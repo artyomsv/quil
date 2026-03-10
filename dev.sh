@@ -10,7 +10,7 @@ DOCKER_RUN="docker run --rm -v ${PROJECT_DIR}:/src -v aethel-gomod:/go/pkg/mod -
 case "${1:-help}" in
   build)
     $DOCKER_RUN sh -c \
-      "go build -o aethel ./cmd/aethel && go build -o aetheld ./cmd/aetheld"
+      "GOOS=windows GOARCH=amd64 go build -o aethel.exe ./cmd/aethel && GOOS=windows GOARCH=amd64 go build -o aetheld.exe ./cmd/aetheld"
     ;;
 
   test)

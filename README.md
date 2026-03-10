@@ -77,7 +77,8 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed design decisions.
 
 ```bash
 # With Docker (no local Go required)
-./dev.sh build
+./dev.ps1 build    # PowerShell (Windows)
+./dev.sh build     # Bash (Linux/macOS)
 
 # With local Go
 make build
@@ -147,14 +148,14 @@ internal/
 
 All commands are available via `dev.sh` (Docker, no local Go) or `make` (local Go):
 
-| Task | Docker | Local Go |
+| Task | Docker (`dev.ps1` / `dev.sh`) | Local Go |
 |---|---|---|
-| Build | `./dev.sh build` | `make build` |
-| Test | `./dev.sh test` | `make test` |
-| Test + race detector | `./dev.sh test-race` | `make test-race` |
-| Lint | `./dev.sh vet` | `make vet` |
-| Cross-compile | `./dev.sh cross` | `make cross` |
-| Docker image | `./dev.sh image` | — |
+| Build | `build` | `make build` |
+| Test | `test` | `make test` |
+| Test + race detector | `test-race` | `make test-race` |
+| Lint | `vet` | `make vet` |
+| Cross-compile | `cross` | `make cross` |
+| Docker image | `image` | — |
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development guidelines.
 

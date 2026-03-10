@@ -71,7 +71,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case WorkspaceStateMsg:
 		m.applyWorkspaceState(msg)
 		m.resizeTabs()
-		return m, m.listenForMessages()
+		return m, tea.Batch(m.listenForMessages(), m.resizeAllPanes())
 
 	case listenContinueMsg:
 		return m, m.listenForMessages()

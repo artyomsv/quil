@@ -1,8 +1,8 @@
-# Binaries
-aethel
-aetheld
-aethel.exe
-aetheld.exe
+# Binaries (root-level only)
+/aethel
+/aetheld
+/aethel.exe
+/aetheld.exe
 *.exe
 *.dll
 *.so

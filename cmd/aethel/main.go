@@ -6,7 +6,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"runtime/debug"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -34,47 +36,75 @@ func main() {
 
 func handleDaemon() {
 	if len(os.Args) < 3 {
-		fmt.Fprintln(os.Stderr, "usage: aethel daemon [start|stop]")
+		fmt.Fprintln(os.Stderr, "usage: aethel daemon [start|stop|status]")
 		os.Exit(1)
 	}
 
 	switch os.Args[2] {
 	case "start":
-		startDaemon()
+		startDaemon(false)
 	case "stop":
 		stopDaemon()
+	case "status":
+		daemonStatus()
 	default:
 		fmt.Fprintf(os.Stderr, "unknown daemon command: %s\n", os.Args[2])
 		os.Exit(1)
 	}
 }
 
-func startDaemon() {
+func findDaemonBinary() string {
+	// 1. Check PATH first
+	if p, err := exec.LookPath("aetheld"); err == nil {
+		return p
+	}
+
+	// 2. Check alongside the running executable
+	if exe, err := os.Executable(); err == nil {
+		dir := filepath.Dir(exe)
+		candidate := filepath.Join(dir, "aetheld")
+		if runtime.GOOS == "windows" {
+			candidate += ".exe"
+		}
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+
+	// 3. Fallback — let OS try
+	return "aetheld"
+}
+
+func startDaemon(quiet bool) {
 	sockPath := config.SocketPath()
 
-	// Check if daemon is already running
+	// Probe existing socket — if daemon is dead, clean up stale
 	if client, err := ipc.NewClient(sockPath); err == nil {
 		client.Close()
-		fmt.Println("daemon already running")
+		if !quiet {
+			fmt.Println("daemon already running")
+		}
 		return
+	} else if _, statErr := os.Stat(sockPath); statErr == nil {
+		// Socket exists but daemon isn't responding → stale
+		os.Remove(sockPath)
 	}
 
-	// Find aetheld binary
-	aetheld, err := exec.LookPath("aetheld")
-	if err != nil {
-		aetheld = "aetheld"
-	}
-
-	cmd := exec.Command(aetheld)
+	aetheld := findDaemonBinary()
+	cmd := exec.Command(aetheld, "--background")
 	cmd.Stdout = nil
 	cmd.Stderr = nil
+	cmd.SysProcAttr = daemonSysProcAttr()
 	if err := cmd.Start(); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to start daemon: %v\n", err)
 		os.Exit(1)
 	}
 
+	pid := cmd.Process.Pid
 	cmd.Process.Release()
-	fmt.Printf("daemon started (pid %d)\n", cmd.Process.Pid)
+	if !quiet {
+		fmt.Printf("daemon started (pid %d)\n", pid)
+	}
 }
 
 func stopDaemon() {
@@ -86,9 +116,32 @@ func stopDaemon() {
 	}
 	defer client.Close()
 
-	msg, _ := ipc.NewMessage(ipc.MsgShutdown, nil)
-	client.Send(msg)
+	msg, err := ipc.NewMessage(ipc.MsgShutdown, nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to create shutdown message: %v\n", err)
+		os.Exit(1)
+	}
+	if err := client.Send(msg); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to send shutdown: %v\n", err)
+		os.Exit(1)
+	}
 	fmt.Println("daemon stopped")
+}
+
+func daemonStatus() {
+	sockPath := config.SocketPath()
+	client, err := ipc.NewClient(sockPath)
+	if err != nil {
+		fmt.Println("daemon not running")
+		os.Exit(1)
+	}
+	client.Close()
+
+	if pidData, err := os.ReadFile(config.PidPath()); err == nil {
+		fmt.Printf("daemon running (pid %s)\n", strings.TrimSpace(string(pidData)))
+	} else {
+		fmt.Println("daemon running")
+	}
 }
 
 func launchTUI() {
@@ -124,12 +177,17 @@ func launchTUI() {
 	log.Printf("config loaded, AutoStart=%v", cfg.Daemon.AutoStart)
 
 	// Try connecting; auto-start if needed
+	const (
+		daemonStartRetries  = 20
+		daemonRetryInterval = 100 * time.Millisecond
+	)
+
 	client, err := ipc.NewClient(sockPath)
 	if err != nil && cfg.Daemon.AutoStart {
 		log.Printf("daemon not reachable, auto-starting...")
-		startDaemon()
-		for i := 0; i < 20; i++ {
-			time.Sleep(100 * time.Millisecond)
+		startDaemon(true) // quiet — no stdout during TUI launch
+		for i := 0; i < daemonStartRetries; i++ {
+			time.Sleep(daemonRetryInterval)
 			client, err = ipc.NewClient(sockPath)
 			if err == nil {
 				break

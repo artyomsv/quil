@@ -16,9 +16,10 @@ import (
 )
 
 type Daemon struct {
-	cfg     config.Config
-	server  *ipc.Server
-	session *SessionManager
+	cfg      config.Config
+	server   *ipc.Server
+	session  *SessionManager
+	shutdown chan struct{}
 }
 
 func New(cfg config.Config) *Daemon {
@@ -28,8 +29,9 @@ func New(cfg config.Config) *Daemon {
 		bufSize = 500 * 512 // 256KB default
 	}
 	return &Daemon{
-		cfg:     cfg,
-		session: NewSessionManager(bufSize),
+		cfg:      cfg,
+		session:  NewSessionManager(bufSize),
+		shutdown: make(chan struct{}),
 	}
 }
 
@@ -57,8 +59,12 @@ func (d *Daemon) Start() error {
 func (d *Daemon) Wait() {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	<-sigCh
-	log.Println("shutting down...")
+	select {
+	case <-sigCh:
+		log.Println("shutting down (signal)...")
+	case <-d.shutdown:
+		log.Println("shutting down (IPC)...")
+	}
 	d.Stop()
 }
 
@@ -100,8 +106,7 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 	case ipc.MsgResizePane:
 		d.handleResizePane(msg)
 	case ipc.MsgShutdown:
-		d.Stop()
-		os.Exit(0)
+		close(d.shutdown)
 	}
 }
 

@@ -206,7 +206,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development guidelines.
 | **M2: Persistence** | In Progress | Output replay, layout persistence, shell integration, mouse, scrollback, tab colors, renaming |
 | **M3: Resume Engine** | Planned | Regex scrapers, token extraction, AI session resume |
 | **M4: Plugin System** | Planned | TOML plugins, typed panes, hot-reload |
-| **M5: Polish** | Planned | JSON transformer, observability, encrypted tokens |
+| **M5: Polish** | Planned | JSON transformer, observability, encrypted tokens, OS service integration (`aethel service install` — systemd/launchd/Task Scheduler) |
 
 ## License
 

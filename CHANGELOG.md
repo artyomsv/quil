@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Daemon process detachment — survives TUI exit on all platforms (Unix: `Setsid`, Windows: `DETACHED_PROCESS`)
+- `aethel daemon status` command — reports daemon PID and connectivity
+- PID file tracking (`~/.aethel/aetheld.pid`) for lifecycle management
+- `aetheld --background` flag — suppresses stdout/stderr for silent auto-start
+- Daemon binary co-location lookup — finds `aetheld` alongside `aethel` when not on PATH (fixes Windows Go 1.19+ LookPath)
+- Stale socket cleanup — detects dead daemon sockets and removes them before starting fresh
+
+### Fixed
+
+- Daemon dying when TUI exits on Windows (missing `DETACHED_PROCESS` creation flag)
+- `os.Exit(0)` in shutdown handler skipping deferred cleanup — replaced with channel-based signaling
+- PID file written before `~/.aethel/` directory guaranteed to exist
+
 ## [0.2.0] - 2026-03-12
 
 ### Added

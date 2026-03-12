@@ -11,9 +11,21 @@ import (
 )
 
 func main() {
+	background := len(os.Args) > 1 && os.Args[1] == "--background"
+
 	logFile := initLogging()
 	if logFile != nil {
 		defer logFile.Close()
+	}
+
+	if background {
+		devNull, err := os.Open(os.DevNull)
+		if err != nil {
+			log.Printf("warning: could not open %s: %v", os.DevNull, err)
+		} else {
+			os.Stdout = devNull
+			os.Stderr = devNull
+		}
 	}
 
 	cfg := config.Default()
@@ -37,6 +49,10 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Write PID file after Start() ensures ~/.aethel/ exists
+	writePIDFile()
+	defer removePIDFile()
+
 	log.Printf("aetheld ready (pid %d)", os.Getpid())
 	fmt.Printf("aetheld ready (pid %d). Press Ctrl+C to stop.\n", os.Getpid())
 	d.Wait()
@@ -56,4 +72,20 @@ func initLogging() *os.File {
 	log.SetOutput(f)
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	return f
+}
+
+func writePIDFile() {
+	dir := config.AethelDir()
+	if dir == "" {
+		log.Println("warning: cannot determine aethel dir, skipping PID file")
+		return
+	}
+	path := config.PidPath()
+	if err := os.WriteFile(path, []byte(fmt.Sprintf("%d", os.Getpid())), 0600); err != nil {
+		log.Printf("warning: failed to write PID file: %v", err)
+	}
+}
+
+func removePIDFile() {
+	os.Remove(config.PidPath())
 }

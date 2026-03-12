@@ -130,3 +130,7 @@ func ConfigPath() string {
 func SocketPath() string {
 	return filepath.Join(AethelDir(), "aetheld.sock")
 }
+
+func PidPath() string {
+	return filepath.Join(AethelDir(), "aetheld.pid")
+}

@@ -67,3 +67,29 @@ func TestAethelDir(t *testing.T) {
 		t.Error("expected non-empty aethel dir")
 	}
 }
+
+func TestPathHelpers(t *testing.T) {
+	dir := config.AethelDir()
+	if dir == "" {
+		t.Skip("cannot determine home directory")
+	}
+
+	tests := []struct {
+		name     string
+		fn       func() string
+		expected string
+	}{
+		{"SocketPath", config.SocketPath, filepath.Join(dir, "aetheld.sock")},
+		{"ConfigPath", config.ConfigPath, filepath.Join(dir, "config.toml")},
+		{"PidPath", config.PidPath, filepath.Join(dir, "aetheld.pid")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.fn()
+			if got != tt.expected {
+				t.Errorf("got %s, want %s", got, tt.expected)
+			}
+		})
+	}
+}

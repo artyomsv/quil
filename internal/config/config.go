@@ -48,6 +48,7 @@ type KeybindingsConfig struct {
 	Quit            string `toml:"quit"`
 	NewTab          string `toml:"new_tab"`
 	ClosePane       string `toml:"close_pane"`
+	CloseTab        string `toml:"close_tab"`
 	SplitHorizontal string `toml:"split_horizontal"`
 	SplitVertical   string `toml:"split_vertical"`
 	NextPane        string `toml:"next_pane"`
@@ -91,6 +92,7 @@ func Default() Config {
 			Quit:            "ctrl+q",
 			NewTab:          "ctrl+t",
 			ClosePane:       "ctrl+w",
+			CloseTab:        "alt+w",
 			SplitHorizontal: "alt+h",
 			SplitVertical:   "alt+v",
 			NextPane:        "tab",

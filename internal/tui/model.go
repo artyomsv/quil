@@ -27,6 +27,7 @@ const (
 type PaneOutputMsg struct {
 	PaneID string
 	Data   []byte
+	Ghost  bool
 }
 
 type WorkspaceStateMsg struct {
@@ -66,6 +67,16 @@ var tabColors = []string{
 	"208", // orange
 }
 
+type dialogScreen int
+
+const (
+	dialogNone dialogScreen = iota
+	dialogAbout
+	dialogSettings
+	dialogShortcuts
+	dialogConfirm
+)
+
 type Model struct {
 	tabs            []*TabModel
 	activeTab       int
@@ -73,6 +84,7 @@ type Model struct {
 	height          int
 	client          *ipc.Client
 	cfg             config.Config
+	version         string
 	attached        bool
 	renaming        bool
 	renameInput     string
@@ -82,12 +94,20 @@ type Model struct {
 	pendingHeight   int
 	resizeSeq       int
 	pendingSplit    map[string]*LayoutNode // tabID → placeholder node awaiting pane from daemon
+	dialog          dialogScreen           // active dialog screen
+	dialogCursor    int                    // highlighted item in dialog
+	dialogEdit      bool                   // editing a settings value
+	dialogInput     string                 // text input buffer for editing
+	confirmKind     string                 // "pane" or "tab"
+	confirmID       string                 // ID of pane/tab to delete
+	confirmName     string                 // display name for confirmation
 }
 
-func NewModel(client *ipc.Client, cfg config.Config) Model {
+func NewModel(client *ipc.Client, cfg config.Config, version string) Model {
 	return Model{
-		client: client,
-		cfg:    cfg,
+		client:  client,
+		cfg:     cfg,
+		version: version,
 	}
 }
 
@@ -140,7 +160,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.Y == 0 {
 				// Tab bar click
 				if idx := m.hitTestTab(msg.X); idx >= 0 {
-					m.activeTab = idx
+					cmd := m.switchTab(idx)
+					return m, cmd
 				}
 			} else if msg.Y < m.height-1 {
 				// Pane area click — offset Y by 1 (tab bar)
@@ -224,12 +245,21 @@ func (m Model) View() string {
 	// Status bar
 	sections = append(sections, m.renderStatusBar())
 
+	if m.dialog != dialogNone {
+		return m.renderDialog()
+	}
+
 	return lipgloss.JoinVertical(lipgloss.Left, sections...)
 }
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 	kb := m.cfg.Keybindings
+
+	// Dialog mode: route input to dialog handler
+	if m.dialog != dialogNone {
+		return m.handleDialogKey(msg)
+	}
 
 	// Rename mode: capture input for tab/pane name editing
 	if m.renaming {
@@ -247,7 +277,34 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.createTab()
 
 	case key == kb.ClosePane:
-		return m, m.closeActivePane()
+		if tab := m.activeTabModel(); tab != nil {
+			if pane := tab.ActivePaneModel(); pane != nil {
+				m.dialog = dialogConfirm
+				m.confirmKind = "pane"
+				m.confirmID = pane.ID
+				m.confirmName = pane.Name
+				if m.confirmName == "" {
+					m.confirmName = pane.CWD
+				}
+				if m.confirmName == "" {
+					if len(pane.ID) > 8 {
+						m.confirmName = pane.ID[:8]
+					} else {
+						m.confirmName = pane.ID
+					}
+				}
+			}
+		}
+		return m, nil
+
+	case key == kb.CloseTab:
+		if tab := m.activeTabModel(); tab != nil {
+			m.dialog = dialogConfirm
+			m.confirmKind = "tab"
+			m.confirmID = tab.ID
+			m.confirmName = tab.Name
+		}
+		return m, nil
 
 	case key == kb.SplitHorizontal:
 		return m, m.splitPane(SplitHorizontal)
@@ -313,14 +370,17 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key == kb.Paste:
 		return m, m.pasteClipboard()
 
+	case key == "f1":
+		m.dialog = dialogAbout
+		m.dialogCursor = 0
+		return m, nil
+
 	case key == "alt+1" || key == "alt+2" || key == "alt+3" ||
 		key == "alt+4" || key == "alt+5" || key == "alt+6" ||
 		key == "alt+7" || key == "alt+8" || key == "alt+9":
 		idx := int(key[len(key)-1] - '1')
-		if idx < len(m.tabs) {
-			m.activeTab = idx
-		}
-		return m, nil
+		cmd := m.switchTab(idx)
+		return m, cmd
 
 	default:
 		// Ignore bare alt key (terminals may emit it as a stray rune)
@@ -417,6 +477,11 @@ func (m *Model) handlePaneOutput(msg PaneOutputMsg) tea.Cmd {
 		if leaf := tab.Root.FindLeaf(msg.PaneID); leaf != nil {
 			oldCWD := leaf.Pane.CWD
 			leaf.Pane.AppendOutput(msg.Data)
+			if msg.Ghost && m.cfg.GhostBuffer.Dimmed {
+				leaf.Pane.ghost = true
+			} else if !msg.Ghost {
+				leaf.Pane.ghost = false
+			}
 			if leaf.Pane.CWD != oldCWD && leaf.Pane.CWD != "" {
 				return m.updatePaneCWD(msg.PaneID, leaf.Pane.CWD)
 			}
@@ -537,6 +602,9 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) {
 			break
 		}
 	}
+	if m.activeTab >= len(m.tabs) {
+		m.activeTab = max(0, len(m.tabs)-1)
+	}
 }
 
 // restoreTabLayout rebuilds a tab's layout tree from serialized daemon state.
@@ -637,6 +705,23 @@ func (m Model) activeTabModel() *TabModel {
 	return nil
 }
 
+// switchTab sets the active tab locally and notifies the daemon so its
+// active_tab stays in sync (prevents stale overwrites on broadcastState).
+func (m *Model) switchTab(idx int) tea.Cmd {
+	if idx < 0 || idx >= len(m.tabs) {
+		return nil
+	}
+	m.activeTab = idx
+	tabID := m.tabs[idx].ID
+	return func() tea.Msg {
+		msg, _ := ipc.NewMessage(ipc.MsgSwitchTab, ipc.SwitchTabPayload{
+			TabID: tabID,
+		})
+		m.client.Send(msg)
+		return nil
+	}
+}
+
 func (m Model) renderTabBar() string {
 	if len(m.tabs) == 0 {
 		return lipgloss.NewStyle().Width(m.width).Render("")
@@ -653,6 +738,8 @@ func (m Model) renderTabBar() string {
 		name := tab.Name
 		if m.renaming && i == m.activeTab {
 			name = m.renameInput + "▎"
+		} else {
+			name = fmt.Sprintf("%d:%s", i+1, name)
 		}
 
 		style := inactiveTabStyle
@@ -854,7 +941,10 @@ func (m Model) renderStatusBar() string {
 	if m.renamingPane {
 		left = "Rename pane: " + m.paneRenameInput + "▎"
 	} else if tab := m.activeTabModel(); tab != nil {
-		paneCount := len(tab.Root.Leaves())
+		paneCount := 0
+		if tab.Root != nil {
+			paneCount = len(tab.Root.Leaves())
+		}
 		paneInfo := fmt.Sprintf("tab %d/%d  panes:%d", m.activeTab+1, len(m.tabs), paneCount)
 
 		if pane := tab.ActivePaneModel(); pane != nil {
@@ -863,7 +953,11 @@ func (m Model) renderStatusBar() string {
 				displayPath = pane.Name
 			}
 			if displayPath == "" {
-				displayPath = pane.ID[:8]
+				if len(pane.ID) > 8 {
+					displayPath = pane.ID[:8]
+				} else {
+					displayPath = pane.ID
+				}
 			}
 			left = fmt.Sprintf("%s  %s", displayPath, paneInfo)
 			if pane.scrollBack > 0 {
@@ -874,8 +968,8 @@ func (m Model) renderStatusBar() string {
 		}
 	}
 
-	// Right side: keybinding hints
-	right := "^T new | Tab/S-Tab panes | F2 tab | A-F2 pane | ^Q quit"
+	// Right side: keybinding hints + version
+	right := "^T new | ^W pane | A-W tab | F1 help | ^Q quit | v" + m.version
 
 	// Fit within width: left takes priority
 	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right) - 2 // 2 for padding
@@ -926,7 +1020,7 @@ func (m Model) listenForMessages() tea.Cmd {
 		case ipc.MsgPaneOutput:
 			var payload ipc.PaneOutputPayload
 			msg.DecodePayload(&payload)
-			return PaneOutputMsg{PaneID: payload.PaneID, Data: payload.Data}
+			return PaneOutputMsg{PaneID: payload.PaneID, Data: payload.Data, Ghost: payload.Ghost}
 
 		case ipc.MsgWorkspaceState:
 			var raw map[string]any
@@ -1002,24 +1096,6 @@ func (m Model) createTab() tea.Cmd {
 	return func() tea.Msg {
 		msg, _ := ipc.NewMessage(ipc.MsgCreateTab, ipc.CreateTabPayload{
 			Name: "New Tab",
-		})
-		m.client.Send(msg)
-		return nil
-	}
-}
-
-func (m Model) closeActivePane() tea.Cmd {
-	return func() tea.Msg {
-		tab := m.activeTabModel()
-		if tab == nil {
-			return nil
-		}
-		pane := tab.ActivePaneModel()
-		if pane == nil {
-			return nil
-		}
-		msg, _ := ipc.NewMessage(ipc.MsgDestroyPane, ipc.DestroyPanePayload{
-			PaneID: pane.ID,
 		})
 		m.client.Send(msg)
 		return nil
@@ -1154,7 +1230,7 @@ func keyToBytes(keyMsg tea.KeyMsg) []byte {
 		return []byte{0x7f}
 	case "space":
 		return []byte(" ")
-	case "escape":
+	case "esc":
 		return []byte{0x1b}
 	case "up":
 		return []byte("\x1b[A")

@@ -73,6 +73,7 @@ type PaneInputPayload struct {
 type PaneOutputPayload struct {
 	PaneID string `json:"pane_id"`
 	Data   []byte `json:"data"`
+	Ghost  bool   `json:"ghost,omitempty"`
 }
 
 type CreateTabPayload struct {

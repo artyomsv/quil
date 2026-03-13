@@ -400,6 +400,7 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 			histMsg, _ := ipc.NewMessage(ipc.MsgPaneOutput, ipc.PaneOutputPayload{
 				PaneID: pane.ID,
 				Data:   history,
+				Ghost:  true,
 			})
 			conn.Send(histMsg)
 		}
@@ -430,6 +431,18 @@ func (d *Daemon) handleDestroyTab(msg *ipc.Message) {
 	var payload ipc.DestroyTabPayload
 	msg.DecodePayload(&payload)
 	d.session.DestroyTab(payload.TabID)
+
+	// Auto-create replacement if last tab was destroyed
+	if len(d.session.Tabs()) == 0 {
+		tab := d.session.CreateTab("Shell")
+		cwd, _ := os.Getwd()
+		pane, _ := d.session.CreatePane(tab.ID, cwd)
+		ptySession := apty.NewWithSize(80, 24)
+		if err := d.spawnShell(pane, ptySession); err != nil {
+			log.Printf("failed to start replacement shell: %v", err)
+		}
+	}
+
 	d.broadcastState()
 	d.snapshotDebounced()
 }
@@ -438,6 +451,8 @@ func (d *Daemon) handleSwitchTab(msg *ipc.Message) {
 	var payload ipc.SwitchTabPayload
 	msg.DecodePayload(&payload)
 	d.session.SwitchTab(payload.TabID)
+	d.broadcastState()
+	d.snapshotDebounced()
 }
 
 func (d *Daemon) handleUpdateTab(msg *ipc.Message) {
@@ -488,7 +503,28 @@ func (d *Daemon) handleCreatePane(msg *ipc.Message) {
 func (d *Daemon) handleDestroyPane(msg *ipc.Message) {
 	var payload ipc.DestroyPanePayload
 	msg.DecodePayload(&payload)
+
+	// Capture tab ID before destroying the pane
+	var tabID string
+	if pane := d.session.Pane(payload.PaneID); pane != nil {
+		tabID = pane.TabID
+	}
+
 	d.session.DestroyPane(payload.PaneID)
+
+	// Auto-create replacement if last pane in tab was destroyed
+	if tabID != "" {
+		if panes := d.session.Panes(tabID); len(panes) == 0 {
+			cwd, _ := os.Getwd()
+			if newPane, err := d.session.CreatePane(tabID, cwd); err == nil {
+				ptySession := apty.New()
+				if err := d.spawnShell(newPane, ptySession); err != nil {
+					log.Printf("failed to start replacement shell: %v", err)
+				}
+			}
+		}
+	}
+
 	d.broadcastState()
 	d.snapshotDebounced()
 }
@@ -546,28 +582,73 @@ func (d *Daemon) handleUpdateLayout(msg *ipc.Message) {
 }
 
 func (d *Daemon) streamPTYOutput(paneID string, pty apty.Session) {
-	buf := make([]byte, 4096)
-	for {
-		n, err := pty.Read(buf)
-		if n > 0 {
-			data := make([]byte, n)
-			copy(data, buf[:n])
+	readBuf := make([]byte, 32*1024)
+	dataCh := make(chan []byte, 64)
 
-			// Buffer for replay on reconnect
-			if pane := d.session.Pane(paneID); pane != nil && pane.OutputBuf != nil {
-				pane.OutputBuf.Write(data)
+	// Reader goroutine: continuously reads from PTY
+	go func() {
+		defer close(dataCh)
+		for {
+			n, err := pty.Read(readBuf)
+			if n > 0 {
+				chunk := make([]byte, n)
+				copy(chunk, readBuf[:n])
+				dataCh <- chunk
 			}
-
-			msg, _ := ipc.NewMessage(ipc.MsgPaneOutput, ipc.PaneOutputPayload{
-				PaneID: paneID,
-				Data:   data,
-			})
-			d.server.Broadcast(msg)
+			if err != nil {
+				return
+			}
 		}
-		if err != nil {
+	}()
+
+	// Coalescing loop: accumulates data, flushes on short timer
+	const coalesceDelay = 2 * time.Millisecond
+	var acc []byte
+
+	flushTimer := time.NewTimer(0)
+	if !flushTimer.Stop() {
+		<-flushTimer.C
+	}
+
+	flush := func() {
+		if len(acc) == 0 {
 			return
 		}
+		d.flushPaneOutput(paneID, acc)
+		acc = acc[:0]
 	}
+
+	for {
+		select {
+		case chunk, ok := <-dataCh:
+			if !ok {
+				flush()
+				return
+			}
+			acc = append(acc, chunk...)
+			if !flushTimer.Stop() {
+				select {
+				case <-flushTimer.C:
+				default:
+				}
+			}
+			flushTimer.Reset(coalesceDelay)
+
+		case <-flushTimer.C:
+			flush()
+		}
+	}
+}
+
+func (d *Daemon) flushPaneOutput(paneID string, data []byte) {
+	if pane := d.session.Pane(paneID); pane != nil && pane.OutputBuf != nil {
+		pane.OutputBuf.Write(data)
+	}
+	msg, _ := ipc.NewMessage(ipc.MsgPaneOutput, ipc.PaneOutputPayload{
+		PaneID: paneID,
+		Data:   data,
+	})
+	d.server.Broadcast(msg)
 }
 
 func (d *Daemon) broadcastState() {

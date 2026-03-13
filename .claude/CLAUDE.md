@@ -61,6 +61,20 @@ Go module cache is persisted in a Docker volume (`aethel-gomod`) for fast repeat
 - Persistence: `internal/persist/` handles atomic file I/O — `snapshot.go` for workspace JSON (write `.tmp` → rotate to `.bak` → rename), `ghostbuf.go` for per-pane binary buffers. Both use temp+rename for crash safety
 - Workspace restore: On daemon start, `restoreWorkspace()` loads `~/.aethel/workspace.json`, reconstructs tabs/panes, loads ghost buffers from `~/.aethel/buffers/`, then `respawnShells()` spawns new shell processes with saved CWD
 - Snapshot triggers: periodic timer (configurable `snapshot_interval`, default 30s) + immediate on structural changes (create/destroy tab/pane) with 1s debounce + final flush on daemon stop
+- Dialog system: `internal/tui/dialog.go` — modal dialogs with `dialogScreen` iota (`dialogAbout`, `dialogSettings`, `dialogShortcuts`, `dialogConfirm`). F1 opens About dialog. Settings editor mutates `m.cfg` in-memory (session-only). Confirm dialog used for pane/tab close (Ctrl+W / Alt+W)
+- Output coalescing: `streamPTYOutput()` uses goroutine + 2ms timer to batch rapid PTY output before IPC broadcast, preventing visual tearing with interactive TUI tools
+- Ghost buffer dimming: `PaneOutputPayload.Ghost` flag distinguishes replay from live output. Panes show muted border + "restored" label until first live output clears the flag. Controlled by `GhostBufferConfig.Dimmed` (default true)
+- Tab bar: tabs show 1-based index prefix (`1:Shell`, `2:Build`) matching Alt+1-9 shortcuts. Index hidden during rename editing
+- Auto-recovery: deleting the last tab auto-creates a new "Shell" tab; deleting the last pane in a tab auto-creates a fresh pane
+
+## Developer Utilities
+
+```bash
+./kill-daemon.sh        # Force-stop daemon (Linux/macOS)
+./kill-daemon.ps1       # Force-stop daemon (Windows PowerShell)
+./reset-daemon.sh       # Stop daemon + wipe persisted state (Linux/macOS)
+./reset-daemon.ps1      # Stop daemon + wipe persisted state (Windows PowerShell)
+```
 
 ## Documents
 

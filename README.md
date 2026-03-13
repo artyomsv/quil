@@ -177,6 +177,7 @@ internal/
 ├── config/          # TOML configuration
 ├── daemon/          # Session management, message routing
 ├── ipc/             # Length-prefixed JSON protocol, client/server
+├── persist/         # Atomic workspace/buffer persistence (JSON + binary)
 ├── pty/             # Cross-platform PTY (Unix + Windows)
 ├── ringbuf/         # Circular byte buffer for PTY output history
 ├── shellinit/       # Automatic shell integration (OSC 7 injection)
@@ -202,8 +203,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development guidelines.
 
 | Milestone | Status | Description |
 |---|---|---|
-| **M1: Foundation** | Done | Daemon, TUI, IPC, PTY, tabs, splits |
-| **M2: Persistence** | In Progress | Output replay, layout persistence, shell integration, mouse, scrollback, tab colors, renaming |
+| **M1: Foundation** | Done | Daemon, TUI, IPC, PTY, tabs, splits, shell integration, mouse, scrollback, daemon lifecycle |
+| **M2: Persistence** | In Progress | Workspace snapshots, ghost buffer persistence, shell respawn, reboot-proof sessions |
 | **M3: Resume Engine** | Planned | Regex scrapers, token extraction, AI session resume |
 | **M4: Plugin System** | Planned | TOML plugins, typed panes, hot-reload |
 | **M5: Polish** | Planned | JSON transformer, observability, encrypted tokens, OS service integration (`aethel service install` — systemd/launchd/Task Scheduler) |

@@ -1,17 +1,22 @@
 package daemon
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 	"os/exec"
 	"os/signal"
 	"runtime"
+	"sync"
 	"syscall"
+	"time"
 
 	"github.com/artyomsv/aethel/internal/config"
 	"github.com/artyomsv/aethel/internal/ipc"
+	"github.com/artyomsv/aethel/internal/persist"
 	apty "github.com/artyomsv/aethel/internal/pty"
+	"github.com/artyomsv/aethel/internal/ringbuf"
 	"github.com/artyomsv/aethel/internal/shellinit"
 )
 
@@ -20,6 +25,10 @@ type Daemon struct {
 	server   *ipc.Server
 	session  *SessionManager
 	shutdown chan struct{}
+	restored bool // true if workspace was loaded from disk
+
+	snapshotMu   sync.Mutex
+	lastSnapshot time.Time
 }
 
 func New(cfg config.Config) *Daemon {
@@ -45,6 +54,11 @@ func (d *Daemon) Start() error {
 		log.Printf("warning: failed to write shell init scripts: %v", err)
 	}
 
+	// Restore workspace from disk if available
+	if err := d.restoreWorkspace(); err != nil {
+		log.Printf("warning: failed to restore workspace: %v", err)
+	}
+
 	sockPath := config.SocketPath()
 	d.server = ipc.NewServer(sockPath, d.handleMessage)
 
@@ -52,23 +66,47 @@ func (d *Daemon) Start() error {
 		return fmt.Errorf("start IPC server: %w", err)
 	}
 
+	// Respawn shells for restored panes
+	if d.restored {
+		d.respawnShells()
+	}
+
 	log.Printf("aetheld started, listening on %s", sockPath)
 	return nil
 }
 
 func (d *Daemon) Wait() {
+	// Start periodic snapshot timer
+	interval, err := time.ParseDuration(d.cfg.Daemon.SnapshotInterval)
+	if err != nil {
+		interval = 30 * time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	select {
-	case <-sigCh:
-		log.Println("shutting down (signal)...")
-	case <-d.shutdown:
-		log.Println("shutting down (IPC)...")
+
+	for {
+		select {
+		case <-sigCh:
+			log.Println("shutting down (signal)...")
+			d.Stop()
+			return
+		case <-d.shutdown:
+			log.Println("shutting down (IPC)...")
+			d.Stop()
+			return
+		case <-ticker.C:
+			d.snapshot()
+		}
 	}
-	d.Stop()
 }
 
 func (d *Daemon) Stop() {
+	// Final snapshot before shutdown
+	d.snapshot()
+
 	if d.server != nil {
 		d.server.Stop()
 	}
@@ -76,6 +114,184 @@ func (d *Daemon) Stop() {
 		for _, pane := range d.session.Panes(tab.ID) {
 			if pane.PTY != nil {
 				pane.PTY.Close()
+			}
+		}
+	}
+}
+
+// snapshot persists workspace state and ghost buffers to disk.
+func (d *Daemon) snapshot() {
+	d.snapshotMu.Lock()
+	defer d.snapshotMu.Unlock()
+
+	state := d.buildWorkspaceState()
+	wsPath := config.WorkspacePath()
+
+	if err := persist.Save(wsPath, state); err != nil {
+		log.Printf("snapshot workspace: %v", err)
+	}
+
+	// Flush ghost buffers
+	bufDir := config.BufferDir()
+	buffers := make(map[string][]byte)
+	var activePaneIDs []string
+
+	for _, tab := range d.session.Tabs() {
+		for _, pane := range d.session.Panes(tab.ID) {
+			activePaneIDs = append(activePaneIDs, pane.ID)
+			if pane.OutputBuf != nil {
+				if data := pane.OutputBuf.Bytes(); len(data) > 0 {
+					buffers[pane.ID] = data
+				}
+			}
+		}
+	}
+
+	if err := persist.SaveAllBuffers(bufDir, buffers); err != nil {
+		log.Printf("snapshot buffers: %v", err)
+	}
+	if err := persist.CleanBuffers(bufDir, activePaneIDs); err != nil {
+		log.Printf("clean buffers: %v", err)
+	}
+
+	d.lastSnapshot = time.Now()
+	log.Printf("snapshot saved (%d tabs, %d panes)", len(d.session.Tabs()), len(activePaneIDs))
+}
+
+// snapshotDebounced triggers a snapshot unless one happened within the last second.
+func (d *Daemon) snapshotDebounced() {
+	d.snapshotMu.Lock()
+	if time.Since(d.lastSnapshot) < time.Second {
+		d.snapshotMu.Unlock()
+		return
+	}
+	d.snapshotMu.Unlock()
+	d.snapshot()
+}
+
+// restoreWorkspace loads workspace state from disk.
+func (d *Daemon) restoreWorkspace() error {
+	wsPath := config.WorkspacePath()
+	state, err := persist.Load(wsPath)
+	if err != nil {
+		return err
+	}
+	if state == nil {
+		return nil // Fresh workspace
+	}
+
+	log.Println("restoring workspace from disk...")
+
+	activeTab, _ := state["active_tab"].(string)
+	tabs, _ := state["tabs"].([]any)
+	panes, _ := state["panes"].([]any)
+
+	// Build pane lookup
+	panesByID := make(map[string]map[string]any, len(panes))
+	for _, p := range panes {
+		paneMap, ok := p.(map[string]any)
+		if !ok {
+			continue
+		}
+		id, _ := paneMap["id"].(string)
+		if id != "" {
+			panesByID[id] = paneMap
+		}
+	}
+
+	// Restore tabs and panes
+	for _, t := range tabs {
+		tabMap, ok := t.(map[string]any)
+		if !ok {
+			continue
+		}
+		tabID, _ := tabMap["id"].(string)
+		tabName, _ := tabMap["name"].(string)
+		tabColor, _ := tabMap["color"].(string)
+		if tabID == "" {
+			continue
+		}
+
+		tab := &Tab{
+			ID:    tabID,
+			Name:  tabName,
+			Color: tabColor,
+		}
+
+		// Restore layout
+		if layoutRaw, ok := tabMap["layout"]; ok {
+			layoutBytes, err := json.Marshal(layoutRaw)
+			if err == nil {
+				tab.Layout = json.RawMessage(layoutBytes)
+			}
+		}
+
+		// Restore pane IDs
+		if paneIDs, ok := tabMap["panes"].([]any); ok {
+			for _, pid := range paneIDs {
+				paneID, _ := pid.(string)
+				if paneID == "" {
+					continue
+				}
+				tab.Panes = append(tab.Panes, paneID)
+
+				// Create pane object
+				paneData := panesByID[paneID]
+				cwd, _ := paneData["cwd"].(string)
+				name, _ := paneData["name"].(string)
+
+				pane := &Pane{
+					ID:        paneID,
+					TabID:     tabID,
+					CWD:       cwd,
+					Name:      name,
+					OutputBuf: ringbuf.NewRingBuffer(d.session.bufSize),
+				}
+
+				// Load ghost buffer from disk
+				bufDir := config.BufferDir()
+				if bufData, err := persist.LoadBuffer(bufDir, paneID); err == nil && len(bufData) > 0 {
+					pane.OutputBuf.Write(bufData)
+				}
+
+				d.session.mu.Lock()
+				d.session.panes[paneID] = pane
+				d.session.mu.Unlock()
+			}
+		}
+
+		d.session.mu.Lock()
+		d.session.tabs[tabID] = tab
+		d.session.tabOrder = append(d.session.tabOrder, tabID)
+		d.session.mu.Unlock()
+	}
+
+	if activeTab != "" {
+		d.session.SwitchTab(activeTab)
+	}
+
+	d.restored = true
+	log.Printf("restored %d tabs, %d panes from disk", len(tabs), len(panes))
+	return nil
+}
+
+// respawnShells starts a shell process in each pane that was restored from disk.
+func (d *Daemon) respawnShells() {
+	for _, tab := range d.session.Tabs() {
+		for _, pane := range d.session.Panes(tab.ID) {
+			if pane.PTY != nil {
+				continue // Already has a PTY
+			}
+
+			ptySession := apty.New()
+			if pane.CWD != "" {
+				ptySession.SetCWD(pane.CWD)
+			}
+
+			if err := d.spawnShell(pane, ptySession); err != nil {
+				log.Printf("respawn shell for pane %s: %v", pane.ID, err)
+			} else {
+				log.Printf("respawned shell in pane %s (cwd: %s)", pane.ID, pane.CWD)
 			}
 		}
 	}
@@ -122,7 +338,7 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 		rows = 24
 	}
 
-	// Create default workspace if empty
+	// Create default workspace if empty (no tabs — neither fresh nor restored)
 	if len(d.session.Tabs()) == 0 {
 		tab := d.session.CreateTab("Shell")
 		cwd, _ := os.Getwd()
@@ -174,6 +390,7 @@ func (d *Daemon) handleCreateTab(conn *ipc.Conn, msg *ipc.Message) {
 	}
 
 	d.broadcastState()
+	d.snapshotDebounced()
 }
 
 func (d *Daemon) handleDestroyTab(msg *ipc.Message) {
@@ -181,6 +398,7 @@ func (d *Daemon) handleDestroyTab(msg *ipc.Message) {
 	msg.DecodePayload(&payload)
 	d.session.DestroyTab(payload.TabID)
 	d.broadcastState()
+	d.snapshotDebounced()
 }
 
 func (d *Daemon) handleSwitchTab(msg *ipc.Message) {
@@ -231,6 +449,7 @@ func (d *Daemon) handleCreatePane(msg *ipc.Message) {
 		return
 	}
 	d.broadcastState()
+	d.snapshotDebounced()
 }
 
 func (d *Daemon) handleDestroyPane(msg *ipc.Message) {
@@ -238,6 +457,7 @@ func (d *Daemon) handleDestroyPane(msg *ipc.Message) {
 	msg.DecodePayload(&payload)
 	d.session.DestroyPane(payload.PaneID)
 	d.broadcastState()
+	d.snapshotDebounced()
 }
 
 func (d *Daemon) handlePaneInput(msg *ipc.Message) {

@@ -134,3 +134,11 @@ func SocketPath() string {
 func PidPath() string {
 	return filepath.Join(AethelDir(), "aetheld.pid")
 }
+
+func WorkspacePath() string {
+	return filepath.Join(AethelDir(), "workspace.json")
+}
+
+func BufferDir() string {
+	return filepath.Join(AethelDir(), "buffers")
+}

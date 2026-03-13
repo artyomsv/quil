@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Workspace snapshot persistence — tabs, panes, layout, and CWD saved to `~/.aethel/workspace.json`
+- Atomic file writes with `.bak` rollback for crash-safe persistence
+- Ghost buffer persistence — raw PTY output saved per pane to `~/.aethel/buffers/*.bin`
+- Automatic workspace restore on daemon restart — tabs, panes, and layouts reconstructed from disk
+- Shell respawn with saved CWD — panes reopen in the directory you were last working in
+- Periodic snapshot timer (configurable via `snapshot_interval`, default 30s)
+- Immediate snapshot on structural changes (tab/pane create/destroy) with 1s debounce
+- Orphan buffer cleanup — removes `.bin` files for panes that no longer exist
+
 ## [0.3.0] - 2026-03-12
 
 ### Added

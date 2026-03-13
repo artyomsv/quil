@@ -94,6 +94,62 @@ func TestSessionManagerCreatePaneInvalidTab(t *testing.T) {
 	}
 }
 
+func TestSessionManagerRestoreTab(t *testing.T) {
+	sm := daemon.NewSessionManager(1024)
+
+	tab := &daemon.Tab{
+		ID:    "tab-aabbccdd",
+		Name:  "Restored",
+		Color: "blue",
+		Panes: []string{"pane-11223344", "pane-55667788"},
+	}
+	panes := []*daemon.Pane{
+		{ID: "pane-11223344", TabID: "tab-aabbccdd", CWD: "/home/user"},
+		{ID: "pane-55667788", TabID: "tab-aabbccdd", CWD: "/tmp"},
+	}
+
+	sm.RestoreTab(tab, panes)
+
+	tabs := sm.Tabs()
+	if len(tabs) != 1 {
+		t.Fatalf("expected 1 tab, got %d", len(tabs))
+	}
+	if tabs[0].Name != "Restored" {
+		t.Errorf("name: got %q, want %q", tabs[0].Name, "Restored")
+	}
+
+	restored := sm.Panes("tab-aabbccdd")
+	if len(restored) != 2 {
+		t.Fatalf("expected 2 panes, got %d", len(restored))
+	}
+	if restored[0].CWD != "/home/user" {
+		t.Errorf("pane[0].CWD: got %q, want %q", restored[0].CWD, "/home/user")
+	}
+}
+
+func TestSessionManagerSnapshotState(t *testing.T) {
+	sm := daemon.NewSessionManager(1024)
+	tab1 := sm.CreateTab("tab-1")
+	sm.CreatePane(tab1.ID, "/tmp")
+	tab2 := sm.CreateTab("tab-2")
+	sm.CreatePane(tab2.ID, "/home")
+
+	activeTab, tabs, panesByTab := sm.SnapshotState()
+
+	if activeTab != tab1.ID {
+		t.Errorf("activeTab: got %s, want %s", activeTab, tab1.ID)
+	}
+	if len(tabs) != 2 {
+		t.Fatalf("expected 2 tabs, got %d", len(tabs))
+	}
+	if len(panesByTab[tab1.ID]) != 1 {
+		t.Errorf("expected 1 pane in tab1, got %d", len(panesByTab[tab1.ID]))
+	}
+	if len(panesByTab[tab2.ID]) != 1 {
+		t.Errorf("expected 1 pane in tab2, got %d", len(panesByTab[tab2.ID]))
+	}
+}
+
 func TestSessionManagerDestroyTabUpdatesActiveTab(t *testing.T) {
 	sm := daemon.NewSessionManager(1024)
 	tab1 := sm.CreateTab("tab-1")

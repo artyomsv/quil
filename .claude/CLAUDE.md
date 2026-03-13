@@ -23,6 +23,7 @@ Client-daemon model:
 - `internal/config/` — TOML configuration
 - `internal/daemon/` — Session manager, message routing
 - `internal/ipc/` — Length-prefixed JSON protocol (4-byte big-endian uint32 + JSON)
+- `internal/persist/` — Atomic workspace/buffer persistence (JSON snapshots, binary ghost buffers)
 - `internal/pty/` — Cross-platform PTY (build tags: `linux || darwin || freebsd`, `windows`)
 - `internal/shellinit/` — Automatic OSC 7 shell integration (embedded init scripts, `//go:embed`)
 - `internal/tui/` — Bubble Tea model, tabs, panes, layout tree, styles
@@ -57,6 +58,23 @@ Go module cache is persisted in a Docker volume (`aethel-gomod`) for fast repeat
 - Daemon detachment: `cmd/aethel/proc_unix.go` and `proc_windows.go` supply `daemonSysProcAttr()` via build tags — mirrors the `internal/pty/` pattern. Unix uses `Setsid`, Windows uses `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`
 - Daemon auto-start: TUI auto-starts `aetheld --background` if not running. `findDaemonBinary()` checks PATH then the executable's own directory. PID file at `~/.aethel/aetheld.pid`, stale socket cleanup before spawn
 - Daemon shutdown: `MsgShutdown` signals via channel (not `os.Exit`) so defers in `main()` run cleanly (PID file removal, log file close)
+- Persistence: `internal/persist/` handles atomic file I/O — `snapshot.go` for workspace JSON (write `.tmp` → rotate to `.bak` → rename), `ghostbuf.go` for per-pane binary buffers. Both use temp+rename for crash safety
+- Workspace restore: On daemon start, `restoreWorkspace()` loads `~/.aethel/workspace.json`, reconstructs tabs/panes, loads ghost buffers from `~/.aethel/buffers/`, then `respawnShells()` spawns new shell processes with saved CWD
+- Snapshot triggers: periodic timer (configurable `snapshot_interval`, default 30s) + immediate on structural changes (create/destroy tab/pane) with 1s debounce + final flush on daemon stop
+- Dialog system: `internal/tui/dialog.go` — modal dialogs with `dialogScreen` iota (`dialogAbout`, `dialogSettings`, `dialogShortcuts`, `dialogConfirm`). F1 opens About dialog. Settings editor mutates `m.cfg` in-memory (session-only). Confirm dialog used for pane/tab close (Ctrl+W / Alt+W)
+- Output coalescing: `streamPTYOutput()` uses goroutine + 2ms timer to batch rapid PTY output before IPC broadcast, preventing visual tearing with interactive TUI tools
+- Ghost buffer dimming: `PaneOutputPayload.Ghost` flag distinguishes replay from live output. Panes show muted border + "restored" label until first live output clears the flag. Controlled by `GhostBufferConfig.Dimmed` (default true)
+- Tab bar: tabs show 1-based index prefix (`1:Shell`, `2:Build`) matching Alt+1-9 shortcuts. Index hidden during rename editing
+- Auto-recovery: deleting the last tab auto-creates a new "Shell" tab; deleting the last pane in a tab auto-creates a fresh pane
+
+## Developer Utilities
+
+```bash
+./kill-daemon.sh        # Force-stop daemon (Linux/macOS)
+./kill-daemon.ps1       # Force-stop daemon (Windows PowerShell)
+./reset-daemon.sh       # Stop daemon + wipe persisted state (Linux/macOS)
+./reset-daemon.ps1      # Stop daemon + wipe persisted state (Windows PowerShell)
+```
 
 ## Documents
 
@@ -68,8 +86,8 @@ Go module cache is persisted in a Docker volume (`aethel-gomod`) for fast repeat
 
 ## Milestones
 
-- **M1 (Done):** Foundation — daemon, TUI, IPC, PTY, tabs, splits
-- **M2 (Next):** State persistence — snapshots, ghost buffers, reboot-proof sessions
+- **M1 (Done):** Foundation — daemon, TUI, IPC, PTY, tabs, splits, shell integration, mouse, scrollback, daemon lifecycle
+- **M2 (In Progress):** Persistence — workspace snapshots, ghost buffer persistence, shell respawn, reboot-proof sessions
 - **M3:** Resume engine — regex scrapers, AI session resume
 - **M4:** Plugin system — TOML plugins, typed panes
 - **M5:** Polish — JSON transformer, observability, encrypted tokens

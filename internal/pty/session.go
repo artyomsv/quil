@@ -7,6 +7,9 @@ type Session interface {
 	// SetEnv sets additional environment variables to merge with os.Environ()
 	// when starting the process. Must be called before Start.
 	SetEnv(env []string)
+	// SetCWD sets the working directory for the spawned process.
+	// Must be called before Start.
+	SetCWD(dir string)
 	// Read reads output from the PTY.
 	Read(buf []byte) (int, error)
 	// Write sends input to the PTY.

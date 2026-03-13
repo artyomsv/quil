@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Workspace snapshot persistence — tabs, panes, layout, and CWD saved to `~/.aethel/workspace.json`
+- Atomic file writes with `.bak` rollback for crash-safe persistence
+- Ghost buffer persistence — raw PTY output saved per pane to `~/.aethel/buffers/*.bin`
+- Automatic workspace restore on daemon restart — tabs, panes, and layouts reconstructed from disk
+- Shell respawn with saved CWD — panes reopen in the directory you were last working in
+- Periodic snapshot timer (configurable via `snapshot_interval`, default 30s)
+- Immediate snapshot on structural changes (tab/pane create/destroy) with 1s debounce
+- Orphan buffer cleanup — removes `.bin` files for panes that no longer exist
+- Ghost buffer dimming — restored panes show muted border and "restored" label until live output arrives
+- Modal dialog system — F1 opens About screen with Settings editor and Shortcuts reference
+- Confirmation dialogs for pane close (Ctrl+W) and tab close (Alt+W)
+- Tab index numbers in tab bar (`1:Shell`, `2:Build`) matching Alt+1-9 shortcuts
+- Auto-recovery — deleting last tab or last pane auto-creates a fresh replacement
+- PTY output coalescing — 2ms timer batches rapid output to prevent visual tearing with interactive tools
+- Version display in status bar and About dialog
+- Developer utility scripts: `kill-daemon.sh/.ps1`, `reset-daemon.sh/.ps1`
+- Build-time version injection via `-ldflags` in `dev.sh`
+
+### Fixed
+
+- Scrollback rendering now preserves ANSI colors (cell styles were previously dropped)
+- Escape key forwarded to PTY — was mapped as `"escape"` but Bubble Tea uses `"esc"`
+- Tab switch state broadcast — `handleSwitchTab` now calls `broadcastState()` + `snapshotDebounced()`
+- Tab switch evaluation order — separated `switchTab()` from return to prevent stale `activeTab`
+- Active tab index clamped after workspace state sync to prevent out-of-bounds
+
 ## [0.3.0] - 2026-03-12
 
 ### Added

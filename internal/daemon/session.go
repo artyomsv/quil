@@ -197,3 +197,44 @@ func (sm *SessionManager) SwitchTab(tabID string) {
 		sm.activeTab = tabID
 	}
 }
+
+// RestoreTab inserts a pre-built tab and its panes into the session.
+// Used during workspace restore from disk. All insertions happen under
+// a single lock hold to prevent orphaned panes.
+func (sm *SessionManager) RestoreTab(tab *Tab, panes []*Pane) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	sm.tabs[tab.ID] = tab
+	sm.tabOrder = append(sm.tabOrder, tab.ID)
+
+	for _, pane := range panes {
+		sm.panes[pane.ID] = pane
+	}
+}
+
+// SnapshotState returns a consistent view of the entire session state under
+// a single RLock hold. This prevents torn reads when tabs/panes are
+// created or destroyed concurrently.
+func (sm *SessionManager) SnapshotState() (activeTab string, tabs []*Tab, panesByTab map[string][]*Pane) {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	activeTab = sm.activeTab
+	tabs = make([]*Tab, 0, len(sm.tabOrder))
+	panesByTab = make(map[string][]*Pane)
+
+	for _, id := range sm.tabOrder {
+		tab := sm.tabs[id]
+		tabs = append(tabs, tab)
+
+		tabPanes := make([]*Pane, 0, len(tab.Panes))
+		for _, pid := range tab.Panes {
+			if pane, ok := sm.panes[pid]; ok {
+				tabPanes = append(tabPanes, pane)
+			}
+		}
+		panesByTab[id] = tabPanes
+	}
+	return
+}

@@ -82,6 +82,8 @@ func TestPathHelpers(t *testing.T) {
 		{"SocketPath", config.SocketPath, filepath.Join(dir, "aetheld.sock")},
 		{"ConfigPath", config.ConfigPath, filepath.Join(dir, "config.toml")},
 		{"PidPath", config.PidPath, filepath.Join(dir, "aetheld.pid")},
+		{"WorkspacePath", config.WorkspacePath, filepath.Join(dir, "workspace.json")},
+		{"BufferDir", config.BufferDir, filepath.Join(dir, "buffers")},
 	}
 
 	for _, tt := range tests {

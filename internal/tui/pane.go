@@ -4,6 +4,8 @@ import (
 	"net/url"
 	"strings"
 
+	uv "github.com/charmbracelet/ultraviolet"
+
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/vt"
@@ -22,6 +24,7 @@ type PaneModel struct {
 	scrollBack    int
 	rawBuf        *ringbuf.RingBuffer // raw PTY bytes for resize replay
 	cursorVisible bool                // tracks shell's DECTCEM state
+	ghost         bool                // true while showing restored content
 }
 
 func NewPaneModel(id string, bufSize int) *PaneModel {
@@ -94,6 +97,9 @@ func (p *PaneModel) View() string {
 	if p.Active {
 		borderColor = lipgloss.Color("57")
 	}
+	if p.ghost {
+		borderColor = lipgloss.Color("95") // muted purple — distinct but not jarring
+	}
 
 	innerW := p.Width - 2
 	innerH := p.Height - 2
@@ -117,12 +123,20 @@ func (p *PaneModel) View() string {
 	body := bodyStyle.Render(content)
 
 	// Manual top border: CWD on the left, pane name on the right.
-	topLine := buildTopBorder(p.Width, p.CWD, p.Name, borderColor)
+	topLine := buildTopBorder(p.Width, p.CWD, p.Name, borderColor, p.ghost)
 
 	return topLine + "\n" + body
 }
 
-func buildTopBorder(width int, cwd, name string, color lipgloss.TerminalColor) string {
+func buildTopBorder(width int, cwd, name string, color lipgloss.TerminalColor, ghost bool) string {
+	if ghost {
+		if name == "" {
+			name = "restored"
+		} else {
+			name = name + " · restored"
+		}
+	}
+
 	style := lipgloss.NewStyle().Foreground(color)
 	b := lipgloss.RoundedBorder()
 	innerW := width - 2
@@ -212,21 +226,13 @@ func (p *PaneModel) renderScrollback() string {
 		if srcLine < 0 {
 			lines[i] = ""
 		} else if srcLine < sbLen {
-			lines[i] = p.cellLine(func(x int) string {
-				cell := p.vt.ScrollbackCellAt(x, srcLine)
-				if cell != nil && cell.Content != "" {
-					return cell.Content
-				}
-				return " "
+			lines[i] = p.styledCellLine(func(x int) *uv.Cell {
+				return p.vt.ScrollbackCellAt(x, srcLine)
 			}, w)
 		} else {
 			screenLine := srcLine - sbLen
-			lines[i] = p.cellLine(func(x int) string {
-				cell := p.vt.CellAt(x, screenLine)
-				if cell != nil && cell.Content != "" {
-					return cell.Content
-				}
-				return " "
+			lines[i] = p.styledCellLine(func(x int) *uv.Cell {
+				return p.vt.CellAt(x, screenLine)
 			}, w)
 		}
 	}
@@ -261,12 +267,61 @@ func (p *PaneModel) renderScrollback() string {
 	return strings.Join(lines, "\n")
 }
 
-func (p *PaneModel) cellLine(getContent func(x int) string, width int) string {
+// styledCellLine renders a row of cells with ANSI styles preserved.
+// Trailing unstyled spaces are buffered and only flushed when followed by
+// visible content, so the result is naturally right-trimmed.
+func (p *PaneModel) styledCellLine(getCell func(x int) *uv.Cell, width int) string {
 	var b strings.Builder
+	var lastSGR string
+	var pending int // buffered trailing unstyled spaces
+
 	for x := 0; x < width; x++ {
-		b.WriteString(getContent(x))
+		cell := getCell(x)
+		ch := " "
+		styled := false
+		var sgr string
+
+		if cell != nil {
+			if cell.Content != "" {
+				ch = cell.Content
+			}
+			if !cell.Style.IsZero() {
+				styled = true
+				sgr = cell.Style.String()
+			}
+		}
+
+		// Unstyled space — buffer (may be trailing)
+		if ch == " " && !styled {
+			if lastSGR != "" {
+				b.WriteString("\x1b[m")
+				lastSGR = ""
+			}
+			pending++
+			continue
+		}
+
+		// Non-trivial cell: flush buffered spaces, then render
+		if pending > 0 {
+			b.WriteString(strings.Repeat(" ", pending))
+			pending = 0
+		}
+		if sgr != lastSGR {
+			if !styled && lastSGR != "" {
+				b.WriteString("\x1b[m")
+			} else if styled {
+				b.WriteString(sgr)
+			}
+			lastSGR = sgr
+		}
+		b.WriteString(ch)
 	}
-	return strings.TrimRight(b.String(), " ")
+
+	// Reset at end if style was active (trailing spaces already dropped)
+	if lastSGR != "" {
+		b.WriteString("\x1b[m")
+	}
+	return b.String()
 }
 
 func (p *PaneModel) insertCursor(content string) string {

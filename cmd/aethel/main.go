@@ -202,7 +202,7 @@ func launchTUI() {
 	defer client.Close()
 	log.Print("connected to daemon")
 
-	model := tui.NewModel(client, cfg)
+	model := tui.NewModel(client, cfg, version)
 	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {
 		log.Printf("TUI error: %v", err)

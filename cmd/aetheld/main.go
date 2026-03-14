@@ -65,7 +65,7 @@ func initLogging() *os.File {
 	}
 	os.MkdirAll(logDir, 0700)
 	f, err := os.OpenFile(filepath.Join(logDir, "aetheld.log"),
-		os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
 		return nil
 	}

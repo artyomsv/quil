@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Multi-instance support via `AETHEL_HOME` env var — run production and dev instances simultaneously
+- `--dev` CLI flag — uses `.aethel/` in project root for isolated dev data
+- Dev launcher scripts: `aethel-dev.sh` / `aethel-dev.ps1`
+- `[dev]` indicator in status bar when running in dev mode
+- `TestAethelDir_EnvOverride` test for env var override
+
+### Fixed
+
+- Daemon log file permission changed from `0644` to `0600` for consistency with other sensitive files
+- `resizeAllPanes()` nil guard — prevents panic when tab has no panes
+- `os.Executable()` error handling in `--dev` flag — exits with clear message instead of silent fallback
+
 ## [0.4.0] - 2026-03-14
 
 ### Added

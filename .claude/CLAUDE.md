@@ -67,6 +67,19 @@ Go module cache is persisted in a Docker volume (`aethel-gomod`) for fast repeat
 - Tab bar: tabs show 1-based index prefix (`1:Shell`, `2:Build`) matching Alt+1-9 shortcuts. Index hidden during rename editing
 - Auto-recovery: deleting the last tab auto-creates a new "Shell" tab; deleting the last pane in a tab auto-creates a fresh pane
 
+## Dev Mode
+
+Run a separate dev instance alongside production using `--dev` or `AETHEL_HOME`:
+
+```bash
+./aethel --dev              # Uses .aethel/ in project root (gitignored)
+./aethel-dev.sh             # Shortcut (Linux/macOS)
+./aethel-dev.ps1            # Shortcut (Windows PowerShell)
+AETHEL_HOME=/custom/path ./aethel  # Arbitrary data directory
+```
+
+`AETHEL_HOME` overrides `AethelDir()` — all derived paths (socket, PID, config, workspace, buffers, logs, shellinit) use the specified directory. The `[dev]` indicator appears in the status bar when active.
+
 ## Developer Utilities
 
 ```bash

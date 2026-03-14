@@ -118,6 +118,9 @@ func Load(path string) (Config, error) {
 }
 
 func AethelDir() string {
+	if dir := os.Getenv("AETHEL_HOME"); dir != "" {
+		return dir
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""

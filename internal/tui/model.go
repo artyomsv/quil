@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"time"
 
@@ -101,6 +102,7 @@ type Model struct {
 	confirmKind     string                 // "pane" or "tab"
 	confirmID       string                 // ID of pane/tab to delete
 	confirmName     string                 // display name for confirmation
+	devMode         bool                   // true when AETHEL_HOME is set
 }
 
 func NewModel(client *ipc.Client, cfg config.Config, version string) Model {
@@ -108,6 +110,7 @@ func NewModel(client *ipc.Client, cfg config.Config, version string) Model {
 		client:  client,
 		cfg:     cfg,
 		version: version,
+		devMode: os.Getenv("AETHEL_HOME") != "",
 	}
 }
 
@@ -970,6 +973,9 @@ func (m Model) renderStatusBar() string {
 
 	// Right side: keybinding hints + version
 	right := "^T new | ^W pane | A-W tab | F1 help | ^Q quit | v" + m.version
+	if m.devMode {
+		right = "[dev] " + right
+	}
 
 	// Fit within width: left takes priority
 	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right) - 2 // 2 for padding
@@ -1297,6 +1303,9 @@ func keyToBytes(keyMsg tea.KeyMsg) []byte {
 func (m Model) resizeAllPanes() tea.Cmd {
 	return func() tea.Msg {
 		for _, tab := range m.tabs {
+			if tab.Root == nil {
+				continue
+			}
 			for _, pane := range tab.Root.Leaves() {
 				cols := pane.Width - 2 // subtract border
 				rows := pane.Height - 2

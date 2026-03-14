@@ -20,6 +20,23 @@ import (
 var version = "dev"
 
 func main() {
+	// Check for --dev flag before anything else.
+	// Sets AETHEL_HOME to .aethel/ next to the executable for isolated dev instances.
+	for i, arg := range os.Args[1:] {
+		if arg == "--dev" {
+			exe, err := os.Executable()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "--dev: cannot determine executable path: %v\n", err)
+				os.Exit(1)
+			}
+			devDir := filepath.Join(filepath.Dir(exe), ".aethel")
+			os.Setenv("AETHEL_HOME", devDir)
+			realIdx := i + 1 // i is relative to os.Args[1:]
+			os.Args = append(os.Args[:realIdx], os.Args[realIdx+1:]...)
+			break
+		}
+	}
+
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "daemon":

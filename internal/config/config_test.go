@@ -68,6 +68,13 @@ func TestAethelDir(t *testing.T) {
 	}
 }
 
+func TestAethelDir_EnvOverride(t *testing.T) {
+	t.Setenv("AETHEL_HOME", "/tmp/custom-aethel")
+	if got := config.AethelDir(); got != "/tmp/custom-aethel" {
+		t.Errorf("expected /tmp/custom-aethel, got %s", got)
+	}
+}
+
 func TestPathHelpers(t *testing.T) {
 	dir := config.AethelDir()
 	if dir == "" {

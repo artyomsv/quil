@@ -19,12 +19,17 @@ type Tab struct {
 }
 
 type Pane struct {
-	ID        string
-	TabID     string
-	CWD       string
-	Name      string // User-set name (empty = use CWD)
-	PTY       apty.Session
-	OutputBuf *ringbuf.RingBuffer // Captures PTY output for replay on reconnect
+	ID           string
+	TabID        string
+	CWD          string
+	Name         string // User-set name (empty = use CWD)
+	PTY          apty.Session
+	OutputBuf    *ringbuf.RingBuffer // Captures PTY output for replay on reconnect
+	Type         string              // Plugin name (default: "terminal")
+	PluginState  map[string]string   // Scraped values (e.g., "session_id": "abc123")
+	PluginMu     sync.Mutex          // Protects PluginState from concurrent access
+	InstanceName string              // Which instance config was used
+	InstanceArgs []string            // Args used to start (for rerun strategy)
 }
 
 type SessionManager struct {
@@ -115,6 +120,48 @@ func (sm *SessionManager) CreatePane(tabID string, cwd string) (*Pane, error) {
 	sm.panes[id] = pane
 	tab.Panes = append(tab.Panes, id)
 	return pane, nil
+}
+
+// NewPane creates a Pane object with a unique ID and ring buffer, but does
+// NOT add it to any tab. Use with ReplacePane for atomic swaps.
+func (sm *SessionManager) NewPane(cwd string) *Pane {
+	id := "pane-" + uuid.New().String()[:8]
+	return &Pane{
+		ID:        id,
+		CWD:       cwd,
+		OutputBuf: ringbuf.NewRingBuffer(sm.bufSize),
+	}
+}
+
+// ReplacePane atomically swaps an old pane for a new one at the same
+// position in the tab's pane list. The old pane's PTY is closed.
+func (sm *SessionManager) ReplacePane(oldPaneID string, newPane *Pane) error {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	oldPane, ok := sm.panes[oldPaneID]
+	if !ok {
+		return fmt.Errorf("pane not found: %s", oldPaneID)
+	}
+
+	if oldPane.PTY != nil {
+		oldPane.PTY.Close()
+	}
+
+	// Replace in tab's pane list at the same index
+	if tab, ok := sm.tabs[oldPane.TabID]; ok {
+		for i, id := range tab.Panes {
+			if id == oldPaneID {
+				tab.Panes[i] = newPane.ID
+				break
+			}
+		}
+	}
+
+	newPane.TabID = oldPane.TabID
+	delete(sm.panes, oldPaneID)
+	sm.panes[newPane.ID] = newPane
+	return nil
 }
 
 func (sm *SessionManager) DestroyPane(paneID string) error {

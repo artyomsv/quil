@@ -35,6 +35,9 @@ const (
 	// State sync (Daemon -> Client)
 	MsgWorkspaceState = "workspace_state"
 	MsgStateUpdate    = "state_update"
+
+	// Plugin (Daemon -> Client)
+	MsgPluginError = "plugin_error"
 )
 
 // Message is the wire format for IPC communication.
@@ -51,8 +54,12 @@ type AttachPayload struct {
 }
 
 type CreatePanePayload struct {
-	TabID string `json:"tab_id"`
-	CWD   string `json:"cwd"`
+	TabID         string   `json:"tab_id"`
+	CWD           string   `json:"cwd"`
+	Type          string   `json:"type,omitempty"`
+	InstanceName  string   `json:"instance_name,omitempty"`
+	InstanceArgs  []string `json:"instance_args,omitempty"`
+	ReplacePaneID string   `json:"replace_pane_id,omitempty"`
 }
 
 type DestroyPanePayload struct {
@@ -103,6 +110,12 @@ type UpdatePanePayload struct {
 type UpdateLayoutPayload struct {
 	TabID  string          `json:"tab_id"`
 	Layout json.RawMessage `json:"layout"`
+}
+
+type PluginErrorPayload struct {
+	PaneID  string `json:"pane_id"`
+	Title   string `json:"title"`
+	Message string `json:"message"`
 }
 
 // NewMessage creates a Message with a typed payload.

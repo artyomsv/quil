@@ -49,20 +49,22 @@ Full mouse support — click tabs to switch, click panes to focus, scroll wheel 
 
 Rename tabs (F2) and panes (Alt+F2). Cycle through 8 tab colors (Alt+C) for visual distinction. Clipboard paste (Ctrl+V) with cross-platform support.
 
-### AI Session Resume (Planned)
+### AI Session Resume
 
-A regex-based scraper watches terminal output for session IDs. When you restart, Aethel executes `claude --resume <session-id>` automatically — no manual copy-paste.
+Claude Code sessions resume automatically after reboot. Aethel assigns a UUID to each AI pane at creation and uses `claude --resume <session-id>` on restart — no manual copy-paste. Other tools can use regex scraping or command re-run strategies.
 
-### Typed Panes via Plugins (Planned)
+### Typed Panes via Plugins
 
-Panes aren't just shells. Each pane type is a TOML plugin that defines:
+Panes aren't just shells. Press `Ctrl+N` to create a typed pane from 4 built-in plugins:
 
-- **Scraper patterns** — extract tokens from terminal output
-- **Resume templates** — auto-restart tools with captured context
-- **Border color rules** — red on errors, green on success
-- **Quick actions** — one-key shortcuts per pane type
+| Plugin | Description | Resume Strategy |
+|--------|-------------|-----------------|
+| **Terminal** | System shell | Restore working directory |
+| **Claude Code** | AI coding assistant | UUID-based session resume |
+| **SSH** | Remote connection (POC) | Re-run same command |
+| **Stripe** | Webhook listener (POC) | Re-run same command |
 
-Ships with 4 built-in plugins: `ai`, `webhook`, `infrastructure`, `build`. Create your own without recompiling.
+Create your own plugins as TOML files in `~/.aethel/plugins/` without recompiling. Plugins define commands, error handlers, persistence strategies, and pre-configured instances.
 
 ### Cross-Platform
 
@@ -79,7 +81,7 @@ aethel (TUI Client)
             ▼
 aetheld (Daemon)
     ├── PTY session management
-    ├── State persistence (JSON + SQLite)
+    ├── State persistence (JSON snapshots)
     ├── Resume engine (regex scrapers)
     └── Plugin registry (TOML definitions)
 ```
@@ -118,7 +120,9 @@ aethel
 | Key | Action |
 |---|---|
 | `Ctrl+T` | New tab |
+| `Ctrl+N` | New typed pane (plugin dialog) |
 | `Ctrl+W` | Close active pane |
+| `Alt+W` | Close active tab |
 | `Alt+H` | Split horizontal |
 | `Alt+V` | Split vertical |
 | `Tab` / `Shift+Tab` | Navigate panes |
@@ -178,6 +182,7 @@ internal/
 ├── daemon/          # Session management, message routing
 ├── ipc/             # Length-prefixed JSON protocol, client/server
 ├── persist/         # Atomic workspace/buffer persistence (JSON + binary)
+├── plugin/          # Pane plugin system (registry, TOML loading, scraper)
 ├── pty/             # Cross-platform PTY (Unix + Windows)
 ├── ringbuf/         # Circular byte buffer for PTY output history
 ├── shellinit/       # Automatic shell integration (OSC 7 injection)
@@ -204,10 +209,15 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development guidelines.
 | Milestone | Status | Description |
 |---|---|---|
 | **M1: Foundation** | Done | Daemon, TUI, IPC, PTY, tabs, splits, shell integration, mouse, scrollback, daemon lifecycle |
-| **M2: Persistence** | In Progress | Workspace snapshots, ghost buffer persistence, shell respawn, reboot-proof sessions |
-| **M3: Resume Engine** | Planned | Regex scrapers, token extraction, AI session resume |
-| **M4: Plugin System** | Planned | TOML plugins, typed panes, hot-reload |
-| **M5: Polish** | Planned | JSON transformer, observability, encrypted tokens, OS service integration (`aethel service install` — systemd/launchd/Task Scheduler) |
+| **M2: Persistence** | Done | Workspace snapshots, ghost buffer persistence, shell respawn, reboot-proof sessions |
+| **M3: Resume Engine** | Done | Regex scrapers, token extraction, AI session resume via pre-assigned UUIDs |
+| **M4: Plugin System** | Done | TOML plugins, typed panes, pane creation dialog, error handlers, window size persistence |
+| **M5: Polish** | Planned | JSON transformer, observability, encrypted tokens, OS service integration |
+| **M6: Pane Focus** | Planned | Full-window focus mode for single pane |
+| **M7: Pane Notes** | Planned | Side-by-side note-taking linked to panes |
+| **M8: Bubble Tea v2** | Planned | Migration to Bubble Tea v2 for improved key handling |
+
+See [ROADMAP.md](ROADMAP.md) for detailed progress and feature descriptions.
 
 ## License
 

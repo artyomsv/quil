@@ -147,3 +147,11 @@ func WorkspacePath() string {
 func BufferDir() string {
 	return filepath.Join(AethelDir(), "buffers")
 }
+
+func PluginsDir() string {
+	return filepath.Join(AethelDir(), "plugins")
+}
+
+func WindowStatePath() string {
+	return filepath.Join(AethelDir(), "window.json")
+}

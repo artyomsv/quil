@@ -26,6 +26,7 @@ Client-daemon model:
 - `internal/persist/` — Atomic workspace/buffer persistence (JSON snapshots, binary ghost buffers)
 - `internal/pty/` — Cross-platform PTY (build tags: `linux || darwin || freebsd`, `windows`)
 - `internal/shellinit/` — Automatic OSC 7 shell integration (embedded init scripts, `//go:embed`)
+- `internal/plugin/` — Pane plugin system (registry, built-ins, TOML loading, scraper)
 - `internal/tui/` — Bubble Tea model, tabs, panes, layout tree, styles
 
 ## Building
@@ -59,13 +60,17 @@ Go module cache is persisted in a Docker volume (`aethel-gomod`) for fast repeat
 - Daemon auto-start: TUI auto-starts `aetheld --background` if not running. `findDaemonBinary()` checks PATH then the executable's own directory. PID file at `~/.aethel/aetheld.pid`, stale socket cleanup before spawn
 - Daemon shutdown: `MsgShutdown` signals via channel (not `os.Exit`) so defers in `main()` run cleanly (PID file removal, log file close)
 - Persistence: `internal/persist/` handles atomic file I/O — `snapshot.go` for workspace JSON (write `.tmp` → rotate to `.bak` → rename), `ghostbuf.go` for per-pane binary buffers. Both use temp+rename for crash safety
-- Workspace restore: On daemon start, `restoreWorkspace()` loads `~/.aethel/workspace.json`, reconstructs tabs/panes, loads ghost buffers from `~/.aethel/buffers/`, then `respawnShells()` spawns new shell processes with saved CWD
+- Workspace restore: On daemon start, `restoreWorkspace()` loads `~/.aethel/workspace.json`, reconstructs tabs/panes, loads ghost buffers from `~/.aethel/buffers/`, then `respawnPanes()` spawns processes per plugin type with saved CWD and resume strategy
 - Snapshot triggers: periodic timer (configurable `snapshot_interval`, default 30s) + immediate on structural changes (create/destroy tab/pane) with 1s debounce + final flush on daemon stop
-- Dialog system: `internal/tui/dialog.go` — modal dialogs with `dialogScreen` iota (`dialogAbout`, `dialogSettings`, `dialogShortcuts`, `dialogConfirm`). F1 opens About dialog. Settings editor mutates `m.cfg` in-memory (session-only). Confirm dialog used for pane/tab close (Ctrl+W / Alt+W)
+- Dialog system: `internal/tui/dialog.go` — modal dialogs with `dialogScreen` iota (`dialogAbout`, `dialogSettings`, `dialogShortcuts`, `dialogConfirm`, `dialogCreatePane`, `dialogPluginError`). F1 opens About dialog. Ctrl+N opens typed pane creation dialog (two-step: category → plugin). Settings editor mutates `m.cfg` in-memory (session-only). Confirm dialog used for pane/tab close (Ctrl+W / Alt+W)
 - Output coalescing: `streamPTYOutput()` uses goroutine + 2ms timer to batch rapid PTY output before IPC broadcast, preventing visual tearing with interactive TUI tools
 - Ghost buffer dimming: `PaneOutputPayload.Ghost` flag distinguishes replay from live output. Panes show muted border + "restored" label until first live output clears the flag. Controlled by `GhostBufferConfig.Dimmed` (default true)
 - Tab bar: tabs show 1-based index prefix (`1:Shell`, `2:Build`) matching Alt+1-9 shortcuts. Index hidden during rename editing
 - Auto-recovery: deleting the last tab auto-creates a new "Shell" tab; deleting the last pane in a tab auto-creates a fresh pane
+- Plugin system: `internal/plugin/` — pane types defined via `PanePlugin` struct. 4 built-in plugins (terminal, claude-code, stripe, ssh) in `builtin.go`. User TOML plugins in `~/.aethel/plugins/` override built-ins. `Registry` manages loading, detection (`DetectCmd`), and lookup. Session scraper in `flushPaneOutput` extracts values from PTY output via regex. Error handlers match output patterns and send `MsgPluginError` to show help dialogs
+- Pane type fields: `Pane.Type` (plugin name, default "terminal"), `Pane.PluginState` (scraped key-values), `Pane.InstanceName`, `Pane.InstanceArgs`. All persisted in workspace JSON, backward compatible (missing `type` → "terminal")
+- Resume strategies: `cwd_only` (terminal), `rerun` (stripe, ssh), `preassign_id` (claude-code), `session_scrape`, `none`. Dispatched in `spawnPane()` with `restoring` flag
+- Window size persistence: `~/.aethel/window.json` stores cols, rows, pixel dimensions, and maximized state. Saved on TUI exit, restored on launch via platform-specific code (`cmd/aethel/window_windows.go` uses Win32 `MoveWindow`/`ShowWindow`, `cmd/aethel/window_unix.go` uses xterm resize sequence). Follows the same build-tag file-split pattern as `proc_unix.go`/`proc_windows.go`
 
 ## Dev Mode
 
@@ -101,6 +106,9 @@ AETHEL_HOME=/custom/path ./aethel  # Arbitrary data directory
 
 - **M1 (Done):** Foundation — daemon, TUI, IPC, PTY, tabs, splits, shell integration, mouse, scrollback, daemon lifecycle
 - **M2 (Done):** Persistence — workspace snapshots, ghost buffer persistence, shell respawn, reboot-proof sessions
-- **M3:** Resume engine — regex scrapers, AI session resume
-- **M4:** Plugin system — TOML plugins, typed panes
+- **M3 (Done):** Resume engine — preassign_id strategy for Claude Code, session_scrape for tools with output tokens, rerun for SSH/Stripe
+- **M4 (Done):** Plugin system — typed panes, TOML plugins, plugin registry, error handlers, pane creation dialog (Ctrl+N), 4 built-in plugins: terminal + claude-code (production), ssh + stripe (POC)
 - **M5:** Polish — JSON transformer, observability, encrypted tokens
+- **M6:** Pane Focus — full-window focus mode for single pane
+- **M7:** Pane Notes — side-by-side note-taking linked to panes
+- **M8:** Bubble Tea v2 migration

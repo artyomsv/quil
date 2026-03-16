@@ -311,6 +311,10 @@ func resizeNode(n *LayoutNode, w, h int) {
 	if n == nil {
 		return
 	}
+	// Placeholder node (nil Pane, no children) — skip until filled.
+	if n.Pane == nil && n.Left == nil && n.Right == nil {
+		return
+	}
 	if n.IsLeaf() {
 		if w < minPaneW {
 			w = minPaneW

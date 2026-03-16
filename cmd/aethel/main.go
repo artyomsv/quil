@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -14,6 +15,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/artyomsv/aethel/internal/config"
 	"github.com/artyomsv/aethel/internal/ipc"
+	"github.com/artyomsv/aethel/internal/plugin"
 	"github.com/artyomsv/aethel/internal/tui"
 )
 
@@ -219,12 +221,29 @@ func launchTUI() {
 	defer client.Close()
 	log.Print("connected to daemon")
 
-	model := tui.NewModel(client, cfg, version)
+	// Initialize plugin registry for the TUI (detection runs in the TUI process
+	// so the dialog knows which plugins are available)
+	reg := plugin.NewRegistry()
+	if err := reg.LoadFromDir(config.PluginsDir()); err != nil {
+		log.Printf("warning: load plugins: %v", err)
+	}
+	reg.DetectAvailability()
+
+	// Restore window size from previous session
+	restoreWindowSize()
+
+	model := tui.NewModel(client, cfg, version, reg)
 	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
-	if _, err := p.Run(); err != nil {
+	finalModel, err := p.Run()
+	if err != nil {
 		log.Printf("TUI error: %v", err)
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
+	}
+
+	// Save window size for next launch
+	if m, ok := finalModel.(tui.Model); ok {
+		saveWindowSize(m)
 	}
 	log.Print("TUI exited normally")
 }
@@ -232,4 +251,55 @@ func launchTUI() {
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+// windowState is persisted to ~/.aethel/window.json.
+type windowState struct {
+	Cols        int  `json:"cols"`
+	Rows        int  `json:"rows"`
+	PixelWidth  int  `json:"pixel_width,omitempty"`
+	PixelHeight int  `json:"pixel_height,omitempty"`
+	Maximized   bool `json:"maximized,omitempty"`
+}
+
+func loadWindowState() *windowState {
+	data, err := os.ReadFile(config.WindowStatePath())
+	if err != nil {
+		return nil
+	}
+	var ws windowState
+	if err := json.Unmarshal(data, &ws); err != nil {
+		return nil
+	}
+	if ws.Cols <= 0 || ws.Rows <= 0 {
+		return nil
+	}
+	return &ws
+}
+
+func restoreWindowSize() {
+	ws := loadWindowState()
+	if ws == nil {
+		return
+	}
+	restoreWindowSizePlatform(ws)
+}
+
+func saveWindowSize(m tui.Model) {
+	cols, rows := m.WindowSize()
+	if cols <= 0 || rows <= 0 {
+		return
+	}
+	ws := windowState{Cols: cols, Rows: rows}
+	// Get pixel dimensions for Windows MoveWindow
+	saveWindowSizePlatform(&ws)
+	data, err := json.Marshal(ws)
+	if err != nil {
+		return
+	}
+	if err := os.WriteFile(config.WindowStatePath(), data, 0600); err != nil {
+		log.Printf("save window state: %v", err)
+		return
+	}
+	log.Printf("saved window size: %dx%d (pixels: %dx%d)", ws.Cols, ws.Rows, ws.PixelWidth, ws.PixelHeight)
 }

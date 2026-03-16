@@ -16,6 +16,8 @@ Several non-trivial functions added or changed in this PR have no direct unit te
 - `isValidHexID(id, prefix string) bool` — ID validation used by `restoreWorkspace()` to guard against corrupt snapshot data. The logic (prefix match + 8 hex chars) is easy to get wrong at boundaries.
 - `buildWorkspaceState()` — serializes the full session to a `map[string]any`. No test verifies the key names, layout embedding, or pane name omission logic.
 - `snapshotDebounced()` — debounce path (TOCTOU-safe via lock). The 1s boundary behaviour is not tested.
+- `spawnPane()` — core plugin dispatch logic (strategy selection, UUID generation for `preassign_id`, resume arg expansion, shell integration). 80+ lines with multiple branches, no unit test.
+- `DetectAvailability()` — registry method that extracts binary name from detect commands and runs `exec.LookPath`. Not directly tested.
 
 **`internal/tui/dialog.go`**
 - `handleConfirmKey()` — confirm/cancel logic for destructive pane/tab operations. The "y" path sends IPC messages; no test covers the state machine transitions.

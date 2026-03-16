@@ -583,7 +583,7 @@ All three platforms supported from day one. Go's cross-compilation makes this fe
 
 ## 7. Milestones
 
-### M1: Foundation — Daemon + Shell + TUI
+### M1: Foundation — Daemon + Shell + TUI (Done)
 
 > **Goal:** `aethel` launches a daemon, opens a Bubble Tea TUI with one tab and one pane running a shell. Basic split support.
 
@@ -600,7 +600,7 @@ All three platforms supported from day one. Go's cross-compilation makes this fe
 
 **Exit criteria:** User can launch `aethel`, create tabs, split panes, and run shell commands on all three platforms.
 
-### M2: Persistence — Reboot-Proof Sessions
+### M2: Persistence — Reboot-Proof Sessions (Done)
 
 > **Goal:** Close `aethel`, reboot, run `aethel` again — tabs, panes, and layout are restored. Ghost buffers show previous output instantly.
 
@@ -609,44 +609,47 @@ All three platforms supported from day one. Go's cross-compilation makes this fe
 - State snapshotting (JSON) on interval + structural changes
 - Atomic writes with `.bak` rollback
 - Workspace re-hydration on startup
-- Ghost buffer system (SQLite-backed)
+- Ghost buffer system (file-backed binary snapshots)
 - Visual distinction for ghost buffer content (dimmed)
 - `aetheld` auto-start on first client invocation
 - Daemon graceful shutdown with state persist
 
 **Exit criteria:** Full reboot cycle — close everything, restart OS, run `aethel` — workspace layout and ghost buffer content are restored within 30 seconds.
 
-### M3: Resume Engine — AI Sessions Survive Reboots
+### M3: Resume Engine — AI Sessions Survive Reboots (Done)
 
 > **Goal:** Claude Code session IDs are automatically scraped and sessions resume on re-hydration.
 
 **Deliverables:**
 
 - Regex scraper framework watching PTY output
-- Token extraction and storage (SQLite)
+- Token extraction and storage (workspace JSON `plugin_state`)
 - Resume command template execution on re-hydration
-- Built-in `ai` plugin with Claude Code patterns
-- Fallback to plain shell when no tokens captured
+- `preassign_id` strategy for Claude Code (UUID pre-assigned via `--session-id`)
+- `session_scrape` strategy for tools that emit session IDs in output
+- `rerun` strategy for SSH/Stripe (re-execute same command)
+- Fallback to plain shell when resume args can't be resolved
 
 **Exit criteria:** Start a Claude Code session, reboot, run `aethel` — Claude session resumes automatically with the previous conversation context.
 
-### M4: Plugin System + Typed Panes
+### M4: Plugin System + Typed Panes (Done)
 
 > **Goal:** Users can define custom pane types. Ship with 4 built-in plugins.
 
 **Deliverables:**
 
 - Plugin loader from `~/.aethel/plugins/*.toml`
-- Plugin validation with clear error messages
-- Plugin hot-reload
-- Built-in plugins: `ai`, `webhook`, `infrastructure`, `build`
-- Border color rules based on output patterns
-- Status line rendering per pane type
-- Quick actions menu per pane type
-- Pane auto-naming from process / plugin config
-- `aethel plugin list/validate` commands
+- Plugin validation with clear error messages (strategy, cmd, action, regex)
+- Plugin registry with auto-detection (`exec.LookPath`)
+- Built-in plugins: Terminal (production), Claude Code (production), SSH (POC), Stripe (POC)
+- Error handler pattern matching on PTY output with help dialogs
+- Pane creation dialog (`Ctrl+N`) — category, plugin, split direction
+- Atomic pane replacement (`ReplacePane`)
+- `preassign_id` persistence strategy for UUID-based resume
+- Resuming/preparing spinner indicator on pane border
+- Window size persistence across restarts (Win32 API / xterm)
 
-**Exit criteria:** User creates a custom plugin TOML, assigns it to a pane, and sees custom border colors, status line, and quick actions — all without restarting the daemon.
+**Exit criteria:** User creates a custom plugin TOML, assigns it to a pane, and the plugin launches with correct persistence strategy. Claude Code sessions resume after hard restart.
 
 ### M5: Polish — Advanced UI + Developer Experience
 

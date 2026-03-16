@@ -3,6 +3,7 @@ package tui
 import (
 	"net/url"
 	"strings"
+	"time"
 
 	uv "github.com/charmbracelet/ultraviolet"
 
@@ -13,8 +14,12 @@ import (
 	"github.com/artyomsv/aethel/internal/ringbuf"
 )
 
+// spinnerFrames are braille characters cycled for the resuming indicator.
+var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
 type PaneModel struct {
 	ID            string
+	Type          string // plugin type ("terminal", "claude-code", etc.)
 	Name          string // user-given name (empty if not set)
 	CWD           string // current working directory from daemon
 	vt            *vt.SafeEmulator
@@ -25,6 +30,10 @@ type PaneModel struct {
 	rawBuf        *ringbuf.RingBuffer // raw PTY bytes for resize replay
 	cursorVisible bool                // tracks shell's DECTCEM state
 	ghost         bool                // true while showing restored content
+	resuming      bool                // true while waiting for first live output after restore
+	preparing     bool                // true for newly created panes (not restored)
+	resumeStart   time.Time           // when resuming/preparing started (minimum display duration)
+	spinnerFrame  int                 // current frame index in spinnerFrames
 }
 
 func NewPaneModel(id string, bufSize int) *PaneModel {
@@ -51,6 +60,25 @@ func NewPaneModel(id string, bufSize int) *PaneModel {
 func (p *PaneModel) AppendOutput(data []byte) {
 	p.rawBuf.Write(data)
 	p.vt.Write(data)
+}
+
+// ResetVT creates a fresh VT emulator at the current dimensions, clearing
+// ghost buffer state so live output starts with a clean cursor position.
+func (p *PaneModel) ResetVT() {
+	w, h := p.vt.Width(), p.vt.Height()
+	em := vt.NewSafeEmulator(w, h)
+	em.SetScrollbackSize(10000)
+	em.SetCallbacks(vt.Callbacks{
+		CursorVisibility: func(visible bool) {
+			p.cursorVisible = visible
+		},
+		WorkingDirectory: func(dir string) {
+			p.CWD = parseOSC7Path(dir)
+		},
+	})
+	p.vt = em
+	p.rawBuf.Reset()
+	p.cursorVisible = true
 }
 
 func (p *PaneModel) ResizeVT(cols, rows int) {
@@ -97,7 +125,7 @@ func (p *PaneModel) View() string {
 	if p.Active {
 		borderColor = lipgloss.Color("57")
 	}
-	if p.ghost {
+	if p.ghost || p.resuming || p.preparing {
 		borderColor = lipgloss.Color("95") // muted purple — distinct but not jarring
 	}
 
@@ -123,18 +151,28 @@ func (p *PaneModel) View() string {
 	body := bodyStyle.Render(content)
 
 	// Manual top border: CWD on the left, pane name on the right.
-	topLine := buildTopBorder(p.Width, p.CWD, p.Name, borderColor, p.ghost)
+	topLine := buildTopBorder(p.Width, p.CWD, p.Name, borderColor, p.ghost, p.resuming, p.preparing, p.spinnerFrame)
 
 	return topLine + "\n" + body
 }
 
-func buildTopBorder(width int, cwd, name string, color lipgloss.TerminalColor, ghost bool) string {
+func buildTopBorder(width int, cwd, name string, color lipgloss.TerminalColor, ghost, resuming, preparing bool, spinnerFrame int) string {
 	if ghost {
 		if name == "" {
 			name = "restored"
 		} else {
 			name = name + " · restored"
 		}
+	}
+
+	// Spinner overrides the right label temporarily
+	if resuming || preparing {
+		frame := spinnerFrames[spinnerFrame%len(spinnerFrames)]
+		label := "resuming..."
+		if preparing {
+			label = "preparing..."
+		}
+		name = frame + " " + label
 	}
 
 	style := lipgloss.NewStyle().Foreground(color)
@@ -144,7 +182,7 @@ func buildTopBorder(width int, cwd, name string, color lipgloss.TerminalColor, g
 		return style.Render(b.TopLeft + b.TopRight)
 	}
 
-	// Right label: pane name (only if it fits with padding).
+	// Right label: pane name or spinner (only if it fits with padding).
 	rightLabel := ""
 	rightLen := 0
 	if name != "" && len([]rune(name))+4 <= innerW {
@@ -201,7 +239,10 @@ func (p *PaneModel) renderContent() string {
 	if p.scrollBack == 0 {
 		// Live view — use Render() for full color support
 		content := p.vt.Render()
-		if p.Active && p.cursorVisible {
+		// Only overlay cursor for terminal panes — TUI apps (Claude Code etc.)
+		// render their own cursor.
+		isTerminal := p.Type == "" || p.Type == "terminal"
+		if p.Active && p.cursorVisible && isTerminal {
 			content = p.insertCursor(content)
 		}
 		return content

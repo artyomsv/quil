@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Plugin system** — typed panes with 4 built-in plugins: Terminal, Claude Code (AI), Stripe (webhook), SSH (remote)
+- `internal/plugin/` package — plugin structs, registry, TOML loading, regex scraper, error handler matching
+- TOML plugin format — user-created plugins in `~/.aethel/plugins/*.toml` with command, persistence, error handlers, and instances
+- Plugin registry with `DetectAvailability()` — checks PATH for plugin binaries at startup
+- Pane creation dialog (`Ctrl+N`) — three-step flow: category → plugin → split direction (horizontal, vertical, replace)
+- Atomic pane replacement via `ReplacePane()` — swap pane type in-place without layout disruption
+- **Session resume for Claude Code** — pre-assigned UUID via `--session-id`, resumed with `--resume` after daemon restart
+- `preassign_id` persistence strategy — generate UUID at pane creation, store in `PluginState`, resume on restore
+- `session_scrape` persistence strategy — regex scraper extracts tokens from PTY output for resume
+- `rerun` persistence strategy — re-execute same command + args on restore (SSH, Stripe)
+- Error handler system — match PTY output against regex patterns, show help dialogs (e.g., SSH auth failure, missing API key)
+- `MsgPluginError` IPC message — daemon-to-TUI error notification with modal dialog display
+- Resuming/preparing spinner — animated braille indicator (`⠹ resuming...` / `⠹ preparing...`) on pane border during startup
+- Window size persistence — save/restore terminal dimensions via `~/.aethel/window.json`
+- Platform-specific window restore — Win32 `MoveWindow`/`ShowWindow` on Windows, xterm sequence on Unix
+- Maximized window state detection and restoration via `IsZoomed`/`SW_MAXIMIZE`
+- `PluginsDir()` and `WindowStatePath()` config path helpers
+- Plugin state fields on `Pane` struct — `Type`, `PluginState`, `InstanceName`, `InstanceArgs`
+- Workspace JSON backward compatibility — missing `type` defaults to `"terminal"`
+
+### Changed
+
+- `spawnShell()` replaced with generalized `spawnPane()` — dispatches by plugin type and resume strategy
+- `respawnShells()` replaced with `respawnPanes()` — fallback to terminal shell on plugin spawn failure
+- Ghost buffer replay skipped for TUI app panes (`preassign_id`, `session_scrape`) — prevents cursor state pollution
+- Aethel cursor overlay disabled for non-terminal panes — TUI apps render their own cursor
+- `CreatePanePayload` extended with `Type`, `InstanceName`, `InstanceArgs`, `ReplacePaneID`
+- `NewModel()` accepts plugin registry parameter
+- Status bar updated with `^N pane` hint
+
+### Fixed
+
+- Regex compilation uses `regexp.Compile` (not `MustCompile`) — invalid TOML patterns log errors instead of crashing daemon
+- Nil guard in `ScrapeOutput`/`MatchError` for uncompiled patterns
+- Data race on `Pane.PluginState` — protected with `PluginMu` mutex
+- `hitTestTab` missing tab index prefix — click targets now match rendered tab widths
+- Scraped values truncated in log output — prevents leaking tokens/secrets
+- Error handler patterns anchored — `Permission denied (publickey` and `error.*API key` avoid false matches
+- `loadPluginTOML` validates strategy, cmd, and error handler action fields
+- `loadPluginTOML` defaults `DisplayName` to `Name` and `Category` to `"tools"` when empty
+- Layout `resizeNode` nil guard for placeholder nodes during pane replacement
+- `ExpandResumeArgs` returns nil when placeholders are unresolved — prevents passing literal `{session_id}` to tools
+- `window_windows.go` bounds-checks pixel dimensions and `GetWindowRect` return value
+- `saveWindowSize` logs `WriteFile` errors
+
 ## [0.4.1] - 2026-03-14
 
 ### Added

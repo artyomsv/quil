@@ -13,6 +13,7 @@ import (
 	"github.com/artyomsv/aethel/internal/clipboard"
 	"github.com/artyomsv/aethel/internal/config"
 	"github.com/artyomsv/aethel/internal/ipc"
+	"github.com/artyomsv/aethel/internal/plugin"
 )
 
 // chromeHeight is the vertical space consumed by tab bar (1) + status bar (1).
@@ -50,11 +51,25 @@ type PaneInfo struct {
 	TabID string
 	CWD   string
 	Name  string
+	Type  string
 }
 
 // resizeTickMsg fires after the debounce delay; seq tracks freshness.
 type resizeTickMsg struct {
 	seq int
+}
+
+// PluginErrorMsg is received when the daemon detects a plugin error pattern.
+type PluginErrorMsg struct {
+	PaneID  string
+	Title   string
+	Message string
+}
+
+// spinnerTickMsg advances the resuming spinner animation for a pane.
+type spinnerTickMsg struct {
+	paneID string
+	frame  int
 }
 
 var tabColors = []string{
@@ -76,6 +91,8 @@ const (
 	dialogSettings
 	dialogShortcuts
 	dialogConfirm
+	dialogCreatePane
+	dialogPluginError
 )
 
 type Model struct {
@@ -99,19 +116,33 @@ type Model struct {
 	dialogCursor    int                    // highlighted item in dialog
 	dialogEdit      bool                   // editing a settings value
 	dialogInput     string                 // text input buffer for editing
-	confirmKind     string                 // "pane" or "tab"
-	confirmID       string                 // ID of pane/tab to delete
-	confirmName     string                 // display name for confirmation
-	devMode         bool                   // true when AETHEL_HOME is set
+	confirmKind        string                 // "pane" or "tab"
+	confirmID          string                 // ID of pane/tab to delete
+	confirmName        string                 // display name for confirmation
+	devMode            bool                   // true when AETHEL_HOME is set
+	pluginRegistry     *plugin.Registry       // plugin registry (shared with daemon)
+	lastWidth          int                    // last known window width (for persistence)
+	lastHeight         int                    // last known window height (for persistence)
+	createPaneStep     int                    // 0=category, 1=plugin, 2=split direction
+	selectedCategory   int                    // selected category index in create pane dialog
+	selectedPlugin     string                 // selected plugin name in create pane dialog
+	pluginErrorTitle   string                 // title for plugin error dialog
+	pluginErrorMessage string                 // message for plugin error dialog
 }
 
-func NewModel(client *ipc.Client, cfg config.Config, version string) Model {
+func NewModel(client *ipc.Client, cfg config.Config, version string, registry *plugin.Registry) Model {
 	return Model{
-		client:  client,
-		cfg:     cfg,
-		version: version,
-		devMode: os.Getenv("AETHEL_HOME") != "",
+		client:         client,
+		cfg:            cfg,
+		version:        version,
+		devMode:        os.Getenv("AETHEL_HOME") != "",
+		pluginRegistry: registry,
 	}
+}
+
+// WindowSize returns the last known window dimensions for persistence.
+func (m Model) WindowSize() (width, height int) {
+	return m.lastWidth, m.lastHeight
 }
 
 func (m Model) Init() tea.Cmd {
@@ -125,6 +156,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		log.Printf("WindowSizeMsg: %dx%d", msg.Width, msg.Height)
 		m.pendingWidth = msg.Width
 		m.pendingHeight = msg.Height
+		m.lastWidth = msg.Width
+		m.lastHeight = msg.Height
 		m.resizeSeq++
 
 		// First resize: apply immediately for initial attach
@@ -208,11 +241,48 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.listenForMessages()
 
+	case spinnerTickMsg:
+		// Advance spinner frame for the resuming/preparing pane
+		for _, tab := range m.tabs {
+			if tab.Root == nil {
+				continue
+			}
+			if leaf := tab.Root.FindLeaf(msg.paneID); leaf != nil && (leaf.Pane.resuming || leaf.Pane.preparing) {
+				// Auto-clear after minimum display + no more ghost state
+				if !leaf.Pane.ghost && time.Since(leaf.Pane.resumeStart) >= 2*time.Second {
+					leaf.Pane.resuming = false
+					leaf.Pane.preparing = false
+					return m, nil
+				}
+				leaf.Pane.spinnerFrame = msg.frame
+				nextFrame := msg.frame + 1
+				paneID := msg.paneID
+				return m, tea.Tick(100*time.Millisecond, func(t time.Time) tea.Msg {
+					return spinnerTickMsg{paneID: paneID, frame: nextFrame}
+				})
+			}
+		}
+		return m, nil
+
+	case PluginErrorMsg:
+		m.dialog = dialogPluginError
+		m.pluginErrorTitle = msg.Title
+		m.pluginErrorMessage = msg.Message
+		return m, m.listenForMessages()
+
 	case WorkspaceStateMsg:
 		log.Printf("WorkspaceState: %d tabs, %d panes", len(msg.Tabs), len(msg.Panes))
-		m.applyWorkspaceState(msg)
+		newPaneIDs := m.applyWorkspaceState(msg)
 		m.resizeTabs()
-		return m, tea.Batch(m.listenForMessages(), m.resizeAllPanes(), m.sendAllLayouts())
+		cmds := []tea.Cmd{m.listenForMessages(), m.resizeAllPanes(), m.sendAllLayouts()}
+		// Start spinner ticks for newly restored panes
+		for _, paneID := range newPaneIDs {
+			id := paneID
+			cmds = append(cmds, tea.Tick(100*time.Millisecond, func(t time.Time) tea.Msg {
+				return spinnerTickMsg{paneID: id, frame: 1}
+			}))
+		}
+		return m, tea.Batch(cmds...)
 
 	case listenContinueMsg:
 		return m, m.listenForMessages()
@@ -373,6 +443,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key == kb.Paste:
 		return m, m.pasteClipboard()
 
+	case key == "ctrl+n":
+		m.dialog = dialogCreatePane
+		m.dialogCursor = 0
+		m.createPaneStep = 0
+		m.selectedCategory = 0
+		return m, nil
+
 	case key == "f1":
 		m.dialog = dialogAbout
 		m.dialogCursor = 0
@@ -479,12 +556,23 @@ func (m *Model) handlePaneOutput(msg PaneOutputMsg) tea.Cmd {
 		}
 		if leaf := tab.Root.FindLeaf(msg.PaneID); leaf != nil {
 			oldCWD := leaf.Pane.CWD
-			leaf.Pane.AppendOutput(msg.Data)
 			if msg.Ghost && m.cfg.GhostBuffer.Dimmed {
 				leaf.Pane.ghost = true
 			} else if !msg.Ghost {
+				// Transitioning from ghost/restored to live output —
+				// reset VT emulator BEFORE processing data so cursor
+				// position isn't polluted by ghost buffer ANSI sequences.
+				if leaf.Pane.ghost {
+					leaf.Pane.ResetVT()
+				}
 				leaf.Pane.ghost = false
+				// Clear spinner labels after minimum display time (2s)
+				if time.Since(leaf.Pane.resumeStart) >= 2*time.Second {
+					leaf.Pane.resuming = false
+					leaf.Pane.preparing = false
+				}
 			}
+			leaf.Pane.AppendOutput(msg.Data)
 			if leaf.Pane.CWD != oldCWD && leaf.Pane.CWD != "" {
 				return m.updatePaneCWD(msg.PaneID, leaf.Pane.CWD)
 			}
@@ -494,7 +582,11 @@ func (m *Model) handlePaneOutput(msg PaneOutputMsg) tea.Cmd {
 	return nil
 }
 
-func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) {
+// applyWorkspaceState rebuilds the TUI state from daemon data.
+// Returns IDs of newly created panes (for spinner activation).
+func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) []string {
+	var newPaneIDs []string
+
 	// Index existing tabs and panes for preservation.
 	existingTabs := make(map[string]*TabModel)
 	existingPanes := make(map[string]*PaneModel)
@@ -522,6 +614,10 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) {
 			// New tab that doesn't exist locally — try to restore layout from daemon.
 			if len(tabInfo.Layout) > 0 {
 				tab = m.restoreTabLayout(tab, tabInfo, paneMap, existingPanes)
+				// All panes in a restored tab are new
+				for _, pid := range tabInfo.Panes {
+					newPaneIDs = append(newPaneIDs, pid)
+				}
 				m.tabs = append(m.tabs, tab)
 				continue
 			}
@@ -556,6 +652,7 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) {
 					if leaf := tab.Root.FindLeaf(paneID); leaf != nil {
 						leaf.Pane.Name = info.Name
 						leaf.Pane.CWD = info.CWD
+						leaf.Pane.Type = info.Type
 					}
 				}
 				continue
@@ -565,10 +662,18 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) {
 			pane, ok := existingPanes[paneID]
 			if !ok {
 				pane = NewPaneModel(paneID, m.replayBufSize())
+				pane.resumeStart = time.Now()
+				if len(existingTabs) > 0 {
+					pane.preparing = true // new pane created while TUI is running
+				} else {
+					pane.resuming = true // restored pane on initial connect
+				}
+				newPaneIDs = append(newPaneIDs, paneID)
 			}
 			if info, ok := paneMap[paneID]; ok {
 				pane.Name = info.Name
 				pane.CWD = info.CWD
+				pane.Type = info.Type
 			}
 
 			// Try to fill a pending split placeholder first.
@@ -608,6 +713,7 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) {
 	if m.activeTab >= len(m.tabs) {
 		m.activeTab = max(0, len(m.tabs)-1)
 	}
+	return newPaneIDs
 }
 
 // restoreTabLayout rebuilds a tab's layout tree from serialized daemon state.
@@ -621,10 +727,13 @@ func (m *Model) restoreTabLayout(tab *TabModel, tabInfo TabInfo, paneMap map[str
 		pane, ok := existingPanes[paneID]
 		if !ok {
 			pane = NewPaneModel(paneID, m.replayBufSize())
+			pane.resuming = true
+			pane.resumeStart = time.Now()
 		}
 		if info, ok := paneMap[paneID]; ok {
 			pane.Name = info.Name
 			pane.CWD = info.CWD
+			pane.Type = info.Type
 		}
 		paneModels[paneID] = pane
 	}
@@ -856,6 +965,8 @@ func (m *Model) hitTestTab(x int) int {
 		name := tab.Name
 		if m.renaming && i == m.activeTab {
 			name = m.renameInput + "▎"
+		} else {
+			name = fmt.Sprintf("%d:%s", i+1, name)
 		}
 
 		style := inactiveTabStyle
@@ -972,7 +1083,7 @@ func (m Model) renderStatusBar() string {
 	}
 
 	// Right side: keybinding hints + version
-	right := "^T new | ^W pane | A-W tab | F1 help | ^Q quit | v" + m.version
+	right := "^T tab | ^N pane | ^W close | F1 help | ^Q quit | v" + m.version
 	if m.devMode {
 		right = "[dev] " + right
 	}
@@ -1033,6 +1144,15 @@ func (m Model) listenForMessages() tea.Cmd {
 			msg.DecodePayload(&raw)
 			return parseWorkspaceState(raw)
 
+		case ipc.MsgPluginError:
+			var payload ipc.PluginErrorPayload
+			msg.DecodePayload(&payload)
+			return PluginErrorMsg{
+				PaneID:  payload.PaneID,
+				Title:   payload.Title,
+				Message: payload.Message,
+			}
+
 		default:
 			// Unknown message type — keep listening
 			return listenContinueMsg{}
@@ -1090,6 +1210,9 @@ func parseWorkspaceState(raw map[string]any) WorkspaceStateMsg {
 				}
 				if name, ok := pm["name"].(string); ok {
 					pi.Name = name
+				}
+				if typ, ok := pm["type"].(string); ok {
+					pi.Type = typ
 				}
 				state.Panes = append(state.Panes, pi)
 			}

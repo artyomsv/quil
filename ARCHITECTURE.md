@@ -263,16 +263,15 @@ Each init script sources the user's original shell config first, then appends th
 │   └── zsh/
 │       ├── .zshenv
 │       └── .zshrc
-├── state/
-│   ├── workspace.json
-│   └── workspace.json.bak
-├── data/
-│   └── aethel.db           # SQLite (planned)
-├── plugins/                 # (planned)
-│   ├── ai.toml
-│   ├── build.toml
-│   ├── infrastructure.toml
-│   └── webhook.toml
-└── secrets/                 # (planned)
+├── workspace.json              # Tab/pane/layout state
+├── workspace.json.bak          # Previous snapshot (rollback)
+├── buffers/                    # Ghost buffer binary files
+│   └── pane-XXXXXXXX.bin
+├── window.json                 # Window size/position persistence
+├── plugins/                    # User TOML plugin definitions
+│   └── *.toml
+├── notes/                      # Pane notes (planned)
+│   └── pane-XXXXXXXX.txt
+└── secrets/                    # (planned)
     └── tokens.enc
 ```

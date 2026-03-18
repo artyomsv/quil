@@ -170,11 +170,19 @@ type tomlPlugin struct {
 		Env              []string `toml:"env"`
 		Detect           string   `toml:"detect"`
 		ShellIntegration bool     `toml:"shell_integration"`
+		ArgTemplate      []string `toml:"arg_template"`
+		FormFields       []struct {
+			Name     string `toml:"name"`
+			Label    string `toml:"label"`
+			Required bool   `toml:"required"`
+			Default  string `toml:"default"`
+		} `toml:"form_fields"`
 	} `toml:"command"`
 	Persistence struct {
-		Strategy   string `toml:"strategy"`
-		StartArgs  []string `toml:"start_args"`
-		ResumeArgs []string `toml:"resume_args"`
+		Strategy    string `toml:"strategy"`
+		StartArgs   []string `toml:"start_args"`
+		ResumeArgs  []string `toml:"resume_args"`
+		GhostBuffer *bool  `toml:"ghost_buffer"` // pointer to detect unset (default true)
 		Scrape     []struct {
 			Name    string `toml:"name"`
 			Pattern string `toml:"pattern"`
@@ -182,6 +190,7 @@ type tomlPlugin struct {
 	} `toml:"persistence"`
 	Display struct {
 		BorderColor string `toml:"border_color"`
+		DialogWidth int    `toml:"dialog_width"`
 	} `toml:"display"`
 	Instances []struct {
 		Name        string   `toml:"name"`
@@ -236,15 +245,28 @@ func loadPluginTOML(path string) (*PanePlugin, error) {
 			Env:              tp.Command.Env,
 			DetectCmd:        tp.Command.Detect,
 			ShellIntegration: tp.Command.ShellIntegration,
+			ArgTemplate:      tp.Command.ArgTemplate,
 		},
 		Persistence: PersistenceConfig{
-			Strategy:   tp.Persistence.Strategy,
-			StartArgs:  tp.Persistence.StartArgs,
-			ResumeArgs: tp.Persistence.ResumeArgs,
+			Strategy:    tp.Persistence.Strategy,
+			StartArgs:   tp.Persistence.StartArgs,
+			ResumeArgs:  tp.Persistence.ResumeArgs,
+			GhostBuffer: tp.Persistence.GhostBuffer == nil || *tp.Persistence.GhostBuffer, // default true
 		},
 		Display: DisplayConfig{
 			BorderColor: tp.Display.BorderColor,
+			DialogWidth: tp.Display.DialogWidth,
 		},
+	}
+
+	// Convert form fields
+	for _, ff := range tp.Command.FormFields {
+		p.Command.FormFields = append(p.Command.FormFields, FormField{
+			Name:     ff.Name,
+			Label:    ff.Label,
+			Required: ff.Required,
+			Default:  ff.Default,
+		})
 	}
 
 	// Convert scrapers

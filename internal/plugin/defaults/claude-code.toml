@@ -1,0 +1,24 @@
+# Claude Code — AI coding assistant
+# Edit this file to customize the plugin. Delete it to restore defaults.
+
+[plugin]
+name = "claude-code"
+display_name = "Claude Code"
+category = "ai"
+description = "AI coding assistant"
+
+[command]
+cmd = "claude"
+detect = "claude --version"
+
+[persistence]
+strategy = "preassign_id"
+ghost_buffer = false
+start_args = ["--session-id", "{session_id}"]
+resume_args = ["--resume", "{session_id}"]
+
+[[error_handlers]]
+pattern = '(?i)error.*API key not found|ANTHROPIC_API_KEY.*not set'
+title = "API Key Missing"
+message = "Set ANTHROPIC_API_KEY in your environment or run 'claude auth'."
+action = "dialog"

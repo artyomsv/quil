@@ -45,9 +45,21 @@ Key capabilities:
 ## In Progress
 
 ### M5: Polish
-> Production-quality UX. JSON transformer, observability, encrypted tokens.
+> Production-quality UX, plugin refinements, observability, encrypted tokens.
 
-**Planned deliverables:**
+**Completed:**
+- Default TOML plugins — claude-code, ssh, stripe shipped as embedded editable TOML files
+- Plugin instance management — saved SSH connections, Stripe webhooks persisted to `instances.json`
+- Plugin management UI — F1 → Plugins with view, reload, restore defaults, in-app TOML editor
+- In-app TOML editor — full-screen editor with syntax highlighting and validation
+- Pane creation dialog extended — 4-step flow: category → plugin → instance/form → split direction
+- Centralized snapshot queue — event-driven with 500ms debounce, replaces scattered calls
+- Per-plugin ghost buffer toggle — `ghost_buffer` bool controls PTY output persistence
+- GhostSnap restore — clean ghost buffer replay after daemon restart
+- Diagnostic logging — trace-level logging across daemon, TUI, and IPC
+- Plugin configuration reference — comprehensive docs for custom plugin creation
+
+**Remaining:**
 - JSON transformer (`Ctrl+J`) — format and highlight JSON in terminal output
 - Observability commands — `aethel status`, session metrics, log level control
 - Encrypted token storage — OS keyring integration for sensitive scraped values

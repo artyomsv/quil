@@ -287,7 +287,8 @@ func restoreWindowSize() {
 
 func saveWindowSize(m tui.Model) {
 	cols, rows := m.WindowSize()
-	if cols <= 0 || rows <= 0 {
+	// Sanity check: don't save absurd dimensions (minimized, broken state)
+	if cols < 40 || rows < 10 || cols > 1000 || rows > 1000 {
 		return
 	}
 	ws := windowState{Cols: cols, Rows: rows}

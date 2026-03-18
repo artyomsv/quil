@@ -36,7 +36,7 @@ func restoreWindowSizePlatform(ws *windowState) {
 		return
 	}
 
-	if ws.PixelWidth <= 0 || ws.PixelHeight <= 0 ||
+	if ws.PixelWidth < 200 || ws.PixelHeight < 100 ||
 		ws.PixelWidth > 32767 || ws.PixelHeight > 32767 {
 		return
 	}

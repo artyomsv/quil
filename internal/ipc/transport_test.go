@@ -29,7 +29,7 @@ func TestServerClientRoundTrip(t *testing.T) {
 		close(done)
 	}
 
-	srv := ipc.NewServer(sockPath, handler)
+	srv := ipc.NewServer(sockPath, handler, nil)
 	if err := srv.Start(); err != nil {
 		t.Fatalf("server start: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestServerBroadcast(t *testing.T) {
 
 	handler := func(conn *ipc.Conn, msg *ipc.Message) {}
 
-	srv := ipc.NewServer(sockPath, handler)
+	srv := ipc.NewServer(sockPath, handler, nil)
 	if err := srv.Start(); err != nil {
 		t.Fatalf("server start: %v", err)
 	}

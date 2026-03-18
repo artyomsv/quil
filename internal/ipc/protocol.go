@@ -38,6 +38,9 @@ const (
 
 	// Plugin (Daemon -> Client)
 	MsgPluginError = "plugin_error"
+
+	// Plugin management (Client -> Daemon)
+	MsgReloadPlugins = "reload_plugins"
 )
 
 // Message is the wire format for IPC communication.

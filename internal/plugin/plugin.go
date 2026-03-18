@@ -24,14 +24,25 @@ type CommandConfig struct {
 	Env              []string
 	DetectCmd        string
 	ShellIntegration bool
+	ArgTemplate      []string    // template args with {field} placeholders, e.g., ["-p", "{port}", "{user}@{host}"]
+	FormFields       []FormField // fields for instance creation form (if empty, no instance management)
+}
+
+// FormField defines a user-fillable field for creating plugin instances.
+type FormField struct {
+	Name     string // field key (used in ArgTemplate placeholders)
+	Label    string // display label in form
+	Required bool   // must be filled before submit
+	Default  string // pre-filled value (empty = blank)
 }
 
 // PersistenceConfig describes how to restore the pane after daemon restart.
 type PersistenceConfig struct {
-	Strategy   string // "none", "cwd_only", "rerun", "session_scrape", "preassign_id"
-	StartArgs  []string // template args for fresh start (e.g., ["--session-id", "{session_id}"])
-	ResumeArgs []string
-	Scrapers   []ScrapePattern
+	Strategy    string // "none", "cwd_only", "rerun", "session_scrape", "preassign_id"
+	StartArgs   []string // template args for fresh start (e.g., ["--session-id", "{session_id}"])
+	ResumeArgs  []string
+	Scrapers    []ScrapePattern
+	GhostBuffer bool // save PTY output to disk for replay on reconnect (default true)
 }
 
 // ScrapePattern extracts named values from PTY output via regex.
@@ -68,6 +79,7 @@ type InstanceConfig struct {
 // DisplayConfig controls visual appearance of the pane.
 type DisplayConfig struct {
 	BorderColor string
+	DialogWidth int // width for plugin dialogs (0 = default 50)
 }
 
 // ErrorHandler matches PTY output patterns and triggers help dialogs.

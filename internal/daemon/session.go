@@ -25,6 +25,7 @@ type Pane struct {
 	Name         string // User-set name (empty = use CWD)
 	PTY          apty.Session
 	OutputBuf    *ringbuf.RingBuffer // Captures PTY output for replay on reconnect
+	GhostSnap    []byte              // Pure disk-loaded ghost buffer, cleared after first client replay
 	Type         string              // Plugin name (default: "terminal")
 	PluginState  map[string]string   // Scraped values (e.g., "session_id": "abc123")
 	PluginMu     sync.Mutex          // Protects PluginState from concurrent access

@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"sync"
 	"syscall"
 	"time"
 
@@ -22,15 +21,13 @@ import (
 )
 
 type Daemon struct {
-	cfg      config.Config
-	server   *ipc.Server
-	session  *SessionManager
-	registry *plugin.Registry
-	shutdown chan struct{}
-	restored bool // true if workspace was loaded from disk
-
-	snapshotMu   sync.Mutex
-	lastSnapshot time.Time
+	cfg        config.Config
+	server     *ipc.Server
+	session    *SessionManager
+	registry   *plugin.Registry
+	shutdown   chan struct{}
+	snapshotCh chan struct{} // buffered channel for snapshot requests
+	restored   bool         // true if workspace was loaded from disk
 }
 
 func New(cfg config.Config) *Daemon {
@@ -43,10 +40,11 @@ func New(cfg config.Config) *Daemon {
 	reg := plugin.NewRegistry()
 
 	return &Daemon{
-		cfg:      cfg,
-		session:  NewSessionManager(bufSize),
-		registry: reg,
-		shutdown: make(chan struct{}),
+		cfg:        cfg,
+		session:    NewSessionManager(bufSize),
+		registry:   reg,
+		shutdown:   make(chan struct{}),
+		snapshotCh: make(chan struct{}, 1),
 	}
 }
 
@@ -60,7 +58,10 @@ func (d *Daemon) Start() error {
 		log.Printf("warning: failed to write shell init scripts: %v", err)
 	}
 
-	// Load user plugins and detect availability
+	// Write default plugin TOML files if missing, then load all plugins
+	if err := plugin.EnsureDefaultPlugins(config.PluginsDir()); err != nil {
+		log.Printf("warning: failed to write default plugins: %v", err)
+	}
 	if err := d.registry.LoadFromDir(config.PluginsDir()); err != nil {
 		log.Printf("warning: failed to load plugins: %v", err)
 	}
@@ -72,7 +73,7 @@ func (d *Daemon) Start() error {
 	}
 
 	sockPath := config.SocketPath()
-	d.server = ipc.NewServer(sockPath, d.handleMessage)
+	d.server = ipc.NewServer(sockPath, d.handleMessage, func() { d.requestSnapshot() })
 
 	if err := d.server.Start(); err != nil {
 		return fmt.Errorf("start IPC server: %w", err)
@@ -88,7 +89,7 @@ func (d *Daemon) Start() error {
 }
 
 func (d *Daemon) Wait() {
-	// Start periodic snapshot timer
+	// Periodic snapshot timer
 	interval, err := time.ParseDuration(d.cfg.Daemon.SnapshotInterval)
 	if err != nil {
 		interval = 30 * time.Second
@@ -98,6 +99,10 @@ func (d *Daemon) Wait() {
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+	// Debounce timer for event-driven snapshot requests
+	var debounceTimer *time.Timer
+	debounceCh := make(chan struct{}, 1)
 
 	for {
 		select {
@@ -111,11 +116,25 @@ func (d *Daemon) Wait() {
 			return
 		case <-ticker.C:
 			d.snapshot()
+		case <-d.snapshotCh:
+			// Debounce: collapse rapid requests into one snapshot after 500ms
+			if debounceTimer != nil {
+				debounceTimer.Stop()
+			}
+			debounceTimer = time.AfterFunc(500*time.Millisecond, func() {
+				select {
+				case debounceCh <- struct{}{}:
+				default:
+				}
+			})
+		case <-debounceCh:
+			d.snapshot()
 		}
 	}
 }
 
 func (d *Daemon) Stop() {
+	log.Print("daemon stopping, writing final snapshot...")
 	// Final snapshot before shutdown
 	d.snapshot()
 
@@ -131,27 +150,18 @@ func (d *Daemon) Stop() {
 	}
 }
 
+// requestSnapshot sends a non-blocking snapshot request to the event loop.
+// The event loop debounces multiple requests and executes one snapshot.
+func (d *Daemon) requestSnapshot() {
+	select {
+	case d.snapshotCh <- struct{}{}:
+	default: // already pending
+	}
+}
+
 // snapshot persists workspace state and ghost buffers to disk.
 func (d *Daemon) snapshot() {
-	d.snapshotMu.Lock()
-	defer d.snapshotMu.Unlock()
-	d.snapshotLocked()
-}
-
-// snapshotDebounced triggers a snapshot unless one happened within the last second.
-// The debounce check and snapshot execute under the same lock hold to prevent
-// TOCTOU races where two goroutines both pass the time check.
-func (d *Daemon) snapshotDebounced() {
-	d.snapshotMu.Lock()
-	defer d.snapshotMu.Unlock()
-	if time.Since(d.lastSnapshot) < time.Second {
-		return
-	}
-	d.snapshotLocked()
-}
-
-// snapshotLocked performs the actual snapshot work. Caller must hold snapshotMu.
-func (d *Daemon) snapshotLocked() {
+	start := time.Now()
 	state := d.buildWorkspaceState()
 
 	if err := persist.Save(config.WorkspacePath(), state); err != nil {
@@ -163,13 +173,19 @@ func (d *Daemon) snapshotLocked() {
 	bufDir := config.BufferDir()
 	buffers := make(map[string][]byte)
 	var activePaneIDs []string
+	var totalBytes int
 
 	for _, tab := range tabs {
 		for _, pane := range panesByTab[tab.ID] {
 			activePaneIDs = append(activePaneIDs, pane.ID)
+			// Skip ghost buffer save for plugins with GhostBuffer disabled
+			if p := d.registry.Get(pane.Type); p != nil && !p.Persistence.GhostBuffer {
+				continue
+			}
 			if pane.OutputBuf != nil {
 				if data := pane.OutputBuf.Bytes(); len(data) > 0 {
 					buffers[pane.ID] = data
+					totalBytes += len(data)
 				}
 			}
 		}
@@ -182,7 +198,8 @@ func (d *Daemon) snapshotLocked() {
 		log.Printf("clean buffers: %v", err)
 	}
 
-	d.lastSnapshot = time.Now()
+	log.Printf("snapshot: %d tabs, %d panes, %d buffers (%d bytes), took %v",
+		len(tabs), len(activePaneIDs), len(buffers), totalBytes, time.Since(start).Round(time.Millisecond))
 }
 
 // restoreWorkspace loads workspace state from disk.
@@ -306,6 +323,11 @@ func (d *Daemon) restoreWorkspace() error {
 				// Load ghost buffer from disk
 				if bufData, err := persist.LoadBuffer(bufDir, paneID); err == nil && len(bufData) > 0 {
 					pane.OutputBuf.Write(bufData)
+					pane.GhostSnap = make([]byte, len(bufData))
+					copy(pane.GhostSnap, bufData)
+					log.Printf("restore: loaded ghost buffer %s (%d bytes)", paneID, len(bufData))
+				} else if err != nil {
+					log.Printf("restore: ghost buffer load error %s: %v", paneID, err)
 				}
 
 				tabPanes = append(tabPanes, pane)
@@ -382,6 +404,14 @@ func (d *Daemon) respawnPanes() {
 }
 
 func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
+	// Log all IPC messages except high-frequency ones (input, resize, layout)
+	switch msg.Type {
+	case ipc.MsgPaneInput, ipc.MsgResizePane, ipc.MsgUpdateLayout:
+		// skip logging — too noisy
+	default:
+		log.Printf("ipc recv: %s", msg.Type)
+	}
+
 	switch msg.Type {
 	case ipc.MsgAttach:
 		d.handleAttach(conn, msg)
@@ -405,6 +435,8 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		d.handlePaneInput(msg)
 	case ipc.MsgResizePane:
 		d.handleResizePane(msg)
+	case ipc.MsgReloadPlugins:
+		d.handleReloadPlugins()
 	case ipc.MsgShutdown:
 		close(d.shutdown)
 	}
@@ -422,8 +454,12 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 		rows = 24
 	}
 
+	log.Printf("attach: client connected (%dx%d), tabs=%d, restored=%v",
+		cols, rows, len(d.session.Tabs()), d.restored)
+
 	// Create default workspace if empty (no tabs — neither fresh nor restored)
 	if len(d.session.Tabs()) == 0 {
+		log.Print("attach: creating default workspace (no tabs)")
 		tab := d.session.CreateTab("Shell")
 		cwd, _ := os.Getwd()
 		pane, _ := d.session.CreatePane(tab.ID, cwd)
@@ -440,31 +476,36 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 	conn.Send(resp)
 
 	// Replay buffered output so reconnecting clients see previous terminal content.
-	// Skip ghost replay for panes that use resume strategies (preassign_id,
-	// session_scrape) — these are TUI apps that re-render from scratch on resume,
-	// so old ghost data just pollutes cursor state.
+	// Skip ghost replay for plugins with GhostBuffer disabled.
+	// Prefer GhostSnap (pure disk-loaded data) over OutputBuf on first connect
+	// after restore — OutputBuf may be contaminated by respawned shell init output
+	// (e.g., ConPTY clear screen sequences) that would wipe the historical content.
 	for _, tab := range d.session.Tabs() {
 		for _, pane := range d.session.Panes(tab.ID) {
 			if pane.OutputBuf == nil {
 				continue
 			}
-			// Skip ghost replay for panes that resume with a fresh TUI
-			if p := d.registry.Get(pane.Type); p != nil {
-				switch p.Persistence.Strategy {
-				case "preassign_id", "session_scrape":
-					continue
-				}
-			}
-			history := pane.OutputBuf.Bytes()
-			if len(history) == 0 {
+			if p := d.registry.Get(pane.Type); p != nil && !p.Persistence.GhostBuffer {
 				continue
 			}
+			ghost := pane.GhostSnap
+			source := "ghostsnap"
+			if ghost == nil {
+				ghost = pane.OutputBuf.Bytes() // reconnect — use full buffer
+				source = "outputbuf"
+			}
+			if len(ghost) == 0 {
+				continue
+			}
+			log.Printf("attach: ghost replay pane %s (type=%s, source=%s, bytes=%d)",
+				pane.ID, pane.Type, source, len(ghost))
 			histMsg, _ := ipc.NewMessage(ipc.MsgPaneOutput, ipc.PaneOutputPayload{
 				PaneID: pane.ID,
-				Data:   history,
+				Data:   ghost,
 				Ghost:  true,
 			})
 			conn.Send(histMsg)
+			pane.GhostSnap = nil // clear after first replay
 		}
 	}
 }
@@ -475,6 +516,7 @@ func (d *Daemon) handleCreateTab(conn *ipc.Conn, msg *ipc.Message) {
 
 	tab := d.session.CreateTab(payload.Name)
 	d.session.SwitchTab(tab.ID)
+	log.Printf("tab created: %s %q", tab.ID, tab.Name)
 
 	// Every tab needs a default pane with a shell
 	cwd, _ := os.Getwd()
@@ -487,12 +529,13 @@ func (d *Daemon) handleCreateTab(conn *ipc.Conn, msg *ipc.Message) {
 	}
 
 	d.broadcastState()
-	d.snapshotDebounced()
+	d.requestSnapshot()
 }
 
 func (d *Daemon) handleDestroyTab(msg *ipc.Message) {
 	var payload ipc.DestroyTabPayload
 	msg.DecodePayload(&payload)
+	log.Printf("tab destroy: %s", payload.TabID)
 	d.session.DestroyTab(payload.TabID)
 
 	// Auto-create replacement if last tab was destroyed
@@ -508,15 +551,16 @@ func (d *Daemon) handleDestroyTab(msg *ipc.Message) {
 	}
 
 	d.broadcastState()
-	d.snapshotDebounced()
+	d.requestSnapshot()
 }
 
 func (d *Daemon) handleSwitchTab(msg *ipc.Message) {
 	var payload ipc.SwitchTabPayload
 	msg.DecodePayload(&payload)
+	log.Printf("tab switch: %s", payload.TabID)
 	d.session.SwitchTab(payload.TabID)
 	d.broadcastState()
-	d.snapshotDebounced()
+	d.requestSnapshot()
 }
 
 func (d *Daemon) handleUpdateTab(msg *ipc.Message) {
@@ -570,6 +614,7 @@ func (d *Daemon) handleCreatePane(msg *ipc.Message) {
 	pane.Type = paneType
 	pane.InstanceName = payload.InstanceName
 	pane.InstanceArgs = payload.InstanceArgs
+	log.Printf("pane created: %s (type=%s, tab=%s)", pane.ID, paneType, payload.TabID)
 
 	ptySession := apty.New()
 	if err := d.spawnPane(pane, ptySession, false); err != nil {
@@ -577,7 +622,7 @@ func (d *Daemon) handleCreatePane(msg *ipc.Message) {
 		return
 	}
 	d.broadcastState()
-	d.snapshotDebounced()
+	d.requestSnapshot()
 }
 
 func (d *Daemon) handleReplacePane(payload ipc.CreatePanePayload, cwd, paneType string) {
@@ -585,6 +630,7 @@ func (d *Daemon) handleReplacePane(payload ipc.CreatePanePayload, cwd, paneType 
 	newPane.Type = paneType
 	newPane.InstanceName = payload.InstanceName
 	newPane.InstanceArgs = payload.InstanceArgs
+	log.Printf("pane replace: %s -> %s (type=%s)", payload.ReplacePaneID, newPane.ID, paneType)
 
 	// Atomically swap old → new in the tab's pane list
 	if err := d.session.ReplacePane(payload.ReplacePaneID, newPane); err != nil {
@@ -597,11 +643,11 @@ func (d *Daemon) handleReplacePane(payload ipc.CreatePanePayload, cwd, paneType 
 		log.Printf("replace pane: start PTY error: %v, removing dead pane", err)
 		d.session.DestroyPane(newPane.ID)
 		d.broadcastState()
-		d.snapshotDebounced()
+		d.requestSnapshot()
 		return
 	}
 	d.broadcastState()
-	d.snapshotDebounced()
+	d.requestSnapshot()
 }
 
 func (d *Daemon) handleDestroyPane(msg *ipc.Message) {
@@ -613,6 +659,7 @@ func (d *Daemon) handleDestroyPane(msg *ipc.Message) {
 	if pane := d.session.Pane(payload.PaneID); pane != nil {
 		tabID = pane.TabID
 	}
+	log.Printf("pane destroy: %s (tab=%s)", payload.PaneID, tabID)
 
 	d.session.DestroyPane(payload.PaneID)
 
@@ -631,7 +678,7 @@ func (d *Daemon) handleDestroyPane(msg *ipc.Message) {
 	}
 
 	d.broadcastState()
-	d.snapshotDebounced()
+	d.requestSnapshot()
 }
 
 func (d *Daemon) handlePaneInput(msg *ipc.Message) {
@@ -673,6 +720,17 @@ func (d *Daemon) handleUpdatePane(msg *ipc.Message) {
 	d.broadcastState()
 }
 
+func (d *Daemon) handleReloadPlugins() {
+	if err := plugin.EnsureDefaultPlugins(config.PluginsDir()); err != nil {
+		log.Printf("reload: ensure defaults: %v", err)
+	}
+	if err := d.registry.LoadFromDir(config.PluginsDir()); err != nil {
+		log.Printf("reload: load plugins: %v", err)
+	}
+	d.registry.DetectAvailability()
+	log.Printf("plugins reloaded")
+}
+
 func (d *Daemon) handleUpdateLayout(msg *ipc.Message) {
 	var payload ipc.UpdateLayoutPayload
 	msg.DecodePayload(&payload)
@@ -683,7 +741,8 @@ func (d *Daemon) handleUpdateLayout(msg *ipc.Message) {
 	}
 	tab.Layout = payload.Layout
 	// No broadcastState() — avoids feedback loop.
-	// Layout is included in next natural state broadcast.
+	// Snapshot ensures layout is persisted to disk.
+	d.requestSnapshot()
 }
 
 func (d *Daemon) streamPTYOutput(paneID string, pty apty.Session) {
@@ -933,6 +992,7 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 		cmd = resolved
 	}
 
+	log.Printf("spawn: pane %s cmd=%s args=%v restoring=%v", pane.ID, cmd, args, restoring)
 	if err := ptySession.Start(cmd, args...); err != nil {
 		return err
 	}

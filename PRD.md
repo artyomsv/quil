@@ -292,223 +292,179 @@ quick_actions = "ctrl+a"
 | ID | Requirement |
 |---|---|
 | FR-5.1 | Pane types are defined as plugin configs in `~/.aethel/plugins/<name>.toml`. |
-| FR-5.2 | A plugin definition includes: display name, description, scraper patterns, resume template + fallback, status line format, border color rules, and quick actions. |
-| FR-5.3 | Aethel ships with 4 built-in plugins: `ai`, `webhook`, `infrastructure`, `build`. |
+| FR-5.2 | A plugin definition includes: command config, persistence/resume strategy, form fields for instance creation, error handlers, and display settings. |
+| FR-5.3 | Aethel ships with 4 built-in plugins: `terminal` (Go built-in), `claude-code`, `ssh`, `stripe` (embedded TOML defaults). |
 | FR-5.4 | Users can create custom plugins without recompiling Aethel. |
-| FR-5.5 | Plugin hot-reload — daemon watches `~/.aethel/plugins/` for changes and reloads definitions without restart. Active panes using a modified plugin pick up new scraper/display rules immediately. |
+| FR-5.5 | Plugin hot-reload via F1 → Plugins → Reload. Active panes using a modified plugin pick up new scraper/error handler rules on next output. |
 | FR-5.6 | Plugin validation — daemon validates plugin TOML on load and logs clear errors for malformed definitions. Invalid plugins are skipped, not fatal. |
 
-#### Plugin Definition Schema
+> **Full plugin configuration reference:** See [`docs/plugin-reference.md`](docs/plugin-reference.md) for complete field-by-field documentation with examples.
+
+#### Plugin Definition Schema (Implemented)
 
 ```toml
 # ~/.aethel/plugins/<name>.toml
 
 [plugin]
-name = "string"              # Unique identifier (lowercase, alphanumeric + hyphens)
-display_name = "string"      # Human-readable name shown in UI
-description = "string"       # One-line description
+name = "string"              # Required — unique identifier
+display_name = "string"      # Optional — defaults to name
+category = "string"          # Optional — "terminal"|"ai"|"tools"|"remote" (default: "tools")
+description = "string"       # Optional — one-line description
 
-[scraper]
-# Regex patterns with named capture groups
-# Groups become template variables in [resume] and [status_line]
-patterns = [
-  '(?P<GroupName>regex pattern)',
-]
+[command]
+cmd = "string"               # Required — binary name (resolved via PATH)
+args = ["string"]            # Optional — default arguments
+env = ["KEY=VALUE"]          # Optional — environment variables
+detect = "string"            # Optional — command to check if installed (default: cmd)
+arg_template = ["string"]    # Optional — {placeholder} expansion from form fields
 
-[resume]
-command = "template string"  # Go text/template, uses captured groups
-fallback = "command"         # Used when no tokens captured
+[[command.form_fields]]      # Optional — instance creation form
+name = "string"              # Required — placeholder key
+label = "string"             # Optional — display label
+required = true              # Optional — form validation (default: false)
+default = "string"           # Optional — pre-filled value
+
+[persistence]
+strategy = "string"          # Optional — "none"|"cwd_only"|"rerun"|"preassign_id"|"session_scrape"
+ghost_buffer = true          # Optional — save/replay PTY output (default: true)
+start_args = ["string"]      # Optional — template args for fresh start
+resume_args = ["string"]     # Optional — template args for restoration
+
+[[persistence.scrape]]       # Optional — extract state from PTY output
+name = "string"              # Required — state key
+pattern = 'regex'            # Required — regex with one capture group
 
 [display]
-markdown_rendering = false   # Enable markdown rendering in pane output
-border_rules = [
-  { pattern = "regex", color = "red|green|orange|blue|yellow" },
-]
+border_color = "string"      # Optional — Lipgloss color
+dialog_width = 60            # Optional — form dialog width (default: 50)
 
-[status_line]
-format = "template string"   # Shown in pane chrome, uses captured groups
+[[instances]]                # Optional — pre-configured variants
+name = "string"              # Required — identifier
+display_name = "string"      # Optional — label
+args = ["string"]            # Optional — instance-specific args
 
-[actions]
-items = [
-  { key = "char", label = "string", command = "template string" },
-]
+[[error_handlers]]           # Optional — error pattern matching
+pattern = 'regex'            # Required — matched against PTY output
+title = "string"             # Optional — dialog title
+message = "string"           # Optional — dialog body (supports {host}, {user}, {port})
+action = "dialog"            # Optional — "dialog"|"log" (default: "log")
 ```
 
-#### Built-in Plugin: AI Pane
+#### Built-in Plugin: Claude Code (AI)
 
 ```toml
-# ~/.aethel/plugins/ai.toml
-
 [plugin]
-name = "ai"
-display_name = "AI Assistant"
-description = "Optimized for AI coding assistants with session resumption"
+name = "claude-code"
+display_name = "Claude Code"
+category = "ai"
+description = "AI coding assistant"
 
-[scraper]
-patterns = [
-  '(?P<SessionID>Conversation ID: [a-f0-9-]+)',
-  '(?P<SessionID>Session: [a-f0-9]+)',
-  '(?P<SessionID>Resuming session [a-f0-9-]+)',
-]
+[command]
+cmd = "claude"
+detect = "claude --version"
 
-[resume]
-command = "claude --resume {{.SessionID}}"
-fallback = "claude"
+[persistence]
+strategy = "preassign_id"
+ghost_buffer = false
+start_args = ["--session-id", "{session_id}"]
+resume_args = ["--resume", "{session_id}"]
 
-[display]
-markdown_rendering = true
-border_rules = [
-  { pattern = "Error|error|FAIL", color = "red" },
-  { pattern = "Success|PASS", color = "green" },
-]
-
-[status_line]
-format = "AI: {{.SessionID | truncate 8}}"
-
-[actions]
-items = [
-  { key = "n", label = "New conversation", command = "claude" },
-  { key = "r", label = "Resume last", command = "claude --resume {{.SessionID}}" },
-]
+[[error_handlers]]
+pattern = '(?i)error.*API key not found|ANTHROPIC_API_KEY.*not set'
+title = "API Key Missing"
+message = "Set ANTHROPIC_API_KEY in your environment or run 'claude auth'."
+action = "dialog"
 ```
 
-#### Built-in Plugin: Webhook Pane
+#### Built-in Plugin: SSH (Remote)
 
 ```toml
-# ~/.aethel/plugins/webhook.toml
-
 [plugin]
-name = "webhook"
-display_name = "Webhook Listener"
-description = "Real-time webhook monitor with auto-restart"
+name = "ssh"
+display_name = "SSH"
+category = "remote"
+description = "Remote SSH connection"
 
-[scraper]
-patterns = []
+[command]
+cmd = "ssh"
+detect = "ssh -V"
+arg_template = ["-p", "{port}", "{user}@{host}"]
 
-[resume]
-command = ""
-fallback = ""
+[[command.form_fields]]
+name = "name"
+label = "Name"
+required = true
+
+[[command.form_fields]]
+name = "host"
+label = "Host"
+required = true
+
+[[command.form_fields]]
+name = "user"
+label = "Username"
+required = true
+
+[[command.form_fields]]
+name = "port"
+label = "Port"
+default = "22"
 
 [display]
-border_rules = [
-  { pattern = "\\[200\\]|200 OK", color = "green" },
-  { pattern = "\\[4[0-9]{2}\\]|\\[5[0-9]{2}\\]", color = "red" },
-  { pattern = "-->|received", color = "orange" },
-]
+dialog_width = 60
 
-[status_line]
-format = "Webhook: listening"
+[persistence]
+strategy = "rerun"
+ghost_buffer = true
 
-[actions]
-items = []
+[[error_handlers]]
+pattern = 'Permission denied \(publickey'
+title = "SSH Authentication Failed"
+message = "SSH key not configured. Run: ssh-copy-id {user}@{host}"
+action = "dialog"
+
+[[error_handlers]]
+pattern = "Connection refused|No route to host"
+title = "Connection Failed"
+message = "Cannot reach {host}. Check that the server is running."
+action = "dialog"
 ```
 
-#### Built-in Plugin: Infrastructure Pane
+#### Built-in Plugin: Stripe (Webhook Listener)
 
 ```toml
-# ~/.aethel/plugins/infrastructure.toml
-
 [plugin]
-name = "infrastructure"
-display_name = "Infrastructure"
-description = "Persistent status display for infrastructure contexts"
+name = "stripe"
+display_name = "Stripe"
+category = "tools"
+description = "Stripe webhook listener"
 
-[scraper]
-patterns = [
-  '(?P<Context>context: [a-zA-Z0-9_-]+)',
-  '(?P<Namespace>namespace: [a-zA-Z0-9_-]+)',
-]
+[command]
+cmd = "stripe"
+args = ["listen"]
+detect = "stripe --version"
+arg_template = ["listen", "--forward-to", "{url}"]
 
-[resume]
-command = ""
-fallback = ""
+[[command.form_fields]]
+name = "name"
+label = "Name"
+required = true
 
-[display]
-border_rules = [
-  { pattern = "production|prod", color = "red" },
-  { pattern = "staging|stg", color = "orange" },
-  { pattern = "development|dev", color = "green" },
-]
+[[command.form_fields]]
+name = "url"
+label = "Forward URL"
+required = true
+default = "http://localhost:8080/webhook"
 
-[status_line]
-format = "{{.Context}} / {{.Namespace}}"
+[persistence]
+strategy = "rerun"
+ghost_buffer = true
 
-[actions]
-items = [
-  { key = "c", label = "Show context", command = "kubectl config current-context" },
-]
-```
-
-#### Built-in Plugin: Build Pane
-
-```toml
-# ~/.aethel/plugins/build.toml
-
-[plugin]
-name = "build"
-display_name = "Build Runner"
-description = "Build tool integration with success/failure indicators"
-
-[scraper]
-patterns = [
-  '(?P<BuildStatus>BUILD SUCCESS|BUILD FAILURE|FAILED|PASSED)',
-]
-
-[resume]
-command = ""
-fallback = ""
-
-[display]
-border_rules = [
-  { pattern = "BUILD SUCCESS|PASSED|All tests passed", color = "green" },
-  { pattern = "BUILD FAILURE|FAILED|FAIL", color = "red" },
-  { pattern = "WARN|warning", color = "orange" },
-]
-
-[status_line]
-format = "Build: {{.BuildStatus}}"
-
-[actions]
-items = [
-  { key = "b", label = "Build", command = "make build" },
-  { key = "t", label = "Test", command = "make test" },
-  { key = "c", label = "Clean", command = "make clean" },
-]
-```
-
-#### User-Defined Plugin Example: Stripe Webhook
-
-```toml
-# ~/.aethel/plugins/stripe-webhook.toml
-
-[plugin]
-name = "stripe-webhook"
-display_name = "Stripe Webhooks"
-description = "Monitors Stripe CLI webhook forwarding"
-
-[scraper]
-patterns = [
-  '(?P<WebhookSecret>whsec_[a-zA-Z0-9]+)',
-]
-
-[resume]
-command = "stripe listen --forward-to localhost:8080/webhooks"
-fallback = "stripe listen --forward-to localhost:8080/webhooks"
-
-[display]
-border_rules = [
-  { pattern = "\\[200\\]", color = "green" },
-  { pattern = "\\[4[0-9]{2}\\]|\\[5[0-9]{2}\\]", color = "red" },
-  { pattern = "-->", color = "orange" },
-]
-
-[status_line]
-format = "Stripe: listening"
-
-[actions]
-items = [
-  { key = "t", label = "Trigger test event", command = "stripe trigger payment_intent.succeeded" },
-]
+[[error_handlers]]
+pattern = "not logged in|login required"
+title = "Stripe Authentication Required"
+message = "Run 'stripe login' in a terminal pane first."
+action = "dialog"
 ```
 
 ### FR-6: Layout & UI

@@ -9,12 +9,9 @@ import (
 func TestRegistryBuiltins(t *testing.T) {
 	r := NewRegistry()
 
-	// All 4 built-ins should be present
-	names := []string{"terminal", "claude-code", "stripe", "ssh"}
-	for _, name := range names {
-		if r.Get(name) == nil {
-			t.Errorf("built-in plugin %q not found", name)
-		}
+	// Terminal is the only Go built-in (others come from TOML defaults)
+	if r.Get("terminal") == nil {
+		t.Error("built-in terminal plugin not found")
 	}
 }
 
@@ -35,17 +32,25 @@ func TestRegistryByCategory(t *testing.T) {
 	r := NewRegistry()
 	cats := r.ByCategory()
 
+	// Only terminal is a Go built-in; other categories come from TOML defaults
 	if _, ok := cats["terminal"]; !ok {
 		t.Error("missing terminal category")
 	}
-	if _, ok := cats["ai"]; !ok {
-		t.Error("missing ai category")
-	}
-	if _, ok := cats["tools"]; !ok {
-		t.Error("missing tools category")
-	}
-	if _, ok := cats["remote"]; !ok {
-		t.Error("missing remote category")
+}
+
+func TestRegistryWithDefaults(t *testing.T) {
+	// Full registry with TOML defaults loaded
+	dir := t.TempDir()
+	EnsureDefaultPlugins(dir)
+
+	r := NewRegistry()
+	r.LoadFromDir(dir)
+
+	cats := r.ByCategory()
+	for _, key := range []string{"terminal", "ai", "tools", "remote"} {
+		if _, ok := cats[key]; !ok {
+			t.Errorf("missing category %q after loading defaults", key)
+		}
 	}
 }
 
@@ -118,11 +123,12 @@ func TestScrapeOutputNilPlugin(t *testing.T) {
 }
 
 func TestMatchError(t *testing.T) {
-	p := builtinSSH()
-	// Pre-compile handlers
-	for i := range p.ErrorHandlers {
-		p.ErrorHandlers[i].Compile()
+	p := &PanePlugin{
+		ErrorHandlers: []ErrorHandler{
+			{Pattern: `Permission denied \(publickey`, Title: "SSH Authentication Failed", Action: "dialog"},
+		},
 	}
+	compilePatterns(p)
 
 	data := []byte("ssh: connect to host: Permission denied (publickey)")
 	eh := MatchError(p, data)
@@ -134,19 +140,76 @@ func TestMatchError(t *testing.T) {
 	}
 }
 
-func TestClaudeCodePreassignStrategy(t *testing.T) {
-	p := builtinClaudeCode()
-	if p.Persistence.Strategy != "preassign_id" {
-		t.Errorf("expected strategy 'preassign_id', got %q", p.Persistence.Strategy)
+func TestDefaultPluginTOMLFiles(t *testing.T) {
+	dir := t.TempDir()
+	if err := EnsureDefaultPlugins(dir); err != nil {
+		t.Fatal(err)
 	}
-	if len(p.Persistence.StartArgs) != 2 || p.Persistence.StartArgs[0] != "--session-id" {
-		t.Errorf("expected StartArgs [--session-id {session_id}], got %v", p.Persistence.StartArgs)
+
+	// Verify all 3 default TOML files were created
+	for _, name := range []string{"claude-code.toml", "ssh.toml", "stripe.toml"} {
+		path := filepath.Join(dir, name)
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("expected default plugin file %s: %v", name, err)
+		}
 	}
-	if len(p.Persistence.ResumeArgs) != 2 || p.Persistence.ResumeArgs[0] != "--resume" {
-		t.Errorf("expected ResumeArgs [--resume {session_id}], got %v", p.Persistence.ResumeArgs)
+
+	// Load them via registry to verify they parse correctly
+	r := NewRegistry()
+	if err := r.LoadFromDir(dir); err != nil {
+		t.Fatal(err)
 	}
-	if len(p.Persistence.Scrapers) != 0 {
-		t.Errorf("expected no scrapers for preassign_id, got %d", len(p.Persistence.Scrapers))
+
+	// Claude Code
+	cc := r.Get("claude-code")
+	if cc == nil {
+		t.Fatal("claude-code plugin not loaded from TOML")
+	}
+	if cc.Persistence.Strategy != "preassign_id" {
+		t.Errorf("expected strategy 'preassign_id', got %q", cc.Persistence.Strategy)
+	}
+	if len(cc.Persistence.StartArgs) != 2 || cc.Persistence.StartArgs[0] != "--session-id" {
+		t.Errorf("expected StartArgs [--session-id {session_id}], got %v", cc.Persistence.StartArgs)
+	}
+
+	// SSH
+	ssh := r.Get("ssh")
+	if ssh == nil {
+		t.Fatal("ssh plugin not loaded from TOML")
+	}
+	if len(ssh.Command.FormFields) < 3 {
+		t.Errorf("expected at least 3 form fields for SSH, got %d", len(ssh.Command.FormFields))
+	}
+	if len(ssh.ErrorHandlers) != 3 {
+		t.Errorf("expected 3 error handlers for SSH, got %d", len(ssh.ErrorHandlers))
+	}
+
+	// Stripe
+	stripe := r.Get("stripe")
+	if stripe == nil {
+		t.Fatal("stripe plugin not loaded from TOML")
+	}
+	if stripe.Persistence.Strategy != "rerun" {
+		t.Errorf("expected strategy 'rerun', got %q", stripe.Persistence.Strategy)
+	}
+}
+
+func TestEnsureDefaultPluginsNoOverwrite(t *testing.T) {
+	dir := t.TempDir()
+
+	// Write defaults first
+	EnsureDefaultPlugins(dir)
+
+	// Modify one file
+	customContent := []byte("# custom override\n[plugin]\nname = \"ssh\"\n[command]\ncmd = \"custom-ssh\"\n")
+	os.WriteFile(filepath.Join(dir, "ssh.toml"), customContent, 0644)
+
+	// Run again — should NOT overwrite
+	EnsureDefaultPlugins(dir)
+
+	data, _ := os.ReadFile(filepath.Join(dir, "ssh.toml"))
+	if string(data) != string(customContent) {
+		t.Error("EnsureDefaultPlugins overwrote user-modified file")
 	}
 }
 
@@ -189,7 +252,12 @@ func TestCompileInvalidPattern(t *testing.T) {
 }
 
 func TestMatchErrorNoMatch(t *testing.T) {
-	p := builtinSSH()
+	p := &PanePlugin{
+		ErrorHandlers: []ErrorHandler{
+			{Pattern: `Permission denied \(publickey`, Title: "Auth Failed", Action: "dialog"},
+			{Pattern: `Host key verification failed`, Title: "Unknown Host", Action: "dialog"},
+		},
+	}
 	compilePatterns(p)
 	data := []byte("Connected to server successfully")
 	eh := MatchError(p, data)

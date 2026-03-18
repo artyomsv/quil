@@ -155,3 +155,7 @@ func PluginsDir() string {
 func WindowStatePath() string {
 	return filepath.Join(AethelDir(), "window.json")
 }
+
+func InstancesPath() string {
+	return filepath.Join(AethelDir(), "instances.json")
+}

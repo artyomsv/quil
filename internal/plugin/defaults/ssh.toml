@@ -1,0 +1,67 @@
+# SSH — Remote SSH connection
+# Edit this file to customize the plugin. Delete it to restore defaults.
+
+[plugin]
+name = "ssh"
+display_name = "SSH"
+category = "remote"
+description = "Remote SSH connection"
+
+[command]
+cmd = "ssh"
+detect = "ssh -V"
+arg_template = ["-p", "{port}", "{user}@{host}"]
+
+[[command.form_fields]]
+name = "name"
+label = "Name"
+required = true
+
+[[command.form_fields]]
+name = "host"
+label = "Host"
+required = true
+
+[[command.form_fields]]
+name = "user"
+label = "Username"
+required = true
+
+[[command.form_fields]]
+name = "port"
+label = "Port"
+default = "22"
+
+[[command.form_fields]]
+name = "description"
+label = "Description"
+
+[display]
+dialog_width = 60
+
+[persistence]
+strategy = "rerun"
+ghost_buffer = true
+
+[[error_handlers]]
+pattern = 'Permission denied \(publickey'
+title = "SSH Authentication Failed"
+message = """
+SSH key not configured for this host.
+
+1. Generate:  ssh-keygen -t ed25519
+2. Copy key:  ssh-copy-id user@host
+3. Retry"""
+action = "dialog"
+
+[[error_handlers]]
+pattern = "Host key verification failed"
+title = "Unknown Host"
+message = "Run: ssh-keyscan <host> >> ~/.ssh/known_hosts"
+action = "dialog"
+
+[[error_handlers]]
+pattern = "Connection refused|No route to host"
+title = "Connection Failed"
+message = "Cannot reach host. Check that the server is running and the address is correct."
+action = "dialog"

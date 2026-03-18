@@ -36,19 +36,21 @@ func (c *Conn) Close() error {
 
 // Server listens for client connections over a Unix socket.
 type Server struct {
-	path     string
-	handler  MessageHandler
-	listener net.Listener
-	conns    []*Conn
-	mu       sync.Mutex
-	done     chan struct{}
+	path         string
+	handler      MessageHandler
+	onDisconnect func() // called when a client disconnects
+	listener     net.Listener
+	conns        []*Conn
+	mu           sync.Mutex
+	done         chan struct{}
 }
 
-func NewServer(socketPath string, handler MessageHandler) *Server {
+func NewServer(socketPath string, handler MessageHandler, onDisconnect func()) *Server {
 	return &Server{
-		path:    socketPath,
-		handler: handler,
-		done:    make(chan struct{}),
+		path:         socketPath,
+		handler:      handler,
+		onDisconnect: onDisconnect,
+		done:         make(chan struct{}),
 	}
 }
 
@@ -59,6 +61,7 @@ func (s *Server) Start() error {
 	if err != nil {
 		return err
 	}
+	os.Chmod(s.path, 0600) // restrict socket permissions
 	s.listener = ln
 
 	go s.acceptLoop()
@@ -100,8 +103,10 @@ func (s *Server) acceptLoop() {
 		conn := newConn(raw)
 		s.mu.Lock()
 		s.conns = append(s.conns, conn)
+		count := len(s.conns)
 		s.mu.Unlock()
 
+		log.Printf("ipc: client connected (total=%d)", count)
 		go s.handleConn(conn)
 	}
 }
@@ -110,6 +115,13 @@ func (s *Server) handleConn(conn *Conn) {
 	defer func() {
 		conn.Close()
 		s.removeConn(conn)
+		s.mu.Lock()
+		count := len(s.conns)
+		s.mu.Unlock()
+		log.Printf("ipc: client disconnected (remaining=%d)", count)
+		if s.onDisconnect != nil {
+			s.onDisconnect()
+		}
 	}()
 
 	for {

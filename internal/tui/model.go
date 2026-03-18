@@ -93,6 +93,9 @@ const (
 	dialogConfirm
 	dialogCreatePane
 	dialogPluginError
+	dialogInstanceForm
+	dialogPlugins
+	dialogTOMLEditor
 )
 
 type Model struct {
@@ -126,8 +129,14 @@ type Model struct {
 	createPaneStep     int                    // 0=category, 1=plugin, 2=split direction
 	selectedCategory   int                    // selected category index in create pane dialog
 	selectedPlugin     string                 // selected plugin name in create pane dialog
-	pluginErrorTitle   string                 // title for plugin error dialog
-	pluginErrorMessage string                 // message for plugin error dialog
+	pluginErrorTitle      string                 // title for plugin error dialog
+	pluginErrorMessage   string                 // message for plugin error dialog
+	instanceStore        InstanceStore           // saved plugin instances (loaded from instances.json)
+	instanceFormValues   []string               // form field values (indexed by FormField position)
+	instanceFormCursor   int                    // active field in instance form
+	selectedInstanceArgs []string               // args from selected instance (for IPC)
+	selectedInstanceName string                 // name from selected instance (for IPC)
+	tomlEditor           *TextEditor            // active TOML editor (nil when not editing)
 }
 
 func NewModel(client *ipc.Client, cfg config.Config, version string, registry *plugin.Registry) Model {
@@ -137,6 +146,7 @@ func NewModel(client *ipc.Client, cfg config.Config, version string, registry *p
 		version:        version,
 		devMode:        os.Getenv("AETHEL_HOME") != "",
 		pluginRegistry: registry,
+		instanceStore:  LoadInstances(config.InstancesPath()),
 	}
 }
 
@@ -317,6 +327,11 @@ func (m Model) View() string {
 
 	// Status bar
 	sections = append(sections, m.renderStatusBar())
+
+	// TOML editor takes over the full screen (bypasses dialog rendering)
+	if m.dialog == dialogTOMLEditor && m.tomlEditor != nil {
+		return m.renderTOMLEditorFullScreen()
+	}
 
 	if m.dialog != dialogNone {
 		return m.renderDialog()
@@ -557,13 +572,23 @@ func (m *Model) handlePaneOutput(msg PaneOutputMsg) tea.Cmd {
 		if leaf := tab.Root.FindLeaf(msg.PaneID); leaf != nil {
 			oldCWD := leaf.Pane.CWD
 			if msg.Ghost && m.cfg.GhostBuffer.Dimmed {
+				if !leaf.Pane.ghost {
+					log.Printf("pane %s: ghost=true (received %d bytes)", msg.PaneID, len(msg.Data))
+				}
 				leaf.Pane.ghost = true
 			} else if !msg.Ghost {
-				// Transitioning from ghost/restored to live output —
-				// reset VT emulator BEFORE processing data so cursor
-				// position isn't polluted by ghost buffer ANSI sequences.
+				// Transitioning from ghost/restored to live output.
+				// Reset VT only for non-terminal panes (e.g. Claude Code)
+				// where ghost buffer ANSI sequences pollute cursor state.
+				// Terminal panes keep their history — the ghost buffer IS
+				// the terminal state and should be preserved.
 				if leaf.Pane.ghost {
-					leaf.Pane.ResetVT()
+					if leaf.Pane.Type != "terminal" && leaf.Pane.Type != "" {
+						log.Printf("pane %s: ghost->live transition, resetting VT (type=%s)", msg.PaneID, leaf.Pane.Type)
+						leaf.Pane.ResetVT()
+					} else {
+						log.Printf("pane %s: ghost->live transition, preserving VT (type=%q)", msg.PaneID, leaf.Pane.Type)
+					}
 				}
 				leaf.Pane.ghost = false
 				// Clear spinner labels after minimum display time (2s)
@@ -665,8 +690,12 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) []string {
 				pane.resumeStart = time.Now()
 				if len(existingTabs) > 0 {
 					pane.preparing = true // new pane created while TUI is running
+					log.Printf("apply: new pane %s (preparing)", paneID)
+				} else if len(tabInfo.Layout) > 0 {
+					pane.resuming = true // restored pane with saved layout
+					log.Printf("apply: new pane %s (resuming, has layout)", paneID)
 				} else {
-					pane.resuming = true // restored pane on initial connect
+					log.Printf("apply: new pane %s (fresh, no layout)", paneID)
 				}
 				newPaneIDs = append(newPaneIDs, paneID)
 			}
@@ -681,6 +710,8 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) []string {
 				if placeholder, ok := m.pendingSplit[tab.ID]; ok {
 					placeholder.Pane = pane
 					delete(m.pendingSplit, tab.ID)
+					// Focus the new pane (it replaced the previously active one)
+					tab.ActivePane = pane.ID
 					continue
 				}
 			}
@@ -718,6 +749,7 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) []string {
 
 // restoreTabLayout rebuilds a tab's layout tree from serialized daemon state.
 func (m *Model) restoreTabLayout(tab *TabModel, tabInfo TabInfo, paneMap map[string]*PaneInfo, existingPanes map[string]*PaneModel) *TabModel {
+	log.Printf("restoreLayout: tab %s %q with %d panes", tab.ID, tabInfo.Name, len(tabInfo.Panes))
 	tab.Name = tabInfo.Name
 	tab.Color = tabInfo.Color
 
@@ -1049,6 +1081,47 @@ func (m *Model) hitTestTab(x int) int {
 	return -1
 }
 
+func (m Model) renderTOMLEditorFullScreen() string {
+	e := m.tomlEditor
+	e.ViewWidth = m.width
+	e.ViewHeight = m.height - 2 // title bar + status bar
+
+	var b strings.Builder
+
+	// Title bar (raw ANSI — background color 236)
+	title := "Edit: "
+	if idx := strings.LastIndex(e.FilePath, "/"); idx >= 0 {
+		title += e.FilePath[idx+1:]
+	} else if idx := strings.LastIndex(e.FilePath, "\\"); idx >= 0 {
+		title += e.FilePath[idx+1:]
+	} else {
+		title += e.FilePath
+	}
+	if e.Dirty {
+		title += " *"
+	}
+	// Pad title to full width
+	for len(title) < m.width {
+		title += " "
+	}
+	b.WriteString("\x1b[48;5;236m\x1b[38;5;250m " + title + "\x1b[0m\n")
+
+	// Editor content
+	b.WriteString(e.Render())
+
+	// Status bar
+	status := fmt.Sprintf(" Ctrl+S save  Esc close    Ln %d, Col %d", e.CursorRow+1, e.CursorCol+1)
+	if e.SaveErr != "" {
+		status = fmt.Sprintf(" \x1b[31mError: %s\x1b[0m\x1b[48;5;236m\x1b[38;5;250m    Ln %d, Col %d", e.SaveErr, e.CursorRow+1, e.CursorCol+1)
+	}
+	for len(status) < m.width {
+		status += " "
+	}
+	b.WriteString("\x1b[48;5;236m\x1b[38;5;250m" + status + "\x1b[0m")
+
+	return b.String()
+}
+
 func (m Model) renderStatusBar() string {
 	// Left side: pane info
 	left := "aethel"
@@ -1140,11 +1213,13 @@ func (m Model) listenForMessages() tea.Cmd {
 			return PaneOutputMsg{PaneID: payload.PaneID, Data: payload.Data, Ghost: payload.Ghost}
 
 		case ipc.MsgWorkspaceState:
+			log.Print("ipc recv: workspace_state")
 			var raw map[string]any
 			msg.DecodePayload(&raw)
 			return parseWorkspaceState(raw)
 
 		case ipc.MsgPluginError:
+			log.Printf("ipc recv: plugin_error")
 			var payload ipc.PluginErrorPayload
 			msg.DecodePayload(&payload)
 			return PluginErrorMsg{
@@ -1154,7 +1229,7 @@ func (m Model) listenForMessages() tea.Cmd {
 			}
 
 		default:
-			// Unknown message type — keep listening
+			log.Printf("ipc recv: unknown type %q", msg.Type)
 			return listenContinueMsg{}
 		}
 	}

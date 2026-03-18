@@ -249,6 +249,47 @@ Each init script sources the user's original shell config first, then appends th
 - Old output is silently evicted — no manual cleanup needed
 - Basis for future ghost buffer rendering (dimmed historical content)
 
+## ADR-12: Centralized Snapshot Queue
+
+**Decision:** Replace scattered `snapshotDebounced()` calls with a single event-driven snapshot channel processed in the daemon's main event loop.
+
+**Context:** Snapshot triggers were spread across handler functions, each calling `snapshotDebounced()` with its own mutex-based time check. This was fragile — missing a trigger in a new handler meant state loss. Multiple concurrent debounce checks also created TOCTOU races.
+
+**Implementation:**
+
+- `snapshotCh` — buffered channel (capacity 1) for non-blocking snapshot requests
+- `requestSnapshot()` sends to the channel; drops if already pending
+- `Wait()` event loop receives from `snapshotCh`, starts a 500ms `time.AfterFunc` debounce timer
+- When the timer fires, `snapshot()` executes in the main loop (no mutex needed)
+- Triggers: create/destroy tab/pane, switch tab, update layout, client disconnect
+- 30-second periodic timer as safety net; final `snapshot()` in `Stop()` before PTY close
+
+**Consequences:**
+
+- Single place to audit all snapshot triggers — the event loop in `Wait()`
+- Debounce collapses rapid operations (e.g., bulk pane creation) into one snapshot
+- No mutex needed — snapshot runs single-threaded in the event loop
+- Layout changes now trigger snapshots (was missing before, causing layout loss on daemon kill)
+
+## ADR-13: GhostSnap Restore
+
+**Decision:** Store pure disk-loaded ghost buffer data in a separate `Pane.GhostSnap` field, keeping it isolated from the live `OutputBuf` ring buffer.
+
+**Context:** After daemon restart, `restoreWorkspace()` loads ghost buffers into `OutputBuf`, then `respawnPanes()` starts new shell processes whose init output (including potential ConPTY clear screen sequences) is appended to the same buffer. When `handleAttach()` sends `OutputBuf.Bytes()` as ghost, the new shell output contaminates the historical data — the VT processes history, then a clear screen wipes it.
+
+**Implementation:**
+
+- `Pane.GhostSnap []byte` — set in `restoreWorkspace()` as a copy of the disk-loaded data
+- `handleAttach()` prefers `GhostSnap` over `OutputBuf.Bytes()` for ghost replay
+- After first client replay, `GhostSnap` is set to `nil` — subsequent reconnects use the full `OutputBuf`
+- TUI skips `ResetVT()` for terminal panes on ghost→live transition (non-terminal panes still reset to avoid cursor pollution)
+
+**Consequences:**
+
+- Terminal history survives daemon restart — ghost data is clean, not contaminated by shell init
+- Reconnects (without daemon restart) still replay the full live buffer — correct behavior
+- Snapshots continue saving `OutputBuf.Bytes()` (ghost + new output) — the combined state is the terminal's current state
+
 ## Storage Layout
 
 ```
@@ -268,6 +309,7 @@ Each init script sources the user's original shell config first, then appends th
 ├── buffers/                    # Ghost buffer binary files
 │   └── pane-XXXXXXXX.bin
 ├── window.json                 # Window size/position persistence
+├── instances.json              # Saved plugin instances (SSH connections, etc.)
 ├── plugins/                    # User TOML plugin definitions
 │   └── *.toml
 ├── notes/                      # Pane notes (planned)

@@ -2,6 +2,9 @@ package tui
 
 import (
 	"fmt"
+	"log"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -9,7 +12,9 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/google/uuid"
 
+	"github.com/artyomsv/aethel/internal/config"
 	"github.com/artyomsv/aethel/internal/ipc"
 	"github.com/artyomsv/aethel/internal/plugin"
 )
@@ -156,6 +161,12 @@ func (m Model) handleDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleCreatePaneKey(msg)
 	case dialogPluginError:
 		return m.handlePluginErrorKey(msg)
+	case dialogInstanceForm:
+		return m.handleInstanceFormKey(msg)
+	case dialogPlugins:
+		return m.handlePluginsKey(msg)
+	case dialogTOMLEditor:
+		return m.handleTOMLEditorKey(msg)
 	}
 	return m, nil
 }
@@ -169,7 +180,7 @@ func (m Model) handleAboutKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.dialogCursor--
 		}
 	case "down", "j":
-		if m.dialogCursor < 1 {
+		if m.dialogCursor < 2 {
 			m.dialogCursor++
 		}
 	case "enter":
@@ -179,6 +190,9 @@ func (m Model) handleAboutKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.dialogCursor = 0
 		case 1:
 			m.dialog = dialogShortcuts
+			m.dialogCursor = 0
+		case 2:
+			m.dialog = dialogPlugins
 			m.dialogCursor = 0
 		}
 	}
@@ -246,12 +260,39 @@ func (m Model) handleShortcutsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) handleConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "n":
+		// Return to appropriate dialog based on confirm kind
+		if m.confirmKind == "instance" {
+			m.dialog = dialogCreatePane
+			m.createPaneStep = 2
+			m.dialogCursor = 0
+			return m, nil
+		}
 		m.dialog = dialogNone
 		return m, nil
 	case "enter", "y":
-		m.dialog = dialogNone
 		kind := m.confirmKind
 		id := m.confirmID
+
+		// Handle instance deletion locally (no IPC needed)
+		if kind == "instance" {
+			pluginName := m.selectedPlugin
+			instances := m.instanceStore[pluginName]
+			for i, inst := range instances {
+				if inst.ID == id {
+					m.instanceStore[pluginName] = append(instances[:i], instances[i+1:]...)
+					break
+				}
+			}
+			if err := SaveInstances(config.InstancesPath(), m.instanceStore); err != nil {
+			log.Printf("save instances: %v", err)
+		}
+			m.dialog = dialogCreatePane
+			m.createPaneStep = 2
+			m.dialogCursor = 0
+			return m, nil
+		}
+
+		m.dialog = dialogNone
 		client := m.client
 		return m, func() tea.Msg {
 			switch kind {
@@ -290,9 +331,25 @@ func (m Model) renderDialog() string {
 		content = m.renderCreatePaneDialog()
 	case dialogPluginError:
 		content = m.renderPluginErrorDialog()
+	case dialogInstanceForm:
+		content = m.renderInstanceFormDialog()
+	case dialogPlugins:
+		content = m.renderPluginsDialog()
+	case dialogTOMLEditor:
+		// Rendered in View() as full-screen, not here
 	}
 
-	box := dialogBorder.Width(dialogWidth).Render(content)
+	// Use wider dialog for TOML editor, plugin-specific width, or default
+	width := dialogWidth
+	if m.dialog == dialogTOMLEditor {
+		width = 74
+	} else if m.selectedPlugin != "" {
+		if p := m.pluginRegistry.Get(m.selectedPlugin); p != nil && p.Display.DialogWidth > 0 {
+			width = p.Display.DialogWidth
+		}
+	}
+
+	box := dialogBorder.Width(width).Render(content)
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
 }
 
@@ -307,7 +364,7 @@ func (m Model) renderAboutDialog() string {
 	b.WriteString(lipgloss.PlaceHorizontal(dialogWidth, lipgloss.Center, link))
 	b.WriteString("\n\n")
 
-	items := []string{"Settings", "Shortcuts"}
+	items := []string{"Settings", "Shortcuts", "Plugins"}
 	for i, item := range items {
 		cursor := "  "
 		style := dialogNormal
@@ -394,9 +451,9 @@ func (m Model) renderConfirmDialog() string {
 
 func boolStr(v bool) string {
 	if v {
-		return "✓"
+		return "yes"
 	}
-	return "✗"
+	return "no"
 }
 
 // --- Pane creation dialog ---
@@ -464,8 +521,14 @@ func (m Model) handleCreatePaneKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch key {
 	case "esc":
 		if m.createPaneStep > 0 {
-			// Go back one step
+			// Go back one step; skip instance list if plugin has no form fields
 			m.createPaneStep--
+			if m.createPaneStep == 2 {
+				p := m.pluginRegistry.Get(m.selectedPlugin)
+				if p == nil || len(p.Command.FormFields) == 0 {
+					m.createPaneStep = 1 // skip instance step
+				}
+			}
 			m.dialogCursor = 0
 			return m, nil
 		}
@@ -488,6 +551,20 @@ func (m Model) handleCreatePaneKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "enter":
 		return m.handleCreatePaneSelect()
+
+	case "delete", "backspace":
+		// Delete saved instance from the list (step 2, cursor > 0)
+		if m.createPaneStep == 2 && m.dialogCursor > 0 {
+			instances := m.instanceStore[m.selectedPlugin]
+			idx := m.dialogCursor - 1
+			if idx < len(instances) {
+				m.confirmKind = "instance"
+				m.confirmID = instances[idx].ID
+				m.confirmName = instances[idx].Name
+				m.dialog = dialogConfirm
+			}
+			return m, nil
+		}
 	}
 
 	return m, nil
@@ -502,7 +579,9 @@ func (m *Model) createPaneItemCount() int {
 		if m.selectedCategory < len(cats) {
 			return len(cats[m.selectedCategory].plugins)
 		}
-	case 2:
+	case 2: // instance list
+		return 1 + len(m.instanceStore[m.selectedPlugin]) // "+ New" + saved
+	case 3: // split direction
 		return 3 // Horizontal, Vertical, Replace
 	}
 	return 0
@@ -522,7 +601,7 @@ func (m Model) handleCreatePaneSelect() (tea.Model, tea.Cmd) {
 	}
 
 	if m.createPaneStep == 1 {
-		// Selected a plugin — advance to split direction
+		// Selected a plugin — check if it has form fields (instance management)
 		if m.selectedCategory >= len(cats) {
 			return m, nil
 		}
@@ -531,13 +610,72 @@ func (m Model) handleCreatePaneSelect() (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.selectedPlugin = plugins[m.dialogCursor].Name
-		m.createPaneStep = 2
+		m.selectedInstanceArgs = nil
+		m.selectedInstanceName = ""
+		m.dialogCursor = 0
+
+		// If plugin has form fields → instance list (step 2)
+		p := m.pluginRegistry.Get(m.selectedPlugin)
+		if p != nil && len(p.Command.FormFields) > 0 {
+			// If no saved instances, jump directly to the form
+			if len(m.instanceStore[m.selectedPlugin]) == 0 {
+				m.openInstanceForm(p)
+				return m, nil
+			}
+			m.createPaneStep = 2
+		} else {
+			m.createPaneStep = 3 // skip instance list
+		}
+		return m, nil
+	}
+
+	if m.createPaneStep == 2 {
+		// Selected from instance list
+		instances := m.instanceStore[m.selectedPlugin]
+		if m.dialogCursor == 0 {
+			// "+ New" — open instance form
+			p := m.pluginRegistry.Get(m.selectedPlugin)
+			if p != nil {
+				m.openInstanceForm(p)
+			}
+			return m, nil
+		}
+		// Select existing instance
+		idx := m.dialogCursor - 1
+		if idx < len(instances) {
+			inst := instances[idx]
+			p := m.pluginRegistry.Get(m.selectedPlugin)
+			if p != nil {
+				m.selectedInstanceArgs = BuildArgs(p.Command.ArgTemplate, inst.Fields)
+			}
+			m.selectedInstanceName = inst.Name
+		}
+		m.createPaneStep = 3
 		m.dialogCursor = 0
 		return m, nil
 	}
 
-	// Step 2: selected placement
+	// Step 3: selected placement (split direction)
+	return m.handleCreatePaneSplit()
+}
+
+// openInstanceForm initializes the instance form dialog with default values.
+func (m *Model) openInstanceForm(p *plugin.PanePlugin) {
+	m.instanceFormValues = make([]string, len(p.Command.FormFields))
+	for i, ff := range p.Command.FormFields {
+		m.instanceFormValues[i] = ff.Default
+	}
+	m.instanceFormCursor = 0
+	m.dialogEdit = false
+	m.dialogInput = ""
+	m.dialog = dialogInstanceForm
+}
+
+// handleCreatePaneSplit handles the final split direction selection (step 3).
+func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 	pluginName := m.selectedPlugin
+	instanceName := m.selectedInstanceName
+	instanceArgs := m.selectedInstanceArgs
 	m.dialog = dialogNone
 	m.createPaneStep = 0
 
@@ -557,8 +695,6 @@ func (m Model) handleCreatePaneSelect() (tea.Model, tea.Cmd) {
 	if m.dialogCursor == 2 {
 		oldPaneID := pane.ID
 
-		// Turn the current leaf into a placeholder so the new pane
-		// fills the same layout position.
 		if leaf := tab.Root.FindLeaf(oldPaneID); leaf != nil {
 			leaf.Pane = nil
 			if m.pendingSplit == nil {
@@ -571,6 +707,8 @@ func (m Model) handleCreatePaneSelect() (tea.Model, tea.Cmd) {
 			msg, _ := ipc.NewMessage(ipc.MsgCreatePane, ipc.CreatePanePayload{
 				TabID:         tabID,
 				Type:          pluginName,
+				InstanceName:  instanceName,
+				InstanceArgs:  instanceArgs,
 				ReplacePaneID: oldPaneID,
 			})
 			client.Send(msg)
@@ -598,8 +736,10 @@ func (m Model) handleCreatePaneSelect() (tea.Model, tea.Cmd) {
 
 	return m, func() tea.Msg {
 		msg, _ := ipc.NewMessage(ipc.MsgCreatePane, ipc.CreatePanePayload{
-			TabID: tabID,
-			Type:  pluginName,
+			TabID:        tabID,
+			Type:         pluginName,
+			InstanceName: instanceName,
+			InstanceArgs: instanceArgs,
 		})
 		client.Send(msg)
 		return nil
@@ -660,7 +800,49 @@ func (m Model) renderCreatePaneDialog() string {
 		}
 
 	case 2:
-		// Step 2: Select split direction
+		// Step 2: Instance list
+		p := m.pluginRegistry.Get(m.selectedPlugin)
+		title := "Instances"
+		if p != nil {
+			title = p.DisplayName
+		}
+		b.WriteString(dialogTitle.Render(title))
+		b.WriteString("\n\n")
+
+		instances := m.instanceStore[m.selectedPlugin]
+
+		// First item: "+ New"
+		cursor := "  "
+		style := dialogNormal
+		if m.dialogCursor == 0 {
+			cursor = "> "
+			style = dialogSelected
+		}
+		b.WriteString(cursor + style.Render("+ New Connection") + "\n")
+
+		// Saved instances
+		for i, inst := range instances {
+			cursor = "  "
+			style = dialogNormal
+			if i+1 == m.dialogCursor {
+				cursor = "> "
+				style = dialogSelected
+			}
+			line := style.Render(inst.Name)
+			if addr := inst.DisplayAddr(); addr != "" {
+				line += "  " + dialogSubtle.Render(addr)
+			}
+			if inst.Description != "" {
+				line += "  " + dialogSubtle.Render(inst.Description)
+			}
+			b.WriteString(cursor + line + "\n")
+		}
+
+		b.WriteByte('\n')
+		b.WriteString(dialogSubtle.Render("Enter select  Del remove  Esc back"))
+
+	case 3:
+		// Step 3: Select split direction
 		b.WriteString(dialogTitle.Render("Split Direction"))
 		b.WriteString("\n\n")
 
@@ -680,6 +862,364 @@ func (m Model) renderCreatePaneDialog() string {
 	}
 
 	return b.String()
+}
+
+// --- Instance form dialog ---
+
+func (m Model) handleInstanceFormKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	p := m.pluginRegistry.Get(m.selectedPlugin)
+	if p == nil {
+		m.dialog = dialogNone
+		return m, nil
+	}
+	fields := p.Command.FormFields
+	totalItems := len(fields) + 1 // fields + "Create" button
+	key := msg.String()
+
+	if m.dialogEdit {
+		switch key {
+		case "esc":
+			m.dialogEdit = false
+			m.dialogInput = ""
+		case "enter":
+			if m.instanceFormCursor < len(fields) {
+				m.instanceFormValues[m.instanceFormCursor] = m.dialogInput
+			}
+			m.dialogEdit = false
+			m.dialogInput = ""
+		case "backspace":
+			if len(m.dialogInput) > 0 {
+				m.dialogInput = m.dialogInput[:len(m.dialogInput)-1]
+			}
+		case "tab":
+			// Commit and advance
+			if m.instanceFormCursor < len(fields) {
+				m.instanceFormValues[m.instanceFormCursor] = m.dialogInput
+			}
+			m.dialogEdit = false
+			m.dialogInput = ""
+			if m.instanceFormCursor < totalItems-1 {
+				m.instanceFormCursor++
+			}
+		default:
+			if len(key) == 1 {
+				m.dialogInput += key
+			} else if key == "space" {
+				m.dialogInput += " "
+			}
+		}
+		return m, nil
+	}
+
+	switch key {
+	case "esc":
+		// Return to instance list or plugin selection
+		m.dialog = dialogCreatePane
+		if len(m.instanceStore[m.selectedPlugin]) > 0 {
+			m.createPaneStep = 2
+		} else {
+			m.createPaneStep = 1
+		}
+		m.dialogCursor = 0
+		return m, nil
+
+	case "up", "k":
+		if m.instanceFormCursor > 0 {
+			m.instanceFormCursor--
+		}
+		return m, nil
+
+	case "down", "j":
+		if m.instanceFormCursor < totalItems-1 {
+			m.instanceFormCursor++
+		}
+		return m, nil
+
+	case "tab":
+		m.instanceFormCursor = (m.instanceFormCursor + 1) % totalItems
+		return m, nil
+
+	case "enter":
+		if m.instanceFormCursor < len(fields) {
+			// Start editing this field
+			m.dialogEdit = true
+			m.dialogInput = m.instanceFormValues[m.instanceFormCursor]
+			return m, nil
+		}
+		// "Create" button — validate and save
+		return m.submitInstanceForm(p)
+	}
+
+	return m, nil
+}
+
+func (m Model) submitInstanceForm(p *plugin.PanePlugin) (tea.Model, tea.Cmd) {
+	fields := p.Command.FormFields
+
+	// Validate required fields
+	fieldMap := make(map[string]string)
+	for i, ff := range fields {
+		val := m.instanceFormValues[i]
+		if ff.Required && val == "" {
+			// Move cursor to the first empty required field
+			m.instanceFormCursor = i
+			return m, nil
+		}
+		fieldMap[ff.Name] = val
+	}
+
+	// Create saved instance
+	name := fieldMap["name"]
+	if name == "" {
+		name = "unnamed"
+	}
+	desc := fieldMap["description"]
+
+	inst := SavedInstance{
+		ID:          uuid.New().String()[:8],
+		Name:        name,
+		Fields:      fieldMap,
+		Description: desc,
+	}
+
+	// Save to store
+	if m.instanceStore == nil {
+		m.instanceStore = make(InstanceStore)
+	}
+	m.instanceStore[m.selectedPlugin] = append(m.instanceStore[m.selectedPlugin], inst)
+	if err := SaveInstances(config.InstancesPath(), m.instanceStore); err != nil {
+			log.Printf("save instances: %v", err)
+		}
+
+	// Build args from template
+	m.selectedInstanceArgs = BuildArgs(p.Command.ArgTemplate, fieldMap)
+	m.selectedInstanceName = name
+
+	// Proceed to split direction
+	m.dialog = dialogCreatePane
+	m.createPaneStep = 3
+	m.dialogCursor = 0
+	return m, nil
+}
+
+func (m Model) renderInstanceFormDialog() string {
+	var b strings.Builder
+
+	p := m.pluginRegistry.Get(m.selectedPlugin)
+	if p == nil {
+		return ""
+	}
+	fields := p.Command.FormFields
+
+	title := "New " + p.DisplayName
+	b.WriteString(dialogTitle.Render(title))
+	b.WriteString("\n\n")
+
+	for i, ff := range fields {
+		cursor := "  "
+		labelStyle := dialogLabelStyle
+		if i == m.instanceFormCursor {
+			cursor = "> "
+			labelStyle = labelStyle.Foreground(lipgloss.Color("230")).Bold(true)
+		}
+
+		val := m.instanceFormValues[i]
+		var valRendered string
+		if m.dialogEdit && i == m.instanceFormCursor {
+			valRendered = dialogEditStyle.Render(m.dialogInput + "▎")
+		} else if val != "" {
+			valRendered = dialogValStyle.Render(val)
+		} else {
+			valRendered = dialogSubtle.Render("—")
+		}
+
+		label := ff.Label
+		if ff.Required {
+			label += "*"
+		}
+
+		b.WriteString(cursor + labelStyle.Render(label) + valRendered + "\n")
+	}
+
+	// "Create" button
+	b.WriteByte('\n')
+	btnCursor := "  "
+	btnStyle := dialogNormal
+	if m.instanceFormCursor == len(fields) {
+		btnCursor = "> "
+		btnStyle = dialogSelected
+	}
+	b.WriteString(btnCursor + btnStyle.Render("[Create]") + "\n")
+
+	b.WriteByte('\n')
+	b.WriteString(dialogSubtle.Render("Tab next  Enter edit/confirm  Esc back"))
+
+	return b.String()
+}
+
+// --- Plugins management dialog ---
+
+func (m Model) handlePluginsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	allPlugins := m.sortedPlugins()
+	totalItems := len(allPlugins) + 2 // plugins + Reload + Reset
+
+	switch msg.String() {
+	case "esc":
+		m.dialog = dialogAbout
+		m.dialogCursor = 2
+		return m, nil
+
+	case "up", "k":
+		if m.dialogCursor > 0 {
+			m.dialogCursor--
+		}
+		return m, nil
+
+	case "down", "j":
+		if m.dialogCursor < totalItems-1 {
+			m.dialogCursor++
+		}
+		return m, nil
+
+	case "enter":
+		if m.dialogCursor < len(allPlugins) {
+			// Open TOML editor for selected plugin
+			p := allPlugins[m.dialogCursor]
+			if p.Name == "terminal" {
+				// Terminal is built-in Go, no TOML to edit
+				return m, nil
+			}
+			filePath := filepath.Join(config.PluginsDir(), p.Name+".toml")
+			data, err := os.ReadFile(filePath)
+			if err != nil {
+				return m, nil
+			}
+			// Calculate editor viewport from available space
+			viewH := m.height - 10 // title + footer + borders + padding
+			if viewH < 5 {
+				viewH = 5
+			}
+			viewW := 70
+			m.tomlEditor = NewTextEditor(string(data), filePath, viewW, viewH)
+			m.dialog = dialogTOMLEditor
+			return m, nil
+		}
+
+		btnIdx := m.dialogCursor - len(allPlugins)
+		if btnIdx == 1 {
+			plugin.EnsureDefaultPlugins(config.PluginsDir())
+		}
+		// Both buttons: reload plugins
+		if err := m.pluginRegistry.LoadFromDir(config.PluginsDir()); err != nil {
+			log.Printf("reload plugins: %v", err)
+		}
+		m.pluginRegistry.DetectAvailability()
+		client := m.client
+		m.dialog = dialogNone
+		return m, func() tea.Msg {
+			msg, _ := ipc.NewMessage(ipc.MsgReloadPlugins, nil)
+			client.Send(msg)
+			return nil
+		}
+	}
+
+	return m, nil
+}
+
+// sortedPlugins returns all plugins sorted by display name.
+func (m Model) sortedPlugins() []*plugin.PanePlugin {
+	all := m.pluginRegistry.All()
+	sort.Slice(all, func(i, j int) bool {
+		return all[i].DisplayName < all[j].DisplayName
+	})
+	return all
+}
+
+func (m Model) renderPluginsDialog() string {
+	var b strings.Builder
+
+	b.WriteString(dialogTitle.Render("Plugins"))
+	b.WriteString("\n\n")
+
+	allPlugins := m.sortedPlugins()
+
+	// Plugin list (selectable — Enter opens editor)
+	for i, p := range allPlugins {
+		cursor := "  "
+		style := dialogNormal
+		if i == m.dialogCursor {
+			cursor = "> "
+			style = dialogSelected
+		}
+
+		avail := dialogSubtle.Render("[x]")
+		if p.Available {
+			avail = lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Render("[ok]")
+		}
+
+		name := style.Render(p.DisplayName)
+		cat := dialogSubtle.Render(p.Category)
+		label := ""
+		if p.Name == "terminal" {
+			label = dialogSubtle.Render("  (built-in)")
+		}
+		b.WriteString(fmt.Sprintf("%s%s  %s  %s%s\n", cursor, name, cat, avail, label))
+	}
+
+	// Action buttons
+	b.WriteByte('\n')
+	btnLabels := []string{"Reload Plugins", "Restore Missing Defaults"}
+	for i, label := range btnLabels {
+		btnIdx := len(allPlugins) + i
+		cursor := "  "
+		style := dialogNormal
+		if btnIdx == m.dialogCursor {
+			cursor = "> "
+			style = dialogSelected
+		}
+		b.WriteString(cursor + style.Render(label) + "\n")
+	}
+
+	b.WriteByte('\n')
+	b.WriteString(dialogSubtle.Render("Enter edit/action  Esc back"))
+
+	return b.String()
+}
+
+// --- TOML editor dialog ---
+
+func (m Model) handleTOMLEditorKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.tomlEditor == nil {
+		m.dialog = dialogPlugins
+		return m, nil
+	}
+
+	saved, closed := m.tomlEditor.HandleKey(msg.String())
+
+	if saved {
+		// Reload plugins after save, re-enable mouse
+		if err := m.pluginRegistry.LoadFromDir(config.PluginsDir()); err != nil {
+			log.Printf("reload plugins: %v", err)
+		}
+		m.pluginRegistry.DetectAvailability()
+		m.tomlEditor = nil
+		m.dialog = dialogPlugins
+		m.dialogCursor = 0
+		client := m.client
+		return m, tea.Batch(func() tea.Msg {
+			msg, _ := ipc.NewMessage(ipc.MsgReloadPlugins, nil)
+			client.Send(msg)
+			return nil
+		})
+	}
+
+	if closed {
+		m.tomlEditor = nil
+		m.dialog = dialogPlugins
+		return m, nil
+	}
+
+	return m, nil
 }
 
 // --- Plugin error dialog ---

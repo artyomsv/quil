@@ -1,0 +1,39 @@
+# Stripe — Webhook listener
+# Edit this file to customize the plugin. Delete it to restore defaults.
+
+[plugin]
+name = "stripe"
+display_name = "Stripe"
+category = "tools"
+description = "Stripe webhook listener"
+
+[command]
+cmd = "stripe"
+args = ["listen"]
+detect = "stripe --version"
+arg_template = ["listen", "--forward-to", "{url}"]
+
+[[command.form_fields]]
+name = "name"
+label = "Name"
+required = true
+
+[[command.form_fields]]
+name = "url"
+label = "Forward URL"
+required = true
+default = "http://localhost:8080/webhook"
+
+[[command.form_fields]]
+name = "description"
+label = "Description"
+
+[persistence]
+strategy = "rerun"
+ghost_buffer = true
+
+[[error_handlers]]
+pattern = "not logged in|login required"
+title = "Stripe Authentication Required"
+message = "Run 'stripe login' in a terminal pane first."
+action = "dialog"

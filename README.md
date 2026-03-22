@@ -3,7 +3,7 @@
 **The Persistent Workflow Orchestrator for AI-Native Development**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Go](https://img.shields.io/badge/Go-1.24-00ADD8.svg)](https://go.dev)
+[![Go](https://img.shields.io/badge/Go-1.25-00ADD8.svg)](https://go.dev)
 [![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg)]()
 
 ---
@@ -44,6 +44,10 @@ Pane borders display the shell's current working directory in real-time. Aethel 
 ### Mouse & Keyboard
 
 Full mouse support — click tabs to switch, click panes to focus, scroll wheel for terminal history. All keybindings are configurable via `config.toml`.
+
+### Text Selection & Clipboard
+
+Select text in terminal panes with Shift+Arrow (character), Ctrl+Shift+Arrow (word), or mouse click+drag. Enter copies selection to clipboard, Ctrl+V pastes with bracketed paste support. The TOML plugin editor also supports full text selection, clipboard, and paragraph navigation.
 
 ### Tab Customization
 
@@ -92,7 +96,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed design decisions.
 
 ### Prerequisites
 
-- Docker **or** Go 1.24+
+- Docker **or** Go 1.25+
 
 ### Build
 
@@ -131,6 +135,8 @@ aethel
 | `Alt+C` | Cycle tab color |
 | `Alt+PgUp` / `Alt+PgDn` | Scroll page up/down |
 | `Ctrl+V` | Paste from clipboard |
+| `Shift+Arrows` | Select text |
+| `Enter` | Copy selection |
 | `Ctrl+Q` | Quit |
 
 All keybindings are configurable in `~/.aethel/config.toml` under `[keybindings]`.
@@ -153,6 +159,7 @@ tab_dock = "top"
 theme = "default"
 mouse_scroll_lines = 3
 page_scroll_lines = 0    # 0 = half-page (dynamic)
+show_disclaimer = true   # beta disclaimer on startup
 
 [keybindings]
 quit = "ctrl+q"
@@ -215,7 +222,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development guidelines.
 | **M5: Polish** | Planned | JSON transformer, observability, encrypted tokens, OS service integration |
 | **M6: Pane Focus** | Planned | Full-window focus mode for single pane |
 | **M7: Pane Notes** | Planned | Side-by-side note-taking linked to panes |
-| **M8: Bubble Tea v2** | Planned | Migration to Bubble Tea v2 for improved key handling |
+| **M8: Bubble Tea v2** | Done | Bubble Tea v2/Lipgloss v2 migration, text selection, clipboard, editor enhancements |
 
 See [ROADMAP.md](ROADMAP.md) for detailed progress and feature descriptions.
 

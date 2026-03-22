@@ -40,6 +40,23 @@ Key capabilities:
 - **Resuming/preparing spinner** — animated border indicator during pane startup
 - **Window size persistence** — save/restore terminal dimensions across restarts
 
+### M8: Bubble Tea v2 Migration + Text Selection
+> BT v2 + Lipgloss v2 migration, text selection, platform-native clipboard, editor enhancements.
+
+Migrated from Bubble Tea v1.3.10 to v2.0.2 and Lipgloss v1.1.0 to v2.0.2. Added text selection, clipboard, editor selection/navigation, and beta disclaimer dialog.
+
+Key changes:
+- **Bubble Tea v2** — declarative View (`tea.View`), typed mouse events, `KeyPressMsg`
+- **Lipgloss v2** — border-inclusive Width/Height semantics
+- **Terminal text selection** — Shift+Arrow (char), Ctrl+Shift+Arrow (word), mouse click+drag
+- **Editor text selection** — full selection/clipboard in TOML editor (Shift+Arrow, Ctrl+X/V/A, Enter to copy)
+- **Editor navigation** — Ctrl+Arrow word jump, Ctrl+Alt+Arrow 3-word, Ctrl+Up/Down paragraph
+- **Clipboard** — platform-native Read/Write: Win32 API, pbcopy/xclip
+- **Bracketed paste** — Ctrl+V wraps content in `ESC[200~...ESC[201~`
+- **Beta disclaimer** — startup dialog with random tips, "Don't show again" persists to config
+- **Config persistence** — `config.Save()` for atomic config write-back
+- **Go 1.25** — required by Lipgloss v2
+
 ---
 
 ## In Progress
@@ -95,15 +112,3 @@ Side-by-side note-taking mode linked to individual panes. When enabled, the wind
 - Notes persist independently from workspace state — they survive pane destruction and can be browsed later
 - Exiting notes mode restores the previous layout
 
-### M8: Bubble Tea v2 Migration + Text Selection
-> BT v2 + Lipgloss v2 migration, text selection, platform-native clipboard.
-
-Migrated from Bubble Tea v1.3.10 to v2.0.2 and Lipgloss v1.1.0 to v2.0.2. Added text selection (keyboard + mouse) and platform-native clipboard support.
-
-Key changes:
-- **Bubble Tea v2** — declarative View (`tea.View`), typed mouse events, `KeyPressMsg`
-- **Lipgloss v2** — border-inclusive Width/Height semantics (compensated in pane/dialog rendering)
-- **Text selection** — Shift+Arrow (char), Ctrl+Shift+Arrow (word), Ctrl+Alt+Shift+Arrow (3 words), mouse click+drag
-- **Clipboard** — platform-native Read/Write (`internal/clipboard/`): Win32 API, pbcopy/xclip
-- **Bracketed paste** — Ctrl+V wraps content in `ESC[200~...ESC[201~` for safe multi-line paste
-- **Go 1.25** — required by Lipgloss v2, Docker images updated

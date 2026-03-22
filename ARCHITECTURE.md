@@ -74,18 +74,19 @@ type Session interface {
 - Interface abstraction keeps daemon code platform-agnostic
 - ConPTY API differences (e.g., `Spawn()` vs `exec.Command()`) are isolated
 
-## ADR-4: Bubble Tea v1 for TUI
+## ADR-4: Bubble Tea v2 for TUI
 
-**Decision:** Use Bubble Tea v1 (`github.com/charmbracelet/bubbletea` v1.3.10) with Lipgloss v1 for the TUI.
+**Decision:** Use Bubble Tea v2 (`charm.land/bubbletea/v2` v2.0.2) with Lipgloss v2 (`charm.land/lipgloss/v2` v2.0.2) for the TUI.
 
-**Context:** Bubble Tea v2 was not available in the Go module proxy at the time of development. v1 is stable and well-documented.
+**Context:** Initially built on Bubble Tea v1. Migrated to v2 in M8 for declarative `View()` (returns `tea.View` struct with AltScreen/MouseMode), typed mouse events (`MouseClickMsg`, `MouseMotionMsg`, `MouseReleaseMsg`, `MouseWheelMsg`), `KeyPressMsg` with modifier bitmask, and diff-based rendering.
 
 **Consequences:**
 
-- Stable, well-tested framework
 - Elm Architecture (Model-Update-View) provides clean state management
-- Lipgloss handles cross-platform terminal styling
-- Migration to v2 is possible later with manageable API changes
+- Declarative view config replaces imperative `tea.EnterAltScreen` commands
+- Diff renderer only updates changed cells — requires `tea.ClearScreen` at dialog transitions
+- Lipgloss v2 Width/Height includes borders (v1 was additive) — pane/dialog rendering compensates
+- `Key.Mod.Contains()` bitmask enables proper Shift/Ctrl/Alt detection for text selection
 
 ## ADR-5: Hybrid Storage — JSON + SQLite
 
@@ -289,6 +290,25 @@ Each init script sources the user's original shell config first, then appends th
 - Terminal history survives daemon restart — ghost data is clean, not contaminated by shell init
 - Reconnects (without daemon restart) still replay the full live buffer — correct behavior
 - Snapshots continue saving `OutputBuf.Bytes()` (ghost + new output) — the combined state is the terminal's current state
+
+## ADR-14: Config Persistence via Atomic Write
+
+**Decision:** Add `config.Save()` for runtime config write-back using the same atomic `.tmp` + rename pattern as workspace persistence.
+
+**Context:** Config was read-only at startup — the Settings dialog warned "changes apply to this session only." The beta disclaimer's "Don't show again" feature requires persisting a config change (`ui.show_disclaimer = false`) across restarts.
+
+**Implementation:**
+
+- `config.Save(path, cfg)` encodes the full `Config` struct to TOML, writes to `.tmp`, renames atomically
+- `Model.configChanged` flag tracks whether any persistent config change was made during the session
+- On TUI exit, `main.go` checks `ConfigChanged()` and calls `Save()` only if needed
+- `MkdirAll` ensures parent directory exists; stale `.tmp` cleaned up on rename failure
+
+**Consequences:**
+
+- Config changes from the disclaimer dialog (and future settings) persist across restarts
+- Only writes when something actually changed — no unnecessary disk I/O
+- Follows the same crash-safe pattern as `persist/snapshot.go`
 
 ## Storage Layout
 

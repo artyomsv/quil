@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Bubble Tea v2 + Lipgloss v2 migration** — declarative `View()` returning `tea.View`, typed mouse events (`MouseClickMsg`, `MouseWheelMsg`, `MouseMotionMsg`, `MouseReleaseMsg`), `KeyPressMsg` replaces `KeyMsg`, Go 1.25
+- **Text selection** — keyboard selection via Shift+Arrow (character), Ctrl+Shift+Arrow (word), Ctrl+Alt+Shift+Arrow (3 words), and mouse click+drag; Enter copies selection to clipboard; Esc clears; right-click copies
+- **Platform-native clipboard** — `internal/clipboard/` with Read/Write: Win32 `GetClipboardData`/`SetClipboardData` on Windows, `pbpaste`/`pbcopy` on macOS, `xclip`/`xsel` on Linux; bounded reads (10MB max); cached tool detection on Unix
+- **Bracketed paste** — Ctrl+V wraps clipboard content in `ESC[200~...ESC[201~` sequences for safe multi-line paste
+- **Paste in dialogs** — Ctrl+V works in dialog input fields (SSH connection form, Settings); control characters sanitized before insertion
+- **Ctrl+Arrow word jump** — sends `ESC[1;5C`/`ESC[1;5D` to PTY for shell word navigation
+- **Ctrl+Alt+Arrow 3-word jump** — sends triple word-jump escape sequences
+- **Stripe dialog wider** — `dialog_width = 75` for long forward URLs
+- **SSH dialog wider** — `dialog_width = 100` for long connection details
+- **Selection shortcuts in help** — F1 → Shortcuts shows Shift+Arrows, Ctrl+Shift+Arrows, Enter, Right-click, Esc
+- `FindPaneRectAt` layout method for mouse-to-pane coordinate mapping
+- `scripts/rebuild.ps1` — kill daemon, reset state, rebuild executables
+
+### Changed
+
+- Scripts moved from project root to `scripts/` directory
+- `dialogBorder.Width()` uses Lipgloss v2 border-inclusive semantics (`Width(width)` on border, `Width(innerW+2).Height(innerH+1)` on pane body)
+- Plugin `dialog_width` override now scoped to instance-specific screens only (instance list and form), not all create-pane dialog steps
+- `tea.ClearScreen` fired on dialog open and width-changing transitions to prevent BT v2 diff renderer artifacts
+- Ghost buffer VT reset now only for `claude-code` pane type (SSH and other terminal-like panes preserve history)
+- Docker images updated from `golang:1.24-alpine` to `golang:1.25-alpine`
+- Cursor hidden via `\x1b[?25l` — custom cursor rendered via `insertCursor()`
+
+### Fixed
+
+- Pane border/size wrong after Lipgloss v2 migration — Width/Height now compensate for border-inclusive semantics
+- Dialog border broken on first render — `tea.ClearScreen` on pane-to-dialog transitions
+- Dialog border broken on width change — `tea.ClearScreen` on plugin selection with custom `dialog_width`
+- Edit cursor glyph not rendering on Windows — replaced `▎` (U+258E) with `│` (U+2502)
+- Paste broken everywhere after v2 migration — restored platform-native `clipboard.Read()` (OSC 52 read not supported by most terminals)
+- SSH ghost buffer not restored after daemon restart — VT reset condition changed from "all non-terminal" to "only claude-code"
+- Selection extending into empty terminal lines — bounded by `lastContentLine()`
+- Soft-wrap detection in text extraction — detects both VT character wraps and near-edge content
+
+### Removed
+
+- Custom `utf16PtrToString` — replaced with `windows.UTF16PtrToString` from `golang.org/x/sys/windows`
+
 ## [0.6.0] - 2026-03-18
 
 ### Added

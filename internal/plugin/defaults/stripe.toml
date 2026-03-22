@@ -28,6 +28,9 @@ default = "http://localhost:8080/webhook"
 name = "description"
 label = "Description"
 
+[display]
+dialog_width = 75
+
 [persistence]
 strategy = "rerun"
 ghost_buffer = true

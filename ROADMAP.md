@@ -95,18 +95,15 @@ Side-by-side note-taking mode linked to individual panes. When enabled, the wind
 - Notes persist independently from workspace state — they survive pane destruction and can be browsed later
 - Exiting notes mode restores the previous layout
 
-### M8: Bubble Tea v2 Migration
+### M8: Bubble Tea v2 Migration + Text Selection
+> BT v2 + Lipgloss v2 migration, text selection, platform-native clipboard.
 
-Migrate from Bubble Tea v1 to v2 when it becomes stable.
+Migrated from Bubble Tea v1.3.10 to v2.0.2 and Lipgloss v1.1.0 to v2.0.2. Added text selection (keyboard + mouse) and platform-native clipboard support.
 
-**Motivation:**
-- v2 has improved key handling (shift/ctrl modifiers distinguishable)
-- Better performance and rendering
-- Built-in spinner and other components
-- Breaking API changes — requires updating all TUI code
-
-**Approach:**
-- Wait for v2 stable release
-- Update import paths and adapt to new API
-- Leverage new key modifier support to enable `Ctrl+Shift+W` and similar bindings
-- Replace custom spinner with built-in component
+Key changes:
+- **Bubble Tea v2** — declarative View (`tea.View`), typed mouse events, `KeyPressMsg`
+- **Lipgloss v2** — border-inclusive Width/Height semantics (compensated in pane/dialog rendering)
+- **Text selection** — Shift+Arrow (char), Ctrl+Shift+Arrow (word), Ctrl+Alt+Shift+Arrow (3 words), mouse click+drag
+- **Clipboard** — platform-native Read/Write (`internal/clipboard/`): Win32 API, pbcopy/xclip
+- **Bracketed paste** — Ctrl+V wraps content in `ESC[200~...ESC[201~` for safe multi-line paste
+- **Go 1.25** — required by Lipgloss v2, Docker images updated

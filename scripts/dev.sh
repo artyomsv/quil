@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Docker-based development commands — no local Go required.
 
-GO_IMAGE="golang:1.24-alpine"
+GO_IMAGE="golang:1.25-alpine"
 PROJECT_DIR="E:/Projects/Stukans/Prototypes/calyx"
 DOCKER_RUN="docker run --rm -v ${PROJECT_DIR}:/src -v aethel-gomod:/go/pkg/mod -w //src ${GO_IMAGE}"
 

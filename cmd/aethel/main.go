@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/artyomsv/aethel/internal/config"
 	"github.com/artyomsv/aethel/internal/ipc"
 	"github.com/artyomsv/aethel/internal/plugin"
@@ -233,7 +233,7 @@ func launchTUI() {
 	restoreWindowSize()
 
 	model := tui.NewModel(client, cfg, version, reg)
-	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	p := tea.NewProgram(model)
 	finalModel, err := p.Run()
 	if err != nil {
 		log.Printf("TUI error: %v", err)

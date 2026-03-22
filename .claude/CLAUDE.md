@@ -6,10 +6,10 @@ Aethel is a persistent workflow orchestrator / terminal multiplexer for AI-nativ
 
 ## Tech Stack
 
-- **Language:** Go 1.24
+- **Language:** Go 1.25
 - **Module path:** `github.com/artyomsv/aethel`
-- **TUI:** Bubble Tea v1 (`github.com/charmbracelet/bubbletea` v1.3.10)
-- **Styling:** Lipgloss v1 (`github.com/charmbracelet/lipgloss` v1.1.0)
+- **TUI:** Bubble Tea v2 (`charm.land/bubbletea/v2` v2.0.2)
+- **Styling:** Lipgloss v2 (`charm.land/lipgloss/v2` v2.0.2)
 - **PTY (Unix):** `creack/pty/v2`
 - **PTY (Windows):** `charmbracelet/x/conpty` v0.2.0
 - **Config:** TOML via `BurntSushi/toml`
@@ -27,20 +27,21 @@ Client-daemon model:
 - `internal/pty/` — Cross-platform PTY (build tags: `linux || darwin || freebsd`, `windows`)
 - `internal/shellinit/` — Automatic OSC 7 shell integration (embedded init scripts, `//go:embed`)
 - `internal/plugin/` — Pane plugin system (registry, built-ins, TOML loading, scraper)
-- `internal/tui/` — Bubble Tea model, tabs, panes, layout tree, styles
+- `internal/clipboard/` — Platform-native clipboard read/write (Win32 API, pbpaste/pbcopy, xclip/xsel)
+- `internal/tui/` — Bubble Tea model, tabs, panes, layout tree, styles, text selection
 
 ## Building
 
-Go and make are NOT installed locally. Use `dev.sh` (Docker-based):
+Go and make are NOT installed locally. Use `scripts/dev.sh` (Docker-based):
 
 ```bash
-./dev.sh build          # Build TUI binaries (aethel + aetheld)
-./dev.sh test           # Run tests
-./dev.sh test-race      # Tests with race detector (CGo — handled automatically)
-./dev.sh vet            # Lint
-./dev.sh cross          # Cross-compile all platforms
-./dev.sh image          # Build scratch-based Docker image
-./dev.sh clean          # Remove built binaries
+./scripts/dev.sh build          # Build TUI binaries (aethel + aetheld)
+./scripts/dev.sh test           # Run tests
+./scripts/dev.sh test-race      # Tests with race detector (CGo — handled automatically)
+./scripts/dev.sh vet            # Lint
+./scripts/dev.sh cross          # Cross-compile all platforms
+./scripts/dev.sh image          # Build scratch-based Docker image
+./scripts/dev.sh clean          # Remove built binaries
 ```
 
 Go module cache is persisted in a Docker volume (`aethel-gomod`) for fast repeated builds.
@@ -49,7 +50,7 @@ Go module cache is persisted in a Docker volume (`aethel-gomod`) for fast repeat
 
 - Platform-specific code uses `//go:build` tags (not `// +build`)
 - ConPTY API: `conpty.New(width, height, flags)` — 3 args, uses `Spawn()`, reads/writes directly on ConPty object
-- Bubble Tea v2 / Lipgloss v2 are NOT available — use v1 import paths
+- Bubble Tea v2 / Lipgloss v2 — import paths: `charm.land/bubbletea/v2`, `charm.land/lipgloss/v2`. View() returns `tea.View` struct (not string). KeyMsg is `tea.KeyPressMsg`. MouseMsg split into `tea.MouseClickMsg`, `tea.MouseWheelMsg`, `tea.MouseMotionMsg`, `tea.MouseReleaseMsg`. Clipboard via `internal/clipboard` (platform-native: Win32/pbcopy/xclip). Paste wraps in bracketed paste sequences (`\x1b[200~...\x1b[201~`). Mouse modifiers: `msg.Mod.Contains(tea.ModCtrl)`. Quit: `tea.Quit` (function value, not call)
 - IPC protocol: 4-byte big-endian length prefix + JSON payload
 - `.gitignore` uses root-anchored patterns (`/aethel`, `/aetheld`) to avoid matching `cmd/` directories
 - Pane layout uses a binary split tree (`LayoutNode` in `internal/tui/layout.go`) — each internal node has its own `SplitDir`, enabling mixed H/V splits (tmux-style). The tree is serialized to JSON and persisted in the daemon's `Tab.Layout` field for reconnect restoration
@@ -75,6 +76,8 @@ Go module cache is persisted in a Docker volume (`aethel-gomod`) for fast repeat
 - Pane type fields: `Pane.Type` (plugin name, default "terminal"), `Pane.PluginState` (scraped key-values), `Pane.InstanceName`, `Pane.InstanceArgs`. All persisted in workspace JSON, backward compatible (missing `type` → "terminal")
 - Resume strategies: `cwd_only` (terminal), `rerun` (stripe, ssh), `preassign_id` (claude-code), `session_scrape`, `none`. Dispatched in `spawnPane()` with `restoring` flag
 - Window size persistence: `~/.aethel/window.json` stores cols, rows, pixel dimensions, and maximized state. Saved on TUI exit, restored on launch via platform-specific code (`cmd/aethel/window_windows.go` uses Win32 `MoveWindow`/`ShowWindow`, `cmd/aethel/window_unix.go` uses xterm resize sequence). Follows the same build-tag file-split pattern as `proc_unix.go`/`proc_windows.go`
+- Text selection: `internal/tui/selection.go` — keyboard (Shift+Arrow, Ctrl+Shift+Arrow word jump, Ctrl+Alt+Shift+Arrow 3-word jump) and mouse (click+drag). Enter copies selection to clipboard via `internal/clipboard`. Shell cursor follows selection horizontally in real-time (same-line only; cross-line is visual-only to avoid triggering command history). Selection bounded by `lastContentLine()` — won't extend into empty terminal area
+- Clipboard: `internal/clipboard/` — platform-native Read/Write. Windows: Win32 `GetClipboardData`/`SetClipboardData`. Unix: `pbpaste`/`pbcopy` (macOS), `xclip`/`xsel` (Linux). Paste (`Ctrl+V`) wraps content in bracketed paste sequences. Dialog paste sanitizes control characters
 
 ## Dev Mode
 
@@ -82,8 +85,8 @@ Run a separate dev instance alongside production using `--dev` or `AETHEL_HOME`:
 
 ```bash
 ./aethel --dev              # Uses .aethel/ in project root (gitignored)
-./aethel-dev.sh             # Shortcut (Linux/macOS)
-./aethel-dev.ps1            # Shortcut (Windows PowerShell)
+./scripts/aethel-dev.sh             # Shortcut (Linux/macOS)
+./scripts/aethel-dev.ps1            # Shortcut (Windows PowerShell)
 AETHEL_HOME=/custom/path ./aethel  # Arbitrary data directory
 ```
 
@@ -92,10 +95,10 @@ AETHEL_HOME=/custom/path ./aethel  # Arbitrary data directory
 ## Developer Utilities
 
 ```bash
-./kill-daemon.sh        # Force-stop daemon (Linux/macOS)
-./kill-daemon.ps1       # Force-stop daemon (Windows PowerShell)
-./reset-daemon.sh       # Stop daemon + wipe persisted state (Linux/macOS)
-./reset-daemon.ps1      # Stop daemon + wipe persisted state (Windows PowerShell)
+./scripts/kill-daemon.sh        # Force-stop daemon (Linux/macOS)
+./scripts/kill-daemon.ps1       # Force-stop daemon (Windows PowerShell)
+./scripts/reset-daemon.sh       # Stop daemon + wipe persisted state (Linux/macOS)
+./scripts/reset-daemon.ps1      # Stop daemon + wipe persisted state (Windows PowerShell)
 ```
 
 ## Documents
@@ -116,4 +119,4 @@ AETHEL_HOME=/custom/path ./aethel  # Arbitrary data directory
 - **M5:** Polish — JSON transformer, observability, encrypted tokens
 - **M6:** Pane Focus — full-window focus mode for single pane
 - **M7:** Pane Notes — side-by-side note-taking linked to panes
-- **M8:** Bubble Tea v2 migration
+- **M8 (Done):** Bubble Tea v2 + Lipgloss v2 migration — declarative View, typed mouse events, platform-native clipboard (Win32/pbcopy/xclip), text selection (keyboard + mouse), bracketed paste

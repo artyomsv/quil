@@ -37,7 +37,7 @@ name = "description"
 label = "Description"
 
 [display]
-dialog_width = 60
+dialog_width = 100
 
 [persistence]
 strategy = "rerun"

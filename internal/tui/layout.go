@@ -3,7 +3,7 @@ package tui
 import (
 	"encoding/json"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 )
 
 // SplitDir determines how child nodes are arranged.
@@ -301,6 +301,60 @@ func (n *LayoutNode) FindPaneAt(x, y, ox, oy, w, h int) *PaneModel {
 			return pane
 		}
 		return n.Right.FindPaneAt(x, y, ox, oy+topH, w, bottomH)
+	}
+
+	return nil
+}
+
+// PaneRect holds a pane and its screen-space rectangle.
+type PaneRect struct {
+	Pane         *PaneModel
+	OX, OY, W, H int
+}
+
+// FindPaneRectAt returns the pane and its screen rectangle at coordinates (x, y).
+func (n *LayoutNode) FindPaneRectAt(x, y, ox, oy, w, h int) *PaneRect {
+	if n == nil {
+		return nil
+	}
+	if x < ox || x >= ox+w || y < oy || y >= oy+h {
+		return nil
+	}
+	if n.IsLeaf() {
+		if n.Pane == nil {
+			return nil
+		}
+		return &PaneRect{Pane: n.Pane, OX: ox, OY: oy, W: w, H: h}
+	}
+
+	switch n.Split {
+	case SplitHorizontal:
+		leftW := int(float64(w) * n.Ratio)
+		if leftW < minPaneW {
+			leftW = minPaneW
+		}
+		rightW := w - leftW
+		if rightW < minPaneW {
+			rightW = minPaneW
+		}
+		if r := n.Left.FindPaneRectAt(x, y, ox, oy, leftW, h); r != nil {
+			return r
+		}
+		return n.Right.FindPaneRectAt(x, y, ox+leftW, oy, rightW, h)
+
+	case SplitVertical:
+		topH := int(float64(h) * n.Ratio)
+		if topH < minPaneH {
+			topH = minPaneH
+		}
+		bottomH := h - topH
+		if bottomH < minPaneH {
+			bottomH = minPaneH
+		}
+		if r := n.Left.FindPaneRectAt(x, y, ox, oy, w, topH); r != nil {
+			return r
+		}
+		return n.Right.FindPaneRectAt(x, y, ox, oy+topH, w, bottomH)
 	}
 
 	return nil

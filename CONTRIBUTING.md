@@ -12,13 +12,13 @@
 ### With Docker (no local Go or make required)
 
 ```bash
-./dev.sh build        # Build both binaries
-./dev.sh test         # Run tests
-./dev.sh test-race    # Tests with race detector
-./dev.sh vet          # Lint
-./dev.sh cross        # Cross-compile all platforms
-./dev.sh image        # Build minimal Docker image
-./dev.sh clean        # Remove built binaries
+./scripts/dev.sh build        # Build both binaries
+./scripts/dev.sh test         # Run tests
+./scripts/dev.sh test-race    # Tests with race detector
+./scripts/dev.sh vet          # Lint
+./scripts/dev.sh cross        # Cross-compile all platforms
+./scripts/dev.sh image        # Build minimal Docker image
+./scripts/dev.sh clean        # Remove built binaries
 ```
 
 ### With local Go + make
@@ -69,7 +69,7 @@ PTY and IPC layers have platform-specific implementations:
 When modifying these, ensure the `Session` interface in `session.go` is satisfied on all platforms. Verify with:
 
 ```bash
-./dev.sh cross   # or: make cross (with local Go)
+./scripts/dev.sh cross   # or: make cross (with local Go)
 ```
 
 ## Commit Messages

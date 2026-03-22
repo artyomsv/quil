@@ -98,8 +98,8 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed design decisions.
 
 ```bash
 # With Docker (no local Go required)
-./dev.ps1 build    # PowerShell (Windows)
-./dev.sh build     # Bash (Linux/macOS)
+./scripts/dev.ps1 build    # PowerShell (Windows)
+./scripts/dev.sh build     # Bash (Linux/macOS)
 
 # With local Go
 make build
@@ -191,9 +191,9 @@ internal/
 
 ## Development
 
-All commands are available via `dev.sh` (Docker, no local Go) or `make` (local Go):
+All commands are available via `scripts/dev.sh` (Docker, no local Go) or `make` (local Go):
 
-| Task | Docker (`dev.ps1` / `dev.sh`) | Local Go |
+| Task | Docker (`scripts/dev.ps1` / `scripts/dev.sh`) | Local Go |
 |---|---|---|
 | Build | `build` | `make build` |
 | Test | `test` | `make test` |

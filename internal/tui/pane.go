@@ -1,13 +1,14 @@
 package tui
 
 import (
+	"image/color"
 	"net/url"
 	"strings"
 	"time"
 
 	uv "github.com/charmbracelet/ultraviolet"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/vt"
 
@@ -34,6 +35,7 @@ type PaneModel struct {
 	preparing     bool                // true for newly created panes (not restored)
 	resumeStart   time.Time           // when resuming/preparing started (minimum display duration)
 	spinnerFrame  int                 // current frame index in spinnerFrames
+	activeSel     *Selection          // set by Model before View() for selection rendering
 }
 
 func NewPaneModel(id string, bufSize int) *PaneModel {
@@ -138,15 +140,17 @@ func (p *PaneModel) View() string {
 		innerH = 1
 	}
 
-	content := p.renderContent()
+	content := p.renderContent(p.activeSel)
 
 	// Render content with left, right, bottom borders (no top).
+	// Lipgloss v2: Width/Height include borders in the budget (v1 was additive).
+	// +2 width for left+right borders, +1 height for bottom border (top removed).
 	bodyStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderTop(false).
 		BorderForeground(borderColor).
-		Width(innerW).
-		Height(innerH)
+		Width(innerW + 2).
+		Height(innerH + 1)
 
 	body := bodyStyle.Render(content)
 
@@ -156,7 +160,7 @@ func (p *PaneModel) View() string {
 	return topLine + "\n" + body
 }
 
-func buildTopBorder(width int, cwd, name string, color lipgloss.TerminalColor, ghost, resuming, preparing bool, spinnerFrame int) string {
+func buildTopBorder(width int, cwd, name string, color color.Color, ghost, resuming, preparing bool, spinnerFrame int) string {
 	if ghost {
 		if name == "" {
 			name = "restored"
@@ -235,7 +239,12 @@ func parseOSC7Path(raw string) string {
 	return path
 }
 
-func (p *PaneModel) renderContent() string {
+func (p *PaneModel) renderContent(sel *Selection) string {
+	// If selection is active on this pane, use cell-by-cell rendering
+	if sel != nil && sel.PaneID == p.ID {
+		return p.renderWithSelection(sel)
+	}
+
 	if p.scrollBack == 0 {
 		// Live view — use Render() for full color support
 		content := p.vt.Render()
@@ -250,6 +259,40 @@ func (p *PaneModel) renderContent() string {
 
 	// Scrollback view — render from scrollback + screen cells
 	return p.renderScrollback()
+}
+
+// renderWithSelection renders content cell-by-cell with selection highlighting.
+func (p *PaneModel) renderWithSelection(sel *Selection) string {
+	w := p.vt.Width()
+	h := p.vt.Height()
+	sbLen := p.vt.ScrollbackLen()
+
+	viewStart := sbLen - p.scrollBack
+
+	lines := make([]string, h)
+	for i := 0; i < h; i++ {
+		absLine := viewStart + i
+
+		var getCell func(x int) *uv.Cell
+		if absLine < 0 {
+			getCell = func(x int) *uv.Cell { return nil }
+		} else if absLine < sbLen {
+			srcLine := absLine
+			getCell = func(x int) *uv.Cell {
+				return p.vt.ScrollbackCellAt(x, srcLine)
+			}
+		} else {
+			screenLine := absLine - sbLen
+			getCell = func(x int) *uv.Cell {
+				return p.vt.CellAt(x, screenLine)
+			}
+		}
+
+		selStart, selEnd := sel.ColRange(absLine, w)
+		lines[i] = p.styledCellLineWithSelection(getCell, w, selStart, selEnd)
+	}
+
+	return strings.Join(lines, "\n")
 }
 
 func (p *PaneModel) renderScrollback() string {
@@ -306,6 +349,80 @@ func (p *PaneModel) renderScrollback() string {
 	}
 
 	return strings.Join(lines, "\n")
+}
+
+// styledCellLineWithSelection renders a row with optional selection highlighting.
+// selStart/selEnd define the selected column range (-1 = no selection on this row).
+func (p *PaneModel) styledCellLineWithSelection(getCell func(x int) *uv.Cell, width, selStart, selEnd int) string {
+	var b strings.Builder
+	var lastSGR string
+	var pending int
+
+	for x := 0; x < width; x++ {
+		cell := getCell(x)
+		ch := " "
+		styled := false
+		var sgr string
+
+		if cell != nil {
+			if cell.Content != "" {
+				ch = cell.Content
+			}
+			if !cell.Style.IsZero() {
+				styled = true
+				sgr = cell.Style.String()
+			}
+		}
+
+		// Check if this cell is selected
+		inSelection := selStart >= 0 && x >= selStart && x <= selEnd
+
+		if inSelection {
+			// Flush pending spaces before selection
+			if pending > 0 {
+				b.WriteString(strings.Repeat(" ", pending))
+				pending = 0
+			}
+			if lastSGR != "" {
+				b.WriteString("\x1b[m")
+				lastSGR = ""
+			}
+			// Render with reverse video
+			b.WriteString("\x1b[7m")
+			b.WriteString(ch)
+			b.WriteString("\x1b[m")
+			continue
+		}
+
+		// Normal rendering (same as styledCellLine)
+		if ch == " " && !styled {
+			if lastSGR != "" {
+				b.WriteString("\x1b[m")
+				lastSGR = ""
+			}
+			pending++
+			continue
+		}
+
+		if pending > 0 {
+			b.WriteString(strings.Repeat(" ", pending))
+			pending = 0
+		}
+		if sgr != lastSGR {
+			if !styled && lastSGR != "" {
+				b.WriteString("\x1b[m")
+			} else if styled {
+				b.WriteString(sgr)
+			}
+			lastSGR = sgr
+		}
+		b.WriteString(ch)
+	}
+
+	if lastSGR != "" {
+		b.WriteString("\x1b[m")
+	}
+	return b.String()
 }
 
 // styledCellLine renders a row of cells with ANSI styles preserved.

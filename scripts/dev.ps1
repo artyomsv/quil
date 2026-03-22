@@ -7,7 +7,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$GoImage = "golang:1.24-alpine"
+$GoImage = "golang:1.25-alpine"
 $ProjectDir = $PSScriptRoot
 
 function Invoke-DockerGo {

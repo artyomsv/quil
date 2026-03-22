@@ -75,6 +75,42 @@ func TestAethelDir_EnvOverride(t *testing.T) {
 	}
 }
 
+func TestShowDisclaimerDefault(t *testing.T) {
+	cfg := config.Default()
+	if !cfg.UI.ShowDisclaimer {
+		t.Error("expected ShowDisclaimer=true by default")
+	}
+}
+
+func TestSaveLoadRoundtrip(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.toml")
+
+	cfg := config.Default()
+	cfg.UI.ShowDisclaimer = false
+	cfg.UI.TabDock = "bottom"
+
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	loaded, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if loaded.UI.ShowDisclaimer {
+		t.Error("expected ShowDisclaimer=false after roundtrip")
+	}
+	if loaded.UI.TabDock != "bottom" {
+		t.Errorf("expected tab_dock=bottom, got %s", loaded.UI.TabDock)
+	}
+	// Defaults should survive
+	if loaded.Keybindings.NewTab != "ctrl+t" {
+		t.Errorf("expected default new_tab=ctrl+t, got %s", loaded.Keybindings.NewTab)
+	}
+}
+
 func TestPathHelpers(t *testing.T) {
 	dir := config.AethelDir()
 	if dir == "" {

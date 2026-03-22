@@ -20,6 +20,18 @@ import (
 )
 
 const dialogWidth = 50
+const disclaimerWidth = 60
+
+// disclaimerTips are shown randomly in the startup disclaimer dialog.
+var disclaimerTips = []struct{ title, body string }{
+	{"Quick Navigation", "Ctrl+Arrow jumps words, Ctrl+Alt+Arrow jumps 3 words.\nCtrl+Up/Down jumps paragraphs in the editor."},
+	{"Split Panes", "Alt+H splits horizontal, Alt+V splits vertical.\nTab/Shift+Tab cycles between panes."},
+	{"Typed Panes", "Ctrl+N creates panes with specific tools (SSH, Claude Code).\nPlugins are configurable via F1 > Plugins."},
+	{"Session Persistence", "Your workspace survives reboots -- tabs, panes, and scroll\nhistory are automatically saved and restored."},
+	{"Pane Management", "F2 renames tabs, Alt+F2 renames panes.\nCtrl+W closes pane, Alt+W closes tab."},
+	{"Text Selection", "Shift+Arrows selects text, Enter copies to clipboard.\nCtrl+V pastes. Works in terminal panes and editors."},
+	{"Customization", "Edit ~/.aethel/config.toml to change keybindings,\nscroll speed, and other preferences. Press F1 for help."},
+}
 
 var (
 	dialogBorder = lipgloss.NewStyle().
@@ -57,12 +69,11 @@ var (
 				Width(24)
 )
 
-
 // settingsField describes one editable config field.
 type settingsField struct {
-	label string
-	get   func(m *Model) string
-	set   func(m *Model, val string)
+	label  string
+	get    func(m *Model) string
+	set    func(m *Model, val string)
 	isBool bool
 }
 
@@ -72,10 +83,10 @@ func settingsFields() []settingsField {
 			label: "Snapshot interval",
 			get:   func(m *Model) string { return m.cfg.Daemon.SnapshotInterval },
 			set: func(m *Model, v string) {
-			if d, err := time.ParseDuration(v); err == nil && d > 0 {
-				m.cfg.Daemon.SnapshotInterval = v
-			}
-		},
+				if d, err := time.ParseDuration(v); err == nil && d > 0 {
+					m.cfg.Daemon.SnapshotInterval = v
+				}
+			},
 		},
 		{
 			label:  "Ghost dimmed",
@@ -114,11 +125,20 @@ func settingsFields() []settingsField {
 			label: "Log level",
 			get:   func(m *Model) string { return m.cfg.Logging.Level },
 			set: func(m *Model, v string) {
-			switch v {
-			case "debug", "info", "warn", "error":
-				m.cfg.Logging.Level = v
-			}
+				switch v {
+				case "debug", "info", "warn", "error":
+					m.cfg.Logging.Level = v
+				}
+			},
 		},
+		{
+			label: "Show disclaimer",
+			get:   func(m *Model) string { return boolStr(m.cfg.UI.ShowDisclaimer) },
+			set: func(m *Model, _ string) {
+				m.cfg.UI.ShowDisclaimer = !m.cfg.UI.ShowDisclaimer
+				m.configChanged = true
+			},
+			isBool: true,
 		},
 	}
 }
@@ -151,6 +171,16 @@ func shortcutsList(m *Model) []struct{ key, desc string } {
 		{"Enter", "Copy selection"},
 		{"Right-click", "Copy selection"},
 		{"Esc", "Clear selection"},
+		{"", ""},
+		{"", "── Editor ──"},
+		{"Shift+Arrows", "Select text (editor)"},
+		{"Ctrl+Shift+←→", "Select word (editor)"},
+		{"Ctrl+Alt+Shift+←→", "Select 3 words (editor)"},
+		{"Enter", "Copy selection (editor)"},
+		{"Ctrl+X", "Cut selection (editor)"},
+		{"Ctrl+V", "Paste (editor)"},
+		{"Ctrl+A", "Select all (editor)"},
+		{"Ctrl+S", "Save (editor)"},
 	}
 }
 
@@ -176,6 +206,8 @@ func (m Model) handleDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.handlePluginsKey(msg)
 	case dialogTOMLEditor:
 		return m.handleTOMLEditorKey(msg)
+	case dialogDisclaimer:
+		return m.handleDisclaimerKey(msg)
 	}
 	return m, nil
 }
@@ -204,6 +236,35 @@ func (m Model) handleAboutKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.dialog = dialogPlugins
 			m.dialogCursor = 0
 		}
+	}
+	return m, nil
+}
+
+func (m Model) handleDisclaimerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.dialog = dialogNone
+		m.dialogCursor = 0
+		return m, tea.ClearScreen
+	case "enter":
+		if m.dialogCursor == 1 {
+			// "Don't show again"
+			m.cfg.UI.ShowDisclaimer = false
+			m.configChanged = true
+		}
+		m.dialog = dialogNone
+		m.dialogCursor = 0
+		return m, tea.ClearScreen
+	case "left":
+		if m.dialogCursor > 0 {
+			m.dialogCursor--
+		}
+	case "right":
+		if m.dialogCursor < 1 {
+			m.dialogCursor++
+		}
+	case "tab":
+		m.dialogCursor = (m.dialogCursor + 1) % 2
 	}
 	return m, nil
 }
@@ -295,8 +356,8 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				}
 			}
 			if err := SaveInstances(config.InstancesPath(), m.instanceStore); err != nil {
-			log.Printf("save instances: %v", err)
-		}
+				log.Printf("save instances: %v", err)
+			}
 			m.dialog = dialogCreatePane
 			m.createPaneStep = 2
 			m.dialogCursor = 0
@@ -358,6 +419,9 @@ func (m Model) renderDialog() string {
 		content = m.renderPluginsDialog()
 	case dialogTOMLEditor:
 		// Rendered in View() as full-screen, not here
+	case dialogDisclaimer:
+		width = disclaimerWidth
+		content = m.renderDisclaimerDialog()
 	}
 
 	box := dialogBorder.Width(width).Render(content)
@@ -392,12 +456,68 @@ func (m Model) renderAboutDialog() string {
 	return b.String()
 }
 
+func (m Model) renderDisclaimerDialog() string {
+	var b strings.Builder
+	w := disclaimerWidth
+
+	// Title
+	title := dialogTitle.Render("Aethel v" + m.version + " -- Early Beta")
+	b.WriteString(lipgloss.PlaceHorizontal(w, lipgloss.Center, title))
+	b.WriteString("\n\n")
+
+	// Beta notice
+	b.WriteString(dialogSubtle.Render("  This software is in early beta. Some features may"))
+	b.WriteByte('\n')
+	b.WriteString(dialogSubtle.Render("  not work as expected. Linux and macOS support has"))
+	b.WriteByte('\n')
+	b.WriteString(dialogSubtle.Render("  not been fully tested yet."))
+	b.WriteString("\n\n")
+
+	// Separator
+	b.WriteString(dialogSubtle.Render("  " + strings.Repeat("-", w-4)))
+	b.WriteString("\n\n")
+
+	// Random tip
+	tip := disclaimerTips[m.disclaimerTipIdx]
+	b.WriteString(dialogSelected.Render("  Tip: " + tip.title))
+	b.WriteByte('\n')
+	for _, line := range strings.Split(tip.body, "\n") {
+		b.WriteString(dialogNormal.Render("  " + line))
+		b.WriteByte('\n')
+	}
+	b.WriteByte('\n')
+
+	// Separator
+	b.WriteString(dialogSubtle.Render("  " + strings.Repeat("-", w-4)))
+	b.WriteByte('\n')
+
+	// Buttons
+	okLabel := "  OK  "
+	dontShowLabel := "  Don't show again  "
+	if m.dialogCursor == 0 {
+		okLabel = dialogSelected.Render("[" + okLabel + "]")
+		dontShowLabel = dialogSubtle.Render(" " + dontShowLabel + " ")
+	} else {
+		okLabel = dialogSubtle.Render(" " + okLabel + " ")
+		dontShowLabel = dialogSelected.Render("[" + dontShowLabel + "]")
+	}
+	buttons := okLabel + "    " + dontShowLabel
+	b.WriteString(lipgloss.PlaceHorizontal(w, lipgloss.Center, buttons))
+	b.WriteByte('\n')
+
+	// Hint
+	b.WriteByte('\n')
+	b.WriteString(dialogSubtle.Render("  Tab/Arrows navigate   Enter select   Esc close"))
+
+	return b.String()
+}
+
 func (m Model) renderSettingsDialog() string {
 	var b strings.Builder
 
 	b.WriteString(dialogTitle.Render("Settings"))
 	b.WriteByte('\n')
-	b.WriteString(dialogSubtle.Render("  changes apply to this session only"))
+	b.WriteString(dialogSubtle.Render("  some changes persist to config.toml"))
 	b.WriteString("\n\n")
 
 	fields := settingsFields()
@@ -1005,8 +1125,8 @@ func (m Model) submitInstanceForm(p *plugin.PanePlugin) (tea.Model, tea.Cmd) {
 	}
 	m.instanceStore[m.selectedPlugin] = append(m.instanceStore[m.selectedPlugin], inst)
 	if err := SaveInstances(config.InstancesPath(), m.instanceStore); err != nil {
-			log.Printf("save instances: %v", err)
-		}
+		log.Printf("save instances: %v", err)
+	}
 
 	// Build args from template
 	m.selectedInstanceArgs = BuildArgs(p.Command.ArgTemplate, fieldMap)
@@ -1211,7 +1331,7 @@ func (m Model) handleTOMLEditorKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	saved, closed := m.tomlEditor.HandleKey(msg.String())
+	saved, closed, cmd := m.tomlEditor.HandleKey(msg.String())
 
 	if saved {
 		// Reload plugins after save, re-enable mouse
@@ -1223,11 +1343,15 @@ func (m Model) handleTOMLEditorKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.dialog = dialogPlugins
 		m.dialogCursor = 0
 		client := m.client
-		return m, tea.Batch(func() tea.Msg {
+		reloadCmd := func() tea.Msg {
 			msg, _ := ipc.NewMessage(ipc.MsgReloadPlugins, nil)
 			client.Send(msg)
 			return nil
-		})
+		}
+		if cmd != nil {
+			return m, tea.Batch(reloadCmd, cmd)
+		}
+		return m, tea.Batch(reloadCmd)
 	}
 
 	if closed {
@@ -1236,7 +1360,7 @@ func (m Model) handleTOMLEditorKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	return m, nil
+	return m, cmd
 }
 
 // --- Plugin error dialog ---

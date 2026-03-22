@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math/rand"
 	"os"
 	"strings"
 	"time"
@@ -99,42 +100,43 @@ const (
 	dialogInstanceForm
 	dialogPlugins
 	dialogTOMLEditor
+	dialogDisclaimer
 )
 
 type Model struct {
-	tabs            []*TabModel
-	activeTab       int
-	width           int
-	height          int
-	client          *ipc.Client
-	cfg             config.Config
-	version         string
-	attached        bool
-	renaming        bool
-	renameInput     string
-	renamingPane    bool
-	paneRenameInput string
-	pendingWidth    int
-	pendingHeight   int
-	resizeSeq       int
-	pendingSplit    map[string]*LayoutNode // tabID → placeholder node awaiting pane from daemon
-	dialog          dialogScreen           // active dialog screen
-	dialogCursor    int                    // highlighted item in dialog
-	dialogEdit      bool                   // editing a settings value
-	dialogInput     string                 // text input buffer for editing
-	confirmKind        string                 // "pane" or "tab"
-	confirmID          string                 // ID of pane/tab to delete
-	confirmName        string                 // display name for confirmation
-	devMode            bool                   // true when AETHEL_HOME is set
-	pluginRegistry     *plugin.Registry       // plugin registry (shared with daemon)
-	lastWidth          int                    // last known window width (for persistence)
-	lastHeight         int                    // last known window height (for persistence)
-	createPaneStep     int                    // 0=category, 1=plugin, 2=split direction
-	selectedCategory   int                    // selected category index in create pane dialog
-	selectedPlugin     string                 // selected plugin name in create pane dialog
-	pluginErrorTitle      string                 // title for plugin error dialog
+	tabs                 []*TabModel
+	activeTab            int
+	width                int
+	height               int
+	client               *ipc.Client
+	cfg                  config.Config
+	version              string
+	attached             bool
+	renaming             bool
+	renameInput          string
+	renamingPane         bool
+	paneRenameInput      string
+	pendingWidth         int
+	pendingHeight        int
+	resizeSeq            int
+	pendingSplit         map[string]*LayoutNode // tabID → placeholder node awaiting pane from daemon
+	dialog               dialogScreen           // active dialog screen
+	dialogCursor         int                    // highlighted item in dialog
+	dialogEdit           bool                   // editing a settings value
+	dialogInput          string                 // text input buffer for editing
+	confirmKind          string                 // "pane" or "tab"
+	confirmID            string                 // ID of pane/tab to delete
+	confirmName          string                 // display name for confirmation
+	devMode              bool                   // true when AETHEL_HOME is set
+	pluginRegistry       *plugin.Registry       // plugin registry (shared with daemon)
+	lastWidth            int                    // last known window width (for persistence)
+	lastHeight           int                    // last known window height (for persistence)
+	createPaneStep       int                    // 0=category, 1=plugin, 2=split direction
+	selectedCategory     int                    // selected category index in create pane dialog
+	selectedPlugin       string                 // selected plugin name in create pane dialog
+	pluginErrorTitle     string                 // title for plugin error dialog
 	pluginErrorMessage   string                 // message for plugin error dialog
-	instanceStore        InstanceStore           // saved plugin instances (loaded from instances.json)
+	instanceStore        InstanceStore          // saved plugin instances (loaded from instances.json)
 	instanceFormValues   []string               // form field values (indexed by FormField position)
 	instanceFormCursor   int                    // active field in instance form
 	selectedInstanceArgs []string               // args from selected instance (for IPC)
@@ -144,10 +146,12 @@ type Model struct {
 	mouseDown            bool                   // true while left mouse button is held
 	mouseStartX          int                    // screen X of mouse press
 	mouseStartY          int                    // screen Y of mouse press
+	configChanged        bool                   // true when config needs saving on exit
+	disclaimerTipIdx     int                    // random tip index for disclaimer dialog
 }
 
 func NewModel(client *ipc.Client, cfg config.Config, version string, registry *plugin.Registry) Model {
-	return Model{
+	m := Model{
 		client:         client,
 		cfg:            cfg,
 		version:        version,
@@ -155,12 +159,23 @@ func NewModel(client *ipc.Client, cfg config.Config, version string, registry *p
 		pluginRegistry: registry,
 		instanceStore:  LoadInstances(config.InstancesPath()),
 	}
+	if cfg.UI.ShowDisclaimer && len(disclaimerTips) > 0 {
+		m.dialog = dialogDisclaimer
+		m.disclaimerTipIdx = rand.Intn(len(disclaimerTips))
+	}
+	return m
 }
 
 // WindowSize returns the last known window dimensions for persistence.
 func (m Model) WindowSize() (width, height int) {
 	return m.lastWidth, m.lastHeight
 }
+
+// Config returns the current config (may be modified by user actions).
+func (m Model) Config() config.Config { return m.cfg }
+
+// ConfigChanged reports whether the config was modified and needs saving.
+func (m Model) ConfigChanged() bool { return m.configChanged }
 
 func (m Model) Init() tea.Cmd {
 	log.Print("TUI Init — starting listener")
@@ -293,7 +308,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.PasteMsg:
-		if m.dialog != dialogNone && m.dialogEdit {
+		if m.dialog == dialogTOMLEditor && m.tomlEditor != nil {
+			text := strings.ReplaceAll(msg.Content, "\r", "")
+			m.tomlEditor.InsertMultiLine(text)
+			m.tomlEditor.Dirty = true
+		} else if m.dialog != dialogNone && m.dialogEdit {
 			m.dialogInput += sanitizeDialogInput(msg.Content)
 		} else {
 			m.sendClipboardToPane(msg.Content)
@@ -302,6 +321,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case dialogPasteMsg:
 		m.dialogInput += sanitizeDialogInput(string(msg))
+		return m, nil
+
+	case editorPasteMsg:
+		if m.dialog == dialogTOMLEditor && m.tomlEditor != nil {
+			text := strings.ReplaceAll(string(msg), "\r", "")
+			m.tomlEditor.InsertMultiLine(text)
+			m.tomlEditor.Dirty = true
+		}
 		return m, nil
 
 	case PaneOutputMsg:
@@ -1212,10 +1239,14 @@ func (m Model) renderTOMLEditorFullScreen() string {
 	// Editor content
 	b.WriteString(e.Render())
 
-	// Status bar
-	status := fmt.Sprintf(" Ctrl+S save  Esc close    Ln %d, Col %d", e.CursorRow+1, e.CursorCol+1)
+	// Status bar — context-sensitive hints
+	var status string
 	if e.SaveErr != "" {
 		status = fmt.Sprintf(" \x1b[31mError: %s\x1b[0m\x1b[48;5;236m\x1b[38;5;250m    Ln %d, Col %d", e.SaveErr, e.CursorRow+1, e.CursorCol+1)
+	} else if e.Sel != nil && !e.Sel.IsEmpty() {
+		status = fmt.Sprintf(" Enter copy  Ctrl+X cut  Esc clear    Ln %d, Col %d", e.CursorRow+1, e.CursorCol+1)
+	} else {
+		status = fmt.Sprintf(" Ctrl+S save  Ctrl+V paste  Esc close    Ln %d, Col %d", e.CursorRow+1, e.CursorCol+1)
 	}
 	for len(status) < m.width {
 		status += " "
@@ -1565,15 +1596,31 @@ func (m *Model) updateMouseSelection(tab *TabModel, curX, curY, tabH int) {
 	// Clamp
 	w := pane.vt.Width()
 	h := pane.vt.Height()
-	if startCol < 0 { startCol = 0 }
-	if startCol >= w { startCol = w - 1 }
-	if curCol < 0 { curCol = 0 }
-	if curCol >= w { curCol = w - 1 }
-	if startLine < 0 { startLine = 0 }
-	if curLine < 0 { curLine = 0 }
+	if startCol < 0 {
+		startCol = 0
+	}
+	if startCol >= w {
+		startCol = w - 1
+	}
+	if curCol < 0 {
+		curCol = 0
+	}
+	if curCol >= w {
+		curCol = w - 1
+	}
+	if startLine < 0 {
+		startLine = 0
+	}
+	if curLine < 0 {
+		curLine = 0
+	}
 	maxLine := sbLen + h - 1
-	if startLine > maxLine { startLine = maxLine }
-	if curLine > maxLine { curLine = maxLine }
+	if startLine > maxLine {
+		startLine = maxLine
+	}
+	if curLine > maxLine {
+		curLine = maxLine
+	}
 
 	m.selection = &Selection{
 		PaneID: pane.ID,

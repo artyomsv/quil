@@ -1,6 +1,8 @@
 package config
 
 import (
+	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -42,6 +44,7 @@ type UIConfig struct {
 	Theme            string `toml:"theme"`
 	MouseScrollLines int    `toml:"mouse_scroll_lines"`
 	PageScrollLines  int    `toml:"page_scroll_lines"`
+	ShowDisclaimer   bool   `toml:"show_disclaimer"`
 }
 
 type KeybindingsConfig struct {
@@ -87,6 +90,7 @@ func Default() Config {
 			Theme:            "default",
 			MouseScrollLines: 3,
 			PageScrollLines:  0, // 0 = half-page (dynamic)
+			ShowDisclaimer:   true,
 		},
 		Keybindings: KeybindingsConfig{
 			Quit:            "ctrl+q",
@@ -115,6 +119,26 @@ func Load(path string) (Config, error) {
 		return cfg, err
 	}
 	return cfg, nil
+}
+
+// Save writes the config to disk atomically (write .tmp then rename).
+func Save(path string, cfg Config) error {
+	var buf bytes.Buffer
+	if err := toml.NewEncoder(&buf).Encode(cfg); err != nil {
+		return fmt.Errorf("encode config: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
+	}
+	tmpPath := path + ".tmp"
+	if err := os.WriteFile(tmpPath, buf.Bytes(), 0600); err != nil {
+		return fmt.Errorf("write config: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("rename config: %w", err)
+	}
+	return nil
 }
 
 func AethelDir() string {

@@ -241,9 +241,16 @@ func launchTUI() {
 		os.Exit(1)
 	}
 
-	// Save window size for next launch
+	// Save window size and config changes for next launch
 	if m, ok := finalModel.(tui.Model); ok {
 		saveWindowSize(m)
+		if m.ConfigChanged() {
+			if err := config.Save(config.ConfigPath(), m.Config()); err != nil {
+				log.Printf("save config: %v", err)
+			} else {
+				log.Print("config saved (disclaimer preference updated)")
+			}
+		}
 	}
 	log.Print("TUI exited normally")
 }

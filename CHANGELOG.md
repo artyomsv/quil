@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Editor text selection** — Shift+Arrow (character), Ctrl+Shift+Arrow (word), Ctrl+Alt+Shift+Arrow (3 words), Shift+Home/End (line) in TOML editor
+- **Editor clipboard** — Enter copies selection, Ctrl+X cuts, Ctrl+V pastes (async via `editorPasteMsg`), Ctrl+A selects all
+- **Editor selection rendering** — reverse video highlight with cursor-within-selection underline
+- **Editor selection-aware editing** — typing with selection replaces selected text; backspace/delete removes selection
+- **Editor multi-line paste** — Ctrl+V and bracketed paste handle newlines, splitting into editor lines
+- **Editor shortcuts in help** — F1 → Shortcuts shows editor selection and clipboard shortcuts
+- **Editor paragraph navigation** — Ctrl+Up/Down jumps to next/previous empty line; Ctrl+Shift+Up/Down selects to paragraph boundary
+- **Editor word navigation** — Ctrl+Arrow (1-word) and Ctrl+Alt+Arrow (3-word) jump in editor
+- **Beta disclaimer dialog** — shown on first launch with random tips/shortcuts; "Don't show again" persists to `config.toml`
+- **Config save** — `config.Save()` function for atomic config persistence (used by disclaimer opt-out)
+- `ui.show_disclaimer` config field (default `true`)
+
 ## [0.7.0] - 2026-03-22
 
 ### Added

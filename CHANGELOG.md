@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Roadmap PRDs** — 11 detailed Product Requirements Documents in `docs/roadmap/`: workspace files, MCP server, command palette, notification center, pre-built binaries, demo GIF, community plugins, process health, tmux migration, cross-pane events, session sharing
+- **Restructured ROADMAP.md** — organized into Core/Growth/Advanced categories with priority matrix, strategic pain-layer analysis, and feature synergy notes
+- **Notification center concept (M12)** — centralized event sidebar with pane navigation and history stack; PRD covers process exit detection, plugin notification handlers, and incremental integration path
+
 ## [0.9.0] - 2026-03-23
 
 ### Added

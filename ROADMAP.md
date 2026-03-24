@@ -2,6 +2,8 @@
 
 Detailed progress tracker and future plans for Aethel.
 
+---
+
 ## Completed
 
 ### M1: Foundation
@@ -39,6 +41,19 @@ Key capabilities:
 - **Atomic pane replacement** — swap pane type in-place
 - **Resuming/preparing spinner** — animated border indicator during pane startup
 - **Window size persistence** — save/restore terminal dimensions across restarts
+
+### M6: Pane Focus Mode
+> Full-window focus for single pane (Ctrl+E toggle).
+
+Ctrl+E toggles the active pane to fill the entire tab content area. Other panes keep running in the background, receiving PTY output. The layout tree stays intact — focus mode is a pure rendering toggle on `TabModel.focusMode`.
+
+Key behaviors:
+- **Ctrl+E** toggles focus on/off (configurable via `focus_pane` keybinding)
+- Active pane resized to full tab dimensions; VT emulator + daemon PTY updated
+- `[focus]` indicator in status bar
+- Pane navigation (Tab/Shift+Tab) disabled in focus mode
+- Split (Alt+H/V) and close (Ctrl+W) auto-exit focus mode
+- Focus state is NOT persisted — restarting Aethel returns to normal layout
 
 ### M8: Bubble Tea v2 Migration + Text Selection
 > BT v2 + Lipgloss v2 migration, text selection, platform-native clipboard, editor enhancements.
@@ -85,22 +100,7 @@ Key changes:
 
 ---
 
-### M6: Pane Focus Mode
-> Full-window focus for single pane (Ctrl+E toggle).
-
-Ctrl+E toggles the active pane to fill the entire tab content area. Other panes keep running in the background, receiving PTY output. The layout tree stays intact — focus mode is a pure rendering toggle on `TabModel.focusMode`.
-
-Key behaviors:
-- **Ctrl+E** toggles focus on/off (configurable via `focus_pane` keybinding)
-- Active pane resized to full tab dimensions; VT emulator + daemon PTY updated
-- `[focus]` indicator in status bar
-- Pane navigation (Tab/Shift+Tab) disabled in focus mode
-- Split (Alt+H/V) and close (Ctrl+W) auto-exit focus mode
-- Focus state is NOT persisted — restarting Aethel returns to normal layout
-
----
-
-## Planned
+## Planned — Core Features
 
 ### M7: Pane Notes
 
@@ -115,3 +115,122 @@ Side-by-side note-taking mode linked to individual panes. When enabled, the wind
 - Notes persist independently from workspace state — they survive pane destruction and can be browsed later
 - Exiting notes mode restores the previous layout
 
+### M9: Project Workspace Files — [PRD](docs/roadmap/workspace-files.md)
+
+> `.aethel.toml` checked into repo — the "docker-compose.yml for dev environments."
+
+Define workspace blueprints committed to git: tabs, panes, plugins, CWDs, commands. `cd my-project && aethel` materializes the entire dev environment. Every team member gets the exact same setup. **Network effect within teams.**
+
+### M10: MCP Server — [PRD](docs/roadmap/mcp-server.md)
+
+> Make Aethel the AI's eyes and hands via Model Context Protocol.
+
+`aethel mcp` subcommand as a thin bridge: MCP JSON-RPC (stdio) ↔ daemon IPC (socket). AI assistants can read pane output, send commands, check process status, and create panes. **No other terminal multiplexer offers this** — Aethel becomes the bridge between AI and the dev environment.
+
+### M11: Command Palette — [PRD](docs/roadmap/command-palette.md)
+
+> `Ctrl+Shift+P` fuzzy-find overlay for everything.
+
+Search panes, execute commands, switch tabs, create panes, open saved instances — all from a single keyboard shortcut. Fuzzy string matching makes every feature instantly discoverable.
+
+### M12: Notification Center — [PRD](docs/roadmap/notification-center.md)
+
+> Centralized event sidebar with pane navigation and history stack.
+
+Processes emit events when they finish or need attention. A non-modal sidebar shows pending events with severity icons. Select an event to jump to the linked pane; `Alt+Backspace` returns to where you were (like browser back). Eliminates manual pane polling — the **context-switching tax** that costs developers dozens of interruptions per day. Ships incrementally: process exit detection first, plugin output patterns second, cross-pane event bus integration third.
+
+---
+
+## Planned — Growth & Adoption
+
+### Pre-Built Binaries & One-Line Install — [PRD](docs/roadmap/pre-built-binaries.md)
+
+> `curl -sSfL https://get.aethel.dev | sh` — zero friction install.
+
+goreleaser for GitHub Releases, Homebrew tap, winget/scoop manifests, install script. **Priority 1** — prerequisite for everything else. Every extra step between "I want to try this" and "it's running" loses users.
+
+### The "Holy Shit" Demo — [PRD](docs/roadmap/demo-gif.md)
+
+> 30-second GIF: 5 panes → reboot → `aethel` → everything snaps back.
+
+The entire pitch in one visual. Goes on README, Hacker News, r/programming, Twitter/X. Adoption for developer tools is driven by a single viral moment. **Priority 2** — prerequisite for marketing.
+
+### Community Plugin Registry — [PRD](docs/roadmap/community-plugins.md)
+
+> `aethel plugin install aider` — community TOML plugins via GitHub.
+
+GitHub repo as registry, `aethel plugin install/search/update` CLI. High-value plugins: Aider, lazygit, k9s, Docker Compose, ngrok, pgcli. Every plugin makes Aethel useful to a new audience.
+
+### tmux Migration Path — [PRD](docs/roadmap/tmux-migration.md)
+
+> Import keybindings and session layouts from tmux.
+
+`aethel import-keybindings tmux` reads `~/.tmux.conf`, maps to `config.toml`. `aethel import-session` snapshots a running tmux session into an Aethel workspace. tmux has millions of users — making switching painless is the fastest acquisition channel.
+
+---
+
+## Planned — Advanced Features
+
+### Smart Process Health & Auto-Restart — [PRD](docs/roadmap/process-health.md)
+
+> Green/yellow/red health indicators, auto-restart with backoff, stale detection.
+
+Elevate `error_handlers` to a first-class health monitoring system. Auto-restart crashed panes with exponential backoff, detect stale processes, fire desktop notifications. Plugin TOML `[health]` section for configuration. Moves Aethel from "terminal organizer" to "workflow orchestrator."
+
+### Cross-Pane Context Awareness — [PRD](docs/roadmap/cross-pane-events.md)
+
+> Build fails → AI pane gets a toast → one keypress sends context.
+
+Event bus connecting panes: build errors notify AI assistants, SSH auto-reconnects, test passes flash green, webhook counters badge tabs. Creates an **integrated experience** that no collection of separate terminals can match.
+
+### Session Sharing — [PRD](docs/roadmap/session-sharing.md)
+
+> `aethel serve --share` / `aethel attach --host` for pair programming.
+
+Remote workspace viewing and collaboration over TCP+TLS. Read-only by default, collaborative mode optional. tmux session sharing but with project context, typed panes, and AI session awareness.
+
+---
+
+## Priority Matrix
+
+| Priority | Feature | Effort | Impact | Category |
+|----------|---------|--------|--------|----------|
+| 1 | Pre-built binaries + one-line install | Small | Critical | Growth |
+| 2 | "Holy Shit" demo GIF/video | Small | Critical | Growth |
+| 3 | Project workspace files (`.aethel.toml`) | Medium | Very High | Core |
+| 4 | Command palette (`Ctrl+Shift+P`) | Medium | High | Core |
+| 5 | MCP server for AI integration | Medium | Very High | Core |
+| 5 | Notification center (sidebar + pane history) | Medium | High | Core |
+| 6 | Community plugin registry + 10 plugins | Medium | High | Growth |
+| 7 | Smart health monitoring + auto-restart | Medium | High | Advanced |
+| 8 | tmux keybinding import | Small | Medium | Growth |
+| 9 | Cross-pane context / event bus | Large | High | Advanced |
+| 10 | Session sharing | Large | Medium | Advanced |
+
+## Strategic Notes
+
+### The Developer Pain (Layered)
+
+| Layer | Pain | Who Feels It |
+|-------|------|-------------|
+| 1. Context destruction | Reboot = 10-15 min of manual reconstruction | Every multi-terminal developer |
+| 2. AI session loss | Losing a Claude conversation means losing reasoning context worth hours | AI-native developers (growing fast) |
+| 3. Project fragmentation | 5 terminals + 3 tools + 2 SSH = no single "project view" | Team leads, senior engineers |
+| 4. Onboarding friction | "How do I run this?" → README with 8 terminal commands | New team members, OSS contributors |
+| 5. Cross-tool blindness | AI assistant can't see the build error in the next pane | Everyone using AI coding tools |
+
+Aethel currently solves layers 1-3 well. **Layers 4-5 are where the breakout potential lives.**
+
+Items 1-2 (install + demo) cost almost nothing and are **prerequisites for everything else**. Items 3 (workspace files) and 5 (MCP) are the **strategic differentiators** — workspace files create team adoption and MCP creates the "AI-native" moat that no other multiplexer can claim.
+
+### Feature Synergies
+
+The **notification center** (M12), **process health** (advanced), and **cross-pane events** (advanced) form a layered system:
+
+| Layer | Feature | Role |
+|-------|---------|------|
+| UI | Notification Center (M12) | Sidebar, pane navigation, history stack |
+| Monitoring | Process Health | Health states, auto-restart, stale detection |
+| Orchestration | Cross-Pane Events | Event bus, pane-to-pane context passing |
+
+M12 ships first as a standalone feature (process exit + output patterns). The other two extend it when they ship — health states and cross-pane events feed into the notification center's event queue.

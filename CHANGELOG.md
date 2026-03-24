@@ -12,6 +12,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Roadmap PRDs** — 11 detailed Product Requirements Documents in `docs/roadmap/`: workspace files, MCP server, command palette, notification center, pre-built binaries, demo GIF, community plugins, process health, tmux migration, cross-pane events, session sharing
 - **Restructured ROADMAP.md** — organized into Core/Growth/Advanced categories with priority matrix, strategic pain-layer analysis, and feature synergy notes
 - **Notification center concept (M12)** — centralized event sidebar with pane navigation and history stack; PRD covers process exit detection, plugin notification handlers, and incremental integration path
+- **Pre-built binaries & release infrastructure** — GoReleaser config for 5 platforms (linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64); two-workflow CI split: `release.yml` handles version bump + tag, `goreleaser.yml` builds + publishes GitHub Release with `.tar.gz`/`.zip` archives and SHA256 checksums
+- **One-line install script** — `scripts/install.sh` detects OS/arch, fetches latest release from GitHub API, verifies SHA256 checksum, installs to `~/.local/bin/`; supports `AETHEL_VERSION` for pinned installs and `GITHUB_TOKEN` for API auth
+- **Daemon version reporting** — `aetheld version` subcommand, version logged at startup; consistent `-ldflags` injection across all build paths (GoReleaser, dev.sh, dev.ps1, rebuild.ps1, Makefile)
+
+### Fixed
+
+- CI Go version mismatch — updated from 1.24 to 1.25 in `ci.yml` and `release.yml` to match `go.mod`
 
 ## [0.9.0] - 2026-03-23
 

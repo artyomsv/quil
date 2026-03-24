@@ -41,7 +41,7 @@ docker run --rm `
     -v "aethel-gomod:/go/pkg/mod" `
     -w /src `
     $GoImage `
-    sh -c "GOOS=windows GOARCH=amd64 go build -ldflags ""-X main.version=$ver"" -o aethel.exe ./cmd/aethel && GOOS=windows GOARCH=amd64 go build -o aetheld.exe ./cmd/aetheld"
+    sh -c "GOOS=windows GOARCH=amd64 go build -ldflags ""-X main.version=$ver"" -o aethel.exe ./cmd/aethel && GOOS=windows GOARCH=amd64 go build -ldflags ""-X main.version=$ver"" -o aetheld.exe ./cmd/aetheld"
 
 if ($LASTEXITCODE -eq 0) {
     Write-Host "Done" -ForegroundColor Green

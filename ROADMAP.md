@@ -145,9 +145,9 @@ Processes emit events when they finish or need attention. A non-modal sidebar sh
 
 ### Pre-Built Binaries & One-Line Install — [PRD](docs/roadmap/pre-built-binaries.md)
 
-> `curl -sSfL https://get.aethel.dev | sh` — zero friction install.
+> `curl -sSfL .../install.sh | sh` — zero friction install.
 
-goreleaser for GitHub Releases, Homebrew tap, winget/scoop manifests, install script. **Priority 1** — prerequisite for everything else. Every extra step between "I want to try this" and "it's running" loses users.
+GoReleaser cross-compiles 5 platform pairs (linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64) with SHA256 checksums. Two-workflow split: `release.yml` handles version bump + tag, `goreleaser.yml` builds + publishes GitHub Release. Install script for Linux/macOS. **Homebrew tap, Scoop, Winget deferred** (need external repos).
 
 ### The "Holy Shit" Demo — [PRD](docs/roadmap/demo-gif.md)
 
@@ -195,7 +195,7 @@ Remote workspace viewing and collaboration over TCP+TLS. Read-only by default, c
 
 | Priority | Feature | Effort | Impact | Category |
 |----------|---------|--------|--------|----------|
-| 1 | Pre-built binaries + one-line install | Small | Critical | Growth |
+| 1 | Pre-built binaries + one-line install (in progress) | Small | Critical | Growth |
 | 2 | "Holy Shit" demo GIF/video | Small | Critical | Growth |
 | 3 | Project workspace files (`.aethel.toml`) | Medium | Very High | Core |
 | 4 | Command palette (`Ctrl+Shift+P`) | Medium | High | Core |

@@ -10,7 +10,14 @@ import (
 	"github.com/artyomsv/aethel/internal/daemon"
 )
 
+var version = "dev" // overridden at build time via -ldflags "-X main.version=..."
+
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "version" {
+		fmt.Println("aetheld v" + version)
+		return
+	}
+
 	background := len(os.Args) > 1 && os.Args[1] == "--background"
 
 	logFile := initLogging()
@@ -41,7 +48,7 @@ func main() {
 	}
 
 	d := daemon.New(cfg)
-	log.Println("aetheld starting...")
+	log.Printf("aetheld v%s starting...", version)
 	fmt.Println("aetheld — starting daemon...")
 	if err := d.Start(); err != nil {
 		log.Printf("failed to start daemon: %v", err)

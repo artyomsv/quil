@@ -25,7 +25,7 @@ function Invoke-DockerGo {
 switch ($Command) {
     "build" {
         Write-Host "[aethel] Building Windows binaries..." -ForegroundColor Cyan
-        Invoke-DockerGo sh -c "GOOS=windows GOARCH=amd64 go build -v -o aethel.exe ./cmd/aethel && GOOS=windows GOARCH=amd64 go build -v -o aetheld.exe ./cmd/aetheld"
+        Invoke-DockerGo sh -c 'VER=$(cat VERSION) && LDFLAGS="-X main.version=$VER" && GOOS=windows GOARCH=amd64 go build -v -ldflags "$LDFLAGS" -o aethel.exe ./cmd/aethel && GOOS=windows GOARCH=amd64 go build -v -ldflags "$LDFLAGS" -o aetheld.exe ./cmd/aetheld'
         Write-Host "[aethel] Built: aethel.exe, aetheld.exe" -ForegroundColor Green
     }
 
@@ -49,7 +49,7 @@ switch ($Command) {
 
     "cross" {
         Write-Host "[aethel] Cross-compiling for all platforms..." -ForegroundColor Cyan
-        Invoke-DockerGo sh -c "mkdir -p dist && GOOS=linux GOARCH=amd64 go build -o dist/aethel-linux-amd64 ./cmd/aethel && GOOS=linux GOARCH=amd64 go build -o dist/aetheld-linux-amd64 ./cmd/aetheld && GOOS=linux GOARCH=arm64 go build -o dist/aethel-linux-arm64 ./cmd/aethel && GOOS=linux GOARCH=arm64 go build -o dist/aetheld-linux-arm64 ./cmd/aetheld && GOOS=darwin GOARCH=amd64 go build -o dist/aethel-darwin-amd64 ./cmd/aethel && GOOS=darwin GOARCH=amd64 go build -o dist/aetheld-darwin-amd64 ./cmd/aetheld && GOOS=darwin GOARCH=arm64 go build -o dist/aethel-darwin-arm64 ./cmd/aethel && GOOS=darwin GOARCH=arm64 go build -o dist/aetheld-darwin-arm64 ./cmd/aetheld && GOOS=windows GOARCH=amd64 go build -o dist/aethel-windows-amd64.exe ./cmd/aethel && GOOS=windows GOARCH=amd64 go build -o dist/aetheld-windows-amd64.exe ./cmd/aetheld"
+        Invoke-DockerGo sh -c 'VER=$(cat VERSION) && LDFLAGS="-X main.version=$VER" && mkdir -p dist && GOOS=linux GOARCH=amd64 go build -ldflags "$LDFLAGS" -o dist/aethel-linux-amd64 ./cmd/aethel && GOOS=linux GOARCH=amd64 go build -ldflags "$LDFLAGS" -o dist/aetheld-linux-amd64 ./cmd/aetheld && GOOS=linux GOARCH=arm64 go build -ldflags "$LDFLAGS" -o dist/aethel-linux-arm64 ./cmd/aethel && GOOS=linux GOARCH=arm64 go build -ldflags "$LDFLAGS" -o dist/aetheld-linux-arm64 ./cmd/aetheld && GOOS=darwin GOARCH=amd64 go build -ldflags "$LDFLAGS" -o dist/aethel-darwin-amd64 ./cmd/aethel && GOOS=darwin GOARCH=amd64 go build -ldflags "$LDFLAGS" -o dist/aetheld-darwin-amd64 ./cmd/aetheld && GOOS=darwin GOARCH=arm64 go build -ldflags "$LDFLAGS" -o dist/aethel-darwin-arm64 ./cmd/aethel && GOOS=darwin GOARCH=arm64 go build -ldflags "$LDFLAGS" -o dist/aetheld-darwin-arm64 ./cmd/aetheld && GOOS=windows GOARCH=amd64 go build -ldflags "$LDFLAGS" -o dist/aethel-windows-amd64.exe ./cmd/aethel && GOOS=windows GOARCH=amd64 go build -ldflags "$LDFLAGS" -o dist/aetheld-windows-amd64.exe ./cmd/aetheld'
         Write-Host "[aethel] Cross-compilation complete. See dist/" -ForegroundColor Green
     }
 

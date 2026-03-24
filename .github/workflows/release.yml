@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: 'Dry run — compute version & build binaries but skip commit, tag, and release'
+        description: 'Dry run — compute version but skip commit, tag, and release'
         type: boolean
         default: true
 
@@ -28,7 +28,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version: '1.25'
 
       - name: Determine version bump
         id: bump
@@ -83,8 +83,9 @@ jobs:
 
       - name: Update version files
         if: steps.bump.outputs.skip != 'true'
+        env:
+          VERSION: ${{ steps.bump.outputs.version }}
         run: |
-          VERSION=${{ steps.bump.outputs.version }}
           echo "$VERSION" > VERSION
 
           # Update CHANGELOG: insert versioned header after [Unreleased]
@@ -99,66 +100,25 @@ jobs:
           go vet ./...
           go test ./...
 
-      - name: Build binaries
-        if: steps.bump.outputs.skip != 'true'
-        run: |
-          VERSION=${{ steps.bump.outputs.version }}
-          LDFLAGS="-X main.version=${VERSION}"
-          mkdir -p dist
-
-          for PAIR in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
-            OS="${PAIR%%/*}"
-            ARCH="${PAIR##*/}"
-            echo "Building ${OS}/${ARCH}..."
-            GOOS=$OS GOARCH=$ARCH go build -ldflags "$LDFLAGS" -o dist/aethel ./cmd/aethel
-            GOOS=$OS GOARCH=$ARCH go build -ldflags "$LDFLAGS" -o dist/aetheld ./cmd/aetheld
-            tar -czf "dist/aethel-${OS}-${ARCH}.tar.gz" -C dist aethel aetheld
-            rm dist/aethel dist/aetheld
-          done
-
-          echo "::notice::Built archives:"
-          ls -lh dist/*.tar.gz
-
-      - name: Extract changelog
-        if: steps.bump.outputs.skip != 'true'
-        run: |
-          VERSION=${{ steps.bump.outputs.version }}
-          # Extract content between ## [VERSION] and the next ## [
-          BODY=$(sed -n "/^## \[${VERSION}\]/,/^## \[/{ /^## \[${VERSION}\]/d; /^## \[/d; p; }" CHANGELOG.md)
-          echo "$BODY" > dist/release-notes.md
-          echo "::notice::Release notes:"
-          cat dist/release-notes.md
-
       - name: Dry run summary
         if: steps.bump.outputs.skip != 'true' && env.DRY_RUN == 'true'
+        env:
+          VERSION: ${{ steps.bump.outputs.version }}
+          BUMP: ${{ steps.bump.outputs.bump }}
         run: |
-          echo "::warning::DRY RUN — skipping commit, tag, and release creation"
-          echo "Would have released: v${{ steps.bump.outputs.version }}"
-          echo "Bump type: ${{ steps.bump.outputs.bump }}"
-          echo "Archives built:"
-          ls -lh dist/*.tar.gz
+          echo "::warning::DRY RUN — skipping commit, tag, and release"
+          echo "Would have released: v${VERSION}"
+          echo "Bump type: ${BUMP}"
 
-      - name: Commit version bump
+      - name: Commit version bump and tag
         if: steps.bump.outputs.skip != 'true' && env.DRY_RUN != 'true'
+        env:
+          VERSION: ${{ steps.bump.outputs.version }}
         run: |
-          VERSION=${{ steps.bump.outputs.version }}
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add VERSION CHANGELOG.md
           git commit -m "chore(release): v${VERSION}"
           git tag "v${VERSION}"
           git push origin master --tags
-
-      - name: Create GitHub Release
-        if: steps.bump.outputs.skip != 'true' && env.DRY_RUN != 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          VERSION=${{ steps.bump.outputs.version }}
-          gh release create "v${VERSION}" \
-            --title "v${VERSION}" \
-            --notes-file dist/release-notes.md \
-            dist/aethel-linux-amd64.tar.gz \
-            dist/aethel-linux-arm64.tar.gz \
-            dist/aethel-darwin-amd64.tar.gz \
-            dist/aethel-darwin-arm64.tar.gz
+          echo "::notice::Tagged v${VERSION} — GoReleaser workflow will build and publish the release"

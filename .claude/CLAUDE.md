@@ -46,6 +46,17 @@ Go and make are NOT installed locally. Use `scripts/dev.sh` (Docker-based):
 
 Go module cache is persisted in a Docker volume (`aethel-gomod`) for fast repeated builds.
 
+## Release Process
+
+Two-workflow split in GitHub Actions:
+
+1. **`release.yml`** — triggers on push to master. Analyzes conventional commits since last tag, computes version bump (major/minor/patch), updates `VERSION` + `CHANGELOG.md`, commits `chore(release): vX.Y.Z`, creates git tag, pushes. Does NOT build binaries or create GitHub Release.
+2. **`goreleaser.yml`** — triggers on tag push (`v*`). Runs GoReleaser to cross-compile 5 platforms (linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64), creates `.tar.gz` (Unix) / `.zip` (Windows) archives with both `aethel` + `aetheld`, publishes GitHub Release with SHA256 checksums.
+
+GoReleaser config: `.goreleaser.yml` (version 2). Version injected via `-ldflags "-s -w -X main.version={{.Version}}"` on both binaries.
+
+Install script: `scripts/install.sh` — POSIX shell, detects OS/arch, downloads from GitHub Releases, verifies checksum, installs to `~/.local/bin/`.
+
 ## Key Conventions
 
 - Platform-specific code uses `//go:build` tags (not `// +build`)

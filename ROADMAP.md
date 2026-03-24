@@ -147,7 +147,7 @@ Processes emit events when they finish or need attention. A non-modal sidebar sh
 
 > `curl -sSfL .../install.sh | sh` — zero friction install.
 
-GoReleaser cross-compiles 5 platform pairs (linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64) with SHA256 checksums. Two-workflow split: `release.yml` handles version bump + tag, `goreleaser.yml` builds + publishes GitHub Release. Install script for Linux/macOS. **Homebrew tap, Scoop, Winget deferred** (need external repos).
+GoReleaser cross-compiles 5 platform pairs (linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64) with SHA256 checksums. Single `release.yml` workflow: version bump + tag job, then GoReleaser build + publish job. Install script for Linux/macOS. **Homebrew tap, Scoop, Winget deferred** (need external repos).
 
 ### The "Holy Shit" Demo — [PRD](docs/roadmap/demo-gif.md)
 

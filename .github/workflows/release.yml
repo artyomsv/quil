@@ -21,6 +21,9 @@ jobs:
     runs-on: ubuntu-latest
     # Skip release commits to prevent infinite loop
     if: "!startsWith(github.event.head_commit.message, 'chore(release):')"
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+      skip: ${{ steps.bump.outputs.skip }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -121,4 +124,39 @@ jobs:
           git commit -m "chore(release): v${VERSION}"
           git tag "v${VERSION}"
           git push origin master --tags
-          echo "::notice::Tagged v${VERSION} — GoReleaser workflow will build and publish the release"
+          echo "::notice::Tagged v${VERSION}"
+
+  goreleaser:
+    needs: release
+    if: needs.release.outputs.skip != 'true' && (inputs.dry_run != true)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v${{ needs.release.outputs.version }}
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Extract release notes from CHANGELOG.md
+        env:
+          VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' || {
+            echo "::error::Invalid version format: $VERSION"
+            exit 1
+          }
+          sed -n "/^## \[${VERSION}\]/,/^## \[/{ /^## \[${VERSION}\]/d; /^## \[/d; p; }" CHANGELOG.md \
+            | tr -d '\r' > /tmp/release-notes.md
+          echo "::notice::Release notes for v${VERSION}:"
+          cat /tmp/release-notes.md
+
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean --release-notes /tmp/release-notes.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

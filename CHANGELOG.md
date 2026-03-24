@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-03-24
+
 ### Fixed
 
 - **GoReleaser workflow not triggering** — tags pushed with `GITHUB_TOKEN` don't trigger other workflows; merged goreleaser into `release.yml` as a second job with `needs: release`

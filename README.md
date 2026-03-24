@@ -94,11 +94,28 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed design decisions.
 
 ## Quick Start
 
-### Prerequisites
+### Install
 
-- Docker **or** Go 1.25+
+```bash
+# Linux / macOS — one-line install
+curl -sSfL https://raw.githubusercontent.com/artyomsv/aethel/master/scripts/install.sh | sh
 
-### Build
+# Go users
+go install github.com/artyomsv/aethel/cmd/aethel@latest
+go install github.com/artyomsv/aethel/cmd/aetheld@latest
+
+# Windows — download .zip from GitHub Releases
+# https://github.com/artyomsv/aethel/releases/latest
+```
+
+### Run
+
+```bash
+# Launch the TUI (auto-starts daemon if needed)
+aethel
+```
+
+### Build from Source
 
 ```bash
 # With Docker (no local Go required)
@@ -107,16 +124,6 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed design decisions.
 
 # With local Go
 make build
-```
-
-### Run
-
-```bash
-# Start the daemon
-aethel daemon start
-
-# Launch the TUI (auto-starts daemon if needed)
-aethel
 ```
 
 ### Key Bindings
@@ -221,10 +228,10 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development guidelines.
 | **M2: Persistence** | Done | Workspace snapshots, ghost buffer persistence, shell respawn, reboot-proof sessions |
 | **M3: Resume Engine** | Done | Regex scrapers, token extraction, AI session resume via pre-assigned UUIDs |
 | **M4: Plugin System** | Done | TOML plugins, typed panes, pane creation dialog, error handlers, window size persistence |
-| **M5: Polish** | Planned | JSON transformer, observability, encrypted tokens, OS service integration |
+| **M5: Polish** | In Progress | JSON transformer, observability, encrypted tokens, OS service integration |
 | **M6: Pane Focus** | Done | Ctrl+E toggles active pane full-screen, other panes keep running |
-| **M7: Pane Notes** | Planned | Side-by-side note-taking linked to panes |
 | **M8: Bubble Tea v2** | Done | Bubble Tea v2/Lipgloss v2 migration, text selection, clipboard, editor enhancements |
+| **Pre-built Binaries** | In Progress | GoReleaser, GitHub Releases, install script, cross-platform archives |
 
 See [ROADMAP.md](ROADMAP.md) for detailed progress and feature descriptions.
 

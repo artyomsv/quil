@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **GoReleaser workflow not triggering** — tags pushed with `GITHUB_TOKEN` don't trigger other workflows; merged goreleaser into `release.yml` as a second job with `needs: release`
+- **Dry run executing goreleaser** — boolean vs string comparison bug in job `if:` condition; `DRY_RUN` now forwarded through job outputs as string
+- **Actions pinned to commit SHAs** — `actions/checkout`, `actions/setup-go`, `goreleaser/goreleaser-action` pinned to immutable SHAs for supply-chain security
+- **Per-job permissions** — `contents: write` moved from workflow-level to per-job blocks for least-privilege
+
 ## [0.10.0] - 2026-03-24
 
 ### Added
@@ -14,7 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Roadmap PRDs** — 11 detailed Product Requirements Documents in `docs/roadmap/`: workspace files, MCP server, command palette, notification center, pre-built binaries, demo GIF, community plugins, process health, tmux migration, cross-pane events, session sharing
 - **Restructured ROADMAP.md** — organized into Core/Growth/Advanced categories with priority matrix, strategic pain-layer analysis, and feature synergy notes
 - **Notification center concept (M12)** — centralized event sidebar with pane navigation and history stack; PRD covers process exit detection, plugin notification handlers, and incremental integration path
-- **Pre-built binaries & release infrastructure** — GoReleaser config for 5 platforms (linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64); two-workflow CI split: `release.yml` handles version bump + tag, `goreleaser.yml` builds + publishes GitHub Release with `.tar.gz`/`.zip` archives and SHA256 checksums
+- **Pre-built binaries & release infrastructure** — GoReleaser config for 5 platforms (linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64); `release.yml` handles version bump + tag + GoReleaser build, publishes GitHub Release with `.tar.gz`/`.zip` archives and SHA256 checksums
 - **One-line install script** — `scripts/install.sh` detects OS/arch, fetches latest release from GitHub API, verifies SHA256 checksum, installs to `~/.local/bin/`; supports `AETHEL_VERSION` for pinned installs and `GITHUB_TOKEN` for API auth
 - **Daemon version reporting** — `aetheld version` subcommand, version logged at startup; consistent `-ldflags` injection across all build paths (GoReleaser, dev.sh, dev.ps1, rebuild.ps1, Makefile)
 

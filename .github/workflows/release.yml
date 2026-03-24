@@ -10,23 +10,26 @@ on:
         type: boolean
         default: true
 
-permissions:
-  contents: write
-
 env:
   DRY_RUN: ${{ inputs.dry_run || false }}
 
 jobs:
   release:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write  # commit + tag version bump
     # Skip release commits to prevent infinite loop
     if: "!startsWith(github.event.head_commit.message, 'chore(release):')"
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+      skip: ${{ steps.bump.outputs.skip }}
+      dry_run: ${{ env.DRY_RUN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5
         with:
           go-version: '1.25'
 
@@ -121,4 +124,46 @@ jobs:
           git commit -m "chore(release): v${VERSION}"
           git tag "v${VERSION}"
           git push origin master --tags
-          echo "::notice::Tagged v${VERSION} — GoReleaser workflow will build and publish the release"
+          echo "::notice::Tagged v${VERSION}"
+
+  goreleaser:
+    needs: release
+    if: needs.release.outputs.skip != 'true' && needs.release.outputs.dry_run != 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # publish GitHub release assets
+    steps:
+      - name: Validate version
+        env:
+          VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' || {
+            echo "::error::Invalid or empty version: '$VERSION'"
+            exit 1
+          }
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          ref: v${{ needs.release.outputs.version }}
+          fetch-depth: 1
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5
+        with:
+          go-version: '1.25'
+
+      - name: Extract release notes from CHANGELOG.md
+        env:
+          VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          sed -n "/^## \[${VERSION}\]/,/^## \[/{ /^## \[${VERSION}\]/d; /^## \[/d; p; }" CHANGELOG.md \
+            | tr -d '\r' > /tmp/release-notes.md
+          echo "::notice::Release notes for v${VERSION}:"
+          cat /tmp/release-notes.md
+
+      - uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a  # v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean --release-notes /tmp/release-notes.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

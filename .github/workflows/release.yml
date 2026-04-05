@@ -164,6 +164,19 @@ jobs:
         with:
           distribution: goreleaser
           version: "~> v2"
-          args: release --clean --release-notes /tmp/release-notes.md
+          args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set release notes
+        if: hashFiles('/tmp/release-notes.md') != ''
+        env:
+          VERSION: ${{ needs.release.outputs.version }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -s /tmp/release-notes.md ]; then
+            gh release edit "v${VERSION}" --notes-file /tmp/release-notes.md
+            echo "::notice::Release notes applied to v${VERSION}"
+          else
+            echo "::warning::Release notes file is empty — skipping"
+          fi

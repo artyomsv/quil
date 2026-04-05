@@ -65,11 +65,11 @@ Architecture: thin bridge between MCP JSON-RPC (stdio) and daemon IPC (socket). 
 
 MCP SDK: `github.com/modelcontextprotocol/go-sdk` (official SDK, v1.4+). Typed tool handlers with struct-based input schemas.
 
-13 MCP tools: `list_panes`, `read_pane_output` (ANSI-stripped), `send_to_pane`, `get_pane_status`, `create_pane`, `send_keys` (named key sequences), `restart_pane`, `screenshot_pane` (VT-emulated text screenshot), `switch_tab`, `list_tabs`, `destroy_pane`, `set_active_pane` (TUI cooperation), `close_tui` (TUI cooperation).
+15 MCP tools: `list_panes`, `read_pane_output` (ANSI-stripped), `send_to_pane`, `get_pane_status`, `create_pane`, `send_keys` (named key sequences), `restart_pane`, `screenshot_pane` (VT-emulated text screenshot), `switch_tab`, `list_tabs`, `destroy_pane`, `set_active_pane` (TUI cooperation), `close_tui` (TUI cooperation), `get_notifications` (non-blocking), `watch_notifications` (blocking, replaces polling).
 
 IPC request-response: `Message.ID` field (omitempty, backward compatible) correlates requests with responses. Daemon responds to the requesting connection when `ID` is set, broadcasts when empty.
 
-Key files: `cmd/aethel/mcp.go` (bridge + daemon connection), `cmd/aethel/mcp_tools.go` (13 tool implementations), `cmd/aethel/mcp_keys.go` (key name → escape sequence map), `cmd/aethel/mcp_log.go` (per-pane interaction logging + two-layer redaction).
+Key files: `cmd/aethel/mcp.go` (bridge + daemon connection), `cmd/aethel/mcp_tools.go` (15 tool implementations), `cmd/aethel/mcp_keys.go` (key name → escape sequence map), `cmd/aethel/mcp_log.go` (per-pane interaction logging + two-layer redaction).
 
 AI tool configuration:
 ```json
@@ -152,4 +152,5 @@ AETHEL_HOME=/custom/path ./aethel  # Arbitrary data directory
 - **M6 (Done):** Pane Focus — Ctrl+E toggles active pane full-screen (`TabModel.focusMode`). Layout tree stays intact; `Resize()`/`View()` skip non-active panes. `* FOCUS *` in pane top border, `[focus]` in status bar. Pane nav disabled in focus. Split/close auto-exit focus. Not persisted
 - **M7:** Pane Notes — side-by-side note-taking linked to panes
 - **M8 (Done):** Bubble Tea v2 + Lipgloss v2 migration — declarative View, typed mouse events, platform-native clipboard (Win32/pbcopy/xclip), text selection (keyboard + mouse), bracketed paste
-- **M10 (Done):** MCP Server — `aethel mcp` exposes 13 tools via Model Context Protocol. Phase A: list_panes, read_pane_output, send_to_pane, get_pane_status, create_pane. Phase B: send_keys, restart_pane, screenshot_pane (VT-emulated), switch_tab, list_tabs, destroy_pane, set_active_pane, close_tui. Official Go SDK (`modelcontextprotocol/go-sdk`). Request-response IPC via `Message.ID` field. TUI cooperation via broadcast messages for set_active_pane and close_tui
+- **M10 (Done):** MCP Server — `aethel mcp` exposes 15 tools via Model Context Protocol. Phase A: list_panes, read_pane_output, send_to_pane, get_pane_status, create_pane. Phase B: send_keys, restart_pane, screenshot_pane (VT-emulated), switch_tab, list_tabs, destroy_pane, set_active_pane, close_tui. Official Go SDK (`modelcontextprotocol/go-sdk`). Request-response IPC via `Message.ID` field. TUI cooperation via broadcast messages for set_active_pane and close_tui
+- **M12 (Done):** Notification Center — daemon event queue (`internal/daemon/event.go`) with process exit detection and output pattern matching via `[[notification_handlers]]` TOML. TUI sidebar (`internal/tui/notification.go`) toggled via Alt+N, non-modal, coexists with panes. Pane history stack with Alt+Backspace navigation. Status bar badge `[N events]`. MCP tools: `get_notifications` (non-blocking) and `watch_notifications` (blocking, replaces polling). `requestWithTimeout` for long waits up to 5 min

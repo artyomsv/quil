@@ -38,14 +38,14 @@ func (c *Conn) Close() error {
 type Server struct {
 	path         string
 	handler      MessageHandler
-	onDisconnect func() // called when a client disconnects
+	onDisconnect func(*Conn) // called when a client disconnects
 	listener     net.Listener
 	conns        []*Conn
 	mu           sync.Mutex
 	done         chan struct{}
 }
 
-func NewServer(socketPath string, handler MessageHandler, onDisconnect func()) *Server {
+func NewServer(socketPath string, handler MessageHandler, onDisconnect func(*Conn)) *Server {
 	return &Server{
 		path:         socketPath,
 		handler:      handler,
@@ -83,7 +83,9 @@ func (s *Server) Broadcast(msg *Message) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, c := range s.conns {
-		c.Send(msg)
+		if err := c.Send(msg); err != nil {
+			log.Printf("broadcast send: %v", err)
+		}
 	}
 }
 
@@ -120,7 +122,7 @@ func (s *Server) handleConn(conn *Conn) {
 		s.mu.Unlock()
 		log.Printf("ipc: client disconnected (remaining=%d)", count)
 		if s.onDisconnect != nil {
-			s.onDisconnect()
+			s.onDisconnect(conn)
 		}
 	}()
 

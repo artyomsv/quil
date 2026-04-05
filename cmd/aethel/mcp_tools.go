@@ -27,6 +27,9 @@ func registerMCPTools(s *mcp.Server, bridge *mcpBridge, mcpLog *mcpLogger) {
 	registerDestroyPaneTool(s, bridge, mcpLog)
 	registerSetActivePaneTool(s, bridge, mcpLog)
 	registerCloseTUITool(s, bridge, mcpLog)
+	// Notification tools
+	registerGetNotificationsTool(s, bridge, mcpLog)
+	registerWatchNotificationsTool(s, bridge, mcpLog)
 }
 
 func registerListPanesTool(s *mcp.Server, bridge *mcpBridge, mcpLog *mcpLogger) {
@@ -434,6 +437,76 @@ func registerCloseTUITool(s *mcp.Server, bridge *mcpBridge, mcpLog *mcpLogger) {
 		}
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: "TUI close signal sent. Daemon continues running."}},
+		}, nil, nil
+	})
+}
+
+// Notification tools
+
+func registerGetNotificationsTool(s *mcp.Server, bridge *mcpBridge, mcpLog *mcpLogger) {
+	type Input struct{}
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "get_notifications",
+		Description: "Get all pending notification events from the Notification Center without blocking. Returns process exits, output pattern matches, and other pane events.",
+	}, func(_ context.Context, _ *mcp.CallToolRequest, _ Input) (*mcp.CallToolResult, any, error) {
+		resp, err := bridge.request(ipc.MsgGetNotificationsReq, nil)
+		if err != nil {
+			return nil, nil, fmt.Errorf("get_notifications: %w", err)
+		}
+		var payload ipc.GetNotificationsRespPayload
+		if err := resp.DecodePayload(&payload); err != nil {
+			return nil, nil, fmt.Errorf("get_notifications decode: %w", err)
+		}
+		mcpLog.Log("", "get_notifications", fmt.Sprintf("events=%d", len(payload.Events)))
+		// GetNotificationsRespPayload has primitive fields — json.MarshalIndent cannot fail
+		text, _ := json.MarshalIndent(payload.Events, "", "  ")
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: string(text)}},
+		}, nil, nil
+	})
+}
+
+func registerWatchNotificationsTool(s *mcp.Server, bridge *mcpBridge, mcpLog *mcpLogger) {
+	type Input struct {
+		PaneIDs []string `json:"pane_ids,omitempty" jsonschema:"pane IDs to watch (empty = all panes)"`
+		Timeout int      `json:"timeout,omitempty" jsonschema:"timeout in seconds (default 60, max 300)"`
+	}
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "watch_notifications",
+		Description: "Block until a notification event fires for the specified panes. Returns event details when a process exits, " +
+			"output matches a notification pattern, or timeout. Use this instead of polling with sleep + screenshot.",
+	}, func(_ context.Context, _ *mcp.CallToolRequest, input Input) (*mcp.CallToolResult, any, error) {
+		timeout := input.Timeout
+		if timeout <= 0 {
+			timeout = 60
+		}
+		if timeout > 300 {
+			timeout = 300
+		}
+
+		mcpLog.Log("", "watch_notifications", fmt.Sprintf("panes=%d timeout=%ds", len(input.PaneIDs), timeout))
+
+		resp, err := bridge.requestWithTimeout(
+			ipc.MsgWatchNotificationsReq,
+			ipc.WatchNotificationsReqPayload{
+				PaneIDs:   input.PaneIDs,
+				TimeoutMs: timeout * 1000,
+			},
+			time.Duration(timeout+5)*time.Second,
+		)
+		if err != nil {
+			return nil, nil, fmt.Errorf("watch_notifications: %w", err)
+		}
+		var payload ipc.WatchNotificationsRespPayload
+		if err := resp.DecodePayload(&payload); err != nil {
+			return nil, nil, fmt.Errorf("watch_notifications decode: %w", err)
+		}
+		// WatchNotificationsRespPayload has primitive fields — json.MarshalIndent cannot fail
+		text, _ := json.MarshalIndent(payload, "", "  ")
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: string(text)}},
 		}, nil, nil
 	})
 }

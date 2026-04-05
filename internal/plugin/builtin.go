@@ -23,6 +23,11 @@ func builtinTerminal() *PanePlugin {
 			GhostBuffer: true,
 		},
 		Instances: instances,
+		IdleHandlers: []IdleHandler{
+			{Pattern: `(?i)\[Y/n\]|\[y/N\]|\(yes/no\)|Continue\?|Proceed\?`, Title: "Waiting for confirmation", Severity: "warning"},
+			{Pattern: `(?i)password:|passphrase:`, Title: "Waiting for password", Severity: "warning"},
+			{Pattern: `(?i)(error|FAIL|fatal|panic|exception)`, Title: "Error detected", Severity: "error"},
+		},
 		Available: true, // always available
 	}
 }

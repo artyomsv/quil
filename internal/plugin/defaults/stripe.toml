@@ -9,6 +9,7 @@ description = "Stripe webhook listener"
 
 [command]
 cmd = "stripe"
+# path = "E:/Tools/stripe/stripe.exe"  # uncomment to override PATH lookup
 args = ["listen"]
 detect = "stripe --version"
 arg_template = ["listen", "--forward-to", "{url}"]

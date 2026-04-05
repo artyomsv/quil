@@ -9,6 +9,7 @@ description = "Remote SSH connection"
 
 [command]
 cmd = "ssh"
+# path = "/usr/bin/ssh"  # uncomment to override PATH lookup
 detect = "ssh -V"
 arg_template = ["-p", "{port}", "{user}@{host}"]
 
@@ -65,3 +66,19 @@ pattern = "Connection refused|No route to host"
 title = "Connection Failed"
 message = "Cannot reach host. Check that the server is running and the address is correct."
 action = "dialog"
+
+# Idle handlers — checked when pane goes idle (last 5 lines analyzed)
+[[idle_handlers]]
+pattern = '(?i)\[Y/n\]|\[y/N\]|\(yes/no\)|Continue\?|Proceed\?'
+title = "Waiting for confirmation"
+severity = "warning"
+
+[[idle_handlers]]
+pattern = '(?i)password:|passphrase:'
+title = "Waiting for password"
+severity = "warning"
+
+[[idle_handlers]]
+pattern = '(?i)(error|FAIL|fatal|panic)'
+title = "Error detected"
+severity = "error"

@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Notification Center (M12)** — daemon event queue with process exit detection, output pattern matching via `[[idle_handlers]]` TOML, and bell character detection with 30s cooldown. TUI sidebar toggled via Alt+N (visibility) / F3 (focus+navigate). Pane history stack with Alt+Backspace navigation. Status bar `[N events]` badge
+- **Smart idle analysis** — when a pane goes idle (5s no output), last lines are analyzed against plugin `[[idle_handlers]]` patterns. SSH `[Y/n]` → "Waiting for confirmation", Claude Code prompt → "Waiting for input", password prompts detected. AI panes default to "warning" severity
+- **OSC 133 command markers** — shell integration hooks extended for bash, zsh, PowerShell to emit command start/end sequences. Daemon parses `OSC 133;D` for precise command completion with exit code
+- **MCP notification tools** — `get_notifications` (non-blocking) and `watch_notifications` (blocking up to 5 min, replaces polling). `requestWithTimeout` for long MCP waits
+- **Plugin `path` field** — optional `path = "/full/path/to/binary"` in plugin TOML overrides PATH lookup. Fallback search in `~/.local/bin/` for Explorer-launched apps on Windows
+- **Plugin `[[idle_handlers]]`** — new TOML section for context-aware idle notifications, parallel to existing `[[error_handlers]]`. Default patterns for terminal, claude-code, and ssh plugins
+
+### Fixed
+
+- **Focus mode mouse selection** — bypasses layout tree traversal when Ctrl+E focus mode is active, uses active pane directly
+- **SSH cursor visibility** — added `"ssh"` to terminal-type check so cursor renders in SSH panes
+- **Paste cursor position** — delayed re-render (100ms) after paste so cursor updates to end of pasted text
+- **DecodePayload error checking** — all 11 pre-existing IPC handlers now check decode errors (was silently ignored)
+- **Shutdown double-close panic** — `sync.Once` guards `close(d.shutdown)` against multiple shutdown messages
+- **Watcher timer leak** — `time.NewTimer` + `defer timer.Stop()` replaces `time.After` in watch goroutine and MCP bridge
+- **Idle detection race** — single `PluginMu` lock span for read+write in `checkIdlePanes` prevents race with `flushPaneOutput`
+- **PowerShell 5.1 compat** — shell init uses `[char]0x1b` for escape instead of `` `e `` which only works in PowerShell 7+
+- **Zsh exit code capture** — `precmd` saves `$?` to local immediately, inserted first in `precmd_functions` before OSC 7
+
+### Changed
+
+- **IPC server** — `onDisconnect` callback now receives `*Conn` for watcher cleanup on disconnect
+- **`flushPaneOutput` refactored** — extracted `detectBellEvent`, `detectOSC133Exit`, `applyPluginHandlers` helpers
+- **Notification matching moved to idle time** — patterns run against last 5 lines at idle, not on every output chunk (eliminates false positives from arrow keys, command history)
+
 ## [0.11.0] - 2026-03-25
 
 ### Added

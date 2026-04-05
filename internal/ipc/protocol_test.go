@@ -95,6 +95,12 @@ func TestMessageTypes(t *testing.T) {
 		ipc.MsgSetActivePane,
 		ipc.MsgCloseTUI,
 		ipc.MsgHighlightPane,
+		ipc.MsgPaneEvent,
+		ipc.MsgDismissEvent,
+		ipc.MsgGetNotificationsReq,
+		ipc.MsgGetNotificationsResp,
+		ipc.MsgWatchNotificationsReq,
+		ipc.MsgWatchNotificationsResp,
 	}
 	for _, typ := range types {
 		if typ == "" {

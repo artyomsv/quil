@@ -276,7 +276,7 @@ func (p *PaneModel) renderContent(sel *Selection) string {
 		content := p.vt.Render()
 		// Only overlay cursor for terminal panes — TUI apps (Claude Code etc.)
 		// render their own cursor.
-		isTerminal := p.Type == "" || p.Type == "terminal"
+		isTerminal := p.Type == "" || p.Type == "terminal" || p.Type == "ssh"
 		if p.Active && p.cursorVisible && isTerminal {
 			content = p.insertCursor(content)
 		}

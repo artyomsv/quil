@@ -1,15 +1,20 @@
 package daemon
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 	"os/exec"
 	"os/signal"
+	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
+
+	"regexp"
 
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/vt"
@@ -23,14 +28,20 @@ import (
 	"github.com/artyomsv/aethel/internal/shellinit"
 )
 
+// oscBellRe matches OSC sequences terminated by BEL (\x07), e.g., \x1b]0;title\x07.
+// Used to strip these before bell detection so OSC terminators aren't treated as bells.
+var oscBellRe = regexp.MustCompile(`\x1b\][^\x07]*\x07`)
+
 type Daemon struct {
 	cfg        config.Config
 	server     *ipc.Server
 	session    *SessionManager
 	registry   *plugin.Registry
-	shutdown   chan struct{}
-	snapshotCh chan struct{} // buffered channel for snapshot requests
-	restored   bool         // true if workspace was loaded from disk
+	shutdown     chan struct{}
+	shutdownOnce sync.Once
+	snapshotCh   chan struct{} // buffered channel for snapshot requests
+	restored     bool         // true if workspace was loaded from disk
+	events       *eventQueue  // notification center event queue
 }
 
 func New(cfg config.Config) *Daemon {
@@ -42,12 +53,18 @@ func New(cfg config.Config) *Daemon {
 
 	reg := plugin.NewRegistry()
 
+	maxEvents := cfg.Notification.MaxEvents
+	if maxEvents <= 0 {
+		maxEvents = 50
+	}
+
 	return &Daemon{
 		cfg:        cfg,
 		session:    NewSessionManager(bufSize),
 		registry:   reg,
 		shutdown:   make(chan struct{}),
 		snapshotCh: make(chan struct{}, 1),
+		events:     newEventQueue(maxEvents),
 	}
 }
 
@@ -76,7 +93,10 @@ func (d *Daemon) Start() error {
 	}
 
 	sockPath := config.SocketPath()
-	d.server = ipc.NewServer(sockPath, d.handleMessage, func() { d.requestSnapshot() })
+	d.server = ipc.NewServer(sockPath, d.handleMessage, func(conn *ipc.Conn) {
+		d.requestSnapshot()
+		d.events.RemoveWatchersByConn(conn)
+	})
 
 	if err := d.server.Start(); err != nil {
 		return fmt.Errorf("start IPC server: %w", err)
@@ -86,6 +106,8 @@ func (d *Daemon) Start() error {
 	if d.restored {
 		d.respawnPanes()
 	}
+
+	go d.idleChecker()
 
 	log.Printf("aetheld started, listening on %s", sockPath)
 	return nil
@@ -441,7 +463,7 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 	case ipc.MsgReloadPlugins:
 		d.handleReloadPlugins()
 	case ipc.MsgShutdown:
-		close(d.shutdown)
+		d.shutdownOnce.Do(func() { close(d.shutdown) })
 
 	// MCP request-response
 	case ipc.MsgListPanesReq:
@@ -466,12 +488,23 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		d.handleSetActivePane(conn, msg)
 	case ipc.MsgCloseTUI:
 		d.server.Broadcast(msg)
+
+	// Notification center
+	case ipc.MsgDismissEvent:
+		d.handleDismissEvent(msg)
+	case ipc.MsgGetNotificationsReq:
+		d.handleGetNotificationsReq(conn, msg)
+	case ipc.MsgWatchNotificationsReq:
+		d.handleWatchNotificationsReq(conn, msg)
 	}
 }
 
 func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 	var attach ipc.AttachPayload
-	msg.DecodePayload(&attach)
+	if err := msg.DecodePayload(&attach); err != nil {
+		log.Printf("handleAttach: decode: %v", err)
+		return
+	}
 
 	cols, rows := attach.Cols, attach.Rows
 	if cols <= 0 {
@@ -535,11 +568,20 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 			pane.GhostSnap = nil // clear after first replay
 		}
 	}
+
+	// Replay pending notification events
+	for _, e := range d.events.Events() {
+		payload := toPaneEventPayload(e)
+		evtMsg, _ := ipc.NewMessage(ipc.MsgPaneEvent, payload)
+		conn.Send(evtMsg)
+	}
 }
 
 func (d *Daemon) handleCreateTab(conn *ipc.Conn, msg *ipc.Message) {
 	var payload ipc.CreateTabPayload
-	msg.DecodePayload(&payload)
+	if err := msg.DecodePayload(&payload); err != nil {
+		return
+	}
 
 	tab := d.session.CreateTab(payload.Name)
 	d.session.SwitchTab(tab.ID)
@@ -561,7 +603,9 @@ func (d *Daemon) handleCreateTab(conn *ipc.Conn, msg *ipc.Message) {
 
 func (d *Daemon) handleDestroyTab(msg *ipc.Message) {
 	var payload ipc.DestroyTabPayload
-	msg.DecodePayload(&payload)
+	if err := msg.DecodePayload(&payload); err != nil {
+		return
+	}
 	log.Printf("tab destroy: %s", payload.TabID)
 	d.session.DestroyTab(payload.TabID)
 
@@ -583,7 +627,9 @@ func (d *Daemon) handleDestroyTab(msg *ipc.Message) {
 
 func (d *Daemon) handleSwitchTab(msg *ipc.Message) {
 	var payload ipc.SwitchTabPayload
-	msg.DecodePayload(&payload)
+	if err := msg.DecodePayload(&payload); err != nil {
+		return
+	}
 	log.Printf("tab switch: %s", payload.TabID)
 	d.session.SwitchTab(payload.TabID)
 	d.broadcastState()
@@ -592,7 +638,9 @@ func (d *Daemon) handleSwitchTab(msg *ipc.Message) {
 
 func (d *Daemon) handleUpdateTab(msg *ipc.Message) {
 	var payload ipc.UpdateTabPayload
-	msg.DecodePayload(&payload)
+	if err := msg.DecodePayload(&payload); err != nil {
+		return
+	}
 
 	tab := d.session.Tab(payload.TabID)
 	if tab == nil {
@@ -613,7 +661,9 @@ func (d *Daemon) handleUpdateTab(msg *ipc.Message) {
 
 func (d *Daemon) handleCreatePane(msg *ipc.Message) {
 	var payload ipc.CreatePanePayload
-	msg.DecodePayload(&payload)
+	if err := msg.DecodePayload(&payload); err != nil {
+		return
+	}
 
 	cwd := payload.CWD
 	if cwd == "" {
@@ -679,7 +729,9 @@ func (d *Daemon) handleReplacePane(payload ipc.CreatePanePayload, cwd, paneType 
 
 func (d *Daemon) handleDestroyPane(msg *ipc.Message) {
 	var payload ipc.DestroyPanePayload
-	msg.DecodePayload(&payload)
+	if err := msg.DecodePayload(&payload); err != nil {
+		return
+	}
 
 	// Capture tab ID before destroying the pane
 	var tabID string
@@ -710,7 +762,9 @@ func (d *Daemon) handleDestroyPane(msg *ipc.Message) {
 
 func (d *Daemon) handlePaneInput(msg *ipc.Message) {
 	var payload ipc.PaneInputPayload
-	msg.DecodePayload(&payload)
+	if err := msg.DecodePayload(&payload); err != nil {
+		return
+	}
 
 	pane := d.session.Pane(payload.PaneID)
 	if pane == nil || pane.PTY == nil {
@@ -721,7 +775,9 @@ func (d *Daemon) handlePaneInput(msg *ipc.Message) {
 
 func (d *Daemon) handleResizePane(msg *ipc.Message) {
 	var payload ipc.ResizePanePayload
-	msg.DecodePayload(&payload)
+	if err := msg.DecodePayload(&payload); err != nil {
+		return
+	}
 
 	pane := d.session.Pane(payload.PaneID)
 	if pane == nil || pane.PTY == nil {
@@ -734,7 +790,9 @@ func (d *Daemon) handleResizePane(msg *ipc.Message) {
 
 func (d *Daemon) handleUpdatePane(msg *ipc.Message) {
 	var payload ipc.UpdatePanePayload
-	msg.DecodePayload(&payload)
+	if err := msg.DecodePayload(&payload); err != nil {
+		return
+	}
 
 	pane := d.session.Pane(payload.PaneID)
 	if pane == nil {
@@ -762,7 +820,9 @@ func (d *Daemon) handleReloadPlugins() {
 
 func (d *Daemon) handleUpdateLayout(msg *ipc.Message) {
 	var payload ipc.UpdateLayoutPayload
-	msg.DecodePayload(&payload)
+	if err := msg.DecodePayload(&payload); err != nil {
+		return
+	}
 
 	tab := d.session.Tab(payload.TabID)
 	if tab == nil {
@@ -824,6 +884,24 @@ func (d *Daemon) streamPTYOutput(paneID string, pty apty.Session) {
 					pane.ExitedAt = time.Now()
 					pane.PluginMu.Unlock()
 					log.Printf("pane %s: process exited with code %d", paneID, code)
+
+					severity := "info"
+					title := "Process exited (code 0)"
+					if code != 0 {
+						severity = "error"
+						title = fmt.Sprintf("Process failed (code %d)", code)
+					}
+					d.emitEvent(PaneEvent{
+						ID:        uuid.New().String(),
+						PaneID:    paneID,
+						TabID:     pane.TabID,
+						PaneName:  pane.Name,
+						Type:      "process_exit",
+						Title:     title,
+						Severity:  severity,
+						Timestamp: time.Now(),
+						Data:      map[string]string{"exit_code": strconv.Itoa(code)},
+					})
 				}
 				return
 			}
@@ -851,38 +929,101 @@ func (d *Daemon) flushPaneOutput(paneID string, data []byte) {
 		pane.OutputBuf.Write(data)
 	}
 
-	// Scrape plugin state from output (e.g., session IDs)
-	if pane.Type != "" && pane.Type != "terminal" {
-		p := d.registry.Get(pane.Type)
-		if scraped := plugin.ScrapeOutput(p, data); scraped != nil {
-			pane.PluginMu.Lock()
-			if pane.PluginState == nil {
-				pane.PluginState = make(map[string]string)
-			}
-			for k, v := range scraped {
-				pane.PluginState[k] = v
-				log.Printf("pane %s: scraped %s=%.8s...", paneID, k, v)
-			}
-			pane.PluginMu.Unlock()
-		}
+	// Update idle tracking (guarded by PluginMu for goroutine safety)
+	pane.PluginMu.Lock()
+	pane.LastOutputAt = time.Now()
+	pane.IdleNotified = false
+	pane.PluginMu.Unlock()
 
-		// Check for error patterns
-		if eh := plugin.MatchError(p, data); eh != nil && eh.Action == "dialog" {
-			message := plugin.ExpandMessage(eh.Message, pane.InstanceArgs)
-			errMsg, _ := ipc.NewMessage(ipc.MsgPluginError, ipc.PluginErrorPayload{
-				PaneID:  paneID,
-				Title:   eh.Title,
-				Message: message,
-			})
-			d.server.Broadcast(errMsg)
-		}
-	}
+	d.detectBellEvent(pane, paneID, data)
+	d.detectOSC133Exit(pane, paneID, data)
+	d.applyPluginHandlers(pane, paneID, data)
 
 	msg, _ := ipc.NewMessage(ipc.MsgPaneOutput, ipc.PaneOutputPayload{
 		PaneID: paneID,
 		Data:   data,
 	})
 	d.server.Broadcast(msg)
+}
+
+// detectBellEvent checks for standalone bell characters (not OSC terminators).
+func (d *Daemon) detectBellEvent(pane *Pane, paneID string, data []byte) {
+	const bellCooldown = 30 * time.Second
+	if !bytes.Contains(data, []byte{0x07}) {
+		return
+	}
+	cleaned := oscBellRe.ReplaceAll(data, nil)
+	if !bytes.Contains(cleaned, []byte{0x07}) {
+		return
+	}
+	pane.PluginMu.Lock()
+	defer pane.PluginMu.Unlock()
+	if !pane.LastBellEventAt.IsZero() && time.Since(pane.LastBellEventAt) < bellCooldown {
+		return
+	}
+	pane.LastBellEventAt = time.Now()
+	d.emitEvent(PaneEvent{
+		ID: uuid.New().String(), PaneID: paneID, TabID: pane.TabID,
+		PaneName: pane.Name, Type: "bell",
+		Title: "Attention", Severity: "warning", Timestamp: time.Now(),
+	})
+}
+
+// detectOSC133Exit parses OSC 133;D (command complete) sequences from shell integration.
+func (d *Daemon) detectOSC133Exit(pane *Pane, paneID string, data []byte) {
+	idx := bytes.Index(data, []byte("\x1b]133;D;"))
+	if idx < 0 {
+		return
+	}
+	rest := data[idx+8:]
+	end := bytes.IndexAny(rest, "\x07\x1b")
+	if end <= 0 {
+		return
+	}
+	code, err := strconv.Atoi(string(rest[:end]))
+	if err != nil {
+		return
+	}
+	severity := "info"
+	title := "Command completed"
+	if code != 0 {
+		severity = "error"
+		title = fmt.Sprintf("Command failed (code %d)", code)
+	}
+	d.emitEvent(PaneEvent{
+		ID: uuid.New().String(), PaneID: paneID, TabID: pane.TabID,
+		PaneName: pane.Name, Type: "command_complete",
+		Title: title, Severity: severity, Timestamp: time.Now(),
+		Data: map[string]string{"exit_code": strconv.Itoa(code)},
+	})
+}
+
+// applyPluginHandlers runs scraping, error matching for non-terminal plugins.
+func (d *Daemon) applyPluginHandlers(pane *Pane, paneID string, data []byte) {
+	if pane.Type == "" || pane.Type == "terminal" {
+		return
+	}
+	p := d.registry.Get(pane.Type)
+	if scraped := plugin.ScrapeOutput(p, data); scraped != nil {
+		pane.PluginMu.Lock()
+		if pane.PluginState == nil {
+			pane.PluginState = make(map[string]string)
+		}
+		for k, v := range scraped {
+			pane.PluginState[k] = v
+			log.Printf("pane %s: scraped %s=%.8s...", paneID, k, v)
+		}
+		pane.PluginMu.Unlock()
+	}
+	if eh := plugin.MatchError(p, data); eh != nil && eh.Action == "dialog" {
+		message := plugin.ExpandMessage(eh.Message, pane.InstanceArgs)
+		errMsg, _ := ipc.NewMessage(ipc.MsgPluginError, ipc.PluginErrorPayload{
+			PaneID:  paneID,
+			Title:   eh.Title,
+			Message: message,
+		})
+		d.server.Broadcast(errMsg)
+	}
 }
 
 func (d *Daemon) broadcastState() {
@@ -1067,6 +1208,112 @@ func (d *Daemon) highlightPane(paneID string) {
 func (d *Daemon) respondToAndHighlight(conn *ipc.Conn, requestID, msgType string, payload any, paneID string) {
 	respondTo(conn, requestID, msgType, payload)
 	d.highlightPane(paneID)
+}
+
+// emitEvent pushes an event to the queue and broadcasts to all clients.
+func (d *Daemon) emitEvent(e PaneEvent) {
+	d.events.Push(e)
+	payload := toPaneEventPayload(e)
+	msg, _ := ipc.NewMessage(ipc.MsgPaneEvent, payload)
+	d.server.Broadcast(msg)
+}
+
+// idleChecker runs a periodic check for panes that have gone idle.
+func (d *Daemon) idleChecker() {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-d.shutdown:
+			return
+		case <-ticker.C:
+			d.checkIdlePanes()
+		}
+	}
+}
+
+func (d *Daemon) checkIdlePanes() {
+	const threshold = 5 * time.Second
+	const cooldown = 30 * time.Second
+	now := time.Now()
+	for _, tab := range d.session.Tabs() {
+		for _, pane := range d.session.Panes(tab.ID) {
+			// Single lock span: read + conditionally write to avoid race with flushPaneOutput
+			pane.PluginMu.Lock()
+			shouldFire := !pane.IdleNotified &&
+				!pane.LastOutputAt.IsZero() &&
+				pane.ExitCode == nil &&
+				(pane.LastIdleEventAt.IsZero() || now.Sub(pane.LastIdleEventAt) >= cooldown) &&
+				now.Sub(pane.LastOutputAt) >= threshold
+			if shouldFire {
+				pane.IdleNotified = true
+				pane.LastIdleEventAt = now
+			}
+			pane.PluginMu.Unlock()
+
+			if !shouldFire {
+				continue
+			}
+
+			title, severity := d.analyzeIdleTitle(pane)
+			d.emitEvent(PaneEvent{
+				ID:        uuid.New().String(),
+				PaneID:    pane.ID,
+				TabID:     pane.TabID,
+				PaneName:  pane.Name,
+				Type:      "output_idle",
+				Title:     title,
+				Severity:  severity,
+				Timestamp: now,
+			})
+		}
+	}
+}
+
+// analyzeIdleTitle determines the notification title/severity by matching
+// the last few lines of pane output against plugin idle handlers.
+func (d *Daemon) analyzeIdleTitle(pane *Pane) (title, severity string) {
+	title = "Output idle"
+	severity = "info"
+
+	p := d.registry.Get(pane.Type)
+	if p == nil {
+		p = d.registry.Get("terminal")
+	}
+	if p == nil {
+		return
+	}
+	if p.Category == "ai" {
+		title = "Waiting for input"
+		severity = "warning"
+	}
+	if pane.OutputBuf != nil && len(p.IdleHandlers) > 0 {
+		raw := pane.OutputBuf.Bytes()
+		// Limit to last 4KB for performance
+		if len(raw) > 4096 {
+			raw = raw[len(raw)-4096:]
+		}
+		stripped := ansi.Strip(string(raw))
+		text := lastNLines(stripped, 5)
+		if ih := plugin.MatchIdle(p, text); ih != nil {
+			title = ih.Title
+			severity = ih.Severity
+		}
+	}
+	return
+}
+
+// lastNLines returns the last n non-empty lines from text.
+func lastNLines(text string, n int) string {
+	lines := strings.Split(text, "\n")
+	var result []string
+	for i := len(lines) - 1; i >= 0 && len(result) < n; i-- {
+		trimmed := strings.TrimSpace(lines[i])
+		if trimmed != "" {
+			result = append([]string{trimmed}, result...)
+		}
+	}
+	return strings.Join(result, "\n")
 }
 
 func (d *Daemon) handleListPanesReq(conn *ipc.Conn, msg *ipc.Message) {
@@ -1479,4 +1726,85 @@ func (d *Daemon) handleSetActivePane(conn *ipc.Conn, msg *ipc.Message) {
 
 	d.broadcastState()
 	d.requestSnapshot()
+}
+
+// Notification center handlers
+
+func (d *Daemon) handleDismissEvent(msg *ipc.Message) {
+	var payload ipc.DismissEventPayload
+	if err := msg.DecodePayload(&payload); err != nil {
+		return
+	}
+	if payload.EventID == "" {
+		d.events.DismissAll()
+	} else {
+		d.events.Dismiss(payload.EventID)
+	}
+}
+
+func (d *Daemon) handleGetNotificationsReq(conn *ipc.Conn, msg *ipc.Message) {
+	events := d.events.Events()
+	var payloads []ipc.PaneEventPayload
+	for _, e := range events {
+		payloads = append(payloads, toPaneEventPayload(e))
+	}
+	respondTo(conn, msg.ID, ipc.MsgGetNotificationsResp, ipc.GetNotificationsRespPayload{
+		Events: payloads,
+	})
+}
+
+func (d *Daemon) handleWatchNotificationsReq(conn *ipc.Conn, msg *ipc.Message) {
+	var req ipc.WatchNotificationsReqPayload
+	if err := msg.DecodePayload(&req); err != nil {
+		log.Printf("handleWatchNotificationsReq: decode: %v", err)
+		respondTo(conn, msg.ID, ipc.MsgWatchNotificationsResp, ipc.WatchNotificationsRespPayload{Timeout: true})
+		return
+	}
+
+	timeoutMs := req.TimeoutMs
+	if timeoutMs <= 0 {
+		timeoutMs = 60000 // 60s default
+	}
+	if timeoutMs > 300000 {
+		timeoutMs = 300000 // 5 min max
+	}
+
+	paneFilter := make(map[string]bool)
+	for _, id := range req.PaneIDs {
+		paneFilter[id] = true
+	}
+
+	// Remove any existing watcher for this connection (limit 1 per connection)
+	d.events.RemoveWatchersByConn(conn)
+
+	watcher := &connWatcher{
+		conn:    conn,
+		paneIDs: paneFilter,
+		ch:      make(chan *PaneEvent, 1),
+	}
+	d.events.AddWatcher(watcher)
+
+	// Block in goroutine — respond when event fires or timeout
+	go func() {
+		timer := time.NewTimer(time.Duration(timeoutMs) * time.Millisecond)
+		defer timer.Stop()
+
+		select {
+		case evt, ok := <-watcher.ch:
+			if !ok {
+				return // connection closed
+			}
+			payload := toPaneEventPayload(*evt)
+			respondTo(conn, msg.ID, ipc.MsgWatchNotificationsResp, ipc.WatchNotificationsRespPayload{
+				Event: &payload,
+			})
+		case <-timer.C:
+			d.events.RemoveWatcher(watcher)
+			respondTo(conn, msg.ID, ipc.MsgWatchNotificationsResp, ipc.WatchNotificationsRespPayload{
+				Timeout: true,
+			})
+		case <-d.shutdown:
+			d.events.RemoveWatcher(watcher)
+		}
+	}()
 }

@@ -72,6 +72,21 @@ type setActivePaneMsg struct {
 	PaneID string
 }
 
+// paneEventMsg delivers a notification event from the daemon.
+type paneEventMsg ipc.PaneEventPayload
+
+// pasteRefreshMsg triggers a re-render after paste so the cursor updates.
+type pasteRefreshMsg struct{}
+
+// sidebarTickMsg triggers a periodic sidebar re-render to update relative timestamps.
+type sidebarTickMsg struct{}
+
+// PaneRef stores a pane location for navigation history.
+type PaneRef struct {
+	TabIndex int
+	PaneID   string
+}
+
 // highlightPaneMsg triggers an orange border highlight on a pane for MCP interactions.
 type highlightPaneMsg struct {
 	PaneID string
@@ -167,6 +182,9 @@ type Model struct {
 	disclaimerTipIdx     int                    // random tip index for disclaimer dialog
 	mcpHighlights        map[string]bool        // pane IDs with active MCP highlight
 	mcpHighlightSeq      map[string]int         // sequence number for highlight timer reset
+	notifications        *NotificationCenter    // notification sidebar
+	paneHistory          []PaneRef              // navigation history (bounded, 20 max)
+	sidebarFocused       bool                   // true when notification sidebar has keyboard focus
 }
 
 func NewModel(client *ipc.Client, cfg config.Config, version string, registry *plugin.Registry) Model {
@@ -177,8 +195,9 @@ func NewModel(client *ipc.Client, cfg config.Config, version string, registry *p
 		devMode:        os.Getenv("AETHEL_HOME") != "",
 		pluginRegistry: registry,
 		instanceStore:  LoadInstances(config.InstancesPath()),
-		mcpHighlights:  make(map[string]bool),
+		mcpHighlights:   make(map[string]bool),
 		mcpHighlightSeq: make(map[string]int),
+		notifications:   NewNotificationCenter(cfg.Notification.SidebarWidth, cfg.Notification.MaxEvents),
 	}
 	if cfg.UI.ShowDisclaimer && len(disclaimerTips) > 0 {
 		m.dialog = dialogDisclaimer
@@ -300,7 +319,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				tab := m.activeTabModel()
 				if tab != nil && tab.Root != nil && !tab.FocusMode() {
 					tabH := m.height - chromeHeight
-					if pane := tab.Root.FindPaneAt(m.mouseStartX, m.mouseStartY, 0, 1, m.width, tabH); pane != nil {
+					if pane := tab.Root.FindPaneAt(m.mouseStartX, m.mouseStartY, 0, 1, m.paneAreaWidth(), tabH); pane != nil {
 						if old := tab.ActivePaneModel(); old != nil {
 							old.Active = false
 						}
@@ -333,12 +352,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			text := strings.ReplaceAll(msg.Content, "\r", "")
 			m.tomlEditor.InsertMultiLine(text)
 			m.tomlEditor.Dirty = true
+			return m, nil
 		} else if m.dialog != dialogNone && m.dialogEdit {
 			m.dialogInput += sanitizeDialogInput(msg.Content)
+			return m, nil
 		} else {
 			m.sendClipboardToPane(msg.Content)
+			// Schedule re-render after PTY echo arrives to update cursor position
+			return m, tea.Tick(100*time.Millisecond, func(_ time.Time) tea.Msg { return pasteRefreshMsg{} })
 		}
-		return m, nil
+
+	case pasteRefreshMsg:
+		return m, nil // triggers re-render with updated VT emulator cursor
 
 	case dialogPasteMsg:
 		m.dialogInput += sanitizeDialogInput(string(msg))
@@ -441,11 +466,113 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case paneEventMsg:
+		m.notifications.AddEvent(ipc.PaneEventPayload(msg))
+		cmds := []tea.Cmd{m.listenForMessages()}
+		// Refresh sidebar tick if visible (no auto-show — user controls with Alt+N)
+		if m.notifications.visible {
+			cmds = append(cmds, m.sidebarTick())
+		}
+		return m, tea.Batch(cmds...)
+
+	case sidebarTickMsg:
+		// Re-render sidebar to update relative timestamps; schedule next tick if still visible
+		if m.notifications.visible && m.notifications.Count() > 0 {
+			return m, m.sidebarTick()
+		}
+		return m, nil
+
 	case listenContinueMsg:
 		return m, m.listenForMessages()
 	}
 
 	return m, nil
+}
+
+func (m Model) handleNotificationKey(key string) (tea.Model, tea.Cmd) {
+	action, eventID, paneID := m.notifications.HandleKey(key)
+	switch action {
+	case "navigate":
+		// Push current location to history, then jump to event's pane in focus mode
+		m.pushPaneHistory()
+		for i, tab := range m.tabs {
+			if tab.Root != nil && tab.Root.PaneIDs()[paneID] {
+				m.activeTab = i
+				tab.ActivePane = paneID
+				if !tab.FocusMode() {
+					tab.ToggleFocus()
+				}
+				m.sidebarFocused = false
+				break
+			}
+		}
+		return m, nil
+	case "dismiss":
+		if eventID != "" {
+			if msg, err := ipc.NewMessage(ipc.MsgDismissEvent, ipc.DismissEventPayload{EventID: eventID}); err == nil {
+				if err := m.client.Send(msg); err != nil {
+					log.Printf("dismiss event send: %v", err)
+				}
+			}
+		}
+		return m, nil
+	case "dismiss_all":
+		if msg, err := ipc.NewMessage(ipc.MsgDismissEvent, ipc.DismissEventPayload{}); err == nil {
+			if err := m.client.Send(msg); err != nil {
+				log.Printf("dismiss all send: %v", err)
+			}
+		}
+		return m, nil
+	case "unfocus":
+		m.sidebarFocused = false
+		return m, nil
+	}
+	return m, nil
+}
+
+func (m *Model) pushPaneHistory() {
+	if tab := m.activeTabModel(); tab != nil && tab.ActivePane != "" {
+		ref := PaneRef{TabIndex: m.activeTab, PaneID: tab.ActivePane}
+		m.paneHistory = append(m.paneHistory, ref)
+		if len(m.paneHistory) > 20 {
+			m.paneHistory = m.paneHistory[len(m.paneHistory)-20:]
+		}
+	}
+}
+
+func (m Model) popPaneHistory() (tea.Model, tea.Cmd) {
+	for len(m.paneHistory) > 0 {
+		ref := m.paneHistory[len(m.paneHistory)-1]
+		m.paneHistory = m.paneHistory[:len(m.paneHistory)-1]
+		if ref.TabIndex < len(m.tabs) {
+			tab := m.tabs[ref.TabIndex]
+			if tab.Root != nil && tab.Root.PaneIDs()[ref.PaneID] {
+				m.activeTab = ref.TabIndex
+				tab.ActivePane = ref.PaneID
+				return m, nil
+			}
+		}
+	}
+	return m, nil
+}
+
+// paneAreaWidth returns the width available for pane content, accounting for sidebar.
+func (m Model) paneAreaWidth() int {
+	if m.notifications.visible && m.dialog == dialogNone {
+		if tab := m.activeTabModel(); tab != nil && !tab.FocusMode() {
+			sw := m.notifications.width
+			if m.width-sw >= minTermWidth {
+				return m.width - sw
+			}
+		}
+	}
+	return m.width
+}
+
+func (m Model) sidebarTick() tea.Cmd {
+	return tea.Tick(10*time.Second, func(_ time.Time) tea.Msg {
+		return sidebarTickMsg{}
+	})
 }
 
 func (m Model) View() tea.View {
@@ -468,11 +595,20 @@ func (m Model) View() tea.View {
 		// Tab bar (1 line)
 		sections = append(sections, m.renderTabBar())
 
-		// Active tab content
+		// Active tab content + optional notification sidebar
 		tabH := m.height - chromeHeight
+		sidebarW := 0
+		if m.notifications.visible && m.dialog == dialogNone {
+			if tab := m.activeTabModel(); tab != nil && !tab.FocusMode() {
+				sidebarW = m.notifications.width
+				if m.width-sidebarW < minTermWidth {
+					sidebarW = 0 // too narrow for sidebar
+				}
+			}
+		}
 		if m.activeTab < len(m.tabs) {
 			tab := m.tabs[m.activeTab]
-			tab.Resize(m.width, tabH)
+			tab.Resize(m.width-sidebarW, tabH)
 			// Pass per-frame state to panes for rendering
 			if tab.Root != nil {
 				for _, pane := range tab.Root.Leaves() {
@@ -481,7 +617,12 @@ func (m Model) View() tea.View {
 					pane.mcpHighlight = m.mcpHighlights[pane.ID]
 				}
 			}
-			sections = append(sections, tab.View())
+			tabContent := tab.View()
+			if sidebarW > 0 {
+				m.notifications.focused = m.sidebarFocused
+				tabContent = lipgloss.JoinHorizontal(lipgloss.Top, tabContent, m.notifications.View(tabH))
+			}
+			sections = append(sections, tabContent)
 		}
 
 		// Status bar
@@ -513,6 +654,32 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.renamingPane {
 		return m.handlePaneRenameKey(msg)
+	}
+
+	// Notification sidebar keybindings (always available)
+	switch {
+	case key == kb.NotificationToggle:
+		// Alt+N: toggle visibility only, never focus
+		m.notifications.visible = !m.notifications.visible
+		m.sidebarFocused = false
+		if m.notifications.visible {
+			return m, tea.Batch(tea.ClearScreen, m.resizeAllPanes(), m.sidebarTick())
+		}
+		return m, tea.Batch(tea.ClearScreen, m.resizeAllPanes())
+	case key == kb.NotificationFocus:
+		// Ctrl+Alt+N: open (if hidden) and focus sidebar
+		if !m.notifications.visible {
+			m.notifications.visible = true
+		}
+		m.sidebarFocused = true
+		return m, tea.Batch(tea.ClearScreen, m.resizeAllPanes(), m.sidebarTick())
+	case key == kb.GoBack:
+		return m.popPaneHistory()
+	}
+
+	// Sidebar focused: route keys to notification center
+	if m.sidebarFocused && m.notifications.visible {
+		return m.handleNotificationKey(key)
 	}
 
 	// Selection: Enter copies (tmux convention), Esc clears, Cmd+C for macOS
@@ -1049,7 +1216,7 @@ func (m *Model) replayBufSize() int {
 func (m *Model) resizeTabs() {
 	tabH := m.height - chromeHeight
 	for _, tab := range m.tabs {
-		tab.Resize(m.width, tabH)
+		tab.Resize(m.paneAreaWidth(), tabH)
 	}
 }
 
@@ -1378,6 +1545,9 @@ func (m Model) renderStatusBar() string {
 	if m.devMode {
 		right = "[dev] " + right
 	}
+	if count := m.notifications.Count(); count > 0 && !m.notifications.visible {
+		right = fmt.Sprintf("[%d events] ", count) + right
+	}
 
 	// Fit within width: left takes priority
 	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right) - 2 // 2 for padding
@@ -1460,6 +1630,12 @@ func (m Model) listenForMessages() tea.Cmd {
 			var payload ipc.HighlightPanePayload
 			msg.DecodePayload(&payload)
 			return highlightPaneMsg{PaneID: payload.PaneID}
+
+		case ipc.MsgPaneEvent:
+			var payload ipc.PaneEventPayload
+			msg.DecodePayload(&payload)
+			log.Printf("ipc recv: pane_event %s %s %s", payload.Type, payload.PaneID, payload.Title)
+			return paneEventMsg(payload)
 
 		default:
 			log.Printf("ipc recv: unknown type %q", msg.Type)
@@ -1652,7 +1828,9 @@ func (m Model) pasteClipboard() tea.Cmd {
 			Data:   data,
 		})
 		m.client.Send(msg)
-		return nil
+		// Wait for PTY echo to arrive before triggering re-render
+		time.Sleep(100 * time.Millisecond)
+		return pasteRefreshMsg{}
 	}
 }
 
@@ -1674,22 +1852,38 @@ func (m *Model) updateMouseSelection(tab *TabModel, curX, curY, tabH int) {
 	if tab.Root == nil {
 		return
 	}
-	// Resolve start position to pane
-	startRect := tab.Root.FindPaneRectAt(m.mouseStartX, m.mouseStartY, 0, 1, m.width, tabH)
-	if startRect == nil {
-		return
+
+	var pane *PaneModel
+	var ox, oy int
+
+	if tab.FocusMode() {
+		// Focus mode: active pane fills entire tab, tree splits don't apply
+		pane = tab.ActivePaneModel()
+		if pane == nil {
+			return
+		}
+		ox = 0
+		oy = 1 // tab bar
+	} else {
+		startRect := tab.Root.FindPaneRectAt(m.mouseStartX, m.mouseStartY, 0, 1, m.paneAreaWidth(), tabH)
+		if startRect == nil {
+			return
+		}
+		pane = startRect.Pane
+		ox = startRect.OX
+		oy = startRect.OY
 	}
-	pane := startRect.Pane
+
 	sbLen := pane.vt.ScrollbackLen()
 
 	// Convert start screen coords to pane-local
-	startCol := m.mouseStartX - startRect.OX - 1
-	startRow := m.mouseStartY - startRect.OY - 1
+	startCol := m.mouseStartX - ox - 1
+	startRow := m.mouseStartY - oy - 1
 	startLine := sbLen - pane.scrollBack + startRow
 
 	// Convert current screen coords to pane-local (clamp to same pane)
-	curCol := curX - startRect.OX - 1
-	curRow := curY - startRect.OY - 1
+	curCol := curX - ox - 1
+	curRow := curY - oy - 1
 	curLine := sbLen - pane.scrollBack + curRow
 
 	// Clamp

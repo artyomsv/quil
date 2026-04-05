@@ -13,13 +13,16 @@ type PanePlugin struct {
 	Persistence   PersistenceConfig
 	Display       DisplayConfig
 	Instances     []InstanceConfig
-	ErrorHandlers []ErrorHandler
-	Available     bool // set at startup by running detect cmd
+	ErrorHandlers        []ErrorHandler
+	NotificationHandlers []NotificationHandler
+	IdleHandlers         []IdleHandler
+	Available            bool // set at startup by running detect cmd
 }
 
 // CommandConfig describes how to launch the plugin's process.
 type CommandConfig struct {
 	Cmd              string
+	Path             string      // optional: full path to binary (overrides PATH lookup)
 	Args             []string
 	Env              []string
 	DetectCmd        string
@@ -105,4 +108,52 @@ func (eh *ErrorHandler) Compile() error {
 // Compiled returns the compiled regex, or nil if compilation failed.
 func (eh *ErrorHandler) Compiled() *regexp.Regexp {
 	return eh.compiled
+}
+
+// NotificationHandler matches PTY output patterns and triggers notification events.
+type NotificationHandler struct {
+	Pattern  string
+	Title    string
+	Severity string // "info", "warning", "error"
+	compiled *regexp.Regexp
+}
+
+// Compile pre-compiles the regex pattern.
+func (nh *NotificationHandler) Compile() error {
+	re, err := regexp.Compile(nh.Pattern)
+	if err != nil {
+		return err
+	}
+	nh.compiled = re
+	return nil
+}
+
+// Compiled returns the compiled regex, or nil if compilation failed.
+func (nh *NotificationHandler) Compiled() *regexp.Regexp {
+	return nh.compiled
+}
+
+// IdleHandler matches patterns against pane content when the pane goes idle.
+// Unlike NotificationHandler (checked on every output chunk), IdleHandler runs
+// only at idle time against the last few lines — much less noisy.
+type IdleHandler struct {
+	Pattern  string
+	Title    string
+	Severity string // "info", "warning", "error"
+	compiled *regexp.Regexp
+}
+
+// Compile pre-compiles the regex pattern.
+func (ih *IdleHandler) Compile() error {
+	re, err := regexp.Compile(ih.Pattern)
+	if err != nil {
+		return err
+	}
+	ih.compiled = re
+	return nil
+}
+
+// Compiled returns the compiled regex, or nil if compilation failed.
+func (ih *IdleHandler) Compiled() *regexp.Regexp {
+	return ih.compiled
 }

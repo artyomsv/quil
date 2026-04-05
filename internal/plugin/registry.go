@@ -43,6 +43,16 @@ func compilePatterns(p *PanePlugin) {
 			log.Printf("plugin %s: invalid error pattern %q: %v", p.Name, p.ErrorHandlers[i].Pattern, err)
 		}
 	}
+	for i := range p.NotificationHandlers {
+		if err := p.NotificationHandlers[i].Compile(); err != nil {
+			log.Printf("plugin %s: invalid notification pattern %q: %v", p.Name, p.NotificationHandlers[i].Pattern, err)
+		}
+	}
+	for i := range p.IdleHandlers {
+		if err := p.IdleHandlers[i].Compile(); err != nil {
+			log.Printf("plugin %s: invalid idle pattern %q: %v", p.Name, p.IdleHandlers[i].Pattern, err)
+		}
+	}
 }
 
 // Get returns a plugin by name, or nil if not found.
@@ -129,11 +139,13 @@ func (r *Registry) LoadFromDir(dir string) error {
 	return nil
 }
 
-// DetectAvailability checks whether each plugin's tool is installed by
-// looking up the binary on PATH. Terminal is always available.
+// DetectAvailability checks whether each plugin's tool is installed.
+// Search order: 1) explicit Path field, 2) PATH lookup, 3) common install locations.
 func (r *Registry) DetectAvailability() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	home, _ := os.UserHomeDir()
 
 	for _, p := range r.plugins {
 		if p.Name == "terminal" {
@@ -141,8 +153,17 @@ func (r *Registry) DetectAvailability() {
 			continue
 		}
 
-		// Determine which binary to look for:
-		// prefer the detect command's binary (first word), fall back to cmd.
+		// 1. Explicit path override (set by user in TOML: path = "C:\\...")
+		if p.Command.Path != "" {
+			if _, err := os.Stat(p.Command.Path); err == nil {
+				p.Available = true
+				p.Command.Cmd = p.Command.Path
+				log.Printf("plugin %s: using explicit path %q", p.Name, p.Command.Path)
+				continue
+			}
+		}
+
+		// Determine which binary to look for
 		bin := p.Command.Cmd
 		if p.Command.DetectCmd != "" {
 			if parts := strings.Fields(p.Command.DetectCmd); len(parts) > 0 {
@@ -150,10 +171,56 @@ func (r *Registry) DetectAvailability() {
 			}
 		}
 
+		// 2. Standard PATH lookup
 		if _, err := exec.LookPath(bin); err == nil {
 			p.Available = true
+			log.Printf("plugin %s: detected %q on PATH", p.Name, bin)
+			continue
+		}
+
+		// 3. Search additional locations (Windows: Explorer-launched apps may have incomplete PATH)
+		if found := searchBinary(p, bin, home); found {
+			continue
+		}
+		log.Printf("plugin %s: %q not found on PATH or common locations", p.Name, bin)
+	}
+}
+
+// searchBinary finds a binary when exec.LookPath fails (common on Windows when
+// launched from Explorer). Re-scans PATH directories with os.Stat which is more
+// reliable than LookPath for Explorer-launched processes with PATHEXT issues.
+func searchBinary(p *PanePlugin, bin, home string) bool {
+	suffixes := []string{"", ".exe"}
+
+	// Common locations
+	var dirs []string
+	if home != "" {
+		dirs = append(dirs, filepath.Join(home, ".local", "bin"))
+	}
+
+	// On Windows, read the full User PATH from environment to cover
+	// directories that may be missing from Explorer-launched processes
+	if userPath := os.Getenv("Path"); userPath != "" {
+		for _, dir := range strings.Split(userPath, string(os.PathListSeparator)) {
+			dir = strings.TrimSpace(dir)
+			if dir != "" {
+				dirs = append(dirs, dir)
+			}
 		}
 	}
+
+	for _, dir := range dirs {
+		for _, suffix := range suffixes {
+			candidate := filepath.Join(dir, bin+suffix)
+			if _, err := os.Stat(candidate); err == nil {
+				p.Available = true
+				p.Command.Cmd = candidate
+				log.Printf("plugin %s: found at %q (fallback search)", p.Name, candidate)
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // tomlPlugin is the on-disk representation of a plugin TOML file.
@@ -166,6 +233,7 @@ type tomlPlugin struct {
 	} `toml:"plugin"`
 	Command struct {
 		Cmd              string   `toml:"cmd"`
+		Path             string   `toml:"path"` // optional: full path to binary
 		Args             []string `toml:"args"`
 		Env              []string `toml:"env"`
 		Detect           string   `toml:"detect"`
@@ -204,6 +272,16 @@ type tomlPlugin struct {
 		Message string `toml:"message"`
 		Action  string `toml:"action"`
 	} `toml:"error_handlers"`
+	NotificationHandlers []struct {
+		Pattern  string `toml:"pattern"`
+		Title    string `toml:"title"`
+		Severity string `toml:"severity"`
+	} `toml:"notification_handlers"`
+	IdleHandlers []struct {
+		Pattern  string `toml:"pattern"`
+		Title    string `toml:"title"`
+		Severity string `toml:"severity"`
+	} `toml:"idle_handlers"`
 }
 
 func loadPluginTOML(path string) (*PanePlugin, error) {
@@ -241,6 +319,7 @@ func loadPluginTOML(path string) (*PanePlugin, error) {
 		Description: tp.Plugin.Description,
 		Command: CommandConfig{
 			Cmd:              tp.Command.Cmd,
+			Path:             tp.Command.Path,
 			Args:             tp.Command.Args,
 			Env:              tp.Command.Env,
 			DetectCmd:        tp.Command.Detect,
@@ -302,6 +381,44 @@ func loadPluginTOML(path string) (*PanePlugin, error) {
 			Title:   eh.Title,
 			Message: eh.Message,
 			Action:  action,
+		})
+	}
+
+	// Convert notification handlers
+	for _, nh := range tp.NotificationHandlers {
+		severity := nh.Severity
+		switch severity {
+		case "info", "warning", "error":
+			// valid
+		case "":
+			severity = "info"
+		default:
+			log.Printf("plugin %q: unknown notification severity %q, defaulting to info", tp.Plugin.Name, severity)
+			severity = "info"
+		}
+		p.NotificationHandlers = append(p.NotificationHandlers, NotificationHandler{
+			Pattern:  nh.Pattern,
+			Title:    nh.Title,
+			Severity: severity,
+		})
+	}
+
+	// Convert idle handlers
+	for _, ih := range tp.IdleHandlers {
+		severity := ih.Severity
+		switch severity {
+		case "info", "warning", "error":
+			// valid
+		case "":
+			severity = "info"
+		default:
+			log.Printf("plugin %q: unknown idle handler severity %q, defaulting to info", tp.Plugin.Name, severity)
+			severity = "info"
+		}
+		p.IdleHandlers = append(p.IdleHandlers, IdleHandler{
+			Pattern:  ih.Pattern,
+			Title:    ih.Title,
+			Severity: severity,
 		})
 	}
 

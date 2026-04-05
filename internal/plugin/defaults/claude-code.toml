@@ -9,6 +9,7 @@ description = "AI coding assistant"
 
 [command]
 cmd = "claude"
+# path = "/path/to/claude"  # uncomment to override PATH lookup
 detect = "claude --version"
 
 [persistence]
@@ -22,3 +23,19 @@ pattern = '(?i)error.*API key not found|ANTHROPIC_API_KEY.*not set'
 title = "API Key Missing"
 message = "Set ANTHROPIC_API_KEY in your environment or run 'claude auth'."
 action = "dialog"
+
+# Idle handlers — checked when pane goes idle (last 5 lines analyzed)
+[[idle_handlers]]
+pattern = '(?i)waiting for (confirmation|input|approval|permission)'
+title = "Needs your approval"
+severity = "warning"
+
+[[idle_handlers]]
+pattern = '(?i)(plan|question|choose|select|pick)'
+title = "Waiting for your choice"
+severity = "warning"
+
+[[idle_handlers]]
+pattern = '❯|> $'
+title = "Waiting for input"
+severity = "info"

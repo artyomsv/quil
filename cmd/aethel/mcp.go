@@ -77,8 +77,14 @@ func (b *mcpBridge) sendRaw(msg *ipc.Message) error {
 	return b.client.Send(msg)
 }
 
-// request sends an IPC message and waits for the response with matching ID.
+// request sends an IPC message and waits for the response with the default timeout.
 func (b *mcpBridge) request(msgType string, payload any) (*ipc.Message, error) {
+	return b.requestWithTimeout(msgType, payload, mcpRequestTimeout)
+}
+
+// requestWithTimeout is like request but with a custom timeout.
+// Used by watch_notifications which may block for minutes.
+func (b *mcpBridge) requestWithTimeout(msgType string, payload any, timeout time.Duration) (*ipc.Message, error) {
 	id := uuid.New().String()
 	ch := make(chan *ipc.Message, 1)
 
@@ -102,13 +108,16 @@ func (b *mcpBridge) request(msgType string, payload any) (*ipc.Message, error) {
 		return nil, fmt.Errorf("send %s: %w", msgType, err)
 	}
 
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
 	select {
 	case resp, ok := <-ch:
 		if !ok {
 			return nil, fmt.Errorf("connection lost while waiting for %s response", msgType)
 		}
 		return resp, nil
-	case <-time.After(mcpRequestTimeout):
+	case <-timer.C:
 		b.mu.Lock()
 		delete(b.pending, id)
 		b.mu.Unlock()
@@ -153,7 +162,9 @@ func runMCP() {
 				"- send_keys: for navigating interactive menus, send arrow keys ONE AT A TIME with separate calls. " +
 				"Do NOT batch escape-sequence keys in a single call — TUI apps may only process the first one.\n" +
 				"- send_to_pane: for typing text commands — appends newline by default to execute.\n" +
-				"- Destructive tools (restart_pane, destroy_pane, close_tui): always confirm with the user before using.\n\n" +
+				"- Destructive tools (restart_pane, destroy_pane, close_tui): always confirm with the user before using.\n" +
+				"- watch_notifications: blocks until an event fires on specified panes (replaces polling). Use after starting long-running tasks.\n" +
+				"- get_notifications: returns all pending notification events without blocking.\n\n" +
 				"Sensitive data handling:\n" +
 				"When sending sensitive data (passwords, API keys, tokens, seeds) via send_to_pane or send_keys, " +
 				"wrap the value with <<REDACT>>...<</REDACT>> markers.\n" +

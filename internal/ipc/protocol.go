@@ -64,6 +64,14 @@ const (
 	MsgSetActivePane      = "set_active_pane"  // broadcast to TUI
 	MsgCloseTUI           = "close_tui"        // broadcast to TUI
 	MsgHighlightPane      = "highlight_pane"   // broadcast to TUI (MCP interaction indicator)
+
+	// Notification center (M12)
+	MsgPaneEvent              = "pane_event"               // broadcast to TUI
+	MsgDismissEvent           = "dismiss_event"            // client → daemon
+	MsgGetNotificationsReq    = "get_notifications_req"    // MCP request
+	MsgGetNotificationsResp   = "get_notifications_resp"   // MCP response
+	MsgWatchNotificationsReq  = "watch_notifications_req"  // MCP request (blocking)
+	MsgWatchNotificationsResp = "watch_notifications_resp" // MCP response
 )
 
 // Message is the wire format for IPC communication.
@@ -257,6 +265,39 @@ type SetActivePanePayload struct {
 
 type HighlightPanePayload struct {
 	PaneID string `json:"pane_id"`
+}
+
+// Notification center payloads (M12)
+
+type PaneEventPayload struct {
+	ID        string            `json:"id"`
+	PaneID    string            `json:"pane_id"`
+	TabID     string            `json:"tab_id"`
+	PaneName  string            `json:"pane_name"`
+	Type      string            `json:"type"`
+	Title     string            `json:"title"`
+	Message   string            `json:"message,omitempty"`
+	Severity  string            `json:"severity"`
+	Timestamp int64             `json:"timestamp"`
+	Data      map[string]string `json:"data,omitempty"`
+}
+
+type DismissEventPayload struct {
+	EventID string `json:"event_id"` // empty = dismiss all
+}
+
+type GetNotificationsRespPayload struct {
+	Events []PaneEventPayload `json:"events"`
+}
+
+type WatchNotificationsReqPayload struct {
+	PaneIDs   []string `json:"pane_ids,omitempty"`
+	TimeoutMs int      `json:"timeout_ms"`
+}
+
+type WatchNotificationsRespPayload struct {
+	Event   *PaneEventPayload `json:"event,omitempty"`
+	Timeout bool              `json:"timeout"`
 }
 
 // NewMessage creates a Message with a typed payload.

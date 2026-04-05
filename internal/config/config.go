@@ -15,8 +15,14 @@ type Config struct {
 	Logging     LoggingConfig     `toml:"logging"`
 	Security    SecurityConfig    `toml:"security"`
 	UI          UIConfig          `toml:"ui"`
-	Keybindings KeybindingsConfig `toml:"keybindings"`
-	MCP         MCPConfig         `toml:"mcp"`
+	Keybindings  KeybindingsConfig  `toml:"keybindings"`
+	MCP          MCPConfig          `toml:"mcp"`
+	Notification NotificationConfig `toml:"notification"`
+}
+
+type NotificationConfig struct {
+	SidebarWidth int `toml:"sidebar_width"` // default 30
+	MaxEvents    int `toml:"max_events"`    // default 50
 }
 
 type MCPConfig struct {
@@ -70,7 +76,10 @@ type KeybindingsConfig struct {
 	Paste           string `toml:"paste"`
 	JSONTransform   string `toml:"json_transform"`
 	QuickActions    string `toml:"quick_actions"`
-	FocusPane       string `toml:"focus_pane"`
+	FocusPane          string `toml:"focus_pane"`
+	NotificationToggle string `toml:"notification_toggle"`
+	NotificationFocus  string `toml:"notification_focus"`
+	GoBack             string `toml:"go_back"`
 }
 
 func Default() Config {
@@ -102,6 +111,10 @@ func Default() Config {
 		MCP: MCPConfig{
 			HighlightDuration: "10s",
 		},
+		Notification: NotificationConfig{
+			SidebarWidth: 30,
+			MaxEvents:    50,
+		},
 		Keybindings: KeybindingsConfig{
 			Quit:            "ctrl+q",
 			NewTab:          "ctrl+t",
@@ -119,7 +132,10 @@ func Default() Config {
 			Paste:           "ctrl+v",
 			JSONTransform:   "ctrl+j",
 			QuickActions:    "ctrl+a",
-			FocusPane:       "ctrl+e",
+			FocusPane:          "ctrl+e",
+			NotificationToggle: "alt+n",
+			NotificationFocus:  "f3",
+			GoBack:             "alt+backspace",
 		},
 	}
 }

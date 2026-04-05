@@ -47,6 +47,47 @@ func MatchError(p *PanePlugin, data []byte) *ErrorHandler {
 	return nil
 }
 
+// Deprecated: MatchNotification is no longer called from the daemon.
+// Notification matching was replaced by idle-time analysis via MatchIdle.
+// Kept for backward compatibility with TOML files that define [[notification_handlers]].
+func MatchNotification(p *PanePlugin, data []byte) *NotificationHandler {
+	if p == nil || len(p.NotificationHandlers) == 0 {
+		return nil
+	}
+
+	for i := range p.NotificationHandlers {
+		nh := &p.NotificationHandlers[i]
+		re := nh.Compiled()
+		if re == nil {
+			continue
+		}
+		if re.Match(data) {
+			return nh
+		}
+	}
+	return nil
+}
+
+// MatchIdle checks ANSI-stripped pane text against a plugin's idle handlers.
+// Called at idle time with the last few lines of output, not on every chunk.
+func MatchIdle(p *PanePlugin, text string) *IdleHandler {
+	if p == nil || len(p.IdleHandlers) == 0 {
+		return nil
+	}
+
+	for i := range p.IdleHandlers {
+		ih := &p.IdleHandlers[i]
+		re := ih.Compiled()
+		if re == nil {
+			continue
+		}
+		if re.MatchString(text) {
+			return ih
+		}
+	}
+	return nil
+}
+
 // ExpandResumeArgs replaces {key} placeholders in resume args with
 // scraped values from plugin state. Returns nil if any placeholder
 // remains unresolved (missing state value).

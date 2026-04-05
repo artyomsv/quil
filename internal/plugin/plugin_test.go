@@ -498,3 +498,97 @@ func TestErrorHandlerCompile(t *testing.T) {
 		t.Fatal("compiled regex should not be nil")
 	}
 }
+
+func TestMatchNotification(t *testing.T) {
+	p := &PanePlugin{
+		NotificationHandlers: []NotificationHandler{
+			{Pattern: `(?i)waiting for confirmation`, Title: "Needs attention", Severity: "warning"},
+			{Pattern: `(?i)task completed`, Title: "Done", Severity: "info"},
+		},
+	}
+	for i := range p.NotificationHandlers {
+		if err := p.NotificationHandlers[i].Compile(); err != nil {
+			t.Fatalf("compile: %v", err)
+		}
+	}
+
+	nh := MatchNotification(p, []byte("Waiting for confirmation from user"))
+	if nh == nil {
+		t.Fatal("expected match for 'waiting for confirmation'")
+	}
+	if nh.Title != "Needs attention" {
+		t.Errorf("Title: got %q, want %q", nh.Title, "Needs attention")
+	}
+	if nh.Severity != "warning" {
+		t.Errorf("Severity: got %q, want %q", nh.Severity, "warning")
+	}
+}
+
+func TestMatchNotificationNoMatch(t *testing.T) {
+	p := &PanePlugin{
+		NotificationHandlers: []NotificationHandler{
+			{Pattern: `(?i)waiting for confirmation`, Title: "Needs attention", Severity: "warning"},
+		},
+	}
+	for i := range p.NotificationHandlers {
+		p.NotificationHandlers[i].Compile()
+	}
+
+	nh := MatchNotification(p, []byte("normal output with no match"))
+	if nh != nil {
+		t.Fatal("expected no match for normal output")
+	}
+}
+
+func TestNotificationHandlerCompile(t *testing.T) {
+	nh := NotificationHandler{Pattern: `[invalid`}
+	if err := nh.Compile(); err == nil {
+		t.Fatal("expected error for invalid regex")
+	}
+
+	nh2 := NotificationHandler{Pattern: `valid.*pattern`}
+	if err := nh2.Compile(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if nh2.Compiled() == nil {
+		t.Fatal("compiled regex should not be nil")
+	}
+}
+
+func TestMatchIdle_Match_ReturnsHandler(t *testing.T) {
+	p := &PanePlugin{
+		IdleHandlers: []IdleHandler{
+			{Pattern: `(?i)\[Y/n\]`, Title: "Waiting for confirmation", Severity: "warning"},
+			{Pattern: `(?i)password:`, Title: "Waiting for password", Severity: "warning"},
+		},
+	}
+	for i := range p.IdleHandlers {
+		if err := p.IdleHandlers[i].Compile(); err != nil {
+			t.Fatalf("compile: %v", err)
+		}
+	}
+
+	ih := MatchIdle(p, "Do you want to continue? [Y/n]")
+	if ih == nil {
+		t.Fatal("expected match for [Y/n]")
+	}
+	if ih.Title != "Waiting for confirmation" {
+		t.Errorf("Title: got %q, want %q", ih.Title, "Waiting for confirmation")
+	}
+}
+
+func TestMatchIdle_NoMatch_ReturnsNil(t *testing.T) {
+	p := &PanePlugin{
+		IdleHandlers: []IdleHandler{
+			{Pattern: `(?i)\[Y/n\]`, Title: "Waiting for confirmation", Severity: "warning"},
+		},
+	}
+	for i := range p.IdleHandlers {
+		p.IdleHandlers[i].Compile()
+	}
+
+	ih := MatchIdle(p, "artyom@server:~$")
+	if ih != nil {
+		t.Fatal("expected no match for shell prompt")
+	}
+}

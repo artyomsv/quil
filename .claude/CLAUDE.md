@@ -21,14 +21,14 @@ Client-daemon model:
 - `cmd/aethel/` — TUI client (Bubble Tea)
 - `cmd/aetheld/` — Background daemon
 - `internal/config/` — TOML configuration (`Load` reads, `Save` writes atomically via `.tmp` + rename). `UIConfig.ShowDisclaimer` controls startup beta dialog
-- `internal/daemon/` — Session manager, message routing
+- `internal/daemon/` — Session manager, message routing, event queue (`event.go` — bounded, mutex-protected, watcher pub/sub for MCP)
 - `internal/ipc/` — Length-prefixed JSON protocol (4-byte big-endian uint32 + JSON)
 - `internal/persist/` — Atomic workspace/buffer persistence (JSON snapshots, binary ghost buffers)
 - `internal/pty/` — Cross-platform PTY (build tags: `linux || darwin || freebsd`, `windows`)
-- `internal/shellinit/` — Automatic OSC 7 shell integration (embedded init scripts, `//go:embed`)
+- `internal/shellinit/` — Automatic OSC 7 + OSC 133 shell integration (embedded init scripts, `//go:embed`)
 - `internal/plugin/` — Pane plugin system (registry, built-ins, TOML loading, scraper)
 - `internal/clipboard/` — Platform-native clipboard read/write (Win32 API, pbpaste/pbcopy, xclip/xsel)
-- `internal/tui/` — Bubble Tea model, tabs, panes, layout tree, styles, text selection
+- `internal/tui/` — Bubble Tea model, tabs, panes, layout tree, styles, text selection, notification sidebar
 
 ## Building
 
@@ -51,7 +51,7 @@ Go module cache is persisted in a Docker volume (`aethel-gomod`) for fast repeat
 Single workflow (`release.yml`) with two jobs:
 
 1. **`release` job** — triggers on push to master. Analyzes conventional commits since last tag, computes version bump (major/minor/patch), updates `VERSION` + `CHANGELOG.md`, commits `chore(release): vX.Y.Z`, creates git tag, pushes. Outputs version to the next job.
-2. **`goreleaser` job** — runs after `release` job. Checks out the tagged commit, runs GoReleaser to cross-compile 5 platforms (linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64), creates `.tar.gz` (Unix) / `.zip` (Windows) archives with both `aethel` + `aetheld`, publishes GitHub Release with SHA256 checksums.
+2. **`goreleaser` job** — runs after `release` job. Checks out the tagged commit, extracts release notes from `CHANGELOG.md` via sed, runs GoReleaser to cross-compile 5 platforms (linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64), creates `.tar.gz` (Unix) / `.zip` (Windows) archives with both `aethel` + `aetheld`, publishes GitHub Release with SHA256 checksums. Release notes applied via `gh release edit` (decoupled from GoReleaser's changelog system — `--release-notes` flag broke with `changelog.disable: true` in newer GoReleaser v2).
 
 GoReleaser config: `.goreleaser.yml` (version 2). Version injected via `-ldflags "-s -w -X main.version={{.Version}}"` on both binaries. Note: both jobs are in one workflow because tags pushed with `GITHUB_TOKEN` don't trigger other workflows.
 
@@ -86,10 +86,12 @@ AI tool configuration:
 - Pane layout uses a binary split tree (`LayoutNode` in `internal/tui/layout.go`) — each internal node has its own `SplitDir`, enabling mixed H/V splits (tmux-style). The tree is serialized to JSON and persisted in the daemon's `Tab.Layout` field for reconnect restoration
 - Layout persistence: TUI sends `MsgUpdateLayout` after every state sync; daemon stores it opaquely (no broadcast to avoid feedback loop). On reconnect, `applyWorkspaceState()` deserializes the tree and prunes missing panes
 - Pane naming: `MsgUpdatePane` IPC message, `Pane.Name` field in daemon, Alt+F2 keybinding to rename active pane (mirrors F2 tab rename pattern)
-- Shell integration: Daemon auto-injects OSC 7 hooks via `internal/shellinit/` — bash (`--rcfile`), zsh (`ZDOTDIR`), PowerShell (`-File`), fish (native). Init scripts written to `~/.aethel/shellinit/` at daemon startup. PTY `SetEnv()` passes env vars to child process
+- Shell integration: Daemon auto-injects OSC 7 + OSC 133 hooks via `internal/shellinit/` — bash (`--rcfile`), zsh (`ZDOTDIR`), PowerShell (`-File`), fish (native). Init scripts written to `~/.aethel/shellinit/` at daemon startup. PTY `SetEnv()` passes env vars to child process. OSC 133 markers (`A` prompt start, `B` command start, `D;exitcode` command done) enable precise command completion detection for notification events
 - Daemon detachment: `cmd/aethel/proc_unix.go` and `proc_windows.go` supply `daemonSysProcAttr()` via build tags — mirrors the `internal/pty/` pattern. Unix uses `Setsid`, Windows uses `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`
 - Daemon auto-start: TUI auto-starts `aetheld --background` if not running. `findDaemonBinary()` checks PATH then the executable's own directory. PID file at `~/.aethel/aetheld.pid`, stale socket cleanup before spawn
-- Daemon shutdown: `MsgShutdown` signals via channel (not `os.Exit`) so defers in `main()` run cleanly (PID file removal, log file close)
+- Daemon shutdown: `MsgShutdown` signals via channel (not `os.Exit`) so defers in `main()` run cleanly (PID file removal, log file close). `sync.Once` guards `close(d.shutdown)` against double-close panic
+- Notification center: `internal/daemon/event.go` — bounded event queue (mutex-protected, not channel) survives TUI disconnects and replays on attach. `connWatcher` one-shot pub/sub for `watch_notifications` MCP tool. Events emitted by: process exit, OSC 133 command completion, bell detection (30s cooldown), smart idle analysis. `internal/tui/notification.go` — sidebar toggled via Alt+N (3-state: hidden → visible+unfocused → visible+focused → hidden), F3 focuses sidebar. Pane history stack with Alt+Backspace navigation
+- Smart idle analysis: `idleChecker()` goroutine ticks 1s, `checkIdlePanes()` reads last 4KB of ring buffer at idle (5s no output), strips ANSI, matches against plugin `[[idle_handlers]]` patterns. 30s cooldown per pane via `LastIdleEventAt`. Single `PluginMu` lock span for read+conditional write (race fix)
 - Persistence: `internal/persist/` handles atomic file I/O — `snapshot.go` for workspace JSON (write `.tmp` → rotate to `.bak` → rename), `ghostbuf.go` for per-pane binary buffers. Both use temp+rename for crash safety
 - Workspace restore: On daemon start, `restoreWorkspace()` loads `~/.aethel/workspace.json`, reconstructs tabs/panes, loads ghost buffers from `~/.aethel/buffers/`, then `respawnPanes()` spawns processes per plugin type with saved CWD and resume strategy
 - Snapshot triggers: centralized event queue via `snapshotCh` channel — `requestSnapshot()` sends non-blocking request, `Wait()` loop debounces with 500ms `time.AfterFunc`. Triggers: create/destroy tab/pane, switch tab, update layout, update pane, client disconnect. Periodic timer (30s) as safety net. Final flush on daemon stop
@@ -101,7 +103,7 @@ AI tool configuration:
 - Diagnostic logging: daemon logs IPC dispatch (excluding high-frequency input/resize/layout), client attach/disconnect, snapshot metrics (tabs, panes, buffer bytes, duration), ghost replay details (source, bytes), spawn commands, tab/pane lifecycle. TUI logs ghost transitions, workspace state, layout restore. IPC server logs connection count on connect/disconnect
 - Tab bar: tabs show 1-based index prefix (`1:Shell`, `2:Build`) matching Alt+1-9 shortcuts. Index hidden during rename editing
 - Auto-recovery: deleting the last tab auto-creates a new "Shell" tab; deleting the last pane in a tab auto-creates a fresh pane
-- Plugin system: `internal/plugin/` — pane types defined via `PanePlugin` struct. Terminal is a Go built-in in `builtin.go`; claude-code, ssh, stripe are embedded TOML defaults in `defaults/*.toml` (written to `~/.aethel/plugins/` on first run via `EnsureDefaultPlugins`). User TOML plugins override defaults. `Registry` manages loading, detection, and lookup. Plugins define `FormFields` + `ArgTemplate` for instance creation forms. `GhostBuffer` bool controls per-plugin ghost buffer persistence
+- Plugin system: `internal/plugin/` — pane types defined via `PanePlugin` struct. Terminal is a Go built-in in `builtin.go`; claude-code, ssh, stripe are embedded TOML defaults in `defaults/*.toml` (written to `~/.aethel/plugins/` on first run via `EnsureDefaultPlugins`). User TOML plugins override defaults. `Registry` manages loading, detection, and lookup. Plugins define `FormFields` + `ArgTemplate` for instance creation forms. `GhostBuffer` bool controls per-plugin ghost buffer persistence. `[[idle_handlers]]` TOML section for context-aware idle notifications (parallel to `[[error_handlers]]`). Optional `path` field in `[command]` for explicit binary location (bypasses PATH lookup). 3-tier detection: path override → `exec.LookPath` → `searchBinary` fallback
 - Plugin instances: `internal/tui/instances.go` — `InstanceStore` (map[pluginName][]SavedInstance) persisted to `~/.aethel/instances.json`. `BuildArgs` expands `{placeholder}` templates from form field values
 - TOML editor: `internal/tui/editor.go` — full-screen multi-line text editor with rune-aware cursor, TOML syntax highlighting (comments grey, sections orange, keys blue, strings green), TOML validation on save, text selection and clipboard support. Accessible via F1 → Plugins → select plugin
 - Editor selection: `internal/tui/editor_selection.go` — `EditorSel`/`EditorPos` types (rune-based, independent from terminal `Selection`). Shift+Arrow char select, Ctrl+Shift+Arrow word jump, Ctrl+Alt+Shift+Arrow 3-word jump, Shift+Home/End line select, Ctrl+A select all. Enter copies selection, Ctrl+X cuts, Ctrl+V pastes (async via `editorPasteMsg`). Selection rendering via reverse video `\x1b[7m]`, cursor within selection uses `\x1b[7;4m]` (reverse+underline). Typing with selection replaces selected text

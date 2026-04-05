@@ -99,6 +99,22 @@ Key capabilities:
 - **TUI cooperation** — `set_active_pane` and `close_tui` use daemon broadcast → TUI handler pattern
 - **Process exit tracking** — `Pane.ExitCode` and `WaitExit()` with `sync.Once` on PTY sessions (Unix + Windows)
 
+### M12: Notification Center — [PRD](docs/roadmap/notification-center.md)
+> Centralized event sidebar with pane navigation and history stack.
+
+Replaces manual pane polling with push notifications. A non-modal sidebar shows pending events; select an event to jump to the linked pane; `Alt+Backspace` returns to where you were (browser-back pattern).
+
+Key capabilities:
+- **Daemon event queue** — bounded, mutex-protected, survives TUI disconnects, replays on attach. Watcher pub/sub for MCP blocking tool
+- **Event sources** — process exit detection, OSC 133 command completion with exit code, bell character detection (30s cooldown), smart idle analysis
+- **Smart idle analysis** — when a pane goes idle (5s no output), last 4KB stripped of ANSI and matched against plugin `[[idle_handlers]]` patterns. SSH `[Y/n]` → "Waiting for confirmation", Claude Code prompt → "Waiting for input", password prompts detected
+- **TUI sidebar** — toggled via Alt+N (visibility), F3 (focus+navigate). Severity-colored pane names (red/orange/blue). Status bar `[N events]` badge. 10s timestamp refresh
+- **Pane history stack** — `Alt+Backspace` navigates back through previously visited panes
+- **OSC 133 shell hooks** — bash, zsh, PowerShell emit command start/end markers. Zsh captures `$?` immediately via `local ec=$?`. PowerShell uses `[char]0x1b` for 5.1 compat
+- **Plugin `[[idle_handlers]]`** — TOML section for context-aware patterns, parallel to `[[error_handlers]]`. Default patterns for terminal, claude-code, and ssh plugins
+- **Plugin `path` field** — explicit binary location bypasses PATH lookup. 3-tier detection: path → LookPath → searchBinary fallback (fixes Explorer-launched apps on Windows)
+- **MCP tools** — `get_notifications` (non-blocking) and `watch_notifications` (blocking up to 5 min, replaces polling). `requestWithTimeout` with `time.NewTimer` + `defer timer.Stop()`
+
 ---
 
 ## In Progress
@@ -153,12 +169,6 @@ Define workspace blueprints committed to git: tabs, panes, plugins, CWDs, comman
 > `Ctrl+Shift+P` fuzzy-find overlay for everything.
 
 Search panes, execute commands, switch tabs, create panes, open saved instances — all from a single keyboard shortcut. Fuzzy string matching makes every feature instantly discoverable.
-
-### M12: Notification Center — [PRD](docs/roadmap/notification-center.md)
-
-> Centralized event sidebar with pane navigation and history stack.
-
-Processes emit events when they finish or need attention. A non-modal sidebar shows pending events with severity icons. Select an event to jump to the linked pane; `Alt+Backspace` returns to where you were (like browser back). Eliminates manual pane polling — the **context-switching tax** that costs developers dozens of interruptions per day. Ships incrementally: process exit detection first, plugin output patterns second, cross-pane event bus integration third.
 
 ---
 

@@ -5,7 +5,7 @@
 | Priority | 4 |
 | Effort | Medium |
 | Impact | High |
-| Status | Proposed |
+| Status | Done |
 | Depends on | M10 MCP Server (for AI event consumption). Phase 3 integrates with Process Health + Cross-Pane Events |
 
 ## Problem
@@ -379,12 +379,29 @@ AI: [reads test output, fixes the code, reruns tests]
 - Multiple `watch_notifications` calls can be active simultaneously (different panes)
 - When the MCP bridge disconnects, all its watchers are automatically cleaned up
 
-## Open Questions
+## Implementation Outcome
 
-- Should notifications have an audible bell (terminal bell character)?
-- Should the sidebar width be configurable?
-- Should events auto-expire after a timeout (e.g., 30 minutes)?
-- Should "go back" (`Alt+Backspace`) work for all pane switches (not just notification navigation)?
-- Should dismissed events go to a history view or disappear permanently?
-- Should `watch_notifications` support custom regex patterns (ad-hoc) in addition to plugin-defined notification handlers?
-- Should AI be able to create notification rules via MCP (e.g., "notify me when this pane outputs ERROR")?
+Implemented in v0.12.0. Key differences from the original PRD:
+
+**Added beyond PRD:**
+- **OSC 133 shell hooks** — bash, zsh, PowerShell emit command start/end markers for precise command completion detection with exit code. Zsh uses `local ec=$?` to capture exit code before other precmd functions clobber it. PowerShell uses `[char]0x1b` for 5.1 compat
+- **Smart idle analysis** — moved from per-chunk regex matching (too noisy with arrow keys, command history) to idle-time analysis. `idleChecker()` goroutine ticks 1s, reads last 4KB at idle (5s no output), strips ANSI, matches against `[[idle_handlers]]`. 30s cooldown per pane
+- **Plugin `[[idle_handlers]]`** — new TOML section (parallel to `[[error_handlers]]`) for context-aware idle notifications. Default patterns for terminal (confirmation, password, error), claude-code (waiting for input), ssh (confirmation, password)
+- **Plugin `path` field** — explicit binary location bypasses PATH lookup. 3-tier detection: path → LookPath → searchBinary fallback (fixes Explorer-launched apps on Windows where PATH differs)
+- **F3 keybinding** — focuses notification sidebar directly (in addition to Alt+N toggle)
+- **Bell detection** — daemon detects BEL character (`\x07`) in PTY output with OSC-stripping regex and 30s cooldown per pane
+- **Sidebar 3-state toggle** — Alt+N cycles: hidden → visible+unfocused → visible+focused → hidden (prevents keyboard input stealing)
+- **`requestWithTimeout`** — MCP bridge helper with `time.NewTimer` + `defer timer.Stop()` for 5-minute waits
+
+**Changed from PRD:**
+- `[[notification_handlers]]` renamed/replaced by `[[idle_handlers]]` — patterns run at idle time, not on every output chunk
+- `subscribe_pane` MCP tool was not implemented (not needed — `watch_notifications` accepts `pane_ids` filter)
+- No auto-show behavior — user requested manual-only toggle
+- `sync.Once` on daemon shutdown to prevent double-close panic
+
+**Open Questions (resolved):**
+- Bell detection: yes, daemon detects BEL with cooldown
+- Sidebar width: fixed at 30 columns (hardcoded in `NewNotificationCenter`)
+- Event expiry: no auto-expire; bounded queue (50) drops oldest
+- Go-back scope: only notification navigation (not all pane switches)
+- Dismissed events: disappear permanently (no history view)

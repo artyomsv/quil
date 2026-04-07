@@ -217,7 +217,11 @@ func (m Model) WindowSize() (width, height int) {
 func (m Model) Config() config.Config { return m.cfg }
 
 // FlushNotes writes any pending notes edits to disk. Safe to call when notes
-// mode is inactive. Used by main.go as a safety net on TUI exit.
+// mode is inactive (no-op).
+//
+// Precondition: must be invoked AFTER tea.Program.Run has returned, when the
+// Update goroutine is no longer pumping events. Calling concurrently with the
+// Update loop is unsafe — the editor is mutable shared state.
 func (m Model) FlushNotes() {
 	if m.notesEditor != nil {
 		if err := m.notesEditor.Close(); err != nil {
@@ -327,9 +331,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.mouseDown {
 			m.mouseDown = false
 			if m.selection == nil {
-				// No drag — treat as click for pane focus
+				// No drag — treat as click for pane focus. Skip when notes
+				// mode is active so the editor stays bound to its pane
+				// regardless of where the user clicks.
 				tab := m.activeTabModel()
-				if tab != nil && tab.Root != nil && !tab.FocusMode() {
+				if tab != nil && tab.Root != nil && !tab.FocusMode() && !m.notesMode {
 					tabH := m.height - chromeHeight
 					if pane := tab.Root.FindPaneAt(m.mouseStartX, m.mouseStartY, 0, 1, m.paneAreaWidth(), tabH); pane != nil {
 						if old := tab.ActivePaneModel(); old != nil {
@@ -368,6 +374,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else if m.dialog != dialogNone && m.dialogEdit {
 			m.dialogInput += sanitizeDialogInput(msg.Content)
 			return m, nil
+		} else if m.notesMode && m.notesEditor != nil {
+			text := strings.ReplaceAll(msg.Content, "\r", "")
+			m.notesEditor.HandlePaste(text)
+			return m, nil
 		} else {
 			m.sendClipboardToPane(msg.Content)
 			// Schedule re-render after PTY echo arrives to update cursor position
@@ -386,6 +396,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			text := strings.ReplaceAll(string(msg), "\r", "")
 			m.tomlEditor.InsertMultiLine(text)
 			m.tomlEditor.Dirty = true
+		} else if m.notesMode && m.notesEditor != nil {
+			text := strings.ReplaceAll(string(msg), "\r", "")
+			m.notesEditor.HandlePaste(text)
 		}
 		return m, nil
 
@@ -602,9 +615,10 @@ func (m Model) notesTick() tea.Cmd {
 	})
 }
 
-// enterNotesMode opens the notes editor for the active pane. Exits focus
-// mode first if it is active (the two modes are mutually exclusive).
-func (m Model) enterNotesMode() (tea.Model, tea.Cmd) {
+// toggleNotesMode opens the notes editor for the active pane, or closes
+// (and flushes) it if notes mode is already active. Exits focus mode first
+// if it is active — focus and notes are mutually exclusive.
+func (m Model) toggleNotesMode() (tea.Model, tea.Cmd) {
 	if m.notesMode && m.notesEditor != nil {
 		return m.exitNotesMode()
 	}
@@ -619,7 +633,9 @@ func (m Model) enterNotesMode() (tea.Model, tea.Cmd) {
 	if tab.FocusMode() {
 		tab.ToggleFocus()
 	}
-	editor, err := NewNotesEditor(config.NotesDir(), pane.ID, pane.Name, 40, 20)
+	// Initial dimensions are placeholders — View() will Resize the editor
+	// to fit the actual notes panel area on the next render pass.
+	editor, err := NewNotesEditor(config.NotesDir(), pane.ID, pane.Name, 1, 1)
 	if err != nil {
 		log.Printf("open notes: %v", err)
 		return m, nil
@@ -627,6 +643,41 @@ func (m Model) enterNotesMode() (tea.Model, tea.Cmd) {
 	m.notesMode = true
 	m.notesEditor = editor
 	return m, tea.Batch(tea.ClearScreen, m.resizeAllPanes(), m.notesTick())
+}
+
+// notesKeyExempt reports whether a key should bypass the notes editor and
+// reach the normal global handlers (navigation, structural changes, dialogs).
+// Anything not on this list is consumed by the editor as text input.
+func (m Model) notesKeyExempt(key string) bool {
+	kb := m.cfg.Keybindings
+	switch key {
+	// Structural — close/split implicitly destroys the bound pane and must
+	// flush + exit notes before running.
+	case kb.ClosePane, kb.CloseTab, kb.SplitHorizontal, kb.SplitVertical:
+		return true
+	// Tab and pane navigation.
+	case kb.NextPane, kb.PrevPane, kb.NewTab:
+		return true
+	// Tab management.
+	case kb.RenameTab, kb.RenamePane, kb.CycleTabColor:
+		return true
+	// Other modes.
+	case kb.FocusPane:
+		return true
+	// Notification center.
+	case kb.NotificationToggle, kb.NotificationFocus, kb.GoBack:
+		return true
+	// Tools and dialogs.
+	case kb.JSONTransform, kb.QuickActions, "f1", "ctrl+n":
+		return true
+	}
+	// Alt+1..9 tab switching.
+	switch key {
+	case "alt+1", "alt+2", "alt+3", "alt+4",
+		"alt+5", "alt+6", "alt+7", "alt+8", "alt+9":
+		return true
+	}
+	return false
 }
 
 // exitNotesMode flushes any pending notes edits and closes the editor.
@@ -640,7 +691,6 @@ func (m Model) exitNotesMode() (tea.Model, tea.Cmd) {
 	m.notesEditor = nil
 	return m, tea.Batch(tea.ClearScreen, m.resizeAllPanes())
 }
-
 
 func (m Model) View() tea.View {
 	var content string
@@ -739,26 +789,30 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.handlePaneRenameKey(msg)
 	}
 
-	// Notes mode: while active, the notes editor owns all keyboard input
-	// except for the toggle key (alt+e) and structural keys that exit
-	// notes first and then fall through to the normal handlers.
+	// Notes mode: while active, the notes editor owns text input but global
+	// shortcuts (navigation, structural changes, dialogs) must still reach
+	// the normal handlers. Anything that is not in the exempt set goes to
+	// the editor.
 	if m.notesMode && m.notesEditor != nil {
 		switch key {
 		case kb.NotesToggle:
 			return m.exitNotesMode()
 		case kb.Quit:
-			_ = m.notesEditor.Close()
-			return m, tea.Quit
-		case kb.ClosePane, kb.CloseTab,
-			kb.SplitHorizontal, kb.SplitVertical:
-			// Save and exit notes, then fall through to the normal
-			// handler so the structural action still fires.
 			if err := m.notesEditor.Close(); err != nil {
-				log.Printf("save notes on action: %v", err)
+				log.Printf("save notes on quit: %v", err)
+			}
+			return m, tea.Quit
+		}
+		if m.notesKeyExempt(key) {
+			// Structural / navigational shortcut — flush notes (in case the
+			// action removes the active pane) then fall through to the
+			// normal handlers.
+			if err := m.notesEditor.Close(); err != nil {
+				log.Printf("save notes on shortcut: %v", err)
 			}
 			m.notesMode = false
 			m.notesEditor = nil
-		default:
+		} else {
 			action, cmd := m.notesEditor.HandleKey(key)
 			if action == notesActionExit {
 				return m.exitNotesMode()
@@ -938,7 +992,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case key == kb.NotesToggle:
-		return m.enterNotesMode()
+		return m.toggleNotesMode()
 
 	case key == "ctrl+n":
 		m.dialog = dialogCreatePane
@@ -1236,6 +1290,31 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) []string {
 	if m.activeTab >= len(m.tabs) {
 		m.activeTab = max(0, len(m.tabs)-1)
 	}
+
+	// Reconcile notes mode: if the pane our notes editor is bound to no
+	// longer exists in any tab, flush whatever is in the editor and exit
+	// notes mode so we don't keep writing to a now-orphaned notes file.
+	if m.notesMode && m.notesEditor != nil {
+		bound := m.notesEditor.PaneID()
+		found := false
+		for _, tab := range m.tabs {
+			if tab.Root == nil {
+				continue
+			}
+			if tab.Root.PaneIDs()[bound] {
+				found = true
+				break
+			}
+		}
+		if !found {
+			if err := m.notesEditor.Close(); err != nil {
+				log.Printf("flush notes for removed pane %s: %v", bound, err)
+			}
+			m.notesMode = false
+			m.notesEditor = nil
+		}
+	}
+
 	return newPaneIDs
 }
 
@@ -1346,6 +1425,16 @@ func (m Model) activeTabModel() *TabModel {
 func (m *Model) switchTab(idx int) tea.Cmd {
 	if idx < 0 || idx >= len(m.tabs) {
 		return nil
+	}
+	// Switching tabs leaves the notes-bound pane behind. Flush and exit
+	// notes mode so we don't keep an editor open against a pane the user
+	// can no longer see.
+	if m.notesMode && m.notesEditor != nil {
+		if err := m.notesEditor.Close(); err != nil {
+			log.Printf("save notes on tab switch: %v", err)
+		}
+		m.notesMode = false
+		m.notesEditor = nil
 	}
 	m.activeTab = idx
 	tabID := m.tabs[idx].ID

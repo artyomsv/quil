@@ -22,13 +22,14 @@ const notesTickInterval = 5 * time.Second
 // notesTickMsg triggers periodic debounce checks while notes mode is active.
 type notesTickMsg struct{}
 
-// notesActionExit signals that the editor is done (user pressed esc).
+// notesAction tells the surrounding model what to do after the editor has
+// processed a key. Currently the only "outside the editor" action is to
+// exit notes mode entirely (e.g., the user pressed esc).
 type notesAction int
 
 const (
 	notesActionNone notesAction = iota
 	notesActionExit
-	notesActionSaved
 )
 
 // NotesEditor is a plain-text notes editor bound to a pane. It wraps the
@@ -57,7 +58,7 @@ func NewNotesEditor(notesDir, paneID, paneName string, viewW, viewH int) (*Notes
 		return nil, fmt.Errorf("load notes: %w", err)
 	}
 	ed := NewTextEditor(content, "", viewW, viewH)
-	ed.Highlight = "plain"
+	ed.Highlight = HighlightPlain
 	return &NotesEditor{
 		editor:   ed,
 		notesDir: notesDir,
@@ -92,25 +93,44 @@ func (n *NotesEditor) PaneID() string {
 	return n.paneID
 }
 
-// Save writes the current content to disk and clears the dirty flag.
-// Safe to call when not dirty — skipped in that case.
+// Content returns the current editor buffer as a single string.
+func (n *NotesEditor) Content() string {
+	if n == nil {
+		return ""
+	}
+	return n.editor.Content()
+}
+
+// Save writes the current content to disk and clears the dirty flag on both
+// the wrapper and the inner TextEditor. Safe to call when not dirty — it is
+// a no-op in that case. Ensures the saved file ends with a newline so it
+// behaves like a normal POSIX text file.
 func (n *NotesEditor) Save() error {
 	if n == nil || !n.dirty {
 		return nil
 	}
 	content := n.editor.Content()
+	if !strings.HasSuffix(content, "\n") {
+		content += "\n"
+	}
 	if err := persist.SaveNotes(n.notesDir, n.paneID, content); err != nil {
 		n.saveErr = err.Error()
 		return err
 	}
 	n.dirty = false
+	// Keep the wrapped editor's dirty flag in sync. Without this, every
+	// non-mutating key (cursor moves) re-marks the wrapper dirty because the
+	// inner editor still reports Dirty == true, leading to a save loop and
+	// a flickering "[notes*]" status indicator after every save.
+	n.editor.Dirty = false
 	n.lastSavedAt = time.Now()
 	n.saveErr = ""
 	return nil
 }
 
 // HandleKey processes a key press. Returns:
-//   - action: what the outer model should do (none, exit notes mode, note that a save occurred)
+//   - action: what the outer model should do (`notesActionNone` to keep
+//     editing, `notesActionExit` to leave notes mode)
 //   - cmd: an optional tea command (e.g., for async paste)
 //
 // ctrl+s and esc are intercepted before being passed to the TextEditor so the
@@ -122,10 +142,8 @@ func (n *NotesEditor) HandleKey(key string) (notesAction, tea.Cmd) {
 
 	switch key {
 	case "ctrl+s":
-		if err := n.Save(); err != nil {
-			return notesActionNone, nil
-		}
-		return notesActionSaved, nil
+		_ = n.Save() // error is captured in n.saveErr and rendered in the footer
+		return notesActionNone, nil
 	case "esc":
 		// Clear active selection first, exit notes mode only on a second press.
 		if n.editor.Sel != nil {
@@ -135,16 +153,9 @@ func (n *NotesEditor) HandleKey(key string) (notesAction, tea.Cmd) {
 		return notesActionExit, nil
 	}
 
-	prevDirty := n.editor.Dirty
 	_, _, cmd := n.editor.HandleKey(key)
-	if n.editor.Dirty && !prevDirty {
-		// First mutation after a clean state — mark our wrapper dirty and
-		// reset the debounce clock.
+	if n.editor.Dirty {
 		n.dirty = true
-	} else if n.editor.Dirty {
-		n.dirty = true
-	}
-	if n.dirty {
 		n.lastEditAt = time.Now()
 	}
 	return notesActionNone, cmd
@@ -161,18 +172,15 @@ func (n *NotesEditor) HandlePaste(text string) {
 }
 
 // MaybeAutoSave saves when the debounce window has elapsed since the last edit.
-// Returns true if a save occurred.
-func (n *NotesEditor) MaybeAutoSave() bool {
+// No-op if the editor is clean or the user is still actively editing.
+func (n *NotesEditor) MaybeAutoSave() {
 	if n == nil || !n.dirty {
-		return false
+		return
 	}
 	if time.Since(n.lastEditAt) < notesDebounceWindow {
-		return false
+		return
 	}
-	if err := n.Save(); err != nil {
-		return false
-	}
-	return true
+	_ = n.Save() // failures are recorded in n.saveErr and shown in the footer
 }
 
 // Close flushes pending unsaved changes to disk and returns any save error.
@@ -231,13 +239,12 @@ func (n *NotesEditor) headerLine(width int) string {
 	if title == "" {
 		title = n.paneID
 	}
-	title = " notes: " + title + " "
 	dirtyMark := ""
 	if n.dirty {
 		dirtyMark = " *"
 	}
-	raw := title + dirtyMark
-	if len([]rune(raw)) > width {
+	raw := " notes: " + title + " " + dirtyMark
+	if lipgloss.Width(raw) > width {
 		raw = truncateRunes(raw, width)
 	}
 	return lipgloss.NewStyle().

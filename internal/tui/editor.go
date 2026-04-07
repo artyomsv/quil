@@ -19,6 +19,17 @@ import (
 // editorPasteMsg delivers clipboard content to the active editor.
 type editorPasteMsg string
 
+// HighlightMode selects which syntax highlighter the editor renders with.
+type HighlightMode int
+
+const (
+	// HighlightTOML applies TOML keyword/comment colouring (default — used by
+	// the TOML editor accessible via F1 → Plugins).
+	HighlightTOML HighlightMode = iota
+	// HighlightPlain disables syntax colouring. Used by pane notes.
+	HighlightPlain
+)
+
 // TextEditor is a minimal multi-line text editor with optional syntax highlighting.
 type TextEditor struct {
 	Lines      []string
@@ -31,16 +42,14 @@ type TextEditor struct {
 	Dirty      bool
 	SaveErr    string
 	Sel        *EditorSel // active selection (nil = none)
-	// Highlight selects the syntax highlighter: "toml" (default, for TOML editor),
-	// "plain" (no highlighting, for pane notes). Empty string behaves as "toml"
-	// for backward compatibility with existing call sites.
-	Highlight string
+	// Highlight selects the syntax highlighter. Defaults to HighlightTOML.
+	Highlight HighlightMode
 }
 
 // highlight applies the configured highlighter to a line. Returns the line
 // unchanged when in plain mode.
 func (e *TextEditor) highlight(line string) string {
-	if e.Highlight == "plain" {
+	if e.Highlight == HighlightPlain {
 		return line
 	}
 	return highlightTOML(line)

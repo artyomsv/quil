@@ -341,6 +341,63 @@ func TestNotesEditor_PaneID_And_SaveErr_NilSafe(t *testing.T) {
 	ne.MaybeAutoSave()
 }
 
+func TestNotesEditor_View_BorderColorReflectsFocus(t *testing.T) {
+	t.Parallel()
+	ne, err := NewNotesEditor(t.TempDir(), "pane-view", "Build", 40, 10)
+	if err != nil {
+		t.Fatalf("NewNotesEditor: %v", err)
+	}
+	focused := ne.View(40, 10, true)
+	unfocused := ne.View(40, 10, false)
+	if focused == "" || unfocused == "" {
+		t.Fatal("View returned empty string")
+	}
+	// Focused border uses lipgloss color 63 (bright blue), unfocused uses
+	// 240 (dim grey). The two renders must differ in at least one ANSI
+	// colour code.
+	if focused == unfocused {
+		t.Error("focused and unfocused View output should differ (border colour)")
+	}
+}
+
+func TestNotesEditor_FooterMentionsTabFocusCycle(t *testing.T) {
+	t.Parallel()
+	ne, err := NewNotesEditor(t.TempDir(), "pane-footer", "Build", 60, 10)
+	if err != nil {
+		t.Fatalf("NewNotesEditor: %v", err)
+	}
+	// Editor focused: footer should mention "Tab pane" (Tab → switch focus to pane).
+	rendered := ne.View(60, 10, true)
+	if !strings.Contains(stripANSI(rendered), "Tab pane") {
+		t.Errorf("editor-focused footer should mention 'Tab pane', got:\n%s", stripANSI(rendered))
+	}
+	// Pane focused: footer should mention "Tab notes" (Tab → switch back to editor).
+	rendered = ne.View(60, 10, false)
+	if !strings.Contains(stripANSI(rendered), "Tab notes") {
+		t.Errorf("pane-focused footer should mention 'Tab notes', got:\n%s", stripANSI(rendered))
+	}
+}
+
+// stripANSI removes simple ANSI escape sequences for substring assertions.
+func stripANSI(s string) string {
+	var b strings.Builder
+	inEscape := false
+	for _, r := range s {
+		if r == 0x1b {
+			inEscape = true
+			continue
+		}
+		if inEscape {
+			if r == 'm' || r == 'K' || r == 'H' || r == 'J' {
+				inEscape = false
+			}
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
 func TestTextEditor_HighlightPlain_ReturnsLineUnchanged(t *testing.T) {
 	t.Parallel()
 	plain := &TextEditor{Highlight: HighlightPlain}

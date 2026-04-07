@@ -201,8 +201,10 @@ func (n *NotesEditor) SaveErr() string {
 
 // View renders the notes editor inside a bordered box of the given size.
 // The box includes a header with the pane name + dirty indicator and a
-// footer with quick-reference hints.
-func (n *NotesEditor) View(width, height int) string {
+// footer with quick-reference hints. The focused parameter controls border
+// colour: bright when the editor has keyboard focus, dim when the bound
+// pane has focus (set via Tab in the surrounding model).
+func (n *NotesEditor) View(width, height int, focused bool) string {
 	if n == nil || width < 8 || height < 5 {
 		return ""
 	}
@@ -217,7 +219,7 @@ func (n *NotesEditor) View(width, height int) string {
 
 	header := n.headerLine(innerW)
 	body := n.editor.Render()
-	footer := n.footerLine(innerW)
+	footer := n.footerLine(innerW, focused)
 
 	content := header + "\n" + body
 	// The editor render may already end with a newline; ensure footer is on its own line.
@@ -226,9 +228,13 @@ func (n *NotesEditor) View(width, height int) string {
 	}
 	content += footer
 
+	borderColor := lipgloss.Color("240") // dim grey when unfocused
+	if focused {
+		borderColor = lipgloss.Color("63") // bright blue when focused
+	}
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("63")).
+		BorderForeground(borderColor).
 		Width(width).
 		Height(height).
 		Render(content)
@@ -253,12 +259,20 @@ func (n *NotesEditor) headerLine(width int) string {
 		Render(raw)
 }
 
-func (n *NotesEditor) footerLine(width int) string {
-	hint := "Ctrl+S save  Esc exit  Alt+E toggle"
-	if n.saveErr != "" {
+func (n *NotesEditor) footerLine(width int, focused bool) string {
+	var hint string
+	switch {
+	case n.saveErr != "":
 		hint = "save err: " + n.saveErr
-	} else if !n.lastSavedAt.IsZero() {
-		hint = fmt.Sprintf("saved %s ago  Ctrl+S  Esc  Alt+E", relativeTime(n.lastSavedAt))
+	case focused:
+		if !n.lastSavedAt.IsZero() {
+			hint = fmt.Sprintf("saved %s ago  Tab pane  Ctrl+S  Esc", relativeTime(n.lastSavedAt))
+		} else {
+			hint = "Tab pane  Ctrl+S save  Esc exit  Alt+E"
+		}
+	default:
+		// Pane has focus — remind the user how to come back here.
+		hint = "Tab notes  Alt+E exit"
 	}
 	hint = truncateRunes(hint, width)
 	return lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render(hint)

@@ -187,6 +187,8 @@ type Model struct {
 	sidebarFocused       bool                   // true when notification sidebar has keyboard focus
 	notesMode            bool                   // true when pane notes editor is open for the active pane
 	notesEditor          *NotesEditor           // active notes editor (nil when notesMode is false)
+	notesPaneFocused     bool                   // true when keyboard input goes to the bound pane (PTY) instead of the notes editor
+	notesEnteredFocus    bool                   // true when toggleNotesMode was the one that turned the tab's focus mode on (so exit reverts)
 }
 
 func NewModel(client *ipc.Client, cfg config.Config, version string, registry *plugin.Registry) Model {
@@ -616,8 +618,13 @@ func (m Model) notesTick() tea.Cmd {
 }
 
 // toggleNotesMode opens the notes editor for the active pane, or closes
-// (and flushes) it if notes mode is already active. Exits focus mode first
-// if it is active — focus and notes are mutually exclusive.
+// (and flushes) it if notes mode is already active.
+//
+// Opening notes auto-enters focus mode for the tab so the user only sees the
+// bound pane next to the editor — sibling panes are hidden but keep running.
+// If the user was already in focus mode, the existing focus state is left
+// alone. Tab/Shift+Tab cycles keyboard focus between the editor and the pane
+// while notes mode is active.
 func (m Model) toggleNotesMode() (tea.Model, tea.Cmd) {
 	if m.notesMode && m.notesEditor != nil {
 		return m.exitNotesMode()
@@ -630,9 +637,6 @@ func (m Model) toggleNotesMode() (tea.Model, tea.Cmd) {
 	if pane == nil {
 		return m, nil
 	}
-	if tab.FocusMode() {
-		tab.ToggleFocus()
-	}
 	// Initial dimensions are placeholders — View() will Resize the editor
 	// to fit the actual notes panel area on the next render pass.
 	editor, err := NewNotesEditor(config.NotesDir(), pane.ID, pane.Name, 1, 1)
@@ -640,14 +644,29 @@ func (m Model) toggleNotesMode() (tea.Model, tea.Cmd) {
 		log.Printf("open notes: %v", err)
 		return m, nil
 	}
+	// Auto-enter focus mode so the bound pane fills the available area to
+	// the left of the editor. Track that we were the ones to do so, so
+	// exiting notes reverts focus only when we owned the toggle.
+	enteredFocus := false
+	if !tab.FocusMode() {
+		tab.ToggleFocus()
+		enteredFocus = tab.FocusMode() // ToggleFocus is a no-op on single-pane tabs
+	}
 	m.notesMode = true
 	m.notesEditor = editor
+	m.notesEnteredFocus = enteredFocus
+	m.notesPaneFocused = false // editor starts focused so the user can immediately type
 	return m, tea.Batch(tea.ClearScreen, m.resizeAllPanes(), m.notesTick())
 }
 
 // notesKeyExempt reports whether a key should bypass the notes editor and
-// reach the normal global handlers (navigation, structural changes, dialogs).
-// Anything not on this list is consumed by the editor as text input.
+// reach the normal global handlers (structural changes, tab/pane management,
+// dialogs). Anything not on this list is consumed by the editor as text
+// input while notes mode is active.
+//
+// Note: Tab/Shift+Tab (kb.NextPane/kb.PrevPane) are deliberately NOT in
+// this list — in notes mode they cycle keyboard focus between the editor
+// and the bound pane, handled by the caller.
 func (m Model) notesKeyExempt(key string) bool {
 	kb := m.cfg.Keybindings
 	switch key {
@@ -655,11 +674,8 @@ func (m Model) notesKeyExempt(key string) bool {
 	// flush + exit notes before running.
 	case kb.ClosePane, kb.CloseTab, kb.SplitHorizontal, kb.SplitVertical:
 		return true
-	// Tab and pane navigation.
-	case kb.NextPane, kb.PrevPane, kb.NewTab:
-		return true
 	// Tab management.
-	case kb.RenameTab, kb.RenamePane, kb.CycleTabColor:
+	case kb.NewTab, kb.RenameTab, kb.RenamePane, kb.CycleTabColor:
 		return true
 	// Other modes.
 	case kb.FocusPane:
@@ -680,15 +696,44 @@ func (m Model) notesKeyExempt(key string) bool {
 	return false
 }
 
-// exitNotesMode flushes any pending notes edits and closes the editor.
+// exitNotesModeInPlace flushes pending notes and tears down notes mode
+// state on the receiver, but does NOT return a command — used when the
+// caller intends to fall through to another handler in the same Update
+// invocation.
+func (m *Model) exitNotesModeInPlace() {
+	if m.notesEditor != nil {
+		if err := m.notesEditor.Close(); err != nil {
+			log.Printf("save notes on shortcut: %v", err)
+		}
+	}
+	if m.notesEnteredFocus {
+		if tab := m.activeTabModel(); tab != nil && tab.FocusMode() {
+			tab.ExitFocus()
+		}
+	}
+	m.notesMode = false
+	m.notesEditor = nil
+	m.notesPaneFocused = false
+	m.notesEnteredFocus = false
+}
+
+// exitNotesMode flushes any pending notes edits, closes the editor, and
+// reverts the tab's focus mode if we were the ones who turned it on.
 func (m Model) exitNotesMode() (tea.Model, tea.Cmd) {
 	if m.notesEditor != nil {
 		if err := m.notesEditor.Close(); err != nil {
 			log.Printf("save notes on exit: %v", err)
 		}
 	}
+	if m.notesEnteredFocus {
+		if tab := m.activeTabModel(); tab != nil && tab.FocusMode() {
+			tab.ExitFocus()
+		}
+	}
 	m.notesMode = false
 	m.notesEditor = nil
+	m.notesPaneFocused = false
+	m.notesEnteredFocus = false
 	return m, tea.Batch(tea.ClearScreen, m.resizeAllPanes())
 }
 
@@ -749,7 +794,8 @@ func (m Model) View() tea.View {
 			}
 			tabContent := tab.View()
 			if notesW > 0 {
-				tabContent = lipgloss.JoinHorizontal(lipgloss.Top, tabContent, m.notesEditor.View(notesW, tabH))
+				editorFocused := !m.notesPaneFocused
+				tabContent = lipgloss.JoinHorizontal(lipgloss.Top, tabContent, m.notesEditor.View(notesW, tabH, editorFocused))
 			}
 			if sidebarW > 0 {
 				m.notifications.focused = m.sidebarFocused
@@ -789,11 +835,13 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.handlePaneRenameKey(msg)
 	}
 
-	// Notes mode: while active, the notes editor owns text input but global
-	// shortcuts (navigation, structural changes, dialogs) must still reach
-	// the normal handlers. Anything that is not in the exempt set goes to
-	// the editor.
+	// Notes mode: while active, keyboard input is split between the bound
+	// pane (left) and the notes editor (right). Tab/Shift+Tab cycles which
+	// side has focus; the user can type into the pane or into the editor
+	// without exiting notes mode.
 	if m.notesMode && m.notesEditor != nil {
+		// Universal keys — handled the same way regardless of which side
+		// currently has focus.
 		switch key {
 		case kb.NotesToggle:
 			return m.exitNotesMode()
@@ -802,17 +850,31 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				log.Printf("save notes on quit: %v", err)
 			}
 			return m, tea.Quit
+		case kb.NextPane, kb.PrevPane:
+			// Tab / Shift+Tab cycles focus between editor and pane.
+			m.notesPaneFocused = !m.notesPaneFocused
+			return m, nil
 		}
-		if m.notesKeyExempt(key) {
-			// Structural / navigational shortcut — flush notes (in case the
-			// action removes the active pane) then fall through to the
-			// normal handlers.
-			if err := m.notesEditor.Close(); err != nil {
-				log.Printf("save notes on shortcut: %v", err)
-			}
-			m.notesMode = false
-			m.notesEditor = nil
+
+		// Structural keys (close pane/tab, split) destroy or restructure
+		// the bound pane. Flush + exit notes first, regardless of which
+		// side currently has focus, then fall through to the normal
+		// handler so the structural action still fires.
+		structural := key == kb.ClosePane || key == kb.CloseTab ||
+			key == kb.SplitHorizontal || key == kb.SplitVertical
+		if structural {
+			m.exitNotesModeInPlace()
+		} else if m.notesPaneFocused {
+			// Pane has focus — fall through to the normal handlers below.
+			// Global shortcuts (dialogs, rename, ...) work as usual, and
+			// unmatched keys are forwarded to the PTY by the default
+			// branch at the bottom of this function.
+		} else if m.notesKeyExempt(key) {
+			// Editor focused + non-structural exempt shortcut — flush
+			// notes and fall through so the global handler runs.
+			m.exitNotesModeInPlace()
 		} else {
+			// Editor has focus and the key is plain text input.
 			action, cmd := m.notesEditor.HandleKey(key)
 			if action == notesActionExit {
 				return m.exitNotesMode()
@@ -1310,8 +1372,15 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) []string {
 			if err := m.notesEditor.Close(); err != nil {
 				log.Printf("flush notes for removed pane %s: %v", bound, err)
 			}
+			if m.notesEnteredFocus {
+				if tab := m.activeTabModel(); tab != nil && tab.FocusMode() {
+					tab.ExitFocus()
+				}
+			}
 			m.notesMode = false
 			m.notesEditor = nil
+			m.notesPaneFocused = false
+			m.notesEnteredFocus = false
 		}
 	}
 
@@ -1433,8 +1502,15 @@ func (m *Model) switchTab(idx int) tea.Cmd {
 		if err := m.notesEditor.Close(); err != nil {
 			log.Printf("save notes on tab switch: %v", err)
 		}
+		if m.notesEnteredFocus {
+			if tab := m.activeTabModel(); tab != nil && tab.FocusMode() {
+				tab.ExitFocus()
+			}
+		}
 		m.notesMode = false
 		m.notesEditor = nil
+		m.notesPaneFocused = false
+		m.notesEnteredFocus = false
 	}
 	m.activeTab = idx
 	tabID := m.tabs[idx].ID
@@ -1736,9 +1812,13 @@ func (m Model) renderStatusBar() string {
 				left = "[focus] " + left
 			}
 			if m.notesMode && m.notesEditor != nil {
-				marker := "[notes]"
-				if m.notesEditor.Dirty() {
+				var marker string
+				if m.notesPaneFocused {
+					marker = "[notes pane]"
+				} else if m.notesEditor.Dirty() {
 					marker = "[notes*]"
+				} else {
+					marker = "[notes]"
 				}
 				left = marker + " " + left
 			}

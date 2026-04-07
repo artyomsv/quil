@@ -88,7 +88,14 @@ const routeToFile = {
 
 export default defineConfig({
   site: "https://quil.cc",
-  trailingSlash: "never",
+  // trailingSlash: "always" tells Astro to emit canonicals + sitemap
+  // URLs with a trailing slash (/install/, /features/, ...). This is
+  // the only setting that lines up with GitHub Pages' directory
+  // serving behaviour: dist/install/index.html is served at /install/
+  // and GH Pages 301-redirects /install -> /install/. Emitting the
+  // slashed form directly means Google Search Console's sitemap
+  // validator sees 200s on every URL, not redirect chains.
+  trailingSlash: "always",
   prefetch: {
     prefetchAll: true,
     defaultStrategy: "viewport",

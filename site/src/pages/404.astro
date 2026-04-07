@@ -1,0 +1,41 @@
+---
+import Page from "@/layouts/Page.astro";
+import Icon from "@/components/Icon.astro";
+
+const seo = {
+  title: "Page not found",
+  description:
+    "That workspace wasn't persisted. Head back to quil.cc to find what you were looking for.",
+  path: "/404",
+};
+---
+<Page {...seo}>
+  <section class="mx-auto flex min-h-[60vh] max-w-2xl flex-col items-center justify-center px-6 py-24 text-center">
+    <div class="mb-8 inline-flex size-20 items-center justify-center rounded-2xl bg-primary/10 text-mint ring-1 ring-primary/30">
+      <Icon name="wifi-off" size={36} />
+    </div>
+
+    <p class="mb-3 text-xs font-semibold uppercase tracking-wider text-sage">
+      404
+    </p>
+    <h1 class="text-4xl font-bold tracking-tight sm:text-5xl">
+      That workspace
+      <span class="gradient-emerald">wasn't persisted.</span>
+    </h1>
+    <p class="mx-auto mt-5 max-w-md text-lg text-muted-foreground">
+      The page you're looking for isn't in the workspace tree. Maybe
+      it was never checked in, or maybe a pane split changed its path.
+    </p>
+
+    <div class="mt-10 flex flex-col items-center justify-center gap-3 sm:flex-row">
+      <a href="/" class="btn-primary">
+        <Icon name="arrow-right" size={16} />
+        Back to home
+      </a>
+      <a href="/install" class="btn-outline">
+        <Icon name="download" size={16} />
+        Install Quil
+      </a>
+    </div>
+  </section>
+</Page>

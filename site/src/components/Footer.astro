@@ -1,0 +1,101 @@
+---
+import { SITE } from "@/data/seo";
+
+const sections = [
+  {
+    title: "Product",
+    links: [
+      { href: "/features", text: "Features" },
+      { href: "/plugins", text: "Plugins" },
+      { href: "/install", text: "Install" },
+      { href: "/docs", text: "Documentation" },
+    ],
+  },
+  {
+    title: "Compare",
+    links: [
+      { href: "/vs/tmux", text: "vs tmux" },
+      { href: "/vs/zellij", text: "vs Zellij" },
+      { href: "/vs/wezterm", text: "vs WezTerm" },
+      { href: "/vs/screen", text: "vs GNU Screen" },
+    ],
+  },
+  {
+    title: "Documentation",
+    links: [
+      { href: SITE.github + "/blob/master/README.md", text: "README", external: true },
+      { href: SITE.github + "/blob/master/VISION.md", text: "Vision", external: true },
+      { href: SITE.github + "/blob/master/PRD.md", text: "PRD", external: true },
+      { href: SITE.github + "/blob/master/ROADMAP.md", text: "Roadmap", external: true },
+      { href: SITE.github + "/blob/master/docs/plugin-reference.md", text: "Plugin reference", external: true },
+      { href: SITE.github + "/blob/master/CHANGELOG.md", text: "Changelog", external: true },
+    ],
+  },
+  {
+    title: "Project",
+    links: [
+      { href: SITE.github, text: "GitHub", external: true },
+      { href: SITE.github + "/issues", text: "Issues", external: true },
+      { href: SITE.github + "/releases/latest", text: "Releases", external: true },
+      { href: SITE.github + "/blob/master/LICENSE", text: "MIT License", external: true },
+      { href: "/legal", text: "Legal" },
+    ],
+  },
+];
+
+const year = new Date().getFullYear();
+---
+<footer class="mt-32 border-t border-border/60 bg-background/40">
+  <div class="mx-auto max-w-6xl px-6 py-14">
+    <div class="grid grid-cols-2 gap-10 md:grid-cols-4">
+      {sections.map((section) => (
+        <nav aria-labelledby={`footer-${section.title.toLowerCase()}`}>
+          <h2
+            id={`footer-${section.title.toLowerCase()}`}
+            class="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground"
+          >
+            {section.title}
+          </h2>
+          <ul class="space-y-2 text-sm">
+            {section.links.map((link) => (
+              <li>
+                <a
+                  href={link.href}
+                  rel={link.external ? "noopener external" : undefined}
+                  class="text-muted-foreground transition-colors hover:text-foreground"
+                >
+                  {link.text}
+                </a>
+              </li>
+            ))}
+          </ul>
+        </nav>
+      ))}
+    </div>
+
+    <div
+      class="mt-12 flex flex-col items-start justify-between gap-3 border-t border-border/60 pt-8 sm:flex-row sm:items-center"
+    >
+      <div class="flex items-center gap-3">
+        <img
+          src="/brand/mark.svg"
+          alt=""
+          width="28"
+          height="30"
+          aria-hidden="true"
+        />
+        <p class="text-xs text-muted-foreground">
+          © {year} {SITE.name} · Released under the
+          <a
+            href={SITE.github + "/blob/master/LICENSE"}
+            class="underline underline-offset-4 hover:text-foreground"
+            rel="noopener external"
+          >MIT License</a>
+        </p>
+      </div>
+      <p class="text-xs text-muted-foreground">
+        Built with <a href="https://astro.build" class="underline underline-offset-4 hover:text-foreground" rel="noopener external">Astro</a> · Hosted on GitHub Pages
+      </p>
+    </div>
+  </div>
+</footer>

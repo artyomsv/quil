@@ -1,0 +1,213 @@
+---
+import Page from "@/layouts/Page.astro";
+import Icon from "@/components/Icon.astro";
+import { SITE } from "@/data/seo";
+import { breadcrumbSchema, howToSchema } from "@/data/schemas";
+
+const seo = {
+  title: "Install Quil in 30 seconds",
+  description:
+    "Install Quil on Linux, macOS, or Windows. Curl one-liner, go install, or pre-built .zip — pick the method that fits your setup.",
+  path: "/install",
+  keywords: [
+    "install quil",
+    "quil download",
+    "quil linux",
+    "quil macos",
+    "quil windows",
+    "terminal multiplexer install",
+  ],
+};
+
+const schemas = [
+  breadcrumbSchema([
+    { name: "Quil", path: "/" },
+    { name: "Install", path: "/install" },
+  ]),
+  howToSchema({
+    name: "Install Quil",
+    description:
+      "Install the Quil terminal multiplexer on Linux, macOS, or Windows and launch the TUI.",
+    totalTime: "PT1M",
+    steps: [
+      {
+        name: "Run the install script",
+        text: "curl -sSfL https://raw.githubusercontent.com/artyomsv/quil/master/scripts/install.sh | sh",
+      },
+      {
+        name: "Launch the TUI",
+        text: "quil",
+      },
+      {
+        name: "Verify the install",
+        text: "quil --version",
+      },
+      {
+        name: "Create your first pane",
+        text: "Press Ctrl+T to add a tab, then Alt+V to split vertically. The daemon auto-starts the first time you launch the TUI.",
+      },
+    ],
+  }),
+];
+
+const installMethods = [
+  {
+    icon: "terminal" as const,
+    title: "Linux / macOS",
+    subtitle: "One-line install script",
+    body: "The install script detects your OS and architecture, downloads the latest release binary, verifies the checksum, and copies both quil and quild into /usr/local/bin.",
+    command: "curl -sSfL https://raw.githubusercontent.com/artyomsv/quil/master/scripts/install.sh | sh",
+    cta: { label: "View the script on GitHub", href: SITE.github + "/blob/master/scripts/install.sh" },
+  },
+  {
+    icon: "code" as const,
+    title: "Go users",
+    subtitle: "Build from source via go install",
+    body: "If you already have Go 1.25+ installed, install directly from the module path. This compiles both binaries and drops them in $GOBIN.",
+    command: `go install github.com/artyomsv/quil/cmd/quil@latest
+go install github.com/artyomsv/quil/cmd/quild@latest`,
+    cta: { label: "Browse the source", href: SITE.github },
+  },
+  {
+    icon: "download" as const,
+    title: "Windows",
+    subtitle: "Pre-built .zip from GitHub Releases",
+    body: "Windows uses a native ConPTY backend, not WSL. Download the windows/amd64 .zip, extract it anywhere on PATH, and run quil.exe.",
+    command: "# Download the latest windows-amd64 .zip from:\n# " + SITE.github + "/releases/latest",
+    cta: { label: "Open Releases", href: SITE.github + "/releases/latest" },
+  },
+];
+---
+<Page {...seo} schemas={schemas}>
+  <article class="mx-auto max-w-5xl px-6 py-16">
+    <!-- Breadcrumb -->
+    <nav aria-label="Breadcrumb" class="mb-6 flex items-center gap-2 text-sm text-muted-foreground">
+      <a href="/" class="hover:text-foreground">Quil</a>
+      <Icon name="chevron-right" size={14} />
+      <span class="text-foreground">Install</span>
+    </nav>
+
+    <header class="mb-14">
+      <p class="mb-3 text-xs font-semibold uppercase tracking-wider text-sage">
+        Get started
+      </p>
+      <h1 class="text-4xl font-bold tracking-tight sm:text-5xl">
+        Install Quil in 30 seconds.
+      </h1>
+      <p class="mt-4 max-w-2xl text-lg text-muted-foreground">
+        Three ways to get Quil running. Pick the one that fits your
+        setup — all three produce the same two binaries (<code>quil</code>
+        and <code>quild</code>) and the same on-disk state under <code>~/.quil/</code>.
+      </p>
+    </header>
+
+    <!-- Install methods -->
+    <section class="space-y-6">
+      {installMethods.map((method) => (
+        <article class="glass-card p-8">
+          <div class="mb-4 flex items-start gap-4">
+            <div class="flex size-12 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-mint ring-1 ring-primary/30">
+              <Icon name={method.icon} size={22} />
+            </div>
+            <div>
+              <h2 class="text-xl font-semibold text-foreground">{method.title}</h2>
+              <p class="text-sm text-sage">{method.subtitle}</p>
+            </div>
+          </div>
+          <p class="mb-5 text-sm leading-relaxed text-muted-foreground">
+            {method.body}
+          </p>
+          <pre class="text-sm"><code>{method.command}</code></pre>
+          <a
+            href={method.cta.href}
+            rel="noopener external"
+            class="mt-5 inline-flex items-center gap-2 text-sm font-medium text-mint hover:text-foreground"
+          >
+            {method.cta.label}
+            <Icon name="arrow-right" size={14} />
+          </a>
+        </article>
+      ))}
+    </section>
+
+    <!-- First run -->
+    <section class="mt-16">
+      <h2 class="mb-4 text-2xl font-semibold tracking-tight">First run</h2>
+      <div class="glass-card p-8">
+        <p class="mb-4 text-sm leading-relaxed text-muted-foreground">
+          Once installed, launch the TUI. The daemon (<code>quild</code>)
+          auto-spawns in the background on your first run and opens a
+          Unix domain socket (or Named Pipe on Windows) at
+          <code>~/.quil/quild.sock</code>.
+        </p>
+        <pre class="text-sm"><code>quil</code></pre>
+        <p class="mt-5 text-sm leading-relaxed text-muted-foreground">
+          You'll see an empty workspace. Press <code>Ctrl+T</code> to
+          create a new tab, <code>Alt+V</code> or <code>Alt+H</code> to
+          split panes vertically or horizontally, <code>F2</code> to
+          rename a tab, <code>Alt+C</code> to cycle tab colours.
+        </p>
+      </div>
+    </section>
+
+    <!-- Verify -->
+    <section class="mt-10">
+      <h2 class="mb-4 text-2xl font-semibold tracking-tight">Verify</h2>
+      <div class="glass-card p-8">
+        <p class="mb-4 text-sm leading-relaxed text-muted-foreground">
+          Check you're running the version you expect:
+        </p>
+        <pre class="text-sm"><code>quil --version</code></pre>
+        <p class="mt-5 text-sm leading-relaxed text-muted-foreground">
+          Expected output: <code>quil version 1.0.0 (commit abc1234, built 2026-04-07)</code>
+          — your commit hash and build date will differ.
+        </p>
+      </div>
+    </section>
+
+    <!-- Uninstall -->
+    <section class="mt-10">
+      <h2 class="mb-4 text-2xl font-semibold tracking-tight">Uninstall</h2>
+      <div class="glass-card p-8">
+        <div class="mb-4 inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-warning">
+          <Icon name="triangle-alert" size={14} />
+          Destructive
+        </div>
+        <p class="mb-4 text-sm leading-relaxed text-muted-foreground">
+          Remove the binaries and (optionally) wipe local state:
+        </p>
+        <pre class="text-sm"><code>sudo rm /usr/local/bin/quil /usr/local/bin/quild
+
+# Optional — removes ALL workspace state, ghost buffers, and plugin configs
+rm -rf ~/.quil</code></pre>
+        <p class="mt-5 text-sm leading-relaxed text-muted-foreground">
+          The second command is irreversible. Your tabs, panes, notes,
+          and saved AI session IDs will be gone. Keep the directory if
+          you want the option to reinstall later.
+        </p>
+      </div>
+    </section>
+
+    <!-- Next steps -->
+    <section class="mt-14">
+      <div class="divider-mint mb-10"></div>
+      <h2 class="mb-4 text-2xl font-semibold tracking-tight">Next steps</h2>
+      <div class="grid gap-4 sm:grid-cols-2">
+        <a href="/features" class="glass-card block p-6 transition-colors hover:border-primary/40">
+          <Icon name="layers" size={22} class="text-mint" />
+          <h3 class="mt-3 font-semibold text-foreground">Explore every feature</h3>
+          <p class="mt-1 text-sm text-muted-foreground">
+            Typed panes, AI session resume, MCP server, plugin system, and more.
+          </p>
+        </a>
+        <a href="/plugins" class="glass-card block p-6 transition-colors hover:border-primary/40">
+          <Icon name="puzzle" size={22} class="text-mint" />
+          <h3 class="mt-3 font-semibold text-foreground">Write a plugin</h3>
+          <p class="mt-1 text-sm text-muted-foreground">
+            Define new pane types in a single TOML file. Hot-reload on save.
+          </p>
+        </a>
+      </div>
+    </section>
+  </article>
+</Page>

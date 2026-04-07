@@ -1,0 +1,10 @@
+# quil.cc — robots.txt
+#
+# The marketing site is 100% public and indexable. No private areas,
+# no staging paths. Allow everything, point every crawler at the
+# sitemap for discovery.
+
+User-agent: *
+Allow: /
+
+Sitemap: https://quil.cc/sitemap-index.xml

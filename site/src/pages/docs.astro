@@ -1,0 +1,186 @@
+---
+import Page from "@/layouts/Page.astro";
+import Icon from "@/components/Icon.astro";
+import { SITE } from "@/data/seo";
+import { breadcrumbSchema } from "@/data/schemas";
+
+const seo = {
+  title: "Documentation — VISION, PRD, architecture, plugin reference",
+  description:
+    "Every Quil document lives in the GitHub repo as plain Markdown. Vision, PRD, architecture decision records, roadmap, plugin authoring reference, contributing guide, and changelog.",
+  path: "/docs",
+  keywords: [
+    "quil docs",
+    "quil documentation",
+    "quil architecture",
+    "quil plugin reference",
+    "quil vision",
+  ],
+};
+
+const schemas = [
+  breadcrumbSchema([
+    { name: "Quil", path: "/" },
+    { name: "Documentation", path: "/docs" },
+  ]),
+];
+
+const sections = [
+  {
+    title: "Project context",
+    items: [
+      {
+        name: "README",
+        path: "README.md",
+        desc: "Project overview, features, install instructions, and keybinding reference. Start here.",
+      },
+      {
+        name: "Vision",
+        path: "VISION.md",
+        desc: "Why Quil exists, who it's for, and what problem the reboot-proof workspace promise solves.",
+      },
+      {
+        name: "PRD",
+        path: "PRD.md",
+        desc: "Full product requirements: personas, user stories, success metrics, scope boundaries.",
+      },
+      {
+        name: "Architecture",
+        path: "ARCHITECTURE.md",
+        desc: "Client-daemon model, PTY backends, IPC protocol, state persistence, ADRs.",
+      },
+      {
+        name: "Roadmap",
+        path: "ROADMAP.md",
+        desc: "Milestone-by-milestone progress from M1 foundation to v1.0.0 stable, plus future work.",
+      },
+      {
+        name: "Changelog",
+        path: "CHANGELOG.md",
+        desc: "Keep-a-Changelog formatted history of every release, from v0.1.0 through v1.0.0.",
+      },
+    ],
+  },
+  {
+    title: "Authoring guides",
+    items: [
+      {
+        name: "Plugin reference",
+        path: "docs/plugin-reference.md",
+        desc: "Complete TOML plugin schema: [plugin], [spawn], [keys], [resume], [error], [status] sections with examples.",
+      },
+      {
+        name: "Contributing",
+        path: "CONTRIBUTING.md",
+        desc: "How to set up the dev environment, run tests, and submit a pull request.",
+      },
+      {
+        name: "Versioning",
+        path: "VERSIONING.md",
+        desc: "Semantic versioning policy driven by Conventional Commits — how version bumps work in this project.",
+      },
+    ],
+  },
+  {
+    title: "Future roadmap PRDs",
+    items: [
+      {
+        name: "Command palette",
+        path: "docs/roadmap/command-palette.md",
+        desc: "Fuzzy-search command bar accessible via Ctrl+Shift+P. Future milestone.",
+      },
+      {
+        name: "Community plugins",
+        path: "docs/roadmap/community-plugins.md",
+        desc: "A registry + discovery mechanism for user-contributed TOML plugins.",
+      },
+      {
+        name: "Session sharing",
+        path: "docs/roadmap/session-sharing.md",
+        desc: "Read-only tunnel into a live Quil workspace so a collaborator can watch your panes in real time.",
+      },
+      {
+        name: "Process health",
+        path: "docs/roadmap/process-health.md",
+        desc: "Liveness probes per pane with automatic restart policies. Think systemd for pane processes.",
+      },
+      {
+        name: "Tmux migration",
+        path: "docs/roadmap/tmux-migration.md",
+        desc: "Import tmux sessions — read ~/.tmux/resurrect/ and map them into Quil's workspace model.",
+      },
+      {
+        name: "Workspace files",
+        path: "docs/roadmap/workspace-files.md",
+        desc: "Declarative workspace definitions in quil.toml checked into project repos.",
+      },
+    ],
+  },
+];
+---
+<Page {...seo} schemas={schemas}>
+  <article class="mx-auto max-w-5xl px-6 py-16">
+    <nav aria-label="Breadcrumb" class="mb-6 flex items-center gap-2 text-sm text-muted-foreground">
+      <a href="/" class="hover:text-foreground">Quil</a>
+      <Icon name="chevron-right" size={14} />
+      <span class="text-foreground">Documentation</span>
+    </nav>
+
+    <header class="mb-14">
+      <p class="mb-3 text-xs font-semibold uppercase tracking-wider text-sage">
+        Documentation
+      </p>
+      <h1 class="text-4xl font-bold tracking-tight sm:text-5xl">
+        Every document ships as plain Markdown.
+      </h1>
+      <p class="mt-5 max-w-3xl text-lg text-muted-foreground">
+        The Quil docs live in the repo next to the code, so they
+        version together. Every link on this page opens the canonical
+        Markdown on GitHub — pull requests welcome on any of them.
+      </p>
+    </header>
+
+    <div class="space-y-16">
+      {sections.map((section) => (
+        <section>
+          <h2 class="mb-6 text-2xl font-semibold tracking-tight">{section.title}</h2>
+          <div class="grid gap-4 sm:grid-cols-2">
+            {section.items.map((item) => (
+              <a
+                href={`${SITE.github}/blob/master/${item.path}`}
+                rel="noopener external"
+                class="glass-card group block p-6 transition-colors hover:border-primary/40"
+              >
+                <div class="mb-2 flex items-center gap-2">
+                  <Icon name="book-open" size={16} class="text-mint" />
+                  <h3 class="font-semibold text-foreground">{item.name}</h3>
+                </div>
+                <p class="mt-1 text-sm text-muted-foreground">{item.desc}</p>
+                <p class="mt-3 font-mono text-xs text-sage">{item.path}</p>
+              </a>
+            ))}
+          </div>
+        </section>
+      ))}
+    </div>
+
+    <section class="mt-16">
+      <div class="glass-card p-8">
+        <div class="mb-3 inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-sage">
+          <Icon name="code" size={14} />
+          Reading the source
+        </div>
+        <p class="text-sm leading-relaxed text-muted-foreground">
+          The backend (Go daemon) lives at
+          <a href={SITE.github + "/tree/master/cmd/quild"} rel="noopener external" class="text-mint underline underline-offset-4 hover:text-foreground">cmd/quild/</a>,
+          the TUI client at
+          <a href={SITE.github + "/tree/master/cmd/quil"} rel="noopener external" class="text-mint underline underline-offset-4 hover:text-foreground">cmd/quil/</a>,
+          and shared internals (PTY, IPC, state, plugins) under
+          <a href={SITE.github + "/tree/master/internal"} rel="noopener external" class="text-mint underline underline-offset-4 hover:text-foreground">internal/</a>.
+          The plugin examples and test fixtures live at
+          <a href={SITE.github + "/tree/master/docs"} rel="noopener external" class="text-mint underline underline-offset-4 hover:text-foreground">docs/</a>.
+        </p>
+      </div>
+    </section>
+  </article>
+</Page>

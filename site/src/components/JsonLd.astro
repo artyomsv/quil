@@ -1,0 +1,30 @@
+---
+// JsonLd — renders an array of structured-data objects as individual
+// <script type="application/ld+json"> blocks.
+//
+// Using one script tag per document (rather than a single @graph
+// array) makes it trivial for Google's Rich Results Test to pinpoint
+// which block has a warning without recursively walking @graph nodes.
+//
+// The stringify call uses a replacer that escapes </ sequences —
+// required by the HTML spec so that an inline script can never
+// prematurely close its parent <script> tag if a schema value
+// happens to contain that sequence.
+
+interface Props {
+  data: Record<string, unknown>[];
+}
+
+const { data } = Astro.props as Props;
+
+function safeStringify(obj: unknown): string {
+  return JSON.stringify(obj).replace(/</g, "\\u003c");
+}
+---
+{data.map((schema) => (
+  <script
+    is:inline
+    type="application/ld+json"
+    set:html={safeStringify(schema)}
+  />
+))}

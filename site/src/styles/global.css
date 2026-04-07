@@ -1,0 +1,284 @@
+@import "tailwindcss";
+
+/* --------------------------------------------------------------------
+   Quil marketing site — design tokens
+   --------------------------------------------------------------------
+   Visual style: "Analogous Calm". Primary colour is a deep jewel-toned
+   emerald green, harmoniously blended with layered accents of cool teal,
+   soft mint (#A8E6CE), and muted sage. Contrast is achieved through
+   depth of greens rather than harsh neutrals — every background, card,
+   border, and text colour has a small green hue so the eye reads the
+   page as a single harmonious family.
+
+   Soft gradients, rounded UI (radius 0.875rem), generous whitespace.
+   Dark-first (wellness aesthetic at night); no light-mode variant.
+   Glass cards everywhere — every card surface uses backdrop-blur with
+   a subtle mint inner highlight and a deep teal-black drop shadow.
+*/
+
+@layer base {
+  :root {
+    /* Background family — very dark green-black, no pure black */
+    --background: 170 35% 5%;       /* deep forest floor */
+    --foreground: 150 15% 95%;      /* warm near-white with faint green */
+
+    /* Surface family — one step lighter for cards, two for popovers */
+    --card: 165 28% 9%;
+    --card-foreground: 150 15% 95%;
+    --popover: 165 28% 9%;
+    --popover-foreground: 150 15% 95%;
+    --muted: 165 25% 11%;
+    --muted-foreground: 155 12% 68%;
+
+    /* Primary — deep jewel-toned emerald */
+    --primary: 158 75% 32%;
+    --primary-foreground: 150 15% 98%;
+
+    /* Accent — cool teal, the secondary hero colour */
+    --accent: 178 65% 42%;
+    --accent-foreground: 170 20% 8%;
+
+    /* Layered accents from the user's palette brief */
+    --mint: 154 57% 78%;            /* #A8E6CE exact */
+    --sage: 140 18% 55%;            /* muted sage */
+
+    /* Semantic — success reads as a brighter primary */
+    --success: 158 75% 42%;
+    --success-foreground: 150 15% 98%;
+    --warning: 38 85% 55%;          /* the only non-green colour in the system */
+    --warning-foreground: 170 20% 8%;
+    --destructive: 0 55% 55%;       /* deliberately desaturated */
+    --destructive-foreground: 0 0% 98%;
+
+    /* Borders + focus ring — green-tinted for the organic feel */
+    --border: 165 25% 16%;
+    --input: 165 25% 16%;
+    --ring: 158 75% 42%;
+
+    --radius: 0.875rem;             /* rounder than typical (0.75rem) — "breath" */
+
+    color-scheme: dark;
+  }
+
+  html, body { height: 100%; }
+
+  html {
+    background: hsl(var(--background));
+    color: hsl(var(--foreground));
+    font-family: "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  body {
+    /* Two restrained radial gradients evoking "breath and space".
+       Deep emerald glow at the top; teal glow at the bottom-right.
+       Both stay subtle so copy remains readable without a harsh
+       vignette. */
+    background:
+      radial-gradient(ellipse 80% 50% at 50% 0%,
+        hsl(158 60% 12% / 0.55),
+        transparent 65%),
+      radial-gradient(ellipse 60% 40% at 85% 100%,
+        hsl(178 45% 15% / 0.30),
+        transparent 65%),
+      hsl(var(--background));
+    min-height: 100vh;
+    font-feature-settings: "rlig" 1, "calt" 1;
+    line-height: 1.65;              /* generous for "breath" */
+  }
+
+  ::selection {
+    background: hsl(var(--primary) / 0.4);
+    color: hsl(var(--foreground));
+  }
+
+  :focus-visible {
+    outline: 2px solid hsl(var(--ring));
+    outline-offset: 3px;
+    border-radius: 6px;
+  }
+
+  /* Code blocks — rounded, mint-tinted border, soft shadow */
+  pre, code, kbd, samp {
+    font-family: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+
+  pre {
+    overflow-x: auto;
+    border-radius: 14px;
+    padding: 1rem 1.25rem;
+    border: 1px solid hsl(var(--primary) / 0.2);
+    background: hsl(165 30% 7% / 0.6);
+  }
+
+  code:not(pre code) {
+    background: hsl(var(--muted));
+    padding: 0.125rem 0.4rem;
+    border-radius: 6px;
+    font-size: 0.875em;
+    border: 1px solid hsl(var(--border) / 0.6);
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    text-wrap: balance;
+  }
+
+  p, li {
+    text-wrap: pretty;
+  }
+}
+
+/* Tailwind 4 @theme — maps our CSS variables to Tailwind utility
+   classes. Every `bg-primary`, `text-mint`, `border-sage/30`, etc.
+   now picks up the palette above automatically. */
+@theme {
+  --color-background: hsl(var(--background));
+  --color-foreground: hsl(var(--foreground));
+  --color-card: hsl(var(--card));
+  --color-card-foreground: hsl(var(--card-foreground));
+  --color-popover: hsl(var(--popover));
+  --color-popover-foreground: hsl(var(--popover-foreground));
+  --color-muted: hsl(var(--muted));
+  --color-muted-foreground: hsl(var(--muted-foreground));
+  --color-primary: hsl(var(--primary));
+  --color-primary-foreground: hsl(var(--primary-foreground));
+  --color-accent: hsl(var(--accent));
+  --color-accent-foreground: hsl(var(--accent-foreground));
+  --color-mint: hsl(var(--mint));
+  --color-sage: hsl(var(--sage));
+  --color-success: hsl(var(--success));
+  --color-success-foreground: hsl(var(--success-foreground));
+  --color-warning: hsl(var(--warning));
+  --color-warning-foreground: hsl(var(--warning-foreground));
+  --color-destructive: hsl(var(--destructive));
+  --color-destructive-foreground: hsl(var(--destructive-foreground));
+  --color-border: hsl(var(--border));
+  --color-input: hsl(var(--input));
+  --color-ring: hsl(var(--ring));
+
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+}
+
+/* ====================================================================
+   Components
+   ==================================================================== */
+
+@layer components {
+  /* Glass cards are the default card style for Quil. Subtle backdrop
+     blur, mint inner highlight, deep teal-black outer shadow. */
+  .glass-card {
+    background: linear-gradient(180deg,
+      hsl(var(--card) / 0.78),
+      hsl(var(--card) / 0.55));
+    backdrop-filter: blur(20px) saturate(140%);
+    -webkit-backdrop-filter: blur(20px) saturate(140%);
+    border: 1px solid hsl(var(--border) / 0.85);
+    border-radius: 16px;
+    box-shadow:
+      inset 0 1px 0 hsl(var(--mint) / 0.08),   /* mint inner highlight */
+      0 30px 80px -30px hsl(170 50% 4% / 0.6); /* deep teal-black shadow */
+  }
+
+  /* Primary CTA — two-stop emerald gradient for jewel-tone depth */
+  .btn-primary {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    border-radius: 14px;
+    padding: 0.85rem 1.4rem;
+    font-size: 0.9375rem;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    background: linear-gradient(135deg,
+      hsl(var(--primary)),
+      hsl(158 80% 26%));
+    color: hsl(var(--primary-foreground));
+    border: 1px solid hsl(var(--primary) / 0.5);
+    box-shadow: 0 12px 30px -12px hsl(var(--primary) / 0.45),
+                inset 0 1px 0 hsl(var(--mint) / 0.2);
+    transition: filter 0.15s ease, transform 0.15s ease;
+  }
+  .btn-primary:hover {
+    filter: brightness(1.1);
+    transform: translateY(-1px);
+  }
+
+  /* Outline CTA — ghost button that lifts on hover */
+  .btn-outline {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    border-radius: 14px;
+    padding: 0.85rem 1.4rem;
+    font-size: 0.9375rem;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    background: transparent;
+    color: hsl(var(--foreground));
+    border: 1px solid hsl(var(--border));
+    transition: background 0.15s ease, border-color 0.15s ease;
+  }
+  .btn-outline:hover {
+    background: hsl(var(--muted) / 0.5);
+    border-color: hsl(var(--primary) / 0.4);
+  }
+
+  /* Pills — tag-style labels */
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    border-radius: 9999px;
+    padding: 0.15rem 0.7rem;
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: -0.005em;
+    border: 1px solid hsl(var(--border));
+    background: hsl(var(--muted) / 0.6);
+  }
+  .pill-primary {
+    border-color: hsl(var(--primary) / 0.45);
+    background: hsl(var(--primary) / 0.14);
+    color: hsl(var(--mint));
+  }
+  .pill-success {
+    border-color: hsl(var(--success) / 0.45);
+    background: hsl(var(--success) / 0.14);
+    color: hsl(var(--success));
+  }
+  .pill-warning {
+    border-color: hsl(var(--warning) / 0.45);
+    background: hsl(var(--warning) / 0.14);
+    color: hsl(var(--warning));
+  }
+  .pill-mint {
+    border-color: hsl(var(--mint) / 0.35);
+    background: hsl(var(--mint) / 0.10);
+    color: hsl(var(--mint));
+  }
+
+  /* Subtle mint divider used between sections */
+  .divider-mint {
+    height: 1px;
+    background: linear-gradient(90deg,
+      transparent,
+      hsl(var(--primary) / 0.3),
+      hsl(var(--mint) / 0.25),
+      hsl(var(--primary) / 0.3),
+      transparent);
+  }
+
+  /* Gradient text — for hero titles */
+  .gradient-emerald {
+    background: linear-gradient(135deg,
+      hsl(var(--mint)) 0%,
+      hsl(var(--foreground)) 40%,
+      hsl(var(--mint)) 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    color: transparent;
+  }
+}

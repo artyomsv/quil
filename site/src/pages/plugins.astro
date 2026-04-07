@@ -1,0 +1,184 @@
+---
+import Page from "@/layouts/Page.astro";
+import Icon from "@/components/Icon.astro";
+import { breadcrumbSchema } from "@/data/schemas";
+import { plugins, samplePluginToml, pluginAuthoringRef } from "@/data/plugins";
+
+const seo = {
+  title: "Plugins — typed panes with context-aware behaviour",
+  description:
+    "Quil ships four built-in pane types: Terminal, Claude Code, SSH, and Stripe CLI. Each has its own spawn command, resume strategy, error handler, and status line. Write your own in a single TOML file.",
+  path: "/plugins",
+  keywords: [
+    "quil plugins",
+    "quil pane types",
+    "toml plugin",
+    "claude code plugin",
+    "ssh pane",
+    "webhook pane",
+  ],
+};
+
+const schemas = [
+  breadcrumbSchema([
+    { name: "Quil", path: "/" },
+    { name: "Plugins", path: "/plugins" },
+  ]),
+];
+
+const pluginIcons: Record<string, "terminal" | "sparkles" | "layers" | "zap"> = {
+  terminal: "terminal",
+  "claude-code": "sparkles",
+  ssh: "layers",
+  stripe: "zap",
+};
+---
+<Page {...seo} schemas={schemas}>
+  <article class="mx-auto max-w-5xl px-6 py-16">
+    <nav aria-label="Breadcrumb" class="mb-6 flex items-center gap-2 text-sm text-muted-foreground">
+      <a href="/" class="hover:text-foreground">Quil</a>
+      <Icon name="chevron-right" size={14} />
+      <span class="text-foreground">Plugins</span>
+    </nav>
+
+    <header class="mb-14">
+      <p class="mb-3 text-xs font-semibold uppercase tracking-wider text-sage">
+        Typed panes
+      </p>
+      <h1 class="text-4xl font-bold tracking-tight sm:text-5xl">
+        Not every pane is a shell.
+      </h1>
+      <p class="mt-5 max-w-2xl text-lg text-muted-foreground">
+        Most multiplexers treat every pane identically — it's just a
+        PTY running a command. Quil lets you tag panes with a
+        <em>type</em>, and each type gets its own spawn command, resume
+        strategy, error handler, and status line.
+      </p>
+    </header>
+
+    <!-- Built-in plugins grid -->
+    <section class="mb-16">
+      <div class="mb-6 flex items-center gap-3">
+        <h2 class="text-2xl font-semibold tracking-tight">Built-in plugins</h2>
+        <span class="pill pill-primary">4 shipped in v1.0</span>
+      </div>
+
+      <div class="grid gap-6 md:grid-cols-2">
+        {plugins.map((p) => (
+          <article class="glass-card p-6">
+            <div class="mb-3 flex items-start justify-between gap-3">
+              <div class="flex items-center gap-3">
+                <div class="flex size-11 items-center justify-center rounded-xl bg-primary/10 text-mint ring-1 ring-primary/30">
+                  <Icon name={pluginIcons[p.slug]} size={22} />
+                </div>
+                <div>
+                  <h3 class="text-base font-semibold text-foreground">{p.name}</h3>
+                  <span class="pill pill-mint mt-1">{p.kind}</span>
+                </div>
+              </div>
+            </div>
+
+            <p class="mb-4 text-sm leading-relaxed text-muted-foreground">
+              {p.description}
+            </p>
+
+            <pre class="mb-4 text-xs"><code>{p.spawnExample}</code></pre>
+
+            <ul class="space-y-1.5 text-xs text-muted-foreground">
+              {p.features.map((f) => (
+                <li class="flex items-start gap-2">
+                  <Icon name="check" size={12} class="mt-0.5 shrink-0 text-mint" />
+                  <span>{f}</span>
+                </li>
+              ))}
+            </ul>
+          </article>
+        ))}
+      </div>
+    </section>
+
+    <!-- How plugins work -->
+    <section class="mb-16">
+      <div class="mb-6 flex items-center gap-3">
+        <h2 class="text-2xl font-semibold tracking-tight">How plugins work</h2>
+      </div>
+
+      <div class="glass-card p-8">
+        <p class="mb-4 text-sm leading-relaxed text-muted-foreground">
+          A plugin is a single TOML file in <code>~/.quil/plugins/</code>.
+          Five optional sections declare its behaviour:
+        </p>
+        <ul class="mb-6 space-y-2 text-sm text-muted-foreground">
+          <li class="flex items-start gap-2">
+            <code class="shrink-0 text-mint">[plugin]</code>
+            <span>name, type, and description — the plugin's identity.</span>
+          </li>
+          <li class="flex items-start gap-2">
+            <code class="shrink-0 text-mint">[spawn]</code>
+            <span>command array, working directory, environment variables.</span>
+          </li>
+          <li class="flex items-start gap-2">
+            <code class="shrink-0 text-mint">[resume]</code>
+            <span>what to run when restoring after a reboot (respawn, replay, or custom).</span>
+          </li>
+          <li class="flex items-start gap-2">
+            <code class="shrink-0 text-mint">[keys]</code>
+            <span>pane-local keybindings that override the global config.</span>
+          </li>
+          <li class="flex items-start gap-2">
+            <code class="shrink-0 text-mint">[error]</code>
+            <span>regex patterns that mark the pane as errored when matched in output.</span>
+          </li>
+          <li class="flex items-start gap-2">
+            <code class="shrink-0 text-mint">[status]</code>
+            <span>regex + template that produces the pane's status line.</span>
+          </li>
+        </ul>
+        <div class="divider-mint mb-6"></div>
+        <p class="text-sm text-muted-foreground">
+          Plugins are hot-reloaded — save the file and Quil picks up
+          the changes on the next pane creation without restarting.
+        </p>
+      </div>
+    </section>
+
+    <!-- Sample plugin code -->
+    <section class="mb-16">
+      <h2 class="mb-6 text-2xl font-semibold tracking-tight">Sample: a smee.io webhook receiver</h2>
+      <div class="glass-card p-8">
+        <p class="mb-4 text-sm leading-relaxed text-muted-foreground">
+          This plugin runs <a href="https://smee.io" rel="noopener external" class="text-mint underline underline-offset-4 hover:text-foreground">smee.io</a>'s
+          webhook forwarder, extracts the live URL from its output into
+          the pane status line, and catches auth failures as errors.
+        </p>
+        <pre class="text-xs"><code>{samplePluginToml}</code></pre>
+      </div>
+    </section>
+
+    <!-- Authoring reference -->
+    <section>
+      <div class="glass-card p-10 text-center">
+        <div class="mb-5 inline-flex size-14 items-center justify-center rounded-2xl bg-primary/15 text-mint ring-1 ring-primary/40">
+          <Icon name="book-open" size={26} />
+        </div>
+        <h2 class="text-2xl font-semibold tracking-tight">
+          Write your own plugin.
+        </h2>
+        <p class="mx-auto mt-3 max-w-xl text-sm text-muted-foreground">
+          Full TOML reference on GitHub — every section, every field,
+          every template variable with copy-pasteable examples.
+        </p>
+        <div class="mt-6 flex flex-col items-center justify-center gap-3 sm:flex-row">
+          <a href={pluginAuthoringRef} rel="noopener external" class="btn-primary">
+            <Icon name="book-open" size={18} />
+            Plugin reference
+          </a>
+          <a href="/install" class="btn-outline">
+            <Icon name="download" size={16} />
+            Install first
+          </a>
+        </div>
+      </div>
+    </section>
+  </article>
+</Page>

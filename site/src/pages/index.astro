@@ -1,0 +1,238 @@
+---
+import Page from "@/layouts/Page.astro";
+import Icon from "@/components/Icon.astro";
+import { SITE } from "@/data/seo";
+import { softwareApplicationSchema, faqSchema } from "@/data/schemas";
+import { features, homeFeatures } from "@/data/features";
+import { homeFaq } from "@/data/faq";
+
+const seo = {
+  title: "The workspace that survives every reboot",
+  description:
+    "Quil is a reboot-proof terminal multiplexer for AI-native developers. Type `quil` after a restart and your tabs, panes, AI sessions, and running tools snap back in under 30 seconds.",
+  path: "/",
+  keywords: [
+    "quil",
+    "terminal multiplexer",
+    "persistent terminal",
+    "tmux alternative",
+    "ai terminal",
+    "claude code multiplexer",
+    "reboot-proof workflow",
+    "developer workflow tool",
+  ],
+};
+
+const schemas = [softwareApplicationSchema(), faqSchema(homeFaq)];
+
+const heroFeatures = homeFeatures
+  .map((slug) => features.find((f) => f.slug === slug)!)
+  .filter(Boolean);
+
+const howItWorksSteps = [
+  {
+    title: "Install once",
+    body: "Grab the pre-built binary for Linux, macOS, or Windows. One curl command or a single `go install`.",
+  },
+  {
+    title: "Launch Quil",
+    body: "Type `quil` in your terminal. The daemon auto-starts on first run; the TUI opens with a fresh workspace.",
+  },
+  {
+    title: "Build your setup",
+    body: "Open your Claude Code conversation, an SSH tunnel, a webhook listener, a build watcher — anything you normally run.",
+  },
+  {
+    title: "Reboot. Resume.",
+    body: "After a restart, type `quil` again. Your tabs, panes, working directories, and AI sessions return exactly where you left them.",
+  },
+];
+---
+<Page {...seo} schemas={schemas}>
+  <!-- =================================================================
+       HERO
+       ================================================================= -->
+  <section class="relative overflow-hidden">
+    <div class="mx-auto max-w-6xl px-6 pt-20 pb-24 text-center sm:pt-28 sm:pb-32">
+      <!-- Status pill -->
+      <p class="mb-6 inline-flex items-center gap-2 rounded-full border border-primary/40 bg-primary/10 px-3 py-1 text-xs font-medium text-mint">
+        <span class="size-1.5 rounded-full bg-mint animate-pulse"></span>
+        v{SITE.software.version} · MIT licensed · Linux · macOS · Windows
+      </p>
+
+      <h1 class="mx-auto max-w-4xl text-4xl font-bold tracking-tight sm:text-6xl">
+        <span class="text-foreground">The workspace that</span>
+        <span class="gradient-emerald">survives every reboot.</span>
+      </h1>
+
+      <p class="mx-auto mt-6 max-w-2xl text-lg text-muted-foreground sm:text-xl">
+        {SITE.blurb}
+      </p>
+
+      <div class="mt-10 flex flex-col items-center justify-center gap-3 sm:flex-row">
+        <a href="/install" class="btn-primary">
+          <Icon name="download" size={18} />
+          Install in 30 seconds
+          <Icon name="arrow-right" size={16} />
+        </a>
+        <a href={SITE.github} rel="noopener external" class="btn-outline">
+          <Icon name="github" size={16} />
+          View on GitHub
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <!-- =================================================================
+       PROBLEM CALLOUT
+       ================================================================= -->
+  <section class="mx-auto max-w-4xl px-6">
+    <div class="glass-card p-8 sm:p-10">
+      <div class="mb-3 inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-sage">
+        <Icon name="wifi-off" size={14} />
+        The daily tax
+      </div>
+      <p class="text-lg leading-relaxed text-foreground/90">
+        Agentic developers run 5–10 terminal sessions per project:
+        AI assistants, webhook listeners, build watchers, SSH tunnels,
+        database shells. Every reboot destroys this setup. Re-opening
+        tabs, re-attaching sessions, and re-typing resume commands is
+        a daily 10-15 minute tax — and worse, you lose the context
+        your AI assistant had built up.
+      </p>
+      <div class="divider-mint mt-8"></div>
+      <p class="mt-6 text-sm text-muted-foreground">
+        tmux survives network disconnects but not reboots. Terminal
+        emulators render beautifully but don't persist state. IDE
+        terminals are tied to a single editor. None of them understand
+        that an AI pane is different from a webhook listener pane.
+      </p>
+    </div>
+  </section>
+
+  <!-- =================================================================
+       FEATURE GRID
+       ================================================================= -->
+  <section class="mx-auto max-w-6xl px-6 pt-24 pb-16">
+    <div class="mb-12 text-center">
+      <p class="mb-3 text-xs font-semibold uppercase tracking-wider text-sage">
+        What Quil does
+      </p>
+      <h2 class="text-3xl font-bold tracking-tight sm:text-4xl">
+        A multiplexer that understands your workflow.
+      </h2>
+    </div>
+
+    <div class="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
+      {heroFeatures.map((f) => (
+        <article class="glass-card group p-6 transition-colors hover:border-primary/40">
+          <div class="mb-4 inline-flex size-11 items-center justify-center rounded-xl bg-primary/10 text-mint ring-1 ring-primary/30">
+            <Icon name={f.icon} size={22} />
+          </div>
+          <h3 class="text-lg font-semibold text-foreground">{f.title}</h3>
+          <p class="mt-2 text-sm leading-relaxed text-muted-foreground">
+            {f.blurb}
+          </p>
+        </article>
+      ))}
+    </div>
+
+    <div class="mt-10 text-center">
+      <a href="/features" class="inline-flex items-center gap-2 text-sm font-medium text-mint hover:text-foreground">
+        See the full feature list
+        <Icon name="arrow-right" size={14} />
+      </a>
+    </div>
+  </section>
+
+  <!-- =================================================================
+       HOW IT WORKS
+       ================================================================= -->
+  <section class="mx-auto max-w-5xl px-6 py-16">
+    <div class="mb-12 text-center">
+      <p class="mb-3 text-xs font-semibold uppercase tracking-wider text-sage">
+        How it works
+      </p>
+      <h2 class="text-3xl font-bold tracking-tight sm:text-4xl">
+        Four steps from install to "I never lose context again".
+      </h2>
+    </div>
+
+    <ol class="space-y-5">
+      {howItWorksSteps.map((step, i) => (
+        <li class="glass-card flex items-start gap-5 p-6">
+          <div class="flex size-11 shrink-0 items-center justify-center rounded-full bg-primary/15 text-mint ring-1 ring-primary/40 font-mono text-sm font-semibold">
+            {i + 1}
+          </div>
+          <div>
+            <h3 class="text-base font-semibold text-foreground">{step.title}</h3>
+            <p class="mt-1.5 text-sm leading-relaxed text-muted-foreground">
+              {step.body}
+            </p>
+          </div>
+        </li>
+      ))}
+    </ol>
+  </section>
+
+  <!-- =================================================================
+       FAQ
+       ================================================================= -->
+  <section class="mx-auto max-w-4xl px-6 py-16">
+    <div class="mb-12 text-center">
+      <p class="mb-3 text-xs font-semibold uppercase tracking-wider text-sage">
+        Questions
+      </p>
+      <h2 class="text-3xl font-bold tracking-tight sm:text-4xl">
+        Frequently asked.
+      </h2>
+    </div>
+
+    <div class="space-y-3">
+      {homeFaq.map((item) => (
+        <details class="glass-card group overflow-hidden">
+          <summary class="flex cursor-pointer list-none items-center justify-between gap-4 p-5 text-left text-base font-semibold text-foreground [&::-webkit-details-marker]:hidden">
+            <span>{item.question}</span>
+            <Icon
+              name="chevron-down"
+              size={18}
+              class="shrink-0 text-sage transition-transform group-open:rotate-180"
+            />
+          </summary>
+          <div class="border-t border-border/60 px-5 py-4 text-sm leading-relaxed text-muted-foreground">
+            {item.answer}
+          </div>
+        </details>
+      ))}
+    </div>
+  </section>
+
+  <!-- =================================================================
+       FINAL CTA
+       ================================================================= -->
+  <section class="mx-auto max-w-4xl px-6 pb-24 pt-8">
+    <div class="glass-card overflow-hidden p-10 text-center">
+      <div class="mb-6 inline-flex size-14 items-center justify-center rounded-2xl bg-primary/15 text-mint ring-1 ring-primary/40">
+        <Icon name="rocket" size={28} />
+      </div>
+      <h2 class="text-2xl font-bold tracking-tight sm:text-3xl">
+        Stop paying the reboot tax.
+      </h2>
+      <p class="mx-auto mt-3 max-w-xl text-sm text-muted-foreground sm:text-base">
+        Quil ships as a single binary for Linux, macOS, and Windows.
+        No daemons to configure, no databases to provision, no cloud
+        account required.
+      </p>
+      <div class="mt-8 flex flex-col items-center justify-center gap-3 sm:flex-row">
+        <a href="/install" class="btn-primary">
+          <Icon name="download" size={18} />
+          Install Quil
+        </a>
+        <a href={SITE.github} rel="noopener external" class="btn-outline">
+          <Icon name="github" size={16} />
+          Star on GitHub
+        </a>
+      </div>
+    </div>
+  </section>
+</Page>

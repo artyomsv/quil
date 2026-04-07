@@ -1,0 +1,75 @@
+---
+// BaseHead — single place where every <head> concern lives.
+//
+// Responsibilities:
+//   - charset, viewport, theme-color
+//   - Per-page <title> (brand-suffixed) and <meta description>
+//   - Canonical URL (absolute, computed from site origin + path)
+//   - Open Graph 1.0 tags for Facebook / LinkedIn / Slack etc.
+//   - Twitter Card tags
+//   - Keywords (for Bing / Yandex; Google ignores them)
+//   - Favicon + apple-touch-icon
+//   - Inter + JetBrains Mono from Google Fonts (preconnect + link)
+//   - Sitemap discovery link + robots meta
+//
+// Pages should import Page.astro which wraps this; they never touch
+// BaseHead directly.
+
+import { SITE, canonical, type Page } from "@/data/seo";
+
+type Props = Page;
+const { title, description, path, ogImage, keywords } = Astro.props;
+
+const fullTitle = `${title} · ${SITE.name}`;
+const canonicalURL = canonical(path);
+const ogImageURL = SITE.url + (ogImage ?? SITE.defaultOgImage);
+---
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="theme-color" content="#051A10" />
+<meta name="color-scheme" content="dark" />
+
+<!-- Fonts: Inter for body, JetBrains Mono for code -->
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link
+  rel="stylesheet"
+  href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+/>
+
+<!-- Title + description -->
+<title>{fullTitle}</title>
+<meta name="description" content={description} />
+{keywords && keywords.length > 0 && (
+  <meta name="keywords" content={keywords.join(", ")} />
+)}
+<link rel="canonical" href={canonicalURL} />
+
+<!-- Open Graph -->
+<meta property="og:type" content="website" />
+<meta property="og:site_name" content={SITE.name} />
+<meta property="og:title" content={fullTitle} />
+<meta property="og:description" content={description} />
+<meta property="og:url" content={canonicalURL} />
+<meta property="og:image" content={ogImageURL} />
+<meta property="og:image:width" content="1200" />
+<meta property="og:image:height" content="630" />
+<meta property="og:locale" content={SITE.locale} />
+
+<!-- Twitter Card -->
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:title" content={fullTitle} />
+<meta name="twitter:description" content={description} />
+<meta name="twitter:image" content={ogImageURL} />
+
+<!-- Favicons -->
+<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+
+<!-- Sitemap discovery -->
+<link rel="sitemap" href="/sitemap-index.xml" />
+<meta name="robots" content="index, follow" />
+
+<!-- Generator tag (informational, not SEO-critical) -->
+<meta name="generator" content={Astro.generator} />

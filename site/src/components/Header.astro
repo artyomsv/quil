@@ -1,0 +1,88 @@
+---
+// Header — sticky top nav.
+//
+// Zero-JS: the "Compare ▾" dropdown uses a native <details>/<summary>
+// element, which gives us click-to-open, Escape-to-close, and mobile
+// collapse for free without a single line of JavaScript.
+
+import Icon from "@/components/Icon.astro";
+import { SITE } from "@/data/seo";
+
+const nav = [
+  { href: "/features", label: "Features" },
+  { href: "/plugins", label: "Plugins" },
+  { href: "/install", label: "Install" },
+  { href: "/docs", label: "Docs" },
+];
+
+const compareLinks = [
+  { href: "/vs/tmux", label: "vs tmux" },
+  { href: "/vs/zellij", label: "vs Zellij" },
+  { href: "/vs/wezterm", label: "vs WezTerm" },
+  { href: "/vs/screen", label: "vs GNU Screen" },
+];
+---
+<header class="sticky top-0 z-40 border-b border-border/60 backdrop-blur-xl bg-background/70">
+  <nav class="mx-auto flex max-w-6xl items-center gap-6 px-6 py-4" aria-label="Main">
+    <!-- Brand -->
+    <a href="/" class="flex items-center gap-2.5 text-foreground no-underline">
+      <img
+        src="/brand/mark.svg"
+        alt=""
+        width="32"
+        height="34"
+        class="shrink-0"
+        aria-hidden="true"
+      />
+      <span class="text-lg font-bold tracking-tight text-foreground">quil</span>
+    </a>
+
+    <!-- Primary nav -->
+    <ul class="ml-6 hidden items-center gap-1 md:flex">
+      {nav.map((item) => (
+        <li>
+          <a
+            href={item.href}
+            class="rounded-md px-3 py-1.5 text-sm font-medium text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground"
+          >
+            {item.label}
+          </a>
+        </li>
+      ))}
+
+      <!-- Compare dropdown: native <details> for zero-JS click-to-open -->
+      <li class="relative">
+        <details class="group">
+          <summary class="flex cursor-pointer list-none items-center gap-1 rounded-md px-3 py-1.5 text-sm font-medium text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground [&::-webkit-details-marker]:hidden">
+            Compare
+            <Icon name="chevron-down" size={14} class="transition-transform group-open:rotate-180" />
+          </summary>
+          <ul
+            class="absolute left-0 top-full mt-2 min-w-[180px] space-y-0.5 rounded-xl border border-border/80 bg-popover/95 p-2 shadow-xl backdrop-blur-xl"
+          >
+            {compareLinks.map((item) => (
+              <li>
+                <a
+                  href={item.href}
+                  class="block rounded-lg px-3 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-muted/70 hover:text-foreground"
+                >
+                  {item.label}
+                </a>
+              </li>
+            ))}
+          </ul>
+        </details>
+      </li>
+    </ul>
+
+    <!-- GitHub CTA on the right -->
+    <a
+      href={SITE.github}
+      rel="noopener external"
+      class="ml-auto inline-flex items-center gap-2 rounded-lg border border-border bg-muted/40 px-3 py-1.5 text-sm font-medium text-muted-foreground transition-colors hover:border-primary/40 hover:bg-muted/60 hover:text-foreground"
+    >
+      <Icon name="github" size={14} />
+      <span class="hidden sm:inline">GitHub</span>
+    </a>
+  </nav>
+</header>

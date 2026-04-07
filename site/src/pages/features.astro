@@ -1,0 +1,130 @@
+---
+import Page from "@/layouts/Page.astro";
+import Icon from "@/components/Icon.astro";
+import { breadcrumbSchema } from "@/data/schemas";
+import { features, featureCategories, type Feature } from "@/data/features";
+
+const seo = {
+  title: "Features — typed panes, AI resume, plugin system, and more",
+  description:
+    "A complete tour of every Quil capability: reboot-proof persistence, typed panes, AI session auto-resume, MCP server, TOML plugin system, notification center, and pane notes.",
+  path: "/features",
+  keywords: [
+    "quil features",
+    "terminal multiplexer features",
+    "persistent terminal",
+    "tmux alternative features",
+    "ai session resume",
+  ],
+};
+
+const schemas = [
+  breadcrumbSchema([
+    { name: "Quil", path: "/" },
+    { name: "Features", path: "/features" },
+  ]),
+];
+
+// Group features by category, preserving declaration order within each.
+const byCategory: Record<Feature["category"], Feature[]> = {
+  persistence: [],
+  interaction: [],
+  ai: [],
+  extensibility: [],
+  observability: [],
+};
+for (const f of features) {
+  byCategory[f.category].push(f);
+}
+
+const orderedCategories: Feature["category"][] = [
+  "persistence",
+  "ai",
+  "interaction",
+  "extensibility",
+  "observability",
+];
+---
+<Page {...seo} schemas={schemas}>
+  <article class="mx-auto max-w-5xl px-6 py-16">
+    <!-- Breadcrumb -->
+    <nav aria-label="Breadcrumb" class="mb-6 flex items-center gap-2 text-sm text-muted-foreground">
+      <a href="/" class="hover:text-foreground">Quil</a>
+      <Icon name="chevron-right" size={14} />
+      <span class="text-foreground">Features</span>
+    </nav>
+
+    <header class="mb-16">
+      <p class="mb-3 text-xs font-semibold uppercase tracking-wider text-sage">
+        Capabilities
+      </p>
+      <h1 class="text-4xl font-bold tracking-tight sm:text-5xl">
+        A workflow orchestrator, not a terminal emulator.
+      </h1>
+      <p class="mt-5 max-w-2xl text-lg text-muted-foreground">
+        Quil ships as a client-daemon pair. The client (<code>quil</code>)
+        is a Bubble Tea v2 TUI. The daemon (<code>quild</code>) is a
+        Go service that holds pane state, ghost buffers, and the
+        workspace snapshot. Every feature on this page is implemented
+        as of v1.0.0.
+      </p>
+    </header>
+
+    <!-- Feature sections by category -->
+    {orderedCategories.map((cat) => (
+      <section class="mb-16">
+        <div class="mb-2 inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-sage">
+          <Icon name="leaf" size={14} />
+          {featureCategories[cat]}
+        </div>
+        <div class="divider-mint mb-8"></div>
+
+        <div class="space-y-6">
+          {byCategory[cat].map((f) => (
+            <article class="glass-card p-8">
+              <div class="mb-4 flex items-start gap-4">
+                <div class="flex size-12 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-mint ring-1 ring-primary/30">
+                  <Icon name={f.icon} size={22} />
+                </div>
+                <div>
+                  <h2 class="text-xl font-semibold text-foreground">{f.title}</h2>
+                  <p class="mt-1 text-sm text-muted-foreground">{f.blurb}</p>
+                </div>
+              </div>
+              <ul class="ml-16 space-y-2 text-sm text-muted-foreground">
+                {f.detail.map((d) => (
+                  <li class="flex items-start gap-2">
+                    <Icon name="check" size={14} class="mt-0.5 shrink-0 text-mint" />
+                    <span>{d}</span>
+                  </li>
+                ))}
+              </ul>
+            </article>
+          ))}
+        </div>
+      </section>
+    ))}
+
+    <!-- CTA -->
+    <section class="mt-16">
+      <div class="glass-card p-10 text-center">
+        <h2 class="text-2xl font-semibold tracking-tight">
+          Ready to stop losing your workspace?
+        </h2>
+        <p class="mx-auto mt-3 max-w-xl text-sm text-muted-foreground">
+          Every feature on this page is in v1.0.0. Install it in 30 seconds.
+        </p>
+        <div class="mt-6 flex flex-col items-center justify-center gap-3 sm:flex-row">
+          <a href="/install" class="btn-primary">
+            <Icon name="download" size={18} />
+            Install Quil
+          </a>
+          <a href="/plugins" class="btn-outline">
+            <Icon name="puzzle" size={16} />
+            Explore plugins
+          </a>
+        </div>
+      </div>
+    </section>
+  </article>
+</Page>

@@ -1,0 +1,111 @@
+---
+import Page from "@/layouts/Page.astro";
+import Icon from "@/components/Icon.astro";
+import { SITE } from "@/data/seo";
+import { breadcrumbSchema } from "@/data/schemas";
+
+const seo = {
+  title: "Legal notice",
+  description:
+    "Quil is open-source software under the MIT License. No telemetry, no cookies, no tracking. What you run inside Quil is your responsibility and subject to the laws of your jurisdiction.",
+  path: "/legal",
+};
+
+const schemas = [
+  breadcrumbSchema([
+    { name: "Quil", path: "/" },
+    { name: "Legal", path: "/legal" },
+  ]),
+];
+---
+<Page {...seo} schemas={schemas}>
+  <article class="mx-auto max-w-3xl px-6 py-16">
+    <nav aria-label="Breadcrumb" class="mb-6 flex items-center gap-2 text-sm text-muted-foreground">
+      <a href="/" class="hover:text-foreground">Quil</a>
+      <Icon name="chevron-right" size={14} />
+      <span class="text-foreground">Legal</span>
+    </nav>
+
+    <header class="mb-12">
+      <div class="mb-4 inline-flex size-12 items-center justify-center rounded-xl bg-primary/10 text-mint ring-1 ring-primary/30">
+        <Icon name="key-round" size={22} />
+      </div>
+      <h1 class="text-4xl font-bold tracking-tight">Legal notice</h1>
+      <p class="mt-4 text-lg text-muted-foreground">
+        Quil is a developer tool. The following applies both to the
+        software itself and to this website.
+      </p>
+    </header>
+
+    <section class="space-y-10 text-base leading-relaxed text-foreground/90">
+      <div>
+        <h2 class="mb-3 text-xl font-semibold text-foreground">License</h2>
+        <p>
+          Quil is released under the
+          <a
+            href={SITE.github + "/blob/master/LICENSE"}
+            rel="noopener external"
+            class="text-mint underline underline-offset-4 hover:text-foreground"
+          >MIT License</a>.
+          You are free to use, modify, and redistribute the software for any purpose,
+          including commercial use, provided the copyright notice is preserved.
+        </p>
+      </div>
+
+      <div>
+        <h2 class="mb-3 text-xl font-semibold text-foreground">No warranty</h2>
+        <p>
+          The software is provided "as is", without warranty of any kind, express or
+          implied, including but not limited to the warranties of merchantability,
+          fitness for a particular purpose, and non-infringement. In no event shall
+          the authors or copyright holders be liable for any claim, damages, or
+          other liability, whether in an action of contract, tort, or otherwise,
+          arising from, out of, or in connection with the software or the use or
+          other dealings in the software.
+        </p>
+      </div>
+
+      <div>
+        <h2 class="mb-3 text-xl font-semibold text-foreground">Privacy</h2>
+        <p class="mb-4">
+          This website ({SITE.url.replace("https://", "")}) sets no cookies, runs
+          no analytics, and makes no third-party network requests except to
+          Google Fonts for the Inter and JetBrains Mono webfonts used on this
+          page. It loads static HTML, CSS, and SVG from GitHub Pages.
+        </p>
+        <p>
+          Quil itself, when installed, stores all state locally under
+          <code>~/.quil/</code>. The workspace snapshot, ghost buffers, plugin
+          configs, and logs never leave your machine. There is no telemetry, no
+          usage reporting, no auto-update phone-home. Quil does not open any
+          outbound network connections on its own — only the commands you run
+          inside a pane do.
+        </p>
+      </div>
+
+      <div>
+        <h2 class="mb-3 text-xl font-semibold text-foreground">Your responsibility</h2>
+        <p>
+          Quil is a general-purpose terminal multiplexer. What you run inside a
+          Quil pane — network tools, scrapers, AI tools, databases, third-party
+          APIs — is <strong class="text-foreground">your responsibility</strong>,
+          and subject to the laws of your jurisdiction, the terms of service of
+          any network you connect to, and any agreements you have with third
+          parties. Quil does not facilitate, assist, or endorse any particular
+          use case.
+        </p>
+      </div>
+
+      <div>
+        <h2 class="mb-3 text-xl font-semibold text-foreground">Trademarks</h2>
+        <p>
+          Claude Code is a trademark of Anthropic PBC. tmux, Zellij, WezTerm,
+          GNU Screen, and other project names mentioned on this site are
+          trademarks of their respective owners. References on these comparison
+          pages are factual only, for the purpose of describing software
+          alternatives, and do not imply endorsement or affiliation.
+        </p>
+      </div>
+    </section>
+  </article>
+</Page>

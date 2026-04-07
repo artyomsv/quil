@@ -3,59 +3,63 @@
 /* --------------------------------------------------------------------
    Quil marketing site — design tokens
    --------------------------------------------------------------------
-   Visual style: "Analogous Calm". Primary colour is a deep jewel-toned
-   emerald green, harmoniously blended with layered accents of cool teal,
-   soft mint (#A8E6CE), and muted sage. Contrast is achieved through
-   depth of greens rather than harsh neutrals — every background, card,
-   border, and text colour has a small green hue so the eye reads the
-   page as a single harmonious family.
+   Visual style: "Ember". Primary colour is a bright flame orange
+   against a near-pure-black background. The accents progress from
+   deep red-orange (the coal) through bright orange (the flame) to a
+   pale ember highlight. Zero greens, zero blues, zero cyans.
 
-   Soft gradients, rounded UI (radius 0.875rem), generous whitespace.
-   Dark-first (wellness aesthetic at night); no light-mode variant.
-   Glass cards everywhere — every card surface uses backdrop-blur with
-   a subtle mint inner highlight and a deep teal-black drop shadow.
+   Conceptually this is the **amber phosphor CRT** aesthetic from the
+   1970s-80s — a warm, confident, terminal-tool feel. It intentionally
+   rejects glassmorphism: cards are flat matte black with a 1px warm
+   border and an optional hover glow. Headlines use JetBrains Mono so
+   the home page literally looks like it was typed at a terminal.
 */
 
 @layer base {
   :root {
-    /* Background family — very dark green-black, no pure black */
-    --background: 170 35% 5%;       /* deep forest floor */
-    --foreground: 150 15% 95%;      /* warm near-white with faint green */
+    /* Background family — near-pure black with a 1% lightness bump
+       so OLED displays don't shimmer on the #000000 pixel boundary */
+    --background: 0 0% 3%;
+    --foreground: 30 15% 95%;      /* warm off-white with faint orange */
 
-    /* Surface family — one step lighter for cards, two for popovers */
-    --card: 165 28% 9%;
-    --card-foreground: 150 15% 95%;
-    --popover: 165 28% 9%;
-    --popover-foreground: 150 15% 95%;
-    --muted: 165 25% 11%;
-    --muted-foreground: 155 12% 68%;
+    /* Surface family — slightly warmer than bg for depth without glass */
+    --card: 18 12% 6%;
+    --card-foreground: 30 15% 95%;
+    --popover: 18 12% 6%;
+    --popover-foreground: 30 15% 95%;
+    --muted: 18 10% 9%;
+    --muted-foreground: 25 10% 62%;
 
-    /* Primary — deep jewel-toned emerald */
-    --primary: 158 75% 32%;
-    --primary-foreground: 150 15% 98%;
+    /* Primary — bright flame orange, the hero colour */
+    --primary: 24 95% 56%;
+    --primary-foreground: 0 0% 3%;
 
-    /* Accent — cool teal, the secondary hero colour */
-    --accent: 178 65% 42%;
-    --accent-foreground: 170 20% 8%;
+    /* Accent — burnt/deeper orange for secondary emphasis */
+    --accent: 32 95% 48%;
+    --accent-foreground: 0 0% 3%;
 
-    /* Layered accents from the user's palette brief */
-    --mint: 154 57% 78%;            /* #A8E6CE exact */
-    --sage: 140 18% 55%;            /* muted sage */
+    /* Ember — the deepest red-orange, used only for glow effects
+       and gradient starting points */
+    --ember: 12 90% 50%;
 
-    /* Semantic — success reads as a brighter primary */
-    --success: 158 75% 42%;
-    --success-foreground: 150 15% 98%;
-    --warning: 38 85% 55%;          /* the only non-green colour in the system */
-    --warning-foreground: 170 20% 8%;
-    --destructive: 0 55% 55%;       /* deliberately desaturated */
+    /* Coal — a black that's subtly warmer than background, used for
+       stripes and dividers that need to be visible but recede */
+    --coal: 18 15% 5%;
+
+    /* Semantic — success reads as a brighter amber, staying in family */
+    --success: 40 95% 55%;
+    --success-foreground: 0 0% 3%;
+    --warning: 45 95% 55%;         /* yellow flame */
+    --warning-foreground: 0 0% 3%;
+    --destructive: 0 85% 58%;      /* deep red — only non-orange */
     --destructive-foreground: 0 0% 98%;
 
-    /* Borders + focus ring — green-tinted for the organic feel */
-    --border: 165 25% 16%;
-    --input: 165 25% 16%;
-    --ring: 158 75% 42%;
+    /* Borders + focus ring — warm-tinted, visible against bg */
+    --border: 20 20% 12%;
+    --input: 20 20% 12%;
+    --ring: 24 95% 56%;
 
-    --radius: 0.875rem;             /* rounder than typical (0.75rem) — "breath" */
+    --radius: 0.5rem;              /* harder edges than marauder's 0.875rem */
 
     color-scheme: dark;
   }
@@ -71,53 +75,50 @@
   }
 
   body {
-    /* Two restrained radial gradients evoking "breath and space".
-       Deep emerald glow at the top; teal glow at the bottom-right.
-       Both stay subtle so copy remains readable without a harsh
-       vignette. */
+    /* A single subtle ember glow near the top of the viewport —
+       imagine a forge fire just out of frame. No blurs, no layered
+       gradients — one radial, small, warm. */
     background:
-      radial-gradient(ellipse 80% 50% at 50% 0%,
-        hsl(158 60% 12% / 0.55),
-        transparent 65%),
-      radial-gradient(ellipse 60% 40% at 85% 100%,
-        hsl(178 45% 15% / 0.30),
-        transparent 65%),
+      radial-gradient(ellipse 90% 45% at 50% 0%,
+        hsl(24 85% 12% / 0.55),
+        transparent 60%),
       hsl(var(--background));
     min-height: 100vh;
     font-feature-settings: "rlig" 1, "calt" 1;
-    line-height: 1.65;              /* generous for "breath" */
+    line-height: 1.6;
   }
 
   ::selection {
-    background: hsl(var(--primary) / 0.4);
+    background: hsl(var(--primary) / 0.35);
     color: hsl(var(--foreground));
   }
 
   :focus-visible {
     outline: 2px solid hsl(var(--ring));
     outline-offset: 3px;
-    border-radius: 6px;
+    border-radius: 4px;
   }
 
-  /* Code blocks — rounded, mint-tinted border, soft shadow */
+  /* Code blocks — warm border, matte black fill */
   pre, code, kbd, samp {
     font-family: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   }
 
   pre {
     overflow-x: auto;
-    border-radius: 14px;
+    border-radius: 8px;
     padding: 1rem 1.25rem;
-    border: 1px solid hsl(var(--primary) / 0.2);
-    background: hsl(165 30% 7% / 0.6);
+    border: 1px solid hsl(var(--primary) / 0.22);
+    background: hsl(18 15% 4% / 0.9);
   }
 
   code:not(pre code) {
     background: hsl(var(--muted));
     padding: 0.125rem 0.4rem;
-    border-radius: 6px;
+    border-radius: 4px;
     font-size: 0.875em;
     border: 1px solid hsl(var(--border) / 0.6);
+    color: hsl(var(--foreground));
   }
 
   h1, h2, h3, h4, h5, h6 {
@@ -129,9 +130,6 @@
   }
 }
 
-/* Tailwind 4 @theme — maps our CSS variables to Tailwind utility
-   classes. Every `bg-primary`, `text-mint`, `border-sage/30`, etc.
-   now picks up the palette above automatically. */
 @theme {
   --color-background: hsl(var(--background));
   --color-foreground: hsl(var(--foreground));
@@ -145,8 +143,8 @@
   --color-primary-foreground: hsl(var(--primary-foreground));
   --color-accent: hsl(var(--accent));
   --color-accent-foreground: hsl(var(--accent-foreground));
-  --color-mint: hsl(var(--mint));
-  --color-sage: hsl(var(--sage));
+  --color-ember: hsl(var(--ember));
+  --color-coal: hsl(var(--coal));
   --color-success: hsl(var(--success));
   --color-success-foreground: hsl(var(--success-foreground));
   --color-warning: hsl(var(--warning));
@@ -166,43 +164,76 @@
    ==================================================================== */
 
 @layer components {
-  /* Glass cards are the default card style for Quil. Subtle backdrop
-     blur, mint inner highlight, deep teal-black outer shadow. */
-  .glass-card {
-    background: linear-gradient(180deg,
-      hsl(var(--card) / 0.78),
-      hsl(var(--card) / 0.55));
-    backdrop-filter: blur(20px) saturate(140%);
-    -webkit-backdrop-filter: blur(20px) saturate(140%);
-    border: 1px solid hsl(var(--border) / 0.85);
-    border-radius: 16px;
+  /*
+    Ember card — the replacement for glass-card. Flat matte-black
+    surface with a subtle warm border, no backdrop-filter. On hover
+    a warm glow pulses around the border so the card feels like it's
+    catching fire.
+  */
+  .ember-card {
+    background: hsl(var(--card));
+    border: 1px solid hsl(var(--border));
+    border-radius: 8px;
+    transition: border-color 0.2s ease, box-shadow 0.3s ease, transform 0.15s ease;
+  }
+  .ember-card:hover {
+    border-color: hsl(var(--primary) / 0.4);
     box-shadow:
-      inset 0 1px 0 hsl(var(--mint) / 0.08),   /* mint inner highlight */
-      0 30px 80px -30px hsl(170 50% 4% / 0.6); /* deep teal-black shadow */
+      0 0 0 1px hsl(var(--primary) / 0.18),
+      0 14px 40px -18px hsl(var(--ember) / 0.35);
   }
 
-  /* Primary CTA — two-stop emerald gradient for jewel-tone depth */
+  /*
+    Feature block — a bigger statement than ember-card. Still matte
+    black, but with a ember accent strip on the left edge that
+    evokes a coal catching light. Used in the home page numbered
+    feature list.
+  */
+  .feature-block {
+    position: relative;
+    background: hsl(var(--card) / 0.7);
+    border-left: 2px solid hsl(var(--primary) / 0.5);
+    border-radius: 0 6px 6px 0;
+    padding: 1.5rem 1.75rem;
+    transition: border-color 0.2s ease, background 0.2s ease;
+  }
+  .feature-block:hover {
+    border-left-color: hsl(var(--primary));
+    background: hsl(var(--card));
+  }
+
+  /*
+    Primary CTA — solid flame orange with a deep red-orange gradient
+    underneath for jewel-tone depth. Sharp-edged (not pill), feels
+    like a stamped metal button.
+  */
   .btn-primary {
     display: inline-flex;
     align-items: center;
     gap: 0.5rem;
-    border-radius: 14px;
-    padding: 0.85rem 1.4rem;
+    border-radius: 6px;
+    padding: 0.85rem 1.5rem;
     font-size: 0.9375rem;
     font-weight: 600;
-    letter-spacing: -0.01em;
-    background: linear-gradient(135deg,
-      hsl(var(--primary)),
-      hsl(158 80% 26%));
+    letter-spacing: -0.005em;
+    background: linear-gradient(180deg,
+      hsl(24 98% 60%),
+      hsl(24 95% 50%));
     color: hsl(var(--primary-foreground));
-    border: 1px solid hsl(var(--primary) / 0.5);
-    box-shadow: 0 12px 30px -12px hsl(var(--primary) / 0.45),
-                inset 0 1px 0 hsl(var(--mint) / 0.2);
-    transition: filter 0.15s ease, transform 0.15s ease;
+    border: 1px solid hsl(24 90% 42%);
+    box-shadow:
+      0 0 0 1px hsl(24 95% 56% / 0.3),
+      0 12px 28px -14px hsl(var(--ember) / 0.55),
+      inset 0 1px 0 hsl(40 100% 78% / 0.3);
+    transition: filter 0.15s ease, transform 0.15s ease, box-shadow 0.2s ease;
   }
   .btn-primary:hover {
-    filter: brightness(1.1);
+    filter: brightness(1.08);
     transform: translateY(-1px);
+    box-shadow:
+      0 0 0 1px hsl(24 95% 56% / 0.5),
+      0 18px 36px -14px hsl(var(--ember) / 0.7),
+      inset 0 1px 0 hsl(40 100% 78% / 0.4);
   }
 
   /* Outline CTA — ghost button that lifts on hover */
@@ -210,11 +241,11 @@
     display: inline-flex;
     align-items: center;
     gap: 0.5rem;
-    border-radius: 14px;
-    padding: 0.85rem 1.4rem;
+    border-radius: 6px;
+    padding: 0.85rem 1.5rem;
     font-size: 0.9375rem;
     font-weight: 600;
-    letter-spacing: -0.01em;
+    letter-spacing: -0.005em;
     background: transparent;
     color: hsl(var(--foreground));
     border: 1px solid hsl(var(--border));
@@ -223,62 +254,109 @@
   .btn-outline:hover {
     background: hsl(var(--muted) / 0.5);
     border-color: hsl(var(--primary) / 0.4);
+    color: hsl(var(--primary));
   }
 
-  /* Pills — tag-style labels */
+  /* Pills — tag-style labels with monospace type */
   .pill {
     display: inline-flex;
     align-items: center;
-    gap: 0.35rem;
-    border-radius: 9999px;
-    padding: 0.15rem 0.7rem;
-    font-size: 0.75rem;
+    gap: 0.4rem;
+    border-radius: 4px;
+    padding: 0.2rem 0.7rem;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 0.72rem;
     font-weight: 600;
-    letter-spacing: -0.005em;
+    letter-spacing: 0;
     border: 1px solid hsl(var(--border));
-    background: hsl(var(--muted) / 0.6);
+    background: hsl(var(--coal));
   }
   .pill-primary {
-    border-color: hsl(var(--primary) / 0.45);
-    background: hsl(var(--primary) / 0.14);
-    color: hsl(var(--mint));
+    border-color: hsl(var(--primary) / 0.5);
+    background: hsl(var(--primary) / 0.1);
+    color: hsl(var(--primary));
   }
   .pill-success {
     border-color: hsl(var(--success) / 0.45);
-    background: hsl(var(--success) / 0.14);
+    background: hsl(var(--success) / 0.1);
     color: hsl(var(--success));
   }
   .pill-warning {
     border-color: hsl(var(--warning) / 0.45);
-    background: hsl(var(--warning) / 0.14);
+    background: hsl(var(--warning) / 0.1);
     color: hsl(var(--warning));
   }
-  .pill-mint {
-    border-color: hsl(var(--mint) / 0.35);
-    background: hsl(var(--mint) / 0.10);
-    color: hsl(var(--mint));
+  .pill-ember {
+    border-color: hsl(var(--ember) / 0.4);
+    background: hsl(var(--ember) / 0.08);
+    color: hsl(var(--primary));
   }
 
-  /* Subtle mint divider used between sections */
-  .divider-mint {
+  /*
+    Divider — a thin warm line with tapered edges, used between
+    sections instead of the old mint divider.
+  */
+  .divider-ember {
     height: 1px;
     background: linear-gradient(90deg,
       transparent,
       hsl(var(--primary) / 0.3),
-      hsl(var(--mint) / 0.25),
+      hsl(var(--ember) / 0.25),
       hsl(var(--primary) / 0.3),
       transparent);
   }
 
-  /* Gradient text — for hero titles */
-  .gradient-emerald {
-    background: linear-gradient(135deg,
-      hsl(var(--mint)) 0%,
-      hsl(var(--foreground)) 40%,
-      hsl(var(--mint)) 100%);
+  /*
+    Gradient text — for hero titles. Bright flame to pale ember.
+    Used on the home headline to reinforce the CRT-ember mood.
+  */
+  .gradient-flame {
+    background: linear-gradient(180deg,
+      hsl(40 100% 78%) 0%,
+      hsl(24 100% 62%) 55%,
+      hsl(12 90% 48%) 100%);
     -webkit-background-clip: text;
     background-clip: text;
     -webkit-text-fill-color: transparent;
     color: transparent;
+  }
+
+  /*
+    Terminal prompt — a small `>` glyph used before some kicker
+    labels to reinforce the CRT aesthetic without being a themepark.
+  */
+  .prompt::before {
+    content: "> ";
+    color: hsl(var(--primary));
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-weight: 700;
+  }
+
+  /*
+    Subtle scanline overlay — an optional wrapper class that paints
+    faint horizontal lines across its children. Used only on the
+    home hero for atmosphere; not applied globally because it would
+    distract on every page.
+  */
+  .scanlines {
+    position: relative;
+  }
+  .scanlines::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background-image: repeating-linear-gradient(
+      0deg,
+      transparent 0,
+      transparent 3px,
+      hsl(24 95% 56% / 0.02) 3px,
+      hsl(24 95% 56% / 0.02) 4px
+    );
+    pointer-events: none;
+    z-index: 0;
+  }
+  .scanlines > * {
+    position: relative;
+    z-index: 1;
   }
 }

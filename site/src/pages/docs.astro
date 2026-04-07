@@ -149,7 +149,7 @@ const schemas = [
     </nav>
 
     <header class="mb-14">
-      <p class="mb-3 text-xs font-semibold uppercase tracking-wider text-sage">
+      <p class="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
         Documentation
       </p>
       <h1 class="text-4xl font-bold tracking-tight sm:text-5xl">
@@ -171,14 +171,14 @@ const schemas = [
               <a
                 href={`${SITE.github}/blob/master/${item.path}`}
                 rel="noopener external"
-                class="glass-card group block p-6 transition-colors hover:border-primary/40"
+                class="ember-card group block p-6 transition-colors hover:border-primary/40"
               >
                 <div class="mb-2 flex items-center gap-2">
-                  <Icon name="book-open" size={16} class="text-mint" />
+                  <Icon name="book-open" size={16} class="text-primary" />
                   <h3 class="font-semibold text-foreground">{item.name}</h3>
                 </div>
                 <p class="mt-1 text-sm text-muted-foreground">{item.desc}</p>
-                <p class="mt-3 font-mono text-xs text-sage">{item.path}</p>
+                <p class="mt-3 font-mono text-xs text-muted-foreground">{item.path}</p>
               </a>
             ))}
           </div>
@@ -187,20 +187,20 @@ const schemas = [
     </div>
 
     <section class="mt-16">
-      <div class="glass-card p-8">
-        <div class="mb-3 inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-sage">
+      <div class="ember-card p-8">
+        <div class="mb-3 inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
           <Icon name="code" size={14} />
           Reading the source
         </div>
         <p class="text-sm leading-relaxed text-muted-foreground">
           The backend (Go daemon) lives at
-          <a href={SITE.github + "/tree/master/cmd/quild"} rel="noopener external" class="text-mint underline underline-offset-4 hover:text-foreground">cmd/quild/</a>,
+          <a href={SITE.github + "/tree/master/cmd/quild"} rel="noopener external" class="text-primary underline underline-offset-4 hover:text-foreground">cmd/quild/</a>,
           the TUI client at
-          <a href={SITE.github + "/tree/master/cmd/quil"} rel="noopener external" class="text-mint underline underline-offset-4 hover:text-foreground">cmd/quil/</a>,
+          <a href={SITE.github + "/tree/master/cmd/quil"} rel="noopener external" class="text-primary underline underline-offset-4 hover:text-foreground">cmd/quil/</a>,
           and shared internals (PTY, IPC, state, plugins) under
-          <a href={SITE.github + "/tree/master/internal"} rel="noopener external" class="text-mint underline underline-offset-4 hover:text-foreground">internal/</a>.
+          <a href={SITE.github + "/tree/master/internal"} rel="noopener external" class="text-primary underline underline-offset-4 hover:text-foreground">internal/</a>.
           The plugin examples and test fixtures live at
-          <a href={SITE.github + "/tree/master/docs"} rel="noopener external" class="text-mint underline underline-offset-4 hover:text-foreground">docs/</a>.
+          <a href={SITE.github + "/tree/master/docs"} rel="noopener external" class="text-primary underline underline-offset-4 hover:text-foreground">docs/</a>.
         </p>
       </div>
     </section>

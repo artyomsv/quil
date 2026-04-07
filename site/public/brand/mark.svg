@@ -1,30 +1,29 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 130 140" width="130" height="140" role="img" aria-label="Quil logo mark">
   <title>Quil</title>
-  <desc>A Q letterform — circle opening at the bottom-right — continuing into a downward curving feather quill tail, rendered as a single gradient stroke from deep emerald to soft mint.</desc>
+  <desc>A Q letterform — circle opening at the bottom-right — continuing into a downward curving ember tail, rendered as a single gradient stroke from deep red-orange to pale flame.</desc>
 
   <defs>
     <linearGradient id="quilStroke" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%"  stop-color="#0D6B42"/>
-      <stop offset="55%" stop-color="#1F9968"/>
-      <stop offset="100%" stop-color="#A8E6CE"/>
+      <stop offset="0%"   stop-color="#B33500"/>
+      <stop offset="35%"  stop-color="#E85D0E"/>
+      <stop offset="70%"  stop-color="#FF8A1F"/>
+      <stop offset="100%" stop-color="#FFD580"/>
     </linearGradient>
     <linearGradient id="quilBarb" x1="0%" y1="0%" x2="100%" y2="0%">
-      <stop offset="0%"   stop-color="#1F9968" stop-opacity="0.55"/>
-      <stop offset="100%" stop-color="#A8E6CE" stop-opacity="0.85"/>
+      <stop offset="0%"   stop-color="#E85D0E" stop-opacity="0.6"/>
+      <stop offset="100%" stop-color="#FFD580" stop-opacity="0.9"/>
     </linearGradient>
   </defs>
 
   <!--
     Single continuous stroke:
-      1. Start at (60, 21) — top of a circle centered at (60, 55), radius 34
-      2. Arc counter-clockwise (sweep=0) the LONG way (large=1) through
-         9 o'clock → 6 o'clock → ending at 4:30 position (84, 79),
-         which is exactly on the circle: cos(45°)*34 = 24, so
-         center (60, 55) + (24, 24) = (84, 79).
-      3. Flow out into a downward-right feather tail via a cubic bezier.
+      1. Start at (60, 21) — top of a circle centered at (60, 55), r=34
+      2. Counter-clockwise long arc to 4:30 position (84, 79)
+      3. Flow out into a downward-right ember tail via cubic bezier
 
-    One path = one gesture. Reinforces the "breath and continuity"
-    aesthetic of the Analogous Calm palette.
+    Same path as the original feather design — only the colours
+    changed. The curve now reads as a forge-spark / ember trail
+    instead of a quill feather, matching the fire palette.
   -->
   <path
     d="M 60 21
@@ -38,10 +37,9 @@
   />
 
   <!--
-    Small feather barb — a short diagonal mark suggesting the
-    side-fibres of an actual feather. Lower opacity via its own
-    gradient so it recedes behind the main stroke but still
-    reads as a quill rather than a generic hook.
+    Short diagonal spark — the counterpart to the original feather
+    barb. At a smaller scale this reads as a stray ember falling off
+    the main trail.
   -->
   <path
     d="M 102 108 L 93 102"

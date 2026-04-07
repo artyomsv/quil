@@ -89,7 +89,7 @@ go install github.com/artyomsv/quil/cmd/quild@latest`,
     </nav>
 
     <header class="mb-14">
-      <p class="mb-3 text-xs font-semibold uppercase tracking-wider text-sage">
+      <p class="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
         Get started
       </p>
       <h1 class="text-4xl font-bold tracking-tight sm:text-5xl">
@@ -105,14 +105,14 @@ go install github.com/artyomsv/quil/cmd/quild@latest`,
     <!-- Install methods -->
     <section class="space-y-6">
       {installMethods.map((method) => (
-        <article class="glass-card p-8">
+        <article class="ember-card p-8">
           <div class="mb-4 flex items-start gap-4">
-            <div class="flex size-12 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-mint ring-1 ring-primary/30">
+            <div class="flex size-12 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary ring-1 ring-primary/30">
               <Icon name={method.icon} size={22} />
             </div>
             <div>
               <h2 class="text-xl font-semibold text-foreground">{method.title}</h2>
-              <p class="text-sm text-sage">{method.subtitle}</p>
+              <p class="text-sm text-muted-foreground">{method.subtitle}</p>
             </div>
           </div>
           <p class="mb-5 text-sm leading-relaxed text-muted-foreground">
@@ -122,7 +122,7 @@ go install github.com/artyomsv/quil/cmd/quild@latest`,
           <a
             href={method.cta.href}
             rel="noopener external"
-            class="mt-5 inline-flex items-center gap-2 text-sm font-medium text-mint hover:text-foreground"
+            class="mt-5 inline-flex items-center gap-2 text-sm font-medium text-primary hover:text-foreground"
           >
             {method.cta.label}
             <Icon name="arrow-right" size={14} />
@@ -134,7 +134,7 @@ go install github.com/artyomsv/quil/cmd/quild@latest`,
     <!-- First run -->
     <section class="mt-16">
       <h2 class="mb-4 text-2xl font-semibold tracking-tight">First run</h2>
-      <div class="glass-card p-8">
+      <div class="ember-card p-8">
         <p class="mb-4 text-sm leading-relaxed text-muted-foreground">
           Once installed, launch the TUI. The daemon (<code>quild</code>)
           auto-spawns in the background on your first run and opens a
@@ -154,7 +154,7 @@ go install github.com/artyomsv/quil/cmd/quild@latest`,
     <!-- Verify -->
     <section class="mt-10">
       <h2 class="mb-4 text-2xl font-semibold tracking-tight">Verify</h2>
-      <div class="glass-card p-8">
+      <div class="ember-card p-8">
         <p class="mb-4 text-sm leading-relaxed text-muted-foreground">
           Check you're running the version you expect:
         </p>
@@ -169,7 +169,7 @@ go install github.com/artyomsv/quil/cmd/quild@latest`,
     <!-- Uninstall -->
     <section class="mt-10">
       <h2 class="mb-4 text-2xl font-semibold tracking-tight">Uninstall</h2>
-      <div class="glass-card p-8">
+      <div class="ember-card p-8">
         <div class="mb-4 inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-warning">
           <Icon name="triangle-alert" size={14} />
           Destructive
@@ -186,28 +186,6 @@ rm -rf ~/.quil</code></pre>
           and saved AI session IDs will be gone. Keep the directory if
           you want the option to reinstall later.
         </p>
-      </div>
-    </section>
-
-    <!-- Next steps -->
-    <section class="mt-14">
-      <div class="divider-mint mb-10"></div>
-      <h2 class="mb-4 text-2xl font-semibold tracking-tight">Next steps</h2>
-      <div class="grid gap-4 sm:grid-cols-2">
-        <a href="/features" class="glass-card block p-6 transition-colors hover:border-primary/40">
-          <Icon name="layers" size={22} class="text-mint" />
-          <h3 class="mt-3 font-semibold text-foreground">Explore every feature</h3>
-          <p class="mt-1 text-sm text-muted-foreground">
-            Typed panes, AI session resume, MCP server, plugin system, and more.
-          </p>
-        </a>
-        <a href="/plugins" class="glass-card block p-6 transition-colors hover:border-primary/40">
-          <Icon name="puzzle" size={22} class="text-mint" />
-          <h3 class="mt-3 font-semibold text-foreground">Write a plugin</h3>
-          <p class="mt-1 text-sm text-muted-foreground">
-            Define new pane types in a single TOML file. Hot-reload on save.
-          </p>
-        </a>
       </div>
     </section>
   </article>

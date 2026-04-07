@@ -68,7 +68,7 @@ const orderedCategories: Feature["category"][] = [
     </nav>
 
     <header class="mb-16">
-      <p class="mb-3 text-xs font-semibold uppercase tracking-wider text-sage">
+      <p class="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
         Capabilities
       </p>
       <h1 class="text-4xl font-bold tracking-tight sm:text-5xl">
@@ -86,17 +86,17 @@ const orderedCategories: Feature["category"][] = [
     <!-- Feature sections by category -->
     {orderedCategories.map((cat) => (
       <section class="mb-16">
-        <div class="mb-2 inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-sage">
+        <div class="mb-2 inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
           <Icon name="leaf" size={14} />
           {featureCategories[cat]}
         </div>
-        <div class="divider-mint mb-8"></div>
+        <div class="divider-ember mb-8"></div>
 
         <div class="space-y-6">
           {byCategory[cat].map((f) => (
-            <article id={f.slug} class="glass-card p-8 scroll-mt-24">
+            <article id={f.slug} class="ember-card p-8 scroll-mt-24">
               <div class="mb-4 flex items-start gap-4">
-                <div class="flex size-12 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-mint ring-1 ring-primary/30">
+                <div class="flex size-12 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary ring-1 ring-primary/30">
                   <Icon name={f.icon} size={22} />
                 </div>
                 <div>
@@ -107,7 +107,7 @@ const orderedCategories: Feature["category"][] = [
               <ul class="ml-16 space-y-2 text-sm text-muted-foreground">
                 {f.detail.map((d) => (
                   <li class="flex items-start gap-2">
-                    <Icon name="check" size={14} class="mt-0.5 shrink-0 text-mint" />
+                    <Icon name="check" size={14} class="mt-0.5 shrink-0 text-primary" />
                     <span>{d}</span>
                   </li>
                 ))}
@@ -120,7 +120,7 @@ const orderedCategories: Feature["category"][] = [
 
     <!-- CTA -->
     <section class="mt-16">
-      <div class="glass-card p-10 text-center">
+      <div class="ember-card p-10 text-center">
         <h2 class="text-2xl font-semibold tracking-tight">
           Ready to stop losing your workspace?
         </h2>

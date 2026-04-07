@@ -3,7 +3,6 @@ import Page from "@/layouts/Page.astro";
 import Icon from "@/components/Icon.astro";
 import { SITE } from "@/data/seo";
 import { softwareApplicationSchema, faqSchema } from "@/data/schemas";
-import { features, homeFeatures } from "@/data/features";
 import { homeFaq } from "@/data/faq";
 
 const seo = {
@@ -20,57 +19,77 @@ const seo = {
     "ai terminal",
     "claude code multiplexer",
     "reboot-proof workflow",
-    "developer workflow tool",
   ],
 };
 
+// Keep structured data even though the visible FAQ block is removed —
+// the home page still hosts the FAQPage schema for Google rich results.
 const schemas = [softwareApplicationSchema(), faqSchema(homeFaq)];
 
-const heroFeatures = homeFeatures
-  .map((slug) => features.find((f) => f.slug === slug)!)
-  .filter(Boolean);
+// Four hand-picked feature statements for the numbered list.
+// Deliberately shorter than the old 6-card grid — density is the enemy.
+const topFeatures = [
+  {
+    number: "01",
+    title: "Reboot-proof sessions",
+    body: "Tabs, panes, working directories, and layout state are snapshotted continuously. Type quil after a restart and everything's back in under 30 seconds.",
+  },
+  {
+    number: "02",
+    title: "AI sessions resume automatically",
+    body: "Claude Code conversations come back with their session ID intact. No copy-paste, no context rebuild, no re-explaining the task.",
+  },
+  {
+    number: "03",
+    title: "Typed panes, not just shells",
+    body: "A Claude Code pane resumes differently than an SSH tunnel, which resumes differently than a webhook listener. Four plugins built in, yours in 30 lines of TOML.",
+  },
+  {
+    number: "04",
+    title: "Native on Linux, macOS, and Windows",
+    body: "ConPTY on Windows, creack/pty on Unix. Zero WSL required. One static binary per platform, ~40 MB, no runtime dependencies.",
+  },
+];
 
-const howItWorksSteps = [
-  {
-    title: "Install once",
-    body: "Grab the pre-built binary for Linux, macOS, or Windows. One curl command or a single `go install`.",
-  },
-  {
-    title: "Launch Quil",
-    body: "Type `quil` in your terminal. The daemon auto-starts on first run; the TUI opens with a fresh workspace.",
-  },
-  {
-    title: "Build your setup",
-    body: "Open your Claude Code conversation, an SSH tunnel, a webhook listener, a build watcher — anything you normally run.",
-  },
-  {
-    title: "Reboot. Resume.",
-    body: "After a restart, type `quil` again. Your tabs, panes, working directories, and AI sessions return exactly where you left them.",
-  },
+const compareLinks = [
+  { slug: "tmux",    label: "vs tmux" },
+  { slug: "zellij",  label: "vs Zellij" },
+  { slug: "wezterm", label: "vs WezTerm" },
+  { slug: "screen",  label: "vs GNU Screen" },
 ];
 ---
 <Page {...seo} schemas={schemas}>
   <!-- =================================================================
-       HERO
+       HERO — left-aligned, asymmetric, mono headline
        ================================================================= -->
-  <section class="relative overflow-hidden">
-    <div class="mx-auto max-w-6xl px-6 pt-20 pb-24 text-center sm:pt-28 sm:pb-32">
-      <!-- Status pill -->
-      <p class="mb-6 inline-flex items-center gap-2 rounded-full border border-primary/40 bg-primary/10 px-3 py-1 text-xs font-medium text-mint">
-        <span class="size-1.5 rounded-full bg-mint animate-pulse"></span>
-        v{SITE.software.version} · MIT licensed · Linux · macOS · Windows
-      </p>
+  <section class="scanlines relative overflow-hidden">
+    <div class="mx-auto max-w-5xl px-6 pt-20 pb-20 sm:pt-28 sm:pb-28">
+      <!-- Terminal-prompt-style status pill -->
+      <div class="mb-8 inline-flex items-center gap-2">
+        <span class="pill pill-primary">
+          <span class="size-1 rounded-full bg-primary"></span>
+          v{SITE.software.version} · MIT · Cross-platform
+        </span>
+      </div>
 
-      <h1 class="mx-auto max-w-4xl text-4xl font-bold tracking-tight sm:text-6xl">
-        <span class="text-foreground">The workspace that</span>
-        <span class="gradient-emerald">survives every reboot.</span>
+      <!--
+        Hero headline in JetBrains Mono. Three short lines so the
+        caesurae act like line breaks in a poem — forces the eye to
+        pause between ideas.
+      -->
+      <h1 class="font-mono text-4xl font-bold leading-[1.05] tracking-tight text-foreground sm:text-6xl lg:text-7xl">
+        <span class="block">The workspace</span>
+        <span class="block">that <span class="gradient-flame">doesn't forget.</span></span>
       </h1>
 
-      <p class="mx-auto mt-6 max-w-2xl text-lg text-muted-foreground sm:text-xl">
-        {SITE.blurb}
+      <p class="mt-8 max-w-2xl text-lg leading-relaxed text-muted-foreground sm:text-xl">
+        Quil is a reboot-proof terminal multiplexer for developers who
+        run complex multi-tool AI workflows. AI sessions, running
+        processes, and your whole setup — back in 30 seconds after
+        any restart.
       </p>
 
-      <div class="mt-10 flex flex-col items-center justify-center gap-3 sm:flex-row">
+      <div class="mt-10 flex flex-col gap-3 sm:flex-row">
         <a href="/install" class="btn-primary">
           <Icon name="download" size={18} />
           Install in 30 seconds
@@ -84,150 +103,107 @@ const howItWorksSteps = [
     </div>
   </section>
 
-  <!-- =================================================================
-       PROBLEM CALLOUT
-       ================================================================= -->
-  <section class="mx-auto max-w-4xl px-6">
-    <div class="glass-card p-8 sm:p-10">
-      <div class="mb-3 inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-sage">
-        <Icon name="wifi-off" size={14} />
-        The daily tax
-      </div>
-      <p class="text-lg leading-relaxed text-foreground/90">
-        Agentic developers run 5–10 terminal sessions per project:
-        AI assistants, webhook listeners, build watchers, SSH tunnels,
-        database shells. Every reboot destroys this setup. Re-opening
-        tabs, re-attaching sessions, and re-typing resume commands is
-        a daily 10-15 minute tax — and worse, you lose the context
-        your AI assistant had built up.
-      </p>
-      <div class="divider-mint mt-8"></div>
-      <p class="mt-6 text-sm text-muted-foreground">
-        tmux survives network disconnects but not reboots. Terminal
-        emulators render beautifully but don't persist state. IDE
-        terminals are tied to a single editor. None of them understand
-        that an AI pane is different from a webhook listener pane.
-      </p>
-    </div>
-  </section>
+  <div class="divider-ember mx-auto max-w-5xl"></div>
 
   <!-- =================================================================
-       FEATURE GRID
+       NUMBERED FEATURE LIST — single column, sparse, matte-black blocks
        ================================================================= -->
-  <section class="mx-auto max-w-6xl px-6 pt-24 pb-16">
-    <div class="mb-12 text-center">
-      <p class="mb-3 text-xs font-semibold uppercase tracking-wider text-sage">
-        What Quil does
+  <section class="mx-auto max-w-5xl px-6 pt-20 pb-16">
+    <div class="mb-12 max-w-2xl">
+      <p class="prompt mb-3 font-mono text-xs font-bold uppercase tracking-[0.2em] text-primary">
+        what quil does
       </p>
-      <h2 class="text-3xl font-bold tracking-tight sm:text-4xl">
-        A multiplexer that understands your workflow.
+      <h2 class="font-mono text-3xl font-bold tracking-tight sm:text-4xl">
+        Four things. Done well.
       </h2>
     </div>
 
-    <div class="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
-      {heroFeatures.map((f) => (
-        <article class="glass-card group p-6 transition-colors hover:border-primary/40">
-          <div class="mb-4 inline-flex size-11 items-center justify-center rounded-xl bg-primary/10 text-mint ring-1 ring-primary/30">
-            <Icon name={f.icon} size={22} />
+    <ol class="space-y-4">
+      {topFeatures.map((f) => (
+        <li class="feature-block">
+          <div class="flex flex-col gap-2 sm:flex-row sm:items-baseline sm:gap-6">
+            <span class="shrink-0 font-mono text-sm font-bold text-primary">
+              {f.number}
+            </span>
+            <div>
+              <h3 class="font-mono text-lg font-semibold text-foreground sm:text-xl">
+                {f.title}
+              </h3>
+              <p class="mt-2 max-w-3xl text-sm leading-relaxed text-muted-foreground sm:text-base">
+                {f.body}
+              </p>
+            </div>
           </div>
-          <h3 class="text-lg font-semibold text-foreground">{f.title}</h3>
-          <p class="mt-2 text-sm leading-relaxed text-muted-foreground">
-            {f.blurb}
-          </p>
-        </article>
+        </li>
       ))}
-    </div>
+    </ol>
 
-    <div class="mt-10 text-center">
-      <a href="/features" class="inline-flex items-center gap-2 text-sm font-medium text-mint hover:text-foreground">
-        See the full feature list
+    <div class="mt-8">
+      <a
+        href="/features"
+        class="inline-flex items-center gap-2 font-mono text-sm font-medium text-primary hover:text-foreground"
+      >
+        <span class="prompt">see every capability</span>
         <Icon name="arrow-right" size={14} />
       </a>
     </div>
   </section>
 
+  <div class="divider-ember mx-auto max-w-5xl"></div>
+
   <!-- =================================================================
-       HOW IT WORKS
+       COMPARE TEASER — single line + four small pills
        ================================================================= -->
   <section class="mx-auto max-w-5xl px-6 py-16">
-    <div class="mb-12 text-center">
-      <p class="mb-3 text-xs font-semibold uppercase tracking-wider text-sage">
-        How it works
+    <div class="max-w-3xl">
+      <p class="prompt mb-3 font-mono text-xs font-bold uppercase tracking-[0.2em] text-primary">
+        how it compares
       </p>
-      <h2 class="text-3xl font-bold tracking-tight sm:text-4xl">
-        Four steps from install to "I never lose context again".
+      <h2 class="font-mono text-3xl font-bold tracking-tight sm:text-4xl">
+        Not another tmux.
       </h2>
-    </div>
-
-    <ol class="space-y-5">
-      {howItWorksSteps.map((step, i) => (
-        <li class="glass-card flex items-start gap-5 p-6">
-          <div class="flex size-11 shrink-0 items-center justify-center rounded-full bg-primary/15 text-mint ring-1 ring-primary/40 font-mono text-sm font-semibold">
-            {i + 1}
-          </div>
-          <div>
-            <h3 class="text-base font-semibold text-foreground">{step.title}</h3>
-            <p class="mt-1.5 text-sm leading-relaxed text-muted-foreground">
-              {step.body}
-            </p>
-          </div>
-        </li>
-      ))}
-    </ol>
-  </section>
-
-  <!-- =================================================================
-       FAQ
-       ================================================================= -->
-  <section class="mx-auto max-w-4xl px-6 py-16">
-    <div class="mb-12 text-center">
-      <p class="mb-3 text-xs font-semibold uppercase tracking-wider text-sage">
-        Questions
+      <p class="mt-6 text-lg leading-relaxed text-muted-foreground">
+        tmux and Zellij survive network disconnects but not host reboots.
+        WezTerm is a terminal emulator that happens to multiplex. Screen
+        is 38 years old. Quil is a different category: a workflow
+        orchestrator that treats your terminal as the source of truth.
       </p>
-      <h2 class="text-3xl font-bold tracking-tight sm:text-4xl">
-        Frequently asked.
-      </h2>
     </div>
-
-    <div class="space-y-3">
-      {homeFaq.map((item) => (
-        <details class="glass-card group overflow-hidden">
-          <summary class="flex cursor-pointer list-none items-center justify-between gap-4 p-5 text-left text-base font-semibold text-foreground [&::-webkit-details-marker]:hidden">
-            <span>{item.question}</span>
-            <Icon
-              name="chevron-down"
-              size={18}
-              class="shrink-0 text-sage transition-transform group-open:rotate-180"
-            />
-          </summary>
-          <div class="border-t border-border/60 px-5 py-4 text-sm leading-relaxed text-muted-foreground">
-            {item.answer}
-          </div>
-        </details>
+    <div class="mt-8 flex flex-wrap gap-3">
+      {compareLinks.map((c) => (
+        <a
+          href={`/vs/${c.slug}`}
+          class="pill transition-colors hover:border-primary/60 hover:text-primary"
+        >
+          {c.label}
+          <Icon name="arrow-right" size={12} />
+        </a>
       ))}
     </div>
   </section>
 
+  <div class="divider-ember mx-auto max-w-5xl"></div>
+
   <!-- =================================================================
-       FINAL CTA
+       FINAL CTA — big, confident, no glass card
        ================================================================= -->
-  <section class="mx-auto max-w-4xl px-6 pb-24 pt-8">
-    <div class="glass-card overflow-hidden p-10 text-center">
-      <div class="mb-6 inline-flex size-14 items-center justify-center rounded-2xl bg-primary/15 text-mint ring-1 ring-primary/40">
-        <Icon name="rocket" size={28} />
-      </div>
-      <h2 class="text-2xl font-bold tracking-tight sm:text-3xl">
-        Stop paying the reboot tax.
-      </h2>
-      <p class="mx-auto mt-3 max-w-xl text-sm text-muted-foreground sm:text-base">
-        Quil ships as a single binary for Linux, macOS, and Windows.
-        No daemons to configure, no databases to provision, no cloud
-        account required.
+  <section class="mx-auto max-w-5xl px-6 pt-20 pb-28">
+    <div class="max-w-3xl">
+      <p class="prompt mb-3 font-mono text-xs font-bold uppercase tracking-[0.2em] text-primary">
+        stop paying the reboot tax
       </p>
-      <div class="mt-8 flex flex-col items-center justify-center gap-3 sm:flex-row">
+      <h2 class="font-mono text-3xl font-bold leading-tight tracking-tight sm:text-5xl">
+        <span class="gradient-flame">Install it. Reboot once. Feel the difference.</span>
+      </h2>
+      <p class="mt-6 text-lg text-muted-foreground">
+        One binary. No daemon to configure. No database to provision.
+        No cloud account. Open source under MIT.
+      </p>
+      <div class="mt-10 flex flex-col gap-3 sm:flex-row">
         <a href="/install" class="btn-primary">
           <Icon name="download" size={18} />
           Install Quil
+          <Icon name="arrow-right" size={16} />
         </a>
         <a href={SITE.github} rel="noopener external" class="btn-outline">
           <Icon name="github" size={16} />

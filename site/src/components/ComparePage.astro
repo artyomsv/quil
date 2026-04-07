@@ -56,7 +56,7 @@ const otherCompetitors = (
 
 // Cell rendering helper: yes → green check, no → red x, partial → amber triangle.
 const cellIcon = (s: Support): { name: "check" | "x" | "triangle-alert"; colour: string } => {
-  if (s === "yes") return { name: "check", colour: "text-mint" };
+  if (s === "yes") return { name: "check", colour: "text-primary" };
   if (s === "no") return { name: "x", colour: "text-destructive/80" };
   return { name: "triangle-alert", colour: "text-warning" };
 };
@@ -74,11 +74,11 @@ const cellIcon = (s: Support): { name: "check" | "x" | "triangle-alert"; colour:
 
     <!-- Hero -->
     <header class="mb-14">
-      <p class="mb-3 text-xs font-semibold uppercase tracking-wider text-sage">
+      <p class="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
         Compare
       </p>
       <h1 class="text-4xl font-bold tracking-tight sm:text-5xl">
-        Quil <span class="text-sage">vs</span> {info.name}
+        Quil <span class="text-muted-foreground">vs</span> {info.name}
       </h1>
       <p class="mt-5 max-w-2xl text-lg text-muted-foreground">
         {info.description}
@@ -87,8 +87,8 @@ const cellIcon = (s: Support): { name: "check" | "x" | "triangle-alert"; colour:
 
     <!-- Positioning -->
     <section class="mb-14">
-      <div class="glass-card p-8">
-        <div class="mb-3 inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-sage">
+      <div class="ember-card p-8">
+        <div class="mb-3 inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
           <Icon name="leaf" size={14} />
           Where they fit
         </div>
@@ -101,14 +101,14 @@ const cellIcon = (s: Support): { name: "check" | "x" | "triangle-alert"; colour:
     <!-- Feature matrix -->
     <section class="mb-14">
       <h2 class="mb-6 text-2xl font-semibold tracking-tight">Feature matrix</h2>
-      <div class="glass-card overflow-hidden">
+      <div class="ember-card overflow-hidden">
         <table class="w-full text-sm">
           <thead>
             <tr class="border-b border-border/60 bg-muted/40">
-              <th class="px-5 py-4 text-left text-xs font-semibold uppercase tracking-wider text-sage">
+              <th class="px-5 py-4 text-left text-xs font-semibold uppercase tracking-wider text-muted-foreground">
                 Feature
               </th>
-              <th class="px-5 py-4 text-center text-xs font-semibold uppercase tracking-wider text-mint">
+              <th class="px-5 py-4 text-center text-xs font-semibold uppercase tracking-wider text-primary">
                 Quil
               </th>
               <th class="px-5 py-4 text-center text-xs font-semibold uppercase tracking-wider text-muted-foreground">
@@ -137,7 +137,7 @@ const cellIcon = (s: Support): { name: "check" | "x" | "triangle-alert"; colour:
                   </tr>
                   {row.note && (
                     <tr class="border-b border-border/40">
-                      <td colspan="3" class="px-5 pb-3 pt-0 text-xs italic text-sage">
+                      <td colspan="3" class="px-5 pb-3 pt-0 text-xs italic text-muted-foreground">
                         {row.note}
                       </td>
                     </tr>
@@ -152,8 +152,8 @@ const cellIcon = (s: Support): { name: "check" | "x" | "triangle-alert"; colour:
 
     <!-- Key strength / key gap -->
     <section class="mb-14 grid gap-6 md:grid-cols-2">
-      <article class="glass-card p-6" style="border-color: hsl(var(--primary) / 0.35);">
-        <div class="mb-3 inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-mint">
+      <article class="ember-card p-6" style="border-color: hsl(var(--primary) / 0.35);">
+        <div class="mb-3 inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-primary">
           <Icon name="check" size={14} />
           Where {info.name} wins
         </div>
@@ -162,7 +162,7 @@ const cellIcon = (s: Support): { name: "check" | "x" | "triangle-alert"; colour:
         </p>
       </article>
 
-      <article class="glass-card p-6" style="border-color: hsl(var(--warning) / 0.35);">
+      <article class="ember-card p-6" style="border-color: hsl(var(--warning) / 0.35);">
         <div class="mb-3 inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-warning">
           <Icon name="triangle-alert" size={14} />
           Where {info.name} stops
@@ -175,8 +175,8 @@ const cellIcon = (s: Support): { name: "check" | "x" | "triangle-alert"; colour:
 
     <!-- Migration note -->
     <section class="mb-14">
-      <div class="glass-card p-8">
-        <div class="mb-3 inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-sage">
+      <div class="ember-card p-8">
+        <div class="mb-3 inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
           <Icon name="arrow-right" size={14} />
           Coming from {info.name}?
         </div>
@@ -191,13 +191,13 @@ const cellIcon = (s: Support): { name: "check" | "x" | "triangle-alert"; colour:
       <h2 class="mb-6 text-2xl font-semibold tracking-tight">Common questions</h2>
       <div class="space-y-3">
         {info.faq.map((item) => (
-          <details class="glass-card group overflow-hidden">
+          <details class="ember-card group overflow-hidden">
             <summary class="flex cursor-pointer list-none items-center justify-between gap-4 p-5 text-left text-base font-semibold text-foreground [&::-webkit-details-marker]:hidden">
               <span>{item.question}</span>
               <Icon
                 name="chevron-down"
                 size={18}
-                class="shrink-0 text-sage transition-transform group-open:rotate-180"
+                class="shrink-0 text-muted-foreground transition-transform group-open:rotate-180"
               />
             </summary>
             <div class="border-t border-border/60 px-5 py-4 text-sm leading-relaxed text-muted-foreground">
@@ -215,14 +215,14 @@ const cellIcon = (s: Support): { name: "check" | "x" | "triangle-alert"; colour:
         {otherCompetitors.map((other) => (
           <a
             href={`/vs/${other}`}
-            class="glass-card block p-5 transition-colors hover:border-primary/40"
+            class="ember-card block p-5 transition-colors hover:border-primary/40"
           >
-            <div class="text-xs font-semibold uppercase tracking-wider text-sage">
+            <div class="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
               Compare
             </div>
             <div class="mt-2 flex items-center justify-between">
               <span class="font-semibold text-foreground">Quil vs {competitors[other].name}</span>
-              <Icon name="arrow-right" size={14} class="text-mint" />
+              <Icon name="arrow-right" size={14} class="text-primary" />
             </div>
           </a>
         ))}
@@ -231,7 +231,7 @@ const cellIcon = (s: Support): { name: "check" | "x" | "triangle-alert"; colour:
 
     <!-- Final CTA -->
     <section>
-      <div class="glass-card p-10 text-center">
+      <div class="ember-card p-10 text-center">
         <h2 class="text-2xl font-semibold tracking-tight">
           Ready to try Quil?
         </h2>

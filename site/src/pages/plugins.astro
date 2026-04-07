@@ -55,7 +55,7 @@ const pluginIcons: Record<string, "terminal" | "sparkles" | "layers" | "zap"> = 
     </nav>
 
     <header class="mb-14">
-      <p class="mb-3 text-xs font-semibold uppercase tracking-wider text-sage">
+      <p class="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
         Typed panes
       </p>
       <h1 class="text-4xl font-bold tracking-tight sm:text-5xl">
@@ -78,15 +78,15 @@ const pluginIcons: Record<string, "terminal" | "sparkles" | "layers" | "zap"> = 
 
       <div class="grid gap-6 md:grid-cols-2">
         {plugins.map((p) => (
-          <article id={p.slug} class="glass-card p-6 scroll-mt-24">
+          <article id={p.slug} class="ember-card p-6 scroll-mt-24">
             <div class="mb-3 flex items-start justify-between gap-3">
               <div class="flex items-center gap-3">
-                <div class="flex size-11 items-center justify-center rounded-xl bg-primary/10 text-mint ring-1 ring-primary/30">
+                <div class="flex size-11 items-center justify-center rounded-xl bg-primary/10 text-primary ring-1 ring-primary/30">
                   <Icon name={pluginIcons[p.slug]} size={22} />
                 </div>
                 <div>
                   <h3 class="text-base font-semibold text-foreground">{p.name}</h3>
-                  <span class="pill pill-mint mt-1">{p.kind}</span>
+                  <span class="pill pill-ember mt-1">{p.kind}</span>
                 </div>
               </div>
             </div>
@@ -100,7 +100,7 @@ const pluginIcons: Record<string, "terminal" | "sparkles" | "layers" | "zap"> = 
             <ul class="space-y-1.5 text-xs text-muted-foreground">
               {p.features.map((f) => (
                 <li class="flex items-start gap-2">
-                  <Icon name="check" size={12} class="mt-0.5 shrink-0 text-mint" />
+                  <Icon name="check" size={12} class="mt-0.5 shrink-0 text-primary" />
                   <span>{f}</span>
                 </li>
               ))}
@@ -116,38 +116,38 @@ const pluginIcons: Record<string, "terminal" | "sparkles" | "layers" | "zap"> = 
         <h2 class="text-2xl font-semibold tracking-tight">How plugins work</h2>
       </div>
 
-      <div class="glass-card p-8">
+      <div class="ember-card p-8">
         <p class="mb-4 text-sm leading-relaxed text-muted-foreground">
           A plugin is a single TOML file in <code>~/.quil/plugins/</code>.
           Five optional sections declare its behaviour:
         </p>
         <ul class="mb-6 space-y-2 text-sm text-muted-foreground">
           <li class="flex items-start gap-2">
-            <code class="shrink-0 text-mint">[plugin]</code>
+            <code class="shrink-0 text-primary">[plugin]</code>
             <span>name, type, and description — the plugin's identity.</span>
           </li>
           <li class="flex items-start gap-2">
-            <code class="shrink-0 text-mint">[spawn]</code>
+            <code class="shrink-0 text-primary">[spawn]</code>
             <span>command array, working directory, environment variables.</span>
           </li>
           <li class="flex items-start gap-2">
-            <code class="shrink-0 text-mint">[resume]</code>
+            <code class="shrink-0 text-primary">[resume]</code>
             <span>what to run when restoring after a reboot (respawn, replay, or custom).</span>
           </li>
           <li class="flex items-start gap-2">
-            <code class="shrink-0 text-mint">[keys]</code>
+            <code class="shrink-0 text-primary">[keys]</code>
             <span>pane-local keybindings that override the global config.</span>
           </li>
           <li class="flex items-start gap-2">
-            <code class="shrink-0 text-mint">[error]</code>
+            <code class="shrink-0 text-primary">[error]</code>
             <span>regex patterns that mark the pane as errored when matched in output.</span>
           </li>
           <li class="flex items-start gap-2">
-            <code class="shrink-0 text-mint">[status]</code>
+            <code class="shrink-0 text-primary">[status]</code>
             <span>regex + template that produces the pane's status line.</span>
           </li>
         </ul>
-        <div class="divider-mint mb-6"></div>
+        <div class="divider-ember mb-6"></div>
         <p class="text-sm text-muted-foreground">
           Plugins are hot-reloaded — save the file and Quil picks up
           the changes on the next pane creation without restarting.
@@ -158,9 +158,9 @@ const pluginIcons: Record<string, "terminal" | "sparkles" | "layers" | "zap"> = 
     <!-- Sample plugin code -->
     <section class="mb-16">
       <h2 class="mb-6 text-2xl font-semibold tracking-tight">Sample: a smee.io webhook receiver</h2>
-      <div class="glass-card p-8">
+      <div class="ember-card p-8">
         <p class="mb-4 text-sm leading-relaxed text-muted-foreground">
-          This plugin runs <a href="https://smee.io" rel="noopener external" class="text-mint underline underline-offset-4 hover:text-foreground">smee.io</a>'s
+          This plugin runs <a href="https://smee.io" rel="noopener external" class="text-primary underline underline-offset-4 hover:text-foreground">smee.io</a>'s
           webhook forwarder, extracts the live URL from its output into
           the pane status line, and catches auth failures as errors.
         </p>
@@ -170,8 +170,8 @@ const pluginIcons: Record<string, "terminal" | "sparkles" | "layers" | "zap"> = 
 
     <!-- Authoring reference -->
     <section>
-      <div class="glass-card p-10 text-center">
-        <div class="mb-5 inline-flex size-14 items-center justify-center rounded-2xl bg-primary/15 text-mint ring-1 ring-primary/40">
+      <div class="ember-card p-10 text-center">
+        <div class="mb-5 inline-flex size-14 items-center justify-center rounded-2xl bg-primary/15 text-primary ring-1 ring-primary/40">
           <Icon name="book-open" size={26} />
         </div>
         <h2 class="text-2xl font-semibold tracking-tight">

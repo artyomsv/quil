@@ -1,0 +1,130 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630" role="img" aria-label="__ARIA__">
+  <title>__ARIA__</title>
+
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#051A10"/>
+      <stop offset="40%" stop-color="#0A281A"/>
+      <stop offset="100%" stop-color="#061510"/>
+    </linearGradient>
+
+    <radialGradient id="glowEmerald" cx="25%" cy="30%" r="50%">
+      <stop offset="0%" stop-color="#1F9968" stop-opacity="0.35"/>
+      <stop offset="100%" stop-color="#1F9968" stop-opacity="0"/>
+    </radialGradient>
+
+    <radialGradient id="glowTeal" cx="85%" cy="90%" r="40%">
+      <stop offset="0%" stop-color="#0E8A8A" stop-opacity="0.22"/>
+      <stop offset="100%" stop-color="#0E8A8A" stop-opacity="0"/>
+    </radialGradient>
+
+    <linearGradient id="ogStroke" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#22A478"/>
+      <stop offset="55%" stop-color="#45C498"/>
+      <stop offset="100%" stop-color="#A8E6CE"/>
+    </linearGradient>
+    <linearGradient id="ogBarb" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#45C498" stop-opacity="0.6"/>
+      <stop offset="100%" stop-color="#A8E6CE" stop-opacity="0.9"/>
+    </linearGradient>
+
+    <linearGradient id="ogTitle" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#F6FFFB"/>
+      <stop offset="100%" stop-color="#C8F0DC"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="0" y="0" width="1200" height="630" fill="url(#bg)"/>
+  <rect x="0" y="0" width="1200" height="630" fill="url(#glowEmerald)"/>
+  <rect x="0" y="0" width="1200" height="630" fill="url(#glowTeal)"/>
+
+  <g stroke="#1A8552" stroke-width="1" stroke-opacity="0.06">
+    <line x1="0" y1="157.5" x2="1200" y2="157.5"/>
+    <line x1="0" y1="315"   x2="1200" y2="315"/>
+    <line x1="0" y1="472.5" x2="1200" y2="472.5"/>
+    <line x1="300" y1="0" x2="300" y2="630"/>
+    <line x1="600" y1="0" x2="600" y2="630"/>
+    <line x1="900" y1="0" x2="900" y2="630"/>
+  </g>
+
+  <!-- Brand mark — smaller + pushed to upper left so the headline dominates -->
+  <g transform="translate(90, 90) scale(1.4)">
+    <path
+      d="M 60 21
+         A 34 34 0 1 0 84 79
+         C 92 89 102 102 112 122"
+      fill="none"
+      stroke="url(#ogStroke)"
+      stroke-width="9"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+    />
+    <path
+      d="M 102 108 L 93 102"
+      fill="none"
+      stroke="url(#ogBarb)"
+      stroke-width="5"
+      stroke-linecap="round"
+    />
+  </g>
+
+  <!-- Brand wordmark — small, top-right corner -->
+  <text
+    x="1110" y="130"
+    text-anchor="end"
+    font-family="'Inter', 'SF Pro Display', system-ui, sans-serif"
+    font-size="34"
+    font-weight="700"
+    letter-spacing="-1"
+    fill="#C8F0DC"
+  >quil</text>
+
+  <!-- Kicker label — small uppercase tag identifying the section -->
+  <text
+    x="90" y="300"
+    font-family="'Inter', 'SF Pro Display', system-ui, sans-serif"
+    font-size="22"
+    font-weight="600"
+    letter-spacing="3"
+    fill="#8CD4B1"
+  >__KICKER__</text>
+
+  <!-- Headline — the hero line for this page -->
+  <text
+    x="90" y="370"
+    font-family="'Inter', 'SF Pro Display', system-ui, sans-serif"
+    font-size="__HEADLINE_SIZE__"
+    font-weight="700"
+    letter-spacing="-3"
+    fill="url(#ogTitle)"
+  >__HEADLINE__</text>
+
+  <!-- Headline line 2 (optional) -->
+  <text
+    x="90" y="__HEADLINE2_Y__"
+    font-family="'Inter', 'SF Pro Display', system-ui, sans-serif"
+    font-size="__HEADLINE_SIZE__"
+    font-weight="700"
+    letter-spacing="-3"
+    fill="url(#ogTitle)"
+  >__HEADLINE2__</text>
+
+  <!-- Subline — one line of supporting copy -->
+  <text
+    x="90" y="__SUBLINE_Y__"
+    font-family="'Inter', 'SF Pro Display', system-ui, sans-serif"
+    font-size="28"
+    font-weight="500"
+    letter-spacing="-0.5"
+    fill="#8CD4B1"
+  >__SUBLINE__</text>
+
+  <!-- Footer row: URL on left, version/license on right -->
+  <g font-family="'JetBrains Mono', ui-monospace, monospace" font-size="22" fill="#6BB89A">
+    <text x="90" y="575">quil.cc__PATH__</text>
+    <text x="1110" y="575" text-anchor="end">v1.0.0  ·  MIT  ·  Linux · macOS · Windows</text>
+  </g>
+
+  <!-- Bottom accent line -->
+  <rect x="0" y="620" width="1200" height="2" fill="url(#ogStroke)" opacity="0.6"/>
+</svg>

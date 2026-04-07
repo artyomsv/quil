@@ -1,14 +1,16 @@
 ---
 import Page from "@/layouts/Page.astro";
 import Icon from "@/components/Icon.astro";
-import { breadcrumbSchema } from "@/data/schemas";
+import { breadcrumbSchema, itemListSchema } from "@/data/schemas";
 import { features, featureCategories, type Feature } from "@/data/features";
+import { SITE } from "@/data/seo";
 
 const seo = {
   title: "Features — typed panes, AI resume, plugin system, and more",
   description:
     "A complete tour of every Quil capability: reboot-proof persistence, typed panes, AI session auto-resume, MCP server, TOML plugin system, notification center, and pane notes.",
   path: "/features",
+  ogImage: "/og/features.png",
   keywords: [
     "quil features",
     "terminal multiplexer features",
@@ -23,6 +25,17 @@ const schemas = [
     { name: "Quil", path: "/" },
     { name: "Features", path: "/features" },
   ]),
+  itemListSchema({
+    name: "Quil features",
+    description:
+      "The complete list of Quil capabilities in v1.0.0: persistence, AI integration, interaction, extensibility, and observability.",
+    url: SITE.url + "/features",
+    items: features.map((f) => ({
+      name: f.title,
+      description: f.blurb,
+      url: SITE.url + "/features#" + f.slug,
+    })),
+  }),
 ];
 
 // Group features by category, preserving declaration order within each.
@@ -81,7 +94,7 @@ const orderedCategories: Feature["category"][] = [
 
         <div class="space-y-6">
           {byCategory[cat].map((f) => (
-            <article class="glass-card p-8">
+            <article id={f.slug} class="glass-card p-8 scroll-mt-24">
               <div class="mb-4 flex items-start gap-4">
                 <div class="flex size-12 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-mint ring-1 ring-primary/30">
                   <Icon name={f.icon} size={22} />

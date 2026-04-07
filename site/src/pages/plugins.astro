@@ -1,14 +1,16 @@
 ---
 import Page from "@/layouts/Page.astro";
 import Icon from "@/components/Icon.astro";
-import { breadcrumbSchema } from "@/data/schemas";
+import { breadcrumbSchema, itemListSchema } from "@/data/schemas";
 import { plugins, samplePluginToml, pluginAuthoringRef } from "@/data/plugins";
+import { SITE } from "@/data/seo";
 
 const seo = {
   title: "Plugins — typed panes with context-aware behaviour",
   description:
     "Quil ships four built-in pane types: Terminal, Claude Code, SSH, and Stripe CLI. Each has its own spawn command, resume strategy, error handler, and status line. Write your own in a single TOML file.",
   path: "/plugins",
+  ogImage: "/og/plugins.png",
   keywords: [
     "quil plugins",
     "quil pane types",
@@ -24,6 +26,17 @@ const schemas = [
     { name: "Quil", path: "/" },
     { name: "Plugins", path: "/plugins" },
   ]),
+  itemListSchema({
+    name: "Quil built-in plugins",
+    description:
+      "Four built-in typed pane types — Terminal, Claude Code, SSH, and Stripe CLI — plus an authoring guide for writing your own in TOML.",
+    url: SITE.url + "/plugins",
+    items: plugins.map((p) => ({
+      name: p.name,
+      description: p.description,
+      url: SITE.url + "/plugins#" + p.slug,
+    })),
+  }),
 ];
 
 const pluginIcons: Record<string, "terminal" | "sparkles" | "layers" | "zap"> = {
@@ -65,7 +78,7 @@ const pluginIcons: Record<string, "terminal" | "sparkles" | "layers" | "zap"> = 
 
       <div class="grid gap-6 md:grid-cols-2">
         {plugins.map((p) => (
-          <article class="glass-card p-6">
+          <article id={p.slug} class="glass-card p-6 scroll-mt-24">
             <div class="mb-3 flex items-start justify-between gap-3">
               <div class="flex items-center gap-3">
                 <div class="flex size-11 items-center justify-center rounded-xl bg-primary/10 text-mint ring-1 ring-primary/30">

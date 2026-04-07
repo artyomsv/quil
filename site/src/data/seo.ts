@@ -23,8 +23,10 @@ export const SITE = {
   locale: "en_US",
   htmlLang: "en",
 
-  /** Default OG image (1200×630 PNG rendered from the brand SVG). */
-  defaultOgImage: "/og/default.png",
+  /** Default OG image (1200×630 PNG rendered from the brand SVG).
+   *  Used only as a fallback for pages that don't set their own
+   *  ogImage. All current pages set per-page cards via build-og.mjs. */
+  defaultOgImage: "/og/home.png",
 
   /** GitHub repository — used for outbound links and structured data. */
   github: "https://github.com/artyomsv/quil",

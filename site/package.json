@@ -7,7 +7,10 @@
     "dev": "astro dev",
     "build": "astro check && astro build",
     "preview": "astro preview --host 0.0.0.0 --port 4321",
-    "astro": "astro"
+    "astro": "astro",
+    "og:svg": "node scripts/build-og.mjs",
+    "og:png": "for svg in public/og/*.svg; do rsvg-convert -w 1200 -h 630 \"$svg\" -o \"${svg%.svg}.png\"; done",
+    "og": "npm run og:svg && npm run og:png"
   },
   "dependencies": {
     "@astrojs/check": "^0.9.4",

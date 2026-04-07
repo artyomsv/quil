@@ -29,6 +29,27 @@ const ogImageURL = SITE.url + (ogImage ?? SITE.defaultOgImage);
 <meta name="theme-color" content="#051A10" />
 <meta name="color-scheme" content="dark" />
 
+<!--
+  Security posture — GitHub Pages doesn't let us set real HTTP
+  response headers, so we lean on meta http-equiv tags. These give
+  us ~80% of the value (modern browsers honour the meta form for
+  CSP, Referrer-Policy, and X-Content-Type-Options identically).
+
+  CSP allows:
+    - self-hosted CSS/JS/images/fonts (every asset we ship)
+    - Google Fonts (fonts.googleapis.com for CSS, fonts.gstatic.com for WOFF2)
+    - data: URIs for inline SVG favicons
+    - https: images (SoftwareApplication JSON-LD references GitHub)
+  CSP blocks:
+    - inline scripts (except is:inline JSON-LD, which uses type=application/ld+json
+      and is not executable, so CSP doesn't block it)
+    - any third-party tracker
+-->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self';" />
+<meta name="referrer" content="strict-origin-when-cross-origin" />
+<meta http-equiv="X-Content-Type-Options" content="nosniff" />
+<meta http-equiv="Permissions-Policy" content="camera=(), microphone=(), geolocation=(), interest-cohort=()" />
+
 <!-- Fonts: Inter for body, JetBrains Mono for code -->
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -62,10 +83,14 @@ const ogImageURL = SITE.url + (ogImage ?? SITE.defaultOgImage);
 <meta name="twitter:description" content={description} />
 <meta name="twitter:image" content={ogImageURL} />
 
-<!-- Favicons -->
+<!-- Favicons + PWA manifest -->
 <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
 <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
 <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+<link rel="manifest" href="/site.webmanifest" />
+<meta name="apple-mobile-web-app-title" content="Quil" />
+<meta name="application-name" content="Quil" />
+<meta name="format-detection" content="telephone=no" />
 
 <!-- Sitemap discovery -->
 <link rel="sitemap" href="/sitemap-index.xml" />

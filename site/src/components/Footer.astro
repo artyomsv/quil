@@ -97,5 +97,17 @@ const year = new Date().getFullYear();
         Built with <a href="https://astro.build" class="underline underline-offset-4 hover:text-foreground" rel="noopener external">Astro</a> · Hosted on GitHub Pages
       </p>
     </div>
+
+    <!--
+      rel="me" verification links — declare which profiles on other
+      platforms belong to the Quil author. GitHub, Mastodon, and the
+      IndieAuth ecosystem use this to cross-verify ownership.
+      The links are invisible (sr-only) because their purpose is
+      machine discovery, not human navigation.
+    -->
+    <div class="sr-only">
+      <a rel="me" href={SITE.author.url}>{SITE.author.name} on GitHub</a>
+      <a rel="me" href={SITE.github}>Quil repository</a>
+    </div>
   </div>
 </footer>

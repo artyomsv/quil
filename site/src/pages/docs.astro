@@ -2,13 +2,14 @@
 import Page from "@/layouts/Page.astro";
 import Icon from "@/components/Icon.astro";
 import { SITE } from "@/data/seo";
-import { breadcrumbSchema } from "@/data/schemas";
+import { breadcrumbSchema, itemListSchema } from "@/data/schemas";
 
 const seo = {
   title: "Documentation — VISION, PRD, architecture, plugin reference",
   description:
     "Every Quil document lives in the GitHub repo as plain Markdown. Vision, PRD, architecture decision records, roadmap, plugin authoring reference, contributing guide, and changelog.",
   path: "/docs",
+  ogImage: "/og/docs.png",
   keywords: [
     "quil docs",
     "quil documentation",
@@ -18,12 +19,8 @@ const seo = {
   ],
 };
 
-const schemas = [
-  breadcrumbSchema([
-    { name: "Quil", path: "/" },
-    { name: "Documentation", path: "/docs" },
-  ]),
-];
+// schemas is constructed below the sections array — it depends on
+// the flattened item list for the ItemList JSON-LD.
 
 const sections = [
   {
@@ -116,6 +113,31 @@ const sections = [
       },
     ],
   },
+];
+
+// Flatten every doc entry into a single list for the ItemList JSON-LD.
+// Each item points at the live GitHub markdown file so Google can
+// follow the link and surface it in rich-list results.
+const allDocItems = sections.flatMap((s) =>
+  s.items.map((item) => ({
+    name: item.name,
+    description: item.desc,
+    url: `${SITE.github}/blob/master/${item.path}`,
+  })),
+);
+
+const schemas = [
+  breadcrumbSchema([
+    { name: "Quil", path: "/" },
+    { name: "Documentation", path: "/docs" },
+  ]),
+  itemListSchema({
+    name: "Quil documentation",
+    description:
+      "All Quil project docs — vision, PRD, architecture, roadmap, plugin reference, contributing guide, and future-milestone PRDs.",
+    url: SITE.url + "/docs",
+    items: allDocItems,
+  }),
 ];
 ---
 <Page {...seo} schemas={schemas}>

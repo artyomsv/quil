@@ -247,6 +247,7 @@ func launchTUI() {
 
 	// Save window size and config changes for next launch
 	if m, ok := finalModel.(tui.Model); ok {
+		m.FlushNotes()
 		saveWindowSize(m)
 		if m.ConfigChanged() {
 			if err := config.Save(config.ConfigPath(), m.Config()); err != nil {

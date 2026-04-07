@@ -80,6 +80,7 @@ type KeybindingsConfig struct {
 	NotificationToggle string `toml:"notification_toggle"`
 	NotificationFocus  string `toml:"notification_focus"`
 	GoBack             string `toml:"go_back"`
+	NotesToggle        string `toml:"notes_toggle"`
 }
 
 func Default() Config {
@@ -136,6 +137,7 @@ func Default() Config {
 			NotificationToggle: "alt+n",
 			NotificationFocus:  "f3",
 			GoBack:             "alt+backspace",
+			NotesToggle:        "alt+e",
 		},
 	}
 }
@@ -216,4 +218,9 @@ func MCPLogDir(cfg MCPConfig) string {
 		return cfg.LogDir
 	}
 	return filepath.Join(AethelDir(), "mcp-logs")
+}
+
+// NotesDir returns the directory where per-pane notes are stored.
+func NotesDir() string {
+	return filepath.Join(AethelDir(), "notes")
 }

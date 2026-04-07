@@ -185,6 +185,8 @@ type Model struct {
 	notifications        *NotificationCenter    // notification sidebar
 	paneHistory          []PaneRef              // navigation history (bounded, 20 max)
 	sidebarFocused       bool                   // true when notification sidebar has keyboard focus
+	notesMode            bool                   // true when pane notes editor is open for the active pane
+	notesEditor          *NotesEditor           // active notes editor (nil when notesMode is false)
 }
 
 func NewModel(client *ipc.Client, cfg config.Config, version string, registry *plugin.Registry) Model {
@@ -213,6 +215,16 @@ func (m Model) WindowSize() (width, height int) {
 
 // Config returns the current config (may be modified by user actions).
 func (m Model) Config() config.Config { return m.cfg }
+
+// FlushNotes writes any pending notes edits to disk. Safe to call when notes
+// mode is inactive. Used by main.go as a safety net on TUI exit.
+func (m Model) FlushNotes() {
+	if m.notesEditor != nil {
+		if err := m.notesEditor.Close(); err != nil {
+			log.Printf("flush notes on exit: %v", err)
+		}
+	}
+}
 
 // ConfigChanged reports whether the config was modified and needs saving.
 func (m Model) ConfigChanged() bool { return m.configChanged }
@@ -482,6 +494,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case notesTickMsg:
+		// Debounce check: save if dirty and idle for >= notesDebounceWindow.
+		if m.notesMode && m.notesEditor != nil {
+			m.notesEditor.MaybeAutoSave()
+			return m, m.notesTick()
+		}
+		return m, nil
+
 	case listenContinueMsg:
 		return m, m.listenForMessages()
 	}
@@ -575,6 +595,53 @@ func (m Model) sidebarTick() tea.Cmd {
 	})
 }
 
+// notesTick schedules a debounce check while notes mode is active.
+func (m Model) notesTick() tea.Cmd {
+	return tea.Tick(notesTickInterval, func(_ time.Time) tea.Msg {
+		return notesTickMsg{}
+	})
+}
+
+// enterNotesMode opens the notes editor for the active pane. Exits focus
+// mode first if it is active (the two modes are mutually exclusive).
+func (m Model) enterNotesMode() (tea.Model, tea.Cmd) {
+	if m.notesMode && m.notesEditor != nil {
+		return m.exitNotesMode()
+	}
+	tab := m.activeTabModel()
+	if tab == nil {
+		return m, nil
+	}
+	pane := tab.ActivePaneModel()
+	if pane == nil {
+		return m, nil
+	}
+	if tab.FocusMode() {
+		tab.ToggleFocus()
+	}
+	editor, err := NewNotesEditor(config.NotesDir(), pane.ID, pane.Name, 40, 20)
+	if err != nil {
+		log.Printf("open notes: %v", err)
+		return m, nil
+	}
+	m.notesMode = true
+	m.notesEditor = editor
+	return m, tea.Batch(tea.ClearScreen, m.resizeAllPanes(), m.notesTick())
+}
+
+// exitNotesMode flushes any pending notes edits and closes the editor.
+func (m Model) exitNotesMode() (tea.Model, tea.Cmd) {
+	if m.notesEditor != nil {
+		if err := m.notesEditor.Close(); err != nil {
+			log.Printf("save notes on exit: %v", err)
+		}
+	}
+	m.notesMode = false
+	m.notesEditor = nil
+	return m, tea.Batch(tea.ClearScreen, m.resizeAllPanes())
+}
+
+
 func (m Model) View() tea.View {
 	var content string
 
@@ -608,7 +675,20 @@ func (m Model) View() tea.View {
 		}
 		if m.activeTab < len(m.tabs) {
 			tab := m.tabs[m.activeTab]
-			tab.Resize(m.width-sidebarW, tabH)
+
+			// Notes mode reserves the right portion of the tab area for the editor.
+			notesW := 0
+			if m.notesMode && m.notesEditor != nil {
+				notesW = (m.width - sidebarW) * 2 / 5 // ~40%
+				if notesW < 30 {
+					notesW = 30
+				}
+				if m.width-sidebarW-notesW < minTermWidth {
+					notesW = 0 // too narrow
+				}
+			}
+
+			tab.Resize(m.width-sidebarW-notesW, tabH)
 			// Pass per-frame state to panes for rendering
 			if tab.Root != nil {
 				for _, pane := range tab.Root.Leaves() {
@@ -618,6 +698,9 @@ func (m Model) View() tea.View {
 				}
 			}
 			tabContent := tab.View()
+			if notesW > 0 {
+				tabContent = lipgloss.JoinHorizontal(lipgloss.Top, tabContent, m.notesEditor.View(notesW, tabH))
+			}
 			if sidebarW > 0 {
 				m.notifications.focused = m.sidebarFocused
 				tabContent = lipgloss.JoinHorizontal(lipgloss.Top, tabContent, m.notifications.View(tabH))
@@ -654,6 +737,34 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.renamingPane {
 		return m.handlePaneRenameKey(msg)
+	}
+
+	// Notes mode: while active, the notes editor owns all keyboard input
+	// except for the toggle key (alt+e) and structural keys that exit
+	// notes first and then fall through to the normal handlers.
+	if m.notesMode && m.notesEditor != nil {
+		switch key {
+		case kb.NotesToggle:
+			return m.exitNotesMode()
+		case kb.Quit:
+			_ = m.notesEditor.Close()
+			return m, tea.Quit
+		case kb.ClosePane, kb.CloseTab,
+			kb.SplitHorizontal, kb.SplitVertical:
+			// Save and exit notes, then fall through to the normal
+			// handler so the structural action still fires.
+			if err := m.notesEditor.Close(); err != nil {
+				log.Printf("save notes on action: %v", err)
+			}
+			m.notesMode = false
+			m.notesEditor = nil
+		default:
+			action, cmd := m.notesEditor.HandleKey(key)
+			if action == notesActionExit {
+				return m.exitNotesMode()
+			}
+			return m, cmd
+		}
 	}
 
 	// Notification sidebar keybindings (always available)
@@ -825,6 +936,9 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(tea.ClearScreen, m.resizeAllPanes())
 		}
 		return m, nil
+
+	case key == kb.NotesToggle:
+		return m.enterNotesMode()
 
 	case key == "ctrl+n":
 		m.dialog = dialogCreatePane
@@ -1531,6 +1645,13 @@ func (m Model) renderStatusBar() string {
 			left = fmt.Sprintf("%s  %s", displayPath, paneInfo)
 			if tab.FocusMode() {
 				left = "[focus] " + left
+			}
+			if m.notesMode && m.notesEditor != nil {
+				marker := "[notes]"
+				if m.notesEditor.Dirty() {
+					marker = "[notes*]"
+				}
+				left = marker + " " + left
 			}
 			if pane.scrollBack > 0 {
 				left += fmt.Sprintf("  ↑%d", pane.scrollBack)

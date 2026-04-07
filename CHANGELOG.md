@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Pane Notes (M7)** — `Alt+E` opens a plain-text notes editor alongside the active pane (pane left ~60%, editor right ~40%). Mutually exclusive with focus mode. Read-only pane while editing: all keys route to the editor, exit notes (`Alt+E` or `Esc`) to interact with the pane again
+- **Per-pane notes storage** — one markdown file per pane at `~/.aethel/notes/<pane-id>.md`. Atomic temp+rename writes via `internal/persist/notes.go`. Notes survive pane destruction — orphan notes remain on disk for a future browser
+- **Three save safety nets** — 30-second debounce auto-save (reset on every edit), explicit `Ctrl+S` shortcut, and an unconditional flush on exit (toggling off, `Esc`, close/split structural actions, TUI quit)
+- **`TextEditor.Highlight` field** — new `"toml"`/`"plain"` mode switch so the existing rune-aware editor can render plain text without TOML syntax colouring
+- **`NotesEditor` wrapper** — `internal/tui/notes.go` intercepts `Ctrl+S` and `Esc` before delegating to `TextEditor`, so notes bypass the TOML-specific validation path and `Esc` only exits on a second press (first press clears selection)
+
+### Changed
+
+- `TextEditor` struct gained a `Highlight` field; existing call sites default to TOML highlighting for backward compatibility
+- `cmd/aethel/main.go` calls `Model.FlushNotes()` on TUI exit as a safety net for unsaved notes
+
 ## [0.12.1] - 2026-04-05
 
 ## [0.12.0] - 2026-04-05

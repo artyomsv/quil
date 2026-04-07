@@ -19,7 +19,7 @@ import (
 // editorPasteMsg delivers clipboard content to the active editor.
 type editorPasteMsg string
 
-// TextEditor is a minimal multi-line text editor with TOML syntax highlighting.
+// TextEditor is a minimal multi-line text editor with optional syntax highlighting.
 type TextEditor struct {
 	Lines      []string
 	CursorRow  int // rune-based row
@@ -31,6 +31,19 @@ type TextEditor struct {
 	Dirty      bool
 	SaveErr    string
 	Sel        *EditorSel // active selection (nil = none)
+	// Highlight selects the syntax highlighter: "toml" (default, for TOML editor),
+	// "plain" (no highlighting, for pane notes). Empty string behaves as "toml"
+	// for backward compatibility with existing call sites.
+	Highlight string
+}
+
+// highlight applies the configured highlighter to a line. Returns the line
+// unchanged when in plain mode.
+func (e *TextEditor) highlight(line string) string {
+	if e.Highlight == "plain" {
+		return line
+	}
+	return highlightTOML(line)
 }
 
 // NewTextEditor creates an editor from file content.
@@ -628,7 +641,7 @@ func (e *TextEditor) Render() string {
 			b.WriteByte('\n')
 		} else {
 			// Non-cursor line: apply syntax highlighting then pad
-			highlighted := highlightTOML(displayRaw)
+			highlighted := e.highlight(displayRaw)
 			visW := ansi.StringWidth(displayRaw)
 			pad := ""
 			if visW < contentW {
@@ -711,7 +724,7 @@ func (e *TextEditor) renderLineWithSelection(b *strings.Builder, lineIdx int, di
 			b.WriteString(before)
 			b.WriteString("\x1b[0m")
 		} else {
-			b.WriteString(highlightTOML(before))
+			b.WriteString(e.highlight(before))
 		}
 	}
 
@@ -761,7 +774,7 @@ func (e *TextEditor) renderLineWithSelection(b *strings.Builder, lineIdx int, di
 				b.WriteString("\x1b[0m")
 			}
 		} else {
-			b.WriteString(highlightTOML(after))
+			b.WriteString(e.highlight(after))
 		}
 	}
 

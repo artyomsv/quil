@@ -9,14 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Pane Notes (M7)** — `Alt+E` opens a plain-text notes editor alongside the active pane (pane left ~60%, editor right ~40%). Mutually exclusive with focus mode. Read-only pane while editing: all keys route to the editor, exit notes (`Alt+E` or `Esc`) to interact with the pane again
-- **Per-pane notes storage** — one markdown file per pane at `~/.aethel/notes/<pane-id>.md`. Atomic temp+rename writes via `internal/persist/notes.go`. Notes survive pane destruction — orphan notes remain on disk for a future browser
-- **Three save safety nets** — 30-second debounce auto-save (reset on every edit), explicit `Ctrl+S` shortcut, and an unconditional flush on exit (toggling off, `Esc`, close/split structural actions, TUI quit)
-- **`TextEditor.Highlight` field** — new `"toml"`/`"plain"` mode switch so the existing rune-aware editor can render plain text without TOML syntax colouring
-- **`NotesEditor` wrapper** — `internal/tui/notes.go` intercepts `Ctrl+S` and `Esc` before delegating to `TextEditor`, so notes bypass the TOML-specific validation path and `Esc` only exits on a second press (first press clears selection)
+- **Pane Notes (M7)** — `Alt+E` opens a plain-text notes editor alongside the bound pane. The bound pane auto-expands to fill the available area on the left (other panes hidden, like `Ctrl+E` focus mode) and the editor takes ~40% on the right. `Alt+E` again or `Esc` exits, reverting the original layout
+- **Tab/Shift+Tab focus cycle** — while notes mode is active, `Tab` and `Shift+Tab` cycle keyboard focus between the editor (default) and the bound pane. Editor-focused: text input goes to notes, border bright blue, status bar `[notes]`/`[notes*]`. Pane-focused: keys reach the PTY normally, border dim grey, status bar `[notes pane]`
+- **Mouse selection in the notes editor** — click positions the cursor; click+drag creates a selection (highlighted in reverse video). Works with the existing `editorExtractText` so `Enter` and right-click both copy. Click in the pane area while notes mode is on hands keyboard focus to the pane (no Tab needed)
+- **Right-click copy** — right-click in the notes editor copies the active selection to the clipboard and clears the highlight, mirroring the existing pane right-click behaviour. The notes selection takes priority over a pane selection while notes mode is active
+- **Per-pane notes storage** — one markdown file per pane at `~/.aethel/notes/<pane-id>.md`. Atomic temp+rename writes via `internal/persist/notes.go` (`os.CreateTemp` for race-free temp filenames, `Lstat` symlink rejection, Windows reserved-name validation). Notes survive pane destruction — orphan notes remain on disk for a future browser
+- **Three save safety nets** — 30-second debounce auto-save (reset on every edit), explicit `Ctrl+S` shortcut, and an unconditional flush on exit (toggling off, structural actions, tab switch, TUI quit). Saved files always end with a trailing newline
+- **`TextEditor.Highlight` field** — new typed `HighlightMode` (`HighlightTOML` default, `HighlightPlain` for notes) so the existing rune-aware editor can render plain text without TOML syntax colouring
+- **`TextEditor.GutterWidth`** — dynamic line-number gutter width derived from `len(Lines)` so files with 1000+ lines render correctly and mouse-to-document coordinate mapping stays accurate
+- **`NotesEditor` wrapper** — `internal/tui/notes.go` intercepts `Ctrl+S` and `Esc` before delegating to `TextEditor`, so notes bypass the TOML-specific validation path and `Esc` only exits on a second press (first press clears selection). Public API: `SetCursor`, `BeginSelection`, `ExtendSelection`, `HasSelection`, `ExtractSelection`, `ClearSelection`, `Save`, `Close`
 
 ### Changed
 
+- **`Model.handleKey` notes routing** — restructured around `notesKeyExempt` (allow-list of global shortcuts that bypass the editor) and `exitNotesModeInPlace` (canonical teardown delegated to by `exitNotesMode`, `applyWorkspaceState`, `switchTab`)
+- **`Model.notesPanelWidth`** — single source of truth for the notes layout math. Both `View()` and `notesEditorBox()` (used by mouse handlers) call it so they cannot drift apart
+- **`applyWorkspaceState` notes reconciliation** — detects when the bound pane is pruned (exits notes) AND when the daemon promotes a different pane to active in the bound tab (re-syncs `ActivePane` back to the bound pane so the editor stays next to its target)
+- **`Model.exitNotesMode` is pointer-receiver** — discarded calls (`m.exitNotesMode()` as a statement) still mutate the model, eliminating the silent-reinstate footgun the previous review flagged
+- **Clipboard write errors logged consistently** — `model.go:294`, `:312`, and `:1086` all wrap `clipboard.Write` in an error-check + `log.Printf`
 - `TextEditor` struct gained a `Highlight` field; existing call sites default to TOML highlighting for backward compatibility
 - `cmd/aethel/main.go` calls `Model.FlushNotes()` on TUI exit as a safety net for unsaved notes
 

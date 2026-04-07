@@ -7,6 +7,9 @@ import (
 	"testing"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
+
+	"github.com/artyomsv/aethel/internal/config"
 	"github.com/artyomsv/aethel/internal/persist"
 )
 
@@ -557,5 +560,406 @@ func TestTextEditor_HighlightPlain_ReturnsLineUnchanged(t *testing.T) {
 	tomlEd := &TextEditor{Highlight: HighlightTOML}
 	if got := tomlEd.highlight(in); got == in {
 		t.Errorf("toml highlight should add ANSI codes, got %q", got)
+	}
+}
+
+func TestTextEditor_GutterWidth(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		numLines int
+		want     int
+	}{
+		{"empty document", 0, 4},     // max(3, 1) + 1
+		{"single line", 1, 4},        // max(3, 1) + 1
+		{"99 lines", 99, 4},          // max(3, 2) + 1
+		{"100 lines", 100, 4},        // max(3, 3) + 1
+		{"999 lines", 999, 4},        // max(3, 3) + 1
+		{"1000 lines", 1000, 5},      // max(3, 4) + 1
+		{"10000 lines", 10000, 6},    // max(3, 5) + 1
+		{"100000 lines", 100000, 7},  // max(3, 6) + 1
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			lines := make([]string, tt.numLines)
+			ed := &TextEditor{Lines: lines}
+			if got := ed.GutterWidth(); got != tt.want {
+				t.Errorf("GutterWidth(%d lines) = %d, want %d", tt.numLines, got, tt.want)
+			}
+		})
+	}
+}
+
+// --- Model-level tests for the notes mode integration ---
+
+// newNotesTestModel builds a minimal Model wired up enough to exercise
+// notes-mode helpers without needing a Bubble Tea program.
+func newNotesTestModel(t *testing.T, ne *NotesEditor) *Model {
+	t.Helper()
+	m := &Model{
+		notesMode:     true,
+		notesEditor:   ne,
+		width:         100,
+		height:        30,
+		notifications: NewNotificationCenter(30, 50),
+		mcpHighlights: make(map[string]bool),
+		tabs:          []*TabModel{NewTabModel("t1", "Shell")},
+		cfg:           config.Default(),
+	}
+	return m
+}
+
+func TestModel_NotesKeyExempt_AllowsGlobalShortcuts(t *testing.T) {
+	t.Parallel()
+	m := Model{cfg: config.Default()}
+	kb := m.cfg.Keybindings
+
+	// Keys that MUST bypass the notes editor.
+	exempt := []string{
+		kb.ClosePane, kb.CloseTab, kb.SplitHorizontal, kb.SplitVertical,
+		kb.NewTab, kb.RenameTab, kb.RenamePane, kb.CycleTabColor,
+		kb.FocusPane,
+		kb.NotificationToggle, kb.NotificationFocus, kb.GoBack,
+		kb.JSONTransform, kb.QuickActions,
+		"f1", "ctrl+n",
+		"alt+1", "alt+2", "alt+3", "alt+4", "alt+5",
+		"alt+6", "alt+7", "alt+8", "alt+9",
+	}
+	for _, key := range exempt {
+		if !m.notesKeyExempt(key) {
+			t.Errorf("notesKeyExempt(%q) = false, want true", key)
+		}
+	}
+
+	// Keys that MUST be consumed by the editor (text input + Tab/Shift+Tab).
+	consumed := []string{
+		"a", "b", "z", "0", "9", " ",
+		"enter", "backspace", "delete",
+		"left", "right", "up", "down",
+		"home", "end",
+		kb.NextPane, // Tab — toggles focus, not exempt
+		kb.PrevPane, // Shift+Tab — toggles focus, not exempt
+	}
+	for _, key := range consumed {
+		if m.notesKeyExempt(key) {
+			t.Errorf("notesKeyExempt(%q) = true, want false", key)
+		}
+	}
+}
+
+func TestModel_ExitNotesModeInPlace_ResetsAllFlagsAndRevertsFocus(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	ne, err := NewNotesEditor(dir, "pane-exit", "Shell", 40, 10)
+	if err != nil {
+		t.Fatalf("NewNotesEditor: %v", err)
+	}
+	// Make the editor dirty so Close() actually flushes content.
+	ne.HandleKey("h")
+	ne.HandleKey("i")
+
+	m := newNotesTestModel(t, ne)
+	m.notesPaneFocused = true
+	m.notesEnteredFocus = true
+	m.notesAnchorRow = 5
+	m.notesAnchorCol = 3
+	// Simulate "we owned the focus toggle" — populate two leaves on the
+	// only tab so ToggleFocus is not a no-op, then enable focus mode.
+	tab := m.tabs[0]
+	tab.Root = NewLeaf(NewPaneModel("p1", 1024))
+	tab.Root.SplitLeaf("p1", SplitVertical)
+	tab.Root.FillPlaceholder(NewPaneModel("p2", 1024))
+	tab.ActivePane = "p1"
+	tab.ToggleFocus() // focusMode = true
+
+	m.exitNotesModeInPlace()
+
+	if m.notesMode {
+		t.Error("notesMode should be false")
+	}
+	if m.notesEditor != nil {
+		t.Error("notesEditor should be nil")
+	}
+	if m.notesPaneFocused {
+		t.Error("notesPaneFocused should be false")
+	}
+	if m.notesEnteredFocus {
+		t.Error("notesEnteredFocus should be false")
+	}
+	if m.notesAnchorRow != 0 || m.notesAnchorCol != 0 {
+		t.Errorf("anchor = (%d, %d), want (0, 0)", m.notesAnchorRow, m.notesAnchorCol)
+	}
+	if tab.FocusMode() {
+		t.Error("focus mode should be reverted because we owned it")
+	}
+	// Persisted content should reflect the dirty edits.
+	got, err := persist.LoadNotes(dir, "pane-exit")
+	if err != nil {
+		t.Fatalf("LoadNotes: %v", err)
+	}
+	if got != "hi\n" {
+		t.Errorf("persisted = %q, want %q", got, "hi\n")
+	}
+}
+
+func TestModel_ExitNotesModeInPlace_DoesNotRevertUserFocus(t *testing.T) {
+	t.Parallel()
+	ne, err := NewNotesEditor(t.TempDir(), "pane-userfocus", "Shell", 40, 10)
+	if err != nil {
+		t.Fatalf("NewNotesEditor: %v", err)
+	}
+	m := newNotesTestModel(t, ne)
+	// User entered focus mode themselves; we did NOT own the toggle.
+	m.notesEnteredFocus = false
+
+	tab := m.tabs[0]
+	tab.Root = NewLeaf(NewPaneModel("p1", 1024))
+	tab.Root.SplitLeaf("p1", SplitVertical)
+	tab.Root.FillPlaceholder(NewPaneModel("p2", 1024))
+	tab.ActivePane = "p1"
+	tab.ToggleFocus()
+
+	m.exitNotesModeInPlace()
+
+	if !tab.FocusMode() {
+		t.Error("focus mode should NOT be reverted when notesEnteredFocus is false")
+	}
+}
+
+func TestModel_SwitchTab_FlushesNotesMode(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	ne, err := NewNotesEditor(dir, "pane-switch", "Shell", 40, 10)
+	if err != nil {
+		t.Fatalf("NewNotesEditor: %v", err)
+	}
+	ne.HandleKey("z")
+
+	m := newNotesTestModel(t, ne)
+	// Two tabs so switchTab(1) is valid.
+	m.tabs = append(m.tabs, NewTabModel("t2", "Build"))
+	m.activeTab = 0
+
+	m.switchTab(1)
+
+	if m.notesMode {
+		t.Error("notesMode should be false after switchTab")
+	}
+	if m.notesEditor != nil {
+		t.Error("notesEditor should be nil after switchTab")
+	}
+	if m.activeTab != 1 {
+		t.Errorf("activeTab = %d, want 1", m.activeTab)
+	}
+	got, _ := persist.LoadNotes(dir, "pane-switch")
+	if got != "z\n" {
+		t.Errorf("persisted on switch = %q, want %q", got, "z\n")
+	}
+}
+
+func TestModel_ToggleNotesMode_SinglePaneTab_NoFocusRevert(t *testing.T) {
+	t.Parallel()
+	cfg := config.Default()
+	cfg.Notification.SidebarWidth = 30
+	cfg.Notification.MaxEvents = 50
+	pane := NewPaneModel("pane-only", 1024)
+	tab := NewTabModel("t1", "Shell")
+	tab.Root = NewLeaf(pane)
+	tab.ActivePane = pane.ID
+	m := Model{
+		width:         100,
+		height:        30,
+		notifications: NewNotificationCenter(30, 50),
+		mcpHighlights: make(map[string]bool),
+		tabs:          []*TabModel{tab},
+		activeTab:     0,
+		cfg:           cfg,
+	}
+
+	mAfterEnter, _ := m.toggleNotesMode()
+	m = mAfterEnter.(Model)
+	if !m.notesMode {
+		t.Fatal("notesMode should be true after toggle")
+	}
+	// Single-pane tab → ToggleFocus is a no-op → notesEnteredFocus stays false.
+	if m.notesEnteredFocus {
+		t.Error("notesEnteredFocus should be false on a single-pane tab")
+	}
+	if tab.FocusMode() {
+		t.Error("tab should not be in focus mode on a single-pane tab")
+	}
+
+	mAfterExit, _ := m.exitNotesMode()
+	m = mAfterExit.(Model)
+	if m.notesMode {
+		t.Error("notesMode should be false after exit")
+	}
+	if tab.FocusMode() {
+		t.Error("focus mode should not be on after exit")
+	}
+}
+
+func TestModel_NotesMouseRightClick_CopiesAndClearsEditorSelection(t *testing.T) {
+	t.Parallel()
+	ne, err := NewNotesEditor(t.TempDir(), "pane-right", "Shell", 40, 10)
+	if err != nil {
+		t.Fatalf("NewNotesEditor: %v", err)
+	}
+	ne.editor.Lines = []string{"alpha", "beta"}
+	ne.BeginSelection(0, 0)
+	ne.ExtendSelection(1, 4)
+
+	m := newNotesTestModel(t, ne)
+
+	// Synthesize a right-click MouseClickMsg via Update.
+	updated, _ := m.Update(tea.MouseClickMsg{Button: tea.MouseRight})
+	mAfter := updated.(Model)
+
+	if mAfter.notesEditor.HasSelection() {
+		t.Error("editor selection should be cleared after right-click copy")
+	}
+	// The pane selection (m.selection) should be untouched (it was nil).
+	if mAfter.selection != nil {
+		t.Error("pane selection should remain nil")
+	}
+}
+
+func TestNotesEditor_BackwardSelection_ExtractText(t *testing.T) {
+	t.Parallel()
+	ne, err := NewNotesEditor(t.TempDir(), "pane-backward", "Shell", 40, 10)
+	if err != nil {
+		t.Fatalf("NewNotesEditor: %v", err)
+	}
+	ne.editor.Lines = []string{"alpha", "beta", "gamma"}
+
+	// Anchor at the END, extend BACK to the start. The Normalized()
+	// path inside editorExtractText should still produce the in-order
+	// text "alpha\nbeta\ngam".
+	ne.BeginSelection(2, 3)
+	ne.ExtendSelection(0, 0)
+
+	got := editorExtractText(ne.editor.Lines, ne.editor.Sel)
+	want := "alpha\nbeta\ngam"
+	if got != want {
+		t.Errorf("backward selection extracted = %q, want %q", got, want)
+	}
+}
+
+func TestModel_NotesPanelWidth_NoSidebar(t *testing.T) {
+	t.Parallel()
+	ne, err := NewNotesEditor(t.TempDir(), "pane-w", "Shell", 40, 10)
+	if err != nil {
+		t.Fatalf("NewNotesEditor: %v", err)
+	}
+	m := newNotesTestModel(t, ne)
+	// Notifications hidden by default → no sidebar contribution.
+	notesW, sidebarW := m.notesPanelWidth()
+	if sidebarW != 0 {
+		t.Errorf("sidebarW = %d, want 0", sidebarW)
+	}
+	// (100 - 0) * 2 / 5 = 40, exceeds the 30 floor.
+	if notesW != 40 {
+		t.Errorf("notesW = %d, want 40", notesW)
+	}
+}
+
+func TestModel_NotesPanelWidth_WithSidebar(t *testing.T) {
+	t.Parallel()
+	ne, err := NewNotesEditor(t.TempDir(), "pane-w-side", "Shell", 40, 10)
+	if err != nil {
+		t.Fatalf("NewNotesEditor: %v", err)
+	}
+	m := newNotesTestModel(t, ne)
+	m.notifications.visible = true
+
+	notesW, sidebarW := m.notesPanelWidth()
+	if sidebarW != 30 {
+		t.Errorf("sidebarW = %d, want 30", sidebarW)
+	}
+	// (100 - 30) * 2 / 5 = 28, below 30 → clamped to 30.
+	if notesW != 30 {
+		t.Errorf("notesW = %d, want 30 (clamp)", notesW)
+	}
+}
+
+func TestModel_NotesPanelWidth_TooNarrow_ReturnsZero(t *testing.T) {
+	t.Parallel()
+	ne, err := NewNotesEditor(t.TempDir(), "pane-narrow", "Shell", 40, 10)
+	if err != nil {
+		t.Fatalf("NewNotesEditor: %v", err)
+	}
+	m := newNotesTestModel(t, ne)
+	m.width = 60 // 60 - 0 - 30 = 30, below minTermWidth(40)
+	notesW, _ := m.notesPanelWidth()
+	if notesW != 0 {
+		t.Errorf("notesW = %d, want 0 (terminal too narrow)", notesW)
+	}
+}
+
+func TestModel_ApplyWorkspaceState_BoundPanePruned_ExitsNotes(t *testing.T) {
+	t.Parallel()
+	ne, err := NewNotesEditor(t.TempDir(), "pane-gone", "Shell", 40, 10)
+	if err != nil {
+		t.Fatalf("NewNotesEditor: %v", err)
+	}
+	m := newNotesTestModel(t, ne)
+	// The bound pane is "pane-gone". Daemon now says only "pane-other"
+	// exists.
+	state := WorkspaceStateMsg{
+		Tabs: []TabInfo{{
+			ID:    "t1",
+			Name:  "Shell",
+			Panes: []string{"pane-other"},
+		}},
+		Panes: []PaneInfo{
+			{ID: "pane-other", Name: "Other"},
+		},
+		ActiveTab: "t1",
+	}
+	m.applyWorkspaceState(state)
+	if m.notesMode {
+		t.Error("notesMode should be false after bound pane was pruned")
+	}
+	if m.notesEditor != nil {
+		t.Error("notesEditor should be nil after bound pane was pruned")
+	}
+}
+
+func TestModel_ApplyWorkspaceState_BoundPaneNotActive_ResyncsActive(t *testing.T) {
+	t.Parallel()
+	ne, err := NewNotesEditor(t.TempDir(), "pane-bound", "Shell", 40, 10)
+	if err != nil {
+		t.Fatalf("NewNotesEditor: %v", err)
+	}
+	m := newNotesTestModel(t, ne)
+	// Pre-populate the tab with two panes; bound is "pane-bound" but
+	// the tab's ActivePane is "pane-other".
+	tab := m.tabs[0]
+	tab.Root = NewLeaf(NewPaneModel("pane-bound", 1024))
+	tab.Root.SplitLeaf("pane-bound", SplitVertical)
+	tab.Root.FillPlaceholder(NewPaneModel("pane-other", 1024))
+	tab.ActivePane = "pane-other"
+
+	state := WorkspaceStateMsg{
+		Tabs: []TabInfo{{
+			ID:    "t1",
+			Name:  "Shell",
+			Panes: []string{"pane-bound", "pane-other"},
+		}},
+		Panes: []PaneInfo{
+			{ID: "pane-bound", Name: "Bound"},
+			{ID: "pane-other", Name: "Other"},
+		},
+		ActiveTab: "t1",
+	}
+	m.applyWorkspaceState(state)
+
+	if !m.notesMode {
+		t.Error("notesMode should still be true after re-sync")
+	}
+	if m.tabs[0].ActivePane != "pane-bound" {
+		t.Errorf("ActivePane = %q after re-sync, want %q", m.tabs[0].ActivePane, "pane-bound")
 	}
 }

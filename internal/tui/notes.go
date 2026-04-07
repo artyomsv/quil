@@ -171,6 +171,33 @@ func (n *NotesEditor) HandlePaste(text string) {
 	n.lastEditAt = time.Now()
 }
 
+// HasSelection reports whether a non-empty selection is currently active
+// in the notes editor. Used by mouse handlers to decide whether a
+// right-click should copy editor text or fall through to the pane path.
+func (n *NotesEditor) HasSelection() bool {
+	if n == nil || n.editor == nil || n.editor.Sel == nil {
+		return false
+	}
+	return !n.editor.Sel.IsEmpty()
+}
+
+// ExtractSelection returns the currently selected editor text, or "" if
+// no selection is active.
+func (n *NotesEditor) ExtractSelection() string {
+	if !n.HasSelection() {
+		return ""
+	}
+	return editorExtractText(n.editor.Lines, n.editor.Sel)
+}
+
+// ClearSelection discards any active selection without moving the cursor.
+func (n *NotesEditor) ClearSelection() {
+	if n == nil || n.editor == nil {
+		return
+	}
+	n.editor.Sel = nil
+}
+
 // SetCursor moves the editor's cursor to (row, col) in the document and
 // clears any active selection. Used by mouse-driven cursor positioning.
 // Coordinates are clamped to valid line/column bounds.

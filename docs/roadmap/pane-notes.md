@@ -29,21 +29,29 @@ survive pane destruction and daemon restart.
 
 ### Behaviour
 
-- `Alt+E` toggles notes mode for the **active pane**
-- When notes mode is active, the tab content area splits ~60/40 horizontally:
-  the pane on the left, the notes editor on the right
-- Other panes in the tab keep running in the background (notes mode does not
-  affect them visually or functionally)
-- The notes editor has keyboard focus while notes mode is active; keys route
-  to the editor, not to the pane. The pane is effectively read-only while the
-  editor is open. Exit notes mode (`Alt+E` or `Esc`) to interact with the pane
+- `Alt+E` toggles notes mode for the **active pane** (which becomes the
+  *bound* pane)
+- Opening notes auto-enters focus mode for the tab so the bound pane fills
+  the available area on the left, and the editor takes ~40% on the right.
+  Other panes in the tab are hidden but keep running in the background. If
+  the user was already in focus mode, the existing focus state is left alone
+- `Tab` and `Shift+Tab` cycle keyboard focus between the editor and the
+  bound pane:
+  - **Editor focused** (default on open): keys go to the notes editor; the
+    editor border is bright blue; status bar shows `[notes]` (or `[notes*]`
+    with unsaved edits)
+  - **Pane focused**: keys reach the PTY normally; the editor border dims
+    to grey; status bar shows `[notes pane]`
+- **Mouse**: click in the editor positions the cursor + focuses the editor;
+  click + drag selects (highlight in reverse video); right-click copies the
+  selection to the clipboard. Clicking in the pane area while notes mode is
+  on hands keyboard focus to the pane (no need to press Tab)
 - Notes are stored one file per pane at `~/.aethel/notes/<pane-id>.md`
 - Notes survive pane destruction — the file remains on disk for future
   browsing (a dedicated notes browser ships in Phase 2)
-- Notes mode and focus mode (`Ctrl+E`) are mutually exclusive — entering
-  notes mode while in focus mode exits focus first
 - `Ctrl+W`, `Alt+W`, `Alt+H`, `Alt+V` (close/split) auto-exit notes mode
   (with a flush to disk) before the structural action fires
+- `Alt+1..9` (tab switch) flushes notes and exits notes mode
 
 ### Save behaviour (three safety nets)
 
@@ -153,6 +161,24 @@ field to `TextEditor` so the notes variant skips TOML syntax colouring.
 | Keybinding | `Alt+E` | `Alt+N` is taken by the notification center; `E` is mnemonic for "Edit notes" |
 | Save behaviour | 30s debounce + `Ctrl+S` + auto-save on exit | Three independent safety nets so the user never loses work regardless of how they leave notes mode |
 | Phase 1 scope | Core editing only | Ship and dogfood the editor UX before designing browsing |
-| Pane interaction | Read-only pane | Keys always route to the editor; exit notes to interact with the pane. Simpler than focus cycling |
+| Pane interaction | Tab cycles focus between pane and editor | Editor focused by default on open. Tab/Shift+Tab swap focus. Originally read-only — see Revision history below |
+| Layout when notes is open | Auto-enter focus mode | Bound pane fills the available area on the left so the user only sees the pane they are taking notes about, not unrelated siblings |
+| Mouse selection in editor | Yes — click positions cursor; drag selects; right-click copies | Matches the existing pane selection ergonomics |
 | File format | Markdown (`.md`) | Plain text today, room for rendered preview later without a migration |
 | Pane ID as filename | Yes (stable UUID format `pane-XXXXXXXX`) | Survives daemon restarts because pane IDs are persisted in `workspace.json` |
+
+## Revision history
+
+- **v0.13.0 (planned)** — Initial M7 implementation in commit `861d0f4`. Two
+  follow-up passes added review fixes (`dab1913`), Tab focus cycle +
+  auto-focus mode (`c67fb40`), mouse selection (`e07d471`), right-click
+  copy (`7b8791b`), and a final cleanup/refactor pass.
+- **Original design (superseded)** — The initial PRD specified a
+  *read-only* pane while notes mode was active: all keys routed to the
+  editor, and the user had to exit notes (`Alt+E` or `Esc`) to interact
+  with the pane. This was changed during the focus-cycle commit
+  (`c67fb40`) to the current Tab-cycle model based on user feedback that
+  the read-only constraint felt restrictive when checking command output
+  while taking notes about it. The two modes (read-only vs. cycle-focus)
+  are mutually exclusive — implementing both would require a config
+  toggle, which we are deferring.

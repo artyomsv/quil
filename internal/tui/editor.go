@@ -588,12 +588,34 @@ func (e *TextEditor) Save() error {
 	return nil
 }
 
+// GutterWidth returns the visible width (in columns) of the line-number
+// gutter for the current document. It is `max(3, digits(len(Lines))) + 1`
+// — three digits minimum plus one trailing space. Both Render() and the
+// mouse-to-document coordinate helper (notesEditorPosAt) use this so
+// the body content's left edge stays in sync with what the user sees.
+func (e *TextEditor) GutterWidth() int {
+	n := len(e.Lines)
+	if n < 1 {
+		n = 1
+	}
+	digits := 1
+	for n >= 10 {
+		n /= 10
+		digits++
+	}
+	if digits < 3 {
+		digits = 3
+	}
+	return digits + 1 // +1 for the trailing space
+}
+
 // --- Rendering ---
 
 func (e *TextEditor) Render() string {
 	var b strings.Builder
 
-	contentW := e.ViewWidth - 5 // "NNN " prefix
+	gutter := e.GutterWidth()
+	contentW := e.ViewWidth - gutter - 1 // -1 defensive pad for cursor overflow
 	if contentW < 10 {
 		contentW = 10
 	}
@@ -604,6 +626,10 @@ func (e *TextEditor) Render() string {
 	}
 
 	hasSel := e.Sel != nil && !e.Sel.IsEmpty()
+
+	// Build the line-number format string once per render so long
+	// documents get a wider gutter without re-formatting per line.
+	lineNumFmt := fmt.Sprintf("\x1b[90m%%%dd \x1b[0m", gutter-1)
 
 	for i := e.ScrollTop; i < end; i++ {
 		rawLine := e.Lines[i]
@@ -620,7 +646,7 @@ func (e *TextEditor) Render() string {
 			displayRaw += "~"
 		}
 
-		lineNum := fmt.Sprintf("\x1b[90m%3d \x1b[0m", i+1)
+		lineNum := fmt.Sprintf(lineNumFmt, i+1)
 
 		// Check if this line has selection
 		selStart, selEnd := -1, -1

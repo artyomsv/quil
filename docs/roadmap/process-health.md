@@ -10,7 +10,7 @@
 
 ## Problem
 
-Aethel currently restores sessions after reboot, but processes can crash or hang during normal operation too. Developers babysit long-running processes (build watchers, webhook listeners, SSH tunnels) — manually checking if they're still alive, restarting them when they die. This is the gap between "terminal organizer" and "workflow orchestrator."
+Quil currently restores sessions after reboot, but processes can crash or hang during normal operation too. Developers babysit long-running processes (build watchers, webhook listeners, SSH tunnels) — manually checking if they're still alive, restarting them when they die. This is the gap between "terminal organizer" and "workflow orchestrator."
 
 ## Proposed Solution
 
@@ -35,7 +35,7 @@ stale_timeout = "5m"
 notify_on_error = true
 ```
 
-**Why this matters:** Moves Aethel from "terminal organizer" to "workflow orchestrator." Developers stop babysitting processes.
+**Why this matters:** Moves Quil from "terminal organizer" to "workflow orchestrator." Developers stop babysitting processes.
 
 ## User Experience
 

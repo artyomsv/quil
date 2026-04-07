@@ -34,7 +34,7 @@ func builtinTerminal() *PanePlugin {
 
 // builtinPlugins returns built-in plugin definitions that require Go runtime
 // logic (e.g., shell detection). Static plugins are shipped as editable TOML
-// files in ~/.aethel/plugins/ — see defaults.go and defaults/*.toml.
+// files in ~/.quil/plugins/ — see defaults.go and defaults/*.toml.
 func builtinPlugins() []*PanePlugin {
 	return []*PanePlugin{
 		builtinTerminal(),

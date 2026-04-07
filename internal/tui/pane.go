@@ -12,7 +12,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/vt"
 
-	"github.com/artyomsv/aethel/internal/ringbuf"
+	"github.com/artyomsv/quil/internal/ringbuf"
 )
 
 // spinnerFrames are braille characters cycled for the resuming indicator.

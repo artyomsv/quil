@@ -1,4 +1,4 @@
-# Aethel
+# Quil
 
 **The Persistent Workflow Orchestrator for AI-Native Development**
 
@@ -8,9 +8,9 @@
 
 ---
 
-Aethel is a terminal multiplexer built for developers who work with AI coding assistants. Unlike tmux or screen, Aethel understands **projects** — it persists your entire workspace across reboots, automatically resumes AI sessions, and provides typed panes with context-aware behaviors.
+Quil is a terminal multiplexer built for developers who work with AI coding assistants. Unlike tmux or screen, Quil understands **projects** — it persists your entire workspace across reboots, automatically resumes AI sessions, and provides typed panes with context-aware behaviors.
 
-Type `aethel` after a reboot and your entire multi-tool environment snaps back: Claude Code conversations resumed, webhooks re-connected, builds re-watching.
+Type `quil` after a reboot and your entire multi-tool environment snaps back: Claude Code conversations resumed, webhooks re-connected, builds re-watching.
 
 ## The Problem
 
@@ -28,7 +28,7 @@ Agentic developers run 5-10 terminal sessions per project: AI assistants, webhoo
 
 ### Reboot-Proof Sessions
 
-Aethel continuously snapshots your workspace — tabs, panes, layouts, working directories, and metadata. On restart, everything is restored. Ghost buffers render the last 500 lines instantly while shells re-initialize.
+Quil continuously snapshots your workspace — tabs, panes, layouts, working directories, and metadata. On restart, everything is restored. Ghost buffers render the last 500 lines instantly while shells re-initialize.
 
 - **Output replay** — a ring buffer per pane captures PTY output. Reconnecting clients instantly see previous terminal content.
 - **Layout persistence** — the pane split tree is serialized to JSON and stored in the daemon. On reconnect, the exact split configuration is restored.
@@ -39,7 +39,7 @@ Binary split tree enables arbitrarily nested horizontal and vertical splits. Eac
 
 ### Live CWD Tracking
 
-Pane borders display the shell's current working directory in real-time. Aethel auto-injects OSC 7 hooks into bash, zsh, and PowerShell at spawn time — no manual shell configuration required. Fish emits OSC 7 natively.
+Pane borders display the shell's current working directory in real-time. Quil auto-injects OSC 7 hooks into bash, zsh, and PowerShell at spawn time — no manual shell configuration required. Fish emits OSC 7 natively.
 
 ### Mouse & Keyboard
 
@@ -55,7 +55,7 @@ Rename tabs (F2) and panes (Alt+F2). Cycle through 8 tab colors (Alt+C) for visu
 
 ### AI Session Resume
 
-Claude Code sessions resume automatically after reboot. Aethel assigns a UUID to each AI pane at creation and uses `claude --resume <session-id>` on restart — no manual copy-paste. Other tools can use regex scraping or command re-run strategies.
+Claude Code sessions resume automatically after reboot. Quil assigns a UUID to each AI pane at creation and uses `claude --resume <session-id>` on restart — no manual copy-paste. Other tools can use regex scraping or command re-run strategies.
 
 ### Typed Panes via Plugins
 
@@ -68,7 +68,7 @@ Panes aren't just shells. Press `Ctrl+N` to create a typed pane from 4 built-in 
 | **SSH** | Remote connection (POC) | Re-run same command |
 | **Stripe** | Webhook listener (POC) | Re-run same command |
 
-Create your own plugins as TOML files in `~/.aethel/plugins/` without recompiling. Plugins define commands, error handlers, persistence strategies, and pre-configured instances.
+Create your own plugins as TOML files in `~/.quil/plugins/` without recompiling. Plugins define commands, error handlers, persistence strategies, and pre-configured instances.
 
 ### Cross-Platform
 
@@ -77,13 +77,13 @@ Linux, macOS, and Windows from day one. PTY management via `creack/pty` (Unix) a
 ## Architecture
 
 ```
-aethel (TUI Client)
+quil (TUI Client)
     ├── Bubble Tea UI with tabs, splits, status bar
     ├── Keyboard-driven navigation
     └── Connects via IPC
             │
             ▼
-aetheld (Daemon)
+quild (Daemon)
     ├── PTY session management
     ├── State persistence (JSON snapshots)
     ├── Resume engine (regex scrapers)
@@ -98,21 +98,21 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed design decisions.
 
 ```bash
 # Linux / macOS — one-line install
-curl -sSfL https://raw.githubusercontent.com/artyomsv/aethel/master/scripts/install.sh | sh
+curl -sSfL https://raw.githubusercontent.com/artyomsv/quil/master/scripts/install.sh | sh
 
 # Go users
-go install github.com/artyomsv/aethel/cmd/aethel@latest
-go install github.com/artyomsv/aethel/cmd/aetheld@latest
+go install github.com/artyomsv/quil/cmd/quil@latest
+go install github.com/artyomsv/quil/cmd/quild@latest
 
 # Windows — download .zip from GitHub Releases
-# https://github.com/artyomsv/aethel/releases/latest
+# https://github.com/artyomsv/quil/releases/latest
 ```
 
 ### Run
 
 ```bash
 # Launch the TUI (auto-starts daemon if needed)
-aethel
+quil
 ```
 
 ### Build from Source
@@ -147,11 +147,11 @@ make build
 | `Enter` | Copy selection |
 | `Ctrl+Q` | Quit |
 
-All keybindings are configurable in `~/.aethel/config.toml` under `[keybindings]`.
+All keybindings are configurable in `~/.quil/config.toml` under `[keybindings]`.
 
 ## Configuration
 
-Aethel looks for `~/.aethel/config.toml`:
+Quil looks for `~/.quil/config.toml`:
 
 ```toml
 [daemon]
@@ -190,8 +190,8 @@ focus_pane = "ctrl+e"
 
 ```
 cmd/
-├── aethel/          # TUI client
-└── aetheld/         # Background daemon
+├── quil/          # TUI client
+└── quild/         # Background daemon
 internal/
 ├── clipboard/       # Cross-platform clipboard read (Win32 API, pbpaste, xclip)
 ├── config/          # TOML configuration

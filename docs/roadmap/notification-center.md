@@ -12,7 +12,7 @@
 
 Users run long-running processes in panes — AI assistants asking for confirmation, builds compiling, tests executing, webhooks waiting. Today the user must **manually poll** each pane to check if it needs attention. This forces a choice: either watch a pane (wasting time) or risk missing an important event (wasting the result).
 
-This is the **context-switching tax** — the same class of problem Aethel solves for reboots, but for real-time multitasking within a session.
+This is the **context-switching tax** — the same class of problem Quil solves for reboots, but for real-time multitasking within a session.
 
 **Example workflow without notification center:**
 1. Ask Claude Code to refactor auth module (pane 1)

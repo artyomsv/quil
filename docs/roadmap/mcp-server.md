@@ -1,4 +1,4 @@
-# MCP Server — Make Aethel the AI's Eyes and Hands
+# MCP Server — Make Quil the AI's Eyes and Hands
 
 | Field | Value |
 |-------|-------|
@@ -12,18 +12,18 @@
 
 **Layer 5: Cross-tool blindness** — AI assistants can't see the build error in the next pane. Claude Code, VS Code Copilot, Cursor — they're all blind to what's happening in other terminal sessions. The AI fixes code but can't see that the build is still failing in another pane. The developer becomes a copy-paste bridge between tools.
 
-**No other terminal multiplexer offers this.** Aethel becomes the **bridge between AI and the dev environment** — not just a container for AI sessions but an active collaborator.
+**No other terminal multiplexer offers this.** Quil becomes the **bridge between AI and the dev environment** — not just a container for AI sessions but an active collaborator.
 
 ## Implemented Solution
 
-Expose Aethel as a [Model Context Protocol](https://modelcontextprotocol.io/) server so AI assistants can interact with the terminal environment:
+Expose Quil as a [Model Context Protocol](https://modelcontextprotocol.io/) server so AI assistants can interact with the terminal environment:
 
 ```
 AI: "Check the test output in the build pane and fix the failing test"
-→ MCP call: aethel.read_pane_output(pane="build", last_lines=50)
+→ MCP call: quil.read_pane_output(pane="build", last_lines=50)
 → AI sees: "FAIL src/auth.test.ts - Expected 200, got 401"
 → AI fixes the code
-→ MCP call: aethel.send_to_pane(pane="build", input="npm test")
+→ MCP call: quil.send_to_pane(pane="build", input="npm test")
 ```
 
 ### MCP Tools (13 total)
@@ -51,13 +51,13 @@ AI: "Check the test output in the build pane and fix the failing test"
 | `set_active_pane` | Focus pane in TUI (cross-tab) |
 | `close_tui` | Exit TUI, daemon persists |
 
-## Architecture: `aethel mcp` Subcommand (Not a Separate Process)
+## Architecture: `quil mcp` Subcommand (Not a Separate Process)
 
-The MCP server should be a **new subcommand** (`aethel mcp`) that acts as a thin bridge — exactly like the TUI client is a bridge between Bubble Tea and the daemon:
+The MCP server should be a **new subcommand** (`quil mcp`) that acts as a thin bridge — exactly like the TUI client is a bridge between Bubble Tea and the daemon:
 
 ```
 ┌──────────────┐    ┌───────────────┐    ┌──────────────┐
-│ AI Tool       │    │ aethel mcp    │    │ aetheld      │
+│ AI Tool       │    │ quil mcp    │    │ quild      │
 │ (Claude, etc) │←──→│ (MCP↔IPC      │←──→│ (daemon)     │
 │               │stdio│  bridge)     │sock │              │
 │ JSON-RPC      │    │ Translates    │    │ Ring buffers  │
@@ -68,13 +68,13 @@ The MCP server should be a **new subcommand** (`aethel mcp`) that acts as a thin
 
 ### Why not directly in the daemon?
 
-MCP servers are invoked by the AI tool as a child process via stdio. Claude Desktop, VS Code, Cursor — they all spawn `aethel mcp` and talk JSON-RPC over stdin/stdout. The daemon is a long-running background service over sockets — fundamentally different lifecycle.
+MCP servers are invoked by the AI tool as a child process via stdio. Claude Desktop, VS Code, Cursor — they all spawn `quil mcp` and talk JSON-RPC over stdin/stdout. The daemon is a long-running background service over sockets — fundamentally different lifecycle.
 
 ### Why not a separate binary?
 
-All data lives in the daemon — ring buffers, session state, PTY handles, plugin registry. A separate binary would need its own IPC connection, which is exactly what `aethel mcp` already is. A third binary fragments the project for no gain.
+All data lives in the daemon — ring buffers, session state, PTY handles, plugin registry. A separate binary would need its own IPC connection, which is exactly what `quil mcp` already is. A third binary fragments the project for no gain.
 
-### Why `aethel mcp` is the right design
+### Why `quil mcp` is the right design
 
 | Concern | How it's handled |
 |---------|-----------------|
@@ -82,7 +82,7 @@ All data lives in the daemon — ring buffers, session state, PTY handles, plugi
 | Lifecycle | AI tool spawns/kills it — no new daemon management needed |
 | Protocol | Translates MCP JSON-RPC (stdio) ↔ length-prefixed JSON (IPC) |
 | New daemon messages | 2-3 new IPC message types: `ReadPaneOutput`, `ListPanesDetailed`, `PaneStatus` |
-| Deployment | Already in the `aethel` binary — zero extra install steps |
+| Deployment | Already in the `quil` binary — zero extra install steps |
 | Existing state | Ring buffers already have `Bytes()` for output replay — MCP just reads them |
 
 ## Technical Implementation
@@ -114,8 +114,8 @@ Official `github.com/modelcontextprotocol/go-sdk` (v1.4+). Typed tool handlers w
 // claude_desktop_config.json or VS Code MCP settings
 {
   "mcpServers": {
-    "aethel": {
-      "command": "aethel",
+    "quil": {
+      "command": "quil",
       "args": ["mcp"]
     }
   }
@@ -139,7 +139,7 @@ The daemon doesn't even need to know MCP exists — it just sees another client 
 
 ### 6. MCP Interaction Logging & Redaction
 
-Per-pane log files in `~/.aethel/mcp-logs/`. Two-layer redaction:
+Per-pane log files in `~/.quil/mcp-logs/`. Two-layer redaction:
 - **Layer 1 (AI markers):** `<<REDACT>>value<</REDACT>>` — stripped before PTY, counted in log
 - **Layer 2 (regex fallback):** Common patterns (OpenAI keys, GitHub PATs, JWTs, passwords, BIP-32 keys) caught automatically
 
@@ -153,10 +153,10 @@ Orange pane border highlight (ANSI color 208) when MCP interacts with a pane. Du
 
 | File | Change |
 |------|--------|
-| `cmd/aethel/mcp.go` | New — MCP bridge: daemon connection, request-response, server instructions |
-| `cmd/aethel/mcp_tools.go` | New — 13 tool implementations with typed input structs |
-| `cmd/aethel/mcp_keys.go` | New — Key name → escape sequence map (50+ keys) |
-| `cmd/aethel/mcp_log.go` | New — Per-pane logging, redaction markers, regex fallback |
+| `cmd/quil/mcp.go` | New — MCP bridge: daemon connection, request-response, server instructions |
+| `cmd/quil/mcp_tools.go` | New — 13 tool implementations with typed input structs |
+| `cmd/quil/mcp_keys.go` | New — Key name → escape sequence map (50+ keys) |
+| `cmd/quil/mcp_log.go` | New — Per-pane logging, redaction markers, regex fallback |
 | `internal/ipc/protocol.go` | Add `ID` field, 27 new message types + payload structs |
 | `internal/daemon/daemon.go` | 10 new handlers, `respondTo()`, `highlightPane()`, exit code capture |
 | `internal/daemon/session.go` | Add `ExitCode`, `ExitedAt`, `Cols`, `Rows` to Pane struct |
@@ -167,11 +167,11 @@ Orange pane border highlight (ANSI color 208) when MCP interacts with a pane. Du
 | `internal/tui/model.go` | Handle `MsgHighlightPane`, `MsgSetActivePane`, `MsgCloseTUI` |
 | `internal/tui/pane.go` | Orange border when `mcpHighlight` flag set |
 | `internal/tui/styles.go` | `mcpHighlightBorder` style (color 208) |
-| `cmd/aethel/main.go` | Add `mcp` subcommand routing, extract daemon retry constants |
+| `cmd/quil/main.go` | Add `mcp` subcommand routing, extract daemon retry constants |
 
 ## Success Criteria
 
-- [x] `aethel mcp` starts and speaks MCP JSON-RPC over stdio
+- [x] `quil mcp` starts and speaks MCP JSON-RPC over stdio
 - [x] Claude Desktop / Claude Code can connect via `.mcp.json` config
 - [x] `list_panes` returns all panes with metadata
 - [x] `read_pane_output` returns last N lines from any pane (ANSI-stripped)

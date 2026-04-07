@@ -1,10 +1,10 @@
-# Aethel
+# Quil
 
 **The Persistent Workflow Orchestrator for AI-Native Development**
 
 ## 1. Executive Summary
 
-Aethel is a cross-platform terminal manager designed to eliminate "context loss." Unlike traditional terminal emulators or multiplexers (like tmux), Aethel is **project-aware**. It doesn't just manage shells; it manages workflows by persisting the state of AI sessions, webhooks, and build tools even across full system reboots.
+Quil is a cross-platform terminal manager designed to eliminate "context loss." Unlike traditional terminal emulators or multiplexers (like tmux), Quil is **project-aware**. It doesn't just manage shells; it manages workflows by persisting the state of AI sessions, webhooks, and build tools even across full system reboots.
 
 ## 2. Core Architecture: "The Brain"
 
@@ -12,25 +12,25 @@ Aethel is a cross-platform terminal manager designed to eliminate "context loss.
 - **Engine:** Internal Multiplexer (built via `creack/pty`). No dependency on tmux.
 - **UI:** Bubble Tea for a rich, interactive TUI.
 - **Model:** Client-Server Architecture.
-  - `aetheld` (Daemon): A background server that maintains PTY sessions and monitors process output.
-  - `aethel` (Client): The frontend TUI that attaches to the daemon.
+  - `quild` (Daemon): A background server that maintains PTY sessions and monitors process output.
+  - `quil` (Client): The frontend TUI that attaches to the daemon.
 
 ## 3. Key Feature Pillars
 
 ### A. Total State Persistence (Reboot-Proof)
 
-- **Continuous Snapshotting:** Aethel saves a `state.json` mapping of every Tab and Pane (Working Directory, Layout, Type, and Metadata).
-- **Ghost Buffer:** Upon OS restart, Aethel immediately renders the last 500 lines of cached text for every pane, providing instant visual context while the underlying shells re-initialize. **Status: Implemented** — ring buffer captures PTY output per pane; daemon replays to reconnecting clients.
+- **Continuous Snapshotting:** Quil saves a `state.json` mapping of every Tab and Pane (Working Directory, Layout, Type, and Metadata).
+- **Ghost Buffer:** Upon OS restart, Quil immediately renders the last 500 lines of cached text for every pane, providing instant visual context while the underlying shells re-initialize. **Status: Implemented** — ring buffer captures PTY output per pane; daemon replays to reconnecting clients.
 - **Layout Persistence:** Pane layout (binary split tree) is serialized to JSON and stored in the daemon. On reconnect, the TUI restores the exact split configuration. **Status: Implemented.**
-- **Process Re-hydration:** On startup, Aethel doesn't just open a shell; it executes the Abstract Resume Command for that specific pane.
+- **Process Re-hydration:** On startup, Quil doesn't just open a shell; it executes the Abstract Resume Command for that specific pane.
 
 ### B. Abstract Resume Engine
 
-Aethel uses a "Template & Scraper" model to ensure tools such as Claude Code or SSH sessions are never lost.
+Quil uses a "Template & Scraper" model to ensure tools such as Claude Code or SSH sessions are never lost.
 
 - **The Scraper:** A background regex listener that "watches" terminal output for Session IDs or Context Tokens (e.g., `Conversation ID: ([a-z0-9-]+)`).
 - **The Template:** Users define an abstract command string per pane (e.g., `claude --resume {{.SessionID}}`).
-- **Universal Support:** This allows Aethel to "resume" any CLI tool (Claude, Gemini, Docker, SSH, etc.) without hardcoded logic.
+- **Universal Support:** This allows Quil to "resume" any CLI tool (Claude, Gemini, Docker, SSH, etc.) without hardcoded logic.
 
 ### C. Typed Panes (Functional Workspaces)
 
@@ -53,13 +53,13 @@ Panes are assigned a Type with specialized behaviors:
 
 ### E. Automatic Shell Integration
 
-- **OSC 7 CWD Tracking:** Aethel auto-injects shell hooks (bash, zsh, PowerShell) at spawn time to emit OSC 7 escape sequences. The pane border displays the live working directory — no manual shell configuration required. Fish emits OSC 7 natively. **Status: Implemented.**
+- **OSC 7 CWD Tracking:** Quil auto-injects shell hooks (bash, zsh, PowerShell) at spawn time to emit OSC 7 escape sequences. The pane border displays the live working directory — no manual shell configuration required. Fish emits OSC 7 natively. **Status: Implemented.**
 
 ## 4. Technical Requirements
 
 | Requirement          | Implementation Detail                                                                |
 |----------------------|--------------------------------------------------------------------------------------|
-| Persistence          | SQLite or JSON-based state storage in `~/.aethel/`.                                   |
+| Persistence          | SQLite or JSON-based state storage in `~/.quil/`.                                   |
 | Rendering            | GPU-aware via Windows Terminal or WezTerm as the host.                               |
 | Shell Support        | Native ConPTY for PowerShell/CMD; PTY for Bash/Zsh.                                 |
 | Syntax Highlighting  | Integrate Chroma for JSON/Code formatting.                                           |
@@ -67,4 +67,4 @@ Panes are assigned a Type with specialized behaviors:
 
 ## 5. User Persona: The "AI-Native" Developer
 
-The user is tired of re-typing `claude --resume` and re-opening five different project tabs every morning. They want to type one command — `aethel` — and have their entire multi-tool environment snap back into existence exactly as it was when they went to sleep.
+The user is tired of re-typing `claude --resume` and re-opening five different project tabs every morning. They want to type one command — `quil` — and have their entire multi-tool environment snap back into existence exactly as it was when they went to sleep.

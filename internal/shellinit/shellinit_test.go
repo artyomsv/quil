@@ -87,7 +87,7 @@ func TestConfigureZsh(t *testing.T) {
 		if e == "ZDOTDIR="+wantZdotdir {
 			foundZdotdir = true
 		}
-		if len(e) >= len("AETHEL_ORIG_ZDOTDIR=") && e[:len("AETHEL_ORIG_ZDOTDIR=")] == "AETHEL_ORIG_ZDOTDIR=" {
+		if len(e) >= len("QUIL_ORIG_ZDOTDIR=") && e[:len("QUIL_ORIG_ZDOTDIR=")] == "QUIL_ORIG_ZDOTDIR=" {
 			foundOrig = true
 		}
 	}
@@ -95,7 +95,7 @@ func TestConfigureZsh(t *testing.T) {
 		t.Errorf("missing ZDOTDIR=%s in Env %v", wantZdotdir, cfg.Env)
 	}
 	if !foundOrig {
-		t.Errorf("missing AETHEL_ORIG_ZDOTDIR in Env %v", cfg.Env)
+		t.Errorf("missing QUIL_ORIG_ZDOTDIR in Env %v", cfg.Env)
 	}
 }
 

@@ -27,7 +27,7 @@ type NotificationConfig struct {
 
 type MCPConfig struct {
 	HighlightDuration string `toml:"highlight_duration"` // e.g., "10s"
-	LogDir            string `toml:"log_dir"`            // empty = ~/.aethel/mcp-logs/
+	LogDir            string `toml:"log_dir"`            // empty = ~/.quil/mcp-logs/
 }
 
 type DaemonConfig struct {
@@ -170,57 +170,57 @@ func Save(path string, cfg Config) error {
 	return nil
 }
 
-func AethelDir() string {
-	if dir := os.Getenv("AETHEL_HOME"); dir != "" {
+func QuilDir() string {
+	if dir := os.Getenv("QUIL_HOME"); dir != "" {
 		return dir
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(home, ".aethel")
+	return filepath.Join(home, ".quil")
 }
 
 func ConfigPath() string {
-	return filepath.Join(AethelDir(), "config.toml")
+	return filepath.Join(QuilDir(), "config.toml")
 }
 
 func SocketPath() string {
-	return filepath.Join(AethelDir(), "aetheld.sock")
+	return filepath.Join(QuilDir(), "quild.sock")
 }
 
 func PidPath() string {
-	return filepath.Join(AethelDir(), "aetheld.pid")
+	return filepath.Join(QuilDir(), "quild.pid")
 }
 
 func WorkspacePath() string {
-	return filepath.Join(AethelDir(), "workspace.json")
+	return filepath.Join(QuilDir(), "workspace.json")
 }
 
 func BufferDir() string {
-	return filepath.Join(AethelDir(), "buffers")
+	return filepath.Join(QuilDir(), "buffers")
 }
 
 func PluginsDir() string {
-	return filepath.Join(AethelDir(), "plugins")
+	return filepath.Join(QuilDir(), "plugins")
 }
 
 func WindowStatePath() string {
-	return filepath.Join(AethelDir(), "window.json")
+	return filepath.Join(QuilDir(), "window.json")
 }
 
 func InstancesPath() string {
-	return filepath.Join(AethelDir(), "instances.json")
+	return filepath.Join(QuilDir(), "instances.json")
 }
 
 func MCPLogDir(cfg MCPConfig) string {
 	if cfg.LogDir != "" {
 		return cfg.LogDir
 	}
-	return filepath.Join(AethelDir(), "mcp-logs")
+	return filepath.Join(QuilDir(), "mcp-logs")
 }
 
 // NotesDir returns the directory where per-pane notes are stored.
 func NotesDir() string {
-	return filepath.Join(AethelDir(), "notes")
+	return filepath.Join(QuilDir(), "notes")
 }

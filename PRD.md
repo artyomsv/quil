@@ -1,4 +1,4 @@
-# Aethel — Product Requirements Document
+# Quil — Product Requirements Document
 
 **The Persistent Workflow Orchestrator for AI-Native Development**
 
@@ -25,7 +25,7 @@ Agentic developers run complex multi-tool workflows — AI assistants (Claude Co
 
 ## 2. User Persona: The Agentic Developer
 
-A developer who runs 5-10 terminal sessions per project: 2-3 Claude Code sessions, a webhook listener, a build watcher, maybe an SSH tunnel. They want to type `aethel` after a reboot and have their entire workspace snap back — AI conversations resumed, webhooks re-connected, builds re-watching.
+A developer who runs 5-10 terminal sessions per project: 2-3 Claude Code sessions, a webhook listener, a build watcher, maybe an SSH tunnel. They want to type `quil` after a reboot and have their entire workspace snap back — AI conversations resumed, webhooks re-connected, builds re-watching.
 
 **Primary audience:** Developers who work with AI coding assistants and run multi-tool terminal workflows daily.
 
@@ -49,7 +49,7 @@ A developer who runs 5-10 terminal sessions per project: 2-3 Claude Code session
 
 ```
 ┌─────────────────────────────────────────────┐
-│  aethel (TUI Client)                        │
+│  quil (TUI Client)                        │
 │  ┌─────────┬─────────┬─────────┐            │
 │  │ Tab 1   │ Tab 2   │ Tab 3   │            │
 │  ├─────────┴─────────┴─────────┤            │
@@ -64,7 +64,7 @@ A developer who runs 5-10 terminal sessions per project: 2-3 Claude Code session
 │         ▲                                    │
 │         │ IPC (Unix Socket / Named Pipe)     │
 │         ▼                                    │
-│  aetheld (Daemon)                            │
+│  quild (Daemon)                            │
 │  ┌─────────────────────────────┐            │
 │  │ Session Manager             │            │
 │  │  ├─ PTY Pool                │            │
@@ -80,12 +80,12 @@ A developer who runs 5-10 terminal sessions per project: 2-3 Claude Code session
 
 | Component | Responsibility |
 |---|---|
-| `aetheld` (Daemon) | Manages PTY sessions, persists state, runs scrapers, handles process lifecycle. Starts on boot or on first `aethel` invocation. |
-| `aethel` (Client) | Bubble Tea TUI. Renders panes, handles input, manages layout. Connects to daemon via IPC. Multiple clients can attach simultaneously. |
+| `quild` (Daemon) | Manages PTY sessions, persists state, runs scrapers, handles process lifecycle. Starts on boot or on first `quil` invocation. |
+| `quil` (Client) | Bubble Tea TUI. Renders panes, handles input, manages layout. Connects to daemon via IPC. Multiple clients can attach simultaneously. |
 | **Session Manager** | Creates/destroys PTY sessions. Assigns pane types. Routes I/O between client and PTYs. |
-| **State Persistence** | Snapshots tabs, panes, layout, and metadata to `~/.aethel/`. Runs on a configurable interval + on every structural change. |
+| **State Persistence** | Snapshots tabs, panes, layout, and metadata to `~/.quil/`. Runs on a configurable interval + on every structural change. |
 | **Resume Engine** | Regex scrapers that watch PTY output. Stores extracted tokens. Executes resume templates on re-hydration. |
-| **Plugin Registry** | Loads pane type definitions from `~/.aethel/plugins/`. Each plugin defines: display behavior, scraper patterns, resume templates, status indicators. |
+| **Plugin Registry** | Loads pane type definitions from `~/.quil/plugins/`. Each plugin defines: display behavior, scraper patterns, resume templates, status indicators. |
 | **Ghost Buffer** | Caches last N lines of each pane's output to SQLite. Renders immediately on reconnect while shells re-initialize. |
 
 ### 4.3 IPC Protocol
@@ -111,13 +111,13 @@ Length-prefixed JSON messages over Unix domain sockets (Linux/macOS) or Named Pi
 ### 4.4 Storage Layout
 
 ```
-~/.aethel/
+~/.quil/
 ├── config.toml              # User configuration
 ├── state/
 │   ├── workspace.json       # Tabs, panes, layout, metadata
 │   └── workspace.json.bak   # Previous snapshot (rollback)
 ├── data/
-│   └── aethel.db            # SQLite: ghost buffers, token history, session logs
+│   └── quil.db            # SQLite: ghost buffers, token history, session logs
 ├── plugins/
 │   ├── ai.toml              # Built-in plugin
 │   ├── build.toml
@@ -125,7 +125,7 @@ Length-prefixed JSON messages over Unix domain sockets (Linux/macOS) or Named Pi
 │   ├── webhook.toml
 │   └── stripe-webhook.toml  # User-defined plugin example
 ├── logs/
-│   └── aetheld.log
+│   └── quild.log
 └── secrets/
     └── tokens.enc           # Encrypted scraped tokens
 ```
@@ -253,7 +253,7 @@ quick_actions = "ctrl+a"
 |---|---|
 | FR-1.1 | Daemon creates and manages PTY sessions (Linux/macOS via `creack/pty`, Windows via ConPTY). |
 | FR-1.2 | Multiple clients can attach to the same daemon simultaneously (read-only observers or active controllers). |
-| FR-1.3 | Daemon auto-starts on first `aethel` invocation if not already running. |
+| FR-1.3 | Daemon auto-starts on first `quil` invocation if not already running. |
 | FR-1.4 | Daemon runs as a background process; survives client disconnection. |
 | FR-1.5 | Graceful shutdown — daemon sends SIGHUP to child processes, waits for clean exit, then persists final state. |
 | FR-1.6 | Pane resize events propagate to the underlying PTY (SIGWINCH on Unix, ConPTY resize on Windows). |
@@ -262,7 +262,7 @@ quick_actions = "ctrl+a"
 
 | ID | Requirement |
 |---|---|
-| FR-2.1 | Daemon snapshots full workspace state (tabs, panes, layout, working directories, pane types, metadata) to `~/.aethel/state/workspace.json`. |
+| FR-2.1 | Daemon snapshots full workspace state (tabs, panes, layout, working directories, pane types, metadata) to `~/.quil/state/workspace.json`. |
 | FR-2.2 | Snapshots trigger on: structural changes (tab/pane create/delete/move), configurable interval (default 30s), and clean shutdown. |
 | FR-2.3 | On startup, daemon reads last snapshot and re-hydrates the workspace. |
 | FR-2.4 | State format is human-readable JSON for debugging and manual recovery. |
@@ -291,10 +291,10 @@ quick_actions = "ctrl+a"
 
 | ID | Requirement |
 |---|---|
-| FR-5.1 | Pane types are defined as plugin configs in `~/.aethel/plugins/<name>.toml`. |
+| FR-5.1 | Pane types are defined as plugin configs in `~/.quil/plugins/<name>.toml`. |
 | FR-5.2 | A plugin definition includes: command config, persistence/resume strategy, form fields for instance creation, error handlers, and display settings. |
-| FR-5.3 | Aethel ships with 4 built-in plugins: `terminal` (Go built-in), `claude-code`, `ssh`, `stripe` (embedded TOML defaults). |
-| FR-5.4 | Users can create custom plugins without recompiling Aethel. |
+| FR-5.3 | Quil ships with 4 built-in plugins: `terminal` (Go built-in), `claude-code`, `ssh`, `stripe` (embedded TOML defaults). |
+| FR-5.4 | Users can create custom plugins without recompiling Quil. |
 | FR-5.5 | Plugin hot-reload via F1 → Plugins → Reload. Active panes using a modified plugin pick up new scraper/error handler rules on next output. |
 | FR-5.6 | Plugin validation — daemon validates plugin TOML on load and logs clear errors for malformed definitions. Invalid plugins are skipped, not fatal. |
 
@@ -303,7 +303,7 @@ quick_actions = "ctrl+a"
 #### Plugin Definition Schema (Implemented)
 
 ```toml
-# ~/.aethel/plugins/<name>.toml
+# ~/.quil/plugins/<name>.toml
 
 [plugin]
 name = "string"              # Required — unique identifier
@@ -484,14 +484,14 @@ action = "dialog"
 
 | Command | Description |
 |---|---|
-| `aethel` | Launch TUI client (auto-starts daemon if needed). |
-| `aethel daemon start` | Explicitly start the daemon. |
-| `aethel daemon stop` | Gracefully stop the daemon (persists state first). |
-| `aethel status` | Show daemon status, active sessions, memory usage. |
-| `aethel debug <pane-id>` | Dump pane metadata, scraper state, recent IPC messages. |
-| `aethel config init` | Generate default `config.toml` and built-in plugins. |
-| `aethel plugin list` | List loaded plugins with status. |
-| `aethel plugin validate <file>` | Validate a plugin TOML file. |
+| `quil` | Launch TUI client (auto-starts daemon if needed). |
+| `quil daemon start` | Explicitly start the daemon. |
+| `quil daemon stop` | Gracefully stop the daemon (persists state first). |
+| `quil status` | Show daemon status, active sessions, memory usage. |
+| `quil debug <pane-id>` | Dump pane metadata, scraper state, recent IPC messages. |
+| `quil config init` | Generate default `config.toml` and built-in plugins. |
+| `quil plugin list` | List loaded plugins with status. |
+| `quil plugin validate <file>` | Validate a plugin TOML file. |
 
 ## 6. Non-Functional Requirements
 
@@ -521,11 +521,11 @@ action = "dialog"
 
 | ID | Requirement |
 |---|---|
-| NFR-3.1 | Daemon logs to `~/.aethel/logs/aetheld.log` with structured JSON logging. |
+| NFR-3.1 | Daemon logs to `~/.quil/logs/quild.log` with structured JSON logging. |
 | NFR-3.2 | Log levels: `debug`, `info`, `warn`, `error`. Default: `info`. Configurable via `config.toml`. |
 | NFR-3.3 | Log rotation: max 10MB per file, 3 files retained. |
-| NFR-3.4 | `aethel status` command shows: daemon uptime, active sessions, memory usage, last snapshot time. |
-| NFR-3.5 | `aethel debug <pane-id>` dumps pane metadata, scraper state, and last 50 IPC messages for troubleshooting. |
+| NFR-3.4 | `quil status` command shows: daemon uptime, active sessions, memory usage, last snapshot time. |
+| NFR-3.5 | `quil debug <pane-id>` dumps pane metadata, scraper state, and last 50 IPC messages for troubleshooting. |
 
 ### NFR-4: Platform Support
 
@@ -541,24 +541,24 @@ All three platforms supported from day one. Go's cross-compilation makes this fe
 
 ### M1: Foundation — Daemon + Shell + TUI (Done)
 
-> **Goal:** `aethel` launches a daemon, opens a Bubble Tea TUI with one tab and one pane running a shell. Basic split support.
+> **Goal:** `quil` launches a daemon, opens a Bubble Tea TUI with one tab and one pane running a shell. Basic split support.
 
 **Deliverables:**
 
-- `aetheld` daemon with PTY management (cross-platform)
-- `aethel` client with Bubble Tea UI
+- `quild` daemon with PTY management (cross-platform)
+- `quil` client with Bubble Tea UI
 - IPC via Unix sockets / Named Pipes
 - Tab creation/switching
 - Vertical/horizontal pane splits
 - Keyboard navigation between panes
 - Basic `config.toml` loading
-- `aethel daemon start/stop` commands
+- `quil daemon start/stop` commands
 
-**Exit criteria:** User can launch `aethel`, create tabs, split panes, and run shell commands on all three platforms.
+**Exit criteria:** User can launch `quil`, create tabs, split panes, and run shell commands on all three platforms.
 
 ### M2: Persistence — Reboot-Proof Sessions (Done)
 
-> **Goal:** Close `aethel`, reboot, run `aethel` again — tabs, panes, and layout are restored. Ghost buffers show previous output instantly.
+> **Goal:** Close `quil`, reboot, run `quil` again — tabs, panes, and layout are restored. Ghost buffers show previous output instantly.
 
 **Deliverables:**
 
@@ -567,10 +567,10 @@ All three platforms supported from day one. Go's cross-compilation makes this fe
 - Workspace re-hydration on startup
 - Ghost buffer system (file-backed binary snapshots)
 - Visual distinction for ghost buffer content (dimmed)
-- `aetheld` auto-start on first client invocation
+- `quild` auto-start on first client invocation
 - Daemon graceful shutdown with state persist
 
-**Exit criteria:** Full reboot cycle — close everything, restart OS, run `aethel` — workspace layout and ghost buffer content are restored within 30 seconds.
+**Exit criteria:** Full reboot cycle — close everything, restart OS, run `quil` — workspace layout and ghost buffer content are restored within 30 seconds.
 
 ### M3: Resume Engine — AI Sessions Survive Reboots (Done)
 
@@ -586,7 +586,7 @@ All three platforms supported from day one. Go's cross-compilation makes this fe
 - `rerun` strategy for SSH/Stripe (re-execute same command)
 - Fallback to plain shell when resume args can't be resolved
 
-**Exit criteria:** Start a Claude Code session, reboot, run `aethel` — Claude session resumes automatically with the previous conversation context.
+**Exit criteria:** Start a Claude Code session, reboot, run `quil` — Claude session resumes automatically with the previous conversation context.
 
 ### M4: Plugin System + Typed Panes (Done)
 
@@ -594,7 +594,7 @@ All three platforms supported from day one. Go's cross-compilation makes this fe
 
 **Deliverables:**
 
-- Plugin loader from `~/.aethel/plugins/*.toml`
+- Plugin loader from `~/.quil/plugins/*.toml`
 - Plugin validation with clear error messages (strategy, cmd, action, regex)
 - Plugin registry with auto-detection (`exec.LookPath`)
 - Built-in plugins: Terminal (production), Claude Code (production), SSH (POC), Stripe (POC)
@@ -616,11 +616,11 @@ All three platforms supported from day one. Go's cross-compilation makes this fe
 - JSON transformer (`Ctrl+J`) with Chroma highlighting
 - Tab dock positions (top/bottom/left/right)
 - Configurable keybindings
-- `aethel status` and `aethel debug` commands
+- `quil status` and `quil debug` commands
 - Structured logging with rotation
 - Secret redaction in logs
 - Encrypted token storage
-- `aethel config init` command
+- `quil config init` command
 
 **Exit criteria:** All FR and NFR items implemented. Clean UX across all three platforms. Observability commands provide actionable debugging information.
 

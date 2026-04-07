@@ -19,11 +19,11 @@ GoReleaser cross-compiles pre-built binaries for 5 platform pairs, published as 
 | Method | Platform | Command | Status |
 |--------|----------|---------|--------|
 | Install script | Linux / macOS | `curl -sSfL .../scripts/install.sh \| sh` | Done |
-| Go install | Any | `go install github.com/artyomsv/aethel/cmd/aethel@latest` | Done |
+| Go install | Any | `go install github.com/artyomsv/quil/cmd/quil@latest` | Done |
 | GitHub Release | Any | Download from Releases page | Done |
-| Homebrew | macOS / Linux | `brew install artyomsv/tap/aethel` | Deferred (needs external repo) |
-| Winget | Windows | `winget install aethel` | Deferred (needs Microsoft Store) |
-| Scoop | Windows | `scoop install aethel` | Deferred (needs external repo) |
+| Homebrew | macOS / Linux | `brew install artyomsv/tap/quil` | Deferred (needs external repo) |
+| Winget | Windows | `winget install quil` | Deferred (needs Microsoft Store) |
+| Scoop | Windows | `scoop install quil` | Deferred (needs external repo) |
 
 ## Technical Implementation
 
@@ -33,7 +33,7 @@ Build matrix:
 - `linux/amd64`, `linux/arm64`
 - `darwin/amd64` (Intel), `darwin/arm64` (Apple Silicon)
 - `windows/amd64`
-- Two binaries per platform: `aethel` (TUI) and `aetheld` (daemon)
+- Two binaries per platform: `quil` (TUI) and `quild` (daemon)
 - `.tar.gz` for Unix, `.zip` for Windows
 - SHA256 checksums in `checksums.txt`
 - Version injected via `-ldflags "-s -w -X main.version={{.Version}}"`
@@ -52,12 +52,12 @@ POSIX shell script:
 - Detects OS (`uname -s`) and architecture (`uname -m`)
 - Fetches latest version from GitHub API (supports `GITHUB_TOKEN` for rate limiting)
 - Downloads archive + checksums, verifies SHA256
-- Installs to `~/.local/bin/` (configurable via `AETHEL_INSTALL_DIR`)
-- Supports pinned versions via `AETHEL_VERSION` env var
+- Installs to `~/.local/bin/` (configurable via `QUIL_INSTALL_DIR`)
+- Supports pinned versions via `QUIL_VERSION` env var
 
 ### 4. Version Injection
 
-Both `aethel` and `aetheld` have `var version = "dev"` overridden at build time. Consistent `-ldflags` injection across all build paths: GoReleaser, `dev.sh`, `dev.ps1`, `rebuild.ps1`, `Makefile`.
+Both `quil` and `quild` have `var version = "dev"` overridden at build time. Consistent `-ldflags` injection across all build paths: GoReleaser, `dev.sh`, `dev.ps1`, `rebuild.ps1`, `Makefile`.
 
 ### 5. CI Security
 
@@ -70,13 +70,13 @@ Both `aethel` and `aetheld` have `var version = "dev"` overridden at build time.
 - [x] GitHub Release page shows all 5 platform binaries with checksums
 - [x] README "Quick Start" section updated with one-line install
 - [x] Install script detects OS/arch, downloads, verifies checksum, installs
-- [x] `aethel version` and `aetheld version` report correct version
-- [ ] `brew install artyomsv/tap/aethel` works (deferred — needs Homebrew tap repo)
-- [ ] `winget install aethel` works on Windows (deferred — needs Microsoft Store)
+- [x] `quil version` and `quild version` report correct version
+- [ ] `brew install artyomsv/tap/quil` works (deferred — needs Homebrew tap repo)
+- [ ] `winget install quil` works on Windows (deferred — needs Microsoft Store)
 
 ## Deferred Work
 
 - **Homebrew tap** — needs `artyomsv/homebrew-tap` repo with formula
 - **Scoop bucket** — needs `artyomsv/scoop-bucket` repo
 - **Winget manifest** — needs Microsoft Store submission
-- **Custom domain** — `get.aethel.dev` redirect to raw install script
+- **Custom domain** — `get.quil.dev` redirect to raw install script

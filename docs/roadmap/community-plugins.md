@@ -10,17 +10,17 @@
 
 ## Problem
 
-Aethel ships with 4 built-in plugins (terminal, claude-code, ssh, stripe). Users who want to add support for other tools must write TOML plugin files manually. There's no way to discover or share plugins. Every user reinvents the same configurations.
+Quil ships with 4 built-in plugins (terminal, claude-code, ssh, stripe). Users who want to add support for other tools must write TOML plugin files manually. There's no way to discover or share plugins. Every user reinvents the same configurations.
 
 ## Proposed Solution
 
-Create a simple plugin sharing mechanism backed by a GitHub repository (`aethel-plugins`) acting as a registry. Each plugin is a `.toml` file. `aethel plugin install <name>` fetches it to `~/.aethel/plugins/`.
+Create a simple plugin sharing mechanism backed by a GitHub repository (`quil-plugins`) acting as a registry. Each plugin is a `.toml` file. `quil plugin install <name>` fetches it to `~/.quil/plugins/`.
 
 ```bash
-aethel plugin install aider       # pulls community TOML plugin
-aethel plugin install k9s
-aethel plugin install lazygit
-aethel plugin search docker
+quil plugin install aider       # pulls community TOML plugin
+quil plugin install k9s
+quil plugin install lazygit
+quil plugin search docker
 ```
 
 ### High-Value Plugins to Ship or Solicit
@@ -36,7 +36,7 @@ aethel plugin search docker
 | **npm/cargo/go watch** | `rerun` | Build watchers |
 | **pgcli/mongosh** | `rerun` | Database CLIs |
 
-**Network effect:** Every plugin makes Aethel useful to a new audience. Plugin authors become advocates.
+**Network effect:** Every plugin makes Quil useful to a new audience. Plugin authors become advocates.
 
 ## User Experience
 
@@ -44,43 +44,43 @@ aethel plugin search docker
 
 ```bash
 # Install by name
-aethel plugin install aider
+quil plugin install aider
 
 # Search available plugins
-aethel plugin search database
+quil plugin search database
 # Results:
 #   pgcli       - PostgreSQL CLI with auto-complete
 #   mongosh     - MongoDB Shell
 #   redis-cli   - Redis CLI
 
 # List installed plugins
-aethel plugin list
+quil plugin list
 
 # Update all plugins
-aethel plugin update
+quil plugin update
 ```
 
 ### Creating and Sharing Plugins
 
 ```bash
 # Create a plugin from template
-aethel plugin init my-tool
+quil plugin init my-tool
 
 # Test locally
-# (edit ~/.aethel/plugins/my-tool.toml, use Ctrl+N to create pane)
+# (edit ~/.quil/plugins/my-tool.toml, use Ctrl+N to create pane)
 
 # Submit to registry
-# (PR to aethel-plugins repo on GitHub)
+# (PR to quil-plugins repo on GitHub)
 ```
 
 ## Technical Approach
 
 ### 1. Registry Structure
 
-GitHub repo `artyomsv/aethel-plugins`:
+GitHub repo `artyomsv/quil-plugins`:
 
 ```
-aethel-plugins/
+quil-plugins/
 ├── registry.json          # index: name → metadata
 ├── plugins/
 │   ├── aider.toml
@@ -111,32 +111,32 @@ aethel-plugins/
 
 | Command | Action |
 |---------|--------|
-| `aethel plugin install <name>` | Download TOML from registry to `~/.aethel/plugins/` |
-| `aethel plugin search <query>` | Search registry.json by name/tags/description |
-| `aethel plugin list` | Show installed plugins (built-in + community) |
-| `aethel plugin update` | Re-fetch all community plugins |
-| `aethel plugin remove <name>` | Delete community plugin |
-| `aethel plugin init <name>` | Create plugin template |
+| `quil plugin install <name>` | Download TOML from registry to `~/.quil/plugins/` |
+| `quil plugin search <query>` | Search registry.json by name/tags/description |
+| `quil plugin list` | Show installed plugins (built-in + community) |
+| `quil plugin update` | Re-fetch all community plugins |
+| `quil plugin remove <name>` | Delete community plugin |
+| `quil plugin init <name>` | Create plugin template |
 
 ### 3. Implementation
 
 - Fetch `registry.json` from GitHub raw URL (cached locally)
 - Download individual TOML files on install
 - No authentication required (public repo)
-- Version tracking in `~/.aethel/plugins/.registry-cache.json`
+- Version tracking in `~/.quil/plugins/.registry-cache.json`
 
 ### 4. Files
 
 | File | Change |
 |------|--------|
-| `cmd/aethel/plugin.go` | New — plugin subcommand (install, search, list, update, remove) |
+| `cmd/quil/plugin.go` | New — plugin subcommand (install, search, list, update, remove) |
 | `internal/plugin/registry_remote.go` | New — GitHub registry client |
 | `internal/plugin/cache.go` | New — local cache management |
 
 ## Success Criteria
 
-- [ ] `aethel plugin install aider` downloads and installs the plugin
-- [ ] `aethel plugin search ai` returns matching plugins
+- [ ] `quil plugin install aider` downloads and installs the plugin
+- [ ] `quil plugin search ai` returns matching plugins
 - [ ] Installed plugins appear in `Ctrl+N` pane creation dialog
 - [ ] At least 5 community plugins published in registry
 - [ ] Plugin submission via PR is documented

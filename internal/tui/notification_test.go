@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/artyomsv/aethel/internal/ipc"
+	"github.com/artyomsv/quil/internal/ipc"
 )
 
 func TestNotificationCenter_AddEvent_Dedup(t *testing.T) {

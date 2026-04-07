@@ -18,10 +18,10 @@ type ShellConfig struct {
 	Env  []string // additional env vars to merge with os.Environ()
 }
 
-// EnsureInitDir writes embedded init scripts to aethelDir/shellinit/.
+// EnsureInitDir writes embedded init scripts to quilDir/shellinit/.
 // Overwrites existing scripts to stay current with the binary version.
-func EnsureInitDir(aethelDir string) error {
-	base := filepath.Join(aethelDir, "shellinit")
+func EnsureInitDir(quilDir string) error {
+	base := filepath.Join(quilDir, "shellinit")
 	zshDir := filepath.Join(base, "zsh")
 
 	if err := os.MkdirAll(zshDir, 0700); err != nil {
@@ -50,8 +50,8 @@ func EnsureInitDir(aethelDir string) error {
 
 // Configure returns modified spawn parameters for the given shell path.
 // Returns nil if the shell doesn't need injection (fish, sh, cmd.exe, unknown).
-func Configure(shell, aethelDir string) *ShellConfig {
-	base := filepath.Join(aethelDir, "shellinit")
+func Configure(shell, quilDir string) *ShellConfig {
+	base := filepath.Join(quilDir, "shellinit")
 	name := shellName(shell)
 
 	switch name {
@@ -67,7 +67,7 @@ func Configure(shell, aethelDir string) *ShellConfig {
 		return &ShellConfig{
 			Cmd: shell,
 			Env: []string{
-				"AETHEL_ORIG_ZDOTDIR=" + origZdotdir,
+				"QUIL_ORIG_ZDOTDIR=" + origZdotdir,
 				"ZDOTDIR=" + zshDir,
 			},
 		}

@@ -1,12 +1,12 @@
 #!/bin/sh
 set -eu
 
-# Aethel installer — detects OS/arch, downloads the latest release, verifies checksum, installs.
-# Usage: curl -sSfL https://raw.githubusercontent.com/artyomsv/aethel/master/scripts/install.sh | sh
+# Quil installer — detects OS/arch, downloads the latest release, verifies checksum, installs.
+# Usage: curl -sSfL https://raw.githubusercontent.com/artyomsv/quil/master/scripts/install.sh | sh
 
-REPO="artyomsv/aethel"
-INSTALL_DIR="${AETHEL_INSTALL_DIR:-$HOME/.local/bin}"
-VERSION="${AETHEL_VERSION:-}"
+REPO="artyomsv/quil"
+INSTALL_DIR="${QUIL_INSTALL_DIR:-$HOME/.local/bin}"
+VERSION="${QUIL_VERSION:-}"
 
 main() {
   detect_platform
@@ -52,7 +52,7 @@ fetch_latest_version() {
   RESPONSE=$(curl -sSf ${GITHUB_TOKEN:+-H "Authorization: token $GITHUB_TOKEN"} \
     "https://api.github.com/repos/$REPO/releases/latest") || {
     echo "Error: failed to fetch latest release (GitHub API may be rate-limiting)" >&2
-    echo "Set GITHUB_TOKEN or use AETHEL_VERSION=x.y.z to skip API call" >&2
+    echo "Set GITHUB_TOKEN or use QUIL_VERSION=x.y.z to skip API call" >&2
     exit 1
   }
   VERSION=$(echo "$RESPONSE" | grep '"tag_name"' | sed -E 's/.*"v([^"]+)".*/\1/')
@@ -67,7 +67,7 @@ fetch_latest_version() {
 }
 
 download_and_verify() {
-  ARCHIVE="aethel_${VERSION}_${OS}_${ARCH}.tar.gz"
+  ARCHIVE="quil_${VERSION}_${OS}_${ARCH}.tar.gz"
   BASE_URL="https://github.com/$REPO/releases/download/v${VERSION}"
   TMP_DIR=$(mktemp -d)
   trap 'rm -rf "$TMP_DIR"' EXIT
@@ -97,16 +97,16 @@ download_and_verify() {
 
 install_binaries() {
   mkdir -p "$INSTALL_DIR"
-  cp "$TMP_DIR/aethel" "$INSTALL_DIR/aethel"
-  cp "$TMP_DIR/aetheld" "$INSTALL_DIR/aetheld"
-  chmod +x "$INSTALL_DIR/aethel" "$INSTALL_DIR/aetheld"
+  cp "$TMP_DIR/quil" "$INSTALL_DIR/quil"
+  cp "$TMP_DIR/quild" "$INSTALL_DIR/quild"
+  chmod +x "$INSTALL_DIR/quil" "$INSTALL_DIR/quild"
 }
 
 print_success() {
   echo ""
-  echo "Installed aethel v${VERSION} to ${INSTALL_DIR}/"
-  echo "  ${INSTALL_DIR}/aethel"
-  echo "  ${INSTALL_DIR}/aetheld"
+  echo "Installed quil v${VERSION} to ${INSTALL_DIR}/"
+  echo "  ${INSTALL_DIR}/quil"
+  echo "  ${INSTALL_DIR}/quild"
 
   case ":$PATH:" in
     *":$INSTALL_DIR:"*) ;;
@@ -120,7 +120,7 @@ print_success() {
   esac
 
   echo ""
-  echo "Run 'aethel' to get started."
+  echo "Run 'quil' to get started."
 }
 
 main

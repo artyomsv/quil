@@ -9,8 +9,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/artyomsv/aethel/internal/config"
-	"github.com/artyomsv/aethel/internal/persist"
+	"github.com/artyomsv/quil/internal/config"
+	"github.com/artyomsv/quil/internal/persist"
 )
 
 func TestNewNotesEditor_LoadsExistingFile(t *testing.T) {

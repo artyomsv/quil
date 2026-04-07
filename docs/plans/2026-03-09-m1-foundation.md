@@ -2,9 +2,9 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** `aethel` launches a daemon, opens a Bubble Tea TUI with one tab and one pane running a shell. Users can create tabs, split panes, and run shell commands on all three platforms.
+**Goal:** `quil` launches a daemon, opens a Bubble Tea TUI with one tab and one pane running a shell. Users can create tabs, split panes, and run shell commands on all three platforms.
 
-**Architecture:** Client-daemon model over IPC. `aetheld` daemon manages PTY sessions and routes I/O. `aethel` client renders a Bubble Tea TUI and forwards keystrokes. IPC uses length-prefixed JSON over Unix domain sockets (Linux/macOS) or Named Pipes (Windows).
+**Architecture:** Client-daemon model over IPC. `quild` daemon manages PTY sessions and routes I/O. `quil` client renders a Bubble Tea TUI and forwards keystrokes. IPC uses length-prefixed JSON over Unix domain sockets (Linux/macOS) or Named Pipes (Windows).
 
 **Tech Stack:** Go 1.23+, Bubble Tea v2, charmbracelet/lipgloss, creack/pty (Unix), charmbracelet/x/conpty (Windows), BurntSushi/toml
 
@@ -16,8 +16,8 @@
 
 **Files:**
 - Create: `go.mod`
-- Create: `cmd/aethel/main.go`
-- Create: `cmd/aetheld/main.go`
+- Create: `cmd/quil/main.go`
+- Create: `cmd/quild/main.go`
 - Create: `.gitignore`
 
 **Step 1: Initialize Git repository**
@@ -31,10 +31,10 @@ git init
 
 ```gitignore
 # Binaries
-aethel
-aetheld
-aethel.exe
-aetheld.exe
+quil
+quild
+quil.exe
+quild.exe
 *.exe
 *.dll
 *.so
@@ -61,7 +61,7 @@ Thumbs.db
 **Step 3: Initialize Go module**
 
 ```bash
-go mod init github.com/artyomsv/aethel
+go mod init github.com/artyomsv/quil
 ```
 
 **Step 4: Add core dependencies**
@@ -77,33 +77,33 @@ go get github.com/google/uuid@latest
 
 **Step 5: Create placeholder entry points**
 
-`cmd/aetheld/main.go`:
+`cmd/quild/main.go`:
 ```go
 package main
 
 import "fmt"
 
 func main() {
-	fmt.Println("aetheld daemon — not yet implemented")
+	fmt.Println("quild daemon — not yet implemented")
 }
 ```
 
-`cmd/aethel/main.go`:
+`cmd/quil/main.go`:
 ```go
 package main
 
 import "fmt"
 
 func main() {
-	fmt.Println("aethel client — not yet implemented")
+	fmt.Println("quil client — not yet implemented")
 }
 ```
 
 **Step 6: Verify both binaries build**
 
 ```bash
-go build ./cmd/aethel
-go build ./cmd/aetheld
+go build ./cmd/quil
+go build ./cmd/quild
 ```
 
 Expected: Both compile with zero errors.
@@ -115,7 +115,7 @@ git add .
 git commit -m "chore: scaffold Go project with dual-binary layout
 
 Initialize go.mod with Bubble Tea v2, creack/pty, lipgloss, toml,
-and conpty dependencies. Create cmd/aethel and cmd/aetheld entry points."
+and conpty dependencies. Create cmd/quil and cmd/quild entry points."
 ```
 
 ---
@@ -137,7 +137,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/artyomsv/aethel/internal/config"
+	"github.com/artyomsv/quil/internal/config"
 )
 
 func TestLoadDefaults(t *testing.T) {
@@ -193,10 +193,10 @@ tab_dock = "bottom"
 	}
 }
 
-func TestAethelDir(t *testing.T) {
-	dir := config.AethelDir()
+func TestQuilDir(t *testing.T) {
+	dir := config.QuilDir()
 	if dir == "" {
-		t.Error("expected non-empty aethel dir")
+		t.Error("expected non-empty quil dir")
 	}
 }
 ```
@@ -312,20 +312,20 @@ func Load(path string) (Config, error) {
 	return cfg, nil
 }
 
-func AethelDir() string {
+func QuilDir() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(home, ".aethel")
+	return filepath.Join(home, ".quil")
 }
 
 func ConfigPath() string {
-	return filepath.Join(AethelDir(), "config.toml")
+	return filepath.Join(QuilDir(), "config.toml")
 }
 
 func SocketPath() string {
-	return filepath.Join(AethelDir(), "aetheld.sock")
+	return filepath.Join(QuilDir(), "quild.sock")
 }
 ```
 
@@ -343,7 +343,7 @@ Expected: PASS (3 tests).
 git add internal/config/
 git commit -m "feat(config): add TOML configuration with defaults
 
-Supports loading config from ~/.aethel/config.toml with sensible
+Supports loading config from ~/.quil/config.toml with sensible
 defaults for daemon, UI, keybindings, logging, and security settings."
 ```
 
@@ -541,12 +541,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/artyomsv/aethel/internal/pty"
+	"github.com/artyomsv/quil/internal/pty"
 )
 
 func TestStartAndReadOutput(t *testing.T) {
 	s := pty.New()
-	err := s.Start("echo", "hello-aethel")
+	err := s.Start("echo", "hello-quil")
 	if err != nil {
 		t.Fatalf("Start failed: %v", err)
 	}
@@ -565,11 +565,11 @@ func TestStartAndReadOutput(t *testing.T) {
 			if n > 0 {
 				output.Write(buf[:n])
 			}
-			if strings.Contains(output.String(), "hello-aethel") {
+			if strings.Contains(output.String(), "hello-quil") {
 				return // success
 			}
 			if err != nil {
-				if strings.Contains(output.String(), "hello-aethel") {
+				if strings.Contains(output.String(), "hello-quil") {
 					return
 				}
 				t.Fatalf("Read error: %v, output so far: %q", err, output.String())
@@ -653,7 +653,7 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/artyomsv/aethel/internal/ipc"
+	"github.com/artyomsv/quil/internal/ipc"
 )
 
 func TestWriteReadMessage(t *testing.T) {
@@ -921,7 +921,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/artyomsv/aethel/internal/ipc"
+	"github.com/artyomsv/quil/internal/ipc"
 )
 
 func TestServerClientRoundTrip(t *testing.T) {
@@ -1206,7 +1206,7 @@ package daemon_test
 import (
 	"testing"
 
-	"github.com/artyomsv/aethel/internal/daemon"
+	"github.com/artyomsv/quil/internal/daemon"
 )
 
 func TestSessionManagerCreateTab(t *testing.T) {
@@ -1309,7 +1309,7 @@ import (
 	"sync"
 
 	"github.com/google/uuid"
-	apty "github.com/artyomsv/aethel/internal/pty"
+	apty "github.com/artyomsv/quil/internal/pty"
 )
 
 type Tab struct {
@@ -1537,9 +1537,9 @@ import (
 	"runtime"
 	"syscall"
 
-	"github.com/artyomsv/aethel/internal/config"
-	"github.com/artyomsv/aethel/internal/ipc"
-	apty "github.com/artyomsv/aethel/internal/pty"
+	"github.com/artyomsv/quil/internal/config"
+	"github.com/artyomsv/quil/internal/ipc"
+	apty "github.com/artyomsv/quil/internal/pty"
 )
 
 type Daemon struct {
@@ -1556,10 +1556,10 @@ func New(cfg config.Config) *Daemon {
 }
 
 func (d *Daemon) Start() error {
-	// Ensure ~/.aethel/ exists
-	aethelDir := config.AethelDir()
-	if err := os.MkdirAll(aethelDir, 0700); err != nil {
-		return fmt.Errorf("create aethel dir: %w", err)
+	// Ensure ~/.quil/ exists
+	quilDir := config.QuilDir()
+	if err := os.MkdirAll(quilDir, 0700); err != nil {
+		return fmt.Errorf("create quil dir: %w", err)
 	}
 
 	sockPath := config.SocketPath()
@@ -1569,7 +1569,7 @@ func (d *Daemon) Start() error {
 		return fmt.Errorf("start IPC server: %w", err)
 	}
 
-	log.Printf("aetheld started, listening on %s", sockPath)
+	log.Printf("quild started, listening on %s", sockPath)
 	return nil
 }
 
@@ -1797,9 +1797,9 @@ import (
 	"runtime"
 	"syscall"
 
-	"github.com/artyomsv/aethel/internal/config"
-	"github.com/artyomsv/aethel/internal/ipc"
-	apty "github.com/artyomsv/aethel/internal/pty"
+	"github.com/artyomsv/quil/internal/config"
+	"github.com/artyomsv/quil/internal/ipc"
+	apty "github.com/artyomsv/quil/internal/pty"
 )
 ```
 
@@ -1828,11 +1828,11 @@ PTY I/O streaming, pane resize, and workspace state sync."
 ## Task 8: Daemon Entry Point
 
 **Files:**
-- Modify: `cmd/aetheld/main.go`
+- Modify: `cmd/quild/main.go`
 
 **Step 1: Write daemon main**
 
-`cmd/aetheld/main.go`:
+`cmd/quild/main.go`:
 ```go
 package main
 
@@ -1841,8 +1841,8 @@ import (
 	"log"
 	"os"
 
-	"github.com/artyomsv/aethel/internal/config"
-	"github.com/artyomsv/aethel/internal/daemon"
+	"github.com/artyomsv/quil/internal/config"
+	"github.com/artyomsv/quil/internal/daemon"
 )
 
 func main() {
@@ -1872,7 +1872,7 @@ func main() {
 **Step 2: Verify it builds**
 
 ```bash
-go build -o bin/aetheld ./cmd/aetheld
+go build -o bin/quild ./cmd/quild
 ```
 
 Expected: Binary compiles cleanly.
@@ -1880,8 +1880,8 @@ Expected: Binary compiles cleanly.
 **Step 3: Commit**
 
 ```bash
-git add cmd/aetheld/main.go
-git commit -m "feat(aetheld): add daemon entry point
+git add cmd/quild/main.go
+git commit -m "feat(quild): add daemon entry point
 
 Loads config, starts daemon, waits for SIGINT/SIGTERM."
 ```
@@ -2113,7 +2113,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea/v2"
 	"github.com/charmbracelet/lipgloss/v2"
-	"github.com/artyomsv/aethel/internal/ipc"
+	"github.com/artyomsv/quil/internal/ipc"
 )
 
 // Messages from daemon
@@ -2187,7 +2187,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m Model) View() string {
 	if m.width == 0 || m.height == 0 {
-		return "Connecting to aetheld..."
+		return "Connecting to quild..."
 	}
 
 	var sections []string
@@ -2318,7 +2318,7 @@ func (m Model) renderTabBar() string {
 }
 
 func (m Model) renderStatusBar() string {
-	status := "aethel"
+	status := "quil"
 	if tab := m.activeTabModel(); tab != nil {
 		if pane := tab.ActivePaneModel(); pane != nil {
 			status = pane.Name
@@ -2487,11 +2487,11 @@ Tab model manages pane layout with horizontal splits."
 ## Task 10: Client Entry Point with CLI
 
 **Files:**
-- Modify: `cmd/aethel/main.go`
+- Modify: `cmd/quil/main.go`
 
 **Step 1: Write client main with subcommands**
 
-`cmd/aethel/main.go`:
+`cmd/quil/main.go`:
 ```go
 package main
 
@@ -2502,9 +2502,9 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea/v2"
-	"github.com/artyomsv/aethel/internal/config"
-	"github.com/artyomsv/aethel/internal/ipc"
-	"github.com/artyomsv/aethel/internal/tui"
+	"github.com/artyomsv/quil/internal/config"
+	"github.com/artyomsv/quil/internal/ipc"
+	"github.com/artyomsv/quil/internal/tui"
 )
 
 func main() {
@@ -2514,7 +2514,7 @@ func main() {
 			handleDaemon()
 			return
 		case "version":
-			fmt.Println("aethel v0.1.0")
+			fmt.Println("quil v0.1.0")
 			return
 		}
 	}
@@ -2525,7 +2525,7 @@ func main() {
 
 func handleDaemon() {
 	if len(os.Args) < 3 {
-		fmt.Fprintln(os.Stderr, "usage: aethel daemon [start|stop]")
+		fmt.Fprintln(os.Stderr, "usage: quil daemon [start|stop]")
 		os.Exit(1)
 	}
 
@@ -2550,14 +2550,14 @@ func startDaemon() {
 		return
 	}
 
-	// Find aetheld binary
-	aetheld, err := exec.LookPath("aetheld")
+	// Find quild binary
+	quild, err := exec.LookPath("quild")
 	if err != nil {
 		// Try relative to current binary
-		aetheld = "aetheld"
+		quild = "quild"
 	}
 
-	cmd := exec.Command(aetheld)
+	cmd := exec.Command(quild)
 	cmd.Stdout = nil
 	cmd.Stderr = nil
 	if err := cmd.Start(); err != nil {
@@ -2609,7 +2609,7 @@ func launchTUI() {
 		}
 	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "cannot connect to daemon: %v\nRun 'aethel daemon start' first.\n", err)
+		fmt.Fprintf(os.Stderr, "cannot connect to daemon: %v\nRun 'quil daemon start' first.\n", err)
 		os.Exit(1)
 	}
 	defer client.Close()
@@ -2631,8 +2631,8 @@ func fileExists(path string) bool {
 **Step 2: Verify it builds**
 
 ```bash
-go build -o bin/aethel ./cmd/aethel
-go build -o bin/aetheld ./cmd/aetheld
+go build -o bin/quil ./cmd/quil
+go build -o bin/quild ./cmd/quild
 ```
 
 Expected: Both binaries compile cleanly.
@@ -2670,18 +2670,18 @@ Expected: All tests pass.
 **Step 3: Build both binaries**
 
 ```bash
-go build -o bin/aetheld ./cmd/aetheld
-go build -o bin/aethel ./cmd/aethel
+go build -o bin/quild ./cmd/quild
+go build -o bin/quil ./cmd/quil
 ```
 
 **Step 4: Manual smoke test**
 
 ```bash
 # Terminal 1: Start daemon
-./bin/aetheld
+./bin/quild
 
 # Terminal 2: Launch client
-./bin/aethel
+./bin/quil
 ```
 
 Expected: TUI opens with tab bar and status bar. No panes yet (daemon creates a default tab+pane on attach — this may need adjustment).
@@ -2715,7 +2715,7 @@ func (d *Daemon) handleAttach(conn *ipc.Conn) {
 **Step 6: Rebuild and re-test**
 
 ```bash
-go build -o bin/aetheld ./cmd/aetheld && go build -o bin/aethel ./cmd/aethel
+go build -o bin/quild ./cmd/quild && go build -o bin/quil ./cmd/quil
 ```
 
 **Step 7: Commit**
@@ -2833,7 +2833,7 @@ func (m Model) splitPane(dir SplitDir) tea.Cmd {
 **Step 3: Verify build and tests**
 
 ```bash
-go test ./... -v && go build ./cmd/aethel ./cmd/aetheld
+go test ./... -v && go build ./cmd/quil ./cmd/quild
 ```
 
 **Step 4: Commit**
@@ -2867,9 +2867,9 @@ go vet ./...
 **Step 3: Verify cross-compilation**
 
 ```bash
-GOOS=linux GOARCH=amd64 go build ./cmd/aethel ./cmd/aetheld
-GOOS=darwin GOARCH=amd64 go build ./cmd/aethel ./cmd/aetheld
-GOOS=windows GOARCH=amd64 go build ./cmd/aethel ./cmd/aetheld
+GOOS=linux GOARCH=amd64 go build ./cmd/quil ./cmd/quild
+GOOS=darwin GOARCH=amd64 go build ./cmd/quil ./cmd/quild
+GOOS=windows GOARCH=amd64 go build ./cmd/quil ./cmd/quild
 ```
 
 Expected: All six binaries compile cleanly.
@@ -2881,14 +2881,14 @@ git add .
 git commit -m "chore: M1 complete — daemon, TUI, tabs, panes, splits
 
 All M1 deliverables implemented:
-- aetheld daemon with cross-platform PTY management
-- aethel client with Bubble Tea TUI
+- quild daemon with cross-platform PTY management
+- quil client with Bubble Tea TUI
 - IPC via Unix sockets
 - Tab creation/switching (Alt+1-9)
 - Horizontal/vertical pane splits
 - Keyboard navigation between panes
 - Basic config.toml loading
-- aethel daemon start/stop commands"
+- quil daemon start/stop commands"
 
 git tag -a v0.1.0 -m "M1: Foundation — Daemon + Shell + TUI"
 ```
@@ -2899,10 +2899,10 @@ git tag -a v0.1.0 -m "M1: Foundation — Daemon + Shell + TUI"
 
 - [ ] `go test ./... -v` — all tests pass
 - [ ] `go vet ./...` — no issues
-- [ ] `go build ./cmd/aethel` — client binary compiles
-- [ ] `go build ./cmd/aetheld` — daemon binary compiles
+- [ ] `go build ./cmd/quil` — client binary compiles
+- [ ] `go build ./cmd/quild` — daemon binary compiles
 - [ ] Cross-compilation for Linux, macOS, Windows succeeds
 - [ ] Manual test: start daemon, launch client, type commands in shell pane
 - [ ] Manual test: create new tab (Ctrl+T), switch tabs (Alt+1/2)
 - [ ] Manual test: split pane (Ctrl+Shift+H), navigate panes (Ctrl+Tab)
-- [ ] Manual test: `aethel daemon stop` gracefully shuts down
+- [ ] Manual test: `quil daemon stop` gracefully shuts down

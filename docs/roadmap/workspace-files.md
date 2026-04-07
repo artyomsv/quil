@@ -1,4 +1,4 @@
-# Project Workspace Files (`.aethel.toml`)
+# Project Workspace Files (`.quil.toml`)
 
 | Field | Value |
 |-------|-------|
@@ -12,14 +12,14 @@
 
 **Layer 3: Project fragmentation** — 5 terminals + 3 tools + 2 SSH sessions = no single "project view." New team members face onboarding friction: "How do I run this project?" → README with 8 terminal commands. Every developer sets up their own ad-hoc arrangement.
 
-This is the single highest-impact feature for adoption. It transforms Aethel from a personal tool into a team infrastructure tool.
+This is the single highest-impact feature for adoption. It transforms Quil from a personal tool into a team infrastructure tool.
 
 ## Proposed Solution
 
-Define a workspace blueprint as a `.aethel.toml` file checked into the repository. When a developer runs `aethel` in a directory containing this file, the entire workspace materializes automatically.
+Define a workspace blueprint as a `.quil.toml` file checked into the repository. When a developer runs `quil` in a directory containing this file, the entire workspace materializes automatically.
 
 ```toml
-# .aethel.toml — checked into the repo
+# .quil.toml — checked into the repo
 [workspace]
 name = "my-saas-app"
 
@@ -50,7 +50,7 @@ plugin = "stripe"
 args = ["listen", "--forward-to", "localhost:3000/webhooks"]
 ```
 
-Then: `cd my-project && aethel` → entire workspace materializes.
+Then: `cd my-project && quil` → entire workspace materializes.
 
 **Why this drives adoption:** Every team member who clones a repo gets the *exact same* dev environment. It becomes like `docker-compose.yml` — once one person adds it, everyone uses it. **Network effect within teams.**
 
@@ -59,29 +59,29 @@ Then: `cd my-project && aethel` → entire workspace materializes.
 ### Creating a Workspace File
 
 ```bash
-# Option 1: Manual — create .aethel.toml in project root
+# Option 1: Manual — create .quil.toml in project root
 # Option 2: Snapshot current workspace
-aethel workspace export > .aethel.toml
+quil workspace export > .quil.toml
 
 # Option 3: Interactive
-aethel workspace init
+quil workspace init
 ```
 
 ### Using a Workspace File
 
 ```bash
 cd my-project
-aethel                    # auto-detects .aethel.toml, materializes workspace
-aethel --workspace alt.toml  # use a different workspace file
+quil                    # auto-detects .quil.toml, materializes workspace
+quil --workspace alt.toml  # use a different workspace file
 ```
 
 ### Behavior
 
-- If daemon is running with existing workspace, detect `.aethel.toml` and offer to load it
+- If daemon is running with existing workspace, detect `.quil.toml` and offer to load it
 - If starting fresh, create tabs/panes/splits from the file
-- CWD paths are relative to the `.aethel.toml` location
+- CWD paths are relative to the `.quil.toml` location
 - `cmd` fields are executed in the pane after creation
-- Plugin references must exist (built-in or installed in `~/.aethel/plugins/`)
+- Plugin references must exist (built-in or installed in `~/.quil/plugins/`)
 
 ## Technical Approach
 
@@ -106,7 +106,7 @@ type TabDef struct {
 
 type PaneDef struct {
     Plugin string   `toml:"plugin"`           // plugin name
-    CWD    string   `toml:"cwd,omitempty"`    // relative to .aethel.toml
+    CWD    string   `toml:"cwd,omitempty"`    // relative to .quil.toml
     CMD    string   `toml:"cmd,omitempty"`    // command to run after spawn
     Args   []string `toml:"args,omitempty"`   // plugin args
     Split  string   `toml:"split,omitempty"`  // "horizontal" or "vertical"
@@ -117,8 +117,8 @@ type PaneDef struct {
 ### 2. Loading Flow
 
 ```
-aethel starts
-  → check CWD for .aethel.toml
+quil starts
+  → check CWD for .quil.toml
   → parse workspace file
   → connect to daemon (auto-start if needed)
   → for each tab:
@@ -133,7 +133,7 @@ aethel starts
 
 ### 3. Export Command
 
-Snapshot current daemon state into `.aethel.toml` format:
+Snapshot current daemon state into `.quil.toml` format:
 - Walk tabs/panes, extract plugin type, CWD, instance args
 - Relativize CWD paths to project root
 - Output valid TOML
@@ -141,15 +141,15 @@ Snapshot current daemon state into `.aethel.toml` format:
 ### 4. File Location
 
 - `internal/workspace/` — new package for workspace file parsing and materialization
-- `cmd/aethel/workspace.go` — CLI subcommands (`export`, `init`)
+- `cmd/quil/workspace.go` — CLI subcommands (`export`, `init`)
 
 ## Success Criteria
 
-- [ ] `aethel` in a directory with `.aethel.toml` creates the described workspace
-- [ ] `aethel workspace export` snapshots current workspace to valid TOML
+- [ ] `quil` in a directory with `.quil.toml` creates the described workspace
+- [ ] `quil workspace export` snapshots current workspace to valid TOML
 - [ ] Relative CWD paths resolve correctly
 - [ ] Missing plugins produce clear error messages
-- [ ] `.aethel.toml` works across team members (no machine-specific paths)
+- [ ] `.quil.toml` works across team members (no machine-specific paths)
 
 ## Open Questions
 

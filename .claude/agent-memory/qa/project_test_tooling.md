@@ -1,10 +1,10 @@
 ---
 name: project_test_tooling
-description: How tests are run in the Aethel/Calyx project — Docker-based, no local Go
+description: How tests are run in the Quil/Calyx project — Docker-based, no local Go
 type: project
 ---
 
-All tests run via Docker through `./scripts/dev.sh test` (uses `golang:1.25` image). Go is NOT installed locally. Direct `docker run` with `-v aethel-gomod:/go/pkg/mod` also works.
+All tests run via Docker through `./scripts/dev.sh test` (uses `golang:1.25` image). Go is NOT installed locally. Direct `docker run` with `-v quil-gomod:/go/pkg/mod` also works.
 
 - Unit tests: `./scripts/dev.sh test` — runs `go test ./...` inside Docker
 - Race detector: `./scripts/dev.sh test-race` — adds CGo + gcc inside Docker

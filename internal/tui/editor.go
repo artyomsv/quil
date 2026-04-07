@@ -12,8 +12,8 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/artyomsv/aethel/internal/clipboard"
-	"github.com/artyomsv/aethel/internal/config"
+	"github.com/artyomsv/quil/internal/clipboard"
+	"github.com/artyomsv/quil/internal/config"
 )
 
 // editorPasteMsg delivers clipboard content to the active editor.

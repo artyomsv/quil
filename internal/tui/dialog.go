@@ -14,9 +14,9 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/google/uuid"
 
-	"github.com/artyomsv/aethel/internal/config"
-	"github.com/artyomsv/aethel/internal/ipc"
-	"github.com/artyomsv/aethel/internal/plugin"
+	"github.com/artyomsv/quil/internal/config"
+	"github.com/artyomsv/quil/internal/ipc"
+	"github.com/artyomsv/quil/internal/plugin"
 )
 
 const dialogWidth = 50
@@ -57,7 +57,7 @@ var disclaimerTips = []struct {
 		"Ctrl+V pastes from clipboard",
 	}},
 	{"Customization", []string{
-		"Edit ~/.aethel/config.toml for settings",
+		"Edit ~/.quil/config.toml for settings",
 		"All keybindings are configurable",
 		"Press F1 for help and shortcuts",
 	}},
@@ -462,8 +462,8 @@ func (m Model) renderDialog() string {
 func (m Model) renderAboutDialog() string {
 	var b strings.Builder
 
-	title := dialogTitle.Render("Aethel v" + m.version)
-	link := dialogSubtle.Render("github.com/artyomsv/aethel")
+	title := dialogTitle.Render("Quil v" + m.version)
+	link := dialogSubtle.Render("github.com/artyomsv/quil")
 
 	b.WriteString(lipgloss.PlaceHorizontal(dialogWidth, lipgloss.Center, title))
 	b.WriteByte('\n')
@@ -492,7 +492,7 @@ func (m Model) renderDisclaimerDialog() string {
 	w := disclaimerWidth
 
 	// Title
-	title := dialogTitle.Render("Aethel v" + m.version + " -- Early Beta")
+	title := dialogTitle.Render("Quil v" + m.version + " -- Early Beta")
 	b.WriteString(lipgloss.PlaceHorizontal(w, lipgloss.Center, title))
 	b.WriteString("\n\n")
 

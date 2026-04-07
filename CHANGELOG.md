@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to Aethel will be documented in this file.
+All notable changes to Quil will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Tab/Shift+Tab focus cycle** — while notes mode is active, `Tab` and `Shift+Tab` cycle keyboard focus between the editor (default) and the bound pane. Editor-focused: text input goes to notes, border bright blue, status bar `[notes]`/`[notes*]`. Pane-focused: keys reach the PTY normally, border dim grey, status bar `[notes pane]`
 - **Mouse selection in the notes editor** — click positions the cursor; click+drag creates a selection (highlighted in reverse video). Works with the existing `editorExtractText` so `Enter` and right-click both copy. Click in the pane area while notes mode is on hands keyboard focus to the pane (no Tab needed)
 - **Right-click copy** — right-click in the notes editor copies the active selection to the clipboard and clears the highlight, mirroring the existing pane right-click behaviour. The notes selection takes priority over a pane selection while notes mode is active
-- **Per-pane notes storage** — one markdown file per pane at `~/.aethel/notes/<pane-id>.md`. Atomic temp+rename writes via `internal/persist/notes.go` (`os.CreateTemp` for race-free temp filenames, `Lstat` symlink rejection, Windows reserved-name validation). Notes survive pane destruction — orphan notes remain on disk for a future browser
+- **Per-pane notes storage** — one markdown file per pane at `~/.quil/notes/<pane-id>.md`. Atomic temp+rename writes via `internal/persist/notes.go` (`os.CreateTemp` for race-free temp filenames, `Lstat` symlink rejection, Windows reserved-name validation). Notes survive pane destruction — orphan notes remain on disk for a future browser
 - **Three save safety nets** — 30-second debounce auto-save (reset on every edit), explicit `Ctrl+S` shortcut, and an unconditional flush on exit (toggling off, structural actions, tab switch, TUI quit). Saved files always end with a trailing newline
 - **`TextEditor.Highlight` field** — new typed `HighlightMode` (`HighlightTOML` default, `HighlightPlain` for notes) so the existing rune-aware editor can render plain text without TOML syntax colouring
 - **`TextEditor.GutterWidth`** — dynamic line-number gutter width derived from `len(Lines)` so files with 1000+ lines render correctly and mouse-to-document coordinate mapping stays accurate
@@ -29,7 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`Model.exitNotesMode` is pointer-receiver** — discarded calls (`m.exitNotesMode()` as a statement) still mutate the model, eliminating the silent-reinstate footgun the previous review flagged
 - **Clipboard write errors logged consistently** — `model.go:294`, `:312`, and `:1086` all wrap `clipboard.Write` in an error-check + `log.Printf`
 - `TextEditor` struct gained a `Highlight` field; existing call sites default to TOML highlighting for backward compatibility
-- `cmd/aethel/main.go` calls `Model.FlushNotes()` on TUI exit as a safety net for unsaved notes
+- `cmd/quil/main.go` calls `Model.FlushNotes()` on TUI exit as a safety net for unsaved notes
 
 ## [0.12.1] - 2026-04-05
 
@@ -66,14 +66,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **MCP Server (M10)** — `aethel mcp` subcommand exposes Aethel to AI assistants via Model Context Protocol. 13 tools: `list_panes`, `read_pane_output`, `send_to_pane`, `get_pane_status`, `create_pane`, `send_keys`, `restart_pane`, `screenshot_pane`, `switch_tab`, `list_tabs`, `destroy_pane`, `set_active_pane`, `close_tui`
+- **MCP Server (M10)** — `quil mcp` subcommand exposes Quil to AI assistants via Model Context Protocol. 13 tools: `list_panes`, `read_pane_output`, `send_to_pane`, `get_pane_status`, `create_pane`, `send_keys`, `restart_pane`, `screenshot_pane`, `switch_tab`, `list_tabs`, `destroy_pane`, `set_active_pane`, `close_tui`
 - **Official MCP SDK** — uses `modelcontextprotocol/go-sdk` v1.4+ with typed tool handlers and struct-based input schemas
 - **Request-response IPC** — backward-compatible `Message.ID` field for correlating MCP requests; daemon responds to specific connection when ID is set, broadcasts when empty
 - **Process exit tracking** — `WaitExit()` on PTY `Session` interface with `sync.Once` for safe concurrent access; `Pane.ExitCode` and `Pane.ExitedAt` fields
 - **VT-emulated screenshots** — `screenshot_pane` tool feeds ring buffer through `charmbracelet/x/vt` terminal emulator to capture actual screen state; essential for interactive TUI apps
 - **Named key sequences** — `send_keys` tool with 50+ key mappings (arrows, function keys, ctrl+a-z); escape sequences sent individually with 50ms pacing for TUI compatibility
 - **Orange MCP highlight** — pane border flashes orange (color 208) when AI interacts via MCP; configurable duration via `[mcp] highlight_duration` (default 10s)
-- **Per-pane MCP logging** — interaction metadata logged to `~/.aethel/mcp-logs/{pane-id}.log`; two-layer redaction: AI markers (`<<REDACT>>...<</REDACT>>`) + regex fallback for common secret patterns
+- **Per-pane MCP logging** — interaction metadata logged to `~/.quil/mcp-logs/{pane-id}.log`; two-layer redaction: AI markers (`<<REDACT>>...<</REDACT>>`) + regex fallback for common secret patterns
 - **MCP server instructions** — tool usage guidelines and sensitive data handling protocol sent to AI clients during initialize handshake
 - **TUI cooperation tools** — `set_active_pane` broadcasts to TUI for pane focus; `close_tui` exits TUI while daemon persists
 - **Notification center PRD update** — added MCP integration section: `watch_notifications` blocking tool, event hub architecture, AI as event consumer
@@ -97,8 +97,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Restructured ROADMAP.md** — organized into Core/Growth/Advanced categories with priority matrix, strategic pain-layer analysis, and feature synergy notes
 - **Notification center concept (M12)** — centralized event sidebar with pane navigation and history stack; PRD covers process exit detection, plugin notification handlers, and incremental integration path
 - **Pre-built binaries & release infrastructure** — GoReleaser config for 5 platforms (linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64); `release.yml` handles version bump + tag + GoReleaser build, publishes GitHub Release with `.tar.gz`/`.zip` archives and SHA256 checksums
-- **One-line install script** — `scripts/install.sh` detects OS/arch, fetches latest release from GitHub API, verifies SHA256 checksum, installs to `~/.local/bin/`; supports `AETHEL_VERSION` for pinned installs and `GITHUB_TOKEN` for API auth
-- **Daemon version reporting** — `aetheld version` subcommand, version logged at startup; consistent `-ldflags` injection across all build paths (GoReleaser, dev.sh, dev.ps1, rebuild.ps1, Makefile)
+- **One-line install script** — `scripts/install.sh` detects OS/arch, fetches latest release from GitHub API, verifies SHA256 checksum, installs to `~/.local/bin/`; supports `QUIL_VERSION` for pinned installs and `GITHUB_TOKEN` for API auth
+- **Daemon version reporting** — `quild version` subcommand, version logged at startup; consistent `-ldflags` injection across all build paths (GoReleaser, dev.sh, dev.ps1, rebuild.ps1, Makefile)
 
 ### Fixed
 
@@ -174,8 +174,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Plugin configuration reference** — comprehensive documentation for creating custom plugins covering every TOML section, field, strategy, and behavior with annotated examples (`docs/plugin-reference.md`)
-- **Default TOML plugins** — claude-code, ssh, stripe shipped as editable embedded TOML files via `//go:embed`; written to `~/.aethel/plugins/` on first run, user edits preserved across upgrades
-- **Plugin instance management** — `InstanceStore` persists saved SSH connections, Stripe webhooks, etc. to `~/.aethel/instances.json`; form fields + arg templates defined per-plugin
+- **Default TOML plugins** — claude-code, ssh, stripe shipped as editable embedded TOML files via `//go:embed`; written to `~/.quil/plugins/` on first run, user edits preserved across upgrades
+- **Plugin instance management** — `InstanceStore` persists saved SSH connections, Stripe webhooks, etc. to `~/.quil/instances.json`; form fields + arg templates defined per-plugin
 - **Plugin management UI** — F1 → Plugins dialog with view, reload, restore defaults, and in-app TOML editor
 - **In-app TOML editor** — full-screen multi-line editor with rune-aware cursor, TOML syntax highlighting (comments grey, sections orange, keys blue, strings green), validation on save
 - **Pane creation instance step** — Ctrl+N dialog extended: category → plugin → instance selection → split direction (4 steps)
@@ -207,7 +207,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Plugin system** — typed panes with 4 built-in plugins: Terminal, Claude Code (AI), Stripe (webhook), SSH (remote)
 - `internal/plugin/` package — plugin structs, registry, TOML loading, regex scraper, error handler matching
-- TOML plugin format — user-created plugins in `~/.aethel/plugins/*.toml` with command, persistence, error handlers, and instances
+- TOML plugin format — user-created plugins in `~/.quil/plugins/*.toml` with command, persistence, error handlers, and instances
 - Plugin registry with `DetectAvailability()` — checks PATH for plugin binaries at startup
 - Pane creation dialog (`Ctrl+N`) — three-step flow: category → plugin → split direction (horizontal, vertical, replace)
 - Atomic pane replacement via `ReplacePane()` — swap pane type in-place without layout disruption
@@ -218,7 +218,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Error handler system — match PTY output against regex patterns, show help dialogs (e.g., SSH auth failure, missing API key)
 - `MsgPluginError` IPC message — daemon-to-TUI error notification with modal dialog display
 - Resuming/preparing spinner — animated braille indicator (`⠹ resuming...` / `⠹ preparing...`) on pane border during startup
-- Window size persistence — save/restore terminal dimensions via `~/.aethel/window.json`
+- Window size persistence — save/restore terminal dimensions via `~/.quil/window.json`
 - Platform-specific window restore — Win32 `MoveWindow`/`ShowWindow` on Windows, xterm sequence on Unix
 - Maximized window state detection and restoration via `IsZoomed`/`SW_MAXIMIZE`
 - `PluginsDir()` and `WindowStatePath()` config path helpers
@@ -230,7 +230,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `spawnShell()` replaced with generalized `spawnPane()` — dispatches by plugin type and resume strategy
 - `respawnShells()` replaced with `respawnPanes()` — fallback to terminal shell on plugin spawn failure
 - Ghost buffer replay skipped for TUI app panes (`preassign_id`, `session_scrape`) — prevents cursor state pollution
-- Aethel cursor overlay disabled for non-terminal panes — TUI apps render their own cursor
+- Quil cursor overlay disabled for non-terminal panes — TUI apps render their own cursor
 - `CreatePanePayload` extended with `Type`, `InstanceName`, `InstanceArgs`, `ReplacePaneID`
 - `NewModel()` accepts plugin registry parameter
 - Status bar updated with `^N pane` hint
@@ -254,11 +254,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Multi-instance support via `AETHEL_HOME` env var — run production and dev instances simultaneously
-- `--dev` CLI flag — uses `.aethel/` in project root for isolated dev data
-- Dev launcher scripts: `aethel-dev.sh` / `aethel-dev.ps1`
+- Multi-instance support via `QUIL_HOME` env var — run production and dev instances simultaneously
+- `--dev` CLI flag — uses `.quil/` in project root for isolated dev data
+- Dev launcher scripts: `quil-dev.sh` / `quil-dev.ps1`
 - `[dev]` indicator in status bar when running in dev mode
-- `TestAethelDir_EnvOverride` test for env var override
+- `TestQuilDir_EnvOverride` test for env var override
 
 ### Fixed
 
@@ -270,9 +270,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Workspace snapshot persistence — tabs, panes, layout, and CWD saved to `~/.aethel/workspace.json`
+- Workspace snapshot persistence — tabs, panes, layout, and CWD saved to `~/.quil/workspace.json`
 - Atomic file writes with `.bak` rollback for crash-safe persistence
-- Ghost buffer persistence — raw PTY output saved per pane to `~/.aethel/buffers/*.bin`
+- Ghost buffer persistence — raw PTY output saved per pane to `~/.quil/buffers/*.bin`
 - Automatic workspace restore on daemon restart — tabs, panes, and layouts reconstructed from disk
 - Shell respawn with saved CWD — panes reopen in the directory you were last working in
 - Periodic snapshot timer (configurable via `snapshot_interval`, default 30s)
@@ -301,17 +301,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Daemon process detachment — survives TUI exit on all platforms (Unix: `Setsid`, Windows: `DETACHED_PROCESS`)
-- `aethel daemon status` command — reports daemon PID and connectivity
-- PID file tracking (`~/.aethel/aetheld.pid`) for lifecycle management
-- `aetheld --background` flag — suppresses stdout/stderr for silent auto-start
-- Daemon binary co-location lookup — finds `aetheld` alongside `aethel` when not on PATH (fixes Windows Go 1.19+ LookPath)
+- `quil daemon status` command — reports daemon PID and connectivity
+- PID file tracking (`~/.quil/quild.pid`) for lifecycle management
+- `quild --background` flag — suppresses stdout/stderr for silent auto-start
+- Daemon binary co-location lookup — finds `quild` alongside `quil` when not on PATH (fixes Windows Go 1.19+ LookPath)
 - Stale socket cleanup — detects dead daemon sockets and removes them before starting fresh
 
 ### Fixed
 
 - Daemon dying when TUI exits on Windows (missing `DETACHED_PROCESS` creation flag)
 - `os.Exit(0)` in shutdown handler skipping deferred cleanup — replaced with channel-based signaling
-- PID file written before `~/.aethel/` directory guaranteed to exist
+- PID file written before `~/.quil/` directory guaranteed to exist
 
 ## [0.2.0] - 2026-03-12
 
@@ -322,9 +322,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bubble Tea TUI with tab bar, bordered panes, and status bar
 - Horizontal and vertical pane splitting
 - Keyboard navigation between panes and tabs
-- TOML configuration with sensible defaults (`~/.aethel/config.toml`)
+- TOML configuration with sensible defaults (`~/.quil/config.toml`)
 - Daemon auto-start on first client attach
-- `aethel daemon start/stop` CLI commands
+- `quil daemon start/stop` CLI commands
 - Length-prefixed JSON IPC protocol with typed messages
 - Default shell workspace created on first attach
 - Docker-based development workflow (`dev.sh`) — no local Go or make required
@@ -344,4 +344,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Resize debouncing for smooth terminal resizing
 - Configurable keybindings via `[keybindings]` in config.toml
 - Configurable mouse scroll lines and page scroll lines via `[ui]` in config.toml
-- Structured logging for both client and daemon (`~/.aethel/*.log`)
+- Structured logging for both client and daemon (`~/.quil/*.log`)

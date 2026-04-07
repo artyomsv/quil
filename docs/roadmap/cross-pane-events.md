@@ -10,7 +10,7 @@
 
 ## Problem
 
-Aethel panes are isolated — they can't react to events in other panes. A build failure in one pane doesn't notify the AI assistant in another. An SSH disconnect doesn't trigger reconnection. Test results don't update tab badges. The developer is still the message bus between their tools.
+Quil panes are isolated — they can't react to events in other panes. A build failure in one pane doesn't notify the AI assistant in another. An SSH disconnect doesn't trigger reconnection. Test results don't update tab badges. The developer is still the message bus between their tools.
 
 This creates an **integrated experience** that no collection of separate terminals can match.
 

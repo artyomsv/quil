@@ -1,6 +1,6 @@
-# Aethel Roadmap
+# Quil Roadmap
 
-Detailed progress tracker and future plans for Aethel.
+Detailed progress tracker and future plans for Quil.
 
 ---
 
@@ -14,7 +14,7 @@ All core infrastructure is in place. The client-daemon architecture works across
 ### M2: Persistence
 > Workspace snapshots, ghost buffer persistence, shell respawn, reboot-proof sessions.
 
-Workspace state (tabs, panes, layout, CWD) persists to `~/.aethel/workspace.json` with atomic writes and `.bak` rollback. Ghost buffers capture PTY output to binary files. On daemon restart, shells respawn with saved CWD and ghost buffers replay instantly.
+Workspace state (tabs, panes, layout, CWD) persists to `~/.quil/workspace.json` with atomic writes and `.bak` rollback. Ghost buffers capture PTY output to binary files. On daemon restart, shells respawn with saved CWD and ghost buffers replay instantly.
 
 ### M3: Resume Engine
 > Regex scrapers, token extraction, AI session resume.
@@ -24,7 +24,7 @@ Session resume infrastructure is complete. The `preassign_id` strategy generates
 ### M4: Plugin System
 > Typed panes with TOML plugins, plugin registry, pane creation dialog.
 
-The plugin system is fully operational. 4 built-in plugins ship with Aethel:
+The plugin system is fully operational. 4 built-in plugins ship with Quil:
 
 | Plugin | Status | Persistence |
 |--------|--------|-------------|
@@ -34,7 +34,7 @@ The plugin system is fully operational. 4 built-in plugins ship with Aethel:
 | **Stripe** | POC | `rerun` — re-listen with same webhook URL |
 
 Key capabilities:
-- **TOML plugin format** — user-created plugins in `~/.aethel/plugins/*.toml`
+- **TOML plugin format** — user-created plugins in `~/.quil/plugins/*.toml`
 - **Plugin registry** with auto-detection (`exec.LookPath`)
 - **Pane creation dialog** (`Ctrl+N`) — three-step: category, plugin, split direction
 - **Error handlers** — regex patterns match PTY output and show help dialogs
@@ -53,7 +53,7 @@ Key behaviors:
 - `[focus]` indicator in status bar
 - Pane navigation (Tab/Shift+Tab) disabled in focus mode
 - Split (Alt+H/V) and close (Ctrl+W) auto-exit focus mode
-- Focus state is NOT persisted — restarting Aethel returns to normal layout
+- Focus state is NOT persisted — restarting Quil returns to normal layout
 
 ### M8: Bubble Tea v2 Migration + Text Selection
 > BT v2 + Lipgloss v2 migration, text selection, platform-native clipboard, editor enhancements.
@@ -78,16 +78,16 @@ Key changes:
 GoReleaser produces archives for 5 platforms (linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64) with SHA256 checksums. Single `release.yml` workflow with two jobs: version bump + tag, then GoReleaser build + publish. Install script (`scripts/install.sh`) for Linux/macOS with checksum verification. Homebrew tap, Scoop, Winget deferred (need external repos).
 
 Key capabilities:
-- **GoReleaser config** — `.goreleaser.yml` (v2), two builds (aethel + aetheld), `.tar.gz`/`.zip` archives
+- **GoReleaser config** — `.goreleaser.yml` (v2), two builds (quil + quild), `.tar.gz`/`.zip` archives
 - **Automated releases** — conventional commit analysis → version bump → tag → build → publish
-- **Install script** — POSIX shell, OS/arch detection, SHA256 verification, `AETHEL_VERSION` pinning
+- **Install script** — POSIX shell, OS/arch detection, SHA256 verification, `QUIL_VERSION` pinning
 - **Version injection** — consistent `-ldflags` across GoReleaser, dev.sh, dev.ps1, rebuild.ps1, Makefile
 - **CI security** — actions pinned to SHA, per-job permissions, version format validation
 
 ### M10: MCP Server — [PRD](docs/roadmap/mcp-server.md)
-> Make Aethel the AI's eyes and hands via Model Context Protocol.
+> Make Quil the AI's eyes and hands via Model Context Protocol.
 
-`aethel mcp` subcommand bridges MCP JSON-RPC (stdio) to daemon IPC (socket). AI assistants can read pane output, send commands, take screenshots, navigate tabs, restart panes, and control the TUI. No other terminal multiplexer offers this.
+`quil mcp` subcommand bridges MCP JSON-RPC (stdio) to daemon IPC (socket). AI assistants can read pane output, send commands, take screenshots, navigate tabs, restart panes, and control the TUI. No other terminal multiplexer offers this.
 
 Key capabilities:
 - **13 MCP tools** — Phase A: `list_panes`, `read_pane_output`, `send_to_pane`, `get_pane_status`, `create_pane`. Phase B: `send_keys`, `restart_pane`, `screenshot_pane`, `switch_tab`, `list_tabs`, `destroy_pane`, `set_active_pane`, `close_tui`
@@ -95,7 +95,7 @@ Key capabilities:
 - **Request-response IPC** — backward-compatible `Message.ID` field for correlation; daemon responds to specific connection
 - **VT-emulated screenshots** — `charmbracelet/x/vt` renders ring buffer into text grid showing actual screen state
 - **Orange highlight** — pane border flashes orange during MCP interaction (configurable `[mcp] highlight_duration`)
-- **Per-pane logging** — interaction metadata in `~/.aethel/mcp-logs/`; two-layer redaction (AI markers + regex fallback)
+- **Per-pane logging** — interaction metadata in `~/.quil/mcp-logs/`; two-layer redaction (AI markers + regex fallback)
 - **TUI cooperation** — `set_active_pane` and `close_tui` use daemon broadcast → TUI handler pattern
 - **Process exit tracking** — `Pane.ExitCode` and `WaitExit()` with `sync.Once` on PTY sessions (Unix + Windows)
 
@@ -124,7 +124,7 @@ Key capabilities:
 - **Alt+E toggle** — opens the notes editor alongside the active pane (pane left ~60%, editor right ~40%). Mutually exclusive with focus mode
 - **Read-only pane while editing** — all keys route to the editor so there is never ambiguity about where input lands. Exit notes to interact with the pane
 - **Three independent save safety nets** — 30-second debounce auto-save, explicit `Ctrl+S`, and unconditional save on exit (`Alt+E`, `Esc`, close/split, TUI quit)
-- **Per-pane storage** — `~/.aethel/notes/<pane-id>.md`, atomic temp+rename writes, survives daemon restart (pane IDs are stable via `workspace.json`)
+- **Per-pane storage** — `~/.quil/notes/<pane-id>.md`, atomic temp+rename writes, survives daemon restart (pane IDs are stable via `workspace.json`)
 - **Notes outlive the pane** — closing or destroying a pane does not delete its notes file; browser ships in Phase 2
 - **TextEditor reuse** — the existing rune-aware editor (selection, clipboard, multi-line paste, word jumps) gained a `Highlight` field so it can render plain text with no TOML colouring
 
@@ -149,10 +149,10 @@ Key capabilities:
 
 **Remaining:**
 - JSON transformer (`Ctrl+J`) — format and highlight JSON in terminal output
-- Observability commands — `aethel status`, session metrics, log level control
+- Observability commands — `quil status`, session metrics, log level control
 - Encrypted token storage — OS keyring integration for sensitive scraped values
 - Tab dock positions (top/bottom/left/right)
-- OS service integration (`aethel service install` — systemd/launchd/Task Scheduler)
+- OS service integration (`quil service install` — systemd/launchd/Task Scheduler)
 
 ---
 
@@ -160,9 +160,9 @@ Key capabilities:
 
 ### M9: Project Workspace Files — [PRD](docs/roadmap/workspace-files.md)
 
-> `.aethel.toml` checked into repo — the "docker-compose.yml for dev environments."
+> `.quil.toml` checked into repo — the "docker-compose.yml for dev environments."
 
-Define workspace blueprints committed to git: tabs, panes, plugins, CWDs, commands. `cd my-project && aethel` materializes the entire dev environment. Every team member gets the exact same setup. **Network effect within teams.**
+Define workspace blueprints committed to git: tabs, panes, plugins, CWDs, commands. `cd my-project && quil` materializes the entire dev environment. Every team member gets the exact same setup. **Network effect within teams.**
 
 ### M11: Command Palette — [PRD](docs/roadmap/command-palette.md)
 
@@ -176,21 +176,21 @@ Search panes, execute commands, switch tabs, create panes, open saved instances 
 
 ### The "Holy Shit" Demo — [PRD](docs/roadmap/demo-gif.md)
 
-> 30-second GIF: 5 panes → reboot → `aethel` → everything snaps back.
+> 30-second GIF: 5 panes → reboot → `quil` → everything snaps back.
 
 The entire pitch in one visual. Goes on README, Hacker News, r/programming, Twitter/X. Adoption for developer tools is driven by a single viral moment. **Priority 2** — prerequisite for marketing.
 
 ### Community Plugin Registry — [PRD](docs/roadmap/community-plugins.md)
 
-> `aethel plugin install aider` — community TOML plugins via GitHub.
+> `quil plugin install aider` — community TOML plugins via GitHub.
 
-GitHub repo as registry, `aethel plugin install/search/update` CLI. High-value plugins: Aider, lazygit, k9s, Docker Compose, ngrok, pgcli. Every plugin makes Aethel useful to a new audience.
+GitHub repo as registry, `quil plugin install/search/update` CLI. High-value plugins: Aider, lazygit, k9s, Docker Compose, ngrok, pgcli. Every plugin makes Quil useful to a new audience.
 
 ### tmux Migration Path — [PRD](docs/roadmap/tmux-migration.md)
 
 > Import keybindings and session layouts from tmux.
 
-`aethel import-keybindings tmux` reads `~/.tmux.conf`, maps to `config.toml`. `aethel import-session` snapshots a running tmux session into an Aethel workspace. tmux has millions of users — making switching painless is the fastest acquisition channel.
+`quil import-keybindings tmux` reads `~/.tmux.conf`, maps to `config.toml`. `quil import-session` snapshots a running tmux session into an Quil workspace. tmux has millions of users — making switching painless is the fastest acquisition channel.
 
 ---
 
@@ -200,7 +200,7 @@ GitHub repo as registry, `aethel plugin install/search/update` CLI. High-value p
 
 > Green/yellow/red health indicators, auto-restart with backoff, stale detection.
 
-Elevate `error_handlers` to a first-class health monitoring system. Auto-restart crashed panes with exponential backoff, detect stale processes, fire desktop notifications. Plugin TOML `[health]` section for configuration. Moves Aethel from "terminal organizer" to "workflow orchestrator."
+Elevate `error_handlers` to a first-class health monitoring system. Auto-restart crashed panes with exponential backoff, detect stale processes, fire desktop notifications. Plugin TOML `[health]` section for configuration. Moves Quil from "terminal organizer" to "workflow orchestrator."
 
 ### Cross-Pane Context Awareness — [PRD](docs/roadmap/cross-pane-events.md)
 
@@ -210,7 +210,7 @@ Event bus connecting panes: build errors notify AI assistants, SSH auto-reconnec
 
 ### Session Sharing — [PRD](docs/roadmap/session-sharing.md)
 
-> `aethel serve --share` / `aethel attach --host` for pair programming.
+> `quil serve --share` / `quil attach --host` for pair programming.
 
 Remote workspace viewing and collaboration over TCP+TLS. Read-only by default, collaborative mode optional. tmux session sharing but with project context, typed panes, and AI session awareness.
 
@@ -222,7 +222,7 @@ Remote workspace viewing and collaboration over TCP+TLS. Read-only by default, c
 |----------|---------|--------|--------|----------|
 | ~~1~~ | ~~Pre-built binaries + one-line install~~ | ~~Small~~ | ~~Critical~~ | ~~Done~~ |
 | 2 | "Holy Shit" demo GIF/video | Small | Critical | Growth |
-| 3 | Project workspace files (`.aethel.toml`) | Medium | Very High | Core |
+| 3 | Project workspace files (`.quil.toml`) | Medium | Very High | Core |
 | 4 | Command palette (`Ctrl+Shift+P`) | Medium | High | Core |
 | ~~5~~ | ~~MCP server for AI integration~~ | ~~Medium~~ | ~~Very High~~ | ~~Done~~ |
 | 5 | Notification center (sidebar + pane history) | Medium | High | Core |
@@ -244,7 +244,7 @@ Remote workspace viewing and collaboration over TCP+TLS. Read-only by default, c
 | 4. Onboarding friction | "How do I run this?" → README with 8 terminal commands | New team members, OSS contributors |
 | 5. Cross-tool blindness | AI assistant can't see the build error in the next pane | Everyone using AI coding tools |
 
-Aethel currently solves layers 1-3 well. **Layers 4-5 are where the breakout potential lives.**
+Quil currently solves layers 1-3 well. **Layers 4-5 are where the breakout potential lives.**
 
 Items 1-2 (install + demo) cost almost nothing and are **prerequisites for everything else**. Items 3 (workspace files) and 5 (MCP) are the **strategic differentiators** — workspace files create team adoption and MCP creates the "AI-native" moat that no other multiplexer can claim.
 

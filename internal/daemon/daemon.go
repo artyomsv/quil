@@ -19,13 +19,13 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/vt"
 	"github.com/google/uuid"
-	"github.com/artyomsv/aethel/internal/config"
-	"github.com/artyomsv/aethel/internal/ipc"
-	"github.com/artyomsv/aethel/internal/persist"
-	"github.com/artyomsv/aethel/internal/plugin"
-	apty "github.com/artyomsv/aethel/internal/pty"
-	"github.com/artyomsv/aethel/internal/ringbuf"
-	"github.com/artyomsv/aethel/internal/shellinit"
+	"github.com/artyomsv/quil/internal/config"
+	"github.com/artyomsv/quil/internal/ipc"
+	"github.com/artyomsv/quil/internal/persist"
+	"github.com/artyomsv/quil/internal/plugin"
+	apty "github.com/artyomsv/quil/internal/pty"
+	"github.com/artyomsv/quil/internal/ringbuf"
+	"github.com/artyomsv/quil/internal/shellinit"
 )
 
 // oscBellRe matches OSC sequences terminated by BEL (\x07), e.g., \x1b]0;title\x07.
@@ -69,12 +69,12 @@ func New(cfg config.Config) *Daemon {
 }
 
 func (d *Daemon) Start() error {
-	aethelDir := config.AethelDir()
-	if err := os.MkdirAll(aethelDir, 0700); err != nil {
-		return fmt.Errorf("create aethel dir: %w", err)
+	quilDir := config.QuilDir()
+	if err := os.MkdirAll(quilDir, 0700); err != nil {
+		return fmt.Errorf("create quil dir: %w", err)
 	}
 
-	if err := shellinit.EnsureInitDir(aethelDir); err != nil {
+	if err := shellinit.EnsureInitDir(quilDir); err != nil {
 		log.Printf("warning: failed to write shell init scripts: %v", err)
 	}
 
@@ -109,7 +109,7 @@ func (d *Daemon) Start() error {
 
 	go d.idleChecker()
 
-	log.Printf("aetheld started, listening on %s", sockPath)
+	log.Printf("quild started, listening on %s", sockPath)
 	return nil
 }
 
@@ -1146,7 +1146,7 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 
 	// Shell integration (only for terminal-type panes)
 	if p.Command.ShellIntegration {
-		shellCfg := shellinit.Configure(cmd, config.AethelDir())
+		shellCfg := shellinit.Configure(cmd, config.QuilDir())
 		if shellCfg != nil {
 			ptySession.SetEnv(shellCfg.Env)
 			cmd = shellCfg.Cmd

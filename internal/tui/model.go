@@ -283,24 +283,40 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Mod.Contains(tea.ModCtrl) {
 			return m, nil
 		}
-		// Right-click: copy selection to clipboard
-		if msg.Button == tea.MouseRight && m.selection != nil {
-			tab := m.activeTabModel()
-			if tab != nil {
-				if pane := tab.ActivePaneModel(); pane != nil {
-					text := extractText(pane, m.selection)
-					m.selection = nil
-					if text != "" {
-						return m, func() tea.Msg {
-							clipboard.Write(text)
-							return nil
+		// Right-click: copy the active selection to the clipboard. While
+		// notes mode is on, the editor's selection takes priority.
+		if msg.Button == tea.MouseRight {
+			if m.notesMode && m.notesEditor != nil && m.notesEditor.editor.Sel != nil && !m.notesEditor.editor.Sel.IsEmpty() {
+				text := editorExtractText(m.notesEditor.editor.Lines, m.notesEditor.editor.Sel)
+				m.notesEditor.editor.Sel = nil
+				if text != "" {
+					return m, func() tea.Msg {
+						if err := clipboard.Write(text); err != nil {
+							log.Printf("notes clipboard write: %v", err)
 						}
+						return nil
 					}
-					return m, nil
 				}
+				return m, nil
 			}
-			m.selection = nil
-			return m, nil
+			if m.selection != nil {
+				tab := m.activeTabModel()
+				if tab != nil {
+					if pane := tab.ActivePaneModel(); pane != nil {
+						text := extractText(pane, m.selection)
+						m.selection = nil
+						if text != "" {
+							return m, func() tea.Msg {
+								clipboard.Write(text)
+								return nil
+							}
+						}
+						return m, nil
+					}
+				}
+				m.selection = nil
+				return m, nil
+			}
 		}
 		if msg.Button == tea.MouseLeft {
 			if msg.Y == 0 {

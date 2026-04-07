@@ -185,6 +185,13 @@ type Model struct {
 	notifications        *NotificationCenter    // notification sidebar
 	paneHistory          []PaneRef              // navigation history (bounded, 20 max)
 	sidebarFocused       bool                   // true when notification sidebar has keyboard focus
+	notesMode            bool                   // true when pane notes editor is open for the active pane
+	notesEditor          *NotesEditor           // active notes editor (nil when notesMode is false)
+	notesPaneFocused     bool                   // true when keyboard input goes to the bound pane (PTY) instead of the notes editor
+	notesEnteredFocus    bool                   // true when toggleNotesMode was the one that turned the tab's focus mode on (so exit reverts)
+	notesMouseDown       bool                   // true while a left-button drag is in progress inside the notes editor
+	notesAnchorRow       int                    // document row where a notes-editor drag began (resolved once on click)
+	notesAnchorCol       int                    // document col where a notes-editor drag began (resolved once on click)
 }
 
 func NewModel(client *ipc.Client, cfg config.Config, version string, registry *plugin.Registry) Model {
@@ -213,6 +220,20 @@ func (m Model) WindowSize() (width, height int) {
 
 // Config returns the current config (may be modified by user actions).
 func (m Model) Config() config.Config { return m.cfg }
+
+// FlushNotes writes any pending notes edits to disk. Safe to call when notes
+// mode is inactive (no-op).
+//
+// Precondition: must be invoked AFTER tea.Program.Run has returned, when the
+// Update goroutine is no longer pumping events. Calling concurrently with the
+// Update loop is unsafe — the editor is mutable shared state.
+func (m Model) FlushNotes() {
+	if m.notesEditor != nil {
+		if err := m.notesEditor.Close(); err != nil {
+			log.Printf("flush notes on exit: %v", err)
+		}
+	}
+}
 
 // ConfigChanged reports whether the config was modified and needs saving.
 func (m Model) ConfigChanged() bool { return m.configChanged }
@@ -264,44 +285,106 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Mod.Contains(tea.ModCtrl) {
 			return m, nil
 		}
-		// Right-click: copy selection to clipboard
-		if msg.Button == tea.MouseRight && m.selection != nil {
-			tab := m.activeTabModel()
-			if tab != nil {
-				if pane := tab.ActivePaneModel(); pane != nil {
-					text := extractText(pane, m.selection)
-					m.selection = nil
-					if text != "" {
-						return m, func() tea.Msg {
-							clipboard.Write(text)
-							return nil
+		// Right-click: copy the active selection to the clipboard. While
+		// notes mode is on, the editor's selection takes priority.
+		if msg.Button == tea.MouseRight {
+			if m.notesMode && m.notesEditor.HasSelection() {
+				text := m.notesEditor.ExtractSelection()
+				m.notesEditor.ClearSelection()
+				if text != "" {
+					return m, func() tea.Msg {
+						if err := clipboard.Write(text); err != nil {
+							log.Printf("notes clipboard write: %v", err)
 						}
+						return nil
 					}
-					return m, nil
 				}
+				return m, nil
 			}
-			m.selection = nil
-			return m, nil
+			if m.selection != nil {
+				tab := m.activeTabModel()
+				if tab != nil {
+					if pane := tab.ActivePaneModel(); pane != nil {
+						text := extractText(pane, m.selection)
+						m.selection = nil
+						if text != "" {
+							return m, func() tea.Msg {
+								if err := clipboard.Write(text); err != nil {
+									log.Printf("pane clipboard write: %v", err)
+								}
+								return nil
+							}
+						}
+						return m, nil
+					}
+				}
+				m.selection = nil
+				return m, nil
+			}
 		}
 		if msg.Button == tea.MouseLeft {
 			if msg.Y == 0 {
 				// Tab bar click
 				m.mouseDown = false
+				// Note: notesMouseDown is not touched here — a fresh
+				// MouseClick always follows a prior MouseRelease which
+				// already cleared the flag, so resetting it would be
+				// dead defensive code.
 				if idx := m.hitTestTab(msg.X); idx >= 0 {
 					cmd := m.switchTab(idx)
 					return m, cmd
 				}
 			} else if msg.Y < m.height-1 {
-				// Pane area — start tracking for drag selection
+				// Notes editor click takes priority when in notes mode and
+				// the pointer is inside the editor's bordered box. Resolve
+				// the document anchor once at click time and cache it —
+				// re-resolving on every mouse-motion event would drift if
+				// the editor's ScrollTop changed between click and first
+				// motion.
+				if row, col, ok := m.notesEditorPosAt(msg.X, msg.Y); ok {
+					m.notesMouseDown = true
+					m.mouseDown = false
+					m.mouseStartX = msg.X
+					m.mouseStartY = msg.Y
+					m.notesAnchorRow = row
+					m.notesAnchorCol = col
+					m.selection = nil
+					m.notesPaneFocused = false
+					m.notesEditor.SetCursor(row, col)
+					return m, nil
+				}
+				// Pane area — start tracking for drag selection.
 				m.mouseDown = true
+				m.notesMouseDown = false
 				m.mouseStartX = msg.X
 				m.mouseStartY = msg.Y
-				m.selection = nil // clear previous selection
+				m.selection = nil
+				// Clicking in the pane area while notes mode is active
+				// hands keyboard focus to the pane.
+				if m.notesMode && m.notesEditor != nil {
+					m.notesPaneFocused = true
+				}
 			}
 		}
 		return m, nil
 
 	case tea.MouseMotionMsg:
+		if m.notesMouseDown && m.notesMode && m.notesEditor != nil {
+			row, col, ok := m.notesEditorPosAt(msg.X, msg.Y)
+			if !ok {
+				return m, nil
+			}
+			// Begin selection on first motion (so a click without drag
+			// just positions the cursor) and extend on subsequent moves.
+			// The anchor was resolved at click time into notesAnchorRow/Col
+			// so selection start is independent of any scroll that may
+			// have occurred since the click.
+			if !m.notesEditor.HasSelection() {
+				m.notesEditor.BeginSelection(m.notesAnchorRow, m.notesAnchorCol)
+			}
+			m.notesEditor.ExtendSelection(row, col)
+			return m, nil
+		}
 		if m.mouseDown {
 			tab := m.activeTabModel()
 			if tab != nil && tab.Root != nil {
@@ -312,12 +395,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.MouseReleaseMsg:
+		if m.notesMouseDown {
+			m.notesMouseDown = false
+			// If the selection is empty (single click without drag) we
+			// already positioned the cursor on click — nothing more to do.
+			return m, nil
+		}
 		if m.mouseDown {
 			m.mouseDown = false
 			if m.selection == nil {
-				// No drag — treat as click for pane focus
+				// No drag — treat as click for pane focus. Skip when notes
+				// mode is active so the editor stays bound to its pane
+				// regardless of where the user clicks.
 				tab := m.activeTabModel()
-				if tab != nil && tab.Root != nil && !tab.FocusMode() {
+				if tab != nil && tab.Root != nil && !tab.FocusMode() && !m.notesMode {
 					tabH := m.height - chromeHeight
 					if pane := tab.Root.FindPaneAt(m.mouseStartX, m.mouseStartY, 0, 1, m.paneAreaWidth(), tabH); pane != nil {
 						if old := tab.ActivePaneModel(); old != nil {
@@ -356,6 +447,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else if m.dialog != dialogNone && m.dialogEdit {
 			m.dialogInput += sanitizeDialogInput(msg.Content)
 			return m, nil
+		} else if m.notesMode && m.notesEditor != nil {
+			text := strings.ReplaceAll(msg.Content, "\r", "")
+			m.notesEditor.HandlePaste(text)
+			return m, nil
 		} else {
 			m.sendClipboardToPane(msg.Content)
 			// Schedule re-render after PTY echo arrives to update cursor position
@@ -374,6 +469,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			text := strings.ReplaceAll(string(msg), "\r", "")
 			m.tomlEditor.InsertMultiLine(text)
 			m.tomlEditor.Dirty = true
+		} else if m.notesMode && m.notesEditor != nil {
+			text := strings.ReplaceAll(string(msg), "\r", "")
+			m.notesEditor.HandlePaste(text)
 		}
 		return m, nil
 
@@ -482,6 +580,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case notesTickMsg:
+		// Debounce check: save if dirty and idle for >= notesDebounceWindow.
+		if m.notesMode && m.notesEditor != nil {
+			m.notesEditor.MaybeAutoSave()
+			return m, m.notesTick()
+		}
+		return m, nil
+
 	case listenContinueMsg:
 		return m, m.listenForMessages()
 	}
@@ -575,6 +681,248 @@ func (m Model) sidebarTick() tea.Cmd {
 	})
 }
 
+// notesTick schedules a debounce check while notes mode is active.
+func (m Model) notesTick() tea.Cmd {
+	return tea.Tick(notesTickInterval, func(_ time.Time) tea.Msg {
+		return notesTickMsg{}
+	})
+}
+
+// toggleNotesMode opens the notes editor for the active pane, or closes
+// (and flushes) it if notes mode is already active.
+//
+// Opening notes auto-enters focus mode for the tab so the user only sees the
+// bound pane next to the editor — sibling panes are hidden but keep running.
+// If the user was already in focus mode, the existing focus state is left
+// alone. Tab/Shift+Tab cycles keyboard focus between the editor and the pane
+// while notes mode is active.
+func (m Model) toggleNotesMode() (tea.Model, tea.Cmd) {
+	if m.notesMode && m.notesEditor != nil {
+		return m.exitNotesMode()
+	}
+	tab := m.activeTabModel()
+	if tab == nil {
+		return m, nil
+	}
+	pane := tab.ActivePaneModel()
+	if pane == nil {
+		return m, nil
+	}
+	// Initial dimensions are placeholders — View() will Resize the editor
+	// to fit the actual notes panel area on the next render pass.
+	editor, err := NewNotesEditor(config.NotesDir(), pane.ID, pane.Name, 1, 1)
+	if err != nil {
+		log.Printf("open notes: %v", err)
+		return m, nil
+	}
+	// Auto-enter focus mode so the bound pane fills the available area to
+	// the left of the editor. Track that we were the ones to do so, so
+	// exiting notes reverts focus only when we owned the toggle.
+	enteredFocus := false
+	if !tab.FocusMode() {
+		tab.ToggleFocus()
+		enteredFocus = tab.FocusMode() // ToggleFocus is a no-op on single-pane tabs
+	}
+	m.notesMode = true
+	m.notesEditor = editor
+	m.notesEnteredFocus = enteredFocus
+	m.notesPaneFocused = false // editor starts focused so the user can immediately type
+	return m, tea.Batch(tea.ClearScreen, m.resizeAllPanes(), m.notesTick())
+}
+
+// notesEditorBox computes the screen bounding box of the bordered notes
+// notesPanelWidthNumerator / Denominator set the default notes-panel
+// width as a fraction of the available tab area (numerator/denominator).
+// The 2/5 ratio gives the pane the dominant share while leaving a
+// comfortable editor panel on the right.
+const (
+	notesPanelWidthNumerator   = 2
+	notesPanelWidthDenominator = 5
+	notesPanelMinWidth         = 30 // minimum editor width, in columns
+)
+
+// notesSidebarWidth computes the notification sidebar width for the
+// current model state (mirrors the reservation logic in View()).
+func (m Model) notesSidebarWidth() int {
+	if !m.notifications.visible || m.dialog != dialogNone {
+		return 0
+	}
+	tab := m.activeTabModel()
+	if tab == nil || tab.FocusMode() {
+		return 0
+	}
+	sidebarW := m.notifications.width
+	if m.width-sidebarW < minTermWidth {
+		return 0
+	}
+	return sidebarW
+}
+
+// notesPanelWidth returns the notes panel width and sidebar width for the
+// current model state. Returns (0, sidebarW) when notes mode is inactive
+// or the terminal is too narrow to render the editor. Single source of
+// truth for the layout math used by both View() and notesEditorBox.
+func (m Model) notesPanelWidth() (notesW, sidebarW int) {
+	sidebarW = m.notesSidebarWidth()
+	if !m.notesMode || m.notesEditor == nil {
+		return 0, sidebarW
+	}
+	notesW = (m.width - sidebarW) * notesPanelWidthNumerator / notesPanelWidthDenominator
+	if notesW < notesPanelMinWidth {
+		notesW = notesPanelMinWidth
+	}
+	if m.width-sidebarW-notesW < minTermWidth {
+		return 0, sidebarW
+	}
+	return notesW, sidebarW
+}
+
+// editor. Returns ok=false when notes mode is inactive or the terminal is
+// too narrow to render the editor.
+func (m Model) notesEditorBox() (boxX0, boxY0, boxX1, boxY1 int, ok bool) {
+	if !m.notesMode || m.notesEditor == nil || m.activeTab >= len(m.tabs) {
+		return 0, 0, 0, 0, false
+	}
+	notesW, sidebarW := m.notesPanelWidth()
+	if notesW == 0 {
+		return 0, 0, 0, 0, false
+	}
+	boxX0 = m.width - sidebarW - notesW
+	boxY0 = 1 // y=0 is the tab bar
+	boxX1 = m.width - sidebarW
+	boxY1 = m.height - 1 // last row is the status bar
+	return boxX0, boxY0, boxX1, boxY1, true
+}
+
+// notesEditorPosAt converts screen (x, y) to a (row, col) document position
+// in the notes editor, accounting for the bordered box, header/footer rows,
+// the line number gutter, and the editor's current scroll offset.
+//
+// Returns ok=false when the screen point is outside the editor's outer box.
+// Points inside the box but on the border / header / footer / gutter are
+// clamped to the nearest body cell so a drag into the gutter still selects
+// the first column of the relevant row.
+func (m Model) notesEditorPosAt(screenX, screenY int) (row, col int, ok bool) {
+	boxX0, boxY0, boxX1, boxY1, exists := m.notesEditorBox()
+	if !exists {
+		return 0, 0, false
+	}
+	if screenX < boxX0 || screenX >= boxX1 || screenY < boxY0 || screenY >= boxY1 {
+		return 0, 0, false
+	}
+	// Body area: strip 1 char border on each side, 1 row of header at the
+	// top (after the top border), and 1 row of footer at the bottom (before
+	// the bottom border). The line number gutter width is dynamic — for
+	// documents with >99 lines the gutter grows, so we query the editor
+	// for its current value rather than hardcoding 4.
+	lineNumWidth := m.notesEditor.editor.GutterWidth()
+	bodyX0 := boxX0 + 1 + lineNumWidth
+	bodyY0 := boxY0 + 2 // top border + header line
+	bodyX1 := boxX1 - 1
+	bodyY1 := boxY1 - 2 // bottom border + footer line
+	if bodyX1 <= bodyX0 || bodyY1 <= bodyY0 {
+		return 0, 0, false
+	}
+
+	// Clamp gutter / border / header / footer clicks into the body so a
+	// drag into those zones still resolves to a sensible cell.
+	if screenX < bodyX0 {
+		screenX = bodyX0
+	} else if screenX >= bodyX1 {
+		screenX = bodyX1 - 1
+	}
+	if screenY < bodyY0 {
+		screenY = bodyY0
+	} else if screenY >= bodyY1 {
+		screenY = bodyY1 - 1
+	}
+
+	ed := m.notesEditor.editor
+	row = ed.ScrollTop + (screenY - bodyY0)
+	col = screenX - bodyX0
+	return row, col, true
+}
+
+// notesKeyExempt reports whether a key should bypass the notes editor and
+// reach the normal global handlers (structural changes, tab/pane management,
+// dialogs). Anything not on this list is consumed by the editor as text
+// input while notes mode is active.
+//
+// Note: Tab/Shift+Tab (kb.NextPane/kb.PrevPane) are deliberately NOT in
+// this list — in notes mode they cycle keyboard focus between the editor
+// and the bound pane, handled by the caller.
+func (m Model) notesKeyExempt(key string) bool {
+	kb := m.cfg.Keybindings
+	switch key {
+	// Structural — close/split implicitly destroys the bound pane and must
+	// flush + exit notes before running.
+	case kb.ClosePane, kb.CloseTab, kb.SplitHorizontal, kb.SplitVertical:
+		return true
+	// Tab management.
+	case kb.NewTab, kb.RenameTab, kb.RenamePane, kb.CycleTabColor:
+		return true
+	// Other modes.
+	case kb.FocusPane:
+		return true
+	// Notification center.
+	case kb.NotificationToggle, kb.NotificationFocus, kb.GoBack:
+		return true
+	// Tools and dialogs.
+	case kb.JSONTransform, kb.QuickActions, "f1", "ctrl+n":
+		return true
+	}
+	// Alt+1..9 tab switching.
+	switch key {
+	case "alt+1", "alt+2", "alt+3", "alt+4",
+		"alt+5", "alt+6", "alt+7", "alt+8", "alt+9":
+		return true
+	}
+	return false
+}
+
+// exitNotesModeInPlace flushes pending notes and tears down notes mode
+// state on the receiver, but does NOT return a command — used when the
+// caller intends to fall through to another handler in the same Update
+// invocation.
+// exitNotesModeInPlace is the single canonical teardown for notes mode. It
+// flushes pending edits, reverts the tab's focus mode if we owned the toggle,
+// and clears every notes-mode flag on the model. All other code paths
+// (exitNotesMode, structural shortcut fall-through, applyWorkspaceState
+// reconciliation, switchTab) delegate to this function so the teardown is
+// guaranteed consistent.
+//
+// IMPORTANT: this function operates on the tab referenced by m.activeTab
+// at the time of the call. Callers that are about to change m.activeTab
+// (e.g. switchTab) must invoke this FIRST so focus reverts on the old tab.
+func (m *Model) exitNotesModeInPlace() {
+	if m.notesEditor != nil {
+		if err := m.notesEditor.Close(); err != nil {
+			log.Printf("save notes on exit: %v", err)
+		}
+	}
+	if m.notesEnteredFocus {
+		if tab := m.activeTabModel(); tab != nil && tab.FocusMode() {
+			tab.ExitFocus()
+		}
+	}
+	m.notesMode = false
+	m.notesEditor = nil
+	m.notesPaneFocused = false
+	m.notesEnteredFocus = false
+	m.notesAnchorRow = 0
+	m.notesAnchorCol = 0
+}
+
+// exitNotesMode is the command-returning form of exitNotesModeInPlace, used
+// when the Update loop needs a batched ClearScreen + resize command after
+// the teardown. Uses a pointer receiver so a discarded call (e.g., a bare
+// `m.exitNotesMode()` statement) still mutates the model — preventing the
+// "silent reinstate" footgun the previous review flagged.
+func (m *Model) exitNotesMode() (tea.Model, tea.Cmd) {
+	m.exitNotesModeInPlace()
+	return *m, tea.Batch(tea.ClearScreen, m.resizeAllPanes())
+}
+
 func (m Model) View() tea.View {
 	var content string
 
@@ -595,20 +943,16 @@ func (m Model) View() tea.View {
 		// Tab bar (1 line)
 		sections = append(sections, m.renderTabBar())
 
-		// Active tab content + optional notification sidebar
+		// Active tab content + optional notification sidebar + optional
+		// notes editor. Single source of truth for the layout math lives
+		// in notesPanelWidth / notesSidebarWidth so notesEditorBox (used
+		// by the mouse handlers) stays in lockstep with this renderer.
 		tabH := m.height - chromeHeight
-		sidebarW := 0
-		if m.notifications.visible && m.dialog == dialogNone {
-			if tab := m.activeTabModel(); tab != nil && !tab.FocusMode() {
-				sidebarW = m.notifications.width
-				if m.width-sidebarW < minTermWidth {
-					sidebarW = 0 // too narrow for sidebar
-				}
-			}
-		}
+		notesW, sidebarW := m.notesPanelWidth()
 		if m.activeTab < len(m.tabs) {
 			tab := m.tabs[m.activeTab]
-			tab.Resize(m.width-sidebarW, tabH)
+
+			tab.Resize(m.width-sidebarW-notesW, tabH)
 			// Pass per-frame state to panes for rendering
 			if tab.Root != nil {
 				for _, pane := range tab.Root.Leaves() {
@@ -618,6 +962,10 @@ func (m Model) View() tea.View {
 				}
 			}
 			tabContent := tab.View()
+			if notesW > 0 {
+				editorFocused := !m.notesPaneFocused
+				tabContent = lipgloss.JoinHorizontal(lipgloss.Top, tabContent, m.notesEditor.View(notesW, tabH, editorFocused))
+			}
 			if sidebarW > 0 {
 				m.notifications.focused = m.sidebarFocused
 				tabContent = lipgloss.JoinHorizontal(lipgloss.Top, tabContent, m.notifications.View(tabH))
@@ -654,6 +1002,54 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.renamingPane {
 		return m.handlePaneRenameKey(msg)
+	}
+
+	// Notes mode: while active, keyboard input is split between the bound
+	// pane (left) and the notes editor (right). Tab/Shift+Tab cycles which
+	// side has focus; the user can type into the pane or into the editor
+	// without exiting notes mode.
+	if m.notesMode && m.notesEditor != nil {
+		// Universal keys — handled the same way regardless of which side
+		// currently has focus.
+		switch key {
+		case kb.NotesToggle:
+			return m.exitNotesMode()
+		case kb.Quit:
+			if err := m.notesEditor.Close(); err != nil {
+				log.Printf("save notes on quit: %v", err)
+			}
+			return m, tea.Quit
+		case kb.NextPane, kb.PrevPane:
+			// Tab / Shift+Tab cycles focus between editor and pane.
+			m.notesPaneFocused = !m.notesPaneFocused
+			return m, nil
+		}
+
+		// Structural keys (close pane/tab, split) destroy or restructure
+		// the bound pane. Flush + exit notes first, regardless of which
+		// side currently has focus, then fall through to the normal
+		// handler so the structural action still fires.
+		structural := key == kb.ClosePane || key == kb.CloseTab ||
+			key == kb.SplitHorizontal || key == kb.SplitVertical
+		if structural {
+			m.exitNotesModeInPlace()
+		} else if m.notesPaneFocused {
+			// Pane has focus — fall through to the normal handlers below.
+			// Global shortcuts (dialogs, rename, ...) work as usual, and
+			// unmatched keys are forwarded to the PTY by the default
+			// branch at the bottom of this function.
+		} else if m.notesKeyExempt(key) {
+			// Editor focused + non-structural exempt shortcut — flush
+			// notes and fall through so the global handler runs.
+			m.exitNotesModeInPlace()
+		} else {
+			// Editor has focus and the key is plain text input.
+			action, cmd := m.notesEditor.HandleKey(key)
+			if action == notesActionExit {
+				return m.exitNotesMode()
+			}
+			return m, cmd
+		}
 	}
 
 	// Notification sidebar keybindings (always available)
@@ -695,7 +1091,9 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				m.selection = nil
 				if text != "" {
 					return m, func() tea.Msg {
-						clipboard.Write(text)
+						if err := clipboard.Write(text); err != nil {
+							log.Printf("pane clipboard write: %v", err)
+						}
 						return nil
 					}
 				}
@@ -825,6 +1223,9 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(tea.ClearScreen, m.resizeAllPanes())
 		}
 		return m, nil
+
+	case key == kb.NotesToggle:
+		return m.toggleNotesMode()
 
 	case key == "ctrl+n":
 		m.dialog = dialogCreatePane
@@ -1122,6 +1523,39 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) []string {
 	if m.activeTab >= len(m.tabs) {
 		m.activeTab = max(0, len(m.tabs)-1)
 	}
+
+	// Reconcile notes mode after daemon state sync:
+	//   (a) If the bound pane no longer exists in any tab, tear down
+	//       notes mode — the notes file is orphaned and the editor would
+	//       otherwise keep writing to a dead pane ID.
+	//   (b) If the bound pane still exists but the containing tab's
+	//       ActivePane is now something else (e.g., a split created a new
+	//       pane and the daemon promoted it), force ActivePane back to the
+	//       bound pane so the focus-mode render shows the right pane next
+	//       to the editor. Without this, the editor would silently sit
+	//       next to an unrelated pane while still writing to the bound
+	//       pane's notes file.
+	if m.notesMode && m.notesEditor != nil {
+		bound := m.notesEditor.PaneID()
+		var boundTab *TabModel
+		for _, tab := range m.tabs {
+			if tab.Root != nil && tab.Root.PaneIDs()[bound] {
+				boundTab = tab
+				break
+			}
+		}
+		if boundTab == nil {
+			log.Printf("notes: bound pane %s pruned — exiting notes mode", bound)
+			m.exitNotesModeInPlace()
+		} else if boundTab.ActivePane != bound {
+			log.Printf("notes: bound pane %s is no longer active (active=%s) — re-syncing", bound, boundTab.ActivePane)
+			for _, p := range boundTab.Root.Leaves() {
+				p.Active = (p.ID == bound)
+			}
+			boundTab.ActivePane = bound
+		}
+	}
+
 	return newPaneIDs
 }
 
@@ -1232,6 +1666,12 @@ func (m Model) activeTabModel() *TabModel {
 func (m *Model) switchTab(idx int) tea.Cmd {
 	if idx < 0 || idx >= len(m.tabs) {
 		return nil
+	}
+	// Switching tabs leaves the notes-bound pane behind. Flush and exit
+	// notes mode BEFORE m.activeTab changes so exitNotesModeInPlace
+	// reverts focus mode on the OLD tab.
+	if m.notesMode && m.notesEditor != nil {
+		m.exitNotesModeInPlace()
 	}
 	m.activeTab = idx
 	tabID := m.tabs[idx].ID
@@ -1531,6 +1971,17 @@ func (m Model) renderStatusBar() string {
 			left = fmt.Sprintf("%s  %s", displayPath, paneInfo)
 			if tab.FocusMode() {
 				left = "[focus] " + left
+			}
+			if m.notesMode && m.notesEditor != nil {
+				var marker string
+				if m.notesPaneFocused {
+					marker = "[notes pane]"
+				} else if m.notesEditor.Dirty() {
+					marker = "[notes*]"
+				} else {
+					marker = "[notes]"
+				}
+				left = marker + " " + left
 			}
 			if pane.scrollBack > 0 {
 				left += fmt.Sprintf("  ↑%d", pane.scrollBack)

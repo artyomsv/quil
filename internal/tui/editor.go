@@ -19,7 +19,18 @@ import (
 // editorPasteMsg delivers clipboard content to the active editor.
 type editorPasteMsg string
 
-// TextEditor is a minimal multi-line text editor with TOML syntax highlighting.
+// HighlightMode selects which syntax highlighter the editor renders with.
+type HighlightMode int
+
+const (
+	// HighlightTOML applies TOML keyword/comment colouring (default — used by
+	// the TOML editor accessible via F1 → Plugins).
+	HighlightTOML HighlightMode = iota
+	// HighlightPlain disables syntax colouring. Used by pane notes.
+	HighlightPlain
+)
+
+// TextEditor is a minimal multi-line text editor with optional syntax highlighting.
 type TextEditor struct {
 	Lines      []string
 	CursorRow  int // rune-based row
@@ -31,6 +42,17 @@ type TextEditor struct {
 	Dirty      bool
 	SaveErr    string
 	Sel        *EditorSel // active selection (nil = none)
+	// Highlight selects the syntax highlighter. Defaults to HighlightTOML.
+	Highlight HighlightMode
+}
+
+// highlight applies the configured highlighter to a line. Returns the line
+// unchanged when in plain mode.
+func (e *TextEditor) highlight(line string) string {
+	if e.Highlight == HighlightPlain {
+		return line
+	}
+	return highlightTOML(line)
 }
 
 // NewTextEditor creates an editor from file content.
@@ -566,12 +588,34 @@ func (e *TextEditor) Save() error {
 	return nil
 }
 
+// GutterWidth returns the visible width (in columns) of the line-number
+// gutter for the current document. It is `max(3, digits(len(Lines))) + 1`
+// — three digits minimum plus one trailing space. Both Render() and the
+// mouse-to-document coordinate helper (notesEditorPosAt) use this so
+// the body content's left edge stays in sync with what the user sees.
+func (e *TextEditor) GutterWidth() int {
+	n := len(e.Lines)
+	if n < 1 {
+		n = 1
+	}
+	digits := 1
+	for n >= 10 {
+		n /= 10
+		digits++
+	}
+	if digits < 3 {
+		digits = 3
+	}
+	return digits + 1 // +1 for the trailing space
+}
+
 // --- Rendering ---
 
 func (e *TextEditor) Render() string {
 	var b strings.Builder
 
-	contentW := e.ViewWidth - 5 // "NNN " prefix
+	gutter := e.GutterWidth()
+	contentW := e.ViewWidth - gutter - 1 // -1 defensive pad for cursor overflow
 	if contentW < 10 {
 		contentW = 10
 	}
@@ -582,6 +626,10 @@ func (e *TextEditor) Render() string {
 	}
 
 	hasSel := e.Sel != nil && !e.Sel.IsEmpty()
+
+	// Build the line-number format string once per render so long
+	// documents get a wider gutter without re-formatting per line.
+	lineNumFmt := fmt.Sprintf("\x1b[90m%%%dd \x1b[0m", gutter-1)
 
 	for i := e.ScrollTop; i < end; i++ {
 		rawLine := e.Lines[i]
@@ -598,7 +646,7 @@ func (e *TextEditor) Render() string {
 			displayRaw += "~"
 		}
 
-		lineNum := fmt.Sprintf("\x1b[90m%3d \x1b[0m", i+1)
+		lineNum := fmt.Sprintf(lineNumFmt, i+1)
 
 		// Check if this line has selection
 		selStart, selEnd := -1, -1
@@ -628,7 +676,7 @@ func (e *TextEditor) Render() string {
 			b.WriteByte('\n')
 		} else {
 			// Non-cursor line: apply syntax highlighting then pad
-			highlighted := highlightTOML(displayRaw)
+			highlighted := e.highlight(displayRaw)
 			visW := ansi.StringWidth(displayRaw)
 			pad := ""
 			if visW < contentW {
@@ -711,7 +759,7 @@ func (e *TextEditor) renderLineWithSelection(b *strings.Builder, lineIdx int, di
 			b.WriteString(before)
 			b.WriteString("\x1b[0m")
 		} else {
-			b.WriteString(highlightTOML(before))
+			b.WriteString(e.highlight(before))
 		}
 	}
 
@@ -761,7 +809,7 @@ func (e *TextEditor) renderLineWithSelection(b *strings.Builder, lineIdx int, di
 				b.WriteString("\x1b[0m")
 			}
 		} else {
-			b.WriteString(highlightTOML(after))
+			b.WriteString(e.highlight(after))
 		}
 	}
 

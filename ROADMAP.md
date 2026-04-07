@@ -115,6 +115,19 @@ Key capabilities:
 - **Plugin `path` field** — explicit binary location bypasses PATH lookup. 3-tier detection: path → LookPath → searchBinary fallback (fixes Explorer-launched apps on Windows)
 - **MCP tools** — `get_notifications` (non-blocking) and `watch_notifications` (blocking up to 5 min, replaces polling). `requestWithTimeout` with `time.NewTimer` + `defer timer.Stop()`
 
+### M7: Pane Notes — [PRD](docs/roadmap/pane-notes.md)
+> Side-by-side note-taking linked to individual panes.
+
+A plain-text notes editor that opens next to the active pane on `Alt+E`. Notes are stored one file per pane and survive pane destruction, so the context you captured while debugging in a pane is still there next week when the pane is long gone.
+
+Key capabilities:
+- **Alt+E toggle** — opens the notes editor alongside the active pane (pane left ~60%, editor right ~40%). Mutually exclusive with focus mode
+- **Read-only pane while editing** — all keys route to the editor so there is never ambiguity about where input lands. Exit notes to interact with the pane
+- **Three independent save safety nets** — 30-second debounce auto-save, explicit `Ctrl+S`, and unconditional save on exit (`Alt+E`, `Esc`, close/split, TUI quit)
+- **Per-pane storage** — `~/.aethel/notes/<pane-id>.md`, atomic temp+rename writes, survives daemon restart (pane IDs are stable via `workspace.json`)
+- **Notes outlive the pane** — closing or destroying a pane does not delete its notes file; browser ships in Phase 2
+- **TextEditor reuse** — the existing rune-aware editor (selection, clipboard, multi-line paste, word jumps) gained a `Highlight` field so it can render plain text with no TOML colouring
+
 ---
 
 ## In Progress
@@ -144,19 +157,6 @@ Key capabilities:
 ---
 
 ## Planned — Core Features
-
-### M7: Pane Notes
-
-Side-by-side note-taking mode linked to individual panes. When enabled, the window splits into the active pane (left) and a text editor (right) where the user can write notes about their work.
-
-**Behavior:**
-- Keybinding (e.g., `Alt+N`) toggles notes mode on/off for the active pane
-- In notes mode: all other panes are hidden; the screen shows active pane (left) + text editor (right)
-- Notes are stored as plain text files in `~/.aethel/notes/<pane-id>.txt`
-- Notes are linked to the pane — after hard restart, opening notes for the same pane shows previous notes
-- The text editor supports basic editing: type, backspace, enter, arrow keys, scroll
-- Notes persist independently from workspace state — they survive pane destruction and can be browsed later
-- Exiting notes mode restores the previous layout
 
 ### M9: Project Workspace Files — [PRD](docs/roadmap/workspace-files.md)
 

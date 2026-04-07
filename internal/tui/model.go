@@ -189,6 +189,7 @@ type Model struct {
 	notesEditor          *NotesEditor           // active notes editor (nil when notesMode is false)
 	notesPaneFocused     bool                   // true when keyboard input goes to the bound pane (PTY) instead of the notes editor
 	notesEnteredFocus    bool                   // true when toggleNotesMode was the one that turned the tab's focus mode on (so exit reverts)
+	notesMouseDown       bool                   // true while a left-button drag is in progress inside the notes editor
 }
 
 func NewModel(client *ipc.Client, cfg config.Config, version string, registry *plugin.Registry) Model {
@@ -305,21 +306,57 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.Y == 0 {
 				// Tab bar click
 				m.mouseDown = false
+				m.notesMouseDown = false
 				if idx := m.hitTestTab(msg.X); idx >= 0 {
 					cmd := m.switchTab(idx)
 					return m, cmd
 				}
 			} else if msg.Y < m.height-1 {
-				// Pane area — start tracking for drag selection
+				// Notes editor click takes priority when in notes mode and
+				// the pointer is inside the editor's bordered box.
+				if row, col, ok := m.notesEditorPosAt(msg.X, msg.Y); ok {
+					m.notesMouseDown = true
+					m.mouseDown = false
+					m.mouseStartX = msg.X
+					m.mouseStartY = msg.Y
+					m.selection = nil
+					m.notesPaneFocused = false
+					m.notesEditor.SetCursor(row, col)
+					return m, nil
+				}
+				// Pane area — start tracking for drag selection.
 				m.mouseDown = true
+				m.notesMouseDown = false
 				m.mouseStartX = msg.X
 				m.mouseStartY = msg.Y
-				m.selection = nil // clear previous selection
+				m.selection = nil
+				// Clicking in the pane area while notes mode is active
+				// hands keyboard focus to the pane.
+				if m.notesMode && m.notesEditor != nil {
+					m.notesPaneFocused = true
+				}
 			}
 		}
 		return m, nil
 
 	case tea.MouseMotionMsg:
+		if m.notesMouseDown && m.notesMode && m.notesEditor != nil {
+			anchorRow, anchorCol, ok := m.notesEditorPosAt(m.mouseStartX, m.mouseStartY)
+			if !ok {
+				return m, nil
+			}
+			row, col, ok := m.notesEditorPosAt(msg.X, msg.Y)
+			if !ok {
+				return m, nil
+			}
+			// Begin selection on first motion (so a click without drag
+			// just positions the cursor) and extend on subsequent moves.
+			if m.notesEditor.editor.Sel == nil {
+				m.notesEditor.BeginSelection(anchorRow, anchorCol)
+			}
+			m.notesEditor.ExtendSelection(row, col)
+			return m, nil
+		}
 		if m.mouseDown {
 			tab := m.activeTabModel()
 			if tab != nil && tab.Root != nil {
@@ -330,6 +367,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.MouseReleaseMsg:
+		if m.notesMouseDown {
+			m.notesMouseDown = false
+			// If the selection is empty (single click without drag) we
+			// already positioned the cursor on click — nothing more to do.
+			return m, nil
+		}
 		if m.mouseDown {
 			m.mouseDown = false
 			if m.selection == nil {
@@ -657,6 +700,87 @@ func (m Model) toggleNotesMode() (tea.Model, tea.Cmd) {
 	m.notesEnteredFocus = enteredFocus
 	m.notesPaneFocused = false // editor starts focused so the user can immediately type
 	return m, tea.Batch(tea.ClearScreen, m.resizeAllPanes(), m.notesTick())
+}
+
+// notesEditorBox computes the screen bounding box of the bordered notes
+// editor. Returns ok=false when notes mode is inactive or the terminal is
+// too narrow to render the editor.
+func (m Model) notesEditorBox() (boxX0, boxY0, boxX1, boxY1 int, ok bool) {
+	if !m.notesMode || m.notesEditor == nil {
+		return 0, 0, 0, 0, false
+	}
+	if m.activeTab >= len(m.tabs) {
+		return 0, 0, 0, 0, false
+	}
+	// Mirror the sidebar width logic from View().
+	sidebarW := 0
+	if m.notifications.visible && m.dialog == dialogNone {
+		if tab := m.activeTabModel(); tab != nil && !tab.FocusMode() {
+			sidebarW = m.notifications.width
+			if m.width-sidebarW < minTermWidth {
+				sidebarW = 0
+			}
+		}
+	}
+	notesW := (m.width - sidebarW) * 2 / 5
+	if notesW < 30 {
+		notesW = 30
+	}
+	if m.width-sidebarW-notesW < minTermWidth {
+		return 0, 0, 0, 0, false
+	}
+	boxX0 = m.width - sidebarW - notesW
+	boxY0 = 1                // y=0 is the tab bar
+	boxX1 = m.width - sidebarW
+	boxY1 = m.height - 1     // last row is the status bar
+	return boxX0, boxY0, boxX1, boxY1, true
+}
+
+// notesEditorPosAt converts screen (x, y) to a (row, col) document position
+// in the notes editor, accounting for the bordered box, header/footer rows,
+// the line number gutter, and the editor's current scroll offset.
+//
+// Returns ok=false when the screen point is outside the editor's outer box.
+// Points inside the box but on the border / header / footer / gutter are
+// clamped to the nearest body cell so a drag into the gutter still selects
+// the first column of the relevant row.
+func (m Model) notesEditorPosAt(screenX, screenY int) (row, col int, ok bool) {
+	boxX0, boxY0, boxX1, boxY1, exists := m.notesEditorBox()
+	if !exists {
+		return 0, 0, false
+	}
+	if screenX < boxX0 || screenX >= boxX1 || screenY < boxY0 || screenY >= boxY1 {
+		return 0, 0, false
+	}
+	// Body area: strip 1 char border on each side, 1 row of header at the
+	// top (after the top border), and 1 row of footer at the bottom (before
+	// the bottom border). The line number gutter is 4 characters wide.
+	const lineNumWidth = 4
+	bodyX0 := boxX0 + 1 + lineNumWidth
+	bodyY0 := boxY0 + 2 // top border + header line
+	bodyX1 := boxX1 - 1
+	bodyY1 := boxY1 - 2 // bottom border + footer line
+	if bodyX1 <= bodyX0 || bodyY1 <= bodyY0 {
+		return 0, 0, false
+	}
+
+	// Clamp gutter / border / header / footer clicks into the body so a
+	// drag into those zones still resolves to a sensible cell.
+	if screenX < bodyX0 {
+		screenX = bodyX0
+	} else if screenX >= bodyX1 {
+		screenX = bodyX1 - 1
+	}
+	if screenY < bodyY0 {
+		screenY = bodyY0
+	} else if screenY >= bodyY1 {
+		screenY = bodyY1 - 1
+	}
+
+	ed := m.notesEditor.editor
+	row = ed.ScrollTop + (screenY - bodyY0)
+	col = screenX - bodyX0
+	return row, col, true
 }
 
 // notesKeyExempt reports whether a key should bypass the notes editor and

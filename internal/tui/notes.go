@@ -171,6 +171,79 @@ func (n *NotesEditor) HandlePaste(text string) {
 	n.lastEditAt = time.Now()
 }
 
+// SetCursor moves the editor's cursor to (row, col) in the document and
+// clears any active selection. Used by mouse-driven cursor positioning.
+// Coordinates are clamped to valid line/column bounds.
+func (n *NotesEditor) SetCursor(row, col int) {
+	if n == nil || n.editor == nil {
+		return
+	}
+	row, col = n.clampPos(row, col)
+	n.editor.CursorRow = row
+	n.editor.CursorCol = col
+	n.editor.Sel = nil
+	n.editor.ensureCursorVisible()
+}
+
+// BeginSelection starts a fresh selection anchored at (row, col) and places
+// the cursor there. Subsequent ExtendSelection calls grow the selection
+// from this anchor.
+func (n *NotesEditor) BeginSelection(row, col int) {
+	if n == nil || n.editor == nil {
+		return
+	}
+	row, col = n.clampPos(row, col)
+	n.editor.CursorRow = row
+	n.editor.CursorCol = col
+	n.editor.Sel = &EditorSel{
+		Anchor: EditorPos{Row: row, Col: col},
+		Cursor: EditorPos{Row: row, Col: col},
+	}
+}
+
+// ExtendSelection moves the selection's cursor end to (row, col), keeping
+// the anchor fixed. Used during mouse drag.
+func (n *NotesEditor) ExtendSelection(row, col int) {
+	if n == nil || n.editor == nil {
+		return
+	}
+	row, col = n.clampPos(row, col)
+	if n.editor.Sel == nil {
+		n.editor.Sel = &EditorSel{
+			Anchor: EditorPos{Row: row, Col: col},
+			Cursor: EditorPos{Row: row, Col: col},
+		}
+	} else {
+		n.editor.Sel.Cursor = EditorPos{Row: row, Col: col}
+	}
+	n.editor.CursorRow = row
+	n.editor.CursorCol = col
+	n.editor.ensureCursorVisible()
+}
+
+// clampPos clamps (row, col) to valid document positions. Returns the
+// clamped pair.
+func (n *NotesEditor) clampPos(row, col int) (int, int) {
+	lines := n.editor.Lines
+	if len(lines) == 0 {
+		return 0, 0
+	}
+	if row < 0 {
+		row = 0
+	}
+	if row >= len(lines) {
+		row = len(lines) - 1
+	}
+	if col < 0 {
+		col = 0
+	}
+	lineLen := runeLen(lines[row])
+	if col > lineLen {
+		col = lineLen
+	}
+	return row, col
+}
+
 // MaybeAutoSave saves when the debounce window has elapsed since the last edit.
 // No-op if the editor is clean or the user is still actively editing.
 func (n *NotesEditor) MaybeAutoSave() {

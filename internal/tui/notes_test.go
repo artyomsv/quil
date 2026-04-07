@@ -341,6 +341,154 @@ func TestNotesEditor_PaneID_And_SaveErr_NilSafe(t *testing.T) {
 	ne.MaybeAutoSave()
 }
 
+func TestNotesEditor_SetCursor_ClampsAndClearsSelection(t *testing.T) {
+	t.Parallel()
+	ne, err := NewNotesEditor(t.TempDir(), "pane-cursor", "Build", 40, 10)
+	if err != nil {
+		t.Fatalf("NewNotesEditor: %v", err)
+	}
+	ne.editor.Lines = []string{"hello", "world!"}
+	ne.editor.Sel = &EditorSel{
+		Anchor: EditorPos{Row: 0, Col: 0},
+		Cursor: EditorPos{Row: 1, Col: 6},
+	}
+
+	// Out-of-bounds row + col is clamped to the last line / line length.
+	ne.SetCursor(99, 99)
+	if ne.editor.CursorRow != 1 {
+		t.Errorf("CursorRow = %d, want 1", ne.editor.CursorRow)
+	}
+	if ne.editor.CursorCol != 6 {
+		t.Errorf("CursorCol = %d, want 6", ne.editor.CursorCol)
+	}
+	if ne.editor.Sel != nil {
+		t.Error("SetCursor should clear any active selection")
+	}
+
+	// Negative coordinates clamp to (0, 0).
+	ne.SetCursor(-5, -5)
+	if ne.editor.CursorRow != 0 || ne.editor.CursorCol != 0 {
+		t.Errorf("clamped negative = (%d, %d), want (0, 0)", ne.editor.CursorRow, ne.editor.CursorCol)
+	}
+}
+
+func TestNotesEditor_BeginAndExtendSelection(t *testing.T) {
+	t.Parallel()
+	ne, err := NewNotesEditor(t.TempDir(), "pane-sel-mouse", "Build", 40, 10)
+	if err != nil {
+		t.Fatalf("NewNotesEditor: %v", err)
+	}
+	ne.editor.Lines = []string{"alpha", "beta", "gamma"}
+
+	// Begin at (0, 1).
+	ne.BeginSelection(0, 1)
+	if ne.editor.Sel == nil {
+		t.Fatal("Sel should be non-nil after BeginSelection")
+	}
+	if ne.editor.Sel.Anchor != (EditorPos{Row: 0, Col: 1}) {
+		t.Errorf("Anchor = %+v, want {0, 1}", ne.editor.Sel.Anchor)
+	}
+	if ne.editor.Sel.Cursor != (EditorPos{Row: 0, Col: 1}) {
+		t.Errorf("Cursor = %+v, want {0, 1}", ne.editor.Sel.Cursor)
+	}
+
+	// Extend to (2, 3).
+	ne.ExtendSelection(2, 3)
+	if ne.editor.Sel.Anchor != (EditorPos{Row: 0, Col: 1}) {
+		t.Errorf("Anchor changed unexpectedly: %+v", ne.editor.Sel.Anchor)
+	}
+	if ne.editor.Sel.Cursor != (EditorPos{Row: 2, Col: 3}) {
+		t.Errorf("Cursor = %+v, want {2, 3}", ne.editor.Sel.Cursor)
+	}
+	if ne.editor.CursorRow != 2 || ne.editor.CursorCol != 3 {
+		t.Errorf("editor cursor = (%d, %d), want (2, 3)", ne.editor.CursorRow, ne.editor.CursorCol)
+	}
+
+	// Extracted text spans the three lines: "lpha\nbeta\ngam"
+	got := editorExtractText(ne.editor.Lines, ne.editor.Sel)
+	want := "lpha\nbeta\ngam"
+	if got != want {
+		t.Errorf("extracted = %q, want %q", got, want)
+	}
+}
+
+func TestNotesEditor_ExtendSelection_OutOfBoundsClamps(t *testing.T) {
+	t.Parallel()
+	ne, err := NewNotesEditor(t.TempDir(), "pane-clamp", "Build", 40, 10)
+	if err != nil {
+		t.Fatalf("NewNotesEditor: %v", err)
+	}
+	ne.editor.Lines = []string{"x"}
+	ne.BeginSelection(0, 0)
+	ne.ExtendSelection(99, 99)
+	if ne.editor.Sel.Cursor != (EditorPos{Row: 0, Col: 1}) {
+		t.Errorf("clamped Cursor = %+v, want {0, 1}", ne.editor.Sel.Cursor)
+	}
+}
+
+func TestModel_NotesEditorPosAt_ConvertsScreenCoordsAndScroll(t *testing.T) {
+	t.Parallel()
+	ne, err := NewNotesEditor(t.TempDir(), "pane-coords", "Build", 40, 10)
+	if err != nil {
+		t.Fatalf("NewNotesEditor: %v", err)
+	}
+	ne.editor.Lines = []string{"line0", "line1", "line2", "line3"}
+	ne.editor.ScrollTop = 1
+
+	m := Model{
+		notesMode:     true,
+		notesEditor:   ne,
+		width:         100,
+		height:        30,
+		notifications: NewNotificationCenter(30, 50),
+		tabs:          []*TabModel{NewTabModel("t1", "Shell")},
+	}
+
+	// notesW = (100 - 0) * 2 / 5 = 40 → boxX0 = 60, boxX1 = 100, boxY0 = 1, boxY1 = 29
+	// bodyX0 = 60 + 1 + 4 = 65, bodyY0 = 3, bodyX1 = 99, bodyY1 = 27
+	// Click at body origin = (65, 3) → row = ScrollTop(1) + 0 = 1, col = 0
+	row, col, ok := m.notesEditorPosAt(65, 3)
+	if !ok {
+		t.Fatal("notesEditorPosAt returned ok=false for in-box click")
+	}
+	if row != 1 || col != 0 {
+		t.Errorf("body origin → (%d, %d), want (1, 0)", row, col)
+	}
+
+	// Click two rows down and three cols right.
+	row, col, _ = m.notesEditorPosAt(68, 5)
+	if row != 3 || col != 3 {
+		t.Errorf("(68, 5) → (%d, %d), want (3, 3)", row, col)
+	}
+
+	// Click outside the box → ok=false.
+	if _, _, ok := m.notesEditorPosAt(10, 10); ok {
+		t.Error("click outside notes box should return ok=false")
+	}
+
+	// Click on the gutter (just inside the box but left of body) clamps to col 0.
+	row, col, ok = m.notesEditorPosAt(61, 5)
+	if !ok {
+		t.Fatal("gutter click should still be inside box")
+	}
+	if col != 0 {
+		t.Errorf("gutter click col = %d, want 0 (clamped)", col)
+	}
+}
+
+func TestModel_NotesEditorPosAt_NotInNotesMode(t *testing.T) {
+	t.Parallel()
+	m := Model{
+		notesMode:     false,
+		width:         100,
+		height:        30,
+		notifications: NewNotificationCenter(30, 50),
+	}
+	if _, _, ok := m.notesEditorPosAt(50, 10); ok {
+		t.Error("notesEditorPosAt should return ok=false when notes mode is off")
+	}
+}
+
 func TestNotesEditor_View_BorderColorReflectsFocus(t *testing.T) {
 	t.Parallel()
 	ne, err := NewNotesEditor(t.TempDir(), "pane-view", "Build", 40, 10)

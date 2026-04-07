@@ -10,15 +10,15 @@
 
 ## Problem
 
-Adoption for developer tools is driven by a single viral moment. A 30-second visual that makes someone say "I need this" is worth more than 10 pages of documentation. Aethel currently has no visual demo — the README describes features but doesn't show them.
+Adoption for developer tools is driven by a single viral moment. A 30-second visual that makes someone say "I need this" is worth more than 10 pages of documentation. Quil currently has no visual demo — the README describes features but doesn't show them.
 
 ## Proposed Solution
 
-Create a 30-second GIF/video that demonstrates Aethel's core value proposition in one continuous take:
+Create a 30-second GIF/video that demonstrates Quil's core value proposition in one continuous take:
 
 1. Show 5 panes: Claude Code mid-conversation, SSH tunnel, build watcher, webhook listener, terminal
 2. `sudo reboot`
-3. Login, type `aethel`
+3. Login, type `quil`
 4. **Everything snaps back** — Claude conversation resumed, build re-watching, SSH reconnected
 5. Total time: 3 seconds
 
@@ -26,7 +26,7 @@ This GIF goes on the README, gets posted to Hacker News, r/programming, Twitter/
 
 ## User Experience
 
-The demo isn't a feature — it's marketing. But it should demonstrate real, reproducible behavior that any user can replicate after installing Aethel.
+The demo isn't a feature — it's marketing. But it should demonstrate real, reproducible behavior that any user can replicate after installing Quil.
 
 ## Technical Approach
 
@@ -40,7 +40,7 @@ The demo isn't a feature — it's marketing. But it should demonstrate real, rep
 
 ```
 # Scene 1: The productive workspace (5s)
-[Show Aethel with 5 panes in 2 tabs]
+[Show Quil with 5 panes in 2 tabs]
 [Claude Code pane shows active conversation]
 [Build watcher shows "watching..."]
 [Webhook listener shows "Ready"]
@@ -50,7 +50,7 @@ The demo isn't a feature — it's marketing. But it should demonstrate real, rep
 [Screen goes black]
 
 # Scene 3: The recovery (5s)
-[Login screen → type aethel]
+[Login screen → type quil]
 [Ghost buffers render instantly]
 [Claude Code resumes conversation]
 [Build watcher re-starts]
@@ -58,7 +58,7 @@ The demo isn't a feature — it's marketing. But it should demonstrate real, rep
 
 # Scene 4: The punchline (2s)
 [Hold on fully restored workspace]
-[Text overlay: "aethel — reboot-proof terminal sessions"]
+[Text overlay: "quil — reboot-proof terminal sessions"]
 ```
 
 ### Optimization

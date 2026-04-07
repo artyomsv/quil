@@ -17,13 +17,13 @@ ARG CGO_ENABLED=0
 ARG GOOS=linux
 ARG GOARCH=amd64
 
-RUN go build -o /out/aethel ./cmd/aethel \
- && go build -o /out/aetheld ./cmd/aetheld
+RUN go build -o /out/quil ./cmd/quil \
+ && go build -o /out/quild ./cmd/quild
 
 # ---- Release stage ----
 FROM scratch AS release
 
-COPY --from=builder /out/aethel /aethel
-COPY --from=builder /out/aetheld /aetheld
+COPY --from=builder /out/quil /quil
+COPY --from=builder /out/quild /quild
 
-ENTRYPOINT ["/aethel"]
+ENTRYPOINT ["/quil"]

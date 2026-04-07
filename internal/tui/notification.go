@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"charm.land/lipgloss/v2"
-	"github.com/artyomsv/aethel/internal/ipc"
+	"github.com/artyomsv/quil/internal/ipc"
 )
 
 // NotificationCenter manages the notification sidebar state.

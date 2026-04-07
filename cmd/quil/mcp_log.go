@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/artyomsv/aethel/internal/config"
+	"github.com/artyomsv/quil/internal/config"
 )
 
 // mcpLogger writes per-pane MCP interaction logs with sensitive data redaction.

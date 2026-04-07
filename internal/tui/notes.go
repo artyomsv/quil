@@ -8,7 +8,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
-	"github.com/artyomsv/aethel/internal/persist"
+	"github.com/artyomsv/quil/internal/persist"
 )
 
 // notesDebounceWindow is how long the notes editor waits after the last edit

@@ -7,12 +7,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/artyomsv/aethel/internal/pty"
+	"github.com/artyomsv/quil/internal/pty"
 )
 
 func TestStartAndReadOutput(t *testing.T) {
 	s := pty.New()
-	err := s.Start("echo", "hello-aethel")
+	err := s.Start("echo", "hello-quil")
 	if err != nil {
 		t.Fatalf("Start failed: %v", err)
 	}
@@ -31,11 +31,11 @@ func TestStartAndReadOutput(t *testing.T) {
 			if n > 0 {
 				output.Write(buf[:n])
 			}
-			if strings.Contains(output.String(), "hello-aethel") {
+			if strings.Contains(output.String(), "hello-quil") {
 				return
 			}
 			if err != nil {
-				if strings.Contains(output.String(), "hello-aethel") {
+				if strings.Contains(output.String(), "hello-quil") {
 					return
 				}
 				t.Fatalf("Read error: %v, output so far: %q", err, output.String())

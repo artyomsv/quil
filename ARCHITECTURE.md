@@ -1,10 +1,10 @@
 # Architecture Decisions
 
-This document records the key architectural decisions for Aethel and the reasoning behind them.
+This document records the key architectural decisions for Quil and the reasoning behind them.
 
 ## ADR-1: Client-Daemon Architecture
 
-**Decision:** Split Aethel into two binaries — `aethel` (TUI client) and `aetheld` (background daemon).
+**Decision:** Split Quil into two binaries — `quil` (TUI client) and `quild` (background daemon).
 
 **Context:** A terminal multiplexer needs to outlive any single terminal session. The daemon manages PTY sessions and state, while clients attach/detach freely.
 
@@ -12,7 +12,7 @@ This document records the key architectural decisions for Aethel and the reasoni
 
 - Sessions survive client disconnection — close the terminal, reopen, and reattach
 - Multiple clients can observe the same workspace simultaneously
-- Daemon auto-starts on first `aethel` invocation if not already running
+- Daemon auto-starts on first `quil` invocation if not already running
 - Adds IPC complexity vs. a single-process design
 
 ## ADR-2: Length-Prefixed JSON over IPC
@@ -108,7 +108,7 @@ type Session interface {
 
 ## ADR-6: Plugin System via TOML
 
-**Decision:** Pane types are defined as TOML plugin files in `~/.aethel/plugins/`. No compiled plugins or scripting engine.
+**Decision:** Pane types are defined as TOML plugin files in `~/.quil/plugins/`. No compiled plugins or scripting engine.
 
 **Plugin schema:**
 
@@ -216,12 +216,12 @@ Internal Node (Split)          Leaf Node (Pane)
 
 | Shell | Injection method |
 |---|---|
-| bash | `--rcfile ~/.aethel/shellinit/bash-init.sh` |
-| zsh | `ZDOTDIR=~/.aethel/shellinit/zsh` (custom `.zshenv` + `.zshrc`) |
-| PowerShell | `-NoProfile -File ~/.aethel/shellinit/pwsh-init.ps1` |
+| bash | `--rcfile ~/.quil/shellinit/bash-init.sh` |
+| zsh | `ZDOTDIR=~/.quil/shellinit/zsh` (custom `.zshenv` + `.zshrc`) |
+| PowerShell | `-NoProfile -File ~/.quil/shellinit/pwsh-init.ps1` |
 | fish | No injection needed — emits OSC 7 natively |
 
-Each init script sources the user's original shell config first, then appends the OSC 7 hook. Scripts are embedded in the binary via `//go:embed` and written to `~/.aethel/shellinit/` at daemon startup.
+Each init script sources the user's original shell config first, then appends the OSC 7 hook. Scripts are embedded in the binary via `//go:embed` and written to `~/.quil/shellinit/` at daemon startup.
 
 **Consequences:**
 
@@ -313,11 +313,11 @@ Each init script sources the user's original shell config first, then appends th
 ## Storage Layout
 
 ```
-~/.aethel/
+~/.quil/
 ├── config.toml
-├── aethel.log               # TUI client log
-├── aetheld.log              # Daemon log
-├── aetheld.sock             # IPC socket (Unix) / Named Pipe (Windows)
+├── quil.log               # TUI client log
+├── quild.log              # Daemon log
+├── quild.sock             # IPC socket (Unix) / Named Pipe (Windows)
 ├── shellinit/               # Auto-generated shell integration scripts
 │   ├── bash-init.sh
 │   ├── pwsh-init.ps1

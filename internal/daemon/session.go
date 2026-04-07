@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	apty "github.com/artyomsv/aethel/internal/pty"
-	"github.com/artyomsv/aethel/internal/ringbuf"
+	apty "github.com/artyomsv/quil/internal/pty"
+	"github.com/artyomsv/quil/internal/ringbuf"
 )
 
 type Tab struct {

@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/artyomsv/aethel/internal/ipc"
+	"github.com/artyomsv/quil/internal/ipc"
 )
 
 func TestWriteReadMessage(t *testing.T) {

@@ -6,15 +6,15 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/artyomsv/aethel/internal/config"
-	"github.com/artyomsv/aethel/internal/daemon"
+	"github.com/artyomsv/quil/internal/config"
+	"github.com/artyomsv/quil/internal/daemon"
 )
 
 var version = "dev" // overridden at build time via -ldflags "-X main.version=..."
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "version" {
-		fmt.Println("aetheld v" + version)
+		fmt.Println("quild v" + version)
 		return
 	}
 
@@ -48,30 +48,30 @@ func main() {
 	}
 
 	d := daemon.New(cfg)
-	log.Printf("aetheld v%s starting...", version)
-	fmt.Println("aetheld — starting daemon...")
+	log.Printf("quild v%s starting...", version)
+	fmt.Println("quild — starting daemon...")
 	if err := d.Start(); err != nil {
 		log.Printf("failed to start daemon: %v", err)
 		fmt.Fprintf(os.Stderr, "failed to start daemon: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Write PID file after Start() ensures ~/.aethel/ exists
+	// Write PID file after Start() ensures ~/.quil/ exists
 	writePIDFile()
 	defer removePIDFile()
 
-	log.Printf("aetheld ready (pid %d)", os.Getpid())
-	fmt.Printf("aetheld ready (pid %d). Press Ctrl+C to stop.\n", os.Getpid())
+	log.Printf("quild ready (pid %d)", os.Getpid())
+	fmt.Printf("quild ready (pid %d). Press Ctrl+C to stop.\n", os.Getpid())
 	d.Wait()
 }
 
 func initLogging() *os.File {
-	logDir := config.AethelDir()
+	logDir := config.QuilDir()
 	if logDir == "" {
 		return nil
 	}
 	os.MkdirAll(logDir, 0700)
-	f, err := os.OpenFile(filepath.Join(logDir, "aetheld.log"),
+	f, err := os.OpenFile(filepath.Join(logDir, "quild.log"),
 		os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
 		return nil
@@ -82,9 +82,9 @@ func initLogging() *os.File {
 }
 
 func writePIDFile() {
-	dir := config.AethelDir()
+	dir := config.QuilDir()
 	if dir == "" {
-		log.Println("warning: cannot determine aethel dir, skipping PID file")
+		log.Println("warning: cannot determine quil dir, skipping PID file")
 		return
 	}
 	path := config.PidPath()

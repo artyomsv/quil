@@ -4,10 +4,10 @@
 .claude/
 
 # Built binaries
-/aethel
-/aetheld
-/aethel.exe
-/aetheld.exe
+/quil
+/quild
+/quil.exe
+/quild.exe
 /dist/
 /bin/
 

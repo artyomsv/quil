@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Kill the aethel daemon
+# Kill the quil daemon
 set -euo pipefail
 
-if pkill -f aetheld 2>/dev/null; then
+if pkill -f quild 2>/dev/null; then
   echo "Daemon killed"
 else
   echo "Daemon not running"

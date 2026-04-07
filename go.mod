@@ -1,4 +1,4 @@
-module github.com/artyomsv/aethel
+module github.com/artyomsv/quil
 
 go 1.25.0
 

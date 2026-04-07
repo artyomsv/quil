@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/artyomsv/aethel/internal/config"
+	"github.com/artyomsv/quil/internal/config"
 )
 
 func TestLoadDefaults(t *testing.T) {
@@ -64,17 +64,17 @@ tab_dock = "bottom"
 	}
 }
 
-func TestAethelDir(t *testing.T) {
-	dir := config.AethelDir()
+func TestQuilDir(t *testing.T) {
+	dir := config.QuilDir()
 	if dir == "" {
-		t.Error("expected non-empty aethel dir")
+		t.Error("expected non-empty quil dir")
 	}
 }
 
-func TestAethelDir_EnvOverride(t *testing.T) {
-	t.Setenv("AETHEL_HOME", "/tmp/custom-aethel")
-	if got := config.AethelDir(); got != "/tmp/custom-aethel" {
-		t.Errorf("expected /tmp/custom-aethel, got %s", got)
+func TestQuilDir_EnvOverride(t *testing.T) {
+	t.Setenv("QUIL_HOME", "/tmp/custom-quil")
+	if got := config.QuilDir(); got != "/tmp/custom-quil" {
+		t.Errorf("expected /tmp/custom-quil, got %s", got)
 	}
 }
 
@@ -115,7 +115,7 @@ func TestSaveLoadRoundtrip(t *testing.T) {
 }
 
 func TestPathHelpers(t *testing.T) {
-	dir := config.AethelDir()
+	dir := config.QuilDir()
 	if dir == "" {
 		t.Skip("cannot determine home directory")
 	}
@@ -125,9 +125,9 @@ func TestPathHelpers(t *testing.T) {
 		fn       func() string
 		expected string
 	}{
-		{"SocketPath", config.SocketPath, filepath.Join(dir, "aetheld.sock")},
+		{"SocketPath", config.SocketPath, filepath.Join(dir, "quild.sock")},
 		{"ConfigPath", config.ConfigPath, filepath.Join(dir, "config.toml")},
-		{"PidPath", config.PidPath, filepath.Join(dir, "aetheld.pid")},
+		{"PidPath", config.PidPath, filepath.Join(dir, "quild.pid")},
 		{"WorkspacePath", config.WorkspacePath, filepath.Join(dir, "workspace.json")},
 		{"BufferDir", config.BufferDir, filepath.Join(dir, "buffers")},
 	}

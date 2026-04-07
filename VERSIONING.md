@@ -1,6 +1,6 @@
 # Versioning
 
-Aethel follows [Semantic Versioning](https://semver.org/) (SemVer).
+Quil follows [Semantic Versioning](https://semver.org/) (SemVer).
 
 ## Version Format
 
@@ -29,7 +29,7 @@ If no bumpable commits are found since the last tag, no release is created.
 ## Version Sources
 
 - **`VERSION`** file at repo root — single source of truth (`0.2.0`)
-- **`cmd/aethel/main.go`** — build-time injection via `-ldflags "-X main.version=..."`
+- **`cmd/quil/main.go`** — build-time injection via `-ldflags "-X main.version=..."`
 - **`CHANGELOG.md`** — version header added automatically on release
 - **Git tags** — `v0.2.0` format, created by the release workflow
 

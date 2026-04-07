@@ -36,7 +36,7 @@ vulnerability today. Exploitation would require all three preconditions:
    running inside an SSH session.
 2. The host terminal emulator re-emitting those sequences as stdin
    (depends on the host terminal's handling of mouse-reporting modes
-   while another program — Aethel itself — is consuming mouse events).
+   while another program — Quil itself — is consuming mouse events).
 3. The user failing to notice the border-colour and status-bar
    transitions, then continuing to type sensitive content (passwords,
    API keys, private notes) under the assumption that input still goes

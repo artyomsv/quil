@@ -6,9 +6,9 @@ before:
     - go vet ./...
 
 builds:
-  - id: aethel
-    main: ./cmd/aethel
-    binary: aethel
+  - id: quil
+    main: ./cmd/quil
+    binary: quil
     env:
       - CGO_ENABLED=0
     goos:
@@ -24,9 +24,9 @@ builds:
     ldflags:
       - -s -w -X main.version={{.Version}}
 
-  - id: aetheld
-    main: ./cmd/aetheld
-    binary: aetheld
+  - id: quild
+    main: ./cmd/quild
+    binary: quild
     env:
       - CGO_ENABLED=0
     goos:
@@ -45,9 +45,9 @@ builds:
 archives:
   - id: default
     ids:
-      - aethel
-      - aetheld
-    name_template: "aethel_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+      - quil
+      - quild
+    name_template: "quil_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     formats:
       - tar.gz
     format_overrides:
@@ -65,7 +65,7 @@ changelog:
 release:
   github:
     owner: artyomsv
-    name: aethel
+    name: quil
   draft: false
   prerelease: auto
   name_template: "v{{.Version}}"

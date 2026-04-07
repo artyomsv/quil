@@ -13,10 +13,10 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/artyomsv/aethel/internal/config"
-	"github.com/artyomsv/aethel/internal/ipc"
-	"github.com/artyomsv/aethel/internal/plugin"
-	"github.com/artyomsv/aethel/internal/tui"
+	"github.com/artyomsv/quil/internal/config"
+	"github.com/artyomsv/quil/internal/ipc"
+	"github.com/artyomsv/quil/internal/plugin"
+	"github.com/artyomsv/quil/internal/tui"
 )
 
 var version = "dev"
@@ -28,7 +28,7 @@ const (
 
 func main() {
 	// Check for --dev flag before anything else.
-	// Sets AETHEL_HOME to .aethel/ next to the executable for isolated dev instances.
+	// Sets QUIL_HOME to .quil/ next to the executable for isolated dev instances.
 	for i, arg := range os.Args[1:] {
 		if arg == "--dev" {
 			exe, err := os.Executable()
@@ -36,8 +36,8 @@ func main() {
 				fmt.Fprintf(os.Stderr, "--dev: cannot determine executable path: %v\n", err)
 				os.Exit(1)
 			}
-			devDir := filepath.Join(filepath.Dir(exe), ".aethel")
-			os.Setenv("AETHEL_HOME", devDir)
+			devDir := filepath.Join(filepath.Dir(exe), ".quil")
+			os.Setenv("QUIL_HOME", devDir)
 			realIdx := i + 1 // i is relative to os.Args[1:]
 			os.Args = append(os.Args[:realIdx], os.Args[realIdx+1:]...)
 			break
@@ -53,7 +53,7 @@ func main() {
 			runMCP()
 			return
 		case "version":
-			fmt.Println("aethel v" + version)
+			fmt.Println("quil v" + version)
 			return
 		}
 	}
@@ -63,7 +63,7 @@ func main() {
 
 func handleDaemon() {
 	if len(os.Args) < 3 {
-		fmt.Fprintln(os.Stderr, "usage: aethel daemon [start|stop|status]")
+		fmt.Fprintln(os.Stderr, "usage: quil daemon [start|stop|status]")
 		os.Exit(1)
 	}
 
@@ -82,14 +82,14 @@ func handleDaemon() {
 
 func findDaemonBinary() string {
 	// 1. Check PATH first
-	if p, err := exec.LookPath("aetheld"); err == nil {
+	if p, err := exec.LookPath("quild"); err == nil {
 		return p
 	}
 
 	// 2. Check alongside the running executable
 	if exe, err := os.Executable(); err == nil {
 		dir := filepath.Dir(exe)
-		candidate := filepath.Join(dir, "aetheld")
+		candidate := filepath.Join(dir, "quild")
 		if runtime.GOOS == "windows" {
 			candidate += ".exe"
 		}
@@ -99,7 +99,7 @@ func findDaemonBinary() string {
 	}
 
 	// 3. Fallback — let OS try
-	return "aetheld"
+	return "quild"
 }
 
 func startDaemon(quiet bool) {
@@ -117,8 +117,8 @@ func startDaemon(quiet bool) {
 		os.Remove(sockPath)
 	}
 
-	aetheld := findDaemonBinary()
-	cmd := exec.Command(aetheld, "--background")
+	quild := findDaemonBinary()
+	cmd := exec.Command(quild, "--background")
 	cmd.Stdout = nil
 	cmd.Stderr = nil
 	cmd.SysProcAttr = daemonSysProcAttr()
@@ -173,12 +173,12 @@ func daemonStatus() {
 
 func launchTUI() {
 	// Set up logging early
-	logDir := config.AethelDir()
+	logDir := config.QuilDir()
 	if logDir != "" {
 		os.MkdirAll(logDir, 0700)
 	}
-	logPath := filepath.Join(logDir, "aethel.log")
-	logFile, err := tea.LogToFile(logPath, "aethel")
+	logPath := filepath.Join(logDir, "quil.log")
+	logFile, err := tea.LogToFile(logPath, "quil")
 	if err == nil && logFile != nil {
 		defer logFile.Close()
 	}
@@ -219,7 +219,7 @@ func launchTUI() {
 	}
 	if err != nil {
 		log.Printf("cannot connect to daemon: %v", err)
-		fmt.Fprintf(os.Stderr, "cannot connect to daemon: %v\nRun 'aethel daemon start' first.\n", err)
+		fmt.Fprintf(os.Stderr, "cannot connect to daemon: %v\nRun 'quil daemon start' first.\n", err)
 		os.Exit(1)
 	}
 	defer client.Close()
@@ -265,7 +265,7 @@ func fileExists(path string) bool {
 	return err == nil
 }
 
-// windowState is persisted to ~/.aethel/window.json.
+// windowState is persisted to ~/.quil/window.json.
 type windowState struct {
 	Cols        int  `json:"cols"`
 	Rows        int  `json:"rows"`

@@ -16,10 +16,10 @@ Remote pair programming with terminal tools is painful. Screen sharing is laggy 
 
 ```bash
 # Developer A (host)
-aethel serve --share --token abc123
+quil serve --share --token abc123
 
 # Developer B (remote)
-aethel attach --host dev-server:8080 --token abc123
+quil attach --host dev-server:8080 --token abc123
 ```
 
 Both developers see the same workspace. Read-only by default, collaborative mode optional. This is tmux session sharing but with project context, typed panes, and AI session awareness.
@@ -30,18 +30,18 @@ Both developers see the same workspace. Read-only by default, collaborative mode
 
 ```bash
 # Start sharing current workspace
-$ aethel serve --share --token mysecret
+$ quil serve --share --token mysecret
 Sharing workspace on :8080
 Token: mysecret
 Waiting for connections...
 
 # Or generate a random token
-$ aethel serve --share
+$ quil serve --share
 Sharing workspace on :8080
 Token: a7f3b2c1 (share this with your pair)
 
 # With specific port
-$ aethel serve --share --port 9090 --token mysecret
+$ quil serve --share --port 9090 --token mysecret
 ```
 
 Status bar shows: `[sharing: 1 viewer]`
@@ -49,7 +49,7 @@ Status bar shows: `[sharing: 1 viewer]`
 ### Remote Side
 
 ```bash
-$ aethel attach --host 192.168.1.50:8080 --token mysecret
+$ quil attach --host 192.168.1.50:8080 --token mysecret
 Connected to workspace "my-saas-app" (read-only)
 Press Ctrl+Q to disconnect
 ```
@@ -64,7 +64,7 @@ Press Ctrl+Q to disconnect
 
 ```bash
 # Enable collaborative mode
-aethel serve --share --token abc123 --mode collaborative
+quil serve --share --token abc123 --mode collaborative
 ```
 
 ## Technical Approach
@@ -76,7 +76,7 @@ Reuse the existing IPC protocol (length-prefixed JSON) over TCP instead of Unix 
 ```
 ┌──────────┐     TCP + TLS      ┌──────────────┐
 │  Remote   │ ◄──────────────► │  Host daemon  │
-│  TUI      │  IPC messages     │  (aetheld)    │
+│  TUI      │  IPC messages     │  (quild)    │
 └──────────┘  + auth layer      └──────────────┘
 ```
 
@@ -108,14 +108,14 @@ In collaborative mode, show remote cursor position:
 | `internal/daemon/share.go` | New — TCP listener, auth, remote client management |
 | `internal/daemon/tls.go` | New — self-signed TLS cert generation |
 | `internal/ipc/tcp.go` | New — TCP transport (reusing existing IPC protocol) |
-| `cmd/aethel/serve.go` | New — `serve --share` subcommand |
-| `cmd/aethel/attach.go` | New — `attach --host` subcommand |
+| `cmd/quil/serve.go` | New — `serve --share` subcommand |
+| `cmd/quil/attach.go` | New — `attach --host` subcommand |
 | `internal/tui/model.go` | Presence indicators, mode restrictions |
 
 ## Success Criteria
 
-- [ ] `aethel serve --share` starts TCP listener with auth
-- [ ] `aethel attach --host` connects and shows remote workspace
+- [ ] `quil serve --share` starts TCP listener with auth
+- [ ] `quil attach --host` connects and shows remote workspace
 - [ ] Read-only mode prevents remote input
 - [ ] Collaborative mode allows both users to interact
 - [ ] PTY output streams with acceptable latency (< 100ms LAN)
@@ -124,7 +124,7 @@ In collaborative mode, show remote cursor position:
 
 ## Open Questions
 
-- NAT traversal: should Aethel provide a relay server for WAN connections?
+- NAT traversal: should Quil provide a relay server for WAN connections?
 - Maximum number of concurrent viewers?
 - Should shared sessions persist after host disconnects?
 - Recording: save shared sessions as replayable recordings?

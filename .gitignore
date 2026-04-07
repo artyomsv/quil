@@ -1,8 +1,8 @@
 # Binaries (root-level only)
-/aethel
-/aetheld
-/aethel.exe
-/aetheld.exe
+/quil
+/quild
+/quil.exe
+/quild.exe
 *.exe
 *.dll
 *.so
@@ -29,4 +29,4 @@ Thumbs.db
 /bin/
 
 # Dev instance data
-/.aethel/
+/.quil/

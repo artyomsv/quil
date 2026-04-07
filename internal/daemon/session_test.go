@@ -3,7 +3,7 @@ package daemon_test
 import (
 	"testing"
 
-	"github.com/artyomsv/aethel/internal/daemon"
+	"github.com/artyomsv/quil/internal/daemon"
 )
 
 func TestSessionManagerCreateTab(t *testing.T) {

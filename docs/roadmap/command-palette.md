@@ -10,7 +10,7 @@
 
 ## Problem
 
-Aethel has many features behind keybindings, but discoverability is poor. Users need to memorize shortcuts or open the help dialog. Power users expect a command palette (VS Code, Sublime Text, Raycast) — a single entry point for everything.
+Quil has many features behind keybindings, but discoverability is poor. Users need to memorize shortcuts or open the help dialog. Power users expect a command palette (VS Code, Sublime Text, Raycast) — a single entry point for everything.
 
 ## Proposed Solution
 

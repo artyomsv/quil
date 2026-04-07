@@ -11,10 +11,10 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/artyomsv/aethel/internal/clipboard"
-	"github.com/artyomsv/aethel/internal/config"
-	"github.com/artyomsv/aethel/internal/ipc"
-	"github.com/artyomsv/aethel/internal/plugin"
+	"github.com/artyomsv/quil/internal/clipboard"
+	"github.com/artyomsv/quil/internal/config"
+	"github.com/artyomsv/quil/internal/ipc"
+	"github.com/artyomsv/quil/internal/plugin"
 )
 
 // chromeHeight is the vertical space consumed by tab bar (1) + status bar (1).
@@ -159,7 +159,7 @@ type Model struct {
 	confirmKind          string                 // "pane" or "tab"
 	confirmID            string                 // ID of pane/tab to delete
 	confirmName          string                 // display name for confirmation
-	devMode              bool                   // true when AETHEL_HOME is set
+	devMode              bool                   // true when QUIL_HOME is set
 	pluginRegistry       *plugin.Registry       // plugin registry (shared with daemon)
 	lastWidth            int                    // last known window width (for persistence)
 	lastHeight           int                    // last known window height (for persistence)
@@ -199,7 +199,7 @@ func NewModel(client *ipc.Client, cfg config.Config, version string, registry *p
 		client:         client,
 		cfg:            cfg,
 		version:        version,
-		devMode:        os.Getenv("AETHEL_HOME") != "",
+		devMode:        os.Getenv("QUIL_HOME") != "",
 		pluginRegistry: registry,
 		instanceStore:  LoadInstances(config.InstancesPath()),
 		mcpHighlights:   make(map[string]bool),
@@ -927,7 +927,7 @@ func (m Model) View() tea.View {
 	var content string
 
 	if m.width == 0 || m.height == 0 {
-		content = "Connecting to aetheld..."
+		content = "Connecting to quild..."
 	} else if m.width < minTermWidth || m.height < minTermHeight {
 		content = fmt.Sprintf("Terminal too small (%dx%d)\nMinimum: %dx%d",
 			m.width, m.height, minTermWidth, minTermHeight)
@@ -1946,7 +1946,7 @@ func (m Model) renderTOMLEditorFullScreen() string {
 
 func (m Model) renderStatusBar() string {
 	// Left side: pane info
-	left := "aethel"
+	left := "quil"
 	if m.renamingPane {
 		left = "Rename pane: " + m.paneRenameInput + "▎"
 	} else if tab := m.activeTabModel(); tab != nil {

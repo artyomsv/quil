@@ -1,4 +1,4 @@
-# Contributing to Aethel
+# Contributing to Quil
 
 ## Prerequisites
 
@@ -39,8 +39,8 @@ make cross
 
 ```
 cmd/
-├── aethel/          # TUI client entry point
-└── aetheld/         # Daemon entry point
+├── quil/          # TUI client entry point
+└── quild/         # Daemon entry point
 internal/
 ├── config/          # TOML configuration loading
 ├── daemon/          # Session manager, message routing, daemon lifecycle

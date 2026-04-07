@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/artyomsv/aethel/internal/persist"
+	"github.com/artyomsv/quil/internal/persist"
 )
 
 func TestSaveAndLoad(t *testing.T) {

@@ -1,6 +1,6 @@
 # Plugin Configuration Reference
 
-Aethel supports custom pane types via TOML plugin files. This document covers every configuration option, constraint, and behavior so you can create your own plugins.
+Quil supports custom pane types via TOML plugin files. This document covers every configuration option, constraint, and behavior so you can create your own plugins.
 
 ## Overview
 
@@ -8,14 +8,14 @@ Plugins define how panes are spawned, persisted, and restored. Each plugin is a 
 
 | Item | Details |
 |------|---------|
-| **File location** | `~/.aethel/plugins/*.toml` (or `$AETHEL_HOME/plugins/`) |
+| **File location** | `~/.quil/plugins/*.toml` (or `$QUIL_HOME/plugins/`) |
 | **Loading** | On daemon startup; hot reload via F1 → Plugins → Reload |
 | **Defaults** | 3 built-in TOML plugins (claude-code, ssh, stripe) are written on first run and never overwritten — your edits are preserved across upgrades |
 | **Built-in** | The `terminal` plugin is defined in Go (not TOML) because it requires runtime shell detection |
 
 ## Quick Start
 
-Save this as `~/.aethel/plugins/htop.toml`:
+Save this as `~/.quil/plugins/htop.toml`:
 
 ```toml
 [plugin]
@@ -192,7 +192,7 @@ pattern = 'Session ID: ([a-f0-9-]+)'
 **`"rerun"`** — The simplest persistence for interactive tools. On restore, the exact same command and arguments are re-executed. The user's saved instance args (from the form) are preserved. Example: an SSH connection to `admin@prod-server:2222` is re-established automatically.
 
 **`"preassign_id"`** — For tools that support session IDs. On first launch:
-1. Aethel generates a UUID
+1. Quil generates a UUID
 2. Stores it as `session_id` in plugin state
 3. Expands `start_args` (e.g., `["--session-id", "{session_id}"]`)
 4. Appends expanded args to the command
@@ -245,7 +245,7 @@ env = ["SSH_AUTH_SOCK=/run/ssh-agent.sock"]
 | `args` | string[] | No | `[]` | Instance-specific command arguments. Override the plugin's default `args`. |
 | `env` | string[] | No | `[]` | Instance-specific environment variables (`KEY=VALUE`). |
 
-**Note:** Users can also create and save instances at runtime via the Ctrl+N form. These are stored in `~/.aethel/instances.json` and appear alongside TOML-defined instances.
+**Note:** Users can also create and save instances at runtime via the Ctrl+N form. These are stored in `~/.quil/instances.json` and appear alongside TOML-defined instances.
 
 ---
 
@@ -284,7 +284,7 @@ action = "dialog"
 | Value | Behavior |
 |-------|----------|
 | `"dialog"` | Show a modal error dialog in the TUI with `title` and `message`. |
-| `"log"` | Log the match to the daemon log file (`~/.aethel/aetheld.log`). No visible UI. |
+| `"log"` | Log the match to the daemon log file (`~/.quil/quild.log`). No visible UI. |
 
 Invalid action values are logged as a warning and treated as `"log"`.
 
@@ -338,7 +338,7 @@ These rules are enforced when loading a TOML plugin file:
 Daemon startup
   ├── Write default TOML files (if missing)
   ├── Load built-in terminal plugin (Go)
-  ├── Load all *.toml from ~/.aethel/plugins/
+  ├── Load all *.toml from ~/.quil/plugins/
   │     ├── Parse TOML → validate → compile regex patterns
   │     └── TOML plugins override built-ins with same name
   ├── Detect availability (exec.LookPath on each binary)
@@ -517,8 +517,8 @@ action = "dialog"
 
 **How it works:**
 
-1. **First launch:** Aethel generates a UUID (e.g., `a1b2c3d4-...`), stores it as `session_id`, and starts: `my-ai-tool --session-id a1b2c3d4-...`
-2. **Daemon restart:** Aethel loads the saved `session_id` from disk and starts: `my-ai-tool --resume a1b2c3d4-...`
+1. **First launch:** Quil generates a UUID (e.g., `a1b2c3d4-...`), stores it as `session_id`, and starts: `my-ai-tool --session-id a1b2c3d4-...`
+2. **Daemon restart:** Quil loads the saved `session_id` from disk and starts: `my-ai-tool --resume a1b2c3d4-...`
 3. **`ghost_buffer = false`:** The tool's TUI output is not saved/replayed (the tool redraws its own interface on resume).
 
 ### Example 4: Webhook Listener

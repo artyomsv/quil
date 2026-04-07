@@ -4,7 +4,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/artyomsv/aethel/internal/ipc"
+	"github.com/artyomsv/quil/internal/ipc"
 )
 
 // PaneEvent represents a notification event from a pane.

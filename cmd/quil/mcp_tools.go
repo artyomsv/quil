@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/artyomsv/aethel/internal/ipc"
+	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -425,8 +425,8 @@ func registerCloseTUITool(s *mcp.Server, bridge *mcpBridge, mcpLog *mcpLogger) {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "close_tui",
-		Description: "Close the Aethel TUI window. The daemon stays running and all pane processes continue. " +
-			"Reconnect by running aethel in any terminal.",
+		Description: "Close the Quil TUI window. The daemon stays running and all pane processes continue. " +
+			"Reconnect by running quil in any terminal.",
 	}, func(_ context.Context, _ *mcp.CallToolRequest, _ Input) (*mcp.CallToolResult, any, error) {
 		msg, err := ipc.NewMessage(ipc.MsgCloseTUI, nil)
 		if err != nil {

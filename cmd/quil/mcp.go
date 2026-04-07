@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/artyomsv/aethel/internal/config"
-	"github.com/artyomsv/aethel/internal/ipc"
+	"github.com/artyomsv/quil/internal/config"
+	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -140,7 +140,7 @@ func runMCP() {
 
 	client, err := connectToDaemon(sockPath, cfg)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "cannot connect to daemon: %v\nRun 'aethel daemon start' first.\n", err)
+		fmt.Fprintf(os.Stderr, "cannot connect to daemon: %v\nRun 'quil daemon start' first.\n", err)
 		os.Exit(1)
 	}
 	defer client.Close()
@@ -152,9 +152,9 @@ func runMCP() {
 	go bridge.readLoop(ctx)
 
 	server := mcp.NewServer(
-		&mcp.Implementation{Name: "aethel", Version: version},
+		&mcp.Implementation{Name: "quil", Version: version},
 		&mcp.ServerOptions{
-			Instructions: "Aethel is a terminal multiplexer with multiple panes and tabs.\n\n" +
+			Instructions: "Quil is a terminal multiplexer with multiple panes and tabs.\n\n" +
 				"Tool usage guidelines:\n" +
 				"- Use list_panes or list_tabs first to discover IDs before calling other tools.\n" +
 				"- read_pane_output: best for simple shells and command output (returns scrollback text).\n" +

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-04-08
+
 ### Added
 
 - **Pane setup dialog — working directory prompt** — when creating a `claude-code` pane (Ctrl+N → AI Tools → Claude Code), the TUI now asks for the working directory with a smart default (the active pane's CWD, tracked via OSC 7). This preserves project-specific `.claude/` context that Claude Code ties to the directory. The empty input falls back to the daemon's `os.Getwd()`, matching the old behaviour.

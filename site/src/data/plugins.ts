@@ -32,13 +32,15 @@ export const plugins: PluginEntry[] = [
     name: "Claude Code",
     kind: "built-in",
     description:
-      "An AI session pane that runs Anthropic's Claude Code CLI with a per-pane UUID so sessions auto-resume on reboot. Ghost buffers show the last 500 lines while the session is restoring.",
-    spawnExample: 'spawn = ["claude", "--session-id", "{{uuid}}"]\nresume = ["claude", "--resume", "{{uuid}}"]',
+      "An AI session pane that runs Anthropic's Claude Code CLI. A setup dialog asks for the working directory (so project-specific `.claude/` context is preserved) and offers a `Dangerously skip permissions` checkbox for unattended runs. Sessions resume across daemon restarts.",
+    spawnExample:
+      '# claude-code.toml — relevant fields\n[command]\ncmd = "claude"\nprompts_cwd = true\n\n[[command.toggles]]\nname = "skip"\nlabel = "Dangerously skip permissions"\nargs_when_on = ["--dangerously-skip-permissions"]\ndefault = false\n\n[persistence]\nstrategy = "preassign_id"\nresume_args = ["--continue"]',
     features: [
-      "UUID assigned at pane creation time, stored in workspace.json",
-      "Auto-resume via `claude --resume <uuid>` on reboot",
-      "Idle-state detection surfaces to the notification center",
-      "Context-aware status line shows token usage + model name",
+      "Setup dialog (Ctrl+N → AI → Claude Code) browses the filesystem starting from the active pane's OSC 7 working directory.",
+      "`Dangerously skip permissions` checkbox is off by default; when on, the toggle args persist across daemon restarts (the resume strategy now appends ResumeArgs to InstanceArgs instead of replacing).",
+      "Auto-resume on daemon restart via `claude --continue`, with daemon-side `EvalSymlinks` re-resolution closing the spawn-time TOCTOU window.",
+      "Idle-state detection surfaces to the notification center.",
+      "Pairs with the Win32 clipboard image paste proxy: take a screenshot, press F8 in a Claude Code pane, and the file path is typed in for the AI to read.",
     ],
   },
   {
@@ -76,28 +78,43 @@ export const pluginAuthoringRef =
 
 /** Sample TOML snippet shown on the /plugins page. Plain enough for
  *  a first-time reader to copy, modify, and drop into ~/.quil/plugins/
- *  without reading the full reference. */
+ *  without reading the full reference. Schema matches the live shipping
+ *  format documented in docs/plugin-reference.md. */
 export const samplePluginToml = `# ~/.quil/plugins/webhook.toml
 [plugin]
 name = "webhook"
-type = "webhook"
+display_name = "Webhook listener"
+category = "tools"
 description = "Receives incoming HTTPS webhooks via smee.io"
 
-[spawn]
-command = ["smee", "--url", "{{webhook_url}}", "--path", "/hook"]
-cwd = "{{project_root}}"
+[command]
+cmd = "smee"
+detect = "smee --version"
+arg_template = ["--url", "{url}", "--path", "/hook"]
+prompts_cwd = true               # ask for the working directory at pane creation
 
-[resume]
-# Just re-run the original spawn command — smee is stateless
-strategy = "respawn"
+[[command.form_fields]]
+name = "name"
+label = "Name"
+required = true
 
-[status]
-# Grep for the smee URL in the output and surface it on the pane tab
-pattern = 'Forwarding (https://smee.io/[a-zA-Z0-9]+)'
-template = "{1}"
+[[command.form_fields]]
+name = "url"
+label = "Smee URL"
+required = true
 
-[error]
-# Catch auth failures and mark the pane as errored
+[persistence]
+strategy = "rerun"               # respawn with the same instance args
+ghost_buffer = true
+
+[[notification_handlers]]
+pattern = 'Forwarding (https?://smee\\.io/\\S+)'
+title = "Webhook tunnel ready"
+severity = "info"
+
+[[error_handlers]]
 pattern = '(?i)(unauthorized|403 forbidden)'
-severity = "error"
+title = "Webhook auth failed"
+message = "Check your smee.io credentials and re-run the pane."
+action = "dialog"
 `;

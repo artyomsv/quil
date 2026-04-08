@@ -1,11 +1,15 @@
 package tui
 
 import (
+	crand "crypto/rand"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math/rand"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -14,6 +18,7 @@ import (
 	"github.com/artyomsv/quil/internal/clipboard"
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
+	"github.com/artyomsv/quil/internal/logger"
 	"github.com/artyomsv/quil/internal/plugin"
 )
 
@@ -128,10 +133,12 @@ const (
 	dialogShortcuts
 	dialogConfirm
 	dialogCreatePane
+	dialogCreatePaneSetup
 	dialogPluginError
 	dialogInstanceForm
 	dialogPlugins
 	dialogTOMLEditor
+	dialogLogViewer
 	dialogDisclaimer
 )
 
@@ -163,7 +170,7 @@ type Model struct {
 	pluginRegistry       *plugin.Registry       // plugin registry (shared with daemon)
 	lastWidth            int                    // last known window width (for persistence)
 	lastHeight           int                    // last known window height (for persistence)
-	createPaneStep       int                    // 0=category, 1=plugin, 2=split direction
+	createPaneStep       int                    // 0=category, 1=plugin, 2=instance form, 3=split direction
 	selectedCategory     int                    // selected category index in create pane dialog
 	selectedPlugin       string                 // selected plugin name in create pane dialog
 	pluginErrorTitle     string                 // title for plugin error dialog
@@ -171,8 +178,21 @@ type Model struct {
 	instanceStore        InstanceStore          // saved plugin instances (loaded from instances.json)
 	instanceFormValues   []string               // form field values (indexed by FormField position)
 	instanceFormCursor   int                    // active field in instance form
-	selectedInstanceArgs []string               // args from selected instance (for IPC)
+	selectedInstanceArgs []string               // args from selected instance (for IPC); toggles are appended here
 	selectedInstanceName string                 // name from selected instance (for IPC)
+	// Setup-dialog state. selectedCWD is the value committed at submit time
+	// (a snapshot of cwdBrowseDir) and is what handleCreatePaneSplit reads
+	// for CreatePanePayload.CWD. The two fields exist separately so that the
+	// browser can navigate freely without dirtying the "to be sent" value
+	// until the user actually presses Continue.
+	selectedCWD          string                 // CWD chosen in dialogCreatePaneSetup (empty = daemon default)
+	cwdInputError        string                 // validation error shown under CWD input (empty = ok)
+	toggleStates         []bool                 // checkbox states; one entry per plugin's Toggles slice, same indexing
+	setupFieldCursor     int                    // focused field in setup dialog: 0 = CWD (if PromptsCWD), then toggles, then Continue
+	cwdBrowseDir         string                 // current dir shown in the setup dialog's directory browser
+	cwdBrowseEntries     []string               // browser listing: ".." (if not at root) + sorted subdirs
+	cwdBrowseCursor      int                    // selected entry index in cwdBrowseEntries
+	cwdBrowseScroll      int                    // scroll offset (top index) for the visible window of cwdBrowseEntries
 	tomlEditor           *TextEditor            // active TOML editor (nil when not editing)
 	selection            *Selection             // active text selection (nil when none)
 	mouseDown            bool                   // true while left mouse button is held
@@ -848,11 +868,24 @@ func (m Model) notesEditorPosAt(screenX, screenY int) (row, col int, ok bool) {
 // dialogs). Anything not on this list is consumed by the editor as text
 // input while notes mode is active.
 //
-// Note: Tab/Shift+Tab (kb.NextPane/kb.PrevPane) are deliberately NOT in
-// this list — in notes mode they cycle keyboard focus between the editor
-// and the bound pane, handled by the caller.
+// Note: Tab and Shift+Tab are deliberately NOT in this list — in notes mode
+// they cycle keyboard focus between the editor and the bound pane, handled
+// as a hard-coded case in the caller (not driven by kb.NextPane, which is
+// now unbound by default since spatial navigation moved to Alt+Arrow).
 func (m Model) notesKeyExempt(key string) bool {
+	if key == "" {
+		return false
+	}
 	kb := m.cfg.Keybindings
+	// Vertical spatial nav — there's no up/down axis in the notes 2-panel
+	// layout (pane|editor), so Alt+Up/Alt+Down flush and exit notes, then
+	// the global handler runs NavigateDirection to the closest neighbor.
+	// Alt+Left and Alt+Right are handled by the notes-mode focus toggle
+	// earlier in handleKey and never reach this function.
+	if (kb.PaneUp != "" && key == kb.PaneUp) ||
+		(kb.PaneDown != "" && key == kb.PaneDown) {
+		return true
+	}
 	switch key {
 	// Structural — close/split implicitly destroys the bound pane and must
 	// flush + exit notes before running.
@@ -932,8 +965,10 @@ func (m Model) View() tea.View {
 		content = fmt.Sprintf("Terminal too small (%dx%d)\nMinimum: %dx%d",
 			m.width, m.height, minTermWidth, minTermHeight)
 		content = lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, content)
-	} else if m.dialog == dialogTOMLEditor && m.tomlEditor != nil {
-		// TOML editor takes over the full screen (bypasses dialog rendering)
+	} else if (m.dialog == dialogTOMLEditor || m.dialog == dialogLogViewer) && m.tomlEditor != nil {
+		// TOML editor and log viewer both take over the full screen
+		// (bypass dialog rendering). The log viewer reuses the same
+		// TextEditor with ReadOnly=true and HighlightPlain.
 		content = m.renderTOMLEditorFullScreen()
 	} else if m.dialog != dialogNone {
 		content = m.renderDialog()
@@ -991,6 +1026,14 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 	kb := m.cfg.Keybindings
 
+	// Debug-level per-key trace. Off by default; flip [logging] level = "debug"
+	// in config.toml to see every modified key reaching Quil. Useful for
+	// diagnosing missing-key bugs (e.g., when a terminal emulator captures
+	// a binding before delivering it to the TUI).
+	if msg.Mod != 0 {
+		logger.Debug("handleKey: key=%q Mod=%v Code=%d Text=%q", key, msg.Mod, msg.Code, msg.Text)
+	}
+
 	// Dialog mode: route input to dialog handler
 	if m.dialog != dialogNone {
 		return m.handleDialogKey(msg)
@@ -1005,23 +1048,32 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 
 	// Notes mode: while active, keyboard input is split between the bound
-	// pane (left) and the notes editor (right). Tab/Shift+Tab cycles which
-	// side has focus; the user can type into the pane or into the editor
-	// without exiting notes mode.
+	// pane (left) and the notes editor (right). Alt+Left focuses the pane,
+	// Alt+Right focuses the editor — spatial directions that match the
+	// physical layout of the two panels. Tab inside notes mode is NOT a
+	// focus-toggle: it reaches the editor (inserts tab) or the PTY (shell
+	// completion), matching the rest of Quil's "Tab belongs to the PTY"
+	// policy.
 	if m.notesMode && m.notesEditor != nil {
 		// Universal keys — handled the same way regardless of which side
 		// currently has focus.
-		switch key {
-		case kb.NotesToggle:
+		switch {
+		case key == kb.NotesToggle:
 			return m.exitNotesMode()
-		case kb.Quit:
+		case key == kb.Quit:
 			if err := m.notesEditor.Close(); err != nil {
 				log.Printf("save notes on quit: %v", err)
 			}
 			return m, tea.Quit
-		case kb.NextPane, kb.PrevPane:
-			// Tab / Shift+Tab cycles focus between editor and pane.
-			m.notesPaneFocused = !m.notesPaneFocused
+		case kb.PaneLeft != "" && key == kb.PaneLeft:
+			// Alt+Left — focus the bound pane (on the left in notes layout).
+			// Idempotent: no-op if the pane is already focused.
+			m.notesPaneFocused = true
+			return m, nil
+		case kb.PaneRight != "" && key == kb.PaneRight:
+			// Alt+Right — focus the editor (on the right in notes layout).
+			// Idempotent: no-op if the editor is already focused.
+			m.notesPaneFocused = false
 			return m, nil
 		}
 
@@ -1102,6 +1154,20 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		m.selection = nil
 		return m, nil
+	}
+
+	// Plugin-declared raw key passthrough (e.g., claude-code consumes shift+tab
+	// for mode toggling). When the active pane's plugin lists the current key
+	// in its RawKeys, send it straight to the PTY and skip every global
+	// shortcut, selection guard, and pane-navigation binding below.
+	if data := m.tryPluginRawKey(key, msg); data != nil {
+		m.selection = nil
+		if tab := m.activeTabModel(); tab != nil {
+			if pane := tab.ActivePaneModel(); pane != nil {
+				pane.ResetScroll()
+			}
+		}
+		return m, m.forwardInputBytes(data)
 	}
 
 	// Selection: Shift+Arrow / Ctrl+Shift+Arrow
@@ -1201,19 +1267,52 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case key == kb.NextPane:
+	case kb.NextPane != "" && key == kb.NextPane:
 		if tab := m.activeTabModel(); tab != nil && !tab.FocusMode() {
 			tab.NextPane()
 		}
 		return m, nil
 
-	case key == kb.PrevPane:
+	case kb.PrevPane != "" && key == kb.PrevPane:
 		if tab := m.activeTabModel(); tab != nil && !tab.FocusMode() {
 			tab.PrevPane()
 		}
 		return m, nil
 
-	case key == kb.Paste:
+	case kb.PaneLeft != "" && key == kb.PaneLeft:
+		if tab := m.activeTabModel(); tab != nil {
+			tab.NavigateDirection(DirLeft)
+		}
+		return m, nil
+
+	case kb.PaneRight != "" && key == kb.PaneRight:
+		if tab := m.activeTabModel(); tab != nil {
+			tab.NavigateDirection(DirRight)
+		}
+		return m, nil
+
+	case kb.PaneUp != "" && key == kb.PaneUp:
+		if tab := m.activeTabModel(); tab != nil {
+			tab.NavigateDirection(DirUp)
+		}
+		return m, nil
+
+	case kb.PaneDown != "" && key == kb.PaneDown:
+		if tab := m.activeTabModel(); tab != nil {
+			tab.NavigateDirection(DirDown)
+		}
+		return m, nil
+
+	case key == kb.Paste, key == "ctrl+alt+v", key == "f8":
+		// Multiple aliases for paste because Windows Terminal captures the
+		// default Ctrl+V binding for its own paste action and never delivers
+		// the key event to the TUI:
+		//   - kb.Paste (ctrl+v): works on Linux/macOS native ttys; eaten by
+		//                        Windows Terminal
+		//   - ctrl+alt+v:        works on most Windows configs but is ambiguous
+		//                        with AltGr on European keyboard layouts
+		//   - f8:                guaranteed pass-through on every terminal,
+		//                        no AltGr ambiguity (recommended on Windows)
 		return m, m.pasteClipboard()
 
 	case key == kb.FocusPane:
@@ -2230,6 +2329,45 @@ func (m Model) cycleTabColor() tea.Cmd {
 	return m.updateTab(tab.ID, tab.Name, tab.Color)
 }
 
+// tryPluginRawKey returns the PTY bytes for the given key if the active pane's
+// plugin has opted into raw passthrough for it (via the plugin's RawKeys list).
+// Returns nil when there is no active pane, the plugin doesn't claim the key,
+// or the key has no encoding in keyToBytes.
+//
+// The linear scan over RawKeys is intentional: lists are tiny in practice
+// (≤5 entries), and the loader caps len(RawKeys) at load time so a hostile
+// TOML cannot turn this into a per-keystroke hot path.
+func (m Model) tryPluginRawKey(key string, keyMsg tea.KeyPressMsg) []byte {
+	// Guard against zero-value Model{} (which is the shape used in unit tests
+	// where the registry isn't wired). Production always sets pluginRegistry
+	// in NewModel, so this branch is purely defensive.
+	if m.pluginRegistry == nil {
+		return nil
+	}
+	tab := m.activeTabModel()
+	if tab == nil {
+		return nil
+	}
+	pane := tab.ActivePaneModel()
+	if pane == nil {
+		return nil
+	}
+	paneType := pane.Type
+	if paneType == "" {
+		paneType = "terminal" // legacy panes without an explicit type
+	}
+	p := m.pluginRegistry.Get(paneType)
+	if p == nil {
+		return nil
+	}
+	for _, rk := range p.Command.RawKeys {
+		if rk == key {
+			return keyToBytes(keyMsg)
+		}
+	}
+	return nil
+}
+
 func (m Model) forwardInputBytes(data []byte) tea.Cmd {
 	return func() tea.Msg {
 		tab := m.activeTabModel()
@@ -2252,12 +2390,26 @@ func (m Model) forwardInputBytes(data []byte) tea.Cmd {
 
 func (m Model) pasteClipboard() tea.Cmd {
 	return func() tea.Msg {
-		text, err := clipboard.Read()
-		if err != nil {
-			log.Printf("clipboard read: %v", err)
-			return nil
+		logger.Debug("pasteClipboard: invoked")
+		// Try text first. If text is non-empty, paste it as-is. Otherwise
+		// fall through to image — this works around claude-code's broken
+		// Windows clipboard image reader (anthropics/claude-code#32791) by
+		// reading the image ourselves, saving it as a PNG under
+		// config.PasteDir(), and pasting the absolute path so any PTY tool
+		// can pick it up via its file-reading tools.
+		text, textErr := clipboard.Read() // text-only error is non-fatal — fall through
+		logger.Debug("pasteClipboard: clipboard.Read() text_len=%d err=%v", len(text), textErr)
+		if text == "" {
+			logger.Debug("pasteClipboard: text empty, attempting image fallback")
+			if path, ok := m.tryPasteClipboardImage(); ok {
+				logger.Debug("pasteClipboard: image fallback succeeded, path=%q", path)
+				text = path
+			} else {
+				logger.Debug("pasteClipboard: image fallback returned no path")
+			}
 		}
 		if text == "" {
+			logger.Debug("pasteClipboard: nothing to paste, returning")
 			return nil
 		}
 		tab := m.activeTabModel()
@@ -2274,6 +2426,7 @@ func (m Model) pasteClipboard() tea.Cmd {
 		data = append(data, "\x1b[200~"...)
 		data = append(data, []byte(text)...)
 		data = append(data, "\x1b[201~"...)
+		logger.Debug("pasteClipboard: sending %d bytes to pane %s", len(data), pane.ID)
 		msg, _ := ipc.NewMessage(ipc.MsgPaneInput, ipc.PaneInputPayload{
 			PaneID: pane.ID,
 			Data:   data,
@@ -2283,6 +2436,64 @@ func (m Model) pasteClipboard() tea.Cmd {
 		time.Sleep(100 * time.Millisecond)
 		return pasteRefreshMsg{}
 	}
+}
+
+// tryPasteClipboardImage attempts to read an image from the system clipboard,
+// save it as a PNG under config.PasteDir(), and return the absolute path of
+// the saved file. Returns ("", false) when no image is available or any step
+// fails — the caller falls back to its existing text-paste path.
+//
+// This is the proxy that works around the broken claude-code clipboard image
+// reader on Windows (anthropics/claude-code#32791): Quil grabs the image from
+// the OS clipboard itself, drops it in a known location, and types the path
+// into the PTY. Any AI tool with file-reading tools can then pick it up.
+func (m Model) tryPasteClipboardImage() (string, bool) {
+	pngBytes, err := clipboard.ReadImage()
+	if err != nil {
+		if !errors.Is(err, clipboard.ErrNoImage) {
+			log.Printf("clipboard image: read failed: %v", err)
+		}
+		return "", false
+	}
+	if len(pngBytes) == 0 {
+		return "", false
+	}
+
+	dir := config.PasteDir()
+	// 0o700 — only the owner can list / read pasted screenshots. They may
+	// contain sensitive material (passwords visible on screen, source code,
+	// etc.) so we deliberately don't share with other local users.
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		log.Printf("clipboard image: mkdir %q: %v", dir, err)
+		return "", false
+	}
+	// Filename uses a timestamp + 8-byte random suffix so:
+	//  - concurrent pastes can't collide,
+	//  - a co-tenant on a Unix box (where the parent dir might be world-
+	//    traversable through the user's home permissions) can't enumerate
+	//    or guess the filename to read recently-pasted screenshots.
+	now := time.Now()
+	suffixBytes := make([]byte, 8)
+	if _, rerr := crand.Read(suffixBytes); rerr != nil {
+		// Cryptographic randomness is on every supported platform; if it
+		// somehow fails, refuse to write rather than fall back to a
+		// predictable name.
+		log.Printf("clipboard image: rand: %v", rerr)
+		return "", false
+	}
+	name := fmt.Sprintf("quil-paste-%s-%s.png",
+		now.Format("20060102-150405"), hex.EncodeToString(suffixBytes))
+	abs := filepath.Join(dir, name)
+
+	// 0o600 — file inherits owner-only access from the directory above. We
+	// belt-and-braces it on the file too in case the umask is permissive
+	// or the directory was pre-existing with looser bits.
+	if err := os.WriteFile(abs, pngBytes, 0o600); err != nil {
+		log.Printf("clipboard image: write %s: %v", abs, err)
+		return "", false
+	}
+	log.Printf("clipboard image: pasted %d bytes → %s", len(pngBytes), abs)
+	return abs, true
 }
 
 func (m Model) pasteToDialog() tea.Cmd {
@@ -2531,6 +2742,10 @@ func keyToBytes(keyMsg tea.KeyPressMsg) []byte {
 		return []byte("\r")
 	case "tab":
 		return []byte("\t")
+	case "shift+tab":
+		// xterm CSI Z — Claude Code uses this to cycle modes (auto-accept,
+		// plan, etc.). Without this mapping the key would be silently dropped.
+		return []byte("\x1b[Z")
 	case "backspace":
 		return []byte{0x7f}
 	case "space":

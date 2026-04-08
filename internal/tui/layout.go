@@ -312,6 +312,46 @@ type PaneRect struct {
 	OX, OY, W, H int
 }
 
+// CollectRects walks the layout tree and appends a PaneRect for every leaf.
+// Used by spatial pane navigation (TabModel.NavigateDirection) to pick the
+// closest neighbor in a given direction without re-implementing the layout
+// arithmetic.
+func (n *LayoutNode) CollectRects(ox, oy, w, h int, out *[]PaneRect) {
+	if n == nil {
+		return
+	}
+	if n.IsLeaf() {
+		if n.Pane != nil {
+			*out = append(*out, PaneRect{Pane: n.Pane, OX: ox, OY: oy, W: w, H: h})
+		}
+		return
+	}
+	switch n.Split {
+	case SplitHorizontal:
+		leftW := int(float64(w) * n.Ratio)
+		if leftW < minPaneW {
+			leftW = minPaneW
+		}
+		rightW := w - leftW
+		if rightW < minPaneW {
+			rightW = minPaneW
+		}
+		n.Left.CollectRects(ox, oy, leftW, h, out)
+		n.Right.CollectRects(ox+leftW, oy, rightW, h, out)
+	case SplitVertical:
+		topH := int(float64(h) * n.Ratio)
+		if topH < minPaneH {
+			topH = minPaneH
+		}
+		bottomH := h - topH
+		if bottomH < minPaneH {
+			bottomH = minPaneH
+		}
+		n.Left.CollectRects(ox, oy, w, topH, out)
+		n.Right.CollectRects(ox, oy+topH, w, bottomH, out)
+	}
+}
+
 // FindPaneRectAt returns the pane and its screen rectangle at coordinates (x, y).
 func (n *LayoutNode) FindPaneRectAt(x, y, ox, oy, w, h int) *PaneRect {
 	if n == nil {

@@ -28,6 +28,7 @@ var (
 	globalUnlock     = kernel32.NewProc("GlobalUnlock")
 	globalAlloc      = kernel32.NewProc("GlobalAlloc")
 	globalFree       = kernel32.NewProc("GlobalFree")
+	globalSize       = kernel32.NewProc("GlobalSize")
 )
 
 func read() (string, error) {

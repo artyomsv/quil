@@ -20,7 +20,12 @@ export const homeFaq: FaqItem[] = [
   {
     question: "Which AI tools does Quil support today?",
     answer:
-      "Claude Code has first-class support via the built-in Claude Code pane type, with auto-resume using `claude --resume <session-id>`. Any other tool can be wrapped in a custom TOML plugin that defines its spawn command, resume strategy, and error patterns. Cursor integration is on the roadmap.",
+      "Claude Code has first-class support via the built-in Claude Code pane type, with auto-resume on daemon restart, a setup dialog that pre-fills the active pane's working directory (so the project's `.claude/` context is preserved), and a one-click `Dangerously skip permissions` toggle for unattended runs. Quil also runs an MCP server (`quil mcp`) that exposes 15 tools so any MCP-capable client can read pane output, send keystrokes, and snapshot a workspace. Any other AI tool can be wrapped in a custom TOML plugin that defines its spawn command, resume strategy, and error patterns.",
+  },
+  {
+    question: "Can I paste a screenshot into Claude Code on Windows?",
+    answer:
+      "Yes. Quil ships a Win32 clipboard image proxy that works around the upstream Claude Code Windows clipboard image bug (anthropics/claude-code#32791). Take a screenshot with Win+Shift+S, focus a Claude Code pane, and press F8 (or Ctrl+Alt+V — Windows Terminal eats Ctrl+V before it reaches the TUI). Quil decodes the clipboard DIB, saves a PNG under `~/.quil/paste/` with owner-only 0o600 permissions and a crypto/rand filename suffix, then types the absolute file path into the pane. Claude Code reads the file via its normal file-reading tools.",
   },
   {
     question: "Does Quil work on Windows without WSL?",

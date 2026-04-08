@@ -76,11 +76,14 @@ arg_template = ["-p", "{port}", "{user}@{host}"]
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `cmd` | string | **Yes** | — | Binary name or absolute path. Resolved via PATH at runtime (`exec.LookPath`). |
+| `path` | string | No | `""` | Explicit absolute path to the binary. If set, bypasses PATH lookup. Useful for tools installed in non-standard locations or when Quil is launched from Explorer on Windows with an incomplete PATH. Detection order: `path` → `exec.LookPath(cmd)` → `searchBinary` fallback (which scans `~/.local/bin` everywhere and the User PATH on Windows). |
 | `args` | string[] | No | `[]` | Default arguments passed every time the plugin is launched. Overridden when instance-specific args are provided. |
 | `env` | string[] | No | `[]` | Environment variables as `KEY=VALUE` pairs. Merged into the PTY process environment. |
 | `detect` | string | No | Value of `cmd` | Command used to check if the tool is installed. Only the **first word** is used for PATH lookup (e.g., `"ssh -V"` checks for `ssh`). |
 | `shell_integration` | bool | No | `false` | **Reserved for the built-in terminal plugin.** Injects OSC 7 directory tracking hooks. Has no effect in user TOML plugins. |
 | `arg_template` | string[] | No | `[]` | Template arguments with `{placeholder}` tokens. Expanded from form field values when creating an instance. See [Template Expansion](#template-expansion). |
+| `prompts_cwd` | bool | No | `false` | If `true`, the pane setup dialog asks the user for a working directory when creating the pane. Pre-filled with the active pane's CWD (tracked via OSC 7). Empty input falls back to the daemon's `os.Getwd()`. See [Pane Setup Dialog](#pane-setup-dialog). |
+| `raw_keys` | string[] | No | `[]` | List of key strings (e.g. `["shift+tab"]`) that bypass Quil's global shortcut layer for panes of this type and are forwarded directly to the PTY. Capped at 64 entries. Single-rune printable entries (e.g. `["a"]`) shadow ordinary typing for the entire pane and are warned about in the daemon log. The default plugins **do not** opt in — Tab and Shift+Tab reach the PTY naturally because pane navigation lives on `Alt+Arrow`. The mechanism is available for custom plugins that need to override some other global shortcut. |
 
 ### Form Fields — `[[command.form_fields]]`
 
@@ -124,6 +127,37 @@ Result: ["-p", "2222", "admin@example.com"]
 ```
 
 These expanded args become the pane's `InstanceArgs` — they override the plugin's default `args` and are saved for `rerun` resume strategy.
+
+### Runtime Toggles — `[[command.toggles]]`
+
+Declare boolean checkboxes shown in the pane setup dialog. Each toggle has args that are appended to the spawn command when the user enables the checkbox. Toggle state is **per pane**, captured at creation time, and persisted across daemon restarts via the pane's `InstanceArgs`.
+
+```toml
+[[command.toggles]]
+name = "dangerously_skip_permissions"
+label = "Dangerously skip permissions (unattended mode — no confirmations)"
+args_when_on = ["--dangerously-skip-permissions"]
+default = false
+```
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `name` | string | **Yes** | — | Stable identifier for the toggle (used for future addressability). |
+| `label` | string | **Yes** | — | Text shown next to the checkbox in the setup dialog. |
+| `args_when_on` | string[] | No | `[]` | Arguments appended to the spawn command when the user checks this toggle. Combined with any other enabled toggles' args, then appended after `InstanceArgs`. |
+| `default` | bool | No | `false` | Initial checked state in the dialog. Users who always want a toggle on can set this to `true`. |
+
+If a plugin declares any `toggles` (or sets `prompts_cwd = true`), the setup dialog is shown automatically after plugin selection. The dialog is skipped entirely when neither opt-in is set — existing plugins (terminal, ssh, stripe) are unaffected.
+
+### Pane Setup Dialog
+
+When a plugin opts in via `prompts_cwd = true` or `[[command.toggles]]`, Quil inserts a setup step between plugin selection and split-direction selection. The dialog renders:
+
+1. **Working directory** text input (only if `prompts_cwd = true`), pre-filled with the active pane's CWD. Validated on Enter: the path is trimmed, stripped of surrounding quotes (to accept Windows `Copy as path` output), `~` is expanded, then verified via `os.Stat` as an existing directory. Empty input is accepted and means "use daemon default".
+2. **One checkbox per toggle**, in declaration order.
+3. **Continue** button.
+
+Navigation: `Tab` / `Shift+Tab` / `↑` / `↓` cycle fields. `Space` flips the focused checkbox. `Enter` validates and submits. `Esc` unwinds — back to the instance form if the plugin also has `form_fields`, otherwise back to the plugin picker. `Ctrl+V` pastes into the CWD field.
 
 ---
 
@@ -297,6 +331,56 @@ Error messages support these placeholders, extracted from the pane's instance ar
 | `{host}` | Hostname from `user@host` pattern in args | `example.com` |
 | `{user}` | Username from `user@host` pattern in args | `admin` |
 | `{port}` | Port from `-p <port>` flag or `host:port` in args | `2222` |
+
+---
+
+## Notification Handlers — `[[notification_handlers]]`
+
+Push events to Quil's notification center (M12) when a pattern matches PTY output. Unlike error handlers — which fire a modal dialog — notification handlers add an entry to the non-modal sidebar (`Alt+N` to toggle, `F3` to focus).
+
+```toml
+[[notification_handlers]]
+pattern = '✔ Build successful'
+title = "Build OK"
+severity = "info"
+
+[[notification_handlers]]
+pattern = '✗ Build failed|Error: '
+title = "Build failed"
+severity = "error"
+```
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `pattern` | string | **Yes** | — | Go regex matched against PTY output. Same compilation rules as error handlers. |
+| `title` | string | No | `""` | Title shown in the notification sidebar entry. |
+| `severity` | string | No | `"info"` | One of `"info"`, `"warning"`, `"error"`. Drives the colour of the pane name in the sidebar. Unknown values are warned about and downgraded to `"info"`. |
+
+---
+
+## Idle Handlers — `[[idle_handlers]]`
+
+Context-aware idle detection: when a pane has produced no PTY output for ~5 seconds, the daemon strips ANSI from the last 4 KB of the pane's ring buffer and matches it against this plugin's idle patterns. A match emits a notification (same path as `notification_handlers`). 30-second cooldown per pane prevents floods.
+
+```toml
+[[idle_handlers]]
+pattern = '\? .*\(Y/n\)'
+title = "Waiting for confirmation"
+severity = "warning"
+
+[[idle_handlers]]
+pattern = 'Password:|password:'
+title = "Password prompt"
+severity = "warning"
+```
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `pattern` | string | **Yes** | — | Go regex matched against the ANSI-stripped tail (last 4 KB) of the pane's output buffer. |
+| `title` | string | No | `""` | Title shown in the notification sidebar. |
+| `severity` | string | No | `"info"` | Same severity values as notification handlers. |
+
+The default plugins ship with sensible idle handlers — terminal detects shell prompts that look like questions, claude-code detects "Press Enter to continue" prompts, ssh detects sudo password prompts.
 
 ---
 

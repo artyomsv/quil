@@ -38,9 +38,11 @@ export const SITE = {
   },
 
   /** Software metadata for the SoftwareApplication JSON-LD schema
-   *  that ships on the home page. */
+   *  that ships on the home page. The version is the single source
+   *  of truth for the home page hero pill — bump it whenever VERSION
+   *  at the repo root moves. */
   software: {
-    version: "1.0.0",
+    version: "1.2.1",
     license: "MIT",
     operatingSystem: "Linux, macOS, Windows",
     applicationCategory: "DeveloperApplication",
@@ -48,7 +50,7 @@ export const SITE = {
   },
 
   /** ISO 8601 release date for structured data + sitemap lastmod. */
-  releaseDate: "2026-04-07",
+  releaseDate: "2026-04-08",
 } as const;
 
 export interface Page {

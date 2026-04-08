@@ -140,16 +140,26 @@ Key capabilities:
 - Plugin instance management — saved SSH connections, Stripe webhooks persisted to `instances.json`
 - Plugin management UI — F1 → Plugins with view, reload, restore defaults, in-app TOML editor
 - In-app TOML editor — full-screen editor with syntax highlighting and validation
-- Pane creation dialog extended — 4-step flow: category → plugin → instance/form → split direction
+- Pane creation dialog extended — 5-step flow: category → plugin → instance/form → setup (CWD/toggles) → split direction
 - Centralized snapshot queue — event-driven with 500ms debounce, replaces scattered calls
 - Per-plugin ghost buffer toggle — `ghost_buffer` bool controls PTY output persistence
 - GhostSnap restore — clean ghost buffer replay after daemon restart
 - Diagnostic logging — trace-level logging across daemon, TUI, and IPC
 - Plugin configuration reference — comprehensive docs for custom plugin creation
+- **Pane setup dialog** (ADR-15) — opt-in directory browser + runtime toggle checkboxes via `prompts_cwd` / `[[command.toggles]]`. Claude Code uses both: pre-fills CWD from active pane's OSC 7 directory and offers a `Dangerously skip permissions` toggle. Daemon-side CWD validation re-runs `EvalSymlinks` to defend the spawn against TOCTOU swaps. The `preassign_id` resume strategy now appends `ResumeArgs` to `InstanceArgs` instead of replacing, so toggle args survive a daemon restart.
+- **Spatial pane navigation** (ADR-16) — `Alt+Left/Right/Up/Down` replaces linear `Tab`/`Shift+Tab` cycling. Picks the closest neighbour in the requested direction with three tie-breakers (gap, overlap, perpendicular center distance). Tab/Shift+Tab now fall through to the PTY so shell completion and Claude Code's mode-cycling work naturally. Splits moved to `Alt+Shift+H/V` so `Alt+V` reaches Claude Code's image paste.
+- **Win32 clipboard image paste proxy** (ADR-17) — Quil decodes the OS clipboard image itself (`CF_DIBV5` / `CF_DIB` → DIB parser → PNG), saves it under `~/.quil/paste/quil-paste-<ts>-<rand>.png` with owner-only `0o600`/`0o700` permissions, and types the absolute path into the active pane. Sidesteps the upstream Claude Code Windows clipboard bug ([anthropics/claude-code#32791](https://github.com/anthropics/claude-code/issues/32791)). New `Ctrl+Alt+V` and `F8` paste aliases — Windows Terminal eats `Ctrl+V` before it reaches the TUI.
+- **Leveled logger** (ADR-18) — `internal/logger` wraps stdlib `slog` and bridges all 152 existing `log.Printf` sites at info level so old and new code respect a single filter. Configurable via `[logging] level` (`debug`/`info`/`warn`/`error`). Hot-path `Debug` calls pre-check `slog.Enabled` to skip `fmt.Sprintf` when filtered.
+- **Read-only F1 log viewer** (ADR-19) — three new menu items (`View client log` / `View daemon log` / `View MCP logs`) reuse the existing `TextEditor` with a new `ReadOnly` flag that gates every mutation path. Tail-reads up to 256 KB at line boundaries with `[... older lines truncated ...]` marker. Symlink-rejecting via `os.Lstat`, plus a re-stat through the open handle defeats TOCTOU swap. `Alt+Up`/`Alt+Down` page navigation jumps by `[ui] log_viewer_page_lines` (default 40, configurable).
+- **Project rule: dev-environment isolation** — `.claude/rules/dev-environment.md` documents the production isolation constraint for Quil's own contributors (Quil-on-Quil dogfooding).
+- **Settings dialog persistence fix** — every Settings field now flips `configChanged` so edits actually persist on TUI exit (previously only the disclaimer setter did, silently dropping the rest).
+- **Plugin registry hardening** — `LoadFromDir` prunes stale plugins on reload (deleted TOML files no longer leak in-memory entries); `validateSeverity` helper extracted; `searchBinary` Windows-PATH walk gated by `runtime.GOOS == "windows"`.
+- **DIB parser hardened** (ADR-17 supporting) — per-axis cap (`maxDIBDimension = 16384`) plus `uint64` stride math defends against crafted clipboard payloads that slip under the 64 MB byte cap but would otherwise allocate gigabytes during decode.
 
 **Remaining:**
 - JSON transformer (`Ctrl+J`) — format and highlight JSON in terminal output
-- Observability commands — `quil status`, session metrics, log level control
+- Observability commands — `quil status`, session metrics
+- Log rotation — wire `MaxSizeMB`/`MaxFiles` (currently reserved fields, not yet honored) via lumberjack
 - Encrypted token storage — OS keyring integration for sensitive scraped values
 - Tab dock positions (top/bottom/left/right)
 - OS service integration (`quil service install` — systemd/launchd/Task Scheduler)

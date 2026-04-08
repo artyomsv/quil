@@ -27,8 +27,7 @@ const schemas = [
   ]),
   itemListSchema({
     name: "Quil features",
-    description:
-      "The complete list of Quil capabilities in v1.0.0: persistence, AI integration, interaction, extensibility, and observability.",
+    description: `The complete list of Quil capabilities in v${SITE.software.version}: persistence, AI integration, interaction, extensibility, and observability.`,
     url: SITE.url + "/features",
     items: features.map((f) => ({
       name: f.title,
@@ -79,7 +78,7 @@ const orderedCategories: Feature["category"][] = [
         is a Bubble Tea v2 TUI. The daemon (<code>quild</code>) is a
         Go service that holds pane state, ghost buffers, and the
         workspace snapshot. Every feature on this page is implemented
-        as of v1.0.0.
+        as of v{SITE.software.version}.
       </p>
     </header>
 
@@ -125,7 +124,7 @@ const orderedCategories: Feature["category"][] = [
           Ready to stop losing your workspace?
         </h2>
         <p class="mx-auto mt-3 max-w-xl text-sm text-muted-foreground">
-          Every feature on this page is in v1.0.0. Install it in 30 seconds.
+          Every feature on this page is in v{SITE.software.version}. Install it in 30 seconds.
         </p>
         <div class="mt-6 flex flex-col items-center justify-center gap-3 sm:flex-row">
           <a href="/install" class="btn-primary">

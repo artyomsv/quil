@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -666,6 +667,25 @@ func (d *Daemon) handleCreatePane(msg *ipc.Message) {
 	}
 
 	cwd := payload.CWD
+	// Validate the CWD before trusting it. The TUI dialog already validates
+	// what it sends, but the IPC socket is reachable by other clients (the
+	// MCP bridge, future tooling), and the daemon should be authoritative.
+	// On any failure (gone / not a directory / stat error) we fall back to
+	// the daemon's own working directory rather than aborting the spawn.
+	//
+	// Re-resolve symlinks here too: the TUI calls EvalSymlinks before sending
+	// but a symlink swap between the TUI's Stat and the daemon's spawn would
+	// otherwise redirect the child process to a different directory. Doing
+	// the resolve once more on the daemon side closes that TOCTOU window for
+	// every IPC client (TUI, MCP, future tooling).
+	if cwd != "" {
+		if info, err := os.Stat(cwd); err != nil || !info.IsDir() {
+			log.Printf("create pane: rejecting cwd %q (err=%v); using daemon default", cwd, err)
+			cwd = ""
+		} else if resolved, evalErr := filepath.EvalSymlinks(cwd); evalErr == nil {
+			cwd = resolved
+		}
+	}
 	if cwd == "" {
 		cwd, _ = os.Getwd()
 	}
@@ -1090,6 +1110,54 @@ func (d *Daemon) buildWorkspaceState() map[string]any {
 	}
 }
 
+// resolveSpawnArgs computes the argv (excluding cmd) that spawnPane should use
+// for the given pane and plugin, applying base args, the InstanceArgs override,
+// preassign_id start args, and the restore-branch resume-args append. It is a
+// pure function — no external state, no PTY, no UUID generation — so the
+// arg-merging matrix can be table-tested. Callers (i.e. spawnPane) are
+// responsible for populating pane.PluginState["session_id"] before invoking
+// this function on the fresh-start preassign_id path.
+func resolveSpawnArgs(p *plugin.PanePlugin, pane *Pane, restoring bool) []string {
+	args := append([]string{}, p.Command.Args...)
+
+	// Instance-specific args override base args.
+	if len(pane.InstanceArgs) > 0 {
+		args = append([]string{}, pane.InstanceArgs...)
+	}
+
+	// Fresh start under preassign_id: append the plugin's StartArgs (after
+	// {placeholder} expansion from PluginState).
+	if !restoring && p.Persistence.Strategy == "preassign_id" {
+		if len(p.Persistence.StartArgs) > 0 {
+			startArgs := plugin.ExpandResumeArgs(p.Persistence.StartArgs, pane.PluginState)
+			if startArgs != nil {
+				args = append(args, startArgs...)
+			}
+		}
+	}
+
+	// Resume branch: append ResumeArgs to whatever args already exist so
+	// InstanceArgs (e.g., "--dangerously-skip-permissions" from a setup
+	// toggle) survives daemon restart. Before this fix, args were replaced
+	// outright, dropping any runtime toggles the user had enabled.
+	if restoring {
+		switch p.Persistence.Strategy {
+		case "preassign_id", "session_scrape":
+			if len(p.Persistence.ResumeArgs) > 0 && len(pane.PluginState) > 0 {
+				resumeArgs := plugin.ExpandResumeArgs(p.Persistence.ResumeArgs, pane.PluginState)
+				args = append(args, resumeArgs...)
+			}
+		case "rerun":
+			// args already set from InstanceArgs above
+		case "none":
+			// Don't restore — but we still spawn for now (pane exists in workspace)
+		// "cwd_only": just start fresh with CWD (default behavior)
+		}
+	}
+
+	return args
+}
+
 // spawnPane launches the appropriate process for a pane based on its plugin type.
 // When restoring is true, resume strategies are applied (e.g., --resume for session_scrape).
 func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) error {
@@ -1104,14 +1172,10 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 	}
 
 	cmd := p.Command.Cmd
-	args := append([]string{}, p.Command.Args...) // copy
 
-	// Instance-specific args override base args
-	if len(pane.InstanceArgs) > 0 {
-		args = pane.InstanceArgs
-	}
-
-	// Pre-assign ID strategy: generate UUID on fresh start
+	// Generate a session UUID for fresh preassign_id panes before computing
+	// args, since resolveSpawnArgs expects PluginState["session_id"] to be
+	// populated for the {session_id} expansion.
 	if !restoring && p.Persistence.Strategy == "preassign_id" {
 		pane.PluginMu.Lock()
 		if pane.PluginState == nil {
@@ -1121,28 +1185,9 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 			pane.PluginState["session_id"] = uuid.New().String()
 		}
 		pane.PluginMu.Unlock()
-		if len(p.Persistence.StartArgs) > 0 {
-			startArgs := plugin.ExpandResumeArgs(p.Persistence.StartArgs, pane.PluginState)
-			if startArgs != nil {
-				args = append(args, startArgs...)
-			}
-		}
 	}
 
-	// Resume logic for restoration
-	if restoring {
-		switch p.Persistence.Strategy {
-		case "preassign_id", "session_scrape":
-			if len(p.Persistence.ResumeArgs) > 0 && len(pane.PluginState) > 0 {
-				args = plugin.ExpandResumeArgs(p.Persistence.ResumeArgs, pane.PluginState)
-			}
-		case "rerun":
-			// args already set from InstanceArgs above
-		case "none":
-			// Don't restore — but we still spawn for now (pane exists in workspace)
-		// "cwd_only": just start fresh with CWD (default behavior)
-		}
-	}
+	args := resolveSpawnArgs(p, pane, restoring)
 
 	// Shell integration (only for terminal-type panes)
 	if p.Command.ShellIntegration {
@@ -1455,10 +1500,15 @@ func (d *Daemon) handleCreatePaneReq(conn *ipc.Conn, msg *ipc.Message) {
 		cwd, _ = os.Getwd()
 	}
 
-	// Validate CWD exists and is a directory
+	// Validate CWD exists and is a directory, then re-resolve symlinks so
+	// the spawn can't be redirected by a swap between Stat and exec. Failure
+	// of EvalSymlinks itself is non-fatal (Windows junctions etc.) — fall
+	// back to the lexically validated path.
 	if info, err := os.Stat(cwd); err != nil || !info.IsDir() {
 		log.Printf("handleCreatePaneReq: invalid cwd %q: %v", cwd, err)
 		cwd, _ = os.Getwd()
+	} else if resolved, evalErr := filepath.EvalSymlinks(cwd); evalErr == nil {
+		cwd = resolved
 	}
 
 	pane, err := d.session.CreatePane(tabID, cwd)

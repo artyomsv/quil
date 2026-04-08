@@ -44,7 +44,21 @@ type TextEditor struct {
 	Sel        *EditorSel // active selection (nil = none)
 	// Highlight selects the syntax highlighter. Defaults to HighlightTOML.
 	Highlight HighlightMode
+	// ReadOnly disables every key path that would mutate the document
+	// (typing, paste, cut, save, enter/backspace/delete, tab/space). Cursor
+	// movement, selection, and clipboard COPY (Enter on a selection,
+	// right-click) still work. Used by the F1 → log viewers so users can
+	// scroll and copy log content without accidentally overwriting the
+	// underlying file with Ctrl+S.
+	ReadOnly bool
+	// PageSize is the cursor jump distance for Alt+Up / Alt+Down. 0 falls
+	// back to a built-in default (see editorDefaultPageSize). Used by the
+	// log viewer to navigate large files quickly without holding Down.
+	PageSize int
 }
+
+// editorDefaultPageSize is used when TextEditor.PageSize is 0 (unset).
+const editorDefaultPageSize = 40
 
 // highlight applies the configured highlighter to a line. Returns the line
 // unchanged when in plain mode.
@@ -108,6 +122,10 @@ func (e *TextEditor) HandleKey(key string) (saved, closed bool, cmd tea.Cmd) {
 		return false, false, nil
 
 	case "ctrl+x":
+		if e.ReadOnly {
+			e.ensureCursorVisible()
+			return false, false, nil
+		}
 		if e.Sel != nil && !e.Sel.IsEmpty() {
 			text := editorExtractText(e.Lines, e.Sel)
 			e.deleteSelection()
@@ -123,6 +141,10 @@ func (e *TextEditor) HandleKey(key string) (saved, closed bool, cmd tea.Cmd) {
 		return false, false, cmd
 
 	case "ctrl+v":
+		if e.ReadOnly {
+			e.ensureCursorVisible()
+			return false, false, nil
+		}
 		e.ensureCursorVisible()
 		return false, false, e.pasteCmd()
 	}
@@ -137,6 +159,9 @@ func (e *TextEditor) HandleKey(key string) (saved, closed bool, cmd tea.Cmd) {
 		return false, true, nil
 
 	case "ctrl+s":
+		if e.ReadOnly {
+			return false, false, nil
+		}
 		if err := e.Save(); err != nil {
 			e.SaveErr = err.Error()
 			return false, false, nil
@@ -156,16 +181,25 @@ func (e *TextEditor) HandleKey(key string) (saved, closed bool, cmd tea.Cmd) {
 			e.ensureCursorVisible()
 			return false, false, cmd
 		}
+		if e.ReadOnly {
+			return false, false, nil
+		}
 		e.insertNewline()
 		e.Dirty = true
 
 	case "backspace":
+		if e.ReadOnly {
+			return false, false, nil
+		}
 		if !e.clearSel() {
 			e.backspace()
 		}
 		e.Dirty = true
 
 	case "delete":
+		if e.ReadOnly {
+			return false, false, nil
+		}
 		if !e.clearSel() {
 			e.deleteChar()
 		}
@@ -237,16 +271,52 @@ func (e *TextEditor) HandleKey(key string) (saved, closed bool, cmd tea.Cmd) {
 		e.CursorRow = editorParagraphJump(e.Lines, e.CursorRow, 1)
 		e.CursorCol = 0
 
+	// Alt+Up / Alt+Down jump the cursor by PageSize lines (default 40).
+	// Used by the F1 → log viewers to flip through long files quickly
+	// without holding the arrow key. Configurable via [ui]
+	// log_viewer_page_lines in config.toml.
+	case "alt+up":
+		e.Sel = nil
+		step := e.PageSize
+		if step <= 0 {
+			step = editorDefaultPageSize
+		}
+		e.CursorRow -= step
+		if e.CursorRow < 0 {
+			e.CursorRow = 0
+		}
+		e.clampCol()
+	case "alt+down":
+		e.Sel = nil
+		step := e.PageSize
+		if step <= 0 {
+			step = editorDefaultPageSize
+		}
+		e.CursorRow += step
+		if e.CursorRow > len(e.Lines)-1 {
+			e.CursorRow = len(e.Lines) - 1
+		}
+		e.clampCol()
+
 	case "tab":
+		if e.ReadOnly {
+			break
+		}
 		e.clearSel()
 		e.insertText("  ")
 		e.Dirty = true
 	case "space":
+		if e.ReadOnly {
+			break
+		}
 		e.clearSel()
 		e.insertText(" ")
 		e.Dirty = true
 
 	default:
+		if e.ReadOnly {
+			break
+		}
 		if utf8.RuneCountInString(key) == 1 {
 			r, _ := utf8.DecodeRuneInString(key)
 			if r >= 32 {
@@ -409,8 +479,11 @@ func (e *TextEditor) deleteSelection() {
 }
 
 // InsertMultiLine inserts text that may contain newlines at the cursor position.
-// If a selection is active, it is deleted first.
+// If a selection is active, it is deleted first. No-op when ReadOnly.
 func (e *TextEditor) InsertMultiLine(text string) {
+	if e.ReadOnly {
+		return
+	}
 	e.clearSel()
 
 	text = strings.ReplaceAll(text, "\r", "")

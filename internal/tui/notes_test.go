@@ -616,13 +616,16 @@ func TestModel_NotesKeyExempt_AllowsGlobalShortcuts(t *testing.T) {
 	m := Model{cfg: config.Default()}
 	kb := m.cfg.Keybindings
 
-	// Keys that MUST bypass the notes editor.
+	// Keys that MUST bypass the notes editor. Alt+Up/Alt+Down are exempt
+	// because there's no up/down axis in the 2-panel notes layout — they
+	// flush + exit + navigate to the closest neighbor.
 	exempt := []string{
 		kb.ClosePane, kb.CloseTab, kb.SplitHorizontal, kb.SplitVertical,
 		kb.NewTab, kb.RenameTab, kb.RenamePane, kb.CycleTabColor,
 		kb.FocusPane,
 		kb.NotificationToggle, kb.NotificationFocus, kb.GoBack,
 		kb.JSONTransform, kb.QuickActions,
+		kb.PaneUp, kb.PaneDown,
 		"f1", "ctrl+n",
 		"alt+1", "alt+2", "alt+3", "alt+4", "alt+5",
 		"alt+6", "alt+7", "alt+8", "alt+9",
@@ -633,14 +636,22 @@ func TestModel_NotesKeyExempt_AllowsGlobalShortcuts(t *testing.T) {
 		}
 	}
 
-	// Keys that MUST be consumed by the editor (text input + Tab/Shift+Tab).
+	// Keys that MUST NOT be exempt — either consumed by the editor as text
+	// input (when editor focused), or forwarded to the PTY (when pane
+	// focused). Tab/Shift+Tab are no longer a focus toggle: Tab reaches
+	// the editor (inserts tab) or the PTY (shell completion). Alt+Left
+	// and Alt+Right are handled as focus toggle EARLIER in handleKey so
+	// they never reach notesKeyExempt — but if they did, they shouldn't
+	// be flagged as exit keys.
 	consumed := []string{
 		"a", "b", "z", "0", "9", " ",
 		"enter", "backspace", "delete",
 		"left", "right", "up", "down",
 		"home", "end",
-		kb.NextPane, // Tab — toggles focus, not exempt
-		kb.PrevPane, // Shift+Tab — toggles focus, not exempt
+		"tab",       // editor consumes OR PTY receives, never a focus toggle anymore
+		"shift+tab", // same
+		kb.PaneLeft, // focus toggle — handled before notesKeyExempt is reached
+		kb.PaneRight,
 	}
 	for _, key := range consumed {
 		if m.notesKeyExempt(key) {

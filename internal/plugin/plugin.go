@@ -29,6 +29,13 @@ type CommandConfig struct {
 	ShellIntegration bool
 	ArgTemplate      []string    // template args with {field} placeholders, e.g., ["-p", "{port}", "{user}@{host}"]
 	FormFields       []FormField // fields for instance creation form (if empty, no instance management)
+	PromptsCWD       bool        // if true, create-pane setup dialog prompts for the working directory
+	Toggles          []Toggle    // runtime on/off switches rendered as checkboxes in the setup dialog
+	// RawKeys lists key strings (in Bubble Tea form, e.g. "shift+tab") that
+	// should bypass Quil's global shortcut layer for panes of this plugin and
+	// be forwarded directly to the PTY. This lets TUI apps like Claude Code
+	// receive shift+tab (mode toggle) which Quil otherwise binds to PrevPane.
+	RawKeys []string
 }
 
 // FormField defines a user-fillable field for creating plugin instances.
@@ -37,6 +44,16 @@ type FormField struct {
 	Label    string // display label in form
 	Required bool   // must be filled before submit
 	Default  string // pre-filled value (empty = blank)
+}
+
+// Toggle is a boolean runtime flag the user can enable when creating a pane.
+// When enabled, ArgsWhenOn is appended to the spawn args (and persisted via
+// the pane's InstanceArgs so it survives daemon restarts).
+type Toggle struct {
+	Name       string   // identifier (stable across renames for future addressability)
+	Label      string   // text shown next to the checkbox in the setup dialog
+	ArgsWhenOn []string // args appended to the command when this toggle is checked
+	Default    bool     // initial checked state
 }
 
 // PersistenceConfig describes how to restore the pane after daemon restart.

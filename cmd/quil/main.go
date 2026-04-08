@@ -15,6 +15,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
+	"github.com/artyomsv/quil/internal/logger"
 	"github.com/artyomsv/quil/internal/plugin"
 	"github.com/artyomsv/quil/internal/tui"
 )
@@ -172,14 +173,26 @@ func daemonStatus() {
 }
 
 func launchTUI() {
-	// Set up logging early
+	// Load config first so we know what log level to use.
+	cfg := config.Default()
+	if cfgPath := config.ConfigPath(); fileExists(cfgPath) {
+		if loaded, err := config.Load(cfgPath); err == nil {
+			cfg = loaded
+		}
+	}
+
+	// Open the log file and route both slog and stdlib log through it at
+	// the configured level. We open the file directly (not via tea.LogToFile)
+	// so we can drive the slog handler ourselves; tea.LogToFile would set up
+	// stdlib log with its own prefix and skip slog entirely.
 	logDir := config.QuilDir()
 	if logDir != "" {
 		os.MkdirAll(logDir, 0700)
 	}
 	logPath := filepath.Join(logDir, "quil.log")
-	logFile, err := tea.LogToFile(logPath, "quil")
+	logFile, err := os.OpenFile(logPath, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o600)
 	if err == nil && logFile != nil {
+		logger.Init(cfg.Logging.Level, logFile)
 		defer logFile.Close()
 	}
 
@@ -194,13 +207,6 @@ func launchTUI() {
 	}()
 
 	sockPath := config.SocketPath()
-
-	cfg := config.Default()
-	if cfgPath := config.ConfigPath(); fileExists(cfgPath) {
-		if loaded, err := config.Load(cfgPath); err == nil {
-			cfg = loaded
-		}
-	}
 	log.Printf("config loaded, AutoStart=%v", cfg.Daemon.AutoStart)
 
 	// Try connecting; auto-start if needed

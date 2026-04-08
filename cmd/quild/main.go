@@ -8,6 +8,7 @@ import (
 
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/daemon"
+	"github.com/artyomsv/quil/internal/logger"
 )
 
 var version = "dev" // overridden at build time via -ldflags "-X main.version=..."
@@ -20,7 +21,20 @@ func main() {
 
 	background := len(os.Args) > 1 && os.Args[1] == "--background"
 
-	logFile := initLogging()
+	// Load config FIRST so we know what log level to use. Errors during
+	// config load go to stderr because the logger isn't set up yet.
+	cfg := config.Default()
+	cfgPath := config.ConfigPath()
+	if _, err := os.Stat(cfgPath); err == nil {
+		loaded, err := config.Load(cfgPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to load config: %v\n", err)
+		} else {
+			cfg = loaded
+		}
+	}
+
+	logFile := initLogging(cfg.Logging.Level)
 	if logFile != nil {
 		defer logFile.Close()
 	}
@@ -32,18 +46,6 @@ func main() {
 		} else {
 			os.Stdout = devNull
 			os.Stderr = devNull
-		}
-	}
-
-	cfg := config.Default()
-
-	cfgPath := config.ConfigPath()
-	if _, err := os.Stat(cfgPath); err == nil {
-		loaded, err := config.Load(cfgPath)
-		if err != nil {
-			log.Printf("warning: failed to load config: %v", err)
-		} else {
-			cfg = loaded
 		}
 	}
 
@@ -65,7 +67,7 @@ func main() {
 	d.Wait()
 }
 
-func initLogging() *os.File {
+func initLogging(level string) *os.File {
 	logDir := config.QuilDir()
 	if logDir == "" {
 		return nil
@@ -76,8 +78,10 @@ func initLogging() *os.File {
 	if err != nil {
 		return nil
 	}
-	log.SetOutput(f)
-	log.SetFlags(log.LstdFlags | log.Lshortfile)
+	// logger.Init replaces the stdlib log output too, so existing log.Printf
+	// call sites bridge through slog at info level and respect the configured
+	// level. New code should call logger.Debug/Info/Warn/Error explicitly.
+	logger.Init(level, f)
 	return f
 }
 

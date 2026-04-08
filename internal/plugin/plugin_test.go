@@ -3,6 +3,7 @@ package plugin
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -50,6 +51,129 @@ func TestRegistryWithDefaults(t *testing.T) {
 	for _, key := range []string{"terminal", "ai", "tools", "remote"} {
 		if _, ok := cats[key]; !ok {
 			t.Errorf("missing category %q after loading defaults", key)
+		}
+	}
+}
+
+// TestLoadPluginTOML_ClaudeCodeSetup_ParsesPromptsCWDAndDangerousToggle verifies
+// the new prompts_cwd and [[command.toggles]] opt-ins parse correctly from the
+// embedded claude-code default TOML. This locks in the contract between the
+// plugin loader and the setup dialog.
+func TestLoadPluginTOML_ClaudeCodeSetup_ParsesPromptsCWDAndDangerousToggle(t *testing.T) {
+	dir := t.TempDir()
+	if err := EnsureDefaultPlugins(dir); err != nil {
+		t.Fatalf("EnsureDefaultPlugins: %v", err)
+	}
+
+	r := NewRegistry()
+	if err := r.LoadFromDir(dir); err != nil {
+		t.Fatalf("LoadFromDir: %v", err)
+	}
+
+	p := r.Get("claude-code")
+	if p == nil {
+		t.Fatal("claude-code plugin not loaded from defaults")
+	}
+	if !p.Command.PromptsCWD {
+		t.Error("expected PromptsCWD = true on claude-code plugin")
+	}
+	if len(p.Command.Toggles) != 1 {
+		t.Fatalf("expected 1 toggle on claude-code, got %d", len(p.Command.Toggles))
+	}
+	tg := p.Command.Toggles[0]
+	if tg.Name != "dangerously_skip_permissions" {
+		t.Errorf("expected toggle name 'dangerously_skip_permissions', got %q", tg.Name)
+	}
+	if tg.Default != false {
+		t.Error("expected dangerous toggle default = false")
+	}
+	if len(tg.ArgsWhenOn) != 1 || tg.ArgsWhenOn[0] != "--dangerously-skip-permissions" {
+		t.Errorf("expected ArgsWhenOn = [--dangerously-skip-permissions], got %v", tg.ArgsWhenOn)
+	}
+	if tg.Label == "" {
+		t.Error("toggle label should not be empty")
+	}
+}
+
+// TestLoadPluginTOML_RawKeys_ParsesOptInField verifies that the raw_keys
+// opt-in parses correctly for any plugin that declares it. Since Tab and
+// Shift+Tab are no longer intercepted globally (pane navigation moved to
+// Alt+Arrow), claude-code and the terminal builtin no longer need the
+// workaround — but the raw_keys mechanism itself is still a valid plugin
+// feature and must keep working for future plugins that need to bypass
+// some other global shortcut.
+func TestLoadPluginTOML_RawKeys_ParsesOptInField(t *testing.T) {
+	dir := t.TempDir()
+	tomlPath := filepath.Join(dir, "rawkey-test.toml")
+	content := `[plugin]
+name = "rawkey-test"
+display_name = "Raw Key Test"
+category = "test"
+
+[command]
+cmd = "true"
+raw_keys = ["alt+h", "f12"]
+`
+	if err := os.WriteFile(tomlPath, []byte(content), 0644); err != nil {
+		t.Fatalf("write test toml: %v", err)
+	}
+
+	r := NewRegistry()
+	if err := r.LoadFromDir(dir); err != nil {
+		t.Fatalf("LoadFromDir: %v", err)
+	}
+
+	p := r.Get("rawkey-test")
+	if p == nil {
+		t.Fatal("rawkey-test plugin not loaded")
+	}
+	if !slices.Contains(p.Command.RawKeys, "alt+h") {
+		t.Errorf("expected RawKeys to contain 'alt+h', got %v", p.Command.RawKeys)
+	}
+	if !slices.Contains(p.Command.RawKeys, "f12") {
+		t.Errorf("expected RawKeys to contain 'f12', got %v", p.Command.RawKeys)
+	}
+}
+
+// TestBuiltinTerminal_NoRawKeysByDefault guards that the terminal builtin
+// does NOT declare any raw_keys. With Tab and Shift+Tab no longer
+// intercepted globally, there's no workaround to apply — keys naturally
+// fall through to the PTY.
+func TestBuiltinTerminal_NoRawKeysByDefault(t *testing.T) {
+	r := NewRegistry()
+	term := r.Get("terminal")
+	if term == nil {
+		t.Fatal("terminal builtin not registered")
+	}
+	if len(term.Command.RawKeys) != 0 {
+		t.Errorf("terminal builtin should have no RawKeys, got %v", term.Command.RawKeys)
+	}
+}
+
+// TestLoadPluginTOML_NoSetupFieldsForOtherPlugins_DefaultsAreOff confirms
+// plugins that don't opt in stay off — no false positives from TOML parsing.
+func TestLoadPluginTOML_NoSetupFieldsForOtherPlugins_DefaultsAreOff(t *testing.T) {
+	dir := t.TempDir()
+	if err := EnsureDefaultPlugins(dir); err != nil {
+		t.Fatalf("EnsureDefaultPlugins: %v", err)
+	}
+
+	r := NewRegistry()
+	if err := r.LoadFromDir(dir); err != nil {
+		t.Fatalf("LoadFromDir: %v", err)
+	}
+
+	// ssh and stripe ship as default POC plugins; neither should opt in.
+	for _, name := range []string{"ssh", "stripe"} {
+		p := r.Get(name)
+		if p == nil {
+			continue // not all environments ship every default
+		}
+		if p.Command.PromptsCWD {
+			t.Errorf("plugin %q: PromptsCWD should be false (zero value), got true", name)
+		}
+		if len(p.Command.Toggles) != 0 {
+			t.Errorf("plugin %q: expected zero toggles, got %d", name, len(p.Command.Toggles))
 		}
 	}
 }

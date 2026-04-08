@@ -70,6 +70,27 @@ Panes aren't just shells. Press `Ctrl+N` to create a typed pane from 4 built-in 
 
 Create your own plugins as TOML files in `~/.quil/plugins/` without recompiling. Plugins define commands, error handlers, persistence strategies, and pre-configured instances.
 
+### Pane Setup Dialog
+
+Plugins that opt in via `prompts_cwd = true` or `[[command.toggles]]` get a setup step in the Ctrl+N flow with:
+
+- A **directory browser** pre-loaded with the active pane's CWD (tracked via OSC 7). Tab/arrows navigate, Enter descends, Backspace goes up, `Ctrl+V` jumps to a pasted path.
+- One **checkbox per runtime toggle** declared in the plugin TOML. Toggle args are appended to `InstanceArgs`, persist across daemon restarts, and are off by default.
+
+The shipped `claude-code` plugin uses both: it asks for the working directory (preserving project-specific `.claude/` context that Claude Code ties to the directory) and offers a `Dangerously skip permissions` toggle for unattended runs.
+
+### Spatial Pane Navigation
+
+`Alt+Left`/`Right`/`Up`/`Down` focus the closest neighbour in the chosen direction — directional, not linear, matching tmux's `select-pane -L/R/U/D`. Tie-breaks pick the candidate whose perpendicular center is closest to the active pane (vim/iTerm parity). `Tab` and `Shift+Tab` are deliberately **not** bound — they fall through to the PTY so shell completion and Claude Code's mode-cycling work naturally.
+
+### Image Paste from Clipboard
+
+Press paste (`Ctrl+V`, `Ctrl+Alt+V`, or `F8`) on a screenshot. If the clipboard has no text but contains an image, Quil decodes the DIB itself, encodes it as PNG, saves it under `~/.quil/paste/quil-paste-<timestamp>-<rand>.png` (owner-only `0o600`/`0o700`), and types the absolute path into the active pane. AI tools like Claude Code then read the file via their normal file-reading tools — sidesteps the upstream Claude Code Windows clipboard bug ([anthropics/claude-code#32791](https://github.com/anthropics/claude-code/issues/32791)). `F8` is recommended on Windows because Windows Terminal eats `Ctrl+V` before it reaches the TUI.
+
+### Leveled Logger + Log Viewer
+
+`internal/logger` wraps Go's stdlib `slog` and bridges all 152 existing `log.Printf` call sites at info level. Set `[logging] level = "debug"` in `config.toml` to trace clipboard pipeline, per-key handlers, and image-paste decoding step-by-step. The F1 About menu has three log viewers — `View client log`, `View daemon log`, `View MCP logs` — that open the matching files in a read-only `TextEditor` (typing/save/paste/cut all gated). `Alt+Up`/`Alt+Down` jump the cursor by `[ui] log_viewer_page_lines` (default 40). Reads are symlink-rejecting via `os.Lstat`.
+
 ### Cross-Platform
 
 Linux, macOS, and Windows from day one. PTY management via `creack/pty` (Unix) and ConPTY (Windows). IPC over Unix domain sockets or Named Pipes.
@@ -134,18 +155,23 @@ make build
 | `Ctrl+N` | New typed pane (plugin dialog) |
 | `Ctrl+W` | Close active pane |
 | `Alt+W` | Close active tab |
-| `Alt+H` | Split horizontal |
-| `Alt+V` | Split vertical |
-| `Tab` / `Shift+Tab` | Navigate panes |
+| `Alt+Shift+H` | Split horizontal (side-by-side) |
+| `Alt+Shift+V` | Split vertical (stacked) |
+| `Alt+Arrow` | Navigate panes spatially (left/right/up/down) |
+| `Alt+E` | Toggle pane notes |
+| `Ctrl+E` | Toggle focus mode |
 | `F2` | Rename active tab |
 | `Alt+F2` | Rename active pane |
 | `Alt+C` | Cycle tab color |
 | `Alt+PgUp` / `Alt+PgDn` | Scroll page up/down |
-| `Ctrl+V` | Paste from clipboard |
-| `Ctrl+E` | Toggle focus mode |
+| `Ctrl+V` / `Ctrl+Alt+V` / `F8` | Paste from clipboard (text or image — Quil reads image data, saves a PNG, and pastes the path) |
 | `Shift+Arrows` | Select text |
 | `Enter` | Copy selection |
 | `Ctrl+Q` | Quit |
+
+`Tab` and `Shift+Tab` are deliberately **not** bound — they pass through to the PTY so shell tab-completion and Claude Code's mode-cycling work naturally.
+
+**Image paste**: pressing any of the paste keys reads the system clipboard. If it contains text, the text is pasted normally. If it contains an image (e.g., a screenshot from `Win+Shift+S`), Quil decodes the image, saves it as `~/.quil/paste/quil-paste-<timestamp>.png`, and types the absolute path into the active pane. AI tools like Claude Code then read the file via their normal file-reading tools. The `Ctrl+Alt+V` and `F8` aliases exist because **Windows Terminal captures `Ctrl+V` for its own paste action** and never delivers it to the running TUI — use `F8` for the most reliable trigger on Windows.
 
 All keybindings are configurable in `~/.quil/config.toml` under `[keybindings]`.
 
@@ -162,21 +188,31 @@ auto_start = true
 max_lines = 500
 dimmed = true
 
+[logging]
+level = "info"            # debug, info, warn, error
+max_size_mb = 10
+max_files = 3
+
 [ui]
 tab_dock = "top"
 theme = "default"
 mouse_scroll_lines = 3
-page_scroll_lines = 0    # 0 = half-page (dynamic)
-show_disclaimer = true   # beta disclaimer on startup
+page_scroll_lines = 0           # 0 = half-page (dynamic) — terminal pane scrollback
+log_viewer_page_lines = 40      # Alt+Up/Alt+Down jump in F1 → log viewer
+show_disclaimer = true          # beta disclaimer on startup
 
 [keybindings]
 quit = "ctrl+q"
 new_tab = "ctrl+t"
 close_pane = "ctrl+w"
-split_horizontal = "alt+h"
-split_vertical = "alt+v"
-next_pane = "tab"
-prev_pane = "shift+tab"
+split_horizontal = "alt+shift+h"
+split_vertical = "alt+shift+v"
+pane_left = "alt+left"
+pane_right = "alt+right"
+pane_up = "alt+up"
+pane_down = "alt+down"
+next_pane = ""   # unbound by default — use directional Alt+Arrow
+prev_pane = ""
 rename_tab = "f2"
 rename_pane = "alt+f2"
 cycle_tab_color = "alt+c"
@@ -193,16 +229,17 @@ cmd/
 ├── quil/          # TUI client
 └── quild/         # Background daemon
 internal/
-├── clipboard/       # Cross-platform clipboard read (Win32 API, pbpaste, xclip)
+├── clipboard/       # Cross-platform clipboard read/write (Win32 API + DIB parser, pbcopy, xclip)
 ├── config/          # TOML configuration
-├── daemon/          # Session management, message routing
+├── daemon/          # Session management, message routing, event queue
 ├── ipc/             # Length-prefixed JSON protocol, client/server
-├── persist/         # Atomic workspace/buffer persistence (JSON + binary)
+├── logger/          # Leveled logger (slog wrapper + stdlib log bridge)
+├── persist/         # Atomic workspace/buffer/notes persistence (JSON + binary)
 ├── plugin/          # Pane plugin system (registry, TOML loading, scraper)
 ├── pty/             # Cross-platform PTY (Unix + Windows)
 ├── ringbuf/         # Circular byte buffer for PTY output history
-├── shellinit/       # Automatic shell integration (OSC 7 injection)
-└── tui/             # Bubble Tea model, tabs, panes, layout tree, styles
+├── shellinit/       # Automatic shell integration (OSC 7 / OSC 133 injection)
+└── tui/             # Bubble Tea model, tabs, panes, layout tree, dialogs, styles
 ```
 
 ## Development
@@ -228,10 +265,13 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development guidelines.
 | **M2: Persistence** | Done | Workspace snapshots, ghost buffer persistence, shell respawn, reboot-proof sessions |
 | **M3: Resume Engine** | Done | Regex scrapers, token extraction, AI session resume via pre-assigned UUIDs |
 | **M4: Plugin System** | Done | TOML plugins, typed panes, pane creation dialog, error handlers, window size persistence |
-| **M5: Polish** | In Progress | JSON transformer, observability, encrypted tokens, OS service integration |
+| **M5: Polish** | In Progress | Pane setup dialog, spatial nav, image paste, leveled logger, log viewer — see ROADMAP for the full list |
 | **M6: Pane Focus** | Done | Ctrl+E toggles active pane full-screen, other panes keep running |
+| **M7: Pane Notes** | Done | Side-by-side notes editor (Alt+E), one file per pane, three save safety nets |
 | **M8: Bubble Tea v2** | Done | Bubble Tea v2/Lipgloss v2 migration, text selection, clipboard, editor enhancements |
-| **Pre-built Binaries** | In Progress | GoReleaser, GitHub Releases, install script, cross-platform archives |
+| **M10: MCP Server** | Done | `quil mcp` exposes 15 tools over Model Context Protocol stdio |
+| **M12: Notification Center** | Done | Daemon event queue, sidebar, pane history stack, blocking MCP watch |
+| **Pre-built Binaries** | Done | GoReleaser, GitHub Releases, install script, cross-platform archives |
 
 See [ROADMAP.md](ROADMAP.md) for detailed progress and feature descriptions.
 

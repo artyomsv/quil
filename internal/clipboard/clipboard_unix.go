@@ -92,3 +92,12 @@ func write(text string) error {
 	cmd.Stdin = strings.NewReader(text)
 	return cmd.Run()
 }
+
+// readImage is not yet implemented on Unix — Quil's primary need for the
+// image-paste proxy is Windows (claude-code's upstream bug). macOS could
+// read via `pbpaste -Prefer png` or `osascript` reading NSPasteboard; Linux
+// via `xclip -selection clipboard -t image/png -o`. For now this is a stub
+// that always reports "no image" so the caller falls back to text paste.
+func readImage() ([]byte, error) {
+	return nil, ErrNoImage
+}

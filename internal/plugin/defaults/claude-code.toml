@@ -11,12 +11,29 @@ description = "AI coding assistant"
 cmd = "claude"
 # path = "/path/to/claude"  # uncomment to override PATH lookup
 detect = "claude --version"
+prompts_cwd = true  # ask user which folder to open Claude in (preserves .claude/ project context)
+
+# Runtime toggles — rendered as checkboxes in the pane setup dialog.
+[[command.toggles]]
+name = "dangerously_skip_permissions"
+label = "Dangerously skip permissions (unattended mode — no confirmations)"
+args_when_on = ["--dangerously-skip-permissions"]
+default = false
 
 [persistence]
 strategy = "preassign_id"
 ghost_buffer = false
+# Pre-assign a UUID to the new session so Quil can identify the pane.
 start_args = ["--session-id", "{session_id}"]
-resume_args = ["--resume", "{session_id}"]
+# On restore, use --continue (claude resumes the most recent session in the
+# current directory). Previously this was ["--resume", "{session_id}"], but
+# claude only writes a session file to disk after a meaningful exchange has
+# completed. If a pane is closed during claude's startup screens (trust /
+# model picker / mode select) the pre-assigned UUID is never persisted and
+# --resume fails with "session does not exist". --continue sidesteps this
+# by using claude's own "most recent in cwd" lookup, which is robust to
+# the timing of session-file creation.
+resume_args = ["--continue"]
 
 [[error_handlers]]
 pattern = '(?i)error.*API key not found|ANTHROPIC_API_KEY.*not set'

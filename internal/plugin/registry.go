@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -35,22 +36,22 @@ func NewRegistry() *Registry {
 func compilePatterns(p *PanePlugin) {
 	for i := range p.Persistence.Scrapers {
 		if err := p.Persistence.Scrapers[i].Compile(); err != nil {
-			log.Printf("plugin %s: invalid scrape pattern %q: %v", p.Name, p.Persistence.Scrapers[i].Pattern, err)
+			log.Printf("plugin %q: invalid scrape pattern %q: %v", p.Name, p.Persistence.Scrapers[i].Pattern, err)
 		}
 	}
 	for i := range p.ErrorHandlers {
 		if err := p.ErrorHandlers[i].Compile(); err != nil {
-			log.Printf("plugin %s: invalid error pattern %q: %v", p.Name, p.ErrorHandlers[i].Pattern, err)
+			log.Printf("plugin %q: invalid error pattern %q: %v", p.Name, p.ErrorHandlers[i].Pattern, err)
 		}
 	}
 	for i := range p.NotificationHandlers {
 		if err := p.NotificationHandlers[i].Compile(); err != nil {
-			log.Printf("plugin %s: invalid notification pattern %q: %v", p.Name, p.NotificationHandlers[i].Pattern, err)
+			log.Printf("plugin %q: invalid notification pattern %q: %v", p.Name, p.NotificationHandlers[i].Pattern, err)
 		}
 	}
 	for i := range p.IdleHandlers {
 		if err := p.IdleHandlers[i].Compile(); err != nil {
-			log.Printf("plugin %s: invalid idle pattern %q: %v", p.Name, p.IdleHandlers[i].Pattern, err)
+			log.Printf("plugin %q: invalid idle pattern %q: %v", p.Name, p.IdleHandlers[i].Pattern, err)
 		}
 	}
 }
@@ -109,6 +110,11 @@ func CategoryOrder() []struct{ Key, Label string } {
 
 // LoadFromDir loads all *.toml plugin files from dir.
 // TOML plugins override built-ins with the same name.
+//
+// LoadFromDir is also the reload entry point: any plugin currently in the
+// registry that no longer has a corresponding TOML file on disk is dropped,
+// EXCEPT the Go-built-in "terminal" plugin which always survives. This makes
+// "delete a TOML, hit reload" behave the way users expect.
 func (r *Registry) LoadFromDir(dir string) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -121,6 +127,10 @@ func (r *Registry) LoadFromDir(dir string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	// Track which plugin names came from disk this pass so we can prune
+	// stragglers below.
+	loaded := make(map[string]struct{})
+
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".toml") {
 			continue
@@ -128,12 +138,27 @@ func (r *Registry) LoadFromDir(dir string) error {
 		path := filepath.Join(dir, e.Name())
 		p, err := loadPluginTOML(path)
 		if err != nil {
-			log.Printf("skip plugin %s: %v", e.Name(), err)
+			log.Printf("skip plugin %q: %v", e.Name(), err)
 			continue
 		}
 		compilePatterns(p)
 		r.plugins[p.Name] = p
-		log.Printf("loaded plugin: %s from %s", p.Name, e.Name())
+		loaded[p.Name] = struct{}{}
+		log.Printf("loaded plugin %q from %q", p.Name, e.Name())
+	}
+
+	// Prune in-memory entries whose backing TOML file vanished. The Go
+	// built-in "terminal" plugin is always preserved — it has no file on
+	// disk and is the fallback for every untyped pane.
+	for name := range r.plugins {
+		if name == "terminal" {
+			continue
+		}
+		if _, ok := loaded[name]; ok {
+			continue
+		}
+		delete(r.plugins, name)
+		log.Printf("plugin %q removed from registry (no backing TOML)", name)
 	}
 
 	return nil
@@ -158,7 +183,7 @@ func (r *Registry) DetectAvailability() {
 			if _, err := os.Stat(p.Command.Path); err == nil {
 				p.Available = true
 				p.Command.Cmd = p.Command.Path
-				log.Printf("plugin %s: using explicit path %q", p.Name, p.Command.Path)
+				log.Printf("plugin %q: using explicit path %q", p.Name, p.Command.Path)
 				continue
 			}
 		}
@@ -174,7 +199,7 @@ func (r *Registry) DetectAvailability() {
 		// 2. Standard PATH lookup
 		if _, err := exec.LookPath(bin); err == nil {
 			p.Available = true
-			log.Printf("plugin %s: detected %q on PATH", p.Name, bin)
+			log.Printf("plugin %q: detected %q on PATH", p.Name, bin)
 			continue
 		}
 
@@ -182,29 +207,42 @@ func (r *Registry) DetectAvailability() {
 		if found := searchBinary(p, bin, home); found {
 			continue
 		}
-		log.Printf("plugin %s: %q not found on PATH or common locations", p.Name, bin)
+		log.Printf("plugin %q: %q not found on PATH or common locations", p.Name, bin)
 	}
 }
 
-// searchBinary finds a binary when exec.LookPath fails (common on Windows when
-// launched from Explorer). Re-scans PATH directories with os.Stat which is more
-// reliable than LookPath for Explorer-launched processes with PATHEXT issues.
+// searchBinary finds a binary when exec.LookPath fails. The motivating case
+// is Windows: when Quil is launched from Explorer (rather than a Terminal
+// session) the inherited PATH can be incomplete and PATHEXT lookups can
+// miss legitimate .exe entries. We rescan the user-PATH directories with a
+// direct os.Stat which is more reliable.
+//
+// On Unix, exec.LookPath has already exhausted $PATH using the same
+// mechanism, so the additional walk is purely wasted syscalls. We still
+// honor ~/.local/bin everywhere because some installers drop binaries
+// there without updating PATH for the current login session.
 func searchBinary(p *PanePlugin, bin, home string) bool {
-	suffixes := []string{"", ".exe"}
+	suffixes := []string{""}
+	if runtime.GOOS == "windows" {
+		suffixes = append(suffixes, ".exe")
+	}
 
-	// Common locations
+	// Common locations — checked on every OS.
 	var dirs []string
 	if home != "" {
 		dirs = append(dirs, filepath.Join(home, ".local", "bin"))
 	}
 
-	// On Windows, read the full User PATH from environment to cover
-	// directories that may be missing from Explorer-launched processes
-	if userPath := os.Getenv("Path"); userPath != "" {
-		for _, dir := range strings.Split(userPath, string(os.PathListSeparator)) {
-			dir = strings.TrimSpace(dir)
-			if dir != "" {
-				dirs = append(dirs, dir)
+	// Windows-only: also walk every entry in the user PATH. On Unix
+	// exec.LookPath already covered this and re-walking would just burn
+	// syscalls.
+	if runtime.GOOS == "windows" {
+		if userPath := os.Getenv("Path"); userPath != "" {
+			for _, dir := range strings.Split(userPath, string(os.PathListSeparator)) {
+				dir = strings.TrimSpace(dir)
+				if dir != "" {
+					dirs = append(dirs, dir)
+				}
 			}
 		}
 	}
@@ -215,7 +253,7 @@ func searchBinary(p *PanePlugin, bin, home string) bool {
 			if _, err := os.Stat(candidate); err == nil {
 				p.Available = true
 				p.Command.Cmd = candidate
-				log.Printf("plugin %s: found at %q (fallback search)", p.Name, candidate)
+				log.Printf("plugin %q: found at %q (fallback search)", p.Name, candidate)
 				return true
 			}
 		}
@@ -245,6 +283,14 @@ type tomlPlugin struct {
 			Required bool   `toml:"required"`
 			Default  string `toml:"default"`
 		} `toml:"form_fields"`
+		PromptsCWD bool `toml:"prompts_cwd"`
+		Toggles    []struct {
+			Name       string   `toml:"name"`
+			Label      string   `toml:"label"`
+			ArgsWhenOn []string `toml:"args_when_on"`
+			Default    bool     `toml:"default"`
+		} `toml:"toggles"`
+		RawKeys []string `toml:"raw_keys"`
 	} `toml:"command"`
 	Persistence struct {
 		Strategy    string `toml:"strategy"`
@@ -312,6 +358,10 @@ func loadPluginTOML(path string) (*PanePlugin, error) {
 		category = "tools"
 	}
 
+	// Cap raw_keys length so a hostile / mistaken TOML cannot turn the
+	// per-keystroke linear scan in tryPluginRawKey into a hot path.
+	rawKeys := sanitizeRawKeys(tp.Plugin.Name, tp.Command.RawKeys)
+
 	p := &PanePlugin{
 		Name:        tp.Plugin.Name,
 		DisplayName: displayName,
@@ -320,16 +370,18 @@ func loadPluginTOML(path string) (*PanePlugin, error) {
 		Command: CommandConfig{
 			Cmd:              tp.Command.Cmd,
 			Path:             tp.Command.Path,
-			Args:             tp.Command.Args,
-			Env:              tp.Command.Env,
+			Args:             append([]string{}, tp.Command.Args...),
+			Env:              append([]string{}, tp.Command.Env...),
 			DetectCmd:        tp.Command.Detect,
 			ShellIntegration: tp.Command.ShellIntegration,
-			ArgTemplate:      tp.Command.ArgTemplate,
+			ArgTemplate:      append([]string{}, tp.Command.ArgTemplate...),
+			PromptsCWD:       tp.Command.PromptsCWD,
+			RawKeys:          rawKeys,
 		},
 		Persistence: PersistenceConfig{
 			Strategy:    tp.Persistence.Strategy,
-			StartArgs:   tp.Persistence.StartArgs,
-			ResumeArgs:  tp.Persistence.ResumeArgs,
+			StartArgs:   append([]string{}, tp.Persistence.StartArgs...),
+			ResumeArgs:  append([]string{}, tp.Persistence.ResumeArgs...),
 			GhostBuffer: tp.Persistence.GhostBuffer == nil || *tp.Persistence.GhostBuffer, // default true
 		},
 		Display: DisplayConfig{
@@ -345,6 +397,16 @@ func loadPluginTOML(path string) (*PanePlugin, error) {
 			Label:    ff.Label,
 			Required: ff.Required,
 			Default:  ff.Default,
+		})
+	}
+
+	// Convert toggles
+	for _, t := range tp.Command.Toggles {
+		p.Command.Toggles = append(p.Command.Toggles, Toggle{
+			Name:       t.Name,
+			Label:      t.Label,
+			ArgsWhenOn: append([]string{}, t.ArgsWhenOn...),
+			Default:    t.Default,
 		})
 	}
 
@@ -386,41 +448,76 @@ func loadPluginTOML(path string) (*PanePlugin, error) {
 
 	// Convert notification handlers
 	for _, nh := range tp.NotificationHandlers {
-		severity := nh.Severity
-		switch severity {
-		case "info", "warning", "error":
-			// valid
-		case "":
-			severity = "info"
-		default:
-			log.Printf("plugin %q: unknown notification severity %q, defaulting to info", tp.Plugin.Name, severity)
-			severity = "info"
-		}
 		p.NotificationHandlers = append(p.NotificationHandlers, NotificationHandler{
 			Pattern:  nh.Pattern,
 			Title:    nh.Title,
-			Severity: severity,
+			Severity: validateSeverity(tp.Plugin.Name, "notification", nh.Severity),
 		})
 	}
 
 	// Convert idle handlers
 	for _, ih := range tp.IdleHandlers {
-		severity := ih.Severity
-		switch severity {
-		case "info", "warning", "error":
-			// valid
-		case "":
-			severity = "info"
-		default:
-			log.Printf("plugin %q: unknown idle handler severity %q, defaulting to info", tp.Plugin.Name, severity)
-			severity = "info"
-		}
 		p.IdleHandlers = append(p.IdleHandlers, IdleHandler{
 			Pattern:  ih.Pattern,
 			Title:    ih.Title,
-			Severity: severity,
+			Severity: validateSeverity(tp.Plugin.Name, "idle handler", ih.Severity),
 		})
 	}
 
 	return p, nil
+}
+
+// validateSeverity normalizes a plugin TOML severity field. Empty becomes
+// "info", unknown values are warned about and downgraded to "info". The
+// `kind` argument is purely for the warning message ("notification" /
+// "idle handler" / etc).
+func validateSeverity(pluginName, kind, severity string) string {
+	switch severity {
+	case "info", "warning", "error":
+		return severity
+	case "":
+		return "info"
+	default:
+		log.Printf("plugin %q: unknown %s severity %q, defaulting to info",
+			pluginName, kind, severity)
+		return "info"
+	}
+}
+
+// maxRawKeys is the upper bound on entries we'll honor in a single plugin's
+// raw_keys list. The list is scanned linearly on every keystroke, so a runaway
+// (or malicious) TOML must not be able to make that scan O(huge). The number
+// is generous — real plugins use 1-5 entries.
+const maxRawKeys = 64
+
+// sanitizeRawKeys validates a plugin's raw_keys list. It caps the length,
+// rejects empty strings, and warns when an entry would shadow a single
+// printable character (e.g. raw_keys = ["a"] would eat every "a" keypress
+// for that pane type, including all of Quil's global shortcuts that use it).
+// Returns a defensive copy.
+func sanitizeRawKeys(pluginName string, raw []string) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	if len(raw) > maxRawKeys {
+		log.Printf("plugin %q: raw_keys has %d entries, truncating to %d", pluginName, len(raw), maxRawKeys)
+		raw = raw[:maxRawKeys]
+	}
+	out := make([]string, 0, len(raw))
+	for _, k := range raw {
+		if k == "" {
+			continue
+		}
+		// One-rune entries that are printable would shadow ordinary typing
+		// for the entire pane. Allow it, but make the consequence visible
+		// in the log so a misconfiguration is easy to find.
+		if len([]rune(k)) == 1 {
+			r := []rune(k)[0]
+			if r >= 0x20 && r != 0x7f {
+				log.Printf("plugin %q: raw_keys entry %q shadows a printable key — every press will bypass Quil's global shortcuts", pluginName, k)
+			}
+		}
+		out = append(out, k)
+	}
+	return out
 }

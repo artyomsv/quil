@@ -302,38 +302,188 @@ Each init script sources the user's original shell config first, then appends th
 - `config.Save(path, cfg)` encodes the full `Config` struct to TOML, writes to `.tmp`, renames atomically
 - `Model.configChanged` flag tracks whether any persistent config change was made during the session
 - On TUI exit, `main.go` checks `ConfigChanged()` and calls `Save()` only if needed
+- Every Settings dialog setter (`Snapshot interval`, `Ghost dimmed`, `Ghost buffer lines`, `Mouse scroll lines`, `Page scroll lines`, `Log level`, `Show disclaimer`) flips the flag — earlier versions only flagged the disclaimer field, silently dropping every other edit
+- Log-level changes apply on the next launch (no live re-init); the file handle owned by `main.go` is not re-plumbed into the Model
 - `MkdirAll` ensures parent directory exists; stale `.tmp` cleaned up on rename failure
 
 **Consequences:**
 
-- Config changes from the disclaimer dialog (and future settings) persist across restarts
+- Config changes from the disclaimer dialog AND every Settings field persist across restarts
 - Only writes when something actually changed — no unnecessary disk I/O
 - Follows the same crash-safe pattern as `persist/snapshot.go`
+
+## ADR-15: Pane Setup Dialog (Per-Spawn Plugin Configuration)
+
+**Decision:** Insert an opt-in setup step between plugin selection and split-direction selection in the Ctrl+N flow. Activated by two new TOML flags on `[command]`: `prompts_cwd = true` (renders a directory browser) and `[[command.toggles]]` (renders one checkbox per declared toggle).
+
+**Context:** Claude Code ties session memory and project plans to the working directory, so spawning the pane in `~` instead of the project root silently loses context. There is also a real demand for `--dangerously-skip-permissions` per-pane, but burying it in plugin TOML is the wrong UX — it should be a one-click opt-in at creation time, off by default.
+
+**Implementation:**
+
+- New `dialogCreatePaneSetup` screen rendered between steps 1 (plugin) and 3 (split direction)
+- `enterSetupOrSplit(p)` decides the route: if `p.Command.PromptsCWD || len(p.Command.Toggles) > 0` open the dialog, otherwise advance straight to step 3
+- Directory browser (`loadBrowseDir`, `loadBrowseDirAndSelect`, `adjustBrowseScroll`) — `os.ReadDir`, sorted, ".." prepended unless at root, follows directory symlinks/Windows junctions via `os.Stat`. Pre-loaded with the active pane's CWD (tracked via OSC 7) or `os.UserHomeDir()` as fallback
+- `validateAndNormalizeCWD` — trim whitespace + quotes, expand `~`, `filepath.Abs`, `os.Stat`, `EvalSymlinks` to canonicalise (closes a small TOCTOU window before the daemon spawn)
+- `sanitizePastedPath` — strips control bytes from clipboard input so an OSC/CSI payload can't inject terminal escapes into a rendered error message
+- Toggle args ride through the existing `CreatePanePayload.InstanceArgs` field — no new IPC surface
+- Daemon-side validation: `handleCreatePane` and `handleCreatePaneReq` re-stat the CWD and re-resolve symlinks, defending against IPC clients beyond the TUI (MCP, future tooling)
+- `daemon.spawnPane` restore branch was fixed to **append** `ResumeArgs` instead of replacing `args`, so toggle args (e.g. `--dangerously-skip-permissions`) survive a daemon restart alongside `--resume <uuid>`
+
+**Consequences:**
+
+- Claude Code panes pick up the project's `.claude/` context automatically — the most common use of the feature
+- Dangerous-permissions mode is one keystroke + one space-bar away, never the default
+- The mechanism is fully generic — any future plugin can opt in to either flag without TUI changes
+- Existing plugins (terminal, ssh, stripe) are unaffected — they don't set either opt-in
+- Toggle state is intentionally NOT persisted per-instance: dangerous flags should be a conscious per-spawn decision, not a saved preference
+
+## ADR-16: Spatial Pane Navigation (Alt+Arrow)
+
+**Decision:** Replace linear pane cycling (`Tab`/`Shift+Tab`) with directional spatial navigation (`Alt+Left`/`Right`/`Up`/`Down`) that picks the closest neighbour in the requested direction. `Tab` and `Shift+Tab` fall through to the PTY.
+
+**Context:** Linear `next_pane`/`prev_pane` is awkward in mixed H/V layouts — the next pane in tree-traversal order rarely matches the next pane on screen. Worse, binding `Tab` globally ate shell tab-completion and Claude Code's mode-cycling key, both of which need to reach the PTY.
+
+**Algorithm:**
+
+1. `CollectRects` walks the layout tree top-down, computing each leaf's `(OX, OY, W, H)` relative to the tab.
+2. For each candidate pane (excluding the active one), `directionScore` checks the half-plane and perpendicular overlap:
+   - The candidate must lie strictly in the target half-plane (e.g. `cand.OX + cand.W <= active.OX` for `DirLeft`). The strict-vs-loose comparison uses `>`, not `>=`, so adjacent panes that share a border column qualify.
+   - The candidate's perpendicular range (`OY..OY+H` for left/right, `OX..OX+W` for up/down) must overlap the active pane's perpendicular range. Zero overlap = rejected — a pane that is strictly above-and-to-the-right is not reachable via "up".
+3. Tie-breakers, applied in order:
+   1. **Smallest gap** along the direction axis (nearest edge wins).
+   2. **Largest perpendicular overlap** (most-aligned wins).
+   3. **Smallest perpendicular center distance** (closest-aligned center wins — tmux/vim/iTerm parity, prevents tree-traversal-order ambiguity in symmetric layouts).
+4. If no candidate qualifies, navigation is a no-op.
+
+**Implementation:**
+
+- New `Direction` enum (`DirLeft`/`DirRight`/`DirUp`/`DirDown`) and `TabModel.NavigateDirection(dir)` method
+- `directionScore` returns `(gap, overlap, perpDist, ok bool)` so the caller has all three sort keys without recomputation
+- New keybindings `pane_left`/`pane_right`/`pane_up`/`pane_down` in `[keybindings]` (defaults `alt+left/right/up/down`); legacy `next_pane`/`prev_pane` default to empty (unbound)
+- Split shortcuts moved off `Alt+H`/`Alt+V` to `Alt+Shift+H`/`Alt+Shift+V` so `Alt+V` reaches Claude Code's image paste
+
+**Consequences:**
+
+- Pane motion now matches user intuition in arbitrary mixed layouts
+- Tab/Shift+Tab work naturally in shells and Claude Code without any per-plugin opt-in
+- Disabled in focus mode and on single-pane tabs (no-op, no error)
+- Vim users can rebind to `alt+h/l/k/j` in `config.toml`
+
+## ADR-17: Win32 Clipboard Image Paste Proxy
+
+**Decision:** When a paste keystroke fires and the clipboard contains an image but no text, Quil itself reads the image, decodes it, encodes it as PNG, drops it in `~/.quil/paste/`, and types the absolute path into the active pane. This is a workaround for the upstream Claude Code Windows clipboard image bug ([anthropics/claude-code#32791](https://github.com/anthropics/claude-code/issues/32791)).
+
+**Context:** Claude Code on Windows can't read images from the clipboard reliably — the broken read path drops the image silently. Forcing users to manually save screenshots and type paths breaks the agentic flow. Since the AI tools all have file-reading tools, dropping the file and pasting its path is functionally equivalent and works for every tool.
+
+**Implementation:**
+
+- `clipboard.ReadImage()` (`internal/clipboard/clipboard.go`) — platform dispatch interface, returns `(pngBytes []byte, err error)` or the sentinel `clipboard.ErrNoImage`
+- `internal/clipboard/image_windows.go` — Win32 read path:
+  - `OpenClipboard` → check `CF_DIBV5` first (preserves alpha and color profiles), fall back to `CF_DIB`
+  - `GlobalLock` + `GlobalSize`, copy out before `CloseClipboard` (defensive — Win32 invalidates the locked pointer immediately on close)
+  - 64 MB clipboard byte cap (`maxClipboardImageBytes`) before any allocation
+  - Hand off to `decodeDIB` for parsing, then `image/png` for encoding
+- `internal/clipboard/dib.go` — platform-agnostic DIB parser (testable on Linux CI):
+  - Supports BITMAPINFOHEADER (40-byte), BITMAPV4HEADER (108), BITMAPV5HEADER (124)
+  - 24bpp BI_RGB and 32bpp BI_RGB / BI_BITFIELDS with default BGRA masks
+  - Handles bottom-up (positive height) and top-down (negative height) row order
+  - **Zero-alpha promotion** — some apps leave the 32bpp alpha channel as 0; the decoder detects "all alpha = 0" and promotes to 0xFF, otherwise downstream tools see a fully-transparent image
+  - Per-axis cap (`maxDIBDimension = 16384`) + uint64 stride math defends against crafted payloads that slip under the 64 MB byte cap but would otherwise allocate gigabytes during decode
+- `internal/clipboard/image_unix.go` — stub returning `ErrNoImage` (macOS / Linux paste image support not implemented yet)
+- `tryPasteClipboardImage` (in `internal/tui/model.go`) — falls through from text paste when text is empty:
+  - `os.MkdirAll(config.PasteDir(), 0o700)` — owner-only directory
+  - Filename: `quil-paste-<timestamp>-<8-byte hex from crypto/rand>.png` — unguessable, defeats enumeration on multi-user Unix boxes
+  - `os.WriteFile(abs, png, 0o600)` — owner-only file
+  - Types the absolute path into the PTY via the same bracketed-paste path as text
+- Paste keys: `Ctrl+V` (default), `Ctrl+Alt+V` and `F8` (hardcoded aliases). `F8` is the recommended Windows trigger because **Windows Terminal captures `Ctrl+V` for its own paste action** and never delivers the key event to the running TUI
+
+**Consequences:**
+
+- Claude Code can read pasted screenshots on Windows even though its native clipboard read is broken
+- The same proxy works for any AI tool with file-reading tools (Cursor, Aider, etc.) without per-tool wiring
+- Paste files inherit the tight `~/.quil/` permission posture — no co-tenant on Unix can enumerate or read them
+- Linux/macOS get the file API but currently always return `ErrNoImage` — the platform reader is a future addition
+
+## ADR-18: Leveled Logger via slog Bridge
+
+**Decision:** Wrap Go's stdlib `log/slog` (Go 1.21+) in a tiny `internal/logger` package that exposes `Debug/Info/Warn/Error` helpers AND bridges the existing 152 stdlib `log.Printf` call sites at info level so both old and new code respect a single configurable filter.
+
+**Context:** Quil's diagnostic logging started as `log.Printf` calls scattered across daemon/TUI/IPC. Useful, but unfilterable — every paste keystroke and per-key handler trace was always on, regardless of whether the user wanted that level of detail. Migrating 152 sites to a new logger interface in one PR is impractical, and removing the diagnostic value of the existing prints is not acceptable.
+
+**Implementation:**
+
+- `internal/logger/logger.go` — single file, no dependencies beyond stdlib
+- `Init(level string, w io.Writer)` builds a `slog.NewTextHandler` at the requested level, sets it as `slog.Default()`, AND calls `log.SetOutput(slog.NewLogLogger(handler, slog.LevelInfo).Writer())` to route stdlib `log.Printf` through the same handler at info level. All three mutations happen under one `sync.Mutex` span so a concurrent reader can't see a half-initialised state.
+- `Debug`/`Info`/`Warn`/`Error` helpers share a `logAt` body that pre-checks `slog.Enabled(ctx, level)` so the (potentially expensive) `fmt.Sprintf` is skipped when the configured level filters the call out — important for the per-keystroke `Debug` calls in the TUI hot path.
+- `ParseLevel` accepts `"debug" | "info" | "warn"/"warning" | "error"/"err"` (case-insensitive), defaults unknowns to info.
+- Wired from both `cmd/quil/main.go` and `cmd/quild/main.go` after the log file is opened. Both entry points call `Init` BEFORE the first meaningful `log.Printf`.
+
+**Consequences:**
+
+- Flip `[logging] level = "debug"` in `config.toml` to see clipboard pipeline traces, per-key handler decisions, and Win32 image read step-by-step. Default `info` keeps the existing log volume.
+- Existing 152 `log.Printf` sites work unchanged — they get a single-level filter for free.
+- New code can be explicit about levels (`logger.Debug(...)`) without dragging in any third-party dependency.
+- `LoggingConfig.MaxSizeMB` / `MaxFiles` are reserved fields documented as "not yet honored" — log rotation is planned via lumberjack in a future PR; the fields exist now to avoid breaking users' configs when rotation lands.
+
+## ADR-19: Read-Only TextEditor for the F1 Log Viewer
+
+**Decision:** Add a `ReadOnly bool` field to the existing `TextEditor` and reuse it for F1 → "View client/daemon/MCP log". Every mutation path (typing, paste, cut, save, enter, backspace, delete, tab, multi-line insert) is gated by the flag; cursor movement and clipboard COPY remain enabled.
+
+**Context:** The F1 menu needs a way to inspect logs without leaving the TUI. Spawning a separate viewer (`less`, `tail`) would break the single-process model. The existing `TextEditor` has all the navigation, scrolling, and selection plumbing already — gating mutation is much smaller than building a viewer from scratch.
+
+**Implementation:**
+
+- `TextEditor.ReadOnly bool` — checked at the top of every mutation case in `HandleKey`. The public `InsertMultiLine` is also gated so `Ctrl+V` paste cannot bypass the check.
+- `TextEditor.PageSize int` — added at the same time so `Alt+Up`/`Alt+Down` can jump by N lines (default 40 via `editorDefaultPageSize`, configurable via `[ui] log_viewer_page_lines`). Navigation works in both read-only and editable modes.
+- `dialogLogViewer` reuses `m.tomlEditor` (the field name predates this use; renaming was deferred). Cursor starts at the bottom so the freshest log lines are in view.
+- `readLogTail` reads up to `maxLogViewBytes = 256 * 1024` from the END of a log file:
+  - `os.Lstat` first to reject symlinks, devices, named pipes — defends against link swaps inside `~/.quil/` that could redirect the read to an arbitrary file (e.g., `~/.ssh/id_rsa`)
+  - Re-stat through the open handle defeats a TOCTOU swap between Lstat and Open
+  - Seeks to `(size - maxBytes)` (with `io.SeekStart`), reads, then drops everything before the first newline so the result starts at a clean line boundary
+  - Prepends `[... older lines truncated ...]` marker
+- `openMCPLogsViewer` aggregates per-pane MCP interaction logs (`~/.quil/mcp-logs/*.log`) into one buffer with file-name headers, most-recently-modified first, capping each file to a fair share of the total budget
+
+**Consequences:**
+
+- F1 → log viewers behave like a real read-only `less` overlay without spawning anything
+- The same `ReadOnly` flag is now available for any other "look but don't touch" use case (future: read-only TOML preview, read-only config dump)
+- Symlink-rejecting reads make the log viewer safe to use against attacker-writable directories under the same user account
 
 ## Storage Layout
 
 ```
-~/.quil/
-├── config.toml
-├── quil.log               # TUI client log
-├── quild.log              # Daemon log
-├── quild.sock             # IPC socket (Unix) / Named Pipe (Windows)
-├── shellinit/               # Auto-generated shell integration scripts
+~/.quil/                           (or ./.quil/ in dev mode — see .claude/rules/dev-environment.md)
+├── config.toml                    # User configuration (TOML)
+├── quil.log                       # TUI client log (slog text format)
+├── quild.log                      # Daemon log
+├── quild.sock                     # IPC socket (Unix) / Named Pipe (Windows)
+├── quild.pid                      # Daemon PID file
+├── shellinit/                     # Auto-generated shell integration scripts
 │   ├── bash-init.sh
 │   ├── pwsh-init.ps1
 │   └── zsh/
 │       ├── .zshenv
 │       └── .zshrc
-├── workspace.json              # Tab/pane/layout state
-├── workspace.json.bak          # Previous snapshot (rollback)
-├── buffers/                    # Ghost buffer binary files
+├── workspace.json                 # Tab/pane/layout state
+├── workspace.json.bak             # Previous snapshot (rollback)
+├── buffers/                       # Ghost buffer binary files
 │   └── pane-XXXXXXXX.bin
-├── window.json                 # Window size/position persistence
-├── instances.json              # Saved plugin instances (SSH connections, etc.)
-├── plugins/                    # User TOML plugin definitions
+├── window.json                    # Window size/position persistence
+├── instances.json                 # Saved plugin instances (SSH connections, etc.)
+├── plugins/                       # User TOML plugin definitions
 │   └── *.toml
-├── notes/                      # Pane notes (planned)
-│   └── pane-XXXXXXXX.txt
-└── secrets/                    # (planned)
+├── notes/                         # Pane notes (M7) — one file per pane
+│   └── pane-XXXXXXXX.md
+├── paste/                         # Clipboard image proxy output (ADR-17)
+│   └── quil-paste-<ts>-<rand>.png
+├── mcp-logs/                      # Per-pane MCP interaction logs (M10)
+│   └── pane-XXXXXXXX.log
+└── secrets/                       # (planned)
     └── tokens.enc
 ```
+
+## Project Rules
+
+The project ships rule files under `.claude/rules/` that document non-obvious constraints for both human contributors and AI coding assistants:
+
+- **`.claude/rules/dev-environment.md`** — production isolation. The Quil author runs Quil itself in production from `~/.quil/`; any operation that touches that directory or the running daemon during development is destructive. All development work uses dev mode (`./quil --dev`, data in project-root `.quil/`). The `kill-daemon`/`reset-daemon` helper scripts target production paths and are off-limits during development.

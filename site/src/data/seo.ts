@@ -39,10 +39,12 @@ export const SITE = {
 
   /** Software metadata for the SoftwareApplication JSON-LD schema
    *  that ships on the home page. The version is the single source
-   *  of truth for the home page hero pill — bump it whenever VERSION
-   *  at the repo root moves. */
+   *  of truth for the home page hero pill. The release.yml workflow
+   *  bumps these two fields automatically as part of its version
+   *  bump step — manual edits are normally unnecessary but harmless
+   *  (the next release will overwrite both via sed). */
   software: {
-    version: "1.2.1",
+    version: "1.3.0",
     license: "MIT",
     operatingSystem: "Linux, macOS, Windows",
     applicationCategory: "DeveloperApplication",

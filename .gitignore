@@ -30,3 +30,11 @@ Thumbs.db
 
 # Dev instance data
 /.quil/
+
+# Release pipeline scratch — release.yml writes the extracted CHANGELOG
+# notes to ./release-notes.md inside GITHUB_WORKSPACE so hashFiles() can
+# find it. We never want that file committed.
+/release-notes.md
+
+# Local scratch directory used for ad-hoc API responses, payloads, etc.
+/.scratch/

@@ -95,7 +95,16 @@ jobs:
           DATE=$(date +%Y-%m-%d)
           sed -i "s/## \[Unreleased\]/## [Unreleased]\n\n## [${VERSION}] - ${DATE}/" CHANGELOG.md
 
-          echo "::notice::Updated VERSION to ${VERSION} and CHANGELOG.md"
+          # Bump the marketing site's version pill so quil.cc reflects the
+          # release. seo.ts is the single source of truth for the home page
+          # hero pill — without this update the site keeps showing the old
+          # version even though the binary moved on. Touching site/** also
+          # triggers .github/workflows/site.yml on the release commit, which
+          # rebuilds and redeploys the site automatically.
+          sed -i -E "s/(version: )\"[0-9]+\\.[0-9]+\\.[0-9]+\"/\\1\"${VERSION}\"/" site/src/data/seo.ts
+          sed -i -E "s/(releaseDate: )\"[0-9]{4}-[0-9]{2}-[0-9]{2}\"/\\1\"${DATE}\"/" site/src/data/seo.ts
+
+          echo "::notice::Updated VERSION to ${VERSION}, CHANGELOG.md, and site/src/data/seo.ts"
 
       - name: Run tests
         if: steps.bump.outputs.skip != 'true'
@@ -120,7 +129,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add VERSION CHANGELOG.md
+          git add VERSION CHANGELOG.md site/src/data/seo.ts
           git commit -m "chore(release): v${VERSION}"
           git tag "v${VERSION}"
           git push origin master --tags
@@ -155,10 +164,15 @@ jobs:
         env:
           VERSION: ${{ needs.release.outputs.version }}
         run: |
+          # IMPORTANT: write the file inside GITHUB_WORKSPACE, not /tmp.
+          # `hashFiles()` (used in `if:` conditions on later steps) only
+          # matches files inside GITHUB_WORKSPACE, so a /tmp path always
+          # hashes to empty string and any guarded step gets skipped.
+          # See: https://docs.github.com/en/actions/learn-github-actions/expressions#hashfiles
           sed -n "/^## \[${VERSION}\]/,/^## \[/{ /^## \[${VERSION}\]/d; /^## \[/d; p; }" CHANGELOG.md \
-            | tr -d '\r' > /tmp/release-notes.md
-          echo "::notice::Release notes for v${VERSION}:"
-          cat /tmp/release-notes.md
+            | tr -d '\r' > release-notes.md
+          echo "::notice::Release notes for v${VERSION} ($(wc -c < release-notes.md) bytes):"
+          cat release-notes.md
 
       - uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a  # v6
         with:
@@ -169,13 +183,17 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set release notes
-        if: hashFiles('/tmp/release-notes.md') != ''
+        # No `if: hashFiles(...)` guard here. Earlier versions used
+        # `hashFiles('/tmp/release-notes.md') != ''` which always evaluated
+        # false because /tmp is outside GITHUB_WORKSPACE — the step was
+        # silently skipped on every release. The inner `[ -s ... ]` check
+        # is the real safety net.
         env:
           VERSION: ${{ needs.release.outputs.version }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if [ -s /tmp/release-notes.md ]; then
-            gh release edit "v${VERSION}" --notes-file /tmp/release-notes.md
+          if [ -s release-notes.md ]; then
+            gh release edit "v${VERSION}" --notes-file release-notes.md
             echo "::notice::Release notes applied to v${VERSION}"
           else
             echo "::warning::Release notes file is empty — skipping"

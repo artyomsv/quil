@@ -2,6 +2,15 @@ package plugin
 
 import "regexp"
 
+// StalePlugin holds data for a plugin whose on-disk schema_version is lower
+// than the embedded default. The TUI uses this to show a migration dialog.
+type StalePlugin struct {
+	Name        string // plugin name (e.g., "claude-code")
+	FilePath    string // absolute path to the user's TOML file
+	UserData    []byte // current content of the user's file
+	DefaultData []byte // embedded default content (newer schema)
+}
+
 // PanePlugin defines a pane type with its command, persistence strategy,
 // and optional error handlers.
 type PanePlugin struct {

@@ -407,8 +407,6 @@ func (d *Daemon) respawnPanes() {
 				if info, err := os.Stat(pane.CWD); err != nil || !info.IsDir() {
 					log.Printf("pane %s: saved cwd %q gone, using default", pane.ID, pane.CWD)
 					pane.CWD = ""
-				} else {
-					ptySession.SetCWD(pane.CWD)
 				}
 			}
 
@@ -416,9 +414,6 @@ func (d *Daemon) respawnPanes() {
 				log.Printf("respawn pane %s (type=%s): %v — falling back to terminal", pane.ID, pane.Type, err)
 				pane.Type = "terminal"
 				ptySession2 := apty.New()
-				if pane.CWD != "" {
-					ptySession2.SetCWD(pane.CWD)
-				}
 				if err := d.spawnPane(pane, ptySession2, false); err != nil {
 					log.Printf("fallback shell for pane %s also failed: %v", pane.ID, err)
 				}
@@ -1246,7 +1241,8 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 		cmd = resolved
 	}
 
-	log.Printf("spawn: pane %s cmd=%s args=%v restoring=%v", pane.ID, cmd, args, restoring)
+	ptySession.SetCWD(pane.CWD)
+	log.Printf("spawn: pane %s cmd=%s args=%v cwd=%s restoring=%v", pane.ID, cmd, args, pane.CWD, restoring)
 	if err := ptySession.Start(cmd, args...); err != nil {
 		return err
 	}

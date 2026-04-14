@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-04-14
+
 ### Added
 
 - **Three-variant build system** — `./scripts/dev.sh build` now produces 6 binaries: `quil.exe`/`quild.exe` (prod, stripped), `quil-dev.exe`/`quild-dev.exe` (auto dev mode + debug logging), `quil-debug.exe`/`quild-debug.exe` (debug logging, production data dir). Compile-time ldflags (`buildDevMode`, `buildLogLevel`, `daemonBinary`) bake in behavior — dev variant needs no `--dev` flag. Each variant auto-starts its matching daemon (e.g., `quil-dev.exe` starts `quild-dev.exe`).

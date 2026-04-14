@@ -80,7 +80,7 @@ func (d *Daemon) Start() error {
 	}
 
 	// Write default plugin TOML files if missing, then load all plugins
-	if err := plugin.EnsureDefaultPlugins(config.PluginsDir()); err != nil {
+	if _, err := plugin.EnsureDefaultPlugins(config.PluginsDir()); err != nil {
 		log.Printf("warning: failed to write default plugins: %v", err)
 	}
 	if err := d.registry.LoadFromDir(config.PluginsDir()); err != nil {
@@ -560,12 +560,7 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 			}
 			log.Printf("attach: ghost replay pane %s (type=%s, source=%s, bytes=%d)",
 				pane.ID, pane.Type, source, len(ghost))
-			histMsg, _ := ipc.NewMessage(ipc.MsgPaneOutput, ipc.PaneOutputPayload{
-				PaneID: pane.ID,
-				Data:   ghost,
-				Ghost:  true,
-			})
-			conn.Send(histMsg)
+			sendGhostChunked(conn, pane.ID, ghost, d.shutdown)
 			pane.GhostSnap = nil // clear after first replay
 		}
 	}
@@ -575,6 +570,41 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 		payload := toPaneEventPayload(e)
 		evtMsg, _ := ipc.NewMessage(ipc.MsgPaneEvent, payload)
 		conn.Send(evtMsg)
+	}
+}
+
+// sendGhostChunked sends a ghost buffer in 8 KB chunks with a 2 ms yield
+// between each chunk. This prevents the TUI's Bubble Tea event loop from
+// being starved by a single massive message — keyboard events can interleave
+// between chunks. The 2 ms delay matches the live-output coalescing interval
+// in streamPTYOutput, so ghost replay feels identical to fast live output.
+// The done channel allows early abort if the daemon is shutting down or the
+// client disconnects mid-replay.
+func sendGhostChunked(conn *ipc.Conn, paneID string, data []byte, done <-chan struct{}) {
+	const chunkSize = 8 * 1024 // 8 KB — typical PTY read size
+	const chunkDelay = 2 * time.Millisecond
+
+	for len(data) > 0 {
+		n := chunkSize
+		if n > len(data) {
+			n = len(data)
+		}
+		msg, _ := ipc.NewMessage(ipc.MsgPaneOutput, ipc.PaneOutputPayload{
+			PaneID: paneID,
+			Data:   data[:n],
+			Ghost:  true,
+		})
+		if err := conn.Send(msg); err != nil {
+			return // client disconnected
+		}
+		data = data[n:]
+		if len(data) > 0 {
+			select {
+			case <-done:
+				return
+			case <-time.After(chunkDelay):
+			}
+		}
 	}
 }
 
@@ -828,7 +858,7 @@ func (d *Daemon) handleUpdatePane(msg *ipc.Message) {
 }
 
 func (d *Daemon) handleReloadPlugins() {
-	if err := plugin.EnsureDefaultPlugins(config.PluginsDir()); err != nil {
+	if _, err := plugin.EnsureDefaultPlugins(config.PluginsDir()); err != nil {
 		log.Printf("reload: ensure defaults: %v", err)
 	}
 	if err := d.registry.LoadFromDir(config.PluginsDir()); err != nil {

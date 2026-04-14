@@ -2,6 +2,9 @@ version: 2
 
 before:
   hooks:
+    - go install github.com/tc-hib/go-winres@v0.3.3
+    - go-winres make --in winres/winres.json --out cmd/quil/rsrc --product-version {{ .Version }} --file-version {{ .Version }}
+    - go-winres make --in winres/winres.json --out cmd/quild/rsrc --product-version {{ .Version }} --file-version {{ .Version }}
     - go mod tidy -diff
     - go vet ./...
 

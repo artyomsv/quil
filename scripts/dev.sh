@@ -10,7 +10,10 @@ DOCKER_RUN="docker run --rm -v ${PROJECT_DIR}:/src -v quil-gomod:/go/pkg/mod -w 
 case "${1:-help}" in
   build)
     $DOCKER_RUN sh -c "\
+      go install github.com/tc-hib/go-winres@v0.3.3 && \
       VER=\$(cat VERSION) && \
+      go-winres make --in winres/winres.json --out cmd/quil/rsrc --product-version \$VER --file-version \$VER && \
+      go-winres make --in winres/winres.json --out cmd/quild/rsrc --product-version \$VER --file-version \$VER && \
       F=\"-s -w -X main.version=\$VER\" && \
       F_DEV=\"\$F -X main.buildDevMode=true -X main.buildLogLevel=debug -X main.daemonBinary=quild-dev\" && \
       F_DBG=\"\$F -X main.buildLogLevel=debug -X main.daemonBinary=quild-debug\" && \
@@ -37,7 +40,11 @@ case "${1:-help}" in
 
   cross)
     $DOCKER_RUN sh -c "\
-      VER=\$(cat VERSION) && LDFLAGS=\"-X main.version=\$VER\" && \
+      go install github.com/tc-hib/go-winres@v0.3.3 && \
+      VER=\$(cat VERSION) && \
+      go-winres make --in winres/winres.json --out cmd/quil/rsrc --product-version \$VER --file-version \$VER && \
+      go-winres make --in winres/winres.json --out cmd/quild/rsrc --product-version \$VER --file-version \$VER && \
+      LDFLAGS=\"-X main.version=\$VER\" && \
       mkdir -p dist && \
       GOOS=linux   GOARCH=amd64 go build -ldflags \"\$LDFLAGS\" -o dist/quil-linux-amd64        ./cmd/quil && \
       GOOS=linux   GOARCH=amd64 go build -ldflags \"\$LDFLAGS\" -o dist/quild-linux-amd64       ./cmd/quild && \
@@ -60,6 +67,7 @@ case "${1:-help}" in
           "$PROJECT_DIR/quil.exe" "$PROJECT_DIR/quild.exe" \
           "$PROJECT_DIR/quil-dev.exe" "$PROJECT_DIR/quild-dev.exe" \
           "$PROJECT_DIR/quil-debug.exe" "$PROJECT_DIR/quild-debug.exe"
+    rm -f "$PROJECT_DIR"/cmd/quil/rsrc*.syso "$PROJECT_DIR"/cmd/quild/rsrc*.syso
     rm -rf "$PROJECT_DIR/dist/"
     ;;
 

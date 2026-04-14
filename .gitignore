@@ -27,6 +27,7 @@ Thumbs.db
 # Build
 /dist/
 /bin/
+*.syso
 
 # Dev instance data
 /.quil/

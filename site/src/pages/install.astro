@@ -166,6 +166,50 @@ go install github.com/artyomsv/quil/cmd/quild@latest`,
       </div>
     </section>
 
+    <!-- Build variants (developers) -->
+    <section class="mt-10">
+      <h2 class="mb-4 text-2xl font-semibold tracking-tight">Build variants (contributors)</h2>
+      <div class="ember-card p-8">
+        <p class="mb-4 text-sm leading-relaxed text-muted-foreground">
+          If you're developing Quil itself, <code>./scripts/dev.sh build</code>
+          produces three matched binary pairs:
+        </p>
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead>
+              <tr class="border-b border-border text-left text-muted-foreground">
+                <th class="pb-2 pr-4 font-medium">Variant</th>
+                <th class="pb-2 pr-4 font-medium">Binaries</th>
+                <th class="pb-2 font-medium">Behaviour</th>
+              </tr>
+            </thead>
+            <tbody class="text-muted-foreground">
+              <tr class="border-b border-border/50">
+                <td class="py-2 pr-4 font-mono text-xs text-foreground">prod</td>
+                <td class="py-2 pr-4 font-mono text-xs">quil / quild</td>
+                <td class="py-2">Stripped symbols, normal log level, data in <code>~/.quil/</code></td>
+              </tr>
+              <tr class="border-b border-border/50">
+                <td class="py-2 pr-4 font-mono text-xs text-foreground">dev</td>
+                <td class="py-2 pr-4 font-mono text-xs">quil-dev / quild-dev</td>
+                <td class="py-2">Auto dev mode (<code>.quil/</code> next to binary), debug logging — no flags needed</td>
+              </tr>
+              <tr>
+                <td class="py-2 pr-4 font-mono text-xs text-foreground">debug</td>
+                <td class="py-2 pr-4 font-mono text-xs">quil-debug / quild-debug</td>
+                <td class="py-2">Debug logging against production <code>~/.quil/</code> — for diagnosing live issues</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="mt-4 text-sm leading-relaxed text-muted-foreground">
+          Each variant auto-starts its matching daemon. The dev variant is
+          recommended for daily development — it isolates all state from
+          the production workspace.
+        </p>
+      </div>
+    </section>
+
     <!-- Uninstall -->
     <section class="mt-10">
       <h2 class="mb-4 text-2xl font-semibold tracking-tight">Uninstall</h2>

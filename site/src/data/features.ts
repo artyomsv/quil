@@ -38,7 +38,7 @@ export const features: Feature[] = [
     category: "persistence",
     detail: [
       "Continuous snapshot of tabs, panes, layout, and working directories to ~/.quil/workspace.json.",
-      "Ghost buffers render the last 500 lines of each pane instantly while shells re-initialise.",
+      "Ghost buffers render the last 500 lines of each pane instantly while shells re-initialise. Large buffers are sent in 8 KB chunks with 2 ms yield between each to prevent input starvation.",
       "Pane split tree is serialised to JSON and restored on reconnect — same horizontal/vertical nesting, same ratios.",
       "Target boot-to-productive time: under 30 seconds.",
     ],
@@ -159,6 +159,20 @@ export const features: Feature[] = [
       "Declarative config means no shell scripting footguns; the daemon validates the TOML at load time.",
     ],
   },
+  {
+    slug: "plugin-auto-upgrade",
+    icon: "refresh-ccw",
+    title: "Plugin auto-upgrade",
+    blurb:
+      "When Quil ships new plugin features, a side-by-side merge dialog lets you reconcile your config with the new defaults — no silent breakage, no lost customizations.",
+    category: "extensibility",
+    detail: [
+      "Each embedded default plugin carries a `schema_version` number. On startup, Quil compares your on-disk version with the shipped default.",
+      "If yours is older, a full-screen split view opens: your config on the left (editable), the new default on the right (read-only). Diff highlighting shows red for your custom lines and green for new additions.",
+      "Ctrl+C / Ctrl+V to copy lines from the default into your config, Ctrl+S to save, F5 to accept the full default. Esc is blocked — migration must be resolved before the workspace loads.",
+      "Multiple stale plugins get a tab bar. Each must be resolved independently.",
+    ],
+  },
 
   // --- Observability -------------------------------------------------
   {
@@ -187,6 +201,23 @@ export const features: Feature[] = [
       "F1 → About → View client log / daemon log / MCP logs opens a read-only TextEditor viewing the tail (256 KB) of each file. Symlink-rejecting via os.Lstat plus a re-stat through the open handle defeats TOCTOU swap.",
       "Alt+Up / Alt+Down jump the cursor by `[ui] log_viewer_page_lines` (default 40, configurable). The same `TextEditor.ReadOnly` flag is now available for any other look-but-don't-touch dialog.",
       "Hot-path Debug calls pre-check `slog.Enabled` so the fmt.Sprintf is skipped entirely when filtered out — important for the per-keystroke trace.",
+      "The shared TextEditor now supports Ctrl+C (copy selection), Ctrl+Y (delete line), and Ctrl+X (cut) — used across log viewers, plugin TOML editor, pane notes, and the migration dialog.",
+    ],
+  },
+
+  // --- Developer experience -------------------------------------------
+  {
+    slug: "build-variants",
+    icon: "key-round",
+    title: "Three build variants",
+    blurb:
+      "Production, dev, and debug binaries — each self-contained with the right log level and data directory baked in at compile time.",
+    category: "interaction",
+    detail: [
+      "`quil.exe` / `quild.exe` — production build, stripped symbols, normal log level, data in ~/.quil/.",
+      "`quil-dev.exe` / `quild-dev.exe` — auto dev mode (data in .quil/ next to the binary), debug logging, finds its matching `quild-dev` daemon. Just double-click — no --dev flag or env vars needed.",
+      "`quil-debug.exe` / `quild-debug.exe` — debug logging against the production data directory. Useful for diagnosing issues in the live workspace.",
+      "Each variant auto-starts its matching daemon. `./scripts/dev.sh build` produces all 6 binaries in one Docker run.",
     ],
   },
 

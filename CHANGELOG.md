@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Three-variant build system** — `./scripts/dev.sh build` now produces 6 binaries: `quil.exe`/`quild.exe` (prod, stripped), `quil-dev.exe`/`quild-dev.exe` (auto dev mode + debug logging), `quil-debug.exe`/`quild-debug.exe` (debug logging, production data dir). Compile-time ldflags (`buildDevMode`, `buildLogLevel`, `daemonBinary`) bake in behavior — dev variant needs no `--dev` flag. Each variant auto-starts its matching daemon (e.g., `quil-dev.exe` starts `quild-dev.exe`).
+- **Plugin schema migration dialog** — when a plugin's on-disk `schema_version` is lower than the embedded default, a full-screen side-by-side merge dialog blocks startup. Left pane shows the user's config (editable), right pane shows the new default (read-only). Diff highlighting: red tint for lines only in the user config, green tint for new lines in the default. Ctrl+C copies, Ctrl+V pastes, Ctrl+S saves and advances, F5 accepts the full default. Esc is blocked — migration must be resolved before using Quil.
+- **Plugin schema versioning** — `schema_version` field in `[plugin]` section of embedded default TOMLs. `EnsureDefaultPlugins` returns `[]StalePlugin` for stale files instead of silently overwriting. `ParseSchemaVersion` exported for TUI validation.
+- **Windows drive navigation** — the CWD directory browser (Ctrl+N → plugin setup) can now switch between Windows drive letters. Pressing backspace at a drive root (e.g., `C:\`) shows all available drives (`A:\` through `Z:\`). Selecting a drive navigates into it.
+- **TextEditor: Ctrl+C copy** — copies the current selection to the system clipboard without deleting it. Previously only Enter (copy) and Ctrl+X (cut) were available.
+- **TextEditor: Ctrl+Y delete line** — deletes the current line. On a single-line document, clears the line content.
+
+### Fixed
+
+- **Ghost buffer replay freeze** — large ghost buffers (80KB+) sent as single IPC messages starved Bubble Tea's unbuffered input channel on Windows, freezing the TUI on startup. Ghost buffers are now sent in 8 KB chunks with 2 ms yield between each, matching the live-output coalescing interval. The `sendGhostChunked` function supports early abort via the daemon's shutdown channel.
+- **Stale plugin configs on upgrade** — existing users who installed Quil before v1.3.0 never received `prompts_cwd`, `[[command.toggles]]`, or the updated `resume_args = ["--continue"]` in their `claude-code.toml` because `EnsureDefaultPlugins` was create-only. Now detected and surfaced via the migration dialog.
+- **Resize artifacts in full-screen dialogs** — the migration and disclaimer dialogs now skip the 150 ms resize debounce, applying window size changes immediately. Previously, maximizing the window caused rendering artifacts during the debounce window.
+
+### Changed
+
+- **`quil-dev.ps1` / `quil-dev.sh`** — now launch the self-contained `quil-dev.exe` / `quil-dev` binary directly instead of `quil.exe --dev`. No flags or env vars needed.
+- **`scripts/dev.sh` PROJECT_DIR** — derived dynamically via `pwd -W` instead of hardcoded absolute path.
+- **`quild` background mode** — stdout/stderr prints gated on `!background` instead of redirecting to `/dev/null` (eliminates a file descriptor leak).
+
 ## [1.3.1] - 2026-04-09
 
 ## [1.3.0] - 2026-04-08

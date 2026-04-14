@@ -98,9 +98,9 @@ jobs:
           # Bump the marketing site's version pill so quil.cc reflects the
           # release. seo.ts is the single source of truth for the home page
           # hero pill — without this update the site keeps showing the old
-          # version even though the binary moved on. Touching site/** also
-          # triggers .github/workflows/site.yml on the release commit, which
-          # rebuilds and redeploys the site automatically.
+          # version even though the binary moved on. Note: the GITHUB_TOKEN
+          # push does NOT trigger site.yml (GitHub Actions limitation), so
+          # the site is rebuilt by the deploy-site job below.
           sed -i -E "s/(version: )\"[0-9]+\\.[0-9]+\\.[0-9]+\"/\\1\"${VERSION}\"/" site/src/data/seo.ts
           sed -i -E "s/(releaseDate: )\"[0-9]{4}-[0-9]{2}-[0-9]{2}\"/\\1\"${DATE}\"/" site/src/data/seo.ts
 
@@ -198,3 +198,50 @@ jobs:
           else
             echo "::warning::Release notes file is empty — skipping"
           fi
+
+  # --- Site rebuild ---------------------------------------------------
+  # Pushes made with GITHUB_TOKEN don't trigger other workflows, so
+  # site.yml never fires on the release commit. This job rebuilds and
+  # deploys the site directly from the tagged commit (which has the
+  # updated seo.ts version pill).
+  deploy-site:
+    needs: release
+    if: needs.release.outputs.skip != 'true' && needs.release.outputs.dry_run != 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    defaults:
+      run:
+        working-directory: site
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          ref: v${{ needs.release.outputs.version }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Build site
+        run: npm run build
+        env:
+          NODE_ENV: production
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/dist
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

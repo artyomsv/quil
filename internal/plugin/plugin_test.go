@@ -42,10 +42,14 @@ func TestRegistryByCategory(t *testing.T) {
 func TestRegistryWithDefaults(t *testing.T) {
 	// Full registry with TOML defaults loaded
 	dir := t.TempDir()
-	EnsureDefaultPlugins(dir)
+	if _, err := EnsureDefaultPlugins(dir); err != nil {
+		t.Fatal(err)
+	}
 
 	r := NewRegistry()
-	r.LoadFromDir(dir)
+	if err := r.LoadFromDir(dir); err != nil {
+		t.Fatal(err)
+	}
 
 	cats := r.ByCategory()
 	for _, key := range []string{"terminal", "ai", "tools", "remote"} {
@@ -61,7 +65,7 @@ func TestRegistryWithDefaults(t *testing.T) {
 // plugin loader and the setup dialog.
 func TestLoadPluginTOML_ClaudeCodeSetup_ParsesPromptsCWDAndDangerousToggle(t *testing.T) {
 	dir := t.TempDir()
-	if err := EnsureDefaultPlugins(dir); err != nil {
+	if _, err := EnsureDefaultPlugins(dir); err != nil {
 		t.Fatalf("EnsureDefaultPlugins: %v", err)
 	}
 
@@ -154,7 +158,7 @@ func TestBuiltinTerminal_NoRawKeysByDefault(t *testing.T) {
 // plugins that don't opt in stay off — no false positives from TOML parsing.
 func TestLoadPluginTOML_NoSetupFieldsForOtherPlugins_DefaultsAreOff(t *testing.T) {
 	dir := t.TempDir()
-	if err := EnsureDefaultPlugins(dir); err != nil {
+	if _, err := EnsureDefaultPlugins(dir); err != nil {
 		t.Fatalf("EnsureDefaultPlugins: %v", err)
 	}
 
@@ -266,7 +270,7 @@ func TestMatchError(t *testing.T) {
 
 func TestDefaultPluginTOMLFiles(t *testing.T) {
 	dir := t.TempDir()
-	if err := EnsureDefaultPlugins(dir); err != nil {
+	if _, err := EnsureDefaultPlugins(dir); err != nil {
 		t.Fatal(err)
 	}
 
@@ -322,14 +326,20 @@ func TestEnsureDefaultPluginsNoOverwrite(t *testing.T) {
 	dir := t.TempDir()
 
 	// Write defaults first
-	EnsureDefaultPlugins(dir)
+	if _, err := EnsureDefaultPlugins(dir); err != nil {
+		t.Fatal(err)
+	}
 
 	// Modify one file
-	customContent := []byte("# custom override\n[plugin]\nname = \"ssh\"\n[command]\ncmd = \"custom-ssh\"\n")
-	os.WriteFile(filepath.Join(dir, "ssh.toml"), customContent, 0644)
+	customContent := []byte("# custom override\n[plugin]\nname = \"ssh\"\nschema_version = 99\n[command]\ncmd = \"custom-ssh\"\n")
+	if err := os.WriteFile(filepath.Join(dir, "ssh.toml"), customContent, 0644); err != nil {
+		t.Fatal(err)
+	}
 
-	// Run again — should NOT overwrite
-	EnsureDefaultPlugins(dir)
+	// Run again — should NOT overwrite (schema_version >= embedded)
+	if _, err := EnsureDefaultPlugins(dir); err != nil {
+		t.Fatal(err)
+	}
 
 	data, _ := os.ReadFile(filepath.Join(dir, "ssh.toml"))
 	if string(data) != string(customContent) {

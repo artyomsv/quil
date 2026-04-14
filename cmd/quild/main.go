@@ -11,9 +11,23 @@ import (
 	"github.com/artyomsv/quil/internal/logger"
 )
 
-var version = "dev" // overridden at build time via -ldflags "-X main.version=..."
+var (
+	version       = "dev" // overridden at build time via -ldflags "-X main.version=..."
+	buildDevMode  string  // "true" to auto-enable dev mode (set via ldflags)
+	buildLogLevel string  // overrides config log level, e.g. "debug" (set via ldflags)
+)
 
 func main() {
+	// Build-time dev mode: auto-set QUIL_HOME before anything else.
+	if buildDevMode == "true" && os.Getenv("QUIL_HOME") == "" {
+		exe, err := os.Executable()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "dev build: cannot determine executable path: %v\n", err)
+			os.Exit(1)
+		}
+		os.Setenv("QUIL_HOME", filepath.Join(filepath.Dir(exe), ".quil"))
+	}
+
 	if len(os.Args) > 1 && os.Args[1] == "version" {
 		fmt.Println("quild v" + version)
 		return
@@ -34,27 +48,25 @@ func main() {
 		}
 	}
 
-	logFile := initLogging(cfg.Logging.Level)
+	logLevel := cfg.Logging.Level
+	if buildLogLevel != "" {
+		logLevel = buildLogLevel
+	}
+	logFile := initLogging(logLevel)
 	if logFile != nil {
 		defer logFile.Close()
 	}
 
-	if background {
-		devNull, err := os.Open(os.DevNull)
-		if err != nil {
-			log.Printf("warning: could not open %s: %v", os.DevNull, err)
-		} else {
-			os.Stdout = devNull
-			os.Stderr = devNull
-		}
-	}
-
 	d := daemon.New(cfg)
 	log.Printf("quild v%s starting...", version)
-	fmt.Println("quild — starting daemon...")
+	if !background {
+		fmt.Println("quild — starting daemon...")
+	}
 	if err := d.Start(); err != nil {
 		log.Printf("failed to start daemon: %v", err)
-		fmt.Fprintf(os.Stderr, "failed to start daemon: %v\n", err)
+		if !background {
+			fmt.Fprintf(os.Stderr, "failed to start daemon: %v\n", err)
+		}
 		os.Exit(1)
 	}
 
@@ -63,7 +75,9 @@ func main() {
 	defer removePIDFile()
 
 	log.Printf("quild ready (pid %d)", os.Getpid())
-	fmt.Printf("quild ready (pid %d). Press Ctrl+C to stop.\n", os.Getpid())
+	if !background {
+		fmt.Printf("quild ready (pid %d). Press Ctrl+C to stop.\n", os.Getpid())
+	}
 	d.Wait()
 }
 

@@ -4,13 +4,22 @@ set -euo pipefail
 # Docker-based development commands — no local Go required.
 
 GO_IMAGE="golang:1.25-alpine"
-PROJECT_DIR="E:/Projects/Stukans/Prototypes/calyx"
+PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd -W 2>/dev/null || pwd)"
 DOCKER_RUN="docker run --rm -v ${PROJECT_DIR}:/src -v quil-gomod:/go/pkg/mod -w //src ${GO_IMAGE}"
 
 case "${1:-help}" in
   build)
-    $DOCKER_RUN sh -c \
-      "VER=\$(cat VERSION) && LDFLAGS=\"-X main.version=\$VER\" && GOOS=windows GOARCH=amd64 go build -ldflags \"\$LDFLAGS\" -o quil.exe ./cmd/quil && GOOS=windows GOARCH=amd64 go build -ldflags \"\$LDFLAGS\" -o quild.exe ./cmd/quild"
+    $DOCKER_RUN sh -c "\
+      VER=\$(cat VERSION) && \
+      F=\"-s -w -X main.version=\$VER\" && \
+      F_DEV=\"\$F -X main.buildDevMode=true -X main.buildLogLevel=debug -X main.daemonBinary=quild-dev\" && \
+      F_DBG=\"\$F -X main.buildLogLevel=debug -X main.daemonBinary=quild-debug\" && \
+      GOOS=windows GOARCH=amd64 go build -ldflags \"\$F_DEV\" -o quil-dev.exe    ./cmd/quil  && \
+      GOOS=windows GOARCH=amd64 go build -ldflags \"\$F_DEV\" -o quild-dev.exe   ./cmd/quild && \
+      GOOS=windows GOARCH=amd64 go build -ldflags \"\$F_DBG\" -o quil-debug.exe  ./cmd/quil  && \
+      GOOS=windows GOARCH=amd64 go build -ldflags \"\$F_DBG\" -o quild-debug.exe ./cmd/quild && \
+      GOOS=windows GOARCH=amd64 go build -ldflags \"\$F\"     -o quil.exe        ./cmd/quil  && \
+      GOOS=windows GOARCH=amd64 go build -ldflags \"\$F\"     -o quild.exe       ./cmd/quild"
     ;;
 
   test)
@@ -48,7 +57,9 @@ case "${1:-help}" in
 
   clean)
     rm -f "$PROJECT_DIR/quil" "$PROJECT_DIR/quild" \
-          "$PROJECT_DIR/quil.exe" "$PROJECT_DIR/quild.exe"
+          "$PROJECT_DIR/quil.exe" "$PROJECT_DIR/quild.exe" \
+          "$PROJECT_DIR/quil-dev.exe" "$PROJECT_DIR/quild-dev.exe" \
+          "$PROJECT_DIR/quil-debug.exe" "$PROJECT_DIR/quild-debug.exe"
     rm -rf "$PROJECT_DIR/dist/"
     ;;
 
@@ -56,7 +67,7 @@ case "${1:-help}" in
     echo "Usage: ./dev.sh <command>"
     echo ""
     echo "Commands:"
-    echo "  build          Build TUI binaries (quil + quild)"
+    echo "  build          Build all variants: prod, dev, debug (6 binaries)"
     echo "  test           Run all tests"
     echo "  test-race      Run tests with race detector"
     echo "  vet            Run go vet"

@@ -140,6 +140,7 @@ const (
 	dialogTOMLEditor
 	dialogLogViewer
 	dialogDisclaimer
+	dialogPluginMigration
 )
 
 type Model struct {
@@ -212,21 +213,33 @@ type Model struct {
 	notesMouseDown       bool                   // true while a left-button drag is in progress inside the notes editor
 	notesAnchorRow       int                    // document row where a notes-editor drag began (resolved once on click)
 	notesAnchorCol       int                    // document col where a notes-editor drag began (resolved once on click)
+
+	// Plugin migration dialog state
+	migrationPlugins    []plugin.StalePlugin // stale plugins needing migration
+	migrationIdx        int                  // active plugin tab index
+	migrationLeft       *TextEditor          // user config (editable)
+	migrationRight      *TextEditor          // new default (read-only)
+	migrationRightFocus bool                 // true when right pane has keyboard focus
+	migrationError      string               // validation error message
 }
 
-func NewModel(client *ipc.Client, cfg config.Config, version string, registry *plugin.Registry) Model {
+func NewModel(client *ipc.Client, cfg config.Config, version string, registry *plugin.Registry, stalePlugins []plugin.StalePlugin) Model {
 	m := Model{
-		client:         client,
-		cfg:            cfg,
-		version:        version,
-		devMode:        os.Getenv("QUIL_HOME") != "",
-		pluginRegistry: registry,
-		instanceStore:  LoadInstances(config.InstancesPath()),
-		mcpHighlights:   make(map[string]bool),
-		mcpHighlightSeq: make(map[string]int),
-		notifications:   NewNotificationCenter(cfg.Notification.SidebarWidth, cfg.Notification.MaxEvents),
+		client:           client,
+		cfg:              cfg,
+		version:          version,
+		devMode:          os.Getenv("QUIL_HOME") != "",
+		pluginRegistry:   registry,
+		instanceStore:    LoadInstances(config.InstancesPath()),
+		mcpHighlights:    make(map[string]bool),
+		mcpHighlightSeq:  make(map[string]int),
+		notifications:    NewNotificationCenter(cfg.Notification.SidebarWidth, cfg.Notification.MaxEvents),
+		migrationPlugins: stalePlugins,
 	}
-	if cfg.UI.ShowDisclaimer && len(disclaimerTips) > 0 {
+	// Migration dialog takes priority over the disclaimer — it blocks
+	// startup until all stale plugins are resolved. Show disclaimer only
+	// when no migration is pending.
+	if len(stalePlugins) == 0 && cfg.UI.ShowDisclaimer && len(disclaimerTips) > 0 {
 		m.dialog = dialogDisclaimer
 		m.disclaimerTipIdx = rand.Intn(len(disclaimerTips))
 	}
@@ -281,6 +294,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.resizeTabs()
 			log.Print("first WindowSizeMsg — attaching to daemon")
 			return m, tea.Batch(m.resizeAllPanes(), m.attachToDaemon())
+		}
+
+		// Full-screen dialogs (migration, disclaimer) have no panes to
+		// resize via IPC, so apply immediately — debouncing would leave
+		// m.width stale during the delay, causing rendering artifacts
+		// (e.g., on window maximize).
+		if m.dialog == dialogPluginMigration || m.dialog == dialogDisclaimer {
+			m.width = msg.Width
+			m.height = msg.Height
+			return m, nil
 		}
 
 		// Debounce subsequent resizes
@@ -459,7 +482,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.PasteMsg:
-		if m.dialog == dialogTOMLEditor && m.tomlEditor != nil {
+		if m.dialog == dialogPluginMigration && m.migrationLeft != nil && !m.migrationRightFocus {
+			text := strings.ReplaceAll(msg.Content, "\r", "")
+			m.migrationLeft.InsertMultiLine(text)
+			m.migrationLeft.Dirty = true
+			return m, nil
+		} else if m.dialog == dialogTOMLEditor && m.tomlEditor != nil {
 			text := strings.ReplaceAll(msg.Content, "\r", "")
 			m.tomlEditor.InsertMultiLine(text)
 			m.tomlEditor.Dirty = true
@@ -485,7 +513,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case editorPasteMsg:
-		if m.dialog == dialogTOMLEditor && m.tomlEditor != nil {
+		if m.dialog == dialogPluginMigration && m.migrationLeft != nil && !m.migrationRightFocus {
+			text := strings.ReplaceAll(string(msg), "\r", "")
+			m.migrationLeft.InsertMultiLine(text)
+			m.migrationLeft.Dirty = true
+		} else if m.dialog == dialogTOMLEditor && m.tomlEditor != nil {
 			text := strings.ReplaceAll(string(msg), "\r", "")
 			m.tomlEditor.InsertMultiLine(text)
 			m.tomlEditor.Dirty = true
@@ -542,6 +574,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, tea.Tick(100*time.Millisecond, func(t time.Time) tea.Msg {
 				return spinnerTickMsg{paneID: id, frame: 1}
 			}))
+		}
+		// If stale plugins need migration, show the dialog now that workspace
+		// is loaded and the user can see their panes behind the dialog.
+		if len(m.migrationPlugins) > 0 && m.migrationLeft == nil {
+			m.openMigrationDialog()
 		}
 		return m, tea.Batch(cmds...)
 
@@ -965,6 +1002,8 @@ func (m Model) View() tea.View {
 		content = fmt.Sprintf("Terminal too small (%dx%d)\nMinimum: %dx%d",
 			m.width, m.height, minTermWidth, minTermHeight)
 		content = lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, content)
+	} else if m.dialog == dialogPluginMigration && m.migrationLeft != nil {
+		content = m.renderMigrationFullScreen()
 	} else if (m.dialog == dialogTOMLEditor || m.dialog == dialogLogViewer) && m.tomlEditor != nil {
 		// TOML editor and log viewer both take over the full screen
 		// (bypass dialog rendering). The log viewer reuses the same
@@ -1026,10 +1065,9 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 	kb := m.cfg.Keybindings
 
-	// Debug-level per-key trace. Off by default; flip [logging] level = "debug"
-	// in config.toml to see every modified key reaching Quil. Useful for
-	// diagnosing missing-key bugs (e.g., when a terminal emulator captures
-	// a binding before delivering it to the TUI).
+	// Per-key trace for modified keys. Flip [logging] level = "debug" in
+	// config.toml to see every modified key reaching Quil. Useful for
+	// diagnosing input-freeze and missing-key bugs.
 	if msg.Mod != 0 {
 		logger.Debug("handleKey: key=%q Mod=%v Code=%d Text=%q", key, msg.Mod, msg.Code, msg.Text)
 	}

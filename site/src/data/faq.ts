@@ -43,7 +43,11 @@ export const homeFaq: FaqItem[] = [
       "Yes. Plugins are single TOML files in ~/.quil/plugins/<name>.toml with sections for spawn, resume, keybindings, error handlers, and status lines. No compilation, no restart, hot-reload on save. See the plugin reference on GitHub or the /plugins page for a walk-through.",
   },
   {
-    question: "Is Quil free?",
+    question: "What happens when I upgrade Quil and plugin configs have changed?",
+    answer:
+      "Quil detects when your on-disk plugin TOML has a lower schema_version than the version shipped with the new binary. Instead of silently overwriting your config, it opens a full-screen side-by-side merge dialog at startup: your config on the left (editable), the new default on the right (read-only). Lines unique to your config are highlighted red, new lines in the default are highlighted green. Copy what you need from the right, edit on the left, then Ctrl+S to save. You can also press F5 to accept the new default entirely. The dialog blocks until resolved — no risk of running with a stale config.",
+  },
+  {
     answer:
       "Yes. Quil is open source under the MIT License. There's no hosted version, no paid tier, no telemetry. You self-host it on your own machine and it stores all state locally under ~/.quil/.",
   },

@@ -121,6 +121,21 @@ func (e *TextEditor) HandleKey(key string) (saved, closed bool, cmd tea.Cmd) {
 		e.ensureCursorVisible()
 		return false, false, nil
 
+	case "ctrl+c":
+		// Copy selection to clipboard (without deleting).
+		if e.Sel != nil && !e.Sel.IsEmpty() {
+			text := editorExtractText(e.Lines, e.Sel)
+			e.Sel = nil
+			cmd = func() tea.Msg {
+				if err := clipboard.Write(text); err != nil {
+					log.Printf("editor clipboard write: %v", err)
+				}
+				return nil
+			}
+		}
+		e.ensureCursorVisible()
+		return false, false, cmd
+
 	case "ctrl+x":
 		if e.ReadOnly {
 			e.ensureCursorVisible()
@@ -204,6 +219,26 @@ func (e *TextEditor) HandleKey(key string) (saved, closed bool, cmd tea.Cmd) {
 			e.deleteChar()
 		}
 		e.Dirty = true
+
+	case "ctrl+y":
+		if e.ReadOnly {
+			return false, false, nil
+		}
+		e.Sel = nil
+		if len(e.Lines) == 1 {
+			if e.Lines[0] != "" {
+				e.Lines[0] = ""
+				e.CursorCol = 0
+				e.Dirty = true
+			}
+		} else {
+			e.Lines = append(e.Lines[:e.CursorRow], e.Lines[e.CursorRow+1:]...)
+			if e.CursorRow >= len(e.Lines) {
+				e.CursorRow = len(e.Lines) - 1
+			}
+			e.clampCol()
+			e.Dirty = true
+		}
 
 	// 4. Movement keys — clear selection
 	case "up":

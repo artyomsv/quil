@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -281,6 +282,8 @@ func (m Model) handleDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.handleLogViewerKey(msg)
 	case dialogDisclaimer:
 		return m.handleDisclaimerKey(msg)
+	case dialogPluginMigration:
+		return m.handleMigrationKey(msg)
 	}
 	return m, nil
 }
@@ -1837,6 +1840,9 @@ func (m *Model) loadBrowseDirAndSelect(path, selectName string) error {
 	listing := make([]string, 0, len(dirs)+1)
 	if parent := filepath.Dir(abs); parent != abs {
 		listing = append(listing, "..")
+	} else if runtime.GOOS == "windows" {
+		// At a drive root (e.g., C:\) — show ".." that navigates to drive list.
+		listing = append(listing, "..")
 	}
 	listing = append(listing, dirs...)
 
@@ -1856,6 +1862,24 @@ func (m *Model) loadBrowseDirAndSelect(path, selectName string) error {
 		}
 	}
 	return nil
+}
+
+// loadDriveList populates the directory browser with available Windows drive
+// letters (e.g., "C:\", "D:\"). cwdBrowseDir is set to "" as a sentinel
+// meaning "showing drive list, not inside any directory."
+func (m *Model) loadDriveList() {
+	var drives []string
+	for c := 'A'; c <= 'Z'; c++ {
+		root := string(c) + `:\`
+		if _, err := os.Stat(root); err == nil {
+			drives = append(drives, root)
+		}
+	}
+	m.cwdBrowseDir = ""
+	m.cwdBrowseEntries = drives
+	m.cwdBrowseCursor = 0
+	m.cwdBrowseScroll = 0
+	m.cwdInputError = ""
 }
 
 // browserVisibleRows is the height of the directory browser viewport.
@@ -2035,7 +2059,16 @@ func (m Model) handleSetupCWDKey(p *plugin.PanePlugin, key string) (tea.Model, t
 		entry := m.cwdBrowseEntries[m.cwdBrowseCursor]
 		var target string
 		if entry == ".." {
-			target = filepath.Dir(m.cwdBrowseDir)
+			parent := filepath.Dir(m.cwdBrowseDir)
+			if parent == m.cwdBrowseDir && runtime.GOOS == "windows" {
+				// At drive root — ".." opens drive list
+				m.loadDriveList()
+				return m, nil
+			}
+			target = parent
+		} else if m.cwdBrowseDir == "" && runtime.GOOS == "windows" {
+			// Selecting a drive from the drive list
+			target = entry
 		} else {
 			target = filepath.Join(m.cwdBrowseDir, entry)
 		}
@@ -2047,9 +2080,16 @@ func (m Model) handleSetupCWDKey(p *plugin.PanePlugin, key string) (tea.Model, t
 		return m, nil
 
 	case "backspace", "left", "h":
+		if m.cwdBrowseDir == "" {
+			return m, nil // already at drive list (or no dir loaded)
+		}
 		parent := filepath.Dir(m.cwdBrowseDir)
 		if parent == m.cwdBrowseDir {
-			return m, nil // already at root
+			// At filesystem root — on Windows, show drive list.
+			if runtime.GOOS == "windows" {
+				m.loadDriveList()
+			}
+			return m, nil
 		}
 		// Remember which child we came from so we can highlight it in the
 		// parent listing — keeps the user oriented during quick up/down
@@ -2232,7 +2272,9 @@ func (m Model) renderCreatePaneSetupDialog() string {
 		// Current path on its own line so it's always visible regardless of
 		// where the cursor is in the listing.
 		path := m.cwdBrowseDir
-		if path == "" {
+		if path == "" && runtime.GOOS == "windows" && len(m.cwdBrowseEntries) > 0 {
+			path = dialogSubtle.Render("Select drive:")
+		} else if path == "" {
 			path = dialogSubtle.Render("(no directory loaded — daemon default will be used)")
 		} else {
 			path = dialogValStyle.Render(path)
@@ -2261,7 +2303,7 @@ func (m Model) renderCreatePaneSetupDialog() string {
 			}
 			name := entries[idx]
 			displayName := name
-			if name != ".." {
+			if name != ".." && !strings.HasSuffix(name, `\`) {
 				displayName = name + "/"
 			}
 			line := "    " + displayName

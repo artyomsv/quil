@@ -264,10 +264,11 @@ func searchBinary(p *PanePlugin, bin, home string) bool {
 // tomlPlugin is the on-disk representation of a plugin TOML file.
 type tomlPlugin struct {
 	Plugin struct {
-		Name        string `toml:"name"`
-		DisplayName string `toml:"display_name"`
-		Category    string `toml:"category"`
-		Description string `toml:"description"`
+		Name          string `toml:"name"`
+		DisplayName   string `toml:"display_name"`
+		Category      string `toml:"category"`
+		Description   string `toml:"description"`
+		SchemaVersion int    `toml:"schema_version"`
 	} `toml:"plugin"`
 	Command struct {
 		Cmd              string   `toml:"cmd"`

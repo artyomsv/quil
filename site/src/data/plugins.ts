@@ -34,13 +34,14 @@ export const plugins: PluginEntry[] = [
     description:
       "An AI session pane that runs Anthropic's Claude Code CLI. A setup dialog asks for the working directory (so project-specific `.claude/` context is preserved) and offers a `Dangerously skip permissions` checkbox for unattended runs. Sessions resume across daemon restarts.",
     spawnExample:
-      '# claude-code.toml — relevant fields\n[command]\ncmd = "claude"\nprompts_cwd = true\n\n[[command.toggles]]\nname = "skip"\nlabel = "Dangerously skip permissions"\nargs_when_on = ["--dangerously-skip-permissions"]\ndefault = false\n\n[persistence]\nstrategy = "preassign_id"\nresume_args = ["--continue"]',
+      '# claude-code.toml — relevant fields\n[plugin]\nname = "claude-code"\nschema_version = 2\n\n[command]\ncmd = "claude"\nprompts_cwd = true\n\n[[command.toggles]]\nname = "skip"\nlabel = "Dangerously skip permissions"\nargs_when_on = ["--dangerously-skip-permissions"]\ndefault = false\n\n[persistence]\nstrategy = "preassign_id"\nresume_args = ["--continue"]',
     features: [
-      "Setup dialog (Ctrl+N → AI → Claude Code) browses the filesystem starting from the active pane's OSC 7 working directory.",
+      "Setup dialog (Ctrl+N → AI → Claude Code) browses the filesystem starting from the active pane's OSC 7 working directory. On Windows, backspace at a drive root shows all available drives for cross-drive navigation.",
       "`Dangerously skip permissions` checkbox is off by default; when on, the toggle args persist across daemon restarts (the resume strategy now appends ResumeArgs to InstanceArgs instead of replacing).",
       "Auto-resume on daemon restart via `claude --continue`, with daemon-side `EvalSymlinks` re-resolution closing the spawn-time TOCTOU window.",
       "Idle-state detection surfaces to the notification center.",
       "Pairs with the Win32 clipboard image paste proxy: take a screenshot, press F8 in a Claude Code pane, and the file path is typed in for the AI to read.",
+      "Plugin auto-upgrade: when Quil ships a new schema version for claude-code.toml, a side-by-side merge dialog lets you reconcile your customizations with the new defaults on first launch.",
     ],
   },
   {
@@ -86,6 +87,7 @@ name = "webhook"
 display_name = "Webhook listener"
 category = "tools"
 description = "Receives incoming HTTPS webhooks via smee.io"
+schema_version = 1                # bump when TOML structure changes
 
 [command]
 cmd = "smee"

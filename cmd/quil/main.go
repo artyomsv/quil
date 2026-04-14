@@ -20,7 +20,12 @@ import (
 	"github.com/artyomsv/quil/internal/tui"
 )
 
-var version = "dev"
+var (
+	version       = "dev"
+	buildDevMode  string // "true" to auto-enable dev mode (set via ldflags)
+	buildLogLevel string // overrides config log level, e.g. "debug" (set via ldflags)
+	daemonBinary  string // daemon binary name, e.g. "quild-dev" (set via ldflags)
+)
 
 const (
 	daemonStartRetries  = 20
@@ -28,6 +33,18 @@ const (
 )
 
 func main() {
+	// Build-time dev mode: if baked in via ldflags, auto-set QUIL_HOME
+	// before anything else. The --dev flag and QUIL_HOME env var still
+	// take precedence (they're checked first).
+	if buildDevMode == "true" && os.Getenv("QUIL_HOME") == "" {
+		exe, err := os.Executable()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "dev build: cannot determine executable path: %v\n", err)
+			os.Exit(1)
+		}
+		os.Setenv("QUIL_HOME", filepath.Join(filepath.Dir(exe), ".quil"))
+	}
+
 	// Check for --dev flag before anything else.
 	// Sets QUIL_HOME to .quil/ next to the executable for isolated dev instances.
 	for i, arg := range os.Args[1:] {
@@ -82,15 +99,20 @@ func handleDaemon() {
 }
 
 func findDaemonBinary() string {
+	name := "quild"
+	if daemonBinary != "" {
+		name = daemonBinary
+	}
+
 	// 1. Check PATH first
-	if p, err := exec.LookPath("quild"); err == nil {
+	if p, err := exec.LookPath(name); err == nil {
 		return p
 	}
 
 	// 2. Check alongside the running executable
 	if exe, err := os.Executable(); err == nil {
 		dir := filepath.Dir(exe)
-		candidate := filepath.Join(dir, "quild")
+		candidate := filepath.Join(dir, name)
 		if runtime.GOOS == "windows" {
 			candidate += ".exe"
 		}
@@ -100,7 +122,7 @@ func findDaemonBinary() string {
 	}
 
 	// 3. Fallback — let OS try
-	return "quild"
+	return name
 }
 
 func startDaemon(quiet bool) {
@@ -190,9 +212,13 @@ func launchTUI() {
 		os.MkdirAll(logDir, 0700)
 	}
 	logPath := filepath.Join(logDir, "quil.log")
+	logLevel := cfg.Logging.Level
+	if buildLogLevel != "" {
+		logLevel = buildLogLevel
+	}
 	logFile, err := os.OpenFile(logPath, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o600)
 	if err == nil && logFile != nil {
-		logger.Init(cfg.Logging.Level, logFile)
+		logger.Init(logLevel, logFile)
 		defer logFile.Close()
 	}
 
@@ -231,6 +257,12 @@ func launchTUI() {
 	defer client.Close()
 	log.Print("connected to daemon")
 
+	// Ensure default plugins exist and detect stale ones needing migration
+	stalePlugins, ensureErr := plugin.EnsureDefaultPlugins(config.PluginsDir())
+	if ensureErr != nil {
+		log.Printf("warning: ensure default plugins: %v", ensureErr)
+	}
+
 	// Initialize plugin registry for the TUI (detection runs in the TUI process
 	// so the dialog knows which plugins are available)
 	reg := plugin.NewRegistry()
@@ -238,11 +270,14 @@ func launchTUI() {
 		log.Printf("warning: load plugins: %v", err)
 	}
 	reg.DetectAvailability()
+	if len(stalePlugins) > 0 {
+		log.Printf("detected %d stale plugin(s) needing migration", len(stalePlugins))
+	}
 
 	// Restore window size from previous session
 	restoreWindowSize()
 
-	model := tui.NewModel(client, cfg, version, reg)
+	model := tui.NewModel(client, cfg, version, reg, stalePlugins)
 	p := tea.NewProgram(model)
 	finalModel, err := p.Run()
 	if err != nil {

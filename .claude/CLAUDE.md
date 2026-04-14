@@ -58,6 +58,10 @@ Ldflags: `buildDevMode` (auto-sets `QUIL_HOME`), `buildLogLevel` (overrides conf
 
 Go module cache is persisted in a Docker volume (`quil-gomod`) for fast repeated builds.
 
+### Windows Icon
+
+`build` and `cross` embed the Quil brand mark as a Windows executable icon via `go-winres` (v0.3.3). Build assets live in `winres/` (icon PNGs + `winres.json` manifest with `RT_GROUP_ICON` + `RT_VERSION`). The build script installs `go-winres` inside the Docker container and generates `.syso` files in `cmd/quil/` and `cmd/quild/` before `go build`. The Go linker picks up `.syso` files automatically (Windows only — ignored on Linux/Darwin). Generated `.syso` files are gitignored.
+
 ## Release Process
 
 Single workflow (`release.yml`) with two jobs:

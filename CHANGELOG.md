@@ -7,8 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.4.2] - 2026-04-14
+### Added
 
+- **Windows executable icon** — `quil.exe` and `quild.exe` now embed the Quil brand mark (ember Q) as a Windows resource icon, visible in Explorer, taskbar, and Alt+Tab. Build assets live in `winres/` (icon PNGs + `winres.json` manifest). `go-winres` v0.3.3 generates `.syso` files at build time — both `build`, `cross`, and GoReleaser invoke it automatically. `RT_VERSION` metadata (ProductName, FileDescription, version) surfaces in Explorer's file properties dialog.
+
+### Fixed
+
+- **Pane CWD ignored on creation** — selecting a working directory in the pane setup dialog (Ctrl+N → CWD browser) had no effect; the spawned process always started in the daemon's own working directory. `spawnPane()` now calls `ptySession.SetCWD(pane.CWD)` before `Start()`. The redundant `SetCWD` calls in `respawnPanes()` were removed — `spawnPane` is now the single source of truth for CWD application.
+
+## [1.4.2] - 2026-04-14
 ## [1.4.1] - 2026-04-14
 
 ## [1.4.0] - 2026-04-14

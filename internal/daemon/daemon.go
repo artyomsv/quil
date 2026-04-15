@@ -22,6 +22,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
+	"github.com/artyomsv/quil/internal/logger"
 	"github.com/artyomsv/quil/internal/persist"
 	"github.com/artyomsv/quil/internal/plugin"
 	apty "github.com/artyomsv/quil/internal/pty"
@@ -692,6 +693,7 @@ func (d *Daemon) handleCreatePane(msg *ipc.Message) {
 	}
 
 	cwd := payload.CWD
+	logger.Debug("create pane: received payload cwd=%q type=%s", cwd, payload.Type)
 	// Validate the CWD before trusting it. The TUI dialog already validates
 	// what it sends, but the IPC socket is reachable by other clients (the
 	// MCP bridge, future tooling), and the daemon should be authoritative.

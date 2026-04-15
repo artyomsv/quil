@@ -213,6 +213,31 @@ func TestEnterSetupOrSplit_RoutingAndDefaults(t *testing.T) {
 			t.Error("toggle 'verbose' default should be true")
 		}
 	})
+
+	t.Run("cwd — lastSelectedCWD wins over home fallback", func(t *testing.T) {
+		remembered := t.TempDir()
+		m := &Model{lastSelectedCWD: remembered}
+		m.enterSetupOrSplit(pluginCWD)
+		if m.cwdBrowseDir != remembered {
+			t.Errorf("expected cwdBrowseDir = %q (from lastSelectedCWD), got %q", remembered, m.cwdBrowseDir)
+		}
+	})
+
+	t.Run("cwd — stale lastSelectedCWD cleared and falls through", func(t *testing.T) {
+		stale := filepath.Join(t.TempDir(), "gone")
+		m := &Model{lastSelectedCWD: stale}
+		m.enterSetupOrSplit(pluginCWD)
+		if m.lastSelectedCWD != "" {
+			t.Errorf("expected lastSelectedCWD cleared after stale dir, got %q", m.lastSelectedCWD)
+		}
+		// Should have fallen through to home directory
+		if m.cwdBrowseDir == "" {
+			t.Error("expected cwdBrowseDir to be set from home fallback after stale dir")
+		}
+		if m.cwdBrowseDir == stale {
+			t.Error("cwdBrowseDir should not be the stale directory")
+		}
+	})
 }
 
 // TestLoadBrowseDir verifies the directory browser populates correctly,

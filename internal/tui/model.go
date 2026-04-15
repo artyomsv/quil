@@ -186,6 +186,7 @@ type Model struct {
 	// for CreatePanePayload.CWD. The two fields exist separately so that the
 	// browser can navigate freely without dirtying the "to be sent" value
 	// until the user actually presses Continue.
+	lastSelectedCWD      string                 // remembers previous CWD selection across pane creations
 	selectedCWD          string                 // CWD chosen in dialogCreatePaneSetup (empty = daemon default)
 	cwdInputError        string                 // validation error shown under CWD input (empty = ok)
 	toggleStates         []bool                 // checkbox states; one entry per plugin's Toggles slice, same indexing

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-04-15
+
 ### Added
 
 - **Windows executable icon** — `quil.exe` and `quild.exe` now embed the Quil brand mark (ember Q) as a Windows resource icon, visible in Explorer, taskbar, and Alt+Tab. Build assets live in `winres/` (icon PNGs + `winres.json` manifest). `go-winres` v0.3.3 generates `.syso` files at build time — both `build`, `cross`, and GoReleaser invoke it automatically. `RT_VERSION` metadata (ProductName, FileDescription, version) surfaces in Explorer's file properties dialog.

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-04-15
+
 ### Added
 
 - **CWD memory in pane creation dialog** — the directory browser (Ctrl+N → setup) now remembers the last selected working directory within the TUI session. On the next pane creation, the browser starts from the previous selection instead of always defaulting to the Quil launch directory. Priority order: last selected CWD → active pane's OSC 7 CWD → user home. Stale directories (deleted between creations) are detected, cleared from memory, and the next candidate is tried automatically.

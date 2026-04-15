@@ -21,6 +21,7 @@ import (
 	"github.com/artyomsv/quil/internal/clipboard"
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
+	"github.com/artyomsv/quil/internal/logger"
 	"github.com/artyomsv/quil/internal/plugin"
 )
 
@@ -917,6 +918,9 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 	instanceName := m.selectedInstanceName
 	instanceArgs := m.selectedInstanceArgs
 	cwd := m.selectedCWD
+	if cwd != "" {
+		m.lastSelectedCWD = cwd
+	}
 	m.dialog = dialogNone
 	m.createPaneStep = 0
 	m.selectedCWD = ""
@@ -939,6 +943,8 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 
 	tabID := tab.ID
 	client := m.client
+
+	logger.Debug("create pane: sending IPC with cwd=%q type=%s instance=%s", cwd, pluginName, instanceName)
 
 	// Option 2: Replace current pane
 	if m.dialogCursor == 2 {
@@ -1758,29 +1764,30 @@ func (m *Model) enterSetupOrSplit(p *plugin.PanePlugin) tea.Cmd {
 		return nil
 	}
 
-	// Initialize the directory browser. Smart default: active pane's CWD
-	// (already tracked via OSC 7); fall back to the user's home directory.
+	// Initialize the directory browser. Try each candidate in priority order;
+	// stop at the first one that loads successfully.
 	if p.Command.PromptsCWD {
-		startDir := ""
+		candidates := []string{m.lastSelectedCWD}
 		if tab := m.activeTabModel(); tab != nil {
 			if pane := tab.ActivePaneModel(); pane != nil {
-				startDir = pane.CWD
+				candidates = append(candidates, pane.CWD)
 			}
 		}
-		if startDir == "" {
-			home, err := os.UserHomeDir()
-			if err != nil {
-				log.Printf("setup dialog: os.UserHomeDir: %v", err)
-			} else {
-				startDir = home
-			}
+		if home, err := os.UserHomeDir(); err == nil {
+			candidates = append(candidates, home)
 		}
-		if startDir != "" {
-			if err := m.loadBrowseDir(startDir); err != nil {
-				log.Printf("setup dialog: load browse dir %q: %v", startDir, err)
-				// loadBrowseDir leaves state empty on failure; submit will use ""
-				// (daemon default). Continue without blocking the dialog open.
+		for _, dir := range candidates {
+			if dir == "" {
+				continue
 			}
+			if err := m.loadBrowseDir(dir); err != nil {
+				log.Printf("setup dialog: load browse dir %q failed, trying next: %v", dir, err)
+				if dir == m.lastSelectedCWD {
+					m.lastSelectedCWD = "" // clear stale memory
+				}
+				continue
+			}
+			break
 		}
 	}
 
@@ -2138,6 +2145,7 @@ func (m Model) handleSetupCWDKey(p *plugin.PanePlugin, key string) (tea.Model, t
 func (m Model) submitSetupDialog(p *plugin.PanePlugin) (tea.Model, tea.Cmd) {
 	if p.Command.PromptsCWD {
 		m.selectedCWD = m.cwdBrowseDir
+		logger.Debug("setup dialog: captured cwd=%q from browser (plugin=%s)", m.selectedCWD, p.Name)
 	}
 	m.cwdInputError = ""
 

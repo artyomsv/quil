@@ -18,6 +18,7 @@ import (
 	"github.com/artyomsv/quil/internal/logger"
 	"github.com/artyomsv/quil/internal/plugin"
 	"github.com/artyomsv/quil/internal/tui"
+	versionpkg "github.com/artyomsv/quil/internal/version"
 )
 
 var (
@@ -33,6 +34,11 @@ const (
 )
 
 func main() {
+	// Publish this binary's version to the shared version package so
+	// subcommands (MCP bridge, handshake logic) and the TUI all read
+	// from one place.
+	versionpkg.SetCurrent(version)
+
 	// Build-time dev mode: if baked in via ldflags, auto-set QUIL_HOME
 	// before anything else. The --dev flag and QUIL_HOME env var still
 	// take precedence (they're checked first).
@@ -254,8 +260,15 @@ func launchTUI() {
 		fmt.Fprintf(os.Stderr, "cannot connect to daemon: %v\nRun 'quil daemon start' first.\n", err)
 		os.Exit(1)
 	}
-	defer client.Close()
 	log.Print("connected to daemon")
+
+	// Version gate: compare TUI and daemon versions before attaching.
+	// gateVersionCheck either returns the same client (match / skipped),
+	// returns a NEW client connected to a freshly-spawned daemon (after
+	// user-confirmed upgrade restart), or exits the process outright
+	// (TUI older than daemon — blocking dialog path).
+	client = gateVersionCheck(client, sockPath)
+	defer client.Close()
 
 	// Ensure default plugins exist and detect stale ones needing migration
 	stalePlugins, ensureErr := plugin.EnsureDefaultPlugins(config.PluginsDir())

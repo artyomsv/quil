@@ -9,6 +9,7 @@ import (
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/daemon"
 	"github.com/artyomsv/quil/internal/logger"
+	versionpkg "github.com/artyomsv/quil/internal/version"
 )
 
 var (
@@ -18,6 +19,10 @@ var (
 )
 
 func main() {
+	// Publish this binary's version to the shared version package so the
+	// IPC MsgVersionReq handler can report it back to connecting clients.
+	versionpkg.SetCurrent(version)
+
 	// Build-time dev mode: auto-set QUIL_HOME before anything else.
 	if buildDevMode == "true" && os.Getenv("QUIL_HOME") == "" {
 		exe, err := os.Executable()

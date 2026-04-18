@@ -72,6 +72,13 @@ const (
 	MsgGetNotificationsResp   = "get_notifications_resp"   // MCP response
 	MsgWatchNotificationsReq  = "watch_notifications_req"  // MCP request (blocking)
 	MsgWatchNotificationsResp = "watch_notifications_resp" // MCP response
+
+	// Version negotiation — TUI asks daemon for its version string before
+	// attaching so mismatches can be surfaced as a blocking dialog or an
+	// auto-restart prompt. A daemon built before this pair existed will
+	// silently drop MsgVersionReq; the client handles the timeout.
+	MsgVersionReq  = "version_req"  // client → daemon (empty payload)
+	MsgVersionResp = "version_resp" // daemon → client (VersionRespPayload)
 )
 
 // Message is the wire format for IPC communication.
@@ -298,6 +305,12 @@ type WatchNotificationsReqPayload struct {
 type WatchNotificationsRespPayload struct {
 	Event   *PaneEventPayload `json:"event,omitempty"`
 	Timeout bool              `json:"timeout"`
+}
+
+// VersionRespPayload carries the daemon's version string. MsgVersionReq
+// has no payload — the request is just "what version are you running?".
+type VersionRespPayload struct {
+	Version string `json:"version"`
 }
 
 // NewMessage creates a Message with a typed payload.

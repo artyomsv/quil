@@ -28,6 +28,7 @@ import (
 	apty "github.com/artyomsv/quil/internal/pty"
 	"github.com/artyomsv/quil/internal/ringbuf"
 	"github.com/artyomsv/quil/internal/shellinit"
+	"github.com/artyomsv/quil/internal/version"
 )
 
 // oscBellRe matches OSC sequences terminated by BEL (\x07), e.g., \x1b]0;title\x07.
@@ -493,6 +494,13 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		d.handleGetNotificationsReq(conn, msg)
 	case ipc.MsgWatchNotificationsReq:
 		d.handleWatchNotificationsReq(conn, msg)
+
+	// Version negotiation — reply with the running daemon's version so the
+	// client can gate attach on matching binaries.
+	case ipc.MsgVersionReq:
+		respondTo(conn, msg.ID, ipc.MsgVersionResp, ipc.VersionRespPayload{
+			Version: version.Current(),
+		})
 	}
 }
 

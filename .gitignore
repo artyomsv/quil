@@ -39,3 +39,6 @@ Thumbs.db
 
 # Local scratch directory used for ad-hoc API responses, payloads, etc.
 /.scratch/
+
+# Superpowers brainstorm runtime scratch (plugin state, server.pid, etc.)
+/.superpowers/

@@ -89,21 +89,14 @@ func (p *PaneModel) ResizeVT(cols, rows int) {
 	if cols <= 0 || rows <= 0 || (cols == p.vt.Width() && rows == p.vt.Height()) {
 		return
 	}
-	// Create fresh emulator at new dimensions and replay buffered output
-	em := vt.NewSafeEmulator(cols, rows)
-	em.SetScrollbackSize(10000)
-	em.SetCallbacks(vt.Callbacks{
-		CursorVisibility: func(visible bool) {
-			p.cursorVisible = visible
-		},
-		WorkingDirectory: func(dir string) {
-			p.CWD = parseOSC7Path(dir)
-		},
-	})
-	if buf := p.rawBuf.Bytes(); len(buf) > 0 {
-		em.Write(buf)
-	}
-	p.vt = em
+	// Resize the emulator in place instead of rebuilding it from the raw PTY
+	// ring buffer. Historical bytes from TUI apps (Claude Code, vim, htop,
+	// fzf) contain CUP / scroll-region sequences laid out for the previous
+	// width; replaying them into a freshly-sized emulator stamps narrow-
+	// column ghost rows into the new screen. The x/vt library's Resize
+	// preserves the current screen state, and the PTY child will redraw via
+	// SIGWINCH (triggered separately by MsgResizePane) into the new size.
+	p.vt.Resize(cols, rows)
 }
 
 func (p *PaneModel) ScrollUp(lines int) {

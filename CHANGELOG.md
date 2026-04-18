@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **claude-code: `--enable-auto-mode` toggle** — the pane setup dialog (Ctrl+N → AI Tools → Claude Code) now offers Claude Code's safer auto-mode alongside the existing `--dangerously-skip-permissions` option. Both toggles share a new `permission_mode` mutual-exclusion group: enabling one automatically disables the other, and "neither" remains valid (Claude's default interactive confirmations). claude-code's plugin schema is bumped to v3 — users with edited `~/.quil/plugins/claude-code.toml` get the standard side-by-side migration dialog on next launch.
+- **Plugin toggles: mutually-exclusive groups** — `[[command.toggles]]` entries now accept an optional `group = "name"` field. Toggles that share a non-empty group value render as radio buttons (`( ) / (•)`) instead of checkboxes (`[ ] / [x]`); enabling one disables the others in the group. Empty `group` keeps the existing independent-checkbox behaviour. Documented in `docs/plugin-reference.md`.
+- **Event-loop perf instrumentation** — new `internal/tui/perf.go` measures per-Update-message cost, View duration, pane-output throughput, and key-backlog depth on the Bubble Tea program goroutine. Emits one aggregate Info line every 5 s and per-event Debug lines above tunable thresholds (50 ms Update, 30 ms View, 10 ms pane-output, 20 msgs key backlog). Zero overhead when stats are disabled (nil-receiver guard on every method).
+
+### Fixed
+
+- **Pane rendering corruption after focus toggle** — toggling focus mode (Ctrl+E) on a wide screen left narrow-column ghost rows from the pre-focus layout in TUI panes (most visible in claude-code's tool-output tree). Root cause: `PaneModel.ResizeVT` was rebuilding the VT emulator from scratch on every resize and replaying the entire raw-PTY ring buffer — including cursor-positioning sequences laid out for the previous width. The replay now uses the `x/vt` library's in-place `Resize`, which preserves the current cell grid; the PTY child redraws via SIGWINCH (already wired through `MsgResizePane`) into the resized emulator. Same fix benefits any TUI pane that resizes (vim, htop, fzf, less).
+- **Shift+Tab silently swallowed in claude-code panes** — pressing Shift+Tab to cycle Claude Code modes (auto-accept / plan / etc.) had no effect since selection support landed. The pane-input router was matching every `shift+*` key with `strings.HasPrefix` and routing it into the scrollback selection handler, whose `default:` branch silently dropped any non-arrow shift combo. The guard is now a precise allow-list (`shift+arrow`, `ctrl+shift+arrow`, `ctrl+alt+shift+arrow`); everything else falls through to plugin raw-key handling and PTY forwarding. Locked in via `TestIsSelectionExtendKey`.
+
 ## [1.6.0] - 2026-04-15
 
 ### Added

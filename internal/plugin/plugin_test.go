@@ -59,11 +59,12 @@ func TestRegistryWithDefaults(t *testing.T) {
 	}
 }
 
-// TestLoadPluginTOML_ClaudeCodeSetup_ParsesPromptsCWDAndDangerousToggle verifies
-// the new prompts_cwd and [[command.toggles]] opt-ins parse correctly from the
-// embedded claude-code default TOML. This locks in the contract between the
-// plugin loader and the setup dialog.
-func TestLoadPluginTOML_ClaudeCodeSetup_ParsesPromptsCWDAndDangerousToggle(t *testing.T) {
+// TestLoadPluginTOML_ClaudeCodeSetup_ParsesPromptsCWDAndPermissionToggles verifies
+// the prompts_cwd and [[command.toggles]] opt-ins parse correctly from the
+// embedded claude-code default TOML, including the mutually-exclusive
+// permission_mode group that guards the user from enabling both
+// --dangerously-skip-permissions and --enable-auto-mode simultaneously.
+func TestLoadPluginTOML_ClaudeCodeSetup_ParsesPromptsCWDAndPermissionToggles(t *testing.T) {
 	dir := t.TempDir()
 	if _, err := EnsureDefaultPlugins(dir); err != nil {
 		t.Fatalf("EnsureDefaultPlugins: %v", err)
@@ -81,21 +82,47 @@ func TestLoadPluginTOML_ClaudeCodeSetup_ParsesPromptsCWDAndDangerousToggle(t *te
 	if !p.Command.PromptsCWD {
 		t.Error("expected PromptsCWD = true on claude-code plugin")
 	}
-	if len(p.Command.Toggles) != 1 {
-		t.Fatalf("expected 1 toggle on claude-code, got %d", len(p.Command.Toggles))
+	if len(p.Command.Toggles) != 2 {
+		t.Fatalf("expected 2 toggles on claude-code, got %d", len(p.Command.Toggles))
 	}
-	tg := p.Command.Toggles[0]
-	if tg.Name != "dangerously_skip_permissions" {
-		t.Errorf("expected toggle name 'dangerously_skip_permissions', got %q", tg.Name)
+
+	byName := map[string]Toggle{}
+	for _, tg := range p.Command.Toggles {
+		byName[tg.Name] = tg
 	}
-	if tg.Default != false {
-		t.Error("expected dangerous toggle default = false")
+
+	skip, ok := byName["dangerously_skip_permissions"]
+	if !ok {
+		t.Fatalf("missing dangerously_skip_permissions toggle")
 	}
-	if len(tg.ArgsWhenOn) != 1 || tg.ArgsWhenOn[0] != "--dangerously-skip-permissions" {
-		t.Errorf("expected ArgsWhenOn = [--dangerously-skip-permissions], got %v", tg.ArgsWhenOn)
+	if skip.Default != false {
+		t.Error("dangerously_skip_permissions default should be false")
 	}
-	if tg.Label == "" {
-		t.Error("toggle label should not be empty")
+	if len(skip.ArgsWhenOn) != 1 || skip.ArgsWhenOn[0] != "--dangerously-skip-permissions" {
+		t.Errorf("skip.ArgsWhenOn = %v, want [--dangerously-skip-permissions]", skip.ArgsWhenOn)
+	}
+	if skip.Group != "permission_mode" {
+		t.Errorf("skip.Group = %q, want permission_mode", skip.Group)
+	}
+	if skip.Label == "" {
+		t.Error("skip.Label should not be empty")
+	}
+
+	auto, ok := byName["enable_auto_mode"]
+	if !ok {
+		t.Fatalf("missing enable_auto_mode toggle")
+	}
+	if auto.Default != false {
+		t.Error("enable_auto_mode default should be false")
+	}
+	if len(auto.ArgsWhenOn) != 1 || auto.ArgsWhenOn[0] != "--enable-auto-mode" {
+		t.Errorf("auto.ArgsWhenOn = %v, want [--enable-auto-mode]", auto.ArgsWhenOn)
+	}
+	if auto.Group != "permission_mode" {
+		t.Errorf("auto.Group = %q, want permission_mode", auto.Group)
+	}
+	if auto.Label == "" {
+		t.Error("auto.Label should not be empty")
 	}
 }
 

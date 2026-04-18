@@ -130,22 +130,41 @@ These expanded args become the pane's `InstanceArgs` — they override the plugi
 
 ### Runtime Toggles — `[[command.toggles]]`
 
-Declare boolean checkboxes shown in the pane setup dialog. Each toggle has args that are appended to the spawn command when the user enables the checkbox. Toggle state is **per pane**, captured at creation time, and persisted across daemon restarts via the pane's `InstanceArgs`.
+Declare boolean flags shown in the pane setup dialog. Each toggle has args that are appended to the spawn command when the user enables it. Toggle state is **per pane**, captured at creation time, and persisted across daemon restarts via the pane's `InstanceArgs`.
+
+By default toggles render as independent checkboxes. Assigning a shared `group` value to two or more toggles turns them into a mutually-exclusive set — rendered as radio buttons in the dialog, enabling one automatically disables the others in the group. All members of the group may still be OFF (a valid "pick none" state).
 
 ```toml
+# Independent checkbox
+[[command.toggles]]
+name = "verbose"
+label = "Verbose output"
+args_when_on = ["-v"]
+default = false
+
+# Mutually-exclusive group: selecting one disables the other.
 [[command.toggles]]
 name = "dangerously_skip_permissions"
 label = "Dangerously skip permissions (unattended mode — no confirmations)"
 args_when_on = ["--dangerously-skip-permissions"]
 default = false
+group = "permission_mode"
+
+[[command.toggles]]
+name = "enable_auto_mode"
+label = "Enable auto mode (safer alternative to skipping permissions)"
+args_when_on = ["--enable-auto-mode"]
+default = false
+group = "permission_mode"
 ```
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `name` | string | **Yes** | — | Stable identifier for the toggle (used for future addressability). |
-| `label` | string | **Yes** | — | Text shown next to the checkbox in the setup dialog. |
-| `args_when_on` | string[] | No | `[]` | Arguments appended to the spawn command when the user checks this toggle. Combined with any other enabled toggles' args, then appended after `InstanceArgs`. |
-| `default` | bool | No | `false` | Initial checked state in the dialog. Users who always want a toggle on can set this to `true`. |
+| `label` | string | **Yes** | — | Text shown next to the control in the setup dialog. |
+| `args_when_on` | string[] | No | `[]` | Arguments appended to the spawn command when the user enables this toggle. Combined with any other enabled toggles' args, then appended after `InstanceArgs`. |
+| `default` | bool | No | `false` | Initial state in the dialog. Users who always want a toggle on can set this to `true`. Within a group, if multiple members declare `default = true` only the last one in declaration order stays on — the invariant is preserved from the first render. |
+| `group` | string | No | `""` | Non-empty value marks this toggle as part of a mutually-exclusive radio group. Toggles that share the same `group` value cannot be enabled simultaneously; enabling one disables the others. Empty string = independent checkbox (default). |
 
 If a plugin declares any `toggles` (or sets `prompts_cwd = true`), the setup dialog is shown automatically after plugin selection. The dialog is skipped entirely when neither opt-in is set — existing plugins (terminal, ssh, stripe) are unaffected.
 

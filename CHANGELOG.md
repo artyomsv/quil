@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-04-18
+
 ### Added
 
 - **claude-code: `--enable-auto-mode` toggle** — the pane setup dialog (Ctrl+N → AI Tools → Claude Code) now offers Claude Code's safer auto-mode alongside the existing `--dangerously-skip-permissions` option. Both toggles share a new `permission_mode` mutual-exclusion group: enabling one automatically disables the other, and "neither" remains valid (Claude's default interactive confirmations). claude-code's plugin schema is bumped to v3 — users with edited `~/.quil/plugins/claude-code.toml` get the standard side-by-side migration dialog on next launch.

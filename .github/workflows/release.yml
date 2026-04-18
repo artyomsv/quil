@@ -40,11 +40,14 @@ jobs:
           LAST_TAG="v${CURRENT}"
           echo "current=${CURRENT}" >> $GITHUB_OUTPUT
 
-          # Check if tag exists; if not, use all history
+          # Scan BOTH subject (%s) and body (%b) so squash-merged PRs whose
+          # subject was defaulted from the branch name (`Feat/foo-bar`) still
+          # get classified by the proper `feat(scope):` lines in the body.
+          # `--oneline` would have stripped bodies and missed those.
           if git rev-parse "$LAST_TAG" >/dev/null 2>&1; then
-            COMMITS=$(git log "${LAST_TAG}..HEAD" --oneline)
+            COMMITS=$(git log "${LAST_TAG}..HEAD" --format='%s%n%b%n---')
           else
-            COMMITS=$(git log --oneline)
+            COMMITS=$(git log --format='%s%n%b%n---')
           fi
 
           echo "--- Commits since ${LAST_TAG} ---"
@@ -57,12 +60,18 @@ jobs:
             exit 0
           fi
 
-          # Determine bump type from conventional commits
-          if echo "$COMMITS" | grep -qE '(feat!|fix!|refactor!|BREAKING CHANGE)'; then
+          # Determine bump type from conventional commits.
+          # - `-i` for case-insensitivity: GitHub's squash-merge auto-capitalizes
+          #   branch-name-derived subjects (`feat/x` -> `Feat/x`).
+          # - `\b` word boundary: prevents `defeated` / `unfeatured` from
+          #   accidentally matching `feat`.
+          # - `[(:/]`: accepts `feat:`, `feat(scope):`, AND `feat/branch-name`
+          #   (the last appears when the squash subject came from the branch).
+          if echo "$COMMITS" | grep -qiE '\b(feat!|fix!|refactor!)|BREAKING CHANGE'; then
             BUMP="major"
-          elif echo "$COMMITS" | grep -qE 'feat(\(|:)'; then
+          elif echo "$COMMITS" | grep -qiE '\bfeat[(:/]'; then
             BUMP="minor"
-          elif echo "$COMMITS" | grep -qE '(fix|perf)(\(|:)'; then
+          elif echo "$COMMITS" | grep -qiE '\b(fix|perf)[(:/]'; then
             BUMP="patch"
           else
             echo "::notice::No version-bumping commits found (only chore/docs/test/ci) — skipping release"

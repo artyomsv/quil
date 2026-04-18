@@ -388,6 +388,44 @@ func TestKeyToBytes_ShiftTab_ReturnsCSI_Z(t *testing.T) {
 	}
 }
 
+// TestIsSelectionExtendKey guards the guard: the pane-input router calls
+// isSelectionExtendKey to decide whether to route a key into the scrollback
+// selection handler, and any false positive here silently swallows keys that
+// must reach the PTY (shift+tab for Claude Code mode toggle, shift+enter for
+// multiline input, shift+Fn for TUI shortcuts).
+func TestIsSelectionExtendKey(t *testing.T) {
+	selection := []string{
+		"shift+left", "shift+right", "shift+up", "shift+down",
+		"ctrl+shift+left", "ctrl+shift+right",
+		"ctrl+alt+shift+left", "ctrl+alt+shift+right",
+	}
+	mustForward := []string{
+		"shift+tab",
+		"shift+enter",
+		"shift+home",
+		"shift+end",
+		"shift+f1",
+		"shift+pgup",
+		"shift+pgdown",
+		"ctrl+shift+tab",
+		"ctrl+shift+up", // handler has no case for this — would fall into default and clear selection
+		"ctrl+shift+down",
+		"tab",
+		"enter",
+		"ctrl+v",
+	}
+	for _, k := range selection {
+		if !isSelectionExtendKey(k) {
+			t.Errorf("isSelectionExtendKey(%q) = false, want true (arrow-based selection key)", k)
+		}
+	}
+	for _, k := range mustForward {
+		if isSelectionExtendKey(k) {
+			t.Errorf("isSelectionExtendKey(%q) = true, want false (must reach PTY / other handler)", k)
+		}
+	}
+}
+
 // TestTryPluginRawKey verifies that tryPluginRawKey forwards keys declared in
 // a plugin's RawKeys list and returns nil for any other key. The active pane's
 // type drives the lookup.
@@ -560,6 +598,198 @@ func TestSubmitSetupDialog_AppendsToggleArgsAndCommitsCWD(t *testing.T) {
 			t.Errorf("createPaneStep = %d, want 3", m.createPaneStep)
 		}
 	})
+}
+
+// TestEnforceToggleGroups covers the mutual-exclusion invariant that
+// backs the radio-button UX for toggles sharing a non-empty Group value.
+// Ungrouped toggles must never be touched; grouped toggles must collapse
+// to at most one ON member per group.
+func TestEnforceToggleGroups(t *testing.T) {
+	t.Run("ungrouped toggles untouched when winner is in a group", func(t *testing.T) {
+		toggles := []plugin.Toggle{
+			{Name: "skip", Group: "permission_mode"},
+			{Name: "auto", Group: "permission_mode"},
+			{Name: "verbose", Group: ""},
+		}
+		states := []bool{true, false, true}
+		enforceToggleGroups(toggles, states, 0)
+		want := []bool{true, false, true} // verbose (ungrouped) untouched
+		if !reflect.DeepEqual(states, want) {
+			t.Errorf("states = %v, want %v", states, want)
+		}
+	})
+
+	t.Run("winner turns off other group members", func(t *testing.T) {
+		toggles := []plugin.Toggle{
+			{Name: "skip", Group: "permission_mode"},
+			{Name: "auto", Group: "permission_mode"},
+		}
+		states := []bool{true, true} // invalid pre-state; winner = auto (idx 1)
+		enforceToggleGroups(toggles, states, 1)
+		want := []bool{false, true}
+		if !reflect.DeepEqual(states, want) {
+			t.Errorf("states = %v, want %v", states, want)
+		}
+	})
+
+	t.Run("winner with empty group is a no-op", func(t *testing.T) {
+		toggles := []plugin.Toggle{
+			{Name: "a", Group: ""},
+			{Name: "b", Group: "grp"},
+		}
+		states := []bool{true, true}
+		enforceToggleGroups(toggles, states, 0) // winner is ungrouped
+		want := []bool{true, true}
+		if !reflect.DeepEqual(states, want) {
+			t.Errorf("states = %v, want %v", states, want)
+		}
+	})
+
+	t.Run("no explicit winner — last true per group wins", func(t *testing.T) {
+		toggles := []plugin.Toggle{
+			{Name: "first", Group: "g"},
+			{Name: "second", Group: "g"},
+			{Name: "third", Group: "g"},
+		}
+		states := []bool{true, false, true} // first and third both claim
+		enforceToggleGroups(toggles, states, -1)
+		want := []bool{false, false, true} // third (last declared) wins
+		if !reflect.DeepEqual(states, want) {
+			t.Errorf("states = %v, want %v", states, want)
+		}
+	})
+
+	t.Run("multiple groups are independent", func(t *testing.T) {
+		toggles := []plugin.Toggle{
+			{Name: "a1", Group: "A"},
+			{Name: "a2", Group: "A"},
+			{Name: "b1", Group: "B"},
+			{Name: "b2", Group: "B"},
+		}
+		states := []bool{true, false, false, true}
+		enforceToggleGroups(toggles, states, 0) // winner in A, B untouched
+		want := []bool{true, false, false, true}
+		if !reflect.DeepEqual(states, want) {
+			t.Errorf("states = %v, want %v", states, want)
+		}
+	})
+
+	t.Run("safe with empty / short inputs", func(t *testing.T) {
+		// Should not panic with any of these.
+		enforceToggleGroups(nil, nil, -1)
+		enforceToggleGroups(nil, []bool{true}, 0)
+		enforceToggleGroups([]plugin.Toggle{{Name: "x", Group: "g"}}, nil, 0)
+		// Winner index out of range — stays a no-op.
+		s := []bool{true}
+		enforceToggleGroups([]plugin.Toggle{{Name: "x", Group: "g"}}, s, 99)
+		if !s[0] {
+			t.Error("state should not be mutated when winner index is out of range")
+		}
+	})
+}
+
+// TestEnterSetupOrSplit_PermissionGroup_SingleDefaultHonoured guards the
+// group invariant on dialog open: even if TOML declares both members of a
+// group with default = true (misconfiguration), only one is ON initially.
+func TestEnterSetupOrSplit_PermissionGroup_SingleDefaultHonoured(t *testing.T) {
+	p := &plugin.PanePlugin{
+		Name: "claude-code",
+		Command: plugin.CommandConfig{
+			Toggles: []plugin.Toggle{
+				{Name: "skip", Default: true, ArgsWhenOn: []string{"--dangerously-skip-permissions"}, Group: "permission_mode"},
+				{Name: "auto", Default: true, ArgsWhenOn: []string{"--enable-auto-mode"}, Group: "permission_mode"},
+			},
+		},
+	}
+	m := &Model{}
+	m.enterSetupOrSplit(p)
+	if len(m.toggleStates) != 2 {
+		t.Fatalf("expected 2 toggle states, got %d", len(m.toggleStates))
+	}
+	onCount := 0
+	for _, s := range m.toggleStates {
+		if s {
+			onCount++
+		}
+	}
+	if onCount > 1 {
+		t.Errorf("expected at most 1 toggle ON in permission_mode group, got %d", onCount)
+	}
+	// Last-declared default-true wins: "auto".
+	if !m.toggleStates[1] || m.toggleStates[0] {
+		t.Errorf("expected toggleStates = [false, true] (last-declared wins), got %v", m.toggleStates)
+	}
+}
+
+// TestHandleCreatePaneSetupKey_GroupMutualExclusion drives the dialog FSM
+// to confirm that toggling one member of a group ON forces the other
+// member OFF, and that pressing Space again to toggle OFF leaves the
+// group fully unselected (a valid state).
+func TestHandleCreatePaneSetupKey_GroupMutualExclusion(t *testing.T) {
+	dir := t.TempDir()
+	tomlPath := filepath.Join(dir, "claude-code.toml")
+	content := `[plugin]
+name = "claude-code"
+display_name = "Claude Code"
+category = "ai"
+
+[command]
+cmd = "true"
+
+[[command.toggles]]
+name = "skip"
+label = "Skip permissions"
+args_when_on = ["--dangerously-skip-permissions"]
+default = false
+group = "permission_mode"
+
+[[command.toggles]]
+name = "auto"
+label = "Enable auto mode"
+args_when_on = ["--enable-auto-mode"]
+default = false
+group = "permission_mode"
+`
+	if err := os.WriteFile(tomlPath, []byte(content), 0644); err != nil {
+		t.Fatalf("write toml: %v", err)
+	}
+	r := plugin.NewRegistry()
+	if err := r.LoadFromDir(dir); err != nil {
+		t.Fatalf("LoadFromDir: %v", err)
+	}
+
+	m := Model{
+		pluginRegistry:   r,
+		selectedPlugin:   "claude-code",
+		dialog:           dialogCreatePaneSetup,
+		toggleStates:     []bool{false, false},
+		setupFieldCursor: 0, // first toggle (no CWD field in this synthetic plugin)
+	}
+
+	space := tea.KeyPressMsg{Code: ' ', Text: " "}
+
+	// Turn first toggle ON.
+	next, _ := m.handleCreatePaneSetupKey(space)
+	m = next.(Model)
+	if !(m.toggleStates[0] && !m.toggleStates[1]) {
+		t.Fatalf("after enabling skip: states = %v, want [true, false]", m.toggleStates)
+	}
+
+	// Move cursor to second toggle and turn it ON — first must flip OFF.
+	m.setupFieldCursor = 1
+	next, _ = m.handleCreatePaneSetupKey(space)
+	m = next.(Model)
+	if !(!m.toggleStates[0] && m.toggleStates[1]) {
+		t.Errorf("after enabling auto: states = %v, want [false, true] (skip should auto-disable)", m.toggleStates)
+	}
+
+	// Pressing Space again on the second toggle should turn it OFF —
+	// neither is selected now, which is a valid state ("pick neither").
+	next, _ = m.handleCreatePaneSetupKey(space)
+	m = next.(Model)
+	if m.toggleStates[0] || m.toggleStates[1] {
+		t.Errorf("after turning auto off: states = %v, want [false, false]", m.toggleStates)
+	}
 }
 
 // TestEnterSetupOrSplit_ClearsLeftoverState_OnNoSetupBranch guards the Q2 fix:

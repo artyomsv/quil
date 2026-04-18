@@ -290,6 +290,7 @@ type tomlPlugin struct {
 			Label      string   `toml:"label"`
 			ArgsWhenOn []string `toml:"args_when_on"`
 			Default    bool     `toml:"default"`
+			Group      string   `toml:"group"`
 		} `toml:"toggles"`
 		RawKeys []string `toml:"raw_keys"`
 	} `toml:"command"`
@@ -408,6 +409,7 @@ func loadPluginTOML(path string) (*PanePlugin, error) {
 			Label:      t.Label,
 			ArgsWhenOn: append([]string{}, t.ArgsWhenOn...),
 			Default:    t.Default,
+			Group:      t.Group,
 		})
 	}
 

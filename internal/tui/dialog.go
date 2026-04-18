@@ -1791,11 +1791,17 @@ func (m *Model) enterSetupOrSplit(p *plugin.PanePlugin) tea.Cmd {
 		}
 	}
 
-	// Initialize toggle states from defaults.
+	// Initialize toggle states from defaults. For mutually-exclusive groups
+	// (toggles that share a non-empty Group value), at most one member can
+	// default to true — if multiple are declared with default = true, the
+	// last one in declaration order wins and earlier members are forced off.
+	// This preserves the group invariant (at most one on) from the very
+	// first render of the dialog.
 	m.toggleStates = make([]bool, len(p.Command.Toggles))
 	for i, t := range p.Command.Toggles {
 		m.toggleStates[i] = t.Default
 	}
+	enforceToggleGroups(p.Command.Toggles, m.toggleStates, -1)
 
 	m.dialogEdit = false // browser doesn't use edit mode
 	m.dialog = dialogCreatePaneSetup
@@ -1905,6 +1911,53 @@ func (m *Model) adjustBrowseScroll() {
 	}
 }
 
+// enforceToggleGroups applies the mutual-exclusion invariant to `states`:
+// within each non-empty Group, at most one member may be true. When a
+// specific toggle has just been turned on, pass its index as `winner` so
+// the other members of its group are turned off. When called without a
+// specific winner (initial defaults), `winner` should be -1 and each
+// group is collapsed to its last-declared true member (so declaration
+// order acts as a tiebreaker when multiple defaults are true).
+//
+// Toggles whose Group is empty are never touched — they remain
+// independent checkboxes.
+func enforceToggleGroups(toggles []plugin.Toggle, states []bool, winner int) {
+	if len(toggles) == 0 || len(states) == 0 {
+		return
+	}
+	if winner >= 0 && winner < len(toggles) {
+		group := toggles[winner].Group
+		if group == "" {
+			return
+		}
+		for i, t := range toggles {
+			if i == winner {
+				continue
+			}
+			if i < len(states) && t.Group == group {
+				states[i] = false
+			}
+		}
+		return
+	}
+	// No explicit winner: per group, keep only the last true member.
+	lastOn := make(map[string]int)
+	for i, t := range toggles {
+		if t.Group == "" || i >= len(states) || !states[i] {
+			continue
+		}
+		lastOn[t.Group] = i
+	}
+	for i, t := range toggles {
+		if t.Group == "" || i >= len(states) || !states[i] {
+			continue
+		}
+		if lastOn[t.Group] != i {
+			states[i] = false
+		}
+	}
+}
+
 // setupFieldCount returns the number of focusable fields in the setup dialog:
 // CWD (if PromptsCWD) + one per toggle + 1 for the Continue button.
 func (m Model) setupFieldCount(p *plugin.PanePlugin) int {
@@ -1981,6 +2034,13 @@ func (m Model) handleCreatePaneSetupKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd
 		case " ", "space":
 			if togIdx >= 0 && togIdx < len(m.toggleStates) {
 				m.toggleStates[togIdx] = !m.toggleStates[togIdx]
+				// If this toggle belongs to a mutual-exclusion group and
+				// was just turned ON, turn OFF the other members of the
+				// same group. Turning OFF is always safe (leaves the
+				// group fully unselected — a valid state).
+				if m.toggleStates[togIdx] {
+					enforceToggleGroups(p.Command.Toggles, m.toggleStates, togIdx)
+				}
 			}
 			return m, nil
 		case "up":
@@ -2337,9 +2397,19 @@ func (m Model) renderCreatePaneSetupDialog() string {
 
 	for i, t := range p.Command.Toggles {
 		focused := cursor == fieldIdx
-		box := "[ ]"
-		if i < len(m.toggleStates) && m.toggleStates[i] {
+		// Grouped toggles render as radio buttons to signal mutual
+		// exclusion; ungrouped ones stay as checkboxes.
+		on := i < len(m.toggleStates) && m.toggleStates[i]
+		var box string
+		switch {
+		case t.Group != "" && on:
+			box = "(•)"
+		case t.Group != "":
+			box = "( )"
+		case on:
 			box = "[x]"
+		default:
+			box = "[ ]"
 		}
 		prefix := "  "
 		lineStyle := dialogNormal

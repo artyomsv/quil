@@ -58,11 +58,17 @@ type FormField struct {
 // Toggle is a boolean runtime flag the user can enable when creating a pane.
 // When enabled, ArgsWhenOn is appended to the spawn args (and persisted via
 // the pane's InstanceArgs so it survives daemon restarts).
+//
+// Group gives mutual-exclusion semantics: toggles that share a non-empty
+// Group value are rendered as radio buttons and only one member may be ON
+// at a time. Enabling one automatically disables the others in the group.
+// A toggle with an empty Group behaves as an independent checkbox.
 type Toggle struct {
 	Name       string   // identifier (stable across renames for future addressability)
 	Label      string   // text shown next to the checkbox in the setup dialog
 	ArgsWhenOn []string // args appended to the command when this toggle is checked
 	Default    bool     // initial checked state
+	Group      string   // optional mutual-exclusion group; empty = independent checkbox
 }
 
 // PersistenceConfig describes how to restore the pane after daemon restart.

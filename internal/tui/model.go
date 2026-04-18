@@ -215,6 +215,10 @@ type Model struct {
 	notesAnchorRow       int                    // document row where a notes-editor drag began (resolved once on click)
 	notesAnchorCol       int                    // document col where a notes-editor drag began (resolved once on click)
 
+	// Event-loop performance stats. Pointer so mutations persist across
+	// Bubble Tea's value-receiver copies.
+	perfStats *eventLoopStats
+
 	// Plugin migration dialog state
 	migrationPlugins    []plugin.StalePlugin // stale plugins needing migration
 	migrationIdx        int                  // active plugin tab index
@@ -236,6 +240,7 @@ func NewModel(client *ipc.Client, cfg config.Config, version string, registry *p
 		mcpHighlightSeq:  make(map[string]int),
 		notifications:    NewNotificationCenter(cfg.Notification.SidebarWidth, cfg.Notification.MaxEvents),
 		migrationPlugins: stalePlugins,
+		perfStats:        newEventLoopStats(),
 	}
 	// Migration dialog takes priority over the disclaimer — it blocks
 	// startup until all stale plugins are resolved. Show disclaimer only
@@ -278,6 +283,10 @@ func (m Model) Init() tea.Cmd {
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	start := time.Now()
+	defer func() {
+		m.perfStats.recordMsg(fmt.Sprintf("%T", msg), time.Since(start))
+	}()
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		log.Printf("WindowSizeMsg: %dx%d", msg.Width, msg.Height)
@@ -995,6 +1004,8 @@ func (m *Model) exitNotesMode() (tea.Model, tea.Cmd) {
 }
 
 func (m Model) View() tea.View {
+	viewStart := time.Now()
+	defer func() { m.perfStats.recordView(time.Since(viewStart)) }()
 	var content string
 
 	if m.width == 0 || m.height == 0 {
@@ -1209,8 +1220,12 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, m.forwardInputBytes(data)
 	}
 
-	// Selection: Shift+Arrow / Ctrl+Shift+Arrow
-	if strings.HasPrefix(key, "shift+") || strings.HasPrefix(key, "ctrl+shift+") || strings.HasPrefix(key, "ctrl+alt+shift+") {
+	// Selection: Shift+Arrow / Ctrl+Shift+Arrow / Ctrl+Alt+Shift+Arrow.
+	// Match only the specific arrow-based combos the selection handler
+	// actually supports — a broader prefix match would swallow shift+tab
+	// (Claude Code mode toggle), shift+enter, and similar app-specific
+	// keys that must reach the PTY.
+	if isSelectionExtendKey(key) {
 		return m.handleSelectionKey(key)
 	}
 
@@ -1509,7 +1524,9 @@ func (m *Model) handlePaneOutput(msg PaneOutputMsg) tea.Cmd {
 					leaf.Pane.preparing = false
 				}
 			}
+			appendStart := time.Now()
 			leaf.Pane.AppendOutput(msg.Data)
+			m.perfStats.recordPaneOutput(len(msg.Data), time.Since(appendStart))
 			if leaf.Pane.CWD != oldCWD && leaf.Pane.CWD != "" {
 				return m.updatePaneCWD(msg.PaneID, leaf.Pane.CWD)
 			}
@@ -2621,6 +2638,22 @@ func (m *Model) updateMouseSelection(tab *TabModel, curX, curY, tabH int) {
 		Anchor: SelectionAnchor{Col: startCol, Line: startLine},
 		Cursor: SelectionAnchor{Col: curCol, Line: curLine},
 	}
+}
+
+// isSelectionExtendKey returns true for the exact set of shift-modified
+// keys handleSelectionKey knows how to extend a selection with. Any other
+// shift-modified key (shift+tab, shift+enter, shift+F*, etc.) must bypass
+// the selection handler so it can reach plugin raw-key handling and the
+// PTY — otherwise typing those in a claude-code or shell pane silently
+// does nothing.
+func isSelectionExtendKey(key string) bool {
+	switch key {
+	case "shift+left", "shift+right", "shift+up", "shift+down",
+		"ctrl+shift+left", "ctrl+shift+right",
+		"ctrl+alt+shift+left", "ctrl+alt+shift+right":
+		return true
+	}
+	return false
 }
 
 func (m Model) handleSelectionKey(key string) (tea.Model, tea.Cmd) {

@@ -6,7 +6,7 @@ name = "claude-code"
 display_name = "Claude Code"
 category = "ai"
 description = "AI coding assistant"
-schema_version = 2
+schema_version = 3
 
 [command]
 cmd = "claude"
@@ -14,12 +14,26 @@ cmd = "claude"
 detect = "claude --version"
 prompts_cwd = true  # ask user which folder to open Claude in (preserves .claude/ project context)
 
-# Runtime toggles — rendered as checkboxes in the pane setup dialog.
+# Runtime toggles — rendered in the pane setup dialog.
+#
+# The two permission-mode toggles below share group = "permission_mode",
+# which makes them mutually exclusive: the setup dialog renders them as
+# radio buttons, and enabling one automatically disables the other. Both
+# default to false, so the user can also pick neither (Claude's standard
+# interactive confirmations).
 [[command.toggles]]
 name = "dangerously_skip_permissions"
 label = "Dangerously skip permissions (unattended mode — no confirmations)"
 args_when_on = ["--dangerously-skip-permissions"]
 default = false
+group = "permission_mode"
+
+[[command.toggles]]
+name = "enable_auto_mode"
+label = "Enable auto mode (safer alternative to skipping permissions)"
+args_when_on = ["--enable-auto-mode"]
+default = false
+group = "permission_mode"
 
 [persistence]
 strategy = "preassign_id"

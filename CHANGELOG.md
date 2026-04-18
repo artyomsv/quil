@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Client/daemon version negotiation** — the TUI now performs a version handshake with the running daemon before attaching. If the daemon is older (or pre-dates version negotiation), the TUI prompts before gracefully stopping it and auto-spawning the matching daemon from alongside the TUI binary. If the daemon is newer (i.e., the TUI is stale), the TUI refuses to attach and points the user at the releases page. Eliminates the manual "stop daemon → replace both binaries → restart" dance on every upgrade. Dev/debug builds and unstamped local builds skip the check. New IPC pair `MsgVersionReq`/`MsgVersionResp` added to the protocol; new shared `internal/version/` package provides proper semver comparison (no more lexical-ordering traps with `1.10.0` vs `1.9.0`).
+
 ## [1.7.0] - 2026-04-18
 
 ### Added

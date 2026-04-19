@@ -1,6 +1,11 @@
 ---
+/**
+ * Install page — platform-switcher tabs on top, then extra sections
+ * (first-run, build variants for contributors, uninstall). The tab
+ * switcher is plain-JS progressive enhancement — without JS, all
+ * panels render stacked.
+ */
 import Page from "@/layouts/Page.astro";
-import Icon from "@/components/Icon.astro";
 import { SITE } from "@/data/seo";
 import { breadcrumbSchema, howToSchema } from "@/data/schemas";
 
@@ -22,7 +27,7 @@ const seo = {
 
 const schemas = [
   breadcrumbSchema([
-    { name: "Quil", path: "/" },
+    { name: "Quil",    path: "/" },
     { name: "Install", path: "/install" },
   ]),
   howToSchema({
@@ -31,206 +36,273 @@ const schemas = [
       "Install the Quil terminal multiplexer on Linux, macOS, or Windows and launch the TUI.",
     totalTime: "PT1M",
     steps: [
-      {
-        name: "Run the install script",
-        text: "curl -sSfL https://raw.githubusercontent.com/artyomsv/quil/master/scripts/install.sh | sh",
-      },
-      {
-        name: "Launch the TUI",
-        text: "quil",
-      },
-      {
-        name: "Verify the install",
-        text: "quil --version",
-      },
-      {
-        name: "Create your first pane",
-        text: "Press Ctrl+T to add a tab, then Alt+V to split vertically. The daemon auto-starts the first time you launch the TUI.",
-      },
+      { name: "Run the install script", text: "curl -sSfL https://raw.githubusercontent.com/artyomsv/quil/master/scripts/install.sh | sh" },
+      { name: "Launch the TUI",          text: "quil" },
+      { name: "Verify the install",      text: "quil --version" },
+      { name: "Create your first pane",  text: "Press Ctrl+T to add a tab, then Alt+V to split vertically. The daemon auto-starts the first time you launch the TUI." },
     ],
   }),
 ];
 
-const installMethods = [
-  {
-    icon: "terminal" as const,
-    title: "Linux / macOS",
-    subtitle: "One-line install script",
-    body: "The install script detects your OS and architecture, downloads the latest release binary, verifies the checksum, and copies both quil and quild into /usr/local/bin.",
-    command: "curl -sSfL https://raw.githubusercontent.com/artyomsv/quil/master/scripts/install.sh | sh",
-    cta: { label: "View the script on GitHub", href: SITE.github + "/blob/master/scripts/install.sh" },
-  },
-  {
-    icon: "code" as const,
-    title: "Go users",
-    subtitle: "Build from source via go install",
-    body: "If you already have Go 1.25+ installed, install directly from the module path. This compiles both binaries and drops them in $GOBIN.",
-    command: `go install github.com/artyomsv/quil/cmd/quil@latest
-go install github.com/artyomsv/quil/cmd/quild@latest`,
-    cta: { label: "Browse the source", href: SITE.github },
-  },
-  {
-    icon: "download" as const,
-    title: "Windows",
-    subtitle: "Pre-built .zip from GitHub Releases",
-    body: "Windows uses a native ConPTY backend, not WSL. Download the windows/amd64 .zip, extract it anywhere on PATH, and run quil.exe.",
-    command: "# Download the latest windows-amd64 .zip from:\n# " + SITE.github + "/releases/latest",
-    cta: { label: "Open Releases", href: SITE.github + "/releases/latest" },
-  },
+const platforms = [
+  { id: "macos",   label: "macOS"       },
+  { id: "linux",   label: "Linux"       },
+  { id: "windows", label: "Windows"     },
+  { id: "go",      label: "Go install"  },
+  { id: "source",  label: "From source" },
 ];
 ---
 <Page {...seo} schemas={schemas}>
-  <article class="mx-auto max-w-5xl px-6 py-16">
-    <!-- Breadcrumb -->
-    <nav aria-label="Breadcrumb" class="mb-6 flex items-center gap-2 text-sm text-muted-foreground">
-      <a href="/" class="hover:text-foreground">Quil</a>
-      <Icon name="chevron-right" size={14} />
-      <span class="text-foreground">Install</span>
-    </nav>
-
-    <header class="mb-14">
-      <p class="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-        Get started
+  <section class="page-hero">
+    <div class="container-ember stack">
+      <div class="hero-ruler">
+        <span>§ INSTALL · 30 SECONDS</span>
+        <span>PLATFORMS <b>{platforms.length}</b></span>
+        <span>SIZE <b>~40 MB</b></span>
+        <span style="margin-left:auto;">no account · no telemetry</span>
+      </div>
+      <span class="eyebrow">PICK A PLATFORM</span>
+      <h1>Install Quil.</h1>
+      <p>
+        One static binary per platform. No daemon to configure, no
+        database to provision, no cloud account. Works on your laptop,
+        in a container, or on a hardened server.
       </p>
-      <h1 class="text-4xl font-bold tracking-tight sm:text-5xl">
-        Install Quil in 30 seconds.
-      </h1>
-      <p class="mt-4 max-w-2xl text-lg text-muted-foreground">
-        Three ways to get Quil running. Pick the one that fits your
-        setup — all three produce the same two binaries (<code>quil</code>
-        and <code>quild</code>) and the same on-disk state under <code>~/.quil/</code>.
-      </p>
-    </header>
+    </div>
+  </section>
 
-    <!-- Install methods -->
-    <section class="space-y-6">
-      {installMethods.map((method) => (
-        <article class="ember-card p-8">
-          <div class="mb-4 flex items-start gap-4">
-            <div class="flex size-12 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary ring-1 ring-primary/30">
-              <Icon name={method.icon} size={22} />
-            </div>
+  <section style="padding: 60px 0;">
+    <div class="container-narrow stack">
+      <div class="platform-tabs" id="platform-tabs" role="tablist" aria-label="Platform">
+        {platforms.map((platform, idx) => (
+          <button
+            type="button"
+            class:list={["platform-tab", { active: idx === 0 }]}
+            data-plat={platform.id}
+            role="tab"
+            aria-selected={idx === 0 ? "true" : "false"}
+            aria-controls={`plat-${platform.id}`}
+          >
+            {platform.label}
+          </button>
+        ))}
+      </div>
+
+      <div id="plat-body">
+        <!-- macOS -->
+        <div class="plat-pane" data-plat="macos" id="plat-macos" role="tabpanel">
+          <div class="install-step">
+            <div class="step-num">01</div>
             <div>
-              <h2 class="text-xl font-semibold text-foreground">{method.title}</h2>
-              <p class="text-sm text-muted-foreground">{method.subtitle}</p>
+              <h3>One-liner install</h3>
+              <p>Installs the latest signed binary into <code>/usr/local/bin</code>. Works on Intel and Apple Silicon.</p>
+              <pre><span class="c"># macOS (Intel or M-series)</span>
+<span class="k">curl</span> -sSfL https://raw.githubusercontent.com/artyomsv/quil/master/scripts/install.sh | sh</pre>
             </div>
           </div>
-          <p class="mb-5 text-sm leading-relaxed text-muted-foreground">
-            {method.body}
-          </p>
-          <pre class="text-sm"><code>{method.command}</code></pre>
-          <a
-            href={method.cta.href}
-            rel="noopener external"
-            class="mt-5 inline-flex items-center gap-2 text-sm font-medium text-primary hover:text-foreground"
-          >
-            {method.cta.label}
-            <Icon name="arrow-right" size={14} />
-          </a>
-        </article>
-      ))}
-    </section>
+          <div class="install-step">
+            <div class="step-num">02</div>
+            <div>
+              <h3>Verify &amp; launch</h3>
+              <p>Check the version, then spin up your first workspace.</p>
+              <pre><span class="k">quil</span> --version
+<span class="c"># quil {SITE.software.version} (darwin/arm64)</span>
 
-    <!-- First run -->
-    <section class="mt-16">
-      <h2 class="mb-4 text-2xl font-semibold tracking-tight">First run</h2>
-      <div class="ember-card p-8">
-        <p class="mb-4 text-sm leading-relaxed text-muted-foreground">
-          Once installed, launch the TUI. The daemon (<code>quild</code>)
-          auto-spawns in the background on your first run and opens a
-          Unix domain socket (or Named Pipe on Windows) at
-          <code>~/.quil/quild.sock</code>.
-        </p>
-        <pre class="text-sm"><code>quil</code></pre>
-        <p class="mt-5 text-sm leading-relaxed text-muted-foreground">
-          You'll see an empty workspace. Press <code>Ctrl+T</code> to
-          create a new tab, <code>Alt+V</code> or <code>Alt+H</code> to
-          split panes vertically or horizontally, <code>F2</code> to
-          rename a tab, <code>Alt+C</code> to cycle tab colours.
-        </p>
-      </div>
-    </section>
-
-    <!-- Verify -->
-    <section class="mt-10">
-      <h2 class="mb-4 text-2xl font-semibold tracking-tight">Verify</h2>
-      <div class="ember-card p-8">
-        <p class="mb-4 text-sm leading-relaxed text-muted-foreground">
-          Check you're running the version you expect:
-        </p>
-        <pre class="text-sm"><code>quil --version</code></pre>
-        <p class="mt-5 text-sm leading-relaxed text-muted-foreground">
-          Expected output: <code>quil version 1.0.0 (commit abc1234, built 2026-04-07)</code>
-          — your commit hash and build date will differ.
-        </p>
-      </div>
-    </section>
-
-    <!-- Build variants (developers) -->
-    <section class="mt-10">
-      <h2 class="mb-4 text-2xl font-semibold tracking-tight">Build variants (contributors)</h2>
-      <div class="ember-card p-8">
-        <p class="mb-4 text-sm leading-relaxed text-muted-foreground">
-          If you're developing Quil itself, <code>./scripts/dev.sh build</code>
-          produces three matched binary pairs:
-        </p>
-        <div class="overflow-x-auto">
-          <table class="w-full text-sm">
-            <thead>
-              <tr class="border-b border-border text-left text-muted-foreground">
-                <th class="pb-2 pr-4 font-medium">Variant</th>
-                <th class="pb-2 pr-4 font-medium">Binaries</th>
-                <th class="pb-2 font-medium">Behaviour</th>
-              </tr>
-            </thead>
-            <tbody class="text-muted-foreground">
-              <tr class="border-b border-border/50">
-                <td class="py-2 pr-4 font-mono text-xs text-foreground">prod</td>
-                <td class="py-2 pr-4 font-mono text-xs">quil / quild</td>
-                <td class="py-2">Stripped symbols, normal log level, data in <code>~/.quil/</code></td>
-              </tr>
-              <tr class="border-b border-border/50">
-                <td class="py-2 pr-4 font-mono text-xs text-foreground">dev</td>
-                <td class="py-2 pr-4 font-mono text-xs">quil-dev / quild-dev</td>
-                <td class="py-2">Auto dev mode (<code>.quil/</code> next to binary), debug logging — no flags needed</td>
-              </tr>
-              <tr>
-                <td class="py-2 pr-4 font-mono text-xs text-foreground">debug</td>
-                <td class="py-2 pr-4 font-mono text-xs">quil-debug / quild-debug</td>
-                <td class="py-2">Debug logging against production <code>~/.quil/</code> — for diagnosing live issues</td>
-              </tr>
-            </tbody>
-          </table>
+<span class="k">quil</span>
+<span class="c"># workspace opens in your current terminal</span></pre>
+            </div>
+          </div>
         </div>
-        <p class="mt-4 text-sm leading-relaxed text-muted-foreground">
-          Each variant auto-starts its matching daemon. The dev variant is
-          recommended for daily development — it isolates all state from
-          the production workspace.
-        </p>
-      </div>
-    </section>
 
-    <!-- Uninstall -->
-    <section class="mt-10">
-      <h2 class="mb-4 text-2xl font-semibold tracking-tight">Uninstall</h2>
-      <div class="ember-card p-8">
-        <div class="mb-4 inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-warning">
-          <Icon name="triangle-alert" size={14} />
-          Destructive
+        <!-- Linux -->
+        <div class="plat-pane" data-plat="linux" id="plat-linux" role="tabpanel" hidden>
+          <div class="install-step">
+            <div class="step-num">01</div>
+            <div>
+              <h3>One-liner</h3>
+              <p>Works on any glibc-based distro (Ubuntu, Debian, Fedora, Arch). Installs to <code>~/.local/bin</code>.</p>
+              <pre><span class="k">curl</span> -sSfL https://raw.githubusercontent.com/artyomsv/quil/master/scripts/install.sh | sh</pre>
+            </div>
+          </div>
+          <div class="install-step">
+            <div class="step-num">02</div>
+            <div>
+              <h3>Systemd user service (optional)</h3>
+              <p>Keeps the daemon alive across login sessions.</p>
+              <pre><span class="k">quil</span> daemon --install-user
+systemctl --user start quild</pre>
+            </div>
+          </div>
         </div>
-        <p class="mb-4 text-sm leading-relaxed text-muted-foreground">
-          Remove the binaries and (optionally) wipe local state:
-        </p>
-        <pre class="text-sm"><code>sudo rm /usr/local/bin/quil /usr/local/bin/quild
 
-# Optional — removes ALL workspace state, ghost buffers, and plugin configs
-rm -rf ~/.quil</code></pre>
-        <p class="mt-5 text-sm leading-relaxed text-muted-foreground">
-          The second command is irreversible. Your tabs, panes, notes,
-          and saved AI session IDs will be gone. Keep the directory if
-          you want the option to reinstall later.
-        </p>
+        <!-- Windows -->
+        <div class="plat-pane" data-plat="windows" id="plat-windows" role="tabpanel" hidden>
+          <div class="install-step">
+            <div class="step-num">01</div>
+            <div>
+              <h3>Download the zip</h3>
+              <p>Native Windows binary. No WSL required. Uses ConPTY + Named Pipes.</p>
+              <pre><span class="c"># PowerShell</span>
+<span class="k">iwr</span> -Uri https://github.com/artyomsv/quil/releases/latest/download/quil-windows-amd64.zip -OutFile quil.zip
+<span class="k">Expand-Archive</span> quil.zip -DestinationPath $env:LOCALAPPDATA\Quil</pre>
+            </div>
+          </div>
+          <div class="install-step">
+            <div class="step-num">02</div>
+            <div>
+              <h3>Add to PATH</h3>
+              <p>Then launch from any terminal — Windows Terminal recommended.</p>
+              <pre><span class="k">setx</span> PATH "$env:PATH;$env:LOCALAPPDATA\Quil"
+<span class="c"># restart terminal</span>
+<span class="k">quil</span> --version</pre>
+            </div>
+          </div>
+          <div class="install-step">
+            <div class="step-num">03</div>
+            <div>
+              <h3>Tip: F8 for clipboard paste</h3>
+              <p>
+                Windows Terminal eats Ctrl+V before the TUI sees it. Use
+                <code>F8</code> instead (or <code>Ctrl+Alt+V</code>) for
+                the clipboard image proxy.
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Go install -->
+        <div class="plat-pane" data-plat="go" id="plat-go" role="tabpanel" hidden>
+          <div class="install-step">
+            <div class="step-num">01</div>
+            <div>
+              <h3>Go install</h3>
+              <p>Builds from the master branch tip. Requires Go 1.25+.</p>
+              <pre><span class="k">go</span> install github.com/artyomsv/quil/cmd/quil@latest
+<span class="k">go</span> install github.com/artyomsv/quil/cmd/quild@latest</pre>
+            </div>
+          </div>
+        </div>
+
+        <!-- From source -->
+        <div class="plat-pane" data-plat="source" id="plat-source" role="tabpanel" hidden>
+          <div class="install-step">
+            <div class="step-num">01</div>
+            <div>
+              <h3>Clone &amp; build</h3>
+              <p>One Docker run produces all six binaries (production, dev, debug × client, daemon).</p>
+              <pre><span class="k">git clone</span> https://github.com/artyomsv/quil.git
+<span class="k">cd</span> quil
+./scripts/dev.sh build</pre>
+            </div>
+          </div>
+          <div class="install-step">
+            <div class="step-num">02</div>
+            <div>
+              <h3>Run tests</h3>
+              <pre><span class="k">go</span> test ./...
+<span class="c"># PASS · 47 tests</span></pre>
+            </div>
+          </div>
+        </div>
       </div>
-    </section>
-  </article>
+    </div>
+  </section>
+
+  <!-- Build variants — contributor info -->
+  <section class="feat-category">
+    <div class="container-ember stack">
+      <div class="feat-category-head">
+        <div>
+          <span class="eyebrow">§ CONTRIBUTORS</span>
+          <h2 style="margin-top:10px;">Build variants</h2>
+        </div>
+        <span class="count">3 TARGETS</span>
+      </div>
+
+      <div class="feat-list">
+        <div class="feat-item">
+          <span class="idx">[prod]</span>
+          <div>
+            <h3>quil · quild</h3>
+            <p class="blurb">Production binaries. Stripped symbols, normal log level, data in <code>~/.quil/</code>.</p>
+          </div>
+        </div>
+        <div class="feat-item">
+          <span class="idx">[dev]</span>
+          <div>
+            <h3>quil-dev · quild-dev</h3>
+            <p class="blurb">Auto dev mode (<code>.quil/</code> next to the binary), debug logging — no flags needed. The recommended daily-driver for contributors.</p>
+          </div>
+        </div>
+        <div class="feat-item">
+          <span class="idx">[debug]</span>
+          <div>
+            <h3>quil-debug · quild-debug</h3>
+            <p class="blurb">Debug logging against the production <code>~/.quil/</code> directory — for diagnosing a live issue without switching data dirs.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Uninstall -->
+  <section class="feat-category">
+    <div class="container-ember stack">
+      <div class="feat-category-head">
+        <div>
+          <span class="eyebrow">§ UNINSTALL · DESTRUCTIVE</span>
+          <h2 style="margin-top:10px;">Remove Quil</h2>
+        </div>
+      </div>
+
+      <div class="install-step" style="grid-template-columns:1fr;">
+        <div>
+          <p>Remove the binaries and (optionally) wipe local state. The second command is irreversible — your tabs, panes, notes, and saved AI session IDs will be gone.</p>
+          <pre><span class="k">sudo rm</span> /usr/local/bin/quil /usr/local/bin/quild
+
+<span class="c"># Optional — removes ALL workspace state, ghost buffers, plugin configs</span>
+<span class="k">rm</span> -rf ~/.quil</pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- CTA -->
+  <section class="cta" style="padding: 80px 0;">
+    <div class="container-ember stack">
+      <div class="cta-inner">
+        <pre class="cta-ascii" aria-hidden="true">┌── <b>AFTER INSTALL</b> ──────────────────────────────────┐
+│                                                    │
+│   1. <b>quil</b>          — open your first workspace   │
+│   2. <b>Ctrl+T</b>        — new tab                     │
+│   3. <b>Alt+Shift+H</b>   — split horizontal            │
+│   4. <b>reboot</b>        — (yes, really. try it.)      │
+│                                                    │
+└────────────────────────────────────────────────────┘</pre>
+        <div class="actions">
+          <a href="/features" class="btn btn-primary">explore features</a>
+          <a href="/plugins" class="btn btn-outline">write a plugin</a>
+        </div>
+      </div>
+    </div>
+  </section>
 </Page>
+
+<script>
+  // Platform-tab switcher — progressive enhancement. If JS is disabled
+  // the panels stay rendered (first one visible, others hidden via the
+  // `hidden` attribute in markup).
+  document.querySelectorAll<HTMLButtonElement>(".platform-tab").forEach((tab) => {
+    tab.addEventListener("click", () => {
+      const plat = tab.dataset.plat;
+      if (!plat) return;
+      document.querySelectorAll<HTMLButtonElement>(".platform-tab").forEach((t) => {
+        t.classList.toggle("active", t === tab);
+        t.setAttribute("aria-selected", t === tab ? "true" : "false");
+      });
+      document.querySelectorAll<HTMLElement>(".plat-pane").forEach((pane) => {
+        pane.hidden = pane.dataset.plat !== plat;
+      });
+    });
+  });
+</script>

@@ -1,68 +1,94 @@
 ---
+/**
+ * Site footer — brand column + 4 link columns + bottom row.
+ *
+ * Column contents are driven by the `sections` array. The invisible
+ * `rel="me"` block at the bottom is for IndieAuth / fediverse cross-
+ * verification of profile ownership — machine-readable only.
+ */
 import { SITE } from "@/data/seo";
 
-const sections = [
+interface FooterLink {
+  href: string;
+  text: string;
+  external?: boolean;
+}
+interface FooterSection {
+  title: string;
+  links: FooterLink[];
+}
+
+const sections: FooterSection[] = [
   {
     title: "Product",
     links: [
       { href: "/features", text: "Features" },
-      { href: "/plugins", text: "Plugins" },
-      { href: "/install", text: "Install" },
-      { href: "/docs", text: "Documentation" },
+      { href: "/plugins",  text: "Plugins"  },
+      { href: "/install",  text: "Install"  },
+      { href: "/docs",     text: "Documentation" },
     ],
   },
   {
     title: "Compare",
     links: [
-      { href: "/vs/tmux", text: "vs tmux" },
-      { href: "/vs/zellij", text: "vs Zellij" },
-      { href: "/vs/wezterm", text: "vs WezTerm" },
-      { href: "/vs/screen", text: "vs GNU Screen" },
+      { href: "/vs/tmux",    text: "vs tmux"       },
+      { href: "/vs/zellij",  text: "vs Zellij"     },
+      { href: "/vs/wezterm", text: "vs WezTerm"    },
+      { href: "/vs/screen",  text: "vs GNU Screen" },
     ],
   },
   {
-    title: "Documentation",
+    title: "Docs",
     links: [
-      { href: SITE.github + "/blob/master/README.md", text: "README", external: true },
-      { href: SITE.github + "/blob/master/VISION.md", text: "Vision", external: true },
-      { href: SITE.github + "/blob/master/PRD.md", text: "PRD", external: true },
-      { href: SITE.github + "/blob/master/ROADMAP.md", text: "Roadmap", external: true },
-      { href: SITE.github + "/blob/master/docs/plugin-reference.md", text: "Plugin reference", external: true },
-      { href: SITE.github + "/blob/master/CHANGELOG.md", text: "Changelog", external: true },
+      { href: SITE.github + "/blob/master/README.md",                 text: "README",          external: true },
+      { href: SITE.github + "/blob/master/VISION.md",                 text: "Vision",          external: true },
+      { href: SITE.github + "/blob/master/ROADMAP.md",                text: "Roadmap",         external: true },
+      { href: SITE.github + "/blob/master/docs/plugin-reference.md",  text: "Plugin reference", external: true },
+      { href: SITE.github + "/blob/master/CHANGELOG.md",              text: "Changelog",       external: true },
     ],
   },
   {
     title: "Project",
     links: [
-      { href: SITE.github, text: "GitHub", external: true },
-      { href: SITE.github + "/issues", text: "Issues", external: true },
+      { href: SITE.github,               text: "GitHub",   external: true },
+      { href: SITE.github + "/issues",   text: "Issues",   external: true },
       { href: SITE.github + "/releases/latest", text: "Releases", external: true },
-      { href: SITE.github + "/blob/master/LICENSE", text: "MIT License", external: true },
-      { href: "/legal", text: "Legal" },
+      { href: "/legal",                  text: "Legal" },
     ],
   },
 ];
 
 const year = new Date().getFullYear();
 ---
-<footer class="mt-32 border-t border-border/60 bg-background/40">
-  <div class="mx-auto max-w-6xl px-6 py-14">
-    <div class="grid grid-cols-2 gap-10 md:grid-cols-4">
+<footer class="site-footer">
+  <div class="container-ember">
+    <div class="footer-grid">
+      <div class="footer-brand">
+        <h4>
+          <img src="/brand/mark.svg" width="22" height="24" alt="" aria-hidden="true" />
+          quil
+        </h4>
+        <p>
+          The workflow orchestrator that survives reboots. Typed panes,
+          AI session resume, an MCP server, TOML plugins. Open source
+          under MIT.
+        </p>
+        <p style="margin-top:10px;">
+          <span class="pill flame"><span class="dot"></span>v{SITE.software.version}</span>
+          <span class="pill">{SITE.software.license}</span>
+          <span class="pill">~40 MB</span>
+        </p>
+      </div>
+
       {sections.map((section) => (
-        <nav aria-labelledby={`footer-${section.title.toLowerCase()}`}>
-          <h2
-            id={`footer-${section.title.toLowerCase()}`}
-            class="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground"
-          >
-            {section.title}
-          </h2>
-          <ul class="space-y-2 text-sm">
+        <nav class="footer-col" aria-labelledby={`footer-${section.title.toLowerCase()}`}>
+          <h5 id={`footer-${section.title.toLowerCase()}`}>{section.title}</h5>
+          <ul>
             {section.links.map((link) => (
               <li>
                 <a
                   href={link.href}
                   rel={link.external ? "noopener external" : undefined}
-                  class="text-muted-foreground transition-colors hover:text-foreground"
                 >
                   {link.text}
                 </a>
@@ -73,39 +99,22 @@ const year = new Date().getFullYear();
       ))}
     </div>
 
-    <div
-      class="mt-12 flex flex-col items-start justify-between gap-3 border-t border-border/60 pt-8 sm:flex-row sm:items-center"
-    >
-      <div class="flex items-center gap-3">
-        <img
-          src="/brand/mark.svg"
-          alt=""
-          width="28"
-          height="30"
-          aria-hidden="true"
-        />
-        <p class="text-xs text-muted-foreground">
-          © {year} {SITE.name} · Released under the
-          <a
-            href={SITE.github + "/blob/master/LICENSE"}
-            class="underline underline-offset-4 hover:text-foreground"
-            rel="noopener external"
-          >MIT License</a>
-        </p>
-      </div>
-      <p class="text-xs text-muted-foreground">
-        Built with <a href="https://astro.build" class="underline underline-offset-4 hover:text-foreground" rel="noopener external">Astro</a> · Hosted on GitHub Pages
-      </p>
+    <div class="footer-bottom">
+      <span>
+        © {year} {SITE.name} ·
+        <a href={SITE.github + "/blob/master/LICENSE"} rel="noopener external">MIT Licensed</a>
+      </span>
+      <span class="mono">└── made by @artyomsv · hosted on GitHub Pages</span>
     </div>
 
     <!--
       rel="me" verification links — declare which profiles on other
       platforms belong to the Quil author. GitHub, Mastodon, and the
-      IndieAuth ecosystem use this to cross-verify ownership.
-      The links are invisible (sr-only) because their purpose is
-      machine discovery, not human navigation.
+      IndieAuth ecosystem use this to cross-verify ownership. Hidden
+      visually because the purpose is machine discovery, not human
+      navigation.
     -->
-    <div class="sr-only">
+    <div class="sr-only" aria-hidden="true">
       <a rel="me" href={SITE.author.url}>{SITE.author.name} on GitHub</a>
       <a rel="me" href={SITE.github}>Quil repository</a>
     </div>

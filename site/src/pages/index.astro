@@ -1,14 +1,28 @@
 ---
+/**
+ * Home page — ember techno-maximalist design.
+ *
+ * Sections: hero (with animated restore viz) → features grid →
+ * interactive 4-pane demo → compare teaser → install CTA.
+ *
+ * SEO / JSON-LD is unchanged: SoftwareApplication + FAQPage schemas
+ * still ship as part of the head. Visible FAQ block was dropped from
+ * the previous iteration; schema-only stays to keep the Google rich
+ * result eligible.
+ *
+ * Inline scripts are Astro-processed (bundled to a single `page.js`
+ * chunk on build). No client hydration — the scripts just wire up
+ * static DOM.
+ */
 import Page from "@/layouts/Page.astro";
-import Icon from "@/components/Icon.astro";
 import { SITE } from "@/data/seo";
 import { softwareApplicationSchema, faqSchema } from "@/data/schemas";
 import { homeFaq } from "@/data/faq";
 
 const seo = {
-  title: "The workspace that survives every reboot",
+  title: "The workspace that doesn't forget",
   description:
-    "Quil is a reboot-proof terminal multiplexer for AI-native developers. Type `quil` after a restart and your tabs, panes, AI sessions, and running tools snap back in under 30 seconds.",
+    "Quil is a reboot-proof terminal multiplexer for AI-native developers. Typed panes, auto-resuming Claude Code sessions, an MCP server. One static binary per platform.",
   path: "/",
   ogImage: "/og/home.png",
   keywords: [
@@ -19,197 +33,556 @@ const seo = {
     "ai terminal",
     "claude code multiplexer",
     "reboot-proof workflow",
+    "mcp server",
   ],
 };
 
-// Keep structured data even though the visible FAQ block is removed —
-// the home page still hosts the FAQPage schema for Google rich results.
 const schemas = [softwareApplicationSchema(), faqSchema(homeFaq)];
 
-// Four hand-picked feature statements for the numbered list.
-// Deliberately shorter than the old 6-card grid — density is the enemy.
 const topFeatures = [
   {
-    number: "01",
+    number: "◇ 01",
     title: "Reboot-proof sessions",
-    body: "Tabs, panes, working directories, and layout state are snapshotted continuously. Type quil after a restart and everything's back in under 30 seconds.",
+    tag: "← PERSISTENCE",
+    body: `Tabs, panes, working directories, and layout ratios snapshot continuously to <span class="mono">~/.quil/workspace.json</span>. Type <span class="mono" style="color:var(--flame);">quil</span> after any restart — everything snaps back in under 30 seconds. Ghost buffers replay the last 500 lines per pane while shells re-initialise.`,
   },
   {
-    number: "02",
-    title: "AI sessions resume automatically",
-    body: "Claude Code conversations come back with their session ID intact. No copy-paste, no context rebuild, no re-explaining the task.",
+    number: "◇ 02",
+    title: "Claude Code resumes itself",
+    tag: "← AI CONTINUITY",
+    body: `Each AI pane owns a UUID at spawn. On restart, Quil runs <span class="mono" style="color:var(--flame);">claude --resume &lt;id&gt;</span> automatically. No copy-paste, no context rebuild, no re-explaining what you were doing. Your conversation is where you left it.`,
   },
   {
-    number: "03",
-    title: "Typed panes, not just shells",
-    body: "A Claude Code pane resumes differently than an SSH tunnel, which resumes differently than a webhook listener. Four plugins built in, yours in 30 lines of TOML.",
+    number: "◇ 03",
+    title: "Typed panes, not shells",
+    tag: "← TOML PLUGINS",
+    body: `A Claude Code pane resumes differently than an SSH tunnel, which resumes differently than a <span class="mono">stripe listen</span>. Four types built in — <span class="mono">terminal</span>, <span class="mono">claude-code</span>, <span class="mono">ssh</span>, <span class="mono">stripe</span>. Yours in 30 lines of TOML. No compile, no restart, hot-reload on save.`,
   },
   {
-    number: "04",
-    title: "Native on Linux, macOS, and Windows",
-    body: "ConPTY on Windows, creack/pty on Unix. Zero WSL required. One static binary per platform, ~40 MB, no runtime dependencies.",
+    number: "◇ 04",
+    title: "MCP server for agents",
+    tag: "← AGENT LAYER",
+    body: `Run <span class="mono" style="color:var(--flame);">quil mcp</span> and any MCP-capable client — Claude Desktop, Cursor, Claude Code — can list panes, read output, send keystrokes, and snapshot your workspace. 15 tools. Your terminal becomes addressable by AI.`,
   },
 ];
 
-const compareLinks = [
-  { slug: "tmux",    label: "vs tmux" },
-  { slug: "zellij",  label: "vs Zellij" },
-  { slug: "wezterm", label: "vs WezTerm" },
-  { slug: "screen",  label: "vs GNU Screen" },
+const compareRows = [
+  { feature: "Host reboot survival",     values: ["yes", "no",  "no",  "no" ] },
+  { feature: "AI session resume",        values: ["yes", "no",  "no",  "no" ] },
+  { feature: "Typed panes",              values: ["yes", "no",  "no",  "no" ] },
+  { feature: "MCP server for agents",    values: ["yes", "no",  "no",  "no" ] },
+  { feature: "Native Windows (no WSL)",  values: ["yes", "no",  "no",  "yes"] },
 ];
+
+const compareTiles = [
+  { slug: "tmux",    label: "tmux",       blurb: "The 2007 standard. Still the answer if you just need tabs on a remote host." },
+  { slug: "zellij",  label: "Zellij",     blurb: "The modern Rust option. Friendly UX, WASM plugins, no reboot story." },
+  { slug: "wezterm", label: "WezTerm",    blurb: "A terminal emulator with multiplexer bolted on. Use both — they complement." },
+  { slug: "screen",  label: "GNU Screen", blurb: "1987. Still on every Unix host. Not a dev-experience tool anymore." },
+];
+
+// ISO date without dashes, used in the hero ruler as a "build rev" hint
+const revTimestamp = new Date().toISOString().slice(0, 10).replace(/-/g, "");
 ---
 <Page {...seo} schemas={schemas}>
-  <!-- =================================================================
-       HERO — left-aligned, asymmetric, mono headline
-       ================================================================= -->
-  <section class="scanlines relative overflow-hidden">
-    <div class="mx-auto max-w-5xl px-6 pt-20 pb-20 sm:pt-28 sm:pb-28">
-      <!-- Terminal-prompt-style status pill -->
-      <div class="mb-8 inline-flex items-center gap-2">
-        <span class="pill pill-primary">
-          <span class="size-1 rounded-full bg-primary"></span>
-          v{SITE.software.version} · MIT · Cross-platform
-        </span>
+  <!-- ================================ HERO ================================ -->
+  <section class="hero">
+    <div class="container-ember stack">
+      <div class="hero-ruler">
+        <span>§ <b>01</b> / 05 · HERO</span>
+        <span>LAT <b>48.8566° N</b></span>
+        <span>LON <b>2.3522° E</b></span>
+        <span>BUILD <b>{SITE.software.version}-release</b></span>
+        <span style="margin-left:auto;">REV <b>{revTimestamp}</b></span>
       </div>
 
-      <!--
-        Hero headline in JetBrains Mono. Three short lines so the
-        caesurae act like line breaks in a poem — forces the eye to
-        pause between ideas.
-      -->
-      <h1 class="font-mono text-4xl font-bold leading-[1.05] tracking-tight text-foreground sm:text-6xl lg:text-7xl">
-        <span class="block">The workspace</span>
-        <span class="block">that <span class="gradient-flame">doesn't forget.</span></span>
-      </h1>
+      <div class="hero-grid">
+        <div>
+          <div style="margin-bottom:24px;">
+            <span class="pill flame"><span class="dot"></span>v{SITE.software.version} shipped · reboot-proof since 2025</span>
+          </div>
 
-      <p class="mt-8 max-w-2xl text-lg leading-relaxed text-muted-foreground sm:text-xl">
-        Quil is a reboot-proof terminal multiplexer for developers who
-        run complex multi-tool AI workflows. AI sessions, running
-        processes, and your whole setup — back in 30 seconds after
-        any restart.
-      </p>
+          <h1 class="hero-headline">
+            <span class="line">the workspace</span>
+            <span class="line">that doesn't</span>
+            <span class="line"><span class="flame-text">forget.</span><span class="caret">_</span></span>
+          </h1>
 
-      <div class="mt-10 flex flex-col gap-3 sm:flex-row">
-        <a href="/install" class="btn-primary">
-          <Icon name="download" size={18} />
-          Install in 30 seconds
-          <Icon name="arrow-right" size={16} />
-        </a>
-        <a href={SITE.github} rel="noopener external" class="btn-outline">
-          <Icon name="github" size={16} />
-          View on GitHub
-        </a>
-      </div>
-    </div>
-  </section>
+          <p class="hero-lede">
+            tmux survives disconnects. Quil survives <b>reboots</b>.
+            Typed panes, auto-resuming Claude Code sessions, and an
+            MCP server that lets AI agents reach into your terminal.
+            One static binary. No daemon to configure. No cloud
+            account.
+          </p>
 
-  <div class="divider-ember mx-auto max-w-5xl"></div>
+          <div class="hero-actions">
+            <a href="/install" class="btn btn-primary"><span>▸ install in 30 seconds</span></a>
+            <a href="#demo" class="btn btn-outline">try the demo</a>
+            <a href={SITE.github} class="btn btn-ghost" rel="noopener external">★ star on github</a>
+          </div>
 
-  <!-- =================================================================
-       NUMBERED FEATURE LIST — single column, sparse, matte-black blocks
-       ================================================================= -->
-  <section class="mx-auto max-w-5xl px-6 pt-20 pb-16">
-    <div class="mb-12 max-w-2xl">
-      <p class="prompt mb-3 font-mono text-xs font-bold uppercase tracking-[0.2em] text-primary">
-        what quil does
-      </p>
-      <h2 class="font-mono text-3xl font-bold tracking-tight sm:text-4xl">
-        Four things. Done well.
-      </h2>
-    </div>
+          <div class="hero-meta">
+            <span>◆ LINUX · MACOS · WINDOWS</span>
+            <span>◆ NO WSL</span>
+            <span>◆ ~40 MB</span>
+            <span>◆ GO 1.25 · BUBBLE TEA V2</span>
+          </div>
+        </div>
 
-    <ol class="space-y-4">
-      {topFeatures.map((f) => (
-        <li class="feature-block">
-          <div class="flex flex-col gap-2 sm:flex-row sm:items-baseline sm:gap-6">
-            <span class="shrink-0 font-mono text-sm font-bold text-primary">
-              {f.number}
-            </span>
-            <div>
-              <h3 class="font-mono text-lg font-semibold text-foreground sm:text-xl">
-                {f.title}
-              </h3>
-              <p class="mt-2 max-w-3xl text-sm leading-relaxed text-muted-foreground sm:text-base">
-                {f.body}
-              </p>
+        <!-- Right column: animated "reboot restore" viz -->
+        <div class="viz registered" id="hero-viz" aria-hidden="true">
+          <div class="viz-chrome">
+            <div class="dots"><i class="dot a"></i><i class="dot b"></i><i class="dot c"></i></div>
+            <div class="title" id="viz-title">~/.quil/workspace.json</div>
+            <div class="status" id="viz-status"><span id="rb-state">● RESTORING</span></div>
+          </div>
+          <div class="viz-body">
+            <div id="reboot-stage" style="height:100%; position:relative;">
+              <div class="tline dim">$ reboot</div>
+              <div class="tline dim" style="margin-top:6px;">── system shutdown ──────────────</div>
+              <div class="tline" style="margin-top:24px; color:var(--flame);"><span class="prompt-glyph">$</span> quil<span class="caret-inline"></span></div>
+              <div id="rb-log" style="margin-top:16px; font-size:12px; color:var(--ink-3); line-height:1.55;"></div>
+              <div id="rb-restored" style="margin-top:22px; opacity:0; transition:opacity 0.35s;">
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:6px;">
+                  <div class="mini-pane">
+                    <div class="mini-label">AI · CLAUDE-CODE</div>
+                    <div class="mini-body">› implement reboot story</div>
+                  </div>
+                  <div class="mini-pane">
+                    <div class="mini-label">TERMINAL · ZSH</div>
+                    <div class="mini-body">$ tail -f calyx.log</div>
+                  </div>
+                  <div class="mini-pane">
+                    <div class="mini-label">SSH · prod-eu-1</div>
+                    <div class="mini-body">● connected · 12ms</div>
+                  </div>
+                  <div class="mini-pane">
+                    <div class="mini-label">STRIPE · LISTEN</div>
+                    <div class="mini-body">whsec_****3f2b ✓</div>
+                  </div>
+                </div>
+                <div style="margin-top:14px; font-size:11px; color:var(--flame); text-align:center; font-family:var(--mono-stack);">
+                  ▸ restored in 27.4s · 4 panes · 2 ai sessions · 2,189 lines replayed
+                </div>
+              </div>
             </div>
           </div>
-        </li>
-      ))}
-    </ol>
-
-    <div class="mt-8">
-      <a
-        href="/features"
-        class="inline-flex items-center gap-2 font-mono text-sm font-medium text-primary hover:text-foreground"
-      >
-        <span class="prompt">see every capability</span>
-        <Icon name="arrow-right" size={14} />
-      </a>
+        </div>
+      </div>
     </div>
   </section>
 
-  <div class="divider-ember mx-auto max-w-5xl"></div>
+  <!-- ================================ FEATURES ================================ -->
+  <section class="features">
+    <div class="container-ember stack">
+      <div class="hr-ascii">┏━━━ <b>§ 02 / 05</b> ━ WHAT IT DOES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓</div>
 
-  <!-- =================================================================
-       COMPARE TEASER — single line + four small pills
-       ================================================================= -->
-  <section class="mx-auto max-w-5xl px-6 py-16">
-    <div class="max-w-3xl">
-      <p class="prompt mb-3 font-mono text-xs font-bold uppercase tracking-[0.2em] text-primary">
-        how it compares
-      </p>
-      <h2 class="font-mono text-3xl font-bold tracking-tight sm:text-4xl">
-        Not another tmux.
-      </h2>
-      <p class="mt-6 text-lg leading-relaxed text-muted-foreground">
-        tmux and Zellij survive network disconnects but not host reboots.
-        WezTerm is a terminal emulator that happens to multiplex. Screen
-        is 38 years old. Quil is a different category: a workflow
-        orchestrator that treats your terminal as the source of truth.
-      </p>
-    </div>
-    <div class="mt-8 flex flex-wrap gap-3">
-      {compareLinks.map((c) => (
-        <a
-          href={`/vs/${c.slug}`}
-          class="pill transition-colors hover:border-primary/60 hover:text-primary"
-        >
-          {c.label}
-          <Icon name="arrow-right" size={12} />
-        </a>
-      ))}
+      <div class="features-head">
+        <div>
+          <div class="section-tag"><span class="dot"></span>FOUR THINGS · DONE WELL</div>
+          <h2 class="h2" style="margin-top:18px;">
+            A <span class="flame-text">multiplexer</span> is a tool. Quil is a <span class="flame-text">contract</span>.
+          </h2>
+        </div>
+        <div>
+          <p>
+            The contract: your machine rebooting is <b style="color:var(--ink);">not</b>
+            your problem. Neither is re-explaining context to Claude
+            Code, re-pasting your last screenshot, or rebuilding five
+            SSH tunnels by hand. Four capabilities, each load-bearing,
+            each opinionated.
+          </p>
+        </div>
+      </div>
+
+      <div class="feature-grid">
+        {topFeatures.map((f) => (
+          <div class="feature-cell">
+            <div class="feat-head">
+              <span class="feat-num">{f.number}</span>
+              <span class="feat-title">{f.title}</span>
+            </div>
+            <p class="feat-body" set:html={f.body} />
+            <span class="feat-tag">{f.tag}</span>
+          </div>
+        ))}
+      </div>
+
+      <div style="margin-top:28px;">
+        <a href="/features" class="btn btn-outline">see every capability →</a>
+      </div>
     </div>
   </section>
 
-  <div class="divider-ember mx-auto max-w-5xl"></div>
+  <!-- ================================ INTERACTIVE DEMO ================================ -->
+  <section class="demo" id="demo">
+    <div class="container-ember stack">
+      <div class="hr-ascii">┣━━━ <b>§ 03 / 05</b> ━ LIVE DEMO ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫</div>
 
-  <!-- =================================================================
-       FINAL CTA — big, confident, no glass card
-       ================================================================= -->
-  <section class="mx-auto max-w-5xl px-6 pt-20 pb-28">
-    <div class="max-w-3xl">
-      <p class="prompt mb-3 font-mono text-xs font-bold uppercase tracking-[0.2em] text-primary">
-        stop paying the reboot tax
-      </p>
-      <h2 class="font-mono text-3xl font-bold leading-tight tracking-tight sm:text-5xl">
-        <span class="gradient-flame">Install it. Reboot once. Feel the difference.</span>
-      </h2>
-      <p class="mt-6 text-lg text-muted-foreground">
-        One binary. No daemon to configure. No database to provision.
-        No cloud account. Open source under MIT.
-      </p>
-      <div class="mt-10 flex flex-col gap-3 sm:flex-row">
-        <a href="/install" class="btn-primary">
-          <Icon name="download" size={18} />
-          Install Quil
-          <Icon name="arrow-right" size={16} />
-        </a>
-        <a href={SITE.github} rel="noopener external" class="btn-outline">
-          <Icon name="github" size={16} />
-          Star on GitHub
-        </a>
+      <div class="demo-head">
+        <div class="section-tag"><span class="dot"></span>CLICK ANY PANE · TRY A COMMAND</div>
+        <h2 class="h2" style="margin-top:18px;">Four panes. Four types. One workspace.</h2>
+        <p>
+          A real Quil layout — a Claude Code session, a live shell, an
+          SSH tunnel, and a Stripe webhook listener. Click a pane to
+          focus it. Everything you see here survives a reboot.
+        </p>
+      </div>
+
+      <div class="demo-stage">
+        <div class="demo-tabbar">
+          <button class="demo-tab active closable" data-tab="main" type="button">
+            <span class="type">MAIN</span>
+            <span>workspace</span>
+          </button>
+          <button class="demo-tab closable" data-tab="deploy" type="button">
+            <span class="type">DEPLOY</span>
+            <span>ci &amp; release</span>
+          </button>
+          <button class="demo-tab closable" data-tab="scratch" type="button">
+            <span class="type">SCRATCH</span>
+            <span>notes</span>
+          </button>
+          <span class="demo-tab-add" aria-hidden="true">+</span>
+        </div>
+
+        <div class="demo-panes">
+          <div class="demo-pane focused" data-pane="claude">
+            <span class="pane-label">AI · CLAUDE-CODE</span>
+            <div class="cwd">▸ ~/code/quil</div>
+            <div id="pane-claude-content"></div>
+          </div>
+          <div class="demo-pane" data-pane="shell">
+            <span class="pane-label">TERMINAL · ZSH</span>
+            <div class="cwd">▸ ~/code/quil/cmd/quild</div>
+            <div id="pane-shell-content"></div>
+          </div>
+          <div class="demo-pane" data-pane="ssh">
+            <span class="pane-label">SSH · prod-eu-1</span>
+            <div class="cwd">▸ deploy@prod-eu-1:/srv/app</div>
+            <div id="pane-ssh-content"></div>
+          </div>
+          <div class="demo-pane" data-pane="stripe">
+            <span class="pane-label">STRIPE · LISTEN</span>
+            <div class="cwd">▸ whsec_****3f2b</div>
+            <div id="pane-stripe-content"></div>
+          </div>
+        </div>
+
+        <div class="demo-statusline">
+          <span>▸ <b>main</b></span>
+          <span class="sep">│</span>
+          <span>pane <b id="focus-name">1/4 · claude-code</b></span>
+          <span class="sep">│</span>
+          <span>ghost-buf <b>500 lines</b></span>
+          <span class="sep">│</span>
+          <span>snapshot <b id="snap-time">00:00:02 ago</b></span>
+          <span class="right">Alt+← → ↑ ↓ to navigate · Ctrl+E focus-mode · Alt+E pane notes</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================================ COMPARE TEASER ================================ -->
+  <section class="compare">
+    <div class="container-ember stack">
+      <div class="hr-ascii">┣━━━ <b>§ 04 / 05</b> ━ VS THE FIELD ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫</div>
+
+      <div class="compare-grid">
+        <div>
+          <div class="section-tag"><span class="dot"></span>NOT ANOTHER TMUX</div>
+          <h2 class="h2" style="margin-top:18px;">
+            Different <span class="flame-text">category.</span>
+          </h2>
+          <p style="margin-top:20px; color:var(--ink-2); font-size:16px; line-height:1.65; max-width:52ch;">
+            tmux and Zellij survive network disconnects but not host
+            reboots. WezTerm is a terminal emulator that happens to
+            multiplex. Screen is 38 years old. Quil is a workflow
+            orchestrator that treats your terminal as the source of
+            truth.
+          </p>
+
+          <table class="cmp-table" style="margin-top:32px;">
+            <thead>
+              <tr>
+                <th>capability</th>
+                <th class="quil val">quil</th>
+                <th class="val">tmux</th>
+                <th class="val">zellij</th>
+                <th class="val">wezterm</th>
+              </tr>
+            </thead>
+            <tbody>
+              {compareRows.map((row) => (
+                <tr>
+                  <td class="feat">{row.feature}</td>
+                  {row.values.map((val) => (
+                    <td class="val">
+                      <b class={val === "yes" ? "yes" : "no"}>{val === "yes" ? "✓" : "✕"}</b>
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        <div class="compare-tiles">
+          {compareTiles.map((tile) => (
+            <a href={`/vs/${tile.slug}`} class="compare-tile">
+              <span class="vs">vs ·</span>
+              <span class="name">{tile.label}</span>
+              <span style="font-size:12px; color:var(--ink-3); line-height:1.5;">{tile.blurb}</span>
+              <span class="arrow">→ compare</span>
+            </a>
+          ))}
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================================ CTA ================================ -->
+  <section class="cta">
+    <div class="container-ember stack">
+      <div class="cta-inner">
+        <div class="hr-ascii" style="text-align:center;">┗━━━ <b>§ 05 / 05</b> ━ TAKE IT HOME ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛</div>
+
+        <pre class="cta-ascii" aria-hidden="true">
+    ┌──────────────────────────────────────────────────┐
+    │                                                  │
+    │   <b>reboot-proof. ai-native. one static binary.</b>   │
+    │                                                  │
+    └──────────────────────────────────────────────────┘
+        </pre>
+
+        <h2>
+          Install it. <span class="flame-text">Reboot once.</span><br />
+          Feel the difference.
+        </h2>
+
+        <p>
+          One binary. ~40 MB. No database. No cloud account. No
+          telemetry. No runtime dependencies. Open source under MIT.
+          Tested on Linux, macOS, and native Windows.
+        </p>
+
+        <div class="install-line">
+          <span class="prompt-glyph">$</span>
+          <span id="install-cmd">curl -sSfL https://raw.githubusercontent.com/artyomsv/quil/master/scripts/install.sh | sh</span>
+          <button class="copy-btn" id="copy-install" type="button">COPY</button>
+        </div>
+
+        <div class="actions">
+          <a href="/install" class="btn btn-primary">▸ install quil</a>
+          <a href={SITE.github} class="btn btn-outline" rel="noopener external">★ star on github</a>
+        </div>
       </div>
     </div>
   </section>
 </Page>
+
+<style>
+  .mini-pane {
+    border: 1px solid var(--line-2);
+    padding: 8px 10px;
+    background: #0a0605;
+  }
+  .mini-pane .mini-label {
+    font-size: 10px;
+    color: var(--ink-4);
+    letter-spacing: 0.12em;
+  }
+  .mini-pane .mini-body {
+    color: var(--pale);
+    font-size: 11.5px;
+    margin-top: 4px;
+    font-family: var(--mono-stack);
+  }
+</style>
+
+<script>
+  // ------------------------------------------------------------------
+  // Hero — reboot restore animation. Plays once on load, replays when
+  // the viz is re-intersected after leaving the viewport.
+  // ------------------------------------------------------------------
+  const rbLog = document.getElementById("rb-log");
+  const rbRestored = document.getElementById("rb-restored");
+  const rbState = document.getElementById("rb-state");
+
+  const rebootSteps = [
+    "[00.1s]  ✓ daemon quild started",
+    "[00.8s]  ✓ read workspace.json · 4 panes · 2 tabs",
+    "[01.2s]  ✓ rebuilt split tree · H(V(a,b), V(c,d))",
+    "[03.5s]  ✓ ghost buffer replay · 2,189 lines",
+    "[12.1s]  ✓ claude --resume 8f2e1c…  (ai-01)",
+    "[18.4s]  ✓ ssh -o ServerAliveInterval=30 deploy@prod-eu-1",
+    "[22.9s]  ✓ stripe listen --forward-to ...",
+    "[27.4s]  ✓ workspace fully restored",
+  ];
+
+  function playReboot() {
+    if (!rbLog || !rbRestored || !rbState) return;
+    rbLog.innerHTML = "";
+    rbRestored.style.opacity = "0";
+    rbState.textContent = "● RESTORING";
+    rbState.style.color = "var(--flame)";
+
+    let i = 0;
+    const tick = () => {
+      if (i >= rebootSteps.length) {
+        rbState.textContent = "● RESTORED";
+        rbState.style.color = "#9ad17a";
+        rbRestored.style.opacity = "1";
+        return;
+      }
+      const line = document.createElement("div");
+      line.textContent = rebootSteps[i];
+      line.style.opacity = "0";
+      line.style.transform = "translateX(-6px)";
+      line.style.transition = "opacity 0.25s, transform 0.25s";
+      rbLog.appendChild(line);
+      requestAnimationFrame(() => {
+        line.style.opacity = "1";
+        line.style.transform = "none";
+      });
+      i++;
+      setTimeout(tick, 380);
+    };
+    setTimeout(tick, 500);
+  }
+
+  playReboot();
+
+  // ------------------------------------------------------------------
+  // Interactive demo section — types out per-pane content and wires up
+  // pane / tab focus interactions.
+  // ------------------------------------------------------------------
+  type PaneLine = { cls: string; html: string };
+
+  const PANE_CONTENT: Record<string, PaneLine[]> = {
+    claude: [
+      { cls: "tline", html: '<span class="prompt-glyph">›</span> <span class="user">you</span> can you add auto-resume to the SSH plugin?' },
+      { cls: "tline dim", html: "" },
+      { cls: "tline", html: '<span class="ai">●</span> <span class="path">claude</span> Yes. I\'ll modify <code>~/.quil/plugins/ssh.toml</code> to add a <code>[persistence]</code> block with <code>strategy = "rerun"</code> so the daemon respawns the same ssh command after a reboot.' },
+      { cls: "tline dim", html: "" },
+      { cls: "tline", html: '<span class="ai">●</span> <span class="path">claude</span> Applying the diff now...' },
+      { cls: "tline ok", html: "    ✓ ssh.toml updated" },
+      { cls: "tline ok", html: "    ✓ hot-reload: 1 plugin reloaded" },
+      { cls: "tline", html: '<span class="ai">●</span> <span class="path">claude</span> Done. Your SSH panes will now auto-reconnect on reboot.<span class="caret-inline"></span>' },
+    ],
+    shell: [
+      { cls: "tline", html: '<span class="prompt-glyph">$</span> <span class="cmd">git status</span>' },
+      { cls: "tline dim", html: "On branch main" },
+      { cls: "tline dim", html: "Your branch is up to date with 'origin/main'." },
+      { cls: "tline dim", html: "" },
+      { cls: "tline dim", html: "Changes not staged for commit:" },
+      { cls: "tline", html: '        modified:   <span class="ai">internal/plugin/ssh.go</span>' },
+      { cls: "tline", html: '        modified:   <span class="ai">plugins/ssh.toml</span>' },
+      { cls: "tline dim", html: "" },
+      { cls: "tline", html: '<span class="prompt-glyph">$</span> <span class="cmd">go test ./internal/plugin/...</span>' },
+      { cls: "tline ok", html: "ok  quil/internal/plugin       0.31s" },
+      { cls: "tline ok", html: 'PASS · 12 tests<span class="caret-inline"></span>' },
+    ],
+    ssh: [
+      { cls: "tline", html: '<span class="prompt-glyph">$</span> <span class="cmd">ssh -o ServerAliveInterval=30 deploy@prod-eu-1</span>' },
+      { cls: "tline ok", html: "connected · latency 12ms · keys=ed25519" },
+      { cls: "tline dim", html: "───── last login: Fri Apr 18 09:42 from 82.164.1.90 ─────" },
+      { cls: "tline", html: '<span class="prompt-glyph">deploy@prod-eu-1:~$</span> <span class="cmd">uptime</span>' },
+      { cls: "tline dim", html: " 12:01:33 up 194 days, 3:14, load average: 0.34, 0.28, 0.22" },
+      { cls: "tline", html: '<span class="prompt-glyph">deploy@prod-eu-1:~$</span> <span class="cmd">tail -f /var/log/app.log</span>' },
+      { cls: "tline dim", html: "2026-04-18 12:01:33 INFO  request_id=a8f3 status=200 dur=42ms" },
+      { cls: "tline dim", html: "2026-04-18 12:01:34 INFO  request_id=b1c7 status=200 dur=37ms" },
+      { cls: "tline", html: '<span style="color:#ffcc66;">2026-04-18 12:01:35 WARN  slow_query duration=842ms table=orders</span><span class="caret-inline"></span>' },
+    ],
+    stripe: [
+      { cls: "tline", html: '<span class="prompt-glyph">$</span> <span class="cmd">stripe listen --forward-to localhost:4242/webhook</span>' },
+      { cls: "tline ok", html: "▸ Ready! Your webhook signing secret is whsec_****3f2b" },
+      { cls: "tline dim", html: "▸ Forwarding to http://localhost:4242/webhook" },
+      { cls: "tline dim", html: "───────────────────────────────────────────────" },
+      { cls: "tline ok", html: "2026-04-18 12:01:02  [200]  payment_intent.succeeded  →  evt_1Mx7…" },
+      { cls: "tline ok", html: "2026-04-18 12:01:17  [200]  charge.succeeded          →  evt_1Mx7…" },
+      { cls: "tline ok", html: "2026-04-18 12:01:44  [200]  invoice.paid              →  evt_1Mx7…" },
+      { cls: "tline", html: '<span class="dim">awaiting webhooks…</span><span class="caret-inline"></span>' },
+    ],
+  };
+
+  function renderPane(key: string): void {
+    const el = document.getElementById("pane-" + key + "-content");
+    if (!el) return;
+    el.innerHTML = "";
+    const lines = PANE_CONTENT[key];
+    let i = 0;
+    const next = () => {
+      if (i >= lines.length) return;
+      const line = lines[i];
+      const d = document.createElement("div");
+      d.className = line.cls;
+      d.innerHTML = line.html || "&nbsp;";
+      d.style.opacity = "0";
+      el.appendChild(d);
+      requestAnimationFrame(() => {
+        d.style.transition = "opacity 0.15s";
+        d.style.opacity = "1";
+      });
+      i++;
+      setTimeout(next, 160 + Math.random() * 90);
+    };
+    next();
+  }
+
+  (["claude", "shell", "ssh", "stripe"] as const).forEach((k, idx) => {
+    setTimeout(() => renderPane(k), 200 + idx * 400);
+  });
+
+  const paneLabels: Record<string, string> = {
+    claude: "1/4 · claude-code",
+    shell: "2/4 · terminal",
+    ssh: "3/4 · ssh",
+    stripe: "4/4 · stripe",
+  };
+
+  document.querySelectorAll<HTMLElement>(".demo-pane").forEach((p) => {
+    p.addEventListener("click", () => {
+      document.querySelectorAll(".demo-pane").forEach((x) => x.classList.remove("focused"));
+      p.classList.add("focused");
+      const name = p.dataset.pane;
+      const focusName = document.getElementById("focus-name");
+      if (focusName && name) focusName.textContent = paneLabels[name] ?? name;
+    });
+  });
+
+  document.querySelectorAll<HTMLElement>(".demo-tab").forEach((t) => {
+    t.addEventListener("click", () => {
+      document.querySelectorAll(".demo-tab").forEach((x) => x.classList.remove("active"));
+      t.classList.add("active");
+    });
+  });
+
+  // ------------------------------------------------------------------
+  // Status bar — fake "snapshot N seconds ago" ticker
+  // ------------------------------------------------------------------
+  let snapSecs = 2;
+  setInterval(() => {
+    snapSecs = (snapSecs + 1) % 180;
+    const el = document.getElementById("snap-time");
+    if (!el) return;
+    const mm = Math.floor(snapSecs / 60);
+    const ss = snapSecs % 60;
+    el.textContent = `00:0${mm}:${String(ss).padStart(2, "0")} ago`;
+  }, 1000);
+
+  // ------------------------------------------------------------------
+  // Copy-install button
+  // ------------------------------------------------------------------
+  const copyBtn = document.getElementById("copy-install") as HTMLButtonElement | null;
+  const installCmd = document.getElementById("install-cmd");
+  if (copyBtn && installCmd && navigator.clipboard) {
+    copyBtn.addEventListener("click", () => {
+      navigator.clipboard.writeText(installCmd.textContent ?? "").then(() => {
+        copyBtn.textContent = "COPIED";
+        setTimeout(() => (copyBtn.textContent = "COPY"), 1500);
+      });
+    });
+  }
+</script>

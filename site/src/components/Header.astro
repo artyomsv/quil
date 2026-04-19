@@ -1,73 +1,69 @@
 ---
-// Header — sticky top nav.
-//
-// Zero-JS: the "Compare ▾" dropdown uses a native <details>/<summary>
-// element, which gives us click-to-open, Escape-to-close, and mobile
-// collapse for free without a single line of JavaScript.
-
-import Icon from "@/components/Icon.astro";
+/**
+ * Site header — sticky top nav with brand, primary links, compare
+ * dropdown, version chip, and GitHub CTA.
+ *
+ * Zero JS: the compare dropdown uses the native <details>/<summary>
+ * element, which gives click-to-open, Escape-to-close, and mobile
+ * collapse without a single line of JavaScript.
+ *
+ * Styling lives in src/styles/ember.css under the `.site-header`
+ * scope — keeping class names terse here (the CSS is specific enough
+ * that utility overrides aren't needed).
+ */
 import { SITE } from "@/data/seo";
 
-const nav = [
-  { href: "/features", label: "Features" },
-  { href: "/plugins", label: "Plugins" },
-  { href: "/install", label: "Install" },
-  { href: "/docs", label: "Docs" },
+const navLinks = [
+  { href: "/features", label: "features" },
+  { href: "/plugins",  label: "plugins"  },
+  { href: "/install",  label: "install"  },
+  { href: "/docs",     label: "docs"     },
 ];
 
 const compareLinks = [
-  { href: "/vs/tmux", label: "vs tmux" },
-  { href: "/vs/zellij", label: "vs Zellij" },
-  { href: "/vs/wezterm", label: "vs WezTerm" },
-  { href: "/vs/screen", label: "vs GNU Screen" },
+  { href: "/vs/tmux",    label: "vs tmux"       },
+  { href: "/vs/zellij",  label: "vs Zellij"     },
+  { href: "/vs/wezterm", label: "vs WezTerm"    },
+  { href: "/vs/screen",  label: "vs GNU Screen" },
 ];
+
+const currentPath = Astro.url.pathname.replace(/\/$/, "") || "/";
+
+function isActive(href: string): boolean {
+  if (href === "/") return currentPath === "/";
+  return currentPath === href || currentPath.startsWith(href + "/");
+}
+
+const compareOpen = compareLinks.some((link) => isActive(link.href));
 ---
-<header class="sticky top-0 z-40 border-b border-border/60 backdrop-blur-xl bg-background/70">
-  <nav class="mx-auto flex max-w-6xl items-center gap-6 px-6 py-4" aria-label="Main">
-    <!-- Brand -->
-    <a href="/" class="flex items-center gap-2.5 text-foreground no-underline">
-      <img
-        src="/brand/mark.svg"
-        alt=""
-        width="32"
-        height="34"
-        class="shrink-0"
-        aria-hidden="true"
-      />
-      <span class="text-lg font-bold tracking-tight text-foreground">quil</span>
+<header class="site-header">
+  <nav class="nav" aria-label="Main">
+    <a href="/" class="brand">
+      <img src="/brand/mark.svg" alt="" aria-hidden="true" width="24" height="26" />
+      <span>quil</span>
     </a>
 
-    <!-- Primary nav -->
-    <ul class="ml-6 hidden items-center gap-1 md:flex">
-      {nav.map((item) => (
+    <ul class="nav-links">
+      {navLinks.map((link) => (
         <li>
           <a
-            href={item.href}
-            class="rounded-md px-3 py-1.5 text-sm font-medium text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground"
+            href={link.href}
+            class:list={["nav-link", { active: isActive(link.href) }]}
           >
-            {item.label}
+            {link.label}
           </a>
         </li>
       ))}
 
-      <!-- Compare dropdown: native <details> for zero-JS click-to-open -->
-      <li class="relative">
-        <details class="group">
-          <summary class="flex cursor-pointer list-none items-center gap-1 rounded-md px-3 py-1.5 text-sm font-medium text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground [&::-webkit-details-marker]:hidden">
-            Compare
-            <Icon name="chevron-down" size={14} class="transition-transform group-open:rotate-180" />
+      <li>
+        <details class="nav-dd" open={compareOpen || undefined}>
+          <summary>
+            compare <span class="slash">▾</span>
           </summary>
-          <ul
-            class="absolute left-0 top-full mt-2 min-w-[180px] space-y-0.5 rounded-xl border border-border/80 bg-popover/95 p-2 shadow-xl backdrop-blur-xl"
-          >
-            {compareLinks.map((item) => (
+          <ul class="dd-menu">
+            {compareLinks.map((link) => (
               <li>
-                <a
-                  href={item.href}
-                  class="block rounded-lg px-3 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-muted/70 hover:text-foreground"
-                >
-                  {item.label}
-                </a>
+                <a href={link.href}>{link.label}</a>
               </li>
             ))}
           </ul>
@@ -75,14 +71,14 @@ const compareLinks = [
       </li>
     </ul>
 
-    <!-- GitHub CTA on the right -->
-    <a
-      href={SITE.github}
-      rel="noopener external"
-      class="ml-auto inline-flex items-center gap-2 rounded-lg border border-border bg-muted/40 px-3 py-1.5 text-sm font-medium text-muted-foreground transition-colors hover:border-primary/40 hover:bg-muted/60 hover:text-foreground"
-    >
-      <Icon name="github" size={14} />
-      <span class="hidden sm:inline">GitHub</span>
-    </a>
+    <div class="nav-right">
+      <span class="version-chip">v<b>{SITE.software.version}</b> · {SITE.software.license}</span>
+      <a href={SITE.github} class="btn btn-ghost" rel="noopener external">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+          <path d="M12 .5C5.65.5.5 5.65.5 12a11.5 11.5 0 0 0 7.86 10.92c.57.1.78-.25.78-.55v-1.92c-3.2.7-3.88-1.54-3.88-1.54-.52-1.33-1.28-1.68-1.28-1.68-1.04-.72.08-.7.08-.7 1.16.08 1.77 1.2 1.77 1.2 1.03 1.77 2.71 1.26 3.37.96.1-.75.4-1.26.73-1.55-2.56-.3-5.25-1.28-5.25-5.7 0-1.26.45-2.3 1.19-3.1-.12-.3-.52-1.48.11-3.1 0 0 .97-.3 3.18 1.18a11.1 11.1 0 0 1 5.8 0c2.2-1.48 3.17-1.18 3.17-1.18.63 1.62.23 2.8.12 3.1.74.8 1.19 1.84 1.19 3.1 0 4.43-2.7 5.4-5.27 5.68.42.36.78 1.07.78 2.16v3.2c0 .3.2.66.78.55A11.5 11.5 0 0 0 23.5 12C23.5 5.65 18.35.5 12 .5Z" />
+        </svg>
+        github
+      </a>
+    </div>
   </nav>
 </header>

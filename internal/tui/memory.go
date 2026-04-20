@@ -31,7 +31,6 @@ type memoryRow struct {
 	label  string
 	goHeap uint64
 	ptyRSS uint64
-	tui    uint64 // filled in by the renderer, not by the tree builder
 	total  uint64
 }
 
@@ -163,7 +162,8 @@ type memoryDialogState struct {
 }
 
 // memoryReportMsg is the Bubble Tea message produced when the TUI receives
-// MsgMemoryReportResp. Task 14 will emit it; Task 13 defines the type.
+// MsgMemoryReportResp from the daemon. Update applies it via
+// applyMemoryReport.
 type memoryReportMsg struct {
 	Resp ipc.MemoryReportRespPayload
 }
@@ -183,9 +183,10 @@ func memoryTickCmd() tea.Cmd {
 	})
 }
 
-// openMemoryDialog transitions the Model into the Memory dialog and marks
-// the snapshot as loading. Task 14 will issue the IPC request; for now we
-// just show a loading state until applyMemoryReport is called with data.
+// openMemoryDialog transitions the Model into the Memory dialog, clears
+// any stale tree, and signals that a fresh snapshot is wanted. The
+// subsequent refreshMemory() call (paired in About-menu dispatch) issues
+// the IPC request.
 func (m Model) openMemoryDialog() Model {
 	m.dialog = dialogMemory
 	m.mem.loading = true
@@ -261,13 +262,42 @@ func (m Model) tuiLocalMem(paneID string) uint64 {
 	return 0
 }
 
+// tuiLocalMemTotal returns the single non-zero contribution from a notes
+// editor (if any). Exists as its own method so renderStatusBar doesn't
+// need to walk every pane when at most one can contribute.
+func (m Model) tuiLocalMemTotal() uint64 {
+	if m.notesEditor != nil {
+		return m.notesEditor.ApproxBytes()
+	}
+	return 0
+}
+
+// jumpToParentTab returns the row index of the parent-tab row for the
+// pane at `cursor`, or -1 if no parent tab exists in the flattened tree.
+func jumpToParentTab(rows []memoryRow, cursor int) int {
+	if cursor < 0 || cursor >= len(rows) || rows[cursor].kind != memRowPane {
+		return -1
+	}
+	tabID := rows[cursor].tabID
+	for i := cursor - 1; i >= 0; i-- {
+		if rows[i].tabID == tabID && rows[i].kind == memRowTab {
+			return i
+		}
+	}
+	return -1
+}
+
 // handleMemoryDialogKey processes a key press while the Memory dialog is
 // open. Cursor navigation, expand/collapse, refresh, and close.
 func (m Model) handleMemoryDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	// When loading or no tree, only Esc works.
+	// When loading or no tree, only Esc and refresh work.
 	if m.mem.tree == nil {
-		if msg.String() == "esc" {
+		switch msg.String() {
+		case "esc":
 			m.dialog = dialogNone
+		case "r", "R":
+			m.mem.loading = true
+			return m, m.refreshMemory()
 		}
 		return m, nil
 	}
@@ -291,11 +321,9 @@ func (m Model) handleMemoryDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if m.mem.cursor < len(rows) {
 			row := rows[m.mem.cursor]
 			if row.kind == memRowPane {
-				for i := m.mem.cursor - 1; i >= 0; i-- {
-					if rows[i].tabID == row.tabID && rows[i].kind == memRowTab {
-						m.mem.cursor = i
-						return m, nil
-					}
+				if parent := jumpToParentTab(rows, m.mem.cursor); parent >= 0 {
+					m.mem.cursor = parent
+					return m, nil
 				}
 			} else if row.kind == memRowTab {
 				m.mem.tree.toggleAt(m.mem.cursor)
@@ -372,6 +400,9 @@ func renderMemoryRow(m Model, row memoryRow, selected bool) string {
 // Used for pane/tab labels in the memory dialog. Rune-aware so multi-byte
 // UTF-8 names (CJK, emoji) are not sliced mid-rune.
 func truncateMem(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
 	r := []rune(s)
 	if len(r) <= n {
 		return s

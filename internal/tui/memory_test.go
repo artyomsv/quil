@@ -52,13 +52,10 @@ func TestMemoryTree_ExpandTab(t *testing.T) {
 	}
 }
 
-func TestUpdate_MemoryReportMsgReArmsListener(t *testing.T) {
-	// We can't easily construct a full Model without the IPC client, but we
-	// CAN assert that applyMemoryReport sets the expected state and the cmd
-	// branch in Update returns a non-nil command. The simplest check is
-	// structural: confirm at least one occurrence of
-	// "m.listenForMessages()" in the memoryReportMsg case. Skip the structural
-	// check — instead test applyMemoryReport directly.
+func TestApplyMemoryReport_StoresLastMemResp(t *testing.T) {
+	// applyMemoryReport's state contract: store the payload on the Model so
+	// the status bar can render the grand total even while the dialog is
+	// closed, and (when the dialog is open) rebuild the tree.
 	m := Model{}
 	resp := ipc.MemoryReportRespPayload{
 		Panes: []ipc.PaneMemInfo{{PaneID: "p1", TabID: "tA", TotalBytes: 42}},

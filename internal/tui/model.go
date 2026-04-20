@@ -2162,11 +2162,7 @@ func (m Model) renderStatusBar() string {
 	// Right side: keybinding hints + version
 	right := "^T tab | ^N pane | ^W close | F1 help | ^Q quit | v" + m.version
 	if m.lastMemResp != nil {
-		tuiExtra := uint64(0)
-		for _, p := range m.lastMemResp.Panes {
-			tuiExtra += m.tuiLocalMem(p.PaneID)
-		}
-		total := m.lastMemResp.Total + tuiExtra
+		total := m.lastMemResp.Total + m.tuiLocalMemTotal()
 		right = "mem " + memreport.HumanBytes(total) + " | " + right
 	}
 	if m.devMode {

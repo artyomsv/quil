@@ -85,6 +85,15 @@ func (n *NotesEditor) Dirty() bool {
 	return n.dirty
 }
 
+// ApproxBytes returns a lower-bound in-memory byte count for the editor
+// buffer. Used by the Memory dialog to attribute notes memory per pane.
+func (n *NotesEditor) ApproxBytes() uint64 {
+	if n == nil {
+		return 0
+	}
+	return n.editor.ApproxBytes()
+}
+
 // PaneID returns the pane this editor is bound to.
 func (n *NotesEditor) PaneID() string {
 	if n == nil {

@@ -2,8 +2,10 @@ package tui
 
 import (
 	"fmt"
+	"log"
 	"sort"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -166,6 +168,21 @@ type memoryReportMsg struct {
 	Resp ipc.MemoryReportRespPayload
 }
 
+// memoryTickMsg drives the 5-second refresh cadence for the Memory dialog
+// and status-bar total.
+type memoryTickMsg struct{}
+
+// memoryTickInterval is how often the TUI asks the daemon for a fresh
+// memory snapshot.
+const memoryTickInterval = 5 * time.Second
+
+// memoryTickCmd schedules the next memoryTickMsg.
+func memoryTickCmd() tea.Cmd {
+	return tea.Tick(memoryTickInterval, func(time.Time) tea.Msg {
+		return memoryTickMsg{}
+	})
+}
+
 // openMemoryDialog transitions the Model into the Memory dialog and marks
 // the snapshot as loading. Task 14 will issue the IPC request; for now we
 // just show a loading state until applyMemoryReport is called with data.
@@ -178,11 +195,25 @@ func (m Model) openMemoryDialog() Model {
 	return m
 }
 
-// refreshMemory is a placeholder command. Task 14 replaces the body with
-// real IPC. Returning nil here is safe — the dialog renders "Loading..."
-// until applyMemoryReport lands the first snapshot.
+// refreshMemory issues MsgMemoryReportReq to the daemon as a fire-and-
+// forget send. The corresponding MsgMemoryReportResp is dispatched by
+// listenForMessages → memoryReportMsg → Update.
 func (m Model) refreshMemory() tea.Cmd {
-	return nil
+	return func() tea.Msg {
+		if m.client == nil {
+			return nil
+		}
+		msg, err := ipc.NewMessage(ipc.MsgMemoryReportReq, ipc.MemoryReportReqPayload{})
+		if err != nil {
+			log.Printf("refreshMemory: marshal: %v", err)
+			return nil
+		}
+		msg.ID = fmt.Sprintf("mem-%d", time.Now().UnixNano())
+		if err := m.client.Send(msg); err != nil {
+			log.Printf("refreshMemory: send: %v", err)
+		}
+		return nil
+	}
 }
 
 // applyMemoryReport rebuilds the tree from a fresh response and clamps the
@@ -221,9 +252,13 @@ func (m Model) tabOrderAndNames() ([]string, map[string]string) {
 }
 
 // tuiLocalMem returns an estimate of TUI-side memory attributable to a
-// pane. Task 13 provides a stub that always returns 0; Task 14 will add
-// VT grid + notes editor accounting.
+// pane. Today that's the notes editor buffer when the pane has an open
+// notes editor. VT grid state is not counted — the emulator owns that and
+// no public accessor exists on the pane model.
 func (m Model) tuiLocalMem(paneID string) uint64 {
+	if m.notesEditor != nil && m.notesEditor.PaneID() == paneID {
+		return m.notesEditor.ApproxBytes()
+	}
 	return 0
 }
 

@@ -1173,6 +1173,60 @@ func (d *Daemon) buildWorkspaceState() map[string]any {
 	}
 }
 
+// claudeSessionExistsFn is the probe resolveSpawnArgs uses to decide whether
+// a restored claude-code pane can use --resume <uuid> (unique session) or
+// must fall back to --continue (Claude's most-recent-in-CWD lookup).
+//
+// Defaults to the real filesystem check; tests override with a stub so the
+// arg-merging matrix never reaches ~/.claude.
+var claudeSessionExistsFn = claudeSessionFileExists
+
+// escapeClaudeCWD mirrors Claude Code's on-disk naming for per-project
+// session directories under ~/.claude/projects/. Each path separator or
+// colon becomes '-'; no other transformation. Confirmed against real
+// directories (e.g. E:\Projects\Stukans → "E--Projects-Stukans").
+func escapeClaudeCWD(cwd string) string {
+	r := strings.NewReplacer(":", "-", `\`, "-", "/", "-")
+	return r.Replace(cwd)
+}
+
+// claudeSessionFileExists reports whether Claude has persisted a session
+// file for the given CWD + session ID. Called on the restore path for
+// claude-code panes; a true result means the pane can resume its own
+// unique session, a false result forces the --continue fallback.
+//
+// Any os.Stat error (including permission denial or the home dir being
+// unavailable) returns false — the fallback path is always safe.
+func claudeSessionFileExists(cwd, sessionID string) bool {
+	if cwd == "" || sessionID == "" {
+		return false
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return false
+	}
+	path := filepath.Join(home, ".claude", "projects", escapeClaudeCWD(cwd), sessionID+".jsonl")
+	_, err = os.Stat(path)
+	return err == nil
+}
+
+// resumeTemplateFor returns the resume-arg template resolveSpawnArgs should
+// expand on the restore branch. For a claude-code pane whose session file
+// is on disk, it promotes the args to ["--resume", "{session_id}"] so each
+// pane reattaches to its own session. Otherwise it returns the plugin's
+// configured ResumeArgs (typically ["--continue"] for claude-code, which is
+// correct for panes closed during Claude's startup screens before any
+// session file was written).
+func resumeTemplateFor(p *plugin.PanePlugin, pane *Pane) []string {
+	if p.Name == "claude-code" && p.Persistence.Strategy == "preassign_id" {
+		sessionID := pane.PluginState["session_id"]
+		if sessionID != "" && claudeSessionExistsFn(pane.CWD, sessionID) {
+			return []string{"--resume", "{session_id}"}
+		}
+	}
+	return p.Persistence.ResumeArgs
+}
+
 // resolveSpawnArgs computes the argv (excluding cmd) that spawnPane should use
 // for the given pane and plugin, applying base args, the InstanceArgs override,
 // preassign_id start args, and the restore-branch resume-args append. It is a
@@ -1206,8 +1260,9 @@ func resolveSpawnArgs(p *plugin.PanePlugin, pane *Pane, restoring bool) []string
 	if restoring {
 		switch p.Persistence.Strategy {
 		case "preassign_id", "session_scrape":
-			if len(p.Persistence.ResumeArgs) > 0 && len(pane.PluginState) > 0 {
-				resumeArgs := plugin.ExpandResumeArgs(p.Persistence.ResumeArgs, pane.PluginState)
+			template := resumeTemplateFor(p, pane)
+			if len(template) > 0 && len(pane.PluginState) > 0 {
+				resumeArgs := plugin.ExpandResumeArgs(template, pane.PluginState)
 				args = append(args, resumeArgs...)
 			}
 		case "rerun":

@@ -50,6 +50,7 @@ type Daemon struct {
 
 	memReport       *memreport.Collector
 	collectorCancel context.CancelFunc
+	collectorWG     sync.WaitGroup
 }
 
 func New(cfg config.Config) *Daemon {
@@ -125,7 +126,11 @@ func (d *Daemon) Start() error {
 		<-d.shutdown
 		cancel()
 	}()
-	go d.memReport.Run(ctx)
+	d.collectorWG.Add(1)
+	go func() {
+		defer d.collectorWG.Done()
+		d.memReport.Run(ctx)
+	}()
 
 	log.Printf("quild started, listening on %s", sockPath)
 	return nil
@@ -179,6 +184,7 @@ func (d *Daemon) Wait() {
 func (d *Daemon) Stop() {
 	if d.collectorCancel != nil {
 		d.collectorCancel()
+		d.collectorWG.Wait()
 	}
 	log.Print("daemon stopping, writing final snapshot...")
 	// Final snapshot before shutdown

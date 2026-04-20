@@ -1,7 +1,10 @@
 package memreport
 
 import (
+	"context"
+	"sync"
 	"testing"
+	"time"
 
 	ringbuf "github.com/artyomsv/quil/internal/ringbuf"
 )
@@ -83,4 +86,54 @@ func TestCollector_LatestBeforeRun(t *testing.T) {
 	if snap := c.Latest(); snap != nil {
 		t.Errorf("Latest() before Run() = %+v, want nil", snap)
 	}
+}
+
+type stubLister struct {
+	panes []paneSource
+}
+
+func (s *stubLister) PaneSources() []paneSource { return s.panes }
+
+func TestCollector_RunPopulatesLatest(t *testing.T) {
+	l := &stubLister{panes: nil}
+	c := NewCollector(l, 50*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go c.Run(ctx)
+
+	// First collection runs synchronously at Run entry; Latest should
+	// become non-nil almost immediately.
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if c.Latest() != nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("Latest() never became non-nil")
+}
+
+func TestCollector_ConcurrentReaders(t *testing.T) {
+	l := &stubLister{panes: nil}
+	c := NewCollector(l, 10*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go c.Run(ctx)
+
+	// Wait for first snapshot.
+	for i := 0; i < 50 && c.Latest() == nil; i++ {
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				_ = c.Latest()
+			}
+		}()
+	}
+	wg.Wait()
 }

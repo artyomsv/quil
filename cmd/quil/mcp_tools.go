@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/artyomsv/quil/internal/ipc"
+	"github.com/artyomsv/quil/internal/memreport"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -30,6 +31,9 @@ func registerMCPTools(s *mcp.Server, bridge *mcpBridge, mcpLog *mcpLogger) {
 	// Notification tools
 	registerGetNotificationsTool(s, bridge, mcpLog)
 	registerWatchNotificationsTool(s, bridge, mcpLog)
+	// Memory reporting
+	registerGetMemoryReportTool(s, bridge, mcpLog)
+	registerGetPaneMemoryTool(s, bridge, mcpLog)
 }
 
 func registerListPanesTool(s *mcp.Server, bridge *mcpBridge, mcpLog *mcpLogger) {
@@ -505,6 +509,199 @@ func registerWatchNotificationsTool(s *mcp.Server, bridge *mcpBridge, mcpLog *mc
 		}
 		// WatchNotificationsRespPayload has primitive fields — json.MarshalIndent cannot fail
 		text, _ := json.MarshalIndent(payload, "", "  ")
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: string(text)}},
+		}, nil, nil
+	})
+}
+
+// TabMemSummary is the per-tab aggregation emitted by get_memory_report.
+type TabMemSummary struct {
+	TabID      string `json:"tab_id"`
+	TabName    string `json:"tab_name"`
+	PaneCount  int    `json:"pane_count"`
+	TotalBytes uint64 `json:"total_bytes"`
+	TotalHuman string `json:"total_human"`
+}
+
+// buildTabMemSummaries is used by registerGetMemoryReportTool to build the tabs[]
+// array in the tool output. The tab-aggregation logic lives here so the
+// tool handler stays short and focused on the request/response flow.
+func buildTabMemSummaries(mem ipc.MemoryReportRespPayload, tabs []ipc.TabInfo) (goHeap, ptyRSS uint64, summaries []TabMemSummary) {
+	tabNames := make(map[string]string, len(tabs))
+	tabOrder := make([]string, 0, len(tabs))
+	for _, t := range tabs {
+		tabNames[t.ID] = t.Name
+		tabOrder = append(tabOrder, t.ID)
+	}
+
+	type agg struct {
+		name  string
+		count int
+		total uint64
+	}
+	tabAgg := make(map[string]*agg, len(tabOrder))
+	for _, id := range tabOrder {
+		tabAgg[id] = &agg{name: tabNames[id]}
+	}
+
+	for _, p := range mem.Panes {
+		goHeap += p.GoHeapBytes
+		ptyRSS += p.PTYRSSBytes
+		a, ok := tabAgg[p.TabID]
+		if !ok {
+			a = &agg{name: p.TabID}
+			tabAgg[p.TabID] = a
+			tabOrder = append(tabOrder, p.TabID)
+		}
+		a.count++
+		a.total += p.TotalBytes
+	}
+
+	summaries = make([]TabMemSummary, 0, len(tabOrder))
+	for _, id := range tabOrder {
+		a := tabAgg[id]
+		summaries = append(summaries, TabMemSummary{
+			TabID:      id,
+			TabName:    a.name,
+			PaneCount:  a.count,
+			TotalBytes: a.total,
+			TotalHuman: memreport.HumanBytes(a.total),
+		})
+	}
+	return
+}
+
+func registerGetMemoryReportTool(s *mcp.Server, bridge *mcpBridge, mcpLog *mcpLogger) {
+	type Input struct{}
+
+	type Output struct {
+		SnapshotAt  string          `json:"snapshot_at"`
+		TotalBytes  uint64          `json:"total_bytes"`
+		TotalHuman  string          `json:"total_human"`
+		GoHeapBytes uint64          `json:"go_heap_bytes"`
+		PTYRSSBytes uint64          `json:"pty_rss_bytes"`
+		Tabs        []TabMemSummary `json:"tabs"`
+	}
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "get_memory_report",
+		Description: "Return a snapshot of daemon-side memory usage: per-tab totals plus grand total. Layers reported: Go-heap (ring buffers + ghost snapshots + plugin state) and PTY child resident memory (OS-reported; not comparable across platforms). TUI-side memory is intentionally omitted because MCP may be invoked when the TUI is disconnected.",
+	}, func(_ context.Context, _ *mcp.CallToolRequest, _ Input) (*mcp.CallToolResult, any, error) {
+		memResp, err := bridge.request(ipc.MsgMemoryReportReq, ipc.MemoryReportReqPayload{})
+		if err != nil {
+			return nil, nil, fmt.Errorf("get_memory_report: %w", err)
+		}
+		var memPayload ipc.MemoryReportRespPayload
+		if err := memResp.DecodePayload(&memPayload); err != nil {
+			return nil, nil, fmt.Errorf("get_memory_report decode: %w", err)
+		}
+
+		tabsResp, err := bridge.request(ipc.MsgListTabsReq, nil)
+		if err != nil {
+			return nil, nil, fmt.Errorf("get_memory_report tabs: %w", err)
+		}
+		var tabsPayload ipc.ListTabsRespPayload
+		if err := tabsResp.DecodePayload(&tabsPayload); err != nil {
+			return nil, nil, fmt.Errorf("get_memory_report tabs decode: %w", err)
+		}
+
+		goHeap, ptyRSS, summaries := buildTabMemSummaries(memPayload, tabsPayload.Tabs)
+
+		out := Output{
+			SnapshotAt:  time.Unix(0, memPayload.SnapshotAt).UTC().Format(time.RFC3339),
+			TotalBytes:  memPayload.Total,
+			TotalHuman:  memreport.HumanBytes(memPayload.Total),
+			GoHeapBytes: goHeap,
+			PTYRSSBytes: ptyRSS,
+			Tabs:        summaries,
+		}
+
+		mcpLog.Log("", "get_memory_report", fmt.Sprintf("panes=%d total=%s", len(memPayload.Panes), out.TotalHuman))
+		text, _ := json.MarshalIndent(out, "", "  ")
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: string(text)}},
+		}, nil, nil
+	})
+}
+
+// fetchPaneMeta best-effort fetches a pane's name + type via MsgPaneStatusReq
+// for use by registerGetPaneMemoryTool. On failure returns empty strings —
+// the memory numbers are the point, metadata is nice-to-have.
+func fetchPaneMeta(bridge *mcpBridge, paneID string) (name, paneType string) {
+	resp, err := bridge.request(ipc.MsgPaneStatusReq, ipc.PaneStatusReqPayload{PaneID: paneID})
+	if err != nil {
+		return "", ""
+	}
+	var status ipc.PaneStatusRespPayload
+	if err := resp.DecodePayload(&status); err != nil {
+		return "", ""
+	}
+	return status.Name, status.Type
+}
+
+func registerGetPaneMemoryTool(s *mcp.Server, bridge *mcpBridge, mcpLog *mcpLogger) {
+	type Input struct {
+		PaneID string `json:"pane_id" jsonschema:"pane ID (use list_panes or get_memory_report to discover)"`
+	}
+
+	type Output struct {
+		SnapshotAt  string `json:"snapshot_at"` // RFC3339 (UTC)
+		PaneID      string `json:"pane_id"`
+		TabID       string `json:"tab_id"`
+		PaneName    string `json:"pane_name,omitempty"`
+		Type        string `json:"type,omitempty"`
+		GoHeapBytes uint64 `json:"go_heap_bytes"`
+		PTYRSSBytes uint64 `json:"pty_rss_bytes"`
+		TotalBytes  uint64 `json:"total_bytes"`
+		TotalHuman  string `json:"total_human"`
+	}
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "get_pane_memory",
+		Description: "Return daemon-side memory usage for a single pane: Go-heap (ring buffer + ghost snapshot + plugin state), PTY child resident memory, and combined total. Call get_memory_report or list_panes first to discover pane IDs. PTY RSS is OS-reported and not comparable across platforms.",
+	}, func(_ context.Context, _ *mcp.CallToolRequest, input Input) (*mcp.CallToolResult, any, error) {
+		if input.PaneID == "" {
+			return nil, nil, fmt.Errorf("get_pane_memory: pane_id is required")
+		}
+
+		memResp, err := bridge.request(ipc.MsgMemoryReportReq, ipc.MemoryReportReqPayload{})
+		if err != nil {
+			return nil, nil, fmt.Errorf("get_pane_memory: %w", err)
+		}
+		var memPayload ipc.MemoryReportRespPayload
+		if err := memResp.DecodePayload(&memPayload); err != nil {
+			return nil, nil, fmt.Errorf("get_pane_memory decode: %w", err)
+		}
+
+		var found *ipc.PaneMemInfo
+		for i := range memPayload.Panes {
+			if memPayload.Panes[i].PaneID == input.PaneID {
+				found = &memPayload.Panes[i]
+				break
+			}
+		}
+		if found == nil {
+			return nil, nil, fmt.Errorf("get_pane_memory: pane not found: %s", input.PaneID)
+		}
+
+		paneName, paneType := fetchPaneMeta(bridge, input.PaneID)
+
+		out := Output{
+			SnapshotAt:  time.Unix(0, memPayload.SnapshotAt).UTC().Format(time.RFC3339),
+			PaneID:      found.PaneID,
+			TabID:       found.TabID,
+			PaneName:    paneName,
+			Type:        paneType,
+			GoHeapBytes: found.GoHeapBytes,
+			PTYRSSBytes: found.PTYRSSBytes,
+			TotalBytes:  found.TotalBytes,
+			TotalHuman:  memreport.HumanBytes(found.TotalBytes),
+		}
+
+		mcpLog.Log(input.PaneID, "get_pane_memory", out.TotalHuman)
+		// Output fields are primitives + strings — json.MarshalIndent cannot fail
+		text, _ := json.MarshalIndent(out, "", "  ")
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: string(text)}},
 		}, nil, nil

@@ -185,6 +185,156 @@ func TestResolveSpawnArgs_Matrix(t *testing.T) {
 	}
 }
 
+// TestResolveSpawnArgs_ClaudeResumePromotion covers the restore-path logic
+// that upgrades claude-code's resume args from the fallback ["--continue"]
+// to ["--resume", "<uuid>"] when the pre-assigned session file is already
+// on disk. Without this promotion, N panes sharing a CWD all converge on
+// claude's "most recent session in cwd" — the exact bug this guards
+// against. The filesystem probe is stubbed so the test never touches
+// ~/.claude/.
+func TestResolveSpawnArgs_ClaudeResumePromotion(t *testing.T) {
+	claudePlugin := &plugin.PanePlugin{
+		Name:    "claude-code",
+		Command: plugin.CommandConfig{Cmd: "claude"},
+		Persistence: plugin.PersistenceConfig{
+			Strategy:   "preassign_id",
+			StartArgs:  []string{"--session-id", "{session_id}"},
+			ResumeArgs: []string{"--continue"},
+		},
+	}
+
+	tests := []struct {
+		name         string
+		pane         *Pane
+		sessionFound bool // stub return value for claudeSessionExistsFn
+		want         []string
+	}{
+		{
+			name: "session file on disk — promoted to --resume",
+			pane: &Pane{
+				CWD:         `E:\Projects\Stukans\Prototypes\calyx`,
+				PluginState: map[string]string{"session_id": "abc-123"},
+			},
+			sessionFound: true,
+			want:         []string{"--resume", "abc-123"},
+		},
+		{
+			name: "session file missing — falls back to --continue",
+			pane: &Pane{
+				CWD:         `E:\Projects\Stukans\Prototypes\calyx`,
+				PluginState: map[string]string{"session_id": "abc-123"},
+			},
+			sessionFound: false,
+			want:         []string{"--continue"},
+		},
+		{
+			name: "InstanceArgs + session file on disk — toggle preserved, --resume appended",
+			pane: &Pane{
+				CWD:          `E:\Projects\Stukans\Prototypes\calyx`,
+				InstanceArgs: []string{"--dangerously-skip-permissions"},
+				PluginState:  map[string]string{"session_id": "abc-123"},
+			},
+			sessionFound: true,
+			want:         []string{"--dangerously-skip-permissions", "--resume", "abc-123"},
+		},
+		{
+			name: "InstanceArgs + session file missing — toggle preserved, --continue fallback",
+			pane: &Pane{
+				CWD:          `E:\Projects\Stukans\Prototypes\calyx`,
+				InstanceArgs: []string{"--dangerously-skip-permissions"},
+				PluginState:  map[string]string{"session_id": "abc-123"},
+			},
+			sessionFound: false,
+			want:         []string{"--dangerously-skip-permissions", "--continue"},
+		},
+		{
+			name: "empty session_id — no promotion even if stub says found",
+			pane: &Pane{
+				CWD:         `E:\Projects\Stukans\Prototypes\calyx`,
+				PluginState: map[string]string{"session_id": ""},
+			},
+			sessionFound: true,
+			want:         []string{"--continue"},
+		},
+	}
+
+	origProbe := claudeSessionExistsFn
+	t.Cleanup(func() { claudeSessionExistsFn = origProbe })
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			claudeSessionExistsFn = func(cwd, sessionID string) bool {
+				if cwd != tt.pane.CWD {
+					t.Errorf("probe cwd = %q, want %q", cwd, tt.pane.CWD)
+				}
+				return tt.sessionFound
+			}
+			got := resolveSpawnArgs(claudePlugin, tt.pane, true)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("resolveSpawnArgs:\n  got:  %v\n  want: %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestResolveSpawnArgs_ClaudeResumePromotion_NotAppliedToOtherPlugins locks
+// in that the claude-specific promotion never fires for other plugins,
+// even if they happen to use the preassign_id strategy. The probe should
+// not be called at all.
+func TestResolveSpawnArgs_ClaudeResumePromotion_NotAppliedToOtherPlugins(t *testing.T) {
+	origProbe := claudeSessionExistsFn
+	t.Cleanup(func() { claudeSessionExistsFn = origProbe })
+	claudeSessionExistsFn = func(cwd, sessionID string) bool {
+		t.Errorf("probe was called for a non-claude plugin (cwd=%q, id=%q)", cwd, sessionID)
+		return true
+	}
+
+	p := &plugin.PanePlugin{
+		Name:    "some-other-ai",
+		Command: plugin.CommandConfig{Cmd: "tool"},
+		Persistence: plugin.PersistenceConfig{
+			Strategy:   "preassign_id",
+			ResumeArgs: []string{"--resume", "{session_id}"},
+		},
+	}
+	pane := &Pane{
+		CWD:         `E:\anywhere`,
+		PluginState: map[string]string{"session_id": "xyz"},
+	}
+	got := resolveSpawnArgs(p, pane, true)
+	want := []string{"--resume", "xyz"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("resolveSpawnArgs:\n  got:  %v\n  want: %v", got, want)
+	}
+}
+
+// TestEscapeClaudeCWD locks in claude's on-disk naming convention for
+// per-project session directories. If claude ever changes this (e.g.
+// starts percent-encoding instead), this test fails in CI instead of
+// panes silently falling back to --continue everywhere.
+func TestEscapeClaudeCWD(t *testing.T) {
+	tests := []struct {
+		name string
+		cwd  string
+		want string
+	}{
+		{"windows path", `E:\Projects\Stukans\Prototypes\calyx`, "E--Projects-Stukans-Prototypes-calyx"},
+		{"unix path", "/home/user/project", "-home-user-project"},
+		{"windows with dot-dir", `C:\Users\artjo\.claude`, "C--Users-artjo-.claude"},
+		{"mixed separators", `E:/Projects\mixed`, "E--Projects-mixed"},
+		{"root-only windows", `C:\`, "C--"},
+		{"empty", "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := escapeClaudeCWD(tt.cwd)
+			if got != tt.want {
+				t.Errorf("escapeClaudeCWD(%q) = %q, want %q", tt.cwd, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestResolveSpawnArgs_DoesNotMutatePluginArgs guards against accidental
 // aliasing — a future change that returns p.Command.Args directly would
 // allow callers to mutate the plugin's static config.

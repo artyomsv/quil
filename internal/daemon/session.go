@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	memreport "github.com/artyomsv/quil/internal/memreport"
 	apty "github.com/artyomsv/quil/internal/pty"
 	"github.com/artyomsv/quil/internal/ringbuf"
 )
@@ -294,4 +295,60 @@ func (sm *SessionManager) SnapshotState() (activeTab string, tabs []*Tab, panesB
 		panesByTab[id] = tabPanes
 	}
 	return
+}
+
+// paneSourceAdapter adapts *Pane to the memreport.PaneSource interface
+// so the collector can read pane memory without importing daemon.
+type paneSourceAdapter struct{ p *Pane }
+
+func (a paneSourceAdapter) PaneID() string                 { return a.p.ID }
+func (a paneSourceAdapter) TabID() string                  { return a.p.TabID }
+func (a paneSourceAdapter) OutputBuf() *ringbuf.RingBuffer { return a.p.OutputBuf }
+func (a paneSourceAdapter) GhostSnap() []byte {
+	a.p.PluginMu.Lock()
+	defer a.p.PluginMu.Unlock()
+	if len(a.p.GhostSnap) == 0 {
+		return nil
+	}
+	// Return a copy so the caller can release the lock and read safely.
+	out := make([]byte, len(a.p.GhostSnap))
+	copy(out, a.p.GhostSnap)
+	return out
+}
+func (a paneSourceAdapter) PluginState() map[string]string {
+	a.p.PluginMu.Lock()
+	defer a.p.PluginMu.Unlock()
+	// Return a shallow copy so the collector can read safely after the
+	// lock is released.
+	out := make(map[string]string, len(a.p.PluginState))
+	for k, v := range a.p.PluginState {
+		out[k] = v
+	}
+	return out
+}
+func (a paneSourceAdapter) PID() int {
+	a.p.PluginMu.Lock()
+	defer a.p.PluginMu.Unlock()
+	if a.p.PTY == nil {
+		return 0
+	}
+	return a.p.PTY.Pid()
+}
+func (a paneSourceAdapter) Alive() bool {
+	a.p.PluginMu.Lock()
+	defer a.p.PluginMu.Unlock()
+	return a.p.ExitCode == nil
+}
+
+// PaneSources returns an adapter per live pane. Implements
+// memreport.PaneLister. Callers must not retain the returned slice beyond
+// a single collection cycle.
+func (sm *SessionManager) PaneSources() []memreport.PaneSource {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	out := make([]memreport.PaneSource, 0, len(sm.panes))
+	for _, p := range sm.panes {
+		out = append(out, paneSourceAdapter{p: p})
+	}
+	return out
 }

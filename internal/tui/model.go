@@ -19,6 +19,7 @@ import (
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/logger"
+	"github.com/artyomsv/quil/internal/memreport"
 	"github.com/artyomsv/quil/internal/plugin"
 )
 
@@ -141,6 +142,7 @@ const (
 	dialogLogViewer
 	dialogDisclaimer
 	dialogPluginMigration
+	dialogMemory
 )
 
 type Model struct {
@@ -226,6 +228,10 @@ type Model struct {
 	migrationRight      *TextEditor          // new default (read-only)
 	migrationRightFocus bool                 // true when right pane has keyboard focus
 	migrationError      string               // validation error message
+
+	// Memory dialog state
+	mem         memoryDialogState
+	lastMemResp *ipc.MemoryReportRespPayload
 }
 
 func NewModel(client *ipc.Client, cfg config.Config, version string, registry *plugin.Registry, stalePlugins []plugin.StalePlugin) Model {
@@ -279,7 +285,7 @@ func (m Model) ConfigChanged() bool { return m.configChanged }
 
 func (m Model) Init() tea.Cmd {
 	log.Print("TUI Init — starting listener")
-	return m.listenForMessages()
+	return tea.Batch(m.listenForMessages(), memoryTickCmd())
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -654,6 +660,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.notesTick()
 		}
 		return m, nil
+
+	case memoryTickMsg:
+		return m, tea.Batch(m.refreshMemory(), memoryTickCmd())
+
+	case memoryReportMsg:
+		m = m.applyMemoryReport(msg.Resp)
+		return m, m.listenForMessages()
 
 	case listenContinueMsg:
 		return m, m.listenForMessages()
@@ -2148,6 +2161,10 @@ func (m Model) renderStatusBar() string {
 
 	// Right side: keybinding hints + version
 	right := "^T tab | ^N pane | ^W close | F1 help | ^Q quit | v" + m.version
+	if m.lastMemResp != nil {
+		total := m.lastMemResp.Total + m.tuiLocalMemTotal()
+		right = "mem " + memreport.HumanBytes(total) + " | " + right
+	}
 	if m.devMode {
 		right = "[dev] " + right
 	}
@@ -2242,6 +2259,14 @@ func (m Model) listenForMessages() tea.Cmd {
 			msg.DecodePayload(&payload)
 			log.Printf("ipc recv: pane_event %s %s %s", payload.Type, payload.PaneID, payload.Title)
 			return paneEventMsg(payload)
+
+		case ipc.MsgMemoryReportResp:
+			var payload ipc.MemoryReportRespPayload
+			if err := msg.DecodePayload(&payload); err != nil {
+				log.Printf("decode memory_report_resp: %v", err)
+				return listenContinueMsg{}
+			}
+			return memoryReportMsg{Resp: payload}
 
 		default:
 			log.Printf("ipc recv: unknown type %q", msg.Type)

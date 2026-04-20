@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -23,6 +24,7 @@ import (
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/logger"
+	memreport "github.com/artyomsv/quil/internal/memreport"
 	"github.com/artyomsv/quil/internal/persist"
 	"github.com/artyomsv/quil/internal/plugin"
 	apty "github.com/artyomsv/quil/internal/pty"
@@ -45,6 +47,10 @@ type Daemon struct {
 	snapshotCh   chan struct{} // buffered channel for snapshot requests
 	restored     bool         // true if workspace was loaded from disk
 	events       *eventQueue  // notification center event queue
+
+	memReport       *memreport.Collector
+	collectorCancel context.CancelFunc
+	collectorWG     sync.WaitGroup
 }
 
 func New(cfg config.Config) *Daemon {
@@ -61,7 +67,7 @@ func New(cfg config.Config) *Daemon {
 		maxEvents = 50
 	}
 
-	return &Daemon{
+	d := &Daemon{
 		cfg:        cfg,
 		session:    NewSessionManager(bufSize),
 		registry:   reg,
@@ -69,6 +75,8 @@ func New(cfg config.Config) *Daemon {
 		snapshotCh: make(chan struct{}, 1),
 		events:     newEventQueue(maxEvents),
 	}
+	d.memReport = memreport.NewCollector(d.session, 5*time.Second)
+	return d
 }
 
 func (d *Daemon) Start() error {
@@ -111,6 +119,18 @@ func (d *Daemon) Start() error {
 	}
 
 	go d.idleChecker()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	d.collectorCancel = cancel
+	go func() {
+		<-d.shutdown
+		cancel()
+	}()
+	d.collectorWG.Add(1)
+	go func() {
+		defer d.collectorWG.Done()
+		d.memReport.Run(ctx)
+	}()
 
 	log.Printf("quild started, listening on %s", sockPath)
 	return nil
@@ -162,6 +182,10 @@ func (d *Daemon) Wait() {
 }
 
 func (d *Daemon) Stop() {
+	if d.collectorCancel != nil {
+		d.collectorCancel()
+		d.collectorWG.Wait()
+	}
 	log.Print("daemon stopping, writing final snapshot...")
 	// Final snapshot before shutdown
 	d.snapshot()
@@ -494,6 +518,10 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		d.handleGetNotificationsReq(conn, msg)
 	case ipc.MsgWatchNotificationsReq:
 		d.handleWatchNotificationsReq(conn, msg)
+
+	// Memory reporting
+	case ipc.MsgMemoryReportReq:
+		d.handleMemoryReportReq(conn, msg)
 
 	// Version negotiation — reply with the running daemon's version so the
 	// client can gate attach on matching binaries.
@@ -1145,6 +1173,60 @@ func (d *Daemon) buildWorkspaceState() map[string]any {
 	}
 }
 
+// claudeSessionExistsFn is the probe resolveSpawnArgs uses to decide whether
+// a restored claude-code pane can use --resume <uuid> (unique session) or
+// must fall back to --continue (Claude's most-recent-in-CWD lookup).
+//
+// Defaults to the real filesystem check; tests override with a stub so the
+// arg-merging matrix never reaches ~/.claude.
+var claudeSessionExistsFn = claudeSessionFileExists
+
+// escapeClaudeCWD mirrors Claude Code's on-disk naming for per-project
+// session directories under ~/.claude/projects/. Each path separator or
+// colon becomes '-'; no other transformation. Confirmed against real
+// directories (e.g. E:\Projects\Stukans → "E--Projects-Stukans").
+func escapeClaudeCWD(cwd string) string {
+	r := strings.NewReplacer(":", "-", `\`, "-", "/", "-")
+	return r.Replace(cwd)
+}
+
+// claudeSessionFileExists reports whether Claude has persisted a session
+// file for the given CWD + session ID. Called on the restore path for
+// claude-code panes; a true result means the pane can resume its own
+// unique session, a false result forces the --continue fallback.
+//
+// Any os.Stat error (including permission denial or the home dir being
+// unavailable) returns false — the fallback path is always safe.
+func claudeSessionFileExists(cwd, sessionID string) bool {
+	if cwd == "" || sessionID == "" {
+		return false
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return false
+	}
+	path := filepath.Join(home, ".claude", "projects", escapeClaudeCWD(cwd), sessionID+".jsonl")
+	_, err = os.Stat(path)
+	return err == nil
+}
+
+// resumeTemplateFor returns the resume-arg template resolveSpawnArgs should
+// expand on the restore branch. For a claude-code pane whose session file
+// is on disk, it promotes the args to ["--resume", "{session_id}"] so each
+// pane reattaches to its own session. Otherwise it returns the plugin's
+// configured ResumeArgs (typically ["--continue"] for claude-code, which is
+// correct for panes closed during Claude's startup screens before any
+// session file was written).
+func resumeTemplateFor(p *plugin.PanePlugin, pane *Pane) []string {
+	if p.Name == "claude-code" && p.Persistence.Strategy == "preassign_id" {
+		sessionID := pane.PluginState["session_id"]
+		if sessionID != "" && claudeSessionExistsFn(pane.CWD, sessionID) {
+			return []string{"--resume", "{session_id}"}
+		}
+	}
+	return p.Persistence.ResumeArgs
+}
+
 // resolveSpawnArgs computes the argv (excluding cmd) that spawnPane should use
 // for the given pane and plugin, applying base args, the InstanceArgs override,
 // preassign_id start args, and the restore-branch resume-args append. It is a
@@ -1178,8 +1260,9 @@ func resolveSpawnArgs(p *plugin.PanePlugin, pane *Pane, restoring bool) []string
 	if restoring {
 		switch p.Persistence.Strategy {
 		case "preassign_id", "session_scrape":
-			if len(p.Persistence.ResumeArgs) > 0 && len(pane.PluginState) > 0 {
-				resumeArgs := plugin.ExpandResumeArgs(p.Persistence.ResumeArgs, pane.PluginState)
+			template := resumeTemplateFor(p, pane)
+			if len(template) > 0 && len(pane.PluginState) > 0 {
+				resumeArgs := plugin.ExpandResumeArgs(template, pane.PluginState)
 				args = append(args, resumeArgs...)
 			}
 		case "rerun":
@@ -1893,4 +1976,24 @@ func (d *Daemon) handleWatchNotificationsReq(conn *ipc.Conn, msg *ipc.Message) {
 			d.events.RemoveWatcher(watcher)
 		}
 	}()
+}
+
+func (d *Daemon) handleMemoryReportReq(conn *ipc.Conn, msg *ipc.Message) {
+	snap := d.memReport.Latest()
+	resp := ipc.MemoryReportRespPayload{}
+	if snap != nil {
+		resp.SnapshotAt = snap.At.UnixNano()
+		resp.Total = snap.Total
+		resp.Panes = make([]ipc.PaneMemInfo, len(snap.Panes))
+		for i, p := range snap.Panes {
+			resp.Panes[i] = ipc.PaneMemInfo{
+				PaneID:      p.PaneID,
+				TabID:       p.TabID,
+				GoHeapBytes: p.GoHeapBytes,
+				PTYRSSBytes: p.PTYRSSBytes,
+				TotalBytes:  p.Total,
+			}
+		}
+	}
+	respondTo(conn, msg.ID, ipc.MsgMemoryReportResp, resp)
 }

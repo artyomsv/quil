@@ -69,6 +69,24 @@ func (e *TextEditor) highlight(line string) string {
 	return highlightTOML(line)
 }
 
+// ApproxBytes returns a lower-bound estimate of the editor's in-memory size.
+// Sums UTF-8 byte lengths of all lines plus one newline byte per line
+// boundary. Does not account for Go slice overhead or unused capacity.
+// Used by the Memory dialog for ranking; precision is not important.
+func (e *TextEditor) ApproxBytes() uint64 {
+	if e == nil {
+		return 0
+	}
+	var n uint64
+	for _, line := range e.Lines {
+		n += uint64(len(line))
+	}
+	if len(e.Lines) > 1 {
+		n += uint64(len(e.Lines) - 1) // newlines between lines
+	}
+	return n
+}
+
 // NewTextEditor creates an editor from file content.
 func NewTextEditor(content, filePath string, viewW, viewH int) *TextEditor {
 	content = strings.ReplaceAll(content, "\r", "")

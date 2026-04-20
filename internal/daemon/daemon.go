@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -23,6 +24,7 @@ import (
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/logger"
+	memreport "github.com/artyomsv/quil/internal/memreport"
 	"github.com/artyomsv/quil/internal/persist"
 	"github.com/artyomsv/quil/internal/plugin"
 	apty "github.com/artyomsv/quil/internal/pty"
@@ -45,6 +47,9 @@ type Daemon struct {
 	snapshotCh   chan struct{} // buffered channel for snapshot requests
 	restored     bool         // true if workspace was loaded from disk
 	events       *eventQueue  // notification center event queue
+
+	memReport       *memreport.Collector
+	collectorCancel context.CancelFunc
 }
 
 func New(cfg config.Config) *Daemon {
@@ -61,7 +66,7 @@ func New(cfg config.Config) *Daemon {
 		maxEvents = 50
 	}
 
-	return &Daemon{
+	d := &Daemon{
 		cfg:        cfg,
 		session:    NewSessionManager(bufSize),
 		registry:   reg,
@@ -69,6 +74,8 @@ func New(cfg config.Config) *Daemon {
 		snapshotCh: make(chan struct{}, 1),
 		events:     newEventQueue(maxEvents),
 	}
+	d.memReport = memreport.NewCollector(d.session, 5*time.Second)
+	return d
 }
 
 func (d *Daemon) Start() error {
@@ -111,6 +118,14 @@ func (d *Daemon) Start() error {
 	}
 
 	go d.idleChecker()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	d.collectorCancel = cancel
+	go func() {
+		<-d.shutdown
+		cancel()
+	}()
+	go d.memReport.Run(ctx)
 
 	log.Printf("quild started, listening on %s", sockPath)
 	return nil
@@ -494,6 +509,10 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		d.handleGetNotificationsReq(conn, msg)
 	case ipc.MsgWatchNotificationsReq:
 		d.handleWatchNotificationsReq(conn, msg)
+
+	// Memory reporting
+	case ipc.MsgMemoryReportReq:
+		d.handleMemoryReportReq(conn, msg)
 
 	// Version negotiation — reply with the running daemon's version so the
 	// client can gate attach on matching binaries.
@@ -1893,4 +1912,24 @@ func (d *Daemon) handleWatchNotificationsReq(conn *ipc.Conn, msg *ipc.Message) {
 			d.events.RemoveWatcher(watcher)
 		}
 	}()
+}
+
+func (d *Daemon) handleMemoryReportReq(conn *ipc.Conn, msg *ipc.Message) {
+	snap := d.memReport.Latest()
+	resp := ipc.MemoryReportRespPayload{}
+	if snap != nil {
+		resp.SnapshotAt = snap.At.UnixNano()
+		resp.Total = snap.Total
+		resp.Panes = make([]ipc.PaneMemInfo, len(snap.Panes))
+		for i, p := range snap.Panes {
+			resp.Panes[i] = ipc.PaneMemInfo{
+				PaneID:      p.PaneID,
+				TabID:       p.TabID,
+				GoHeapBytes: p.GoHeapBytes,
+				PTYRSSBytes: p.PTYRSSBytes,
+				TotalBytes:  p.Total,
+			}
+		}
+	}
+	respondTo(conn, msg.ID, ipc.MsgMemoryReportResp, resp)
 }

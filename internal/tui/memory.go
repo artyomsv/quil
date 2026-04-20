@@ -336,10 +336,12 @@ func renderMemoryRow(m Model, row memoryRow, selected bool) string {
 }
 
 // truncateMem shortens s to at most n runes, appending "…" if truncated.
-// Used for pane/tab labels in the memory dialog.
+// Used for pane/tab labels in the memory dialog. Rune-aware so multi-byte
+// UTF-8 names (CJK, emoji) are not sliced mid-rune.
 func truncateMem(s string, n int) string {
-	if len(s) <= n {
+	r := []rune(s)
+	if len(r) <= n {
 		return s
 	}
-	return s[:n-1] + "…"
+	return string(r[:n-1]) + "…"
 }

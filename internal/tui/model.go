@@ -141,6 +141,7 @@ const (
 	dialogLogViewer
 	dialogDisclaimer
 	dialogPluginMigration
+	dialogMemory
 )
 
 type Model struct {
@@ -226,6 +227,11 @@ type Model struct {
 	migrationRight      *TextEditor          // new default (read-only)
 	migrationRightFocus bool                 // true when right pane has keyboard focus
 	migrationError      string               // validation error message
+
+	// Memory dialog state
+	mem                 memoryDialogState
+	lastMemResp         *ipc.MemoryReportRespPayload
+	pendingMemoryReport bool
 }
 
 func NewModel(client *ipc.Client, cfg config.Config, version string, registry *plugin.Registry, stalePlugins []plugin.StalePlugin) Model {

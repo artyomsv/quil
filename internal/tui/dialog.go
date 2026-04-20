@@ -285,12 +285,14 @@ func (m Model) handleDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.handleDisclaimerKey(msg)
 	case dialogPluginMigration:
 		return m.handleMigrationKey(msg)
+	case dialogMemory:
+		return m.handleMemoryDialogKey(msg)
 	}
 	return m, nil
 }
 
 func (m Model) handleAboutKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	const lastAboutItem = 5 // 0:Settings 1:Shortcuts 2:Plugins 3:Client 4:Daemon 5:MCP
+	const lastAboutItem = 6 // 0:Settings 1:Shortcuts 2:Plugins 3:Memory 4:Client 5:Daemon 6:MCP
 	switch msg.String() {
 	case "esc":
 		m.dialog = dialogNone
@@ -314,10 +316,13 @@ func (m Model) handleAboutKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.dialog = dialogPlugins
 			m.dialogCursor = 0
 		case 3:
-			return m.openLogViewer("Client log", filepath.Join(config.QuilDir(), "quil.log"))
+			m = m.openMemoryDialog()
+			return m, m.refreshMemory()
 		case 4:
-			return m.openLogViewer("Daemon log", filepath.Join(config.QuilDir(), "quild.log"))
+			return m.openLogViewer("Client log", filepath.Join(config.QuilDir(), "quil.log"))
 		case 5:
+			return m.openLogViewer("Daemon log", filepath.Join(config.QuilDir(), "quild.log"))
+		case 6:
 			return m.openMCPLogsViewer()
 		}
 	}
@@ -509,6 +514,9 @@ func (m Model) renderDialog() string {
 	case dialogDisclaimer:
 		width = disclaimerWidth
 		content = m.renderDisclaimerDialog()
+	case dialogMemory:
+		width = 80
+		content = m.renderMemoryDialog()
 	}
 
 	box := dialogBorder.Width(width).Render(content)
@@ -530,6 +538,7 @@ func (m Model) renderAboutDialog() string {
 		"Settings",
 		"Shortcuts",
 		"Plugins",
+		"Memory",
 		"View client log",
 		"View daemon log",
 		"View MCP logs",

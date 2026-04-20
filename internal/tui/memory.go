@@ -1,9 +1,14 @@
 package tui
 
 import (
+	"fmt"
 	"sort"
+	"strings"
+
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/artyomsv/quil/internal/ipc"
+	"github.com/artyomsv/quil/internal/memreport"
 )
 
 // memRowKind distinguishes the three kinds of visible rows in the Memory
@@ -146,4 +151,195 @@ func (t *memoryTree) findTab(id string) *memoryTabNode {
 		}
 	}
 	return nil
+}
+
+// memoryDialogState holds the live state of the Memory dialog.
+type memoryDialogState struct {
+	tree    *memoryTree
+	cursor  int
+	loading bool
+}
+
+// memoryReportMsg is the Bubble Tea message produced when the TUI receives
+// MsgMemoryReportResp. Task 14 will emit it; Task 13 defines the type.
+type memoryReportMsg struct {
+	Resp ipc.MemoryReportRespPayload
+}
+
+// openMemoryDialog transitions the Model into the Memory dialog and marks
+// the snapshot as loading. Task 14 will issue the IPC request; for now we
+// just show a loading state until applyMemoryReport is called with data.
+func (m Model) openMemoryDialog() Model {
+	m.dialog = dialogMemory
+	m.mem.loading = true
+	m.mem.cursor = 0
+	m.mem.tree = nil
+	m.pendingMemoryReport = true
+	return m
+}
+
+// refreshMemory is a placeholder command. Task 14 replaces the body with
+// real IPC. Returning nil here is safe — the dialog renders "Loading..."
+// until applyMemoryReport lands the first snapshot.
+func (m Model) refreshMemory() tea.Cmd {
+	return nil
+}
+
+// applyMemoryReport rebuilds the tree from a fresh response and clamps the
+// cursor into the new row count.
+func (m Model) applyMemoryReport(resp ipc.MemoryReportRespPayload) Model {
+	order, names := m.tabOrderAndNames()
+	stored := resp
+	m.lastMemResp = &stored
+	if m.dialog == dialogMemory {
+		m.mem.tree = buildMemoryTree(resp, order, names)
+		m.mem.loading = false
+		rows := m.mem.tree.flatten()
+		if m.mem.cursor >= len(rows) {
+			m.mem.cursor = len(rows) - 1
+		}
+		if m.mem.cursor < 0 {
+			m.mem.cursor = 0
+		}
+	}
+	return m
+}
+
+// tabOrderAndNames extracts the current tab order and name map from the
+// Model so the tree builder can render tab headers.
+func (m Model) tabOrderAndNames() ([]string, map[string]string) {
+	order := make([]string, 0, len(m.tabs))
+	names := make(map[string]string, len(m.tabs))
+	for _, t := range m.tabs {
+		if t == nil {
+			continue
+		}
+		order = append(order, t.ID)
+		names[t.ID] = t.Name
+	}
+	return order, names
+}
+
+// tuiLocalMem returns an estimate of TUI-side memory attributable to a
+// pane. Task 13 provides a stub that always returns 0; Task 14 will add
+// VT grid + notes editor accounting.
+func (m Model) tuiLocalMem(paneID string) uint64 {
+	return 0
+}
+
+// handleMemoryDialogKey processes a key press while the Memory dialog is
+// open. Cursor navigation, expand/collapse, refresh, and close.
+func (m Model) handleMemoryDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	// When loading or no tree, only Esc works.
+	if m.mem.tree == nil {
+		if msg.String() == "esc" {
+			m.dialog = dialogNone
+		}
+		return m, nil
+	}
+	rows := m.mem.tree.flatten()
+	switch msg.String() {
+	case "esc":
+		m.dialog = dialogNone
+	case "up", "k":
+		if m.mem.cursor > 0 {
+			m.mem.cursor--
+		}
+	case "down", "j":
+		if m.mem.cursor < len(rows)-1 {
+			m.mem.cursor++
+		}
+	case "enter", " ", "right", "l":
+		if m.mem.cursor < len(rows) && rows[m.mem.cursor].kind == memRowTab {
+			m.mem.tree.toggleAt(m.mem.cursor)
+		}
+	case "left", "h":
+		if m.mem.cursor < len(rows) {
+			row := rows[m.mem.cursor]
+			if row.kind == memRowPane {
+				for i := m.mem.cursor - 1; i >= 0; i-- {
+					if rows[i].tabID == row.tabID && rows[i].kind == memRowTab {
+						m.mem.cursor = i
+						return m, nil
+					}
+				}
+			} else if row.kind == memRowTab {
+				m.mem.tree.toggleAt(m.mem.cursor)
+			}
+		}
+	case "r", "R":
+		m.mem.loading = true
+		m.pendingMemoryReport = true
+		return m, m.refreshMemory()
+	}
+	return m, nil
+}
+
+// renderMemoryDialog produces the dialog body string. The outer
+// dialogBorder wrapping is applied by the common render dispatch.
+func (m Model) renderMemoryDialog() string {
+	var b strings.Builder
+	b.WriteString(dialogTitle.Render("Memory"))
+	b.WriteByte('\n')
+
+	if m.mem.tree == nil || m.mem.loading {
+		b.WriteString("Loading snapshot...\n")
+		b.WriteByte('\n')
+		b.WriteString(dialogSubtle.Render("Esc close"))
+		return b.String()
+	}
+
+	rows := m.mem.tree.flatten()
+	for i, row := range rows {
+		line := renderMemoryRow(m, row, i == m.mem.cursor)
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
+
+	b.WriteByte('\n')
+	b.WriteString(dialogSubtle.Render("r refresh · enter/←→ expand · esc close"))
+	b.WriteByte('\n')
+	b.WriteString(dialogSubtle.Render("PTY RSS is OS-reported; not comparable across platforms."))
+	return b.String()
+}
+
+// renderMemoryRow formats one row of the Memory dialog. Extracted from
+// renderMemoryDialog to keep the loop readable.
+func renderMemoryRow(m Model, row memoryRow, selected bool) string {
+	style := dialogNormal
+	if selected {
+		style = dialogSelected
+	}
+
+	switch row.kind {
+	case memRowTotal:
+		return style.Render(fmt.Sprintf("  Total                                 %12s",
+			memreport.HumanBytes(row.total)))
+	case memRowTab:
+		indicator := "▶"
+		if t := m.mem.tree.findTab(row.tabID); t != nil && t.expanded {
+			indicator = "▼"
+		}
+		return style.Render(fmt.Sprintf("%s %-36s %12s",
+			indicator, truncateMem(row.label, 36), memreport.HumanBytes(row.total)))
+	case memRowPane:
+		tui := m.tuiLocalMem(row.paneID)
+		total := row.total + tui
+		return style.Render(fmt.Sprintf("    %-20s heap %8s  pty %8s  tui %8s  total %8s",
+			truncateMem(row.label, 20),
+			memreport.HumanBytes(row.goHeap),
+			memreport.HumanBytes(row.ptyRSS),
+			memreport.HumanBytes(tui),
+			memreport.HumanBytes(total)))
+	}
+	return ""
+}
+
+// truncateMem shortens s to at most n runes, appending "…" if truncated.
+// Used for pane/tab labels in the memory dialog.
+func truncateMem(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n-1] + "…"
 }

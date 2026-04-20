@@ -9,23 +9,23 @@ import (
 	ringbuf "github.com/artyomsv/quil/internal/ringbuf"
 )
 
-// paneSource is the minimal view the collector needs over a daemon pane.
-// Keeping this as an interface lets us unit-test without pulling in the
-// daemon package (which would create a cycle).
-type paneSource interface {
-	paneID() string
-	tabID() string
-	outputBuf() *ringbuf.RingBuffer
-	ghostSnap() []byte
-	pluginState() map[string]string
-	pid() int
-	alive() bool
+// PaneSource is the minimal view the collector needs over a daemon pane.
+// Keeping this as an interface lets the daemon satisfy it externally without
+// creating a package import cycle (memreport ↔ daemon).
+type PaneSource interface {
+	PaneID() string
+	TabID() string
+	OutputBuf() *ringbuf.RingBuffer
+	GhostSnap() []byte
+	PluginState() map[string]string
+	PID() int
+	Alive() bool
 }
 
 // PaneLister is implemented by *daemon.SessionManager; the collector calls
 // it each tick to enumerate current panes.
 type PaneLister interface {
-	PaneSources() []paneSource
+	PaneSources() []PaneSource
 }
 
 // Collector periodically scans a PaneLister and stores an atomic snapshot
@@ -81,14 +81,14 @@ func (c *Collector) collect() {
 	c.last.Store(&snap)
 }
 
-// collectFrom is the pure core, exported for testing via the paneSource
+// collectFrom is the pure core, exported for testing via the PaneSource
 // abstraction. rssFn is injected so tests can stub procRSSBatch.
-func collectFrom(panes []paneSource, rssFn func([]int) map[int]uint64) Snapshot {
+func collectFrom(panes []PaneSource, rssFn func([]int) map[int]uint64) Snapshot {
 	// Gather alive PIDs for a single batched RSS query.
 	alivePIDs := make([]int, 0, len(panes))
 	for _, p := range panes {
-		if p.alive() && p.pid() > 0 {
-			alivePIDs = append(alivePIDs, p.pid())
+		if p.Alive() && p.PID() > 0 {
+			alivePIDs = append(alivePIDs, p.PID())
 		}
 	}
 	rss := rssFn(alivePIDs)
@@ -103,22 +103,22 @@ func collectFrom(panes []paneSource, rssFn func([]int) map[int]uint64) Snapshot 
 
 	for _, p := range panes {
 		heap := uint64(0)
-		if buf := p.outputBuf(); buf != nil {
+		if buf := p.OutputBuf(); buf != nil {
 			heap += uint64(buf.Len())
 		}
-		heap += uint64(len(p.ghostSnap()))
-		for k, v := range p.pluginState() {
+		heap += uint64(len(p.GhostSnap()))
+		for k, v := range p.PluginState() {
 			heap += uint64(len(k) + len(v))
 		}
 
 		var paneRSS uint64
-		if p.alive() && p.pid() > 0 {
-			paneRSS = rss[p.pid()]
+		if p.Alive() && p.PID() > 0 {
+			paneRSS = rss[p.PID()]
 		}
 
 		pm := PaneMem{
-			PaneID:      p.paneID(),
-			TabID:       p.tabID(),
+			PaneID:      p.PaneID(),
+			TabID:       p.TabID(),
 			GoHeapBytes: heap,
 			PTYRSSBytes: paneRSS,
 			Total:       heap + paneRSS,

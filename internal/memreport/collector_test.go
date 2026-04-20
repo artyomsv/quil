@@ -9,42 +9,43 @@ import (
 	ringbuf "github.com/artyomsv/quil/internal/ringbuf"
 )
 
-// paneView is a minimal in-test fake satisfying paneSource. Keeps tests
+// paneView is a minimal in-test fake satisfying PaneSource. Keeps tests
 // self-contained without importing the daemon package (which would form a
-// cycle).
+// cycle). Fields are lowercase to avoid colliding with the interface method
+// names on the same receiver.
 type paneView struct {
-	ID          string
-	TabID       string
-	OutputBuf   *ringbuf.RingBuffer
-	GhostSnap   []byte
-	PluginState map[string]string
-	PID         int
-	Alive       bool
+	id          string
+	tabID       string
+	outputBuf   *ringbuf.RingBuffer
+	ghostSnap   []byte
+	pluginState map[string]string
+	pid         int
+	alive       bool
 }
 
-func (p *paneView) paneID() string                 { return p.ID }
-func (p *paneView) tabID() string                  { return p.TabID }
-func (p *paneView) outputBuf() *ringbuf.RingBuffer { return p.OutputBuf }
-func (p *paneView) ghostSnap() []byte              { return p.GhostSnap }
-func (p *paneView) pluginState() map[string]string { return p.PluginState }
-func (p *paneView) pid() int                       { return p.PID }
-func (p *paneView) alive() bool                    { return p.Alive }
+func (p *paneView) PaneID() string                 { return p.id }
+func (p *paneView) TabID() string                  { return p.tabID }
+func (p *paneView) OutputBuf() *ringbuf.RingBuffer { return p.outputBuf }
+func (p *paneView) GhostSnap() []byte              { return p.ghostSnap }
+func (p *paneView) PluginState() map[string]string { return p.pluginState }
+func (p *paneView) PID() int                       { return p.pid }
+func (p *paneView) Alive() bool                    { return p.alive }
 
 func TestCollector_GoHeapOnly(t *testing.T) {
 	rb := ringbuf.NewRingBuffer(1024)
 	rb.Write([]byte("hello world")) // 11 bytes
 	p := &paneView{
-		ID:        "p1",
-		TabID:     "t1",
-		OutputBuf: rb,
-		GhostSnap: make([]byte, 100),
-		PluginState: map[string]string{
+		id:        "p1",
+		tabID:     "t1",
+		outputBuf: rb,
+		ghostSnap: make([]byte, 100),
+		pluginState: map[string]string{
 			"session_id": "abc",
 		},
-		PID:   0,
-		Alive: false,
+		pid:   0,
+		alive: false,
 	}
-	snap := collectFrom([]paneSource{p}, func(pids []int) map[int]uint64 { return nil })
+	snap := collectFrom([]PaneSource{p}, func(pids []int) map[int]uint64 { return nil })
 	if len(snap.Panes) != 1 {
 		t.Fatalf("got %d panes, want 1", len(snap.Panes))
 	}
@@ -61,14 +62,14 @@ func TestCollector_GoHeapOnly(t *testing.T) {
 }
 
 func TestCollector_TotalAndSort(t *testing.T) {
-	mk := func(id string, heap uint64) paneSource {
+	mk := func(id string, heap uint64) PaneSource {
 		rb := ringbuf.NewRingBuffer(int(heap) + 16)
 		rb.Write(make([]byte, heap))
 		return &paneView{
-			ID: id, TabID: "t1", OutputBuf: rb, Alive: false,
+			id: id, tabID: "t1", outputBuf: rb, alive: false,
 		}
 	}
-	snap := collectFrom([]paneSource{mk("small", 10), mk("big", 1000), mk("mid", 100)},
+	snap := collectFrom([]PaneSource{mk("small", 10), mk("big", 1000), mk("mid", 100)},
 		func(pids []int) map[int]uint64 { return nil })
 	if len(snap.Panes) != 3 {
 		t.Fatalf("got %d panes", len(snap.Panes))
@@ -89,10 +90,10 @@ func TestCollector_LatestBeforeRun(t *testing.T) {
 }
 
 type stubLister struct {
-	panes []paneSource
+	panes []PaneSource
 }
 
-func (s *stubLister) PaneSources() []paneSource { return s.panes }
+func (s *stubLister) PaneSources() []PaneSource { return s.panes }
 
 func TestCollector_RunPopulatesLatest(t *testing.T) {
 	l := &stubLister{panes: nil}

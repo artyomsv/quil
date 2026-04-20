@@ -15,6 +15,9 @@ import (
 // TestDaemon_MemoryReportRoundTrip boots a daemon on a temp socket, sends
 // a memory_report request, and asserts the response is well-formed.
 func TestDaemon_MemoryReportRoundTrip(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
 	tmp := t.TempDir()
 	t.Setenv("QUIL_HOME", tmp)
 

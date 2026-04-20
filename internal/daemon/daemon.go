@@ -177,6 +177,9 @@ func (d *Daemon) Wait() {
 }
 
 func (d *Daemon) Stop() {
+	if d.collectorCancel != nil {
+		d.collectorCancel()
+	}
 	log.Print("daemon stopping, writing final snapshot...")
 	// Final snapshot before shutdown
 	d.snapshot()

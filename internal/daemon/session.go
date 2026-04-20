@@ -304,7 +304,17 @@ type paneSourceAdapter struct{ p *Pane }
 func (a paneSourceAdapter) PaneID() string                 { return a.p.ID }
 func (a paneSourceAdapter) TabID() string                  { return a.p.TabID }
 func (a paneSourceAdapter) OutputBuf() *ringbuf.RingBuffer { return a.p.OutputBuf }
-func (a paneSourceAdapter) GhostSnap() []byte              { return a.p.GhostSnap }
+func (a paneSourceAdapter) GhostSnap() []byte {
+	a.p.PluginMu.Lock()
+	defer a.p.PluginMu.Unlock()
+	if len(a.p.GhostSnap) == 0 {
+		return nil
+	}
+	// Return a copy so the caller can release the lock and read safely.
+	out := make([]byte, len(a.p.GhostSnap))
+	copy(out, a.p.GhostSnap)
+	return out
+}
 func (a paneSourceAdapter) PluginState() map[string]string {
 	a.p.PluginMu.Lock()
 	defer a.p.PluginMu.Unlock()
@@ -317,12 +327,16 @@ func (a paneSourceAdapter) PluginState() map[string]string {
 	return out
 }
 func (a paneSourceAdapter) PID() int {
+	a.p.PluginMu.Lock()
+	defer a.p.PluginMu.Unlock()
 	if a.p.PTY == nil {
 		return 0
 	}
 	return a.p.PTY.Pid()
 }
 func (a paneSourceAdapter) Alive() bool {
+	a.p.PluginMu.Lock()
+	defer a.p.PluginMu.Unlock()
 	return a.p.ExitCode == nil
 }
 

@@ -230,9 +230,8 @@ type Model struct {
 	migrationError      string               // validation error message
 
 	// Memory dialog state
-	mem                 memoryDialogState
-	lastMemResp         *ipc.MemoryReportRespPayload
-	pendingMemoryReport bool
+	mem         memoryDialogState
+	lastMemResp *ipc.MemoryReportRespPayload
 }
 
 func NewModel(client *ipc.Client, cfg config.Config, version string, registry *plugin.Registry, stalePlugins []plugin.StalePlugin) Model {
@@ -663,12 +662,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case memoryTickMsg:
-		m.pendingMemoryReport = true
 		return m, tea.Batch(m.refreshMemory(), memoryTickCmd())
 
 	case memoryReportMsg:
 		m = m.applyMemoryReport(msg.Resp)
-		return m, nil
+		return m, m.listenForMessages()
 
 	case listenContinueMsg:
 		return m, m.listenForMessages()

@@ -191,7 +191,6 @@ func (m Model) openMemoryDialog() Model {
 	m.mem.loading = true
 	m.mem.cursor = 0
 	m.mem.tree = nil
-	m.pendingMemoryReport = true
 	return m
 }
 
@@ -304,7 +303,6 @@ func (m Model) handleMemoryDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	case "r", "R":
 		m.mem.loading = true
-		m.pendingMemoryReport = true
 		return m, m.refreshMemory()
 	}
 	return m, nil

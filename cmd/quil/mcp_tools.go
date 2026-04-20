@@ -515,19 +515,68 @@ func registerWatchNotificationsTool(s *mcp.Server, bridge *mcpBridge, mcpLog *mc
 	})
 }
 
+// TabMemSummary is the per-tab aggregation emitted by get_memory_report.
+type TabMemSummary struct {
+	TabID      string `json:"tab_id"`
+	TabName    string `json:"tab_name"`
+	PaneCount  int    `json:"pane_count"`
+	TotalBytes uint64 `json:"total_bytes"`
+	TotalHuman string `json:"total_human"`
+}
+
+// buildTabMemSummaries is used by registerGetMemoryReportTool to build the tabs[]
+// array in the tool output. The tab-aggregation logic lives here so the
+// tool handler stays short and focused on the request/response flow.
+func buildTabMemSummaries(mem ipc.MemoryReportRespPayload, tabs []ipc.TabInfo) (goHeap, ptyRSS uint64, summaries []TabMemSummary) {
+	tabNames := make(map[string]string, len(tabs))
+	tabOrder := make([]string, 0, len(tabs))
+	for _, t := range tabs {
+		tabNames[t.ID] = t.Name
+		tabOrder = append(tabOrder, t.ID)
+	}
+
+	type agg struct {
+		name  string
+		count int
+		total uint64
+	}
+	tabAgg := make(map[string]*agg, len(tabOrder))
+	for _, id := range tabOrder {
+		tabAgg[id] = &agg{name: tabNames[id]}
+	}
+
+	for _, p := range mem.Panes {
+		goHeap += p.GoHeapBytes
+		ptyRSS += p.PTYRSSBytes
+		a, ok := tabAgg[p.TabID]
+		if !ok {
+			a = &agg{name: p.TabID}
+			tabAgg[p.TabID] = a
+			tabOrder = append(tabOrder, p.TabID)
+		}
+		a.count++
+		a.total += p.TotalBytes
+	}
+
+	summaries = make([]TabMemSummary, 0, len(tabOrder))
+	for _, id := range tabOrder {
+		a := tabAgg[id]
+		summaries = append(summaries, TabMemSummary{
+			TabID:      id,
+			TabName:    a.name,
+			PaneCount:  a.count,
+			TotalBytes: a.total,
+			TotalHuman: memreport.HumanBytes(a.total),
+		})
+	}
+	return
+}
+
 func registerGetMemoryReportTool(s *mcp.Server, bridge *mcpBridge, mcpLog *mcpLogger) {
 	type Input struct{}
 
-	type TabMemSummary struct {
-		TabID      string `json:"tab_id"`
-		TabName    string `json:"tab_name"`
-		PaneCount  int    `json:"pane_count"`
-		TotalBytes uint64 `json:"total_bytes"`
-		TotalHuman string `json:"total_human"`
-	}
-
 	type Output struct {
-		SnapshotAt  string          `json:"snapshot_at"` // RFC3339
+		SnapshotAt  string          `json:"snapshot_at"`
 		TotalBytes  uint64          `json:"total_bytes"`
 		TotalHuman  string          `json:"total_human"`
 		GoHeapBytes uint64          `json:"go_heap_bytes"`
@@ -557,36 +606,7 @@ func registerGetMemoryReportTool(s *mcp.Server, bridge *mcpBridge, mcpLog *mcpLo
 			return nil, nil, fmt.Errorf("get_memory_report tabs decode: %w", err)
 		}
 
-		tabNames := make(map[string]string, len(tabsPayload.Tabs))
-		tabOrder := make([]string, 0, len(tabsPayload.Tabs))
-		for _, t := range tabsPayload.Tabs {
-			tabNames[t.ID] = t.Name
-			tabOrder = append(tabOrder, t.ID)
-		}
-
-		type agg struct {
-			name  string
-			count int
-			total uint64
-		}
-		tabAgg := make(map[string]*agg, len(tabOrder))
-		for _, id := range tabOrder {
-			tabAgg[id] = &agg{name: tabNames[id]}
-		}
-
-		var goHeap, ptyRSS uint64
-		for _, p := range memPayload.Panes {
-			goHeap += p.GoHeapBytes
-			ptyRSS += p.PTYRSSBytes
-			a, ok := tabAgg[p.TabID]
-			if !ok {
-				a = &agg{name: p.TabID}
-				tabAgg[p.TabID] = a
-				tabOrder = append(tabOrder, p.TabID)
-			}
-			a.count++
-			a.total += p.TotalBytes
-		}
+		goHeap, ptyRSS, summaries := buildTabMemSummaries(memPayload, tabsPayload.Tabs)
 
 		out := Output{
 			SnapshotAt:  time.Unix(0, memPayload.SnapshotAt).UTC().Format(time.RFC3339),
@@ -594,16 +614,7 @@ func registerGetMemoryReportTool(s *mcp.Server, bridge *mcpBridge, mcpLog *mcpLo
 			TotalHuman:  memreport.HumanBytes(memPayload.Total),
 			GoHeapBytes: goHeap,
 			PTYRSSBytes: ptyRSS,
-		}
-		for _, id := range tabOrder {
-			a := tabAgg[id]
-			out.Tabs = append(out.Tabs, TabMemSummary{
-				TabID:      id,
-				TabName:    a.name,
-				PaneCount:  a.count,
-				TotalBytes: a.total,
-				TotalHuman: memreport.HumanBytes(a.total),
-			})
+			Tabs:        summaries,
 		}
 
 		mcpLog.Log("", "get_memory_report", fmt.Sprintf("panes=%d total=%s", len(memPayload.Panes), out.TotalHuman))
@@ -612,6 +623,21 @@ func registerGetMemoryReportTool(s *mcp.Server, bridge *mcpBridge, mcpLog *mcpLo
 			Content: []mcp.Content{&mcp.TextContent{Text: string(text)}},
 		}, nil, nil
 	})
+}
+
+// fetchPaneMeta best-effort fetches a pane's name + type via MsgPaneStatusReq
+// for use by registerGetPaneMemoryTool. On failure returns empty strings —
+// the memory numbers are the point, metadata is nice-to-have.
+func fetchPaneMeta(bridge *mcpBridge, paneID string) (name, paneType string) {
+	resp, err := bridge.request(ipc.MsgPaneStatusReq, ipc.PaneStatusReqPayload{PaneID: paneID})
+	if err != nil {
+		return "", ""
+	}
+	var status ipc.PaneStatusRespPayload
+	if err := resp.DecodePayload(&status); err != nil {
+		return "", ""
+	}
+	return status.Name, status.Type
 }
 
 func registerGetPaneMemoryTool(s *mcp.Server, bridge *mcpBridge, mcpLog *mcpLogger) {
@@ -659,18 +685,7 @@ func registerGetPaneMemoryTool(s *mcp.Server, bridge *mcpBridge, mcpLog *mcpLogg
 			return nil, nil, fmt.Errorf("get_pane_memory: pane not found: %s", input.PaneID)
 		}
 
-		// Enrich with pane metadata via existing MsgPaneStatusReq. If it
-		// fails, log and fall through with blank fields — the memory data
-		// is still useful without the friendly labels.
-		paneName, paneType := "", ""
-		statusResp, err := bridge.request(ipc.MsgPaneStatusReq, ipc.PaneStatusReqPayload{PaneID: input.PaneID})
-		if err == nil {
-			var status ipc.PaneStatusRespPayload
-			if err := statusResp.DecodePayload(&status); err == nil {
-				paneName = status.Name
-				paneType = status.Type
-			}
-		}
+		paneName, paneType := fetchPaneMeta(bridge, input.PaneID)
 
 		out := Output{
 			SnapshotAt:  time.Unix(0, memPayload.SnapshotAt).UTC().Format(time.RFC3339),

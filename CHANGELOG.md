@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.9.0] - 2026-04-20
+
 ### Added
 
 - **Memory reporting** — F1 → Memory opens a collapsible tab/pane tree showing Go-heap (ring buffer + ghost snapshot + plugin state), PTY child resident memory, and notes-editor bytes per pane. The status bar gains a `mem <n>` segment updated every 5 s from a new daemon-side collector (`internal/memreport/`). Cross-platform PTY RSS: `/proc/<pid>/status` on Linux, `ps -o rss=` batched on Darwin, `GetProcessMemoryInfo` on Windows. Two new MCP tools — `get_memory_report` (per-tab totals + grand total) and `get_pane_memory` (single pane detail) — expose daemon-side layers for external agents. Spec at `docs/superpowers/specs/2026-04-20-memory-reporting-design.md`, plan at `docs/superpowers/plans/2026-04-20-memory-reporting.md`.

@@ -104,7 +104,7 @@ func collectFrom(panes []paneSource, rssFn func([]int) map[int]uint64) Snapshot 
 	for _, p := range panes {
 		heap := uint64(0)
 		if buf := p.outputBuf(); buf != nil {
-			heap += uint64(len(buf.Bytes()))
+			heap += uint64(buf.Len())
 		}
 		heap += uint64(len(p.ghostSnap()))
 		for k, v := range p.pluginState() {

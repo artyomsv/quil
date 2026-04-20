@@ -19,13 +19,13 @@ type paneView struct {
 	Alive       bool
 }
 
-func (p *paneView) paneID() string                   { return p.ID }
-func (p *paneView) tabID() string                    { return p.TabID }
-func (p *paneView) outputBuf() *ringbuf.RingBuffer   { return p.OutputBuf }
-func (p *paneView) ghostSnap() []byte                { return p.GhostSnap }
-func (p *paneView) pluginState() map[string]string   { return p.PluginState }
-func (p *paneView) pid() int                         { return p.PID }
-func (p *paneView) alive() bool                      { return p.Alive }
+func (p *paneView) paneID() string                 { return p.ID }
+func (p *paneView) tabID() string                  { return p.TabID }
+func (p *paneView) outputBuf() *ringbuf.RingBuffer { return p.OutputBuf }
+func (p *paneView) ghostSnap() []byte              { return p.GhostSnap }
+func (p *paneView) pluginState() map[string]string { return p.PluginState }
+func (p *paneView) pid() int                       { return p.PID }
+func (p *paneView) alive() bool                    { return p.Alive }
 
 func TestCollector_GoHeapOnly(t *testing.T) {
 	rb := ringbuf.NewRingBuffer(1024)

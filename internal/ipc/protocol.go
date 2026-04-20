@@ -79,6 +79,10 @@ const (
 	// silently drop MsgVersionReq; the client handles the timeout.
 	MsgVersionReq  = "version_req"  // client → daemon (empty payload)
 	MsgVersionResp = "version_resp" // daemon → client (VersionRespPayload)
+
+	// Memory reporting
+	MsgMemoryReportReq  = "memory_report_req"
+	MsgMemoryReportResp = "memory_report_resp"
 )
 
 // Message is the wire format for IPC communication.
@@ -311,6 +315,27 @@ type WatchNotificationsRespPayload struct {
 // has no payload — the request is just "what version are you running?".
 type VersionRespPayload struct {
 	Version string `json:"version"`
+}
+
+// Memory reporting payloads
+
+type MemoryReportReqPayload struct{}
+
+// PaneMemInfo is the wire form of a single pane's daemon-side memory.
+// TUI-local memory is not part of the wire format — the TUI merges its own
+// values at render time.
+type PaneMemInfo struct {
+	PaneID      string `json:"pane_id"`
+	TabID       string `json:"tab_id"`
+	GoHeapBytes uint64 `json:"go_heap_bytes"`
+	PTYRSSBytes uint64 `json:"pty_rss_bytes"`
+	TotalBytes  uint64 `json:"total_bytes"`
+}
+
+type MemoryReportRespPayload struct {
+	SnapshotAt int64         `json:"snapshot_at"` // Unix nanoseconds
+	Panes      []PaneMemInfo `json:"panes"`
+	Total      uint64        `json:"total"`
 }
 
 // NewMessage creates a Message with a typed payload.

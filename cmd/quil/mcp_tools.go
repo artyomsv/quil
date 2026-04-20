@@ -33,6 +33,7 @@ func registerMCPTools(s *mcp.Server, bridge *mcpBridge, mcpLog *mcpLogger) {
 	registerWatchNotificationsTool(s, bridge, mcpLog)
 	// Memory reporting
 	registerGetMemoryReportTool(s, bridge, mcpLog)
+	registerGetPaneMemoryTool(s, bridge, mcpLog)
 }
 
 func registerListPanesTool(s *mcp.Server, bridge *mcpBridge, mcpLog *mcpLogger) {
@@ -606,6 +607,85 @@ func registerGetMemoryReportTool(s *mcp.Server, bridge *mcpBridge, mcpLog *mcpLo
 		}
 
 		mcpLog.Log("", "get_memory_report", fmt.Sprintf("panes=%d total=%s", len(memPayload.Panes), out.TotalHuman))
+		text, _ := json.MarshalIndent(out, "", "  ")
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: string(text)}},
+		}, nil, nil
+	})
+}
+
+func registerGetPaneMemoryTool(s *mcp.Server, bridge *mcpBridge, mcpLog *mcpLogger) {
+	type Input struct {
+		PaneID string `json:"pane_id" jsonschema:"pane ID (use list_panes or get_memory_report to discover)"`
+	}
+
+	type Output struct {
+		SnapshotAt  string `json:"snapshot_at"` // RFC3339 (UTC)
+		PaneID      string `json:"pane_id"`
+		TabID       string `json:"tab_id"`
+		PaneName    string `json:"pane_name,omitempty"`
+		Type        string `json:"type,omitempty"`
+		GoHeapBytes uint64 `json:"go_heap_bytes"`
+		PTYRSSBytes uint64 `json:"pty_rss_bytes"`
+		TotalBytes  uint64 `json:"total_bytes"`
+		TotalHuman  string `json:"total_human"`
+	}
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "get_pane_memory",
+		Description: "Return daemon-side memory usage for a single pane: Go-heap (ring buffer + ghost snapshot + plugin state), PTY child resident memory, and combined total. Call get_memory_report or list_panes first to discover pane IDs. PTY RSS is OS-reported and not comparable across platforms.",
+	}, func(_ context.Context, _ *mcp.CallToolRequest, input Input) (*mcp.CallToolResult, any, error) {
+		if input.PaneID == "" {
+			return nil, nil, fmt.Errorf("get_pane_memory: pane_id is required")
+		}
+
+		memResp, err := bridge.request(ipc.MsgMemoryReportReq, ipc.MemoryReportReqPayload{})
+		if err != nil {
+			return nil, nil, fmt.Errorf("get_pane_memory: %w", err)
+		}
+		var memPayload ipc.MemoryReportRespPayload
+		if err := memResp.DecodePayload(&memPayload); err != nil {
+			return nil, nil, fmt.Errorf("get_pane_memory decode: %w", err)
+		}
+
+		var found *ipc.PaneMemInfo
+		for i := range memPayload.Panes {
+			if memPayload.Panes[i].PaneID == input.PaneID {
+				found = &memPayload.Panes[i]
+				break
+			}
+		}
+		if found == nil {
+			return nil, nil, fmt.Errorf("get_pane_memory: pane not found: %s", input.PaneID)
+		}
+
+		// Enrich with pane metadata via existing MsgPaneStatusReq. If it
+		// fails, log and fall through with blank fields — the memory data
+		// is still useful without the friendly labels.
+		paneName, paneType := "", ""
+		statusResp, err := bridge.request(ipc.MsgPaneStatusReq, ipc.PaneStatusReqPayload{PaneID: input.PaneID})
+		if err == nil {
+			var status ipc.PaneStatusRespPayload
+			if err := statusResp.DecodePayload(&status); err == nil {
+				paneName = status.Name
+				paneType = status.Type
+			}
+		}
+
+		out := Output{
+			SnapshotAt:  time.Unix(0, memPayload.SnapshotAt).UTC().Format(time.RFC3339),
+			PaneID:      found.PaneID,
+			TabID:       found.TabID,
+			PaneName:    paneName,
+			Type:        paneType,
+			GoHeapBytes: found.GoHeapBytes,
+			PTYRSSBytes: found.PTYRSSBytes,
+			TotalBytes:  found.TotalBytes,
+			TotalHuman:  memreport.HumanBytes(found.TotalBytes),
+		}
+
+		mcpLog.Log(input.PaneID, "get_pane_memory", out.TotalHuman)
+		// Output fields are primitives + strings — json.MarshalIndent cannot fail
 		text, _ := json.MarshalIndent(out, "", "  ")
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: string(text)}},

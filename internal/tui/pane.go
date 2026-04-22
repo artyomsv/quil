@@ -1,7 +1,10 @@
 package tui
 
 import (
+	"errors"
 	"image/color"
+	"io"
+	"log"
 	"net/url"
 	"strings"
 	"time"
@@ -14,6 +17,34 @@ import (
 
 	"github.com/artyomsv/quil/internal/ringbuf"
 )
+
+// drainEmulatorReplies reads and discards the emulator's reply stream.
+// The vt.Emulator replies to DECRQM / DSR / cursor-position queries by
+// writing to an internal unbuffered io.Pipe. If nothing reads that pipe the
+// writer (inside Emulator.Write, which runs on Update's goroutine under the
+// SafeEmulator mutex) blocks forever — freezing the entire TUI. We are a
+// renderer, not a real terminal; the real ConPTY already handled the query.
+//
+// Shutdown contract: the goroutine has no context.Context by design — its
+// lifecycle is bound to the emulator. Callers MUST call em.Close() before
+// dropping the emulator pointer; Close closes the pipe's write side, Read
+// returns io.EOF (or io.ErrClosedPipe), and the goroutine exits. See
+// ResetVT for the caller-side invariant. Any other error is logged once
+// and the goroutine exits — the pipe is gone either way, and if a future
+// library change exits this drain for a transient reason we want a
+// breadcrumb instead of a silent re-wedge.
+func drainEmulatorReplies(em *vt.SafeEmulator) {
+	buf := make([]byte, 4096)
+	for {
+		if _, err := em.Read(buf); err != nil {
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) {
+				return
+			}
+			log.Printf("pane: emulator drain exited: %v", err)
+			return
+		}
+	}
+}
 
 // spinnerFrames are braille characters cycled for the resuming indicator.
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
@@ -58,6 +89,7 @@ func NewPaneModel(id string, bufSize int) *PaneModel {
 		},
 	})
 	p.vt = em
+	go drainEmulatorReplies(em)
 	return p
 }
 
@@ -69,7 +101,13 @@ func (p *PaneModel) AppendOutput(data []byte) {
 // ResetVT creates a fresh VT emulator at the current dimensions, clearing
 // ghost buffer state so live output starts with a clean cursor position.
 func (p *PaneModel) ResetVT() {
+	// NewPaneModel is the sole constructor and always sets p.vt, so no nil
+	// guard is needed here. Closing the old emulator before dropping the
+	// pointer is load-bearing: Close closes the pipe's write side, which
+	// signals the existing drain goroutine to exit via EOF. Skipping it
+	// would leak one goroutine per ResetVT.
 	w, h := p.vt.Width(), p.vt.Height()
+	_ = p.vt.Close()
 	em := vt.NewSafeEmulator(w, h)
 	em.SetScrollbackSize(10000)
 	em.SetCallbacks(vt.Callbacks{
@@ -81,6 +119,7 @@ func (p *PaneModel) ResetVT() {
 		},
 	})
 	p.vt = em
+	go drainEmulatorReplies(em)
 	p.rawBuf.Reset()
 	p.cursorVisible = true
 }

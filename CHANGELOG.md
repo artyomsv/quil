@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.9.1] - 2026-04-22
+
 ### Fixed
 
 - **TUI freeze on claude-code pane creation** — creating a new claude-code pane could hard-wedge the Bubble Tea main goroutine, requiring a client kill. Root cause: `charmbracelet/x/vt`'s `Emulator.handleRequestMode` writes DECRQM replies to an unbuffered `io.Pipe`. Quil uses the emulator as a renderer only (ConPTY is the real terminal), so nobody drained the pipe — when claude-code sent a mode query, `SafeEmulator.Write` blocked forever *inside* Update, under its own mutex. Fix: per-pane goroutine in `internal/tui/pane.go` that reads and discards emulator replies; shutdown via `em.Close()` → `io.EOF`, wired into `ResetVT` so no goroutine leaks on VT reset. Any TUI pane running software that probes terminal modes is covered.

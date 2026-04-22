@@ -285,12 +285,15 @@ func (m Model) ConfigChanged() bool { return m.configChanged }
 
 func (m Model) Init() tea.Cmd {
 	log.Print("TUI Init — starting listener")
+	startUpdateWatchdog(defaultWatchdogConfig())
 	return tea.Batch(m.listenForMessages(), memoryTickCmd())
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	start := time.Now()
+	markUpdateStart(start)
 	defer func() {
+		markUpdateEnd()
 		m.perfStats.recordMsg(fmt.Sprintf("%T", msg), time.Since(start))
 	}()
 	switch msg := msg.(type) {
@@ -580,9 +583,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(tea.ClearScreen, m.listenForMessages())
 
 	case WorkspaceStateMsg:
+		// TODO(freeze-diagnostic): the 8 "apply: ..." breadcrumbs in this case
+		// and inside applyWorkspaceState were added to pinpoint a TUI Update
+		// wedge during claude-code pane creation (2026-04-22). The root cause
+		// turned out to be a drained-less VT emulator pipe in pane.go, fixed
+		// in the same PR. Keep the breadcrumbs for ~2 weeks of watchdog-clean
+		// runs, then either delete or demote them to logger.Debug.
 		log.Printf("WorkspaceState: %d tabs, %d panes", len(msg.Tabs), len(msg.Panes))
 		newPaneIDs := m.applyWorkspaceState(msg)
+		log.Printf("apply: returned, %d new panes", len(newPaneIDs))
 		m.resizeTabs()
+		log.Printf("apply: resizeTabs done")
 		cmds := []tea.Cmd{m.listenForMessages(), m.resizeAllPanes(), m.sendAllLayouts()}
 		// Start spinner ticks for newly restored panes
 		for _, paneID := range newPaneIDs {
@@ -596,6 +607,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(m.migrationPlugins) > 0 && m.migrationLeft == nil {
 			m.openMigrationDialog()
 		}
+		log.Printf("apply: cmds prepared (n=%d), returning from Update", len(cmds))
 		return m, tea.Batch(cmds...)
 
 	case setActivePaneMsg:
@@ -1677,8 +1689,14 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) []string {
 		if tab.Root != nil {
 			tab.Root.PrunePlaceholders()
 		}
+		if tab.Root != nil {
+			log.Printf("apply: tab %s panes reconciled (n=%d leaves)", tab.ID, len(tab.Root.Leaves()))
+		} else {
+			log.Printf("apply: tab %s panes reconciled (root=nil)", tab.ID)
+		}
 
 		m.finalizeTabPanes(tab)
+		log.Printf("apply: tab %s finalized", tab.ID)
 		m.tabs = append(m.tabs, tab)
 	}
 
@@ -1691,6 +1709,7 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) []string {
 	if m.activeTab >= len(m.tabs) {
 		m.activeTab = max(0, len(m.tabs)-1)
 	}
+	log.Printf("apply: active tab = %d", m.activeTab)
 
 	// Reconcile notes mode after daemon state sync:
 	//   (a) If the bound pane no longer exists in any tab, tear down
@@ -1703,6 +1722,7 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) []string {
 	//       to the editor. Without this, the editor would silently sit
 	//       next to an unrelated pane while still writing to the bound
 	//       pane's notes file.
+	log.Printf("apply: notes reconciliation start (mode=%v)", m.notesMode)
 	if m.notesMode && m.notesEditor != nil {
 		bound := m.notesEditor.PaneID()
 		var boundTab *TabModel
@@ -1723,6 +1743,7 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) []string {
 			boundTab.ActivePane = bound
 		}
 	}
+	log.Printf("apply: notes reconciliation done")
 
 	return newPaneIDs
 }

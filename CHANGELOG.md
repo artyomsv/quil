@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **TUI freeze on claude-code pane creation** — creating a new claude-code pane could hard-wedge the Bubble Tea main goroutine, requiring a client kill. Root cause: `charmbracelet/x/vt`'s `Emulator.handleRequestMode` writes DECRQM replies to an unbuffered `io.Pipe`. Quil uses the emulator as a renderer only (ConPTY is the real terminal), so nobody drained the pipe — when claude-code sent a mode query, `SafeEmulator.Write` blocked forever *inside* Update, under its own mutex. Fix: per-pane goroutine in `internal/tui/pane.go` that reads and discards emulator replies; shutdown via `em.Close()` → `io.EOF`, wired into `ResetVT` so no goroutine leaks on VT reset. Any TUI pane running software that probes terminal modes is covered.
+
+### Added
+
+- **Stuck-Update watchdog + breadcrumbs** — `internal/tui/watchdog.go` launches a process-lifetime goroutine that ticks every 2 s and, if a Bubble Tea Update has been in flight for more than 10 s, writes `runtime.Stack(buf, true)` to the log. Memoized per start-ns so one wedge produces exactly one dump; `sync.Pool` reuses the 1 MiB buffer. Eight new `apply: ...` breadcrumb log lines bracket each step of `applyWorkspaceState` and the `WorkspaceStateMsg` handler so the next wedge pinpoints the line that hung to within one statement. Seven white-box tests in `watchdog_test.go` cover the logic kernel via an injected clock/stack/logger.
+- **Memory reporting** — F1 → Memory opens a collapsible tab/pane tree showing Go-heap (ring buffer + ghost snapshot + plugin state), PTY child resident memory, and notes-editor bytes per pane. The status bar gains a `mem <n>` segment updated every 5 s from a new daemon-side collector (`internal/memreport/`). Cross-platform PTY RSS: `/proc/<pid>/status` on Linux, `ps -o rss=` batched on Darwin, `GetProcessMemoryInfo` on Windows. Two new MCP tools — `get_memory_report` (per-tab totals + grand total) and `get_pane_memory` (single pane detail) — expose daemon-side layers for external agents. Spec at `docs/superpowers/specs/2026-04-20-memory-reporting-design.md`, plan at `docs/superpowers/plans/2026-04-20-memory-reporting.md`.
+- **claude-code: per-pane resume** — multi-pane Claude sessions sharing a working directory now reattach to their own session on restore, instead of all converging on claude's "most recent in cwd" lookup. On restart, the daemon checks `~/.claude/projects/<escaped-cwd>/<session_id>.jsonl`; if present, it promotes the pane's resume args to `--resume <uuid>`. Otherwise (pane closed during claude's startup screens before any exchange persisted a session file), it falls back to `--continue`. Plugin schema bumped to v4 — users with edited `~/.quil/plugins/claude-code.toml` get the standard side-by-side migration dialog on next launch.
+
 ## [1.9.0] - 2026-04-20
 
 ### Added

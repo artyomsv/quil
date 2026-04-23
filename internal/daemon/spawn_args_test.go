@@ -1,7 +1,9 @@
 package daemon
 
 import (
+	"os"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/artyomsv/quil/internal/plugin"
@@ -330,6 +332,208 @@ func TestEscapeClaudeCWD(t *testing.T) {
 			got := escapeClaudeCWD(tt.cwd)
 			if got != tt.want {
 				t.Errorf("escapeClaudeCWD(%q) = %q, want %q", tt.cwd, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestResolveSpawnArgs_ClaudeHookSessionID covers the restore-path logic that
+// prefers the SessionStart hook's recorded session id over the preassigned
+// one. This is what keeps /clear, /resume, and compaction rotations working:
+// the hook file captures the live id and resumeTemplateFor promotes it to
+// --resume when the matching jsonl is on disk.
+func TestResolveSpawnArgs_ClaudeHookSessionID(t *testing.T) {
+	claudePlugin := &plugin.PanePlugin{
+		Name:    "claude-code",
+		Command: plugin.CommandConfig{Cmd: "claude"},
+		Persistence: plugin.PersistenceConfig{
+			Strategy:   "preassign_id",
+			StartArgs:  []string{"--session-id", "{session_id}"},
+			ResumeArgs: []string{"--continue"},
+		},
+	}
+
+	tests := []struct {
+		name              string
+		pane              *Pane
+		hookID            string
+		hookErr           error
+		sessionFoundForID string // claudeSessionExistsFn returns true only for this id
+		want              []string
+	}{
+		{
+			name: "hook id present, hook file on disk — resume via hook id",
+			pane: &Pane{
+				ID:          "pane-abc",
+				CWD:         `E:\project`,
+				PluginState: map[string]string{"session_id": "preassigned-111"},
+			},
+			hookID:            "rotated-222",
+			sessionFoundForID: "rotated-222",
+			want:              []string{"--resume", "rotated-222"},
+		},
+		{
+			name: "hook id present, hook file missing, preassigned on disk — falls back to preassigned",
+			pane: &Pane{
+				ID:          "pane-abc",
+				CWD:         `E:\project`,
+				PluginState: map[string]string{"session_id": "preassigned-111"},
+			},
+			hookID:            "rotated-222",
+			sessionFoundForID: "preassigned-111",
+			want:              []string{"--resume", "preassigned-111"},
+		},
+		{
+			name: "hook id present, neither file on disk — --continue fallback",
+			pane: &Pane{
+				ID:          "pane-abc",
+				CWD:         `E:\project`,
+				PluginState: map[string]string{"session_id": "preassigned-111"},
+			},
+			hookID:            "rotated-222",
+			sessionFoundForID: "", // neither matches
+			want:              []string{"--continue"},
+		},
+		{
+			name: "no hook file — legacy path, preassigned on disk",
+			pane: &Pane{
+				ID:          "pane-abc",
+				CWD:         `E:\project`,
+				PluginState: map[string]string{"session_id": "preassigned-111"},
+			},
+			hookErr:           os.ErrNotExist,
+			sessionFoundForID: "preassigned-111",
+			want:              []string{"--resume", "preassigned-111"},
+		},
+		{
+			name: "InstanceArgs + hook id — toggle preserved, hook id wins",
+			pane: &Pane{
+				ID:           "pane-abc",
+				CWD:          `E:\project`,
+				InstanceArgs: []string{"--dangerously-skip-permissions"},
+				PluginState:  map[string]string{"session_id": "preassigned-111"},
+			},
+			hookID:            "rotated-222",
+			sessionFoundForID: "rotated-222",
+			want:              []string{"--dangerously-skip-permissions", "--resume", "rotated-222"},
+		},
+		{
+			// Hook file exists but is empty after trim (hook fired before
+			// session_id was extracted). Should fall through to the
+			// preassigned-id probe identically to the ErrNotExist case.
+			name: "hook returns empty string with no error — fallthrough to preassigned",
+			pane: &Pane{
+				ID:          "pane-abc",
+				CWD:         `E:\project`,
+				PluginState: map[string]string{"session_id": "preassigned-111"},
+			},
+			hookID:            "",
+			hookErr:           nil,
+			sessionFoundForID: "preassigned-111",
+			want:              []string{"--resume", "preassigned-111"},
+		},
+	}
+
+	// NOTE: subtests are intentionally NOT marked t.Parallel(). They mutate
+	// package-level vars (readHookSessionIDFn, claudeSessionExistsFn) and a
+	// concurrent run would cross-contaminate. The Cleanup below restores both
+	// when the outer test completes.
+	origHook := readHookSessionIDFn
+	origProbe := claudeSessionExistsFn
+	t.Cleanup(func() {
+		readHookSessionIDFn = origHook
+		claudeSessionExistsFn = origProbe
+	})
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			readHookSessionIDFn = func(paneID string) (string, error) {
+				if paneID != tt.pane.ID {
+					t.Errorf("hook read paneID = %q, want %q", paneID, tt.pane.ID)
+				}
+				return tt.hookID, tt.hookErr
+			}
+			claudeSessionExistsFn = func(cwd, sessionID string) bool {
+				if cwd != tt.pane.CWD {
+					t.Errorf("probe cwd = %q, want %q", cwd, tt.pane.CWD)
+				}
+				return sessionID == tt.sessionFoundForID
+			}
+			got := resolveSpawnArgs(claudePlugin, tt.pane, true)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("resolveSpawnArgs:\n  got:  %v\n  want: %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestClaudeHookSpawnPrep covers the fresh-spawn injection helper. It must
+// (a) emit --settings + QUIL_PANE_ID env when the hook script is present,
+// (b) silently skip both when the script is missing so the spawn proceeds
+// like the pre-feature daemon, and (c) warn (not error) when --settings is
+// already in the user's args because Claude treats later-wins.
+func TestClaudeHookSpawnPrep(t *testing.T) {
+	tests := []struct {
+		name        string
+		statErr     error
+		userArgs    []string
+		paneID      string
+		wantPrefix  bool
+		wantEnvVar  string
+	}{
+		{
+			name:       "script present — injects --settings + env",
+			statErr:    nil,
+			userArgs:   []string{"--enable-auto-mode"},
+			paneID:     "pane-abc",
+			wantPrefix: true,
+			wantEnvVar: "QUIL_PANE_ID=pane-abc",
+		},
+		{
+			name:       "script missing — no injection, no env",
+			statErr:    os.ErrNotExist,
+			userArgs:   []string{"--enable-auto-mode"},
+			paneID:     "pane-abc",
+			wantPrefix: false,
+			wantEnvVar: "",
+		},
+		{
+			name:       "user already passed --settings — still injects (later-wins warning logged)",
+			statErr:    nil,
+			userArgs:   []string{"--settings", `{"foo":"bar"}`, "--enable-auto-mode"},
+			paneID:     "pane-abc",
+			wantPrefix: true,
+			wantEnvVar: "QUIL_PANE_ID=pane-abc",
+		},
+	}
+
+	origStat := claudeHookScriptStatFn
+	t.Cleanup(func() { claudeHookScriptStatFn = origStat })
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			claudeHookScriptStatFn = func(string) error { return tt.statErr }
+			prefix, env := claudeHookSpawnPrep("/tmp/quil", tt.paneID, tt.userArgs)
+			if tt.wantPrefix {
+				if len(prefix) != 2 || prefix[0] != "--settings" {
+					t.Errorf("prefix = %v, want [--settings ...]", prefix)
+				}
+				if !strings.Contains(prefix[1], `"SessionStart"`) {
+					t.Errorf("prefix[1] missing SessionStart key: %s", prefix[1])
+				}
+			} else {
+				if prefix != nil {
+					t.Errorf("prefix = %v, want nil", prefix)
+				}
+			}
+			if tt.wantEnvVar == "" {
+				if env != nil {
+					t.Errorf("env = %v, want nil", env)
+				}
+			} else {
+				if len(env) != 1 || env[0] != tt.wantEnvVar {
+					t.Errorf("env = %v, want [%q]", env, tt.wantEnvVar)
+				}
 			}
 		})
 	}

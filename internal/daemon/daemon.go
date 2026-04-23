@@ -21,6 +21,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/vt"
 	"github.com/google/uuid"
+	"github.com/artyomsv/quil/internal/claudehook"
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/logger"
@@ -87,6 +88,13 @@ func (d *Daemon) Start() error {
 
 	if err := shellinit.EnsureInitDir(quilDir); err != nil {
 		log.Printf("warning: failed to write shell init scripts: %v", err)
+	}
+
+	if err := claudehook.EnsureScripts(quilDir); err != nil {
+		log.Printf("warning: failed to write claude hook scripts: %v", err)
+	}
+	if err := os.MkdirAll(config.SessionsDir(), 0700); err != nil {
+		log.Printf("warning: failed to create sessions dir: %v", err)
 	}
 
 	// Write default plugin TOML files if missing, then load all plugins
@@ -1181,6 +1189,49 @@ func (d *Daemon) buildWorkspaceState() map[string]any {
 // arg-merging matrix never reaches ~/.claude.
 var claudeSessionExistsFn = claudeSessionFileExists
 
+// readHookSessionIDFn reads the hook-recorded session id for a pane. Defaults
+// to the real claudehook.ReadPersistedSessionID; tests override it so
+// resolveSpawnArgs matrix tests never touch $QUIL_HOME/sessions/.
+var readHookSessionIDFn = func(paneID string) (string, error) {
+	id, _, err := claudehook.ReadPersistedSessionID(config.QuilDir(), paneID)
+	return id, err
+}
+
+// claudeHookScriptStatFn lets claudeHookSpawnPrep check whether the hook
+// script exists on disk. Defaults to os.Stat; tests override to simulate the
+// "EnsureScripts failed at startup" branch without touching the real FS.
+var claudeHookScriptStatFn = func(path string) error {
+	_, err := os.Stat(path)
+	return err
+}
+
+// claudeHookSpawnPrep returns the --settings prefix args and env vars to add
+// to a fresh claude-code spawn for SessionStart hook registration. Returns
+// nil slices when the hook is unavailable (script missing or settings JSON
+// build fails) so the spawn proceeds without the hook — matching the
+// pre-feature behaviour rather than failing the whole spawn. Logs a warning
+// if userArgs already contain --settings; Claude treats later wins, so our
+// prepend silently overrides the user's value.
+func claudeHookSpawnPrep(quilDir, paneID string, userArgs []string) (prefix, env []string) {
+	scriptPath := claudehook.ScriptPath(quilDir)
+	if err := claudeHookScriptStatFn(scriptPath); err != nil {
+		log.Printf("warning: pane %s: claude hook script unavailable (%s): %v — session-id rotation tracking disabled", paneID, scriptPath, err)
+		return nil, nil
+	}
+	js, err := claudehook.BuildSettingsJSON(claudehook.HookCommand(quilDir))
+	if err != nil {
+		log.Printf("warning: pane %s: build claude settings JSON: %v — session-id rotation tracking disabled", paneID, err)
+		return nil, nil
+	}
+	for _, a := range userArgs {
+		if a == "--settings" {
+			log.Printf("warning: pane %s: claude-code args already contain --settings; Quil's hook entry will override (later-wins)", paneID)
+			break
+		}
+	}
+	return []string{"--settings", js}, []string{"QUIL_PANE_ID=" + paneID}
+}
+
 // escapeClaudeCWD mirrors Claude Code's on-disk naming for per-project
 // session directories under ~/.claude/projects/. Each path separator or
 // colon becomes '-'; no other transformation. Confirmed against real
@@ -1218,11 +1269,38 @@ func claudeSessionFileExists(cwd, sessionID string) bool {
 // correct for panes closed during Claude's startup screens before any
 // session file was written).
 func resumeTemplateFor(p *plugin.PanePlugin, pane *Pane) []string {
-	if p.Name == "claude-code" && p.Persistence.Strategy == "preassign_id" {
-		sessionID := pane.PluginState["session_id"]
-		if sessionID != "" && claudeSessionExistsFn(pane.CWD, sessionID) {
+	if p.Name != "claude-code" || p.Persistence.Strategy != "preassign_id" {
+		return p.Persistence.ResumeArgs
+	}
+
+	// Prefer the id recorded by the SessionStart hook — it reflects any
+	// /clear, /resume, or compaction rotation that happened after the
+	// original preassigned id was generated. A missing or empty value falls
+	// through to the original probe so panes on older Quil installs still
+	// work.
+	if hookID, err := readHookSessionIDFn(pane.ID); err == nil && hookID != "" {
+		if claudeSessionExistsFn(pane.CWD, hookID) {
+			pane.PluginMu.Lock()
+			if pane.PluginState == nil {
+				pane.PluginState = make(map[string]string)
+			}
+			pane.PluginState["session_id"] = hookID
+			pane.PluginMu.Unlock()
 			return []string{"--resume", "{session_id}"}
 		}
+	}
+
+	// Snapshot the preassigned id under PluginMu so a concurrent scraper
+	// goroutine cannot mutate the map underneath us. Disk probe runs after
+	// the lock is released — never hold a mutex across syscalls.
+	pane.PluginMu.Lock()
+	sessionID := ""
+	if pane.PluginState != nil {
+		sessionID = pane.PluginState["session_id"]
+	}
+	pane.PluginMu.Unlock()
+	if sessionID != "" && claudeSessionExistsFn(pane.CWD, sessionID) {
+		return []string{"--resume", "{session_id}"}
 	}
 	return p.Persistence.ResumeArgs
 }
@@ -1317,9 +1395,22 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 		}
 	}
 
-	// Plugin-specific env vars
-	if len(p.Command.Env) > 0 {
-		ptySession.SetEnv(p.Command.Env)
+	// Claude Code session-id rotation tracking: prepend --settings with an
+	// inline JSON that registers a SessionStart hook. The hook receives
+	// Claude's session_id and writes it to $QUIL_HOME/sessions/<paneID>.id,
+	// which the restore path consults in resumeTemplateFor. QUIL_PANE_ID in
+	// the PTY env lets the hook attribute the write to this specific pane.
+	envVars := append([]string{}, p.Command.Env...)
+	if p.Name == "claude-code" {
+		settingsArgs, hookEnv := claudeHookSpawnPrep(config.QuilDir(), pane.ID, args)
+		if len(settingsArgs) > 0 {
+			args = append(settingsArgs, args...)
+		}
+		envVars = append(envVars, hookEnv...)
+	}
+
+	if len(envVars) > 0 {
+		ptySession.SetEnv(envVars)
 	}
 
 	// Initialize plugin state map

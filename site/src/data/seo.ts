@@ -44,7 +44,7 @@ export const SITE = {
    *  bump step — manual edits are normally unnecessary but harmless
    *  (the next release will overwrite both via sed). */
   software: {
-    version: "1.9.1",
+    version: "1.9.2",
     license: "MIT",
     operatingSystem: "Linux, macOS, Windows",
     applicationCategory: "DeveloperApplication",
@@ -52,7 +52,7 @@ export const SITE = {
   },
 
   /** ISO 8601 release date for structured data + sitemap lastmod. */
-  releaseDate: "2026-04-22",
+  releaseDate: "2026-04-23",
 } as const;
 
 export interface Page {

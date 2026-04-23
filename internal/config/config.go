@@ -267,3 +267,18 @@ func MCPLogDir(cfg MCPConfig) string {
 func NotesDir() string {
 	return filepath.Join(QuilDir(), "notes")
 }
+
+// ClaudeHookDir returns the directory where Quil writes the Claude Code
+// SessionStart hook scripts it passes via --settings. Lives under Quil's
+// own home so we never touch the user's ~/.claude/ config.
+func ClaudeHookDir() string {
+	return filepath.Join(QuilDir(), "claudehook")
+}
+
+// SessionsDir returns the directory where the Claude Code SessionStart hook
+// writes per-pane session id files (<paneID>.id). Read on daemon restore
+// by resumeTemplateFor so panes reattach to the latest session id after
+// /clear, compaction, or /resume rotations.
+func SessionsDir() string {
+	return filepath.Join(QuilDir(), "sessions")
+}

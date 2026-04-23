@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **claude-code: session-id rotation tracking** — `/clear`, `/resume`, and compaction rotate Claude's session id to a new jsonl file. Before this fix, the daemon kept resuming the preassigned jsonl after a restart, silently restoring the pre-rotation conversation and discarding the user's post-rotation work. Quil now registers a `SessionStart` hook via `claude --settings '<inline JSON>'` at every spawn (never touches `~/.claude/settings.json`) and passes `QUIL_PANE_ID=<paneID>` in the PTY env; the hook script — shipped in `$QUIL_HOME/claudehook/` and written atomically on daemon start — writes the live session id to `$QUIL_HOME/sessions/<paneID>.id` on every rotation. `resumeTemplateFor` consults this file on restore (snapshotting `PluginState["session_id"]` under `PluginMu` before the disk probe) and resumes the current session with per-pane attribution. Hardening: `ValidateQuilDir` rejects shell-unsafe paths before hook install, `ReadPersistedSessionID` rejects pane ids containing path separators and caps reads at 256 bytes, scripts validate the extracted id matches a uuid regex before persisting and log failures to `$QUIL_HOME/claudehook/hook.log`, missing script on disk is detected at spawn time (`claudeHookSpawnPrep`) so the spawn falls back to the pre-feature behaviour instead of silently registering a dead hook. Introduces `internal/claudehook/` package with embedded sh + ps1 scripts.
+
 ## [1.9.1] - 2026-04-22
 
 ### Fixed

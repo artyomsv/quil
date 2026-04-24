@@ -930,9 +930,18 @@ func (m Model) notesEditorPosAt(screenX, screenY int) (row, col int, ok bool) {
 	}
 
 	ed := m.notesEditor.editor
-	row = ed.ScrollTop + (screenY - bodyY0)
-	col = screenX - bodyX0
-	return row, col, true
+	vrow := ed.ScrollTop + (screenY - bodyY0)
+	vcol := screenX - bodyX0
+	if ed.SoftWrap {
+		// The editor is scrolled in visual-row space; translate the
+		// visual (row, col) back to the underlying logical position
+		// before returning to the caller, which expects logical
+		// coordinates for selection and cursor updates.
+		layout := ed.visualLayout(ed.contentWForLayout())
+		row, col = ed.visualToLogical(layout, vrow, vcol)
+		return row, col, true
+	}
+	return vrow, vcol, true
 }
 
 // notesKeyExempt reports whether a key should bypass the notes editor and

@@ -59,6 +59,7 @@ func NewNotesEditor(notesDir, paneID, paneName string, viewW, viewH int) (*Notes
 	}
 	ed := NewTextEditor(content, "", viewW, viewH)
 	ed.Highlight = HighlightPlain
+	ed.SoftWrap = true
 	return &NotesEditor{
 		editor:   ed,
 		notesDir: notesDir,

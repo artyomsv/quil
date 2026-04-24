@@ -479,6 +479,49 @@ func TestModel_NotesEditorPosAt_ConvertsScreenCoordsAndScroll(t *testing.T) {
 	}
 }
 
+func TestModel_NotesEditorPosAt_SoftWrap_ClickOnContinuationRow(t *testing.T) {
+	t.Parallel()
+	ne, err := NewNotesEditor(t.TempDir(), "pane-wrap-click", "Build", 40, 10)
+	if err != nil {
+		t.Fatalf("NewNotesEditor: %v", err)
+	}
+	// A single long logical line that wraps into multiple visual rows.
+	// SoftWrap is already true (set in NewNotesEditor). Content width
+	// inside the notes panel has to be large enough for the long line
+	// to actually split, so build a wide model.
+	ne.editor.Lines = []string{strings.Repeat("a", 80)}
+
+	m := Model{
+		notesMode:     true,
+		notesEditor:   ne,
+		width:         100,
+		height:        30,
+		notifications: NewNotificationCenter(30, 50),
+		tabs:          []*TabModel{NewTabModel("t1", "Shell")},
+	}
+
+	// notesW = 100 * 2 / 5 = 40. Outer box x = [60, 100). Production
+	// NotesEditor.View() receives width=40 and invokes Resize with
+	// innerW = 38 → editor.ViewWidth = 38. GutterWidth = 4 (one line).
+	// contentW = 38 - 4 - 1 = 33. visualLayout splits the 80-rune
+	// line at 33: [0,33), [33,66), [66,80).
+	ne.editor.ViewWidth = 38
+	ne.editor.ScrollTop = 0
+	// bodyY0 = 3 (tab bar + top border + header). bodyX0 = 60 + 1 + 4 = 65.
+	// Click at y=5 → vrow = ScrollTop + (5-3) = 2. Click at x=70 → vcol = 5.
+	// visualToLogical(layout, 2, 5) → row 0, col = 66 + 5 = 71.
+	row, col, ok := m.notesEditorPosAt(70, 5)
+	if !ok {
+		t.Fatal("notesEditorPosAt returned ok=false for in-box click")
+	}
+	if row != 0 {
+		t.Errorf("logical row: got %d, want 0 (still the same wrapped line)", row)
+	}
+	if col != 71 {
+		t.Errorf("logical col: got %d, want 71 (row-2 Start 66 + vcol 5)", col)
+	}
+}
+
 func TestModel_NotesEditorPosAt_NotInNotesMode(t *testing.T) {
 	t.Parallel()
 	m := Model{

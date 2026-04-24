@@ -55,6 +55,24 @@ type TextEditor struct {
 	// back to a built-in default (see editorDefaultPageSize). Used by the
 	// log viewer to navigate large files quickly without holding Down.
 	PageSize int
+	// SoftWrap makes long logical lines wrap onto the next visual row
+	// instead of being hard-truncated with a trailing "~". When enabled,
+	// ScrollTop is a visual-row index and cursor Up/Down/Home/End work on
+	// visual rows. Paragraph jumps (ctrl+up/down) and PageSize jumps
+	// (alt+up/down) remain logical-line based. Only NotesEditor opts in
+	// — the TOML plugin editor and F1 log viewer keep truncation.
+	SoftWrap bool
+}
+
+// visualRow maps a visual row (what the user sees on screen) back to a
+// slice [Start, End) of runes within a logical line. With SoftWrap off
+// there is exactly one visualRow per logical line (Start=0, End=runeLen);
+// with SoftWrap on, each logical line produces ceil(runeLen/contentW)
+// visualRows (minimum 1 for empty lines).
+type visualRow struct {
+	Logical int // index into Lines
+	Start   int // first rune in the logical line (inclusive)
+	End     int // last rune (exclusive)
 }
 
 // editorDefaultPageSize is used when TextEditor.PageSize is 0 (unset).
@@ -261,16 +279,10 @@ func (e *TextEditor) HandleKey(key string) (saved, closed bool, cmd tea.Cmd) {
 	// 4. Movement keys — clear selection
 	case "up":
 		e.Sel = nil
-		if e.CursorRow > 0 {
-			e.CursorRow--
-			e.clampCol()
-		}
+		e.verticalMove(-1)
 	case "down":
 		e.Sel = nil
-		if e.CursorRow < len(e.Lines)-1 {
-			e.CursorRow++
-			e.clampCol()
-		}
+		e.verticalMove(1)
 	case "left":
 		e.Sel = nil
 		if e.CursorCol > 0 {
@@ -289,10 +301,22 @@ func (e *TextEditor) HandleKey(key string) (saved, closed bool, cmd tea.Cmd) {
 		}
 	case "home":
 		e.Sel = nil
-		e.CursorCol = 0
+		if e.SoftWrap {
+			layout := e.visualLayout(e.contentWForLayout())
+			vi := e.cursorVisualRow(layout)
+			e.CursorCol = layout[vi].Start
+		} else {
+			e.CursorCol = 0
+		}
 	case "end":
 		e.Sel = nil
-		e.CursorCol = runeLen(e.Lines[e.CursorRow])
+		if e.SoftWrap {
+			layout := e.visualLayout(e.contentWForLayout())
+			vi := e.cursorVisualRow(layout)
+			e.CursorCol = layout[vi].End
+		} else {
+			e.CursorCol = runeLen(e.Lines[e.CursorRow])
+		}
 
 	// Navigation keys (word jump without selection)
 	case "ctrl+right":
@@ -667,12 +691,58 @@ func (e *TextEditor) clampCol() {
 }
 
 func (e *TextEditor) ensureCursorVisible() {
-	if e.CursorRow < e.ScrollTop {
-		e.ScrollTop = e.CursorRow
+	if !e.SoftWrap {
+		if e.CursorRow < e.ScrollTop {
+			e.ScrollTop = e.CursorRow
+		}
+		if e.CursorRow >= e.ScrollTop+e.ViewHeight {
+			e.ScrollTop = e.CursorRow - e.ViewHeight + 1
+		}
+		if e.ScrollTop < 0 {
+			e.ScrollTop = 0
+		}
+		return
 	}
-	if e.CursorRow >= e.ScrollTop+e.ViewHeight {
-		e.ScrollTop = e.CursorRow - e.ViewHeight + 1
+	layout := e.visualLayout(e.contentWForLayout())
+	vi := e.cursorVisualRow(layout)
+	if vi < e.ScrollTop {
+		e.ScrollTop = vi
 	}
+	if vi >= e.ScrollTop+e.ViewHeight {
+		e.ScrollTop = vi - e.ViewHeight + 1
+	}
+	if e.ScrollTop < 0 {
+		e.ScrollTop = 0
+	}
+}
+
+// verticalMove moves the cursor one visual row in the given direction
+// (-1 up, +1 down). Preserves the visual column where possible so
+// wrapped-line navigation feels natural. Falls back to logical-row
+// stepping when SoftWrap is off.
+func (e *TextEditor) verticalMove(dir int) {
+	if !e.SoftWrap {
+		target := e.CursorRow + dir
+		if target < 0 || target >= len(e.Lines) {
+			return
+		}
+		e.CursorRow = target
+		e.clampCol()
+		return
+	}
+	layout := e.visualLayout(e.contentWForLayout())
+	if len(layout) == 0 {
+		return
+	}
+	vi := e.cursorVisualRow(layout)
+	nv := vi + dir
+	if nv < 0 || nv >= len(layout) {
+		return
+	}
+	vcol := e.CursorCol - layout[vi].Start
+	row, col := e.visualToLogical(layout, nv, vcol)
+	e.CursorRow = row
+	e.CursorCol = col
 }
 
 // Content returns raw text (no ANSI codes) for saving.
@@ -735,94 +805,237 @@ func (e *TextEditor) GutterWidth() int {
 	return digits + 1 // +1 for the trailing space
 }
 
+// contentWForLayout returns the usable content width (columns) for
+// rendering and wrap calculations, matching what Render() uses.
+func (e *TextEditor) contentWForLayout() int {
+	cw := e.ViewWidth - e.GutterWidth() - 1
+	if cw < 10 {
+		cw = 10
+	}
+	return cw
+}
+
+// visualLayout expands Lines into visual rows. When SoftWrap is off the
+// result is 1:1 (kept so callers have a single code path). When on, long
+// lines are split at contentW rune boundaries.
+func (e *TextEditor) visualLayout(contentW int) []visualRow {
+	if contentW < 1 {
+		contentW = 1
+	}
+	out := make([]visualRow, 0, len(e.Lines))
+	if !e.SoftWrap {
+		for i, line := range e.Lines {
+			out = append(out, visualRow{Logical: i, Start: 0, End: runeLen(line)})
+		}
+		return out
+	}
+	for i, line := range e.Lines {
+		rl := runeLen(line)
+		if rl == 0 {
+			out = append(out, visualRow{Logical: i, Start: 0, End: 0})
+			continue
+		}
+		for start := 0; start < rl; start += contentW {
+			end := start + contentW
+			if end > rl {
+				end = rl
+			}
+			out = append(out, visualRow{Logical: i, Start: start, End: end})
+		}
+	}
+	return out
+}
+
+// cursorVisualRow returns the visual-row index in layout that owns the
+// current cursor position. A cursor sitting exactly at End of a visual
+// row is attributed to that row only if it's the last visual row for
+// the logical line (end-of-line); otherwise it belongs to the next row.
+// Defensive: if CursorRow is out of range or no matching row is found,
+// returns the clamped index closest to the cursor's logical row so the
+// caller never derefs layout[0] for an unrelated line.
+func (e *TextEditor) cursorVisualRow(layout []visualRow) int {
+	if len(layout) == 0 {
+		return 0
+	}
+	for vi, vr := range layout {
+		if vr.Logical != e.CursorRow {
+			continue
+		}
+		if e.CursorCol >= vr.Start && e.CursorCol < vr.End {
+			return vi
+		}
+		if e.CursorCol == vr.End {
+			// cursor sits on the boundary — last visual row of this
+			// logical line gets it (end-of-line cursor).
+			if vi == len(layout)-1 || layout[vi+1].Logical != vr.Logical {
+				return vi
+			}
+		}
+	}
+	// Fallback: find the first visual row whose Logical >= CursorRow,
+	// or the last row if CursorRow is past the document.
+	for vi, vr := range layout {
+		if vr.Logical >= e.CursorRow {
+			return vi
+		}
+	}
+	return len(layout) - 1
+}
+
+// visualToLogical converts a visual (row, col) screen position back into
+// a logical (row, col) position in Lines. Clamps vrow to the valid range
+// and vcol to the visual row's width.
+func (e *TextEditor) visualToLogical(layout []visualRow, vrow, vcol int) (row, col int) {
+	if len(layout) == 0 {
+		return 0, 0
+	}
+	if vrow < 0 {
+		vrow = 0
+	}
+	if vrow >= len(layout) {
+		vrow = len(layout) - 1
+	}
+	vr := layout[vrow]
+	if vcol < 0 {
+		vcol = 0
+	}
+	width := vr.End - vr.Start
+	if vcol > width {
+		vcol = width
+	}
+	return vr.Logical, vr.Start + vcol
+}
+
 // --- Rendering ---
 
 func (e *TextEditor) Render() string {
 	var b strings.Builder
 
 	gutter := e.GutterWidth()
-	contentW := e.ViewWidth - gutter - 1 // -1 defensive pad for cursor overflow
-	if contentW < 10 {
-		contentW = 10
-	}
+	contentW := e.contentWForLayout()
+	layout := e.visualLayout(contentW)
 
 	end := e.ScrollTop + e.ViewHeight
-	if end > len(e.Lines) {
-		end = len(e.Lines)
+	if end > len(layout) {
+		end = len(layout)
 	}
-
 	hasSel := e.Sel != nil && !e.Sel.IsEmpty()
 
-	// Build the line-number format string once per render so long
-	// documents get a wider gutter without re-formatting per line.
+	// Build the gutter strings once: the line-number format picks up
+	// the widest digit count; wrapped continuations share a single
+	// blank-spaces buffer.
 	lineNumFmt := fmt.Sprintf("\x1b[90m%%%dd \x1b[0m", gutter-1)
+	blankGutter := strings.Repeat(" ", gutter)
 
-	for i := e.ScrollTop; i < end; i++ {
-		rawLine := e.Lines[i]
-
-		// Truncate by rune count
-		runes := []rune(rawLine)
-		truncated := false
-		if len(runes) > contentW {
-			runes = runes[:contentW-1]
-			truncated = true
-		}
-		displayRaw := string(runes)
-		if truncated {
-			displayRaw += "~"
-		}
-
-		lineNum := fmt.Sprintf(lineNumFmt, i+1)
-
-		// Check if this line has selection
-		selStart, selEnd := -1, -1
-		if hasSel {
-			selStart, selEnd = e.Sel.ColRange(i, runeLen(rawLine))
-			// Clamp to display width
-			if selStart >= 0 {
-				displayRL := len([]rune(displayRaw))
-				if selStart > displayRL {
-					selStart = -1
-					selEnd = -1
-				} else if selEnd > displayRL {
-					selEnd = displayRL
-				}
-			}
-		}
-
-		if selStart >= 0 {
-			// Line has selection — render with selection highlight
-			b.WriteString(lineNum)
-			e.renderLineWithSelection(&b, i, displayRaw, contentW, selStart, selEnd)
-			b.WriteByte('\n')
-		} else if i == e.CursorRow {
-			// Cursor line: render with cursor highlight
-			b.WriteString(lineNum)
-			e.renderCursorLine(&b, displayRaw, contentW)
-			b.WriteByte('\n')
-		} else {
-			// Non-cursor line: apply syntax highlighting then pad
-			highlighted := e.highlight(displayRaw)
-			visW := ansi.StringWidth(displayRaw)
-			pad := ""
-			if visW < contentW {
-				pad = strings.Repeat(" ", contentW-visW)
-			}
-			b.WriteString(lineNum + highlighted + pad + "\n")
-		}
+	for vi := e.ScrollTop; vi < end; vi++ {
+		e.renderVisualRow(&b, layout, vi, contentW, lineNumFmt, blankGutter, hasSel)
 	}
 
 	for i := end; i < e.ScrollTop+e.ViewHeight; i++ {
 		b.WriteString("\x1b[90m  ~ \x1b[0m\n")
 	}
-
 	return b.String()
 }
 
+// renderVisualRow renders a single visual row into b. Factored out of
+// Render so the loop body fits on one screen: slice the logical line
+// to the visual window, resolve cursor/selection attribution for this
+// row, then dispatch to the selection/cursor/plain renderer.
+func (e *TextEditor) renderVisualRow(b *strings.Builder, layout []visualRow, vi, contentW int, lineNumFmt, blankGutter string, hasSel bool) {
+	vr := layout[vi]
+	rawLine := e.Lines[vr.Logical]
+	rawRunes := []rune(rawLine)
+	sliceRunes := rawRunes[vr.Start:vr.End]
+
+	// Non-softwrap: hard-truncate oversize rows with "~" (legacy
+	// TOML-editor and log-viewer behavior). With SoftWrap on, the
+	// layout already splits at contentW so no truncation fires.
+	truncated := false
+	if !e.SoftWrap && len(sliceRunes) > contentW {
+		sliceRunes = sliceRunes[:contentW-1]
+		truncated = true
+	}
+	displayRaw := string(sliceRunes)
+	if truncated {
+		displayRaw += "~"
+	}
+	displayRL := len([]rune(displayRaw))
+	rowWidth := vr.End - vr.Start
+
+	// Gutter: line number on the first visual row of each logical line,
+	// blank spaces on wrapped continuations.
+	if vr.Start == 0 {
+		b.WriteString(fmt.Sprintf(lineNumFmt, vr.Logical+1))
+	} else {
+		b.WriteString(blankGutter)
+	}
+
+	onCursorLine := false
+	if vr.Logical == e.CursorRow {
+		if e.CursorCol >= vr.Start && e.CursorCol < vr.End {
+			onCursorLine = true
+		} else if e.CursorCol == vr.End {
+			// End-of-row position belongs to this row only if no
+			// continuation row for the same logical line follows.
+			if vi == len(layout)-1 || layout[vi+1].Logical != vr.Logical {
+				onCursorLine = true
+			}
+		}
+	}
+	localCursorCol := e.CursorCol - vr.Start
+	if localCursorCol < 0 {
+		localCursorCol = 0
+	}
+	if localCursorCol > displayRL {
+		localCursorCol = displayRL
+	}
+
+	selStart, selEnd := -1, -1
+	if hasSel {
+		gs, ge := e.Sel.ColRange(vr.Logical, len(rawRunes))
+		if gs >= 0 && ge > vr.Start && gs < vr.End {
+			selStart = gs - vr.Start
+			if selStart < 0 {
+				selStart = 0
+			}
+			selEnd = ge - vr.Start
+			if selEnd > rowWidth {
+				selEnd = rowWidth
+			}
+			if selStart > displayRL {
+				selStart = -1
+				selEnd = -1
+			} else if selEnd > displayRL {
+				selEnd = displayRL
+			}
+		}
+	}
+
+	switch {
+	case selStart >= 0:
+		e.renderLineWithSelection(b, displayRaw, contentW, selStart, selEnd, onCursorLine, localCursorCol)
+	case onCursorLine:
+		e.renderCursorLine(b, displayRaw, contentW, localCursorCol)
+	default:
+		highlighted := e.highlight(displayRaw)
+		visW := ansi.StringWidth(displayRaw)
+		b.WriteString(highlighted)
+		if visW < contentW {
+			b.WriteString(strings.Repeat(" ", contentW-visW))
+		}
+	}
+	b.WriteByte('\n')
+}
+
 // renderCursorLine renders the current line with cursor highlight and syntax colors.
-func (e *TextEditor) renderCursorLine(b *strings.Builder, displayRaw string, contentW int) {
+// cursorCol is the rune column within displayRaw where the cursor sits
+// (already translated from the logical CursorCol by the caller).
+func (e *TextEditor) renderCursorLine(b *strings.Builder, displayRaw string, contentW, cursorCol int) {
 	runes := []rune(displayRaw)
-	col := e.CursorCol
+	col := cursorCol
+	if col < 0 {
+		col = 0
+	}
 	if col > len(runes) {
 		col = len(runes)
 	}
@@ -859,12 +1072,16 @@ func (e *TextEditor) renderCursorLine(b *strings.Builder, displayRaw string, con
 }
 
 // renderLineWithSelection renders a line with selection highlight.
-// selStart/selEnd are rune-based column indices (endCol is exclusive).
-func (e *TextEditor) renderLineWithSelection(b *strings.Builder, lineIdx int, displayRaw string, contentW, selStart, selEnd int) {
+// selStart/selEnd are rune-based column indices within displayRaw (endCol
+// is exclusive). isCursorLine and cursorCol are pre-translated by the
+// caller (which knows whether the cursor lives on this visual row and
+// where inside the sliced displayRaw it sits).
+func (e *TextEditor) renderLineWithSelection(b *strings.Builder, displayRaw string, contentW, selStart, selEnd int, isCursorLine bool, cursorCol int) {
 	runes := []rune(displayRaw)
 	rl := len(runes)
-	isCursorLine := lineIdx == e.CursorRow
-	cursorCol := e.CursorCol
+	if cursorCol < 0 {
+		cursorCol = 0
+	}
 	if cursorCol > rl {
 		cursorCol = rl
 	}
@@ -925,10 +1142,16 @@ func (e *TextEditor) renderLineWithSelection(b *strings.Builder, lineIdx int, di
 					if cursorInAfter+1 < len(afterRunes) {
 						b.WriteString(string(afterRunes[cursorInAfter+1:]))
 					}
+					b.WriteString("\x1b[0m")
 				} else {
+					// Cursor sits past the last rune of the after-run.
+					// Close the 97m run, then paint a reverse-video
+					// space as the cursor glyph. Without this the
+					// padding below reserves the slot (extraCursor=1)
+					// but nothing visible lands on it.
 					b.WriteString(string(afterRunes))
+					b.WriteString("\x1b[0m\x1b[7m \x1b[27m")
 				}
-				b.WriteString("\x1b[0m")
 			} else {
 				b.WriteString("\x1b[97m")
 				b.WriteString(after)

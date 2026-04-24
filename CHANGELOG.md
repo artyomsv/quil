@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.10.0] - 2026-04-24
+
 ### Added
 
 - **Notes editor: soft-wrap** — long lines in the pane-notes editor (Alt+E) now wrap onto the next visual row instead of being hard-truncated at the column edge with a trailing `~`. Character-wrap (not word-wrap), opt-in per editor via a new `TextEditor.SoftWrap` flag — the TOML plugin editor and F1 log viewer keep their existing truncation. Cursor Up/Down walks visual rows with column preservation; Home/End snap to the current visual row; Shift-arrow selections stay contiguous across wrap boundaries. Mouse clicks on a wrapped continuation row now resolve to the correct logical column via a new `visualToLogical` helper in `notesEditorPosAt`. Internals: `visualLayout(contentW) []visualRow` drives rendering, scroll (`ScrollTop` reinterpreted as a visual-row index when wrap is on), and navigation from a single source of truth.

@@ -88,23 +88,29 @@ type Session interface {
 - Lipgloss v2 Width/Height includes borders (v1 was additive) — pane/dialog rendering compensates
 - `Key.Mod.Contains()` bitmask enables proper Shift/Ctrl/Alt detection for text selection
 
-## ADR-5: Hybrid Storage — JSON + SQLite
+## ADR-5: Storage — TOML config, JSON state, binary buffers (no SQLite)
 
-**Decision:** Use JSON for configuration and workspace state, SQLite for volatile cached data.
+**Decision:** Use TOML for hand-edited config, JSON for workspace state, and per-pane binary files for ghost buffers. No SQLite anywhere.
 
 | Layer | Format | What | Why |
 |---|---|---|---|
-| Configuration | TOML | `config.toml`, plugin definitions | Human-readable, hand-editable, git-friendly |
-| Workspace state | JSON | `workspace.json` | Source of truth for layout. Human-inspectable. Atomic writes via temp+rename. |
-| Volatile data | SQLite | Ghost buffers, token history, session logs | High-write frequency, queryable. Rebuildable cache — can be deleted safely. |
+| Configuration | TOML | `config.toml`, plugin definitions, instances | Human-readable, hand-editable, git-friendly |
+| Workspace state | JSON | `workspace.json`, `window.json` | Source of truth for layout. Human-inspectable. Atomic writes via temp+rename + `.bak` rollback |
+| Pane output history | Binary | `buffers/<pane-id>.bin` | Ring-buffered PTY bytes; one file per pane; cheap append, full-file rewrite on snapshot |
+| Pane notes | Plain text | `notes/<pane-id>.md` | One file per pane, atomic temp+rename, readable with `cat` |
+| Per-pane Claude session id | Plain text | `sessions/<pane-id>.id` | Single uuid per file, written by the embedded SessionStart hook, atomic rename, readable with `cat` |
+| Per-pane MCP interaction logs | Plain text | `mcp-logs/<pane-id>.log` | Append-only log lines; redaction applied at write time |
+
+**Earlier drafts considered SQLite for ghost buffers, token history, and session logs** — that direction was abandoned because (a) the per-pane binary file approach is simpler to reason about, (b) crash-safety via atomic rename is more straightforward than file-locked SQLite from multiple goroutines, and (c) zero additional CGo dependency for users on platforms where the SQLite driver doesn't ship pre-built. **No file under `~/.quil/` is a SQLite database.**
 
 **Alternatives considered:**
 
 | Option | Rejected because |
 |---|---|
-| SQLite for everything | Config files should be hand-editable. TOML/JSON is more accessible. |
-| JSON for everything | Ghost buffers write frequently. JSON append is not crash-safe for high-frequency writes. |
-| BoltDB / bbolt | SQLite has better tooling, broader ecosystem, and handles concurrent reads well. |
+| SQLite for everything | Adds a CGo / C-driver dependency for what is fundamentally append-only per-pane streams. The tooling advantage (`sqlite3` REPL) doesn't outweigh the build complexity |
+| JSON for ghost buffers | Frequent append writes; JSON is not crash-safe under high-frequency append, and re-encoding the full buffer per byte is wasteful |
+| BoltDB / bbolt | Same CGo and packaging questions as SQLite, with worse tooling |
+| One giant binary file for all panes | Whole-file rewrites on per-pane changes don't scale; per-pane files let snapshots be parallelised and let removal of a pane delete a single file |
 
 ## ADR-6: Plugin System via TOML
 
@@ -449,6 +455,149 @@ Each init script sources the user's original shell config first, then appends th
 - The same `ReadOnly` flag is now available for any other "look but don't touch" use case (future: read-only TOML preview, read-only config dump)
 - Symlink-rejecting reads make the log viewer safe to use against attacker-writable directories under the same user account
 
+## ADR-20: Client/Daemon Version Handshake (v1.8.0)
+
+**Decision:** The TUI handshakes with the running daemon over IPC before attaching, and self-heals when versions drift. Older daemon → prompt the user, gracefully stop it, auto-spawn the matching daemon next to the TUI binary. Newer daemon than client → refuse to attach and point at the releases page. Dev/debug builds skip the check.
+
+**Context:** Quil ships two binaries (`quil` + `quild`) that share a single IPC protocol. Before this ADR, an upgrade to a new IPC schema required the user to manually `kill quild`, replace both binaries, and restart — easy to get wrong, and hard to debug because a half-upgraded session would surface as cryptic "unknown message type" errors. The dual-binary nature is otherwise invisible to users (the TUI auto-starts the daemon on first invocation), so the upgrade dance broke that abstraction.
+
+**Implementation:**
+
+- New IPC pair `MsgVersionReq`/`MsgVersionResp` added to the protocol — backward compatible because pre-handshake daemons return `unknown message` and the client treats that as "older daemon"
+- New shared `internal/version/` package with proper semver comparison so `1.10.0 > 1.9.0` (the previous lexical-string comparison had the opposite ordering — a real breakage waiting to land at v1.10)
+- Auto-spawn logic finds `quild` next to the TUI executable (`os.Executable()`+`filepath.Dir()`), falls back to PATH; skips this with a warning if neither resolves so users on weird path setups can still run their existing daemon
+- Empty version string short-circuits the comparison so unstamped local builds (`go run ./cmd/quil`) and `quil-dev`/`quil-debug` variants don't trigger the prompt during development
+- The graceful-stop path uses an existing `MsgShutdown` channel (added in ADR-7's snapshot redesign), so the daemon flushes a final snapshot and writes its PID file removal before exiting
+
+**Consequences:**
+
+- "Drop in the new tarball, run `quil`" now Just Works for both `quil` and `quild` — single-step upgrade
+- Newer-daemon-than-client refuses to attach instead of corrupting the user's session with mismatched message ordinals
+- The shared `internal/version/` package is now the canonical place for semver math (used by GoReleaser ldflag injection too)
+- Any future IPC-protocol change simply bumps the version; the handshake catches mismatches before either side reads a malformed payload
+
+## ADR-21: Memory Reporting (v1.9.0–v1.9.1)
+
+**Decision:** A daemon-side 5-second collector (`internal/memreport/`) snapshots per-pane Go-heap (output ring buffer + ghost snapshot + plugin state) and PTY child resident memory; results are surfaced via a `mem <n>` segment in the status bar, an F1 → Memory tree dialog, and two MCP tools.
+
+**Context:** Quil keeps long-running PTY children and per-pane ring buffers — both are silent leak risks. Without an in-app accounting view, users had to attach a debugger or read OS-level process listings to spot a misbehaving plugin. The same data is also valuable to AI agents that drive Quil over MCP (e.g., "the assistant pane's RSS jumped 800 MB after that last run — it's leaking").
+
+**Implementation:**
+
+- `internal/memreport/` package — collector goroutine, 5 s ticker, daemon-owned. Per-pane breakdown: `OutputBufBytes` (ring buffer cap), `GhostSnapBytes` (frozen disk-loaded copy), `PluginStateBytes` (rough JSON-encoded estimate), `NotesBytes` (notes editor approx), and `PTYRSSBytes` (resident memory of the spawned child)
+- Cross-platform RSS via the smallest possible per-platform shim — no CGo:
+
+| Platform | Implementation |
+|---|---|
+| Linux | Read `/proc/<pid>/status`, parse `VmRSS:` line |
+| Darwin | Single batched `ps -o pid=,rss= -p <pid1>,<pid2>,...` per tick |
+| Windows | `GetProcessMemoryInfo` via `golang.org/x/sys/windows` |
+| Other | No-op stub returning 0 |
+
+- New IPC pair `MsgMemoryReportReq`/`MsgMemoryReportResp` so both the TUI and MCP bridge consume the same daemon-computed snapshot — single source of truth, no double-counting
+- TUI side: `dialogMemory` (F1 → Memory) renders a tab/pane tree with expand/collapse; status bar gains a `mem <n>` segment polled every 5 s; the notes editor gets `ApproxBytes()` for per-pane attribution
+- Two MCP tools: `get_memory_report` (per-tab totals + grand total) and `get_pane_memory` (single pane detail)
+- VT-emulator grid memory **explicitly deferred** — `charmbracelet/x/vt` does not expose a stable accessor for cell-grid bytes; opening that surface would require either upstream API changes or a fork. The estimate is documented as missing in the dialog footer
+
+**Consequences:**
+
+- Leaks become visible in the live UI without dropping out of Quil — most often catches plugin-state objects that aren't released after pane destruction
+- AI agents can self-monitor over MCP — useful for long-running automated sessions
+- The daemon is the single source of truth for memory numbers; multiple TUIs attached to the same daemon all see identical figures
+- VT grid memory remains an accepted blind spot; will be revisited when upstream provides an accessor
+
+## ADR-22: VT-Emulator Reply Drain Goroutine + Stuck-Update Watchdog (v1.9.1)
+
+**Decision:** Run a per-pane goroutine that reads and discards replies from `charmbracelet/x/vt`'s emulator (`SafeEmulator`) into `io.Discard`, and add a process-lifetime watchdog that dumps full-process stack traces if any Bubble Tea `Update` call exceeds 10 s.
+
+**Context:** `Emulator.handleRequestMode` writes DECRQM mode-query replies to an unbuffered `io.Pipe`. Quil uses the emulator as a renderer only — ConPTY (Windows) and the real PTY (Unix) are the actual terminal — so nobody was reading from that pipe. When claude-code probed the terminal mode, `SafeEmulator.Write` blocked forever inside `tea.Update` under its own mutex. Result: a single keystroke wedged the entire TUI, requiring a hard kill. The bug is generic — any tool that sends a mode/cursor/window query (most TUI applications) was a potential trigger.
+
+**Implementation:**
+
+- Per-pane goroutine in `internal/tui/pane.go` started after `vt.NewEmulator` returns:
+  - `io.Copy(io.Discard, em)` — blocks on `em.Read()` until `em.Close()` returns `io.EOF`
+  - One goroutine per pane; teardown is wired into both `ResetVT()` and pane destruction so no goroutine leaks across VT resets or pane closes
+- `internal/tui/watchdog.go` — process-lifetime singleton:
+  - `sync.Mutex` + `time.Time updateStartedAt` set/cleared by `applyWorkspaceState` and the `WorkspaceStateMsg` handler
+  - 2 s ticker; if `updateStartedAt` has been non-zero for ≥ 10 s and the start-time hasn't already triggered a dump, write `runtime.Stack(buf, true)` to the leveled logger at error level
+  - Memoised per start-ns so one wedge produces exactly one dump (avoids log spam if the TUI stays wedged)
+  - `sync.Pool` reuses the 1 MiB stack buffer
+- Eight new `apply: ...` breadcrumb log lines bracket each step of `applyWorkspaceState` and the `WorkspaceStateMsg` handler so the next wedge pinpoints the line that hung to within one statement
+- Seven white-box tests in `watchdog_test.go` cover the logic via injected clock/stack/logger so the assertion targets are deterministic
+
+**Consequences:**
+
+- The originally-reported wedge (claude-code on a fresh pane) is fixed
+- Future wedges in the Update path are auto-diagnosed — the next user report comes with a stack trace already in the log
+- The drain goroutine is allowed to leak the *bytes* it discards (we throw the replies away — Quil has no need for them since ConPTY/PTY is the real terminal); the goroutine itself terminates cleanly via `Close`
+- The watchdog never preempts work, only observes it — there is no risk of false-positive cancellation
+
+## ADR-23: Claude Code SessionStart Hook (v1.9.2)
+
+**Decision:** Track Claude Code session-id rotation by registering a `SessionStart` hook via `claude --settings '<inline JSON>'` at every spawn. The hook runs an embedded shell/PowerShell script that writes the live `session_id` into `$QUIL_HOME/sessions/<paneID>.id` atomically. On daemon restore, the resume strategy prefers the hook-recorded id over the original preassigned id.
+
+**Context:** Claude Code's `/clear`, `/resume`, and conversation compaction all rotate the session id to a new jsonl file. ADR-3's `preassign_id` strategy generates a UUID at pane creation and resumes with `--resume <id>` after restart — but that id is now stale. The daemon kept resuming the preassigned jsonl after a restart, silently restoring the pre-rotation conversation and discarding the user's post-rotation work. Critical correctness bug, hard to detect because the resume *succeeded* — just into the wrong session.
+
+**Constraints that shaped the design:**
+
+- Must not modify `~/.claude/settings.json` — it belongs to the user, may be in source control, and is shared across all Claude tools (not just Quil)
+- Must not require a one-time setup step — Quil should "just work" the first time the user creates a claude-code pane
+- Must survive both daemon restarts and Claude itself restarting between sessions
+- The hook runs from Claude's own context, not Quil's — so it has to communicate back via the filesystem, not over IPC
+
+**Implementation:**
+
+- New `internal/claudehook/` package with embedded scripts in `scripts/` (sh + ps1) — `//go:embed` makes them part of the binary so there is nothing to install separately
+- `claudehook.EnsureScripts()` writes the scripts to `$QUIL_HOME/claudehook/` atomically (`os.CreateTemp` + `os.Rename`) at daemon startup. Writes are owner-only (`0o700`/`0o600`)
+- Each spawn passes `--settings '<inline JSON>'` to Claude with a `SessionStart` hook pointing at the on-disk script. Inline JSON, not a config file, so Quil's wiring is fully scoped to that one process invocation
+- Each spawn passes `QUIL_PANE_ID=<paneID>` in the PTY env. The hook script reads the variable and writes the captured session id to `$QUIL_HOME/sessions/<QUIL_PANE_ID>.id`
+- The hook script reads Claude's stdin JSON, extracts `session_id`, validates it against a uuid regex (`^[0-9a-f-]{36}$`), and atomically rewrites the file. Validation failures are logged to `$QUIL_HOME/claudehook/hook.log` so post-mortem debugging is possible without a second tool
+- `daemon.resumeTemplateFor` calls `claudehook.ReadPersistedSessionID(paneID)` first, falls back to the preassigned id from `PluginState["session_id"]` if the hook hasn't written anything yet (e.g., pane closed before any `SessionStart` event fired). The existing on-disk `claudeSessionExistsFn` probe still gates the resume so a deleted jsonl file falls back to `--continue`
+- Hardening:
+  - `ValidateQuilDir` rejects shell-unsafe paths before hook install (would break the script's `cd "$QUIL_HOME"` line otherwise)
+  - `ReadPersistedSessionID` rejects pane ids containing path separators (defends against a malicious pane id injection through a future IPC bug); read is capped at 256 bytes
+  - Missing-script detection at spawn time (`claudeHookSpawnPrep`) — if a user wiped `$QUIL_HOME/claudehook/`, the spawn falls back to the pre-feature behaviour rather than registering a dead hook with stale paths
+  - Both `readHookSessionIDFn` and `claudeSessionExistsFn` are package-level function vars so `spawn_args_test.go` swaps them out and never touches real `~/.claude/` or `$QUIL_HOME/sessions/`
+
+**Consequences:**
+
+- Claude Code session rotation is tracked transparently — `/clear` creates a new session, daemon restart resumes that new session, the user's post-rotation conversation is preserved
+- Multi-pane Claude in the same project keeps each pane on its own session — the per-pane file is the disambiguator, even though all panes share the same project directory under `~/.claude/projects/<escaped-cwd>/`
+- The hook mechanism is reusable — any future Claude lifecycle event (`SessionEnd`, `BeforeMessage`) can be wired the same way
+- Wiring is fully self-contained in `internal/claudehook/`; the daemon and TUI know the package only as a small API surface (`EnsureScripts`, `ReadPersistedSessionID`, `claudeHookSpawnPrep`)
+
+## ADR-24: TextEditor Soft-Wrap via Visual-Row Layout
+
+**Decision:** Add a `SoftWrap bool` flag to `TextEditor` and route rendering, scrolling, and cursor navigation through a new `visualLayout(contentW) []visualRow` helper when the flag is set. Only `NotesEditor` opts in — the F1 log viewer and the TOML plugin editor keep their legacy hard-truncation behaviour with the trailing `~` marker.
+
+**Context:** The pane-notes editor (M7) is rendered into a side-panel that is only ~40% of window width (`notesPanelWidthNumerator = 2/5`, minimum 30 cols). With the legacy editor truncating each logical line at the panel edge with `~`, every normal prose paragraph disappeared off the right. Word-wrap is a UX expectation users brought from every other text editor; absence was a surprising regression on a multi-paragraph note.
+
+**Why character-wrap (not word-wrap):**
+
+The simplest implementation that delivers the user expectation. Word-wrap adds a second layer of locale-sensitive break rules (CJK, mixed-script notes, hyphenation) on top of an editor that is otherwise rune-pure. The default in most code editors with "soft wrap on" is character wrap. Revisitable later as a config knob if users ask.
+
+**Implementation:**
+
+- New `visualRow` struct: `{ Logical, Start, End int }` — a slice `[Start, End)` of runes within logical line `Logical`
+- `visualLayout(contentW) []visualRow` — emits exactly one visual row per logical line when `SoftWrap=false` (so callers do not branch); otherwise splits each logical line at every `contentW`-th rune. Empty lines still produce one zero-width visual row
+- `cursorVisualRow(layout)` and `visualToLogical(layout, vrow, vcol)` are the inverse operations. Cursor on a wrap boundary attributes to the *continuation* row, except at end-of-logical-line where it stays on the last visual row — matches vim/most editors
+- `ScrollTop` is reinterpreted as a visual-row index when `SoftWrap=true`. Existing surfaces are unaffected because visual-row count equals logical-row count when wrap is off
+- Cursor Up/Down (`verticalMove`) walks visual rows with column preservation; Home/End snap to the visual row's `Start`/`End`. Paragraph jumps (`Ctrl+Up`/`Down`) and `PageSize` jumps (`Alt+Up`/`Down`) deliberately stay logical — long-distance jumps want logical semantics
+- Selection (`shift+arrow`) stays logical; the per-visual-row render intersects `Sel.ColRange(logical, runeLen)` with each visual row's `[Start, End)` so highlight remains contiguous across wrap boundaries
+- `notesEditorPosAt` (model.go) translates mouse-click `(vrow, vcol)` to logical `(row, col)` via `visualToLogical` when wrap is on
+- `Render()` is split into `Render` (drives the loop) + `renderVisualRow` (one row's slicing + selection / cursor / plain dispatch). Wrapped continuation rows render with a blank gutter (no line number)
+
+**Why an opt-in flag and not always-on:**
+
+The TOML plugin editor renders at a fixed 70-col width inside a centred dialog — no wrap is correct there because the user is editing source code. The F1 log viewer benefits from `~`-truncation as a visual cue that a log line is being clipped (Alt+Up/Down jump 40 logical lines, not visual lines). Both surfaces explicitly want the legacy behaviour.
+
+**Consequences:**
+
+- The notes editor renders prose as users expect from any other editor; no `~` ever appears in the notes panel
+- The shared `TextEditor` API picks up exactly one new field; non-notes callers are byte-identical with the pre-soft-wrap behaviour
+- Soft-wrap is a generic capability now — if a future surface (a future read-only text dialog?) wants wrapping, the flag is ready
+- Fixed an unrelated pre-existing render bug in `renderLineWithSelection` exposed by the new path: cursor at end-of-line past a shorter selection used to be invisible because the padding math reserved a cell but never emitted a reverse-video glyph
+
 ## Storage Layout
 
 ```
@@ -478,6 +627,12 @@ Each init script sources the user's original shell config first, then appends th
 │   └── quil-paste-<ts>-<rand>.png
 ├── mcp-logs/                      # Per-pane MCP interaction logs (M10)
 │   └── pane-XXXXXXXX.log
+├── claudehook/                    # Embedded SessionStart hook scripts (ADR-23)
+│   ├── quil-session-hook.sh       # Unix
+│   ├── quil-session-hook.ps1      # Windows
+│   └── hook.log                   # Hook validation failure log
+├── sessions/                      # Per-pane Claude session ids (ADR-23)
+│   └── pane-XXXXXXXX.id
 └── secrets/                       # (planned)
     └── tokens.enc
 ```

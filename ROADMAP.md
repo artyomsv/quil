@@ -90,7 +90,7 @@ Key capabilities:
 `quil mcp` subcommand bridges MCP JSON-RPC (stdio) to daemon IPC (socket). AI assistants can read pane output, send commands, take screenshots, navigate tabs, restart panes, and control the TUI. No other terminal multiplexer offers this.
 
 Key capabilities:
-- **13 MCP tools** — Phase A: `list_panes`, `read_pane_output`, `send_to_pane`, `get_pane_status`, `create_pane`. Phase B: `send_keys`, `restart_pane`, `screenshot_pane`, `switch_tab`, `list_tabs`, `destroy_pane`, `set_active_pane`, `close_tui`
+- **17 MCP tools** — Phase A (workspace control): `list_panes`, `read_pane_output`, `send_to_pane`, `get_pane_status`, `create_pane`. Phase B (interaction + introspection): `send_keys`, `restart_pane`, `screenshot_pane`, `switch_tab`, `list_tabs`, `destroy_pane`, `set_active_pane`, `close_tui`. Notification Center (M12): `get_notifications`, `watch_notifications`. Memory Reporting (M13): `get_memory_report`, `get_pane_memory`
 - **Official MCP SDK** — `modelcontextprotocol/go-sdk` v1.4+, typed tool handlers with struct-based input schemas
 - **Request-response IPC** — backward-compatible `Message.ID` field for correlation; daemon responds to specific connection
 - **VT-emulated screenshots** — `charmbracelet/x/vt` renders ring buffer into text grid showing actual screen state
@@ -114,6 +114,57 @@ Key capabilities:
 - **Plugin `[[idle_handlers]]`** — TOML section for context-aware patterns, parallel to `[[error_handlers]]`. Default patterns for terminal, claude-code, and ssh plugins
 - **Plugin `path` field** — explicit binary location bypasses PATH lookup. 3-tier detection: path → LookPath → searchBinary fallback (fixes Explorer-launched apps on Windows)
 - **MCP tools** — `get_notifications` (non-blocking) and `watch_notifications` (blocking up to 5 min, replaces polling). `requestWithTimeout` with `time.NewTimer` + `defer timer.Stop()`
+
+### M13: Memory Reporting
+> Per-pane memory accounting with status-bar segment, F1 dialog, and MCP tools.
+
+A daemon-side 5 s collector (`internal/memreport/`) snapshots per-pane Go-heap (output ring buffer + ghost snapshot + plugin state) and PTY child resident memory. Surfaces it three ways: a `mem <n>` segment in the status bar refreshed every 5 s, an F1 → Memory tab/pane tree with expand/collapse and per-pane notes-editor byte accounting, and two MCP tools for external agents.
+
+Key capabilities:
+- **Cross-platform PTY RSS** — `/proc/<pid>/status` on Linux, `ps -o rss=` batched on Darwin, `GetProcessMemoryInfo` on Windows. No-op stub elsewhere
+- **New IPC pair** — `MsgMemoryReportReq`/`MsgMemoryReportResp` with the daemon as the source of truth
+- **Two MCP tools** — `get_memory_report` (per-tab totals + grand total) and `get_pane_memory` (single-pane detail). Spec: `docs/superpowers/specs/2026-04-20-memory-reporting-design.md`, plan: `docs/superpowers/plans/2026-04-20-memory-reporting.md`
+- **VT grid TUI memory deferred** — no stable public emulator accessor in `charmbracelet/x/vt` yet
+
+### v1.8.0: Client/Daemon Version Handshake
+> Eliminates the manual "stop daemon → replace both binaries → restart" upgrade dance.
+
+The TUI handshakes with the running daemon before attaching. Older daemon → prompts the user, gracefully stops it, auto-spawns the matching daemon from alongside the TUI binary. Newer daemon → TUI refuses to attach and points to the releases page. Dev/debug builds skip the check.
+
+Key capabilities:
+- **New IPC pair** — `MsgVersionReq`/`MsgVersionResp` added to the protocol
+- **Shared `internal/version/` package** — proper semver comparison so `1.10.0 > 1.9.0` (the previous lexical comparison had the opposite ordering)
+- **Auto-spawn from binary directory** — finds `quild` next to the TUI binary, falls back to PATH
+- **Unstamped local builds skip the check** — empty version string short-circuits the comparison
+
+### v1.9.1: VT Drain + Update Watchdog
+> Fixes a TUI freeze on claude-code pane creation; ships a stuck-Update detector for future hangs.
+
+`charmbracelet/x/vt`'s `Emulator.handleRequestMode` writes DECRQM replies to an unbuffered `io.Pipe`. Quil uses the emulator as a renderer only (ConPTY is the real terminal), so nobody drained the pipe. When claude-code sent a mode query, `SafeEmulator.Write` blocked forever inside Update under its own mutex — single-keystroke wedge requiring a client kill.
+
+Fix: per-pane goroutine in `internal/tui/pane.go` reads and discards emulator replies; shutdown via `em.Close()` → `io.EOF`, wired into `ResetVT` so no goroutine leaks on VT reset.
+
+Watchdog: `internal/tui/watchdog.go` ticks every 2 s and, if a Bubble Tea Update has been in flight for more than 10 s, writes `runtime.Stack(buf, true)` to the log. Memoised per start-ns so one wedge produces exactly one dump; `sync.Pool` reuses the 1 MiB buffer. Eight new `apply: ...` breadcrumb log lines bracket each step of `applyWorkspaceState`. Seven white-box tests cover the logic via injected clock/stack/logger.
+
+### v1.9.2: Claude Code SessionStart Hook
+> Track session-id rotation across `/clear`, `/resume`, and conversation compaction.
+
+Before this, daemon kept resuming the preassigned jsonl after a restart, silently restoring pre-rotation conversation and discarding the user's post-rotation work.
+
+Quil registers a `SessionStart` hook via `claude --settings '<inline JSON>'` at every spawn (never modifies `~/.claude/settings.json`) and passes `QUIL_PANE_ID=<paneID>` in the PTY env. The hook script — embedded in `internal/claudehook/scripts/` (sh + ps1), written to `$QUIL_HOME/claudehook/` atomically on daemon start — reads Claude's stdin JSON, extracts `session_id`, and atomically writes `$QUIL_HOME/sessions/<paneID>.id`. On daemon restore, `resumeTemplateFor` consults this file and prefers the hook-recorded id over the original preassigned id.
+
+Hardening:
+- **`ValidateQuilDir`** rejects shell-unsafe paths before hook install
+- **`ReadPersistedSessionID`** rejects pane ids containing path separators and caps reads at 256 bytes
+- **Scripts validate** the extracted id against a uuid regex before persisting; failures land in `$QUIL_HOME/claudehook/hook.log`
+- **Missing-script detection** at spawn time (`claudeHookSpawnPrep`) — falls back to pre-feature behaviour rather than registering a dead hook
+
+### Notes Soft-Wrap
+> Long prose in the pane-notes editor wraps onto the next visual row instead of being hard-truncated.
+
+Pane notes (M7) historically truncated long lines at the panel edge with a trailing `~`. The notes panel is only ~40% of window width — every normal paragraph disappeared off the right edge.
+
+Character wrap (not word wrap), opt-in per editor via a new `TextEditor.SoftWrap` flag — the TOML plugin editor and F1 log viewer keep their existing truncation. Cursor Up/Down walks visual rows with column preservation; Home/End snap to the visual row; shift-arrow selections stay contiguous across wrap boundaries; mouse clicks on a continuation row resolve to the correct logical column via a new `visualToLogical` helper. `ScrollTop` is reinterpreted as a visual-row index when wrap is on. Paragraph (Ctrl+Up/Down) and PageSize (Alt+Up/Down) jumps stay logical. Also fixes a pre-existing render bug exposed by the new path: cursor at end-of-line past a shorter selection was invisible.
 
 ### M7: Pane Notes — [PRD](docs/roadmap/pane-notes.md)
 > Side-by-side note-taking linked to individual panes.

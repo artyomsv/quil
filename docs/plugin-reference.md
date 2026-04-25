@@ -40,6 +40,7 @@ name = "my-tool"
 display_name = "My Tool"
 category = "tools"
 description = "A short description of what this plugin does"
+schema_version = 1
 ```
 
 | Field | Type | Required | Default | Description |
@@ -48,6 +49,7 @@ description = "A short description of what this plugin does"
 | `display_name` | string | No | Value of `name` | Human-readable label shown in the Ctrl+N creation dialog and pane borders. |
 | `category` | string | No | `"tools"` | Groups the plugin in the creation dialog. |
 | `description` | string | No | `""` | One-line description shown in plugin lists. |
+| `schema_version` | int | No | `0` | Plugin TOML schema version. Built-in plugins shipped via `defaults/*.toml` carry an embedded `schema_version`; on startup, Quil compares your on-disk file's value with the embedded default and — if yours is older — opens a side-by-side migration dialog so you can merge new defaults without losing edits. **Custom plugins**: set `schema_version = 1` and bump it whenever you publish a breaking schema change so consumers of your plugin get a prompt. Omitting the field is treated as `0` (legacy) and the migration check is skipped. |
 
 ### Categories
 
@@ -78,7 +80,7 @@ arg_template = ["-p", "{port}", "{user}@{host}"]
 | `cmd` | string | **Yes** | — | Binary name or absolute path. Resolved via PATH at runtime (`exec.LookPath`). |
 | `path` | string | No | `""` | Explicit absolute path to the binary. If set, bypasses PATH lookup. Useful for tools installed in non-standard locations or when Quil is launched from Explorer on Windows with an incomplete PATH. Detection order: `path` → `exec.LookPath(cmd)` → `searchBinary` fallback (which scans `~/.local/bin` everywhere and the User PATH on Windows). |
 | `args` | string[] | No | `[]` | Default arguments passed every time the plugin is launched. Overridden when instance-specific args are provided. |
-| `env` | string[] | No | `[]` | Environment variables as `KEY=VALUE` pairs. Merged into the PTY process environment. |
+| `env` | string[] | No | `[]` | Environment variables as `KEY=VALUE` pairs. Merged into the PTY process environment. Quil itself adds `QUIL_PANE_ID=<paneID>` to every spawned PTY (claude-code's SessionStart hook reads this to attribute session-id rotations to a specific pane); custom plugins that wrap claude-code-adjacent tooling can read `$QUIL_PANE_ID` from their child process and assume it is set. |
 | `detect` | string | No | Value of `cmd` | Command used to check if the tool is installed. Only the **first word** is used for PATH lookup (e.g., `"ssh -V"` checks for `ssh`). |
 | `shell_integration` | bool | No | `false` | **Reserved for the built-in terminal plugin.** Injects OSC 7 directory tracking hooks. Has no effect in user TOML plugins. |
 | `arg_template` | string[] | No | `[]` | Template arguments with `{placeholder}` tokens. Expanded from form field values when creating an instance. See [Template Expansion](#template-expansion). |

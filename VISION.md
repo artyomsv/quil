@@ -45,7 +45,7 @@ Panes are assigned a Type with specialized behaviors:
 
 - **Dynamic Positioning:** Tabs can be docked to Top, Bottom, Left, or Right.
 - **Visual Logic:**
-  - **JSON Transformer:** A hotkey (`Ctrl+J`) to toggle between Raw, Minified, and Pretty-Printed JSON with syntax highlighting.
+  - **JSON Transformer:** A hotkey (`Ctrl+J`) to toggle between Raw, Minified, and Pretty-Printed JSON with syntax highlighting. **Status: Planned** — see ROADMAP M5 "Remaining".
   - **Pane Naming:** Every pane can be manually named (Alt+F2) or dynamically named based on the running process. **Status: Implemented.**
   - **Split-Views:** Support for infinite nesting of vertical and horizontal splits within a single tab. **Status: Implemented** — binary split tree (`LayoutNode`) with per-node split direction and ratio.
   - **Mouse Support:** Click to switch tabs and panes, scroll wheel for terminal history. **Status: Implemented.**
@@ -55,11 +55,22 @@ Panes are assigned a Type with specialized behaviors:
 
 - **OSC 7 CWD Tracking:** Quil auto-injects shell hooks (bash, zsh, PowerShell) at spawn time to emit OSC 7 escape sequences. The pane border displays the live working directory — no manual shell configuration required. Fish emits OSC 7 natively. **Status: Implemented.**
 
+### F. AI-Orchestration Layer (MCP)
+
+The strategic differentiator that no other terminal multiplexer offers: Quil is **addressable by AI agents** via the Model Context Protocol.
+
+- **`quil mcp` subcommand** — spawned as a stdio child of any MCP-capable client (Claude Desktop, Claude Code, Cursor). Bridges JSON-RPC to the daemon's IPC socket so agents can drive the live workspace from outside the TUI.
+- **17 typed tools** — list/create/destroy panes, read pane output (ANSI-stripped), send keys, take VT-emulated text screenshots, switch tabs, query notifications (blocking + non-blocking), inspect per-pane and per-tab memory usage. **Status: Implemented.**
+- **TUI cooperation** — `set_active_pane` and `close_tui` use a daemon-broadcast → TUI-handler pattern so external agents can change focus without race-conditioning the user's keystrokes.
+- **Two-layer redaction** — per-pane MCP interaction logs use AI-defined redaction markers backed by regex fallbacks before reaching disk under `~/.quil/mcp-logs/`. **Status: Implemented.**
+
+This pillar is what makes Quil "AI-native" beyond just "good at running Claude Code" — every other pane type and feature is also reachable by an agent.
+
 ## 4. Technical Requirements
 
 | Requirement          | Implementation Detail                                                                |
 |----------------------|--------------------------------------------------------------------------------------|
-| Persistence          | SQLite or JSON-based state storage in `~/.quil/`.                                   |
+| Persistence          | JSON-based state storage in `~/.quil/` (atomic temp+rename) plus per-pane binary ghost-buffer files. No SQLite. |
 | Rendering            | GPU-aware via Windows Terminal or WezTerm as the host.                               |
 | Shell Support        | Native ConPTY for PowerShell/CMD; PTY for Bash/Zsh.                                 |
 | Syntax Highlighting  | Integrate Chroma for JSON/Code formatting.                                           |

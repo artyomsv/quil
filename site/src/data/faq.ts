@@ -20,7 +20,7 @@ export const homeFaq: FaqItem[] = [
   {
     question: "Which AI tools does Quil support today?",
     answer:
-      "Claude Code has first-class support via the built-in Claude Code pane type, with auto-resume on daemon restart, a setup dialog that pre-fills the active pane's working directory (so the project's `.claude/` context is preserved), and a one-click `Dangerously skip permissions` toggle for unattended runs. Quil also runs an MCP server (`quil mcp`) that exposes 15 tools so any MCP-capable client can read pane output, send keystrokes, and snapshot a workspace. Any other AI tool can be wrapped in a custom TOML plugin that defines its spawn command, resume strategy, and error patterns.",
+      "Claude Code has first-class support via the built-in Claude Code pane type, with auto-resume on daemon restart, a setup dialog that pre-fills the active pane's working directory (so the project's `.claude/` context is preserved), and a one-click `Dangerously skip permissions` toggle for unattended runs. Quil also runs an MCP server (`quil mcp`) that exposes 17 tools so any MCP-capable client can read pane output, send keystrokes, snapshot a workspace, and query per-pane memory usage. Any other AI tool can be wrapped in a custom TOML plugin that defines its spawn command, resume strategy, and error patterns.",
   },
   {
     question: "Can I paste a screenshot into Claude Code on Windows?",
@@ -35,7 +35,7 @@ export const homeFaq: FaqItem[] = [
   {
     question: "How does the reboot-proof persistence actually work?",
     answer:
-      "Quil runs as a client-daemon pair. The daemon (quild) continuously snapshots workspace state to ~/.quil/workspace.json and maintains 500-line ghost buffers per pane in a SQLite database. On reboot the client spawns the daemon, reads the snapshot, re-creates the pane split tree, and replays ghost buffers instantly while shells re-initialise in the background.",
+      "Quil runs as a client-daemon pair. The daemon (quild) continuously snapshots workspace state to ~/.quil/workspace.json (atomic temp+rename) and maintains 500-line ghost buffers per pane as binary files under ~/.quil/buffers/. On reboot the client spawns the daemon, reads the snapshot, re-creates the pane split tree, and replays ghost buffers instantly while shells re-initialise in the background.",
   },
   {
     question: "Can I write my own plugins?",

@@ -79,8 +79,8 @@ export const features: Feature[] = [
       "Run `quil mcp` and an AI agent can list panes, read output, send keystrokes, and snapshot your workspace.",
     category: "ai",
     detail: [
-      "15 tools exposed over the Model Context Protocol (Anthropic's open standard for AI tool use).",
-      "Tools include: list/create/destroy panes, read pane output, send keys, switch tabs, screenshot a pane, watch the notification queue, and more.",
+      "17 tools exposed over the Model Context Protocol (Anthropic's open standard for AI tool use).",
+      "Tools include: list/create/destroy panes, read pane output, send keys, switch tabs, screenshot a pane, watch the notification queue, query memory usage per pane, and more.",
       "Lets any MCP-capable client (Claude Desktop, Claude Code, Cursor) reach directly into your running Quil session.",
     ],
   },
@@ -186,6 +186,34 @@ export const features: Feature[] = [
       "Daemon-side event queue with pattern-matching idle analysis.",
       "Process exit detection with exit-code extraction.",
       "Optional sidebar surfaces notifications without interrupting focused work.",
+    ],
+  },
+  {
+    slug: "memory-reporting",
+    icon: "book-open",
+    title: "Memory reporting",
+    blurb:
+      "Per-pane memory accounting in the status bar and a collapsible breakdown dialog (F1 → Memory).",
+    category: "observability",
+    detail: [
+      "Daemon-side 5 s collector snapshots Go-heap (output ring buffer + ghost snapshot + plugin state) and PTY child resident memory per pane.",
+      "Cross-platform RSS: /proc/<pid>/status on Linux, ps -o rss= batched on Darwin, GetProcessMemoryInfo on Windows.",
+      "Status bar gains a `mem <n>` segment refreshed every 5 s; F1 → Memory opens a tab/pane tree with expand/collapse and notes-editor byte accounting.",
+      "Two MCP tools — `get_memory_report` (per-tab totals + grand total) and `get_pane_memory` (single-pane detail) — expose the layers for external agents.",
+    ],
+  },
+  {
+    slug: "version-handshake",
+    icon: "refresh-ccw",
+    title: "Client/daemon version handshake",
+    blurb:
+      "Upgrade in one step. The client checks the running daemon's version on attach and self-heals when they drift.",
+    category: "observability",
+    detail: [
+      "TUI handshakes with the daemon before attaching. Older daemon → prompt, gracefully stop, auto-spawn the matching daemon from alongside the TUI binary.",
+      "Newer daemon than client → TUI refuses to attach and points to the releases page (avoids subtle protocol drift bugs).",
+      "Dev/debug builds and unstamped local builds skip the check.",
+      "Backed by a new IPC pair (MsgVersionReq/MsgVersionResp) and a shared `internal/version/` package with proper semver comparison — no more lexical-ordering traps with 1.10.0 vs 1.9.0.",
     ],
   },
   {

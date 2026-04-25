@@ -91,6 +91,22 @@ Press paste (`Ctrl+V`, `Ctrl+Alt+V`, or `F8`) on a screenshot. If the clipboard 
 
 `internal/logger` wraps Go's stdlib `slog` and bridges all 152 existing `log.Printf` call sites at info level. Set `[logging] level = "debug"` in `config.toml` to trace clipboard pipeline, per-key handlers, and image-paste decoding step-by-step. The F1 About menu has three log viewers — `View client log`, `View daemon log`, `View MCP logs` — that open the matching files in a read-only `TextEditor` (typing/save/paste/cut all gated). `Alt+Up`/`Alt+Down` jump the cursor by `[ui] log_viewer_page_lines` (default 40). Reads are symlink-rejecting via `os.Lstat`.
 
+### Memory Reporting
+
+F1 → Memory opens a collapsible tab/pane tree showing Go-heap (output ring buffer + ghost snapshot + plugin state), PTY child resident memory, and notes-editor bytes per pane. The status bar gains a `mem <n>` segment refreshed every 5 s by a daemon-side collector (`internal/memreport/`). Cross-platform RSS: `/proc/<pid>/status` on Linux, `ps -o rss=` batched on Darwin, `GetProcessMemoryInfo` on Windows. Two MCP tools — `get_memory_report` (per-tab totals) and `get_pane_memory` (single-pane detail) — expose the layers for external agents.
+
+### Notification Center
+
+A non-modal sidebar surfaces process exits, OSC 133 command-completion events, bell characters (30 s cooldown), and smart-idle pattern matches. Toggle visibility with `Alt+N`, focus the sidebar with `F3`, and `Alt+Backspace` walks back through previously visited panes (browser-back pattern). MCP tools `get_notifications` (non-blocking) and `watch_notifications` (blocking, up to 5 min) replace polling.
+
+### Client/Daemon Version Handshake
+
+The TUI handshakes with the running daemon before attaching. If the daemon is older it prompts to gracefully stop and auto-spawn the matching daemon from alongside the TUI binary; if the daemon is newer the TUI refuses to attach and points to the releases page. Eliminates the manual "stop daemon → replace both binaries → restart" upgrade dance. Dev/debug builds skip the check.
+
+### Claude Code Session-ID Rotation
+
+`/clear`, `/resume`, and conversation compaction all rotate Claude Code's session id to a new jsonl file. Quil registers a `SessionStart` hook via `claude --settings '<inline JSON>'` at every spawn (never modifies `~/.claude/settings.json`) and passes `QUIL_PANE_ID=<paneID>` in the PTY env. The hook script — embedded in the binary, written to `$QUIL_HOME/claudehook/`, reused across spawns — atomically writes the live session id to `$QUIL_HOME/sessions/<paneID>.id` on every rotation. On daemon restart, the resume strategy prefers the hook-recorded id over the original preassigned id.
+
 ### Cross-Platform
 
 Linux, macOS, and Windows from day one. PTY management via `creack/pty` (Unix) and ConPTY (Windows). IPC over Unix domain sockets or Named Pipes.
@@ -151,23 +167,29 @@ make build
 
 | Key | Action |
 |---|---|
+| `F1` | About menu — Settings, Plugins, Memory, log viewers (client/daemon/MCP) |
+| `F2` | Rename active tab |
+| `F3` | Focus the notification sidebar |
+| `F8` | Paste from clipboard (Windows-friendly alias for `Ctrl+V`) |
 | `Ctrl+T` | New tab |
 | `Ctrl+N` | New typed pane (plugin dialog) |
 | `Ctrl+W` | Close active pane |
+| `Ctrl+E` | Toggle focus mode |
+| `Ctrl+S` | Save notes (in notes editor) |
+| `Ctrl+Q` | Quit |
 | `Alt+W` | Close active tab |
+| `Alt+E` | Toggle pane notes |
+| `Alt+N` | Toggle the notification sidebar (visible / focused / hidden) |
+| `Alt+Backspace` | Jump back through pane visit history |
 | `Alt+Shift+H` | Split horizontal (side-by-side) |
 | `Alt+Shift+V` | Split vertical (stacked) |
 | `Alt+Arrow` | Navigate panes spatially (left/right/up/down) |
-| `Alt+E` | Toggle pane notes |
-| `Ctrl+E` | Toggle focus mode |
-| `F2` | Rename active tab |
 | `Alt+F2` | Rename active pane |
 | `Alt+C` | Cycle tab color |
 | `Alt+PgUp` / `Alt+PgDn` | Scroll page up/down |
 | `Ctrl+V` / `Ctrl+Alt+V` / `F8` | Paste from clipboard (text or image — Quil reads image data, saves a PNG, and pastes the path) |
 | `Shift+Arrows` | Select text |
 | `Enter` | Copy selection |
-| `Ctrl+Q` | Quit |
 
 `Tab` and `Shift+Tab` are deliberately **not** bound — they pass through to the PTY so shell tab-completion and Claude Code's mode-cycling work naturally.
 
@@ -269,8 +291,13 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development guidelines.
 | **M6: Pane Focus** | Done | Ctrl+E toggles active pane full-screen, other panes keep running |
 | **M7: Pane Notes** | Done | Side-by-side notes editor (Alt+E), one file per pane, three save safety nets |
 | **M8: Bubble Tea v2** | Done | Bubble Tea v2/Lipgloss v2 migration, text selection, clipboard, editor enhancements |
-| **M10: MCP Server** | Done | `quil mcp` exposes 15 tools over Model Context Protocol stdio |
+| **M10: MCP Server** | Done | `quil mcp` exposes 17 tools over Model Context Protocol stdio |
 | **M12: Notification Center** | Done | Daemon event queue, sidebar, pane history stack, blocking MCP watch |
+| **M13: Memory Reporting** | Done | Per-pane Go-heap + PTY RSS, F1 → Memory dialog, status-bar `mem <n>`, two MCP tools |
+| **v1.8.0: Version Handshake** | Done | Client/daemon version negotiation with auto-restart on mismatch, shared semver package |
+| **v1.9.1: VT Drain + Watchdog** | Done | Per-pane VT-emulator reply drain goroutine fixes Update freezes; stuck-Update watchdog dumps stack traces after 10 s |
+| **v1.9.2: Claude SessionStart Hook** | Done | Track `/clear` / `/resume` / compaction session-id rotations via embedded shell+ps1 hook scripts |
+| **Notes Soft-Wrap** | Done | Long lines in the pane-notes editor wrap onto the next visual row instead of truncating with `~` |
 | **Pre-built Binaries** | Done | GoReleaser, GitHub Releases, install script, cross-platform archives |
 
 See [ROADMAP.md](ROADMAP.md) for detailed progress and feature descriptions.

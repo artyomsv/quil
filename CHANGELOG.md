@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.10.2] - 2026-04-26
+
 ### Fixed
 
 - **Daemon `Stop()` leaked goroutines on programmatic shutdown** — `Stop()` tore down the IPC server and snapshot machinery but never closed `d.shutdown`, so `idleChecker`, the memreport ctx-bridge, and `sendGhostChunked` workers stayed alive until process exit on any Stop path that didn't go through `MsgShutdown`. `Stop()` now closes the channel via `shutdownOnce` as its first action and wraps the rest in `stopOnce` for full idempotency. The IPC server is now also stopped before the final snapshot so a late-arriving `MsgCreatePane`/`MsgDestroyPane` cannot be ACK'd to a client after the on-disk snapshot is sealed.

@@ -5,21 +5,26 @@ import (
 	"sort"
 	"sync/atomic"
 	"time"
-
-	ringbuf "github.com/artyomsv/quil/internal/ringbuf"
 )
+
+// PaneSourceSnapshot is the per-pane view the collector needs each tick. It
+// is intentionally a value type so the adapter can fill it under a single
+// lock acquisition and hand back a torn-free copy.
+type PaneSourceSnapshot struct {
+	PaneID    string
+	TabID     string
+	Alive     bool
+	PID       int
+	HeapBytes uint64 // OutputBuf + GhostSnap + plugin-state key/value bytes
+}
 
 // PaneSource is the minimal view the collector needs over a daemon pane.
 // Keeping this as an interface lets the daemon satisfy it externally without
-// creating a package import cycle (memreport ↔ daemon).
+// creating a package import cycle (memreport ↔ daemon). The single Snapshot
+// call replaces the old seven-method interface — adapters can now grab the
+// per-pane mutex once instead of six times per tick.
 type PaneSource interface {
-	PaneID() string
-	TabID() string
-	OutputBuf() *ringbuf.RingBuffer
-	GhostSnap() []byte
-	PluginState() map[string]string
-	PID() int
-	Alive() bool
+	Snapshot() PaneSourceSnapshot
 }
 
 // PaneLister is implemented by *daemon.SessionManager; the collector calls
@@ -84,13 +89,17 @@ func (c *Collector) collect() {
 // collectFrom is the pure core, exported for testing via the PaneSource
 // abstraction. rssFn is injected so tests can stub procRSSBatch.
 func collectFrom(panes []PaneSource, rssFn func([]int) map[int]uint64) Snapshot {
-	// Gather alive PIDs for a single batched RSS query.
+	// Take a single per-pane snapshot under that pane's lock; everything
+	// downstream operates on the captured values.
+	snaps := make([]PaneSourceSnapshot, len(panes))
 	alivePIDs := make([]int, 0, len(panes))
-	for _, p := range panes {
-		if p.Alive() && p.PID() > 0 {
-			alivePIDs = append(alivePIDs, p.PID())
+	for i, p := range panes {
+		snaps[i] = p.Snapshot()
+		if snaps[i].Alive && snaps[i].PID > 0 {
+			alivePIDs = append(alivePIDs, snaps[i].PID)
 		}
 	}
+
 	rss := rssFn(alivePIDs)
 	if rss == nil {
 		rss = map[int]uint64{}
@@ -98,30 +107,21 @@ func collectFrom(panes []PaneSource, rssFn func([]int) map[int]uint64) Snapshot 
 
 	result := Snapshot{
 		At:    time.Now(),
-		Panes: make([]PaneMem, 0, len(panes)),
+		Panes: make([]PaneMem, 0, len(snaps)),
 	}
 
-	for _, p := range panes {
-		heap := uint64(0)
-		if buf := p.OutputBuf(); buf != nil {
-			heap += uint64(buf.Len())
-		}
-		heap += uint64(len(p.GhostSnap()))
-		for k, v := range p.PluginState() {
-			heap += uint64(len(k) + len(v))
-		}
-
+	for _, s := range snaps {
 		var paneRSS uint64
-		if p.Alive() && p.PID() > 0 {
-			paneRSS = rss[p.PID()]
+		if s.Alive && s.PID > 0 {
+			paneRSS = rss[s.PID]
 		}
 
 		pm := PaneMem{
-			PaneID:      p.PaneID(),
-			TabID:       p.TabID(),
-			GoHeapBytes: heap,
+			PaneID:      s.PaneID,
+			TabID:       s.TabID,
+			GoHeapBytes: s.HeapBytes,
 			PTYRSSBytes: paneRSS,
-			Total:       heap + paneRSS,
+			Total:       s.HeapBytes + paneRSS,
 		}
 		result.Panes = append(result.Panes, pm)
 		result.Total += pm.Total

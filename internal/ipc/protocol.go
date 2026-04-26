@@ -336,6 +336,14 @@ type MemoryReportRespPayload struct {
 	SnapshotAt int64         `json:"snapshot_at"` // Unix nanoseconds
 	Panes      []PaneMemInfo `json:"panes"`
 	Total      uint64        `json:"total"`
+	// Tabs is the same view that MsgListTabsResp would return at the moment
+	// the daemon assembled this response. Embedded here so MCP
+	// `get_memory_report` does not need a second round-trip to enrich tab
+	// IDs with names. Note: the per-pane memory numbers come from the
+	// memreport collector's last tick (up to 5 s old), while Tabs is taken
+	// fresh — the two halves are captured close-in-time on the daemon side
+	// but are not guaranteed to be drawn from the exact same instant.
+	Tabs []TabInfo `json:"tabs,omitempty"`
 }
 
 // NewMessage creates a Message with a typed payload.

@@ -327,7 +327,7 @@ func (n *NotesEditor) View(width, height int, focused bool) string {
 	}
 	n.Resize(innerW, innerH)
 
-	header := n.headerLine(innerW)
+	header := n.headerLineWithFocus(innerW, focused)
 	body := n.editor.Render()
 	footer := n.footerLine(innerW, focused)
 
@@ -351,6 +351,22 @@ func (n *NotesEditor) View(width, height int, focused bool) string {
 }
 
 func (n *NotesEditor) headerLine(width int) string {
+	return n.headerLineWithFocus(width, true)
+}
+
+// headerLineWithFocus renders the header with a persistent reverse-video
+// focus badge so the user can never mistake which surface keystrokes are
+// going to. The badge is intentionally non-subtle (background fill) — it
+// is the defence-in-depth cue against synthesised mouse-click input
+// redirection (see techdebt 4-2-notes-focus-swap).
+//
+// At very narrow widths the badge degrades but never lies:
+//   - width >= len(" INPUT ") — full badge + truncated title
+//   - 3 <= width < badge len  — single-letter form (" I "/" P "), still
+//     reverse-video, still distinguishes the two states
+//   - width < 3               — empty header (better than a corrupted
+//     badge that gives the same visual on both sides)
+func (n *NotesEditor) headerLineWithFocus(width int, editorFocused bool) string {
 	title := n.paneName
 	if title == "" {
 		title = n.paneID
@@ -359,14 +375,39 @@ func (n *NotesEditor) headerLine(width int) string {
 	if n.dirty {
 		dirtyMark = " *"
 	}
-	raw := " notes: " + title + " " + dirtyMark
-	if lipgloss.Width(raw) > width {
-		raw = truncateRunes(raw, width)
+
+	// Use explicit Background+Foreground rather than Reverse(true) so the
+	// fill colour stays the same under any terminal theme — a Reverse style
+	// swaps with the terminal default which can be unpredictable.
+	badgeStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("231")) // bright white text
+	var badgeFull, badgeShort string
+	if editorFocused {
+		s := badgeStyle.Background(lipgloss.Color("63")) // bright blue
+		badgeFull = s.Render(" INPUT ")
+		badgeShort = s.Render(" I ")
+	} else {
+		s := badgeStyle.Background(lipgloss.Color("214")) // orange
+		badgeFull = s.Render(" PANE ")
+		badgeShort = s.Render(" P ")
 	}
-	return lipgloss.NewStyle().
+
+	rest := lipgloss.NewStyle().
 		Bold(true).
 		Foreground(lipgloss.Color("230")).
-		Render(raw)
+		Render(" notes: " + title + " " + dirtyMark)
+
+	fullW := lipgloss.Width(badgeFull)
+	shortW := lipgloss.Width(badgeShort)
+	switch {
+	case width >= fullW+lipgloss.Width(rest):
+		return badgeFull + rest
+	case width >= fullW:
+		return badgeFull + truncateRunes(rest, width-fullW)
+	case width >= shortW:
+		return badgeShort
+	default:
+		return ""
+	}
 }
 
 func (n *NotesEditor) footerLine(width int, focused bool) string {

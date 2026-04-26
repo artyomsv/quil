@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Daemon `Stop()` leaked goroutines on programmatic shutdown** — `Stop()` tore down the IPC server and snapshot machinery but never closed `d.shutdown`, so `idleChecker`, the memreport ctx-bridge, and `sendGhostChunked` workers stayed alive until process exit on any Stop path that didn't go through `MsgShutdown`. `Stop()` now closes the channel via `shutdownOnce` as its first action and wraps the rest in `stopOnce` for full idempotency. The IPC server is now also stopped before the final snapshot so a late-arriving `MsgCreatePane`/`MsgDestroyPane` cannot be ACK'd to a client after the on-disk snapshot is sealed.
+- **Snapshot pane-count inconsistency between `workspace.json` and ghost buffers** — `snapshot()` called `SessionManager.SnapshotState()` twice (once via `buildWorkspaceState`, once for the buffer-flush loop). A pane create/destroy slipping between the two atomic reads produced an off-by-one mismatch on disk. The two halves now share a single snapshot via the new `workspaceStateFromSnapshot` helper. The periodic 30 s ticker still calls `snapshot()` directly so the safety-net write cannot be starved by sustained event-driven traffic resetting the debounce timer.
+- **`paneSourceAdapter` could observe a torn pane state** — the memreport collector called six methods per pane per tick, each acquiring `PluginMu` independently. Under interleaving with a pane-exit write, the trio (`Alive`, `PID`, plugin-state size) could be inconsistent — e.g. "alive with PID 0". The seven-method `PaneSource` interface collapses into a single `Snapshot() PaneSourceSnapshot` call that takes `PluginMu` once (with `defer Unlock` for panic safety) and returns a frozen value type.
+
+### Changed
+
+- **MCP `get_memory_report` halves its IPC latency** — the daemon now embeds the current tab list (`Tabs []TabInfo`) directly in `MemoryReportRespPayload`, eliminating the second `MsgListTabsReq` round-trip and the tab create/destroy race window between the two requests. The MCP bridge falls back to bare tab IDs against pre-1.10 daemons during a rolling upgrade.
+- **Notes editor focus indicator is now non-subtle** — when the pane-notes editor (Alt+E) is open, the header carries a persistent reverse-video badge: `INPUT` on bright blue when keystrokes route to the editor, `PANE` on orange when they route to the bound PTY. Border colour alone was easy to miss in peripheral vision, leaving a defence-in-depth gap against synthesised mouse-click focus redirection. At narrow widths the badge degrades to single-letter form (`I` / `P`) before falling back to an empty header — never to a corrupted partial that would give the same visual on both sides. Implementation uses explicit `Background`+`Foreground` rather than `Reverse(true)` so the fill colour is stable across terminal themes.
+
 ## [1.10.1] - 2026-04-25
 
 ## [1.10.0] - 2026-04-24

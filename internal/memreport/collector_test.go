@@ -11,8 +11,7 @@ import (
 
 // paneView is a minimal in-test fake satisfying PaneSource. Keeps tests
 // self-contained without importing the daemon package (which would form a
-// cycle). Fields are lowercase to avoid colliding with the interface method
-// names on the same receiver.
+// cycle).
 type paneView struct {
 	id          string
 	tabID       string
@@ -23,13 +22,22 @@ type paneView struct {
 	alive       bool
 }
 
-func (p *paneView) PaneID() string                 { return p.id }
-func (p *paneView) TabID() string                  { return p.tabID }
-func (p *paneView) OutputBuf() *ringbuf.RingBuffer { return p.outputBuf }
-func (p *paneView) GhostSnap() []byte              { return p.ghostSnap }
-func (p *paneView) PluginState() map[string]string { return p.pluginState }
-func (p *paneView) PID() int                       { return p.pid }
-func (p *paneView) Alive() bool                    { return p.alive }
+func (p *paneView) Snapshot() PaneSourceSnapshot {
+	s := PaneSourceSnapshot{
+		PaneID: p.id,
+		TabID:  p.tabID,
+		Alive:  p.alive,
+		PID:    p.pid,
+	}
+	if p.outputBuf != nil {
+		s.HeapBytes += uint64(p.outputBuf.Len())
+	}
+	s.HeapBytes += uint64(len(p.ghostSnap))
+	for k, v := range p.pluginState {
+		s.HeapBytes += uint64(len(k) + len(v))
+	}
+	return s
+}
 
 func TestCollector_GoHeapOnly(t *testing.T) {
 	rb := ringbuf.NewRingBuffer(1024)

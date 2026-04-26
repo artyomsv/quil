@@ -45,13 +45,13 @@ type Daemon struct {
 	registry   *plugin.Registry
 	shutdown     chan struct{}
 	shutdownOnce sync.Once
+	stopOnce     sync.Once
 	snapshotCh   chan struct{} // buffered channel for snapshot requests
 	restored     bool         // true if workspace was loaded from disk
 	events       *eventQueue  // notification center event queue
 
-	memReport       *memreport.Collector
-	collectorCancel context.CancelFunc
-	collectorWG     sync.WaitGroup
+	memReport   *memreport.Collector
+	collectorWG sync.WaitGroup
 }
 
 func New(cfg config.Config) *Daemon {
@@ -129,7 +129,6 @@ func (d *Daemon) Start() error {
 	go d.idleChecker()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	d.collectorCancel = cancel
 	go func() {
 		<-d.shutdown
 		cancel()
@@ -171,6 +170,15 @@ func (d *Daemon) Wait() {
 			d.Stop()
 			return
 		case <-ticker.C:
+			// Periodic safety net MUST call snapshot() directly, not
+			// requestSnapshot(). The debounce timer below resets on every
+			// fresh request, so under sustained event traffic (resize spam,
+			// MCP bursts, rapid PTY flushes) routing the ticker through the
+			// debounced path would let the timer be perpetually rescheduled
+			// and never fire — workspace.json would stop being flushed.
+			// snapshot() is internally consistent (single SnapshotState),
+			// so a coincidental overlap with the debounced path is wasteful
+			// but correct: persist.Save uses atomic temp+rename.
 			d.snapshot()
 		case <-d.snapshotCh:
 			// Debounce: collapse rapid requests into one snapshot after 500ms
@@ -190,24 +198,29 @@ func (d *Daemon) Wait() {
 }
 
 func (d *Daemon) Stop() {
-	if d.collectorCancel != nil {
-		d.collectorCancel()
+	// Close shutdown channel first so every long-running goroutine
+	// (idleChecker, memReport ctx bridge, sendGhostChunked, etc.) wakes up
+	// and exits, regardless of whether MsgShutdown or a signal beat us here.
+	d.shutdownOnce.Do(func() { close(d.shutdown) })
+	d.stopOnce.Do(func() {
+		// Stop the IPC server FIRST so no new client mutations can land
+		// after the final snapshot — otherwise an IPC handler can ACK a
+		// pane create/destroy to the client that the on-disk snapshot
+		// has already missed.
+		if d.server != nil {
+			d.server.Stop()
+		}
 		d.collectorWG.Wait()
-	}
-	log.Print("daemon stopping, writing final snapshot...")
-	// Final snapshot before shutdown
-	d.snapshot()
-
-	if d.server != nil {
-		d.server.Stop()
-	}
-	for _, tab := range d.session.Tabs() {
-		for _, pane := range d.session.Panes(tab.ID) {
-			if pane.PTY != nil {
-				pane.PTY.Close()
+		log.Print("daemon stopping, writing final snapshot...")
+		d.snapshot()
+		for _, tab := range d.session.Tabs() {
+			for _, pane := range d.session.Panes(tab.ID) {
+				if pane.PTY != nil {
+					pane.PTY.Close()
+				}
 			}
 		}
-	}
+	})
 }
 
 // requestSnapshot sends a non-blocking snapshot request to the event loop.
@@ -222,14 +235,20 @@ func (d *Daemon) requestSnapshot() {
 // snapshot persists workspace state and ghost buffers to disk.
 func (d *Daemon) snapshot() {
 	start := time.Now()
-	state := d.buildWorkspaceState()
+
+	// Take ONE consistent view of the session and reuse it for both the
+	// workspace JSON and the ghost-buffer flush. Calling SnapshotState
+	// twice (once via buildWorkspaceState, once for the buffer loop)
+	// allowed a pane create/destroy between the two calls to slip through
+	// — the workspace.json said N panes while the buffer flush iterated
+	// N±1, surfacing as the "snapshot pane count oscillation" bug.
+	activeTab, tabs, panesByTab := d.session.SnapshotState()
+	state := d.workspaceStateFromSnapshot(activeTab, tabs, panesByTab)
 
 	if err := persist.Save(config.WorkspacePath(), state); err != nil {
 		log.Printf("snapshot workspace: %v", err)
 	}
 
-	// Flush ghost buffers using consistent snapshot
-	_, tabs, panesByTab := d.session.SnapshotState()
 	bufDir := config.BufferDir()
 	buffers := make(map[string][]byte)
 	var activePaneIDs []string
@@ -1125,6 +1144,14 @@ func (d *Daemon) broadcastState() {
 
 func (d *Daemon) buildWorkspaceState() map[string]any {
 	activeTab, tabs, panesByTab := d.session.SnapshotState()
+	return d.workspaceStateFromSnapshot(activeTab, tabs, panesByTab)
+}
+
+// workspaceStateFromSnapshot is the pure half of buildWorkspaceState — it
+// turns an already-taken SnapshotState into the wire/persistence map. Callers
+// that already hold a consistent snapshot (e.g. snapshot()) reuse it instead
+// of calling SnapshotState a second time.
+func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panesByTab map[string][]*Pane) map[string]any {
 	tabList := make([]map[string]any, 0, len(tabs))
 	paneList := make([]map[string]any, 0)
 
@@ -2085,6 +2112,19 @@ func (d *Daemon) handleMemoryReportReq(conn *ipc.Conn, msg *ipc.Message) {
 				TotalBytes:  p.Total,
 			}
 		}
+	}
+	// Embed the current tab list so MCP callers don't need a second
+	// MsgListTabsReq round-trip just to map tab IDs to human names.
+	activeTab, tabs, panesByTab := d.session.SnapshotState()
+	resp.Tabs = make([]ipc.TabInfo, 0, len(tabs))
+	for _, tab := range tabs {
+		resp.Tabs = append(resp.Tabs, ipc.TabInfo{
+			ID:        tab.ID,
+			Name:      tab.Name,
+			Color:     tab.Color,
+			PaneCount: len(panesByTab[tab.ID]),
+			Active:    tab.ID == activeTab,
+		})
 	}
 	respondTo(conn, msg.ID, ipc.MsgMemoryReportResp, resp)
 }

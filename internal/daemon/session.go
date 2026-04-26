@@ -30,7 +30,12 @@ type Pane struct {
 	GhostSnap    []byte              // Pure disk-loaded ghost buffer, cleared after first client replay
 	Type         string              // Plugin name (default: "terminal")
 	PluginState  map[string]string   // Scraped values (e.g., "session_id": "abc123")
-	PluginMu     sync.Mutex          // Protects PluginState from concurrent access
+	// PluginMu protects every mutable field that can be read or written
+	// concurrently with the daemon's PTY-output goroutine: PluginState,
+	// GhostSnap, PTY (the pointer itself + Pid lookups), ExitCode, and
+	// ExitedAt. Immutable post-creation fields (ID, TabID, OutputBuf
+	// pointer, Cols/Rows once set) are read without it.
+	PluginMu     sync.Mutex
 	InstanceName string              // Which instance config was used
 	InstanceArgs []string            // Args used to start (for rerun strategy)
 	ExitCode     *int                // nil = still running, non-nil = exited
@@ -301,43 +306,30 @@ func (sm *SessionManager) SnapshotState() (activeTab string, tabs []*Tab, panesB
 // so the collector can read pane memory without importing daemon.
 type paneSourceAdapter struct{ p *Pane }
 
-func (a paneSourceAdapter) PaneID() string                 { return a.p.ID }
-func (a paneSourceAdapter) TabID() string                  { return a.p.TabID }
-func (a paneSourceAdapter) OutputBuf() *ringbuf.RingBuffer { return a.p.OutputBuf }
-func (a paneSourceAdapter) GhostSnap() []byte {
-	a.p.PluginMu.Lock()
-	defer a.p.PluginMu.Unlock()
-	if len(a.p.GhostSnap) == 0 {
-		return nil
+// Snapshot fills a PaneSourceSnapshot under a single PluginMu acquisition
+// so the GoHeap / PID / Alive trio is layer-consistent. ID, TabID, and the
+// OutputBuf pointer are immutable after pane creation, so they are read
+// outside the lock. OutputBuf.Len() is safe outside PluginMu because the
+// ringbuf has its own internal mutex protecting its length.
+func (a paneSourceAdapter) Snapshot() memreport.PaneSourceSnapshot {
+	s := memreport.PaneSourceSnapshot{
+		PaneID: a.p.ID,
+		TabID:  a.p.TabID,
 	}
-	// Return a copy so the caller can release the lock and read safely.
-	out := make([]byte, len(a.p.GhostSnap))
-	copy(out, a.p.GhostSnap)
-	return out
-}
-func (a paneSourceAdapter) PluginState() map[string]string {
+	if a.p.OutputBuf != nil {
+		s.HeapBytes += uint64(a.p.OutputBuf.Len())
+	}
 	a.p.PluginMu.Lock()
 	defer a.p.PluginMu.Unlock()
-	// Return a shallow copy so the collector can read safely after the
-	// lock is released.
-	out := make(map[string]string, len(a.p.PluginState))
+	s.HeapBytes += uint64(len(a.p.GhostSnap))
 	for k, v := range a.p.PluginState {
-		out[k] = v
+		s.HeapBytes += uint64(len(k) + len(v))
 	}
-	return out
-}
-func (a paneSourceAdapter) PID() int {
-	a.p.PluginMu.Lock()
-	defer a.p.PluginMu.Unlock()
-	if a.p.PTY == nil {
-		return 0
+	if a.p.PTY != nil {
+		s.PID = a.p.PTY.Pid()
 	}
-	return a.p.PTY.Pid()
-}
-func (a paneSourceAdapter) Alive() bool {
-	a.p.PluginMu.Lock()
-	defer a.p.PluginMu.Unlock()
-	return a.p.ExitCode == nil
+	s.Alive = a.p.ExitCode == nil
+	return s
 }
 
 // PaneSources returns an adapter per live pane. Implements

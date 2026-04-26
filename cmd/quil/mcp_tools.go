@@ -597,16 +597,11 @@ func registerGetMemoryReportTool(s *mcp.Server, bridge *mcpBridge, mcpLog *mcpLo
 			return nil, nil, fmt.Errorf("get_memory_report decode: %w", err)
 		}
 
-		tabsResp, err := bridge.request(ipc.MsgListTabsReq, nil)
-		if err != nil {
-			return nil, nil, fmt.Errorf("get_memory_report tabs: %w", err)
-		}
-		var tabsPayload ipc.ListTabsRespPayload
-		if err := tabsResp.DecodePayload(&tabsPayload); err != nil {
-			return nil, nil, fmt.Errorf("get_memory_report tabs decode: %w", err)
-		}
-
-		goHeap, ptyRSS, summaries := buildTabMemSummaries(memPayload, tabsPayload.Tabs)
+		// Daemon embeds the tab list in the same response (since v1.10.x);
+		// no second IPC round-trip is needed for newer daemons. Against a
+		// pre-1.10 daemon memPayload.Tabs will be nil — buildTabMemSummaries
+		// degrades gracefully and uses bare tab IDs as the display name.
+		goHeap, ptyRSS, summaries := buildTabMemSummaries(memPayload, memPayload.Tabs)
 
 		out := Output{
 			SnapshotAt:  time.Unix(0, memPayload.SnapshotAt).UTC().Format(time.RFC3339),

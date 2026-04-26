@@ -554,6 +554,77 @@ func TestNotesEditor_View_BorderColorReflectsFocus(t *testing.T) {
 	}
 }
 
+// TestNotesEditor_HeaderBadge_ReflectsFocus locks in the persistent
+// reverse-video focus indicator added for techdebt 4-2-notes-focus-swap.
+// Border colour alone is too easy to miss in peripheral vision; the badge
+// is non-subtle by design so a synthesised mouse-click focus swap cannot
+// silently redirect keystrokes to the bound PTY without the user noticing.
+func TestNotesEditor_HeaderBadge_ReflectsFocus(t *testing.T) {
+	t.Parallel()
+	ne, err := NewNotesEditor(t.TempDir(), "pane-badge", "Build", 60, 10)
+	if err != nil {
+		t.Fatalf("NewNotesEditor: %v", err)
+	}
+
+	rendered := stripANSI(ne.View(60, 10, true))
+	if !strings.Contains(rendered, "INPUT") {
+		t.Errorf("editor-focused header should contain 'INPUT' badge, got:\n%s", rendered)
+	}
+	if strings.Contains(rendered, "PANE") {
+		t.Errorf("editor-focused header should not show 'PANE' badge, got:\n%s", rendered)
+	}
+
+	rendered = stripANSI(ne.View(60, 10, false))
+	if !strings.Contains(rendered, "PANE") {
+		t.Errorf("pane-focused header should contain 'PANE' badge, got:\n%s", rendered)
+	}
+	if strings.Contains(rendered, "INPUT") {
+		t.Errorf("pane-focused header should not show 'INPUT' badge, got:\n%s", rendered)
+	}
+}
+
+// TestNotesEditor_HeaderBadge_TruncatesGracefully exercises the narrow-width
+// branches of headerLineWithFocus directly. The badge is the last cue the
+// user has — it must never degrade into a partial form that gives the same
+// visual on both focus states.
+func TestNotesEditor_HeaderBadge_TruncatesGracefully(t *testing.T) {
+	t.Parallel()
+	ne, err := NewNotesEditor(t.TempDir(), "pane-narrow", "Build", 200, 10)
+	if err != nil {
+		t.Fatalf("NewNotesEditor: %v", err)
+	}
+
+	// Width 7: full " INPUT "/" PANE  " badge fits, title gets dropped.
+	editor := stripANSI(ne.headerLineWithFocus(7, true))
+	pane := stripANSI(ne.headerLineWithFocus(7, false))
+	if !strings.Contains(editor, "INPUT") || !strings.Contains(pane, "PANE") {
+		t.Errorf("width=7 should keep full badges (got editor=%q pane=%q)", editor, pane)
+	}
+	if editor == pane {
+		t.Errorf("width=7 editor/pane renders match — focus indistinguishable")
+	}
+
+	// Width 4: full badge does not fit, single-letter form must take over
+	// and stay distinguishable between focus states.
+	editor = stripANSI(ne.headerLineWithFocus(4, true))
+	pane = stripANSI(ne.headerLineWithFocus(4, false))
+	if !strings.Contains(editor, "I") {
+		t.Errorf("width=4 editor short-badge should contain 'I', got %q", editor)
+	}
+	if !strings.Contains(pane, "P") {
+		t.Errorf("width=4 pane short-badge should contain 'P', got %q", pane)
+	}
+	if editor == pane {
+		t.Errorf("width=4 editor/pane renders match — focus indistinguishable")
+	}
+
+	// Width 2: even short badge does not fit. Empty header is the honest
+	// answer — better than a corrupted partial badge.
+	if got := ne.headerLineWithFocus(2, true); got != "" {
+		t.Errorf("width=2 should yield empty header, got %q", got)
+	}
+}
+
 func TestNotesEditor_FooterMentionsTabFocusCycle(t *testing.T) {
 	t.Parallel()
 	ne, err := NewNotesEditor(t.TempDir(), "pane-footer", "Build", 60, 10)

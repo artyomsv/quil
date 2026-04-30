@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.11.0] - 2026-04-30
+
 ### Fixed
 
 - **New panes spawned in the daemon's start-time CWD instead of the user's** — because `quild` is auto-started in the background, `os.Getwd()` was frozen to whatever directory was current at daemon-spawn time (typically the user's home or the launcher's path). Every new tab/pane created afterwards inherited that frozen directory regardless of where the TUI had `cd`'d. The TUI now sends its `os.Getwd()` in `MsgAttach` via a new optional `AttachPayload.CWD` field (omitempty — old clients still work), the daemon stores it in `Daemon.clientCWD` as an `atomic.Pointer[string]` so concurrent IPC dispatch goroutines read and write it race-free, and a new `defaultCWD()` helper returns the validated client value (`os.Stat` + `EvalSymlinks`) with a fallback to the daemon's `os.Getwd()` if the path is empty or stale. All six pane/tab creation sites — `handleAttach` default workspace, `handleCreateTab`, `handleDestroyTab`/`handleDestroyPane`/`handleDestroyPaneReq` auto-replacements, and `handleCreatePane` — now consume the helper. The daemon's own CWD is also pinned to `config.QuilDir()` at spawn, with `MkdirAll` guarding against `quil daemon start` failing with `chdir: no such file or directory` on a fresh install where the data directory does not yet exist. New tests `TestDaemon_DefaultCWD` (set/stale/unset/empty branches) and `TestAttachPayload_CWDRoundTrip` (back-compat with old clients omitting the field).

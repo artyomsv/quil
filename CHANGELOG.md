@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **New panes spawned in the daemon's start-time CWD instead of the user's** — because `quild` is auto-started in the background, `os.Getwd()` was frozen to whatever directory was current at daemon-spawn time (typically the user's home or the launcher's path). Every new tab/pane created afterwards inherited that frozen directory regardless of where the TUI had `cd`'d. The TUI now sends its `os.Getwd()` in `MsgAttach` via a new optional `AttachPayload.CWD` field (omitempty — old clients still work), the daemon stores it in `Daemon.clientCWD` as an `atomic.Pointer[string]` so concurrent IPC dispatch goroutines read and write it race-free, and a new `defaultCWD()` helper returns the validated client value (`os.Stat` + `EvalSymlinks`) with a fallback to the daemon's `os.Getwd()` if the path is empty or stale. All six pane/tab creation sites — `handleAttach` default workspace, `handleCreateTab`, `handleDestroyTab`/`handleDestroyPane`/`handleDestroyPaneReq` auto-replacements, and `handleCreatePane` — now consume the helper. The daemon's own CWD is also pinned to `config.QuilDir()` at spawn, with `MkdirAll` guarding against `quil daemon start` failing with `chdir: no such file or directory` on a fresh install where the data directory does not yet exist. New tests `TestDaemon_DefaultCWD` (set/stale/unset/empty branches) and `TestAttachPayload_CWDRoundTrip` (back-compat with old clients omitting the field).
+- **`shellinit/zsh-init.sh` broke zsh sessions running under `set -u` / `setopt nounset`** — the bare `${arr[(Ie)x]}` array-index expansion returns empty when the element is absent, which strict-mode zsh treats as an unset-variable error and aborts the init. Added `:-0` parameter-expansion fallbacks and inverted the conditionals from `(( !N )) && add` to `(( N:-0 )) || add`; semantics preserved. Affects the OSC 7 (`chpwd`) and OSC 133 (`precmd`/`preexec`) hook installers.
+
+### Changed
+
+- **VT emulator construction consolidated into `(*PaneModel).newVTEmulator`** — the drain goroutine that reads and discards the emulator's response pipe (a workaround for `charmbracelet/x/vt` blocking inside `Write` when nobody reads its DA1 / DA2 / DSR / OSC replies) used to be spawned inline at two call sites in `pane.go`. It is now folded into a single `newVTEmulator(w, h)` method, paired with `replaceVT(em)` (close-old → install-new), so adding a third construction site cannot accidentally skip the drain spawn. The drain itself logs unexpected (non-EOF, non-`io.ErrClosedPipe`) read errors as a breadcrumb so a future library regression that reintroduces the deadlock fails loudly instead of silently. New regression test (`TestPaneModel_AppendOutput_DoesNotDeadlockOnVTQueries`) feeds DA1, DA2, DSR, and 20× DA1 bursts through `AppendOutput` with a 2 s deadline — guards against the freeze fixed in 1.9.1.
+
 ## [1.10.2] - 2026-04-26
 
 ### Fixed

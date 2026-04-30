@@ -95,8 +95,9 @@ type Message struct {
 // Payload types
 
 type AttachPayload struct {
-	Cols int `json:"cols"`
-	Rows int `json:"rows"`
+	Cols int    `json:"cols"`
+	Rows int    `json:"rows"`
+	CWD  string `json:"cwd,omitempty"`
 }
 
 type CreatePanePayload struct {

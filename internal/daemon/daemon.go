@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -49,6 +50,11 @@ type Daemon struct {
 	snapshotCh   chan struct{} // buffered channel for snapshot requests
 	restored     bool         // true if workspace was loaded from disk
 	events       *eventQueue  // notification center event queue
+	// clientCWD is the last-known CWD from a TUI client, used as the
+	// default working directory for new panes/tabs. Read by defaultCWD()
+	// from any IPC dispatch goroutine and written by handleAttach on each
+	// connect — atomic.Pointer is what keeps that race-free.
+	clientCWD    atomic.Pointer[string]
 
 	memReport   *memreport.Collector
 	collectorWG sync.WaitGroup
@@ -577,12 +583,18 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 	log.Printf("attach: client connected (%dx%d), tabs=%d, restored=%v",
 		cols, rows, len(d.session.Tabs()), d.restored)
 
+	// Remember client CWD so new tabs/panes default to the TUI's directory
+	// instead of the daemon's (which is frozen at daemon start time). An
+	// empty value resets to "use daemon CWD" — preferable to retaining a
+	// stale value from a previous client.
+	cwd := attach.CWD
+	d.clientCWD.Store(&cwd)
+
 	// Create default workspace if empty (no tabs — neither fresh nor restored)
 	if len(d.session.Tabs()) == 0 {
 		log.Print("attach: creating default workspace (no tabs)")
 		tab := d.session.CreateTab("Shell")
-		cwd, _ := os.Getwd()
-		pane, _ := d.session.CreatePane(tab.ID, cwd)
+		pane, _ := d.session.CreatePane(tab.ID, d.defaultCWD())
 		pane.Type = "terminal"
 
 		ptySession := apty.NewWithSize(cols, rows)
@@ -678,8 +690,7 @@ func (d *Daemon) handleCreateTab(conn *ipc.Conn, msg *ipc.Message) {
 	log.Printf("tab created: %s %q", tab.ID, tab.Name)
 
 	// Every tab needs a default pane with a shell
-	cwd, _ := os.Getwd()
-	pane, _ := d.session.CreatePane(tab.ID, cwd)
+	pane, _ := d.session.CreatePane(tab.ID, d.defaultCWD())
 	pane.Type = "terminal"
 
 	ptySession := apty.New()
@@ -702,8 +713,7 @@ func (d *Daemon) handleDestroyTab(msg *ipc.Message) {
 	// Auto-create replacement if last tab was destroyed
 	if len(d.session.Tabs()) == 0 {
 		tab := d.session.CreateTab("Shell")
-		cwd, _ := os.Getwd()
-		pane, _ := d.session.CreatePane(tab.ID, cwd)
+		pane, _ := d.session.CreatePane(tab.ID, d.defaultCWD())
 		pane.Type = "terminal"
 		ptySession := apty.NewWithSize(80, 24)
 		if err := d.spawnPane(pane, ptySession, false); err != nil {
@@ -777,7 +787,7 @@ func (d *Daemon) handleCreatePane(msg *ipc.Message) {
 		}
 	}
 	if cwd == "" {
-		cwd, _ = os.Getwd()
+		cwd = d.defaultCWD()
 	}
 
 	// Determine pane type
@@ -855,8 +865,7 @@ func (d *Daemon) handleDestroyPane(msg *ipc.Message) {
 	// Auto-create replacement if last pane in tab was destroyed
 	if tabID != "" {
 		if panes := d.session.Panes(tabID); len(panes) == 0 {
-			cwd, _ := os.Getwd()
-			if newPane, err := d.session.CreatePane(tabID, cwd); err == nil {
+			if newPane, err := d.session.CreatePane(tabID, d.defaultCWD()); err == nil {
 				newPane.Type = "terminal"
 				ptySession := apty.New()
 				if err := d.spawnPane(newPane, ptySession, false); err != nil {
@@ -1381,6 +1390,26 @@ func resolveSpawnArgs(p *plugin.PanePlugin, pane *Pane, restoring bool) []string
 	return args
 }
 
+// defaultCWD returns the best working directory for a new pane: the last
+// known client CWD (from the most recent TUI attach) if it still points at
+// an existing directory, falling back to the daemon's own working
+// directory. Symlinks are resolved so all callers see the canonical path.
+func (d *Daemon) defaultCWD() string {
+	if p := d.clientCWD.Load(); p != nil && *p != "" {
+		if info, err := os.Stat(*p); err == nil && info.IsDir() {
+			if resolved, err := filepath.EvalSymlinks(*p); err == nil {
+				return resolved
+			}
+			return *p
+		}
+		// stale (directory removed since attach) — fall through
+	}
+	// Best-effort; if Getwd fails we return "" and the spawn will fail
+	// with a clear error from os/exec rather than silently land somewhere.
+	cwd, _ := os.Getwd()
+	return cwd
+}
+
 // spawnPane launches the appropriate process for a pane based on its plugin type.
 // When restoring is true, resume strategies are applied (e.g., --resume for session_scrape).
 func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) error {
@@ -1734,7 +1763,7 @@ func (d *Daemon) handleCreatePaneReq(conn *ipc.Conn, msg *ipc.Message) {
 
 	cwd := req.CWD
 	if cwd == "" {
-		cwd, _ = os.Getwd()
+		cwd = d.defaultCWD()
 	}
 
 	// Validate CWD exists and is a directory, then re-resolve symlinks so
@@ -1743,7 +1772,7 @@ func (d *Daemon) handleCreatePaneReq(conn *ipc.Conn, msg *ipc.Message) {
 	// back to the lexically validated path.
 	if info, err := os.Stat(cwd); err != nil || !info.IsDir() {
 		log.Printf("handleCreatePaneReq: invalid cwd %q: %v", cwd, err)
-		cwd, _ = os.Getwd()
+		cwd = d.defaultCWD()
 	} else if resolved, evalErr := filepath.EvalSymlinks(cwd); evalErr == nil {
 		cwd = resolved
 	}
@@ -1969,8 +1998,7 @@ func (d *Daemon) handleDestroyPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 	// Auto-create replacement if last pane in tab (same as handleDestroyPane)
 	tab := d.session.Tab(tabID)
 	if tab != nil && len(tab.Panes) == 0 {
-		cwd, _ := os.Getwd()
-		newPane, _ := d.session.CreatePane(tabID, cwd)
+		newPane, _ := d.session.CreatePane(tabID, d.defaultCWD())
 		if newPane != nil {
 			newPane.Type = "terminal"
 			ptySession := apty.NewWithSize(80, 24)

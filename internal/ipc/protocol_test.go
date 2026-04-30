@@ -191,3 +191,35 @@ func TestNewMessageAndDecode(t *testing.T) {
 		t.Errorf("CWD: got %q, want %q", payload.CWD, "/home/user")
 	}
 }
+
+// TestAttachPayload_CWDRoundTrip locks in the wire-format contract for the
+// optional CWD field on MsgAttach. New clients send CWD; old clients omit
+// it and the daemon must see an empty string (no JSON decode error).
+func TestAttachPayload_CWDRoundTrip(t *testing.T) {
+	cases := []struct {
+		name string
+		in   ipc.AttachPayload
+		want string
+	}{
+		{"new client with CWD", ipc.AttachPayload{Cols: 80, Rows: 24, CWD: "/work"}, "/work"},
+		{"old client omits CWD", ipc.AttachPayload{Cols: 80, Rows: 24}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			msg, err := ipc.NewMessage(ipc.MsgAttach, tc.in)
+			if err != nil {
+				t.Fatalf("NewMessage: %v", err)
+			}
+			var got ipc.AttachPayload
+			if err := msg.DecodePayload(&got); err != nil {
+				t.Fatalf("DecodePayload: %v", err)
+			}
+			if got.CWD != tc.want {
+				t.Errorf("CWD: got %q, want %q", got.CWD, tc.want)
+			}
+			if got.Cols != tc.in.Cols || got.Rows != tc.in.Rows {
+				t.Errorf("dims: got %dx%d, want %dx%d", got.Cols, got.Rows, tc.in.Cols, tc.in.Rows)
+			}
+		})
+	}
+}

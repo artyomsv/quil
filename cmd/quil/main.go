@@ -147,8 +147,18 @@ func startDaemon(quiet bool) {
 	}
 
 	quild := findDaemonBinary()
+	// Pin the daemon's CWD to its data dir so newly-spawned panes don't
+	// inherit the launcher's directory (which can vanish under the daemon).
+	// Pre-create the directory because exec.Cmd.Start chdir's *before* the
+	// daemon's own MkdirAll runs — without this, `quil daemon start` fails
+	// with "chdir: no such file or directory" on first install.
+	quilDir := config.QuilDir()
+	if err := os.MkdirAll(quilDir, 0700); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to create data dir %q: %v\n", quilDir, err)
+		os.Exit(1)
+	}
 	cmd := exec.Command(quild, "--background")
-	cmd.Dir = config.QuilDir() // daemon CWD = ~/.quil/ (not caller's random directory)
+	cmd.Dir = quilDir
 	cmd.Stdout = nil
 	cmd.Stderr = nil
 	cmd.SysProcAttr = daemonSysProcAttr()

@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 
@@ -134,5 +136,62 @@ func TestWorkspaceStateFromSnapshot(t *testing.T) {
 			t.Errorf("pane[1] has unexpected %q key: %v", k, pane1[k])
 		}
 	}
+}
+
+// TestDaemon_DefaultCWD covers the three branches of (*Daemon).defaultCWD:
+// (1) clientCWD set and valid → returns the resolved client path,
+// (2) clientCWD set but stale → falls back to os.Getwd(),
+// (3) clientCWD unset → falls back to os.Getwd().
+//
+// We bypass New() and build a minimal Daemon literal because defaultCWD only
+// depends on the atomic.Pointer field, not on session/registry/etc.
+func TestDaemon_DefaultCWD(t *testing.T) {
+	hostCWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+
+	t.Run("client CWD set and valid", func(t *testing.T) {
+		dir := t.TempDir()
+		d := &Daemon{}
+		d.clientCWD.Store(&dir)
+		got := d.defaultCWD()
+		// EvalSymlinks is applied; on macOS t.TempDir() lives under
+		// /var/folders/... which symlinks to /private/var/folders/...,
+		// so we compare the resolved form.
+		want, err := filepath.EvalSymlinks(dir)
+		if err != nil {
+			t.Fatalf("EvalSymlinks: %v", err)
+		}
+		if got != want {
+			t.Errorf("defaultCWD = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("client CWD set but stale", func(t *testing.T) {
+		dir := t.TempDir()
+		stale := dir + "/does-not-exist"
+		d := &Daemon{}
+		d.clientCWD.Store(&stale)
+		if got := d.defaultCWD(); got != hostCWD {
+			t.Errorf("stale path should fall back to os.Getwd(); got %q, want %q", got, hostCWD)
+		}
+	})
+
+	t.Run("client CWD unset", func(t *testing.T) {
+		d := &Daemon{}
+		if got := d.defaultCWD(); got != hostCWD {
+			t.Errorf("unset should fall back to os.Getwd(); got %q, want %q", got, hostCWD)
+		}
+	})
+
+	t.Run("client CWD empty string", func(t *testing.T) {
+		empty := ""
+		d := &Daemon{}
+		d.clientCWD.Store(&empty)
+		if got := d.defaultCWD(); got != hostCWD {
+			t.Errorf("empty string should fall back to os.Getwd(); got %q, want %q", got, hostCWD)
+		}
+	})
 }
 

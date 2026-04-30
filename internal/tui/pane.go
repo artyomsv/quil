@@ -1,7 +1,10 @@
 package tui
 
 import (
+	"errors"
 	"image/color"
+	"io"
+	"log"
 	"net/url"
 	"strings"
 	"time"
@@ -67,11 +70,16 @@ func (p *PaneModel) newVTEmulator(w, h int) *vt.SafeEmulator {
 }
 
 // drainVTResponses continuously reads and discards the emulator's query
-// responses. Exits cleanly on EOF (emulator closed).
+// responses. Exits cleanly on EOF/closed-pipe (emulator closed); any other
+// read error leaves a breadcrumb so a future library regression that
+// re-introduces a deadlock isn't silent.
 func drainVTResponses(em *vt.SafeEmulator) {
 	buf := make([]byte, 256)
 	for {
 		if _, err := em.Read(buf); err != nil {
+			if !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrClosedPipe) {
+				log.Printf("pane: VT drain exited unexpectedly: %v", err)
+			}
 			return
 		}
 	}

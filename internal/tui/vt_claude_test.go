@@ -1,12 +1,16 @@
 package tui
 
 import (
+	"bytes"
 	"testing"
 	"time"
 )
 
-// TestVTEmulator_DrainsResponsePipe verifies that the VT emulator does not
-// deadlock when a TUI app sends terminal-capability queries.
+const testRingBufSize = 64 * 1024
+
+// TestPaneModel_AppendOutput_DoesNotDeadlockOnVTQueries verifies that the
+// VT emulator does not deadlock when a TUI app sends terminal-capability
+// queries.
 //
 // Background: charmbracelet/x/vt answers CSI c (Primary Device Attributes)
 // and similar queries by writing to an internal io.Pipe. Without a reader,
@@ -15,7 +19,7 @@ import (
 // the entire TUI froze at AppendOutput() because there was no drain. This
 // test feeds the problem sequences to a fresh PaneModel with a 2-second
 // deadline — it must complete quickly.
-func TestVTEmulator_DrainsResponsePipe(t *testing.T) {
+func TestPaneModel_AppendOutput_DoesNotDeadlockOnVTQueries(t *testing.T) {
 	cases := []struct {
 		name string
 		data []byte
@@ -23,11 +27,11 @@ func TestVTEmulator_DrainsResponsePipe(t *testing.T) {
 		{"DA1 Primary Device Attributes", []byte("\x1b[c")},
 		{"DA2 Secondary Device Attributes", []byte("\x1b[>c")},
 		{"DSR cursor position report", []byte("\x1b[6n")},
-		{"repeated DA1 bursts", repeatBytesFunc("\x1b[c", 20)},
+		{"repeated DA1 bursts", bytes.Repeat([]byte("\x1b[c"), 20)},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			pane := NewPaneModel("test", 65536)
+			pane := NewPaneModel("test", testRingBufSize)
 			pane.ResizeVT(120, 30)
 
 			done := make(chan struct{})
@@ -43,12 +47,4 @@ func TestVTEmulator_DrainsResponsePipe(t *testing.T) {
 			}
 		})
 	}
-}
-
-func repeatBytesFunc(s string, n int) []byte {
-	out := make([]byte, 0, len(s)*n)
-	for i := 0; i < n; i++ {
-		out = append(out, s...)
-	}
-	return out
 }

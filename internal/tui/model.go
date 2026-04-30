@@ -2227,9 +2227,11 @@ func (m Model) attachToDaemon() tea.Cmd {
 		if rows < 1 {
 			rows = 1
 		}
+		clientCWD, _ := os.Getwd()
 		msg, _ := ipc.NewMessage(ipc.MsgAttach, ipc.AttachPayload{
 			Cols: cols,
 			Rows: rows,
+			CWD:  clientCWD,
 		})
 		m.client.Send(msg)
 		return nil

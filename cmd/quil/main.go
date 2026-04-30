@@ -148,6 +148,7 @@ func startDaemon(quiet bool) {
 
 	quild := findDaemonBinary()
 	cmd := exec.Command(quild, "--background")
+	cmd.Dir = config.QuilDir() // daemon CWD = ~/.quil/ (not caller's random directory)
 	cmd.Stdout = nil
 	cmd.Stderr = nil
 	cmd.SysProcAttr = daemonSysProcAttr()

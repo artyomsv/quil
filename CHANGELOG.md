@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.12.0] - 2026-05-22
+
 ### Added
 
 - **OpenCode AI plugin with session-id rotation tracking** — new built-in plugin (`internal/plugin/defaults/opencode.toml`) for the [opencode](https://opencode.ai) CLI, the second production AI pane type alongside claude-code. Quil tracks opencode's session-id rotation (new session, `/new`, fork, compaction) by registering a small JS plugin via the `OPENCODE_CONFIG_CONTENT` env var at pane spawn. The plugin lives entirely under `$QUIL_HOME/opencodehook/quil-session-tracker.js` (no writes into `~/.config/opencode/`) and hooks `session.created` / `session.updated` / `session.idle` / `session.compacted` / `session.deleted` events from opencode's plugin runtime, writing per-pane session ids atomically to `$QUIL_HOME/sessions/opencode-<paneID>.id`. The daemon's restore path (`opencodeResumeTemplate` in `internal/daemon/daemon.go`) consults that file and promotes the resume args to `["--session", "{session_id}"]` when an id was recorded, falling back to `["--continue"]` otherwise. `OPENCODE_CONFIG_CONTENT` merges with the user's existing opencode config (verified against opencode 1.14.x) so user-installed plugins, agents, and modes remain active inside Quil-spawned opencode panes.

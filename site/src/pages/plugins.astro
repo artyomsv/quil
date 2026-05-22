@@ -3,7 +3,7 @@
  * Plugins — built-in pane types + TOML authoring sample.
  *
  * Data flows from `data/plugins.ts`:
- *   - `plugins[]`: four built-ins displayed as feature cells
+ *   - `plugins[]`: five built-ins displayed as feature cells
  *   - `samplePluginToml`: reference webhook plugin shown verbatim
  *   - `pluginAuthoringRef`: external link to docs/plugin-reference.md
  */
@@ -15,7 +15,7 @@ import { plugins, samplePluginToml, pluginAuthoringRef } from "@/data/plugins";
 const seo = {
   title: "Plugins — typed panes with context-aware behaviour",
   description:
-    "Quil ships four built-in pane types: Terminal, Claude Code, SSH, and Stripe CLI. Each has its own spawn command, resume strategy, error handler, and status line. Write your own in a single TOML file.",
+    "Quil ships five built-in pane types: Terminal, Claude Code, OpenCode (beta), SSH, and Stripe CLI. Each has its own spawn command, resume strategy, error handler, and status line. Write your own in a single TOML file.",
   path: "/plugins",
   ogImage: "/og/plugins.png",
   keywords: [
@@ -36,7 +36,7 @@ const schemas = [
   itemListSchema({
     name: "Quil built-in plugins",
     description:
-      "Four built-in typed pane types — Terminal, Claude Code, SSH, and Stripe CLI — plus an authoring guide for writing your own in TOML.",
+      "Five built-in typed pane types — Terminal, Claude Code, OpenCode (beta), SSH, and Stripe CLI — plus an authoring guide for writing your own in TOML.",
     url: SITE.url + "/plugins",
     items: plugins.map((p) => ({
       name: p.name,
@@ -83,7 +83,10 @@ type PluginEntry = (typeof plugins)[number];
               <span class="feat-title">{plugin.name.toLowerCase()}</span>
             </div>
             <p class="feat-body">{plugin.description}</p>
-            <span class="feat-tag">{tagByKind[plugin.kind]}</span>
+            <span class="feat-tag">
+              {tagByKind[plugin.kind]}
+              {plugin.beta && <span style="color: var(--flame); margin-left: 8px;">· BETA</span>}
+            </span>
           </div>
         ))}
       </div>

@@ -10,7 +10,7 @@ Plugins define how panes are spawned, persisted, and restored. Each plugin is a 
 |------|---------|
 | **File location** | `~/.quil/plugins/*.toml` (or `$QUIL_HOME/plugins/`) |
 | **Loading** | On daemon startup; hot reload via F1 → Plugins → Reload |
-| **Defaults** | 3 built-in TOML plugins (claude-code, ssh, stripe) are written on first run and never overwritten — your edits are preserved across upgrades |
+| **Defaults** | 4 built-in TOML plugins (claude-code, opencode, ssh, stripe) are written on first run and never overwritten — your edits are preserved across upgrades |
 | **Built-in** | The `terminal` plugin is defined in Go (not TOML) because it requires runtime shell detection |
 
 ## Quick Start
@@ -80,7 +80,7 @@ arg_template = ["-p", "{port}", "{user}@{host}"]
 | `cmd` | string | **Yes** | — | Binary name or absolute path. Resolved via PATH at runtime (`exec.LookPath`). |
 | `path` | string | No | `""` | Explicit absolute path to the binary. If set, bypasses PATH lookup. Useful for tools installed in non-standard locations or when Quil is launched from Explorer on Windows with an incomplete PATH. Detection order: `path` → `exec.LookPath(cmd)` → `searchBinary` fallback (which scans `~/.local/bin` everywhere and the User PATH on Windows). |
 | `args` | string[] | No | `[]` | Default arguments passed every time the plugin is launched. Overridden when instance-specific args are provided. |
-| `env` | string[] | No | `[]` | Environment variables as `KEY=VALUE` pairs. Merged into the PTY process environment. Quil itself adds `QUIL_PANE_ID=<paneID>` to every spawned PTY (claude-code's SessionStart hook reads this to attribute session-id rotations to a specific pane); custom plugins that wrap claude-code-adjacent tooling can read `$QUIL_PANE_ID` from their child process and assume it is set. |
+| `env` | string[] | No | `[]` | Environment variables as `KEY=VALUE` pairs. Merged into the PTY process environment. For claude-code and opencode panes Quil also injects `QUIL_PANE_ID=<paneID>` (and `QUIL_HOME=<dir>` plus `OPENCODE_CONFIG_CONTENT=…` for opencode) so their respective session-id hooks can attribute writes to a specific pane; custom plugins that wrap those tools can read these from their child process and assume they are set. |
 | `detect` | string | No | Value of `cmd` | Command used to check if the tool is installed. Only the **first word** is used for PATH lookup (e.g., `"ssh -V"` checks for `ssh`). |
 | `shell_integration` | bool | No | `false` | **Reserved for the built-in terminal plugin.** Injects OSC 7 directory tracking hooks. Has no effect in user TOML plugins. |
 | `arg_template` | string[] | No | `[]` | Template arguments with `{placeholder}` tokens. Expanded from form field values when creating an instance. See [Template Expansion](#template-expansion). |

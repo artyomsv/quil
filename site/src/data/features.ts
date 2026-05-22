@@ -67,7 +67,7 @@ export const features: Feature[] = [
     category: "ai",
     detail: [
       "Each AI pane gets a UUID at creation time. On restart Quil runs `claude --resume <session-id>` automatically.",
-      "Works for any AI tool that exposes a session ID — Claude Code today, more to come.",
+      "Works for any AI tool that exposes a session ID — Claude Code (production) and OpenCode (beta) today, more to come.",
       "For tools without a session ID, plugins can fall back to regex scraping the last state or replaying a command.",
     ],
   },
@@ -109,7 +109,7 @@ export const features: Feature[] = [
       "Terminals are not all the same. Quil understands pane types and gives each one context-aware behaviour — including a per-spawn setup dialog with directory browser and runtime checkboxes.",
     category: "interaction",
     detail: [
-      "Four built-in pane types: Terminal, Claude Code, SSH, Stripe.",
+      "Five built-in pane types: Terminal, Claude Code, OpenCode (beta), SSH, Stripe.",
       "Each type has its own resume strategy, error handler, and status line.",
       "Pane setup dialog (opt-in via plugin TOML): a directory browser pre-filled with the active pane's CWD plus one checkbox per declared `[[command.toggles]]` entry. claude-code uses both — picks up the project's `.claude/` context automatically and offers a `Dangerously skip permissions` toggle for unattended runs.",
       "Toggle state rides through the existing `InstanceArgs` IPC field and survives daemon restarts; no IPC schema changes.",

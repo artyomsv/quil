@@ -6,6 +6,9 @@ export interface PluginEntry {
   slug: string;
   name: string;
   kind: "built-in" | "community";
+  /** True when the plugin ships in Quil but isn't yet considered production-stable.
+   *  Rendered as an extra BETA badge alongside the kind tag on /plugins. */
+  beta?: boolean;
   description: string;
   spawnExample: string;
   features: string[];
@@ -42,6 +45,24 @@ export const plugins: PluginEntry[] = [
       "Idle-state detection surfaces to the notification center.",
       "Pairs with the Win32 clipboard image paste proxy: take a screenshot, press F8 in a Claude Code pane, and the file path is typed in for the AI to read.",
       "Plugin auto-upgrade: when Quil ships a new schema version for claude-code.toml, a side-by-side merge dialog lets you reconcile your customizations with the new defaults on first launch.",
+    ],
+  },
+  {
+    slug: "opencode",
+    name: "OpenCode",
+    kind: "built-in",
+    beta: true,
+    description:
+      "An AI session pane that runs [opencode](https://opencode.ai), the second production AI integration alongside Claude Code. A setup dialog asks for the working directory; sessions resume across daemon restarts to the exact conversation (not just the most recent in CWD) via a small JS plugin Quil registers through opencode's plugin runtime. The user's own opencode plugins, agents, and modes remain active — Quil's plugin is additive.",
+    spawnExample:
+      '# opencode.toml — relevant fields\n[plugin]\nname = "opencode"\nschema_version = 1\n\n[command]\ncmd = "opencode"\nprompts_cwd = true\n\n[[command.toggles]]\nname = "print_logs"\nlabel = "Print logs to stderr (debug)"\nargs_when_on = ["--print-logs"]\ndefault = false\n\n[persistence]\nstrategy = "session_scrape"\nresume_args = ["--continue"]',
+    features: [
+      "Setup dialog (Ctrl+N → AI → OpenCode) browses the filesystem starting from the active pane's OSC 7 working directory, same UX as Claude Code.",
+      "Session-id rotation tracked via opencode's first-class plugin runtime — Quil writes a small JS plugin to `$QUIL_HOME/opencodehook/` and injects it via the `OPENCODE_CONFIG_CONTENT` env var per spawn, with **zero writes** into `~/.config/opencode/`.",
+      "On daemon restart the pane respawns with `opencode --session <id>` so each pane reattaches to its own conversation — including any rotation from `/new`, fork, or compaction during the previous run.",
+      "If the recorded id is missing or fails shape validation, the pane falls back to `opencode --continue` (most-recent in CWD) — never to an empty restore.",
+      "`OPENCODE_CONFIG_CONTENT` merges with the user's existing opencode config, so any user-installed plugins, agents, and modes remain active inside Quil-spawned opencode panes.",
+      "`--pure` deliberately not exposed as a toggle: it disables external plugins (including Quil's tracker). Run opencode outside Quil if you need pure mode.",
     ],
   },
   {

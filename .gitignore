@@ -1,6 +1,10 @@
 # Binaries (root-level only)
 /quil
 /quild
+/quil-dev
+/quild-dev
+/quil-debug
+/quild-debug
 /quil.exe
 /quild.exe
 *.exe

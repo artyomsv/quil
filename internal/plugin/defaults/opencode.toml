@@ -1,0 +1,67 @@
+# OpenCode — AI coding assistant (opencode.ai)
+# Edit this file to customize the plugin. Delete it to restore defaults.
+#
+# Diagnostic logging: the bundled session-id tracker plugin (loaded via
+# OPENCODE_CONFIG_CONTENT at spawn time) appends a line per recorded /
+# rotated / cleared session id to $QUIL_HOME/opencodehook/hook.log, capped
+# at 1 MB with a single rotation to hook.log.1. Safe to delete or rotate.
+
+[plugin]
+name = "opencode"
+display_name = "OpenCode"
+category = "ai"
+description = "AI coding assistant (opencode.ai)"
+schema_version = 1
+
+[command]
+cmd = "opencode"
+# path = "/opt/homebrew/bin/opencode"  # uncomment to override PATH lookup
+detect = "opencode --version"
+prompts_cwd = true  # ask user which directory to open opencode in (project ctx)
+
+# Runtime toggles — rendered in the pane setup dialog. Note: we deliberately
+# do NOT expose --pure here, because --pure disables external plugins and
+# would kill Quil's session-id tracker. Users who need pure mode should run
+# opencode outside Quil.
+[[command.toggles]]
+name = "print_logs"
+label = "Print logs to stderr (debug)"
+args_when_on = ["--print-logs"]
+default = false
+
+[persistence]
+strategy = "session_scrape"
+ghost_buffer = false
+# On restore: if Quil's session tracker plugin recorded a session id for this
+# pane (via OPENCODE_CONFIG_CONTENT-loaded JS hook), the daemon promotes the
+# resume args to ["--session", "{session_id}"] so each pane reattaches to its
+# own conversation. When no id was recorded yet (pane closed before the first
+# session event), the daemon falls back to the args below.
+#
+# Both the inline-plugin injection and the promotion logic live in the daemon
+# (see opencodeSpawnPrep and resumeTemplateFor in internal/daemon/daemon.go);
+# the session_scrape strategy here opts opencode into resolveSpawnArgs's
+# resume-args expansion path.
+resume_args = ["--continue"]
+
+[[error_handlers]]
+pattern = '(?i)no provider configured|please run.*opencode auth|missing.*api key|provider.*not configured'
+title = "OpenCode Provider Not Configured"
+message = "Run 'opencode auth' (alias of 'opencode providers') to configure an AI provider."
+action = "dialog"
+
+# Idle handlers — checked when pane goes idle (last 5 lines analyzed)
+[[idle_handlers]]
+pattern = '(?i)waiting for (confirmation|input|approval|permission)'
+title = "Needs your approval"
+severity = "warning"
+
+[[idle_handlers]]
+pattern = '(?i)(plan|question|choose|select|pick)'
+title = "Waiting for your choice"
+severity = "warning"
+
+[[idle_handlers]]
+pattern = '❯|> $'
+title = "Waiting for input"
+severity = "info"

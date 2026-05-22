@@ -101,7 +101,10 @@ func atomicWrite(path string, data []byte, perm os.FileMode) error {
 		return err
 	}
 	tmpPath := tmp.Name()
-	cleanup := func() { os.Remove(tmpPath) }
+	// cleanup removes the half-written temp on any error. The Remove return
+	// value is intentionally discarded: we are already returning an error to
+	// the caller, and the dir is 0700 so a leaked temp is owner-only.
+	cleanup := func() { _ = os.Remove(tmpPath) }
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
 		cleanup()

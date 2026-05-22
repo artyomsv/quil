@@ -27,6 +27,7 @@ import (
 	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/logger"
 	memreport "github.com/artyomsv/quil/internal/memreport"
+	"github.com/artyomsv/quil/internal/opencodehook"
 	"github.com/artyomsv/quil/internal/persist"
 	"github.com/artyomsv/quil/internal/plugin"
 	apty "github.com/artyomsv/quil/internal/pty"
@@ -98,6 +99,9 @@ func (d *Daemon) Start() error {
 
 	if err := claudehook.EnsureScripts(quilDir); err != nil {
 		log.Printf("warning: failed to write claude hook scripts: %v", err)
+	}
+	if err := opencodehook.EnsureScripts(quilDir); err != nil {
+		log.Printf("warning: failed to write opencode hook scripts: %v", err)
 	}
 	if err := os.MkdirAll(config.SessionsDir(), 0700); err != nil {
 		log.Printf("warning: failed to create sessions dir: %v", err)
@@ -1241,6 +1245,56 @@ var claudeHookScriptStatFn = func(path string) error {
 	return err
 }
 
+// readOpencodeSessionIDFn mirrors readHookSessionIDFn for the opencode pane
+// type. Tests override it so the spawn-args matrix never touches the real
+// $QUIL_HOME/sessions/ directory.
+var readOpencodeSessionIDFn = func(paneID string) (string, error) {
+	id, _, err := opencodehook.ReadPersistedSessionID(config.QuilDir(), paneID)
+	return id, err
+}
+
+// opencodeHookScriptStatFn mirrors claudeHookScriptStatFn for the opencode
+// JS plugin. Defaults to os.Stat; tests override to simulate the
+// "EnsureScripts failed at startup" branch.
+var opencodeHookScriptStatFn = func(path string) error {
+	_, err := os.Stat(path)
+	return err
+}
+
+// opencodeSpawnPrep returns the env vars to add to a fresh opencode spawn so
+// the bundled session-id-tracker plugin loads via OPENCODE_CONFIG_CONTENT.
+// Returns nil when the plugin script is missing on disk so the spawn proceeds
+// without session tracking — matching the pre-feature behaviour rather than
+// failing the whole spawn.
+//
+// quilDir is absolutized before being embedded so the resulting JSON plugin
+// path is unambiguous in the child opencode process — which resolves plugin
+// entries against its own CWD, not the daemon's. With `prompts_cwd = true`
+// the child CWD is user-chosen and may differ from where the daemon was
+// launched, so a relative quilDir would silently break tracking.
+func opencodeSpawnPrep(quilDir, paneID string) []string {
+	absQuilDir, err := filepath.Abs(quilDir)
+	if err != nil {
+		log.Printf("warning: pane %s: absolutize quilDir %q: %v — session-id rotation tracking disabled", paneID, quilDir, err)
+		return nil
+	}
+	scriptPath := opencodehook.ScriptPath(absQuilDir)
+	if err := opencodeHookScriptStatFn(scriptPath); err != nil {
+		log.Printf("warning: pane %s: opencode plugin script unavailable (%s): %v — session-id rotation tracking disabled", paneID, scriptPath, err)
+		return nil
+	}
+	cfg, err := opencodehook.BuildConfigContent(scriptPath)
+	if err != nil {
+		log.Printf("warning: pane %s: build opencode config content: %v — session-id rotation tracking disabled", paneID, err)
+		return nil
+	}
+	return []string{
+		"QUIL_PANE_ID=" + paneID,
+		"QUIL_HOME=" + absQuilDir,
+		"OPENCODE_CONFIG_CONTENT=" + cfg,
+	}
+}
+
 // claudeHookSpawnPrep returns the --settings prefix args and env vars to add
 // to a fresh claude-code spawn for SessionStart hook registration. Returns
 // nil slices when the hook is unavailable (script missing or settings JSON
@@ -1298,22 +1352,27 @@ func claudeSessionFileExists(cwd, sessionID string) bool {
 }
 
 // resumeTemplateFor returns the resume-arg template resolveSpawnArgs should
-// expand on the restore branch. For a claude-code pane whose session file
-// is on disk, it promotes the args to ["--resume", "{session_id}"] so each
-// pane reattaches to its own session. Otherwise it returns the plugin's
-// configured ResumeArgs (typically ["--continue"] for claude-code, which is
-// correct for panes closed during Claude's startup screens before any
-// session file was written).
+// expand on the restore branch. Dispatches by plugin name to plugin-specific
+// promotion logic; default falls back to the plugin's configured ResumeArgs.
 func resumeTemplateFor(p *plugin.PanePlugin, pane *Pane) []string {
-	if p.Name != "claude-code" || p.Persistence.Strategy != "preassign_id" {
+	switch {
+	case p.Name == "claude-code" && p.Persistence.Strategy == "preassign_id":
+		return claudeResumeTemplate(p, pane)
+	case p.Name == "opencode" && p.Persistence.Strategy == "session_scrape":
+		return opencodeResumeTemplate(p, pane)
+	default:
 		return p.Persistence.ResumeArgs
 	}
+}
 
-	// Prefer the id recorded by the SessionStart hook — it reflects any
-	// /clear, /resume, or compaction rotation that happened after the
-	// original preassigned id was generated. A missing or empty value falls
-	// through to the original probe so panes on older Quil installs still
-	// work.
+// claudeResumeTemplate decides between --resume <id> (unique session) and
+// the configured fallback (typically --continue) for a claude-code pane.
+//
+// Prefers the id recorded by the SessionStart hook — it reflects any /clear,
+// /resume, or compaction rotation that happened after the original
+// preassigned id was generated. A missing or empty value falls through to
+// the original probe so panes on older Quil installs still work.
+func claudeResumeTemplate(p *plugin.PanePlugin, pane *Pane) []string {
 	if hookID, err := readHookSessionIDFn(pane.ID); err == nil && hookID != "" {
 		if claudeSessionExistsFn(pane.CWD, hookID) {
 			pane.PluginMu.Lock()
@@ -1339,6 +1398,52 @@ func resumeTemplateFor(p *plugin.PanePlugin, pane *Pane) []string {
 		return []string{"--resume", "{session_id}"}
 	}
 	return p.Persistence.ResumeArgs
+}
+
+// opencodeResumeTemplate decides between --session <id> (resume exact
+// conversation) and the configured fallback (--continue) for an opencode
+// pane.
+//
+// Unlike the claude-code path we do not probe whether the session id still
+// exists in opencode's SQLite DB before passing it: a stale id surfaces a
+// clear, actionable error from opencode itself, while a probe would tie us
+// to opencode's schema. If that proves too noisy in practice we can add a
+// SQLite probe later (file: ~/.local/share/opencode/opencode.db).
+//
+// Shape-validates the recorded id via opencodehook.IsValidSessionID (mirror
+// of the JS plugin's SESSION_ID_RE) before promoting — guards against a
+// corrupted file, partial write surviving rename, or manual edit injecting
+// arbitrary text into the spawn argv.
+func opencodeResumeTemplate(p *plugin.PanePlugin, pane *Pane) []string {
+	hookID, err := readOpencodeSessionIDFn(pane.ID)
+	if err != nil || hookID == "" {
+		return p.Persistence.ResumeArgs
+	}
+	if !opencodehook.IsValidSessionID(hookID) {
+		log.Printf("warning: pane %s: recorded opencode session id failed shape validation (%q); falling back to %v", pane.ID, hookID, p.Persistence.ResumeArgs)
+		return p.Persistence.ResumeArgs
+	}
+	pane.PluginMu.Lock()
+	if pane.PluginState == nil {
+		pane.PluginState = make(map[string]string)
+	}
+	pane.PluginState["session_id"] = hookID
+	pane.PluginMu.Unlock()
+	return []string{"--session", "{session_id}"}
+}
+
+// templateHasPlaceholder reports whether any entry contains a `{key}` token
+// that ExpandResumeArgs would need to substitute. Used by resolveSpawnArgs
+// to decide whether a static template can pass through without PluginState
+// (covers the session_scrape fallback for opencode panes that never received
+// a session event before the daemon restart).
+func templateHasPlaceholder(template []string) bool {
+	for _, a := range template {
+		if strings.Contains(a, "{") && strings.Contains(a, "}") {
+			return true
+		}
+	}
+	return false
 }
 
 // resolveSpawnArgs computes the argv (excluding cmd) that spawnPane should use
@@ -1375,9 +1480,21 @@ func resolveSpawnArgs(p *plugin.PanePlugin, pane *Pane, restoring bool) []string
 		switch p.Persistence.Strategy {
 		case "preassign_id", "session_scrape":
 			template := resumeTemplateFor(p, pane)
-			if len(template) > 0 && len(pane.PluginState) > 0 {
-				resumeArgs := plugin.ExpandResumeArgs(template, pane.PluginState)
-				args = append(args, resumeArgs...)
+			if len(template) > 0 {
+				// Static templates (no {placeholder}) pass through directly so
+				// a session_scrape pane that never received a hook event still
+				// gets its --continue fallback. Templates with placeholders
+				// require PluginState; ExpandResumeArgs returns nil if state
+				// is missing or any placeholder is unresolved.
+				if templateHasPlaceholder(template) {
+					if len(pane.PluginState) > 0 {
+						if resumeArgs := plugin.ExpandResumeArgs(template, pane.PluginState); resumeArgs != nil {
+							args = append(args, resumeArgs...)
+						}
+					}
+				} else {
+					args = append(args, template...)
+				}
 			}
 		case "rerun":
 			// args already set from InstanceArgs above
@@ -1456,13 +1573,21 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 	// Claude's session_id and writes it to $QUIL_HOME/sessions/<paneID>.id,
 	// which the restore path consults in resumeTemplateFor. QUIL_PANE_ID in
 	// the PTY env lets the hook attribute the write to this specific pane.
+	//
+	// OpenCode session-id rotation tracking uses the same pattern but routes
+	// through OPENCODE_CONFIG_CONTENT (inline JSON) referencing a JS plugin
+	// under $QUIL_HOME/opencodehook/. OPENCODE_CONFIG_CONTENT merges with the
+	// user's own opencode config so their plugins/agents/modes still apply.
 	envVars := append([]string{}, p.Command.Env...)
-	if p.Name == "claude-code" {
+	switch p.Name {
+	case "claude-code":
 		settingsArgs, hookEnv := claudeHookSpawnPrep(config.QuilDir(), pane.ID, args)
 		if len(settingsArgs) > 0 {
 			args = append(settingsArgs, args...)
 		}
 		envVars = append(envVars, hookEnv...)
+	case "opencode":
+		envVars = append(envVars, opencodeSpawnPrep(config.QuilDir(), pane.ID)...)
 	}
 
 	if len(envVars) > 0 {

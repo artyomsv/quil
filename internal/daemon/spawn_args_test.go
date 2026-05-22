@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"encoding/json"
 	"os"
 	"reflect"
 	"strings"
@@ -554,5 +555,194 @@ func TestResolveSpawnArgs_DoesNotMutatePluginArgs(t *testing.T) {
 	got[0] = "MUTATED"
 	if p.Command.Args[0] != "-l" {
 		t.Errorf("plugin.Command.Args was mutated: got %q, want %q", p.Command.Args[0], "-l")
+	}
+}
+
+// TestResolveSpawnArgs_OpencodeResume covers the opencode restore branch of
+// resumeTemplateFor: when our JS plugin recorded a session id we promote to
+// --session <id>, otherwise we fall back to the configured --continue.
+//
+// Unlike the claude-code test there is no session-exists probe; opencode is
+// asked to resume the id and handles staleness itself.
+func TestResolveSpawnArgs_OpencodeResume(t *testing.T) {
+	opencodePlugin := &plugin.PanePlugin{
+		Name:    "opencode",
+		Command: plugin.CommandConfig{Cmd: "opencode"},
+		Persistence: plugin.PersistenceConfig{
+			Strategy:   "session_scrape",
+			ResumeArgs: []string{"--continue"},
+		},
+	}
+
+	tests := []struct {
+		name    string
+		pane    *Pane
+		hookID  string
+		hookErr error
+		want    []string
+	}{
+		{
+			name:   "hook id present — resume via --session",
+			pane:   &Pane{ID: "pane-abc"},
+			hookID: "sess-1234",
+			want:   []string{"--session", "sess-1234"},
+		},
+		{
+			name:    "hook id missing (ErrNotExist) — fallback to --continue",
+			pane:    &Pane{ID: "pane-abc"},
+			hookErr: os.ErrNotExist,
+			want:    []string{"--continue"},
+		},
+		{
+			name:   "hook id empty string — fallback to --continue",
+			pane:   &Pane{ID: "pane-abc"},
+			hookID: "",
+			want:   []string{"--continue"},
+		},
+		{
+			name:   "InstanceArgs + hook id — toggle preserved, --session appended",
+			pane:   &Pane{ID: "pane-abc", InstanceArgs: []string{"--print-logs"}},
+			hookID: "sess-1234",
+			want:   []string{"--print-logs", "--session", "sess-1234"},
+		},
+		{
+			// Guards opencodeResumeTemplate's shape check: a malformed id
+			// (corrupted file, manual edit) must not be passed to opencode
+			// as a discrete argv entry; we fall back to --continue so the
+			// pane recovers a coherent state instead of erroring on a
+			// nonsense --session value.
+			name:   "hook id fails shape validation — fallback to --continue",
+			pane:   &Pane{ID: "pane-abc"},
+			hookID: "not a valid id with spaces\nand newlines",
+			want:   []string{"--continue"},
+		},
+		{
+			name:   "hook id with NUL byte — fallback to --continue",
+			pane:   &Pane{ID: "pane-abc"},
+			hookID: "sess\x00abc",
+			want:   []string{"--continue"},
+		},
+	}
+
+	// Subtests mutate readOpencodeSessionIDFn — not parallel-safe.
+	orig := readOpencodeSessionIDFn
+	t.Cleanup(func() { readOpencodeSessionIDFn = orig })
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			readOpencodeSessionIDFn = func(paneID string) (string, error) {
+				if paneID != tt.pane.ID {
+					t.Errorf("hook read paneID = %q, want %q", paneID, tt.pane.ID)
+				}
+				return tt.hookID, tt.hookErr
+			}
+			got := resolveSpawnArgs(opencodePlugin, tt.pane, true)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("resolveSpawnArgs:\n  got:  %v\n  want: %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestTemplateHasPlaceholder locks in the brace-detection predicate that
+// gates the restore branch's static-vs-dynamic template handling. Without
+// this gate, session_scrape panes with empty PluginState would drop their
+// --continue fallback on restore — a real bug found during the opencode
+// implementation. Direct coverage so a regression here is visible at the
+// unit level instead of only via the resume matrix.
+func TestTemplateHasPlaceholder(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		template []string
+		want     bool
+	}{
+		{"nil", nil, false},
+		{"empty", []string{}, false},
+		{"static single arg", []string{"--continue"}, false},
+		{"static multi arg", []string{"--session", "fixed-id"}, false},
+		{"placeholder", []string{"--session", "{session_id}"}, true},
+		{"placeholder in middle of arg", []string{"prefix-{id}-suffix"}, true},
+		{"open brace only", []string{"{partial"}, false},
+		{"close brace only", []string{"partial}"}, false},
+		{"matched outside arg boundaries", []string{"{a", "b}"}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := templateHasPlaceholder(tt.template); got != tt.want {
+				t.Errorf("templateHasPlaceholder(%v) = %v, want %v", tt.template, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestOpencodeSpawnPrep covers the env-injection helper: it must emit the
+// three env vars when the JS plugin file is present, and nil when missing
+// so the spawn proceeds without session tracking rather than failing.
+func TestOpencodeSpawnPrep(t *testing.T) {
+	tests := []struct {
+		name        string
+		statErr     error
+		paneID      string
+		wantEnv     bool
+		wantPaneEnv string
+	}{
+		{
+			name:        "script present — injects three env vars",
+			statErr:     nil,
+			paneID:      "pane-abc",
+			wantEnv:     true,
+			wantPaneEnv: "QUIL_PANE_ID=pane-abc",
+		},
+		{
+			name:    "script missing — no injection",
+			statErr: os.ErrNotExist,
+			paneID:  "pane-abc",
+			wantEnv: false,
+		},
+	}
+
+	orig := opencodeHookScriptStatFn
+	t.Cleanup(func() { opencodeHookScriptStatFn = orig })
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opencodeHookScriptStatFn = func(string) error { return tt.statErr }
+			env := opencodeSpawnPrep("/tmp/quil", tt.paneID)
+			if tt.wantEnv {
+				if len(env) != 3 {
+					t.Fatalf("env = %v, want 3 entries", env)
+				}
+				if env[0] != tt.wantPaneEnv {
+					t.Errorf("env[0] = %q, want %q", env[0], tt.wantPaneEnv)
+				}
+				if env[1] != "QUIL_HOME=/tmp/quil" {
+					t.Errorf("env[1] = %q, want QUIL_HOME=/tmp/quil", env[1])
+				}
+				if !strings.HasPrefix(env[2], "OPENCODE_CONFIG_CONTENT=") {
+					t.Errorf("env[2] = %q, want OPENCODE_CONFIG_CONTENT=... prefix", env[2])
+				}
+				if !strings.Contains(env[2], "quil-session-tracker.js") {
+					t.Errorf("env[2] missing plugin filename: %s", env[2])
+				}
+				// Round-trip-parse the inline config so a future regression in
+				// configContentSchema's wire format gets caught here, not by
+				// opencode silently ignoring the plugin entry at load time.
+				jsonPart := strings.TrimPrefix(env[2], "OPENCODE_CONFIG_CONTENT=")
+				var parsed struct {
+					Plugin []string `json:"plugin"`
+				}
+				if err := json.Unmarshal([]byte(jsonPart), &parsed); err != nil {
+					t.Errorf("OPENCODE_CONFIG_CONTENT not valid JSON: %v (%s)", err, jsonPart)
+				} else if len(parsed.Plugin) != 1 || !strings.HasSuffix(parsed.Plugin[0], "quil-session-tracker.js") {
+					t.Errorf("parsed.Plugin = %v, want one entry ending in quil-session-tracker.js", parsed.Plugin)
+				}
+			} else {
+				if env != nil {
+					t.Errorf("env = %v, want nil", env)
+				}
+			}
+		})
 	}
 }

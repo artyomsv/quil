@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -193,5 +194,118 @@ func TestDaemon_DefaultCWD(t *testing.T) {
 			t.Errorf("empty string should fall back to os.Getwd(); got %q, want %q", got, hostCWD)
 		}
 	})
+}
+
+// saveHookStubs captures and restores the package-level hook reader vars
+// so the per-test stub installs cannot leak into other tests in the
+// package. Returns no value; the cleanup runs at test end.
+//
+// NOTE: tests that use this helper MUST NOT call t.Parallel() — they
+// mutate package-level state shared with every other daemon test, and a
+// parallel scheduler would let two stubs collide.
+func saveHookStubs(t *testing.T) {
+	t.Helper()
+	origClaudeHook := readHookSessionIDFn
+	origOpencodeHook := readOpencodeSessionIDFn
+	t.Cleanup(func() {
+		readHookSessionIDFn = origClaudeHook
+		readOpencodeSessionIDFn = origOpencodeHook
+	})
+}
+
+// TestDaemon_RefreshPluginStateFromHooks verifies the shutdown helper
+// that pulls live hook-recorded session ids into PluginState before the
+// final snapshot. Without this, workspace.json ships with the original
+// preassigned id and is stale after any /clear / /resume / compaction
+// rotation; if the hook file later disappears the restore falls back to
+// --continue.
+func TestDaemon_RefreshPluginStateFromHooks(t *testing.T) {
+	// NOTE: stubs mutate package-level vars — must not be marked t.Parallel().
+	saveHookStubs(t)
+
+	d := New(config.Default())
+	tab := &Tab{ID: "tab-1", Name: "test", Panes: []string{"pane-claude", "pane-opencode", "pane-term", "pane-nilstate"}}
+	panes := []*Pane{
+		// Direct writes to PluginState without PluginMu are safe here:
+		// the panes have not been published to any goroutine until
+		// RestoreTab returns; no concurrent reader exists.
+		{ID: "pane-claude", TabID: "tab-1", Type: "claude-code", PluginState: map[string]string{"session_id": "stale-preassigned"}},
+		{ID: "pane-opencode", TabID: "tab-1", Type: "opencode", PluginState: map[string]string{"session_id": "stale-preassigned"}},
+		{ID: "pane-term", TabID: "tab-1", Type: "terminal", PluginState: map[string]string{"session_id": "ignore-me"}},
+		// nil PluginState exercises the lazy allocation branch in
+		// refreshPluginStateFromHooks.
+		{ID: "pane-nilstate", TabID: "tab-1", Type: "claude-code", PluginState: nil},
+	}
+	d.session.RestoreTab(tab, panes)
+
+	readHookSessionIDFn = func(paneID string) (string, error) {
+		switch paneID {
+		case "pane-claude":
+			return "live-claude-id", nil
+		case "pane-nilstate":
+			return "live-nilstate-id", nil
+		}
+		return "", nil
+	}
+	readOpencodeSessionIDFn = func(paneID string) (string, error) {
+		if paneID == "pane-opencode" {
+			return "live-opencode-id", nil
+		}
+		return "", nil
+	}
+
+	d.refreshPluginStateFromHooks()
+
+	if got := panes[0].PluginState["session_id"]; got != "live-claude-id" {
+		t.Errorf("claude pane session_id = %q, want %q (hook id should have overwritten the stale preassigned id)", got, "live-claude-id")
+	}
+	if got := panes[1].PluginState["session_id"]; got != "live-opencode-id" {
+		t.Errorf("opencode pane session_id = %q, want %q", got, "live-opencode-id")
+	}
+	if got := panes[2].PluginState["session_id"]; got != "ignore-me" {
+		t.Errorf("terminal pane session_id = %q, want %q (non-AI panes must not be touched)", got, "ignore-me")
+	}
+	if panes[3].PluginState == nil {
+		t.Fatal("nil PluginState pane: map should have been lazily allocated")
+	}
+	if got := panes[3].PluginState["session_id"]; got != "live-nilstate-id" {
+		t.Errorf("nil PluginState pane session_id = %q, want %q", got, "live-nilstate-id")
+	}
+}
+
+// TestDaemon_RefreshPluginStateFromHooks_EmptyHookIDPreservesExisting
+// guards the "hook file exists but is empty / unreadable" path: we must
+// NOT clear PluginState["session_id"] in that case — the preassigned id
+// is still better than nothing for the restore probe. Covers both an
+// empty-string-no-error read and an error read; the production code
+// path swallows both into the same fallthrough.
+func TestDaemon_RefreshPluginStateFromHooks_EmptyHookIDPreservesExisting(t *testing.T) {
+	// NOTE: stubs mutate package-level vars — must not be marked t.Parallel().
+	saveHookStubs(t)
+
+	cases := []struct {
+		name string
+		stub func(string) (string, error)
+	}{
+		{"empty string no error", func(string) (string, error) { return "", nil }},
+		{"read error", func(string) (string, error) { return "", errors.New("simulated disk error") }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d := New(config.Default())
+			tab := &Tab{ID: "tab-1", Name: "test", Panes: []string{"pane-claude"}}
+			panes := []*Pane{
+				{ID: "pane-claude", TabID: "tab-1", Type: "claude-code", PluginState: map[string]string{"session_id": "preassigned-fallback"}},
+			}
+			d.session.RestoreTab(tab, panes)
+			readHookSessionIDFn = tc.stub
+
+			d.refreshPluginStateFromHooks()
+
+			if got := panes[0].PluginState["session_id"]; got != "preassigned-fallback" {
+				t.Errorf("empty/error hook read should leave existing session_id intact; got %q", got)
+			}
+		})
+	}
 }
 

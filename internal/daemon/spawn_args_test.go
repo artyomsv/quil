@@ -327,6 +327,20 @@ func TestEscapeClaudeCWD(t *testing.T) {
 		{"mixed separators", `E:/Projects\mixed`, "E--Projects-mixed"},
 		{"root-only windows", `C:\`, "C--"},
 		{"empty", "", ""},
+		// Regression: macOS home like /Users/Foo_Bar lands under
+		// ~/.claude/projects/-Users-Foo-Bar (Claude encodes _ as -). Before
+		// the fix every Claude pane on a path with an underscore restarted
+		// with --continue instead of --resume <id>.
+		{"unix path with underscore", "/Users/Artjoms_Stukans/Projects/crypto-finance", "-Users-Artjoms-Stukans-Projects-crypto-finance"},
+		{"underscore-only segment", "/home/foo_bar/quil", "-home-foo-bar-quil"},
+		{"multiple underscores", "/a_b/c_d_e", "-a-b-c-d-e"},
+		// Negative cases: pin the deliberately-conservative scope. If
+		// Claude is observed to encode any of these in the wild, extend
+		// the replacer AND update these rows together so the assumption
+		// shift is reviewable as a single diff.
+		{"dot preserved", "/foo.bar/quil", "-foo.bar-quil"},
+		{"space preserved", "/foo bar/quil", "-foo bar-quil"},
+		{"uppercase preserved", "/Foo/BAR", "-Foo-BAR"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

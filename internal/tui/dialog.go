@@ -25,7 +25,15 @@ import (
 	"github.com/artyomsv/quil/internal/plugin"
 )
 
-const dialogWidth = 50
+// dialogWidth is the standard width used by About, Settings, Shortcuts, and
+// the non-plugin Confirm dialogs. Set wide enough that:
+//   - Settings rows fit `cursor (2) + label (24) + value (24)` without
+//     wrapping the longest description (e.g. "(closes this TUI window)").
+//   - The Stop-daemon confirm body line "Panes will respawn from the
+//     snapshot on next launch." fits on a single rendered row.
+// Matched to disclaimerWidth so the visual style is consistent across all
+// fixed-width modal dialogs.
+const dialogWidth = 60
 const disclaimerWidth = 60
 
 // disclaimerTips are shown randomly in the startup disclaimer dialog.

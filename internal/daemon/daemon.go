@@ -1887,12 +1887,22 @@ func (d *Daemon) analyzeIdleTitle(pane *Pane) (title, severity, excerpt string) 
 	return
 }
 
-// lastNLines returns the last n non-empty lines from text.
+// lastNLines returns the last n non-empty lines from text, applying terminal
+// carriage-return semantics per line. A real terminal interprets `\r` as
+// "return to column 0 and overwrite from there" — so when ansi.Strip leaves
+// `prompt   \r \r\rwindow-title-leak` in a single line, what the user
+// actually SEES is the trailing segment after the last `\r`. Without this
+// reset, excerpts capture text the user can never see (e.g. the prompt
+// rune that was immediately overwritten) and miss the text they DO see.
 func lastNLines(text string, n int) string {
 	lines := strings.Split(text, "\n")
 	var result []string
 	for i := len(lines) - 1; i >= 0 && len(result) < n; i-- {
-		trimmed := strings.TrimSpace(lines[i])
+		line := lines[i]
+		if cr := strings.LastIndex(line, "\r"); cr >= 0 {
+			line = line[cr+1:]
+		}
+		trimmed := strings.TrimSpace(line)
 		if trimmed != "" {
 			result = append([]string{trimmed}, result...)
 		}
@@ -1967,34 +1977,82 @@ func trimToNewlineSafe(raw []byte, maxTail int) []byte {
 // the pane is sitting at a fresh prompt — a non-event from the user's POV,
 // because they can see the prompt by looking at the pane.
 var promptRunes = map[string]bool{
-	"%":   true, // zsh default
-	"$":   true, // bash / sh
-	">":   true, // PowerShell / cmd, also some Python REPLs
-	"❯":   true, // starship / pure / spaceship default
-	"#":   true, // root prompts
-	"➜":   true, // oh-my-zsh agnoster / af-magic
-	"λ":   true, // fish-friendly minimal themes
-	"»":   true, // bash-it powerline
+	"%": true, // zsh default
+	"$": true, // bash / sh
+	">": true, // PowerShell / cmd, also some Python REPLs
+	"❯": true, // starship / pure / spaceship default
+	"#": true, // root prompts
+	"➜": true, // oh-my-zsh agnoster / af-magic
+	"λ": true, // fish-friendly minimal themes
+	"»": true, // bash-it powerline
 }
 
-// isPromptOnlyExcerpt reports whether an excerpt collapses to a bare shell
-// prompt — i.e. the only non-whitespace content is one prompt rune, possibly
-// with leading/trailing space. Multi-line excerpts where ALL non-empty lines
-// are prompt-only also qualify (a sequence of empty prompts).
+// hostnameLikeRe matches user@host patterns (e.g. "Artjoms_Stukans@HOSTNAME")
+// that leak into excerpts from OSC 0 window-title sequences when ansi.Strip
+// or upstream emulators bail on an embedded CR. These leaks are
+// indistinguishable from "the pane is at a prompt" because the underlying
+// terminal state IS a fresh prompt — the title text is what survived the
+// strip, not what the cursor is sitting on.
+var hostnameLikeRe = regexp.MustCompile(`^[\w][\w.-]*@[\w][\w.-]+`)
+
+// isPromptOnlyExcerpt reports whether the excerpt represents a pane sitting
+// at an idle shell prompt. We classify a line as "prompt-like" when it is:
+//
+//   - a single canonical prompt rune (`%`, `$`, `❯`, etc.), OR
+//   - short (< 200 chars) AND contains a prompt rune somewhere (e.g.
+//     "user@host % git:(main)"), OR
+//   - short AND starts with a user@host pattern — the OSC 0 leak signature.
+//
+// The excerpt is prompt-only when every non-empty line passes these checks.
+// "Short" matters: a multi-line `ls` output that happens to contain a `%`
+// in one filename should NOT collapse to "shell idle" — only lines that
+// could realistically be a prompt qualify.
 func isPromptOnlyExcerpt(excerpt string) bool {
 	if excerpt == "" {
-		return false // empty excerpt is a separate case — keep emitting
+		return false
 	}
+	sawAny := false
 	for _, line := range strings.Split(excerpt, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" {
 			continue
 		}
-		if !promptRunes[trimmed] {
+		sawAny = true
+		if !isPromptLikeLine(trimmed) {
 			return false
 		}
 	}
-	return true
+	return sawAny
+}
+
+// isPromptLikeLine encapsulates the per-line classification used by
+// isPromptOnlyExcerpt. See that function's docs for the classification rules.
+//
+// Specifically, a line is "prompt-like" when, after trimming trailing
+// whitespace, it ENDS with a recognised prompt rune (covers `%`, `user@host
+// % `, `~/repo $ `, etc) OR it matches the user@host pattern that OSC 0
+// window-title leaks produce. Long lines (> 200 chars) are presumed to be
+// command output regardless of trailing chars — real prompts are short.
+func isPromptLikeLine(line string) bool {
+	if line == "" {
+		return true
+	}
+	if promptRunes[line] {
+		return true
+	}
+	if len(line) > 200 {
+		return false
+	}
+	trimmed := strings.TrimRight(line, " \t")
+	for r := range promptRunes {
+		if strings.HasSuffix(trimmed, r) {
+			return true
+		}
+	}
+	if hostnameLikeRe.MatchString(line) {
+		return true
+	}
+	return false
 }
 
 // withExcerpt populates PaneEvent.Message and Data["excerpt"] from the pane's

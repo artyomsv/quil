@@ -40,21 +40,35 @@ jobs:
           LAST_TAG="v${CURRENT}"
           echo "current=${CURRENT}" >> $GITHUB_OUTPUT
 
-          # Scan BOTH subject (%s) and body (%b) so squash-merged PRs whose
-          # subject was defaulted from the branch name (`Feat/foo-bar`) still
-          # get classified by the proper `feat(scope):` lines in the body.
-          # `--oneline` would have stripped bodies and missed those.
+          # Scan SUBJECTS only for type-bump classification. A previous
+          # version of this script also scanned commit bodies ("%s%n%b"),
+          # which produced a false-positive minor bump on PR #35 (docs
+          # restructure) because the PR description contained the literal
+          # string `feat(tui): add Stop daemon action` — a back-tick-wrapped
+          # reference to another open PR — that the body regex matched as
+          # if it were a real `feat(tui):` commit. The squash subject set
+          # by the merger is the authoritative classification; if a
+          # contributor's branch-name-derived subject is non-conventional
+          # the `[(:/]` regex below still accepts `feat/foo-bar` form.
+          #
+          # BREAKING CHANGE is read from bodies because per the Conventional
+          # Commits spec it lives in the footer, not the subject. The
+          # `^BREAKING[ -]CHANGE:` anchor matches the footer form
+          # specifically (line-start + colon) so prose references like
+          # "this is not a BREAKING CHANGE" do NOT match.
           if git rev-parse "$LAST_TAG" >/dev/null 2>&1; then
-            COMMITS=$(git log "${LAST_TAG}..HEAD" --format='%s%n%b%n---')
+            SUBJECTS=$(git log "${LAST_TAG}..HEAD" --format='%s')
+            BODIES=$(git log "${LAST_TAG}..HEAD" --format='%b')
           else
-            COMMITS=$(git log --format='%s%n%b%n---')
+            SUBJECTS=$(git log --format='%s')
+            BODIES=$(git log --format='%b')
           fi
 
-          echo "--- Commits since ${LAST_TAG} ---"
-          echo "$COMMITS"
+          echo "--- Subjects since ${LAST_TAG} ---"
+          echo "$SUBJECTS"
           echo "---"
 
-          if [ -z "$COMMITS" ]; then
+          if [ -z "$SUBJECTS" ]; then
             echo "::notice::No commits since last tag — skipping release"
             echo "skip=true" >> $GITHUB_OUTPUT
             exit 0
@@ -67,11 +81,12 @@ jobs:
           #   accidentally matching `feat`.
           # - `[(:/]`: accepts `feat:`, `feat(scope):`, AND `feat/branch-name`
           #   (the last appears when the squash subject came from the branch).
-          if echo "$COMMITS" | grep -qiE '\b(feat!|fix!|refactor!)|BREAKING CHANGE'; then
+          if echo "$SUBJECTS" | grep -qiE '\b(feat!|fix!|refactor!)[(:/]?' \
+             || echo "$BODIES" | grep -qE '^BREAKING[ -]CHANGE:'; then
             BUMP="major"
-          elif echo "$COMMITS" | grep -qiE '\bfeat[(:/]'; then
+          elif echo "$SUBJECTS" | grep -qiE '\bfeat[(:/]'; then
             BUMP="minor"
-          elif echo "$COMMITS" | grep -qiE '\b(fix|perf)[(:/]'; then
+          elif echo "$SUBJECTS" | grep -qiE '\b(fix|perf)[(:/]'; then
             BUMP="patch"
           else
             echo "::notice::No version-bumping commits found (only chore/docs/test/ci) — skipping release"

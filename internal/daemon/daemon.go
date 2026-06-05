@@ -1821,7 +1821,18 @@ func (d *Daemon) checkIdlePanes() {
 			// plugin idle handler matched (e.g. claude-code's "Needs your
 			// approval"), the regex saw something meaningful in the excerpt
 			// even though the surface chars collapse to a prompt rune.
-			if title == "Output idle" && isPromptOnlyExcerpt(excerpt) {
+			suppress := title == "Output idle" && isPromptOnlyExcerpt(excerpt)
+			// Debug visibility into what excerpts the idle checker sees in
+			// the wild — helps diagnose why suppression fires (or doesn't)
+			// for a given shell setup. Truncate the excerpt to keep the
+			// log line bounded.
+			logExcerpt := excerpt
+			if len(logExcerpt) > 200 {
+				logExcerpt = logExcerpt[:200] + "..."
+			}
+			logger.Debug("idle decision: pane=%s type=%s title=%q suppress=%v excerpt=%q",
+				pane.ID, pane.Type, title, suppress, logExcerpt)
+			if suppress {
 				continue
 			}
 			d.emitEvent(withExcerpt(PaneEvent{
@@ -1916,17 +1927,37 @@ func paneOutputExcerpt(pane *Pane, n int) string {
 // longer recognise them as part of an escape. They then render to the user
 // as raw garbage.
 //
-// The advance is bounded: we look at most one line ahead and bail out if no
-// newline is found (which only happens on pathological no-newline output,
-// where the partial-sequence cost is at most a few characters of garbage and
-// not worth dropping the whole window for).
+// We scan forward bounded by maxScan bytes looking for either:
+//   - a newline (clean text restart), or
+//   - an ESC byte (0x1b — start of a fresh ANSI sequence that ansi.Strip
+//     will recognise in full).
+//
+// Whichever boundary comes first wins. Newline-only seek wasn't enough:
+// some TUIs (Claude Code, opencode) emit one logical "screen paint" with
+// few or no newlines in the trailing window, so the seek fell through and
+// we returned the un-advanced slice — the original bug shape. ESC bytes
+// are abundant in ANSI-rich panes, so finding one is fast.
+//
+// If neither boundary is found within maxScan, we accept the un-advanced
+// slice — the chance of a leading partial sequence in 4 KiB of plain text
+// is small relative to the bytes the user sees.
 func trimToNewlineSafe(raw []byte, maxTail int) []byte {
 	if len(raw) <= maxTail {
 		return raw
 	}
 	start := len(raw) - maxTail
-	if idx := bytes.IndexByte(raw[start:], '\n'); idx >= 0 {
-		start += idx + 1
+	const maxScan = 512
+	upper := start + maxScan
+	if upper > len(raw) {
+		upper = len(raw)
+	}
+	for i := start; i < upper; i++ {
+		switch raw[i] {
+		case '\n':
+			return raw[i+1:]
+		case 0x1b:
+			return raw[i:]
+		}
 	}
 	return raw[start:]
 }

@@ -43,13 +43,77 @@ func TestTrimToNewlineSafe_NoTrimWhenSmaller(t *testing.T) {
 }
 
 func TestTrimToNewlineSafe_NoNewlineFallback(t *testing.T) {
-	// Pathological case: no newline in the window. We accept some leading
-	// garbage rather than dropping the whole window — small loss compared
-	// to silently emitting nothing.
+	// Pathological case: no newline AND no ESC in the bounded scan
+	// window. We accept some leading garbage rather than dropping the
+	// whole window — small loss compared to silently emitting nothing.
 	raw := []byte(strings.Repeat("a", 5000))
 	got := trimToNewlineSafe(raw, 4096)
 	if len(got) != 4096 {
-		t.Errorf("trimToNewlineSafe no-newline fallback: got len=%d, want 4096", len(got))
+		t.Errorf("trimToNewlineSafe no-boundary fallback: got len=%d, want 4096", len(got))
+	}
+}
+
+// TestTrimToNewlineSafe_SeeksESCWhenNoNewline reproduces the field bug shape:
+// Claude TUI emits one big screen paint with very few newlines, so the
+// newline-only seek falls through and leaves leading ANSI parameter bytes
+// in the slice. The hardened version also recognises ESC bytes as a clean
+// boundary because ansi.Strip handles full sequences from there.
+func TestTrimToNewlineSafe_SeeksESCWhenNoNewline(t *testing.T) {
+	// 100 bytes of CSI parameter garbage (no newline, no ESC), then an ESC
+	// starting a fresh sequence + real content.
+	prefix := strings.Repeat("a", 100)
+	tail := "2;30;30;30m garbage chars no newline " + "\x1b[31mreal content here"
+	raw := []byte(prefix + tail)
+	tailLen := len(tail) - 5 // boundary lands inside the garbage prefix
+
+	got := trimToNewlineSafe(raw, tailLen)
+	gotStr := string(got)
+
+	if strings.Contains(gotStr, "garbage chars") {
+		t.Errorf("trimToNewlineSafe should have advanced past garbage to the ESC: %q", gotStr)
+	}
+	if !strings.Contains(gotStr, "real content here") {
+		t.Errorf("trimToNewlineSafe should have preserved the post-ESC content: %q", gotStr)
+	}
+	if got[0] != 0x1b {
+		t.Errorf("first byte after seek should be ESC; got 0x%02x", got[0])
+	}
+}
+
+// TestTrimToNewlineSafe_NewlineBeatsESCWhenFirst confirms whichever boundary
+// comes first wins (newline before ESC in this case).
+func TestTrimToNewlineSafe_NewlineBeatsESCWhenFirst(t *testing.T) {
+	prefix := strings.Repeat("a", 100)
+	tail := "garbage\nline-after-newline\x1b[31mansi-later"
+	raw := []byte(prefix + tail)
+	tailLen := len(tail) - 5
+
+	got := trimToNewlineSafe(raw, tailLen)
+	gotStr := string(got)
+
+	if strings.Contains(gotStr, "garbage") {
+		t.Errorf("trimToNewlineSafe should have advanced past the newline: %q", gotStr)
+	}
+	if !strings.HasPrefix(gotStr, "line-after-newline") {
+		t.Errorf("trimToNewlineSafe should start at next line, not skip to ESC: %q", gotStr)
+	}
+}
+
+// TestTrimToNewlineSafe_ScanBoundary asserts that the scan stops at maxScan
+// bytes — far-away boundaries don't drag the whole window forward.
+func TestTrimToNewlineSafe_ScanBoundary(t *testing.T) {
+	// 2 KiB of plain text (no boundary), then a newline. Scan window is
+	// 512 bytes, so the seek must not find the newline and must return
+	// the un-advanced slice.
+	prefix := strings.Repeat("a", 100)
+	pad := strings.Repeat("b", 2000)
+	tail := pad + "\nafter-far-newline"
+	raw := []byte(prefix + tail)
+	tailLen := len(tail) - 50
+
+	got := trimToNewlineSafe(raw, tailLen)
+	if len(got) != tailLen {
+		t.Errorf("scan should not advance past maxScan; got len=%d, want %d", len(got), tailLen)
 	}
 }
 

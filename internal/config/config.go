@@ -105,8 +105,12 @@ type KeybindingsConfig struct {
 	FocusPane          string `toml:"focus_pane"`
 	NotificationToggle string `toml:"notification_toggle"`
 	NotificationFocus  string `toml:"notification_focus"`
-	GoBack             string `toml:"go_back"`
-	NotesToggle        string `toml:"notes_toggle"`
+	// MutePane toggles notification mute on the active pane (idle/bell/exit
+	// events stop firing). Useful for `npm test --watch` and other chatty
+	// processes that would otherwise flood the sidebar.
+	MutePane    string `toml:"mute_pane"`
+	GoBack      string `toml:"go_back"`
+	NotesToggle string `toml:"notes_toggle"`
 }
 
 func Default() Config {
@@ -141,7 +145,7 @@ func Default() Config {
 		},
 		Notification: NotificationConfig{
 			SidebarWidth: 30,
-			MaxEvents:    50,
+			MaxEvents:    200,
 		},
 		Keybindings: KeybindingsConfig{
 			Quit:            "ctrl+q",
@@ -172,6 +176,7 @@ func Default() Config {
 			FocusPane:          "ctrl+e",
 			NotificationToggle: "alt+n",
 			NotificationFocus:  "f3",
+			MutePane:           "alt+m",
 			GoBack:             "alt+backspace",
 			NotesToggle:        "alt+e",
 		},

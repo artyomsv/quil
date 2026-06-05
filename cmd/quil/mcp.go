@@ -164,7 +164,8 @@ func runMCP() {
 				"- send_to_pane: for typing text commands — appends newline by default to execute.\n" +
 				"- Destructive tools (restart_pane, destroy_pane, close_tui): always confirm with the user before using.\n" +
 				"- watch_notifications: blocks until an event fires on specified panes (replaces polling). Use after starting long-running tasks.\n" +
-				"- get_notifications: returns all pending notification events without blocking.\n\n" +
+				"- get_notifications: returns all pending notification events without blocking.\n" +
+				"- dismiss_notifications: ack events you've handled so they don't show up again. Pass an event_id, or omit to clear all.\n\n" +
 				"Sensitive data handling:\n" +
 				"When sending sensitive data (passwords, API keys, tokens, seeds) via send_to_pane or send_keys, " +
 				"wrap the value with <<REDACT>>...<</REDACT>> markers.\n" +

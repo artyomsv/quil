@@ -452,6 +452,8 @@ func (d *Daemon) restoreWorkspace() error {
 					}
 				}
 
+				muted, _ := paneData["muted"].(bool)
+
 				pane := &Pane{
 					ID:           paneID,
 					TabID:        tabID,
@@ -462,6 +464,7 @@ func (d *Daemon) restoreWorkspace() error {
 					InstanceName: instanceName,
 					InstanceArgs: instanceArgs,
 					OutputBuf:    ringbuf.NewRingBuffer(d.session.bufSize),
+					Muted:        muted,
 				}
 
 				// Load ghost buffer from disk
@@ -999,7 +1002,14 @@ func (d *Daemon) handleUpdatePane(msg *ipc.Message) {
 	if payload.CWD != "" {
 		pane.CWD = payload.CWD
 	}
+	if payload.Muted != nil {
+		pane.PluginMu.Lock()
+		pane.Muted = *payload.Muted
+		pane.PluginMu.Unlock()
+		log.Printf("pane %s: muted=%v", pane.ID, *payload.Muted)
+	}
 	d.broadcastState()
+	d.requestSnapshot()
 }
 
 func (d *Daemon) handleReloadPlugins() {
@@ -1086,7 +1096,7 @@ func (d *Daemon) streamPTYOutput(paneID string, pty apty.Session) {
 						severity = "error"
 						title = fmt.Sprintf("Process failed (code %d)", code)
 					}
-					d.emitEvent(PaneEvent{
+					d.emitEvent(withExcerpt(PaneEvent{
 						ID:        uuid.New().String(),
 						PaneID:    paneID,
 						TabID:     pane.TabID,
@@ -1096,7 +1106,7 @@ func (d *Daemon) streamPTYOutput(paneID string, pty apty.Session) {
 						Severity:  severity,
 						Timestamp: time.Now(),
 						Data:      map[string]string{"exit_code": strconv.Itoa(code)},
-					})
+					}, paneOutputExcerpt(pane, 5)))
 				}
 				return
 			}
@@ -1157,11 +1167,11 @@ func (d *Daemon) detectBellEvent(pane *Pane, paneID string, data []byte) {
 		return
 	}
 	pane.LastBellEventAt = time.Now()
-	d.emitEvent(PaneEvent{
+	d.emitEvent(withExcerpt(PaneEvent{
 		ID: uuid.New().String(), PaneID: paneID, TabID: pane.TabID,
 		PaneName: pane.Name, Type: "bell",
 		Title: "Attention", Severity: "warning", Timestamp: time.Now(),
-	})
+	}, paneOutputExcerpt(pane, 3)))
 }
 
 // detectOSC133Exit parses OSC 133;D (command complete) sequences from shell integration.
@@ -1185,12 +1195,12 @@ func (d *Daemon) detectOSC133Exit(pane *Pane, paneID string, data []byte) {
 		severity = "error"
 		title = fmt.Sprintf("Command failed (code %d)", code)
 	}
-	d.emitEvent(PaneEvent{
+	d.emitEvent(withExcerpt(PaneEvent{
 		ID: uuid.New().String(), PaneID: paneID, TabID: pane.TabID,
 		PaneName: pane.Name, Type: "command_complete",
 		Title: title, Severity: severity, Timestamp: time.Now(),
 		Data: map[string]string{"exit_code": strconv.Itoa(code)},
-	})
+	}, paneOutputExcerpt(pane, 5)))
 }
 
 // applyPluginHandlers runs scraping, error matching for non-terminal plugins.
@@ -1222,6 +1232,9 @@ func (d *Daemon) applyPluginHandlers(pane *Pane, paneID string, data []byte) {
 }
 
 func (d *Daemon) broadcastState() {
+	if d.server == nil {
+		return
+	}
 	state := d.buildWorkspaceState()
 	resp, _ := ipc.NewMessage(ipc.MsgWorkspaceState, state)
 	d.server.Broadcast(resp)
@@ -1274,6 +1287,9 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 					ps[k] = v
 				}
 				paneData["plugin_state"] = ps
+			}
+			if pane.Muted {
+				paneData["muted"] = true
 			}
 			pane.PluginMu.Unlock()
 			if pane.InstanceName != "" {
@@ -1728,12 +1744,37 @@ func (d *Daemon) respondToAndHighlight(conn *ipc.Conn, requestID, msgType string
 	d.highlightPane(paneID)
 }
 
+// findEventSince delegates to the event queue's catch-up scan. Returns the
+// oldest queued event newer than sinceUnixMilli matching paneFilter (empty
+// filter = any pane), or nil. Used by watch_notifications's race-closing
+// short-circuit before a watcher is registered.
+func (d *Daemon) findEventSince(sinceUnixMilli int64, paneFilter map[string]bool) *PaneEvent {
+	return d.events.FindSince(sinceUnixMilli, paneFilter)
+}
+
 // emitEvent pushes an event to the queue and broadcasts to all clients.
+// Events from muted panes are dropped entirely — neither queued nor broadcast.
+// Mute is a per-pane signal-quality control: panes like `npm test --watch`
+// fire idle handlers on every iteration, and the only sane treatment is to
+// silence them at the source. Process-exit on a muted pane is also silenced —
+// once you say "stop telling me about this pane", we honor it.
 func (d *Daemon) emitEvent(e PaneEvent) {
+	if e.PaneID != "" {
+		if pane := d.session.Pane(e.PaneID); pane != nil {
+			pane.PluginMu.Lock()
+			muted := pane.Muted
+			pane.PluginMu.Unlock()
+			if muted {
+				return
+			}
+		}
+	}
 	d.events.Push(e)
 	payload := toPaneEventPayload(e)
 	msg, _ := ipc.NewMessage(ipc.MsgPaneEvent, payload)
-	d.server.Broadcast(msg)
+	if d.server != nil {
+		d.server.Broadcast(msg)
+	}
 }
 
 // idleChecker runs a periodic check for panes that have gone idle.
@@ -1773,8 +1814,8 @@ func (d *Daemon) checkIdlePanes() {
 				continue
 			}
 
-			title, severity := d.analyzeIdleTitle(pane)
-			d.emitEvent(PaneEvent{
+			title, severity, excerpt := d.analyzeIdleTitle(pane)
+			d.emitEvent(withExcerpt(PaneEvent{
 				ID:        uuid.New().String(),
 				PaneID:    pane.ID,
 				TabID:     pane.TabID,
@@ -1783,14 +1824,16 @@ func (d *Daemon) checkIdlePanes() {
 				Title:     title,
 				Severity:  severity,
 				Timestamp: now,
-			})
+			}, excerpt))
 		}
 	}
 }
 
 // analyzeIdleTitle determines the notification title/severity by matching
-// the last few lines of pane output against plugin idle handlers.
-func (d *Daemon) analyzeIdleTitle(pane *Pane) (title, severity string) {
+// the last few lines of pane output against plugin idle handlers. The
+// excerpt is the same text used for regex matching — returned so the caller
+// can attach it to the event without a second buffer read.
+func (d *Daemon) analyzeIdleTitle(pane *Pane) (title, severity, excerpt string) {
 	title = "Output idle"
 	severity = "info"
 
@@ -1805,18 +1848,24 @@ func (d *Daemon) analyzeIdleTitle(pane *Pane) (title, severity string) {
 		title = "Waiting for input"
 		severity = "warning"
 	}
-	if pane.OutputBuf != nil && len(p.IdleHandlers) > 0 {
-		raw := pane.OutputBuf.Bytes()
-		// Limit to last 4KB for performance
-		if len(raw) > 4096 {
-			raw = raw[len(raw)-4096:]
-		}
-		stripped := ansi.Strip(string(raw))
-		text := lastNLines(stripped, 5)
-		if ih := plugin.MatchIdle(p, text); ih != nil {
-			title = ih.Title
-			severity = ih.Severity
-		}
+	if pane.OutputBuf == nil {
+		return
+	}
+	raw := pane.OutputBuf.Bytes()
+	if len(raw) == 0 {
+		return
+	}
+	if len(raw) > 4096 {
+		raw = raw[len(raw)-4096:]
+	}
+	stripped := ansi.Strip(string(raw))
+	excerpt = lastNLines(stripped, 5)
+	if len(p.IdleHandlers) == 0 || excerpt == "" {
+		return
+	}
+	if ih := plugin.MatchIdle(p, excerpt); ih != nil {
+		title = ih.Title
+		severity = ih.Severity
 	}
 	return
 }
@@ -1832,6 +1881,44 @@ func lastNLines(text string, n int) string {
 		}
 	}
 	return strings.Join(result, "\n")
+}
+
+// paneOutputExcerpt extracts the last n non-empty stripped lines from a pane's
+// ring buffer. Used to enrich notification events with the context that
+// triggered them so the sidebar and MCP consumers can show something more
+// informative than the title alone. Returns "" if the buffer is empty.
+//
+// Reads only the trailing 4 KiB of the ring buffer — enough for ~50 wrapped
+// lines on a typical terminal, far more than n=3 needs, and bounded so the
+// per-event cost stays negligible even for panes with very large buffers.
+func paneOutputExcerpt(pane *Pane, n int) string {
+	if pane == nil || pane.OutputBuf == nil {
+		return ""
+	}
+	raw := pane.OutputBuf.Bytes()
+	if len(raw) == 0 {
+		return ""
+	}
+	if len(raw) > 4096 {
+		raw = raw[len(raw)-4096:]
+	}
+	return lastNLines(ansi.Strip(string(raw)), n)
+}
+
+// withExcerpt populates PaneEvent.Message and Data["excerpt"] from the pane's
+// tail output. Idempotent: callers that already extracted the excerpt (e.g.
+// the idle checker, which needs it for regex matching) can pass excerpt
+// directly and skip the second buffer read.
+func withExcerpt(e PaneEvent, excerpt string) PaneEvent {
+	if excerpt == "" {
+		return e
+	}
+	e.Message = excerpt
+	if e.Data == nil {
+		e.Data = make(map[string]string)
+	}
+	e.Data["excerpt"] = excerpt
+	return e
 }
 
 func (d *Daemon) handleListPanesReq(conn *ipc.Conn, msg *ipc.Message) {
@@ -2294,6 +2381,21 @@ func (d *Daemon) handleWatchNotificationsReq(conn *ipc.Conn, msg *ipc.Message) {
 	paneFilter := make(map[string]bool)
 	for _, id := range req.PaneIDs {
 		paneFilter[id] = true
+	}
+
+	// since_timestamp short-circuit: scan the existing queue for any event
+	// newer than the marker that also matches the pane filter. If one
+	// exists, return it without ever registering a watcher. This closes the
+	// race-on-registration window — events fired between the agent's prior
+	// action and this watch call would otherwise be lost.
+	if req.SinceTimestamp > 0 {
+		if catchup := d.findEventSince(req.SinceTimestamp, paneFilter); catchup != nil {
+			payload := toPaneEventPayload(*catchup)
+			respondTo(conn, msg.ID, ipc.MsgWatchNotificationsResp, ipc.WatchNotificationsRespPayload{
+				Event: &payload,
+			})
+			return
+		}
 	}
 
 	// Remove any existing watcher for this connection (limit 1 per connection)

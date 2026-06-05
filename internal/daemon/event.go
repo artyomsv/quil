@@ -102,6 +102,30 @@ func (q *eventQueue) Events() []PaneEvent {
 	return out
 }
 
+// FindSince scans the queue for the OLDEST event whose Timestamp is strictly
+// greater than sinceUnixMilli AND whose PaneID is in paneFilter (or for any
+// pane when paneFilter is empty). Returns a copy of the matching event or
+// nil. Iterating oldest-to-newest is deliberate: the caller (an agent) wants
+// to process events in order, not jump straight to the latest. The queue is
+// stored newest-first, so the scan walks the slice in reverse.
+func (q *eventQueue) FindSince(sinceUnixMilli int64, paneFilter map[string]bool) *PaneEvent {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	for i := len(q.events) - 1; i >= 0; i-- {
+		e := q.events[i]
+		if e.Timestamp.UnixMilli() <= sinceUnixMilli {
+			continue
+		}
+		if len(paneFilter) > 0 && !paneFilter[e.PaneID] {
+			continue
+		}
+		cp := e
+		return &cp
+	}
+	return nil
+}
+
 // Count returns the number of pending events.
 func (q *eventQueue) Count() int {
 	q.mu.Lock()

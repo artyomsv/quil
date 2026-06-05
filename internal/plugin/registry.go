@@ -450,6 +450,17 @@ func loadPluginTOML(path string) (*PanePlugin, error) {
 	}
 
 	// Convert notification handlers
+	//
+	// [[notification_handlers]] was the original per-chunk regex matcher. It
+	// proved too noisy (every PTY chunk triggered a scan) and was replaced by
+	// the lighter [[idle_handlers]] that runs only when a pane goes idle.
+	// MatchNotification still exists for back-compat with TOMLs in the wild
+	// but the daemon never calls it. Warn once per stale plugin so authors
+	// notice and migrate instead of silently editing dead config.
+	if len(tp.NotificationHandlers) > 0 {
+		log.Printf("plugin %q: [[notification_handlers]] is deprecated and no longer evaluated; "+
+			"migrate to [[idle_handlers]] (same fields: pattern, title, severity)", tp.Plugin.Name)
+	}
 	for _, nh := range tp.NotificationHandlers {
 		p.NotificationHandlers = append(p.NotificationHandlers, NotificationHandler{
 			Pattern:  nh.Pattern,

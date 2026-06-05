@@ -207,6 +207,58 @@ func (d *Daemon) Wait() {
 	}
 }
 
+// refreshPluginStateFromHooks copies the SessionStart-hook-recorded
+// session id for every claude-code and opencode pane into
+// PluginState["session_id"] so the final on-disk snapshot carries the
+// live, rotated id rather than the initial preassigned one.
+//
+// Normal operation never updates PluginState["session_id"]: the hook file
+// at ~/.quil/sessions/<pane-id>.id is the authoritative source of truth
+// and resumeTemplateFor reads it at restore time. But that one-way flow
+// means workspace.json can drift after /clear, /resume, or compaction —
+// and if the hook file is later lost, the fallback PluginState id is
+// stale. Refreshing on shutdown closes that gap: workspace.json becomes
+// self-sufficient. F1 → Stop daemon and signal-driven shutdowns both
+// run through here.
+//
+// Concurrency contract: caller must have already stopped the IPC server
+// and waited on collectorWG so no goroutine can create, destroy, or
+// mutate panes. PluginMu is still taken per pane to keep the assignment
+// race-free against any future call site that does run concurrently
+// with the PTY output goroutine.
+//
+// Empty/error hook reads preserve the existing PluginState["session_id"]
+// — clobbering it with "" would force the next restore to fall back to
+// --continue even when a usable preassigned id is still on disk.
+func (d *Daemon) refreshPluginStateFromHooks() {
+	for _, tab := range d.session.Tabs() {
+		for _, pane := range d.session.Panes(tab.ID) {
+			var hookID string
+			switch pane.Type {
+			case "claude-code":
+				if id, err := readHookSessionIDFn(pane.ID); err == nil {
+					hookID = id
+				}
+			case "opencode":
+				if id, err := readOpencodeSessionIDFn(pane.ID); err == nil {
+					hookID = id
+				}
+			default:
+				continue
+			}
+			if hookID == "" {
+				continue
+			}
+			pane.PluginMu.Lock()
+			if pane.PluginState == nil {
+				pane.PluginState = make(map[string]string)
+			}
+			pane.PluginState["session_id"] = hookID
+			pane.PluginMu.Unlock()
+		}
+	}
+}
+
 func (d *Daemon) Stop() {
 	// Close shutdown channel first so every long-running goroutine
 	// (idleChecker, memReport ctx bridge, sendGhostChunked, etc.) wakes up
@@ -221,6 +273,9 @@ func (d *Daemon) Stop() {
 			d.server.Stop()
 		}
 		d.collectorWG.Wait()
+		// Pull the latest hook-recorded session ids into PluginState so
+		// the final snapshot survives even if the hook files are lost.
+		d.refreshPluginStateFromHooks()
 		log.Print("daemon stopping, writing final snapshot...")
 		d.snapshot()
 		for _, tab := range d.session.Tabs() {
@@ -1340,11 +1395,21 @@ func claudeHookSpawnPrep(quilDir, paneID string, userArgs []string) (prefix, env
 }
 
 // escapeClaudeCWD mirrors Claude Code's on-disk naming for per-project
-// session directories under ~/.claude/projects/. Each path separator or
-// colon becomes '-'; no other transformation. Confirmed against real
-// directories (e.g. E:\Projects\Stukans → "E--Projects-Stukans").
+// session directories under ~/.claude/projects/. Path separators, the
+// Windows drive-letter colon, AND the underscore all become '-'.
+//
+// The underscore case is the one that silently broke restore: a macOS
+// home like /Users/Foo_Bar lands under ~/.claude/projects/-Users-Foo-Bar
+// (not -Users-Foo_Bar), so the on-disk probe with an underscore-preserving
+// encoding always returned false and every Claude pane fell back to
+// --continue at restart. Confirmed against real directories on macOS
+// (Jun 2026) and Windows (E:\Projects\Stukans → "E--Projects-Stukans").
+//
+// Other non-alphanumeric characters Claude may also encode (spaces, dots)
+// are not handled here — no concrete examples observed in the wild yet.
+// Extend the replacer when a real path forces the issue.
 func escapeClaudeCWD(cwd string) string {
-	r := strings.NewReplacer(":", "-", `\`, "-", "/", "-")
+	r := strings.NewReplacer(":", "-", `\`, "-", "/", "-", "_", "-")
 	return r.Replace(cwd)
 }
 

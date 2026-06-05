@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.15.0] - 2026-06-05
+
 ### Added
 
 - **Active-tab asterisk marker** — every active tab is now prefixed with `* ` in the bar in addition to the existing bold-on-color styling. Colored tabs already use foreground 230-on-color for active and 255-on-color for inactive — a contrast small enough that the active tab is hard to spot at a glance. The asterisk works regardless of tab color. A shared `tabLabel(idx)` helper is the single source of truth for the label string so `renderTabBar` and `hitTestTab` cannot drift — click coordinates always line up with what the eye sees.

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Stop daemon action row in the Settings dialog** — `F1 → Settings` now ends with a "Stop daemon" entry that opens a confirmation explaining the TUI window will close and panes will respawn from the snapshot on next launch. Enter on the confirm fires `MsgShutdown` over the existing IPC client and `tea.Quit`s the TUI in the same `tea.Batch`, so the daemon's stop defers (final snapshot write, PID file removal, log close) all run before the TUI exits. Implemented as a non-config "action row" via a new optional `settingsField.action func(Model) (Model, tea.Cmd)` — when set, Enter calls the action instead of opening the inline editor; the existing get/set/isBool wiring is untouched for the other seven config rows. Esc on the shutdown confirm returns to Settings with the cursor restored to Stop daemon (not dialogNone). The shutdown send is best-effort — a stale socket logs but does not block the TUI's quit, matching the operator intent that "I asked to stop" results in the TUI exiting either way.
+
 ## [1.12.0] - 2026-05-22
 
 ### Added

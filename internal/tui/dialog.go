@@ -109,12 +109,20 @@ var (
 				Bold(true)
 )
 
-// settingsField describes one editable config field.
+// settingsField describes one row in the Settings dialog. Most rows edit a
+// config value (use label + get + set, optionally isBool). Action rows leave
+// get/set/isBool zero and supply `action` — Enter calls the action instead
+// of opening the inline editor, letting the row trigger a flow (e.g. a
+// confirmation dialog) instead of mutating config.
 type settingsField struct {
 	label  string
 	get    func(m *Model) string
 	set    func(m *Model, val string)
 	isBool bool
+	// action is invoked on Enter for non-config rows (e.g. "Stop daemon").
+	// When set, get is still used to render the trailing description text,
+	// but set / isBool are ignored.
+	action func(m Model) (Model, tea.Cmd)
 }
 
 // settingsFields returns the editable Settings rows. Every setter that
@@ -196,8 +204,25 @@ func settingsFields() []settingsField {
 			},
 			isBool: true,
 		},
+		{
+			label: "Stop daemon",
+			get:   func(_ *Model) string { return "(closes this TUI window)" },
+			action: func(m Model) (Model, tea.Cmd) {
+				m.dialog = dialogConfirm
+				m.confirmKind = confirmKindShutdown
+				m.confirmID = ""
+				m.confirmName = ""
+				m.dialogCursor = 0
+				return m, nil
+			},
+		},
 	}
 }
+
+// confirmKindShutdown is the discriminator on confirmKind for the
+// "stop daemon" confirmation. Kept as a named constant so the handler and
+// renderer cannot drift from each other on a typo.
+const confirmKindShutdown = "shutdown"
 
 func shortcutsList(m *Model) []struct{ key, desc string } {
 	kb := m.cfg.Keybindings
@@ -399,6 +424,9 @@ func (m Model) handleSettingsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	case "enter", " ":
 		f := fields[m.dialogCursor]
+		if f.action != nil {
+			return f.action(m)
+		}
 		if f.isBool {
 			f.set(&m, "")
 		} else {
@@ -428,11 +456,39 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.dialogCursor = 0
 			return m, nil
 		}
+		if m.confirmKind == confirmKindShutdown {
+			// Back to Settings where the action was triggered.
+			m.dialog = dialogSettings
+			m.dialogCursor = len(settingsFields()) - 1
+			return m, nil
+		}
 		m.dialog = dialogNone
 		return m, nil
 	case "enter", "y":
 		kind := m.confirmKind
 		id := m.confirmID
+
+		// Stop-daemon: fire MsgShutdown and quit the TUI together. The
+		// daemon's MsgShutdown handler writes the final snapshot in its
+		// stop defers, and panes respawn from that snapshot on next launch.
+		// We tea.Quit even if the Send returns an error (e.g. socket already
+		// gone) — the user explicitly asked to stop and the right outcome
+		// is the TUI exiting.
+		if kind == confirmKindShutdown {
+			client := m.client
+			m.dialog = dialogNone
+			return m, tea.Batch(
+				func() tea.Msg {
+					if req, err := ipc.NewMessage(ipc.MsgShutdown, nil); err == nil {
+						if sendErr := client.Send(req); sendErr != nil {
+							log.Printf("stop daemon: send shutdown: %v", sendErr)
+						}
+					}
+					return nil
+				},
+				tea.Quit,
+			)
+		}
 
 		// Handle instance deletion locally (no IPC needed)
 		if kind == "instance" {
@@ -674,8 +730,17 @@ func (m Model) renderConfirmDialog() string {
 	b.WriteString(dialogTitle.Render("Confirm"))
 	b.WriteString("\n\n")
 
-	label := fmt.Sprintf("Close %s %q?", m.confirmKind, m.confirmName)
-	b.WriteString("  " + dialogNormal.Render(label))
+	switch m.confirmKind {
+	case confirmKindShutdown:
+		b.WriteString("  " + dialogNormal.Render("Stop the daemon?"))
+		b.WriteString("\n\n")
+		b.WriteString("  " + dialogSubtle.Render("This TUI window will close."))
+		b.WriteString("\n")
+		b.WriteString("  " + dialogSubtle.Render("Panes will respawn from the snapshot on next launch."))
+	default:
+		label := fmt.Sprintf("Close %s %q?", m.confirmKind, m.confirmName)
+		b.WriteString("  " + dialogNormal.Render(label))
+	}
 	b.WriteString("\n\n")
 
 	b.WriteString("  " + dialogSubtle.Render("Enter confirm    Esc cancel"))

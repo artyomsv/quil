@@ -22,6 +22,7 @@ func TestSettingsFields_LabelsAndInitialValues(t *testing.T) {
 		"Page scroll lines",
 		"Log level",
 		"Show disclaimer",
+		"Stop daemon",
 	}
 	if len(fields) != len(wantLabels) {
 		t.Fatalf("settingsFields len = %d, want %d", len(fields), len(wantLabels))
@@ -37,6 +38,112 @@ func TestSettingsFields_LabelsAndInitialValues(t *testing.T) {
 	if got := fields[0].get(m); got != cfg.Daemon.SnapshotInterval {
 		t.Errorf("Snapshot interval get = %q, want %q", got, cfg.Daemon.SnapshotInterval)
 	}
+}
+
+// TestSettingsFields_StopDaemonIsAction verifies that the "Stop daemon" row
+// is an action row (action!=nil, set==nil, isBool==false). A regression
+// where the action gets dropped would render the row as a plain editable
+// field — pressing Enter would open the inline editor with no obvious way
+// to actually stop the daemon.
+func TestSettingsFields_StopDaemonIsAction(t *testing.T) {
+	fields := settingsFields()
+	stop := fields[len(fields)-1]
+	if stop.label != "Stop daemon" {
+		t.Fatalf("last field label = %q, want %q (test assumes Stop daemon is last)", stop.label, "Stop daemon")
+	}
+	if stop.action == nil {
+		t.Errorf("Stop daemon row has nil action — Enter would open inline editor instead")
+	}
+	if stop.set != nil {
+		t.Errorf("Stop daemon row has non-nil set — action rows ignore set but a stray setter is a smell")
+	}
+	if stop.isBool {
+		t.Errorf("Stop daemon row marked isBool — would make it look like a toggle")
+	}
+	// Description text must convey the consequence so the user understands
+	// before pressing Enter that the TUI window is affected.
+	if got := stop.get(nil); got == "" {
+		t.Errorf("Stop daemon get() returned empty — user has no hint about consequence")
+	}
+}
+
+// TestHandleSettingsKey_StopDaemonOpensConfirm verifies that pressing Enter
+// on the Stop daemon row routes to the confirmation dialog (rather than
+// directly sending MsgShutdown). Without the confirm step, a misclick
+// would terminate the TUI + every pane child with no chance to abort.
+func TestHandleSettingsKey_StopDaemonOpensConfirm(t *testing.T) {
+	fields := settingsFields()
+	stopIdx := len(fields) - 1
+	m := Model{
+		cfg:          config.Default(),
+		dialog:       dialogSettings,
+		dialogCursor: stopIdx,
+	}
+	out, cmd := m.handleSettingsKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	got := out.(Model)
+	if got.dialog != dialogConfirm {
+		t.Errorf("dialog = %v, want dialogConfirm", got.dialog)
+	}
+	if got.confirmKind != confirmKindShutdown {
+		t.Errorf("confirmKind = %q, want %q", got.confirmKind, confirmKindShutdown)
+	}
+	if cmd != nil {
+		t.Errorf("opening confirm should not emit a Cmd; got %v", cmd)
+	}
+	if got.configChanged {
+		t.Errorf("configChanged set — opening confirm must not mutate persistent state")
+	}
+}
+
+// TestHandleConfirmKey_StopDaemonEscReturnsToSettings keeps the user in the
+// Settings menu (cursor on Stop daemon) when they back out of the confirm.
+// Returning to dialogNone — which is the default for confirm Esc — would
+// drop the user back to the workspace and lose the menu they were in.
+func TestHandleConfirmKey_StopDaemonEscReturnsToSettings(t *testing.T) {
+	m := Model{
+		dialog:      dialogConfirm,
+		confirmKind: confirmKindShutdown,
+	}
+	out, cmd := m.handleConfirmKey(tea.KeyPressMsg{Code: tea.KeyEscape})
+	got := out.(Model)
+	if got.dialog != dialogSettings {
+		t.Errorf("dialog = %v, want dialogSettings", got.dialog)
+	}
+	wantCursor := len(settingsFields()) - 1
+	if got.dialogCursor != wantCursor {
+		t.Errorf("dialogCursor = %d, want %d (last row, Stop daemon)", got.dialogCursor, wantCursor)
+	}
+	if cmd != nil {
+		t.Errorf("cancel must not return a Cmd")
+	}
+}
+
+// TestRenderConfirmDialog_StopDaemonMessage locks in the exact warning text
+// the user sees before confirming. The "this TUI window will close" line is
+// the load-bearing piece — without it, users hit Enter expecting the daemon
+// to stop in the background, then act surprised when their session ends.
+func TestRenderConfirmDialog_StopDaemonMessage(t *testing.T) {
+	m := Model{
+		dialog:      dialogConfirm,
+		confirmKind: confirmKindShutdown,
+	}
+	got := m.renderConfirmDialog()
+	for _, want := range []string{"Stop the daemon?", "TUI window will close", "Enter confirm", "Esc cancel"} {
+		if !contains(got, want) {
+			t.Errorf("confirm dialog missing %q\nrendered:\n%s", want, got)
+		}
+	}
+}
+
+// contains is a tiny helper avoiding strings import noise in tests that
+// just need a substring check.
+func contains(s, sub string) bool {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
 }
 
 // TestHandleSettingsKey_BoolToggle ensures the "Ghost dimmed" boolean field

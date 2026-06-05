@@ -224,6 +224,19 @@ func settingsFields() []settingsField {
 // renderer cannot drift from each other on a typo.
 const confirmKindShutdown = "shutdown"
 
+// stopDaemonRowIndex returns the index of the "Stop daemon" row in
+// settingsFields() by label lookup. Used by the confirm dialog's Esc
+// handler to restore the cursor — looking up by label (instead of assuming
+// "last row") survives adding new action rows after Stop daemon.
+func stopDaemonRowIndex() int {
+	for i, f := range settingsFields() {
+		if f.label == "Stop daemon" {
+			return i
+		}
+	}
+	return 0
+}
+
 func shortcutsList(m *Model) []struct{ key, desc string } {
 	kb := m.cfg.Keybindings
 	list := []struct{ key, desc string }{
@@ -457,9 +470,11 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.confirmKind == confirmKindShutdown {
-			// Back to Settings where the action was triggered.
+			// Back to Settings where the action was triggered. Cursor by
+			// label-lookup so a future action row inserted after Stop daemon
+			// does not silently misplace the cursor.
 			m.dialog = dialogSettings
-			m.dialogCursor = len(settingsFields()) - 1
+			m.dialogCursor = stopDaemonRowIndex()
 			return m, nil
 		}
 		m.dialog = dialogNone
@@ -468,26 +483,33 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		kind := m.confirmKind
 		id := m.confirmID
 
-		// Stop-daemon: fire MsgShutdown and quit the TUI together. The
-		// daemon's MsgShutdown handler writes the final snapshot in its
-		// stop defers, and panes respawn from that snapshot on next launch.
-		// We tea.Quit even if the Send returns an error (e.g. socket already
-		// gone) — the user explicitly asked to stop and the right outcome
-		// is the TUI exiting.
+		// Stop-daemon requires explicit `y` — Enter is what every Settings
+		// row uses to commit toggles, and the cost of a misclick here is a
+		// killed daemon + every pane child SIGHUP'd. `y` is a deliberate
+		// keystroke a user does not press accidentally.
+		if kind == confirmKindShutdown && msg.String() != "y" {
+			return m, nil
+		}
+
+		// Stop-daemon: fire MsgShutdown and quit the TUI. The daemon's
+		// MsgShutdown handler writes the final snapshot in its stop defers,
+		// and panes respawn from that snapshot on next launch. Send is
+		// performed synchronously (not via tea.Batch which gives no
+		// ordering guarantee) so the message lands BEFORE tea.Quit returns
+		// control to cmd/quil/main.go where `defer client.Close()` would
+		// otherwise close the socket out from under the in-flight write.
+		// One-shot ~150-byte write to a local Unix socket — no UI-thread
+		// concern. Send errors are logged but do not block the quit; the
+		// user explicitly asked to stop, the TUI exits either way.
 		if kind == confirmKindShutdown {
-			client := m.client
 			m.dialog = dialogNone
-			return m, tea.Batch(
-				func() tea.Msg {
-					if req, err := ipc.NewMessage(ipc.MsgShutdown, nil); err == nil {
-						if sendErr := client.Send(req); sendErr != nil {
-							log.Printf("stop daemon: send shutdown: %v", sendErr)
-						}
-					}
-					return nil
-				},
-				tea.Quit,
-			)
+			if m.client != nil {
+				req, _ := ipc.NewMessage(ipc.MsgShutdown, nil)
+				if sendErr := m.client.Send(req); sendErr != nil {
+					log.Printf("stop daemon: send shutdown: %v", sendErr)
+				}
+			}
+			return m, tea.Quit
 		}
 
 		// Handle instance deletion locally (no IPC needed)
@@ -730,6 +752,10 @@ func (m Model) renderConfirmDialog() string {
 	b.WriteString(dialogTitle.Render("Confirm"))
 	b.WriteString("\n\n")
 
+	// Footer text varies by kind: shutdown requires explicit `y` to
+	// distinguish it from the Enter that commits Settings toggles, so the
+	// help line must say `y confirm` to match the handler.
+	footer := "Enter confirm    Esc cancel"
 	switch m.confirmKind {
 	case confirmKindShutdown:
 		b.WriteString("  " + dialogNormal.Render("Stop the daemon?"))
@@ -737,13 +763,14 @@ func (m Model) renderConfirmDialog() string {
 		b.WriteString("  " + dialogSubtle.Render("This TUI window will close."))
 		b.WriteString("\n")
 		b.WriteString("  " + dialogSubtle.Render("Panes will respawn from the snapshot on next launch."))
+		footer = "y confirm    Esc cancel"
 	default:
 		label := fmt.Sprintf("Close %s %q?", m.confirmKind, m.confirmName)
 		b.WriteString("  " + dialogNormal.Render(label))
 	}
 	b.WriteString("\n\n")
 
-	b.WriteString("  " + dialogSubtle.Render("Enter confirm    Esc cancel"))
+	b.WriteString("  " + dialogSubtle.Render(footer))
 
 	return b.String()
 }

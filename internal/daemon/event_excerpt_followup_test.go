@@ -132,6 +132,28 @@ func TestPaneOutputExcerpt_FieldReproducesAndFixesANSILeak(t *testing.T) {
 	}
 }
 
+// TestLastNLines_AppliesCarriageReturnReset proves that the field-observed
+// "%   ...   \r \r\rArtjoms_Stukans@HOSTNAME" excerpt collapses to just
+// the post-CR content (what the terminal would actually display), not the
+// prompt rune that was immediately overwritten.
+func TestLastNLines_AppliesCarriageReturnReset(t *testing.T) {
+	in := "%                                          \r \r\rArtjoms_Stukans@EPCHZURW03: /path"
+	got := lastNLines(in, 5)
+	want := "Artjoms_Stukans@EPCHZURW03: /path"
+	if got != want {
+		t.Errorf("lastNLines CR-reset: got %q, want %q", got, want)
+	}
+}
+
+func TestLastNLines_NoCarriageReturnUntouched(t *testing.T) {
+	in := "line one\nline two\nline three"
+	got := lastNLines(in, 5)
+	want := "line one\nline two\nline three"
+	if got != want {
+		t.Errorf("lastNLines no-CR: got %q, want %q", got, want)
+	}
+}
+
 func TestIsPromptOnlyExcerpt(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -149,8 +171,16 @@ func TestIsPromptOnlyExcerpt(t *testing.T) {
 		{"prompt across multiple lines", "$\n\n%\n", true},
 		{"meaningful first line", "error: missing semicolon\n%", false},
 		{"meaningful last line", "%\nbuilding...", false},
-		{"long word", "%cargo", false},
-		{"text resembling prompt then content", "%%", false},
+		// Suffix-rune classifier: "%cargo" ends in "o" → not prompt.
+		{"prompt rune as prefix of a word", "%cargo", false},
+		// "%%" ends with "%" so the heuristic accepts it. Realistic shells
+		// don't emit this, so suppressing is the lesser evil.
+		{"repeated prompt rune", "%%", true},
+		// OSC 0 window-title leak shape — must suppress.
+		{"hostname leak", "Artjoms_Stukans@EPCHZURW03: /Users/me/proj", true},
+		// `ls` output should NOT be classified as prompt material.
+		{"ls output", "LICENSE\tcmd\tgo.sum", false},
+		{"long line with prompt rune still emits", strings.Repeat("a", 250) + "%", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

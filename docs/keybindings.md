@@ -39,6 +39,10 @@ The five keys you'll use most:
 | `F2` | Rename active tab |
 | `Alt+C` | Cycle tab colour (8 colours) |
 | `Alt+1` … `Alt+9` | Switch directly to tab 1–9 |
+| Mouse click on tab | Switch to that tab |
+| Mouse drag a tab | Reorder — intermediate tabs slide one slot at a time, dragged tab follows the cursor |
+
+The active tab is prefixed with `* ` in the tab bar so it's visible even when [tab colors](configuration.md#keybindings) override the bold weight.
 
 ## Panes
 
@@ -48,7 +52,7 @@ The five keys you'll use most:
 | `Ctrl+W` | Close active pane (with confirm) |
 | `Alt+Shift+H` | Split side-by-side |
 | `Alt+Shift+V` | Split top/bottom |
-| `Alt+F2` | Rename active pane |
+| `Alt+F2` / `Alt+Shift+R` | Rename active pane. `Alt+Shift+R` is a macOS-friendly fallback since `F2` is often eaten by the OS and `Option` is not always passed through as Meta. |
 | `Ctrl+E` | Toggle focus mode (active pane full-screen) |
 
 ## Pane navigation
@@ -106,6 +110,8 @@ If the clipboard has no text but contains an image, Quil decodes the DIB, saves 
 |---|---|
 | `Alt+PgUp` / `Alt+PgDown` | Scroll the pane scrollback by `[ui] page_scroll_lines` (0 = half-page) |
 | Mouse wheel | Scroll by `[ui] mouse_scroll_lines` (default 3) |
+| Click on scrollbar | Jump the scrollbar thumb to that Y position (rightmost content column of the pane) |
+| Click + drag on scrollbar | Continuous scroll — drag follows cursor Y, even off-pane |
 | `Alt+Up` / `Alt+Down` *(in log viewer)* | Jump cursor by `[ui] log_viewer_page_lines` (default 40) |
 
 ## Dialogs (F1 menus)

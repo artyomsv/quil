@@ -261,6 +261,50 @@ func (sm *SessionManager) SwitchTab(tabID string) {
 	}
 }
 
+// ReorderTab moves the tab with tabID to the given ordinal newIdx in the
+// session's tabOrder. newIdx is clamped to [0, len(tabOrder)-1]; out-of-
+// range values silently snap to the nearest valid slot rather than
+// erroring, so a stale TUI doesn't have to race the daemon for an
+// authoritative tab count.
+//
+// Returns true when the order actually changed (caller decides whether to
+// snapshot/broadcast).
+func (sm *SessionManager) ReorderTab(tabID string, newIdx int) bool {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if _, ok := sm.tabs[tabID]; !ok {
+		return false
+	}
+	from := -1
+	for i, id := range sm.tabOrder {
+		if id == tabID {
+			from = i
+			break
+		}
+	}
+	if from < 0 {
+		return false
+	}
+	if newIdx < 0 {
+		newIdx = 0
+	}
+	if newIdx >= len(sm.tabOrder) {
+		newIdx = len(sm.tabOrder) - 1
+	}
+	if from == newIdx {
+		return false
+	}
+	// Slide the slice without allocating: pull tabID out, shift the gap
+	// across the affected range, drop tabID into newIdx.
+	if from < newIdx {
+		copy(sm.tabOrder[from:newIdx], sm.tabOrder[from+1:newIdx+1])
+	} else {
+		copy(sm.tabOrder[newIdx+1:from+1], sm.tabOrder[newIdx:from])
+	}
+	sm.tabOrder[newIdx] = tabID
+	return true
+}
+
 // RestoreTab inserts a pre-built tab and its panes into the session.
 // Used during workspace restore from disk. All insertions happen under
 // a single lock hold to prevent orphaned panes.

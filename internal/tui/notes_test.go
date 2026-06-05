@@ -733,17 +733,28 @@ func TestModel_NotesKeyExempt_AllowsGlobalShortcuts(t *testing.T) {
 	// Keys that MUST bypass the notes editor. Alt+Up/Alt+Down are exempt
 	// because there's no up/down axis in the 2-panel notes layout — they
 	// flush + exit + navigate to the closest neighbor.
-	exempt := []string{
+	//
+	// Multi-binding fields (e.g. kb.RenamePane = "alt+f2,alt+shift+r") are
+	// expanded so the test exercises each pressed-key form individually —
+	// notesKeyExempt receives a single normalized key from msg.String(),
+	// never the raw comma-separated config spec.
+	configured := []string{
 		kb.ClosePane, kb.CloseTab, kb.SplitHorizontal, kb.SplitVertical,
 		kb.NewTab, kb.RenameTab, kb.RenamePane, kb.CycleTabColor,
 		kb.FocusPane,
 		kb.NotificationToggle, kb.NotificationFocus, kb.GoBack,
 		kb.JSONTransform, kb.QuickActions,
 		kb.PaneUp, kb.PaneDown,
+	}
+	var exempt []string
+	for _, c := range configured {
+		exempt = append(exempt, kbBindings(c)...)
+	}
+	exempt = append(exempt,
 		"f1", "ctrl+n",
 		"alt+1", "alt+2", "alt+3", "alt+4", "alt+5",
 		"alt+6", "alt+7", "alt+8", "alt+9",
-	}
+	)
 	for _, key := range exempt {
 		if !m.notesKeyExempt(key) {
 			t.Errorf("notesKeyExempt(%q) = false, want true", key)

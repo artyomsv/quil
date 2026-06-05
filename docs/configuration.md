@@ -64,7 +64,7 @@ pane_down = "alt+down"
 next_pane = ""                  # unbound by default — use directional Alt+Arrow
 prev_pane = ""
 rename_tab = "f2"
-rename_pane = "alt+f2"
+rename_pane = "alt+f2,alt+shift+r"   # macOS users: alt+shift+r is the reliable form
 cycle_tab_color = "alt+c"
 scroll_page_up = "alt+pgup"
 scroll_page_down = "alt+pgdown"
@@ -119,6 +119,7 @@ Every binding accepts a Bubble Tea key string. Common forms:
 
 - Single key — `enter`, `tab`, `escape`, `space`, `f1` … `f12`
 - Modified — `ctrl+a`, `alt+left`, `shift+tab`, `ctrl+shift+up`, `alt+shift+v`
+- Multiple bindings — comma-separate them in the same field, e.g. `rename_pane = "alt+f2,alt+shift+r"`. Quil tries each binding for a match. Useful when a default binding is unreliable on a specific platform (macOS in particular intercepts most F-keys unless "Use F1, F2, etc. keys as standard function keys" is enabled).
 - Empty string — explicitly unbind (e.g., `next_pane = ""`)
 
 Multiple modifiers stack with `+` (no spaces). Mouse buttons are not bindable here — mouse events route through Bubble Tea's mouse subsystem.
@@ -136,7 +137,7 @@ Multiple modifiers stack with `+` (no spaces). Mouse buttons are not bindable he
 | `pane_left` / `right` / `up` / `down` | `alt+arrow` | Spatial pane navigation |
 | `next_pane` / `prev_pane` | *(unbound)* | Linear pane cycling — bind to `tab` / `shift+tab` if preferred (you'll lose PTY tab-completion) |
 | `rename_tab` | `f2` | Inline rename for the active tab |
-| `rename_pane` | `alt+f2` | Inline rename for the active pane |
+| `rename_pane` | `alt+f2,alt+shift+r` | Inline rename for the active pane. The second binding is a macOS-friendly fallback since `f2` is often eaten by the OS and `option` is not always configured as Meta. |
 | `cycle_tab_color` | `alt+c` | Cycle through 8 tab colours |
 | `scroll_page_up` / `scroll_page_down` | `alt+pgup` / `alt+pgdown` | Pane scrollback |
 | `paste` | `ctrl+v` | Paste from clipboard (text or image) |

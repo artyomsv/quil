@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Active-tab asterisk marker** — every active tab is now prefixed with `* ` in the bar in addition to the existing bold-on-color styling. Colored tabs already use foreground 230-on-color for active and 255-on-color for inactive — a contrast small enough that the active tab is hard to spot at a glance. The asterisk works regardless of tab color. A shared `tabLabel(idx)` helper is the single source of truth for the label string so `renderTabBar` and `hitTestTab` cannot drift — click coordinates always line up with what the eye sees.
+- **macOS-friendly fallback binding for Rename pane** — keybindings now accept comma-separated alternatives in a single config field (`rename_pane = "alt+f2,alt+shift+r"`); `kbMatches` parses the spec at match time. macOS Terminal.app eats `f2` unless "Use F1, F2, etc. keys as standard function keys" is enabled in System Settings, and Option-as-Meta is terminal-specific — the second binding is the reliable fallback. The match helper is used at every keybinding site (global switch, notes-mode delegation, notification sidebar, `notesKeyExempt`) so the multi-binding behavior is uniform. `kbDisplay()` renders comma-separated specs as `"alt+f2 / alt+shift+r"` in the F1 → Shortcuts help.
+- **Click-and-drag scrollbar** — left-clicking on a pane's scrollbar zone jumps the thumb to that Y position; holding the button and dragging follows the cursor's Y. The hit zone is 3 cells wide (the rightmost content column, the scrollbar column, and the right border) so off-by-one clicks still register as scroll instead of starting a text selection. The visible scrollbar is unchanged at 1 cell. Math is the exact inverse of `renderScrollback`'s thumb-position formula — a click at content row R puts the thumb's top at R (matches every GUI scrollbar). The drag rect is captured once at click time so a window resize, split, or notes-mode toggle mid-drag doesn't drift the mapping; the drag-target pane survives an active-tab switch through `activePaneByID` lookup.
+- **Drag-and-drop tab reorder** — left-click a tab and drag it left or right; intermediate tabs slide one slot at a time so the dragged tab moves through positions (browser/VSCode UX) instead of swapping with whichever tab is under the cursor. `MsgReorderTab` IPC (`TabID`, `NewIndex`) carries the change to the daemon, which updates `SessionManager.tabOrder` and broadcasts the new state. The TUI's local reorder happens immediately for zero-latency feedback; the daemon's broadcast is a no-op reconciliation on the next frame. `NewIndex` clamps to the daemon-side bounds, so a stale TUI never has to race for an authoritative tab count. The original click-to-switch behavior is preserved: a click without motion just switches tabs.
+
+### Fixed
+
+- **Tab label overlap during rename** — typing a longer name into F2 rename grew the active tab cell but the rendered positions of the neighboring tabs lagged behind, producing a visible overlap that only cleared on a window resize. `handleRenameKey` now emits `tea.ClearScreen` on every keypress so the next frame is a full repaint, matching the "width changes — force full redraw" pattern already used in the Settings and migration dialogs. The clear is imperceptible in practice — renames are rare and the screen repaint is one frame.
+
+### Internal
+
+- **`Model.clearDragState()` invariant helper** — every "start a new drag" path in `MouseClickMsg` and every "drag ended" branch in `MouseReleaseMsg` routes through one helper that zeros every mutually-exclusive drag flag (`tabDragFromIdx`, `scrollDragPaneID`/`scrollDragRect`, `mouseDown`, `notesMouseDown`). A future drag mode can be added by extending the helper in one place rather than auditing every click handler for "did I clear my siblings?". `TestModel_ClearDragState` guards the invariant.
+
 ## [1.14.0] - 2026-06-05
 
 ### Added

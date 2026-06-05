@@ -160,7 +160,9 @@ func Default() Config {
 			PaneUp:          "alt+up",
 			PaneDown:        "alt+down",
 			RenameTab:       "f2",
-			RenamePane:      "alt+f2",
+			// macOS often eats F2 and may not forward Option as Meta; the
+			// second binding is the reliable fallback.
+			RenamePane:      "alt+f2,alt+shift+r",
 			CycleTabColor:   "alt+c",
 			ScrollPageUp:    "alt+pgup",
 			ScrollPageDown:  "alt+pgdown",

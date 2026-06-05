@@ -72,6 +72,8 @@ func TestMessageTypes(t *testing.T) {
 		ipc.MsgCreateTab,
 		ipc.MsgDestroyTab,
 		ipc.MsgSwitchTab,
+		ipc.MsgUpdateTab,
+		ipc.MsgReorderTab,
 		ipc.MsgWorkspaceState,
 		ipc.MsgStateUpdate,
 		ipc.MsgListPanesReq,

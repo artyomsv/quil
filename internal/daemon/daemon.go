@@ -507,6 +507,8 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		d.handleSwitchTab(msg)
 	case ipc.MsgUpdateTab:
 		d.handleUpdateTab(msg)
+	case ipc.MsgReorderTab:
+		d.handleReorderTab(msg)
 	case ipc.MsgCreatePane:
 		d.handleCreatePane(msg)
 	case ipc.MsgDestroyPane:
@@ -761,6 +763,21 @@ func (d *Daemon) handleUpdateTab(msg *ipc.Message) {
 	}
 
 	d.broadcastState()
+}
+
+func (d *Daemon) handleReorderTab(msg *ipc.Message) {
+	var payload ipc.ReorderTabPayload
+	if err := msg.DecodePayload(&payload); err != nil {
+		return
+	}
+	if !d.session.ReorderTab(payload.TabID, payload.NewIndex) {
+		// No-op: tab missing or already at requested index. Don't
+		// broadcast — saves a wave of needless state-update traffic during
+		// a drag that hasn't crossed a tab boundary yet.
+		return
+	}
+	d.broadcastState()
+	d.requestSnapshot()
 }
 
 func (d *Daemon) handleCreatePane(msg *ipc.Message) {

@@ -23,10 +23,11 @@ const (
 	MsgUpdateLayout = "update_layout"
 
 	// Tab control (Client -> Daemon)
-	MsgCreateTab  = "create_tab"
-	MsgDestroyTab = "destroy_tab"
-	MsgSwitchTab  = "switch_tab"
-	MsgUpdateTab  = "update_tab"
+	MsgCreateTab   = "create_tab"
+	MsgDestroyTab  = "destroy_tab"
+	MsgSwitchTab   = "switch_tab"
+	MsgUpdateTab   = "update_tab"
+	MsgReorderTab  = "reorder_tab"
 
 	// I/O (bidirectional)
 	MsgPaneInput  = "pane_input"
@@ -146,6 +147,14 @@ type UpdateTabPayload struct {
 	TabID string `json:"tab_id"`
 	Name  string `json:"name,omitempty"`
 	Color string `json:"color,omitempty"`
+}
+
+// ReorderTabPayload moves an existing tab to a new ordinal position. NewIndex
+// is clamped to the daemon-side tab list bounds, so a stale TUI does not have
+// to track creation/destruction races to send a safe value.
+type ReorderTabPayload struct {
+	TabID    string `json:"tab_id"`
+	NewIndex int    `json:"new_index"`
 }
 
 type UpdatePanePayload struct {

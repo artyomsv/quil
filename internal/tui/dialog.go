@@ -247,34 +247,37 @@ func stopDaemonRowIndex() int {
 
 func shortcutsList(m *Model) []struct{ key, desc string } {
 	kb := m.cfg.Keybindings
+	// kbDisplay renders comma-separated multi-bindings as "a / b" so the
+	// help text stays readable when an action has multiple bindings (e.g.
+	// the macOS-friendly fallback on Rename pane).
 	list := []struct{ key, desc string }{
-		{kb.Quit, "Quit"},
-		{kb.NewTab, "New tab"},
-		{kb.ClosePane, "Close pane"},
-		{kb.CloseTab, "Close tab"},
-		{kb.SplitHorizontal, "Split side-by-side"},
-		{kb.SplitVertical, "Split top/bottom"},
-		{kb.PaneLeft, "Focus pane left"},
-		{kb.PaneRight, "Focus pane right"},
-		{kb.PaneUp, "Focus pane up"},
-		{kb.PaneDown, "Focus pane down"},
+		{kbDisplay(kb.Quit), "Quit"},
+		{kbDisplay(kb.NewTab), "New tab"},
+		{kbDisplay(kb.ClosePane), "Close pane"},
+		{kbDisplay(kb.CloseTab), "Close tab"},
+		{kbDisplay(kb.SplitHorizontal), "Split side-by-side"},
+		{kbDisplay(kb.SplitVertical), "Split top/bottom"},
+		{kbDisplay(kb.PaneLeft), "Focus pane left"},
+		{kbDisplay(kb.PaneRight), "Focus pane right"},
+		{kbDisplay(kb.PaneUp), "Focus pane up"},
+		{kbDisplay(kb.PaneDown), "Focus pane down"},
 	}
 	// Legacy linear pane cycling (unbound by default — hide when empty).
 	if kb.NextPane != "" {
-		list = append(list, struct{ key, desc string }{kb.NextPane, "Next pane"})
+		list = append(list, struct{ key, desc string }{kbDisplay(kb.NextPane), "Next pane"})
 	}
 	if kb.PrevPane != "" {
-		list = append(list, struct{ key, desc string }{kb.PrevPane, "Previous pane"})
+		list = append(list, struct{ key, desc string }{kbDisplay(kb.PrevPane), "Previous pane"})
 	}
 	list = append(list, []struct{ key, desc string }{
-		{kb.RenameTab, "Rename tab"},
-		{kb.RenamePane, "Rename pane"},
-		{kb.CycleTabColor, "Cycle tab color"},
-		{kb.ScrollPageUp, "Scroll page up"},
-		{kb.ScrollPageDown, "Scroll page down"},
-		{kb.Paste, "Paste clipboard"},
-		{kb.FocusPane, "Toggle focus mode"},
-		{kb.NotesToggle, "Toggle pane notes"},
+		{kbDisplay(kb.RenameTab), "Rename tab"},
+		{kbDisplay(kb.RenamePane), "Rename pane"},
+		{kbDisplay(kb.CycleTabColor), "Cycle tab color"},
+		{kbDisplay(kb.ScrollPageUp), "Scroll page up"},
+		{kbDisplay(kb.ScrollPageDown), "Scroll page down"},
+		{kbDisplay(kb.Paste), "Paste clipboard"},
+		{kbDisplay(kb.FocusPane), "Toggle focus mode"},
+		{kbDisplay(kb.NotesToggle), "Toggle pane notes"},
 		{"Ctrl+N", "New typed pane"},
 		{"Alt+1..9", "Switch to tab N"},
 		{"F1", "Help / About"},

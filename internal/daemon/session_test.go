@@ -162,3 +162,101 @@ func TestSessionManagerDestroyTabUpdatesActiveTab(t *testing.T) {
 		t.Errorf("expected tab2 to become active, got %s", sm.ActiveTabID())
 	}
 }
+
+// sessionTabNames returns the ordered tab names for assertions — the
+// test relies on the SessionManager.Tabs() order matching the underlying
+// tabOrder. t.Helper() so a failure inside the helper reports the
+// caller's line, not this function's.
+func sessionTabNames(t *testing.T, sm *daemon.SessionManager) []string {
+	t.Helper()
+	out := make([]string, 0)
+	for _, tab := range sm.Tabs() {
+		out = append(out, tab.Name)
+	}
+	return out
+}
+
+func TestSessionManagerReorderTab(t *testing.T) {
+	t.Parallel()
+	type step struct {
+		tabName  string
+		newIndex int
+		want     []string
+	}
+	cases := []struct {
+		name  string
+		setup []string
+		steps []step
+	}{
+		{
+			name:  "move first to last",
+			setup: []string{"A", "B", "C", "D"},
+			steps: []step{{"A", 3, []string{"B", "C", "D", "A"}}},
+		},
+		{
+			name:  "move last to first",
+			setup: []string{"A", "B", "C", "D"},
+			steps: []step{{"D", 0, []string{"D", "A", "B", "C"}}},
+		},
+		{
+			name:  "move middle one step right",
+			setup: []string{"A", "B", "C", "D"},
+			steps: []step{{"B", 2, []string{"A", "C", "B", "D"}}},
+		},
+		{
+			name:  "out-of-range clamps to last",
+			setup: []string{"A", "B", "C"},
+			steps: []step{{"A", 99, []string{"B", "C", "A"}}},
+		},
+		{
+			name:  "negative clamps to first",
+			setup: []string{"A", "B", "C"},
+			steps: []step{{"C", -5, []string{"C", "A", "B"}}},
+		},
+		{
+			name:  "noop when already in place",
+			setup: []string{"A", "B", "C"},
+			steps: []step{{"B", 1, []string{"A", "B", "C"}}},
+		},
+		{
+			name:  "sequential drags slide through",
+			setup: []string{"A", "B", "C", "D", "E"},
+			steps: []step{
+				{"A", 2, []string{"B", "C", "A", "D", "E"}},
+				{"A", 4, []string{"B", "C", "D", "E", "A"}},
+				{"A", 0, []string{"A", "B", "C", "D", "E"}},
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			sm := daemon.NewSessionManager(1024)
+			ids := make(map[string]string)
+			for _, n := range tc.setup {
+				ids[n] = sm.CreateTab(n).ID
+			}
+			for i, s := range tc.steps {
+				_ = sm.ReorderTab(ids[s.tabName], s.newIndex)
+				got := sessionTabNames(t, sm)
+				if len(got) != len(s.want) {
+					t.Fatalf("step %d: got %v, want %v", i, got, s.want)
+				}
+				for j := range got {
+					if got[j] != s.want[j] {
+						t.Errorf("step %d: pos %d got %q want %q (full: %v)", i, j, got[j], s.want[j], got)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestSessionManagerReorderTab_UnknownTabReturnsFalse(t *testing.T) {
+	t.Parallel()
+	sm := daemon.NewSessionManager(1024)
+	sm.CreateTab("A")
+	if changed := sm.ReorderTab("does-not-exist", 0); changed {
+		t.Errorf("ReorderTab(unknown) = true, want false")
+	}
+}

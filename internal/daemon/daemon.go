@@ -1815,6 +1815,15 @@ func (d *Daemon) checkIdlePanes() {
 			}
 
 			title, severity, excerpt := d.analyzeIdleTitle(pane)
+			// Skip prompt-only idle events: shells legitimately idle at a
+			// shell prompt are not a state change worth notifying. We only
+			// suppress when the default "Output idle" title fired — if a
+			// plugin idle handler matched (e.g. claude-code's "Needs your
+			// approval"), the regex saw something meaningful in the excerpt
+			// even though the surface chars collapse to a prompt rune.
+			if title == "Output idle" && isPromptOnlyExcerpt(excerpt) {
+				continue
+			}
 			d.emitEvent(withExcerpt(PaneEvent{
 				ID:        uuid.New().String(),
 				PaneID:    pane.ID,
@@ -1855,10 +1864,7 @@ func (d *Daemon) analyzeIdleTitle(pane *Pane) (title, severity, excerpt string) 
 	if len(raw) == 0 {
 		return
 	}
-	if len(raw) > 4096 {
-		raw = raw[len(raw)-4096:]
-	}
-	stripped := ansi.Strip(string(raw))
+	stripped := ansi.Strip(string(trimToNewlineSafe(raw, 4096)))
 	excerpt = lastNLines(stripped, 5)
 	if len(p.IdleHandlers) == 0 || excerpt == "" {
 		return
@@ -1899,10 +1905,65 @@ func paneOutputExcerpt(pane *Pane, n int) string {
 	if len(raw) == 0 {
 		return ""
 	}
-	if len(raw) > 4096 {
-		raw = raw[len(raw)-4096:]
+	return lastNLines(ansi.Strip(string(trimToNewlineSafe(raw, 4096))), n)
+}
+
+// trimToNewlineSafe returns the trailing window of raw, advancing past any
+// partial ANSI escape sequence at the slice boundary. Without this guard, a
+// 4 KiB tail slice can begin in the middle of a CSI sequence — the leading
+// `\x1b[` ended up in the discarded prefix, but parameters like
+// `2;30;30;30m` or `;18H` survive into the window and ansi.Strip can no
+// longer recognise them as part of an escape. They then render to the user
+// as raw garbage.
+//
+// The advance is bounded: we look at most one line ahead and bail out if no
+// newline is found (which only happens on pathological no-newline output,
+// where the partial-sequence cost is at most a few characters of garbage and
+// not worth dropping the whole window for).
+func trimToNewlineSafe(raw []byte, maxTail int) []byte {
+	if len(raw) <= maxTail {
+		return raw
 	}
-	return lastNLines(ansi.Strip(string(raw)), n)
+	start := len(raw) - maxTail
+	if idx := bytes.IndexByte(raw[start:], '\n'); idx >= 0 {
+		start += idx + 1
+	}
+	return raw[start:]
+}
+
+// promptRunes are the canonical interactive shell prompt terminators.
+// An idle excerpt that strips down to one of these (and nothing else) means
+// the pane is sitting at a fresh prompt — a non-event from the user's POV,
+// because they can see the prompt by looking at the pane.
+var promptRunes = map[string]bool{
+	"%":   true, // zsh default
+	"$":   true, // bash / sh
+	">":   true, // PowerShell / cmd, also some Python REPLs
+	"❯":   true, // starship / pure / spaceship default
+	"#":   true, // root prompts
+	"➜":   true, // oh-my-zsh agnoster / af-magic
+	"λ":   true, // fish-friendly minimal themes
+	"»":   true, // bash-it powerline
+}
+
+// isPromptOnlyExcerpt reports whether an excerpt collapses to a bare shell
+// prompt — i.e. the only non-whitespace content is one prompt rune, possibly
+// with leading/trailing space. Multi-line excerpts where ALL non-empty lines
+// are prompt-only also qualify (a sequence of empty prompts).
+func isPromptOnlyExcerpt(excerpt string) bool {
+	if excerpt == "" {
+		return false // empty excerpt is a separate case — keep emitting
+	}
+	for _, line := range strings.Split(excerpt, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if !promptRunes[trimmed] {
+			return false
+		}
+	}
+	return true
 }
 
 // withExcerpt populates PaneEvent.Message and Data["excerpt"] from the pane's

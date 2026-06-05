@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -30,10 +31,17 @@ func NewNotificationCenter(width, maxEvents int) *NotificationCenter {
 	return &NotificationCenter{width: width, maxEvents: maxEvents}
 }
 
-// AddEvent prepends an event, deduplicating by ID.
+// AddEvent prepends an event. When an event with the same ID is already
+// queued, the entry is updated in place AND moved to the front — this is
+// the echo of the daemon's eventQueue.Push aggregation, where a repeat
+// (PaneID, Title) event reuses the prior event's ID and bumps Data["count"].
+// Without the move-to-front the sidebar would silently drop bumps and the
+// user would never see the ×N count grow.
 func (nc *NotificationCenter) AddEvent(e ipc.PaneEventPayload) {
-	for _, existing := range nc.events {
+	for i, existing := range nc.events {
 		if existing.ID == e.ID {
+			nc.events = append(nc.events[:i], nc.events[i+1:]...)
+			nc.events = append([]ipc.PaneEventPayload{e}, nc.events...)
 			return
 		}
 	}
@@ -187,9 +195,17 @@ func (nc *NotificationCenter) View(height int) string {
 			}
 			line1 := styledName + strings.Repeat(" ", gap) + lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render(age)
 
-			// Line 2: title (indented)
-			titleText := "  " + e.Title
-			titleText = truncateRunes(titleText, innerW)
+			// Line 2: title (indented), with optional ×N badge for
+			// daemon-side aggregation. count > 1 means this card already
+			// absorbed N repeats of the same (PaneID, Title).
+			titleBody := "  " + e.Title
+			countBadge := ""
+			if e.Data != nil {
+				if n, err := strconv.Atoi(e.Data["count"]); err == nil && n > 1 {
+					countBadge = "  ×" + e.Data["count"]
+				}
+			}
+			titleText := truncateRunes(titleBody+countBadge, innerW)
 			if selected {
 				titleText = lipgloss.NewStyle().Reverse(true).Render(titleText)
 			} else {

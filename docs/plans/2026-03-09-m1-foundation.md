@@ -8,7 +8,7 @@
 
 **Tech Stack:** Go 1.23+, Bubble Tea v2, charmbracelet/lipgloss, creack/pty (Unix), charmbracelet/x/conpty (Windows), BurntSushi/toml
 
-**Reference:** `PRD.md` (full product requirements), `VISION.md` (project vision)
+**Reference:** [`../prd.md`](../prd.md) (full product requirements), [`../vision.md`](../vision.md) (project vision)
 
 ---
 

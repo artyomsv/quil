@@ -72,7 +72,7 @@ Key changes:
 - **Config persistence** — `config.Save()` for atomic config write-back
 - **Go 1.25** — required by Lipgloss v2
 
-### Pre-Built Binaries & One-Line Install — [PRD](docs/roadmap/pre-built-binaries.md)
+### Pre-Built Binaries & One-Line Install — [PRD](roadmap/pre-built-binaries.md)
 > GoReleaser cross-compilation, GitHub Releases, install script.
 
 GoReleaser produces archives for 5 platforms (linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64) with SHA256 checksums. Single `release.yml` workflow with two jobs: version bump + tag, then GoReleaser build + publish. Install script (`scripts/install.sh`) for Linux/macOS with checksum verification. Homebrew tap, Scoop, Winget deferred (need external repos).
@@ -84,7 +84,7 @@ Key capabilities:
 - **Version injection** — consistent `-ldflags` across GoReleaser, dev.sh, dev.ps1, rebuild.ps1, Makefile
 - **CI security** — actions pinned to SHA, per-job permissions, version format validation
 
-### M10: MCP Server — [PRD](docs/roadmap/mcp-server.md)
+### M10: MCP Server — [PRD](roadmap/mcp-server.md)
 > Make Quil the AI's eyes and hands via Model Context Protocol.
 
 `quil mcp` subcommand bridges MCP JSON-RPC (stdio) to daemon IPC (socket). AI assistants can read pane output, send commands, take screenshots, navigate tabs, restart panes, and control the TUI. No other terminal multiplexer offers this.
@@ -99,7 +99,7 @@ Key capabilities:
 - **TUI cooperation** — `set_active_pane` and `close_tui` use daemon broadcast → TUI handler pattern
 - **Process exit tracking** — `Pane.ExitCode` and `WaitExit()` with `sync.Once` on PTY sessions (Unix + Windows)
 
-### M12: Notification Center — [PRD](docs/roadmap/notification-center.md)
+### M12: Notification Center — [PRD](roadmap/notification-center.md)
 > Centralized event sidebar with pane navigation and history stack.
 
 Replaces manual pane polling with push notifications. A non-modal sidebar shows pending events; select an event to jump to the linked pane; `Alt+Backspace` returns to where you were (browser-back pattern).
@@ -166,7 +166,7 @@ Pane notes (M7) historically truncated long lines at the panel edge with a trail
 
 Character wrap (not word wrap), opt-in per editor via a new `TextEditor.SoftWrap` flag — the TOML plugin editor and F1 log viewer keep their existing truncation. Cursor Up/Down walks visual rows with column preservation; Home/End snap to the visual row; shift-arrow selections stay contiguous across wrap boundaries; mouse clicks on a continuation row resolve to the correct logical column via a new `visualToLogical` helper. `ScrollTop` is reinterpreted as a visual-row index when wrap is on. Paragraph (Ctrl+Up/Down) and PageSize (Alt+Up/Down) jumps stay logical. Also fixes a pre-existing render bug exposed by the new path: cursor at end-of-line past a shorter selection was invisible.
 
-### M7: Pane Notes — [PRD](docs/roadmap/pane-notes.md)
+### M7: Pane Notes — [PRD](roadmap/pane-notes.md)
 > Side-by-side note-taking linked to individual panes.
 
 A plain-text notes editor that opens next to the active pane on `Alt+E`. Notes are stored one file per pane and survive pane destruction, so the context you captured while debugging in a pane is still there next week when the pane is long gone.
@@ -219,13 +219,13 @@ Key capabilities:
 
 ## Planned — Core Features
 
-### M9: Project Workspace Files — [PRD](docs/roadmap/workspace-files.md)
+### M9: Project Workspace Files — [PRD](roadmap/workspace-files.md)
 
 > `.quil.toml` checked into repo — the "docker-compose.yml for dev environments."
 
 Define workspace blueprints committed to git: tabs, panes, plugins, CWDs, commands. `cd my-project && quil` materializes the entire dev environment. Every team member gets the exact same setup. **Network effect within teams.**
 
-### M11: Command Palette — [PRD](docs/roadmap/command-palette.md)
+### M11: Command Palette — [PRD](roadmap/command-palette.md)
 
 > `Ctrl+Shift+P` fuzzy-find overlay for everything.
 
@@ -235,19 +235,19 @@ Search panes, execute commands, switch tabs, create panes, open saved instances 
 
 ## Planned — Growth & Adoption
 
-### The "Holy Shit" Demo — [PRD](docs/roadmap/demo-gif.md)
+### The "Holy Shit" Demo — [PRD](roadmap/demo-gif.md)
 
 > 30-second GIF: 5 panes → reboot → `quil` → everything snaps back.
 
 The entire pitch in one visual. Goes on README, Hacker News, r/programming, Twitter/X. Adoption for developer tools is driven by a single viral moment. **Priority 2** — prerequisite for marketing.
 
-### Community Plugin Registry — [PRD](docs/roadmap/community-plugins.md)
+### Community Plugin Registry — [PRD](roadmap/community-plugins.md)
 
 > `quil plugin install aider` — community TOML plugins via GitHub.
 
 GitHub repo as registry, `quil plugin install/search/update` CLI. High-value plugins: Aider, lazygit, k9s, Docker Compose, ngrok, pgcli. Every plugin makes Quil useful to a new audience.
 
-### tmux Migration Path — [PRD](docs/roadmap/tmux-migration.md)
+### tmux Migration Path — [PRD](roadmap/tmux-migration.md)
 
 > Import keybindings and session layouts from tmux.
 
@@ -257,19 +257,19 @@ GitHub repo as registry, `quil plugin install/search/update` CLI. High-value plu
 
 ## Planned — Advanced Features
 
-### Smart Process Health & Auto-Restart — [PRD](docs/roadmap/process-health.md)
+### Smart Process Health & Auto-Restart — [PRD](roadmap/process-health.md)
 
 > Green/yellow/red health indicators, auto-restart with backoff, stale detection.
 
 Elevate `error_handlers` to a first-class health monitoring system. Auto-restart crashed panes with exponential backoff, detect stale processes, fire desktop notifications. Plugin TOML `[health]` section for configuration. Moves Quil from "terminal organizer" to "workflow orchestrator."
 
-### Cross-Pane Context Awareness — [PRD](docs/roadmap/cross-pane-events.md)
+### Cross-Pane Context Awareness — [PRD](roadmap/cross-pane-events.md)
 
 > Build fails → AI pane gets a toast → one keypress sends context.
 
 Event bus connecting panes: build errors notify AI assistants, SSH auto-reconnects, test passes flash green, webhook counters badge tabs. Creates an **integrated experience** that no collection of separate terminals can match.
 
-### Session Sharing — [PRD](docs/roadmap/session-sharing.md)
+### Session Sharing — [PRD](roadmap/session-sharing.md)
 
 > `quil serve --share` / `quil attach --host` for pair programming.
 

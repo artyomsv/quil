@@ -36,33 +36,50 @@ interface DocSection {
 
 const sections: DocSection[] = [
   {
-    title: "Project context",
+    title: "Getting started",
     items: [
-      { name: "README",       path: "README.md",       tag: "← OVERVIEW",   desc: "Project overview, features, install instructions, and keybinding reference. Start here." },
-      { name: "VISION",       path: "VISION.md",       tag: "← PHILOSOPHY", desc: "Why Quil exists, who it's for, and what problem the reboot-proof workspace promise solves." },
-      { name: "PRD",          path: "PRD.md",          tag: "← SPEC",       desc: "Full product requirements: personas, user stories, success metrics, scope boundaries." },
-      { name: "ARCHITECTURE", path: "ARCHITECTURE.md", tag: "← INTERNALS",  desc: "Client-daemon model, PTY backends, IPC protocol, state persistence, ADRs." },
-      { name: "ROADMAP",      path: "ROADMAP.md",      tag: "← PLAN",       desc: "Milestone-by-milestone progress through M12, plus the in-flight M5 polish work." },
-      { name: "CHANGELOG",    path: "CHANGELOG.md",    tag: "← HISTORY",    desc: "Keep-a-Changelog formatted history of every release from v0.1.0 onward." },
+      { name: "README",            path: "README.md",                tag: "← OVERVIEW",     desc: "Landing page: what Quil is, one-line install, five keys to remember, MCP wiring snippet, link to deep docs." },
+      { name: "Installation",      path: "docs/installation.md",     tag: "← INSTALL",      desc: "Pre-built binary (Linux / macOS one-liner, Windows zip), Go install, build from source with Docker or local Go." },
+      { name: "Quick start",       path: "docs/quick-start.md",      tag: "← FIRST RUN",    desc: "First-launch walkthrough — five keys, opening a typed pane, automatic persistence, AI assistant connection." },
+      { name: "Troubleshooting",   path: "docs/troubleshooting.md",  tag: "← HELP",         desc: "Daemon won't start, MCP not detected, log file locations, force-stop scripts, full reset." },
     ],
   },
   {
-    title: "Authoring guides",
+    title: "Using Quil",
     items: [
-      { name: "Plugin reference", path: "docs/plugin-reference.md", tag: "← PLUGINS",   desc: "Complete TOML plugin schema: [plugin], [command], [persistence], [[error_handlers]], and examples." },
-      { name: "Contributing",     path: "CONTRIBUTING.md",          tag: "← CONTRIB",   desc: "How to set up the dev environment, run tests, and submit a pull request." },
-      { name: "Versioning",       path: "VERSIONING.md",            tag: "← SEMVER",    desc: "Semantic versioning policy driven by Conventional Commits." },
+      { name: "Features",          path: "docs/features.md",         tag: "← TOUR",         desc: "Capability tour grouped by area: persistence, layout, typed panes, clipboard, observability, pane notes." },
+      { name: "Keybindings",       path: "docs/keybindings.md",      tag: "← KEYS",         desc: "Full keymap, customization syntax, what to bind and what to leave passing through to the PTY." },
+      { name: "Configuration",     path: "docs/configuration.md",    tag: "← CONFIG",       desc: "~/.quil/config.toml reference — every section and every key with defaults and effects." },
+      { name: "MCP",               path: "docs/mcp.md",              tag: "← AI",           desc: "Let your AI assistant drive Quil. Client wiring for Claude / Cursor / VS Code, all 17 tools, redaction model." },
+    ],
+  },
+  {
+    title: "Authoring & extending",
+    items: [
+      { name: "Plugin reference",  path: "docs/plugin-reference.md", tag: "← PLUGINS",      desc: "Complete TOML plugin schema: [plugin], [command], [persistence], [[error_handlers]], runtime toggles, examples." },
+      { name: "Contributing",      path: "CONTRIBUTING.md",          tag: "← CONTRIB",      desc: "Branch / commit conventions, how to submit changes, where to read deeper architectural rationale." },
+    ],
+  },
+  {
+    title: "Project context",
+    items: [
+      { name: "Vision",            path: "docs/vision.md",           tag: "← PHILOSOPHY",   desc: "Why Quil exists, who it's for, and what problem the reboot-proof workspace promise solves." },
+      { name: "Architecture",      path: "docs/architecture.md",     tag: "← INTERNALS",    desc: "Client-daemon model, PTY backends, IPC protocol, state persistence — 24 ADRs covering every meaningful decision." },
+      { name: "PRD",               path: "docs/prd.md",              tag: "← SPEC",         desc: "Original v1 product requirements: personas, user stories, success metrics, scope boundaries. Historical reference." },
+      { name: "Roadmap",           path: "docs/roadmap.md",          tag: "← PLAN",         desc: "Milestone-by-milestone progress through the latest release, plus in-flight polish work." },
+      { name: "Versioning",        path: "docs/versioning.md",       tag: "← SEMVER",       desc: "Semantic versioning policy driven by Conventional Commits." },
+      { name: "CHANGELOG",         path: "CHANGELOG.md",             tag: "← HISTORY",      desc: "Keep-a-Changelog formatted history of every release from v0.1.0 onward." },
     ],
   },
   {
     title: "Future roadmap PRDs",
     items: [
-      { name: "Command palette",    path: "docs/roadmap/command-palette.md",    tag: "← FUTURE", desc: "Fuzzy-search command bar accessible via Ctrl+Shift+P. Future milestone." },
-      { name: "Community plugins",  path: "docs/roadmap/community-plugins.md",  tag: "← FUTURE", desc: "A registry + discovery mechanism for user-contributed TOML plugins." },
-      { name: "Session sharing",    path: "docs/roadmap/session-sharing.md",    tag: "← FUTURE", desc: "Read-only tunnel into a live Quil workspace so a collaborator can watch your panes." },
-      { name: "Process health",     path: "docs/roadmap/process-health.md",     tag: "← FUTURE", desc: "Liveness probes per pane with automatic restart policies. Think systemd for pane processes." },
-      { name: "Tmux migration",     path: "docs/roadmap/tmux-migration.md",     tag: "← FUTURE", desc: "Import tmux sessions — read ~/.tmux/resurrect/ and map them into Quil's workspace model." },
-      { name: "Workspace files",    path: "docs/roadmap/workspace-files.md",    tag: "← FUTURE", desc: "Declarative workspace definitions in quil.toml checked into project repos." },
+      { name: "Command palette",   path: "docs/roadmap/command-palette.md",   tag: "← FUTURE", desc: "Fuzzy-search command bar accessible via Ctrl+Shift+P. Future milestone." },
+      { name: "Community plugins", path: "docs/roadmap/community-plugins.md", tag: "← FUTURE", desc: "A registry + discovery mechanism for user-contributed TOML plugins." },
+      { name: "Session sharing",   path: "docs/roadmap/session-sharing.md",   tag: "← FUTURE", desc: "Read-only tunnel into a live Quil workspace so a collaborator can watch your panes." },
+      { name: "Process health",    path: "docs/roadmap/process-health.md",    tag: "← FUTURE", desc: "Liveness probes per pane with automatic restart policies. Think systemd for pane processes." },
+      { name: "Tmux migration",    path: "docs/roadmap/tmux-migration.md",    tag: "← FUTURE", desc: "Import tmux sessions — read ~/.tmux/resurrect/ and map them into Quil's workspace model." },
+      { name: "Workspace files",   path: "docs/roadmap/workspace-files.md",   tag: "← FUTURE", desc: "Declarative workspace definitions in quil.toml checked into project repos." },
     ],
   },
 ];

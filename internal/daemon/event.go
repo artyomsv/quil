@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"strconv"
 	"sync"
 	"time"
 
@@ -46,10 +47,43 @@ func newEventQueue(max int) *eventQueue {
 	}
 }
 
-// Push adds an event (newest first) and wakes any matching watchers.
+// Push adds an event (newest first), aggregating repeat events from the same
+// pane with the same title, and wakes any matching watchers.
+//
+// Aggregation: when a queued event has matching (PaneID, Title), the new
+// event REPLACES it at the front of the queue. The replacement keeps the
+// old event's ID (so the TUI sidebar can update its card in place via the
+// existing ID-based dedup) and bumps Data["count"]. This collapses bursts
+// of "Output idle" from the same shell, or repeated "Waiting for input"
+// from the same Claude pane, into a single sidebar card with a ×N badge —
+// instead of N separate cards saying the same thing.
+//
+// Aggregation only applies when PaneID is non-empty so daemon-level events
+// (without a pane source) never collapse together.
 func (q *eventQueue) Push(e PaneEvent) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+
+	if e.PaneID != "" && e.Title != "" {
+		for i, existing := range q.events {
+			if existing.PaneID == e.PaneID && existing.Title == e.Title {
+				count := 1
+				if existing.Data != nil {
+					if c, err := strconv.Atoi(existing.Data["count"]); err == nil && c > 0 {
+						count = c
+					}
+				}
+				count++
+				e.ID = existing.ID
+				if e.Data == nil {
+					e.Data = make(map[string]string)
+				}
+				e.Data["count"] = strconv.Itoa(count)
+				q.events = append(q.events[:i], q.events[i+1:]...)
+				break
+			}
+		}
+	}
 
 	q.events = append([]PaneEvent{e}, q.events...)
 	if len(q.events) > q.max {

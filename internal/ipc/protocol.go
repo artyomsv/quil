@@ -161,6 +161,10 @@ type UpdatePanePayload struct {
 	PaneID string `json:"pane_id"`
 	Name   string `json:"name,omitempty"`
 	CWD    string `json:"cwd,omitempty"`
+	// Muted is a pointer so an unset field (nil) is distinguishable from an
+	// explicit false. Callers updating only Name or CWD pass nil and the
+	// daemon leaves the pane's mute state untouched.
+	Muted *bool `json:"muted,omitempty"`
 }
 
 type UpdateLayoutPayload struct {
@@ -314,6 +318,14 @@ type GetNotificationsRespPayload struct {
 type WatchNotificationsReqPayload struct {
 	PaneIDs   []string `json:"pane_ids,omitempty"`
 	TimeoutMs int      `json:"timeout_ms"`
+	// SinceTimestamp closes the race between "kick off a task" and "start
+	// watching" — events fired during that window would otherwise be lost.
+	// When set (Unix ms), the daemon first scans the existing event queue
+	// for any matching event whose timestamp is strictly greater, returning
+	// the oldest such event immediately. Only if the queue holds no
+	// qualifying event does it register a blocking watcher. Agents should
+	// pass the timestamp of the last event they handled.
+	SinceTimestamp int64 `json:"since_timestamp,omitempty"`
 }
 
 type WatchNotificationsRespPayload struct {

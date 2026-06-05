@@ -135,8 +135,11 @@ func (nc *NotificationCenter) View(height int) string {
 		noEvents = truncateRunes(noEvents, innerW)
 		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render(noEvents))
 	} else {
-		// Each event = separator + name/time + title = 3 lines
-		maxVisible := (innerH - 3) / 3
+		// Each event = separator + name/time + title + excerpt = 4 lines.
+		// The excerpt line is always emitted (blank if Message is empty) so
+		// every event has the same height — keeps pagination math predictable.
+		const linesPerEvent = 4
+		maxVisible := (innerH - 3) / linesPerEvent
 		if maxVisible < 1 {
 			maxVisible = 1
 		}
@@ -193,8 +196,24 @@ func (nc *NotificationCenter) View(height int) string {
 				titleText = lipgloss.NewStyle().Foreground(lipgloss.Color("250")).Render(titleText)
 			}
 
+			// Line 3: excerpt — first non-empty line of Message (the
+			// triggering output). Dim grey so it visually subordinates to
+			// the title; blank line preserved if no excerpt so the
+			// per-event height stays constant.
+			excerptLine := ""
+			if e.Message != "" {
+				preview := "  " + firstNonEmptyLine(e.Message)
+				preview = truncateRunes(preview, innerW)
+				if selected {
+					excerptLine = lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Reverse(true).Render(preview)
+				} else {
+					excerptLine = lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Render(preview)
+				}
+			}
+
 			lines = append(lines, line1)
 			lines = append(lines, titleText)
+			lines = append(lines, excerptLine)
 		}
 
 		// Trailing separator
@@ -229,6 +248,17 @@ func (nc *NotificationCenter) View(height int) string {
 		Width(nc.width).
 		Height(height).
 		Render(content)
+}
+
+// firstNonEmptyLine returns the first non-empty trimmed line of s, or "".
+// Used by the sidebar to render a one-line preview of a multi-line excerpt.
+func firstNonEmptyLine(s string) string {
+	for _, line := range strings.Split(s, "\n") {
+		if trimmed := strings.TrimSpace(line); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }
 
 // truncateRunes truncates a string to maxWidth runes.

@@ -26,6 +26,7 @@ type PaneModel struct {
 	Type          string // plugin type ("terminal", "claude-code", etc.)
 	Name          string // user-given name (empty if not set)
 	CWD           string // current working directory from daemon
+	Muted         bool   // notification mute (daemon-authoritative; mirrored here for border rendering)
 	vt            *vt.SafeEmulator
 	Width         int
 	Height        int
@@ -231,7 +232,18 @@ func (p *PaneModel) View() string {
 	body := bodyStyle.Render(content)
 
 	// Manual top border: CWD on the left, pane name on the right.
-	topLine := buildTopBorder(p.Width, p.CWD, p.Name, borderColor, p.ghost, p.resuming, p.preparing, p.focusMode, p.spinnerFrame)
+	// Muted panes prefix the right label so it's visible at a glance — the
+	// border colour stays the same (no risk of confusion with ghost / mcp /
+	// active states, each of which already owns a colour slot).
+	rightLabel := p.Name
+	if p.Muted {
+		if rightLabel == "" {
+			rightLabel = "[muted]"
+		} else {
+			rightLabel = "[muted] " + rightLabel
+		}
+	}
+	topLine := buildTopBorder(p.Width, p.CWD, rightLabel, borderColor, p.ghost, p.resuming, p.preparing, p.focusMode, p.spinnerFrame)
 
 	return topLine + "\n" + body
 }

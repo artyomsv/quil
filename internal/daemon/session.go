@@ -44,8 +44,13 @@ type Pane struct {
 	Rows         int                 // Last known terminal height (0 = unknown)
 	LastOutputAt    time.Time        // Updated on every flushPaneOutput
 	IdleNotified    bool             // Prevents re-firing for same idle period
-	LastIdleEventAt time.Time        // Cooldown: last time an idle event was emitted
+	LastIdleEventAt time.Time        // Cooldown: last time a idle event was emitted
 	LastBellEventAt time.Time        // Cooldown: last time a bell event was emitted
+	// Muted suppresses notification events sourced from this pane. Set via
+	// MsgUpdatePane{Muted: true} from the TUI (default keybinding Alt+M).
+	// Persisted in the workspace snapshot so mute survives restart. Read
+	// under PluginMu in emitEvent.
+	Muted bool
 }
 
 type SessionManager struct {

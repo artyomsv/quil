@@ -164,12 +164,28 @@ QUIL_HOME=/custom/path ./quil     # Arbitrary data directory
 
 ## Documents
 
-- `PRD.md` — Full product requirements document
-- `VISION.md` — Project vision
-- `ARCHITECTURE.md` — Architecture Decision Records
+Project docs are now organized as a navigable tree under `docs/` (with the index at `docs/README.md`). Only `README.md`, `CHANGELOG.md`, `CONTRIBUTING.md`, and `LICENSE` stay at the repo root.
+
+- `README.md` — Landing page (install + 5-command quick start + Documentation table)
 - `CHANGELOG.md` — Keep a Changelog format
-- `docs/plans/` — Implementation plans
-- `docs/plugin-reference.md` — Plugin configuration reference (TOML format, fields, strategies, examples)
+- `CONTRIBUTING.md` — Branch / commit / PR conventions
+- `docs/README.md` — Documentation index
+- `docs/quick-start.md` — First-launch walkthrough
+- `docs/installation.md` — All install paths (one-liner, Go, manual, build from source)
+- `docs/features.md` — Feature catalog grouped by area
+- `docs/keybindings.md` — Full keymap + customization syntax
+- `docs/configuration.md` — `~/.quil/config.toml` reference
+- `docs/mcp.md` — User-facing MCP guide (client wiring, all 17 tools, redaction model)
+- `docs/plugin-reference.md` — TOML plugin schema (every field, every strategy, examples)
+- `docs/troubleshooting.md` — Daemon won't start, MCP not detected, log file locations, reset
+- `docs/architecture.md` — 24 ADRs (moved from root `ARCHITECTURE.md`)
+- `docs/vision.md` — Project vision (moved from root `VISION.md`)
+- `docs/prd.md` — Original v1 PRD, historical reference (moved from root `PRD.md`)
+- `docs/roadmap.md` — Milestone status + planned work (moved from root `ROADMAP.md`)
+- `docs/versioning.md` — SemVer policy (moved from root `VERSIONING.md`)
+- `docs/plans/` — Historical implementation plans
+- `docs/roadmap/` — Per-feature roadmap PRDs (done + planned)
+- `docs/superpowers/` — Detailed plans + specs for large feature efforts
 
 ## Milestones
 

@@ -1,118 +1,102 @@
 # Contributing to Quil
 
-## Prerequisites
+Thanks for considering a contribution! This page covers what stays at the project root: how to submit code, commit/branch conventions, and PR expectations. Deeper material lives in [docs/](docs/) — pointers below.
 
-- Git
-- **One of:**
-  - Docker (recommended — no local Go required)
-  - Go 1.24+
+## Reporting bugs and ideas
 
-## Building
+Open an issue with:
 
-### With Docker (no local Go or make required)
+- Quil version (`quil --version` and `quild --version` — both must match)
+- OS + terminal emulator
+- Steps to reproduce
+- Relevant excerpts from `~/.quil/quil.log` and `~/.quil/quild.log` (see [Troubleshooting → log files](docs/troubleshooting.md#log-files--where-to-look))
 
-```bash
-./scripts/dev.sh build        # Build both binaries
-./scripts/dev.sh test         # Run tests
-./scripts/dev.sh test-race    # Tests with race detector
-./scripts/dev.sh vet          # Lint
-./scripts/dev.sh cross        # Cross-compile all platforms
-./scripts/dev.sh image        # Build minimal Docker image
-./scripts/dev.sh clean        # Remove built binaries
-```
+For feature ideas, check [docs/roadmap.md](docs/roadmap.md) and [docs/roadmap/](docs/roadmap/) first — many ideas are already scoped as PRDs.
 
-### With local Go + make
+## Building locally
+
+The full build workflow — Docker-based and native-Go paths, dev/debug variants, cross-compilation — lives in **[docs/installation.md → Build from source](docs/installation.md#build-from-source)**.
+
+The shortest path:
 
 ```bash
-make build
-make test
-make test-race
-make vet
-make cross
+./scripts/dev.sh build       # Docker, no local Go needed
+./scripts/dev.sh test
+./scripts/dev.sh test-race
+./scripts/dev.sh vet
 ```
 
-> **Note:** The Docker image is for building release binaries. Running the daemon
-> inside a container is not practical — it needs host PTY access for terminal
-> session management.
+## Code conventions
 
-## Project Structure
+- **Formatting** — `gofmt` is mandatory. Tabs in Go files, 2 spaces in YAML / TOML / JSON.
+- **Naming** — Go conventions. Acronyms stay uppercase (`IPC`, `PTY`, `JSON`, `HTTP`). No `GetXxx` getters — just `Xxx()`.
+- **Errors** — return them, wrap with context: `fmt.Errorf("doing X: %w", err)`. Never `panic` for recoverable conditions.
+- **Goroutines** — every goroutine must have a clear shutdown path (`context.Context` cancel, done channel, defer).
+- **Platform code** — `//go:build` tags (not `// +build`). One file per variant: `foo_unix.go` / `foo_windows.go`.
+- **Tests** — same package, `_test.go` suffix. Table-driven where it earns its keep. Run `go test -race ./...` before submitting.
+- **No global mutable state** — pass dependencies explicitly. The exception: package-level swappable function vars for testability (already established pattern in `internal/daemon/`).
 
-```
-cmd/
-├── quil/          # TUI client entry point
-└── quild/         # Daemon entry point
-internal/
-├── config/          # TOML configuration loading
-├── daemon/          # Session manager, message routing, daemon lifecycle
-├── ipc/             # IPC protocol, client, server
-├── pty/             # Cross-platform PTY (Unix via creack/pty, Windows via ConPTY)
-└── tui/             # Bubble Tea model, tabs, panes, styles
-```
+For deeper architectural rationale see [docs/architecture.md](docs/architecture.md) (24 ADRs cover every meaningful decision).
 
-## Code Conventions
+## Commit messages
 
-- **Formatting:** `gofmt` — enforced by build. Use tabs for Go files.
-- **Naming:** Follow Go conventions — exported names are PascalCase, unexported are camelCase.
-- **Build tags:** Platform-specific code uses `//go:build` tags (not `// +build`).
-- **Error handling:** Return errors, don't panic. Wrap errors with context using `fmt.Errorf("context: %w", err)`.
-- **Tests:** Place tests in the same package (`_test.go` suffix). Use table-driven tests where appropriate.
-
-## Platform-Specific Code
-
-PTY and IPC layers have platform-specific implementations:
-
-| File | Platforms |
-|---|---|
-| `internal/pty/session_unix.go` | Linux, macOS, FreeBSD |
-| `internal/pty/session_windows.go` | Windows |
-
-When modifying these, ensure the `Session` interface in `session.go` is satisfied on all platforms. Verify with:
-
-```bash
-./scripts/dev.sh cross   # or: make cross (with local Go)
-```
-
-## Commit Messages
-
-Follow [Conventional Commits](https://www.conventionalcommits.org/):
+[Conventional Commits](https://www.conventionalcommits.org/):
 
 ```
-feat(daemon): add state persistence
+feat(daemon): propagate TUI CWD to daemon for new panes
 fix(tui): correct pane resize on tab switch
 refactor(ipc): simplify message encoding
 test(pty): add resize test for Unix
-docs: update architecture decisions
+docs: clarify MCP redaction model
+chore(release): v1.12.0
 ```
 
 - Imperative mood: "add" not "added"
-- Max 72 characters on the first line
-- Include body for non-trivial changes
+- First line ≤ 72 characters
+- Body wraps at 72 characters, explains the **why** not the **what** (the diff shows the what)
+- Reference issues in the footer when applicable: `Closes #42`
 
-## Branch Naming
+## Branch naming
+
+`<type>/<short-description>`, all lowercase, hyphen-separated:
 
 ```
-feature/state-persistence
-fix/pane-resize-crash
-chore/update-dependencies
+feature/plugin-opencode
+fix/cors-config
+docs/restructure-and-mcp-guide
+chore/update-deps
 ```
 
-## Pull Requests
+## Pull requests
 
-- One logical concern per PR
-- Title follows Conventional Commits format
-- Include a summary and test plan in the description
-- Keep PRs under 400 lines when possible
+- One logical concern per PR — bundling unrelated changes makes review painful
+- Title follows Conventional Commits
+- Description has a **Summary** (1–3 bullets) and a **Test plan** (how to verify)
+- Aim for under 400 lines of diff. If you must go bigger, split into stacked PRs with a clear sequence.
 
-## Architecture Decisions
+PRs get squash-merged to `master` for a clean history. The release pipeline picks up the squash commit, computes the version bump from conventional commit types, updates `VERSION` + `CHANGELOG.md`, tags, and publishes via GoReleaser.
 
-When making significant design choices, document them in [ARCHITECTURE.md](ARCHITECTURE.md) using the ADR format:
+## Documentation maintenance
 
-```markdown
-## ADR-N: Title
+When your change adds a new feature, configuration knob, or significant architectural decision:
 
-**Decision:** What was decided.
+- Update [CHANGELOG.md](CHANGELOG.md) — add a line under `[Unreleased]`. The release pipeline rotates it into a dated section on the next bump.
+- Update the matching doc in [docs/](docs/):
+  - New feature → [features.md](docs/features.md)
+  - New config key → [configuration.md](docs/configuration.md)
+  - New keybinding → [keybindings.md](docs/keybindings.md)
+  - New MCP tool or behaviour change → [mcp.md](docs/mcp.md)
+  - New plugin field or strategy → [plugin-reference.md](docs/plugin-reference.md)
+  - New ADR → [architecture.md](docs/architecture.md) (use the existing `ADR-N: Title` / `Decision` / `Context` / `Consequences` template)
 
-**Context:** Why this decision was needed.
+The TLDR architecture map (the `.claude/CLAUDE.md` file at the repo root) is the agent-facing index — keep that updated too if your change touches a package boundary, persistence path, or external protocol.
 
-**Consequences:** What follows from this decision.
-```
+## Where to read deeper
+
+| Question | Doc |
+|---|---|
+| How does Quil work internally? | [docs/architecture.md](docs/architecture.md) — 24 ADRs |
+| What's planned? | [docs/roadmap.md](docs/roadmap.md) + [docs/roadmap/](docs/roadmap/) |
+| Why does Quil exist? | [docs/vision.md](docs/vision.md) |
+| Versioning policy? | [docs/versioning.md](docs/versioning.md) |
+| Original PRD? | [docs/prd.md](docs/prd.md) — historical reference |

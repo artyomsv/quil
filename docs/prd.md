@@ -298,7 +298,7 @@ quick_actions = "ctrl+a"
 | FR-5.5 | Plugin hot-reload via F1 → Plugins → Reload. Active panes using a modified plugin pick up new scraper/error handler rules on next output. |
 | FR-5.6 | Plugin validation — daemon validates plugin TOML on load and logs clear errors for malformed definitions. Invalid plugins are skipped, not fatal. |
 
-> **Full plugin configuration reference:** See [`docs/plugin-reference.md`](docs/plugin-reference.md) for complete field-by-field documentation with examples.
+> **Full plugin configuration reference:** See [`plugin-reference.md`](plugin-reference.md) for complete field-by-field documentation with examples.
 
 #### Plugin Definition Schema (Implemented)
 
@@ -626,19 +626,19 @@ All three platforms supported from day one. Go's cross-compilation makes this fe
 
 ### Post-M5 Milestones
 
-The PRD captures the original v1 plan. The product has shipped past M5 in tightly scoped follow-up milestones; each has its own design doc / PRD under `docs/roadmap/` and is tracked in [ROADMAP.md](ROADMAP.md). Stubs:
+The PRD captures the original v1 plan. The product has shipped past M5 in tightly scoped follow-up milestones; each has its own design doc / PRD under `roadmap/` and is tracked in [roadmap.md](roadmap.md). Stubs:
 
 | Milestone | Status | Summary |
 |---|---|---|
 | **M6: Pane Focus Mode** | Done | `Ctrl+E` toggles the active pane to fill the tab — other panes keep running, layout tree intact, focus state not persisted |
-| **M7: Pane Notes** | Done | `Alt+E` opens a plain-text notes editor next to the active pane; one file per pane (`~/.quil/notes/<pane-id>.md`); 30 s debounced auto-save + explicit `Ctrl+S` + flush on exit. Notes outlive the pane. See [docs/roadmap/pane-notes.md](docs/roadmap/pane-notes.md) |
+| **M7: Pane Notes** | Done | `Alt+E` opens a plain-text notes editor next to the active pane; one file per pane (`~/.quil/notes/<pane-id>.md`); 30 s debounced auto-save + explicit `Ctrl+S` + flush on exit. Notes outlive the pane. See [roadmap/pane-notes.md](roadmap/pane-notes.md) |
 | **M8: Bubble Tea v2 Migration** | Done | Migrated to Bubble Tea v2 (`charm.land/bubbletea/v2`) and Lipgloss v2 with declarative `View` / typed mouse events / `KeyPressMsg`. Added platform-native clipboard, terminal text selection, editor selection / clipboard / word jumps, beta disclaimer dialog, runtime `config.Save()` |
-| **M10: MCP Server** | Done | `quil mcp` exposes 17 tools over Model Context Protocol stdio so any MCP-capable client (Claude Desktop, Claude Code, Cursor) can drive the live workspace. See [docs/roadmap/mcp-server.md](docs/roadmap/mcp-server.md) |
-| **M12: Notification Center** | Done | Daemon event queue with process-exit / OSC 133 / bell / smart-idle detection; non-modal `Alt+N` sidebar with severity colours and a pane-history stack (`Alt+Backspace`); blocking and non-blocking MCP tools. See [docs/roadmap/notification-center.md](docs/roadmap/notification-center.md) |
+| **M10: MCP Server** | Done | `quil mcp` exposes 17 tools over Model Context Protocol stdio so any MCP-capable client (Claude Desktop, Claude Code, Cursor) can drive the live workspace. See [roadmap/mcp-server.md](roadmap/mcp-server.md) |
+| **M12: Notification Center** | Done | Daemon event queue with process-exit / OSC 133 / bell / smart-idle detection; non-modal `Alt+N` sidebar with severity colours and a pane-history stack (`Alt+Backspace`); blocking and non-blocking MCP tools. See [roadmap/notification-center.md](roadmap/notification-center.md) |
 | **M13: Memory Reporting** | Done | Per-pane Go-heap + PTY RSS surfaced in a status-bar `mem <n>` segment, an F1 → Memory dialog, and two MCP tools (`get_memory_report`, `get_pane_memory`). Cross-platform RSS via `/proc/<pid>/status` / `ps` / `GetProcessMemoryInfo` |
-| **v1.8.0+ patch milestones** | Done | Client/daemon version handshake (auto-restart on mismatch), VT-emulator drain goroutine + Update watchdog, claude-code SessionStart hook for session-id rotation, notes editor soft-wrap. See [CHANGELOG.md](CHANGELOG.md) |
+| **v1.8.0+ patch milestones** | Done | Client/daemon version handshake (auto-restart on mismatch), VT-emulator drain goroutine + Update watchdog, claude-code SessionStart hook for session-id rotation, notes editor soft-wrap. See [CHANGELOG.md](../CHANGELOG.md) |
 
-These milestones are intentionally scope-limited follow-ups that did not warrant a full PRD revision; their designs live in `docs/roadmap/<feature>.md` (or `docs/superpowers/specs/` for memory reporting), and the priority matrix lives in [ROADMAP.md](ROADMAP.md).
+These milestones are intentionally scope-limited follow-ups that did not warrant a full PRD revision; their designs live in `roadmap/<feature>.md` (or `superpowers/specs/` for memory reporting), and the priority matrix lives in [roadmap.md](roadmap.md).
 
 ## 8. Success Metrics
 

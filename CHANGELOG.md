@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.15.1] - 2026-06-05
+
 ### Fixed
 
 - **Claude Code session restore silently failed on paths with underscores** — every `claude-code` pane respawned with `--continue` instead of `--resume <session_id>` at daemon restart, so users had to manually re-attach to their Claude sessions. Root cause: `escapeClaudeCWD` only replaced `/`, `\`, and `:` with `-` when computing the path to Claude's per-project session directory (`~/.claude/projects/<encoded-cwd>/<id>.jsonl`). Claude Code also replaces `_` — so a macOS home like `/Users/Foo_Bar` lives under `~/.claude/projects/-Users-Foo-Bar/` while Quil was probing `~/.claude/projects/-Users-Foo_Bar/`. Every `claudeSessionFileExists` call returned false, both the hook-recorded id and the preassigned id failed the existence probe, and the resume path fell through to the `--continue` fallback. Hits every macOS user whose home directory contains an underscore. The encoder now also handles `_`; regression tests in `TestEscapeClaudeCWD` lock in the new cases.

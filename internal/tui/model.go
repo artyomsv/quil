@@ -145,12 +145,21 @@ const (
 	dialogMemory
 )
 
+// tuiClient is the subset of *ipc.Client the TUI uses on the Model. Defined
+// at the consumer (here) so tests can inject a fake — e.g. for the Stop-
+// daemon confirm — without depending on a real Unix socket. *ipc.Client
+// satisfies this interface, so the assignment in NewModel needs no change.
+type tuiClient interface {
+	Send(*ipc.Message) error
+	Receive() (*ipc.Message, error)
+}
+
 type Model struct {
 	tabs                 []*TabModel
 	activeTab            int
 	width                int
 	height               int
-	client               *ipc.Client
+	client               tuiClient
 	cfg                  config.Config
 	version              string
 	attached             bool

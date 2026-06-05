@@ -25,7 +25,15 @@ import (
 	"github.com/artyomsv/quil/internal/plugin"
 )
 
-const dialogWidth = 50
+// dialogWidth is the standard width used by About, Settings, Shortcuts, and
+// the non-plugin Confirm dialogs. Set wide enough that:
+//   - Settings rows fit `cursor (2) + label (24) + value (24)` without
+//     wrapping the longest description (e.g. "(closes this TUI window)").
+//   - The Stop-daemon confirm body line "Panes will respawn from the
+//     snapshot on next launch." fits on a single rendered row.
+// Matched to disclaimerWidth so the visual style is consistent across all
+// fixed-width modal dialogs.
+const dialogWidth = 60
 const disclaimerWidth = 60
 
 // disclaimerTips are shown randomly in the startup disclaimer dialog.
@@ -109,12 +117,20 @@ var (
 				Bold(true)
 )
 
-// settingsField describes one editable config field.
+// settingsField describes one row in the Settings dialog. Most rows edit a
+// config value (use label + get + set, optionally isBool). Action rows leave
+// get/set/isBool zero and supply `action` — Enter calls the action instead
+// of opening the inline editor, letting the row trigger a flow (e.g. a
+// confirmation dialog) instead of mutating config.
 type settingsField struct {
 	label  string
 	get    func(m *Model) string
 	set    func(m *Model, val string)
 	isBool bool
+	// action is invoked on Enter for non-config rows (e.g. "Stop daemon").
+	// When set, get is still used to render the trailing description text,
+	// but set / isBool are ignored.
+	action func(m Model) (Model, tea.Cmd)
 }
 
 // settingsFields returns the editable Settings rows. Every setter that
@@ -196,7 +212,37 @@ func settingsFields() []settingsField {
 			},
 			isBool: true,
 		},
+		{
+			label: "Stop daemon",
+			get:   func(_ *Model) string { return "(closes this TUI window)" },
+			action: func(m Model) (Model, tea.Cmd) {
+				m.dialog = dialogConfirm
+				m.confirmKind = confirmKindShutdown
+				m.confirmID = ""
+				m.confirmName = ""
+				m.dialogCursor = 0
+				return m, nil
+			},
+		},
 	}
+}
+
+// confirmKindShutdown is the discriminator on confirmKind for the
+// "stop daemon" confirmation. Kept as a named constant so the handler and
+// renderer cannot drift from each other on a typo.
+const confirmKindShutdown = "shutdown"
+
+// stopDaemonRowIndex returns the index of the "Stop daemon" row in
+// settingsFields() by label lookup. Used by the confirm dialog's Esc
+// handler to restore the cursor — looking up by label (instead of assuming
+// "last row") survives adding new action rows after Stop daemon.
+func stopDaemonRowIndex() int {
+	for i, f := range settingsFields() {
+		if f.label == "Stop daemon" {
+			return i
+		}
+	}
+	return 0
 }
 
 func shortcutsList(m *Model) []struct{ key, desc string } {
@@ -399,6 +445,9 @@ func (m Model) handleSettingsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	case "enter", " ":
 		f := fields[m.dialogCursor]
+		if f.action != nil {
+			return f.action(m)
+		}
 		if f.isBool {
 			f.set(&m, "")
 		} else {
@@ -428,11 +477,48 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.dialogCursor = 0
 			return m, nil
 		}
+		if m.confirmKind == confirmKindShutdown {
+			// Back to Settings where the action was triggered. Cursor by
+			// label-lookup so a future action row inserted after Stop daemon
+			// does not silently misplace the cursor.
+			m.dialog = dialogSettings
+			m.dialogCursor = stopDaemonRowIndex()
+			return m, nil
+		}
 		m.dialog = dialogNone
 		return m, nil
 	case "enter", "y":
 		kind := m.confirmKind
 		id := m.confirmID
+
+		// Stop-daemon requires explicit `y` — Enter is what every Settings
+		// row uses to commit toggles, and the cost of a misclick here is a
+		// killed daemon + every pane child SIGHUP'd. `y` is a deliberate
+		// keystroke a user does not press accidentally.
+		if kind == confirmKindShutdown && msg.String() != "y" {
+			return m, nil
+		}
+
+		// Stop-daemon: fire MsgShutdown and quit the TUI. The daemon's
+		// MsgShutdown handler writes the final snapshot in its stop defers,
+		// and panes respawn from that snapshot on next launch. Send is
+		// performed synchronously (not via tea.Batch which gives no
+		// ordering guarantee) so the message lands BEFORE tea.Quit returns
+		// control to cmd/quil/main.go where `defer client.Close()` would
+		// otherwise close the socket out from under the in-flight write.
+		// One-shot ~150-byte write to a local Unix socket — no UI-thread
+		// concern. Send errors are logged but do not block the quit; the
+		// user explicitly asked to stop, the TUI exits either way.
+		if kind == confirmKindShutdown {
+			m.dialog = dialogNone
+			if m.client != nil {
+				req, _ := ipc.NewMessage(ipc.MsgShutdown, nil)
+				if sendErr := m.client.Send(req); sendErr != nil {
+					log.Printf("stop daemon: send shutdown: %v", sendErr)
+				}
+			}
+			return m, tea.Quit
+		}
 
 		// Handle instance deletion locally (no IPC needed)
 		if kind == "instance" {
@@ -674,11 +760,25 @@ func (m Model) renderConfirmDialog() string {
 	b.WriteString(dialogTitle.Render("Confirm"))
 	b.WriteString("\n\n")
 
-	label := fmt.Sprintf("Close %s %q?", m.confirmKind, m.confirmName)
-	b.WriteString("  " + dialogNormal.Render(label))
+	// Footer text varies by kind: shutdown requires explicit `y` to
+	// distinguish it from the Enter that commits Settings toggles, so the
+	// help line must say `y confirm` to match the handler.
+	footer := "Enter confirm    Esc cancel"
+	switch m.confirmKind {
+	case confirmKindShutdown:
+		b.WriteString("  " + dialogNormal.Render("Stop the daemon?"))
+		b.WriteString("\n\n")
+		b.WriteString("  " + dialogSubtle.Render("This TUI window will close."))
+		b.WriteString("\n")
+		b.WriteString("  " + dialogSubtle.Render("Panes will respawn from the snapshot on next launch."))
+		footer = "y confirm    Esc cancel"
+	default:
+		label := fmt.Sprintf("Close %s %q?", m.confirmKind, m.confirmName)
+		b.WriteString("  " + dialogNormal.Render(label))
+	}
 	b.WriteString("\n\n")
 
-	b.WriteString("  " + dialogSubtle.Render("Enter confirm    Esc cancel"))
+	b.WriteString("  " + dialogSubtle.Render(footer))
 
 	return b.String()
 }

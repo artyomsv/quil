@@ -226,6 +226,25 @@ type Model struct {
 	notesAnchorRow       int                    // document row where a notes-editor drag began (resolved once on click)
 	notesAnchorCol       int                    // document col where a notes-editor drag began (resolved once on click)
 
+	// Scrollbar click-and-drag. Set on a left-click that hits a pane's
+	// rightmost content column (the scrollbar track). While
+	// scrollDragPaneID is non-empty, every MouseMotionMsg with the left
+	// button held maps Y → scrollback position on that pane regardless of
+	// where the cursor lands — matches GUI scrollbar UX. The rect is
+	// captured once at click time so layout changes (e.g. window resize
+	// mid-drag) don't drift the mapping; on release the state is cleared.
+	scrollDragPaneID string
+	scrollDragRect   PaneRect
+
+	// Tab drag-and-drop. tabDragFromIdx == -1 means no drag in progress.
+	// On left-click at Y=0 over a tab we record the index; subsequent
+	// motion events at Y=0 swap the dragged tab into the hovered slot
+	// (one slot at a time, slide semantics — other tabs shift, the
+	// dragged tab moves through positions). Each swap fires an
+	// MsgReorderTab IPC so the daemon's state stays authoritative and
+	// the next workspace_state broadcast is a no-op.
+	tabDragFromIdx int
+
 	// Event-loop performance stats. Pointer so mutations persist across
 	// Bubble Tea's value-receiver copies.
 	perfStats *eventLoopStats
@@ -256,6 +275,7 @@ func NewModel(client *ipc.Client, cfg config.Config, version string, registry *p
 		notifications:    NewNotificationCenter(cfg.Notification.SidebarWidth, cfg.Notification.MaxEvents),
 		migrationPlugins: stalePlugins,
 		perfStats:        newEventLoopStats(),
+		tabDragFromIdx:   -1,
 	}
 	// Migration dialog takes priority over the disclaimer — it blocks
 	// startup until all stale plugins are resolved. Show disclaimer only
@@ -395,26 +415,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.Button == tea.MouseLeft {
 			if msg.Y == 0 {
-				// Tab bar click
-				m.mouseDown = false
-				// Note: notesMouseDown is not touched here — a fresh
-				// MouseClick always follows a prior MouseRelease which
-				// already cleared the flag, so resetting it would be
-				// dead defensive code.
+				// Tab bar — prime the drag tracker so subsequent motion at
+				// Y=0 reorders. clearDragState first enforces the
+				// "one drag at a time" invariant.
+				m.clearDragState()
 				if idx := m.hitTestTab(msg.X); idx >= 0 {
-					cmd := m.switchTab(idx)
-					return m, cmd
+					m.tabDragFromIdx = idx
+					return m, m.switchTab(idx)
 				}
 			} else if msg.Y < m.height-1 {
-				// Notes editor click takes priority when in notes mode and
-				// the pointer is inside the editor's bordered box. Resolve
-				// the document anchor once at click time and cache it —
-				// re-resolving on every mouse-motion event would drift if
-				// the editor's ScrollTop changed between click and first
-				// motion.
+				// Notes editor click takes priority — the document anchor
+				// is resolved once at click time so motion events can't
+				// drift it if ScrollTop changes mid-drag.
 				if row, col, ok := m.notesEditorPosAt(msg.X, msg.Y); ok {
+					m.clearDragState()
 					m.notesMouseDown = true
-					m.mouseDown = false
 					m.mouseStartX = msg.X
 					m.mouseStartY = msg.Y
 					m.notesAnchorRow = row
@@ -424,14 +439,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.notesEditor.SetCursor(row, col)
 					return m, nil
 				}
+				// Scrollbar click jumps the thumb and starts a drag. The
+				// rect is captured once so a window resize mid-drag doesn't
+				// drift the mapping.
+				if rect := m.hitTestScrollbar(msg.X, msg.Y); rect != nil {
+					m.clearDragState()
+					rect.Pane.ScrollToRelY(msg.Y-(rect.OY+1), rect.H-2)
+					m.scrollDragPaneID = rect.Pane.ID
+					m.scrollDragRect = *rect
+					m.selection = nil
+					return m, nil
+				}
 				// Pane area — start tracking for drag selection.
+				m.clearDragState()
 				m.mouseDown = true
-				m.notesMouseDown = false
 				m.mouseStartX = msg.X
 				m.mouseStartY = msg.Y
 				m.selection = nil
-				// Clicking in the pane area while notes mode is active
-				// hands keyboard focus to the pane.
 				if m.notesMode && m.notesEditor != nil {
 					m.notesPaneFocused = true
 				}
@@ -440,16 +464,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.MouseMotionMsg:
+		// Drag dispatch — at most one branch is active (clearDragState
+		// invariant). Off-Y=0 motion during a tab drag pauses reorder but
+		// keeps the drag alive so the user can return to the tab bar
+		// without releasing.
+		if m.tabDragFromIdx >= 0 && msg.Y == 0 {
+			target := m.hitTestTab(msg.X)
+			if target >= 0 && target != m.tabDragFromIdx && m.tabDragFromIdx < len(m.tabs) {
+				tabID := m.tabs[m.tabDragFromIdx].ID
+				if m.moveTab(m.tabDragFromIdx, target) {
+					m.tabDragFromIdx = target
+					return m, m.sendReorderTab(tabID, target)
+				}
+			}
+			return m, nil
+		}
+		if m.scrollDragPaneID != "" {
+			if pane := m.activePaneByID(m.scrollDragPaneID); pane != nil {
+				rect := m.scrollDragRect
+				pane.ScrollToRelY(msg.Y-(rect.OY+1), rect.H-2)
+			}
+			return m, nil
+		}
 		if m.notesMouseDown && m.notesMode && m.notesEditor != nil {
 			row, col, ok := m.notesEditorPosAt(msg.X, msg.Y)
 			if !ok {
 				return m, nil
 			}
-			// Begin selection on first motion (so a click without drag
-			// just positions the cursor) and extend on subsequent moves.
-			// The anchor was resolved at click time into notesAnchorRow/Col
-			// so selection start is independent of any scroll that may
-			// have occurred since the click.
 			if !m.notesEditor.HasSelection() {
 				m.notesEditor.BeginSelection(m.notesAnchorRow, m.notesAnchorCol)
 			}
@@ -466,10 +507,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.MouseReleaseMsg:
+		// A tab drag or scrollbar drag terminates here with no further
+		// processing — they don't share the click-vs-drag pane-focus
+		// fall-through path below.
+		if m.tabDragFromIdx >= 0 || m.scrollDragPaneID != "" {
+			m.clearDragState()
+			return m, nil
+		}
 		if m.notesMouseDown {
-			m.notesMouseDown = false
-			// If the selection is empty (single click without drag) we
-			// already positioned the cursor on click — nothing more to do.
+			m.clearDragState()
 			return m, nil
 		}
 		if m.mouseDown {
@@ -776,6 +822,105 @@ func (m Model) paneAreaWidth() int {
 	return m.width
 }
 
+// scrollbarHitPadding is how many cells on each side of the visible
+// scrollbar column also register as a scrollbar click. The visual
+// scrollbar stays 1 cell wide; the hit target is wider so a slightly off
+// click jumps the thumb instead of starting a 1-column text selection.
+// Trade-off: the rightmost `scrollbarHitPadding` content cells are no
+// longer selectable by clicking — drag selection still covers them.
+const scrollbarHitPadding = 1
+
+// hitTestScrollbar returns the pane rect under (x, y) when the click hits
+// the pane's scrollbar zone. The visible scrollbar lives at
+// `rect.OX + rect.W - 2` (just inside the right border); the hit zone
+// extends `scrollbarHitPadding` cells to either side so the target is
+// 1 + 2*padding cells wide. The valid Y range is the content area
+// (rows `rect.OY + 1` through `rect.OY + rect.H - 2` inclusive).
+func (m *Model) hitTestScrollbar(x, y int) *PaneRect {
+	tab := m.activeTabModel()
+	if tab == nil || tab.Root == nil {
+		return nil
+	}
+	tabH := m.height - chromeHeight
+	rect := tab.Root.FindPaneRectAt(x, y, 0, 1, m.paneAreaWidth(), tabH)
+	if rect == nil {
+		return nil
+	}
+	if rect.W < 4 || rect.H < 4 {
+		// Pane too small to render a meaningful scrollbar.
+		return nil
+	}
+	scrollbarX := rect.OX + rect.W - 2
+	contentTopY := rect.OY + 1
+	contentBottomY := rect.OY + rect.H - 2
+	if x < scrollbarX-scrollbarHitPadding || x > scrollbarX+scrollbarHitPadding {
+		return nil
+	}
+	if y < contentTopY || y > contentBottomY {
+		return nil
+	}
+	return rect
+}
+
+// clearDragState resets every mutually-exclusive drag flag in one place.
+//
+// Invariant: at most one drag is active at any time — tab reorder, pane
+// scrollbar, notes editor selection, and pane text selection cannot
+// coexist because each is started by a different (Y, X) region of a
+// MouseClickMsg. Routing every "start a new drag" / "drag ended" path
+// through this helper keeps the invariant enforced in one place rather
+// than spread across each click handler that has to remember to zero its
+// siblings.
+func (m *Model) clearDragState() {
+	m.tabDragFromIdx = -1
+	m.scrollDragPaneID = ""
+	m.scrollDragRect = PaneRect{}
+	m.mouseDown = false
+	m.notesMouseDown = false
+}
+
+// moveTab repositions m.tabs[from] to ordinal `to`, sliding the tabs
+// between them by one position. Other multiplexers and every browser tab
+// strip use this UX — a swap would teleport the displaced tab to the
+// dragged tab's old slot, which feels wrong when dragging across several
+// positions. The active tab follows the dragged tab.
+//
+// Returns true when the order actually changed.
+func (m *Model) moveTab(from, to int) bool {
+	if from == to || from < 0 || to < 0 || from >= len(m.tabs) || to >= len(m.tabs) {
+		return false
+	}
+	tab := m.tabs[from]
+	if from < to {
+		copy(m.tabs[from:to], m.tabs[from+1:to+1])
+	} else {
+		copy(m.tabs[to+1:from+1], m.tabs[to:from])
+	}
+	m.tabs[to] = tab
+	// activeTab tracks position, not identity — adjust to the dragged
+	// tab's new ordinal so the visual selection follows it.
+	m.activeTab = to
+	return true
+}
+
+// activePaneByID returns the pane with the given ID from the active tab,
+// or nil if no such pane exists. Used to look up the drag target across
+// MouseMotion / MouseRelease events. The active tab may change between
+// the click and a motion event (e.g. the user pressed Alt+2 mid-drag);
+// in that case the drag is silently dropped on the next motion.
+func (m *Model) activePaneByID(id string) *PaneModel {
+	tab := m.activeTabModel()
+	if tab == nil || tab.Root == nil {
+		return nil
+	}
+	for _, p := range tab.Root.Leaves() {
+		if p.ID == id {
+			return p
+		}
+	}
+	return nil
+}
+
 func (m Model) sidebarTick() tea.Cmd {
 	return tea.Tick(10*time.Second, func(_ time.Time) tea.Msg {
 		return sidebarTickMsg{}
@@ -972,30 +1117,34 @@ func (m Model) notesKeyExempt(key string) bool {
 	// the global handler runs NavigateDirection to the closest neighbor.
 	// Alt+Left and Alt+Right are handled by the notes-mode focus toggle
 	// earlier in handleKey and never reach this function.
-	if (kb.PaneUp != "" && key == kb.PaneUp) ||
-		(kb.PaneDown != "" && key == kb.PaneDown) {
-		return true
+	exempt := []string{
+		// Vertical spatial nav — there's no up/down axis in the notes 2-panel
+		// layout (pane|editor), so Alt+Up/Alt+Down flush and exit notes, then
+		// the global handler runs NavigateDirection to the closest neighbor.
+		// Alt+Left and Alt+Right are handled by the notes-mode focus toggle
+		// earlier in handleKey and never reach this function.
+		kb.PaneUp, kb.PaneDown,
+		// Structural — close/split implicitly destroys the bound pane and must
+		// flush + exit notes before running.
+		kb.ClosePane, kb.CloseTab, kb.SplitHorizontal, kb.SplitVertical,
+		// Tab management.
+		kb.NewTab, kb.RenameTab, kb.RenamePane, kb.CycleTabColor,
+		// Other modes.
+		kb.FocusPane,
+		// Notification center.
+		kb.NotificationToggle, kb.NotificationFocus, kb.GoBack,
+		// Tools and dialogs.
+		kb.JSONTransform, kb.QuickActions,
+	}
+	for _, b := range exempt {
+		if kbMatches(key, b) {
+			return true
+		}
 	}
 	switch key {
-	// Structural — close/split implicitly destroys the bound pane and must
-	// flush + exit notes before running.
-	case kb.ClosePane, kb.CloseTab, kb.SplitHorizontal, kb.SplitVertical:
+	case "f1", "ctrl+n":
 		return true
-	// Tab management.
-	case kb.NewTab, kb.RenameTab, kb.RenamePane, kb.CycleTabColor:
-		return true
-	// Other modes.
-	case kb.FocusPane:
-		return true
-	// Notification center.
-	case kb.NotificationToggle, kb.NotificationFocus, kb.GoBack:
-		return true
-	// Tools and dialogs.
-	case kb.JSONTransform, kb.QuickActions, "f1", "ctrl+n":
-		return true
-	}
 	// Alt+1..9 tab switching.
-	switch key {
 	case "alt+1", "alt+2", "alt+3", "alt+4",
 		"alt+5", "alt+6", "alt+7", "alt+8", "alt+9":
 		return true
@@ -1151,19 +1300,19 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// Universal keys — handled the same way regardless of which side
 		// currently has focus.
 		switch {
-		case key == kb.NotesToggle:
+		case kbMatches(key, kb.NotesToggle):
 			return m.exitNotesMode()
-		case key == kb.Quit:
+		case kbMatches(key, kb.Quit):
 			if err := m.notesEditor.Close(); err != nil {
 				log.Printf("save notes on quit: %v", err)
 			}
 			return m, tea.Quit
-		case kb.PaneLeft != "" && key == kb.PaneLeft:
+		case kbMatches(key, kb.PaneLeft):
 			// Alt+Left — focus the bound pane (on the left in notes layout).
 			// Idempotent: no-op if the pane is already focused.
 			m.notesPaneFocused = true
 			return m, nil
-		case kb.PaneRight != "" && key == kb.PaneRight:
+		case kbMatches(key, kb.PaneRight):
 			// Alt+Right — focus the editor (on the right in notes layout).
 			// Idempotent: no-op if the editor is already focused.
 			m.notesPaneFocused = false
@@ -1174,8 +1323,8 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// the bound pane. Flush + exit notes first, regardless of which
 		// side currently has focus, then fall through to the normal
 		// handler so the structural action still fires.
-		structural := key == kb.ClosePane || key == kb.CloseTab ||
-			key == kb.SplitHorizontal || key == kb.SplitVertical
+		structural := kbMatches(key, kb.ClosePane) || kbMatches(key, kb.CloseTab) ||
+			kbMatches(key, kb.SplitHorizontal) || kbMatches(key, kb.SplitVertical)
 		if structural {
 			m.exitNotesModeInPlace()
 		} else if m.notesPaneFocused {
@@ -1199,7 +1348,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	// Notification sidebar keybindings (always available)
 	switch {
-	case key == kb.NotificationToggle:
+	case kbMatches(key, kb.NotificationToggle):
 		// Alt+N: toggle visibility only, never focus
 		m.notifications.visible = !m.notifications.visible
 		m.sidebarFocused = false
@@ -1207,14 +1356,14 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(tea.ClearScreen, m.resizeAllPanes(), m.sidebarTick())
 		}
 		return m, tea.Batch(tea.ClearScreen, m.resizeAllPanes())
-	case key == kb.NotificationFocus:
+	case kbMatches(key, kb.NotificationFocus):
 		// Ctrl+Alt+N: open (if hidden) and focus sidebar
 		if !m.notifications.visible {
 			m.notifications.visible = true
 		}
 		m.sidebarFocused = true
 		return m, tea.Batch(tea.ClearScreen, m.resizeAllPanes(), m.sidebarTick())
-	case key == kb.GoBack:
+	case kbMatches(key, kb.GoBack):
 		return m.popPaneHistory()
 	}
 
@@ -1273,13 +1422,13 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 
 	switch {
-	case key == kb.Quit:
+	case kbMatches(key, kb.Quit):
 		return m, tea.Quit
 
-	case key == kb.NewTab:
+	case kbMatches(key, kb.NewTab):
 		return m, m.createTab()
 
-	case key == kb.ClosePane:
+	case kbMatches(key, kb.ClosePane):
 		if tab := m.activeTabModel(); tab != nil {
 			if pane := tab.ActivePaneModel(); pane != nil {
 				m.dialog = dialogConfirm
@@ -1300,7 +1449,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.ClearScreen
 
-	case key == kb.CloseTab:
+	case kbMatches(key, kb.CloseTab):
 		if tab := m.activeTabModel(); tab != nil {
 			m.dialog = dialogConfirm
 			m.confirmKind = "tab"
@@ -1309,26 +1458,26 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.ClearScreen
 
-	case key == kb.SplitHorizontal:
+	case kbMatches(key, kb.SplitHorizontal):
 		if tab := m.activeTabModel(); tab != nil && tab.FocusMode() {
 			tab.ExitFocus()
 		}
 		return m, m.splitPane(SplitHorizontal)
 
-	case key == kb.SplitVertical:
+	case kbMatches(key, kb.SplitVertical):
 		if tab := m.activeTabModel(); tab != nil && tab.FocusMode() {
 			tab.ExitFocus()
 		}
 		return m, m.splitPane(SplitVertical)
 
-	case key == kb.RenameTab:
+	case kbMatches(key, kb.RenameTab):
 		if tab := m.activeTabModel(); tab != nil {
 			m.renaming = true
 			m.renameInput = tab.Name
 		}
 		return m, nil
 
-	case key == kb.RenamePane:
+	case kbMatches(key, kb.RenamePane):
 		if tab := m.activeTabModel(); tab != nil {
 			if pane := tab.ActivePaneModel(); pane != nil {
 				m.renamingPane = true
@@ -1337,10 +1486,10 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case key == kb.CycleTabColor:
+	case kbMatches(key, kb.CycleTabColor):
 		return m, m.cycleTabColor()
 
-	case key == kb.ScrollPageUp:
+	case kbMatches(key, kb.ScrollPageUp):
 		if tab := m.activeTabModel(); tab != nil {
 			if pane := tab.ActivePaneModel(); pane != nil {
 				lines := m.cfg.UI.PageScrollLines
@@ -1352,7 +1501,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case key == kb.ScrollPageDown:
+	case kbMatches(key, kb.ScrollPageDown):
 		if tab := m.activeTabModel(); tab != nil {
 			if pane := tab.ActivePaneModel(); pane != nil {
 				lines := m.cfg.UI.PageScrollLines
@@ -1364,43 +1513,43 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case kb.NextPane != "" && key == kb.NextPane:
+	case kbMatches(key, kb.NextPane):
 		if tab := m.activeTabModel(); tab != nil && !tab.FocusMode() {
 			tab.NextPane()
 		}
 		return m, nil
 
-	case kb.PrevPane != "" && key == kb.PrevPane:
+	case kbMatches(key, kb.PrevPane):
 		if tab := m.activeTabModel(); tab != nil && !tab.FocusMode() {
 			tab.PrevPane()
 		}
 		return m, nil
 
-	case kb.PaneLeft != "" && key == kb.PaneLeft:
+	case kbMatches(key, kb.PaneLeft):
 		if tab := m.activeTabModel(); tab != nil {
 			tab.NavigateDirection(DirLeft)
 		}
 		return m, nil
 
-	case kb.PaneRight != "" && key == kb.PaneRight:
+	case kbMatches(key, kb.PaneRight):
 		if tab := m.activeTabModel(); tab != nil {
 			tab.NavigateDirection(DirRight)
 		}
 		return m, nil
 
-	case kb.PaneUp != "" && key == kb.PaneUp:
+	case kbMatches(key, kb.PaneUp):
 		if tab := m.activeTabModel(); tab != nil {
 			tab.NavigateDirection(DirUp)
 		}
 		return m, nil
 
-	case kb.PaneDown != "" && key == kb.PaneDown:
+	case kbMatches(key, kb.PaneDown):
 		if tab := m.activeTabModel(); tab != nil {
 			tab.NavigateDirection(DirDown)
 		}
 		return m, nil
 
-	case key == kb.Paste, key == "ctrl+alt+v", key == "f8":
+	case kbMatches(key, kb.Paste), key == "ctrl+alt+v", key == "f8":
 		// Multiple aliases for paste because Windows Terminal captures the
 		// default Ctrl+V binding for its own paste action and never delivers
 		// the key event to the TUI:
@@ -1412,7 +1561,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		//                        no AltGr ambiguity (recommended on Windows)
 		return m, m.pasteClipboard()
 
-	case key == kb.FocusPane:
+	case kbMatches(key, kb.FocusPane):
 		if tab := m.activeTabModel(); tab != nil && tab.Root != nil {
 			tab.ToggleFocus()
 			m.resizeTabs()
@@ -1420,7 +1569,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case key == kb.NotesToggle:
+	case kbMatches(key, kb.NotesToggle):
 		return m.toggleNotesMode()
 
 	case key == "ctrl+n":
@@ -1462,6 +1611,15 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 func (m Model) handleRenameKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 
+	// Tab rename mutates the tab bar's width: each typed character grows
+	// the active tab cell, shifting every neighbor to the right. Bubble Tea
+	// v2's cell-diff renderer occasionally leaves stale glyphs where the
+	// previous-shorter render ended, producing visible tab-label overlap
+	// that only goes away on a window resize. Every tab-bar-width-changing
+	// key returns tea.ClearScreen so the next frame is a full repaint —
+	// the same pattern used elsewhere in the codebase ("width changes —
+	// force full redraw"). The cost is one extra clear+repaint per keypress
+	// during an explicit rename, which is imperceptible.
 	switch key {
 	case "enter":
 		m.renaming = false
@@ -1469,26 +1627,32 @@ func (m Model) handleRenameKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if name != "" {
 			if tab := m.activeTabModel(); tab != nil {
 				tab.Name = name
-				return m, m.updateTab(tab.ID, name, tab.Color)
+				return m, tea.Batch(tea.ClearScreen, m.updateTab(tab.ID, name, tab.Color))
 			}
 		}
-		return m, nil
+		return m, tea.ClearScreen
 
 	case "escape":
 		m.renaming = false
-		return m, nil
+		return m, tea.ClearScreen
 
 	case "backspace":
 		if len(m.renameInput) > 0 {
 			m.renameInput = m.renameInput[:len(m.renameInput)-1]
 		}
-		return m, nil
+		return m, tea.ClearScreen
 
 	default:
+		changed := false
 		if len(key) == 1 {
 			m.renameInput += key
+			changed = true
 		} else if key == "space" {
 			m.renameInput += " "
+			changed = true
+		}
+		if changed {
+			return m, tea.ClearScreen
 		}
 		return m, nil
 	}
@@ -1891,6 +2055,22 @@ func (m *Model) switchTab(idx int) tea.Cmd {
 	}
 }
 
+// tabLabel returns the label text rendered inside a tab cell at index idx.
+// The active tab is prefixed with "* " so it's visible at a glance even when
+// colored tabs override the bold-active styling. `renderTabBar` and
+// `hitTestTab` MUST go through this helper so click coordinates stay aligned
+// with the rendered widths.
+func (m Model) tabLabel(idx int) string {
+	if m.renaming && idx == m.activeTab {
+		return "* " + m.renameInput + "▎"
+	}
+	name := fmt.Sprintf("%d:%s", idx+1, m.tabs[idx].Name)
+	if idx == m.activeTab {
+		return "* " + name
+	}
+	return name
+}
+
 func (m Model) renderTabBar() string {
 	if len(m.tabs) == 0 {
 		return lipgloss.NewStyle().Width(m.width).Render("")
@@ -1904,12 +2084,7 @@ func (m Model) renderTabBar() string {
 	// Pre-render all tabs
 	all := make([]renderedTab, len(m.tabs))
 	for i, tab := range m.tabs {
-		name := tab.Name
-		if m.renaming && i == m.activeTab {
-			name = m.renameInput + "▎"
-		} else {
-			name = fmt.Sprintf("%d:%s", i+1, name)
-		}
+		name := m.tabLabel(i)
 
 		style := inactiveTabStyle
 		if i == m.activeTab {
@@ -2019,12 +2194,7 @@ func (m *Model) hitTestTab(x int) int {
 	// Pre-render tab widths using the same styling as renderTabBar.
 	all := make([]renderedTab, len(m.tabs))
 	for i, tab := range m.tabs {
-		name := tab.Name
-		if m.renaming && i == m.activeTab {
-			name = m.renameInput + "▎"
-		} else {
-			name = fmt.Sprintf("%d:%s", i+1, name)
-		}
+		name := m.tabLabel(i)
 
 		style := inactiveTabStyle
 		if i == m.activeTab {
@@ -2428,6 +2598,22 @@ func (m Model) updateTab(tabID, name, color string) tea.Cmd {
 			Color: color,
 		})
 		m.client.Send(msg)
+		return nil
+	}
+}
+
+// sendReorderTab fires a MsgReorderTab IPC for a drag-induced tab move.
+// The daemon snapshots + broadcasts; the next workspace_state arriving at
+// the TUI just confirms what we already rearranged locally.
+func (m Model) sendReorderTab(tabID string, newIdx int) tea.Cmd {
+	return func() tea.Msg {
+		msg, _ := ipc.NewMessage(ipc.MsgReorderTab, ipc.ReorderTabPayload{
+			TabID:    tabID,
+			NewIndex: newIdx,
+		})
+		if m.client != nil {
+			_ = m.client.Send(msg)
+		}
 		return nil
 	}
 }

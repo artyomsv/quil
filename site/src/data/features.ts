@@ -126,7 +126,9 @@ export const features: Feature[] = [
     detail: [
       "Binary split tree, each split with its own direction and ratio.",
       "Click any pane to focus it; scroll wheel traverses terminal history.",
+      "Click the scrollbar to jump the thumb; click-and-drag scrolls continuously. The hit zone is three cells wide so off-by-one clicks register as scroll instead of text selection.",
       "Spatial pane navigation: Alt+Left/Right/Up/Down focuses the closest neighbour in that direction. Three tie-breakers (gap, perpendicular overlap, perpendicular center distance) match tmux/vim/iTerm muscle memory.",
+      "Drag any tab in the tab bar to reorder it — intermediate tabs slide one slot at a time. A click without motion still switches tabs. The active tab is prefixed with `* ` so it's visible at a glance even when colored.",
       "Tab and Shift+Tab are deliberately NOT bound globally — they fall through to the PTY so shell completion and Claude Code's mode-cycling work naturally. Splits live on Alt+Shift+H / Alt+Shift+V to keep Alt+V free for Claude Code's image paste.",
       "Focus mode (Ctrl+E) expands the active pane full-screen while others keep running in the background.",
     ],

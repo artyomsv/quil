@@ -151,6 +151,50 @@ func (p *PaneModel) ResetScroll() {
 	p.scrollBack = 0
 }
 
+// ScrollToRelY positions the scrollback so that the scrollbar thumb's TOP
+// row lands at relY (relative to the content area, 0..innerH-1). Inverse
+// of the thumb-position formula in renderScrollback — a click at row R
+// puts the thumb's top at R, matching standard GUI scrollbar UX.
+//
+// CONTRACT (must stay in sync with renderScrollback):
+//
+//	renderScrollback:  thumbSize = max(1, h*h/totalLines)
+//	                   thumbPos  = viewStart * (h - thumbSize) / scrollRange
+//	                              where scrollRange = totalLines - h = sbLen
+//	this fn (inverse): viewStart = relY * sbLen / (innerH - thumbSize)
+//
+// Drift between the two is a silent UX bug. The integer math is safe on
+// every supported quil platform (Go int is 64-bit on amd64 and arm64);
+// even a million-line scrollback with a thousand-row pane multiplies to
+// well under 2^63.
+//
+// Out-of-range relY clamps to the valid scroll extent. Returns silently
+// (no-op) when there's no scrollback to scroll into or the visible area
+// is large enough to hold every line (no scrollable range).
+func (p *PaneModel) ScrollToRelY(relY, innerH int) {
+	sbLen := p.vt.ScrollbackLen()
+	if sbLen <= 0 || innerH <= 0 {
+		return
+	}
+	totalLines := sbLen + innerH
+	thumbSize := innerH * innerH / totalLines
+	if thumbSize < 1 {
+		thumbSize = 1
+	}
+	maxThumbPos := innerH - thumbSize
+	if maxThumbPos <= 0 {
+		return
+	}
+	if relY < 0 {
+		relY = 0
+	}
+	if relY > maxThumbPos {
+		relY = maxThumbPos
+	}
+	viewStart := relY * sbLen / maxThumbPos
+	p.scrollBack = sbLen - viewStart
+}
+
 func (p *PaneModel) View() string {
 	borderColor := lipgloss.Color("238")
 	if p.Active {

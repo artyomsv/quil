@@ -55,6 +55,10 @@ highlight_duration = "10s"      # border flash duration when AI touches a pane
 sidebar_width = 30              # columns reserved for the notification sidebar
 max_events = 200                # ring-buffer cap (per daemon, both sidebar and MCP)
 
+[notification.hooks]
+claude = "default"              # "default" | "verbose" | "off"
+opencode = "default"            # same
+
 [keybindings]
 quit = "ctrl+q"
 new_tab = "ctrl+t"
@@ -129,6 +133,17 @@ The "ghost buffer" is the rendered preview Quil shows immediately on reconnect, 
 |---|---|---|---|
 | `sidebar_width` | int | `30` | Columns reserved for the notification sidebar when toggled (`Alt+N`). Reducing this gives more room to panes; values below ~25 truncate event titles and excerpts heavily. |
 | `max_events` | int | `200` | Ring-buffer cap for the daemon's notification queue. The sidebar and MCP `get_notifications` both read from this queue. Each event is bounded to ≤ 4 KiB `Message` + ≤ 1 KiB per `Data` value (`_quil_truncated` flag set when truncated). |
+
+### `[notification.hooks]`
+
+Hook-driven notifications surface structured events from Claude Code and OpenCode (permission asks, retries, "reply ready", file edits, …) instead of guessing from the PTY byte stream. The daemon writes the resolved tier to the hook script's environment via `QUIL_HOOK_MODE` at pane spawn so the script can branch on it.
+
+| Key | Type | Default | What it does |
+|---|---|---|---|
+| `claude` | string | `"default"` | Tier for Claude Code panes. `"default"` forwards SessionEnd, UserPromptSubmit, Notification, PermissionRequest, Stop, PreCompact, PostCompact, SubagentStart/Stop, TaskCreated/TaskCompleted. `"verbose"` additionally forwards PreToolUse/PostToolUse (one card per tool call — useful for debugging, noisy in normal use). `"off"` disables hook event forwarding entirely; Quil falls back to the legacy PTY-byte idle heuristic. |
+| `opencode` | string | `"default"` | Tier for OpenCode panes. `"default"` forwards session.idle/error/compacted, session.status retry only, file.edited batched 1 s, permission.ask, experimental.session.compacting. `"verbose"` adds tool.execute.before/after. `"off"` disables hook event forwarding. |
+
+The hook events flow through a JSONL spool (`~/.quil/events/<paneID>.jsonl`) that the daemon polls every 200 ms. Truncated on daemon start (no replay of stale events); deleted on pane destroy.
 
 ## `[keybindings]`
 

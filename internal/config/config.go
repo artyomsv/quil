@@ -21,8 +21,20 @@ type Config struct {
 }
 
 type NotificationConfig struct {
-	SidebarWidth int `toml:"sidebar_width"` // default 30
-	MaxEvents    int `toml:"max_events"`    // default 50
+	SidebarWidth int                 `toml:"sidebar_width"` // default 30
+	MaxEvents    int                 `toml:"max_events"`    // default 200
+	Hooks        HookNotificationsConfig `toml:"hooks"`
+}
+
+// HookNotificationsConfig controls which hook-driven events get spool-emitted
+// per source. Tier values are "default" / "verbose" / "off". Daemon passes
+// the resolved value to the hook scripts via the QUIL_HOOK_MODE env var at
+// pane spawn so the script can branch on it (default → forward the v1 tier;
+// verbose → also forward tool-use + pre/post events; off → no spool writes
+// at all). Unset = "default" downstream.
+type HookNotificationsConfig struct {
+	Claude   string `toml:"claude"`
+	OpenCode string `toml:"opencode"`
 }
 
 type MCPConfig struct {
@@ -146,6 +158,10 @@ func Default() Config {
 		Notification: NotificationConfig{
 			SidebarWidth: 30,
 			MaxEvents:    200,
+			Hooks: HookNotificationsConfig{
+				Claude:   "default",
+				OpenCode: "default",
+			},
 		},
 		Keybindings: KeybindingsConfig{
 			Quit:            "ctrl+q",

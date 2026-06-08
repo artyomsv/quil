@@ -1387,7 +1387,7 @@ var opencodeHookScriptStatFn = func(path string) error {
 // entries against its own CWD, not the daemon's. With `prompts_cwd = true`
 // the child CWD is user-chosen and may differ from where the daemon was
 // launched, so a relative quilDir would silently break tracking.
-func opencodeSpawnPrep(quilDir, paneID string) []string {
+func opencodeSpawnPrep(quilDir, paneID, hookMode string) []string {
 	absQuilDir, err := filepath.Abs(quilDir)
 	if err != nil {
 		log.Printf("warning: pane %s: absolutize quilDir %q: %v — session-id rotation tracking disabled", paneID, quilDir, err)
@@ -1403,9 +1403,14 @@ func opencodeSpawnPrep(quilDir, paneID string) []string {
 		log.Printf("warning: pane %s: build opencode config content: %v — session-id rotation tracking disabled", paneID, err)
 		return nil
 	}
+	mode := hookMode
+	if mode == "" {
+		mode = "default"
+	}
 	return []string{
 		"QUIL_PANE_ID=" + paneID,
 		"QUIL_HOME=" + absQuilDir,
+		"QUIL_HOOK_MODE=" + mode,
 		"OPENCODE_CONFIG_CONTENT=" + cfg,
 	}
 }
@@ -1417,7 +1422,7 @@ func opencodeSpawnPrep(quilDir, paneID string) []string {
 // pre-feature behaviour rather than failing the whole spawn. Logs a warning
 // if userArgs already contain --settings; Claude treats later wins, so our
 // prepend silently overrides the user's value.
-func claudeHookSpawnPrep(quilDir, paneID string, userArgs []string) (prefix, env []string) {
+func claudeHookSpawnPrep(quilDir, paneID, hookMode string, userArgs []string) (prefix, env []string) {
 	scriptPath := claudehook.ScriptPath(quilDir)
 	if err := claudeHookScriptStatFn(scriptPath); err != nil {
 		log.Printf("warning: pane %s: claude hook script unavailable (%s): %v — session-id rotation tracking disabled", paneID, scriptPath, err)
@@ -1434,7 +1439,14 @@ func claudeHookSpawnPrep(quilDir, paneID string, userArgs []string) (prefix, env
 			break
 		}
 	}
-	return []string{"--settings", js}, []string{"QUIL_PANE_ID=" + paneID}
+	mode := hookMode
+	if mode == "" {
+		mode = "default"
+	}
+	return []string{"--settings", js}, []string{
+		"QUIL_PANE_ID=" + paneID,
+		"QUIL_HOOK_MODE=" + mode,
+	}
 }
 
 // escapeClaudeCWD mirrors Claude Code's on-disk naming for per-project
@@ -1706,13 +1718,13 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 	envVars := append([]string{}, p.Command.Env...)
 	switch p.Name {
 	case "claude-code":
-		settingsArgs, hookEnv := claudeHookSpawnPrep(config.QuilDir(), pane.ID, args)
+		settingsArgs, hookEnv := claudeHookSpawnPrep(config.QuilDir(), pane.ID, d.cfg.Notification.Hooks.Claude, args)
 		if len(settingsArgs) > 0 {
 			args = append(settingsArgs, args...)
 		}
 		envVars = append(envVars, hookEnv...)
 	case "opencode":
-		envVars = append(envVars, opencodeSpawnPrep(config.QuilDir(), pane.ID)...)
+		envVars = append(envVars, opencodeSpawnPrep(config.QuilDir(), pane.ID, d.cfg.Notification.Hooks.OpenCode)...)
 	}
 
 	if len(envVars) > 0 {

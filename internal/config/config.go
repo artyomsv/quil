@@ -282,6 +282,16 @@ func ClaudeHookDir() string {
 	return filepath.Join(QuilDir(), "claudehook")
 }
 
+// EventsDir returns the directory where Claude / opencode hooks append
+// per-pane JSONL event spool files (<paneID>.jsonl). The daemon's
+// hookEventsWatcher polls these files on a 200 ms ticker, parses new
+// lines, and feeds them through hookevents.Ingester → eventQueue → IPC
+// fan-out. Truncated at daemon start (no replay of stale events); files
+// for destroyed panes are unlinked.
+func EventsDir() string {
+	return filepath.Join(QuilDir(), "events")
+}
+
 // SessionsDir returns the directory where the Claude Code SessionStart hook
 // writes per-pane session id files (<paneID>.id). Read on daemon restore
 // by resumeTemplateFor so panes reattach to the latest session id after

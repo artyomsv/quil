@@ -24,6 +24,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/artyomsv/quil/internal/claudehook"
 	"github.com/artyomsv/quil/internal/config"
+	"github.com/artyomsv/quil/internal/hookevents"
 	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/logger"
 	memreport "github.com/artyomsv/quil/internal/memreport"
@@ -59,6 +60,15 @@ type Daemon struct {
 
 	memReport   *memreport.Collector
 	collectorWG sync.WaitGroup
+
+	// hookIngester translates hookevents.Payload (from spool reads / future
+	// IPC submissions) into PaneEvents via emitHookEvent. Lazily initialised
+	// in Start once the events dir is ready; nil before Start.
+	hookIngester *hookevents.Ingester
+	// hookSpool reads $QUIL_HOME/events/<paneID>.jsonl appended by the
+	// Claude .sh / opencode .js hook scripts. Polled by hookEventsWatcher
+	// every 200 ms while the daemon runs.
+	hookSpool *hookevents.Spool
 }
 
 func New(cfg config.Config) *Daemon {
@@ -107,6 +117,15 @@ func (d *Daemon) Start() error {
 		log.Printf("warning: failed to create sessions dir: %v", err)
 	}
 
+	// Hook event ingest plumbing: spool reader + ingester (rate limit +
+	// coalesce) feeding emitHookEvent. Init truncates stale spool files so
+	// the daemon never replays notifications from a prior session.
+	d.hookSpool = hookevents.NewSpool(config.EventsDir())
+	if err := d.hookSpool.Init(); err != nil {
+		log.Printf("warning: failed to init hook events spool: %v", err)
+	}
+	d.hookIngester = hookevents.NewIngester(d.emitHookEvent)
+
 	// Write default plugin TOML files if missing, then load all plugins
 	if _, err := plugin.EnsureDefaultPlugins(config.PluginsDir()); err != nil {
 		log.Printf("warning: failed to write default plugins: %v", err)
@@ -137,6 +156,7 @@ func (d *Daemon) Start() error {
 	}
 
 	go d.idleChecker()
+	go d.hookEventsWatcher()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
@@ -938,6 +958,13 @@ func (d *Daemon) handleDestroyPane(msg *ipc.Message) {
 		tabID = pane.TabID
 	}
 	log.Printf("pane destroy: %s (tab=%s)", payload.PaneID, tabID)
+
+	// Tear down the pane's hook event spool file before destroying the
+	// pane itself — the watcher's next tick must not pick up stale lines
+	// from a destroyed pane.
+	if d.hookSpool != nil {
+		d.hookSpool.Cleanup(payload.PaneID)
+	}
 
 	d.session.DestroyPane(payload.PaneID)
 
@@ -1778,6 +1805,105 @@ func (d *Daemon) emitEvent(e PaneEvent) {
 }
 
 // idleChecker runs a periodic check for panes that have gone idle.
+// hookEventsWatcher polls the hook event spool every 200 ms while the daemon
+// runs, submitting each new payload to the Ingester which then forwards
+// (after rate-limit + coalesce) to emitHookEvent. Mirrors idleChecker's
+// shutdown discipline: select on d.shutdown so Stop() drains cleanly.
+//
+// 200 ms is a tradeoff between latency and CPU. With the spool being just
+// stat+seek+read per file, ten panes cost ~50 µs/tick — negligible — while
+// a 200 ms p99 latency from hook fire to sidebar render keeps the user's
+// perception of "instant" intact.
+func (d *Daemon) hookEventsWatcher() {
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-d.shutdown:
+			// Final drain so any in-flight bursts surface before close.
+			if d.hookIngester != nil {
+				d.hookIngester.FlushAll()
+			}
+			return
+		case <-ticker.C:
+			if d.hookSpool == nil || d.hookIngester == nil {
+				continue
+			}
+			for _, p := range d.hookSpool.Tick() {
+				d.hookIngester.Submit(p)
+			}
+		}
+	}
+}
+
+// emitHookEvent is the bridge from hookevents.Payload (post rate-limit and
+// coalesce) to the daemon's PaneEvent emission funnel. Looks up the pane
+// to enrich with TabID/Name (which the hook side does not know), marks the
+// pane HookHealthy so the legacy idle checker steps aside, then routes
+// through the existing emitEvent so mute, aggregation, and the broadcast
+// path all apply.
+//
+// A pane that has been destroyed between the hook write and the spool
+// read silently drops here — the lookup returns nil and we return without
+// emit. Same trust boundary as the rest of the IPC surface.
+func (d *Daemon) emitHookEvent(p hookevents.Payload) {
+	pane := d.session.Pane(p.PaneID)
+	if pane == nil {
+		logger.Debug("hook event for unknown pane=%s src=%s hook_event=%s",
+			p.PaneID, p.Source, p.HookEvent)
+		return
+	}
+
+	pane.PluginMu.Lock()
+	pane.HookHealthy = true
+	pane.LastHookEventAt = time.Now()
+	pane.PluginMu.Unlock()
+
+	// Compose the PaneEvent. The Type field encodes the source so MCP
+	// consumers can filter by "hook.claude.*" or "hook.opencode.*" without
+	// parsing the title. Severity defaults to info when the hook omitted it.
+	severity := p.Severity
+	if severity == "" {
+		severity = hookevents.SeverityInfo
+	}
+	eventType := "hook." + p.Source + "." + p.HookEvent
+	ts := time.UnixMilli(p.TsMs)
+	if p.TsMs == 0 {
+		ts = time.Now()
+	}
+
+	// Copy Data so the Payload's map is not aliased downstream — the
+	// Ingester may still hold a reference, and emitEvent's aggregation may
+	// mutate Data["count"].
+	var data map[string]string
+	if len(p.Data) > 0 {
+		data = make(map[string]string, len(p.Data)+2)
+		for k, v := range p.Data {
+			data[k] = v
+		}
+	}
+	// Enrich with source-tracking metadata so MCP consumers do not need to
+	// re-parse the Type prefix.
+	if data == nil {
+		data = make(map[string]string, 2)
+	}
+	data["hook_source"] = p.Source
+	data["hook_event"] = p.HookEvent
+
+	d.emitEvent(PaneEvent{
+		ID:        uuid.New().String(),
+		PaneID:    p.PaneID,
+		TabID:     pane.TabID,
+		PaneName:  pane.Name,
+		Type:      eventType,
+		Title:     p.Title,
+		Message:   data["preview"], // optional excerpt-like preview from the hook
+		Severity:  severity,
+		Timestamp: ts,
+		Data:      data,
+	})
+}
+
 func (d *Daemon) idleChecker() {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
@@ -1799,9 +1925,17 @@ func (d *Daemon) checkIdlePanes() {
 		for _, pane := range d.session.Panes(tab.ID) {
 			// Single lock span: read + conditionally write to avoid race with flushPaneOutput
 			pane.PluginMu.Lock()
+			// Suppress the legacy idle excerpt when the pane's hook is
+			// actively delivering ground-truth events. A 30 s grace period
+			// catches the case where hooks load successfully but the AI
+			// tool sits quiet for an extended turn — the legacy idle then
+			// reactivates as a fallback so the user is never left with
+			// zero notification signal.
+			hookActive := pane.HookHealthy && now.Sub(pane.LastHookEventAt) < 30*time.Second
 			shouldFire := !pane.IdleNotified &&
 				!pane.LastOutputAt.IsZero() &&
 				pane.ExitCode == nil &&
+				!hookActive &&
 				(pane.LastIdleEventAt.IsZero() || now.Sub(pane.LastIdleEventAt) >= cooldown) &&
 				now.Sub(pane.LastOutputAt) >= threshold
 			if shouldFire {
@@ -2479,6 +2613,12 @@ func (d *Daemon) handleDestroyPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 		return
 	}
 	d.highlightPane(pane.ID)
+
+	// Same hook-events cleanup as handleDestroyPane: kill the spool file
+	// before the pane disappears so the watcher does not race the destroy.
+	if d.hookSpool != nil {
+		d.hookSpool.Cleanup(req.PaneID)
+	}
 
 	tabID := pane.TabID
 	if err := d.session.DestroyPane(req.PaneID); err != nil {

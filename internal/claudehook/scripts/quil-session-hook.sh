@@ -1,14 +1,27 @@
 #!/bin/sh
-# Quil SessionStart hook for Claude Code.
+# Quil hook handler for Claude Code (multi-event v1).
 #
-# Receives Claude's hook JSON on stdin, extracts session_id, and writes it
-# atomically to $QUIL_HOME/sessions/$QUIL_PANE_ID.id. QUIL_PANE_ID is set by
-# Quil at pane spawn; when unset the hook is a no-op (Claude invoked outside
-# Quil). Always exits 0 so Claude is never blocked by our bookkeeping.
+# Quil registers this script under multiple Claude hook events via
+# --settings. Claude invokes it once per fired event with a JSON payload on
+# stdin including a `hook_event_name` discriminator and event-specific
+# fields. We branch on hook_event_name and route to one of two outputs:
 #
-# Failure breadcrumbs are appended to $QUIL_HOME/claudehook/hook.log so a
-# silently-broken hook is detectable from the logs (otherwise the rotation
-# tracking would silently regress to the preassigned session id).
+#   - SessionStart → atomically write the session id to
+#     $QUIL_HOME/sessions/$QUIL_PANE_ID.id so Quil's restore path can
+#     dispatch --resume vs --continue. (Unchanged from the original
+#     SessionStart-only hook.)
+#
+#   - Every other forwarded event → append one JSONL line to
+#     $QUIL_HOME/events/$QUIL_PANE_ID.jsonl carrying the Quil hookevents
+#     wire schema (v=1, ts_ms, seq, pane_id, src=claude, hook_event, title,
+#     sev, data). The daemon's hookEventsWatcher picks the line up within
+#     200 ms, runs it through rate-limit + coalesce, and emits a PaneEvent.
+#
+# QUIL_PANE_ID and QUIL_HOME are set by Quil at pane spawn. When either is
+# unset the hook is a no-op (Claude invoked outside Quil).
+#
+# Always exit 0 so Claude is never blocked by our bookkeeping. Failure
+# breadcrumbs land in $QUIL_HOME/claudehook/hook.log.
 
 set -u
 
@@ -28,47 +41,201 @@ log_err() {
         >>"$log_file" 2>/dev/null || true
 }
 
-sessions_dir="$quil_home/sessions"
-if ! mkdir -p "$sessions_dir" 2>/dev/null; then
-    log_err "mkdir sessions dir failed: $sessions_dir"
-    exit 0
-fi
-
+# Stdin is consumed exactly once; everything else reads from $payload.
 payload="$(cat)"
 
-session_id=""
-if command -v jq >/dev/null 2>&1; then
-    session_id="$(printf '%s' "$payload" | jq -r '.session_id // empty' 2>/dev/null || true)"
-fi
-if [ -z "$session_id" ]; then
-    session_id="$(printf '%s' "$payload" | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
-fi
-if [ -z "$session_id" ]; then
-    log_err "no session_id extracted from stdin"
-    exit 0
-fi
+# Extract a JSON string field by key. Tries jq first, falls back to a
+# best-effort sed for environments without jq. The sed regex deliberately
+# tolerates whitespace + escaped quotes only by giving up — falling back to
+# empty is safe because callers treat empty as absent.
+jget() {
+    key="$1"
+    if command -v jq >/dev/null 2>&1; then
+        printf '%s' "$payload" | jq -r ".$key // empty" 2>/dev/null
+        return
+    fi
+    printf '%s' "$payload" | \
+        sed -n 's/.*"'"$key"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1
+}
 
-# Defence-in-depth: only accept uuid-shaped values so a malformed payload can't
-# poison the persisted id with arbitrary text.
-if ! printf '%s' "$session_id" | grep -Eq '^[0-9a-fA-F-]{32,64}$'; then
-    log_err "session_id rejected as non-uuid: $session_id"
-    exit 0
-fi
+hook_event="$(jget hook_event_name)"
+session_id="$(jget session_id)"
 
-out="$sessions_dir/$pane_id.id"
-tmp="$(mktemp "$out.XXXXXX" 2>/dev/null)"
-if [ -z "$tmp" ]; then
-    log_err "mktemp failed for $out"
-    exit 0
-fi
-if ! printf '%s\n' "$session_id" >"$tmp" 2>/dev/null; then
-    log_err "write tmp failed: $tmp"
-    rm -f "$tmp" 2>/dev/null
-    exit 0
-fi
-if ! mv "$tmp" "$out" 2>/dev/null; then
-    log_err "rename failed: $tmp -> $out"
-    rm -f "$tmp" 2>/dev/null
-    exit 0
-fi
+# Truncate to the wire-schema limits before any composition. Claude's
+# inputs (prompt, tool args, etc.) can be arbitrarily large; we cap at
+# 256 chars for any preview field and let the daemon enforce the 1 KiB
+# Data value backstop. Title cap is 200.
+truncate() {
+    awk -v n="$2" 'BEGIN { v=ARGV[1]; if (length(v) <= n) print v; else print substr(v, 1, n-1) "…"; }' "$1" 2>/dev/null
+}
+
+# json_escape escapes a string for embedding inside a JSON string literal.
+# Handles backslash, double-quote, newline, carriage return, and tab; other
+# control bytes pass through (the daemon's json.Unmarshal will reject them
+# and the line will be dropped — acceptable since this is best-effort
+# escaping in a shell script).
+json_escape() {
+    printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e ':a' -e 'N' -e '$!ba' \
+        -e 's/\n/\\n/g' -e 's/\r/\\r/g' -e 's/\t/\\t/g'
+}
+
+# Append a JSONL event line to the spool. Single write(2) keeps it atomic
+# under PIPE_BUF on Unix (the schema cap of 2 KiB stays well under the
+# typical 4 KiB PIPE_BUF). Args: 1=hook_event, 2=title, 3=severity,
+# 4=data_json (already a {"k":"v",...} string, may be empty for none).
+spool() {
+    he="$1"
+    ti="$2"
+    sv="$3"
+    da="$4"
+    events_dir="$quil_home/events"
+    if ! mkdir -p "$events_dir" 2>/dev/null; then
+        log_err "mkdir events dir failed: $events_dir"
+        return 0
+    fi
+    spool_file="$events_dir/$pane_id.jsonl"
+
+    ts_ms="$(date +%s%3N 2>/dev/null || echo 0)"
+    # %3N is GNU date; macOS BSD date lacks it. Fall back to seconds × 1000.
+    case "$ts_ms" in
+        ''|*[!0-9]*) ts_ms="$(( $(date +%s) * 1000 ))" ;;
+    esac
+
+    he_e="$(json_escape "$he")"
+    ti_e="$(json_escape "$ti")"
+    sid_e="$(json_escape "$session_id")"
+
+    line="{\"v\":1,\"ts_ms\":$ts_ms,\"seq\":0,\"pane_id\":\"$(json_escape "$pane_id")\",\"src\":\"claude\",\"hook_event\":\"$he_e\",\"session_id\":\"$sid_e\",\"title\":\"$ti_e\",\"sev\":\"$sv\""
+    if [ -n "$da" ]; then
+        line="$line,\"data\":$da"
+    fi
+    line="$line}"
+
+    printf '%s\n' "$line" >>"$spool_file" 2>/dev/null || \
+        log_err "write spool failed: $spool_file"
+}
+
+# SessionStart keeps the original behaviour: validate + atomically write
+# the session id file. The session_id rotates over the lifetime of the
+# pane (after /clear, /resume, compaction) and the restore path needs the
+# LATEST id, not just the first one.
+write_session_file() {
+    sessions_dir="$quil_home/sessions"
+    if ! mkdir -p "$sessions_dir" 2>/dev/null; then
+        log_err "mkdir sessions dir failed: $sessions_dir"
+        return 0
+    fi
+    if [ -z "$session_id" ]; then
+        log_err "no session_id extracted from stdin"
+        return 0
+    fi
+    if ! printf '%s' "$session_id" | grep -Eq '^[0-9a-fA-F-]{32,64}$'; then
+        log_err "session_id rejected as non-uuid: $session_id"
+        return 0
+    fi
+    out="$sessions_dir/$pane_id.id"
+    tmp="$(mktemp "$out.XXXXXX" 2>/dev/null)"
+    if [ -z "$tmp" ]; then
+        log_err "mktemp failed for $out"
+        return 0
+    fi
+    if ! printf '%s\n' "$session_id" >"$tmp" 2>/dev/null; then
+        log_err "write tmp failed: $tmp"
+        rm -f "$tmp" 2>/dev/null
+        return 0
+    fi
+    if ! mv "$tmp" "$out" 2>/dev/null; then
+        log_err "rename failed: $tmp -> $out"
+        rm -f "$tmp" 2>/dev/null
+        return 0
+    fi
+}
+
+# Route by hook_event_name. Every branch returns to the final exit 0 at the
+# bottom of the script.
+case "$hook_event" in
+    SessionStart)
+        # Session id rotation tracking (original behaviour).
+        write_session_file
+        ;;
+    SessionEnd)
+        spool "SessionEnd" "Session ended" "info" ""
+        ;;
+    UserPromptSubmit)
+        prompt="$(jget prompt)"
+        preview="$(printf '%s' "$prompt" | head -c 60)"
+        prev_e="$(json_escape "$preview")"
+        title="Working on: $preview"
+        # Cap title to 200 chars defensively (preview already truncated).
+        title="$(printf '%s' "$title" | head -c 200)"
+        title_e="$(json_escape "$title")"
+        spool "UserPromptSubmit" "$title" "info" "{\"prompt_preview\":\"$prev_e\"}"
+        ;;
+    Notification)
+        # Claude's own notification text — pass through as title.
+        message="$(jget message)"
+        msg_t="$(printf '%s' "$message" | head -c 200)"
+        spool "Notification" "$msg_t" "warning" ""
+        ;;
+    PermissionRequest)
+        tool="$(jget tool_name)"
+        tool_e="$(json_escape "$tool")"
+        title="Needs approval: $tool"
+        title="$(printf '%s' "$title" | head -c 200)"
+        spool "PermissionRequest" "$title" "warning" "{\"tool\":\"$tool_e\"}"
+        ;;
+    Stop)
+        spool "Stop" "Reply ready" "warning" ""
+        ;;
+    PreCompact)
+        reason="$(jget reason)"
+        reason_e="$(json_escape "$reason")"
+        title="Compacting context"
+        if [ -n "$reason" ]; then
+            title="$title ($reason)"
+            title="$(printf '%s' "$title" | head -c 200)"
+        fi
+        spool "PreCompact" "$title" "info" "{\"reason\":\"$reason_e\"}"
+        ;;
+    PostCompact)
+        spool "PostCompact" "Compaction complete" "info" ""
+        ;;
+    SubagentStart)
+        agent="$(jget agent_type)"
+        agent_e="$(json_escape "$agent")"
+        title="Spawned: $agent"
+        title="$(printf '%s' "$title" | head -c 200)"
+        spool "SubagentStart" "$title" "info" "{\"agent_type\":\"$agent_e\"}"
+        ;;
+    SubagentStop)
+        agent="$(jget agent_type)"
+        agent_e="$(json_escape "$agent")"
+        title="$agent done"
+        title="$(printf '%s' "$title" | head -c 200)"
+        spool "SubagentStop" "$title" "info" "{\"agent_type\":\"$agent_e\"}"
+        ;;
+    TaskCreated)
+        content="$(jget content)"
+        content_t="$(printf '%s' "$content" | head -c 180)"
+        content_e="$(json_escape "$content_t")"
+        title="Task: $content_t"
+        title="$(printf '%s' "$title" | head -c 200)"
+        spool "TaskCreated" "$title" "info" "{\"content\":\"$content_e\"}"
+        ;;
+    TaskCompleted)
+        content="$(jget content)"
+        content_t="$(printf '%s' "$content" | head -c 180)"
+        content_e="$(json_escape "$content_t")"
+        title="✓ $content_t"
+        title="$(printf '%s' "$title" | head -c 200)"
+        spool "TaskCompleted" "$title" "info" "{\"content\":\"$content_e\"}"
+        ;;
+    *)
+        # Unknown / unhandled event — log a breadcrumb and drop. Not an
+        # error because Claude can add new events at any time and we want
+        # graceful forward-compat.
+        log_err "unhandled hook_event: $hook_event"
+        ;;
+esac
+
 exit 0

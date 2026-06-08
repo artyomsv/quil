@@ -1840,6 +1840,7 @@ func (d *Daemon) emitEvent(e PaneEvent) {
 // a 200 ms p99 latency from hook fire to sidebar render keeps the user's
 // perception of "instant" intact.
 func (d *Daemon) hookEventsWatcher() {
+	logger.Info("hook events watcher started (200 ms tick, spool=%s)", config.EventsDir())
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
 	for {
@@ -1854,7 +1855,11 @@ func (d *Daemon) hookEventsWatcher() {
 			if d.hookSpool == nil || d.hookIngester == nil {
 				continue
 			}
-			for _, p := range d.hookSpool.Tick() {
+			payloads := d.hookSpool.Tick()
+			if len(payloads) > 0 {
+				logger.Debug("hook events tick: read %d payloads from spool", len(payloads))
+			}
+			for _, p := range payloads {
 				d.hookIngester.Submit(p)
 			}
 		}
@@ -1896,6 +1901,8 @@ func (d *Daemon) emitHookEvent(p hookevents.Payload) {
 			p.PaneID, p.Source, p.HookEvent)
 		return
 	}
+	logger.Debug("emit hook event pane=%s src=%s hook_event=%s title=%q",
+		p.PaneID, p.Source, p.HookEvent, p.Title)
 
 	// Only real hook events count toward "this pane is hook-healthy". The
 	// rate limiter's own synthetic storm diagnostic would otherwise flip

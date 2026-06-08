@@ -278,6 +278,7 @@ func shortcutsList(m *Model) []struct{ key, desc string } {
 		{kbDisplay(kb.Paste), "Paste clipboard"},
 		{kbDisplay(kb.FocusPane), "Toggle focus mode"},
 		{kbDisplay(kb.NotesToggle), "Toggle pane notes"},
+		{kbDisplay(kb.Redraw), "Force screen redraw"},
 		{kbDisplay(kb.MutePane), "Mute / unmute pane notifications"},
 		{kbDisplay(kb.NotificationToggle), "Toggle notification sidebar"},
 		{kbDisplay(kb.NotificationFocus), "Focus notification sidebar"},

@@ -19,9 +19,6 @@ import (
 
 	"regexp"
 
-	"github.com/charmbracelet/x/ansi"
-	"github.com/charmbracelet/x/vt"
-	"github.com/google/uuid"
 	"github.com/artyomsv/quil/internal/claudehook"
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/hookevents"
@@ -35,6 +32,9 @@ import (
 	"github.com/artyomsv/quil/internal/ringbuf"
 	"github.com/artyomsv/quil/internal/shellinit"
 	"github.com/artyomsv/quil/internal/version"
+	"github.com/charmbracelet/x/ansi"
+	"github.com/charmbracelet/x/vt"
+	"github.com/google/uuid"
 )
 
 // oscBellRe matches OSC sequences terminated by BEL (\x07), e.g., \x1b]0;title\x07.
@@ -42,21 +42,21 @@ import (
 var oscBellRe = regexp.MustCompile(`\x1b\][^\x07]*\x07`)
 
 type Daemon struct {
-	cfg        config.Config
-	server     *ipc.Server
-	session    *SessionManager
-	registry   *plugin.Registry
+	cfg          config.Config
+	server       *ipc.Server
+	session      *SessionManager
+	registry     *plugin.Registry
 	shutdown     chan struct{}
 	shutdownOnce sync.Once
 	stopOnce     sync.Once
 	snapshotCh   chan struct{} // buffered channel for snapshot requests
-	restored     bool         // true if workspace was loaded from disk
-	events       *eventQueue  // notification center event queue
+	restored     bool          // true if workspace was loaded from disk
+	events       *eventQueue   // notification center event queue
 	// clientCWD is the last-known CWD from a TUI client, used as the
 	// default working directory for new panes/tabs. Read by defaultCWD()
 	// from any IPC dispatch goroutine and written by handleAttach on each
 	// connect — atomic.Pointer is what keeps that race-free.
-	clientCWD    atomic.Pointer[string]
+	clientCWD atomic.Pointer[string]
 
 	memReport   *memreport.Collector
 	collectorWG sync.WaitGroup
@@ -472,6 +472,11 @@ func (d *Daemon) restoreWorkspace() error {
 					}
 				}
 
+				// Restore last known size (JSON numbers decode as float64;
+				// absent on pre-size snapshots → stays 0 and respawn falls
+				// back to the default PTY dimensions).
+				cols, _ := paneData["cols"].(float64)
+				rows, _ := paneData["rows"].(float64)
 				muted, _ := paneData["muted"].(bool)
 
 				pane := &Pane{
@@ -480,6 +485,8 @@ func (d *Daemon) restoreWorkspace() error {
 					CWD:          cwd,
 					Name:         name,
 					Type:         paneType,
+					Cols:         int(cols),
+					Rows:         int(rows),
 					PluginState:  pluginState,
 					InstanceName: instanceName,
 					InstanceArgs: instanceArgs,
@@ -543,7 +550,7 @@ func (d *Daemon) respawnPanes() {
 				continue // Already has a PTY
 			}
 
-			ptySession := apty.New()
+			ptySession := newRestoredPTY(pane)
 			if pane.CWD != "" {
 				if info, err := os.Stat(pane.CWD); err != nil || !info.IsDir() {
 					log.Printf("pane %s: saved cwd %q gone, using default", pane.ID, pane.CWD)
@@ -554,15 +561,27 @@ func (d *Daemon) respawnPanes() {
 			if err := d.spawnPane(pane, ptySession, true); err != nil {
 				log.Printf("respawn pane %s (type=%s): %v — falling back to terminal", pane.ID, pane.Type, err)
 				pane.Type = "terminal"
-				ptySession2 := apty.New()
+				ptySession2 := newRestoredPTY(pane)
 				if err := d.spawnPane(pane, ptySession2, false); err != nil {
 					log.Printf("fallback shell for pane %s also failed: %v", pane.ID, err)
 				}
 			} else {
-				log.Printf("respawned pane %s (type=%s, cwd=%s)", pane.ID, pane.Type, pane.CWD)
+				log.Printf("respawned pane %s (type=%s, cwd=%s, size=%dx%d)", pane.ID, pane.Type, pane.CWD, pane.Cols, pane.Rows)
 			}
 		}
 	}
+}
+
+// newRestoredPTY creates the PTY for a restored pane at its persisted size,
+// so the child boots at the real dimensions instead of the 80x24 default
+// (which interactive TUIs latch onto when the first resize event is lost —
+// see resizeKick). Falls back to the default constructor for pre-size
+// snapshots where Cols/Rows were never recorded.
+func newRestoredPTY(pane *Pane) apty.Session {
+	if pane.Cols > 0 && pane.Rows > 0 {
+		return apty.NewWithSize(pane.Cols, pane.Rows)
+	}
+	return apty.New()
 }
 
 func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
@@ -1021,7 +1040,9 @@ func (d *Daemon) handleResizePane(msg *ipc.Message) {
 	if pane == nil || pane.PTY == nil {
 		return
 	}
-	pane.PTY.Resize(payload.Rows, payload.Cols)
+	if err := pane.PTY.Resize(payload.Rows, payload.Cols); err != nil {
+		log.Printf("resize pane %s to %dx%d: %v", payload.PaneID, payload.Cols, payload.Rows, err)
+	}
 	pane.Cols = int(payload.Cols)
 	pane.Rows = int(payload.Rows)
 }
@@ -1079,9 +1100,35 @@ func (d *Daemon) handleUpdateLayout(msg *ipc.Message) {
 	d.requestSnapshot()
 }
 
+// resizeKick re-applies a pane's last known size to its PTY, with a
+// 1-column jiggle so the child receives a real size-change event.
+//
+// Windows ConPTY delivers resizes to the child as WINDOW_BUFFER_SIZE_EVENTs
+// in its console input queue; events fired before the child starts reading
+// input (claude/node mid-boot) are dropped and never replayed. The TUI's
+// initial resize_pane lands ~25 ms after spawn and can be lost that way,
+// leaving the child rendering at the spawn-time 80x24 until the next window
+// resize. Called on the pane's first output — the child is alive and its
+// console is wired up by then. No-op while the size is still unknown
+// (resize_pane not yet received).
+func resizeKick(pty apty.Session, cols, rows int) {
+	if cols <= 0 || rows <= 0 {
+		return
+	}
+	if cols > 1 {
+		if err := pty.Resize(uint16(rows), uint16(cols-1)); err != nil {
+			log.Printf("resize kick (jiggle): %v", err)
+		}
+	}
+	if err := pty.Resize(uint16(rows), uint16(cols)); err != nil {
+		log.Printf("resize kick: %v", err)
+	}
+}
+
 func (d *Daemon) streamPTYOutput(paneID string, pty apty.Session) {
 	readBuf := make([]byte, 32*1024)
 	dataCh := make(chan []byte, 64)
+	firstChunk := true
 
 	// Reader goroutine: continuously reads from PTY
 	go func() {
@@ -1149,6 +1196,15 @@ func (d *Daemon) streamPTYOutput(paneID string, pty apty.Session) {
 					}, paneOutputExcerpt(pane, 5)))
 				}
 				return
+			}
+			if firstChunk {
+				firstChunk = false
+				// First output proves the child's console is wired up —
+				// re-apply the size in case the initial resize event was
+				// dropped during boot (see resizeKick).
+				if pane := d.session.Pane(paneID); pane != nil {
+					resizeKick(pty, pane.Cols, pane.Rows)
+				}
 			}
 			acc = append(acc, chunk...)
 			if !flushTimer.Stop() {
@@ -1337,6 +1393,14 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			}
 			if len(pane.InstanceArgs) > 0 {
 				paneData["instance_args"] = pane.InstanceArgs
+			}
+			// Persist last known size so respawnPanes can recreate the
+			// ConPTY at the right dimensions instead of the 80x24 default
+			// (children that boot before the first resize event would
+			// otherwise render an 80-column UI — see resizeKick).
+			if pane.Cols > 0 && pane.Rows > 0 {
+				paneData["cols"] = pane.Cols
+				paneData["rows"] = pane.Rows
 			}
 			paneList = append(paneList, paneData)
 		}
@@ -1650,7 +1714,7 @@ func resolveSpawnArgs(p *plugin.PanePlugin, pane *Pane, restoring bool) []string
 			// args already set from InstanceArgs above
 		case "none":
 			// Don't restore — but we still spawn for now (pane exists in workspace)
-		// "cwd_only": just start fresh with CWD (default behavior)
+			// "cwd_only": just start fresh with CWD (default behavior)
 		}
 	}
 

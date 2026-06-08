@@ -54,6 +54,7 @@ The active tab is prefixed with `* ` in the tab bar so it's visible even when [t
 | `Alt+Shift+V` | Split top/bottom |
 | `Alt+F2` / `Alt+Shift+R` | Rename active pane. `Alt+Shift+R` is a macOS-friendly fallback since `F2` is often eaten by the OS and `Option` is not always passed through as Meta. |
 | `Ctrl+E` | Toggle focus mode (active pane full-screen) |
+| `Alt+Shift+L` | Force a full screen redraw — clears rendering artifacts (scrambled/misplaced characters) without restarting. Mnemonic: `Ctrl+L` redraws a shell. |
 
 ## Pane navigation
 

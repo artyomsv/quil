@@ -84,6 +84,7 @@ notification_focus = "f3"       # jump focus to the sidebar (alt path when alt+n
 mute_pane = "alt+m"             # toggle notification mute for the active pane
 go_back = "alt+backspace"       # pane history back (after jumping via sidebar Enter)
 notes_toggle = "alt+e"          # toggle pane notes editor
+redraw = "alt+shift+l"          # force full screen repaint (clears rendering artifacts)
 ```
 
 ## `[daemon]`
@@ -179,6 +180,7 @@ Multiple modifiers stack with `+` (no spaces). Mouse buttons are not bindable he
 | `mute_pane` | `alt+m` | Toggle notification mute on the active pane. Muted panes show `[muted]` on their border and never fire idle / bell / process-exit / hook events. Persisted in `workspace.json` so mute survives daemon restart. |
 | `go_back` | `alt+backspace` | Pane history back — return to the pane you were on before the sidebar's `Enter` jump |
 | `notes_toggle` | `alt+e` | Open / close the per-pane notes editor |
+| `redraw` | `alt+shift+l` | Force a full screen repaint — clears rendering artifacts (scrambled or misplaced characters) without restarting the TUI |
 
 ## Per-plugin instances
 

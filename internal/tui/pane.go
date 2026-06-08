@@ -22,26 +22,27 @@ import (
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 type PaneModel struct {
-	ID            string
-	Type          string // plugin type ("terminal", "claude-code", etc.)
-	Name          string // user-given name (empty if not set)
-	CWD           string // current working directory from daemon
-	Muted         bool   // notification mute (daemon-authoritative; mirrored here for border rendering)
-	vt            *vt.SafeEmulator
-	Width         int
-	Height        int
-	Active        bool
-	scrollBack    int
-	rawBuf        *ringbuf.RingBuffer // raw PTY bytes for resize replay
-	cursorVisible bool                // tracks shell's DECTCEM state
-	ghost         bool                // true while showing restored content
-	resuming      bool                // true while waiting for first live output after restore
-	preparing     bool                // true for newly created panes (not restored)
-	resumeStart   time.Time           // when resuming/preparing started (minimum display duration)
-	spinnerFrame  int                 // current frame index in spinnerFrames
-	activeSel     *Selection          // set by Model before View() for selection rendering
-	focusMode     bool                // set by Model before View() when in focus mode
-	mcpHighlight  bool                // set by Model before View() when MCP is interacting
+	ID             string
+	Type           string // plugin type ("terminal", "claude-code", etc.)
+	Name           string // user-given name (empty if not set)
+	CWD            string // current working directory from daemon
+	Muted          bool   // notification mute (daemon-authoritative; mirrored here for border rendering)
+	vt             *vt.SafeEmulator
+	Width          int
+	Height         int
+	Active         bool
+	scrollBack     int
+	rawBuf         *ringbuf.RingBuffer // raw PTY bytes for resize replay
+	cursorVisible  bool                // tracks shell's DECTCEM state
+	ghost          bool                // true while showing restored content
+	resuming       bool                // true while waiting for first live output after restore
+	preparing      bool                // true for newly created panes (not restored)
+	resumeStart    time.Time           // when resuming/preparing started (minimum display duration)
+	spinnerFrame   int                 // current frame index in spinnerFrames
+	activeSel      *Selection          // set by Model before View() for selection rendering
+	focusMode      bool                // set by Model before View() when in focus mode
+	mcpHighlight   bool                // set by Model before View() when MCP is interacting
+	liveOutputSeen bool                // first live (non-ghost) output received — settle repaints scheduled
 }
 
 // newVTEmulator builds a SafeEmulator for this pane and starts a goroutine
@@ -357,10 +358,14 @@ func (p *PaneModel) renderContent(sel *Selection) string {
 	if p.scrollBack == 0 {
 		// Live view — use Render() for full color support
 		content := p.vt.Render()
-		// Only overlay cursor for terminal panes — TUI apps (Claude Code etc.)
-		// render their own cursor.
-		isTerminal := p.Type == "" || p.Type == "terminal" || p.Type == "ssh"
-		if p.Active && p.cursorVisible && isTerminal {
+		// Software reverse-video caret at the VT cursor for every pane
+		// type. Interactive apps (claude-code, opencode) position the VT
+		// cursor at their input caret exactly like shells do. A real
+		// hardware cursor (tea.View.Cursor) was tried and reverted:
+		// repositioning it every frame desynced Bubble Tea's diff writer
+		// on Windows — the first typed character after a fresh input line
+		// landed one cell off ("Test" → "T est").
+		if p.Active && p.cursorVisible {
 			content = p.insertCursor(content)
 		}
 		return content
@@ -469,6 +474,11 @@ func (p *PaneModel) styledCellLineWithSelection(getCell func(x int) *uv.Cell, wi
 
 	for x := 0; x < width; x++ {
 		cell := getCell(x)
+		// Wide-char continuation cell — the lead cell already spans this
+		// column; emitting anything here drifts the rest of the row right.
+		if cell != nil && cell.Width == 0 {
+			continue
+		}
 		ch := " "
 		styled := false
 		var sgr string
@@ -544,6 +554,11 @@ func (p *PaneModel) styledCellLine(getCell func(x int) *uv.Cell, width int) stri
 
 	for x := 0; x < width; x++ {
 		cell := getCell(x)
+		// Wide-char continuation cell — the lead cell already spans this
+		// column; emitting anything here drifts the rest of the row right.
+		if cell != nil && cell.Width == 0 {
+			continue
+		}
 		ch := " "
 		styled := false
 		var sgr string
@@ -605,6 +620,11 @@ func (p *PaneModel) insertCursor(content string) string {
 
 	for x := 0; x < w; x++ {
 		cell := p.vt.CellAt(x, pos.Y)
+		// Wide-char continuation cell — the lead cell already spans this
+		// column (cursor landing on one is a degenerate case; skip it too).
+		if cell != nil && cell.Width == 0 {
+			continue
+		}
 		ch := " "
 		if cell != nil && cell.Content != "" {
 			ch = cell.Content

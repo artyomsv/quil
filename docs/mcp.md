@@ -14,7 +14,7 @@ The result: your AI can **see what's in your build pane and react**, instead of 
   - [VS Code (GitHub Copilot Chat)](#vs-code-github-copilot-chat)
   - [Any MCP-capable client](#any-mcp-capable-client)
 - [Verify the connection](#verify-the-connection)
-- [The 17 tools](#the-17-tools)
+- [The 18 tools](#the-18-tools)
   - [Discovery](#discovery)
   - [Reading pane output](#reading-pane-output)
   - [Interacting with panes](#interacting-with-panes)
@@ -67,7 +67,7 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) o
 }
 ```
 
-Restart Claude Desktop. The 🔌 icon in the input bar should show Quil with 17 tools.
+Restart Claude Desktop. The 🔌 icon in the input bar should show Quil with 18 tools.
 
 ### Claude Code (CLI)
 
@@ -136,7 +136,7 @@ In your AI client, ask:
 
 The AI should call `list_panes` and return a JSON array with each pane's `id`, `type`, `tab_id`, `cwd`, etc. If you see "no Quil panes" or an error, check [Troubleshooting](#troubleshooting).
 
-## The 17 tools
+## The 18 tools
 
 Tools are grouped below by purpose. Every tool returns a `text` content block; many return JSON-formatted payloads.
 
@@ -194,10 +194,11 @@ Replace polling-with-sleep + screenshot with the blocking watcher.
 
 | Tool | Input | Returns | Notes |
 |---|---|---|---|
-| `get_notifications` | — | JSON array of pending events: `{pane_id, kind, title, body, timestamp, severity}` | Non-blocking. Drains the daemon's event queue. |
-| `watch_notifications` | `pane_ids` (optional, empty = all), `timeout` (seconds, default 60, max 300) | JSON: the first event that fires, or `{timed_out: true}` | **Blocks** up to `timeout` seconds. Use after kicking off a long-running task ("watch the build pane until it finishes"). Replaces sleep+poll patterns. |
+| `get_notifications` | — | JSON array of pending events: `{pane_id, kind, title, body, timestamp, severity, data}` | Non-blocking. Returns the daemon's event queue without removing entries — use `dismiss_notifications` to ack. Each event's `data.excerpt` carries the last lines of pane output that triggered the event. |
+| `watch_notifications` | `pane_ids` (optional, empty = all), `timeout` (seconds, default 60, max 300), `since_timestamp` (Unix ms, optional) | JSON: the first event that fires, or `{timed_out: true}` | **Blocks** up to `timeout` seconds. Use after kicking off a long-running task ("watch the build pane until it finishes"). Replaces sleep+poll patterns. Pass `since_timestamp` (the timestamp of the last event you handled) to catch events fired between your previous action and this call — the daemon returns the oldest queued event newer than the marker without ever registering a watcher. |
+| `dismiss_notifications` | `event_id` (optional, empty = dismiss all) | Confirmation string | Acks events the agent has already handled so they don't show up again on the next `get_notifications` call. |
 
-The events fired by the daemon include: process exits (any pane), OSC 133 command completion (shell panes), bell characters (with 30 s cooldown to avoid storming), and smart-idle pattern matches based on per-plugin `[[notification_handlers]]` in TOML.
+The events fired by the daemon include: process exits (any pane), OSC 133 command completion (shell panes), bell characters (with 30 s cooldown to avoid storming), and smart-idle pattern matches based on per-plugin `[[idle_handlers]]` in TOML. Each event carries a `data.excerpt` field with the last few stripped lines that triggered it, so an agent can act on the context without a follow-up `read_pane_output` call.
 
 ### Memory reporting
 

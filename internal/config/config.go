@@ -21,8 +21,20 @@ type Config struct {
 }
 
 type NotificationConfig struct {
-	SidebarWidth int `toml:"sidebar_width"` // default 30
-	MaxEvents    int `toml:"max_events"`    // default 50
+	SidebarWidth int                 `toml:"sidebar_width"` // default 30
+	MaxEvents    int                 `toml:"max_events"`    // default 200
+	Hooks        HookNotificationsConfig `toml:"hooks"`
+}
+
+// HookNotificationsConfig controls which hook-driven events get spool-emitted
+// per source. Tier values are "default" / "verbose" / "off". Daemon passes
+// the resolved value to the hook scripts via the QUIL_HOOK_MODE env var at
+// pane spawn so the script can branch on it (default → forward the v1 tier;
+// verbose → also forward tool-use + pre/post events; off → no spool writes
+// at all). Unset = "default" downstream.
+type HookNotificationsConfig struct {
+	Claude   string `toml:"claude"`
+	OpenCode string `toml:"opencode"`
 }
 
 type MCPConfig struct {
@@ -105,8 +117,12 @@ type KeybindingsConfig struct {
 	FocusPane          string `toml:"focus_pane"`
 	NotificationToggle string `toml:"notification_toggle"`
 	NotificationFocus  string `toml:"notification_focus"`
-	GoBack             string `toml:"go_back"`
-	NotesToggle        string `toml:"notes_toggle"`
+	// MutePane toggles notification mute on the active pane (idle/bell/exit
+	// events stop firing). Useful for `npm test --watch` and other chatty
+	// processes that would otherwise flood the sidebar.
+	MutePane    string `toml:"mute_pane"`
+	GoBack      string `toml:"go_back"`
+	NotesToggle string `toml:"notes_toggle"`
 }
 
 func Default() Config {
@@ -141,7 +157,11 @@ func Default() Config {
 		},
 		Notification: NotificationConfig{
 			SidebarWidth: 30,
-			MaxEvents:    50,
+			MaxEvents:    200,
+			Hooks: HookNotificationsConfig{
+				Claude:   "default",
+				OpenCode: "default",
+			},
 		},
 		Keybindings: KeybindingsConfig{
 			Quit:            "ctrl+q",
@@ -172,6 +192,7 @@ func Default() Config {
 			FocusPane:          "ctrl+e",
 			NotificationToggle: "alt+n",
 			NotificationFocus:  "f3",
+			MutePane:           "alt+m",
 			GoBack:             "alt+backspace",
 			NotesToggle:        "alt+e",
 		},
@@ -275,6 +296,16 @@ func NotesDir() string {
 // own home so we never touch the user's ~/.claude/ config.
 func ClaudeHookDir() string {
 	return filepath.Join(QuilDir(), "claudehook")
+}
+
+// EventsDir returns the directory where Claude / opencode hooks append
+// per-pane JSONL event spool files (<paneID>.jsonl). The daemon's
+// hookEventsWatcher polls these files on a 200 ms ticker, parses new
+// lines, and feeds them through hookevents.Ingester → eventQueue → IPC
+// fan-out. Truncated at daemon start (no replay of stale events); files
+// for destroyed panes are unlinked.
+func EventsDir() string {
+	return filepath.Join(QuilDir(), "events")
 }
 
 // SessionsDir returns the directory where the Claude Code SessionStart hook

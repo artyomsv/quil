@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -30,17 +31,57 @@ func NewNotificationCenter(width, maxEvents int) *NotificationCenter {
 	return &NotificationCenter{width: width, maxEvents: maxEvents}
 }
 
-// AddEvent prepends an event, deduplicating by ID.
+// AddEvent prepends an event. When an event with the same ID is already
+// queued, the entry is updated in place AND moved to the front — this is
+// the echo of the daemon's eventQueue.Push aggregation, where a repeat
+// (PaneID, Title) event reuses the prior event's ID and bumps Data["count"].
+// Without the move-to-front the sidebar would silently drop bumps and the
+// user would never see the ×N count grow.
+//
+// Cursor invariant: the cursor follows the LOGICAL event the user is on,
+// not the index. If the move-to-front shifts other events past the cursor's
+// position, we rewrite cursor to point at the event with the same ID it had
+// before — so a user staring at "claude-code (×3)" does not silently jump to
+// a different card when "claude-code (×4)" arrives.
 func (nc *NotificationCenter) AddEvent(e ipc.PaneEventPayload) {
-	for _, existing := range nc.events {
-		if existing.ID == e.ID {
-			return
+	for i, existing := range nc.events {
+		if existing.ID != e.ID {
+			continue
 		}
+		// Capture the cursor's current event ID so we can chase it through
+		// the move-to-front. The aggregated event itself is allowed to move
+		// — what we protect is selection of OTHER events.
+		var cursorID string
+		if nc.cursor >= 0 && nc.cursor < len(nc.events) {
+			cursorID = nc.events[nc.cursor].ID
+		}
+
+		nc.events = append(nc.events[:i], nc.events[i+1:]...)
+		nc.events = append([]ipc.PaneEventPayload{e}, nc.events...)
+
+		// Restore cursor onto the same logical event. When the aggregated
+		// event WAS the cursor, follow it to position 0 (the visual
+		// equivalent of "stay on the card you were looking at"). When the
+		// cursor was on a different event, find its new index.
+		if cursorID != "" {
+			for j, ev := range nc.events {
+				if ev.ID == cursorID {
+					nc.cursor = j
+					break
+				}
+			}
+		}
+		return
 	}
 	nc.events = append([]ipc.PaneEventPayload{e}, nc.events...)
 	if len(nc.events) > nc.maxEvents {
 		nc.events = nc.events[:nc.maxEvents]
 	}
+	// Deliberately do NOT shift the cursor on a fresh prepend. The legacy
+	// contract is "cursor 0 = newest event"; a fresh event landing at index
+	// 0 should become the new selection by default. Only the aggregation
+	// move-to-front above chases the logical event by ID, because that's the
+	// case where the user is actively reading a card that's about to bump.
 }
 
 // DismissSelected removes the selected event and returns its ID.
@@ -135,8 +176,11 @@ func (nc *NotificationCenter) View(height int) string {
 		noEvents = truncateRunes(noEvents, innerW)
 		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render(noEvents))
 	} else {
-		// Each event = separator + name/time + title = 3 lines
-		maxVisible := (innerH - 3) / 3
+		// Each event = separator + name/time + title + excerpt = 4 lines.
+		// The excerpt line is always emitted (blank if Message is empty) so
+		// every event has the same height — keeps pagination math predictable.
+		const linesPerEvent = 4
+		maxVisible := (innerH - 3) / linesPerEvent
 		if maxVisible < 1 {
 			maxVisible = 1
 		}
@@ -184,17 +228,41 @@ func (nc *NotificationCenter) View(height int) string {
 			}
 			line1 := styledName + strings.Repeat(" ", gap) + lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render(age)
 
-			// Line 2: title (indented)
-			titleText := "  " + e.Title
-			titleText = truncateRunes(titleText, innerW)
+			// Line 2: title (indented), with optional ×N badge for
+			// daemon-side aggregation. count > 1 means this card already
+			// absorbed N repeats of the same (PaneID, Title).
+			titleBody := "  " + e.Title
+			countBadge := ""
+			if e.Data != nil {
+				if n, err := strconv.Atoi(e.Data["count"]); err == nil && n > 1 {
+					countBadge = "  ×" + e.Data["count"]
+				}
+			}
+			titleText := truncateRunes(titleBody+countBadge, innerW)
 			if selected {
 				titleText = lipgloss.NewStyle().Reverse(true).Render(titleText)
 			} else {
 				titleText = lipgloss.NewStyle().Foreground(lipgloss.Color("250")).Render(titleText)
 			}
 
+			// Line 3: excerpt — first non-empty line of Message (the
+			// triggering output). Dim grey so it visually subordinates to
+			// the title; blank line preserved if no excerpt so the
+			// per-event height stays constant.
+			excerptLine := ""
+			if e.Message != "" {
+				preview := "  " + firstNonEmptyLine(e.Message)
+				preview = truncateRunes(preview, innerW)
+				if selected {
+					excerptLine = lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Reverse(true).Render(preview)
+				} else {
+					excerptLine = lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Render(preview)
+				}
+			}
+
 			lines = append(lines, line1)
 			lines = append(lines, titleText)
+			lines = append(lines, excerptLine)
 		}
 
 		// Trailing separator
@@ -229,6 +297,17 @@ func (nc *NotificationCenter) View(height int) string {
 		Width(nc.width).
 		Height(height).
 		Render(content)
+}
+
+// firstNonEmptyLine returns the first non-empty trimmed line of s, or "".
+// Used by the sidebar to render a one-line preview of a multi-line excerpt.
+func firstNonEmptyLine(s string) string {
+	for _, line := range strings.Split(s, "\n") {
+		if trimmed := strings.TrimSpace(line); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }
 
 // truncateRunes truncates a string to maxWidth runes.

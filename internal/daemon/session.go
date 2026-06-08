@@ -44,8 +44,26 @@ type Pane struct {
 	Rows         int                 // Last known terminal height (0 = unknown)
 	LastOutputAt    time.Time        // Updated on every flushPaneOutput
 	IdleNotified    bool             // Prevents re-firing for same idle period
-	LastIdleEventAt time.Time        // Cooldown: last time an idle event was emitted
+	LastIdleEventAt time.Time        // Cooldown: last time a idle event was emitted
 	LastBellEventAt time.Time        // Cooldown: last time a bell event was emitted
+	// Muted suppresses notification events sourced from this pane. Set via
+	// MsgUpdatePane{Muted: true} from the TUI (default keybinding Alt+M).
+	// Persisted in the workspace snapshot so mute survives restart. Read
+	// under PluginMu in emitEvent.
+	Muted bool
+	// LastHookEventAt is the wall-clock time of the most recent hook event
+	// the daemon translated into a PaneEvent for this pane. Used by
+	// checkIdlePanes to skip the legacy idle excerpt heuristic when hook
+	// events are actively flowing (the AI tool itself is the ground truth
+	// for what "idle" means once hooks are wired up).
+	LastHookEventAt time.Time
+	// HookHealthy flips true the first time a hook event is received for
+	// this pane. Provides the legacy-idle fallback: panes whose hooks
+	// never load (plugin throws at module init, settings JSON malformed,
+	// etc.) remain HookHealthy=false and the idle checker stays active —
+	// the user always sees SOME notification surface, even if not the
+	// hook-driven one.
+	HookHealthy bool
 }
 
 type SessionManager struct {

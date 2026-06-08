@@ -163,16 +163,42 @@ type hookEntry struct {
 	Command string `json:"command"`
 }
 
+// forwardedHookEvents lists the Claude Code hook events Quil registers in
+// the inline --settings JSON. The script branches on hook_event_name from
+// stdin so the same command handles every entry.
+//
+// SessionStart is the original — it still writes the session id file used
+// by the resume-args path. The rest are the v1 "default" tier from the
+// hook events plan: notification + permission + lifecycle. PreToolUse /
+// PostToolUse and friends are NOT in this list (too noisy at scale);
+// they are reachable in verbose mode by editing the user config.
+var forwardedHookEvents = []string{
+	"SessionStart",
+	"SessionEnd",
+	"UserPromptSubmit",
+	"Notification",
+	"PermissionRequest",
+	"Stop",
+	"PreCompact",
+	"PostCompact",
+	"SubagentStart",
+	"SubagentStop",
+	"TaskCreated",
+	"TaskCompleted",
+}
+
 // BuildSettingsJSON returns the inline JSON string Quil passes to
-// `claude --settings <json>`. The returned payload registers a single
-// SessionStart hook whose command is `cmd`.
+// `claude --settings <json>`. Registers Quil's hook command under every
+// entry in forwardedHookEvents — the script then branches on the
+// hook_event_name field of the stdin JSON.
 func BuildSettingsJSON(cmd string) (string, error) {
 	s := settingsSchema{
-		Hooks: map[string][]hookMatcher{
-			"SessionStart": {{
-				Hooks: []hookEntry{{Type: "command", Command: cmd}},
-			}},
-		},
+		Hooks: make(map[string][]hookMatcher, len(forwardedHookEvents)),
+	}
+	for _, name := range forwardedHookEvents {
+		s.Hooks[name] = []hookMatcher{{
+			Hooks: []hookEntry{{Type: "command", Command: cmd}},
+		}}
 	}
 	b, err := json.Marshal(s)
 	if err != nil {

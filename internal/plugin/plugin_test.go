@@ -59,6 +59,51 @@ func TestRegistryWithDefaults(t *testing.T) {
 	}
 }
 
+// TestLoadPluginTOML_NotificationHandlersDeprecated verifies that legacy TOML
+// containing the deprecated [[notification_handlers]] section loads
+// successfully (back-compat preserved) and still populates the
+// NotificationHandlers slice — even though the daemon no longer evaluates
+// them. The deprecation warning fires at most once per plugin name per
+// daemon lifetime (one-shot sentinel) to avoid log spam during reload.
+func TestLoadPluginTOML_NotificationHandlersDeprecated(t *testing.T) {
+	dir := t.TempDir()
+	tomlPath := filepath.Join(dir, "legacy.toml")
+	const legacyTOML = `
+[plugin]
+name = "legacy"
+display_name = "Legacy"
+category = "tools"
+
+[command]
+cmd = "echo"
+detect = "echo --version"
+
+[[notification_handlers]]
+pattern = '(?i)error|fail'
+title = "Old handler"
+severity = "warning"
+`
+	if err := os.WriteFile(tomlPath, []byte(legacyTOML), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	r := NewRegistry()
+	if err := r.LoadFromDir(dir); err != nil {
+		t.Fatalf("LoadFromDir with [[notification_handlers]] must not error; got %v", err)
+	}
+
+	p := r.Get("legacy")
+	if p == nil {
+		t.Fatal("legacy plugin not loaded — deprecation warning must not block back-compat")
+	}
+	if len(p.NotificationHandlers) != 1 {
+		t.Errorf("NotificationHandlers populated for back-compat; got %d, want 1", len(p.NotificationHandlers))
+	}
+	if p.NotificationHandlers[0].Title != "Old handler" {
+		t.Errorf("NotificationHandler title: got %q, want %q", p.NotificationHandlers[0].Title, "Old handler")
+	}
+}
+
 // TestLoadPluginTOML_ClaudeCodeSetup_ParsesPromptsCWDAndPermissionToggles verifies
 // the prompts_cwd and [[command.toggles]] opt-ins parse correctly from the
 // embedded claude-code default TOML, including the mutually-exclusive

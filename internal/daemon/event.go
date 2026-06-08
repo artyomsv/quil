@@ -206,9 +206,11 @@ func (q *eventQueue) RemoveWatchersByConn(conn *ipc.Conn) {
 
 // Per-event wire-size caps. The earlier wedge incident happened with a
 // > 1 KiB box-drawing excerpt from an opencode splash screen flooding the
-// IPC fan-out. 4 KiB per Message and 128 bytes per Data value give comfortable
-// headroom for legitimate content (multi-line excerpts, command previews,
-// error stacks) while keeping a runaway event source from bloating the wire.
+// IPC fan-out. 4 KiB per Message and 1 KiB per Data value give comfortable
+// headroom for legitimate content (multi-line excerpts in data.excerpt,
+// command previews, hook payloads, error stacks) while keeping a runaway
+// event source from bloating the wire. Per-event ceiling with N Data keys:
+// 4 KiB + N × 1 KiB. Realistic event has 2-4 keys so total < 10 KiB.
 //
 // Truncation strategy: keeps the TAIL because PaneEvent.Message is used for
 // terminal excerpts (last visible lines = what the user sees) and idle
@@ -224,7 +226,7 @@ func (q *eventQueue) RemoveWatchersByConn(conn *ipc.Conn) {
 // enforces this at compile time.
 const (
 	maxEventMessageBytes   = 4 * 1024
-	maxEventDataValueBytes = 128
+	maxEventDataValueBytes = 1024
 	truncationMarker       = "…[truncated]"
 )
 

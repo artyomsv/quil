@@ -44,7 +44,9 @@ func TestToPaneEventPayload_MessageOverCapTruncatesAndMarks(t *testing.T) {
 // dumping a full prompt or a stack trace).
 func TestToPaneEventPayload_DataValueOverCapTruncates(t *testing.T) {
 	t.Parallel()
-	bigValue := strings.Repeat("y", 1024)
+	// 4 KiB — guaranteed to exceed the 1 KiB Data value cap regardless of
+	// future tuning. The exact-boundary test below pins the cap edge.
+	bigValue := strings.Repeat("y", 4*1024)
 	ev := PaneEvent{
 		ID:    "evt-1",
 		Title: "tool_run",

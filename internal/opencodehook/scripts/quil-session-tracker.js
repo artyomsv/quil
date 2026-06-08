@@ -45,6 +45,11 @@ const FILE_EDITED_BATCH_MS = 1000;
 export default async function quilSessionTracker(_input) {
   const paneId = process.env.QUIL_PANE_ID || "";
   const quilHome = process.env.QUIL_HOME || "";
+  // Tier gate: "default" forwards the standard event set, "verbose" would
+  // add tier-2 (tool.execute.before/after for read-only tools — currently
+  // not wired), "off" disables all spool emission while preserving the
+  // session-id rotation tracking (used by Quil's resume path).
+  const hookMode = process.env.QUIL_HOOK_MODE || "default";
   if (!paneId || !quilHome) return {};
   if (!PANE_ID_RE.test(paneId)) return {};
   // Defense-in-depth: the daemon controls QUIL_HOME but a leaked/forwarded
@@ -85,9 +90,18 @@ export default async function quilSessionTracker(_input) {
 
   const consumeToken = () => {
     const now = Date.now();
-    const elapsed = (now - lastRefillMs) / 1000;
+    // Clamp elapsed to ≥ 0. A backward clock jump (NTP correction, manual
+    // time change, VM snapshot resume) would otherwise produce negative
+    // elapsed and push `tokens` below the floor — every subsequent event
+    // would drop until the wall clock caught up to the pre-jump time,
+    // potentially days later.
+    const elapsed = Math.max(0, (now - lastRefillMs) / 1000);
     if (elapsed > 0) {
       tokens = Math.min(RATE_BURST, tokens + elapsed * RATE_BUDGET_PER_SEC);
+      lastRefillMs = now;
+    } else if (now < lastRefillMs) {
+      // Reset the refill anchor on clock jumps so the next call computes
+      // a sane positive elapsed from the new clock baseline.
       lastRefillMs = now;
     }
     if (tokens < 1) {
@@ -112,11 +126,26 @@ export default async function quilSessionTracker(_input) {
 
   // Truncate a string with an ellipsis. Bytes counted as UTF-8 — opencode
   // is permitted to put unicode in payloads (file paths, prompt text).
+  //
+  // Buffer.slice on a UTF-8 byte boundary that lands mid-codepoint produces
+  // a string with a U+FFFD replacement char when decoded. JSON.stringify
+  // happily serialises U+FFFD (it round-trips as �), so the daemon's
+  // strict UTF-8 validator accepts the resulting line — but the user sees
+  // a notification card with "…" in the middle of what should be a clean
+  // path or prompt. Walk backwards from the byte cap to the previous
+  // codepoint boundary so the truncated string is always valid UTF-8.
   const truncate = (s, n) => {
     if (s == null) return "";
     const buf = Buffer.from(String(s), "utf8");
     if (buf.length <= n) return String(s);
-    return buf.slice(0, n - 3).toString("utf8") + "…";
+    // Target the largest cut at n-3 (room for "…" which is 3 bytes UTF-8).
+    let cut = n - 3;
+    // Back up over any UTF-8 continuation byte (10xxxxxx); we may need to
+    // walk back up to 3 bytes for a 4-byte codepoint.
+    while (cut > 0 && (buf[cut] & 0xc0) === 0x80) {
+      cut--;
+    }
+    return buf.slice(0, cut).toString("utf8") + "…";
   };
 
   const truncateData = (data) => {
@@ -132,6 +161,9 @@ export default async function quilSessionTracker(_input) {
   // Emit one Payload to the spool file. Best-effort; failures land in the
   // hook log but never block the opencode runtime.
   const spool = async (hookEvent, title, sev, data) => {
+    // Off-mode short-circuit: keep session-id tracking alive but drop the
+    // notification event surface entirely. The user opted out.
+    if (hookMode === "off") return;
     if (!consumeToken()) return;
     const payload = {
       v: 1,

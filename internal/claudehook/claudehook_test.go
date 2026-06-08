@@ -134,6 +134,21 @@ func TestBuildSettingsJSON_RegistersAllForwardedEvents(t *testing.T) {
 	}
 }
 
+// TestForwardedHookEvents_NoDuplicates guards a silent footgun: the
+// BuildSettingsJSON loop overwrites by name in the Hooks map, so a
+// duplicate entry would dedupe without warning. This test catches that at
+// build time rather than at the first Claude session.
+func TestForwardedHookEvents_NoDuplicates(t *testing.T) {
+	t.Parallel()
+	seen := make(map[string]bool)
+	for _, name := range forwardedHookEvents {
+		if seen[name] {
+			t.Errorf("duplicate entry in forwardedHookEvents: %q", name)
+		}
+		seen[name] = true
+	}
+}
+
 func TestBuildSettingsJSON_EscapesQuotesInCommand(t *testing.T) {
 	t.Parallel()
 	js, err := BuildSettingsJSON(`sh "/tmp/with quotes/hook.sh"`)

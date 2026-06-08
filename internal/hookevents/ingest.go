@@ -2,9 +2,19 @@ package hookevents
 
 import (
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
+
+// EventStorm is the canonical hook_event name for the synthetic diagnostic
+// the rate limiter emits when a pane crosses the 100-events/2s budget. The
+// daemon's emitHookEvent consumer references this constant so the
+// HookHealthy bookkeeping can skip these self-emitted events — otherwise a
+// rate-limited pane would falsely appear "hook-healthy" during the 10 s
+// penalty window and the legacy idle excerpt (the user's last fallback)
+// would also be silenced.
+const EventStorm = "internal.event_storm"
 
 // Ingester is the daemon-side gate between raw Spool / IPC payloads and the
 // downstream emit callback that translates them to daemon.PaneEvent. It
@@ -36,6 +46,7 @@ type Ingester struct {
 	now func() time.Time
 
 	mu      sync.Mutex
+	closed  bool                     // FlushAll set; future Submits no-op
 	rates   map[string]*paneRate     // paneID → sliding window
 	pending map[string]*pendingEvent // (paneID + "\x00" + hookEvent) → buffered coalesce
 }
@@ -109,12 +120,50 @@ func NewIngester(emit func(Payload)) *Ingester {
 // Validation failures are silently dropped: Submit assumes the caller has
 // already validated. The Spool reader does this before calling Submit;
 // the IPC handler should do the same.
+//
+// After FlushAll has been called as part of daemon shutdown, Submit
+// becomes a no-op so a late-arriving payload from a still-draining
+// goroutine cannot leak past the documented "after FlushAll returns no
+// emits will happen" guarantee.
 func (i *Ingester) Submit(p Payload) {
+	i.mu.Lock()
+	if i.closed {
+		i.mu.Unlock()
+		return
+	}
+	i.mu.Unlock()
 	now := i.now()
 	if !i.allowAndRecord(p, now) {
 		return
 	}
 	i.coalesce(p, now)
+}
+
+// Cancel discards any coalescer state for a pane being destroyed. Stops the
+// AfterFunc timer for every pending event keyed by paneID and removes the
+// per-pane rate-limiter bookkeeping. Critical for lifecycle correctness:
+// without this, a pane destroyed while a 50 ms coalesce window is open
+// would emit one final stale event ~50 ms later via the AfterFunc
+// goroutine — at best a debug-log drop in emitHookEvent (pane gone), at
+// worst a race window where the pane briefly exists again under a
+// different identity (defensive — Quil's UUID pane IDs make actual reuse
+// effectively impossible).
+//
+// Safe to call for a paneID that has no pending events; idempotent.
+func (i *Ingester) Cancel(paneID string) {
+	prefix := paneID + "\x00"
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	for k, p := range i.pending {
+		if !strings.HasPrefix(k, prefix) {
+			continue
+		}
+		if p.timer != nil {
+			p.timer.Stop()
+		}
+		delete(i.pending, k)
+	}
+	delete(i.rates, paneID)
 }
 
 // allowAndRecord returns true if the payload is within budget. If it
@@ -183,7 +232,7 @@ func stormPayload(paneID, source string, now time.Time) Payload {
 		Seq:       0,
 		PaneID:    paneID,
 		Source:    source,
-		HookEvent: "internal.event_storm",
+		HookEvent: EventStorm,
 		Title:     "Hook event storm — silenced 10 s",
 		Severity:  SeverityWarning,
 		Data: map[string]string{
@@ -261,14 +310,26 @@ func formatUint(v uint64) string {
 }
 
 // FlushAll is a test helper / shutdown helper that drains the coalescer's
-// pending buffers immediately, emitting whatever is currently queued.
-// Production code does not need this — the AfterFunc timers fire on their
-// own — but Daemon.Stop calls it during shutdown so any in-flight bursts
-// are surfaced before the IPC server tears down.
+// pending buffers immediately, emitting whatever is currently queued. The
+// hookEventsWatcher goroutine calls it during shutdown so in-flight bursts
+// surface before the IPC server tears down.
+//
+// FlushAll also marks the Ingester closed so any concurrent or
+// late-arriving Submit becomes a no-op — without this, a Submit racing
+// with shutdown could repopulate i.pending after the drain, then fire 50
+// ms later when the daemon's emit pipeline has already torn down.
+//
+// Every pending timer is Stop()ped before drain so the AfterFunc
+// goroutines do not fire a second redundant flush; the explicit flush
+// loop covers what the timers would have delivered.
 func (i *Ingester) FlushAll() {
 	i.mu.Lock()
+	i.closed = true
 	keys := make([]string, 0, len(i.pending))
-	for k := range i.pending {
+	for k, p := range i.pending {
+		if p.timer != nil {
+			p.timer.Stop()
+		}
 		keys = append(keys, k)
 	}
 	// Sort so the emit order is deterministic for tests.

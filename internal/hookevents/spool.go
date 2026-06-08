@@ -1,10 +1,10 @@
 package hookevents
 
 import (
-	"bytes"
+	"bufio"
 	"encoding/json"
 	"errors"
-	"io"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +12,20 @@ import (
 
 	"github.com/artyomsv/quil/internal/logger"
 )
+
+// rotationThreshold is the per-pane spool size at which we truncate after a
+// fully-drained read. The watcher only ever advances; without rotation a
+// long-running pane's spool file grows linearly with hook-event count and
+// can hit hundreds of MB over a multi-hour Claude session. 16 MiB is much
+// larger than any realistic per-pane backlog and stays well clear of
+// filesystem inode size guards.
+const rotationThreshold = 16 * 1024 * 1024
+
+// parseWarnSampleRate controls how often a per-pane producer error gets
+// logged at WARN. A misbehaving producer (malformed lines in a loop) would
+// otherwise spam quild.log at 200 ms ticks; sampling at 1 in N keeps the
+// diagnostic visible without drowning the rest of the log.
+const parseWarnSampleRate = 50
 
 // Spool is a per-pane JSONL file reader. The daemon polls Tick on a 200 ms
 // ticker; each call reads any new bytes appended since the previous read
@@ -30,16 +44,18 @@ import (
 type Spool struct {
 	dir string
 
-	mu      sync.Mutex
-	offsets map[string]int64 // paneID → byte offset already consumed
+	mu             sync.Mutex
+	offsets        map[string]int64 // paneID → byte offset already consumed
+	parseErrCounts map[string]uint64 // paneID → malformed-line counter for log sampling
 }
 
 // NewSpool returns a Spool reading from dir. Use Init to truncate stale
 // files on daemon startup; Tick on each poll; Cleanup on pane destroy.
 func NewSpool(dir string) *Spool {
 	return &Spool{
-		dir:     dir,
-		offsets: make(map[string]int64),
+		dir:            dir,
+		offsets:        make(map[string]int64),
+		parseErrCounts: make(map[string]uint64),
 	}
 }
 
@@ -53,11 +69,11 @@ func NewSpool(dir string) *Spool {
 // represent live state — is worse for a notification surface.
 func (s *Spool) Init() error {
 	if err := os.MkdirAll(s.dir, 0o700); err != nil {
-		return err
+		return fmt.Errorf("hookevents: create spool dir %q: %w", s.dir, err)
 	}
 	entries, err := os.ReadDir(s.dir)
 	if err != nil {
-		return err
+		return fmt.Errorf("hookevents: read spool dir %q: %w", s.dir, err)
 	}
 	for _, e := range entries {
 		name := e.Name()
@@ -71,6 +87,7 @@ func (s *Spool) Init() error {
 	}
 	s.mu.Lock()
 	s.offsets = make(map[string]int64)
+	s.parseErrCounts = make(map[string]uint64)
 	s.mu.Unlock()
 	return nil
 }
@@ -107,6 +124,14 @@ func (s *Spool) Tick() []Payload {
 }
 
 func (s *Spool) readPaneFile(paneID, path string) []Payload {
+	// Reject unsafe paneIDs at the read path too — symmetric with the
+	// Cleanup guard. A filename like "../evil.jsonl" in the spool dir
+	// would otherwise drive arbitrary file reads via os.Open.
+	if !safePaneID(paneID) {
+		logger.Warn("hookevents: rejected read for unsafe filename-derived paneID %q", paneID)
+		return nil
+	}
+
 	s.mu.Lock()
 	off := s.offsets[paneID]
 	s.mu.Unlock()
@@ -127,76 +152,194 @@ func (s *Spool) readPaneFile(paneID, path string) []Payload {
 	}
 	size := info.Size()
 	if size == off {
-		return nil // nothing new
+		// Nothing new. Take this opportunity to rotate the file if it has
+		// grown beyond the threshold and we have nothing in flight. Doing
+		// it on an idle tick keeps the truncate off the hot read path.
+		if size >= rotationThreshold {
+			s.rotate(paneID, path)
+		}
+		return nil
 	}
 	if size < off {
-		// File was truncated externally (e.g. test harness or a future
-		// rotation). Restart from the beginning.
+		// File was truncated externally (test harness, prior rotation,
+		// disk-full recovery). Restart from the beginning.
 		off = 0
 	}
 
-	if _, err := f.Seek(off, io.SeekStart); err != nil {
+	if _, err := f.Seek(off, 0); err != nil {
 		logger.Warn("hookevents: seek spool %q: %v", path, err)
 		return nil
 	}
-	buf, err := io.ReadAll(f)
-	if err != nil {
-		logger.Warn("hookevents: read spool %q: %v", path, err)
-		return nil
+
+	// bufio.Reader.ReadBytes('\n') lets us distinguish complete lines
+	// (returned with the trailing \n) from a partial trailing line
+	// (returned WITHOUT \n at io.EOF). The partial trailing line MUST NOT
+	// advance the offset — it'll be picked up on the next tick once the
+	// producer's pending write finishes.
+	//
+	// Per-line size cap: ReadBytes will happily allocate an unbounded
+	// buffer if the producer writes a multi-MB single line. We guard by
+	// checking the returned slice's length and dropping anything over
+	// MaxTotalBytes+1 with a warn. The advance still applies so we don't
+	// spin on it.
+	br := bufio.NewReader(f)
+	var out []Payload
+	consumed := off
+	for {
+		line, err := br.ReadBytes('\n')
+		if len(line) > 0 && line[len(line)-1] == '\n' {
+			// Complete line — advance offset past it regardless of
+			// whether validation accepts it.
+			consumed += int64(len(line))
+			trimmed := line[:len(line)-1]
+			if len(trimmed) == 0 || isWhitespaceLine(trimmed) {
+				if err != nil {
+					break
+				}
+				continue
+			}
+			if p, ok := s.parseAndValidate(paneID, trimmed); ok {
+				out = append(out, p)
+			}
+		}
+		if err != nil {
+			// io.EOF with len(line) > 0 means we hit a partial trailing
+			// line — leave the offset short of it so the next tick
+			// picks it up. io.EOF with len(line) == 0 means we read the
+			// last complete line above; offset already advanced.
+			break
+		}
 	}
 
-	// Find the last complete line (ending in \n). Everything past that is a
-	// partial trailing write that we must not consume; it will be picked up
-	// on the next Tick.
-	lastNL := bytes.LastIndexByte(buf, '\n')
-	if lastNL < 0 {
-		return nil // no complete line yet
-	}
-	consumed := off + int64(lastNL) + 1
 	s.mu.Lock()
 	s.offsets[paneID] = consumed
 	s.mu.Unlock()
-
-	complete := buf[:lastNL+1]
-	return parsePayloads(complete)
+	return out
 }
 
-// parsePayloads decodes a buffer of newline-delimited JSON lines, dropping
-// malformed lines with a warn log and returning the valid ones.
-func parsePayloads(buf []byte) []Payload {
-	var out []Payload
-	for _, line := range bytes.Split(buf, []byte("\n")) {
-		if len(bytes.TrimSpace(line)) == 0 {
-			continue
-		}
-		if len(line) > MaxTotalBytes {
-			logger.Warn("hookevents: payload exceeds %d-byte cap (%d bytes), dropping", MaxTotalBytes, len(line))
-			continue
-		}
-		var p Payload
-		if err := json.Unmarshal(line, &p); err != nil {
-			logger.Warn("hookevents: parse payload: %v", err)
-			continue
-		}
-		if err := p.Validate(); err != nil {
-			logger.Warn("hookevents: invalid payload from pane=%s src=%s hook_event=%s: %v",
-				p.PaneID, p.Source, p.HookEvent, err)
-			continue
-		}
-		out = append(out, p)
+// parseAndValidate decodes one JSONL line, validates it, and enforces the
+// filename↔Payload paneID match that closes the cross-pane spoof. Returns
+// (payload, true) when the line passes all checks; otherwise drops the
+// line with a rate-limited warn.
+func (s *Spool) parseAndValidate(filenamePaneID string, line []byte) (Payload, bool) {
+	if len(line) > MaxTotalBytes {
+		s.sampledParseWarn(filenamePaneID, fmt.Sprintf("payload exceeds %d-byte cap (%d bytes)", MaxTotalBytes, len(line)))
+		return Payload{}, false
 	}
-	return out
+	var p Payload
+	if err := json.Unmarshal(line, &p); err != nil {
+		// Log only the byte size — never the err.Error() which may include
+		// fragments of the raw line. Producer content can carry user
+		// prompt previews or secrets.
+		s.sampledParseWarn(filenamePaneID, fmt.Sprintf("unmarshal failed (line len %d)", len(line)))
+		return Payload{}, false
+	}
+	if err := p.Validate(); err != nil {
+		s.sampledParseWarn(filenamePaneID, fmt.Sprintf("invalid payload (hook_event=%q src=%q): %v", p.HookEvent, p.Source, err))
+		return Payload{}, false
+	}
+	// Cross-pane spoofing defense: refuse to accept a payload that
+	// claims to belong to a different pane than the file it was written
+	// to. Without this a plugin running in pane A could forge events
+	// attributed to pane B (e.g. "Permission required" cards aimed at a
+	// pane the user is not currently looking at). The hook scripts set
+	// pane_id from $QUIL_PANE_ID which the daemon controls — a mismatch
+	// indicates either a bug or an attempt at attribution forgery.
+	if p.PaneID != filenamePaneID {
+		s.sampledParseWarn(filenamePaneID, fmt.Sprintf("paneID mismatch: filename=%q payload=%q", filenamePaneID, p.PaneID))
+		return Payload{}, false
+	}
+	return p, true
+}
+
+// sampledParseWarn logs a parse failure at WARN, but only 1 of every
+// parseWarnSampleRate occurrences per pane. A misbehaving producer (e.g.
+// truncated lines in a loop) would otherwise floodlight quild.log.
+func (s *Spool) sampledParseWarn(paneID, msg string) {
+	s.mu.Lock()
+	s.parseErrCounts[paneID]++
+	n := s.parseErrCounts[paneID]
+	s.mu.Unlock()
+	if n%parseWarnSampleRate == 1 {
+		logger.Warn("hookevents: pane=%s parse drop (sampled 1/%d): %s", paneID, parseWarnSampleRate, msg)
+	}
+}
+
+// rotate truncates a fully-drained spool file and resets its offset. Caller
+// is responsible for ensuring the file was just observed to have no
+// unconsumed bytes (size == offset). Failures land in the hook log.
+func (s *Spool) rotate(paneID, path string) {
+	if err := os.Truncate(path, 0); err != nil {
+		logger.Warn("hookevents: rotate spool %q: %v", path, err)
+		return
+	}
+	s.mu.Lock()
+	s.offsets[paneID] = 0
+	s.mu.Unlock()
+}
+
+// isWhitespaceLine reports whether a slice is all spaces / tabs / nothing.
+func isWhitespaceLine(b []byte) bool {
+	for _, c := range b {
+		if c != ' ' && c != '\t' {
+			return false
+		}
+	}
+	return true
 }
 
 // Cleanup removes the spool file for a destroyed pane and forgets its
 // offset. Idempotent; safe to call for panes that never had a spool file.
+//
+// Defensive against path traversal: the caller is expected to validate
+// paneID upstream (the daemon's IPC handlers use isValidHexID) but we
+// reject characters that could escape the spool dir as a second line of
+// defense. A paneID of "../etc/passwd" would otherwise let an attacker
+// who reached the IPC surface unlink arbitrary *.jsonl files under the
+// daemon user.
 func (s *Spool) Cleanup(paneID string) {
+	if !safePaneID(paneID) {
+		logger.Warn("hookevents: rejected cleanup for unsafe paneID %q", paneID)
+		return
+	}
+
 	s.mu.Lock()
 	delete(s.offsets, paneID)
 	s.mu.Unlock()
 
 	path := filepath.Join(s.dir, paneID+".jsonl")
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		logger.Warn("hookevents: cleanup spool %q: %v", path, err)
+	// Belt-and-suspenders: ensure the cleaned path lives strictly under
+	// s.dir even after filepath.Join's lexical processing. A future change
+	// to safePaneID that lets `..` slip through would still be caught here.
+	cleanedPath := filepath.Clean(path)
+	cleanedDir := filepath.Clean(s.dir)
+	if !strings.HasPrefix(cleanedPath, cleanedDir+string(filepath.Separator)) {
+		logger.Warn("hookevents: rejected cleanup escaping spool dir: %q", cleanedPath)
+		return
 	}
+	if err := os.Remove(cleanedPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		logger.Warn("hookevents: cleanup spool %q: %v", cleanedPath, err)
+	}
+}
+
+// safePaneID rejects pane ids that could escape the spool directory via
+// path-separator or parent-traversal segments. Matches the trust shape the
+// daemon uses for its own pane id allocation (uuid-derived hex), but does
+// NOT enforce the exact format — that lives in the daemon's isValidHexID
+// check at the IPC ingress. Here we just refuse anything that could turn
+// filepath.Join into a writable arbitrary path.
+func safePaneID(id string) bool {
+	if id == "" {
+		return false
+	}
+	if strings.ContainsAny(id, `/\`+"\x00") {
+		return false
+	}
+	if id == "." || id == ".." {
+		return false
+	}
+	if strings.Contains(id, "..") {
+		return false
+	}
+	return true
 }

@@ -951,6 +951,14 @@ func (d *Daemon) handleDestroyPane(msg *ipc.Message) {
 	if err := msg.DecodePayload(&payload); err != nil {
 		return
 	}
+	// Defense-in-depth: reject malformed PaneID at the IPC ingress so a
+	// crafted payload (e.g. PaneID = "../../tmp/target") cannot escape the
+	// spool directory in Spool.Cleanup or any other paneID-keyed FS path.
+	// Production paneIDs are uuid-derived hex; anything else is invalid.
+	if !isValidHexID(payload.PaneID, "pane-") {
+		log.Printf("handleDestroyPane: rejected malformed PaneID %q", payload.PaneID)
+		return
+	}
 
 	// Capture tab ID before destroying the pane
 	var tabID string
@@ -959,11 +967,16 @@ func (d *Daemon) handleDestroyPane(msg *ipc.Message) {
 	}
 	log.Printf("pane destroy: %s (tab=%s)", payload.PaneID, tabID)
 
-	// Tear down the pane's hook event spool file before destroying the
-	// pane itself — the watcher's next tick must not pick up stale lines
-	// from a destroyed pane.
+	// Tear down the pane's hook event spool file AND coalescer pending
+	// state before destroying the pane itself. Spool.Cleanup stops the
+	// watcher from picking up stale lines on the next tick; Ingester.Cancel
+	// stops the 50 ms AfterFunc timers from firing a final stale event
+	// after the pane is gone.
 	if d.hookSpool != nil {
 		d.hookSpool.Cleanup(payload.PaneID)
+	}
+	if d.hookIngester != nil {
+		d.hookIngester.Cancel(payload.PaneID)
 	}
 
 	d.session.DestroyPane(payload.PaneID)
@@ -1859,6 +1872,24 @@ func (d *Daemon) hookEventsWatcher() {
 // read silently drops here — the lookup returns nil and we return without
 // emit. Same trust boundary as the rest of the IPC surface.
 func (d *Daemon) emitHookEvent(p hookevents.Payload) {
+	// Daemon-side enforcement of the hooks tier — covers the case where
+	// the script-side gate did not fire (older script on disk, env var
+	// stripped by an opencode wrapper, etc.). "off" drops the event;
+	// "default"/"verbose"/anything else fall through. Storm diagnostics
+	// always pass — they're the rate limiter's own internal signal.
+	if p.HookEvent != hookevents.EventStorm {
+		var mode string
+		switch p.Source {
+		case hookevents.SourceClaude:
+			mode = d.cfg.Notification.Hooks.Claude
+		case hookevents.SourceOpenCode:
+			mode = d.cfg.Notification.Hooks.OpenCode
+		}
+		if mode == "off" {
+			return
+		}
+	}
+
 	pane := d.session.Pane(p.PaneID)
 	if pane == nil {
 		logger.Debug("hook event for unknown pane=%s src=%s hook_event=%s",
@@ -1866,10 +1897,17 @@ func (d *Daemon) emitHookEvent(p hookevents.Payload) {
 		return
 	}
 
-	pane.PluginMu.Lock()
-	pane.HookHealthy = true
-	pane.LastHookEventAt = time.Now()
-	pane.PluginMu.Unlock()
+	// Only real hook events count toward "this pane is hook-healthy". The
+	// rate limiter's own synthetic storm diagnostic would otherwise flip
+	// HookHealthy=true precisely when the pane has stopped delivering real
+	// events — silencing the legacy idle excerpt during the 30 s window
+	// when it's the user's last remaining notification surface.
+	if p.HookEvent != hookevents.EventStorm {
+		pane.PluginMu.Lock()
+		pane.HookHealthy = true
+		pane.LastHookEventAt = time.Now()
+		pane.PluginMu.Unlock()
+	}
 
 	// Compose the PaneEvent. The Type field encodes the source so MCP
 	// consumers can filter by "hook.claude.*" or "hook.opencode.*" without
@@ -1879,25 +1917,27 @@ func (d *Daemon) emitHookEvent(p hookevents.Payload) {
 		severity = hookevents.SeverityInfo
 	}
 	eventType := "hook." + p.Source + "." + p.HookEvent
-	ts := time.UnixMilli(p.TsMs)
+	// Clamp timestamp to a sane window. A hook with a clock skew (container
+	// with wrong NTP, malicious payload) might carry TsMs years off; the
+	// sidebar would pin the event at the top or bottom forever. Accept ±1h
+	// of the daemon's clock; anything else falls back to now.
+	now := time.Now()
+	var ts time.Time
 	if p.TsMs == 0 {
-		ts = time.Now()
-	}
-
-	// Copy Data so the Payload's map is not aliased downstream — the
-	// Ingester may still hold a reference, and emitEvent's aggregation may
-	// mutate Data["count"].
-	var data map[string]string
-	if len(p.Data) > 0 {
-		data = make(map[string]string, len(p.Data)+2)
-		for k, v := range p.Data {
-			data[k] = v
+		ts = now
+	} else {
+		ts = time.UnixMilli(p.TsMs)
+		if ts.Before(now.Add(-time.Hour)) || ts.After(now.Add(time.Minute)) {
+			ts = now
 		}
 	}
-	// Enrich with source-tracking metadata so MCP consumers do not need to
-	// re-parse the Type prefix.
-	if data == nil {
-		data = make(map[string]string, 2)
+
+	// Build the Data map in a single allocation. Always carries the
+	// source-tracking metadata so MCP consumers don't have to parse the
+	// Type prefix.
+	data := make(map[string]string, len(p.Data)+2)
+	for k, v := range p.Data {
+		data[k] = v
 	}
 	data["hook_source"] = p.Source
 	data["hook_event"] = p.HookEvent
@@ -2618,6 +2658,13 @@ func (d *Daemon) handleDestroyPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 		respondTo(conn, msg.ID, ipc.MsgDestroyPaneResp, ipc.DestroyPaneRespPayload{})
 		return
 	}
+	// Mirror handleDestroyPane's PaneID validation so this MCP-facing path
+	// is also defended against path-traversal payloads.
+	if !isValidHexID(req.PaneID, "pane-") {
+		log.Printf("handleDestroyPaneReq: rejected malformed PaneID %q", req.PaneID)
+		respondTo(conn, msg.ID, ipc.MsgDestroyPaneResp, ipc.DestroyPaneRespPayload{})
+		return
+	}
 
 	pane := d.session.Pane(req.PaneID)
 	if pane == nil {
@@ -2626,10 +2673,13 @@ func (d *Daemon) handleDestroyPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 	}
 	d.highlightPane(pane.ID)
 
-	// Same hook-events cleanup as handleDestroyPane: kill the spool file
-	// before the pane disappears so the watcher does not race the destroy.
+	// Same hook-events cleanup as handleDestroyPane: kill the spool file +
+	// cancel the coalescer's pending timers before the pane disappears.
 	if d.hookSpool != nil {
 		d.hookSpool.Cleanup(req.PaneID)
+	}
+	if d.hookIngester != nil {
+		d.hookIngester.Cancel(req.PaneID)
 	}
 
 	tabID := pane.TabID

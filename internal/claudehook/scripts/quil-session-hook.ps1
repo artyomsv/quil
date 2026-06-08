@@ -31,6 +31,9 @@ function Write-HookErr([string]$msg) {
     } catch {}
 }
 
+$mode = $env:QUIL_HOOK_MODE
+if (-not $mode) { $mode = 'default' }
+
 $payload = [Console]::In.ReadToEnd()
 
 # Try the structured ConvertFrom-Json first; fall back to regex extraction
@@ -61,17 +64,43 @@ function Truncate([string]$s, [int]$n) {
 }
 
 # Escape a string for embedding in a JSON string literal.
+#
+# PowerShell -replace is a .NET Regex.Replace under the hood. In the
+# replacement string, `$` is the substitution sigil but backslash is
+# literal. So to emit JSON's `\\` (two chars) the replacement value must
+# be the LITERAL two-character string `\\`, expressed in PowerShell as
+# the single-quoted `'\\'` — which is exactly two characters.
+#
+# Order matters: backslash is escaped FIRST so subsequent replacements'
+# inserted `\` characters are not re-escaped.
+#
+# C0 control characters (0x00–0x1F) other than `\n`/`\r`/`\t` are
+# escaped as `\uXXXX` so the resulting JSON string literal is valid;
+# without this, a Claude payload containing e.g. `\x1b` (ESC, common in
+# ANSI-colored tool output) would produce a line the daemon's strict
+# json.Unmarshal rejects, silently dropping the event.
 function JsonEscape([string]$s) {
     if ($null -eq $s) { return '' }
-    $s = $s -replace '\\', '\\\\'
+    $s = $s -replace '\\', '\\'
     $s = $s -replace '"', '\"'
     $s = $s -replace "`n", '\n'
     $s = $s -replace "`r", '\r'
     $s = $s -replace "`t", '\t'
+    # Catch-all for remaining C0 control bytes [\x00-\x1F]. Without this a
+    # Claude payload containing e.g. ESC (\x1B from ANSI-colored tool
+    # output) would produce a line the daemon's strict json.Unmarshal
+    # rejects, silently dropping the event. Match evaluator formats the
+    # matched character as JSON's \u00XX hex escape.
+    $s = [regex]::Replace($s, '[\x00-\x1f]', {
+        param($m)
+        '\u{0:x4}' -f [int][char]$m.Value
+    })
     return $s
 }
 
 function Spool-Event([string]$he, [string]$title, [string]$sev, [string]$dataJson) {
+    # Off-mode short-circuit (see .sh for design notes).
+    if ($mode -eq 'off') { return }
     $eventsDir = Join-Path $quilHome 'events'
     try { New-Item -ItemType Directory -Path $eventsDir -Force | Out-Null } catch {
         Write-HookErr ("mkdir events dir failed: {0}" -f $eventsDir)

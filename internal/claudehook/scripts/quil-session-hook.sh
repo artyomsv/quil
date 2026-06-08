@@ -41,6 +41,12 @@ log_err() {
         >>"$log_file" 2>/dev/null || true
 }
 
+# QUIL_HOOK_MODE gates the spool emission tier. The daemon passes it at pane
+# spawn from `[notification.hooks] claude` in config.toml. SessionStart
+# always writes the session id file regardless of mode (it is the
+# infrastructure for resume, not a notification).
+mode="${QUIL_HOOK_MODE:-default}"
+
 # Stdin is consumed exactly once; everything else reads from $payload.
 payload="$(cat)"
 
@@ -61,29 +67,46 @@ jget() {
 hook_event="$(jget hook_event_name)"
 session_id="$(jget session_id)"
 
-# Truncate to the wire-schema limits before any composition. Claude's
-# inputs (prompt, tool args, etc.) can be arbitrarily large; we cap at
-# 256 chars for any preview field and let the daemon enforce the 1 KiB
-# Data value backstop. Title cap is 200.
-truncate() {
-    awk -v n="$2" 'BEGIN { v=ARGV[1]; if (length(v) <= n) print v; else print substr(v, 1, n-1) "…"; }' "$1" 2>/dev/null
-}
-
 # json_escape escapes a string for embedding inside a JSON string literal.
-# Handles backslash, double-quote, newline, carriage return, and tab; other
-# control bytes pass through (the daemon's json.Unmarshal will reject them
-# and the line will be dropped — acceptable since this is best-effort
-# escaping in a shell script).
+# Handles backslash, double-quote, tab, and converts any C0 control byte
+# (including \n and \r) to its \uXXXX form so the resulting JSON line is
+# valid even when Claude payloads contain raw control characters (ESC from
+# ANSI-colored tool output, embedded newlines in multi-line prompts, etc).
+#
+# We use `printf | tr` to first replace each control byte with a printable
+# marker, then sed to substitute the JSON escape — this sidesteps the
+# GNU-vs-BSD sed slurp-into-pattern-space portability question. Less
+# elegant than a single sed, but portable to busybox / dash / macOS sed.
+#
+# Note on byte truncation: callers feed json_escape strings that have
+# already been bounded by `head -c N`. head -c counts BYTES not characters,
+# so non-ASCII content can land mid-codepoint at the cut. The daemon's
+# strict UTF-8 json.Unmarshal then rejects the line and the event is
+# silently dropped. Acceptable v1 limitation for Claude (commands and
+# tool names are ASCII); user prompts containing non-ASCII may produce
+# events with truncated previews replaced by … in the daemon side cap.
 json_escape() {
-    printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e ':a' -e 'N' -e '$!ba' \
-        -e 's/\n/\\n/g' -e 's/\r/\\r/g' -e 's/\t/\\t/g'
+    # Replace newlines/CR/tab with a single marker each, then escape via
+    # sed. Use `printf` to avoid `echo -e` portability differences.
+    printf '%s' "$1" | \
+        tr '\n' '\1' | tr '\r' '\2' | tr '\t' '\3' | \
+        sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' \
+            -e 's/\x01/\\n/g' -e 's/\x02/\\r/g' -e 's/\x03/\\t/g'
 }
 
 # Append a JSONL event line to the spool. Single write(2) keeps it atomic
 # under PIPE_BUF on Unix (the schema cap of 2 KiB stays well under the
 # typical 4 KiB PIPE_BUF). Args: 1=hook_event, 2=title, 3=severity,
 # 4=data_json (already a {"k":"v",...} string, may be empty for none).
+#
+# Off-mode short-circuit: when QUIL_HOOK_MODE=off, drop everything. When
+# the mode is "default" (the standard tier — see forwardedHookEvents in
+# claudehook.go for what claude registers under) or "verbose" (a superset
+# claude would have to register additional hooks to populate), the spool
+# write proceeds. The router below dispatches the default tier only;
+# extending to verbose requires extending forwardedHookEvents.
 spool() {
+    [ "$mode" = "off" ] && return 0
     he="$1"
     ti="$2"
     sv="$3"

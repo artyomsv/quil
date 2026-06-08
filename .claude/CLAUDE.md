@@ -22,7 +22,7 @@ Client-daemon model:
 - `cmd/quild/` — Background daemon
 - `internal/config/` — TOML configuration (`Load` reads, `Save` writes atomically via `.tmp` + rename). `UIConfig.ShowDisclaimer` controls startup beta dialog
 - `internal/daemon/` — Session manager, message routing, event queue (`event.go` — bounded, mutex-protected, watcher pub/sub for MCP)
-- `internal/ipc/` — Length-prefixed JSON protocol (4-byte big-endian uint32 + JSON)
+- `internal/ipc/` — Length-prefixed JSON protocol (4-byte big-endian uint32 + JSON). Each `Conn` owns a 64-slot send buffer (`sendCh`) drained by a dedicated `sendLoop` goroutine; `Send`/`sendFrame` are non-blocking. `Broadcast` marshals once and shares the cloned wire frame across N conns lock-free after snapshotting `s.conns`. A slow / wedged peer's `sendFrame` trips a CAS-guarded overflow that logs once + spawns `go c.Close()` (`ErrSendOverflow`); other clients never block. `sendLoop` enforces a 30 s `SetWriteDeadline` per frame as a belt-and-suspenders catch for kernel-buffer wedges. `Server.ConnCount()` exposes the live count for tests. Daemon-side per-event size caps (4 KiB Message, 128 B per Data value, front-truncated with `…[truncated]` marker, reserved `_quil_truncated` flag) live in `internal/daemon/event.go:toPaneEventPayload`
 - `internal/persist/` — Atomic workspace/buffer persistence (JSON snapshots, binary ghost buffers)
 - `internal/pty/` — Cross-platform PTY (build tags: `linux || darwin || freebsd`, `windows`)
 - `internal/shellinit/` — Automatic OSC 7 + OSC 133 shell integration (embedded init scripts, `//go:embed`)

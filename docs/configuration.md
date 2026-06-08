@@ -70,6 +70,7 @@ scroll_page_up = "alt+pgup"
 scroll_page_down = "alt+pgdown"
 paste = "ctrl+v"
 focus_pane = "ctrl+e"
+redraw = "alt+shift+l"          # force full screen repaint (clears rendering artifacts)
 ```
 
 ## `[daemon]`
@@ -142,6 +143,7 @@ Multiple modifiers stack with `+` (no spaces). Mouse buttons are not bindable he
 | `scroll_page_up` / `scroll_page_down` | `alt+pgup` / `alt+pgdown` | Pane scrollback |
 | `paste` | `ctrl+v` | Paste from clipboard (text or image) |
 | `focus_pane` | `ctrl+e` | Toggle focus mode |
+| `redraw` | `alt+shift+l` | Force a full screen repaint — clears rendering artifacts (scrambled or misplaced characters) without restarting the TUI |
 
 ## Per-plugin instances
 

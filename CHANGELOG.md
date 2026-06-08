@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.16.0] - 2026-06-08
+
 ### Added
 
 - **Notification events carry an excerpt of the triggering output** — every `process_exit`, `command_complete`, `bell`, and `output_idle` event now embeds the last few stripped output lines in the event's `Message` field and `Data["excerpt"]`. The notification sidebar renders the first line of the excerpt as a 4th line per event card (dim grey, blank when there is none). MCP consumers see the full excerpt in the event payload, so an agent can act on context without a follow-up `read_pane_output` round-trip. Single helper `paneOutputExcerpt(pane, n)` reads the trailing 4 KiB of the ring buffer, ANSI-strips it, and returns the last n non-empty lines; `withExcerpt(event, excerpt)` populates the fields idempotently.

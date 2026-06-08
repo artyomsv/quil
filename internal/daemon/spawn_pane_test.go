@@ -10,14 +10,15 @@ import (
 // fakeSession records PTY method calls without spawning a real process.
 // Used to verify that spawnPane applies CWD before Start.
 type fakeSession struct {
-	cwd        string
-	env        []string
-	started    bool
-	startCmd   string
-	startArgs  []string
-	cwdSetAt   int // call ordinal when SetCWD was invoked
-	startedAt  int // call ordinal when Start was invoked
-	callSeq    int
+	cwd       string
+	env       []string
+	started   bool
+	startCmd  string
+	startArgs []string
+	cwdSetAt  int // call ordinal when SetCWD was invoked
+	startedAt int // call ordinal when Start was invoked
+	callSeq   int
+	resizes   [][2]uint16 // recorded (rows, cols) Resize calls
 }
 
 func (f *fakeSession) SetCWD(dir string) {
@@ -41,7 +42,10 @@ func (f *fakeSession) Start(cmd string, args ...string) error {
 
 func (f *fakeSession) Read(buf []byte) (int, error)  { return 0, fmt.Errorf("not implemented") }
 func (f *fakeSession) Write(data []byte) (int, error) { return 0, fmt.Errorf("not implemented") }
-func (f *fakeSession) Resize(rows, cols uint16) error  { return nil }
+func (f *fakeSession) Resize(rows, cols uint16) error {
+	f.resizes = append(f.resizes, [2]uint16{rows, cols})
+	return nil
+}
 func (f *fakeSession) Close() error                    { return nil }
 func (f *fakeSession) Pid() int                        { return 0 }
 func (f *fakeSession) WaitExit() int                   { return 0 }

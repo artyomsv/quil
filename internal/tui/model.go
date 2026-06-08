@@ -61,6 +61,36 @@ type PaneInfo struct {
 	Type  string
 }
 
+// paneSettleRepaintMsg fires shortly after a pane's first live output and
+// forces a full repaint. The child reflows its UI right after the daemon's
+// spawn-time resize kick; when the host terminal disagrees with the renderer
+// about glyph widths (Claude Code's logo on Windows fonts), that redraw
+// leaves stale cells only a full repaint clears.
+type paneSettleRepaintMsg struct{}
+
+// sizePollMsg fires on a fixed interval and re-queries the terminal size.
+// conhost coalesces/drops WINDOW_BUFFER_SIZE_EVENTs during rapid resize →
+// maximize, so the final WindowSizeMsg can simply never arrive; the poll
+// closes the gap. Unchanged sizes no-op in the WindowSizeMsg handler.
+type sizePollMsg struct{}
+
+// sizePollInterval balances recovery latency against poll cost (one
+// terminal-size query per tick — a single syscall).
+const sizePollInterval = 1 * time.Second
+
+func sizePollTick() tea.Cmd {
+	return tea.Tick(sizePollInterval, func(time.Time) tea.Msg { return sizePollMsg{} })
+}
+
+// sizePollProbe runs the conhost grid fixup (no-op off Windows / when the
+// grid already fits) and then asks Bubble Tea to re-query the terminal
+// size. One command instead of a batch so the fixup is guaranteed to run
+// before the query.
+func sizePollProbe() tea.Msg {
+	fixupConsoleGrid()
+	return tea.RequestWindowSize()
+}
+
 // resizeTickMsg fires after the debounce delay; seq tracks freshness.
 type resizeTickMsg struct {
 	seq int
@@ -315,7 +345,7 @@ func (m Model) ConfigChanged() bool { return m.configChanged }
 func (m Model) Init() tea.Cmd {
 	log.Print("TUI Init — starting listener")
 	startUpdateWatchdog(defaultWatchdogConfig())
-	return tea.Batch(m.listenForMessages(), memoryTickCmd())
+	return tea.Batch(m.listenForMessages(), memoryTickCmd(), sizePollTick())
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -327,6 +357,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}()
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
+		// Poll echo: size matches both the applied and any pending value —
+		// nothing to do. Keeps the 1s size poll free when idle.
+		if m.attached && msg.Width == m.width && msg.Height == m.height &&
+			msg.Width == m.pendingWidth && msg.Height == m.pendingHeight {
+			return m, nil
+		}
 		log.Printf("WindowSizeMsg: %dx%d", msg.Width, msg.Height)
 		m.pendingWidth = msg.Width
 		m.pendingHeight = msg.Height
@@ -359,6 +395,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Tick(150*time.Millisecond, func(t time.Time) tea.Msg {
 			return resizeTickMsg{seq: seq}
 		})
+
+	case sizePollMsg:
+		return m, tea.Batch(sizePollProbe, sizePollTick())
 
 	case resizeTickMsg:
 		if msg.seq != m.resizeSeq {
@@ -607,6 +646,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(cmd, m.listenForMessages())
 		}
 		return m, m.listenForMessages()
+
+	case paneSettleRepaintMsg:
+		return m, tea.ClearScreen
 
 	case spinnerTickMsg:
 		// Advance spinner frame for the resuming/preparing pane
@@ -1131,6 +1173,8 @@ func (m Model) notesKeyExempt(key string) bool {
 		kb.NewTab, kb.RenameTab, kb.RenamePane, kb.CycleTabColor,
 		// Other modes.
 		kb.FocusPane,
+		// Force repaint — view-level, harmless while the editor is open.
+		kb.Redraw,
 		// Notification center.
 		kb.NotificationToggle, kb.NotificationFocus, kb.GoBack,
 		// Tools and dialogs.
@@ -1257,11 +1301,15 @@ func (m Model) View() tea.View {
 		content = lipgloss.JoinVertical(lipgloss.Left, sections...)
 	}
 
-	// Hide the terminal cursor — we render our own via insertCursor()
-	content += "\x1b[?25l"
 	v := tea.NewView(content)
 	v.AltScreen = true
 	v.MouseMode = tea.MouseModeCellMotion
+	// v.Cursor stays nil — the hardware cursor is never shown. Every pane
+	// type gets a software reverse-video caret drawn into the frame by
+	// renderContent/insertCursor instead. Positioning the real cursor via
+	// tea.View.Cursor was tried and reverted: the per-frame repositioning
+	// desynced Bubble Tea's diff writer on Windows and the first typed
+	// character landed one cell off ("Test" → "T est").
 	return v
 }
 
@@ -1488,6 +1536,15 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case kbMatches(key, kb.CycleTabColor):
 		return m, m.cycleTabColor()
+
+	case kbMatches(key, kb.Redraw):
+		// Recovery hatch for rendering artifacts: cell-diff drift (width
+		// disagreements with the host terminal) accumulates until a full
+		// repaint. sizePollProbe additionally recovers from a stale size —
+		// it grows the conhost grid if the window outgrew it (legacy
+		// conhost never grows it back itself) and re-queries the size.
+		// ClearScreen alone would repaint the same stale-size frame.
+		return m, tea.Batch(tea.ClearScreen, sizePollProbe)
 
 	case kbMatches(key, kb.ScrollPageUp):
 		if tab := m.activeTabModel(); tab != nil {
@@ -1734,10 +1791,26 @@ func (m *Model) handlePaneOutput(msg PaneOutputMsg) tea.Cmd {
 			appendStart := time.Now()
 			leaf.Pane.AppendOutput(msg.Data)
 			m.perfStats.recordPaneOutput(len(msg.Data), time.Since(appendStart))
-			if leaf.Pane.CWD != oldCWD && leaf.Pane.CWD != "" {
-				return m.updatePaneCWD(msg.PaneID, leaf.Pane.CWD)
+
+			var cmds []tea.Cmd
+			if !msg.Ghost && !leaf.Pane.liveOutputSeen {
+				leaf.Pane.liveOutputSeen = true
+				// First live output: the child reflows right after the
+				// daemon's resize kick lands. Repaint quickly to clean
+				// boot-frame leftovers, and once more after the UI settles
+				// (see paneSettleRepaintMsg).
+				cmds = append(cmds,
+					tea.Tick(300*time.Millisecond, func(time.Time) tea.Msg { return paneSettleRepaintMsg{} }),
+					tea.Tick(2*time.Second, func(time.Time) tea.Msg { return paneSettleRepaintMsg{} }),
+				)
 			}
-			return nil
+			if leaf.Pane.CWD != oldCWD && leaf.Pane.CWD != "" {
+				cmds = append(cmds, m.updatePaneCWD(msg.PaneID, leaf.Pane.CWD))
+			}
+			if len(cmds) == 0 {
+				return nil
+			}
+			return tea.Batch(cmds...)
 		}
 	}
 	return nil

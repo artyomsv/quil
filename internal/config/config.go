@@ -107,6 +107,11 @@ type KeybindingsConfig struct {
 	NotificationFocus  string `toml:"notification_focus"`
 	GoBack             string `toml:"go_back"`
 	NotesToggle        string `toml:"notes_toggle"`
+	// Redraw forces a full screen repaint (tea.ClearScreen). Recovery key
+	// for rendering artifacts left behind by cell-diff drift — width
+	// disagreements between Quil and the host terminal (most common on
+	// Windows) scramble characters until something repaints everything.
+	Redraw string `toml:"redraw"`
 }
 
 func Default() Config {
@@ -174,6 +179,9 @@ func Default() Config {
 			NotificationFocus:  "f3",
 			GoBack:             "alt+backspace",
 			NotesToggle:        "alt+e",
+			// Mnemonic: Ctrl+L clears/redraws a shell; the Alt+Shift layer
+			// keeps plain Ctrl+L flowing to the PTY.
+			Redraw: "alt+shift+l",
 		},
 	}
 }

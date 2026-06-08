@@ -8,6 +8,7 @@ import (
 )
 
 func TestFirstNonEmptyLine(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		in   string
@@ -30,6 +31,7 @@ func TestFirstNonEmptyLine(t *testing.T) {
 }
 
 func TestNotificationCenter_View_RendersExcerpt(t *testing.T) {
+	t.Parallel()
 	nc := NewNotificationCenter(40, 50)
 	nc.visible = true
 	nc.AddEvent(ipc.PaneEventPayload{
@@ -52,6 +54,7 @@ func TestNotificationCenter_View_RendersExcerpt(t *testing.T) {
 }
 
 func TestNotificationCenter_View_NoExcerptStillRendersTitle(t *testing.T) {
+	t.Parallel()
 	// Events without Message (legacy or empty-excerpt events) must still
 	// render the title — the excerpt slot is just left blank.
 	nc := NewNotificationCenter(40, 50)
@@ -72,6 +75,7 @@ func TestNotificationCenter_View_NoExcerptStillRendersTitle(t *testing.T) {
 }
 
 func TestNotificationCenter_View_ExcerptShowsFirstLineOnly(t *testing.T) {
+	t.Parallel()
 	// A multi-line Message should collapse to its first non-empty line in
 	// the per-event sidebar card. Full text is still available via the
 	// daemon's Data["excerpt"] for MCP consumers.

@@ -9,6 +9,7 @@ import (
 // "two pane-a39ad0c Waiting for input cards" issue is now collapsed into one
 // card with a count badge.
 func TestEventQueue_Push_AggregatesSameTitleSamePane(t *testing.T) {
+	t.Parallel()
 	q := newEventQueue(10)
 	t0 := time.Unix(0, 0).Add(1 * time.Second)
 	q.Push(PaneEvent{ID: "first-id", PaneID: "p1", Title: "Waiting for input", Timestamp: t0})
@@ -31,6 +32,7 @@ func TestEventQueue_Push_AggregatesSameTitleSamePane(t *testing.T) {
 }
 
 func TestEventQueue_Push_AggregationKeepsCountingAcrossManyHits(t *testing.T) {
+	t.Parallel()
 	q := newEventQueue(10)
 	at := time.Unix(0, 0).Add(1 * time.Second)
 	for i := 0; i < 5; i++ {
@@ -51,6 +53,7 @@ func TestEventQueue_Push_AggregationKeepsCountingAcrossManyHits(t *testing.T) {
 }
 
 func TestEventQueue_Push_DifferentTitleNotAggregated(t *testing.T) {
+	t.Parallel()
 	q := newEventQueue(10)
 	at := time.Unix(0, 0).Add(1 * time.Second)
 	q.Push(PaneEvent{ID: "a", PaneID: "p1", Title: "Output idle", Timestamp: at})
@@ -62,6 +65,7 @@ func TestEventQueue_Push_DifferentTitleNotAggregated(t *testing.T) {
 }
 
 func TestEventQueue_Push_DifferentPaneNotAggregated(t *testing.T) {
+	t.Parallel()
 	q := newEventQueue(10)
 	at := time.Unix(0, 0).Add(1 * time.Second)
 	q.Push(PaneEvent{ID: "a", PaneID: "p1", Title: "Output idle", Timestamp: at})
@@ -73,6 +77,7 @@ func TestEventQueue_Push_DifferentPaneNotAggregated(t *testing.T) {
 }
 
 func TestEventQueue_Push_EmptyPaneIDNeverAggregates(t *testing.T) {
+	t.Parallel()
 	// Daemon-level events without a pane source must remain distinct so
 	// they're never accidentally collapsed.
 	q := newEventQueue(10)
@@ -85,7 +90,34 @@ func TestEventQueue_Push_EmptyPaneIDNeverAggregates(t *testing.T) {
 	}
 }
 
+// TestEventQueue_Push_CorruptCountResetsToBaseline guards the safety
+// fallback in Push: when an existing event's Data["count"] is non-numeric
+// (corrupted by a misbehaving emitter, a future schema change, etc.), the
+// `strconv.Atoi` error branch defaults count to 1 so aggregation continues
+// at "2" instead of panicking or producing nonsense.
+func TestEventQueue_Push_CorruptCountResetsToBaseline(t *testing.T) {
+	t.Parallel()
+	q := newEventQueue(10)
+	at := time.Unix(0, 0).Add(1 * time.Second)
+	q.Push(PaneEvent{
+		ID: "first", PaneID: "p1", Title: "x", Timestamp: at,
+		Data: map[string]string{"count": "garbage-not-a-number"},
+	})
+	q.Push(PaneEvent{
+		ID: "second", PaneID: "p1", Title: "x", Timestamp: at.Add(time.Second),
+	})
+
+	events := q.Events()
+	if len(events) != 1 {
+		t.Fatalf("aggregation: got %d events, want 1", len(events))
+	}
+	if got := events[0].Data["count"]; got != "2" {
+		t.Errorf("corrupt count must reset to 1 + 1 = 2; got %q", got)
+	}
+}
+
 func TestEventQueue_Push_AggregationMovesToFront(t *testing.T) {
+	t.Parallel()
 	// Insert: A(p1), B(p2), then A again with same (p1, Output idle). The
 	// repeat must end up at position 0, not at its old position.
 	q := newEventQueue(10)

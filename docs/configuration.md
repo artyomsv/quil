@@ -10,6 +10,7 @@ Quil reads `~/.quil/config.toml` (or `$QUIL_HOME/config.toml` when `QUIL_HOME` i
 - [`[logging]`](#logging)
 - [`[ui]`](#ui)
 - [`[mcp]`](#mcp)
+- [`[notification]`](#notification)
 - [`[keybindings]`](#keybindings)
 - [Per-plugin instances](#per-plugin-instances)
 - [How edits get persisted](#how-edits-get-persisted)
@@ -50,6 +51,10 @@ show_disclaimer = true          # beta disclaimer on startup
 [mcp]
 highlight_duration = "10s"      # border flash duration when AI touches a pane
 
+[notification]
+sidebar_width = 30              # columns reserved for the notification sidebar
+max_events = 200                # ring-buffer cap (per daemon, both sidebar and MCP)
+
 [keybindings]
 quit = "ctrl+q"
 new_tab = "ctrl+t"
@@ -70,6 +75,11 @@ scroll_page_up = "alt+pgup"
 scroll_page_down = "alt+pgdown"
 paste = "ctrl+v"
 focus_pane = "ctrl+e"
+notification_toggle = "alt+n"   # show / focus / hide the notification sidebar
+notification_focus = "f3"       # jump focus to the sidebar (alt path when alt+n misbehaves)
+mute_pane = "alt+m"             # toggle notification mute for the active pane
+go_back = "alt+backspace"       # pane history back (after jumping via sidebar Enter)
+notes_toggle = "alt+e"          # toggle pane notes editor
 ```
 
 ## `[daemon]`
@@ -113,6 +123,13 @@ The "ghost buffer" is the rendered preview Quil shows immediately on reconnect, 
 |---|---|---|---|
 | `highlight_duration` | duration | `"10s"` | When the AI interacts with a pane via MCP, its border flashes orange for this duration. `"0s"` disables. See [MCP visual indicator](mcp.md#visual-mcp-activity-indicator). |
 
+## `[notification]`
+
+| Key | Type | Default | What it does |
+|---|---|---|---|
+| `sidebar_width` | int | `30` | Columns reserved for the notification sidebar when toggled (`Alt+N`). Reducing this gives more room to panes; values below ~25 truncate event titles and excerpts heavily. |
+| `max_events` | int | `200` | Ring-buffer cap for the daemon's notification queue. The sidebar and MCP `get_notifications` both read from this queue. Each event is bounded to ≤ 4 KiB `Message` + ≤ 1 KiB per `Data` value (`_quil_truncated` flag set when truncated). |
+
 ## `[keybindings]`
 
 Every binding accepts a Bubble Tea key string. Common forms:
@@ -142,6 +159,11 @@ Multiple modifiers stack with `+` (no spaces). Mouse buttons are not bindable he
 | `scroll_page_up` / `scroll_page_down` | `alt+pgup` / `alt+pgdown` | Pane scrollback |
 | `paste` | `ctrl+v` | Paste from clipboard (text or image) |
 | `focus_pane` | `ctrl+e` | Toggle focus mode |
+| `notification_toggle` | `alt+n` | Cycle the notification sidebar: hidden → visible → visible+focused → hidden |
+| `notification_focus` | `f3` | Jump focus to the sidebar (alt path when `alt+n` is intercepted by the terminal) |
+| `mute_pane` | `alt+m` | Toggle notification mute on the active pane. Muted panes show `[muted]` on their border and never fire idle / bell / process-exit / hook events. Persisted in `workspace.json` so mute survives daemon restart. |
+| `go_back` | `alt+backspace` | Pane history back — return to the pane you were on before the sidebar's `Enter` jump |
+| `notes_toggle` | `alt+e` | Open / close the per-pane notes editor |
 
 ## Per-plugin instances
 

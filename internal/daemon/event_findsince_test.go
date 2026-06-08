@@ -12,6 +12,7 @@ import (
 // because agents handle events in order — jumping straight to the newest
 // would skip intermediate state changes.
 func TestEventQueue_FindSince_ReturnsOldestNewerEvent(t *testing.T) {
+	t.Parallel()
 	q := newEventQueue(10)
 	t0 := time.Unix(0, 0).Add(1000 * time.Millisecond)
 	q.Push(PaneEvent{ID: "old", PaneID: "p1", Timestamp: t0})
@@ -28,6 +29,7 @@ func TestEventQueue_FindSince_ReturnsOldestNewerEvent(t *testing.T) {
 }
 
 func TestEventQueue_FindSince_ExclusiveOnTimestamp(t *testing.T) {
+	t.Parallel()
 	q := newEventQueue(10)
 	at := time.Unix(0, 0).Add(2000 * time.Millisecond)
 	q.Push(PaneEvent{ID: "exact-match", PaneID: "p1", Timestamp: at})
@@ -39,6 +41,7 @@ func TestEventQueue_FindSince_ExclusiveOnTimestamp(t *testing.T) {
 }
 
 func TestEventQueue_FindSince_RespectsPaneFilter(t *testing.T) {
+	t.Parallel()
 	q := newEventQueue(10)
 	t0 := time.Unix(0, 0).Add(1000 * time.Millisecond)
 	q.Push(PaneEvent{ID: "a", PaneID: "pane-A", Timestamp: t0.Add(10 * time.Millisecond)})
@@ -56,6 +59,7 @@ func TestEventQueue_FindSince_RespectsPaneFilter(t *testing.T) {
 }
 
 func TestEventQueue_FindSince_NoMatchReturnsNil(t *testing.T) {
+	t.Parallel()
 	q := newEventQueue(10)
 	at := time.Unix(0, 0).Add(500 * time.Millisecond)
 	q.Push(PaneEvent{ID: "old", PaneID: "p1", Timestamp: at})
@@ -67,6 +71,7 @@ func TestEventQueue_FindSince_NoMatchReturnsNil(t *testing.T) {
 }
 
 func TestEventQueue_FindSince_EmptyQueue(t *testing.T) {
+	t.Parallel()
 	q := newEventQueue(10)
 	if got := q.FindSince(0, nil); got != nil {
 		t.Errorf("empty queue: got %q, want nil", got.ID)

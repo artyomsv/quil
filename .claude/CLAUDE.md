@@ -83,11 +83,11 @@ Architecture: thin bridge between MCP JSON-RPC (stdio) and daemon IPC (socket). 
 
 MCP SDK: `github.com/modelcontextprotocol/go-sdk` (official SDK, v1.4+). Typed tool handlers with struct-based input schemas.
 
-17 MCP tools: `list_panes`, `read_pane_output` (ANSI-stripped), `send_to_pane`, `get_pane_status`, `create_pane`, `send_keys` (named key sequences), `restart_pane`, `screenshot_pane` (VT-emulated text screenshot), `switch_tab`, `list_tabs`, `destroy_pane`, `set_active_pane` (TUI cooperation), `close_tui` (TUI cooperation), `get_notifications` (non-blocking), `watch_notifications` (blocking, replaces polling), `get_memory_report` (per-tab totals + Go-heap + PTY RSS), `get_pane_memory` (single pane detail).
+18 MCP tools: `list_panes`, `read_pane_output` (ANSI-stripped), `send_to_pane`, `get_pane_status`, `create_pane`, `send_keys` (named key sequences), `restart_pane`, `screenshot_pane` (VT-emulated text screenshot), `switch_tab`, `list_tabs`, `destroy_pane`, `set_active_pane` (TUI cooperation), `close_tui` (TUI cooperation), `get_notifications` (non-blocking; carries `data.excerpt` with the triggering lines), `watch_notifications` (blocking, replaces polling; optional `since_timestamp` closes the race-on-registration window), `dismiss_notifications` (ack handled events from the agent side), `get_memory_report` (per-tab totals + Go-heap + PTY RSS), `get_pane_memory` (single pane detail).
 
 IPC request-response: `Message.ID` field (omitempty, backward compatible) correlates requests with responses. Daemon responds to the requesting connection when `ID` is set, broadcasts when empty.
 
-Key files: `cmd/quil/mcp.go` (bridge + daemon connection), `cmd/quil/mcp_tools.go` (15 tool implementations), `cmd/quil/mcp_keys.go` (key name → escape sequence map), `cmd/quil/mcp_log.go` (per-pane interaction logging + two-layer redaction).
+Key files: `cmd/quil/mcp.go` (bridge + daemon connection), `cmd/quil/mcp_tools.go` (18 tool implementations), `cmd/quil/mcp_keys.go` (key name → escape sequence map), `cmd/quil/mcp_log.go` (per-pane interaction logging + two-layer redaction).
 
 AI tool configuration:
 ```json

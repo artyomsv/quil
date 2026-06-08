@@ -8,6 +8,7 @@ import (
 )
 
 func TestPaneOutputExcerpt_LastNLines(t *testing.T) {
+	t.Parallel()
 	pane := &Pane{OutputBuf: ringbuf.NewRingBuffer(4096)}
 	pane.OutputBuf.Write([]byte("first\nsecond\nthird\nfourth\n"))
 
@@ -19,6 +20,7 @@ func TestPaneOutputExcerpt_LastNLines(t *testing.T) {
 }
 
 func TestPaneOutputExcerpt_SkipsEmptyLines(t *testing.T) {
+	t.Parallel()
 	pane := &Pane{OutputBuf: ringbuf.NewRingBuffer(4096)}
 	pane.OutputBuf.Write([]byte("alpha\n\n\nbeta\n\n"))
 
@@ -30,6 +32,7 @@ func TestPaneOutputExcerpt_SkipsEmptyLines(t *testing.T) {
 }
 
 func TestPaneOutputExcerpt_StripsANSI(t *testing.T) {
+	t.Parallel()
 	pane := &Pane{OutputBuf: ringbuf.NewRingBuffer(4096)}
 	// Red "error" + reset, then a plain line.
 	pane.OutputBuf.Write([]byte("\x1b[31merror\x1b[0m\nokay\n"))
@@ -42,6 +45,7 @@ func TestPaneOutputExcerpt_StripsANSI(t *testing.T) {
 }
 
 func TestPaneOutputExcerpt_EmptyBuffer(t *testing.T) {
+	t.Parallel()
 	pane := &Pane{OutputBuf: ringbuf.NewRingBuffer(4096)}
 	if got := paneOutputExcerpt(pane, 3); got != "" {
 		t.Errorf("paneOutputExcerpt empty: got %q, want %q", got, "")
@@ -49,6 +53,7 @@ func TestPaneOutputExcerpt_EmptyBuffer(t *testing.T) {
 }
 
 func TestPaneOutputExcerpt_NilBuffer(t *testing.T) {
+	t.Parallel()
 	pane := &Pane{}
 	if got := paneOutputExcerpt(pane, 3); got != "" {
 		t.Errorf("paneOutputExcerpt nil buf: got %q, want %q", got, "")
@@ -56,12 +61,14 @@ func TestPaneOutputExcerpt_NilBuffer(t *testing.T) {
 }
 
 func TestPaneOutputExcerpt_NilPane(t *testing.T) {
+	t.Parallel()
 	if got := paneOutputExcerpt(nil, 3); got != "" {
 		t.Errorf("paneOutputExcerpt nil pane: got %q, want %q", got, "")
 	}
 }
 
 func TestPaneOutputExcerpt_LargeBufferTrailingCap(t *testing.T) {
+	t.Parallel()
 	pane := &Pane{OutputBuf: ringbuf.NewRingBuffer(16384)}
 	// Build > 4 KiB of "line N\n" — only the trailing window should be read.
 	var sb strings.Builder
@@ -80,6 +87,7 @@ func TestPaneOutputExcerpt_LargeBufferTrailingCap(t *testing.T) {
 }
 
 func TestWithExcerpt_PopulatesMessageAndData(t *testing.T) {
+	t.Parallel()
 	e := PaneEvent{
 		ID:    "evt-1",
 		Type:  "process_exit",
@@ -99,6 +107,7 @@ func TestWithExcerpt_PopulatesMessageAndData(t *testing.T) {
 }
 
 func TestWithExcerpt_EmptyExcerptIsNoop(t *testing.T) {
+	t.Parallel()
 	e := PaneEvent{
 		ID:   "evt-1",
 		Data: map[string]string{"exit_code": "0"},
@@ -116,6 +125,7 @@ func TestWithExcerpt_EmptyExcerptIsNoop(t *testing.T) {
 }
 
 func TestWithExcerpt_NilData_CreatedOnDemand(t *testing.T) {
+	t.Parallel()
 	e := PaneEvent{ID: "evt-1"}
 	got := withExcerpt(e, "context")
 	if got.Data == nil {

@@ -24,6 +24,7 @@ func modelForActivePaneTest(activePaneID string) Model {
 }
 
 func TestPaneEvent_OutputIdleOnActivePane_Suppressed(t *testing.T) {
+	t.Parallel()
 	m := modelForActivePaneTest("pane-active")
 	idle := paneEventMsg(ipc.PaneEventPayload{
 		ID:     "evt-1",
@@ -39,6 +40,7 @@ func TestPaneEvent_OutputIdleOnActivePane_Suppressed(t *testing.T) {
 }
 
 func TestPaneEvent_OutputIdleOnBackgroundPane_Queued(t *testing.T) {
+	t.Parallel()
 	m := modelForActivePaneTest("pane-active")
 	idle := paneEventMsg(ipc.PaneEventPayload{
 		ID:     "evt-1",
@@ -54,6 +56,7 @@ func TestPaneEvent_OutputIdleOnBackgroundPane_Queued(t *testing.T) {
 }
 
 func TestPaneEvent_ProcessExitOnActivePane_StillQueued(t *testing.T) {
+	t.Parallel()
 	// Process exits, bells, and command completions are transient state
 	// changes — they belong in the sidebar even when the user is looking at
 	// the pane (the sidebar acts as a session log they can scroll back to).
@@ -72,6 +75,7 @@ func TestPaneEvent_ProcessExitOnActivePane_StillQueued(t *testing.T) {
 }
 
 func TestPaneEvent_BellOnActivePane_StillQueued(t *testing.T) {
+	t.Parallel()
 	m := modelForActivePaneTest("pane-active")
 	bell := paneEventMsg(ipc.PaneEventPayload{
 		ID:     "evt-1",
@@ -87,6 +91,7 @@ func TestPaneEvent_BellOnActivePane_StillQueued(t *testing.T) {
 }
 
 func TestIsActivePane_EmptyPaneID(t *testing.T) {
+	t.Parallel()
 	m := modelForActivePaneTest("pane-active")
 	if m.isActivePane("") {
 		t.Errorf("empty paneID must not match")
@@ -94,6 +99,7 @@ func TestIsActivePane_EmptyPaneID(t *testing.T) {
 }
 
 func TestIsActivePane_NoActiveTab(t *testing.T) {
+	t.Parallel()
 	cfg := config.Default()
 	m := Model{
 		client:        &fakeSender{},

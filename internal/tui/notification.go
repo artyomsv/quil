@@ -37,18 +37,51 @@ func NewNotificationCenter(width, maxEvents int) *NotificationCenter {
 // (PaneID, Title) event reuses the prior event's ID and bumps Data["count"].
 // Without the move-to-front the sidebar would silently drop bumps and the
 // user would never see the ×N count grow.
+//
+// Cursor invariant: the cursor follows the LOGICAL event the user is on,
+// not the index. If the move-to-front shifts other events past the cursor's
+// position, we rewrite cursor to point at the event with the same ID it had
+// before — so a user staring at "claude-code (×3)" does not silently jump to
+// a different card when "claude-code (×4)" arrives.
 func (nc *NotificationCenter) AddEvent(e ipc.PaneEventPayload) {
 	for i, existing := range nc.events {
-		if existing.ID == e.ID {
-			nc.events = append(nc.events[:i], nc.events[i+1:]...)
-			nc.events = append([]ipc.PaneEventPayload{e}, nc.events...)
-			return
+		if existing.ID != e.ID {
+			continue
 		}
+		// Capture the cursor's current event ID so we can chase it through
+		// the move-to-front. The aggregated event itself is allowed to move
+		// — what we protect is selection of OTHER events.
+		var cursorID string
+		if nc.cursor >= 0 && nc.cursor < len(nc.events) {
+			cursorID = nc.events[nc.cursor].ID
+		}
+
+		nc.events = append(nc.events[:i], nc.events[i+1:]...)
+		nc.events = append([]ipc.PaneEventPayload{e}, nc.events...)
+
+		// Restore cursor onto the same logical event. When the aggregated
+		// event WAS the cursor, follow it to position 0 (the visual
+		// equivalent of "stay on the card you were looking at"). When the
+		// cursor was on a different event, find its new index.
+		if cursorID != "" {
+			for j, ev := range nc.events {
+				if ev.ID == cursorID {
+					nc.cursor = j
+					break
+				}
+			}
+		}
+		return
 	}
 	nc.events = append([]ipc.PaneEventPayload{e}, nc.events...)
 	if len(nc.events) > nc.maxEvents {
 		nc.events = nc.events[:nc.maxEvents]
 	}
+	// Deliberately do NOT shift the cursor on a fresh prepend. The legacy
+	// contract is "cursor 0 = newest event"; a fresh event landing at index
+	// 0 should become the new selection by default. Only the aggregation
+	// move-to-front above chases the logical event by ID, because that's the
+	// case where the user is actively reading a card that's about to bump.
 }
 
 // DismissSelected removes the selected event and returns its ID.

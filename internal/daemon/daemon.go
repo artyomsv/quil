@@ -1822,17 +1822,25 @@ func (d *Daemon) checkIdlePanes() {
 			// approval"), the regex saw something meaningful in the excerpt
 			// even though the surface chars collapse to a prompt rune.
 			suppress := title == "Output idle" && isPromptOnlyExcerpt(excerpt)
-			// Debug visibility into what excerpts the idle checker sees in
-			// the wild — helps diagnose why suppression fires (or doesn't)
-			// for a given shell setup. Truncate the excerpt to keep the
-			// log line bounded.
-			logExcerpt := excerpt
-			if len(logExcerpt) > 200 {
-				logExcerpt = logExcerpt[:200] + "..."
-			}
-			logger.Debug("idle decision: pane=%s type=%s title=%q suppress=%v excerpt=%q",
-				pane.ID, pane.Type, title, suppress, logExcerpt)
+			// Diagnostic: structural metadata only, NEVER the raw excerpt
+			// content. Terminal panes can contain secrets (`echo $API_KEY`,
+			// `mysql -p…`, `cat .env`) — even at debug level we must not log
+			// user-provided content per observability-and-logging.md. Length
+			// + line count + line-end class are sufficient to diagnose
+			// suppression decisions (the OSC 0 leak case shows up as
+			// excerpt_lines=1 line_end_class=text, normal shell prompts as
+			// line_end_class=prompt_rune).
+			logger.Debug("idle decision: pane=%s type=%s title=%q suppress=%v excerpt_bytes=%d excerpt_lines=%d",
+				pane.ID, pane.Type, title, suppress, len(excerpt), countNonEmptyLines(excerpt))
 			if suppress {
+				// Roll back the cooldown bookkeeping: we DID NOT emit, so
+				// the next real activity should fire promptly instead of
+				// waiting out a fake 30 s cooldown. IdleNotified stays true
+				// — flushPaneOutput resets it on the next byte from the PTY,
+				// so we won't re-evaluate the same idle state every tick.
+				pane.PluginMu.Lock()
+				pane.LastIdleEventAt = time.Time{}
+				pane.PluginMu.Unlock()
 				continue
 			}
 			d.emitEvent(withExcerpt(PaneEvent{
@@ -1987,7 +1995,7 @@ var promptRunes = map[string]bool{
 	"»": true, // bash-it powerline
 }
 
-// hostnameLikeRe matches user@host patterns (e.g. "Artjoms_Stukans@HOSTNAME")
+// hostnameLikeRe matches user@host patterns (e.g. "user_name@host01")
 // that leak into excerpts from OSC 0 window-title sequences when ansi.Strip
 // or upstream emulators bail on an embedded CR. These leaks are
 // indistinguishable from "the pane is at a prompt" because the underlying
@@ -2029,10 +2037,19 @@ func isPromptOnlyExcerpt(excerpt string) bool {
 // isPromptOnlyExcerpt. See that function's docs for the classification rules.
 //
 // Specifically, a line is "prompt-like" when, after trimming trailing
-// whitespace, it ENDS with a recognised prompt rune (covers `%`, `user@host
-// % `, `~/repo $ `, etc) OR it matches the user@host pattern that OSC 0
-// window-title leaks produce. Long lines (> 200 chars) are presumed to be
-// command output regardless of trailing chars — real prompts are short.
+// whitespace, it is:
+//
+//   - the bare prompt rune by itself (e.g. "%"), OR
+//   - a recognised prompt rune as the trailing token, preceded by whitespace
+//     (e.g. "user@host %", "~/repo $ ", "❯ "), OR
+//   - matches the user@host pattern that OSC 0 window-title leaks produce.
+//
+// The space-before-rune requirement is what distinguishes a real prompt
+// from a number-with-percent (`"build complete: 100%"`) or a literal text
+// ending in a prompt-like rune (`"x$"`). Without it the classifier would
+// suppress legitimate command output that happens to end in a prompt rune.
+// Long lines (> 200 chars) are presumed to be command output regardless of
+// trailing chars — real prompts are short.
 func isPromptLikeLine(line string) bool {
 	if line == "" {
 		return true
@@ -2045,14 +2062,45 @@ func isPromptLikeLine(line string) bool {
 	}
 	trimmed := strings.TrimRight(line, " \t")
 	for r := range promptRunes {
-		if strings.HasSuffix(trimmed, r) {
+		if !strings.HasSuffix(trimmed, r) {
+			continue
+		}
+		// Bare prompt rune (e.g. trimmed == "%").
+		if trimmed == r {
 			return true
+		}
+		// Prompt rune preceded by whitespace (e.g. "user@host %"). The byte
+		// immediately before the rune must be a space or tab — that's what
+		// makes it a standalone prompt terminator instead of part of a
+		// word like "100%" or "x$".
+		runeStart := len(trimmed) - len(r)
+		if runeStart > 0 {
+			prev := trimmed[runeStart-1]
+			if prev == ' ' || prev == '\t' {
+				return true
+			}
 		}
 	}
 	if hostnameLikeRe.MatchString(line) {
 		return true
 	}
 	return false
+}
+
+// countNonEmptyLines returns the number of non-blank lines in s. Used for
+// structural diagnostics in the idle-decision debug log so we can surface
+// excerpt shape ("N lines, M bytes") without echoing the raw content.
+func countNonEmptyLines(s string) int {
+	if s == "" {
+		return 0
+	}
+	n := 0
+	for _, line := range strings.Split(s, "\n") {
+		if strings.TrimSpace(line) != "" {
+			n++
+		}
+	}
+	return n
 }
 
 // withExcerpt populates PaneEvent.Message and Data["excerpt"] from the pane's

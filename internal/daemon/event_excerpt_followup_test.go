@@ -13,6 +13,7 @@ import (
 // text. Reproduces the field-observed garbage where excerpts contained
 // "2;30;30;30m" (fragment of \x1b[2;30;30;30m) at the start.
 func TestTrimToNewlineSafe_AdvancesPastPartialANSI(t *testing.T) {
+	t.Parallel()
 	// Craft a buffer where the maxTail slice would otherwise begin inside
 	// an ANSI sequence. Layout: <noise to push past tail-start>\x1b[31mRED\n<rest>
 	prefix := strings.Repeat("x", 100)
@@ -35,6 +36,7 @@ func TestTrimToNewlineSafe_AdvancesPastPartialANSI(t *testing.T) {
 }
 
 func TestTrimToNewlineSafe_NoTrimWhenSmaller(t *testing.T) {
+	t.Parallel()
 	raw := []byte("short data")
 	got := trimToNewlineSafe(raw, 4096)
 	if string(got) != "short data" {
@@ -43,6 +45,7 @@ func TestTrimToNewlineSafe_NoTrimWhenSmaller(t *testing.T) {
 }
 
 func TestTrimToNewlineSafe_NoNewlineFallback(t *testing.T) {
+	t.Parallel()
 	// Pathological case: no newline AND no ESC in the bounded scan
 	// window. We accept some leading garbage rather than dropping the
 	// whole window — small loss compared to silently emitting nothing.
@@ -59,6 +62,7 @@ func TestTrimToNewlineSafe_NoNewlineFallback(t *testing.T) {
 // in the slice. The hardened version also recognises ESC bytes as a clean
 // boundary because ansi.Strip handles full sequences from there.
 func TestTrimToNewlineSafe_SeeksESCWhenNoNewline(t *testing.T) {
+	t.Parallel()
 	// 100 bytes of CSI parameter garbage (no newline, no ESC), then an ESC
 	// starting a fresh sequence + real content.
 	prefix := strings.Repeat("a", 100)
@@ -83,6 +87,7 @@ func TestTrimToNewlineSafe_SeeksESCWhenNoNewline(t *testing.T) {
 // TestTrimToNewlineSafe_NewlineBeatsESCWhenFirst confirms whichever boundary
 // comes first wins (newline before ESC in this case).
 func TestTrimToNewlineSafe_NewlineBeatsESCWhenFirst(t *testing.T) {
+	t.Parallel()
 	prefix := strings.Repeat("a", 100)
 	tail := "garbage\nline-after-newline\x1b[31mansi-later"
 	raw := []byte(prefix + tail)
@@ -102,6 +107,7 @@ func TestTrimToNewlineSafe_NewlineBeatsESCWhenFirst(t *testing.T) {
 // TestTrimToNewlineSafe_ScanBoundary asserts that the scan stops at maxScan
 // bytes — far-away boundaries don't drag the whole window forward.
 func TestTrimToNewlineSafe_ScanBoundary(t *testing.T) {
+	t.Parallel()
 	// 2 KiB of plain text (no boundary), then a newline. Scan window is
 	// 512 bytes, so the seek must not find the newline and must return
 	// the un-advanced slice.
@@ -118,6 +124,7 @@ func TestTrimToNewlineSafe_ScanBoundary(t *testing.T) {
 }
 
 func TestPaneOutputExcerpt_FieldReproducesAndFixesANSILeak(t *testing.T) {
+	t.Parallel()
 	// Reproduce the screenshot bug end-to-end. The ring buffer holds a
 	// stream of bytes that exceeds 4096; the trailing slice would have
 	// previously begun inside the CSI parameters and leaked them.
@@ -133,19 +140,34 @@ func TestPaneOutputExcerpt_FieldReproducesAndFixesANSILeak(t *testing.T) {
 }
 
 // TestLastNLines_AppliesCarriageReturnReset proves that the field-observed
-// "%   ...   \r \r\rArtjoms_Stukans@HOSTNAME" excerpt collapses to just
-// the post-CR content (what the terminal would actually display), not the
-// prompt rune that was immediately overwritten.
+// "%   ...   \r \r\ruser@host" excerpt collapses to just the post-CR
+// content (what the terminal would actually display), not the prompt rune
+// that was immediately overwritten.
 func TestLastNLines_AppliesCarriageReturnReset(t *testing.T) {
-	in := "%                                          \r \r\rArtjoms_Stukans@EPCHZURW03: /path"
+	t.Parallel()
+	in := "%                                          \r \r\ruser_name@host01: /path"
 	got := lastNLines(in, 5)
-	want := "Artjoms_Stukans@EPCHZURW03: /path"
+	want := "user_name@host01: /path"
 	if got != want {
 		t.Errorf("lastNLines CR-reset: got %q, want %q", got, want)
 	}
 }
 
+// TestIsPromptLikeLine_EmptyString_DirectCall pins the explicit guard at the
+// top of isPromptLikeLine. The function returns true for an empty string so
+// that multi-line prompt-only excerpts with blank lines between prompts
+// continue to classify correctly. The isPromptOnlyExcerpt level filters
+// blank lines before dispatch, so this branch only matters if a future
+// caller invokes isPromptLikeLine directly with "".
+func TestIsPromptLikeLine_EmptyString_DirectCall(t *testing.T) {
+	t.Parallel()
+	if !isPromptLikeLine("") {
+		t.Errorf("isPromptLikeLine(\"\") = false, want true (empty lines are vacuously prompt-like)")
+	}
+}
+
 func TestLastNLines_NoCarriageReturnUntouched(t *testing.T) {
+	t.Parallel()
 	in := "line one\nline two\nline three"
 	got := lastNLines(in, 5)
 	want := "line one\nline two\nline three"
@@ -155,6 +177,7 @@ func TestLastNLines_NoCarriageReturnUntouched(t *testing.T) {
 }
 
 func TestIsPromptOnlyExcerpt(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name  string
 		input string
@@ -173,11 +196,20 @@ func TestIsPromptOnlyExcerpt(t *testing.T) {
 		{"meaningful last line", "%\nbuilding...", false},
 		// Suffix-rune classifier: "%cargo" ends in "o" → not prompt.
 		{"prompt rune as prefix of a word", "%cargo", false},
-		// "%%" ends with "%" so the heuristic accepts it. Realistic shells
-		// don't emit this, so suppressing is the lesser evil.
-		{"repeated prompt rune", "%%", true},
+		// "%%" ends with "%" but the char before is also "%", not whitespace
+		// — H1 fix rejects it. Realistic shells don't emit "%%" as a prompt.
+		{"repeated prompt rune", "%%", false},
+		// H1 regression: percentage-of-number must NOT be classified as
+		// prompt-like. The `%` is preceded by a digit, not whitespace.
+		{"percentage of number", "build complete: 100%", false},
+		// H1 sanity check: prompt rune preceded by a space IS a real prompt.
+		{"prompt rune after path", "~/projects/quil %", true},
 		// OSC 0 window-title leak shape — must suppress.
-		{"hostname leak", "Artjoms_Stukans@EPCHZURW03: /Users/me/proj", true},
+		{"hostname leak", "user_name@host01: /Users/me/proj", true},
+		// Empty / whitespace-only lines must be treated as prompt-like so
+		// "$\n\n%" (prompt-blank-prompt) still classifies as prompt-only.
+		{"empty line classified as prompt-like", "", false}, // empty EXCERPT is false (early return)
+		{"whitespace-only excerpt", "   \n\t\n", false},
 		// `ls` output should NOT be classified as prompt material.
 		{"ls output", "LICENSE\tcmd\tgo.sum", false},
 		{"long line with prompt rune still emits", strings.Repeat("a", 250) + "%", false},

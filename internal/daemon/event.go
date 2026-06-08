@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"strconv"
 	"sync"
 	"time"
 
@@ -46,10 +47,43 @@ func newEventQueue(max int) *eventQueue {
 	}
 }
 
-// Push adds an event (newest first) and wakes any matching watchers.
+// Push adds an event (newest first), aggregating repeat events from the same
+// pane with the same title, and wakes any matching watchers.
+//
+// Aggregation: when a queued event has matching (PaneID, Title), the new
+// event REPLACES it at the front of the queue. The replacement keeps the
+// old event's ID (so the TUI sidebar can update its card in place via the
+// existing ID-based dedup) and bumps Data["count"]. This collapses bursts
+// of "Output idle" from the same shell, or repeated "Waiting for input"
+// from the same Claude pane, into a single sidebar card with a ×N badge —
+// instead of N separate cards saying the same thing.
+//
+// Aggregation only applies when PaneID is non-empty so daemon-level events
+// (without a pane source) never collapse together.
 func (q *eventQueue) Push(e PaneEvent) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+
+	if e.PaneID != "" && e.Title != "" {
+		for i, existing := range q.events {
+			if existing.PaneID == e.PaneID && existing.Title == e.Title {
+				count := 1
+				if existing.Data != nil {
+					if c, err := strconv.Atoi(existing.Data["count"]); err == nil && c > 0 {
+						count = c
+					}
+				}
+				count++
+				e.ID = existing.ID
+				if e.Data == nil {
+					e.Data = make(map[string]string)
+				}
+				e.Data["count"] = strconv.Itoa(count)
+				q.events = append(q.events[:i], q.events[i+1:]...)
+				break
+			}
+		}
+	}
 
 	q.events = append([]PaneEvent{e}, q.events...)
 	if len(q.events) > q.max {
@@ -102,6 +136,30 @@ func (q *eventQueue) Events() []PaneEvent {
 	return out
 }
 
+// FindSince scans the queue for the OLDEST event whose Timestamp is strictly
+// greater than sinceUnixMilli AND whose PaneID is in paneFilter (or for any
+// pane when paneFilter is empty). Returns a copy of the matching event or
+// nil. Iterating oldest-to-newest is deliberate: the caller (an agent) wants
+// to process events in order, not jump straight to the latest. The queue is
+// stored newest-first, so the scan walks the slice in reverse.
+func (q *eventQueue) FindSince(sinceUnixMilli int64, paneFilter map[string]bool) *PaneEvent {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	for i := len(q.events) - 1; i >= 0; i-- {
+		e := q.events[i]
+		if e.Timestamp.UnixMilli() <= sinceUnixMilli {
+			continue
+		}
+		if len(paneFilter) > 0 && !paneFilter[e.PaneID] {
+			continue
+		}
+		cp := e
+		return &cp
+	}
+	return nil
+}
+
 // Count returns the number of pending events.
 func (q *eventQueue) Count() int {
 	q.mu.Lock()
@@ -146,8 +204,82 @@ func (q *eventQueue) RemoveWatchersByConn(conn *ipc.Conn) {
 	q.watchers = remaining
 }
 
-// toPaneEventPayload converts a PaneEvent to an IPC payload.
+// Per-event wire-size caps. The earlier wedge incident happened with a
+// > 1 KiB box-drawing excerpt from an opencode splash screen flooding the
+// IPC fan-out. 4 KiB per Message and 1 KiB per Data value give comfortable
+// headroom for legitimate content (multi-line excerpts in data.excerpt,
+// command previews, hook payloads, error stacks) while keeping a runaway
+// event source from bloating the wire. Per-event ceiling with N Data keys:
+// 4 KiB + N × 1 KiB. Realistic event has 2-4 keys so total < 10 KiB.
+//
+// Truncation strategy: keeps the TAIL because PaneEvent.Message is used for
+// terminal excerpts (last visible lines = what the user sees) and idle
+// pattern matches (recent output). If a future emitter needs head-truncation
+// (e.g. Java-style stack traces where the deepest frame at the top is the
+// actual exception), add a PaneEvent.TruncationStrategy field rather than
+// special-casing here.
+//
+// truncationMarker is "…[truncated]" — 14 bytes, NOT 12: the leading "…" is a
+// 3-byte UTF-8 ellipsis rune. The slice arithmetic below uses len() so it
+// remains correct regardless of marker change, but the cap constants must
+// always exceed the marker length. The init-time invariant block below
+// enforces this at compile time.
+const (
+	maxEventMessageBytes   = 4 * 1024
+	maxEventDataValueBytes = 1024
+	truncationMarker       = "…[truncated]"
+)
+
+// Compile-time invariants. If a future contributor lowers either cap below
+// the marker length the conversion of a negative constant to uint will fail
+// the build — guaranteeing the slice arithmetic in toPaneEventPayload never
+// panics with a negative slice index.
+const (
+	_ = uint(maxEventMessageBytes - len(truncationMarker) - 1)
+	_ = uint(maxEventDataValueBytes - len(truncationMarker) - 1)
+)
+
+// truncatedFlagKey is the reserved Data key used to signal that the event
+// went through the size-cap path. The `_quil_` prefix establishes a daemon-
+// internal namespace so emitters (idle handlers, plugin scrapers, future
+// hook events) can never accidentally collide with a meaningful key —
+// silently clobbering caller-supplied data would be a confusing failure
+// mode. Document any future daemon-internal Data flags under the same
+// prefix.
+const truncatedFlagKey = "_quil_truncated"
+
+// toPaneEventPayload converts a PaneEvent to an IPC payload, enforcing the
+// per-event wire-size caps. Caps are applied at the IPC boundary so all
+// emitters (idle checker, bell, process_exit, future hook events) share the
+// same protection.
 func toPaneEventPayload(e PaneEvent) ipc.PaneEventPayload {
+	message := e.Message
+	truncated := false
+
+	if len(message) > maxEventMessageBytes {
+		message = truncationMarker + message[len(message)-(maxEventMessageBytes-len(truncationMarker)):]
+		truncated = true
+	}
+
+	var data map[string]string
+	if len(e.Data) > 0 {
+		data = make(map[string]string, len(e.Data))
+		for k, v := range e.Data {
+			if len(v) > maxEventDataValueBytes {
+				data[k] = v[:maxEventDataValueBytes-len(truncationMarker)] + truncationMarker
+				truncated = true
+			} else {
+				data[k] = v
+			}
+		}
+	}
+	if truncated {
+		if data == nil {
+			data = make(map[string]string, 1)
+		}
+		data[truncatedFlagKey] = "1"
+	}
+
 	return ipc.PaneEventPayload{
 		ID:        e.ID,
 		PaneID:    e.PaneID,
@@ -155,9 +287,9 @@ func toPaneEventPayload(e PaneEvent) ipc.PaneEventPayload {
 		PaneName:  e.PaneName,
 		Type:      e.Type,
 		Title:     e.Title,
-		Message:   e.Message,
+		Message:   message,
 		Severity:  e.Severity,
 		Timestamp: e.Timestamp.UnixMilli(),
-		Data:      e.Data,
+		Data:      data,
 	}
 }

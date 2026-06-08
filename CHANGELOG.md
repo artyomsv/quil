@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.16.0] - 2026-06-08
+
+### Added
+
+- **Notification events carry an excerpt of the triggering output** — every `process_exit`, `command_complete`, `bell`, and `output_idle` event now embeds the last few stripped output lines in the event's `Message` field and `Data["excerpt"]`. The notification sidebar renders the first line of the excerpt as a 4th line per event card (dim grey, blank when there is none). MCP consumers see the full excerpt in the event payload, so an agent can act on context without a follow-up `read_pane_output` round-trip. Single helper `paneOutputExcerpt(pane, n)` reads the trailing 4 KiB of the ring buffer, ANSI-strips it, and returns the last n non-empty lines; `withExcerpt(event, excerpt)` populates the fields idempotently.
+- **Per-pane notification mute** — `Alt+M` toggles a `[muted]` chip on the active pane and suppresses every notification event sourced from that pane (idle, bell, OSC133, process exit). Events are dropped at the daemon, not just hidden in the UI, so muted panes never enter the queue, never wake watchers, and never reach `get_notifications`. Solves the "`npm test --watch` floods the sidebar" problem without disabling notifications globally. Mute is persisted in `workspace.json` (`paneData["muted"] = true`) and survives daemon restart. `MsgUpdatePane` gains an optional `Muted *bool` field (pointer so unset is distinguishable from explicit false).
+- **MCP `dismiss_notifications` tool** — agents can finally ack events from their side. Pass `event_id` to dismiss a single event, or omit it to clear the entire queue. Closes a long-standing asymmetry: `get_notifications` was read-only, so MCP-only sessions accumulated events until the bounded queue evicted them.
+- **MCP `watch_notifications` `since_timestamp` parameter** — closes the race between "kick off a task" and "start watching." When an agent passes the timestamp of the last event it handled, the daemon scans the existing event queue for the oldest event newer than the marker, returning it immediately without registering a blocking watcher. New `eventQueue.FindSince(sinceMs, paneFilter)` walks the queue oldest-to-newest so agents process events in order.
+
+### Changed
+
+- **Default `notification.max_events` raised from 50 to 200** — a busy multi-pane session evicts 50 events within an hour. 200 events at ~300 bytes each is ~60 KB, negligible memory, and gives genuinely useful history depth.
+- **Active-pane `output_idle` events are suppressed in the sidebar** — TUI-side filter in the `paneEventMsg` handler. The pane you're staring at is by definition idle when you can see it idling; the sidebar entry is pure noise. Other event types (`process_exit`, `bell`, `command_complete`) still queue on the active pane because they're transient state changes worth a sidebar audit-trail entry.
+- **`docs/mcp.md` corrected** — the event-observation section incorrectly referenced `[[notification_handlers]]` as the source of idle matches. The actual mechanism has been `[[idle_handlers]]` since the deprecated `MatchNotification` codepath was removed from the daemon; anyone editing the legacy section was getting silent no-ops. Plugin loader now logs a one-shot deprecation warning per stale plugin.
+
+### Internal
+
+- **Defensive nil-guards on `Daemon.broadcastState` and `emitEvent`** — both now no-op when `d.server` is nil, allowing unit tests that exercise notification dispatch and pane updates to construct a bare `Daemon` via `New(config.Default())` without spinning up the IPC server. Production behavior is unchanged — `d.server` is always non-nil after `Start()`.
+
 ## [1.15.1] - 2026-06-05
 
 ### Fixed

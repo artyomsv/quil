@@ -59,6 +59,7 @@ type PaneInfo struct {
 	CWD   string
 	Name  string
 	Type  string
+	Muted bool
 }
 
 // paneSettleRepaintMsg fires shortly after a pane's first live output and
@@ -747,7 +748,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case paneEventMsg:
-		m.notifications.AddEvent(ipc.PaneEventPayload(msg))
+		// Skip output_idle events for the pane the user is currently looking
+		// at — it's redundant noise. Other event types (process_exit, bell,
+		// command_complete) stay even on the active pane: they're transient
+		// state changes that benefit from a sidebar audit trail.
+		if !(msg.Type == "output_idle" && m.isActivePane(msg.PaneID)) {
+			m.notifications.AddEvent(ipc.PaneEventPayload(msg))
+		}
 		cmds := []tea.Cmd{m.listenForMessages()}
 		// Refresh sidebar tick if visible (no auto-show — user controls with Alt+N)
 		if m.notifications.visible {
@@ -1176,7 +1183,7 @@ func (m Model) notesKeyExempt(key string) bool {
 		// Force repaint — view-level, harmless while the editor is open.
 		kb.Redraw,
 		// Notification center.
-		kb.NotificationToggle, kb.NotificationFocus, kb.GoBack,
+		kb.NotificationToggle, kb.NotificationFocus, kb.GoBack, kb.MutePane,
 		// Tools and dialogs.
 		kb.JSONTransform, kb.QuickActions,
 	}
@@ -1413,6 +1420,8 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(tea.ClearScreen, m.resizeAllPanes(), m.sidebarTick())
 	case kbMatches(key, kb.GoBack):
 		return m.popPaneHistory()
+	case kbMatches(key, kb.MutePane):
+		return m, m.toggleActivePaneMute()
 	}
 
 	// Sidebar focused: route keys to notification center
@@ -1892,6 +1901,7 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) []string {
 						leaf.Pane.Name = info.Name
 						leaf.Pane.CWD = info.CWD
 						leaf.Pane.Type = info.Type
+						leaf.Pane.Muted = info.Muted
 					}
 				}
 				continue
@@ -1917,6 +1927,7 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) []string {
 				pane.Name = info.Name
 				pane.CWD = info.CWD
 				pane.Type = info.Type
+				pane.Muted = info.Muted
 			}
 
 			// Try to fill a pending split placeholder first.
@@ -2103,6 +2114,21 @@ func (m Model) activeTabModel() *TabModel {
 		return m.tabs[m.activeTab]
 	}
 	return nil
+}
+
+// isActivePane reports whether paneID is the pane the user is currently
+// focused on (active pane of the active tab). Used by the notification
+// dispatcher to suppress redundant idle events for the pane the user is
+// already staring at.
+func (m Model) isActivePane(paneID string) bool {
+	if paneID == "" {
+		return false
+	}
+	tab := m.activeTabModel()
+	if tab == nil {
+		return false
+	}
+	return tab.ActivePane == paneID
 }
 
 // switchTab sets the active tab locally and notifies the daemon so its
@@ -2613,6 +2639,9 @@ func parseWorkspaceState(raw map[string]any) WorkspaceStateMsg {
 				}
 				if typ, ok := pm["type"].(string); ok {
 					pi.Type = typ
+				}
+				if muted, ok := pm["muted"].(bool); ok {
+					pi.Muted = muted
 				}
 				state.Panes = append(state.Panes, pi)
 			}
@@ -3266,6 +3295,37 @@ func (m Model) updatePaneCWD(paneID, cwd string) tea.Cmd {
 			CWD:    cwd,
 		})
 		m.client.Send(msg)
+		return nil
+	}
+}
+
+// toggleActivePaneMute flips the muted flag on the currently-focused pane and
+// sends the update to the daemon. The daemon is the source of truth — it
+// echoes the new state back via the next workspace_state broadcast and the
+// pane border's `[muted]` chip updates from there. No-op if no active pane.
+func (m Model) toggleActivePaneMute() tea.Cmd {
+	tab := m.activeTabModel()
+	if tab == nil {
+		return nil
+	}
+	pane := tab.ActivePaneModel()
+	if pane == nil {
+		return nil
+	}
+	next := !pane.Muted
+	paneID := pane.ID
+	return func() tea.Msg {
+		msg, err := ipc.NewMessage(ipc.MsgUpdatePane, ipc.UpdatePanePayload{
+			PaneID: paneID,
+			Muted:  &next,
+		})
+		if err != nil {
+			log.Printf("toggleActivePaneMute build msg: %v", err)
+			return nil
+		}
+		if err := m.client.Send(msg); err != nil {
+			log.Printf("toggleActivePaneMute send: %v", err)
+		}
 		return nil
 	}
 }

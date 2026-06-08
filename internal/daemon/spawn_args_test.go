@@ -528,7 +528,7 @@ func TestClaudeHookSpawnPrep(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			claudeHookScriptStatFn = func(string) error { return tt.statErr }
-			prefix, env := claudeHookSpawnPrep("/tmp/quil", tt.paneID, tt.userArgs)
+			prefix, env := claudeHookSpawnPrep("/tmp/quil", tt.paneID, "default", tt.userArgs)
 			if tt.wantPrefix {
 				if len(prefix) != 2 || prefix[0] != "--settings" {
 					t.Errorf("prefix = %v, want [--settings ...]", prefix)
@@ -546,8 +546,18 @@ func TestClaudeHookSpawnPrep(t *testing.T) {
 					t.Errorf("env = %v, want nil", env)
 				}
 			} else {
-				if len(env) != 1 || env[0] != tt.wantEnvVar {
-					t.Errorf("env = %v, want [%q]", env, tt.wantEnvVar)
+				// Phase D: claudeHookSpawnPrep now returns QUIL_PANE_ID
+				// AND QUIL_HOOK_MODE so the hook script can branch on
+				// "default" / "verbose" / "off". The pane-id var is at
+				// index 0 (unchanged); the new hook-mode var is at 1.
+				if len(env) != 2 {
+					t.Errorf("env = %v, want 2 entries (pane id + hook mode)", env)
+				}
+				if env[0] != tt.wantEnvVar {
+					t.Errorf("env[0] = %q, want %q", env[0], tt.wantEnvVar)
+				}
+				if len(env) > 1 && env[1] != "QUIL_HOOK_MODE=default" {
+					t.Errorf("env[1] = %q, want QUIL_HOOK_MODE=default", env[1])
 				}
 			}
 		})
@@ -723,10 +733,10 @@ func TestOpencodeSpawnPrep(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			opencodeHookScriptStatFn = func(string) error { return tt.statErr }
-			env := opencodeSpawnPrep("/tmp/quil", tt.paneID)
+			env := opencodeSpawnPrep("/tmp/quil", tt.paneID, "default")
 			if tt.wantEnv {
-				if len(env) != 3 {
-					t.Fatalf("env = %v, want 3 entries", env)
+				if len(env) != 4 {
+					t.Fatalf("env = %v, want 4 entries (pane, home, mode, config)", env)
 				}
 				if env[0] != tt.wantPaneEnv {
 					t.Errorf("env[0] = %q, want %q", env[0], tt.wantPaneEnv)
@@ -734,16 +744,19 @@ func TestOpencodeSpawnPrep(t *testing.T) {
 				if env[1] != "QUIL_HOME=/tmp/quil" {
 					t.Errorf("env[1] = %q, want QUIL_HOME=/tmp/quil", env[1])
 				}
-				if !strings.HasPrefix(env[2], "OPENCODE_CONFIG_CONTENT=") {
-					t.Errorf("env[2] = %q, want OPENCODE_CONFIG_CONTENT=... prefix", env[2])
+				if env[2] != "QUIL_HOOK_MODE=default" {
+					t.Errorf("env[2] = %q, want QUIL_HOOK_MODE=default", env[2])
 				}
-				if !strings.Contains(env[2], "quil-session-tracker.js") {
-					t.Errorf("env[2] missing plugin filename: %s", env[2])
+				if !strings.HasPrefix(env[3], "OPENCODE_CONFIG_CONTENT=") {
+					t.Errorf("env[3] = %q, want OPENCODE_CONFIG_CONTENT=... prefix", env[3])
+				}
+				if !strings.Contains(env[3], "quil-session-tracker.js") {
+					t.Errorf("env[3] missing plugin filename: %s", env[3])
 				}
 				// Round-trip-parse the inline config so a future regression in
 				// configContentSchema's wire format gets caught here, not by
 				// opencode silently ignoring the plugin entry at load time.
-				jsonPart := strings.TrimPrefix(env[2], "OPENCODE_CONFIG_CONTENT=")
+				jsonPart := strings.TrimPrefix(env[3], "OPENCODE_CONFIG_CONTENT=")
 				var parsed struct {
 					Plugin []string `json:"plugin"`
 				}

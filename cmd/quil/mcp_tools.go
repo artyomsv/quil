@@ -31,6 +31,7 @@ func registerMCPTools(s *mcp.Server, bridge *mcpBridge, mcpLog *mcpLogger) {
 	// Notification tools
 	registerGetNotificationsTool(s, bridge, mcpLog)
 	registerWatchNotificationsTool(s, bridge, mcpLog)
+	registerDismissNotificationsTool(s, bridge, mcpLog)
 	// Memory reporting
 	registerGetMemoryReportTool(s, bridge, mcpLog)
 	registerGetPaneMemoryTool(s, bridge, mcpLog)
@@ -471,16 +472,62 @@ func registerGetNotificationsTool(s *mcp.Server, bridge *mcpBridge, mcpLog *mcpL
 	})
 }
 
+// registerDismissNotificationsTool exposes the same dismiss path the TUI uses
+// (MsgDismissEvent). The previous MCP surface was read-only — get_notifications
+// returned the queue but no agent could drain it, so MCP-only sessions
+// accumulated events until the daemon's bounded queue evicted them. Now an
+// agent can ack events explicitly: dismiss a single event by ID, or pass an
+// empty event_id to clear everything.
+func registerDismissNotificationsTool(s *mcp.Server, bridge *mcpBridge, mcpLog *mcpLogger) {
+	type Input struct {
+		EventID string `json:"event_id,omitempty" jsonschema:"event id to dismiss (empty = dismiss all)"`
+	}
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "dismiss_notifications",
+		Description: "Dismiss notification events from the daemon's queue. Pass event_id to drop a single event " +
+			"(matching one returned by get_notifications), or omit it to clear all pending events. Use after " +
+			"acting on an event so it does not show up again on the next get_notifications call.",
+	}, func(_ context.Context, _ *mcp.CallToolRequest, input Input) (*mcp.CallToolResult, any, error) {
+		mcpLog.Log("", "dismiss_notifications", fmt.Sprintf("event_id=%q", input.EventID))
+
+		msg, err := ipc.NewMessage(ipc.MsgDismissEvent, ipc.DismissEventPayload{
+			EventID: input.EventID,
+		})
+		if err != nil {
+			return nil, nil, fmt.Errorf("dismiss_notifications build: %w", err)
+		}
+		// MsgDismissEvent is fire-and-forget on the daemon side — no response
+		// IPC message exists. sendRaw is thread-safe; raw Send through the
+		// shared bridge.client could race with the response read loop's
+		// internal locking.
+		if err := bridge.sendRaw(msg); err != nil {
+			return nil, nil, fmt.Errorf("dismiss_notifications send: %w", err)
+		}
+
+		summary := "Dismissed all notifications."
+		if input.EventID != "" {
+			summary = fmt.Sprintf("Dismissed notification %s.", input.EventID)
+		}
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: summary}},
+		}, nil, nil
+	})
+}
+
 func registerWatchNotificationsTool(s *mcp.Server, bridge *mcpBridge, mcpLog *mcpLogger) {
 	type Input struct {
-		PaneIDs []string `json:"pane_ids,omitempty" jsonschema:"pane IDs to watch (empty = all panes)"`
-		Timeout int      `json:"timeout,omitempty" jsonschema:"timeout in seconds (default 60, max 300)"`
+		PaneIDs        []string `json:"pane_ids,omitempty" jsonschema:"pane IDs to watch (empty = all panes)"`
+		Timeout        int      `json:"timeout,omitempty" jsonschema:"timeout in seconds (default 60, max 300)"`
+		SinceTimestamp int64    `json:"since_timestamp,omitempty" jsonschema:"if set (Unix ms), return immediately with the oldest queued event newer than this — closes the race between kicking off a task and starting to watch. Pass the timestamp of the last event you handled."`
 	}
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "watch_notifications",
 		Description: "Block until a notification event fires for the specified panes. Returns event details when a process exits, " +
-			"output matches a notification pattern, or timeout. Use this instead of polling with sleep + screenshot.",
+			"output matches a notification pattern, or timeout. Use this instead of polling with sleep + screenshot. " +
+			"Pass since_timestamp (the Unix ms of the last event you saw) to recover events that may have fired between " +
+			"your previous action and this call.",
 	}, func(_ context.Context, _ *mcp.CallToolRequest, input Input) (*mcp.CallToolResult, any, error) {
 		timeout := input.Timeout
 		if timeout <= 0 {
@@ -490,13 +537,14 @@ func registerWatchNotificationsTool(s *mcp.Server, bridge *mcpBridge, mcpLog *mc
 			timeout = 300
 		}
 
-		mcpLog.Log("", "watch_notifications", fmt.Sprintf("panes=%d timeout=%ds", len(input.PaneIDs), timeout))
+		mcpLog.Log("", "watch_notifications", fmt.Sprintf("panes=%d timeout=%ds since=%d", len(input.PaneIDs), timeout, input.SinceTimestamp))
 
 		resp, err := bridge.requestWithTimeout(
 			ipc.MsgWatchNotificationsReq,
 			ipc.WatchNotificationsReqPayload{
-				PaneIDs:   input.PaneIDs,
-				TimeoutMs: timeout * 1000,
+				PaneIDs:        input.PaneIDs,
+				TimeoutMs:      timeout * 1000,
+				SinceTimestamp: input.SinceTimestamp,
 			},
 			time.Duration(timeout+5)*time.Second,
 		)

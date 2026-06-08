@@ -167,15 +167,32 @@ A non-modal sidebar surfaces:
 - Process exits (any pane)
 - OSC 133 command-completion events (shell panes)
 - Bell characters (30 s cooldown to avoid storming)
-- Smart-idle pattern matches (per-plugin `[[notification_handlers]]` regex)
+- Smart-idle pattern matches (per-plugin `[[idle_handlers]]` regex)
+- **Hook-driven events from Claude Code and OpenCode** — structured events forwarded directly from the AI tool (permission requests, "reply ready", session errors, file edits, etc.) instead of guessed from the PTY byte stream. See `[notification.hooks]` in [configuration.md](configuration.md#notificationhooks) for the tier knob.
+
+Hook-driven events flow:
+
+```
+hook fires (claude .sh / opencode .js)
+  → writes one JSONL line to ~/.quil/events/<paneID>.jsonl
+  → daemon polls every 200 ms (rate-limited to 100/2s per pane, coalesced 50 ms per event-type)
+  → translated to PaneEvent and routed through the same broadcast pipeline
+```
+
+Tier values (per source — Claude and OpenCode are configured independently):
+
+- `default` (the v1 set): Claude `SessionEnd`, `UserPromptSubmit`, `Notification`, `PermissionRequest`, `Stop`, `PreCompact`/`PostCompact`, `SubagentStart/Stop`, `TaskCreated/Completed`; OpenCode `permission.ask`, `experimental.session.compacting`, plus filtered bus events (`session.idle/error/compacted`, `session.status` retry-only, `file.edited` batched 1 s).
+- `verbose` (currently identical to `default` — placeholder for future tier-2 events like Claude `PreToolUse`/`PostToolUse`).
+- `off` disables forwarding entirely; the legacy PTY-byte idle heuristic kicks back in as the fallback notification surface.
 
 | Action | Binding |
 |---|---|
 | Toggle sidebar | `Alt+N` (3-state: hidden → visible+unfocused → visible+focused → hidden) |
 | Focus sidebar | `F3` |
 | Pane back-button (browser-style) | `Alt+Backspace` |
+| Mute / unmute active pane | `Alt+M` |
 
-External AI agents can subscribe via MCP — `get_notifications` (non-blocking) and `watch_notifications` (blocking, up to 5 min) replace polling. See [MCP](mcp.md#event-observation).
+External AI agents can subscribe via MCP — `get_notifications` (non-blocking), `watch_notifications` (blocking, up to 5 min) and `dismiss_notifications` (ack from agent side) replace polling. See [MCP](mcp.md#event-observation).
 
 ### Memory reporting
 

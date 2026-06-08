@@ -19,11 +19,9 @@ import (
 
 	"regexp"
 
-	"github.com/charmbracelet/x/ansi"
-	"github.com/charmbracelet/x/vt"
-	"github.com/google/uuid"
 	"github.com/artyomsv/quil/internal/claudehook"
 	"github.com/artyomsv/quil/internal/config"
+	"github.com/artyomsv/quil/internal/hookevents"
 	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/logger"
 	memreport "github.com/artyomsv/quil/internal/memreport"
@@ -34,6 +32,9 @@ import (
 	"github.com/artyomsv/quil/internal/ringbuf"
 	"github.com/artyomsv/quil/internal/shellinit"
 	"github.com/artyomsv/quil/internal/version"
+	"github.com/charmbracelet/x/ansi"
+	"github.com/charmbracelet/x/vt"
+	"github.com/google/uuid"
 )
 
 // oscBellRe matches OSC sequences terminated by BEL (\x07), e.g., \x1b]0;title\x07.
@@ -41,24 +42,33 @@ import (
 var oscBellRe = regexp.MustCompile(`\x1b\][^\x07]*\x07`)
 
 type Daemon struct {
-	cfg        config.Config
-	server     *ipc.Server
-	session    *SessionManager
-	registry   *plugin.Registry
+	cfg          config.Config
+	server       *ipc.Server
+	session      *SessionManager
+	registry     *plugin.Registry
 	shutdown     chan struct{}
 	shutdownOnce sync.Once
 	stopOnce     sync.Once
 	snapshotCh   chan struct{} // buffered channel for snapshot requests
-	restored     bool         // true if workspace was loaded from disk
-	events       *eventQueue  // notification center event queue
+	restored     bool          // true if workspace was loaded from disk
+	events       *eventQueue   // notification center event queue
 	// clientCWD is the last-known CWD from a TUI client, used as the
 	// default working directory for new panes/tabs. Read by defaultCWD()
 	// from any IPC dispatch goroutine and written by handleAttach on each
 	// connect — atomic.Pointer is what keeps that race-free.
-	clientCWD    atomic.Pointer[string]
+	clientCWD atomic.Pointer[string]
 
 	memReport   *memreport.Collector
 	collectorWG sync.WaitGroup
+
+	// hookIngester translates hookevents.Payload (from spool reads / future
+	// IPC submissions) into PaneEvents via emitHookEvent. Lazily initialised
+	// in Start once the events dir is ready; nil before Start.
+	hookIngester *hookevents.Ingester
+	// hookSpool reads $QUIL_HOME/events/<paneID>.jsonl appended by the
+	// Claude .sh / opencode .js hook scripts. Polled by hookEventsWatcher
+	// every 200 ms while the daemon runs.
+	hookSpool *hookevents.Spool
 }
 
 func New(cfg config.Config) *Daemon {
@@ -107,6 +117,15 @@ func (d *Daemon) Start() error {
 		log.Printf("warning: failed to create sessions dir: %v", err)
 	}
 
+	// Hook event ingest plumbing: spool reader + ingester (rate limit +
+	// coalesce) feeding emitHookEvent. Init truncates stale spool files so
+	// the daemon never replays notifications from a prior session.
+	d.hookSpool = hookevents.NewSpool(config.EventsDir())
+	if err := d.hookSpool.Init(); err != nil {
+		log.Printf("warning: failed to init hook events spool: %v", err)
+	}
+	d.hookIngester = hookevents.NewIngester(d.emitHookEvent)
+
 	// Write default plugin TOML files if missing, then load all plugins
 	if _, err := plugin.EnsureDefaultPlugins(config.PluginsDir()); err != nil {
 		log.Printf("warning: failed to write default plugins: %v", err)
@@ -137,6 +156,7 @@ func (d *Daemon) Start() error {
 	}
 
 	go d.idleChecker()
+	go d.hookEventsWatcher()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
@@ -457,6 +477,7 @@ func (d *Daemon) restoreWorkspace() error {
 				// back to the default PTY dimensions).
 				cols, _ := paneData["cols"].(float64)
 				rows, _ := paneData["rows"].(float64)
+				muted, _ := paneData["muted"].(bool)
 
 				pane := &Pane{
 					ID:           paneID,
@@ -470,6 +491,7 @@ func (d *Daemon) restoreWorkspace() error {
 					InstanceName: instanceName,
 					InstanceArgs: instanceArgs,
 					OutputBuf:    ringbuf.NewRingBuffer(d.session.bufSize),
+					Muted:        muted,
 				}
 
 				// Load ghost buffer from disk
@@ -948,6 +970,14 @@ func (d *Daemon) handleDestroyPane(msg *ipc.Message) {
 	if err := msg.DecodePayload(&payload); err != nil {
 		return
 	}
+	// Defense-in-depth: reject malformed PaneID at the IPC ingress so a
+	// crafted payload (e.g. PaneID = "../../tmp/target") cannot escape the
+	// spool directory in Spool.Cleanup or any other paneID-keyed FS path.
+	// Production paneIDs are uuid-derived hex; anything else is invalid.
+	if !isValidHexID(payload.PaneID, "pane-") {
+		log.Printf("handleDestroyPane: rejected malformed PaneID %q", payload.PaneID)
+		return
+	}
 
 	// Capture tab ID before destroying the pane
 	var tabID string
@@ -955,6 +985,18 @@ func (d *Daemon) handleDestroyPane(msg *ipc.Message) {
 		tabID = pane.TabID
 	}
 	log.Printf("pane destroy: %s (tab=%s)", payload.PaneID, tabID)
+
+	// Tear down the pane's hook event spool file AND coalescer pending
+	// state before destroying the pane itself. Spool.Cleanup stops the
+	// watcher from picking up stale lines on the next tick; Ingester.Cancel
+	// stops the 50 ms AfterFunc timers from firing a final stale event
+	// after the pane is gone.
+	if d.hookSpool != nil {
+		d.hookSpool.Cleanup(payload.PaneID)
+	}
+	if d.hookIngester != nil {
+		d.hookIngester.Cancel(payload.PaneID)
+	}
 
 	d.session.DestroyPane(payload.PaneID)
 
@@ -1021,7 +1063,14 @@ func (d *Daemon) handleUpdatePane(msg *ipc.Message) {
 	if payload.CWD != "" {
 		pane.CWD = payload.CWD
 	}
+	if payload.Muted != nil {
+		pane.PluginMu.Lock()
+		pane.Muted = *payload.Muted
+		pane.PluginMu.Unlock()
+		log.Printf("pane %s: muted=%v", pane.ID, *payload.Muted)
+	}
 	d.broadcastState()
+	d.requestSnapshot()
 }
 
 func (d *Daemon) handleReloadPlugins() {
@@ -1134,7 +1183,7 @@ func (d *Daemon) streamPTYOutput(paneID string, pty apty.Session) {
 						severity = "error"
 						title = fmt.Sprintf("Process failed (code %d)", code)
 					}
-					d.emitEvent(PaneEvent{
+					d.emitEvent(withExcerpt(PaneEvent{
 						ID:        uuid.New().String(),
 						PaneID:    paneID,
 						TabID:     pane.TabID,
@@ -1144,7 +1193,7 @@ func (d *Daemon) streamPTYOutput(paneID string, pty apty.Session) {
 						Severity:  severity,
 						Timestamp: time.Now(),
 						Data:      map[string]string{"exit_code": strconv.Itoa(code)},
-					})
+					}, paneOutputExcerpt(pane, 5)))
 				}
 				return
 			}
@@ -1214,11 +1263,11 @@ func (d *Daemon) detectBellEvent(pane *Pane, paneID string, data []byte) {
 		return
 	}
 	pane.LastBellEventAt = time.Now()
-	d.emitEvent(PaneEvent{
+	d.emitEvent(withExcerpt(PaneEvent{
 		ID: uuid.New().String(), PaneID: paneID, TabID: pane.TabID,
 		PaneName: pane.Name, Type: "bell",
 		Title: "Attention", Severity: "warning", Timestamp: time.Now(),
-	})
+	}, paneOutputExcerpt(pane, 3)))
 }
 
 // detectOSC133Exit parses OSC 133;D (command complete) sequences from shell integration.
@@ -1242,12 +1291,12 @@ func (d *Daemon) detectOSC133Exit(pane *Pane, paneID string, data []byte) {
 		severity = "error"
 		title = fmt.Sprintf("Command failed (code %d)", code)
 	}
-	d.emitEvent(PaneEvent{
+	d.emitEvent(withExcerpt(PaneEvent{
 		ID: uuid.New().String(), PaneID: paneID, TabID: pane.TabID,
 		PaneName: pane.Name, Type: "command_complete",
 		Title: title, Severity: severity, Timestamp: time.Now(),
 		Data: map[string]string{"exit_code": strconv.Itoa(code)},
-	})
+	}, paneOutputExcerpt(pane, 5)))
 }
 
 // applyPluginHandlers runs scraping, error matching for non-terminal plugins.
@@ -1279,6 +1328,9 @@ func (d *Daemon) applyPluginHandlers(pane *Pane, paneID string, data []byte) {
 }
 
 func (d *Daemon) broadcastState() {
+	if d.server == nil {
+		return
+	}
 	state := d.buildWorkspaceState()
 	resp, _ := ipc.NewMessage(ipc.MsgWorkspaceState, state)
 	d.server.Broadcast(resp)
@@ -1331,6 +1383,9 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 					ps[k] = v
 				}
 				paneData["plugin_state"] = ps
+			}
+			if pane.Muted {
+				paneData["muted"] = true
 			}
 			pane.PluginMu.Unlock()
 			if pane.InstanceName != "" {
@@ -1409,7 +1464,7 @@ var opencodeHookScriptStatFn = func(path string) error {
 // entries against its own CWD, not the daemon's. With `prompts_cwd = true`
 // the child CWD is user-chosen and may differ from where the daemon was
 // launched, so a relative quilDir would silently break tracking.
-func opencodeSpawnPrep(quilDir, paneID string) []string {
+func opencodeSpawnPrep(quilDir, paneID, hookMode string) []string {
 	absQuilDir, err := filepath.Abs(quilDir)
 	if err != nil {
 		log.Printf("warning: pane %s: absolutize quilDir %q: %v — session-id rotation tracking disabled", paneID, quilDir, err)
@@ -1425,9 +1480,14 @@ func opencodeSpawnPrep(quilDir, paneID string) []string {
 		log.Printf("warning: pane %s: build opencode config content: %v — session-id rotation tracking disabled", paneID, err)
 		return nil
 	}
+	mode := hookMode
+	if mode == "" {
+		mode = "default"
+	}
 	return []string{
 		"QUIL_PANE_ID=" + paneID,
 		"QUIL_HOME=" + absQuilDir,
+		"QUIL_HOOK_MODE=" + mode,
 		"OPENCODE_CONFIG_CONTENT=" + cfg,
 	}
 }
@@ -1439,7 +1499,7 @@ func opencodeSpawnPrep(quilDir, paneID string) []string {
 // pre-feature behaviour rather than failing the whole spawn. Logs a warning
 // if userArgs already contain --settings; Claude treats later wins, so our
 // prepend silently overrides the user's value.
-func claudeHookSpawnPrep(quilDir, paneID string, userArgs []string) (prefix, env []string) {
+func claudeHookSpawnPrep(quilDir, paneID, hookMode string, userArgs []string) (prefix, env []string) {
 	scriptPath := claudehook.ScriptPath(quilDir)
 	if err := claudeHookScriptStatFn(scriptPath); err != nil {
 		log.Printf("warning: pane %s: claude hook script unavailable (%s): %v — session-id rotation tracking disabled", paneID, scriptPath, err)
@@ -1456,7 +1516,14 @@ func claudeHookSpawnPrep(quilDir, paneID string, userArgs []string) (prefix, env
 			break
 		}
 	}
-	return []string{"--settings", js}, []string{"QUIL_PANE_ID=" + paneID}
+	mode := hookMode
+	if mode == "" {
+		mode = "default"
+	}
+	return []string{"--settings", js}, []string{
+		"QUIL_PANE_ID=" + paneID,
+		"QUIL_HOOK_MODE=" + mode,
+	}
 }
 
 // escapeClaudeCWD mirrors Claude Code's on-disk naming for per-project
@@ -1647,7 +1714,7 @@ func resolveSpawnArgs(p *plugin.PanePlugin, pane *Pane, restoring bool) []string
 			// args already set from InstanceArgs above
 		case "none":
 			// Don't restore — but we still spawn for now (pane exists in workspace)
-		// "cwd_only": just start fresh with CWD (default behavior)
+			// "cwd_only": just start fresh with CWD (default behavior)
 		}
 	}
 
@@ -1728,13 +1795,13 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 	envVars := append([]string{}, p.Command.Env...)
 	switch p.Name {
 	case "claude-code":
-		settingsArgs, hookEnv := claudeHookSpawnPrep(config.QuilDir(), pane.ID, args)
+		settingsArgs, hookEnv := claudeHookSpawnPrep(config.QuilDir(), pane.ID, d.cfg.Notification.Hooks.Claude, args)
 		if len(settingsArgs) > 0 {
 			args = append(settingsArgs, args...)
 		}
 		envVars = append(envVars, hookEnv...)
 	case "opencode":
-		envVars = append(envVars, opencodeSpawnPrep(config.QuilDir(), pane.ID)...)
+		envVars = append(envVars, opencodeSpawnPrep(config.QuilDir(), pane.ID, d.cfg.Notification.Hooks.OpenCode)...)
 	}
 
 	if len(envVars) > 0 {
@@ -1793,15 +1860,173 @@ func (d *Daemon) respondToAndHighlight(conn *ipc.Conn, requestID, msgType string
 	d.highlightPane(paneID)
 }
 
+// findEventSince delegates to the event queue's catch-up scan. Returns the
+// oldest queued event newer than sinceUnixMilli matching paneFilter (empty
+// filter = any pane), or nil. Used by watch_notifications's race-closing
+// short-circuit before a watcher is registered.
+func (d *Daemon) findEventSince(sinceUnixMilli int64, paneFilter map[string]bool) *PaneEvent {
+	return d.events.FindSince(sinceUnixMilli, paneFilter)
+}
+
 // emitEvent pushes an event to the queue and broadcasts to all clients.
+// Events from muted panes are dropped entirely — neither queued nor broadcast.
+// Mute is a per-pane signal-quality control: panes like `npm test --watch`
+// fire idle handlers on every iteration, and the only sane treatment is to
+// silence them at the source. Process-exit on a muted pane is also silenced —
+// once you say "stop telling me about this pane", we honor it.
 func (d *Daemon) emitEvent(e PaneEvent) {
+	if e.PaneID != "" {
+		if pane := d.session.Pane(e.PaneID); pane != nil {
+			pane.PluginMu.Lock()
+			muted := pane.Muted
+			pane.PluginMu.Unlock()
+			if muted {
+				return
+			}
+		}
+	}
 	d.events.Push(e)
 	payload := toPaneEventPayload(e)
 	msg, _ := ipc.NewMessage(ipc.MsgPaneEvent, payload)
-	d.server.Broadcast(msg)
+	if d.server != nil {
+		d.server.Broadcast(msg)
+	}
 }
 
 // idleChecker runs a periodic check for panes that have gone idle.
+// hookEventsWatcher polls the hook event spool every 200 ms while the daemon
+// runs, submitting each new payload to the Ingester which then forwards
+// (after rate-limit + coalesce) to emitHookEvent. Mirrors idleChecker's
+// shutdown discipline: select on d.shutdown so Stop() drains cleanly.
+//
+// 200 ms is a tradeoff between latency and CPU. With the spool being just
+// stat+seek+read per file, ten panes cost ~50 µs/tick — negligible — while
+// a 200 ms p99 latency from hook fire to sidebar render keeps the user's
+// perception of "instant" intact.
+func (d *Daemon) hookEventsWatcher() {
+	logger.Info("hook events watcher started (200 ms tick, spool=%s)", config.EventsDir())
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-d.shutdown:
+			// Final drain so any in-flight bursts surface before close.
+			if d.hookIngester != nil {
+				d.hookIngester.FlushAll()
+			}
+			return
+		case <-ticker.C:
+			if d.hookSpool == nil || d.hookIngester == nil {
+				continue
+			}
+			payloads := d.hookSpool.Tick()
+			if len(payloads) > 0 {
+				logger.Debug("hook events tick: read %d payloads from spool", len(payloads))
+			}
+			for _, p := range payloads {
+				d.hookIngester.Submit(p)
+			}
+		}
+	}
+}
+
+// emitHookEvent is the bridge from hookevents.Payload (post rate-limit and
+// coalesce) to the daemon's PaneEvent emission funnel. Looks up the pane
+// to enrich with TabID/Name (which the hook side does not know), marks the
+// pane HookHealthy so the legacy idle checker steps aside, then routes
+// through the existing emitEvent so mute, aggregation, and the broadcast
+// path all apply.
+//
+// A pane that has been destroyed between the hook write and the spool
+// read silently drops here — the lookup returns nil and we return without
+// emit. Same trust boundary as the rest of the IPC surface.
+func (d *Daemon) emitHookEvent(p hookevents.Payload) {
+	// Daemon-side enforcement of the hooks tier — covers the case where
+	// the script-side gate did not fire (older script on disk, env var
+	// stripped by an opencode wrapper, etc.). "off" drops the event;
+	// "default"/"verbose"/anything else fall through. Storm diagnostics
+	// always pass — they're the rate limiter's own internal signal.
+	if p.HookEvent != hookevents.EventStorm {
+		var mode string
+		switch p.Source {
+		case hookevents.SourceClaude:
+			mode = d.cfg.Notification.Hooks.Claude
+		case hookevents.SourceOpenCode:
+			mode = d.cfg.Notification.Hooks.OpenCode
+		}
+		if mode == "off" {
+			return
+		}
+	}
+
+	pane := d.session.Pane(p.PaneID)
+	if pane == nil {
+		logger.Debug("hook event for unknown pane=%s src=%s hook_event=%s",
+			p.PaneID, p.Source, p.HookEvent)
+		return
+	}
+	logger.Debug("emit hook event pane=%s src=%s hook_event=%s title=%q",
+		p.PaneID, p.Source, p.HookEvent, p.Title)
+
+	// Only real hook events count toward "this pane is hook-healthy". The
+	// rate limiter's own synthetic storm diagnostic would otherwise flip
+	// HookHealthy=true precisely when the pane has stopped delivering real
+	// events — silencing the legacy idle excerpt during the 30 s window
+	// when it's the user's last remaining notification surface.
+	if p.HookEvent != hookevents.EventStorm {
+		pane.PluginMu.Lock()
+		pane.HookHealthy = true
+		pane.LastHookEventAt = time.Now()
+		pane.PluginMu.Unlock()
+	}
+
+	// Compose the PaneEvent. The Type field encodes the source so MCP
+	// consumers can filter by "hook.claude.*" or "hook.opencode.*" without
+	// parsing the title. Severity defaults to info when the hook omitted it.
+	severity := p.Severity
+	if severity == "" {
+		severity = hookevents.SeverityInfo
+	}
+	eventType := "hook." + p.Source + "." + p.HookEvent
+	// Clamp timestamp to a sane window. A hook with a clock skew (container
+	// with wrong NTP, malicious payload) might carry TsMs years off; the
+	// sidebar would pin the event at the top or bottom forever. Accept ±1h
+	// of the daemon's clock; anything else falls back to now.
+	now := time.Now()
+	var ts time.Time
+	if p.TsMs == 0 {
+		ts = now
+	} else {
+		ts = time.UnixMilli(p.TsMs)
+		if ts.Before(now.Add(-time.Hour)) || ts.After(now.Add(time.Minute)) {
+			ts = now
+		}
+	}
+
+	// Build the Data map in a single allocation. Always carries the
+	// source-tracking metadata so MCP consumers don't have to parse the
+	// Type prefix.
+	data := make(map[string]string, len(p.Data)+2)
+	for k, v := range p.Data {
+		data[k] = v
+	}
+	data["hook_source"] = p.Source
+	data["hook_event"] = p.HookEvent
+
+	d.emitEvent(PaneEvent{
+		ID:        uuid.New().String(),
+		PaneID:    p.PaneID,
+		TabID:     pane.TabID,
+		PaneName:  pane.Name,
+		Type:      eventType,
+		Title:     p.Title,
+		Message:   data["preview"], // optional excerpt-like preview from the hook
+		Severity:  severity,
+		Timestamp: ts,
+		Data:      data,
+	})
+}
+
 func (d *Daemon) idleChecker() {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
@@ -1823,9 +2048,17 @@ func (d *Daemon) checkIdlePanes() {
 		for _, pane := range d.session.Panes(tab.ID) {
 			// Single lock span: read + conditionally write to avoid race with flushPaneOutput
 			pane.PluginMu.Lock()
+			// Suppress the legacy idle excerpt when the pane's hook is
+			// actively delivering ground-truth events. A 30 s grace period
+			// catches the case where hooks load successfully but the AI
+			// tool sits quiet for an extended turn — the legacy idle then
+			// reactivates as a fallback so the user is never left with
+			// zero notification signal.
+			hookActive := pane.HookHealthy && now.Sub(pane.LastHookEventAt) < 30*time.Second
 			shouldFire := !pane.IdleNotified &&
 				!pane.LastOutputAt.IsZero() &&
 				pane.ExitCode == nil &&
+				!hookActive &&
 				(pane.LastIdleEventAt.IsZero() || now.Sub(pane.LastIdleEventAt) >= cooldown) &&
 				now.Sub(pane.LastOutputAt) >= threshold
 			if shouldFire {
@@ -1838,8 +2071,36 @@ func (d *Daemon) checkIdlePanes() {
 				continue
 			}
 
-			title, severity := d.analyzeIdleTitle(pane)
-			d.emitEvent(PaneEvent{
+			title, severity, excerpt := d.analyzeIdleTitle(pane)
+			// Skip prompt-only idle events: shells legitimately idle at a
+			// shell prompt are not a state change worth notifying. We only
+			// suppress when the default "Output idle" title fired — if a
+			// plugin idle handler matched (e.g. claude-code's "Needs your
+			// approval"), the regex saw something meaningful in the excerpt
+			// even though the surface chars collapse to a prompt rune.
+			suppress := title == "Output idle" && isPromptOnlyExcerpt(excerpt)
+			// Diagnostic: structural metadata only, NEVER the raw excerpt
+			// content. Terminal panes can contain secrets (`echo $API_KEY`,
+			// `mysql -p…`, `cat .env`) — even at debug level we must not log
+			// user-provided content per observability-and-logging.md. Length
+			// + line count + line-end class are sufficient to diagnose
+			// suppression decisions (the OSC 0 leak case shows up as
+			// excerpt_lines=1 line_end_class=text, normal shell prompts as
+			// line_end_class=prompt_rune).
+			logger.Debug("idle decision: pane=%s type=%s title=%q suppress=%v excerpt_bytes=%d excerpt_lines=%d",
+				pane.ID, pane.Type, title, suppress, len(excerpt), countNonEmptyLines(excerpt))
+			if suppress {
+				// Roll back the cooldown bookkeeping: we DID NOT emit, so
+				// the next real activity should fire promptly instead of
+				// waiting out a fake 30 s cooldown. IdleNotified stays true
+				// — flushPaneOutput resets it on the next byte from the PTY,
+				// so we won't re-evaluate the same idle state every tick.
+				pane.PluginMu.Lock()
+				pane.LastIdleEventAt = time.Time{}
+				pane.PluginMu.Unlock()
+				continue
+			}
+			d.emitEvent(withExcerpt(PaneEvent{
 				ID:        uuid.New().String(),
 				PaneID:    pane.ID,
 				TabID:     pane.TabID,
@@ -1848,14 +2109,16 @@ func (d *Daemon) checkIdlePanes() {
 				Title:     title,
 				Severity:  severity,
 				Timestamp: now,
-			})
+			}, excerpt))
 		}
 	}
 }
 
 // analyzeIdleTitle determines the notification title/severity by matching
-// the last few lines of pane output against plugin idle handlers.
-func (d *Daemon) analyzeIdleTitle(pane *Pane) (title, severity string) {
+// the last few lines of pane output against plugin idle handlers. The
+// excerpt is the same text used for regex matching — returned so the caller
+// can attach it to the event without a second buffer read.
+func (d *Daemon) analyzeIdleTitle(pane *Pane) (title, severity, excerpt string) {
 	title = "Output idle"
 	severity = "info"
 
@@ -1870,33 +2133,247 @@ func (d *Daemon) analyzeIdleTitle(pane *Pane) (title, severity string) {
 		title = "Waiting for input"
 		severity = "warning"
 	}
-	if pane.OutputBuf != nil && len(p.IdleHandlers) > 0 {
-		raw := pane.OutputBuf.Bytes()
-		// Limit to last 4KB for performance
-		if len(raw) > 4096 {
-			raw = raw[len(raw)-4096:]
-		}
-		stripped := ansi.Strip(string(raw))
-		text := lastNLines(stripped, 5)
-		if ih := plugin.MatchIdle(p, text); ih != nil {
-			title = ih.Title
-			severity = ih.Severity
-		}
+	if pane.OutputBuf == nil {
+		return
+	}
+	raw := pane.OutputBuf.Bytes()
+	if len(raw) == 0 {
+		return
+	}
+	stripped := ansi.Strip(string(trimToNewlineSafe(raw, 4096)))
+	excerpt = lastNLines(stripped, 5)
+	if len(p.IdleHandlers) == 0 || excerpt == "" {
+		return
+	}
+	if ih := plugin.MatchIdle(p, excerpt); ih != nil {
+		title = ih.Title
+		severity = ih.Severity
 	}
 	return
 }
 
-// lastNLines returns the last n non-empty lines from text.
+// lastNLines returns the last n non-empty lines from text, applying terminal
+// carriage-return semantics per line. A real terminal interprets `\r` as
+// "return to column 0 and overwrite from there" — so when ansi.Strip leaves
+// `prompt   \r \r\rwindow-title-leak` in a single line, what the user
+// actually SEES is the trailing segment after the last `\r`. Without this
+// reset, excerpts capture text the user can never see (e.g. the prompt
+// rune that was immediately overwritten) and miss the text they DO see.
 func lastNLines(text string, n int) string {
 	lines := strings.Split(text, "\n")
 	var result []string
 	for i := len(lines) - 1; i >= 0 && len(result) < n; i-- {
-		trimmed := strings.TrimSpace(lines[i])
+		line := lines[i]
+		if cr := strings.LastIndex(line, "\r"); cr >= 0 {
+			line = line[cr+1:]
+		}
+		trimmed := strings.TrimSpace(line)
 		if trimmed != "" {
 			result = append([]string{trimmed}, result...)
 		}
 	}
 	return strings.Join(result, "\n")
+}
+
+// paneOutputExcerpt extracts the last n non-empty stripped lines from a pane's
+// ring buffer. Used to enrich notification events with the context that
+// triggered them so the sidebar and MCP consumers can show something more
+// informative than the title alone. Returns "" if the buffer is empty.
+//
+// Reads only the trailing 4 KiB of the ring buffer — enough for ~50 wrapped
+// lines on a typical terminal, far more than n=3 needs, and bounded so the
+// per-event cost stays negligible even for panes with very large buffers.
+func paneOutputExcerpt(pane *Pane, n int) string {
+	if pane == nil || pane.OutputBuf == nil {
+		return ""
+	}
+	raw := pane.OutputBuf.Bytes()
+	if len(raw) == 0 {
+		return ""
+	}
+	return lastNLines(ansi.Strip(string(trimToNewlineSafe(raw, 4096))), n)
+}
+
+// trimToNewlineSafe returns the trailing window of raw, advancing past any
+// partial ANSI escape sequence at the slice boundary. Without this guard, a
+// 4 KiB tail slice can begin in the middle of a CSI sequence — the leading
+// `\x1b[` ended up in the discarded prefix, but parameters like
+// `2;30;30;30m` or `;18H` survive into the window and ansi.Strip can no
+// longer recognise them as part of an escape. They then render to the user
+// as raw garbage.
+//
+// We scan forward bounded by maxScan bytes looking for either:
+//   - a newline (clean text restart), or
+//   - an ESC byte (0x1b — start of a fresh ANSI sequence that ansi.Strip
+//     will recognise in full).
+//
+// Whichever boundary comes first wins. Newline-only seek wasn't enough:
+// some TUIs (Claude Code, opencode) emit one logical "screen paint" with
+// few or no newlines in the trailing window, so the seek fell through and
+// we returned the un-advanced slice — the original bug shape. ESC bytes
+// are abundant in ANSI-rich panes, so finding one is fast.
+//
+// If neither boundary is found within maxScan, we accept the un-advanced
+// slice — the chance of a leading partial sequence in 4 KiB of plain text
+// is small relative to the bytes the user sees.
+func trimToNewlineSafe(raw []byte, maxTail int) []byte {
+	if len(raw) <= maxTail {
+		return raw
+	}
+	start := len(raw) - maxTail
+	const maxScan = 512
+	upper := start + maxScan
+	if upper > len(raw) {
+		upper = len(raw)
+	}
+	for i := start; i < upper; i++ {
+		switch raw[i] {
+		case '\n':
+			return raw[i+1:]
+		case 0x1b:
+			return raw[i:]
+		}
+	}
+	return raw[start:]
+}
+
+// promptRunes are the canonical interactive shell prompt terminators.
+// An idle excerpt that strips down to one of these (and nothing else) means
+// the pane is sitting at a fresh prompt — a non-event from the user's POV,
+// because they can see the prompt by looking at the pane.
+var promptRunes = map[string]bool{
+	"%": true, // zsh default
+	"$": true, // bash / sh
+	">": true, // PowerShell / cmd, also some Python REPLs
+	"❯": true, // starship / pure / spaceship default
+	"#": true, // root prompts
+	"➜": true, // oh-my-zsh agnoster / af-magic
+	"λ": true, // fish-friendly minimal themes
+	"»": true, // bash-it powerline
+}
+
+// hostnameLikeRe matches user@host patterns (e.g. "user_name@host01")
+// that leak into excerpts from OSC 0 window-title sequences when ansi.Strip
+// or upstream emulators bail on an embedded CR. These leaks are
+// indistinguishable from "the pane is at a prompt" because the underlying
+// terminal state IS a fresh prompt — the title text is what survived the
+// strip, not what the cursor is sitting on.
+var hostnameLikeRe = regexp.MustCompile(`^[\w][\w.-]*@[\w][\w.-]+`)
+
+// isPromptOnlyExcerpt reports whether the excerpt represents a pane sitting
+// at an idle shell prompt. We classify a line as "prompt-like" when it is:
+//
+//   - a single canonical prompt rune (`%`, `$`, `❯`, etc.), OR
+//   - short (< 200 chars) AND contains a prompt rune somewhere (e.g.
+//     "user@host % git:(main)"), OR
+//   - short AND starts with a user@host pattern — the OSC 0 leak signature.
+//
+// The excerpt is prompt-only when every non-empty line passes these checks.
+// "Short" matters: a multi-line `ls` output that happens to contain a `%`
+// in one filename should NOT collapse to "shell idle" — only lines that
+// could realistically be a prompt qualify.
+func isPromptOnlyExcerpt(excerpt string) bool {
+	if excerpt == "" {
+		return false
+	}
+	sawAny := false
+	for _, line := range strings.Split(excerpt, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		sawAny = true
+		if !isPromptLikeLine(trimmed) {
+			return false
+		}
+	}
+	return sawAny
+}
+
+// isPromptLikeLine encapsulates the per-line classification used by
+// isPromptOnlyExcerpt. See that function's docs for the classification rules.
+//
+// Specifically, a line is "prompt-like" when, after trimming trailing
+// whitespace, it is:
+//
+//   - the bare prompt rune by itself (e.g. "%"), OR
+//   - a recognised prompt rune as the trailing token, preceded by whitespace
+//     (e.g. "user@host %", "~/repo $ ", "❯ "), OR
+//   - matches the user@host pattern that OSC 0 window-title leaks produce.
+//
+// The space-before-rune requirement is what distinguishes a real prompt
+// from a number-with-percent (`"build complete: 100%"`) or a literal text
+// ending in a prompt-like rune (`"x$"`). Without it the classifier would
+// suppress legitimate command output that happens to end in a prompt rune.
+// Long lines (> 200 chars) are presumed to be command output regardless of
+// trailing chars — real prompts are short.
+func isPromptLikeLine(line string) bool {
+	if line == "" {
+		return true
+	}
+	if promptRunes[line] {
+		return true
+	}
+	if len(line) > 200 {
+		return false
+	}
+	trimmed := strings.TrimRight(line, " \t")
+	for r := range promptRunes {
+		if !strings.HasSuffix(trimmed, r) {
+			continue
+		}
+		// Bare prompt rune (e.g. trimmed == "%").
+		if trimmed == r {
+			return true
+		}
+		// Prompt rune preceded by whitespace (e.g. "user@host %"). The byte
+		// immediately before the rune must be a space or tab — that's what
+		// makes it a standalone prompt terminator instead of part of a
+		// word like "100%" or "x$".
+		runeStart := len(trimmed) - len(r)
+		if runeStart > 0 {
+			prev := trimmed[runeStart-1]
+			if prev == ' ' || prev == '\t' {
+				return true
+			}
+		}
+	}
+	if hostnameLikeRe.MatchString(line) {
+		return true
+	}
+	return false
+}
+
+// countNonEmptyLines returns the number of non-blank lines in s. Used for
+// structural diagnostics in the idle-decision debug log so we can surface
+// excerpt shape ("N lines, M bytes") without echoing the raw content.
+func countNonEmptyLines(s string) int {
+	if s == "" {
+		return 0
+	}
+	n := 0
+	for _, line := range strings.Split(s, "\n") {
+		if strings.TrimSpace(line) != "" {
+			n++
+		}
+	}
+	return n
+}
+
+// withExcerpt populates PaneEvent.Message and Data["excerpt"] from the pane's
+// tail output. Idempotent: callers that already extracted the excerpt (e.g.
+// the idle checker, which needs it for regex matching) can pass excerpt
+// directly and skip the second buffer read.
+func withExcerpt(e PaneEvent, excerpt string) PaneEvent {
+	if excerpt == "" {
+		return e
+	}
+	e.Message = excerpt
+	if e.Data == nil {
+		e.Data = make(map[string]string)
+	}
+	e.Data["excerpt"] = excerpt
+	return e
 }
 
 func (d *Daemon) handleListPanesReq(conn *ipc.Conn, msg *ipc.Message) {
@@ -2252,6 +2729,13 @@ func (d *Daemon) handleDestroyPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 		respondTo(conn, msg.ID, ipc.MsgDestroyPaneResp, ipc.DestroyPaneRespPayload{})
 		return
 	}
+	// Mirror handleDestroyPane's PaneID validation so this MCP-facing path
+	// is also defended against path-traversal payloads.
+	if !isValidHexID(req.PaneID, "pane-") {
+		log.Printf("handleDestroyPaneReq: rejected malformed PaneID %q", req.PaneID)
+		respondTo(conn, msg.ID, ipc.MsgDestroyPaneResp, ipc.DestroyPaneRespPayload{})
+		return
+	}
 
 	pane := d.session.Pane(req.PaneID)
 	if pane == nil {
@@ -2259,6 +2743,15 @@ func (d *Daemon) handleDestroyPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 		return
 	}
 	d.highlightPane(pane.ID)
+
+	// Same hook-events cleanup as handleDestroyPane: kill the spool file +
+	// cancel the coalescer's pending timers before the pane disappears.
+	if d.hookSpool != nil {
+		d.hookSpool.Cleanup(req.PaneID)
+	}
+	if d.hookIngester != nil {
+		d.hookIngester.Cancel(req.PaneID)
+	}
 
 	tabID := pane.TabID
 	if err := d.session.DestroyPane(req.PaneID); err != nil {
@@ -2359,6 +2852,21 @@ func (d *Daemon) handleWatchNotificationsReq(conn *ipc.Conn, msg *ipc.Message) {
 	paneFilter := make(map[string]bool)
 	for _, id := range req.PaneIDs {
 		paneFilter[id] = true
+	}
+
+	// since_timestamp short-circuit: scan the existing queue for any event
+	// newer than the marker that also matches the pane filter. If one
+	// exists, return it without ever registering a watcher. This closes the
+	// race-on-registration window — events fired between the agent's prior
+	// action and this watch call would otherwise be lost.
+	if req.SinceTimestamp > 0 {
+		if catchup := d.findEventSince(req.SinceTimestamp, paneFilter); catchup != nil {
+			payload := toPaneEventPayload(*catchup)
+			respondTo(conn, msg.ID, ipc.MsgWatchNotificationsResp, ipc.WatchNotificationsRespPayload{
+				Event: &payload,
+			})
+			return
+		}
 	}
 
 	// Remove any existing watcher for this connection (limit 1 per connection)

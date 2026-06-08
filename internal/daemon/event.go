@@ -146,8 +146,56 @@ func (q *eventQueue) RemoveWatchersByConn(conn *ipc.Conn) {
 	q.watchers = remaining
 }
 
-// toPaneEventPayload converts a PaneEvent to an IPC payload.
+// Per-event wire-size caps. The earlier wedge incident happened with a
+// > 1 KiB box-drawing excerpt from an opencode splash screen flooding the
+// IPC fan-out. 4 KiB per Message and 128 bytes per Data value give comfortable
+// headroom for legitimate content (multi-line excerpts, command previews,
+// error stacks) while keeping a runaway event source from bloating the wire.
+//
+// Truncation is from the *front* so the most recent (and usually most
+// relevant) content survives — for excerpts that's the last visible line a
+// terminal would actually display.
+const (
+	maxEventMessageBytes  = 4 * 1024
+	maxEventDataValueBytes = 128
+	truncationMarker      = "…[truncated]"
+)
+
+// toPaneEventPayload converts a PaneEvent to an IPC payload, enforcing the
+// per-event wire-size caps. Caps are applied at the IPC boundary so all
+// emitters (idle checker, bell, process_exit, future hook events) share the
+// same protection.
 func toPaneEventPayload(e PaneEvent) ipc.PaneEventPayload {
+	message := e.Message
+	truncated := false
+
+	if len(message) > maxEventMessageBytes {
+		// Keep the tail — for excerpts, the bottom-most lines are the
+		// terminal-visible ones; for error blobs the trailing lines often
+		// carry the actual cause.
+		message = truncationMarker + message[len(message)-(maxEventMessageBytes-len(truncationMarker)):]
+		truncated = true
+	}
+
+	var data map[string]string
+	if len(e.Data) > 0 {
+		data = make(map[string]string, len(e.Data))
+		for k, v := range e.Data {
+			if len(v) > maxEventDataValueBytes {
+				data[k] = v[:maxEventDataValueBytes-len(truncationMarker)] + truncationMarker
+				truncated = true
+			} else {
+				data[k] = v
+			}
+		}
+	}
+	if truncated {
+		if data == nil {
+			data = make(map[string]string, 1)
+		}
+		data["truncated"] = "1"
+	}
+
 	return ipc.PaneEventPayload{
 		ID:        e.ID,
 		PaneID:    e.PaneID,
@@ -155,9 +203,9 @@ func toPaneEventPayload(e PaneEvent) ipc.PaneEventPayload {
 		PaneName:  e.PaneName,
 		Type:      e.Type,
 		Title:     e.Title,
-		Message:   e.Message,
+		Message:   message,
 		Severity:  e.Severity,
 		Timestamp: e.Timestamp.UnixMilli(),
-		Data:      e.Data,
+		Data:      data,
 	}
 }

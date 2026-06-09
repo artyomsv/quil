@@ -51,6 +51,15 @@ type Pane struct {
 	// Persisted in the workspace snapshot so mute survives restart. Read
 	// under PluginMu in emitEvent.
 	Muted bool
+	// Eager, when true, makes this pane respawn immediately on daemon restart
+	// instead of being deferred until first access. Toggled via
+	// MsgUpdatePane{Eager: true} (default keybinding Alt+Shift+E), persisted in
+	// the workspace snapshot, and marked on the tab label. Read under PluginMu.
+	Eager bool
+	// Pending is true between restore and first spawn for a deferred pane: the
+	// model + ghost buffer exist but no PTY has been created yet. Runtime-only,
+	// never persisted. Cleared by ensurePaneSpawned.
+	Pending bool
 	// LastHookEventAt is the wall-clock time of the most recent hook event
 	// the daemon translated into a PaneEvent for this pane. Used by
 	// checkIdlePanes to skip the legacy idle excerpt heuristic when hook

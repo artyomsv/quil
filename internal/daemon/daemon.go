@@ -478,6 +478,7 @@ func (d *Daemon) restoreWorkspace() error {
 				cols, _ := paneData["cols"].(float64)
 				rows, _ := paneData["rows"].(float64)
 				muted, _ := paneData["muted"].(bool)
+				eager, _ := paneData["eager"].(bool)
 
 				pane := &Pane{
 					ID:           paneID,
@@ -492,6 +493,7 @@ func (d *Daemon) restoreWorkspace() error {
 					InstanceArgs: instanceArgs,
 					OutputBuf:    ringbuf.NewRingBuffer(d.session.bufSize),
 					Muted:        muted,
+					Eager:        eager,
 				}
 
 				// Load ghost buffer from disk
@@ -1069,6 +1071,12 @@ func (d *Daemon) handleUpdatePane(msg *ipc.Message) {
 		pane.PluginMu.Unlock()
 		log.Printf("pane %s: muted=%v", pane.ID, *payload.Muted)
 	}
+	if payload.Eager != nil {
+		pane.PluginMu.Lock()
+		pane.Eager = *payload.Eager
+		pane.PluginMu.Unlock()
+		log.Printf("pane %s: eager=%v", pane.ID, *payload.Eager)
+	}
 	d.broadcastState()
 	d.requestSnapshot()
 }
@@ -1386,6 +1394,9 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			}
 			if pane.Muted {
 				paneData["muted"] = true
+			}
+			if pane.Eager {
+				paneData["eager"] = true
 			}
 			pane.PluginMu.Unlock()
 			if pane.InstanceName != "" {

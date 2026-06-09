@@ -107,9 +107,8 @@ func (d *Daemon) Start() error {
 		log.Printf("warning: failed to write shell init scripts: %v", err)
 	}
 
-	if err := claudehook.EnsureScripts(quilDir); err != nil {
-		log.Printf("warning: failed to write claude hook scripts: %v", err)
-	}
+	// Claude's hook is a native quild subcommand (see claudeHookSpawnPrep) —
+	// no script files to write. OpenCode still ships an embedded JS plugin.
 	if err := opencodehook.EnsureScripts(quilDir); err != nil {
 		log.Printf("warning: failed to write opencode hook scripts: %v", err)
 	}
@@ -1540,13 +1539,11 @@ var readHookSessionIDFn = func(paneID string) (string, error) {
 	return id, err
 }
 
-// claudeHookScriptStatFn lets claudeHookSpawnPrep check whether the hook
-// script exists on disk. Defaults to os.Stat; tests override to simulate the
-// "EnsureScripts failed at startup" branch without touching the real FS.
-var claudeHookScriptStatFn = func(path string) error {
-	_, err := os.Stat(path)
-	return err
-}
+// claudeHookExeFn resolves the path to the running quild binary, which the
+// claude hook command invokes via its `claude-hook` subcommand. Defaults to
+// os.Executable; tests override it to simulate the unresolvable-executable
+// branch without depending on the test binary's real path.
+var claudeHookExeFn = os.Executable
 
 // readOpencodeSessionIDFn mirrors readHookSessionIDFn for the opencode pane
 // type. Tests override it so the spawn-args matrix never touches the real
@@ -1604,19 +1601,20 @@ func opencodeSpawnPrep(quilDir, paneID, hookMode string) []string {
 }
 
 // claudeHookSpawnPrep returns the --settings prefix args and env vars to add
-// to a fresh claude-code spawn for SessionStart hook registration. Returns
-// nil slices when the hook is unavailable (script missing or settings JSON
-// build fails) so the spawn proceeds without the hook — matching the
-// pre-feature behaviour rather than failing the whole spawn. Logs a warning
-// if userArgs already contain --settings; Claude treats later wins, so our
+// to a fresh claude-code spawn for hook registration. The hook command invokes
+// the running quild binary's native `claude-hook` subcommand. Returns nil
+// slices when the hook is unavailable (executable path unresolvable or settings
+// JSON build fails) so the spawn proceeds without the hook — matching the
+// pre-feature behaviour rather than failing the whole spawn. Logs a warning if
+// userArgs already contain --settings; Claude treats later wins, so our
 // prepend silently overrides the user's value.
 func claudeHookSpawnPrep(quilDir, paneID, hookMode string, userArgs []string) (prefix, env []string) {
-	scriptPath := claudehook.ScriptPath(quilDir)
-	if err := claudeHookScriptStatFn(scriptPath); err != nil {
-		log.Printf("warning: pane %s: claude hook script unavailable (%s): %v — session-id rotation tracking disabled", paneID, scriptPath, err)
+	exePath, err := claudeHookExeFn()
+	if err != nil {
+		log.Printf("warning: pane %s: cannot resolve quild executable: %v — session-id rotation tracking disabled", paneID, err)
 		return nil, nil
 	}
-	js, err := claudehook.BuildSettingsJSON(claudehook.HookCommand(quilDir))
+	js, err := claudehook.BuildSettingsJSON(claudehook.HookCommand(exePath))
 	if err != nil {
 		log.Printf("warning: pane %s: build claude settings JSON: %v — session-id rotation tracking disabled", paneID, err)
 		return nil, nil
@@ -1631,9 +1629,14 @@ func claudeHookSpawnPrep(quilDir, paneID, hookMode string, userArgs []string) (p
 	if mode == "" {
 		mode = "default"
 	}
+	// QUIL_HOME is passed explicitly (not just inherited) so the hook
+	// subprocess writes to the correct data dir even when the daemon's env
+	// doesn't carry it (production) — the native subcommand resolves it via
+	// config.QuilDir which reads QUIL_HOME.
 	return []string{"--settings", js}, []string{
 		"QUIL_PANE_ID=" + paneID,
 		"QUIL_HOOK_MODE=" + mode,
+		"QUIL_HOME=" + quilDir,
 	}
 }
 

@@ -1,140 +1,29 @@
 package claudehook
 
 import (
-	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
 
-func TestEnsureScripts_WritesBothVariants(t *testing.T) {
+// TestHookCommand_InvokesNativeSubcommand pins the native hook command shape:
+// the running quild binary is double-quoted (so paths with spaces survive the
+// shell Claude runs the command in) and followed by the claude-hook
+// subcommand.
+func TestHookCommand_InvokesNativeSubcommand(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
-	if err := EnsureScripts(dir); err != nil {
-		t.Fatalf("EnsureScripts: %v", err)
+	exe := `C:\Program Files\quil\quild.exe`
+	cmd := HookCommand(exe)
+	if !strings.Contains(cmd, exe) {
+		t.Errorf("HookCommand %q missing exe path %q", cmd, exe)
 	}
-	hookDir := filepath.Join(dir, "claudehook")
-	for _, name := range []string{unixScriptName, windowsScriptName} {
-		p := filepath.Join(hookDir, name)
-		info, err := os.Stat(p)
-		if err != nil {
-			t.Fatalf("missing %s: %v", p, err)
-		}
-		if info.Size() == 0 {
-			t.Errorf("%s is empty", p)
-		}
+	if !strings.HasSuffix(cmd, " claude-hook") {
+		t.Errorf("HookCommand %q must end with the claude-hook subcommand", cmd)
 	}
-}
-
-// TestEnsureScripts_WindowsScriptHasUTF8BOM guards the encoding fix for the
-// PowerShell 5.1 hook. Without a UTF-8 BOM, powershell.exe decodes the .ps1
-// with the system ANSI codepage and the ✓/… glyphs in notification titles
-// mis-decode — a byte landing on the 0x91-0x94 curly-quote range terminates a
-// string literal and the whole script fails to parse (observed in the wild as
-// "Stop hook error ... Unexpected token"). The .sh twin must stay BOM-free or
-// sh tries to execute the BOM as a command.
-func TestEnsureScripts_WindowsScriptHasUTF8BOM(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	if err := EnsureScripts(dir); err != nil {
-		t.Fatalf("EnsureScripts: %v", err)
-	}
-	hookDir := filepath.Join(dir, "claudehook")
-
-	ps1, err := os.ReadFile(filepath.Join(hookDir, windowsScriptName))
-	if err != nil {
-		t.Fatalf("read ps1: %v", err)
-	}
-	bom := []byte{0xEF, 0xBB, 0xBF}
-	if !bytes.HasPrefix(ps1, bom) {
-		t.Errorf("%s missing UTF-8 BOM prefix; first bytes = % x", windowsScriptName, ps1[:min(3, len(ps1))])
-	}
-	// The script must still parse as UTF-8 after the BOM — the bytes
-	// following it should contain the original ✓ glyph intact, not a
-	// double-encoded BOM or mangled content.
-	if !bytes.Contains(ps1, []byte("✓")) {
-		t.Errorf("%s missing the ✓ glyph after BOM — content may be corrupted", windowsScriptName)
-	}
-
-	sh, err := os.ReadFile(filepath.Join(hookDir, unixScriptName))
-	if err != nil {
-		t.Fatalf("read sh: %v", err)
-	}
-	if bytes.HasPrefix(sh, bom) {
-		t.Errorf("%s must NOT have a UTF-8 BOM — sh would try to execute it", unixScriptName)
-	}
-}
-
-func TestEnsureScripts_Idempotent(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	if err := EnsureScripts(dir); err != nil {
-		t.Fatalf("first call: %v", err)
-	}
-	if err := EnsureScripts(dir); err != nil {
-		t.Fatalf("second call: %v", err)
-	}
-}
-
-func TestEnsureScripts_EmptyDir(t *testing.T) {
-	t.Parallel()
-	if err := EnsureScripts(""); err == nil {
-		t.Fatal("expected error for empty quilDir")
-	}
-}
-
-func TestEnsureScripts_RejectsShellUnsafePath(t *testing.T) {
-	t.Parallel()
-	for _, p := range []string{
-		`/tmp/has"quote/quil`,
-		"/tmp/has`backtick/quil",
-		"/tmp/has\nnewline/quil",
-		"/tmp/has$dollar/quil",
-	} {
-		if err := EnsureScripts(p); err == nil {
-			t.Errorf("EnsureScripts(%q) returned nil, expected rejection", p)
-		}
-	}
-}
-
-func TestValidateQuilDir_AcceptsCommonPaths(t *testing.T) {
-	t.Parallel()
-	for _, p := range []string{
-		"/home/user/.quil",
-		`E:\Projects\Stukans\Prototypes\calyx\.quil`,
-		`C:\Users\artjo\.quil`,
-		"/tmp/quil with spaces",
-	} {
-		if err := ValidateQuilDir(p); err != nil {
-			t.Errorf("ValidateQuilDir(%q) = %v, want nil", p, err)
-		}
-	}
-}
-
-func TestScriptPath_PlatformMatchesBinary(t *testing.T) {
-	t.Parallel()
-	p := ScriptPath("/tmp/quil")
-	want := unixScriptName
-	if runtime.GOOS == "windows" {
-		want = windowsScriptName
-	}
-	if filepath.Base(p) != want {
-		t.Errorf("ScriptPath base = %q, want %q", filepath.Base(p), want)
-	}
-}
-
-func TestHookCommand_ContainsScriptPath(t *testing.T) {
-	t.Parallel()
-	quilDir := filepath.Join("C:", "quil-home")
-	if runtime.GOOS != "windows" {
-		quilDir = "/tmp/quil-home"
-	}
-	cmd := HookCommand(quilDir)
-	if !strings.Contains(cmd, ScriptPath(quilDir)) {
-		t.Errorf("HookCommand %q missing ScriptPath %q", cmd, ScriptPath(quilDir))
+	if !strings.HasPrefix(cmd, `"`) {
+		t.Errorf("HookCommand %q must double-quote the exe path for spaces", cmd)
 	}
 }
 

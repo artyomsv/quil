@@ -483,51 +483,56 @@ func TestResolveSpawnArgs_ClaudeHookSessionID(t *testing.T) {
 }
 
 // TestClaudeHookSpawnPrep covers the fresh-spawn injection helper. It must
-// (a) emit --settings + QUIL_PANE_ID env when the hook script is present,
-// (b) silently skip both when the script is missing so the spawn proceeds
-// like the pre-feature daemon, and (c) warn (not error) when --settings is
-// already in the user's args because Claude treats later-wins.
+// (a) emit --settings + QUIL_PANE_ID/QUIL_HOOK_MODE/QUIL_HOME env when the
+// quild executable resolves, (b) silently skip both when the executable cannot
+// be resolved so the spawn proceeds like the pre-feature daemon, and (c) warn
+// (not error) when --settings is already in the user's args (Claude later-wins).
 func TestClaudeHookSpawnPrep(t *testing.T) {
 	tests := []struct {
-		name        string
-		statErr     error
-		userArgs    []string
-		paneID      string
-		wantPrefix  bool
-		wantEnvVar  string
+		name       string
+		exeErr     error
+		userArgs   []string
+		paneID     string
+		wantPrefix bool
+		wantEnvVar bool
 	}{
 		{
-			name:       "script present — injects --settings + env",
-			statErr:    nil,
+			name:       "exe resolves — injects --settings + env",
+			exeErr:     nil,
 			userArgs:   []string{"--enable-auto-mode"},
 			paneID:     "pane-abc",
 			wantPrefix: true,
-			wantEnvVar: "QUIL_PANE_ID=pane-abc",
+			wantEnvVar: true,
 		},
 		{
-			name:       "script missing — no injection, no env",
-			statErr:    os.ErrNotExist,
+			name:       "exe unresolvable — no injection, no env",
+			exeErr:     os.ErrNotExist,
 			userArgs:   []string{"--enable-auto-mode"},
 			paneID:     "pane-abc",
 			wantPrefix: false,
-			wantEnvVar: "",
+			wantEnvVar: false,
 		},
 		{
 			name:       "user already passed --settings — still injects (later-wins warning logged)",
-			statErr:    nil,
+			exeErr:     nil,
 			userArgs:   []string{"--settings", `{"foo":"bar"}`, "--enable-auto-mode"},
 			paneID:     "pane-abc",
 			wantPrefix: true,
-			wantEnvVar: "QUIL_PANE_ID=pane-abc",
+			wantEnvVar: true,
 		},
 	}
 
-	origStat := claudeHookScriptStatFn
-	t.Cleanup(func() { claudeHookScriptStatFn = origStat })
+	origExe := claudeHookExeFn
+	t.Cleanup(func() { claudeHookExeFn = origExe })
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			claudeHookScriptStatFn = func(string) error { return tt.statErr }
+			claudeHookExeFn = func() (string, error) {
+				if tt.exeErr != nil {
+					return "", tt.exeErr
+				}
+				return "/opt/quil/quild", nil
+			}
 			prefix, env := claudeHookSpawnPrep("/tmp/quil", tt.paneID, "default", tt.userArgs)
 			if tt.wantPrefix {
 				if len(prefix) != 2 || prefix[0] != "--settings" {
@@ -536,28 +541,31 @@ func TestClaudeHookSpawnPrep(t *testing.T) {
 				if !strings.Contains(prefix[1], `"SessionStart"`) {
 					t.Errorf("prefix[1] missing SessionStart key: %s", prefix[1])
 				}
-			} else {
-				if prefix != nil {
-					t.Errorf("prefix = %v, want nil", prefix)
+				if !strings.Contains(prefix[1], "claude-hook") {
+					t.Errorf("prefix[1] missing native claude-hook command: %s", prefix[1])
 				}
+			} else if prefix != nil {
+				t.Errorf("prefix = %v, want nil", prefix)
 			}
-			if tt.wantEnvVar == "" {
+			if !tt.wantEnvVar {
 				if env != nil {
 					t.Errorf("env = %v, want nil", env)
 				}
 			} else {
-				// Phase D: claudeHookSpawnPrep now returns QUIL_PANE_ID
-				// AND QUIL_HOOK_MODE so the hook script can branch on
-				// "default" / "verbose" / "off". The pane-id var is at
-				// index 0 (unchanged); the new hook-mode var is at 1.
-				if len(env) != 2 {
-					t.Errorf("env = %v, want 2 entries (pane id + hook mode)", env)
+				// claudeHookSpawnPrep returns QUIL_PANE_ID, QUIL_HOOK_MODE,
+				// and QUIL_HOME so the native subcommand resolves its data dir
+				// and tier independent of the daemon's inherited environment.
+				if len(env) != 3 {
+					t.Fatalf("env = %v, want 3 entries (pane id + hook mode + quil home)", env)
 				}
-				if env[0] != tt.wantEnvVar {
-					t.Errorf("env[0] = %q, want %q", env[0], tt.wantEnvVar)
+				if env[0] != "QUIL_PANE_ID="+tt.paneID {
+					t.Errorf("env[0] = %q, want QUIL_PANE_ID=%s", env[0], tt.paneID)
 				}
-				if len(env) > 1 && env[1] != "QUIL_HOOK_MODE=default" {
+				if env[1] != "QUIL_HOOK_MODE=default" {
 					t.Errorf("env[1] = %q, want QUIL_HOOK_MODE=default", env[1])
+				}
+				if env[2] != "QUIL_HOME=/tmp/quil" {
+					t.Errorf("env[2] = %q, want QUIL_HOME=/tmp/quil", env[2])
 				}
 			}
 		})

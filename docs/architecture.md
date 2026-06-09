@@ -545,7 +545,9 @@ Each init script sources the user's original shell config first, then appends th
 - Must survive both daemon restarts and Claude itself restarting between sessions
 - The hook runs from Claude's own context, not Quil's — so it has to communicate back via the filesystem, not over IPC
 
-**Implementation:**
+**Update (2026-06):** the embedded `sh`/`ps1` hook scripts were replaced by a native `quild claude-hook` subcommand (`internal/claudehook/runhook.go` + `cmd/quild`). The daemon registers `"<quild>" claude-hook` as the hook command (via `os.Executable`), and the subcommand reads the hook JSON on stdin and writes the session file / spool line natively. This removed the per-event shell cold-start latency (Windows PowerShell 5.1 was ~1–4 s) and the hand-rolled JSON escaping (now `encoding/json`), which had caused a UTF-8 BOM/codepage bug class. `EnsureScripts`/`ScriptPath`/`ValidateQuilDir` no longer exist; the script-existence guard became an `os.Executable` resolution. The original script-based design below is retained for historical context.
+
+**Implementation (original, script-based — superseded; see Update above):**
 
 - New `internal/claudehook/` package with embedded scripts in `scripts/` (sh + ps1) — `//go:embed` makes them part of the binary so there is nothing to install separately
 - `claudehook.EnsureScripts()` writes the scripts to `$QUIL_HOME/claudehook/` atomically (`os.CreateTemp` + `os.Rename`) at daemon startup. Writes are owner-only (`0o700`/`0o600`)

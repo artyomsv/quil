@@ -216,6 +216,7 @@ type PaneStatusReqPayload struct {
 type PaneStatusRespPayload struct {
 	PaneID   string `json:"pane_id"`
 	Running  bool   `json:"running"`
+	Pending  bool   `json:"pending,omitempty"`
 	ExitCode *int   `json:"exit_code,omitempty"`
 	Type     string `json:"type"`
 	CWD      string `json:"cwd"`

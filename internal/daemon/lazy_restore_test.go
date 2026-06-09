@@ -168,13 +168,13 @@ func TestEnsurePaneSpawned_ConcurrentSpawnsOnce(t *testing.T) {
 
 func TestListPanes_DeferredPaneReportsNotRunning(t *testing.T) {
 	d := newTestDaemon(t)
-	d.session.RestoreTab(&Tab{ID: "tab-0000000d", Name: "D", Panes: []string{"pane-0000000d"}}, []*Pane{
-		{ID: "pane-0000000d", TabID: "tab-0000000d", Type: "terminal", Pending: true},
+	d.session.RestoreTab(&Tab{ID: "tab-0000000f", Name: "F", Panes: []string{"pane-0000000f"}}, []*Pane{
+		{ID: "pane-0000000f", TabID: "tab-0000000f", Type: "terminal", Pending: true},
 	})
 	infos := d.buildPaneInfos()
 	var found bool
 	for _, pi := range infos {
-		if pi.ID == "pane-0000000d" {
+		if pi.ID == "pane-0000000f" {
 			found = true
 			if pi.Running {
 				t.Errorf("deferred pane should report Running=false")

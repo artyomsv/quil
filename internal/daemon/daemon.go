@@ -2575,14 +2575,23 @@ func (d *Daemon) handlePaneStatusReq(conn *ipc.Conn, msg *ipc.Message) {
 		typ = "terminal"
 	}
 
+	// Match buildPaneInfos: a deferred pane (PTY==nil) reports Running=false even
+	// though ExitCode is nil, so get_pane_status and list_panes agree. Read
+	// ExitCode/PTY under PluginMu, Pending under spawnMu — separate critical
+	// sections, never both held at once (best-effort snapshot, no lock-ordering
+	// hazard). This handler stays non-spawning by design.
 	pane.PluginMu.Lock()
 	exitCode := pane.ExitCode
-	running := exitCode == nil
+	running := pane.PTY != nil && exitCode == nil
 	pane.PluginMu.Unlock()
+	pane.spawnMu.Lock()
+	pending := pane.Pending
+	pane.spawnMu.Unlock()
 
 	respondTo(conn, msg.ID, ipc.MsgPaneStatusResp, ipc.PaneStatusRespPayload{
 		PaneID:   pane.ID,
 		Running:  running,
+		Pending:  pending,
 		ExitCode: exitCode,
 		Type:     typ,
 		CWD:      pane.CWD,

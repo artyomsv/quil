@@ -1,6 +1,7 @@
 package claudehook
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -25,6 +26,45 @@ func TestEnsureScripts_WritesBothVariants(t *testing.T) {
 		if info.Size() == 0 {
 			t.Errorf("%s is empty", p)
 		}
+	}
+}
+
+// TestEnsureScripts_WindowsScriptHasUTF8BOM guards the encoding fix for the
+// PowerShell 5.1 hook. Without a UTF-8 BOM, powershell.exe decodes the .ps1
+// with the system ANSI codepage and the ✓/… glyphs in notification titles
+// mis-decode — a byte landing on the 0x91-0x94 curly-quote range terminates a
+// string literal and the whole script fails to parse (observed in the wild as
+// "Stop hook error ... Unexpected token"). The .sh twin must stay BOM-free or
+// sh tries to execute the BOM as a command.
+func TestEnsureScripts_WindowsScriptHasUTF8BOM(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if err := EnsureScripts(dir); err != nil {
+		t.Fatalf("EnsureScripts: %v", err)
+	}
+	hookDir := filepath.Join(dir, "claudehook")
+
+	ps1, err := os.ReadFile(filepath.Join(hookDir, windowsScriptName))
+	if err != nil {
+		t.Fatalf("read ps1: %v", err)
+	}
+	bom := []byte{0xEF, 0xBB, 0xBF}
+	if !bytes.HasPrefix(ps1, bom) {
+		t.Errorf("%s missing UTF-8 BOM prefix; first bytes = % x", windowsScriptName, ps1[:min(3, len(ps1))])
+	}
+	// The script must still parse as UTF-8 after the BOM — the bytes
+	// following it should contain the original ✓ glyph intact, not a
+	// double-encoded BOM or mangled content.
+	if !bytes.Contains(ps1, []byte("✓")) {
+		t.Errorf("%s missing the ✓ glyph after BOM — content may be corrupted", windowsScriptName)
+	}
+
+	sh, err := os.ReadFile(filepath.Join(hookDir, unixScriptName))
+	if err != nil {
+		t.Fatalf("read sh: %v", err)
+	}
+	if bytes.HasPrefix(sh, bom) {
+		t.Errorf("%s must NOT have a UTF-8 BOM — sh would try to execute it", unixScriptName)
 	}
 }
 

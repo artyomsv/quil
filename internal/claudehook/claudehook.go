@@ -85,12 +85,27 @@ func EnsureScripts(quilDir string) error {
 		if err != nil {
 			return fmt.Errorf("read embedded %s: %w", src, err)
 		}
+		// Windows PowerShell 5.1 (powershell.exe, the host HookCommand
+		// invokes) decodes a BOM-less .ps1 with the system ANSI codepage,
+		// not UTF-8. A multibyte glyph in the script (e.g. the ✓/… used in
+		// notification titles) then mis-decodes; bytes that land on the
+		// 0x91-0x94 curly-quote range terminate a string literal mid-line
+		// and the whole script fails to parse. Prepending a UTF-8 BOM is
+		// the documented switch that makes PS 5.1 read it as UTF-8. The .sh
+		// twin must NOT get a BOM — sh would try to execute it as a command.
+		if src == "scripts/"+windowsScriptName {
+			data = append([]byte(utf8BOM), data...)
+		}
 		if err := atomicWrite(dst, data, 0700); err != nil {
 			return fmt.Errorf("write %s: %w", dst, err)
 		}
 	}
 	return nil
 }
+
+// utf8BOM is the UTF-8 byte-order mark. Prefixing the Windows hook script
+// with it forces Windows PowerShell 5.1 to decode the file as UTF-8.
+const utf8BOM = "\xef\xbb\xbf"
 
 // atomicWrite writes data to path via a temp file in the same directory and a
 // rename. Removes the temp on any error so we never leak a half-written file.

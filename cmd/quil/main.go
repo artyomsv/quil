@@ -228,15 +228,14 @@ func launchTUI() {
 	if logDir != "" {
 		os.MkdirAll(logDir, 0700)
 	}
-	logPath := filepath.Join(logDir, "quil.log")
 	logLevel := cfg.Logging.Level
 	if buildLogLevel != "" {
 		logLevel = buildLogLevel
 	}
-	logFile, err := os.OpenFile(logPath, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o600)
-	if err == nil && logFile != nil {
-		logger.Init(logLevel, logFile)
-		defer logFile.Close()
+	logWriter, err := logger.NewRotatingWriter(logDir, "quil.log", int64(cfg.Logging.MaxSizeMB)<<20, cfg.Logging.MaxFiles)
+	if err == nil && logWriter != nil {
+		logger.Init(logLevel, logWriter)
+		defer logWriter.Close()
 	}
 
 	// Panic recovery — write to log before crashing

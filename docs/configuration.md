@@ -37,8 +37,8 @@ dimmed = true
 
 [logging]
 level = "info"            # debug, info, warn, error
-max_size_mb = 10
-max_files = 3
+max_size_mb = 5           # rotate quild.log / quil.log when file exceeds this size (MB)
+max_files = 10            # number of timestamped rotation archives to keep
 
 [ui]
 tab_dock = "top"
@@ -82,6 +82,7 @@ focus_pane = "ctrl+e"
 notification_toggle = "alt+n"   # show / focus / hide the notification sidebar
 notification_focus = "f3"       # jump focus to the sidebar (alt path when alt+n misbehaves)
 mute_pane = "alt+m"             # toggle notification mute for the active pane
+toggle_eager = "alt+shift+e"    # toggle eager restore; eager panes respawn on restart, others load lazily
 go_back = "alt+backspace"       # pane history back (after jumping via sidebar Enter)
 notes_toggle = "alt+e"          # toggle pane notes editor
 redraw = "alt+shift+l"          # force full screen repaint (clears rendering artifacts)
@@ -103,13 +104,15 @@ The "ghost buffer" is the rendered preview Quil shows immediately on reconnect, 
 | `max_lines` | int | `500` | Lines per pane retained in the on-disk ghost buffer (`~/.quil/buffers/<pane-id>.buf`). Larger = better restore fidelity, more disk. |
 | `dimmed` | bool | `true` | While the pane is showing ghost (not yet receiving live output), render the border muted with a `restored` label. First live output clears the flag. |
 
+**Lazy restore:** On daemon restart only the active tab's panes spawn immediately. Panes in other tabs are deferred — their workspace model and ghost buffer history are available at once, but the child process is not started until the tab is first opened. Mark a pane as "eager" (`Alt+Shift+E`, config key `toggle_eager`) to force it to spawn immediately regardless of which tab is active. Eager panes are marked with `●` on the tab label.
+
 ## `[logging]`
 
 | Key | Type | Default | What it does |
 |---|---|---|---|
 | `level` | string | `"info"` | One of `debug`, `info`, `warn`, `error`. `debug` traces clipboard pipeline, per-key handlers, image-paste decoding, MCP IPC. Apply-on-next-launch only. |
-| `max_size_mb` | int | `10` | Per-file rotation threshold for `quil.log` and `quild.log`. |
-| `max_files` | int | `3` | How many rotated log files to retain. |
+| `max_size_mb` | int | `5` | Per-file rotation threshold. When `quil.log` or `quild.log` would exceed this size the file is rotated to a timestamped archive (`stem-YYYYMMDD-HHMMSS.log`) and a fresh base file is opened. |
+| `max_files` | int | `10` | How many timestamped rotation archives to keep per log file. Older archives are pruned by modification time. |
 
 ## `[ui]`
 
@@ -178,6 +181,7 @@ Multiple modifiers stack with `+` (no spaces). Mouse buttons are not bindable he
 | `notification_toggle` | `alt+n` | Cycle the notification sidebar: hidden → visible → visible+focused → hidden |
 | `notification_focus` | `f3` | Jump focus to the sidebar (alt path when `alt+n` is intercepted by the terminal) |
 | `mute_pane` | `alt+m` | Toggle notification mute on the active pane. Muted panes show `[muted]` on their border and never fire idle / bell / process-exit / hook events. Persisted in `workspace.json` so mute survives daemon restart. |
+| `toggle_eager` | `alt+shift+e` | Toggle eager restore on the active pane. Eager panes respawn immediately on daemon restart; other panes load lazily (process started only when the tab is first opened). Tabs with an eager pane show `●` in the tab bar. Persisted in `workspace.json`. |
 | `go_back` | `alt+backspace` | Pane history back — return to the pane you were on before the sidebar's `Enter` jump |
 | `notes_toggle` | `alt+e` | Open / close the per-pane notes editor |
 | `redraw` | `alt+shift+l` | Force a full screen repaint — clears rendering artifacts (scrambled or misplaced characters) without restarting the TUI |

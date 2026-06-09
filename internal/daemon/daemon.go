@@ -704,7 +704,7 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 	case ipc.MsgSetActivePane:
 		d.handleSetActivePane(conn, msg)
 	case ipc.MsgCloseTUI:
-		d.server.Broadcast(msg)
+		d.broadcast(msg)
 
 	// Notification center
 	case ipc.MsgDismissEvent:
@@ -1316,7 +1316,7 @@ func (d *Daemon) flushPaneOutput(paneID string, data []byte) {
 		PaneID: paneID,
 		Data:   data,
 	})
-	d.server.Broadcast(msg)
+	d.broadcast(msg)
 }
 
 // detectBellEvent checks for standalone bell characters (not OSC terminators).
@@ -1395,7 +1395,17 @@ func (d *Daemon) applyPluginHandlers(pane *Pane, paneID string, data []byte) {
 			Title:   eh.Title,
 			Message: message,
 		})
-		d.server.Broadcast(errMsg)
+		d.broadcast(errMsg)
+	}
+}
+
+// broadcast sends a message to all connected clients, tolerating a nil server.
+// d.server is nil during the early-startup window (respawnPanes runs before the
+// IPC server is created), and a restored pane's streamPTYOutput goroutine can
+// fire a broadcast in that window — so every broadcast site must nil-check.
+func (d *Daemon) broadcast(msg *ipc.Message) {
+	if d.server != nil {
+		d.server.Broadcast(msg)
 	}
 }
 
@@ -1405,7 +1415,7 @@ func (d *Daemon) broadcastState() {
 	}
 	state := d.buildWorkspaceState()
 	resp, _ := ipc.NewMessage(ipc.MsgWorkspaceState, state)
-	d.server.Broadcast(resp)
+	d.broadcast(resp)
 }
 
 func (d *Daemon) buildWorkspaceState() map[string]any {
@@ -1932,7 +1942,7 @@ func (d *Daemon) highlightPane(paneID string) {
 	msg, _ := ipc.NewMessage(ipc.MsgHighlightPane, ipc.HighlightPanePayload{
 		PaneID: paneID,
 	})
-	d.server.Broadcast(msg)
+	d.broadcast(msg)
 }
 
 // respondToAndHighlight sends a response and broadcasts a highlight for the pane.
@@ -1969,9 +1979,7 @@ func (d *Daemon) emitEvent(e PaneEvent) {
 	d.events.Push(e)
 	payload := toPaneEventPayload(e)
 	msg, _ := ipc.NewMessage(ipc.MsgPaneEvent, payload)
-	if d.server != nil {
-		d.server.Broadcast(msg)
-	}
+	d.broadcast(msg)
 }
 
 // idleChecker runs a periodic check for panes that have gone idle.
@@ -2915,7 +2923,7 @@ func (d *Daemon) handleSetActivePane(conn *ipc.Conn, msg *ipc.Message) {
 	broadcast, _ := ipc.NewMessage(ipc.MsgSetActivePane, ipc.SetActivePanePayload{
 		PaneID: req.PaneID,
 	})
-	d.server.Broadcast(broadcast)
+	d.broadcast(broadcast)
 
 	d.broadcastState()
 	d.requestSnapshot()

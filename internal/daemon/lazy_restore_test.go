@@ -254,3 +254,22 @@ func TestListPanes_DeferredPaneReportsNotRunning(t *testing.T) {
 		t.Fatalf("deferred pane missing from list")
 	}
 }
+
+// TestBroadcast_NilServerDoesNotPanic guards against the panic window where
+// respawnPanes (called before d.server is assigned in Start) spawns panes whose
+// streamPTYOutput goroutines may call flushPaneOutput → broadcast before the
+// IPC server exists. A nil d.server must be silently ignored.
+func TestBroadcast_NilServerDoesNotPanic(t *testing.T) {
+	d := newTestDaemon(t)
+	// newTestDaemon calls New() but never Start(), so d.server is nil — this is
+	// exactly the window the bug occurs in. Verify and document that assumption.
+	if d.server != nil {
+		t.Skip("d.server unexpectedly non-nil after New(); test precondition not met")
+	}
+	msg, err := ipc.NewMessage(ipc.MsgPaneOutput, ipc.PaneOutputPayload{PaneID: "pane-1", Data: []byte("x")})
+	if err != nil {
+		t.Fatalf("build msg: %v", err)
+	}
+	// Must not panic.
+	d.broadcast(msg)
+}

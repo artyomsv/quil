@@ -37,17 +37,10 @@ func TestSendLoop_ExitsOnWriteError(t *testing.T) {
 	}
 
 	// Give sendLoop a moment to consume the frame, attempt the write, and
-	// exit on the resulting error.
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		// sendLoop exits when raw.Write errors. After that, our explicit
-		// Close completes cleanly via sync.Once. Check the closed flag —
-		// it's set by Close, so we need to call Close to confirm cleanup.
-		if c.overflow.Load() {
-			break // not the path under test; bail
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	// exit on the resulting error. overflow is never set on this path
+	// (write-error exit is distinct from critical-overflow exit), so we
+	// simply wait a fixed interval for sendLoop to drain and terminate.
+	time.Sleep(100 * time.Millisecond)
 
 	// Explicitly close to release the local pipe half. After Close + a brief
 	// settle, the goroutine count should match baseline (the sendLoop has

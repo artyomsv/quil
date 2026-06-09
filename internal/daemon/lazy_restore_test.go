@@ -1,13 +1,16 @@
 package daemon
 
 import (
+	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
 
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
+	"github.com/artyomsv/quil/internal/persist"
 	apty "github.com/artyomsv/quil/internal/pty"
+	"github.com/artyomsv/quil/internal/ringbuf"
 )
 
 // callUpdatePaneEager drives handleUpdatePane with just the Eager field set.
@@ -163,6 +166,36 @@ func TestEnsurePaneSpawned_ConcurrentSpawnsOnce(t *testing.T) {
 	pane.spawnMu.Unlock()
 	if pending {
 		t.Errorf("Pending should be cleared after spawn")
+	}
+}
+
+func TestSnapshot_PreservesDeferredPaneGhost(t *testing.T) {
+	d := newTestDaemon(t)
+
+	bufDir := config.BufferDir()
+	if err := os.MkdirAll(bufDir, 0o700); err != nil {
+		t.Fatalf("mkdir bufdir: %v", err)
+	}
+	ghost := []byte("important scrollback history\n")
+	if err := persist.SaveBuffer(bufDir, "pane-0000000f", ghost); err != nil {
+		t.Fatalf("seed ghost: %v", err)
+	}
+
+	pane := &Pane{
+		ID: "pane-0000000f", TabID: "tab-0000000f", Type: "terminal", Pending: true,
+		OutputBuf: ringbuf.NewRingBuffer(d.session.bufSize),
+	}
+	pane.OutputBuf.Write(ghost) // restore pre-fills OutputBuf from the ghost — replicate that
+	d.session.RestoreTab(&Tab{ID: "tab-0000000f", Name: "F", Panes: []string{"pane-0000000f"}}, []*Pane{pane})
+
+	d.snapshot()
+
+	got, err := persist.LoadBuffer(bufDir, "pane-0000000f")
+	if err != nil {
+		t.Fatalf("load ghost after snapshot: %v", err)
+	}
+	if string(got) != string(ghost) {
+		t.Errorf("deferred pane ghost clobbered by snapshot: got %q want %q", got, ghost)
 	}
 }
 

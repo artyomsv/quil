@@ -232,10 +232,12 @@ func launchTUI() {
 	if buildLogLevel != "" {
 		logLevel = buildLogLevel
 	}
-	logWriter, err := logger.NewRotatingWriter(logDir, "quil.log", int64(cfg.Logging.MaxSizeMB)<<20, cfg.Logging.MaxFiles)
-	if err == nil && logWriter != nil {
-		logger.Init(logLevel, logWriter)
-		defer logWriter.Close()
+	if logDir != "" {
+		logWriter, err := logger.NewRotatingWriter(logDir, "quil.log", int64(cfg.Logging.MaxSizeMB)<<20, cfg.Logging.MaxFiles)
+		if err == nil && logWriter != nil {
+			logger.Init(logLevel, logWriter)
+			defer logWriter.Close()
+		}
 	}
 
 	// Panic recovery — write to log before crashing

@@ -13,14 +13,19 @@ import (
 	"github.com/artyomsv/quil/internal/logger"
 )
 
-// sendBufSize is the per-connection queue depth. A wedged or slow client can
-// build up at most this many in-flight frames before the server marks the
-// connection as overflowed and tears it down — guaranteeing that one bad
-// client cannot block the daemon's broadcast loop and starve healthy peers.
+// sendBufSize is the depth of EACH of a connection's two send queues (critical
+// and droppable). A wedged or slow client can build up at most this many
+// in-flight frames per queue. The critical queue (state, responses, ghost
+// replay, lifecycle) overflowing tears the connection down — guaranteeing that
+// one bad client cannot block the daemon's broadcast loop and starve healthy
+// peers. The droppable queue (live PTY output) overflowing drops the frame
+// instead (cosmetic — superseded by the next output frame), so a busy-but-alive
+// client is never disconnected by an output storm.
 //
 // 64 frames is comfortably more than any healthy client lags by (a TUI's
 // Bubble Tea event loop typically drains everything in <50 ms) and small
-// enough that an overflowed conn is detected within a few milliseconds.
+// enough that an overflowed critical queue is detected within a few
+// milliseconds.
 const sendBufSize = 64
 
 // writeDeadline bounds how long a single raw.Write may block inside sendLoop
@@ -41,26 +46,35 @@ type MessageHandler func(conn *Conn, msg *Message)
 
 // Conn wraps a net.Conn with message framing.
 //
-// Sends are non-blocking: each Conn owns a 64-slot queue and a dedicated
-// goroutine that drains the queue into the underlying socket. A slow or
-// wedged peer drains its own queue; if the queue overflows, the offending
-// conn is closed in the background and Send returns ErrSendOverflow. Other
-// connections are never affected by one client's slowness — closing the
-// wedge-incident class where a single stuck TUI or MCP bridge stalled the
-// daemon's broadcast for every other client.
+// Sends are non-blocking: each Conn owns TWO 64-slot queues and a dedicated
+// goroutine that drains them into the underlying socket. The critical queue
+// carries must-deliver frames (state, responses, ghost replay, lifecycle); the
+// droppable queue carries live PTY output broadcasts. The send loop drains
+// critical first (priority) so an output flood can never starve state. A slow
+// or wedged peer drains its own queues; if the CRITICAL queue overflows the
+// offending conn is closed in the background and Send returns ErrSendOverflow.
+// If the DROPPABLE queue overflows the frame is dropped (cosmetic — the next
+// output frame supersedes it) and the conn survives. Other connections are
+// never affected by one client's slowness — closing the wedge-incident class
+// where a single stuck TUI or MCP bridge stalled the daemon's broadcast for
+// every other client, AND the busy-but-alive class where an output storm
+// force-closed a TUI mid-restore.
 type Conn struct {
 	raw       net.Conn
-	sendCh    chan []byte
+	critCh    chan []byte // must-deliver: state, responses, ghost replay, lifecycle
+	outCh     chan []byte // droppable: live PaneOutput broadcast frames
 	done      chan struct{}
 	closeOnce sync.Once
 	closed    atomic.Bool
 	overflow  atomic.Bool
+	dropped   atomic.Uint64
 }
 
 func newConn(raw net.Conn) *Conn {
 	c := &Conn{
 		raw:    raw,
-		sendCh: make(chan []byte, sendBufSize),
+		critCh: make(chan []byte, sendBufSize),
+		outCh:  make(chan []byte, sendBufSize),
 		done:   make(chan struct{}),
 	}
 	go c.sendLoop()
@@ -90,54 +104,98 @@ func (c *Conn) Send(msg *Message) error {
 	return c.sendFrame(buf.Bytes())
 }
 
-// sendFrame queues a pre-encoded wire frame. Used by Broadcast to share one
-// marshal allocation across N conns. The frame []byte is read-only — both
-// sendFrame and sendLoop only read it, never mutate it.
+// sendFrame queues a must-deliver frame. Retained for Send and the existing
+// tests that exercise the critical-overflow → close path. It is a thin wrapper
+// over enqueue with droppable=false.
 //
-// The closed/overflow check here is the race-safe gate that sits next to the
-// channel send — necessary because Send's outer check is only a fast-path
+// The closed/overflow check inside enqueue is the race-safe gate that sits next
+// to the channel send — necessary because Send's outer check is only a fast-path
 // optimization (avoids JSON marshal). A future "cleanup" that drops either
 // check would either reintroduce the marshal cost for dead conns or open a
 // race where overflow flips between check and send.
 func (c *Conn) sendFrame(frame []byte) error {
+	return c.enqueue(frame, false)
+}
+
+// enqueue queues a pre-encoded frame. The frame []byte is read-only — both
+// enqueue and sendLoop only read it, never mutate it.
+//
+// Droppable frames (live PTY output) are dropped silently when the output queue
+// is full — a busy client sheds cosmetic output (the next frame supersedes it)
+// instead of being disconnected. Critical frames use the bounded critical
+// queue; if THAT overflows the peer cannot drain 64 low-volume frames and is
+// genuinely wedged, so it is closed (the original slow-client defense, now
+// scoped to critical traffic only).
+func (c *Conn) enqueue(frame []byte, droppable bool) error {
 	if c.closed.Load() || c.overflow.Load() {
 		return ErrSendOverflow
 	}
+	if droppable {
+		select {
+		case c.outCh <- frame:
+		default:
+			n := c.dropped.Add(1)
+			logger.Debug("ipc: dropped output frame (slow client, total=%d)", n)
+		}
+		return nil
+	}
 	select {
-	case c.sendCh <- frame:
+	case c.critCh <- frame:
 		return nil
 	default:
-		// Buffer full — slow client. CAS the overflow flag so only the
-		// first concurrent overflow spawns the Close goroutine and emits
+		// Critical buffer full — slow client. CAS the overflow flag so only
+		// the first concurrent overflow spawns the Close goroutine and emits
 		// the log line; all subsequent failed sends short-circuit silently.
 		// Without the CAS, a wedged peer would log once per broadcast and
-		// spawn N redundant Close goroutines (each no-ops via closeOnce
-		// but still pays goroutine spawn cost).
+		// spawn N redundant Close goroutines (each no-ops via closeOnce but
+		// still pays goroutine spawn cost).
 		if c.overflow.CompareAndSwap(false, true) {
-			logger.Warn("ipc: dropping slow client (send buffer overflow)")
+			logger.Warn("ipc: dropping slow client (critical send buffer overflow)")
 			go c.Close()
 		}
 		return ErrSendOverflow
 	}
 }
 
+// sendLoop drains the two queues, draining critical first so an output flood
+// can never starve state/responses.
 func (c *Conn) sendLoop() {
 	for {
+		// Priority: take any pending critical frame before considering output.
 		select {
 		case <-c.done:
 			return
-		case frame := <-c.sendCh:
-			// Bound the per-frame Write to writeDeadline so a peer with a
-			// wedged kernel buffer or stalled connection cannot block this
-			// goroutine indefinitely. Deadline errors are reported the same
-			// way as any other Write failure — sendLoop exits, the read
-			// side detects the matching error and runs handleConn's defer.
-			_ = c.raw.SetWriteDeadline(time.Now().Add(writeDeadline))
-			if _, err := c.raw.Write(frame); err != nil {
+		case frame := <-c.critCh:
+			if !c.write(frame) {
+				return
+			}
+			continue
+		default:
+		}
+		select {
+		case <-c.done:
+			return
+		case frame := <-c.critCh:
+			if !c.write(frame) {
+				return
+			}
+		case frame := <-c.outCh:
+			if !c.write(frame) {
 				return
 			}
 		}
 	}
+}
+
+// write applies the per-frame write deadline and writes. Returns false on any
+// error so sendLoop exits (the read side detects the matching error + runs
+// handleConn's defer cleanup). Bounding each Write to writeDeadline prevents a
+// peer with a wedged kernel buffer or stalled connection from blocking this
+// goroutine indefinitely.
+func (c *Conn) write(frame []byte) bool {
+	_ = c.raw.SetWriteDeadline(time.Now().Add(writeDeadline))
+	_, err := c.raw.Write(frame)
+	return err == nil
 }
 
 func (c *Conn) Receive() (*Message, error) {
@@ -145,10 +203,10 @@ func (c *Conn) Receive() (*Message, error) {
 }
 
 // Close shuts down the conn. Idempotent — safe to call concurrently from any
-// goroutine. Any frames still queued in sendCh at close time are intentionally
-// discarded: by the time Close is called we are either tearing down an
-// overflowed (already broken) peer or shutting down the server entirely, and
-// in both cases delivery guarantees no longer apply.
+// goroutine. Any frames still queued in critCh or outCh at close time are
+// intentionally discarded: by the time Close is called we are either tearing
+// down an overflowed (already broken) peer or shutting down the server
+// entirely, and in both cases delivery guarantees no longer apply.
 func (c *Conn) Close() error {
 	var err error
 	c.closeOnce.Do(func() {
@@ -219,8 +277,11 @@ func (s *Server) ConnCount() int {
 
 // Broadcast sends a message to all connected clients without blocking on any
 // individual conn. Marshals the wire frame once and shares the bytes across
-// all per-conn send queues. A slow or wedged conn is dropped from the fan-out
-// (logged once, per CAS-guarded sendFrame) without affecting the others.
+// all per-conn send queues. Live PTY output (MsgPaneOutput) is enqueued as
+// droppable — a slow conn sheds it without being closed. All other message
+// types are critical: a slow or wedged conn that overflows its critical queue
+// is dropped from the fan-out (logged once, per CAS-guarded enqueue) without
+// affecting the others.
 func (s *Server) Broadcast(msg *Message) {
 	var buf bytes.Buffer
 	if err := WriteMessage(&buf, msg); err != nil {
@@ -248,8 +309,12 @@ func (s *Server) Broadcast(msg *Message) {
 	copy(conns, s.conns)
 	s.mu.Unlock()
 
+	// Live PTY output is droppable: a busy client sheds it (the next frame
+	// supersedes it) rather than being force-closed. Everything else is
+	// must-deliver and routes to the critical queue (overflow → close).
+	droppable := msg.Type == MsgPaneOutput
 	for _, c := range conns {
-		if err := c.sendFrame(frame); err != nil && !errors.Is(err, ErrSendOverflow) {
+		if err := c.enqueue(frame, droppable); err != nil && !errors.Is(err, ErrSendOverflow) {
 			// ErrSendOverflow is already logged at the overflow site (CAS
 			// guarantees exactly one log per conn). Any other error is
 			// genuinely unexpected.

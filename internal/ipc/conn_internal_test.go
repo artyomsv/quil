@@ -121,3 +121,24 @@ func TestConn_SendFrameAfterCloseShortCircuits(t *testing.T) {
 		t.Errorf("Send after Close: got %v, want ErrSendOverflow", err)
 	}
 }
+
+// TestEnqueue_DropsOutputFrameWhenFull verifies a full output queue drops the
+// frame (and does NOT trip overflow/close), while the connection stays usable.
+func TestEnqueue_DropsOutputFrameWhenFull(t *testing.T) {
+	t.Parallel()
+	local, remote := net.Pipe()
+	defer remote.Close()
+	c := newConn(local)
+	defer c.Close()
+
+	// Remote never reads → sendLoop blocks on its first write → outCh fills.
+	for i := 0; i < sendBufSize*3; i++ {
+		_ = c.enqueue([]byte{0, 0, 0, 1, byte('x')}, true)
+	}
+	if c.overflow.Load() {
+		t.Errorf("droppable flood must not set overflow")
+	}
+	if c.closed.Load() {
+		t.Errorf("droppable flood must not close the conn")
+	}
+}

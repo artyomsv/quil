@@ -199,6 +199,39 @@ func TestSnapshot_PreservesDeferredPaneGhost(t *testing.T) {
 	}
 }
 
+func TestSnapshot_PreservesEmptyDeferredPaneGhost(t *testing.T) {
+	d := newTestDaemon(t)
+
+	bufDir := config.BufferDir()
+	if err := os.MkdirAll(bufDir, 0o700); err != nil {
+		t.Fatalf("mkdir bufdir: %v", err)
+	}
+	ghost := []byte("history that must not be deleted\n")
+	if err := persist.SaveBuffer(bufDir, "pane-00000010", ghost); err != nil {
+		t.Fatalf("seed ghost: %v", err)
+	}
+
+	// Deferred pane whose OutputBuf is EMPTY (simulating a future where ghost
+	// loading is lazy / not pre-filled). snapshot() will skip writing it
+	// (len==0 guard); the on-disk ghost must SURVIVE because the pane is still
+	// an active pane id and CleanBuffers must not delete it.
+	pane := &Pane{
+		ID: "pane-00000010", TabID: "tab-00000010", Type: "terminal", Pending: true,
+		OutputBuf: ringbuf.NewRingBuffer(d.session.bufSize),
+	}
+	d.session.RestoreTab(&Tab{ID: "tab-00000010", Name: "G", Panes: []string{"pane-00000010"}}, []*Pane{pane})
+
+	d.snapshot()
+
+	got, err := persist.LoadBuffer(bufDir, "pane-00000010")
+	if err != nil {
+		t.Fatalf("load ghost after snapshot: %v", err)
+	}
+	if string(got) != string(ghost) {
+		t.Errorf("empty-OutputBuf deferred pane ghost lost on snapshot: got %q want %q", got, ghost)
+	}
+}
+
 func TestListPanes_DeferredPaneReportsNotRunning(t *testing.T) {
 	d := newTestDaemon(t)
 	d.session.RestoreTab(&Tab{ID: "tab-0000000f", Name: "F", Panes: []string{"pane-0000000f"}}, []*Pane{

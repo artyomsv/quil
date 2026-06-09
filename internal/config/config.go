@@ -128,6 +128,10 @@ type KeybindingsConfig struct {
 	// disagreements between Quil and the host terminal (most common on
 	// Windows) scramble characters until something repaints everything.
 	Redraw string `toml:"redraw"`
+	// ToggleEager flips the active pane's eager-restore flag. Eager panes
+	// respawn immediately on daemon restart (vs the default lazy deferral) and
+	// show a ● marker on their tab.
+	ToggleEager string `toml:"toggle_eager"`
 }
 
 func Default() Config {
@@ -202,7 +206,8 @@ func Default() Config {
 			NotesToggle:        "alt+e",
 			// Mnemonic: Ctrl+L clears/redraws a shell; the Alt+Shift layer
 			// keeps plain Ctrl+L flowing to the PTY.
-			Redraw: "alt+shift+l",
+			Redraw:      "alt+shift+l",
+			ToggleEager: "alt+shift+e",
 		},
 	}
 }

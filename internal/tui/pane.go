@@ -27,6 +27,7 @@ type PaneModel struct {
 	Name           string // user-given name (empty if not set)
 	CWD            string // current working directory from daemon
 	Muted          bool   // notification mute (daemon-authoritative; mirrored here for border rendering)
+	Eager          bool   // eager-restore flag (daemon-authoritative; mirrored for the tab marker)
 	vt             *vt.SafeEmulator
 	Width          int
 	Height         int

@@ -60,6 +60,7 @@ type PaneInfo struct {
 	Name  string
 	Type  string
 	Muted bool
+	Eager bool
 }
 
 // paneSettleRepaintMsg fires shortly after a pane's first live output and
@@ -1422,6 +1423,8 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.popPaneHistory()
 	case kbMatches(key, kb.MutePane):
 		return m, m.toggleActivePaneMute()
+	case kbMatches(key, kb.ToggleEager):
+		return m, m.toggleActivePaneEager()
 	}
 
 	// Sidebar focused: route keys to notification center
@@ -1902,6 +1905,7 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) []string {
 						leaf.Pane.CWD = info.CWD
 						leaf.Pane.Type = info.Type
 						leaf.Pane.Muted = info.Muted
+						leaf.Pane.Eager = info.Eager
 					}
 				}
 				continue
@@ -1928,6 +1932,7 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) []string {
 				pane.CWD = info.CWD
 				pane.Type = info.Type
 				pane.Muted = info.Muted
+				pane.Eager = info.Eager
 			}
 
 			// Try to fill a pending split placeholder first.
@@ -2643,6 +2648,9 @@ func parseWorkspaceState(raw map[string]any) WorkspaceStateMsg {
 				if muted, ok := pm["muted"].(bool); ok {
 					pi.Muted = muted
 				}
+				if eager, ok := pm["eager"].(bool); ok {
+					pi.Eager = eager
+				}
 				state.Panes = append(state.Panes, pi)
 			}
 		}
@@ -3325,6 +3333,36 @@ func (m Model) toggleActivePaneMute() tea.Cmd {
 		}
 		if err := m.client.Send(msg); err != nil {
 			log.Printf("toggleActivePaneMute send: %v", err)
+		}
+		return nil
+	}
+}
+
+// toggleActivePaneEager flips the eager-restore flag on the focused pane and
+// sends the daemon the authoritative update; the tab ● marker updates from the
+// next workspace_state broadcast. No-op if no active pane.
+func (m Model) toggleActivePaneEager() tea.Cmd {
+	tab := m.activeTabModel()
+	if tab == nil {
+		return nil
+	}
+	pane := tab.ActivePaneModel()
+	if pane == nil {
+		return nil
+	}
+	next := !pane.Eager
+	paneID := pane.ID
+	return func() tea.Msg {
+		msg, err := ipc.NewMessage(ipc.MsgUpdatePane, ipc.UpdatePanePayload{
+			PaneID: paneID,
+			Eager:  &next,
+		})
+		if err != nil {
+			log.Printf("toggleActivePaneEager build msg: %v", err)
+			return nil
+		}
+		if err := m.client.Send(msg); err != nil {
+			log.Printf("toggleActivePaneEager send: %v", err)
 		}
 		return nil
 	}

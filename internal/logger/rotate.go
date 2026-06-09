@@ -1,6 +1,7 @@
 package logger
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,6 +9,18 @@ import (
 	"sync"
 	"time"
 )
+
+// renameFn is the rename implementation used by rotate. Overridable in tests to
+// simulate a locked-file failure (e.g. Windows file-in-use).
+var renameFn = os.Rename
+
+// nowFn returns the current time for archive timestamp generation. Overridable
+// in tests to produce deterministic collision-suffix paths.
+var nowFn = time.Now
+
+// errClosed is returned by Write when the writer has not been successfully opened
+// (e.g. a mid-run open failure left w.f nil after a failed rotation).
+var errClosed = errors.New("logger: rotating writer not open")
 
 // RotatingWriter is an io.WriteCloser that writes to dir/base and, when the
 // active file would exceed maxSize bytes, rotates it to a timestamped archive
@@ -23,6 +36,12 @@ type RotatingWriter struct {
 	mu   sync.Mutex
 	f    *os.File
 	size int64
+
+	// suppressRotateUntil is the w.size threshold below which rotation is
+	// skipped after a failed os.Rename. This caps retry frequency to at most
+	// once per maxSize bytes of additional writes, preventing a hot-loop on
+	// Windows where the log file may be held open by another process.
+	suppressRotateUntil int64
 }
 
 // NewRotatingWriter opens dir/base for appending. If the existing file already
@@ -69,7 +88,18 @@ func (w *RotatingWriter) open() error {
 func (w *RotatingWriter) Write(p []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.size+int64(len(p)) > w.maxSize {
+
+	// Guard against a nil file handle that can result from a failed open() call
+	// inside rotate(). Without this check, w.f.Write below would panic.
+	if w.f == nil {
+		return 0, errClosed
+	}
+
+	// Only attempt rotation when not suppressed by a prior rename failure.
+	// suppressRotateUntil gates retries to at most once per maxSize bytes of
+	// additional growth, preventing a per-write hot-loop on Windows when the
+	// file is locked by another process.
+	if w.size+int64(len(p)) > w.maxSize && w.size >= w.suppressRotateUntil {
 		if err := w.rotate(); err != nil {
 			return 0, err
 		}
@@ -86,9 +116,9 @@ func (w *RotatingWriter) rotate() error {
 		w.f.Close()
 		w.f = nil
 	}
-	ext := filepath.Ext(w.base)            // ".log"
-	stem := w.base[:len(w.base)-len(ext)]  // "quild"
-	ts := time.Now().Format("20060102-150405")
+	ext := filepath.Ext(w.base)           // ".log"
+	stem := w.base[:len(w.base)-len(ext)] // "quild"
+	ts := nowFn().Format("20060102-150405")
 	dest := filepath.Join(w.dir, fmt.Sprintf("%s-%s%s", stem, ts, ext))
 	for i := 1; ; i++ { // collision suffix if two rotations land in the same second
 		if _, err := os.Stat(dest); os.IsNotExist(err) {
@@ -99,8 +129,20 @@ func (w *RotatingWriter) rotate() error {
 		}
 		dest = filepath.Join(w.dir, fmt.Sprintf("%s-%s-%d%s", stem, ts, i, ext))
 	}
-	// Best-effort: on rename failure (cross-device, file locked on Windows) we keep writing to the original path rather than dropping log data.
-	_ = os.Rename(filepath.Join(w.dir, w.base), dest)
+	if err := renameFn(filepath.Join(w.dir, w.base), dest); err != nil {
+		// Rename failed (e.g. file locked on Windows). Keep writing to the
+		// original path rather than dropping log data. Suppress further rotation
+		// attempts until another maxSize bytes have been written, so a
+		// persistently-failing rename cannot cause a per-write hot-loop.
+		fmt.Fprintf(os.Stderr, "logger: rotate rename failed (will retry after %d bytes): %v\n", w.maxSize, err)
+		if openErr := w.open(); openErr != nil {
+			return openErr
+		}
+		w.suppressRotateUntil = w.size + w.maxSize
+		return nil
+	}
+	// Rename succeeded — clear any prior suppression.
+	w.suppressRotateUntil = 0
 	if err := w.open(); err != nil {
 		return err
 	}

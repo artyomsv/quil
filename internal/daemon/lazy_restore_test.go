@@ -165,3 +165,26 @@ func TestEnsurePaneSpawned_ConcurrentSpawnsOnce(t *testing.T) {
 		t.Errorf("Pending should be cleared after spawn")
 	}
 }
+
+func TestListPanes_DeferredPaneReportsNotRunning(t *testing.T) {
+	d := newTestDaemon(t)
+	d.session.RestoreTab(&Tab{ID: "tab-0000000d", Name: "D", Panes: []string{"pane-0000000d"}}, []*Pane{
+		{ID: "pane-0000000d", TabID: "tab-0000000d", Type: "terminal", Pending: true},
+	})
+	infos := d.buildPaneInfos()
+	var found bool
+	for _, pi := range infos {
+		if pi.ID == "pane-0000000d" {
+			found = true
+			if pi.Running {
+				t.Errorf("deferred pane should report Running=false")
+			}
+			if !pi.Pending {
+				t.Errorf("deferred pane should report Pending=true")
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("deferred pane missing from list")
+	}
+}

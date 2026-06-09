@@ -190,6 +190,7 @@ type PaneInfo struct {
 	Type         string `json:"type"`
 	CWD          string `json:"cwd"`
 	Running      bool   `json:"running"`
+	Pending      bool   `json:"pending,omitempty"`
 	InstanceName string `json:"instance_name,omitempty"`
 }
 

@@ -1084,7 +1084,13 @@ func (d *Daemon) handlePaneInput(msg *ipc.Message) {
 	}
 
 	pane := d.session.Pane(payload.PaneID)
-	if pane == nil || pane.PTY == nil {
+	if pane == nil {
+		return
+	}
+	// A deferred pane (MCP send_to_pane / send_keys targeting a not-yet-spawned
+	// restored pane) must be booted before its PTY can accept input.
+	d.ensurePaneSpawned(pane)
+	if pane.PTY == nil {
 		return
 	}
 	pane.PTY.Write(payload.Data)
@@ -2451,7 +2457,16 @@ func withExcerpt(e PaneEvent, excerpt string) PaneEvent {
 	return e
 }
 
-func (d *Daemon) handleListPanesReq(conn *ipc.Conn, msg *ipc.Message) {
+// buildPaneInfos snapshots every pane across all tabs into ipc.PaneInfo. A
+// deferred (Pending) pane has no PTY yet and must report Running=false +
+// Pending=true so an MCP client can see it exists without booting it.
+//
+// Locking: ExitCode and PTY are PluginMu-guarded; Pending is spawnMu-guarded.
+// We read each under its own lock in separate critical sections — never both
+// at once — so there's no lock-ordering hazard. This is a best-effort snapshot:
+// a pane could in principle flip Pending→spawned between the two reads, but the
+// list is informational and the worst case is a momentarily stale flag.
+func (d *Daemon) buildPaneInfos() []ipc.PaneInfo {
 	_, tabs, panesByTab := d.session.SnapshotState()
 
 	var panes []ipc.PaneInfo
@@ -2462,8 +2477,11 @@ func (d *Daemon) handleListPanesReq(conn *ipc.Conn, msg *ipc.Message) {
 				typ = "terminal"
 			}
 			pane.PluginMu.Lock()
-			running := pane.ExitCode == nil
+			running := pane.PTY != nil && pane.ExitCode == nil
 			pane.PluginMu.Unlock()
+			pane.spawnMu.Lock()
+			pending := pane.Pending
+			pane.spawnMu.Unlock()
 			panes = append(panes, ipc.PaneInfo{
 				ID:           pane.ID,
 				TabID:        tab.ID,
@@ -2472,13 +2490,17 @@ func (d *Daemon) handleListPanesReq(conn *ipc.Conn, msg *ipc.Message) {
 				Type:         typ,
 				CWD:          pane.CWD,
 				Running:      running,
+				Pending:      pending,
 				InstanceName: pane.InstanceName,
 			})
 		}
 	}
+	return panes
+}
 
+func (d *Daemon) handleListPanesReq(conn *ipc.Conn, msg *ipc.Message) {
 	respondTo(conn, msg.ID, ipc.MsgListPanesResp, ipc.ListPanesRespPayload{
-		Panes: panes,
+		Panes: d.buildPaneInfos(),
 	})
 }
 
@@ -2499,6 +2521,7 @@ func (d *Daemon) handleReadPaneOutputReq(conn *ipc.Conn, msg *ipc.Message) {
 		})
 		return
 	}
+	d.ensurePaneSpawned(pane)
 	d.highlightPane(pane.ID)
 
 	lastLines := req.LastLines
@@ -2644,6 +2667,9 @@ func (d *Daemon) handleRestartPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 		respondTo(conn, msg.ID, ipc.MsgRestartPaneResp, ipc.RestartPaneRespPayload{PaneID: req.PaneID})
 		return
 	}
+	// Clear any deferred state first so the restart below operates on a normal
+	// live pane (Pending=false) rather than racing the lazy-spawn guard.
+	d.ensurePaneSpawned(pane)
 	d.highlightPane(pane.ID)
 
 	// Close existing PTY
@@ -2702,6 +2728,7 @@ func (d *Daemon) handleScreenshotPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 		})
 		return
 	}
+	d.ensurePaneSpawned(pane)
 	d.highlightPane(pane.ID)
 
 	width := req.Width
@@ -2770,6 +2797,7 @@ func (d *Daemon) handleSwitchTabReq(conn *ipc.Conn, msg *ipc.Message) {
 	}
 
 	d.session.SwitchTab(req.TabID)
+	d.ensureTabSpawned(req.TabID)
 	d.broadcastState()
 	d.requestSnapshot()
 
@@ -2869,6 +2897,7 @@ func (d *Daemon) handleSetActivePane(conn *ipc.Conn, msg *ipc.Message) {
 		log.Printf("handleSetActivePane: pane not found: %s", req.PaneID)
 		return
 	}
+	d.ensurePaneSpawned(pane)
 
 	// Switch to the pane's tab
 	d.session.SwitchTab(pane.TabID)

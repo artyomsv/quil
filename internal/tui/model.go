@@ -2159,6 +2159,24 @@ func (m *Model) switchTab(idx int) tea.Cmd {
 	}
 }
 
+// eagerTabMarker is a single-width BMP glyph (deliberately not an emoji — wide
+// glyphs drift conhost columns; see pane_widechar_test.go). Shown on any tab
+// containing at least one eager-restore pane.
+const eagerTabMarker = "●"
+
+// tabHasEagerPane reports whether any pane in the tab at idx has Eager set.
+func (m Model) tabHasEagerPane(idx int) bool {
+	if m.tabs[idx].Root == nil {
+		return false
+	}
+	for _, p := range m.tabs[idx].Root.Leaves() {
+		if p != nil && p.Eager {
+			return true
+		}
+	}
+	return false
+}
+
 // tabLabel returns the label text rendered inside a tab cell at index idx.
 // The active tab is prefixed with "* " so it's visible at a glance even when
 // colored tabs override the bold-active styling. `renderTabBar` and
@@ -2169,6 +2187,9 @@ func (m Model) tabLabel(idx int) string {
 		return "* " + m.renameInput + "▎"
 	}
 	name := fmt.Sprintf("%d:%s", idx+1, m.tabs[idx].Name)
+	if m.tabHasEagerPane(idx) {
+		name = eagerTabMarker + name
+	}
 	if idx == m.activeTab {
 		return "* " + name
 	}

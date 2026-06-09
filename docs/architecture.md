@@ -429,7 +429,7 @@ Each init script sources the user's original shell config first, then appends th
 - Flip `[logging] level = "debug"` in `config.toml` to see clipboard pipeline traces, per-key handler decisions, and Win32 image read step-by-step. Default `info` keeps the existing log volume.
 - Existing 152 `log.Printf` sites work unchanged — they get a single-level filter for free.
 - New code can be explicit about levels (`logger.Debug(...)`) without dragging in any third-party dependency.
-- `LoggingConfig.MaxSizeMB` / `MaxFiles` are reserved fields documented as "not yet honored" — log rotation is planned via lumberjack in a future PR; the fields exist now to avoid breaking users' configs when rotation lands.
+- `LoggingConfig.MaxSizeMB` / `MaxFiles` now drive log rotation natively via `internal/logger/rotate.go` (`RotatingWriter`). When the active `quild.log` / `quil.log` would exceed `MaxSizeMB` (default 5 MB) it is rotated to a timestamped archive (`stem-YYYYMMDD-HHMMSS.log`); the newest `MaxFiles` (default 10) archives are kept and older ones are pruned by modification time. No external dependency.
 
 ## ADR-19: Read-Only TextEditor for the F1 Log Viewer
 

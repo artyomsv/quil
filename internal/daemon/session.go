@@ -33,8 +33,13 @@ type Pane struct {
 	// PluginMu protects every mutable field that can be read or written
 	// concurrently with the daemon's PTY-output goroutine: PluginState,
 	// GhostSnap, PTY (the pointer itself + Pid lookups), ExitCode, and
-	// ExitedAt. Immutable post-creation fields (ID, TabID, OutputBuf
-	// pointer, Cols/Rows once set) are read without it.
+	// ExitedAt. Type and CWD also join this set: the lazy-restore path
+	// (spawnRestoredPane via ensurePaneSpawned) rewrites them on its error
+	// branches (CWD="" when the saved dir is gone, Type="terminal" on spawn
+	// fallback) WHILE the IPC server is live, racing snapshot() /
+	// workspaceStateFromSnapshot / buildPaneInfos / handlePaneStatusReq
+	// readers. Immutable post-creation fields (ID, TabID, OutputBuf pointer,
+	// Cols/Rows once set) are read without it.
 	PluginMu     sync.Mutex
 	InstanceName string              // Which instance config was used
 	InstanceArgs []string            // Args used to start (for rerun strategy)
@@ -51,6 +56,23 @@ type Pane struct {
 	// Persisted in the workspace snapshot so mute survives restart. Read
 	// under PluginMu in emitEvent.
 	Muted bool
+	// Eager, when true, makes this pane respawn immediately on daemon restart
+	// instead of being deferred until first access. Toggled via
+	// MsgUpdatePane{Eager: true} (default keybinding Alt+Shift+E), persisted in
+	// the workspace snapshot, and marked on the tab label. Read under PluginMu.
+	Eager bool
+	// Pending is true between restore and first spawn for a deferred pane: the
+	// model + ghost buffer exist but no PTY has been created yet. Runtime-only,
+	// never persisted. Cleared by ensurePaneSpawned.
+	Pending bool
+	// spawnMu serializes the lazy-spawn idempotency guard in ensurePaneSpawned.
+	// It is deliberately SEPARATE from PluginMu: spawnPane locks PluginMu
+	// synchronously on the calling goroutine (preassign_id + PluginState init),
+	// so reusing PluginMu here would self-deadlock (Go mutexes are non-reentrant).
+	// spawnMu is held only across the spawn decision + spawnRestoredPane call, so
+	// two callers (tab switch + MCP op) racing the same Pending pane spawn it
+	// exactly once.
+	spawnMu sync.Mutex
 	// LastHookEventAt is the wall-clock time of the most recent hook event
 	// the daemon translated into a PaneEvent for this pane. Used by
 	// checkIdlePanes to skip the legacy idle excerpt heuristic when hook

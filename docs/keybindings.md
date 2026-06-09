@@ -83,6 +83,7 @@ You can bind `next_pane` / `prev_pane` in `config.toml` if you prefer linear cyc
 | `Alt+N` | Cycle sidebar visibility: hidden → visible+unfocused → visible+focused → hidden |
 | `F3` | Focus the notification sidebar (when visible) |
 | `Alt+M` | Mute / unmute notifications for the active pane. Muted panes show `[muted]` on the border and never fire process-exit, bell, OSC 133, or idle events. Useful for `npm test --watch` and other chatty processes. |
+| `Alt+Shift+E` | Toggle eager restore on the active pane. Eager panes respawn immediately on daemon restart instead of loading lazily on tab open; marked with `●` on the tab. |
 
 ## Clipboard
 

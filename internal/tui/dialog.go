@@ -280,6 +280,7 @@ func shortcutsList(m *Model) []struct{ key, desc string } {
 		{kbDisplay(kb.NotesToggle), "Toggle pane notes"},
 		{kbDisplay(kb.Redraw), "Force screen redraw"},
 		{kbDisplay(kb.MutePane), "Mute / unmute pane notifications"},
+		{kbDisplay(kb.ToggleEager), "Toggle eager restore (active pane)"},
 		{kbDisplay(kb.NotificationToggle), "Toggle notification sidebar"},
 		{kbDisplay(kb.NotificationFocus), "Focus notification sidebar"},
 		{kbDisplay(kb.GoBack), "Pane history back"},

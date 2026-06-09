@@ -60,6 +60,7 @@ type PaneInfo struct {
 	Name  string
 	Type  string
 	Muted bool
+	Eager bool
 }
 
 // paneSettleRepaintMsg fires shortly after a pane's first live output and
@@ -1183,7 +1184,7 @@ func (m Model) notesKeyExempt(key string) bool {
 		// Force repaint — view-level, harmless while the editor is open.
 		kb.Redraw,
 		// Notification center.
-		kb.NotificationToggle, kb.NotificationFocus, kb.GoBack, kb.MutePane,
+		kb.NotificationToggle, kb.NotificationFocus, kb.GoBack, kb.MutePane, kb.ToggleEager,
 		// Tools and dialogs.
 		kb.JSONTransform, kb.QuickActions,
 	}
@@ -1422,6 +1423,8 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.popPaneHistory()
 	case kbMatches(key, kb.MutePane):
 		return m, m.toggleActivePaneMute()
+	case kbMatches(key, kb.ToggleEager):
+		return m, m.toggleActivePaneEager()
 	}
 
 	// Sidebar focused: route keys to notification center
@@ -1902,6 +1905,7 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) []string {
 						leaf.Pane.CWD = info.CWD
 						leaf.Pane.Type = info.Type
 						leaf.Pane.Muted = info.Muted
+						leaf.Pane.Eager = info.Eager
 					}
 				}
 				continue
@@ -1928,6 +1932,7 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) []string {
 				pane.CWD = info.CWD
 				pane.Type = info.Type
 				pane.Muted = info.Muted
+				pane.Eager = info.Eager
 			}
 
 			// Try to fill a pending split placeholder first.
@@ -2154,6 +2159,24 @@ func (m *Model) switchTab(idx int) tea.Cmd {
 	}
 }
 
+// eagerTabMarker is a single-width BMP glyph (deliberately not an emoji — wide
+// glyphs drift conhost columns; see pane_widechar_test.go). Shown on any tab
+// containing at least one eager-restore pane.
+const eagerTabMarker = "●"
+
+// tabHasEagerPane reports whether any pane in the tab at idx has Eager set.
+func (m Model) tabHasEagerPane(idx int) bool {
+	if m.tabs[idx].Root == nil {
+		return false
+	}
+	for _, p := range m.tabs[idx].Root.Leaves() {
+		if p != nil && p.Eager {
+			return true
+		}
+	}
+	return false
+}
+
 // tabLabel returns the label text rendered inside a tab cell at index idx.
 // The active tab is prefixed with "* " so it's visible at a glance even when
 // colored tabs override the bold-active styling. `renderTabBar` and
@@ -2164,6 +2187,9 @@ func (m Model) tabLabel(idx int) string {
 		return "* " + m.renameInput + "▎"
 	}
 	name := fmt.Sprintf("%d:%s", idx+1, m.tabs[idx].Name)
+	if m.tabHasEagerPane(idx) {
+		name = eagerTabMarker + name
+	}
 	if idx == m.activeTab {
 		return "* " + name
 	}
@@ -2642,6 +2668,9 @@ func parseWorkspaceState(raw map[string]any) WorkspaceStateMsg {
 				}
 				if muted, ok := pm["muted"].(bool); ok {
 					pi.Muted = muted
+				}
+				if eager, ok := pm["eager"].(bool); ok {
+					pi.Eager = eager
 				}
 				state.Panes = append(state.Panes, pi)
 			}
@@ -3325,6 +3354,36 @@ func (m Model) toggleActivePaneMute() tea.Cmd {
 		}
 		if err := m.client.Send(msg); err != nil {
 			log.Printf("toggleActivePaneMute send: %v", err)
+		}
+		return nil
+	}
+}
+
+// toggleActivePaneEager flips the eager-restore flag on the focused pane and
+// sends the daemon the authoritative update; the eager state updates from the
+// next workspace_state broadcast. No-op if no active pane.
+func (m Model) toggleActivePaneEager() tea.Cmd {
+	tab := m.activeTabModel()
+	if tab == nil {
+		return nil
+	}
+	pane := tab.ActivePaneModel()
+	if pane == nil {
+		return nil
+	}
+	next := !pane.Eager
+	paneID := pane.ID
+	return func() tea.Msg {
+		msg, err := ipc.NewMessage(ipc.MsgUpdatePane, ipc.UpdatePanePayload{
+			PaneID: paneID,
+			Eager:  &next,
+		})
+		if err != nil {
+			log.Printf("toggleActivePaneEager build msg: %v", err)
+			return nil
+		}
+		if err := m.client.Send(msg); err != nil {
+			log.Printf("toggleActivePaneEager send: %v", err)
 		}
 		return nil
 	}

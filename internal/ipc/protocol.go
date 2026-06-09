@@ -165,6 +165,8 @@ type UpdatePanePayload struct {
 	// explicit false. Callers updating only Name or CWD pass nil and the
 	// daemon leaves the pane's mute state untouched.
 	Muted *bool `json:"muted,omitempty"`
+	// Eager is a pointer for the same nil-vs-false tri-state reason as Muted.
+	Eager *bool `json:"eager,omitempty"`
 }
 
 type UpdateLayoutPayload struct {
@@ -188,6 +190,7 @@ type PaneInfo struct {
 	Type         string `json:"type"`
 	CWD          string `json:"cwd"`
 	Running      bool   `json:"running"`
+	Pending      bool   `json:"pending,omitempty"`
 	InstanceName string `json:"instance_name,omitempty"`
 }
 
@@ -213,6 +216,7 @@ type PaneStatusReqPayload struct {
 type PaneStatusRespPayload struct {
 	PaneID   string `json:"pane_id"`
 	Running  bool   `json:"running"`
+	Pending  bool   `json:"pending,omitempty"`
 	ExitCode *int   `json:"exit_code,omitempty"`
 	Type     string `json:"type"`
 	CWD      string `json:"cwd"`

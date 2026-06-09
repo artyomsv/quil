@@ -6,6 +6,7 @@ A capability-by-capability tour of what Quil does. For configuration knobs, see 
 
 - [Persistence](#persistence)
   - [Reboot-proof sessions](#reboot-proof-sessions)
+  - [Lazy restore](#lazy-restore)
   - [Claude Code session-id rotation](#claude-code-session-id-rotation)
   - [OpenCode session-id tracking](#opencode-session-id-tracking)
   - [AI session resume](#ai-session-resume)
@@ -43,6 +44,12 @@ Quil continuously snapshots your workspace — tabs, panes, layouts, working dir
 - Output replay — every pane has a ring buffer that captures PTY output. Reconnecting clients see prior terminal content immediately.
 - Layout persistence — the binary split tree is serialized to JSON and stored in the daemon. Reconnect restores the exact split configuration.
 - Centralized snapshot queue debounces 500 ms after structural events and runs a safety-net write every 30 s.
+
+### Lazy restore
+
+On daemon restart, only the **active tab's** panes spawn immediately. All other tabs' panes are **deferred** — their workspace model and scrollback history are loaded from disk instantly, but the child process is not started until you first open that tab (or an MCP tool accesses the pane). This makes restart fast even with many tabs open: you see the saved scrollback right away, and live output resumes seamlessly when the tab is opened.
+
+Mark a pane as **eager** with `Alt+Shift+E` (config key `toggle_eager`) to force it to respawn immediately on every restart, regardless of tab order. Eager panes are marked with `●` in the tab bar. The flag is persisted in `workspace.json`.
 
 ### Claude Code session-id rotation
 

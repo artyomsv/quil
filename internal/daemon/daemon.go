@@ -140,6 +140,20 @@ func (d *Daemon) Start() error {
 		log.Printf("warning: failed to restore workspace: %v", err)
 	}
 
+	// Respawn panes for the restored workspace BEFORE the IPC server starts
+	// listening. respawnPanes writes pane.Pending (unlocked) and the lazy-spawn
+	// path (ensureTabSpawned → ensurePaneSpawned, reachable from a client's
+	// MsgSwitchTab) reads/writes it under spawnMu. Doing all spawn/defer
+	// decisions before any client can connect makes those writes happen-before
+	// every possible concurrent reader — eliminating the data race and the logic
+	// gap where a tab switched-to before its Pending flag was set wouldn't spawn.
+	// respawnPanes only needs d.session + d.registry; emitEvent (via the
+	// streamPTYOutput goroutine) guards on d.server != nil, so a not-yet-assigned
+	// server is safe here.
+	if d.restored {
+		d.respawnPanes()
+	}
+
 	sockPath := config.SocketPath()
 	d.server = ipc.NewServer(sockPath, d.handleMessage, func(conn *ipc.Conn) {
 		d.requestSnapshot()
@@ -148,11 +162,6 @@ func (d *Daemon) Start() error {
 
 	if err := d.server.Start(); err != nil {
 		return fmt.Errorf("start IPC server: %w", err)
-	}
-
-	// Respawn panes for restored workspace
-	if d.restored {
-		d.respawnPanes()
 	}
 
 	go d.idleChecker()
@@ -342,8 +351,13 @@ func (d *Daemon) snapshot() {
 	for _, tab := range tabs {
 		for _, pane := range panesByTab[tab.ID] {
 			activePaneIDs = append(activePaneIDs, pane.ID)
+			// Type is PluginMu-protected (spawnRestoredPane mutates it on the
+			// lazy-spawn fallback path concurrently with this snapshot).
+			pane.PluginMu.Lock()
+			typ := pane.Type
+			pane.PluginMu.Unlock()
 			// Skip ghost buffer save for plugins with GhostBuffer disabled
-			if p := d.registry.Get(pane.Type); p != nil && !p.Persistence.GhostBuffer {
+			if p := d.registry.Get(typ); p != nil && !p.Persistence.GhostBuffer {
 				continue
 			}
 			if pane.OutputBuf != nil {
@@ -478,6 +492,7 @@ func (d *Daemon) restoreWorkspace() error {
 				cols, _ := paneData["cols"].(float64)
 				rows, _ := paneData["rows"].(float64)
 				muted, _ := paneData["muted"].(bool)
+				eager, _ := paneData["eager"].(bool)
 
 				pane := &Pane{
 					ID:           paneID,
@@ -492,6 +507,7 @@ func (d *Daemon) restoreWorkspace() error {
 					InstanceArgs: instanceArgs,
 					OutputBuf:    ringbuf.NewRingBuffer(d.session.bufSize),
 					Muted:        muted,
+					Eager:        eager,
 				}
 
 				// Load ghost buffer from disk
@@ -541,34 +557,79 @@ func isValidHexID(id, prefix string) bool {
 	return true
 }
 
-// respawnPanes starts a process in each pane that was restored from disk,
-// dispatching to the appropriate resume strategy based on plugin type.
+// respawnPanes starts processes for restored panes. Only the active tab's
+// panes and panes flagged Eager are spawned immediately; everything else is
+// marked Pending and spawned lazily on first access (tab switch or MCP op).
+// This keeps a large-workspace restart from launching N heavy children at once.
 func (d *Daemon) respawnPanes() {
+	active := d.session.ActiveTabID()
 	for _, tab := range d.session.Tabs() {
 		for _, pane := range d.session.Panes(tab.ID) {
 			if pane.PTY != nil {
 				continue // Already has a PTY
 			}
-
-			ptySession := newRestoredPTY(pane)
-			if pane.CWD != "" {
-				if info, err := os.Stat(pane.CWD); err != nil || !info.IsDir() {
-					log.Printf("pane %s: saved cwd %q gone, using default", pane.ID, pane.CWD)
-					pane.CWD = ""
-				}
-			}
-
-			if err := d.spawnPane(pane, ptySession, true); err != nil {
-				log.Printf("respawn pane %s (type=%s): %v — falling back to terminal", pane.ID, pane.Type, err)
-				pane.Type = "terminal"
-				ptySession2 := newRestoredPTY(pane)
-				if err := d.spawnPane(pane, ptySession2, false); err != nil {
-					log.Printf("fallback shell for pane %s also failed: %v", pane.ID, err)
-				}
+			if tab.ID == active || pane.Eager {
+				d.spawnRestoredPane(pane)
 			} else {
-				log.Printf("respawned pane %s (type=%s, cwd=%s, size=%dx%d)", pane.ID, pane.Type, pane.CWD, pane.Cols, pane.Rows)
+				pane.Pending = true
+				log.Printf("respawn: deferring pane %s (type=%s, tab=%s)", pane.ID, pane.Type, tab.ID)
 			}
 		}
+	}
+}
+
+// spawnRestoredPane spawns a single restored pane, applying the saved-cwd
+// sanity check and the fallback-to-terminal recovery. Extracted from
+// respawnPanes so the lazy-spawn path (ensurePaneSpawned) reuses it verbatim.
+func (d *Daemon) spawnRestoredPane(pane *Pane) {
+	ptySession := newRestoredPTY(pane)
+	if pane.CWD != "" {
+		if info, err := os.Stat(pane.CWD); err != nil || !info.IsDir() {
+			log.Printf("pane %s: saved cwd %q gone, using default", pane.ID, pane.CWD)
+			// PluginMu-protected: snapshot()/buildPaneInfos/handlePaneStatusReq
+			// read pane.CWD concurrently while the server is live (lazy spawn).
+			// Single-field critical section — never nested with spawnPane (which
+			// takes PluginMu itself).
+			pane.PluginMu.Lock()
+			pane.CWD = ""
+			pane.PluginMu.Unlock()
+		}
+	}
+	if err := d.spawnPane(pane, ptySession, true); err != nil {
+		log.Printf("respawn pane %s (type=%s): %v — falling back to terminal", pane.ID, pane.Type, err)
+		// PluginMu-protected: same concurrent readers as pane.CWD above.
+		pane.PluginMu.Lock()
+		pane.Type = "terminal"
+		pane.PluginMu.Unlock()
+		ptySession2 := newRestoredPTY(pane)
+		if err := d.spawnPane(pane, ptySession2, false); err != nil {
+			log.Printf("fallback shell for pane %s also failed: %v", pane.ID, err)
+		}
+	} else {
+		log.Printf("respawned pane %s (type=%s, cwd=%s, size=%dx%d)", pane.ID, pane.Type, pane.CWD, pane.Cols, pane.Rows)
+	}
+}
+
+// ensurePaneSpawned spawns a deferred pane on first access. Idempotent and
+// race-safe: the double-check under spawnMu means a tab switch and an MCP op
+// hitting the same pending pane spawn it exactly once.
+//
+// spawnMu (not PluginMu) guards the guard: spawnPane locks PluginMu
+// synchronously on this goroutine, so holding PluginMu here would self-deadlock.
+func (d *Daemon) ensurePaneSpawned(pane *Pane) {
+	pane.spawnMu.Lock()
+	defer pane.spawnMu.Unlock()
+	if pane.PTY != nil || !pane.Pending {
+		return
+	}
+	d.spawnRestoredPane(pane)
+	pane.Pending = false
+}
+
+// ensureTabSpawned spawns every deferred pane in a tab (handles splits).
+func (d *Daemon) ensureTabSpawned(tabID string) {
+	for _, pane := range d.session.Panes(tabID) {
+		d.ensurePaneSpawned(pane)
 	}
 }
 
@@ -579,7 +640,19 @@ func (d *Daemon) respawnPanes() {
 // snapshots where Cols/Rows were never recorded.
 func newRestoredPTY(pane *Pane) apty.Session {
 	if pane.Cols > 0 && pane.Rows > 0 {
-		return apty.NewWithSize(pane.Cols, pane.Rows)
+		return newSessionFn(pane.Cols, pane.Rows)
+	}
+	return newSessionFn(0, 0)
+}
+
+// newSessionFn constructs the PTY session for a restored pane. It is a
+// package-level var (not a direct apty call) so tests can swap in a fake that
+// avoids launching a real /bin/sh child — mirrors the claudeSessionExistsFn /
+// readHookSessionIDFn seams used elsewhere in this file. Production passes
+// (cols, rows); a zero pair means "no persisted size, use the default".
+var newSessionFn = func(cols, rows int) apty.Session {
+	if cols > 0 && rows > 0 {
+		return apty.NewWithSize(cols, rows)
 	}
 	return apty.New()
 }
@@ -645,7 +718,7 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 	case ipc.MsgSetActivePane:
 		d.handleSetActivePane(conn, msg)
 	case ipc.MsgCloseTUI:
-		d.server.Broadcast(msg)
+		d.broadcast(msg)
 
 	// Notification center
 	case ipc.MsgDismissEvent:
@@ -720,7 +793,12 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 			if pane.OutputBuf == nil {
 				continue
 			}
-			if p := d.registry.Get(pane.Type); p != nil && !p.Persistence.GhostBuffer {
+			// Type is PluginMu-protected — a concurrent lazy spawn
+			// (ensurePaneSpawned on another IPC goroutine) can rewrite it.
+			pane.PluginMu.Lock()
+			typ := pane.Type
+			pane.PluginMu.Unlock()
+			if p := d.registry.Get(typ); p != nil && !p.Persistence.GhostBuffer {
 				continue
 			}
 			ghost := pane.GhostSnap
@@ -733,7 +811,7 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 				continue
 			}
 			log.Printf("attach: ghost replay pane %s (type=%s, source=%s, bytes=%d)",
-				pane.ID, pane.Type, source, len(ghost))
+				pane.ID, typ, source, len(ghost))
 			sendGhostChunked(conn, pane.ID, ghost, d.shutdown)
 			pane.GhostSnap = nil // clear after first replay
 		}
@@ -835,6 +913,7 @@ func (d *Daemon) handleSwitchTab(msg *ipc.Message) {
 	}
 	log.Printf("tab switch: %s", payload.TabID)
 	d.session.SwitchTab(payload.TabID)
+	d.ensureTabSpawned(payload.TabID)
 	d.broadcastState()
 	d.requestSnapshot()
 }
@@ -1024,7 +1103,13 @@ func (d *Daemon) handlePaneInput(msg *ipc.Message) {
 	}
 
 	pane := d.session.Pane(payload.PaneID)
-	if pane == nil || pane.PTY == nil {
+	if pane == nil {
+		return
+	}
+	// A deferred pane (MCP send_to_pane / send_keys targeting a not-yet-spawned
+	// restored pane) must be booted before its PTY can accept input.
+	d.ensurePaneSpawned(pane)
+	if pane.PTY == nil {
 		return
 	}
 	pane.PTY.Write(payload.Data)
@@ -1068,6 +1153,12 @@ func (d *Daemon) handleUpdatePane(msg *ipc.Message) {
 		pane.Muted = *payload.Muted
 		pane.PluginMu.Unlock()
 		log.Printf("pane %s: muted=%v", pane.ID, *payload.Muted)
+	}
+	if payload.Eager != nil {
+		pane.PluginMu.Lock()
+		pane.Eager = *payload.Eager
+		pane.PluginMu.Unlock()
+		log.Printf("pane %s: eager=%v", pane.ID, *payload.Eager)
 	}
 	d.broadcastState()
 	d.requestSnapshot()
@@ -1244,7 +1335,7 @@ func (d *Daemon) flushPaneOutput(paneID string, data []byte) {
 		PaneID: paneID,
 		Data:   data,
 	})
-	d.server.Broadcast(msg)
+	d.broadcast(msg)
 }
 
 // detectBellEvent checks for standalone bell characters (not OSC terminators).
@@ -1323,7 +1414,17 @@ func (d *Daemon) applyPluginHandlers(pane *Pane, paneID string, data []byte) {
 			Title:   eh.Title,
 			Message: message,
 		})
-		d.server.Broadcast(errMsg)
+		d.broadcast(errMsg)
+	}
+}
+
+// broadcast sends a message to all connected clients, tolerating a nil server.
+// d.server is nil during the early-startup window (respawnPanes runs before the
+// IPC server is created), and a restored pane's streamPTYOutput goroutine can
+// fire a broadcast in that window — so every broadcast site must nil-check.
+func (d *Daemon) broadcast(msg *ipc.Message) {
+	if d.server != nil {
+		d.server.Broadcast(msg)
 	}
 }
 
@@ -1333,7 +1434,7 @@ func (d *Daemon) broadcastState() {
 	}
 	state := d.buildWorkspaceState()
 	resp, _ := ipc.NewMessage(ipc.MsgWorkspaceState, state)
-	d.server.Broadcast(resp)
+	d.broadcast(resp)
 }
 
 func (d *Daemon) buildWorkspaceState() map[string]any {
@@ -1367,15 +1468,18 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			paneData := map[string]any{
 				"id":     pane.ID,
 				"tab_id": pane.TabID,
-				"cwd":    pane.CWD,
 			}
 			if pane.Name != "" {
 				paneData["name"] = pane.Name
 			}
-			if pane.Type != "" && pane.Type != "terminal" {
-				paneData["type"] = pane.Type
-			}
+			// Type and CWD are PluginMu-protected: spawnRestoredPane mutates
+			// them on the lazy-spawn error paths (CWD="" when the saved dir is
+			// gone, Type="terminal" on spawn fallback) concurrently with this
+			// snapshot. Capture both under the same lock as the other
+			// PluginMu-guarded fields.
 			pane.PluginMu.Lock()
+			typ := pane.Type
+			cwd := pane.CWD
 			if len(pane.PluginState) > 0 {
 				// Copy to avoid holding lock during JSON marshal
 				ps := make(map[string]string, len(pane.PluginState))
@@ -1387,7 +1491,14 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			if pane.Muted {
 				paneData["muted"] = true
 			}
+			if pane.Eager {
+				paneData["eager"] = true
+			}
 			pane.PluginMu.Unlock()
+			paneData["cwd"] = cwd
+			if typ != "" && typ != "terminal" {
+				paneData["type"] = typ
+			}
 			if pane.InstanceName != "" {
 				paneData["instance_name"] = pane.InstanceName
 			}
@@ -1744,12 +1855,19 @@ func (d *Daemon) defaultCWD() string {
 // spawnPane launches the appropriate process for a pane based on its plugin type.
 // When restoring is true, resume strategies are applied (e.g., --resume for session_scrape).
 func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) error {
-	// Default type
+	// Default type. Type is PluginMu-protected — a lazy spawn (ensurePaneSpawned)
+	// runs this concurrently with snapshot()/buildPaneInfos readers. Capture the
+	// settled value under the lock; the assignment and read share one critical
+	// section. (We hold spawnMu here, never PluginMu — single-field section, no
+	// nesting with another spawnPane.)
+	pane.PluginMu.Lock()
 	if pane.Type == "" {
 		pane.Type = "terminal"
 	}
+	typ := pane.Type
+	pane.PluginMu.Unlock()
 
-	p := d.registry.Get(pane.Type)
+	p := d.registry.Get(typ)
 	if p == nil {
 		p = d.registry.Get("terminal") // fallback
 	}
@@ -1825,7 +1943,13 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 	if err := ptySession.Start(cmd, args...); err != nil {
 		return err
 	}
+	// PluginMu protects pane.PTY (per the Pane struct doc): the memReport
+	// collector reads it on a 5s timer goroutine. PluginMu is free here (taken
+	// and released above at the PluginState init); lock ordering stays
+	// spawnMu→PluginMu, consistent with ensurePaneSpawned.
+	pane.PluginMu.Lock()
 	pane.PTY = ptySession
+	pane.PluginMu.Unlock()
 	go d.streamPTYOutput(pane.ID, ptySession)
 	return nil
 }
@@ -1851,7 +1975,7 @@ func (d *Daemon) highlightPane(paneID string) {
 	msg, _ := ipc.NewMessage(ipc.MsgHighlightPane, ipc.HighlightPanePayload{
 		PaneID: paneID,
 	})
-	d.server.Broadcast(msg)
+	d.broadcast(msg)
 }
 
 // respondToAndHighlight sends a response and broadcasts a highlight for the pane.
@@ -1888,9 +2012,7 @@ func (d *Daemon) emitEvent(e PaneEvent) {
 	d.events.Push(e)
 	payload := toPaneEventPayload(e)
 	msg, _ := ipc.NewMessage(ipc.MsgPaneEvent, payload)
-	if d.server != nil {
-		d.server.Broadcast(msg)
-	}
+	d.broadcast(msg)
 }
 
 // idleChecker runs a periodic check for panes that have gone idle.
@@ -2376,34 +2498,54 @@ func withExcerpt(e PaneEvent, excerpt string) PaneEvent {
 	return e
 }
 
-func (d *Daemon) handleListPanesReq(conn *ipc.Conn, msg *ipc.Message) {
+// buildPaneInfos snapshots every pane across all tabs into ipc.PaneInfo. A
+// deferred (Pending) pane has no PTY yet and must report Running=false +
+// Pending=true so an MCP client can see it exists without booting it.
+//
+// Locking: ExitCode and PTY are PluginMu-guarded; Pending is spawnMu-guarded.
+// We read each under its own lock in separate critical sections — never both
+// at once — so there's no lock-ordering hazard. This is a best-effort snapshot:
+// a pane could in principle flip Pending→spawned between the two reads, but the
+// list is informational and the worst case is a momentarily stale flag.
+func (d *Daemon) buildPaneInfos() []ipc.PaneInfo {
 	_, tabs, panesByTab := d.session.SnapshotState()
 
 	var panes []ipc.PaneInfo
 	for _, tab := range tabs {
 		for _, pane := range panesByTab[tab.ID] {
+			// Type, CWD, ExitCode, PTY are PluginMu-protected (spawnRestoredPane
+			// mutates Type/CWD on the lazy-spawn error paths). Read them all in
+			// one critical section.
+			pane.PluginMu.Lock()
 			typ := pane.Type
+			cwd := pane.CWD
+			running := pane.PTY != nil && pane.ExitCode == nil
+			pane.PluginMu.Unlock()
 			if typ == "" {
 				typ = "terminal"
 			}
-			pane.PluginMu.Lock()
-			running := pane.ExitCode == nil
-			pane.PluginMu.Unlock()
+			pane.spawnMu.Lock()
+			pending := pane.Pending
+			pane.spawnMu.Unlock()
 			panes = append(panes, ipc.PaneInfo{
 				ID:           pane.ID,
 				TabID:        tab.ID,
 				TabName:      tab.Name,
 				Name:         pane.Name,
 				Type:         typ,
-				CWD:          pane.CWD,
+				CWD:          cwd,
 				Running:      running,
+				Pending:      pending,
 				InstanceName: pane.InstanceName,
 			})
 		}
 	}
+	return panes
+}
 
+func (d *Daemon) handleListPanesReq(conn *ipc.Conn, msg *ipc.Message) {
 	respondTo(conn, msg.ID, ipc.MsgListPanesResp, ipc.ListPanesRespPayload{
-		Panes: panes,
+		Panes: d.buildPaneInfos(),
 	})
 }
 
@@ -2424,6 +2566,7 @@ func (d *Daemon) handleReadPaneOutputReq(conn *ipc.Conn, msg *ipc.Message) {
 		})
 		return
 	}
+	d.ensurePaneSpawned(pane)
 	d.highlightPane(pane.ID)
 
 	lastLines := req.LastLines
@@ -2455,6 +2598,35 @@ func (d *Daemon) handleReadPaneOutputReq(conn *ipc.Conn, msg *ipc.Message) {
 	})
 }
 
+// buildPaneStatus returns the status payload for a single pane without
+// spawning it. It mirrors the locking discipline of buildPaneInfos: PluginMu
+// guards Type/CWD/PTY/ExitCode; spawnMu guards Pending. Both critical
+// sections are kept separate (no lock-ordering hazard).
+func (d *Daemon) buildPaneStatus(pane *Pane) ipc.PaneStatusRespPayload {
+	pane.PluginMu.Lock()
+	typ := pane.Type
+	cwd := pane.CWD
+	exitCode := pane.ExitCode
+	running := pane.PTY != nil && exitCode == nil
+	pane.PluginMu.Unlock()
+	if typ == "" {
+		typ = "terminal"
+	}
+	pane.spawnMu.Lock()
+	pending := pane.Pending
+	pane.spawnMu.Unlock()
+
+	return ipc.PaneStatusRespPayload{
+		PaneID:   pane.ID,
+		Running:  running,
+		Pending:  pending,
+		ExitCode: exitCode,
+		Type:     typ,
+		CWD:      cwd,
+		Name:     pane.Name,
+	}
+}
+
 func (d *Daemon) handlePaneStatusReq(conn *ipc.Conn, msg *ipc.Message) {
 	var req ipc.PaneStatusReqPayload
 	if err := msg.DecodePayload(&req); err != nil {
@@ -2472,24 +2644,10 @@ func (d *Daemon) handlePaneStatusReq(conn *ipc.Conn, msg *ipc.Message) {
 	}
 	d.highlightPane(pane.ID)
 
-	typ := pane.Type
-	if typ == "" {
-		typ = "terminal"
-	}
-
-	pane.PluginMu.Lock()
-	exitCode := pane.ExitCode
-	running := exitCode == nil
-	pane.PluginMu.Unlock()
-
-	respondTo(conn, msg.ID, ipc.MsgPaneStatusResp, ipc.PaneStatusRespPayload{
-		PaneID:   pane.ID,
-		Running:  running,
-		ExitCode: exitCode,
-		Type:     typ,
-		CWD:      pane.CWD,
-		Name:     pane.Name,
-	})
+	// Match buildPaneInfos: a deferred pane (PTY==nil) reports Running=false even
+	// though ExitCode is nil, so get_pane_status and list_panes agree. This
+	// handler stays non-spawning by design — see buildPaneStatus.
+	respondTo(conn, msg.ID, ipc.MsgPaneStatusResp, d.buildPaneStatus(pane))
 }
 
 func (d *Daemon) handleCreatePaneReq(conn *ipc.Conn, msg *ipc.Message) {
@@ -2569,12 +2727,21 @@ func (d *Daemon) handleRestartPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 		respondTo(conn, msg.ID, ipc.MsgRestartPaneResp, ipc.RestartPaneRespPayload{PaneID: req.PaneID})
 		return
 	}
+	// Clear any deferred state first so the restart below operates on a normal
+	// live pane (Pending=false) rather than racing the lazy-spawn guard.
+	d.ensurePaneSpawned(pane)
 	d.highlightPane(pane.ID)
 
-	// Close existing PTY
-	if pane.PTY != nil {
-		pane.PTY.Close()
-		pane.PTY = nil
+	// Close existing PTY. pane.PTY is PluginMu-protected (the 5 s memReport
+	// collector reads it under PluginMu) — swap it out under the lock, then
+	// run the Close() syscall after releasing it (never hold a mutex across a
+	// syscall).
+	pane.PluginMu.Lock()
+	old := pane.PTY
+	pane.PTY = nil
+	pane.PluginMu.Unlock()
+	if old != nil {
+		old.Close()
 	}
 
 	// Reset exit state
@@ -2627,6 +2794,7 @@ func (d *Daemon) handleScreenshotPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 		})
 		return
 	}
+	d.ensurePaneSpawned(pane)
 	d.highlightPane(pane.ID)
 
 	width := req.Width
@@ -2695,6 +2863,7 @@ func (d *Daemon) handleSwitchTabReq(conn *ipc.Conn, msg *ipc.Message) {
 	}
 
 	d.session.SwitchTab(req.TabID)
+	d.ensureTabSpawned(req.TabID)
 	d.broadcastState()
 	d.requestSnapshot()
 
@@ -2794,6 +2963,7 @@ func (d *Daemon) handleSetActivePane(conn *ipc.Conn, msg *ipc.Message) {
 		log.Printf("handleSetActivePane: pane not found: %s", req.PaneID)
 		return
 	}
+	d.ensurePaneSpawned(pane)
 
 	// Switch to the pane's tab
 	d.session.SwitchTab(pane.TabID)
@@ -2802,7 +2972,7 @@ func (d *Daemon) handleSetActivePane(conn *ipc.Conn, msg *ipc.Message) {
 	broadcast, _ := ipc.NewMessage(ipc.MsgSetActivePane, ipc.SetActivePanePayload{
 		PaneID: req.PaneID,
 	})
-	d.server.Broadcast(broadcast)
+	d.broadcast(broadcast)
 
 	d.broadcastState()
 	d.requestSnapshot()

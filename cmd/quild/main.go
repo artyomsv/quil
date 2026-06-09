@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -57,9 +58,9 @@ func main() {
 	if buildLogLevel != "" {
 		logLevel = buildLogLevel
 	}
-	logFile := initLogging(logLevel)
-	if logFile != nil {
-		defer logFile.Close()
+	closer := initLogging(logLevel, cfg.Logging.MaxSizeMB, cfg.Logging.MaxFiles)
+	if closer != nil {
+		defer closer.Close()
 	}
 
 	d := daemon.New(cfg)
@@ -86,22 +87,20 @@ func main() {
 	d.Wait()
 }
 
-func initLogging(level string) *os.File {
+func initLogging(level string, maxSizeMB, maxFiles int) io.Closer {
 	logDir := config.QuilDir()
 	if logDir == "" {
 		return nil
 	}
-	os.MkdirAll(logDir, 0700)
-	f, err := os.OpenFile(filepath.Join(logDir, "quild.log"),
-		os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	w, err := logger.NewRotatingWriter(logDir, "quild.log", int64(maxSizeMB)<<20, maxFiles)
 	if err != nil {
 		return nil
 	}
 	// logger.Init replaces the stdlib log output too, so existing log.Printf
 	// call sites bridge through slog at info level and respect the configured
 	// level. New code should call logger.Debug/Info/Warn/Error explicitly.
-	logger.Init(level, f)
-	return f
+	logger.Init(level, w)
+	return w
 }
 
 func writePIDFile() {

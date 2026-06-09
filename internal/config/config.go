@@ -55,12 +55,12 @@ type GhostBufferConfig struct {
 type LoggingConfig struct {
 	Level string `toml:"level"`
 
-	// MaxSizeMB and MaxFiles are reserved for log rotation. They are NOT
-	// currently honored by internal/logger — both the daemon and the TUI
-	// open their log files in O_APPEND mode and never truncate. Wiring is
-	// planned (a small lumberjack-style writer would slot in via
-	// logger.Init), but we keep the fields here so users who set them
-	// today don't see "unknown key" errors after the rotation lands.
+	// MaxSizeMB and MaxFiles drive log rotation via logger.RotatingWriter.
+	// When the active quild.log / quil.log would exceed MaxSizeMB it is
+	// rotated to a timestamped archive (stem-YYYYMMDD-HHMMSS.log) and a
+	// fresh base file is opened. The newest MaxFiles archives are kept;
+	// older ones are pruned by modification time. Implemented natively in
+	// internal/logger/rotate.go — no external dependency.
 	MaxSizeMB int `toml:"max_size_mb"`
 	MaxFiles  int `toml:"max_files"`
 }
@@ -128,6 +128,10 @@ type KeybindingsConfig struct {
 	// disagreements between Quil and the host terminal (most common on
 	// Windows) scramble characters until something repaints everything.
 	Redraw string `toml:"redraw"`
+	// ToggleEager flips the active pane's eager-restore flag. Eager panes
+	// respawn immediately on daemon restart (vs the default lazy deferral) and
+	// show a ● marker on their tab.
+	ToggleEager string `toml:"toggle_eager"`
 }
 
 func Default() Config {
@@ -142,8 +146,8 @@ func Default() Config {
 		},
 		Logging: LoggingConfig{
 			Level:     "info",
-			MaxSizeMB: 10,
-			MaxFiles:  3,
+			MaxSizeMB: 5,
+			MaxFiles:  10,
 		},
 		Security: SecurityConfig{
 			EncryptTokens: true,
@@ -202,7 +206,8 @@ func Default() Config {
 			NotesToggle:        "alt+e",
 			// Mnemonic: Ctrl+L clears/redraws a shell; the Alt+Shift layer
 			// keeps plain Ctrl+L flowing to the PTY.
-			Redraw: "alt+shift+l",
+			Redraw:      "alt+shift+l",
+			ToggleEager: "alt+shift+e",
 		},
 	}
 }

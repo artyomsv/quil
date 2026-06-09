@@ -87,10 +87,15 @@ func TestBroadcast_SlowConnDoesNotBlockFastConn(t *testing.T) {
 	broadcastDur := time.Since(broadcastStart)
 
 	// All Broadcast calls must return promptly even though one peer is
-	// stalled. 1s gives plenty of headroom for CI jitter; the actual cost
-	// is microseconds.
-	if broadcastDur > time.Second {
-		t.Errorf("Broadcast loop blocked: %d broadcasts took %v (want < 1s) — slow client wedged the fan-out", broadcasts, broadcastDur)
+	// stalled. The real failure mode this guards against is a *wedged* fan-out:
+	// a blocked Broadcast would hang on the slow conn until the 30s write
+	// deadline (or forever). The actual healthy cost is microseconds; the
+	// generous 5s ceiling tolerates `-race` instrumentation + loaded-CI jitter
+	// (each broadcast marshals+clones a 4 KiB frame and does atomic-guarded
+	// dual-queue enqueues, all heavily instrumented under the race detector)
+	// while still being far below the seconds-to-30s signature of a real wedge.
+	if broadcastDur > 5*time.Second {
+		t.Errorf("Broadcast loop blocked: %d broadcasts took %v (want < 5s) — slow client wedged the fan-out", broadcasts, broadcastDur)
 	}
 
 	// Fast client must drain enough messages to demonstrate it's still being

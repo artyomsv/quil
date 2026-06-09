@@ -37,17 +37,10 @@ func TestSendLoop_ExitsOnWriteError(t *testing.T) {
 	}
 
 	// Give sendLoop a moment to consume the frame, attempt the write, and
-	// exit on the resulting error.
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		// sendLoop exits when raw.Write errors. After that, our explicit
-		// Close completes cleanly via sync.Once. Check the closed flag —
-		// it's set by Close, so we need to call Close to confirm cleanup.
-		if c.overflow.Load() {
-			break // not the path under test; bail
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	// exit on the resulting error. overflow is never set on this path
+	// (write-error exit is distinct from critical-overflow exit), so we
+	// simply wait a fixed interval for sendLoop to drain and terminate.
+	time.Sleep(100 * time.Millisecond)
 
 	// Explicitly close to release the local pipe half. After Close + a brief
 	// settle, the goroutine count should match baseline (the sendLoop has
@@ -119,5 +112,29 @@ func TestConn_SendFrameAfterCloseShortCircuits(t *testing.T) {
 	msg, _ := NewMessage(MsgStateUpdate, map[string]string{"x": "y"})
 	if err := c.Send(msg); err != ErrSendOverflow {
 		t.Errorf("Send after Close: got %v, want ErrSendOverflow", err)
+	}
+}
+
+// TestEnqueue_DropsOutputFrameWhenFull verifies a full output queue drops the
+// frame (and does NOT trip overflow/close), while the connection stays usable.
+func TestEnqueue_DropsOutputFrameWhenFull(t *testing.T) {
+	t.Parallel()
+	local, remote := net.Pipe()
+	defer remote.Close()
+	c := newConn(local)
+	defer c.Close()
+
+	// Remote never reads → sendLoop blocks on its first write → outCh fills.
+	for i := 0; i < sendBufSize*3; i++ {
+		_ = c.enqueue([]byte{0, 0, 0, 1, byte('x')}, true)
+	}
+	if c.overflow.Load() {
+		t.Errorf("droppable flood must not set overflow")
+	}
+	if c.closed.Load() {
+		t.Errorf("droppable flood must not close the conn")
+	}
+	if c.Dropped() == 0 {
+		t.Errorf("expected some dropped frames after a droppable flood, got 0")
 	}
 }

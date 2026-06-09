@@ -94,8 +94,12 @@ func (w *RotatingWriter) rotate() error {
 		if _, err := os.Stat(dest); os.IsNotExist(err) {
 			break
 		}
+		if i > 100 { // cap: a non-IsNotExist Stat error (perm/I/O) must not spin forever — fall back to the last candidate name
+			break
+		}
 		dest = filepath.Join(w.dir, fmt.Sprintf("%s-%s-%d%s", stem, ts, i, ext))
 	}
+	// Best-effort: on rename failure (cross-device, file locked on Windows) we keep writing to the original path rather than dropping log data.
 	_ = os.Rename(filepath.Join(w.dir, w.base), dest)
 	if err := w.open(); err != nil {
 		return err
@@ -107,6 +111,7 @@ func (w *RotatingWriter) rotate() error {
 // prune deletes all but the newest maxFiles archives (by modification time, so
 // same-second collision suffixes can't fool a name sort).
 func (w *RotatingWriter) prune(stem, ext string) {
+	// Glob only errors on a malformed pattern; len(nil) <= maxFiles short-circuits safely.
 	matches, _ := filepath.Glob(filepath.Join(w.dir, stem+"-*"+ext))
 	if len(matches) <= w.maxFiles {
 		return
@@ -123,8 +128,12 @@ func (w *RotatingWriter) prune(stem, ext string) {
 		}
 		infos = append(infos, fi{m, st.ModTime()})
 	}
+	if len(infos) <= w.maxFiles { // re-check on infos: failed Stats may have dropped entries, so the delete-slice bound must be infos-based to avoid a negative index
+		return
+	}
 	sort.Slice(infos, func(i, j int) bool { return infos[i].mod.Before(infos[j].mod) })
 	for _, old := range infos[:len(infos)-w.maxFiles] {
+		// Best-effort: a failed prune just leaves an old archive on disk; non-fatal.
 		_ = os.Remove(old.path)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -65,4 +66,27 @@ func TestRotatingWriter_RotatesOversizedExistingFileOnOpen(t *testing.T) {
 	if len(archives) != 1 {
 		t.Fatalf("want 1 archive from oversized-on-open, got %d", len(archives))
 	}
+}
+
+func TestRotatingWriter_ConcurrentWrite(t *testing.T) {
+	dir := t.TempDir()
+	w, err := NewRotatingWriter(dir, "quild.log", 1<<20, 10)
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	defer w.Close()
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 64; j++ {
+				if _, err := w.Write([]byte("concurrent line\n")); err != nil {
+					t.Errorf("write: %v", err)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
 }

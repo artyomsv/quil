@@ -29,11 +29,13 @@ import (
 const sendBufSize = 64
 
 // writeDeadline bounds how long a single raw.Write may block inside sendLoop
-// before we give up on the peer. Belt-and-suspenders alongside the sendCh
+// before we give up on the peer. Belt-and-suspenders alongside the critCh
 // overflow detection: under a wedged kernel buffer + a peer that doesn't
-// error on TCP RST, the overflow path is still triggered (sendCh fills →
-// next sendFrame trips overflow), but the deadline guarantees a deterministic
-// cleanup ceiling instead of an indefinite block.
+// error on TCP RST, the overflow path is still triggered (critCh fills →
+// next critical send trips overflow → close), but the deadline guarantees a
+// deterministic cleanup ceiling instead of an indefinite block. Overflow-close
+// applies only to the critical queue; droppable output (outCh) is shed when
+// full and never triggers a close.
 const writeDeadline = 30 * time.Second
 
 // ErrSendOverflow is returned by Conn.Send when the per-conn send buffer is
@@ -134,8 +136,13 @@ func (c *Conn) enqueue(frame []byte, droppable bool) error {
 		select {
 		case c.outCh <- frame:
 		default:
-			n := c.dropped.Add(1)
-			logger.Debug("ipc: dropped output frame (slow client, total=%d)", n)
+			// Throttle the log: during an output storm one line per dropped
+			// frame is noisy exactly when an operator is reading the log. The
+			// counter increment stays unconditional — only the log is gated to
+			// the first drop and every 256th thereafter.
+			if n := c.dropped.Add(1); n == 1 || n%256 == 0 {
+				logger.Debug("ipc: dropped output frame (slow client, total=%d)", n)
+			}
 		}
 		return nil
 	}
@@ -156,6 +163,10 @@ func (c *Conn) enqueue(frame []byte, droppable bool) error {
 		return ErrSendOverflow
 	}
 }
+
+// Dropped returns the number of droppable (live-output) frames discarded
+// because this conn's output queue was full. Test/metrics observability.
+func (c *Conn) Dropped() uint64 { return c.dropped.Load() }
 
 // sendLoop drains the two queues, draining critical first so an output flood
 // can never starve state/responses.

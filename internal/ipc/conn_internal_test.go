@@ -141,4 +141,7 @@ func TestEnqueue_DropsOutputFrameWhenFull(t *testing.T) {
 	if c.closed.Load() {
 		t.Errorf("droppable flood must not close the conn")
 	}
+	if c.Dropped() == 0 {
+		t.Errorf("expected some dropped frames after a droppable flood, got 0")
+	}
 }

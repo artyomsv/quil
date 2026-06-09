@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -166,6 +167,96 @@ func TestEnsurePaneSpawned_ConcurrentSpawnsOnce(t *testing.T) {
 	pane.spawnMu.Unlock()
 	if pending {
 		t.Errorf("Pending should be cleared after spawn")
+	}
+}
+
+// TestEnsurePaneSpawned_ConcurrentWithSnapshot_NoRace exercises the data race
+// fixed by guarding Pane.Type / Pane.CWD under PluginMu. A deferred pane whose
+// saved CWD does NOT exist takes the `pane.CWD = ""` branch on lazy spawn
+// (spawnRestoredPane). That write must be synchronized against snapshot() /
+// buildPaneInfos() readers running on other goroutines.
+//
+// Without the reader-side locking (workspaceStateFromSnapshot / buildPaneInfos
+// reading Type/CWD under PluginMu) this races the writer and `go test -race`
+// reports a data race on Pane.CWD. The assertions are intentionally weak — the
+// real signal is the race detector and the absence of a panic.
+func TestEnsurePaneSpawned_ConcurrentWithSnapshot_NoRace(t *testing.T) {
+	d := newTestDaemon(t)
+
+	// A path that does not exist forces spawnRestoredPane down the
+	// `pane.CWD = ""` branch on the lazy spawn (os.Stat fails).
+	missingCWD := filepath.Join(t.TempDir(), "does-not-exist-"+t.Name())
+
+	pane := &Pane{
+		ID: "pane-00000011", TabID: "tab-00000011", Type: "terminal",
+		CWD: missingCWD, Pending: true,
+		OutputBuf: ringbuf.NewRingBuffer(d.session.bufSize),
+	}
+	d.session.RestoreTab(
+		&Tab{ID: "tab-00000011", Name: "R", Panes: []string{"pane-00000011"}},
+		[]*Pane{pane},
+	)
+
+	var readerWG, writerWG sync.WaitGroup
+	stop := make(chan struct{})
+
+	// Reader goroutine: hammer snapshot() + buildPaneInfos() (both read
+	// Type/CWD) while the writer repeatedly flips CWD on lazy spawn.
+	readerWG.Add(1)
+	go func() {
+		defer readerWG.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				d.snapshot()
+				_ = d.buildPaneInfos()
+			}
+		}
+	}()
+
+	// Writer goroutine: repeatedly reset the pane to the deferred state with a
+	// missing saved CWD, then trigger the lazy spawn. spawnRestoredPane takes
+	// the `pane.CWD = ""` branch each time — a write that must be synchronized
+	// against the readers above. Looping keeps the write window wide so the
+	// race detector reliably observes the conflict when the reader-side lock is
+	// removed (the test would be vacuous against a single one-shot spawn).
+	writerWG.Add(1)
+	go func() {
+		defer writerWG.Done()
+		for i := 0; i < 500; i++ {
+			pane.spawnMu.Lock()
+			pane.Pending = true
+			pane.spawnMu.Unlock()
+			pane.PluginMu.Lock()
+			pane.PTY = nil
+			pane.CWD = missingCWD
+			pane.PluginMu.Unlock()
+			d.ensurePaneSpawned(pane)
+		}
+	}()
+
+	writerWG.Wait()
+	close(stop)
+	readerWG.Wait()
+
+	// The lazy spawn must have completed and cleared the stale CWD.
+	pane.PluginMu.Lock()
+	gotCWD := pane.CWD
+	gotType := pane.Type
+	pane.PluginMu.Unlock()
+	if gotCWD != "" {
+		t.Errorf("missing saved CWD should have been cleared on lazy spawn, got %q", gotCWD)
+	}
+	if gotType != "terminal" {
+		t.Errorf("Type unexpectedly changed: got %q want %q", gotType, "terminal")
+	}
+	pane.spawnMu.Lock()
+	pending := pane.Pending
+	pane.spawnMu.Unlock()
+	if pending {
+		t.Errorf("Pending should be cleared after lazy spawn")
 	}
 }
 

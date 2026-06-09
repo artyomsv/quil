@@ -33,8 +33,13 @@ type Pane struct {
 	// PluginMu protects every mutable field that can be read or written
 	// concurrently with the daemon's PTY-output goroutine: PluginState,
 	// GhostSnap, PTY (the pointer itself + Pid lookups), ExitCode, and
-	// ExitedAt. Immutable post-creation fields (ID, TabID, OutputBuf
-	// pointer, Cols/Rows once set) are read without it.
+	// ExitedAt. Type and CWD also join this set: the lazy-restore path
+	// (spawnRestoredPane via ensurePaneSpawned) rewrites them on its error
+	// branches (CWD="" when the saved dir is gone, Type="terminal" on spawn
+	// fallback) WHILE the IPC server is live, racing snapshot() /
+	// workspaceStateFromSnapshot / buildPaneInfos / handlePaneStatusReq
+	// readers. Immutable post-creation fields (ID, TabID, OutputBuf pointer,
+	// Cols/Rows once set) are read without it.
 	PluginMu     sync.Mutex
 	InstanceName string              // Which instance config was used
 	InstanceArgs []string            // Args used to start (for rerun strategy)

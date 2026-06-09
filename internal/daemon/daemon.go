@@ -543,34 +543,70 @@ func isValidHexID(id, prefix string) bool {
 	return true
 }
 
-// respawnPanes starts a process in each pane that was restored from disk,
-// dispatching to the appropriate resume strategy based on plugin type.
+// respawnPanes starts processes for restored panes. Only the active tab's
+// panes and panes flagged Eager are spawned immediately; everything else is
+// marked Pending and spawned lazily on first access (tab switch or MCP op).
+// This keeps a large-workspace restart from launching N heavy children at once.
 func (d *Daemon) respawnPanes() {
+	active := d.session.ActiveTabID()
 	for _, tab := range d.session.Tabs() {
 		for _, pane := range d.session.Panes(tab.ID) {
 			if pane.PTY != nil {
 				continue // Already has a PTY
 			}
-
-			ptySession := newRestoredPTY(pane)
-			if pane.CWD != "" {
-				if info, err := os.Stat(pane.CWD); err != nil || !info.IsDir() {
-					log.Printf("pane %s: saved cwd %q gone, using default", pane.ID, pane.CWD)
-					pane.CWD = ""
-				}
-			}
-
-			if err := d.spawnPane(pane, ptySession, true); err != nil {
-				log.Printf("respawn pane %s (type=%s): %v — falling back to terminal", pane.ID, pane.Type, err)
-				pane.Type = "terminal"
-				ptySession2 := newRestoredPTY(pane)
-				if err := d.spawnPane(pane, ptySession2, false); err != nil {
-					log.Printf("fallback shell for pane %s also failed: %v", pane.ID, err)
-				}
+			if tab.ID == active || pane.Eager {
+				d.spawnRestoredPane(pane)
 			} else {
-				log.Printf("respawned pane %s (type=%s, cwd=%s, size=%dx%d)", pane.ID, pane.Type, pane.CWD, pane.Cols, pane.Rows)
+				pane.Pending = true
+				log.Printf("respawn: deferring pane %s (type=%s, tab=%s)", pane.ID, pane.Type, tab.ID)
 			}
 		}
+	}
+}
+
+// spawnRestoredPane spawns a single restored pane, applying the saved-cwd
+// sanity check and the fallback-to-terminal recovery. Extracted from
+// respawnPanes so the lazy-spawn path (ensurePaneSpawned) reuses it verbatim.
+func (d *Daemon) spawnRestoredPane(pane *Pane) {
+	ptySession := newRestoredPTY(pane)
+	if pane.CWD != "" {
+		if info, err := os.Stat(pane.CWD); err != nil || !info.IsDir() {
+			log.Printf("pane %s: saved cwd %q gone, using default", pane.ID, pane.CWD)
+			pane.CWD = ""
+		}
+	}
+	if err := d.spawnPane(pane, ptySession, true); err != nil {
+		log.Printf("respawn pane %s (type=%s): %v — falling back to terminal", pane.ID, pane.Type, err)
+		pane.Type = "terminal"
+		ptySession2 := newRestoredPTY(pane)
+		if err := d.spawnPane(pane, ptySession2, false); err != nil {
+			log.Printf("fallback shell for pane %s also failed: %v", pane.ID, err)
+		}
+	} else {
+		log.Printf("respawned pane %s (type=%s, cwd=%s, size=%dx%d)", pane.ID, pane.Type, pane.CWD, pane.Cols, pane.Rows)
+	}
+}
+
+// ensurePaneSpawned spawns a deferred pane on first access. Idempotent and
+// race-safe: the double-check under spawnMu means a tab switch and an MCP op
+// hitting the same pending pane spawn it exactly once.
+//
+// spawnMu (not PluginMu) guards the guard: spawnPane locks PluginMu
+// synchronously on this goroutine, so holding PluginMu here would self-deadlock.
+func (d *Daemon) ensurePaneSpawned(pane *Pane) {
+	pane.spawnMu.Lock()
+	defer pane.spawnMu.Unlock()
+	if pane.PTY != nil || !pane.Pending {
+		return
+	}
+	d.spawnRestoredPane(pane)
+	pane.Pending = false
+}
+
+// ensureTabSpawned spawns every deferred pane in a tab (handles splits).
+func (d *Daemon) ensureTabSpawned(tabID string) {
+	for _, pane := range d.session.Panes(tabID) {
+		d.ensurePaneSpawned(pane)
 	}
 }
 
@@ -581,7 +617,19 @@ func (d *Daemon) respawnPanes() {
 // snapshots where Cols/Rows were never recorded.
 func newRestoredPTY(pane *Pane) apty.Session {
 	if pane.Cols > 0 && pane.Rows > 0 {
-		return apty.NewWithSize(pane.Cols, pane.Rows)
+		return newSessionFn(pane.Cols, pane.Rows)
+	}
+	return newSessionFn(0, 0)
+}
+
+// newSessionFn constructs the PTY session for a restored pane. It is a
+// package-level var (not a direct apty call) so tests can swap in a fake that
+// avoids launching a real /bin/sh child — mirrors the claudeSessionExistsFn /
+// readHookSessionIDFn seams used elsewhere in this file. Production passes
+// (cols, rows); a zero pair means "no persisted size, use the default".
+var newSessionFn = func(cols, rows int) apty.Session {
+	if cols > 0 && rows > 0 {
+		return apty.NewWithSize(cols, rows)
 	}
 	return apty.New()
 }
@@ -837,6 +885,7 @@ func (d *Daemon) handleSwitchTab(msg *ipc.Message) {
 	}
 	log.Printf("tab switch: %s", payload.TabID)
 	d.session.SwitchTab(payload.TabID)
+	d.ensureTabSpawned(payload.TabID)
 	d.broadcastState()
 	d.requestSnapshot()
 }

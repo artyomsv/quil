@@ -60,6 +60,14 @@ type Pane struct {
 	// model + ghost buffer exist but no PTY has been created yet. Runtime-only,
 	// never persisted. Cleared by ensurePaneSpawned.
 	Pending bool
+	// spawnMu serializes the lazy-spawn idempotency guard in ensurePaneSpawned.
+	// It is deliberately SEPARATE from PluginMu: spawnPane locks PluginMu
+	// synchronously on the calling goroutine (preassign_id + PluginState init),
+	// so reusing PluginMu here would self-deadlock (Go mutexes are non-reentrant).
+	// spawnMu is held only across the spawn decision + spawnRestoredPane call, so
+	// two callers (tab switch + MCP op) racing the same Pending pane spawn it
+	// exactly once.
+	spawnMu sync.Mutex
 	// LastHookEventAt is the wall-clock time of the most recent hook event
 	// the daemon translated into a PaneEvent for this pane. Used by
 	// checkIdlePanes to skip the legacy idle excerpt heuristic when hook

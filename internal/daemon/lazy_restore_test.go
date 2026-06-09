@@ -65,7 +65,15 @@ func TestHandleUpdatePane_EagerFieldToggle(t *testing.T) {
 // collide.
 func newTestDaemon(t *testing.T) *Daemon {
 	t.Helper()
-	t.Setenv("QUIL_HOME", t.TempDir())
+	return newTestDaemonInDir(t, t.TempDir())
+}
+
+// newTestDaemonInDir is like newTestDaemon but uses an explicit QUIL_HOME
+// directory. Use this when two daemon instances in the same test must share the
+// same workspace path (e.g. snapshot → restore round-trip tests).
+func newTestDaemonInDir(t *testing.T, dir string) *Daemon {
+	t.Helper()
+	t.Setenv("QUIL_HOME", dir)
 	prev := newSessionFn
 	newSessionFn = func(cols, rows int) apty.Session { return &fakeSession{} }
 	t.Cleanup(func() { newSessionFn = prev })
@@ -363,4 +371,92 @@ func TestBroadcast_NilServerDoesNotPanic(t *testing.T) {
 	}
 	// Must not panic.
 	d.broadcast(msg)
+}
+
+// TestRestoreWorkspace_EagerRoundTrip verifies that Pane.Eager survives a
+// snapshot → restore cycle. workspaceStateFromSnapshot writes
+// paneData["eager"] = true and restoreWorkspace reads it back; this test
+// catches any omission of the write, a key typo, or a wrong type assertion.
+//
+// Two daemon instances share a single QUIL_HOME (set via t.Setenv before
+// constructing either daemon) so d1.snapshot() writes workspace.json and
+// d2.restoreWorkspace() reads the same file. newTestDaemonInDir is used for
+// both so each daemon gets the same fakeSession swap — but since QUIL_HOME is
+// already set before the first call, both daemons resolve config.WorkspacePath()
+// to the shared directory.
+func TestRestoreWorkspace_EagerRoundTrip(t *testing.T) {
+	// Pin a single QUIL_HOME for both daemon instances.
+	quilHome := t.TempDir()
+
+	d1 := newTestDaemonInDir(t, quilHome)
+
+	d1.session.RestoreTab(
+		&Tab{ID: "tab-00000020", Name: "T", Panes: []string{"pane-00000020", "pane-00000021"}},
+		[]*Pane{
+			{ID: "pane-00000020", TabID: "tab-00000020", Type: "terminal", Eager: true},
+			{ID: "pane-00000021", TabID: "tab-00000020", Type: "terminal", Eager: false},
+		},
+	)
+
+	d1.snapshot()
+
+	// Construct a fresh daemon against the same QUIL_HOME and restore the
+	// snapshot written above.
+	d2 := newTestDaemonInDir(t, quilHome)
+	if err := d2.restoreWorkspace(); err != nil {
+		t.Fatalf("restoreWorkspace: %v", err)
+	}
+
+	eagerPane := d2.session.Pane("pane-00000020")
+	if eagerPane == nil {
+		t.Fatalf("eager pane not found after restore")
+	}
+	if !eagerPane.Eager {
+		t.Errorf("Eager=true pane: Eager should be true after round-trip, got false")
+	}
+
+	nonEagerPane := d2.session.Pane("pane-00000021")
+	if nonEagerPane == nil {
+		t.Fatalf("non-eager pane not found after restore")
+	}
+	if nonEagerPane.Eager {
+		t.Errorf("Eager=false pane: Eager should be false after round-trip, got true")
+	}
+}
+
+// TestPaneStatus_DeferredPaneReportsNotRunning verifies that buildPaneStatus
+// (the pure-function half extracted from handlePaneStatusReq) returns
+// Running=false and Pending=true for a deferred pane whose PTY has not yet
+// been spawned, matching the contract of buildPaneInfos / TestListPanes_DeferredPaneReportsNotRunning.
+// It also asserts that the pane's PTY is still nil after the call — buildPaneStatus
+// must not trigger a lazy spawn.
+func TestPaneStatus_DeferredPaneReportsNotRunning(t *testing.T) {
+	d := newTestDaemon(t)
+	pane := &Pane{
+		ID:      "pane-00000022",
+		TabID:   "tab-00000022",
+		Type:    "terminal",
+		Pending: true,
+	}
+	d.session.RestoreTab(
+		&Tab{ID: "tab-00000022", Name: "S", Panes: []string{"pane-00000022"}},
+		[]*Pane{pane},
+	)
+
+	status := d.buildPaneStatus(pane)
+
+	if status.Running {
+		t.Errorf("deferred pane should report Running=false, got true")
+	}
+	if !status.Pending {
+		t.Errorf("deferred pane should report Pending=true, got false")
+	}
+
+	// Non-spawning contract: buildPaneStatus must not trigger ensurePaneSpawned.
+	pane.PluginMu.Lock()
+	ptyAfter := pane.PTY
+	pane.PluginMu.Unlock()
+	if ptyAfter != nil {
+		t.Errorf("buildPaneStatus must not spawn the pane (PTY should remain nil)")
+	}
 }

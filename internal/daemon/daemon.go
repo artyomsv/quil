@@ -2598,6 +2598,35 @@ func (d *Daemon) handleReadPaneOutputReq(conn *ipc.Conn, msg *ipc.Message) {
 	})
 }
 
+// buildPaneStatus returns the status payload for a single pane without
+// spawning it. It mirrors the locking discipline of buildPaneInfos: PluginMu
+// guards Type/CWD/PTY/ExitCode; spawnMu guards Pending. Both critical
+// sections are kept separate (no lock-ordering hazard).
+func (d *Daemon) buildPaneStatus(pane *Pane) ipc.PaneStatusRespPayload {
+	pane.PluginMu.Lock()
+	typ := pane.Type
+	cwd := pane.CWD
+	exitCode := pane.ExitCode
+	running := pane.PTY != nil && exitCode == nil
+	pane.PluginMu.Unlock()
+	if typ == "" {
+		typ = "terminal"
+	}
+	pane.spawnMu.Lock()
+	pending := pane.Pending
+	pane.spawnMu.Unlock()
+
+	return ipc.PaneStatusRespPayload{
+		PaneID:   pane.ID,
+		Running:  running,
+		Pending:  pending,
+		ExitCode: exitCode,
+		Type:     typ,
+		CWD:      cwd,
+		Name:     pane.Name,
+	}
+}
+
 func (d *Daemon) handlePaneStatusReq(conn *ipc.Conn, msg *ipc.Message) {
 	var req ipc.PaneStatusReqPayload
 	if err := msg.DecodePayload(&req); err != nil {
@@ -2616,33 +2645,9 @@ func (d *Daemon) handlePaneStatusReq(conn *ipc.Conn, msg *ipc.Message) {
 	d.highlightPane(pane.ID)
 
 	// Match buildPaneInfos: a deferred pane (PTY==nil) reports Running=false even
-	// though ExitCode is nil, so get_pane_status and list_panes agree. Type, CWD,
-	// ExitCode, PTY are PluginMu-protected (spawnRestoredPane mutates Type/CWD on
-	// the lazy-spawn error paths) — read them in one critical section; Pending is
-	// spawnMu-guarded (separate critical section, never both held at once, no
-	// lock-ordering hazard). This handler stays non-spawning by design.
-	pane.PluginMu.Lock()
-	typ := pane.Type
-	cwd := pane.CWD
-	exitCode := pane.ExitCode
-	running := pane.PTY != nil && exitCode == nil
-	pane.PluginMu.Unlock()
-	if typ == "" {
-		typ = "terminal"
-	}
-	pane.spawnMu.Lock()
-	pending := pane.Pending
-	pane.spawnMu.Unlock()
-
-	respondTo(conn, msg.ID, ipc.MsgPaneStatusResp, ipc.PaneStatusRespPayload{
-		PaneID:   pane.ID,
-		Running:  running,
-		Pending:  pending,
-		ExitCode: exitCode,
-		Type:     typ,
-		CWD:      cwd,
-		Name:     pane.Name,
-	})
+	// though ExitCode is nil, so get_pane_status and list_panes agree. This
+	// handler stays non-spawning by design — see buildPaneStatus.
+	respondTo(conn, msg.ID, ipc.MsgPaneStatusResp, d.buildPaneStatus(pane))
 }
 
 func (d *Daemon) handleCreatePaneReq(conn *ipc.Conn, msg *ipc.Message) {

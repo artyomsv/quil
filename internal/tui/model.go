@@ -1184,7 +1184,7 @@ func (m Model) notesKeyExempt(key string) bool {
 		// Force repaint — view-level, harmless while the editor is open.
 		kb.Redraw,
 		// Notification center.
-		kb.NotificationToggle, kb.NotificationFocus, kb.GoBack, kb.MutePane,
+		kb.NotificationToggle, kb.NotificationFocus, kb.GoBack, kb.MutePane, kb.ToggleEager,
 		// Tools and dialogs.
 		kb.JSONTransform, kb.QuickActions,
 	}
@@ -3339,7 +3339,7 @@ func (m Model) toggleActivePaneMute() tea.Cmd {
 }
 
 // toggleActivePaneEager flips the eager-restore flag on the focused pane and
-// sends the daemon the authoritative update; the tab ● marker updates from the
+// sends the daemon the authoritative update; the eager state updates from the
 // next workspace_state broadcast. No-op if no active pane.
 func (m Model) toggleActivePaneEager() tea.Cmd {
 	tab := m.activeTabModel()

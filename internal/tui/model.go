@@ -2239,7 +2239,7 @@ func (m Model) tabLabel(idx int) string {
 		name = eagerTabMarker + name
 	}
 	if m.tabHasWorkingPane(idx) {
-		name = spinnerFrames[m.workSpinnerFrame%len(spinnerFrames)] + name
+		name = spinnerFrames[m.workSpinnerFrame%len(spinnerFrames)] + " " + name
 	}
 	if idx == m.activeTab {
 		return "* " + name

@@ -47,6 +47,39 @@ func TestSpool_Tick_ReadsAppendedLines(t *testing.T) {
 	}
 }
 
+func TestSpool_Tick_StripsLeadingBOM(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	s := NewSpool(dir)
+	if err := s.Init(); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	path := filepath.Join(dir, "pane-1.jsonl")
+	p := Payload{V: SchemaVersion, PaneID: "pane-1", Source: SourceClaude, HookEvent: "UserPromptSubmit", Title: "Working on: x", Severity: SeverityInfo, TsMs: 1, Seq: 1}
+	b, err := json.Marshal(p)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	// Simulate Windows PowerShell 5.1 `Add-Content -Encoding UTF8`: it
+	// prepends a UTF-8 BOM (EF BB BF) when it CREATES the file, so the first
+	// event line per pane — always the start edge — is BOM-prefixed. Go's
+	// json.Unmarshal rejects a leading BOM, so the reader must strip it.
+	line := append([]byte{0xEF, 0xBB, 0xBF}, b...)
+	line = append(line, '\n')
+	if err := os.WriteFile(path, line, 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	got := s.Tick()
+	if len(got) != 1 {
+		t.Fatalf("Tick: got %d payloads, want 1 (BOM-prefixed first line must parse)", len(got))
+	}
+	if got[0].HookEvent != "UserPromptSubmit" {
+		t.Errorf("got hook_event %q, want UserPromptSubmit", got[0].HookEvent)
+	}
+}
+
 func TestSpool_Tick_OffsetSurvivesAcrossCalls(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

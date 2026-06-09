@@ -122,7 +122,13 @@ function Spool-Event([string]$he, [string]$title, [string]$sev, [string]$dataJso
     $line = $line + '}'
 
     try {
-        Add-Content -Path $spoolFile -Value $line -Encoding UTF8
+        # Write UTF-8 WITHOUT a BOM. Windows PowerShell 5.1's
+        # `Add-Content -Encoding UTF8` prepends a BOM when it CREATES the file,
+        # which makes the daemon's strict json.Unmarshal reject the first JSONL
+        # line per pane (always the start edge). AppendAllText with
+        # UTF8Encoding($false) appends raw bytes only, matching the .sh/.js
+        # producers; the explicit `n keeps the JSONL delimiter as LF.
+        [System.IO.File]::AppendAllText($spoolFile, $line + "`n", (New-Object System.Text.UTF8Encoding $false))
     } catch {
         Write-HookErr ("write spool failed: {0}" -f $_.Exception.Message)
     }

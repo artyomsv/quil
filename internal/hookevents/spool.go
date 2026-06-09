@@ -2,6 +2,7 @@ package hookevents
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,13 @@ import (
 
 	"github.com/artyomsv/quil/internal/logger"
 )
+
+// utf8BOM is the UTF-8 byte-order mark. Windows PowerShell 5.1's
+// `Add-Content -Encoding UTF8` (the claude hook producer on Windows) prepends
+// it when it CREATES a spool file, so the first JSONL line per pane — always
+// the start edge (UserPromptSubmit) — would carry it. Go's encoding/json does
+// not skip a leading BOM, so the reader strips it (see parseAndValidate).
+var utf8BOM = []byte{0xEF, 0xBB, 0xBF}
 
 // rotationThreshold is the per-pane spool size at which we truncate after a
 // fully-drained read. The watcher only ever advances; without rotation a
@@ -226,6 +234,11 @@ func (s *Spool) parseAndValidate(filenamePaneID string, line []byte) (Payload, b
 		s.sampledParseWarn(filenamePaneID, fmt.Sprintf("payload exceeds %d-byte cap (%d bytes)", MaxTotalBytes, len(line)))
 		return Payload{}, false
 	}
+	// Strip a leading UTF-8 BOM before decoding. A BOM-writing producer (the
+	// Windows PowerShell claude hook — see utf8BOM) would otherwise make the
+	// first line per pane fail json.Unmarshal and be silently dropped, losing
+	// the start edge that drives the work-in-progress indicator.
+	line = bytes.TrimPrefix(line, utf8BOM)
 	var p Payload
 	if err := json.Unmarshal(line, &p); err != nil {
 		// Log only the byte size — never the err.Error() which may include

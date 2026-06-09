@@ -331,6 +331,19 @@ export default async function quilSessionTracker(_input) {
       }
     },
 
+    // chat.message — fires when a user message is submitted to the model.
+    // This is opencode's analog of Claude's UserPromptSubmit and marks the
+    // START of a turn. Quil's TUI flips the pane to "working" on this event
+    // and back to idle on session.idle/session.error. Emitting it also
+    // produces a "Working…" notification card, symmetric with Claude.
+    "chat.message": async (_input, _output) => {
+      try {
+        await spool("chat.message", "Working…", "info", {});
+      } catch (e) {
+        await logLine("chat.message handler error: " + (e && e.message ? e.message : String(e)));
+      }
+    },
+
     // Typed permission.ask hook — fires when opencode needs the user to
     // approve a tool use. Surfaces as a "Needs approval: <tool>" event.
     "permission.ask": async (input, _output) => {

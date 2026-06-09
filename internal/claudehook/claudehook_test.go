@@ -4,97 +4,26 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
 
-func TestEnsureScripts_WritesBothVariants(t *testing.T) {
+// TestHookCommand_InvokesNativeSubcommand pins the native hook command shape:
+// the running quild binary is double-quoted (so paths with spaces survive the
+// shell Claude runs the command in) and followed by the claude-hook
+// subcommand.
+func TestHookCommand_InvokesNativeSubcommand(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
-	if err := EnsureScripts(dir); err != nil {
-		t.Fatalf("EnsureScripts: %v", err)
+	exe := `C:\Program Files\quil\quild.exe`
+	cmd := HookCommand(exe)
+	if !strings.Contains(cmd, exe) {
+		t.Errorf("HookCommand %q missing exe path %q", cmd, exe)
 	}
-	hookDir := filepath.Join(dir, "claudehook")
-	for _, name := range []string{unixScriptName, windowsScriptName} {
-		p := filepath.Join(hookDir, name)
-		info, err := os.Stat(p)
-		if err != nil {
-			t.Fatalf("missing %s: %v", p, err)
-		}
-		if info.Size() == 0 {
-			t.Errorf("%s is empty", p)
-		}
+	if !strings.HasSuffix(cmd, " claude-hook") {
+		t.Errorf("HookCommand %q must end with the claude-hook subcommand", cmd)
 	}
-}
-
-func TestEnsureScripts_Idempotent(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	if err := EnsureScripts(dir); err != nil {
-		t.Fatalf("first call: %v", err)
-	}
-	if err := EnsureScripts(dir); err != nil {
-		t.Fatalf("second call: %v", err)
-	}
-}
-
-func TestEnsureScripts_EmptyDir(t *testing.T) {
-	t.Parallel()
-	if err := EnsureScripts(""); err == nil {
-		t.Fatal("expected error for empty quilDir")
-	}
-}
-
-func TestEnsureScripts_RejectsShellUnsafePath(t *testing.T) {
-	t.Parallel()
-	for _, p := range []string{
-		`/tmp/has"quote/quil`,
-		"/tmp/has`backtick/quil",
-		"/tmp/has\nnewline/quil",
-		"/tmp/has$dollar/quil",
-	} {
-		if err := EnsureScripts(p); err == nil {
-			t.Errorf("EnsureScripts(%q) returned nil, expected rejection", p)
-		}
-	}
-}
-
-func TestValidateQuilDir_AcceptsCommonPaths(t *testing.T) {
-	t.Parallel()
-	for _, p := range []string{
-		"/home/user/.quil",
-		`E:\Projects\Stukans\Prototypes\calyx\.quil`,
-		`C:\Users\artjo\.quil`,
-		"/tmp/quil with spaces",
-	} {
-		if err := ValidateQuilDir(p); err != nil {
-			t.Errorf("ValidateQuilDir(%q) = %v, want nil", p, err)
-		}
-	}
-}
-
-func TestScriptPath_PlatformMatchesBinary(t *testing.T) {
-	t.Parallel()
-	p := ScriptPath("/tmp/quil")
-	want := unixScriptName
-	if runtime.GOOS == "windows" {
-		want = windowsScriptName
-	}
-	if filepath.Base(p) != want {
-		t.Errorf("ScriptPath base = %q, want %q", filepath.Base(p), want)
-	}
-}
-
-func TestHookCommand_ContainsScriptPath(t *testing.T) {
-	t.Parallel()
-	quilDir := filepath.Join("C:", "quil-home")
-	if runtime.GOOS != "windows" {
-		quilDir = "/tmp/quil-home"
-	}
-	cmd := HookCommand(quilDir)
-	if !strings.Contains(cmd, ScriptPath(quilDir)) {
-		t.Errorf("HookCommand %q missing ScriptPath %q", cmd, ScriptPath(quilDir))
+	if !strings.HasPrefix(cmd, `"`) {
+		t.Errorf("HookCommand %q must double-quote the exe path for spaces", cmd)
 	}
 }
 

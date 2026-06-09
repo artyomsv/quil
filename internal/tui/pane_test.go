@@ -7,7 +7,8 @@ import (
 	"charm.land/lipgloss/v2"
 )
 
-func TestBuildTopBorderFocus(t *testing.T) {
+func TestBuildTopBorder_Focus_LabelVisibilityByWidth(t *testing.T) {
+	t.Parallel()
 	color := lipgloss.Color("57")
 
 	tests := []struct {
@@ -24,7 +25,7 @@ func TestBuildTopBorderFocus(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := buildTopBorder(tt.width, "", "", color, false, false, false, tt.focus, 0)
+			result := buildTopBorder(tt.width, "", "", color, false, false, false, tt.focus, 0, false, 0)
 			hasLabel := strings.Contains(result, "* FOCUS *")
 			if hasLabel != tt.wantLabel {
 				t.Errorf("width=%d focus=%v: hasLabel=%v, want %v", tt.width, tt.focus, hasLabel, tt.wantLabel)
@@ -33,9 +34,10 @@ func TestBuildTopBorderFocus(t *testing.T) {
 	}
 }
 
-func TestBuildTopBorderFocusCentered(t *testing.T) {
+func TestBuildTopBorder_Focus_CentersLabel(t *testing.T) {
+	t.Parallel()
 	color := lipgloss.Color("57")
-	result := buildTopBorder(40, "", "", color, false, false, false, true, 0)
+	result := buildTopBorder(40, "", "", color, false, false, false, true, 0, false, 0)
 
 	// Find the focus label position — dashes should be roughly equal on both sides
 	idx := strings.Index(result, "* FOCUS *")

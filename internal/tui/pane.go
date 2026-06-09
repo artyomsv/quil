@@ -44,6 +44,8 @@ type PaneModel struct {
 	focusMode      bool                // set by Model before View() when in focus mode
 	mcpHighlight   bool                // set by Model before View() when MCP is interacting
 	liveOutputSeen bool                // first live (non-ghost) output received — settle repaints scheduled
+	working        bool                // true while a claude/opencode turn is in progress (hook-driven)
+	workFrame      int                 // shared spinner frame index, mirrored here for top-border render
 }
 
 // newVTEmulator builds a SafeEmulator for this pane and starts a goroutine
@@ -245,12 +247,12 @@ func (p *PaneModel) View() string {
 			rightLabel = "[muted] " + rightLabel
 		}
 	}
-	topLine := buildTopBorder(p.Width, p.CWD, rightLabel, borderColor, p.ghost, p.resuming, p.preparing, p.focusMode, p.spinnerFrame)
+	topLine := buildTopBorder(p.Width, p.CWD, rightLabel, borderColor, p.ghost, p.resuming, p.preparing, p.focusMode, p.spinnerFrame, p.working, p.workFrame)
 
 	return topLine + "\n" + body
 }
 
-func buildTopBorder(width int, cwd, name string, color color.Color, ghost, resuming, preparing, focus bool, spinnerFrame int) string {
+func buildTopBorder(width int, cwd, name string, color color.Color, ghost, resuming, preparing, focus bool, spinnerFrame int, working bool, workFrame int) string {
 	if ghost {
 		if name == "" {
 			name = "restored"
@@ -284,14 +286,27 @@ func buildTopBorder(width int, cwd, name string, color color.Color, ghost, resum
 		rightLen = len([]rune(rightLabel))
 	}
 
+	// Optional working spinner — a fixed leading segment drawn before the CWD.
+	// Reserved width is excluded from the CWD truncation budget so the spinner
+	// itself is never cut off (the CWD truncates from its left with "…tail").
+	spin := ""
+	spinLen := 0
+	if working {
+		spin = " " + spinnerFrames[workFrame%len(spinnerFrames)]
+		spinLen = 2 // leading space + single-width braille glyph
+	}
+
 	// Left label: CWD, truncated with ellipsis if needed.
 	leftLabel := ""
 	leftLen := 0
 	if cwd != "" {
-		available := innerW - rightLen - 1 // reserve at least 1 dash
+		available := innerW - rightLen - 1 - spinLen // reserve 1 dash + spinner
 		cwdLabel := " " + cwd + " "
 		cwdLabelLen := len([]rune(cwdLabel))
 
+		if available < 0 {
+			available = 0
+		}
 		if cwdLabelLen <= available {
 			leftLabel = cwdLabel
 			leftLen = cwdLabelLen
@@ -302,7 +317,15 @@ func buildTopBorder(width int, cwd, name string, color color.Color, ghost, resum
 			leftLabel = " …" + string(cwdRunes[len(cwdRunes)-maxCwd:]) + " "
 			leftLen = len([]rune(leftLabel))
 		}
+	} else if working {
+		// No CWD but working: still show the spinner with a trailing space.
+		leftLabel = " "
+		leftLen = 1
 	}
+
+	// Prepend the spinner segment (never truncated).
+	leftLabel = spin + leftLabel
+	leftLen += spinLen
 
 	dashes := innerW - leftLen - rightLen
 	if dashes < 0 {

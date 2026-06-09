@@ -34,6 +34,17 @@ func main() {
 		os.Setenv("QUIL_HOME", filepath.Join(filepath.Dir(exe), ".quil"))
 	}
 
+	// Native Claude hook fast-path. Registered via --settings as the command
+	// Claude runs per hook event (see internal/claudehook). It must NOT start
+	// the daemon — it reads the hook JSON on stdin, writes the session-id file
+	// / spool line under $QUIL_HOME, and exits 0 so Claude is never blocked.
+	// Replacing the per-event PowerShell/sh script with this native subcommand
+	// cuts hook latency from ~1-4 s (shell cold start) to tens of ms.
+	if len(os.Args) > 1 && os.Args[1] == "claude-hook" {
+		runClaudeHook()
+		return
+	}
+
 	if len(os.Args) > 1 && os.Args[1] == "version" {
 		fmt.Println("quild v" + version)
 		return

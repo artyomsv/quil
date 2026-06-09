@@ -1,9 +1,16 @@
-// Package claudehook manages Claude Code's SessionStart hook for Quil.
+// Package claudehook manages Claude Code's multi-event hook for Quil.
 //
-// Quil tracks Claude session-id rotation (/clear, compaction, /resume) by
-// registering a SessionStart hook via --settings (inline JSON) when it
-// spawns a claude-code pane. The hook script lives under $QUIL_HOME/claudehook/
-// and writes per-pane session ids to $QUIL_HOME/sessions/<paneID>.id.
+// Quil tracks Claude session-id rotation (/clear, compaction, /resume) and
+// forwards Claude's lifecycle/notification hooks by registering a hook command
+// via --settings (inline JSON) when it spawns a claude-code pane. The hook
+// command invokes the quil daemon binary's `claude-hook` subcommand (see
+// runhook.go + cmd/quild), which reads the hook JSON on stdin and writes the
+// per-pane session id to $QUIL_HOME/sessions/<paneID>.id and/or appends a
+// hookevents JSONL line to $QUIL_HOME/events/<paneID>.jsonl.
+//
+// Invoking the native binary instead of a per-event shell script eliminates
+// the dominant hook latency (PowerShell 5.1 cold start was ~1-4 s) and the
+// hand-rolled JSON escaping the shell producers required.
 //
 // This package never reads or writes ~/.claude/settings.json — the hook is
 // per-invocation, lives entirely under QuilDir, and no user Claude config is
@@ -11,44 +18,15 @@
 package claudehook
 
 import (
-	"embed"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 )
-
-//go:embed scripts/*
-var scripts embed.FS
-
-const (
-	unixScriptName    = "quil-session-hook.sh"
-	windowsScriptName = "quil-session-hook.ps1"
-)
-
-// shellUnsafeChars are characters that, if present in $QUIL_HOME, would let an
-// attacker break out of the quoted hook-command string we hand to Claude. We
-// refuse to install the hook in that case rather than try to escape every
-// shell variant Claude might use to run it.
-const shellUnsafeChars = "\"`$\n\r\t"
-
-// ValidateQuilDir reports an error if quilDir contains characters that cannot
-// be safely embedded in the hook command string. Used by EnsureScripts so the
-// daemon can decide at startup whether to register the hook at all.
-func ValidateQuilDir(quilDir string) error {
-	if quilDir == "" {
-		return errors.New("claudehook: empty quilDir")
-	}
-	if strings.ContainsAny(quilDir, shellUnsafeChars) {
-		return fmt.Errorf("claudehook: quilDir %q contains shell-unsafe characters", quilDir)
-	}
-	return nil
-}
 
 // validatePaneID rejects pane ids that could let a caller escape the sessions
 // directory. Defense-in-depth: today every caller routes through pane IDs
@@ -61,32 +39,12 @@ func validatePaneID(paneID string) error {
 	if strings.ContainsAny(paneID, `/\`) || strings.Contains(paneID, "..") {
 		return fmt.Errorf("claudehook: paneID %q contains path separators or parent traversal", paneID)
 	}
-	return nil
-}
-
-// EnsureScripts writes the embedded SessionStart hook scripts to
-// $quilDir/claudehook/. Each script is written via a temp file + rename so a
-// hook firing concurrently with the rewrite never sees a truncated file.
-// Mirrors shellinit.EnsureInitDir.
-func EnsureScripts(quilDir string) error {
-	if err := ValidateQuilDir(quilDir); err != nil {
-		return err
-	}
-	dir := filepath.Join(quilDir, "claudehook")
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return fmt.Errorf("create claudehook dir: %w", err)
-	}
-	files := map[string]string{
-		filepath.Join(dir, unixScriptName):    "scripts/" + unixScriptName,
-		filepath.Join(dir, windowsScriptName): "scripts/" + windowsScriptName,
-	}
-	for dst, src := range files {
-		data, err := scripts.ReadFile(src)
-		if err != nil {
-			return fmt.Errorf("read embedded %s: %w", src, err)
-		}
-		if err := atomicWrite(dst, data, 0700); err != nil {
-			return fmt.Errorf("write %s: %w", dst, err)
+	// Reject control characters (incl. newline) so a hostile pane id cannot
+	// forge log lines when reflected into the hook log, nor smuggle a NUL that
+	// truncates a path on some platforms. %q in the error escapes them safely.
+	for _, r := range paneID {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("claudehook: paneID %q contains a control character", paneID)
 		}
 	}
 	return nil
@@ -126,30 +84,23 @@ func atomicWrite(path string, data []byte, perm os.FileMode) error {
 	return nil
 }
 
-// ScriptPath returns the absolute path to the hook script for the current
-// platform. The file must have been written by EnsureScripts first.
-func ScriptPath(quilDir string) string {
-	name := unixScriptName
-	if runtime.GOOS == "windows" {
-		name = windowsScriptName
-	}
-	return filepath.Join(quilDir, "claudehook", name)
-}
-
-// HookCommand returns the shell command Claude should execute for the
-// SessionStart hook. EnsureScripts must have validated quilDir first; the
-// returned string is safe to embed in a JSON `command` field that Claude will
-// later shell-execute.
-func HookCommand(quilDir string) string {
-	p := ScriptPath(quilDir)
-	if runtime.GOOS == "windows" {
-		return fmt.Sprintf(`powershell -NoProfile -ExecutionPolicy Bypass -File "%s"`, p)
-	}
-	return fmt.Sprintf(`sh "%s"`, p)
+// HookCommand returns the command Claude runs for each registered hook event.
+// It invokes the running quil daemon binary's `claude-hook` subcommand, which
+// reads the hook JSON on stdin and writes the session-id file / spool line
+// natively. exePath must be the absolute path to the quild binary (the daemon
+// passes os.Executable()); it is double-quoted so paths with spaces work under
+// the shell Claude uses to run hook commands. The command is embedded in the
+// --settings JSON via BuildSettingsJSON, which JSON-escapes it.
+//
+// exePath is the daemon's own binary location — OS-controlled, never user
+// input — so a shell-metacharacter break-out is not a realistic concern; a `"`
+// is illegal in a Windows path and effectively never appears on Unix.
+func HookCommand(exePath string) string {
+	return fmt.Sprintf(`"%s" claude-hook`, exePath)
 }
 
 // settingsSchema mirrors the subset of Claude Code's settings.json format
-// we need to register a SessionStart hook. Only SessionStart is populated.
+// we need to register hooks. Only the forwarded events are populated.
 type settingsSchema struct {
 	Hooks map[string][]hookMatcher `json:"hooks"`
 }
@@ -164,14 +115,13 @@ type hookEntry struct {
 }
 
 // forwardedHookEvents lists the Claude Code hook events Quil registers in
-// the inline --settings JSON. The script branches on hook_event_name from
-// stdin so the same command handles every entry.
+// the inline --settings JSON. The native claude-hook subcommand branches on
+// hook_event_name from stdin so the same command handles every entry.
 //
-// SessionStart is the original — it still writes the session id file used
-// by the resume-args path. The rest are the v1 "default" tier from the
-// hook events plan: notification + permission + lifecycle. PreToolUse /
-// PostToolUse and friends are NOT in this list (too noisy at scale);
-// they are reachable in verbose mode by editing the user config.
+// SessionStart is the original — it writes the session id file used by the
+// resume-args path. The rest are the v1 "default" tier from the hook events
+// plan: notification + permission + lifecycle. PreToolUse / PostToolUse and
+// friends are NOT in this list (too noisy at scale).
 var forwardedHookEvents = []string{
 	"SessionStart",
 	"SessionEnd",
@@ -189,7 +139,7 @@ var forwardedHookEvents = []string{
 
 // BuildSettingsJSON returns the inline JSON string Quil passes to
 // `claude --settings <json>`. Registers Quil's hook command under every
-// entry in forwardedHookEvents — the script then branches on the
+// entry in forwardedHookEvents — the native subcommand then branches on the
 // hook_event_name field of the stdin JSON.
 func BuildSettingsJSON(cmd string) (string, error) {
 	s := settingsSchema{

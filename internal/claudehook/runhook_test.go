@@ -172,6 +172,120 @@ func TestRunHook_SpoolLineIsBOMFreeValidJSON(t *testing.T) {
 	}
 }
 
+// TestRunHook_AllSpoolBranches covers the per-event title/severity/data
+// mapping for every forwarded event that produces a spool line. Each case
+// asserts hook_event, title, severity, and (where applicable) the data field.
+func TestRunHook_AllSpoolBranches(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		stdin    string
+		hookEvt  string
+		wantTit  string
+		wantSev  string
+		dataKey  string
+		dataWant string
+	}{
+		{
+			name:    "SessionEnd",
+			stdin:   `{"hook_event_name":"SessionEnd"}`,
+			hookEvt: "SessionEnd", wantTit: "Session ended", wantSev: "info",
+		},
+		{
+			name:    "Notification",
+			stdin:   `{"hook_event_name":"Notification","message":"Claude is waiting"}`,
+			hookEvt: "Notification", wantTit: "Claude is waiting", wantSev: "warning",
+		},
+		{
+			name:    "PermissionRequest",
+			stdin:   `{"hook_event_name":"PermissionRequest","tool_name":"Bash"}`,
+			hookEvt: "PermissionRequest", wantTit: "Needs approval: Bash", wantSev: "warning",
+			dataKey: "tool", dataWant: "Bash",
+		},
+		{
+			name:    "PreCompact no reason",
+			stdin:   `{"hook_event_name":"PreCompact"}`,
+			hookEvt: "PreCompact", wantTit: "Compacting context", wantSev: "info",
+			dataKey: "reason", dataWant: "",
+		},
+		{
+			name:    "PreCompact with reason",
+			stdin:   `{"hook_event_name":"PreCompact","reason":"auto"}`,
+			hookEvt: "PreCompact", wantTit: "Compacting context (auto)", wantSev: "info",
+			dataKey: "reason", dataWant: "auto",
+		},
+		{
+			name:    "PostCompact",
+			stdin:   `{"hook_event_name":"PostCompact"}`,
+			hookEvt: "PostCompact", wantTit: "Compaction complete", wantSev: "info",
+		},
+		{
+			name:    "SubagentStart",
+			stdin:   `{"hook_event_name":"SubagentStart","agent_type":"Explore"}`,
+			hookEvt: "SubagentStart", wantTit: "Spawned: Explore", wantSev: "info",
+			dataKey: "agent_type", dataWant: "Explore",
+		},
+		{
+			name:    "SubagentStop",
+			stdin:   `{"hook_event_name":"SubagentStop","agent_type":"Explore"}`,
+			hookEvt: "SubagentStop", wantTit: "Explore done", wantSev: "info",
+			dataKey: "agent_type", dataWant: "Explore",
+		},
+		{
+			name:    "TaskCreated",
+			stdin:   `{"hook_event_name":"TaskCreated","content":"write tests"}`,
+			hookEvt: "TaskCreated", wantTit: "Task: write tests", wantSev: "info",
+			dataKey: "content", dataWant: "write tests",
+		},
+		{
+			name:    "TaskCompleted",
+			stdin:   `{"hook_event_name":"TaskCompleted","content":"write tests"}`,
+			hookEvt: "TaskCompleted", wantTit: "✓ write tests", wantSev: "info",
+			dataKey: "content", dataWant: "write tests",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			env := HookEnv{PaneID: "pane-x", QuilDir: dir, Mode: "default"}
+			if err := RunHook(strings.NewReader(tt.stdin), env, 42); err != nil {
+				t.Fatalf("RunHook: %v", err)
+			}
+			got := readSpool(t, dir, "pane-x")
+			if len(got) != 1 {
+				t.Fatalf("spool lines = %d, want 1", len(got))
+			}
+			p := got[0]
+			if p.HookEvent != tt.hookEvt {
+				t.Errorf("hook_event = %q, want %q", p.HookEvent, tt.hookEvt)
+			}
+			if p.Title != tt.wantTit {
+				t.Errorf("title = %q, want %q", p.Title, tt.wantTit)
+			}
+			if p.Severity != tt.wantSev {
+				t.Errorf("sev = %q, want %q", p.Severity, tt.wantSev)
+			}
+			if tt.dataKey != "" && p.Data[tt.dataKey] != tt.dataWant {
+				t.Errorf("data[%q] = %q, want %q", tt.dataKey, p.Data[tt.dataKey], tt.dataWant)
+			}
+		})
+	}
+}
+
+func TestRunHook_RejectsTraversalPaneID(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	env := HookEnv{PaneID: "../escape", QuilDir: dir, Mode: "default"}
+	if err := RunHook(strings.NewReader(`{"hook_event_name":"Stop"}`), env, 1); err == nil {
+		t.Error("expected error for a path-traversal pane id")
+	}
+	// No file should have been written outside the events dir.
+	if _, err := os.Stat(filepath.Join(dir, "events")); !os.IsNotExist(err) {
+		t.Errorf("traversal pane id must not create any spool file (err=%v)", err)
+	}
+}
+
 func TestRunHook_UnknownEvent_NoSpool(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

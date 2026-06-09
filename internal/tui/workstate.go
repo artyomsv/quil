@@ -71,6 +71,9 @@ func (m *Model) applyWorkTransition(paneID, eventType string) tea.Cmd {
 	switch kind {
 	case workStart:
 		pane.working = true
+		// Seed the pane spinner with the shared frame so the tab and pane
+		// glyphs are in sync from the first render (before the next tick).
+		pane.workFrame = m.workSpinnerFrame
 	case workStop:
 		wasWorking := pane.working
 		pane.working = false
@@ -124,4 +127,23 @@ func (m Model) tabFlashing(idx int) bool {
 // workSpinnerTick schedules the next shared work-spinner frame.
 func (m Model) workSpinnerTick() tea.Cmd {
 	return tea.Tick(workSpinnerInterval, func(time.Time) tea.Msg { return workSpinnerTickMsg{} })
+}
+
+// syncPaneMeta copies daemon-authoritative metadata from a PaneInfo onto the
+// local PaneModel during workspace-state reconciliation.
+//
+// Muting a pane clears any in-progress work indicator: the daemon drops a
+// muted pane's hook events at the source, so the completion edge that would
+// normally clear `working` never reaches the TUI. Without this, muting a pane
+// mid-turn would strand its spinner — and keep the 100ms animation tick alive
+// — indefinitely.
+func syncPaneMeta(pane *PaneModel, info *PaneInfo) {
+	pane.Name = info.Name
+	pane.CWD = info.CWD
+	pane.Type = info.Type
+	pane.Muted = info.Muted
+	pane.Eager = info.Eager
+	if info.Muted {
+		pane.working = false
+	}
 }

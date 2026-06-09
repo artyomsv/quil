@@ -62,6 +62,14 @@ func RunHook(r io.Reader, env HookEnv, nowMs int64) error {
 	if env.PaneID == "" {
 		return nil // invoked outside Quil
 	}
+	// Defense-in-depth: the pane id arrives via $QUIL_PANE_ID and is used to
+	// build file paths under sessions/ and events/. The daemon only ever sets
+	// a validated uuid-hex id, but a future/hostile caller must not be able to
+	// escape those dirs or forge a log line. Log without echoing the raw id.
+	if err := validatePaneID(env.PaneID); err != nil {
+		hookLog(env.QuilDir, "invalid", "rejected pane id")
+		return err
+	}
 	if env.Mode == "" {
 		env.Mode = "default"
 	}
@@ -79,7 +87,14 @@ func RunHook(r io.Reader, env HookEnv, nowMs int64) error {
 		hookLog(env.QuilDir, env.PaneID, "parse stdin failed")
 		return err
 	}
+	return dispatchHookEvent(env, in, nowMs)
+}
 
+// dispatchHookEvent routes a decoded Claude hook payload to the session-file
+// writer (SessionStart) or the spool (every other forwarded event). Split out
+// of RunHook so the read/decode/validate path stays short and the per-event
+// mapping is a single focused unit.
+func dispatchHookEvent(env HookEnv, in claudeStdin, nowMs int64) error {
 	switch in.HookEventName {
 	case "SessionStart":
 		return writeSessionFile(env, in.SessionID)

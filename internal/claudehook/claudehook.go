@@ -39,6 +39,14 @@ func validatePaneID(paneID string) error {
 	if strings.ContainsAny(paneID, `/\`) || strings.Contains(paneID, "..") {
 		return fmt.Errorf("claudehook: paneID %q contains path separators or parent traversal", paneID)
 	}
+	// Reject control characters (incl. newline) so a hostile pane id cannot
+	// forge log lines when reflected into the hook log, nor smuggle a NUL that
+	// truncates a path on some platforms. %q in the error escapes them safely.
+	for _, r := range paneID {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("claudehook: paneID %q contains a control character", paneID)
+		}
+	}
 	return nil
 }
 

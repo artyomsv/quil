@@ -7,7 +7,8 @@ import (
 	"charm.land/lipgloss/v2"
 )
 
-func TestBuildTopBorderFocus(t *testing.T) {
+func TestBuildTopBorder_Focus_LabelVisibilityByWidth(t *testing.T) {
+	t.Parallel()
 	color := lipgloss.Color("57")
 
 	tests := []struct {
@@ -33,7 +34,8 @@ func TestBuildTopBorderFocus(t *testing.T) {
 	}
 }
 
-func TestBuildTopBorderFocusCentered(t *testing.T) {
+func TestBuildTopBorder_Focus_CentersLabel(t *testing.T) {
+	t.Parallel()
 	color := lipgloss.Color("57")
 	result := buildTopBorder(40, "", "", color, false, false, false, true, 0, false, 0)
 

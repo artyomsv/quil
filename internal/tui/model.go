@@ -1949,11 +1949,7 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) []string {
 				// Already in tree — just update metadata.
 				if info, ok := paneMap[paneID]; ok {
 					if leaf := tab.Root.FindLeaf(paneID); leaf != nil {
-						leaf.Pane.Name = info.Name
-						leaf.Pane.CWD = info.CWD
-						leaf.Pane.Type = info.Type
-						leaf.Pane.Muted = info.Muted
-						leaf.Pane.Eager = info.Eager
+						syncPaneMeta(leaf.Pane, info)
 					}
 				}
 				continue
@@ -1976,11 +1972,7 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) []string {
 				newPaneIDs = append(newPaneIDs, paneID)
 			}
 			if info, ok := paneMap[paneID]; ok {
-				pane.Name = info.Name
-				pane.CWD = info.CWD
-				pane.Type = info.Type
-				pane.Muted = info.Muted
-				pane.Eager = info.Eager
+				syncPaneMeta(pane, info)
 			}
 
 			// Try to fill a pending split placeholder first.

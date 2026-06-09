@@ -200,6 +200,49 @@ func TestTabLabel_ShowsSpinnerWhenWorking(t *testing.T) {
 	}
 }
 
+func TestSyncPaneMeta_MuteClearsWorking(t *testing.T) {
+	t.Parallel()
+	// Muting a pane mid-turn must clear `working`: the daemon drops a muted
+	// pane's hook events, so the completion edge that would clear it never
+	// arrives — otherwise the spinner (and the 100ms tick) would run forever.
+	pane := NewPaneModel("p1", 1024)
+	pane.working = true
+	syncPaneMeta(pane, &PaneInfo{Muted: true})
+	if pane.working {
+		t.Error("muting a pane must clear its working indicator")
+	}
+
+	// An unmuted metadata sync must not disturb working.
+	pane2 := NewPaneModel("p2", 1024)
+	pane2.working = true
+	syncPaneMeta(pane2, &PaneInfo{Muted: false})
+	if !pane2.working {
+		t.Error("a non-mute metadata sync must not clear working")
+	}
+}
+
+func TestWorkSpinnerTick_FrameWraparoundMirrors(t *testing.T) {
+	t.Parallel()
+	m := modelForWorkTest()
+	m.tabs[0].Root.Leaves()[0].working = true
+	m.workTickRunning = true
+	// Push the frame to the last index so the next tick crosses the modulo
+	// boundary — the raw frame keeps incrementing and the pane mirror must
+	// track it without any out-of-range glyph indexing.
+	m.workSpinnerFrame = len(spinnerFrames) - 1
+	next, _ := m.Update(workSpinnerTickMsg{})
+	nm := next.(Model)
+	if nm.workSpinnerFrame != len(spinnerFrames) {
+		t.Fatalf("frame = %d, want %d", nm.workSpinnerFrame, len(spinnerFrames))
+	}
+	if nm.tabs[0].Root.Leaves()[0].workFrame != len(spinnerFrames) {
+		t.Errorf("pane.workFrame = %d, want %d (mirrors raw frame)",
+			nm.tabs[0].Root.Leaves()[0].workFrame, len(spinnerFrames))
+	}
+	// Rendering at the wrapped frame must not panic (modulo guards the index).
+	_ = nm.tabLabel(0)
+}
+
 func TestTabStyle_FlashOverridesInactive(t *testing.T) {
 	t.Parallel()
 	m := modelForWorkTest()

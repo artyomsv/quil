@@ -143,6 +143,13 @@ type spinnerTickMsg struct {
 	frame  int
 }
 
+// workSpinnerTickMsg advances the shared work-in-progress spinner animation.
+type workSpinnerTickMsg struct{}
+
+// flashTickMsg fires once when a tab's green "just finished" flash expires,
+// forcing a re-render so the tab returns to its normal style.
+type flashTickMsg struct{}
+
 // dialogPasteMsg delivers clipboard content to the active dialog input field.
 type dialogPasteMsg string
 
@@ -292,6 +299,13 @@ type Model struct {
 	// Memory dialog state
 	mem         memoryDialogState
 	lastMemResp *ipc.MemoryReportRespPayload
+
+	// Work-in-progress indicators. Derived TUI-side from the hook event
+	// stream (see internal/tui/workstate.go). workSpinnerFrame is the shared
+	// braille frame for the tab + pane spinners; workTickRunning guards
+	// against starting multiple animation tick loops.
+	workSpinnerFrame int
+	workTickRunning  bool
 }
 
 func NewModel(client *ipc.Client, cfg config.Config, version string, registry *plugin.Registry, stalePlugins []plugin.StalePlugin) Model {
@@ -675,6 +689,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case workSpinnerTickMsg:
+		// Self-stopping loop: only keep ticking while a pane is mid-turn.
+		if !m.anyPaneWorking() {
+			m.workTickRunning = false
+			return m, nil
+		}
+		m.workSpinnerFrame++
+		// Mirror the shared frame onto every working pane so the top-border
+		// spinner (rendered inside PaneModel.View) stays in sync with the tab.
+		for _, tab := range m.tabs {
+			if tab.Root == nil {
+				continue
+			}
+			for _, p := range tab.Root.Leaves() {
+				if p != nil && p.working {
+					p.workFrame = m.workSpinnerFrame
+				}
+			}
+		}
+		return m, m.workSpinnerTick()
+
+	case flashTickMsg:
+		// A tab's green flash expired — returning triggers a re-render and
+		// tabFlashing() recomputes from flashUntil (now in the past).
+		return m, nil
+
 	case PluginErrorMsg:
 		m.dialog = dialogPluginError
 		m.pluginErrorTitle = msg.Title
@@ -757,6 +797,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.notifications.AddEvent(ipc.PaneEventPayload(msg))
 		}
 		cmds := []tea.Cmd{m.listenForMessages()}
+		// Update working state + green-flash from the same hook stream.
+		if flashCmd := m.applyWorkTransition(msg.PaneID, msg.Type); flashCmd != nil {
+			cmds = append(cmds, flashCmd)
+		}
+		if m.anyPaneWorking() && !m.workTickRunning {
+			m.workTickRunning = true
+			cmds = append(cmds, m.workSpinnerTick())
+		}
 		// Refresh sidebar tick if visible (no auto-show — user controls with Alt+N)
 		if m.notifications.visible {
 			cmds = append(cmds, m.sidebarTick())
@@ -2190,10 +2238,36 @@ func (m Model) tabLabel(idx int) string {
 	if m.tabHasEagerPane(idx) {
 		name = eagerTabMarker + name
 	}
+	if m.tabHasWorkingPane(idx) {
+		name = spinnerFrames[m.workSpinnerFrame%len(spinnerFrames)] + name
+	}
 	if idx == m.activeTab {
 		return "* " + name
 	}
 	return name
+}
+
+// tabStyle returns the lipgloss style for the tab at idx. Precedence: green
+// flash (inactive + within flash window) > custom tab color > active/inactive
+// default. Shared by renderTabBar and hitTestTab so rendered widths and click
+// hit-testing never diverge.
+func (m Model) tabStyle(idx int) lipgloss.Style {
+	tab := m.tabs[idx]
+	active := idx == m.activeTab
+	if !active && m.tabFlashing(idx) {
+		return flashTabStyle
+	}
+	if tab.Color != "" {
+		c := lipgloss.Color(tab.Color)
+		if active {
+			return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("230")).Background(c).Padding(0, 1)
+		}
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Background(c).Padding(0, 1)
+	}
+	if active {
+		return activeTabStyle
+	}
+	return inactiveTabStyle
 }
 
 func (m Model) renderTabBar() string {
@@ -2208,22 +2282,9 @@ func (m Model) renderTabBar() string {
 
 	// Pre-render all tabs
 	all := make([]renderedTab, len(m.tabs))
-	for i, tab := range m.tabs {
+	for i := range m.tabs {
 		name := m.tabLabel(i)
-
-		style := inactiveTabStyle
-		if i == m.activeTab {
-			style = activeTabStyle
-		}
-		if tab.Color != "" {
-			c := lipgloss.Color(tab.Color)
-			if i == m.activeTab {
-				style = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("230")).Background(c).Padding(0, 1)
-			} else {
-				style = lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Background(c).Padding(0, 1)
-			}
-		}
-
+		style := m.tabStyle(i)
 		rendered := style.Render(name)
 		all[i] = renderedTab{text: rendered, width: lipgloss.Width(rendered)}
 	}
@@ -2318,22 +2379,9 @@ func (m *Model) hitTestTab(x int) int {
 
 	// Pre-render tab widths using the same styling as renderTabBar.
 	all := make([]renderedTab, len(m.tabs))
-	for i, tab := range m.tabs {
+	for i := range m.tabs {
 		name := m.tabLabel(i)
-
-		style := inactiveTabStyle
-		if i == m.activeTab {
-			style = activeTabStyle
-		}
-		if tab.Color != "" {
-			c := lipgloss.Color(tab.Color)
-			if i == m.activeTab {
-				style = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("230")).Background(c).Padding(0, 1)
-			} else {
-				style = lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Background(c).Padding(0, 1)
-			}
-		}
-
+		style := m.tabStyle(i)
 		rendered := style.Render(name)
 		all[i] = renderedTab{width: lipgloss.Width(rendered), index: i}
 	}

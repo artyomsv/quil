@@ -140,6 +140,20 @@ func (d *Daemon) Start() error {
 		log.Printf("warning: failed to restore workspace: %v", err)
 	}
 
+	// Respawn panes for the restored workspace BEFORE the IPC server starts
+	// listening. respawnPanes writes pane.Pending (unlocked) and the lazy-spawn
+	// path (ensureTabSpawned → ensurePaneSpawned, reachable from a client's
+	// MsgSwitchTab) reads/writes it under spawnMu. Doing all spawn/defer
+	// decisions before any client can connect makes those writes happen-before
+	// every possible concurrent reader — eliminating the data race and the logic
+	// gap where a tab switched-to before its Pending flag was set wouldn't spawn.
+	// respawnPanes only needs d.session + d.registry; emitEvent (via the
+	// streamPTYOutput goroutine) guards on d.server != nil, so a not-yet-assigned
+	// server is safe here.
+	if d.restored {
+		d.respawnPanes()
+	}
+
 	sockPath := config.SocketPath()
 	d.server = ipc.NewServer(sockPath, d.handleMessage, func(conn *ipc.Conn) {
 		d.requestSnapshot()
@@ -148,11 +162,6 @@ func (d *Daemon) Start() error {
 
 	if err := d.server.Start(); err != nil {
 		return fmt.Errorf("start IPC server: %w", err)
-	}
-
-	// Respawn panes for restored workspace
-	if d.restored {
-		d.respawnPanes()
 	}
 
 	go d.idleChecker()
@@ -1885,7 +1894,13 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 	if err := ptySession.Start(cmd, args...); err != nil {
 		return err
 	}
+	// PluginMu protects pane.PTY (per the Pane struct doc): the memReport
+	// collector reads it on a 5s timer goroutine. PluginMu is free here (taken
+	// and released above at the PluginState init); lock ordering stays
+	// spawnMu→PluginMu, consistent with ensurePaneSpawned.
+	pane.PluginMu.Lock()
 	pane.PTY = ptySession
+	pane.PluginMu.Unlock()
 	go d.streamPTYOutput(pane.ID, ptySession)
 	return nil
 }

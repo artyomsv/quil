@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/artyomsv/quil/internal/config"
@@ -53,6 +55,10 @@ func TestHandleUpdatePane_EagerFieldToggle(t *testing.T) {
 //
 // newSessionFn follows the same swappable-package-var pattern this codebase
 // already uses for test seams (claudeSessionExistsFn, readHookSessionIDFn).
+//
+// NOTE: this helper mutates the package-level newSessionFn var, so tests that
+// use it MUST NOT call t.Parallel() — a parallel scheduler would let two stubs
+// collide.
 func newTestDaemon(t *testing.T) *Daemon {
 	t.Helper()
 	t.Setenv("QUIL_HOME", t.TempDir())
@@ -99,5 +105,63 @@ func TestEnsurePaneSpawned_IsIdempotent(t *testing.T) {
 	d.ensurePaneSpawned(pane)
 	if pane.PTY != first {
 		t.Errorf("second ensure must not respawn (PTY pointer changed)")
+	}
+}
+
+// countingSession wraps fakeSession but increments a shared atomic counter on
+// construction so a concurrent test can assert spawnPane ran exactly once.
+type countingSession struct {
+	fakeSession
+}
+
+// TestEnsurePaneSpawned_ConcurrentSpawnsOnce launches N goroutines all racing
+// to spawn the SAME pending pane and asserts the underlying PTY constructor ran
+// exactly once. This is what validates spawnMu actually serializes lazy spawns
+// — the sequential idempotency test proves nothing about concurrency. Run under
+// -race to also catch unsynchronized access to pane.Pending / pane.PTY.
+func TestEnsurePaneSpawned_ConcurrentSpawnsOnce(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+
+	var spawnCount atomic.Int64
+	prev := newSessionFn
+	newSessionFn = func(cols, rows int) apty.Session {
+		spawnCount.Add(1)
+		return &countingSession{}
+	}
+	t.Cleanup(func() { newSessionFn = prev })
+
+	d := New(config.Default())
+	pane := &Pane{ID: "pane-0000000d", TabID: "tab-0000000d", Type: "terminal", Pending: true}
+	d.session.RestoreTab(&Tab{ID: "tab-0000000d", Name: "D", Panes: []string{"pane-0000000d"}}, []*Pane{pane})
+
+	const n = 16
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func() {
+			defer wg.Done()
+			<-start // line everyone up so the race is real
+			d.ensurePaneSpawned(pane)
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	if got := spawnCount.Load(); got != 1 {
+		t.Errorf("PTY constructed %d times, want exactly 1 — spawnMu did not serialize", got)
+	}
+
+	pane.PluginMu.Lock()
+	gotPTY := pane.PTY
+	pane.PluginMu.Unlock()
+	if gotPTY == nil {
+		t.Errorf("pane should be spawned (PTY non-nil) after concurrent ensure")
+	}
+	pane.spawnMu.Lock()
+	pending := pane.Pending
+	pane.spawnMu.Unlock()
+	if pending {
+		t.Errorf("Pending should be cleared after spawn")
 	}
 }

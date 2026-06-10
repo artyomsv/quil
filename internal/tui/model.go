@@ -236,34 +236,34 @@ type Model struct {
 	// for CreatePanePayload.CWD. The two fields exist separately so that the
 	// browser can navigate freely without dirtying the "to be sent" value
 	// until the user actually presses Continue.
-	lastSelectedCWD      string                 // remembers previous CWD selection across pane creations
-	selectedCWD          string                 // CWD chosen in dialogCreatePaneSetup (empty = daemon default)
-	cwdInputError        string                 // validation error shown under CWD input (empty = ok)
-	toggleStates         []bool                 // checkbox states; one entry per plugin's Toggles slice, same indexing
-	setupFieldCursor     int                    // focused field in setup dialog: 0 = CWD (if PromptsCWD), then toggles, then Continue
-	cwdBrowseDir         string                 // current dir shown in the setup dialog's directory browser
-	cwdBrowseEntries     []string               // browser listing: ".." (if not at root) + sorted subdirs
-	cwdBrowseCursor      int                    // selected entry index in cwdBrowseEntries
-	cwdBrowseScroll      int                    // scroll offset (top index) for the visible window of cwdBrowseEntries
-	tomlEditor           *TextEditor            // active TOML editor (nil when not editing)
-	selection            *Selection             // active text selection (nil when none)
-	mouseDown            bool                   // true while left mouse button is held
-	mouseStartX          int                    // screen X of mouse press
-	mouseStartY          int                    // screen Y of mouse press
-	configChanged        bool                   // true when config needs saving on exit
-	disclaimerTipIdx     int                    // random tip index for disclaimer dialog
-	mcpHighlights        map[string]bool        // pane IDs with active MCP highlight
-	mcpHighlightSeq      map[string]int         // sequence number for highlight timer reset
-	notifications        *NotificationCenter    // notification sidebar
-	paneHistory          []PaneRef              // navigation history (bounded, 20 max)
-	sidebarFocused       bool                   // true when notification sidebar has keyboard focus
-	notesMode            bool                   // true when pane notes editor is open for the active pane
-	notesEditor          *NotesEditor           // active notes editor (nil when notesMode is false)
-	notesPaneFocused     bool                   // true when keyboard input goes to the bound pane (PTY) instead of the notes editor
-	notesEnteredFocus    bool                   // true when toggleNotesMode was the one that turned the tab's focus mode on (so exit reverts)
-	notesMouseDown       bool                   // true while a left-button drag is in progress inside the notes editor
-	notesAnchorRow       int                    // document row where a notes-editor drag began (resolved once on click)
-	notesAnchorCol       int                    // document col where a notes-editor drag began (resolved once on click)
+	lastSelectedCWD   string              // remembers previous CWD selection across pane creations
+	selectedCWD       string              // CWD chosen in dialogCreatePaneSetup (empty = daemon default)
+	cwdInputError     string              // validation error shown under CWD input (empty = ok)
+	toggleStates      []bool              // checkbox states; one entry per plugin's Toggles slice, same indexing
+	setupFieldCursor  int                 // focused field in setup dialog: 0 = CWD (if PromptsCWD), then toggles, then Continue
+	cwdBrowseDir      string              // current dir shown in the setup dialog's directory browser
+	cwdBrowseEntries  []string            // browser listing: ".." (if not at root) + sorted subdirs
+	cwdBrowseCursor   int                 // selected entry index in cwdBrowseEntries
+	cwdBrowseScroll   int                 // scroll offset (top index) for the visible window of cwdBrowseEntries
+	tomlEditor        *TextEditor         // active TOML editor (nil when not editing)
+	selection         *Selection          // active text selection (nil when none)
+	mouseDown         bool                // true while left mouse button is held
+	mouseStartX       int                 // screen X of mouse press
+	mouseStartY       int                 // screen Y of mouse press
+	configChanged     bool                // true when config needs saving on exit
+	disclaimerTipIdx  int                 // random tip index for disclaimer dialog
+	mcpHighlights     map[string]bool     // pane IDs with active MCP highlight
+	mcpHighlightSeq   map[string]int      // sequence number for highlight timer reset
+	notifications     *NotificationCenter // notification sidebar
+	paneHistory       []PaneRef           // navigation history (bounded, 20 max)
+	sidebarFocused    bool                // true when notification sidebar has keyboard focus
+	notesMode         bool                // true when pane notes editor is open for the active pane
+	notesEditor       *NotesEditor        // active notes editor (nil when notesMode is false)
+	notesPaneFocused  bool                // true when keyboard input goes to the bound pane (PTY) instead of the notes editor
+	notesEnteredFocus bool                // true when toggleNotesMode was the one that turned the tab's focus mode on (so exit reverts)
+	notesMouseDown    bool                // true while a left-button drag is in progress inside the notes editor
+	notesAnchorRow    int                 // document row where a notes-editor drag began (resolved once on click)
+	notesAnchorCol    int                 // document col where a notes-editor drag began (resolved once on click)
 
 	// Scrollbar click-and-drag. Set on a left-click that hits a pane's
 	// rightmost content column (the scrollbar track). While
@@ -306,6 +306,13 @@ type Model struct {
 	// against starting multiple animation tick loops.
 	workSpinnerFrame int
 	workTickRunning  bool
+
+	// sidebarTickRunning and notesTickRunning guard against stacking multiple
+	// self-perpetuating tick chains (one immortal chain per unguarded schedule
+	// call). Each chain clears its flag when it decides not to reschedule,
+	// allowing a fresh chain to start on the next trigger.
+	sidebarTickRunning bool
+	notesTickRunning   bool
 }
 
 func NewModel(client *ipc.Client, cfg config.Config, version string, registry *plugin.Registry, stalePlugins []plugin.StalePlugin) Model {
@@ -364,12 +371,57 @@ func (m Model) Init() tea.Cmd {
 	return tea.Batch(m.listenForMessages(), memoryTickCmd(), sizePollTick())
 }
 
+// msgTypeName avoids per-Update reflection for the hot message types; the
+// default arm keeps unknown types observable via fmt.Sprintf("%T", msg).
+func msgTypeName(msg tea.Msg) string {
+	switch msg.(type) {
+	case PaneOutputMsg:
+		return "tui.PaneOutputMsg"
+	case paneEventMsg:
+		return "tui.paneEventMsg"
+	case tea.KeyPressMsg:
+		return "tea.KeyPressMsg"
+	case tea.MouseMotionMsg:
+		return "tea.MouseMotionMsg"
+	case tea.MouseClickMsg:
+		return "tea.MouseClickMsg"
+	case tea.MouseWheelMsg:
+		return "tea.MouseWheelMsg"
+	case tea.MouseReleaseMsg:
+		return "tea.MouseReleaseMsg"
+	case tea.WindowSizeMsg:
+		return "tea.WindowSizeMsg"
+	case sizePollMsg:
+		return "tui.sizePollMsg"
+	case resizeTickMsg:
+		return "tui.resizeTickMsg"
+	case workSpinnerTickMsg:
+		return "tui.workSpinnerTickMsg"
+	case spinnerTickMsg:
+		return "tui.spinnerTickMsg"
+	case flashTickMsg:
+		return "tui.flashTickMsg"
+	case sidebarTickMsg:
+		return "tui.sidebarTickMsg"
+	case notesTickMsg:
+		return "tui.notesTickMsg"
+	case memoryTickMsg:
+		return "tui.memoryTickMsg"
+	case listenContinueMsg:
+		return "tui.listenContinueMsg"
+	case WorkspaceStateMsg:
+		return "tui.WorkspaceStateMsg"
+	default:
+		return fmt.Sprintf("%T", msg)
+	}
+}
+
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	start := time.Now()
 	markUpdateStart(start)
 	defer func() {
 		markUpdateEnd()
-		m.perfStats.recordMsg(fmt.Sprintf("%T", msg), time.Since(start))
+		m.perfStats.recordMsg(msgTypeName(msg), time.Since(start))
 	}()
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -711,7 +763,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if tab.Root == nil {
 				continue
 			}
-			for _, p := range tab.Root.Leaves() {
+			for _, p := range tab.Leaves() {
 				if p != nil && p.working {
 					p.workFrame = m.workSpinnerFrame
 				}
@@ -820,23 +872,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Refresh sidebar tick if visible (no auto-show — user controls with Alt+N)
 		if m.notifications.visible {
-			cmds = append(cmds, m.sidebarTick())
+			cmds = append(cmds, m.startSidebarTick())
 		}
 		return m, tea.Batch(cmds...)
 
 	case sidebarTickMsg:
 		// Re-render sidebar to update relative timestamps; schedule next tick if still visible
 		if m.notifications.visible && m.notifications.Count() > 0 {
-			return m, m.sidebarTick()
+			return m, m.sidebarTick() // chain continues; running flag stays set
 		}
+		m.sidebarTickRunning = false
 		return m, nil
 
 	case notesTickMsg:
 		// Debounce check: save if dirty and idle for >= notesDebounceWindow.
 		if m.notesMode && m.notesEditor != nil {
 			m.notesEditor.MaybeAutoSave()
-			return m, m.notesTick()
+			return m, m.notesTick() // chain continues; running flag stays set
 		}
+		m.notesTickRunning = false
 		return m, nil
 
 	case memoryTickMsg:
@@ -1024,7 +1078,7 @@ func (m *Model) activePaneByID(id string) *PaneModel {
 	if tab == nil || tab.Root == nil {
 		return nil
 	}
-	for _, p := range tab.Root.Leaves() {
+	for _, p := range tab.Leaves() {
 		if p.ID == id {
 			return p
 		}
@@ -1032,6 +1086,8 @@ func (m *Model) activePaneByID(id string) *PaneModel {
 	return nil
 }
 
+// sidebarTick schedules the next relative-timestamp refresh for the
+// notification sidebar.
 func (m Model) sidebarTick() tea.Cmd {
 	return tea.Tick(10*time.Second, func(_ time.Time) tea.Msg {
 		return sidebarTickMsg{}
@@ -1043,6 +1099,27 @@ func (m Model) notesTick() tea.Cmd {
 	return tea.Tick(notesTickInterval, func(_ time.Time) tea.Msg {
 		return notesTickMsg{}
 	})
+}
+
+// startSidebarTick schedules the sidebar refresh chain unless one is already
+// in flight. Mirrors workTickRunning: the chain self-perpetuates inside the
+// sidebarTickMsg handler, so unguarded scheduling stacks immortal chains.
+func (m *Model) startSidebarTick() tea.Cmd {
+	if m.sidebarTickRunning {
+		return nil
+	}
+	m.sidebarTickRunning = true
+	return m.sidebarTick()
+}
+
+// startNotesTick schedules the notes auto-save debounce chain unless one is
+// already in flight. Same immortal-chain guard as startSidebarTick.
+func (m *Model) startNotesTick() tea.Cmd {
+	if m.notesTickRunning {
+		return nil
+	}
+	m.notesTickRunning = true
+	return m.notesTick()
 }
 
 // toggleNotesMode opens the notes editor for the active pane, or closes
@@ -1084,7 +1161,7 @@ func (m Model) toggleNotesMode() (tea.Model, tea.Cmd) {
 	m.notesEditor = editor
 	m.notesEnteredFocus = enteredFocus
 	m.notesPaneFocused = false // editor starts focused so the user can immediately type
-	return m, tea.Batch(tea.ClearScreen, m.resizeAllPanes(), m.notesTick())
+	return m, tea.Batch(tea.ClearScreen, m.resizeAllPanes(), m.startNotesTick())
 }
 
 // notesEditorBox computes the screen bounding box of the bordered notes
@@ -1346,7 +1423,7 @@ func (m Model) View() tea.View {
 			tab.Resize(m.width-sidebarW-notesW, tabH)
 			// Pass per-frame state to panes for rendering
 			if tab.Root != nil {
-				for _, pane := range tab.Root.Leaves() {
+				for _, pane := range tab.Leaves() {
 					pane.activeSel = m.selection
 					pane.focusMode = tab.FocusMode() && pane.ID == tab.ActivePane
 					pane.mcpHighlight = m.mcpHighlights[pane.ID]
@@ -1470,7 +1547,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.notifications.visible = !m.notifications.visible
 		m.sidebarFocused = false
 		if m.notifications.visible {
-			return m, tea.Batch(tea.ClearScreen, m.resizeAllPanes(), m.sidebarTick())
+			return m, tea.Batch(tea.ClearScreen, m.resizeAllPanes(), m.startSidebarTick())
 		}
 		return m, tea.Batch(tea.ClearScreen, m.resizeAllPanes())
 	case kbMatches(key, kb.NotificationFocus):
@@ -1479,7 +1556,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.notifications.visible = true
 		}
 		m.sidebarFocused = true
-		return m, tea.Batch(tea.ClearScreen, m.resizeAllPanes(), m.sidebarTick())
+		return m, tea.Batch(tea.ClearScreen, m.resizeAllPanes(), m.startSidebarTick())
 	case kbMatches(key, kb.GoBack):
 		return m.popPaneHistory()
 	case kbMatches(key, kb.MutePane):
@@ -1617,6 +1694,17 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// it grows the conhost grid if the window outgrew it (legacy
 		// conhost never grows it back itself) and re-queries the size.
 		// ClearScreen alone would repaint the same stale-size frame.
+		// Also drop every pane's render cache and every tab's leaves cache —
+		// the user-facing escape hatch for a hypothetical stale-cache bug
+		// (a renderKey field gap or a missed leaves invalidation).
+		for _, tab := range m.tabs {
+			tab.invalidateLeaves()
+			if tab.Root != nil {
+				for _, pane := range tab.Leaves() {
+					pane.invalidateRenderCache()
+				}
+			}
+		}
 		return m, tea.Batch(tea.ClearScreen, sizePollProbe)
 
 	case kbMatches(key, kb.ScrollPageUp):
@@ -1900,7 +1988,7 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) []string {
 	for _, tab := range m.tabs {
 		existingTabs[tab.ID] = tab
 		if tab.Root != nil {
-			for _, pane := range tab.Root.Leaves() {
+			for _, pane := range tab.Leaves() {
 				existingPanes[pane.ID] = pane
 			}
 		}
@@ -1992,6 +2080,7 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) []string {
 			if m.pendingSplit != nil {
 				if placeholder, ok := m.pendingSplit[tab.ID]; ok {
 					placeholder.Pane = pane
+					tab.invalidateLeaves()
 					delete(m.pendingSplit, tab.ID)
 					// Focus the new pane (it replaced the previously active one)
 					tab.ActivePane = pane.ID
@@ -2002,19 +2091,22 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) []string {
 			// Fallback: insert at root level.
 			if tab.Root == nil {
 				tab.Root = NewLeaf(pane)
+				tab.invalidateLeaves()
 			} else {
 				// Split the root horizontally to accommodate the new pane.
-				tab.Root.SplitLeaf(tab.Root.Leaves()[0].ID, SplitVertical)
+				tab.Root.SplitLeaf(tab.Leaves()[0].ID, SplitVertical)
 				tab.Root.FillPlaceholder(pane)
+				tab.invalidateLeaves()
 			}
 		}
 
 		// Clean up any unfilled placeholders (e.g., rapid double-splits).
 		if tab.Root != nil {
 			tab.Root.PrunePlaceholders()
+			tab.invalidateLeaves()
 		}
 		if tab.Root != nil {
-			log.Printf("apply: tab %s panes reconciled (n=%d leaves)", tab.ID, len(tab.Root.Leaves()))
+			log.Printf("apply: tab %s panes reconciled (n=%d leaves)", tab.ID, len(tab.Leaves()))
 		} else {
 			log.Printf("apply: tab %s panes reconciled (root=nil)", tab.ID)
 		}
@@ -2022,6 +2114,24 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) []string {
 		m.finalizeTabPanes(tab)
 		log.Printf("apply: tab %s finalized", tab.ID)
 		m.tabs = append(m.tabs, tab)
+	}
+
+	// Dispose panes that did not survive reconciliation — both panes pruned
+	// from surviving tabs and every pane of tabs the daemon dropped. Without
+	// this, each removed pane leaks its VT emulator (drain goroutine +
+	// scrollback grid) for the TUI session's lifetime.
+	surviving := make(map[string]bool)
+	for _, tab := range m.tabs {
+		if tab.Root != nil {
+			for id := range tab.Root.PaneIDs() {
+				surviving[id] = true
+			}
+		}
+	}
+	for id, pane := range existingPanes {
+		if !surviving[id] {
+			pane.Dispose()
+		}
 	}
 
 	for i, tab := range m.tabs {
@@ -2061,7 +2171,7 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) []string {
 			m.exitNotesModeInPlace()
 		} else if boundTab.ActivePane != bound {
 			log.Printf("notes: bound pane %s is no longer active (active=%s) — re-syncing", bound, boundTab.ActivePane)
-			for _, p := range boundTab.Root.Leaves() {
+			for _, p := range boundTab.Leaves() {
 				p.Active = (p.ID == bound)
 			}
 			boundTab.ActivePane = bound
@@ -2102,6 +2212,7 @@ func (m *Model) restoreTabLayout(tab *TabModel, tabInfo TabInfo, paneMap map[str
 		if tab.Root != nil {
 			tab.Root.PrunePlaceholders()
 		}
+		tab.invalidateLeaves()
 	}
 
 	// Add any panes not in the deserialized tree (e.g., created while TUI was away).
@@ -2117,9 +2228,10 @@ func (m *Model) restoreTabLayout(tab *TabModel, tabInfo TabInfo, paneMap map[str
 		if tab.Root == nil {
 			tab.Root = NewLeaf(pane)
 		} else {
-			tab.Root.SplitLeaf(tab.Root.Leaves()[0].ID, SplitVertical)
+			tab.Root.SplitLeaf(tab.Leaves()[0].ID, SplitVertical)
 			tab.Root.FillPlaceholder(pane)
 		}
+		tab.invalidateLeaves()
 	}
 
 	m.finalizeTabPanes(tab)
@@ -2131,7 +2243,7 @@ func (m *Model) finalizeTabPanes(tab *TabModel) {
 	if tab.Root == nil {
 		return
 	}
-	leaves := tab.Root.Leaves()
+	leaves := tab.Leaves()
 	if len(leaves) == 0 {
 		return
 	}
@@ -2222,7 +2334,7 @@ func (m Model) tabHasEagerPane(idx int) bool {
 	if m.tabs[idx].Root == nil {
 		return false
 	}
-	for _, p := range m.tabs[idx].Root.Leaves() {
+	for _, p := range m.tabs[idx].Leaves() {
 		if p != nil && p.Eager {
 			return true
 		}
@@ -2507,7 +2619,7 @@ func (m Model) renderStatusBar() string {
 	} else if tab := m.activeTabModel(); tab != nil {
 		paneCount := 0
 		if tab.Root != nil {
-			paneCount = len(tab.Root.Leaves())
+			paneCount = len(tab.Leaves())
 		}
 		paneInfo := fmt.Sprintf("tab %d/%d  panes:%d", m.activeTab+1, len(m.tabs), paneCount)
 
@@ -3346,7 +3458,7 @@ func (m Model) resizeAllPanes() tea.Cmd {
 			if tab.Root == nil {
 				continue
 			}
-			for _, pane := range tab.Root.Leaves() {
+			for _, pane := range tab.Leaves() {
 				cols := pane.Width - 2 // subtract border
 				rows := pane.Height - 2
 				if cols < 1 {

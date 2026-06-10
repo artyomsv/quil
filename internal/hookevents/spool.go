@@ -318,6 +318,7 @@ func (s *Spool) Cleanup(paneID string) {
 
 	s.mu.Lock()
 	delete(s.offsets, paneID)
+	delete(s.parseErrCounts, paneID)
 	s.mu.Unlock()
 
 	path := filepath.Join(s.dir, paneID+".jsonl")

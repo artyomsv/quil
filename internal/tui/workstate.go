@@ -113,7 +113,7 @@ func (m Model) anyPaneWorking() bool {
 		if tab.Root == nil {
 			continue
 		}
-		for _, p := range tab.Root.Leaves() {
+		for _, p := range tab.Leaves() {
 			if p != nil && p.working {
 				return true
 			}
@@ -127,7 +127,7 @@ func (m Model) tabHasWorkingPane(idx int) bool {
 	if idx < 0 || idx >= len(m.tabs) || m.tabs[idx].Root == nil {
 		return false
 	}
-	for _, p := range m.tabs[idx].Root.Leaves() {
+	for _, p := range m.tabs[idx].Leaves() {
 		if p != nil && p.working {
 			return true
 		}

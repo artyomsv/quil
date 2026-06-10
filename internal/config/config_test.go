@@ -3,6 +3,8 @@ package config_test
 import (
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/artyomsv/quil/internal/config"
@@ -137,6 +139,37 @@ func TestPathHelpers(t *testing.T) {
 			got := tt.fn()
 			if got != tt.expected {
 				t.Errorf("got %s, want %s", got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestIsDefaultQuilDir(t *testing.T) {
+	def := config.DefaultQuilDir()
+	if def == "" {
+		t.Skip("no home dir on this runner")
+	}
+	tests := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"exact default", def, true},
+		{"trailing separator", def + string(filepath.Separator), true},
+		{"different dir", filepath.Join(def, "sub"), false},
+		{"empty", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := config.IsDefaultQuilDir(tt.in); got != tt.want {
+				t.Errorf("IsDefaultQuilDir(%q) = %v, want %v", tt.in, got, tt.want)
+			}
+		})
+	}
+	if runtime.GOOS == "windows" {
+		t.Run("case insensitive on windows", func(t *testing.T) {
+			if !config.IsDefaultQuilDir(strings.ToUpper(def)) {
+				t.Errorf("IsDefaultQuilDir(%q) = false, want true (Windows paths are case-insensitive)", strings.ToUpper(def))
 			}
 		})
 	}

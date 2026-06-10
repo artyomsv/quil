@@ -4,11 +4,12 @@
 // pane. Two responsibilities:
 //
 //   1. Session-id rotation tracking (original behaviour). Writes the current
-//      session id to $QUIL_HOME/sessions/opencode-<paneID>.id; consulted by
-//      Quil's restore path to decide between --session <id> and --continue.
+//      session id to $QUIL_HOOK_HOME/sessions/opencode-<paneID>.id (legacy
+//      $QUIL_HOME fallback for one release); consulted by Quil's restore
+//      path to decide between --session <id> and --continue.
 //
 //   2. Hook events forwarding (Phase C). Appends one JSONL line to
-//      $QUIL_HOME/events/<paneID>.jsonl per filtered bus event so the
+//      $QUIL_HOOK_HOME/events/<paneID>.jsonl per filtered bus event so the
 //      daemon's hookEventsWatcher can translate them into PaneEvents.
 //      Filtered to the "default" tier from the hook events plan:
 //      session.idle/error/compacted, session.status retry-only,
@@ -44,7 +45,7 @@ const FILE_EDITED_BATCH_MS = 1000;
 
 export default async function quilSessionTracker(_input) {
   const paneId = process.env.QUIL_PANE_ID || "";
-  const quilHome = process.env.QUIL_HOME || "";
+  const quilHome = process.env.QUIL_HOOK_HOME || process.env.QUIL_HOME || "";
   // Tier gate: "default" forwards the standard event set, "verbose" would
   // add tier-2 (tool.execute.before/after for read-only tools — currently
   // not wired), "off" disables all spool emission while preserving the
@@ -52,10 +53,10 @@ export default async function quilSessionTracker(_input) {
   const hookMode = process.env.QUIL_HOOK_MODE || "default";
   if (!paneId || !quilHome) return {};
   if (!PANE_ID_RE.test(paneId)) return {};
-  // Defense-in-depth: the daemon controls QUIL_HOME but a leaked/forwarded
-  // env from a hostile parent could still contain a NUL terminator that
-  // truncates the path silently on some platforms. Bail before constructing
-  // any filesystem paths.
+  // Defense-in-depth: the daemon controls QUIL_HOOK_HOME (legacy QUIL_HOME
+  // fallback) but a leaked/forwarded env from a hostile parent could still
+  // contain a NUL terminator that truncates the path silently on some
+  // platforms. Bail before constructing any filesystem paths.
   if (quilHome.includes("\0")) return {};
 
   const sessionsDir = join(quilHome, "sessions");

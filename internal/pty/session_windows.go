@@ -97,15 +97,22 @@ func (s *winSession) Pid() int {
 }
 
 func (s *winSession) WaitExit() int {
-	if s.handle == 0 {
-		return -1
-	}
 	s.waitOnce.Do(func() {
+		if s.handle == 0 {
+			return
+		}
 		windows.WaitForSingleObject(s.handle, windows.INFINITE)
 		var code uint32
 		if err := windows.GetExitCodeProcess(s.handle, &code); err == nil {
 			s.exitCode = int(code)
 		}
+		// The kernel keeps the process object alive while any handle is
+		// open; without this Close the daemon retains one HANDLE per
+		// destroyed/restarted pane for its whole lifetime. The error is
+		// discarded: after a successful wait the handle is known-valid, and
+		// a CloseHandle failure has no recovery path.
+		_ = windows.CloseHandle(s.handle)
+		s.handle = 0
 	})
 	return s.exitCode
 }

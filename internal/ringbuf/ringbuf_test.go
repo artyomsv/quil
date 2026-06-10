@@ -86,3 +86,72 @@ func TestRingBufferEmptyWrite(t *testing.T) {
 		t.Fatalf("expected len 0 after empty writes, got %d", rb.Len())
 	}
 }
+
+func TestRingBuffer_TailReturnsLastN(t *testing.T) {
+	rb := NewRingBuffer(8)
+	rb.Write([]byte("abcdefghij")) // wraps: buffer holds "cdefghij"
+
+	tests := []struct {
+		n    int
+		want string
+	}{
+		{4, "ghij"},
+		{8, "cdefghij"},
+		{20, "cdefghij"}, // n > Len → everything
+		{0, ""},
+	}
+	for _, tt := range tests {
+		if got := string(rb.Tail(tt.n)); got != tt.want {
+			t.Errorf("Tail(%d) = %q, want %q", tt.n, got, tt.want)
+		}
+	}
+}
+
+func TestRingBuffer_GenIncrementsOnMutation(t *testing.T) {
+	rb := NewRingBuffer(8)
+	g0 := rb.Gen()
+	rb.Write([]byte("ab"))
+	if rb.Gen() == g0 {
+		t.Error("Gen unchanged after Write")
+	}
+	g1 := rb.Gen()
+	rb.Reset()
+	if rb.Gen() == g1 {
+		t.Error("Gen unchanged after Reset")
+	}
+	g2 := rb.Gen()
+	if rb.Gen() != g2 {
+		t.Error("Gen changed without mutation")
+	}
+}
+
+// TestRingBuffer_WriteSteadyStateZeroAllocs pins the entire point of the
+// rewrite: the old implementation reallocated + copied the full buffer on
+// every write once full.
+func TestRingBuffer_WriteSteadyStateZeroAllocs(t *testing.T) {
+	rb := NewRingBuffer(4096)
+	rb.Write(make([]byte, 4096)) // reach steady state (full)
+	chunk := make([]byte, 512)
+	allocs := testing.AllocsPerRun(100, func() {
+		rb.Write(chunk)
+	})
+	if allocs != 0 {
+		t.Errorf("steady-state Write allocates %.1f times per call, want 0", allocs)
+	}
+}
+
+func TestRingBuffer_WrapContentMatchesNaive(t *testing.T) {
+	rb := NewRingBuffer(100)
+	var naive []byte
+	for i := 0; i < 50; i++ {
+		chunk := bytes.Repeat([]byte{byte('a' + i%26)}, 7+i%13)
+		rb.Write(chunk)
+		naive = append(naive, chunk...)
+		if len(naive) > 100 {
+			naive = naive[len(naive)-100:]
+		}
+		if !bytes.Equal(rb.Bytes(), naive) {
+			t.Fatalf("iteration %d: ring %q != naive %q", i, rb.Bytes(), naive)
+		}
+	}
+}

@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **TUI render path stops rebuilding unchanged frames** — every Bubble Tea update used to re-render the full VT grid, borders, and labels of every visible pane (hundreds of times per second under streaming output; the 100 ms spinner tick alone forced full-tab rebuilds). Pane frames are now cached behind a complete render fingerprint (content/selection generations + every visual input), tab pane-lists are memoized until the layout tree mutates (the tab bar walked every tab's tree twice per render), and the per-update perf instrumentation no longer does reflection. `Alt+Shift+L` (redraw) also clears the caches as the escape hatch.
+- **Daemon hot paths rebuilt for allocation-free steady state** — the per-pane output ring buffer is now a true circular buffer (the old implementation reallocated and copied the full 256 KB backing array on every write once full — the daemon's dominant GC pressure under chatty AI panes; steady-state writes are now zero-allocation). Snapshots skip ghost buffers unchanged since the last write via a ring-buffer generation counter (previously every 30 s snapshot rewrote all buffer files — ~20 GB/day of identical bytes). Notification excerpts and idle analysis read only the trailing 4 KiB window (`RingBuffer.Tail`) instead of copying the whole ring per event. IPC framing builds each wire frame in a single allocation (replacing a marshal → buffer → clone chain) and reads through a buffered reader (halves read syscalls; removes a per-message allocation).
+
+### Fixed
+
+- **TUI: closed panes no longer leak VT emulators** — every pane removed from the layout (Ctrl+W, tab close, pane replace, daemon-side destroy) left its VT emulator's drain goroutine parked forever, pinning a 10,000-line scrollback grid per closed pane. `applyWorkspaceState` now disposes the emulators of panes that did not survive reconciliation.
+- **TUI: notification-sidebar refresh chains no longer stack** — every pane event with the sidebar open started an additional self-perpetuating 10 s re-render chain (50 events → 50 immortal chains → constant background CPU). Scheduling is now guarded by a running flag, mirroring the work-spinner pattern; the notes auto-save chain got the same guard.
+- **Daemon: PTY output coalescer is bounded** — the 2 ms coalescing timer is a debounce, so a PTY streaming without gaps (`cat bigfile`) grew the accumulator and the resulting broadcast frame without bound. Flushes are now capped at 64 KiB.
+- **Daemon: tab destroy and pane replace clean hook artifacts** — only direct pane destroy released the hook spool file, spool/ingester map entries, and session-id files; panes destroyed via tab close or replace leaked them, and the spool watcher kept re-polling the dead file every 200 ms. All destroy paths now share one `cleanupPaneArtifacts` helper (which also unlinks the persisted session-id files — previously never removed by any path).
+- **Windows: child-process handles are released** — `WaitExit` now closes the process HANDLE after reaping the exit code; previously one kernel handle leaked per destroyed/restarted pane for the daemon's lifetime.
+- **Second daemon no longer bricks the running one** — `quild` now probes the socket before starting and refuses when a live daemon is already serving the same `QUIL_HOME`, instead of unlinking the live socket and overwriting `quild.pid` (which left the original daemon unreachable for every new client). A stale socket with nothing listening behind it still starts normally.
+- **Dev builds no longer silently target production state** — pane environments now carry `QUIL_HOOK_HOME` (consumers fall back to `QUIL_HOME` for one release) so children of claude/opencode panes stop inheriting a production-pointing `QUIL_HOME`; additionally, dev builds ignore an inherited `QUIL_HOME` that equals the production default `~/.quil` (with a stderr warning). The `quild claude-hook` fast path dispatches before the dev-mode gates so hook writes always honor the spawning daemon's data dir.
+
 ## [1.18.5] - 2026-06-10
 
 ### Fixed

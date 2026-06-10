@@ -194,6 +194,26 @@ func TestNewMessageAndDecode(t *testing.T) {
 	}
 }
 
+func TestEncodeFrame_RoundTrip(t *testing.T) {
+	msg, err := ipc.NewMessage(ipc.MsgPaneOutput, ipc.PaneOutputPayload{
+		PaneID: "pane-x", Data: []byte("hello"), Ghost: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame, err := ipc.EncodeFrame(msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := ipc.ReadMessage(bytes.NewReader(frame))
+	if err != nil {
+		t.Fatalf("ReadMessage on encoded frame: %v", err)
+	}
+	if got.Type != msg.Type || !bytes.Equal(got.Payload, msg.Payload) {
+		t.Errorf("round trip mismatch: got %+v want %+v", got, msg)
+	}
+}
+
 // TestAttachPayload_CWDRoundTrip locks in the wire-format contract for the
 // optional CWD field on MsgAttach. New clients send CWD; old clients omit
 // it and the daemon must see an empty string (no JSON decode error).

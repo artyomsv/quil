@@ -1069,7 +1069,18 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 		oldPaneID := pane.ID
 
 		if leaf := tab.Root.FindLeaf(oldPaneID); leaf != nil {
+			// Detach + dispose immediately: the daemon destroys the old pane
+			// server-side and this PaneModel is never rendered again (output
+			// and rendering resolve panes via FindLeaf, which skips nil-Pane
+			// leaves). Disposing here — not via the reconciliation sweep —
+			// keeps the leaves cache honest: a stale cache was previously
+			// what fed the detached pane into the sweep's existingPanes.
+			old := leaf.Pane
 			leaf.Pane = nil
+			tab.invalidateLeaves()
+			if old != nil {
+				old.Dispose()
+			}
 			if m.pendingSplit == nil {
 				m.pendingSplit = make(map[string]*LayoutNode)
 			}

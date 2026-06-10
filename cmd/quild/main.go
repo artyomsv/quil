@@ -24,7 +24,37 @@ func main() {
 	// IPC MsgVersionReq handler can report it back to connecting clients.
 	versionpkg.SetCurrent(version)
 
-	// Build-time dev mode: auto-set QUIL_HOME before anything else.
+	// Native Claude hook fast-path. Registered via --settings as the command
+	// Claude runs per hook event (see internal/claudehook). It must NOT start
+	// the daemon — it reads the hook JSON on stdin, writes the session-id file
+	// / spool line under the dir the spawning daemon designated, and exits 0
+	// so Claude is never blocked. Replacing the per-event PowerShell/sh script
+	// with this native subcommand cuts hook latency from ~1-4 s (shell cold
+	// start) to tens of ms.
+	//
+	// MUST run before the dev-mode env blocks below: the hook writes to
+	// whatever dir the spawning daemon set via QUIL_HOOK_HOME (or legacy
+	// QUIL_HOME during the upgrade window) — the dev belt would unset an
+	// inherited prod QUIL_HOME and re-point the hook at the dev dir, breaking
+	// session-id tracking for a dev hook binary running inside a production
+	// pane. A hook invocation without pane env is a no-op anyway (RunHook
+	// returns early on empty QUIL_PANE_ID), so the dev-default gate is
+	// irrelevant here.
+	if len(os.Args) > 1 && os.Args[1] == "claude-hook" {
+		runClaudeHook()
+		return
+	}
+
+	// Build-time dev mode: auto-set QUIL_HOME before everything except the
+	// claude-hook fast path above (which must honor the spawning daemon's dir).
+	if buildDevMode == "true" && config.IsDefaultQuilDir(os.Getenv("QUIL_HOME")) {
+		// Inherited from a production pane env (pre-rename daemon) or a
+		// stray export. A dev build pointed at production ~/.quil violates
+		// the isolation rule — ignore it and fall through to the
+		// project-local default.
+		fmt.Fprintln(os.Stderr, "dev build: ignoring inherited QUIL_HOME pointing at production ~/.quil")
+		os.Unsetenv("QUIL_HOME")
+	}
 	if buildDevMode == "true" && os.Getenv("QUIL_HOME") == "" {
 		exe, err := os.Executable()
 		if err != nil {
@@ -32,17 +62,6 @@ func main() {
 			os.Exit(1)
 		}
 		os.Setenv("QUIL_HOME", filepath.Join(filepath.Dir(exe), ".quil"))
-	}
-
-	// Native Claude hook fast-path. Registered via --settings as the command
-	// Claude runs per hook event (see internal/claudehook). It must NOT start
-	// the daemon — it reads the hook JSON on stdin, writes the session-id file
-	// / spool line under $QUIL_HOME, and exits 0 so Claude is never blocked.
-	// Replacing the per-event PowerShell/sh script with this native subcommand
-	// cuts hook latency from ~1-4 s (shell cold start) to tens of ms.
-	if len(os.Args) > 1 && os.Args[1] == "claude-hook" {
-		runClaudeHook()
-		return
 	}
 
 	if len(os.Args) > 1 && os.Args[1] == "version" {

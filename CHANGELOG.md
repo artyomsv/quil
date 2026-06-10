@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.18.2] - 2026-06-10
 
+### Fixed
+
+- **Windows: launching from Windows Terminal froze mouse input to every other app** — restoring a persisted `maximized: true` window state called `ShowWindow(SW_MAXIMIZE)` on the handle returned by `GetConsoleWindow()`. Under a ConPTY host (Windows Terminal, VS Code) there is no real console window — that call returns a hidden `PseudoConsoleWindow`, and maximizing it spawns an invisible full-screen window that swallows mouse clicks for every window beneath it in the Z-order (only the focused window and Alt+Tab kept working; everything else looked frozen). `IsZoomed` on the ghost then stayed true, so exit re-saved `maximized: true` and the bug reproduced on every launch. Window restore and save now gate on `IsWindowVisible` via a new `realConsoleWindow()` helper — a real conhost window is always visible by the time the TUI runs, the ConPTY ghost never is — and save carries the previous session's pixel/maximized values forward so a ConPTY session can no longer poison real conhost geometry.
+
 ## [1.18.1] - 2026-06-10
 
 ### Fixed

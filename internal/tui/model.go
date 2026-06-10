@@ -629,6 +629,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.notesEditor.HandlePaste(text)
 			return m, nil
 		} else {
+			// Empty bracketed-paste content means the terminal (e.g. Windows
+			// Terminal on Ctrl+V) fired a paste for a clipboard that holds an
+			// image but no text. Route to the same image-capable path the
+			// F8/Ctrl+Alt+V keypress uses (pasteClipboard's image fallback) so
+			// screenshot paste works on Ctrl+V again.
+			if msg.Content == "" {
+				logger.Debug("PasteMsg: empty content, routing to image-capable pasteClipboard")
+				return m, m.pasteClipboard()
+			}
 			m.sendClipboardToPane(msg.Content)
 			// Schedule re-render after PTY echo arrives to update cursor position
 			return m, tea.Tick(100*time.Millisecond, func(_ time.Time) tea.Msg { return pasteRefreshMsg{} })
@@ -2872,6 +2881,14 @@ func (m Model) forwardInputBytes(data []byte) tea.Cmd {
 	}
 }
 
+// clipboardReadText and clipboardReadImage indirect over the clipboard package
+// so the paste flow can be exercised hermetically in tests (the real readers
+// touch the OS clipboard). Production leaves them at the package functions.
+var (
+	clipboardReadText  = clipboard.Read
+	clipboardReadImage = clipboard.ReadImage
+)
+
 func (m Model) pasteClipboard() tea.Cmd {
 	return func() tea.Msg {
 		logger.Debug("pasteClipboard: invoked")
@@ -2881,7 +2898,7 @@ func (m Model) pasteClipboard() tea.Cmd {
 		// reading the image ourselves, saving it as a PNG under
 		// config.PasteDir(), and pasting the absolute path so any PTY tool
 		// can pick it up via its file-reading tools.
-		text, textErr := clipboard.Read() // text-only error is non-fatal — fall through
+		text, textErr := clipboardReadText() // text-only error is non-fatal — fall through
 		logger.Debug("pasteClipboard: clipboard.Read() text_len=%d err=%v", len(text), textErr)
 		if text == "" {
 			logger.Debug("pasteClipboard: text empty, attempting image fallback")
@@ -2932,7 +2949,7 @@ func (m Model) pasteClipboard() tea.Cmd {
 // the OS clipboard itself, drops it in a known location, and types the path
 // into the PTY. Any AI tool with file-reading tools can then pick it up.
 func (m Model) tryPasteClipboardImage() (string, bool) {
-	pngBytes, err := clipboard.ReadImage()
+	pngBytes, err := clipboardReadImage()
 	if err != nil {
 		if !errors.Is(err, clipboard.ErrNoImage) {
 			log.Printf("clipboard image: read failed: %v", err)

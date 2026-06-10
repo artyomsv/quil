@@ -106,7 +106,10 @@ type settingsSchema struct {
 }
 
 type hookMatcher struct {
-	Hooks []hookEntry `json:"hooks"`
+	// Matcher is an optional tool-name regex (Claude matches it against
+	// tool_name for PreToolUse/PostToolUse). Empty = match all events.
+	Matcher string      `json:"matcher,omitempty"`
+	Hooks   []hookEntry `json:"hooks"`
 }
 
 type hookEntry struct {
@@ -120,8 +123,8 @@ type hookEntry struct {
 //
 // SessionStart is the original — it writes the session id file used by the
 // resume-args path. The rest are the v1 "default" tier from the hook events
-// plan: notification + permission + lifecycle. PreToolUse / PostToolUse and
-// friends are NOT in this list (too noisy at scale).
+// plan: notification + permission + lifecycle. These are registered match-all
+// (no tool-name filter).
 var forwardedHookEvents = []string{
 	"SessionStart",
 	"SessionEnd",
@@ -137,17 +140,42 @@ var forwardedHookEvents = []string{
 	"TaskCompleted",
 }
 
+// matchedHookEvents are registered with a tool-name matcher so Claude only
+// invokes the hook for the listed tools — avoiding the per-tool-call overhead
+// that kept the full PreToolUse/PostToolUse stream out of the default tier.
+//
+// PostToolUse for the interactive-prompt tools (AskUserQuestion, ExitPlanMode)
+// is the "resume" edge: it fires the instant the user answers a prompt, which
+// the TUI uses to re-arm the work spinner after a park (the park itself comes
+// from the match-all PermissionRequest/Notification events above). Diagnostic
+// hook logging confirmed PreToolUse fires *before* the prompt, so only
+// PostToolUse is registered here.
+var matchedHookEvents = []struct{ Name, Matcher string }{
+	{Name: "PostToolUse", Matcher: promptToolMatcher},
+}
+
+// promptToolMatcher is the tool-name regex for interactive-prompt tools whose
+// completion re-arms the work spinner. Keep in sync with the PostToolUse case
+// in runhook.go.
+const promptToolMatcher = "AskUserQuestion|ExitPlanMode"
+
 // BuildSettingsJSON returns the inline JSON string Quil passes to
 // `claude --settings <json>`. Registers Quil's hook command under every
 // entry in forwardedHookEvents — the native subcommand then branches on the
 // hook_event_name field of the stdin JSON.
 func BuildSettingsJSON(cmd string) (string, error) {
 	s := settingsSchema{
-		Hooks: make(map[string][]hookMatcher, len(forwardedHookEvents)),
+		Hooks: make(map[string][]hookMatcher, len(forwardedHookEvents)+len(matchedHookEvents)),
 	}
 	for _, name := range forwardedHookEvents {
 		s.Hooks[name] = []hookMatcher{{
 			Hooks: []hookEntry{{Type: "command", Command: cmd}},
+		}}
+	}
+	for _, me := range matchedHookEvents {
+		s.Hooks[me.Name] = []hookMatcher{{
+			Matcher: me.Matcher,
+			Hooks:   []hookEntry{{Type: "command", Command: cmd}},
 		}}
 	}
 	b, err := json.Marshal(s)

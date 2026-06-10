@@ -67,6 +67,27 @@ func TestBuildSettingsJSON_RegistersAllForwardedEvents(t *testing.T) {
 // BuildSettingsJSON loop overwrites by name in the Hooks map, so a
 // duplicate entry would dedupe without warning. This test catches that at
 // build time rather than at the first Claude session.
+// TestBuildSettingsJSON_PostToolUseHasMatcher pins the tool-name matcher on the
+// PostToolUse resume edge. Without the matcher Claude would invoke the hook on
+// every tool completion (the noise the default tier deliberately excluded); the
+// matcher narrows it to the interactive-prompt tools that re-arm the spinner.
+func TestBuildSettingsJSON_PostToolUseHasMatcher(t *testing.T) {
+	t.Parallel()
+	js, err := BuildSettingsJSON("sh /tmp/hook.sh")
+	if err != nil {
+		t.Fatalf("BuildSettingsJSON: %v", err)
+	}
+	for _, want := range []string{`"PostToolUse"`, `"matcher":"` + promptToolMatcher + `"`} {
+		if !strings.Contains(js, want) {
+			t.Errorf("BuildSettingsJSON missing %q in output: %s", want, js)
+		}
+	}
+	// The match-all events must NOT carry a matcher key.
+	if strings.Contains(js, `"SessionStart","matcher"`) {
+		t.Error("match-all events should not emit a matcher field")
+	}
+}
+
 func TestForwardedHookEvents_NoDuplicates(t *testing.T) {
 	t.Parallel()
 	seen := make(map[string]bool)

@@ -381,6 +381,14 @@ func NewMessage(typ string, payload any) (*Message, error) {
 	return &Message{Type: typ, Payload: data}, nil
 }
 
+// maxFrameSize bounds a single wire frame (length prefix excluded), shared by
+// both directions: ReadMessage rejects oversized incoming frames, and
+// EncodeFrame refuses to produce one — failing fast at the producer with an
+// attributable error instead of poisoning the stream and surfacing as an
+// opaque "message too large" disconnect on the peer. The guard also bounds
+// the size arithmetic in EncodeFrame's allocation.
+const maxFrameSize = 10 * 1024 * 1024
+
 // EncodeFrame marshals msg into a single length-prefixed wire frame in one
 // allocation. Shared by WriteMessage and the per-conn send queues — replaces
 // the marshal → bytes.Buffer → clone chain that copied every broadcast frame
@@ -389,6 +397,9 @@ func EncodeFrame(msg *Message) ([]byte, error) {
 	data, err := json.Marshal(msg)
 	if err != nil {
 		return nil, fmt.Errorf("marshal message: %w", err)
+	}
+	if len(data) > maxFrameSize {
+		return nil, fmt.Errorf("frame too large: %d bytes (max %d)", len(data), maxFrameSize)
 	}
 	frame := make([]byte, 4+len(data))
 	binary.BigEndian.PutUint32(frame[:4], uint32(len(data)))
@@ -417,7 +428,7 @@ func ReadMessage(r io.Reader) (*Message, error) {
 	}
 	length := binary.BigEndian.Uint32(lenBuf[:])
 
-	if length > 10*1024*1024 { // 10MB max
+	if length > maxFrameSize {
 		return nil, fmt.Errorf("message too large: %d bytes", length)
 	}
 

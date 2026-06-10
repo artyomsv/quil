@@ -245,3 +245,21 @@ func TestAttachPayload_CWDRoundTrip(t *testing.T) {
 		})
 	}
 }
+
+// TestEncodeFrame_RejectsOversizedFrame: the read side caps frames at 10 MB —
+// without a matching write-side guard, an oversized producer poisons the
+// stream and surfaces as an opaque "message too large" disconnect on the
+// PEER, attributing the failure to the wrong side. The guard also bounds the
+// size arithmetic in EncodeFrame's allocation (CodeQL finding on PR #51).
+func TestEncodeFrame_RejectsOversizedFrame(t *testing.T) {
+	msg, err := ipc.NewMessage(ipc.MsgPaneOutput, ipc.PaneOutputPayload{
+		PaneID: "pane-x",
+		Data:   make([]byte, 11*1024*1024), // base64 in JSON ≈ 14.7 MB > cap
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ipc.EncodeFrame(msg); err == nil {
+		t.Fatal("EncodeFrame produced a frame larger than the wire maximum")
+	}
+}

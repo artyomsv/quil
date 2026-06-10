@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	uv "github.com/charmbracelet/ultraviolet"
@@ -29,6 +30,7 @@ type PaneModel struct {
 	Muted          bool   // notification mute (daemon-authoritative; mirrored here for border rendering)
 	Eager          bool   // eager-restore flag (daemon-authoritative; mirrored for the tab marker)
 	vt             *vt.SafeEmulator
+	vtDrain        *vtDrain // drain goroutine tracker for p.vt (see closeVT)
 	Width          int
 	Height         int
 	Active         bool
@@ -46,20 +48,118 @@ type PaneModel struct {
 	liveOutputSeen bool                // first live (non-ghost) output received — settle repaints scheduled
 	working        bool                // true while a claude/opencode turn is in progress (hook-driven)
 	workFrame      int                 // shared spinner frame index, mirrored here for top-border render
+
+	// Render cache: View() output is reused while renderKey() is unchanged.
+	// contentGen covers VT-grid/raw-buffer mutations (the grid itself has no
+	// public change counter; PaneModel mediates all writes via AppendOutput/
+	// ResetVT/ResizeVT). Selection is snapshotted by VALUE into the key (it
+	// lives on Model and is mutated there), so no selection generation is
+	// needed. renderCount is test observability — incremented on real renders
+	// only. invalidateRenderCache() is the explicit escape hatch (redraw key).
+	contentGen  uint64
+	cachedKey   paneRenderKey
+	cachedView  string
+	hasCache    bool
+	renderCount int
+}
+
+// paneRenderKey is the comparable fingerprint of everything View() reads,
+// directly or transitively (renderContent, renderScrollback,
+// renderWithSelection, insertCursor, buildTopBorder). Adding a new visual
+// input to any of those REQUIRES adding it here — a missing field means
+// stale frames. The redraw key (alt+shift+l) clears the cache as the
+// user-facing escape hatch.
+//
+// Notes on coverage:
+//   - contentGen stands in for everything derived from the VT emulator:
+//     screen cells, scrollback cells, ScrollbackLen, CursorPosition, and the
+//     emulator's own width/height (only PaneModel methods mutate the VT).
+//   - cursorVisible and cwd are written by VT callbacks during vt.Write
+//     (same Update goroutine); they are plain fields here.
+//   - selActive/sel snapshot the Model-owned *Selection by value, already
+//     resolved against this pane's ID — a selection on another pane renders
+//     identically to no selection, so it is normalized to the zero value.
+//   - spinnerFrame is only advanced while resuming/preparing, workFrame only
+//     while working (guarded at the call sites in model.go/workstate.go), so
+//     including them raw does not churn the key for idle panes.
+type paneRenderKey struct {
+	contentGen                     uint64
+	width, height, scrollBack      int
+	active, cursorVisible          bool
+	ghost, resuming, preparing     bool
+	mcpHighlight, muted, focusMode bool
+	working                        bool
+	spinnerFrame, workFrame        int
+	name, cwd                      string
+	selActive                      bool
+	sel                            Selection
+}
+
+// renderKey computes the current fingerprint of every View() input.
+func (p *PaneModel) renderKey() paneRenderKey {
+	k := paneRenderKey{
+		contentGen:    p.contentGen,
+		width:         p.Width,
+		height:        p.Height,
+		scrollBack:    p.scrollBack,
+		active:        p.Active,
+		cursorVisible: p.cursorVisible,
+		ghost:         p.ghost,
+		resuming:      p.resuming,
+		preparing:     p.preparing,
+		mcpHighlight:  p.mcpHighlight,
+		muted:         p.Muted,
+		focusMode:     p.focusMode,
+		working:       p.working,
+		spinnerFrame:  p.spinnerFrame,
+		workFrame:     p.workFrame,
+		name:          p.Name,
+		cwd:           p.CWD,
+	}
+	// renderContent only honors a selection whose PaneID matches this pane;
+	// foreign or absent selections render identically, so both normalize to
+	// the zero value (no spurious invalidation while another pane is being
+	// selected).
+	if p.activeSel != nil && p.activeSel.PaneID == p.ID {
+		k.selActive = true
+		k.sel = *p.activeSel
+	}
+	return k
+}
+
+// invalidateRenderCache drops the cached frame so the next View() rebuilds
+// it unconditionally. Wired to the redraw keybinding as the user-facing
+// escape hatch for a hypothetical stale-cache bug. Also releases the cached
+// string so the escape hatch doubles as a memory release.
+func (p *PaneModel) invalidateRenderCache() {
+	p.hasCache = false
+	p.cachedView = ""
+}
+
+// vtDrain tracks the drain goroutine of one emulator so teardown can be
+// sequenced: upstream x/vt's Emulator.Close races Emulator.Read on an
+// unsynchronized closed flag (SafeEmulator wraps neither), so Close may only
+// run after the drain goroutine has exited.
+type vtDrain struct {
+	stop atomic.Bool
+	done chan struct{}
 }
 
 // newVTEmulator builds a SafeEmulator for this pane and starts a goroutine
-// that drains the emulator's response pipe.
+// that drains the emulator's response pipe. The caller installs the returned
+// pair into p.vt / p.vtDrain (newVTEmulator deliberately does NOT write p's
+// fields itself — installVT must close the OLD emulator via the OLD vtDrain
+// before the new pair is assigned).
 //
 // The charmbracelet/x/vt emulator answers queries like CSI c (Primary Device
 // Attributes, DA1), DSR (Device Status Report), and OSC 10/11/12 by writing
 // the response to an internal io.Pipe. That pipe blocks writers until a
 // reader drains it. Without a drain, any TUI app that queries terminal
 // capabilities — Claude Code 2.1.110 sends DA1 on startup — deadlocks the
-// entire TUI inside vt.Write(). The drain goroutine terminates when
-// Emulator.Close() closes the pipe, so replaceVT() must close the old
-// emulator before releasing it.
-func (p *PaneModel) newVTEmulator(w, h int) *vt.SafeEmulator {
+// entire TUI inside vt.Write(). The drain goroutine terminates via the
+// stop-flag protocol in closeVT(); only after it exits is Emulator.Close()
+// safe to call.
+func (p *PaneModel) newVTEmulator(w, h int) (*vt.SafeEmulator, *vtDrain) {
 	em := vt.NewSafeEmulator(w, h)
 	em.SetScrollbackSize(10000)
 	em.SetCallbacks(vt.Callbacks{
@@ -70,15 +170,19 @@ func (p *PaneModel) newVTEmulator(w, h int) *vt.SafeEmulator {
 			p.CWD = parseOSC7Path(dir)
 		},
 	})
-	go drainVTResponses(em)
-	return em
+	d := &vtDrain{done: make(chan struct{})}
+	go drainVTResponses(em, d)
+	return em, d
 }
 
 // drainVTResponses continuously reads and discards the emulator's query
-// responses. Exits cleanly on EOF/closed-pipe (emulator closed); any other
-// read error leaves a breadcrumb so a future library regression that
-// re-introduces a deadlock isn't silent.
-func drainVTResponses(em *vt.SafeEmulator) {
+// responses. After each successful read it checks the stop flag so closeVT
+// can retire it without calling Emulator.Close while a Read is in flight.
+// Exits cleanly on EOF/closed-pipe (emulator closed); any other read error
+// leaves a breadcrumb so a future library regression that re-introduces a
+// deadlock isn't silent.
+func drainVTResponses(em *vt.SafeEmulator, d *vtDrain) {
+	defer close(d.done)
 	buf := make([]byte, 256)
 	for {
 		if _, err := em.Read(buf); err != nil {
@@ -87,16 +191,48 @@ func drainVTResponses(em *vt.SafeEmulator) {
 			}
 			return
 		}
+		if d.stop.Load() {
+			return
+		}
 	}
 }
 
-// replaceVT closes the current emulator (stopping its drain goroutine) and
-// installs the new one.
-func (p *PaneModel) replaceVT(em *vt.SafeEmulator) {
-	if p.vt != nil {
-		_ = p.vt.Close()
+// closeVT stops the drain goroutine, then closes the emulator. The DA1 query
+// makes the emulator emit a response into its pipe, waking the drain's
+// blocked Read so it can observe the stop flag; only after it exits is
+// Close safe (see vtDrain). The 1 s fallback guards a hypothetical
+// non-responding emulator — closing then re-admits the benign upstream race
+// rather than hanging the Update loop.
+func (p *PaneModel) closeVT() {
+	if p.vt == nil {
+		return
 	}
-	p.vt = em
+	if p.vtDrain != nil {
+		p.vtDrain.stop.Store(true)
+		_, _ = p.vt.Write([]byte("\x1b[c")) // DA1 — provokes a response
+		select {
+		case <-p.vtDrain.done:
+		case <-time.After(time.Second):
+			log.Printf("pane %s: VT drain did not stop within 1s — closing anyway", p.ID)
+		}
+	}
+	_ = p.vt.Close()
+}
+
+// Dispose closes the VT emulator, stopping its drainVTResponses goroutine
+// and releasing the scrollback grid. Must be called for every PaneModel
+// removed from the layout tree — without it each closed pane leaks a parked
+// goroutine plus up to a 10,000-line scrollback. The PaneModel must not be
+// rendered or written to afterwards.
+func (p *PaneModel) Dispose() {
+	p.closeVT()
+}
+
+// installVT closes the current emulator (stopping its drain goroutine via
+// the OLD vtDrain) and installs the new pair.
+func (p *PaneModel) installVT(em *vt.SafeEmulator, d *vtDrain) {
+	p.closeVT()
+	p.vt, p.vtDrain = em, d
 }
 
 func NewPaneModel(id string, bufSize int) *PaneModel {
@@ -106,22 +242,24 @@ func NewPaneModel(id string, bufSize int) *PaneModel {
 		rawBuf:        ringbuf.NewRingBuffer(bufSize),
 		cursorVisible: true, // visible by default (matches terminal default)
 	}
-	p.vt = p.newVTEmulator(80, 24)
+	p.vt, p.vtDrain = p.newVTEmulator(80, 24)
 	return p
 }
 
 func (p *PaneModel) AppendOutput(data []byte) {
 	p.rawBuf.Write(data)
 	p.vt.Write(data)
+	p.contentGen++
 }
 
 // ResetVT creates a fresh VT emulator at the current dimensions, clearing
 // ghost buffer state so live output starts with a clean cursor position.
 func (p *PaneModel) ResetVT() {
 	w, h := p.vt.Width(), p.vt.Height()
-	p.replaceVT(p.newVTEmulator(w, h))
+	p.installVT(p.newVTEmulator(w, h))
 	p.rawBuf.Reset()
 	p.cursorVisible = true
+	p.contentGen++
 }
 
 func (p *PaneModel) ResizeVT(cols, rows int) {
@@ -136,6 +274,7 @@ func (p *PaneModel) ResizeVT(cols, rows int) {
 	// preserves the current screen state, and the PTY child will redraw via
 	// SIGWINCH (triggered separately by MsgResizePane) into the new size.
 	p.vt.Resize(cols, rows)
+	p.contentGen++
 }
 
 func (p *PaneModel) ScrollUp(lines int) {
@@ -201,6 +340,12 @@ func (p *PaneModel) ScrollToRelY(relY, innerH int) {
 }
 
 func (p *PaneModel) View() string {
+	key := p.renderKey()
+	if p.hasCache && key == p.cachedKey {
+		return p.cachedView
+	}
+	p.renderCount++
+
 	borderColor := lipgloss.Color("238")
 	if p.Active {
 		borderColor = lipgloss.Color("57")
@@ -249,7 +394,9 @@ func (p *PaneModel) View() string {
 	}
 	topLine := buildTopBorder(p.Width, p.CWD, rightLabel, borderColor, p.ghost, p.resuming, p.preparing, p.focusMode, p.spinnerFrame, p.working, p.workFrame)
 
-	return topLine + "\n" + body
+	out := topLine + "\n" + body
+	p.cachedKey, p.cachedView, p.hasCache = key, out, true
+	return out
 }
 
 func buildTopBorder(width int, cwd, name string, color color.Color, ghost, resuming, preparing, focus bool, spinnerFrame int, working bool, workFrame int) string {

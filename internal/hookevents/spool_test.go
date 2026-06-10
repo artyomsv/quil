@@ -254,3 +254,20 @@ func TestSpool_Tick_DropsOversizeLine(t *testing.T) {
 		t.Errorf("oversize line must be dropped; got %d payloads", len(got))
 	}
 }
+
+func TestSpoolCleanup_RemovesParseErrCount(t *testing.T) {
+	t.Parallel()
+	s := NewSpool(t.TempDir())
+	s.mu.Lock()
+	s.parseErrCounts["pane-x"] = 3
+	s.mu.Unlock()
+
+	s.Cleanup("pane-x")
+
+	s.mu.Lock()
+	_, ok := s.parseErrCounts["pane-x"]
+	s.mu.Unlock()
+	if ok {
+		t.Error("Cleanup left parseErrCounts entry — monotonic map growth")
+	}
+}

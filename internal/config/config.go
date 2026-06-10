@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 )
@@ -249,6 +251,31 @@ func QuilDir() string {
 		return ""
 	}
 	return filepath.Join(home, ".quil")
+}
+
+// DefaultQuilDir returns the production default data dir (~/.quil),
+// ignoring QUIL_HOME. Used by dev builds to detect an inherited
+// production-pointing QUIL_HOME.
+func DefaultQuilDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".quil")
+}
+
+// IsDefaultQuilDir reports whether dir resolves to the production default
+// data dir. Case-insensitive on Windows.
+func IsDefaultQuilDir(dir string) bool {
+	def := DefaultQuilDir()
+	if def == "" || dir == "" {
+		return false
+	}
+	a, b := filepath.Clean(dir), filepath.Clean(def)
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
 }
 
 func ConfigPath() string {

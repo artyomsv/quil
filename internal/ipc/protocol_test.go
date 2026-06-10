@@ -194,6 +194,26 @@ func TestNewMessageAndDecode(t *testing.T) {
 	}
 }
 
+func TestEncodeFrame_RoundTrip(t *testing.T) {
+	msg, err := ipc.NewMessage(ipc.MsgPaneOutput, ipc.PaneOutputPayload{
+		PaneID: "pane-x", Data: []byte("hello"), Ghost: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame, err := ipc.EncodeFrame(msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := ipc.ReadMessage(bytes.NewReader(frame))
+	if err != nil {
+		t.Fatalf("ReadMessage on encoded frame: %v", err)
+	}
+	if got.Type != msg.Type || !bytes.Equal(got.Payload, msg.Payload) {
+		t.Errorf("round trip mismatch: got %+v want %+v", got, msg)
+	}
+}
+
 // TestAttachPayload_CWDRoundTrip locks in the wire-format contract for the
 // optional CWD field on MsgAttach. New clients send CWD; old clients omit
 // it and the daemon must see an empty string (no JSON decode error).
@@ -223,5 +243,23 @@ func TestAttachPayload_CWDRoundTrip(t *testing.T) {
 				t.Errorf("dims: got %dx%d, want %dx%d", got.Cols, got.Rows, tc.in.Cols, tc.in.Rows)
 			}
 		})
+	}
+}
+
+// TestEncodeFrame_RejectsOversizedFrame: the read side caps frames at 10 MB —
+// without a matching write-side guard, an oversized producer poisons the
+// stream and surfaces as an opaque "message too large" disconnect on the
+// PEER, attributing the failure to the wrong side. The guard also bounds the
+// size arithmetic in EncodeFrame's allocation (CodeQL finding on PR #51).
+func TestEncodeFrame_RejectsOversizedFrame(t *testing.T) {
+	msg, err := ipc.NewMessage(ipc.MsgPaneOutput, ipc.PaneOutputPayload{
+		PaneID: "pane-x",
+		Data:   make([]byte, 11*1024*1024), // base64 in JSON ≈ 14.7 MB > cap
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ipc.EncodeFrame(msg); err == nil {
+		t.Fatal("EncodeFrame produced a frame larger than the wire maximum")
 	}
 }

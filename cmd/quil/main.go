@@ -42,6 +42,14 @@ func main() {
 	// Build-time dev mode: if baked in via ldflags, auto-set QUIL_HOME
 	// before anything else. The --dev flag and QUIL_HOME env var still
 	// take precedence (they're checked first).
+	if buildDevMode == "true" && config.IsDefaultQuilDir(os.Getenv("QUIL_HOME")) {
+		// Inherited from a production pane env (pre-rename daemon) or a
+		// stray export. A dev build pointed at production ~/.quil violates
+		// the isolation rule — ignore it and fall through to the
+		// project-local default.
+		fmt.Fprintln(os.Stderr, "dev build: ignoring inherited QUIL_HOME pointing at production ~/.quil")
+		os.Unsetenv("QUIL_HOME")
+	}
 	if buildDevMode == "true" && os.Getenv("QUIL_HOME") == "" {
 		exe, err := os.Executable()
 		if err != nil {

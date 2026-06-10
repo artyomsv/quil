@@ -483,7 +483,7 @@ func TestResolveSpawnArgs_ClaudeHookSessionID(t *testing.T) {
 }
 
 // TestClaudeHookSpawnPrep covers the fresh-spawn injection helper. It must
-// (a) emit --settings + QUIL_PANE_ID/QUIL_HOOK_MODE/QUIL_HOME env when the
+// (a) emit --settings + QUIL_PANE_ID/QUIL_HOOK_MODE/QUIL_HOOK_HOME env when the
 // quild executable resolves, (b) silently skip both when the executable cannot
 // be resolved so the spawn proceeds like the pre-feature daemon, and (c) warn
 // (not error) when --settings is already in the user's args (Claude later-wins).
@@ -553,10 +553,10 @@ func TestClaudeHookSpawnPrep(t *testing.T) {
 				}
 			} else {
 				// claudeHookSpawnPrep returns QUIL_PANE_ID, QUIL_HOOK_MODE,
-				// and QUIL_HOME so the native subcommand resolves its data dir
+				// and QUIL_HOOK_HOME so the native subcommand resolves its data dir
 				// and tier independent of the daemon's inherited environment.
 				if len(env) != 3 {
-					t.Fatalf("env = %v, want 3 entries (pane id + hook mode + quil home)", env)
+					t.Fatalf("env = %v, want 3 entries (pane id + hook mode + quil hook home)", env)
 				}
 				if env[0] != "QUIL_PANE_ID="+tt.paneID {
 					t.Errorf("env[0] = %q, want QUIL_PANE_ID=%s", env[0], tt.paneID)
@@ -564,8 +564,8 @@ func TestClaudeHookSpawnPrep(t *testing.T) {
 				if env[1] != "QUIL_HOOK_MODE=default" {
 					t.Errorf("env[1] = %q, want QUIL_HOOK_MODE=default", env[1])
 				}
-				if env[2] != "QUIL_HOME=/tmp/quil" {
-					t.Errorf("env[2] = %q, want QUIL_HOME=/tmp/quil", env[2])
+				if env[2] != "QUIL_HOOK_HOME=/tmp/quil" {
+					t.Errorf("env[2] = %q, want QUIL_HOOK_HOME=/tmp/quil", env[2])
 				}
 			}
 		})
@@ -749,8 +749,8 @@ func TestOpencodeSpawnPrep(t *testing.T) {
 				if env[0] != tt.wantPaneEnv {
 					t.Errorf("env[0] = %q, want %q", env[0], tt.wantPaneEnv)
 				}
-				if env[1] != "QUIL_HOME=/tmp/quil" {
-					t.Errorf("env[1] = %q, want QUIL_HOME=/tmp/quil", env[1])
+				if env[1] != "QUIL_HOOK_HOME=/tmp/quil" {
+					t.Errorf("env[1] = %q, want QUIL_HOOK_HOME=/tmp/quil", env[1])
 				}
 				if env[2] != "QUIL_HOOK_MODE=default" {
 					t.Errorf("env[2] = %q, want QUIL_HOOK_MODE=default", env[2])

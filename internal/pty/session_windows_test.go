@@ -103,3 +103,25 @@ func TestWinSession_WaitExit_NoHandle_ReturnsMinusOne(t *testing.T) {
 		t.Errorf("WaitExit on unspawned session: got %d, want -1", got)
 	}
 }
+
+// TestWinSession_WaitExit_IdempotentAfterHandleClose: WaitExit closes the
+// process handle (the kernel retains the process object while any handle is
+// open — one leaked HANDLE per destroyed/restarted pane otherwise); repeated
+// calls must return the cached exit code, not -1 from the zeroed handle.
+//
+// Runs only on a Windows host (the CI/docker runner is Linux and only
+// compile-checks this file via GOOS=windows go test -c).
+func TestWinSession_WaitExit_IdempotentAfterHandleClose(t *testing.T) {
+	s := New().(*winSession)
+	if err := s.Start("cmd.exe", "/c", "exit", "3"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer s.Close()
+
+	if code := s.WaitExit(); code != 3 {
+		t.Errorf("first WaitExit = %d, want 3", code)
+	}
+	if code := s.WaitExit(); code != 3 {
+		t.Errorf("second WaitExit = %d, want 3 (cached) — handle-zeroing broke the cache", code)
+	}
+}

@@ -381,19 +381,40 @@ func NewMessage(typ string, payload any) (*Message, error) {
 	return &Message{Type: typ, Payload: data}, nil
 }
 
+// maxFrameSize bounds a single wire frame (length prefix excluded), shared by
+// both directions: ReadMessage rejects oversized incoming frames, and
+// EncodeFrame refuses to produce one — failing fast at the producer with an
+// attributable error instead of poisoning the stream and surfacing as an
+// opaque "message too large" disconnect on the peer. The guard also bounds
+// the size arithmetic in EncodeFrame's allocation.
+const maxFrameSize = 10 * 1024 * 1024
+
+// EncodeFrame marshals msg into a single length-prefixed wire frame in one
+// allocation. Shared by WriteMessage and the per-conn send queues — replaces
+// the marshal → bytes.Buffer → clone chain that copied every broadcast frame
+// up to four times.
+func EncodeFrame(msg *Message) ([]byte, error) {
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return nil, fmt.Errorf("marshal message: %w", err)
+	}
+	if len(data) > maxFrameSize {
+		return nil, fmt.Errorf("frame too large: %d bytes (max %d)", len(data), maxFrameSize)
+	}
+	frame := make([]byte, 4+len(data))
+	binary.BigEndian.PutUint32(frame[:4], uint32(len(data)))
+	copy(frame[4:], data)
+	return frame, nil
+}
+
 // WriteMessage writes a length-prefixed JSON message to w.
 // Format: [4 bytes uint32 big-endian length][JSON payload]
 func WriteMessage(w io.Writer, msg *Message) error {
-	data, err := json.Marshal(msg)
+	frame, err := EncodeFrame(msg)
 	if err != nil {
-		return fmt.Errorf("marshal message: %w", err)
+		return err
 	}
-
-	length := uint32(len(data))
-	if err := binary.Write(w, binary.BigEndian, length); err != nil {
-		return fmt.Errorf("write length: %w", err)
-	}
-	if _, err := w.Write(data); err != nil {
+	if _, err := w.Write(frame); err != nil {
 		return fmt.Errorf("write payload: %w", err)
 	}
 	return nil
@@ -401,12 +422,13 @@ func WriteMessage(w io.Writer, msg *Message) error {
 
 // ReadMessage reads a length-prefixed JSON message from r.
 func ReadMessage(r io.Reader) (*Message, error) {
-	var length uint32
-	if err := binary.Read(r, binary.BigEndian, &length); err != nil {
+	var lenBuf [4]byte
+	if _, err := io.ReadFull(r, lenBuf[:]); err != nil {
 		return nil, fmt.Errorf("read length: %w", err)
 	}
+	length := binary.BigEndian.Uint32(lenBuf[:])
 
-	if length > 10*1024*1024 { // 10MB max
+	if length > maxFrameSize {
 		return nil, fmt.Errorf("message too large: %d bytes", length)
 	}
 

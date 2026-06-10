@@ -1,11 +1,10 @@
 package ipc
 
 import (
-	"bytes"
+	"bufio"
 	"errors"
 	"net"
 	"os"
-	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -78,8 +77,9 @@ type MessageHandler func(conn *Conn, msg *Message)
 // force-closed a TUI mid-restore.
 type Conn struct {
 	raw       net.Conn
-	critCh    chan []byte // must-deliver: state, responses, ghost replay, lifecycle
-	outCh     chan []byte // droppable: live PaneOutput broadcast frames
+	br        *bufio.Reader // buffered read side — reduces syscalls from 2 per message to 1
+	critCh    chan []byte   // must-deliver: state, responses, ghost replay, lifecycle
+	outCh     chan []byte   // droppable: live PaneOutput broadcast frames
 	done      chan struct{}
 	closeOnce sync.Once
 	closed    atomic.Bool
@@ -90,6 +90,7 @@ type Conn struct {
 func newConn(raw net.Conn) *Conn {
 	c := &Conn{
 		raw:    raw,
+		br:     bufio.NewReader(raw),
 		critCh: make(chan []byte, sendBufSize),
 		outCh:  make(chan []byte, sendBufSize),
 		done:   make(chan struct{}),
@@ -109,16 +110,14 @@ func (c *Conn) Send(msg *Message) error {
 	if c.closed.Load() || c.overflow.Load() {
 		return ErrSendOverflow
 	}
-	var buf bytes.Buffer
-	if err := WriteMessage(&buf, msg); err != nil {
+	frame, err := EncodeFrame(msg)
+	if err != nil {
 		return err
 	}
-	// Per-Conn ownership: buf.Bytes() backs a stack-local Buffer whose
-	// lifetime ends when Send returns, but the channel reference keeps the
-	// backing array alive until sendLoop's Write completes. No defensive
-	// copy needed here — only Broadcast (which fans the same frame across
-	// N conns) clones to decouple the shared slice from its source.
-	return c.sendFrame(buf.Bytes())
+	// Per-Conn ownership: frame is freshly allocated by EncodeFrame on each
+	// call. The channel reference keeps it alive until sendLoop's Write
+	// completes — no defensive copy needed.
+	return c.sendFrame(frame)
 }
 
 // sendFrame queues a must-deliver frame. Retained for Send and the existing
@@ -191,8 +190,8 @@ func (c *Conn) enqueue(frame []byte, droppable bool) error {
 // force-closed whenever replay volume exceeded sendBufSize frames — two full
 // 256 KB ghost buffers were enough — locking the client out on every attach.
 func (c *Conn) SendBlocking(msg *Message, cancel <-chan struct{}) error {
-	var buf bytes.Buffer
-	if err := WriteMessage(&buf, msg); err != nil {
+	frame, err := EncodeFrame(msg)
+	if err != nil {
 		return err
 	}
 	const pollInterval = 2 * time.Millisecond
@@ -202,7 +201,7 @@ func (c *Conn) SendBlocking(msg *Message, cancel <-chan struct{}) error {
 		}
 		if len(c.critCh) < sendHeadroom {
 			select {
-			case c.critCh <- buf.Bytes():
+			case c.critCh <- frame:
 				return nil
 			default:
 				// Lost a race with concurrent broadcast enqueues — wait.
@@ -263,8 +262,12 @@ func (c *Conn) write(frame []byte) bool {
 	return err == nil
 }
 
+// Receive reads the next message from the connection. Callers must ensure a
+// single reader at a time per conn — daemon: handleConn's goroutine; client:
+// the version handshake, then the receive loop, sequentially — so br needs
+// no locking.
 func (c *Conn) Receive() (*Message, error) {
-	return ReadMessage(c.raw)
+	return ReadMessage(c.br)
 }
 
 // Close shuts down the conn. Idempotent — safe to call concurrently from any
@@ -348,22 +351,13 @@ func (s *Server) ConnCount() int {
 // is dropped from the fan-out (logged once, per CAS-guarded enqueue) without
 // affecting the others.
 func (s *Server) Broadcast(msg *Message) {
-	var buf bytes.Buffer
-	if err := WriteMessage(&buf, msg); err != nil {
+	frame, err := EncodeFrame(msg)
+	if err != nil {
 		logger.Error("ipc: broadcast marshal: %v", err)
 		return
 	}
-	// IMPORTANT: clone the bytes BEFORE fan-out. The slice returned by
-	// buf.Bytes() aliases a stack-local Buffer whose backing array would
-	// today survive via channel references — but if a future contributor
-	// pools the Buffer (sync.Pool, freelist), reuse would silently corrupt
-	// frames still being read by per-conn sendLoops. The clone decouples
-	// the shared frame from its source so the contract holds across any
-	// future Buffer reuse strategy.
-	// TODO(perf): if broadcast rate ever dominates daemon CPU, consider a
-	// sync.Pool of [][]byte AND remove this clone — but then every callsite
-	// that aliases the frame must be re-audited.
-	frame := slices.Clone(buf.Bytes())
+	// frame is freshly allocated by EncodeFrame on each Broadcast call.
+	// All per-conn sendLoops share the same slice read-only — no clone needed.
 
 	// IMPORTANT: do not remove the slice copy below. The `conns` snapshot
 	// must be independent of s.conns so the lock-free fan-out cannot race

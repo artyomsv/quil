@@ -13,6 +13,10 @@ type TabModel struct {
 	Height     int
 	focusMode  bool      // true = active pane fills entire tab
 	flashUntil time.Time // until when this tab's label flashes green (work just finished)
+
+	// leavesCache memoizes Root.Leaves(); nil = invalid. The tab bar alone
+	// walks every tab's tree twice per render without it.
+	leavesCache []*PaneModel
 }
 
 func NewTabModel(id, name string) *TabModel {
@@ -22,12 +26,27 @@ func NewTabModel(id, name string) *TabModel {
 	}
 }
 
+// Leaves returns the tab's panes in layout order, cached until the tree
+// mutates. Every method that mutates the tree (or assigns Root) must call
+// invalidateLeaves.
+func (t *TabModel) Leaves() []*PaneModel {
+	if t.Root == nil {
+		return nil
+	}
+	if t.leavesCache == nil {
+		t.leavesCache = t.Root.Leaves()
+	}
+	return t.leavesCache
+}
+
+func (t *TabModel) invalidateLeaves() { t.leavesCache = nil }
+
 // ActivePaneModel returns the currently active pane, or nil.
 func (t *TabModel) ActivePaneModel() *PaneModel {
 	if t.Root == nil {
 		return nil
 	}
-	leaves := t.Root.Leaves()
+	leaves := t.Leaves()
 	if len(leaves) == 0 {
 		return nil
 	}
@@ -219,7 +238,7 @@ func rangeOverlap(a1, a2, b1, b2 int) int {
 
 // NextPane advances focus to the next pane (in-order traversal order).
 func (t *TabModel) NextPane() {
-	leaves := t.Root.Leaves()
+	leaves := t.Leaves()
 	if len(leaves) == 0 {
 		return
 	}
@@ -232,7 +251,7 @@ func (t *TabModel) NextPane() {
 
 // PrevPane moves focus to the previous pane.
 func (t *TabModel) PrevPane() {
-	leaves := t.Root.Leaves()
+	leaves := t.Leaves()
 	if len(leaves) == 0 {
 		return
 	}
@@ -316,7 +335,11 @@ func (t *TabModel) SplitAtPane(paneID string, dir SplitDir) *LayoutNode {
 	if t.Root == nil {
 		return nil
 	}
-	return t.Root.SplitLeaf(paneID, dir)
+	ph := t.Root.SplitLeaf(paneID, dir)
+	if ph != nil {
+		t.invalidateLeaves()
+	}
+	return ph
 }
 
 // RemovePane removes the pane with the given ID, promoting its sibling.
@@ -329,14 +352,16 @@ func (t *TabModel) RemovePane(paneID string) {
 	if t.Root.IsLeaf() && t.Root.Pane.ID == paneID {
 		t.Root = nil
 		t.ActivePane = ""
+		t.invalidateLeaves()
 		return
 	}
 	if !t.Root.RemoveLeaf(paneID) {
 		return
 	}
+	t.invalidateLeaves()
 	// If we removed the active pane, pick the first leaf.
 	if t.ActivePane == paneID {
-		leaves := t.Root.Leaves()
+		leaves := t.Leaves()
 		if len(leaves) > 0 {
 			t.ActivePane = leaves[0].ID
 			leaves[0].Active = true

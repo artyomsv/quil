@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -61,6 +62,13 @@ type Daemon struct {
 	memReport   *memreport.Collector
 	collectorWG sync.WaitGroup
 
+	// snapGens records, per pane, the OutputBuf generation captured by the
+	// last buffer flush. Equal generation ⇒ identical contents ⇒ the on-disk
+	// file already matches and the write is skipped. Only touched inside
+	// snapshot(), which is serialized (debounce loop, then the final flush
+	// after the loop exits) — no lock needed.
+	snapGens map[string]uint64
+
 	// hookIngester translates hookevents.Payload (from spool reads / future
 	// IPC submissions) into PaneEvents via emitHookEvent. Lazily initialised
 	// in Start once the events dir is ready; nil before Start.
@@ -92,6 +100,7 @@ func New(cfg config.Config) *Daemon {
 		shutdown:   make(chan struct{}),
 		snapshotCh: make(chan struct{}, 1),
 		events:     newEventQueue(maxEvents),
+		snapGens:   make(map[string]uint64),
 	}
 	d.memReport = memreport.NewCollector(d.session, 5*time.Second)
 	return d
@@ -99,6 +108,9 @@ func New(cfg config.Config) *Daemon {
 
 func (d *Daemon) Start() error {
 	quilDir := config.QuilDir()
+	if err := probeExistingDaemon(config.SocketPath()); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(quilDir, 0700); err != nil {
 		return fmt.Errorf("create quil dir: %w", err)
 	}
@@ -360,11 +372,29 @@ func (d *Daemon) snapshot() {
 				continue
 			}
 			if pane.OutputBuf != nil {
+				gen := pane.OutputBuf.Gen()
+				if prev, ok := d.snapGens[pane.ID]; ok && prev == gen {
+					continue // unchanged since last flush — file already matches
+				}
 				if data := pane.OutputBuf.Bytes(); len(data) > 0 {
 					buffers[pane.ID] = data
 					totalBytes += len(data)
+					d.snapGens[pane.ID] = gen
 				}
 			}
+		}
+	}
+
+	// Prune generations of destroyed panes so the map tracks only live ones.
+	// snapshot() is the sole reader/writer of snapGens (serialized), so this
+	// sweep is race-free.
+	live := make(map[string]bool, len(activePaneIDs))
+	for _, id := range activePaneIDs {
+		live[id] = true
+	}
+	for id := range d.snapGens {
+		if !live[id] {
+			delete(d.snapGens, id)
 		}
 	}
 
@@ -896,7 +926,13 @@ func (d *Daemon) handleDestroyTab(msg *ipc.Message) {
 		return
 	}
 	log.Printf("tab destroy: %s", payload.TabID)
+	// Capture the pane list before DestroyTab removes them from the session
+	// maps, so we can clean up their artifacts after the tab is gone.
+	panes := d.session.Panes(payload.TabID)
 	d.session.DestroyTab(payload.TabID)
+	for _, p := range panes {
+		d.cleanupPaneArtifacts(p.ID)
+	}
 
 	// Auto-create replacement if last tab was destroyed
 	if len(d.session.Tabs()) == 0 {
@@ -1038,6 +1074,9 @@ func (d *Daemon) handleReplacePane(payload ipc.CreatePanePayload, cwd, paneType 
 		log.Printf("replace pane: swap error: %v", err)
 		return
 	}
+	// The old pane is no longer reachable via the session — clean up its
+	// hook artifacts so the spool watcher stops re-polling a dead file.
+	d.cleanupPaneArtifacts(payload.ReplacePaneID)
 
 	ptySession := apty.New()
 	if err := d.spawnPane(newPane, ptySession, false); err != nil {
@@ -1049,6 +1088,34 @@ func (d *Daemon) handleReplacePane(payload ipc.CreatePanePayload, cwd, paneType 
 	}
 	d.broadcastState()
 	d.requestSnapshot()
+}
+
+// cleanupPaneArtifacts tears down everything keyed by paneID outside the
+// session maps: the hook spool file + offset/parse-error entries, the
+// ingester's pending coalescers and rate buckets, and the persisted
+// session-id files. MUST be called on every pane-destruction path —
+// destroy-pane, destroy-tab, replace — or the daemon leaks the map entries
+// and re-polls the dead spool file every 200 ms until restart.
+//
+// Ordering relative to the PTY close does not matter for correctness: a
+// dying hook process can recreate the spool/session-id file after cleanup,
+// but emitHookEvent drops events for panes absent from the session, so the
+// residue is a small bounded file until the next daemon restart (Init
+// truncates stale spools). Call it before or after the session delete,
+// whichever reads better at the call site.
+func (d *Daemon) cleanupPaneArtifacts(paneID string) {
+	if d.hookSpool != nil {
+		d.hookSpool.Cleanup(paneID)
+	}
+	if d.hookIngester != nil {
+		d.hookIngester.Cancel(paneID)
+	}
+	for _, name := range []string{paneID + ".id", "opencode-" + paneID + ".id"} {
+		p := filepath.Join(config.SessionsDir(), name)
+		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+			log.Printf("cleanup pane %s: remove session id %s: %v", paneID, name, err)
+		}
+	}
 }
 
 func (d *Daemon) handleDestroyPane(msg *ipc.Message) {
@@ -1072,17 +1139,9 @@ func (d *Daemon) handleDestroyPane(msg *ipc.Message) {
 	}
 	log.Printf("pane destroy: %s (tab=%s)", payload.PaneID, tabID)
 
-	// Tear down the pane's hook event spool file AND coalescer pending
-	// state before destroying the pane itself. Spool.Cleanup stops the
-	// watcher from picking up stale lines on the next tick; Ingester.Cancel
-	// stops the 50 ms AfterFunc timers from firing a final stale event
-	// after the pane is gone.
-	if d.hookSpool != nil {
-		d.hookSpool.Cleanup(payload.PaneID)
-	}
-	if d.hookIngester != nil {
-		d.hookIngester.Cancel(payload.PaneID)
-	}
+	// Tear down the pane's hook event spool file, ingester state, and
+	// persisted session-id files before destroying the pane itself.
+	d.cleanupPaneArtifacts(payload.PaneID)
 
 	d.session.DestroyPane(payload.PaneID)
 
@@ -1226,7 +1285,6 @@ func resizeKick(pty apty.Session, cols, rows int) {
 func (d *Daemon) streamPTYOutput(paneID string, pty apty.Session) {
 	readBuf := make([]byte, 32*1024)
 	dataCh := make(chan []byte, 64)
-	firstChunk := true
 
 	// Reader goroutine: continuously reads from PTY
 	go func() {
@@ -1244,78 +1302,45 @@ func (d *Daemon) streamPTYOutput(paneID string, pty apty.Session) {
 		}
 	}()
 
-	// Coalescing loop: accumulates data, flushes on short timer
-	const coalesceDelay = 2 * time.Millisecond
-	var acc []byte
+	runCoalescer(dataCh,
+		func() {
+			// First output proves the child's console is wired up — re-apply
+			// the size in case the initial resize event was dropped during
+			// boot (see resizeKick).
+			if pane := d.session.Pane(paneID); pane != nil {
+				resizeKick(pty, pane.Cols, pane.Rows)
+			}
+		},
+		func(b []byte) { d.flushPaneOutput(paneID, b) },
+	)
 
-	flushTimer := time.NewTimer(0)
-	if !flushTimer.Stop() {
-		<-flushTimer.C
-	}
+	// dataCh closed: PTY EOF. Capture process exit code (protected by
+	// PluginMu to avoid data race).
+	if pane := d.session.Pane(paneID); pane != nil {
+		code := pty.WaitExit()
+		pane.PluginMu.Lock()
+		pane.ExitCode = &code
+		pane.ExitedAt = time.Now()
+		pane.PluginMu.Unlock()
+		log.Printf("pane %s: process exited with code %d", paneID, code)
 
-	flush := func() {
-		if len(acc) == 0 {
-			return
+		severity := "info"
+		title := "Process exited (code 0)"
+		if code != 0 {
+			severity = "error"
+			title = fmt.Sprintf("Process failed (code %d)", code)
 		}
-		d.flushPaneOutput(paneID, acc)
-		acc = acc[:0]
-	}
-
-	for {
-		select {
-		case chunk, ok := <-dataCh:
-			if !ok {
-				flush()
-				// Capture process exit code (protected by PluginMu to avoid data race)
-				if pane := d.session.Pane(paneID); pane != nil {
-					code := pty.WaitExit()
-					pane.PluginMu.Lock()
-					pane.ExitCode = &code
-					pane.ExitedAt = time.Now()
-					pane.PluginMu.Unlock()
-					log.Printf("pane %s: process exited with code %d", paneID, code)
-
-					severity := "info"
-					title := "Process exited (code 0)"
-					if code != 0 {
-						severity = "error"
-						title = fmt.Sprintf("Process failed (code %d)", code)
-					}
-					d.emitEvent(withExcerpt(PaneEvent{
-						ID:        uuid.New().String(),
-						PaneID:    paneID,
-						TabID:     pane.TabID,
-						PaneName:  pane.Name,
-						Type:      "process_exit",
-						Title:     title,
-						Severity:  severity,
-						Timestamp: time.Now(),
-						Data:      map[string]string{"exit_code": strconv.Itoa(code)},
-					}, paneOutputExcerpt(pane, 5)))
-				}
-				return
-			}
-			if firstChunk {
-				firstChunk = false
-				// First output proves the child's console is wired up —
-				// re-apply the size in case the initial resize event was
-				// dropped during boot (see resizeKick).
-				if pane := d.session.Pane(paneID); pane != nil {
-					resizeKick(pty, pane.Cols, pane.Rows)
-				}
-			}
-			acc = append(acc, chunk...)
-			if !flushTimer.Stop() {
-				select {
-				case <-flushTimer.C:
-				default:
-				}
-			}
-			flushTimer.Reset(coalesceDelay)
-
-		case <-flushTimer.C:
-			flush()
-		}
+		d.emitEvent(withExcerpt(PaneEvent{
+			ID:        uuid.New().String(),
+			PaneID:    paneID,
+			TabID:     pane.TabID,
+			PaneName:  pane.Name,
+			Type:      "process_exit",
+			Title:     title,
+			Severity:  severity,
+			Timestamp: time.Now(),
+			Data:      map[string]string{"exit_code": strconv.Itoa(code)},
+		}, paneOutputExcerpt(pane, 5)))
 	}
 }
 
@@ -1602,7 +1627,7 @@ func opencodeSpawnPrep(quilDir, paneID, hookMode string) []string {
 	}
 	return []string{
 		"QUIL_PANE_ID=" + paneID,
-		"QUIL_HOME=" + absQuilDir,
+		"QUIL_HOOK_HOME=" + absQuilDir,
 		"QUIL_HOOK_MODE=" + mode,
 		"OPENCODE_CONFIG_CONTENT=" + cfg,
 	}
@@ -1637,14 +1662,14 @@ func claudeHookSpawnPrep(quilDir, paneID, hookMode string, userArgs []string) (p
 	if mode == "" {
 		mode = "default"
 	}
-	// QUIL_HOME is passed explicitly (not just inherited) so the hook
-	// subprocess writes to the correct data dir even when the daemon's env
-	// doesn't carry it (production) — the native subcommand resolves it via
-	// config.QuilDir which reads QUIL_HOME.
+	// QUIL_HOOK_HOME is passed explicitly so the hook subprocess writes to the
+	// correct data dir; renamed from QUIL_HOME because children inherit the
+	// pane env and an inherited QUIL_HOME retargeted dev builds at production.
+	// Consumers fall back to QUIL_HOME for one release.
 	return []string{"--settings", js}, []string{
 		"QUIL_PANE_ID=" + paneID,
 		"QUIL_HOOK_MODE=" + mode,
-		"QUIL_HOME=" + quilDir,
+		"QUIL_HOOK_HOME=" + quilDir,
 	}
 }
 
@@ -2269,7 +2294,11 @@ func (d *Daemon) analyzeIdleTitle(pane *Pane) (title, severity, excerpt string) 
 	if pane.OutputBuf == nil {
 		return
 	}
-	raw := pane.OutputBuf.Bytes()
+	// Tail copies only the trailing window — Bytes() copied the full ring on
+	// every event emit. The extra 512 bytes give trimToNewlineSafe a scan
+	// margin: with exactly 4096 bytes its len <= maxTail early-return would
+	// skip the partial-escape-sequence trim entirely.
+	raw := pane.OutputBuf.Tail(4096 + 512)
 	if len(raw) == 0 {
 		return
 	}
@@ -2320,7 +2349,11 @@ func paneOutputExcerpt(pane *Pane, n int) string {
 	if pane == nil || pane.OutputBuf == nil {
 		return ""
 	}
-	raw := pane.OutputBuf.Bytes()
+	// Tail copies only the trailing window — Bytes() copied the full ring on
+	// every event emit. The extra 512 bytes give trimToNewlineSafe a scan
+	// margin: with exactly 4096 bytes its len <= maxTail early-return would
+	// skip the partial-escape-sequence trim entirely.
+	raw := pane.OutputBuf.Tail(4096 + 512)
 	if len(raw) == 0 {
 		return ""
 	}
@@ -2924,14 +2957,9 @@ func (d *Daemon) handleDestroyPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 	}
 	d.highlightPane(pane.ID)
 
-	// Same hook-events cleanup as handleDestroyPane: kill the spool file +
-	// cancel the coalescer's pending timers before the pane disappears.
-	if d.hookSpool != nil {
-		d.hookSpool.Cleanup(req.PaneID)
-	}
-	if d.hookIngester != nil {
-		d.hookIngester.Cancel(req.PaneID)
-	}
+	// Same cleanup as handleDestroyPane: spool file, ingester state, and
+	// persisted session-id files before the pane disappears.
+	d.cleanupPaneArtifacts(req.PaneID)
 
 	tabID := pane.TabID
 	if err := d.session.DestroyPane(req.PaneID); err != nil {

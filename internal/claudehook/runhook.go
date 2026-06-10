@@ -17,7 +17,7 @@ import (
 // QUIL_* environment the daemon sets on a claude-code pane at spawn.
 type HookEnv struct {
 	PaneID  string // QUIL_PANE_ID — empty means "invoked outside Quil" (no-op)
-	QuilDir string // QUIL_HOME (resolved) — root for sessions/ and events/
+	QuilDir string // resolved via QUIL_HOOK_HOME (QUIL_HOME fallback) — root for sessions/ and events/
 	Mode    string // QUIL_HOOK_MODE: "default" | "verbose" | "off"
 }
 

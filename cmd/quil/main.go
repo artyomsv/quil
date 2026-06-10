@@ -370,6 +370,14 @@ func saveWindowSize(m tui.Model) {
 		return
 	}
 	ws := windowState{Cols: cols, Rows: rows}
+	// Carry forward the previous session's pixel/maximized state; the platform
+	// layer overwrites it only when a real (visible) console window exists, so
+	// a ConPTY-hosted session (Windows Terminal) never wipes conhost geometry.
+	if prev := loadWindowState(); prev != nil {
+		ws.PixelWidth = prev.PixelWidth
+		ws.PixelHeight = prev.PixelHeight
+		ws.Maximized = prev.Maximized
+	}
 	// Get pixel dimensions for Windows MoveWindow
 	saveWindowSizePlatform(&ws)
 	data, err := json.Marshal(ws)

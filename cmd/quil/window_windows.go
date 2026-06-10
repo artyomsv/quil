@@ -16,7 +16,26 @@ var (
 	moveWindow       = user32.NewProc("MoveWindow")
 	showWindow       = user32.NewProc("ShowWindow")
 	isZoomed         = user32.NewProc("IsZoomed")
+	isWindowVisible  = user32.NewProc("IsWindowVisible")
 )
+
+// realConsoleWindow returns the console window handle, or 0 when there is no
+// window the user can actually see. Under ConPTY hosts (Windows Terminal,
+// VS Code, IDE terminals) GetConsoleWindow returns a hidden compatibility
+// window ("PseudoConsoleWindow"); calling ShowWindow(SW_MAXIMIZE) on it makes
+// an invisible full-screen window appear that swallows mouse input for every
+// window beneath it in the Z-order. A real conhost window is always visible
+// by the time the TUI runs — the ConPTY ghost never is.
+func realConsoleWindow() uintptr {
+	hwnd, _, _ := getConsoleWindow.Call()
+	if hwnd == 0 {
+		return 0
+	}
+	if vis, _, _ := isWindowVisible.Call(hwnd); vis == 0 {
+		return 0
+	}
+	return hwnd
+}
 
 const swMaximize = 3 // SW_MAXIMIZE
 
@@ -25,8 +44,9 @@ type rect struct {
 }
 
 func restoreWindowSizePlatform(ws *windowState) {
-	hwnd, _, _ := getConsoleWindow.Call()
+	hwnd := realConsoleWindow()
 	if hwnd == 0 {
+		log.Printf("window restore skipped: no visible console window (ConPTY host manages its own size)")
 		return
 	}
 
@@ -64,8 +84,11 @@ func restoreWindowSizePlatform(ws *windowState) {
 }
 
 func saveWindowSizePlatform(ws *windowState) {
-	hwnd, _, _ := getConsoleWindow.Call()
+	hwnd := realConsoleWindow()
 	if hwnd == 0 {
+		// Keep whatever pixel/maximized values the caller pre-filled from the
+		// previous session — the ConPTY ghost's metrics would poison them
+		// (IsZoomed on the ghost stays true once a stale restore zoomed it).
 		return
 	}
 

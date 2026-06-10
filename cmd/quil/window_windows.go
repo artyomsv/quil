@@ -16,22 +16,50 @@ var (
 	moveWindow       = user32.NewProc("MoveWindow")
 	showWindow       = user32.NewProc("ShowWindow")
 	isZoomed         = user32.NewProc("IsZoomed")
-	isWindowVisible  = user32.NewProc("IsWindowVisible")
+	getClassNameW    = user32.NewProc("GetClassNameW")
 )
 
-// realConsoleWindow returns the console window handle, or 0 when there is no
-// window the user can actually see. Under ConPTY hosts (Windows Terminal,
-// VS Code, IDE terminals) GetConsoleWindow returns a hidden compatibility
-// window ("PseudoConsoleWindow"); calling ShowWindow(SW_MAXIMIZE) on it makes
-// an invisible full-screen window appear that swallows mouse input for every
-// window beneath it in the Z-order. A real conhost window is always visible
-// by the time the TUI runs — the ConPTY ghost never is.
+// realConsoleClassName is the window class of a genuine legacy conhost window.
+// A maximizable/movable console window only exists under conhost; under any
+// ConPTY host (Windows Terminal, VS Code, IDE terminals) GetConsoleWindow
+// returns a hidden compatibility window of class "PseudoConsoleWindow" instead.
+const realConsoleClassName = "ConsoleWindowClass"
+
+// isRealConsoleClass reports whether a console window class belongs to a real
+// conhost window (safe to move/maximize/persist) rather than a ConPTY ghost.
+//
+// This is the discriminator the previous fix got wrong: it gated on
+// IsWindowVisible, assuming the ConPTY ghost is invisible. It is NOT — the
+// ghost has WS_VISIBLE set (IsWindowVisible returns true) while sitting at a
+// zero rect, so the gate never fired in a real Windows Terminal session and
+// ShowWindow(SW_MAXIMIZE) still detonated the invisible full-screen window
+// that swallows mouse input desktop-wide. The window CLASS is the reliable
+// signal: conhost is "ConsoleWindowClass", the ConPTY ghost is
+// "PseudoConsoleWindow".
+func isRealConsoleClass(class string) bool {
+	return class == realConsoleClassName
+}
+
+// windowClassName returns the Win32 class name of hwnd.
+func windowClassName(hwnd uintptr) string {
+	var buf [256]uint16
+	n, _, _ := getClassNameW.Call(hwnd, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
+	if n == 0 {
+		return ""
+	}
+	return syscall.UTF16ToString(buf[:n])
+}
+
+// realConsoleWindow returns the console window handle only when it is a genuine
+// conhost window. Returns 0 under a ConPTY host (Windows Terminal, VS Code,
+// IDE terminals), where the host owns window geometry and the "console window"
+// is a hidden PseudoConsoleWindow that must never be moved or maximized.
 func realConsoleWindow() uintptr {
 	hwnd, _, _ := getConsoleWindow.Call()
 	if hwnd == 0 {
 		return 0
 	}
-	if vis, _, _ := isWindowVisible.Call(hwnd); vis == 0 {
+	if !isRealConsoleClass(windowClassName(hwnd)) {
 		return 0
 	}
 	return hwnd
@@ -46,7 +74,7 @@ type rect struct {
 func restoreWindowSizePlatform(ws *windowState) {
 	hwnd := realConsoleWindow()
 	if hwnd == 0 {
-		log.Printf("window restore skipped: no visible console window (ConPTY host manages its own size)")
+		log.Printf("window restore skipped: not a real conhost window (ConPTY host manages its own size)")
 		return
 	}
 
@@ -87,8 +115,9 @@ func saveWindowSizePlatform(ws *windowState) {
 	hwnd := realConsoleWindow()
 	if hwnd == 0 {
 		// Keep whatever pixel/maximized values the caller pre-filled from the
-		// previous session — the ConPTY ghost's metrics would poison them
-		// (IsZoomed on the ghost stays true once a stale restore zoomed it).
+		// previous session — under a ConPTY host there is no real window whose
+		// geometry we could read, and the ghost's IsZoomed/GetWindowRect would
+		// poison the persisted values.
 		return
 	}
 

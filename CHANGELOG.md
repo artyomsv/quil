@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.18.6] - 2026-06-10
+
 ### Changed
 
 - **TUI render path stops rebuilding unchanged frames** — every Bubble Tea update used to re-render the full VT grid, borders, and labels of every visible pane (hundreds of times per second under streaming output; the 100 ms spinner tick alone forced full-tab rebuilds). Pane frames are now cached behind a complete render fingerprint (content/selection generations + every visual input), tab pane-lists are memoized until the layout tree mutates (the tab bar walked every tab's tree twice per render), and the per-update perf instrumentation no longer does reflection. `Alt+Shift+L` (redraw) also clears the caches as the escape hatch.

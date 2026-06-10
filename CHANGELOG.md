@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.18.4] - 2026-06-10
+
 ### Fixed
 
 - **Work-in-progress spinner stayed spinning while an AI pane waited for your input** — when Claude (or opencode) parked on a permission prompt or an options/question prompt, the tab + pane spinner kept animating as if work were ongoing, and the "turn finished" green tab flash never fired. The TUI derives work state purely from the hook-event stream, and the park edges (`hook.claude.Notification`, `hook.claude.PermissionRequest`, `hook.opencode.permission.ask`) were unmapped, so `working` was never cleared. Those edges now resolve to a stop transition: the spinner stops and the (non-active) tab flashes green for 5 s to pull attention. The earlier v1 decision to treat permission-waiting as "still working" (no separate blocked state) is reversed.

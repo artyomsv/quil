@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Windows: Ctrl+V stopped pasting screenshots** — pressing Ctrl+V on a clipboard holding an image (but no text) did nothing, while F8 still worked. Windows Terminal performs its own paste on Ctrl+V and delivers it to Quil as a bracketed `tea.PasteMsg`; for an image-only clipboard that message's content is empty, and the empty-content branch called `sendClipboardToPane("")` and silently no-oped. The image→PNG proxy (save the image under `~/.quil/paste/`, type the file path into the pane) lived only in the F8/Ctrl+Alt+V keypress path (`pasteClipboard`), so F8 worked while Ctrl+V did not — a regression introduced when bracketed-paste handling was added. An empty bracketed paste now routes to that same image-capable path, restoring Ctrl+V screenshot paste. The paste flow's clipboard readers were made injectable so the routing is covered by a unit test.
+
 ## [1.18.4] - 2026-06-10
 
 ### Fixed

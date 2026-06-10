@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Attach kick-loop: daemon force-closed a healthy TUI mid ghost replay** — ghost replay and notification-event replay during attach route through the per-conn 64-slot critical send queue. Two full 256 KB ghost buffers chunk into exactly 64 must-deliver frames, so a freshly attached client still busy applying workspace state overflowed the queue and tripped the slow-client defense (`ipc: dropping slow client`), disconnecting the TUI on **every** attach — production was locked out permanently. New `Conn.SendBlocking` applies backpressure for unicast bulk transfers instead of the overflow close: it waits for the queue to drain below half capacity (reserving headroom so concurrent broadcasts never hit a replay-saturated queue), aborts on conn close or daemon shutdown, and leaves genuinely wedged peers to the existing 30 s write deadline. `sendGhostChunked` and the attach event-replay loop (up to 200 events — same latent overflow) now use it.
+
 ## [1.18.0] - 2026-06-09
 
 ## [1.17.0] - 2026-06-09

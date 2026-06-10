@@ -43,6 +43,21 @@ const writeDeadline = 30 * time.Second
 // circuit with the same error.
 var ErrSendOverflow = errors.New("ipc: send buffer overflow (slow client)")
 
+// ErrConnClosed is returned by SendBlocking when the conn closes (locally,
+// via the overflow path, or by the peer) while waiting for queue space.
+var ErrConnClosed = errors.New("ipc: conn closed")
+
+// ErrSendCanceled is returned by SendBlocking when the caller's cancel
+// channel fires while waiting for queue space.
+var ErrSendCanceled = errors.New("ipc: blocking send canceled")
+
+// sendHeadroom is the critical-queue depth a SendBlocking caller waits for
+// before enqueuing. Capping bulk transfers at half the queue reserves the
+// other half for concurrent Broadcast criticals (state updates, pane events),
+// so a replay-saturated queue can never trip the overflow close for traffic
+// the bulk sender didn't produce.
+const sendHeadroom = sendBufSize / 2
+
 // MessageHandler is called for each incoming message on a connection.
 type MessageHandler func(conn *Conn, msg *Message)
 
@@ -161,6 +176,45 @@ func (c *Conn) enqueue(frame []byte, droppable bool) error {
 			go c.Close()
 		}
 		return ErrSendOverflow
+	}
+}
+
+// SendBlocking queues a must-deliver frame, waiting for the critical queue to
+// drain below sendHeadroom instead of tripping the slow-client overflow close.
+// For unicast bulk transfers (ghost replay, event replay during attach) that
+// run on the sender's own goroutine: backpressure slows only this client's
+// replay, while a genuinely wedged peer is still bounded by sendLoop's
+// writeDeadline (deadline trips → conn closes → done fires → this returns).
+// cancel (typically the daemon shutdown channel) may be nil.
+//
+// Without this, a freshly attached TUI busy applying workspace state was
+// force-closed whenever replay volume exceeded sendBufSize frames — two full
+// 256 KB ghost buffers were enough — locking the client out on every attach.
+func (c *Conn) SendBlocking(msg *Message, cancel <-chan struct{}) error {
+	var buf bytes.Buffer
+	if err := WriteMessage(&buf, msg); err != nil {
+		return err
+	}
+	const pollInterval = 2 * time.Millisecond
+	for {
+		if c.closed.Load() || c.overflow.Load() {
+			return ErrConnClosed
+		}
+		if len(c.critCh) < sendHeadroom {
+			select {
+			case c.critCh <- buf.Bytes():
+				return nil
+			default:
+				// Lost a race with concurrent broadcast enqueues — wait.
+			}
+		}
+		select {
+		case <-c.done:
+			return ErrConnClosed
+		case <-cancel:
+			return ErrSendCanceled
+		case <-time.After(pollInterval):
+		}
 	}
 }
 

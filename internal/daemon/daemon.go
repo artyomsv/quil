@@ -816,11 +816,15 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 		}
 	}
 
-	// Replay pending notification events
+	// Replay pending notification events. Blocking send for the same reason
+	// as ghost replay: up to MaxEvents (200) critical frames in a burst would
+	// overflow the 64-slot critical queue and force-close a busy client.
 	for _, e := range d.events.Events() {
 		payload := toPaneEventPayload(e)
 		evtMsg, _ := ipc.NewMessage(ipc.MsgPaneEvent, payload)
-		conn.Send(evtMsg)
+		if err := conn.SendBlocking(evtMsg, d.shutdown); err != nil {
+			return // client disconnected or daemon shutting down
+		}
 	}
 }
 
@@ -845,8 +849,12 @@ func sendGhostChunked(conn *ipc.Conn, paneID string, data []byte, done <-chan st
 			Data:   data[:n],
 			Ghost:  true,
 		})
-		if err := conn.Send(msg); err != nil {
-			return // client disconnected
+		// Blocking send: replay volume routinely exceeds the critical queue
+		// (32 chunks per full 256 KB buffer), and a freshly attached TUI is
+		// busy applying workspace state. Backpressure must slow the replay,
+		// not force-close the client (the production attach kick-loop).
+		if err := conn.SendBlocking(msg, done); err != nil {
+			return // client disconnected or daemon shutting down
 		}
 		data = data[n:]
 		if len(data) > 0 {

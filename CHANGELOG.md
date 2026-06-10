@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Work-in-progress spinner stayed spinning while an AI pane waited for your input** — when Claude (or opencode) parked on a permission prompt or an options/question prompt, the tab + pane spinner kept animating as if work were ongoing, and the "turn finished" green tab flash never fired. The TUI derives work state purely from the hook-event stream, and the park edges (`hook.claude.Notification`, `hook.claude.PermissionRequest`, `hook.opencode.permission.ask`) were unmapped, so `working` was never cleared. Those edges now resolve to a stop transition: the spinner stops and the (non-active) tab flashes green for 5 s to pull attention. The earlier v1 decision to treat permission-waiting as "still working" (no separate blocked state) is reversed.
+- **Spinner did not resume after you answered an AI prompt** — once the spinner was parked, selecting an answer left the pane looking idle even though the agent had resumed. There is no "resumed after approval" hook, so the resume edge had to be found empirically: diagnostic hook logging showed `PreToolUse` fires *before* the prompt (useless as a resume), while **`PostToolUse` fires the instant the prompt tool returns the user's answer**. The Claude hook now registers `PostToolUse` with a tool-name matcher (`AskUserQuestion|ExitPlanMode`) so the hook is invoked only for interactive-prompt tools — no per-tool-call overhead, which is why the full `PostToolUse` stream was excluded from the default tier. That edge re-arms the spinner and clears the pending green flash; it is a work-state-only signal and never appears as a notification card. Known limitation: a permission-gated *command* (e.g. an approved `Bash`) resumes only when the command completes (its `PostToolUse`), not at the moment of approval — the options-prompt case resumes instantly.
+
 ## [1.18.3] - 2026-06-10
 
 ### Fixed

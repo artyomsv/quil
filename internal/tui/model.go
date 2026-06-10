@@ -793,7 +793,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// at — it's redundant noise. Other event types (process_exit, bell,
 		// command_complete) stay even on the active pane: they're transient
 		// state changes that benefit from a sidebar audit trail.
-		if !(msg.Type == "output_idle" && m.isActivePane(msg.PaneID)) {
+		//
+		// hook.claude.PostToolUse is a work-state-only signal (re-arms the
+		// spinner after a prompt is answered) — never a user-facing card.
+		workStateOnly := msg.Type == "hook.claude.PostToolUse"
+		if !workStateOnly && !(msg.Type == "output_idle" && m.isActivePane(msg.PaneID)) {
 			m.notifications.AddEvent(ipc.PaneEventPayload(msg))
 		}
 		cmds := []tea.Cmd{m.listenForMessages()}

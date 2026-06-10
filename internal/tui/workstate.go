@@ -20,7 +20,7 @@ type workTransition int
 const (
 	workNone  workTransition = iota // no effect
 	workStart                       // a turn began
-	workStop                        // a turn completed normally → green flash
+	workStop                        // turn completed OR parked for user input → green flash
 	workAbort                       // process exited → clear working, no flash
 )
 
@@ -32,8 +32,23 @@ func workEventKind(eventType string) workTransition {
 	switch eventType {
 	case "hook.claude.UserPromptSubmit", "hook.opencode.chat.message":
 		return workStart
+	// Resume edge: the user answered an interactive-prompt tool (AskUserQuestion
+	// / ExitPlanMode) and the agent is working again. The hook registers
+	// PostToolUse only for those tools, so this re-arms the spinner after a park
+	// without tracking ordinary tool completions.
+	case "hook.claude.PostToolUse":
+		return workStart
 	case "hook.claude.Stop", "hook.claude.SessionEnd",
 		"hook.opencode.session.idle", "hook.opencode.session.error":
+		return workStop
+	// Park-for-input edges: the agent is blocked waiting on the user (permission
+	// prompt, option select, idle-input nudge). There is no "resumed after
+	// approval" hook, so we treat the park as a turn boundary — stop the spinner
+	// and flash the tab green to pull attention. Both Claude (Notification fires
+	// for permission + idle-wait; PermissionRequest when available) and opencode
+	// (permission.ask) are covered.
+	case "hook.claude.Notification", "hook.claude.PermissionRequest",
+		"hook.opencode.permission.ask":
 		return workStop
 	case "process_exit":
 		return workAbort
@@ -74,6 +89,11 @@ func (m *Model) applyWorkTransition(paneID, eventType string) tea.Cmd {
 		// Seed the pane spinner with the shared frame so the tab and pane
 		// glyphs are in sync from the first render (before the next tick).
 		pane.workFrame = m.workSpinnerFrame
+		// Clear any pending green flash: a (re)start means the work is no longer
+		// "finished/parked", so the attention cue should yield to the spinner.
+		// Covers both a fresh turn after a previous flash and a resume after the
+		// user answers a prompt (PostToolUse arrives mid-flash).
+		m.tabs[tabIdx].flashUntil = time.Time{}
 	case workStop:
 		wasWorking := pane.working
 		pane.working = false

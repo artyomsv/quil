@@ -114,6 +114,21 @@ func dispatchHookEvent(env HookEnv, in claudeStdin, nowMs int64) error {
 			map[string]string{"tool": truncate(in.ToolName, hookevents.MaxDataValueBytes)})
 	case "Stop":
 		return spoolEvent(env, nowMs, "Stop", in.SessionID, "Reply ready", hookevents.SeverityWarning, nil)
+	case "PostToolUse":
+		// Work-spinner RESUME edge. Registered with a tool-name matcher
+		// (claudehook.promptToolMatcher) so Claude only fires it for the
+		// interactive-prompt tools, whose PostToolUse marks the moment the user
+		// answered and the agent resumes work. The defensive tool gate below
+		// mirrors the matcher in case a future settings change widens it — we
+		// never want to spool a Read/Bash/Edit completion here. This event drives
+		// work-state only; the TUI suppresses it from the notification sidebar.
+		if !isPromptTool(in.ToolName) {
+			return nil
+		}
+		hookLog(env.QuilDir, env.PaneID, "PostToolUse resume tool="+in.ToolName)
+		return spoolEvent(env, nowMs, "PostToolUse", in.SessionID,
+			truncate("Resumed after "+in.ToolName, hookevents.MaxTitleBytes), hookevents.SeverityInfo,
+			map[string]string{"tool": truncate(in.ToolName, hookevents.MaxDataValueBytes)})
 	case "PreCompact":
 		title := "Compacting context"
 		if in.Reason != "" {
@@ -144,6 +159,18 @@ func dispatchHookEvent(env HookEnv, in claudeStdin, nowMs int64) error {
 		// breadcrumb rather than erroring.
 		hookLog(env.QuilDir, env.PaneID, "unhandled hook_event: "+in.HookEventName)
 		return nil
+	}
+}
+
+// isPromptTool reports whether tool is an interactive-prompt tool whose
+// completion (PostToolUse) should re-arm the work spinner. Keep this set in
+// sync with claudehook.promptToolMatcher (the registration-side regex).
+func isPromptTool(tool string) bool {
+	switch tool {
+	case "AskUserQuestion", "ExitPlanMode":
+		return true
+	default:
+		return false
 	}
 }
 

@@ -243,6 +243,12 @@ func TestRunHook_AllSpoolBranches(t *testing.T) {
 			hookEvt: "TaskCompleted", wantTit: "✓ write tests", wantSev: "info",
 			dataKey: "content", dataWant: "write tests",
 		},
+		{
+			name:    "PostToolUse prompt tool (resume edge)",
+			stdin:   `{"hook_event_name":"PostToolUse","tool_name":"AskUserQuestion"}`,
+			hookEvt: "PostToolUse", wantTit: "Resumed after AskUserQuestion", wantSev: "info",
+			dataKey: "tool", dataWant: "AskUserQuestion",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -283,6 +289,22 @@ func TestRunHook_RejectsTraversalPaneID(t *testing.T) {
 	// No file should have been written outside the events dir.
 	if _, err := os.Stat(filepath.Join(dir, "events")); !os.IsNotExist(err) {
 		t.Errorf("traversal pane id must not create any spool file (err=%v)", err)
+	}
+}
+
+// TestRunHook_PostToolUse_NonPromptToolDropped guards the defensive tool gate:
+// even though Claude's matcher should only fire PostToolUse for prompt tools, a
+// PostToolUse for an ordinary tool (Bash/Read/Edit) must never spool — that was
+// the noise the matcher exists to avoid.
+func TestRunHook_PostToolUse_NonPromptToolDropped(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	env := HookEnv{PaneID: "pane-pt", QuilDir: dir, Mode: "default"}
+	if err := RunHook(strings.NewReader(`{"hook_event_name":"PostToolUse","tool_name":"Bash"}`), env, 1); err != nil {
+		t.Fatalf("RunHook: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "events", "pane-pt.jsonl")); !os.IsNotExist(err) {
+		t.Errorf("PostToolUse for a non-prompt tool must not spool (err=%v)", err)
 	}
 }
 

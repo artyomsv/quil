@@ -17,12 +17,17 @@ func TestWorkEventKind(t *testing.T) {
 	}{
 		{"hook.claude.UserPromptSubmit", workStart},
 		{"hook.opencode.chat.message", workStart},
+		{"hook.claude.PostToolUse", workStart}, // resume after a prompt is answered
 		{"hook.claude.Stop", workStop},
 		{"hook.claude.SessionEnd", workStop},
 		{"hook.opencode.session.idle", workStop},
 		{"hook.opencode.session.error", workStop},
 		{"process_exit", workAbort},
-		{"hook.claude.Notification", workNone},
+		// Park-for-input edges: the agent is waiting on the user, so the turn
+		// is effectively done until they respond → stop spinner + green flash.
+		{"hook.claude.Notification", workStop},
+		{"hook.claude.PermissionRequest", workStop},
+		{"hook.opencode.permission.ask", workStop},
 		{"output_idle", workNone},
 		{"", workNone},
 	}
@@ -79,6 +84,68 @@ func TestApplyWorkTransition_StopClearsAndFlashes(t *testing.T) {
 	}
 	if cmd == nil {
 		t.Error("stop transition should return a flash-expiry tick cmd")
+	}
+}
+
+func TestApplyWorkTransition_ParkForInputClearsAndFlashes(t *testing.T) {
+	t.Parallel()
+	// When the agent parks for user input (permission prompt / option select)
+	// the spinner must stop and the tab must flash green for attention — even
+	// though no genuine Stop edge will arrive until after the user responds.
+	for _, evt := range []string{
+		"hook.claude.Notification",
+		"hook.claude.PermissionRequest",
+		"hook.opencode.permission.ask",
+	} {
+		t.Run(evt, func(t *testing.T) {
+			t.Parallel()
+			m := modelForWorkTest()
+			m.applyWorkTransition("p1", "hook.claude.UserPromptSubmit")
+			cmd := m.applyWorkTransition("p1", evt)
+			if m.tabs[0].Root.Leaves()[0].working {
+				t.Errorf("%s: pane.working should be false after a park-for-input edge", evt)
+			}
+			if !m.tabFlashing(0) {
+				t.Errorf("%s: tab should flash green when the agent parks for input", evt)
+			}
+			if cmd == nil {
+				t.Errorf("%s: park transition should return a flash-expiry tick cmd", evt)
+			}
+		})
+	}
+}
+
+func TestApplyWorkTransition_ResumeAfterParkClearsFlashAndReArms(t *testing.T) {
+	t.Parallel()
+	// Full prompt cycle: start → park (spinner off + flash) → user answers
+	// (PostToolUse) → spinner back on, flash cleared.
+	m := modelForWorkTest()
+	m.applyWorkTransition("p1", "hook.claude.UserPromptSubmit")
+	m.applyWorkTransition("p1", "hook.claude.PermissionRequest") // park
+	if m.tabs[0].Root.Leaves()[0].working {
+		t.Fatal("precondition: pane should be parked (not working) before resume")
+	}
+	if !m.tabFlashing(0) {
+		t.Fatal("precondition: tab should be flashing after the park")
+	}
+
+	m.applyWorkTransition("p1", "hook.claude.PostToolUse") // resume
+	if !m.tabs[0].Root.Leaves()[0].working {
+		t.Error("pane.working should be true again after the answer (PostToolUse)")
+	}
+	if m.tabFlashing(0) {
+		t.Error("resume must clear the green flash — work is no longer parked")
+	}
+}
+
+func TestApplyWorkTransition_StartClearsStaleFlash(t *testing.T) {
+	t.Parallel()
+	// A fresh turn must clear a lingering flash from the previous turn.
+	m := modelForWorkTest()
+	m.tabs[0].flashUntil = time.Now().Add(tabFlashDuration)
+	m.applyWorkTransition("p1", "hook.claude.UserPromptSubmit")
+	if m.tabFlashing(0) {
+		t.Error("a new turn (UserPromptSubmit) should clear a stale green flash")
 	}
 }
 

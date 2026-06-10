@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Windows: ConPTY ghost-window mouse block was not actually fixed in v1.18.2** — the v1.18.2 guard gated on `IsWindowVisible`, assuming the ConPTY ghost is invisible. It is not: the `PseudoConsoleWindow` has `WS_VISIBLE` set while sitting at a zero rect, so `IsWindowVisible` returns true and the guard never fired in a real Windows Terminal / VS Code session — `ShowWindow(SW_MAXIMIZE)` still spawned the invisible full-screen window that swallows mouse clicks across the whole desktop. The guard now discriminates by **window class** via `GetClassNameW`: only a genuine conhost window (`"ConsoleWindowClass"`) may be moved, maximized, or have its geometry persisted; the ConPTY ghost (`"PseudoConsoleWindow"`) is skipped on both restore and save. Verified against a real ConPTY (`realConsoleWindow()` returns 0 for a live `PseudoConsoleWindow`); the pure `isRealConsoleClass` discriminator is unit-tested.
+
 ## [1.18.2] - 2026-06-10
 
 ### Fixed

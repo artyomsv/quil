@@ -1,7 +1,5 @@
 package tui
 
-import "time"
-
 // TabModel represents a single tab containing a tree of panes.
 type TabModel struct {
 	ID         string
@@ -11,8 +9,7 @@ type TabModel struct {
 	ActivePane string      // pane ID of the active pane
 	Width      int
 	Height     int
-	focusMode  bool      // true = active pane fills entire tab
-	flashUntil time.Time // until when this tab's label flashes green (work just finished)
+	focusMode  bool // true = active pane fills entire tab
 
 	// leavesCache memoizes Root.Leaves(); nil = invalid. The tab bar alone
 	// walks every tab's tree twice per render without it.

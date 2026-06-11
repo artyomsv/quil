@@ -6,10 +6,6 @@ import (
 	tea "charm.land/bubbletea/v2"
 )
 
-// tabFlashDuration is how long an inactive tab label stays green after the
-// pane it contains finishes a turn.
-const tabFlashDuration = 5 * time.Second
-
 // workSpinnerInterval is the animation cadence for the work-in-progress
 // spinner (shared by tab and pane indicators).
 const workSpinnerInterval = 100 * time.Millisecond
@@ -20,8 +16,8 @@ type workTransition int
 const (
 	workNone  workTransition = iota // no effect
 	workStart                       // a turn began
-	workStop                        // turn completed OR parked for user input → green flash
-	workAbort                       // process exited → clear working, no flash
+	workStop                        // turn completed OR parked for user input → mark pane unseen
+	workAbort                       // process exited → clear working, no mark
 )
 
 // workEventKind maps a PaneEvent Type (the daemon encodes hook events as
@@ -71,17 +67,18 @@ func (m *Model) findPaneAndTab(paneID string) (*PaneModel, int) {
 }
 
 // applyWorkTransition updates the working state of the pane identified by
-// paneID based on the event type. On a normal completion it stamps the
-// containing tab's flashUntil and returns a one-shot tick cmd that re-renders
-// when the flash expires. All other cases return nil.
-func (m *Model) applyWorkTransition(paneID, eventType string) tea.Cmd {
+// paneID based on the event type. On a normal completion or park, any pane
+// that is not the focused pane of the active tab gets a persistent unseen
+// mark — green border + derived green tab label — cleared when the user
+// focuses the pane (ackFocusedPane at Update entry). There is no timer.
+func (m *Model) applyWorkTransition(paneID, eventType string) {
 	kind := workEventKind(eventType)
 	if kind == workNone {
-		return nil
+		return
 	}
 	pane, tabIdx := m.findPaneAndTab(paneID)
 	if pane == nil {
-		return nil
+		return
 	}
 	switch kind {
 	case workStart:
@@ -89,22 +86,24 @@ func (m *Model) applyWorkTransition(paneID, eventType string) tea.Cmd {
 		// Seed the pane spinner with the shared frame so the tab and pane
 		// glyphs are in sync from the first render (before the next tick).
 		pane.workFrame = m.workSpinnerFrame
-		// Clear any pending green flash: a (re)start means the work is no longer
-		// "finished/parked", so the attention cue should yield to the spinner.
-		// Covers both a fresh turn after a previous flash and a resume after the
-		// user answers a prompt (PostToolUse arrives mid-flash).
-		m.tabs[tabIdx].flashUntil = time.Time{}
+		// A (re)start means the work is no longer "finished/parked" — the
+		// spinner supersedes the green unseen mark. Covers both a fresh turn
+		// after a previous completion and a resume after the user answers a
+		// prompt (PostToolUse arrives while the mark is set).
+		pane.unseen = false
 	case workStop:
 		wasWorking := pane.working
 		pane.working = false
-		if wasWorking {
-			m.tabs[tabIdx].flashUntil = time.Now().Add(tabFlashDuration)
-			return tea.Tick(tabFlashDuration, func(time.Time) tea.Msg { return flashTickMsg{} })
+		// Mark unless the user is looking straight at the pane: completion
+		// in the focused pane of the active tab is seen by definition. An
+		// unfocused split sibling IS marked — its green border is the cue.
+		focused := tabIdx == m.activeTab && m.tabs[tabIdx].ActivePane == paneID
+		if wasWorking && !focused {
+			pane.unseen = true
 		}
 	case workAbort:
 		pane.working = false
 	}
-	return nil
 }
 
 // anyPaneWorking reports whether any pane in any tab is mid-turn.
@@ -135,13 +134,20 @@ func (m Model) tabHasWorkingPane(idx int) bool {
 	return false
 }
 
-// tabFlashing reports whether the tab at idx is within its green flash window.
-func (m Model) tabFlashing(idx int) bool {
-	if idx < 0 || idx >= len(m.tabs) {
+// tabUnseen reports whether the background tab at idx contains at least one
+// pane with an unacknowledged work-finished mark. Purely derived from pane
+// state — the active tab always reports false (the user is on it; the pane
+// border carries the cue there).
+func (m Model) tabUnseen(idx int) bool {
+	if idx < 0 || idx >= len(m.tabs) || idx == m.activeTab || m.tabs[idx].Root == nil {
 		return false
 	}
-	t := m.tabs[idx].flashUntil
-	return !t.IsZero() && time.Now().Before(t)
+	for _, p := range m.tabs[idx].Leaves() {
+		if p != nil && p.unseen {
+			return true
+		}
+	}
+	return false
 }
 
 // workSpinnerTick schedules the next shared work-spinner frame.

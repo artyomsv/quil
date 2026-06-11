@@ -14,9 +14,10 @@ var (
 		Background(lipgloss.Color("238")).
 		Padding(0, 1)
 
-	// flashTabStyle highlights an inactive tab for a few seconds after a
-	// pane in it finishes a turn. Green background, bright text.
-	flashTabStyle = lipgloss.NewStyle().
+	// unseenTabStyle highlights a background tab containing a pane that
+	// finished a turn (or parked for user input) and hasn't been focused
+	// since. Green background, bright text; clears when the pane is focused.
+	unseenTabStyle = lipgloss.NewStyle().
 		Bold(true).
 		Foreground(lipgloss.Color("231")).
 		Background(lipgloss.Color("28")).

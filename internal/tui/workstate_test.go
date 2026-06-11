@@ -3,7 +3,6 @@ package tui
 import (
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
@@ -56,6 +55,34 @@ func modelForWorkTest() Model {
 	}
 }
 
+// modelWithBackgroundTab extends modelForWorkTest with a second, background
+// tab (index 1) holding pane "p2". activeTab stays 0, so transitions on "p2"
+// exercise the background-tab marking rules.
+func modelWithBackgroundTab() Model {
+	m := modelForWorkTest()
+	tab2 := NewTabModel("tab-2", "background")
+	tab2.Root = NewLeaf(NewPaneModel("p2", 1024))
+	tab2.ActivePane = "p2"
+	m.tabs = append(m.tabs, tab2)
+	m.activeTab = 0
+	return m
+}
+
+// modelWithSplitActiveTab extends modelForWorkTest with a second pane "p1b"
+// split into the active tab. "p1" stays the focused pane (tab.ActivePane), so
+// transitions on "p1b" exercise the unfocused-sibling marking rules.
+func modelWithSplitActiveTab() Model {
+	m := modelForWorkTest()
+	m.tabs[0].Root = &LayoutNode{
+		Split: SplitHorizontal,
+		Ratio: 0.5,
+		Left:  m.tabs[0].Root,
+		Right: NewLeaf(NewPaneModel("p1b", 1024)),
+	}
+	m.tabs[0].invalidateLeaves()
+	return m
+}
+
 func TestApplyWorkTransition_StartSetsWorking(t *testing.T) {
 	t.Parallel()
 	m := modelForWorkTest()
@@ -71,27 +98,57 @@ func TestApplyWorkTransition_StartSetsWorking(t *testing.T) {
 	}
 }
 
-func TestApplyWorkTransition_StopClearsAndFlashes(t *testing.T) {
+func TestApplyWorkTransition_StopOnBackgroundTab_SetsUnseen(t *testing.T) {
 	t.Parallel()
-	m := modelForWorkTest()
-	m.applyWorkTransition("p1", "hook.claude.UserPromptSubmit")
-	cmd := m.applyWorkTransition("p1", "hook.claude.Stop")
-	if m.tabs[0].Root.Leaves()[0].working {
+	m := modelWithBackgroundTab()
+	m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit")
+	m.applyWorkTransition("p2", "hook.claude.Stop")
+	if m.tabs[1].Root.Leaves()[0].working {
 		t.Error("pane.working should be false after stop")
 	}
-	if !m.tabFlashing(0) {
-		t.Error("tab should be flashing after a genuine stop")
+	if !m.tabs[1].Root.Leaves()[0].unseen {
+		t.Error("background-tab pane should be marked unseen after a genuine stop")
 	}
-	if cmd == nil {
-		t.Error("stop transition should return a flash-expiry tick cmd")
+	if !m.tabUnseen(1) {
+		t.Error("tab label derivation should report the background tab unseen")
 	}
 }
 
-func TestApplyWorkTransition_ParkForInputClearsAndFlashes(t *testing.T) {
+func TestApplyWorkTransition_StopOnFocusedPane_NoMark(t *testing.T) {
+	t.Parallel()
+	// Completion in the pane being looked at is seen by definition — no mark.
+	m := modelForWorkTest()
+	m.applyWorkTransition("p1", "hook.claude.UserPromptSubmit")
+	m.applyWorkTransition("p1", "hook.claude.Stop")
+	if m.tabs[0].Root.Leaves()[0].working {
+		t.Error("pane.working should be false after stop")
+	}
+	if m.tabs[0].Root.Leaves()[0].unseen {
+		t.Error("the focused pane of the active tab must never be marked unseen")
+	}
+}
+
+func TestApplyWorkTransition_StopOnUnfocusedSibling_MarksPaneOnly(t *testing.T) {
+	t.Parallel()
+	// An unfocused split sibling on the ACTIVE tab gets the border cue (the
+	// user may be typing in the focused pane), but the active tab's label
+	// never goes green — you're already on the tab.
+	m := modelWithSplitActiveTab()
+	m.applyWorkTransition("p1b", "hook.claude.UserPromptSubmit")
+	m.applyWorkTransition("p1b", "hook.claude.Stop")
+	if !m.tabs[0].Root.Right.Pane.unseen {
+		t.Error("unfocused sibling pane should be marked unseen")
+	}
+	if m.tabUnseen(0) {
+		t.Error("the active tab's label must not report unseen")
+	}
+}
+
+func TestApplyWorkTransition_ParkForInput_MarksBackgroundPane(t *testing.T) {
 	t.Parallel()
 	// When the agent parks for user input (permission prompt / option select)
-	// the spinner must stop and the tab must flash green for attention — even
-	// though no genuine Stop edge will arrive until after the user responds.
+	// the spinner must stop and the pane must be marked unseen — the mark
+	// persists until the user focuses the pane.
 	for _, evt := range []string{
 		"hook.claude.Notification",
 		"hook.claude.PermissionRequest",
@@ -99,103 +156,133 @@ func TestApplyWorkTransition_ParkForInputClearsAndFlashes(t *testing.T) {
 	} {
 		t.Run(evt, func(t *testing.T) {
 			t.Parallel()
-			m := modelForWorkTest()
-			m.applyWorkTransition("p1", "hook.claude.UserPromptSubmit")
-			cmd := m.applyWorkTransition("p1", evt)
-			if m.tabs[0].Root.Leaves()[0].working {
+			m := modelWithBackgroundTab()
+			m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit")
+			m.applyWorkTransition("p2", evt)
+			if m.tabs[1].Root.Leaves()[0].working {
 				t.Errorf("%s: pane.working should be false after a park-for-input edge", evt)
 			}
-			if !m.tabFlashing(0) {
-				t.Errorf("%s: tab should flash green when the agent parks for input", evt)
-			}
-			if cmd == nil {
-				t.Errorf("%s: park transition should return a flash-expiry tick cmd", evt)
+			if !m.tabs[1].Root.Leaves()[0].unseen {
+				t.Errorf("%s: pane should be marked unseen when the agent parks", evt)
 			}
 		})
 	}
 }
 
-func TestApplyWorkTransition_ResumeAfterParkClearsFlashAndReArms(t *testing.T) {
+func TestApplyWorkTransition_ResumeAfterParkClearsUnseenAndReArms(t *testing.T) {
 	t.Parallel()
-	// Full prompt cycle: start → park (spinner off + flash) → user answers
-	// (PostToolUse) → spinner back on, flash cleared.
-	m := modelForWorkTest()
-	m.applyWorkTransition("p1", "hook.claude.UserPromptSubmit")
-	m.applyWorkTransition("p1", "hook.claude.PermissionRequest") // park
-	if m.tabs[0].Root.Leaves()[0].working {
+	// Full prompt cycle on a background pane: start → park (spinner off +
+	// unseen) → user answers (PostToolUse) → spinner back on, mark cleared.
+	m := modelWithBackgroundTab()
+	m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit")
+	m.applyWorkTransition("p2", "hook.claude.PermissionRequest") // park
+	pane := m.tabs[1].Root.Leaves()[0]
+	if pane.working {
 		t.Fatal("precondition: pane should be parked (not working) before resume")
 	}
-	if !m.tabFlashing(0) {
-		t.Fatal("precondition: tab should be flashing after the park")
+	if !pane.unseen {
+		t.Fatal("precondition: pane should be unseen after the park")
 	}
 
-	m.applyWorkTransition("p1", "hook.claude.PostToolUse") // resume
-	if !m.tabs[0].Root.Leaves()[0].working {
+	m.applyWorkTransition("p2", "hook.claude.PostToolUse") // resume
+	if !pane.working {
 		t.Error("pane.working should be true again after the answer (PostToolUse)")
 	}
-	if m.tabFlashing(0) {
-		t.Error("resume must clear the green flash — work is no longer parked")
+	if pane.unseen {
+		t.Error("resume must clear the unseen mark — work is no longer parked")
 	}
 }
 
-func TestApplyWorkTransition_StartClearsStaleFlash(t *testing.T) {
+func TestApplyWorkTransition_StartClearsStaleUnseen(t *testing.T) {
 	t.Parallel()
-	// A fresh turn must clear a lingering flash from the previous turn.
-	m := modelForWorkTest()
-	m.tabs[0].flashUntil = time.Now().Add(tabFlashDuration)
-	m.applyWorkTransition("p1", "hook.claude.UserPromptSubmit")
-	if m.tabFlashing(0) {
-		t.Error("a new turn (UserPromptSubmit) should clear a stale green flash")
+	// A fresh turn must clear a lingering mark from the previous turn — the
+	// spinner supersedes the green "finished" cue.
+	m := modelWithBackgroundTab()
+	m.tabs[1].Root.Leaves()[0].unseen = true
+	m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit")
+	if m.tabs[1].Root.Leaves()[0].unseen {
+		t.Error("a new turn (UserPromptSubmit) should clear a stale unseen mark")
 	}
 }
 
-func TestApplyWorkTransition_AbortClearsWithoutFlash(t *testing.T) {
+func TestApplyWorkTransition_AbortClearsWorkingWithoutMarking(t *testing.T) {
 	t.Parallel()
-	m := modelForWorkTest()
-	m.applyWorkTransition("p1", "hook.claude.UserPromptSubmit")
-	cmd := m.applyWorkTransition("p1", "process_exit")
-	if m.tabs[0].Root.Leaves()[0].working {
+	m := modelWithBackgroundTab()
+	m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit")
+	m.applyWorkTransition("p2", "process_exit")
+	if m.tabs[1].Root.Leaves()[0].working {
 		t.Error("pane.working should be false after process_exit")
 	}
-	if m.tabFlashing(0) {
-		t.Error("process_exit must NOT flash the tab green")
+	if m.tabs[1].Root.Leaves()[0].unseen {
+		t.Error("process_exit must NOT mark the pane unseen (a crash is not a completed turn)")
 	}
-	if cmd != nil {
-		t.Error("abort transition should not return a flash cmd")
+
+	// An existing mark from an earlier completion survives an abort.
+	m2 := modelWithBackgroundTab()
+	m2.tabs[1].Root.Leaves()[0].unseen = true
+	m2.applyWorkTransition("p2", "process_exit")
+	if !m2.tabs[1].Root.Leaves()[0].unseen {
+		t.Error("abort must not clear an existing unseen mark")
 	}
 }
 
-func TestApplyWorkTransition_StopWithoutPriorStart_NoFlash(t *testing.T) {
+func TestApplyWorkTransition_StopWithoutPriorStart_NoMark(t *testing.T) {
 	t.Parallel()
-	// A Stop with no in-progress turn (pane was already idle) must not flash.
-	m := modelForWorkTest()
-	cmd := m.applyWorkTransition("p1", "hook.claude.Stop")
-	if m.tabFlashing(0) {
-		t.Error("stop on an already-idle pane must not flash")
-	}
-	if cmd != nil {
-		t.Error("no-op stop should not return a flash cmd")
+	// A Stop with no in-progress turn (pane was already idle) must not mark.
+	m := modelWithBackgroundTab()
+	m.applyWorkTransition("p2", "hook.claude.Stop")
+	if m.tabs[1].Root.Leaves()[0].unseen {
+		t.Error("stop on an already-idle pane must not mark the pane unseen")
 	}
 }
 
 func TestApplyWorkTransition_UnknownPane_NoPanic(t *testing.T) {
 	t.Parallel()
 	m := modelForWorkTest()
-	if cmd := m.applyWorkTransition("does-not-exist", "hook.claude.Stop"); cmd != nil {
-		t.Error("unknown pane should be a no-op")
+	m.applyWorkTransition("does-not-exist", "hook.claude.Stop") // must not panic
+}
+
+func TestTabUnseen_DerivedAndBounds(t *testing.T) {
+	t.Parallel()
+	m := modelWithBackgroundTab()
+	if m.tabUnseen(-1) || m.tabUnseen(99) {
+		t.Error("out-of-range tab index must report not unseen")
+	}
+	if m.tabUnseen(1) {
+		t.Error("background tab with no unseen pane must report false")
+	}
+	m.tabs[1].Root.Leaves()[0].unseen = true
+	if !m.tabUnseen(1) {
+		t.Error("background tab with an unseen pane must report true")
+	}
+	// The same tab reports false the moment it is active — the label cue is
+	// suppressed while the user is on the tab (the pane border takes over).
+	m.activeTab = 1
+	if m.tabUnseen(1) {
+		t.Error("the active tab must never report unseen")
 	}
 }
 
-func TestTabFlashing_Expired(t *testing.T) {
+func TestTabStyle_UnseenOverridesInactive(t *testing.T) {
 	t.Parallel()
-	m := modelForWorkTest()
-	m.tabs[0].flashUntil = time.Now().Add(-time.Second) // already past
-	if m.tabFlashing(0) {
-		t.Error("expired flashUntil should report not flashing")
+	m := modelWithBackgroundTab()
+
+	// lipgloss.Style is uncomparable (contains a slice), so assert on the
+	// rendered 256-color background SGR: unseen=48;5;28, active=48;5;57.
+
+	// Background tab with an unseen pane → green label.
+	m.tabs[1].Root.Leaves()[0].unseen = true
+	if !strings.Contains(m.tabStyle(1).Render("x"), "48;5;28") {
+		t.Error("unseen background tab should render with green background (48;5;28)")
 	}
-	m.tabs[0].flashUntil = time.Time{} // zero value
-	if m.tabFlashing(0) {
-		t.Error("zero flashUntil should report not flashing")
+
+	// Active tab never renders the green label, even with an unseen pane.
+	m.tabs[0].Root.Leaves()[0].unseen = true
+	if strings.Contains(m.tabStyle(0).Render("x"), "48;5;28") {
+		t.Error("active tab must never use the green unseen background")
+	}
+	if !strings.Contains(m.tabStyle(0).Render("x"), "48;5;57") {
+		t.Error("active tab without custom color should use activeTabStyle (48;5;57)")
 	}
 }
 
@@ -308,32 +395,4 @@ func TestWorkSpinnerTick_FrameWraparoundMirrors(t *testing.T) {
 	}
 	// Rendering at the wrapped frame must not panic (modulo guards the index).
 	_ = nm.tabLabel(0)
-}
-
-func TestTabStyle_FlashOverridesInactive(t *testing.T) {
-	t.Parallel()
-	m := modelForWorkTest()
-	// Add a second tab so we can flash a non-active one.
-	tab2 := NewTabModel("tab-2", "second")
-	tab2.Root = NewLeaf(NewPaneModel("p2", 1024))
-	m.tabs = append(m.tabs, tab2)
-	m.activeTab = 0
-
-	// lipgloss.Style is uncomparable (contains a slice), so assert on the
-	// rendered 256-color background SGR: flash=48;5;28, active=48;5;57.
-
-	// Inactive tab flashing → green flash background.
-	m.tabs[1].flashUntil = time.Now().Add(time.Hour)
-	if !strings.Contains(m.tabStyle(1).Render("x"), "48;5;28") {
-		t.Error("flashing inactive tab should render with green background (48;5;28)")
-	}
-
-	// Active tab never flashes, even if flashUntil is set.
-	m.tabs[0].flashUntil = time.Now().Add(time.Hour)
-	if strings.Contains(m.tabStyle(0).Render("x"), "48;5;28") {
-		t.Error("active tab must never use the green flash background")
-	}
-	if !strings.Contains(m.tabStyle(0).Render("x"), "48;5;57") {
-		t.Error("active tab without custom color should use activeTabStyle (48;5;57)")
-	}
 }

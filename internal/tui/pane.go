@@ -47,6 +47,7 @@ type PaneModel struct {
 	mcpHighlight   bool                // set by Model before View() when MCP is interacting
 	liveOutputSeen bool                // first live (non-ghost) output received — settle repaints scheduled
 	working        bool                // true while a claude/opencode turn is in progress (hook-driven)
+	unseen         bool                // work finished/parked while this pane was not focused; cleared on focus
 	workFrame      int                 // shared spinner frame index, mirrored here for top-border render
 
 	// Render cache: View() output is reused while renderKey() is unchanged.

@@ -87,6 +87,12 @@ func main() {
 		case "version":
 			fmt.Println("quil v" + version)
 			return
+		case "restart":
+			// Recovery path for a hung/wedged daemon: stop with bounded
+			// escalation, start fresh, then drop into the normal TUI.
+			restartDaemonCmd()
+			launchTUI()
+			return
 		}
 	}
 
@@ -95,7 +101,7 @@ func main() {
 
 func handleDaemon() {
 	if len(os.Args) < 3 {
-		fmt.Fprintln(os.Stderr, "usage: quil daemon [start|stop|status]")
+		fmt.Fprintln(os.Stderr, "usage: quil daemon [start|stop|restart|status]")
 		os.Exit(1)
 	}
 
@@ -104,6 +110,8 @@ func handleDaemon() {
 		startDaemon(false)
 	case "stop":
 		stopDaemon()
+	case "restart":
+		restartDaemonCmd()
 	case "status":
 		daemonStatus()
 	default:
@@ -183,21 +191,14 @@ func startDaemon(quiet bool) {
 }
 
 func stopDaemon() {
-	sockPath := config.SocketPath()
-	client, err := ipc.NewClient(sockPath)
+	fmt.Printf("environment: %s\n", envDescription())
+	wasRunning, err := stopDaemonEscalating(true)
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "stop daemon: %v\n", err)
+		os.Exit(1)
+	}
+	if !wasRunning {
 		fmt.Fprintln(os.Stderr, "daemon not running")
-		os.Exit(1)
-	}
-	defer client.Close()
-
-	msg, err := ipc.NewMessage(ipc.MsgShutdown, nil)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to create shutdown message: %v\n", err)
-		os.Exit(1)
-	}
-	if err := client.Send(msg); err != nil {
-		fmt.Fprintf(os.Stderr, "failed to send shutdown: %v\n", err)
 		os.Exit(1)
 	}
 	fmt.Println("daemon stopped")

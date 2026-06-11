@@ -5,6 +5,7 @@ When things go sideways, this is the first place to look.
 ## Table of contents
 
 - [The daemon won't start](#the-daemon-wont-start)
+- [Quil hangs, or tabs don't reopen after a restart](#quil-hangs-or-tabs-dont-reopen-after-a-restart)
 - [macOS: `zsh: killed quil` after upgrading](#macos-zsh-killed-quil-after-upgrading)
 - [The TUI shows a blank screen](#the-tui-shows-a-blank-screen)
 - [Version mismatch — daemon won't accept the TUI](#version-mismatch--daemon-wont-accept-the-tui)
@@ -89,8 +90,7 @@ The TUI handshakes with the daemon on attach. The two MUST be the same version:
 If the auto-restart fails, do it manually:
 
 ```bash
-quil daemon stop      # graceful stop
-quil                  # auto-starts the matching daemon
+quil restart          # stop (escalating) + fresh daemon + TUI
 ```
 
 ## MCP — AI client doesn't see Quil
@@ -191,9 +191,23 @@ Takes effect on the next launch.
 
 Debug builds attach to the production `~/.quil/` daemon and emit verbose logging. Don't use them as your daily driver — they're noisy.
 
+## Quil hangs, or tabs don't reopen after a restart
+
+Symptoms: the TUI freezes (no pane output, keys ignored), or after quitting and relaunching, `quil` connects but shows an empty workspace with no tabs.
+
+Both are signatures of a wedged daemon: the process is alive and accepts connections, but its internals are stuck, so it never delivers your workspace to the TUI. Your state is safe — the daemon snapshots `workspace.json` every 30 seconds. Recover with one command:
+
+```bash
+quil restart
+```
+
+It prints which environment it's operating on (production `~/.quil` or dev `QUIL_HOME`), stops the daemon with bounded escalation — graceful IPC shutdown (final snapshot) → SIGTERM → force-kill, each tier with a timeout so a deadlocked daemon can't stall it — cleans up stale pid/socket files, starts a fresh daemon, and opens the TUI. Your tabs and panes respawn from the last snapshot.
+
+`quil daemon restart` does the same without launching the TUI.
+
 ## Force-stop the daemon
 
-`quil daemon stop` is the graceful path. If the daemon is wedged:
+`quil daemon stop` uses the same bounded escalation as `quil restart` (graceful IPC → SIGTERM → force-kill) and cleans up the pid/socket files, so it works even against a wedged daemon. Manual fallback, if you ever need it:
 
 ```bash
 # Read the PID and SIGTERM

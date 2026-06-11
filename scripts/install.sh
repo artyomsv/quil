@@ -97,9 +97,18 @@ download_and_verify() {
 
 install_binaries() {
   mkdir -p "$INSTALL_DIR"
-  cp "$TMP_DIR/quil" "$INSTALL_DIR/quil"
-  cp "$TMP_DIR/quild" "$INSTALL_DIR/quild"
-  chmod +x "$INSTALL_DIR/quil" "$INSTALL_DIR/quild"
+  # Install via temp file + mv (rename): the destination gets a NEW inode,
+  # atomically. Overwriting an existing binary in place with cp reuses the
+  # inode, and macOS caches code-signing info per inode (vnode) — a stale
+  # cache entry makes the kernel SIGKILL the new binary at exec time
+  # ("zsh: killed quil", "Code Signature Invalid" in the crash report).
+  # The temp file lives inside INSTALL_DIR so the rename never crosses
+  # filesystems.
+  for bin in quil quild; do
+    cp "$TMP_DIR/$bin" "$INSTALL_DIR/.$bin.tmp.$$"
+    chmod +x "$INSTALL_DIR/.$bin.tmp.$$"
+    mv -f "$INSTALL_DIR/.$bin.tmp.$$" "$INSTALL_DIR/$bin"
+  done
 }
 
 print_success() {

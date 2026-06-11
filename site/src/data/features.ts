@@ -100,6 +100,22 @@ export const features: Feature[] = [
     ],
   },
 
+  {
+    slug: "work-indicators",
+    icon: "bell",
+    title: "Agent work indicators",
+    blurb:
+      "A spinner shows which AI panes are mid-turn; when one finishes or waits for your input, it stays marked green until you actually look at it.",
+    category: "ai",
+    detail: [
+      "Work state is derived entirely from the agent's own hook events (Claude Code hooks, OpenCode plugin bus) — no output polling, no heuristics.",
+      "While an agent works, a spinner animates on the pane border and its tab label.",
+      "When a turn completes — or the agent parks on a permission prompt or a question — the pane border turns green and the tab label of a background tab turns green with it.",
+      "No timer: the green mark persists until you focus that exact pane (click it, Alt+Arrow onto it, or switch to its tab). With several agent panes split in one tab, the border pinpoints which one needs you.",
+      "A crash never shows a green mark — process exit clears the spinner without claiming the turn finished.",
+    ],
+  },
+
   // --- Interaction ---------------------------------------------------
   {
     slug: "typed-panes",

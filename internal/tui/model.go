@@ -146,10 +146,6 @@ type spinnerTickMsg struct {
 // workSpinnerTickMsg advances the shared work-in-progress spinner animation.
 type workSpinnerTickMsg struct{}
 
-// flashTickMsg fires once when a tab's green "just finished" flash expires,
-// forcing a re-render so the tab returns to its normal style.
-type flashTickMsg struct{}
-
 // dialogPasteMsg delivers clipboard content to the active dialog input field.
 type dialogPasteMsg string
 
@@ -399,8 +395,6 @@ func msgTypeName(msg tea.Msg) string {
 		return "tui.workSpinnerTickMsg"
 	case spinnerTickMsg:
 		return "tui.spinnerTickMsg"
-	case flashTickMsg:
-		return "tui.flashTickMsg"
 	case sidebarTickMsg:
 		return "tui.sidebarTickMsg"
 	case notesTickMsg:
@@ -423,6 +417,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		markUpdateEnd()
 		m.perfStats.recordMsg(msgTypeName(msg), time.Since(start))
 	}()
+	// Acknowledge the focused pane of the active tab before processing the
+	// message — focusing is the acknowledgement; see ackFocusedPane.
+	m.ackFocusedPane()
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		// Poll echo: size matches both the applied and any pending value —
@@ -771,11 +768,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.workSpinnerTick()
 
-	case flashTickMsg:
-		// A tab's green flash expired — returning triggers a re-render and
-		// tabFlashing() recomputes from flashUntil (now in the past).
-		return m, nil
-
 	case PluginErrorMsg:
 		m.dialog = dialogPluginError
 		m.pluginErrorTitle = msg.Title
@@ -862,10 +854,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.notifications.AddEvent(ipc.PaneEventPayload(msg))
 		}
 		cmds := []tea.Cmd{m.listenForMessages()}
-		// Update working state + green-flash from the same hook stream.
-		if flashCmd := m.applyWorkTransition(msg.PaneID, msg.Type); flashCmd != nil {
-			cmds = append(cmds, flashCmd)
-		}
+		// Update working state + unseen marks from the same hook stream.
+		m.applyWorkTransition(msg.PaneID, msg.Type)
 		if m.anyPaneWorking() && !m.workTickRunning {
 			m.workTickRunning = true
 			cmds = append(cmds, m.workSpinnerTick())
@@ -2365,14 +2355,14 @@ func (m Model) tabLabel(idx int) string {
 }
 
 // tabStyle returns the lipgloss style for the tab at idx. Precedence: green
-// flash (inactive + within flash window) > custom tab color > active/inactive
-// default. Shared by renderTabBar and hitTestTab so rendered widths and click
-// hit-testing never diverge.
+// unseen mark (background tab with an unfocused finished pane) > custom tab
+// color > active/inactive default. Shared by renderTabBar and hitTestTab so
+// rendered widths and click hit-testing never diverge.
 func (m Model) tabStyle(idx int) lipgloss.Style {
 	tab := m.tabs[idx]
 	active := idx == m.activeTab
-	if !active && m.tabFlashing(idx) {
-		return flashTabStyle
+	if !active && m.tabUnseen(idx) {
+		return unseenTabStyle
 	}
 	if tab.Color != "" {
 		c := lipgloss.Color(tab.Color)

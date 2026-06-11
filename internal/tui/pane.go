@@ -47,6 +47,7 @@ type PaneModel struct {
 	mcpHighlight   bool                // set by Model before View() when MCP is interacting
 	liveOutputSeen bool                // first live (non-ghost) output received — settle repaints scheduled
 	working        bool                // true while a claude/opencode turn is in progress (hook-driven)
+	unseen         bool                // work finished/parked while this pane was not focused; cleared on focus
 	workFrame      int                 // shared spinner frame index, mirrored here for top-border render
 
 	// Render cache: View() output is reused while renderKey() is unchanged.
@@ -89,6 +90,7 @@ type paneRenderKey struct {
 	ghost, resuming, preparing     bool
 	mcpHighlight, muted, focusMode bool
 	working                        bool
+	unseen                         bool
 	spinnerFrame, workFrame        int
 	name, cwd                      string
 	selActive                      bool
@@ -111,6 +113,7 @@ func (p *PaneModel) renderKey() paneRenderKey {
 		muted:         p.Muted,
 		focusMode:     p.focusMode,
 		working:       p.working,
+		unseen:        p.unseen,
 		spinnerFrame:  p.spinnerFrame,
 		workFrame:     p.workFrame,
 		name:          p.Name,
@@ -347,6 +350,9 @@ func (p *PaneModel) View() string {
 	p.renderCount++
 
 	borderColor := lipgloss.Color("238")
+	if p.unseen {
+		borderColor = lipgloss.Color("28") // green — finished/parked, awaiting focus
+	}
 	if p.Active {
 		borderColor = lipgloss.Color("57")
 	}

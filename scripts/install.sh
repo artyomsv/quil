@@ -97,18 +97,24 @@ download_and_verify() {
 
 install_binaries() {
   mkdir -p "$INSTALL_DIR"
-  # Install via temp file + mv (rename): the destination gets a NEW inode,
-  # atomically. Overwriting an existing binary in place with cp reuses the
-  # inode, and macOS caches code-signing info per inode (vnode) — a stale
-  # cache entry makes the kernel SIGKILL the new binary at exec time
-  # ("zsh: killed quil", "Code Signature Invalid" in the crash report).
-  # The temp file lives inside INSTALL_DIR so the rename never crosses
-  # filesystems.
-  for bin in quil quild; do
-    cp "$TMP_DIR/$bin" "$INSTALL_DIR/.$bin.tmp.$$"
-    chmod +x "$INSTALL_DIR/.$bin.tmp.$$"
-    mv -f "$INSTALL_DIR/.$bin.tmp.$$" "$INSTALL_DIR/$bin"
-  done
+  # Stage each binary as a temp file inside INSTALL_DIR, then mv it into
+  # place: each binary is swapped in atomically via rename and lands on a
+  # NEW inode (the two binaries are swapped one after the other — the pair
+  # is not replaced transactionally). Overwriting an existing binary in
+  # place with cp reuses the inode, and macOS caches code-signing info per
+  # inode (vnode) — a stale cache entry makes the kernel SIGKILL the new
+  # binary at exec time ("zsh: killed quil", "Code Signature Invalid" in
+  # the crash report). The temp files live inside INSTALL_DIR so the
+  # rename never crosses filesystems; the EXIT trap removes them if the
+  # install aborts between staging and rename.
+  QUIL_TMP=$(mktemp "$INSTALL_DIR/.quil.tmp.XXXXXX")
+  QUILD_TMP=$(mktemp "$INSTALL_DIR/.quild.tmp.XXXXXX")
+  trap 'rm -rf "$TMP_DIR"; rm -f "$QUIL_TMP" "$QUILD_TMP"' EXIT
+  cp "$TMP_DIR/quil" "$QUIL_TMP"
+  cp "$TMP_DIR/quild" "$QUILD_TMP"
+  chmod 755 "$QUIL_TMP" "$QUILD_TMP"
+  mv -f "$QUIL_TMP" "$INSTALL_DIR/quil"
+  mv -f "$QUILD_TMP" "$INSTALL_DIR/quild"
 }
 
 print_success() {
@@ -132,4 +138,6 @@ print_success() {
   echo "Run 'quil' to get started."
 }
 
-main
+# QUIL_INSTALLER_NO_MAIN=1 lets tests source this file for its functions
+# without running the installer (see scripts/test-install.sh).
+[ "${QUIL_INSTALLER_NO_MAIN:-0}" = "1" ] || main

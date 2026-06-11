@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.19.0] - 2026-06-11
+
 ### Changed
 
 - **"Turn finished" green flash is now a persistent unseen indicator** — when an AI pane finished a turn or parked for input (permission prompt, options question), the tab label flashed green for 5 seconds and reverted — easy to miss when away from the keyboard, and with several agent panes split in one tab it couldn't say *which* pane needed attention. The cue is now persistent and per-pane: the finished/parked pane gets a green border, and a background tab containing one derives a green label; both stay green until you focus that pane (click it, Alt+Arrow onto it, or switch to its single-pane tab) — focusing is the acknowledgement, there is no timer. Completion in the pane you're currently focused on shows no cue (seen by definition), and a fresh turn replaces the green with the work spinner. Border precedence stays below active/ghost/MCP-highlight; the mark is not persisted across TUI restarts (same as the rest of work state).

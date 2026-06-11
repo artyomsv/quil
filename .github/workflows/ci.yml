@@ -27,3 +27,9 @@ jobs:
       - run: go vet ./...
       - run: go test ./...
       - run: go build ./cmd/quil && go build ./cmd/quild
+
+      - name: shellcheck
+        run: shellcheck -S warning scripts/*.sh
+
+      - name: installer regression test
+        run: sh scripts/test-install.sh

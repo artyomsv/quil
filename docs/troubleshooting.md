@@ -5,6 +5,7 @@ When things go sideways, this is the first place to look.
 ## Table of contents
 
 - [The daemon won't start](#the-daemon-wont-start)
+- [macOS: `zsh: killed quil` after upgrading](#macos-zsh-killed-quil-after-upgrading)
 - [The TUI shows a blank screen](#the-tui-shows-a-blank-screen)
 - [Version mismatch — daemon won't accept the TUI](#version-mismatch--daemon-wont-accept-the-tui)
 - [MCP — AI client doesn't see Quil](#mcp--ai-client-doesnt-see-quil)
@@ -38,6 +39,34 @@ Symptoms: `quil` prints `cannot connect to daemon` and exits, or the TUI hangs o
    tail -100 ~/.quil/quild.log
    ```
    Common errors: socket binding failed (permission), workspace.json deserialize error (corrupted state).
+
+## macOS: `zsh: killed quil` after upgrading
+
+Symptoms: after upgrading an existing install, running `quil` (or `quild`) prints `zsh: killed quil` and exits instantly. Reinstalling doesn't help.
+
+This is the macOS kernel killing the binary at exec time, not a Quil crash. Confirm it by checking the newest crash report:
+
+```bash
+ls -t ~/Library/Logs/DiagnosticReports/quil-*.ips | head -1 | xargs grep -o '"signal":"[^"]*"\|"indicator":"[^"]*"'
+```
+
+If you see `SIGKILL (Code Signature Invalid)` / `Taskgated Invalid Signature`, you've hit it.
+
+**Cause.** macOS caches code-signing information per inode. Older versions of `install.sh` overwrote the existing binaries in place with `cp`, which reuses the inode — the kernel's cached signature for the *old* binary no longer matches the *new* bytes, so every exec is SIGKILLed even though the binary's signature is actually valid (`codesign --verify` passes).
+
+**Fix.** Re-run the installer — current versions install via temp file + `mv`, which gives the destination a fresh inode and clears the stale cache entry:
+
+```bash
+curl -sSfL https://raw.githubusercontent.com/artyomsv/quil/master/scripts/install.sh | sh
+```
+
+If you're stuck with an old copy of the installer, delete the binaries first so the copy lands on new inodes:
+
+```bash
+rm -f ~/.local/bin/quil ~/.local/bin/quild
+```
+
+then reinstall.
 
 ## The TUI shows a blank screen
 

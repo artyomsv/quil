@@ -90,6 +90,7 @@ type paneRenderKey struct {
 	ghost, resuming, preparing     bool
 	mcpHighlight, muted, focusMode bool
 	working                        bool
+	unseen                         bool
 	spinnerFrame, workFrame        int
 	name, cwd                      string
 	selActive                      bool
@@ -112,6 +113,7 @@ func (p *PaneModel) renderKey() paneRenderKey {
 		muted:         p.Muted,
 		focusMode:     p.focusMode,
 		working:       p.working,
+		unseen:        p.unseen,
 		spinnerFrame:  p.spinnerFrame,
 		workFrame:     p.workFrame,
 		name:          p.Name,
@@ -348,6 +350,9 @@ func (p *PaneModel) View() string {
 	p.renderCount++
 
 	borderColor := lipgloss.Color("238")
+	if p.unseen {
+		borderColor = lipgloss.Color("28") // green — finished/parked, awaiting focus
+	}
 	if p.Active {
 		borderColor = lipgloss.Color("57")
 	}

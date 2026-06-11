@@ -408,6 +408,35 @@ func TestAckFocusedPane_NoTabs_NoPanic(t *testing.T) {
 	m.ackFocusedPane() // must not panic on an empty model
 }
 
+func TestPaneView_UnseenBorderGreen(t *testing.T) {
+	t.Parallel()
+	p := NewPaneModel("px", 1024)
+	p.Width, p.Height = 24, 6
+
+	// Baseline: no green border.
+	if strings.Contains(p.View(), "38;5;28") {
+		t.Fatal("baseline pane must not render the green border")
+	}
+
+	// Unseen + unfocused → green border. This also exercises renderKey
+	// invalidation: without `unseen` in the key the cached baseline would
+	// be returned unchanged.
+	p.unseen = true
+	if !strings.Contains(p.View(), "38;5;28") {
+		t.Error("unseen unfocused pane should render a green border (38;5;28)")
+	}
+
+	// Focused wins over unseen — the user is looking at it.
+	p.Active = true
+	view := p.View()
+	if strings.Contains(view, "38;5;28") {
+		t.Error("focused pane must not render the green border")
+	}
+	if !strings.Contains(view, "38;5;57") {
+		t.Error("focused pane should render the active border (38;5;57)")
+	}
+}
+
 func TestUpdate_AcksFocusedPaneAtEntry(t *testing.T) {
 	t.Parallel()
 	// Integration: ANY message arriving means the previous frame (with the

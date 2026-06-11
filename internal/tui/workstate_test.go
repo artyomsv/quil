@@ -439,8 +439,9 @@ func TestPaneView_UnseenBorderGreen(t *testing.T) {
 
 func TestUpdate_AcksFocusedPaneAtEntry(t *testing.T) {
 	t.Parallel()
-	// Integration: ANY message arriving means the previous frame (with the
-	// focused pane visible) has been rendered — Update's entry hook clears it.
+	// Integration: Update's entry hook acknowledges the focused pane of the
+	// active tab on every message — focusing is the acknowledgement (see
+	// ackFocusedPane; a focused pane never renders the mark anyway).
 	m := modelForWorkTest()
 	m.tabs[0].Root.Leaves()[0].unseen = true
 	next, _ := m.Update(workSpinnerTickMsg{})

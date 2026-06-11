@@ -76,19 +76,19 @@ each is fragile. Instead, acknowledge at the **top of `Model.Update`**:
 
 ```go
 // ackFocusedPane clears the unseen mark on the focused pane of the active
-// tab. Called at the top of Update: by the time any message arrives, the
-// previous frame — with that pane focused and visible — has already been
-// rendered, so the user has seen it. Unfocused panes keep their mark.
+// tab, called once at the top of Update. Focusing the pane is itself the
+// acknowledgement. Unfocused panes keep their mark until focused.
 func (m *Model) ackFocusedPane() { ... }
 ```
 
-Why this is correct: Bubble Tea renders `View()` after every `Update`. When
-any message arrives, whatever pane was focused on the active tab has been on
-screen since the previous render. Clearing it at `Update` entry can never
-clear a mark the user hasn't had on screen. Newly-focused panes are cleared
-one message later (the 1 s size poll guarantees an upper bound), and the
-focused pane renders with the active border anyway — green is never visible
-on a focused pane.
+Why this is correct: it does not depend on a render having happened between
+messages (the Bubble Tea renderer coalesces frames, so multiple Updates can
+run between renders). The invariant that actually holds is that a focused
+pane never renders the mark — `tabUnseen` excludes the active tab and the
+pane border gives the active style precedence — and focusing the pane is
+itself the acknowledgement, so clearing without a guaranteed intervening
+render loses nothing. Newly-focused panes are cleared one message later (the
+1 s size poll guarantees an upper bound).
 
 This runs on every message; cost is one slice scan of the active tab's cached
 `Leaves()` — negligible next to the per-message work already done.

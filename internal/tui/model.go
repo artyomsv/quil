@@ -417,8 +417,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		markUpdateEnd()
 		m.perfStats.recordMsg(msgTypeName(msg), time.Since(start))
 	}()
-	// The previous frame rendered the active tab with its focused pane
-	// visible — acknowledge its unseen mark before processing the message.
+	// Acknowledge the focused pane of the active tab before processing the
+	// message — focusing is the acknowledgement; see ackFocusedPane.
 	m.ackFocusedPane()
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:

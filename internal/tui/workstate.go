@@ -107,13 +107,14 @@ func (m *Model) applyWorkTransition(paneID, eventType string) {
 }
 
 // ackFocusedPane clears the unseen mark on the focused pane of the active
-// tab. Called at the top of Update: by the time any message arrives, the
-// previous frame — with that pane focused and visible — has already been
-// rendered, so the user has seen it. This single choke point replaces
-// auditing every ActivePane/activeTab assignment (13 call sites); a newly
-// focused pane is acknowledged one message later (the 1 s size poll bounds
-// the wait), and a focused pane never renders the green border anyway.
-// Unfocused panes keep their mark until focused.
+// tab, called once at the top of Update. Correctness does not depend on a
+// render having happened between messages (the renderer coalesces frames):
+// a focused pane never renders the mark anyway — tabUnseen excludes the
+// active tab and the pane border gives the active style precedence — and
+// focusing the pane is itself the acknowledgement. This single choke point
+// replaces auditing every ActivePane/activeTab assignment (13 call sites);
+// a newly focused pane is acknowledged on the next message (the 1 s size
+// poll bounds the wait). Unfocused panes keep their mark until focused.
 func (m *Model) ackFocusedPane() {
 	if m.activeTab < 0 || m.activeTab >= len(m.tabs) {
 		return
@@ -122,6 +123,8 @@ func (m *Model) ackFocusedPane() {
 	if tab == nil || tab.Root == nil || tab.ActivePane == "" {
 		return
 	}
+	// Deliberately not ActivePaneModel(): that helper heals a stale
+	// ActivePane and sets Active — side effects we must not run per message.
 	for _, p := range tab.Leaves() {
 		if p != nil && p.ID == tab.ActivePane {
 			p.unseen = false

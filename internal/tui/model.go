@@ -417,6 +417,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		markUpdateEnd()
 		m.perfStats.recordMsg(msgTypeName(msg), time.Since(start))
 	}()
+	// The previous frame rendered the active tab with its focused pane
+	// visible — acknowledge its unseen mark before processing the message.
+	m.ackFocusedPane()
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		// Poll echo: size matches both the applied and any pending value —

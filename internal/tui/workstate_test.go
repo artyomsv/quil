@@ -23,7 +23,7 @@ func TestWorkEventKind(t *testing.T) {
 		{"hook.opencode.session.error", workStop},
 		{"process_exit", workAbort},
 		// Park-for-input edges: the agent is waiting on the user, so the turn
-		// is effectively done until they respond → stop spinner + green flash.
+		// is effectively done until they respond → stop spinner + unseen mark.
 		{"hook.claude.Notification", workStop},
 		{"hook.claude.PermissionRequest", workStop},
 		{"hook.opencode.permission.ask", workStop},
@@ -372,6 +372,51 @@ func TestSyncPaneMeta_MuteClearsWorking(t *testing.T) {
 	syncPaneMeta(pane2, &PaneInfo{Muted: false})
 	if !pane2.working {
 		t.Error("a non-mute metadata sync must not clear working")
+	}
+}
+
+func TestAckFocusedPane_ClearsOnlyFocusedPane(t *testing.T) {
+	t.Parallel()
+	m := modelWithSplitActiveTab()
+	focused := m.tabs[0].Root.Left.Pane  // "p1" — tab.ActivePane
+	sibling := m.tabs[0].Root.Right.Pane // "p1b" — unfocused
+	focused.unseen = true
+	sibling.unseen = true
+	m.ackFocusedPane()
+	if focused.unseen {
+		t.Error("the focused pane of the active tab must be acknowledged")
+	}
+	if !sibling.unseen {
+		t.Error("an unfocused sibling must keep its mark until focused")
+	}
+}
+
+func TestAckFocusedPane_BackgroundTabUntouched(t *testing.T) {
+	t.Parallel()
+	m := modelWithBackgroundTab()
+	bg := m.tabs[1].Root.Leaves()[0] // "p2" is tab-2's ActivePane, but tab-2 is background
+	bg.unseen = true
+	m.ackFocusedPane()
+	if !bg.unseen {
+		t.Error("panes on background tabs must keep their mark")
+	}
+}
+
+func TestAckFocusedPane_NoTabs_NoPanic(t *testing.T) {
+	t.Parallel()
+	m := Model{}
+	m.ackFocusedPane() // must not panic on an empty model
+}
+
+func TestUpdate_AcksFocusedPaneAtEntry(t *testing.T) {
+	t.Parallel()
+	// Integration: ANY message arriving means the previous frame (with the
+	// focused pane visible) has been rendered — Update's entry hook clears it.
+	m := modelForWorkTest()
+	m.tabs[0].Root.Leaves()[0].unseen = true
+	next, _ := m.Update(workSpinnerTickMsg{})
+	if next.(Model).tabs[0].Root.Leaves()[0].unseen {
+		t.Error("Update entry must acknowledge the focused pane of the active tab")
 	}
 }
 

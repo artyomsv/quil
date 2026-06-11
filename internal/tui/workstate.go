@@ -40,7 +40,7 @@ func workEventKind(eventType string) workTransition {
 	// Park-for-input edges: the agent is blocked waiting on the user (permission
 	// prompt, option select, idle-input nudge). There is no "resumed after
 	// approval" hook, so we treat the park as a turn boundary — stop the spinner
-	// and flash the tab green to pull attention. Both Claude (Notification fires
+	// and mark the pane unseen to pull attention. Both Claude (Notification fires
 	// for permission + idle-wait; PermissionRequest when available) and opencode
 	// (permission.ask) are covered.
 	case "hook.claude.Notification", "hook.claude.PermissionRequest",
@@ -103,6 +103,30 @@ func (m *Model) applyWorkTransition(paneID, eventType string) {
 		}
 	case workAbort:
 		pane.working = false
+	}
+}
+
+// ackFocusedPane clears the unseen mark on the focused pane of the active
+// tab. Called at the top of Update: by the time any message arrives, the
+// previous frame — with that pane focused and visible — has already been
+// rendered, so the user has seen it. This single choke point replaces
+// auditing every ActivePane/activeTab assignment (13 call sites); a newly
+// focused pane is acknowledged one message later (the 1 s size poll bounds
+// the wait), and a focused pane never renders the green border anyway.
+// Unfocused panes keep their mark until focused.
+func (m *Model) ackFocusedPane() {
+	if m.activeTab < 0 || m.activeTab >= len(m.tabs) {
+		return
+	}
+	tab := m.tabs[m.activeTab]
+	if tab == nil || tab.Root == nil || tab.ActivePane == "" {
+		return
+	}
+	for _, p := range tab.Leaves() {
+		if p != nil && p.ID == tab.ActivePane {
+			p.unseen = false
+			return
+		}
 	}
 }
 

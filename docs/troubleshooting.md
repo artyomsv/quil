@@ -167,8 +167,11 @@ For OpenCode the equivalent files are under `~/.quil/opencodehook/` and `~/.quil
 | `~/.quil/mcp-logs/<pane-id>.log` | Per-pane MCP interaction log (tool name, timestamp, sanitized detail) |
 | `~/.quil/claudehook/hook.log` | Errors from the Claude Code SessionStart hook |
 | `~/.quil/opencodehook/hook.log` | Errors / breadcrumbs from the OpenCode JS plugin |
+| `~/.quil/quild.stderr.log` | Daemon panics and SIGQUIT goroutine dumps (anything the Go runtime writes to stderr) |
 
 From inside the TUI: `F1 → View client log` / `View daemon log` / `View MCP logs` opens a read-only viewer with `Alt+Up` / `Alt+Down` for paged navigation.
+
+**Wedge diagnostics:** if the daemon ever stops responding, search `quild.log` for `WATCHDOG` — when no workspace snapshot completes for 2 minutes, the daemon writes a full goroutine stack dump there. Attach that dump to a bug report; it pinpoints the blocked code path exactly.
 
 ## Enable debug logging
 

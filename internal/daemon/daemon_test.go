@@ -377,3 +377,33 @@ func TestWorkspaceState_OverlayPane_BroadcastVsDisk(t *testing.T) {
 	}
 }
 
+// TestWorkspaceState_OverlayFlip_NoRace is a -race regression guard for the
+// Pane.Overlay locking discipline: handleCreatePane sets Overlay AFTER the
+// pane is published to the session maps, so a concurrent snapshot/broadcast
+// goroutine reading the pane must observe the field only under PluginMu.
+// One goroutine flips Overlay under PluginMu while another builds the
+// workspace state in a loop; the race detector flags any unlocked access.
+func TestWorkspaceState_OverlayFlip_NoRace(t *testing.T) {
+	d := New(config.Default())
+
+	tab := &Tab{ID: "tab-racerace", Name: "race", Panes: []string{"pane-cafecafe"}}
+	pane := &Pane{ID: "pane-cafecafe", TabID: "tab-racerace", CWD: "/tmp"}
+	tabs := []*Tab{tab}
+	panesByTab := map[string][]*Pane{tab.ID: {pane}}
+
+	const iters = 100
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < iters; i++ {
+			pane.PluginMu.Lock()
+			pane.Overlay = i%2 == 0
+			pane.PluginMu.Unlock()
+		}
+	}()
+
+	for i := 0; i < iters; i++ {
+		_ = d.workspaceStateFromSnapshot(tab.ID, tabs, panesByTab, true)
+	}
+	<-done
+}

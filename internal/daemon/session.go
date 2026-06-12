@@ -62,9 +62,9 @@ type Pane struct {
 	// the workspace snapshot, and marked on the tab label. Read under PluginMu.
 	Eager bool
 	// Overlay marks an ephemeral TUI overlay pane (lazygit toggle view).
-	// Set once in handleCreatePane before the pane is first broadcast and
-	// never mutated afterwards (immutable post-creation, like ID/TabID),
-	// so readers take no lock. Excluded from disk snapshots.
+	// Guarded by PluginMu like Muted (set in handleCreatePane after the
+	// pane is already published to the session maps; concurrent snapshots
+	// may read it). Excluded from disk snapshots.
 	Overlay bool
 	// Pending is true between restore and first spawn for a deferred pane: the
 	// model + ghost buffer exist but no PTY has been created yet. Runtime-only,

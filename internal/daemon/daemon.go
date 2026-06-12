@@ -362,17 +362,20 @@ func (d *Daemon) snapshot() {
 	for _, tab := range tabs {
 		for _, pane := range panesByTab[tab.ID] {
 			activePaneIDs = append(activePaneIDs, pane.ID)
+			// Type and Overlay are PluginMu-protected (spawnRestoredPane
+			// mutates Type on the lazy-spawn fallback path, handleCreatePane
+			// sets Overlay post-publication, both concurrently with this
+			// snapshot).
+			pane.PluginMu.Lock()
+			typ := pane.Type
+			isOverlay := pane.Overlay
+			pane.PluginMu.Unlock()
 			// Overlay panes are ephemeral: never write their ghost buffer to
 			// disk (they are excluded from workspace.json by design and must
 			// not leave orphaned buffer files behind).
-			if pane.Overlay {
+			if isOverlay {
 				continue
 			}
-			// Type is PluginMu-protected (spawnRestoredPane mutates it on the
-			// lazy-spawn fallback path concurrently with this snapshot).
-			pane.PluginMu.Lock()
-			typ := pane.Type
-			pane.PluginMu.Unlock()
 			// Skip ghost buffer save for plugins with GhostBuffer disabled
 			if p := d.registry.Get(typ); p != nil && !p.Persistence.GhostBuffer {
 				continue
@@ -1058,14 +1061,17 @@ func (d *Daemon) handleCreatePane(msg *ipc.Message) {
 	pane.InstanceName = payload.InstanceName
 	pane.InstanceArgs = payload.InstanceArgs
 	if payload.Overlay {
+		// CreatePane already PUBLISHED the pane into the session maps, so a
+		// concurrent snapshot/broadcast goroutine may be reading it — both
+		// writes go under PluginMu (same discipline as Muted).
+		pane.PluginMu.Lock()
 		pane.Overlay = true
 		// Overlay panes are muted at the source: a hidden lazygit
 		// refreshing must not ping the notification sidebar.
-		pane.PluginMu.Lock()
 		pane.Muted = true
 		pane.PluginMu.Unlock()
 	}
-	log.Printf("pane created: %s (type=%s, tab=%s, overlay=%v)", pane.ID, paneType, payload.TabID, pane.Overlay)
+	log.Printf("pane created: %s (type=%s, tab=%s, overlay=%v)", pane.ID, paneType, payload.TabID, payload.Overlay)
 
 	ptySession := apty.New()
 	if err := d.spawnPane(pane, ptySession, false); err != nil {
@@ -1501,9 +1507,16 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 	paneList := make([]map[string]any, 0)
 
 	for _, tab := range tabs {
+		// Overlay is PluginMu-guarded like Muted: handleCreatePane sets it
+		// AFTER the pane is published to the session maps, concurrently with
+		// this snapshot/broadcast. Capture one consistent view per tab here
+		// and reuse it for both the pane-ID filter and the pane-loop skip.
 		overlayIDs := make(map[string]bool)
 		for _, pane := range panesByTab[tab.ID] {
-			if pane.Overlay {
+			pane.PluginMu.Lock()
+			isOverlay := pane.Overlay
+			pane.PluginMu.Unlock()
+			if isOverlay {
 				overlayIDs[pane.ID] = true
 			}
 		}
@@ -1526,7 +1539,9 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 		tabList = append(tabList, tabData)
 
 		for _, pane := range panesByTab[tab.ID] {
-			if !includeOverlays && pane.Overlay {
+			// overlayIDs was captured under PluginMu above — reuse it so the
+			// skip decision agrees with the pane-ID filter for this snapshot.
+			if !includeOverlays && overlayIDs[pane.ID] {
 				continue
 			}
 			paneData := map[string]any{
@@ -1540,10 +1555,11 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			// them on the lazy-spawn error paths (CWD="" when the saved dir is
 			// gone, Type="terminal" on spawn fallback) concurrently with this
 			// snapshot. Capture both under the same lock as the other
-			// PluginMu-guarded fields.
+			// PluginMu-guarded fields (Overlay included — see session.go).
 			pane.PluginMu.Lock()
 			typ := pane.Type
 			cwd := pane.CWD
+			isOverlay := pane.Overlay
 			if len(pane.PluginState) > 0 {
 				// Copy to avoid holding lock during JSON marshal
 				ps := make(map[string]string, len(pane.PluginState))
@@ -1577,9 +1593,7 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 				paneData["cols"] = pane.Cols
 				paneData["rows"] = pane.Rows
 			}
-			// Overlay is immutable post-creation (set once in handleCreatePane,
-			// never mutated), so it is safe to read without PluginMu.
-			if pane.Overlay {
+			if isOverlay {
 				paneData["overlay"] = true
 			}
 			paneList = append(paneList, paneData)

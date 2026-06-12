@@ -207,6 +207,7 @@ type Model struct {
 	pendingHeight        int
 	resizeSeq            int
 	pendingSplit         map[string]*LayoutNode // tabID → placeholder node awaiting pane from daemon
+	pendingOverlayShow  map[string]bool        // tabID → show overlay pane on its first arrival (set by Alt+G sender)
 	dialog               dialogScreen           // active dialog screen
 	dialogCursor         int                    // highlighted item in dialog
 	dialogEdit           bool                   // editing a settings value
@@ -1998,6 +1999,9 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) []string {
 				existingPanes[pane.ID] = pane
 			}
 		}
+		if tab.overlayPane != nil {
+			existingPanes[tab.overlayPane.ID] = tab.overlayPane
+		}
 	}
 
 	paneMap := make(map[string]*PaneInfo)
@@ -2015,10 +2019,14 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) []string {
 			// New tab that doesn't exist locally — try to restore layout from daemon.
 			if len(tabInfo.Layout) > 0 {
 				tab = m.restoreTabLayout(tab, tabInfo, paneMap, existingPanes)
-				// All panes in a restored tab are new
+				// All non-overlay panes in a restored tab are new.
 				for _, pid := range tabInfo.Panes {
+					if info, ok := paneMap[pid]; ok && info.Overlay {
+						continue
+					}
 					newPaneIDs = append(newPaneIDs, pid)
 				}
+				newPaneIDs = m.reconcileOverlayPane(tab, tabInfo, paneMap, existingPanes, newPaneIDs)
 				m.tabs = append(m.tabs, tab)
 				continue
 			}
@@ -2027,8 +2035,13 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) []string {
 		tab.Color = tabInfo.Color
 
 		// Build the set of panes the daemon says belong to this tab.
+		// Overlay panes are excluded: they live outside the layout tree and
+		// are reconciled separately below.
 		daemonPaneSet := make(map[string]bool, len(tabInfo.Panes))
 		for _, pid := range tabInfo.Panes {
+			if info, ok := paneMap[pid]; ok && info.Overlay {
+				continue
+			}
 			daemonPaneSet[pid] = true
 		}
 
@@ -2052,6 +2065,11 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) []string {
 			treePaneIDs = tab.Root.PaneIDs()
 		}
 		for _, paneID := range tabInfo.Panes {
+			// Overlay panes are reconciled separately — never insert into the tree.
+			if info, ok := paneMap[paneID]; ok && info.Overlay {
+				continue
+			}
+
 			if treePaneIDs[paneID] {
 				// Already in tree — just update metadata.
 				if info, ok := paneMap[paneID]; ok {
@@ -2117,6 +2135,8 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) []string {
 			log.Printf("apply: tab %s panes reconciled (root=nil)", tab.ID)
 		}
 
+		newPaneIDs = m.reconcileOverlayPane(tab, tabInfo, paneMap, existingPanes, newPaneIDs)
+
 		m.finalizeTabPanes(tab)
 		log.Printf("apply: tab %s finalized", tab.ID)
 		m.tabs = append(m.tabs, tab)
@@ -2132,6 +2152,9 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) []string {
 			for id := range tab.Root.PaneIDs() {
 				surviving[id] = true
 			}
+		}
+		if tab.overlayPane != nil {
+			surviving[tab.overlayPane.ID] = true
 		}
 	}
 	for id, pane := range existingPanes {
@@ -2222,11 +2245,15 @@ func (m *Model) restoreTabLayout(tab *TabModel, tabInfo TabInfo, paneMap map[str
 	}
 
 	// Add any panes not in the deserialized tree (e.g., created while TUI was away).
+	// Overlay panes are never part of the tree — skip them here.
 	treePaneIDs := make(map[string]bool)
 	if tab.Root != nil {
 		treePaneIDs = tab.Root.PaneIDs()
 	}
 	for _, paneID := range tabInfo.Panes {
+		if info, ok := paneMap[paneID]; ok && info.Overlay {
+			continue
+		}
 		if treePaneIDs[paneID] {
 			continue
 		}
@@ -2242,6 +2269,60 @@ func (m *Model) restoreTabLayout(tab *TabModel, tabInfo TabInfo, paneMap map[str
 
 	m.finalizeTabPanes(tab)
 	return tab
+}
+
+// reconcileOverlayPane adopts the overlay pane reported by the daemon into
+// tab.overlayPane, or clears the slot when the daemon no longer reports one.
+// The overlay is never part of the layout tree. Returns newPaneIDs extended
+// with the overlay pane ID when a new PaneModel was created for it.
+func (m *Model) reconcileOverlayPane(
+	tab *TabModel,
+	tabInfo TabInfo,
+	paneMap map[string]*PaneInfo,
+	existingPanes map[string]*PaneModel,
+	newPaneIDs []string,
+) []string {
+	// Find the overlay pane for this tab in the daemon broadcast, if any.
+	var overlayInfo *PaneInfo
+	for _, pid := range tabInfo.Panes {
+		if info, ok := paneMap[pid]; ok && info.Overlay {
+			overlayInfo = info
+			break
+		}
+	}
+
+	switch {
+	case overlayInfo == nil:
+		// Daemon has no overlay for this tab (exited or destroyed).
+		if tab.overlayPane != nil {
+			tab.overlayPane.Dispose()
+			tab.overlayPane = nil
+			tab.overlayVisible = false
+		}
+	case tab.overlayPane == nil || tab.overlayPane.ID != overlayInfo.ID:
+		// New overlay arrived (or replaced an old one).
+		if tab.overlayPane != nil {
+			tab.overlayPane.Dispose()
+		}
+		pane, ok := existingPanes[overlayInfo.ID]
+		if !ok {
+			pane = NewPaneModel(overlayInfo.ID, m.replayBufSize())
+			newPaneIDs = append(newPaneIDs, overlayInfo.ID)
+		}
+		syncPaneMeta(pane, overlayInfo)
+		tab.overlayPane = pane
+		// Show the overlay immediately when this TUI's Alt+G triggered its
+		// creation (pendingOverlayShow entry). On plain reattach, default hidden.
+		if m.pendingOverlayShow[tab.ID] {
+			delete(m.pendingOverlayShow, tab.ID)
+			tab.overlayVisible = true
+		}
+	default:
+		// Same overlay pane — refresh metadata only.
+		syncPaneMeta(tab.overlayPane, overlayInfo)
+	}
+
+	return newPaneIDs
 }
 
 // finalizeTabPanes ensures the active pane is valid and focus flags are set.

@@ -205,6 +205,8 @@ It prints which environment it's operating on (production `~/.quil` or dev `QUIL
 
 `quil daemon restart` does the same without launching the TUI.
 
+A related single-pane symptom: an AI pane (e.g. Claude Code after a context compaction) stops reacting to keystrokes while everything else works. The process has stopped reading its stdin. The daemon drops the unread keystrokes (you'll see a **"Pane not accepting input"** warning in the notification sidebar, `Alt+N`) instead of freezing — restart that one pane (close with `Ctrl+W` and recreate, or use the MCP `restart_pane` tool) to recover it.
+
 ## Force-stop the daemon
 
 `quil daemon stop` uses the same bounded escalation as `quil restart` (graceful IPC → SIGTERM → force-kill) and cleans up the pid/socket files, so it works even against a wedged daemon. Manual fallback, if you ever need it:

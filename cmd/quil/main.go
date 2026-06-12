@@ -176,7 +176,15 @@ func startDaemon(quiet bool) {
 	cmd := exec.Command(quild, "--background")
 	cmd.Dir = quilDir
 	cmd.Stdout = nil
+	// Capture the daemon's stderr (runtime panics, SIGQUIT goroutine dumps)
+	// instead of discarding it — stderr at /dev/null cost us the post-mortem
+	// for the 2026-06-11 daemon wedge. The parent's handle is closed after
+	// Start; the child keeps its own dup.
 	cmd.Stderr = nil
+	if f, ferr := os.OpenFile(filepath.Join(quilDir, "quild.stderr.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600); ferr == nil {
+		cmd.Stderr = f
+		defer f.Close()
+	}
 	cmd.SysProcAttr = daemonSysProcAttr()
 	if err := cmd.Start(); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to start daemon: %v\n", err)

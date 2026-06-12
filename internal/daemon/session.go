@@ -6,10 +6,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
+	"github.com/artyomsv/quil/internal/logger"
 	memreport "github.com/artyomsv/quil/internal/memreport"
 	apty "github.com/artyomsv/quil/internal/pty"
 	"github.com/artyomsv/quil/internal/ringbuf"
+	"github.com/google/uuid"
 )
 
 type Tab struct {
@@ -21,15 +22,15 @@ type Tab struct {
 }
 
 type Pane struct {
-	ID           string
-	TabID        string
-	CWD          string
-	Name         string // User-set name (empty = use CWD)
-	PTY          apty.Session
-	OutputBuf    *ringbuf.RingBuffer // Captures PTY output for replay on reconnect
-	GhostSnap    []byte              // Pure disk-loaded ghost buffer, cleared after first client replay
-	Type         string              // Plugin name (default: "terminal")
-	PluginState  map[string]string   // Scraped values (e.g., "session_id": "abc123")
+	ID          string
+	TabID       string
+	CWD         string
+	Name        string // User-set name (empty = use CWD)
+	PTY         apty.Session
+	OutputBuf   *ringbuf.RingBuffer // Captures PTY output for replay on reconnect
+	GhostSnap   []byte              // Pure disk-loaded ghost buffer, cleared after first client replay
+	Type        string              // Plugin name (default: "terminal")
+	PluginState map[string]string   // Scraped values (e.g., "session_id": "abc123")
 	// PluginMu protects every mutable field that can be read or written
 	// concurrently with the daemon's PTY-output goroutine: PluginState,
 	// GhostSnap, PTY (the pointer itself + Pid lookups), ExitCode, and
@@ -40,17 +41,31 @@ type Pane struct {
 	// workspaceStateFromSnapshot / buildPaneInfos / handlePaneStatusReq
 	// readers. Immutable post-creation fields (ID, TabID, OutputBuf pointer,
 	// Cols/Rows once set) are read without it.
-	PluginMu     sync.Mutex
-	InstanceName string              // Which instance config was used
-	InstanceArgs []string            // Args used to start (for rerun strategy)
-	ExitCode     *int                // nil = still running, non-nil = exited
-	ExitedAt     time.Time           // When the process exited (zero if running)
-	Cols         int                 // Last known terminal width (0 = unknown)
-	Rows         int                 // Last known terminal height (0 = unknown)
-	LastOutputAt    time.Time        // Updated on every flushPaneOutput
-	IdleNotified    bool             // Prevents re-firing for same idle period
-	LastIdleEventAt time.Time        // Cooldown: last time a idle event was emitted
-	LastBellEventAt time.Time        // Cooldown: last time a bell event was emitted
+	PluginMu        sync.Mutex
+	InstanceName    string    // Which instance config was used
+	InstanceArgs    []string  // Args used to start (for rerun strategy)
+	ExitCode        *int      // nil = still running, non-nil = exited
+	ExitedAt        time.Time // When the process exited (zero if running)
+	Cols            int       // Last known terminal width (0 = unknown)
+	Rows            int       // Last known terminal height (0 = unknown)
+	LastOutputAt    time.Time // Updated on every flushPaneOutput
+	IdleNotified    bool      // Prevents re-firing for same idle period
+	LastIdleEventAt time.Time // Cooldown: last time a idle event was emitted
+	LastBellEventAt time.Time // Cooldown: last time a bell event was emitted
+	// LastInputBlockedAt: cooldown for the input_blocked event emitted when
+	// the input queue overflows (child stopped reading stdin). Under PluginMu.
+	LastInputBlockedAt time.Time
+	// Input pipeline: all PTY stdin writes go through a dedicated per-pane
+	// goroutine (inputWriter). A child that stops reading its stdin fills
+	// the kernel PTY buffer and makes Write block forever; on the IPC
+	// dispatch goroutine that froze input for EVERY pane (the 2026-06-11/12
+	// production wedge). The writer goroutine parks harmlessly instead, and
+	// EnqueueInput never blocks. Channels are created lazily by
+	// EnsureInputWriter; StopInput ends the writer on pane teardown.
+	inputCh       chan []byte
+	inputDone     chan struct{}
+	inputOnce     sync.Once
+	inputStopOnce sync.Once
 	// Muted suppresses notification events sourced from this pane. Set via
 	// MsgUpdatePane{Muted: true} from the TUI (default keybinding Alt+M).
 	// Persisted in the workspace snapshot so mute survives restart. Read
@@ -97,6 +112,86 @@ type SessionManager struct {
 	mu        sync.RWMutex
 }
 
+// inputQueueSize bounds the per-pane stdin queue. Generous for interactive
+// typing and paste bursts; only a child that has stopped draining stdin can
+// fill it, at which point further input is dropped (with a sidebar event)
+// instead of blocking the daemon.
+const inputQueueSize = 256
+
+// EnsureInputWriter lazily starts the pane's dedicated PTY input goroutine.
+func (p *Pane) EnsureInputWriter() {
+	p.inputOnce.Do(func() {
+		p.inputCh = make(chan []byte, inputQueueSize)
+		p.inputDone = make(chan struct{})
+		go p.inputWriter()
+	})
+}
+
+// EnqueueInput hands data to the input writer without ever blocking.
+// Returns false when the queue is full — the child is not reading stdin
+// and the caller decides how to surface the drop.
+func (p *Pane) EnqueueInput(data []byte) bool {
+	p.EnsureInputWriter()
+	select {
+	case p.inputCh <- data:
+		return true
+	default:
+		return false
+	}
+}
+
+// StopInput terminates the input writer. Idempotent; safe to call even if
+// the writer never started.
+func (p *Pane) StopInput() {
+	p.EnsureInputWriter()
+	p.inputStopOnce.Do(func() { close(p.inputDone) })
+}
+
+func (p *Pane) inputWriter() {
+	for {
+		select {
+		case <-p.inputDone:
+			return
+		case data := <-p.inputCh:
+			p.PluginMu.Lock()
+			pty := p.PTY
+			p.PluginMu.Unlock()
+			if pty == nil {
+				continue
+			}
+			// May block until the child reads or the PTY is closed — both
+			// are fine here, on the pane's own goroutine. A close while
+			// blocked errors the Write, and the next loop sees inputDone.
+			if _, err := pty.Write(data); err != nil {
+				logger.Debug("pane %s: input write: %v", p.ID, err)
+			}
+		}
+	}
+}
+
+// releasePanes tears down pane PTYs OFF the session lock, each on its own
+// goroutine. Close → cmd.Wait blocks until the child is reaped; doing that
+// under sm.mu's write lock starved every reader (snapshot loop, attach,
+// tab switch, hook enrichment) when a wedged child refused to die — the
+// 2026-06-11/12 daemon wedge. Async close keeps even the calling handler
+// responsive.
+func releasePanes(panes []*Pane) {
+	for _, p := range panes {
+		p.StopInput()
+		p.PluginMu.Lock()
+		pty := p.PTY
+		p.PluginMu.Unlock()
+		if pty == nil {
+			continue
+		}
+		go func(id string, s apty.Session) {
+			if err := s.Close(); err != nil {
+				logger.Debug("pane %s: PTY close: %v", id, err)
+			}
+		}(p.ID, pty)
+	}
+}
+
 func NewSessionManager(bufSize int) *SessionManager {
 	return &SessionManager{
 		tabs:    make(map[string]*Tab),
@@ -122,18 +217,19 @@ func (sm *SessionManager) CreateTab(name string) *Tab {
 
 func (sm *SessionManager) DestroyTab(tabID string) error {
 	sm.mu.Lock()
-	defer sm.mu.Unlock()
 
 	tab, ok := sm.tabs[tabID]
 	if !ok {
+		sm.mu.Unlock()
 		return fmt.Errorf("tab not found: %s", tabID)
 	}
 
+	// Detach panes under the lock; close their PTYs after releasing it
+	// (releasePanes) — Close can block on reaping a wedged child.
+	var orphans []*Pane
 	for _, paneID := range tab.Panes {
 		if pane, ok := sm.panes[paneID]; ok {
-			if pane.PTY != nil {
-				pane.PTY.Close()
-			}
+			orphans = append(orphans, pane)
 			delete(sm.panes, paneID)
 		}
 	}
@@ -153,6 +249,8 @@ func (sm *SessionManager) DestroyTab(tabID string) error {
 			sm.activeTab = ""
 		}
 	}
+	sm.mu.Unlock()
+	releasePanes(orphans)
 	return nil
 }
 
@@ -193,15 +291,11 @@ func (sm *SessionManager) NewPane(cwd string) *Pane {
 // position in the tab's pane list. The old pane's PTY is closed.
 func (sm *SessionManager) ReplacePane(oldPaneID string, newPane *Pane) error {
 	sm.mu.Lock()
-	defer sm.mu.Unlock()
 
 	oldPane, ok := sm.panes[oldPaneID]
 	if !ok {
+		sm.mu.Unlock()
 		return fmt.Errorf("pane not found: %s", oldPaneID)
-	}
-
-	if oldPane.PTY != nil {
-		oldPane.PTY.Close()
 	}
 
 	// Replace in tab's pane list at the same index
@@ -217,20 +311,18 @@ func (sm *SessionManager) ReplacePane(oldPaneID string, newPane *Pane) error {
 	newPane.TabID = oldPane.TabID
 	delete(sm.panes, oldPaneID)
 	sm.panes[newPane.ID] = newPane
+	sm.mu.Unlock()
+	releasePanes([]*Pane{oldPane})
 	return nil
 }
 
 func (sm *SessionManager) DestroyPane(paneID string) error {
 	sm.mu.Lock()
-	defer sm.mu.Unlock()
 
 	pane, ok := sm.panes[paneID]
 	if !ok {
+		sm.mu.Unlock()
 		return fmt.Errorf("pane not found: %s", paneID)
-	}
-
-	if pane.PTY != nil {
-		pane.PTY.Close()
 	}
 
 	if tab, ok := sm.tabs[pane.TabID]; ok {
@@ -243,6 +335,8 @@ func (sm *SessionManager) DestroyPane(paneID string) error {
 	}
 
 	delete(sm.panes, paneID)
+	sm.mu.Unlock()
+	releasePanes([]*Pane{pane})
 	return nil
 }
 

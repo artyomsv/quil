@@ -976,8 +976,9 @@ func (d *Daemon) handleUpdateTab(msg *ipc.Message) {
 	}
 	if payload.Color != "" {
 		tab.Color = payload.Color
-	} else if payload.Name == "" {
-		// Only color field sent as empty → clear color
+	} else if payload.ClearColor || payload.Name == "" {
+		// Explicit clear (color cycle wrapped past the last color), or the
+		// legacy heuristic: only the color field sent, as empty → clear.
 		tab.Color = ""
 	}
 

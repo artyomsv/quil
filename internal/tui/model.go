@@ -2882,6 +2882,10 @@ func (m Model) updateTab(tabID, name, color string) tea.Cmd {
 			TabID: tabID,
 			Name:  name,
 			Color: color,
+			// An empty color here always means "back to default" — both the
+			// color cycle wrap and a rename of an uncolored tab want the tab
+			// to end up colorless, so the flag is safe to derive.
+			ClearColor: color == "",
 		})
 		m.client.Send(msg)
 		return nil

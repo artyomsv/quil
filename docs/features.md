@@ -174,7 +174,8 @@ See the full [plugin reference](plugin-reference.md) for every field.
   from the active pane's current directory. Hidden overlays keep running —
   re-show is instant with lazygit's UI state intact. One overlay per tab.
   Overlays are ephemeral: they don't survive a daemon restart (one keypress
-  recreates them). Quit lazygit (q) to destroy the overlay pane.
+  recreates them). Quit lazygit (`q`) and the overlay pane is destroyed
+  automatically; the next Alt+G starts fresh.
 
 ---
 

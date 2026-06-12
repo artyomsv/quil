@@ -472,3 +472,67 @@ func TestWorkspaceState_OverlayFlip_NoRace(t *testing.T) {
 	}
 	<-done
 }
+
+// TestOnPaneExit_OverlayAutoDestroyed verifies that onPaneExit destroys an
+// overlay pane on exit while leaving normal panes intact. This is the fix for
+// the Alt+G dead-overlay issue: without auto-destroy, the TUI state machine
+// would re-show a dead overlay forever.
+func TestOnPaneExit_OverlayAutoDestroyed(t *testing.T) {
+	// newTestDaemon mutates package-level vars — must not be t.Parallel().
+	d := newTestDaemon(t)
+	tab := d.session.CreateTab("work")
+
+	normal, err := d.session.CreatePane(tab.ID, "/tmp")
+	if err != nil {
+		t.Fatalf("create normal pane: %v", err)
+	}
+
+	overlay, err := d.session.CreatePane(tab.ID, "/tmp/repo")
+	if err != nil {
+		t.Fatalf("create overlay pane: %v", err)
+	}
+	overlay.PluginMu.Lock()
+	overlay.Overlay = true
+	overlay.PluginMu.Unlock()
+
+	// Simulate overlay process exit.
+	d.onPaneExit(overlay, 0)
+
+	// Overlay pane must be gone from the session.
+	if p := d.session.Pane(overlay.ID); p != nil {
+		t.Error("overlay pane must be destroyed after exit; still present in session")
+	}
+
+	// Normal pane must still exist.
+	if p := d.session.Pane(normal.ID); p == nil {
+		t.Error("normal pane must not be destroyed when overlay exits")
+	}
+}
+
+// TestOnPaneExit_NormalPaneSurvivesExit verifies that a normal (non-overlay)
+// pane is NOT auto-destroyed on exit — it survives as an exited husk, which
+// is the existing deliberate behavior.
+func TestOnPaneExit_NormalPaneSurvivesExit(t *testing.T) {
+	// newTestDaemon mutates package-level vars — must not be t.Parallel().
+	d := newTestDaemon(t)
+	tab := d.session.CreateTab("work")
+
+	normal, err := d.session.CreatePane(tab.ID, "/tmp")
+	if err != nil {
+		t.Fatalf("create normal pane: %v", err)
+	}
+
+	d.onPaneExit(normal, 1)
+
+	// Normal pane must still exist in session (as an exited husk).
+	if p := d.session.Pane(normal.ID); p == nil {
+		t.Error("normal pane must survive exit as an exited husk")
+	}
+	// ExitCode must be set.
+	normal.PluginMu.Lock()
+	exitCode := normal.ExitCode
+	normal.PluginMu.Unlock()
+	if exitCode == nil || *exitCode != 1 {
+		t.Errorf("ExitCode = %v, want 1", exitCode)
+	}
+}

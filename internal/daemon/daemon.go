@@ -1366,29 +1366,60 @@ func (d *Daemon) streamPTYOutput(paneID string, pty apty.Session) {
 	// PluginMu to avoid data race).
 	if pane := d.session.Pane(paneID); pane != nil {
 		code := pty.WaitExit()
-		pane.PluginMu.Lock()
-		pane.ExitCode = &code
-		pane.ExitedAt = time.Now()
-		pane.PluginMu.Unlock()
-		log.Printf("pane %s: process exited with code %d", paneID, code)
+		d.onPaneExit(pane, code)
+	}
+}
 
-		severity := "info"
-		title := "Process exited (code 0)"
-		if code != 0 {
-			severity = "error"
-			title = fmt.Sprintf("Process failed (code %d)", code)
-		}
-		d.emitEvent(withExcerpt(PaneEvent{
-			ID:        uuid.New().String(),
-			PaneID:    paneID,
-			TabID:     pane.TabID,
-			PaneName:  pane.Name,
-			Type:      "process_exit",
-			Title:     title,
-			Severity:  severity,
-			Timestamp: time.Now(),
-			Data:      map[string]string{"exit_code": strconv.Itoa(code)},
-		}, paneOutputExcerpt(pane, 5)))
+// onPaneExit records the exit state, emits the process_exit event, and
+// auto-destroys overlay panes. Extracted from streamPTYOutput so it can be
+// called and tested without a real PTY.
+//
+// Goroutine safety: called from the PTY-output goroutine. All sub-operations
+// (PluginMu, session.mu, broadcast, requestSnapshot) take their own locks and
+// are safe to call from any goroutine — the broadcast helpers already document
+// this property (see the broadcast nil-guard comment at line 1501).
+func (d *Daemon) onPaneExit(pane *Pane, code int) {
+	pane.PluginMu.Lock()
+	pane.ExitCode = &code
+	pane.ExitedAt = time.Now()
+	isOverlay := pane.Overlay
+	pane.PluginMu.Unlock()
+	log.Printf("pane %s: process exited with code %d", pane.ID, code)
+
+	severity := "info"
+	title := "Process exited (code 0)"
+	if code != 0 {
+		severity = "error"
+		title = fmt.Sprintf("Process failed (code %d)", code)
+	}
+	d.emitEvent(withExcerpt(PaneEvent{
+		ID:        uuid.New().String(),
+		PaneID:    pane.ID,
+		TabID:     pane.TabID,
+		PaneName:  pane.Name,
+		Type:      "process_exit",
+		Title:     title,
+		Severity:  severity,
+		Timestamp: time.Now(),
+		Data:      map[string]string{"exit_code": strconv.Itoa(code)},
+	}, paneOutputExcerpt(pane, 5)))
+
+	// Overlay panes are ephemeral: auto-destroy on exit so the TUI
+	// reconciliation clears the slot and the next Alt+G creates fresh.
+	// Normal panes survive as exited husks (existing behavior unchanged).
+	if isOverlay {
+		log.Printf("pane exit: auto-destroying overlay %s", pane.ID)
+		tabID := pane.TabID
+		d.cleanupPaneArtifacts(pane.ID)
+		d.session.DestroyPane(pane.ID) //nolint:errcheck — pane was just live; not-found is impossible here
+		// ensureTabNotEmpty is a cheap no-op when normal panes remain (the
+		// common case). It guards the degenerate case where an overlay was
+		// somehow the tab's only pane — shouldn't happen because
+		// handleDestroyPane calls ensureTabNotEmpty before we get here, but
+		// defense in depth costs nothing.
+		d.ensureTabNotEmpty(tabID)
+		d.broadcastState()
+		d.requestSnapshot()
 	}
 }
 

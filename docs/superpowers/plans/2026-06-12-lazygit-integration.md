@@ -1,6 +1,6 @@
 # Lazygit Integration Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Lazygit integration per spec `docs/superpowers/specs/2026-06-12-lazygit-integration-design.md` — built-in plugin, git-aware setup dialog, per-tab toggle overlay (Alt+G).
 
@@ -22,7 +22,7 @@
 - Create: `internal/gitdiscover/gitdiscover.go`
 - Create: `internal/gitdiscover/gitdiscover_test.go`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```go
 package gitdiscover
@@ -168,12 +168,12 @@ func TestCandidates_EmptyDir(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `./scripts/dev.sh test`
 Expected: FAIL — `internal/gitdiscover` does not compile (undefined: EnclosingRepo, SubRepos, Candidates).
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 ```go
 // Package gitdiscover finds git repositories near a directory: the enclosing
@@ -291,12 +291,12 @@ if err != nil {
 
 (CI runs Linux in Docker where this is a no-op, but keep the tests portable.)
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `./scripts/dev.sh test`
 Expected: PASS (all packages).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/gitdiscover/
@@ -314,7 +314,7 @@ deduped). I/O errors degrade to no-candidates by design."
 - Modify: `internal/plugin/registry.go` (tomlPlugin ~line 303, loadPluginTOML ~line 388)
 - Test: `internal/plugin/plugin_test.go`
 
-- [ ] **Step 1: Write the failing test** (append to `plugin_test.go`; follow the existing pattern there of writing TOML bytes to a temp file and calling `loadPluginTOML` — see `TestLoadPluginTOML*` siblings)
+- [x] **Step 1: Write the failing test** (append to `plugin_test.go`; follow the existing pattern there of writing TOML bytes to a temp file and calling `loadPluginTOML` — see `TestLoadPluginTOML*` siblings)
 
 ```go
 func TestLoadPluginTOML_DiscoverField(t *testing.T) {
@@ -361,12 +361,12 @@ discover = "svn"
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `./scripts/dev.sh test`
 Expected: FAIL — `p.Command.Discover undefined`.
 
-- [ ] **Step 3: Implement.** Three edits:
+- [x] **Step 3: Implement.** Three edits:
 
 In `internal/plugin/plugin.go`, add to `CommandConfig` after `RawKeys`:
 
@@ -402,12 +402,12 @@ and copy the field in the `CommandConfig` literal (~line 388, next to `PromptsCW
 			Discover:         tp.Command.Discover,
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `./scripts/dev.sh test`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/plugin/plugin.go internal/plugin/registry.go internal/plugin/plugin_test.go
@@ -423,7 +423,7 @@ in the pane setup dialog. Validated at TOML load (only \"\"/\"git\")."
 - Create: `internal/plugin/defaults/lazygit.toml` (auto-embedded by `//go:embed defaults/*.toml` in `internal/plugin/defaults.go:12` — no Go change needed)
 - Test: `internal/plugin/defaults_test.go`
 
-- [ ] **Step 1: Write the failing test** (append to `defaults_test.go`)
+- [x] **Step 1: Write the failing test** (append to `defaults_test.go`)
 
 ```go
 func TestEnsureDefaultPlugins_WritesLazygit(t *testing.T) {
@@ -450,12 +450,12 @@ func TestEnsureDefaultPlugins_WritesLazygit(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `./scripts/dev.sh test`
 Expected: FAIL — `load lazygit.toml: ... no such file`.
 
-- [ ] **Step 3: Create `internal/plugin/defaults/lazygit.toml`**
+- [x] **Step 3: Create `internal/plugin/defaults/lazygit.toml`**
 
 ```toml
 # Lazygit — git TUI for the current workspace
@@ -491,12 +491,12 @@ strategy = "rerun"
 ghost_buffer = false
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `./scripts/dev.sh test`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/plugin/defaults/lazygit.toml internal/plugin/defaults_test.go
@@ -520,7 +520,7 @@ DetectAvailability (path override -> LookPath -> searchBinary)."
 
 **Design recap:** when the plugin has `Discover == "git"` and candidates are found, the CWD field of the setup dialog renders the candidate list (plus a final "Browse…" row) instead of the directory browser. `m.cwdBrowseDir` doubles as "currently selected candidate" so `submitSetupDialog` (dialog.go:2334, which copies `m.cwdBrowseDir` into `m.selectedCWD`) needs **no change**. `m.cwdBrowseCursor` doubles as the list cursor. Choosing "Browse…" clears `repoCandidates` and falls back to the existing browser init.
 
-- [ ] **Step 1: Write the failing tests** (append to `setup_dialog_test.go`; it already builds `*Model` literals directly — follow that pattern)
+- [x] **Step 1: Write the failing tests** (append to `setup_dialog_test.go`; it already builds `*Model` literals directly — follow that pattern)
 
 ```go
 func TestEnterSetupOrSplit_GitDiscover_PopulatesCandidates(t *testing.T) {
@@ -602,12 +602,12 @@ func TestEnterSetupOrSplit_GitDiscover_ClearsStaleCandidates(t *testing.T) {
 
 Check the existing tests in `setup_dialog_test.go:217-231` for how `Model` literals are seeded — if `activeTabModel()` requires more fields than `tabs`/`activeTab`, mirror what `TestEnterSetupOrSplit`-adjacent tests already do.
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `./scripts/dev.sh test`
 Expected: FAIL — `m.repoCandidates undefined`.
 
-- [ ] **Step 3: Implement.** In `internal/tui/model.go` next to `lastSelectedCWD` (~line 235):
+- [x] **Step 3: Implement.** In `internal/tui/model.go` next to `lastSelectedCWD` (~line 235):
 
 ```go
 	repoCandidates []string // git repos offered by the setup dialog (discover="git"); nil = plain browser
@@ -680,12 +680,12 @@ and replace the `if p.Command.PromptsCWD { ... }` body with:
 
 Add the import `"github.com/artyomsv/quil/internal/gitdiscover"` to dialog.go.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `./scripts/dev.sh test`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/tui/model.go internal/tui/dialog.go internal/tui/setup_dialog_test.go
@@ -702,7 +702,7 @@ to initSetupBrowser for reuse by the Browse… escape hatch."
 - Modify: `internal/tui/dialog.go` (`handleSetupCWDKey` at line 2204; the CWD-field section of the setup render function — find it via `grep -n "renderCreatePaneSetup" internal/tui/dialog.go`)
 - Test: `internal/tui/setup_dialog_test.go`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```go
 // repoPickModel builds a Model sitting in the setup dialog with a candidate
@@ -772,12 +772,12 @@ func TestSetupRepoKey_BrowseRowFallsBackToBrowser(t *testing.T) {
 
 Note on key construction: check how existing tests in `setup_dialog_test.go` build `tea.KeyPressMsg` values (arrow keys vs text keys) and copy that exact construction — Bubble Tea v2 key codes, not strings.
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `./scripts/dev.sh test`
 Expected: FAIL (cursor/selection unchanged — repo branch doesn't exist yet).
 
-- [ ] **Step 3: Implement.** At the top of `handleSetupCWDKey` (dialog.go:2204), before the `len(m.cwdBrowseEntries) == 0` check:
+- [x] **Step 3: Implement.** At the top of `handleSetupCWDKey` (dialog.go:2204), before the `len(m.cwdBrowseEntries) == 0` check:
 
 ```go
 	if len(m.repoCandidates) > 0 {
@@ -856,14 +856,14 @@ Rendering: locate the CWD-field section in the setup render function (`grep -n "
 
 Adapt variable names (`lines`, `focused`, path-shortening helper) to what the render function actually uses — the structure above is the contract; the surrounding render code dictates the exact builder. If no `displayPath` helper exists, render the absolute path as-is (the dialog is 60 cols; long paths truncate from the left with `…` if the browser rows already do that, otherwise don't add truncation).
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `./scripts/dev.sh test`
 Expected: PASS.
 
-- [ ] **Step 5: Manual verification (dev mode).** Build `./scripts/dev.sh build`, run `./scripts/quil-dev.ps1`, confirm `[dev]` in the status bar. With lazygit installed: Ctrl+N → Tools → Lazygit → candidate list shows this repo; Browse… falls back to the directory browser; Enter on a candidate proceeds to split selection and the pane opens lazygit in the repo.
+- [x] **Step 5: Manual verification (dev mode).** Build `./scripts/dev.sh build`, run `./scripts/quil-dev.ps1`, confirm `[dev]` in the status bar. With lazygit installed: Ctrl+N → Tools → Lazygit → candidate list shows this repo; Browse… falls back to the directory browser; Enter on a candidate proceeds to split selection and the pane opens lazygit in the repo.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add internal/tui/dialog.go internal/tui/setup_dialog_test.go
@@ -886,7 +886,7 @@ candidate submits; Browse… falls back to the normal browser."
 - Modify: `internal/daemon/daemon.go` (`handleCreatePane` ~line 1045; `workspaceStateFromSnapshot` line 1481 + its two call sites at lines 351 and 1474)
 - Test: `internal/daemon/daemon_test.go`
 
-- [ ] **Step 1: Write the failing tests** (append to `daemon_test.go`; mirror the existing `workspaceStateFromSnapshot` test at line 87 for daemon/tab/pane construction)
+- [x] **Step 1: Write the failing tests** (append to `daemon_test.go`; mirror the existing `workspaceStateFromSnapshot` test at line 87 for daemon/tab/pane construction)
 
 ```go
 func TestWorkspaceState_OverlayPane_BroadcastVsDisk(t *testing.T) {
@@ -938,12 +938,12 @@ func TestWorkspaceState_OverlayPane_BroadcastVsDisk(t *testing.T) {
 
 The tab's pane-ID membership: `SessionManager.CreatePane` appends the pane ID to `tab.Panes` — verify by reading `CreatePane` in session.go; if it does not, append manually in the test (`tab.Panes = append(tab.Panes, normal.ID, overlay.ID)`).
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `./scripts/dev.sh test`
 Expected: FAIL — `overlay.Overlay undefined` / wrong arity on `workspaceStateFromSnapshot`.
 
-- [ ] **Step 3: Implement.**
+- [x] **Step 3: Implement.**
 
 `internal/ipc/protocol.go` — `CreatePanePayload`:
 
@@ -1030,12 +1030,12 @@ Also check the ghost-buffer loop in `snapshot()` (daemon.go:362–376): it itera
 
 (lazygit sets `ghost_buffer = false` anyway, but the flag must not depend on plugin lookup succeeding.)
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `./scripts/dev.sh test`
 Expected: PASS, including the pre-existing `workspaceStateFromSnapshot` test.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/ipc/protocol.go internal/daemon/session.go internal/daemon/daemon.go internal/daemon/daemon_test.go
@@ -1053,7 +1053,7 @@ saves (gone on daemon restart by design)."
 - Modify: `internal/daemon/daemon.go` (`handleDestroyPane` line 1148–1159; check `handleDestroyPaneReq` at line 2938 for the same block)
 - Test: `internal/daemon/daemon_test.go`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```go
 func TestDestroyPane_LastNormalPane_DestroysOverlayAndRecovers(t *testing.T) {
@@ -1085,12 +1085,12 @@ func TestDestroyPane_LastNormalPane_DestroysOverlayAndRecovers(t *testing.T) {
 
 Write the test against the helper you extract in Step 3 (`ensureTabNotEmpty`) rather than the full `handleDestroyPane` (which needs PTY spawning); if `newTestDaemon` already supports a fake spawn (see `newTestDaemonInDir` / `fakeSession` in `lazy_restore_test.go`), drive `handleDestroyPane` end-to-end instead — prefer whichever the existing destroy tests do (`grep -n "handleDestroyPane" internal/daemon/*_test.go`).
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `./scripts/dev.sh test`
 Expected: FAIL — helper undefined / overlay survives.
 
-- [ ] **Step 3: Implement.** Replace the auto-recovery block in `handleDestroyPane` (lines 1148–1159):
+- [x] **Step 3: Implement.** Replace the auto-recovery block in `handleDestroyPane` (lines 1148–1159):
 
 ```go
 	// Auto-create replacement if the last NORMAL pane in the tab was
@@ -1138,12 +1138,12 @@ func (d *Daemon) ensureTabNotEmpty(tabID string) {
 
 Then check `handleDestroyPaneReq` (line 2938): if it contains its own copy of the old auto-recovery block, replace it with `d.ensureTabNotEmpty(tabID)` too. Also check `DestroyTab` paths — tab destruction already destroys all panes including overlays (they're normal panes in `tab.Panes`), no change needed there.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `./scripts/dev.sh test`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/daemon/daemon.go internal/daemon/daemon_test.go
@@ -1160,7 +1160,7 @@ ensureTabNotEmpty, shared by the TUI and MCP destroy paths."
 - Modify: `internal/config/config.go` (KeybindingsConfig ~line 136; Default() ~line 212)
 - Test: `internal/config/config_test.go`
 
-- [ ] **Step 1: Write the failing test** (mirror however existing keybinding defaults are asserted in `config_test.go`; if there is no per-binding test, add)
+- [x] **Step 1: Write the failing test** (mirror however existing keybinding defaults are asserted in `config_test.go`; if there is no per-binding test, add)
 
 ```go
 func TestDefault_ToggleLazygitBinding(t *testing.T) {
@@ -1171,12 +1171,12 @@ func TestDefault_ToggleLazygitBinding(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `./scripts/dev.sh test`
 Expected: FAIL — field undefined.
 
-- [ ] **Step 3: Implement.** In `KeybindingsConfig` after `ToggleEager`:
+- [x] **Step 3: Implement.** In `KeybindingsConfig` after `ToggleEager`:
 
 ```go
 	// ToggleLazygit opens/hides the per-tab lazygit overlay for the git
@@ -1190,12 +1190,12 @@ In `Default()` after `ToggleEager: "alt+shift+e",`:
 			ToggleLazygit: "alt+g",
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `./scripts/dev.sh test`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/config/config.go internal/config/config_test.go
@@ -1209,7 +1209,7 @@ git commit -m "feat(config): add toggle_lazygit keybinding (default alt+g)"
 - Modify: `internal/tui/tab.go` (TabModel struct ~line 12; `ActivePaneModel`; `View` ~line 300; `Resize` ~line 274)
 - Test: `internal/tui/tab_test.go` (or the file where TabModel tests live — `grep -rn "func TestTabModel" internal/tui`)
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```go
 func TestTabModel_OverlayVisible_ActivePaneModelReturnsOverlay(t *testing.T) {
@@ -1249,12 +1249,12 @@ func TestTabModel_OverlayVisible_ViewRendersOverlay(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `./scripts/dev.sh test`
 Expected: FAIL — `tab.overlayPane undefined`.
 
-- [ ] **Step 3: Implement.**
+- [x] **Step 3: Implement.**
 
 `internal/tui/tab.go` — TabModel fields after `focusMode`:
 
@@ -1347,12 +1347,12 @@ In the status-bar render function (find it: `grep -n "\[dev\]" internal/tui/*.go
 
 (adapt to the actual segment-building code shape).
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `./scripts/dev.sh test`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/tui/model.go internal/tui/tab.go internal/tui/tab_test.go
@@ -1370,7 +1370,7 @@ feeds overlay output, status bar gains a transient flash segment."
 - Modify: `internal/tui/model.go` (`applyWorkspaceState` line 1972)
 - Test: `internal/tui/model_test.go` (or wherever `applyWorkspaceState` tests live — `grep -rn "applyWorkspaceState" internal/tui/*_test.go`)
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```go
 func TestApplyWorkspaceState_OverlayPane_NotInLayoutTree(t *testing.T) {
@@ -1431,12 +1431,12 @@ func TestApplyWorkspaceState_OverlayGone_ClearsSlot(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `./scripts/dev.sh test`
 Expected: FAIL — overlay pane lands in the layout tree (2 leaves) / slot not cleared.
 
-- [ ] **Step 3: Implement.** Three changes inside `applyWorkspaceState`:
+- [x] **Step 3: Implement.** Three changes inside `applyWorkspaceState`:
 
 (a) Index overlay panes for reuse — in the "Index existing tabs and panes" loop (line 1978-1985), after the leaves loop:
 
@@ -1517,12 +1517,12 @@ Model field (near `pendingSplit`):
 
 (`delete` and reads on a nil map are safe; only the writer in Task 10's `createOverlay` initializes it.)
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `./scripts/dev.sh test`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/tui/model.go internal/tui/model_test.go
@@ -1541,7 +1541,7 @@ the slot when the daemon no longer reports the pane."
 - Create: `internal/tui/overlay.go` (state machine + helpers — keeps model.go from growing)
 - Test: `internal/tui/overlay_test.go`
 
-- [ ] **Step 1: Write the failing tests** (uses `fakeSender` from `dialog_test.go` — it records sent messages in `fake.sent`)
+- [x] **Step 1: Write the failing tests** (uses `fakeSender` from `dialog_test.go` — it records sent messages in `fake.sent`)
 
 ```go
 package tui
@@ -1717,12 +1717,12 @@ func runCmd(cmd tea.Cmd) {
 
 Wrap every `m.handleToggleLazygit()` call in the tests as `runCmd(m.handleToggleLazygit())`. (Check how `dialog_test.go:193-199` executes cmds against fakeSender and copy that pattern if it differs — the shutdown test sends synchronously, but overlay sends are async cmds.)
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `./scripts/dev.sh test`
 Expected: FAIL — `handleToggleLazygit` undefined.
 
-- [ ] **Step 3: Implement `internal/tui/overlay.go`:**
+- [x] **Step 3: Implement `internal/tui/overlay.go`:**
 
 ```go
 package tui
@@ -1963,12 +1963,12 @@ Model field for the picker (next to `repoCandidates`):
 	repoPickCandidates []string // candidates shown by dialogGitRepoPick (Alt+G with multiple repos)
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `./scripts/dev.sh test`
 Expected: PASS (the `dialogGitRepoPick` constant is added in Task 12 — if the compiler complains here, add the iota constant now as part of this task and note it in the commit).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/tui/overlay.go internal/tui/overlay_test.go internal/tui/model.go
@@ -1988,7 +1988,7 @@ tab-switch; mouse swallowed (keyboard-only v1)."
 - Modify: `internal/tui/dialog.go` (key dispatch switch + render switch; find them: `grep -n "case dialogConfirm" internal/tui/*.go` shows both)
 - Test: `internal/tui/overlay_test.go`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```go
 func TestGitRepoPick_EnterCreatesOverlayForChosenRepo(t *testing.T) {
@@ -2037,12 +2037,12 @@ func TestGitRepoPick_EscCloses(t *testing.T) {
 
 (Use the same `tea.KeyPressMsg` construction style as existing dialog tests — check `dialog_test.go:193`.)
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `./scripts/dev.sh test`
 Expected: FAIL — `dialogGitRepoPick` / `handleGitRepoPickKey` undefined.
 
-- [ ] **Step 3: Implement.**
+- [x] **Step 3: Implement.**
 
 `model.go` iota — append after `dialogMemory`:
 
@@ -2110,12 +2110,12 @@ func (m Model) renderGitRepoPickDialog() string {
 
 Wire both into the dialog dispatch: add `case dialogGitRepoPick: return m.handleGitRepoPickKey(msg)` to the key switch and the equivalent render call to the render switch — copy exactly how `dialogConfirm` plugs into both (same files, same switches), including any box/width styling wrapper the other dialogs pass through (use `dialogWidth` 60 like the rest; long paths may truncate — acceptable v1).
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `./scripts/dev.sh test`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/tui/model.go internal/tui/dialog.go internal/tui/overlay_test.go
@@ -2130,7 +2130,7 @@ git commit -m "feat(tui): repo picker dialog for Alt+G with multiple candidates"
 - Modify: `docs/keybindings.md`, `docs/configuration.md`, `docs/features.md`, `docs/plugin-reference.md`
 - Modify: `.claude/CLAUDE.md`
 
-- [ ] **Step 1: Shortcuts dialog.** In `shortcutsList` (dialog.go:248), add a row following the existing pattern (`kbDisplay` for the key column):
+- [x] **Step 1: Shortcuts dialog.** In `shortcutsList` (dialog.go:248), add a row following the existing pattern (`kbDisplay` for the key column):
 
 ```go
 		{kbDisplay(kb.ToggleLazygit), "Toggle lazygit overlay for current repo"},
@@ -2138,9 +2138,9 @@ git commit -m "feat(tui): repo picker dialog for Alt+G with multiple candidates"
 
 (place it near the MutePane/ToggleEager rows; match the exact struct-literal shape used there).
 
-- [ ] **Step 2: Notes-mode exemption.** Do NOT add `ToggleLazygit` to `notesKeyExempt` — notes mode binds the editor to a pane; popping a full-screen overlay over it mid-edit conflicts with the notes layout. Alt+G in notes mode falls through to the editor (types nothing — it's a modifier chord) which is the safe default. Add a one-line comment in `notesKeyExempt`'s comment block noting the exclusion is deliberate.
+- [x] **Step 2: Notes-mode exemption.** Do NOT add `ToggleLazygit` to `notesKeyExempt` — notes mode binds the editor to a pane; popping a full-screen overlay over it mid-edit conflicts with the notes layout. Alt+G in notes mode falls through to the editor (types nothing — it's a modifier chord) which is the safe default. Add a one-line comment in `notesKeyExempt`'s comment block noting the exclusion is deliberate.
 
-- [ ] **Step 3: Docs.**
+- [x] **Step 3: Docs.**
 
 `docs/keybindings.md` — add `Alt+G` to the keymap table: "Toggle lazygit overlay (git repo from active pane's directory)" + the `toggle_lazygit` config key in the customization section.
 
@@ -2176,12 +2176,12 @@ Unknown values fail plugin load.
 
 `.claude/CLAUDE.md` — add to Key Conventions / Architecture notes (one bullet, terse, matching existing style): lazygit integration — `internal/gitdiscover` (pure repo discovery), `discover = "git"` plugin opt-in (setup-dialog candidate list), per-tab overlay (`Pane.Overlay` excluded from disk snapshots + TUI `TabModel.overlayPane` outside the layout tree, Alt+G state machine in `internal/tui/overlay.go`, `toggle_lazygit` keybinding). Update the dialogScreen iota list to include `dialogGitRepoPick` and the M5 milestone line.
 
-- [ ] **Step 4: Run full suite + vet**
+- [x] **Step 4: Run full suite + vet**
 
 Run: `./scripts/dev.sh test && ./scripts/dev.sh vet`
 Expected: PASS / no vet findings.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/tui/dialog.go internal/tui/notes.go docs/ .claude/CLAUDE.md
@@ -2193,17 +2193,17 @@ overlay semantics in features; CLAUDE.md architecture notes."
 
 ### Task 14: race check + manual end-to-end verification
 
-- [ ] **Step 1: Race detector**
+- [x] **Step 1: Race detector**
 
 Run: `./scripts/dev.sh test-race`
 Expected: PASS, no races (the overlay flag is immutable post-creation; if the detector flags `Pane.Overlay`, move its reads under `PluginMu` like `Muted`).
 
-- [ ] **Step 2: Build all variants**
+- [x] **Step 2: Build all variants**
 
 Run: `./scripts/dev.sh build`
 Expected: 6 binaries, no errors.
 
-- [ ] **Step 3: Manual verification in dev mode** (`./scripts/quil-dev.ps1`, confirm `[dev]` in status bar; production `~/.quil/` untouched per `.claude/rules/dev-environment.md`):
+- [x] **Step 3: Manual verification in dev mode** (`./scripts/quil-dev.ps1`, confirm `[dev]` in status bar; production `~/.quil/` untouched per `.claude/rules/dev-environment.md`):
 
 1. Terminal pane `cd` into this repo → Alt+G → lazygit overlay appears full-tab.
 2. Alt+G again → hides instantly. Alt+G → re-shows with lazygit state intact (e.g. scroll position).
@@ -2216,7 +2216,7 @@ Expected: 6 binaries, no errors.
 9. Quit dev TUI, relaunch → overlay gone (ephemeral), normal lazygit panes respawn via rerun.
 10. Alt+1..9 while overlay visible → switches tab; switching back shows the overlay still hidden/visible per its per-tab state... (verify the visible state is preserved per tab).
 
-- [ ] **Step 4: Final commit if fixes were needed; otherwise done.** Hand off via superpowers:finishing-a-development-branch.
+- [x] **Step 4: Final commit if fixes were needed; otherwise done.** Hand off via superpowers:finishing-a-development-branch.
 
 ---
 

@@ -1576,7 +1576,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// focused branch below must NOT steal keys while lazygit is on screen.
 	// The kb.ToggleLazygit case in the main switch is still reachable when the
 	// overlay is hidden (this block only fires when overlayVisible is true).
-	if tab := m.activeTabModel(); tab != nil && tab.overlayVisible && m.dialog == dialogNone && !m.renaming && !m.renamingPane {
+	if tab := m.activeTabModel(); tab != nil && tab.overlayVisible && tab.overlayPane != nil && m.dialog == dialogNone && !m.renaming && !m.renamingPane {
 		return m, m.handleOverlayKey(msg, tab)
 	}
 

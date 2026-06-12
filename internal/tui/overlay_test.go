@@ -402,6 +402,70 @@ func TestHandleOverlayKey_PlainRune_ForwardsToOverlay(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Availability gate + picker cap tests (fixes)
+// ---------------------------------------------------------------------------
+
+// TestToggleLazygit_MultipleRepos_Unavailable_FlashesNoPicker: when lazygit is
+// not installed and multiple candidate repos exist, Alt+G must flash
+// "lazygit not installed" and must NOT open the picker or send any IPC.
+func TestToggleLazygit_MultipleRepos_Unavailable_FlashesNoPicker(t *testing.T) {
+	// Build a base directory with two git sub-repos.
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"repo-a", "repo-b"} {
+		if err := os.MkdirAll(filepath.Join(base, name, ".git"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m, fake, _ := overlayTestModel(t, base)
+	// Force lazygit unavailable.
+	m.pluginRegistry.Get("lazygit").Available = false
+
+	cmd := m.handleToggleLazygit()
+	runCmd(cmd)
+
+	if m.flashText == "" {
+		t.Error("expected flash when lazygit unavailable with multiple repos")
+	}
+	if m.dialog == dialogGitRepoPick {
+		t.Error("picker must not open when lazygit is unavailable")
+	}
+	if len(fake.sent) != 0 {
+		t.Errorf("expected no IPC sends, got %d: %v", len(fake.sent), debugSentTypes(fake))
+	}
+}
+
+// TestToggleLazygit_ManyRepos_PickerCapped: when more than maxRepoCandidates
+// repos are found, the picker must receive at most maxRepoCandidates entries.
+func TestToggleLazygit_ManyRepos_PickerCapped(t *testing.T) {
+	// Build a base directory with 12 git sub-repos (> maxRepoCandidates=10).
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 12; i++ {
+		name := filepath.Join(base, filepath.FromSlash("repo-"+string(rune('a'+i))))
+		if err := os.MkdirAll(filepath.Join(name, ".git"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m, _, _ := overlayTestModel(t, base)
+
+	cmd := m.handleToggleLazygit()
+	runCmd(cmd)
+
+	if m.dialog != dialogGitRepoPick {
+		t.Errorf("dialog = %v, want dialogGitRepoPick", m.dialog)
+	}
+	if len(m.repoPickCandidates) != maxRepoCandidates {
+		t.Errorf("repoPickCandidates len = %d, want %d (maxRepoCandidates cap)",
+			len(m.repoPickCandidates), maxRepoCandidates)
+	}
+}
+
 // debugSentTypes returns a slice of sent message types for test failure output.
 func debugSentTypes(fake *fakeSender) []string {
 	var out []string

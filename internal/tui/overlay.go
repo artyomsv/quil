@@ -19,10 +19,14 @@ import (
 //     else flash "no git repo here".
 //  4. Any candidate == existing overlay's repo (compare to overlayPane.CWD) →
 //     show existing (no binary check; process already running).
-//  5. Multiple candidates, none matching → open picker dialog
+//  5. Lazygit availability gate — hoisted above the picker so a missing binary
+//     never opens the picker (which would spawn a doomed pane on Enter).
+//     Steps 1-4 stay unguarded: showing a running overlay never needs the binary.
+//  6. Multiple candidates, none matching → open picker dialog
 //     (dialogGitRepoPick; Task 12 fills render/handler).
-//  6. Create (or destroy old + create) for the resolved repo. Lazygit plugin
-//     availability check gates THIS STEP ONLY.
+//  7. Create (or destroy old + create) for the resolved repo.
+//     createOverlay keeps its own gate as defense-in-depth for callers that
+//     bypass this function (e.g. handleGitRepoPickKey).
 func (m *Model) handleToggleLazygit() tea.Cmd {
 	tab := m.activeTabModel()
 	if tab == nil {
@@ -63,24 +67,28 @@ func (m *Model) handleToggleLazygit() tea.Cmd {
 		}
 	}
 
-	// Step 5: multiple candidates, none matching → picker.
-	if len(candidates) > 1 {
-		m.repoPickCandidates = candidates
-		m.dialog = dialogGitRepoPick
-		m.dialogCursor = 0
-		return nil
-	}
-
-	// Single candidate (or first candidate) — create/replace.
-	// Step 6: availability gate.
-	repo := candidates[0]
+	// Step 5: availability gate — must come before the picker so a missing
+	// binary never opens the picker dialog (Enter would spawn a doomed pane).
 	p := m.pluginRegistry.Get("lazygit")
 	if p == nil || !p.Available {
 		m.setFlash("lazygit not installed")
 		return nil
 	}
 
-	return m.createOverlay(tab, repo)
+	// Step 6: multiple candidates, none matching → picker.
+	// Picker has no scroll machinery; same cap as the setup-dialog list.
+	if len(candidates) > 1 {
+		if len(candidates) > maxRepoCandidates {
+			candidates = candidates[:maxRepoCandidates]
+		}
+		m.repoPickCandidates = candidates
+		m.dialog = dialogGitRepoPick
+		m.dialogCursor = 0
+		return nil
+	}
+
+	// Step 7: single candidate — create/replace.
+	return m.createOverlay(tab, candidates[0])
 }
 
 // showOverlay makes the overlay visible and syncs its dimensions to the full
@@ -93,7 +101,18 @@ func (m *Model) showOverlay(tab *TabModel) tea.Cmd {
 
 // createOverlay destroys any existing overlay pane, initialises
 // pendingOverlayShow, and sends MsgCreatePane to the daemon.
+//
+// Defense-in-depth availability check: handleToggleLazygit already gates on
+// this before reaching the picker or this function, but handleGitRepoPickKey
+// calls createOverlay directly, so we re-check here to cover any future caller.
 func (m *Model) createOverlay(tab *TabModel, repo string) tea.Cmd {
+	// Defense-in-depth: re-check availability so any direct caller is safe.
+	p := m.pluginRegistry.Get("lazygit")
+	if p == nil || !p.Available {
+		m.setFlash("lazygit not installed")
+		return nil
+	}
+
 	var cmds []tea.Cmd
 
 	// Destroy the old overlay if one exists (different repo).

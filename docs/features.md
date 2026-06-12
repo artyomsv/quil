@@ -30,6 +30,7 @@ A capability-by-capability tour of what Quil does. For configuration knobs, see 
   - [Leveled logger + log viewer](#leveled-logger--log-viewer)
 - [Pane notes](#pane-notes)
 - [Operations](#operations)
+  - [Self-healing daemon](#self-healing-daemon)
   - [Client/daemon version handshake](#clientdaemon-version-handshake)
   - [Cross-platform](#cross-platform)
 
@@ -175,6 +176,7 @@ A non-modal sidebar surfaces:
 - OSC 133 command-completion events (shell panes)
 - Bell characters (30 s cooldown to avoid storming)
 - Smart-idle pattern matches (per-plugin `[[idle_handlers]]` regex)
+- **"Pane not accepting input"** — the pane's process stopped reading its stdin (e.g. an AI tool wedged after a context compaction), so the daemon drops the keystrokes instead of letting one stuck pane freeze the app. Recover with `Alt+R` (restart the pane in place — AI sessions resume)
 - **Hook-driven events from Claude Code and OpenCode** — structured events forwarded directly from the AI tool (permission requests, "reply ready", session errors, file edits, etc.) instead of guessed from the PTY byte stream. See `[notification.hooks]` in [configuration.md](configuration.md#notificationhooks) for the tier knob.
 
 Hook-driven events flow:
@@ -238,6 +240,14 @@ Soft-wrap (opt-in via `TextEditor.SoftWrap`): long logical lines wrap onto the n
 ---
 
 ## Operations
+
+### Self-healing daemon
+
+A stuck child process can't take Quil down, and a stuck daemon recovers with one command:
+
+- **`quil restart`** — stop the daemon with bounded escalation (graceful IPC shutdown with a final snapshot → SIGTERM → force-kill, each tier with a timeout so even a deadlocked daemon can't stall it), clean up stale pid/socket files, start fresh, and open the TUI. Prints the target environment first (`production (~/.quil)` vs `dev`) so you can never kill the wrong daemon. `quil daemon restart` / `quil daemon stop` use the same escalation. Tabs and panes respawn from the last snapshot; AI panes resume their sessions.
+- **Isolated pane input** — every pane's stdin is written by its own goroutine behind a bounded queue. A process that stops reading input (an AI tool wedged mid-turn) costs you a "Pane not accepting input" sidebar warning for that one pane; everything else stays interactive. `Alt+R` restarts the stuck pane in place.
+- **Liveness watchdog** — the daemon's snapshot loop doubles as a health canary. If no snapshot completes for 2 minutes, a full goroutine stack dump is written to `~/.quil/quild.log` (`WATCHDOG:` prefix), so a wedge is a diagnosable bug report instead of a silent freeze. Daemon panics and SIGQUIT dumps land in `~/.quil/quild.stderr.log`.
 
 ### Client/daemon version handshake
 

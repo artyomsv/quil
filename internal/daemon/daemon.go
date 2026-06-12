@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -77,6 +78,12 @@ type Daemon struct {
 	// Claude .sh / opencode .js hook scripts. Polled by hookEventsWatcher
 	// every 200 ms while the daemon runs.
 	hookSpool *hookevents.Spool
+
+	// lastSnapshotDone is the UnixNano of the last completed snapshot().
+	// The snapshot loop is the daemon's liveness canary — it acquires the
+	// same locks (sm.mu, per-pane PluginMu) every wedge so far has parked
+	// on. snapshotWatchdog dumps all goroutine stacks when this goes stale.
+	lastSnapshotDone atomic.Int64
 }
 
 func New(cfg config.Config) *Daemon {
@@ -177,6 +184,9 @@ func (d *Daemon) Start() error {
 
 	go d.idleChecker()
 	go d.hookEventsWatcher()
+	// Arm the liveness canary only once a first snapshot is plausible.
+	d.lastSnapshotDone.Store(time.Now().UnixNano())
+	go d.snapshotWatchdog()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
@@ -407,6 +417,44 @@ func (d *Daemon) snapshot() {
 
 	log.Printf("snapshot: %d tabs, %d panes, %d buffers (%d bytes), took %v",
 		len(tabs), len(activePaneIDs), len(buffers), totalBytes, time.Since(start).Round(time.Millisecond))
+	d.lastSnapshotDone.Store(time.Now().UnixNano())
+}
+
+// snapshotWatchdog turns a wedged daemon into a diagnosable incident. The
+// periodic snapshot runs every 30s on the Wait goroutine and takes the same
+// locks every production wedge has parked on; if no snapshot completes for
+// stallAfter, dump every goroutine stack to the log (throttled) so the
+// blocking site is identifiable post-mortem instead of being lost in a
+// silent freeze (incidents 2026-06-11/12: zero log evidence of the holder).
+func (d *Daemon) snapshotWatchdog() {
+	const (
+		checkEvery = 30 * time.Second
+		stallAfter = 2 * time.Minute
+		dumpEvery  = 10 * time.Minute
+	)
+	var lastDump time.Time
+	ticker := time.NewTicker(checkEvery)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-d.shutdown:
+			return
+		case <-ticker.C:
+			last := d.lastSnapshotDone.Load()
+			if last == 0 {
+				continue
+			}
+			stale := time.Since(time.Unix(0, last))
+			if stale < stallAfter || time.Since(lastDump) < dumpEvery {
+				continue
+			}
+			lastDump = time.Now()
+			buf := make([]byte, 1<<20)
+			n := runtime.Stack(buf, true)
+			log.Printf("WATCHDOG: no snapshot completed for %v — daemon may be wedged; goroutine dump follows\n%s",
+				stale.Round(time.Second), buf[:n])
+		}
+	}
 }
 
 // restoreWorkspace loads workspace state from disk.
@@ -1179,7 +1227,39 @@ func (d *Daemon) handlePaneInput(msg *ipc.Message) {
 	if pane.PTY == nil {
 		return
 	}
-	pane.PTY.Write(payload.Data)
+	// Never write the PTY here: a child that stopped reading stdin makes
+	// Write block forever, and this runs on the conn's dispatch goroutine —
+	// a single stuck pane froze input for every pane (2026-06-11/12 wedge).
+	// EnqueueInput hands the data to the pane's own writer goroutine.
+	if !pane.EnqueueInput(payload.Data) {
+		d.notifyInputBlocked(pane)
+	}
+}
+
+// notifyInputBlocked surfaces a full input queue — the pane's child has
+// stopped reading stdin, so keystrokes are being dropped rather than
+// freezing the daemon. One sidebar event per pane per cooldown window.
+func (d *Daemon) notifyInputBlocked(pane *Pane) {
+	const inputBlockedCooldown = 30 * time.Second
+	pane.PluginMu.Lock()
+	if !pane.LastInputBlockedAt.IsZero() && time.Since(pane.LastInputBlockedAt) < inputBlockedCooldown {
+		pane.PluginMu.Unlock()
+		return
+	}
+	pane.LastInputBlockedAt = time.Now()
+	pane.PluginMu.Unlock()
+	log.Printf("pane %s: input queue full — process not reading stdin, dropping keystrokes", pane.ID)
+	d.emitEvent(PaneEvent{
+		ID:        uuid.New().String(),
+		PaneID:    pane.ID,
+		TabID:     pane.TabID,
+		PaneName:  pane.Name,
+		Type:      "input_blocked",
+		Title:     "Pane not accepting input",
+		Message:   "The process stopped reading its input — keystrokes are being dropped. Restart the pane if it stays stuck.",
+		Severity:  "warning",
+		Timestamp: time.Now(),
+	})
 }
 
 func (d *Daemon) handleResizePane(msg *ipc.Message) {
@@ -2786,7 +2866,14 @@ func (d *Daemon) handleRestartPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 	pane.PTY = nil
 	pane.PluginMu.Unlock()
 	if old != nil {
-		old.Close()
+		// Async: Close → cmd.Wait blocks until the child is reaped, and a
+		// wedged child is precisely when restart_pane gets called — a
+		// synchronous Close would park this conn's dispatch goroutine.
+		go func(s apty.Session) {
+			if err := s.Close(); err != nil {
+				logger.Debug("restart pane %s: old PTY close: %v", pane.ID, err)
+			}
+		}(old)
 	}
 
 	// Reset exit state

@@ -1381,15 +1381,27 @@ func (d *Daemon) detectBellEvent(pane *Pane, paneID string, data []byte) {
 	if !bytes.Contains(cleaned, []byte{0x07}) {
 		return
 	}
+	// Cooldown bookkeeping under the lock; emit AFTER releasing it.
+	// emitEvent re-locks this pane's PluginMu for the mute check, and Go
+	// mutexes are not reentrant — emitting while holding the lock
+	// self-deadlocked the output goroutine, and every subsystem touching
+	// this pane's PluginMu queued behind it (snapshot loop, idle checker,
+	// memreport, switch-tab broadcast): the daemon-wide freeze caught by
+	// the snapshot watchdog's goroutine dump on 2026-06-12. Claude rings
+	// the terminal bell exactly when it wants attention, arming this on
+	// every "waiting for your input".
 	pane.PluginMu.Lock()
-	defer pane.PluginMu.Unlock()
 	if !pane.LastBellEventAt.IsZero() && time.Since(pane.LastBellEventAt) < bellCooldown {
+		pane.PluginMu.Unlock()
 		return
 	}
 	pane.LastBellEventAt = time.Now()
+	tabID := pane.TabID
+	name := pane.Name
+	pane.PluginMu.Unlock()
 	d.emitEvent(withExcerpt(PaneEvent{
-		ID: uuid.New().String(), PaneID: paneID, TabID: pane.TabID,
-		PaneName: pane.Name, Type: "bell",
+		ID: uuid.New().String(), PaneID: paneID, TabID: tabID,
+		PaneName: name, Type: "bell",
 		Title: "Attention", Severity: "warning", Timestamp: time.Now(),
 	}, paneOutputExcerpt(pane, 3)))
 }

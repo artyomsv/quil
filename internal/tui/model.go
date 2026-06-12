@@ -2692,8 +2692,9 @@ func (m Model) renderStatusBar() string {
 }
 
 // setFlash shows a transient message in the status bar for ~3 seconds.
-// Expiry needs no timer: the 1 s sizePollTick already repaints, and the
-// status bar renderer checks flashUntil on every frame.
+// Expiry needs no timer: the status bar renderer checks flashUntil on
+// every frame, and the 1 s sizePollTick guarantees a repaint, so the
+// message disappears within ~1 s of the deadline.
 func (m *Model) setFlash(text string) {
 	m.flashText = text
 	m.flashUntil = time.Now().Add(3 * time.Second)

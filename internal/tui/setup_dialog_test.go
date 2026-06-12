@@ -1147,3 +1147,78 @@ func TestLoadBrowseDirAndSelect_PositionsCursorOnChild(t *testing.T) {
 		t.Errorf("cursor = %d, want 0 for unknown selectName", m.cwdBrowseCursor)
 	}
 }
+
+func TestEnterSetupOrSplit_GitDiscover_PopulatesCandidates(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	pane := NewPaneModel("pane-1", 1024)
+	pane.CWD = root
+	tab := NewTabModel("tab-1", "t")
+	tab.Root = NewLeaf(pane)
+	tab.ActivePane = pane.ID
+
+	m := &Model{tabs: []*TabModel{tab}, activeTab: 0}
+	p := &plugin.PanePlugin{
+		Name: "lazygit",
+		Command: plugin.CommandConfig{
+			Cmd:        "lazygit",
+			PromptsCWD: true,
+			Discover:   "git",
+		},
+	}
+	m.enterSetupOrSplit(p)
+
+	if len(m.repoCandidates) != 1 || m.repoCandidates[0] != root {
+		t.Fatalf("repoCandidates = %v, want [%q]", m.repoCandidates, root)
+	}
+	if m.cwdBrowseDir != root {
+		t.Errorf("cwdBrowseDir = %q, want first candidate pre-selected %q", m.cwdBrowseDir, root)
+	}
+	if m.dialog != dialogCreatePaneSetup {
+		t.Errorf("dialog = %v, want dialogCreatePaneSetup", m.dialog)
+	}
+}
+
+func TestEnterSetupOrSplit_GitDiscover_NoRepo_FallsBackToBrowser(t *testing.T) {
+	plain, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pane := NewPaneModel("pane-1", 1024)
+	pane.CWD = plain
+	tab := NewTabModel("tab-1", "t")
+	tab.Root = NewLeaf(pane)
+	tab.ActivePane = pane.ID
+
+	m := &Model{tabs: []*TabModel{tab}, activeTab: 0}
+	p := &plugin.PanePlugin{
+		Name: "lazygit",
+		Command: plugin.CommandConfig{
+			Cmd:        "lazygit",
+			PromptsCWD: true,
+			Discover:   "git",
+		},
+	}
+	m.enterSetupOrSplit(p)
+
+	if len(m.repoCandidates) != 0 {
+		t.Fatalf("repoCandidates = %v, want empty", m.repoCandidates)
+	}
+	if m.cwdBrowseDir != plain {
+		t.Errorf("cwdBrowseDir = %q, want pane CWD %q as browser fallback", m.cwdBrowseDir, plain)
+	}
+}
+
+func TestEnterSetupOrSplit_GitDiscover_ClearsStaleCandidates(t *testing.T) {
+	m := &Model{repoCandidates: []string{"/stale"}}
+	m.enterSetupOrSplit(&plugin.PanePlugin{Name: "terminal", Command: plugin.CommandConfig{Cmd: "sh"}})
+	if m.repoCandidates != nil {
+		t.Errorf("repoCandidates = %v, want nil", m.repoCandidates)
+	}
+}

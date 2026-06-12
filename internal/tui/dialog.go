@@ -20,6 +20,7 @@ import (
 
 	"github.com/artyomsv/quil/internal/clipboard"
 	"github.com/artyomsv/quil/internal/config"
+	"github.com/artyomsv/quil/internal/gitdiscover"
 	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/logger"
 	"github.com/artyomsv/quil/internal/plugin"
@@ -1886,6 +1887,7 @@ func (m *Model) enterSetupOrSplit(p *plugin.PanePlugin) tea.Cmd {
 	m.cwdBrowseEntries = nil
 	m.cwdBrowseCursor = 0
 	m.cwdBrowseScroll = 0
+	m.repoCandidates = nil
 
 	needsSetup := p != nil && (p.Command.PromptsCWD || len(p.Command.Toggles) > 0)
 	if !needsSetup {
@@ -1893,30 +1895,26 @@ func (m *Model) enterSetupOrSplit(p *plugin.PanePlugin) tea.Cmd {
 		return nil
 	}
 
-	// Initialize the directory browser. Try each candidate in priority order;
-	// stop at the first one that loads successfully.
 	if p.Command.PromptsCWD {
-		candidates := []string{m.lastSelectedCWD}
-		if tab := m.activeTabModel(); tab != nil {
-			if pane := tab.ActivePaneModel(); pane != nil {
-				candidates = append(candidates, pane.CWD)
-			}
-		}
-		if home, err := os.UserHomeDir(); err == nil {
-			candidates = append(candidates, home)
-		}
-		for _, dir := range candidates {
-			if dir == "" {
-				continue
-			}
-			if err := m.loadBrowseDir(dir); err != nil {
-				log.Printf("setup dialog: load browse dir %q failed, trying next: %v", dir, err)
-				if dir == m.lastSelectedCWD {
-					m.lastSelectedCWD = "" // clear stale memory
+		if p.Command.Discover == "git" {
+			// Discovery base is the active pane's OSC7 CWD directly — not
+			// lastSelectedCWD (that memory belongs to the generic browser; a
+			// stale last-choice from another project would seed wrong
+			// candidates).
+			var base string
+			if tab := m.activeTabModel(); tab != nil {
+				if pane := tab.ActivePaneModel(); pane != nil {
+					base = pane.CWD
 				}
-				continue
 			}
-			break
+			m.repoCandidates = gitdiscover.Candidates(base)
+		}
+		if len(m.repoCandidates) > 0 {
+			// Pre-select the first candidate so Enter-through submits it.
+			m.cwdBrowseDir = m.repoCandidates[0]
+			m.cwdBrowseCursor = 0
+		} else {
+			m.initSetupBrowser()
 		}
 	}
 
@@ -1935,6 +1933,34 @@ func (m *Model) enterSetupOrSplit(p *plugin.PanePlugin) tea.Cmd {
 	m.dialogEdit = false // browser doesn't use edit mode
 	m.dialog = dialogCreatePaneSetup
 	return tea.ClearScreen
+}
+
+// initSetupBrowser seeds the directory browser using the standard pre-fill
+// chain: last selected CWD -> active pane OSC7 CWD -> home. Stale entries
+// are skipped (and lastSelectedCWD cleared) exactly as before.
+func (m *Model) initSetupBrowser() {
+	candidates := []string{m.lastSelectedCWD}
+	if tab := m.activeTabModel(); tab != nil {
+		if pane := tab.ActivePaneModel(); pane != nil {
+			candidates = append(candidates, pane.CWD)
+		}
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		candidates = append(candidates, home)
+	}
+	for _, dir := range candidates {
+		if dir == "" {
+			continue
+		}
+		if err := m.loadBrowseDir(dir); err != nil {
+			log.Printf("setup dialog: load browse dir %q failed, trying next: %v", dir, err)
+			if dir == m.lastSelectedCWD {
+				m.lastSelectedCWD = "" // clear stale memory
+			}
+			continue
+		}
+		break
+	}
 }
 
 // loadBrowseDir reads `path` and populates the directory browser state. Only

@@ -45,6 +45,12 @@ type CommandConfig struct {
 	// be forwarded directly to the PTY. This lets TUI apps like Claude Code
 	// receive shift+tab (mode toggle) which Quil otherwise binds to PrevPane.
 	RawKeys []string
+	// Discover selects a repo-discovery mode for the pane setup dialog.
+	// "" = none (plain directory browser). "git" = the CWD step lists git
+	// repo candidates (enclosing repo + 1-level sub-repos of the active
+	// pane's CWD) with a "Browse…" escape hatch. Only meaningful when
+	// PromptsCWD is true.
+	Discover string
 }
 
 // FormField defines a user-fillable field for creating plugin instances.

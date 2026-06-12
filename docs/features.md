@@ -24,6 +24,7 @@ A capability-by-capability tour of what Quil does. For configuration knobs, see 
   - [Built-in plugins](#built-in-plugins)
   - [Pane setup dialog](#pane-setup-dialog)
   - [Custom plugins via TOML](#custom-plugins-via-toml)
+  - [Lazygit integration](#lazygit-integration)
 - [Observability](#observability)
   - [Notification center](#notification-center)
   - [Memory reporting](#memory-reporting)
@@ -162,6 +163,18 @@ The shipped `claude-code` plugin uses both: it asks for the working directory (p
 Create your own pane types as TOML files in `~/.quil/plugins/` without recompiling. Hot reload happens on save. Plugins define commands, error handlers, idle handlers, persistence strategies, runtime toggles, and pre-configured instances.
 
 See the full [plugin reference](plugin-reference.md) for every field.
+
+### Lazygit integration
+
+- **Lazygit plugin** (Ctrl+N → Tools → Lazygit): opens lazygit as a regular
+  pane. The directory step lists git repos found near the active pane's
+  directory (the enclosing repo plus one-level subfolders, up to 10) with a
+  Browse… escape hatch. Only offered when the `lazygit` binary is installed.
+- **Overlay (Alt+G)**: toggles a full-tab lazygit view for the repo resolved
+  from the active pane's current directory. Hidden overlays keep running —
+  re-show is instant with lazygit's UI state intact. One overlay per tab.
+  Overlays are ephemeral: they don't survive a daemon restart (one keypress
+  recreates them). Quit lazygit (q) to destroy the overlay pane.
 
 ---
 

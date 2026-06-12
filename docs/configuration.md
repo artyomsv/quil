@@ -85,6 +85,7 @@ mute_pane = "alt+m"             # toggle notification mute for the active pane
 toggle_eager = "alt+shift+e"    # toggle eager restore; eager panes respawn on restart, others load lazily
 go_back = "alt+backspace"       # pane history back (after jumping via sidebar Enter)
 notes_toggle = "alt+e"          # toggle pane notes editor
+toggle_lazygit = "alt+g"        # toggle lazygit overlay for the repo at the active pane's CWD
 redraw = "alt+shift+l"          # force full screen repaint (clears rendering artifacts)
 ```
 
@@ -184,6 +185,7 @@ Multiple modifiers stack with `+` (no spaces). Mouse buttons are not bindable he
 | `toggle_eager` | `alt+shift+e` | Toggle eager restore on the active pane. Eager panes respawn immediately on daemon restart; other panes load lazily (process started only when the tab is first opened). Tabs with an eager pane show `●` in the tab bar. Persisted in `workspace.json`. |
 | `go_back` | `alt+backspace` | Pane history back — return to the pane you were on before the sidebar's `Enter` jump |
 | `notes_toggle` | `alt+e` | Open / close the per-pane notes editor |
+| `toggle_lazygit` | `alt+g` | Toggle lazygit overlay for the git repo resolved from the active pane's current directory. Only shown when the `lazygit` binary is installed. |
 | `redraw` | `alt+shift+l` | Force a full screen repaint — clears rendering artifacts (scrambled or misplaced characters) without restarting the TUI |
 
 ## Per-plugin instances

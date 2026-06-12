@@ -1321,6 +1321,11 @@ func (m Model) notesEditorPosAt(screenX, screenY int) (row, col int, ok bool) {
 // they cycle keyboard focus between the editor and the bound pane, handled
 // as a hard-coded case in the caller (not driven by kb.NextPane, which is
 // now unbound by default since spatial navigation moved to Alt+Arrow).
+//
+// Note: ToggleLazygit (Alt+G) is deliberately NOT in this list — notes mode
+// binds the editor to a pane, and popping a full-screen overlay over it
+// mid-edit conflicts with the notes layout. Alt+G in notes mode falls through
+// to the editor harmlessly as plain text input.
 func (m Model) notesKeyExempt(key string) bool {
 	if key == "" {
 		return false

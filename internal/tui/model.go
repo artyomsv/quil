@@ -179,6 +179,7 @@ const (
 	dialogDisclaimer
 	dialogPluginMigration
 	dialogMemory
+	dialogGitRepoPick // Alt+G repo picker (Task 12 fills handler/render)
 )
 
 // tuiClient is the subset of *ipc.Client the TUI uses on the Model. Defined
@@ -234,7 +235,8 @@ type Model struct {
 	// for CreatePanePayload.CWD. The two fields exist separately so that the
 	// browser can navigate freely without dirtying the "to be sent" value
 	// until the user actually presses Continue.
-	repoCandidates    []string            // git repos offered by the setup dialog (discover="git"); nil = plain browser
+	repoCandidates     []string            // git repos offered by the setup dialog (discover="git"); nil = plain browser
+	repoPickCandidates []string            // candidates for dialogGitRepoPick (Alt+G, multiple repos)
 	lastSelectedCWD   string              // remembers previous CWD selection across pane creations
 	selectedCWD       string              // CWD chosen in dialogCreatePaneSetup (empty = daemon default)
 	cwdInputError     string              // validation error shown under CWD input (empty = ok)
@@ -480,13 +482,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = m.pendingWidth
 		m.height = m.pendingHeight
 		m.resizeTabs()
-		return m, m.resizeAllPanes()
+		// Also resize an active overlay pane so the daemon's PTY tracks the new size.
+		var overlayCmds []tea.Cmd
+		overlayCmds = append(overlayCmds, m.resizeAllPanes())
+		if tab := m.activeTabModel(); tab != nil && tab.overlayVisible && tab.overlayPane != nil {
+			overlayCmds = append(overlayCmds, m.overlayResizeCmd(tab))
+		}
+		return m, tea.Batch(overlayCmds...)
 
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
 
 	case tea.MouseClickMsg:
 		if msg.Mod.Contains(tea.ModCtrl) {
+			return m, nil
+		}
+		// Overlay visible: swallow all mouse clicks (keyboard-only v1).
+		// clearDragState ensures no drag flag stays set from before the overlay opened.
+		if tab := m.activeTabModel(); tab != nil && tab.overlayVisible {
+			m.clearDragState()
 			return m, nil
 		}
 		// Right-click: copy the active selection to the clipboard. While
@@ -577,6 +591,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.MouseMotionMsg:
+		// Overlay visible: swallow all motion (keyboard-only v1).
+		if tab := m.activeTabModel(); tab != nil && tab.overlayVisible {
+			return m, nil
+		}
 		// Drag dispatch — at most one branch is active (clearDragState
 		// invariant). Off-Y=0 motion during a tab drag pauses reorder but
 		// keeps the drag alive so the user can return to the tab bar
@@ -620,6 +638,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.MouseReleaseMsg:
+		// Overlay visible: clear any stale drag state and swallow the release.
+		if tab := m.activeTabModel(); tab != nil && tab.overlayVisible {
+			m.clearDragState()
+			return m, nil
+		}
 		// A tab drag or scrollbar drag terminates here with no further
 		// processing — they don't share the click-vs-drag pane-focus
 		// fall-through path below.
@@ -653,6 +676,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.MouseWheelMsg:
+		// Overlay visible: swallow wheel events (keyboard-only v1).
+		if tab := m.activeTabModel(); tab != nil && tab.overlayVisible {
+			return m, nil
+		}
 		lines := m.cfg.UI.MouseScrollLines
 		if lines < 1 {
 			lines = 3
@@ -1539,6 +1566,15 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	// Overlay visible: intercept keys before global shortcuts reach pane-level
+	// handlers (ClosePane, RenamePane, notes toggle, split, etc.). The sidebar-
+	// focused branch below must NOT steal keys while lazygit is on screen.
+	// The kb.ToggleLazygit case in the main switch is still reachable when the
+	// overlay is hidden (this block only fires when overlayVisible is true).
+	if tab := m.activeTabModel(); tab != nil && tab.overlayVisible && m.dialog == dialogNone && !m.renaming && !m.renamingPane {
+		return m, m.handleOverlayKey(msg, tab)
+	}
+
 	// Notification sidebar keybindings (always available)
 	switch {
 	case kbMatches(key, kb.NotificationToggle):
@@ -1562,6 +1598,8 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, m.toggleActivePaneMute()
 	case kbMatches(key, kb.ToggleEager):
 		return m, m.toggleActivePaneEager()
+	case kbMatches(key, kb.ToggleLazygit):
+		return m, m.handleToggleLazygit()
 	}
 
 	// Sidebar focused: route keys to notification center

@@ -2228,6 +2228,9 @@ func (m Model) handleCreatePaneSetupKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd
 // The browser shows a scrollable directory listing; arrows navigate, Enter
 // descends/ascends, and Ctrl+V pastes a path to jump there.
 func (m Model) handleSetupCWDKey(p *plugin.PanePlugin, key string) (tea.Model, tea.Cmd) {
+	if len(m.repoCandidates) > 0 {
+		return m.handleSetupRepoKey(p, key)
+	}
 	if len(m.cwdBrowseEntries) == 0 {
 		// Browser failed to load — Enter still submits using empty selectedCWD.
 		if key == "enter" {
@@ -2351,6 +2354,56 @@ func (m Model) handleSetupCWDKey(p *plugin.PanePlugin, key string) (tea.Model, t
 			m.cwdInputError = ""
 		}
 		return m, nil
+	}
+	return m, nil
+}
+
+// handleSetupRepoKey processes keystrokes when the CWD field is in repo-pick
+// mode (discover="git" found candidates). Rows are the candidates plus one
+// trailing "Browse…" escape hatch. cwdBrowseCursor is the row cursor and
+// cwdBrowseDir mirrors the highlighted candidate so submitSetupDialog's
+// selectedCWD = cwdBrowseDir capture works unchanged.
+func (m Model) handleSetupRepoKey(p *plugin.PanePlugin, key string) (tea.Model, tea.Cmd) {
+	rows := len(m.repoCandidates) + 1 // +1 for Browse…
+
+	// syncSelection keeps cwdBrowseDir aligned with the highlighted candidate
+	// row. Not called when the cursor is on the "Browse…" row.
+	syncSelection := func() {
+		if m.cwdBrowseCursor < len(m.repoCandidates) {
+			m.cwdBrowseDir = m.repoCandidates[m.cwdBrowseCursor]
+		}
+	}
+
+	switch key {
+	case "up", "k":
+		if m.cwdBrowseCursor > 0 {
+			m.cwdBrowseCursor--
+			syncSelection()
+		}
+		return m, nil
+
+	case "down", "j":
+		if m.cwdBrowseCursor < rows-1 {
+			m.cwdBrowseCursor++
+			syncSelection()
+		}
+		return m, nil
+
+	case "enter":
+		if m.cwdBrowseCursor == len(m.repoCandidates) {
+			// Browse… — drop candidate mode, fall back to the directory
+			// browser with its normal pre-fill chain.
+			m.repoCandidates = nil
+			m.cwdBrowseDir = ""
+			m.cwdBrowseCursor = 0
+			m.initSetupBrowser()
+			return m, nil
+		}
+		// Selecting a candidate submits the dialog (the repo IS the answer
+		// to the CWD question; toggles keep their defaults unless the user
+		// tabbed to them first).
+		m.cwdBrowseDir = m.repoCandidates[m.cwdBrowseCursor]
+		return m.submitSetupDialog(p)
 	}
 	return m, nil
 }
@@ -2508,43 +2561,62 @@ func (m Model) renderCreatePaneSetupDialog() string {
 			b.WriteString("    " + dialogErrorStyle.Render("✗ "+m.cwdInputError) + "\n")
 		}
 
-		// Listing window — always allocate `browserVisibleRows` lines so the
-		// dialog height stays stable across navigation.
-		entries := m.cwdBrowseEntries
-		visible := browserVisibleRows
-		start := m.cwdBrowseScroll
-		end := start + visible
-		if end > len(entries) {
-			end = len(entries)
-		}
-
-		for i := 0; i < visible; i++ {
-			idx := start + i
-			if idx >= len(entries) {
-				b.WriteString("\n")
-				continue
+		if len(m.repoCandidates) > 0 {
+			// Repo pick-list mode: show discovered git repo candidates plus a
+			// trailing "Browse…" escape hatch. Uses the same cursor-row
+			// prefix/style as the directory browser for visual consistency.
+			rows := len(m.repoCandidates) + 1 // +1 for Browse…
+			for i := 0; i < rows; i++ {
+				var displayName string
+				if i < len(m.repoCandidates) {
+					displayName = m.repoCandidates[i]
+				} else {
+					displayName = "Browse…"
+				}
+				if focused && i == m.cwdBrowseCursor {
+					b.WriteString("  > " + dialogSelected.Render(displayName) + "\n")
+				} else {
+					b.WriteString("    " + dialogNormal.Render(displayName) + "\n")
+				}
 			}
-			name := entries[idx]
-			displayName := name
-			if name != ".." && !strings.HasSuffix(name, `\`) {
-				displayName = name + "/"
-			}
-			line := "    " + displayName
-			if focused && idx == m.cwdBrowseCursor {
-				line = "  > " + dialogSelected.Render(displayName)
-			} else {
-				line = "    " + dialogNormal.Render(displayName)
-			}
-			b.WriteString(line + "\n")
-		}
-
-		// Scroll indicator — shows position inside the list.
-		if len(entries) > visible {
-			b.WriteString(dialogSubtle.Render(fmt.Sprintf("    %d/%d  ↑↓ navigate  Enter descend  ← parent  Ctrl+V paste path", m.cwdBrowseCursor+1, len(entries))) + "\n")
-		} else if len(entries) > 0 {
-			b.WriteString(dialogSubtle.Render("    ↑↓ navigate  Enter descend  ← parent  Ctrl+V paste path") + "\n")
+			b.WriteString(dialogSubtle.Render("    ↑↓ navigate  Enter select  Browse… for manual path") + "\n")
 		} else {
-			b.WriteString(dialogSubtle.Render("    (empty directory)") + "\n")
+			// Listing window — always allocate `browserVisibleRows` lines so the
+			// dialog height stays stable across navigation.
+			entries := m.cwdBrowseEntries
+			visible := browserVisibleRows
+			start := m.cwdBrowseScroll
+			end := start + visible
+			if end > len(entries) {
+				end = len(entries)
+			}
+
+			for i := 0; i < visible; i++ {
+				idx := start + i
+				if idx >= len(entries) {
+					b.WriteString("\n")
+					continue
+				}
+				name := entries[idx]
+				displayName := name
+				if name != ".." && !strings.HasSuffix(name, `\`) {
+					displayName = name + "/"
+				}
+				if focused && idx == m.cwdBrowseCursor {
+					b.WriteString("  > " + dialogSelected.Render(displayName) + "\n")
+				} else {
+					b.WriteString("    " + dialogNormal.Render(displayName) + "\n")
+				}
+			}
+
+			// Scroll indicator — shows position inside the list.
+			if len(entries) > visible {
+				b.WriteString(dialogSubtle.Render(fmt.Sprintf("    %d/%d  ↑↓ navigate  Enter descend  ← parent  Ctrl+V paste path", m.cwdBrowseCursor+1, len(entries))) + "\n")
+			} else if len(entries) > 0 {
+				b.WriteString(dialogSubtle.Render("    ↑↓ navigate  Enter descend  ← parent  Ctrl+V paste path") + "\n")
+			} else {
+				b.WriteString(dialogSubtle.Render("    (empty directory)") + "\n")
+			}
 		}
 		b.WriteString("\n")
 		fieldIdx++

@@ -1222,3 +1222,77 @@ func TestEnterSetupOrSplit_GitDiscover_ClearsStaleCandidates(t *testing.T) {
 		t.Errorf("repoCandidates = %v, want nil", m.repoCandidates)
 	}
 }
+
+// registryWithLazygit returns a plugin registry containing a minimal
+// lazygit plugin with PromptsCWD+Discover set and Available forced true.
+// Registry has NO Register method — the established pattern (see the
+// raw-keys test ~line 440) is temp TOML + LoadFromDir, then flip the
+// exported Available field via Get.
+func registryWithLazygit(t *testing.T) *plugin.Registry {
+	t.Helper()
+	dir := t.TempDir()
+	content := `[plugin]
+name = "lazygit"
+
+[command]
+cmd = "lazygit"
+prompts_cwd = true
+discover = "git"
+`
+	if err := os.WriteFile(filepath.Join(dir, "lazygit.toml"), []byte(content), 0o644); err != nil {
+		t.Fatalf("write test toml: %v", err)
+	}
+	r := plugin.NewRegistry()
+	if err := r.LoadFromDir(dir); err != nil {
+		t.Fatalf("LoadFromDir: %v", err)
+	}
+	r.Get("lazygit").Available = true
+	return r
+}
+
+// repoPickModel builds a Model sitting in the setup dialog with a candidate
+// list, mirroring what enterSetupOrSplit produces for discover="git".
+func repoPickModel(t *testing.T, candidates []string) Model {
+	t.Helper()
+	return Model{
+		dialog:         dialogCreatePaneSetup,
+		repoCandidates: candidates,
+		cwdBrowseDir:   candidates[0],
+		pluginRegistry: registryWithLazygit(t),
+		selectedPlugin: "lazygit",
+	}
+}
+
+func TestSetupRepoKey_DownMovesAndSelects(t *testing.T) {
+	m := repoPickModel(t, []string{"/repo-a", "/repo-b"})
+	out, _ := m.handleCreatePaneSetupKey(tea.KeyPressMsg{Code: tea.KeyDown})
+	got := out.(Model)
+	if got.cwdBrowseCursor != 1 {
+		t.Errorf("cursor = %d, want 1", got.cwdBrowseCursor)
+	}
+	if got.cwdBrowseDir != "/repo-b" {
+		t.Errorf("cwdBrowseDir = %q, want /repo-b", got.cwdBrowseDir)
+	}
+}
+
+func TestSetupRepoKey_BrowseRowFallsBackToBrowser(t *testing.T) {
+	m := repoPickModel(t, []string{"/repo-a"})
+	m.cwdBrowseCursor = 1 // the "Browse…" row (index == len(candidates))
+	out, _ := m.handleCreatePaneSetupKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	got := out.(Model)
+	if got.repoCandidates != nil {
+		t.Errorf("repoCandidates = %v, want nil after Browse…", got.repoCandidates)
+	}
+}
+
+func TestSetupRepoKey_EnterOnCandidateSubmits(t *testing.T) {
+	m := repoPickModel(t, []string{"/repo-a", "/repo-b"})
+	out, _ := m.handleCreatePaneSetupKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	got := out.(Model)
+	if got.selectedCWD != "/repo-a" {
+		t.Errorf("selectedCWD = %q, want /repo-a (submitted candidate)", got.selectedCWD)
+	}
+	if got.dialog != dialogCreatePane || got.createPaneStep != 3 {
+		t.Errorf("dialog/step = %v/%d, want dialogCreatePane/3 (split selection)", got.dialog, got.createPaneStep)
+	}
+}

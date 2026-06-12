@@ -6,6 +6,7 @@ import (
 )
 
 func TestSetFlash_SetsTextAndExpiry(t *testing.T) {
+	t.Parallel()
 	m := &Model{}
 	m.setFlash("no git repo here")
 	if m.flashText != "no git repo here" {

@@ -5,6 +5,7 @@ import (
 )
 
 func TestApplyWorkspaceState_OverlayPane_NotInLayoutTree(t *testing.T) {
+	t.Parallel()
 	m := &Model{}
 	state := WorkspaceStateMsg{
 		ActiveTab: "tab-1",
@@ -35,6 +36,7 @@ func TestApplyWorkspaceState_OverlayPane_NotInLayoutTree(t *testing.T) {
 }
 
 func TestApplyWorkspaceState_OverlayGone_ClearsSlot(t *testing.T) {
+	t.Parallel()
 	m := &Model{}
 	withOverlay := WorkspaceStateMsg{
 		ActiveTab: "tab-1",
@@ -71,6 +73,7 @@ func TestApplyWorkspaceState_OverlayGone_ClearsSlot(t *testing.T) {
 // goroutine that was never adopted and never disposed (leak). The overlay must
 // still be adopted into the slot via reconcileOverlayPane.
 func TestApplyWorkspaceState_RestoredLayout_OverlayAdoptedNotInTree(t *testing.T) {
+	t.Parallel()
 	m := &Model{}
 	state := WorkspaceStateMsg{
 		ActiveTab: "tab-1",
@@ -102,6 +105,7 @@ func TestApplyWorkspaceState_RestoredLayout_OverlayAdoptedNotInTree(t *testing.T
 }
 
 func TestApplyWorkspaceState_PendingOverlayShow_ShowsOnArrival(t *testing.T) {
+	t.Parallel()
 	m := &Model{pendingOverlayShow: map[string]bool{"tab-1": true}}
 	state := WorkspaceStateMsg{
 		ActiveTab: "tab-1",

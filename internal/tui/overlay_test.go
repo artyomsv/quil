@@ -108,6 +108,7 @@ func sentTypesFiltered(fake *fakeSender, include ...string) []string {
 // TestHandleToggleLazygit_VisibleOverlay_Hides: when the overlay is already
 // visible, Alt+G hides it without sending any IPC.
 func TestHandleToggleLazygit_VisibleOverlay_Hides(t *testing.T) {
+	t.Parallel()
 	m, fake, tab := overlayTestModel(t, "")
 	// Pre-condition: overlay exists and is visible.
 	overlay := NewPaneModel("pane-o", 1024)
@@ -128,6 +129,7 @@ func TestHandleToggleLazygit_VisibleOverlay_Hides(t *testing.T) {
 // TestHandleToggleLazygit_NoRepo_NoOverlay_Flashes: when the pane CWD has no
 // git repo and no overlay exists, a flash message is set.
 func TestHandleToggleLazygit_NoRepo_NoOverlay_Flashes(t *testing.T) {
+	t.Parallel()
 	plain, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -148,6 +150,7 @@ func TestHandleToggleLazygit_NoRepo_NoOverlay_Flashes(t *testing.T) {
 // TestHandleToggleLazygit_NoRepo_ExistingOverlay_Shows: when there is no
 // candidate repo but an overlay pane already exists, show it.
 func TestHandleToggleLazygit_NoRepo_ExistingOverlay_Shows(t *testing.T) {
+	t.Parallel()
 	plain, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -169,6 +172,7 @@ func TestHandleToggleLazygit_NoRepo_ExistingOverlay_Shows(t *testing.T) {
 // CWD is inside a git repo and an overlay for that repo already exists, show
 // it without sending MsgCreatePane or MsgDestroyPane.
 func TestHandleToggleLazygit_MatchingRepo_ShowsNoCreate(t *testing.T) {
+	t.Parallel()
 	repo := gitRepoDir(t)
 	m, fake, tab := overlayTestModel(t, repo)
 
@@ -194,6 +198,7 @@ func TestHandleToggleLazygit_MatchingRepo_ShowsNoCreate(t *testing.T) {
 // TestHandleToggleLazygit_SingleRepo_NoOverlay_Creates: when a single repo
 // is found and no overlay exists, MsgCreatePane is sent with Overlay:true.
 func TestHandleToggleLazygit_SingleRepo_NoOverlay_Creates(t *testing.T) {
+	t.Parallel()
 	repo := gitRepoDir(t)
 	m, fake, tab := overlayTestModel(t, repo)
 
@@ -245,6 +250,7 @@ func TestHandleToggleLazygit_SingleRepo_NoOverlay_Creates(t *testing.T) {
 // repo is found that differs from the existing overlay's repo, MsgDestroyPane
 // is sent for the old and MsgCreatePane for the new.
 func TestHandleToggleLazygit_DifferentRepo_DestroysAndCreates(t *testing.T) {
+	t.Parallel()
 	repo := gitRepoDir(t)
 	m, fake, tab := overlayTestModel(t, repo)
 
@@ -274,6 +280,7 @@ func TestHandleToggleLazygit_DifferentRepo_DestroysAndCreates(t *testing.T) {
 // TestHandleToggleLazygit_LazygitUnavailable_Flashes: when the lazygit
 // plugin reports Available=false, flash "lazygit not installed", no IPC.
 func TestHandleToggleLazygit_LazygitUnavailable_Flashes(t *testing.T) {
+	t.Parallel()
 	repo := gitRepoDir(t)
 	m, fake, _ := overlayTestModel(t, repo)
 	// Force the plugin unavailable.
@@ -293,6 +300,7 @@ func TestHandleToggleLazygit_LazygitUnavailable_Flashes(t *testing.T) {
 // TestHandleToggleLazygit_TwoCandidates_OpensPicker: when two repos are found
 // and no overlay exists, the picker dialog opens with both candidates.
 func TestHandleToggleLazygit_TwoCandidates_OpensPicker(t *testing.T) {
+	t.Parallel()
 	// Build a base directory with two sub-repos.
 	base, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
@@ -329,6 +337,7 @@ func TestHandleToggleLazygit_TwoCandidates_OpensPicker(t *testing.T) {
 // TestHandleOverlayKey_ToggleKey_Hides: the toggle key while overlay is
 // visible hides it.
 func TestHandleOverlayKey_ToggleKey_Hides(t *testing.T) {
+	t.Parallel()
 	m, _, tab := overlayTestModel(t, "")
 	overlay := NewPaneModel("pane-o", 1024)
 	tab.overlayPane = overlay
@@ -348,6 +357,7 @@ func TestHandleOverlayKey_ToggleKey_Hides(t *testing.T) {
 // TestHandleOverlayKey_AltNum_SwitchesTab: alt+3 in overlay mode returns a
 // switchTab-style cmd (non-nil) and changes activeTab.
 func TestHandleOverlayKey_AltNum_SwitchesTab(t *testing.T) {
+	t.Parallel()
 	m, fake, tab := overlayTestModel(t, "")
 	// Add a second and third tab so alt+2 and alt+3 are valid.
 	m.tabs = append(m.tabs, NewTabModel("tab-2", "b"), NewTabModel("tab-3", "c"))
@@ -376,6 +386,7 @@ func TestHandleOverlayKey_AltNum_SwitchesTab(t *testing.T) {
 // while the overlay is visible must be forwarded to the overlay pane as
 // MsgPaneInput.
 func TestHandleOverlayKey_PlainRune_ForwardsToOverlay(t *testing.T) {
+	t.Parallel()
 	m, fake, tab := overlayTestModel(t, "")
 	overlay := NewPaneModel("pane-o", 1024)
 	overlay.ID = "pane-overlay"
@@ -410,6 +421,7 @@ func TestHandleOverlayKey_PlainRune_ForwardsToOverlay(t *testing.T) {
 // not installed and multiple candidate repos exist, Alt+G must flash
 // "lazygit not installed" and must NOT open the picker or send any IPC.
 func TestToggleLazygit_MultipleRepos_Unavailable_FlashesNoPicker(t *testing.T) {
+	t.Parallel()
 	// Build a base directory with two git sub-repos.
 	base, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
@@ -441,6 +453,7 @@ func TestToggleLazygit_MultipleRepos_Unavailable_FlashesNoPicker(t *testing.T) {
 // TestToggleLazygit_ManyRepos_PickerCapped: when more than maxRepoCandidates
 // repos are found, the picker must receive at most maxRepoCandidates entries.
 func TestToggleLazygit_ManyRepos_PickerCapped(t *testing.T) {
+	t.Parallel()
 	// Build a base directory with 12 git sub-repos (> maxRepoCandidates=10).
 	base, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
@@ -483,6 +496,7 @@ func debugSentTypes(fake *fakeSender) []string {
 // cursor on the second candidate closes the picker dialog and sends
 // MsgCreatePane with Overlay=true for that repo.
 func TestGitRepoPick_EnterCreatesOverlayForChosenRepo(t *testing.T) {
+	t.Parallel()
 	repoA := gitRepoDir(t)
 	repoB := gitRepoDir(t)
 	m, fake, tab := overlayTestModel(t, "")
@@ -542,6 +556,7 @@ func TestGitRepoPick_EnterCreatesOverlayForChosenRepo(t *testing.T) {
 // TestGitRepoPick_EscCloses: Esc clears the dialog and candidates without
 // sending any IPC.
 func TestGitRepoPick_EscCloses(t *testing.T) {
+	t.Parallel()
 	m, fake, _ := overlayTestModel(t, "")
 	m.dialog = dialogGitRepoPick
 	m.repoPickCandidates = []string{"/a", "/b"}
@@ -563,6 +578,7 @@ func TestGitRepoPick_EscCloses(t *testing.T) {
 // TestGitRepoPick_UpDownClamp: Up from cursor 0 stays at 0; Down from last
 // index stays at last.
 func TestGitRepoPick_UpDownClamp(t *testing.T) {
+	t.Parallel()
 	m, _, _ := overlayTestModel(t, "")
 	m.dialog = dialogGitRepoPick
 	m.repoPickCandidates = []string{"/a", "/b", "/c"}
@@ -591,5 +607,107 @@ func TestGitRepoPick_UpDownClamp(t *testing.T) {
 	got = out.(Model)
 	if got.dialogCursor != 2 {
 		t.Errorf("down from last: cursor = %d, want 2 (clamped)", got.dialogCursor)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Task C — handleOverlayKey Quit + Redraw branches
+// ---------------------------------------------------------------------------
+
+// TestHandleOverlayKey_Quit_ReturnsQuit: the configured Quit key (ctrl+q)
+// while the overlay is visible must return tea.Quit so the program exits.
+func TestHandleOverlayKey_Quit_ReturnsQuit(t *testing.T) {
+	t.Parallel()
+	m, _, tab := overlayTestModel(t, "")
+	overlay := NewPaneModel("pane-o", 1024)
+	tab.overlayPane = overlay
+	tab.overlayVisible = true
+
+	// Default binding is "ctrl+q". Text must be empty so String() → "ctrl+q"
+	// via Keystroke(); no Text field for control-key messages.
+	key := tea.KeyPressMsg{Mod: tea.ModCtrl, Code: 'q'}
+	cmd := m.handleOverlayKey(key, tab)
+	if cmd == nil {
+		t.Fatal("Quit key must return a non-nil cmd")
+	}
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Errorf("Quit key cmd() returned %T, want tea.QuitMsg", cmd())
+	}
+}
+
+// TestHandleOverlayKey_Redraw_InvalidatesCaches: the Redraw key (alt+shift+l)
+// while the overlay is visible must return a non-nil cmd and must not panic.
+// The Redraw branch calls invalidateLeaves + invalidateRenderCache on each
+// tab/pane then returns tea.Batch(tea.ClearScreen, sizePollProbe). We verify
+// the cmd is non-nil and that runCmd on it doesn't panic (it sends no IPC —
+// ClearScreen + sizePollProbe are program-internal Bubble Tea messages).
+func TestHandleOverlayKey_Redraw_InvalidatesCaches(t *testing.T) {
+	t.Parallel()
+	m, fake, tab := overlayTestModel(t, "")
+
+	// Give the tab a two-pane split so the cache-invalidation loop has real
+	// panes to walk.
+	p1 := NewPaneModel("p1", 1024)
+	p2 := NewPaneModel("p2", 1024)
+	defer p1.Dispose()
+	defer p2.Dispose()
+	tab.Root = NewLeaf(p1)
+	tab.Root.SplitLeaf("p1", SplitHorizontal)
+	tab.Root.Right.Pane = p2
+	tab.ActivePane = "p1"
+	_ = tab.Leaves() // prime the cache so invalidation has something to clear
+
+	overlay := NewPaneModel("pane-o", 1024)
+	tab.overlayPane = overlay
+	tab.overlayVisible = true
+
+	// Default binding is "alt+shift+l". Text must be empty; Mod carries both
+	// Alt and Shift so String() → "alt+shift+l".
+	key := tea.KeyPressMsg{Mod: tea.ModAlt | tea.ModShift, Code: 'l'}
+	cmd := m.handleOverlayKey(key, tab)
+
+	// Primary observable: must return a non-nil cmd.
+	if cmd == nil {
+		t.Fatal("Redraw key must return a non-nil cmd (tea.Batch(ClearScreen, sizePollProbe))")
+	}
+
+	// Running the cmd must not panic and must not send any IPC to the daemon.
+	runCmd(cmd)
+	if len(fake.sent) != 0 {
+		t.Errorf("Redraw key must not send IPC; got %d messages: %v", len(fake.sent), debugSentTypes(fake))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Task D — createOverlay defense-in-depth
+// ---------------------------------------------------------------------------
+
+// TestCreateOverlay_DefenseInDepth_UnavailableFlashes: createOverlay has its
+// own availability check that guards any direct caller that bypasses
+// handleToggleLazygit's gate (e.g. handleGitRepoPickKey). Even when the
+// plugin is marked unavailable AFTER the gate, createOverlay must flash
+// "lazygit not installed" and send zero IPC messages.
+func TestCreateOverlay_DefenseInDepth_UnavailableFlashes(t *testing.T) {
+	t.Parallel()
+	repo := gitRepoDir(t)
+	m, fake, tab := overlayTestModel(t, repo)
+
+	// Force lazygit unavailable AFTER model construction (simulates a race
+	// or a direct caller bypassing handleToggleLazygit's availability gate).
+	m.pluginRegistry.Get("lazygit").Available = false
+
+	// Call createOverlay directly, bypassing handleToggleLazygit.
+	cmd := m.createOverlay(tab, repo)
+	runCmd(cmd)
+
+	if m.flashText == "" {
+		t.Error("createOverlay defense-in-depth: expected flash 'lazygit not installed' when plugin is unavailable")
+	}
+	if m.flashText != "lazygit not installed" {
+		t.Errorf("createOverlay defense-in-depth: flashText = %q, want %q", m.flashText, "lazygit not installed")
+	}
+	if len(fake.sent) != 0 {
+		t.Errorf("createOverlay defense-in-depth: expected zero IPC sends, got %d: %v",
+			len(fake.sent), debugSentTypes(fake))
 	}
 }

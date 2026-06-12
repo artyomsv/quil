@@ -84,7 +84,7 @@ func TestWorkspaceStateFromSnapshot(t *testing.T) {
 		},
 	}
 
-	state := d.workspaceStateFromSnapshot("tab-aaaaaaaa", tabs, panesByTab)
+	state := d.workspaceStateFromSnapshot("tab-aaaaaaaa", tabs, panesByTab, false)
 
 	if got := state["active_tab"]; got != "tab-aaaaaaaa" {
 		t.Errorf("active_tab = %v, want tab-aaaaaaaa", got)
@@ -306,6 +306,74 @@ func TestDaemon_RefreshPluginStateFromHooks_EmptyHookIDPreservesExisting(t *test
 				t.Errorf("empty/error hook read should leave existing session_id intact; got %q", got)
 			}
 		})
+	}
+}
+
+// TestWorkspaceState_OverlayPane_BroadcastVsDisk verifies that overlay panes
+// are present (and flagged overlay=true) in live broadcasts but absent from
+// disk snapshots — both in the pane list and in the tab's pane-ID list.
+func TestWorkspaceState_OverlayPane_BroadcastVsDisk(t *testing.T) {
+	d := New(config.Default())
+
+	tab := &Tab{
+		ID:    "tab-aabbccdd",
+		Name:  "Work",
+		Panes: []string{"pane-11111111", "pane-22222222"},
+	}
+	normal := &Pane{
+		ID:    "pane-11111111",
+		TabID: "tab-aabbccdd",
+		CWD:   "/tmp",
+	}
+	overlay := &Pane{
+		ID:      "pane-22222222",
+		TabID:   "tab-aabbccdd",
+		CWD:     "/tmp/repo",
+		Overlay: true,
+	}
+
+	tabs := []*Tab{tab}
+	panesByTab := map[string][]*Pane{tab.ID: {normal, overlay}}
+
+	// Broadcast: overlay pane must be included and carry overlay=true.
+	live := d.workspaceStateFromSnapshot(tab.ID, tabs, panesByTab, true)
+	livePanes := live["panes"].([]map[string]any)
+	if len(livePanes) != 2 {
+		t.Fatalf("broadcast panes = %d, want 2", len(livePanes))
+	}
+	var flagged bool
+	for _, p := range livePanes {
+		if p["id"] == overlay.ID {
+			if p["overlay"] == true {
+				flagged = true
+			} else {
+				t.Errorf("broadcast overlay pane missing overlay=true; got %v", p["overlay"])
+			}
+		}
+	}
+	if !flagged {
+		t.Error("broadcast pane list did not contain the overlay pane")
+	}
+
+	// Disk: overlay pane must be absent from both the pane list and the
+	// tab's pane-ID list.
+	disk := d.workspaceStateFromSnapshot(tab.ID, tabs, panesByTab, false)
+	diskPanes := disk["panes"].([]map[string]any)
+	if len(diskPanes) != 1 {
+		t.Fatalf("disk panes = %d, want 1", len(diskPanes))
+	}
+	if diskPanes[0]["id"] != normal.ID {
+		t.Fatalf("disk panes[0].id = %v, want %s", diskPanes[0]["id"], normal.ID)
+	}
+	diskTabs := disk["tabs"].([]map[string]any)
+	if len(diskTabs) != 1 {
+		t.Fatalf("disk tabs = %d, want 1", len(diskTabs))
+	}
+	ids := diskTabs[0]["panes"].([]string)
+	for _, id := range ids {
+		if id == overlay.ID {
+			t.Error("disk tab pane-ID list must not reference the overlay pane")
+		}
 	}
 }
 

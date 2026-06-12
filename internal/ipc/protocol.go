@@ -108,6 +108,10 @@ type CreatePanePayload struct {
 	InstanceName  string   `json:"instance_name,omitempty"`
 	InstanceArgs  []string `json:"instance_args,omitempty"`
 	ReplacePaneID string   `json:"replace_pane_id,omitempty"`
+	// Overlay marks the pane as a TUI overlay (lazygit toggle view): it
+	// never enters the layout tree, is muted at creation, and is excluded
+	// from disk snapshots (ephemeral — gone on daemon restart).
+	Overlay bool `json:"overlay,omitempty"`
 }
 
 type DestroyPanePayload struct {

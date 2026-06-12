@@ -348,7 +348,7 @@ func (d *Daemon) snapshot() {
 	// — the workspace.json said N panes while the buffer flush iterated
 	// N±1, surfacing as the "snapshot pane count oscillation" bug.
 	activeTab, tabs, panesByTab := d.session.SnapshotState()
-	state := d.workspaceStateFromSnapshot(activeTab, tabs, panesByTab)
+	state := d.workspaceStateFromSnapshot(activeTab, tabs, panesByTab, false)
 
 	if err := persist.Save(config.WorkspacePath(), state); err != nil {
 		log.Printf("snapshot workspace: %v", err)
@@ -362,6 +362,12 @@ func (d *Daemon) snapshot() {
 	for _, tab := range tabs {
 		for _, pane := range panesByTab[tab.ID] {
 			activePaneIDs = append(activePaneIDs, pane.ID)
+			// Overlay panes are ephemeral: never write their ghost buffer to
+			// disk (they are excluded from workspace.json by design and must
+			// not leave orphaned buffer files behind).
+			if pane.Overlay {
+				continue
+			}
 			// Type is PluginMu-protected (spawnRestoredPane mutates it on the
 			// lazy-spawn fallback path concurrently with this snapshot).
 			pane.PluginMu.Lock()
@@ -1051,7 +1057,15 @@ func (d *Daemon) handleCreatePane(msg *ipc.Message) {
 	pane.Type = paneType
 	pane.InstanceName = payload.InstanceName
 	pane.InstanceArgs = payload.InstanceArgs
-	log.Printf("pane created: %s (type=%s, tab=%s)", pane.ID, paneType, payload.TabID)
+	if payload.Overlay {
+		pane.Overlay = true
+		// Overlay panes are muted at the source: a hidden lazygit
+		// refreshing must not ping the notification sidebar.
+		pane.PluginMu.Lock()
+		pane.Muted = true
+		pane.PluginMu.Unlock()
+	}
+	log.Printf("pane created: %s (type=%s, tab=%s, overlay=%v)", pane.ID, paneType, payload.TabID, pane.Overlay)
 
 	ptySession := apty.New()
 	if err := d.spawnPane(pane, ptySession, false); err != nil {
@@ -1471,20 +1485,35 @@ func (d *Daemon) broadcastState() {
 
 func (d *Daemon) buildWorkspaceState() map[string]any {
 	activeTab, tabs, panesByTab := d.session.SnapshotState()
-	return d.workspaceStateFromSnapshot(activeTab, tabs, panesByTab)
+	return d.workspaceStateFromSnapshot(activeTab, tabs, panesByTab, true)
 }
 
 // workspaceStateFromSnapshot is the pure half of buildWorkspaceState — it
 // turns an already-taken SnapshotState into the wire/persistence map. Callers
 // that already hold a consistent snapshot (e.g. snapshot()) reuse it instead
 // of calling SnapshotState a second time.
-func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panesByTab map[string][]*Pane) map[string]any {
+//
+// includeOverlays controls whether ephemeral overlay panes are present in the
+// output. Pass true for live broadcasts (TUI needs them for routing) and false
+// for disk snapshots (overlays are intentionally ephemeral — gone on restart).
+func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panesByTab map[string][]*Pane, includeOverlays bool) map[string]any {
 	tabList := make([]map[string]any, 0, len(tabs))
 	paneList := make([]map[string]any, 0)
 
 	for _, tab := range tabs {
-		paneIDs := make([]string, len(tab.Panes))
-		copy(paneIDs, tab.Panes)
+		overlayIDs := make(map[string]bool)
+		for _, pane := range panesByTab[tab.ID] {
+			if pane.Overlay {
+				overlayIDs[pane.ID] = true
+			}
+		}
+		paneIDs := make([]string, 0, len(tab.Panes))
+		for _, pid := range tab.Panes {
+			if !includeOverlays && overlayIDs[pid] {
+				continue
+			}
+			paneIDs = append(paneIDs, pid)
+		}
 		tabData := map[string]any{
 			"id":    tab.ID,
 			"name":  tab.Name,
@@ -1497,6 +1526,9 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 		tabList = append(tabList, tabData)
 
 		for _, pane := range panesByTab[tab.ID] {
+			if !includeOverlays && pane.Overlay {
+				continue
+			}
 			paneData := map[string]any{
 				"id":     pane.ID,
 				"tab_id": pane.TabID,
@@ -1544,6 +1576,11 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			if pane.Cols > 0 && pane.Rows > 0 {
 				paneData["cols"] = pane.Cols
 				paneData["rows"] = pane.Rows
+			}
+			// Overlay is immutable post-creation (set once in handleCreatePane,
+			// never mutated), so it is safe to read without PluginMu.
+			if pane.Overlay {
+				paneData["overlay"] = true
 			}
 			paneList = append(paneList, paneData)
 		}

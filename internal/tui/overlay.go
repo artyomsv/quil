@@ -55,7 +55,7 @@ func (m *Model) handleToggleLazygit() tea.Cmd {
 			return m.showOverlay(tab)
 		}
 		m.setFlash("no git repo here")
-		return nil
+		return m.flashCmd()
 	}
 
 	// Step 4: check whether any candidate matches the existing overlay's repo.
@@ -72,7 +72,7 @@ func (m *Model) handleToggleLazygit() tea.Cmd {
 	p := m.pluginRegistry.Get("lazygit")
 	if p == nil || !p.Available {
 		m.setFlash("lazygit not installed")
-		return nil
+		return m.flashCmd()
 	}
 
 	// Step 6: multiple candidates, none matching → picker.
@@ -110,7 +110,7 @@ func (m *Model) createOverlay(tab *TabModel, repo string) tea.Cmd {
 	p := m.pluginRegistry.Get("lazygit")
 	if p == nil || !p.Available {
 		m.setFlash("lazygit not installed")
-		return nil
+		return m.flashCmd()
 	}
 
 	var cmds []tea.Cmd

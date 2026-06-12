@@ -760,6 +760,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case paneSettleRepaintMsg:
 		return m, tea.ClearScreen
 
+	case flashExpireMsg:
+		// Clear flash only if it hasn't been refreshed by a newer setFlash call.
+		if !time.Now().Before(m.flashUntil) {
+			m.flashText = ""
+		}
+		return m, nil
+
 	case spinnerTickMsg:
 		// Advance spinner frame for the resuming/preparing pane
 		for _, tab := range m.tabs {
@@ -2854,13 +2861,23 @@ func (m Model) renderStatusBar() string {
 	return statusBarStyle.Width(m.width).Render(left + spacer + right)
 }
 
-// setFlash shows a transient message in the status bar for ~3 seconds.
-// Expiry needs no timer: the status bar renderer checks flashUntil on
-// every frame, and the 1 s sizePollTick guarantees a repaint, so the
-// message disappears within ~1 s of the deadline.
+// flashDuration is how long a flash message stays in the status bar.
+const flashDuration = 3 * time.Second
+
+// flashExpireMsg is sent by flashCmd when the flash timer fires.
+type flashExpireMsg struct{}
+
+// flashCmd returns a tea.Cmd that fires flashExpireMsg after flashDuration.
+// The Update handler re-checks flashUntil to avoid clobbering a newer flash.
+func (m Model) flashCmd() tea.Cmd {
+	return tea.Tick(flashDuration, func(time.Time) tea.Msg { return flashExpireMsg{} })
+}
+
+// setFlash shows a transient message in the status bar for flashDuration.
+// The 1 s sizePollTick is a backstop; flashCmd provides a crisp expiry timer.
 func (m *Model) setFlash(text string) {
 	m.flashText = text
-	m.flashUntil = time.Now().Add(3 * time.Second)
+	m.flashUntil = time.Now().Add(flashDuration)
 }
 
 // Daemon communication commands

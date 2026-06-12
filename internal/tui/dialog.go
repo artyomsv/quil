@@ -843,6 +843,8 @@ func (m Model) renderGitRepoPickDialog() string {
 	b.WriteString(dialogTitle.Render("Open lazygit for which repo?"))
 	b.WriteString("\n\n")
 
+	// dialogWidth - 4: 2 for cursor marker, 2 for dialog border padding.
+	const pickMaxWidth = dialogWidth - 4
 	for i, repo := range m.repoPickCandidates {
 		cursor := "  "
 		style := dialogNormal
@@ -850,13 +852,24 @@ func (m Model) renderGitRepoPickDialog() string {
 			cursor = "> "
 			style = dialogSelected
 		}
-		b.WriteString(cursor + style.Render(repo) + "\n")
+		b.WriteString(cursor + style.Render(leftTruncPath(repo, pickMaxWidth)) + "\n")
 	}
 
 	b.WriteByte('\n')
 	b.WriteString(dialogSubtle.Render("Enter open · Esc cancel"))
 
 	return b.String()
+}
+
+// leftTruncPath truncates s to at most maxWidth runes, preserving the
+// rightmost characters (the repo basename / distinguishing tail).
+// A leading "…" is prepended when truncation occurs.
+func leftTruncPath(s string, maxWidth int) string {
+	runes := []rune(s)
+	if len(runes) <= maxWidth {
+		return s
+	}
+	return "…" + string(runes[len(runes)-maxWidth+1:])
 }
 
 func boolStr(v bool) string {
@@ -2639,11 +2652,13 @@ func (m Model) renderCreatePaneSetupDialog() string {
 			// Repo pick-list mode: show discovered git repo candidates plus a
 			// trailing "Browse…" escape hatch. Uses the same cursor-row
 			// prefix/style as the directory browser for visual consistency.
+			// Setup dialog width is 70; 4-char prefix + 2-char border → 64 usable.
+			const setupPickMaxWidth = 64
 			rows := len(m.repoCandidates) + 1 // +1 for Browse…
 			for i := 0; i < rows; i++ {
 				var displayName string
 				if i < len(m.repoCandidates) {
-					displayName = m.repoCandidates[i]
+					displayName = leftTruncPath(m.repoCandidates[i], setupPickMaxWidth)
 				} else {
 					displayName = "Browse…"
 				}

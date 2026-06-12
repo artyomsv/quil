@@ -1296,3 +1296,61 @@ func TestSetupRepoKey_EnterOnCandidateSubmits(t *testing.T) {
 		t.Errorf("dialog/step = %v/%d, want dialogCreatePane/3 (split selection)", got.dialog, got.createPaneStep)
 	}
 }
+
+func TestSetupRepoKey_UpAtTopStays(t *testing.T) {
+	m := repoPickModel(t, []string{"/repo-a", "/repo-b"})
+	out, _ := m.handleCreatePaneSetupKey(tea.KeyPressMsg{Code: tea.KeyUp})
+	got := out.(Model)
+	if got.cwdBrowseCursor != 0 {
+		t.Errorf("cursor = %d, want 0 (clamped at top)", got.cwdBrowseCursor)
+	}
+	if got.cwdBrowseDir != "/repo-a" {
+		t.Errorf("cwdBrowseDir = %q, want /repo-a (unchanged)", got.cwdBrowseDir)
+	}
+}
+
+func TestSetupRepoKey_DownAtBrowseRowStays(t *testing.T) {
+	m := repoPickModel(t, []string{"/repo-a", "/repo-b"})
+	m.cwdBrowseCursor = 2 // the "Browse…" row (index == len(candidates))
+	out, _ := m.handleCreatePaneSetupKey(tea.KeyPressMsg{Code: tea.KeyDown})
+	got := out.(Model)
+	if got.cwdBrowseCursor != 2 {
+		t.Errorf("cursor = %d, want 2 (clamped at Browse… row)", got.cwdBrowseCursor)
+	}
+}
+
+// TestEnterSetupOrSplit_GitDiscover_CapsCandidates guards the maxRepoCandidates
+// bound: the pick list has no scroll machinery, so discovery must never hand
+// the dialog more rows than fit the box.
+func TestEnterSetupOrSplit_GitDiscover_CapsCandidates(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 12; i++ {
+		if err := os.MkdirAll(filepath.Join(base, fmt.Sprintf("repo-%02d", i), ".git"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	pane := NewPaneModel("pane-1", 1024)
+	pane.CWD = base
+	tab := NewTabModel("tab-1", "t")
+	tab.Root = NewLeaf(pane)
+	tab.ActivePane = pane.ID
+
+	m := &Model{tabs: []*TabModel{tab}, activeTab: 0}
+	p := &plugin.PanePlugin{
+		Name: "lazygit",
+		Command: plugin.CommandConfig{
+			Cmd:        "lazygit",
+			PromptsCWD: true,
+			Discover:   "git",
+		},
+	}
+	m.enterSetupOrSplit(p)
+
+	if len(m.repoCandidates) != maxRepoCandidates {
+		t.Fatalf("len(repoCandidates) = %d, want %d (capped)", len(m.repoCandidates), maxRepoCandidates)
+	}
+}

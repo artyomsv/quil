@@ -1908,6 +1908,9 @@ func (m *Model) enterSetupOrSplit(p *plugin.PanePlugin) tea.Cmd {
 				}
 			}
 			m.repoCandidates = gitdiscover.Candidates(base)
+			if len(m.repoCandidates) > maxRepoCandidates {
+				m.repoCandidates = m.repoCandidates[:maxRepoCandidates]
+			}
 		}
 		if len(m.repoCandidates) > 0 {
 			// Pre-select the first candidate so Enter-through submits it.
@@ -2052,6 +2055,11 @@ func (m *Model) loadDriveList() {
 
 // browserVisibleRows is the height of the directory browser viewport.
 const browserVisibleRows = 12
+
+// maxRepoCandidates bounds the setup-dialog pick list: the dialog has no
+// scroll machinery for this mode, so the list must fit the box. Overflow
+// repos remain reachable via the Browse… escape hatch.
+const maxRepoCandidates = 10
 
 // adjustBrowseScroll keeps the cursor inside the visible window.
 func (m *Model) adjustBrowseScroll() {

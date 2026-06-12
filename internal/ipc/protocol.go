@@ -111,6 +111,9 @@ type CreatePanePayload struct {
 	// Overlay marks the pane as a TUI overlay (lazygit toggle view): it
 	// never enters the layout tree, is muted at creation, and is excluded
 	// from disk snapshots (ephemeral — gone on daemon restart).
+	// Trust: any IPC client can set this field; the daemon honors it under
+	// the same socket trust model as every other field (the MCP bridge
+	// deliberately does not expose it).
 	Overlay bool `json:"overlay,omitempty"`
 }
 

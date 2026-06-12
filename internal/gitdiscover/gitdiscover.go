@@ -15,6 +15,20 @@ import (
 // guard against symlink-loop pathologies.
 const maxWalkUp = 32
 
+// canonical resolves dir to an absolute, symlink-free path. Resolution
+// failures fall back to the absolute path (consistent with the package's
+// degrade-don't-fail design).
+func canonical(dir string) (string, bool) {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return "", false
+	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = resolved
+	}
+	return abs, true
+}
+
 // hasGitEntry reports whether dir contains a .git entry. Both shapes count:
 // a directory (normal repo) and a regular file (worktree / submodule).
 func hasGitEntry(dir string) bool {
@@ -32,12 +46,9 @@ func EnclosingRepo(dir string) (string, bool) {
 	if dir == "" {
 		return "", false
 	}
-	abs, err := filepath.Abs(dir)
-	if err != nil {
+	abs, ok := canonical(dir)
+	if !ok {
 		return "", false
-	}
-	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
-		abs = resolved
 	}
 	cur := abs
 	for i := 0; i < maxWalkUp; i++ {
@@ -59,8 +70,8 @@ func SubRepos(dir string) []string {
 	if dir == "" {
 		return nil
 	}
-	abs, err := filepath.Abs(dir)
-	if err != nil {
+	abs, ok := canonical(dir)
+	if !ok {
 		return nil
 	}
 	entries, err := os.ReadDir(abs)

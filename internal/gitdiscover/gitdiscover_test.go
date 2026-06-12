@@ -145,6 +145,41 @@ func TestCandidates_EnclosingFirstThenSubsDeduped(t *testing.T) {
 	}
 }
 
+func TestSubRepos_NoSubRepos_ReturnsEmpty(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(base, "plain"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if got := SubRepos(base); len(got) != 0 {
+		t.Errorf("expected no sub-repos, got %v", got)
+	}
+}
+
+func TestCandidates_SymlinkDir_CanonicalAndDeduped(t *testing.T) {
+	t.Parallel()
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	real := filepath.Join(base, "real")
+	mkRepo(t, real)
+	sub := filepath.Join(real, "vendor-fork")
+	mkRepo(t, sub)
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlink creation not permitted: %v", err)
+	}
+
+	got := Candidates(link)
+	if len(got) != 2 {
+		t.Fatalf("got %v, want exactly 2 entries [%q %q]", got, real, sub)
+	}
+	if got[0] != real || got[1] != sub {
+		t.Errorf("got %v, want resolved paths [%q %q]", got, real, sub)
+	}
+}
+
 func TestCandidates_EmptyDir(t *testing.T) {
 	t.Parallel()
 	if got := Candidates(""); got != nil {

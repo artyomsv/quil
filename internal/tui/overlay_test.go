@@ -8,6 +8,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
 )
 
@@ -23,6 +24,7 @@ func overlayTestModel(t *testing.T, paneCWD string) (*Model, *fakeSender, *TabMo
 
 	fake := &fakeSender{}
 	m := &Model{
+		cfg:            config.Default(),
 		tabs:           []*TabModel{tab},
 		activeTab:      0,
 		client:         fake,
@@ -79,7 +81,7 @@ func decodeSentPayload(t *testing.T, fake *fakeSender, n int, dest any) {
 		t.Fatalf("expected at least %d sent messages, got %d", n+1, len(fake.sent))
 	}
 	if err := json.Unmarshal(fake.sent[n].Payload, dest); err != nil {
-		t.Fatalf("unmarshal sent[%d].Payload: %v", err, n)
+		t.Fatalf("unmarshal sent[%d].Payload: %v", n, err)
 	}
 }
 
@@ -208,11 +210,9 @@ func TestHandleToggleLazygit_SingleRepo_NoOverlay_Creates(t *testing.T) {
 		t.Fatalf("want 1 MsgCreatePane, got %v (all sent: %v)", len(creates), debugSentTypes(fake))
 	}
 	var p ipc.CreatePanePayload
-	for _, msg := range fake.sent {
+	for i, msg := range fake.sent {
 		if msg.Type == ipc.MsgCreatePane {
-			if err := json.Unmarshal(msg.Payload, &p); err != nil {
-				t.Fatalf("unmarshal CreatePanePayload: %v", err)
-			}
+			decodeSentPayload(t, fake, i, &p)
 			break
 		}
 	}
@@ -334,21 +334,14 @@ func TestHandleOverlayKey_ToggleKey_Hides(t *testing.T) {
 	tab.overlayPane = overlay
 	tab.overlayVisible = true
 
-	cfg := m.cfg
-	key := cfg.Keybindings.ToggleLazygit // "alt+g"
-	msg := tea.KeyPressMsg{Mod: tea.ModAlt, Code: 'g', Text: "g"}
-	_ = msg // just for documentation
-	// Construct a proper key press matching the binding.
-	cmd := m.handleOverlayKey(tea.KeyPressMsg{Text: ""}, tab) // use a simple re-dispatch
-	_ = cmd
+	// Default binding is "alt+g". Text must be empty so String() →
+	// "alt+g" via Keystroke() (real terminals send no Text for alt+rune).
+	key := tea.KeyPressMsg{Mod: tea.ModAlt, Code: 'g'}
+	cmd := m.handleOverlayKey(key, tab)
+	runCmd(cmd)
 
-	// Direct test: call handleToggleLazygit while overlay visible.
-	_ = key
-	tab.overlayVisible = true
-	cmd2 := m.handleToggleLazygit()
-	runCmd(cmd2)
 	if tab.overlayVisible {
-		t.Error("toggle key should hide the overlay")
+		t.Error("toggle key routed through handleOverlayKey must hide the overlay")
 	}
 }
 
@@ -395,13 +388,12 @@ func TestHandleOverlayKey_PlainRune_ForwardsToOverlay(t *testing.T) {
 
 	// Should have sent a MsgPaneInput to the overlay pane.
 	found := false
-	for _, msg := range fake.sent {
+	for i, msg := range fake.sent {
 		if msg.Type == ipc.MsgPaneInput {
 			var p ipc.PaneInputPayload
-			if err := json.Unmarshal(msg.Payload, &p); err == nil {
-				if p.PaneID == "pane-overlay" {
-					found = true
-				}
+			decodeSentPayload(t, fake, i, &p)
+			if p.PaneID == "pane-overlay" {
+				found = true
 			}
 		}
 	}

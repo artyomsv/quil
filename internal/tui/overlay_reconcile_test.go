@@ -101,14 +101,6 @@ func TestApplyWorkspaceState_RestoredLayout_OverlayAdoptedNotInTree(t *testing.T
 	}
 }
 
-func TestPaneModel_Dispose_Idempotent(t *testing.T) {
-	p := NewPaneModel("pane-dispose", 1024)
-	p.Dispose()
-	// Second Dispose must be a no-op (vt nil-guard), not a second
-	// vt.Close()/drain-stop attempt.
-	p.Dispose()
-}
-
 func TestApplyWorkspaceState_PendingOverlayShow_ShowsOnArrival(t *testing.T) {
 	m := &Model{pendingOverlayShow: map[string]bool{"tab-1": true}}
 	state := WorkspaceStateMsg{

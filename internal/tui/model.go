@@ -207,7 +207,7 @@ type Model struct {
 	pendingHeight        int
 	resizeSeq            int
 	pendingSplit         map[string]*LayoutNode // tabID → placeholder node awaiting pane from daemon
-	pendingOverlayShow  map[string]bool        // tabID → show overlay pane on its first arrival (set by Alt+G sender)
+	pendingOverlayShow   map[string]bool        // tabID → show overlay on its first arrival; set by the Alt+G overlay sender (wired in a follow-up commit); reads/deletes are nil-map-safe
 	dialog               dialogScreen           // active dialog screen
 	dialogCursor         int                    // highlighted item in dialog
 	dialogEdit           bool                   // editing a settings value
@@ -2021,7 +2021,7 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) []string {
 				tab = m.restoreTabLayout(tab, tabInfo, paneMap, existingPanes)
 				// All non-overlay panes in a restored tab are new.
 				for _, pid := range tabInfo.Panes {
-					if info, ok := paneMap[pid]; ok && info.Overlay {
+					if isOverlayPane(paneMap, pid) {
 						continue
 					}
 					newPaneIDs = append(newPaneIDs, pid)
@@ -2039,7 +2039,7 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) []string {
 		// are reconciled separately below.
 		daemonPaneSet := make(map[string]bool, len(tabInfo.Panes))
 		for _, pid := range tabInfo.Panes {
-			if info, ok := paneMap[pid]; ok && info.Overlay {
+			if isOverlayPane(paneMap, pid) {
 				continue
 			}
 			daemonPaneSet[pid] = true
@@ -2066,7 +2066,7 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) []string {
 		}
 		for _, paneID := range tabInfo.Panes {
 			// Overlay panes are reconciled separately — never insert into the tree.
-			if info, ok := paneMap[paneID]; ok && info.Overlay {
+			if isOverlayPane(paneMap, paneID) {
 				continue
 			}
 
@@ -2223,7 +2223,7 @@ func (m *Model) restoreTabLayout(tab *TabModel, tabInfo TabInfo, paneMap map[str
 	// goroutine (never adopted, never disposed).
 	paneModels := make(map[string]*PaneModel, len(tabInfo.Panes))
 	for _, paneID := range tabInfo.Panes {
-		if info, ok := paneMap[paneID]; ok && info.Overlay {
+		if isOverlayPane(paneMap, paneID) {
 			continue
 		}
 		pane, ok := existingPanes[paneID]
@@ -2257,7 +2257,7 @@ func (m *Model) restoreTabLayout(tab *TabModel, tabInfo TabInfo, paneMap map[str
 		treePaneIDs = tab.Root.PaneIDs()
 	}
 	for _, paneID := range tabInfo.Panes {
-		if info, ok := paneMap[paneID]; ok && info.Overlay {
+		if isOverlayPane(paneMap, paneID) {
 			continue
 		}
 		if treePaneIDs[paneID] {
@@ -2275,6 +2275,13 @@ func (m *Model) restoreTabLayout(tab *TabModel, tabInfo TabInfo, paneMap map[str
 
 	m.finalizeTabPanes(tab)
 	return tab
+}
+
+// isOverlayPane reports whether the daemon broadcast marks pane id as an
+// overlay (never part of the layout tree).
+func isOverlayPane(paneMap map[string]*PaneInfo, id string) bool {
+	info, ok := paneMap[id]
+	return ok && info.Overlay
 }
 
 // reconcileOverlayPane adopts the overlay pane reported by the daemon into
@@ -2296,8 +2303,8 @@ func (m *Model) reconcileOverlayPane(
 	// Find the overlay pane for this tab in the daemon broadcast, if any.
 	var overlayInfo *PaneInfo
 	for _, pid := range tabInfo.Panes {
-		if info, ok := paneMap[pid]; ok && info.Overlay {
-			overlayInfo = info
+		if isOverlayPane(paneMap, pid) {
+			overlayInfo = paneMap[pid]
 			break
 		}
 	}

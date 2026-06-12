@@ -1260,7 +1260,17 @@ func (d *Daemon) handleUpdatePane(msg *ipc.Message) {
 		pane.Name = payload.Name
 	}
 	if payload.CWD != "" {
-		pane.CWD = payload.CWD
+		// Defense-in-depth: skip UNC/device paths (\\host\share, //host/share,
+		// \\?\..., \\.\...) that an attacker could inject via a crafted OSC7
+		// sequence. The primary mitigation is in gitdiscover.canonical, which
+		// prevents these paths from being probed at all; this guard additionally
+		// prevents a UNC value from being persisted into workspace.json and later
+		// handed to os.Stat in spawnRestoredPane.
+		if !strings.HasPrefix(payload.CWD, `\\`) && !strings.HasPrefix(payload.CWD, `//`) {
+			pane.CWD = payload.CWD
+		} else {
+			log.Printf("pane %s: rejected UNC CWD %q", pane.ID, payload.CWD)
+		}
 	}
 	if payload.Muted != nil {
 		pane.PluginMu.Lock()
@@ -1411,7 +1421,9 @@ func (d *Daemon) onPaneExit(pane *Pane, code int) {
 		log.Printf("pane exit: auto-destroying overlay %s", pane.ID)
 		tabID := pane.TabID
 		d.cleanupPaneArtifacts(pane.ID)
-		d.session.DestroyPane(pane.ID) //nolint:errcheck — pane was just live; not-found is impossible here
+		if err := d.session.DestroyPane(pane.ID); err != nil {
+			log.Printf("onPaneExit: destroy overlay %s: %v", pane.ID, err)
+		}
 		// ensureTabNotEmpty is a cheap no-op when normal panes remain (the
 		// common case). It guards the degenerate case where an overlay was
 		// somehow the tab's only pane — shouldn't happen because

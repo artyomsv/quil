@@ -186,3 +186,73 @@ func TestCandidates_EmptyDir(t *testing.T) {
 		t.Errorf("expected nil for empty dir, got %v", got)
 	}
 }
+
+// TestIsUNCOrDevicePath covers the helper directly.
+func TestIsUNCOrDevicePath(t *testing.T) {
+	t.Parallel()
+	yes := []string{
+		`\\host\share`,
+		`\\host\share\repo`,
+		`\\?\C:\x`,
+		`\\.\PIPE\x`,
+		`//host/share`,
+		`//host/share/repo`,
+	}
+	no := []string{
+		`C:\Users\foo`,
+		`/home/foo`,
+		`relative/path`,
+		``,
+	}
+	for _, p := range yes {
+		if !isUNCOrDevicePath(p) {
+			t.Errorf("isUNCOrDevicePath(%q) = false, want true", p)
+		}
+	}
+	for _, p := range no {
+		if isUNCOrDevicePath(p) {
+			t.Errorf("isUNCOrDevicePath(%q) = true, want false", p)
+		}
+	}
+}
+
+// TestCanonical_RejectsUNC asserts that EnclosingRepo and Candidates both
+// return empty/false for UNC and device paths. This prevents an untrusted
+// OSC7-reported CWD from triggering an outbound SMB connection via os.Stat.
+func TestCanonical_RejectsUNC(t *testing.T) {
+	t.Parallel()
+	uncPaths := []string{
+		`\\host\share\repo`,
+		`//host/share`,
+		`\\?\C:\x`,
+		`\\.\PIPE\x`,
+	}
+	for _, p := range uncPaths {
+		p := p
+		t.Run(p, func(t *testing.T) {
+			t.Parallel()
+			if got, ok := EnclosingRepo(p); ok || got != "" {
+				t.Errorf("EnclosingRepo(%q) = (%q, %v), want (\"\", false)", p, got, ok)
+			}
+			if got := Candidates(p); got != nil {
+				t.Errorf("Candidates(%q) = %v, want nil", p, got)
+			}
+		})
+	}
+}
+
+// TestCanonical_NormalPathStillWorks is a regression guard — a normal absolute
+// path must still be resolved by canonical (the UNC check must not be a no-op
+// that also blocks valid paths).
+func TestCanonical_NormalPathStillWorks(t *testing.T) {
+	t.Parallel()
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	mkRepo(t, base)
+	got, ok := EnclosingRepo(base)
+	if !ok || got != base {
+		t.Errorf("EnclosingRepo(%q) = (%q, %v), want (%q, true)", base, got, ok, base)
+	}
+}

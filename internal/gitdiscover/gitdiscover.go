@@ -8,6 +8,7 @@ package gitdiscover
 import (
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // maxWalkUp bounds EnclosingRepo's upward walk. The walk already terminates
@@ -15,10 +16,30 @@ import (
 // guard against symlink-loop pathologies.
 const maxWalkUp = 32
 
-// canonical resolves dir to an absolute, symlink-free path. Resolution
-// failures fall back to the absolute path (consistent with the package's
-// degrade-don't-fail design).
+// isUNCOrDevicePath reports whether p is a Windows UNC share (\\host\share),
+// extended/device path (\\?\, \\.\), or has a UNC volume name. Probing such a
+// path with os.Stat/os.ReadDir can trigger an outbound SMB connection — an
+// untrusted OSC7-reported CWD must never steer git discovery there. The check
+// is on backslash/UNC syntax, which is meaningless on Unix paths, so it is a
+// no-op off Windows.
+func isUNCOrDevicePath(p string) bool {
+	if strings.HasPrefix(p, `\\`) || strings.HasPrefix(p, `//`) {
+		return true
+	}
+	// filepath.VolumeName returns `\\host\share` (or `//host/share`) for UNC.
+	if vol := filepath.VolumeName(p); len(vol) > 2 && (vol[0] == '\\' || vol[0] == '/') {
+		return true
+	}
+	return false
+}
+
+// canonical resolves dir to an absolute, symlink-free path. Returns ("", false)
+// for UNC/device paths (see isUNCOrDevicePath). Resolution failures fall back
+// to the absolute path (consistent with the package's degrade-don't-fail design).
 func canonical(dir string) (string, bool) {
+	if isUNCOrDevicePath(dir) {
+		return "", false
+	}
 	abs, err := filepath.Abs(dir)
 	if err != nil {
 		return "", false

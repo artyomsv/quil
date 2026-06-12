@@ -410,3 +410,122 @@ func debugSentTypes(fake *fakeSender) []string {
 	}
 	return out
 }
+
+// ---------------------------------------------------------------------------
+// handleGitRepoPickKey tests
+// ---------------------------------------------------------------------------
+
+// TestGitRepoPick_EnterCreatesOverlayForChosenRepo: pressing Enter with the
+// cursor on the second candidate closes the picker dialog and sends
+// MsgCreatePane with Overlay=true for that repo.
+func TestGitRepoPick_EnterCreatesOverlayForChosenRepo(t *testing.T) {
+	repoA := gitRepoDir(t)
+	repoB := gitRepoDir(t)
+	m, fake, tab := overlayTestModel(t, "")
+	m.dialog = dialogGitRepoPick
+	m.repoPickCandidates = []string{repoA, repoB}
+	m.dialogCursor = 1 // repoB
+
+	out, cmd := m.handleGitRepoPickKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	got := out.(Model)
+	runCmd(cmd)
+
+	if got.dialog != dialogNone {
+		t.Errorf("dialog = %v, want dialogNone", got.dialog)
+	}
+	if got.repoPickCandidates != nil {
+		t.Errorf("repoPickCandidates must be cleared, got %v", got.repoPickCandidates)
+	}
+	// pendingOverlayShow must be set for the tab.
+	if !got.pendingOverlayShow[tab.ID] {
+		t.Errorf("pendingOverlayShow[%s] must be true after picker selects a repo", tab.ID)
+	}
+	// MsgCreatePane must have been sent with repoB as CWD.
+	var p ipc.CreatePanePayload
+	found := false
+	for i, msg := range fake.sent {
+		if msg.Type == ipc.MsgCreatePane {
+			decodeSentPayload(t, fake, i, &p)
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("no MsgCreatePane sent; all sent: %v", debugSentTypes(fake))
+	}
+	if p.CWD != repoB {
+		t.Errorf("CreatePane CWD = %q, want %q (repoB)", p.CWD, repoB)
+	}
+	if p.Type != "lazygit" {
+		t.Errorf("CreatePane Type = %q, want lazygit", p.Type)
+	}
+	if !p.Overlay {
+		t.Error("CreatePane Overlay must be true")
+	}
+	// InstanceArgs must contain ["--path", repoB].
+	argsOK := false
+	for i := 0; i+1 < len(p.InstanceArgs); i++ {
+		if p.InstanceArgs[i] == "--path" && p.InstanceArgs[i+1] == repoB {
+			argsOK = true
+			break
+		}
+	}
+	if !argsOK {
+		t.Errorf("InstanceArgs %v must contain [--path, %s]", p.InstanceArgs, repoB)
+	}
+}
+
+// TestGitRepoPick_EscCloses: Esc clears the dialog and candidates without
+// sending any IPC.
+func TestGitRepoPick_EscCloses(t *testing.T) {
+	m, fake, _ := overlayTestModel(t, "")
+	m.dialog = dialogGitRepoPick
+	m.repoPickCandidates = []string{"/a", "/b"}
+
+	out, _ := m.handleGitRepoPickKey(tea.KeyPressMsg{Code: tea.KeyEscape})
+	got := out.(Model)
+
+	if got.dialog != dialogNone {
+		t.Errorf("dialog = %v, want dialogNone", got.dialog)
+	}
+	if got.repoPickCandidates != nil {
+		t.Errorf("repoPickCandidates = %v, want nil (cleared)", got.repoPickCandidates)
+	}
+	if len(fake.sent) != 0 {
+		t.Errorf("Esc must not send any IPC; got %v", debugSentTypes(fake))
+	}
+}
+
+// TestGitRepoPick_UpDownClamp: Up from cursor 0 stays at 0; Down from last
+// index stays at last.
+func TestGitRepoPick_UpDownClamp(t *testing.T) {
+	m, _, _ := overlayTestModel(t, "")
+	m.dialog = dialogGitRepoPick
+	m.repoPickCandidates = []string{"/a", "/b", "/c"}
+	m.dialogCursor = 0
+
+	// Up from top stays at 0.
+	out, _ := m.handleGitRepoPickKey(tea.KeyPressMsg{Text: "k"})
+	got := out.(Model)
+	if got.dialogCursor != 0 {
+		t.Errorf("up from 0: cursor = %d, want 0", got.dialogCursor)
+	}
+
+	// Down twice from 0 reaches index 2 (last).
+	out, _ = m.handleGitRepoPickKey(tea.KeyPressMsg{Code: tea.KeyDown})
+	got = out.(Model)
+	if got.dialogCursor != 1 {
+		t.Errorf("down from 0: cursor = %d, want 1", got.dialogCursor)
+	}
+	out, _ = got.handleGitRepoPickKey(tea.KeyPressMsg{Code: tea.KeyDown})
+	got = out.(Model)
+	if got.dialogCursor != 2 {
+		t.Errorf("down from 1: cursor = %d, want 2", got.dialogCursor)
+	}
+	// Down from last clamps.
+	out, _ = got.handleGitRepoPickKey(tea.KeyPressMsg{Code: tea.KeyDown})
+	got = out.(Model)
+	if got.dialogCursor != 2 {
+		t.Errorf("down from last: cursor = %d, want 2 (clamped)", got.dialogCursor)
+	}
+}

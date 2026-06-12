@@ -343,6 +343,8 @@ func (m Model) handleDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.handleMigrationKey(msg)
 	case dialogMemory:
 		return m.handleMemoryDialogKey(msg)
+	case dialogGitRepoPick:
+		return m.handleGitRepoPickKey(msg)
 	}
 	return m, nil
 }
@@ -570,6 +572,45 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// handleGitRepoPickKey drives the Alt+G multi-repo picker: a plain list of
+// git repos found near the active pane's CWD. Enter opens the lazygit
+// overlay for the highlighted repo; Esc cancels.
+func (m Model) handleGitRepoPickKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	key := msg.String()
+	switch key {
+	case "esc":
+		m.dialog = dialogNone
+		m.repoPickCandidates = nil
+		return m, tea.ClearScreen
+	case "up", "k":
+		if m.dialogCursor > 0 {
+			m.dialogCursor--
+		}
+		return m, nil
+	case "down", "j":
+		if m.dialogCursor < len(m.repoPickCandidates)-1 {
+			m.dialogCursor++
+		}
+		return m, nil
+	case "enter":
+		if m.dialogCursor >= len(m.repoPickCandidates) {
+			return m, nil
+		}
+		repo := m.repoPickCandidates[m.dialogCursor]
+		m.dialog = dialogNone
+		m.repoPickCandidates = nil
+		tab := m.activeTabModel()
+		if tab == nil {
+			return m, tea.ClearScreen
+		}
+		// createOverlay uses a pointer receiver so it mutates m directly
+		// (Go takes &m on a value-receiver local variable). The returned m
+		// reflects all mutations including pendingOverlayShow.
+		return m, tea.Batch(tea.ClearScreen, m.createOverlay(tab, repo))
+	}
+	return m, nil
+}
+
 // --- Rendering ---
 
 func (m Model) renderDialog() string {
@@ -613,6 +654,8 @@ func (m Model) renderDialog() string {
 	case dialogMemory:
 		width = 80
 		content = m.renderMemoryDialog()
+	case dialogGitRepoPick:
+		content = m.renderGitRepoPickDialog()
 	}
 
 	box := dialogBorder.Width(width).Render(content)
@@ -789,6 +832,28 @@ func (m Model) renderConfirmDialog() string {
 	b.WriteString("\n\n")
 
 	b.WriteString("  " + dialogSubtle.Render(footer))
+
+	return b.String()
+}
+
+func (m Model) renderGitRepoPickDialog() string {
+	var b strings.Builder
+
+	b.WriteString(dialogTitle.Render("Open lazygit for which repo?"))
+	b.WriteString("\n\n")
+
+	for i, repo := range m.repoPickCandidates {
+		cursor := "  "
+		style := dialogNormal
+		if i == m.dialogCursor {
+			cursor = "> "
+			style = dialogSelected
+		}
+		b.WriteString(cursor + style.Render(repo) + "\n")
+	}
+
+	b.WriteByte('\n')
+	b.WriteString(dialogSubtle.Render("Enter open · Esc cancel"))
 
 	return b.String()
 }

@@ -377,6 +377,71 @@ func TestWorkspaceState_OverlayPane_BroadcastVsDisk(t *testing.T) {
 	}
 }
 
+// TestEnsureTabNotEmpty_LastNormalPaneGone_DestroysOverlayAndRecovers verifies
+// that ensureTabNotEmpty destroys orphaned overlay panes and creates a
+// replacement terminal pane when the last normal pane in a tab is gone.
+func TestEnsureTabNotEmpty_LastNormalPaneGone_DestroysOverlayAndRecovers(t *testing.T) {
+	d := newTestDaemon(t)
+	tab := d.session.CreateTab("t")
+	normal, err := d.session.CreatePane(tab.ID, "/tmp")
+	if err != nil {
+		t.Fatalf("create normal pane: %v", err)
+	}
+	overlay, err := d.session.CreatePane(tab.ID, "/tmp/repo")
+	if err != nil {
+		t.Fatalf("create overlay pane: %v", err)
+	}
+	overlay.PluginMu.Lock()
+	overlay.Overlay = true
+	overlay.PluginMu.Unlock()
+
+	// Destroy the last normal pane, then drive ensureTabNotEmpty.
+	if err := d.session.DestroyPane(normal.ID); err != nil {
+		t.Fatalf("destroy normal pane: %v", err)
+	}
+	d.ensureTabNotEmpty(tab.ID)
+
+	panes := d.session.Panes(tab.ID)
+	for _, p := range panes {
+		if p.ID == overlay.ID {
+			t.Error("overlay pane must be destroyed when the last normal pane goes")
+		}
+		p.PluginMu.Lock()
+		ov := p.Overlay
+		p.PluginMu.Unlock()
+		if ov {
+			t.Error("no overlay panes may remain")
+		}
+	}
+	if len(panes) == 0 {
+		t.Error("auto-recovery must have created a replacement pane")
+	}
+}
+
+// TestEnsureTabNotEmpty_NormalPanesRemain_NoOp verifies that ensureTabNotEmpty
+// is a no-op when at least one normal pane still exists in the tab.
+func TestEnsureTabNotEmpty_NormalPanesRemain_NoOp(t *testing.T) {
+	d := newTestDaemon(t)
+	tab := d.session.CreateTab("t")
+	_, err := d.session.CreatePane(tab.ID, "/tmp")
+	if err != nil {
+		t.Fatalf("create normal pane: %v", err)
+	}
+	overlay, err := d.session.CreatePane(tab.ID, "/tmp/repo")
+	if err != nil {
+		t.Fatalf("create overlay pane: %v", err)
+	}
+	overlay.PluginMu.Lock()
+	overlay.Overlay = true
+	overlay.PluginMu.Unlock()
+
+	d.ensureTabNotEmpty(tab.ID)
+
+	if got := len(d.session.Panes(tab.ID)); got != 2 {
+		t.Errorf("panes = %d, want 2 (no-op when a normal pane remains)", got)
+	}
+}
+
 // TestWorkspaceState_OverlayFlip_NoRace is a -race regression guard for the
 // Pane.Overlay locking discipline: handleCreatePane sets Overlay AFTER the
 // pane is published to the session maps, so a concurrent snapshot/broadcast

@@ -1165,21 +1165,49 @@ func (d *Daemon) handleDestroyPane(msg *ipc.Message) {
 
 	d.session.DestroyPane(payload.PaneID)
 
-	// Auto-create replacement if last pane in tab was destroyed
+	// Auto-create replacement if the last NORMAL pane in the tab was
+	// destroyed. Overlay panes don't count — a tab holding only a hidden
+	// lazygit overlay would otherwise render an empty layout. Remaining
+	// overlays are destroyed along with the tab's last normal pane.
 	if tabID != "" {
-		if panes := d.session.Panes(tabID); len(panes) == 0 {
-			if newPane, err := d.session.CreatePane(tabID, d.defaultCWD()); err == nil {
-				newPane.Type = "terminal"
-				ptySession := apty.New()
-				if err := d.spawnPane(newPane, ptySession, false); err != nil {
-					log.Printf("failed to start replacement shell: %v", err)
-				}
-			}
-		}
+		d.ensureTabNotEmpty(tabID)
 	}
 
 	d.broadcastState()
 	d.requestSnapshot()
+}
+
+// ensureTabNotEmpty destroys orphaned overlay panes and spawns a fresh
+// terminal pane when a tab has no normal panes left. Shared by the TUI
+// destroy path (handleDestroyPane) and the MCP path (handleDestroyPaneReq).
+func (d *Daemon) ensureTabNotEmpty(tabID string) {
+	var overlays []*Pane
+	normal := 0
+	for _, p := range d.session.Panes(tabID) {
+		p.PluginMu.Lock()
+		isOverlay := p.Overlay
+		p.PluginMu.Unlock()
+		if isOverlay {
+			overlays = append(overlays, p)
+		} else {
+			normal++
+		}
+	}
+	if normal > 0 {
+		return
+	}
+	for _, op := range overlays {
+		log.Printf("pane destroy: orphaned overlay %s (tab=%s)", op.ID, tabID)
+		d.cleanupPaneArtifacts(op.ID)
+		d.session.DestroyPane(op.ID)
+	}
+	if newPane, err := d.session.CreatePane(tabID, d.defaultCWD()); err == nil {
+		newPane.Type = "terminal"
+		ptySession := apty.New()
+		if err := d.spawnPane(newPane, ptySession, false); err != nil {
+			log.Printf("failed to start replacement shell: %v", err)
+		}
+	}
 }
 
 func (d *Daemon) handlePaneInput(msg *ipc.Message) {
@@ -3019,18 +3047,10 @@ func (d *Daemon) handleDestroyPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 		return
 	}
 
-	// Auto-create replacement if last pane in tab (same as handleDestroyPane)
-	tab := d.session.Tab(tabID)
-	if tab != nil && len(tab.Panes) == 0 {
-		newPane, _ := d.session.CreatePane(tabID, d.defaultCWD())
-		if newPane != nil {
-			newPane.Type = "terminal"
-			ptySession := apty.NewWithSize(80, 24)
-			if err := d.spawnPane(newPane, ptySession, false); err != nil {
-				log.Printf("handleDestroyPaneReq: auto-create: %v", err)
-			}
-		}
-	}
+	// Auto-create replacement if the last normal pane in the tab was
+	// destroyed. Delegates to ensureTabNotEmpty (shared with handleDestroyPane)
+	// so overlay-pane accounting and auto-recovery are identical on both paths.
+	d.ensureTabNotEmpty(tabID)
 
 	d.broadcastState()
 	d.requestSnapshot()

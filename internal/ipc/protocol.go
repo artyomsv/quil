@@ -147,6 +147,10 @@ type UpdateTabPayload struct {
 	TabID string `json:"tab_id"`
 	Name  string `json:"name,omitempty"`
 	Color string `json:"color,omitempty"`
+	// ClearColor disambiguates an empty Color: "" alone means "no change"
+	// (e.g. a rename of an uncolored tab), ClearColor=true means "reset to
+	// the default color" (the tab-color cycle wrapping past the last color).
+	ClearColor bool `json:"clear_color,omitempty"`
 }
 
 // ReorderTabPayload moves an existing tab to a new ordinal position. NewIndex

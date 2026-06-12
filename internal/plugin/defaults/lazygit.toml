@@ -1,0 +1,31 @@
+# Lazygit — git TUI for the current workspace
+# Edit this file to customize the plugin. Delete it to restore defaults.
+
+[plugin]
+name = "lazygit"
+display_name = "Lazygit"
+category = "tools"
+description = "Git TUI for the current workspace"
+schema_version = 1
+
+[command]
+cmd = "lazygit"
+# path = "/path/to/lazygit"  # uncomment to override PATH lookup
+detect = "lazygit --version"
+prompts_cwd = true
+# The CWD step lists git repos found near the active pane's directory
+# (enclosing repo + one-level sub-repos) instead of the plain browser.
+discover = "git"
+
+[[command.toggles]]
+name = "screen_mode_full"
+label = "Open focused panel full-screen"
+args_when_on = ["--screen-mode", "full"]
+default = false
+
+[persistence]
+# Re-run lazygit in the saved CWD on daemon restart. Lazygit discovers
+# the repo by walking up from its CWD, exactly like git itself.
+strategy = "rerun"
+# Full-screen TUI — replaying stale frames on reconnect is useless.
+ghost_buffer = false

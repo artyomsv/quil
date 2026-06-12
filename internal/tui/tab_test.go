@@ -1,6 +1,8 @@
 package tui
 
-import "testing"
+import (
+	"testing"
+)
 
 func TestToggleFocus_SinglePane_NoOp(t *testing.T) {
 	tab := NewTabModel("t1", "Test")
@@ -106,5 +108,41 @@ func TestView_FocusMode_RendersSinglePane(t *testing.T) {
 
 	if normalView == focusView {
 		t.Error("focus view should differ from normal view (single pane vs split)")
+	}
+}
+
+func TestTabModel_OverlayVisible_ActivePaneModelReturnsOverlay(t *testing.T) {
+	normal := NewPaneModel("pane-n", 1024)
+	overlay := NewPaneModel("pane-o", 1024)
+	tab := NewTabModel("tab-1", "t")
+	tab.Root = NewLeaf(normal)
+	tab.ActivePane = normal.ID
+	tab.overlayPane = overlay
+
+	if got := tab.ActivePaneModel(); got != normal {
+		t.Fatalf("hidden overlay: ActivePaneModel = %v, want normal pane", got)
+	}
+	tab.overlayVisible = true
+	if got := tab.ActivePaneModel(); got != overlay {
+		t.Fatalf("visible overlay: ActivePaneModel = %v, want overlay pane", got)
+	}
+}
+
+func TestTabModel_OverlayVisible_ResizeSizesOverlay(t *testing.T) {
+	normal := NewPaneModel("pane-n", 1024)
+	overlay := NewPaneModel("pane-o", 1024)
+	tab := NewTabModel("tab-1", "t")
+	tab.Root = NewLeaf(normal)
+	tab.ActivePane = normal.ID
+	tab.overlayPane = overlay
+	tab.overlayVisible = true
+	tab.Resize(80, 24)
+
+	if overlay.Width != 80 || overlay.Height != 24 {
+		t.Errorf("overlay sized %dx%d, want 80x24", overlay.Width, overlay.Height)
+	}
+	// The hidden layout must ALSO stay current (overlay hides later).
+	if normal.Width == 0 {
+		t.Error("layout pane must still be resized while overlay is visible")
 	}
 }

@@ -54,13 +54,14 @@ type TabInfo struct {
 }
 
 type PaneInfo struct {
-	ID    string
-	TabID string
-	CWD   string
-	Name  string
-	Type  string
-	Muted bool
-	Eager bool
+	ID      string
+	TabID   string
+	CWD     string
+	Name    string
+	Type    string
+	Muted   bool
+	Eager   bool
+	Overlay bool
 }
 
 // paneSettleRepaintMsg fires shortly after a pane's first live output and
@@ -310,6 +311,12 @@ type Model struct {
 	// allowing a fresh chain to start on the next trigger.
 	sidebarTickRunning bool
 	notesTickRunning   bool
+
+	// flashText is a transient status-bar message shown until flashUntil.
+	// No dedicated timer is needed — the 1 s sizePollTick already repaints,
+	// and the status-bar renderer checks flashUntil on every frame.
+	flashText  string
+	flashUntil time.Time
 }
 
 func NewModel(client *ipc.Client, cfg config.Config, version string, registry *plugin.Registry, stalePlugins []plugin.StalePlugin) Model {
@@ -1905,6 +1912,14 @@ func (m Model) handlePaneRenameKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) handlePaneOutput(msg PaneOutputMsg) tea.Cmd {
+	// Overlay panes live outside the layout tree — check them first.
+	for _, tab := range m.tabs {
+		if tab.overlayPane != nil && tab.overlayPane.ID == msg.PaneID {
+			tab.overlayPane.preparing = false
+			tab.overlayPane.AppendOutput(msg.Data)
+			return nil
+		}
+	}
 	for _, tab := range m.tabs {
 		if tab.Root == nil {
 			continue
@@ -2661,6 +2676,9 @@ func (m Model) renderStatusBar() string {
 	if count := m.notifications.Count(); count > 0 && !m.notifications.visible {
 		right = fmt.Sprintf("[%d events] ", count) + right
 	}
+	if m.flashText != "" && time.Now().Before(m.flashUntil) {
+		right = m.flashText + " | " + right
+	}
 
 	// Fit within width: left takes priority
 	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right) - 2 // 2 for padding
@@ -2671,6 +2689,14 @@ func (m Model) renderStatusBar() string {
 
 	spacer := strings.Repeat(" ", gap)
 	return statusBarStyle.Width(m.width).Render(left + spacer + right)
+}
+
+// setFlash shows a transient message in the status bar for ~3 seconds.
+// Expiry needs no timer: the 1 s sizePollTick already repaints, and the
+// status bar renderer checks flashUntil on every frame.
+func (m *Model) setFlash(text string) {
+	m.flashText = text
+	m.flashUntil = time.Now().Add(3 * time.Second)
 }
 
 // Daemon communication commands
@@ -2827,6 +2853,9 @@ func parseWorkspaceState(raw map[string]any) WorkspaceStateMsg {
 				}
 				if eager, ok := pm["eager"].(bool); ok {
 					pi.Eager = eager
+				}
+				if overlay, ok := pm["overlay"].(bool); ok {
+					pi.Overlay = overlay
 				}
 				state.Panes = append(state.Panes, pi)
 			}

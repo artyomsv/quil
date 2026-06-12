@@ -117,6 +117,11 @@ func (m *Model) createOverlay(tab *TabModel, repo string) tea.Cmd {
 	if m.pendingOverlayShow == nil {
 		m.pendingOverlayShow = make(map[string]bool)
 	}
+	// Known race window: a concurrent foreign workspace_state arriving between
+	// our local slot-clear above and the daemon processing the destroy can
+	// re-adopt the dying pane and consume this show intent (the next broadcast
+	// self-heals; a second Alt+G shows the new overlay). Tab-keyed is the
+	// pragmatic v1 choice because the daemon mints the new pane ID.
 	m.pendingOverlayShow[tab.ID] = true
 
 	tabID := tab.ID

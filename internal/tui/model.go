@@ -237,34 +237,34 @@ type Model struct {
 	// until the user actually presses Continue.
 	repoCandidates     []string            // git repos offered by the setup dialog (discover="git"); nil = plain browser
 	repoPickCandidates []string            // candidates for dialogGitRepoPick (Alt+G, multiple repos)
-	lastSelectedCWD   string              // remembers previous CWD selection across pane creations
-	selectedCWD       string              // CWD chosen in dialogCreatePaneSetup (empty = daemon default)
-	cwdInputError     string              // validation error shown under CWD input (empty = ok)
-	toggleStates      []bool              // checkbox states; one entry per plugin's Toggles slice, same indexing
-	setupFieldCursor  int                 // focused field in setup dialog: 0 = CWD (if PromptsCWD), then toggles, then Continue
-	cwdBrowseDir      string              // current dir shown in the setup dialog's directory browser
-	cwdBrowseEntries  []string            // browser listing: ".." (if not at root) + sorted subdirs
-	cwdBrowseCursor   int                 // selected entry index in cwdBrowseEntries
-	cwdBrowseScroll   int                 // scroll offset (top index) for the visible window of cwdBrowseEntries
-	tomlEditor        *TextEditor         // active TOML editor (nil when not editing)
-	selection         *Selection          // active text selection (nil when none)
-	mouseDown         bool                // true while left mouse button is held
-	mouseStartX       int                 // screen X of mouse press
-	mouseStartY       int                 // screen Y of mouse press
-	configChanged     bool                // true when config needs saving on exit
-	disclaimerTipIdx  int                 // random tip index for disclaimer dialog
-	mcpHighlights     map[string]bool     // pane IDs with active MCP highlight
-	mcpHighlightSeq   map[string]int      // sequence number for highlight timer reset
-	notifications     *NotificationCenter // notification sidebar
-	paneHistory       []PaneRef           // navigation history (bounded, 20 max)
-	sidebarFocused    bool                // true when notification sidebar has keyboard focus
-	notesMode         bool                // true when pane notes editor is open for the active pane
-	notesEditor       *NotesEditor        // active notes editor (nil when notesMode is false)
-	notesPaneFocused  bool                // true when keyboard input goes to the bound pane (PTY) instead of the notes editor
-	notesEnteredFocus bool                // true when toggleNotesMode was the one that turned the tab's focus mode on (so exit reverts)
-	notesMouseDown    bool                // true while a left-button drag is in progress inside the notes editor
-	notesAnchorRow    int                 // document row where a notes-editor drag began (resolved once on click)
-	notesAnchorCol    int                 // document col where a notes-editor drag began (resolved once on click)
+	lastSelectedCWD    string              // remembers previous CWD selection across pane creations
+	selectedCWD        string              // CWD chosen in dialogCreatePaneSetup (empty = daemon default)
+	cwdInputError      string              // validation error shown under CWD input (empty = ok)
+	toggleStates       []bool              // checkbox states; one entry per plugin's Toggles slice, same indexing
+	setupFieldCursor   int                 // focused field in setup dialog: 0 = CWD (if PromptsCWD), then toggles, then Continue
+	cwdBrowseDir       string              // current dir shown in the setup dialog's directory browser
+	cwdBrowseEntries   []string            // browser listing: ".." (if not at root) + sorted subdirs
+	cwdBrowseCursor    int                 // selected entry index in cwdBrowseEntries
+	cwdBrowseScroll    int                 // scroll offset (top index) for the visible window of cwdBrowseEntries
+	tomlEditor         *TextEditor         // active TOML editor (nil when not editing)
+	selection          *Selection          // active text selection (nil when none)
+	mouseDown          bool                // true while left mouse button is held
+	mouseStartX        int                 // screen X of mouse press
+	mouseStartY        int                 // screen Y of mouse press
+	configChanged      bool                // true when config needs saving on exit
+	disclaimerTipIdx   int                 // random tip index for disclaimer dialog
+	mcpHighlights      map[string]bool     // pane IDs with active MCP highlight
+	mcpHighlightSeq    map[string]int      // sequence number for highlight timer reset
+	notifications      *NotificationCenter // notification sidebar
+	paneHistory        []PaneRef           // navigation history (bounded, 20 max)
+	sidebarFocused     bool                // true when notification sidebar has keyboard focus
+	notesMode          bool                // true when pane notes editor is open for the active pane
+	notesEditor        *NotesEditor        // active notes editor (nil when notesMode is false)
+	notesPaneFocused   bool                // true when keyboard input goes to the bound pane (PTY) instead of the notes editor
+	notesEnteredFocus  bool                // true when toggleNotesMode was the one that turned the tab's focus mode on (so exit reverts)
+	notesMouseDown     bool                // true while a left-button drag is in progress inside the notes editor
+	notesAnchorRow     int                 // document row where a notes-editor drag began (resolved once on click)
+	notesAnchorCol     int                 // document col where a notes-editor drag began (resolved once on click)
 
 	// Scrollbar click-and-drag. Set on a left-click that hits a pane's
 	// rightmost content column (the scrollbar track). While

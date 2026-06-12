@@ -31,6 +31,7 @@ import (
 //     wrapping the longest description (e.g. "(closes this TUI window)").
 //   - The Stop-daemon confirm body line "Panes will respawn from the
 //     snapshot on next launch." fits on a single rendered row.
+//
 // Matched to disclaimerWidth so the visual style is consistent across all
 // fixed-width modal dialogs.
 const dialogWidth = 60
@@ -232,6 +233,11 @@ func settingsFields() []settingsField {
 // renderer cannot drift from each other on a typo.
 const confirmKindShutdown = "shutdown"
 
+// confirmKindRestartPane is the discriminator on confirmKind for the
+// restart-pane confirm (default Alt+R): kill + respawn the pane's process
+// in place via the same MsgRestartPaneReq the MCP restart_pane tool uses.
+const confirmKindRestartPane = "restart-pane"
+
 // stopDaemonRowIndex returns the index of the "Stop daemon" row in
 // settingsFields() by label lookup. Used by the confirm dialog's Esc
 // handler to restore the cursor — looking up by label (instead of assuming
@@ -280,6 +286,7 @@ func shortcutsList(m *Model) []struct{ key, desc string } {
 		{kbDisplay(kb.NotesToggle), "Toggle pane notes"},
 		{kbDisplay(kb.Redraw), "Force screen redraw"},
 		{kbDisplay(kb.MutePane), "Mute / unmute pane notifications"},
+		{kbDisplay(kb.RestartPane), "Restart pane process (sessions resume)"},
 		{kbDisplay(kb.ToggleEager), "Toggle eager restore (active pane)"},
 		{kbDisplay(kb.NotificationToggle), "Toggle notification sidebar"},
 		{kbDisplay(kb.NotificationFocus), "Focus notification sidebar"},
@@ -527,6 +534,26 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				}
 			}
 			return m, tea.Quit
+		}
+
+		// Restart-pane: fire the same request the MCP restart_pane tool
+		// uses — the daemon kills the old PTY and respawns with the
+		// plugin's resume strategy (AI panes resume their session). Sent
+		// synchronously like MsgShutdown above; the listener logs the
+		// daemon's MsgRestartPaneResp.
+		if kind == confirmKindRestartPane {
+			m.dialog = dialogNone
+			if m.client != nil {
+				req, reqErr := ipc.NewMessage(ipc.MsgRestartPaneReq, ipc.RestartPaneReqPayload{PaneID: id})
+				if reqErr != nil {
+					log.Printf("restart pane %s: marshal: %v", id, reqErr)
+					return m, nil
+				}
+				if sendErr := m.client.Send(req); sendErr != nil {
+					log.Printf("restart pane %s: send: %v", id, sendErr)
+				}
+			}
+			return m, nil
 		}
 
 		// Handle instance deletion locally (no IPC needed)
@@ -781,6 +808,12 @@ func (m Model) renderConfirmDialog() string {
 		b.WriteString("\n")
 		b.WriteString("  " + dialogSubtle.Render("Panes will respawn from the snapshot on next launch."))
 		footer = "y confirm    Esc cancel"
+	case confirmKindRestartPane:
+		b.WriteString("  " + dialogNormal.Render(fmt.Sprintf("Restart pane %q?", m.confirmName)))
+		b.WriteString("\n\n")
+		b.WriteString("  " + dialogSubtle.Render("The process is killed and respawned in place."))
+		b.WriteString("\n")
+		b.WriteString("  " + dialogSubtle.Render("AI panes resume their recorded session."))
 	default:
 		label := fmt.Sprintf("Close %s %q?", m.confirmKind, m.confirmName)
 		b.WriteString("  " + dialogNormal.Render(label))

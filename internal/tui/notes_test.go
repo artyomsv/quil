@@ -743,7 +743,7 @@ func TestModel_NotesKeyExempt_AllowsGlobalShortcuts(t *testing.T) {
 		kb.NewTab, kb.RenameTab, kb.RenamePane, kb.CycleTabColor,
 		kb.FocusPane,
 		kb.NotificationToggle, kb.NotificationFocus, kb.GoBack,
-		kb.MutePane, kb.ToggleEager,
+		kb.MutePane, kb.ToggleEager, kb.RestartPane,
 		kb.JSONTransform, kb.QuickActions,
 		kb.PaneUp, kb.PaneDown,
 	}

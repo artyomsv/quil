@@ -1313,6 +1313,9 @@ func (m Model) notesKeyExempt(key string) bool {
 		kb.Redraw,
 		// Notification center.
 		kb.NotificationToggle, kb.NotificationFocus, kb.GoBack, kb.MutePane, kb.ToggleEager,
+		// Pane process restart — opens a confirm dialog, never types into
+		// the notes editor.
+		kb.RestartPane,
 		// Tools and dialogs.
 		kb.JSONTransform, kb.QuickActions,
 	}
@@ -1622,17 +1625,18 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				m.dialog = dialogConfirm
 				m.confirmKind = "pane"
 				m.confirmID = pane.ID
-				m.confirmName = pane.Name
-				if m.confirmName == "" {
-					m.confirmName = pane.CWD
-				}
-				if m.confirmName == "" {
-					if len(pane.ID) > 8 {
-						m.confirmName = pane.ID[:8]
-					} else {
-						m.confirmName = pane.ID
-					}
-				}
+				m.confirmName = paneDisplayName(pane)
+			}
+		}
+		return m, tea.ClearScreen
+
+	case kbMatches(key, kb.RestartPane):
+		if tab := m.activeTabModel(); tab != nil {
+			if pane := tab.ActivePaneModel(); pane != nil {
+				m.dialog = dialogConfirm
+				m.confirmKind = confirmKindRestartPane
+				m.confirmID = pane.ID
+				m.confirmName = paneDisplayName(pane)
 			}
 		}
 		return m, tea.ClearScreen
@@ -2701,6 +2705,21 @@ func (m Model) attachToDaemon() tea.Cmd {
 // listenContinueMsg signals the TUI to keep listening for daemon messages.
 type listenContinueMsg struct{}
 
+// paneDisplayName resolves the human-readable label confirm dialogs show
+// for a pane: explicit name, else CWD, else the truncated pane id.
+func paneDisplayName(pane *PaneModel) string {
+	if pane.Name != "" {
+		return pane.Name
+	}
+	if pane.CWD != "" {
+		return pane.CWD
+	}
+	if len(pane.ID) > 8 {
+		return pane.ID[:8]
+	}
+	return pane.ID
+}
+
 func (m Model) listenForMessages() tea.Cmd {
 	return func() tea.Msg {
 		msg, err := m.client.Receive()
@@ -2759,6 +2778,15 @@ func (m Model) listenForMessages() tea.Cmd {
 				return listenContinueMsg{}
 			}
 			return memoryReportMsg{Resp: payload}
+
+		case ipc.MsgRestartPaneResp:
+			// Response to the Alt+R restart confirm. The respawned pane
+			// announces itself through the normal workspace_state /
+			// pane_output flow; here we only log the outcome.
+			var payload ipc.RestartPaneRespPayload
+			msg.DecodePayload(&payload)
+			log.Printf("ipc recv: restart_pane_resp pane=%s success=%v", payload.PaneID, payload.Success)
+			return listenContinueMsg{}
 
 		default:
 			log.Printf("ipc recv: unknown type %q", msg.Type)

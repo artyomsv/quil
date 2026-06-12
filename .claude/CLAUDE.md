@@ -197,6 +197,13 @@ Project docs are now organized as a navigable tree under `docs/` (with the index
 - `docs/roadmap/` — Per-feature roadmap PRDs (done + planned)
 - `docs/superpowers/` — Detailed plans + specs for large feature efforts
 
+## Reference Source — opensrc
+
+Dependency/reference source is cached at `~/.opensrc/` via [opensrc](https://opensrc.sh/) (global cache, nothing written into this repo). Read source inside other commands: `rg "pattern" $(opensrc path <package-or-owner/repo>)` or `cat $(opensrc path <owner/repo>)/path/to/file`. `opensrc path` fetches on cache miss, so the command form is self-healing.
+
+Cached reference repos:
+- `jesseduffield/lazygit` — TUI-patterns reference (panel layout, keybinding dispatch); its user docs live in `docs/` (e.g. `docs/Config.md`, `docs/keybindings/`)
+
 ## Milestones
 
 - **M1 (Done):** Foundation — daemon, TUI, IPC, PTY, tabs, splits, shell integration, mouse, scrollback, daemon lifecycle

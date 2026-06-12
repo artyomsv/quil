@@ -1377,7 +1377,7 @@ func (d *Daemon) streamPTYOutput(paneID string, pty apty.Session) {
 // Goroutine safety: called from the PTY-output goroutine. All sub-operations
 // (PluginMu, session.mu, broadcast, requestSnapshot) take their own locks and
 // are safe to call from any goroutine — the broadcast helpers already document
-// this property (see the broadcast nil-guard comment at line 1501).
+// this property (see the nil-guarded broadcast helper).
 func (d *Daemon) onPaneExit(pane *Pane, code int) {
 	pane.PluginMu.Lock()
 	pane.ExitCode = &code

@@ -2217,9 +2217,15 @@ func (m *Model) restoreTabLayout(tab *TabModel, tabInfo TabInfo, paneMap map[str
 	tab.Name = tabInfo.Name
 	tab.Color = tabInfo.Color
 
-	// Build PaneModel objects for all panes in this tab.
+	// Build PaneModel objects for all panes in this tab. Overlay panes are
+	// excluded — they never enter the tree and reconcileOverlayPane adopts
+	// them from existingPanes; building one here would leak its VT drain
+	// goroutine (never adopted, never disposed).
 	paneModels := make(map[string]*PaneModel, len(tabInfo.Panes))
 	for _, paneID := range tabInfo.Panes {
+		if info, ok := paneMap[paneID]; ok && info.Overlay {
+			continue
+		}
 		pane, ok := existingPanes[paneID]
 		if !ok {
 			pane = NewPaneModel(paneID, m.replayBufSize())
@@ -2275,6 +2281,11 @@ func (m *Model) restoreTabLayout(tab *TabModel, tabInfo TabInfo, paneMap map[str
 // tab.overlayPane, or clears the slot when the daemon no longer reports one.
 // The overlay is never part of the layout tree. Returns newPaneIDs extended
 // with the overlay pane ID when a new PaneModel was created for it.
+//
+// Disposal ownership: this function never calls Dispose. Every pre-existing
+// overlay PaneModel was indexed into existingPanes by the caller, so a pane
+// dropped from the slot here is simply absent from the surviving set and the
+// caller's post-reconciliation sweep disposes it exactly once.
 func (m *Model) reconcileOverlayPane(
 	tab *TabModel,
 	tabInfo TabInfo,
@@ -2294,16 +2305,14 @@ func (m *Model) reconcileOverlayPane(
 	switch {
 	case overlayInfo == nil:
 		// Daemon has no overlay for this tab (exited or destroyed).
+		// The dropped PaneModel is disposed by the caller's sweep.
 		if tab.overlayPane != nil {
-			tab.overlayPane.Dispose()
 			tab.overlayPane = nil
 			tab.overlayVisible = false
 		}
 	case tab.overlayPane == nil || tab.overlayPane.ID != overlayInfo.ID:
-		// New overlay arrived (or replaced an old one).
-		if tab.overlayPane != nil {
-			tab.overlayPane.Dispose()
-		}
+		// New overlay arrived (or replaced an old one — the replaced
+		// PaneModel is disposed by the caller's sweep).
 		pane, ok := existingPanes[overlayInfo.ID]
 		if !ok {
 			pane = NewPaneModel(overlayInfo.ID, m.replayBufSize())

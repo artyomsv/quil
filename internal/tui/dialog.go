@@ -666,7 +666,7 @@ func (m Model) renderDialog() string {
 	case dialogCreatePane:
 		content = m.renderCreatePaneDialog()
 	case dialogCreatePaneSetup:
-		width = 70 // wider to fit paths and toggle labels comfortably
+		width = m.setupDialogWidth() // grows to fit the longest toggle label
 		content = m.renderCreatePaneSetupDialog()
 	case dialogPluginError:
 		content = m.renderPluginErrorDialog()
@@ -2638,6 +2638,36 @@ func sanitizePastedPath(s string) string {
 	return b.String()
 }
 
+// setupDialogWidth returns the box width for the pane setup dialog. The text
+// area inside the box is width-4 (Padding(1,2) on dialogBorder; the border
+// itself sits outside Width). Each toggle row costs 6 cells of chrome — the
+// 2-char cursor prefix plus "[x] " — on top of its label, so a long label
+// wraps onto a second line once it exceeds the text area. Grow the box to fit
+// the widest toggle row instead of hardcoding a constant that the next long
+// label silently breaks. Floored at 70 (keeps CWD paths comfortable) and
+// capped to the terminal width so the box never renders off-screen.
+func (m Model) setupDialogWidth() int {
+	const (
+		floor        = 70
+		toggleChrome = 6 // 2 prefix ("> "/"  ") + 4 box+space ([x]/[ ]/(•)/( ) are all 4)
+		padding      = 4 // dialogBorder Padding(1,2) → 2 cells each side
+	)
+	width := floor
+	if p := m.pluginRegistry.Get(m.selectedPlugin); p != nil {
+		for _, t := range p.Command.Toggles {
+			if need := toggleChrome + lipgloss.Width(t.Label) + padding; need > width {
+				width = need
+			}
+		}
+	}
+	// Skip the clamp until the first WindowSizeMsg sets m.width (>2 keeps
+	// m.width-2 ≥ 1); the border adds +2 so this caps the rendered box at m.width.
+	if m.width > 2 && width > m.width-2 {
+		width = m.width - 2
+	}
+	return width
+}
+
 // renderCreatePaneSetupDialog renders the setup dialog: a CWD directory
 // browser (optional) + one checkbox per plugin Toggle + a Continue button.
 // The focused field is highlighted; inside the browser the selected entry
@@ -2685,8 +2715,10 @@ func (m Model) renderCreatePaneSetupDialog() string {
 			// Repo pick-list mode: show discovered git repo candidates plus a
 			// trailing "Browse…" escape hatch. Uses the same cursor-row
 			// prefix/style as the directory browser for visual consistency.
-			// Setup dialog width is 70; 4-char prefix + 2-char border → 64 usable.
-			const setupPickMaxWidth = 64
+			// Track the dialog width: 6 cells go to the "  > " prefix + border,
+			// the rest is usable for the repo path (matches the historical 64 at
+			// the floor width of 70).
+			setupPickMaxWidth := m.setupDialogWidth() - 6
 			rows := len(m.repoCandidates) + 1 // +1 for Browse…
 			for i := 0; i < rows; i++ {
 				var displayName string

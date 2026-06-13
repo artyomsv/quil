@@ -104,12 +104,12 @@ severity = "warning"
 	}
 }
 
-// TestLoadPluginTOML_ClaudeCodeSetup_ParsesPromptsCWDAndPermissionToggles verifies
+// TestLoadPluginTOML_ClaudeCodeSetup_ParsesPromptsCWDAndToggles verifies
 // the prompts_cwd and [[command.toggles]] opt-ins parse correctly from the
-// embedded claude-code default TOML, including the mutually-exclusive
-// permission_mode group that guards the user from enabling both
-// --dangerously-skip-permissions and --enable-auto-mode simultaneously.
-func TestLoadPluginTOML_ClaudeCodeSetup_ParsesPromptsCWDAndPermissionToggles(t *testing.T) {
+// embedded claude-code default TOML: the mutually-exclusive permission_mode
+// group that guards the user from enabling both --dangerously-skip-permissions
+// and --enable-auto-mode simultaneously, plus the independent --chrome toggle.
+func TestLoadPluginTOML_ClaudeCodeSetup_ParsesPromptsCWDAndToggles(t *testing.T) {
 	dir := t.TempDir()
 	if _, err := EnsureDefaultPlugins(dir); err != nil {
 		t.Fatalf("EnsureDefaultPlugins: %v", err)
@@ -127,8 +127,8 @@ func TestLoadPluginTOML_ClaudeCodeSetup_ParsesPromptsCWDAndPermissionToggles(t *
 	if !p.Command.PromptsCWD {
 		t.Error("expected PromptsCWD = true on claude-code plugin")
 	}
-	if len(p.Command.Toggles) != 2 {
-		t.Fatalf("expected 2 toggles on claude-code, got %d", len(p.Command.Toggles))
+	if len(p.Command.Toggles) != 3 {
+		t.Fatalf("expected 3 toggles on claude-code, got %d", len(p.Command.Toggles))
 	}
 
 	byName := map[string]Toggle{}
@@ -168,6 +168,25 @@ func TestLoadPluginTOML_ClaudeCodeSetup_ParsesPromptsCWDAndPermissionToggles(t *
 	}
 	if auto.Label == "" {
 		t.Error("auto.Label should not be empty")
+	}
+
+	// chrome is independent of the permission_mode group (empty Group), so it
+	// renders as a standalone checkbox combinable with either permission mode.
+	chrome, ok := byName["chrome"]
+	if !ok {
+		t.Fatalf("missing chrome toggle")
+	}
+	if chrome.Default != false {
+		t.Error("chrome default should be false")
+	}
+	if len(chrome.ArgsWhenOn) != 1 || chrome.ArgsWhenOn[0] != "--chrome" {
+		t.Errorf("chrome.ArgsWhenOn = %v, want [--chrome]", chrome.ArgsWhenOn)
+	}
+	if chrome.Group != "" {
+		t.Errorf("chrome.Group = %q, want empty (independent toggle)", chrome.Group)
+	}
+	if chrome.Label == "" {
+		t.Error("chrome.Label should not be empty")
 	}
 }
 

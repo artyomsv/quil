@@ -6,7 +6,7 @@ name = "claude-code"
 display_name = "Claude Code"
 category = "ai"
 description = "AI coding assistant"
-schema_version = 4
+schema_version = 5
 
 [command]
 cmd = "claude"
@@ -34,6 +34,16 @@ label = "Enable auto mode (safer alternative to skipping permissions)"
 args_when_on = ["--enable-auto-mode"]
 default = false
 group = "permission_mode"
+
+# Chrome support is independent of the permission mode (no group), so it
+# renders as a standalone checkbox the user can combine with either mode.
+# Requires the "Claude in Chrome" browser extension (v1.0.36+) and
+# claude >= 2.0.73; the flag only connects the CLI to the extension.
+[[command.toggles]]
+name = "chrome"
+label = "Chrome support (connect to the Claude in Chrome browser extension)"
+args_when_on = ["--chrome"]
+default = false
 
 [persistence]
 strategy = "preassign_id"

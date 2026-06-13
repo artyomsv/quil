@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.22.0] - 2026-06-13
+
 ### Added
 
 - **Lazygit integration** — a built-in `lazygit` plugin plus a per-tab overlay for dropping into a git UI for whatever repository a pane is working in. Two entry points: **Ctrl+N → Tools → Lazygit** opens lazygit as an ordinary pane — when the binary is installed, the working-directory step lists the git repositories discovered near the active pane's directory (the enclosing repository plus any one level down, capped at ten) with a "Browse…" fallback to the plain directory picker; and **Alt+G** toggles a full-tab lazygit overlay for the repository resolved from the active pane's current directory. Press Alt+G again to hide it — the process keeps running, so re-opening is instant with lazygit's UI state intact — and when several repositories are found near the pane, a picker lets you choose. Overlays are deliberately ephemeral: one per tab, excluded from workspace snapshots, recreated with a single keypress, and destroyed automatically when you quit lazygit (`q`). Repository discovery (`internal/gitdiscover`) is a pure filesystem walk that canonicalises paths and refuses UNC/device paths, so an untrusted working directory can never steer it onto a network share. The plugin and the overlay are offered only when the `lazygit` binary is found on `PATH`. New keybinding `toggle_lazygit` (default `alt+g`); new plugin field `discover = "git"` documented in the plugin reference.

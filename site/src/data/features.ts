@@ -16,6 +16,7 @@ export type IconName =
   | "code"
   | "book-open"
   | "key-round"
+  | "heart-pulse"
   | "layout-panel-left";
 
 export interface Feature {

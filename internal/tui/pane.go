@@ -220,13 +220,19 @@ func (p *PaneModel) closeVT() {
 		}
 	}
 	_ = p.vt.Close()
+	// Nil both so a second closeVT/Dispose is a no-op via the guard above.
+	// Safe: disposal only happens after the pane is removed from every model
+	// structure (layout tree, overlay slot), inside the single-threaded
+	// Update path, so no other p.vt reader can be reached afterwards.
+	p.vt = nil
+	p.vtDrain = nil
 }
 
 // Dispose closes the VT emulator, stopping its drainVTResponses goroutine
 // and releasing the scrollback grid. Must be called for every PaneModel
 // removed from the layout tree — without it each closed pane leaks a parked
 // goroutine plus up to a 10,000-line scrollback. The PaneModel must not be
-// rendered or written to afterwards.
+// rendered or written to afterwards. Idempotent: a second call is a no-op.
 func (p *PaneModel) Dispose() {
 	p.closeVT()
 }

@@ -1147,3 +1147,210 @@ func TestLoadBrowseDirAndSelect_PositionsCursorOnChild(t *testing.T) {
 		t.Errorf("cursor = %d, want 0 for unknown selectName", m.cwdBrowseCursor)
 	}
 }
+
+func TestEnterSetupOrSplit_GitDiscover_PopulatesCandidates(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	pane := NewPaneModel("pane-1", 1024)
+	pane.CWD = root
+	tab := NewTabModel("tab-1", "t")
+	tab.Root = NewLeaf(pane)
+	tab.ActivePane = pane.ID
+
+	m := &Model{tabs: []*TabModel{tab}, activeTab: 0}
+	p := &plugin.PanePlugin{
+		Name: "lazygit",
+		Command: plugin.CommandConfig{
+			Cmd:        "lazygit",
+			PromptsCWD: true,
+			Discover:   "git",
+		},
+	}
+	m.enterSetupOrSplit(p)
+
+	if len(m.repoCandidates) != 1 || m.repoCandidates[0] != root {
+		t.Fatalf("repoCandidates = %v, want [%q]", m.repoCandidates, root)
+	}
+	if m.cwdBrowseDir != root {
+		t.Errorf("cwdBrowseDir = %q, want first candidate pre-selected %q", m.cwdBrowseDir, root)
+	}
+	if m.dialog != dialogCreatePaneSetup {
+		t.Errorf("dialog = %v, want dialogCreatePaneSetup", m.dialog)
+	}
+}
+
+func TestEnterSetupOrSplit_GitDiscover_NoRepo_FallsBackToBrowser(t *testing.T) {
+	plain, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pane := NewPaneModel("pane-1", 1024)
+	pane.CWD = plain
+	tab := NewTabModel("tab-1", "t")
+	tab.Root = NewLeaf(pane)
+	tab.ActivePane = pane.ID
+
+	m := &Model{tabs: []*TabModel{tab}, activeTab: 0}
+	p := &plugin.PanePlugin{
+		Name: "lazygit",
+		Command: plugin.CommandConfig{
+			Cmd:        "lazygit",
+			PromptsCWD: true,
+			Discover:   "git",
+		},
+	}
+	m.enterSetupOrSplit(p)
+
+	if len(m.repoCandidates) != 0 {
+		t.Fatalf("repoCandidates = %v, want empty", m.repoCandidates)
+	}
+	if m.cwdBrowseDir != plain {
+		t.Errorf("cwdBrowseDir = %q, want pane CWD %q as browser fallback", m.cwdBrowseDir, plain)
+	}
+}
+
+func TestEnterSetupOrSplit_GitDiscover_ClearsStaleCandidates(t *testing.T) {
+	m := &Model{repoCandidates: []string{"/stale"}}
+	m.enterSetupOrSplit(&plugin.PanePlugin{Name: "terminal", Command: plugin.CommandConfig{Cmd: "sh"}})
+	if m.repoCandidates != nil {
+		t.Errorf("repoCandidates = %v, want nil", m.repoCandidates)
+	}
+}
+
+// registryWithLazygit returns a plugin registry containing a minimal
+// lazygit plugin with PromptsCWD+Discover set and Available forced true.
+// Registry has NO Register method — the established pattern (see the
+// raw-keys test ~line 440) is temp TOML + LoadFromDir, then flip the
+// exported Available field via Get.
+func registryWithLazygit(t *testing.T) *plugin.Registry {
+	t.Helper()
+	dir := t.TempDir()
+	content := `[plugin]
+name = "lazygit"
+
+[command]
+cmd = "lazygit"
+prompts_cwd = true
+discover = "git"
+`
+	if err := os.WriteFile(filepath.Join(dir, "lazygit.toml"), []byte(content), 0o644); err != nil {
+		t.Fatalf("write test toml: %v", err)
+	}
+	r := plugin.NewRegistry()
+	if err := r.LoadFromDir(dir); err != nil {
+		t.Fatalf("LoadFromDir: %v", err)
+	}
+	r.Get("lazygit").Available = true
+	return r
+}
+
+// repoPickModel builds a Model sitting in the setup dialog with a candidate
+// list, mirroring what enterSetupOrSplit produces for discover="git".
+func repoPickModel(t *testing.T, candidates []string) Model {
+	t.Helper()
+	return Model{
+		dialog:         dialogCreatePaneSetup,
+		repoCandidates: candidates,
+		cwdBrowseDir:   candidates[0],
+		pluginRegistry: registryWithLazygit(t),
+		selectedPlugin: "lazygit",
+	}
+}
+
+func TestSetupRepoKey_DownMovesAndSelects(t *testing.T) {
+	m := repoPickModel(t, []string{"/repo-a", "/repo-b"})
+	out, _ := m.handleCreatePaneSetupKey(tea.KeyPressMsg{Code: tea.KeyDown})
+	got := out.(Model)
+	if got.cwdBrowseCursor != 1 {
+		t.Errorf("cursor = %d, want 1", got.cwdBrowseCursor)
+	}
+	if got.cwdBrowseDir != "/repo-b" {
+		t.Errorf("cwdBrowseDir = %q, want /repo-b", got.cwdBrowseDir)
+	}
+}
+
+func TestSetupRepoKey_BrowseRowFallsBackToBrowser(t *testing.T) {
+	m := repoPickModel(t, []string{"/repo-a"})
+	m.cwdBrowseCursor = 1 // the "Browse…" row (index == len(candidates))
+	out, _ := m.handleCreatePaneSetupKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	got := out.(Model)
+	if got.repoCandidates != nil {
+		t.Errorf("repoCandidates = %v, want nil after Browse…", got.repoCandidates)
+	}
+}
+
+func TestSetupRepoKey_EnterOnCandidateSubmits(t *testing.T) {
+	m := repoPickModel(t, []string{"/repo-a", "/repo-b"})
+	out, _ := m.handleCreatePaneSetupKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	got := out.(Model)
+	if got.selectedCWD != "/repo-a" {
+		t.Errorf("selectedCWD = %q, want /repo-a (submitted candidate)", got.selectedCWD)
+	}
+	if got.dialog != dialogCreatePane || got.createPaneStep != 3 {
+		t.Errorf("dialog/step = %v/%d, want dialogCreatePane/3 (split selection)", got.dialog, got.createPaneStep)
+	}
+}
+
+func TestSetupRepoKey_UpAtTopStays(t *testing.T) {
+	m := repoPickModel(t, []string{"/repo-a", "/repo-b"})
+	out, _ := m.handleCreatePaneSetupKey(tea.KeyPressMsg{Code: tea.KeyUp})
+	got := out.(Model)
+	if got.cwdBrowseCursor != 0 {
+		t.Errorf("cursor = %d, want 0 (clamped at top)", got.cwdBrowseCursor)
+	}
+	if got.cwdBrowseDir != "/repo-a" {
+		t.Errorf("cwdBrowseDir = %q, want /repo-a (unchanged)", got.cwdBrowseDir)
+	}
+}
+
+func TestSetupRepoKey_DownAtBrowseRowStays(t *testing.T) {
+	m := repoPickModel(t, []string{"/repo-a", "/repo-b"})
+	m.cwdBrowseCursor = 2 // the "Browse…" row (index == len(candidates))
+	out, _ := m.handleCreatePaneSetupKey(tea.KeyPressMsg{Code: tea.KeyDown})
+	got := out.(Model)
+	if got.cwdBrowseCursor != 2 {
+		t.Errorf("cursor = %d, want 2 (clamped at Browse… row)", got.cwdBrowseCursor)
+	}
+}
+
+// TestEnterSetupOrSplit_GitDiscover_CapsCandidates guards the maxRepoCandidates
+// bound: the pick list has no scroll machinery, so discovery must never hand
+// the dialog more rows than fit the box.
+func TestEnterSetupOrSplit_GitDiscover_CapsCandidates(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 12; i++ {
+		if err := os.MkdirAll(filepath.Join(base, fmt.Sprintf("repo-%02d", i), ".git"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	pane := NewPaneModel("pane-1", 1024)
+	pane.CWD = base
+	tab := NewTabModel("tab-1", "t")
+	tab.Root = NewLeaf(pane)
+	tab.ActivePane = pane.ID
+
+	m := &Model{tabs: []*TabModel{tab}, activeTab: 0}
+	p := &plugin.PanePlugin{
+		Name: "lazygit",
+		Command: plugin.CommandConfig{
+			Cmd:        "lazygit",
+			PromptsCWD: true,
+			Discover:   "git",
+		},
+	}
+	m.enterSetupOrSplit(p)
+
+	if len(m.repoCandidates) != maxRepoCandidates {
+		t.Fatalf("len(repoCandidates) = %d, want %d (capped)", len(m.repoCandidates), maxRepoCandidates)
+	}
+}

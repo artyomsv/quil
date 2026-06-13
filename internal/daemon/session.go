@@ -76,6 +76,11 @@ type Pane struct {
 	// MsgUpdatePane{Eager: true} (default keybinding Alt+Shift+E), persisted in
 	// the workspace snapshot, and marked on the tab label. Read under PluginMu.
 	Eager bool
+	// Overlay marks an ephemeral TUI overlay pane (lazygit toggle view).
+	// Guarded by PluginMu like Muted (set in handleCreatePane after the
+	// pane is already published to the session maps; concurrent snapshots
+	// may read it). Excluded from disk snapshots.
+	Overlay bool
 	// Pending is true between restore and first spawn for a deferred pane: the
 	// model + ghost buffer exist but no PTY has been created yet. Runtime-only,
 	// never persisted. Cleared by ensurePaneSpawned.

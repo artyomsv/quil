@@ -77,3 +77,26 @@ func TestEnsureDefaultPlugins_CurrentVersionNotStale(t *testing.T) {
 		t.Fatalf("second run: expected 0 stale plugins, got %d", len(stale))
 	}
 }
+
+func TestEnsureDefaultPlugins_WritesLazygit(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := EnsureDefaultPlugins(dir); err != nil {
+		t.Fatalf("EnsureDefaultPlugins: %v", err)
+	}
+	p, err := loadPluginTOML(filepath.Join(dir, "lazygit.toml"))
+	if err != nil {
+		t.Fatalf("load lazygit.toml: %v", err)
+	}
+	if p.Name != "lazygit" || p.Command.Cmd != "lazygit" {
+		t.Errorf("name/cmd = %q/%q", p.Name, p.Command.Cmd)
+	}
+	if !p.Command.PromptsCWD || p.Command.Discover != "git" {
+		t.Errorf("PromptsCWD=%v Discover=%q, want true/git", p.Command.PromptsCWD, p.Command.Discover)
+	}
+	if p.Persistence.Strategy != "rerun" || p.Persistence.GhostBuffer {
+		t.Errorf("strategy=%q ghost=%v, want rerun/false", p.Persistence.Strategy, p.Persistence.GhostBuffer)
+	}
+	if len(p.Command.Toggles) != 1 || p.Command.Toggles[0].Name != "screen_mode_full" {
+		t.Errorf("toggles = %+v", p.Command.Toggles)
+	}
+}

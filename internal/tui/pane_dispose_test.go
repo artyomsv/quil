@@ -45,3 +45,11 @@ func TestPaneModel_Dispose_StopsDrainGoroutine(t *testing.T) {
 	t.Errorf("drain goroutines did not exit within 2s: before=%d, after=%d",
 		before, runtime.NumGoroutine())
 }
+
+func TestPaneModel_Dispose_Idempotent(t *testing.T) {
+	p := NewPaneModel("pane-dispose", 1024)
+	p.Dispose()
+	// Second Dispose must be a no-op (vt nil-guard), not a second
+	// vt.Close()/drain-stop attempt.
+	p.Dispose()
+}

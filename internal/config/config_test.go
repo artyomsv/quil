@@ -174,3 +174,10 @@ func TestIsDefaultQuilDir(t *testing.T) {
 		})
 	}
 }
+
+func TestDefault_ToggleLazygitBinding(t *testing.T) {
+	cfg := config.Default()
+	if cfg.Keybindings.ToggleLazygit != "alt+g" {
+		t.Errorf("ToggleLazygit = %q, want alt+g", cfg.Keybindings.ToggleLazygit)
+	}
+}

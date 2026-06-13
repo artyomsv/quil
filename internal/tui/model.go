@@ -54,13 +54,14 @@ type TabInfo struct {
 }
 
 type PaneInfo struct {
-	ID    string
-	TabID string
-	CWD   string
-	Name  string
-	Type  string
-	Muted bool
-	Eager bool
+	ID      string
+	TabID   string
+	CWD     string
+	Name    string
+	Type    string
+	Muted   bool
+	Eager   bool
+	Overlay bool
 }
 
 // paneSettleRepaintMsg fires shortly after a pane's first live output and
@@ -178,6 +179,7 @@ const (
 	dialogDisclaimer
 	dialogPluginMigration
 	dialogMemory
+	dialogGitRepoPick // Alt+G repo picker (Task 12 fills handler/render)
 )
 
 // tuiClient is the subset of *ipc.Client the TUI uses on the Model. Defined
@@ -206,6 +208,7 @@ type Model struct {
 	pendingHeight        int
 	resizeSeq            int
 	pendingSplit         map[string]*LayoutNode // tabID → placeholder node awaiting pane from daemon
+	pendingOverlayShow   map[string]bool        // tabID → show overlay on its first arrival; set by the Alt+G overlay sender (wired in a follow-up commit); reads/deletes are nil-map-safe
 	dialog               dialogScreen           // active dialog screen
 	dialogCursor         int                    // highlighted item in dialog
 	dialogEdit           bool                   // editing a settings value
@@ -232,34 +235,36 @@ type Model struct {
 	// for CreatePanePayload.CWD. The two fields exist separately so that the
 	// browser can navigate freely without dirtying the "to be sent" value
 	// until the user actually presses Continue.
-	lastSelectedCWD   string              // remembers previous CWD selection across pane creations
-	selectedCWD       string              // CWD chosen in dialogCreatePaneSetup (empty = daemon default)
-	cwdInputError     string              // validation error shown under CWD input (empty = ok)
-	toggleStates      []bool              // checkbox states; one entry per plugin's Toggles slice, same indexing
-	setupFieldCursor  int                 // focused field in setup dialog: 0 = CWD (if PromptsCWD), then toggles, then Continue
-	cwdBrowseDir      string              // current dir shown in the setup dialog's directory browser
-	cwdBrowseEntries  []string            // browser listing: ".." (if not at root) + sorted subdirs
-	cwdBrowseCursor   int                 // selected entry index in cwdBrowseEntries
-	cwdBrowseScroll   int                 // scroll offset (top index) for the visible window of cwdBrowseEntries
-	tomlEditor        *TextEditor         // active TOML editor (nil when not editing)
-	selection         *Selection          // active text selection (nil when none)
-	mouseDown         bool                // true while left mouse button is held
-	mouseStartX       int                 // screen X of mouse press
-	mouseStartY       int                 // screen Y of mouse press
-	configChanged     bool                // true when config needs saving on exit
-	disclaimerTipIdx  int                 // random tip index for disclaimer dialog
-	mcpHighlights     map[string]bool     // pane IDs with active MCP highlight
-	mcpHighlightSeq   map[string]int      // sequence number for highlight timer reset
-	notifications     *NotificationCenter // notification sidebar
-	paneHistory       []PaneRef           // navigation history (bounded, 20 max)
-	sidebarFocused    bool                // true when notification sidebar has keyboard focus
-	notesMode         bool                // true when pane notes editor is open for the active pane
-	notesEditor       *NotesEditor        // active notes editor (nil when notesMode is false)
-	notesPaneFocused  bool                // true when keyboard input goes to the bound pane (PTY) instead of the notes editor
-	notesEnteredFocus bool                // true when toggleNotesMode was the one that turned the tab's focus mode on (so exit reverts)
-	notesMouseDown    bool                // true while a left-button drag is in progress inside the notes editor
-	notesAnchorRow    int                 // document row where a notes-editor drag began (resolved once on click)
-	notesAnchorCol    int                 // document col where a notes-editor drag began (resolved once on click)
+	repoCandidates     []string            // git repos offered by the setup dialog (discover="git"); nil = plain browser
+	repoPickCandidates []string            // candidates for dialogGitRepoPick (Alt+G, multiple repos)
+	lastSelectedCWD    string              // remembers previous CWD selection across pane creations
+	selectedCWD        string              // CWD chosen in dialogCreatePaneSetup (empty = daemon default)
+	cwdInputError      string              // validation error shown under CWD input (empty = ok)
+	toggleStates       []bool              // checkbox states; one entry per plugin's Toggles slice, same indexing
+	setupFieldCursor   int                 // focused field in setup dialog: 0 = CWD (if PromptsCWD), then toggles, then Continue
+	cwdBrowseDir       string              // current dir shown in the setup dialog's directory browser
+	cwdBrowseEntries   []string            // browser listing: ".." (if not at root) + sorted subdirs
+	cwdBrowseCursor    int                 // selected entry index in cwdBrowseEntries
+	cwdBrowseScroll    int                 // scroll offset (top index) for the visible window of cwdBrowseEntries
+	tomlEditor         *TextEditor         // active TOML editor (nil when not editing)
+	selection          *Selection          // active text selection (nil when none)
+	mouseDown          bool                // true while left mouse button is held
+	mouseStartX        int                 // screen X of mouse press
+	mouseStartY        int                 // screen Y of mouse press
+	configChanged      bool                // true when config needs saving on exit
+	disclaimerTipIdx   int                 // random tip index for disclaimer dialog
+	mcpHighlights      map[string]bool     // pane IDs with active MCP highlight
+	mcpHighlightSeq    map[string]int      // sequence number for highlight timer reset
+	notifications      *NotificationCenter // notification sidebar
+	paneHistory        []PaneRef           // navigation history (bounded, 20 max)
+	sidebarFocused     bool                // true when notification sidebar has keyboard focus
+	notesMode          bool                // true when pane notes editor is open for the active pane
+	notesEditor        *NotesEditor        // active notes editor (nil when notesMode is false)
+	notesPaneFocused   bool                // true when keyboard input goes to the bound pane (PTY) instead of the notes editor
+	notesEnteredFocus  bool                // true when toggleNotesMode was the one that turned the tab's focus mode on (so exit reverts)
+	notesMouseDown     bool                // true while a left-button drag is in progress inside the notes editor
+	notesAnchorRow     int                 // document row where a notes-editor drag began (resolved once on click)
+	notesAnchorCol     int                 // document col where a notes-editor drag began (resolved once on click)
 
 	// Scrollbar click-and-drag. Set on a left-click that hits a pane's
 	// rightmost content column (the scrollbar track). While
@@ -309,6 +314,12 @@ type Model struct {
 	// allowing a fresh chain to start on the next trigger.
 	sidebarTickRunning bool
 	notesTickRunning   bool
+
+	// flashText is a transient status-bar message shown until flashUntil.
+	// No dedicated timer is needed — the 1 s sizePollTick already repaints,
+	// and the status-bar renderer checks flashUntil on every frame.
+	flashText  string
+	flashUntil time.Time
 }
 
 func NewModel(client *ipc.Client, cfg config.Config, version string, registry *plugin.Registry, stalePlugins []plugin.StalePlugin) Model {
@@ -471,13 +482,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = m.pendingWidth
 		m.height = m.pendingHeight
 		m.resizeTabs()
-		return m, m.resizeAllPanes()
+		// Also resize an active overlay pane so the daemon's PTY tracks the new size.
+		var overlayCmds []tea.Cmd
+		overlayCmds = append(overlayCmds, m.resizeAllPanes())
+		if tab := m.activeTabModel(); tab != nil && tab.overlayVisible && tab.overlayPane != nil {
+			overlayCmds = append(overlayCmds, m.overlayResizeCmd(tab))
+		}
+		return m, tea.Batch(overlayCmds...)
 
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
 
 	case tea.MouseClickMsg:
 		if msg.Mod.Contains(tea.ModCtrl) {
+			return m, nil
+		}
+		// Overlay visible: swallow all mouse clicks (keyboard-only v1).
+		// clearDragState ensures no drag flag stays set from before the overlay opened.
+		if tab := m.activeTabModel(); tab != nil && tab.overlayVisible {
+			m.clearDragState()
 			return m, nil
 		}
 		// Right-click: copy the active selection to the clipboard. While
@@ -568,6 +591,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.MouseMotionMsg:
+		// Overlay visible: swallow all motion (keyboard-only v1).
+		if tab := m.activeTabModel(); tab != nil && tab.overlayVisible {
+			return m, nil
+		}
 		// Drag dispatch — at most one branch is active (clearDragState
 		// invariant). Off-Y=0 motion during a tab drag pauses reorder but
 		// keeps the drag alive so the user can return to the tab bar
@@ -611,6 +638,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.MouseReleaseMsg:
+		// Overlay visible: clear any stale drag state and swallow the release.
+		if tab := m.activeTabModel(); tab != nil && tab.overlayVisible {
+			m.clearDragState()
+			return m, nil
+		}
 		// A tab drag or scrollbar drag terminates here with no further
 		// processing — they don't share the click-vs-drag pane-focus
 		// fall-through path below.
@@ -644,6 +676,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.MouseWheelMsg:
+		// Overlay visible: swallow wheel events (keyboard-only v1).
+		if tab := m.activeTabModel(); tab != nil && tab.overlayVisible {
+			return m, nil
+		}
 		lines := m.cfg.UI.MouseScrollLines
 		if lines < 1 {
 			lines = 3
@@ -724,6 +760,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case paneSettleRepaintMsg:
 		return m, tea.ClearScreen
 
+	case flashExpireMsg:
+		// Clear flash only if it hasn't been refreshed by a newer setFlash call.
+		if !time.Now().Before(m.flashUntil) {
+			m.flashText = ""
+		}
+		return m, nil
+
 	case spinnerTickMsg:
 		// Advance spinner frame for the resuming/preparing pane
 		for _, tab := range m.tabs {
@@ -782,11 +825,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// in the same PR. Keep the breadcrumbs for ~2 weeks of watchdog-clean
 		// runs, then either delete or demote them to logger.Debug.
 		log.Printf("WorkspaceState: %d tabs, %d panes", len(msg.Tabs), len(msg.Panes))
-		newPaneIDs := m.applyWorkspaceState(msg)
+		newPaneIDs, overlayResizeCmds := m.applyWorkspaceState(msg)
 		log.Printf("apply: returned, %d new panes", len(newPaneIDs))
 		m.resizeTabs()
 		log.Printf("apply: resizeTabs done")
 		cmds := []tea.Cmd{m.listenForMessages(), m.resizeAllPanes(), m.sendAllLayouts()}
+		// Resize overlay PTYs that just became visible on initial creation.
+		// resizeAllPanes only walks tab.Leaves() (the layout tree), so overlay
+		// panes are skipped there; these cmds are the only resize they receive.
+		cmds = append(cmds, overlayResizeCmds...)
 		// Start spinner ticks for newly restored panes
 		for _, paneID := range newPaneIDs {
 			id := paneID
@@ -1285,6 +1332,11 @@ func (m Model) notesEditorPosAt(screenX, screenY int) (row, col int, ok bool) {
 // they cycle keyboard focus between the editor and the bound pane, handled
 // as a hard-coded case in the caller (not driven by kb.NextPane, which is
 // now unbound by default since spatial navigation moved to Alt+Arrow).
+//
+// Note: ToggleLazygit (Alt+G) is deliberately NOT in this list — notes mode
+// binds the editor to a pane, and popping a full-screen overlay over it
+// mid-edit conflicts with the notes layout. Alt+G in notes mode falls through
+// to the editor harmlessly as plain text input.
 func (m Model) notesKeyExempt(key string) bool {
 	if key == "" {
 		return false
@@ -1533,6 +1585,15 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	// Overlay visible: intercept keys before global shortcuts reach pane-level
+	// handlers (ClosePane, RenamePane, notes toggle, split, etc.). The sidebar-
+	// focused branch below must NOT steal keys while lazygit is on screen.
+	// The kb.ToggleLazygit case in the main switch is still reachable when the
+	// overlay is hidden (this block only fires when overlayVisible is true).
+	if tab := m.activeTabModel(); tab != nil && tab.overlayVisible && tab.overlayPane != nil && m.dialog == dialogNone && !m.renaming && !m.renamingPane {
+		return m, m.handleOverlayKey(msg, tab)
+	}
+
 	// Notification sidebar keybindings (always available)
 	switch {
 	case kbMatches(key, kb.NotificationToggle):
@@ -1556,6 +1617,8 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, m.toggleActivePaneMute()
 	case kbMatches(key, kb.ToggleEager):
 		return m, m.toggleActivePaneEager()
+	case kbMatches(key, kb.ToggleLazygit):
+		return m, m.handleToggleLazygit()
 	}
 
 	// Sidebar focused: route keys to notification center
@@ -1908,6 +1971,14 @@ func (m Model) handlePaneRenameKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) handlePaneOutput(msg PaneOutputMsg) tea.Cmd {
+	// Overlay panes live outside the layout tree — check them first.
+	for _, tab := range m.tabs {
+		if tab.overlayPane != nil && tab.overlayPane.ID == msg.PaneID {
+			tab.overlayPane.preparing = false
+			tab.overlayPane.AppendOutput(msg.Data)
+			return nil
+		}
+	}
 	for _, tab := range m.tabs {
 		if tab.Root == nil {
 			continue
@@ -1973,8 +2044,15 @@ func (m *Model) handlePaneOutput(msg PaneOutputMsg) tea.Cmd {
 
 // applyWorkspaceState rebuilds the TUI state from daemon data.
 // Returns IDs of newly created panes (for spinner activation).
-func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) []string {
+// applyWorkspaceState rebuilds the TUI state from daemon data. Returns:
+//   - newPaneIDs: IDs of PaneModels created during this reconciliation (for
+//     spinner setup in the caller).
+//   - overlayResizeCmds: resize commands that must be batched by the caller
+//     for overlay panes that just became visible on initial creation (fixing
+//     the 80×24 boot size they would otherwise keep until a window resize).
+func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) ([]string, []tea.Cmd) {
 	var newPaneIDs []string
+	var overlayResizeCmds []tea.Cmd
 
 	// Index existing tabs and panes for preservation.
 	existingTabs := make(map[string]*TabModel)
@@ -1985,6 +2063,9 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) []string {
 			for _, pane := range tab.Leaves() {
 				existingPanes[pane.ID] = pane
 			}
+		}
+		if tab.overlayPane != nil {
+			existingPanes[tab.overlayPane.ID] = tab.overlayPane
 		}
 	}
 
@@ -2003,9 +2084,17 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) []string {
 			// New tab that doesn't exist locally — try to restore layout from daemon.
 			if len(tabInfo.Layout) > 0 {
 				tab = m.restoreTabLayout(tab, tabInfo, paneMap, existingPanes)
-				// All panes in a restored tab are new
+				// All non-overlay panes in a restored tab are new.
 				for _, pid := range tabInfo.Panes {
+					if isOverlayPane(paneMap, pid) {
+						continue
+					}
 					newPaneIDs = append(newPaneIDs, pid)
+				}
+				var shown bool
+				newPaneIDs, shown = m.reconcileOverlayPane(tab, tabInfo, paneMap, existingPanes, newPaneIDs)
+				if shown {
+					overlayResizeCmds = append(overlayResizeCmds, m.overlayResizeCmd(tab))
 				}
 				m.tabs = append(m.tabs, tab)
 				continue
@@ -2015,8 +2104,13 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) []string {
 		tab.Color = tabInfo.Color
 
 		// Build the set of panes the daemon says belong to this tab.
+		// Overlay panes are excluded: they live outside the layout tree and
+		// are reconciled separately below.
 		daemonPaneSet := make(map[string]bool, len(tabInfo.Panes))
 		for _, pid := range tabInfo.Panes {
+			if isOverlayPane(paneMap, pid) {
+				continue
+			}
 			daemonPaneSet[pid] = true
 		}
 
@@ -2040,6 +2134,11 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) []string {
 			treePaneIDs = tab.Root.PaneIDs()
 		}
 		for _, paneID := range tabInfo.Panes {
+			// Overlay panes are reconciled separately — never insert into the tree.
+			if isOverlayPane(paneMap, paneID) {
+				continue
+			}
+
 			if treePaneIDs[paneID] {
 				// Already in tree — just update metadata.
 				if info, ok := paneMap[paneID]; ok {
@@ -2105,6 +2204,12 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) []string {
 			log.Printf("apply: tab %s panes reconciled (root=nil)", tab.ID)
 		}
 
+		var shown bool
+		newPaneIDs, shown = m.reconcileOverlayPane(tab, tabInfo, paneMap, existingPanes, newPaneIDs)
+		if shown {
+			overlayResizeCmds = append(overlayResizeCmds, m.overlayResizeCmd(tab))
+		}
+
 		m.finalizeTabPanes(tab)
 		log.Printf("apply: tab %s finalized", tab.ID)
 		m.tabs = append(m.tabs, tab)
@@ -2120,6 +2225,9 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) []string {
 			for id := range tab.Root.PaneIDs() {
 				surviving[id] = true
 			}
+		}
+		if tab.overlayPane != nil {
+			surviving[tab.overlayPane.ID] = true
 		}
 	}
 	for id, pane := range existingPanes {
@@ -2173,7 +2281,7 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) []string {
 	}
 	log.Printf("apply: notes reconciliation done")
 
-	return newPaneIDs
+	return newPaneIDs, overlayResizeCmds
 }
 
 // restoreTabLayout rebuilds a tab's layout tree from serialized daemon state.
@@ -2182,9 +2290,15 @@ func (m *Model) restoreTabLayout(tab *TabModel, tabInfo TabInfo, paneMap map[str
 	tab.Name = tabInfo.Name
 	tab.Color = tabInfo.Color
 
-	// Build PaneModel objects for all panes in this tab.
+	// Build PaneModel objects for all panes in this tab. Overlay panes are
+	// excluded — they never enter the tree and reconcileOverlayPane adopts
+	// them from existingPanes; building one here would leak its VT drain
+	// goroutine (never adopted, never disposed).
 	paneModels := make(map[string]*PaneModel, len(tabInfo.Panes))
 	for _, paneID := range tabInfo.Panes {
+		if isOverlayPane(paneMap, paneID) {
+			continue
+		}
 		pane, ok := existingPanes[paneID]
 		if !ok {
 			pane = NewPaneModel(paneID, m.replayBufSize())
@@ -2210,11 +2324,15 @@ func (m *Model) restoreTabLayout(tab *TabModel, tabInfo TabInfo, paneMap map[str
 	}
 
 	// Add any panes not in the deserialized tree (e.g., created while TUI was away).
+	// Overlay panes are never part of the tree — skip them here.
 	treePaneIDs := make(map[string]bool)
 	if tab.Root != nil {
 		treePaneIDs = tab.Root.PaneIDs()
 	}
 	for _, paneID := range tabInfo.Panes {
+		if isOverlayPane(paneMap, paneID) {
+			continue
+		}
 		if treePaneIDs[paneID] {
 			continue
 		}
@@ -2230,6 +2348,74 @@ func (m *Model) restoreTabLayout(tab *TabModel, tabInfo TabInfo, paneMap map[str
 
 	m.finalizeTabPanes(tab)
 	return tab
+}
+
+// isOverlayPane reports whether the daemon broadcast marks pane id as an
+// overlay (never part of the layout tree).
+func isOverlayPane(paneMap map[string]*PaneInfo, id string) bool {
+	info, ok := paneMap[id]
+	return ok && info.Overlay
+}
+
+// reconcileOverlayPane adopts the overlay pane reported by the daemon into
+// tab.overlayPane, or clears the slot when the daemon no longer reports one.
+// The overlay is never part of the layout tree. Returns newPaneIDs extended
+// with the overlay pane ID when a new PaneModel was created for it, and
+// overlayShown=true when the overlay just flipped from hidden to visible due
+// to a pendingOverlayShow entry (the caller should issue an overlayResizeCmd
+// so the daemon PTY gets the correct dimensions immediately on creation).
+//
+// Disposal ownership: this function never calls Dispose. Every pre-existing
+// overlay PaneModel was indexed into existingPanes by the caller, so a pane
+// dropped from the slot here is simply absent from the surviving set and the
+// caller's post-reconciliation sweep disposes it exactly once.
+func (m *Model) reconcileOverlayPane(
+	tab *TabModel,
+	tabInfo TabInfo,
+	paneMap map[string]*PaneInfo,
+	existingPanes map[string]*PaneModel,
+	newPaneIDs []string,
+) ([]string, bool) {
+	// Find the overlay pane for this tab in the daemon broadcast, if any.
+	var overlayInfo *PaneInfo
+	for _, pid := range tabInfo.Panes {
+		if isOverlayPane(paneMap, pid) {
+			overlayInfo = paneMap[pid]
+			break
+		}
+	}
+
+	switch {
+	case overlayInfo == nil:
+		// Daemon has no overlay for this tab (exited or destroyed).
+		// The dropped PaneModel is disposed by the caller's sweep.
+		if tab.overlayPane != nil {
+			tab.overlayPane = nil
+			tab.overlayVisible = false
+		}
+	case tab.overlayPane == nil || tab.overlayPane.ID != overlayInfo.ID:
+		// New overlay arrived (or replaced an old one — the replaced
+		// PaneModel is disposed by the caller's sweep).
+		pane, ok := existingPanes[overlayInfo.ID]
+		if !ok {
+			pane = NewPaneModel(overlayInfo.ID, m.replayBufSize())
+			newPaneIDs = append(newPaneIDs, overlayInfo.ID)
+		}
+		syncPaneMeta(pane, overlayInfo)
+		tab.overlayPane = pane
+		// Show the overlay immediately when this TUI's Alt+G triggered its
+		// creation (pendingOverlayShow entry). On plain reattach, default hidden.
+		if m.pendingOverlayShow[tab.ID] {
+			delete(m.pendingOverlayShow, tab.ID)
+			tab.overlayVisible = true
+			return newPaneIDs, true // newly visible — caller must resize
+		}
+	default:
+		// Same overlay pane — refresh metadata only.
+		syncPaneMeta(tab.overlayPane, overlayInfo)
+	}
+
+	return newPaneIDs, false
 }
 
 // finalizeTabPanes ensures the active pane is valid and focus flags are set.
@@ -2664,6 +2850,9 @@ func (m Model) renderStatusBar() string {
 	if count := m.notifications.Count(); count > 0 && !m.notifications.visible {
 		right = fmt.Sprintf("[%d events] ", count) + right
 	}
+	if m.flashText != "" && time.Now().Before(m.flashUntil) {
+		right = m.flashText + " | " + right
+	}
 
 	// Fit within width: left takes priority
 	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right) - 2 // 2 for padding
@@ -2674,6 +2863,25 @@ func (m Model) renderStatusBar() string {
 
 	spacer := strings.Repeat(" ", gap)
 	return statusBarStyle.Width(m.width).Render(left + spacer + right)
+}
+
+// flashDuration is how long a flash message stays in the status bar.
+const flashDuration = 3 * time.Second
+
+// flashExpireMsg is sent by flashCmd when the flash timer fires.
+type flashExpireMsg struct{}
+
+// flashCmd returns a tea.Cmd that fires flashExpireMsg after flashDuration.
+// The Update handler re-checks flashUntil to avoid clobbering a newer flash.
+func (m Model) flashCmd() tea.Cmd {
+	return tea.Tick(flashDuration, func(time.Time) tea.Msg { return flashExpireMsg{} })
+}
+
+// setFlash shows a transient message in the status bar for flashDuration.
+// The 1 s sizePollTick is a backstop; flashCmd provides a crisp expiry timer.
+func (m *Model) setFlash(text string) {
+	m.flashText = text
+	m.flashUntil = time.Now().Add(flashDuration)
 }
 
 // Daemon communication commands
@@ -2854,6 +3062,9 @@ func parseWorkspaceState(raw map[string]any) WorkspaceStateMsg {
 				}
 				if eager, ok := pm["eager"].(bool); ok {
 					pi.Eager = eager
+				}
+				if overlay, ok := pm["overlay"].(bool); ok {
+					pi.Overlay = overlay
 				}
 				state.Panes = append(state.Panes, pi)
 			}

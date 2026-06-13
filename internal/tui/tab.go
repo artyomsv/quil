@@ -11,6 +11,12 @@ type TabModel struct {
 	Height     int
 	focusMode  bool // true = active pane fills entire tab
 
+	// overlayPane is the tab's lazygit overlay (never part of the layout
+	// tree). overlayVisible controls rendering; the pane's PTY keeps
+	// running while hidden so re-show is instant with UI state intact.
+	overlayPane    *PaneModel
+	overlayVisible bool
+
 	// leavesCache memoizes Root.Leaves(); nil = invalid. The tab bar alone
 	// walks every tab's tree twice per render without it.
 	leavesCache []*PaneModel
@@ -39,7 +45,34 @@ func (t *TabModel) Leaves() []*PaneModel {
 func (t *TabModel) invalidateLeaves() { t.leavesCache = nil }
 
 // ActivePaneModel returns the currently active pane, or nil.
+// When the overlay is visible it acts as the single active pane —
+// all input and scroll events route through this choke point.
+// Unlike treeActivePaneModel, a stale ActivePane is REPAIRED here:
+// the returned fallback leaf is adopted (t.ActivePane rewritten,
+// Active flag set).
 func (t *TabModel) ActivePaneModel() *PaneModel {
+	if t.overlayVisible && t.overlayPane != nil {
+		return t.overlayPane
+	}
+	pane := t.treeActivePaneModel()
+	if pane == nil {
+		return nil
+	}
+	if pane.ID != t.ActivePane {
+		// Fallback: ActivePane was stale; adopt the first leaf.
+		t.ActivePane = pane.ID
+		pane.Active = true
+	}
+	return pane
+}
+
+// treeActivePaneModel returns the layout tree's active pane — ignoring the
+// overlay — with NO side effects. When ActivePane is stale it returns the
+// first leaf but does not rewrite t.ActivePane or set the Active flag;
+// callers like Resize must not mutate selection state. ActivePaneModel
+// layers the overlay short-circuit and the side-effecting stale-fallback
+// on top of this lookup.
+func (t *TabModel) treeActivePaneModel() *PaneModel {
 	if t.Root == nil {
 		return nil
 	}
@@ -52,9 +85,6 @@ func (t *TabModel) ActivePaneModel() *PaneModel {
 			return p
 		}
 	}
-	// Fallback: if ActivePane is stale, use first leaf.
-	t.ActivePane = leaves[0].ID
-	leaves[0].Active = true
 	return leaves[0]
 }
 
@@ -269,23 +299,43 @@ func (t *TabModel) activeIndex(leaves []*PaneModel) int {
 	return 0
 }
 
+// sizePaneFull sizes a pane to fill the entire tab area (used by the
+// full-tab modes: focus and overlay). The border consumes 2 cells per
+// axis; the VT grid is clamped at 1x1.
+func sizePaneFull(p *PaneModel, w, h int) {
+	p.Width = w
+	p.Height = h
+	cols := w - 2
+	rows := h - 2
+	if cols < 1 {
+		cols = 1
+	}
+	if rows < 1 {
+		rows = 1
+	}
+	p.ResizeVT(cols, rows)
+}
+
 // Resize recomputes dimensions for the entire layout tree.
 func (t *TabModel) Resize(w, h int) {
 	t.Width = w
 	t.Height = h
+
+	// Overlay sizing: full tab area, same as focus mode. We do NOT return
+	// early — the tree resize runs unconditionally so hidden panes keep
+	// correct dimensions for when the overlay is dismissed.
+	if t.overlayVisible && t.overlayPane != nil {
+		sizePaneFull(t.overlayPane, w, h)
+	}
+
+	// Focus mode sizes the tree's active pane to fill the tab. We use the
+	// side-effect-free tree lookup (not ActivePaneModel, which returns the
+	// overlay when visible and repairs stale selection) so that focus-mode
+	// and overlay-mode coexist without the overlay being double-sized and
+	// Resize never mutates selection state.
 	if t.focusMode {
-		if pane := t.ActivePaneModel(); pane != nil {
-			pane.Width = w
-			pane.Height = h
-			cols := w - 2
-			rows := h - 2
-			if cols < 1 {
-				cols = 1
-			}
-			if rows < 1 {
-				rows = 1
-			}
-			pane.ResizeVT(cols, rows)
+		if pane := t.treeActivePaneModel(); pane != nil {
+			sizePaneFull(pane, w, h)
 		}
 		return
 	}
@@ -296,6 +346,9 @@ func (t *TabModel) Resize(w, h int) {
 
 // View renders the entire pane layout.
 func (t *TabModel) View() string {
+	if t.overlayVisible && t.overlayPane != nil {
+		return t.overlayPane.View()
+	}
 	if t.Root == nil {
 		return ""
 	}

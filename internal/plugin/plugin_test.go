@@ -798,3 +798,46 @@ func TestMatchIdle_NoMatch_ReturnsNil(t *testing.T) {
 		t.Fatal("expected no match for shell prompt")
 	}
 }
+
+func TestLoadPluginTOML_DiscoverField(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "lg.toml")
+	data := []byte(`
+[plugin]
+name = "lg"
+[command]
+cmd = "lazygit"
+discover = "git"
+prompts_cwd = true
+`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p, err := loadPluginTOML(path)
+	if err != nil {
+		t.Fatalf("loadPluginTOML: %v", err)
+	}
+	if p.Command.Discover != "git" {
+		t.Errorf("Discover = %q, want %q", p.Command.Discover, "git")
+	}
+}
+
+func TestLoadPluginTOML_DiscoverInvalid(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bad.toml")
+	data := []byte(`
+[plugin]
+name = "bad"
+[command]
+cmd = "x"
+discover = "svn"
+`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadPluginTOML(path); err == nil {
+		t.Error("expected error for discover=\"svn\"")
+	}
+}

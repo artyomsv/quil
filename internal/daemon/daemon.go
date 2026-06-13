@@ -358,7 +358,7 @@ func (d *Daemon) snapshot() {
 	// — the workspace.json said N panes while the buffer flush iterated
 	// N±1, surfacing as the "snapshot pane count oscillation" bug.
 	activeTab, tabs, panesByTab := d.session.SnapshotState()
-	state := d.workspaceStateFromSnapshot(activeTab, tabs, panesByTab)
+	state := d.workspaceStateFromSnapshot(activeTab, tabs, panesByTab, false)
 
 	if err := persist.Save(config.WorkspacePath(), state); err != nil {
 		log.Printf("snapshot workspace: %v", err)
@@ -372,11 +372,20 @@ func (d *Daemon) snapshot() {
 	for _, tab := range tabs {
 		for _, pane := range panesByTab[tab.ID] {
 			activePaneIDs = append(activePaneIDs, pane.ID)
-			// Type is PluginMu-protected (spawnRestoredPane mutates it on the
-			// lazy-spawn fallback path concurrently with this snapshot).
+			// Type and Overlay are PluginMu-protected (spawnRestoredPane
+			// mutates Type on the lazy-spawn fallback path, handleCreatePane
+			// sets Overlay post-publication, both concurrently with this
+			// snapshot).
 			pane.PluginMu.Lock()
 			typ := pane.Type
+			isOverlay := pane.Overlay
 			pane.PluginMu.Unlock()
+			// Overlay panes are ephemeral: never write their ghost buffer to
+			// disk (they are excluded from workspace.json by design and must
+			// not leave orphaned buffer files behind).
+			if isOverlay {
+				continue
+			}
 			// Skip ghost buffer save for plugins with GhostBuffer disabled
 			if p := d.registry.Get(typ); p != nil && !p.Persistence.GhostBuffer {
 				continue
@@ -1100,7 +1109,18 @@ func (d *Daemon) handleCreatePane(msg *ipc.Message) {
 	pane.Type = paneType
 	pane.InstanceName = payload.InstanceName
 	pane.InstanceArgs = payload.InstanceArgs
-	log.Printf("pane created: %s (type=%s, tab=%s)", pane.ID, paneType, payload.TabID)
+	if payload.Overlay {
+		// CreatePane already PUBLISHED the pane into the session maps, so a
+		// concurrent snapshot/broadcast goroutine may be reading it — both
+		// writes go under PluginMu (same discipline as Muted).
+		pane.PluginMu.Lock()
+		pane.Overlay = true
+		// Overlay panes are muted at the source: a hidden lazygit
+		// refreshing must not ping the notification sidebar.
+		pane.Muted = true
+		pane.PluginMu.Unlock()
+	}
+	log.Printf("pane created: %s (type=%s, tab=%s, overlay=%v)", pane.ID, paneType, payload.TabID, payload.Overlay)
 
 	ptySession := apty.New()
 	if err := d.spawnPane(pane, ptySession, false); err != nil {
@@ -1194,21 +1214,49 @@ func (d *Daemon) handleDestroyPane(msg *ipc.Message) {
 
 	d.session.DestroyPane(payload.PaneID)
 
-	// Auto-create replacement if last pane in tab was destroyed
+	// Auto-create replacement if the last NORMAL pane in the tab was
+	// destroyed. Overlay panes don't count — a tab holding only a hidden
+	// lazygit overlay would otherwise render an empty layout. Remaining
+	// overlays are destroyed along with the tab's last normal pane.
 	if tabID != "" {
-		if panes := d.session.Panes(tabID); len(panes) == 0 {
-			if newPane, err := d.session.CreatePane(tabID, d.defaultCWD()); err == nil {
-				newPane.Type = "terminal"
-				ptySession := apty.New()
-				if err := d.spawnPane(newPane, ptySession, false); err != nil {
-					log.Printf("failed to start replacement shell: %v", err)
-				}
-			}
-		}
+		d.ensureTabNotEmpty(tabID)
 	}
 
 	d.broadcastState()
 	d.requestSnapshot()
+}
+
+// ensureTabNotEmpty destroys orphaned overlay panes and spawns a fresh
+// terminal pane when a tab has no normal panes left. Shared by the TUI
+// destroy path (handleDestroyPane) and the MCP path (handleDestroyPaneReq).
+func (d *Daemon) ensureTabNotEmpty(tabID string) {
+	var overlays []*Pane
+	normal := 0
+	for _, p := range d.session.Panes(tabID) {
+		p.PluginMu.Lock()
+		isOverlay := p.Overlay
+		p.PluginMu.Unlock()
+		if isOverlay {
+			overlays = append(overlays, p)
+		} else {
+			normal++
+		}
+	}
+	if normal > 0 {
+		return
+	}
+	for _, op := range overlays {
+		log.Printf("pane destroy: orphaned overlay %s (tab=%s)", op.ID, tabID)
+		d.cleanupPaneArtifacts(op.ID)
+		d.session.DestroyPane(op.ID)
+	}
+	if newPane, err := d.session.CreatePane(tabID, d.defaultCWD()); err == nil {
+		newPane.Type = "terminal"
+		ptySession := apty.New()
+		if err := d.spawnPane(newPane, ptySession, false); err != nil {
+			log.Printf("failed to start replacement shell: %v", err)
+		}
+	}
 }
 
 func (d *Daemon) handlePaneInput(msg *ipc.Message) {
@@ -1293,7 +1341,17 @@ func (d *Daemon) handleUpdatePane(msg *ipc.Message) {
 		pane.Name = payload.Name
 	}
 	if payload.CWD != "" {
-		pane.CWD = payload.CWD
+		// Defense-in-depth: skip UNC/device paths (\\host\share, //host/share,
+		// \\?\..., \\.\...) that an attacker could inject via a crafted OSC7
+		// sequence. The primary mitigation is in gitdiscover.canonical, which
+		// prevents these paths from being probed at all; this guard additionally
+		// prevents a UNC value from being persisted into workspace.json and later
+		// handed to os.Stat in spawnRestoredPane.
+		if !strings.HasPrefix(payload.CWD, `\\`) && !strings.HasPrefix(payload.CWD, `//`) {
+			pane.CWD = payload.CWD
+		} else {
+			log.Printf("pane %s: rejected UNC CWD %q", pane.ID, payload.CWD)
+		}
 	}
 	if payload.Muted != nil {
 		pane.PluginMu.Lock()
@@ -1399,29 +1457,62 @@ func (d *Daemon) streamPTYOutput(paneID string, pty apty.Session) {
 	// PluginMu to avoid data race).
 	if pane := d.session.Pane(paneID); pane != nil {
 		code := pty.WaitExit()
-		pane.PluginMu.Lock()
-		pane.ExitCode = &code
-		pane.ExitedAt = time.Now()
-		pane.PluginMu.Unlock()
-		log.Printf("pane %s: process exited with code %d", paneID, code)
+		d.onPaneExit(pane, code)
+	}
+}
 
-		severity := "info"
-		title := "Process exited (code 0)"
-		if code != 0 {
-			severity = "error"
-			title = fmt.Sprintf("Process failed (code %d)", code)
+// onPaneExit records the exit state, emits the process_exit event, and
+// auto-destroys overlay panes. Extracted from streamPTYOutput so it can be
+// called and tested without a real PTY.
+//
+// Goroutine safety: called from the PTY-output goroutine. All sub-operations
+// (PluginMu, session.mu, broadcast, requestSnapshot) take their own locks and
+// are safe to call from any goroutine — the broadcast helpers already document
+// this property (see the nil-guarded broadcast helper).
+func (d *Daemon) onPaneExit(pane *Pane, code int) {
+	pane.PluginMu.Lock()
+	pane.ExitCode = &code
+	pane.ExitedAt = time.Now()
+	isOverlay := pane.Overlay
+	pane.PluginMu.Unlock()
+	log.Printf("pane %s: process exited with code %d", pane.ID, code)
+
+	severity := "info"
+	title := "Process exited (code 0)"
+	if code != 0 {
+		severity = "error"
+		title = fmt.Sprintf("Process failed (code %d)", code)
+	}
+	d.emitEvent(withExcerpt(PaneEvent{
+		ID:        uuid.New().String(),
+		PaneID:    pane.ID,
+		TabID:     pane.TabID,
+		PaneName:  pane.Name,
+		Type:      "process_exit",
+		Title:     title,
+		Severity:  severity,
+		Timestamp: time.Now(),
+		Data:      map[string]string{"exit_code": strconv.Itoa(code)},
+	}, paneOutputExcerpt(pane, 5)))
+
+	// Overlay panes are ephemeral: auto-destroy on exit so the TUI
+	// reconciliation clears the slot and the next Alt+G creates fresh.
+	// Normal panes survive as exited husks (existing behavior unchanged).
+	if isOverlay {
+		log.Printf("pane exit: auto-destroying overlay %s", pane.ID)
+		tabID := pane.TabID
+		d.cleanupPaneArtifacts(pane.ID)
+		if err := d.session.DestroyPane(pane.ID); err != nil {
+			log.Printf("onPaneExit: destroy overlay %s: %v", pane.ID, err)
 		}
-		d.emitEvent(withExcerpt(PaneEvent{
-			ID:        uuid.New().String(),
-			PaneID:    paneID,
-			TabID:     pane.TabID,
-			PaneName:  pane.Name,
-			Type:      "process_exit",
-			Title:     title,
-			Severity:  severity,
-			Timestamp: time.Now(),
-			Data:      map[string]string{"exit_code": strconv.Itoa(code)},
-		}, paneOutputExcerpt(pane, 5)))
+		// ensureTabNotEmpty is a cheap no-op when normal panes remain (the
+		// common case). It guards the degenerate case where an overlay was
+		// somehow the tab's only pane — shouldn't happen because
+		// handleDestroyPane calls ensureTabNotEmpty before we get here, but
+		// defense in depth costs nothing.
+		d.ensureTabNotEmpty(tabID)
+		d.broadcastState()
+		d.requestSnapshot()
 	}
 }
 
@@ -1564,20 +1655,42 @@ func (d *Daemon) broadcastState() {
 
 func (d *Daemon) buildWorkspaceState() map[string]any {
 	activeTab, tabs, panesByTab := d.session.SnapshotState()
-	return d.workspaceStateFromSnapshot(activeTab, tabs, panesByTab)
+	return d.workspaceStateFromSnapshot(activeTab, tabs, panesByTab, true)
 }
 
 // workspaceStateFromSnapshot is the pure half of buildWorkspaceState — it
 // turns an already-taken SnapshotState into the wire/persistence map. Callers
 // that already hold a consistent snapshot (e.g. snapshot()) reuse it instead
 // of calling SnapshotState a second time.
-func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panesByTab map[string][]*Pane) map[string]any {
+//
+// includeOverlays controls whether ephemeral overlay panes are present in the
+// output. Pass true for live broadcasts (TUI needs them for routing) and false
+// for disk snapshots (overlays are intentionally ephemeral — gone on restart).
+func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panesByTab map[string][]*Pane, includeOverlays bool) map[string]any {
 	tabList := make([]map[string]any, 0, len(tabs))
 	paneList := make([]map[string]any, 0)
 
 	for _, tab := range tabs {
-		paneIDs := make([]string, len(tab.Panes))
-		copy(paneIDs, tab.Panes)
+		// Overlay is PluginMu-guarded like Muted: handleCreatePane sets it
+		// AFTER the pane is published to the session maps, concurrently with
+		// this snapshot/broadcast. Capture one consistent view per tab here
+		// and reuse it for both the pane-ID filter and the pane-loop skip.
+		overlayIDs := make(map[string]bool)
+		for _, pane := range panesByTab[tab.ID] {
+			pane.PluginMu.Lock()
+			isOverlay := pane.Overlay
+			pane.PluginMu.Unlock()
+			if isOverlay {
+				overlayIDs[pane.ID] = true
+			}
+		}
+		paneIDs := make([]string, 0, len(tab.Panes))
+		for _, pid := range tab.Panes {
+			if !includeOverlays && overlayIDs[pid] {
+				continue
+			}
+			paneIDs = append(paneIDs, pid)
+		}
 		tabData := map[string]any{
 			"id":    tab.ID,
 			"name":  tab.Name,
@@ -1590,6 +1703,11 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 		tabList = append(tabList, tabData)
 
 		for _, pane := range panesByTab[tab.ID] {
+			// overlayIDs was captured under PluginMu above — reuse it so the
+			// skip decision agrees with the pane-ID filter for this snapshot.
+			if !includeOverlays && overlayIDs[pane.ID] {
+				continue
+			}
 			paneData := map[string]any{
 				"id":     pane.ID,
 				"tab_id": pane.TabID,
@@ -1601,10 +1719,11 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			// them on the lazy-spawn error paths (CWD="" when the saved dir is
 			// gone, Type="terminal" on spawn fallback) concurrently with this
 			// snapshot. Capture both under the same lock as the other
-			// PluginMu-guarded fields.
+			// PluginMu-guarded fields (Overlay included — see session.go).
 			pane.PluginMu.Lock()
 			typ := pane.Type
 			cwd := pane.CWD
+			isOverlay := pane.Overlay
 			if len(pane.PluginState) > 0 {
 				// Copy to avoid holding lock during JSON marshal
 				ps := make(map[string]string, len(pane.PluginState))
@@ -1637,6 +1756,9 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			if pane.Cols > 0 && pane.Rows > 0 {
 				paneData["cols"] = pane.Cols
 				paneData["rows"] = pane.Rows
+			}
+			if isOverlay {
+				paneData["overlay"] = true
 			}
 			paneList = append(paneList, paneData)
 		}
@@ -3068,18 +3190,10 @@ func (d *Daemon) handleDestroyPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 		return
 	}
 
-	// Auto-create replacement if last pane in tab (same as handleDestroyPane)
-	tab := d.session.Tab(tabID)
-	if tab != nil && len(tab.Panes) == 0 {
-		newPane, _ := d.session.CreatePane(tabID, d.defaultCWD())
-		if newPane != nil {
-			newPane.Type = "terminal"
-			ptySession := apty.NewWithSize(80, 24)
-			if err := d.spawnPane(newPane, ptySession, false); err != nil {
-				log.Printf("handleDestroyPaneReq: auto-create: %v", err)
-			}
-		}
-	}
+	// Auto-create replacement if the last normal pane in the tab was
+	// destroyed. Delegates to ensureTabNotEmpty (shared with handleDestroyPane)
+	// so overlay-pane accounting and auto-recovery are identical on both paths.
+	d.ensureTabNotEmpty(tabID)
 
 	d.broadcastState()
 	d.requestSnapshot()

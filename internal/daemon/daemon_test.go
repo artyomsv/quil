@@ -84,7 +84,7 @@ func TestWorkspaceStateFromSnapshot(t *testing.T) {
 		},
 	}
 
-	state := d.workspaceStateFromSnapshot("tab-aaaaaaaa", tabs, panesByTab)
+	state := d.workspaceStateFromSnapshot("tab-aaaaaaaa", tabs, panesByTab, false)
 
 	if got := state["active_tab"]; got != "tab-aaaaaaaa" {
 		t.Errorf("active_tab = %v, want tab-aaaaaaaa", got)
@@ -309,3 +309,230 @@ func TestDaemon_RefreshPluginStateFromHooks_EmptyHookIDPreservesExisting(t *test
 	}
 }
 
+// TestWorkspaceState_OverlayPane_BroadcastVsDisk verifies that overlay panes
+// are present (and flagged overlay=true) in live broadcasts but absent from
+// disk snapshots — both in the pane list and in the tab's pane-ID list.
+func TestWorkspaceState_OverlayPane_BroadcastVsDisk(t *testing.T) {
+	d := New(config.Default())
+
+	tab := &Tab{
+		ID:    "tab-aabbccdd",
+		Name:  "Work",
+		Panes: []string{"pane-11111111", "pane-22222222"},
+	}
+	normal := &Pane{
+		ID:    "pane-11111111",
+		TabID: "tab-aabbccdd",
+		CWD:   "/tmp",
+	}
+	overlay := &Pane{
+		ID:      "pane-22222222",
+		TabID:   "tab-aabbccdd",
+		CWD:     "/tmp/repo",
+		Overlay: true,
+	}
+
+	tabs := []*Tab{tab}
+	panesByTab := map[string][]*Pane{tab.ID: {normal, overlay}}
+
+	// Broadcast: overlay pane must be included and carry overlay=true.
+	live := d.workspaceStateFromSnapshot(tab.ID, tabs, panesByTab, true)
+	livePanes := live["panes"].([]map[string]any)
+	if len(livePanes) != 2 {
+		t.Fatalf("broadcast panes = %d, want 2", len(livePanes))
+	}
+	var flagged bool
+	for _, p := range livePanes {
+		if p["id"] == overlay.ID {
+			if p["overlay"] == true {
+				flagged = true
+			} else {
+				t.Errorf("broadcast overlay pane missing overlay=true; got %v", p["overlay"])
+			}
+		}
+	}
+	if !flagged {
+		t.Error("broadcast pane list did not contain the overlay pane")
+	}
+
+	// Disk: overlay pane must be absent from both the pane list and the
+	// tab's pane-ID list.
+	disk := d.workspaceStateFromSnapshot(tab.ID, tabs, panesByTab, false)
+	diskPanes := disk["panes"].([]map[string]any)
+	if len(diskPanes) != 1 {
+		t.Fatalf("disk panes = %d, want 1", len(diskPanes))
+	}
+	if diskPanes[0]["id"] != normal.ID {
+		t.Fatalf("disk panes[0].id = %v, want %s", diskPanes[0]["id"], normal.ID)
+	}
+	diskTabs := disk["tabs"].([]map[string]any)
+	if len(diskTabs) != 1 {
+		t.Fatalf("disk tabs = %d, want 1", len(diskTabs))
+	}
+	ids := diskTabs[0]["panes"].([]string)
+	for _, id := range ids {
+		if id == overlay.ID {
+			t.Error("disk tab pane-ID list must not reference the overlay pane")
+		}
+	}
+}
+
+// TestEnsureTabNotEmpty_LastNormalPaneGone_DestroysOverlayAndRecovers verifies
+// that ensureTabNotEmpty destroys orphaned overlay panes and creates a
+// replacement terminal pane when the last normal pane in a tab is gone.
+func TestEnsureTabNotEmpty_LastNormalPaneGone_DestroysOverlayAndRecovers(t *testing.T) {
+	d := newTestDaemon(t)
+	tab := d.session.CreateTab("t")
+	normal, err := d.session.CreatePane(tab.ID, "/tmp")
+	if err != nil {
+		t.Fatalf("create normal pane: %v", err)
+	}
+	overlay, err := d.session.CreatePane(tab.ID, "/tmp/repo")
+	if err != nil {
+		t.Fatalf("create overlay pane: %v", err)
+	}
+	overlay.PluginMu.Lock()
+	overlay.Overlay = true
+	overlay.PluginMu.Unlock()
+
+	// Destroy the last normal pane, then drive ensureTabNotEmpty.
+	if err := d.session.DestroyPane(normal.ID); err != nil {
+		t.Fatalf("destroy normal pane: %v", err)
+	}
+	d.ensureTabNotEmpty(tab.ID)
+
+	panes := d.session.Panes(tab.ID)
+	for _, p := range panes {
+		if p.ID == overlay.ID {
+			t.Error("overlay pane must be destroyed when the last normal pane goes")
+		}
+		p.PluginMu.Lock()
+		ov := p.Overlay
+		p.PluginMu.Unlock()
+		if ov {
+			t.Error("no overlay panes may remain")
+		}
+	}
+	if len(panes) == 0 {
+		t.Error("auto-recovery must have created a replacement pane")
+	}
+}
+
+// TestEnsureTabNotEmpty_NormalPanesRemain_NoOp verifies that ensureTabNotEmpty
+// is a no-op when at least one normal pane still exists in the tab.
+func TestEnsureTabNotEmpty_NormalPanesRemain_NoOp(t *testing.T) {
+	d := newTestDaemon(t)
+	tab := d.session.CreateTab("t")
+	_, err := d.session.CreatePane(tab.ID, "/tmp")
+	if err != nil {
+		t.Fatalf("create normal pane: %v", err)
+	}
+	overlay, err := d.session.CreatePane(tab.ID, "/tmp/repo")
+	if err != nil {
+		t.Fatalf("create overlay pane: %v", err)
+	}
+	overlay.PluginMu.Lock()
+	overlay.Overlay = true
+	overlay.PluginMu.Unlock()
+
+	d.ensureTabNotEmpty(tab.ID)
+
+	if got := len(d.session.Panes(tab.ID)); got != 2 {
+		t.Errorf("panes = %d, want 2 (no-op when a normal pane remains)", got)
+	}
+}
+
+// TestWorkspaceState_OverlayFlip_NoRace is a -race regression guard for the
+// Pane.Overlay locking discipline: handleCreatePane sets Overlay AFTER the
+// pane is published to the session maps, so a concurrent snapshot/broadcast
+// goroutine reading the pane must observe the field only under PluginMu.
+// One goroutine flips Overlay under PluginMu while another builds the
+// workspace state in a loop; the race detector flags any unlocked access.
+func TestWorkspaceState_OverlayFlip_NoRace(t *testing.T) {
+	d := New(config.Default())
+
+	tab := &Tab{ID: "tab-racerace", Name: "race", Panes: []string{"pane-cafecafe"}}
+	pane := &Pane{ID: "pane-cafecafe", TabID: "tab-racerace", CWD: "/tmp"}
+	tabs := []*Tab{tab}
+	panesByTab := map[string][]*Pane{tab.ID: {pane}}
+
+	const iters = 100
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < iters; i++ {
+			pane.PluginMu.Lock()
+			pane.Overlay = i%2 == 0
+			pane.PluginMu.Unlock()
+		}
+	}()
+
+	for i := 0; i < iters; i++ {
+		_ = d.workspaceStateFromSnapshot(tab.ID, tabs, panesByTab, true)
+	}
+	<-done
+}
+
+// TestOnPaneExit_OverlayAutoDestroyed verifies that onPaneExit destroys an
+// overlay pane on exit while leaving normal panes intact. This is the fix for
+// the Alt+G dead-overlay issue: without auto-destroy, the TUI state machine
+// would re-show a dead overlay forever.
+func TestOnPaneExit_OverlayAutoDestroyed(t *testing.T) {
+	// newTestDaemon mutates package-level vars — must not be t.Parallel().
+	d := newTestDaemon(t)
+	tab := d.session.CreateTab("work")
+
+	normal, err := d.session.CreatePane(tab.ID, "/tmp")
+	if err != nil {
+		t.Fatalf("create normal pane: %v", err)
+	}
+
+	overlay, err := d.session.CreatePane(tab.ID, "/tmp/repo")
+	if err != nil {
+		t.Fatalf("create overlay pane: %v", err)
+	}
+	overlay.PluginMu.Lock()
+	overlay.Overlay = true
+	overlay.PluginMu.Unlock()
+
+	// Simulate overlay process exit.
+	d.onPaneExit(overlay, 0)
+
+	// Overlay pane must be gone from the session.
+	if p := d.session.Pane(overlay.ID); p != nil {
+		t.Error("overlay pane must be destroyed after exit; still present in session")
+	}
+
+	// Normal pane must still exist.
+	if p := d.session.Pane(normal.ID); p == nil {
+		t.Error("normal pane must not be destroyed when overlay exits")
+	}
+}
+
+// TestOnPaneExit_NormalPaneSurvivesExit verifies that a normal (non-overlay)
+// pane is NOT auto-destroyed on exit — it survives as an exited husk, which
+// is the existing deliberate behavior.
+func TestOnPaneExit_NormalPaneSurvivesExit(t *testing.T) {
+	// newTestDaemon mutates package-level vars — must not be t.Parallel().
+	d := newTestDaemon(t)
+	tab := d.session.CreateTab("work")
+
+	normal, err := d.session.CreatePane(tab.ID, "/tmp")
+	if err != nil {
+		t.Fatalf("create normal pane: %v", err)
+	}
+
+	d.onPaneExit(normal, 1)
+
+	// Normal pane must still exist in session (as an exited husk).
+	if p := d.session.Pane(normal.ID); p == nil {
+		t.Error("normal pane must survive exit as an exited husk")
+	}
+	// ExitCode must be set.
+	normal.PluginMu.Lock()
+	exitCode := normal.ExitCode
+	normal.PluginMu.Unlock()
+	if exitCode == nil || *exitCode != 1 {
+		t.Errorf("ExitCode = %v, want 1", exitCode)
+	}
+}

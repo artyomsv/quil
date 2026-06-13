@@ -16,6 +16,7 @@ export type IconName =
   | "code"
   | "book-open"
   | "key-round"
+  | "heart-pulse"
   | "layout-panel-left";
 
 export interface Feature {
@@ -189,6 +190,20 @@ export const features: Feature[] = [
       "If yours is older, a full-screen split view opens: your config on the left (editable), the new default on the right (read-only). Diff highlighting shows red for your custom lines and green for new additions.",
       "Ctrl+C / Ctrl+V to copy lines from the default into your config, Ctrl+S to save, F5 to accept the full default. Esc is blocked — migration must be resolved before the workspace loads.",
       "Multiple stale plugins get a tab bar. Each must be resolved independently.",
+    ],
+  },
+  {
+    slug: "lazygit-overlay",
+    icon: "code",
+    title: "Lazygit overlay",
+    blurb:
+      "Press Alt+G to drop a full-tab git UI over any pane — pointed at the repository of whatever directory that pane is working in.",
+    category: "extensibility",
+    detail: [
+      "Alt+G toggles a per-tab lazygit overlay for the repository resolved from the active pane's working directory; press it again to hide — the process keeps running, so re-opening is instant with lazygit's UI state intact.",
+      "Repositories are discovered automatically near the pane (the enclosing repo plus one level down); when several are found, a picker lets you choose which to open.",
+      "Also available as an ordinary pane via Ctrl+N → Tools → Lazygit, where the setup dialog lists the same discovered repositories with a Browse… fallback.",
+      "Overlays are ephemeral — one per tab, never persisted, recreated with one keypress, and auto-destroyed when you quit lazygit. Offered only when the lazygit binary is on PATH.",
     ],
   },
 

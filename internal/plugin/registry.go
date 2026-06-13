@@ -300,7 +300,8 @@ type tomlPlugin struct {
 			Default    bool     `toml:"default"`
 			Group      string   `toml:"group"`
 		} `toml:"toggles"`
-		RawKeys []string `toml:"raw_keys"`
+		RawKeys  []string `toml:"raw_keys"`
+		Discover string   `toml:"discover"`
 	} `toml:"command"`
 	Persistence struct {
 		Strategy    string `toml:"strategy"`
@@ -359,6 +360,13 @@ func loadPluginTOML(path string) (*PanePlugin, error) {
 		return nil, fmt.Errorf("plugin %q: unknown strategy %q", tp.Plugin.Name, tp.Persistence.Strategy)
 	}
 
+	switch tp.Command.Discover {
+	case "", "git":
+		// valid
+	default:
+		return nil, fmt.Errorf("plugin %q: unknown discover mode %q", tp.Plugin.Name, tp.Command.Discover)
+	}
+
 	displayName := tp.Plugin.DisplayName
 	if displayName == "" {
 		displayName = tp.Plugin.Name
@@ -387,6 +395,7 @@ func loadPluginTOML(path string) (*PanePlugin, error) {
 			ArgTemplate:      append([]string{}, tp.Command.ArgTemplate...),
 			PromptsCWD:       tp.Command.PromptsCWD,
 			RawKeys:          rawKeys,
+			Discover:         tp.Command.Discover,
 		},
 		Persistence: PersistenceConfig{
 			Strategy:    tp.Persistence.Strategy,

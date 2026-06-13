@@ -93,6 +93,22 @@ export const plugins: PluginEntry[] = [
       "Resume strategy: re-spawn with the same forward URL on reboot",
     ],
   },
+  {
+    slug: "lazygit",
+    name: "Lazygit",
+    kind: "built-in",
+    description:
+      "A git UI pane backed by [lazygit](https://github.com/jesseduffield/lazygit). Open it as an ordinary pane from Ctrl+N → Tools, or toggle it as a full-tab overlay over any pane with Alt+G — pointed at the git repository of whatever directory the active pane is working in. Offered only when the lazygit binary is found on PATH.",
+    spawnExample:
+      '# lazygit.toml — relevant fields\n[plugin]\nname = "lazygit"\nschema_version = 1\n\n[command]\ncmd = "lazygit"\ndetect = "lazygit --version"\nprompts_cwd = true\ndiscover = "git"          # list nearby repos in the setup dialog\n\n[persistence]\nstrategy = "rerun"\nghost_buffer = false',
+    features: [
+      "Alt+G toggles a per-tab lazygit overlay for the repo resolved from the active pane's working directory; press it again to hide — the process keeps running, so re-opening is instant with its UI state intact.",
+      'discover = "git" turns the setup-dialog directory step into a repo picker: the enclosing repository plus one-level subfolders (up to ten), with a Browse… fallback to the plain directory browser.',
+      "When several repositories are found near the pane, a picker lets you choose which one to open.",
+      "Repo discovery is a pure filesystem walk that canonicalises paths and rejects UNC/device paths, so an untrusted working directory can't steer it onto a network share.",
+      "Overlays are ephemeral — one per tab, excluded from workspace snapshots, recreated with one keypress, and auto-destroyed when you quit lazygit (q).",
+    ],
+  },
 ];
 
 export const pluginAuthoringRef =

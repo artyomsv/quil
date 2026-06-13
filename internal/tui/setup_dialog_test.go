@@ -1354,3 +1354,86 @@ func TestEnterSetupOrSplit_GitDiscover_CapsCandidates(t *testing.T) {
 		t.Fatalf("len(repoCandidates) = %d, want %d (capped)", len(m.repoCandidates), maxRepoCandidates)
 	}
 }
+
+// TestSetupDialogWidth_FloorGrowthAndCap exercises the three branches of
+// setupDialogWidth: the floor (no/short labels), label-driven growth (the box
+// widens to fit the longest toggle row), and the terminal-width cap (the box
+// never exceeds m.width). The growth/cap expectations are derived from the same
+// label length the registry is built with, so the test stays correct if the
+// helper's overhead constants change meaning but not value.
+func TestSetupDialogWidth_FloorGrowthAndCap(t *testing.T) {
+	// rowOverhead mirrors setupDialogWidth: "> " prefix (2) + "[x] " box (4) +
+	// dialogBorder Padding(1,2) → 4 = 10 cells on top of the label width.
+	const rowOverhead = 10
+
+	// A label long enough to push the box well past the floor of 70.
+	longLabel := strings.Repeat("x", 80) // 80 cells wide (ASCII → 1 cell each)
+	grownWidth := rowOverhead + len(longLabel) // 90
+
+	dir := t.TempDir()
+	// Plugin "wide" has a long label; "narrow" has only a short label.
+	wideTOML := fmt.Sprintf(`[plugin]
+name = "wide"
+display_name = "Wide"
+category = "ai"
+
+[command]
+cmd = "true"
+
+[[command.toggles]]
+name = "long"
+label = %q
+args_when_on = ["--long"]
+default = false
+`, longLabel)
+	narrowTOML := `[plugin]
+name = "narrow"
+display_name = "Narrow"
+category = "ai"
+
+[command]
+cmd = "true"
+
+[[command.toggles]]
+name = "short"
+label = "Short"
+args_when_on = ["--short"]
+default = false
+`
+	if err := os.WriteFile(filepath.Join(dir, "wide.toml"), []byte(wideTOML), 0644); err != nil {
+		t.Fatalf("write wide.toml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "narrow.toml"), []byte(narrowTOML), 0644); err != nil {
+		t.Fatalf("write narrow.toml: %v", err)
+	}
+	r := plugin.NewRegistry()
+	if err := r.LoadFromDir(dir); err != nil {
+		t.Fatalf("LoadFromDir: %v", err)
+	}
+
+	tests := []struct {
+		name     string
+		width    int
+		selected string
+		want     int
+	}{
+		{"unknown plugin falls back to floor", 200, "no-such-plugin", 70},
+		{"short label stays at floor", 200, "narrow", 70},
+		{"long label grows past floor", 200, "wide", grownWidth},
+		{"grown width capped to terminal", 80, "wide", 80 - 2},
+		{"unset width skips cap", 0, "wide", grownWidth},
+		{"floor capped to tiny terminal", 40, "narrow", 40 - 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := Model{
+				pluginRegistry: r,
+				selectedPlugin: tt.selected,
+				width:          tt.width,
+			}
+			if got := m.setupDialogWidth(); got != tt.want {
+				t.Errorf("setupDialogWidth() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}

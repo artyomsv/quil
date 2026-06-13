@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Claude Code Chrome support toggle** — the Claude Code pane setup dialog now offers a standalone "Chrome support" checkbox that appends `--chrome` to the launch command, connecting the CLI to the Claude in Chrome browser extension. It is independent of the permission-mode radio buttons, so it can be combined with either mode (or neither). Requires the Claude in Chrome extension (v1.0.36+) and `claude` ≥ 2.0.73. The pane setup dialog now also auto-sizes its width to fit the longest toggle label instead of a fixed width, so long option descriptions render on one line.
+
 ## [1.22.0] - 2026-06-13
 
 ### Added

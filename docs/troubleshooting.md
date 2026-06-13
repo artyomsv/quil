@@ -167,8 +167,11 @@ For OpenCode the equivalent files are under `~/.quil/opencodehook/` and `~/.quil
 | `~/.quil/mcp-logs/<pane-id>.log` | Per-pane MCP interaction log (tool name, timestamp, sanitized detail) |
 | `~/.quil/claudehook/hook.log` | Errors from the Claude Code SessionStart hook |
 | `~/.quil/opencodehook/hook.log` | Errors / breadcrumbs from the OpenCode JS plugin |
+| `~/.quil/quild.stderr.log` | Daemon panics and SIGQUIT goroutine dumps (anything the Go runtime writes to stderr) |
 
 From inside the TUI: `F1 → View client log` / `View daemon log` / `View MCP logs` opens a read-only viewer with `Alt+Up` / `Alt+Down` for paged navigation.
+
+**Wedge diagnostics:** if the daemon ever stops responding, search `quild.log` for `WATCHDOG` — when no workspace snapshot completes for 2 minutes, the daemon writes a full goroutine stack dump there. Attach that dump to a bug report; it pinpoints the blocked code path exactly.
 
 ## Enable debug logging
 
@@ -204,6 +207,8 @@ quil restart
 It prints which environment it's operating on (production `~/.quil` or dev `QUIL_HOME`), stops the daemon with bounded escalation — graceful IPC shutdown (final snapshot) → SIGTERM → force-kill, each tier with a timeout so a deadlocked daemon can't stall it — cleans up stale pid/socket files, starts a fresh daemon, and opens the TUI. Your tabs and panes respawn from the last snapshot.
 
 `quil daemon restart` does the same without launching the TUI.
+
+A related single-pane symptom: an AI pane (e.g. Claude Code after a context compaction) stops reacting to keystrokes while everything else works. The process has stopped reading its stdin. The daemon drops the unread keystrokes (you'll see a **"Pane not accepting input"** warning in the notification sidebar, `Alt+N`) instead of freezing — restart that one pane (close with `Ctrl+W` and recreate, or use the MCP `restart_pane` tool) to recover it.
 
 ## Force-stop the daemon
 

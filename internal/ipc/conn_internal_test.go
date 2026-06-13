@@ -3,9 +3,35 @@ package ipc
 import (
 	"net"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
+
+// sendLoopCount returns the number of live (*Conn).sendLoop goroutines by
+// scanning a full goroutine stack dump. Counting only this function makes
+// the leak check immune to unrelated goroutine churn from the test runner
+// and sibling tests — the global runtime.NumGoroutine() delta this test
+// previously asserted on was flaky under parallel execution (it blocked a
+// release run and a PR CI run before being replaced).
+func sendLoopCount() int {
+	buf := make([]byte, 1<<20)
+	n := runtime.Stack(buf, true)
+	return strings.Count(string(buf[:n]), "(*Conn).sendLoop(")
+}
+
+// waitSendLoopCount polls until the live sendLoop count equals want or the
+// deadline passes; returns the final observed count.
+func waitSendLoopCount(want int, timeout time.Duration) int {
+	deadline := time.Now().Add(timeout)
+	for {
+		got := sendLoopCount()
+		if got == want || time.Now().After(deadline) {
+			return got
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
 
 // TestSendLoop_ExitsOnWriteError verifies that when the underlying socket
 // Write fails (peer disconnected mid-send, kernel detected RST, etc.),
@@ -14,18 +40,21 @@ import (
 // hardening.
 //
 // Uses net.Pipe so we can deterministically force a write error by closing
-// the remote end mid-send. Goroutine leak is detected via a runtime-level
-// goroutine count delta around the conn lifecycle.
+// the remote end mid-send.
+//
+// Deliberately NOT t.Parallel: the assertion scans live goroutines for
+// sendLoop frames, and concurrent sibling tests creating conns would race
+// the count. Sequential tests run while parallel ones are still parked, so
+// the count is stable here, and the poll-until-deadline makes the check
+// timing-independent.
 func TestSendLoop_ExitsOnWriteError(t *testing.T) {
-	t.Parallel()
-
-	// Settle the runtime so the baseline goroutine count is stable.
-	runtime.GC()
-	time.Sleep(50 * time.Millisecond)
-	baseline := runtime.NumGoroutine()
+	baseline := sendLoopCount()
 
 	local, remote := net.Pipe()
 	c := newConn(local)
+	if got := waitSendLoopCount(baseline+1, 5*time.Second); got != baseline+1 {
+		t.Fatalf("sendLoop did not start: count=%d, want %d", got, baseline+1)
+	}
 
 	// Close the remote half BEFORE Send. Any subsequent Write on `local`
 	// returns io.ErrClosedPipe, exercising the sendLoop write-error exit.
@@ -36,24 +65,14 @@ func TestSendLoop_ExitsOnWriteError(t *testing.T) {
 		t.Fatalf("sendFrame should queue even before the write fails; got %v", err)
 	}
 
-	// Give sendLoop a moment to consume the frame, attempt the write, and
-	// exit on the resulting error. overflow is never set on this path
-	// (write-error exit is distinct from critical-overflow exit), so we
-	// simply wait a fixed interval for sendLoop to drain and terminate.
-	time.Sleep(100 * time.Millisecond)
-
-	// Explicitly close to release the local pipe half. After Close + a brief
-	// settle, the goroutine count should match baseline (the sendLoop has
-	// already exited on the write error, and nothing else lingers).
-	_ = c.Close()
-
-	runtime.GC()
-	time.Sleep(100 * time.Millisecond)
-
-	if got := runtime.NumGoroutine(); got > baseline+1 {
-		// +1 tolerates the test runner's own bookkeeping goroutine churn.
-		t.Errorf("goroutine leak after sendLoop write-error exit: baseline=%d, after=%d", baseline, got)
+	// The queued frame's Write fails and sendLoop must exit on its own —
+	// before Close is ever called. This is a stronger assertion than the
+	// original (which only checked the count after Close).
+	if got := waitSendLoopCount(baseline, 5*time.Second); got != baseline {
+		t.Errorf("goroutine leak after sendLoop write-error exit: sendLoop count=%d, want %d", got, baseline)
 	}
+
+	_ = c.Close()
 }
 
 // TestConn_CloseIdempotent confirms sync.Once-guarded Close — multiple

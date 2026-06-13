@@ -50,6 +50,7 @@ The active tab is prefixed with `* ` in the tab bar so it's visible even when [t
 |---|---|
 | `Ctrl+N` | New typed pane (plugin picker dialog) |
 | `Ctrl+W` | Close active pane (with confirm) |
+| `Alt+R` | Restart active pane's process in place (with confirm). The process is killed and respawned with the plugin's resume strategy, so AI panes (Claude Code, OpenCode) resume their recorded session. Use this when a pane shows the "Pane not accepting input" warning. |
 | `Alt+Shift+H` | Split side-by-side |
 | `Alt+Shift+V` | Split top/bottom |
 | `Alt+F2` / `Alt+Shift+R` | Rename active pane. `Alt+Shift+R` is a macOS-friendly fallback since `F2` is often eaten by the OS and `Option` is not always passed through as Meta. |

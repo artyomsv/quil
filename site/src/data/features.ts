@@ -249,6 +249,20 @@ export const features: Feature[] = [
     ],
   },
   {
+    slug: "self-healing-daemon",
+    icon: "heart-pulse",
+    title: "Self-healing daemon",
+    blurb:
+      "A wedged AI pane can't freeze your workspace, and `quil restart` recovers anything in one command — tabs and AI sessions restored from the last snapshot.",
+    category: "observability",
+    detail: [
+      "`quil restart` stops the daemon with bounded escalation (graceful IPC shutdown with final snapshot → SIGTERM → force-kill, each tier timed out so even a deadlocked daemon can't stall it), cleans stale pid/socket files, starts fresh, and reopens the TUI.",
+      "Prints the target environment first — production (~/.quil) vs dev (QUIL_HOME) — so you can never kill the wrong daemon. PID-reuse guard: a recorded PID is only signaled if it actually belongs to a quild binary.",
+      "Per-pane input isolation: every pane's stdin is written by its own goroutine behind a bounded queue. A process that stops reading input costs you a 'Pane not accepting input' sidebar warning on that one pane — everything else stays interactive. Alt+R restarts the stuck pane in place with its AI session resumed.",
+      "Liveness watchdog: if no workspace snapshot completes for 2 minutes, the daemon writes a full goroutine stack dump to quild.log — a wedge becomes a precise bug report instead of a silent freeze.",
+    ],
+  },
+  {
     slug: "leveled-logging",
     icon: "book-open",
     title: "Leveled logging + in-app log viewer",

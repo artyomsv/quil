@@ -122,7 +122,12 @@ type KeybindingsConfig struct {
 	// MutePane toggles notification mute on the active pane (idle/bell/exit
 	// events stop firing). Useful for `npm test --watch` and other chatty
 	// processes that would otherwise flood the sidebar.
-	MutePane    string `toml:"mute_pane"`
+	MutePane string `toml:"mute_pane"`
+	// RestartPane kills and respawns the active pane's process in place
+	// (same pane, same plugin resume strategy — AI panes resume their
+	// session via the recorded session id). Recovery for a child that
+	// stopped reading stdin ("Pane not accepting input").
+	RestartPane string `toml:"restart_pane"`
 	GoBack      string `toml:"go_back"`
 	NotesToggle string `toml:"notes_toggle"`
 	// Redraw forces a full screen repaint (tea.ClearScreen). Recovery key
@@ -207,6 +212,7 @@ func Default() Config {
 			NotificationToggle: "alt+n",
 			NotificationFocus:  "f3",
 			MutePane:           "alt+m",
+			RestartPane:        "alt+r",
 			GoBack:             "alt+backspace",
 			NotesToggle:        "alt+e",
 			// Mnemonic: Ctrl+L clears/redraws a shell; the Alt+Shift layer

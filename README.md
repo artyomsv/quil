@@ -50,6 +50,8 @@ Five keys to remember:
 
 That's enough to start. See [docs/quick-start.md](docs/quick-start.md) for the first-launch walkthrough and [docs/keybindings.md](docs/keybindings.md) for the full keymap.
 
+If anything ever hangs: `quil restart` recovers the daemon (escalating stop → fresh start → tabs restored from the last snapshot), and `Alt+R` restarts a single stuck pane in place with its AI session resumed.
+
 ## Let your AI assistant drive Quil
 
 Add this to your AI client's MCP config (Claude Desktop, Claude Code, Cursor, VS Code Copilot):

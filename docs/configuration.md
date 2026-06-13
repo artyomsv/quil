@@ -82,6 +82,7 @@ focus_pane = "ctrl+e"
 notification_toggle = "alt+n"   # show / focus / hide the notification sidebar
 notification_focus = "f3"       # jump focus to the sidebar (alt path when alt+n misbehaves)
 mute_pane = "alt+m"             # toggle notification mute for the active pane
+restart_pane = "alt+r"          # kill + respawn the active pane's process (AI sessions resume)
 toggle_eager = "alt+shift+e"    # toggle eager restore; eager panes respawn on restart, others load lazily
 go_back = "alt+backspace"       # pane history back (after jumping via sidebar Enter)
 notes_toggle = "alt+e"          # toggle pane notes editor
@@ -182,6 +183,7 @@ Multiple modifiers stack with `+` (no spaces). Mouse buttons are not bindable he
 | `notification_toggle` | `alt+n` | Cycle the notification sidebar: hidden → visible → visible+focused → hidden |
 | `notification_focus` | `f3` | Jump focus to the sidebar (alt path when `alt+n` is intercepted by the terminal) |
 | `mute_pane` | `alt+m` | Toggle notification mute on the active pane. Muted panes show `[muted]` on their border and never fire idle / bell / process-exit / hook events. Persisted in `workspace.json` so mute survives daemon restart. |
+| `restart_pane` | `alt+r` | Restart the active pane's process in place (confirm dialog). Kills the child and respawns it with the plugin's resume strategy — AI panes resume their recorded session. Recovery for a process that stopped reading input. |
 | `toggle_eager` | `alt+shift+e` | Toggle eager restore on the active pane. Eager panes respawn immediately on daemon restart; other panes load lazily (process started only when the tab is first opened). Tabs with an eager pane show `●` in the tab bar. Persisted in `workspace.json`. |
 | `go_back` | `alt+backspace` | Pane history back — return to the pane you were on before the sidebar's `Enter` jump |
 | `notes_toggle` | `alt+e` | Open / close the per-pane notes editor |

@@ -80,7 +80,7 @@ export const features: Feature[] = [
       "Run `quil mcp` and an AI agent can list panes, read output, send keystrokes, and snapshot your workspace.",
     category: "ai",
     detail: [
-      "17 tools exposed over the Model Context Protocol (Anthropic's open standard for AI tool use).",
+      "18 tools exposed over the Model Context Protocol (Anthropic's open standard for AI tool use).",
       "Tools include: list/create/destroy panes, read pane output, send keys, switch tabs, screenshot a pane, watch the notification queue, query memory usage per pane, and more.",
       "Lets any MCP-capable client (Claude Desktop, Claude Code, Cursor) reach directly into your running Quil session.",
     ],

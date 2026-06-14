@@ -36,7 +36,7 @@ export const competitorMatrix: CompareRow[] = [
     note: "Quil's defining capability. Everyone else loses the session on reboot.",
   },
   {
-    feature: "AI session auto-resume (Claude Code, Cursor)",
+    feature: "AI session auto-resume (Claude Code, OpenCode)",
     quil: "yes",
     tmux: "no",
     zellij: "no",

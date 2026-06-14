@@ -1,0 +1,99 @@
+---
+/**
+ * Blog index — lists published posts newest-first. Pure static list;
+ * the per-post pages live at /blog/<slug>/ via [...slug].astro.
+ */
+import { getCollection } from "astro:content";
+import Page from "@/layouts/Page.astro";
+
+const posts = (await getCollection("blog", ({ data }) => !data.draft)).sort(
+  (a, b) => b.data.pubDate.getTime() - a.data.pubDate.getTime(),
+);
+
+const seo = {
+  title: "Blog",
+  description:
+    "Guides and notes on reboot-proof terminal workflows, running Claude Code and OpenCode across restarts, and getting more out of Quil.",
+  path: "/blog",
+  keywords: [
+    "quil blog",
+    "claude code tips",
+    "terminal multiplexer guides",
+    "reboot-proof terminal",
+  ],
+};
+
+function fmt(date: Date): string {
+  return date.toLocaleDateString("en-US", {
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+    timeZone: "UTC",
+  });
+}
+---
+<Page {...seo}>
+  <section class="blog-index">
+    <header class="blog-index-head">
+      <h1>Blog</h1>
+      <p>Reboot-proof workflows, AI session continuity, and Quil deep-dives.</p>
+    </header>
+
+    {posts.length === 0 ? (
+      <p class="blog-empty">No posts yet — check back soon.</p>
+    ) : (
+      <ul class="blog-list">
+        {posts.map((post) => (
+          <li class="blog-card">
+            <a href={`/blog/${post.id}/`}>
+              <time datetime={post.data.pubDate.toISOString()}>
+                {fmt(post.data.pubDate)}
+              </time>
+              <h2>{post.data.title}</h2>
+              <p>{post.data.description}</p>
+              <span class="read">Read →</span>
+            </a>
+          </li>
+        ))}
+      </ul>
+    )}
+  </section>
+</Page>
+
+<style>
+  .blog-index {
+    max-width: 46rem;
+    margin: 0 auto;
+    padding: 4rem 1.5rem 6rem;
+  }
+  .blog-index-head h1 {
+    font-size: clamp(2rem, 5vw, 3rem);
+    margin: 0 0 0.5rem;
+  }
+  .blog-index-head p { opacity: 0.65; margin: 0 0 3rem; }
+
+  .blog-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 1.25rem; }
+  .blog-card a {
+    display: block;
+    text-decoration: none;
+    color: inherit;
+    padding: 1.5rem;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 12px;
+    transition: border-color 0.15s ease, transform 0.15s ease;
+  }
+  .blog-card a:hover {
+    border-color: var(--flame, #ff6a2b);
+    transform: translateY(-2px);
+  }
+  .blog-card time {
+    font-size: 0.8rem;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    opacity: 0.55;
+  }
+  .blog-card h2 { font-size: 1.35rem; margin: 0.5rem 0 0.6rem; line-height: 1.25; }
+  .blog-card p { opacity: 0.75; margin: 0 0 0.9rem; line-height: 1.6; }
+  .blog-card .read { color: var(--flame, #ff6a2b); font-weight: 600; font-size: 0.9rem; }
+  .blog-empty { opacity: 0.6; }
+</style>

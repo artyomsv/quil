@@ -25,6 +25,7 @@ A capability-by-capability tour of what Quil does. For configuration knobs, see 
   - [Pane setup dialog](#pane-setup-dialog)
   - [Custom plugins via TOML](#custom-plugins-via-toml)
   - [Lazygit integration](#lazygit-integration)
+  - [k9s integration](#k9s-integration)
 - [Observability](#observability)
   - [Notification center](#notification-center)
   - [Memory reporting](#memory-reporting)
@@ -177,6 +178,20 @@ See the full [plugin reference](plugin-reference.md) for every field.
   Overlays are ephemeral: they don't survive a daemon restart (one keypress
   recreates them). Quit lazygit (`q`) and the overlay pane is destroyed
   automatically; the next Alt+G starts fresh.
+
+### k9s integration
+
+- **k9s plugin** (Ctrl+N → Tools → k9s): opens [k9s](https://github.com/derailed/k9s)
+  as a regular pane — a Kubernetes cluster TUI. Unlike lazygit, k9s is
+  cluster-scoped rather than directory-scoped, so there is no working-directory
+  prompt; it connects to whatever your kubeconfig points at (the `KUBECONFIG`
+  env var, then `~/.kube/config`). Only offered when the `k9s` binary is
+  installed. Cross-platform (Windows, macOS, Linux).
+- **Toggles**: a read-only toggle (`--readonly`) lets the pane browse a cluster
+  with all mutating commands disabled, and a start-on-Pods toggle opens k9s
+  directly on the pods view.
+- **Persistence**: on daemon restart the pane re-runs k9s and reconnects
+  (`rerun` strategy; no stale-frame replay).
 
 ---
 

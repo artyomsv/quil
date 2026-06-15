@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **k9s plugin** — Kubernetes cluster TUI as a built-in pane type. Binary-gated
+  (greyed out when `k9s` is not on `PATH`), opens as a normal pane with optional
+  read-only (`--readonly`) and start-on-Pods toggles. k9s is cluster-scoped, so
+  there is no working-directory prompt — it connects to whatever your kubeconfig
+  points at (`KUBECONFIG` / `~/.kube/config`). Cross-platform (Windows, macOS,
+  Linux); re-runs and reconnects on daemon restart.
+
 ## [1.26.0] - 2026-06-15
 
 ## [1.25.1] - 2026-06-15

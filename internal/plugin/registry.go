@@ -361,7 +361,7 @@ func loadPluginTOML(path string) (*PanePlugin, error) {
 	}
 
 	switch tp.Command.Discover {
-	case "", "git":
+	case "", "git", "kube":
 		// valid
 	default:
 		return nil, fmt.Errorf("plugin %q: unknown discover mode %q", tp.Plugin.Name, tp.Command.Discover)

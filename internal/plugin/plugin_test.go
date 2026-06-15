@@ -842,6 +842,29 @@ prompts_cwd = true
 	}
 }
 
+func TestLoadPluginTOML_DiscoverKube(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "k.toml")
+	data := []byte(`
+[plugin]
+name = "k9s"
+[command]
+cmd = "k9s"
+discover = "kube"
+`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p, err := loadPluginTOML(path)
+	if err != nil {
+		t.Fatalf("loadPluginTOML: %v", err)
+	}
+	if p.Command.Discover != "kube" {
+		t.Errorf("Discover = %q, want kube", p.Command.Discover)
+	}
+}
+
 func TestLoadPluginTOML_DiscoverInvalid(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

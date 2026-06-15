@@ -5,13 +5,28 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Go](https://img.shields.io/badge/Go-1.25-00ADD8.svg)](https://go.dev)
 [![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg)](#install)
-[![MCP](https://img.shields.io/badge/MCP-17%20tools-orange.svg)](docs/mcp.md)
+[![MCP](https://img.shields.io/badge/MCP-18%20tools-orange.svg)](docs/mcp.md)
 
 ---
 
 A terminal multiplexer built for developers who orchestrate 5–10 sessions per project across AI assistants, build watchers, webhook tunnels, and SSH connections. Unlike tmux, Quil understands **projects** and **typed panes**: it persists your entire workspace across reboots, auto-resumes AI conversations by session id, and lets your AI assistant drive your terminal over [MCP](docs/mcp.md).
 
 Type `quil` after a reboot — every tab, pane, working directory, layout split, and AI conversation is right where you left it.
+
+<p align="center">
+  <img src="https://cdn.stukans.com/quil/screenshots/pane-restoration-1280.png"
+       alt="Quil restoring tabs, panes, and Claude Code sessions after a reboot" width="880">
+</p>
+
+## See it
+
+| Survives a full reboot | AI drives your terminal |
+|:---:|:---:|
+| <img src="https://cdn.stukans.com/quil/screenshots/pane-restoration-800.webp" alt="Panes and AI sessions restoring after reboot" width="420"> | <img src="https://cdn.stukans.com/quil/screenshots/claude-code-quil-mcp-800.webp" alt="Claude Code talking to the Quil MCP server" width="420"> |
+| Panes, working dirs, and AI sessions snap back in ~30s. | Expose Quil over MCP — agents list panes, read output, send keys. |
+| **Many projects, one window** | **Typed panes** |
+| <img src="https://cdn.stukans.com/quil/screenshots/focus-screen-800.webp" alt="Focus mode across a dozen project tabs" width="420"> | <img src="https://cdn.stukans.com/quil/screenshots/claude-code-setup-dialog-800.webp" alt="Claude Code pane setup dialog with directory browser and toggles" width="420"> |
+| Focus mode + a dozen project tabs. | Per-type setup: dir browser, resume strategy, permission toggles. |
 
 ## Install
 

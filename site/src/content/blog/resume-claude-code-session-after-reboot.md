@@ -2,7 +2,7 @@
 title: "How to Resume Your Claude Code Session After a Reboot — Automatically"
 description: "Reboot your machine and your Claude Code conversation is gone. Here's the manual fix with claude --resume, why it doesn't scale, and how to make it automatic."
 pubDate: 2026-06-14
-ogImage: "/blog/img/hero-reboot-restore.png"
+ogImage: "https://cdn.stukans.com/quil/screenshots/pane-restoration-og.png"
 keywords:
   - "resume claude code session after reboot"
   - "claude code session lost after restart"
@@ -14,7 +14,7 @@ draft: false
 
 *You rebooted. Claude Code forgot everything. Here's the manual fix, why it falls apart across a real project, and how to make session resume happen by itself.*
 
-![Cold boot, then `quil` restoring panes and a Claude Code session](/blog/img/hero-reboot-restore.gif)
+![Quil restoring tabs, panes, and Claude Code sessions after a reboot](https://cdn.stukans.com/quil/screenshots/pane-restoration-1280.webp)
 
 You were three hours into a refactor. Claude Code knew the whole plan — the files it had touched, the decisions you'd made together, the half-finished migration it was walking through. Then you installed an OS update, the machine rebooted, and you opened a fresh terminal to… nothing. Empty prompt. The conversation, and all of its context, gone.
 
@@ -84,7 +84,7 @@ Here's the mechanism, because the "how" matters for trusting it:
 3. Quil continuously snapshots your whole workspace: the tab and pane layout, each pane's working directory, scrollback, and the recorded session ids.
 4. After a reboot, you type `quil`. It rebuilds the layout, drops each pane back into its directory, and runs `claude --resume <the-recorded-id>` for every Claude Code pane — automatically, with the *post-rotation* id, not a stale one.
 
-![Two Claude Code panes mid-conversation plus a shell, each pane border labeled with its working directory](/blog/img/typed-panes.png)
+![Quil in focus mode with a dozen project tabs — many AI sessions, one workspace](https://cdn.stukans.com/quil/screenshots/focus-screen-1280.webp)
 
 Because the id is captured by a hook rather than guessed, it works for the hard cases the manual path chokes on: several agents in one repo, sessions that compacted while you were away, projects spread across many tabs. OpenCode sessions are tracked the same way.
 

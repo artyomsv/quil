@@ -109,6 +109,15 @@ for (const feature of features) {
                       <li>{bullet}</li>
                     ))}
                   </ul>
+                  {feature.image && (
+                    <img
+                      class="feat-shot"
+                      src={feature.image}
+                      alt={`${feature.title} — Quil screenshot`}
+                      loading="lazy"
+                      decoding="async"
+                    />
+                  )}
                 </div>
               </div>
             ))}
@@ -134,3 +143,16 @@ for (const feature of features) {
     </div>
   </section>
 </Page>
+
+<style>
+  /* Feature screenshots (opt-in via the data layer's `image` field). */
+  .feat-shot {
+    display: block;
+    width: 100%;
+    max-width: 640px;
+    height: auto;
+    margin-top: 18px;
+    border-radius: 10px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+  }
+</style>

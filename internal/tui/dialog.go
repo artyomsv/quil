@@ -666,6 +666,12 @@ func (m Model) renderDialog() string {
 		content = m.renderConfirmDialog()
 	case dialogCreatePane:
 		content = m.renderCreatePaneDialog()
+		// Auto-fit so plugin rows never wrap — e.g. a greyed entry that
+		// appends a homepage URL can exceed the default width. Padding(1,2)
+		// costs 4 cells; +2 margin guards reflow's long-token edge case.
+		if w := maxContentLineWidth(content) + 6; w > width {
+			width = w
+		}
 	case dialogCreatePaneSetup:
 		width = m.setupDialogWidth() // grows to fit the longest toggle label
 		content = m.renderCreatePaneSetupDialog()
@@ -687,8 +693,25 @@ func (m Model) renderDialog() string {
 		content = m.renderGitRepoPickDialog()
 	}
 
+	// Never render wider than the terminal (border adds +2 outside Width).
+	if m.width > 2 && width > m.width-2 {
+		width = m.width - 2
+	}
+
 	box := dialogBorder.Width(width).Render(content)
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
+}
+
+// maxContentLineWidth returns the widest visible line in content (ANSI-aware),
+// used to auto-size a dialog box to its content.
+func maxContentLineWidth(content string) int {
+	max := 0
+	for _, line := range strings.Split(content, "\n") {
+		if w := lipgloss.Width(line); w > max {
+			max = w
+		}
+	}
+	return max
 }
 
 func (m Model) renderAboutDialog() string {
@@ -1331,7 +1354,7 @@ func (m Model) renderCreatePaneDialog() string {
 
 			b.WriteByte('\n')
 			if cursorOnUnavailable {
-				b.WriteString(dialogErrorStyle.Render("Not installed — install the tool from the link above, then restart quil") + "\n")
+				b.WriteString(dialogErrorStyle.Render("Not installed — install it (link above), then restart") + "\n")
 			}
 			b.WriteString(dialogSubtle.Render("Esc back"))
 		}

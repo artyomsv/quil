@@ -196,6 +196,9 @@ func syncPaneMeta(pane *PaneModel, info *PaneInfo) {
 	pane.Type = info.Type
 	pane.Muted = info.Muted
 	pane.Eager = info.Eager
+	pane.Pending = info.Pending
+	pane.SessionID = info.SessionID
+	pane.HistoryLines = info.HistoryLines
 	if info.Muted {
 		pane.working = false
 	}

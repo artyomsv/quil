@@ -601,6 +601,7 @@ func (d *Daemon) restoreWorkspace() error {
 					pane.OutputBuf.Write(bufData)
 					pane.GhostSnap = make([]byte, len(bufData))
 					copy(pane.GhostSnap, bufData)
+					pane.HistoryLines = bytes.Count(bufData, []byte{'\n'})
 					log.Printf("restore: loaded ghost buffer %s (%d bytes)", paneID, len(bufData))
 				} else if err != nil {
 					log.Printf("restore: ghost buffer load error %s: %v", paneID, err)
@@ -879,27 +880,35 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 			if pane.OutputBuf == nil {
 				continue
 			}
-			// Type is PluginMu-protected — a concurrent lazy spawn
-			// (ensurePaneSpawned on another IPC goroutine) can rewrite it.
+			// Type and GhostSnap are PluginMu-protected — a concurrent lazy
+			// spawn (ensurePaneSpawned) can rewrite Type, and a second client's
+			// attach (each IPC conn runs on its own goroutine) races the
+			// take-and-clear of GhostSnap. Read Type, decide ghost eligibility,
+			// and atomically take+clear GhostSnap in ONE lock span; then release
+			// before the slow chunked replay (never hold PluginMu across I/O).
 			pane.PluginMu.Lock()
 			typ := pane.Type
-			pane.PluginMu.Unlock()
+			ghostEnabled := true
 			if p := d.registry.Get(typ); p != nil && !p.Persistence.GhostBuffer {
-				continue
+				ghostEnabled = false
 			}
-			ghost := pane.GhostSnap
+			var ghost []byte
 			source := "ghostsnap"
-			if ghost == nil {
-				ghost = pane.OutputBuf.Bytes() // reconnect — use full buffer
-				source = "outputbuf"
+			if ghostEnabled {
+				ghost = pane.GhostSnap
+				if ghost == nil {
+					ghost = pane.OutputBuf.Bytes() // reconnect — use full buffer
+					source = "outputbuf"
+				}
+				pane.GhostSnap = nil // take-and-clear under the lock
 			}
-			if len(ghost) == 0 {
+			pane.PluginMu.Unlock()
+			if !ghostEnabled || len(ghost) == 0 {
 				continue
 			}
 			log.Printf("attach: ghost replay pane %s (type=%s, source=%s, bytes=%d)",
 				pane.ID, typ, source, len(ghost))
 			sendGhostChunked(conn, pane.ID, ghost, d.shutdown)
-			pane.GhostSnap = nil // clear after first replay
 		}
 	}
 
@@ -1724,6 +1733,8 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			typ := pane.Type
 			cwd := pane.CWD
 			isOverlay := pane.Overlay
+			sessionID := pane.PluginState["session_id"]
+			historyLines := pane.HistoryLines
 			if len(pane.PluginState) > 0 {
 				// Copy to avoid holding lock during JSON marshal
 				ps := make(map[string]string, len(pane.PluginState))
@@ -1739,6 +1750,31 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 				paneData["eager"] = true
 			}
 			pane.PluginMu.Unlock()
+			// Pending (deferred, not yet lazy-spawned) is spawnMu-guarded —
+			// read it the same way list_panes does. The TUI uses it to show the
+			// restore indicator on deferred panes and to re-arm the indicator
+			// when the pane actually spawns (Pending→running on tab switch).
+			// Broadcast-only: Pending is runtime state, never persisted to disk
+			// (gated on includeOverlays, like overlay panes).
+			if includeOverlays {
+				pane.spawnMu.Lock()
+				pending := pane.Pending
+				pane.spawnMu.Unlock()
+				if pending {
+					paneData["pending"] = true
+				}
+			}
+			// Broadcast-only restore-checklist hints (runtime, never persisted):
+			// the tracked session id and the ghost-buffer line count the TUI
+			// shows in the per-pane restore checklist.
+			if includeOverlays {
+				if sessionID != "" {
+					paneData["session_id"] = sessionID
+				}
+				if historyLines > 0 {
+					paneData["history_lines"] = historyLines
+				}
+			}
 			paneData["cwd"] = cwd
 			if typ != "" && typ != "terminal" {
 				paneData["type"] = typ

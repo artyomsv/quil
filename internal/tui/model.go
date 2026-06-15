@@ -54,14 +54,17 @@ type TabInfo struct {
 }
 
 type PaneInfo struct {
-	ID      string
-	TabID   string
-	CWD     string
-	Name    string
-	Type    string
-	Muted   bool
-	Eager   bool
-	Overlay bool
+	ID           string
+	TabID        string
+	CWD          string
+	Name         string
+	Type         string
+	Muted        bool
+	Eager        bool
+	Overlay      bool
+	Pending      bool // deferred restore — not yet lazy-spawned
+	SessionID    string
+	HistoryLines int
 }
 
 // paneSettleRepaintMsg fires shortly after a pane's first live output and
@@ -768,18 +771,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case spinnerTickMsg:
-		// Advance spinner frame for the resuming/preparing pane
+		// Advance spinner frame for the resuming/preparing pane. Exactly one
+		// tick chain per pane: spinnerTickRunning (set at the start site) is
+		// cleared here when the chain stops, so a re-arm can start a fresh one
+		// without ever stacking two chains (which would double the frame rate).
 		for _, tab := range m.tabs {
 			if tab.Root == nil {
 				continue
 			}
-			if leaf := tab.Root.FindLeaf(msg.paneID); leaf != nil && (leaf.Pane.resuming || leaf.Pane.preparing) {
-				// Auto-clear after minimum display + no more ghost state
-				if !leaf.Pane.ghost && time.Since(leaf.Pane.resumeStart) >= 2*time.Second {
-					leaf.Pane.resuming = false
-					leaf.Pane.preparing = false
-					return m, nil
-				}
+			leaf := tab.Root.FindLeaf(msg.paneID)
+			if leaf == nil {
+				continue
+			}
+			// Keep the indicator alive until the pane's first live output
+			// (min display met) or the safety cap — not a fixed 2s timer.
+			if (leaf.Pane.resuming || leaf.Pane.preparing) && !leaf.Pane.restoreSettled() {
 				leaf.Pane.spinnerFrame = msg.frame
 				nextFrame := msg.frame + 1
 				paneID := msg.paneID
@@ -787,6 +793,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return spinnerTickMsg{paneID: paneID, frame: nextFrame}
 				})
 			}
+			// Chain stopped: settled, or no longer resuming/preparing.
+			leaf.Pane.resuming = false
+			leaf.Pane.preparing = false
+			leaf.Pane.spinnerTickRunning = false
+			return m, nil
 		}
 		return m, nil
 
@@ -834,9 +845,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// resizeAllPanes only walks tab.Leaves() (the layout tree), so overlay
 		// panes are skipped there; these cmds are the only resize they receive.
 		cmds = append(cmds, overlayResizeCmds...)
-		// Start spinner ticks for newly restored panes
+		// Start spinner ticks for newly restored panes. Guard tree panes with
+		// spinnerTickRunning so a pane that already has a live tick chain (e.g.
+		// armed in a previous broadcast) never gets a second one — two chains
+		// would advance spinnerFrame independently and double the visible rate.
+		// Overlay panes (not in the tree) keep their prior ungated behavior.
 		for _, paneID := range newPaneIDs {
 			id := paneID
+			if leaf := m.leafByID(id); leaf != nil {
+				if leaf.Pane.spinnerTickRunning {
+					continue
+				}
+				leaf.Pane.spinnerTickRunning = true
+			}
 			cmds = append(cmds, tea.Tick(100*time.Millisecond, func(t time.Time) tea.Msg {
 				return spinnerTickMsg{paneID: id, frame: 1}
 			}))
@@ -1118,6 +1139,21 @@ func (m *Model) activePaneByID(id string) *PaneModel {
 	for _, p := range tab.Leaves() {
 		if p.ID == id {
 			return p
+		}
+	}
+	return nil
+}
+
+// leafByID returns the layout leaf for a pane id across all tabs (tree panes
+// only — overlay panes live outside the tree). Used to guard spinner-tick
+// chains against stacking.
+func (m *Model) leafByID(id string) *LayoutNode {
+	for _, tab := range m.tabs {
+		if tab.Root == nil {
+			continue
+		}
+		if leaf := tab.Root.FindLeaf(id); leaf != nil {
+			return leaf
 		}
 	}
 	return nil
@@ -2008,15 +2044,20 @@ func (m *Model) handlePaneOutput(msg PaneOutputMsg) tea.Cmd {
 					}
 				}
 				leaf.Pane.ghost = false
-				// Clear spinner labels after minimum display time (2s)
-				if time.Since(leaf.Pane.resumeStart) >= 2*time.Second {
-					leaf.Pane.resuming = false
-					leaf.Pane.preparing = false
-				}
 			}
 			appendStart := time.Now()
 			leaf.Pane.AppendOutput(msg.Data)
 			m.perfStats.recordPaneOutput(len(msg.Data), time.Since(appendStart))
+
+			// Settle the restore state once the pane actually shows visible
+			// content (checked AFTER AppendOutput so the VT reflects this
+			// frame). A boot frame that only clears the screen leaves it blank
+			// and keeps the indicator up; the frame that paints real content
+			// clears it. Mirrors restoreSettled() used by the spinner tick.
+			if (leaf.Pane.resuming || leaf.Pane.preparing) && leaf.Pane.restoreSettled() {
+				leaf.Pane.resuming = false
+				leaf.Pane.preparing = false
+			}
 
 			var cmds []tea.Cmd
 			if !msg.Ghost && !leaf.Pane.liveOutputSeen {
@@ -2143,7 +2184,18 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) ([]string, []tea.Cm
 				// Already in tree — just update metadata.
 				if info, ok := paneMap[paneID]; ok {
 					if leaf := tab.Root.FindLeaf(paneID); leaf != nil {
+						wasPending := leaf.Pane.Pending
 						syncPaneMeta(leaf.Pane, info)
+						// A deferred pane that just lazy-spawned (Pending→running,
+						// e.g. on tab switch): arm the restore indicator NOW so it
+						// covers the real boot, and enroll it for spinner ticks.
+						// Its boot clock starts here, not at the original restore.
+						if wasPending && !info.Pending {
+							leaf.Pane.resuming = true
+							leaf.Pane.resumeStart = time.Now()
+							newPaneIDs = append(newPaneIDs, paneID)
+							log.Printf("apply: pane %s spawned (pending→resuming)", paneID)
+						}
 					}
 				}
 				continue
@@ -2151,21 +2203,29 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) ([]string, []tea.Cm
 
 			// New pane — reuse model if it existed elsewhere, otherwise create.
 			pane, ok := existingPanes[paneID]
+			info := paneMap[paneID]
 			if !ok {
 				pane = NewPaneModel(paneID, m.replayBufSize())
 				pane.resumeStart = time.Now()
-				if len(existingTabs) > 0 {
+				switch {
+				case info != nil && info.Pending:
+					// Deferred pane (other tab, not spawned yet). Don't arm the
+					// boot clock now — it spawns lazily on tab switch, where the
+					// Pending→running transition arms resuming. The indicator
+					// still shows while Pending (showRestoreIndicator) if visited.
+					log.Printf("apply: new pane %s (pending/deferred)", paneID)
+				case len(existingTabs) > 0:
 					pane.preparing = true // new pane created while TUI is running
 					log.Printf("apply: new pane %s (preparing)", paneID)
-				} else if len(tabInfo.Layout) > 0 {
+				case len(tabInfo.Layout) > 0:
 					pane.resuming = true // restored pane with saved layout
 					log.Printf("apply: new pane %s (resuming, has layout)", paneID)
-				} else {
+				default:
 					log.Printf("apply: new pane %s (fresh, no layout)", paneID)
 				}
 				newPaneIDs = append(newPaneIDs, paneID)
 			}
-			if info, ok := paneMap[paneID]; ok {
+			if info != nil {
 				syncPaneMeta(pane, info)
 			}
 
@@ -3065,6 +3125,15 @@ func parseWorkspaceState(raw map[string]any) WorkspaceStateMsg {
 				}
 				if overlay, ok := pm["overlay"].(bool); ok {
 					pi.Overlay = overlay
+				}
+				if pending, ok := pm["pending"].(bool); ok {
+					pi.Pending = pending
+				}
+				if sid, ok := pm["session_id"].(string); ok {
+					pi.SessionID = sid
+				}
+				if hl, ok := pm["history_lines"].(float64); ok {
+					pi.HistoryLines = int(hl)
 				}
 				state.Panes = append(state.Panes, pi)
 			}

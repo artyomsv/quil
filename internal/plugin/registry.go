@@ -276,6 +276,7 @@ type tomlPlugin struct {
 		DisplayName   string `toml:"display_name"`
 		Category      string `toml:"category"`
 		Description   string `toml:"description"`
+		Homepage      string `toml:"homepage"`
 		SchemaVersion int    `toml:"schema_version"`
 	} `toml:"plugin"`
 	Command struct {
@@ -385,6 +386,7 @@ func loadPluginTOML(path string) (*PanePlugin, error) {
 		DisplayName: displayName,
 		Category:    category,
 		Description: tp.Plugin.Description,
+		Homepage:    tp.Plugin.Homepage,
 		Command: CommandConfig{
 			Cmd:              tp.Command.Cmd,
 			Path:             tp.Command.Path,

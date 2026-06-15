@@ -49,6 +49,7 @@ schema_version = 1
 | `display_name` | string | No | Value of `name` | Human-readable label shown in the Ctrl+N creation dialog and pane borders. |
 | `category` | string | No | `"tools"` | Groups the plugin in the creation dialog. |
 | `description` | string | No | `""` | One-line description shown in plugin lists. |
+| `homepage` | string | No | `""` | Project/tool URL. When the plugin's binary isn't found on `PATH`, the Ctrl+N list shows the entry greyed out with this link (instead of hiding it), so users know where to get the tool. |
 | `schema_version` | int | No | `0` | Plugin TOML schema version. Built-in plugins shipped via `defaults/*.toml` carry an embedded `schema_version`; on startup, Quil compares your on-disk file's value with the embedded default and — if yours is older — opens a side-by-side migration dialog so you can merge new defaults without losing edits. **Custom plugins**: set `schema_version = 1` and bump it whenever you publish a breaking schema change so consumers of your plugin get a prompt. Omitting the field is treated as `0` (legacy) and the migration check is skipped. |
 
 ### Categories

@@ -6,6 +6,7 @@ name = "lazygit"
 display_name = "Lazygit"
 category = "tools"
 description = "Git TUI for the current workspace"
+homepage = "https://github.com/jesseduffield/lazygit"
 schema_version = 1
 
 [command]

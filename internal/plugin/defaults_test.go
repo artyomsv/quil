@@ -113,6 +113,9 @@ func TestEnsureDefaultPlugins_WritesK9s(t *testing.T) {
 	if p.Name != "k9s" || p.Command.Cmd != "k9s" {
 		t.Errorf("name/cmd = %q/%q", p.Name, p.Command.Cmd)
 	}
+	if p.Homepage != "https://github.com/derailed/k9s" {
+		t.Errorf("Homepage = %q, want the k9s URL", p.Homepage)
+	}
 	// k9s is cluster-scoped, not directory-scoped: no CWD prompt. Discovery
 	// is by kube context, so the setup dialog offers a context pick-list.
 	if p.Command.PromptsCWD {

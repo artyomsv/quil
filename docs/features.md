@@ -187,8 +187,9 @@ See the full [plugin reference](plugin-reference.md) for every field.
   prompt. The setup dialog instead offers a **kube-context picker**: "Default
   context" (your kubeconfig current-context) plus the contexts found in
   `KUBECONFIG` / `~/.kube/config`, and pins the pane to the chosen one via
-  `--context`. Only offered when the `k9s` binary is installed. Cross-platform
-  (Windows, macOS, Linux).
+  `--context`. When `k9s` is not on `PATH` the entry is shown greyed with a
+  link to its homepage (rather than hidden), so it stays discoverable.
+  Cross-platform (Windows, macOS, Linux).
 - **Toggles**: a read-only toggle (`--readonly`) lets the pane browse a cluster
   with all mutating commands disabled, and a start-on-Pods toggle opens k9s
   directly on the pods view.

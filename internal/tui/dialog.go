@@ -925,7 +925,10 @@ func (m *Model) createPaneCategories() []struct {
 	if m.pluginRegistry == nil {
 		return nil
 	}
-	byCategory := m.pluginRegistry.AvailableByCategory()
+	// All plugins (not just available): unavailable ones are shown greyed with
+	// their homepage so users discover what to install, instead of silently
+	// vanishing from the list.
+	byCategory := m.pluginRegistry.ByCategory()
 	order := plugin.CategoryOrder()
 
 	var result []struct {
@@ -938,10 +941,9 @@ func (m *Model) createPaneCategories() []struct {
 		if len(plugins) == 0 {
 			continue
 		}
-		// Sort plugins by display name for consistency
-		sort.Slice(plugins, func(i, j int) bool {
-			return plugins[i].DisplayName < plugins[j].DisplayName
-		})
+		// Available plugins first, then alphabetical — keeps the actionable
+		// entries on top and greyed (not-installed) ones below.
+		sortPluginsAvailableFirst(plugins)
 		result = append(result, struct {
 			key     string
 			label   string
@@ -959,9 +961,7 @@ func (m *Model) createPaneCategories() []struct {
 			}
 		}
 		if !found {
-			sort.Slice(plugins, func(i, j int) bool {
-				return plugins[i].DisplayName < plugins[j].DisplayName
-			})
+			sortPluginsAvailableFirst(plugins)
 			result = append(result, struct {
 				key     string
 				label   string
@@ -970,6 +970,17 @@ func (m *Model) createPaneCategories() []struct {
 		}
 	}
 	return result
+}
+
+// sortPluginsAvailableFirst orders available plugins ahead of unavailable
+// ones, alphabetical by display name within each group.
+func sortPluginsAvailableFirst(plugins []*plugin.PanePlugin) {
+	sort.SliceStable(plugins, func(i, j int) bool {
+		if plugins[i].Available != plugins[j].Available {
+			return plugins[i].Available // available (true) sorts before unavailable
+		}
+		return plugins[i].DisplayName < plugins[j].DisplayName
+	})
 }
 
 func (m Model) handleCreatePaneKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -1064,6 +1075,12 @@ func (m Model) handleCreatePaneSelect() (tea.Model, tea.Cmd) {
 		}
 		plugins := cats[m.selectedCategory].plugins
 		if m.dialogCursor >= len(plugins) {
+			return m, nil
+		}
+		// Unavailable plugins are greyed and not selectable — the binary isn't
+		// installed, so there's nothing to spawn. The inline footer hint
+		// (rendered while the cursor is on it) tells the user where to get it.
+		if !plugins[m.dialogCursor].Available {
 			return m, nil
 		}
 		m.selectedPlugin = plugins[m.dialogCursor].Name
@@ -1281,21 +1298,41 @@ func (m Model) renderCreatePaneDialog() string {
 			b.WriteString(dialogTitle.Render(cat.label))
 			b.WriteString("\n\n")
 
+			cursorOnUnavailable := false
 			for i, p := range cat.plugins {
 				cursor := "  "
-				style := dialogNormal
-				if i == m.dialogCursor {
-					cursor = "> "
-					style = dialogSelected
-				}
-				line := style.Render(p.DisplayName)
-				if p.Description != "" {
-					line += "  " + dialogSubtle.Render(p.Description)
+				selected := i == m.dialogCursor
+				var line string
+				if !p.Available {
+					// Greyed, not selectable — show why and where to get it.
+					if selected {
+						cursor = "> "
+						cursorOnUnavailable = true
+					}
+					note := "(not installed"
+					if p.Homepage != "" {
+						note += " — " + p.Homepage
+					}
+					note += ")"
+					line = dialogSubtle.Render(p.DisplayName + "  " + note)
+				} else {
+					style := dialogNormal
+					if selected {
+						cursor = "> "
+						style = dialogSelected
+					}
+					line = style.Render(p.DisplayName)
+					if p.Description != "" {
+						line += "  " + dialogSubtle.Render(p.Description)
+					}
 				}
 				b.WriteString(cursor + line + "\n")
 			}
 
 			b.WriteByte('\n')
+			if cursorOnUnavailable {
+				b.WriteString(dialogErrorStyle.Render("Not installed — install the tool from the link above, then restart quil") + "\n")
+			}
 			b.WriteString(dialogSubtle.Render("Esc back"))
 		}
 

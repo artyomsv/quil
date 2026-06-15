@@ -6,6 +6,7 @@ name = "k9s"
 display_name = "k9s"
 category = "tools"
 description = "Kubernetes cluster TUI"
+homepage = "https://github.com/derailed/k9s"
 schema_version = 1
 
 [command]

@@ -6,6 +6,7 @@ name = "stripe"
 display_name = "Stripe"
 category = "tools"
 description = "Stripe webhook listener"
+homepage = "https://github.com/stripe/stripe-cli"
 
 [command]
 cmd = "stripe"

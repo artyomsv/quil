@@ -18,6 +18,7 @@ type PanePlugin struct {
 	DisplayName   string
 	Category      string
 	Description   string
+	Homepage      string // optional project/tool URL, shown when the binary is missing
 	Command       CommandConfig
 	Persistence   PersistenceConfig
 	Display       DisplayConfig

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.27.0] - 2026-06-15
+
 ### Added
 
 - **Uninstalled tool plugins stay discoverable** — the `Ctrl+N` pane-creation

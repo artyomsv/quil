@@ -365,8 +365,8 @@ func TestDefaultPluginTOMLFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Verify all 3 default TOML files were created
-	for _, name := range []string{"claude-code.toml", "ssh.toml", "stripe.toml"} {
+	// Verify all 5 default TOML files were created
+	for _, name := range []string{"claude-code.toml", "ssh.toml", "stripe.toml", "lazygit.toml", "k9s.toml"} {
 		path := filepath.Join(dir, name)
 		if _, err := os.Stat(path); err != nil {
 			t.Errorf("expected default plugin file %s: %v", name, err)

@@ -7,6 +7,8 @@ display_name = "Stripe"
 category = "tools"
 description = "Stripe webhook listener"
 homepage = "https://github.com/stripe/stripe-cli"
+# v1: added `homepage` (shown greyed in Ctrl+N when the binary is missing).
+schema_version = 1
 
 [command]
 cmd = "stripe"

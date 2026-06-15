@@ -22,7 +22,13 @@ const { title, description, path, ogImage, keywords } = Astro.props;
 
 const fullTitle = `${title} · ${SITE.name}`;
 const canonicalURL = canonical(path);
-const ogImageURL = SITE.url + (ogImage ?? SITE.defaultOgImage);
+// ogImage may be a site-relative path ("/og/home.png") or an absolute
+// URL (a CDN-hosted card). Only prefix the origin for relative paths,
+// otherwise an absolute URL gets double-prefixed (https://quil.cchttps://…).
+const ogImageURL =
+  ogImage && /^https?:\/\//.test(ogImage)
+    ? ogImage
+    : SITE.url + (ogImage ?? SITE.defaultOgImage);
 ---
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />

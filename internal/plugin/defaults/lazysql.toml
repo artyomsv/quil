@@ -1,0 +1,32 @@
+# lazysql — database TUI (MySQL, PostgreSQL, SQLite, MSSQL)
+# Edit this file to customize the plugin. Delete it to restore defaults.
+
+[plugin]
+name = "lazysql"
+display_name = "lazysql"
+category = "tools"
+description = "Database TUI (MySQL, PostgreSQL, SQLite, MSSQL)"
+homepage = "https://github.com/jorgerojas26/lazysql"
+schema_version = 1
+
+[command]
+cmd = "lazysql"
+# path = "/path/to/lazysql"  # uncomment to override PATH lookup
+detect = "lazysql --version"
+# lazysql is connection-scoped, not directory-scoped: it opens its own
+# connection-manager UI and reads connections from its own config. No CWD
+# prompt and no Quil-side connection picker — the only launch arg lazysql
+# accepts is a full DSN (with credentials), which must never reach argv.
+prompts_cwd = false
+
+[[command.toggles]]
+name = "read_only"
+label = "Read-only (no data modification)"
+args_when_on = ["--read-only"]
+default = false
+
+[persistence]
+# Re-run lazysql on daemon restart; it reopens its connection manager.
+strategy = "rerun"
+# Full-screen TUI — replaying stale frames on reconnect is useless.
+ghost_buffer = false

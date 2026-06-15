@@ -134,3 +134,34 @@ func TestEnsureDefaultPlugins_WritesK9s(t *testing.T) {
 		t.Errorf("toggle names = %q,%q", p.Command.Toggles[0].Name, p.Command.Toggles[1].Name)
 	}
 }
+
+func TestEnsureDefaultPlugins_WritesLazysql(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := EnsureDefaultPlugins(dir); err != nil {
+		t.Fatalf("EnsureDefaultPlugins: %v", err)
+	}
+	p, err := loadPluginTOML(filepath.Join(dir, "lazysql.toml"))
+	if err != nil {
+		t.Fatalf("load lazysql.toml: %v", err)
+	}
+	if p.Name != "lazysql" || p.Command.Cmd != "lazysql" {
+		t.Errorf("name/cmd = %q/%q", p.Name, p.Command.Cmd)
+	}
+	if p.Homepage != "https://github.com/jorgerojas26/lazysql" {
+		t.Errorf("Homepage = %q, want the lazysql URL", p.Homepage)
+	}
+	// Connection-scoped, not directory-scoped: no CWD prompt, no Quil-side
+	// connection picker (the only launch arg lazysql takes is a credentialed DSN).
+	if p.Command.PromptsCWD {
+		t.Errorf("PromptsCWD = true, want false")
+	}
+	if p.Command.Discover != "" {
+		t.Errorf("Discover = %q, want \"\"", p.Command.Discover)
+	}
+	if p.Persistence.Strategy != "rerun" || p.Persistence.GhostBuffer {
+		t.Errorf("strategy=%q ghost=%v, want rerun/false", p.Persistence.Strategy, p.Persistence.GhostBuffer)
+	}
+	if len(p.Command.Toggles) != 1 || p.Command.Toggles[0].Name != "read_only" {
+		t.Errorf("toggles = %+v, want one read_only", p.Command.Toggles)
+	}
+}

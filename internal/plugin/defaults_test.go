@@ -162,6 +162,13 @@ func TestEnsureDefaultPlugins_WritesLazysql(t *testing.T) {
 		t.Errorf("strategy=%q ghost=%v, want rerun/false", p.Persistence.Strategy, p.Persistence.GhostBuffer)
 	}
 	if len(p.Command.Toggles) != 1 || p.Command.Toggles[0].Name != "read_only" {
-		t.Errorf("toggles = %+v, want one read_only", p.Command.Toggles)
+		t.Fatalf("toggles = %+v, want one read_only", p.Command.Toggles)
+	}
+	tog := p.Command.Toggles[0]
+	if tog.Default {
+		t.Errorf("read_only toggle default = true, want false")
+	}
+	if len(tog.ArgsWhenOn) != 1 || tog.ArgsWhenOn[0] != "--read-only" {
+		t.Errorf("read_only ArgsWhenOn = %v, want [--read-only]", tog.ArgsWhenOn)
 	}
 }

@@ -79,6 +79,9 @@ const routeToFile = {
   "/features": "src/pages/features.astro",
   "/plugins": "src/pages/plugins.astro",
   "/docs": "src/pages/docs.astro",
+  "/blog": "src/pages/blog/index.astro",
+  "/blog/resume-claude-code-session-after-reboot":
+    "src/content/blog/resume-claude-code-session-after-reboot.md",
   "/legal": "src/pages/legal.astro",
   "/vs/tmux": "src/pages/vs/tmux.astro",
   "/vs/zellij": "src/pages/vs/zellij.astro",

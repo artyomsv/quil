@@ -1,0 +1,197 @@
+---
+/**
+ * Blog post page — renders one entry from the `blog` content
+ * collection. Wires per-post SEO (title/description/OG/keywords) plus
+ * BlogPosting + BreadcrumbList JSON-LD through the shared Page layout.
+ *
+ * On quil.cc each post is self-canonical (BaseHead derives it from the
+ * path). When syndicating to Medium / Dev.to / Hashnode, set THEIR
+ * canonical URL to this page's URL so we keep the ranking.
+ */
+import { getCollection, render } from "astro:content";
+import Page from "@/layouts/Page.astro";
+import { SITE, canonical } from "@/data/seo";
+import { breadcrumbSchema } from "@/data/schemas";
+
+export async function getStaticPaths() {
+  const posts = await getCollection("blog", ({ data }) => !data.draft);
+  return posts.map((post) => ({
+    params: { slug: post.id },
+    props: { post },
+  }));
+}
+
+const { post } = Astro.props;
+const { Content } = await render(post);
+
+const path = `/blog/${post.id}/`;
+const published = post.data.pubDate.toISOString();
+const modified = (post.data.updatedDate ?? post.data.pubDate).toISOString();
+
+const blogPosting = {
+  "@context": "https://schema.org",
+  "@type": "BlogPosting",
+  "@id": canonical(path) + "#post",
+  headline: post.data.title,
+  description: post.data.description,
+  datePublished: published,
+  dateModified: modified,
+  author: {
+    "@type": "Person",
+    "@id": SITE.author.url,
+    name: SITE.author.name,
+    url: SITE.author.url,
+  },
+  publisher: { "@id": SITE.url + "/#organization" },
+  mainEntityOfPage: canonical(path),
+  url: canonical(path),
+  inLanguage: SITE.htmlLang,
+  keywords: post.data.keywords,
+  ...(post.data.ogImage ? { image: SITE.url + post.data.ogImage } : {}),
+};
+
+const schemas = [
+  blogPosting,
+  breadcrumbSchema([
+    { name: "Home", path: "/" },
+    { name: "Blog", path: "/blog" },
+    { name: post.data.title, path },
+  ]),
+];
+
+// Human-readable date for the byline.
+const displayDate = post.data.pubDate.toLocaleDateString("en-US", {
+  year: "numeric",
+  month: "long",
+  day: "numeric",
+  timeZone: "UTC",
+});
+---
+<Page
+  title={post.data.title}
+  description={post.data.description}
+  path={path}
+  ogImage={post.data.ogImage}
+  keywords={post.data.keywords}
+  schemas={schemas}
+>
+  <article class="blog-article">
+    <nav class="blog-crumbs" aria-label="Breadcrumb">
+      <a href="/blog/">blog</a>
+      <span aria-hidden="true">/</span>
+      <span>{post.data.title}</span>
+    </nav>
+
+    <header class="blog-head">
+      <h1>{post.data.title}</h1>
+      <p class="blog-meta">
+        <time datetime={published}>{displayDate}</time>
+      </p>
+    </header>
+
+    <div class="blog-body">
+      <Content />
+    </div>
+
+    <footer class="blog-foot">
+      <a href="/install/" class="btn btn-primary"><span>▸ install quil</span></a>
+      <a href="/blog/" class="btn btn-ghost">← all posts</a>
+    </footer>
+  </article>
+</Page>
+
+<style>
+  .blog-article {
+    max-width: 46rem;
+    margin: 0 auto;
+    padding: 4rem 1.5rem 6rem;
+  }
+  .blog-crumbs {
+    font-size: 0.8rem;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    opacity: 0.6;
+    margin-bottom: 2rem;
+    display: flex;
+    gap: 0.6rem;
+  }
+  .blog-crumbs a { color: inherit; text-decoration: none; }
+  .blog-crumbs a:hover { color: var(--flame, #ff6a2b); }
+
+  .blog-head h1 {
+    font-size: clamp(1.9rem, 4vw, 2.8rem);
+    line-height: 1.1;
+    margin: 0 0 0.75rem;
+    letter-spacing: -0.01em;
+  }
+  .blog-meta {
+    font-size: 0.9rem;
+    opacity: 0.6;
+    margin: 0 0 2.5rem;
+  }
+
+  /* Rendered Markdown — scoped styles don't reach <Content/>, so target
+     the body via :global() under the wrapper. */
+  .blog-body :global(h2) {
+    font-size: 1.5rem;
+    margin: 2.5rem 0 0.9rem;
+    line-height: 1.2;
+  }
+  .blog-body :global(h3) {
+    font-size: 1.2rem;
+    margin: 2rem 0 0.7rem;
+  }
+  .blog-body :global(p),
+  .blog-body :global(ul),
+  .blog-body :global(ol) {
+    font-size: 1.05rem;
+    line-height: 1.75;
+    margin: 0 0 1.25rem;
+  }
+  .blog-body :global(ul),
+  .blog-body :global(ol) { padding-left: 1.4rem; }
+  .blog-body :global(li) { margin-bottom: 0.4rem; }
+  .blog-body :global(a) {
+    color: var(--flame, #ff6a2b);
+    text-underline-offset: 3px;
+  }
+  .blog-body :global(strong) { font-weight: 600; }
+  .blog-body :global(img) {
+    max-width: 100%;
+    height: auto;
+    border-radius: 10px;
+    margin: 2rem 0;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+  }
+  .blog-body :global(blockquote) {
+    border-left: 3px solid var(--flame, #ff6a2b);
+    padding-left: 1rem;
+    margin: 1.5rem 0;
+    opacity: 0.85;
+  }
+  /* Inline code; fenced blocks are themed by Shiki at build time. */
+  .blog-body :global(:not(pre) > code) {
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 0.9em;
+    background: rgba(255, 255, 255, 0.07);
+    padding: 0.1em 0.35em;
+    border-radius: 4px;
+  }
+  .blog-body :global(pre) {
+    border-radius: 10px;
+    padding: 1rem 1.1rem;
+    overflow-x: auto;
+    margin: 1.5rem 0;
+    font-size: 0.92rem;
+    line-height: 1.6;
+  }
+
+  .blog-foot {
+    margin-top: 3.5rem;
+    padding-top: 2rem;
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+    display: flex;
+    gap: 1rem;
+    flex-wrap: wrap;
+  }
+</style>

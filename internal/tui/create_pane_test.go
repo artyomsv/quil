@@ -80,3 +80,24 @@ func TestHandleCreatePaneSelect_UnavailablePluginBlocked(t *testing.T) {
 		t.Errorf("createPaneStep = %d, want 1 (stayed on plugin list)", got.createPaneStep)
 	}
 }
+
+func TestMaxContentLineWidth(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want int
+	}{
+		{"empty", "", 0},
+		{"single line", "hello", 5},
+		{"multi line picks widest", "ab\nabcd\nabc", 4},
+		{"trailing newline ignored", "abc\n", 3},
+		{"ansi stripped", "\x1b[31mred\x1b[0m", 3},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := maxContentLineWidth(tt.in); got != tt.want {
+				t.Errorf("maxContentLineWidth(%q) = %d, want %d", tt.in, got, tt.want)
+			}
+		})
+	}
+}

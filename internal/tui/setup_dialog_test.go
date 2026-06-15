@@ -1403,6 +1403,58 @@ func TestSubmitSetup_KubeDefaultRow_NoContextArg(t *testing.T) {
 	}
 }
 
+func TestSetupKubeKey_UpClampAtTop(t *testing.T) {
+	m := kubePickModel(t, []kubediscover.Context{{Name: "prod"}, {Name: "staging"}})
+	m.kubeCursor = 0
+	out, _ := m.handleCreatePaneSetupKey(tea.KeyPressMsg{Code: tea.KeyUp})
+	if got := out.(Model); got.kubeCursor != 0 {
+		t.Errorf("kubeCursor = %d, want 0 (clamped at top)", got.kubeCursor)
+	}
+}
+
+func TestSetupKubeKey_DownClampAtBottom(t *testing.T) {
+	m := kubePickModel(t, []kubediscover.Context{{Name: "prod"}, {Name: "staging"}})
+	m.kubeCursor = 2 // rows = 2 contexts + Default = 3; bottom index = 2
+	out, _ := m.handleCreatePaneSetupKey(tea.KeyPressMsg{Code: tea.KeyDown})
+	if got := out.(Model); got.kubeCursor != 2 {
+		t.Errorf("kubeCursor = %d, want 2 (clamped at bottom)", got.kubeCursor)
+	}
+}
+
+func TestSetupKubeKey_EnterSubmitsAndInjects(t *testing.T) {
+	m := kubePickModel(t, []kubediscover.Context{{Name: "prod"}})
+	m.kubeCursor = 1 // prod
+	out, _ := m.handleCreatePaneSetupKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	got := out.(Model)
+	if got.dialog != dialogCreatePane || got.createPaneStep != 3 {
+		t.Errorf("dialog/step = %v/%d, want dialogCreatePane/3 (advanced via enter dispatch)", got.dialog, got.createPaneStep)
+	}
+	if len(got.selectedInstanceArgs) != 2 || got.selectedInstanceArgs[0] != "--context" || got.selectedInstanceArgs[1] != "prod" {
+		t.Errorf("selectedInstanceArgs = %v, want [--context prod]", got.selectedInstanceArgs)
+	}
+}
+
+func TestEnterSetupOrSplit_Kube_CapsContexts(t *testing.T) {
+	dir := t.TempDir()
+	var b strings.Builder
+	b.WriteString("contexts:\n")
+	for i := 0; i < maxKubeContexts+5; i++ {
+		fmt.Fprintf(&b, "- name: ctx-%d\n  context: {}\n", i)
+	}
+	cfg := filepath.Join(dir, "config")
+	if err := os.WriteFile(cfg, []byte(b.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("KUBECONFIG", cfg)
+
+	m := &Model{pluginRegistry: registryWithK9s(t)}
+	m.enterSetupOrSplit(m.pluginRegistry.Get("k9s"))
+
+	if len(m.kubeContexts) != maxKubeContexts {
+		t.Errorf("kubeContexts = %d, want capped to %d", len(m.kubeContexts), maxKubeContexts)
+	}
+}
+
 // TestEnterSetupOrSplit_GitDiscover_CapsCandidates guards the maxRepoCandidates
 // bound: the pick list has no scroll machinery, so discovery must never hand
 // the dialog more rows than fit the box.

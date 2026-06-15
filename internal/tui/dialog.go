@@ -2406,11 +2406,11 @@ func (m Model) handleCreatePaneSetupKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd
 				}
 			}
 			return m, nil
-		case "up":
+		case "up", "k":
 			n := m.setupFieldCount(p)
 			m.setupFieldCursor = (m.setupFieldCursor - 1 + n) % n
 			return m, nil
-		case "down":
+		case "down", "j":
 			m.setupFieldCursor = (m.setupFieldCursor + 1) % m.setupFieldCount(p)
 			return m, nil
 		case "enter":
@@ -2420,9 +2420,12 @@ func (m Model) handleCreatePaneSetupKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd
 
 	case "continue":
 		switch key {
-		case "up":
+		case "up", "k":
 			n := m.setupFieldCount(p)
 			m.setupFieldCursor = (m.setupFieldCursor - 1 + n) % n
+			return m, nil
+		case "down", "j":
+			m.setupFieldCursor = (m.setupFieldCursor + 1) % m.setupFieldCount(p)
 			return m, nil
 		case "enter":
 			return m.submitSetupDialog(p)
@@ -2910,24 +2913,32 @@ func (m Model) renderCreatePaneSetupDialog() string {
 		b.WriteString(label + "\n")
 
 		// Row 0 = Default context (current-context, no --context flag); rows
-		// 1..N = discovered contexts, current-context marked with ●.
-		renderRow := func(rowIdx int, text string) {
+		// 1..N = discovered contexts, current-context marked with ●. The
+		// namespace suffix is passed separately (not pre-rendered) so a
+		// focused row's selection styling covers the whole line instead of
+		// being truncated by a nested ANSI reset from dialogSubtle.
+		renderRow := func(rowIdx int, text, suffix string) {
 			if focused && rowIdx == m.kubeCursor {
-				b.WriteString("  > " + dialogSelected.Render(text) + "\n")
+				b.WriteString("  > " + dialogSelected.Render(text+suffix) + "\n")
 			} else {
-				b.WriteString("    " + dialogNormal.Render(text) + "\n")
+				line := dialogNormal.Render(text)
+				if suffix != "" {
+					line += dialogSubtle.Render(suffix)
+				}
+				b.WriteString("    " + line + "\n")
 			}
 		}
-		renderRow(0, "Default context")
+		renderRow(0, "Default context", "")
 		for i, c := range m.kubeContexts {
 			name := c.Name
 			if c.Current {
 				name = "● " + name
 			}
+			suffix := ""
 			if c.Namespace != "" {
-				name += dialogSubtle.Render("  (" + c.Namespace + ")")
+				suffix = "  (" + c.Namespace + ")"
 			}
-			renderRow(i+1, name)
+			renderRow(i+1, name, suffix)
 		}
 		if len(m.kubeContexts) == 0 {
 			b.WriteString(dialogSubtle.Render("    (no kube contexts found — k9s uses its current context)") + "\n")

@@ -125,6 +125,21 @@ export const plugins: PluginEntry[] = [
       "Binary-gated: the entry is greyed out in Ctrl+N when k9s is not installed. On daemon restart the pane re-runs k9s and reconnects (rerun strategy, no stale-frame replay).",
     ],
   },
+  {
+    slug: "lazysql",
+    name: "lazysql",
+    kind: "built-in",
+    description:
+      "A database TUI backed by [lazysql](https://github.com/jorgerojas26/lazysql) for MySQL, PostgreSQL, SQLite, and MSSQL. Open it as an ordinary pane from Ctrl+N → Tools — it launches lazysql's own connection manager, where you select or save connections. Offered only when the lazysql binary is found on PATH. Cross-platform: Windows, macOS, Linux.",
+    spawnExample:
+      '# lazysql.toml — relevant fields\n[plugin]\nname = "lazysql"\nschema_version = 1\n\n[command]\ncmd = "lazysql"\ndetect = "lazysql --version"\nprompts_cwd = false       # connection-scoped, not directory-scoped\n\n[[command.toggles]]\nname = "read_only"\nlabel = "Read-only (no data modification)"\nargs_when_on = ["--read-only"]\ndefault = false\n\n[persistence]\nstrategy = "rerun"\nghost_buffer = false',
+    features: [
+      "Opens as a normal pane (Ctrl+N → Tools → lazysql) into lazysql's connection manager — split it alongside your app and AI panes.",
+      "No Quil-side connection picker, by design: lazysql's only launch argument is a full connection string with embedded credentials, so Quil never reads its config or injects a DSN. Connection selection and credentials stay inside lazysql (which supports ${env:VAR} substitution to keep passwords out of its config).",
+      "Read-only toggle appends --read-only so you can browse a database without risking a modification.",
+      "Binary-gated: greyed out in Ctrl+N with a homepage link when lazysql is not installed. Re-runs on daemon restart (rerun strategy).",
+    ],
+  },
 ];
 
 export const pluginAuthoringRef =

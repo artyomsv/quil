@@ -26,6 +26,7 @@ A capability-by-capability tour of what Quil does. For configuration knobs, see 
   - [Custom plugins via TOML](#custom-plugins-via-toml)
   - [Lazygit integration](#lazygit-integration)
   - [k9s integration](#k9s-integration)
+  - [lazysql integration](#lazysql-integration)
 - [Observability](#observability)
   - [Notification center](#notification-center)
   - [Memory reporting](#memory-reporting)
@@ -195,6 +196,23 @@ See the full [plugin reference](plugin-reference.md) for every field.
   directly on the pods view.
 - **Persistence**: on daemon restart the pane re-runs k9s and reconnects
   (`rerun` strategy; no stale-frame replay).
+
+### lazysql integration
+
+- **lazysql plugin** (Ctrl+N → Tools → lazysql): opens
+  [lazysql](https://github.com/jorgerojas26/lazysql) as a regular pane — a
+  database TUI for MySQL, PostgreSQL, SQLite, and MSSQL. It opens lazysql's own
+  connection manager; you select or save connections there.
+- **No Quil-side connection picker — by design.** The only argument lazysql
+  accepts is a full connection string (DSN) with embedded credentials, which
+  would leak through the process arguments. So Quil never reads lazysql's config
+  or injects a connection — credential handling stays inside lazysql (which
+  supports `${env:VAR}` substitution to keep passwords out of its config).
+- **Toggle**: a read-only toggle (`--read-only`) opens the session with data
+  modification disabled.
+- **Discoverability & persistence**: greyed in Ctrl+N with a homepage link when
+  the `lazysql` binary isn't installed; re-runs on daemon restart (`rerun`
+  strategy). Cross-platform (Windows, macOS, Linux).
 
 ---
 

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **lazysql plugin** — database TUI (MySQL, PostgreSQL, SQLite, MSSQL) as a
+  built-in pane type. Binary-gated (greyed in `Ctrl+N` with a homepage link when
+  `lazysql` is not on `PATH`), opens lazysql's own connection manager, with an
+  optional read-only toggle. Connection selection and credentials stay inside
+  lazysql. Cross-platform; re-runs on daemon restart.
+
 ## [1.27.0] - 2026-06-15
 
 ### Added

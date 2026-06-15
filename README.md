@@ -97,6 +97,7 @@ Typed panes ship for the tools developers run all day. Each opens from `Ctrl+N`;
 | **OpenCode** | AI coding session ([opencode](https://opencode.ai)) with the same per-pane session resume. |
 | **lazygit** | Git TUI ([lazygit](https://github.com/jesseduffield/lazygit)) for the repo near the pane — also a per-tab `Alt+G` overlay. |
 | **k9s** | Kubernetes cluster TUI ([k9s](https://github.com/derailed/k9s)) with a context picker sourced from your kubeconfig. |
+| **lazysql** | Database TUI ([lazysql](https://github.com/jorgerojas26/lazysql)) for MySQL, PostgreSQL, SQLite, and MSSQL. |
 | **SSH** | Persistent SSH session that re-runs the same command (host, port, forwards) on restart. |
 | **Stripe CLI** | `stripe listen` webhook tunnel that restores its forward URL and surfaces the signing secret. |
 

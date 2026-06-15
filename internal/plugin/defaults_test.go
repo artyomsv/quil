@@ -113,13 +113,13 @@ func TestEnsureDefaultPlugins_WritesK9s(t *testing.T) {
 	if p.Name != "k9s" || p.Command.Cmd != "k9s" {
 		t.Errorf("name/cmd = %q/%q", p.Name, p.Command.Cmd)
 	}
-	// k9s is cluster-scoped, not directory-scoped: no CWD prompt in Tier A,
-	// and discover stays empty until Tier B turns it on.
+	// k9s is cluster-scoped, not directory-scoped: no CWD prompt. Discovery
+	// is by kube context, so the setup dialog offers a context pick-list.
 	if p.Command.PromptsCWD {
 		t.Errorf("PromptsCWD = true, want false")
 	}
-	if p.Command.Discover != "" {
-		t.Errorf("Discover = %q, want \"\" (Tier A)", p.Command.Discover)
+	if p.Command.Discover != "kube" {
+		t.Errorf("Discover = %q, want kube", p.Command.Discover)
 	}
 	if p.Persistence.Strategy != "rerun" || p.Persistence.GhostBuffer {
 		t.Errorf("strategy=%q ghost=%v, want rerun/false", p.Persistence.Strategy, p.Persistence.GhostBuffer)

@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   there is no working-directory prompt — it connects to whatever your kubeconfig
   points at (`KUBECONFIG` / `~/.kube/config`). Cross-platform (Windows, macOS,
   Linux); re-runs and reconnects on daemon restart.
+- **k9s context picker** — the k9s pane setup dialog lists kube contexts from
+  `KUBECONFIG` / `~/.kube/config` and pins the pane to the chosen context via
+  `--context`. "Default context" uses the kubeconfig current-context. Backed by
+  the new `discover = "kube"` plugin field (documented in the plugin reference).
 
 ## [1.26.0] - 2026-06-15
 

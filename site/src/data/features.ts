@@ -214,6 +214,20 @@ export const features: Feature[] = [
       "Overlays are ephemeral — one per tab, never persisted, recreated with one keypress, and auto-destroyed when you quit lazygit. Offered only when the lazygit binary is on PATH.",
     ],
   },
+  {
+    slug: "k9s-clusters",
+    icon: "layers",
+    title: "k9s for Kubernetes",
+    blurb:
+      "Open k9s as a pane (Ctrl+N → Tools → k9s) to drive your Kubernetes cluster, with a context picker sourced from your kubeconfig.",
+    category: "extensibility",
+    detail: [
+      "k9s opens as an ordinary pane (not an overlay — it's a long-lived monitoring view you can split alongside your other panes).",
+      "The setup dialog lists the contexts from your KUBECONFIG / ~/.kube/config (current one marked) and pins the pane to your choice via --context; \"Default context\" uses the kubeconfig's current-context.",
+      "A read-only toggle (--readonly) lets you browse a cluster with all mutating commands disabled, and a start-on-Pods toggle jumps straight to the pods view.",
+      "Cross-platform (Windows, macOS, Linux). Offered only when the k9s binary is on PATH — otherwise it shows greyed in Ctrl+N with a link to install it. Re-runs and reconnects on daemon restart.",
+    ],
+  },
 
   // --- Observability -------------------------------------------------
   {

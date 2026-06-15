@@ -17,15 +17,15 @@ import (
 type Registry struct {
 	plugins map[string]*PanePlugin
 	mu      sync.RWMutex
-}
 
-// deprecationWarned remembers which plugins have already emitted the
-// [[notification_handlers]] deprecation warning during this daemon's
-// lifetime. Without this, a `reload_plugins` IPC call would re-fire the
-// warning every time the daemon walks the same TOML — log spam during
-// development. Cleared only by daemon restart, which is the natural
-// "I want to re-see the migration prompt" trigger.
-var deprecationWarned sync.Map // key: plugin name (string), value: struct{}
+	// deprecationWarned remembers which plugins have already emitted the
+	// [[notification_handlers]] deprecation warning during this registry's
+	// lifetime. Without this, a `reload_plugins` IPC call would re-fire the
+	// warning every time the daemon walks the same TOML — log spam during
+	// development. Cleared only by daemon restart, which is the natural
+	// "I want to re-see the migration prompt" trigger.
+	deprecationWarned sync.Map // key: plugin name (string), value: struct{}
+}
 
 // NewRegistry creates a registry pre-loaded with built-in plugins.
 func NewRegistry() *Registry {
@@ -150,6 +150,15 @@ func (r *Registry) LoadFromDir(dir string) error {
 			continue
 		}
 		compilePatterns(p)
+		// Warn once per stale plugin per registry lifetime so authors notice
+		// and migrate off the deprecated [[notification_handlers]]; subsequent
+		// reloads (e.g. MsgReloadPlugins) stay silent to avoid log spam.
+		if len(p.NotificationHandlers) > 0 {
+			if _, already := r.deprecationWarned.LoadOrStore(p.Name, struct{}{}); !already {
+				log.Printf("plugin %q: [[notification_handlers]] is deprecated and no longer evaluated; "+
+					"migrate to [[idle_handlers]] (same fields: pattern, title, severity)", p.Name)
+			}
+		}
 		r.plugins[p.Name] = p
 		loaded[p.Name] = struct{}{}
 		log.Printf("loaded plugin %q from %q", p.Name, e.Name())
@@ -276,6 +285,7 @@ type tomlPlugin struct {
 		DisplayName   string `toml:"display_name"`
 		Category      string `toml:"category"`
 		Description   string `toml:"description"`
+		Homepage      string `toml:"homepage"`
 		SchemaVersion int    `toml:"schema_version"`
 	} `toml:"plugin"`
 	Command struct {
@@ -361,7 +371,7 @@ func loadPluginTOML(path string) (*PanePlugin, error) {
 	}
 
 	switch tp.Command.Discover {
-	case "", "git":
+	case "", "git", "kube":
 		// valid
 	default:
 		return nil, fmt.Errorf("plugin %q: unknown discover mode %q", tp.Plugin.Name, tp.Command.Discover)
@@ -385,6 +395,7 @@ func loadPluginTOML(path string) (*PanePlugin, error) {
 		DisplayName: displayName,
 		Category:    category,
 		Description: tp.Plugin.Description,
+		Homepage:    tp.Plugin.Homepage,
 		Command: CommandConfig{
 			Cmd:              tp.Command.Cmd,
 			Path:             tp.Command.Path,
@@ -472,15 +483,9 @@ func loadPluginTOML(path string) (*PanePlugin, error) {
 	// proved too noisy (every PTY chunk triggered a scan) and was replaced by
 	// the lighter [[idle_handlers]] that runs only when a pane goes idle.
 	// MatchNotification still exists for back-compat with TOMLs in the wild
-	// but the daemon never calls it. Warn once per stale plugin per daemon
-	// lifetime so authors notice and migrate; subsequent reloads (e.g.
-	// MsgReloadPlugins) stay silent to avoid log spam during plugin editing.
-	if len(tp.NotificationHandlers) > 0 {
-		if _, already := deprecationWarned.LoadOrStore(tp.Plugin.Name, struct{}{}); !already {
-			log.Printf("plugin %q: [[notification_handlers]] is deprecated and no longer evaluated; "+
-				"migrate to [[idle_handlers]] (same fields: pattern, title, severity)", tp.Plugin.Name)
-		}
-	}
+	// but the daemon never calls it. The dedup'd deprecation warning lives in
+	// LoadFromDir (it owns the per-registry deprecationWarned set); parsing
+	// here just carries the handlers through.
 	for _, nh := range tp.NotificationHandlers {
 		p.NotificationHandlers = append(p.NotificationHandlers, NotificationHandler{
 			Pattern:  nh.Pattern,

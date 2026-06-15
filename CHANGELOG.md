@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Uninstalled tool plugins stay discoverable** — the `Ctrl+N` pane-creation
+  list now shows plugins whose binary isn't on `PATH` greyed out (sorted below
+  the available ones) with a link to the tool's homepage, instead of hiding
+  them entirely. Selecting a greyed entry is blocked with an inline hint. New
+  optional `homepage` field in the plugin `[plugin]` schema; set for the
+  external-tool plugins (k9s, lazygit, Stripe CLI).
+
+- **k9s plugin** — Kubernetes cluster TUI as a built-in pane type. Binary-gated
+  (greyed out when `k9s` is not on `PATH`), opens as a normal pane with optional
+  read-only (`--readonly`) and start-on-Pods toggles. k9s is cluster-scoped, so
+  there is no working-directory prompt — it connects to whatever your kubeconfig
+  points at (`KUBECONFIG` / `~/.kube/config`). Cross-platform (Windows, macOS,
+  Linux); re-runs and reconnects on daemon restart.
+- **k9s context picker** — the k9s pane setup dialog lists kube contexts from
+  `KUBECONFIG` / `~/.kube/config` and pins the pane to the chosen context via
+  `--context`. "Default context" uses the kubeconfig current-context. Backed by
+  the new `discover = "kube"` plugin field (documented in the plugin reference).
+
 ## [1.26.0] - 2026-06-15
 
 ## [1.25.1] - 2026-06-15

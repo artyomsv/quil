@@ -100,3 +100,37 @@ func TestEnsureDefaultPlugins_WritesLazygit(t *testing.T) {
 		t.Errorf("toggles = %+v", p.Command.Toggles)
 	}
 }
+
+func TestEnsureDefaultPlugins_WritesK9s(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := EnsureDefaultPlugins(dir); err != nil {
+		t.Fatalf("EnsureDefaultPlugins: %v", err)
+	}
+	p, err := loadPluginTOML(filepath.Join(dir, "k9s.toml"))
+	if err != nil {
+		t.Fatalf("load k9s.toml: %v", err)
+	}
+	if p.Name != "k9s" || p.Command.Cmd != "k9s" {
+		t.Errorf("name/cmd = %q/%q", p.Name, p.Command.Cmd)
+	}
+	if p.Homepage != "https://github.com/derailed/k9s" {
+		t.Errorf("Homepage = %q, want the k9s URL", p.Homepage)
+	}
+	// k9s is cluster-scoped, not directory-scoped: no CWD prompt. Discovery
+	// is by kube context, so the setup dialog offers a context pick-list.
+	if p.Command.PromptsCWD {
+		t.Errorf("PromptsCWD = true, want false")
+	}
+	if p.Command.Discover != "kube" {
+		t.Errorf("Discover = %q, want kube", p.Command.Discover)
+	}
+	if p.Persistence.Strategy != "rerun" || p.Persistence.GhostBuffer {
+		t.Errorf("strategy=%q ghost=%v, want rerun/false", p.Persistence.Strategy, p.Persistence.GhostBuffer)
+	}
+	if len(p.Command.Toggles) != 2 {
+		t.Fatalf("toggles = %+v, want 2 (readonly, start_pods)", p.Command.Toggles)
+	}
+	if p.Command.Toggles[0].Name != "readonly" || p.Command.Toggles[1].Name != "start_pods" {
+		t.Errorf("toggle names = %q,%q", p.Command.Toggles[0].Name, p.Command.Toggles[1].Name)
+	}
+}

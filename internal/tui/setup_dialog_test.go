@@ -11,6 +11,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/artyomsv/quil/internal/kubediscover"
 	"github.com/artyomsv/quil/internal/plugin"
 )
 
@@ -1316,6 +1317,141 @@ func TestSetupRepoKey_DownAtBrowseRowStays(t *testing.T) {
 	got := out.(Model)
 	if got.cwdBrowseCursor != 2 {
 		t.Errorf("cursor = %d, want 2 (clamped at Browse… row)", got.cwdBrowseCursor)
+	}
+}
+
+// registryWithK9s mirrors registryWithLazygit: temp TOML + LoadFromDir, then
+// flip Available. k9s has prompts_cwd=false and discover=kube.
+func registryWithK9s(t *testing.T) *plugin.Registry {
+	t.Helper()
+	dir := t.TempDir()
+	content := `[plugin]
+name = "k9s"
+
+[command]
+cmd = "k9s"
+prompts_cwd = false
+discover = "kube"
+`
+	if err := os.WriteFile(filepath.Join(dir, "k9s.toml"), []byte(content), 0o644); err != nil {
+		t.Fatalf("write test toml: %v", err)
+	}
+	r := plugin.NewRegistry()
+	if err := r.LoadFromDir(dir); err != nil {
+		t.Fatalf("LoadFromDir: %v", err)
+	}
+	r.Get("k9s").Available = true
+	return r
+}
+
+// kubePickModel builds a Model sitting in the setup dialog with a kube field.
+func kubePickModel(t *testing.T, ctxs []kubediscover.Context) Model {
+	t.Helper()
+	return Model{
+		dialog:         dialogCreatePaneSetup,
+		kubeContexts:   ctxs,
+		kubeCursor:     0,
+		pluginRegistry: registryWithK9s(t),
+		selectedPlugin: "k9s",
+	}
+}
+
+func TestSetupFieldKind_KubeFieldFirst(t *testing.T) {
+	t.Parallel()
+	m := Model{}
+	p := &plugin.PanePlugin{Command: plugin.CommandConfig{Discover: "kube"}}
+	if kind, _ := m.setupFieldKind(p, 0); kind != "kube" {
+		t.Errorf("field 0 kind = %q, want kube", kind)
+	}
+	// Only field besides Continue → count is 2.
+	if got := m.setupFieldCount(p); got != 2 {
+		t.Errorf("setupFieldCount = %d, want 2 (kube + continue)", got)
+	}
+}
+
+func TestSetupKubeKey_DownMoves(t *testing.T) {
+	m := kubePickModel(t, []kubediscover.Context{{Name: "prod", Current: true}, {Name: "staging"}})
+	out, _ := m.handleCreatePaneSetupKey(tea.KeyPressMsg{Code: tea.KeyDown})
+	got := out.(Model)
+	if got.kubeCursor != 1 {
+		t.Errorf("kubeCursor = %d, want 1", got.kubeCursor)
+	}
+}
+
+func TestSubmitSetup_KubeContext_InjectsContextArg(t *testing.T) {
+	m := kubePickModel(t, []kubediscover.Context{{Name: "prod"}, {Name: "staging"}})
+	p := m.pluginRegistry.Get("k9s")
+	m.kubeCursor = 2 // row 0 = Default, row 1 = prod, row 2 = staging
+	out, _ := m.submitSetupDialog(p)
+	got := out.(Model)
+	want := []string{"--context", "staging"}
+	if len(got.selectedInstanceArgs) != 2 || got.selectedInstanceArgs[0] != want[0] || got.selectedInstanceArgs[1] != want[1] {
+		t.Errorf("selectedInstanceArgs = %v, want %v", got.selectedInstanceArgs, want)
+	}
+}
+
+func TestSubmitSetup_KubeDefaultRow_NoContextArg(t *testing.T) {
+	m := kubePickModel(t, []kubediscover.Context{{Name: "prod"}})
+	p := m.pluginRegistry.Get("k9s")
+	m.kubeCursor = 0 // Default context
+	out, _ := m.submitSetupDialog(p)
+	got := out.(Model)
+	for _, a := range got.selectedInstanceArgs {
+		if a == "--context" {
+			t.Errorf("Default row must not inject --context, got %v", got.selectedInstanceArgs)
+		}
+	}
+}
+
+func TestSetupKubeKey_UpClampAtTop(t *testing.T) {
+	m := kubePickModel(t, []kubediscover.Context{{Name: "prod"}, {Name: "staging"}})
+	m.kubeCursor = 0
+	out, _ := m.handleCreatePaneSetupKey(tea.KeyPressMsg{Code: tea.KeyUp})
+	if got := out.(Model); got.kubeCursor != 0 {
+		t.Errorf("kubeCursor = %d, want 0 (clamped at top)", got.kubeCursor)
+	}
+}
+
+func TestSetupKubeKey_DownClampAtBottom(t *testing.T) {
+	m := kubePickModel(t, []kubediscover.Context{{Name: "prod"}, {Name: "staging"}})
+	m.kubeCursor = 2 // rows = 2 contexts + Default = 3; bottom index = 2
+	out, _ := m.handleCreatePaneSetupKey(tea.KeyPressMsg{Code: tea.KeyDown})
+	if got := out.(Model); got.kubeCursor != 2 {
+		t.Errorf("kubeCursor = %d, want 2 (clamped at bottom)", got.kubeCursor)
+	}
+}
+
+func TestSetupKubeKey_EnterSubmitsAndInjects(t *testing.T) {
+	m := kubePickModel(t, []kubediscover.Context{{Name: "prod"}})
+	m.kubeCursor = 1 // prod
+	out, _ := m.handleCreatePaneSetupKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	got := out.(Model)
+	if got.dialog != dialogCreatePane || got.createPaneStep != 3 {
+		t.Errorf("dialog/step = %v/%d, want dialogCreatePane/3 (advanced via enter dispatch)", got.dialog, got.createPaneStep)
+	}
+	if len(got.selectedInstanceArgs) != 2 || got.selectedInstanceArgs[0] != "--context" || got.selectedInstanceArgs[1] != "prod" {
+		t.Errorf("selectedInstanceArgs = %v, want [--context prod]", got.selectedInstanceArgs)
+	}
+}
+
+func TestEnterSetupOrSplit_Kube_CapsContexts(t *testing.T) {
+	dir := t.TempDir()
+	var b strings.Builder
+	b.WriteString("contexts:\n")
+	for i := 0; i < maxKubeContexts+5; i++ {
+		fmt.Fprintf(&b, "- name: ctx-%d\n  context: {}\n", i)
+	}
+	cfg := filepath.Join(dir, "config")
+	if err := os.WriteFile(cfg, []byte(b.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("KUBECONFIG", cfg)
+
+	m := &Model{pluginRegistry: registryWithK9s(t)}
+	m.enterSetupOrSplit(m.pluginRegistry.Get("k9s"))
+
+	if len(m.kubeContexts) != maxKubeContexts {
+		t.Errorf("kubeContexts = %d, want capped to %d", len(m.kubeContexts), maxKubeContexts)
 	}
 }
 

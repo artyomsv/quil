@@ -18,6 +18,7 @@ import (
 	"github.com/artyomsv/quil/internal/clipboard"
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
+	"github.com/artyomsv/quil/internal/kubediscover"
 	"github.com/artyomsv/quil/internal/logger"
 	"github.com/artyomsv/quil/internal/memreport"
 	"github.com/artyomsv/quil/internal/plugin"
@@ -240,6 +241,8 @@ type Model struct {
 	// until the user actually presses Continue.
 	repoCandidates     []string            // git repos offered by the setup dialog (discover="git"); nil = plain browser
 	repoPickCandidates []string            // candidates for dialogGitRepoPick (Alt+G, multiple repos)
+	kubeContexts       []kubediscover.Context // contexts offered by the setup dialog (discover="kube"); nil = none
+	kubeCursor         int                 // row cursor in the kube field: 0 = Default context, 1.. = kubeContexts
 	lastSelectedCWD    string              // remembers previous CWD selection across pane creations
 	selectedCWD        string              // CWD chosen in dialogCreatePaneSetup (empty = daemon default)
 	cwdInputError      string              // validation error shown under CWD input (empty = ok)

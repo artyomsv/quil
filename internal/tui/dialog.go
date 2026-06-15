@@ -22,6 +22,7 @@ import (
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/gitdiscover"
 	"github.com/artyomsv/quil/internal/ipc"
+	"github.com/artyomsv/quil/internal/kubediscover"
 	"github.com/artyomsv/quil/internal/logger"
 	"github.com/artyomsv/quil/internal/plugin"
 )
@@ -665,6 +666,12 @@ func (m Model) renderDialog() string {
 		content = m.renderConfirmDialog()
 	case dialogCreatePane:
 		content = m.renderCreatePaneDialog()
+		// Auto-fit so plugin rows never wrap — e.g. a greyed entry that
+		// appends a homepage URL can exceed the default width. Padding(1,2)
+		// costs 4 cells; +2 margin guards reflow's long-token edge case.
+		if w := maxContentLineWidth(content) + 6; w > width {
+			width = w
+		}
 	case dialogCreatePaneSetup:
 		width = m.setupDialogWidth() // grows to fit the longest toggle label
 		content = m.renderCreatePaneSetupDialog()
@@ -686,8 +693,25 @@ func (m Model) renderDialog() string {
 		content = m.renderGitRepoPickDialog()
 	}
 
+	// Never render wider than the terminal (border adds +2 outside Width).
+	if m.width > 2 && width > m.width-2 {
+		width = m.width - 2
+	}
+
 	box := dialogBorder.Width(width).Render(content)
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
+}
+
+// maxContentLineWidth returns the widest visible line in content (ANSI-aware),
+// used to auto-size a dialog box to its content.
+func maxContentLineWidth(content string) int {
+	max := 0
+	for _, line := range strings.Split(content, "\n") {
+		if w := lipgloss.Width(line); w > max {
+			max = w
+		}
+	}
+	return max
 }
 
 func (m Model) renderAboutDialog() string {
@@ -924,7 +948,10 @@ func (m *Model) createPaneCategories() []struct {
 	if m.pluginRegistry == nil {
 		return nil
 	}
-	byCategory := m.pluginRegistry.AvailableByCategory()
+	// All plugins (not just available): unavailable ones are shown greyed with
+	// their homepage so users discover what to install, instead of silently
+	// vanishing from the list.
+	byCategory := m.pluginRegistry.ByCategory()
 	order := plugin.CategoryOrder()
 
 	var result []struct {
@@ -937,10 +964,9 @@ func (m *Model) createPaneCategories() []struct {
 		if len(plugins) == 0 {
 			continue
 		}
-		// Sort plugins by display name for consistency
-		sort.Slice(plugins, func(i, j int) bool {
-			return plugins[i].DisplayName < plugins[j].DisplayName
-		})
+		// Available plugins first, then alphabetical — keeps the actionable
+		// entries on top and greyed (not-installed) ones below.
+		sortPluginsAvailableFirst(plugins)
 		result = append(result, struct {
 			key     string
 			label   string
@@ -958,9 +984,7 @@ func (m *Model) createPaneCategories() []struct {
 			}
 		}
 		if !found {
-			sort.Slice(plugins, func(i, j int) bool {
-				return plugins[i].DisplayName < plugins[j].DisplayName
-			})
+			sortPluginsAvailableFirst(plugins)
 			result = append(result, struct {
 				key     string
 				label   string
@@ -969,6 +993,17 @@ func (m *Model) createPaneCategories() []struct {
 		}
 	}
 	return result
+}
+
+// sortPluginsAvailableFirst orders available plugins ahead of unavailable
+// ones, alphabetical by display name within each group.
+func sortPluginsAvailableFirst(plugins []*plugin.PanePlugin) {
+	sort.SliceStable(plugins, func(i, j int) bool {
+		if plugins[i].Available != plugins[j].Available {
+			return plugins[i].Available // available (true) sorts before unavailable
+		}
+		return plugins[i].DisplayName < plugins[j].DisplayName
+	})
 }
 
 func (m Model) handleCreatePaneKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -1063,6 +1098,12 @@ func (m Model) handleCreatePaneSelect() (tea.Model, tea.Cmd) {
 		}
 		plugins := cats[m.selectedCategory].plugins
 		if m.dialogCursor >= len(plugins) {
+			return m, nil
+		}
+		// Unavailable plugins are greyed and not selectable — the binary isn't
+		// installed, so there's nothing to spawn. The inline footer hint
+		// (rendered while the cursor is on it) tells the user where to get it.
+		if !plugins[m.dialogCursor].Available {
 			return m, nil
 		}
 		m.selectedPlugin = plugins[m.dialogCursor].Name
@@ -1280,21 +1321,41 @@ func (m Model) renderCreatePaneDialog() string {
 			b.WriteString(dialogTitle.Render(cat.label))
 			b.WriteString("\n\n")
 
+			cursorOnUnavailable := false
 			for i, p := range cat.plugins {
 				cursor := "  "
-				style := dialogNormal
-				if i == m.dialogCursor {
-					cursor = "> "
-					style = dialogSelected
-				}
-				line := style.Render(p.DisplayName)
-				if p.Description != "" {
-					line += "  " + dialogSubtle.Render(p.Description)
+				selected := i == m.dialogCursor
+				var line string
+				if !p.Available {
+					// Greyed, not selectable — show why and where to get it.
+					if selected {
+						cursor = "> "
+						cursorOnUnavailable = true
+					}
+					note := "(not installed"
+					if p.Homepage != "" {
+						note += " — " + p.Homepage
+					}
+					note += ")"
+					line = dialogSubtle.Render(p.DisplayName + "  " + note)
+				} else {
+					style := dialogNormal
+					if selected {
+						cursor = "> "
+						style = dialogSelected
+					}
+					line = style.Render(p.DisplayName)
+					if p.Description != "" {
+						line += "  " + dialogSubtle.Render(p.Description)
+					}
 				}
 				b.WriteString(cursor + line + "\n")
 			}
 
 			b.WriteByte('\n')
+			if cursorOnUnavailable {
+				b.WriteString(dialogErrorStyle.Render("Not installed — install it (link above), then restart") + "\n")
+			}
 			b.WriteString(dialogSubtle.Render("Esc back"))
 		}
 
@@ -2000,8 +2061,10 @@ func (m *Model) enterSetupOrSplit(p *plugin.PanePlugin) tea.Cmd {
 	m.cwdBrowseCursor = 0
 	m.cwdBrowseScroll = 0
 	m.repoCandidates = nil
+	m.kubeContexts = nil
+	m.kubeCursor = 0
 
-	needsSetup := p != nil && (p.Command.PromptsCWD || len(p.Command.Toggles) > 0)
+	needsSetup := p != nil && (p.Command.PromptsCWD || len(p.Command.Toggles) > 0 || p.Command.Discover == "kube")
 	if !needsSetup {
 		m.createPaneStep = 3
 		return nil
@@ -2031,6 +2094,14 @@ func (m *Model) enterSetupOrSplit(p *plugin.PanePlugin) tea.Cmd {
 		} else {
 			m.initSetupBrowser()
 		}
+	}
+
+	if p.Command.Discover == "kube" {
+		m.kubeContexts = kubediscover.Contexts()
+		if len(m.kubeContexts) > maxKubeContexts {
+			m.kubeContexts = m.kubeContexts[:maxKubeContexts]
+		}
+		m.kubeCursor = 0 // Default context row
 	}
 
 	// Initialize toggle states from defaults. For mutually-exclusive groups
@@ -2173,6 +2244,11 @@ const browserVisibleRows = 12
 // repos remain reachable via the Browse… escape hatch.
 const maxRepoCandidates = 10
 
+// maxKubeContexts bounds the kube-context pick list (discover="kube"). Like
+// the repo list it has no scroll machinery; "Default context" is always
+// available, so an overflowing kubeconfig still spawns a usable pane.
+const maxKubeContexts = 50
+
 // adjustBrowseScroll keeps the cursor inside the visible window.
 func (m *Model) adjustBrowseScroll() {
 	if m.cwdBrowseCursor < m.cwdBrowseScroll {
@@ -2240,16 +2316,25 @@ func (m Model) setupFieldCount(p *plugin.PanePlugin) int {
 	if p.Command.PromptsCWD {
 		n++
 	}
+	if p.Command.Discover == "kube" {
+		n++
+	}
 	return n
 }
 
 // setupFieldKind reports what field is at the given cursor index in the setup
-// dialog. Returns "cwd", "toggle" (with toggleIdx), or "continue".
+// dialog. Returns "cwd", "kube", "toggle" (with toggleIdx), or "continue".
 func (m Model) setupFieldKind(p *plugin.PanePlugin, cursor int) (kind string, toggleIdx int) {
 	i := cursor
 	if p.Command.PromptsCWD {
 		if i == 0 {
 			return "cwd", -1
+		}
+		i--
+	}
+	if p.Command.Discover == "kube" {
+		if i == 0 {
+			return "kube", -1
 		}
 		i--
 	}
@@ -2304,6 +2389,9 @@ func (m Model) handleCreatePaneSetupKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd
 	case "cwd":
 		return m.handleSetupCWDKey(p, key)
 
+	case "kube":
+		return m.handleSetupKubeKey(p, key)
+
 	case "toggle":
 		switch key {
 		case " ", "space":
@@ -2318,11 +2406,11 @@ func (m Model) handleCreatePaneSetupKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd
 				}
 			}
 			return m, nil
-		case "up":
+		case "up", "k":
 			n := m.setupFieldCount(p)
 			m.setupFieldCursor = (m.setupFieldCursor - 1 + n) % n
 			return m, nil
-		case "down":
+		case "down", "j":
 			m.setupFieldCursor = (m.setupFieldCursor + 1) % m.setupFieldCount(p)
 			return m, nil
 		case "enter":
@@ -2332,9 +2420,12 @@ func (m Model) handleCreatePaneSetupKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd
 
 	case "continue":
 		switch key {
-		case "up":
+		case "up", "k":
 			n := m.setupFieldCount(p)
 			m.setupFieldCursor = (m.setupFieldCursor - 1 + n) % n
+			return m, nil
+		case "down", "j":
+			m.setupFieldCursor = (m.setupFieldCursor + 1) % m.setupFieldCount(p)
 			return m, nil
 		case "enter":
 			return m.submitSetupDialog(p)
@@ -2528,6 +2619,32 @@ func (m Model) handleSetupRepoKey(p *plugin.PanePlugin, key string) (tea.Model, 
 	return m, nil
 }
 
+// handleSetupKubeKey processes keystrokes when the kube-context field is
+// focused (discover="kube"). Row 0 is the "Default context" (no --context
+// flag — k9s uses the kubeconfig current-context); rows 1..N are the
+// discovered contexts. kubeCursor is the row index; submitSetupDialog reads it
+// to inject --context.
+func (m Model) handleSetupKubeKey(p *plugin.PanePlugin, key string) (tea.Model, tea.Cmd) {
+	rows := len(m.kubeContexts) + 1 // +1 for the Default context row
+	switch key {
+	case "up", "k":
+		if m.kubeCursor > 0 {
+			m.kubeCursor--
+		}
+		return m, nil
+
+	case "down", "j":
+		if m.kubeCursor < rows-1 {
+			m.kubeCursor++
+		}
+		return m, nil
+
+	case "enter":
+		return m.submitSetupDialog(p)
+	}
+	return m, nil
+}
+
 // submitSetupDialog commits the browser-selected directory and toggle states,
 // then advances the create-pane flow to the split-direction step.
 func (m Model) submitSetupDialog(p *plugin.PanePlugin) (tea.Model, tea.Cmd) {
@@ -2536,6 +2653,15 @@ func (m Model) submitSetupDialog(p *plugin.PanePlugin) (tea.Model, tea.Cmd) {
 		logger.Debug("setup dialog: captured cwd=%q from browser (plugin=%s)", m.selectedCWD, p.Name)
 	}
 	m.cwdInputError = ""
+
+	// Inject the chosen kube context (row 0 = Default = no --context flag).
+	if p.Command.Discover == "kube" && m.kubeCursor > 0 && m.kubeCursor-1 < len(m.kubeContexts) {
+		ctx := m.kubeContexts[m.kubeCursor-1].Name
+		merged := make([]string, 0, len(m.selectedInstanceArgs)+2)
+		merged = append(merged, m.selectedInstanceArgs...)
+		merged = append(merged, "--context", ctx)
+		m.selectedInstanceArgs = merged
+	}
 
 	// Append enabled-toggle args to whatever instance args came in.
 	var extra []string
@@ -2771,6 +2897,53 @@ func (m Model) renderCreatePaneSetupDialog() string {
 			} else {
 				b.WriteString(dialogSubtle.Render("    (empty directory)") + "\n")
 			}
+		}
+		b.WriteString("\n")
+		fieldIdx++
+	}
+
+	if p.Command.Discover == "kube" {
+		focused := cursor == fieldIdx
+		label := "Kube context:"
+		if focused {
+			label = dialogSelected.Render("> " + label)
+		} else {
+			label = dialogNormal.Render("  " + label)
+		}
+		b.WriteString(label + "\n")
+
+		// Row 0 = Default context (current-context, no --context flag); rows
+		// 1..N = discovered contexts, current-context marked with ●. The
+		// namespace suffix is passed separately (not pre-rendered) so a
+		// focused row's selection styling covers the whole line instead of
+		// being truncated by a nested ANSI reset from dialogSubtle.
+		renderRow := func(rowIdx int, text, suffix string) {
+			if focused && rowIdx == m.kubeCursor {
+				b.WriteString("  > " + dialogSelected.Render(text+suffix) + "\n")
+			} else {
+				line := dialogNormal.Render(text)
+				if suffix != "" {
+					line += dialogSubtle.Render(suffix)
+				}
+				b.WriteString("    " + line + "\n")
+			}
+		}
+		renderRow(0, "Default context", "")
+		for i, c := range m.kubeContexts {
+			name := c.Name
+			if c.Current {
+				name = "● " + name
+			}
+			suffix := ""
+			if c.Namespace != "" {
+				suffix = "  (" + c.Namespace + ")"
+			}
+			renderRow(i+1, name, suffix)
+		}
+		if len(m.kubeContexts) == 0 {
+			b.WriteString(dialogSubtle.Render("    (no kube contexts found — k9s uses its current context)") + "\n")
+		} else {
+			b.WriteString(dialogSubtle.Render("    ↑↓ navigate  Enter select") + "\n")
 		}
 		b.WriteString("\n")
 		fieldIdx++

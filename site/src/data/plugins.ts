@@ -109,6 +109,22 @@ export const plugins: PluginEntry[] = [
       "Overlays are ephemeral — one per tab, excluded from workspace snapshots, recreated with one keypress, and auto-destroyed when you quit lazygit (q).",
     ],
   },
+  {
+    slug: "k9s",
+    name: "k9s",
+    kind: "built-in",
+    description:
+      "A Kubernetes cluster TUI backed by [k9s](https://github.com/derailed/k9s). Open it as an ordinary pane from Ctrl+N → Tools — it connects to whatever cluster your kubeconfig points at (KUBECONFIG / ~/.kube/config). Offered only when the k9s binary is found on PATH. Cross-platform: Windows, macOS, Linux.",
+    spawnExample:
+      '# k9s.toml — relevant fields\n[plugin]\nname = "k9s"\nschema_version = 2\n\n[command]\ncmd = "k9s"\ndetect = "k9s version"\nprompts_cwd = false       # k9s is cluster-scoped, not directory-scoped\ndiscover = "kube"         # context pick-list in the setup dialog\n\n[[command.toggles]]\nname = "readonly"\nlabel = "Read-only (disable all cluster-modifying commands)"\nargs_when_on = ["--readonly"]\ndefault = false\n\n[persistence]\nstrategy = "rerun"\nghost_buffer = false',
+    features: [
+      "Opens as a normal pane (Ctrl+N → Tools → k9s) — a long-lived monitoring view you can split alongside other panes, not an overlay.",
+      'discover = "kube" gives the setup dialog a context pick-list: "Default context" (your kubeconfig current-context) plus the contexts found in KUBECONFIG / ~/.kube/config, with the current one marked. The choice is pinned via --context.',
+      "Cluster connection comes from the standard kubeconfig resolution (KUBECONFIG env, then ~/.kube/config) — no working-directory prompt.",
+      "Read-only toggle appends --readonly so the pane can browse a cluster without exposing any mutating commands; a start-on-Pods toggle opens k9s directly on the pods view.",
+      "Binary-gated: the entry is greyed out in Ctrl+N when k9s is not installed. On daemon restart the pane re-runs k9s and reconnects (rerun strategy, no stale-frame replay).",
+    ],
+  },
 ];
 
 export const pluginAuthoringRef =

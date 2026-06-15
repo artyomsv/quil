@@ -1,0 +1,40 @@
+# k9s — Kubernetes cluster TUI
+# Edit this file to customize the plugin. Delete it to restore defaults.
+
+[plugin]
+name = "k9s"
+display_name = "k9s"
+category = "tools"
+description = "Kubernetes cluster TUI"
+homepage = "https://github.com/derailed/k9s"
+# v2: added `homepage` (shown greyed in Ctrl+N when the binary is missing).
+schema_version = 2
+
+[command]
+cmd = "k9s"
+# path = "/path/to/k9s"  # uncomment to override PATH lookup
+detect = "k9s version"
+# k9s connects to the cluster via KUBECONFIG / ~/.kube/config, not the CWD,
+# so no directory prompt.
+prompts_cwd = false
+# Pane setup offers a pick-list of kube contexts (from KUBECONFIG /
+# ~/.kube/config) and injects --context <name>. "Default context" = no flag.
+discover = "kube"
+
+[[command.toggles]]
+name = "readonly"
+label = "Read-only (disable all cluster-modifying commands)"
+args_when_on = ["--readonly"]
+default = false
+
+[[command.toggles]]
+name = "start_pods"
+label = "Start on the Pods view"
+args_when_on = ["--command", "pods"]
+default = false
+
+[persistence]
+# Re-run k9s on daemon restart; it reconnects to the cluster fresh.
+strategy = "rerun"
+# Full-screen TUI — replaying stale frames on reconnect is useless.
+ghost_buffer = false

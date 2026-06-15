@@ -6,7 +6,9 @@ name = "lazygit"
 display_name = "Lazygit"
 category = "tools"
 description = "Git TUI for the current workspace"
-schema_version = 1
+homepage = "https://github.com/jesseduffield/lazygit"
+# v2: added `homepage` (shown greyed in Ctrl+N when the binary is missing).
+schema_version = 2
 
 [command]
 cmd = "lazygit"

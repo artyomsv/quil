@@ -365,8 +365,8 @@ func TestDefaultPluginTOMLFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Verify all 3 default TOML files were created
-	for _, name := range []string{"claude-code.toml", "ssh.toml", "stripe.toml"} {
+	// Verify all 5 default TOML files were created
+	for _, name := range []string{"claude-code.toml", "ssh.toml", "stripe.toml", "lazygit.toml", "k9s.toml"} {
 		path := filepath.Join(dir, name)
 		if _, err := os.Stat(path); err != nil {
 			t.Errorf("expected default plugin file %s: %v", name, err)
@@ -839,6 +839,52 @@ prompts_cwd = true
 	}
 	if p.Command.Discover != "git" {
 		t.Errorf("Discover = %q, want %q", p.Command.Discover, "git")
+	}
+}
+
+func TestLoadPluginTOML_Homepage(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "k.toml")
+	data := []byte(`
+[plugin]
+name = "k9s"
+homepage = "https://github.com/derailed/k9s"
+[command]
+cmd = "k9s"
+`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p, err := loadPluginTOML(path)
+	if err != nil {
+		t.Fatalf("loadPluginTOML: %v", err)
+	}
+	if p.Homepage != "https://github.com/derailed/k9s" {
+		t.Errorf("Homepage = %q, want the k9s URL", p.Homepage)
+	}
+}
+
+func TestLoadPluginTOML_DiscoverKube(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "k.toml")
+	data := []byte(`
+[plugin]
+name = "k9s"
+[command]
+cmd = "k9s"
+discover = "kube"
+`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p, err := loadPluginTOML(path)
+	if err != nil {
+		t.Fatalf("loadPluginTOML: %v", err)
+	}
+	if p.Command.Discover != "kube" {
+		t.Errorf("Discover = %q, want kube", p.Command.Discover)
 	}
 }
 

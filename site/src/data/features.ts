@@ -26,12 +26,15 @@ export interface Feature {
   blurb: string;
   detail: string[];
   category: "persistence" | "interaction" | "ai" | "extensibility" | "observability";
+  /** Optional CDN screenshot (…-800.webp) rendered beside the feature on /features. */
+  image?: string;
 }
 
 export const features: Feature[] = [
   // --- Persistence ---------------------------------------------------
   {
     slug: "reboot-proof-sessions",
+    image: "https://cdn.stukans.com/quil/screenshots/pane-restoration-800.webp",
     icon: "refresh-ccw",
     title: "Reboot-proof sessions",
     blurb:
@@ -74,6 +77,7 @@ export const features: Feature[] = [
   },
   {
     slug: "mcp-server",
+    image: "https://cdn.stukans.com/quil/screenshots/claude-code-quil-mcp-800.webp",
     icon: "zap",
     title: "MCP server for AI agents",
     blurb:
@@ -120,6 +124,7 @@ export const features: Feature[] = [
   // --- Interaction ---------------------------------------------------
   {
     slug: "typed-panes",
+    image: "https://cdn.stukans.com/quil/screenshots/claude-code-setup-dialog-800.webp",
     icon: "layers",
     title: "Typed panes",
     blurb:
@@ -135,6 +140,7 @@ export const features: Feature[] = [
   },
   {
     slug: "tmux-splits",
+    image: "https://cdn.stukans.com/quil/screenshots/tui-panes-800.webp",
     icon: "layout-panel-left",
     title: "tmux-style splits with spatial navigation",
     blurb:
@@ -152,6 +158,7 @@ export const features: Feature[] = [
   },
   {
     slug: "pane-notes",
+    image: "https://cdn.stukans.com/quil/screenshots/focus-with-notes-800.webp",
     icon: "notebook-pen",
     title: "Pane notes",
     blurb:
@@ -194,6 +201,7 @@ export const features: Feature[] = [
   },
   {
     slug: "lazygit-overlay",
+    image: "https://cdn.stukans.com/quil/screenshots/lazygit-integration-800.webp",
     icon: "code",
     title: "Lazygit overlay",
     blurb:

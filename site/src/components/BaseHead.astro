@@ -50,6 +50,11 @@ const ogImageURL = SITE.url + (ogImage ?? SITE.defaultOgImage);
 <meta http-equiv="X-Content-Type-Options" content="nosniff" />
 <meta http-equiv="Permissions-Policy" content="camera=(), microphone=(), geolocation=(), interest-cohort=()" />
 
+<!-- CDN preconnect — screenshots/images are served from cdn.stukans.com.
+     Allowed by the CSP img-src 'self' data: https: rule; a preconnect is a
+     resource hint (not a fetch), so connect-src 'self' doesn't block it. -->
+<link rel="preconnect" href="https://cdn.stukans.com" crossorigin />
+
 <!-- Fonts: Inter for body, JetBrains Mono for code -->
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />

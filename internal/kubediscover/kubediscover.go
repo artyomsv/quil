@@ -1,14 +1,19 @@
 // Package kubediscover enumerates kube contexts from the kubeconfig file(s)
 // referenced by KUBECONFIG (OS-list-separated) or ~/.kube/config. Pure reads
 // with no cluster I/O: every failure (missing file, unreadable, malformed
-// YAML, symlinked path) degrades to "no contexts" so discovery can never
-// block pane creation. Only context names, default namespaces, and
-// current-context are parsed — clusters, users, and credentials are ignored.
+// YAML) degrades to "no contexts" so discovery can never block pane creation.
+// Only context names, default namespaces, and current-context are parsed —
+// clusters, users, and credentials are ignored. Context names/namespaces are
+// stripped of control characters (a kubeconfig is user-controlled but may be
+// symlinked/synced from elsewhere) so a hostile value cannot inject terminal
+// escape sequences into the TUI or the spawned --context argument.
 package kubediscover
 
 import (
 	"os"
 	"path/filepath"
+	"strings"
+	"unicode"
 
 	"gopkg.in/yaml.v3"
 )
@@ -59,13 +64,11 @@ func Contexts() []Context {
 	seen := make(map[string]bool)
 	current := ""
 	for _, path := range KubeconfigPaths() {
-		// Reject symlinks: an attacker-controlled KUBECONFIG could otherwise
-		// point discovery at an arbitrary file. k9s itself handles the real
-		// connection; we only read named contexts.
-		fi, err := os.Lstat(path)
-		if err != nil || fi.Mode()&os.ModeSymlink != 0 {
-			continue
-		}
+		// os.ReadFile follows symlinks — reading the target is correct: a
+		// symlinked ~/.kube/config (dotfile managers, multi-cluster tooling)
+		// is the exact file k9s/kubectl read. We only extract context names,
+		// never credentials, and the values are sanitized below, so following
+		// the link adds no meaningful risk over honouring KUBECONFIG itself.
 		data, err := os.ReadFile(path)
 		if err != nil {
 			continue
@@ -75,14 +78,15 @@ func Contexts() []Context {
 			continue
 		}
 		if current == "" && kc.CurrentContext != "" {
-			current = kc.CurrentContext
+			current = sanitize(kc.CurrentContext)
 		}
 		for _, c := range kc.Contexts {
-			if c.Name == "" || seen[c.Name] {
+			name := sanitize(c.Name)
+			if name == "" || seen[name] {
 				continue
 			}
-			seen[c.Name] = true
-			out = append(out, Context{Name: c.Name, Namespace: c.Context.Namespace})
+			seen[name] = true
+			out = append(out, Context{Name: name, Namespace: sanitize(c.Context.Namespace)})
 		}
 	}
 	for i := range out {
@@ -91,4 +95,22 @@ func Contexts() []Context {
 		}
 	}
 	return out
+}
+
+// sanitize strips control characters (including ESC, the lead byte of ANSI
+// escape sequences) from a kubeconfig-sourced string and collapses tabs to
+// spaces, so a hostile context name/namespace cannot inject terminal control
+// codes into the TUI or the spawned --context argument. Surrounding
+// whitespace is trimmed.
+func sanitize(s string) string {
+	mapped := strings.Map(func(r rune) rune {
+		if r == '\t' {
+			return ' '
+		}
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, s)
+	return strings.TrimSpace(mapped)
 }

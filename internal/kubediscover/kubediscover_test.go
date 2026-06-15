@@ -3,6 +3,7 @@ package kubediscover
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -32,20 +33,51 @@ func writeConfig(t *testing.T, dir, name, body string) string {
 	return p
 }
 
-func TestContexts_ParsesNamesNamespacesAndCurrent(t *testing.T) {
-	dir := t.TempDir()
-	cfg := writeConfig(t, dir, "config", sampleKubeconfig)
-	t.Setenv("KUBECONFIG", cfg)
-
-	got := Contexts()
-	if len(got) != 2 {
-		t.Fatalf("got %d contexts, want 2: %+v", len(got), got)
+// TestContexts covers the single-file parse scenarios that share the same
+// shape (write a kubeconfig body, point KUBECONFIG at it, parse).
+func TestContexts(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want []Context
+	}{
+		{
+			name: "names namespaces and current",
+			body: sampleKubeconfig,
+			want: []Context{
+				{Name: "prod", Namespace: "payments", Current: true},
+				{Name: "staging", Namespace: "", Current: false},
+			},
+		},
+		{
+			name: "malformed yaml degrades to empty",
+			body: "contexts: [this is : not : valid : yaml\n",
+			want: nil,
+		},
+		{
+			name: "empty contexts",
+			body: "contexts: []\ncurrent-context: \"\"\n",
+			want: nil,
+		},
+		{
+			name: "no current-context marks nothing",
+			body: "contexts:\n- name: dev\n  context:\n    namespace: web\n",
+			want: []Context{{Name: "dev", Namespace: "web", Current: false}},
+		},
+		{
+			name: "control characters stripped from name and namespace",
+			body: "contexts:\n- name: \"saf\\u0000\\u0007e\"\n  context:\n    namespace: \"n\\u001bs\"\ncurrent-context: \"saf\\u0000\\u0007e\"\n",
+			want: []Context{{Name: "safe", Namespace: "ns", Current: true}},
+		},
 	}
-	if got[0].Name != "prod" || got[0].Namespace != "payments" || !got[0].Current {
-		t.Errorf("ctx[0] = %+v, want prod/payments/current", got[0])
-	}
-	if got[1].Name != "staging" || got[1].Namespace != "" || got[1].Current {
-		t.Errorf("ctx[1] = %+v, want staging/empty/not-current", got[1])
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := writeConfig(t, t.TempDir(), "config", tt.body)
+			t.Setenv("KUBECONFIG", cfg)
+			if got := Contexts(); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("Contexts() = %+v, want %+v", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -71,16 +103,7 @@ func TestContexts_MissingFile_DegradesToEmpty(t *testing.T) {
 	}
 }
 
-func TestContexts_MalformedYAML_DegradesToEmpty(t *testing.T) {
-	dir := t.TempDir()
-	cfg := writeConfig(t, dir, "config", "contexts: [this is : not : valid : yaml\n")
-	t.Setenv("KUBECONFIG", cfg)
-	if got := Contexts(); len(got) != 0 {
-		t.Errorf("got %+v, want empty for malformed yaml", got)
-	}
-}
-
-func TestContexts_SymlinkedConfig_Rejected(t *testing.T) {
+func TestContexts_SymlinkedConfig_Resolved(t *testing.T) {
 	dir := t.TempDir()
 	real := writeConfig(t, dir, "real", sampleKubeconfig)
 	link := filepath.Join(dir, "link")
@@ -88,8 +111,11 @@ func TestContexts_SymlinkedConfig_Rejected(t *testing.T) {
 		t.Skipf("symlink unsupported: %v", err) // Windows without privilege
 	}
 	t.Setenv("KUBECONFIG", link)
-	if got := Contexts(); len(got) != 0 {
-		t.Errorf("symlinked kubeconfig must be rejected, got %+v", got)
+	// A symlinked kubeconfig (dotfile managers, multi-cluster tooling) must be
+	// followed to its target, not rejected — it's the exact file k9s reads.
+	got := Contexts()
+	if len(got) != 2 || got[0].Name != "prod" {
+		t.Errorf("symlinked kubeconfig must be resolved, got %+v", got)
 	}
 }
 

@@ -86,6 +86,22 @@ Restart the client. The AI can now `list_panes`, `read_pane_output`, `send_to_pa
 
 Full guide: [docs/mcp.md](docs/mcp.md).
 
+## Built-in integrations
+
+Typed panes ship for the tools developers run all day. Each opens from `Ctrl+N`; the ones that wrap an external binary appear only when that binary is on `PATH` (greyed with an install link otherwise).
+
+| Integration | What it is |
+|---|---|
+| **Terminal** | Your system shell (bash/zsh/PowerShell/fish) with live working-directory tracking. |
+| **Claude Code** | AI coding session that resumes the exact conversation by session id across reboots. |
+| **OpenCode** | AI coding session ([opencode](https://opencode.ai)) with the same per-pane session resume. |
+| **lazygit** | Git TUI ([lazygit](https://github.com/jesseduffield/lazygit)) for the repo near the pane — also a per-tab `Alt+G` overlay. |
+| **k9s** | Kubernetes cluster TUI ([k9s](https://github.com/derailed/k9s)) with a context picker sourced from your kubeconfig. |
+| **SSH** | Persistent SSH session that re-runs the same command (host, port, forwards) on restart. |
+| **Stripe CLI** | `stripe listen` webhook tunnel that restores its forward URL and surfaces the signing secret. |
+
+Define your own pane types in TOML — see the [plugin reference](docs/plugin-reference.md).
+
 ## Documentation
 
 | Topic | Doc |

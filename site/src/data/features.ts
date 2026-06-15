@@ -228,6 +228,20 @@ export const features: Feature[] = [
       "Cross-platform (Windows, macOS, Linux). Offered only when the k9s binary is on PATH — otherwise it shows greyed in Ctrl+N with a link to install it. Re-runs and reconnects on daemon restart.",
     ],
   },
+  {
+    slug: "lazysql-databases",
+    icon: "layers",
+    title: "lazysql for databases",
+    blurb:
+      "Open lazysql as a pane (Ctrl+N → Tools → lazysql) to browse and query MySQL, PostgreSQL, SQLite, and MSSQL from its connection manager.",
+    category: "extensibility",
+    detail: [
+      "lazysql opens as an ordinary pane into its own connection manager — split it alongside your app and AI panes.",
+      "By design there's no Quil-side connection picker: lazysql's only launch argument is a full connection string with embedded credentials, so Quil never reads its config or injects a DSN. Credential handling stays inside lazysql (which supports ${env:VAR} substitution to keep passwords out of its config).",
+      "A read-only toggle (--read-only) opens a session with data modification disabled.",
+      "Cross-platform (Windows, macOS, Linux). Offered only when the lazysql binary is on PATH — otherwise greyed in Ctrl+N with a link to install it. Re-runs on daemon restart.",
+    ],
+  },
 
   // --- Observability -------------------------------------------------
   {

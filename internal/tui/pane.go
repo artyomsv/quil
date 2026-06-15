@@ -2,10 +2,12 @@ package tui
 
 import (
 	"errors"
+	"fmt"
 	"image/color"
 	"io"
 	"log"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -22,33 +24,55 @@ import (
 // spinnerFrames are braille characters cycled for the resuming indicator.
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
+// restoreAccentStyle / restoreDimStyle / restoreDoneStyle color the centered
+// restore indicator: brand flame (256-color 208) for the spinner+label, dim
+// grey for the context/pending rows, green (28) for done rows.
+var (
+	restoreAccentStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("208"))
+	restoreDimStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
+	restoreDoneStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("28"))
+)
+
+// Restore-indicator timing: the spinner shows for at least restoreMinDisplay
+// (so a fast pane doesn't flash), persists until the pane's first live output,
+// and is force-cleared after restoreSafetyCap so a silent or dead process does
+// not spin forever.
+const (
+	restoreMinDisplay = 2 * time.Second
+	restoreSafetyCap  = 30 * time.Second
+)
+
 type PaneModel struct {
-	ID             string
-	Type           string // plugin type ("terminal", "claude-code", etc.)
-	Name           string // user-given name (empty if not set)
-	CWD            string // current working directory from daemon
-	Muted          bool   // notification mute (daemon-authoritative; mirrored here for border rendering)
-	Eager          bool   // eager-restore flag (daemon-authoritative; mirrored for the tab marker)
-	vt             *vt.SafeEmulator
-	vtDrain        *vtDrain // drain goroutine tracker for p.vt (see closeVT)
-	Width          int
-	Height         int
-	Active         bool
-	scrollBack     int
-	rawBuf         *ringbuf.RingBuffer // raw PTY bytes for resize replay
-	cursorVisible  bool                // tracks shell's DECTCEM state
-	ghost          bool                // true while showing restored content
-	resuming       bool                // true while waiting for first live output after restore
-	preparing      bool                // true for newly created panes (not restored)
-	resumeStart    time.Time           // when resuming/preparing started (minimum display duration)
-	spinnerFrame   int                 // current frame index in spinnerFrames
-	activeSel      *Selection          // set by Model before View() for selection rendering
-	focusMode      bool                // set by Model before View() when in focus mode
-	mcpHighlight   bool                // set by Model before View() when MCP is interacting
-	liveOutputSeen bool                // first live (non-ghost) output received — settle repaints scheduled
-	working        bool                // true while a claude/opencode turn is in progress (hook-driven)
-	unseen         bool                // work finished/parked while this pane was not focused; cleared on focus
-	workFrame      int                 // shared spinner frame index, mirrored here for top-border render
+	ID                 string
+	Type               string // plugin type ("terminal", "claude-code", etc.)
+	Name               string // user-given name (empty if not set)
+	CWD                string // current working directory from daemon
+	Muted              bool   // notification mute (daemon-authoritative; mirrored here for border rendering)
+	Eager              bool   // eager-restore flag (daemon-authoritative; mirrored for the tab marker)
+	vt                 *vt.SafeEmulator
+	vtDrain            *vtDrain // drain goroutine tracker for p.vt (see closeVT)
+	Width              int
+	Height             int
+	Active             bool
+	scrollBack         int
+	rawBuf             *ringbuf.RingBuffer // raw PTY bytes for resize replay
+	cursorVisible      bool                // tracks shell's DECTCEM state
+	ghost              bool                // true while showing restored content
+	resuming           bool                // true while waiting for first live output after restore
+	preparing          bool                // true for newly created panes (not restored)
+	Pending            bool                // deferred restore — not yet lazy-spawned (daemon-authoritative)
+	SessionID          string              // tracked session id (daemon-authoritative; restore checklist)
+	HistoryLines       int                 // ghost-buffer line count (daemon-authoritative; restore checklist)
+	resumeStart        time.Time           // when resuming/preparing started (minimum display duration)
+	spinnerFrame       int                 // current frame index in spinnerFrames
+	spinnerTickRunning bool                // guards against stacking restore-spinner tick chains (cf. workTickRunning)
+	activeSel          *Selection          // set by Model before View() for selection rendering
+	focusMode          bool                // set by Model before View() when in focus mode
+	mcpHighlight       bool                // set by Model before View() when MCP is interacting
+	liveOutputSeen     bool                // first live (non-ghost) output received — settle repaints scheduled
+	working            bool                // true while a claude/opencode turn is in progress (hook-driven)
+	unseen             bool                // work finished/parked while this pane was not focused; cleared on focus
+	workFrame          int                 // shared spinner frame index, mirrored here for top-border render
 
 	// Render cache: View() output is reused while renderKey() is unchanged.
 	// contentGen covers VT-grid/raw-buffer mutations (the grid itself has no
@@ -88,11 +112,15 @@ type paneRenderKey struct {
 	width, height, scrollBack      int
 	active, cursorVisible          bool
 	ghost, resuming, preparing     bool
+	pending                        bool
 	mcpHighlight, muted, focusMode bool
 	working                        bool
 	unseen                         bool
+	liveOutputSeen                 bool
 	spinnerFrame, workFrame        int
 	name, cwd                      string
+	paneType, sessionID            string
+	historyLines                   int
 	selActive                      bool
 	sel                            Selection
 }
@@ -100,24 +128,29 @@ type paneRenderKey struct {
 // renderKey computes the current fingerprint of every View() input.
 func (p *PaneModel) renderKey() paneRenderKey {
 	k := paneRenderKey{
-		contentGen:    p.contentGen,
-		width:         p.Width,
-		height:        p.Height,
-		scrollBack:    p.scrollBack,
-		active:        p.Active,
-		cursorVisible: p.cursorVisible,
-		ghost:         p.ghost,
-		resuming:      p.resuming,
-		preparing:     p.preparing,
-		mcpHighlight:  p.mcpHighlight,
-		muted:         p.Muted,
-		focusMode:     p.focusMode,
-		working:       p.working,
-		unseen:        p.unseen,
-		spinnerFrame:  p.spinnerFrame,
-		workFrame:     p.workFrame,
-		name:          p.Name,
-		cwd:           p.CWD,
+		contentGen:     p.contentGen,
+		width:          p.Width,
+		height:         p.Height,
+		scrollBack:     p.scrollBack,
+		active:         p.Active,
+		cursorVisible:  p.cursorVisible,
+		ghost:          p.ghost,
+		resuming:       p.resuming,
+		preparing:      p.preparing,
+		pending:        p.Pending,
+		mcpHighlight:   p.mcpHighlight,
+		muted:          p.Muted,
+		focusMode:      p.focusMode,
+		working:        p.working,
+		unseen:         p.unseen,
+		liveOutputSeen: p.liveOutputSeen,
+		spinnerFrame:   p.spinnerFrame,
+		workFrame:      p.workFrame,
+		name:           p.Name,
+		cwd:            p.CWD,
+		paneType:       p.Type,
+		sessionID:      p.SessionID,
+		historyLines:   p.HistoryLines,
 	}
 	// renderContent only honors a selection whose PaneID matches this pane;
 	// foreign or absent selections render identically, so both normalize to
@@ -348,6 +381,208 @@ func (p *PaneModel) ScrollToRelY(relY, innerH int) {
 	p.scrollBack = sbLen - viewStart
 }
 
+// restoreSettled reports whether the resuming/preparing restore state should
+// clear: the pane is now showing visible content (after the minimum display
+// time), or the safety cap elapsed. "Visible content" — not merely "first byte
+// received" — is the right signal. claude-code (ghost_buffer=false) emits
+// terminal-setup bytes and a screen clear seconds before the resumed session
+// paints, so gating on the first byte (liveOutputSeen) cleared the indicator
+// while the pane was still blank for 5-15s.
+func (p *PaneModel) restoreSettled() bool {
+	if time.Since(p.resumeStart) >= restoreSafetyCap {
+		return true
+	}
+	return !p.screenBlank() && time.Since(p.resumeStart) >= restoreMinDisplay
+}
+
+// screenBlank reports whether the live VT screen has no visible content: every
+// cell empty/space with no styling (a space with a background colour counts as
+// visible). Cheap — returns on the first visible cell. Scrollback is irrelevant
+// here; the indicator only shows at scrollBack==0.
+func (p *PaneModel) screenBlank() bool {
+	w, h := p.vt.Width(), p.vt.Height()
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			cell := p.vt.CellAt(x, y)
+			if cell == nil {
+				continue
+			}
+			if cell.Content != "" && cell.Content != " " {
+				return false
+			}
+			if !cell.Style.IsZero() {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// showRestoreIndicator reports whether View() should overlay the centered
+// restore indicator: the pane is mid-restore/spawn (or still a deferred,
+// not-yet-spawned pane) and its body is currently blank. Gating on the actual
+// blank screen (rather than the ghost/liveOutputSeen flags) keeps the indicator
+// up through claude-code's multi-second boot — where the child has emitted bytes
+// and cleared the screen but not yet painted — and hides it the instant any
+// content (ghost or live) fills the screen. Pending covers lazy-restored panes
+// that have not spawned yet (other tabs), which arm resuming on spawn.
+func (p *PaneModel) showRestoreIndicator() bool {
+	return (p.resuming || p.preparing || p.Pending) && p.scrollBack == 0 && p.screenBlank()
+}
+
+// restoreContext builds the dim second line: "<type> · <name-or-cwd-basename>".
+// Falls back to just the type when neither a name nor a CWD is known.
+func (p *PaneModel) restoreContext() string {
+	typ := p.Type
+	if typ == "" {
+		typ = "terminal"
+	}
+	detail := p.Name
+	if detail == "" && p.CWD != "" {
+		detail = filepath.Base(p.CWD)
+	}
+	if detail == "" {
+		return typ
+	}
+	return typ + " · " + detail
+}
+
+type stepState int
+
+const (
+	stepDone    stepState = iota // ✓ completed
+	stepActive                   // ⠹ in progress (gets the spinner)
+	stepPending                  // · not reached yet
+	stepNone                     // ─ neutral (e.g. no saved history); rendering: '─'
+)
+
+type restoreStep struct {
+	text  string
+	state stepState
+}
+
+// restoresViaSession reports whether a plugin restores its own history through a
+// session id (claude --resume / opencode --session) rather than a Quil ghost
+// buffer. For these tools the conversation comes back even though Quil saves no
+// ghost buffer (HistoryLines == 0).
+func restoresViaSession(paneType string) bool {
+	return paneType == "claude-code" || paneType == "opencode"
+}
+
+// resumeLabel is row 3 of the checklist: a human description of the resume
+// strategy for this pane type, with the tracked session-id prefix appended for
+// the agent plugins when known.
+func resumeLabel(paneType, sessionID string) string {
+	var base string
+	switch paneType {
+	case "claude-code":
+		base = "resuming claude"
+	case "opencode":
+		base = "resuming opencode"
+	case "ssh":
+		base = "reconnecting ssh"
+	case "stripe":
+		base = "restarting stripe"
+	case "", "terminal":
+		base = "restarting shell"
+	default:
+		base = "starting " + paneType
+	}
+	// Session id is only meaningful for agent plugins (claude-code, opencode).
+	if sessionID != "" && restoresViaSession(paneType) {
+		id := sessionID
+		if r := []rune(sessionID); len(r) > 8 {
+			id = string(r[:8])
+		}
+		base += " · " + id
+	}
+	return base
+}
+
+// restoreSteps builds the ordered checklist rows from the pane's restore state.
+// Exactly one row is stepActive (the spinner row): row 3 while the pane is still
+// deferred (Pending), otherwise row 4 (waiting for the first painted output).
+func (p *PaneModel) restoreSteps() []restoreStep {
+	steps := []restoreStep{
+		{text: "session loaded", state: stepDone},
+	}
+	// Row 2 — where the history comes from:
+	//   - HistoryLines > 0: Quil replayed a saved ghost buffer (terminal/ssh).
+	//   - resume tools with a session id: the tool restores the conversation
+	//     itself (claude --resume) even though Quil has no ghost buffer.
+	//   - otherwise: genuinely nothing to restore (new pane, no session).
+	switch {
+	case p.HistoryLines > 0:
+		steps = append(steps, restoreStep{
+			text:  fmt.Sprintf("history restored (%d ln)", p.HistoryLines),
+			state: stepDone,
+		})
+	case restoresViaSession(p.Type) && p.SessionID != "":
+		steps = append(steps, restoreStep{text: "history via resume", state: stepDone})
+	default:
+		steps = append(steps, restoreStep{text: "no saved history", state: stepNone})
+	}
+
+	spawned := !p.Pending
+	resume := restoreStep{text: resumeLabel(p.Type, p.SessionID), state: stepActive}
+	wait := restoreStep{text: "waiting for first output", state: stepPending}
+	if spawned {
+		resume.state = stepDone
+		wait.state = stepActive
+	}
+	return append(steps, resume, wait)
+}
+
+// renderRestoreIndicator centers the per-pane restore checklist in an
+// innerW×innerH area: one row per restore step, the in-progress row carrying the
+// animated spinner. Falls back to a compact single line when the pane is too
+// short or narrow for the checklist. Border stays purple (handled in View).
+func (p *PaneModel) renderRestoreIndicator(innerW, innerH int) string {
+	steps := p.restoreSteps()
+	rows := make([]string, len(steps))
+	widest := 0
+	for i, s := range steps {
+		var row string
+		switch s.state {
+		case stepDone:
+			row = restoreDoneStyle.Render("✓") + " " + restoreDimStyle.Render(s.text)
+		case stepActive:
+			row = restoreAccentStyle.Render(spinnerFrames[p.spinnerFrame%len(spinnerFrames)] + " " + s.text)
+		case stepPending:
+			row = restoreDimStyle.Render("· " + s.text)
+		default: // stepNone
+			row = restoreDimStyle.Render("─ " + s.text)
+		}
+		rows[i] = row
+		if w := ansi.StringWidth(row); w > widest {
+			widest = w
+		}
+	}
+
+	// Fallback for panes too small for the checklist.
+	if innerH < len(steps)+2 || widest+2 > innerW {
+		return p.renderRestoreIndicatorCompact(innerW, innerH)
+	}
+
+	block := lipgloss.JoinVertical(lipgloss.Left, rows...)
+	return lipgloss.Place(innerW, innerH, lipgloss.Center, lipgloss.Center, block)
+}
+
+// renderRestoreIndicatorCompact is the small single-line indicator used when the
+// pane is too small for the full checklist.
+func (p *PaneModel) renderRestoreIndicatorCompact(innerW, innerH int) string {
+	glyph := spinnerFrames[p.spinnerFrame%len(spinnerFrames)]
+	label := "Rebuilding session"
+	if p.preparing {
+		label = "Building new pane"
+	}
+	block := restoreAccentStyle.Render(glyph + "  " + label)
+	if ctx := p.restoreContext(); ctx != "" {
+		block += "\n" + restoreDimStyle.Render(ctx)
+	}
+	return lipgloss.Place(innerW, innerH, lipgloss.Center, lipgloss.Center, block)
+}
+
 func (p *PaneModel) View() string {
 	key := p.renderKey()
 	if p.hasCache && key == p.cachedKey {
@@ -379,6 +614,9 @@ func (p *PaneModel) View() string {
 	}
 
 	content := p.renderContent(p.activeSel)
+	if p.showRestoreIndicator() {
+		content = p.renderRestoreIndicator(innerW, innerH)
+	}
 
 	// Render content with left, right, bottom borders (no top).
 	// Lipgloss v2: Width/Height include borders in the budget (v1 was additive).

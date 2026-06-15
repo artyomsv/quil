@@ -22,15 +22,16 @@ type Tab struct {
 }
 
 type Pane struct {
-	ID          string
-	TabID       string
-	CWD         string
-	Name        string // User-set name (empty = use CWD)
-	PTY         apty.Session
-	OutputBuf   *ringbuf.RingBuffer // Captures PTY output for replay on reconnect
-	GhostSnap   []byte              // Pure disk-loaded ghost buffer, cleared after first client replay
-	Type        string              // Plugin name (default: "terminal")
-	PluginState map[string]string   // Scraped values (e.g., "session_id": "abc123")
+	ID           string
+	TabID        string
+	CWD          string
+	Name         string // User-set name (empty = use CWD)
+	PTY          apty.Session
+	OutputBuf    *ringbuf.RingBuffer // Captures PTY output for replay on reconnect
+	GhostSnap    []byte              // Pure disk-loaded ghost buffer, cleared after first client replay
+	HistoryLines int                 // Ghost-buffer line count, snapshotted at restore (immutable after; broadcast-only restore-checklist hint)
+	Type         string              // Plugin name (default: "terminal")
+	PluginState  map[string]string   // Scraped values (e.g., "session_id": "abc123")
 	// PluginMu protects every mutable field that can be read or written
 	// concurrently with the daemon's PTY-output goroutine: PluginState,
 	// GhostSnap, PTY (the pointer itself + Pid lookups), ExitCode, and

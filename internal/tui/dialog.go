@@ -22,6 +22,7 @@ import (
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/gitdiscover"
 	"github.com/artyomsv/quil/internal/ipc"
+	"github.com/artyomsv/quil/internal/kubediscover"
 	"github.com/artyomsv/quil/internal/logger"
 	"github.com/artyomsv/quil/internal/plugin"
 )
@@ -2000,8 +2001,10 @@ func (m *Model) enterSetupOrSplit(p *plugin.PanePlugin) tea.Cmd {
 	m.cwdBrowseCursor = 0
 	m.cwdBrowseScroll = 0
 	m.repoCandidates = nil
+	m.kubeContexts = nil
+	m.kubeCursor = 0
 
-	needsSetup := p != nil && (p.Command.PromptsCWD || len(p.Command.Toggles) > 0)
+	needsSetup := p != nil && (p.Command.PromptsCWD || len(p.Command.Toggles) > 0 || p.Command.Discover == "kube")
 	if !needsSetup {
 		m.createPaneStep = 3
 		return nil
@@ -2031,6 +2034,14 @@ func (m *Model) enterSetupOrSplit(p *plugin.PanePlugin) tea.Cmd {
 		} else {
 			m.initSetupBrowser()
 		}
+	}
+
+	if p.Command.Discover == "kube" {
+		m.kubeContexts = kubediscover.Contexts()
+		if len(m.kubeContexts) > maxKubeContexts {
+			m.kubeContexts = m.kubeContexts[:maxKubeContexts]
+		}
+		m.kubeCursor = 0 // Default context row
 	}
 
 	// Initialize toggle states from defaults. For mutually-exclusive groups
@@ -2173,6 +2184,11 @@ const browserVisibleRows = 12
 // repos remain reachable via the Browse… escape hatch.
 const maxRepoCandidates = 10
 
+// maxKubeContexts bounds the kube-context pick list (discover="kube"). Like
+// the repo list it has no scroll machinery; "Default context" is always
+// available, so an overflowing kubeconfig still spawns a usable pane.
+const maxKubeContexts = 50
+
 // adjustBrowseScroll keeps the cursor inside the visible window.
 func (m *Model) adjustBrowseScroll() {
 	if m.cwdBrowseCursor < m.cwdBrowseScroll {
@@ -2240,16 +2256,25 @@ func (m Model) setupFieldCount(p *plugin.PanePlugin) int {
 	if p.Command.PromptsCWD {
 		n++
 	}
+	if p.Command.Discover == "kube" {
+		n++
+	}
 	return n
 }
 
 // setupFieldKind reports what field is at the given cursor index in the setup
-// dialog. Returns "cwd", "toggle" (with toggleIdx), or "continue".
+// dialog. Returns "cwd", "kube", "toggle" (with toggleIdx), or "continue".
 func (m Model) setupFieldKind(p *plugin.PanePlugin, cursor int) (kind string, toggleIdx int) {
 	i := cursor
 	if p.Command.PromptsCWD {
 		if i == 0 {
 			return "cwd", -1
+		}
+		i--
+	}
+	if p.Command.Discover == "kube" {
+		if i == 0 {
+			return "kube", -1
 		}
 		i--
 	}
@@ -2303,6 +2328,9 @@ func (m Model) handleCreatePaneSetupKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd
 	switch kind {
 	case "cwd":
 		return m.handleSetupCWDKey(p, key)
+
+	case "kube":
+		return m.handleSetupKubeKey(p, key)
 
 	case "toggle":
 		switch key {
@@ -2528,6 +2556,32 @@ func (m Model) handleSetupRepoKey(p *plugin.PanePlugin, key string) (tea.Model, 
 	return m, nil
 }
 
+// handleSetupKubeKey processes keystrokes when the kube-context field is
+// focused (discover="kube"). Row 0 is the "Default context" (no --context
+// flag — k9s uses the kubeconfig current-context); rows 1..N are the
+// discovered contexts. kubeCursor is the row index; submitSetupDialog reads it
+// to inject --context.
+func (m Model) handleSetupKubeKey(p *plugin.PanePlugin, key string) (tea.Model, tea.Cmd) {
+	rows := len(m.kubeContexts) + 1 // +1 for the Default context row
+	switch key {
+	case "up", "k":
+		if m.kubeCursor > 0 {
+			m.kubeCursor--
+		}
+		return m, nil
+
+	case "down", "j":
+		if m.kubeCursor < rows-1 {
+			m.kubeCursor++
+		}
+		return m, nil
+
+	case "enter":
+		return m.submitSetupDialog(p)
+	}
+	return m, nil
+}
+
 // submitSetupDialog commits the browser-selected directory and toggle states,
 // then advances the create-pane flow to the split-direction step.
 func (m Model) submitSetupDialog(p *plugin.PanePlugin) (tea.Model, tea.Cmd) {
@@ -2536,6 +2590,15 @@ func (m Model) submitSetupDialog(p *plugin.PanePlugin) (tea.Model, tea.Cmd) {
 		logger.Debug("setup dialog: captured cwd=%q from browser (plugin=%s)", m.selectedCWD, p.Name)
 	}
 	m.cwdInputError = ""
+
+	// Inject the chosen kube context (row 0 = Default = no --context flag).
+	if p.Command.Discover == "kube" && m.kubeCursor > 0 && m.kubeCursor-1 < len(m.kubeContexts) {
+		ctx := m.kubeContexts[m.kubeCursor-1].Name
+		merged := make([]string, 0, len(m.selectedInstanceArgs)+2)
+		merged = append(merged, m.selectedInstanceArgs...)
+		merged = append(merged, "--context", ctx)
+		m.selectedInstanceArgs = merged
+	}
 
 	// Append enabled-toggle args to whatever instance args came in.
 	var extra []string
@@ -2771,6 +2834,45 @@ func (m Model) renderCreatePaneSetupDialog() string {
 			} else {
 				b.WriteString(dialogSubtle.Render("    (empty directory)") + "\n")
 			}
+		}
+		b.WriteString("\n")
+		fieldIdx++
+	}
+
+	if p.Command.Discover == "kube" {
+		focused := cursor == fieldIdx
+		label := "Kube context:"
+		if focused {
+			label = dialogSelected.Render("> " + label)
+		} else {
+			label = dialogNormal.Render("  " + label)
+		}
+		b.WriteString(label + "\n")
+
+		// Row 0 = Default context (current-context, no --context flag); rows
+		// 1..N = discovered contexts, current-context marked with ●.
+		renderRow := func(rowIdx int, text string) {
+			if focused && rowIdx == m.kubeCursor {
+				b.WriteString("  > " + dialogSelected.Render(text) + "\n")
+			} else {
+				b.WriteString("    " + dialogNormal.Render(text) + "\n")
+			}
+		}
+		renderRow(0, "Default context")
+		for i, c := range m.kubeContexts {
+			name := c.Name
+			if c.Current {
+				name = "● " + name
+			}
+			if c.Namespace != "" {
+				name += dialogSubtle.Render("  (" + c.Namespace + ")")
+			}
+			renderRow(i+1, name)
+		}
+		if len(m.kubeContexts) == 0 {
+			b.WriteString(dialogSubtle.Render("    (no kube contexts found — k9s uses its current context)") + "\n")
+		} else {
+			b.WriteString(dialogSubtle.Render("    ↑↓ navigate  Enter select") + "\n")
 		}
 		b.WriteString("\n")
 		fieldIdx++

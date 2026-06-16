@@ -246,6 +246,44 @@ func TestAttachPayload_CWDRoundTrip(t *testing.T) {
 	}
 }
 
+func TestPaneHistoryPayloads_RoundTrip(t *testing.T) {
+	req := ipc.PaneHistoryReqPayload{PaneID: "pane-1"}
+	msg, err := ipc.NewMessage(ipc.MsgPaneHistoryReq, req)
+	if err != nil {
+		t.Fatalf("NewMessage: %v", err)
+	}
+	var gotReq ipc.PaneHistoryReqPayload
+	if err := msg.DecodePayload(&gotReq); err != nil {
+		t.Fatalf("DecodePayload: %v", err)
+	}
+	if gotReq.PaneID != "pane-1" {
+		t.Fatalf("req round-trip mismatch: %+v", gotReq)
+	}
+
+	resp := ipc.PaneHistoryRespPayload{
+		PaneID:  "pane-1",
+		Entries: []ipc.HistoryEntryMeta{{TsMs: 9, Preview: []string{"a", "b"}}},
+	}
+	rmsg, _ := ipc.NewMessage(ipc.MsgPaneHistoryResp, resp)
+	var gotResp ipc.PaneHistoryRespPayload
+	if err := rmsg.DecodePayload(&gotResp); err != nil {
+		t.Fatalf("DecodePayload resp: %v", err)
+	}
+	if len(gotResp.Entries) != 1 || gotResp.Entries[0].TsMs != 9 || gotResp.Entries[0].Preview[1] != "b" {
+		t.Fatalf("resp round-trip mismatch: %+v", gotResp)
+	}
+
+	er := ipc.PaneHistoryEntryRespPayload{PaneID: "p", TsMs: 9, Text: "full", Found: true}
+	emsg, _ := ipc.NewMessage(ipc.MsgPaneHistoryEntryResp, er)
+	var gotER ipc.PaneHistoryEntryRespPayload
+	if err := emsg.DecodePayload(&gotER); err != nil {
+		t.Fatalf("DecodePayload entry resp: %v", err)
+	}
+	if !gotER.Found || gotER.Text != "full" {
+		t.Fatalf("entry resp round-trip mismatch: %+v", gotER)
+	}
+}
+
 // TestEncodeFrame_RejectsOversizedFrame: the read side caps frames at 10 MB —
 // without a matching write-side guard, an oversized producer poisons the
 // stream and surfaces as an opaque "message too large" disconnect on the

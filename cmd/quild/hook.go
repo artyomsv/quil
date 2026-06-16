@@ -24,6 +24,8 @@ func runClaudeHook() {
 		PaneID:  os.Getenv("QUIL_PANE_ID"),
 		QuilDir: hookHomeDir(),
 		Mode:    os.Getenv("QUIL_HOOK_MODE"),
+
+		RecordHistory: os.Getenv("QUIL_RECORD_HISTORY") == "1",
 	}, time.Now().UnixMilli())
 }
 

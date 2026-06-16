@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/artyomsv/quil/internal/hookevents"
+	"github.com/artyomsv/quil/internal/panehistory"
 )
 
 // readSpool reads and JSON-decodes every line of a pane's spool file.
@@ -59,6 +60,35 @@ func TestRunHook_UserPromptSubmit_SpoolsStartEdge(t *testing.T) {
 	}
 	if p.Data["prompt_preview"] != "tell me a joke" {
 		t.Errorf("prompt_preview = %q", p.Data["prompt_preview"])
+	}
+}
+
+func TestRunHook_UserPromptSubmit_AppendsHistory(t *testing.T) {
+	dir := t.TempDir()
+	env := HookEnv{PaneID: "pane-abc", QuilDir: dir, Mode: "default", RecordHistory: true}
+	in := `{"hook_event_name":"UserPromptSubmit","session_id":"sess-1","prompt":"fix the parser bug"}`
+	if err := RunHook(strings.NewReader(in), env, 12345); err != nil {
+		t.Fatalf("RunHook: %v", err)
+	}
+	got, err := panehistory.Read(dir, env.PaneID)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if len(got) != 1 || got[0].Text != "fix the parser bug" || got[0].TsMs != 12345 {
+		t.Fatalf("unexpected history: %+v", got)
+	}
+}
+
+func TestRunHook_UserPromptSubmit_NoHistoryWhenDisabled(t *testing.T) {
+	dir := t.TempDir()
+	env := HookEnv{PaneID: "pane-abc", QuilDir: dir, Mode: "default", RecordHistory: false}
+	in := `{"hook_event_name":"UserPromptSubmit","session_id":"s","prompt":"hello"}`
+	if err := RunHook(strings.NewReader(in), env, 1); err != nil {
+		t.Fatalf("RunHook: %v", err)
+	}
+	got, _ := panehistory.Read(dir, env.PaneID)
+	if len(got) != 0 {
+		t.Fatalf("expected no history when disabled, got %d", len(got))
 	}
 }
 

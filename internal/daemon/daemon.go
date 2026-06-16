@@ -2209,6 +2209,13 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 		envVars = append(envVars, opencodeSpawnPrep(config.QuilDir(), pane.ID, d.cfg.Notification.Hooks.OpenCode)...)
 	}
 
+	// Generic opt-in: any plugin whose hook producer records input history
+	// gets the gate env. The hook subprocess reads QUIL_RECORD_HISTORY and
+	// appends submitted prompts to the per-pane history store.
+	if p.Command.RecordHistory {
+		envVars = append(envVars, "QUIL_RECORD_HISTORY=1")
+	}
+
 	if len(envVars) > 0 {
 		ptySession.SetEnv(envVars)
 	}

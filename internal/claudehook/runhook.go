@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/artyomsv/quil/internal/hookevents"
+	"github.com/artyomsv/quil/internal/panehistory"
 )
 
 // HookEnv carries the per-invocation context the hook needs, sourced from the
@@ -19,6 +20,8 @@ type HookEnv struct {
 	PaneID  string // QUIL_PANE_ID — empty means "invoked outside Quil" (no-op)
 	QuilDir string // resolved via QUIL_HOOK_HOME (QUIL_HOME fallback) — root for sessions/ and events/
 	Mode    string // QUIL_HOOK_MODE: "default" | "verbose" | "off"
+
+	RecordHistory bool // QUIL_RECORD_HISTORY=1 — append full prompts to the history store
 }
 
 // maxStdinBytes caps how much of Claude's hook stdin we read. The payload can
@@ -101,6 +104,15 @@ func dispatchHookEvent(env HookEnv, in claudeStdin, nowMs int64) error {
 	case "SessionEnd":
 		return spoolEvent(env, nowMs, "SessionEnd", in.SessionID, "Session ended", hookevents.SeverityInfo, nil)
 	case "UserPromptSubmit":
+		if env.RecordHistory {
+			if err := panehistory.Append(env.QuilDir, env.PaneID, panehistory.Entry{
+				TsMs:      nowMs,
+				SessionID: in.SessionID,
+				Text:      in.Prompt,
+			}); err != nil {
+				hookLog(env.QuilDir, env.PaneID, "append history failed: "+err.Error())
+			}
+		}
 		preview := truncate(in.Prompt, 60)
 		return spoolEvent(env, nowMs, "UserPromptSubmit", in.SessionID,
 			truncate("Working on: "+preview, hookevents.MaxTitleBytes), hookevents.SeverityInfo,

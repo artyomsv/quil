@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestAppend_WritesEntry_ReadBack(t *testing.T) {
@@ -46,6 +47,28 @@ func TestAppend_CapsOversizeText(t *testing.T) {
 	}
 	if len(got[0].Text) > MaxEntryBytes {
 		t.Fatalf("text not capped: %d bytes", len(got[0].Text))
+	}
+	if !strings.HasSuffix(got[0].Text, "…[truncated]") {
+		t.Fatalf("missing truncation marker")
+	}
+}
+
+func TestAppend_CapsOversizeText_MultiByteRuneSafe(t *testing.T) {
+	dir := t.TempDir()
+	// All multi-byte runes so truncation must land on a rune boundary.
+	big := strings.Repeat("日", MaxEntryBytes) // 3 bytes each, far over the cap
+	if err := Append(dir, "pane-mb", Entry{TsMs: 1, Text: big}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	got, _ := Read(dir, "pane-mb")
+	if len(got) != 1 {
+		t.Fatalf("want 1 entry, got %d", len(got))
+	}
+	if len(got[0].Text) > MaxEntryBytes {
+		t.Fatalf("text not capped: %d bytes", len(got[0].Text))
+	}
+	if !utf8.ValidString(got[0].Text) {
+		t.Fatalf("truncation produced invalid UTF-8")
 	}
 	if !strings.HasSuffix(got[0].Text, "…[truncated]") {
 		t.Fatalf("missing truncation marker")

@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -100,18 +101,21 @@ func Read(quilDir, paneID string) ([]Entry, error) {
 	defer f.Close()
 
 	var entries []Entry
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), MaxEntryBytes+4096)
-	for sc.Scan() {
-		line := sc.Bytes()
-		if len(line) == 0 {
-			continue
+	r := bufio.NewReader(f)
+	for {
+		line, rerr := r.ReadBytes('\n')
+		if len(line) > 0 {
+			var e Entry
+			if json.Unmarshal(line, &e) == nil { // skip malformed / trailing partial line
+				entries = append(entries, e)
+			}
 		}
-		var e Entry
-		if err := json.Unmarshal(line, &e); err != nil {
-			continue
+		if rerr != nil {
+			if errors.Is(rerr, io.EOF) {
+				break
+			}
+			return entries, rerr
 		}
-		entries = append(entries, e)
 	}
 	return entries, nil
 }

@@ -6,13 +6,14 @@ name = "claude-code"
 display_name = "Claude Code"
 category = "ai"
 description = "AI coding assistant"
-schema_version = 5
+schema_version = 6
 
 [command]
 cmd = "claude"
 # path = "/path/to/claude"  # uncomment to override PATH lookup
 detect = "claude --version"
 prompts_cwd = true  # ask user which folder to open Claude in (preserves .claude/ project context)
+record_history = true  # capture submitted prompts to <quilDir>/history/<paneID>.jsonl (hook producer)
 
 # Runtime toggles — rendered in the pane setup dialog.
 #

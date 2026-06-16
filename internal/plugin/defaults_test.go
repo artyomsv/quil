@@ -78,6 +78,20 @@ func TestEnsureDefaultPlugins_CurrentVersionNotStale(t *testing.T) {
 	}
 }
 
+func TestEnsureDefaultPlugins_ClaudeCodeRecordsHistory(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := EnsureDefaultPlugins(dir); err != nil {
+		t.Fatalf("EnsureDefaultPlugins: %v", err)
+	}
+	p, err := loadPluginTOML(filepath.Join(dir, "claude-code.toml"))
+	if err != nil {
+		t.Fatalf("load claude-code.toml: %v", err)
+	}
+	if !p.Command.RecordHistory {
+		t.Fatal("expected claude-code Command.RecordHistory = true")
+	}
+}
+
 func TestEnsureDefaultPlugins_WritesLazygit(t *testing.T) {
 	dir := t.TempDir()
 	if _, err := EnsureDefaultPlugins(dir); err != nil {

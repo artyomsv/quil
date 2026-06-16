@@ -53,6 +53,12 @@ type CommandConfig struct {
 	// PromptsCWD is true. "kube" = a context pick-list lists kube contexts
 	// from the kubeconfig and injects --context <name> (CWD-independent).
 	Discover string
+	// RecordHistory enables per-pane user-input history capture for this
+	// plugin. When true, the daemon sets QUIL_RECORD_HISTORY=1 in the pane's
+	// PTY env, and the plugin's hook producer appends submitted prompts to
+	// <quilDir>/history/<paneID>.jsonl. Meaningful only for plugins with a
+	// hook producer (claude-code; opencode is a follow-up).
+	RecordHistory bool
 }
 
 // FormField defines a user-fillable field for creating plugin instances.

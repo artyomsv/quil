@@ -57,6 +57,7 @@ The active tab is prefixed with `* ` in the tab bar so it's visible even when [t
 | `Ctrl+E` | Toggle focus mode (active pane full-screen) |
 | `Alt+G` | Toggle lazygit overlay (git repo from active pane's directory) |
 | `Alt+Shift+L` | Force a full screen redraw — clears rendering artifacts (scrambled/misplaced characters) without restarting. Mnemonic: `Ctrl+L` redraws a shell. |
+| `Alt+Shift+I` | Open the active pane's input history — a list of prompts you submitted, each shown as a 3-line preview. `↑/↓` navigate, `Enter` opens the full text read-only (scroll + copy), `Esc` closes. Only AI panes whose plugin sets `record_history` (Claude Code) capture history; other pane types show an empty state. |
 
 ## Pane navigation
 

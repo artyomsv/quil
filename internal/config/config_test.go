@@ -181,3 +181,10 @@ func TestDefault_ToggleLazygitBinding(t *testing.T) {
 		t.Errorf("ToggleLazygit = %q, want alt+g", cfg.Keybindings.ToggleLazygit)
 	}
 }
+
+func TestDefaultKeybindings_CommandHistory(t *testing.T) {
+	cfg := config.Default()
+	if cfg.Keybindings.CommandHistory != "alt+shift+i" {
+		t.Fatalf("want alt+shift+i, got %q", cfg.Keybindings.CommandHistory)
+	}
+}

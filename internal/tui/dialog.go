@@ -354,6 +354,31 @@ func (m Model) handleDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.handleMemoryDialogKey(msg)
 	case dialogGitRepoPick:
 		return m.handleGitRepoPickKey(msg)
+	case dialogCommandHistory:
+		return m.handleCommandHistoryKey(msg)
+	}
+	return m, nil
+}
+
+// handleCommandHistoryKey processes a key press while the input-history modal
+// is open. Mirrors handleMemoryDialogKey's raw-string key idiom.
+func (m Model) handleCommandHistoryKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.dialog = dialogNone
+		return m, tea.ClearScreen
+	case "up", "k":
+		if m.history.cursor > 0 {
+			m.history.cursor--
+		}
+	case "down", "j":
+		if m.history.cursor < len(m.history.entries)-1 {
+			m.history.cursor++
+		}
+	case "enter":
+		if m.history.supported && m.history.cursor >= 0 && m.history.cursor < len(m.history.entries) {
+			return m, m.requestHistoryEntry(m.history.paneID, m.history.entries[m.history.cursor].TsMs)
+		}
 	}
 	return m, nil
 }
@@ -691,6 +716,9 @@ func (m Model) renderDialog() string {
 		content = m.renderMemoryDialog()
 	case dialogGitRepoPick:
 		content = m.renderGitRepoPickDialog()
+	case dialogCommandHistory:
+		width = 80
+		content = m.renderCommandHistory()
 	}
 
 	// Never render wider than the terminal (border adds +2 outside Width).
@@ -1834,6 +1862,15 @@ func (m Model) newLogViewerEditor(content, path string) *TextEditor {
 	editor.CursorCol = 0
 	editor.ensureCursorVisible()
 	return editor
+}
+
+// openReadonlyText opens arbitrary in-memory content in the same full-screen
+// read-only TextEditor used by the log viewer. label appears in the editor's
+// path field.
+func (m Model) openReadonlyText(label, content string) (tea.Model, tea.Cmd) {
+	m.tomlEditor = m.newLogViewerEditor(content, label)
+	m.dialog = dialogLogViewer
+	return m, tea.ClearScreen
 }
 
 func (m Model) openLogViewer(label, path string) (tea.Model, tea.Cmd) {

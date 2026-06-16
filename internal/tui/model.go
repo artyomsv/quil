@@ -184,6 +184,7 @@ const (
 	dialogPluginMigration
 	dialogMemory
 	dialogGitRepoPick // Alt+G repo picker (Task 12 fills handler/render)
+	dialogCommandHistory
 )
 
 // tuiClient is the subset of *ipc.Client the TUI uses on the Model. Defined
@@ -306,6 +307,9 @@ type Model struct {
 	// Memory dialog state
 	mem         memoryDialogState
 	lastMemResp *ipc.MemoryReportRespPayload
+
+	// Input-history modal state (dialogCommandHistory)
+	history historyState
 
 	// Work-in-progress indicators. Derived TUI-side from the hook event
 	// stream (see internal/tui/workstate.go). workSpinnerFrame is the shared
@@ -961,6 +965,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m = m.applyMemoryReport(msg.Resp)
 		return m, m.listenForMessages()
 
+	case historyListMsg:
+		m = m.applyHistoryList(msg.Resp)
+		return m, m.listenForMessages()
+
+	case historyEntryMsg:
+		// Both branches must keep the IPC listen loop alive — these messages
+		// originate from listenForMessages.
+		if !msg.Resp.Found {
+			return m, tea.Batch(m.requestHistory(m.history.paneID), m.listenForMessages())
+		}
+		label := fmt.Sprintf("Input @ %s", time.UnixMilli(msg.Resp.TsMs).Format("2006-01-02 15:04:05"))
+		mdl, cmd := m.openReadonlyText(label, msg.Resp.Text)
+		return mdl, tea.Batch(cmd, m.listenForMessages())
+
 	case listenContinueMsg:
 		return m, m.listenForMessages()
 	}
@@ -1408,7 +1426,7 @@ func (m Model) notesKeyExempt(key string) bool {
 		// the notes editor.
 		kb.RestartPane,
 		// Tools and dialogs.
-		kb.JSONTransform, kb.QuickActions,
+		kb.JSONTransform, kb.QuickActions, kb.CommandHistory,
 	}
 	for _, b := range exempt {
 		if kbMatches(key, b) {
@@ -1658,6 +1676,24 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, m.toggleActivePaneEager()
 	case kbMatches(key, kb.ToggleLazygit):
 		return m, m.handleToggleLazygit()
+	case kbMatches(key, kb.CommandHistory):
+		tab := m.activeTabModel()
+		if tab == nil {
+			return m, nil
+		}
+		pane := tab.ActivePaneModel()
+		if pane == nil {
+			return m, nil
+		}
+		supported := false
+		if p := m.pluginRegistry.Get(pane.Type); p != nil {
+			supported = p.Command.RecordHistory
+		}
+		m = m.openHistoryDialog(pane.ID, pane.Type, supported)
+		if supported {
+			return m, m.requestHistory(pane.ID)
+		}
+		return m, nil
 	}
 
 	// Sidebar focused: route keys to notification center
@@ -3049,6 +3085,22 @@ func (m Model) listenForMessages() tea.Cmd {
 				return listenContinueMsg{}
 			}
 			return memoryReportMsg{Resp: payload}
+
+		case ipc.MsgPaneHistoryResp:
+			var payload ipc.PaneHistoryRespPayload
+			if err := msg.DecodePayload(&payload); err != nil {
+				log.Printf("decode pane_history_resp: %v", err)
+				return listenContinueMsg{}
+			}
+			return historyListMsg{Resp: payload}
+
+		case ipc.MsgPaneHistoryEntryResp:
+			var payload ipc.PaneHistoryEntryRespPayload
+			if err := msg.DecodePayload(&payload); err != nil {
+				log.Printf("decode pane_history_entry_resp: %v", err)
+				return listenContinueMsg{}
+			}
+			return historyEntryMsg{Resp: payload}
 
 		case ipc.MsgRestartPaneResp:
 			// Response to the Alt+R restart confirm. The respawned pane

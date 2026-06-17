@@ -39,6 +39,11 @@ import (
 const dialogWidth = 60
 const disclaimerWidth = 60
 
+// gitRepoPickWidth is the multi-repo lazygit picker width. Repo paths are long,
+// so it runs 50% wider than the standard dialog to keep distinguishing tails
+// readable without aggressive left-truncation.
+const gitRepoPickWidth = 90
+
 // disclaimerTips are shown randomly in the startup disclaimer dialog.
 // Each body line is rendered as a bullet point.
 var disclaimerTips = []struct {
@@ -120,20 +125,15 @@ var (
 				Bold(true)
 )
 
-// settingsField describes one row in the Settings dialog. Most rows edit a
-// config value (use label + get + set, optionally isBool). Action rows leave
-// get/set/isBool zero and supply `action` — Enter calls the action instead
-// of opening the inline editor, letting the row trigger a flow (e.g. a
-// confirmation dialog) instead of mutating config.
+// settingsField describes one row in the Settings dialog. Each row edits a
+// config value: label + get + set, optionally isBool for toggles. Non-config
+// actions (e.g. "Stop daemon") live on the F1 → About root menu instead — see
+// handleAboutKey.
 type settingsField struct {
 	label  string
 	get    func(m *Model) string
 	set    func(m *Model, val string)
 	isBool bool
-	// action is invoked on Enter for non-config rows (e.g. "Stop daemon").
-	// When set, get is still used to render the trailing description text,
-	// but set / isBool are ignored.
-	action func(m Model) (Model, tea.Cmd)
 }
 
 // settingsFields returns the editable Settings rows. Every setter that
@@ -215,18 +215,6 @@ func settingsFields() []settingsField {
 			},
 			isBool: true,
 		},
-		{
-			label: "Stop daemon",
-			get:   func(_ *Model) string { return "(closes this TUI window)" },
-			action: func(m Model) (Model, tea.Cmd) {
-				m.dialog = dialogConfirm
-				m.confirmKind = confirmKindShutdown
-				m.confirmID = ""
-				m.confirmName = ""
-				m.dialogCursor = 0
-				return m, nil
-			},
-		},
 	}
 }
 
@@ -239,19 +227,6 @@ const confirmKindShutdown = "shutdown"
 // restart-pane confirm (default Alt+R): kill + respawn the pane's process
 // in place via the same MsgRestartPaneReq the MCP restart_pane tool uses.
 const confirmKindRestartPane = "restart-pane"
-
-// stopDaemonRowIndex returns the index of the "Stop daemon" row in
-// settingsFields() by label lookup. Used by the confirm dialog's Esc
-// handler to restore the cursor — looking up by label (instead of assuming
-// "last row") survives adding new action rows after Stop daemon.
-func stopDaemonRowIndex() int {
-	for i, f := range settingsFields() {
-		if f.label == "Stop daemon" {
-			return i
-		}
-	}
-	return 0
-}
 
 func shortcutsList(m *Model) []struct{ key, desc string } {
 	kb := m.cfg.Keybindings
@@ -383,8 +358,15 @@ func (m Model) handleCommandHistoryKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd)
 	return m, nil
 }
 
+// aboutStopDaemonIndex is the row index of "Stop daemon" in the F1 → About
+// (root) menu. Stop daemon was promoted from the nested Settings list to the
+// root menu so it sits alongside Settings/Shortcuts/Plugins. Kept as a named
+// constant so handleAboutKey, lastAboutItem, and the confirm-dialog Esc
+// handler cannot drift on the index.
+const aboutStopDaemonIndex = 7
+
 func (m Model) handleAboutKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	const lastAboutItem = 6 // 0:Settings 1:Shortcuts 2:Plugins 3:Memory 4:Client 5:Daemon 6:MCP
+	const lastAboutItem = aboutStopDaemonIndex // 0:Settings 1:Shortcuts 2:Plugins 3:Memory 4:Client 5:Daemon 6:MCP 7:Stop daemon
 	switch msg.String() {
 	case "esc":
 		m.dialog = dialogNone
@@ -416,6 +398,15 @@ func (m Model) handleAboutKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m.openLogViewer("Daemon log", filepath.Join(config.QuilDir(), "quild.log"))
 		case 6:
 			return m.openMCPLogsViewer()
+		case aboutStopDaemonIndex:
+			// Stop daemon: route to the shutdown confirm. Enter here only
+			// opens the confirm; the confirm itself requires `y` to fire
+			// MsgShutdown (see handleConfirmKey).
+			m.dialog = dialogConfirm
+			m.confirmKind = confirmKindShutdown
+			m.confirmID = ""
+			m.confirmName = ""
+			m.dialogCursor = 0
 		}
 	}
 	return m, nil
@@ -491,9 +482,6 @@ func (m Model) handleSettingsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	case "enter", " ":
 		f := fields[m.dialogCursor]
-		if f.action != nil {
-			return f.action(m)
-		}
 		if f.isBool {
 			f.set(&m, "")
 		} else {
@@ -524,11 +512,10 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.confirmKind == confirmKindShutdown {
-			// Back to Settings where the action was triggered. Cursor by
-			// label-lookup so a future action row inserted after Stop daemon
-			// does not silently misplace the cursor.
-			m.dialog = dialogSettings
-			m.dialogCursor = stopDaemonRowIndex()
+			// Back to the About (root) menu where Stop daemon was triggered,
+			// cursor restored to that row.
+			m.dialog = dialogAbout
+			m.dialogCursor = aboutStopDaemonIndex
 			return m, nil
 		}
 		m.dialog = dialogNone
@@ -537,9 +524,10 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		kind := m.confirmKind
 		id := m.confirmID
 
-		// Stop-daemon requires explicit `y` — Enter is what every Settings
-		// row uses to commit toggles, and the cost of a misclick here is a
-		// killed daemon + every pane child SIGHUP'd. `y` is a deliberate
+		// Stop-daemon requires explicit `y` — Enter is the universal
+		// select/commit key across every menu and toggle, so accepting it
+		// here would let finger-memory Enter (these dialogs are keyboard-only)
+		// kill the daemon + SIGHUP every pane child. `y` is a deliberate
 		// keystroke a user does not press accidentally.
 		if kind == confirmKindShutdown && msg.String() != "y" {
 			return m, nil
@@ -715,6 +703,7 @@ func (m Model) renderDialog() string {
 		width = 80
 		content = m.renderMemoryDialog()
 	case dialogGitRepoPick:
+		width = gitRepoPickWidth
 		content = m.renderGitRepoPickDialog()
 	case dialogCommandHistory:
 		width = 80
@@ -761,6 +750,7 @@ func (m Model) renderAboutDialog() string {
 		"View client log",
 		"View daemon log",
 		"View MCP logs",
+		"Stop daemon",
 	}
 	for i, item := range items {
 		cursor := "  "
@@ -928,8 +918,8 @@ func (m Model) renderGitRepoPickDialog() string {
 	b.WriteString(dialogTitle.Render("Open lazygit for which repo?"))
 	b.WriteString("\n\n")
 
-	// dialogWidth - 4: 2 for cursor marker, 2 for dialog border padding.
-	const pickMaxWidth = dialogWidth - 4
+	// gitRepoPickWidth - 4: 2 for cursor marker, 2 for dialog border padding.
+	const pickMaxWidth = gitRepoPickWidth - 4
 	for i, repo := range m.repoPickCandidates {
 		cursor := "  "
 		style := dialogNormal

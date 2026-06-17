@@ -27,6 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so the daemon kept the stale config until restarted. It now sends a reload, so
   newly added plugin fields (such as `record_history`) take effect immediately.
 
+## [1.29.0] - 2026-06-17
+
 ## [1.28.0] - 2026-06-15
 
 ### Added

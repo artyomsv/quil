@@ -26,7 +26,6 @@ func TestSettingsFields_LabelsAndInitialValues(t *testing.T) {
 		"Page scroll lines",
 		"Log level",
 		"Show disclaimer",
-		"Stop daemon",
 	}
 	if len(fields) != len(wantLabels) {
 		t.Fatalf("settingsFields len = %d, want %d", len(fields), len(wantLabels))
@@ -44,51 +43,61 @@ func TestSettingsFields_LabelsAndInitialValues(t *testing.T) {
 	}
 }
 
-// TestSettingsFields_StopDaemonIsAction verifies that the "Stop daemon" row
-// is an action row (action!=nil, set==nil, isBool==false). A regression
-// where the action gets dropped would render the row as a plain editable
-// field — pressing Enter would open the inline editor with no obvious way
-// to actually stop the daemon.
-func TestSettingsFields_StopDaemonIsAction(t *testing.T) {
+// TestRenderAboutDialog_HasStopDaemon verifies "Stop daemon" lives on the F1
+// → About (root) menu (promoted out of the nested Settings list). A
+// regression dropping it would leave no in-TUI way to stop the daemon.
+func TestRenderAboutDialog_HasStopDaemon(t *testing.T) {
 	t.Parallel()
-	fields := settingsFields()
-	stop := fields[len(fields)-1]
-	if stop.label != "Stop daemon" {
-		t.Fatalf("last field label = %q, want %q (test assumes Stop daemon is last)", stop.label, "Stop daemon")
-	}
-	if stop.action == nil {
-		t.Errorf("Stop daemon row has nil action — Enter would open inline editor instead")
-	}
-	if stop.set != nil {
-		t.Errorf("Stop daemon row has non-nil set — action rows ignore set but a stray setter is a smell")
-	}
-	if stop.isBool {
-		t.Errorf("Stop daemon row marked isBool — would make it look like a toggle")
-	}
-	// Description text must convey the consequence so the user understands
-	// before pressing Enter that the TUI window is affected. Pass a real
-	// Model to be honest about the get() contract — a future getter that
-	// inspects m would nil-panic on the previous shortcut.
-	m := &Model{cfg: config.Default()}
-	if got := stop.get(m); got == "" {
-		t.Errorf("Stop daemon get() returned empty — user has no hint about consequence")
+	m := Model{cfg: config.Default()}
+	got := m.renderAboutDialog()
+	if !strings.Contains(got, "Stop daemon") {
+		t.Errorf("About dialog missing %q row:\n%s", "Stop daemon", got)
 	}
 }
 
-// TestHandleSettingsKey_StopDaemonOpensConfirm verifies that pressing Enter
-// on the Stop daemon row routes to the confirmation dialog (rather than
-// directly sending MsgShutdown). Without the confirm step, a misclick
-// would terminate the TUI + every pane child with no chance to abort.
-func TestHandleSettingsKey_StopDaemonOpensConfirm(t *testing.T) {
+// TestRenderAboutDialog_StopDaemonAtIndex guards against drift between the
+// hardcoded aboutStopDaemonIndex / case ladder in handleAboutKey and the
+// items slice rendered by renderAboutDialog. The order lives in two places
+// (the render slice and the index constant + Enter case), so inserting a new
+// row before "Stop daemon" would shift the rendered row while the index
+// constant still routes Enter to position 7 — Enter would then fire on the
+// wrong action. Rendering with the cursor on aboutStopDaemonIndex must
+// highlight the "Stop daemon" row, pinning the two in sync.
+func TestRenderAboutDialog_StopDaemonAtIndex(t *testing.T) {
 	t.Parallel()
-	fields := settingsFields()
-	stopIdx := len(fields) - 1
+	m := Model{cfg: config.Default(), dialogCursor: aboutStopDaemonIndex}
+	got := m.renderAboutDialog()
+
+	var selected string
+	for _, line := range strings.Split(got, "\n") {
+		// The selected row is the only one prefixed with the "> " cursor
+		// marker (others get "  "); the marker is plain text written before
+		// the styled label, so it survives lipgloss rendering.
+		if strings.Contains(line, "> ") {
+			selected = line
+			break
+		}
+	}
+	if selected == "" {
+		t.Fatalf("no selected (\"> \") row found in About dialog:\n%s", got)
+	}
+	if !strings.Contains(selected, "Stop daemon") {
+		t.Errorf("cursor at aboutStopDaemonIndex=%d highlights %q, want the Stop daemon row", aboutStopDaemonIndex, selected)
+	}
+}
+
+// TestHandleAboutKey_StopDaemonOpensConfirm verifies that pressing Enter on
+// the Stop daemon row (root menu) routes to the confirmation dialog rather
+// than directly sending MsgShutdown. Without the confirm step, a misclick
+// would terminate the TUI + every pane child with no chance to abort.
+func TestHandleAboutKey_StopDaemonOpensConfirm(t *testing.T) {
+	t.Parallel()
 	m := Model{
 		cfg:          config.Default(),
-		dialog:       dialogSettings,
-		dialogCursor: stopIdx,
+		dialog:       dialogAbout,
+		dialogCursor: aboutStopDaemonIndex,
 	}
-	out, cmd := m.handleSettingsKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	out, cmd := m.handleAboutKey(tea.KeyPressMsg{Code: tea.KeyEnter})
 	got := out.(Model)
 	if got.dialog != dialogConfirm {
 		t.Errorf("dialog = %v, want dialogConfirm", got.dialog)
@@ -104,11 +113,11 @@ func TestHandleSettingsKey_StopDaemonOpensConfirm(t *testing.T) {
 	}
 }
 
-// TestHandleConfirmKey_StopDaemonEscReturnsToSettings keeps the user in the
-// Settings menu (cursor on Stop daemon) when they back out of the confirm.
-// Returning to dialogNone — which is the default for confirm Esc — would
+// TestHandleConfirmKey_StopDaemonEscReturnsToAbout keeps the user on the
+// About (root) menu, cursor on Stop daemon, when they back out of the
+// confirm. Returning to dialogNone — the default for confirm Esc — would
 // drop the user back to the workspace and lose the menu they were in.
-func TestHandleConfirmKey_StopDaemonEscReturnsToSettings(t *testing.T) {
+func TestHandleConfirmKey_StopDaemonEscReturnsToAbout(t *testing.T) {
 	t.Parallel()
 	m := Model{
 		dialog:      dialogConfirm,
@@ -116,12 +125,11 @@ func TestHandleConfirmKey_StopDaemonEscReturnsToSettings(t *testing.T) {
 	}
 	out, cmd := m.handleConfirmKey(tea.KeyPressMsg{Code: tea.KeyEscape})
 	got := out.(Model)
-	if got.dialog != dialogSettings {
-		t.Errorf("dialog = %v, want dialogSettings", got.dialog)
+	if got.dialog != dialogAbout {
+		t.Errorf("dialog = %v, want dialogAbout", got.dialog)
 	}
-	wantCursor := stopDaemonRowIndex()
-	if got.dialogCursor != wantCursor {
-		t.Errorf("dialogCursor = %d, want %d (label-lookup of Stop daemon row)", got.dialogCursor, wantCursor)
+	if got.dialogCursor != aboutStopDaemonIndex {
+		t.Errorf("dialogCursor = %d, want %d (Stop daemon About row)", got.dialogCursor, aboutStopDaemonIndex)
 	}
 	if cmd != nil {
 		t.Errorf("cancel must not return a Cmd")

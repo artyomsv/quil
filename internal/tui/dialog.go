@@ -1870,6 +1870,9 @@ func (m Model) newLogViewerEditor(content, path string) *TextEditor {
 func (m Model) openReadonlyText(label, content string) (tea.Model, tea.Cmd) {
 	m.tomlEditor = m.newLogViewerEditor(content, label)
 	m.dialog = dialogLogViewer
+	// Esc returns to the history list this was opened from, not the About menu
+	// (the log viewer's default parent).
+	m.logViewerReturn = dialogCommandHistory
 	return m, tea.ClearScreen
 }
 
@@ -1883,6 +1886,7 @@ func (m Model) openLogViewer(label, path string) (tea.Model, tea.Cmd) {
 	}
 	m.tomlEditor = m.newLogViewerEditor(content, path)
 	m.dialog = dialogLogViewer
+	m.logViewerReturn = dialogAbout
 	return m, tea.ClearScreen
 }
 
@@ -1890,6 +1894,7 @@ func (m Model) openLogViewer(label, path string) (tea.Model, tea.Cmd) {
 // config.MCPLogDir() into a single read-only buffer with file-name headers,
 // most-recently-modified file first.
 func (m Model) openMCPLogsViewer() (tea.Model, tea.Cmd) {
+	m.logViewerReturn = dialogAbout
 	dir := config.MCPLogDir(m.cfg.MCP)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -2018,14 +2023,23 @@ func readLogTail(path string, maxBytes int) (string, error) {
 // Save (Ctrl+S) is suppressed by TextEditor.ReadOnly so we never overwrite
 // a log file by accident.
 func (m Model) handleLogViewerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	// Return target depends on where the viewer was opened from: the About menu
+	// for logs, the history list for a history entry. Default to About for
+	// safety if a caller forgot to set it.
+	ret := m.logViewerReturn
+	if ret == dialogNone {
+		ret = dialogAbout
+	}
 	if m.tomlEditor == nil {
-		m.dialog = dialogAbout
+		m.dialog = ret
+		m.logViewerReturn = dialogNone
 		return m, nil
 	}
 	_, closed, cmd := m.tomlEditor.HandleKey(msg.String())
 	if closed {
 		m.tomlEditor = nil
-		m.dialog = dialogAbout
+		m.dialog = ret
+		m.logViewerReturn = dialogNone
 		// Cursor is at the position of the menu item the user came from
 		// (3, 4, or 5). Don't reset it — feels jarring.
 		return m, tea.ClearScreen

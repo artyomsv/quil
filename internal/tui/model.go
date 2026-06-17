@@ -216,6 +216,7 @@ type Model struct {
 	pendingOverlayShow   map[string]bool        // tabID → show overlay on its first arrival; set by the Alt+G overlay sender (wired in a follow-up commit); reads/deletes are nil-map-safe
 	dialog               dialogScreen           // active dialog screen
 	dialogCursor         int                    // highlighted item in dialog
+	logViewerReturn      dialogScreen           // dialog to return to when the read-only log/text viewer closes (default About)
 	dialogEdit           bool                   // editing a settings value
 	dialogInput          string                 // text input buffer for editing
 	confirmKind          string                 // "pane" or "tab"

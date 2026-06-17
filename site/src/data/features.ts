@@ -123,6 +123,7 @@ export const features: Feature[] = [
 
   {
     slug: "input-history",
+    image: "https://cdn.stukans.com/quil/screenshots/input-history-800.webp",
     icon: "book-open",
     title: "Input history",
     blurb:

@@ -121,6 +121,21 @@ export const features: Feature[] = [
     ],
   },
 
+  {
+    slug: "input-history",
+    icon: "book-open",
+    title: "Input history",
+    blurb:
+      "AI panes bury your prompt under a wall of output. Alt+Shift+I lists every prompt you submitted — open one full-text and copy it back.",
+    category: "ai",
+    detail: [
+      "Alt+Shift+I opens a per-pane list of your past prompts as 3-line previews, newest first; Enter opens the full text in a read-only viewer you can scroll and copy from.",
+      "Captured from the agent's own UserPromptSubmit hook, not keystroke scraping — multiline prompts, pastes, and edits are recorded exactly as submitted.",
+      "Persists across daemon restarts at ~/.quil/history/<pane>.jsonl (64 KiB per entry, ring-trimmed to the last 200) and is removed when the pane is destroyed.",
+      "Opt-in per pane type via `[command] record_history = true` (enabled for Claude Code); other pane types show an empty state. OpenCode support is planned.",
+    ],
+  },
+
   // --- Interaction ---------------------------------------------------
   {
     slug: "typed-panes",

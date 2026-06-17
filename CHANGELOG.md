@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Per-pane input history (AI panes)** — Quil records every prompt you submit
+  to a Claude Code pane so you can find what you asked without scrolling back
+  through the agent's output. `Alt+Shift+I` opens a list of your past inputs
+  (3-line previews, newest first); `Enter` opens the full text in a read-only
+  viewer you can scroll and copy from (`Esc` returns to the list, `Esc` again to
+  the pane). History persists across daemon restarts at
+  `~/.quil/history/<pane>.jsonl` (64 KiB per entry, ring-trimmed to the last
+  200) and is removed when the pane is destroyed. Opt-in per plugin via
+  `[command] record_history = true` (enabled for `claude-code`); pane types
+  without it show an empty state. OpenCode support is planned.
+
+### Fixed
+
+- **Plugin schema migration now reloads the daemon** — accepting the startup
+  migration dialog rewrote the plugin file and reloaded only the TUI's registry,
+  so the daemon kept the stale config until restarted. It now sends a reload, so
+  newly added plugin fields (such as `record_history`) take effect immediately.
+
 ## [1.28.0] - 2026-06-15
 
 ### Added

@@ -2861,8 +2861,13 @@ func (m Model) renderTOMLEditorFullScreen() string {
 
 	var b strings.Builder
 
-	// Title bar (raw ANSI — background color 236)
+	// Title bar (raw ANSI — background color 236). Read-only buffers (log
+	// viewer, history entry) are for viewing, not editing — label them so and
+	// never show the dirty marker.
 	title := "Edit: "
+	if e.ReadOnly {
+		title = "View: "
+	}
 	if idx := strings.LastIndex(e.FilePath, "/"); idx >= 0 {
 		title += e.FilePath[idx+1:]
 	} else if idx := strings.LastIndex(e.FilePath, "\\"); idx >= 0 {
@@ -2870,7 +2875,7 @@ func (m Model) renderTOMLEditorFullScreen() string {
 	} else {
 		title += e.FilePath
 	}
-	if e.Dirty {
+	if e.Dirty && !e.ReadOnly {
 		title += " *"
 	}
 	// Pad title to full width
@@ -2882,13 +2887,21 @@ func (m Model) renderTOMLEditorFullScreen() string {
 	// Editor content
 	b.WriteString(e.Render())
 
-	// Status bar — context-sensitive hints
+	// Status bar — context-sensitive hints. Read-only buffers omit the
+	// mutating affordances (save, paste, cut); copy still works on a selection.
 	var status string
-	if e.SaveErr != "" {
+	switch {
+	case e.SaveErr != "":
 		status = fmt.Sprintf(" \x1b[31mError: %s\x1b[0m\x1b[48;5;236m\x1b[38;5;250m    Ln %d, Col %d", e.SaveErr, e.CursorRow+1, e.CursorCol+1)
-	} else if e.Sel != nil && !e.Sel.IsEmpty() {
-		status = fmt.Sprintf(" Enter copy  Ctrl+X cut  Esc clear    Ln %d, Col %d", e.CursorRow+1, e.CursorCol+1)
-	} else {
+	case e.Sel != nil && !e.Sel.IsEmpty():
+		if e.ReadOnly {
+			status = fmt.Sprintf(" Enter copy  Esc clear    Ln %d, Col %d", e.CursorRow+1, e.CursorCol+1)
+		} else {
+			status = fmt.Sprintf(" Enter copy  Ctrl+X cut  Esc clear    Ln %d, Col %d", e.CursorRow+1, e.CursorCol+1)
+		}
+	case e.ReadOnly:
+		status = fmt.Sprintf(" Esc close    Ln %d, Col %d", e.CursorRow+1, e.CursorCol+1)
+	default:
 		status = fmt.Sprintf(" Ctrl+S save  Ctrl+V paste  Esc close    Ln %d, Col %d", e.CursorRow+1, e.CursorCol+1)
 	}
 	for len(status) < m.width {

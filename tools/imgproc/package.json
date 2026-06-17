@@ -1,0 +1,14 @@
+{
+  "name": "quil-imgproc",
+  "private": true,
+  "type": "module",
+  "version": "1.0.0",
+  "description": "Crop + multi-size/format export for Quil marketing screenshots (CDN-ready).",
+  "scripts": {
+    "build": "node process-screenshots.mjs",
+    "probe": "node process-screenshots.mjs --probe"
+  },
+  "dependencies": {
+    "sharp": "^0.33.5"
+  }
+}

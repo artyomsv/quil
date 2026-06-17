@@ -1,0 +1,24 @@
+{
+  "srcDir": "sources",
+  "outDir": "out/screenshots",
+  "cdnBase": "https://cdn.stukans.com/quil/screenshots",
+  "_comment": "bg = the app's near-black background (ember theme). trimThreshold is how far a pixel may differ from bg and still count as 'background' to crop. type=content keeps the app UI edge-to-edge (only black margins/title bar trimmed); type=dialog tight-crops to the centred dialog box. profiles map to the export sizes defined in process-screenshots.mjs.",
+  "bg": { "r": 10, "g": 6, "b": 4 },
+  "trimThreshold": 26,
+  "dialogPadding": 28,
+  "images": [
+    { "src": "pane-restoration.png",          "type": "content", "profiles": ["full", "hero", "card", "og"] },
+    { "src": "claude-code-quil-mcp.png",       "type": "content", "profiles": ["full", "hero", "card"] },
+    { "src": "focus-screen.png",               "type": "content", "profiles": ["full", "hero", "card"] },
+    { "src": "claude-code-setup-dialog.png",   "type": "dialog",  "profiles": ["hero", "card"] },
+    { "src": "lazygit-integration.png",        "type": "content", "profiles": ["hero", "card"] },
+    { "src": "focus-with-notes.png",           "type": "content", "profiles": ["hero", "card"] },
+    { "src": "tui-panes.png",                  "type": "content", "profiles": ["hero", "card"] },
+    { "src": "f1-settings-page.png",           "type": "dialog",  "profiles": ["card"] },
+    { "src": "pane-split-direction-options.png","type": "dialog", "profiles": ["card"] },
+    { "src": "welcome-page.png",               "type": "dialog",  "profiles": ["card"] },
+    { "src": "input-history.png",              "type": "dialog",  "profiles": ["hero", "card"] },
+    { "src": "input-history-detail.png",       "type": "content", "profiles": ["hero", "card"] },
+    { "src": "input-history-pane.png",         "type": "content", "profiles": ["hero", "card"] }
+  ]
+}

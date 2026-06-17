@@ -84,6 +84,12 @@ const (
 	// Memory reporting
 	MsgMemoryReportReq  = "memory_report_req"
 	MsgMemoryReportResp = "memory_report_resp"
+
+	// Pane input history
+	MsgPaneHistoryReq       = "pane_history_req"
+	MsgPaneHistoryResp      = "pane_history_resp"
+	MsgPaneHistoryEntryReq  = "pane_history_entry_req"
+	MsgPaneHistoryEntryResp = "pane_history_entry_resp"
 )
 
 // Message is the wire format for IPC communication.
@@ -381,6 +387,40 @@ type MemoryReportRespPayload struct {
 	// fresh — the two halves are captured close-in-time on the daemon side
 	// but are not guaranteed to be drawn from the exact same instant.
 	Tabs []TabInfo `json:"tabs,omitempty"`
+}
+
+// Pane input history payloads
+
+// PaneHistoryReqPayload requests the input-history preview list for one pane.
+type PaneHistoryReqPayload struct {
+	PaneID string `json:"pane_id"`
+}
+
+// HistoryEntryMeta is one list row: a stable id (TsMs) and up to 3 preview lines.
+type HistoryEntryMeta struct {
+	TsMs    int64    `json:"ts_ms"`
+	Preview []string `json:"preview"`
+}
+
+// PaneHistoryRespPayload carries the preview list, newest first.
+type PaneHistoryRespPayload struct {
+	PaneID  string             `json:"pane_id"`
+	Entries []HistoryEntryMeta `json:"entries"`
+}
+
+// PaneHistoryEntryReqPayload requests one entry's full text by its TsMs id.
+type PaneHistoryEntryReqPayload struct {
+	PaneID string `json:"pane_id"`
+	TsMs   int64  `json:"ts_ms"`
+}
+
+// PaneHistoryEntryRespPayload carries one entry's full text (Found=false if the
+// id no longer exists, e.g. compacted away between list and fetch).
+type PaneHistoryEntryRespPayload struct {
+	PaneID string `json:"pane_id"`
+	TsMs   int64  `json:"ts_ms"`
+	Text   string `json:"text"`
+	Found  bool   `json:"found"`
 }
 
 // NewMessage creates a Message with a typed payload.

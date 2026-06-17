@@ -20,6 +20,7 @@ A capability-by-capability tour of what Quil does. For configuration knobs, see 
   - [Mouse & keyboard](#mouse--keyboard)
   - [Text selection & clipboard](#text-selection--clipboard)
   - [Image paste from clipboard](#image-paste-from-clipboard)
+  - [Input history (AI panes)](#input-history-ai-panes)
 - [Typed panes & plugins](#typed-panes--plugins)
   - [Built-in plugins](#built-in-plugins)
   - [Pane setup dialog](#pane-setup-dialog)
@@ -133,6 +134,16 @@ Press any paste key on a screenshot. If the clipboard has no text but contains a
 AI tools like Claude Code then read the file via their normal file-reading tools — sidesteps the upstream Claude Code Windows clipboard bug ([anthropics/claude-code#32791](https://github.com/anthropics/claude-code/issues/32791)).
 
 Three paste keys: `Ctrl+V`, `Ctrl+Alt+V`, and `F8`. **`F8` is the recommended Windows trigger** because Windows Terminal captures `Ctrl+V` for its own paste action before the TUI sees it.
+
+### Input history (AI panes)
+
+AI panes produce a lot of output, and the prompt you actually typed scrolls far out of view. Quil records each prompt you submit and lets you pull it back up.
+
+- **`Alt+Shift+I`** opens the input-history modal for the active pane: your past prompts as 3-line previews, newest first.
+- **`↑`/`↓`** to navigate, **`Enter`** to open the selected prompt's full text in a read-only viewer (scroll and copy supported), **`Esc`** back to the list, **`Esc`** again back to the pane.
+- History **persists across daemon restarts** at `~/.quil/history/<pane-id>.jsonl` (one JSON line per prompt, capped at 64 KiB per entry and ring-trimmed to the last 200), and is deleted when the pane is destroyed.
+
+Capture is **opt-in per pane type**. A plugin enables it with `record_history = true` under `[command]` (see [Plugin reference](plugin-reference.md)); the built-in **Claude Code** plugin sets it. The source of truth is the agent's own `UserPromptSubmit` hook — not keystroke scraping — so multiline prompts, pastes, and edits are captured exactly as submitted. Pane types without the opt-in (terminal, lazygit, k9s, lazysql, …) show "No input history for this pane type." OpenCode support is planned.
 
 ---
 

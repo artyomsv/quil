@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/artyomsv/quil/internal/config"
+	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/plugin"
 )
 
@@ -171,7 +172,20 @@ func (m Model) saveMigrationAndAdvance() (tea.Model, tea.Cmd) {
 	m.migrationRight = nil
 	m.migrationPlugins = nil
 	m.dialog = dialogNone
-	return m, tea.ClearScreen
+	// Propagate the migrated config to the daemon. The daemon loads plugins
+	// once at startup and keeps a stale in-memory copy; without an explicit
+	// reload it spawns panes with the OLD schema (e.g. record_history still
+	// false) until it restarts. Mirrors the Plugins dialog's reload (dialog.go).
+	client := m.client
+	reloadCmd := func() tea.Msg {
+		if client == nil {
+			return nil
+		}
+		msg, _ := ipc.NewMessage(ipc.MsgReloadPlugins, nil)
+		client.Send(msg)
+		return nil
+	}
+	return m, tea.Batch(reloadCmd, tea.ClearScreen)
 }
 
 // renderMigrationFullScreen renders the plugin migration dialog as a

@@ -310,8 +310,9 @@ type tomlPlugin struct {
 			Default    bool     `toml:"default"`
 			Group      string   `toml:"group"`
 		} `toml:"toggles"`
-		RawKeys  []string `toml:"raw_keys"`
-		Discover string   `toml:"discover"`
+		RawKeys       []string `toml:"raw_keys"`
+		Discover      string   `toml:"discover"`
+		RecordHistory bool     `toml:"record_history"`
 	} `toml:"command"`
 	Persistence struct {
 		Strategy    string `toml:"strategy"`
@@ -407,6 +408,7 @@ func loadPluginTOML(path string) (*PanePlugin, error) {
 			PromptsCWD:       tp.Command.PromptsCWD,
 			RawKeys:          rawKeys,
 			Discover:         tp.Command.Discover,
+			RecordHistory:    tp.Command.RecordHistory,
 		},
 		Persistence: PersistenceConfig{
 			Strategy:    tp.Persistence.Strategy,

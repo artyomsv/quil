@@ -139,6 +139,10 @@ type KeybindingsConfig struct {
 	// respawn immediately on daemon restart (vs the default lazy deferral) and
 	// show a ● marker on their tab.
 	ToggleEager string `toml:"toggle_eager"`
+	// CommandHistory opens the per-pane input-history modal (list of submitted
+	// prompts; Enter opens one full-text read-only). Only meaningful for panes
+	// whose plugin sets record_history (claude-code).
+	CommandHistory string `toml:"command_history"`
 	// ToggleLazygit opens/hides the per-tab lazygit overlay for the git
 	// repo resolved from the active pane's CWD.
 	ToggleLazygit string `toml:"toggle_lazygit"`
@@ -218,8 +222,9 @@ func Default() Config {
 			// Mnemonic: Ctrl+L clears/redraws a shell; the Alt+Shift layer
 			// keeps plain Ctrl+L flowing to the PTY.
 			Redraw:        "alt+shift+l",
-			ToggleEager:   "alt+shift+e",
-			ToggleLazygit: "alt+g",
+			ToggleEager:    "alt+shift+e",
+			CommandHistory: "alt+shift+i",
+			ToggleLazygit:  "alt+g",
 		},
 	}
 }

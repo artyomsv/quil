@@ -329,6 +329,31 @@ func (m Model) handleDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.handleMemoryDialogKey(msg)
 	case dialogGitRepoPick:
 		return m.handleGitRepoPickKey(msg)
+	case dialogCommandHistory:
+		return m.handleCommandHistoryKey(msg)
+	}
+	return m, nil
+}
+
+// handleCommandHistoryKey processes a key press while the input-history modal
+// is open. Mirrors handleMemoryDialogKey's raw-string key idiom.
+func (m Model) handleCommandHistoryKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.dialog = dialogNone
+		return m, tea.ClearScreen
+	case "up", "k":
+		if m.history.cursor > 0 {
+			m.history.cursor--
+		}
+	case "down", "j":
+		if m.history.cursor < len(m.history.entries)-1 {
+			m.history.cursor++
+		}
+	case "enter":
+		if m.history.supported && m.history.cursor >= 0 && m.history.cursor < len(m.history.entries) {
+			return m, m.requestHistoryEntry(m.history.paneID, m.history.entries[m.history.cursor].TsMs)
+		}
 	}
 	return m, nil
 }
@@ -680,6 +705,9 @@ func (m Model) renderDialog() string {
 	case dialogGitRepoPick:
 		width = gitRepoPickWidth
 		content = m.renderGitRepoPickDialog()
+	case dialogCommandHistory:
+		width = 80
+		content = m.renderCommandHistory()
 	}
 
 	// Never render wider than the terminal (border adds +2 outside Width).
@@ -1826,6 +1854,18 @@ func (m Model) newLogViewerEditor(content, path string) *TextEditor {
 	return editor
 }
 
+// openReadonlyText opens arbitrary in-memory content in the same full-screen
+// read-only TextEditor used by the log viewer. label appears in the editor's
+// path field.
+func (m Model) openReadonlyText(label, content string) (tea.Model, tea.Cmd) {
+	m.tomlEditor = m.newLogViewerEditor(content, label)
+	m.dialog = dialogLogViewer
+	// Esc returns to the history list this was opened from, not the About menu
+	// (the log viewer's default parent).
+	m.logViewerReturn = dialogCommandHistory
+	return m, tea.ClearScreen
+}
+
 func (m Model) openLogViewer(label, path string) (tea.Model, tea.Cmd) {
 	content, err := readLogTail(path, maxLogViewBytes)
 	if err != nil {
@@ -1836,6 +1876,7 @@ func (m Model) openLogViewer(label, path string) (tea.Model, tea.Cmd) {
 	}
 	m.tomlEditor = m.newLogViewerEditor(content, path)
 	m.dialog = dialogLogViewer
+	m.logViewerReturn = dialogAbout
 	return m, tea.ClearScreen
 }
 
@@ -1843,6 +1884,7 @@ func (m Model) openLogViewer(label, path string) (tea.Model, tea.Cmd) {
 // config.MCPLogDir() into a single read-only buffer with file-name headers,
 // most-recently-modified file first.
 func (m Model) openMCPLogsViewer() (tea.Model, tea.Cmd) {
+	m.logViewerReturn = dialogAbout
 	dir := config.MCPLogDir(m.cfg.MCP)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -1971,14 +2013,23 @@ func readLogTail(path string, maxBytes int) (string, error) {
 // Save (Ctrl+S) is suppressed by TextEditor.ReadOnly so we never overwrite
 // a log file by accident.
 func (m Model) handleLogViewerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	// Return target depends on where the viewer was opened from: the About menu
+	// for logs, the history list for a history entry. Default to About for
+	// safety if a caller forgot to set it.
+	ret := m.logViewerReturn
+	if ret == dialogNone {
+		ret = dialogAbout
+	}
 	if m.tomlEditor == nil {
-		m.dialog = dialogAbout
+		m.dialog = ret
+		m.logViewerReturn = dialogNone
 		return m, nil
 	}
 	_, closed, cmd := m.tomlEditor.HandleKey(msg.String())
 	if closed {
 		m.tomlEditor = nil
-		m.dialog = dialogAbout
+		m.dialog = ret
+		m.logViewerReturn = dialogNone
 		// Cursor is at the position of the menu item the user came from
 		// (3, 4, or 5). Don't reset it — feels jarring.
 		return m, tea.ClearScreen

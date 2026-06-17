@@ -184,6 +184,7 @@ const (
 	dialogPluginMigration
 	dialogMemory
 	dialogGitRepoPick // Alt+G repo picker (Task 12 fills handler/render)
+	dialogCommandHistory
 )
 
 // tuiClient is the subset of *ipc.Client the TUI uses on the Model. Defined
@@ -215,6 +216,7 @@ type Model struct {
 	pendingOverlayShow   map[string]bool        // tabID → show overlay on its first arrival; set by the Alt+G overlay sender (wired in a follow-up commit); reads/deletes are nil-map-safe
 	dialog               dialogScreen           // active dialog screen
 	dialogCursor         int                    // highlighted item in dialog
+	logViewerReturn      dialogScreen           // dialog to return to when the read-only log/text viewer closes (default About)
 	dialogEdit           bool                   // editing a settings value
 	dialogInput          string                 // text input buffer for editing
 	confirmKind          string                 // "pane" or "tab"
@@ -306,6 +308,9 @@ type Model struct {
 	// Memory dialog state
 	mem         memoryDialogState
 	lastMemResp *ipc.MemoryReportRespPayload
+
+	// Input-history modal state (dialogCommandHistory)
+	history historyState
 
 	// Work-in-progress indicators. Derived TUI-side from the hook event
 	// stream (see internal/tui/workstate.go). workSpinnerFrame is the shared
@@ -961,6 +966,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m = m.applyMemoryReport(msg.Resp)
 		return m, m.listenForMessages()
 
+	case historyListMsg:
+		m = m.applyHistoryList(msg.Resp)
+		return m, m.listenForMessages()
+
+	case historyEntryMsg:
+		// All branches must keep the IPC listen loop alive — these messages
+		// originate from listenForMessages.
+		//
+		// Drop a stale response: if the user navigated to another pane's history
+		// or closed the dialog before this entry arrived, opening the viewer now
+		// would yank them into the wrong pane's prompt. The list path guards the
+		// same way in applyHistoryList.
+		if msg.Resp.PaneID != m.history.paneID || m.dialog != dialogCommandHistory {
+			return m, m.listenForMessages()
+		}
+		if !msg.Resp.Found {
+			return m, tea.Batch(m.requestHistory(m.history.paneID), m.listenForMessages())
+		}
+		label := fmt.Sprintf("Input @ %s", time.UnixMilli(msg.Resp.TsMs).Format("2006-01-02 15:04:05"))
+		mdl, cmd := m.openReadonlyText(label, msg.Resp.Text)
+		return mdl, tea.Batch(cmd, m.listenForMessages())
+
 	case listenContinueMsg:
 		return m, m.listenForMessages()
 	}
@@ -1408,7 +1435,7 @@ func (m Model) notesKeyExempt(key string) bool {
 		// the notes editor.
 		kb.RestartPane,
 		// Tools and dialogs.
-		kb.JSONTransform, kb.QuickActions,
+		kb.JSONTransform, kb.QuickActions, kb.CommandHistory,
 	}
 	for _, b := range exempt {
 		if kbMatches(key, b) {
@@ -1658,6 +1685,24 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, m.toggleActivePaneEager()
 	case kbMatches(key, kb.ToggleLazygit):
 		return m, m.handleToggleLazygit()
+	case kbMatches(key, kb.CommandHistory):
+		tab := m.activeTabModel()
+		if tab == nil {
+			return m, nil
+		}
+		pane := tab.ActivePaneModel()
+		if pane == nil {
+			return m, nil
+		}
+		supported := false
+		if p := m.pluginRegistry.Get(pane.Type); p != nil {
+			supported = p.Command.RecordHistory
+		}
+		m = m.openHistoryDialog(pane.ID, pane.Type, supported)
+		if supported {
+			return m, m.requestHistory(pane.ID)
+		}
+		return m, nil
 	}
 
 	// Sidebar focused: route keys to notification center
@@ -2816,8 +2861,13 @@ func (m Model) renderTOMLEditorFullScreen() string {
 
 	var b strings.Builder
 
-	// Title bar (raw ANSI — background color 236)
+	// Title bar (raw ANSI — background color 236). Read-only buffers (log
+	// viewer, history entry) are for viewing, not editing — label them so and
+	// never show the dirty marker.
 	title := "Edit: "
+	if e.ReadOnly {
+		title = "View: "
+	}
 	if idx := strings.LastIndex(e.FilePath, "/"); idx >= 0 {
 		title += e.FilePath[idx+1:]
 	} else if idx := strings.LastIndex(e.FilePath, "\\"); idx >= 0 {
@@ -2825,7 +2875,7 @@ func (m Model) renderTOMLEditorFullScreen() string {
 	} else {
 		title += e.FilePath
 	}
-	if e.Dirty {
+	if e.Dirty && !e.ReadOnly {
 		title += " *"
 	}
 	// Pad title to full width
@@ -2837,13 +2887,21 @@ func (m Model) renderTOMLEditorFullScreen() string {
 	// Editor content
 	b.WriteString(e.Render())
 
-	// Status bar — context-sensitive hints
+	// Status bar — context-sensitive hints. Read-only buffers omit the
+	// mutating affordances (save, paste, cut); copy still works on a selection.
 	var status string
-	if e.SaveErr != "" {
+	switch {
+	case e.SaveErr != "":
 		status = fmt.Sprintf(" \x1b[31mError: %s\x1b[0m\x1b[48;5;236m\x1b[38;5;250m    Ln %d, Col %d", e.SaveErr, e.CursorRow+1, e.CursorCol+1)
-	} else if e.Sel != nil && !e.Sel.IsEmpty() {
-		status = fmt.Sprintf(" Enter copy  Ctrl+X cut  Esc clear    Ln %d, Col %d", e.CursorRow+1, e.CursorCol+1)
-	} else {
+	case e.Sel != nil && !e.Sel.IsEmpty():
+		if e.ReadOnly {
+			status = fmt.Sprintf(" Enter copy  Esc clear    Ln %d, Col %d", e.CursorRow+1, e.CursorCol+1)
+		} else {
+			status = fmt.Sprintf(" Enter copy  Ctrl+X cut  Esc clear    Ln %d, Col %d", e.CursorRow+1, e.CursorCol+1)
+		}
+	case e.ReadOnly:
+		status = fmt.Sprintf(" Esc close    Ln %d, Col %d", e.CursorRow+1, e.CursorCol+1)
+	default:
 		status = fmt.Sprintf(" Ctrl+S save  Ctrl+V paste  Esc close    Ln %d, Col %d", e.CursorRow+1, e.CursorCol+1)
 	}
 	for len(status) < m.width {
@@ -3049,6 +3107,22 @@ func (m Model) listenForMessages() tea.Cmd {
 				return listenContinueMsg{}
 			}
 			return memoryReportMsg{Resp: payload}
+
+		case ipc.MsgPaneHistoryResp:
+			var payload ipc.PaneHistoryRespPayload
+			if err := msg.DecodePayload(&payload); err != nil {
+				log.Printf("decode pane_history_resp: %v", err)
+				return listenContinueMsg{}
+			}
+			return historyListMsg{Resp: payload}
+
+		case ipc.MsgPaneHistoryEntryResp:
+			var payload ipc.PaneHistoryEntryRespPayload
+			if err := msg.DecodePayload(&payload); err != nil {
+				log.Printf("decode pane_history_entry_resp: %v", err)
+				return listenContinueMsg{}
+			}
+			return historyEntryMsg{Resp: payload}
 
 		case ipc.MsgRestartPaneResp:
 			// Response to the Alt+R restart confirm. The respawned pane

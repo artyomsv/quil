@@ -28,6 +28,7 @@ import (
 	"github.com/artyomsv/quil/internal/logger"
 	memreport "github.com/artyomsv/quil/internal/memreport"
 	"github.com/artyomsv/quil/internal/opencodehook"
+	"github.com/artyomsv/quil/internal/panehistory"
 	"github.com/artyomsv/quil/internal/persist"
 	"github.com/artyomsv/quil/internal/plugin"
 	apty "github.com/artyomsv/quil/internal/pty"
@@ -819,6 +820,12 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 	case ipc.MsgMemoryReportReq:
 		d.handleMemoryReportReq(conn, msg)
 
+	// Pane input history
+	case ipc.MsgPaneHistoryReq:
+		d.handlePaneHistoryReq(conn, msg)
+	case ipc.MsgPaneHistoryEntryReq:
+		d.handlePaneHistoryEntryReq(conn, msg)
+
 	// Version negotiation — reply with the running daemon's version so the
 	// client can gate attach on matching binaries.
 	case ipc.MsgVersionReq:
@@ -1193,6 +1200,9 @@ func (d *Daemon) cleanupPaneArtifacts(paneID string) {
 		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
 			log.Printf("cleanup pane %s: remove session id %s: %v", paneID, name, err)
 		}
+	}
+	if err := os.Remove(panehistory.Path(config.QuilDir(), paneID)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		log.Printf("cleanup pane %s: remove history: %v", paneID, err)
 	}
 }
 
@@ -2207,6 +2217,13 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 		envVars = append(envVars, hookEnv...)
 	case "opencode":
 		envVars = append(envVars, opencodeSpawnPrep(config.QuilDir(), pane.ID, d.cfg.Notification.Hooks.OpenCode)...)
+	}
+
+	// Generic opt-in: any plugin whose hook producer records input history
+	// gets the gate env. The hook subprocess reads QUIL_RECORD_HISTORY and
+	// appends submitted prompts to the per-pane history store.
+	if p.Command.RecordHistory {
+		envVars = append(envVars, "QUIL_RECORD_HISTORY=1")
 	}
 
 	if len(envVars) > 0 {
@@ -3394,4 +3411,61 @@ func (d *Daemon) handleMemoryReportReq(conn *ipc.Conn, msg *ipc.Message) {
 		})
 	}
 	respondTo(conn, msg.ID, ipc.MsgMemoryReportResp, resp)
+}
+
+// handlePaneHistoryReq serves the per-pane input-history preview list, newest
+// first. It compacts the file to the ring cap before reading so the on-disk
+// history never grows unbounded.
+func (d *Daemon) handlePaneHistoryReq(conn *ipc.Conn, msg *ipc.Message) {
+	var p ipc.PaneHistoryReqPayload
+	if err := msg.DecodePayload(&p); err != nil {
+		return
+	}
+	resp := ipc.PaneHistoryRespPayload{PaneID: p.PaneID}
+	if !isValidHexID(p.PaneID, "pane-") {
+		respondTo(conn, msg.ID, ipc.MsgPaneHistoryResp, resp)
+		return
+	}
+	dir := config.QuilDir()
+	if err := panehistory.Compact(dir, p.PaneID, panehistory.MaxEntries); err != nil {
+		log.Printf("history compact pane %s: %v", p.PaneID, err)
+	}
+	entries, err := panehistory.Read(dir, p.PaneID)
+	if err != nil {
+		log.Printf("history read pane %s: %v", p.PaneID, err)
+	}
+	for i := len(entries) - 1; i >= 0; i-- { // newest first
+		e := entries[i]
+		resp.Entries = append(resp.Entries, ipc.HistoryEntryMeta{
+			TsMs:    e.TsMs,
+			Preview: panehistory.Preview(e.Text, 3, 200),
+		})
+	}
+	respondTo(conn, msg.ID, ipc.MsgPaneHistoryResp, resp)
+}
+
+// handlePaneHistoryEntryReq serves one history entry's full text, looked up by
+// its TsMs id. Found=false when no entry matches.
+func (d *Daemon) handlePaneHistoryEntryReq(conn *ipc.Conn, msg *ipc.Message) {
+	var p ipc.PaneHistoryEntryReqPayload
+	if err := msg.DecodePayload(&p); err != nil {
+		return
+	}
+	resp := ipc.PaneHistoryEntryRespPayload{PaneID: p.PaneID, TsMs: p.TsMs}
+	if !isValidHexID(p.PaneID, "pane-") {
+		respondTo(conn, msg.ID, ipc.MsgPaneHistoryEntryResp, resp)
+		return
+	}
+	entries, err := panehistory.Read(config.QuilDir(), p.PaneID)
+	if err != nil {
+		log.Printf("history read pane %s: %v", p.PaneID, err)
+	}
+	for _, e := range entries {
+		if e.TsMs == p.TsMs {
+			resp.Text = e.Text
+			resp.Found = true
+			break
+		}
+	}
+	respondTo(conn, msg.ID, ipc.MsgPaneHistoryEntryResp, resp)
 }

@@ -103,6 +103,10 @@ func TestMessageTypes(t *testing.T) {
 		ipc.MsgGetNotificationsResp,
 		ipc.MsgWatchNotificationsReq,
 		ipc.MsgWatchNotificationsResp,
+		ipc.MsgPaneHistoryReq,
+		ipc.MsgPaneHistoryResp,
+		ipc.MsgPaneHistoryEntryReq,
+		ipc.MsgPaneHistoryEntryResp,
 	}
 	for _, typ := range types {
 		if typ == "" {

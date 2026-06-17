@@ -971,8 +971,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.listenForMessages()
 
 	case historyEntryMsg:
-		// Both branches must keep the IPC listen loop alive — these messages
+		// All branches must keep the IPC listen loop alive — these messages
 		// originate from listenForMessages.
+		//
+		// Drop a stale response: if the user navigated to another pane's history
+		// or closed the dialog before this entry arrived, opening the viewer now
+		// would yank them into the wrong pane's prompt. The list path guards the
+		// same way in applyHistoryList.
+		if msg.Resp.PaneID != m.history.paneID || m.dialog != dialogCommandHistory {
+			return m, m.listenForMessages()
+		}
 		if !msg.Resp.Found {
 			return m, tea.Batch(m.requestHistory(m.history.paneID), m.listenForMessages())
 		}

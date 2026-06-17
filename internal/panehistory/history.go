@@ -1,12 +1,21 @@
 // Package panehistory stores and serves per-pane user-input history. One
 // JSONL file per pane lives under <quilDir>/history/<paneID>.jsonl. The Claude
 // hook subprocess appends entries; the daemon reads, previews, and compacts.
+//
+// Concurrency: the hook subprocess only ever O_APPENDs single lines and the
+// daemon only reads/compacts, so writes never interleave in practice. On Linux
+// an O_APPEND write of one line is atomic; on Windows the guarantee is weaker
+// for very large lines, but Read tolerates a malformed/partial trailing line
+// and Compact's rename is best-effort (a transient Windows sharing-violation is
+// logged by the caller and retried on the next read). Treat "concurrent" as
+// serial-enough, not lock-free-safe.
 package panehistory
 
 import (
 	"bufio"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -25,7 +34,17 @@ const (
 	truncMarker = "…[truncated]"
 )
 
-// Entry is one recorded user input, persisted as a single JSONL line.
+// maxReadBytes bounds how much of a history file Read buffers. A runaway
+// producer that never triggered Compact could grow the file without bound; Read
+// then loads only the trailing window (the newest entries), keeping daemon
+// memory bounded. A var, not a const, so tests can lower it. Default ≈ the
+// ring's worst case (MaxEntries × MaxEntryBytes).
+var maxReadBytes int64 = MaxEntries * MaxEntryBytes
+
+// Entry is one recorded user input, persisted as a single JSONL line. TsMs
+// doubles as the entry's lookup id on the fetch-one-entry IPC path; two
+// submissions in the same millisecond would collide, but human prompt cadence
+// makes that effectively impossible (a collision just returns the first match).
 type Entry struct {
 	V         int    `json:"v"`
 	TsMs      int64  `json:"ts_ms"`
@@ -58,7 +77,11 @@ func Append(quilDir, paneID string, e Entry) error {
 		return err
 	}
 	line = append(line, '\n')
-	f, err := os.OpenFile(Path(quilDir, paneID), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	path := Path(quilDir, paneID)
+	if err := rejectSymlink(path); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
@@ -87,11 +110,35 @@ func capText(s string, maxBytes int) string {
 	return s[:cut] + truncMarker
 }
 
+// rejectSymlink returns an error when path is a symlink (a missing file is
+// fine). The history dir is owner-only (0o700), but a planted symlink at
+// history/<paneID>.jsonl must not redirect a write or a rename. Mirrors the
+// symlink guard in internal/persist/notes.go.
+func rejectSymlink(path string) error {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("panehistory: refusing to use symlink %q", path)
+	}
+	return nil
+}
+
 // Read returns all entries oldest-first. A missing file is not an error
 // (returns nil, nil). Malformed lines — including a trailing partial line from
-// an in-flight concurrent append — are skipped.
+// an in-flight concurrent append — are skipped. A file larger than maxReadBytes
+// is read from the tail so daemon memory stays bounded (the dropped first line
+// is the oldest; Compact normally keeps the file well under the cap).
 func Read(quilDir, paneID string) ([]Entry, error) {
-	f, err := os.Open(Path(quilDir, paneID))
+	path := Path(quilDir, paneID)
+	if err := rejectSymlink(path); err != nil {
+		return nil, err
+	}
+	f, err := os.Open(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
@@ -100,8 +147,22 @@ func Read(quilDir, paneID string) ([]Entry, error) {
 	}
 	defer f.Close()
 
-	var entries []Entry
 	r := bufio.NewReader(f)
+	if fi, serr := f.Stat(); serr == nil && fi.Size() > maxReadBytes {
+		if _, serr := f.Seek(fi.Size()-maxReadBytes, io.SeekStart); serr == nil {
+			r = bufio.NewReader(f)
+			// Drop the now-partial first line so we start on an entry boundary.
+			if _, derr := r.ReadBytes('\n'); derr != nil && !errors.Is(derr, io.EOF) {
+				return nil, derr
+			}
+		}
+	}
+	return readEntries(r)
+}
+
+// readEntries parses JSONL Entry lines from r, skipping malformed/partial lines.
+func readEntries(r *bufio.Reader) ([]Entry, error) {
+	var entries []Entry
 	for {
 		line, rerr := r.ReadBytes('\n')
 		if len(line) > 0 {

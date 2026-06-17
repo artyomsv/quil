@@ -302,6 +302,62 @@ func TestHandlePaneHistoryReq_ReturnsPreviewsNewestFirst(t *testing.T) {
 	}
 }
 
+// TestHandlePaneHistoryEntryReq_FetchesFullTextByTsMs seeds two entries and
+// verifies MsgPaneHistoryEntryReq returns the full text of the requested entry
+// (Found=true), and that an unknown TsMs yields Found=false with empty text.
+func TestHandlePaneHistoryEntryReq_FetchesFullTextByTsMs(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("QUIL_HOME", tmp)
+
+	const paneID = "pane-a1b2c3d4"
+	dir := config.QuilDir()
+	if err := panehistory.Append(dir, paneID, panehistory.Entry{TsMs: 1, Text: "first prompt"}); err != nil {
+		t.Fatalf("Append 1: %v", err)
+	}
+	if err := panehistory.Append(dir, paneID, panehistory.Entry{TsMs: 2, Text: "second\nmultiline body"}); err != nil {
+		t.Fatalf("Append 2: %v", err)
+	}
+
+	d := New(config.Default())
+	if err := d.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer d.Stop()
+
+	sockPath := filepath.Join(tmp, "quild.sock")
+	conn := dialDaemon(t, sockPath)
+	defer conn.Close()
+
+	fetch := func(ts int64) ipc.PaneHistoryEntryRespPayload {
+		t.Helper()
+		payload, _ := json.Marshal(ipc.PaneHistoryEntryReqPayload{PaneID: paneID, TsMs: ts})
+		req := &ipc.Message{Type: ipc.MsgPaneHistoryEntryReq, ID: "he", Payload: payload}
+		if err := ipc.WriteMessage(conn, req); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		resp, err := ipc.ReadMessage(conn)
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		var out ipc.PaneHistoryEntryRespPayload
+		if err := json.Unmarshal(resp.Payload, &out); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		return out
+	}
+
+	found := fetch(2)
+	if !found.Found || found.Text != "second\nmultiline body" {
+		t.Fatalf("fetch(2): Found=%v Text=%q, want true / full body", found.Found, found.Text)
+	}
+
+	missing := fetch(999)
+	if missing.Found || missing.Text != "" {
+		t.Fatalf("fetch(999): Found=%v Text=%q, want false / empty", missing.Found, missing.Text)
+	}
+}
+
 // TestCleanupPaneArtifacts_RemovesHistory verifies cleanupPaneArtifacts deletes
 // the pane's history file along with the other per-pane artifacts.
 func TestCleanupPaneArtifacts_RemovesHistory(t *testing.T) {

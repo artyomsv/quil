@@ -207,21 +207,26 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set release notes
-        # No `if: hashFiles(...)` guard here. Earlier versions used
-        # `hashFiles('/tmp/release-notes.md') != ''` which always evaluated
-        # false because /tmp is outside GITHUB_WORKSPACE — the step was
-        # silently skipped on every release. The inner `[ -s ... ]` check
-        # is the real safety net.
+        # The release body must NEVER be empty. The CHANGELOG section is the
+        # preferred source, but when a PR ships without a `## [Unreleased]`
+        # entry that section is empty (this produced blank release pages on
+        # v1.29.0 and v1.31.0). In that case we fall back to GitHub's
+        # commit/PR-generated notes so every release has a description.
         env:
           VERSION: ${{ needs.release.outputs.version }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if [ -s release-notes.md ]; then
-            gh release edit "v${VERSION}" --notes-file release-notes.md
-            echo "::notice::Release notes applied to v${VERSION}"
-          else
-            echo "::warning::Release notes file is empty — skipping"
+          if [ ! -s release-notes.md ]; then
+            echo "::warning::CHANGELOG section for v${VERSION} is empty — generating notes from commits/PRs"
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+              -f tag_name="v${VERSION}" --jq .body > release-notes.md
           fi
+          if [ ! -s release-notes.md ]; then
+            echo "::error::Could not produce release notes for v${VERSION}"
+            exit 1
+          fi
+          gh release edit "v${VERSION}" --notes-file release-notes.md
+          echo "::notice::Release notes applied to v${VERSION}"
 
   # --- Site rebuild ---------------------------------------------------
   # Pushes made with GITHUB_TOKEN don't trigger other workflows, so
@@ -232,6 +237,16 @@ jobs:
     needs: release
     if: needs.release.outputs.skip != 'true' && needs.release.outputs.dry_run != 'true'
     runs-on: ubuntu-latest
+    # Share the "pages" concurrency group with site.yml. The same merge push
+    # triggers site.yml (which builds the PRE-bump commit → stale version pill)
+    # AND this job (which builds the tag → correct version). Without a shared
+    # group both deploy to github-pages and the stale one can win the race
+    # (v1.31.0 shipped but quil.cc kept showing 1.30.0). This job runs after the
+    # release job, so it enters the group last and supersedes/cancels site.yml's
+    # in-flight deploy — making the versioned deploy authoritative.
+    concurrency:
+      group: pages
+      cancel-in-progress: true
     permissions:
       contents: read
       pages: write

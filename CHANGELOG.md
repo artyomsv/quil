@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.31.0] - 2026-06-18
 
+### Fixed
+
+- **Windows 10 input rendering** — typing in claude-code (and other TUIs) no
+  longer shows an extra space after the first character on Windows 10
+  (`Hello` → `H ello`). The Windows 10 inbox console host re-serializes
+  incremental screen updates incorrectly; Quil now bundles Microsoft's
+  OpenConsole (MIT) and hosts panes through it on Windows 10 only — Windows 11
+  keeps its built-in host, which is unaffected. Fail-safe: falls back to the
+  inbox host if the bundle is unavailable. See `docs/architecture.md` (ADR-25).
+
 ## [1.30.0] - 2026-06-17
 
 ### Added

@@ -216,12 +216,16 @@ jobs:
           VERSION: ${{ needs.release.outputs.version }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if [ ! -s release-notes.md ]; then
+          # Treat a whitespace-only section as empty: the extract step emits a
+          # lone newline (1 byte) for an empty CHANGELOG section, which `[ -s ]`
+          # wrongly accepts as non-empty — that bug shipped v1.31.1 with a blank
+          # body. Strip whitespace and test for genuinely-empty content.
+          if [ -z "$(tr -d '[:space:]' < release-notes.md)" ]; then
             echo "::warning::CHANGELOG section for v${VERSION} is empty — generating notes from commits/PRs"
             gh api --method POST "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
               -f tag_name="v${VERSION}" --jq .body > release-notes.md
           fi
-          if [ ! -s release-notes.md ]; then
+          if [ -z "$(tr -d '[:space:]' < release-notes.md)" ]; then
             echo "::error::Could not produce release notes for v${VERSION}"
             exit 1
           fi

@@ -96,6 +96,21 @@ const schemas = [
           pages are factual only, for the purpose of describing software
           alternatives, and do not imply endorsement or affiliation.
         </p>
+
+        <h2>Third-party software</h2>
+        <p>
+          The <strong>Windows</strong> build of Quil incorporates Microsoft's
+          <a href="https://github.com/microsoft/terminal" rel="noopener external">OpenConsole</a>
+          (<code>OpenConsole.exe</code> + <code>conpty.dll</code>, from the
+          <a href="https://www.nuget.org/packages/Microsoft.Windows.Console.ConPTY" rel="noopener external">Microsoft.Windows.Console.ConPTY</a>
+          redistributable), which is licensed under the MIT License,
+          Copyright &copy; Microsoft Corporation. On Windows 10 these files are
+          extracted at runtime under <code>~/.quil/conpty/</code> and used to host
+          terminal panes correctly; Windows 11 uses the built-in console host.
+          Quil also vendors <a href="https://github.com/charmbracelet/x" rel="noopener external">charmbracelet/x</a>
+          (MIT). Full attribution and license texts are in
+          <a href={SITE.github + "/blob/master/THIRD_PARTY_LICENSES.md"} rel="noopener external">THIRD_PARTY_LICENSES.md</a>.
+        </p>
       </article>
     </div>
   </section>

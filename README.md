@@ -127,3 +127,5 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for branch / commit conventions and the d
 ## License
 
 [MIT](LICENSE) — Copyright (c) 2026 Artjoms Stukans
+
+The Windows build bundles Microsoft's MIT-licensed [OpenConsole](https://github.com/microsoft/terminal) (`OpenConsole.exe` + `conpty.dll`) to host terminal panes correctly on Windows 10. See [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) for full third-party attribution.

@@ -73,6 +73,7 @@ type Session interface {
 - Each platform uses its native PTY mechanism
 - Interface abstraction keeps daemon code platform-agnostic
 - ConPTY API differences (e.g., `Spawn()` vs `exec.Command()`) are isolated
+- On Windows the inbox ConPTY host (`conhost.exe`) on Windows 10 mis-renders some TUIs; Quil bundles a newer OpenConsole to host panes there — see [ADR-25](#adr-25-bundled-openconsole-conpty-host-on-windows-10)
 
 ## ADR-4: Bubble Tea v2 for TUI
 
@@ -600,6 +601,26 @@ The TOML plugin editor renders at a fixed 70-col width inside a centred dialog �
 - Soft-wrap is a generic capability now — if a future surface (a future read-only text dialog?) wants wrapping, the flag is ready
 - Fixed an unrelated pre-existing render bug in `renderLineWithSelection` exposed by the new path: cursor at end-of-line past a shorter selection used to be invisible because the padding math reserved a cell but never emitted a reverse-video glyph
 
+## ADR-25: Bundled OpenConsole ConPTY Host on Windows 10
+
+**Context:** Claude Code's incremental input renderer drew an extra space after the first character on every prompt after the first ("Hello" → "H ello") when run in a Quil pane on Windows 10 — but not on macOS, not in Windows Terminal, and not on Windows 11. Root cause (traced 2026-06-18): the Windows 10 **inbox console host** (`conhost.exe`, used by `kernel32.CreatePseudoConsole`) re-serializes the child's incremental screen updates incorrectly. Windows Terminal escapes this by shipping its own newer **OpenConsole.exe**; macOS uses a real PTY (no re-serialization); Windows 11's inbox host is the modern Terminal-derived code and is unaffected.
+
+**Decision:** On Windows, host pane PTYs through a **bundled** ConPTY (`conpty.dll` + `OpenConsole.exe` from Microsoft's MIT-licensed `Microsoft.Windows.Console.ConPTY` redistributable) instead of the inbox `CreatePseudoConsole` — on **Windows 10 / older only**. Windows 11+ keeps using the inbox host.
+
+**Implementation:**
+
+- `internal/pty/winconpty/` — `charmbracelet/x/conpty` vendored (MIT), with the three pseudoconsole syscalls routed through the bundled `conpty.dll` exports (`Conpty{Create,Resize,Close}PseudoConsole`) loaded via `LoadLibrary` at an absolute path.
+- The two binaries are `go:embed`-ed into the Windows build and extracted at daemon startup to `QuilDir()/conpty/<version>/` (`embed_windows.go`), SHA256-verified against the embedded bytes (self-heals corrupt/partial files), with symlink rejection on the extraction targets.
+- `prepare_windows.go` gates extraction/use on `RtlGetVersion().BuildNumber < 22000` (Windows 11 = build 22000); `session_windows.go` prefers the bundled backend and falls back to the inbox ConPTY when the dll is absent or fails to load.
+- Binaries are gitignored and fetched at build time by `scripts/fetch-conpty.sh` (SHA256-pinned against a poisoned package/CDN), wired into `dev.sh build`/`cross` and the `.goreleaser.yml` before-hooks.
+
+**Consequences:**
+
+- Windows 10 renders modern TUIs (Claude Code, etc.) correctly, matching Windows Terminal and macOS.
+- The Windows binary grows ~1.2 MB (the embedded host); Windows 11 carries but never extracts it — one shared `windows/amd64` artifact, runtime-gated rather than two downloads.
+- A third-party MIT binary (Microsoft OpenConsole) ships inside Quil — attributed in [`THIRD_PARTY_LICENSES.md`](https://github.com/artyomsv/quil/blob/master/THIRD_PARTY_LICENSES.md).
+- Fail-safe: a missing or unloadable bundle degrades automatically to the inbox host.
+
 ## Storage Layout
 
 ```
@@ -627,6 +648,8 @@ The TOML plugin editor renders at a fixed 70-col width inside a centred dialog �
 │   └── pane-XXXXXXXX.md
 ├── paste/                         # Clipboard image proxy output (ADR-17)
 │   └── quil-paste-<ts>-<rand>.png
+├── conpty/                        # Bundled OpenConsole host — Windows 10 only (ADR-25)
+│   └── <version>/                 # conpty.dll + OpenConsole.exe, extracted from the embed
 ├── mcp-logs/                      # Per-pane MCP interaction logs (M10)
 │   └── pane-XXXXXXXX.log
 ├── claudehook/                    # Embedded SessionStart hook scripts (ADR-23)

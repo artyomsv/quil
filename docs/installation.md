@@ -43,6 +43,8 @@ The installer drops two binaries: `quil` (TUI client) and `quild` (daemon).
 
 > **Tip:** Windows Terminal captures `Ctrl+V` for its own paste action before the TUI sees it. Use `F8` to paste inside Quil — see [Keybindings → Clipboard](keybindings.md#clipboard).
 
+> **Bundled console host (Windows 10):** the Windows build embeds Microsoft's MIT-licensed OpenConsole (`OpenConsole.exe` + `conpty.dll`, from the [`Microsoft.Windows.Console.ConPTY`](https://www.nuget.org/packages/Microsoft.Windows.Console.ConPTY) redistributable). On **Windows 10** it is extracted at first run to `%USERPROFILE%\.quil\conpty\<version>\` and used to host panes, because the Windows 10 inbox console host mis-renders some TUIs (e.g. Claude Code's input box shows an extra space after the first typed character). On **Windows 11** the inbox console host is already correct, so nothing is extracted. Attribution and license text: [`THIRD_PARTY_LICENSES.md`](https://github.com/artyomsv/quil/blob/master/THIRD_PARTY_LICENSES.md).
+
 ---
 
 ## Via Go

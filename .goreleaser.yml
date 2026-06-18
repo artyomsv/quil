@@ -2,6 +2,10 @@ version: 2
 
 before:
   hooks:
+    # Fetch the bundled ConPTY host (conpty.dll + OpenConsole.exe) that the
+    # Windows build embeds via go:embed. The binaries are gitignored, so the
+    # release runner fetches them before building. See scripts/fetch-conpty.sh.
+    - sh scripts/fetch-conpty.sh
     - go install github.com/tc-hib/go-winres@v0.3.3
     - go-winres make --in winres/winres.json --out cmd/quil/rsrc --product-version {{ .Version }} --file-version {{ .Version }}
     - go-winres make --in winres/winres.json --out cmd/quild/rsrc --product-version {{ .Version }} --file-version {{ .Version }}

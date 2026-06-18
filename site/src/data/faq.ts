@@ -33,6 +33,11 @@ export const homeFaq: FaqItem[] = [
       "Yes. Quil ships a native Windows binary that uses ConPTY for pseudo-terminal support and Named Pipes for client-daemon IPC. No WSL required. Linux and macOS use creack/pty and Unix domain sockets, respectively.",
   },
   {
+    question: "Why does the Windows build include OpenConsole.exe?",
+    answer:
+      "On Windows 10, the built-in console host (conhost.exe) mis-renders some TUIs — Claude Code's input box, for example, shows an extra space after the first typed character. Quil fixes this automatically by bundling Microsoft's MIT-licensed OpenConsole (the same console host Windows Terminal ships) and hosting panes through it; on Windows 10 it is extracted to ~/.quil/conpty/ at first run. Windows 11's console host is already correct, so nothing is extracted there. Attribution and license text are on the /legal page and in THIRD_PARTY_LICENSES.md.",
+  },
+  {
     question: "How does the reboot-proof persistence actually work?",
     answer:
       "Quil runs as a client-daemon pair. The daemon (quild) continuously snapshots workspace state to ~/.quil/workspace.json (atomic temp+rename) and maintains 500-line ghost buffers per pane as binary files under ~/.quil/buffers/. On reboot the client spawns the daemon, reads the snapshot, re-creates the pane split tree, and replays ghost buffers instantly while shells re-initialise in the background.",

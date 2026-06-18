@@ -10,6 +10,7 @@ import (
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/daemon"
 	"github.com/artyomsv/quil/internal/logger"
+	apty "github.com/artyomsv/quil/internal/pty"
 	versionpkg "github.com/artyomsv/quil/internal/version"
 )
 
@@ -91,6 +92,13 @@ func main() {
 	closer := initLogging(logLevel, cfg.Logging.MaxSizeMB, cfg.Logging.MaxFiles)
 	if closer != nil {
 		defer closer.Close()
+	}
+
+	// Extract the bundled ConPTY host (Windows only; no-op elsewhere) so panes
+	// spawn through the newer OpenConsole instead of the OS conhost. Non-fatal:
+	// on failure the PTY layer falls back to the inbox ConPTY.
+	if err := apty.PrepareBundledConPTY(config.QuilDir()); err != nil {
+		log.Printf("conpty: bundled host unavailable (%v); using inbox", err)
 	}
 
 	d := daemon.New(cfg)

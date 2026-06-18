@@ -168,6 +168,20 @@ systemctl --user start quild</pre>
               </p>
             </div>
           </div>
+          <div class="install-step">
+            <div class="step-num">04</div>
+            <div>
+              <h3>Windows 10: bundled console host</h3>
+              <p>
+                On Windows 10, Quil bundles Microsoft's MIT-licensed
+                <a href="https://github.com/microsoft/terminal" rel="noopener">OpenConsole</a>
+                and extracts it to <code>~/.quil/conpty/</code> on first run, so
+                TUIs render correctly despite the older Windows 10 console host.
+                Windows 11 uses its built-in host and extracts nothing. See
+                <a href="/legal">third-party software</a>.
+              </p>
+            </div>
+          </div>
         </div>
 
         <!-- Go install -->

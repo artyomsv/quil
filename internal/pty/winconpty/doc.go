@@ -1,0 +1,15 @@
+// Package conpty implements Windows Console Pseudo-terminal support.
+//
+// https://learn.microsoft.com/en-us/windows/console/creating-a-pseudoconsole-session
+package winconpty
+
+import "errors"
+
+// ErrUnsupported is returned when the current platform is not supported.
+var ErrUnsupported = errors.New("conpty: unsupported platform")
+
+// Default size.
+const (
+	DefaultWidth  = 80
+	DefaultHeight = 25
+)

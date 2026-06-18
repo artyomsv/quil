@@ -11,6 +11,7 @@ When things go sideways, this is the first place to look.
 - [Version mismatch — daemon won't accept the TUI](#version-mismatch--daemon-wont-accept-the-tui)
 - [MCP — AI client doesn't see Quil](#mcp--ai-client-doesnt-see-quil)
 - [`Ctrl+V` doesn't paste on Windows](#ctrlv-doesnt-paste-on-windows)
+- [Extra space / garbled text when typing on Windows 10](#extra-space--garbled-text-when-typing-on-windows-10)
 - [Pane shows ghost (dimmed border) and never goes live](#pane-shows-ghost-dimmed-border-and-never-goes-live)
 - [Claude Code session doesn't resume](#claude-code-session-doesnt-resume)
 - [Log files — where to look](#log-files--where-to-look)
@@ -123,6 +124,17 @@ Windows Terminal captures `Ctrl+V` for its own paste action **before the TUI see
 - Or use **`Ctrl+Alt+V`** — another alias.
 
 You can also tell Windows Terminal to forward `Ctrl+V` by remapping it in `settings.json`, but `F8` is the friction-free path.
+
+## Extra space / garbled text when typing on Windows 10
+
+Symptoms: typing in an AI pane (e.g. Claude Code) on **Windows 10** shows an extra space after the first character — `Hello` renders as `H ello` — that self-corrects when the line wraps or you press Enter.
+
+Cause: the Windows 10 inbox console host (`conhost.exe`) mis-renders some TUIs' incremental input. Quil fixes this automatically by bundling Microsoft's newer **OpenConsole** and hosting panes through it on Windows 10 (see [Architecture → ADR-25](architecture.md#adr-25-bundled-openconsole-conpty-host-on-windows-10)). Windows 11 is unaffected and uses the inbox host.
+
+If you still see it on Windows 10, the bundled host didn't load — check the daemon log (`%USERPROFILE%\.quil\quild.log`) for `conpty:` lines:
+
+- `conpty: Windows build NNNNN (<11); extracting bundled OpenConsole` — expected on Win10; the host is active.
+- `conpty: bundled host unavailable (...)` — extraction/load failed and Quil fell back to the inbox host. Ensure `%USERPROFILE%\.quil\conpty\` is writable and not blocked by antivirus, then restart the daemon (`quil daemon restart`).
 
 ## Pane shows ghost (dimmed border) and never goes live
 

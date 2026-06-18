@@ -10,6 +10,8 @@ DOCKER_RUN="docker run --rm -v ${PROJECT_DIR}:/src -v quil-gomod:/go/pkg/mod -w 
 case "${1:-help}" in
   build)
     $DOCKER_RUN sh -c "\
+      apk add --no-cache curl unzip >/dev/null 2>&1 && \
+      sh scripts/fetch-conpty.sh && \
       go install github.com/tc-hib/go-winres@v0.3.3 && \
       VER=\$(cat VERSION) && \
       go-winres make --in winres/winres.json --out cmd/quil/rsrc --product-version \$VER --file-version \$VER && \
@@ -40,6 +42,8 @@ case "${1:-help}" in
 
   cross)
     $DOCKER_RUN sh -c "\
+      apk add --no-cache curl unzip >/dev/null 2>&1 && \
+      sh scripts/fetch-conpty.sh && \
       go install github.com/tc-hib/go-winres@v0.3.3 && \
       VER=\$(cat VERSION) && \
       go-winres make --in winres/winres.json --out cmd/quil/rsrc --product-version \$VER --file-version \$VER && \

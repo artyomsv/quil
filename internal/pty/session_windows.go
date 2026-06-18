@@ -8,12 +8,24 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/artyomsv/quil/internal/logger"
+	"github.com/artyomsv/quil/internal/pty/winconpty"
 	"github.com/charmbracelet/x/conpty"
 	"golang.org/x/sys/windows"
 )
 
+// winConPTY is the common surface of the inbox (charmbracelet/x/conpty) and the
+// bundled-OpenConsole (winconpty) ConPTY backends. Both expose identical methods.
+type winConPTY interface {
+	Read([]byte) (int, error)
+	Write([]byte) (int, error)
+	Resize(w, h int) error
+	Close() error
+	Spawn(name string, args []string, attr *syscall.ProcAttr) (pid int, handle uintptr, err error)
+}
+
 type winSession struct {
-	cpty     *conpty.ConPty
+	cpty     winConPTY
 	pid      int
 	handle   windows.Handle
 	cols     int
@@ -40,8 +52,27 @@ func (s *winSession) SetCWD(dir string) {
 	s.cwd = dir
 }
 
+// newConPTY prefers the bundled-OpenConsole backend (which renders claude-code's
+// input cleanly, unlike the Windows 10 inbox conhost) and falls back to the
+// inbox ConPTY when the bundled conpty.dll is not present next to the binary.
+func newConPTY(cols, rows int) (winConPTY, error) {
+	if winconpty.Available() {
+		cp, err := winconpty.New(cols, rows, 0)
+		if err == nil {
+			logger.Debug("conpty: using bundled OpenConsole")
+			return cp, nil
+		}
+		logger.Debug("conpty: bundled backend failed (%v); using inbox conhost", err)
+	}
+	cp, err := conpty.New(cols, rows, 0)
+	if err != nil {
+		return nil, err
+	}
+	return cp, nil
+}
+
 func (s *winSession) Start(cmd string, args ...string) error {
-	cp, err := conpty.New(s.cols, s.rows, 0)
+	cp, err := newConPTY(s.cols, s.rows)
 	if err != nil {
 		return err
 	}

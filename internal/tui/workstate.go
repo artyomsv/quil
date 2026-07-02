@@ -199,6 +199,8 @@ func syncPaneMeta(pane *PaneModel, info *PaneInfo) {
 	pane.Pending = info.Pending
 	pane.SessionID = info.SessionID
 	pane.HistoryLines = info.HistoryLines
+	pane.daemonMouseTracking = info.MouseTracking
+	pane.daemonMouseSGR = info.MouseSGR
 	if info.Muted {
 		pane.working = false
 	}

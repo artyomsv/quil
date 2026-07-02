@@ -82,6 +82,19 @@ type Pane struct {
 	// pane is already published to the session maps; concurrent snapshots
 	// may read it). Excluded from disk snapshots.
 	Overlay bool
+	// MouseModes mirrors the child app's DEC mouse-mode state, scanned from the
+	// PTY output stream (scanMouseModes) in flushPaneOutput. The daemon is the
+	// only component that sees the one-time mouse-enable burst on every attach,
+	// so it is authoritative. Broadcast (not persisted) in the workspace snapshot
+	// so the TUI can forward wheel events to apps that handle their own
+	// scrolling. mouseBroadcast / lastMouseBroadcastAt are throttle bookkeeping:
+	// broadcasts are gated by a cooldown so a hostile PTY stream that alternates
+	// a mode every flush cannot force a full-snapshot broadcast storm (the
+	// suppressed change is re-delivered on the next flush past the cooldown, or
+	// by any other broadcastState caller). All three guarded by PluginMu.
+	MouseModes           mouseModeState
+	mouseBroadcast       mouseModeState
+	lastMouseBroadcastAt time.Time
 	// Pending is true between restore and first spawn for a deferred pane: the
 	// model + ghost buffer exist but no PTY has been created yet. Runtime-only,
 	// never persisted. Cleared by ensurePaneSpawned.

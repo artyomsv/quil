@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Mouse-wheel scrolling in AI/TUI panes** — scrolling the wheel over a pane
+  running an app that handles its own mouse input (opencode, claude-code, vim,
+  htop, lazygit, …) now scrolls that app's viewport instead of doing nothing.
+  These apps run on the alternate screen, which never fills Quil's local
+  scrollback, so the wheel is forwarded straight to the program. The daemon
+  detects when a pane's program enables mouse tracking — reliable even when you
+  reattach to an already-running session — and the client forwards each wheel
+  notch as the matching mouse sequence. Plain terminal/shell panes keep
+  scrolling Quil's own scrollback as before.
+
 ## [1.31.2] - 2026-06-18
 
 ## [1.31.1] - 2026-06-18

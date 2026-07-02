@@ -211,46 +211,82 @@ jobs:
     permissions:
       contents: write  # push tag + publish GitHub release assets
     outputs:
-      released: ${{ steps.tag.outputs.released }}
-      version: ${{ steps.tag.outputs.version }}
+      released: ${{ steps.check.outputs.released }}
+      version: ${{ steps.check.outputs.version }}
     steps:
+      # Shallow checkout for the cheap common case: every push to master reaches
+      # this job, but ordinary feature merges exit at the release-existence check
+      # below without needing full history. Only an actual release pulls the full
+      # history GoReleaser needs. A job-level `if` guard was avoided on purpose —
+      # it can't inspect the git diff, and keying off
+      # github.event.head_commit.modified would silently skip a release merged via
+      # a merge-commit (empty file list), which the ruleset permits.
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
-        with:
-          fetch-depth: 0  # GoReleaser needs full history for tag resolution
 
-      - name: Tag when VERSION is unreleased
-        id: tag
-        if: github.event_name == 'push'
+      - name: Decide whether to release
+        id: check
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # A dry-run dispatch must never publish; only prepare-release honors it.
+          if [ "${DRY_RUN}" = "true" ]; then
+            echo "::warning::DRY RUN — skipping tag/release"
+            echo "released=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           VERSION=$(cat VERSION)
           echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' || {
             echo "::error::Invalid version in VERSION file: '$VERSION'"
             exit 1
           }
-          echo "version=${VERSION}" >> $GITHUB_OUTPUT
-          if git rev-parse "v${VERSION}" >/dev/null 2>&1; then
-            echo "::notice::v${VERSION} already tagged — nothing to release"
-            echo "released=false" >> $GITHUB_OUTPUT
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          # Gate on the *published Release*, not merely the tag. A prior run can
+          # push the tag and then fail inside GoReleaser (exactly the v1.32.0
+          # failure); a tag-only check would skip the retry forever. Missing
+          # Release ⇒ (re)build. Recover by re-running the failed run, or by
+          # dispatching this workflow with dry_run=false.
+          if gh release view "v${VERSION}" >/dev/null 2>&1; then
+            echo "::notice::v${VERSION} already released — nothing to do"
+            echo "released=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag "v${VERSION}"
-          git push origin "v${VERSION}"
-          echo "released=true" >> $GITHUB_OUTPUT
-          echo "::notice::Tagged v${VERSION}"
+          echo "released=true" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch full history and tags
+        if: steps.check.outputs.released == 'true'
+        run: |
+          git fetch --prune --tags origin
+          if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
+            git fetch --unshallow origin
+          fi
+
+      - name: Create or reuse the tag
+        if: steps.check.outputs.released == 'true'
+        env:
+          VERSION: ${{ steps.check.outputs.version }}
+        run: |
+          if git rev-parse "v${VERSION}" >/dev/null 2>&1; then
+            # Prior partial release: build the already-tagged commit so a moved
+            # master can't desync GoReleaser from the tag.
+            echo "::notice::v${VERSION} already tagged (partial prior release) — reusing tag"
+            git checkout --detach "v${VERSION}"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git tag "v${VERSION}"
+            git push origin "v${VERSION}"
+            echo "::notice::Tagged v${VERSION}"
+          fi
 
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5
-        if: steps.tag.outputs.released == 'true'
+        if: steps.check.outputs.released == 'true'
         with:
           go-version: '1.25'
 
       - name: Extract release notes from CHANGELOG.md
-        if: steps.tag.outputs.released == 'true'
+        if: steps.check.outputs.released == 'true'
         env:
-          VERSION: ${{ steps.tag.outputs.version }}
+          VERSION: ${{ steps.check.outputs.version }}
         run: |
           # IMPORTANT: write the file inside GITHUB_WORKSPACE, not /tmp.
           # `hashFiles()` (used in `if:` conditions on later steps) only
@@ -263,7 +299,7 @@ jobs:
           cat release-notes.md
 
       - uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a  # v6
-        if: steps.tag.outputs.released == 'true'
+        if: steps.check.outputs.released == 'true'
         with:
           distribution: goreleaser
           version: "~> v2"
@@ -277,9 +313,9 @@ jobs:
         # entry that section is empty (this produced blank release pages on
         # v1.29.0 and v1.31.0). In that case we fall back to GitHub's
         # commit/PR-generated notes so every release has a description.
-        if: steps.tag.outputs.released == 'true'
+        if: steps.check.outputs.released == 'true'
         env:
-          VERSION: ${{ steps.tag.outputs.version }}
+          VERSION: ${{ steps.check.outputs.version }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # Treat a whitespace-only section as empty: the extract step emits a

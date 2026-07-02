@@ -3932,6 +3932,24 @@ func keyToBytes(keyMsg tea.KeyPressMsg) []byte {
 		}
 	}
 
+	// Alt/Meta + printable key → ESC-prefixed byte (Meta encoding). Terminals
+	// send Meta this way, and readline / claude-code bind ESC-b / ESC-f to
+	// backward-word / forward-word. macOS Terminal.app with "Use Option as Meta
+	// key" delivers Option+b / Option+f (a common word-jump setup) as alt+b /
+	// alt+f — which otherwise fall through here and get dropped (no Text on a
+	// modified key). Require Alt WITHOUT Ctrl (Ctrl+Alt combos have explicit
+	// cases above), and only printable ASCII (special keys are named cases).
+	// Prefer Text (carries the shifted glyph, e.g. Alt+Shift+B → "B") and fall
+	// back to Code (a bare modified key like Alt+B has empty Text).
+	if keyMsg.Mod.Contains(tea.ModAlt) && !keyMsg.Mod.Contains(tea.ModCtrl) {
+		if t := keyMsg.Text; len(t) == 1 && t[0] >= 0x20 && t[0] <= 0x7e {
+			return []byte{0x1b, t[0]}
+		}
+		if r := keyMsg.Code; r >= 0x20 && r <= 0x7e {
+			return []byte{0x1b, byte(r)}
+		}
+	}
+
 	// Printable text — handles single ASCII, multi-byte UTF-8, and multi-rune IME input.
 	if keyMsg.Text != "" {
 		return []byte(keyMsg.Text)

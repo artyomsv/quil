@@ -19,6 +19,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   notch as the matching mouse sequence. Plain terminal/shell panes keep
   scrolling Quil's own scrollback as before.
 
+### Fixed
+
+- **macOS render corruption in claude-code panes** — typing over the input
+  placeholder no longer leaks stray text (`AAA` shown as `AAAude Code`), and the
+  header logo no longer doubles (`Claude CodClaude Code`). The bundled terminal
+  emulator ended the child app's window-title escape sequence early when the
+  title contained certain Unicode characters (claude-code's `✳` marker), spilling
+  the title text into the visible pane. Quil now filters window-title sequences
+  before the emulator — it renders its own tab titles, so nothing is lost.
+
+- **Word-jump keys on macOS Terminal.app** — Option-based word navigation now
+  works inside panes. With "Use Option as Meta key" enabled, `Option+B` /
+  `Option+F` (and other `Alt`+key combinations) are forwarded to the pane as Meta
+  keys, so claude-code and shell readline word navigation work with no extra
+  configuration. `Ctrl+Arrow` word-jump on Windows/Linux is unchanged.
+
 ## [1.31.2] - 2026-06-18
 
 ## [1.31.1] - 2026-06-18

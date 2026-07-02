@@ -709,18 +709,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// silent no-op. One event per wheel notch matches a real
 				// terminal; the app applies its own scroll step.
 				if pane.MouseTracking() {
-					relX, relY := 0, 0
+					// Only forward when we can resolve the pane's rect: a nil rect
+					// means the layout is momentarily unsettled (rapid tab switch,
+					// split-then-focus), and forwarding with a (0,0) origin would
+					// hand any-event tracking (?1003) a bogus cursor position.
+					// Either way this pane's local scrollback is never populated
+					// (alt-screen), so swallow the event rather than scrolling it.
 					if rect := m.activePaneRect(); rect != nil {
-						relX = msg.X - rect.OX - 1
-						relY = msg.Y - rect.OY - 1
+						relX := msg.X - rect.OX - 1
+						relY := msg.Y - rect.OY - 1
+						if seq := pane.wheelForwardSeq(msg.Button == tea.MouseWheelUp, relX, relY); seq != nil {
+							logger.Debug("wheel: forward pane=%s type=%s btn=%v rel=(%d,%d) seq=%q (local n=%v b=%v a=%v sgr=%v daemonTrack=%v)",
+								pane.ID, pane.Type, msg.Button, relX, relY, string(seq),
+								pane.mouseNormal, pane.mouseButton, pane.mouseAny, pane.mouseSGR, pane.daemonMouseTracking)
+							m.sendInputToPane(pane.ID, seq)
+						}
 					}
-					if seq := pane.wheelForwardSeq(msg.Button == tea.MouseWheelUp, relX, relY); seq != nil {
-						logger.Debug("wheel: forward pane=%s type=%s btn=%v rel=(%d,%d) seq=%q (local n=%v b=%v a=%v sgr=%v daemonTrack=%v)",
-							pane.ID, pane.Type, msg.Button, relX, relY, string(seq),
-							pane.mouseNormal, pane.mouseButton, pane.mouseAny, pane.mouseSGR, pane.daemonMouseTracking)
-						m.sendInputToPane(pane.ID, seq)
-						return m, nil
-					}
+					return m, nil
 				}
 				if msg.Button == tea.MouseWheelUp {
 					pane.ScrollUp(lines)

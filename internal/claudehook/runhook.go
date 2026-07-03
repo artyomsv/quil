@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"time"
 
 	"github.com/artyomsv/quil/internal/hookevents"
@@ -32,14 +33,15 @@ const maxStdinBytes = 1 << 20
 // claudeStdin mirrors the subset of Claude Code's hook JSON Quil reads. Extra
 // fields in the payload are ignored by encoding/json.
 type claudeStdin struct {
-	HookEventName string `json:"hook_event_name"`
-	SessionID     string `json:"session_id"`
-	Prompt        string `json:"prompt"`
-	Message       string `json:"message"`
-	ToolName      string `json:"tool_name"`
-	Reason        string `json:"reason"`
-	AgentType     string `json:"agent_type"`
-	Content       string `json:"content"`
+	HookEventName  string `json:"hook_event_name"`
+	SessionID      string `json:"session_id"`
+	TranscriptPath string `json:"transcript_path"`
+	Prompt         string `json:"prompt"`
+	Message        string `json:"message"`
+	ToolName       string `json:"tool_name"`
+	Reason         string `json:"reason"`
+	AgentType      string `json:"agent_type"`
+	Content        string `json:"content"`
 }
 
 // sessionIDRe matches the Claude session-id shape (uuid-ish hex). Mirrors the
@@ -125,7 +127,8 @@ func dispatchHookEvent(env HookEnv, in claudeStdin, nowMs int64) error {
 			truncate("Needs approval: "+in.ToolName, hookevents.MaxTitleBytes), hookevents.SeverityWarning,
 			map[string]string{"tool": truncate(in.ToolName, hookevents.MaxDataValueBytes)})
 	case "Stop":
-		return spoolEvent(env, nowMs, "Stop", in.SessionID, "Reply ready", hookevents.SeverityWarning, nil)
+		return spoolEvent(env, nowMs, "Stop", in.SessionID, "Reply ready", hookevents.SeverityWarning,
+			modelUsageData(env, in.TranscriptPath))
 	case "PostToolUse":
 		// Work-spinner RESUME edge. Registered with a tool-name matcher
 		// (claudehook.promptToolMatcher) so Claude only fires it for the
@@ -149,7 +152,8 @@ func dispatchHookEvent(env HookEnv, in claudeStdin, nowMs int64) error {
 		return spoolEvent(env, nowMs, "PreCompact", in.SessionID, title, hookevents.SeverityInfo,
 			map[string]string{"reason": truncate(in.Reason, hookevents.MaxDataValueBytes)})
 	case "PostCompact":
-		return spoolEvent(env, nowMs, "PostCompact", in.SessionID, "Compaction complete", hookevents.SeverityInfo, nil)
+		return spoolEvent(env, nowMs, "PostCompact", in.SessionID, "Compaction complete", hookevents.SeverityInfo,
+			modelUsageData(env, in.TranscriptPath))
 	case "SubagentStart":
 		return spoolEvent(env, nowMs, "SubagentStart", in.SessionID,
 			truncate("Spawned: "+in.AgentType, hookevents.MaxTitleBytes), hookevents.SeverityInfo,
@@ -171,6 +175,44 @@ func dispatchHookEvent(env HookEnv, in claudeStdin, nowMs int64) error {
 		// breadcrumb rather than erroring.
 		hookLog(env.QuilDir, env.PaneID, "unhandled hook_event: "+in.HookEventName)
 		return nil
+	}
+}
+
+// transcriptRetryDelays paces the re-reads in modelUsageData. Claude appends
+// the final assistant transcript line asynchronously around the moment Stop
+// hooks fire — a live trace showed the line landing 30 ms AFTER the hook's
+// first read — so a failed read is retried briefly before giving up. Package
+// var so tests can shrink the waits.
+var transcriptRetryDelays = []time.Duration{0, 100 * time.Millisecond, 250 * time.Millisecond}
+
+// modelUsageData tail-reads the session transcript and returns the model +
+// context-token Data keys for a spool event, or nil when the transcript is
+// missing or unreadable (the event is then emitted exactly as before this
+// feature — no new failure mode). A failed read leaves one breadcrumb in the
+// hook log; a silent failure here cost a live-debugging round when the
+// transcript-flush race produced data-less Stop events without a trace.
+func modelUsageData(env HookEnv, transcriptPath string) map[string]string {
+	if transcriptPath == "" {
+		return nil
+	}
+	var (
+		model  string
+		tokens int64
+		ok     bool
+	)
+	for _, delay := range transcriptRetryDelays {
+		time.Sleep(delay)
+		if model, tokens, ok = readTranscriptUsage(transcriptPath); ok {
+			break
+		}
+	}
+	if !ok {
+		hookLog(env.QuilDir, env.PaneID, "transcript usage read failed after retries: "+truncate(transcriptPath, 200))
+		return nil
+	}
+	return map[string]string{
+		"model":          truncate(model, hookevents.MaxDataValueBytes),
+		"context_tokens": strconv.FormatInt(tokens, 10),
 	}
 }
 

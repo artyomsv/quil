@@ -64,6 +64,8 @@ type PaneModel struct {
 	Pending            bool                // deferred restore — not yet lazy-spawned (daemon-authoritative)
 	SessionID          string              // tracked session id (daemon-authoritative; restore checklist)
 	HistoryLines       int                 // ghost-buffer line count (daemon-authoritative; restore checklist)
+	Model              string              // model id of the last completed AI turn (daemon-authoritative; status bar)
+	ContextTokens      int64               // context-window tokens of the last completed AI turn (daemon-authoritative; status bar)
 	resumeStart        time.Time           // when resuming/preparing started (minimum display duration)
 	spinnerFrame       int                 // current frame index in spinnerFrames
 	spinnerTickRunning bool                // guards against stacking restore-spinner tick chains (cf. workTickRunning)

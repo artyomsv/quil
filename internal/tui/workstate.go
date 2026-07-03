@@ -179,4 +179,10 @@ func syncPaneMeta(pane *PaneModel, info *PaneInfo) {
 	pane.HistoryLines = info.HistoryLines
 	pane.daemonMouseTracking = info.MouseTracking
 	pane.daemonMouseSGR = info.MouseSGR
+	// Model/context are only broadcast once a turn has completed; don't let a
+	// snapshot raced between spawn and first turn wipe a live-event value.
+	if info.Model != "" {
+		pane.Model = info.Model
+		pane.ContextTokens = info.ContextTokens
+	}
 }

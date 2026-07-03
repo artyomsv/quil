@@ -10,6 +10,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -71,6 +72,11 @@ type PaneInfo struct {
 	// should be forwarded to it. Mirrored onto PaneModel for the wheel handler.
 	MouseTracking bool
 	MouseSGR      bool
+	// Model/ContextTokens are daemon-authoritative (extracted from hook event
+	// data at turn boundaries): the model id and context-window token count of
+	// the pane's last completed AI turn. Empty/zero for non-AI panes.
+	Model         string
+	ContextTokens int64
 }
 
 // paneSettleRepaintMsg fires shortly after a pane's first live output and
@@ -967,6 +973,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.notifications.AddEvent(ipc.PaneEventPayload(msg))
 		}
 		cmds := []tea.Cmd{m.listenForMessages()}
+		// Model/context usage rides turn-boundary hook events as Data keys
+		// (claude Stop/PostCompact, opencode session.idle) — apply it live so
+		// the status bar refreshes without waiting for a workspace snapshot.
+		if eventPane != nil {
+			if model := msg.Data["model"]; model != "" {
+				if tokens, err := strconv.ParseInt(msg.Data["context_tokens"], 10, 64); err == nil && tokens >= 0 {
+					eventPane.Model = model
+					eventPane.ContextTokens = tokens
+				}
+			}
+		}
 		// Update working state + unseen marks from the same hook stream.
 		m.applyWorkTransition(msg.PaneID, msg.Type)
 		if m.anyPaneWorking() && !m.workTickRunning {
@@ -3031,6 +3048,9 @@ func (m Model) renderStatusBar() string {
 				}
 			}
 			left = fmt.Sprintf("%s  %s", displayPath, paneInfo)
+			if seg := modelStatusSegment(pane.Model, pane.ContextTokens); seg != "" {
+				left = fmt.Sprintf("%s  %s  %s", displayPath, seg, paneInfo)
+			}
 			if tab.FocusMode() {
 				left = "[focus] " + left
 			}
@@ -3311,6 +3331,12 @@ func parseWorkspaceState(raw map[string]any) WorkspaceStateMsg {
 				}
 				if ms, ok := pm["mouse_sgr"].(bool); ok {
 					pi.MouseSGR = ms
+				}
+				if model, ok := pm["model"].(string); ok {
+					pi.Model = model
+				}
+				if ct, ok := pm["context_tokens"].(float64); ok {
+					pi.ContextTokens = int64(ct)
 				}
 				state.Panes = append(state.Panes, pi)
 			}

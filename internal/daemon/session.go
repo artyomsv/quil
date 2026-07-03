@@ -120,6 +120,16 @@ type Pane struct {
 	// the user always sees SOME notification surface, even if not the
 	// hook-driven one.
 	HookHealthy bool
+	// LastModel / LastContextTokens mirror the model id and context-window
+	// token count of the most recent completed AI turn, extracted from hook
+	// event data (claude Stop/PostCompact, opencode session.idle) in
+	// emitHookEvent. Runtime-only — deliberately NOT persisted (a stale
+	// token count from a previous daemon run would be wrong until the next
+	// turn) — and broadcast in the workspace snapshot's runtime block so a
+	// newly-attached TUI shows them without waiting for the next turn.
+	// Cleared on restart/respawn like MouseModes. Guarded by PluginMu.
+	LastModel         string
+	LastContextTokens int64
 }
 
 type SessionManager struct {

@@ -206,6 +206,37 @@ export default async function quilSessionTracker(_input) {
   // Session-id tracking ─────────────────────────────────────────────────
   let lastRecorded = null;
 
+  // Model/context tracking ──────────────────────────────────────────────
+  // message.updated fires repeatedly while an assistant reply streams; we
+  // only cache (never spool) here, and the cached values ride the next
+  // session.idle event's data map. Context ≈ input + cache read + cache
+  // write — the tokens occupying the window at the end of the turn.
+  let lastModelID = "";
+  let lastContextTokens = 0;
+
+  const cacheModelUsage = (info) => {
+    if (!info || info.role !== "assistant") return;
+    // Streaming updates carry partial token counts; only trust a finished
+    // message (time.completed / finish set on the final update).
+    const done = (info.time && info.time.completed) || info.finish;
+    if (!done) return;
+    const t = info.tokens || {};
+    const cache = t.cache || {};
+    const ctx = (Number(t.input) || 0) + (Number(cache.read) || 0) + (Number(cache.write) || 0);
+    if (typeof info.modelID === "string" && info.modelID !== "" && ctx > 0) {
+      lastModelID = info.modelID;
+      lastContextTokens = ctx;
+    }
+  };
+
+  const modelUsageData = () => {
+    if (!lastModelID) return {};
+    return {
+      model: lastModelID,
+      context_tokens: String(lastContextTokens),
+    };
+  };
+
   const record = async (sessionId, eventType) => {
     if (typeof sessionId !== "string" || !SESSION_ID_RE.test(sessionId)) {
       const shown = sessionId == null ? "(empty)" : String(sessionId).slice(0, 200);
@@ -287,10 +318,16 @@ export default async function quilSessionTracker(_input) {
           }
         }
 
+        // Cache model/context off the inline assistant message. Never
+        // spools — the values ride the next session.idle event below.
+        if (t === "message.updated") {
+          cacheModelUsage(props.info);
+        }
+
         // 2) Spool forwarding (Phase C "default" tier).
         switch (t) {
           case "session.idle":
-            await spool("session.idle", "Reply ready", "warning", {});
+            await spool("session.idle", "Reply ready", "warning", modelUsageData());
             break;
 
           case "session.error": {

@@ -179,4 +179,12 @@ func syncPaneMeta(pane *PaneModel, info *PaneInfo) {
 	pane.HistoryLines = info.HistoryLines
 	pane.daemonMouseTracking = info.MouseTracking
 	pane.daemonMouseSGR = info.MouseSGR
+	// Unconditional copy, like the other daemon-authoritative fields: the
+	// daemon writes LastModel BEFORE broadcasting the hook event and IPC
+	// delivery is ordered per connection, so a snapshot can never lag behind
+	// a live paneEventMsg value — and an empty snapshot value is meaningful
+	// (pane restart cleared the daemon-side state; the status bar must not
+	// keep showing the pre-restart model until the next turn).
+	pane.Model = info.Model
+	pane.ContextTokens = info.ContextTokens
 }

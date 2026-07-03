@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/artyomsv/quil/internal/hookevents"
 	"github.com/artyomsv/quil/internal/panehistory"
@@ -105,6 +106,83 @@ func TestRunHook_Stop_SpoolsStopEdge(t *testing.T) {
 	}
 	if got[0].Severity != hookevents.SeverityWarning {
 		t.Errorf("sev = %q, want warning", got[0].Severity)
+	}
+	if got[0].Data != nil {
+		t.Errorf("Stop without transcript_path must carry no data, got %+v", got[0].Data)
+	}
+}
+
+func TestRunHook_Stop_AttachesModelUsageFromTranscript(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	transcript := writeTranscript(t,
+		`{"type":"user","message":{"content":"hi"}}`,
+		assistantLine("claude-opus-4-8", 2, 600000, 1000, false),
+	)
+	env := HookEnv{PaneID: "pane-m", QuilDir: dir, Mode: "default"}
+	stdin := `{"hook_event_name":"Stop","session_id":"s","transcript_path":` + jsonString(transcript) + `}`
+	if err := RunHook(strings.NewReader(stdin), env, 1); err != nil {
+		t.Fatalf("RunHook: %v", err)
+	}
+	got := readSpool(t, dir, "pane-m")
+	if len(got) != 1 {
+		t.Fatalf("spool lines = %d, want 1", len(got))
+	}
+	if got[0].Data["model"] != "claude-opus-4-8" {
+		t.Errorf("data.model = %q", got[0].Data["model"])
+	}
+	if got[0].Data["context_tokens"] != "601002" {
+		t.Errorf("data.context_tokens = %q, want 601002", got[0].Data["context_tokens"])
+	}
+}
+
+func TestRunHook_Stop_MissingTranscript_NoData(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	env := HookEnv{PaneID: "pane-mm", QuilDir: dir, Mode: "default"}
+	stdin := `{"hook_event_name":"Stop","transcript_path":"/nonexistent/nope.jsonl"}`
+	if err := RunHook(strings.NewReader(stdin), env, 1); err != nil {
+		t.Fatalf("RunHook: %v", err)
+	}
+	got := readSpool(t, dir, "pane-mm")
+	if len(got) != 1 || got[0].Title != "Reply ready" {
+		t.Fatalf("unexpected spool: %+v", got)
+	}
+	if got[0].Data != nil {
+		t.Errorf("unreadable transcript must not add data, got %+v", got[0].Data)
+	}
+}
+
+// jsonString marshals s as a JSON string literal (handles Windows path
+// backslashes in transcript paths).
+func jsonString(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
+}
+
+func TestRunHook_Stop_RetriesTranscriptFlushRace(t *testing.T) {
+	// Claude appends the final assistant transcript line ~30 ms AFTER the
+	// Stop hook fires. Simulate the race: the transcript appears while the
+	// hook is inside its retry loop.
+	origDelays := transcriptRetryDelays
+	transcriptRetryDelays = []time.Duration{0, 30 * time.Millisecond, 200 * time.Millisecond}
+	t.Cleanup(func() { transcriptRetryDelays = origDelays })
+
+	dir := t.TempDir()
+	transcript := filepath.Join(t.TempDir(), "session.jsonl")
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		_ = os.WriteFile(transcript, []byte(assistantLine("claude-fable-5", 5, 80000, 400, false)+"\n"), 0o600)
+	}()
+
+	env := HookEnv{PaneID: "pane-race", QuilDir: dir, Mode: "default"}
+	stdin := `{"hook_event_name":"Stop","session_id":"s","transcript_path":` + jsonString(transcript) + `}`
+	if err := RunHook(strings.NewReader(stdin), env, 1); err != nil {
+		t.Fatalf("RunHook: %v", err)
+	}
+	got := readSpool(t, dir, "pane-race")
+	if len(got) != 1 || got[0].Data["model"] != "claude-fable-5" || got[0].Data["context_tokens"] != "80405" {
+		t.Fatalf("retry did not pick up late transcript: %+v", got)
 	}
 }
 

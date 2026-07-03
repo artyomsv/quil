@@ -1775,6 +1775,8 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			mouseSGR := pane.MouseModes.sgr
 			sessionID := pane.PluginState["session_id"]
 			historyLines := pane.HistoryLines
+			lastModel := pane.LastModel
+			lastContextTokens := pane.LastContextTokens
 			if len(pane.PluginState) > 0 {
 				// Copy to avoid holding lock during JSON marshal
 				ps := make(map[string]string, len(pane.PluginState))
@@ -1821,6 +1823,14 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 				}
 				if mouseSGR {
 					paneData["mouse_sgr"] = true
+				}
+				// Model/context usage of the last completed AI turn is
+				// runtime-only (broadcast, never persisted): a stale token
+				// count from a previous daemon run would be wrong until the
+				// next turn refreshes it.
+				if lastModel != "" {
+					paneData["model"] = lastModel
+					paneData["context_tokens"] = lastContextTokens
 				}
 			}
 			paneData["cwd"] = cwd
@@ -2454,6 +2464,16 @@ func (d *Daemon) emitHookEvent(p hookevents.Payload) {
 		pane.PluginMu.Lock()
 		pane.HookHealthy = true
 		pane.LastHookEventAt = time.Now()
+		// Model/context usage rides the turn-boundary events (claude
+		// Stop/PostCompact, opencode session.idle) as Data keys. Stored on
+		// the pane (runtime-only) so the workspace snapshot can deliver the
+		// values to a client that attaches between turns.
+		if model := p.Data["model"]; model != "" {
+			if tokens, err := strconv.ParseInt(p.Data["context_tokens"], 10, 64); err == nil && tokens >= 0 {
+				pane.LastModel = model
+				pane.LastContextTokens = tokens
+			}
+		}
 		pane.PluginMu.Unlock()
 	}
 
@@ -3126,6 +3146,10 @@ func (d *Daemon) handleRestartPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 	pane.MouseModes = mouseModeState{}
 	pane.mouseBroadcast = mouseModeState{}
 	pane.lastMouseBroadcastAt = time.Time{}
+	// Clear model/context usage: the respawned child starts a fresh (or
+	// resumed) conversation and the next completed turn re-reports it.
+	pane.LastModel = ""
+	pane.LastContextTokens = 0
 	pane.PluginMu.Unlock()
 
 	// Clear output buffer

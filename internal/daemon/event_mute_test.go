@@ -45,6 +45,28 @@ func TestEmitEvent_MutedPaneDropsEvent(t *testing.T) {
 	}
 }
 
+// TestEmitEvent_MutedPaneWorkStateEventBypassesQueue verifies that a
+// work-state hook event (turn start/stop/abort) from a muted pane still
+// bypasses the persisted/notification queue — mute must still mean "no
+// visible notification" (sidebar card, MCP get_notifications) — even though
+// daemon.emitEvent now broadcasts it live so the TUI's working flag doesn't
+// go stale for the duration of the mute (see workstate.go syncPaneMeta).
+func TestEmitEvent_MutedPaneWorkStateEventBypassesQueue(t *testing.T) {
+	d := New(config.Default())
+	tab := &Tab{ID: "tab-1", Name: "test", Panes: []string{"pane-quiet"}}
+	panes := []*Pane{
+		{ID: "pane-quiet", TabID: "tab-1", Type: "terminal", Muted: true},
+	}
+	d.session.RestoreTab(tab, panes)
+
+	d.emitEvent(PaneEvent{ID: "evt-1", PaneID: "pane-quiet", Type: "hook.claude.UserPromptSubmit", Title: "Working"})
+	d.emitEvent(PaneEvent{ID: "evt-2", PaneID: "pane-quiet", Type: "hook.claude.Stop", Title: "Done"})
+
+	if d.events.Count() != 0 {
+		t.Errorf("work-state events from a muted pane must not enter the notification queue: got %d", d.events.Count())
+	}
+}
+
 // TestEmitEvent_UnknownPaneStillEmits guards against an over-aggressive filter
 // — events whose PaneID does not resolve to a live pane (e.g. a synthetic
 // daemon-level event) must still be queued.

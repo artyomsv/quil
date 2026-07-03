@@ -27,17 +27,20 @@ func TestModelStatusSegment(t *testing.T) {
 	}
 }
 
-func TestSyncPaneMeta_ModelPreservedWhenSnapshotOmitsIt(t *testing.T) {
+func TestSyncPaneMeta_ModelFollowsSnapshot(t *testing.T) {
 	t.Parallel()
-	pane := &PaneModel{ID: "p1", Model: "claude-opus-4-8", ContextTokens: 601002}
-	// Snapshot raced between spawn and first turn: no model key broadcast.
-	syncPaneMeta(pane, &PaneInfo{ID: "p1", CWD: "/tmp"})
-	if pane.Model != "claude-opus-4-8" || pane.ContextTokens != 601002 {
-		t.Fatalf("live-event model wiped by snapshot: model=%q tokens=%d", pane.Model, pane.ContextTokens)
-	}
-	// A snapshot that DOES carry values updates them.
+	pane := &PaneModel{ID: "p1"}
+	// A snapshot carrying values applies them.
 	syncPaneMeta(pane, &PaneInfo{ID: "p1", Model: "claude-sonnet-5", ContextTokens: 42})
 	if pane.Model != "claude-sonnet-5" || pane.ContextTokens != 42 {
 		t.Fatalf("snapshot values not applied: model=%q tokens=%d", pane.Model, pane.ContextTokens)
+	}
+	// A snapshot WITHOUT the model key clears the mirror — this is how the
+	// daemon-side restart-clear (handleRestartPaneReq zeroes LastModel)
+	// reaches the status bar; keeping the old value would show the
+	// pre-restart model until the next completed turn.
+	syncPaneMeta(pane, &PaneInfo{ID: "p1", CWD: "/tmp"})
+	if pane.Model != "" || pane.ContextTokens != 0 {
+		t.Fatalf("restart-clear did not propagate: model=%q tokens=%d", pane.Model, pane.ContextTokens)
 	}
 }

@@ -2347,6 +2347,19 @@ func (d *Daemon) emitEvent(e PaneEvent) {
 			muted := pane.Muted
 			pane.PluginMu.Unlock()
 			if muted {
+				// Muting suppresses the visible notification (sidebar card,
+				// MCP get_notifications), but a work-state transition
+				// (turn start/stop/abort) must still reach live clients —
+				// otherwise the TUI's per-pane `working` flag (and its
+				// spinner) goes stale for the whole mute window and never
+				// resyncs on unmute, since no later event exists to correct
+				// it against. Bypass the persisted queue, still broadcast.
+				if hookevents.ClassifyWorkEvent(e.Type) == hookevents.WorkEventNone {
+					return
+				}
+				payload := toPaneEventPayload(e)
+				msg, _ := ipc.NewMessage(ipc.MsgPaneEvent, payload)
+				d.broadcast(msg)
 				return
 			}
 		}

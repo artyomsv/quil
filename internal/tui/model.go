@@ -955,8 +955,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		//
 		// hook.claude.PostToolUse is a work-state-only signal (re-arms the
 		// spinner after a prompt is answered) — never a user-facing card.
+		//
+		// A muted pane's daemon still forwards work-state hook events live
+		// (see emitEvent) so `working` tracks reality across mute/unmute —
+		// but muting must still mean "no visible notification", so suppress
+		// the sidebar card for any event sourced from a muted pane.
+		eventPane, _ := m.findPaneAndTab(msg.PaneID)
+		muted := eventPane != nil && eventPane.Muted
 		workStateOnly := msg.Type == "hook.claude.PostToolUse"
-		if !workStateOnly && !(msg.Type == "output_idle" && m.isActivePane(msg.PaneID)) {
+		if !muted && !workStateOnly && !(msg.Type == "output_idle" && m.isActivePane(msg.PaneID)) {
 			m.notifications.AddEvent(ipc.PaneEventPayload(msg))
 		}
 		cmds := []tea.Cmd{m.listenForMessages()}

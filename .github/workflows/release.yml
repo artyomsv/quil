@@ -259,13 +259,15 @@ jobs:
           echo "::notice::Release notes applied to v${VERSION}"
 
   # --- Site rebuild ---------------------------------------------------
-  # A push made with RELEASE_PAT still doesn't trigger other workflows if it
-  # matches the same actor+event that initiated this run (GitHub Actions
-  # loop-prevention), so site.yml can't be relied on to fire from the release
-  # commit. This job rebuilds and deploys the site directly from the tagged
+  # A push made with RELEASE_PAT triggers site.yml (unlike GITHUB_TOKEN, which
+  # is exempt from workflow loop-prevention). However, site.yml fires on the
+  # *pre-bump* push that started this run — not the release commit — so it
+  # would deploy a stale version pill. The shared "pages" concurrency group
+  # below cancels that stale build and makes this job the authoritative
+  # deploy. This job rebuilds and deploys the site directly from the tagged
   # commit (which has the updated seo.ts version pill).
   deploy-site:
-    needs: release
+    needs: [release, goreleaser]
     if: needs.release.outputs.skip != 'true' && needs.release.outputs.dry_run != 'true'
     runs-on: ubuntu-latest
     # Share the "pages" concurrency group with site.yml. The same push

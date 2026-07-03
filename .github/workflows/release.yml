@@ -1,21 +1,17 @@
 name: Release
 
-# PR-based release flow (respects the `master` branch ruleset — no bypass).
+# Single-person repo: cuts the release commit and tag with a direct push to
+# master. The `master` ruleset requires PR review for ordinary pushes, but
+# you (artyomsv) are listed as a ruleset bypass_actor with bypass_mode
+# "always" — that bypass only applies to YOUR identity, not the ephemeral
+# `github-actions[bot]` GITHUB_TOKEN. So the checkout below authenticates
+# with the `RELEASE_PAT` secret (a fine-grained PAT owned by you) instead of
+# the default token — every git push in this job then runs as you, which the
+# ruleset lets straight through. No release PR, no second review step.
 #
-#   1. prepare-release (on push to master): when conventional commits since the
-#      last tag warrant a bump, push a `release/vX.Y.Z` branch and open a
-#      release PR carrying the VERSION/CHANGELOG/seo.ts bump. A branch push + PR
-#      are both allowed by the ruleset; nothing is written to master directly.
-#   2. A human approves + merges the release PR (the ruleset's code-owner review
-#      + Copilot review gate the release, exactly as intended).
-#   3. tag-and-release (on push to master): when VERSION has no matching tag yet
-#      — i.e. the release PR just merged — tag the merge commit and publish via
-#      GoReleaser. Tag pushes are NOT covered by the branch ruleset.
-#
-# Loop safety: prepare-release skips when the push already changed VERSION (a
-# release merge); tag-and-release is a no-op whenever a tag for the current
-# VERSION already exists. Tag pushes don't retrigger this workflow (branch push
-# only), so the release merge fans out to exactly one tag + one build.
+# Without RELEASE_PAT the job falls back to GITHUB_TOKEN and the push WILL be
+# rejected by the ruleset once branch protection is enforced — see the warning
+# step below.
 
 on:
   push:
@@ -23,50 +19,49 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: 'Dry run — compute version but do not push the release branch or open the PR'
+        description: 'Dry run — compute version but skip commit, tag, and release'
         type: boolean
         default: true
 
 env:
   DRY_RUN: ${{ inputs.dry_run || false }}
 
-permissions: {}
-
 jobs:
-  # ── Stage 1: open/update the release PR ───────────────────────────────
-  prepare-release:
+  release:
     runs-on: ubuntu-latest
     permissions:
-      contents: write       # push the release branch
-      pull-requests: write  # open/update the release PR
+      contents: write  # commit + tag version bump
+    # Skip release commits to prevent infinite loop
+    if: "!startsWith(github.event.head_commit.message, 'chore(release):')"
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+      skip: ${{ steps.bump.outputs.skip }}
+      dry_run: ${{ env.DRY_RUN }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
           fetch-depth: 0
+          # Persisted by actions/checkout as the git credential for every
+          # push in this job — see the header note on why this must be a
+          # user-owned PAT, not the default bot token.
+          token: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}
 
-      - name: Skip if this push is a release merge
-        id: guard
+      - name: Warn if RELEASE_PAT is missing
+        # secrets can't be used in a step `if:`, so map presence to env and
+        # branch inside the script.
+        env:
+          HAS_PAT: ${{ secrets.RELEASE_PAT != '' }}
         run: |
-          # When the release PR merges, VERSION changes in this very push and
-          # the tag-and-release job below handles it. Detect that here so we
-          # don't immediately open another release PR for the version we just
-          # cut. A non-empty diff on VERSION between HEAD~1 and HEAD covers both
-          # squash and merge-commit strategies.
-          if git rev-parse HEAD~1 >/dev/null 2>&1 && ! git diff --quiet HEAD~1 HEAD -- VERSION; then
-            echo "::notice::VERSION changed in this push — release merge, skipping prepare"
-            echo "release_merge=true" >> $GITHUB_OUTPUT
-          else
-            echo "release_merge=false" >> $GITHUB_OUTPUT
+          if [ "$HAS_PAT" != "true" ]; then
+            echo "::warning::RELEASE_PAT secret is not set. The release push will run as github-actions[bot], which is NOT a ruleset bypass actor — 'git push origin master --tags' below will be rejected by the master branch ruleset. Add the RELEASE_PAT secret (see release.yml header)."
           fi
 
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5
-        if: steps.guard.outputs.release_merge != 'true'
         with:
           go-version: '1.25'
 
       - name: Determine version bump
         id: bump
-        if: steps.guard.outputs.release_merge != 'true'
         run: |
           CURRENT=$(cat VERSION)
           LAST_TAG="v${CURRENT}"
@@ -141,7 +136,7 @@ jobs:
           echo "::notice::Version bump: ${CURRENT} → ${NEW_VERSION} (${BUMP})"
 
       - name: Update version files
-        if: steps.bump.outputs.skip != 'true' && steps.guard.outputs.release_merge != 'true'
+        if: steps.bump.outputs.skip != 'true'
         env:
           VERSION: ${{ steps.bump.outputs.version }}
         run: |
@@ -154,139 +149,70 @@ jobs:
           # Bump the marketing site's version pill so quil.cc reflects the
           # release. seo.ts is the single source of truth for the home page
           # hero pill — without this update the site keeps showing the old
-          # version even though the binary moved on. The deploy-site job below
-          # rebuilds the site from the tagged commit after release.
+          # version even though the binary moved on. The deploy-site job
+          # below rebuilds the site from the tagged commit after release.
           sed -i -E "s/(version: )\"[0-9]+\\.[0-9]+\\.[0-9]+\"/\\1\"${VERSION}\"/" site/src/data/seo.ts
           sed -i -E "s/(releaseDate: )\"[0-9]{4}-[0-9]{2}-[0-9]{2}\"/\\1\"${DATE}\"/" site/src/data/seo.ts
 
           echo "::notice::Updated VERSION to ${VERSION}, CHANGELOG.md, and site/src/data/seo.ts"
 
       - name: Run tests
-        if: steps.bump.outputs.skip != 'true' && steps.guard.outputs.release_merge != 'true'
+        if: steps.bump.outputs.skip != 'true'
         run: |
           go vet ./...
           go test ./...
 
-      - name: Open or update release PR
-        if: steps.bump.outputs.skip != 'true' && steps.guard.outputs.release_merge != 'true' && env.DRY_RUN != 'true'
+      - name: Dry run summary
+        if: steps.bump.outputs.skip != 'true' && env.DRY_RUN == 'true'
         env:
           VERSION: ${{ steps.bump.outputs.version }}
           BUMP: ${{ steps.bump.outputs.bump }}
-          GH_TOKEN: ${{ github.token }}
         run: |
-          BRANCH="release/v${VERSION}"
+          echo "::warning::DRY RUN — skipping commit, tag, and release"
+          echo "Would have released: v${VERSION}"
+          echo "Bump type: ${BUMP}"
+
+      - name: Commit version bump and tag
+        if: steps.bump.outputs.skip != 'true' && env.DRY_RUN != 'true'
+        env:
+          VERSION: ${{ steps.bump.outputs.version }}
+        run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git checkout -B "$BRANCH"
           git add VERSION CHANGELOG.md site/src/data/seo.ts
           git commit -m "chore(release): v${VERSION}"
-          # Force-push: on a re-run the branch is recreated from a fresh master.
-          git push --force origin "$BRANCH"
+          git tag "v${VERSION}"
+          git push origin master --tags
+          echo "::notice::Tagged v${VERSION}"
 
-          BODY=$(printf '%s\n' \
-            "Automated release PR — **${BUMP}** bump to \`v${VERSION}\`." \
-            "" \
-            "Merging this PR tags \`v${VERSION}\` on master and publishes the GitHub Release (binaries + checksums) and the site. Review the VERSION / CHANGELOG / seo.ts bump below." \
-            "" \
-            "_Opened by the Release workflow._")
-          if [ -z "$(gh pr list --head "$BRANCH" --state open --json number --jq '.[].number')" ]; then
-            gh pr create --base master --head "$BRANCH" \
-              --title "chore(release): v${VERSION}" --body "$BODY"
-            echo "::notice::Opened release PR for v${VERSION}"
-          else
-            echo "::notice::Release PR for $BRANCH already open — branch updated"
-          fi
-
-      - name: Dry run summary
-        if: steps.bump.outputs.skip != 'true' && steps.guard.outputs.release_merge != 'true' && env.DRY_RUN == 'true'
-        env:
-          VERSION: ${{ steps.bump.outputs.version }}
-          BUMP: ${{ steps.bump.outputs.bump }}
-        run: |
-          echo "::warning::DRY RUN — would open a release PR for v${VERSION} (${BUMP})"
-
-  # ── Stage 2: on release-PR merge, tag + publish ───────────────────────
-  tag-and-release:
+  goreleaser:
+    needs: release
+    if: needs.release.outputs.skip != 'true' && needs.release.outputs.dry_run != 'true'
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # push tag + publish GitHub release assets
-    outputs:
-      released: ${{ steps.check.outputs.released }}
-      version: ${{ steps.check.outputs.version }}
+      contents: write  # publish GitHub release assets
     steps:
-      # Shallow checkout for the cheap common case: every push to master reaches
-      # this job, but ordinary feature merges exit at the release-existence check
-      # below without needing full history. Only an actual release pulls the full
-      # history GoReleaser needs. A job-level `if` guard was avoided on purpose —
-      # it can't inspect the git diff, and keying off
-      # github.event.head_commit.modified would silently skip a release merged via
-      # a merge-commit (empty file list), which the ruleset permits.
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
-
-      - name: Decide whether to release
-        id: check
+      - name: Validate version
         env:
-          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.release.outputs.version }}
         run: |
-          # A dry-run dispatch must never publish; only prepare-release honors it.
-          if [ "${DRY_RUN}" = "true" ]; then
-            echo "::warning::DRY RUN — skipping tag/release"
-            echo "released=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          VERSION=$(cat VERSION)
           echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' || {
-            echo "::error::Invalid version in VERSION file: '$VERSION'"
+            echo "::error::Invalid or empty version: '$VERSION'"
             exit 1
           }
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          # Gate on the *published Release*, not merely the tag. A prior run can
-          # push the tag and then fail inside GoReleaser (exactly the v1.32.0
-          # failure); a tag-only check would skip the retry forever. Missing
-          # Release ⇒ (re)build. Recover by re-running the failed run, or by
-          # dispatching this workflow with dry_run=false.
-          if gh release view "v${VERSION}" >/dev/null 2>&1; then
-            echo "::notice::v${VERSION} already released — nothing to do"
-            echo "released=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          echo "released=true" >> "$GITHUB_OUTPUT"
 
-      - name: Fetch full history and tags
-        if: steps.check.outputs.released == 'true'
-        run: |
-          git fetch --prune --tags origin
-          if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
-            git fetch --unshallow origin
-          fi
-
-      - name: Create or reuse the tag
-        if: steps.check.outputs.released == 'true'
-        env:
-          VERSION: ${{ steps.check.outputs.version }}
-        run: |
-          if git rev-parse "v${VERSION}" >/dev/null 2>&1; then
-            # Prior partial release: build the already-tagged commit so a moved
-            # master can't desync GoReleaser from the tag.
-            echo "::notice::v${VERSION} already tagged (partial prior release) — reusing tag"
-            git checkout --detach "v${VERSION}"
-          else
-            git config user.name "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            git tag "v${VERSION}"
-            git push origin "v${VERSION}"
-            echo "::notice::Tagged v${VERSION}"
-          fi
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          ref: v${{ needs.release.outputs.version }}
+          fetch-depth: 0  # GoReleaser needs full history for tag resolution
 
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5
-        if: steps.check.outputs.released == 'true'
         with:
           go-version: '1.25'
 
       - name: Extract release notes from CHANGELOG.md
-        if: steps.check.outputs.released == 'true'
         env:
-          VERSION: ${{ steps.check.outputs.version }}
+          VERSION: ${{ needs.release.outputs.version }}
         run: |
           # IMPORTANT: write the file inside GITHUB_WORKSPACE, not /tmp.
           # `hashFiles()` (used in `if:` conditions on later steps) only
@@ -299,7 +225,6 @@ jobs:
           cat release-notes.md
 
       - uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a  # v6
-        if: steps.check.outputs.released == 'true'
         with:
           distribution: goreleaser
           version: "~> v2"
@@ -313,9 +238,8 @@ jobs:
         # entry that section is empty (this produced blank release pages on
         # v1.29.0 and v1.31.0). In that case we fall back to GitHub's
         # commit/PR-generated notes so every release has a description.
-        if: steps.check.outputs.released == 'true'
         env:
-          VERSION: ${{ steps.check.outputs.version }}
+          VERSION: ${{ needs.release.outputs.version }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # Treat a whitespace-only section as empty: the extract step emits a
@@ -335,15 +259,16 @@ jobs:
           echo "::notice::Release notes applied to v${VERSION}"
 
   # --- Site rebuild ---------------------------------------------------
-  # Pushes made with GITHUB_TOKEN don't trigger other workflows, so
-  # site.yml never fires on the release commit. This job rebuilds and
-  # deploys the site directly from the tagged commit (which has the
-  # updated seo.ts version pill).
+  # A push made with RELEASE_PAT still doesn't trigger other workflows if it
+  # matches the same actor+event that initiated this run (GitHub Actions
+  # loop-prevention), so site.yml can't be relied on to fire from the release
+  # commit. This job rebuilds and deploys the site directly from the tagged
+  # commit (which has the updated seo.ts version pill).
   deploy-site:
-    needs: tag-and-release
-    if: needs.tag-and-release.outputs.released == 'true'
+    needs: release
+    if: needs.release.outputs.skip != 'true' && needs.release.outputs.dry_run != 'true'
     runs-on: ubuntu-latest
-    # Share the "pages" concurrency group with site.yml. The same merge push
+    # Share the "pages" concurrency group with site.yml. The same push
     # triggers site.yml (which builds the PRE-bump commit → stale version pill)
     # AND this job (which builds the tag → correct version). Without a shared
     # group both deploy to github-pages and the stale one can win the race
@@ -366,7 +291,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
-          ref: v${{ needs.tag-and-release.outputs.version }}
+          ref: v${{ needs.release.outputs.version }}
 
       - uses: actions/setup-node@v4
         with:

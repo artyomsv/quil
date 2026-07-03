@@ -50,7 +50,8 @@ type PaneModel struct {
 	Muted              bool   // notification mute (daemon-authoritative; mirrored here for border rendering)
 	Eager              bool   // eager-restore flag (daemon-authoritative; mirrored for the tab marker)
 	vt                 *vt.SafeEmulator
-	vtDrain            *vtDrain // drain goroutine tracker for p.vt (see closeVT)
+	vtDrain            *vtDrain       // drain goroutine tracker for p.vt (see closeVT)
+	oscFilter          oscTitleFilter // strips OSC 0/1/2 before the emulator (see oscfilter.go)
 	Width              int
 	Height             int
 	Active             bool
@@ -312,7 +313,11 @@ func NewPaneModel(id string, bufSize int) *PaneModel {
 
 func (p *PaneModel) AppendOutput(data []byte) {
 	p.rawBuf.Write(data)
-	p.vt.Write(data)
+	// Strip OSC 0/1/2 (window title) before the emulator: x/vt ends an OSC at a
+	// stray 0x9C even mid-UTF-8, so claude-code's "✳ Claude Code" title leaks
+	// into the grid (see oscfilter.go). The raw ring buffer keeps the untouched
+	// bytes; only the emulator feed is filtered.
+	p.vt.Write(p.oscFilter.Filter(data))
 	p.contentGen++
 }
 

@@ -70,6 +70,22 @@ Linear pane cycling (`Tab` / `Shift+Tab`) is **not** bound by default — see [K
 
 You can bind `next_pane` / `prev_pane` in `config.toml` if you prefer linear cycling alongside the spatial keys.
 
+### Word-jump inside a pane (macOS)
+
+On Windows/Linux, `Ctrl+Left` / `Ctrl+Right` jump by word — Quil forwards them to the pane's
+child (claude-code, shell). macOS **Terminal.app** emits no distinct sequence for `Ctrl+Arrow`,
+but with **Use Option as Meta key** enabled (Settings → Profiles → Keyboard), `Option`-combos
+arrive as Meta keys. Quil forwards any `Alt+<key>` to the pane as `ESC+<key>` (the standard Meta
+encoding), so the readline word-jump keys work out of the box with **no configuration**:
+
+- `Option+B` → backward one word
+- `Option+F` → forward one word
+
+(These map to `ESC-b` / `ESC-f`, which claude-code and shell readline bind to word navigation.)
+Terminal.app has no distinct combo for a multi-word "fast jump" (`Option+Shift+Arrow` collapses
+to `Option+Arrow` and `Cmd` is reserved by macOS), so that remains available only on
+Kitty-protocol terminals (Ghostty, WezTerm, iTerm2).
+
 ## Notes editor
 
 | Key | Action |

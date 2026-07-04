@@ -164,3 +164,45 @@ func TestRenderPreview_ScrolledShowsScrollbarAndHistory(t *testing.T) {
 		}
 	}
 }
+
+func TestPreviewScroll_ClampsToVisualRows(t *testing.T) {
+	var feed strings.Builder
+	for i := 0; i < 20; i++ {
+		feed.WriteString(strings.Repeat("z", 95) + "\r\n")
+	}
+	p := canvasPane(t, 100, 6, feed.String())
+	defer p.Dispose()
+	p.Width, p.Height = 42, 8 // innerW 40 → each content row = 3 visual rows
+	l := p.previewLayoutFor(40)
+	maxScroll := l.totalVisual() - 6
+	p.ScrollUp(1000000)
+	if p.scrollBack != maxScroll {
+		t.Errorf("scrollBack clamped to %d, want %d (visual rows; emulator scrollback is %d)",
+			p.scrollBack, maxScroll, p.vt.ScrollbackLen())
+	}
+	p.ScrollDown(1000000)
+	if p.scrollBack != 0 {
+		t.Errorf("ScrollDown floor: %d, want 0", p.scrollBack)
+	}
+}
+
+func TestPreviewScrollToRelY_TopAndBottom(t *testing.T) {
+	var feed strings.Builder
+	for i := 0; i < 30; i++ {
+		feed.WriteString(strings.Repeat("y", 95) + "\r\n")
+	}
+	p := canvasPane(t, 100, 6, feed.String())
+	defer p.Dispose()
+	p.Width, p.Height = 42, 8
+	innerH := 6
+	p.ScrollToRelY(0, innerH)
+	if p.scrollBack != p.maxScroll() {
+		t.Errorf("thumb at top: scrollBack %d, want max %d", p.scrollBack, p.maxScroll())
+	}
+	l := p.previewLayoutFor(40)
+	thumbSize := max(1, innerH*innerH/l.totalVisual())
+	p.ScrollToRelY(innerH-thumbSize, innerH)
+	if p.scrollBack != 0 {
+		t.Errorf("thumb at bottom: scrollBack %d, want 0", p.scrollBack)
+	}
+}

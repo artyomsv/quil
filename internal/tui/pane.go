@@ -326,9 +326,27 @@ func (p *PaneModel) ResizeVT(cols, rows int) {
 	p.contentGen++
 }
 
+// maxScroll is the upper bound for scrollBack. In preview mode scrollBack
+// counts VISUAL rows (wrapped segments beyond one viewport); natively it
+// counts emulator scrollback lines.
+func (p *PaneModel) maxScroll() int {
+	if p.previewMode() {
+		innerH := p.Height - 2
+		if innerH < 1 {
+			innerH = 1
+		}
+		m := p.previewLayoutFor(max(1, p.Width-2)).totalVisual() - innerH
+		if m < 0 {
+			m = 0
+		}
+		return m
+	}
+	return p.vt.ScrollbackLen()
+}
+
 func (p *PaneModel) ScrollUp(lines int) {
 	p.scrollBack += lines
-	if max := p.vt.ScrollbackLen(); p.scrollBack > max {
+	if max := p.maxScroll(); p.scrollBack > max {
 		p.scrollBack = max
 	}
 }
@@ -365,7 +383,9 @@ func (p *PaneModel) ResetScroll() {
 // (no-op) when there's no scrollback to scroll into or the visible area
 // is large enough to hold every line (no scrollable range).
 func (p *PaneModel) ScrollToRelY(relY, innerH int) {
-	sbLen := p.vt.ScrollbackLen()
+	// Preview mode scrolls in visual rows; the same inverse-thumb contract
+	// holds with sbLen replaced by the visual scroll range.
+	sbLen := p.maxScroll()
 	if sbLen <= 0 || innerH <= 0 {
 		return
 	}

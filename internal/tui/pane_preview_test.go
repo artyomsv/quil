@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"github.com/charmbracelet/x/ansi"
 	"strings"
 	"testing"
 )
@@ -93,5 +94,73 @@ func TestPreviewMode_Predicate(t *testing.T) {
 	p.Width = 42
 	if p.previewMode() {
 		t.Error("non-canvas pane must never be preview mode")
+	}
+}
+
+func TestRenderPreview_BottomAnchoredAndWrapped(t *testing.T) {
+	p := canvasPane(t, 100, 6, strings.Repeat("w", 95)+"\r\nprompt> ")
+	defer p.Dispose()
+	// innerH 10 > 8 visual rows (3 wrapped + prompt + 4 blank screen rows),
+	// so the whole wrapped content is in view; bottom-anchoring itself is
+	// covered by TestRenderPreview_ScrolledShowsScrollbarAndHistory.
+	p.Width, p.Height = 42, 12 // innerW 40, innerH 10
+	out := ansi.Strip(p.renderPreview())
+	lines := strings.Split(out, "\n")
+	if len(lines) != 10 {
+		t.Fatalf("preview height %d, want 10", len(lines))
+	}
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "prompt>") {
+		t.Errorf("live preview must show the screen tail, got:\n%s", joined)
+	}
+	if !strings.Contains(joined, strings.Repeat("w", 40)) {
+		t.Errorf("wide row must appear wrapped at 40 cols, got:\n%s", joined)
+	}
+}
+
+func TestRenderPreview_LinesFitInnerWidth(t *testing.T) {
+	p := canvasPane(t, 120, 6, strings.Repeat("你x", 30)+"\r\n")
+	defer p.Dispose()
+	p.Width, p.Height = 42, 8
+	for i, line := range strings.Split(p.renderPreview(), "\n") {
+		if w := ansi.StringWidth(line); w > 40 {
+			t.Errorf("line %d width %d exceeds innerW 40", i, w)
+		}
+	}
+}
+
+func TestRenderPreview_CursorReverseVideo(t *testing.T) {
+	p := canvasPane(t, 100, 6, "prompt> ")
+	defer p.Dispose()
+	p.Width, p.Height = 42, 8
+	p.Active = true
+	out := p.renderPreview()
+	if !strings.Contains(out, "\x1b[7m") {
+		t.Error("active pane preview must render the caret in reverse video")
+	}
+	p.Active = false
+	if strings.Contains(p.renderPreview(), "\x1b[7m") {
+		t.Error("inactive pane preview must not render a caret")
+	}
+}
+
+func TestRenderPreview_ScrolledShowsScrollbarAndHistory(t *testing.T) {
+	var feed strings.Builder
+	for i := 0; i < 30; i++ {
+		feed.WriteString(strings.Repeat("h", 95) + "\r\n")
+	}
+	p := canvasPane(t, 100, 6, feed.String())
+	defer p.Dispose()
+	p.Width, p.Height = 42, 8
+	l := p.previewLayoutFor(40)
+	p.scrollBack = l.totalVisual() - 6 // scroll to the very top
+	out := p.renderPreview()
+	if !strings.Contains(out, "█") {
+		t.Error("scrolled preview must render the scrollbar thumb")
+	}
+	for i, line := range strings.Split(out, "\n") {
+		if w := ansi.StringWidth(line); w > 40 {
+			t.Errorf("scrolled line %d width %d exceeds innerW 40", i, w)
+		}
 	}
 }

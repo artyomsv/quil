@@ -514,6 +514,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.clearDragState()
 			return m, nil
 		}
+		// Sidebar overlay region: the press belongs to the sidebar, not
+		// the pane rendered beneath it. Clear drag flags so no half-armed
+		// drag survives the swallowed press.
+		if m.sidebarSwallowsMouse(msg.X, msg.Y) {
+			m.clearDragState()
+			return m, nil
+		}
 		// Right-click: copy the active selection to the clipboard. While
 		// notes mode is on, the editor's selection takes priority.
 		if msg.Button == tea.MouseRight {
@@ -689,6 +696,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.MouseWheelMsg:
 		// Overlay visible: swallow wheel events (keyboard-only v1).
 		if tab := m.activeTabModel(); tab != nil && tab.overlayVisible {
+			return m, nil
+		}
+		// Wheel over the sidebar overlay must not scroll the pane beneath.
+		if m.sidebarSwallowsMouse(msg.X, msg.Y) {
 			return m, nil
 		}
 		lines := m.cfg.UI.MouseScrollLines
@@ -1062,17 +1073,37 @@ func (m Model) popPaneHistory() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// paneAreaWidth returns the width available for pane content, accounting for sidebar.
+// paneAreaWidth returns the width available for pane content. The
+// notification sidebar is a compositor overlay (overlayRight) — it does
+// NOT reserve layout width, so panes never resize when it toggles. This
+// constant width is what kills the sidebar-driven resize churn that made
+// background claude panes repaint and garble their scrollback.
 func (m Model) paneAreaWidth() int {
-	if m.notifications.visible && m.dialog == dialogNone {
-		if tab := m.activeTabModel(); tab != nil && !tab.FocusMode() {
-			sw := m.notifications.width
-			if m.width-sw >= minTermWidth {
-				return m.width - sw
-			}
-		}
-	}
 	return m.width
+}
+
+// sidebarOverlayWidth returns the drawn width of the notification sidebar
+// overlay, or 0 when it isn't drawn (hidden, a dialog is open, or the
+// terminal is too narrow). Unlike the old reservation logic there is no
+// focus-mode suppression: visible ⇒ drawn, over whatever is beneath.
+func (m Model) sidebarOverlayWidth() int {
+	if !m.notifications.visible || m.dialog != dialogNone {
+		return 0
+	}
+	if m.width-m.notifications.width < minTermWidth {
+		return 0
+	}
+	return m.notifications.width
+}
+
+// sidebarSwallowsMouse reports whether a mouse press/wheel at (x, y) lands
+// on the sidebar overlay. Such events must not reach the pane rendered
+// beneath it. Row 0 (tab bar) and the last row (status bar) are exempt;
+// release/motion events are also exempt at the call sites so an in-flight
+// drag can always terminate.
+func (m Model) sidebarSwallowsMouse(x, y int) bool {
+	sw := m.sidebarOverlayWidth()
+	return sw > 0 && x >= m.width-sw && y >= 1 && y < m.height-1
 }
 
 // scrollbarHitPadding is how many cells on each side of the visible
@@ -1278,55 +1309,39 @@ const (
 	notesPanelMinWidth         = 30 // minimum editor width, in columns
 )
 
-// notesSidebarWidth computes the notification sidebar width for the
-// current model state (mirrors the reservation logic in View()).
-func (m Model) notesSidebarWidth() int {
-	if !m.notifications.visible || m.dialog != dialogNone {
-		return 0
-	}
-	tab := m.activeTabModel()
-	if tab == nil || tab.FocusMode() {
-		return 0
-	}
-	sidebarW := m.notifications.width
-	if m.width-sidebarW < minTermWidth {
-		return 0
-	}
-	return sidebarW
-}
-
-// notesPanelWidth returns the notes panel width and sidebar width for the
-// current model state. Returns (0, sidebarW) when notes mode is inactive
-// or the terminal is too narrow to render the editor. Single source of
-// truth for the layout math used by both View() and notesEditorBox.
-func (m Model) notesPanelWidth() (notesW, sidebarW int) {
-	sidebarW = m.notesSidebarWidth()
+// notesPanelWidth returns the notes panel width for the current model
+// state. Returns 0 when notes mode is inactive or the terminal is too
+// narrow to render the editor. The notification sidebar is an overlay and
+// no longer reserves width here. Single source of truth for the layout
+// math used by both View() and notesEditorBox.
+func (m Model) notesPanelWidth() int {
 	if !m.notesMode || m.notesEditor == nil {
-		return 0, sidebarW
+		return 0
 	}
-	notesW = (m.width - sidebarW) * notesPanelWidthNumerator / notesPanelWidthDenominator
+	notesW := m.width * notesPanelWidthNumerator / notesPanelWidthDenominator
 	if notesW < notesPanelMinWidth {
 		notesW = notesPanelMinWidth
 	}
-	if m.width-sidebarW-notesW < minTermWidth {
-		return 0, sidebarW
+	if m.width-notesW < minTermWidth {
+		return 0
 	}
-	return notesW, sidebarW
+	return notesW
 }
 
-// editor. Returns ok=false when notes mode is inactive or the terminal is
-// too narrow to render the editor.
+// notesEditorBox returns the outer screen box (x0/y0 inclusive, x1/y1
+// exclusive) of the notes editor. Returns ok=false when notes mode is
+// inactive or the terminal is too narrow to render the editor.
 func (m Model) notesEditorBox() (boxX0, boxY0, boxX1, boxY1 int, ok bool) {
 	if !m.notesMode || m.notesEditor == nil || m.activeTab >= len(m.tabs) {
 		return 0, 0, 0, 0, false
 	}
-	notesW, sidebarW := m.notesPanelWidth()
+	notesW := m.notesPanelWidth()
 	if notesW == 0 {
 		return 0, 0, 0, 0, false
 	}
-	boxX0 = m.width - sidebarW - notesW
+	boxX0 = m.width - notesW
 	boxY0 = 1 // y=0 is the tab bar
-	boxX1 = m.width - sidebarW
+	boxX1 = m.width
 	boxY1 = m.height - 1 // last row is the status bar
 	return boxX0, boxY0, boxX1, boxY1, true
 }
@@ -1522,16 +1537,18 @@ func (m Model) View() tea.View {
 		// Tab bar (1 line)
 		sections = append(sections, m.renderTabBar())
 
-		// Active tab content + optional notification sidebar + optional
-		// notes editor. Single source of truth for the layout math lives
-		// in notesPanelWidth / notesSidebarWidth so notesEditorBox (used
-		// by the mouse handlers) stays in lockstep with this renderer.
+		// Active tab content + optional notes editor; the notification
+		// sidebar is composited OVER the right edge afterwards
+		// (overlayRight) — it takes no layout width, so panes never
+		// resize when it toggles. Layout math single source of truth:
+		// notesPanelWidth / sidebarOverlayWidth (notesEditorBox and the
+		// mouse handlers stay in lockstep with this renderer).
 		tabH := m.height - chromeHeight
-		notesW, sidebarW := m.notesPanelWidth()
+		notesW := m.notesPanelWidth()
 		if m.activeTab < len(m.tabs) {
 			tab := m.tabs[m.activeTab]
 
-			tab.Resize(m.width-sidebarW-notesW, tabH)
+			tab.Resize(m.width-notesW, tabH)
 			// Pass per-frame state to panes for rendering
 			if tab.Root != nil {
 				for _, pane := range tab.Leaves() {
@@ -1545,9 +1562,9 @@ func (m Model) View() tea.View {
 				editorFocused := !m.notesPaneFocused
 				tabContent = lipgloss.JoinHorizontal(lipgloss.Top, tabContent, m.notesEditor.View(notesW, tabH, editorFocused))
 			}
-			if sidebarW > 0 {
+			if sw := m.sidebarOverlayWidth(); sw > 0 {
 				m.notifications.focused = m.sidebarFocused
-				tabContent = lipgloss.JoinHorizontal(lipgloss.Top, tabContent, m.notifications.View(tabH))
+				tabContent = overlayRight(tabContent, m.notifications.View(tabH), m.width, sw)
 			}
 			sections = append(sections, tabContent)
 		}
@@ -1663,20 +1680,21 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// Notification sidebar keybindings (always available)
 	switch {
 	case kbMatches(key, kb.NotificationToggle):
-		// Alt+N: toggle visibility only, never focus
+		// Alt+N: toggle visibility only, never focus. The sidebar is an
+		// overlay — no pane resize needed, only a full repaint.
 		m.notifications.visible = !m.notifications.visible
 		m.sidebarFocused = false
 		if m.notifications.visible {
-			return m, tea.Batch(tea.ClearScreen, m.resizeAllPanes(), m.startSidebarTick())
+			return m, tea.Batch(tea.ClearScreen, m.startSidebarTick())
 		}
-		return m, tea.Batch(tea.ClearScreen, m.resizeAllPanes())
+		return m, tea.ClearScreen
 	case kbMatches(key, kb.NotificationFocus):
 		// Ctrl+Alt+N: open (if hidden) and focus sidebar
 		if !m.notifications.visible {
 			m.notifications.visible = true
 		}
 		m.sidebarFocused = true
-		return m, tea.Batch(tea.ClearScreen, m.resizeAllPanes(), m.startSidebarTick())
+		return m, tea.Batch(tea.ClearScreen, m.startSidebarTick())
 	case kbMatches(key, kb.GoBack):
 		return m.popPaneHistory()
 	case kbMatches(key, kb.MutePane):

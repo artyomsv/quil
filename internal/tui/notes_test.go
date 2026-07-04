@@ -984,40 +984,33 @@ func TestNotesEditor_BackwardSelection_ExtractText(t *testing.T) {
 	}
 }
 
-func TestModel_NotesPanelWidth_NoSidebar(t *testing.T) {
+func TestModel_NotesPanelWidth_Basic(t *testing.T) {
 	t.Parallel()
 	ne, err := NewNotesEditor(t.TempDir(), "pane-w", "Shell", 40, 10)
 	if err != nil {
 		t.Fatalf("NewNotesEditor: %v", err)
 	}
 	m := newNotesTestModel(t, ne)
-	// Notifications hidden by default → no sidebar contribution.
-	notesW, sidebarW := m.notesPanelWidth()
-	if sidebarW != 0 {
-		t.Errorf("sidebarW = %d, want 0", sidebarW)
-	}
-	// (100 - 0) * 2 / 5 = 40, exceeds the 30 floor.
-	if notesW != 40 {
+	// 100 * 2 / 5 = 40, exceeds the 30 floor.
+	if notesW := m.notesPanelWidth(); notesW != 40 {
 		t.Errorf("notesW = %d, want 40", notesW)
 	}
 }
 
-func TestModel_NotesPanelWidth_WithSidebar(t *testing.T) {
+func TestModel_NotesPanelWidth_SidebarDoesNotReserveWidth(t *testing.T) {
 	t.Parallel()
 	ne, err := NewNotesEditor(t.TempDir(), "pane-w-side", "Shell", 40, 10)
 	if err != nil {
 		t.Fatalf("NewNotesEditor: %v", err)
 	}
 	m := newNotesTestModel(t, ne)
+	without := m.notesPanelWidth()
 	m.notifications.visible = true
-
-	notesW, sidebarW := m.notesPanelWidth()
-	if sidebarW != 30 {
-		t.Errorf("sidebarW = %d, want 30", sidebarW)
-	}
-	// (100 - 30) * 2 / 5 = 28, below 30 → clamped to 30.
-	if notesW != 30 {
-		t.Errorf("notesW = %d, want 30 (clamp)", notesW)
+	with := m.notesPanelWidth()
+	// The sidebar is a compositor overlay (overlayRight): it draws over
+	// the right edge and must not squeeze the notes panel math.
+	if with != without {
+		t.Errorf("notesPanelWidth changed %d -> %d when sidebar became visible; overlay must not reserve width", without, with)
 	}
 }
 
@@ -1028,9 +1021,8 @@ func TestModel_NotesPanelWidth_TooNarrow_ReturnsZero(t *testing.T) {
 		t.Fatalf("NewNotesEditor: %v", err)
 	}
 	m := newNotesTestModel(t, ne)
-	m.width = 60 // 60 - 0 - 30 = 30, below minTermWidth(40)
-	notesW, _ := m.notesPanelWidth()
-	if notesW != 0 {
+	m.width = 60 // 60 - 30 = 30, below minTermWidth(40)
+	if notesW := m.notesPanelWidth(); notesW != 0 {
 		t.Errorf("notesW = %d, want 0 (terminal too narrow)", notesW)
 	}
 }

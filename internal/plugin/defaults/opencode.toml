@@ -11,7 +11,7 @@ name = "opencode"
 display_name = "OpenCode"
 category = "ai"
 description = "AI coding assistant (opencode.ai)"
-schema_version = 1
+schema_version = 2
 
 [command]
 cmd = "opencode"
@@ -65,3 +65,8 @@ severity = "warning"
 pattern = '❯|> $'
 title = "Waiting for input"
 severity = "info"
+
+[display]
+# Window-sized canvas: the PTY never resizes with the pane rect; small
+# panes show a soft-wrapped preview. Zoom (Ctrl+E) shows the native render.
+wide_canvas = true

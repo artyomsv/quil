@@ -87,6 +87,10 @@ type PaneModel struct {
 	cachedView  string
 	hasCache    bool
 	renderCount int
+
+	// pvCache: wrap layout for wide-canvas preview rendering. Invalidated
+	// implicitly by its (contentGen, innerW) key — see previewLayoutFor.
+	pvCache *previewLayout
 }
 
 // paneRenderKey is the comparable fingerprint of everything View() reads,

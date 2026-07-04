@@ -89,7 +89,7 @@ func TestResizeHorizontal(t *testing.T) {
 	placeholder := root.SplitLeaf("a", SplitHorizontal)
 	placeholder.Pane = pb
 
-	resizeNode(root, 100, 40)
+	resizeNode(root, 100, 40, 0, 0)
 
 	if pa.Width != 50 {
 		t.Errorf("pane a width: got %d, want 50", pa.Width)
@@ -110,7 +110,7 @@ func TestResizeVertical(t *testing.T) {
 	placeholder := root.SplitLeaf("a", SplitVertical)
 	placeholder.Pane = pb
 
-	resizeNode(root, 80, 40)
+	resizeNode(root, 80, 40, 0, 0)
 
 	if pa.Height != 20 {
 		t.Errorf("pane a height: got %d, want 20", pa.Height)
@@ -127,7 +127,7 @@ func TestResizeClampsMinimum(t *testing.T) {
 	pa := NewPaneModel("a", 1024)
 
 	root := NewLeaf(pa)
-	resizeNode(root, 5, 2)
+	resizeNode(root, 5, 2, 0, 0)
 
 	if pa.Width < minPaneW {
 		t.Errorf("width %d < minimum %d", pa.Width, minPaneW)

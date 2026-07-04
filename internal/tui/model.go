@@ -1082,6 +1082,19 @@ func (m Model) paneAreaWidth() int {
 	return m.width
 }
 
+// pluginWideCanvas resolves the wide-canvas flag for a pane type via the
+// plugin registry. Unknown types (registry miss, nil registry in tests)
+// render 1:1.
+func (m Model) pluginWideCanvas(paneType string) bool {
+	if m.pluginRegistry == nil {
+		return false
+	}
+	if p := m.pluginRegistry.Get(paneType); p != nil {
+		return p.Display.WideCanvas
+	}
+	return false
+}
+
 // sidebarOverlayWidth returns the drawn width of the notification sidebar
 // overlay, or 0 when it isn't drawn (hidden, a dialog is open, or the
 // terminal is too narrow). Unlike the old reservation logic there is no
@@ -1548,6 +1561,7 @@ func (m Model) View() tea.View {
 		if m.activeTab < len(m.tabs) {
 			tab := m.tabs[m.activeTab]
 
+			tab.SetCanvas(m.width, tabH)
 			tab.Resize(m.width-notesW, tabH)
 			// Pass per-frame state to panes for rendering
 			if tab.Root != nil {
@@ -2435,6 +2449,7 @@ func (m *Model) restoreTabLayout(tab *TabModel, tabInfo TabInfo, paneMap map[str
 			pane.Name = info.Name
 			pane.CWD = info.CWD
 			pane.Type = info.Type
+			pane.WideCanvas = m.pluginWideCanvas(info.Type)
 		}
 		paneModels[paneID] = pane
 	}
@@ -2581,6 +2596,9 @@ func (m *Model) replayBufSize() int {
 func (m *Model) resizeTabs() {
 	tabH := m.height - chromeHeight
 	for _, tab := range m.tabs {
+		// Canvas = full window area, independent of notes squeeze, so
+		// wide-canvas panes only ever resize on a real window resize.
+		tab.SetCanvas(m.width, tabH)
 		tab.Resize(m.paneAreaWidth(), tabH)
 	}
 }
@@ -3856,14 +3874,10 @@ func (m Model) resizeAllPanes() tea.Cmd {
 				continue
 			}
 			for _, pane := range tab.Leaves() {
-				cols := pane.Width - 2 // subtract border
-				rows := pane.Height - 2
-				if cols < 1 {
-					cols = 1
-				}
-				if rows < 1 {
-					rows = 1
-				}
+				// paneVTSize keeps the PTY in lockstep with the VT: rect
+				// size for normal panes, tab canvas for wide-canvas panes.
+				// The daemon drops exact duplicates (same-size guard).
+				cols, rows := paneVTSize(pane.WideCanvas, pane.Width, pane.Height, tab.CanvasW, tab.CanvasH)
 				msg, _ := ipc.NewMessage(ipc.MsgResizePane, ipc.ResizePanePayload{
 					PaneID: pane.ID,
 					Cols:   uint16(cols),

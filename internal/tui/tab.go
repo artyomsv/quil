@@ -9,7 +9,11 @@ type TabModel struct {
 	ActivePane string      // pane ID of the active pane
 	Width      int
 	Height     int
-	focusMode  bool // true = active pane fills entire tab
+	// CanvasW/CanvasH: full tab-area dimensions for wide-canvas panes
+	// (set via SetCanvas before Resize; independent of notes squeeze).
+	CanvasW   int
+	CanvasH   int
+	focusMode bool // true = active pane fills entire tab
 
 	// overlayPane is the tab's lazygit overlay (never part of the layout
 	// tree). overlayVisible controls rendering; the pane's PTY keeps
@@ -300,20 +304,13 @@ func (t *TabModel) activeIndex(leaves []*PaneModel) int {
 }
 
 // sizePaneFull sizes a pane to fill the entire tab area (used by the
-// full-tab modes: focus and overlay). The border consumes 2 cells per
-// axis; the VT grid is clamped at 1x1.
-func sizePaneFull(p *PaneModel, w, h int) {
+// full-tab modes: focus and overlay). Wide-canvas panes resolve to the tab
+// canvas via paneVTSize — for them focus mode is a pure viewport change,
+// never a PTY/emulator resize.
+func sizePaneFull(t *TabModel, p *PaneModel, w, h int) {
 	p.Width = w
 	p.Height = h
-	cols := w - 2
-	rows := h - 2
-	if cols < 1 {
-		cols = 1
-	}
-	if rows < 1 {
-		rows = 1
-	}
-	p.ResizeVT(cols, rows)
+	p.ResizeVT(paneVTSize(p.WideCanvas, w, h, t.CanvasW, t.CanvasH))
 }
 
 // Resize recomputes dimensions for the entire layout tree.
@@ -325,7 +322,7 @@ func (t *TabModel) Resize(w, h int) {
 	// early — the tree resize runs unconditionally so hidden panes keep
 	// correct dimensions for when the overlay is dismissed.
 	if t.overlayVisible && t.overlayPane != nil {
-		sizePaneFull(t.overlayPane, w, h)
+		sizePaneFull(t, t.overlayPane, w, h)
 	}
 
 	// Focus mode sizes the tree's active pane to fill the tab. We use the
@@ -335,14 +332,20 @@ func (t *TabModel) Resize(w, h int) {
 	// Resize never mutates selection state.
 	if t.focusMode {
 		if pane := t.treeActivePaneModel(); pane != nil {
-			sizePaneFull(pane, w, h)
+			sizePaneFull(t, pane, w, h)
 		}
 		return
 	}
 	if t.Root != nil {
-		resizeNode(t.Root, w, h)
+		resizeNode(t.Root, w, h, t.CanvasW, t.CanvasH)
 	}
 }
+
+// SetCanvas records the full tab-area dimensions used to size wide-canvas
+// panes. Callers (resizeTabs, View) set it BEFORE Resize so the canvas is
+// independent of the notes-panel squeeze: canvas = (window width, tab
+// height). A zero canvas makes paneVTSize fall back to rect sizing.
+func (t *TabModel) SetCanvas(w, h int) { t.CanvasW, t.CanvasH = w, h }
 
 // View renders the entire pane layout.
 func (t *TabModel) View() string {

@@ -45,6 +45,7 @@ const (
 type PaneModel struct {
 	ID                 string
 	Type               string // plugin type ("terminal", "claude-code", etc.)
+	WideCanvas         bool   // [display] wide_canvas: VT/PTY stay window-sized; small rects render a wrapped preview
 	Name               string // user-given name (empty if not set)
 	CWD                string // current working directory from daemon
 	Muted              bool   // notification mute (daemon-authoritative; mirrored here for border rendering)
@@ -120,6 +121,7 @@ type paneRenderKey struct {
 	spinnerFrame, workFrame        int
 	name, cwd                      string
 	paneType, sessionID            string
+	wideCanvas                     bool
 	historyLines                   int
 	selActive                      bool
 	sel                            Selection
@@ -150,6 +152,7 @@ func (p *PaneModel) renderKey() paneRenderKey {
 		cwd:            p.CWD,
 		paneType:       p.Type,
 		sessionID:      p.SessionID,
+		wideCanvas:     p.WideCanvas,
 		historyLines:   p.HistoryLines,
 	}
 	// renderContent only honors a selection whose PaneID matches this pane;

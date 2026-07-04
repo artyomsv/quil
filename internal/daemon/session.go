@@ -49,6 +49,13 @@ type Pane struct {
 	ExitedAt        time.Time // When the process exited (zero if running)
 	Cols            int       // Last known terminal width (0 = unknown)
 	Rows            int       // Last known terminal height (0 = unknown)
+	// appliedCols/appliedRows: size last applied to the CURRENT PTY by
+	// handleResizePane. The TUI re-sends every pane's size on each
+	// workspace broadcast; this guard turns the duplicates into no-ops.
+	// Zeroed when a new PTY is installed (spawnPane) so a fresh PTY
+	// always accepts its first resize. Guarded by PluginMu.
+	appliedCols     int
+	appliedRows     int
 	LastOutputAt    time.Time // Updated on every flushPaneOutput
 	IdleNotified    bool      // Prevents re-firing for same idle period
 	LastIdleEventAt time.Time // Cooldown: last time a idle event was emitted

@@ -1336,10 +1336,25 @@ func (d *Daemon) handleResizePane(msg *ipc.Message) {
 	}
 
 	pane := d.session.Pane(payload.PaneID)
-	if pane == nil || pane.PTY == nil {
+	if pane == nil {
 		return
 	}
-	if err := pane.PTY.Resize(payload.Rows, payload.Cols); err != nil {
+	// Same-size guard: skip when this exact size was already applied to
+	// the current PTY (the TUI re-sends all pane sizes on every workspace
+	// broadcast). Guard fields are PluginMu-protected; the Resize syscall
+	// runs outside the lock.
+	pane.PluginMu.Lock()
+	pty := pane.PTY
+	same := pane.appliedCols == int(payload.Cols) && pane.appliedRows == int(payload.Rows)
+	if pty != nil && !same {
+		pane.appliedCols = int(payload.Cols)
+		pane.appliedRows = int(payload.Rows)
+	}
+	pane.PluginMu.Unlock()
+	if pty == nil || same {
+		return
+	}
+	if err := pty.Resize(payload.Rows, payload.Cols); err != nil {
 		log.Printf("resize pane %s to %dx%d: %v", payload.PaneID, payload.Cols, payload.Rows, err)
 	}
 	pane.Cols = int(payload.Cols)
@@ -2253,6 +2268,9 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 	// spawnMu→PluginMu, consistent with ensurePaneSpawned.
 	pane.PluginMu.Lock()
 	pane.PTY = ptySession
+	// Fresh PTY: reset the same-size guard so its first resize_pane is
+	// always applied (see handleResizePane).
+	pane.appliedCols, pane.appliedRows = 0, 0
 	pane.PluginMu.Unlock()
 	go d.streamPTYOutput(pane.ID, ptySession)
 	return nil

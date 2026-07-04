@@ -52,7 +52,7 @@ show_disclaimer = true          # beta disclaimer on startup
 highlight_duration = "10s"      # border flash duration when AI touches a pane
 
 [notification]
-sidebar_width = 30              # columns reserved for the notification sidebar
+sidebar_width = 30              # width of the notification sidebar overlay
 max_events = 200                # ring-buffer cap (per daemon, both sidebar and MCP)
 
 [notification.hooks]
@@ -137,7 +137,7 @@ The "ghost buffer" is the rendered preview Quil shows immediately on reconnect, 
 
 | Key | Type | Default | What it does |
 |---|---|---|---|
-| `sidebar_width` | int | `30` | Columns reserved for the notification sidebar when toggled (`Alt+N`). Reducing this gives more room to panes; values below ~25 truncate event titles and excerpts heavily. |
+| `sidebar_width` | int | `30` | Width of the notification sidebar overlay (`Alt+N`). The sidebar draws over the right edge of the pane area — panes keep their size (no PTY resize) and the covered columns reappear when it closes. Values below ~25 truncate event titles and excerpts heavily. |
 | `max_events` | int | `200` | Ring-buffer cap for the daemon's notification queue. The sidebar and MCP `get_notifications` both read from this queue. Each event is bounded to ≤ 4 KiB `Message` + ≤ 1 KiB per `Data` value (`_quil_truncated` flag set when truncated). |
 
 ### `[notification.hooks]`

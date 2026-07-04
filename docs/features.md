@@ -231,7 +231,7 @@ See the full [plugin reference](plugin-reference.md) for every field.
 
 ### Notification center
 
-A non-modal sidebar surfaces:
+A non-modal sidebar (drawn as an overlay on the right edge — panes keep their size, so opening it never makes a running TUI re-wrap its output) surfaces:
 
 - Process exits (any pane)
 - OSC 133 command-completion events (shell panes)

@@ -308,15 +308,6 @@ func (p *PaneModel) ResizeVT(cols, rows int) {
 	if cols <= 0 || rows <= 0 || (cols == p.vt.Width() && rows == p.vt.Height()) {
 		return
 	}
-	// AI panes repaint their whole viewport when the child sees the resize;
-	// without a clean screen that repaint lands BELOW the stale frame wrapped
-	// at the old width — mixed-width text and duplicated transcript chunks.
-	// Push the old frame into scrollback (honest history) so the repaint
-	// draws on a blank screen. Terminal/ssh panes don't repaint on resize
-	// (clearing would only hide context) and altscreen apps repaint in place.
-	if cols != p.vt.Width() && clearsOnWidthResize(p.Type) && !p.vt.IsAltScreen() {
-		p.pushScreenToScrollback()
-	}
 	// Resize the emulator in place instead of rebuilding it from the raw PTY
 	// ring buffer. Historical bytes from TUI apps (Claude Code, vim, htop,
 	// fzf) contain CUP / scroll-region sequences laid out for the previous
@@ -325,38 +316,6 @@ func (p *PaneModel) ResizeVT(cols, rows int) {
 	// preserves the current screen state, and the PTY child will redraw via
 	// SIGWINCH (triggered separately by MsgResizePane) into the new size.
 	p.vt.Resize(cols, rows)
-	p.contentGen++
-}
-
-// clearsOnWidthResize reports whether a pane type gets the
-// push-screen-to-scrollback treatment on width-changing resizes. Only the
-// agent plugins repaint their viewport on resize; shells/ssh do not, and
-// full-screen TUIs (k9s, lazygit) are excluded by the IsAltScreen gate at
-// the call site.
-func clearsOnWidthResize(paneType string) bool {
-	return paneType == "claude-code" || paneType == "opencode"
-}
-
-// pushScreenToScrollback scrolls the visible screen's content rows into
-// the emulator's scrollback and leaves a blank, homed screen. The
-// synthetic bytes go to the emulator only — the child never sees them, and
-// its own cursor bookkeeping is unaffected (its post-resize repaint opens
-// with absolute/relative positioning that clamps harmlessly on a blank
-// screen). See docs/superpowers/specs/2026-07-04-resize-artifacts-design.md.
-func (p *PaneModel) pushScreenToScrollback() {
-	if p.screenBlank() {
-		return
-	}
-	sbLen := p.vt.ScrollbackLen()
-	contentRows := lastContentLine(p) - sbLen + 1
-	if contentRows <= 0 {
-		return // content is all in scrollback already
-	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "\x1b[%d;1H", p.vt.Height())     // park cursor on the bottom row
-	b.WriteString(strings.Repeat("\n", contentRows)) // scroll content rows out
-	b.WriteString("\x1b[2J\x1b[H")                   // clear remnants, home cursor
-	_, _ = p.vt.Write([]byte(b.String()))
 	p.contentGen++
 }
 

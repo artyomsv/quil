@@ -70,11 +70,13 @@ chore/update-deps
 ## Pull requests
 
 - One logical concern per PR — bundling unrelated changes makes review painful
-- Title follows Conventional Commits
+- Title follows Conventional Commits — this is release-critical, not cosmetic (see below)
 - Description has a **Summary** (1–3 bullets) and a **Test plan** (how to verify)
 - Aim for under 400 lines of diff. If you must go bigger, split into stacked PRs with a clear sequence.
 
-PRs get squash-merged to `master` for a clean history. The release pipeline picks up the squash commit, computes the version bump from conventional commit types, updates `VERSION` + `CHANGELOG.md`, tags, and publishes via GoReleaser.
+PRs get squash-merged to `master` for a clean history. GitHub uses the **PR title** as the squash-commit subject, and the release pipeline classifies that subject by conventional-commit type to compute the version bump, update `VERSION` + `CHANGELOG.md`, tag, and publish via GoReleaser.
+
+> **A non-conventional PR title silently skips the release.** The bump regex requires the type followed by `:`, `(`, or `/` (e.g. `fix:`, `fix(tui):`, `fix/…`). A title like `Fix the pane bug` matches nothing, so the release job logs `No version-bumping commits found` and exits without tagging — the merge lands on `master` but never ships. If a merged change didn't produce a release, check the PR title first.
 
 ## Documentation maintenance
 

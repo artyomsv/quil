@@ -18,11 +18,11 @@ import (
 // "--dangerously-skip-permissions") were dropped on daemon restart.
 func TestResolveSpawnArgs_Matrix(t *testing.T) {
 	tests := []struct {
-		name       string
-		plugin     *plugin.PanePlugin
-		pane       *Pane
-		restoring  bool
-		want       []string
+		name      string
+		plugin    *plugin.PanePlugin
+		pane      *Pane
+		restoring bool
+		want      []string
 	}{
 		{
 			name: "fresh terminal — base args only",
@@ -350,9 +350,23 @@ func TestEscapeClaudeCWD(t *testing.T) {
 		// (emoji, surrogate pair) → two dashes.
 		{"macos home with accent", "/Users/josé/proj", "-Users-jos--proj"},
 		{"astral char is two units", "/tmp/😀dir", "-tmp---dir"},
-		// Claude truncates sanitized names longer than 200 chars and
-		// appends base36(abs(java31x-hash(cwd))). Vector pinned from this
-		// implementation; the algorithm is byte-for-byte the binary's.
+		// >200-char names: claude truncates to 200 then appends
+		// "-"+base36(abs(hash)). The exact form is transcribed from the
+		// claude binary (2026-07-05):
+		//   Ows(e){let t=e.replace(/[^a-zA-Z0-9]/g,"-");
+		//          if(t.length<=200)return t;
+		//          return `${t.slice(0,200)}-${Math.abs(Pke(e)).toString(36)}`}
+		//   Pke(e){let h=0;for(u of utf16(e))h=(h<<5)-h+u|0;return h}
+		// Critically, the hash argument is the ORIGINAL cwd `e`, NOT the
+		// dashified `t` — so escapeClaudeCWD hashes `units` (original), and
+		// a >200-char path resolves to the SAME dir claude writes. The
+		// `-ut7e65` suffix below is computed by that transcribed algorithm;
+		// it has not been diffed against a claude-generated dir for a
+		// >200-char cwd (no such path exists on disk to observe), but the
+		// algorithm is byte-for-byte the binary's. If claude ever changes
+		// the scheme, the sanity gate fails safe: a wrong probe dir just
+		// forces the --continue fallback (pane still restores), and this
+		// vector flags the drift.
 		{"exactly 200 keeps no suffix", "/" + strings.Repeat("a", 199),
 			"-" + strings.Repeat("a", 199)},
 		{"long path truncates with hash suffix", "/home/user/" + strings.Repeat("a", 200),

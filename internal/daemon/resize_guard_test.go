@@ -1,9 +1,11 @@
 package daemon
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/artyomsv/quil/internal/ipc"
+	"github.com/artyomsv/quil/internal/plugin"
 )
 
 // The TUI re-sends every pane's size on each workspace broadcast
@@ -82,4 +84,79 @@ func TestHandleResizePane_NilPTY_NoApply(t *testing.T) {
 	if len(fake.resizes) != 1 {
 		t.Fatalf("PTY got %d resizes, want 1 (nil-PTY request must not poison the guard)", len(fake.resizes))
 	}
+}
+
+// TestSpawnPane_ResetsResizeGuard exercises the REAL reset path (spawnPane),
+// not a hand-set of the fields: a fresh PTY must always accept its first
+// resize even if the pane's guard still holds a stale size from the
+// previous PTY. Regression cover for the same-size guard's fresh-PTY reset.
+func TestSpawnPane_ResetsResizeGuard(t *testing.T) {
+	// A fully-constructed test daemon: spawnPane launches streamPTYOutput,
+	// whose reader hits the fakeSession's Read error and calls onPaneExit →
+	// emitEvent. That path needs a real event queue (d.events) or it nil-
+	// derefs; d.broadcast is already nil-safe (guards on d.server).
+	d := &Daemon{
+		registry: plugin.NewRegistry(),
+		session:  NewSessionManager(4096),
+		events:   newEventQueue(16),
+	}
+	pane := &Pane{ID: "p-reset", Type: "terminal"}
+	// Simulate a prior PTY's last-applied size lingering on the pane.
+	pane.appliedCols, pane.appliedRows = 100, 40
+	// Register the pane BEFORE spawnPane so the write happens-before the
+	// streamPTYOutput goroutine (which reads the session map under sm.mu);
+	// writing it after spawnPane would race that reader.
+	d.session.panes["p-reset"] = pane
+
+	fake := &fakeSession{}
+	if err := d.spawnPane(pane, fake, false); err != nil {
+		t.Fatalf("spawnPane: %v", err)
+	}
+	if pane.appliedCols != 0 || pane.appliedRows != 0 {
+		t.Fatalf("spawnPane left guard at %dx%d, want 0x0 (fresh PTY must accept first resize)",
+			pane.appliedCols, pane.appliedRows)
+	}
+	// A resize at the old size now goes through to the new PTY.
+	d.handleResizePane(resizeMsg(t, "p-reset", 100, 40))
+	if len(fake.resizes) < 1 {
+		t.Errorf("fresh PTY got %d resizes at the old size, want at least 1", len(fake.resizes))
+	}
+}
+
+// TestHandleResizePane_FailedResizeDoesNotStickGuard: a Resize error must
+// leave the guard unchanged so the next identical broadcast retries rather
+// than being silently swallowed.
+func TestHandleResizePane_FailedResizeDoesNotStickGuard(t *testing.T) {
+	d := &Daemon{session: NewSessionManager(4096)}
+	fake := &failingResizeSession{fail: true}
+	pane := &Pane{ID: "p-fail", PTY: fake}
+	d.session.panes["p-fail"] = pane
+
+	d.handleResizePane(resizeMsg(t, "p-fail", 90, 30)) // fails
+	if pane.appliedCols != 0 || pane.appliedRows != 0 {
+		t.Fatalf("failed resize stuck the guard at %dx%d, want 0x0", pane.appliedCols, pane.appliedRows)
+	}
+	fake.fail = false
+	d.handleResizePane(resizeMsg(t, "p-fail", 90, 30)) // retry succeeds
+	if pane.appliedCols != 90 || pane.appliedRows != 30 {
+		t.Errorf("retry after failure did not apply: guard %dx%d, want 90x30", pane.appliedCols, pane.appliedRows)
+	}
+	if fake.okResizes != 1 {
+		t.Errorf("successful resizes = %d, want 1 (first failed, retry succeeded)", fake.okResizes)
+	}
+}
+
+// failingResizeSession fails Resize while fail is true, then succeeds.
+type failingResizeSession struct {
+	fakeSession
+	fail      bool
+	okResizes int
+}
+
+func (f *failingResizeSession) Resize(rows, cols uint16) error {
+	if f.fail {
+		return fmt.Errorf("simulated resize failure")
+	}
+	f.okResizes++
+	return nil
 }

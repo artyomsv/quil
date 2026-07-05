@@ -42,13 +42,13 @@ type Pane struct {
 	// workspaceStateFromSnapshot / buildPaneInfos / handlePaneStatusReq
 	// readers. Immutable post-creation fields (ID, TabID, OutputBuf pointer,
 	// Cols/Rows once set) are read without it.
-	PluginMu        sync.Mutex
-	InstanceName    string    // Which instance config was used
-	InstanceArgs    []string  // Args used to start (for rerun strategy)
-	ExitCode        *int      // nil = still running, non-nil = exited
-	ExitedAt        time.Time // When the process exited (zero if running)
-	Cols            int       // Last known terminal width (0 = unknown)
-	Rows            int       // Last known terminal height (0 = unknown)
+	PluginMu     sync.Mutex
+	InstanceName string    // Which instance config was used
+	InstanceArgs []string  // Args used to start (for rerun strategy)
+	ExitCode     *int      // nil = still running, non-nil = exited
+	ExitedAt     time.Time // When the process exited (zero if running)
+	Cols         int       // Last known terminal width (0 = unknown)
+	Rows         int       // Last known terminal height (0 = unknown)
 	// appliedCols/appliedRows: size last applied to the CURRENT PTY by
 	// handleResizePane. The TUI re-sends every pane's size on each
 	// workspace broadcast; this guard turns the duplicates into no-ops.

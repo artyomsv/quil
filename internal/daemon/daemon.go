@@ -1347,17 +1347,24 @@ func (d *Daemon) handleResizePane(msg *ipc.Message) {
 	pane.PluginMu.Lock()
 	pty := pane.PTY
 	same := pane.appliedCols == int(payload.Cols) && pane.appliedRows == int(payload.Rows)
-	if pty != nil && !same {
-		pane.appliedCols = int(payload.Cols)
-		pane.appliedRows = int(payload.Rows)
-	}
 	pane.PluginMu.Unlock()
 	if pty == nil || same {
 		return
 	}
 	if err := pty.Resize(payload.Rows, payload.Cols); err != nil {
+		// Record nothing on failure: a transient Resize error must not make
+		// the guard believe this size was applied, or the TUI's next
+		// identical re-send would be skipped and the failed resize never
+		// retried. Leaving appliedCols/Rows unchanged lets the next
+		// broadcast retry.
 		log.Printf("resize pane %s to %dx%d: %v", payload.PaneID, payload.Cols, payload.Rows, err)
+		return
 	}
+	// Record only after the syscall succeeds.
+	pane.PluginMu.Lock()
+	pane.appliedCols = int(payload.Cols)
+	pane.appliedRows = int(payload.Rows)
+	pane.PluginMu.Unlock()
 	pane.Cols = int(payload.Cols)
 	pane.Rows = int(payload.Rows)
 }

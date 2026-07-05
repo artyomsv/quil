@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unicode/utf16"
 
 	"regexp"
 
@@ -1963,20 +1964,48 @@ func claudeHookSpawnPrep(quilDir, paneID, hookMode string, userArgs []string) (p
 // Other non-alphanumeric characters Claude may also encode (spaces, dots)
 // are not handled here — no concrete examples observed in the wild yet.
 // Extend the replacer when a real path forces the issue.
+// escapeClaudeCWD mirrors Claude Code's per-project directory naming under
+// ~/.claude/projects/, extracted verbatim from the claude binary
+// (2026-07-05, v2.x):
+//
+//	t = cwd.replace(/[^a-zA-Z0-9]/g, "-")           // per UTF-16 code unit
+//	if (t.length <= 200) return t
+//	return t.slice(0, 200) + "-" + base36(abs(h))   // h = Java-31x hash
+//	// h: for each UTF-16 unit u: h = (h<<5) - h + u | 0   (int32 wrap)
+//
+// Operating per UTF-16 code unit (not rune) matches the JS regex without
+// the /u flag: an astral char (emoji) becomes TWO dashes. Earlier versions
+// replaced only : \ / _ and missed '.', so any CWD containing a dot (e.g.
+// a .claude/worktrees checkout) probed a nonexistent directory,
+// claudeSessionFileExists returned false, and every restored pane fell
+// back to --continue — all resuming the SAME latest session after a
+// daemon restart (2026-07-05 dev incident). Same rule on every OS; the
+// separators and drive colons all collapse to '-'.
 func escapeClaudeCWD(cwd string) string {
-	// Claude Code names its per-project dir under ~/.claude/projects/ by
-	// replacing EVERY character outside [A-Za-z0-9] with '-'. Earlier
-	// versions here replaced only : \ / _ and missed '.', so any CWD
-	// containing a dot (e.g. a .claude/worktrees path) probed a
-	// nonexistent directory, claudeSessionFileExists returned false, and
-	// every restored pane fell back to --continue — all resuming the SAME
-	// latest session after a daemon restart (2026-07-05 dev incident).
-	return strings.Map(func(r rune) rune {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
-			return r
+	const maxLen = 200 // claude's truncation threshold (Lws/Xrt in the bundle)
+	units := utf16.Encode([]rune(cwd))
+	b := make([]byte, len(units))
+	for i, u := range units {
+		switch {
+		case u >= 'a' && u <= 'z', u >= 'A' && u <= 'Z', u >= '0' && u <= '9':
+			b[i] = byte(u)
+		default:
+			b[i] = '-'
 		}
-		return '-'
-	}, cwd)
+	}
+	t := string(b)
+	if len(t) <= maxLen {
+		return t
+	}
+	var h int32
+	for _, u := range units {
+		h = (h << 5) - h + int32(u) // int32 wrap == JS |0
+	}
+	abs := int64(h)
+	if abs < 0 {
+		abs = -abs // JS Math.abs; int64 widening handles MinInt32 exactly
+	}
+	return t[:maxLen] + "-" + strconv.FormatInt(abs, 36)
 }
 
 // claudeSessionFileExists reports whether Claude has persisted a session

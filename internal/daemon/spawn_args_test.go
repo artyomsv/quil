@@ -344,6 +344,19 @@ func TestEscapeClaudeCWD(t *testing.T) {
 		{"worktree dot-dir (real incident)",
 			`E:\Projects\Stukans\quil\.claude\worktrees\resize-artifacts`,
 			"E--Projects-Stukans-quil--claude-worktrees-resize-artifacts"},
+		// Cross-OS + unicode parity with claude's JS sanitizer
+		// (replace(/[^a-zA-Z0-9]/g,"-") over UTF-16 code units, extracted
+		// from the binary 2026-07-05): BMP non-ASCII → one dash, astral
+		// (emoji, surrogate pair) → two dashes.
+		{"macos home with accent", "/Users/josé/proj", "-Users-jos--proj"},
+		{"astral char is two units", "/tmp/😀dir", "-tmp---dir"},
+		// Claude truncates sanitized names longer than 200 chars and
+		// appends base36(abs(java31x-hash(cwd))). Vector pinned from this
+		// implementation; the algorithm is byte-for-byte the binary's.
+		{"exactly 200 keeps no suffix", "/" + strings.Repeat("a", 199),
+			"-" + strings.Repeat("a", 199)},
+		{"long path truncates with hash suffix", "/home/user/" + strings.Repeat("a", 200),
+			"-home-user-" + strings.Repeat("a", 189) + "-ut7e65"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

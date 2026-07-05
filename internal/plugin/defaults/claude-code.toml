@@ -6,7 +6,7 @@ name = "claude-code"
 display_name = "Claude Code"
 category = "ai"
 description = "AI coding assistant"
-schema_version = 6
+schema_version = 7
 
 [command]
 cmd = "claude"
@@ -92,3 +92,8 @@ severity = "warning"
 pattern = '❯|> $'
 title = "Waiting for input"
 severity = "info"
+
+[display]
+# Window-sized canvas: the PTY never resizes with the pane rect; small
+# panes show a soft-wrapped preview. Zoom (Ctrl+E) shows the native render.
+wide_canvas = true

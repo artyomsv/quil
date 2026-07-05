@@ -45,6 +45,7 @@ const (
 type PaneModel struct {
 	ID                 string
 	Type               string // plugin type ("terminal", "claude-code", etc.)
+	WideCanvas         bool   // [display] wide_canvas: VT/PTY stay window-sized; small rects render a wrapped preview
 	Name               string // user-given name (empty if not set)
 	CWD                string // current working directory from daemon
 	Muted              bool   // notification mute (daemon-authoritative; mirrored here for border rendering)
@@ -109,6 +110,14 @@ type PaneModel struct {
 	cachedView  string
 	hasCache    bool
 	renderCount int
+
+	// pvCache: wrap layout for wide-canvas preview rendering. Invalidated
+	// implicitly by its (contentGen, innerW, wrap) key — see previewLayoutFor.
+	pvCache *previewLayout
+	// previewWrap: soft-wrap the wide-canvas preview instead of the default
+	// left-edge crop. Toggled per pane via the toggle_wrap keybinding
+	// (default alt+shift+w). TUI-session state, not persisted.
+	previewWrap bool
 }
 
 // paneRenderKey is the comparable fingerprint of everything View() reads,
@@ -143,6 +152,7 @@ type paneRenderKey struct {
 	spinnerFrame, workFrame        int
 	name, cwd                      string
 	paneType, sessionID            string
+	wideCanvas, previewWrap        bool
 	historyLines                   int
 	selActive                      bool
 	sel                            Selection
@@ -173,6 +183,8 @@ func (p *PaneModel) renderKey() paneRenderKey {
 		cwd:            p.CWD,
 		paneType:       p.Type,
 		sessionID:      p.SessionID,
+		wideCanvas:     p.WideCanvas,
+		previewWrap:    p.previewWrap,
 		historyLines:   p.HistoryLines,
 	}
 	// renderContent only honors a selection whose PaneID matches this pane;
@@ -352,9 +364,27 @@ func (p *PaneModel) ResizeVT(cols, rows int) {
 	p.contentGen++
 }
 
+// maxScroll is the upper bound for scrollBack. In preview mode scrollBack
+// counts VISUAL rows (wrapped segments beyond one viewport); natively it
+// counts emulator scrollback lines.
+func (p *PaneModel) maxScroll() int {
+	if p.previewMode() {
+		innerH := p.Height - 2
+		if innerH < 1 {
+			innerH = 1
+		}
+		m := p.previewLayoutFor(max(1, p.Width-2)).totalVisual() - innerH
+		if m < 0 {
+			m = 0
+		}
+		return m
+	}
+	return p.vt.ScrollbackLen()
+}
+
 func (p *PaneModel) ScrollUp(lines int) {
 	p.scrollBack += lines
-	if max := p.vt.ScrollbackLen(); p.scrollBack > max {
+	if max := p.maxScroll(); p.scrollBack > max {
 		p.scrollBack = max
 	}
 }
@@ -470,7 +500,9 @@ func (p *PaneModel) wheelForwardSeq(up bool, relX, relY int) []byte {
 // (no-op) when there's no scrollback to scroll into or the visible area
 // is large enough to hold every line (no scrollable range).
 func (p *PaneModel) ScrollToRelY(relY, innerH int) {
-	sbLen := p.vt.ScrollbackLen()
+	// Preview mode scrolls in visual rows; the same inverse-thumb contract
+	// holds with sbLen replaced by the visual scroll range.
+	sbLen := p.maxScroll()
 	if sbLen <= 0 || innerH <= 0 {
 		return
 	}
@@ -883,6 +915,12 @@ func parseOSC7Path(raw string) string {
 }
 
 func (p *PaneModel) renderContent(sel *Selection) string {
+	// Wide-canvas preview: wrapped view of the window-sized buffer.
+	// Selection is zoom-only in preview mode (v1), so the selection
+	// branches below are intentionally unreachable here.
+	if p.previewMode() {
+		return p.renderPreview()
+	}
 	// If selection is active on this pane, use cell-by-cell rendering
 	if sel != nil && sel.PaneID == p.ID {
 		return p.renderWithSelection(sel)

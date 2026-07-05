@@ -119,7 +119,7 @@ func TestUpdate_MouseWheel_ForwardsViaDaemonFlagOnReattach(t *testing.T) {
 	pane.Type = "opencode"
 	// Simulate the daemon snapshot reconciliation: no local emulator modes were
 	// ever observed (reattach), only the daemon flags.
-	syncPaneMeta(pane, &PaneInfo{ID: "oc2", Type: "opencode", MouseTracking: true, MouseSGR: true})
+	syncPaneMeta(pane, &PaneInfo{ID: "oc2", Type: "opencode", MouseTracking: true, MouseSGR: true}, false)
 	if !pane.MouseTracking() {
 		t.Fatal("MouseTracking() = false with daemon flag set, want true")
 	}

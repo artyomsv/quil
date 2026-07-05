@@ -68,6 +68,10 @@ OpenCode (opencode.ai) mints a new session id on `/new`, fork, or compaction. Qu
 
 Each AI pane gets a UUID at creation time. On restart Quil runs `claude --resume <session-id>` (or `opencode --session <id>`) automatically. Works for any AI tool that exposes a session id — Claude Code (production), OpenCode (beta), more to come. Tools without a session id can fall back to regex-scraping the last visible state or replaying a stored command.
 
+### Wide canvas (no-resize AI panes)
+
+AI transcripts are immutable hard-wrapped text: whatever width the pane had while the reply streamed is the width that text keeps forever, and every PTY resize makes the tool re-render its tail — the classic source of mixed-width, duplicated-looking transcripts in small panes. Wide-canvas panes (`[display] wide_canvas = true`; claude-code and opencode ship with it) sidestep the whole problem: the tool always renders at full window width, small grid panes show a preview of that wide buffer, and zoom (`Ctrl+E`) switches to the native render instantly — no resize, no repaint, no artifacts. Splits, the notification sidebar, notes mode, and zoom never touch the PTY; only a real window resize does. The preview crops to the left edge by default (clean lines, tmux-style); `Alt+Shift+W` (`toggle_wrap`) switches the active pane to soft-wrap when you want every character visible. In the preview you can type, scroll, and see the cursor; text selection needs the zoomed view (v1).
+
 ---
 
 ## Layout & navigation
@@ -231,7 +235,7 @@ See the full [plugin reference](plugin-reference.md) for every field.
 
 ### Notification center
 
-A non-modal sidebar surfaces:
+A non-modal sidebar (drawn as an overlay on the right edge — panes keep their size, so opening it never makes a running TUI re-wrap its output) surfaces:
 
 - Process exits (any pane)
 - OSC 133 command-completion events (shell panes)

@@ -400,8 +400,10 @@ func (n *LayoutNode) FindPaneRectAt(x, y, ox, oy, w, h int) *PaneRect {
 	return nil
 }
 
-// resizeNode recursively assigns dimensions to each node.
-func resizeNode(n *LayoutNode, w, h int) {
+// resizeNode recursively assigns dimensions to each node. canvasW/canvasH
+// are the full tab-area dimensions — wide-canvas panes size their VT to
+// the canvas (via paneVTSize) while their rect keeps following the tree.
+func resizeNode(n *LayoutNode, w, h, canvasW, canvasH int) {
 	if n == nil {
 		return
 	}
@@ -418,7 +420,7 @@ func resizeNode(n *LayoutNode, w, h int) {
 		}
 		n.Pane.Width = w
 		n.Pane.Height = h
-		n.Pane.ResizeVT(w-2, h-2)
+		n.Pane.ResizeVT(paneVTSize(n.Pane.WideCanvas, w, h, canvasW, canvasH))
 		return
 	}
 
@@ -432,8 +434,8 @@ func resizeNode(n *LayoutNode, w, h int) {
 		if rightW < minPaneW {
 			rightW = minPaneW
 		}
-		resizeNode(n.Left, leftW, h)
-		resizeNode(n.Right, rightW, h)
+		resizeNode(n.Left, leftW, h, canvasW, canvasH)
+		resizeNode(n.Right, rightW, h, canvasW, canvasH)
 
 	case SplitVertical:
 		topH := int(float64(h) * n.Ratio)
@@ -444,8 +446,8 @@ func resizeNode(n *LayoutNode, w, h int) {
 		if bottomH < minPaneH {
 			bottomH = minPaneH
 		}
-		resizeNode(n.Left, w, topH)
-		resizeNode(n.Right, w, bottomH)
+		resizeNode(n.Left, w, topH, canvasW, canvasH)
+		resizeNode(n.Right, w, bottomH, canvasW, canvasH)
 	}
 }
 

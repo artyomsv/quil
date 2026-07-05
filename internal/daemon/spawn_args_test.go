@@ -18,11 +18,11 @@ import (
 // "--dangerously-skip-permissions") were dropped on daemon restart.
 func TestResolveSpawnArgs_Matrix(t *testing.T) {
 	tests := []struct {
-		name       string
-		plugin     *plugin.PanePlugin
-		pane       *Pane
-		restoring  bool
-		want       []string
+		name      string
+		plugin    *plugin.PanePlugin
+		pane      *Pane
+		restoring bool
+		want      []string
 	}{
 		{
 			name: "fresh terminal — base args only",
@@ -323,7 +323,7 @@ func TestEscapeClaudeCWD(t *testing.T) {
 	}{
 		{"windows path", `E:\Projects\Stukans\Prototypes\calyx`, "E--Projects-Stukans-Prototypes-calyx"},
 		{"unix path", "/home/user/project", "-home-user-project"},
-		{"windows with dot-dir", `C:\Users\artjo\.claude`, "C--Users-artjo-.claude"},
+		{"windows with dot-dir", `C:\Users\artjo\.claude`, "C--Users-artjo--claude"},
 		{"mixed separators", `E:/Projects\mixed`, "E--Projects-mixed"},
 		{"root-only windows", `C:\`, "C--"},
 		{"empty", "", ""},
@@ -334,13 +334,43 @@ func TestEscapeClaudeCWD(t *testing.T) {
 		{"unix path with underscore", "/Users/Artjoms_Stukans/Projects/crypto-finance", "-Users-Artjoms-Stukans-Projects-crypto-finance"},
 		{"underscore-only segment", "/home/foo_bar/quil", "-home-foo-bar-quil"},
 		{"multiple underscores", "/a_b/c_d_e", "-a-b-c-d-e"},
-		// Negative cases: pin the deliberately-conservative scope. If
-		// Claude is observed to encode any of these in the wild, extend
-		// the replacer AND update these rows together so the assumption
-		// shift is reviewable as a single diff.
-		{"dot preserved", "/foo.bar/quil", "-foo.bar-quil"},
-		{"space preserved", "/foo bar/quil", "-foo bar-quil"},
+		// Field evidence 2026-07-05: a worktree CWD containing ".claude"
+		// landed under E--Projects-Stukans-quil--claude-worktrees-… — Claude
+		// encodes EVERY non-alphanumeric as '-'. The escaper now mirrors
+		// that rule exactly; only [A-Za-z0-9] survives.
+		{"dot encoded", "/foo.bar/quil", "-foo-bar-quil"},
+		{"space encoded", "/foo bar/quil", "-foo-bar-quil"},
 		{"uppercase preserved", "/Foo/BAR", "-Foo-BAR"},
+		{"worktree dot-dir (real incident)",
+			`E:\Projects\Stukans\quil\.claude\worktrees\resize-artifacts`,
+			"E--Projects-Stukans-quil--claude-worktrees-resize-artifacts"},
+		// Cross-OS + unicode parity with claude's JS sanitizer
+		// (replace(/[^a-zA-Z0-9]/g,"-") over UTF-16 code units, extracted
+		// from the binary 2026-07-05): BMP non-ASCII → one dash, astral
+		// (emoji, surrogate pair) → two dashes.
+		{"macos home with accent", "/Users/josé/proj", "-Users-jos--proj"},
+		{"astral char is two units", "/tmp/😀dir", "-tmp---dir"},
+		// >200-char names: claude truncates to 200 then appends
+		// "-"+base36(abs(hash)). The exact form is transcribed from the
+		// claude binary (2026-07-05):
+		//   Ows(e){let t=e.replace(/[^a-zA-Z0-9]/g,"-");
+		//          if(t.length<=200)return t;
+		//          return `${t.slice(0,200)}-${Math.abs(Pke(e)).toString(36)}`}
+		//   Pke(e){let h=0;for(u of utf16(e))h=(h<<5)-h+u|0;return h}
+		// Critically, the hash argument is the ORIGINAL cwd `e`, NOT the
+		// dashified `t` — so escapeClaudeCWD hashes `units` (original), and
+		// a >200-char path resolves to the SAME dir claude writes. The
+		// `-ut7e65` suffix below is computed by that transcribed algorithm;
+		// it has not been diffed against a claude-generated dir for a
+		// >200-char cwd (no such path exists on disk to observe), but the
+		// algorithm is byte-for-byte the binary's. If claude ever changes
+		// the scheme, the sanity gate fails safe: a wrong probe dir just
+		// forces the --continue fallback (pane still restores), and this
+		// vector flags the drift.
+		{"exactly 200 keeps no suffix", "/" + strings.Repeat("a", 199),
+			"-" + strings.Repeat("a", 199)},
+		{"long path truncates with hash suffix", "/home/user/" + strings.Repeat("a", 200),
+			"-home-user-" + strings.Repeat("a", 189) + "-ut7e65"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

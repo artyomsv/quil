@@ -52,7 +52,7 @@ show_disclaimer = true          # beta disclaimer on startup
 highlight_duration = "10s"      # border flash duration when AI touches a pane
 
 [notification]
-sidebar_width = 30              # columns reserved for the notification sidebar
+sidebar_width = 30              # width of the notification sidebar overlay
 max_events = 200                # ring-buffer cap (per daemon, both sidebar and MCP)
 
 [notification.hooks]
@@ -87,6 +87,7 @@ toggle_eager = "alt+shift+e"    # toggle eager restore; eager panes respawn on r
 go_back = "alt+backspace"       # pane history back (after jumping via sidebar Enter)
 notes_toggle = "alt+e"          # toggle pane notes editor
 toggle_lazygit = "alt+g"        # toggle lazygit overlay for the repo at the active pane's CWD
+toggle_wrap = "alt+shift+w"     # AI-pane preview: switch left-edge crop (default) <-> soft-wrap
 redraw = "alt+shift+l"          # force full screen repaint (clears rendering artifacts)
 ```
 
@@ -137,7 +138,7 @@ The "ghost buffer" is the rendered preview Quil shows immediately on reconnect, 
 
 | Key | Type | Default | What it does |
 |---|---|---|---|
-| `sidebar_width` | int | `30` | Columns reserved for the notification sidebar when toggled (`Alt+N`). Reducing this gives more room to panes; values below ~25 truncate event titles and excerpts heavily. |
+| `sidebar_width` | int | `30` | Width of the notification sidebar overlay (`Alt+N`). The sidebar draws over the right edge of the pane area — panes keep their size (no PTY resize) and the covered columns reappear when it closes. Values below ~25 truncate event titles and excerpts heavily. |
 | `max_events` | int | `200` | Ring-buffer cap for the daemon's notification queue. The sidebar and MCP `get_notifications` both read from this queue. Each event is bounded to ≤ 4 KiB `Message` + ≤ 1 KiB per `Data` value (`_quil_truncated` flag set when truncated). |
 
 ### `[notification.hooks]`
@@ -188,6 +189,7 @@ Multiple modifiers stack with `+` (no spaces). Mouse buttons are not bindable he
 | `go_back` | `alt+backspace` | Pane history back — return to the pane you were on before the sidebar's `Enter` jump |
 | `notes_toggle` | `alt+e` | Open / close the per-pane notes editor |
 | `toggle_lazygit` | `alt+g` | Toggle lazygit overlay for the git repo resolved from the active pane's current directory. Only shown when the `lazygit` binary is installed. |
+| `toggle_wrap` | `alt+shift+w` | Switch the active AI pane's preview between left-edge crop (default) and soft-wrap. Only meaningful for `wide_canvas` panes rendered smaller than the window; per-pane, not persisted. |
 | `redraw` | `alt+shift+l` | Force a full screen repaint — clears rendering artifacts (scrambled or misplaced characters) without restarting the TUI |
 
 ## Per-plugin instances

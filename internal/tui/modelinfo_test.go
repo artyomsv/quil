@@ -31,7 +31,7 @@ func TestSyncPaneMeta_ModelFollowsSnapshot(t *testing.T) {
 	t.Parallel()
 	pane := &PaneModel{ID: "p1"}
 	// A snapshot carrying values applies them.
-	syncPaneMeta(pane, &PaneInfo{ID: "p1", Model: "claude-sonnet-5", ContextTokens: 42})
+	syncPaneMeta(pane, &PaneInfo{ID: "p1", Model: "claude-sonnet-5", ContextTokens: 42}, false)
 	if pane.Model != "claude-sonnet-5" || pane.ContextTokens != 42 {
 		t.Fatalf("snapshot values not applied: model=%q tokens=%d", pane.Model, pane.ContextTokens)
 	}
@@ -39,7 +39,7 @@ func TestSyncPaneMeta_ModelFollowsSnapshot(t *testing.T) {
 	// daemon-side restart-clear (handleRestartPaneReq zeroes LastModel)
 	// reaches the status bar; keeping the old value would show the
 	// pre-restart model until the next completed turn.
-	syncPaneMeta(pane, &PaneInfo{ID: "p1", CWD: "/tmp"})
+	syncPaneMeta(pane, &PaneInfo{ID: "p1", CWD: "/tmp"}, false)
 	if pane.Model != "" || pane.ContextTokens != 0 {
 		t.Fatalf("restart-clear did not propagate: model=%q tokens=%d", pane.Model, pane.ContextTokens)
 	}

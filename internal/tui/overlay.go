@@ -95,6 +95,10 @@ func (m *Model) handleToggleLazygit() tea.Cmd {
 // tab area (it may have been hidden during a resize).
 func (m *Model) showOverlay(tab *TabModel) tea.Cmd {
 	tab.overlayVisible = true
+	// Re-assert the canvas before resizing so a wide-canvas overlay toggled
+	// before any View()/resizeTabs pass still sizes correctly (today's
+	// overlays are lazygit/non-canvas, so this is robustness, not a live bug).
+	tab.SetCanvas(tab.Width, tab.Height)
 	tab.Resize(tab.Width, tab.Height) // re-sync overlay pane dims
 	return tea.Batch(tea.ClearScreen, m.overlayResizeCmd(tab))
 }

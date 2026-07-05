@@ -55,6 +55,7 @@ The active tab is prefixed with `* ` in the tab bar so it's visible even when [t
 | `Alt+Shift+V` | Split top/bottom |
 | `Alt+F2` / `Alt+Shift+R` | Rename active pane. `Alt+Shift+R` is a macOS-friendly fallback since `F2` is often eaten by the OS and `Option` is not always passed through as Meta. |
 | `Ctrl+E` | Toggle focus mode (active pane full-screen) |
+| `Alt+Shift+W` | Toggle the active AI pane's preview between left-edge crop (default) and soft-wrap. Only affects `wide_canvas` panes rendered smaller than the window. |
 | `Alt+G` | Toggle lazygit overlay (git repo from active pane's directory) |
 | `Alt+Shift+L` | Force a full screen redraw — clears rendering artifacts (scrambled/misplaced characters) without restarting. Mnemonic: `Ctrl+L` redraws a shell. |
 | `Alt+Shift+I` | Open the active pane's input history — a list of prompts you submitted, each shown as a 3-line preview. `↑/↓` navigate, `Enter` opens the full text read-only (scroll + copy), `Esc` closes. Only AI panes whose plugin sets `record_history` (Claude Code) capture history; other pane types show an empty state. |

@@ -129,6 +129,12 @@ type InstanceConfig struct {
 type DisplayConfig struct {
 	BorderColor string
 	DialogWidth int // width for plugin dialogs (0 = default 50)
+	// WideCanvas keeps the pane's PTY/emulator sized to the full window
+	// regardless of its layout rect; small rects render a soft-wrapped
+	// preview TUI-side. For AI tools (claude-code, opencode) whose
+	// transcript is immutable hard-wrapped text: rendering wide once and
+	// wrapping down beats resizing, which garbles history. Default false.
+	WideCanvas bool
 }
 
 // ErrorHandler matches PTY output patterns and triggers help dialogs.

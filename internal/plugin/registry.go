@@ -327,6 +327,7 @@ type tomlPlugin struct {
 	Display struct {
 		BorderColor string `toml:"border_color"`
 		DialogWidth int    `toml:"dialog_width"`
+		WideCanvas  bool   `toml:"wide_canvas"`
 	} `toml:"display"`
 	Instances []struct {
 		Name        string   `toml:"name"`
@@ -419,6 +420,7 @@ func loadPluginTOML(path string) (*PanePlugin, error) {
 		Display: DisplayConfig{
 			BorderColor: tp.Display.BorderColor,
 			DialogWidth: tp.Display.DialogWidth,
+			WideCanvas:  tp.Display.WideCanvas,
 		},
 	}
 

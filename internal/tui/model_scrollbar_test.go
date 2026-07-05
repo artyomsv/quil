@@ -100,11 +100,11 @@ func TestModel_HitTestScrollbar_NotesModeSinglePaneUsesReducedWidth(t *testing.T
 	// width before hit-testing.
 	_ = m.View()
 
-	notesW, sidebarW := m.notesPanelWidth()
+	notesW := m.notesPanelWidth()
 	if notesW == 0 {
 		t.Fatal("notes panel width is 0 — terminal too narrow for the test")
 	}
-	paneW := m.width - sidebarW - notesW
+	paneW := m.width - notesW
 	scrollbarX := paneW - 2 // OX=0
 
 	if rect := m.hitTestScrollbar(scrollbarX, 5); rect == nil {

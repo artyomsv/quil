@@ -87,6 +87,7 @@ toggle_eager = "alt+shift+e"    # toggle eager restore; eager panes respawn on r
 go_back = "alt+backspace"       # pane history back (after jumping via sidebar Enter)
 notes_toggle = "alt+e"          # toggle pane notes editor
 toggle_lazygit = "alt+g"        # toggle lazygit overlay for the repo at the active pane's CWD
+toggle_wrap = "alt+shift+w"     # AI-pane preview: switch left-edge crop (default) <-> soft-wrap
 redraw = "alt+shift+l"          # force full screen repaint (clears rendering artifacts)
 ```
 
@@ -188,6 +189,7 @@ Multiple modifiers stack with `+` (no spaces). Mouse buttons are not bindable he
 | `go_back` | `alt+backspace` | Pane history back — return to the pane you were on before the sidebar's `Enter` jump |
 | `notes_toggle` | `alt+e` | Open / close the per-pane notes editor |
 | `toggle_lazygit` | `alt+g` | Toggle lazygit overlay for the git repo resolved from the active pane's current directory. Only shown when the `lazygit` binary is installed. |
+| `toggle_wrap` | `alt+shift+w` | Switch the active AI pane's preview between left-edge crop (default) and soft-wrap. Only meaningful for `wide_canvas` panes rendered smaller than the window; per-pane, not persisted. |
 | `redraw` | `alt+shift+l` | Force a full screen repaint — clears rendering artifacts (scrambled or misplaced characters) without restarting the TUI |
 
 ## Per-plugin instances

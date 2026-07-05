@@ -277,7 +277,7 @@ wide_canvas = false
 |-------|------|----------|---------|-------------|
 | `border_color` | string | No | `""` | Lipgloss terminal color for the pane border (e.g., `"blue"`, `"cyan"`, `"#ff5733"`). |
 | `dialog_width` | int | No | `50` | Width (in characters) of the instance creation form dialog. Increase for plugins with long field labels. |
-| `wide_canvas` | bool | No | `false` | Keep the pane's terminal sized to the full window regardless of its layout rect. Small panes show a soft-wrapped preview; zoom (Ctrl+E) shows the native render instantly. Built for AI tools (claude-code, opencode ship with `true`) whose transcript is immutable hard-wrapped text — rendering wide once beats resizing, which garbles history. Not for full-screen TUIs (k9s, lazygit): a wrapped altscreen app is unusable. |
+| `wide_canvas` | bool | No | `false` | Keep the pane's terminal sized to the full window regardless of its layout rect. Small panes show a preview of the wide buffer — left-edge crop by default, soft-wrap via `toggle_wrap` (`Alt+Shift+W`); zoom (Ctrl+E) shows the native render instantly. Built for AI tools (claude-code, opencode ship with `true`) whose transcript is immutable hard-wrapped text — rendering wide once beats resizing, which garbles history. Not for full-screen TUIs (k9s, lazygit): a cropped/wrapped altscreen app is unusable. |
 
 ---
 

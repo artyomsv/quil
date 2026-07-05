@@ -1472,6 +1472,8 @@ func (m Model) notesKeyExempt(key string) bool {
 		kb.Redraw,
 		// Notification center.
 		kb.NotificationToggle, kb.NotificationFocus, kb.GoBack, kb.MutePane, kb.ToggleEager,
+		// Preview wrap toggle — pane-level view state, harmless in notes mode.
+		kb.ToggleWrap,
 		// Pane process restart — opens a confirm dialog, never types into
 		// the notes editor.
 		kb.RestartPane,
@@ -1728,6 +1730,16 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, m.toggleActivePaneMute()
 	case kbMatches(key, kb.ToggleEager):
 		return m, m.toggleActivePaneEager()
+	case kbMatches(key, kb.ToggleWrap):
+		// Flip the active wide-canvas pane's preview between left-edge
+		// crop (default) and soft-wrap. View-only state — no IPC, no PTY
+		// touch; the preview layout cache re-keys on the flag.
+		if tab := m.activeTabModel(); tab != nil {
+			if pane := tab.ActivePaneModel(); pane != nil && pane.WideCanvas {
+				pane.previewWrap = !pane.previewWrap
+			}
+		}
+		return m, nil
 	case kbMatches(key, kb.ToggleLazygit):
 		return m, m.handleToggleLazygit()
 	case kbMatches(key, kb.CommandHistory):

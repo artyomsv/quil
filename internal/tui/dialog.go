@@ -265,6 +265,7 @@ func shortcutsList(m *Model) []struct{ key, desc string } {
 		{kbDisplay(kb.MutePane), "Mute / unmute pane notifications"},
 		{kbDisplay(kb.RestartPane), "Restart pane process (sessions resume)"},
 		{kbDisplay(kb.ToggleEager), "Toggle eager restore (active pane)"},
+		{kbDisplay(kb.ToggleWrap), "Toggle preview soft-wrap (AI pane)"},
 		{kbDisplay(kb.ToggleLazygit), "Toggle lazygit overlay for current repo"},
 		{kbDisplay(kb.NotificationToggle), "Toggle notification sidebar"},
 		{kbDisplay(kb.NotificationFocus), "Focus notification sidebar"},

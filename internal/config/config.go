@@ -146,6 +146,10 @@ type KeybindingsConfig struct {
 	// ToggleLazygit opens/hides the per-tab lazygit overlay for the git
 	// repo resolved from the active pane's CWD.
 	ToggleLazygit string `toml:"toggle_lazygit"`
+	// ToggleWrap switches the active wide-canvas pane's preview between
+	// left-edge crop (default) and soft-wrap. Only meaningful for panes
+	// whose plugin sets [display] wide_canvas; no-op elsewhere.
+	ToggleWrap string `toml:"toggle_wrap"`
 }
 
 func Default() Config {
@@ -225,6 +229,9 @@ func Default() Config {
 			ToggleEager:    "alt+shift+e",
 			CommandHistory: "alt+shift+i",
 			ToggleLazygit:  "alt+g",
+			// Mnemonic: W for wrap; the Alt+Shift layer dodges AI-tool
+			// Alt-letter bindings (same reasoning as the split keys).
+			ToggleWrap: "alt+shift+w",
 		},
 	}
 }

@@ -89,8 +89,12 @@ type PaneModel struct {
 	renderCount int
 
 	// pvCache: wrap layout for wide-canvas preview rendering. Invalidated
-	// implicitly by its (contentGen, innerW) key — see previewLayoutFor.
+	// implicitly by its (contentGen, innerW, wrap) key — see previewLayoutFor.
 	pvCache *previewLayout
+	// previewWrap: soft-wrap the wide-canvas preview instead of the default
+	// left-edge crop. Toggled per pane via the toggle_wrap keybinding
+	// (default alt+shift+w). TUI-session state, not persisted.
+	previewWrap bool
 }
 
 // paneRenderKey is the comparable fingerprint of everything View() reads,
@@ -125,7 +129,7 @@ type paneRenderKey struct {
 	spinnerFrame, workFrame        int
 	name, cwd                      string
 	paneType, sessionID            string
-	wideCanvas                     bool
+	wideCanvas, previewWrap        bool
 	historyLines                   int
 	selActive                      bool
 	sel                            Selection
@@ -157,6 +161,7 @@ func (p *PaneModel) renderKey() paneRenderKey {
 		paneType:       p.Type,
 		sessionID:      p.SessionID,
 		wideCanvas:     p.WideCanvas,
+		previewWrap:    p.previewWrap,
 		historyLines:   p.HistoryLines,
 	}
 	// renderContent only honors a selection whose PaneID matches this pane;

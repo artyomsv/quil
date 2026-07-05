@@ -22,6 +22,7 @@ type seg struct{ start, end int }
 
 type previewLayout struct {
 	innerW     int
+	wrap       bool // soft-wrap (all segments) vs left-edge crop (first segment only)
 	contentGen uint64
 	segs       [][]seg // per absolute row (scrollback + screen)
 	prefix     []int   // prefix[i] = visual rows before absolute row i
@@ -37,10 +38,14 @@ func (p *PaneModel) previewMode() bool {
 	return innerW >= 1 && innerW < p.vt.Width()
 }
 
-// previewLayoutFor returns the wrap layout for innerW, rebuilding only when
-// the emulator content or the width changed.
+// previewLayoutFor returns the preview layout for innerW, rebuilding only
+// when the emulator content, the width, or the wrap mode changed. Mode:
+// p.previewWrap picks soft-wrap (every wide row becomes 1..N visual rows)
+// vs the default left-edge crop (exactly 1 visual row per absolute row,
+// truncated at innerW — tmux-style).
 func (p *PaneModel) previewLayoutFor(innerW int) *previewLayout {
-	if p.pvCache != nil && p.pvCache.innerW == innerW && p.pvCache.contentGen == p.contentGen {
+	if p.pvCache != nil && p.pvCache.innerW == innerW &&
+		p.pvCache.contentGen == p.contentGen && p.pvCache.wrap == p.previewWrap {
 		return p.pvCache
 	}
 	sbLen := p.vt.ScrollbackLen()
@@ -48,16 +53,44 @@ func (p *PaneModel) previewLayoutFor(innerW int) *previewLayout {
 	total := sbLen + h
 	l := &previewLayout{
 		innerW:     innerW,
+		wrap:       p.previewWrap,
 		contentGen: p.contentGen,
 		segs:       make([][]seg, total),
 		prefix:     make([]int, total+1),
 	}
 	for row := 0; row < total; row++ {
-		l.segs[row] = wrapRow(cellAccessor(p, row), lineContentEnd(p, row), innerW)
+		if p.previewWrap {
+			l.segs[row] = wrapRow(cellAccessor(p, row), lineContentEnd(p, row), innerW)
+		} else {
+			l.segs[row] = cropRow(cellAccessor(p, row), lineContentEnd(p, row), innerW)
+		}
 		l.prefix[row+1] = l.prefix[row] + len(l.segs[row])
 	}
 	p.pvCache = l
 	return l
+}
+
+// cropRow is the no-wrap counterpart of wrapRow: one segment per row,
+// truncated at innerW (a wide glyph straddling the cut retreats one
+// column, matching wrapRow's boundary rule).
+func cropRow(getCell func(x int) *uv.Cell, contentEnd, innerW int) []seg {
+	if innerW < 1 {
+		innerW = 1
+	}
+	if contentEnd < 0 {
+		return []seg{{0, 0}}
+	}
+	end := contentEnd + 1
+	if end > innerW {
+		end = innerW
+		if c := getCell(end); c != nil && c.Width == 0 {
+			end--
+		}
+	}
+	if end < 1 {
+		end = 1
+	}
+	return []seg{{0, end}}
 }
 
 // totalVisual is the number of visual rows across scrollback + screen.

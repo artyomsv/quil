@@ -24,6 +24,7 @@ func canvasPane(t *testing.T, cols, rows int, feed string) *PaneModel {
 func TestPreviewLayout_WrapCounts(t *testing.T) {
 	p := canvasPane(t, 100, 8, strings.Repeat("a", 95)+"\r\nshort\r\n\r\n")
 	defer p.Dispose()
+	p.previewWrap = true
 	p.Width = 42 // innerW 40
 	l := p.previewLayoutFor(40)
 	if got := len(l.segs[0]); got != 3 {
@@ -52,6 +53,7 @@ func TestPreviewLayout_WideGlyphBoundary(t *testing.T) {
 	// stays whole.
 	p := canvasPane(t, 100, 6, "x"+strings.Repeat("你", 20)+"\r\n")
 	defer p.Dispose()
+	p.previewWrap = true
 	l := p.previewLayoutFor(40)
 	first := l.segs[0][0]
 	if first.end != 39 {
@@ -77,6 +79,60 @@ func TestPreviewLayout_CacheInvalidation(t *testing.T) {
 	if l30.innerW != 30 {
 		t.Errorf("layout innerW = %d, want 30", l30.innerW)
 	}
+	// Flipping the wrap mode must also invalidate the cache.
+	before := p.previewLayoutFor(30)
+	p.previewWrap = true
+	after := p.previewLayoutFor(30)
+	if after == before {
+		t.Error("wrap-mode flip must rebuild the preview layout")
+	}
+	if !after.wrap {
+		t.Error("rebuilt layout must carry the new wrap mode")
+	}
+}
+
+// Crop is the DEFAULT preview mode (soft wrap is opt-in via toggle_wrap):
+// exactly one visual row per absolute row, truncated at innerW.
+func TestPreviewLayout_CropDefault_SingleSegmentPerRow(t *testing.T) {
+	p := canvasPane(t, 100, 8, strings.Repeat("a", 95)+"\r\nshort\r\n")
+	defer p.Dispose()
+	if p.previewWrap {
+		t.Fatal("previewWrap must default to false (crop)")
+	}
+	l := p.previewLayoutFor(40)
+	for row, segs := range l.segs {
+		if len(segs) != 1 {
+			t.Fatalf("crop mode: row %d has %d segments, want 1", row, len(segs))
+		}
+	}
+	if got := l.segs[0][0]; got.start != 0 || got.end != 40 {
+		t.Errorf("95-wide row cropped to [%d,%d), want [0,40)", got.start, got.end)
+	}
+	if got := l.segs[1][0]; got.end != 5 {
+		t.Errorf("short row segment end = %d, want 5", got.end)
+	}
+	// One visual row per absolute row — scroll space matches emulator lines.
+	if l.totalVisual() != len(l.segs) {
+		t.Errorf("crop totalVisual = %d, want %d (1:1 with rows)", l.totalVisual(), len(l.segs))
+	}
+}
+
+func TestRenderPreview_CropTruncatesLines(t *testing.T) {
+	p := canvasPane(t, 100, 6, strings.Repeat("c", 95)+"\r\ntail> ")
+	defer p.Dispose()
+	p.Width, p.Height = 42, 8 // innerW 40, crop default
+	out := ansi.Strip(p.renderPreview())
+	if strings.Contains(out, strings.Repeat("c", 41)) {
+		t.Error("crop mode must not render more than innerW columns of a row")
+	}
+	if !strings.Contains(out, "tail>") {
+		t.Errorf("crop preview must show the screen tail, got:\n%s", out)
+	}
+	for i, line := range strings.Split(out, "\n") {
+		if w := ansi.StringWidth(line); w > 40 {
+			t.Errorf("line %d width %d exceeds innerW 40", i, w)
+		}
+	}
 }
 
 func TestPreviewMode_Predicate(t *testing.T) {
@@ -100,6 +156,7 @@ func TestPreviewMode_Predicate(t *testing.T) {
 func TestRenderPreview_BottomAnchoredAndWrapped(t *testing.T) {
 	p := canvasPane(t, 100, 6, strings.Repeat("w", 95)+"\r\nprompt> ")
 	defer p.Dispose()
+	p.previewWrap = true
 	// innerH 10 > 8 visual rows (3 wrapped + prompt + 4 blank screen rows),
 	// so the whole wrapped content is in view; bottom-anchoring itself is
 	// covered by TestRenderPreview_ScrolledShowsScrollbarAndHistory.
@@ -172,6 +229,7 @@ func TestPreviewScroll_ClampsToVisualRows(t *testing.T) {
 	}
 	p := canvasPane(t, 100, 6, feed.String())
 	defer p.Dispose()
+	p.previewWrap = true
 	p.Width, p.Height = 42, 8 // innerW 40 → each content row = 3 visual rows
 	l := p.previewLayoutFor(40)
 	maxScroll := l.totalVisual() - 6

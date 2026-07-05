@@ -185,15 +185,24 @@ func (m Model) workSpinnerTick() tea.Cmd {
 // syncPaneMeta copies daemon-authoritative metadata from a PaneInfo onto the
 // local PaneModel during workspace-state reconciliation.
 //
+// wideCanvas is passed explicitly (resolved by the caller via
+// Model.pluginWideCanvas) so EVERY reconciliation path re-evaluates it
+// against the live plugin registry — a plugin migration mid-session
+// reloads the registry, and a flag captured only at pane creation would
+// stay stale forever (2026-07-05 dev-smoke bug: panes stayed rect-sized
+// after the wide_canvas migration because only the cold-attach path set
+// the flag).
+//
 // Muting a pane clears any in-progress work indicator: the daemon drops a
 // muted pane's hook events at the source, so the completion edge that would
 // normally clear `working` never reaches the TUI. Without this, muting a pane
 // mid-turn would strand its spinner — and keep the 100ms animation tick alive
 // — indefinitely.
-func syncPaneMeta(pane *PaneModel, info *PaneInfo) {
+func syncPaneMeta(pane *PaneModel, info *PaneInfo, wideCanvas bool) {
 	pane.Name = info.Name
 	pane.CWD = info.CWD
 	pane.Type = info.Type
+	pane.WideCanvas = wideCanvas
 	pane.Muted = info.Muted
 	pane.Eager = info.Eager
 	pane.Pending = info.Pending

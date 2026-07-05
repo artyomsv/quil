@@ -2278,7 +2278,7 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) ([]string, []tea.Cm
 				if info, ok := paneMap[paneID]; ok {
 					if leaf := tab.Root.FindLeaf(paneID); leaf != nil {
 						wasPending := leaf.Pane.Pending
-						syncPaneMeta(leaf.Pane, info)
+						syncPaneMeta(leaf.Pane, info, m.pluginWideCanvas(info.Type))
 						// A deferred pane that just lazy-spawned (Pending→running,
 						// e.g. on tab switch): arm the restore indicator NOW so it
 						// covers the real boot, and enroll it for spinner ticks.
@@ -2319,7 +2319,7 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) ([]string, []tea.Cm
 				newPaneIDs = append(newPaneIDs, paneID)
 			}
 			if info != nil {
-				syncPaneMeta(pane, info)
+				syncPaneMeta(pane, info, m.pluginWideCanvas(info.Type))
 			}
 
 			// Try to fill a pending split placeholder first.
@@ -2459,10 +2459,7 @@ func (m *Model) restoreTabLayout(tab *TabModel, tabInfo TabInfo, paneMap map[str
 			pane.resumeStart = time.Now()
 		}
 		if info, ok := paneMap[paneID]; ok {
-			pane.Name = info.Name
-			pane.CWD = info.CWD
-			pane.Type = info.Type
-			pane.WideCanvas = m.pluginWideCanvas(info.Type)
+			syncPaneMeta(pane, info, m.pluginWideCanvas(info.Type))
 		}
 		paneModels[paneID] = pane
 	}
@@ -2555,7 +2552,7 @@ func (m *Model) reconcileOverlayPane(
 			pane = NewPaneModel(overlayInfo.ID, m.replayBufSize())
 			newPaneIDs = append(newPaneIDs, overlayInfo.ID)
 		}
-		syncPaneMeta(pane, overlayInfo)
+		syncPaneMeta(pane, overlayInfo, m.pluginWideCanvas(overlayInfo.Type))
 		tab.overlayPane = pane
 		// Show the overlay immediately when this TUI's Alt+G triggered its
 		// creation (pendingOverlayShow entry). On plain reattach, default hidden.
@@ -2566,7 +2563,7 @@ func (m *Model) reconcileOverlayPane(
 		}
 	default:
 		// Same overlay pane — refresh metadata only.
-		syncPaneMeta(tab.overlayPane, overlayInfo)
+		syncPaneMeta(tab.overlayPane, overlayInfo, m.pluginWideCanvas(overlayInfo.Type))
 	}
 
 	return newPaneIDs, false

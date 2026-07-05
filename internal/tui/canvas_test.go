@@ -1,6 +1,13 @@
 package tui
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/artyomsv/quil/internal/config"
+	"github.com/artyomsv/quil/internal/plugin"
+)
 
 func TestPaneVTSize(t *testing.T) {
 	cases := []struct {
@@ -61,5 +68,71 @@ func TestTabResize_CanvasPane_FocusToggleKeepsVTSize(t *testing.T) {
 	tab.Resize(200, 50)
 	if a.vt.Width() != wantW || a.vt.Height() != wantH {
 		t.Errorf("back to grid: canvas pane VT %dx%d, want unchanged %dx%d", a.vt.Width(), a.vt.Height(), wantW, wantH)
+	}
+}
+
+// End-to-end regression for the flag pipeline observed broken in dev
+// smoke testing (2026-07-05): registry flag → applyWorkspaceState
+// reconciliation → resizeTabs → canvas-sized VT.
+func TestApplyWorkspaceState_CanvasFlagFlowsToVTSize(t *testing.T) {
+	dir := t.TempDir()
+	toml := `
+[plugin]
+name = "claude-code"
+schema_version = 7
+[command]
+cmd = "true"
+[display]
+wide_canvas = true
+`
+	if err := os.WriteFile(filepath.Join(dir, "claude-code.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatalf("write plugin: %v", err)
+	}
+	reg := plugin.NewRegistry()
+	if err := reg.LoadFromDir(dir); err != nil {
+		t.Fatalf("LoadFromDir: %v", err)
+	}
+	if p := reg.Get("claude-code"); p == nil || !p.Display.WideCanvas {
+		t.Fatal("setup: registry must resolve wide_canvas for claude-code")
+	}
+
+	m := Model{
+		cfg:            config.Default(),
+		notifications:  NewNotificationCenter(30, 50),
+		pluginRegistry: reg,
+		mcpHighlights:  make(map[string]bool),
+		attached:       true,
+		width:          209,
+		height:         58,
+	}
+	state := WorkspaceStateMsg{
+		ActiveTab: "t1",
+		Tabs: []TabInfo{{
+			ID:    "t1",
+			Name:  "AI",
+			Panes: []string{"pane-c1", "pane-c2"},
+		}},
+		Panes: []PaneInfo{
+			{ID: "pane-c1", TabID: "t1", Type: "claude-code"},
+			{ID: "pane-c2", TabID: "t1", Type: "claude-code"},
+		},
+	}
+	m.applyWorkspaceState(state)
+	m.resizeTabs()
+
+	tab := m.tabs[0]
+	leaves := tab.Leaves()
+	if len(leaves) != 2 {
+		t.Fatalf("leaves = %d, want 2", len(leaves))
+	}
+	for _, p := range leaves {
+		if !p.WideCanvas {
+			t.Errorf("pane %s: WideCanvas=false after reconciliation with flagged registry", p.ID)
+		}
+		wantW, wantH := 207, 54 // canvas (209, 56) minus border
+		if p.vt.Width() != wantW || p.vt.Height() != wantH {
+			t.Errorf("pane %s VT %dx%d, want canvas %dx%d (rect was %dx%d)",
+				p.ID, p.vt.Width(), p.vt.Height(), wantW, wantH, p.Width, p.Height)
+		}
 	}
 }

@@ -361,7 +361,7 @@ func TestSyncPaneMeta_MuteClearsWorking(t *testing.T) {
 	// arrives — otherwise the spinner (and the 100ms tick) would run forever.
 	pane := NewPaneModel("p1", 1024)
 	pane.working = true
-	syncPaneMeta(pane, &PaneInfo{Muted: true})
+	syncPaneMeta(pane, &PaneInfo{Muted: true}, false)
 	if pane.working {
 		t.Error("muting a pane must clear its working indicator")
 	}
@@ -369,7 +369,7 @@ func TestSyncPaneMeta_MuteClearsWorking(t *testing.T) {
 	// An unmuted metadata sync must not disturb working.
 	pane2 := NewPaneModel("p2", 1024)
 	pane2.working = true
-	syncPaneMeta(pane2, &PaneInfo{Muted: false})
+	syncPaneMeta(pane2, &PaneInfo{Muted: false}, false)
 	if !pane2.working {
 		t.Error("a non-mute metadata sync must not clear working")
 	}

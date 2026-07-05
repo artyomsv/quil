@@ -1,9 +1,13 @@
 package tui
 
 import (
-	"github.com/charmbracelet/x/ansi"
 	"strings"
 	"testing"
+
+	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
+
+	"github.com/artyomsv/quil/internal/config"
 )
 
 // canvasPane builds a wide-canvas pane whose emulator is cols×rows with
@@ -262,5 +266,114 @@ func TestPreviewScrollToRelY_TopAndBottom(t *testing.T) {
 	p.ScrollToRelY(innerH-thumbSize, innerH)
 	if p.scrollBack != 0 {
 		t.Errorf("thumb at bottom: scrollBack %d, want 0", p.scrollBack)
+	}
+}
+
+// Cursor beyond the first wrap segment: with soft-wrap on, a caret at
+// column 45 (innerW 40) must map to visual row 1, column 5 — verifying
+// cursorVisual/cursorCol, not just "an escape is present".
+func TestRenderPreview_CursorPastFirstSegment(t *testing.T) {
+	// 50 chars then the cursor parks at col 50 (end of content) on row 0.
+	p := canvasPane(t, 100, 6, strings.Repeat("a", 50))
+	defer p.Dispose()
+	p.previewWrap = true
+	p.Width, p.Height = 42, 12 // innerW 40, innerH 10; row 0 wraps into 2 visual rows
+	p.Active = true
+
+	l := p.previewLayoutFor(40)
+	pos := p.vt.CursorPosition()
+	absRow := p.vt.ScrollbackLen() + pos.Y
+	wantVisual := l.visualIndex(absRow, pos.X)
+	if wantVisual == l.prefix[absRow] {
+		t.Fatalf("setup: cursor at col %d should be on a wrapped continuation row, not the first segment", pos.X)
+	}
+
+	out := p.renderPreview()
+	lines := strings.Split(out, "\n")
+	// The reverse-video caret must appear on the continuation visual row,
+	// not row 0. Locate which rendered line carries the \x1b[7m caret.
+	caretLine := -1
+	for i, ln := range lines {
+		if strings.Contains(ln, "\x1b[7m") {
+			caretLine = i
+			break
+		}
+	}
+	if caretLine < 0 {
+		t.Fatal("no reverse-video caret rendered for an active cursor")
+	}
+	// total visual rows = 2 (content) ... blanks; bottom-anchored at innerH 10
+	// means the two content rows sit at the top. The caret is on the 2nd.
+	if caretLine != 1 {
+		t.Errorf("caret rendered on visual line %d, want 1 (past the first wrap segment)", caretLine)
+	}
+}
+
+// locate is the inverse of the prefix-sum walk; exercise it directly across
+// multiple wrapped rows including the boundary v values.
+func TestPreviewLayout_LocateRoundTrip(t *testing.T) {
+	p := canvasPane(t, 100, 6, strings.Repeat("a", 95)+"\r\n"+strings.Repeat("b", 45)+"\r\nc\r\n")
+	defer p.Dispose()
+	p.previewWrap = true
+	l := p.previewLayoutFor(40)
+	total := l.totalVisual()
+	for v := 0; v < total; v++ {
+		absRow, s := l.locate(v)
+		// The located segment must be one of absRow's segments, and its
+		// visual index must round-trip back to v.
+		found := false
+		for i, seg := range l.segs[absRow] {
+			if seg == s && l.prefix[absRow]+i == v {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("locate(%d) = row %d seg %+v does not round-trip", v, absRow, s)
+		}
+	}
+}
+
+// The toggle_wrap keybinding flips previewWrap on the active WIDE-CANVAS
+// pane and no-ops elsewhere — the UI entry point, distinct from the layout
+// math tested above.
+func TestHandleKey_ToggleWrap(t *testing.T) {
+	cfg := config.Default()
+	cfg.Keybindings.ToggleWrap = "f9" // simple key, avoids alt+shift encoding
+
+	canvas := NewPaneModel("wc", 1024)
+	canvas.WideCanvas = true
+	tab := NewTabModel("t", "T")
+	tab.Root = NewLeaf(canvas)
+	tab.ActivePane = "wc"
+	m := Model{
+		cfg:           cfg,
+		client:        &fakeSender{},
+		tabs:          []*TabModel{tab},
+		activeTab:     0,
+		notifications: NewNotificationCenter(30, 50),
+	}
+
+	if canvas.previewWrap {
+		t.Fatal("setup: previewWrap must start false")
+	}
+	m.handleKey(tea.KeyPressMsg{Code: tea.KeyF9})
+	if !canvas.previewWrap {
+		t.Error("toggle_wrap did not enable previewWrap on the active wide-canvas pane")
+	}
+	m.handleKey(tea.KeyPressMsg{Code: tea.KeyF9})
+	if canvas.previewWrap {
+		t.Error("toggle_wrap did not flip previewWrap back off")
+	}
+
+	// Non-canvas active pane: the toggle must be a no-op (no spurious flag).
+	plain := NewPaneModel("plain", 1024)
+	tab2 := NewTabModel("t2", "T2")
+	tab2.Root = NewLeaf(plain)
+	tab2.ActivePane = "plain"
+	m.tabs = []*TabModel{tab2}
+	m.handleKey(tea.KeyPressMsg{Code: tea.KeyF9})
+	if plain.previewWrap {
+		t.Error("toggle_wrap must not set previewWrap on a non-canvas pane")
 	}
 }

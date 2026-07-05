@@ -136,3 +136,98 @@ wide_canvas = true
 		}
 	}
 }
+
+// flaggedCanvasRegistry returns a registry whose claude-code plugin has
+// wide_canvas = true (mirrors the shipped default) for reconciliation tests.
+func flaggedCanvasRegistry(t *testing.T) *plugin.Registry {
+	t.Helper()
+	dir := t.TempDir()
+	toml := "[plugin]\nname = \"claude-code\"\nschema_version = 7\n[command]\ncmd = \"true\"\n[display]\nwide_canvas = true\n"
+	if err := os.WriteFile(filepath.Join(dir, "claude-code.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatalf("write plugin: %v", err)
+	}
+	reg := plugin.NewRegistry()
+	if err := reg.LoadFromDir(dir); err != nil {
+		t.Fatalf("LoadFromDir: %v", err)
+	}
+	return reg
+}
+
+// The cold-restart path (daemon restart with a saved layout tree) goes
+// through restoreTabLayout, not the "new pane" branch — this is the exact
+// path the 2026-07-05 regression left rect-sized. Assert the flag reaches
+// the VT there too.
+func TestApplyWorkspaceState_RestorePath_CanvasFlag(t *testing.T) {
+	m := Model{
+		cfg:            config.Default(),
+		notifications:  NewNotificationCenter(30, 50),
+		pluginRegistry: flaggedCanvasRegistry(t),
+		mcpHighlights:  make(map[string]bool),
+		attached:       true,
+		width:          209,
+		height:         58,
+	}
+	// Build a saved single-pane layout tree so applyWorkspaceState takes the
+	// restoreTabLayout branch (tab absent locally + non-empty Layout).
+	layout, err := MarshalLayout(NewLeaf(NewPaneModel("pane-r1", 4096)))
+	if err != nil {
+		t.Fatalf("MarshalLayout: %v", err)
+	}
+	state := WorkspaceStateMsg{
+		ActiveTab: "t1",
+		Tabs:      []TabInfo{{ID: "t1", Name: "AI", Panes: []string{"pane-r1"}, Layout: layout}},
+		Panes:     []PaneInfo{{ID: "pane-r1", TabID: "t1", Type: "claude-code"}},
+	}
+	m.applyWorkspaceState(state)
+	m.resizeTabs()
+
+	leaves := m.tabs[0].Leaves()
+	if len(leaves) != 1 {
+		t.Fatalf("leaves = %d, want 1", len(leaves))
+	}
+	if !leaves[0].WideCanvas {
+		t.Error("restore path (restoreTabLayout) left WideCanvas=false — the 2026-07-05 regression")
+	}
+	if w := leaves[0].vt.Width(); w != 207 {
+		t.Errorf("restored canvas pane VT width %d, want 207", w)
+	}
+}
+
+// Mid-session plugin migration reloads the registry; a subsequent broadcast
+// reconciling an ALREADY-present pane (the resync-in-tree branch) must pick
+// up the freshly-true flag. Reproduces the regression scenario the
+// syncPaneMeta doc comment describes.
+func TestApplyWorkspaceState_MidSessionFlip_CanvasFlag(t *testing.T) {
+	m := Model{
+		cfg:            config.Default(),
+		notifications:  NewNotificationCenter(30, 50),
+		pluginRegistry: plugin.NewRegistry(), // no wide_canvas yet (pre-migration)
+		mcpHighlights:  make(map[string]bool),
+		attached:       true,
+		width:          209,
+		height:         58,
+	}
+	state := WorkspaceStateMsg{
+		ActiveTab: "t1",
+		Tabs:      []TabInfo{{ID: "t1", Name: "AI", Panes: []string{"pane-m1"}}},
+		Panes:     []PaneInfo{{ID: "pane-m1", TabID: "t1", Type: "claude-code"}},
+	}
+	m.applyWorkspaceState(state)
+	if m.tabs[0].Leaves()[0].WideCanvas {
+		t.Fatal("setup: pane must start non-canvas before migration")
+	}
+
+	// Migration reloads the registry with wide_canvas = true, then the next
+	// broadcast re-reconciles the same tab/pane (resync-in-tree branch).
+	m.pluginRegistry = flaggedCanvasRegistry(t)
+	m.applyWorkspaceState(state)
+	m.resizeTabs()
+
+	pane := m.tabs[0].Leaves()[0]
+	if !pane.WideCanvas {
+		t.Error("resync-in-tree branch did not pick up the post-migration flag flip")
+	}
+	if w := pane.vt.Width(); w != 207 {
+		t.Errorf("post-flip canvas pane VT width %d, want 207", w)
+	}
+}

@@ -30,14 +30,19 @@ func overlayRight(base, overlay string, totalW, overlayW int) string {
 	out := make([]string, len(baseLines))
 	for i, bl := range baseLines {
 		left := ansi.Truncate(bl, keepW, "")
-		if pad := keepW - ansi.StringWidth(left); pad > 0 {
-			left += strings.Repeat(" ", pad)
+		// Reset BEFORE padding: if Truncate left an SGR open at the cut
+		// (e.g. a trailing background color), padding the gap without a
+		// reset first would bleed that background into the columns between
+		// the pane content and the overlay.
+		pad := ""
+		if n := keepW - ansi.StringWidth(left); n > 0 {
+			pad = strings.Repeat(" ", n)
 		}
 		right := blank
 		if i < len(overlayLines) {
 			right = overlayLines[i]
 		}
-		out[i] = left + "\x1b[0m" + right
+		out[i] = left + "\x1b[0m" + pad + right
 	}
 	return strings.Join(out, "\n")
 }

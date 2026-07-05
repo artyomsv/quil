@@ -149,6 +149,13 @@ func (p *PaneModel) renderPreview() string {
 	l := p.previewLayoutFor(innerW)
 	total := l.totalVisual()
 	viewStart := total - innerH - p.scrollBack
+	// Top-anchor when content is shorter than the viewport (rare for a
+	// window-sized emulator, but a fresh pane can have total < innerH). A
+	// negative viewStart would otherwise pad blank rows at the TOP and pin
+	// content to the bottom; terminals conventionally top-anchor.
+	if viewStart < 0 {
+		viewStart = 0
+	}
 	scrolled := p.scrollBack > 0
 
 	// Caret position in visual space (live view only).

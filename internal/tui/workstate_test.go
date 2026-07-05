@@ -354,6 +354,22 @@ func TestTabLabel_ShowsSpinnerWhenWorking(t *testing.T) {
 	}
 }
 
+func TestSyncPaneMeta_SetsWideCanvas(t *testing.T) {
+	t.Parallel()
+	// The flag is passed explicitly (resolved against the live registry by
+	// the caller) so every reconciliation path re-evaluates it — a plugin
+	// migration mid-session must be able to flip it in both directions.
+	pane := NewPaneModel("p", 1024)
+	syncPaneMeta(pane, &PaneInfo{Type: "claude-code"}, true)
+	if !pane.WideCanvas {
+		t.Error("syncPaneMeta must set WideCanvas from the passed flag (true)")
+	}
+	syncPaneMeta(pane, &PaneInfo{Type: "claude-code"}, false)
+	if pane.WideCanvas {
+		t.Error("syncPaneMeta must clear WideCanvas when the flag flips to false")
+	}
+}
+
 func TestSyncPaneMeta_MuteClearsWorking(t *testing.T) {
 	t.Parallel()
 	// Muting a pane mid-turn must clear `working`: the daemon drops a muted

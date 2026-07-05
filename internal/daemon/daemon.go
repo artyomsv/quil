@@ -1964,8 +1964,19 @@ func claudeHookSpawnPrep(quilDir, paneID, hookMode string, userArgs []string) (p
 // are not handled here — no concrete examples observed in the wild yet.
 // Extend the replacer when a real path forces the issue.
 func escapeClaudeCWD(cwd string) string {
-	r := strings.NewReplacer(":", "-", `\`, "-", "/", "-", "_", "-")
-	return r.Replace(cwd)
+	// Claude Code names its per-project dir under ~/.claude/projects/ by
+	// replacing EVERY character outside [A-Za-z0-9] with '-'. Earlier
+	// versions here replaced only : \ / _ and missed '.', so any CWD
+	// containing a dot (e.g. a .claude/worktrees path) probed a
+	// nonexistent directory, claudeSessionFileExists returned false, and
+	// every restored pane fell back to --continue — all resuming the SAME
+	// latest session after a daemon restart (2026-07-05 dev incident).
+	return strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			return r
+		}
+		return '-'
+	}, cwd)
 }
 
 // claudeSessionFileExists reports whether Claude has persisted a session

@@ -323,7 +323,7 @@ func TestEscapeClaudeCWD(t *testing.T) {
 	}{
 		{"windows path", `E:\Projects\Stukans\Prototypes\calyx`, "E--Projects-Stukans-Prototypes-calyx"},
 		{"unix path", "/home/user/project", "-home-user-project"},
-		{"windows with dot-dir", `C:\Users\artjo\.claude`, "C--Users-artjo-.claude"},
+		{"windows with dot-dir", `C:\Users\artjo\.claude`, "C--Users-artjo--claude"},
 		{"mixed separators", `E:/Projects\mixed`, "E--Projects-mixed"},
 		{"root-only windows", `C:\`, "C--"},
 		{"empty", "", ""},
@@ -334,13 +334,16 @@ func TestEscapeClaudeCWD(t *testing.T) {
 		{"unix path with underscore", "/Users/Artjoms_Stukans/Projects/crypto-finance", "-Users-Artjoms-Stukans-Projects-crypto-finance"},
 		{"underscore-only segment", "/home/foo_bar/quil", "-home-foo-bar-quil"},
 		{"multiple underscores", "/a_b/c_d_e", "-a-b-c-d-e"},
-		// Negative cases: pin the deliberately-conservative scope. If
-		// Claude is observed to encode any of these in the wild, extend
-		// the replacer AND update these rows together so the assumption
-		// shift is reviewable as a single diff.
-		{"dot preserved", "/foo.bar/quil", "-foo.bar-quil"},
-		{"space preserved", "/foo bar/quil", "-foo bar-quil"},
+		// Field evidence 2026-07-05: a worktree CWD containing ".claude"
+		// landed under E--Projects-Stukans-quil--claude-worktrees-… — Claude
+		// encodes EVERY non-alphanumeric as '-'. The escaper now mirrors
+		// that rule exactly; only [A-Za-z0-9] survives.
+		{"dot encoded", "/foo.bar/quil", "-foo-bar-quil"},
+		{"space encoded", "/foo bar/quil", "-foo-bar-quil"},
 		{"uppercase preserved", "/Foo/BAR", "-Foo-BAR"},
+		{"worktree dot-dir (real incident)",
+			`E:\Projects\Stukans\quil\.claude\worktrees\resize-artifacts`,
+			"E--Projects-Stukans-quil--claude-worktrees-resize-artifacts"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

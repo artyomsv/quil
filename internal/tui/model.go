@@ -10,6 +10,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -66,6 +67,16 @@ type PaneInfo struct {
 	Pending      bool // deferred restore — not yet lazy-spawned
 	SessionID    string
 	HistoryLines int
+	// MouseTracking/MouseSGR are daemon-authoritative (scanned from the PTY
+	// stream): the child app has enabled mouse tracking, so wheel events
+	// should be forwarded to it. Mirrored onto PaneModel for the wheel handler.
+	MouseTracking bool
+	MouseSGR      bool
+	// Model/ContextTokens are daemon-authoritative (extracted from hook event
+	// data at turn boundaries): the model id and context-window token count of
+	// the pane's last completed AI turn. Empty/zero for non-AI panes.
+	Model         string
+	ContextTokens int64
 }
 
 // paneSettleRepaintMsg fires shortly after a pane's first live output and
@@ -241,38 +252,38 @@ type Model struct {
 	// for CreatePanePayload.CWD. The two fields exist separately so that the
 	// browser can navigate freely without dirtying the "to be sent" value
 	// until the user actually presses Continue.
-	repoCandidates     []string            // git repos offered by the setup dialog (discover="git"); nil = plain browser
-	repoPickCandidates []string            // candidates for dialogGitRepoPick (Alt+G, multiple repos)
+	repoCandidates     []string               // git repos offered by the setup dialog (discover="git"); nil = plain browser
+	repoPickCandidates []string               // candidates for dialogGitRepoPick (Alt+G, multiple repos)
 	kubeContexts       []kubediscover.Context // contexts offered by the setup dialog (discover="kube"); nil = none
-	kubeCursor         int                 // row cursor in the kube field: 0 = Default context, 1.. = kubeContexts
-	lastSelectedCWD    string              // remembers previous CWD selection across pane creations
-	selectedCWD        string              // CWD chosen in dialogCreatePaneSetup (empty = daemon default)
-	cwdInputError      string              // validation error shown under CWD input (empty = ok)
-	toggleStates       []bool              // checkbox states; one entry per plugin's Toggles slice, same indexing
-	setupFieldCursor   int                 // focused field in setup dialog: 0 = CWD (if PromptsCWD), then toggles, then Continue
-	cwdBrowseDir       string              // current dir shown in the setup dialog's directory browser
-	cwdBrowseEntries   []string            // browser listing: ".." (if not at root) + sorted subdirs
-	cwdBrowseCursor    int                 // selected entry index in cwdBrowseEntries
-	cwdBrowseScroll    int                 // scroll offset (top index) for the visible window of cwdBrowseEntries
-	tomlEditor         *TextEditor         // active TOML editor (nil when not editing)
-	selection          *Selection          // active text selection (nil when none)
-	mouseDown          bool                // true while left mouse button is held
-	mouseStartX        int                 // screen X of mouse press
-	mouseStartY        int                 // screen Y of mouse press
-	configChanged      bool                // true when config needs saving on exit
-	disclaimerTipIdx   int                 // random tip index for disclaimer dialog
-	mcpHighlights      map[string]bool     // pane IDs with active MCP highlight
-	mcpHighlightSeq    map[string]int      // sequence number for highlight timer reset
-	notifications      *NotificationCenter // notification sidebar
-	paneHistory        []PaneRef           // navigation history (bounded, 20 max)
-	sidebarFocused     bool                // true when notification sidebar has keyboard focus
-	notesMode          bool                // true when pane notes editor is open for the active pane
-	notesEditor        *NotesEditor        // active notes editor (nil when notesMode is false)
-	notesPaneFocused   bool                // true when keyboard input goes to the bound pane (PTY) instead of the notes editor
-	notesEnteredFocus  bool                // true when toggleNotesMode was the one that turned the tab's focus mode on (so exit reverts)
-	notesMouseDown     bool                // true while a left-button drag is in progress inside the notes editor
-	notesAnchorRow     int                 // document row where a notes-editor drag began (resolved once on click)
-	notesAnchorCol     int                 // document col where a notes-editor drag began (resolved once on click)
+	kubeCursor         int                    // row cursor in the kube field: 0 = Default context, 1.. = kubeContexts
+	lastSelectedCWD    string                 // remembers previous CWD selection across pane creations
+	selectedCWD        string                 // CWD chosen in dialogCreatePaneSetup (empty = daemon default)
+	cwdInputError      string                 // validation error shown under CWD input (empty = ok)
+	toggleStates       []bool                 // checkbox states; one entry per plugin's Toggles slice, same indexing
+	setupFieldCursor   int                    // focused field in setup dialog: 0 = CWD (if PromptsCWD), then toggles, then Continue
+	cwdBrowseDir       string                 // current dir shown in the setup dialog's directory browser
+	cwdBrowseEntries   []string               // browser listing: ".." (if not at root) + sorted subdirs
+	cwdBrowseCursor    int                    // selected entry index in cwdBrowseEntries
+	cwdBrowseScroll    int                    // scroll offset (top index) for the visible window of cwdBrowseEntries
+	tomlEditor         *TextEditor            // active TOML editor (nil when not editing)
+	selection          *Selection             // active text selection (nil when none)
+	mouseDown          bool                   // true while left mouse button is held
+	mouseStartX        int                    // screen X of mouse press
+	mouseStartY        int                    // screen Y of mouse press
+	configChanged      bool                   // true when config needs saving on exit
+	disclaimerTipIdx   int                    // random tip index for disclaimer dialog
+	mcpHighlights      map[string]bool        // pane IDs with active MCP highlight
+	mcpHighlightSeq    map[string]int         // sequence number for highlight timer reset
+	notifications      *NotificationCenter    // notification sidebar
+	paneHistory        []PaneRef              // navigation history (bounded, 20 max)
+	sidebarFocused     bool                   // true when notification sidebar has keyboard focus
+	notesMode          bool                   // true when pane notes editor is open for the active pane
+	notesEditor        *NotesEditor           // active notes editor (nil when notesMode is false)
+	notesPaneFocused   bool                   // true when keyboard input goes to the bound pane (PTY) instead of the notes editor
+	notesEnteredFocus  bool                   // true when toggleNotesMode was the one that turned the tab's focus mode on (so exit reverts)
+	notesMouseDown     bool                   // true while a left-button drag is in progress inside the notes editor
+	notesAnchorRow     int                    // document row where a notes-editor drag began (resolved once on click)
+	notesAnchorCol     int                    // document col where a notes-editor drag began (resolved once on click)
 
 	// Scrollbar click-and-drag. Set on a left-click that hits a pane's
 	// rightmost content column (the scrollbar track). While
@@ -721,6 +732,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if tab := m.activeTabModel(); tab != nil {
 			if pane := tab.ActivePaneModel(); pane != nil {
+				// Apps that requested mouse tracking (opencode, claude-code,
+				// vim, htop, lazygit, …) scroll their own viewport. Forward
+				// the wheel to the PTY — these run on the alternate screen,
+				// which never feeds Quil's scrollback, so local scrolling is a
+				// silent no-op. One event per wheel notch matches a real
+				// terminal; the app applies its own scroll step.
+				if pane.MouseTracking() {
+					// Only forward when we can resolve the pane's rect: a nil rect
+					// means the layout is momentarily unsettled (rapid tab switch,
+					// split-then-focus), and forwarding with a (0,0) origin would
+					// hand any-event tracking (?1003) a bogus cursor position.
+					// Either way this pane's local scrollback is never populated
+					// (alt-screen), so swallow the event rather than scrolling it.
+					if rect := m.activePaneRect(); rect != nil {
+						relX := msg.X - rect.OX - 1
+						relY := msg.Y - rect.OY - 1
+						if seq := pane.wheelForwardSeq(msg.Button == tea.MouseWheelUp, relX, relY); seq != nil {
+							logger.Debug("wheel: forward pane=%s type=%s btn=%v rel=(%d,%d) seq=%q (local n=%v b=%v a=%v sgr=%v daemonTrack=%v)",
+								pane.ID, pane.Type, msg.Button, relX, relY, string(seq),
+								pane.mouseNormal, pane.mouseButton, pane.mouseAny, pane.mouseSGR, pane.daemonMouseTracking)
+							m.sendInputToPane(pane.ID, seq)
+						}
+					}
+					return m, nil
+				}
 				if msg.Button == tea.MouseWheelUp {
 					pane.ScrollUp(lines)
 				} else if msg.Button == tea.MouseWheelDown {
@@ -949,11 +985,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		//
 		// hook.claude.PostToolUse is a work-state-only signal (re-arms the
 		// spinner after a prompt is answered) — never a user-facing card.
+		//
+		// A muted pane's daemon still forwards work-state hook events live
+		// (see emitEvent) so `working` tracks reality across mute/unmute —
+		// but muting must still mean "no visible notification", so suppress
+		// the sidebar card for any event sourced from a muted pane.
+		eventPane, _ := m.findPaneAndTab(msg.PaneID)
+		muted := eventPane != nil && eventPane.Muted
 		workStateOnly := msg.Type == "hook.claude.PostToolUse"
-		if !workStateOnly && !(msg.Type == "output_idle" && m.isActivePane(msg.PaneID)) {
+		if !muted && !workStateOnly && !(msg.Type == "output_idle" && m.isActivePane(msg.PaneID)) {
 			m.notifications.AddEvent(ipc.PaneEventPayload(msg))
 		}
 		cmds := []tea.Cmd{m.listenForMessages()}
+		// Model/context usage rides turn-boundary hook events as Data keys
+		// (claude Stop/PostCompact, opencode session.idle) — apply it live so
+		// the status bar refreshes without waiting for a workspace snapshot.
+		if eventPane != nil {
+			if model := msg.Data["model"]; model != "" {
+				if tokens, err := strconv.ParseInt(msg.Data["context_tokens"], 10, 64); err == nil && tokens >= 0 {
+					eventPane.Model = model
+					eventPane.ContextTokens = tokens
+				}
+			}
+		}
 		// Update working state + unseen marks from the same hook stream.
 		m.applyWorkTransition(msg.PaneID, msg.Type)
 		if m.anyPaneWorking() && !m.workTickRunning {
@@ -1140,6 +1194,54 @@ func (m Model) sidebarSwallowsMouse(x, y int) bool {
 // longer selectable by clicking — drag selection still covers them.
 const scrollbarHitPadding = 1
 
+// activePaneRectFocus returns the rendered rect of the active pane when the
+// active tab is in focus mode (notes mode implies focus mode), or nil when the
+// tab is not in focus mode. The geometry mirrors View(): the active pane fills
+// the area below the tab bar and left of the notes panel + notification
+// sidebar (both reserve 0 width in plain focus mode, so the pane is full-width).
+func (m *Model) activePaneRectFocus() *PaneRect {
+	tab := m.activeTabModel()
+	if tab == nil || !tab.FocusMode() {
+		return nil
+	}
+	pane := tab.ActivePaneModel()
+	if pane == nil {
+		return nil
+	}
+	// The notification sidebar is an overlay (reserves 0 layout width); only
+	// the notes panel narrows the pane area.
+	notesW := m.notesPanelWidth()
+	return &PaneRect{
+		Pane: pane,
+		OX:   0,
+		OY:   1, // tab bar occupies row 0
+		W:    m.width - notesW,
+		H:    m.height - chromeHeight,
+	}
+}
+
+// activePaneRect returns the rendered rect of the active pane in any layout
+// mode (focus, notes, or split). Returns nil if there is no active pane.
+func (m *Model) activePaneRect() *PaneRect {
+	if r := m.activePaneRectFocus(); r != nil {
+		return r
+	}
+	tab := m.activeTabModel()
+	if tab == nil || tab.Root == nil {
+		return nil
+	}
+	tabH := m.height - chromeHeight
+	notesW := m.notesPanelWidth()
+	var rects []PaneRect
+	tab.Root.CollectRects(0, 1, m.width-notesW, tabH, &rects)
+	for i := range rects {
+		if rects[i].Pane != nil && rects[i].Pane.ID == tab.ActivePane {
+			return &rects[i]
+		}
+	}
+	return nil
+}
+
 // hitTestScrollbar returns the pane rect under (x, y) when the click hits
 // the pane's scrollbar zone. The visible scrollbar lives at
 // `rect.OX + rect.W - 2` (just inside the right border); the hit zone
@@ -1148,11 +1250,22 @@ const scrollbarHitPadding = 1
 // (rows `rect.OY + 1` through `rect.OY + rect.H - 2` inclusive).
 func (m *Model) hitTestScrollbar(x, y int) *PaneRect {
 	tab := m.activeTabModel()
-	if tab == nil || tab.Root == nil {
+	if tab == nil {
 		return nil
 	}
-	tabH := m.height - chromeHeight
-	rect := tab.Root.FindPaneRectAt(x, y, 0, 1, m.paneAreaWidth(), tabH)
+	// Resolve the rect using the SAME width View() lays the pane area out with
+	// (m.width - sidebarW - notesW). paneAreaWidth() omits the notes-panel
+	// width, so in notes mode the scrollbar column would be computed too far
+	// right and every click would miss. Focus mode renders only the active pane
+	// full-area and never resizes the split tree, so use its rendered rect.
+	var rect *PaneRect
+	if r := m.activePaneRectFocus(); r != nil {
+		rect = r
+	} else if tab.Root != nil {
+		tabH := m.height - chromeHeight
+		notesW := m.notesPanelWidth()
+		rect = tab.Root.FindPaneRectAt(x, y, 0, 1, m.width-notesW, tabH)
+	}
 	if rect == nil {
 		return nil
 	}
@@ -2995,6 +3108,9 @@ func (m Model) renderStatusBar() string {
 				}
 			}
 			left = fmt.Sprintf("%s  %s", displayPath, paneInfo)
+			if seg := modelStatusSegment(pane.Model, pane.ContextTokens); seg != "" {
+				left = fmt.Sprintf("%s  %s  %s", displayPath, seg, paneInfo)
+			}
 			if tab.FocusMode() {
 				left = "[focus] " + left
 			}
@@ -3269,6 +3385,18 @@ func parseWorkspaceState(raw map[string]any) WorkspaceStateMsg {
 				}
 				if hl, ok := pm["history_lines"].(float64); ok {
 					pi.HistoryLines = int(hl)
+				}
+				if mt, ok := pm["mouse_tracking"].(bool); ok {
+					pi.MouseTracking = mt
+				}
+				if ms, ok := pm["mouse_sgr"].(bool); ok {
+					pi.MouseSGR = ms
+				}
+				if model, ok := pm["model"].(string); ok {
+					pi.Model = model
+				}
+				if ct, ok := pm["context_tokens"].(float64); ok {
+					pi.ContextTokens = int64(ct)
 				}
 				state.Panes = append(state.Panes, pi)
 			}
@@ -3786,6 +3914,22 @@ func sanitizeDialogInput(s string) string {
 // NOTE: This does NOT wrap in bracketed paste sequences because it handles
 // tea.PasteMsg events, which originate from the terminal's own bracketed paste
 // — the terminal has already signaled paste mode to the shell.
+// sendInputToPane writes raw bytes to a specific pane's PTY stdin via IPC.
+// Used to forward encoded mouse-wheel events to mouse-tracking apps.
+func (m Model) sendInputToPane(paneID string, data []byte) {
+	if len(data) == 0 || paneID == "" {
+		return
+	}
+	// NewMessage only fails if the fixed PaneInputPayload struct can't marshal
+	// (it always can); Send errors are transient and non-actionable here — a
+	// dropped wheel notch is cosmetic, matching the other m.client.Send sites.
+	msg, _ := ipc.NewMessage(ipc.MsgPaneInput, ipc.PaneInputPayload{
+		PaneID: paneID,
+		Data:   data,
+	})
+	_ = m.client.Send(msg)
+}
+
 func (m Model) sendClipboardToPane(text string) {
 	if text == "" {
 		return
@@ -3883,6 +4027,24 @@ func keyToBytes(keyMsg tea.KeyPressMsg) []byte {
 		ch := s[5]
 		if ch >= 'a' && ch <= 'z' {
 			return []byte{ch - 'a' + 1}
+		}
+	}
+
+	// Alt/Meta + printable key → ESC-prefixed byte (Meta encoding). Terminals
+	// send Meta this way, and readline / claude-code bind ESC-b / ESC-f to
+	// backward-word / forward-word. macOS Terminal.app with "Use Option as Meta
+	// key" delivers Option+b / Option+f (a common word-jump setup) as alt+b /
+	// alt+f — which otherwise fall through here and get dropped (no Text on a
+	// modified key). Require Alt WITHOUT Ctrl (Ctrl+Alt combos have explicit
+	// cases above), and only printable ASCII (special keys are named cases).
+	// Prefer Text (carries the shifted glyph, e.g. Alt+Shift+B → "B") and fall
+	// back to Code (a bare modified key like Alt+B has empty Text).
+	if keyMsg.Mod.Contains(tea.ModAlt) && !keyMsg.Mod.Contains(tea.ModCtrl) {
+		if t := keyMsg.Text; len(t) == 1 && t[0] >= 0x20 && t[0] <= 0x7e {
+			return []byte{0x1b, t[0]}
+		}
+		if r := keyMsg.Code; r >= 0x20 && r <= 0x7e {
+			return []byte{0x1b, byte(r)}
 		}
 	}
 

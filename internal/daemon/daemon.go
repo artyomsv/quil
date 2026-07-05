@@ -1558,6 +1558,13 @@ func (d *Daemon) onPaneExit(pane *Pane, code int) {
 	}
 }
 
+// mouseModeBroadcastCooldown throttles mouse-mode state broadcasts. Normal apps
+// toggle mouse modes at most a couple times (startup enable, exit disable), so
+// this never delays a real change; it only collapses a pathological or hostile
+// PTY stream that alternates a mode every flush, which would otherwise force an
+// unbounded full-snapshot broadcast storm.
+const mouseModeBroadcastCooldown = 250 * time.Millisecond
+
 func (d *Daemon) flushPaneOutput(paneID string, data []byte) {
 	pane := d.session.Pane(paneID)
 	if pane == nil {
@@ -1567,11 +1574,32 @@ func (d *Daemon) flushPaneOutput(paneID string, data []byte) {
 		pane.OutputBuf.Write(data)
 	}
 
-	// Update idle tracking (guarded by PluginMu for goroutine safety)
+	// Update idle tracking + mouse-mode state (guarded by PluginMu).
 	pane.PluginMu.Lock()
-	pane.LastOutputAt = time.Now()
+	now := time.Now()
+	pane.LastOutputAt = now
 	pane.IdleNotified = false
+	newModes := scanMouseModes(pane.MouseModes, data)
+	pane.MouseModes = newModes
+	// A mouse-mode toggle (rare: once at startup, once at exit) must reach the
+	// TUI so it can start/stop forwarding wheel events to the app. broadcastState
+	// builds a full workspace snapshot, and the child fully controls its PTY
+	// output, so we throttle: broadcast only when the state differs from what
+	// clients last saw AND a cooldown has elapsed. Comparing against the
+	// last-broadcast state (not the last-scanned state) means a change suppressed
+	// inside the cooldown window is re-evaluated on the next flush and still
+	// delivered once the window passes — normal apps never hit the window.
+	var doMouseBroadcast bool
+	if newModes != pane.mouseBroadcast && now.Sub(pane.lastMouseBroadcastAt) >= mouseModeBroadcastCooldown {
+		pane.mouseBroadcast = newModes
+		pane.lastMouseBroadcastAt = now
+		doMouseBroadcast = true
+	}
 	pane.PluginMu.Unlock()
+	if doMouseBroadcast {
+		logger.Debug("pane %s: mouse-mode change tracking=%v sgr=%v", paneID, newModes.tracking(), newModes.sgr)
+		d.broadcastState()
+	}
 
 	d.detectBellEvent(pane, paneID, data)
 	d.detectOSC133Exit(pane, paneID, data)
@@ -1766,8 +1794,12 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			typ := pane.Type
 			cwd := pane.CWD
 			isOverlay := pane.Overlay
+			mouseTracking := pane.MouseModes.tracking()
+			mouseSGR := pane.MouseModes.sgr
 			sessionID := pane.PluginState["session_id"]
 			historyLines := pane.HistoryLines
+			lastModel := pane.LastModel
+			lastContextTokens := pane.LastContextTokens
 			if len(pane.PluginState) > 0 {
 				// Copy to avoid holding lock during JSON marshal
 				ps := make(map[string]string, len(pane.PluginState))
@@ -1806,6 +1838,22 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 				}
 				if historyLines > 0 {
 					paneData["history_lines"] = historyLines
+				}
+				// Mouse-mode state is runtime-only (broadcast, never persisted):
+				// it is re-derived from the live PTY stream on every spawn.
+				if mouseTracking {
+					paneData["mouse_tracking"] = true
+				}
+				if mouseSGR {
+					paneData["mouse_sgr"] = true
+				}
+				// Model/context usage of the last completed AI turn is
+				// runtime-only (broadcast, never persisted): a stale token
+				// count from a previous daemon run would be wrong until the
+				// next turn refreshes it.
+				if lastModel != "" {
+					paneData["model"] = lastModel
+					paneData["context_tokens"] = lastContextTokens
 				}
 			}
 			paneData["cwd"] = cwd
@@ -2374,6 +2422,19 @@ func (d *Daemon) emitEvent(e PaneEvent) {
 			muted := pane.Muted
 			pane.PluginMu.Unlock()
 			if muted {
+				// Muting suppresses the visible notification (sidebar card,
+				// MCP get_notifications), but a work-state transition
+				// (turn start/stop/abort) must still reach live clients —
+				// otherwise the TUI's per-pane `working` flag (and its
+				// spinner) goes stale for the whole mute window and never
+				// resyncs on unmute, since no later event exists to correct
+				// it against. Bypass the persisted queue, still broadcast.
+				if hookevents.ClassifyWorkEvent(e.Type) == hookevents.WorkEventNone {
+					return
+				}
+				payload := toPaneEventPayload(e)
+				msg, _ := ipc.NewMessage(ipc.MsgPaneEvent, payload)
+				d.broadcast(msg)
 				return
 			}
 		}
@@ -2468,6 +2529,16 @@ func (d *Daemon) emitHookEvent(p hookevents.Payload) {
 		pane.PluginMu.Lock()
 		pane.HookHealthy = true
 		pane.LastHookEventAt = time.Now()
+		// Model/context usage rides the turn-boundary events (claude
+		// Stop/PostCompact, opencode session.idle) as Data keys. Stored on
+		// the pane (runtime-only) so the workspace snapshot can deliver the
+		// values to a client that attaches between turns.
+		if model := p.Data["model"]; model != "" {
+			if tokens, err := strconv.ParseInt(p.Data["context_tokens"], 10, 64); err == nil && tokens >= 0 {
+				pane.LastModel = model
+				pane.LastContextTokens = tokens
+			}
+		}
 		pane.PluginMu.Unlock()
 	}
 
@@ -3132,6 +3203,18 @@ func (d *Daemon) handleRestartPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 	pane.PluginMu.Lock()
 	pane.ExitCode = nil
 	pane.ExitedAt = time.Time{}
+	// Clear mouse-mode state: the respawned child re-emits its own enable burst,
+	// so carrying the old tracking=true forward would make the TUI forward wheel
+	// notches as escape bytes to the pre-burst screen (e.g. a shell prompt).
+	// Mirrors the TUI's ResetVT clearing its local flags on respawn. Reset the
+	// broadcast bookkeeping too so the fresh (empty) state is delivered promptly.
+	pane.MouseModes = mouseModeState{}
+	pane.mouseBroadcast = mouseModeState{}
+	pane.lastMouseBroadcastAt = time.Time{}
+	// Clear model/context usage: the respawned child starts a fresh (or
+	// resumed) conversation and the next completed turn re-reports it.
+	pane.LastModel = ""
+	pane.LastContextTokens = 0
 	pane.PluginMu.Unlock()
 
 	// Clear output buffer

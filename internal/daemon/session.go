@@ -89,6 +89,19 @@ type Pane struct {
 	// pane is already published to the session maps; concurrent snapshots
 	// may read it). Excluded from disk snapshots.
 	Overlay bool
+	// MouseModes mirrors the child app's DEC mouse-mode state, scanned from the
+	// PTY output stream (scanMouseModes) in flushPaneOutput. The daemon is the
+	// only component that sees the one-time mouse-enable burst on every attach,
+	// so it is authoritative. Broadcast (not persisted) in the workspace snapshot
+	// so the TUI can forward wheel events to apps that handle their own
+	// scrolling. mouseBroadcast / lastMouseBroadcastAt are throttle bookkeeping:
+	// broadcasts are gated by a cooldown so a hostile PTY stream that alternates
+	// a mode every flush cannot force a full-snapshot broadcast storm (the
+	// suppressed change is re-delivered on the next flush past the cooldown, or
+	// by any other broadcastState caller). All three guarded by PluginMu.
+	MouseModes           mouseModeState
+	mouseBroadcast       mouseModeState
+	lastMouseBroadcastAt time.Time
 	// Pending is true between restore and first spawn for a deferred pane: the
 	// model + ghost buffer exist but no PTY has been created yet. Runtime-only,
 	// never persisted. Cleared by ensurePaneSpawned.
@@ -114,6 +127,16 @@ type Pane struct {
 	// the user always sees SOME notification surface, even if not the
 	// hook-driven one.
 	HookHealthy bool
+	// LastModel / LastContextTokens mirror the model id and context-window
+	// token count of the most recent completed AI turn, extracted from hook
+	// event data (claude Stop/PostCompact, opencode session.idle) in
+	// emitHookEvent. Runtime-only — deliberately NOT persisted (a stale
+	// token count from a previous daemon run would be wrong until the next
+	// turn) — and broadcast in the workspace snapshot's runtime block so a
+	// newly-attached TUI shows them without waiting for the next turn.
+	// Cleared on restart/respawn like MouseModes. Guarded by PluginMu.
+	LastModel         string
+	LastContextTokens int64
 }
 
 type SessionManager struct {

@@ -51,7 +51,8 @@ type PaneModel struct {
 	Muted              bool   // notification mute (daemon-authoritative; mirrored here for border rendering)
 	Eager              bool   // eager-restore flag (daemon-authoritative; mirrored for the tab marker)
 	vt                 *vt.SafeEmulator
-	vtDrain            *vtDrain // drain goroutine tracker for p.vt (see closeVT)
+	vtDrain            *vtDrain       // drain goroutine tracker for p.vt (see closeVT)
+	oscFilter          oscTitleFilter // strips OSC 0/1/2 before the emulator (see oscfilter.go)
 	Width              int
 	Height             int
 	Active             bool
@@ -64,6 +65,8 @@ type PaneModel struct {
 	Pending            bool                // deferred restore — not yet lazy-spawned (daemon-authoritative)
 	SessionID          string              // tracked session id (daemon-authoritative; restore checklist)
 	HistoryLines       int                 // ghost-buffer line count (daemon-authoritative; restore checklist)
+	Model              string              // model id of the last completed AI turn (daemon-authoritative; status bar)
+	ContextTokens      int64               // context-window tokens of the last completed AI turn (daemon-authoritative; status bar)
 	resumeStart        time.Time           // when resuming/preparing started (minimum display duration)
 	spinnerFrame       int                 // current frame index in spinnerFrames
 	spinnerTickRunning bool                // guards against stacking restore-spinner tick chains (cf. workTickRunning)
@@ -74,6 +77,26 @@ type PaneModel struct {
 	working            bool                // true while a claude/opencode turn is in progress (hook-driven)
 	unseen             bool                // work finished/parked while this pane was not focused; cleared on focus
 	workFrame          int                 // shared spinner frame index, mirrored here for top-border render
+
+	// Mouse-tracking state, updated by the VT EnableMode/DisableMode callbacks
+	// during AppendOutput (same goroutine as Update/View, like cursorVisible —
+	// no synchronization needed). One bool per DEC mouse mode so disabling a
+	// mode that was never set can't wrongly clear tracking. mouseSGR records the
+	// SGR extended-encoding mode (?1006). When any tracking mode is active the
+	// wheel handler forwards the event to the PTY instead of scrolling Quil's
+	// own scrollback (which alt-screen TUI apps never populate).
+	mouseX10    bool // ?9
+	mouseNormal bool // ?1000
+	mouseButton bool // ?1002
+	mouseAny    bool // ?1003
+	mouseSGR    bool // ?1006
+	// daemonMouseTracking/daemonMouseSGR mirror the daemon-authoritative mouse
+	// state from the workspace snapshot. The daemon sees the one-time
+	// mouse-enable burst on every attach; the local emulator does not when
+	// reattaching to an already-running app (ghost_buffer=false, e.g.
+	// opencode), so this is the reliable signal. Set in syncPaneMeta.
+	daemonMouseTracking bool
+	daemonMouseSGR      bool
 
 	// Render cache: View() output is reused while renderKey() is unchanged.
 	// contentGen covers VT-grid/raw-buffer mutations (the grid itself has no
@@ -217,6 +240,8 @@ func (p *PaneModel) newVTEmulator(w, h int) (*vt.SafeEmulator, *vtDrain) {
 		WorkingDirectory: func(dir string) {
 			p.CWD = parseOSC7Path(dir)
 		},
+		EnableMode:  func(mode ansi.Mode) { p.setMouseMode(mode, true) },
+		DisableMode: func(mode ansi.Mode) { p.setMouseMode(mode, false) },
 	})
 	d := &vtDrain{done: make(chan struct{})}
 	go drainVTResponses(em, d)
@@ -302,7 +327,11 @@ func NewPaneModel(id string, bufSize int) *PaneModel {
 
 func (p *PaneModel) AppendOutput(data []byte) {
 	p.rawBuf.Write(data)
-	p.vt.Write(data)
+	// Strip OSC 0/1/2 (window title) before the emulator: x/vt ends an OSC at a
+	// stray 0x9C even mid-UTF-8, so claude-code's "✳ Claude Code" title leaks
+	// into the grid (see oscfilter.go). The raw ring buffer keeps the untouched
+	// bytes; only the emulator feed is filtered.
+	p.vt.Write(p.oscFilter.Filter(data))
 	p.contentGen++
 }
 
@@ -313,6 +342,10 @@ func (p *PaneModel) ResetVT() {
 	p.installVT(p.newVTEmulator(w, h))
 	p.rawBuf.Reset()
 	p.cursorVisible = true
+	// Fresh emulator starts with every mouse mode off; clear the mirrored
+	// flags so a wheel event isn't forwarded until the new app re-enables
+	// tracking.
+	p.mouseX10, p.mouseNormal, p.mouseButton, p.mouseAny, p.mouseSGR = false, false, false, false, false
 	p.contentGen++
 }
 
@@ -365,6 +398,85 @@ func (p *PaneModel) ScrollDown(lines int) {
 
 func (p *PaneModel) ResetScroll() {
 	p.scrollBack = 0
+}
+
+// setMouseMode records a DEC mouse mode toggle reported by the VT emulator's
+// EnableMode/DisableMode callback. Only mouse-related modes are tracked; every
+// other mode is ignored. Runs on the Update goroutine (inside vt.Write).
+func (p *PaneModel) setMouseMode(mode ansi.Mode, on bool) {
+	switch mode {
+	case ansi.ModeMouseX10:
+		p.mouseX10 = on
+	case ansi.ModeMouseNormal:
+		p.mouseNormal = on
+	case ansi.ModeMouseButtonEvent:
+		p.mouseButton = on
+	case ansi.ModeMouseAnyEvent:
+		p.mouseAny = on
+	case ansi.ModeMouseExtSgr:
+		p.mouseSGR = on
+	}
+}
+
+// MouseTracking reports whether the pane's child app has enabled any mouse
+// tracking mode — i.e. it wants to handle mouse events (wheel scroll, clicks)
+// itself rather than letting Quil scroll its local scrollback. Combines the
+// local emulator state (fast path for freshly-created panes whose mouse-enable
+// burst we just saw) with the daemon-authoritative flag (the reliable path on
+// reattach, where the burst was emitted before this client connected).
+func (p *PaneModel) MouseTracking() bool {
+	return p.mouseX10 || p.mouseNormal || p.mouseButton || p.mouseAny || p.daemonMouseTracking
+}
+
+// wheelForwardSeq returns the mouse-wheel escape sequence to forward to the
+// PTY child, or nil when the app has not enabled mouse tracking. relX/relY are
+// content-relative (0-based) and are clamped to the emulator grid; the encoding
+// follows the app's requested mode (SGR when ?1006 is set, else legacy X10).
+func (p *PaneModel) wheelForwardSeq(up bool, relX, relY int) []byte {
+	if !p.MouseTracking() {
+		return nil
+	}
+	if w := p.vt.Width(); w > 0 {
+		if relX < 0 {
+			relX = 0
+		} else if relX >= w {
+			relX = w - 1
+		}
+	} else if relX < 0 {
+		relX = 0
+	}
+	if h := p.vt.Height(); h > 0 {
+		if relY < 0 {
+			relY = 0
+		} else if relY >= h {
+			relY = h - 1
+		}
+	} else if relY < 0 {
+		relY = 0
+	}
+	btn := ansi.MouseWheelUp
+	if !up {
+		btn = ansi.MouseWheelDown
+	}
+	b := ansi.EncodeMouseButton(btn, false, false, false, false)
+	// SGR is the modern default; apps parse it regardless of the mode they
+	// set, and it has no 223-column coordinate limit. Use legacy X10 only when
+	// we positively know SGR is not in play (local emulator saw no ?1006 and
+	// the daemon didn't report it either).
+	if p.mouseSGR || p.daemonMouseSGR {
+		return []byte(ansi.MouseSgr(b, relX, relY, false))
+	}
+	// X10 encodes each coordinate in a single byte (32+1+coord), so it cannot
+	// represent a position past column/row 222 (0-based) — beyond that the byte
+	// wraps into garbage. Clamp to the representable maximum on very large panes.
+	const x10Max = 222
+	if relX > x10Max {
+		relX = x10Max
+	}
+	if relY > x10Max {
+		relY = x10Max
+	}
+	return []byte(ansi.MouseX10(b, relX, relY))
 }
 
 // ScrollToRelY positions the scrollback so that the scrollbar thumb's TOP

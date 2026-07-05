@@ -286,6 +286,39 @@ func TestTabStyle_UnseenOverridesInactive(t *testing.T) {
 	}
 }
 
+func TestUpdate_PaneEvent_MutedPaneTracksWorkingWithoutCard(t *testing.T) {
+	t.Parallel()
+	// A muted pane's daemon still forwards work-state hook events live (see
+	// daemon.emitEvent) so `working` stays accurate across mute/unmute — but
+	// muting must still suppress the visible sidebar card.
+	m := modelForWorkTest()
+	m.tabs[0].Root.Leaves()[0].Muted = true
+
+	start := paneEventMsg(ipc.PaneEventPayload{
+		ID: "e1", PaneID: "p1", Type: "hook.claude.UserPromptSubmit", Title: "Working on: x",
+	})
+	next, _ := m.Update(start)
+	nm := next.(Model)
+	if !nm.tabs[0].Root.Leaves()[0].working {
+		t.Fatal("muted pane should still track working=true from a live work-state event")
+	}
+	if nm.notifications.Count() != 0 {
+		t.Errorf("muted pane must not produce a sidebar card: got %d events", nm.notifications.Count())
+	}
+
+	stop := paneEventMsg(ipc.PaneEventPayload{
+		ID: "e2", PaneID: "p1", Type: "hook.claude.Stop", Title: "Done",
+	})
+	next2, _ := nm.Update(stop)
+	nm2 := next2.(Model)
+	if nm2.tabs[0].Root.Leaves()[0].working {
+		t.Error("muted pane should still clear working=false from a live Stop event")
+	}
+	if nm2.notifications.Count() != 0 {
+		t.Errorf("muted pane must not produce a sidebar card on stop: got %d events", nm2.notifications.Count())
+	}
+}
+
 func TestUpdate_PaneEvent_StartBeginsTicking(t *testing.T) {
 	t.Parallel()
 	m := modelForWorkTest()
@@ -370,19 +403,20 @@ func TestSyncPaneMeta_SetsWideCanvas(t *testing.T) {
 	}
 }
 
-func TestSyncPaneMeta_MuteClearsWorking(t *testing.T) {
+func TestSyncPaneMeta_MuteDoesNotDisturbWorking(t *testing.T) {
 	t.Parallel()
-	// Muting a pane mid-turn must clear `working`: the daemon drops a muted
-	// pane's hook events, so the completion edge that would clear it never
-	// arrives — otherwise the spinner (and the 100ms tick) would run forever.
+	// The daemon still delivers work-state hook events live for a muted pane
+	// (see daemon.emitEvent), so a metadata sync must NOT clobber `working`
+	// just because the pane is muted — otherwise a real completion event
+	// racing a workspace-state broadcast would get its effect reverted, and
+	// the spinner would never reappear after unmuting a still-working pane.
 	pane := NewPaneModel("p1", 1024)
 	pane.working = true
 	syncPaneMeta(pane, &PaneInfo{Muted: true}, false)
-	if pane.working {
-		t.Error("muting a pane must clear its working indicator")
+	if !pane.working {
+		t.Error("a mute metadata sync must not clear working")
 	}
 
-	// An unmuted metadata sync must not disturb working.
 	pane2 := NewPaneModel("p2", 1024)
 	pane2.working = true
 	syncPaneMeta(pane2, &PaneInfo{Muted: false}, false)

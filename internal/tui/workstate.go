@@ -4,6 +4,8 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+
+	"github.com/artyomsv/quil/internal/hookevents"
 )
 
 // workSpinnerInterval is the animation cadence for the work-in-progress
@@ -11,45 +13,21 @@ import (
 const workSpinnerInterval = 100 * time.Millisecond
 
 // workTransition classifies a pane event's effect on a pane's working state.
-type workTransition int
+// Alias of hookevents.WorkEventKind — that package is the single source of
+// truth (shared with the daemon's mute-bypass logic in emitEvent).
+type workTransition = hookevents.WorkEventKind
 
 const (
-	workNone  workTransition = iota // no effect
-	workStart                       // a turn began
-	workStop                        // turn completed OR parked for user input → mark pane unseen
-	workAbort                       // process exited → clear working, no mark
+	workNone  = hookevents.WorkEventNone  // no effect
+	workStart = hookevents.WorkEventStart // a turn began
+	workStop  = hookevents.WorkEventStop  // turn completed OR parked for user input → mark pane unseen
+	workAbort = hookevents.WorkEventAbort // process exited → clear working, no mark
 )
 
 // workEventKind maps a PaneEvent Type (the daemon encodes hook events as
-// "hook.<src>.<event>") to a working-state transition. This is the single
-// source of truth for the work indicator — keep it in sync with the
-// producers in internal/claudehook and internal/opencodehook.
+// "hook.<src>.<event>") to a working-state transition.
 func workEventKind(eventType string) workTransition {
-	switch eventType {
-	case "hook.claude.UserPromptSubmit", "hook.opencode.chat.message":
-		return workStart
-	// Resume edge: the user answered an interactive-prompt tool (AskUserQuestion
-	// / ExitPlanMode) and the agent is working again. The hook registers
-	// PostToolUse only for those tools, so this re-arms the spinner after a park
-	// without tracking ordinary tool completions.
-	case "hook.claude.PostToolUse":
-		return workStart
-	case "hook.claude.Stop", "hook.claude.SessionEnd",
-		"hook.opencode.session.idle", "hook.opencode.session.error":
-		return workStop
-	// Park-for-input edges: the agent is blocked waiting on the user (permission
-	// prompt, option select, idle-input nudge). There is no "resumed after
-	// approval" hook, so we treat the park as a turn boundary — stop the spinner
-	// and mark the pane unseen to pull attention. Both Claude (Notification fires
-	// for permission + idle-wait; PermissionRequest when available) and opencode
-	// (permission.ask) are covered.
-	case "hook.claude.Notification", "hook.claude.PermissionRequest",
-		"hook.opencode.permission.ask":
-		return workStop
-	case "process_exit":
-		return workAbort
-	}
-	return workNone
+	return hookevents.ClassifyWorkEvent(eventType)
 }
 
 // findPaneAndTab locates a pane by ID and the index of its containing tab.
@@ -193,11 +171,11 @@ func (m Model) workSpinnerTick() tea.Cmd {
 // after the wide_canvas migration because only the cold-attach path set
 // the flag).
 //
-// Muting a pane clears any in-progress work indicator: the daemon drops a
-// muted pane's hook events at the source, so the completion edge that would
-// normally clear `working` never reaches the TUI. Without this, muting a pane
-// mid-turn would strand its spinner — and keep the 100ms animation tick alive
-// — indefinitely.
+// Muting a pane does NOT clear `working` here: the daemon still delivers
+// work-state hook events (start/stop/abort) live for a muted pane — it only
+// suppresses the visible notification card (see emitEvent) — so the normal
+// completion edge keeps `working` accurate across the whole mute/unmute
+// window instead of going stale the instant the pane is muted.
 func syncPaneMeta(pane *PaneModel, info *PaneInfo, wideCanvas bool) {
 	pane.Name = info.Name
 	pane.CWD = info.CWD
@@ -208,7 +186,14 @@ func syncPaneMeta(pane *PaneModel, info *PaneInfo, wideCanvas bool) {
 	pane.Pending = info.Pending
 	pane.SessionID = info.SessionID
 	pane.HistoryLines = info.HistoryLines
-	if info.Muted {
-		pane.working = false
-	}
+	pane.daemonMouseTracking = info.MouseTracking
+	pane.daemonMouseSGR = info.MouseSGR
+	// Unconditional copy, like the other daemon-authoritative fields: the
+	// daemon writes LastModel BEFORE broadcasting the hook event and IPC
+	// delivery is ordered per connection, so a snapshot can never lag behind
+	// a live paneEventMsg value — and an empty snapshot value is meaningful
+	// (pane restart cleared the daemon-side state; the status bar must not
+	// keep showing the pre-restart model until the next turn).
+	pane.Model = info.Model
+	pane.ContextTokens = info.ContextTokens
 }

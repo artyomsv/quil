@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.33.0] - 2026-07-03
+
+## [1.32.2] - 2026-07-03
+
+## [1.32.1] - 2026-07-03
+
+## [1.32.0] - 2026-07-02
+
+### Added
+
+- **Mouse-wheel scrolling in AI/TUI panes** — scrolling the wheel over a pane
+  running an app that handles its own mouse input (opencode, claude-code, vim,
+  htop, lazygit, …) now scrolls that app's viewport instead of doing nothing.
+  These apps run on the alternate screen, which never fills Quil's local
+  scrollback, so the wheel is forwarded straight to the program. The daemon
+  detects when a pane's program enables mouse tracking — reliable even when you
+  reattach to an already-running session — and the client forwards each wheel
+  notch as the matching mouse sequence. Plain terminal/shell panes keep
+  scrolling Quil's own scrollback as before.
+
+### Fixed
+
+- **macOS render corruption in claude-code panes** — typing over the input
+  placeholder no longer leaks stray text (`AAA` shown as `AAAude Code`), and the
+  header logo no longer doubles (`Claude CodClaude Code`). The bundled terminal
+  emulator ended the child app's window-title escape sequence early when the
+  title contained certain Unicode characters (claude-code's `✳` marker), spilling
+  the title text into the visible pane. Quil now filters window-title sequences
+  before the emulator — it renders its own tab titles, so nothing is lost.
+
+- **Word-jump keys on macOS Terminal.app** — Option-based word navigation now
+  works inside panes. With "Use Option as Meta key" enabled, `Option+B` /
+  `Option+F` (and other `Alt`+key combinations) are forwarded to the pane as Meta
+  keys, so claude-code and shell readline word navigation work with no extra
+  configuration. `Ctrl+Arrow` word-jump on Windows/Linux is unchanged.
+
 ## [1.31.2] - 2026-06-18
 
 ## [1.31.1] - 2026-06-18

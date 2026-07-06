@@ -505,6 +505,66 @@ func TestRenderPreview_NoSelectionNoReverse(t *testing.T) {
 	}
 }
 
+// TestRenderPreview_WrapSelectionSpansSeam verifies a selection that
+// straddles a soft-wrap seam renders as reverse video on BOTH sides of the
+// seam, at the correct LOCAL columns per segment — the design goal
+// ("selection spanning a wrap boundary stays contiguous"). The existing
+// TestRenderPreview_DrawsSelection only covers a selection entirely inside
+// segment 0, where renderPreview's intersect+translate math is a no-op
+// (lo == cStart, hi == cEnd, since s.start == 0); this test exercises
+// segment 1, where the translation actually shifts columns.
+func TestRenderPreview_WrapSelectionSpansSeam(t *testing.T) {
+	// 95-char row at innerW 40 wraps into 3 segments: [0,40), [40,80), [80,95).
+	p := canvasPane(t, 100, 6, strings.Repeat("a", 95)+"\r\n")
+	defer p.Dispose()
+	p.previewWrap = true
+	p.Width = 42 // innerW 40
+
+	l := p.previewLayoutFor(40)
+	total := l.totalVisual()
+	p.Height = total + 2 // innerH == total, so every visual row is in view
+	innerH := p.Height - 2
+	if viewStart := total - innerH; viewStart != 0 {
+		t.Fatalf("setup: viewStart = %d, want 0 (fixture must render every visual row unscrolled)", viewStart)
+	}
+	if len(l.segs[0]) < 2 || l.segs[0][0] != (seg{0, 40}) || l.segs[0][1].start != 40 {
+		t.Fatalf("setup: row 0 segments = %+v, want seg0 [0,40) and seg1 starting at 40", l.segs[0])
+	}
+	// Inactive: no caret, so the only possible source of reverse video is
+	// the range selection (mirrors TestRenderPreview_DrawsSelection).
+
+	// Selection straddles the seam at column 40: absolute cols 35..45.
+	sel := &Selection{
+		PaneID: p.ID,
+		Anchor: SelectionAnchor{Col: 35, Line: 0},
+		Cursor: SelectionAnchor{Col: 45, Line: 0},
+	}
+	out := p.renderPreview(sel)
+	lines := strings.Split(out, "\n")
+	if len(lines) < 3 {
+		t.Fatalf("setup: only %d rendered lines, need at least 3 (2 wrapped rows + 1 unselected)", len(lines))
+	}
+
+	// Segment 0 [0,40): intersecting [35,45] with [0,39] gives local cols
+	// 35..39 -> 5 selected cells.
+	if got := strings.Count(lines[0], "\x1b[7m"); got != 5 {
+		t.Errorf("row0 (segment [0,40)) reverse-video cell count = %d, want 5 (local cols 35..39)", got)
+	}
+	// Segment 1 [40,80): intersecting [35,45] with [40,79] gives absolute
+	// cols 40..45, translated to LOCAL cols 0..5 -> 6 selected cells. Under
+	// the pre-translation bug (raw cStart/cEnd used directly as local
+	// selStart/selEnd, no clamp/shift by s.start) this row would instead
+	// highlight local cols 35..39 -> 5 cells — the count alone catches that
+	// regression, not just SGR presence.
+	if got := strings.Count(lines[1], "\x1b[7m"); got != 6 {
+		t.Errorf("row1 (segment [40,80)) reverse-video cell count = %d, want 6 (local cols 0..5, contiguous across the seam)", got)
+	}
+	// A later, unselected row must carry no reverse video at all.
+	if last := lines[len(lines)-1]; strings.Contains(last, "\x1b[7m") {
+		t.Errorf("last rendered row must not be selected, got:\n%q", last)
+	}
+}
+
 func TestPreviewPosAt_WrapSegments(t *testing.T) {
 	// Soft-wrap: a 95-wide row at innerW 40 becomes 3 visual rows
 	// [0,40),[40,80),[80,95). Across the 6-row emulator that's 3 wrapped +

@@ -46,6 +46,7 @@ type PaneModel struct {
 	ID                 string
 	Type               string // plugin type ("terminal", "claude-code", etc.)
 	WideCanvas         bool   // [display] wide_canvas: VT/PTY stay window-sized; small rects render a wrapped preview
+	MinNativeCols      int    // [display] min_native_cols: inner-width threshold for native (non-canvas) rendering; 0 = default 80
 	Name               string // user-given name (empty if not set)
 	CWD                string // current working directory from daemon
 	Muted              bool   // notification mute (daemon-authoritative; mirrored here for border rendering)
@@ -916,10 +917,8 @@ func parseOSC7Path(raw string) string {
 
 func (p *PaneModel) renderContent(sel *Selection) string {
 	// Wide-canvas preview: wrapped view of the window-sized buffer.
-	// Selection is zoom-only in preview mode (v1), so the selection
-	// branches below are intentionally unreachable here.
 	if p.previewMode() {
-		return p.renderPreview()
+		return p.renderPreview(sel)
 	}
 	// If selection is active on this pane, use cell-by-cell rendering
 	if sel != nil && sel.PaneID == p.ID {

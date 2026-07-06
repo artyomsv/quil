@@ -607,23 +607,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				// Pane area — start tracking for drag selection. Wide-canvas
-				// previews are zoom-only for selection (v1): the wrapped view
-				// has no 1:1 grid mapping, so the click focuses the pane but
-				// never arms a drag. Focus mode shows the native render, where
-				// selection works normally.
+				// preview panes route through previewPosAt in
+				// updateMouseSelection, so a drag here arms normally.
 				m.clearDragState()
-				armSelection := true
-				if tab := m.activeTabModel(); tab != nil && !tab.FocusMode() && tab.Root != nil {
-					tabH := m.height - chromeHeight
-					if pane := tab.Root.FindPaneAt(msg.X, msg.Y, 0, 1, m.paneAreaWidth(), tabH); pane != nil && pane.previewMode() {
-						armSelection = false
-					}
-				}
-				if armSelection {
-					m.mouseDown = true
-					m.mouseStartX = msg.X
-					m.mouseStartY = msg.Y
-				}
+				m.mouseDown = true
+				m.mouseStartX = msg.X
+				m.mouseStartY = msg.Y
 				m.selection = nil
 				if m.notesMode && m.notesEditor != nil {
 					m.notesPaneFocused = true
@@ -1160,6 +1149,19 @@ func (m Model) pluginWideCanvas(paneType string) bool {
 		return p.Display.WideCanvas
 	}
 	return false
+}
+
+// pluginMinNativeCols resolves the native-rendering column threshold for a
+// pane type via the plugin registry. Unknown types (registry miss, nil
+// registry in tests) return 0, which paneVTSize treats as the default (80).
+func (m Model) pluginMinNativeCols(paneType string) int {
+	if m.pluginRegistry == nil {
+		return 0
+	}
+	if p := m.pluginRegistry.Get(paneType); p != nil {
+		return p.Display.MinNativeCols
+	}
+	return 0
 }
 
 // sidebarOverlayWidth returns the drawn width of the notification sidebar
@@ -2403,7 +2405,7 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) ([]string, []tea.Cm
 				if info, ok := paneMap[paneID]; ok {
 					if leaf := tab.Root.FindLeaf(paneID); leaf != nil {
 						wasPending := leaf.Pane.Pending
-						syncPaneMeta(leaf.Pane, info, m.pluginWideCanvas(info.Type))
+						syncPaneMeta(leaf.Pane, info, m.pluginWideCanvas(info.Type), m.pluginMinNativeCols(info.Type))
 						// A deferred pane that just lazy-spawned (Pending→running,
 						// e.g. on tab switch): arm the restore indicator NOW so it
 						// covers the real boot, and enroll it for spinner ticks.
@@ -2444,7 +2446,7 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) ([]string, []tea.Cm
 				newPaneIDs = append(newPaneIDs, paneID)
 			}
 			if info != nil {
-				syncPaneMeta(pane, info, m.pluginWideCanvas(info.Type))
+				syncPaneMeta(pane, info, m.pluginWideCanvas(info.Type), m.pluginMinNativeCols(info.Type))
 			}
 
 			// Try to fill a pending split placeholder first.
@@ -2464,7 +2466,7 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) ([]string, []tea.Cm
 				tab.Root = NewLeaf(pane)
 				tab.invalidateLeaves()
 			} else {
-				// Split the root horizontally to accommodate the new pane.
+				// Split the root vertically (stacked) to accommodate the new pane.
 				tab.Root.SplitLeaf(tab.Leaves()[0].ID, SplitVertical)
 				tab.Root.FillPlaceholder(pane)
 				tab.invalidateLeaves()
@@ -2584,7 +2586,7 @@ func (m *Model) restoreTabLayout(tab *TabModel, tabInfo TabInfo, paneMap map[str
 			pane.resumeStart = time.Now()
 		}
 		if info, ok := paneMap[paneID]; ok {
-			syncPaneMeta(pane, info, m.pluginWideCanvas(info.Type))
+			syncPaneMeta(pane, info, m.pluginWideCanvas(info.Type), m.pluginMinNativeCols(info.Type))
 		}
 		paneModels[paneID] = pane
 	}
@@ -2677,7 +2679,7 @@ func (m *Model) reconcileOverlayPane(
 			pane = NewPaneModel(overlayInfo.ID, m.replayBufSize())
 			newPaneIDs = append(newPaneIDs, overlayInfo.ID)
 		}
-		syncPaneMeta(pane, overlayInfo, m.pluginWideCanvas(overlayInfo.Type))
+		syncPaneMeta(pane, overlayInfo, m.pluginWideCanvas(overlayInfo.Type), m.pluginMinNativeCols(overlayInfo.Type))
 		tab.overlayPane = pane
 		// Show the overlay immediately when this TUI's Alt+G triggered its
 		// creation (pendingOverlayShow entry). On plain reattach, default hidden.
@@ -2688,7 +2690,7 @@ func (m *Model) reconcileOverlayPane(
 		}
 	default:
 		// Same overlay pane — refresh metadata only.
-		syncPaneMeta(tab.overlayPane, overlayInfo, m.pluginWideCanvas(overlayInfo.Type))
+		syncPaneMeta(tab.overlayPane, overlayInfo, m.pluginWideCanvas(overlayInfo.Type), m.pluginMinNativeCols(overlayInfo.Type))
 	}
 
 	return newPaneIDs, false
@@ -3714,6 +3716,20 @@ func (m *Model) updateMouseSelection(tab *TabModel, curX, curY, tabH int) {
 		oy = startRect.OY
 	}
 
+	// Wide-canvas preview panes have no 1:1 grid mapping — the visible rows
+	// are wrapped/cropped segments of a wider emulator. Map both endpoints
+	// through the layout inverse instead of the raw screen mapping below.
+	if pane.previewMode() {
+		startCol, startLine, _ := pane.previewPosAt(m.mouseStartX-ox-1, m.mouseStartY-oy-1)
+		curCol, curLine, _ := pane.previewPosAt(curX-ox-1, curY-oy-1)
+		m.selection = &Selection{
+			PaneID: pane.ID,
+			Anchor: SelectionAnchor{Col: startCol, Line: startLine},
+			Cursor: SelectionAnchor{Col: curCol, Line: curLine},
+		}
+		return
+	}
+
 	sbLen := pane.vt.ScrollbackLen()
 
 	// Convert start screen coords to pane-local
@@ -3787,8 +3803,11 @@ func (m Model) handleSelectionKey(key string) (tea.Model, tea.Cmd) {
 	if pane == nil {
 		return m, nil
 	}
-	// Wide-canvas previews are zoom-only for selection (v1): the wrapped
-	// view has no 1:1 grid mapping, so selection keys are ignored here.
+	// Keyboard selection is disabled in preview mode: stepping a caret by
+	// logical lines through a wrapped/cropped view is disorienting when the
+	// visual and absolute row grids don't match 1:1. Mouse selection IS
+	// supported in preview — see updateMouseSelection, which maps through
+	// previewPosAt instead of the raw screen grid used below.
 	if pane.previewMode() {
 		return m, nil
 	}
@@ -4066,7 +4085,7 @@ func (m Model) resizeAllPanes() tea.Cmd {
 				// paneVTSize keeps the PTY in lockstep with the VT: rect
 				// size for normal panes, tab canvas for wide-canvas panes.
 				// The daemon drops exact duplicates (same-size guard).
-				cols, rows := paneVTSize(pane.WideCanvas, pane.Width, pane.Height, tab.CanvasW, tab.CanvasH)
+				cols, rows := paneVTSize(pane.WideCanvas, pane.MinNativeCols, pane.Width, pane.Height, tab.CanvasW, tab.CanvasH)
 				msg, _ := ipc.NewMessage(ipc.MsgResizePane, ipc.ResizePanePayload{
 					PaneID: pane.ID,
 					Cols:   uint16(cols),

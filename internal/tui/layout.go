@@ -420,7 +420,7 @@ func resizeNode(n *LayoutNode, w, h, canvasW, canvasH int) {
 		}
 		n.Pane.Width = w
 		n.Pane.Height = h
-		n.Pane.ResizeVT(paneVTSize(n.Pane.WideCanvas, w, h, canvasW, canvasH))
+		n.Pane.ResizeVT(paneVTSize(n.Pane.WideCanvas, n.Pane.MinNativeCols, w, h, canvasW, canvasH))
 		return
 	}
 

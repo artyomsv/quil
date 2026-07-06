@@ -134,10 +134,12 @@ func (l *previewLayout) locate(v int) (absRow int, s seg) {
 // renderPreview renders the wrapped view of a wide-canvas pane. The live
 // view (scrollBack == 0) bottom-anchors on the end of the layout; a
 // scrolled view reserves the rightmost column for the scrollbar, with the
-// same thumb math as renderScrollback but over visual rows. The caret is
-// drawn in reverse video through the selection-capable cell walker
-// (selStart == selEnd == caret column).
-func (p *PaneModel) renderPreview() string {
+// same thumb math as renderScrollback but over visual rows. Selection and
+// caret are both drawn in reverse video through the selection-capable cell
+// walker: sel's column range is intersected per visual row with that row's
+// segment window, then the caret (live view only) overrides as a 1-cell
+// reverse span.
+func (p *PaneModel) renderPreview(sel *Selection) string {
 	innerW := p.Width - 2
 	innerH := p.Height - 2
 	if innerW < 1 {
@@ -158,9 +160,15 @@ func (p *PaneModel) renderPreview() string {
 	}
 	scrolled := p.scrollBack > 0
 
-	// Caret position in visual space (live view only).
+	// Caret position in visual space (live view only). Suppressed while a
+	// range selection is active on this pane, matching native panes
+	// (renderWithSelection draws no caret): otherwise the 1-cell caret span
+	// would punch a reverse-video "hole" in the selection on the caret's row —
+	// visible when dragging a selection down through Claude's bottom input
+	// cursor.
+	selActive := sel != nil && sel.PaneID == p.ID
 	cursorVisual, cursorCol := -1, -1
-	if !scrolled && p.Active && p.cursorVisible {
+	if !scrolled && p.Active && p.cursorVisible && !selActive {
 		pos := p.vt.CursorPosition()
 		absRow := p.vt.ScrollbackLen() + pos.Y
 		if absRow >= 0 && absRow < len(l.segs) && len(l.segs[absRow]) > 0 {
@@ -206,10 +214,30 @@ func (p *PaneModel) renderPreview() string {
 			w = contentW
 		}
 		selStart, selEnd := -1, -1
+		// Range selection on this pane: intersect the selection's column
+		// span for this absolute row with the segment window [s.start,s.end)
+		// and translate to local (in-segment) columns.
+		if sel != nil && sel.PaneID == p.ID {
+			cStart, cEnd := sel.ColRange(absRow, p.vt.Width())
+			if cStart >= 0 && cEnd >= cStart {
+				lo := cStart
+				if lo < s.start {
+					lo = s.start
+				}
+				hi := cEnd
+				if hi > s.end-1 {
+					hi = s.end - 1
+				}
+				if lo <= hi {
+					selStart, selEnd = lo-s.start, hi-s.start
+				}
+			}
+		}
+		// Caret (live view) takes precedence as a 1-cell reverse span.
 		if v == cursorVisual {
-			selStart, selEnd = cursorCol, cursorCol // reverse-video caret
+			selStart, selEnd = cursorCol, cursorCol
 			if w <= cursorCol {
-				w = cursorCol + 1 // caret sits on the blank cell after content
+				w = cursorCol + 1
 			}
 		}
 		lines[i] = p.styledCellLineWithSelection(window, w, selStart, selEnd)
@@ -243,6 +271,75 @@ func (p *PaneModel) renderPreview() string {
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+// previewPosAt maps a pane-local (relX, relY) — already border-adjusted, i.e.
+// 0-based within the inner content area — to an emulator (col, absLine) via
+// the visual→absolute preview layout. ok is false when the point lands
+// outside the rendered content (e.g. below the last line); in that case the
+// returned (col, absLine) is still clamped to the nearest rendered row rather
+// than zeroed, so callers can use it directly (e.g. a drag that continues
+// past the pane edge extends the selection to the boundary instead of
+// snapping to buffer position (0,0)). The mapping is the inverse of
+// renderPreview's viewStart + locate() walk, so a click lands on the glyph
+// under the cursor in both crop and soft-wrap modes.
+func (p *PaneModel) previewPosAt(relX, relY int) (col, absLine int, ok bool) {
+	innerW := p.Width - 2
+	innerH := p.Height - 2
+	if innerW < 1 {
+		innerW = 1
+	}
+	if innerH < 1 {
+		innerH = 1
+	}
+	l := p.previewLayoutFor(innerW)
+	total := l.totalVisual()
+	viewStart := total - innerH - p.scrollBack
+	if viewStart < 0 {
+		viewStart = 0
+	}
+	v := viewStart + relY
+	inRange := v >= 0 && v < total
+	if !inRange {
+		if total == 0 {
+			return 0, 0, false
+		}
+		// Clamp to the nearest rendered row so a drag past the pane edge
+		// extends the selection to the boundary (like the native path),
+		// rather than snapping the endpoint to buffer position (0,0).
+		if v < 0 {
+			v = 0
+		} else {
+			v = total - 1
+		}
+	}
+	absRow, s := l.locate(v)
+	// When scrolled, renderPreview reserves the rightmost column for the
+	// scrollbar (contentW = innerW-1), so a click on that gutter column must
+	// map to the last CONTENT column, not one past it.
+	contentW := innerW
+	if p.scrollBack > 0 {
+		contentW = innerW - 1
+		if contentW < 1 {
+			contentW = 1
+		}
+	}
+	if relX < 0 {
+		relX = 0
+	}
+	if relX > contentW-1 {
+		relX = contentW - 1
+	}
+	col = s.start + relX
+	if col > s.end {
+		col = s.end
+	}
+	// Clamp to the row's real content end so a click in the blank area past
+	// text maps to end-of-line rather than an off-grid column.
+	if end := lineContentEnd(p, absRow); end >= 0 && col > end+1 {
+		col = end + 1
+	}
+	return col, absRow, inRange
 }
 
 // wrapRow splits one wide row into innerW-wide segments over [0, contentEnd].

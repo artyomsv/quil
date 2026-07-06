@@ -176,11 +176,12 @@ func (m Model) workSpinnerTick() tea.Cmd {
 // suppresses the visible notification card (see emitEvent) — so the normal
 // completion edge keeps `working` accurate across the whole mute/unmute
 // window instead of going stale the instant the pane is muted.
-func syncPaneMeta(pane *PaneModel, info *PaneInfo, wideCanvas bool) {
+func syncPaneMeta(pane *PaneModel, info *PaneInfo, wideCanvas bool, minNativeCols int) {
 	pane.Name = info.Name
 	pane.CWD = info.CWD
 	pane.Type = info.Type
 	pane.WideCanvas = wideCanvas
+	pane.MinNativeCols = minNativeCols
 	pane.Muted = info.Muted
 	pane.Eager = info.Eager
 	pane.Pending = info.Pending

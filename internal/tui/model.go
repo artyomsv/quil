@@ -2466,7 +2466,7 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) ([]string, []tea.Cm
 				tab.Root = NewLeaf(pane)
 				tab.invalidateLeaves()
 			} else {
-				// Split the root horizontally to accommodate the new pane.
+				// Split the root vertically (stacked) to accommodate the new pane.
 				tab.Root.SplitLeaf(tab.Leaves()[0].ID, SplitVertical)
 				tab.Root.FillPlaceholder(pane)
 				tab.invalidateLeaves()

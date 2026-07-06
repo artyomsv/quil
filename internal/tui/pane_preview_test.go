@@ -565,6 +565,54 @@ func TestRenderPreview_WrapSelectionSpansSeam(t *testing.T) {
 	}
 }
 
+// When the caret and a multi-column range selection land on the same visual
+// row, the caret wins (a 1-cell reverse span), not the range. Rendered twice
+// on the same fixture: inactive → the full 7-cell selection shows; active →
+// the caret collapses that row to a single reverse cell. The inactive render
+// proves the selection really is 7 cells, so the active assertion is not
+// vacuous — dropping the caret-precedence branch would make active show 7 too.
+func TestRenderPreview_CaretTakesPrecedenceOverSelection(t *testing.T) {
+	// Row 0 = 10 'a's with the cursor parked at col 10 (end of content, no
+	// newline). Crop mode, innerW 40 → one segment [0,10), so absRow 0 is a
+	// single visual row carrying both the selection and the caret.
+	p := canvasPane(t, 100, 3, strings.Repeat("a", 10))
+	defer p.Dispose()
+	p.Width, p.Height = 42, 5 // innerW 40 (no wrap), innerH 3 == emulator rows
+	sel := &Selection{
+		PaneID: p.ID,
+		Anchor: SelectionAnchor{Col: 2, Line: 0},
+		Cursor: SelectionAnchor{Col: 8, Line: 0}, // cols 2..8 inclusive = 7 cells
+	}
+
+	// Locate the caret's visual row from the layout (bottom-anchored viewport).
+	l := p.previewLayoutFor(40)
+	pos := p.vt.CursorPosition()
+	caretVisual := l.visualIndex(p.vt.ScrollbackLen()+pos.Y, pos.X)
+	innerH := p.Height - 2
+	viewStart := l.totalVisual() - innerH
+	if viewStart < 0 {
+		viewStart = 0
+	}
+	caretLine := caretVisual - viewStart
+	if caretLine < 0 || caretLine >= innerH {
+		t.Fatalf("setup: caret visual row %d not in viewport [%d,%d)", caretVisual, viewStart, viewStart+innerH)
+	}
+
+	// Inactive: no caret, so the range selection renders in full (7 cells).
+	p.Active = false
+	inactive := strings.Split(p.renderPreview(sel), "\n")
+	if got := strings.Count(inactive[caretLine], "\x1b[7m"); got != 7 {
+		t.Fatalf("inactive: selection cols 2..8 should reverse 7 cells, got %d", got)
+	}
+
+	// Active: the caret (1 cell at col 10) takes precedence on its own row.
+	p.Active = true
+	active := strings.Split(p.renderPreview(sel), "\n")
+	if got := strings.Count(active[caretLine], "\x1b[7m"); got != 1 {
+		t.Errorf("active: caret must win over the range on its row (want 1 reverse cell, got %d)", got)
+	}
+}
+
 func TestPreviewPosAt_WrapSegments(t *testing.T) {
 	// Soft-wrap: a 95-wide row at innerW 40 becomes 3 visual rows
 	// [0,40),[40,80),[80,95). Across the 6-row emulator that's 3 wrapped +

@@ -118,14 +118,34 @@ export const competitorMatrix: CompareRow[] = [
   },
 ];
 
+/**
+ * A row in a competitor-specific matrix (used for the AI-agent-orchestrator
+ * comparisons herdr / aoe, whose feature axis differs from the classic
+ * multiplexers). `them` is the competitor's support level.
+ */
+export interface VsRow {
+  feature: string;
+  quil: Support;
+  them: Support;
+  note?: string;
+}
+
 export interface CompetitorInfo {
-  slug: "tmux" | "zellij" | "wezterm" | "screen";
+  slug: "tmux" | "zellij" | "wezterm" | "screen" | "herdr" | "aoe";
   name: string;
   description: string;
   positioning: string;
   keyStrength: string;
   keyGap: string;
   migrationNote: string;
+  /**
+   * Optional competitor-specific matrix. When present it replaces the shared
+   * `competitorMatrix` on that page — used for herdr/aoe, which are direct
+   * agent-orchestrator rivals rather than classic multiplexers.
+   */
+  matrix?: VsRow[];
+  /** Optional override for the "where Quil takes over" headline. */
+  quilHeadline?: string;
   /** Per-page FAQ — 3-4 Q&A pairs. */
   faq: { question: string; answer: string }[];
 }
@@ -255,6 +275,117 @@ export const competitors: Record<CompetitorInfo["slug"], CompetitorInfo> = {
         question: "Is screen actively maintained?",
         answer:
           "Yes, but slowly. Version 5.0 shipped in 2024 — the first major release since 2014.",
+      },
+    ],
+  },
+
+  herdr: {
+    slug: "herdr",
+    name: "herdr",
+    description:
+      "A Rust terminal multiplexer purpose-built for AI coding agents — 'tmux, rebuilt for agents.' Single binary, its own PTY and VT engine, a socket API agents can drive, and a language-agnostic plugin system. Quil's closest philosophical twin.",
+    positioning:
+      "herdr and Quil made almost the same bet: build your own multiplexer, keep it a single lightweight binary, and make it agent-aware. herdr is further ahead on agent breadth (it detects ~18 agents and ships 14 integrations) and scriptable plugins; Quil is further ahead on native Windows and on speaking MCP, the protocol AI assistants already understand. The honest read: herdr is the stronger Unix-first agent fleet manager today, Quil is the stronger Windows-native, MCP-native one.",
+    keyStrength:
+      "Agent breadth and extensibility. Detects ~18 agents with screen-content heuristics, installs native integrations with one command, exposes a full socket API + CLI that agents and scripts can drive, and runs language-agnostic plugins with actions, event hooks, and a GitHub-topic marketplace.",
+    keyGap:
+      "Native Windows is still beta, there is no MCP server (agents drive it through a bespoke socket API + an installed skill instead of a protocol assistants already speak), and it has no pane-notes editor or per-pane memory reporting.",
+    migrationNote:
+      "herdr uses a tmux-style prefix (Ctrl+B) where Quil uses direct Alt-based keys. Both keep agents alive on detach and restore AI sessions. If you're on Windows without WSL, Quil is the smoother path; if you drive many different agents from Unix and want to script the multiplexer from a shell, herdr is very strong.",
+    quilHeadline: "Native Windows. MCP-native. Notes + memory built in.",
+    matrix: [
+      { feature: "Own multiplexer + PTY (not a tmux wrapper)", quil: "yes", them: "yes" },
+      { feature: "Survives a full host reboot", quil: "yes", them: "yes" },
+      { feature: "AI session auto-resume", quil: "yes", them: "yes", note: "herdr restores native sessions for ~14 agents; Quil for Claude Code + OpenCode." },
+      { feature: "Native Windows (no WSL)", quil: "yes", them: "partial", note: "herdr's native Windows support is a ConPTY beta; Quil ships bundled ConPTY/OpenConsole and a Windows clipboard image-paste proxy." },
+      { feature: "MCP server for AI agents", quil: "yes", them: "no", note: "herdr exposes a bespoke socket API + an installed agent skill instead of the MCP protocol." },
+      { feature: "Pane notes editor", quil: "yes", them: "no" },
+      { feature: "Per-pane memory reporting", quil: "yes", them: "no" },
+      { feature: "Screen-content agent detection (no hooks)", quil: "partial", them: "yes", note: "Quil pattern-matches idle only; herdr ships updatable detection manifests for ~18 agents." },
+      { feature: "Breadth of agents detected", quil: "partial", them: "yes", note: "Quil: 2 deep + tools. herdr: ~18." },
+      { feature: "One-command agent integration installer", quil: "no", them: "yes" },
+      { feature: "Git worktree-per-session", quil: "no", them: "yes" },
+      { feature: "Executable plugins (actions / event hooks / link handlers)", quil: "partial", them: "yes", note: "Quil plugins are declarative TOML pane types; herdr runs any-language plugins." },
+      { feature: "Plugin marketplace", quil: "no", them: "yes" },
+      { feature: "General CLI to script the multiplexer", quil: "no", them: "yes", note: "Quil scripts via MCP (for AI); herdr adds a shell CLI for humans." },
+      { feature: "Remote SSH thin-client attach", quil: "no", them: "yes" },
+      { feature: "Named sessions / live server handoff", quil: "no", them: "yes" },
+      { feature: "Sound + desktop notifications", quil: "partial", them: "yes", note: "Quil has an in-TUI notification center but no sound or OS notifications." },
+      { feature: "Themes with light/dark auto-switch", quil: "partial", them: "yes" },
+    ],
+    faq: [
+      {
+        question: "Is herdr basically Quil in Rust?",
+        answer:
+          "Architecturally they're remarkably close — both build their own multiplexer and PTY layer rather than wrapping tmux, both keep agents alive on detach, both restore AI sessions. The divergence is emphasis: herdr optimizes for agent breadth and shell scriptability on Unix; Quil optimizes for native Windows and for being an MCP server that AI assistants drive directly.",
+      },
+      {
+        question: "Can herdr run on Windows without WSL?",
+        answer:
+          "It has an experimental native Windows (ConPTY) beta, but several features are unsupported there. Quil treats Windows as a first-class target with bundled ConPTY/OpenConsole and a clipboard image-paste proxy.",
+      },
+      {
+        question: "How do agents control each tool?",
+        answer:
+          "herdr exposes a Unix-socket API plus a CLI, and ships an installable 'skill' so an agent learns to call it. Quil exposes 18 tools over the Model Context Protocol, which Claude Desktop, Cursor, and VS Code speak natively with no glue.",
+      },
+    ],
+  },
+
+  aoe: {
+    slug: "aoe",
+    name: "Agent of Empires",
+    description:
+      "A Rust TUI + React web dashboard that manages AI coding agents on top of tmux, with git worktrees, Docker sandboxing, a mobile-first 'structured view', and remote phone access. Backed by the Mozilla.ai community.",
+    positioning:
+      "Agent of Empires and Quil solve the same problem from opposite ends. AoE wraps tmux and invests everything above it — a browser dashboard, an Agent-Client-Protocol structured view, container sandboxing, and phone access over a tunnel. Quil builds its own multiplexer and invests in the terminal itself — native Windows, an MCP server, pane notes. AoE is the richer remote/mobile experience; Quil is the tighter native-terminal and Windows experience.",
+    keyStrength:
+      "Reach and isolation. A real browser dashboard (installable PWA) with a native structured view of agent state, remote phone access via Tailscale/Cloudflare with QR + passphrase pairing and Web Push, git worktree-per-session and multi-repo workspaces, an in-TUI diff viewer, and Docker/Podman/Apple-Container sandboxing with shared auth volumes.",
+    keyGap:
+      "It depends on tmux, so native Windows is out (WSL2 only). It has no MCP server (external control is a bespoke HTTP API), no pane-notes editor, and no per-pane memory reporting — and its large surface area is a heavier install than Quil's two binaries.",
+    migrationNote:
+      "AoE keeps every agent in a tmux session, so you can `tmux attach` to any of them directly, and its dashboard runs in the browser. Quil is a native TUI with its own daemon — no tmux, Docker, or Node required — and runs natively on Windows. If you want the browser/mobile surface today, AoE leads; if you want a lightweight native terminal and an MCP server, Quil is the closer fit.",
+    quilHeadline: "Native Windows. MCP-native. No tmux dependency.",
+    matrix: [
+      { feature: "Runs natively on Windows (no WSL / no tmux)", quil: "yes", them: "no", note: "AoE requires tmux, so Windows is WSL2-only. Quil is native on Windows." },
+      { feature: "Survives a full host reboot", quil: "yes", them: "yes", note: "AoE via tmux; Quil via its own snapshot + ghost buffers." },
+      { feature: "AI session auto-resume", quil: "yes", them: "yes" },
+      { feature: "MCP server for AI agents", quil: "yes", them: "no", note: "AoE exposes a bespoke HTTP REST API; Quil speaks MCP natively." },
+      { feature: "Pane notes editor", quil: "yes", them: "no" },
+      { feature: "Per-pane memory reporting", quil: "yes", them: "no" },
+      { feature: "Web dashboard (browser terminal + diffs, PWA)", quil: "no", them: "yes" },
+      { feature: "Remote phone access (tunnel + QR/passphrase + Web Push)", quil: "no", them: "yes" },
+      { feature: "ACP structured view (plan / tool / approve cards)", quil: "no", them: "yes" },
+      { feature: "Git worktree-per-session", quil: "no", them: "yes" },
+      { feature: "Multi-repo workspaces", quil: "no", them: "yes" },
+      { feature: "Built-in diff viewer (review + edit)", quil: "no", them: "yes" },
+      { feature: "Container sandboxing (Docker/Podman/Apple)", quil: "no", them: "yes" },
+      { feature: "Screen-content agent detection (no hooks)", quil: "partial", them: "yes" },
+      { feature: "Breadth of agents supported", quil: "partial", them: "yes", note: "Quil: 2 deep + tools. AoE: ~13 terminal + 7 ACP." },
+      { feature: "Session fork / import from disk", quil: "no", them: "yes" },
+      { feature: "Sound + push notifications", quil: "partial", them: "yes", note: "Quil has an in-TUI notification center but no sound or push." },
+      { feature: "Session lifecycle mgmt (auto-stop idle, groups, archive)", quil: "no", them: "yes" },
+    ],
+    faq: [
+      {
+        question: "Does Agent of Empires work on Windows?",
+        answer:
+          "Only through WSL2 — it depends on tmux and POSIX process handling. Quil runs natively on Windows with bundled ConPTY/OpenConsole, so if you're a Windows developer it's the more direct fit.",
+      },
+      {
+        question: "AoE has a web dashboard — does Quil?",
+        answer:
+          "Not today. AoE's browser dashboard and remote phone access are genuinely ahead here, and both are on Quil's roadmap. Quil's current bet is the native terminal experience plus an MCP server that lets an AI assistant drive the multiplexer directly.",
+      },
+      {
+        question: "Which is lighter to run?",
+        answer:
+          "Quil ships two Go binaries and needs no tmux, Docker, or Node. AoE is a larger stack (tmux + a React app + optional Node ACP workers and containers) in exchange for its web and sandboxing features.",
+      },
+      {
+        question: "Can I sandbox agents in containers with Quil?",
+        answer:
+          "Not yet — container sandboxing is an AoE strength that's on Quil's roadmap. For now Quil runs agents as normal processes with the same isolation as your shell.",
       },
     ],
   },

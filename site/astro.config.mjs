@@ -87,6 +87,8 @@ const routeToFile = {
   "/vs/zellij": "src/pages/vs/zellij.astro",
   "/vs/wezterm": "src/pages/vs/wezterm.astro",
   "/vs/screen": "src/pages/vs/screen.astro",
+  "/vs/herdr": "src/pages/vs/herdr.astro",
+  "/vs/aoe": "src/pages/vs/aoe.astro",
 };
 
 export default defineConfig({

@@ -15,6 +15,7 @@ import {
   competitors,
   type CompetitorInfo,
   type Support,
+  type VsRow,
 } from "@/data/competitors";
 import { breadcrumbSchema, faqSchema } from "@/data/schemas";
 
@@ -52,6 +53,22 @@ const otherCompetitors = (
   Object.keys(competitors) as CompetitorInfo["slug"][]
 ).filter((s) => s !== slug);
 
+// Classic multiplexer pages share `competitorMatrix`; direct agent-orchestrator
+// rivals (herdr / aoe) supply their own `info.matrix`. Normalize both into the
+// same {feature, quil, them, note} shape so the table renders uniformly.
+const classicSlugs = ["tmux", "zellij", "wezterm", "screen"] as const;
+const rows: VsRow[] =
+  info.matrix ??
+  competitorMatrix.map((row) => ({
+    feature: row.feature,
+    quil: row.quil,
+    them: row[slug as (typeof classicSlugs)[number]],
+    note: row.note,
+  }));
+
+const quilHeadline =
+  info.quilHeadline ?? "Reboot survival. AI continuity. Typed panes.";
+
 interface CellGlyph {
   label: string;
   klass: "yes" | "no" | "partial";
@@ -68,7 +85,7 @@ function cellGlyph(support: Support): CellGlyph {
     <div class="container-ember stack">
       <div class="hero-ruler">
         <span>§ COMPARE · VS {info.name.toUpperCase()}</span>
-        <span>FEATURES <b>{competitorMatrix.length}</b></span>
+        <span>FEATURES <b>{rows.length}</b></span>
         <span style="margin-left:auto;">← <a href="/" style="color:var(--ink-3);">all comparisons</a></span>
       </div>
       <span class="eyebrow">QUIL vs {info.name.toUpperCase()}</span>
@@ -88,7 +105,7 @@ function cellGlyph(support: Support): CellGlyph {
         </div>
         <div>
           <span class="eyebrow">QUIL · WHERE IT TAKES OVER</span>
-          <h2 class="h2" style="margin-top:14px; font-size:28px;">Reboot survival. AI continuity. Typed panes.</h2>
+          <h2 class="h2" style="margin-top:14px; font-size:28px;">{quilHeadline}</h2>
           <p style="margin-top:18px; color:var(--ink-2);">{info.keyGap}</p>
         </div>
       </div>
@@ -115,9 +132,9 @@ function cellGlyph(support: Support): CellGlyph {
           </tr>
         </thead>
         <tbody>
-          {competitorMatrix.map((row) => {
+          {rows.map((row) => {
             const quilCell = cellGlyph(row.quil);
-            const otherCell = cellGlyph(row[slug]);
+            const otherCell = cellGlyph(row.them);
             return (
               <>
                 <tr>

@@ -277,21 +277,123 @@ Remote workspace viewing and collaboration over TCP+TLS. Read-only by default, c
 
 ---
 
+## Planned — Competitive Gaps (herdr / AoE)
+
+> Derived from the [competitive analysis](competitive-analysis.md) of the two
+> closest direct competitors — [herdr](https://github.com/ogulcancelik/herdr)
+> and [Agent of Empires](https://github.com/agent-of-empires/agent-of-empires).
+> These are the 20 most interesting capabilities they ship that Quil lacks or
+> only partially supports, grouped into candidate milestones. Several extend
+> work already planned above — those are cross-referenced, not duplicated.
+
+Both competitors are agent-orchestrators like Quil, but each is broader in one
+axis: herdr on **agent breadth + scriptable extensibility**, AoE on **web/remote
+access + sandboxing**. Quil already leads on **native Windows**, the **MCP
+server**, **pane notes**, and **memory reporting** — those are moats to defend,
+not gaps to close.
+
+### M14: Agent Fleet — breadth + detection *(highest ROI)*
+
+The starkest deficit: rivals detect 13–18 agents out of the box; Quil ships 2.
+
+1. **Screen-content agent state detection** — infer blocked/working/done from
+   terminal output for *any* agent, with no hooks required (herdr ships updatable
+   TOML detection manifests). Quil today only pattern-matches idle. Extends
+   [process-health](roadmap/process-health.md).
+2. **Broad agent support + detection registry** — Codex, Gemini, Cursor, Copilot,
+   Droid, Devin, Kimi, and more, detected by process name + output heuristics.
+3. **One-command agent integration installer** — `quil integration install
+   <agent>` writes the agent's hooks/settings for you (both rivals do this).
+4. **Session fork** — branch a conversation into a new independent session, parent
+   untouched (AoE).
+
+### M15: Git Workflow — worktrees + review *(high ROI)*
+
+The most-cited reason people adopt these tools: parallel agents on branches, then
+review the diff.
+
+5. **Git worktree-per-session** — auto branch + worktree on create, cleanup on
+   delete (both rivals). Quil already has the `gitdiscover` primitives; the
+   automation layer is missing. Extends [workspace-files](roadmap/workspace-files.md).
+6. **Built-in diff viewer** — review, edit, and commit agent changes without
+   leaving the TUI (AoE).
+7. **Inline diff comments → prompt to agent** — annotate a diff; comments assemble
+   into one prompt back to the agent (AoE). Builds on #6.
+8. **Multi-repo workspaces** — one session/branch spanning several repos (AoE).
+   Extends [workspace-files](roadmap/workspace-files.md).
+
+### M16: Extensibility & scripting
+
+9. **Executable/scriptable plugins** — any-language plugins with actions, event
+   hooks, and link handlers, not just declarative pane types (both rivals). The
+   biggest lever for a real ecosystem. Extends
+   [community-plugins](roadmap/community-plugins.md) and
+   [cross-pane-events](roadmap/cross-pane-events.md).
+10. **Plugin marketplace** — GitHub-topic index + `quil plugin install owner/repo`.
+    Already partly planned in [community-plugins](roadmap/community-plugins.md).
+11. **General shell CLI to script the multiplexer** — `quil pane split`,
+    `quil tab create`, `quil pane run` from any script. MCP serves AI agents;
+    humans and shell scripts currently have no equivalent.
+12. **Repo config + lifecycle hooks** — per-project `.quil.toml` with
+    `on_create` / `on_launch` / `on_destroy` hooks (AoE). Natural extension of
+    [workspace-files](roadmap/workspace-files.md).
+
+### M17: Notifications & polish *(cheap, immediately felt)*
+
+13. **Sound notifications** — audible cue when an agent needs you (both rivals).
+    Extends [notification-center](roadmap/notification-center.md).
+14. **OS / desktop notifications** — OSC / `notify-send` / `terminal-notifier` so
+    alerts leave the TUI and work over SSH. Extends
+    [notification-center](roadmap/notification-center.md).
+15. **Themes + light/dark auto-switch** — multiple presets that follow the host's
+    OSC 10/11 colors (herdr ships 18, AoE 8). Quil's theming is minimal today.
+16. **Session lifecycle management** — auto-stop idle sessions plus
+    groups / favorites / snooze / archive to keep a large fleet tidy (AoE).
+
+### M18: Remote & Web *(largest builds; deliberate "later")*
+
+Where AoE is pulling away for the mobile/remote crowd. Sequenced last because each
+is a major surface and cuts against Quil's TUI/Windows-native focus.
+
+17. **Remote SSH thin-client attach** — `quil --remote host` makes the local
+    machine a thin client of a remote daemon, bridging local clipboard image paste
+    into remote agents (herdr). Extends [session-sharing](roadmap/session-sharing.md).
+18. **Web dashboard** — real terminal + diffs in the browser, installable as a PWA
+    (AoE). The single largest surface Quil is missing.
+19. **Remote phone access** — expose the dashboard over a Tailscale/Cloudflare
+    tunnel with QR + passphrase pairing and Web Push (AoE). Builds on #18.
+20. **Container sandboxing** — isolate agents in Docker/Podman with shared auth
+    volumes so they authenticate in-container without re-login (AoE).
+
+---
+
 ## Priority Matrix
+
+Reordered so the highest-ROI competitive gaps sit alongside the original core and
+growth items. Competitive-gap rows are tagged **[gap]** and cross-reference the
+section above.
 
 | Priority | Feature | Effort | Impact | Category |
 |----------|---------|--------|--------|----------|
 | ~~1~~ | ~~Pre-built binaries + one-line install~~ | ~~Small~~ | ~~Critical~~ | ~~Done~~ |
+| ~~—~~ | ~~MCP server for AI integration~~ | ~~Medium~~ | ~~Very High~~ | ~~Done~~ |
+| ~~—~~ | ~~Notification center (sidebar + pane history)~~ | ~~Medium~~ | ~~High~~ | ~~Done~~ |
 | 2 | "Holy Shit" demo GIF/video | Small | Critical | Growth |
-| 3 | Project workspace files (`.quil.toml`) | Medium | Very High | Core |
-| 4 | Command palette (`Ctrl+Shift+P`) | Medium | High | Core |
-| ~~5~~ | ~~MCP server for AI integration~~ | ~~Medium~~ | ~~Very High~~ | ~~Done~~ |
-| 5 | Notification center (sidebar + pane history) | Medium | High | Core |
-| 6 | Community plugin registry + 10 plugins | Medium | High | Growth |
-| 7 | Smart health monitoring + auto-restart | Medium | High | Advanced |
-| 8 | tmux keybinding import | Small | Medium | Growth |
-| 9 | Cross-pane context / event bus | Large | High | Advanced |
-| 10 | Session sharing | Large | Medium | Advanced |
+| 3 | **[gap]** Screen-content agent detection + broad agent support (M14) | Medium | Very High | Core |
+| 4 | **[gap]** Git worktree-per-session + diff viewer (M15) | Medium | Very High | Core |
+| 5 | Project workspace files (`.quil.toml`) + repo hooks **[gap #19]** | Medium | Very High | Core |
+| 6 | Command palette (`Ctrl+Shift+P`) | Medium | High | Core |
+| 7 | **[gap]** Sound + OS/desktop notifications (M17) | Small | High | Polish |
+| 8 | **[gap]** General shell CLI to script panes | Medium | High | Core |
+| 9 | Community plugin registry + executable plugins **[gap]** | Medium | High | Growth |
+| 10 | Smart health monitoring + auto-restart (feeds M14 detection) | Medium | High | Advanced |
+| 11 | tmux keybinding import | Small | Medium | Growth |
+| 12 | **[gap]** Themes + light/dark auto-switch | Small–Med | Medium | Polish |
+| 13 | Cross-pane context / event bus | Large | High | Advanced |
+| 14 | **[gap]** Remote SSH thin-client attach | Large | Medium | Advanced |
+| 15 | Session sharing | Large | Medium | Advanced |
+| 16 | **[gap]** Web dashboard + remote phone access (M18) | Large | Medium | Advanced |
+| 17 | **[gap]** Container sandboxing | Large | Medium | Advanced |
 
 ## Strategic Notes
 

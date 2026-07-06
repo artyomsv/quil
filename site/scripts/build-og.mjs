@@ -133,6 +133,22 @@ const pages = [
     headlineSize: 80,
     subline: "The modern multiplexer screen was never designed to be.",
   },
+  {
+    slug: "vs-herdr",
+    path: "/vs/herdr",
+    kicker: "COMPARE",
+    headline: "Quil vs herdr",
+    headlineSize: 100,
+    subline: "Native Windows and MCP-native, versus a Unix-first agent fleet.",
+  },
+  {
+    slug: "vs-aoe",
+    path: "/vs/aoe",
+    kicker: "COMPARE",
+    headline: "Quil vs Agent of Empires",
+    headlineSize: 68,
+    subline: "A native terminal + MCP, versus a tmux-based web dashboard.",
+  },
 ];
 
 /**

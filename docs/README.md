@@ -35,6 +35,7 @@
 | [Vision](vision.md) | The project's why — what problem Quil solves and how |
 | [Product requirements](prd.md) | Original PRD (historical reference) |
 | [Roadmap](roadmap.md) | Milestone summary + planned work — see also [roadmap/](roadmap/) for per-feature PRDs |
+| [Competitive analysis](competitive-analysis.md) | Deep comparison vs herdr and Agent of Empires — capability matrix, the 20 gaps worth chasing, where Quil leads |
 | [Versioning](versioning.md) | SemVer policy and release process |
 | [Contributing](../CONTRIBUTING.md) | Branch / commit conventions, how to submit changes |
 | [Changelog](../CHANGELOG.md) | Per-release notes (auto-maintained) |

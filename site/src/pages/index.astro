@@ -75,6 +75,8 @@ const compareRows = [
 ];
 
 const compareTiles = [
+  { slug: "herdr",   label: "herdr",             blurb: "The closest rival: a Rust agent multiplexer. Broader agent support; no native Windows, no MCP." },
+  { slug: "aoe",     label: "Agent of Empires",  blurb: "A tmux-based agent manager with a web dashboard. Richer remote; WSL2-only, no MCP." },
   { slug: "tmux",    label: "tmux",       blurb: "The 2007 standard. Still the answer if you just need tabs on a remote host." },
   { slug: "zellij",  label: "Zellij",     blurb: "The modern Rust option. Friendly UX, WASM plugins, no reboot story." },
   { slug: "wezterm", label: "WezTerm",    blurb: "A terminal emulator with multiplexer bolted on. Use both — they complement." },
@@ -302,6 +304,18 @@ const revTimestamp = new Date().toISOString().slice(0, 10).replace(/-/g, "");
             orchestrator that treats your terminal as the source of
             truth.
           </p>
+
+          <div style="margin-top:24px; padding:16px 18px; border:1px solid var(--line-2); background:var(--bg-2);">
+            <div class="section-tag"><span class="dot"></span>THE DIRECT RIVALS</div>
+            <p style="margin-top:12px; color:var(--ink-2); font-size:14px; line-height:1.6; max-width:52ch;">
+              Building the same thing for agents? So are
+              <a href="/vs/herdr" style="color:var(--flame);">herdr</a> and
+              <a href="/vs/aoe" style="color:var(--flame);">Agent of Empires</a>.
+              They ship broader agent support and a web dashboard; Quil answers
+              with native Windows, an MCP server, and pane notes. See the honest
+              side-by-side — gaps included.
+            </p>
+          </div>
 
           <table class="cmp-table" style="margin-top:32px;">
             <thead>

@@ -403,29 +403,65 @@ func TestPreviewPosAt_CropRoundTrip(t *testing.T) {
 		t.Errorf("relY 99 should be out of range")
 	}
 	// A click past the row's content clamps to content end (95), not off-grid.
+	// (innerW is 40, so col can never even reach 95 — this only guards against
+	// an unclamped or wildly-wrong column, not the exact clamp value; see the
+	// "short" row assertion below for a tight, meaningful check of the clamp.)
 	col, _, ok = p.previewPosAt(39, 0)
 	if !ok || col > 95 {
 		t.Errorf("relX 39 -> col %d ok=%v, want <=95", col, ok)
+	}
+
+	// A click past the "short" row's content (5 chars, contentEnd 4) clamps
+	// to that row's real content end rather than the crop window width.
+	// Derive relY the same way renderPreview/previewPosAt do — via the
+	// layout's prefix sums and the bottom-anchored viewStart — instead of
+	// guessing a magic number, so the coordinate is a real, reproducible
+	// pane-local click.
+	l := p.previewLayoutFor(40)
+	total := l.totalVisual()
+	viewStart := total - 4 // innerH
+	if viewStart < 0 {
+		viewStart = 0
+	}
+	// Absolute row 1 ("short") has exactly one visual row in crop mode; its
+	// visual index is l.prefix[1].
+	relYShort := l.prefix[1] - viewStart
+	if relYShort < 0 {
+		t.Fatalf("setup: relYShort %d must be a real non-negative click coordinate", relYShort)
+	}
+	wantCol := lineContentEnd(p, 1) + 1
+	col, absLine, ok := p.previewPosAt(39, relYShort)
+	if !ok || col != wantCol || absLine != 1 {
+		t.Errorf("relX 39 on short row -> col %d absLine %d ok=%v, want col %d absLine 1",
+			col, absLine, ok, wantCol)
 	}
 }
 
 func TestPreviewPosAt_WrapSegments(t *testing.T) {
 	// Soft-wrap: a 95-wide row at innerW 40 becomes 3 visual rows
-	// [0,40),[40,80),[80,95). The 2nd visual row's relX 5 maps to col 45.
+	// [0,40),[40,80),[80,95). Across the 6-row emulator that's 3 wrapped +
+	// 5 blank screen rows = 8 total visual rows. p.Height = 10 (innerH 8)
+	// makes the whole layout fit with no scroll (viewStart = 0), so relY
+	// below is a real, non-negative pane-local click coordinate landing on
+	// the row's 2nd wrapped segment — not a value previewPosAt merely
+	// happens to recompute internally.
 	p := canvasPane(t, 100, 6, strings.Repeat("b", 95)+"\r\n")
 	defer p.Dispose()
 	p.previewWrap = true
-	p.Width = 42 // innerW 40
-	p.Height = 8 // innerH 6 — tall enough that all 3 segments are visible
+	p.Width = 42  // innerW 40
+	p.Height = 10 // innerH 8 == total visual rows (8) -> viewStart 0, no scroll
 	l := p.previewLayoutFor(40)
 	// Find the visual row index of the row's 2nd segment (absolute row 0).
 	vSecond := l.prefix[0] + 1
 	total := l.totalVisual()
-	viewStart := total - 6 // innerH
+	viewStart := total - 8 // innerH
 	if viewStart < 0 {
 		viewStart = 0
 	}
 	relY := vSecond - viewStart
+	if relY < 0 {
+		t.Fatalf("setup: relY %d must be a real non-negative click coordinate", relY)
+	}
 	col, absLine, ok := p.previewPosAt(5, relY)
 	if !ok || col != 45 || absLine != 0 {
 		t.Errorf("wrap seg2 relX 5 -> col %d line %d ok=%v, want col 45 line 0", col, absLine, ok)

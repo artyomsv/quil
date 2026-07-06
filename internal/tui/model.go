@@ -607,23 +607,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				// Pane area — start tracking for drag selection. Wide-canvas
-				// previews are zoom-only for selection (v1): the wrapped view
-				// has no 1:1 grid mapping, so the click focuses the pane but
-				// never arms a drag. Focus mode shows the native render, where
-				// selection works normally.
+				// preview panes route through previewPosAt in
+				// updateMouseSelection, so a drag here arms normally.
 				m.clearDragState()
-				armSelection := true
-				if tab := m.activeTabModel(); tab != nil && !tab.FocusMode() && tab.Root != nil {
-					tabH := m.height - chromeHeight
-					if pane := tab.Root.FindPaneAt(msg.X, msg.Y, 0, 1, m.paneAreaWidth(), tabH); pane != nil && pane.previewMode() {
-						armSelection = false
-					}
-				}
-				if armSelection {
-					m.mouseDown = true
-					m.mouseStartX = msg.X
-					m.mouseStartY = msg.Y
-				}
+				m.mouseDown = true
+				m.mouseStartX = msg.X
+				m.mouseStartY = msg.Y
 				m.selection = nil
 				if m.notesMode && m.notesEditor != nil {
 					m.notesPaneFocused = true
@@ -3725,6 +3714,23 @@ func (m *Model) updateMouseSelection(tab *TabModel, curX, curY, tabH int) {
 		pane = startRect.Pane
 		ox = startRect.OX
 		oy = startRect.OY
+	}
+
+	// Wide-canvas preview panes have no 1:1 grid mapping — the visible rows
+	// are wrapped/cropped segments of a wider emulator. Map both endpoints
+	// through the layout inverse instead of the raw screen mapping below.
+	if pane.previewMode() {
+		startCol, startLine, okS := pane.previewPosAt(m.mouseStartX-ox-1, m.mouseStartY-oy-1)
+		curCol, curLine, okC := pane.previewPosAt(curX-ox-1, curY-oy-1)
+		if !okS && !okC {
+			return
+		}
+		m.selection = &Selection{
+			PaneID: pane.ID,
+			Anchor: SelectionAnchor{Col: startCol, Line: startLine},
+			Cursor: SelectionAnchor{Col: curCol, Line: curLine},
+		}
+		return
 	}
 
 	sbLen := pane.vt.ScrollbackLen()

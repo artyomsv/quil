@@ -2,7 +2,10 @@ package tui
 
 import (
 	"bytes"
+	"strings"
 	"testing"
+
+	"github.com/artyomsv/quil/internal/config"
 )
 
 // TestPaneModel_MouseTracking_ReflectsModeSequences feeds the DEC mouse-mode
@@ -127,5 +130,120 @@ func TestPaneModel_WheelForwardSeq_ClampsToGrid(t *testing.T) {
 	// Past the grid clamps to width-1/height-1 -> SGR 80;24.
 	if got, want := p.wheelForwardSeq(true, 999, 999), []byte("\x1b[<64;80;24M"); !bytes.Equal(got, want) {
 		t.Errorf("oversize clamp = %q, want %q", got, want)
+	}
+}
+
+// A click+drag inside a narrow preview pane must build a selection whose
+// anchors are mapped through the wrapped-preview layout (previewPosAt), not
+// the raw 1:1 screen mapping used for native panes.
+//
+// Construction note: applyWorkspaceState's "fresh pane, no saved layout"
+// branch always stacks new panes with a VERTICAL split, which leaves each
+// leaf at the full window width — previewMode() (width-only) could never
+// observe the canvas branch through that path (see canvas_test.go's
+// TestApplyWorkspaceState_ThresholdSelectsNativeOrCanvas). This test instead
+// supplies a saved Layout with an explicit SplitHorizontal tree via the
+// restoreTabLayout branch, so the first leaf's rect is genuinely narrower
+// than the canvas and lands in preview mode.
+//
+// Crop mode (previewWrap=false, the default) would NOT distinguish the fixed
+// mapping from the old raw screen mapping here: with no scrollback and short
+// content, every absolute row occupies exactly one visual row starting at
+// column 0, so both mappings agree by coincidence. The test therefore turns
+// on soft-wrap and makes the first logical row wrap into exactly two visual
+// segments — the second visual row (screen row 1) still belongs to absolute
+// row 0 at a non-zero column offset, and the following logical row ("second
+// line") only starts at screen row 2. The old raw mapping treated screen row
+// N as absolute row N unconditionally, which is wrong for both cells once
+// wrapping is in play; the previewPosAt-routed mapping gets both right.
+func TestUpdateMouseSelection_PreviewPane_RoutesThroughLayout(t *testing.T) {
+	root := NewLeaf(NewPaneModel("p1", 4096))
+	ph := root.SplitLeaf("p1", SplitHorizontal)
+	ph.Pane = NewPaneModel("p2", 4096)
+	layout, err := MarshalLayout(root)
+	if err != nil {
+		t.Fatalf("MarshalLayout: %v", err)
+	}
+
+	m := Model{
+		cfg:            config.Default(),
+		notifications:  NewNotificationCenter(30, 50),
+		pluginRegistry: flaggedCanvasRegistry(t),
+		mcpHighlights:  make(map[string]bool),
+		attached:       true,
+		width:          120,
+		height:         40,
+	}
+	state := WorkspaceStateMsg{
+		ActiveTab: "t1",
+		Tabs:      []TabInfo{{ID: "t1", Name: "AI", Panes: []string{"p1", "p2"}, Layout: layout}},
+		Panes: []PaneInfo{
+			{ID: "p1", TabID: "t1", Type: "claude-code"},
+			{ID: "p2", TabID: "t1", Type: "claude-code"},
+		},
+	}
+	m.applyWorkspaceState(state)
+	m.resizeTabs()
+	tab := m.tabs[0]
+	p := tab.Leaves()[0]
+	if !p.previewMode() {
+		t.Fatalf("setup: pane must be in preview (innerW %d, vt %d)", p.Width-2, p.vt.Width())
+	}
+
+	// Soft-wrap on; row 0 is innerW+15 'a's (wraps into exactly 2 segments —
+	// the tail of 15 cols is short enough it can't wrap again), row 1 is a
+	// short distinct line.
+	p.previewWrap = true
+	innerW := p.Width - 2
+	p.AppendOutput([]byte(strings.Repeat("a", innerW+15) + "\r\nsecond line\r\n"))
+	pvLayout := p.previewLayoutFor(innerW)
+	if len(pvLayout.segs) < 2 || len(pvLayout.segs[0]) != 2 {
+		t.Fatalf("setup: expected row 0 to wrap into exactly 2 segments, got %d (innerW=%d)", len(pvLayout.segs[0]), innerW)
+	}
+	// vAnchor (visual row 1) is row 0's wrapped continuation segment; vCursor
+	// (visual row 2, i.e. pvLayout.prefix[1]) is the first — and only —
+	// visual row of logical row 1 ("second line"). viewStart mirrors the
+	// live-view formula in renderPreview/previewPosAt: the emulator grid is a
+	// fixed innerH rows regardless of how little was written, so it is
+	// generally > 0, not 0.
+	innerH := p.Height - 2
+	viewStart := pvLayout.totalVisual() - innerH - p.scrollBack
+	if viewStart < 0 {
+		viewStart = 0
+	}
+	vAnchor, vCursor := 1, pvLayout.prefix[1]
+
+	tabH := m.height - chromeHeight
+	rect := tab.Root.FindPaneRectAt(0, 1, 0, 1, m.paneAreaWidth(), tabH)
+	if rect == nil || rect.Pane != p {
+		t.Fatalf("setup: expected first leaf at top-left, got %v", rect)
+	}
+	// Anchor: the wrapped continuation of row 0, a few columns into that
+	// segment. Cursor: the start of logical row 1 ("second line").
+	startX, startY := rect.OX+1+5, rect.OY+1+(vAnchor-viewStart)
+	curX, curY := rect.OX+1+5, rect.OY+1+(vCursor-viewStart)
+	m.mouseStartX, m.mouseStartY = startX, startY
+	m.updateMouseSelection(tab, curX, curY, tabH)
+
+	if m.selection == nil {
+		t.Fatal("preview click+drag produced no selection")
+	}
+	if m.selection.PaneID != p.ID {
+		t.Errorf("selection PaneID = %q, want %q", m.selection.PaneID, p.ID)
+	}
+	// The anchors must match previewPosAt exactly (proves the branch is wired).
+	wantAncCol, wantAncLine, _ := p.previewPosAt(startX-rect.OX-1, startY-rect.OY-1)
+	wantCurCol, wantCurLine, _ := p.previewPosAt(curX-rect.OX-1, curY-rect.OY-1)
+	if wantAncLine != 0 {
+		t.Fatalf("setup: expected anchor to resolve to absolute row 0 (wrapped continuation), got %d", wantAncLine)
+	}
+	if wantCurLine != 1 {
+		t.Fatalf("setup: expected cursor to resolve to absolute row 1 (\"second line\"), got %d", wantCurLine)
+	}
+	if m.selection.Anchor.Col != wantAncCol || m.selection.Anchor.Line != wantAncLine {
+		t.Errorf("anchor = (%d,%d), want (%d,%d)", m.selection.Anchor.Col, m.selection.Anchor.Line, wantAncCol, wantAncLine)
+	}
+	if m.selection.Cursor.Col != wantCurCol || m.selection.Cursor.Line != wantCurLine {
+		t.Errorf("cursor = (%d,%d), want (%d,%d)", m.selection.Cursor.Col, m.selection.Cursor.Line, wantCurCol, wantCurLine)
 	}
 }

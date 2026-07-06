@@ -134,10 +134,12 @@ func (l *previewLayout) locate(v int) (absRow int, s seg) {
 // renderPreview renders the wrapped view of a wide-canvas pane. The live
 // view (scrollBack == 0) bottom-anchors on the end of the layout; a
 // scrolled view reserves the rightmost column for the scrollbar, with the
-// same thumb math as renderScrollback but over visual rows. The caret is
-// drawn in reverse video through the selection-capable cell walker
-// (selStart == selEnd == caret column).
-func (p *PaneModel) renderPreview() string {
+// same thumb math as renderScrollback but over visual rows. Selection and
+// caret are both drawn in reverse video through the selection-capable cell
+// walker: sel's column range is intersected per visual row with that row's
+// segment window, then the caret (live view only) overrides as a 1-cell
+// reverse span.
+func (p *PaneModel) renderPreview(sel *Selection) string {
 	innerW := p.Width - 2
 	innerH := p.Height - 2
 	if innerW < 1 {
@@ -206,10 +208,30 @@ func (p *PaneModel) renderPreview() string {
 			w = contentW
 		}
 		selStart, selEnd := -1, -1
+		// Range selection on this pane: intersect the selection's column
+		// span for this absolute row with the segment window [s.start,s.end)
+		// and translate to local (in-segment) columns.
+		if sel != nil && sel.PaneID == p.ID {
+			cStart, cEnd := sel.ColRange(absRow, p.vt.Width())
+			if cStart >= 0 && cEnd >= cStart {
+				lo := cStart
+				if lo < s.start {
+					lo = s.start
+				}
+				hi := cEnd
+				if hi > s.end-1 {
+					hi = s.end - 1
+				}
+				if lo <= hi {
+					selStart, selEnd = lo-s.start, hi-s.start
+				}
+			}
+		}
+		// Caret (live view) takes precedence as a 1-cell reverse span.
 		if v == cursorVisual {
-			selStart, selEnd = cursorCol, cursorCol // reverse-video caret
+			selStart, selEnd = cursorCol, cursorCol
 			if w <= cursorCol {
-				w = cursorCol + 1 // caret sits on the blank cell after content
+				w = cursorCol + 1
 			}
 		}
 		lines[i] = p.styledCellLineWithSelection(window, w, selStart, selEnd)

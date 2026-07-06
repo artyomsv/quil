@@ -917,10 +917,8 @@ func parseOSC7Path(raw string) string {
 
 func (p *PaneModel) renderContent(sel *Selection) string {
 	// Wide-canvas preview: wrapped view of the window-sized buffer.
-	// Selection is zoom-only in preview mode (v1), so the selection
-	// branches below are intentionally unreachable here.
 	if p.previewMode() {
-		return p.renderPreview()
+		return p.renderPreview(sel)
 	}
 	// If selection is active on this pane, use cell-by-cell rendering
 	if sel != nil && sel.PaneID == p.ID {

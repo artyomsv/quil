@@ -125,7 +125,7 @@ func TestRenderPreview_CropTruncatesLines(t *testing.T) {
 	p := canvasPane(t, 100, 6, strings.Repeat("c", 95)+"\r\ntail> ")
 	defer p.Dispose()
 	p.Width, p.Height = 42, 8 // innerW 40, crop default
-	out := ansi.Strip(p.renderPreview())
+	out := ansi.Strip(p.renderPreview(nil))
 	if strings.Contains(out, strings.Repeat("c", 41)) {
 		t.Error("crop mode must not render more than innerW columns of a row")
 	}
@@ -165,7 +165,7 @@ func TestRenderPreview_BottomAnchoredAndWrapped(t *testing.T) {
 	// so the whole wrapped content is in view; bottom-anchoring itself is
 	// covered by TestRenderPreview_ScrolledShowsScrollbarAndHistory.
 	p.Width, p.Height = 42, 12 // innerW 40, innerH 10
-	out := ansi.Strip(p.renderPreview())
+	out := ansi.Strip(p.renderPreview(nil))
 	lines := strings.Split(out, "\n")
 	if len(lines) != 10 {
 		t.Fatalf("preview height %d, want 10", len(lines))
@@ -183,7 +183,7 @@ func TestRenderPreview_LinesFitInnerWidth(t *testing.T) {
 	p := canvasPane(t, 120, 6, strings.Repeat("你x", 30)+"\r\n")
 	defer p.Dispose()
 	p.Width, p.Height = 42, 8
-	for i, line := range strings.Split(p.renderPreview(), "\n") {
+	for i, line := range strings.Split(p.renderPreview(nil), "\n") {
 		if w := ansi.StringWidth(line); w > 40 {
 			t.Errorf("line %d width %d exceeds innerW 40", i, w)
 		}
@@ -195,12 +195,12 @@ func TestRenderPreview_CursorReverseVideo(t *testing.T) {
 	defer p.Dispose()
 	p.Width, p.Height = 42, 8
 	p.Active = true
-	out := p.renderPreview()
+	out := p.renderPreview(nil)
 	if !strings.Contains(out, "\x1b[7m") {
 		t.Error("active pane preview must render the caret in reverse video")
 	}
 	p.Active = false
-	if strings.Contains(p.renderPreview(), "\x1b[7m") {
+	if strings.Contains(p.renderPreview(nil), "\x1b[7m") {
 		t.Error("inactive pane preview must not render a caret")
 	}
 }
@@ -215,7 +215,7 @@ func TestRenderPreview_ScrolledShowsScrollbarAndHistory(t *testing.T) {
 	p.Width, p.Height = 42, 8
 	l := p.previewLayoutFor(40)
 	p.scrollBack = l.totalVisual() - 6 // scroll to the very top
-	out := p.renderPreview()
+	out := p.renderPreview(nil)
 	if !strings.Contains(out, "█") {
 		t.Error("scrolled preview must render the scrollbar thumb")
 	}
@@ -288,7 +288,7 @@ func TestRenderPreview_CursorPastFirstSegment(t *testing.T) {
 		t.Fatalf("setup: cursor at col %d should be on a wrapped continuation row, not the first segment", pos.X)
 	}
 
-	out := p.renderPreview()
+	out := p.renderPreview(nil)
 	lines := strings.Split(out, "\n")
 	// The reverse-video caret must appear on the continuation visual row,
 	// not row 0. Locate which rendered line carries the \x1b[7m caret.
@@ -465,6 +465,43 @@ func TestPreviewPosAt_OutOfRangeClampsToBoundary(t *testing.T) {
 	}
 	if col < 0 || col > innerW {
 		t.Errorf("col = %d, want within [0, %d]", col, innerW)
+	}
+}
+
+func TestRenderPreview_DrawsSelection(t *testing.T) {
+	p := canvasPane(t, 100, 6, strings.Repeat("a", 30)+"\r\n")
+	defer p.Dispose()
+	// Inactive (no caret) so the only possible source of reverse video is
+	// the range selection itself — a caret sharing p.Active would make this
+	// assertion pass even with broken/missing selection logic (see
+	// TestRenderPreview_NoSelectionNoReverse for the caret-covered case).
+	p.Width = 42 // innerW 40
+	p.Height = 8 // innerH 6, matches the 6-row vt so row 0 is in view (not
+	// scrolled out by bottom-anchoring)
+	if !p.previewMode() {
+		t.Fatalf("setup: want preview mode")
+	}
+	// Select columns 5..10 on absolute row 0 (the 'a' row).
+	sel := &Selection{
+		PaneID: p.ID,
+		Anchor: SelectionAnchor{Col: 5, Line: 0},
+		Cursor: SelectionAnchor{Col: 10, Line: 0},
+	}
+	out := p.renderPreview(sel)
+	if !strings.Contains(out, "\x1b[7m") {
+		t.Errorf("preview render missing reverse-video selection SGR; got:\n%q", out)
+	}
+}
+
+func TestRenderPreview_NoSelectionNoReverse(t *testing.T) {
+	p := canvasPane(t, 100, 6, strings.Repeat("a", 30)+"\r\n")
+	defer p.Dispose()
+	p.Width = 42
+	p.Height = 6
+	// Inactive, no selection, no caret → no reverse-video anywhere.
+	out := p.renderPreview(nil)
+	if strings.Contains(out, "\x1b[7m") {
+		t.Errorf("preview render has reverse-video with no selection/caret; got:\n%q", out)
 	}
 }
 

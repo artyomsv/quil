@@ -565,16 +565,15 @@ func TestRenderPreview_WrapSelectionSpansSeam(t *testing.T) {
 	}
 }
 
-// When the caret and a multi-column range selection land on the same visual
-// row, the caret wins (a 1-cell reverse span), not the range. Rendered twice
-// on the same fixture: inactive → the full 7-cell selection shows; active →
-// the caret collapses that row to a single reverse cell. The inactive render
-// proves the selection really is 7 cells, so the active assertion is not
-// vacuous — dropping the caret-precedence branch would make active show 7 too.
-func TestRenderPreview_CaretTakesPrecedenceOverSelection(t *testing.T) {
+// While a range selection is active on a pane, the software caret is
+// suppressed (matching native panes, whose renderWithSelection draws no
+// caret), so the selection highlight has no 1-cell "hole" on the caret's row.
+// Claude's cursor sits at the bottom input line — exactly where a downward
+// drag-selection ends — so the hole would be common without this.
+func TestRenderPreview_SelectionSuppressesCaret(t *testing.T) {
 	// Row 0 = 10 'a's with the cursor parked at col 10 (end of content, no
 	// newline). Crop mode, innerW 40 → one segment [0,10), so absRow 0 is a
-	// single visual row carrying both the selection and the caret.
+	// single visual row carrying both the selection and the caret position.
 	p := canvasPane(t, 100, 3, strings.Repeat("a", 10))
 	defer p.Dispose()
 	p.Width, p.Height = 42, 5 // innerW 40 (no wrap), innerH 3 == emulator rows
@@ -598,18 +597,49 @@ func TestRenderPreview_CaretTakesPrecedenceOverSelection(t *testing.T) {
 		t.Fatalf("setup: caret visual row %d not in viewport [%d,%d)", caretVisual, viewStart, viewStart+innerH)
 	}
 
-	// Inactive: no caret, so the range selection renders in full (7 cells).
-	p.Active = false
-	inactive := strings.Split(p.renderPreview(sel), "\n")
-	if got := strings.Count(inactive[caretLine], "\x1b[7m"); got != 7 {
-		t.Fatalf("inactive: selection cols 2..8 should reverse 7 cells, got %d", got)
+	// Active pane WITH a selection: the caret is suppressed, so the caret's
+	// row shows the full 7-cell selection — no reverse-video hole.
+	p.Active = true
+	withSel := strings.Split(p.renderPreview(sel), "\n")
+	if got := strings.Count(withSel[caretLine], "\x1b[7m"); got != 7 {
+		t.Errorf("active+selection: caret row must show the full selection (7 cells, no caret hole), got %d", got)
 	}
 
-	// Active: the caret (1 cell at col 10) takes precedence on its own row.
-	p.Active = true
-	active := strings.Split(p.renderPreview(sel), "\n")
-	if got := strings.Count(active[caretLine], "\x1b[7m"); got != 1 {
-		t.Errorf("active: caret must win over the range on its row (want 1 reverse cell, got %d)", got)
+	// Active pane WITHOUT a selection: the caret IS drawn (1 reverse cell) —
+	// confirms the suppression is scoped to the selection case, not a lost
+	// caret. Removing the suppression would make the above show 1 (a hole);
+	// suppressing unconditionally would make this show 0.
+	caretOnly := strings.Split(p.renderPreview(nil), "\n")
+	if got := strings.Count(caretOnly[caretLine], "\x1b[7m"); got != 1 {
+		t.Errorf("active, no selection: caret must render as 1 reverse cell, got %d", got)
+	}
+}
+
+// When scrolled, renderPreview reserves the rightmost column for the scrollbar
+// (contentW = innerW-1); a click on that gutter column must map to the last
+// CONTENT column, not one column further right into the gutter.
+func TestPreviewPosAt_ScrolledReservesScrollbarColumn(t *testing.T) {
+	// 12 rows of 80 'a's in an 8-row emulator → 4 rows spill into scrollback,
+	// so every visual row is a full-width content row (crop seg spans the full
+	// inner width, no content-end clamp). innerH 4, total 12 → scrollable.
+	p := canvasPane(t, 100, 8, strings.Repeat(strings.Repeat("a", 80)+"\r\n", 12))
+	defer p.Dispose()
+	p.Width, p.Height = 42, 6 // innerW 40, innerH 4
+	p.scrollBack = 1          // scrolled → scrollbar reserves the rightmost column
+
+	innerW := p.Width - 2 // 40
+	// Confirm the visible row at relY 0 is a wide content row (not blank).
+	if _, _, ok := p.previewPosAt(0, 0); !ok {
+		t.Fatalf("setup: relY 0 must land on a rendered content row")
+	}
+	// Click the reserved scrollbar column (relX = innerW-1) and the last
+	// content column (relX = innerW-2) on the same visible row; both must map
+	// to the same content column (the gutter click does not run one past it).
+	colGutter, _, _ := p.previewPosAt(innerW-1, 0)
+	colLast, _, _ := p.previewPosAt(innerW-2, 0)
+	if colGutter != colLast {
+		t.Errorf("scrolled: scrollbar-column click (relX %d) mapped to col %d, want last content col %d (relX %d)",
+			innerW-1, colGutter, colLast, innerW-2)
 	}
 }
 

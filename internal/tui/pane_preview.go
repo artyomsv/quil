@@ -160,9 +160,15 @@ func (p *PaneModel) renderPreview(sel *Selection) string {
 	}
 	scrolled := p.scrollBack > 0
 
-	// Caret position in visual space (live view only).
+	// Caret position in visual space (live view only). Suppressed while a
+	// range selection is active on this pane, matching native panes
+	// (renderWithSelection draws no caret): otherwise the 1-cell caret span
+	// would punch a reverse-video "hole" in the selection on the caret's row —
+	// visible when dragging a selection down through Claude's bottom input
+	// cursor.
+	selActive := sel != nil && sel.PaneID == p.ID
 	cursorVisual, cursorCol := -1, -1
-	if !scrolled && p.Active && p.cursorVisible {
+	if !scrolled && p.Active && p.cursorVisible && !selActive {
 		pos := p.vt.CursorPosition()
 		absRow := p.vt.ScrollbackLen() + pos.Y
 		if absRow >= 0 && absRow < len(l.segs) && len(l.segs[absRow]) > 0 {
@@ -308,8 +314,21 @@ func (p *PaneModel) previewPosAt(relX, relY int) (col, absLine int, ok bool) {
 		}
 	}
 	absRow, s := l.locate(v)
+	// When scrolled, renderPreview reserves the rightmost column for the
+	// scrollbar (contentW = innerW-1), so a click on that gutter column must
+	// map to the last CONTENT column, not one past it.
+	contentW := innerW
+	if p.scrollBack > 0 {
+		contentW = innerW - 1
+		if contentW < 1 {
+			contentW = 1
+		}
+	}
 	if relX < 0 {
 		relX = 0
+	}
+	if relX > contentW-1 {
+		relX = contentW - 1
 	}
 	col = s.start + relX
 	if col > s.end {

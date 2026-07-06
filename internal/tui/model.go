@@ -4079,7 +4079,7 @@ func (m Model) resizeAllPanes() tea.Cmd {
 				// paneVTSize keeps the PTY in lockstep with the VT: rect
 				// size for normal panes, tab canvas for wide-canvas panes.
 				// The daemon drops exact duplicates (same-size guard).
-				cols, rows := paneVTSize(pane.WideCanvas, pane.Width, pane.Height, tab.CanvasW, tab.CanvasH)
+				cols, rows := paneVTSize(pane.WideCanvas, pane.MinNativeCols, pane.Width, pane.Height, tab.CanvasW, tab.CanvasH)
 				msg, _ := ipc.NewMessage(ipc.MsgResizePane, ipc.ResizePanePayload{
 					PaneID: pane.ID,
 					Cols:   uint16(cols),

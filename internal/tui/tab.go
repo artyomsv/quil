@@ -310,7 +310,7 @@ func (t *TabModel) activeIndex(leaves []*PaneModel) int {
 func sizePaneFull(t *TabModel, p *PaneModel, w, h int) {
 	p.Width = w
 	p.Height = h
-	p.ResizeVT(paneVTSize(p.WideCanvas, w, h, t.CanvasW, t.CanvasH))
+	p.ResizeVT(paneVTSize(p.WideCanvas, p.MinNativeCols, w, h, t.CanvasW, t.CanvasH))
 }
 
 // Resize recomputes dimensions for the entire layout tree.

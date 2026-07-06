@@ -13,18 +13,21 @@ func TestPaneVTSize(t *testing.T) {
 	cases := []struct {
 		name                     string
 		wide                     bool
+		minNativeCols            int
 		rectW, rectH, canW, canH int
 		wantCols, wantRows       int
 	}{
-		{"normal pane uses rect", false, 60, 20, 200, 50, 58, 18},
-		{"canvas pane uses canvas", true, 60, 20, 200, 50, 198, 48},
-		{"canvas degenerate clamps", true, 60, 20, 1, 1, 1, 1},
-		{"normal degenerate clamps", false, 2, 2, 200, 50, 1, 1},
-		{"zero canvas falls back to rect", true, 60, 20, 0, 0, 58, 18},
+		{"normal pane uses rect", false, 80, 60, 20, 200, 50, 58, 18},
+		{"wide narrow pane uses canvas", true, 80, 60, 20, 200, 50, 198, 48},
+		{"wide pane at threshold goes native", true, 80, 120, 20, 200, 50, 118, 18},
+		{"minNativeCols<=0 defaults to 80", true, 0, 60, 20, 200, 50, 198, 48},
+		{"wide canvas degenerate clamps", true, 80, 60, 20, 1, 1, 1, 1},
+		{"normal degenerate clamps", false, 80, 2, 2, 200, 50, 1, 1},
+		{"zero canvas falls back to rect", true, 80, 60, 20, 0, 0, 58, 18},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			c, r := paneVTSize(tc.wide, tc.rectW, tc.rectH, tc.canW, tc.canH)
+			c, r := paneVTSize(tc.wide, tc.minNativeCols, tc.rectW, tc.rectH, tc.canW, tc.canH)
 			if c != tc.wantCols || r != tc.wantRows {
 				t.Errorf("got %dx%d, want %dx%d", c, r, tc.wantCols, tc.wantRows)
 			}
@@ -32,9 +35,10 @@ func TestPaneVTSize(t *testing.T) {
 	}
 }
 
-// Zoom must not resize a canvas pane: the grid resize and the focus-mode
-// resize must produce the same canvas-derived VT size. This is the core
-// invariant of the wide-canvas design — Ctrl+E stops being a PTY resize.
+// Zoom must not resize a SUB-THRESHOLD canvas pane: with a 120-wide window a
+// 2-pane split leaves each rect ~58 inner cols (< 80), so pane `a` stays on
+// the window canvas; the grid and focus-mode resizes must produce the same
+// canvas-derived VT size.
 func TestTabResize_CanvasPane_FocusToggleKeepsVTSize(t *testing.T) {
 	a := NewPaneModel("a", 4096)
 	defer a.Dispose()
@@ -48,9 +52,9 @@ func TestTabResize_CanvasPane_FocusToggleKeepsVTSize(t *testing.T) {
 	ph.Pane = b
 	tab.ActivePane = "a"
 
-	tab.SetCanvas(200, 50)
-	tab.Resize(200, 50)
-	wantW, wantH := 198, 48
+	tab.SetCanvas(120, 50)
+	tab.Resize(120, 50)
+	wantW, wantH := 118, 48
 	if a.vt.Width() != wantW || a.vt.Height() != wantH {
 		t.Fatalf("grid: canvas pane VT %dx%d, want %dx%d", a.vt.Width(), a.vt.Height(), wantW, wantH)
 	}
@@ -59,13 +63,13 @@ func TestTabResize_CanvasPane_FocusToggleKeepsVTSize(t *testing.T) {
 	}
 
 	tab.ToggleFocus()
-	tab.Resize(200, 50)
+	tab.Resize(120, 50)
 	if a.vt.Width() != wantW || a.vt.Height() != wantH {
 		t.Errorf("focus: canvas pane VT %dx%d, want unchanged %dx%d", a.vt.Width(), a.vt.Height(), wantW, wantH)
 	}
 
 	tab.ExitFocus()
-	tab.Resize(200, 50)
+	tab.Resize(120, 50)
 	if a.vt.Width() != wantW || a.vt.Height() != wantH {
 		t.Errorf("back to grid: canvas pane VT %dx%d, want unchanged %dx%d", a.vt.Width(), a.vt.Height(), wantW, wantH)
 	}
@@ -129,10 +133,18 @@ wide_canvas = true
 		if !p.WideCanvas {
 			t.Errorf("pane %s: WideCanvas=false after reconciliation with flagged registry", p.ID)
 		}
-		wantW, wantH := 207, 54 // canvas (209, 56) minus border
-		if p.vt.Width() != wantW || p.vt.Height() != wantH {
-			t.Errorf("pane %s VT %dx%d, want canvas %dx%d (rect was %dx%d)",
-				p.ID, p.vt.Width(), p.vt.Height(), wantW, wantH, p.Width, p.Height)
+		// 209x58 window, 2-pane split → applyWorkspaceState stacks new panes
+		// with a VERTICAL split (top/bottom), so each rect keeps the full
+		// 209 width and only the height halves (~28 rows). That makes width
+		// alone indistinguishable between native and canvas here (canvasW
+		// happens to equal rectW, 209) — height is the real discriminator:
+		// canvas would be tabH-2=54 rows, native is rectH-2≈26. Assert
+		// native (rect-sized) and NOT in preview mode (so selection works).
+		if p.previewMode() {
+			t.Errorf("pane %s: previewMode=true, want native (rect ≥ threshold)", p.ID)
+		}
+		if p.vt.Height() >= 54 {
+			t.Errorf("pane %s VT height %d, want native (< 54 canvas height)", p.ID, p.vt.Height())
 		}
 	}
 }
@@ -280,5 +292,74 @@ func TestSyncPaneMeta_SetsMinNativeCols(t *testing.T) {
 	m.applyWorkspaceState(state)
 	if got := m.tabs[0].Leaves()[0].MinNativeCols; got != 100 {
 		t.Errorf("pane MinNativeCols = %d, want 100", got)
+	}
+}
+
+// A wide window puts each split pane over the threshold → native (previewMode
+// false); a narrow window puts them under → canvas (previewMode true).
+//
+// Note on construction: applyWorkspaceState's "fresh pane, no saved layout"
+// branch always stacks new panes with a VERTICAL split (top/bottom, see
+// model.go's SplitLeaf(..., SplitVertical) in the new-pane branch) — that
+// leaves each leaf's rect at the FULL window width, so canvasW and rectW are
+// always numerically equal and previewMode() (which only compares width)
+// can never observe the canvas branch through that path. To actually
+// exercise a side-by-side split (rect narrower than the canvas), this test
+// supplies a saved Layout with an explicit SplitHorizontal tree, taking the
+// restoreTabLayout branch instead — the same mechanism
+// TestApplyWorkspaceState_RestorePath_CanvasFlag uses for a single pane.
+func TestApplyWorkspaceState_ThresholdSelectsNativeOrCanvas(t *testing.T) {
+	horizontalSplitLayout := func(t *testing.T) []byte {
+		t.Helper()
+		root := NewLeaf(NewPaneModel("p1", 4096))
+		ph := root.SplitLeaf("p1", SplitHorizontal)
+		ph.Pane = NewPaneModel("p2", 4096)
+		layout, err := MarshalLayout(root)
+		if err != nil {
+			t.Fatalf("MarshalLayout: %v", err)
+		}
+		return layout
+	}
+
+	newModel := func(w, h int) Model {
+		m := Model{
+			cfg:            config.Default(),
+			notifications:  NewNotificationCenter(30, 50),
+			pluginRegistry: flaggedCanvasRegistry(t),
+			mcpHighlights:  make(map[string]bool),
+			attached:       true,
+			width:          w,
+			height:         h,
+		}
+		state := WorkspaceStateMsg{
+			ActiveTab: "t1",
+			Tabs:      []TabInfo{{ID: "t1", Name: "AI", Panes: []string{"p1", "p2"}, Layout: horizontalSplitLayout(t)}},
+			Panes: []PaneInfo{
+				{ID: "p1", TabID: "t1", Type: "claude-code"},
+				{ID: "p2", TabID: "t1", Type: "claude-code"},
+			},
+		}
+		m.applyWorkspaceState(state)
+		m.resizeTabs()
+		return m
+	}
+
+	// 209-wide window, horizontal split → each rect ≈104-105 inner cols
+	// (rect-2 ≥ 80) → native (previewMode false).
+	wide := newModel(209, 58)
+	for _, p := range wide.tabs[0].Leaves() {
+		if p.previewMode() {
+			t.Errorf("wide window: pane %s in preview, want native (rect %d)", p.ID, p.Width-2)
+		}
+	}
+
+	// 120-wide window, horizontal split → each rect = 60 (rect-2 = 58 < 80)
+	// → canvas (previewMode true, since the 120-wide canvas is wider than
+	// the 60-wide rect).
+	narrow := newModel(120, 40)
+	for _, p := range narrow.tabs[0].Leaves() {
+		if !p.previewMode() {
+			t.Errorf("narrow window: pane %s native, want preview (rect %d < threshold)", p.ID, p.Width-2)
+		}
 	}
 }

@@ -325,9 +325,10 @@ type tomlPlugin struct {
 		} `toml:"scrape"`
 	} `toml:"persistence"`
 	Display struct {
-		BorderColor string `toml:"border_color"`
-		DialogWidth int    `toml:"dialog_width"`
-		WideCanvas  bool   `toml:"wide_canvas"`
+		BorderColor   string `toml:"border_color"`
+		DialogWidth   int    `toml:"dialog_width"`
+		WideCanvas    bool   `toml:"wide_canvas"`
+		MinNativeCols int    `toml:"min_native_cols"`
 	} `toml:"display"`
 	Instances []struct {
 		Name        string   `toml:"name"`
@@ -418,9 +419,10 @@ func loadPluginTOML(path string) (*PanePlugin, error) {
 			GhostBuffer: tp.Persistence.GhostBuffer == nil || *tp.Persistence.GhostBuffer, // default true
 		},
 		Display: DisplayConfig{
-			BorderColor: tp.Display.BorderColor,
-			DialogWidth: tp.Display.DialogWidth,
-			WideCanvas:  tp.Display.WideCanvas,
+			BorderColor:   tp.Display.BorderColor,
+			DialogWidth:   tp.Display.DialogWidth,
+			WideCanvas:    tp.Display.WideCanvas,
+			MinNativeCols: tp.Display.MinNativeCols,
 		},
 	}
 

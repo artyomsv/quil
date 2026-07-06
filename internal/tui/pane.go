@@ -46,6 +46,7 @@ type PaneModel struct {
 	ID                 string
 	Type               string // plugin type ("terminal", "claude-code", etc.)
 	WideCanvas         bool   // [display] wide_canvas: VT/PTY stay window-sized; small rects render a wrapped preview
+	MinNativeCols      int    // [display] min_native_cols: inner-width threshold for native (non-canvas) rendering; 0 = default 80
 	Name               string // user-given name (empty if not set)
 	CWD                string // current working directory from daemon
 	Muted              bool   // notification mute (daemon-authoritative; mirrored here for border rendering)

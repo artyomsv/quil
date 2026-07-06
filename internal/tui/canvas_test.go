@@ -231,3 +231,54 @@ func TestApplyWorkspaceState_MidSessionFlip_CanvasFlag(t *testing.T) {
 		t.Errorf("post-flip canvas pane VT width %d, want 207", w)
 	}
 }
+
+func TestPluginMinNativeCols(t *testing.T) {
+	dir := t.TempDir()
+	toml := "[plugin]\nname = \"claude-code\"\nschema_version = 7\n" +
+		"[command]\ncmd = \"true\"\n[display]\nwide_canvas = true\nmin_native_cols = 100\n"
+	if err := os.WriteFile(filepath.Join(dir, "claude-code.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatalf("write plugin: %v", err)
+	}
+	reg := plugin.NewRegistry()
+	if err := reg.LoadFromDir(dir); err != nil {
+		t.Fatalf("LoadFromDir: %v", err)
+	}
+	m := Model{pluginRegistry: reg}
+	if got := m.pluginMinNativeCols("claude-code"); got != 100 {
+		t.Errorf("pluginMinNativeCols(claude-code) = %d, want 100", got)
+	}
+	if got := m.pluginMinNativeCols("unknown"); got != 0 {
+		t.Errorf("pluginMinNativeCols(unknown) = %d, want 0", got)
+	}
+}
+
+func TestSyncPaneMeta_SetsMinNativeCols(t *testing.T) {
+	dir := t.TempDir()
+	toml := "[plugin]\nname = \"claude-code\"\nschema_version = 7\n" +
+		"[command]\ncmd = \"true\"\n[display]\nwide_canvas = true\nmin_native_cols = 100\n"
+	if err := os.WriteFile(filepath.Join(dir, "claude-code.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatalf("write plugin: %v", err)
+	}
+	reg := plugin.NewRegistry()
+	if err := reg.LoadFromDir(dir); err != nil {
+		t.Fatalf("LoadFromDir: %v", err)
+	}
+	m := Model{
+		cfg:            config.Default(),
+		notifications:  NewNotificationCenter(30, 50),
+		pluginRegistry: reg,
+		mcpHighlights:  make(map[string]bool),
+		attached:       true,
+		width:          209,
+		height:         58,
+	}
+	state := WorkspaceStateMsg{
+		ActiveTab: "t1",
+		Tabs:      []TabInfo{{ID: "t1", Name: "AI", Panes: []string{"p1"}}},
+		Panes:     []PaneInfo{{ID: "p1", TabID: "t1", Type: "claude-code"}},
+	}
+	m.applyWorkspaceState(state)
+	if got := m.tabs[0].Leaves()[0].MinNativeCols; got != 100 {
+		t.Errorf("pane MinNativeCols = %d, want 100", got)
+	}
+}

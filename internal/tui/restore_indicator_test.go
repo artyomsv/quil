@@ -99,11 +99,11 @@ func TestSyncPaneMeta_PropagatesPending(t *testing.T) {
 	p := NewPaneModel("p", testRingBufSize)
 	defer p.Dispose()
 	p.Pending = true
-	syncPaneMeta(p, &PaneInfo{ID: "p", Pending: false}, false)
+	syncPaneMeta(p, &PaneInfo{ID: "p", Pending: false}, false, 0)
 	if p.Pending {
 		t.Error("syncPaneMeta should clear Pending when the daemon reports it spawned")
 	}
-	syncPaneMeta(p, &PaneInfo{ID: "p", Pending: true}, false)
+	syncPaneMeta(p, &PaneInfo{ID: "p", Pending: true}, false, 0)
 	if !p.Pending {
 		t.Error("syncPaneMeta should set Pending when the daemon reports deferred")
 	}
@@ -287,7 +287,7 @@ func TestSyncPaneMeta_PropagatesSessionAndHistory(t *testing.T) {
 	t.Parallel()
 	p := NewPaneModel("p", testRingBufSize)
 	defer p.Dispose()
-	syncPaneMeta(p, &PaneInfo{ID: "p", Type: "claude-code", SessionID: "abc123", HistoryLines: 42}, false)
+	syncPaneMeta(p, &PaneInfo{ID: "p", Type: "claude-code", SessionID: "abc123", HistoryLines: 42}, false, 0)
 	if p.SessionID != "abc123" {
 		t.Errorf("SessionID = %q, want abc123", p.SessionID)
 	}

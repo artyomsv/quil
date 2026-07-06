@@ -1162,6 +1162,19 @@ func (m Model) pluginWideCanvas(paneType string) bool {
 	return false
 }
 
+// pluginMinNativeCols resolves the native-rendering column threshold for a
+// pane type via the plugin registry. Unknown types (registry miss, nil
+// registry in tests) return 0, which paneVTSize treats as the default (80).
+func (m Model) pluginMinNativeCols(paneType string) int {
+	if m.pluginRegistry == nil {
+		return 0
+	}
+	if p := m.pluginRegistry.Get(paneType); p != nil {
+		return p.Display.MinNativeCols
+	}
+	return 0
+}
+
 // sidebarOverlayWidth returns the drawn width of the notification sidebar
 // overlay, or 0 when it isn't drawn (hidden, a dialog is open, or the
 // terminal is too narrow). Unlike the old reservation logic there is no
@@ -2403,7 +2416,7 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) ([]string, []tea.Cm
 				if info, ok := paneMap[paneID]; ok {
 					if leaf := tab.Root.FindLeaf(paneID); leaf != nil {
 						wasPending := leaf.Pane.Pending
-						syncPaneMeta(leaf.Pane, info, m.pluginWideCanvas(info.Type))
+						syncPaneMeta(leaf.Pane, info, m.pluginWideCanvas(info.Type), m.pluginMinNativeCols(info.Type))
 						// A deferred pane that just lazy-spawned (Pending→running,
 						// e.g. on tab switch): arm the restore indicator NOW so it
 						// covers the real boot, and enroll it for spinner ticks.
@@ -2444,7 +2457,7 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) ([]string, []tea.Cm
 				newPaneIDs = append(newPaneIDs, paneID)
 			}
 			if info != nil {
-				syncPaneMeta(pane, info, m.pluginWideCanvas(info.Type))
+				syncPaneMeta(pane, info, m.pluginWideCanvas(info.Type), m.pluginMinNativeCols(info.Type))
 			}
 
 			// Try to fill a pending split placeholder first.
@@ -2584,7 +2597,7 @@ func (m *Model) restoreTabLayout(tab *TabModel, tabInfo TabInfo, paneMap map[str
 			pane.resumeStart = time.Now()
 		}
 		if info, ok := paneMap[paneID]; ok {
-			syncPaneMeta(pane, info, m.pluginWideCanvas(info.Type))
+			syncPaneMeta(pane, info, m.pluginWideCanvas(info.Type), m.pluginMinNativeCols(info.Type))
 		}
 		paneModels[paneID] = pane
 	}
@@ -2677,7 +2690,7 @@ func (m *Model) reconcileOverlayPane(
 			pane = NewPaneModel(overlayInfo.ID, m.replayBufSize())
 			newPaneIDs = append(newPaneIDs, overlayInfo.ID)
 		}
-		syncPaneMeta(pane, overlayInfo, m.pluginWideCanvas(overlayInfo.Type))
+		syncPaneMeta(pane, overlayInfo, m.pluginWideCanvas(overlayInfo.Type), m.pluginMinNativeCols(overlayInfo.Type))
 		tab.overlayPane = pane
 		// Show the overlay immediately when this TUI's Alt+G triggered its
 		// creation (pendingOverlayShow entry). On plain reattach, default hidden.
@@ -2688,7 +2701,7 @@ func (m *Model) reconcileOverlayPane(
 		}
 	default:
 		// Same overlay pane — refresh metadata only.
-		syncPaneMeta(tab.overlayPane, overlayInfo, m.pluginWideCanvas(overlayInfo.Type))
+		syncPaneMeta(tab.overlayPane, overlayInfo, m.pluginWideCanvas(overlayInfo.Type), m.pluginMinNativeCols(overlayInfo.Type))
 	}
 
 	return newPaneIDs, false

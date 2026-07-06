@@ -135,6 +135,10 @@ type DisplayConfig struct {
 	// transcript is immutable hard-wrapped text: rendering wide once and
 	// wrapping down beats resizing, which garbles history. Default false.
 	WideCanvas bool
+	// MinNativeCols is the inner-width threshold (columns) at or above which
+	// a wide_canvas pane renders natively (real pane-width PTY) instead of
+	// the window canvas + preview. 0 means "use the built-in default" (80).
+	MinNativeCols int
 }
 
 // ErrorHandler matches PTY output patterns and triggers help dialogs.

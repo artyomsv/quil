@@ -245,6 +245,47 @@ func (p *PaneModel) renderPreview() string {
 	return strings.Join(lines, "\n")
 }
 
+// previewPosAt maps a pane-local (relX, relY) — already border-adjusted, i.e.
+// 0-based within the inner content area — to an emulator (col, absLine) via
+// the visual→absolute preview layout. ok is false when the point lands
+// outside the rendered content (e.g. below the last line). The mapping is the
+// inverse of renderPreview's viewStart + locate() walk, so a click lands on
+// the glyph under the cursor in both crop and soft-wrap modes.
+func (p *PaneModel) previewPosAt(relX, relY int) (col, absLine int, ok bool) {
+	innerW := p.Width - 2
+	innerH := p.Height - 2
+	if innerW < 1 {
+		innerW = 1
+	}
+	if innerH < 1 {
+		innerH = 1
+	}
+	l := p.previewLayoutFor(innerW)
+	total := l.totalVisual()
+	viewStart := total - innerH - p.scrollBack
+	if viewStart < 0 {
+		viewStart = 0
+	}
+	v := viewStart + relY
+	if v < 0 || v >= total {
+		return 0, 0, false
+	}
+	absRow, s := l.locate(v)
+	if relX < 0 {
+		relX = 0
+	}
+	col = s.start + relX
+	if col > s.end {
+		col = s.end
+	}
+	// Clamp to the row's real content end so a click in the blank area past
+	// text maps to end-of-line rather than an off-grid column.
+	if end := lineContentEnd(p, absRow); end >= 0 && col > end+1 {
+		col = end + 1
+	}
+	return col, absRow, true
+}
+
 // wrapRow splits one wide row into innerW-wide segments over [0, contentEnd].
 // A blank row (contentEnd < 0) is a single empty segment. A wide glyph whose
 // continuation cell would start a segment (lead straddling the cut) keeps

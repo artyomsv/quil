@@ -377,3 +377,57 @@ func TestHandleKey_ToggleWrap(t *testing.T) {
 		t.Error("toggle_wrap must not set previewWrap on a non-canvas pane")
 	}
 }
+
+func TestPreviewPosAt_CropRoundTrip(t *testing.T) {
+	// 100-wide emulator, one 95-char row + a short row. Crop mode (default):
+	// one visual row per absolute row, viewport bottom-anchored. The emulator
+	// is 4 rows tall (matching innerH) so the bottom-anchored viewport starts
+	// exactly at absolute row 0 — a taller emulator (e.g. 6 rows, matching
+	// only the pane's outer Height) leaves 2 unused blank screen rows below
+	// the fed content, and bottom-anchoring would show those blank rows
+	// instead of the "a" row, which is not what this test is exercising.
+	p := canvasPane(t, 100, 4, strings.Repeat("a", 95)+"\r\nshort\r\n")
+	defer p.Dispose()
+	p.Width = 42  // innerW 40
+	p.Height = 6  // innerH 4
+	if !p.previewMode() {
+		t.Fatalf("setup: want preview mode (innerW 40 < vt %d)", p.vt.Width())
+	}
+	// Column within the crop window maps 1:1 (seg.start == 0).
+	col, _, ok := p.previewPosAt(10, 0)
+	if !ok || col != 10 {
+		t.Errorf("relX 10 -> col %d ok=%v, want col 10", col, ok)
+	}
+	// relY past the rendered content is out of range.
+	if _, _, ok := p.previewPosAt(0, 99); ok {
+		t.Errorf("relY 99 should be out of range")
+	}
+	// A click past the row's content clamps to content end (95), not off-grid.
+	col, _, ok = p.previewPosAt(39, 0)
+	if !ok || col > 95 {
+		t.Errorf("relX 39 -> col %d ok=%v, want <=95", col, ok)
+	}
+}
+
+func TestPreviewPosAt_WrapSegments(t *testing.T) {
+	// Soft-wrap: a 95-wide row at innerW 40 becomes 3 visual rows
+	// [0,40),[40,80),[80,95). The 2nd visual row's relX 5 maps to col 45.
+	p := canvasPane(t, 100, 6, strings.Repeat("b", 95)+"\r\n")
+	defer p.Dispose()
+	p.previewWrap = true
+	p.Width = 42 // innerW 40
+	p.Height = 8 // innerH 6 — tall enough that all 3 segments are visible
+	l := p.previewLayoutFor(40)
+	// Find the visual row index of the row's 2nd segment (absolute row 0).
+	vSecond := l.prefix[0] + 1
+	total := l.totalVisual()
+	viewStart := total - 6 // innerH
+	if viewStart < 0 {
+		viewStart = 0
+	}
+	relY := vSecond - viewStart
+	col, absLine, ok := p.previewPosAt(5, relY)
+	if !ok || col != 45 || absLine != 0 {
+		t.Errorf("wrap seg2 relX 5 -> col %d line %d ok=%v, want col 45 line 0", col, absLine, ok)
+	}
+}

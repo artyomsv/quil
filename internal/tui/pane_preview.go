@@ -248,9 +248,13 @@ func (p *PaneModel) renderPreview() string {
 // previewPosAt maps a pane-local (relX, relY) — already border-adjusted, i.e.
 // 0-based within the inner content area — to an emulator (col, absLine) via
 // the visual→absolute preview layout. ok is false when the point lands
-// outside the rendered content (e.g. below the last line). The mapping is the
-// inverse of renderPreview's viewStart + locate() walk, so a click lands on
-// the glyph under the cursor in both crop and soft-wrap modes.
+// outside the rendered content (e.g. below the last line); in that case the
+// returned (col, absLine) is still clamped to the nearest rendered row rather
+// than zeroed, so callers can use it directly (e.g. a drag that continues
+// past the pane edge extends the selection to the boundary instead of
+// snapping to buffer position (0,0)). The mapping is the inverse of
+// renderPreview's viewStart + locate() walk, so a click lands on the glyph
+// under the cursor in both crop and soft-wrap modes.
 func (p *PaneModel) previewPosAt(relX, relY int) (col, absLine int, ok bool) {
 	innerW := p.Width - 2
 	innerH := p.Height - 2
@@ -267,8 +271,19 @@ func (p *PaneModel) previewPosAt(relX, relY int) (col, absLine int, ok bool) {
 		viewStart = 0
 	}
 	v := viewStart + relY
-	if v < 0 || v >= total {
-		return 0, 0, false
+	inRange := v >= 0 && v < total
+	if !inRange {
+		if total == 0 {
+			return 0, 0, false
+		}
+		// Clamp to the nearest rendered row so a drag past the pane edge
+		// extends the selection to the boundary (like the native path),
+		// rather than snapping the endpoint to buffer position (0,0).
+		if v < 0 {
+			v = 0
+		} else {
+			v = total - 1
+		}
 	}
 	absRow, s := l.locate(v)
 	if relX < 0 {
@@ -283,7 +298,7 @@ func (p *PaneModel) previewPosAt(relX, relY int) (col, absLine int, ok bool) {
 	if end := lineContentEnd(p, absRow); end >= 0 && col > end+1 {
 		col = end + 1
 	}
-	return col, absRow, true
+	return col, absRow, inRange
 }
 
 // wrapRow splits one wide row into innerW-wide segments over [0, contentEnd].

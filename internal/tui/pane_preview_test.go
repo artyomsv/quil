@@ -437,6 +437,37 @@ func TestPreviewPosAt_CropRoundTrip(t *testing.T) {
 	}
 }
 
+// A drag endpoint past the pane's bottom edge (common: mouse-motion
+// coordinates are unclamped) must clamp to the nearest rendered row rather
+// than snapping to buffer position (0,0) — the bug this test guards against.
+func TestPreviewPosAt_OutOfRangeClampsToBoundary(t *testing.T) {
+	p := canvasPane(t, 100, 4, strings.Repeat("a", 95)+"\r\nshort\r\n")
+	defer p.Dispose()
+	p.Width = 42 // innerW 40
+	p.Height = 6 // innerH 4
+	if !p.previewMode() {
+		t.Fatalf("setup: want preview mode (innerW 40 < vt %d)", p.vt.Width())
+	}
+
+	innerW := p.Width - 2
+	l := p.previewLayoutFor(innerW)
+	wantAbsLine, _ := l.locate(l.totalVisual() - 1)
+	if wantAbsLine == 0 {
+		t.Fatalf("setup: last rendered row must not be row 0, or this test can't distinguish the clamp from the old zeroing bug")
+	}
+
+	col, absLine, ok := p.previewPosAt(0, 99) // relY 99 is far past the last rendered row
+	if ok {
+		t.Errorf("relY 99 (past pane bottom) should report ok=false")
+	}
+	if absLine != wantAbsLine {
+		t.Errorf("absLine = %d, want %d (clamped to the last rendered row, not 0)", absLine, wantAbsLine)
+	}
+	if col < 0 || col > innerW {
+		t.Errorf("col = %d, want within [0, %d]", col, innerW)
+	}
+}
+
 func TestPreviewPosAt_WrapSegments(t *testing.T) {
 	// Soft-wrap: a 95-wide row at innerW 40 becomes 3 visual rows
 	// [0,40),[40,80),[80,95). Across the 6-row emulator that's 3 wrapped +

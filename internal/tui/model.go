@@ -3720,11 +3720,8 @@ func (m *Model) updateMouseSelection(tab *TabModel, curX, curY, tabH int) {
 	// are wrapped/cropped segments of a wider emulator. Map both endpoints
 	// through the layout inverse instead of the raw screen mapping below.
 	if pane.previewMode() {
-		startCol, startLine, okS := pane.previewPosAt(m.mouseStartX-ox-1, m.mouseStartY-oy-1)
-		curCol, curLine, okC := pane.previewPosAt(curX-ox-1, curY-oy-1)
-		if !okS && !okC {
-			return
-		}
+		startCol, startLine, _ := pane.previewPosAt(m.mouseStartX-ox-1, m.mouseStartY-oy-1)
+		curCol, curLine, _ := pane.previewPosAt(curX-ox-1, curY-oy-1)
 		m.selection = &Selection{
 			PaneID: pane.ID,
 			Anchor: SelectionAnchor{Col: startCol, Line: startLine},
@@ -3806,8 +3803,11 @@ func (m Model) handleSelectionKey(key string) (tea.Model, tea.Cmd) {
 	if pane == nil {
 		return m, nil
 	}
-	// Wide-canvas previews are zoom-only for selection (v1): the wrapped
-	// view has no 1:1 grid mapping, so selection keys are ignored here.
+	// Keyboard selection is disabled in preview mode: stepping a caret by
+	// logical lines through a wrapped/cropped view is disorienting when the
+	// visual and absolute row grids don't match 1:1. Mouse selection IS
+	// supported in preview — see updateMouseSelection, which maps through
+	// previewPosAt instead of the raw screen grid used below.
 	if pane.previewMode() {
 		return m, nil
 	}

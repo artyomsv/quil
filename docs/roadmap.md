@@ -277,7 +277,7 @@ Remote workspace viewing and collaboration over TCP+TLS. Read-only by default, c
 
 ---
 
-## Planned — Competitive Gaps (herdr / AoE)
+## Planned — Competitive Gaps (herdr, AoE)
 
 > Derived from the [competitive analysis](competitive-analysis.md) of the two
 > closest direct competitors — [herdr](https://github.com/ogulcancelik/herdr)

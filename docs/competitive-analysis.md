@@ -2,7 +2,7 @@
 
 > Deep comparison of Quil against the two closest direct competitors in the
 > "terminal multiplexer for AI coding agents" category, captured 2026-07-06.
-> Feeds the [competitive-gap section of the roadmap](roadmap.md#planned--competitive-gaps-herdr--aoe).
+> Feeds the [competitive-gap section of the roadmap](roadmap.md#planned--competitive-gaps-herdr-aoe).
 
 The classic-multiplexer comparisons (tmux, zellij, WezTerm, screen) live on the
 marketing site under `/vs/*`. This document covers the two products that share

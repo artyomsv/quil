@@ -1,9 +1,13 @@
 # Code Review State: quil / robust-restart
 
-Last reviewed: 2026-06-09
-Rounds completed: 1
+Last reviewed: 2026-07-08
+Rounds completed: 2
 
 ## Resolved (fixed in code; do not re-raise)
+- [rules/M1] Single-instance guard + 30 s crash-aware readiness wait documented in CLAUDE.md (Daemon single-instance guard / Daemon readiness wait bullets) — round 2
+- [code-quality/L1] startDaemon doc comment tightened: pid==0 ⇒ daemon already listening; spawn failures os.Exit (never return 0) — round 2
+- [code-quality/L2] Wait-failure after spawn now surfaces a descriptive error pointing at the daemon log (launchTUI spawnedButNotReady branch; connectToDaemon wraps with "daemon spawned but did not open socket") instead of the stale pre-spawn dial error — round 2
+- [qa/gap-alive-pid] TestWaitForDaemonReadyWithin_AlivePidTimesOutNormally added — proves the crash-abort is dead-pid-specific (live pid waits full timeout, 0.15s, vs dead pid 0.00s) — round 2
 - [code-quality/M1] Pane.Type/CWD data race — spawnRestoredPane error-path writes now under PluginMu; all concurrent-reachable Type/CWD readers (workspaceStateFromSnapshot, buildPaneInfos, handlePaneStatusReq, snapshot ghost loop, handleAttach replay, spawnPane) read under PluginMu; Pane doc updated; non-vacuous -race test added (commit 9826780) — round 1
 - [code-quality/L4] handleRestartPaneReq PTY=nil swap now under PluginMu (9826780) — round 1
 - [code-quality/M2] Windows log-rotation hot-loop on rename failure — renameFn seam + suppressRotateUntil backoff caps retries to once per maxSize growth (b50f31f) — round 1
@@ -23,3 +27,6 @@ Rounds completed: 1
 - [rules/L6] tab_marker tests not table-driven — per-case form is explicit and readable; stylistic only (round 1)
 - [rules/L7] 5 commit subjects exceed 72 chars — immutable history; noted for future commits (round 1)
 - [security/L1] rotate.go Stat→Rename TOCTOU and [security/L2] int64<<20 overflow — defense-in-depth only; nil impact in the same-UID 0700-dir / trusted-config threat model (round 1)
+- [security/INFO] Residual TOCTOU on the single-instance guard — two daemons that both pass the probe before either listens can still race and orphan one. Availability-only, same-UID, strictly better than the pre-guard behavior; a fully race-free fix (bind-first / pidfile flock) is a robustness follow-up, not a security fix (round 2)
+- [code-quality/obs] restartDaemonForUpgrade stops the old daemon with MsgShutdown + os.Remove rather than stopDaemonEscalating, so a wedged daemon during a version upgrade can still be orphaned — pre-existing (this diff only swapped the readiness wait), narrow (wedged daemon during upgrade), out of scope for this change (round 2)
+- [testability] Extract cmd/quild single-instance guard into a named predicate for unit testing — main() is convention-skip (cmd/*/main.go integration-only) and the dependency (ipc.NewClient vs live/stale socket) is already covered in internal/ipc; optional, not taken (round 2)

@@ -194,13 +194,15 @@ func connectToDaemon(sockPath string, cfg config.Config) (*ipc.Client, error) {
 		return nil, err
 	}
 
-	startDaemon(true)
-	for i := 0; i < daemonStartRetries; i++ {
-		time.Sleep(daemonRetryInterval)
-		client, err = ipc.NewClient(sockPath)
-		if err == nil {
-			return client, nil
-		}
+	pid := startDaemon(true)
+	if !waitForDaemonReady(sockPath, pid) {
+		// Spawned, but the socket never opened — surface that instead of the
+		// stale pre-spawn dial error so the MCP client's log points at the
+		// daemon rather than looking like a plain "not running".
+		return nil, fmt.Errorf("daemon spawned but did not open socket %s within %s: %w", sockPath, daemonReadyTimeout, err)
 	}
-	return nil, err
+	if client, err = ipc.NewClient(sockPath); err != nil {
+		return nil, fmt.Errorf("reconnect after auto-start: %w", err)
+	}
+	return client, nil
 }

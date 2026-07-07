@@ -9,6 +9,7 @@ import (
 
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/daemon"
+	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/logger"
 	apty "github.com/artyomsv/quil/internal/pty"
 	versionpkg "github.com/artyomsv/quil/internal/version"
@@ -99,6 +100,22 @@ func main() {
 	// on failure the PTY layer falls back to the inbox ConPTY.
 	if err := apty.PrepareBundledConPTY(config.QuilDir()); err != nil {
 		log.Printf("conpty: bundled host unavailable (%v); using inbox", err)
+	}
+
+	// Single-instance guard. If a daemon is already listening on the socket
+	// this spawn is redundant — a double auto-start, or a fresh spawn racing a
+	// previous daemon that is slow to exit. Exit cleanly instead of proceeding:
+	// Server.Start() would os.Remove the live socket and re-listen, which
+	// orphans the running daemon (it keeps its panes alive headless, holds the
+	// log file open — breaking rotation — and leaks memory). Only a genuinely
+	// stale socket (no daemon answering) is left for Server.Start to clean up.
+	if client, err := ipc.NewClient(config.SocketPath()); err == nil {
+		client.Close()
+		log.Printf("another quild is already listening on %s; exiting (no orphan spawn)", config.SocketPath())
+		if !background {
+			fmt.Println("quild already running")
+		}
+		return
 	}
 
 	d := daemon.New(cfg)

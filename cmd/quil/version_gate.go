@@ -16,12 +16,9 @@ import (
 	versionpkg "github.com/artyomsv/quil/internal/version"
 )
 
-// reconnectRetryAttempts bounds how long we wait for the respawned
-// daemon to open its socket after a graceful restart.
-const reconnectRetryAttempts = 50
-
-// restartDaemonWaitInterval paces the polling loops that watch the
-// socket disappear (after MsgShutdown) and reappear (after respawn).
+// restartDaemonWaitInterval paces the polling loop that watches the
+// socket disappear after MsgShutdown during a graceful restart. The
+// reappear-after-respawn wait is handled by waitForDaemonReady.
 const restartDaemonWaitInterval = 100 * time.Millisecond
 
 // releasesURL is shown to users running an older TUI against a newer
@@ -195,23 +192,22 @@ func restartDaemonForUpgrade(oldClient *ipc.Client, sockPath string) (*ipc.Clien
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("spawn daemon %q: %w", binary, err)
 	}
+	pid := 0
 	if cmd.Process != nil {
+		pid = cmd.Process.Pid
 		cmd.Process.Release()
 	}
 
-	// 4. Wait for the new daemon's socket and reconnect.
-	var newClient *ipc.Client
-	for i := 0; i < reconnectRetryAttempts; i++ {
-		time.Sleep(restartDaemonWaitInterval)
-		c, err := ipc.NewClient(sockPath)
-		if err == nil {
-			newClient = c
-			break
-		}
-	}
-	if newClient == nil {
+	// 4. Wait for the new daemon's socket and reconnect. Shares the crash-aware
+	//    readiness wait used by every other spawn path — tolerates a slow
+	//    restore, aborts early if the spawned daemon dies.
+	if !waitForDaemonReady(sockPath, pid) {
 		return nil, fmt.Errorf("daemon did not open socket %s within %s",
-			sockPath, time.Duration(reconnectRetryAttempts)*restartDaemonWaitInterval)
+			sockPath, daemonReadyTimeout)
+	}
+	newClient, err := ipc.NewClient(sockPath)
+	if err != nil {
+		return nil, fmt.Errorf("reconnect after restart: %w", err)
 	}
 	return newClient, nil
 }

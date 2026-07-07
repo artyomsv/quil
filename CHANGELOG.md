@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **"daemon did not come up" when starting with a large saved workspace** —
+  launching Quil or running `quil restart` no longer falsely reports the daemon
+  as failed while it is in fact still starting. On restart the daemon respawns
+  the active tab's panes plus any panes marked "always resume" before it begins
+  accepting connections, so a session with several Claude/AI panes could take
+  longer than the old 2-second wait allowed and the client gave up prematurely.
+  The readiness wait is now 30 seconds and aborts early if the daemon actually
+  crashes — a slow-but-healthy start succeeds, and a genuine failure is still
+  reported promptly instead of after a long hang.
+- **Orphaned background daemons** — starting the daemon while one is already
+  running (for example after the false timeout above) no longer leaves earlier
+  daemon processes running invisibly. A redundant daemon now detects the healthy
+  one and exits cleanly instead of hijacking its socket and stranding it; the
+  stranded daemons had leaked memory and held the log file open, which broke log
+  rotation.
+
 ## [1.34.0] - 2026-07-06
 
 ## [1.33.1] - 2026-07-05

@@ -207,21 +207,46 @@ func restartDaemonCmd() {
 	} else {
 		fmt.Println("daemon was not running")
 	}
-	startDaemon(false)
-	if !waitForSocket(config.SocketPath()) {
+	pid := startDaemon(false)
+	if !waitForDaemonReady(config.SocketPath(), pid) {
 		fmt.Fprintln(os.Stderr, "daemon did not come up — check the daemon log (see 'quil daemon status')")
 		os.Exit(1)
 	}
+	fmt.Println("daemon ready")
 }
 
-// waitForSocket polls until a fresh daemon accepts connections.
-func waitForSocket(sockPath string) bool {
-	for i := 0; i < daemonStartRetries; i++ {
+// waitForDaemonReady polls until a freshly-spawned daemon accepts a connection,
+// up to daemonReadyTimeout. This tolerates a slow workspace restore (many eager
+// panes spawn before the socket opens) that the old 2 s budget falsely reported
+// as "daemon did not come up".
+//
+// When pid > 0, the spawned process is watched: if it dies before the socket
+// opens, the wait returns false immediately instead of blocking for the full
+// timeout — a genuine daemon crash is reported fast, while a healthy-but-slow
+// start still succeeds. pid == 0 (daemon was already running, or spawn PID
+// unknown) falls back to a plain timed poll.
+func waitForDaemonReady(sockPath string, pid int) bool {
+	return waitForDaemonReadyWithin(sockPath, pid, daemonReadyTimeout, daemonReadyPoll)
+}
+
+// waitForDaemonReadyWithin is waitForDaemonReady with the timing injected, so
+// tests can exercise the ready / crash-abort / timeout branches without the
+// 30 s production budget.
+func waitForDaemonReadyWithin(sockPath string, pid int, timeout, poll time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
 		if client, err := ipc.NewClient(sockPath); err == nil {
 			client.Close()
 			return true
 		}
-		time.Sleep(daemonRetryInterval)
+		if pid > 0 {
+			// Discard comm: pid is our own just-spawned child, so identity is
+			// certain by construction — only liveness matters here.
+			if alive, _ := processProbe(pid); !alive {
+				return false
+			}
+		}
+		time.Sleep(poll)
 	}
 	return false
 }

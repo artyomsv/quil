@@ -29,8 +29,16 @@ var (
 )
 
 const (
-	daemonStartRetries  = 20
-	daemonRetryInterval = 100 * time.Millisecond
+	// daemonReadyTimeout bounds how long a client waits for a freshly-spawned
+	// daemon to open its socket. It must comfortably exceed a heavy workspace
+	// restore: the daemon spawns the active tab's panes AND every Eager-flagged
+	// pane serially BEFORE it listens, so N eager AI panes cost ~N×spawn
+	// latency (each claude --resume ≈ 200-300 ms). The old 2 s budget produced
+	// false "daemon did not come up" failures whenever restore ran long. The
+	// wait aborts early if the spawned PID dies, so a genuine crash is still
+	// reported fast (see waitForDaemonReady).
+	daemonReadyTimeout = 30 * time.Second
+	daemonReadyPoll    = 100 * time.Millisecond
 )
 
 func main() {
@@ -107,7 +115,11 @@ func handleDaemon() {
 
 	switch os.Args[2] {
 	case "start":
-		startDaemon(false)
+		pid := startDaemon(false)
+		if pid != 0 && !waitForDaemonReady(config.SocketPath(), pid) {
+			fmt.Fprintln(os.Stderr, "daemon did not come up — check the daemon log (see 'quil daemon status')")
+			os.Exit(1)
+		}
 	case "stop":
 		stopDaemon()
 	case "restart":
@@ -147,7 +159,12 @@ func findDaemonBinary() string {
 	return name
 }
 
-func startDaemon(quiet bool) {
+// startDaemon spawns the background daemon, returning its PID so callers can
+// watch it for early death while waiting for the socket (see
+// waitForDaemonReady). Returns 0 only when a daemon was already listening (no
+// process spawned) — that invariant lets callers treat pid==0 as "socket is
+// already up". Spawn failures exit the process (os.Exit) rather than return 0.
+func startDaemon(quiet bool) int {
 	sockPath := config.SocketPath()
 
 	// Probe existing socket — if daemon is dead, clean up stale
@@ -156,7 +173,7 @@ func startDaemon(quiet bool) {
 		if !quiet {
 			fmt.Println("daemon already running")
 		}
-		return
+		return 0
 	} else if _, statErr := os.Stat(sockPath); statErr == nil {
 		// Socket exists but daemon isn't responding → stale
 		os.Remove(sockPath)
@@ -196,6 +213,7 @@ func startDaemon(quiet bool) {
 	if !quiet {
 		fmt.Printf("daemon started (pid %d)\n", pid)
 	}
+	return pid
 }
 
 func stopDaemon() {
@@ -273,20 +291,28 @@ func launchTUI() {
 	// Try connecting; auto-start if needed
 
 	client, err := ipc.NewClient(sockPath)
+	spawnedButNotReady := false
 	if err != nil && cfg.Daemon.AutoStart {
 		log.Printf("daemon not reachable, auto-starting...")
-		startDaemon(true) // quiet — no stdout during TUI launch
-		for i := 0; i < daemonStartRetries; i++ {
-			time.Sleep(daemonRetryInterval)
+		pid := startDaemon(true) // quiet — no stdout during TUI launch
+		if waitForDaemonReady(sockPath, pid) {
 			client, err = ipc.NewClient(sockPath)
-			if err == nil {
-				break
-			}
+		} else {
+			spawnedButNotReady = true
 		}
 	}
 	if err != nil {
-		log.Printf("cannot connect to daemon: %v", err)
-		fmt.Fprintf(os.Stderr, "cannot connect to daemon: %v\nRun 'quil daemon start' first.\n", err)
+		if spawnedButNotReady {
+			// We DID spawn a daemon; it just never opened its socket (crashed
+			// during restore, or exceeded the readiness budget). Point the user
+			// at the daemon log rather than "run daemon start" — they can't fix
+			// this by starting it again.
+			log.Printf("auto-started daemon did not come up within %s", daemonReadyTimeout)
+			fmt.Fprintf(os.Stderr, "daemon was started but did not come up within %s — check the daemon log (see 'quil daemon status')\n", daemonReadyTimeout)
+		} else {
+			log.Printf("cannot connect to daemon: %v", err)
+			fmt.Fprintf(os.Stderr, "cannot connect to daemon: %v\nRun 'quil daemon start' first.\n", err)
+		}
 		os.Exit(1)
 	}
 	log.Print("connected to daemon")

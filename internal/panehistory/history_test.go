@@ -53,6 +53,9 @@ func TestIsSyntheticPrompt_MatchesKnownTags(t *testing.T) {
 		{"real prompt", "fix the input history bug", false},
 		{"empty", "", false},
 		{"tag mentioned mid-sentence", "why does <task-notification> appear?", false},
+		// Opens with the tag but is not a complete block — a user quoting the
+		// tag in a real question must be preserved (requires the close tag too).
+		{"open tag without close", "<task-notification is confusing, what is it?", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -138,6 +141,39 @@ func TestCompact_UnderCap_LeavesDiskUntouched(t *testing.T) {
 	got, _ := Read(dir, "pane-under")
 	if len(got) != 1 || got[0].Text != "real" {
 		t.Fatalf("Read did not hide synthetic entry: %+v", got)
+	}
+}
+
+// TestCompact_ManySyntheticFewReal_LeavesDiskUntouched is the regression guard
+// for the gate: the raw line count exceeds keepLast because of pre-existing
+// synthetic junk, but the real-entry count does not. Compact must NOT rewrite
+// (which would race the hook's append); the junk is left on disk and hidden by
+// Read.
+func TestCompact_ManySyntheticFewReal_LeavesDiskUntouched(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeRawLine(t, dir, "pane-junky", Entry{V: 1, TsMs: 1, Text: "real"})
+	for i := 2; i <= 5; i++ { // 4 synthetic => 5 raw lines, over keepLast=2
+		writeRawLine(t, dir, "pane-junky", Entry{V: 1, TsMs: int64(i), Text: syntheticSample})
+	}
+
+	before, err := os.ReadFile(Path(dir, "pane-junky"))
+	if err != nil {
+		t.Fatalf("read file: %v", err)
+	}
+	if err := Compact(dir, "pane-junky", 2); err != nil { // raw=5 > 2, but real=1 <= 2
+		t.Fatalf("Compact: %v", err)
+	}
+	after, err := os.ReadFile(Path(dir, "pane-junky"))
+	if err != nil {
+		t.Fatalf("read file: %v", err)
+	}
+	if string(before) != string(after) {
+		t.Fatalf("Compact rewrote despite real entries within cap (append-race risk)")
+	}
+	got, _ := Read(dir, "pane-junky")
+	if len(got) != 1 || got[0].Text != "real" {
+		t.Fatalf("Read did not hide synthetic entries: %+v", got)
 	}
 }
 

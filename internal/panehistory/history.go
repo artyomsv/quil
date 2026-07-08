@@ -58,25 +58,28 @@ func Dir(quilDir string) string { return filepath.Join(quilDir, "history") }
 // Path returns the per-pane history file path.
 func Path(quilDir, paneID string) string { return filepath.Join(Dir(quilDir), paneID+".jsonl") }
 
-// syntheticPromptPrefixes are the leading tags Claude Code uses when it injects
-// a synthetic user turn the user never typed. The confirmed offender is
+// syntheticTags are the open/close tag pairs Claude Code uses for turns it
+// injects that the user never typed. The confirmed offender is
 // <task-notification>: when a background Task/subagent finishes, the harness
 // resumes the main loop by submitting that block as a UserPromptSubmit, so
 // without this filter machine-generated notifications land in input history.
-// The prefix intentionally omits the closing ">" so a future attribute
+// The open tag intentionally omits the closing ">" so a future attribute
 // (<task-notification version="2">) still matches.
-var syntheticPromptPrefixes = []string{
-	"<task-notification",
+var syntheticTags = []struct{ open, close string }{
+	{"<task-notification", "</task-notification>"},
 }
 
 // IsSyntheticPrompt reports whether text is a harness-injected turn (not real
-// user input) that must be excluded from history. It matches a known leading
-// tag after trimming leading whitespace; a user prompt that merely mentions the
-// tag mid-sentence is not affected.
+// user input) that must be excluded from history. A prompt is synthetic only
+// when, after trimming surrounding whitespace, it BOTH opens with a known tag
+// AND closes with its matching end tag — i.e. it is the whole notification
+// block and nothing else. Requiring both ends means a real prompt that merely
+// quotes or discusses the tag ("<task-notification is confusing, what is it?")
+// is preserved; only a pure, complete block is dropped.
 func IsSyntheticPrompt(text string) bool {
 	t := strings.TrimSpace(text)
-	for _, p := range syntheticPromptPrefixes {
-		if strings.HasPrefix(t, p) {
+	for _, tag := range syntheticTags {
+		if strings.HasPrefix(t, tag.open) && strings.HasSuffix(t, tag.close) {
 			return true
 		}
 	}
@@ -285,14 +288,17 @@ func truncRunes(s string, maxBytes int) string {
 
 // Compact rewrites the pane's history file keeping only the last keepLast real
 // entries, dropping synthetic harness-injected turns (see IsSyntheticPrompt) in
-// the process. It rewrites ONLY when the file physically holds more than
-// keepLast lines. Under the cap the file is left untouched: Read-time filtering
-// already hides synthetic junk from every caller, and rewriting on the common
-// (under-cap) path would race the Claude hook's cross-process O_APPEND — a
-// prompt appended between readRaw and the rename would be written to the old
-// inode and lost. Junk is therefore purged from disk as a side effect of normal
-// ring eviction when the file crosses the cap, not on every read. Atomic via
-// temp file + rename.
+// the process. It rewrites ONLY when the number of REAL entries exceeds
+// keepLast. When real entries are within the cap the file is left untouched —
+// even if pre-existing synthetic junk is on disk — because Read-time filtering
+// already hides that junk from every caller, and rewriting would race the
+// Claude hook's cross-process O_APPEND (a prompt appended between readRaw and
+// the rename would be written to the old inode and lost). Gating on the RAW
+// line count instead would reopen that race: historical task-notifications can
+// push a pane with few real prompts over the cap, triggering a needless rewrite.
+// Since Append no longer records synthetic turns, that junk is a finite, non-
+// growing residue; it is purged only as part of a genuine over-cap trim of real
+// entries. Atomic via temp file + rename.
 func Compact(quilDir, paneID string, keepLast int) error {
 	if keepLast < 0 {
 		keepLast = 0
@@ -301,13 +307,11 @@ func Compact(quilDir, paneID string, keepLast int) error {
 	if err != nil {
 		return err
 	}
-	if len(raw) <= keepLast {
+	entries := filterSynthetic(raw)
+	if len(entries) <= keepLast {
 		return nil
 	}
-	entries := filterSynthetic(raw)
-	if len(entries) > keepLast {
-		entries = entries[len(entries)-keepLast:]
-	}
+	entries = entries[len(entries)-keepLast:]
 
 	if err := os.MkdirAll(Dir(quilDir), 0o700); err != nil {
 		return err

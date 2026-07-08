@@ -1,0 +1,116 @@
+name: Bug report
+description: Something in Quil isn't working the way you expected.
+labels: [bug, triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug report. Please include
+        as much detail as you can — the more reproducible the report,
+        the faster the fix.
+
+  - type: input
+    id: version
+    attributes:
+      label: Quil version
+      description: Output of `quil version`, or the short git SHA if you built from source.
+      placeholder: v1.34.2
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Windows 11
+        - Windows 10
+        - macOS (Apple Silicon)
+        - macOS (Intel)
+        - Linux (x86_64)
+        - Linux (arm64)
+        - other (describe in steps)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: terminal
+    attributes:
+      label: Terminal host
+      description: Which terminal emulator is Quil running inside?
+      options:
+        - Windows Terminal
+        - conhost (legacy Windows console)
+        - VS Code integrated terminal
+        - iTerm2
+        - macOS Terminal.app
+        - Alacritty
+        - kitty
+        - WezTerm
+        - GNOME Terminal / other Linux terminal
+        - other (describe in steps)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install
+    attributes:
+      label: How did you install Quil?
+      options:
+        - install script (curl … install.sh)
+        - go install
+        - prebuilt binary from a GitHub Release
+        - built from source (scripts/dev.sh)
+        - other (describe in steps)
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug. Name the pane type (shell, claude-code, opencode, …) if relevant.
+      placeholder: I split a pane vertically and the right pane rendered garbled scrollback instead of the prompt.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Numbered steps a maintainer can follow exactly.
+      placeholder: |
+        1. Start the daemon and attach with `quil`
+        2. Open a new claude-code pane with Ctrl+N
+        3. Split vertically with Alt+Shift+V
+        4. Type into the left pane
+        5. Observe...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: |
+        Daemon and client logs live under `~/.quil/` (`quild.log`, `quil.log`).
+        View them in-app via F1 → View daemon log / View client log, or attach the
+        tail here. Please scrub anything sensitive (tokens, keys, private paths).
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots (optional)
+      description: A screenshot of the TUI is often worth more than a description for layout/rendering bugs.
+    validations:
+      required: false

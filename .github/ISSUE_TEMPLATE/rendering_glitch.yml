@@ -1,0 +1,127 @@
+name: Rendering / display glitch
+description: The TUI renders incorrectly — garbled scrollback, caret gaps, stale cells, wrong pane size, doubled output.
+labels: [bug, rendering, triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Terminal rendering depends heavily on the host console and the
+        program running inside the pane. This template captures the
+        environment details needed to reproduce a display bug without
+        round-trips. Most rendering glitches are host- or PTY-specific,
+        so the exact terminal + OS combination matters a lot.
+
+  - type: input
+    id: version
+    attributes:
+      label: Quil version
+      description: Output of `quil version`, or the short git SHA if you built from source.
+      placeholder: v1.34.2
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Windows 11
+        - Windows 10
+        - macOS (Apple Silicon)
+        - macOS (Intel)
+        - Linux (x86_64)
+        - Linux (arm64)
+        - other (describe below)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: terminal
+    attributes:
+      label: Terminal host
+      description: Which terminal emulator is Quil running inside?
+      options:
+        - Windows Terminal
+        - conhost (legacy Windows console)
+        - VS Code integrated terminal
+        - iTerm2
+        - macOS Terminal.app
+        - Alacritty
+        - kitty
+        - WezTerm
+        - GNOME Terminal / other Linux terminal
+        - other (describe below)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: pane-type
+    attributes:
+      label: Which pane type is affected?
+      options:
+        - shell / terminal
+        - claude-code
+        - opencode
+        - lazygit
+        - k9s
+        - lazysql
+        - ssh
+        - other / not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: symptom
+    attributes:
+      label: What does the glitch look like?
+      options:
+        - Garbled / corrupted scrollback
+        - Caret gap or transposed characters while typing
+        - Stale cells left behind (ghosting)
+        - Doubled / duplicated output
+        - Wrong pane size (content clipped or misaligned)
+        - Colors / styling wrong
+        - Cursor in the wrong position
+        - other (describe below)
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Describe the corruption and, if you can, the action that triggered it (resize, split, maximize, tab switch, scroll, paste, …).
+    validations:
+      required: true
+
+  - type: dropdown
+    id: redraw
+    attributes:
+      label: Does a force redraw (Alt+Shift+L) fix it?
+      description: The redraw key clears the screen and re-requests the window size. Whether it recovers narrows the cause considerably.
+      options:
+        - "Yes — redraw fully fixes it"
+        - "Partially — it comes back"
+        - "No — redraw does nothing"
+        - Didn't try
+    validations:
+      required: false
+
+  - type: textarea
+    id: screenshot
+    attributes:
+      label: Screenshot (strongly encouraged)
+      description: A screenshot of the glitch is usually the single most useful thing you can attach for a rendering bug.
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Daemon log excerpt (optional)
+      description: |
+        `~/.quil/quild.log` — snapshot/resize/spawn lines around the glitch help.
+        View in-app via F1 → View daemon log. Scrub anything sensitive.
+      render: shell
+    validations:
+      required: false

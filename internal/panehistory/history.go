@@ -58,12 +58,41 @@ func Dir(quilDir string) string { return filepath.Join(quilDir, "history") }
 // Path returns the per-pane history file path.
 func Path(quilDir, paneID string) string { return filepath.Join(Dir(quilDir), paneID+".jsonl") }
 
-// Append writes one entry to the pane's history file. Empty/whitespace text is
-// skipped (returns nil without writing). Oversize text is truncated on a rune
-// boundary with a trailing marker. V is forced to the current schema version.
-// O_APPEND keeps concurrent hook invocations from clobbering each other.
+// syntheticTags are the open/close tag pairs Claude Code uses for turns it
+// injects that the user never typed. The confirmed offender is
+// <task-notification>: when a background Task/subagent finishes, the harness
+// resumes the main loop by submitting that block as a UserPromptSubmit, so
+// without this filter machine-generated notifications land in input history.
+// The open tag intentionally omits the closing ">" so a future attribute
+// (<task-notification version="2">) still matches.
+var syntheticTags = []struct{ open, close string }{
+	{"<task-notification", "</task-notification>"},
+}
+
+// IsSyntheticPrompt reports whether text is a harness-injected turn (not real
+// user input) that must be excluded from history. A prompt is synthetic only
+// when, after trimming surrounding whitespace, it BOTH opens with a known tag
+// AND closes with its matching end tag — i.e. it is the whole notification
+// block and nothing else. Requiring both ends means a real prompt that merely
+// quotes or discusses the tag ("<task-notification is confusing, what is it?")
+// is preserved; only a pure, complete block is dropped.
+func IsSyntheticPrompt(text string) bool {
+	t := strings.TrimSpace(text)
+	for _, tag := range syntheticTags {
+		if strings.HasPrefix(t, tag.open) && strings.HasSuffix(t, tag.close) {
+			return true
+		}
+	}
+	return false
+}
+
+// Append writes one entry to the pane's history file. Empty/whitespace text and
+// synthetic harness-injected turns (see IsSyntheticPrompt) are skipped (returns
+// nil without writing). Oversize text is truncated on a rune boundary with a
+// trailing marker. V is forced to the current schema version. O_APPEND keeps
+// concurrent hook invocations from clobbering each other.
 func Append(quilDir, paneID string, e Entry) error {
-	if strings.TrimSpace(e.Text) == "" {
+	if strings.TrimSpace(e.Text) == "" || IsSyntheticPrompt(e.Text) {
 		return nil
 	}
 	e.V = schemaVersion
@@ -128,12 +157,25 @@ func rejectSymlink(path string) error {
 	return nil
 }
 
-// Read returns all entries oldest-first. A missing file is not an error
+// Read returns all real user entries oldest-first, excluding synthetic
+// harness-injected turns (see IsSyntheticPrompt) so pre-existing junk written
+// before the filter existed never surfaces. A missing file is not an error
 // (returns nil, nil). Malformed lines — including a trailing partial line from
 // an in-flight concurrent append — are skipped. A file larger than maxReadBytes
 // is read from the tail so daemon memory stays bounded (the dropped first line
 // is the oldest; Compact normally keeps the file well under the cap).
 func Read(quilDir, paneID string) ([]Entry, error) {
+	entries, err := readRaw(quilDir, paneID)
+	if err != nil {
+		return nil, err
+	}
+	return filterSynthetic(entries), nil
+}
+
+// readRaw loads every parseable entry from the pane file, unfiltered. Used by
+// Read (which then drops synthetic turns) and Compact (which needs the raw set
+// to detect droppable junk even when the file is under the ring cap).
+func readRaw(quilDir, paneID string) ([]Entry, error) {
 	path := Path(quilDir, paneID)
 	if err := rejectSymlink(path); err != nil {
 		return nil, err
@@ -158,6 +200,31 @@ func Read(quilDir, paneID string) ([]Entry, error) {
 		}
 	}
 	return readEntries(r)
+}
+
+// filterSynthetic returns entries with harness-injected turns removed. When
+// nothing needs filtering it returns the input slice unchanged — so a nil or
+// all-real input allocates nothing and nil stays nil, preserving Read's
+// missing-file contract.
+func filterSynthetic(entries []Entry) []Entry {
+	first := -1
+	for i, e := range entries {
+		if IsSyntheticPrompt(e.Text) {
+			first = i
+			break
+		}
+	}
+	if first < 0 {
+		return entries // common case: no synthetic entries, no copy
+	}
+	out := make([]Entry, first, len(entries)-1)
+	copy(out, entries[:first])
+	for _, e := range entries[first+1:] {
+		if !IsSyntheticPrompt(e.Text) {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // readEntries parses JSONL Entry lines from r, skipping malformed/partial lines.
@@ -219,13 +286,28 @@ func truncRunes(s string, maxBytes int) string {
 	return s[:cut] + ell
 }
 
-// Compact rewrites the pane's history file keeping only the last keepLast
-// entries. No-op when at or under the limit. Atomic via temp file + rename.
+// Compact rewrites the pane's history file keeping only the last keepLast real
+// entries, dropping synthetic harness-injected turns (see IsSyntheticPrompt) in
+// the process. It rewrites ONLY when the number of REAL entries exceeds
+// keepLast. When real entries are within the cap the file is left untouched —
+// even if pre-existing synthetic junk is on disk — because Read-time filtering
+// already hides that junk from every caller, and rewriting would race the
+// Claude hook's cross-process O_APPEND (a prompt appended between readRaw and
+// the rename would be written to the old inode and lost). Gating on the RAW
+// line count instead would reopen that race: historical task-notifications can
+// push a pane with few real prompts over the cap, triggering a needless rewrite.
+// Since Append no longer records synthetic turns, that junk is a finite, non-
+// growing residue; it is purged only as part of a genuine over-cap trim of real
+// entries. Atomic via temp file + rename.
 func Compact(quilDir, paneID string, keepLast int) error {
-	entries, err := Read(quilDir, paneID)
+	if keepLast < 0 {
+		keepLast = 0
+	}
+	raw, err := readRaw(quilDir, paneID)
 	if err != nil {
 		return err
 	}
+	entries := filterSynthetic(raw)
 	if len(entries) <= keepLast {
 		return nil
 	}

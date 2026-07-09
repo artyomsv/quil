@@ -26,11 +26,7 @@ const (
 // so users always see whether they're touching dev or production state.
 // Mirrors the TUI's [dev] status-bar indicator (QUIL_HOME set → dev).
 func envDescription() string {
-	mode := "production"
-	if os.Getenv("QUIL_HOME") != "" {
-		mode = "dev"
-	}
-	return fmt.Sprintf("%s (%s)", mode, config.QuilDir())
+	return fmt.Sprintf("%s (%s)", envMode(), config.QuilDir())
 }
 
 // daemonPID reads the daemon's PID file. Returns 0 when the file is

@@ -3,6 +3,8 @@ package tui
 import (
 	"fmt"
 	"strings"
+
+	"github.com/artyomsv/quil/internal/ipc"
 )
 
 // modelStatusSegment formats the status-bar segment for a pane's last
@@ -18,6 +20,10 @@ func modelStatusSegment(model string, tokens int64) string {
 		return ""
 	}
 	name := strings.TrimPrefix(model, "claude-")
+	// Checked before the tokens<=0 branch since the sentinel is negative.
+	if tokens == ipc.ContextTokensCompacting {
+		return name + " · compacting"
+	}
 	if tokens <= 0 {
 		return name
 	}

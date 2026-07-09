@@ -326,6 +326,7 @@ func TestRunHook_AllSpoolBranches(t *testing.T) {
 			name:    "PostCompact",
 			stdin:   `{"hook_event_name":"PostCompact"}`,
 			hookEvt: "PostCompact", wantTit: "Compaction complete", wantSev: "info",
+			dataKey: "compacting", dataWant: "1",
 		},
 		{
 			name:    "SubagentStart",
@@ -384,6 +385,35 @@ func TestRunHook_AllSpoolBranches(t *testing.T) {
 				t.Errorf("data[%q] = %q, want %q", tt.dataKey, p.Data[tt.dataKey], tt.dataWant)
 			}
 		})
+	}
+}
+
+// TestRunHook_PostCompact_SignalsResetNoUsage locks in the compaction fix:
+// right after compaction the reduced context size is not yet in the transcript
+// (the summary carries no assistant usage), so PostCompact must NOT re-read and
+// re-emit the stale pre-compaction usage — it emits a compacting-reset signal
+// instead. The next completed turn's Stop reports the true reduced size.
+func TestRunHook_PostCompact_SignalsResetNoUsage(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	env := HookEnv{PaneID: "pane-pc", QuilDir: dir, Mode: "default"}
+	// Even with a transcript_path present, PostCompact must not attach usage.
+	stdin := `{"hook_event_name":"PostCompact","transcript_path":"/whatever.jsonl"}`
+	if err := RunHook(strings.NewReader(stdin), env, 7); err != nil {
+		t.Fatalf("RunHook: %v", err)
+	}
+	got := readSpool(t, dir, "pane-pc")
+	if len(got) != 1 {
+		t.Fatalf("spool lines = %d, want 1", len(got))
+	}
+	if got[0].Data["compacting"] != "1" {
+		t.Errorf("data.compacting = %q, want 1", got[0].Data["compacting"])
+	}
+	if v, ok := got[0].Data["context_tokens"]; ok {
+		t.Errorf("PostCompact must not carry context_tokens (stale pre-compaction count), got %q", v)
+	}
+	if v, ok := got[0].Data["model"]; ok {
+		t.Errorf("PostCompact must not carry model usage data, got %q", v)
 	}
 }
 

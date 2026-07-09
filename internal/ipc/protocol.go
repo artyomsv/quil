@@ -315,6 +315,17 @@ type HighlightPanePayload struct {
 
 // Notification center payloads (M12)
 
+// ContextTokensCompacting is the sentinel value for a pane's context-token
+// count while a Claude compaction is in flight. The true post-compaction size
+// is not knowable at PostCompact time — the compaction summary is written to
+// the transcript as system/user entries with no assistant usage, so a read
+// there would return the (now-stale) pre-compaction count. The daemon stores
+// this sentinel on PostCompact and the TUI renders "<model> · compacting"
+// until the next completed turn's Stop reports the real reduced size. It
+// travels as the context_tokens value in both the hook-event data path and the
+// workspace snapshot; the display convention lives in tui.modelStatusSegment.
+const ContextTokensCompacting int64 = -1
+
 type PaneEventPayload struct {
 	ID        string            `json:"id"`
 	PaneID    string            `json:"pane_id"`

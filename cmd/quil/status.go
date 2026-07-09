@@ -130,8 +130,11 @@ func mergePaneMemory(panes []ipc.PaneInfo, mem []ipc.PaneMemInfo) []statusPane {
 
 // buildStatus assembles the full in-memory report from the composed IPC
 // responses. Tab order and metadata come from mem.Tabs; per-pane details from
-// panes; memory is joined by pane ID. Totals are computed from the merged
-// panes so the header numbers always match the rendered rows.
+// panes; memory is joined by pane ID. Totals are summed over the panes grouped
+// into rendered tabs (not over all merged panes) so a pane whose tab was
+// destroyed between the ListPanes and MemoryReport round-trips — its TabID
+// absent from mem.Tabs — is excluded from BOTH the tree and the totals, and the
+// two can never diverge.
 func buildStatus(version string, pid int, panes []ipc.PaneInfo, mem ipc.MemoryReportRespPayload, events int, hasEvents bool, startedAt time.Time) statusReport {
 	merged := mergePaneMemory(panes, mem.Panes)
 
@@ -152,15 +155,17 @@ func buildStatus(version string, pid int, panes []ipc.PaneInfo, mem ipc.MemoryRe
 
 	var totals statusTotals
 	totals.Tabs = len(tabs)
-	for _, sp := range merged {
-		totals.Panes++
-		switch {
-		case sp.Pending:
-			totals.Pending++
-		case sp.Running:
-			totals.Running++
+	for _, t := range tabs {
+		for _, sp := range t.Panes {
+			totals.Panes++
+			switch {
+			case sp.Pending:
+				totals.Pending++
+			case sp.Running:
+				totals.Running++
+			}
+			totals.MemoryBytes += sp.MemBytes
 		}
-		totals.MemoryBytes += sp.MemBytes
 	}
 	totals.PendingEvents = events
 	totals.HasEvents = hasEvents
@@ -260,13 +265,16 @@ type jsonTotals struct {
 }
 
 type jsonPane struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	Type        string `json:"type"`
-	Running     bool   `json:"running"`
-	Pending     bool   `json:"pending"`
-	CWD         string `json:"cwd"`
-	MemoryBytes uint64 `json:"memory_bytes"`
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Type    string `json:"type"`
+	Running bool   `json:"running"`
+	Pending bool   `json:"pending"`
+	CWD     string `json:"cwd"`
+	// MemoryBytes is a pointer so an unsampled pane (pending, or not yet seen
+	// by the 5 s memreport collector) serializes as JSON null — distinct from a
+	// real zero-byte sample. Mirrors the human renderer's "—".
+	MemoryBytes *uint64 `json:"memory_bytes"`
 }
 
 type jsonTab struct {
@@ -332,11 +340,15 @@ func renderJSON(r statusReport) ([]byte, error) {
 	for _, t := range r.Tabs {
 		jt := jsonTab{ID: t.ID, Name: t.Name, Active: t.Active}
 		for _, p := range t.Panes {
-			jt.Panes = append(jt.Panes, jsonPane{
+			jp := jsonPane{
 				ID: p.ID, Name: p.Name, Type: p.Type,
-				Running: p.Running, Pending: p.Pending,
-				CWD: p.CWD, MemoryBytes: p.MemBytes,
-			})
+				Running: p.Running, Pending: p.Pending, CWD: p.CWD,
+			}
+			if p.HasMem {
+				mb := p.MemBytes
+				jp.MemoryBytes = &mb // else JSON null: unsampled, not real zero
+			}
+			jt.Panes = append(jt.Panes, jp)
 		}
 		jr.Tabs = append(jr.Tabs, jt)
 	}
@@ -344,12 +356,24 @@ func renderJSON(r statusReport) ([]byte, error) {
 	return json.Marshal(jr)
 }
 
-const statusTimeout = 2 * time.Second
+const (
+	// statusIdleTimeout bounds the wait for the NEXT frame, re-armed on every
+	// frame received. A non-attached status conn still receives the daemon's
+	// broadcasts (pane output, state updates); re-arming per frame means a
+	// healthy-but-chatty daemon keeps the connection visibly alive and never
+	// trips the wedge path — only genuine silence (no frames at all) does.
+	statusIdleTimeout = 2 * time.Second
+	// statusTotalBudget caps the whole exchange so a partial wedge — broadcasts
+	// still flowing but our specific request never answered — can't loop
+	// forever re-arming the idle deadline.
+	statusTotalBudget = 8 * time.Second
+)
 
 // statusRoundTrip sends one request-response message on a fresh (non-attached)
 // connection and decodes the matching reply into out. Replies are correlated
-// by Message.ID; any interleaved broadcast frame is skipped. A single read
-// deadline bounds the whole exchange.
+// by Message.ID; interleaved broadcast frames are skipped (and re-arm the idle
+// deadline). The exchange is bounded by statusIdleTimeout per frame and
+// statusTotalBudget overall.
 func statusRoundTrip(c *ipc.Client, typ string, payload any, out any) error {
 	id := uuid.New().String()
 	msg, err := ipc.NewMessage(typ, payload)
@@ -357,7 +381,8 @@ func statusRoundTrip(c *ipc.Client, typ string, payload any, out any) error {
 		return fmt.Errorf("marshal %s: %w", typ, err)
 	}
 	msg.ID = id
-	if err := c.SetReadDeadline(time.Now().Add(statusTimeout)); err != nil {
+	overall := time.Now().Add(statusTotalBudget)
+	if err := c.SetReadDeadline(earlier(time.Now().Add(statusIdleTimeout), overall)); err != nil {
 		return err
 	}
 	if err := c.Send(msg); err != nil {
@@ -369,6 +394,12 @@ func statusRoundTrip(c *ipc.Client, typ string, payload any, out any) error {
 			return fmt.Errorf("receive %s: %w", typ, err)
 		}
 		if resp.ID != id {
+			// A broadcast frame delivered to this non-attached conn — the
+			// daemon is alive. Re-arm the idle deadline (bounded by the overall
+			// budget) and keep looking for our reply.
+			if err := c.SetReadDeadline(earlier(time.Now().Add(statusIdleTimeout), overall)); err != nil {
+				return err
+			}
 			continue
 		}
 		if out == nil {
@@ -376,6 +407,15 @@ func statusRoundTrip(c *ipc.Client, typ string, payload any, out any) error {
 		}
 		return resp.DecodePayload(out)
 	}
+}
+
+// earlier returns the earlier of two times — the effective read deadline is the
+// idle window unless the overall budget would elapse first.
+func earlier(a, b time.Time) time.Time {
+	if a.Before(b) {
+		return a
+	}
+	return b
 }
 
 // emitStatus writes the report in the requested format and exits with code.

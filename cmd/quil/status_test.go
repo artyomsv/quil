@@ -9,6 +9,67 @@ import (
 	"github.com/artyomsv/quil/internal/ipc"
 )
 
+func TestBuildStatus_OrphanTabPaneExcludedFromTotals(t *testing.T) {
+	// A pane whose TabID is absent from mem.Tabs (its tab destroyed between the
+	// ListPanes and MemoryReport round-trips) must be excluded from totals, so
+	// totals never exceed what the rendered tabs contain.
+	panes := []ipc.PaneInfo{
+		{ID: "p1", TabID: "t1", Name: "shell", Type: "terminal", Running: true},
+		{ID: "orphan", TabID: "gone", Name: "x", Type: "terminal", Running: true},
+	}
+	mem := ipc.MemoryReportRespPayload{
+		Panes: []ipc.PaneMemInfo{{PaneID: "p1", TotalBytes: 100}, {PaneID: "orphan", TotalBytes: 500}},
+		Tabs:  []ipc.TabInfo{{ID: "t1", Name: "Shell", Active: true}},
+	}
+	r := buildStatus("v", 1, panes, mem, 0, false, time.Time{})
+
+	if r.Totals.Panes != 1 || r.Totals.Running != 1 {
+		t.Errorf("totals panes/running = %d/%d, want 1/1 (orphan excluded)", r.Totals.Panes, r.Totals.Running)
+	}
+	if r.Totals.MemoryBytes != 100 {
+		t.Errorf("totals memory = %d, want 100 (orphan's 500 excluded)", r.Totals.MemoryBytes)
+	}
+	rendered := 0
+	for _, tb := range r.Tabs {
+		rendered += len(tb.Panes)
+	}
+	if rendered != r.Totals.Panes {
+		t.Errorf("rendered panes %d != totals.Panes %d — totals must match the tree", rendered, r.Totals.Panes)
+	}
+}
+
+func TestRenderJSON_UnknownMemoryIsNull(t *testing.T) {
+	// A pane with no memory sample serializes memory_bytes as JSON null (not 0)
+	// so a script can distinguish "unsampled" from a real zero-byte reading.
+	r := statusReport{
+		Running: true, Responding: true,
+		Totals: statusTotals{Tabs: 1, Panes: 2},
+		Tabs: []statusTab{{ID: "t", Name: "T", Panes: []statusPane{
+			{ID: "p1", Name: "known", Type: "terminal", Running: true, HasMem: true, MemBytes: 123},
+			{ID: "p2", Name: "pending", Type: "terminal", Pending: true, HasMem: false},
+		}}},
+	}
+	b, err := renderJSON(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatal(err)
+	}
+	panes := m["tabs"].([]any)[0].(map[string]any)["panes"].([]any)
+	if got := panes[0].(map[string]any)["memory_bytes"]; got != float64(123) {
+		t.Errorf("known pane memory_bytes = %v, want 123", got)
+	}
+	v, ok := panes[1].(map[string]any)["memory_bytes"]
+	if !ok {
+		t.Errorf("memory_bytes key should be present (null), not absent")
+	}
+	if v != nil {
+		t.Errorf("unsampled pane memory_bytes = %v, want null", v)
+	}
+}
+
 func TestFormatBytes_Boundaries(t *testing.T) {
 	tests := []struct {
 		name string

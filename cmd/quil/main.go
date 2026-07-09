@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
-	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -101,6 +100,9 @@ func main() {
 			restartDaemonCmd()
 			launchTUI()
 			return
+		case "status":
+			runStatus(os.Args[2:])
+			return
 		}
 	}
 
@@ -125,7 +127,7 @@ func handleDaemon() {
 	case "restart":
 		restartDaemonCmd()
 	case "status":
-		daemonStatus()
+		runStatus(os.Args[3:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown daemon command: %s\n", os.Args[2])
 		os.Exit(1)
@@ -228,22 +230,6 @@ func stopDaemon() {
 		os.Exit(1)
 	}
 	fmt.Println("daemon stopped")
-}
-
-func daemonStatus() {
-	sockPath := config.SocketPath()
-	client, err := ipc.NewClient(sockPath)
-	if err != nil {
-		fmt.Println("daemon not running")
-		os.Exit(1)
-	}
-	client.Close()
-
-	if pidData, err := os.ReadFile(config.PidPath()); err == nil {
-		fmt.Printf("daemon running (pid %s)\n", strings.TrimSpace(string(pidData)))
-	} else {
-		fmt.Println("daemon running")
-	}
 }
 
 func launchTUI() {

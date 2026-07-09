@@ -9,6 +9,7 @@ import (
 
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
+	"github.com/google/uuid"
 )
 
 // formatBytes renders a byte count as B / KB / MB / GB with one decimal.
@@ -341,4 +342,104 @@ func renderJSON(r statusReport) ([]byte, error) {
 	}
 
 	return json.Marshal(jr)
+}
+
+const statusTimeout = 2 * time.Second
+
+// statusRoundTrip sends one request-response message on a fresh (non-attached)
+// connection and decodes the matching reply into out. Replies are correlated
+// by Message.ID; any interleaved broadcast frame is skipped. A single read
+// deadline bounds the whole exchange.
+func statusRoundTrip(c *ipc.Client, typ string, payload any, out any) error {
+	id := uuid.New().String()
+	msg, err := ipc.NewMessage(typ, payload)
+	if err != nil {
+		return fmt.Errorf("marshal %s: %w", typ, err)
+	}
+	msg.ID = id
+	if err := c.SetReadDeadline(time.Now().Add(statusTimeout)); err != nil {
+		return err
+	}
+	if err := c.Send(msg); err != nil {
+		return fmt.Errorf("send %s: %w", typ, err)
+	}
+	for {
+		resp, err := c.Receive()
+		if err != nil {
+			return fmt.Errorf("receive %s: %w", typ, err)
+		}
+		if resp.ID != id {
+			continue
+		}
+		if out == nil {
+			return nil
+		}
+		return resp.DecodePayload(out)
+	}
+}
+
+// emitStatus writes the report in the requested format and exits with code.
+func emitStatus(r statusReport, jsonOut, verbose bool, code int) {
+	if jsonOut {
+		if b, err := renderJSON(r); err == nil {
+			fmt.Println(string(b))
+		}
+	} else {
+		fmt.Print(renderHuman(r, verbose))
+	}
+	os.Exit(code)
+}
+
+// runStatus is the entry point for `quil status` and `quil daemon status`.
+func runStatus(args []string) {
+	jsonOut, verbose := false, false
+	for _, a := range args {
+		switch a {
+		case "--json":
+			jsonOut = true
+		case "-v", "--verbose":
+			verbose = true
+		default:
+			fmt.Fprintf(os.Stderr, "unknown flag: %s\nusage: quil status [--json] [-v]\n", a)
+			os.Exit(2)
+		}
+	}
+
+	pid := daemonPID()
+
+	client, err := ipc.NewClient(config.SocketPath())
+	if err != nil {
+		emitStatus(statusReport{Running: false}, jsonOut, verbose, 1)
+	}
+	defer client.Close()
+
+	var ver ipc.VersionRespPayload
+	if err := statusRoundTrip(client, ipc.MsgVersionReq, struct{}{}, &ver); err != nil {
+		emitStatus(statusReport{Running: true, Responding: false, Pid: pid}, jsonOut, verbose, 2)
+	}
+
+	var panes ipc.ListPanesRespPayload
+	if err := statusRoundTrip(client, ipc.MsgListPanesReq, struct{}{}, &panes); err != nil {
+		emitStatus(statusReport{Running: true, Responding: false, Pid: pid, Version: ver.Version}, jsonOut, verbose, 2)
+	}
+
+	var mem ipc.MemoryReportRespPayload
+	if err := statusRoundTrip(client, ipc.MsgMemoryReportReq, ipc.MemoryReportReqPayload{}, &mem); err != nil {
+		emitStatus(statusReport{Running: true, Responding: false, Pid: pid, Version: ver.Version}, jsonOut, verbose, 2)
+	}
+
+	// Optional: pending notification count. Degrades to "unknown" on any error.
+	events, hasEvents := 0, false
+	var notif ipc.GetNotificationsRespPayload
+	if err := statusRoundTrip(client, ipc.MsgGetNotificationsReq, struct{}{}, &notif); err == nil {
+		events, hasEvents = len(notif.Events), true
+	}
+
+	var startedAt time.Time
+	if fi, err := os.Stat(config.PidPath()); err == nil {
+		startedAt = fi.ModTime()
+	}
+
+	report := buildStatus(ver.Version, pid, panes.Panes, mem, events, hasEvents, startedAt)
+	emitStatus(report, jsonOut, verbose, 0)
 }

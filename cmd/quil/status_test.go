@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -123,5 +125,117 @@ func TestBuildStatus_NoUptimeWhenZeroTime(t *testing.T) {
 	}
 	if r.Totals.HasEvents {
 		t.Errorf("HasEvents = true, want false")
+	}
+}
+
+func TestRenderHuman_NotRunning(t *testing.T) {
+	out := renderHuman(statusReport{Running: false}, false)
+	if !strings.Contains(out, "not running") {
+		t.Errorf("output = %q, want it to mention 'not running'", out)
+	}
+}
+
+func TestRenderHuman_Wedged(t *testing.T) {
+	out := renderHuman(statusReport{Running: true, Responding: false, Pid: 77}, false)
+	if !strings.Contains(out, "not responding") || !strings.Contains(out, "77") {
+		t.Errorf("output = %q, want 'not responding' and pid 77", out)
+	}
+}
+
+func TestRenderHuman_HealthyTree(t *testing.T) {
+	r := statusReport{
+		Running: true, Responding: true, Pid: 42, Version: "1.2.3",
+		Environment: "production", HasUptime: true, StartedAt: time.Now().Add(-time.Hour),
+		Totals: statusTotals{Tabs: 1, Panes: 2, Running: 1, Pending: 1, MemoryBytes: 1024 * 1024, PendingEvents: 3, HasEvents: true},
+		Tabs: []statusTab{{
+			ID: "t1", Name: "Shell", Active: true,
+			Panes: []statusPane{
+				{Name: "shell", Type: "terminal", Running: true, HasMem: true, MemBytes: 1024 * 1024},
+				{Name: "notes", Type: "terminal", Pending: true},
+			},
+		}},
+	}
+	out := renderHuman(r, false)
+	for _, want := range []string{"running", "pid 42", "v1.2.3", "production", "1:Shell *", "shell", "pending", "—", "events 3 pending"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q\n---\n%s", want, out)
+		}
+	}
+}
+
+func TestRenderHuman_VerboseShowsCWD(t *testing.T) {
+	r := statusReport{
+		Running: true, Responding: true,
+		Tabs: []statusTab{{Name: "T", Panes: []statusPane{{Name: "p", Type: "terminal", Running: true, CWD: "/home/x/proj"}}}},
+	}
+	if strings.Contains(renderHuman(r, false), "/home/x/proj") {
+		t.Errorf("non-verbose output should not contain CWD")
+	}
+	if !strings.Contains(renderHuman(r, true), "/home/x/proj") {
+		t.Errorf("verbose output should contain CWD")
+	}
+}
+
+func TestRenderJSON_OmitsAndIncludes(t *testing.T) {
+	// Not running → just {"running":false}
+	b, err := renderJSON(statusReport{Running: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatal(err)
+	}
+	if m["running"] != false {
+		t.Errorf("running = %v, want false", m["running"])
+	}
+	if _, ok := m["responding"]; ok {
+		t.Errorf("responding should be omitted when not running")
+	}
+	if _, ok := m["totals"]; ok {
+		t.Errorf("totals should be omitted when not running")
+	}
+
+	// Healthy with events + uptime
+	r := statusReport{
+		Running: true, Responding: true, Pid: 5, Version: "9.9.9", Environment: "dev",
+		HasUptime: true, StartedAt: time.Now().Add(-time.Minute),
+		Totals: statusTotals{Tabs: 1, Panes: 1, Running: 1, PendingEvents: 2, HasEvents: true},
+		Tabs:   []statusTab{{ID: "t", Name: "T", Active: true, Panes: []statusPane{{ID: "p", Name: "p", Type: "terminal", Running: true, HasMem: true, MemBytes: 10}}}},
+	}
+	b, err = renderJSON(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m = nil
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatal(err)
+	}
+	if m["responding"] != true {
+		t.Errorf("responding = %v, want true", m["responding"])
+	}
+	totals, ok := m["totals"].(map[string]any)
+	if !ok {
+		t.Fatalf("totals missing or wrong type: %v", m["totals"])
+	}
+	if totals["pending_events"].(float64) != 2 {
+		t.Errorf("pending_events = %v, want 2", totals["pending_events"])
+	}
+	if _, ok := m["uptime_seconds"]; !ok {
+		t.Errorf("uptime_seconds should be present when HasUptime")
+	}
+}
+
+func TestRenderJSON_OmitsEventsWhenUnknown(t *testing.T) {
+	r := statusReport{
+		Running: true, Responding: true,
+		Totals: statusTotals{Tabs: 0, Panes: 0, HasEvents: false},
+	}
+	b, _ := renderJSON(r)
+	var m map[string]any
+	json.Unmarshal(b, &m)
+	totals := m["totals"].(map[string]any)
+	if _, ok := totals["pending_events"]; ok {
+		t.Errorf("pending_events should be omitted when HasEvents is false")
 	}
 }

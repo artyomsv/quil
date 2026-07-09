@@ -26,9 +26,20 @@ on:
 env:
   DRY_RUN: ${{ inputs.dry_run || false }}
 
+# Serialize releases: if two pushes to master land close together, queue the
+# second run rather than let two release jobs race on the tag/commit. Never
+# cancel-in-progress — a release must not be interrupted mid tag-and-push.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: ubuntu-latest
+    # Hard cap so a hung step (e.g. an intermittent test-suite deadlock) auto-
+    # fails instead of running for 15+ min until someone cancels it — the exact
+    # toil this workflow kept causing.
+    timeout-minutes: 15
     permissions:
       contents: write  # commit + tag version bump
     # Skip release commits to prevent infinite loop
@@ -164,7 +175,9 @@ jobs:
         if: steps.bump.outputs.skip != 'true'
         run: |
           go vet ./...
-          go test ./...
+          # -race + bounded -timeout: a deadlocked test fails fast with a
+          # goroutine dump instead of hanging the release job to its timeout.
+          go test -race -timeout 300s ./...
 
       - name: Dry run summary
         if: steps.bump.outputs.skip != 'true' && env.DRY_RUN == 'true'
@@ -207,6 +220,9 @@ jobs:
     needs: release
     if: needs.release.outputs.skip != 'true' && needs.release.outputs.dry_run != 'true'
     runs-on: ubuntu-latest
+    # Cross-compiles 5 platforms + publishes assets — give it more room than the
+    # release job, but still bounded so a stuck upload can't hang indefinitely.
+    timeout-minutes: 30
     permissions:
       contents: write  # publish GitHub release assets
     steps:

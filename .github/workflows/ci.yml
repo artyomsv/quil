@@ -10,9 +10,19 @@ on:
         type: boolean
         default: true
 
+# Auto-supersede: a new push to a PR cancels the in-flight run for the previous
+# commit instead of piling up (or waiting for a human to cancel it). Grouped
+# per-branch so different PRs never cancel each other.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    # Hard cap so a hung step — historically an intermittent test-suite
+    # deadlock — auto-fails here instead of running until someone cancels it.
+    timeout-minutes: 15
     steps:
       - name: Dry run notice
         if: inputs.dry_run == true
@@ -25,7 +35,11 @@ jobs:
           go-version: '1.25'
 
       - run: go vet ./...
-      - run: go test ./...
+      # -race targets the concurrency-bug class behind the intermittent hangs
+      # (the project's go-testing rule requires CI to run with -race). -timeout
+      # makes a deadlocked test fail fast WITH a full goroutine dump naming the
+      # culprit, instead of hanging until the job timeout.
+      - run: go test -race -timeout 300s ./...
       - run: go build ./cmd/quil && go build ./cmd/quild
 
       - name: shellcheck

@@ -22,13 +22,28 @@ on:
         description: 'Dry run — compute version but skip commit, tag, and release'
         type: boolean
         default: true
+      publish_tag:
+        description: 'Recovery: publish an existing tag (e.g. v1.35.0) whose Release never went public. Skips the version bump/commit; (re)runs GoReleaser + publish for that tag.'
+        type: string
+        default: ''
 
 env:
   DRY_RUN: ${{ inputs.dry_run || false }}
 
+# Serialize releases: if two pushes to master land close together, queue the
+# second run rather than let two release jobs race on the tag/commit. Never
+# cancel-in-progress — a release must not be interrupted mid tag-and-push.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: ubuntu-latest
+    # Hard cap so a hung step (e.g. an intermittent test-suite deadlock) auto-
+    # fails instead of running for 15+ min until someone cancels it — the exact
+    # toil this workflow kept causing.
+    timeout-minutes: 15
     permissions:
       contents: write  # commit + tag version bump
     # Skip release commits to prevent infinite loop
@@ -36,7 +51,9 @@ jobs:
     outputs:
       version: ${{ steps.bump.outputs.version }}
       skip: ${{ steps.bump.outputs.skip }}
-      dry_run: ${{ env.DRY_RUN }}
+      # Sourced from the bump step (not env) so recovery mode can force it false
+      # even when the workflow_dispatch dry_run box is left at its default.
+      dry_run: ${{ steps.bump.outputs.dry_run }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
@@ -53,7 +70,7 @@ jobs:
           HAS_PAT: ${{ secrets.RELEASE_PAT != '' }}
         run: |
           if [ "$HAS_PAT" != "true" ]; then
-            echo "::warning::RELEASE_PAT secret is not set. The release push will run as github-actions[bot], which is NOT a ruleset bypass actor — 'git push origin master --tags' below will be rejected by the master branch ruleset. Add the RELEASE_PAT secret (see release.yml header)."
+            echo "::warning::RELEASE_PAT secret is not set. The release push will run as github-actions[bot], which is NOT a ruleset bypass actor — the 'git push --atomic origin master' below will be rejected by the master branch ruleset. Add the RELEASE_PAT secret (see release.yml header)."
           fi
 
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5
@@ -62,7 +79,26 @@ jobs:
 
       - name: Determine version bump
         id: bump
+        # PUBLISH_TAG via env (not inline ${{ }}) so the user-supplied input
+        # can't be interpolated into the shell — no script-injection surface.
+        env:
+          PUBLISH_TAG: ${{ inputs.publish_tag }}
         run: |
+          # Recovery: publish an existing tag without cutting a new version.
+          # Triggered via workflow_dispatch with publish_tag=vX.Y.Z when a prior
+          # run pushed the tag but its GitHub Release never went public. Skips
+          # bump/commit/tag; goreleaser then (re)publishes that tag.
+          if [ -n "$PUBLISH_TAG" ]; then
+            V="${PUBLISH_TAG#v}"
+            echo "version=${V}" >> $GITHUB_OUTPUT
+            echo "skip=false" >> $GITHUB_OUTPUT
+            echo "dry_run=false" >> $GITHUB_OUTPUT
+            echo "::notice::Recovery publish for v${V} — skipping bump/commit/tag"
+            exit 0
+          fi
+          # Normal mode: this run's dry_run flag flows to the goreleaser gate.
+          echo "dry_run=${DRY_RUN}" >> $GITHUB_OUTPUT
+
           CURRENT=$(cat VERSION)
           LAST_TAG="v${CURRENT}"
           echo "current=${CURRENT}" >> $GITHUB_OUTPUT
@@ -136,7 +172,7 @@ jobs:
           echo "::notice::Version bump: ${CURRENT} → ${NEW_VERSION} (${BUMP})"
 
       - name: Update version files
-        if: steps.bump.outputs.skip != 'true'
+        if: steps.bump.outputs.skip != 'true' && inputs.publish_tag == ''
         env:
           VERSION: ${{ steps.bump.outputs.version }}
         run: |
@@ -161,13 +197,15 @@ jobs:
           echo "::notice::Updated VERSION to ${VERSION}, CHANGELOG.md, and site/src/data/seo.ts"
 
       - name: Run tests
-        if: steps.bump.outputs.skip != 'true'
+        if: steps.bump.outputs.skip != 'true' && inputs.publish_tag == ''
         run: |
           go vet ./...
-          go test ./...
+          # -race + bounded -timeout: a deadlocked test fails fast with a
+          # goroutine dump instead of hanging the release job to its timeout.
+          go test -race -timeout 300s ./...
 
       - name: Dry run summary
-        if: steps.bump.outputs.skip != 'true' && env.DRY_RUN == 'true'
+        if: steps.bump.outputs.skip != 'true' && env.DRY_RUN == 'true' && inputs.publish_tag == ''
         env:
           VERSION: ${{ steps.bump.outputs.version }}
           BUMP: ${{ steps.bump.outputs.bump }}
@@ -191,7 +229,7 @@ jobs:
         # removed this job (see its description for the concrete failure).
         # Exactly one deploy pathway, from a commit that is always correct,
         # beats two deploy pathways arbitrated by a concurrency group.
-        if: steps.bump.outputs.skip != 'true' && env.DRY_RUN != 'true'
+        if: steps.bump.outputs.skip != 'true' && env.DRY_RUN != 'true' && inputs.publish_tag == ''
         env:
           VERSION: ${{ steps.bump.outputs.version }}
         run: |
@@ -200,13 +238,23 @@ jobs:
           git add VERSION CHANGELOG.md site/src/data/seo.ts
           git commit -m "chore(release): v${VERSION}"
           git tag "v${VERSION}"
-          git push origin master --tags
+          # --atomic: land the release commit and its tag together or not at
+          # all. If this push is interrupted (e.g. the job timeout-minutes cap
+          # firing, or a network stall), the server applies both refs or
+          # neither — never the commit without the tag (or vice versa), which
+          # would otherwise leave a half-released state needing manual cleanup.
+          # Push the specific tag rather than --tags so only this release's tag
+          # is part of the atomic unit.
+          git push --atomic origin master "v${VERSION}"
           echo "::notice::Tagged v${VERSION}"
 
   goreleaser:
     needs: release
     if: needs.release.outputs.skip != 'true' && needs.release.outputs.dry_run != 'true'
     runs-on: ubuntu-latest
+    # Cross-compiles 5 platforms + publishes assets — give it more room than the
+    # release job, but still bounded so a stuck upload can't hang indefinitely.
+    timeout-minutes: 30
     permissions:
       contents: write  # publish GitHub release assets
     steps:
@@ -242,6 +290,21 @@ jobs:
           echo "::notice::Release notes for v${VERSION} ($(wc -c < release-notes.md) bytes):"
           cat release-notes.md
 
+      - name: Clear any leftover draft for this tag
+        # Recovery-safe idempotency: if a prior interrupted run left a DRAFT
+        # release for this tag, delete it so GoReleaser can recreate it cleanly
+        # (GoReleaser errors on a pre-existing release). ONLY a draft is removed
+        # — an already-published release is never touched — and the tag itself
+        # is kept (--cleanup-tag=false). No-op on a normal first release.
+        env:
+          VERSION: ${{ needs.release.outputs.version }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "$(gh release view "v${VERSION}" --json isDraft --jq .isDraft 2>/dev/null)" = "true" ]; then
+            gh release delete "v${VERSION}" --yes --cleanup-tag=false
+            echo "::notice::Removed leftover draft for v${VERSION} before re-publish"
+          fi
+
       - uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a  # v6
         with:
           distribution: goreleaser
@@ -275,6 +338,18 @@ jobs:
           fi
           gh release edit "v${VERSION}" --notes-file release-notes.md
           echo "::notice::Release notes applied to v${VERSION}"
+
+      - name: Publish release
+        # Final, atomic step: flip the draft to public ONLY after every asset is
+        # uploaded (GoReleaser) and the notes are set. Any earlier interruption
+        # leaves a hidden draft — never a partial PUBLIC release. Recovery is to
+        # re-run this job, or dispatch the workflow with publish_tag=v${VERSION}.
+        env:
+          VERSION: ${{ needs.release.outputs.version }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release edit "v${VERSION}" --draft=false
+          echo "::notice::Published v${VERSION}"
 
   # --- Site deploy ------------------------------------------------------
   # There is deliberately no site-deploy job here. site.yml (path-filtered on

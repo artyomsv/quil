@@ -73,6 +73,10 @@ release:
   github:
     owner: artyomsv
     name: quil
-  draft: false
+  # Upload assets to a HIDDEN draft. The release becomes public only when the
+  # workflow's final "Publish" step flips the draft — so an interruption during
+  # asset upload leaves an invisible draft, never a partial PUBLIC release. See
+  # release.yml (goreleaser job) for the flip + the recovery path.
+  draft: true
   prerelease: auto
   name_template: "v{{.Version}}"

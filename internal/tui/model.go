@@ -990,7 +990,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// (claude Stop/PostCompact, opencode session.idle) — apply it live so
 		// the status bar refreshes without waiting for a workspace snapshot.
 		if eventPane != nil {
-			if model := msg.Data["model"]; model != "" {
+			if msg.Data["compacting"] == "1" {
+				// Post-compaction reset: show "<model> · compacting" until the
+				// next completed turn reports the true reduced context size.
+				eventPane.ContextTokens = ipc.ContextTokensCompacting
+			} else if model := msg.Data["model"]; model != "" {
 				if tokens, err := strconv.ParseInt(msg.Data["context_tokens"], 10, 64); err == nil && tokens >= 0 {
 					eventPane.Model = model
 					eventPane.ContextTokens = tokens

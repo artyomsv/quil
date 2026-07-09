@@ -2533,7 +2533,15 @@ func (d *Daemon) emitHookEvent(p hookevents.Payload) {
 		// Stop/PostCompact, opencode session.idle) as Data keys. Stored on
 		// the pane (runtime-only) so the workspace snapshot can deliver the
 		// values to a client that attaches between turns.
-		if model := p.Data["model"]; model != "" {
+		if p.Data["compacting"] == "1" {
+			// PostCompact reset: the true reduced context size isn't known
+			// until the next completed turn (the compaction summary carries no
+			// assistant usage). Reset to the compacting sentinel — keeping the
+			// model — so the status bar shows "<model> · compacting" instead of
+			// the stale pre-compaction count until the next Stop reports the
+			// real size.
+			pane.LastContextTokens = ipc.ContextTokensCompacting
+		} else if model := p.Data["model"]; model != "" {
 			if tokens, err := strconv.ParseInt(p.Data["context_tokens"], 10, 64); err == nil && tokens >= 0 {
 				pane.LastModel = model
 				pane.LastContextTokens = tokens

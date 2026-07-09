@@ -1,6 +1,10 @@
 package tui
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/artyomsv/quil/internal/ipc"
+)
 
 func TestModelStatusSegment(t *testing.T) {
 	t.Parallel()
@@ -17,6 +21,7 @@ func TestModelStatusSegment(t *testing.T) {
 		{"millions", "claude-opus-4-8", 1_200_000, "opus-4-8 · 1.2M ctx"},
 		{"exact million", "claude-opus-4-8", 1_000_000, "opus-4-8 · 1M ctx"},
 		{"small count", "claude-haiku-4-5", 950, "haiku-4-5 · 950 ctx"},
+		{"compacting sentinel", "claude-opus-4-8", ipc.ContextTokensCompacting, "opus-4-8 · compacting"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -152,8 +152,14 @@ func dispatchHookEvent(env HookEnv, in claudeStdin, nowMs int64) error {
 		return spoolEvent(env, nowMs, "PreCompact", in.SessionID, title, hookevents.SeverityInfo,
 			map[string]string{"reason": truncate(in.Reason, hookevents.MaxDataValueBytes)})
 	case "PostCompact":
+		// Do NOT read model/context usage here. Right after compaction the
+		// reduced context size is not yet in the transcript: the compaction
+		// summary is written as system/user entries with no assistant usage, so
+		// readTranscriptUsage would return the PRE-compaction turn's (now-stale)
+		// count. Emit a compacting-reset signal instead — the next completed
+		// turn's Stop reports the true reduced size via modelUsageData.
 		return spoolEvent(env, nowMs, "PostCompact", in.SessionID, "Compaction complete", hookevents.SeverityInfo,
-			modelUsageData(env, in.TranscriptPath))
+			map[string]string{"compacting": "1"})
 	case "SubagentStart":
 		return spoolEvent(env, nowMs, "SubagentStart", in.SessionID,
 			truncate("Spawned: "+in.AgentType, hookevents.MaxTitleBytes), hookevents.SeverityInfo,

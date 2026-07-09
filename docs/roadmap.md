@@ -207,10 +207,10 @@ Key capabilities:
 - **Plugin registry hardening** — `LoadFromDir` prunes stale plugins on reload (deleted TOML files no longer leak in-memory entries); `validateSeverity` helper extracted; `searchBinary` Windows-PATH walk gated by `runtime.GOOS == "windows"`.
 - **DIB parser hardened** (ADR-17 supporting) — per-axis cap (`maxDIBDimension = 16384`) plus `uint64` stride math defends against crafted clipboard payloads that slip under the 64 MB byte cap but would otherwise allocate gigabytes during decode.
 - **Log rotation** — `MaxSizeMB`/`MaxFiles` now honored via `internal/logger/rotate.go` (`RotatingWriter`). Active `quild.log` / `quil.log` rotates to `stem-YYYYMMDD-HHMMSS.log` on size breach; newest `MaxFiles` archives kept, older pruned. Defaults: 5 MB / 10 files. No external dependency.
+- **Observability — `quil status`** — top-level command (alias `quil daemon status`) reporting daemon liveness, pid, version, environment, approximate uptime, and per-tab/pane session metrics (state + memory), with `--json` for scripting. Exit codes distinguish healthy / not-running / wedged.
 
 **Remaining:**
 - JSON transformer (`Ctrl+J`) — format and highlight JSON in terminal output
-- Observability commands — `quil status`, session metrics
 - Encrypted token storage — OS keyring integration for sensitive scraped values
 - Tab dock positions (top/bottom/left/right)
 - OS service integration (`quil service install` — systemd/launchd/Task Scheduler)

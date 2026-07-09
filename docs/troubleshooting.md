@@ -17,6 +17,7 @@ When things go sideways, this is the first place to look.
 - [Log files — where to look](#log-files--where-to-look)
 - [Enable debug logging](#enable-debug-logging)
 - [Force-stop the daemon](#force-stop-the-daemon)
+- [Checking daemon + session status](#checking-daemon--session-status)
 - [Reset everything](#reset-everything)
 
 ---
@@ -238,6 +239,22 @@ rm -f ~/.quil/quild.pid ~/.quil/quild.sock
 ```
 
 The repo also ships kill scripts: `./scripts/kill-daemon.sh` (Unix) and `./scripts/kill-daemon.ps1` (Windows). **These target the PRODUCTION daemon** — don't use them while testing dev builds.
+
+## Checking daemon + session status
+
+`quil status` reports whether the daemon is running and prints a live snapshot
+of the workspace:
+
+```
+quil status            # human-readable tree
+quil status -v         # also show each pane's working directory
+quil status --json     # machine-readable, for scripts/CI
+```
+
+Exit codes: `0` healthy, `1` daemon not running, `2` daemon running but not
+responding (wedged). `quil daemon status` is an alias.
+
+Add `--dev` (or set `QUIL_HOME`) to inspect a dev instance instead of production.
 
 ## Reset everything
 

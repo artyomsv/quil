@@ -70,6 +70,75 @@ func TestRenderJSON_UnknownMemoryIsNull(t *testing.T) {
 	}
 }
 
+func TestBuildStatus_TracksUnsampledMemory(t *testing.T) {
+	// Sampled panes contribute to MemoryBytes; unsampled ones are counted so
+	// the aggregate can be flagged as incomplete.
+	panes := []ipc.PaneInfo{
+		{ID: "p1", TabID: "t1", Name: "a", Type: "terminal", Running: true},
+		{ID: "p2", TabID: "t1", Name: "b", Type: "terminal", Running: true},
+		{ID: "p3", TabID: "t1", Name: "c", Type: "terminal", Pending: true},
+	}
+	mem := ipc.MemoryReportRespPayload{
+		Panes: []ipc.PaneMemInfo{{PaneID: "p1", TotalBytes: 100}}, // p2, p3 unsampled
+		Tabs:  []ipc.TabInfo{{ID: "t1", Name: "T", Active: true}},
+	}
+	r := buildStatus("v", 1, panes, mem, 0, false, time.Time{})
+	if r.Totals.MemoryBytes != 100 {
+		t.Errorf("MemoryBytes = %d, want 100 (only p1 sampled)", r.Totals.MemoryBytes)
+	}
+	if r.Totals.MemUnsampled != 2 {
+		t.Errorf("MemUnsampled = %d, want 2 (p2, p3)", r.Totals.MemUnsampled)
+	}
+}
+
+func TestRenderJSON_MemoryCompleteSignal(t *testing.T) {
+	base := func(unsampled int) statusReport {
+		return statusReport{
+			Running: true, Responding: true,
+			Totals: statusTotals{Tabs: 1, Panes: 1, MemoryBytes: 10, MemUnsampled: unsampled},
+			Tabs:   []statusTab{{ID: "t", Name: "T"}},
+		}
+	}
+	parse := func(r statusReport) map[string]any {
+		b, err := renderJSON(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(b, &m); err != nil {
+			t.Fatal(err)
+		}
+		return m["totals"].(map[string]any)
+	}
+	if c := parse(base(0))["memory_complete"]; c != true {
+		t.Errorf("memory_complete (all sampled) = %v, want true", c)
+	}
+	tot := parse(base(2))
+	if c := tot["memory_complete"]; c != false {
+		t.Errorf("memory_complete (2 unsampled) = %v, want false", c)
+	}
+	// The partial sum is still reported alongside the incomplete flag.
+	if mb := tot["memory_bytes"]; mb != float64(10) {
+		t.Errorf("memory_bytes = %v, want 10 (partial sum retained)", mb)
+	}
+}
+
+func TestRenderHuman_UnsampledNote(t *testing.T) {
+	r := statusReport{
+		Running: true, Responding: true,
+		Totals: statusTotals{Tabs: 1, Panes: 3, Running: 3, MemoryBytes: 1024 * 1024, MemUnsampled: 2},
+	}
+	out := renderHuman(r, false)
+	if !strings.Contains(out, "(2 unsampled)") {
+		t.Errorf("output should flag unsampled panes\n---\n%s", out)
+	}
+	// A complete total carries no note.
+	r.Totals.MemUnsampled = 0
+	if strings.Contains(renderHuman(r, false), "unsampled") {
+		t.Errorf("complete total should not carry an unsampled note")
+	}
+}
+
 func TestFormatBytes_Boundaries(t *testing.T) {
 	tests := []struct {
 		name string

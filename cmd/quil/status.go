@@ -76,6 +76,11 @@ type statusTotals struct {
 	PendingEvents int
 	MemoryBytes   uint64
 	HasEvents     bool
+	// MemUnsampled counts panes with no memory reading (pending, or not yet
+	// seen by the 5 s collector). When > 0, MemoryBytes is a lower bound, not
+	// an exact total — surfaced as memory_complete=false in JSON and a
+	// "(N unsampled)" note in the human output.
+	MemUnsampled int
 }
 
 type statusReport struct {
@@ -164,7 +169,11 @@ func buildStatus(version string, pid int, panes []ipc.PaneInfo, mem ipc.MemoryRe
 			case sp.Running:
 				totals.Running++
 			}
-			totals.MemoryBytes += sp.MemBytes
+			if sp.HasMem {
+				totals.MemoryBytes += sp.MemBytes
+			} else {
+				totals.MemUnsampled++
+			}
 		}
 	}
 	totals.PendingEvents = events
@@ -220,8 +229,14 @@ func renderHuman(r statusReport, verbose bool) string {
 	}
 	b.WriteString("\n\n")
 
+	memStr := formatBytes(r.Totals.MemoryBytes)
+	if r.Totals.MemUnsampled > 0 {
+		// The total covers only sampled panes — flag it as a lower bound so it
+		// isn't read as an exact figure.
+		memStr = fmt.Sprintf("%s (%d unsampled)", memStr, r.Totals.MemUnsampled)
+	}
 	fmt.Fprintf(&b, "tabs %d    panes %d (%d running · %d pending)    mem %s",
-		r.Totals.Tabs, r.Totals.Panes, r.Totals.Running, r.Totals.Pending, formatBytes(r.Totals.MemoryBytes))
+		r.Totals.Tabs, r.Totals.Panes, r.Totals.Running, r.Totals.Pending, memStr)
 	if r.Totals.HasEvents {
 		fmt.Fprintf(&b, "    events %d pending", r.Totals.PendingEvents)
 	}
@@ -256,12 +271,16 @@ func renderHuman(r statusReport, verbose bool) string {
 //   - running but wedged  → {"running":true,"responding":false,...}
 //   - healthy             → full object
 type jsonTotals struct {
-	Tabs          int    `json:"tabs"`
-	Panes         int    `json:"panes"`
-	Running       int    `json:"running"`
-	Pending       int    `json:"pending"`
-	MemoryBytes   uint64 `json:"memory_bytes"`
-	PendingEvents *int   `json:"pending_events,omitempty"`
+	Tabs        int    `json:"tabs"`
+	Panes       int    `json:"panes"`
+	Running     int    `json:"running"`
+	Pending     int    `json:"pending"`
+	MemoryBytes uint64 `json:"memory_bytes"`
+	// MemoryComplete is false when memory_bytes omits one or more unsampled
+	// panes (so callers don't treat a partial sum as exact). Never omitempty —
+	// a false value is the meaningful case.
+	MemoryComplete bool `json:"memory_complete"`
+	PendingEvents  *int `json:"pending_events,omitempty"`
 }
 
 type jsonPane struct {
@@ -325,11 +344,12 @@ func renderJSON(r statusReport) ([]byte, error) {
 	}
 
 	totals := jsonTotals{
-		Tabs:        r.Totals.Tabs,
-		Panes:       r.Totals.Panes,
-		Running:     r.Totals.Running,
-		Pending:     r.Totals.Pending,
-		MemoryBytes: r.Totals.MemoryBytes,
+		Tabs:           r.Totals.Tabs,
+		Panes:          r.Totals.Panes,
+		Running:        r.Totals.Running,
+		Pending:        r.Totals.Pending,
+		MemoryBytes:    r.Totals.MemoryBytes,
+		MemoryComplete: r.Totals.MemUnsampled == 0,
 	}
 	if r.Totals.HasEvents {
 		ev := r.Totals.PendingEvents

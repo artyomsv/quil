@@ -213,7 +213,14 @@ jobs:
           git add VERSION CHANGELOG.md site/src/data/seo.ts
           git commit -m "chore(release): v${VERSION}"
           git tag "v${VERSION}"
-          git push origin master --tags
+          # --atomic: land the release commit and its tag together or not at
+          # all. If this push is interrupted (e.g. the job timeout-minutes cap
+          # firing, or a network stall), the server applies both refs or
+          # neither — never the commit without the tag (or vice versa), which
+          # would otherwise leave a half-released state needing manual cleanup.
+          # Push the specific tag rather than --tags so only this release's tag
+          # is part of the atomic unit.
+          git push --atomic origin master "v${VERSION}"
           echo "::notice::Tagged v${VERSION}"
 
   goreleaser:

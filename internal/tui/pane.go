@@ -119,6 +119,11 @@ type PaneModel struct {
 	// left-edge crop. Toggled per pane via the toggle_wrap keybinding
 	// (default alt+shift+w). TUI-session state, not persisted.
 	previewWrap bool
+
+	// splitDragHighlight marks this pane's border while a split-border
+	// drag-resize touching this pane is in progress. Transient TUI state,
+	// never persisted; set/cleared by Model.setSplitDragHighlight.
+	splitDragHighlight bool
 }
 
 // paneRenderKey is the comparable fingerprint of everything View() reads,
@@ -147,6 +152,7 @@ type paneRenderKey struct {
 	ghost, resuming, preparing     bool
 	pending                        bool
 	mcpHighlight, muted, focusMode bool
+	splitDragHighlight             bool
 	working                        bool
 	unseen                         bool
 	liveOutputSeen                 bool
@@ -162,31 +168,32 @@ type paneRenderKey struct {
 // renderKey computes the current fingerprint of every View() input.
 func (p *PaneModel) renderKey() paneRenderKey {
 	k := paneRenderKey{
-		contentGen:     p.contentGen,
-		width:          p.Width,
-		height:         p.Height,
-		scrollBack:     p.scrollBack,
-		active:         p.Active,
-		cursorVisible:  p.cursorVisible,
-		ghost:          p.ghost,
-		resuming:       p.resuming,
-		preparing:      p.preparing,
-		pending:        p.Pending,
-		mcpHighlight:   p.mcpHighlight,
-		muted:          p.Muted,
-		focusMode:      p.focusMode,
-		working:        p.working,
-		unseen:         p.unseen,
-		liveOutputSeen: p.liveOutputSeen,
-		spinnerFrame:   p.spinnerFrame,
-		workFrame:      p.workFrame,
-		name:           p.Name,
-		cwd:            p.CWD,
-		paneType:       p.Type,
-		sessionID:      p.SessionID,
-		wideCanvas:     p.WideCanvas,
-		previewWrap:    p.previewWrap,
-		historyLines:   p.HistoryLines,
+		contentGen:         p.contentGen,
+		width:              p.Width,
+		height:             p.Height,
+		scrollBack:         p.scrollBack,
+		active:             p.Active,
+		cursorVisible:      p.cursorVisible,
+		ghost:              p.ghost,
+		resuming:           p.resuming,
+		preparing:          p.preparing,
+		pending:            p.Pending,
+		mcpHighlight:       p.mcpHighlight,
+		splitDragHighlight: p.splitDragHighlight,
+		muted:              p.Muted,
+		focusMode:          p.focusMode,
+		working:            p.working,
+		unseen:             p.unseen,
+		liveOutputSeen:     p.liveOutputSeen,
+		spinnerFrame:       p.spinnerFrame,
+		workFrame:          p.workFrame,
+		name:               p.Name,
+		cwd:                p.CWD,
+		paneType:           p.Type,
+		sessionID:          p.SessionID,
+		wideCanvas:         p.WideCanvas,
+		previewWrap:        p.previewWrap,
+		historyLines:       p.HistoryLines,
 	}
 	// renderContent only honors a selection whose PaneID matches this pane;
 	// foreign or absent selections render identically, so both normalize to
@@ -744,6 +751,9 @@ func (p *PaneModel) View() string {
 	}
 	if p.ghost || p.resuming || p.preparing {
 		borderColor = lipgloss.Color("95") // muted purple — distinct but not jarring
+	}
+	if p.splitDragHighlight {
+		borderColor = lipgloss.Color("39") // bright blue — split drag in progress
 	}
 	if p.mcpHighlight {
 		borderColor = lipgloss.Color("208") // orange — MCP interaction

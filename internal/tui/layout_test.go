@@ -778,7 +778,7 @@ func TestNavigateDirection_TieBreaksByCenterDistance(t *testing.T) {
 
 func TestRangeOverlap(t *testing.T) {
 	cases := []struct {
-		name       string
+		name                 string
 		a1, a2, b1, b2, want int
 	}{
 		{"identical", 0, 10, 0, 10, 10},
@@ -796,5 +796,148 @@ func TestRangeOverlap(t *testing.T) {
 					tc.a1, tc.a2, tc.b1, tc.b2, got, tc.want)
 			}
 		})
+	}
+}
+
+// buildHSplitTree returns root = H-split of two leaves (a | b), ratio 0.5.
+func buildHSplitTree() (*LayoutNode, *PaneModel, *PaneModel) {
+	a := newTestPane("a")
+	b := newTestPane("b")
+	root := NewLeaf(a)
+	root.SplitLeaf("a", SplitHorizontal)
+	root.Right.Pane = b
+	return root, a, b
+}
+
+func TestLayoutNode_MinWidth(t *testing.T) {
+	t.Parallel()
+	leaf := NewLeaf(newTestPane("a"))
+	if got := leaf.minWidth(); got != minPaneW {
+		t.Errorf("leaf minWidth = %d, want %d", got, minPaneW)
+	}
+	if got := leaf.minHeight(); got != minPaneH {
+		t.Errorf("leaf minHeight = %d, want %d", got, minPaneH)
+	}
+
+	// H-split: widths sum, heights take the max.
+	h, _, _ := buildHSplitTree()
+	if got := h.minWidth(); got != 2*minPaneW {
+		t.Errorf("H-split minWidth = %d, want %d", got, 2*minPaneW)
+	}
+	if got := h.minHeight(); got != minPaneH {
+		t.Errorf("H-split minHeight = %d, want %d", got, minPaneH)
+	}
+
+	// V-split: heights sum, widths take the max.
+	v := NewLeaf(newTestPane("a"))
+	v.SplitLeaf("a", SplitVertical)
+	v.Right.Pane = newTestPane("b")
+	if got := v.minWidth(); got != minPaneW {
+		t.Errorf("V-split minWidth = %d, want %d", got, minPaneW)
+	}
+	if got := v.minHeight(); got != 2*minPaneH {
+		t.Errorf("V-split minHeight = %d, want %d", got, 2*minPaneH)
+	}
+
+	// Nested: H-split whose left child is itself an H-split of two leaves.
+	n, _, _ := buildHSplitTree()
+	n.Left = &LayoutNode{Split: SplitHorizontal, Ratio: 0.5,
+		Left: NewLeaf(newTestPane("c")), Right: NewLeaf(newTestPane("d"))}
+	if got := n.minWidth(); got != 3*minPaneW {
+		t.Errorf("nested minWidth = %d, want %d", got, 3*minPaneW)
+	}
+}
+
+func TestLayoutNode_CollectBorders(t *testing.T) {
+	t.Parallel()
+
+	// Single leaf: no borders.
+	leaf := NewLeaf(newTestPane("a"))
+	var none []BorderHit
+	leaf.CollectBorders(0, 1, 100, 38, &none)
+	if len(none) != 0 {
+		t.Fatalf("leaf borders = %d, want 0", len(none))
+	}
+
+	// H-split at ratio 0.5 in a 100x38 region at origin (0,1):
+	// boundary column = 0 + int(100*0.5) = 50; line cells are x=49 and x=50.
+	h, _, _ := buildHSplitTree()
+	var hits []BorderHit
+	h.CollectBorders(0, 1, 100, 38, &hits)
+	if len(hits) != 1 {
+		t.Fatalf("H-split borders = %d, want 1", len(hits))
+	}
+	if hits[0].Node != h {
+		t.Error("BorderHit.Node should be the internal node")
+	}
+	if got := hits[0].boundary(); got != 50 {
+		t.Errorf("boundary = %d, want 50", got)
+	}
+	for _, tc := range []struct {
+		x, y int
+		want bool
+	}{
+		{49, 10, true},  // left cell of the 2-cell line (drawn glyph)
+		{50, 10, true},  // right cell (drawn glyph)
+		{48, 10, false}, // left of the drawn line — scrollbar territory, never border
+		{51, 10, true},  // right-side padding cell
+		{52, 10, true},  // second right-side padding cell (asymmetric budget)
+		{53, 10, false}, // beyond the padded zone, right
+		{50, 0, false},  // above the region (tab bar row)
+		{50, 39, false}, // below the region
+	} {
+		if got := hits[0].Contains(tc.x, tc.y); got != tc.want {
+			t.Errorf("Contains(%d,%d) = %v, want %v", tc.x, tc.y, got, tc.want)
+		}
+	}
+
+	// Nested mixed splits: root V-split; top child is an H-split.
+	// Region 100x38 at (0,1): root boundary row = 1 + int(38*0.5) = 20.
+	// Top child region is 100x19 at (0,1): inner boundary col = int(100*0.5) = 50.
+	root := &LayoutNode{Split: SplitVertical, Ratio: 0.5}
+	inner := &LayoutNode{Split: SplitHorizontal, Ratio: 0.5,
+		Left: NewLeaf(newTestPane("a")), Right: NewLeaf(newTestPane("b"))}
+	root.Left = inner
+	root.Right = NewLeaf(newTestPane("c"))
+	var nested []BorderHit
+	root.CollectBorders(0, 1, 100, 38, &nested)
+	if len(nested) != 2 {
+		t.Fatalf("nested borders = %d, want 2", len(nested))
+	}
+	// Parent emitted before child (reverse scan = deepest wins).
+	if nested[0].Node != root || nested[1].Node != inner {
+		t.Error("emission order must be parent then child")
+	}
+	if got := nested[0].boundary(); got != 20 {
+		t.Errorf("root boundary row = %d, want 20", got)
+	}
+	if got := nested[1].boundary(); got != 50 {
+		t.Errorf("inner boundary col = %d, want 50", got)
+	}
+	// Inner line only spans the top child's rows (1..19 inclusive).
+	if nested[1].Contains(50, 25) {
+		t.Error("inner H line must not extend below the top child's region")
+	}
+	if !nested[1].Contains(50, 10) {
+		t.Error("inner H line should contain (50,10)")
+	}
+}
+
+// TestLayoutNode_CollectBorders_PlaceholderSkipped covers the mid-split
+// tree state: an internal node whose child is a placeholder (nil Pane, no
+// children, before FillPlaceholder runs). The placeholder subtree must
+// emit no border and must not panic; the parent's own line still emits.
+func TestLayoutNode_CollectBorders_PlaceholderSkipped(t *testing.T) {
+	t.Parallel()
+	root := &LayoutNode{Split: SplitHorizontal, Ratio: 0.5,
+		Left:  NewLeaf(newTestPane("a")),
+		Right: &LayoutNode{Ratio: 0.5}} // placeholder
+	var hits []BorderHit
+	root.CollectBorders(0, 1, 100, 38, &hits)
+	if len(hits) != 1 {
+		t.Fatalf("borders = %d, want 1 (root only, placeholder skipped)", len(hits))
+	}
+	if hits[0].Node != root {
+		t.Error("the emitted border must belong to the root split")
 	}
 }

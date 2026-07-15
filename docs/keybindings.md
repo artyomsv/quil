@@ -126,6 +126,7 @@ If the clipboard has no text but contains an image, Quil decodes the DIB, saves 
 | `Ctrl+A` (in editors) | Select all |
 | `Enter` | Copy selection to clipboard |
 | Mouse click + drag | Visual selection (terminals + editors) |
+| Click + drag a split border | Resize the adjacent panes (10×4 minimum; PTY resize applied on release) |
 
 ## Scrolling
 

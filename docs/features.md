@@ -121,6 +121,8 @@ The CWD also feeds the new-pane setup dialog (pre-filled from the active pane's 
 
 Full mouse support — click tabs to switch, click panes to focus, scroll wheel for terminal history. Drag panes to select text. All keybindings are configurable via `config.toml`.
 
+**Drag-resize splits** — click and drag any border between panes to resize; every pane keeps a 10×4 minimum (nested splits included), affected panes highlight while dragging, and child processes see a single resize on release. Note: when a *terminal* pane gets narrower, line content that no longer fits is cut by the console host and is not restored on growing back — the same thing happens when shrinking the whole window (no reflow-on-resize; see `techdebt/3-5-terminal-vt-resize-reflow.md`). AI panes are unaffected (window-sized canvas, apps repaint themselves). If content survival matters more than formatting for a given pane (log tails, watch loops), pick the built-in **Terminal (keeps content on squeeze)** pane type instead — it runs the same shell on the AI-pane-style window-sized canvas, so squeezes never cut content, at the cost of output being formatted for the window width (previewed cropped/soft-wrapped) while the pane is narrow.
+
 ### Text selection & clipboard
 
 Select text in terminal panes with `Shift+Arrow` (character), `Ctrl+Shift+Arrow` (word jump), `Ctrl+Alt+Shift+Arrow` (3-word jump), or mouse click+drag. Enter copies the selection to the system clipboard. `Ctrl+V` pastes with bracketed-paste sequences so the receiving shell knows the text came from clipboard.

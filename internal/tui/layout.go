@@ -352,6 +352,131 @@ func (n *LayoutNode) CollectRects(ox, oy, w, h int, out *[]PaneRect) {
 	}
 }
 
+// BorderHit describes one draggable split line: the internal node whose
+// Ratio a drag mutates, plus the node's region captured at collection time
+// so ratio math survives mid-drag layout changes.
+type BorderHit struct {
+	Node         *LayoutNode
+	OX, OY, W, H int
+}
+
+// boundary returns the first cell of the Right child along the split axis
+// (column for H-splits, row for V-splits). Mirrors resizeNode's clamp of
+// the Left child's share — the Right child is always placed at this offset.
+func (b BorderHit) boundary() int {
+	switch b.Node.Split {
+	case SplitVertical:
+		topH := int(float64(b.H) * b.Node.Ratio)
+		if topH < minPaneH {
+			topH = minPaneH
+		}
+		return b.OY + topH
+	default: // SplitHorizontal
+		leftW := int(float64(b.W) * b.Node.Ratio)
+		if leftW < minPaneW {
+			leftW = minPaneW
+		}
+		return b.OX + leftW
+	}
+}
+
+// splitBorderHitPadding widens each split line's hit zone beyond the
+// 2-cell drawn line (the two adjacent pane border glyphs) so a
+// slightly-off click still grabs the border — the same trade-off
+// scrollbarHitPadding makes. Vertical lines (V-splits) widen symmetrically.
+// Horizontal-split lines widen to the RIGHT only: the columns left of the
+// drawn line belong to the left neighbour's scrollbar (its drawn thumb
+// column is exactly bd-2), and a border zone reaching them would either
+// steal thumb clicks or — with scrollbar-first ordering — get swallowed
+// silently, which is worst on panes with no scrollback where the eaten
+// click gives no feedback at all.
+const splitBorderHitPadding = 1
+
+// Contains reports whether (x, y) lies in this node's split-line hit zone.
+// H-splits: columns [bd-1, bd+1+padding] (the drawn line plus a right-side
+// budget of 1+padding cells). V-splits: rows [bd-1-padding, bd+padding]
+// (symmetric). Both span the node's full perpendicular extent.
+func (b BorderHit) Contains(x, y int) bool {
+	bd := b.boundary()
+	switch b.Node.Split {
+	case SplitVertical:
+		return y >= bd-1-splitBorderHitPadding && y <= bd+splitBorderHitPadding &&
+			x >= b.OX && x < b.OX+b.W
+	default: // SplitHorizontal
+		return x >= bd-1 && x <= bd+1+splitBorderHitPadding &&
+			y >= b.OY && y < b.OY+b.H
+	}
+}
+
+// CollectBorders walks the layout tree with the same arithmetic as
+// CollectRects and appends one BorderHit per internal node. Parents are
+// emitted before children, so a reverse scan finds the deepest split line
+// under a point (T-junction resolution).
+func (n *LayoutNode) CollectBorders(ox, oy, w, h int, out *[]BorderHit) {
+	if n == nil || n.IsLeaf() {
+		return
+	}
+	// Placeholder node (nil Pane, no children) — no split line.
+	if n.Left == nil && n.Right == nil {
+		return
+	}
+	*out = append(*out, BorderHit{Node: n, OX: ox, OY: oy, W: w, H: h})
+	switch n.Split {
+	case SplitHorizontal:
+		leftW := int(float64(w) * n.Ratio)
+		if leftW < minPaneW {
+			leftW = minPaneW
+		}
+		rightW := w - leftW
+		if rightW < minPaneW {
+			rightW = minPaneW
+		}
+		n.Left.CollectBorders(ox, oy, leftW, h, out)
+		n.Right.CollectBorders(ox+leftW, oy, rightW, h, out)
+	case SplitVertical:
+		topH := int(float64(h) * n.Ratio)
+		if topH < minPaneH {
+			topH = minPaneH
+		}
+		bottomH := h - topH
+		if bottomH < minPaneH {
+			bottomH = minPaneH
+		}
+		n.Left.CollectBorders(ox, oy, w, topH, out)
+		n.Right.CollectBorders(ox, oy+topH, w, bottomH, out)
+	}
+}
+
+// minWidth returns the smallest width this subtree can occupy without any
+// leaf dropping below minPaneW. Placeholder leaves count as a full pane so
+// a mid-fill tree never reports an impossible zero minimum.
+func (n *LayoutNode) minWidth() int {
+	if n == nil {
+		return 0
+	}
+	if n.Left == nil && n.Right == nil { // leaf or placeholder
+		return minPaneW
+	}
+	if n.Split == SplitHorizontal {
+		return n.Left.minWidth() + n.Right.minWidth()
+	}
+	return max(n.Left.minWidth(), n.Right.minWidth())
+}
+
+// minHeight is the vertical counterpart of minWidth.
+func (n *LayoutNode) minHeight() int {
+	if n == nil {
+		return 0
+	}
+	if n.Left == nil && n.Right == nil { // leaf or placeholder
+		return minPaneH
+	}
+	if n.Split == SplitVertical {
+		return n.Left.minHeight() + n.Right.minHeight()
+	}
+	return max(n.Left.minHeight(), n.Right.minHeight())
+}
+
 // FindPaneRectAt returns the pane and its screen rectangle at coordinates (x, y).
 func (n *LayoutNode) FindPaneRectAt(x, y, ox, oy, w, h int) *PaneRect {
 	if n == nil {
@@ -448,6 +573,63 @@ func resizeNode(n *LayoutNode, w, h, canvasW, canvasH int) {
 		}
 		resizeNode(n.Left, w, topH, canvasW, canvasH)
 		resizeNode(n.Right, w, bottomH, canvasW, canvasH)
+	}
+}
+
+// resizeNodeRects assigns Width/Height to every pane with the same
+// arithmetic as resizeNode but deliberately does NOT touch the VT
+// emulator. Used mid split-drag: ResizeVT's contract (pane.go) is that
+// every emulator resize is paired with a PTY resize so the child redraws
+// into the new grid — but the drag defers the PTY resize to release, so
+// resizing the emulator through every intermediate width rewraps the grid
+// with no child repaint to correct it, leaving content permanently
+// garbled at the narrowest width crossed. Rect-only sizing moves the
+// borders live; content renders from the unchanged emulator (the
+// preview/crop path handles rect narrower than the VT), and the single
+// VT+PTY resize pair happens together in finishSplitDrag.
+func resizeNodeRects(n *LayoutNode, w, h int) {
+	if n == nil {
+		return
+	}
+	if n.Pane == nil && n.Left == nil && n.Right == nil {
+		return
+	}
+	if n.IsLeaf() {
+		if w < minPaneW {
+			w = minPaneW
+		}
+		if h < minPaneH {
+			h = minPaneH
+		}
+		n.Pane.Width = w
+		n.Pane.Height = h
+		return
+	}
+
+	switch n.Split {
+	case SplitHorizontal:
+		leftW := int(float64(w) * n.Ratio)
+		if leftW < minPaneW {
+			leftW = minPaneW
+		}
+		rightW := w - leftW
+		if rightW < minPaneW {
+			rightW = minPaneW
+		}
+		resizeNodeRects(n.Left, leftW, h)
+		resizeNodeRects(n.Right, rightW, h)
+
+	case SplitVertical:
+		topH := int(float64(h) * n.Ratio)
+		if topH < minPaneH {
+			topH = minPaneH
+		}
+		bottomH := h - topH
+		if bottomH < minPaneH {
+			bottomH = minPaneH
+		}
+		resizeNodeRects(n.Left, w, topH)
+		resizeNodeRects(n.Right, w, bottomH)
 	}
 }
 

@@ -304,6 +304,14 @@ type Model struct {
 	// the next workspace_state broadcast is a no-op.
 	tabDragFromIdx int
 
+	// Split-border drag-resize. splitDragNode is non-nil while a border
+	// drag is in progress; splitDragRect captures the owning node's region
+	// at click time so mid-drag layout changes can't drift the ratio math.
+	// PTY resize + layout persistence are deferred to release
+	// (finishSplitDrag) — mid-drag only the local tree and VT change.
+	splitDragNode *LayoutNode
+	splitDragRect BorderHit
+
 	// Event-loop performance stats. Pointer so mutations persist across
 	// Bubble Tea's value-receiver copies.
 	perfStats *eventLoopStats
@@ -595,6 +603,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.notesEditor.SetCursor(row, col)
 					return m, nil
 				}
+				// Split-border click arms a drag-resize. Checked BEFORE
+				// the scrollbar so the drawn split line (both border
+				// glyphs) always grabs the border: the left glyph sits
+				// inside the left pane's widened scrollbar hit zone and
+				// would otherwise be swallowed silently — worst on panes
+				// with no scrollback, where the eaten click gives no
+				// feedback at all. The border zone never extends left of
+				// the drawn line (asymmetric extent, layout.go), so the
+				// scrollbar's drawn thumb column stays clickable.
+				if hit := m.hitTestSplitBorder(msg.X, msg.Y); hit != nil {
+					m.clearDragState()
+					m.splitDragNode = hit.Node
+					m.splitDragRect = *hit
+					m.selection = nil
+					m.setSplitDragHighlight(hit, true)
+					return m, nil
+				}
 				// Scrollbar click jumps the thumb and starts a drag. The
 				// rect is captured once so a window resize mid-drag doesn't
 				// drift the mapping.
@@ -648,6 +673,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+		if m.splitDragNode != nil {
+			m.dragSplitBorder(msg.X, msg.Y)
+			return m, nil
+		}
 		if m.notesMouseDown && m.notesMode && m.notesEditor != nil {
 			row, col, ok := m.notesEditorPosAt(msg.X, msg.Y)
 			if !ok {
@@ -673,6 +702,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if tab := m.activeTabModel(); tab != nil && tab.overlayVisible {
 			m.clearDragState()
 			return m, nil
+		}
+		// A split-border drag commits on release: one PTY resize per pane
+		// plus the persisted layout ratio (finishSplitDrag), highlight off.
+		if m.splitDragNode != nil {
+			return m, m.finishSplitDrag()
 		}
 		// A tab drag or scrollbar drag terminates here with no further
 		// processing — they don't share the click-vs-drag pane-focus
@@ -1301,11 +1335,130 @@ func (m *Model) hitTestScrollbar(x, y int) *PaneRect {
 // than spread across each click handler that has to remember to zero its
 // siblings.
 func (m *Model) clearDragState() {
+	if m.splitDragNode != nil {
+		m.setSplitDragHighlight(&m.splitDragRect, false)
+	}
 	m.tabDragFromIdx = -1
 	m.scrollDragPaneID = ""
 	m.scrollDragRect = PaneRect{}
 	m.mouseDown = false
 	m.notesMouseDown = false
+	m.splitDragNode = nil
+	m.splitDragRect = BorderHit{}
+}
+
+// hitTestSplitBorder returns the deepest split line containing (x, y), or
+// nil. Disabled in focus mode (one full-area pane — no inner borders),
+// notes mode (implies focus mode plus a squeezed layout), and on tabs
+// without splits (a leaf root emits no borders). Runs AFTER
+// hitTestScrollbar at the call site so the scrollbar keeps priority where
+// its widened hit zone overlaps a pane's right border.
+func (m *Model) hitTestSplitBorder(x, y int) *BorderHit {
+	tab := m.activeTabModel()
+	if tab == nil || tab.Root == nil || tab.FocusMode() || m.notesMode {
+		return nil
+	}
+	tabH := m.height - chromeHeight
+	var borders []BorderHit
+	tab.Root.CollectBorders(0, 1, m.paneAreaWidth(), tabH, &borders)
+	for i := len(borders) - 1; i >= 0; i-- {
+		if borders[i].Contains(x, y) {
+			return &borders[i]
+		}
+	}
+	return nil
+}
+
+// setSplitDragHighlight toggles the transient drag highlight on every leaf
+// whose rect touches the dragged split line, on both sides of it.
+// Adjacency is topological (which leaves border the line never changes as
+// the ratio moves), so the same recomputation clears exactly the set it
+// set — even after the drag moved the boundary.
+func (m *Model) setSplitDragHighlight(hit *BorderHit, on bool) {
+	if hit == nil || hit.Node == nil || hit.Node.IsLeaf() {
+		return
+	}
+	bd := hit.boundary()
+	var rects []PaneRect
+	hit.Node.CollectRects(hit.OX, hit.OY, hit.W, hit.H, &rects)
+	for i := range rects {
+		if rects[i].Pane == nil {
+			continue
+		}
+		var touches bool
+		if hit.Node.Split == SplitHorizontal {
+			touches = rects[i].OX == bd || rects[i].OX+rects[i].W == bd
+		} else {
+			touches = rects[i].OY == bd || rects[i].OY+rects[i].H == bd
+		}
+		if touches {
+			rects[i].Pane.splitDragHighlight = on
+		}
+	}
+}
+
+// treeContains reports whether target is reachable from n (pointer
+// identity). Guards a drag whose node was pruned or replaced by a
+// workspace_state reconciliation mid-drag.
+func treeContains(n, target *LayoutNode) bool {
+	if n == nil {
+		return false
+	}
+	if n == target {
+		return true
+	}
+	return treeContains(n.Left, target) || treeContains(n.Right, target)
+}
+
+// dragSplitBorder maps the cursor to a new Ratio on the dragged node,
+// clamped so every leaf in BOTH subtrees keeps its minimum size (nested
+// splits included, via minWidth/minHeight). Clamping happens in cells and
+// the ratio is derived from the clamped cell count — exact at the
+// extremes, no float-truncation flicker. Local-only: the PTY resize and
+// layout persistence fire on release (finishSplitDrag).
+func (m *Model) dragSplitBorder(x, y int) {
+	tab := m.activeTabModel()
+	if tab == nil || tab.Root == nil || m.splitDragNode == nil ||
+		!treeContains(tab.Root, m.splitDragNode) {
+		m.clearDragState()
+		return
+	}
+	node, rect := m.splitDragNode, m.splitDragRect
+	switch node.Split {
+	case SplitHorizontal:
+		if rect.W <= 0 {
+			return
+		}
+		leftW := min(max(x-rect.OX, node.Left.minWidth()), rect.W-node.Right.minWidth())
+		node.Ratio = float64(leftW) / float64(rect.W)
+	case SplitVertical:
+		if rect.H <= 0 {
+			return
+		}
+		topH := min(max(y-rect.OY, node.Left.minHeight()), rect.H-node.Right.minHeight())
+		node.Ratio = float64(topH) / float64(rect.H)
+	}
+	// Rects only — the VT emulator must NOT resize mid-drag (see
+	// resizeNodeRects). The full tab.Resize runs once in finishSplitDrag.
+	resizeNodeRects(tab.Root, tab.Width, tab.Height)
+}
+
+// finishSplitDrag commits an in-progress border drag: the daemon gets the
+// final pane sizes (one PTY resize per pane — children reflow once, per
+// the on-release-only design) and every tab's layout blob (persists the
+// new Ratio). resizeAllPanes/sendAllLayouts cover all panes/tabs; the
+// daemon's same-size guard drops the untouched panes' resizes, and layout
+// updates are stored opaquely without broadcast, so the extra breadth is
+// harmless and reuses tested plumbing.
+func (m *Model) finishSplitDrag() tea.Cmd {
+	// The one VT resize of the whole drag: old size → final size, paired
+	// with the PTY resize below so the child's SIGWINCH redraw lands in a
+	// matching grid (mid-drag only rects moved — see resizeNodeRects).
+	if tab := m.activeTabModel(); tab != nil {
+		tab.Resize(tab.Width, tab.Height)
+	}
+	m.clearDragState()
+	return tea.Batch(m.resizeAllPanes(), m.sendAllLayouts())
 }
 
 // moveTab repositions m.tabs[from] to ordinal `to`, sliding the tabs

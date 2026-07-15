@@ -32,12 +32,31 @@ func builtinTerminal() *PanePlugin {
 	}
 }
 
+// builtinTerminalWide returns the wide-canvas variant of the terminal
+// plugin: identical shell detection and persistence, but the pane keeps
+// its PTY/emulator on the window-sized canvas below min_native_cols (like
+// AI panes), so squeezing a pane never cuts content — at the cost of
+// output being formatted for the canvas width while previewed. Best for
+// logs, watch loops, and long-running output; the native "terminal" stays
+// the right choice for interactive work (tables and line editing format
+// to the real pane width). See docs/features.md and
+// techdebt/3-5-terminal-vt-resize-reflow.md for the trade-off.
+func builtinTerminalWide() *PanePlugin {
+	p := builtinTerminal()
+	p.Name = "terminal-wide"
+	p.DisplayName = "Terminal (keeps content on squeeze)"
+	p.Description = "System shell on a window-sized canvas — resizing never cuts content; narrow panes show a cropped/wrapped preview. Best for logs and long-running output; use Terminal for interactive work."
+	p.Display.WideCanvas = true
+	return p
+}
+
 // builtinPlugins returns built-in plugin definitions that require Go runtime
 // logic (e.g., shell detection). Static plugins are shipped as editable TOML
 // files in ~/.quil/plugins/ — see defaults.go and defaults/*.toml.
 func builtinPlugins() []*PanePlugin {
 	return []*PanePlugin{
 		builtinTerminal(),
+		builtinTerminalWide(),
 	}
 }
 

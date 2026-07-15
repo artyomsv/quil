@@ -84,6 +84,8 @@ func TestModel_ClearDragState(t *testing.T) {
 		scrollDragRect:   PaneRect{OX: 1, OY: 2, W: 3, H: 4},
 		mouseDown:        true,
 		notesMouseDown:   true,
+		splitDragNode:    &LayoutNode{},
+		splitDragRect:    BorderHit{OX: 1, OY: 2, W: 3, H: 4},
 	}
 	m.clearDragState()
 	if m.tabDragFromIdx != -1 {
@@ -100,5 +102,11 @@ func TestModel_ClearDragState(t *testing.T) {
 	}
 	if m.notesMouseDown {
 		t.Error("notesMouseDown = true, want false")
+	}
+	if m.splitDragNode != nil {
+		t.Error("splitDragNode should be nil after clearDragState")
+	}
+	if m.splitDragRect != (BorderHit{}) {
+		t.Errorf("splitDragRect = %+v, want zero value", m.splitDragRect)
 	}
 }

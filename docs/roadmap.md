@@ -208,6 +208,8 @@ Key capabilities:
 - **DIB parser hardened** (ADR-17 supporting) — per-axis cap (`maxDIBDimension = 16384`) plus `uint64` stride math defends against crafted clipboard payloads that slip under the 64 MB byte cap but would otherwise allocate gigabytes during decode.
 - **Log rotation** — `MaxSizeMB`/`MaxFiles` now honored via `internal/logger/rotate.go` (`RotatingWriter`). Active `quild.log` / `quil.log` rotates to `stem-YYYYMMDD-HHMMSS.log` on size breach; newest `MaxFiles` archives kept, older pruned. Defaults: 5 MB / 10 files. No external dependency.
 - **Observability — `quil status`** — top-level command (alias `quil daemon status`) reporting daemon liveness, pid, version, environment, approximate uptime, and per-tab/pane session metrics (state + memory), with `--json` for scripting. Exit codes distinguish healthy / not-running / wedged.
+- **Mouse split-border drag-resize** ([PR #93](https://github.com/artyomsv/quil/pull/93)) — click and drag any border between panes to move the split. Ratio clamped in cells against subtree minimums (10×4 floor, nested splits included); adjacent panes show a transient highlight; PTY resize + layout persistence fire once on release (mid-drag only rects move — unpaired emulator resizes garble content). Border hit zone widened and given priority over the scrollbar's overlap cells. Disabled in focus/notes modes.
+- **Wide-canvas terminal variant** — `terminal-wide` built-in ("Terminal (keeps content on squeeze)"): same shell auto-detection as the native terminal, but the pane keeps its PTY/emulator on the window-sized canvas below `min_native_cols` (like AI panes), so pane squeezes never cut content — at the cost of window-width output formatting while narrow. Native terminal remains the default for interactive work; proper reflow-on-resize is tracked below.
 
 **Remaining:**
 - JSON transformer (`Ctrl+J`) — format and highlight JSON in terminal output
@@ -247,6 +249,12 @@ The entire pitch in one visual. Goes on README, Hacker News, r/programming, Twit
 
 GitHub repo as registry, `quil plugin install/search/update` CLI. High-value plugins: Aider, lazygit, k9s, Docker Compose, ngrok, pgcli. Every plugin makes Quil useful to a new audience.
 
+### GitHub Pages Documentation Site
+
+> Publish the `docs/` tree as a browsable site with a landing page.
+
+The documentation is already structured as a navigable tree (`docs/README.md` index, per-topic pages). A GitHub Pages deployment (static site generator over the existing Markdown — e.g. MkDocs Material or GitHub's built-in Jekyll — via a `pages.yml` workflow) turns it into a linkable, searchable site: install one-liner above the fold, quick-start, feature catalog, keybindings, plugin reference, MCP guide. Pairs with the demo GIF as the landing target for README / HN / social links. Custom domain optional later.
+
 ### tmux Migration Path — [PRD](roadmap/tmux-migration.md)
 
 > Import keybindings and session layouts from tmux.
@@ -268,6 +276,12 @@ Elevate `error_handlers` to a first-class health monitoring system. Auto-restart
 > Build fails → AI pane gets a toast → one keypress sends context.
 
 Event bus connecting panes: build errors notify AI assistants, SSH auto-reconnects, test passes flash green, webhook counters badge tabs. Creates an **integrated experience** that no collection of separate terminals can match.
+
+### Terminal Reflow-on-Resize
+
+> Rewrap terminal pane content on width change, like tmux and Windows Terminal.
+
+Today a terminal pane's emulator crops on width shrink and ConPTY re-emits only the viewport, so content cut by a squeeze is not restored on growing back (`techdebt/3-5-terminal-vt-resize-reflow.md`). The fix is a reflow engine in Quil's emulator layer: rewrap screen + scrollback from soft-wrap continuation flags on width change (upstream `charmbracelet/x/vt` feature or a wrapper). Gives the native terminal the content preservation of `terminal-wide` without its formatting trade-offs — the endgame that makes both terminal variants converge. Epic-sized: wide-char cells, cursor remapping, alt-screen exclusion.
 
 ### Session Sharing — [PRD](roadmap/session-sharing.md)
 
@@ -394,6 +408,8 @@ section above.
 | 15 | Session sharing | Large | Medium | Advanced |
 | 16 | **[gap]** Web dashboard + remote phone access (M18) | Large | Medium | Advanced |
 | 17 | **[gap]** Container sandboxing | Large | Medium | Advanced |
+| 18 | GitHub Pages documentation site | Small | Medium | Growth |
+| 19 | Terminal reflow-on-resize | Large | Medium | Polish |
 
 ## Strategic Notes
 

@@ -249,11 +249,11 @@ The entire pitch in one visual. Goes on README, Hacker News, r/programming, Twit
 
 GitHub repo as registry, `quil plugin install/search/update` CLI. High-value plugins: Aider, lazygit, k9s, Docker Compose, ngrok, pgcli. Every plugin makes Quil useful to a new audience.
 
-### GitHub Pages Documentation Site
+### Native Docs on quil.cc
 
-> Publish the `docs/` tree as a browsable site with a landing page.
+> Render the `docs/` markdown tree as first-class pages on the existing site.
 
-The documentation is already structured as a navigable tree (`docs/README.md` index, per-topic pages). A GitHub Pages deployment (static site generator over the existing Markdown — e.g. MkDocs Material or GitHub's built-in Jekyll — via a `pages.yml` workflow) turns it into a linkable, searchable site: install one-liner above the fold, quick-start, feature catalog, keybindings, plugin reference, MCP guide. Pairs with the demo GIF as the landing target for README / HN / social links. Custom domain optional later.
+[quil.cc](https://quil.cc) (Astro under `site/`, deployed to GitHub Pages by `site.yml` on master pushes touching `site/**`) already covers marketing: landing, features catalog, install, plugins, blog, comparisons. Its `/docs` page is a **link hub** that points back to the markdown on GitHub. The gap: render `docs/*.md` natively on the site (Astro content collections over the existing tree) so keybindings, configuration, plugin reference, and MCP guide are searchable, linkable pages with site navigation — no GitHub round-trip. Requires keeping `docs/` as the single source of truth (site consumes, never forks, the markdown). Also add a docs-freshness check: site deploys only trigger on `site/**`, so feature PRs that touch `docs/` or the feature catalog data layer must remember quil.cc (this PR added the drag-resize entry to `site/src/data/features.ts` by hand — content collections would make `docs/` changes flow automatically).
 
 ### tmux Migration Path — [PRD](roadmap/tmux-migration.md)
 
@@ -408,7 +408,7 @@ section above.
 | 15 | Session sharing | Large | Medium | Advanced |
 | 16 | **[gap]** Web dashboard + remote phone access (M18) | Large | Medium | Advanced |
 | 17 | **[gap]** Container sandboxing | Large | Medium | Advanced |
-| 18 | GitHub Pages documentation site | Small | Medium | Growth |
+| 18 | Native docs rendering on quil.cc | Small | Medium | Growth |
 | 19 | Terminal reflow-on-resize | Large | Medium | Polish |
 
 ## Strategic Notes

@@ -173,6 +173,22 @@ export const features: Feature[] = [
     ],
   },
   {
+    slug: "mouse-pane-resize",
+    icon: "layout-panel-left",
+    title: "Mouse drag-resize splits",
+    blurb:
+      "Grab any border between panes and drag — the split follows your mouse, every nested pane keeps its minimum size, and the child processes see exactly one resize when you let go.",
+    category: "interaction",
+    detail: [
+      "Click-and-drag any split border; the affected panes show a highlight while the drag is active.",
+      "Works on arbitrarily nested layouts: the drag is clamped so every pane in both subtrees keeps the 10×4 minimum — not just the two panes touching the border.",
+      "The grab zone is wider than the drawn line, and the drawn line always wins over the scrollbar where they overlap — no pixel hunting.",
+      "PTY resize and layout persistence fire once, on mouse release — mid-drag the borders move locally, so TUI apps (claude-code, vim, htop) never see resize churn and never repaint mid-drag.",
+      "The new ratios ride the existing workspace snapshot, so a drag-resized layout survives daemon restarts and reboots.",
+      "Companion pane type — Terminal (keeps content on squeeze): the same shell on an AI-pane-style window-sized canvas, for log tails and watch loops where content survival matters more than width-perfect formatting.",
+    ],
+  },
+  {
     slug: "pane-notes",
     image: "https://cdn.stukans.com/quil/screenshots/focus-with-notes-800.webp",
     icon: "notebook-pen",

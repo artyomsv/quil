@@ -906,3 +906,44 @@ discover = "svn"
 		t.Error("expected error for discover=\"svn\"")
 	}
 }
+
+func TestBuiltinTerminalWide_MirrorsTerminalWithWideCanvas(t *testing.T) {
+	native := builtinTerminal()
+	wide := builtinTerminalWide()
+
+	if wide.Name != "terminal-wide" {
+		t.Errorf("Name = %q, want %q", wide.Name, "terminal-wide")
+	}
+	if wide.DisplayName == native.DisplayName {
+		t.Error("wide variant needs a distinct display name")
+	}
+	if !wide.Display.WideCanvas {
+		t.Error("wide variant must set Display.WideCanvas")
+	}
+	if native.Display.WideCanvas {
+		t.Error("native terminal must stay non-wide-canvas")
+	}
+	// Everything shell-related mirrors the native terminal.
+	if wide.Command.Cmd != native.Command.Cmd {
+		t.Errorf("Cmd = %q, want the native terminal's %q", wide.Command.Cmd, native.Command.Cmd)
+	}
+	if !wide.Command.ShellIntegration {
+		t.Error("wide variant must keep shell integration")
+	}
+	if wide.Persistence.Strategy != "cwd_only" || !wide.Persistence.GhostBuffer {
+		t.Errorf("persistence = %+v, want cwd_only + ghost buffer like the native terminal", wide.Persistence)
+	}
+	if !wide.Available {
+		t.Error("wide variant must always be available")
+	}
+}
+
+func TestBuiltinPlugins_IncludesBothTerminals(t *testing.T) {
+	names := map[string]bool{}
+	for _, p := range builtinPlugins() {
+		names[p.Name] = true
+	}
+	if !names["terminal"] || !names["terminal-wide"] {
+		t.Errorf("builtinPlugins = %v, want both terminal and terminal-wide", names)
+	}
+}

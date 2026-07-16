@@ -61,6 +61,13 @@ func TestEmitEvent_MutedPaneWorkStateEventBypassesQueue(t *testing.T) {
 
 	d.emitEvent(PaneEvent{ID: "evt-1", PaneID: "pane-quiet", Type: "hook.claude.UserPromptSubmit", Title: "Working"})
 	d.emitEvent(PaneEvent{ID: "evt-2", PaneID: "pane-quiet", Type: "hook.claude.Stop", Title: "Done"})
+	// Subagent lifecycle events are work-state too: a muted pane's spinner
+	// must keep tracking background subagents (SubagentStart keeps it lit
+	// past the main turn's Stop; SubagentStop drains it), so they take the
+	// same broadcast-but-don't-queue path.
+	d.emitEvent(PaneEvent{ID: "evt-3", PaneID: "pane-quiet", Type: "hook.claude.SubagentStart", Title: "Spawned: Explore"})
+	d.emitEvent(PaneEvent{ID: "evt-4", PaneID: "pane-quiet", Type: "hook.claude.SubagentStop", Title: "Explore done"})
+	d.emitEvent(PaneEvent{ID: "evt-5", PaneID: "pane-quiet", Type: "hook.claude.SessionEnd", Title: "Session ended"})
 
 	if d.events.Count() != 0 {
 		t.Errorf("work-state events from a muted pane must not enter the notification queue: got %d", d.events.Count())

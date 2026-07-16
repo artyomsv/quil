@@ -18,7 +18,9 @@ func TestWorkEventKind(t *testing.T) {
 		{"hook.opencode.chat.message", workStart},
 		{"hook.claude.PostToolUse", workStart}, // resume after a prompt is answered
 		{"hook.claude.Stop", workStop},
-		{"hook.claude.SessionEnd", workStop},
+		// SessionEnd is terminal: no subagent can outlive the session, so it
+		// also clears any outstanding-subagent count (WorkEventStopFinal).
+		{"hook.claude.SessionEnd", workStopFinal},
 		{"hook.opencode.session.idle", workStop},
 		{"hook.opencode.session.error", workStop},
 		{"process_exit", workAbort},
@@ -27,6 +29,15 @@ func TestWorkEventKind(t *testing.T) {
 		{"hook.claude.Notification", workStop},
 		{"hook.claude.PermissionRequest", workStop},
 		{"hook.opencode.permission.ask", workStop},
+		// Subagent lifecycle: background subagents outlive the main turn's
+		// Stop (Claude Code runs them detached by default), so they get their
+		// own edges instead of riding Start/Stop.
+		{"hook.claude.SubagentStart", workSubagentStart},
+		{"hook.claude.SubagentStop", workSubagentStop},
+		// Task-list bookkeeping is NOT an execution signal — a created task
+		// may never run and completion is a manual/tool state flip.
+		{"hook.claude.TaskCreated", workNone},
+		{"hook.claude.TaskCompleted", workNone},
 		{"output_idle", workNone},
 		{"", workNone},
 	}
@@ -86,7 +97,7 @@ func modelWithSplitActiveTab() Model {
 func TestApplyWorkTransition_StartSetsWorking(t *testing.T) {
 	t.Parallel()
 	m := modelForWorkTest()
-	m.applyWorkTransition("p1", "hook.claude.UserPromptSubmit")
+	m.applyWorkTransition("p1", "hook.claude.UserPromptSubmit", nil)
 	if !m.tabs[0].Root.Leaves()[0].working {
 		t.Fatal("expected pane.working = true after start event")
 	}
@@ -101,8 +112,8 @@ func TestApplyWorkTransition_StartSetsWorking(t *testing.T) {
 func TestApplyWorkTransition_StopOnBackgroundTab_SetsUnseen(t *testing.T) {
 	t.Parallel()
 	m := modelWithBackgroundTab()
-	m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit")
-	m.applyWorkTransition("p2", "hook.claude.Stop")
+	m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit", nil)
+	m.applyWorkTransition("p2", "hook.claude.Stop", nil)
 	if m.tabs[1].Root.Leaves()[0].working {
 		t.Error("pane.working should be false after stop")
 	}
@@ -118,8 +129,8 @@ func TestApplyWorkTransition_StopOnFocusedPane_NoMark(t *testing.T) {
 	t.Parallel()
 	// Completion in the pane being looked at is seen by definition — no mark.
 	m := modelForWorkTest()
-	m.applyWorkTransition("p1", "hook.claude.UserPromptSubmit")
-	m.applyWorkTransition("p1", "hook.claude.Stop")
+	m.applyWorkTransition("p1", "hook.claude.UserPromptSubmit", nil)
+	m.applyWorkTransition("p1", "hook.claude.Stop", nil)
 	if m.tabs[0].Root.Leaves()[0].working {
 		t.Error("pane.working should be false after stop")
 	}
@@ -134,8 +145,8 @@ func TestApplyWorkTransition_StopOnUnfocusedSibling_MarksPaneOnly(t *testing.T) 
 	// user may be typing in the focused pane), but the active tab's label
 	// never goes green — you're already on the tab.
 	m := modelWithSplitActiveTab()
-	m.applyWorkTransition("p1b", "hook.claude.UserPromptSubmit")
-	m.applyWorkTransition("p1b", "hook.claude.Stop")
+	m.applyWorkTransition("p1b", "hook.claude.UserPromptSubmit", nil)
+	m.applyWorkTransition("p1b", "hook.claude.Stop", nil)
 	if !m.tabs[0].Root.Right.Pane.unseen {
 		t.Error("unfocused sibling pane should be marked unseen")
 	}
@@ -157,8 +168,8 @@ func TestApplyWorkTransition_ParkForInput_MarksBackgroundPane(t *testing.T) {
 		t.Run(evt, func(t *testing.T) {
 			t.Parallel()
 			m := modelWithBackgroundTab()
-			m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit")
-			m.applyWorkTransition("p2", evt)
+			m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit", nil)
+			m.applyWorkTransition("p2", evt, nil)
 			if m.tabs[1].Root.Leaves()[0].working {
 				t.Errorf("%s: pane.working should be false after a park-for-input edge", evt)
 			}
@@ -174,8 +185,8 @@ func TestApplyWorkTransition_ResumeAfterParkClearsUnseenAndReArms(t *testing.T) 
 	// Full prompt cycle on a background pane: start → park (spinner off +
 	// unseen) → user answers (PostToolUse) → spinner back on, mark cleared.
 	m := modelWithBackgroundTab()
-	m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit")
-	m.applyWorkTransition("p2", "hook.claude.PermissionRequest") // park
+	m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit", nil)
+	m.applyWorkTransition("p2", "hook.claude.PermissionRequest", nil) // park
 	pane := m.tabs[1].Root.Leaves()[0]
 	if pane.working {
 		t.Fatal("precondition: pane should be parked (not working) before resume")
@@ -184,7 +195,7 @@ func TestApplyWorkTransition_ResumeAfterParkClearsUnseenAndReArms(t *testing.T) 
 		t.Fatal("precondition: pane should be unseen after the park")
 	}
 
-	m.applyWorkTransition("p2", "hook.claude.PostToolUse") // resume
+	m.applyWorkTransition("p2", "hook.claude.PostToolUse", nil) // resume
 	if !pane.working {
 		t.Error("pane.working should be true again after the answer (PostToolUse)")
 	}
@@ -199,7 +210,7 @@ func TestApplyWorkTransition_StartClearsStaleUnseen(t *testing.T) {
 	// spinner supersedes the green "finished" cue.
 	m := modelWithBackgroundTab()
 	m.tabs[1].Root.Leaves()[0].unseen = true
-	m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit")
+	m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit", nil)
 	if m.tabs[1].Root.Leaves()[0].unseen {
 		t.Error("a new turn (UserPromptSubmit) should clear a stale unseen mark")
 	}
@@ -208,8 +219,8 @@ func TestApplyWorkTransition_StartClearsStaleUnseen(t *testing.T) {
 func TestApplyWorkTransition_AbortClearsWorkingWithoutMarking(t *testing.T) {
 	t.Parallel()
 	m := modelWithBackgroundTab()
-	m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit")
-	m.applyWorkTransition("p2", "process_exit")
+	m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit", nil)
+	m.applyWorkTransition("p2", "process_exit", nil)
 	if m.tabs[1].Root.Leaves()[0].working {
 		t.Error("pane.working should be false after process_exit")
 	}
@@ -220,7 +231,7 @@ func TestApplyWorkTransition_AbortClearsWorkingWithoutMarking(t *testing.T) {
 	// An existing mark from an earlier completion survives an abort.
 	m2 := modelWithBackgroundTab()
 	m2.tabs[1].Root.Leaves()[0].unseen = true
-	m2.applyWorkTransition("p2", "process_exit")
+	m2.applyWorkTransition("p2", "process_exit", nil)
 	if !m2.tabs[1].Root.Leaves()[0].unseen {
 		t.Error("abort must not clear an existing unseen mark")
 	}
@@ -230,16 +241,208 @@ func TestApplyWorkTransition_StopWithoutPriorStart_NoMark(t *testing.T) {
 	t.Parallel()
 	// A Stop with no in-progress turn (pane was already idle) must not mark.
 	m := modelWithBackgroundTab()
-	m.applyWorkTransition("p2", "hook.claude.Stop")
+	m.applyWorkTransition("p2", "hook.claude.Stop", nil)
 	if m.tabs[1].Root.Leaves()[0].unseen {
 		t.Error("stop on an already-idle pane must not mark the pane unseen")
+	}
+}
+
+func TestApplyWorkTransition_StopWithOutstandingSubagents_KeepsSpinner(t *testing.T) {
+	t.Parallel()
+	// Claude Code runs subagents in the background by default: the main
+	// turn's Stop (or a park-for-input edge) fires while they are still
+	// working. The spinner must survive the edge and the unseen mark must be
+	// deferred until the work has actually drained.
+	for _, stopEdge := range []string{"hook.claude.Stop", "hook.claude.Notification"} {
+		t.Run(stopEdge, func(t *testing.T) {
+			t.Parallel()
+			m := modelWithBackgroundTab()
+			m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit", nil)
+			m.applyWorkTransition("p2", "hook.claude.SubagentStart", nil)
+			m.applyWorkTransition("p2", stopEdge, nil)
+			pane := m.tabs[1].Root.Leaves()[0]
+			if !pane.working {
+				t.Errorf("%s with an outstanding subagent must keep the spinner", stopEdge)
+			}
+			if pane.unseen {
+				t.Errorf("%s with an outstanding subagent must defer the unseen mark", stopEdge)
+			}
+
+			// The last subagent finishing IS the completion edge now.
+			m.applyWorkTransition("p2", "hook.claude.SubagentStop", nil)
+			if pane.working {
+				t.Error("draining the last subagent after the turn ended must stop the spinner")
+			}
+			if !pane.unseen {
+				t.Error("draining the last subagent after the turn ended must mark the background pane unseen")
+			}
+		})
+	}
+}
+
+func TestApplyWorkTransition_SubagentStopBeforeStop_TurnKeepsSpinner(t *testing.T) {
+	t.Parallel()
+	// A subagent finishing while the main turn is still running must NOT
+	// stop the spinner — the turn itself is still mid-flight.
+	m := modelWithBackgroundTab()
+	m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit", nil)
+	m.applyWorkTransition("p2", "hook.claude.SubagentStart", nil)
+	m.applyWorkTransition("p2", "hook.claude.SubagentStop", nil)
+	pane := m.tabs[1].Root.Leaves()[0]
+	if !pane.working {
+		t.Error("subagent drain during an active turn must keep the spinner")
+	}
+	if pane.unseen {
+		t.Error("subagent drain during an active turn must not mark the pane")
+	}
+
+	m.applyWorkTransition("p2", "hook.claude.Stop", nil)
+	if pane.working {
+		t.Error("Stop with no outstanding subagents must stop the spinner")
+	}
+	if !pane.unseen {
+		t.Error("Stop with no outstanding subagents must mark the background pane")
+	}
+}
+
+func TestApplyWorkTransition_CoalescedSubagentBursts(t *testing.T) {
+	t.Parallel()
+	// The daemon's ingester debounces per (paneID, hook_event) with a 50 ms
+	// window: N events in a burst arrive as ONE PaneEvent carrying
+	// data["coalesced"] = "N". The counter must honor the burst count or a
+	// parallel spawn of 3 subagents would be undercounted as 1.
+	m := modelWithBackgroundTab()
+	m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit", nil)
+	m.applyWorkTransition("p2", "hook.claude.SubagentStart", map[string]string{"coalesced": "3"})
+	m.applyWorkTransition("p2", "hook.claude.Stop", nil)
+	pane := m.tabs[1].Root.Leaves()[0]
+
+	m.applyWorkTransition("p2", "hook.claude.SubagentStop", map[string]string{"coalesced": "2"})
+	if !pane.working {
+		t.Fatal("2 of 3 subagents drained — one is still outstanding, spinner must stay")
+	}
+	m.applyWorkTransition("p2", "hook.claude.SubagentStop", nil) // last one
+	if pane.working {
+		t.Error("all 3 subagents drained — spinner must stop")
+	}
+	if !pane.unseen {
+		t.Error("all subagents drained after turn end — background pane must be marked")
+	}
+}
+
+func TestApplyWorkTransition_OrphanSubagentStop_NoUnderflow(t *testing.T) {
+	t.Parallel()
+	// A SubagentStop with no recorded start (event replay gap, hook loss)
+	// must be a no-op — and must NOT push the counter negative, which would
+	// make the next SubagentStart+SubagentStop pair fail to balance.
+	m := modelWithBackgroundTab()
+	pane := m.tabs[1].Root.Leaves()[0]
+	m.applyWorkTransition("p2", "hook.claude.SubagentStop", nil) // orphan
+	if pane.working {
+		t.Fatal("orphan SubagentStop on an idle pane must not start the spinner")
+	}
+	if pane.unseen {
+		t.Fatal("orphan SubagentStop on an idle pane must not mark the pane")
+	}
+
+	// Counter must still balance: one start + one stop = drained.
+	m.applyWorkTransition("p2", "hook.claude.SubagentStart", nil)
+	if !pane.working {
+		t.Fatal("SubagentStart after an orphan stop must start the spinner")
+	}
+	m.applyWorkTransition("p2", "hook.claude.SubagentStop", nil)
+	if pane.working {
+		t.Error("counter went negative on the orphan stop — start/stop pair no longer balances")
+	}
+}
+
+func TestApplyWorkTransition_SessionEndClearsOutstandingSubagents(t *testing.T) {
+	t.Parallel()
+	// SessionEnd (/clear, /logout, process exit path) is terminal for every
+	// subagent of that session — a stale counter must not wedge the spinner.
+	m := modelWithBackgroundTab()
+	m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit", nil)
+	m.applyWorkTransition("p2", "hook.claude.SubagentStart", nil)
+	m.applyWorkTransition("p2", "hook.claude.SessionEnd", nil)
+	pane := m.tabs[1].Root.Leaves()[0]
+	if pane.working {
+		t.Error("SessionEnd must stop the spinner even with an outstanding subagent count")
+	}
+	if !pane.unseen {
+		t.Error("SessionEnd is a genuine completion — background pane should be marked")
+	}
+}
+
+func TestApplyWorkTransition_ProcessExitClearsOutstandingSubagents(t *testing.T) {
+	t.Parallel()
+	m := modelWithBackgroundTab()
+	m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit", nil)
+	m.applyWorkTransition("p2", "hook.claude.SubagentStart", nil)
+	m.applyWorkTransition("p2", "process_exit", nil)
+	pane := m.tabs[1].Root.Leaves()[0]
+	if pane.working {
+		t.Fatal("process_exit must clear the spinner regardless of subagent count")
+	}
+	if pane.unseen {
+		t.Fatal("process_exit must not mark the pane (a crash is not a completed turn)")
+	}
+
+	// The stale counter must not leak into the next session: a plain
+	// start → stop cycle must end idle.
+	m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit", nil)
+	m.applyWorkTransition("p2", "hook.claude.Stop", nil)
+	if pane.working {
+		t.Error("a pre-exit subagent count leaked into the next turn and wedged the spinner")
+	}
+}
+
+func TestApplyWorkTransition_SubagentStartFromIdle_SetsWorkingAndClearsUnseen(t *testing.T) {
+	t.Parallel()
+	// Between the main turn's Stop and the harness's synthetic resume, a new
+	// subagent can spawn (or an event replay can start mid-cycle): the spawn
+	// alone must light the spinner and supersede a stale unseen mark.
+	m := modelWithBackgroundTab()
+	pane := m.tabs[1].Root.Leaves()[0]
+	pane.unseen = true
+	m.applyWorkTransition("p2", "hook.claude.SubagentStart", nil)
+	if !pane.working {
+		t.Error("SubagentStart on an idle pane must start the spinner")
+	}
+	if pane.unseen {
+		t.Error("SubagentStart must clear a stale unseen mark — work is in progress again")
+	}
+}
+
+func TestCoalescedCount(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		data map[string]string
+		want int
+	}{
+		{"nil map", nil, 1},
+		{"missing key", map[string]string{"other": "x"}, 1},
+		{"plain burst", map[string]string{"coalesced": "3"}, 3},
+		{"burst of one", map[string]string{"coalesced": "1"}, 1},
+		{"zero rejected", map[string]string{"coalesced": "0"}, 1},
+		{"negative rejected", map[string]string{"coalesced": "-2"}, 1},
+		{"malformed rejected", map[string]string{"coalesced": "abc"}, 1},
+		{"empty value rejected", map[string]string{"coalesced": ""}, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := coalescedCount(tt.data); got != tt.want {
+				t.Errorf("coalescedCount(%v) = %d, want %d", tt.data, got, tt.want)
+			}
+		})
 	}
 }
 
 func TestApplyWorkTransition_UnknownPane_NoPanic(t *testing.T) {
 	t.Parallel()
 	m := modelForWorkTest()
-	m.applyWorkTransition("does-not-exist", "hook.claude.Stop") // must not panic
+	m.applyWorkTransition("does-not-exist", "hook.claude.Stop", nil) // must not panic
 }
 
 func TestTabUnseen_DerivedAndBounds(t *testing.T) {

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strconv"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -18,10 +19,13 @@ const workSpinnerInterval = 100 * time.Millisecond
 type workTransition = hookevents.WorkEventKind
 
 const (
-	workNone  = hookevents.WorkEventNone  // no effect
-	workStart = hookevents.WorkEventStart // a turn began
-	workStop  = hookevents.WorkEventStop  // turn completed OR parked for user input → mark pane unseen
-	workAbort = hookevents.WorkEventAbort // process exited → clear working, no mark
+	workNone          = hookevents.WorkEventNone          // no effect
+	workStart         = hookevents.WorkEventStart         // a turn began
+	workStop          = hookevents.WorkEventStop          // turn completed OR parked for user input → mark pane unseen
+	workAbort         = hookevents.WorkEventAbort         // process exited → clear working, no mark
+	workSubagentStart = hookevents.WorkEventSubagentStart // subagent spawned → spinner on
+	workSubagentStop  = hookevents.WorkEventSubagentStop  // subagent finished → spinner off once drained AND turn over
+	workStopFinal     = hookevents.WorkEventStopFinal     // terminal stop → also clears the outstanding count
 )
 
 // workEventKind maps a PaneEvent Type (the daemon encodes hook events as
@@ -49,7 +53,27 @@ func (m *Model) findPaneAndTab(paneID string) (*PaneModel, int) {
 // that is not the focused pane of the active tab gets a persistent unseen
 // mark — green border + derived green tab label — cleared when the user
 // focuses the pane (ackFocusedPane at Update entry). There is no timer.
-func (m *Model) applyWorkTransition(paneID, eventType string) {
+//
+// `working` is DERIVED — recomputed at a single point below as
+// turnActive || subagents > 0 — never assigned by hand in a branch, so no
+// future edge can desync the spinner from its inputs. The main turn
+// (turnActive) and the outstanding background-subagent count (subagents)
+// are tracked separately: Claude Code runs subagents detached by default,
+// so the main turn's Stop routinely fires while they are still grinding —
+// the spinner must survive that edge and the unseen mark is deferred until
+// the LAST subagent drains (which then becomes the completion edge).
+//
+// data carries the ingester's coalesced burst count: N same-type events
+// inside the 50 ms debounce window arrive as ONE PaneEvent with
+// data["coalesced"] = "N".
+//
+// Replay safety: the daemon replays the queued event history on attach,
+// and attach happens exactly once per TUI process (Model.attached guard) —
+// counters always start from zero and the ordered replay reconstructs the
+// live state. The ring's oldest-first eviction can only ever orphan a
+// SubagentStop (never strand a start behind its stop), and orphan stops
+// are ignored below.
+func (m *Model) applyWorkTransition(paneID, eventType string, data map[string]string) {
 	kind := workEventKind(eventType)
 	if kind == workNone {
 		return
@@ -58,30 +82,75 @@ func (m *Model) applyWorkTransition(paneID, eventType string) {
 	if pane == nil {
 		return
 	}
+	wasWorking := pane.working
+	abort := false
 	switch kind {
 	case workStart:
-		pane.working = true
-		// Seed the pane spinner with the shared frame so the tab and pane
-		// glyphs are in sync from the first render (before the next tick).
-		pane.workFrame = m.workSpinnerFrame
-		// A (re)start means the work is no longer "finished/parked" — the
-		// spinner supersedes the green unseen mark. Covers both a fresh turn
-		// after a previous completion and a resume after the user answers a
-		// prompt (PostToolUse arrives while the mark is set).
-		pane.unseen = false
-	case workStop:
-		wasWorking := pane.working
-		pane.working = false
-		// Mark unless the user is looking straight at the pane: completion
-		// in the focused pane of the active tab is seen by definition. An
-		// unfocused split sibling IS marked — its green border is the cue.
-		focused := tabIdx == m.activeTab && m.tabs[tabIdx].ActivePane == paneID
-		if wasWorking && !focused {
-			pane.unseen = true
+		pane.turnActive = true
+	case workSubagentStart:
+		pane.subagents += coalescedCount(data)
+	case workSubagentStop:
+		if pane.subagents == 0 {
+			// Orphan stop (replay truncated by ring eviction, lost start) —
+			// ignore rather than underflow, or the next start/stop pair
+			// stops balancing.
+			return
+		}
+		pane.subagents -= coalescedCount(data)
+		if pane.subagents < 0 {
+			pane.subagents = 0
+		}
+	case workStop, workStopFinal:
+		pane.turnActive = false
+		if kind == workStopFinal {
+			// Terminal stop (session end): no subagent of the session can
+			// still be alive — drop the count so a lost SubagentStop can't
+			// wedge the spinner forever.
+			pane.subagents = 0
 		}
 	case workAbort:
-		pane.working = false
+		pane.turnActive = false
+		pane.subagents = 0
+		abort = true
 	}
+
+	// Single derivation point for the spinner; the edge actions below key
+	// off the before/after pair so they fire exactly once per transition.
+	pane.working = pane.turnActive || pane.subagents > 0
+	switch {
+	case pane.working && !wasWorking:
+		// Rising edge: seed the pane spinner with the shared frame so the
+		// tab and pane glyphs are in sync from the first render, and clear
+		// any stale mark — the spinner supersedes the green unseen cue.
+		// (working ⇒ !unseen is an invariant: the mark is set only on the
+		// falling edge below, so a start on an already-working pane has
+		// nothing to clear.)
+		pane.workFrame = m.workSpinnerFrame
+		pane.unseen = false
+	case !pane.working && wasWorking && !abort:
+		// Falling edge on a genuine completion — turn over AND subagents
+		// drained, whichever edge landed last. Mark unless the user is
+		// looking straight at the pane: completion in the focused pane of
+		// the active tab is seen by definition; an unfocused split sibling
+		// IS marked — its green border is the cue. An abort (process exit)
+		// clears the spinner without marking: a crash is not a completed
+		// turn.
+		focused := tabIdx == m.activeTab && m.tabs[tabIdx].ActivePane == paneID
+		if !focused {
+			pane.unseen = true
+		}
+	}
+}
+
+// coalescedCount extracts the ingester's burst count from an event's Data
+// ("coalesced" = total events merged into this one), defaulting to 1 for a
+// plain uncoalesced event, absent data, or a malformed value.
+func coalescedCount(data map[string]string) int {
+	n, err := strconv.Atoi(data["coalesced"])
+	if err != nil || n < 1 {
+		return 1
+	}
+	return n
 }
 
 // ackFocusedPane clears the unseen mark on the focused pane of the active

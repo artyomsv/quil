@@ -75,7 +75,9 @@ type PaneModel struct {
 	focusMode          bool                // set by Model before View() when in focus mode
 	mcpHighlight       bool                // set by Model before View() when MCP is interacting
 	liveOutputSeen     bool                // first live (non-ghost) output received — settle repaints scheduled
-	working            bool                // true while a claude/opencode turn is in progress (hook-driven)
+	working            bool                // derived spinner state: turnActive || subagents > 0 (hook-driven)
+	turnActive         bool                // main turn in flight (UserPromptSubmit/PostToolUse → Stop/park)
+	subagents          int                 // outstanding background subagents (SubagentStart/Stop, burst-aware)
 	unseen             bool                // work finished/parked while this pane was not focused; cleared on focus
 	workFrame          int                 // shared spinner frame index, mirrored here for top-border render
 

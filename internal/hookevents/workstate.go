@@ -15,6 +15,18 @@ const (
 	WorkEventStart                      // a turn began
 	WorkEventStop                       // turn completed OR parked for user input → mark pane unseen
 	WorkEventAbort                      // process exited → clear working, no mark
+	// Background subagents (Claude Code runs them detached by default)
+	// outlive the main turn's Stop, so they carry their own edges: the TUI
+	// keeps an outstanding count per pane and only lets a Stop end the
+	// spinner once that count is drained. A permanently lost SubagentStop
+	// (e.g. dropped during an ingester rate-limit storm) keeps the spinner
+	// lit until a terminal edge — recovery is deliberately deferred to
+	// WorkEventStopFinal / process-exit rather than an age-based drain,
+	// because there is no signal that distinguishes a long-running subagent
+	// from a lost stop.
+	WorkEventSubagentStart // a subagent spawned → spinner on
+	WorkEventSubagentStop  // a subagent finished → spinner off once drained AND turn over
+	WorkEventStopFinal     // terminal stop (session end) → also clears the outstanding count
 )
 
 // ClassifyWorkEvent maps a composed PaneEvent Type to a work-state transition.
@@ -28,9 +40,23 @@ func ClassifyWorkEvent(eventType string) WorkEventKind {
 	// without tracking ordinary tool completions.
 	case "hook.claude.PostToolUse":
 		return WorkEventStart
-	case "hook.claude.Stop", "hook.claude.SessionEnd",
+	case "hook.claude.Stop",
 		"hook.opencode.session.idle", "hook.opencode.session.error":
 		return WorkEventStop
+	// SessionEnd is terminal for the whole Claude session (/clear, /logout,
+	// exit): no subagent of it can still be running, so the TUI also drops
+	// any outstanding-subagent count instead of letting a lost SubagentStop
+	// wedge the spinner forever.
+	case "hook.claude.SessionEnd":
+		return WorkEventStopFinal
+	// Background subagents outlive the main turn's Stop (Claude Code runs
+	// them detached by default), so they carry their own start/stop edges.
+	// TaskCreated/TaskCompleted stay unmapped on purpose: the task list is
+	// bookkeeping, not an execution signal.
+	case "hook.claude.SubagentStart":
+		return WorkEventSubagentStart
+	case "hook.claude.SubagentStop":
+		return WorkEventSubagentStop
 	// Park-for-input edges: the agent is blocked waiting on the user (permission
 	// prompt, option select, idle-input nudge). There is no "resumed after
 	// approval" hook, so we treat the park as a turn boundary — stop the spinner

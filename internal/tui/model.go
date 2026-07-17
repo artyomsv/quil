@@ -198,6 +198,7 @@ const (
 	dialogMemory
 	dialogGitRepoPick // Alt+G repo picker (Task 12 fills handler/render)
 	dialogCommandHistory
+	dialogUpdateNotice
 )
 
 // tuiClient is the subset of *ipc.Client the TUI uses on the Model. Defined
@@ -935,6 +936,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case WorkspaceStateMsg:
 		m.updateInfo = msg.Update
+		m.maybeShowUpdateNotice()
 		// TODO(freeze-diagnostic): the 8 "apply: ..." breadcrumbs in this case
 		// and inside applyWorkspaceState were added to pinpoint a TUI Update
 		// wedge during claude-code pane creation (2026-04-22). The root cause

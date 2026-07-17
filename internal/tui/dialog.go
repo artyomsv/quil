@@ -338,6 +338,8 @@ func (m Model) handleDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.handleGitRepoPickKey(msg)
 	case dialogCommandHistory:
 		return m.handleCommandHistoryKey(msg)
+	case dialogUpdateNotice:
+		return m.handleUpdateNoticeKey(msg)
 	}
 	return m, nil
 }
@@ -738,6 +740,9 @@ func (m Model) renderDialog() string {
 	case dialogCommandHistory:
 		width = 80
 		content = m.renderCommandHistory()
+	case dialogUpdateNotice:
+		width = dialogWidth
+		content = m.renderUpdateNoticeDialog()
 	}
 
 	// Never render wider than the terminal (border adds +2 outside Width).

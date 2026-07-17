@@ -73,3 +73,41 @@ func TestAboutUpdateLabel(t *testing.T) {
 		})
 	}
 }
+
+func TestMaybeShowUpdateNotice(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+
+	m := &Model{version: "0.0.1", updateInfo: &ipc.UpdateInfo{LatestVersion: "0.0.2", InstallWritable: true}}
+	m.maybeShowUpdateNotice()
+	if m.dialog != dialogUpdateNotice {
+		t.Fatalf("dialog = %v, want dialogUpdateNotice", m.dialog)
+	}
+
+	// Second call for the same version: already notified → no dialog.
+	m2 := &Model{version: "0.0.1", updateInfo: &ipc.UpdateInfo{LatestVersion: "0.0.2", InstallWritable: true}}
+	m2.maybeShowUpdateNotice()
+	if m2.dialog == dialogUpdateNotice {
+		t.Error("second notice for same version shown, want suppressed")
+	}
+
+	// A modal other than the disclaimer blocks the notice.
+	m3 := &Model{version: "0.0.1", dialog: dialogPluginMigration, updateInfo: &ipc.UpdateInfo{LatestVersion: "0.0.3", InstallWritable: true}}
+	m3.maybeShowUpdateNotice()
+	if m3.dialog != dialogPluginMigration {
+		t.Error("notice replaced migration dialog, want migration kept")
+	}
+
+	// The disclaimer yields to the notice (spec: update notice > disclaimer).
+	m4 := &Model{version: "0.0.1", dialog: dialogDisclaimer, updateInfo: &ipc.UpdateInfo{LatestVersion: "0.0.3", InstallWritable: true}}
+	m4.maybeShowUpdateNotice()
+	if m4.dialog != dialogUpdateNotice {
+		t.Error("notice did not replace disclaimer, want replaced")
+	}
+
+	// Up to date → no dialog.
+	m5 := &Model{version: "0.0.2", updateInfo: &ipc.UpdateInfo{LatestVersion: "0.0.2"}}
+	m5.maybeShowUpdateNotice()
+	if m5.dialog == dialogUpdateNotice {
+		t.Error("notice shown when up to date")
+	}
+}

@@ -2,10 +2,14 @@ package tui
 
 import (
 	"log"
+	"strings"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
+	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
+	"github.com/artyomsv/quil/internal/update"
 	"github.com/artyomsv/quil/internal/version"
 )
 
@@ -88,4 +92,87 @@ func (m Model) handleUpdateAction() (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, tea.Batch(tea.ClearScreen, m.flashCmd())
+}
+
+// maybeShowUpdateNotice opens the once-per-version startup dialog.
+// Priority: the migration dialog (blocking) and any interactive dialog win;
+// only the informational disclaimer yields (spec: migration > update notice
+// > disclaimer — the disclaimer reappears next launch).
+func (m *Model) maybeShowUpdateNotice() {
+	if !updateAvailable(m.updateInfo, m.version) {
+		return
+	}
+	if m.dialog != dialogNone && m.dialog != dialogDisclaimer {
+		return
+	}
+	if update.LoadNotifiedVersion(config.UpdateNotifiedPath()) == m.updateInfo.LatestVersion {
+		return
+	}
+	m.dialog = dialogUpdateNotice
+	m.dialogCursor = 0
+	if err := update.SaveNotifiedVersion(config.UpdateNotifiedPath(), m.updateInfo.LatestVersion); err != nil {
+		log.Printf("save update notified marker: %v", err)
+	}
+}
+
+// handleUpdateNoticeKey drives the two-button startup notice
+// (OK / Update now), mirroring the disclaimer's cursor idiom.
+func (m Model) handleUpdateNoticeKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.dialog = dialogNone
+		m.dialogCursor = 0
+		return m, tea.ClearScreen
+	case "left", "right", "tab":
+		m.dialogCursor = 1 - m.dialogCursor
+		return m, nil
+	case "enter":
+		if m.dialogCursor == 1 {
+			return m.handleUpdateAction()
+		}
+		m.dialog = dialogNone
+		m.dialogCursor = 0
+		return m, tea.ClearScreen
+	}
+	return m, nil
+}
+
+// renderUpdateNoticeDialog renders the once-per-version startup notice.
+func (m Model) renderUpdateNoticeDialog() string {
+	info := m.updateInfo
+	if info == nil {
+		return ""
+	}
+	var b strings.Builder
+	title := dialogTitle.Render("Update available")
+	b.WriteString(lipgloss.PlaceHorizontal(dialogWidth, lipgloss.Center, title))
+	b.WriteString("\n\n")
+	b.WriteString(dialogNormal.Render("  Installed: v" + m.version))
+	b.WriteByte('\n')
+	b.WriteString(dialogNormal.Render("  Latest:    v" + info.LatestVersion))
+	b.WriteString("\n\n")
+	switch {
+	case info.StagedVersion == info.LatestVersion:
+		b.WriteString(dialogSubtle.Render("  Downloaded and staged — applies on next launch."))
+	case !info.InstallWritable:
+		b.WriteString(dialogSubtle.Render("  Install dir not writable — update manually:"))
+	default:
+		b.WriteString(dialogSubtle.Render("  Will download in the background."))
+	}
+	b.WriteByte('\n')
+	if info.ReleaseURL != "" {
+		b.WriteString(dialogSubtle.Render("  " + info.ReleaseURL))
+		b.WriteByte('\n')
+	}
+	b.WriteByte('\n')
+
+	okLabel := "  OK  "
+	updateLabel := "  Update now  "
+	okStyle, updateStyle := dialogSelected, dialogNormal
+	if m.dialogCursor == 1 {
+		okStyle, updateStyle = dialogNormal, dialogSelected
+	}
+	buttons := okStyle.Render(okLabel) + "    " + updateStyle.Render(updateLabel)
+	b.WriteString(lipgloss.PlaceHorizontal(dialogWidth, lipgloss.Center, buttons))
+	return b.String()
 }

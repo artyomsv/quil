@@ -129,6 +129,13 @@ func runMCP() {
 	// MCP uses stdout for JSON-RPC — redirect logs to stderr early
 	log.SetOutput(os.Stderr)
 
+	// Tie this bridge's lifetime to the AI client that spawned it. Stdin
+	// EOF alone is not a reliable termination signal on Windows (sibling
+	// processes inherit the pipe's write handle and keep it open past the
+	// parent's death), which leaked orphaned bridges for days. See
+	// parentwatch_windows.go for the full mechanism.
+	watchParentExit()
+
 	cfg := config.Default()
 	if cfgPath := config.ConfigPath(); fileExists(cfgPath) {
 		if loaded, loadErr := config.Load(cfgPath); loadErr == nil {

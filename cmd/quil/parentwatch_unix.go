@@ -35,8 +35,10 @@ func watchParentExit() {
 		return
 	}
 	go func() {
+		// No ticker.Stop: this goroutine is a one-way exit — it only ever
+		// leaves via os.Exit(0) below, which bypasses defers anyway. The
+		// timer is reclaimed when the process exits.
 		ticker := time.NewTicker(parentWatchInterval)
-		defer ticker.Stop()
 		for range ticker.C {
 			if os.Getppid() != initial {
 				log.Printf("mcp: parent %d exited (reparented), shutting down", initial)

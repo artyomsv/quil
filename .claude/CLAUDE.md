@@ -90,6 +90,8 @@ IPC request-response: `Message.ID` field (omitempty, backward compatible) correl
 
 Key files: `cmd/quil/mcp.go` (bridge + daemon connection), `cmd/quil/mcp_tools.go` (18 tool implementations), `cmd/quil/mcp_keys.go` (key name → escape sequence map), `cmd/quil/mcp_log.go` (per-pane interaction logging + two-layer redaction).
 
+Bridge lifetime: `watchParentExit()` (`cmd/quil/parentwatch_windows.go` / `parentwatch_unix.go`, armed first thing in `runMCP`) ties the bridge to the AI client that spawned it. Stdin EOF is NOT a reliable termination signal on Windows — the MCP client spawns stdio servers concurrently and same-second siblings inherit each other's pipe handles, so after the client dies a sibling still holds the bridge's stdin write end and `server.Run` blocks forever (observed: 20 orphaned bridges accumulated over a week, in same-second spawn pairs, each holding a live IPC conn to the production daemon). Windows: `OpenProcess(SYNCHRONIZE)` on the parent + `WaitForSingleObject` in a goroutine → `os.Exit(0)` when the parent exits, with a PID-reuse guard (`parentHandleTrustworthy` — a real parent's creation time is ≤ the child's; an impostor wearing a reused PID is treated as parent-already-dead). Unix: 2 s `Getppid()` reparent poll as belt-and-suspenders (EOF is reliable there). Covers pane kill, pane restart, session restart, and client crash with zero daemon coupling — the pane's claude process IS the bridge's parent.
+
 AI tool configuration:
 ```json
 {"mcpServers": {"quil": {"command": "quil", "args": ["mcp"]}}}

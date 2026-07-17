@@ -356,6 +356,10 @@ type Model struct {
 	// updateInfo mirrors the daemon's announced newer release; drives the
 	// status-bar segment, the About row, and the startup notice.
 	updateInfo *ipc.UpdateInfo
+
+	// applyUpdateOnExit signals cmd/quil/main.go to run the staged-update
+	// swap after tea.Program returns (set by the apply confirm).
+	applyUpdateOnExit bool
 }
 
 func NewModel(client *ipc.Client, cfg config.Config, version string, registry *plugin.Registry, stalePlugins []plugin.StalePlugin) Model {
@@ -407,6 +411,10 @@ func (m Model) FlushNotes() {
 
 // ConfigChanged reports whether the config was modified and needs saving.
 func (m Model) ConfigChanged() bool { return m.configChanged }
+
+// ApplyUpdateRequested reports whether the user confirmed applying the
+// staged update; main.go acts on it after the program exits.
+func (m Model) ApplyUpdateRequested() bool { return m.applyUpdateOnExit }
 
 func (m Model) Init() tea.Cmd {
 	log.Print("TUI Init — starting listener")

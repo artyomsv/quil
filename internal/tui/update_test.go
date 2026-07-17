@@ -52,3 +52,24 @@ func TestParseWorkspaceState_UpdateKey(t *testing.T) {
 		t.Errorf("no update key: state.Update = %+v, want nil", got.Update)
 	}
 }
+
+func TestAboutUpdateLabel(t *testing.T) {
+	cases := []struct {
+		name    string
+		info    *ipc.UpdateInfo
+		current string
+		want    string
+	}{
+		{"up to date", nil, "0.0.1", "Check for updates (up to date)"},
+		{"staged", &ipc.UpdateInfo{LatestVersion: "0.0.2", StagedVersion: "0.0.2", InstallWritable: true}, "0.0.1", "Update to v0.0.2 (staged — applies on restart)"},
+		{"not staged", &ipc.UpdateInfo{LatestVersion: "0.0.2", InstallWritable: true}, "0.0.1", "Update to v0.0.2 (download)"},
+		{"unwritable", &ipc.UpdateInfo{LatestVersion: "0.0.2"}, "0.0.1", "Update available: v0.0.2 (manual install)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := aboutUpdateLabel(tc.info, tc.current); got != tc.want {
+				t.Errorf("aboutUpdateLabel = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

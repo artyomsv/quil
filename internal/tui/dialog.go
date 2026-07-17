@@ -228,6 +228,12 @@ const confirmKindShutdown = "shutdown"
 // in place via the same MsgRestartPaneReq the MCP restart_pane tool uses.
 const confirmKindRestartPane = "restart-pane"
 
+// confirmKindApplyUpdate is the discriminator on confirmKind for the
+// "apply staged update now" confirm (About → Update / startup notice →
+// Update now). Accepting quits the TUI with an apply-intent flag;
+// cmd/quil/main.go runs the swap after tea.Program exits.
+const confirmKindApplyUpdate = "apply-update"
+
 func shortcutsList(m *Model) []struct{ key, desc string } {
 	kb := m.cfg.Keybindings
 	// kbDisplay renders comma-separated multi-bindings as "a / b" so the
@@ -359,15 +365,21 @@ func (m Model) handleCommandHistoryKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd)
 	return m, nil
 }
 
+// aboutUpdateIndex is the row index of the dynamic update row in the F1 →
+// About (root) menu; aboutStopDaemonIndex sits below it. Named constants
+// so handleAboutKey, lastAboutItem, and the confirm-dialog Esc handlers
+// cannot drift on the indices.
+const aboutUpdateIndex = 7
+
 // aboutStopDaemonIndex is the row index of "Stop daemon" in the F1 → About
 // (root) menu. Stop daemon was promoted from the nested Settings list to the
 // root menu so it sits alongside Settings/Shortcuts/Plugins. Kept as a named
 // constant so handleAboutKey, lastAboutItem, and the confirm-dialog Esc
 // handler cannot drift on the index.
-const aboutStopDaemonIndex = 7
+const aboutStopDaemonIndex = 8
 
 func (m Model) handleAboutKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	const lastAboutItem = aboutStopDaemonIndex // 0:Settings 1:Shortcuts 2:Plugins 3:Memory 4:Client 5:Daemon 6:MCP 7:Stop daemon
+	const lastAboutItem = aboutStopDaemonIndex // 0:Settings 1:Shortcuts 2:Plugins 3:Memory 4:Client 5:Daemon 6:MCP 7:Update 8:Stop daemon
 	switch msg.String() {
 	case "esc":
 		m.dialog = dialogNone
@@ -399,6 +411,8 @@ func (m Model) handleAboutKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m.openLogViewer("Daemon log", filepath.Join(config.QuilDir(), "quild.log"))
 		case 6:
 			return m.openMCPLogsViewer()
+		case aboutUpdateIndex:
+			return m.handleUpdateAction()
 		case aboutStopDaemonIndex:
 			// Stop daemon: route to the shutdown confirm. Enter here only
 			// opens the confirm; the confirm itself requires `y` to fire
@@ -519,6 +533,12 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.dialogCursor = aboutStopDaemonIndex
 			return m, nil
 		}
+		if m.confirmKind == confirmKindApplyUpdate {
+			// Back to the About menu, cursor on the update row.
+			m.dialog = dialogAbout
+			m.dialogCursor = aboutUpdateIndex
+			return m, nil
+		}
 		m.dialog = dialogNone
 		return m, nil
 	case "enter", "y":
@@ -573,6 +593,15 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				}
 			}
 			return m, nil
+		}
+
+		// Apply-update: quit the TUI with the apply intent set; main.go
+		// performs verify → swap → respawn after the program exits (the
+		// terminal must be released before the wrapper respawn).
+		if kind == confirmKindApplyUpdate {
+			m.dialog = dialogNone
+			m.applyUpdateOnExit = true
+			return m, tea.Quit
 		}
 
 		// Handle instance deletion locally (no IPC needed)
@@ -751,6 +780,7 @@ func (m Model) renderAboutDialog() string {
 		"View client log",
 		"View daemon log",
 		"View MCP logs",
+		aboutUpdateLabel(m.updateInfo, m.version),
 		"Stop daemon",
 	}
 	for i, item := range items {
@@ -902,6 +932,12 @@ func (m Model) renderConfirmDialog() string {
 		b.WriteString("  " + dialogSubtle.Render("The process is killed and respawned in place."))
 		b.WriteString("\n")
 		b.WriteString("  " + dialogSubtle.Render("AI panes resume their recorded session."))
+	case confirmKindApplyUpdate:
+		b.WriteString("  " + dialogNormal.Render(fmt.Sprintf("Apply update v%s now?", m.confirmName)))
+		b.WriteString("\n\n")
+		b.WriteString("  " + dialogSubtle.Render("The TUI restarts and the daemon respawns all panes."))
+		b.WriteString("\n")
+		b.WriteString("  " + dialogSubtle.Render("Claude sessions resume; running shell commands are killed."))
 	default:
 		label := fmt.Sprintf("Close %s %q?", m.confirmKind, m.confirmName)
 		b.WriteString("  " + dialogNormal.Render(label))

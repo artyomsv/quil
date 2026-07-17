@@ -1,0 +1,1 @@
+- [OSC7 CWD taint source](project_osc7_cwd_taint.md) — pane.CWD is attacker-influenced (OSC7 from PTY); flows TUI→daemon→workspace.json; flag unguarded filesystem/network use

@@ -188,3 +188,44 @@ func TestDefaultKeybindings_CommandHistory(t *testing.T) {
 		t.Fatalf("want alt+shift+i, got %q", cfg.Keybindings.CommandHistory)
 	}
 }
+
+func TestDefault_UpdateSection(t *testing.T) {
+	cfg := config.Default()
+	if !cfg.Update.Check {
+		t.Error("Update.Check default = false, want true")
+	}
+	if !cfg.Update.Auto {
+		t.Error("Update.Auto default = false, want true")
+	}
+}
+
+func TestLoad_MissingUpdateSection_KeepsDefaults(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte("[ui]\ntheme = \"default\"\n"), 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.Update.Check || !cfg.Update.Auto {
+		t.Errorf("missing [update] section: Check=%v Auto=%v, want true/true", cfg.Update.Check, cfg.Update.Auto)
+	}
+}
+
+func TestUpdatePaths_UnderQuilDir(t *testing.T) {
+	t.Setenv("QUIL_HOME", filepath.Join(t.TempDir(), "qh"))
+	root := config.QuilDir()
+	if got, want := config.UpdateDir(), filepath.Join(root, "update"); got != want {
+		t.Errorf("UpdateDir = %q, want %q", got, want)
+	}
+	if got, want := config.UpdateStagingDir("1.2.3"), filepath.Join(root, "update", "staged", "1.2.3"); got != want {
+		t.Errorf("UpdateStagingDir = %q, want %q", got, want)
+	}
+	if got, want := config.UpdateStatePath(), filepath.Join(root, "update", "state.json"); got != want {
+		t.Errorf("UpdateStatePath = %q, want %q", got, want)
+	}
+	if got, want := config.UpdateNotifiedPath(), filepath.Join(root, "update", "notified.json"); got != want {
+		t.Errorf("UpdateNotifiedPath = %q, want %q", got, want)
+	}
+}

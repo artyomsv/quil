@@ -90,6 +90,10 @@ const (
 	MsgPaneHistoryResp      = "pane_history_resp"
 	MsgPaneHistoryEntryReq  = "pane_history_entry_req"
 	MsgPaneHistoryEntryResp = "pane_history_entry_resp"
+
+	// Auto-update (TUI ⇄ daemon)
+	MsgStageUpdateReq  = "stage_update_req"  // TUI → daemon (empty payload)
+	MsgStageUpdateResp = "stage_update_resp" // daemon → TUI (unicast)
 )
 
 // Message is the wire format for IPC communication.
@@ -432,6 +436,24 @@ type PaneHistoryEntryRespPayload struct {
 	TsMs   int64  `json:"ts_ms"`
 	Text   string `json:"text"`
 	Found  bool   `json:"found"`
+}
+
+// UpdateInfo rides the workspace_state broadcast under the "update" key
+// when a newer release than the running daemon's version is known. Omitted
+// entirely when up to date; old clients ignore the extra key.
+type UpdateInfo struct {
+	LatestVersion   string `json:"latest_version"`
+	ReleaseURL      string `json:"release_url,omitempty"`
+	StagedVersion   string `json:"staged_version,omitempty"` // set once fully staged
+	InstallWritable bool   `json:"install_writable"`
+}
+
+// StageUpdateRespPayload answers MsgStageUpdateReq (About → Update now with
+// nothing staged yet).
+type StageUpdateRespPayload struct {
+	Success bool   `json:"success"`
+	Version string `json:"version,omitempty"`
+	Error   string `json:"error,omitempty"`
 }
 
 // NewMessage creates a Message with a typed payload.

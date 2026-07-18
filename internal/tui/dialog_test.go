@@ -26,6 +26,8 @@ func TestSettingsFields_LabelsAndInitialValues(t *testing.T) {
 		"Page scroll lines",
 		"Log level",
 		"Show disclaimer",
+		"Update check",
+		"Update auto-download",
 	}
 	if len(fields) != len(wantLabels) {
 		t.Fatalf("settingsFields len = %d, want %d", len(fields), len(wantLabels))
@@ -300,6 +302,57 @@ func TestHandleSettingsKey_BoolToggle(t *testing.T) {
 	}
 	if !got.configChanged {
 		t.Errorf("configChanged not set — Settings edit would be lost on exit")
+	}
+}
+
+// TestHandleSettingsKey_UpdateTogglesFlipCfgAndPersist covers the two rows
+// added for [update] check/auto — mirrors TestHandleSettingsKey_BoolToggle
+// so a regression that drops either toggle's set/configChanged wiring is
+// caught the same way the Ghost-dimmed regression would be.
+func TestHandleSettingsKey_UpdateTogglesFlipCfgAndPersist(t *testing.T) {
+	t.Parallel()
+	fields := settingsFields()
+	checkIdx, autoIdx := -1, -1
+	for i, f := range fields {
+		switch f.label {
+		case "Update check":
+			checkIdx = i
+		case "Update auto-download":
+			autoIdx = i
+		}
+	}
+	if checkIdx == -1 || autoIdx == -1 {
+		t.Fatalf("settingsFields missing Update rows: checkIdx=%d autoIdx=%d", checkIdx, autoIdx)
+	}
+
+	cfg := config.Default()
+	cfg.Update.Check = false
+	m := Model{cfg: cfg, dialog: dialogSettings, dialogCursor: checkIdx}
+	out, _ := m.handleSettingsKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	got, ok := out.(Model)
+	if !ok {
+		t.Fatalf("returned model type = %T", out)
+	}
+	if !got.cfg.Update.Check {
+		t.Error("Update.Check not toggled to true")
+	}
+	if !got.configChanged {
+		t.Error("configChanged not set for Update.Check toggle")
+	}
+
+	cfg2 := config.Default()
+	cfg2.Update.Auto = false
+	m2 := Model{cfg: cfg2, dialog: dialogSettings, dialogCursor: autoIdx}
+	out2, _ := m2.handleSettingsKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	got2, ok := out2.(Model)
+	if !ok {
+		t.Fatalf("returned model type = %T", out2)
+	}
+	if !got2.cfg.Update.Auto {
+		t.Error("Update.Auto not toggled to true")
+	}
+	if !got2.configChanged {
+		t.Error("configChanged not set for Update.Auto toggle")
 	}
 }
 

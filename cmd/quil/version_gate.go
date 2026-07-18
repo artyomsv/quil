@@ -58,7 +58,9 @@ func gateVersionCheck(client *ipc.Client, sockPath string) *ipc.Client {
 		// Either TUI > daemon, or the daemon timed out / returned an
 		// unparseable version (treated as "pre-versioning daemon", same
 		// handling: offer to restart).
-		if !promptRestartDaemon(versionpkg.Current(), res.DaemonVersion, res.DaemonUnknown) {
+		// A staged-update respawn already got user consent at the apply
+		// prompt — asking again here would double-prompt every update.
+		if !updateRestartPreapproved() && !promptRestartDaemon(versionpkg.Current(), res.DaemonVersion, res.DaemonUnknown) {
 			fmt.Fprintln(os.Stderr, "Aborted — daemon left running at the older version.")
 			client.Close()
 			os.Exit(0)

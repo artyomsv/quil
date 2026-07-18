@@ -86,6 +86,13 @@ type Daemon struct {
 	// same locks (sm.mu, per-pane PluginMu) every wedge so far has parked
 	// on. snapshotWatchdog dumps all goroutine stacks when this goes stale.
 	lastSnapshotDone atomic.Int64
+
+	// updateMu guards updateInfo, the currently-announced newer release
+	// (nil = up to date). updateStaging is the single-flight guard for the
+	// download/stage pipeline (daily tick vs on-demand request).
+	updateMu      sync.Mutex
+	updateInfo    *ipc.UpdateInfo
+	updateStaging atomic.Bool
 }
 
 func New(cfg config.Config) *Daemon {
@@ -137,6 +144,8 @@ func (d *Daemon) Start() error {
 		log.Printf("warning: failed to create sessions dir: %v", err)
 	}
 
+	d.seedUpdateInfoFromState()
+
 	// Hook event ingest plumbing: spool reader + ingester (rate limit +
 	// coalesce) feeding emitHookEvent. Init truncates stale spool files so
 	// the daemon never replays notifications from a prior session.
@@ -185,6 +194,7 @@ func (d *Daemon) Start() error {
 	}
 
 	go d.idleChecker()
+	go d.updateChecker()
 	go d.hookEventsWatcher()
 	// Arm the liveness canary only once a first snapshot is plausible.
 	d.lastSnapshotDone.Store(time.Now().UnixNano())
@@ -820,6 +830,10 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 	// Memory reporting
 	case ipc.MsgMemoryReportReq:
 		d.handleMemoryReportReq(conn, msg)
+
+	// Auto-update
+	case ipc.MsgStageUpdateReq:
+		d.handleStageUpdateReq(conn, msg)
 
 	// Pane input history
 	case ipc.MsgPaneHistoryReq:
@@ -1725,7 +1739,12 @@ func (d *Daemon) broadcastState() {
 
 func (d *Daemon) buildWorkspaceState() map[string]any {
 	activeTab, tabs, panesByTab := d.session.SnapshotState()
-	return d.workspaceStateFromSnapshot(activeTab, tabs, panesByTab, true)
+	state := d.workspaceStateFromSnapshot(activeTab, tabs, panesByTab, true)
+	// Broadcast-only (never persisted): announced newer release, if any.
+	if info := d.currentUpdateInfo(); info != nil {
+		state["update"] = info
+	}
+	return state
 }
 
 // workspaceStateFromSnapshot is the pure half of buildWorkspaceState — it

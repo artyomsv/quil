@@ -15,15 +15,19 @@ import (
 )
 
 var (
-	version       = "dev" // overridden at build time via -ldflags "-X main.version=..."
-	buildDevMode  string  // "true" to auto-enable dev mode (set via ldflags)
-	buildLogLevel string  // overrides config log level, e.g. "debug" (set via ldflags)
+	version         = "dev" // overridden at build time via -ldflags "-X main.version=..."
+	buildDevMode    string  // "true" to auto-enable dev mode (set via ldflags)
+	buildLogLevel   string  // overrides config log level, e.g. "debug" (set via ldflags)
+	buildUpdatesOff string  // "true" to disable the self-update pipeline (set via ldflags; dev/debug builds only)
 )
 
 func main() {
 	// Publish this binary's version to the shared version package so the
 	// IPC MsgVersionReq handler can report it back to connecting clients.
 	versionpkg.SetCurrent(version)
+	// Dev/debug builds never self-update — a staged release swap would strip
+	// their build-mode ldflags (see internal/version.SetUpdatesEnabled).
+	versionpkg.SetUpdatesEnabled(buildUpdatesOff != "true")
 
 	// Native Claude hook fast-path. Registered via --settings as the command
 	// Claude runs per hook event (see internal/claudehook). It must NOT start

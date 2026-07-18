@@ -45,6 +45,8 @@ type WorkspaceStateMsg struct {
 	ActiveTab string
 	Tabs      []TabInfo
 	Panes     []PaneInfo
+	// Update is the daemon's announced newer release (nil when up to date).
+	Update *ipc.UpdateInfo
 }
 
 type TabInfo struct {
@@ -196,6 +198,7 @@ const (
 	dialogMemory
 	dialogGitRepoPick // Alt+G repo picker (Task 12 fills handler/render)
 	dialogCommandHistory
+	dialogUpdateNotice
 )
 
 // tuiClient is the subset of *ipc.Client the TUI uses on the Model. Defined
@@ -350,6 +353,23 @@ type Model struct {
 	// and the status-bar renderer checks flashUntil on every frame.
 	flashText  string
 	flashUntil time.Time
+
+	// updateInfo mirrors the daemon's announced newer release; drives the
+	// status-bar segment, the About row, and the startup notice.
+	updateInfo *ipc.UpdateInfo
+
+	// sawFirstState gates the once-per-launch update notice to the FIRST
+	// WorkspaceStateMsg after attach — every broadcast thereafter (switch
+	// tab, create pane, etc.) also carries the update key and would
+	// otherwise reopen the dialog mid-session. The daemon re-announces its
+	// update info to every newly-attached client, so the first broadcast is
+	// exactly the "startup" moment the notice's spec calls for; the
+	// status-bar segment already covers mid-session discovery.
+	sawFirstState bool
+
+	// applyUpdateOnExit signals cmd/quil/main.go to run the staged-update
+	// swap after tea.Program returns (set by the apply confirm).
+	applyUpdateOnExit bool
 }
 
 func NewModel(client *ipc.Client, cfg config.Config, version string, registry *plugin.Registry, stalePlugins []plugin.StalePlugin) Model {
@@ -401,6 +421,10 @@ func (m Model) FlushNotes() {
 
 // ConfigChanged reports whether the config was modified and needs saving.
 func (m Model) ConfigChanged() bool { return m.configChanged }
+
+// ApplyUpdateRequested reports whether the user confirmed applying the
+// staged update; main.go acts on it after the program exits.
+func (m Model) ApplyUpdateRequested() bool { return m.applyUpdateOnExit }
 
 func (m Model) Init() tea.Cmd {
 	log.Print("TUI Init — starting listener")
@@ -920,6 +944,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(tea.ClearScreen, m.listenForMessages())
 
 	case WorkspaceStateMsg:
+		m.noteWorkspaceState(msg.Update)
 		// TODO(freeze-diagnostic): the 8 "apply: ..." breadcrumbs in this case
 		// and inside applyWorkspaceState were added to pinpoint a TUI Update
 		// wedge during claude-code pane creation (2026-04-22). The root cause
@@ -1070,6 +1095,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case memoryReportMsg:
 		m = m.applyMemoryReport(msg.Resp)
 		return m, m.listenForMessages()
+
+	case stageUpdateRespMsg:
+		switch {
+		case msg.Resp.Success:
+			m.setFlash("update v" + msg.Resp.Version + " staged — applies on next launch")
+		case msg.Resp.Error == "already up to date":
+			// handleUpdateAction's "up to date" branch sends this request to
+			// force a fresh check rather than trusting stale broadcast info;
+			// a re-confirmed "up to date" is a normal outcome, not a failure.
+			m.setFlash("quil is up to date (v" + m.version + ")")
+		default:
+			m.setFlash("update failed: " + msg.Resp.Error)
+		}
+		return m, tea.Batch(m.listenForMessages(), m.flashCmd())
 
 	case historyListMsg:
 		m = m.applyHistoryList(msg.Resp)
@@ -3298,6 +3337,9 @@ func (m Model) renderStatusBar() string {
 		total := m.lastMemResp.Total + m.tuiLocalMemTotal()
 		right = "mem " + memreport.HumanBytes(total) + " | " + right
 	}
+	if seg := updateStatusSegment(m.updateInfo, m.version); seg != "" {
+		right = seg + " | " + right
+	}
 	if m.devMode {
 		right = "[dev] " + right
 	}
@@ -3466,6 +3508,14 @@ func (m Model) listenForMessages() tea.Cmd {
 			log.Printf("ipc recv: restart_pane_resp pane=%s success=%v", payload.PaneID, payload.Success)
 			return listenContinueMsg{}
 
+		case ipc.MsgStageUpdateResp:
+			var payload ipc.StageUpdateRespPayload
+			if err := msg.DecodePayload(&payload); err != nil {
+				log.Printf("decode stage_update_resp: %v", err)
+				return listenContinueMsg{}
+			}
+			return stageUpdateRespMsg{Resp: payload}
+
 		default:
 			log.Printf("ipc recv: unknown type %q", msg.Type)
 			return listenContinueMsg{}
@@ -3477,6 +3527,24 @@ func parseWorkspaceState(raw map[string]any) WorkspaceStateMsg {
 	state := WorkspaceStateMsg{}
 	if at, ok := raw["active_tab"].(string); ok {
 		state.ActiveTab = at
+	}
+	if u, ok := raw["update"].(map[string]any); ok {
+		info := &ipc.UpdateInfo{}
+		if s, ok := u["latest_version"].(string); ok {
+			info.LatestVersion = s
+		}
+		if s, ok := u["release_url"].(string); ok {
+			info.ReleaseURL = s
+		}
+		if s, ok := u["staged_version"].(string); ok {
+			info.StagedVersion = s
+		}
+		if b, ok := u["install_writable"].(bool); ok {
+			info.InstallWritable = b
+		}
+		if info.LatestVersion != "" {
+			state.Update = info
+		}
 	}
 	if tabs, ok := raw["tabs"].([]any); ok {
 		for _, t := range tabs {

@@ -17,6 +17,29 @@ const fallback = "dev"
 
 var current = fallback
 
+// updatesEnabled gates the entire self-update pipeline (daily check, staging,
+// apply-at-launch, TUI status/About/notice surfaces). Defaults to true; the
+// dev and debug build variants (see scripts/dev.sh F_DEV/F_DBG) stamp
+// main.buildUpdatesOff="true" via ldflags, which calls SetUpdatesEnabled(false)
+// early in main(). Without this, a staged release applied on top of
+// quil-dev.exe/quild-dev.exe would strip the buildDevMode ldflag baked into
+// the dev binary, and the next launch would silently attach to production
+// ~/.quil instead of the project-local dev dir.
+var updatesEnabled = true
+
+// SetUpdatesEnabled stores whether the self-update pipeline may run. Call
+// once from main(), immediately after SetCurrent, before any code path reads
+// UpdatesEnabled().
+func SetUpdatesEnabled(v bool) {
+	updatesEnabled = v
+}
+
+// UpdatesEnabled reports whether the self-update pipeline is allowed to run
+// for this binary.
+func UpdatesEnabled() bool {
+	return updatesEnabled
+}
+
 // SetCurrent stores the binary's version. Call exactly once from main()
 // early in startup, before any code path reads Current(). Whitespace is
 // trimmed. An empty string is coerced to the fallback so Current() never

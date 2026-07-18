@@ -20,12 +20,23 @@ type Config struct {
 	Keybindings  KeybindingsConfig  `toml:"keybindings"`
 	MCP          MCPConfig          `toml:"mcp"`
 	Notification NotificationConfig `toml:"notification"`
+	Update       UpdateConfig       `toml:"update"`
 }
 
 type NotificationConfig struct {
 	SidebarWidth int                     `toml:"sidebar_width"` // default 30
 	MaxEvents    int                     `toml:"max_events"`    // default 200
 	Hooks        HookNotificationsConfig `toml:"hooks"`
+}
+
+// UpdateConfig controls the auto-update pipeline. Check gates the daily
+// GitHub release check (one unauthenticated GET to api.github.com); Auto
+// gates background download + staging of a newer release. auto = false
+// degrades to notify-only. Dev builds (version.IsRelease() == false) skip
+// the pipeline regardless of these settings.
+type UpdateConfig struct {
+	Check bool `toml:"check"`
+	Auto  bool `toml:"auto"`
 }
 
 // HookNotificationsConfig controls which hook-driven events get spool-emitted
@@ -189,6 +200,10 @@ func Default() Config {
 				Claude:   "default",
 				OpenCode: "default",
 			},
+		},
+		Update: UpdateConfig{
+			Check: true,
+			Auto:  true,
 		},
 		Keybindings: KeybindingsConfig{
 			Quit:      "ctrl+q",
@@ -376,4 +391,36 @@ func EventsDir() string {
 // /clear, compaction, or /resume rotations.
 func SessionsDir() string {
 	return filepath.Join(QuilDir(), "sessions")
+}
+
+// UpdateDir returns the root directory of the auto-update pipeline:
+// staged binaries, the daemon-owned state.json, and the TUI-owned
+// notified.json all live under it.
+func UpdateDir() string {
+	return filepath.Join(QuilDir(), "update")
+}
+
+// UpdateStagingRoot returns the directory that holds one subdirectory per
+// staged release version.
+func UpdateStagingRoot() string {
+	return filepath.Join(UpdateDir(), "staged")
+}
+
+// UpdateStagingDir returns the directory a given release version is staged
+// into. The stager writes manifest.json into it LAST — its presence is the
+// atomic "staging complete" marker.
+func UpdateStagingDir(version string) string {
+	return filepath.Join(UpdateStagingRoot(), version)
+}
+
+// UpdateStatePath is the daemon-owned check/stage status file. The TUI
+// never writes it (single-writer-per-file rule).
+func UpdateStatePath() string {
+	return filepath.Join(UpdateDir(), "state.json")
+}
+
+// UpdateNotifiedPath is the TUI-owned once-per-version startup-dialog
+// marker. The daemon never writes it.
+func UpdateNotifiedPath() string {
+	return filepath.Join(UpdateDir(), "notified.json")
 }

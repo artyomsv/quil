@@ -11,6 +11,7 @@ Quil reads `~/.quil/config.toml` (or `$QUIL_HOME/config.toml` when `QUIL_HOME` i
 - [`[ui]`](#ui)
 - [`[mcp]`](#mcp)
 - [`[notification]`](#notification)
+- [`[update]`](#update)
 - [`[keybindings]`](#keybindings)
 - [Per-plugin instances](#per-plugin-instances)
 - [How edits get persisted](#how-edits-get-persisted)
@@ -58,6 +59,10 @@ max_events = 200                # ring-buffer cap (per daemon, both sidebar and 
 [notification.hooks]
 claude = "default"              # "default" | "verbose" | "off"
 opencode = "default"            # same
+
+[update]
+check = true                    # Daily check for new releases
+auto = true                     # Download and stage in background
 
 [keybindings]
 quit = "ctrl+q"
@@ -151,6 +156,23 @@ Hook-driven notifications surface structured events from Claude Code and OpenCod
 | `opencode` | string | `"default"` | Tier for OpenCode panes. `"default"` forwards session.idle/error/compacted, session.status retry only, file.edited batched 1 s, permission.ask, experimental.session.compacting. `"verbose"` adds tool.execute.before/after. `"off"` disables hook event forwarding. |
 
 The hook events flow through a JSONL spool (`~/.quil/events/<paneID>.jsonl`) that the daemon polls every 200 ms. Truncated on daemon start (no replay of stale events); deleted on pane destroy.
+
+## `[update]`
+
+Automatic update checking and staging.
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `check` | `true` | Daily check for new releases (one unauthenticated GET to `api.github.com`). Set `false` to disable the daily background check. F1 → About → "Check for updates" / "Update now" still contacts GitHub on demand regardless of this setting. |
+| `auto` | `true` | Download and stage new releases in the background once a check finds one. The update applies at the next `quil` launch after a single `[Y/n]` confirmation. Set `false` for notify-only (the daily check still runs; nothing downloads until you trigger it from About). |
+
+A pending update shows as `↑ v<version>` in the status bar (`ready` once
+staged), in F1 → About, and once per version as a startup dialog. Dev and
+debug builds never self-update (the pipeline is compiled out via a build-time
+flag, since a self-update would strip the dev/debug ldflags baked into those
+binaries) — see `./scripts/dev.sh build`. Installs in non-writable locations
+(package managers) also never self-update; those show the release page URL
+instead.
 
 ## `[keybindings]`
 

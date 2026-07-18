@@ -320,6 +320,15 @@ A stuck child process can't take Quil down, and a stuck daemon recovers with one
 
 The TUI handshakes with the running daemon before attaching. If the daemon is older it prompts to gracefully stop and auto-spawn the matching daemon from alongside the TUI binary; if the daemon is newer the TUI refuses to attach and points to the releases page. Eliminates the manual "stop daemon → replace both binaries → restart" upgrade dance. Dev/debug builds skip the check.
 
+### Auto-update
+
+The daemon checks GitHub daily for new releases,
+downloads and verifies them (sha256) in the background, and stages them
+under `~/.quil/update/`. The next `quil` launch applies the update with
+one confirmation and restarts the daemon; tabs, layouts, CWDs, notes,
+and Claude sessions are preserved via the workspace snapshot. Configure
+via `[update]` in `config.toml`; About (F1) has a manual "Update now".
+
 ### Cross-platform
 
 Linux, macOS, and Windows from day one. PTY management via `creack/pty` (Unix) and ConPTY (Windows). IPC over Unix domain sockets or Named Pipes. All persistence paths use atomic temp+rename so a crash during snapshot leaves the previous state on disk.

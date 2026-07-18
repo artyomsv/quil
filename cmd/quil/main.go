@@ -271,6 +271,15 @@ func launchTUI() {
 		}
 	}()
 
+	// Staged auto-update: apply before touching the daemon. On success the
+	// new binary was respawned and has already run the whole session — this
+	// process was just a wrapper. On decline/failure, fall through to a
+	// normal launch; cleanup only runs when nothing is being applied.
+	if maybeApplyStagedUpdate(false) {
+		return
+	}
+	cleanupAppliedUpdate()
+
 	sockPath := config.SocketPath()
 	log.Printf("config loaded, AutoStart=%v", cfg.Daemon.AutoStart)
 
@@ -349,6 +358,15 @@ func launchTUI() {
 				log.Printf("save config: %v", err)
 			} else {
 				log.Print("config saved (disclaimer preference updated)")
+			}
+		}
+
+		// About → Update now / notice → Update now: the confirm dialog
+		// already asked, so apply pre-confirmed. The respawned TUI runs a
+		// fresh session; this process waits as a wrapper.
+		if m.ApplyUpdateRequested() {
+			if maybeApplyStagedUpdate(true) {
+				return
 			}
 		}
 	}

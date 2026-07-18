@@ -215,6 +215,24 @@ func settingsFields() []settingsField {
 			},
 			isBool: true,
 		},
+		{
+			label: "Update check",
+			get:   func(m *Model) string { return boolStr(m.cfg.Update.Check) },
+			set: func(m *Model, _ string) {
+				m.cfg.Update.Check = !m.cfg.Update.Check
+				m.configChanged = true
+			},
+			isBool: true,
+		},
+		{
+			label: "Update auto-download",
+			get:   func(m *Model) string { return boolStr(m.cfg.Update.Auto) },
+			set: func(m *Model, _ string) {
+				m.cfg.Update.Auto = !m.cfg.Update.Auto
+				m.configChanged = true
+			},
+			isBool: true,
+		},
 	}
 }
 
@@ -888,6 +906,8 @@ func (m Model) renderSettingsDialog() string {
 		b.WriteString(cursor + labelStyle.Render(f.label) + valRendered + "\n")
 	}
 
+	b.WriteByte('\n')
+	b.WriteString(dialogSubtle.Render("  Update check/auto-download apply on next daemon restart"))
 	b.WriteByte('\n')
 	hint := "↑↓ navigate  Enter edit  Esc back"
 	b.WriteString(dialogSubtle.Render(hint))

@@ -46,3 +46,58 @@ func overlayRight(base, overlay string, totalW, overlayW int) string {
 	}
 	return strings.Join(out, "\n")
 }
+
+// overlayAt composites box onto base with box's top-left cell at column x,
+// row y (both 0-based within base). base is a block of totalW-wide lines.
+// Same ANSI discipline as overlayRight: segments are cut with ansi.Truncate /
+// ansi.Cut and closed with an SGR reset on BOTH sides of the box so
+// base styling never bleeds into it and the box's styling never bleeds into
+// the preserved right tail. Used by the pane context menu — a positional
+// popup that, like the sidebar, must not reserve layout width (a layout
+// change would resize PTYs; see the 2026-07-04 resize-artifacts design).
+//
+// The caller (ctxMenuPos) is responsible for clamping the box on screen;
+// out-of-range inputs return base unchanged as a backstop, and box rows
+// below base's last line are dropped.
+func overlayAt(base, box string, x, y, totalW int) string {
+	if x < 0 || y < 0 || totalW <= 0 {
+		return base
+	}
+	boxLines := strings.Split(box, "\n")
+	boxW := 0
+	for _, bl := range boxLines {
+		if w := ansi.StringWidth(bl); w > boxW {
+			boxW = w
+		}
+	}
+	if boxW == 0 || x+boxW > totalW {
+		return base
+	}
+	baseLines := strings.Split(base, "\n")
+	for i, bl := range boxLines {
+		row := y + i
+		if row >= len(baseLines) {
+			break
+		}
+		left := ansi.Truncate(baseLines[row], x, "")
+		pad := ""
+		if n := x - ansi.StringWidth(left); n > 0 {
+			pad = strings.Repeat(" ", n)
+		}
+		// Cut the right part starting from x + boxW to the end.
+		// If a wide glyph straddles the cut boundary, ansi.Cut may include it,
+		// so we cap the result to the remaining width.
+		baselineWidth := ansi.StringWidth(baseLines[row])
+		cutStartCell := x + ansi.StringWidth(bl)
+		right := ansi.Cut(baseLines[row], cutStartCell, baselineWidth)
+		rightMaxWidth := baselineWidth - cutStartCell
+		if rightMaxWidth < 0 {
+			rightMaxWidth = 0
+		}
+		if rightMaxWidth > 0 && ansi.StringWidth(right) > rightMaxWidth {
+			right = ansi.Truncate(right, rightMaxWidth, "")
+		}
+		baseLines[row] = left + "\x1b[0m" + pad + bl + "\x1b[0m" + right
+	}
+	return strings.Join(baseLines, "\n")
+}

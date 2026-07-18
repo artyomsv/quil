@@ -18,6 +18,7 @@ A capability-by-capability tour of what Quil does. For configuration knobs, see 
   - [Tab customization](#tab-customization)
 - [Input & clipboard](#input--clipboard)
   - [Mouse & keyboard](#mouse--keyboard)
+  - [Pane context menu](#pane-context-menu)
   - [Text selection & clipboard](#text-selection--clipboard)
   - [Image paste from clipboard](#image-paste-from-clipboard)
   - [Input history (AI panes)](#input-history-ai-panes)
@@ -122,6 +123,14 @@ The CWD also feeds the new-pane setup dialog (pre-filled from the active pane's 
 Full mouse support — click tabs to switch, click panes to focus, scroll wheel for terminal history. Drag panes to select text. All keybindings are configurable via `config.toml`.
 
 **Drag-resize splits** — click and drag any border between panes to resize; every pane keeps a 10×4 minimum (nested splits included), affected panes highlight while dragging, and child processes see a single resize on release. Note: when a *terminal* pane gets narrower, line content that no longer fits is cut by the console host and is not restored on growing back — the same thing happens when shrinking the whole window (no reflow-on-resize; see `techdebt/3-5-terminal-vt-resize-reflow.md`). AI panes are unaffected (window-sized canvas, apps repaint themselves). If content survival matters more than formatting for a given pane (log tails, watch loops), pick the built-in **Terminal (keeps content on squeeze)** pane type instead — it runs the same shell on the AI-pane-style window-sized canvas, so squeezes never cut content, at the cost of output being formatted for the window width (previewed cropped/soft-wrapped) while the pane is narrow.
+
+### Pane context menu
+
+Right-click a pane (with no text selection active — a selection still copies, unchanged) or press `Alt+A` (`quick_actions`, active pane) to open a popup with 9 actions: Input history, Focus mode, Open notes, Open lazygit, Rename pane, Mute/Unmute notifications, Mark/Unmark attention, Restart pane… (confirm), Close pane… (confirm). The target pane gets a blue highlight border while the menu is open. `↑`/`↓`/`k`/`j` navigate (disabled rows are skipped), `Enter` or a click executes, `Esc` or a click outside closes, and right-clicking another pane re-targets the menu.
+
+Two rows grey out when unavailable: **Input history** unless the pane's plugin sets `record_history` (Claude Code), and **Open lazygit** when the `lazygit` binary isn't installed.
+
+**Mark attention** pins a green border on the pane — the same colour as the "work finished, unseen" mark, but it survives focusing the pane and clears only via **Unmark attention**. It's session-only (not persisted across daemon restarts) and also colours the tab label, including on the active tab when the pinned pane isn't the one currently focused.
 
 ### Text selection & clipboard
 

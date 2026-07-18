@@ -3028,7 +3028,10 @@ func (m Model) tabLabel(idx int) string {
 func (m Model) tabStyle(idx int) lipgloss.Style {
 	tab := m.tabs[idx]
 	active := idx == m.activeTab
-	if !active && m.tabUnseen(idx) {
+	// tabUnseen self-excludes the active tab; tabPinnedAttention deliberately
+	// does not (a pin colors the active tab's label unless the pinned pane is
+	// the one in focus).
+	if m.tabUnseen(idx) || m.tabPinnedAttention(idx) {
 		return unseenTabStyle
 	}
 	if tab.Color != "" {

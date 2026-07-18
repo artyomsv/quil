@@ -141,3 +141,16 @@ func TestOverlayAt_Degenerate_ReturnsBase(t *testing.T) {
 		}
 	}
 }
+
+func TestOverlayAt_WideGlyphAtRightCut_KeepsTotalWidth(t *testing.T) {
+	// All-double-width base; the box's right edge (x=1+2=3) lands mid-好.
+	base := "你好你好你"
+	got := overlayAt(base, "ZZ", 1, 0, 10)
+	if w := ansi.StringWidth(got); w != 10 {
+		t.Errorf("width = %d, want 10", w)
+	}
+	got = overlayAt(base, "Z", 2, 0, 10)
+	if w := ansi.StringWidth(got); w != 10 {
+		t.Errorf("single-cell box: width = %d, want 10", w)
+	}
+}

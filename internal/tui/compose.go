@@ -97,6 +97,11 @@ func overlayAt(base, box string, x, y, totalW int) string {
 		if rightMaxWidth > 0 && ansi.StringWidth(right) > rightMaxWidth {
 			right = ansi.Truncate(right, rightMaxWidth, "")
 		}
+		// Pad the right tail to match the target width: when Truncate drops a
+		// wide glyph, right may undershoot rightMaxWidth.
+		if n := rightMaxWidth - ansi.StringWidth(right); n > 0 {
+			right += strings.Repeat(" ", n)
+		}
 		baseLines[row] = left + "\x1b[0m" + pad + bl + "\x1b[0m" + right
 	}
 	return strings.Join(baseLines, "\n")

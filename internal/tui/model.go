@@ -358,6 +358,15 @@ type Model struct {
 	// status-bar segment, the About row, and the startup notice.
 	updateInfo *ipc.UpdateInfo
 
+	// sawFirstState gates the once-per-launch update notice to the FIRST
+	// WorkspaceStateMsg after attach — every broadcast thereafter (switch
+	// tab, create pane, etc.) also carries the update key and would
+	// otherwise reopen the dialog mid-session. The daemon re-announces its
+	// update info to every newly-attached client, so the first broadcast is
+	// exactly the "startup" moment the notice's spec calls for; the
+	// status-bar segment already covers mid-session discovery.
+	sawFirstState bool
+
 	// applyUpdateOnExit signals cmd/quil/main.go to run the staged-update
 	// swap after tea.Program returns (set by the apply confirm).
 	applyUpdateOnExit bool
@@ -935,8 +944,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(tea.ClearScreen, m.listenForMessages())
 
 	case WorkspaceStateMsg:
-		m.updateInfo = msg.Update
-		m.maybeShowUpdateNotice()
+		m.noteWorkspaceState(msg.Update)
 		// TODO(freeze-diagnostic): the 8 "apply: ..." breadcrumbs in this case
 		// and inside applyWorkspaceState were added to pinpoint a TUI Update
 		// wedge during claude-code pane creation (2026-04-22). The root cause
@@ -1089,9 +1097,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.listenForMessages()
 
 	case stageUpdateRespMsg:
-		if msg.Resp.Success {
+		switch {
+		case msg.Resp.Success:
 			m.setFlash("update v" + msg.Resp.Version + " staged — applies on next launch")
-		} else {
+		case msg.Resp.Error == "already up to date":
+			// handleUpdateAction's "up to date" branch sends this request to
+			// force a fresh check rather than trusting stale broadcast info;
+			// a re-confirmed "up to date" is a normal outcome, not a failure.
+			m.setFlash("quil is up to date (v" + m.version + ")")
+		default:
 			m.setFlash("update failed: " + msg.Resp.Error)
 		}
 		return m, tea.Batch(m.listenForMessages(), m.flashCmd())

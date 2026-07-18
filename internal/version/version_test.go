@@ -137,3 +137,22 @@ func TestIsRelease(t *testing.T) {
 		t.Error("1.2.3-rc1 should be release (pre-release tag is still semver)")
 	}
 }
+
+func TestSetUpdatesEnabled(t *testing.T) {
+	orig := updatesEnabled
+	t.Cleanup(func() { updatesEnabled = orig })
+
+	if !UpdatesEnabled() {
+		t.Error("default UpdatesEnabled() = false, want true")
+	}
+
+	SetUpdatesEnabled(false)
+	if UpdatesEnabled() {
+		t.Error("after SetUpdatesEnabled(false): UpdatesEnabled() = true, want false")
+	}
+
+	SetUpdatesEnabled(true)
+	if !UpdatesEnabled() {
+		t.Error("after SetUpdatesEnabled(true): UpdatesEnabled() = false, want true")
+	}
+}

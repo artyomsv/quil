@@ -32,7 +32,7 @@ const updateCheckTimeout = 10 * time.Minute
 // Start() alongside idleChecker; exits on d.shutdown. Entirely inert for
 // dev builds and when [update] check = false.
 func (d *Daemon) updateChecker() {
-	if !d.cfg.Update.Check || !version.IsRelease() {
+	if !d.cfg.Update.Check || !version.IsRelease() || !version.UpdatesEnabled() {
 		return
 	}
 	timer := time.NewTimer(updateCheckInitialDelay)
@@ -161,7 +161,7 @@ func (d *Daemon) handleStageUpdateReq(conn *ipc.Conn, msg *ipc.Message) {
 }
 
 func (d *Daemon) stageOnDemand() ipc.StageUpdateRespPayload {
-	if !version.IsRelease() {
+	if !version.IsRelease() || !version.UpdatesEnabled() {
 		return ipc.StageUpdateRespPayload{Error: "dev build — updates disabled"}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), updateCheckTimeout)

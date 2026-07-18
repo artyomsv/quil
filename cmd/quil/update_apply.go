@@ -23,7 +23,7 @@ import (
 // wrapper and the session is over). Every failure path rolls back and
 // returns false so the old version launches normally.
 func maybeApplyStagedUpdate(preConfirmed bool) bool {
-	if !versionpkg.IsRelease() {
+	if !versionpkg.IsRelease() || !versionpkg.UpdatesEnabled() {
 		return false
 	}
 	man, dir, err := update.FindStaged(config.UpdateDir())
@@ -43,13 +43,29 @@ func maybeApplyStagedUpdate(preConfirmed bool) bool {
 	if !preConfirmed && !promptApplyUpdate(man.Version) {
 		return false
 	}
-	if err := swapBinaries(dir); err != nil {
+
+	// Resolve the running executable's path exactly ONCE, before any swap,
+	// and thread it through to both swapBinaries and respawnSelf. On Linux
+	// os.Executable() is a live `readlink /proc/self/exe`; once swapOne
+	// below renames this binary aside to "<exe>.old", a SECOND call to
+	// os.Executable() re-resolves to that renamed path — respawnSelf would
+	// then relaunch the OLD binary, which re-detects the still-staged
+	// update and prompts again (and can corrupt the install layout on the
+	// resulting double-apply). Do not "simplify" this back to calling
+	// os.Executable() inside swapBinaries/respawnSelf.
+	exe, err := os.Executable()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "update to v%s failed: locate own executable: %v — continuing on v%s\n",
+			man.Version, err, versionpkg.Current())
+		return false
+	}
+	if err := swapBinaries(exe, dir); err != nil {
 		fmt.Fprintf(os.Stderr, "update to v%s failed: %v — continuing on v%s\n",
 			man.Version, err, versionpkg.Current())
 		return false
 	}
 	log.Printf("update: swapped binaries to v%s, respawning", man.Version)
-	return respawnSelf()
+	return respawnSelf(exe)
 }
 
 // promptApplyUpdate asks on the terminal, version-gate style. Default is
@@ -80,13 +96,11 @@ func promptApplyUpdate(ver string) bool {
 }
 
 // swapBinaries installs the staged quil and quild over the live install.
-// If the second swap fails, the first is rolled back so the pair never
-// splits versions.
-func swapBinaries(stagedDir string) error {
-	exe, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("locate own executable: %w", err)
-	}
+// exe is the caller-resolved path to the running quil executable (resolved
+// exactly once in maybeApplyStagedUpdate — see the comment there). If the
+// second swap fails, the first is rolled back so the pair never splits
+// versions.
+func swapBinaries(exe, stagedDir string) error {
 	quildTarget := findDaemonBinaryForUpgrade()
 	if !filepath.IsAbs(quildTarget) {
 		return fmt.Errorf("cannot locate installed quild (got %q)", quildTarget)
@@ -156,20 +170,18 @@ func copyFile(src, dst string) error {
 	return cpErr
 }
 
-// respawnSelf runs the freshly-installed quil with the original args and
-// QUIL_UPDATE_RESTART=1 (the version gate reads it to skip the second
-// restart prompt). This process stays as a thin wrapper waiting for the
-// child — exiting immediately would hand the terminal back to the shell
-// while the child TUI still owns it. Always returns true: the swap is
-// already done, so even on spawn failure the caller must not fall through
-// to running the (renamed-away) old binary's launch path — the user just
-// relaunches manually.
-func respawnSelf() bool {
-	exe, err := os.Executable()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "update applied — relaunch quil manually (%v)\n", err)
-		return true
-	}
+// respawnSelf runs the freshly-installed quil at exe (the same path
+// maybeApplyStagedUpdate resolved BEFORE the swap — see the comment there;
+// re-resolving via os.Executable() here would return the just-renamed-aside
+// ".old" binary on Linux) with the original args and QUIL_UPDATE_RESTART=1
+// (the version gate reads it to skip the second restart prompt). This
+// process stays as a thin wrapper waiting for the child — exiting
+// immediately would hand the terminal back to the shell while the child TUI
+// still owns it. Always returns true: the swap is already done, so even on
+// spawn failure the caller must not fall through to running the
+// (renamed-away) old binary's launch path — the user just relaunches
+// manually.
+func respawnSelf(exe string) bool {
 	cmd := exec.Command(exe, os.Args[1:]...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout

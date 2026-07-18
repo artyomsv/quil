@@ -21,10 +21,11 @@ import (
 )
 
 var (
-	version       = "dev"
-	buildDevMode  string // "true" to auto-enable dev mode (set via ldflags)
-	buildLogLevel string // overrides config log level, e.g. "debug" (set via ldflags)
-	daemonBinary  string // daemon binary name, e.g. "quild-dev" (set via ldflags)
+	version         = "dev"
+	buildDevMode    string // "true" to auto-enable dev mode (set via ldflags)
+	buildLogLevel   string // overrides config log level, e.g. "debug" (set via ldflags)
+	daemonBinary    string // daemon binary name, e.g. "quild-dev" (set via ldflags)
+	buildUpdatesOff string // "true" to disable the self-update pipeline (set via ldflags; dev/debug builds only)
 )
 
 const (
@@ -45,6 +46,9 @@ func main() {
 	// subcommands (MCP bridge, handshake logic) and the TUI all read
 	// from one place.
 	versionpkg.SetCurrent(version)
+	// Dev/debug builds never self-update — a staged release swap would strip
+	// their build-mode ldflags (see internal/version.SetUpdatesEnabled).
+	versionpkg.SetUpdatesEnabled(buildUpdatesOff != "true")
 
 	// Build-time dev mode: if baked in via ldflags, auto-set QUIL_HOME
 	// before anything else. The --dev flag and QUIL_HOME env var still
@@ -368,6 +372,12 @@ func launchTUI() {
 			if maybeApplyStagedUpdate(true) {
 				return
 			}
+			// The user explicitly confirmed "Update now" — silently falling
+			// through to a normal exit would look like the confirm did
+			// nothing. maybeApplyStagedUpdate already logged the specific
+			// failure (verification, swap, or missing staged files); this is
+			// the user-facing summary line.
+			fmt.Fprintln(os.Stderr, "update was confirmed but could not be applied (staged files missing or failed verification) — run quil again or use About → Update now to re-download.")
 		}
 	}
 	log.Print("TUI exited normally")

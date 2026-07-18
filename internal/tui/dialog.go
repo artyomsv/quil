@@ -261,6 +261,7 @@ func shortcutsList(m *Model) []struct{ key, desc string } {
 		{kbDisplay(kb.Quit), "Quit"},
 		{kbDisplay(kb.NewTab), "New tab"},
 		{kbDisplay(kb.ClosePane), "Close pane"},
+		{kbDisplay(kb.QuickActions), "Pane context menu (also mouse right-click)"},
 		{kbDisplay(kb.CloseTab), "Close tab"},
 		{kbDisplay(kb.SplitHorizontal), "Split side-by-side"},
 		{kbDisplay(kb.SplitVertical), "Split top/bottom"},

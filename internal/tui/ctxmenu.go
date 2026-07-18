@@ -3,6 +3,7 @@ package tui
 import (
 	"strings"
 
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 )
 
@@ -193,4 +194,120 @@ func renderCtxMenu(s ctxMenuState) string {
 		}
 	}
 	return ctxMenuBorderStyle.Render(strings.Join(rows, "\n"))
+}
+
+// openCtxMenu opens (or re-targets) the context menu for pane, anchored at
+// the given screen coordinate. Closes any previous menu first (clearing the
+// old target's highlight), kills in-flight drags (one interaction at a
+// time), and drops any live selection — the menu owns the mouse now.
+func (m *Model) openCtxMenu(pane *PaneModel, anchorX, anchorY int) {
+	m.closeCtxMenu()
+	m.clearDragState()
+	m.selection = nil
+	items := m.buildCtxMenuItems(pane)
+	w, h := ctxMenuBoxSize(items)
+	x, y := ctxMenuPos(anchorX, anchorY, w, h, m.width, m.height)
+	m.ctxMenu = ctxMenuState{
+		paneID: pane.ID,
+		x:      x,
+		y:      y,
+		cursor: firstEnabled(items),
+		items:  items,
+	}
+	pane.ctxTargetHighlight = true
+}
+
+// closeCtxMenu closes the menu and clears the target-pane highlight. Safe to
+// call when already closed; nil-safe when the target pane has vanished.
+func (m *Model) closeCtxMenu() {
+	if m.ctxMenu.paneID != "" {
+		if pane, _ := m.findPaneAndTab(m.ctxMenu.paneID); pane != nil {
+			pane.ctxTargetHighlight = false
+		}
+	}
+	m.ctxMenu = ctxMenuState{}
+}
+
+// openQuickActionsMenu is the keyboard entry point (kb.QuickActions): same
+// menu as right-click, for the ACTIVE pane, anchored at its content
+// top-left. No-op in notes mode — the key is notes-exempt so it reaches
+// here, but the menu's actions restructure the layout out from under the
+// editor.
+func (m Model) openQuickActionsMenu() (tea.Model, tea.Cmd) {
+	if m.notesMode {
+		return m, nil
+	}
+	if rect := m.activePaneRect(); rect != nil && rect.Pane != nil {
+		m.openCtxMenu(rect.Pane, rect.OX+1, rect.OY+1)
+	}
+	return m, nil
+}
+
+// handleCtxMenuKey captures keyboard input while the menu is open. Quit is
+// the only global that passes through — everything else is either menu
+// navigation or swallowed (the menu is short-lived; no exempt list).
+func (m Model) handleCtxMenuKey(key string) (tea.Model, tea.Cmd) {
+	kb := m.cfg.Keybindings
+	switch {
+	case key == "esc":
+		m.closeCtxMenu()
+		return m, nil
+	case key == "up" || key == "k":
+		m.ctxMenu.cursor = nextEnabled(m.ctxMenu.items, m.ctxMenu.cursor, -1)
+		return m, nil
+	case key == "down" || key == "j":
+		m.ctxMenu.cursor = nextEnabled(m.ctxMenu.items, m.ctxMenu.cursor, +1)
+		return m, nil
+	case key == "enter":
+		if c := m.ctxMenu.cursor; c >= 0 && c < len(m.ctxMenu.items) && m.ctxMenu.items[c].enabled {
+			return m.executeCtxMenuItem(m.ctxMenu.items[c])
+		}
+		return m, nil
+	case kbMatches(key, kb.Quit):
+		m.closeCtxMenu()
+		return m, tea.Quit
+	}
+	return m, nil
+}
+
+// executeCtxMenuItem closes the menu, focuses the target pane (TUI-local,
+// mirroring the setActivePaneMsg handler), and dispatches to the SAME
+// handler logic the keybinding cases use. Destructive items keep their
+// confirm dialogs.
+func (m Model) executeCtxMenuItem(item ctxMenuItem) (tea.Model, tea.Cmd) {
+	paneID := m.ctxMenu.paneID
+	m.closeCtxMenu()
+	if !item.enabled || paneID == "" {
+		return m, nil
+	}
+	tab := m.activeTabModel()
+	if tab == nil || tab.Root == nil || tab.Root.FindLeaf(paneID) == nil {
+		return m, nil // target vanished between open and execute
+	}
+	tab.ActivePane = paneID
+
+	switch item.id {
+	case ctxActHistory:
+		return m.openHistoryForActivePane()
+	case ctxActFocus:
+		return m.toggleFocusForActiveTab()
+	case ctxActNotes:
+		return m.toggleNotesMode()
+	case ctxActLazygit:
+		return m, m.handleToggleLazygit()
+	case ctxActRename:
+		return m.beginPaneRename()
+	case ctxActMute:
+		return m, m.toggleActivePaneMute()
+	case ctxActAttention:
+		if pane, _ := m.findPaneAndTab(paneID); pane != nil {
+			pane.pinnedAttention = !pane.pinnedAttention
+		}
+		return m, nil
+	case ctxActRestart:
+		return m.openRestartPaneConfirm()
+	case ctxActClose:
+		return m.openClosePaneConfirm()
+	}
+	return m, nil
 }

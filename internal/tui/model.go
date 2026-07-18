@@ -489,6 +489,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Acknowledge the focused pane of the active tab before processing the
 	// message — focusing is the acknowledgement; see ackFocusedPane.
 	m.ackFocusedPane()
+	// A context menu whose target pane vanished (daemon reconciliation,
+	// pane destroy) closes itself. Single choke point — no need to audit
+	// every pruning path. findPaneAndTab is nil-safe.
+	if m.ctxMenu.open() {
+		if pane, _ := m.findPaneAndTab(m.ctxMenu.paneID); pane == nil {
+			m.closeCtxMenu()
+		}
+	}
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		// Poll echo: size matches both the applied and any pending value —
@@ -537,6 +545,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.seq != m.resizeSeq {
 			return m, nil // stale tick, newer resize pending
 		}
+		// Anchor coordinates are stale after a reflow — cheapest correct
+		// answer is to close.
+		m.closeCtxMenu()
 		m.width = m.pendingWidth
 		m.height = m.pendingHeight
 		m.resizeTabs()
@@ -567,6 +578,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.sidebarSwallowsMouse(msg.X, msg.Y) {
 			m.clearDragState()
 			return m, nil
+		}
+		// Context menu open: it owns the mouse. Click on an enabled row
+		// executes; anywhere else inside the box is swallowed; outside
+		// closes — and an outside RIGHT-click falls through to the open
+		// path below so it re-targets in one gesture (OS-menu convention).
+		if m.ctxMenu.open() {
+			if row, inside := ctxMenuHitRow(m.ctxMenu, msg.X, msg.Y); inside {
+				if msg.Button == tea.MouseLeft && row >= 0 && m.ctxMenu.items[row].enabled {
+					return m.executeCtxMenuItem(m.ctxMenu.items[row])
+				}
+				return m, nil
+			}
+			m.closeCtxMenu()
+			if msg.Button != tea.MouseRight {
+				return m, nil // closing click is consumed, never arms a drag
+			}
 		}
 		// Right-click: copy the active selection to the clipboard. While
 		// notes mode is on, the editor's selection takes priority.
@@ -604,6 +631,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.selection = nil
 				return m, nil
 			}
+			// No selection anywhere: open the pane context menu for the
+			// pane under the cursor. Suppressed while a modal dialog,
+			// rename edit, or notes mode owns input (the lazygit overlay
+			// and sidebar swallows already returned above).
+			if m.dialog == dialogNone && !m.notesMode && !m.renaming && !m.renamingPane {
+				if rect := m.paneRectAt(msg.X, msg.Y); rect != nil && rect.Pane != nil {
+					m.openCtxMenu(rect.Pane, msg.X, msg.Y)
+				}
+			}
+			return m, nil
 		}
 		if msg.Button == tea.MouseLeft {
 			if msg.Y == 0 {
@@ -679,6 +716,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if tab := m.activeTabModel(); tab != nil && tab.overlayVisible {
 			return m, nil
 		}
+		// Context menu open: hover moves the cursor; everything else is
+		// swallowed so no drag can advance underneath the popup.
+		if m.ctxMenu.open() {
+			if row, inside := ctxMenuHitRow(m.ctxMenu, msg.X, msg.Y); inside && row >= 0 && m.ctxMenu.items[row].enabled {
+				m.ctxMenu.cursor = row
+			}
+			return m, nil
+		}
 		// Drag dispatch — at most one branch is active (clearDragState
 		// invariant). Off-Y=0 motion during a tab drag pauses reorder but
 		// keeps the drag alive so the user can return to the tab bar
@@ -731,6 +776,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.clearDragState()
 			return m, nil
 		}
+		if m.ctxMenu.open() {
+			return m, nil // no drags can be live while the menu is open
+		}
 		// A split-border drag commits on release: one PTY resize per pane
 		// plus the persisted layout ratio (finishSplitDrag), highlight off.
 		if m.splitDragNode != nil {
@@ -769,6 +817,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.MouseWheelMsg:
+		if m.ctxMenu.open() {
+			return m, nil // wheel is swallowed while the menu is open
+		}
 		// Overlay visible: swallow wheel events (keyboard-only v1).
 		if tab := m.activeTabModel(); tab != nil && tab.overlayVisible {
 			return m, nil
@@ -1320,6 +1371,34 @@ func (m *Model) activePaneRect() *PaneRect {
 	for i := range rects {
 		if rects[i].Pane != nil && rects[i].Pane.ID == tab.ActivePane {
 			return &rects[i]
+		}
+	}
+	return nil
+}
+
+// paneRectAt returns the rendered pane rect containing screen coordinate
+// (x, y) in the active tab, or nil. Focus mode resolves to the single
+// full-area rect; split layouts walk the same CollectRects geometry the
+// scrollbar and border hit-tests use.
+func (m *Model) paneRectAt(x, y int) *PaneRect {
+	if r := m.activePaneRectFocus(); r != nil {
+		if x >= r.OX && x < r.OX+r.W && y >= r.OY && y < r.OY+r.H {
+			return r
+		}
+		return nil
+	}
+	tab := m.activeTabModel()
+	if tab == nil || tab.Root == nil {
+		return nil
+	}
+	tabH := m.height - chromeHeight
+	notesW := m.notesPanelWidth()
+	var rects []PaneRect
+	tab.Root.CollectRects(0, 1, m.width-notesW, tabH, &rects)
+	for i := range rects {
+		r := &rects[i]
+		if r.Pane != nil && x >= r.OX && x < r.OX+r.W && y >= r.OY && y < r.OY+r.H {
+			return r
 		}
 	}
 	return nil
@@ -1984,6 +2063,11 @@ func (m Model) View() tea.View {
 				m.notifications.focused = m.sidebarFocused
 				tabContent = overlayRight(tabContent, m.notifications.View(tabH), m.width, sw)
 			}
+			if m.ctxMenu.open() {
+				// ctxMenu coords are screen rows; tabContent starts at
+				// screen row 1 (tab bar above), so shift by -1.
+				tabContent = overlayAt(tabContent, renderCtxMenu(m.ctxMenu), m.ctxMenu.x, m.ctxMenu.y-1, m.width)
+			}
 			sections = append(sections, tabContent)
 		}
 
@@ -2027,6 +2111,12 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.renamingPane {
 		return m.handlePaneRenameKey(msg)
+	}
+
+	// Context menu open: it captures navigation until closed. Quit passes
+	// through inside the handler (never swallow quit).
+	if m.ctxMenu.open() {
+		return m.handleCtxMenuKey(key)
 	}
 
 	// Notes mode: while active, keyboard input is split between the bound
@@ -2133,6 +2223,8 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, m.handleToggleLazygit()
 	case kbMatches(key, kb.CommandHistory):
 		return m.openHistoryForActivePane()
+	case kbMatches(key, kb.QuickActions):
+		return m.openQuickActionsMenu()
 	}
 
 	// Sidebar focused: route keys to notification center

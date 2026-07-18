@@ -224,13 +224,17 @@ func Default() Config {
 			RenameTab:       "f2",
 			// macOS often eats F2 and may not forward Option as Meta; the
 			// second binding is the reliable fallback.
-			RenamePane:         "alt+f2,alt+shift+r",
-			CycleTabColor:      "alt+c",
-			ScrollPageUp:       "alt+pgup",
-			ScrollPageDown:     "alt+pgdown",
-			Paste:              "ctrl+v",
-			JSONTransform:      "ctrl+j",
-			QuickActions:       "ctrl+a",
+			RenamePane:     "alt+f2,alt+shift+r",
+			CycleTabColor:  "alt+c",
+			ScrollPageUp:   "alt+pgup",
+			ScrollPageDown: "alt+pgdown",
+			Paste:          "ctrl+v",
+			JSONTransform:  "ctrl+j",
+			// alt+a (NOT the historical ctrl+a placeholder): ctrl+a is
+			// readline beginning-of-line in every shell and the common tmux
+			// prefix — stealing it from the PTY would be a regression. The
+			// Alt layer matches the other pane-level shortcuts.
+			QuickActions:       "alt+a",
 			FocusPane:          "ctrl+e",
 			NotificationToggle: "alt+n",
 			NotificationFocus:  "f3",
@@ -240,7 +244,7 @@ func Default() Config {
 			NotesToggle:        "alt+e",
 			// Mnemonic: Ctrl+L clears/redraws a shell; the Alt+Shift layer
 			// keeps plain Ctrl+L flowing to the PTY.
-			Redraw:        "alt+shift+l",
+			Redraw:         "alt+shift+l",
 			ToggleEager:    "alt+shift+e",
 			CommandHistory: "alt+shift+i",
 			ToggleLazygit:  "alt+g",

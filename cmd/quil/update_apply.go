@@ -72,6 +72,7 @@ func promptApplyUpdate(ver string) bool {
 	reader := bufio.NewReader(os.Stdin)
 	line, err := reader.ReadString('\n')
 	if err != nil {
+		log.Printf("prompt read: %v", err)
 		return false
 	}
 	a := strings.ToLower(strings.TrimSpace(line))
@@ -86,21 +87,31 @@ func swapBinaries(stagedDir string) error {
 	if err != nil {
 		return fmt.Errorf("locate own executable: %w", err)
 	}
-	names := update.BinaryNames(runtime.GOOS)
-	quilName, quildName := names[0], names[1]
-
-	quilTarget := exe
 	quildTarget := findDaemonBinaryForUpgrade()
 	if !filepath.IsAbs(quildTarget) {
 		return fmt.Errorf("cannot locate installed quild (got %q)", quildTarget)
 	}
+	return swapPair(exe, quildTarget, stagedDir, runtime.GOOS)
+}
+
+// swapPair swaps both binaries as a unit: if the second swap fails, the
+// first is rolled back so quil/quild never split versions. Pure function
+// of its arguments (target resolution via os.Executable /
+// findDaemonBinaryForUpgrade lives in swapBinaries) so the rollback path
+// is directly testable against temp-dir targets.
+func swapPair(quilTarget, quildTarget, stagedDir, goos string) error {
+	names := update.BinaryNames(goos)
+	quilName, quildName := names[0], names[1]
 
 	if err := swapOne(quilTarget, filepath.Join(stagedDir, quilName)); err != nil {
 		return err
 	}
 	if err := swapOne(quildTarget, filepath.Join(stagedDir, quildName)); err != nil {
 		// Roll the first swap back so quil/quild stay version-matched.
-		os.Remove(quilTarget)
+		// os.Rename replaces an existing destination on both Windows and
+		// POSIX, so quilTarget (holding the just-installed, non-running
+		// new binary) doesn't need removing first — an unchecked Remove
+		// here would leave NO quil binary on disk if this rename failed.
 		if rbErr := os.Rename(quilTarget+".old", quilTarget); rbErr != nil {
 			return fmt.Errorf("%w (AND quil rollback failed: %v — restore %s.old manually)", err, rbErr, quilTarget)
 		}

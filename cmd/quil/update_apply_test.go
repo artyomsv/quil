@@ -40,6 +40,39 @@ func TestSwapOne_MissingStaged_RollsBack(t *testing.T) {
 	}
 }
 
+func TestSwapBinaries_SecondSwapFails_RollsBackFirst(t *testing.T) {
+	installDir := t.TempDir()
+	stagedDir := t.TempDir()
+
+	quilTarget := filepath.Join(installDir, "quil.exe")
+	quildTarget := filepath.Join(installDir, "quild.exe")
+	os.WriteFile(quilTarget, []byte("old-quil"), 0755)
+	os.WriteFile(quildTarget, []byte("old-quild"), 0755)
+
+	// Staged dir has ONLY the quil binary — quild is missing, forcing the
+	// second swap to fail and the pair-rollback branch to run.
+	os.WriteFile(filepath.Join(stagedDir, "quil.exe"), []byte("new-quil"), 0755)
+
+	if err := swapPair(quilTarget, quildTarget, stagedDir, "windows"); err == nil {
+		t.Fatal("swapPair with missing staged quild = nil error, want error")
+	}
+
+	gotQuil, err := os.ReadFile(quilTarget)
+	if err != nil || string(gotQuil) != "old-quil" {
+		t.Errorf("quil target after rollback = %q (err %v), want old-quil restored", gotQuil, err)
+	}
+	if _, err := os.Stat(quilTarget + ".old"); !os.IsNotExist(err) {
+		t.Errorf("quil.old backup should be gone after rollback, stat err = %v", err)
+	}
+	gotQuild, err := os.ReadFile(quildTarget)
+	if err != nil || string(gotQuild) != "old-quild" {
+		t.Errorf("quild target = %q (err %v), want old-quild (untouched by its own inner rollback)", gotQuild, err)
+	}
+	if _, err := os.Stat(quildTarget + ".old"); !os.IsNotExist(err) {
+		t.Errorf("quild.old backup should be gone after its own inner rollback, stat err = %v", err)
+	}
+}
+
 func TestUpdateRestartPreapproved(t *testing.T) {
 	t.Setenv("QUIL_UPDATE_RESTART", "")
 	if updateRestartPreapproved() {

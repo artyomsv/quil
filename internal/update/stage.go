@@ -67,6 +67,16 @@ func (s *Stager) httpClient() *http.Client {
 // writes manifest.json last. Any earlier failure leaves no manifest — the
 // next check re-stages from scratch.
 func (s *Stager) Stage(ctx context.Context, rel *Release) error {
+	// The version becomes a directory name under staged/ via filepath.Join.
+	// A hostile tag ("v1.0.0-../../evil") survives semver parsing (the
+	// suffix after "-" is stripped by version.Parsed) yet would escape the
+	// staging root once joined. Reject anything that isn't a plain single
+	// path component before any network I/O happens.
+	if v := rel.Version(); v == "" || v != filepath.Base(v) ||
+		strings.ContainsAny(v, `/\`) || strings.Contains(v, "..") {
+		return fmt.Errorf("release tag %q is not a safe version string", rel.TagName)
+	}
+
 	archive, sums, err := FindAssets(rel, s.GOOS, s.GOARCH)
 	if err != nil {
 		return err
@@ -187,15 +197,27 @@ func (s *Stager) fetchChecksums(ctx context.Context, url string) (map[string]str
 	return sums, nil
 }
 
+// matchBinary returns the allowlisted binary name (the constant from names)
+// that entryName's base matches, or "" if none match. The returned string is
+// always one of our own constants — never derived from the archive entry —
+// so the path written to disk cannot be influenced by a hostile entry name
+// (breaks the CodeQL go/zipslip taint chain at the source).
+func matchBinary(names []string, entryName string) string {
+	base := filepath.Base(entryName)
+	for _, n := range names {
+		if base == n {
+			return n
+		}
+	}
+	return ""
+}
+
 // extractBinaries pulls only the quil/quild executables out of the archive
 // into dir, ignoring archive paths entirely (base-name match only — immune
 // to zip-slip by construction). Returns base name → sha256 of extracted
 // bytes.
 func extractBinaries(archivePath, dir, goos string) (map[string]string, error) {
-	wanted := make(map[string]bool)
-	for _, n := range BinaryNames(goos) {
-		wanted[n] = true
-	}
+	names := BinaryNames(goos)
 	files := make(map[string]string)
 
 	writeOne := func(base string, r io.Reader) error {
@@ -222,15 +244,15 @@ func extractBinaries(archivePath, dir, goos string) (map[string]string, error) {
 		}
 		defer zr.Close()
 		for _, f := range zr.File {
-			base := filepath.Base(f.Name)
-			if !wanted[base] {
+			name := matchBinary(names, f.Name)
+			if name == "" {
 				continue
 			}
 			rc, err := f.Open()
 			if err != nil {
 				return nil, err
 			}
-			err = writeOne(base, rc)
+			err = writeOne(name, rc)
 			rc.Close()
 			if err != nil {
 				return nil, err
@@ -256,18 +278,18 @@ func extractBinaries(archivePath, dir, goos string) (map[string]string, error) {
 			if err != nil {
 				return nil, err
 			}
-			base := filepath.Base(hdr.Name)
-			if hdr.Typeflag != tar.TypeReg || !wanted[base] {
+			name := matchBinary(names, hdr.Name)
+			if hdr.Typeflag != tar.TypeReg || name == "" {
 				continue
 			}
-			if err := writeOne(base, tr); err != nil {
+			if err := writeOne(name, tr); err != nil {
 				return nil, err
 			}
 		}
 	}
 
-	if len(files) != len(wanted) {
-		return nil, fmt.Errorf("archive missing binaries: extracted %d of %d", len(files), len(wanted))
+	if len(files) != len(names) {
+		return nil, fmt.Errorf("archive missing binaries: extracted %d of %d", len(files), len(names))
 	}
 	return files, nil
 }

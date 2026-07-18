@@ -35,7 +35,6 @@ import (
 	apty "github.com/artyomsv/quil/internal/pty"
 	"github.com/artyomsv/quil/internal/ringbuf"
 	"github.com/artyomsv/quil/internal/shellinit"
-	"github.com/artyomsv/quil/internal/update"
 	"github.com/artyomsv/quil/internal/version"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/vt"
@@ -145,22 +144,7 @@ func (d *Daemon) Start() error {
 		log.Printf("warning: failed to create sessions dir: %v", err)
 	}
 
-	// Re-announce a previously-detected update immediately after restart
-	// (the daily tick would otherwise leave a 1-day blind spot). Only when
-	// the persisted latest is still newer than this (possibly just
-	// upgraded) daemon.
-	if version.IsRelease() && d.cfg.Update.Check {
-		if st := update.LoadState(config.UpdateStatePath()); st.LatestVersion != "" {
-			if cmp, err := version.Compare(st.LatestVersion, version.Current()); err == nil && cmp > 0 {
-				d.setUpdateInfo(&ipc.UpdateInfo{
-					LatestVersion:   st.LatestVersion,
-					ReleaseURL:      st.ReleaseURL,
-					StagedVersion:   st.StagedVersion,
-					InstallWritable: st.InstallWritable,
-				})
-			}
-		}
-	}
+	d.seedUpdateInfoFromState()
 
 	// Hook event ingest plumbing: spool reader + ingester (rate limit +
 	// coalesce) feeding emitHookEvent. Init truncates stale spool files so

@@ -28,6 +28,40 @@ const updateCheckInterval = 24 * time.Hour
 // download + extraction).
 const updateCheckTimeout = 10 * time.Minute
 
+// seedUpdateInfoFromState re-announces a previously-detected update
+// immediately after daemon restart (the daily tick would otherwise leave a
+// 1-day blind spot). Only announces when updates are enabled for this build,
+// checking is turned on, and the persisted latest is still newer than this
+// (possibly just-upgraded) daemon. A StagedVersion claim in state.json is
+// cross-checked against the actual staged manifest on disk — the staged dir
+// can be pruned or deleted between runs, and the TUI must not show "ready"
+// for a phantom stage.
+func (d *Daemon) seedUpdateInfoFromState() {
+	if !version.IsRelease() || !d.cfg.Update.Check || !version.UpdatesEnabled() {
+		return
+	}
+	st := update.LoadState(config.UpdateStatePath())
+	if st.LatestVersion == "" {
+		return
+	}
+	cmp, err := version.Compare(st.LatestVersion, version.Current())
+	if err != nil || cmp <= 0 {
+		return
+	}
+	if st.StagedVersion != "" {
+		man, _, findErr := update.FindStaged(config.UpdateDir())
+		if findErr != nil || man == nil || man.Version != st.StagedVersion {
+			st.StagedVersion = ""
+		}
+	}
+	d.setUpdateInfo(&ipc.UpdateInfo{
+		LatestVersion:   st.LatestVersion,
+		ReleaseURL:      st.ReleaseURL,
+		StagedVersion:   st.StagedVersion,
+		InstallWritable: st.InstallWritable,
+	})
+}
+
 // updateChecker is the daily release check + auto-stage loop. Started from
 // Start() alongside idleChecker; exits on d.shutdown. Entirely inert for
 // dev builds and when [update] check = false.

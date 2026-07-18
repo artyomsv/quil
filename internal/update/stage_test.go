@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -204,6 +205,33 @@ func TestVerifyStaged_DetectsCorruption(t *testing.T) {
 	}
 	if err := VerifyStaged(dir, man); err == nil {
 		t.Error("VerifyStaged on corrupted file = nil error, want error")
+	}
+}
+
+// TestStage_HostileTagRejected asserts a release tag crafted to escape the
+// staging root via its version string ("v1.0.0-../../evil" — the "-" suffix
+// is stripped by version parsing elsewhere, but Version() here does not
+// re-validate it) is rejected before any asset lookup or network I/O, and
+// nothing is created outside <root>/staged/.
+func TestStage_HostileTagRejected(t *testing.T) {
+	rel := &Release{TagName: "v1.99.0-../../evil"} // no assets — a lookup would fail loudly if reached
+	root := t.TempDir()
+	s := &Stager{Root: root, GOOS: "windows", GOARCH: "amd64"}
+
+	err := s.Stage(context.Background(), rel)
+	if err == nil {
+		t.Fatal("Stage with hostile tag = nil error, want error")
+	}
+	if !strings.Contains(err.Error(), "not a safe version") {
+		t.Errorf("Stage error = %q, want mention of \"not a safe version\"", err)
+	}
+
+	entries, readErr := os.ReadDir(root)
+	if readErr != nil {
+		t.Fatalf("ReadDir(root): %v", readErr)
+	}
+	if len(entries) != 0 {
+		t.Errorf("root dir has entries after rejected stage: %v", entries)
 	}
 }
 

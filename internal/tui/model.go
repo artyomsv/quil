@@ -315,6 +315,10 @@ type Model struct {
 	splitDragNode *LayoutNode
 	splitDragRect BorderHit
 
+	// ctxMenu is the pane context menu overlay (right-click / quick_actions).
+	// Zero value = closed. Not a dialogScreen — see ctxmenu.go.
+	ctxMenu ctxMenuState
+
 	// Event-loop performance stats. Pointer so mutations persist across
 	// Bubble Tea's value-receiver copies.
 	perfStats *eventLoopStats

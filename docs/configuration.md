@@ -163,13 +163,16 @@ Automatic update checking and staging.
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `check` | `true` | Daily check for new releases (one unauthenticated GET to `api.github.com`). Set `false` to disable all update networking. |
-| `auto` | `true` | Download and stage new releases in the background. The update applies at the next `quil` launch after a single `[Y/n]` confirmation. Set `false` for notify-only. |
+| `check` | `true` | Daily check for new releases (one unauthenticated GET to `api.github.com`). Set `false` to disable the daily background check. F1 → About → "Check for updates" / "Update now" still contacts GitHub on demand regardless of this setting. |
+| `auto` | `true` | Download and stage new releases in the background once a check finds one. The update applies at the next `quil` launch after a single `[Y/n]` confirmation. Set `false` for notify-only (the daily check still runs; nothing downloads until you trigger it from About). |
 
 A pending update shows as `↑ v<version>` in the status bar (`ready` once
-staged), in F1 → About, and once per version as a startup dialog. Dev
-builds and installs in non-writable locations (package managers) never
-self-update; the latter show the release page URL instead.
+staged), in F1 → About, and once per version as a startup dialog. Dev and
+debug builds never self-update (the pipeline is compiled out via a build-time
+flag, since a self-update would strip the dev/debug ldflags baked into those
+binaries) — see `./scripts/dev.sh build`. Installs in non-writable locations
+(package managers) also never self-update; those show the release page URL
+instead.
 
 ## `[keybindings]`
 

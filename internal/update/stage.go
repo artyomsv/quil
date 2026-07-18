@@ -51,7 +51,7 @@ type Stager struct {
 	Root   string // config.UpdateDir()
 	GOOS   string // runtime.GOOS at prod call sites
 	GOARCH string
-	Client *http.Client // nil → 10 s-timeout default (per request)
+	Client *http.Client // nil → 5 min-timeout default (per request)
 }
 
 func (s *Stager) httpClient() *http.Client {

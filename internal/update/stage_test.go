@@ -1,8 +1,10 @@
 package update
 
 import (
+	"archive/tar"
 	"archive/zip"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -64,6 +66,89 @@ func stageFixture(t *testing.T, tamperChecksum bool) (*Release, *httptest.Server
 		},
 	}
 	return rel, srv
+}
+
+// buildTarGz returns an in-memory gzip'd tar holding the given files — the
+// archive format for 4 of quil's 5 release targets (linux/amd64,
+// linux/arm64, darwin/amd64, darwin/arm64; only windows/amd64 ships a zip).
+func buildTarGz(t *testing.T, files map[string][]byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	for name, data := range files {
+		hdr := &tar.Header{Name: name, Mode: 0755, Size: int64(len(data)), Typeflag: tar.TypeReg}
+		if err := tw.WriteHeader(hdr); err != nil {
+			t.Fatalf("tar header %s: %v", name, err)
+		}
+		if _, err := tw.Write(data); err != nil {
+			t.Fatalf("tar write %s: %v", name, err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("tar close: %v", err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatalf("gzip close: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// stageFixtureTarGz mirrors stageFixture but serves a linux/amd64 tar.gz
+// release — the tar-extraction path in extractBinaries is otherwise
+// completely untested (the zip-only stageFixture exercises the zip branch
+// only).
+func stageFixtureTarGz(t *testing.T) *Release {
+	t.Helper()
+	archive := buildTarGz(t, map[string][]byte{
+		"quil":    []byte("fake-quil-binary"),
+		"quild":   []byte("fake-quild-binary"),
+		"LICENSE": []byte("mit"),
+	})
+	sum := sha256.Sum256(archive)
+	hexSum := hex.EncodeToString(sum[:])
+	name := "quil_0.0.3_linux_amd64.tar.gz"
+	checksums := fmt.Sprintf("%s  %s\n", hexSum, name)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/archive", func(w http.ResponseWriter, r *http.Request) { w.Write(archive) })
+	mux.HandleFunc("/sums", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(checksums)) })
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	return &Release{
+		TagName: "v0.0.3",
+		URL:     "https://example.invalid/rel",
+		Assets: []Asset{
+			{Name: name, DownloadURL: srv.URL + "/archive", Size: int64(len(archive))},
+			{Name: "checksums.txt", DownloadURL: srv.URL + "/sums"},
+		},
+	}
+}
+
+func TestStage_TarGzHappyPath_WritesBinariesAndManifest(t *testing.T) {
+	rel := stageFixtureTarGz(t)
+	root := t.TempDir()
+	s := &Stager{Root: root, GOOS: "linux", GOARCH: "amd64"}
+	if err := s.Stage(context.Background(), rel); err != nil {
+		t.Fatalf("Stage: %v", err)
+	}
+	dir := filepath.Join(root, "staged", "0.0.3")
+	for _, name := range []string{"quil", "quild", "manifest.json"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Errorf("staged file %s missing: %v", name, err)
+		}
+	}
+	man, gotDir, err := FindStaged(root)
+	if err != nil || man == nil {
+		t.Fatalf("FindStaged: man=%v err=%v", man, err)
+	}
+	if man.Version != "0.0.3" || gotDir != dir {
+		t.Errorf("FindStaged = (%q, %q), want (0.0.3, %q)", man.Version, gotDir, dir)
+	}
+	if err := VerifyStaged(dir, man); err != nil {
+		t.Errorf("VerifyStaged on fresh tar.gz stage: %v", err)
+	}
 }
 
 func TestStage_HappyPath_WritesBinariesAndManifest(t *testing.T) {

@@ -1639,6 +1639,80 @@ func (m Model) toggleNotesMode() (tea.Model, tea.Cmd) {
 	return m, tea.Batch(tea.ClearScreen, m.resizeAllPanes(), m.startNotesTick())
 }
 
+// openClosePaneConfirm opens the close-pane confirm dialog for the active
+// pane. Extracted from the kb.ClosePane case; shared with the context menu.
+func (m Model) openClosePaneConfirm() (tea.Model, tea.Cmd) {
+	if tab := m.activeTabModel(); tab != nil {
+		if pane := tab.ActivePaneModel(); pane != nil {
+			m.dialog = dialogConfirm
+			m.confirmKind = "pane"
+			m.confirmID = pane.ID
+			m.confirmName = paneDisplayName(pane)
+		}
+	}
+	return m, tea.ClearScreen
+}
+
+// openRestartPaneConfirm opens the restart confirm dialog for the active
+// pane. Extracted from the kb.RestartPane case; shared with the context menu.
+func (m Model) openRestartPaneConfirm() (tea.Model, tea.Cmd) {
+	if tab := m.activeTabModel(); tab != nil {
+		if pane := tab.ActivePaneModel(); pane != nil {
+			m.dialog = dialogConfirm
+			m.confirmKind = confirmKindRestartPane
+			m.confirmID = pane.ID
+			m.confirmName = paneDisplayName(pane)
+		}
+	}
+	return m, tea.ClearScreen
+}
+
+// beginPaneRename enters inline pane-rename mode for the active pane.
+// Extracted from the kb.RenamePane case; shared with the context menu.
+func (m Model) beginPaneRename() (tea.Model, tea.Cmd) {
+	if tab := m.activeTabModel(); tab != nil {
+		if pane := tab.ActivePaneModel(); pane != nil {
+			m.renamingPane = true
+			m.paneRenameInput = pane.Name
+		}
+	}
+	return m, nil
+}
+
+// toggleFocusForActiveTab toggles focus mode on the active tab. Extracted
+// from the kb.FocusPane case; shared with the context menu.
+func (m Model) toggleFocusForActiveTab() (tea.Model, tea.Cmd) {
+	if tab := m.activeTabModel(); tab != nil && tab.Root != nil {
+		tab.ToggleFocus()
+		m.resizeTabs()
+		return m, tea.Batch(tea.ClearScreen, m.resizeAllPanes())
+	}
+	return m, nil
+}
+
+// openHistoryForActivePane opens the input-history modal for the active
+// pane, gated on the plugin's record_history opt-in. Extracted from the
+// kb.CommandHistory case; shared with the context menu.
+func (m Model) openHistoryForActivePane() (tea.Model, tea.Cmd) {
+	tab := m.activeTabModel()
+	if tab == nil {
+		return m, nil
+	}
+	pane := tab.ActivePaneModel()
+	if pane == nil {
+		return m, nil
+	}
+	supported := false
+	if p := m.pluginRegistry.Get(pane.Type); p != nil {
+		supported = p.Command.RecordHistory
+	}
+	m = m.openHistoryDialog(pane.ID, pane.Type, supported)
+	if supported {
+		return m, m.requestHistory(pane.ID)
+	}
+	return m, nil
+}
+
 // notesEditorBox computes the screen bounding box of the bordered notes
 // notesPanelWidthNumerator / Denominator set the default notes-panel
 // width as a fraction of the available tab area (numerator/denominator).
@@ -2058,23 +2132,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case kbMatches(key, kb.ToggleLazygit):
 		return m, m.handleToggleLazygit()
 	case kbMatches(key, kb.CommandHistory):
-		tab := m.activeTabModel()
-		if tab == nil {
-			return m, nil
-		}
-		pane := tab.ActivePaneModel()
-		if pane == nil {
-			return m, nil
-		}
-		supported := false
-		if p := m.pluginRegistry.Get(pane.Type); p != nil {
-			supported = p.Command.RecordHistory
-		}
-		m = m.openHistoryDialog(pane.ID, pane.Type, supported)
-		if supported {
-			return m, m.requestHistory(pane.ID)
-		}
-		return m, nil
+		return m.openHistoryForActivePane()
 	}
 
 	// Sidebar focused: route keys to notification center
@@ -2139,26 +2197,10 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, m.createTab()
 
 	case kbMatches(key, kb.ClosePane):
-		if tab := m.activeTabModel(); tab != nil {
-			if pane := tab.ActivePaneModel(); pane != nil {
-				m.dialog = dialogConfirm
-				m.confirmKind = "pane"
-				m.confirmID = pane.ID
-				m.confirmName = paneDisplayName(pane)
-			}
-		}
-		return m, tea.ClearScreen
+		return m.openClosePaneConfirm()
 
 	case kbMatches(key, kb.RestartPane):
-		if tab := m.activeTabModel(); tab != nil {
-			if pane := tab.ActivePaneModel(); pane != nil {
-				m.dialog = dialogConfirm
-				m.confirmKind = confirmKindRestartPane
-				m.confirmID = pane.ID
-				m.confirmName = paneDisplayName(pane)
-			}
-		}
-		return m, tea.ClearScreen
+		return m.openRestartPaneConfirm()
 
 	case kbMatches(key, kb.CloseTab):
 		if tab := m.activeTabModel(); tab != nil {
@@ -2189,13 +2231,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case kbMatches(key, kb.RenamePane):
-		if tab := m.activeTabModel(); tab != nil {
-			if pane := tab.ActivePaneModel(); pane != nil {
-				m.renamingPane = true
-				m.paneRenameInput = pane.Name
-			}
-		}
-		return m, nil
+		return m.beginPaneRename()
 
 	case kbMatches(key, kb.CycleTabColor):
 		return m, m.cycleTabColor()
@@ -2293,12 +2329,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, m.pasteClipboard()
 
 	case kbMatches(key, kb.FocusPane):
-		if tab := m.activeTabModel(); tab != nil && tab.Root != nil {
-			tab.ToggleFocus()
-			m.resizeTabs()
-			return m, tea.Batch(tea.ClearScreen, m.resizeAllPanes())
-		}
-		return m, nil
+		return m.toggleFocusForActiveTab()
 
 	case kbMatches(key, kb.NotesToggle):
 		return m.toggleNotesMode()

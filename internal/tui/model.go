@@ -1792,8 +1792,10 @@ func (m Model) openHistoryForActivePane() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	supported := false
-	if p := m.pluginRegistry.Get(pane.Type); p != nil {
-		supported = p.Command.RecordHistory
+	if m.pluginRegistry != nil {
+		if p := m.pluginRegistry.Get(pane.Type); p != nil {
+			supported = p.Command.RecordHistory
+		}
 	}
 	m = m.openHistoryDialog(pane.ID, pane.Type, supported)
 	if supported {

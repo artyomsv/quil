@@ -201,11 +201,26 @@ func renderCtxMenu(s ctxMenuState) string {
 // old target's highlight), kills in-flight drags (one interaction at a
 // time), and drops any live selection — the menu owns the mouse now.
 func (m *Model) openCtxMenu(pane *PaneModel, anchorX, anchorY int) {
-	m.closeCtxMenu()
-	m.clearDragState()
-	m.selection = nil
 	items := m.buildCtxMenuItems(pane)
 	w, h := ctxMenuBoxSize(items)
+	// Bail before any state mutation when the box cannot fit inside the
+	// content area (row 0 is the tab bar, row m.height-1 the status bar, so
+	// the usable content height is m.height-2). overlayAt silently returns
+	// base unchanged when x+boxW > totalW, so opening anyway would leave an
+	// INVISIBLE menu that still captures every keyboard/mouse event until
+	// Esc. Applies to both entry points (right-click and quick_actions).
+	if w > m.width || h > m.height-2 {
+		return
+	}
+	m.closeCtxMenu()
+	m.clearDragState()
+	// Menu wins over a live selection on this path: right-click never
+	// reaches here with a selection active (Update's copy-to-clipboard
+	// branch intercepts it first), but the keyboard entry point
+	// (openQuickActionsMenu / kb.QuickActions) has no such gate — pressing
+	// quick actions mid-selection is treated as abandoning the selection
+	// (Enter remains the copy key), so this unconditionally discards it.
+	m.selection = nil
 	x, y := ctxMenuPos(anchorX, anchorY, w, h, m.width, m.height)
 	m.ctxMenu = ctxMenuState{
 		paneID: pane.ID,
@@ -232,7 +247,9 @@ func (m *Model) closeCtxMenu() {
 // menu as right-click, for the ACTIVE pane, anchored at its content
 // top-left. No-op in notes mode — the key is notes-exempt so it reaches
 // here, but the menu's actions restructure the layout out from under the
-// editor.
+// editor. Unlike right-click (which yields to copy-selection when one is
+// active), this path always wins over a live selection — see the
+// m.selection = nil comment in openCtxMenu.
 func (m Model) openQuickActionsMenu() (tea.Model, tea.Cmd) {
 	if m.notesMode {
 		return m, nil

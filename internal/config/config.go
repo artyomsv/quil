@@ -272,6 +272,12 @@ func Load(path string) (Config, error) {
 	// shell pane. Safe to force-migrate because no legitimate "ctrl+a
 	// opens the menu" customization can exist on disk; the binding did
 	// nothing until this release.
+	//
+	// This patch is in-memory only — Load never writes to disk, so the
+	// legacy value persists on disk until an unrelated Save. The migration
+	// (and its log line) therefore re-fires on every launch, deliberately:
+	// a startup write from every process that loads config (TUI, daemon,
+	// MCP bridge) would race the same file.
 	if cfg.Keybindings.QuickActions == "ctrl+a" {
 		cfg.Keybindings.QuickActions = "alt+a"
 		log.Printf("config: migrated quick_actions ctrl+a -> alt+a (legacy placeholder; ctrl+a stays with the shell)")

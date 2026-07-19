@@ -101,21 +101,7 @@ func overlayAt(base, box string, x, y, totalW int) string {
 		if rightMaxWidth < 0 {
 			rightMaxWidth = 0
 		}
-		right := raw
-		if rawW := ansi.StringWidth(raw); rawW > rightMaxWidth {
-			// Grow the drop count one cell at a time until the leading
-			// straddling glyph (the sole source of the overshoot) is fully
-			// excluded — TruncateLeft only drops a glyph once the drop
-			// count reaches its full width, so a single guess can
-			// under-drop. Bounded by rawW: at most one grapheme's width
-			// worth of iterations.
-			for n := 1; n <= rawW; n++ {
-				if trimmed := ansi.TruncateLeft(raw, n, ""); ansi.StringWidth(trimmed) <= rightMaxWidth {
-					right = trimmed
-					break
-				}
-			}
-		}
+		right := trimOvershoot(raw, rightMaxWidth)
 		// Pad the right tail to match the target width: dropping the
 		// straddling glyph vacates cells at the CUT boundary (the first
 		// cell of the tail, immediately after the box) — prepend (not
@@ -127,4 +113,23 @@ func overlayAt(base, box string, x, y, totalW int) string {
 		baseLines[row] = left + "\x1b[0m" + pad + bl + "\x1b[0m" + right
 	}
 	return strings.Join(baseLines, "\n")
+}
+
+// trimOvershoot grows the drop count one cell at a time until the leading
+// straddling glyph (the sole source of the overshoot) is fully excluded —
+// ansi.TruncateLeft only drops a glyph once the drop count reaches its full
+// width, so a single guess can under-drop. Bounded by the width of raw: at
+// most one grapheme's width worth of iterations. Returns raw unchanged when
+// it already fits within maxWidth.
+func trimOvershoot(raw string, maxWidth int) string {
+	rawW := ansi.StringWidth(raw)
+	if rawW <= maxWidth {
+		return raw
+	}
+	for n := 1; n <= rawW; n++ {
+		if trimmed := ansi.TruncateLeft(raw, n, ""); ansi.StringWidth(trimmed) <= maxWidth {
+			return trimmed
+		}
+	}
+	return raw
 }

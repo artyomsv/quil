@@ -568,21 +568,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Overlay visible: swallow all mouse clicks (keyboard-only v1).
 		// clearDragState ensures no drag flag stays set from before the overlay opened.
+		// The context menu can never be open while the lazygit overlay is
+		// visible, so this swallow is safe to keep ahead of the ctxMenu check.
 		if tab := m.activeTabModel(); tab != nil && tab.overlayVisible {
 			m.clearDragState()
 			return m, nil
 		}
-		// Sidebar overlay region: the press belongs to the sidebar, not
-		// the pane rendered beneath it. Clear drag flags so no half-armed
-		// drag survives the swallowed press.
-		if m.sidebarSwallowsMouse(msg.X, msg.Y) {
-			m.clearDragState()
-			return m, nil
-		}
-		// Context menu open: it owns the mouse. Click on an enabled row
-		// executes; anywhere else inside the box is swallowed; outside
-		// closes — and an outside RIGHT-click falls through to the open
-		// path below so it re-targets in one gesture (OS-menu convention).
+		// Context menu open: it owns the mouse. Checked BEFORE the sidebar
+		// swallow — the menu is drawn (compositor overlay) on TOP of the
+		// sidebar, so a menu clamped near the right edge can show rows over
+		// the sidebar strip. Input priority must match paint priority: if
+		// the sidebar check ran first, a click on a menu row that happens
+		// to overlap the strip would be silently swallowed by the sidebar
+		// instead of executing the visibly-topmost menu item. Click on an
+		// enabled row executes; anywhere else inside the box is swallowed;
+		// outside closes — and an outside RIGHT-click falls through to the
+		// open path below so it re-targets in one gesture (OS-menu
+		// convention), which may include falling into the sidebar swallow
+		// next if the retarget lands there.
 		if m.ctxMenu.open() {
 			if row, inside := ctxMenuHitRow(m.ctxMenu, msg.X, msg.Y); inside {
 				if msg.Button == tea.MouseLeft && row >= 0 && m.ctxMenu.items[row].enabled {
@@ -594,6 +597,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.Button != tea.MouseRight {
 				return m, nil // closing click is consumed, never arms a drag
 			}
+		}
+		// Sidebar overlay region: the press belongs to the sidebar, not
+		// the pane rendered beneath it. Clear drag flags so no half-armed
+		// drag survives the swallowed press.
+		if m.sidebarSwallowsMouse(msg.X, msg.Y) {
+			m.clearDragState()
+			return m, nil
 		}
 		// Right-click: copy the active selection to the clipboard. While
 		// notes mode is on, the editor's selection takes priority.

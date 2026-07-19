@@ -127,6 +127,28 @@ func TestCtxMenu_ExecuteClose_SwitchesTargetAndOpensConfirm(t *testing.T) {
 	}
 }
 
+func TestCtxMenu_Execute_SyncsActiveFlagOnBothPanes(t *testing.T) {
+	t.Parallel()
+	m := newSplitDragTestModel(t) // ActivePane = p1
+	p1 := m.tabs[0].Root.Left.Pane
+	p2 := m.tabs[0].Root.Right.Pane
+	p1.Active = true
+	p2.Active = false
+	updated, _ := m.Update(tea.MouseClickMsg{X: 70, Y: 10, Button: tea.MouseRight})
+	got := updated.(Model) // targeting p2
+	updated, _ = got.executeCtxMenuItem(ctxMenuItem{id: ctxActMute, label: "Mute notifications", enabled: true})
+	got = updated.(Model)
+	if !got.tabs[0].Root.Right.Pane.Active {
+		t.Error("p2.Active should be true after dispatch focuses it")
+	}
+	if got.tabs[0].Root.Left.Pane.Active {
+		t.Error("p1.Active should be false — the old active pane must be cleared")
+	}
+	if got.tabs[0].ActivePane != "p2" {
+		t.Errorf("ActivePane = %q, want p2", got.tabs[0].ActivePane)
+	}
+}
+
 func TestCtxMenu_ExecuteAttention_TogglesPin(t *testing.T) {
 	t.Parallel()
 	m := newSplitDragTestModel(t)
@@ -185,4 +207,65 @@ func TestCtxMenu_WheelAndMotionSwallowedWhileOpen(t *testing.T) {
 		t.Error("motion while open must not feed any drag")
 	}
 	_ = before
+}
+
+// TestCtxMenu_ClickInsideMenu_BeatsSidebarSwallow guards the input-vs-paint
+// ordering bug: the menu is composited over the sidebar (View draws it
+// last), so a menu box clamped near the right edge can show rows on top of
+// the sidebar strip. The click router must match that paint order — a left
+// click on an enabled row must execute the item even when that row's cell
+// also lands inside the sidebar's swallow zone. Regression coverage for
+// routing the ctxMenu case ahead of sidebarSwallowsMouse in
+// tea.MouseClickMsg.
+func TestCtxMenu_ClickInsideMenu_BeatsSidebarSwallow(t *testing.T) {
+	t.Parallel()
+	m := newSplitDragTestModel(t)
+	m.notifications.visible = true
+	sw := m.sidebarOverlayWidth()
+	if sw == 0 {
+		t.Fatal("fixture must produce a visible sidebar strip")
+	}
+	stripX := m.width - sw // first column of the sidebar strip
+
+	// Open the menu on p2, anchored just left of the strip so the clamped
+	// box overlaps it.
+	anchorX := stripX - 2
+	updated, _ := m.Update(tea.MouseClickMsg{X: anchorX, Y: 10, Button: tea.MouseRight})
+	got := updated.(Model)
+	if !got.ctxMenu.open() {
+		t.Fatal("menu should have opened")
+	}
+	boxW, _ := ctxMenuBoxSize(got.ctxMenu.items)
+	if got.ctxMenu.x+boxW <= stripX {
+		t.Fatalf("test setup: box (x=%d w=%d) does not overlap sidebar strip at x=%d — adjust anchor", got.ctxMenu.x, boxW, stripX)
+	}
+
+	// Close is always enabled — find its row and compute the screen
+	// coordinate that lands inside BOTH the menu box and the sidebar strip.
+	closeRow := -1
+	for i, it := range got.ctxMenu.items {
+		if it.id == ctxActClose {
+			closeRow = i
+		}
+	}
+	if closeRow < 0 {
+		t.Fatal("close item not found in menu")
+	}
+	clickY := got.ctxMenu.y + 1 + closeRow
+	clickX := stripX + 1
+	if clickX < got.ctxMenu.x || clickX >= got.ctxMenu.x+boxW {
+		t.Fatalf("test setup: clickX=%d not inside box [%d,%d)", clickX, got.ctxMenu.x, got.ctxMenu.x+boxW)
+	}
+	if clickY < 1 || clickY >= m.height-1 {
+		t.Fatalf("test setup: clickY=%d outside the sidebar's vertical range", clickY)
+	}
+
+	updated, _ = got.Update(tea.MouseClickMsg{X: clickX, Y: clickY, Button: tea.MouseLeft})
+	got2 := updated.(Model)
+	if got2.ctxMenu.open() {
+		t.Error("menu should close on execute")
+	}
+	if got2.dialog != dialogConfirm || got2.confirmKind != "pane" || got2.confirmID != "p2" {
+		t.Errorf("close confirm not armed: dialog=%v kind=%q id=%q — click was swallowed by the sidebar instead of executing the topmost (visibly composited) menu row", got2.dialog, got2.confirmKind, got2.confirmID)
+	}
 }

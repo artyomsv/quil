@@ -284,7 +284,18 @@ func (m Model) executeCtxMenuItem(item ctxMenuItem) (tea.Model, tea.Cmd) {
 	if tab == nil || tab.Root == nil || tab.Root.FindLeaf(paneID) == nil {
 		return m, nil // target vanished between open and execute
 	}
+	// Sync the Active bool alongside ActivePane — mirrors the mouse-release
+	// pane-focus path (model.go) and NavigateDirection (tab.go). Leaving
+	// the old pane's Active flag set would keep its purple border while
+	// the real target renders inactive; ActivePaneModel() only heals a
+	// stale ID, never a stale flag.
+	if old := tab.ActivePaneModel(); old != nil {
+		old.Active = false
+	}
 	tab.ActivePane = paneID
+	if pane, _ := m.findPaneAndTab(paneID); pane != nil {
+		pane.Active = true
+	}
 
 	switch item.id {
 	case ctxActHistory:

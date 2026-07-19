@@ -9,9 +9,9 @@ import (
 
 func testItems() []ctxMenuItem {
 	return []ctxMenuItem{
-		{ctxActHistory, "Input history", false},
-		{ctxActFocus, "Focus mode", true},
-		{ctxActClose, "Close pane…", true},
+		{ctxActHistory, "Input history", false, false},
+		{ctxActFocus, "Focus mode", true, true}, // group boundary below this row
+		{ctxActClose, "Close pane…", true, false},
 	}
 }
 
@@ -47,9 +47,9 @@ func TestCtxMenuBoxSize(t *testing.T) {
 	if w != 17 {
 		t.Errorf("spaced w = %d, want 17", w)
 	}
-	// title + separator (2) + items with spacers (2*3-1=5) + borders (2) = 9.
-	if h != 9 {
-		t.Errorf("spaced h = %d, want 9", h)
+	// title + separator (2) + 3 items + 1 group gap + borders (2) = 8.
+	if h != 8 {
+		t.Errorf("spaced h = %d, want 8", h)
 	}
 
 	s.spaced = false
@@ -66,8 +66,9 @@ func TestCtxMenuBoxSize(t *testing.T) {
 
 func TestCtxMenuHitRow(t *testing.T) {
 	t.Parallel()
-	// Spaced box at (10,5), h=9: y=5 top border, y=6 title, y=7 separator,
-	// items at y=8/10/12 with inert spacers at y=9/11, y=13 bottom border.
+	// Spaced box at (10,5), h=8: y=5 top border, y=6 title, y=7 separator,
+	// items at y=8/9 (same group), group gap at y=10, item 2 at y=11,
+	// y=12 bottom border.
 	s := ctxMenuState{paneID: "p", x: 10, y: 5, spaced: true, items: testItems()}
 	for _, tc := range []struct {
 		name   string
@@ -80,13 +81,13 @@ func TestCtxMenuHitRow(t *testing.T) {
 		{"title row", 12, 6, -1, true},
 		{"separator row", 12, 7, -1, true},
 		{"first item", 12, 8, 0, true},
-		{"spacer row", 12, 9, -1, true},
-		{"second item", 12, 10, 1, true},
-		{"third item", 12, 12, 2, true},
-		{"bottom border", 12, 13, -1, true},
+		{"second item same group", 12, 9, 1, true},
+		{"group gap row", 12, 10, -1, true},
+		{"third item", 12, 11, 2, true},
+		{"bottom border", 12, 12, -1, true},
 		{"left border col", 10, 8, -1, true},
 		{"right border col", 26, 8, -1, true},
-		{"below box", 12, 14, -1, false},
+		{"below box", 12, 13, -1, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			row, inside := ctxMenuHitRow(s, tc.px, tc.py)
@@ -112,7 +113,7 @@ func TestNextEnabled_SkipsDisabledAndWraps(t *testing.T) {
 	if got := nextEnabled(items, 1, -1); got != 2 {
 		t.Errorf("up from 1 wraps past disabled 0 to 2, got %d", got)
 	}
-	none := []ctxMenuItem{{ctxActFocus, "x", false}}
+	none := []ctxMenuItem{{ctxActFocus, "x", false, false}}
 	if got := firstEnabled(none); got != -1 {
 		t.Errorf("all disabled: firstEnabled = %d, want -1", got)
 	}

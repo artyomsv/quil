@@ -28,11 +28,14 @@ const (
 )
 
 // ctxMenuItem is one row of the menu. Disabled rows render greyed, are
-// skipped by cursor movement, and are inert to clicks.
+// skipped by cursor movement, and are inert to clicks. gapAfter draws a
+// blank separator row below this item in the spaced layout — used at group
+// boundaries (view actions / pane settings / destructive), not per row.
 type ctxMenuItem struct {
-	id      ctxMenuAction
-	label   string
-	enabled bool
+	id       ctxMenuAction
+	label    string
+	enabled  bool
+	gapAfter bool
 }
 
 // ctxMenuState is the live state of the pane context menu — a compositor
@@ -43,10 +46,11 @@ type ctxMenuState struct {
 	title  string // pane display name shown as the header row
 	x, y   int    // clamped top-left of the rendered box (screen coords)
 	cursor int    // index into items; always on an enabled item (or -1)
-	// spaced inserts a blank row between items (easier mouse targeting — a
-	// near-miss lands on an inert spacer instead of the neighboring action).
-	// openCtxMenu falls back to the compact layout when the spaced box is
-	// taller than the content area.
+	// spaced honors the items' gapAfter group separators (a blank row
+	// between action groups — near-misses at group edges land on an inert
+	// spacer, and the destructive group stays visually isolated).
+	// openCtxMenu falls back to the compact layout (no separators) when
+	// the spaced box is taller than the content area.
 	spaced bool
 	items  []ctxMenuItem
 }
@@ -97,16 +101,17 @@ func (m *Model) buildCtxMenuItems(pane *PaneModel) []ctxMenuItem {
 	if tab := m.activeTabModel(); tab != nil && tab.FocusMode() {
 		focusLabel = "Exit focus mode"
 	}
+	// Group boundaries (gapAfter): view actions | pane settings | destructive.
 	return []ctxMenuItem{
-		{ctxActHistory, "Input history", historyOK},
-		{ctxActFocus, focusLabel, true},
-		{ctxActNotes, "Open notes", true},
-		{ctxActLazygit, "Open lazygit", lazygitOK},
-		{ctxActRename, "Rename pane", true},
-		{ctxActMute, muteLabel, true},
-		{ctxActAttention, attnLabel, true},
-		{ctxActRestart, "Restart pane…", true},
-		{ctxActClose, "Close pane…", true},
+		{ctxActHistory, "Input history", historyOK, false},
+		{ctxActFocus, focusLabel, true, false},
+		{ctxActNotes, "Open notes", true, false},
+		{ctxActLazygit, "Open lazygit", lazygitOK, true},
+		{ctxActRename, "Rename pane", true, false},
+		{ctxActMute, muteLabel, true, false},
+		{ctxActAttention, attnLabel, true, true},
+		{ctxActRestart, "Restart pane…", true, false},
+		{ctxActClose, "Close pane…", true, false},
 	}
 }
 
@@ -129,46 +134,49 @@ func (s ctxMenuState) innerWidth() int {
 	return w + 2
 }
 
+// gapsBefore counts the group-separator rows above item i in the spaced
+// layout (0 in compact).
+func (s ctxMenuState) gapsBefore(i int) int {
+	if !s.spaced {
+		return 0
+	}
+	n := 0
+	for j := 0; j < i && j < len(s.items); j++ {
+		if s.items[j].gapAfter {
+			n++
+		}
+	}
+	return n
+}
+
 // contentRows is the number of rows between the borders: header (title +
-// blank separator) plus the item block — spaced layout interleaves one
-// blank row between adjacent items.
+// blank separator) plus the item block — spaced layout adds one blank row
+// per gapAfter group boundary.
 func (s ctxMenuState) contentRows() int {
-	n := len(s.items)
-	if n == 0 {
-		return 2
-	}
-	if s.spaced {
-		return 2 + 2*n - 1
-	}
-	return 2 + n
+	return 2 + len(s.items) + s.gapsBefore(len(s.items))
 }
 
 // itemContentRow maps an item index to its content row (0-based, first row
 // under the top border). Rows 0/1 are the title and separator.
 func (s ctxMenuState) itemContentRow(i int) int {
-	if s.spaced {
-		return 2 + 2*i
-	}
-	return 2 + i
+	return 2 + i + s.gapsBefore(i)
 }
 
 // itemAtContentRow is the inverse of itemContentRow: -1 for the header rows
-// and the inert spacer rows between items.
+// and the inert group-separator rows.
 func (s ctxMenuState) itemAtContentRow(r int) int {
-	r -= 2
-	if r < 0 {
+	if r < 2 {
 		return -1
 	}
-	if s.spaced {
-		if r%2 != 0 {
-			return -1
+	for i := range s.items {
+		switch row := s.itemContentRow(i); {
+		case row == r:
+			return i
+		case row > r:
+			return -1 // r landed on a separator row
 		}
-		r /= 2
 	}
-	if r >= len(s.items) {
-		return -1
-	}
-	return r
+	return -1
 }
 
 // itemScreenY is the absolute screen row of item i (for tests and hit-test
@@ -274,7 +282,7 @@ func renderCtxMenu(s ctxMenuState) string {
 		blank,
 	)
 	for i, it := range s.items {
-		if s.spaced && i > 0 {
+		if s.spaced && i > 0 && s.items[i-1].gapAfter {
 			rows = append(rows, blank)
 		}
 		label := " " + it.label + strings.Repeat(" ", innerW-lipgloss.Width(it.label)-2) + " "

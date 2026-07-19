@@ -499,7 +499,7 @@ func TestCtxMenu_TitleShowsPaneDisplayName(t *testing.T) {
 func TestCtxMenu_CompactFallbackOnShortTerminal(t *testing.T) {
 	t.Parallel()
 	m := newSplitDragTestModel(t)
-	m.height = 20 // content area 18: spaced box (21) can't fit, compact (13) can
+	m.height = 16 // content area 14: spaced box (15) can't fit, compact (13) can
 	updated, _ := m.Update(tea.MouseClickMsg{X: 20, Y: 10, Button: tea.MouseRight})
 	got := updated.(Model)
 	if !got.ctxMenu.open() {

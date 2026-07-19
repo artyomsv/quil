@@ -5,6 +5,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // ctxMenuAction identifies one entry in the pane context menu. Dispatch in
@@ -39,15 +40,27 @@ type ctxMenuItem struct {
 // this popup is positional and dismiss-on-outside-click. Zero value = closed.
 type ctxMenuState struct {
 	paneID string // target pane; "" = closed
+	title  string // pane display name shown as the header row
 	x, y   int    // clamped top-left of the rendered box (screen coords)
 	cursor int    // index into items; always on an enabled item (or -1)
+	// spaced inserts a blank row between items (easier mouse targeting — a
+	// near-miss lands on an inert spacer instead of the neighboring action).
+	// openCtxMenu falls back to the compact layout when the spaced box is
+	// taller than the content area.
+	spaced bool
 	items  []ctxMenuItem
 }
 
 func (s ctxMenuState) open() bool { return s.paneID != "" }
 
+// ctxMenuTitleCap bounds how far the header (pane display name — often a
+// CWD) may widen the box beyond the widest item label. Longer titles are
+// truncated at render; item labels always fit untruncated.
+const ctxMenuTitleCap = 28
+
 var (
 	ctxMenuBorderStyle   = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("39"))
+	ctxMenuTitleStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Bold(true)
 	ctxMenuItemStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
 	ctxMenuCursorStyle   = lipgloss.NewStyle().Reverse(true)
 	ctxMenuDisabledStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240")) // same grey as uninstalled plugins in Ctrl+N
@@ -77,9 +90,16 @@ func (m *Model) buildCtxMenuItems(pane *PaneModel) []ctxMenuItem {
 	if pane.pinnedAttention {
 		attnLabel = "Unmark attention"
 	}
+	// The focus item toggles tab-level focus mode, so its label reflects the
+	// ACTIVE TAB's current state (the menu always targets a pane on the
+	// active tab; in focus mode the only clickable pane IS the focused one).
+	focusLabel := "Enter focus mode"
+	if tab := m.activeTabModel(); tab != nil && tab.FocusMode() {
+		focusLabel = "Exit focus mode"
+	}
 	return []ctxMenuItem{
 		{ctxActHistory, "Input history", historyOK},
-		{ctxActFocus, "Focus mode", true},
+		{ctxActFocus, focusLabel, true},
 		{ctxActNotes, "Open notes", true},
 		{ctxActLazygit, "Open lazygit", lazygitOK},
 		{ctxActRename, "Rename pane", true},
@@ -90,23 +110,78 @@ func (m *Model) buildCtxMenuItems(pane *PaneModel) []ctxMenuItem {
 	}
 }
 
-// ctxMenuInnerWidth is the content width: longest label + one space of
-// padding on each side. lipgloss.Width is rune/wide-glyph aware.
-func ctxMenuInnerWidth(items []ctxMenuItem) int {
+// innerWidth is the content width: the longest item label (or the
+// cap-bounded title, whichever is wider) + one space of padding on each
+// side. lipgloss.Width is rune/wide-glyph aware.
+func (s ctxMenuState) innerWidth() int {
 	w := 0
-	for _, it := range items {
+	for _, it := range s.items {
 		if lw := lipgloss.Width(it.label); lw > w {
 			w = lw
 		}
 	}
+	if tw := lipgloss.Width(s.title); tw > w {
+		w = tw
+	}
+	if w > ctxMenuTitleCap {
+		w = ctxMenuTitleCap
+	}
 	return w + 2
 }
 
-// ctxMenuBoxSize returns the rendered box dimensions including the border.
-// MUST stay in lockstep with renderCtxMenu — ctxMenuPos and ctxMenuHitRow
-// both derive geometry from it.
-func ctxMenuBoxSize(items []ctxMenuItem) (w, h int) {
-	return ctxMenuInnerWidth(items) + 2, len(items) + 2
+// contentRows is the number of rows between the borders: header (title +
+// blank separator) plus the item block — spaced layout interleaves one
+// blank row between adjacent items.
+func (s ctxMenuState) contentRows() int {
+	n := len(s.items)
+	if n == 0 {
+		return 2
+	}
+	if s.spaced {
+		return 2 + 2*n - 1
+	}
+	return 2 + n
+}
+
+// itemContentRow maps an item index to its content row (0-based, first row
+// under the top border). Rows 0/1 are the title and separator.
+func (s ctxMenuState) itemContentRow(i int) int {
+	if s.spaced {
+		return 2 + 2*i
+	}
+	return 2 + i
+}
+
+// itemAtContentRow is the inverse of itemContentRow: -1 for the header rows
+// and the inert spacer rows between items.
+func (s ctxMenuState) itemAtContentRow(r int) int {
+	r -= 2
+	if r < 0 {
+		return -1
+	}
+	if s.spaced {
+		if r%2 != 0 {
+			return -1
+		}
+		r /= 2
+	}
+	if r >= len(s.items) {
+		return -1
+	}
+	return r
+}
+
+// itemScreenY is the absolute screen row of item i (for tests and hit-test
+// call sites that need the forward mapping).
+func (s ctxMenuState) itemScreenY(i int) int {
+	return s.y + 1 + s.itemContentRow(i)
+}
+
+// boxSize returns the rendered box dimensions including the border. MUST
+// stay in lockstep with renderCtxMenu — ctxMenuPos and ctxMenuHitRow both
+// derive geometry from it.
+func (s ctxMenuState) boxSize() (w, h int) {
+	return s.innerWidth() + 2, s.contentRows() + 2
 }
 
 // ctxMenuPos clamps the menu's top-left so the whole box stays inside the
@@ -131,19 +206,22 @@ func ctxMenuPos(anchorX, anchorY, boxW, boxH, screenW, screenH int) (int, int) {
 	return x, y
 }
 
-// ctxMenuHitRow maps a screen coordinate to a menu row. inside=false means
-// the point is outside the box entirely; (-1, true) means inside the box but
-// on the border, not on an item row.
+// ctxMenuHitRow maps a screen coordinate to an item index. inside=false
+// means the point is outside the box entirely; (-1, true) means inside the
+// box but on no item (border, title, separator, or a spacer row).
 func ctxMenuHitRow(s ctxMenuState, x, y int) (int, bool) {
-	w, h := ctxMenuBoxSize(s.items)
+	w, h := s.boxSize()
 	if x < s.x || x >= s.x+w || y < s.y || y >= s.y+h {
 		return -1, false
 	}
-	row := y - s.y - 1
-	if row < 0 || row >= len(s.items) || x == s.x || x == s.x+w-1 {
+	if x == s.x || x == s.x+w-1 {
 		return -1, true
 	}
-	return row, true
+	i := s.itemAtContentRow(y - s.y - 1)
+	if i < 0 {
+		return -1, true
+	}
+	return i, true
 }
 
 // firstEnabled returns the index of the first enabled item, or -1.
@@ -176,21 +254,37 @@ func nextEnabled(items []ctxMenuItem, cur, dir int) int {
 	return cur
 }
 
-// renderCtxMenu draws the menu box. Every content line is padded to exactly
-// ctxMenuInnerWidth so the border renders a straight right edge and
-// ctxMenuBoxSize's geometry matches the output cell-for-cell.
+// renderCtxMenu draws the menu box: a title row (target pane's display
+// name), a blank separator, then the items — with a blank spacer between
+// adjacent items in the spaced layout. Every content line is padded to
+// exactly innerWidth so the border renders a straight right edge and
+// boxSize's geometry matches the output cell-for-cell (itemContentRow /
+// itemAtContentRow depend on this row order).
 func renderCtxMenu(s ctxMenuState) string {
-	innerW := ctxMenuInnerWidth(s.items)
-	rows := make([]string, len(s.items))
+	innerW := s.innerWidth()
+	blank := strings.Repeat(" ", innerW)
+	rows := make([]string, 0, s.contentRows())
+
+	title := s.title
+	if lipgloss.Width(title) > innerW-2 {
+		title = ansi.Truncate(title, innerW-3, "…")
+	}
+	rows = append(rows,
+		ctxMenuTitleStyle.Render(" "+title+strings.Repeat(" ", innerW-lipgloss.Width(title)-2)+" "),
+		blank,
+	)
 	for i, it := range s.items {
+		if s.spaced && i > 0 {
+			rows = append(rows, blank)
+		}
 		label := " " + it.label + strings.Repeat(" ", innerW-lipgloss.Width(it.label)-2) + " "
 		switch {
 		case !it.enabled:
-			rows[i] = ctxMenuDisabledStyle.Render(label)
+			rows = append(rows, ctxMenuDisabledStyle.Render(label))
 		case i == s.cursor:
-			rows[i] = ctxMenuCursorStyle.Render(label)
+			rows = append(rows, ctxMenuCursorStyle.Render(label))
 		default:
-			rows[i] = ctxMenuItemStyle.Render(label)
+			rows = append(rows, ctxMenuItemStyle.Render(label))
 		}
 	}
 	return ctxMenuBorderStyle.Render(strings.Join(rows, "\n"))
@@ -201,14 +295,28 @@ func renderCtxMenu(s ctxMenuState) string {
 // old target's highlight), kills in-flight drags (one interaction at a
 // time), and drops any live selection — the menu owns the mouse now.
 func (m *Model) openCtxMenu(pane *PaneModel, anchorX, anchorY int) {
-	items := m.buildCtxMenuItems(pane)
-	w, h := ctxMenuBoxSize(items)
-	// Bail before any state mutation when the box cannot fit inside the
-	// content area (row 0 is the tab bar, row m.height-1 the status bar, so
-	// the usable content height is m.height-2). overlayAt silently returns
-	// base unchanged when x+boxW > totalW, so opening anyway would leave an
-	// INVISIBLE menu that still captures every keyboard/mouse event until
-	// Esc. Applies to both entry points (right-click and quick_actions).
+	s := ctxMenuState{
+		paneID: pane.ID,
+		title:  paneDisplayName(pane),
+		spaced: true,
+		cursor: -1,
+		items:  m.buildCtxMenuItems(pane),
+	}
+	s.cursor = firstEnabled(s.items)
+	w, h := s.boxSize()
+	// Prefer the spaced layout (blank row between items — forgiving mouse
+	// targets); fall back to compact when the content area is too short.
+	if h > m.height-2 {
+		s.spaced = false
+		w, h = s.boxSize()
+	}
+	// Bail before any state mutation when even the compact box cannot fit
+	// inside the content area (row 0 is the tab bar, row m.height-1 the
+	// status bar, so the usable content height is m.height-2). overlayAt
+	// silently returns base unchanged when x+boxW > totalW, so opening
+	// anyway would leave an INVISIBLE menu that still captures every
+	// keyboard/mouse event until Esc. Applies to both entry points
+	// (right-click and quick_actions).
 	if w > m.width || h > m.height-2 {
 		return
 	}
@@ -221,14 +329,8 @@ func (m *Model) openCtxMenu(pane *PaneModel, anchorX, anchorY int) {
 	// quick actions mid-selection is treated as abandoning the selection
 	// (Enter remains the copy key), so this unconditionally discards it.
 	m.selection = nil
-	x, y := ctxMenuPos(anchorX, anchorY, w, h, m.width, m.height)
-	m.ctxMenu = ctxMenuState{
-		paneID: pane.ID,
-		x:      x,
-		y:      y,
-		cursor: firstEnabled(items),
-		items:  items,
-	}
+	s.x, s.y = ctxMenuPos(anchorX, anchorY, w, h, m.width, m.height)
+	m.ctxMenu = s
 	pane.ctxTargetHighlight = true
 }
 

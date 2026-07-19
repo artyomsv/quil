@@ -2092,6 +2092,14 @@ func (m Model) View() tea.View {
 	v := tea.NewView(content)
 	v.AltScreen = true
 	v.MouseMode = tea.MouseModeCellMotion
+	if m.ctxMenu.open() {
+		// Cell-motion only reports motion while a button is held, so the
+		// context menu's hover highlight would be dead under it. All-motion
+		// is scoped to exactly the frames where the menu is open — the
+		// flood of buttonless motion events ends the moment it closes (the
+		// menu's Update routing swallows them meanwhile).
+		v.MouseMode = tea.MouseModeAllMotion
+	}
 	// v.Cursor stays nil — the hardware cursor is never shown. Every pane
 	// type gets a software reverse-video caret drawn into the frame by
 	// renderContent/insertCursor instead. Positioning the real cursor via

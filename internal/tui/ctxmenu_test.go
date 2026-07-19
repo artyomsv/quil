@@ -40,19 +40,35 @@ func TestCtxMenuPos_Clamping(t *testing.T) {
 
 func TestCtxMenuBoxSize(t *testing.T) {
 	t.Parallel()
-	w, h := ctxMenuBoxSize(testItems())
-	// Longest label "Input history" = 13 cells; +2 padding +2 border = 17.
+	// Longest label "Input history" = 13 cells; short title doesn't widen;
+	// +2 padding +2 border = 17.
+	s := ctxMenuState{paneID: "p", title: "p1", spaced: true, items: testItems()}
+	w, h := s.boxSize()
 	if w != 17 {
-		t.Errorf("w = %d, want 17", w)
+		t.Errorf("spaced w = %d, want 17", w)
 	}
-	if h != 5 { // 3 items + 2 border rows
-		t.Errorf("h = %d, want 5", h)
+	// title + separator (2) + items with spacers (2*3-1=5) + borders (2) = 9.
+	if h != 9 {
+		t.Errorf("spaced h = %d, want 9", h)
+	}
+
+	s.spaced = false
+	if _, h = s.boxSize(); h != 7 { // title + separator (2) + 3 items + borders (2)
+		t.Errorf("compact h = %d, want 7", h)
+	}
+
+	// A long title widens the box only up to ctxMenuTitleCap.
+	s.title = strings.Repeat("x", ctxMenuTitleCap+20)
+	if w, _ = s.boxSize(); w != ctxMenuTitleCap+2+2 {
+		t.Errorf("capped w = %d, want %d", w, ctxMenuTitleCap+4)
 	}
 }
 
 func TestCtxMenuHitRow(t *testing.T) {
 	t.Parallel()
-	s := ctxMenuState{paneID: "p", x: 10, y: 5, items: testItems()}
+	// Spaced box at (10,5), h=9: y=5 top border, y=6 title, y=7 separator,
+	// items at y=8/10/12 with inert spacers at y=9/11, y=13 bottom border.
+	s := ctxMenuState{paneID: "p", x: 10, y: 5, spaced: true, items: testItems()}
 	for _, tc := range []struct {
 		name   string
 		px, py int
@@ -61,11 +77,16 @@ func TestCtxMenuHitRow(t *testing.T) {
 	}{
 		{"outside left", 9, 6, -1, false},
 		{"top border", 12, 5, -1, true},
-		{"first item", 12, 6, 0, true},
-		{"third item", 12, 8, 2, true},
-		{"bottom border", 12, 9, -1, true},
-		{"left border col", 10, 6, -1, true},
-		{"below box", 12, 10, -1, false},
+		{"title row", 12, 6, -1, true},
+		{"separator row", 12, 7, -1, true},
+		{"first item", 12, 8, 0, true},
+		{"spacer row", 12, 9, -1, true},
+		{"second item", 12, 10, 1, true},
+		{"third item", 12, 12, 2, true},
+		{"bottom border", 12, 13, -1, true},
+		{"left border col", 10, 8, -1, true},
+		{"right border col", 26, 8, -1, true},
+		{"below box", 12, 14, -1, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			row, inside := ctxMenuHitRow(s, tc.px, tc.py)
@@ -128,20 +149,41 @@ func TestBuildCtxMenuItems_LabelsAndGates(t *testing.T) {
 	if !byID[ctxActClose].enabled || !byID[ctxActFocus].enabled {
 		t.Error("close/focus must always be enabled")
 	}
+	// Focus label tracks the active tab's focus-mode state.
+	if byID[ctxActFocus].label != "Enter focus mode" {
+		t.Errorf("focus label = %q, want Enter focus mode", byID[ctxActFocus].label)
+	}
+	m.tabs[0].ToggleFocus()
+	items = m.buildCtxMenuItems(pane)
+	for _, it := range items {
+		if it.id == ctxActFocus && it.label != "Exit focus mode" {
+			t.Errorf("focus label in focus mode = %q, want Exit focus mode", it.label)
+		}
+	}
 }
 
 func TestRenderCtxMenu_Dimensions(t *testing.T) {
 	t.Parallel()
-	s := ctxMenuState{paneID: "p", cursor: 1, items: testItems()}
-	out := renderCtxMenu(s)
-	lines := strings.Split(out, "\n")
-	w, h := ctxMenuBoxSize(s.items)
-	if len(lines) != h {
-		t.Fatalf("rendered height = %d, want %d", len(lines), h)
-	}
-	for i, l := range lines {
-		if got := ansi.StringWidth(l); got != w {
-			t.Errorf("line %d width = %d, want %d", i, got, w)
+	for _, spaced := range []bool{true, false} {
+		// Overlong title exercises the render-time truncation: the box must
+		// keep its cell-exact geometry regardless of the title's raw length.
+		s := ctxMenuState{
+			paneID: "p",
+			title:  strings.Repeat("t", ctxMenuTitleCap+10),
+			cursor: 1,
+			spaced: spaced,
+			items:  testItems(),
+		}
+		out := renderCtxMenu(s)
+		lines := strings.Split(out, "\n")
+		w, h := s.boxSize()
+		if len(lines) != h {
+			t.Fatalf("spaced=%v: rendered height = %d, want %d", spaced, len(lines), h)
+		}
+		for i, l := range lines {
+			if got := ansi.StringWidth(l); got != w {
+				t.Errorf("spaced=%v: line %d width = %d, want %d", spaced, i, got, w)
+			}
 		}
 	}
 }

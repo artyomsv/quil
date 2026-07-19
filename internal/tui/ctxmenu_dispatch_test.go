@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -24,7 +25,7 @@ func TestCtxMenu_RightClickOpensForPaneUnderCursor(t *testing.T) {
 		t.Error("target pane border highlight should be set")
 	}
 	// Position is clamped inside the content area.
-	w, h := ctxMenuBoxSize(got.ctxMenu.items)
+	w, h := got.ctxMenu.boxSize()
 	if got.ctxMenu.x+w > 100 || got.ctxMenu.y+h > 39 || got.ctxMenu.y < 1 {
 		t.Errorf("menu box (%d,%d,%dx%d) escapes the content area", got.ctxMenu.x, got.ctxMenu.y, w, h)
 	}
@@ -235,7 +236,7 @@ func TestCtxMenu_ClickInsideMenu_BeatsSidebarSwallow(t *testing.T) {
 	if !got.ctxMenu.open() {
 		t.Fatal("menu should have opened")
 	}
-	boxW, _ := ctxMenuBoxSize(got.ctxMenu.items)
+	boxW, _ := got.ctxMenu.boxSize()
 	if got.ctxMenu.x+boxW <= stripX {
 		t.Fatalf("test setup: box (x=%d w=%d) does not overlap sidebar strip at x=%d — adjust anchor", got.ctxMenu.x, boxW, stripX)
 	}
@@ -251,7 +252,7 @@ func TestCtxMenu_ClickInsideMenu_BeatsSidebarSwallow(t *testing.T) {
 	if closeRow < 0 {
 		t.Fatal("close item not found in menu")
 	}
-	clickY := got.ctxMenu.y + 1 + closeRow
+	clickY := got.ctxMenu.itemScreenY(closeRow)
 	clickX := stripX + 1
 	if clickX < got.ctxMenu.x || clickX >= got.ctxMenu.x+boxW {
 		t.Fatalf("test setup: clickX=%d not inside box [%d,%d)", clickX, got.ctxMenu.x, got.ctxMenu.x+boxW)
@@ -441,7 +442,7 @@ func TestCtxMenu_HoverMovesCursorOnEnabledRow_NotOnDisabled(t *testing.T) {
 	}
 
 	hoverX := got.ctxMenu.x + 1
-	hoverY := got.ctxMenu.y + 1 + enabledRow
+	hoverY := got.ctxMenu.itemScreenY(enabledRow)
 	updated, _ = got.Update(tea.MouseMotionMsg{X: hoverX, Y: hoverY})
 	got2 := updated.(Model)
 	if got2.ctxMenu.cursor != enabledRow {
@@ -449,10 +450,65 @@ func TestCtxMenu_HoverMovesCursorOnEnabledRow_NotOnDisabled(t *testing.T) {
 	}
 
 	before := got2.ctxMenu.cursor
-	disabledY := got2.ctxMenu.y + 1 // row 0
+	disabledY := got2.ctxMenu.itemScreenY(0) // Input history — disabled
 	updated, _ = got2.Update(tea.MouseMotionMsg{X: hoverX, Y: disabledY})
 	got3 := updated.(Model)
 	if got3.ctxMenu.cursor != before {
 		t.Errorf("hover on disabled row must not move cursor: got %d, want %d", got3.ctxMenu.cursor, before)
+	}
+}
+
+// TestCtxMenu_ViewSwitchesToAllMotionWhileOpen: cell-motion never delivers
+// buttonless hover, so View must request all-motion exactly while the menu
+// is open — that is what makes the hover highlight work.
+func TestCtxMenu_ViewSwitchesToAllMotionWhileOpen(t *testing.T) {
+	t.Parallel()
+	m := newSplitDragTestModel(t)
+	if v := m.View(); v.MouseMode != tea.MouseModeCellMotion {
+		t.Errorf("closed menu: MouseMode = %v, want CellMotion", v.MouseMode)
+	}
+	updated, _ := m.Update(tea.MouseClickMsg{X: 20, Y: 10, Button: tea.MouseRight})
+	got := updated.(Model)
+	if !got.ctxMenu.open() {
+		t.Fatal("menu should have opened")
+	}
+	if v := got.View(); v.MouseMode != tea.MouseModeAllMotion {
+		t.Errorf("open menu: MouseMode = %v, want AllMotion", v.MouseMode)
+	}
+}
+
+// TestCtxMenu_TitleShowsPaneDisplayName: the header row carries the target
+// pane's display name so the user can see which pane the actions will hit.
+func TestCtxMenu_TitleShowsPaneDisplayName(t *testing.T) {
+	t.Parallel()
+	m := newSplitDragTestModel(t)
+	m.tabs[0].Root.Right.Pane.Name = "builds"
+	updated, _ := m.Update(tea.MouseClickMsg{X: 70, Y: 10, Button: tea.MouseRight})
+	got := updated.(Model)
+	if got.ctxMenu.title != "builds" {
+		t.Errorf("title = %q, want the target pane's display name", got.ctxMenu.title)
+	}
+	if !strings.Contains(renderCtxMenu(got.ctxMenu), "builds") {
+		t.Error("rendered menu should contain the pane display name header")
+	}
+}
+
+// TestCtxMenu_CompactFallbackOnShortTerminal: when the spaced box is taller
+// than the content area but the compact one fits, the menu opens compact
+// instead of not at all.
+func TestCtxMenu_CompactFallbackOnShortTerminal(t *testing.T) {
+	t.Parallel()
+	m := newSplitDragTestModel(t)
+	m.height = 20 // content area 18: spaced box (21) can't fit, compact (13) can
+	updated, _ := m.Update(tea.MouseClickMsg{X: 20, Y: 10, Button: tea.MouseRight})
+	got := updated.(Model)
+	if !got.ctxMenu.open() {
+		t.Fatal("menu should open in compact layout on a short terminal")
+	}
+	if got.ctxMenu.spaced {
+		t.Error("menu should have fallen back to the compact layout")
+	}
+	if _, h := got.ctxMenu.boxSize(); h > m.height-2 {
+		t.Errorf("compact box h=%d still exceeds content area %d", h, m.height-2)
 	}
 }

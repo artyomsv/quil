@@ -213,6 +213,33 @@ func TestLoad_MissingUpdateSection_KeepsDefaults(t *testing.T) {
 	}
 }
 
+func TestLoad_MigratesLegacyQuickActions(t *testing.T) {
+	legacyPath := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(legacyPath, []byte("[keybindings]\nquick_actions = \"ctrl+a\"\n"), 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := config.Load(legacyPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Keybindings.QuickActions != "alt+a" {
+		t.Errorf("QuickActions = %q, want migrated alt+a", cfg.Keybindings.QuickActions)
+	}
+
+	// A deliberate, non-legacy customization must survive untouched.
+	customPath := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(customPath, []byte("[keybindings]\nquick_actions = \"ctrl+x\"\n"), 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err = config.Load(customPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Keybindings.QuickActions != "ctrl+x" {
+		t.Errorf("QuickActions = %q, want untouched ctrl+x", cfg.Keybindings.QuickActions)
+	}
+}
+
 func TestUpdatePaths_UnderQuilDir(t *testing.T) {
 	t.Setenv("QUIL_HOME", filepath.Join(t.TempDir(), "qh"))
 	root := config.QuilDir()

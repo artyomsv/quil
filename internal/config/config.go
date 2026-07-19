@@ -3,6 +3,7 @@ package config
 import (
 	"bytes"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -259,6 +260,21 @@ func Load(path string) (Config, error) {
 	cfg := Default()
 	if _, err := toml.DecodeFile(path, &cfg); err != nil {
 		return cfg, err
+	}
+	// Legacy quick_actions migration: ctrl+a was the M1 placeholder value —
+	// it was never wired to any handler, so it was inert on every config
+	// that predates this release. But Save serializes the WHOLE
+	// KeybindingsConfig struct (not just fields the user touched), so any
+	// config.toml that was ever saved by an old build round-trips
+	// quick_actions = "ctrl+a" back onto disk. Left alone, Load would
+	// resurrect that dead value and the new context-menu binding would
+	// hijack ctrl+a — readline beginning-of-line — out from under every
+	// shell pane. Safe to force-migrate because no legitimate "ctrl+a
+	// opens the menu" customization can exist on disk; the binding did
+	// nothing until this release.
+	if cfg.Keybindings.QuickActions == "ctrl+a" {
+		cfg.Keybindings.QuickActions = "alt+a"
+		log.Printf("config: migrated quick_actions ctrl+a -> alt+a (legacy placeholder; ctrl+a stays with the shell)")
 	}
 	return cfg, nil
 }

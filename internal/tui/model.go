@@ -3159,7 +3159,8 @@ func (m Model) tabLabel(idx int) string {
 }
 
 // tabStyle returns the lipgloss style for the tab at idx. Precedence: green
-// unseen mark (background tab with an unfocused finished pane) > custom tab
+// unseen mark (background tab with an unfocused finished pane, OR a tab
+// containing a pane pinned for attention via the context menu) > custom tab
 // color > active/inactive default. Shared by renderTabBar and hitTestTab so
 // rendered widths and click hit-testing never diverge.
 func (m Model) tabStyle(idx int) lipgloss.Style {

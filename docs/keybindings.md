@@ -92,6 +92,12 @@ Terminal.app has no distinct combo for a multi-word "fast jump" (`Option+Shift+A
 to `Option+Arrow` and `Cmd` is reserved by macOS), so that remains available only on
 Kitty-protocol terminals (Ghostty, WezTerm, iTerm2).
 
+Note: `Alt+A` (`Option+A` under Option-as-Meta) is bound to `quick_actions` — opening the pane
+context menu — so `ESC-a` (emacs `M-a`, backward-sentence) no longer reaches the PTY. This is
+deliberate and consistent with the other single-letter Alt-layer bindings Quil already
+intercepts (`Alt+G`, `Alt+M`, `Alt+N`, `Alt+E`, …); rebind `quick_actions` in `config.toml` if
+you rely on `M-a` in a pane's readline.
+
 ## Notes editor
 
 | Key | Action |

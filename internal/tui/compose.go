@@ -85,22 +85,44 @@ func overlayAt(base, box string, x, y, totalW int) string {
 			pad = strings.Repeat(" ", n)
 		}
 		// Cut the right part starting from x + boxW to the end.
-		// If a wide glyph straddles the cut boundary, ansi.Cut may include it,
-		// so we cap the result to the remaining width.
+		// ansi.Cut's left boundary is generous: when cutStartCell lands
+		// mid-glyph, it keeps that straddling glyph whole rather than
+		// dropping it, so raw can start up to one glyph too early —
+		// overlapping the box's last column instead of starting cleanly
+		// after it. Trim the overshoot off the FRONT of raw (dropping the
+		// straddling glyph, not the true tail) so every fully-intact glyph
+		// after it keeps its original screen column. The trailing edge
+		// (baselineWidth) never straddles anything — it's the string's own
+		// end — so only the front needs this correction.
 		baselineWidth := ansi.StringWidth(baseLines[row])
 		cutStartCell := x + ansi.StringWidth(bl)
-		right := ansi.Cut(baseLines[row], cutStartCell, baselineWidth)
+		raw := ansi.Cut(baseLines[row], cutStartCell, baselineWidth)
 		rightMaxWidth := baselineWidth - cutStartCell
 		if rightMaxWidth < 0 {
 			rightMaxWidth = 0
 		}
-		if rightMaxWidth > 0 && ansi.StringWidth(right) > rightMaxWidth {
-			right = ansi.Truncate(right, rightMaxWidth, "")
+		right := raw
+		if rawW := ansi.StringWidth(raw); rawW > rightMaxWidth {
+			// Grow the drop count one cell at a time until the leading
+			// straddling glyph (the sole source of the overshoot) is fully
+			// excluded — TruncateLeft only drops a glyph once the drop
+			// count reaches its full width, so a single guess can
+			// under-drop. Bounded by rawW: at most one grapheme's width
+			// worth of iterations.
+			for n := 1; n <= rawW; n++ {
+				if trimmed := ansi.TruncateLeft(raw, n, ""); ansi.StringWidth(trimmed) <= rightMaxWidth {
+					right = trimmed
+					break
+				}
+			}
 		}
-		// Pad the right tail to match the target width: when Truncate drops a
-		// wide glyph, right may undershoot rightMaxWidth.
+		// Pad the right tail to match the target width: dropping the
+		// straddling glyph vacates cells at the CUT boundary (the first
+		// cell of the tail, immediately after the box) — prepend (not
+		// append) the pad so every surviving glyph keeps its true screen
+		// column instead of sliding left to fill a gap it never had.
 		if n := rightMaxWidth - ansi.StringWidth(right); n > 0 {
-			right += strings.Repeat(" ", n)
+			right = strings.Repeat(" ", n) + right
 		}
 		baseLines[row] = left + "\x1b[0m" + pad + bl + "\x1b[0m" + right
 	}

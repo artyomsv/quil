@@ -154,3 +154,25 @@ func TestOverlayAt_WideGlyphAtRightCut_KeepsTotalWidth(t *testing.T) {
 		t.Errorf("single-cell box: width = %d, want 10", w)
 	}
 }
+
+// TestOverlayAt_WideGlyphAtRightCut_PinsContentPosition pins the tail's
+// exact CONTENT, not just its width — the invariant is that every
+// surviving tail glyph keeps its original screen column.
+//
+// Hand-traced: base "你好你好你" is 你(cols0-1) 好(cols2-3) 你(cols4-5)
+// 好(cols6-7) 你(cols8-9). Box "ZZ" at x=1 covers columns 1-2. Column 0 is
+// half of the leading 你 (dropped, blank pad); column 3 is the other half
+// of 好 (also dropped, blank pad — ansi.Cut's left boundary generously
+// keeps that straddling 好 whole rather than splitting it, so the fix
+// must trim it back off, not just relocate a pad). The true, fully-intact
+// tail is 你(4-5) 好(6-7) 你(8-9) — "你好你" — unshifted from its
+// original columns.
+func TestOverlayAt_WideGlyphAtRightCut_PinsContentPosition(t *testing.T) {
+	t.Parallel()
+	base := "你好你好你"
+	got := overlayAt(base, "ZZ", 1, 0, 10)
+	want := " ZZ 你好你"
+	if s := ansi.Strip(got); s != want {
+		t.Errorf("stripped = %q, want %q", s, want)
+	}
+}

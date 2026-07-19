@@ -79,3 +79,100 @@ func TestOverlayRight_DegenerateWidths_ReturnsBase(t *testing.T) {
 		t.Errorf("overlayW=totalW: got %q, want base", got)
 	}
 }
+
+func TestOverlayAt_MiddleOverwrite_PreservesTail(t *testing.T) {
+	base := "aaaaaaaaaa\nbbbbbbbbbb\ncccccccccc"
+	got := overlayAt(base, "XX\nYY", 3, 1, 10)
+	lines := strings.Split(got, "\n")
+	if len(lines) != 3 {
+		t.Fatalf("line count = %d, want 3", len(lines))
+	}
+	if s := ansi.Strip(lines[0]); s != "aaaaaaaaaa" {
+		t.Errorf("row 0 = %q, want untouched", s)
+	}
+	if s := ansi.Strip(lines[1]); s != "bbbXXbbbbb" {
+		t.Errorf("row 1 = %q, want bbbXXbbbbb", s)
+	}
+	if s := ansi.Strip(lines[2]); s != "cccYYccccc" {
+		t.Errorf("row 2 = %q, want cccYYccccc", s)
+	}
+}
+
+func TestOverlayAt_SGRResetGuards(t *testing.T) {
+	base := "\x1b[31mrrrrrrrrrr\x1b[0m"
+	got := overlayAt(base, "XX", 4, 0, 10)
+	// Reset must close the left segment before the box so red never bleeds in.
+	if !strings.Contains(got, "\x1b[0mXX") {
+		t.Errorf("box not preceded by SGR reset: %q", got)
+	}
+	if s := ansi.Strip(got); s != "rrrrXXrrrr" {
+		t.Errorf("stripped = %q, want rrrrXXrrrr", s)
+	}
+}
+
+func TestOverlayAt_WideGlyphAtLeftCut_KeepsTotalWidth(t *testing.T) {
+	// 你(0-1)好(2-3)世(4-5)界(6-7)xx(8-9). Cut at x=3 straddles 好.
+	base := "你好世界xx"
+	got := overlayAt(base, "ZZ", 3, 0, 10)
+	if w := ansi.StringWidth(got); w != 10 {
+		t.Errorf("width = %d, want 10", w)
+	}
+	if s := ansi.Strip(got); !strings.HasPrefix(s, "你") || !strings.Contains(s, "ZZ") {
+		t.Errorf("stripped = %q, want 你-prefix with ZZ box", s)
+	}
+}
+
+func TestOverlayAt_BoxRowsBeyondBase_Dropped(t *testing.T) {
+	got := overlayAt("aaaaaaaaaa", "XX\nYY\nZZ", 2, 0, 10)
+	if n := len(strings.Split(got, "\n")); n != 1 {
+		t.Errorf("line count = %d, want 1 (extra box rows dropped)", n)
+	}
+}
+
+func TestOverlayAt_Degenerate_ReturnsBase(t *testing.T) {
+	base := "aaaa\nbbbb"
+	for name, tc := range map[string]struct{ x, y, w int }{
+		"negative x":       {-1, 0, 4},
+		"negative y":       {0, -1, 4},
+		"box exceeds base": {3, 0, 4}, // 2-wide box at x=3 needs 5 cells
+	} {
+		if got := overlayAt(base, "XX", tc.x, tc.y, tc.w); got != base {
+			t.Errorf("%s: got %q, want base unchanged", name, got)
+		}
+	}
+}
+
+func TestOverlayAt_WideGlyphAtRightCut_KeepsTotalWidth(t *testing.T) {
+	// All-double-width base; the box's right edge (x=1+2=3) lands mid-好.
+	base := "你好你好你"
+	got := overlayAt(base, "ZZ", 1, 0, 10)
+	if w := ansi.StringWidth(got); w != 10 {
+		t.Errorf("width = %d, want 10", w)
+	}
+	got = overlayAt(base, "Z", 2, 0, 10)
+	if w := ansi.StringWidth(got); w != 10 {
+		t.Errorf("single-cell box: width = %d, want 10", w)
+	}
+}
+
+// TestOverlayAt_WideGlyphAtRightCut_PinsContentPosition pins the tail's
+// exact CONTENT, not just its width — the invariant is that every
+// surviving tail glyph keeps its original screen column.
+//
+// Hand-traced: base "你好你好你" is 你(cols0-1) 好(cols2-3) 你(cols4-5)
+// 好(cols6-7) 你(cols8-9). Box "ZZ" at x=1 covers columns 1-2. Column 0 is
+// half of the leading 你 (dropped, blank pad); column 3 is the other half
+// of 好 (also dropped, blank pad — ansi.Cut's left boundary generously
+// keeps that straddling 好 whole rather than splitting it, so the fix
+// must trim it back off, not just relocate a pad). The true, fully-intact
+// tail is 你(4-5) 好(6-7) 你(8-9) — "你好你" — unshifted from its
+// original columns.
+func TestOverlayAt_WideGlyphAtRightCut_PinsContentPosition(t *testing.T) {
+	t.Parallel()
+	base := "你好你好你"
+	got := overlayAt(base, "ZZ", 1, 0, 10)
+	want := " ZZ 你好你"
+	if s := ansi.Strip(got); s != want {
+		t.Errorf("stripped = %q, want %q", s, want)
+	}
+}

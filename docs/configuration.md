@@ -202,6 +202,8 @@ Multiple modifiers stack with `+` (no spaces). Mouse buttons are not bindable he
 | `cycle_tab_color` | `alt+c` | Cycle through 8 tab colours |
 | `scroll_page_up` / `scroll_page_down` | `alt+pgup` / `alt+pgdown` | Pane scrollback |
 | `paste` | `ctrl+v` | Paste from clipboard (text or image) |
+| `quick_actions` | `alt+a` | Open the pane context menu for the active pane (same menu as right-click) |
+| `command_history` | `alt+shift+i` | Open the active pane's input-history modal (submitted prompts; only meaningful for panes whose plugin records history, e.g. claude-code) |
 | `focus_pane` | `ctrl+e` | Toggle focus mode |
 | `notification_toggle` | `alt+n` | Cycle the notification sidebar: hidden → visible → visible+focused → hidden |
 | `notification_focus` | `f3` | Jump focus to the sidebar (alt path when `alt+n` is intercepted by the terminal) |

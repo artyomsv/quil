@@ -59,6 +59,11 @@ The active tab is prefixed with `* ` in the tab bar so it's visible even when [t
 | `Alt+G` | Toggle lazygit overlay (git repo from active pane's directory) |
 | `Alt+Shift+L` | Force a full screen redraw — clears rendering artifacts (scrambled/misplaced characters) without restarting. Mnemonic: `Ctrl+L` redraws a shell. |
 | `Alt+Shift+I` | Open the active pane's input history — a list of prompts you submitted, each shown as a 3-line preview. `↑/↓` navigate, `Enter` opens the full text read-only (scroll + copy), `Esc` closes. Only AI panes whose plugin sets `record_history` (Claude Code) capture history; other pane types show an empty state. |
+| `Alt+A` | Open the pane context menu for the active pane (`quick_actions`). Same menu as right-click — see [Mouse: pane context menu](#mouse-pane-context-menu) below. |
+
+### Mouse: pane context menu
+
+Right-click on a pane — with a text selection active, it copies the selection to the clipboard (unchanged); with no selection, it opens the pane context menu for the pane under the cursor. `↑`/`↓` (or `k`/`j`) navigate, `Enter` or a left-click executes the highlighted item, `Esc` or a click outside the menu closes it, and right-clicking another pane re-targets the menu to it. `Ctrl+Q` still quits while the menu is open.
 
 ## Pane navigation
 
@@ -86,6 +91,12 @@ encoding), so the readline word-jump keys work out of the box with **no configur
 Terminal.app has no distinct combo for a multi-word "fast jump" (`Option+Shift+Arrow` collapses
 to `Option+Arrow` and `Cmd` is reserved by macOS), so that remains available only on
 Kitty-protocol terminals (Ghostty, WezTerm, iTerm2).
+
+Note: `Alt+A` (`Option+A` under Option-as-Meta) is bound to `quick_actions` — opening the pane
+context menu — so `ESC-a` (emacs `M-a`, backward-sentence) no longer reaches the PTY. This is
+deliberate and consistent with the other single-letter Alt-layer bindings Quil already
+intercepts (`Alt+G`, `Alt+M`, `Alt+N`, `Alt+E`, …); rebind `quick_actions` in `config.toml` if
+you rely on `M-a` in a pane's readline.
 
 ## Notes editor
 

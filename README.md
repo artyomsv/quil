@@ -27,6 +27,9 @@ Type `quil` after a reboot — every tab, pane, working directory, layout split,
 | **Many projects, one window** | **Typed panes** |
 | <img src="https://cdn.stukans.com/quil/screenshots/focus-screen-800.webp" alt="Focus mode across a dozen project tabs" width="420"> | <img src="https://cdn.stukans.com/quil/screenshots/claude-code-setup-dialog-800.webp" alt="Claude Code pane setup dialog with directory browser and toggles" width="420"> |
 | Focus mode + a dozen project tabs. | Per-type setup: dir browser, resume strategy, permission toggles. |
+| **Resize with the mouse** | **Right-click pane menu** |
+| <img src="https://cdn.stukans.com/quil/screenshots/pane-resize-800.webp" alt="Dragging a split border with the mouse to resize neighboring panes" width="420"> | <img src="https://cdn.stukans.com/quil/screenshots/mouse-right-click-menu-800.webp" alt="Right-click context menu with per-pane actions and the target pane highlighted" width="420"> |
+| Drag any split border — nested panes clamp to minimums, PTYs see one resize on release. | Per-pane actions under the cursor: history, notes, lazygit, attention pin, restart, close. |
 
 ## Install
 

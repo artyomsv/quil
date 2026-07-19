@@ -315,6 +315,10 @@ type Model struct {
 	splitDragNode *LayoutNode
 	splitDragRect BorderHit
 
+	// ctxMenu is the pane context menu overlay (right-click / quick_actions).
+	// Zero value = closed. Not a dialogScreen — see ctxmenu.go.
+	ctxMenu ctxMenuState
+
 	// Event-loop performance stats. Pointer so mutations persist across
 	// Bubble Tea's value-receiver copies.
 	perfStats *eventLoopStats
@@ -485,6 +489,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Acknowledge the focused pane of the active tab before processing the
 	// message — focusing is the acknowledgement; see ackFocusedPane.
 	m.ackFocusedPane()
+	// A context menu whose target pane vanished (daemon reconciliation,
+	// pane destroy) closes itself. Single choke point — no need to audit
+	// every pruning path. findPaneAndTab is nil-safe.
+	if m.ctxMenu.open() {
+		if pane, _ := m.findPaneAndTab(m.ctxMenu.paneID); pane == nil {
+			m.closeCtxMenu()
+		}
+	}
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		// Poll echo: size matches both the applied and any pending value —
@@ -533,6 +545,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.seq != m.resizeSeq {
 			return m, nil // stale tick, newer resize pending
 		}
+		// Anchor coordinates are stale after a reflow — cheapest correct
+		// answer is to close.
+		m.closeCtxMenu()
 		m.width = m.pendingWidth
 		m.height = m.pendingHeight
 		m.resizeTabs()
@@ -553,9 +568,35 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Overlay visible: swallow all mouse clicks (keyboard-only v1).
 		// clearDragState ensures no drag flag stays set from before the overlay opened.
+		// The context menu can never be open while the lazygit overlay is
+		// visible, so this swallow is safe to keep ahead of the ctxMenu check.
 		if tab := m.activeTabModel(); tab != nil && tab.overlayVisible {
 			m.clearDragState()
 			return m, nil
+		}
+		// Context menu open: it owns the mouse. Checked BEFORE the sidebar
+		// swallow — the menu is drawn (compositor overlay) on TOP of the
+		// sidebar, so a menu clamped near the right edge can show rows over
+		// the sidebar strip. Input priority must match paint priority: if
+		// the sidebar check ran first, a click on a menu row that happens
+		// to overlap the strip would be silently swallowed by the sidebar
+		// instead of executing the visibly-topmost menu item. Click on an
+		// enabled row executes; anywhere else inside the box is swallowed;
+		// outside closes — and an outside RIGHT-click falls through to the
+		// open path below so it re-targets in one gesture (OS-menu
+		// convention), which may include falling into the sidebar swallow
+		// next if the retarget lands there.
+		if m.ctxMenu.open() {
+			if row, inside := ctxMenuHitRow(m.ctxMenu, msg.X, msg.Y); inside {
+				if msg.Button == tea.MouseLeft && row >= 0 && m.ctxMenu.items[row].enabled {
+					return m.executeCtxMenuItem(m.ctxMenu.items[row])
+				}
+				return m, nil
+			}
+			m.closeCtxMenu()
+			if msg.Button != tea.MouseRight {
+				return m, nil // closing click is consumed, never arms a drag
+			}
 		}
 		// Sidebar overlay region: the press belongs to the sidebar, not
 		// the pane rendered beneath it. Clear drag flags so no half-armed
@@ -600,6 +641,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.selection = nil
 				return m, nil
 			}
+			// No selection anywhere: open the pane context menu for the
+			// pane under the cursor. Suppressed while a modal dialog,
+			// rename edit, or notes mode owns input (the lazygit overlay
+			// and sidebar swallows already returned above).
+			if m.dialog == dialogNone && !m.notesMode && !m.renaming && !m.renamingPane {
+				if rect := m.paneRectAt(msg.X, msg.Y); rect != nil && rect.Pane != nil {
+					m.openCtxMenu(rect.Pane, msg.X, msg.Y)
+				}
+			}
+			return m, nil
 		}
 		if msg.Button == tea.MouseLeft {
 			if msg.Y == 0 {
@@ -675,6 +726,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if tab := m.activeTabModel(); tab != nil && tab.overlayVisible {
 			return m, nil
 		}
+		// Context menu open: hover moves the cursor; everything else is
+		// swallowed so no drag can advance underneath the popup.
+		if m.ctxMenu.open() {
+			if row, inside := ctxMenuHitRow(m.ctxMenu, msg.X, msg.Y); inside && row >= 0 && m.ctxMenu.items[row].enabled {
+				m.ctxMenu.cursor = row
+			}
+			return m, nil
+		}
 		// Drag dispatch — at most one branch is active (clearDragState
 		// invariant). Off-Y=0 motion during a tab drag pauses reorder but
 		// keeps the drag alive so the user can return to the tab bar
@@ -727,6 +786,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.clearDragState()
 			return m, nil
 		}
+		if m.ctxMenu.open() {
+			return m, nil // no drags can be live while the menu is open
+		}
 		// A split-border drag commits on release: one PTY resize per pane
 		// plus the persisted layout ratio (finishSplitDrag), highlight off.
 		if m.splitDragNode != nil {
@@ -765,6 +827,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.MouseWheelMsg:
+		if m.ctxMenu.open() {
+			return m, nil // wheel is swallowed while the menu is open
+		}
 		// Overlay visible: swallow wheel events (keyboard-only v1).
 		if tab := m.activeTabModel(); tab != nil && tab.overlayVisible {
 			return m, nil
@@ -1321,6 +1386,34 @@ func (m *Model) activePaneRect() *PaneRect {
 	return nil
 }
 
+// paneRectAt returns the rendered pane rect containing screen coordinate
+// (x, y) in the active tab, or nil. Focus mode resolves to the single
+// full-area rect; split layouts walk the same CollectRects geometry the
+// scrollbar and border hit-tests use.
+func (m *Model) paneRectAt(x, y int) *PaneRect {
+	if r := m.activePaneRectFocus(); r != nil {
+		if x >= r.OX && x < r.OX+r.W && y >= r.OY && y < r.OY+r.H {
+			return r
+		}
+		return nil
+	}
+	tab := m.activeTabModel()
+	if tab == nil || tab.Root == nil {
+		return nil
+	}
+	tabH := m.height - chromeHeight
+	notesW := m.notesPanelWidth()
+	var rects []PaneRect
+	tab.Root.CollectRects(0, 1, m.width-notesW, tabH, &rects)
+	for i := range rects {
+		r := &rects[i]
+		if r.Pane != nil && x >= r.OX && x < r.OX+r.W && y >= r.OY && y < r.OY+r.H {
+			return r
+		}
+	}
+	return nil
+}
+
 // hitTestScrollbar returns the pane rect under (x, y) when the click hits
 // the pane's scrollbar zone. The visible scrollbar lives at
 // `rect.OX + rect.W - 2` (just inside the right border); the hit zone
@@ -1635,6 +1728,82 @@ func (m Model) toggleNotesMode() (tea.Model, tea.Cmd) {
 	return m, tea.Batch(tea.ClearScreen, m.resizeAllPanes(), m.startNotesTick())
 }
 
+// openClosePaneConfirm opens the close-pane confirm dialog for the active
+// pane. Extracted from the kb.ClosePane case; shared with the context menu.
+func (m Model) openClosePaneConfirm() (tea.Model, tea.Cmd) {
+	if tab := m.activeTabModel(); tab != nil {
+		if pane := tab.ActivePaneModel(); pane != nil {
+			m.dialog = dialogConfirm
+			m.confirmKind = "pane"
+			m.confirmID = pane.ID
+			m.confirmName = paneDisplayName(pane)
+		}
+	}
+	return m, tea.ClearScreen
+}
+
+// openRestartPaneConfirm opens the restart confirm dialog for the active
+// pane. Extracted from the kb.RestartPane case; shared with the context menu.
+func (m Model) openRestartPaneConfirm() (tea.Model, tea.Cmd) {
+	if tab := m.activeTabModel(); tab != nil {
+		if pane := tab.ActivePaneModel(); pane != nil {
+			m.dialog = dialogConfirm
+			m.confirmKind = confirmKindRestartPane
+			m.confirmID = pane.ID
+			m.confirmName = paneDisplayName(pane)
+		}
+	}
+	return m, tea.ClearScreen
+}
+
+// beginPaneRename enters inline pane-rename mode for the active pane.
+// Extracted from the kb.RenamePane case; shared with the context menu.
+func (m Model) beginPaneRename() (tea.Model, tea.Cmd) {
+	if tab := m.activeTabModel(); tab != nil {
+		if pane := tab.ActivePaneModel(); pane != nil {
+			m.renamingPane = true
+			m.paneRenameInput = pane.Name
+		}
+	}
+	return m, nil
+}
+
+// toggleFocusForActiveTab toggles focus mode on the active tab. Extracted
+// from the kb.FocusPane case; shared with the context menu.
+func (m Model) toggleFocusForActiveTab() (tea.Model, tea.Cmd) {
+	if tab := m.activeTabModel(); tab != nil && tab.Root != nil {
+		tab.ToggleFocus()
+		m.resizeTabs()
+		return m, tea.Batch(tea.ClearScreen, m.resizeAllPanes())
+	}
+	return m, nil
+}
+
+// openHistoryForActivePane opens the input-history modal for the active
+// pane, gated on the plugin's record_history opt-in. Extracted from the
+// kb.CommandHistory case; shared with the context menu.
+func (m Model) openHistoryForActivePane() (tea.Model, tea.Cmd) {
+	tab := m.activeTabModel()
+	if tab == nil {
+		return m, nil
+	}
+	pane := tab.ActivePaneModel()
+	if pane == nil {
+		return m, nil
+	}
+	supported := false
+	if m.pluginRegistry != nil {
+		if p := m.pluginRegistry.Get(pane.Type); p != nil {
+			supported = p.Command.RecordHistory
+		}
+	}
+	m = m.openHistoryDialog(pane.ID, pane.Type, supported)
+	if supported {
+		return m, m.requestHistory(pane.ID)
+	}
+	return m, nil
+}
+
 // notesEditorBox computes the screen bounding box of the bordered notes
 // notesPanelWidthNumerator / Denominator set the default notes-panel
 // width as a fraction of the available tab area (numerator/denominator).
@@ -1906,6 +2075,11 @@ func (m Model) View() tea.View {
 				m.notifications.focused = m.sidebarFocused
 				tabContent = overlayRight(tabContent, m.notifications.View(tabH), m.width, sw)
 			}
+			if m.ctxMenu.open() {
+				// ctxMenu coords are screen rows; tabContent starts at
+				// screen row 1 (tab bar above), so shift by -1.
+				tabContent = overlayAt(tabContent, renderCtxMenu(m.ctxMenu), m.ctxMenu.x, m.ctxMenu.y-1, m.width)
+			}
 			sections = append(sections, tabContent)
 		}
 
@@ -1918,6 +2092,14 @@ func (m Model) View() tea.View {
 	v := tea.NewView(content)
 	v.AltScreen = true
 	v.MouseMode = tea.MouseModeCellMotion
+	if m.ctxMenu.open() {
+		// Cell-motion only reports motion while a button is held, so the
+		// context menu's hover highlight would be dead under it. All-motion
+		// is scoped to exactly the frames where the menu is open — the
+		// flood of buttonless motion events ends the moment it closes (the
+		// menu's Update routing swallows them meanwhile).
+		v.MouseMode = tea.MouseModeAllMotion
+	}
 	// v.Cursor stays nil — the hardware cursor is never shown. Every pane
 	// type gets a software reverse-video caret drawn into the frame by
 	// renderContent/insertCursor instead. Positioning the real cursor via
@@ -1949,6 +2131,12 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.renamingPane {
 		return m.handlePaneRenameKey(msg)
+	}
+
+	// Context menu open: it captures navigation until closed. Quit passes
+	// through inside the handler (never swallow quit).
+	if m.ctxMenu.open() {
+		return m.handleCtxMenuKey(key)
 	}
 
 	// Notes mode: while active, keyboard input is split between the bound
@@ -2054,23 +2242,9 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case kbMatches(key, kb.ToggleLazygit):
 		return m, m.handleToggleLazygit()
 	case kbMatches(key, kb.CommandHistory):
-		tab := m.activeTabModel()
-		if tab == nil {
-			return m, nil
-		}
-		pane := tab.ActivePaneModel()
-		if pane == nil {
-			return m, nil
-		}
-		supported := false
-		if p := m.pluginRegistry.Get(pane.Type); p != nil {
-			supported = p.Command.RecordHistory
-		}
-		m = m.openHistoryDialog(pane.ID, pane.Type, supported)
-		if supported {
-			return m, m.requestHistory(pane.ID)
-		}
-		return m, nil
+		return m.openHistoryForActivePane()
+	case kbMatches(key, kb.QuickActions):
+		return m.openQuickActionsMenu()
 	}
 
 	// Sidebar focused: route keys to notification center
@@ -2135,26 +2309,10 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, m.createTab()
 
 	case kbMatches(key, kb.ClosePane):
-		if tab := m.activeTabModel(); tab != nil {
-			if pane := tab.ActivePaneModel(); pane != nil {
-				m.dialog = dialogConfirm
-				m.confirmKind = "pane"
-				m.confirmID = pane.ID
-				m.confirmName = paneDisplayName(pane)
-			}
-		}
-		return m, tea.ClearScreen
+		return m.openClosePaneConfirm()
 
 	case kbMatches(key, kb.RestartPane):
-		if tab := m.activeTabModel(); tab != nil {
-			if pane := tab.ActivePaneModel(); pane != nil {
-				m.dialog = dialogConfirm
-				m.confirmKind = confirmKindRestartPane
-				m.confirmID = pane.ID
-				m.confirmName = paneDisplayName(pane)
-			}
-		}
-		return m, tea.ClearScreen
+		return m.openRestartPaneConfirm()
 
 	case kbMatches(key, kb.CloseTab):
 		if tab := m.activeTabModel(); tab != nil {
@@ -2185,13 +2343,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case kbMatches(key, kb.RenamePane):
-		if tab := m.activeTabModel(); tab != nil {
-			if pane := tab.ActivePaneModel(); pane != nil {
-				m.renamingPane = true
-				m.paneRenameInput = pane.Name
-			}
-		}
-		return m, nil
+		return m.beginPaneRename()
 
 	case kbMatches(key, kb.CycleTabColor):
 		return m, m.cycleTabColor()
@@ -2289,12 +2441,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, m.pasteClipboard()
 
 	case kbMatches(key, kb.FocusPane):
-		if tab := m.activeTabModel(); tab != nil && tab.Root != nil {
-			tab.ToggleFocus()
-			m.resizeTabs()
-			return m, tea.Batch(tea.ClearScreen, m.resizeAllPanes())
-		}
-		return m, nil
+		return m.toggleFocusForActiveTab()
 
 	case kbMatches(key, kb.NotesToggle):
 		return m.toggleNotesMode()
@@ -3022,13 +3169,17 @@ func (m Model) tabLabel(idx int) string {
 }
 
 // tabStyle returns the lipgloss style for the tab at idx. Precedence: green
-// unseen mark (background tab with an unfocused finished pane) > custom tab
+// unseen mark (background tab with an unfocused finished pane, OR a tab
+// containing a pane pinned for attention via the context menu) > custom tab
 // color > active/inactive default. Shared by renderTabBar and hitTestTab so
 // rendered widths and click hit-testing never diverge.
 func (m Model) tabStyle(idx int) lipgloss.Style {
 	tab := m.tabs[idx]
 	active := idx == m.activeTab
-	if !active && m.tabUnseen(idx) {
+	// tabUnseen self-excludes the active tab; tabPinnedAttention deliberately
+	// does not (a pin colors the active tab's label unless the pinned pane is
+	// the one in focus).
+	if m.tabUnseen(idx) || m.tabPinnedAttention(idx) {
 		return unseenTabStyle
 	}
 	if tab.Color != "" {

@@ -79,6 +79,7 @@ type PaneModel struct {
 	turnActive         bool                // main turn in flight (UserPromptSubmit/PostToolUse → Stop/park)
 	subagents          int                 // outstanding background subagents (SubagentStart/Stop, burst-aware)
 	unseen             bool                // work finished/parked while this pane was not focused; cleared on focus
+	pinnedAttention    bool                // context-menu "Mark attention" pin — green border that SURVIVES focus; cleared only by Unmark. TUI-session state, never persisted
 	workFrame          int                 // shared spinner frame index, mirrored here for top-border render
 
 	// Mouse-tracking state, updated by the VT EnableMode/DisableMode callbacks
@@ -126,6 +127,10 @@ type PaneModel struct {
 	// drag-resize touching this pane is in progress. Transient TUI state,
 	// never persisted; set/cleared by Model.setSplitDragHighlight.
 	splitDragHighlight bool
+	// ctxTargetHighlight marks this pane's border while the pane context
+	// menu is open and targeting it. Transient TUI state, never persisted;
+	// set/cleared by Model.openCtxMenu / Model.closeCtxMenu.
+	ctxTargetHighlight bool
 }
 
 // paneRenderKey is the comparable fingerprint of everything View() reads,
@@ -155,8 +160,10 @@ type paneRenderKey struct {
 	pending                        bool
 	mcpHighlight, muted, focusMode bool
 	splitDragHighlight             bool
+	ctxTargetHighlight             bool
 	working                        bool
 	unseen                         bool
+	pinnedAttention                bool
 	liveOutputSeen                 bool
 	spinnerFrame, workFrame        int
 	name, cwd                      string
@@ -182,10 +189,12 @@ func (p *PaneModel) renderKey() paneRenderKey {
 		pending:            p.Pending,
 		mcpHighlight:       p.mcpHighlight,
 		splitDragHighlight: p.splitDragHighlight,
+		ctxTargetHighlight: p.ctxTargetHighlight,
 		muted:              p.Muted,
 		focusMode:          p.focusMode,
 		working:            p.working,
 		unseen:             p.unseen,
+		pinnedAttention:    p.pinnedAttention,
 		liveOutputSeen:     p.liveOutputSeen,
 		spinnerFrame:       p.spinnerFrame,
 		workFrame:          p.workFrame,
@@ -745,8 +754,8 @@ func (p *PaneModel) View() string {
 	p.renderCount++
 
 	borderColor := lipgloss.Color("238")
-	if p.unseen {
-		borderColor = lipgloss.Color("28") // green — finished/parked, awaiting focus
+	if p.unseen || p.pinnedAttention {
+		borderColor = lipgloss.Color("28") // green — finished/parked/pinned, awaiting attention
 	}
 	if p.Active {
 		borderColor = lipgloss.Color("57")
@@ -756,6 +765,9 @@ func (p *PaneModel) View() string {
 	}
 	if p.splitDragHighlight {
 		borderColor = lipgloss.Color("39") // bright blue — split drag in progress
+	}
+	if p.ctxTargetHighlight {
+		borderColor = lipgloss.Color("39") // bright blue — context-menu target
 	}
 	if p.mcpHighlight {
 		borderColor = lipgloss.Color("208") // orange — MCP interaction

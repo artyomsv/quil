@@ -12,9 +12,14 @@ import (
 // (p1 | p2) at ratio 0.5, window 100x40 → tab area 100x38 at origin (0,1)
 // (row 0 tab bar, last row status bar). Boundary line: columns 49-50.
 // NewPaneModel (not newTestPane) because Resize drives the VT emulator.
+// notifications is initialized (hidden, matching NewModel's real-world
+// invariant) because m.Update's MouseClickMsg/MouseWheelMsg paths call
+// sidebarSwallowsMouse unconditionally — a nil *NotificationCenter panics
+// on the field read before any button/x/y branching happens.
 func newSplitDragTestModel(t *testing.T) *Model {
 	t.Helper()
 	m := newModelForTest([]string{"T"}, 0)
+	m.notifications = NewNotificationCenter(30, 200)
 	tab := m.tabs[0]
 	p1 := NewPaneModel("p1", 1024)
 	p2 := NewPaneModel("p2", 1024)

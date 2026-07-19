@@ -174,6 +174,7 @@ export const features: Feature[] = [
   },
   {
     slug: "mouse-pane-resize",
+    image: "https://cdn.stukans.com/quil/screenshots/pane-resize-800.webp",
     icon: "layout-panel-left",
     title: "Mouse drag-resize splits",
     blurb:
@@ -186,6 +187,22 @@ export const features: Feature[] = [
       "PTY resize and layout persistence fire once, on mouse release — mid-drag the borders move locally, so TUI apps (claude-code, vim, htop) never see resize churn and never repaint mid-drag.",
       "The new ratios ride the existing workspace snapshot, so a drag-resized layout survives daemon restarts and reboots.",
       "Companion pane type — Terminal (keeps content on squeeze): the same shell on an AI-pane-style window-sized canvas, for log tails and watch loops where content survival matters more than width-perfect formatting.",
+    ],
+  },
+  {
+    slug: "pane-context-menu",
+    image: "https://cdn.stukans.com/quil/screenshots/mouse-right-click-menu-800.webp",
+    icon: "layout-panel-left",
+    title: "Right-click pane menu",
+    blurb:
+      "Right-click any pane for a per-pane action menu — history, focus, notes, lazygit, rename, mute, attention pin, restart, close — no keybinding memorization required.",
+    category: "interaction",
+    detail: [
+      "Right-click a pane (or press Alt+A for the active pane) to open a popup targeting the pane under the cursor — its border lights up so there's never doubt which pane the actions will hit, and the menu header shows the pane's name.",
+      "Nine actions in three groups: view (input history, enter/exit focus mode, notes, lazygit), pane settings (rename, mute notifications, mark attention), and destructive (restart, close — both keep their confirmation dialogs).",
+      "Hover highlights the row under the mouse; arrow keys / j / k navigate; unavailable actions grey out (input history without an AI pane, lazygit without the binary installed).",
+      "Mark attention pins a green border that survives focusing the pane — a manual \"don't let me forget this one\" flag, cleared only by unmarking.",
+      "Right-click with a text selection active still copies it — the menu only opens on a plain right-click.",
     ],
   },
   {

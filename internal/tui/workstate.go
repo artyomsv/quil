@@ -224,6 +224,27 @@ func (m Model) tabUnseen(idx int) bool {
 	return false
 }
 
+// tabPinnedAttention reports whether the tab at idx contains a pane with a
+// manually pinned attention mark. Unlike tabUnseen, the ACTIVE tab also
+// reports true — a pin is an explicit "don't let me forget", not a
+// seen/unseen state — except when the pinned pane is the focused pane of
+// the active tab (the user is looking straight at it).
+func (m Model) tabPinnedAttention(idx int) bool {
+	if idx < 0 || idx >= len(m.tabs) || m.tabs[idx].Root == nil {
+		return false
+	}
+	for _, p := range m.tabs[idx].Leaves() {
+		if p == nil || !p.pinnedAttention {
+			continue
+		}
+		if idx == m.activeTab && p.ID == m.tabs[idx].ActivePane {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
 // workSpinnerTick schedules the next shared work-spinner frame.
 func (m Model) workSpinnerTick() tea.Cmd {
 	return tea.Tick(workSpinnerInterval, func(time.Time) tea.Msg { return workSpinnerTickMsg{} })

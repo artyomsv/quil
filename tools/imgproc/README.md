@@ -91,6 +91,8 @@ let Cloudflare hold it.
 | /features section heroes | `*-1280.webp` | reboot, MCP, focus, notes, lazygit |
 | /vs/tmux ("survives reboot") | `pane-restoration-1280.webp` | next to the matrix |
 | /docs quick-start | `welcome-page-800.webp`, `f1-settings-page-800.webp` | first-launch walkthrough |
+| README "See it" row 3 | `pane-resize-800.webp`, `mouse-right-click-menu-800.webp` | drag-resize + context-menu cards |
+| /features cards | `pane-resize-800.webp` (mouse-pane-resize), `mouse-right-click-menu-800.webp` (pane-context-menu) | per-feature |
 
 Reference webp with a png fallback where you want belt-and-suspenders:
 

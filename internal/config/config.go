@@ -3,6 +3,7 @@ package config
 import (
 	"bytes"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -224,13 +225,17 @@ func Default() Config {
 			RenameTab:       "f2",
 			// macOS often eats F2 and may not forward Option as Meta; the
 			// second binding is the reliable fallback.
-			RenamePane:         "alt+f2,alt+shift+r",
-			CycleTabColor:      "alt+c",
-			ScrollPageUp:       "alt+pgup",
-			ScrollPageDown:     "alt+pgdown",
-			Paste:              "ctrl+v",
-			JSONTransform:      "ctrl+j",
-			QuickActions:       "ctrl+a",
+			RenamePane:     "alt+f2,alt+shift+r",
+			CycleTabColor:  "alt+c",
+			ScrollPageUp:   "alt+pgup",
+			ScrollPageDown: "alt+pgdown",
+			Paste:          "ctrl+v",
+			JSONTransform:  "ctrl+j",
+			// alt+a (NOT the historical ctrl+a placeholder): ctrl+a is
+			// readline beginning-of-line in every shell and the common tmux
+			// prefix — stealing it from the PTY would be a regression. The
+			// Alt layer matches the other pane-level shortcuts.
+			QuickActions:       "alt+a",
 			FocusPane:          "ctrl+e",
 			NotificationToggle: "alt+n",
 			NotificationFocus:  "f3",
@@ -240,7 +245,7 @@ func Default() Config {
 			NotesToggle:        "alt+e",
 			// Mnemonic: Ctrl+L clears/redraws a shell; the Alt+Shift layer
 			// keeps plain Ctrl+L flowing to the PTY.
-			Redraw:        "alt+shift+l",
+			Redraw:         "alt+shift+l",
 			ToggleEager:    "alt+shift+e",
 			CommandHistory: "alt+shift+i",
 			ToggleLazygit:  "alt+g",
@@ -255,6 +260,27 @@ func Load(path string) (Config, error) {
 	cfg := Default()
 	if _, err := toml.DecodeFile(path, &cfg); err != nil {
 		return cfg, err
+	}
+	// Legacy quick_actions migration: ctrl+a was the M1 placeholder value —
+	// it was never wired to any handler, so it was inert on every config
+	// that predates this release. But Save serializes the WHOLE
+	// KeybindingsConfig struct (not just fields the user touched), so any
+	// config.toml that was ever saved by an old build round-trips
+	// quick_actions = "ctrl+a" back onto disk. Left alone, Load would
+	// resurrect that dead value and the new context-menu binding would
+	// hijack ctrl+a — readline beginning-of-line — out from under every
+	// shell pane. Safe to force-migrate because no legitimate "ctrl+a
+	// opens the menu" customization can exist on disk; the binding did
+	// nothing until this release.
+	//
+	// This patch is in-memory only — Load never writes to disk, so the
+	// legacy value persists on disk until an unrelated Save. The migration
+	// (and its log line) therefore re-fires on every launch, deliberately:
+	// a startup write from every process that loads config (TUI, daemon,
+	// MCP bridge) would race the same file.
+	if cfg.Keybindings.QuickActions == "ctrl+a" {
+		cfg.Keybindings.QuickActions = "alt+a"
+		log.Printf("config: migrated quick_actions ctrl+a -> alt+a (legacy placeholder; ctrl+a stays with the shell)")
 	}
 	return cfg, nil
 }

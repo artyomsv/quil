@@ -269,3 +269,190 @@ func TestCtxMenu_ClickInsideMenu_BeatsSidebarSwallow(t *testing.T) {
 		t.Errorf("close confirm not armed: dialog=%v kind=%q id=%q — click was swallowed by the sidebar instead of executing the topmost (visibly composited) menu row", got2.dialog, got2.confirmKind, got2.confirmID)
 	}
 }
+
+// TestCtxMenu_NarrowTerminalGuard_NoInvisibleMenu guards against opening a
+// menu whose box cannot fit inside the content area. overlayAt silently
+// returns its base unchanged when the box would overshoot the right edge, so
+// without a fit guard the menu becomes INVISIBLE while still owning all
+// keyboard/mouse input (only Esc gets you out). The default 9-item menu box
+// is ~23 cols wide; a 20-col terminal cannot fit it.
+func TestCtxMenu_NarrowTerminalGuard_NoInvisibleMenu(t *testing.T) {
+	t.Parallel()
+	m := newSplitDragTestModel(t)
+	m.width = 20 // narrower than the ~23-col box
+	updated, _ := m.Update(tea.MouseClickMsg{X: 5, Y: 10, Button: tea.MouseRight})
+	got := updated.(Model)
+	if got.ctxMenu.open() {
+		t.Error("menu must not open when its box cannot fit inside the content area")
+	}
+	if got.tabs[0].Root.Left.Pane.ctxTargetHighlight || got.tabs[0].Root.Right.Pane.ctxTargetHighlight {
+		t.Error("no pane should get the target highlight when the menu fails to open")
+	}
+}
+
+// TestCtxMenu_ExecuteRestart_OpensConfirm covers the ctxActRestart dispatch
+// branch (previously unexercised).
+func TestCtxMenu_ExecuteRestart_OpensConfirm(t *testing.T) {
+	t.Parallel()
+	m := newSplitDragTestModel(t) // ActivePane = p1
+	updated, _ := m.Update(tea.MouseClickMsg{X: 70, Y: 10, Button: tea.MouseRight})
+	got := updated.(Model) // targeting p2
+	updated, _ = got.executeCtxMenuItem(ctxMenuItem{id: ctxActRestart, label: "Restart pane…", enabled: true})
+	got = updated.(Model)
+	if got.dialog != dialogConfirm || got.confirmKind != confirmKindRestartPane || got.confirmID != "p2" {
+		t.Errorf("restart confirm not armed for p2: dialog=%v kind=%q id=%q", got.dialog, got.confirmKind, got.confirmID)
+	}
+}
+
+// TestCtxMenu_ExecuteRename_EntersRenameModeForTarget covers the
+// ctxActRename dispatch branch (previously unexercised).
+func TestCtxMenu_ExecuteRename_EntersRenameModeForTarget(t *testing.T) {
+	t.Parallel()
+	m := newSplitDragTestModel(t) // ActivePane = p1
+	m.tabs[0].Root.Right.Pane.Name = "Build"
+	updated, _ := m.Update(tea.MouseClickMsg{X: 70, Y: 10, Button: tea.MouseRight})
+	got := updated.(Model) // targeting p2
+	updated, _ = got.executeCtxMenuItem(ctxMenuItem{id: ctxActRename, label: "Rename pane", enabled: true})
+	got = updated.(Model)
+	if !got.renamingPane {
+		t.Error("renamingPane should be true after ctxActRename dispatch")
+	}
+	if got.paneRenameInput != "Build" {
+		t.Errorf("paneRenameInput = %q, want target pane's Name %q", got.paneRenameInput, "Build")
+	}
+}
+
+// TestCtxMenu_ExecuteFocus_TogglesFocusModeOnActiveTab covers the
+// ctxActFocus dispatch branch (previously unexercised).
+func TestCtxMenu_ExecuteFocus_TogglesFocusModeOnActiveTab(t *testing.T) {
+	t.Parallel()
+	m := newSplitDragTestModel(t) // ActivePane = p1
+	updated, _ := m.Update(tea.MouseClickMsg{X: 70, Y: 10, Button: tea.MouseRight})
+	got := updated.(Model) // targeting p2
+	updated, _ = got.executeCtxMenuItem(ctxMenuItem{id: ctxActFocus, label: "Focus mode", enabled: true})
+	got = updated.(Model)
+	if !got.tabs[0].FocusMode() {
+		t.Error("active tab should be in focus mode after ctxActFocus dispatch")
+	}
+}
+
+// TestCtxMenu_ExecuteNotes_OpensNotesMode covers the ctxActNotes dispatch
+// branch (previously unexercised). Not run in parallel: toggleNotesMode
+// opens a NotesEditor backed by config.NotesDir(), so QUIL_HOME must be
+// redirected to a temp dir before the call — t.Setenv forbids t.Parallel,
+// mirroring the isolation idiom used by TestUpdate_PasteMsgEmptyContent_
+// FallsBackToImagePaste and TestMaybeShowUpdateNotice.
+func TestCtxMenu_ExecuteNotes_OpensNotesMode(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	m := newSplitDragTestModel(t) // ActivePane = p1
+	updated, _ := m.Update(tea.MouseClickMsg{X: 70, Y: 10, Button: tea.MouseRight})
+	got := updated.(Model) // targeting p2
+	updated, _ = got.executeCtxMenuItem(ctxMenuItem{id: ctxActNotes, label: "Open notes", enabled: true})
+	got = updated.(Model)
+	if !got.notesMode {
+		t.Error("notesMode should be true after ctxActNotes dispatch")
+	}
+}
+
+// TestCtxMenu_ExecuteHistory_NilRegistryDoesNotPanic covers the
+// ctxActHistory dispatch branch (previously unexercised) and is the
+// regression guard for the nil-pluginRegistry crash: buildCtxMenuItems
+// nil-guards m.pluginRegistry, but openHistoryForActivePane historically did
+// not, so reaching this branch through the menu with the fixture's nil
+// registry panicked before that guard was added.
+func TestCtxMenu_ExecuteHistory_NilRegistryDoesNotPanic(t *testing.T) {
+	t.Parallel()
+	m := newSplitDragTestModel(t) // ActivePane = p1, m.pluginRegistry == nil
+	updated, _ := m.Update(tea.MouseClickMsg{X: 70, Y: 10, Button: tea.MouseRight})
+	got := updated.(Model) // targeting p2
+	updated, _ = got.executeCtxMenuItem(ctxMenuItem{id: ctxActHistory, label: "Input history", enabled: true})
+	got = updated.(Model)
+	if got.dialog != dialogCommandHistory {
+		t.Errorf("dialog = %v, want dialogCommandHistory", got.dialog)
+	}
+	if got.history.supported {
+		t.Error("history.supported should be false with a nil plugin registry")
+	}
+}
+
+// TestCtxMenu_ExecuteLazygit_NilRegistryDoesNotPanic covers the
+// ctxActLazygit dispatch branch (previously unexercised). The fixture panes
+// have no CWD, so gitdiscover.Candidates returns no candidates before
+// handleToggleLazygit ever touches the (nil) plugin registry — the
+// observable outcome is a flash, not a panic either way.
+func TestCtxMenu_ExecuteLazygit_NilRegistryDoesNotPanic(t *testing.T) {
+	t.Parallel()
+	m := newSplitDragTestModel(t) // ActivePane = p1, m.pluginRegistry == nil
+	updated, _ := m.Update(tea.MouseClickMsg{X: 70, Y: 10, Button: tea.MouseRight})
+	got := updated.(Model) // targeting p2
+	updated, _ = got.executeCtxMenuItem(ctxMenuItem{id: ctxActLazygit, label: "Open lazygit", enabled: true})
+	got = updated.(Model)
+	if got.ctxMenu.open() {
+		t.Error("menu should close on execute")
+	}
+	if got.flashText != "no git repo here" {
+		t.Errorf("flashText = %q, want %q (no CWD on the fixture pane)", got.flashText, "no git repo here")
+	}
+}
+
+// TestCtxMenu_FocusModeRightClick exercises paneRectAt's activePaneRectFocus
+// branch: in focus mode the active pane fills the content area, so a
+// right-click anywhere inside it targets the active pane, and a click
+// outside the content area (e.g. the status bar row) must not open a menu.
+func TestCtxMenu_FocusModeRightClick(t *testing.T) {
+	t.Parallel()
+	m := newSplitDragTestModel(t)
+	m.tabs[0].ToggleFocus()
+	if !m.tabs[0].FocusMode() {
+		t.Fatal("fixture: ToggleFocus should enter focus mode on a multi-pane tab")
+	}
+
+	updated, _ := m.Update(tea.MouseClickMsg{X: 50, Y: 20, Button: tea.MouseRight})
+	got := updated.(Model)
+	if !got.ctxMenu.open() || got.ctxMenu.paneID != "p1" {
+		t.Errorf("focus-mode right-click inside pane: paneID = %q, open = %v, want p1 open", got.ctxMenu.paneID, got.ctxMenu.open())
+	}
+
+	m2 := newSplitDragTestModel(t)
+	m2.tabs[0].ToggleFocus()
+	updated, _ = m2.Update(tea.MouseClickMsg{X: 50, Y: m2.height - 1, Button: tea.MouseRight})
+	got2 := updated.(Model)
+	if got2.ctxMenu.open() {
+		t.Error("right-click on the status bar row must not open the menu in focus mode")
+	}
+}
+
+// TestCtxMenu_HoverMovesCursorOnEnabledRow_NotOnDisabled covers the
+// MouseMotionMsg hover-cursor path: motion inside the box on an enabled row
+// moves the cursor there; motion on a disabled row (row 0, Input history,
+// disabled by the fixture's nil plugin registry) leaves it unchanged.
+func TestCtxMenu_HoverMovesCursorOnEnabledRow_NotOnDisabled(t *testing.T) {
+	t.Parallel()
+	m := newSplitDragTestModel(t)
+	updated, _ := m.Update(tea.MouseClickMsg{X: 70, Y: 10, Button: tea.MouseRight})
+	got := updated.(Model)
+
+	if got.ctxMenu.items[0].enabled {
+		t.Fatal("fixture assumption broken: row 0 (Input history) should be disabled without a plugin registry")
+	}
+	const enabledRow = 1 // Focus mode — always enabled
+	if !got.ctxMenu.items[enabledRow].enabled {
+		t.Fatalf("fixture assumption broken: row %d should be enabled", enabledRow)
+	}
+
+	hoverX := got.ctxMenu.x + 1
+	hoverY := got.ctxMenu.y + 1 + enabledRow
+	updated, _ = got.Update(tea.MouseMotionMsg{X: hoverX, Y: hoverY})
+	got2 := updated.(Model)
+	if got2.ctxMenu.cursor != enabledRow {
+		t.Errorf("hover on enabled row %d: cursor = %d, want %d", enabledRow, got2.ctxMenu.cursor, enabledRow)
+	}
+
+	before := got2.ctxMenu.cursor
+	disabledY := got2.ctxMenu.y + 1 // row 0
+	updated, _ = got2.Update(tea.MouseMotionMsg{X: hoverX, Y: disabledY})
+	got3 := updated.(Model)
+	if got3.ctxMenu.cursor != before {
+		t.Errorf("hover on disabled row must not move cursor: got %d, want %d", got3.ctxMenu.cursor, before)
+	}
+}

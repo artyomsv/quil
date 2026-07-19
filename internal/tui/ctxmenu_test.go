@@ -19,9 +19,9 @@ func TestCtxMenuPos_Clamping(t *testing.T) {
 	t.Parallel()
 	// Screen 100x40: content rows 1..38 (row 0 tab bar, row 39 status bar).
 	for _, tc := range []struct {
-		name                     string
-		ax, ay, bw, bh           int
-		wantX, wantY             int
+		name           string
+		ax, ay, bw, bh int
+		wantX, wantY   int
 	}{
 		{"prefers cursor+1", 10, 10, 20, 8, 11, 11},
 		{"right edge shifts left", 95, 10, 20, 8, 80, 11},
@@ -29,10 +29,12 @@ func TestCtxMenuPos_Clamping(t *testing.T) {
 		{"top clamps to row 1", 10, -5, 20, 8, 11, 1},
 		{"left clamps to col 0", -5, 10, 20, 8, 0, 11},
 	} {
-		x, y := ctxMenuPos(tc.ax, tc.ay, tc.bw, tc.bh, 100, 40)
-		if x != tc.wantX || y != tc.wantY {
-			t.Errorf("%s: got (%d,%d), want (%d,%d)", tc.name, x, y, tc.wantX, tc.wantY)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			x, y := ctxMenuPos(tc.ax, tc.ay, tc.bw, tc.bh, 100, 40)
+			if x != tc.wantX || y != tc.wantY {
+				t.Errorf("%s: got (%d,%d), want (%d,%d)", tc.name, x, y, tc.wantX, tc.wantY)
+			}
+		})
 	}
 }
 
@@ -52,10 +54,10 @@ func TestCtxMenuHitRow(t *testing.T) {
 	t.Parallel()
 	s := ctxMenuState{paneID: "p", x: 10, y: 5, items: testItems()}
 	for _, tc := range []struct {
-		name    string
-		px, py  int
-		row     int
-		inside  bool
+		name   string
+		px, py int
+		row    int
+		inside bool
 	}{
 		{"outside left", 9, 6, -1, false},
 		{"top border", 12, 5, -1, true},
@@ -65,10 +67,12 @@ func TestCtxMenuHitRow(t *testing.T) {
 		{"left border col", 10, 6, -1, true},
 		{"below box", 12, 10, -1, false},
 	} {
-		row, inside := ctxMenuHitRow(s, tc.px, tc.py)
-		if row != tc.row || inside != tc.inside {
-			t.Errorf("%s: got (%d,%v), want (%d,%v)", tc.name, row, inside, tc.row, tc.inside)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			row, inside := ctxMenuHitRow(s, tc.px, tc.py)
+			if row != tc.row || inside != tc.inside {
+				t.Errorf("%s: got (%d,%v), want (%d,%v)", tc.name, row, inside, tc.row, tc.inside)
+			}
+		})
 	}
 }
 

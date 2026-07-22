@@ -162,6 +162,11 @@ type KeybindingsConfig struct {
 	// left-edge crop (default) and soft-wrap. Only meaningful for panes
 	// whose plugin sets [display] wide_canvas; no-op elsewhere.
 	ToggleWrap string `toml:"toggle_wrap"`
+	// CommandPalette opens the fuzzy command palette — a modal, centered
+	// launcher for every action plus jump-to-tab/pane. Default is a two-key
+	// list: ctrl+shift+p (VS Code muscle memory) plus alt+shift+p, the reliable
+	// fallback on terminals that cannot distinguish ctrl+shift+p from ctrl+p.
+	CommandPalette string `toml:"command_palette"`
 }
 
 func Default() Config {
@@ -252,6 +257,9 @@ func Default() Config {
 			// Mnemonic: W for wrap; the Alt+Shift layer dodges AI-tool
 			// Alt-letter bindings (same reasoning as the split keys).
 			ToggleWrap: "alt+shift+w",
+			// ctrl+shift+p is the VS Code / Sublime trigger; alt+shift+p is the
+			// reliable fallback (legacy terminals fold ctrl+shift+p into ctrl+p).
+			CommandPalette: "ctrl+shift+p,alt+shift+p",
 		},
 	}
 }

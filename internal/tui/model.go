@@ -199,6 +199,7 @@ const (
 	dialogGitRepoPick // Alt+G repo picker (Task 12 fills handler/render)
 	dialogCommandHistory
 	dialogUpdateNotice
+	dialogCommandPalette
 )
 
 // tuiClient is the subset of *ipc.Client the TUI uses on the Model. Defined
@@ -318,6 +319,10 @@ type Model struct {
 	// ctxMenu is the pane context menu overlay (right-click / quick_actions).
 	// Zero value = closed. Not a dialogScreen — see ctxmenu.go.
 	ctxMenu ctxMenuState
+
+	// palette is the command-palette state (dialogCommandPalette). Zero value
+	// = empty; m.dialog is the sole open/closed authority. See palette.go.
+	palette paletteState
 
 	// Event-loop performance stats. Pointer so mutations persist across
 	// Bubble Tea's value-receiver copies.

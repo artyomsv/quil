@@ -2,6 +2,7 @@ package tui
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -80,5 +81,94 @@ func TestFilterPalette_RanksAndStableTies(t *testing.T) {
 	}
 	if got[0].label != "Close pane" || got[1].label != "Close tab" {
 		t.Errorf("stable tie order broken: %q, %q", got[0].label, got[1].label)
+	}
+}
+
+func hasEnabledAction(cmds []paletteCommand, a paletteAction) bool {
+	for _, c := range cmds {
+		if c.action == a && c.enabled {
+			return true
+		}
+	}
+	return false
+}
+
+func TestBuildPaletteCommands_NavigationAndGates(t *testing.T) {
+	t.Parallel()
+	m := newSplitDragTestModel(t) // panes p1, p2 on tab 0
+	cmds := m.buildPaletteCommands()
+
+	var gotoP1, gotoP2, history, lazygit bool
+	for _, c := range cmds {
+		switch {
+		case c.action == palActGoToPane && c.arg == "p1":
+			gotoP1 = true
+		case c.action == palActGoToPane && c.arg == "p2":
+			gotoP2 = true
+		case c.action == palActHistory:
+			history = c.enabled
+		case c.action == palActLazygit:
+			lazygit = c.enabled
+		}
+	}
+	if !gotoP1 || !gotoP2 {
+		t.Errorf("both panes must have Go-to commands (p1=%v p2=%v)", gotoP1, gotoP2)
+	}
+	if history {
+		t.Error("history must be disabled without a record_history plugin")
+	}
+	if lazygit {
+		t.Error("lazygit must be disabled without an available plugin")
+	}
+	if !hasEnabledAction(cmds, palActClosePane) || !hasEnabledAction(cmds, palActSplitH) {
+		t.Error("close-pane and split-horizontal must always be present and enabled")
+	}
+}
+
+func TestRenderCommandPalette_WidthAndCursor(t *testing.T) {
+	t.Parallel()
+	m := newSplitDragTestModel(t)
+	m.palette = paletteState{query: "close"}
+	m.palette.commands = m.buildPaletteCommands()
+	m.palette.filtered = filterPalette("close", m.palette.commands)
+	out := renderCommandPalette(*m)
+	if out == "" {
+		t.Fatal("render produced empty output")
+	}
+	if !strings.Contains(out, "close") {
+		t.Error("query text should appear in the rendered palette")
+	}
+}
+
+func TestRenderCommandPalette_EmptyResults(t *testing.T) {
+	t.Parallel()
+	m := newSplitDragTestModel(t)
+	m.palette = paletteState{query: "zzzzzz"}
+	m.palette.commands = m.buildPaletteCommands()
+	m.palette.filtered = filterPalette("zzzzzz", m.palette.commands)
+	out := renderCommandPalette(*m)
+	if !strings.Contains(out, "No matching") {
+		t.Errorf("empty results should show a 'No matching' row, got:\n%s", out)
+	}
+}
+
+func TestPaletteWindow_KeepsCursorVisible(t *testing.T) {
+	t.Parallel()
+	// n below the cap: full list, no scroll.
+	if s, e := paletteWindow(0, 5); s != 0 || e != 5 {
+		t.Errorf("small list: got [%d,%d), want [0,5)", s, e)
+	}
+	// Cursor past the first window shifts the window down.
+	s, e := paletteWindow(paletteVisibleRows+3, 40)
+	if s == 0 {
+		t.Error("cursor beyond first window should shift start > 0")
+	}
+	if cursor := paletteVisibleRows + 3; cursor < s || cursor >= e {
+		t.Errorf("cursor %d not in window [%d,%d)", cursor, s, e)
+	}
+	// Cursor at the end clamps to the last window.
+	s, e = paletteWindow(39, 40)
+	if e != 40 || s != 40-paletteVisibleRows {
+		t.Errorf("end cursor: got [%d,%d), want [%d,40)", s, e, 40-paletteVisibleRows)
 	}
 }

@@ -281,8 +281,11 @@ func (m Model) paletteInnerWidth() int {
 		boxW = m.width - 2
 	}
 	inner := boxW - 4
-	if inner < 20 {
-		inner = 20
+	// Never floor ABOVE the clamped box: on a <26-column terminal a 20-cell
+	// minimum exceeds the actual content area and the rows wrap the border.
+	// Floor at 1 only, to keep the row math non-negative.
+	if inner < 1 {
+		inner = 1
 	}
 	return inner
 }
@@ -295,24 +298,35 @@ func renderCommandPalette(m Model) string {
 	inner := m.paletteInnerWidth()
 	var b strings.Builder
 
-	// Query row: "> " + edit-styled query with a caret (matches dialogEditStyle).
+	// Query row: "> " (2 cells) + query + caret (1 cell). Show the TAIL of a long
+	// query so the caret stays visible AND the row never exceeds inner — an
+	// over-wide query row wraps the box border on a narrow terminal.
+	qAvail := inner - 3
+	if qAvail < 1 {
+		qAvail = 1
+	}
 	b.WriteString(dialogTitle.Render("> "))
-	b.WriteString(dialogEditStyle.Render(m.palette.query + "│"))
+	b.WriteString(dialogEditStyle.Render(lastCellsToWidth(m.palette.query, qAvail) + "│"))
 	b.WriteByte('\n')
 	b.WriteByte('\n')
 
+	// subtle renders an informational line bounded to inner so it never wraps the
+	// box border on a narrow terminal (greptile P1 applies to these lines too).
+	subtle := func(s string) string { return dialogSubtle.Render(truncateToWidth(s, inner)) }
+	const hint = "↑↓ nav · Enter run · Esc close"
+
 	filtered := m.palette.filtered
 	if len(filtered) == 0 {
-		b.WriteString(dialogSubtle.Render("  No matching commands"))
+		b.WriteString(subtle("  No matching commands"))
 		b.WriteByte('\n')
 		b.WriteByte('\n')
-		b.WriteString(dialogSubtle.Render("↑↓ nav · Enter run · Esc close"))
+		b.WriteString(subtle(hint))
 		return b.String()
 	}
 
 	start, end := paletteWindow(m.palette.cursor, len(filtered))
 	if start > 0 {
-		b.WriteString(dialogSubtle.Render(fmt.Sprintf("  ↑ %d more", start)))
+		b.WriteString(subtle(fmt.Sprintf("  ↑ %d more", start)))
 		b.WriteByte('\n')
 	}
 	for i := start; i < end; i++ {
@@ -320,12 +334,12 @@ func renderCommandPalette(m Model) string {
 		b.WriteByte('\n')
 	}
 	if end < len(filtered) {
-		b.WriteString(dialogSubtle.Render(fmt.Sprintf("  ↓ %d more", len(filtered)-end)))
+		b.WriteString(subtle(fmt.Sprintf("  ↓ %d more", len(filtered)-end)))
 		b.WriteByte('\n')
 	}
 
 	b.WriteByte('\n')
-	b.WriteString(dialogSubtle.Render("↑↓ nav · Enter run · Esc close"))
+	b.WriteString(subtle(hint))
 	return b.String()
 }
 
@@ -357,6 +371,9 @@ func renderPaletteRow(c paletteCommand, cursor bool, inner int) string {
 		prefix = "› "
 	}
 	contentW := inner - 2 // prefix takes 2 cells
+	if contentW < 1 {
+		contentW = 1
+	}
 	// Bound the detail first so a long shortcut cannot overflow a narrow row;
 	// leave at least 2 cells for a label + gap. Then bound the label against the
 	// remaining budget. Both are cell-aware so wide glyphs never wrap the box.
@@ -511,6 +528,30 @@ func truncateToWidth(s string, w int) string {
 		width += rw
 	}
 	return b.String() + "…"
+}
+
+// lastCellsToWidth returns the trailing substring of s whose display width is at
+// most w cells — used to show the tail (most recent input) of a long palette
+// query so the caret stays visible without overflowing the box.
+func lastCellsToWidth(s string, w int) string {
+	if w <= 0 {
+		return ""
+	}
+	if lipgloss.Width(s) <= w {
+		return s
+	}
+	runes := []rune(s)
+	width := 0
+	i := len(runes)
+	for i > 0 {
+		rw := lipgloss.Width(string(runes[i-1]))
+		if width+rw > w {
+			break
+		}
+		width += rw
+		i--
+	}
+	return string(runes[i:])
 }
 
 // executePaletteCommand closes the palette and dispatches into the SAME handler

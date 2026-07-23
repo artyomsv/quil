@@ -185,6 +185,69 @@ func TestRenderPaletteRow_WideLabelNoOverflow(t *testing.T) {
 	}
 }
 
+func TestLastCellsToWidth(t *testing.T) {
+	t.Parallel()
+	if got := lastCellsToWidth("hello", 10); got != "hello" {
+		t.Errorf("no trim: got %q", got)
+	}
+	if got := lastCellsToWidth("hello world", 5); got != "world" {
+		t.Errorf("tail: got %q, want world", got)
+	}
+	if got := lastCellsToWidth("你好世界", 4); lipgloss.Width(got) > 4 {
+		t.Errorf("wide tail width %d > 4: %q", lipgloss.Width(got), got)
+	}
+	if got := lastCellsToWidth("x", 0); got != "" {
+		t.Errorf("w=0: got %q, want empty", got)
+	}
+}
+
+// Greptile P1: on a narrow terminal the old inner-width floor (20) exceeded the
+// clamped box and long queries escaped the border. Assert every rendered content
+// line fits inside paletteInnerWidth for both a long query and a full result set.
+func TestRenderCommandPalette_NarrowTerminalNoOverflow(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		width int
+		query string
+	}{
+		{"long query narrow", 30, strings.Repeat("verylongquery ", 20)},
+		{"full list narrow", 26, ""},
+		{"full list mid", 50, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			m := newSplitDragTestModel(t)
+			m.width = tc.width
+			m.palette.query = tc.query
+			m.palette.commands = m.buildPaletteCommands()
+			m.palette.filtered = filterPalette(tc.query, m.palette.commands)
+			inner := m.paletteInnerWidth()
+			for i, line := range strings.Split(renderCommandPalette(*m), "\n") {
+				if w := lipgloss.Width(line); w > inner {
+					t.Errorf("line %d width %d exceeds inner %d: %q", i, w, inner, line)
+				}
+			}
+		})
+	}
+}
+
+func TestPaletteInnerWidth_NeverExceedsBox(t *testing.T) {
+	t.Parallel()
+	m := newSplitDragTestModel(t)
+	for _, w := range []int{8, 10, 20, 26, 40, 100} {
+		m.width = w
+		boxW := paletteWidth
+		if boxW > w-2 {
+			boxW = w - 2
+		}
+		content := boxW - 4
+		if got := m.paletteInnerWidth(); content >= 1 && got > content {
+			t.Errorf("width=%d: inner %d exceeds content area %d", w, got, content)
+		}
+	}
+}
+
 func TestPaletteWindow_KeepsCursorVisible(t *testing.T) {
 	t.Parallel()
 	// n below the cap: full list, no scroll.

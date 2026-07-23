@@ -259,17 +259,24 @@ func (m *Model) buildPaletteCommands() []paletteCommand {
 			if p == nil {
 				continue
 			}
-			label := fmt.Sprintf("%d.%d · %s", i+1, j+1, p.Type)
+			// Join only the non-empty parts with " · " so a typeless or
+			// unnamed pane never renders a dangling/doubled separator. Empty
+			// type falls back to "terminal" (the daemon's default plugin).
+			paneType := p.Type
+			if paneType == "" {
+				paneType = "terminal"
+			}
+			parts := []string{fmt.Sprintf("%d.%d", i+1, j+1), paneType}
 			if p.Name != "" {
-				label += " · " + p.Name
+				parts = append(parts, p.Name)
 			}
 			cmds = append(cmds, paletteCommand{
 				action:   palActGoToPane,
 				arg:      p.ID,
 				enabled:  true,
-				label:    label,
+				label:    strings.Join(parts, " · "),
 				detail:   shortCWD(p.CWD, home),
-				keywords: []string{"go to", "goto", "pane", "focus", p.Name, filepath.Base(p.CWD), p.Type},
+				keywords: []string{"go to", "goto", "pane", "focus", p.Name, filepath.Base(p.CWD), paneType},
 			})
 		}
 	}

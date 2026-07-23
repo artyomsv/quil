@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -107,6 +108,22 @@ func TestPalette_CursorNavigationSkipsHeaders(t *testing.T) {
 	db, _ := got.handleCommandPaletteKey(tea.KeyPressMsg{Code: tea.KeyDown})
 	if db.(Model).palette.cursor != lastSel {
 		t.Errorf("down at bottom: cursor = %d, want %d", db.(Model).palette.cursor, lastSel)
+	}
+}
+
+func TestBuildPaletteCommands_GoToPaneLabelClean(t *testing.T) {
+	t.Parallel()
+	m := newSplitDragTestModel(t) // panes p1/p2, empty Type + Name
+	for _, c := range m.buildPaletteCommands() {
+		if c.action != palActGoToPane {
+			continue
+		}
+		if strings.Contains(c.label, "· ·") || strings.HasSuffix(strings.TrimSpace(c.label), "·") {
+			t.Errorf("go-to label has a dangling/doubled separator: %q", c.label)
+		}
+		if c.arg == "p1" && c.label != "1.1 · terminal" {
+			t.Errorf("p1 label = %q, want %q", c.label, "1.1 · terminal")
+		}
 	}
 }
 

@@ -232,6 +232,34 @@ func TestRenderCommandPalette_NarrowTerminalNoOverflow(t *testing.T) {
 	}
 }
 
+// Regression: dialogBorder draws its border inside Width, so a full-width row
+// (label + right-aligned shortcut) must not soft-wrap the shortcut onto the next
+// rendered line. Render through the real renderDialog path and assert the label
+// and its shortcut land on the SAME rendered row.
+func TestRenderCommandPalette_ShortcutNotWrapped(t *testing.T) {
+	t.Parallel()
+	m := newSplitDragTestModel(t)
+	m.width, m.height = 100, 40
+	m.dialog = dialogCommandPalette
+	m.palette.commands = m.buildPaletteCommands()
+	m.palette.filtered = filterPalette("", m.palette.commands)
+
+	out := m.renderDialog()
+	var row string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "Split horizontal") {
+			row = line
+			break
+		}
+	}
+	if row == "" {
+		t.Fatal("Split horizontal row not found in rendered dialog")
+	}
+	if !strings.Contains(row, "alt+shift+h") {
+		t.Errorf("shortcut wrapped to another line — label and shortcut must share a row:\n%q", row)
+	}
+}
+
 func TestPaletteInnerWidth_NeverExceedsBox(t *testing.T) {
 	t.Parallel()
 	m := newSplitDragTestModel(t)

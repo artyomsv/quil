@@ -280,10 +280,11 @@ func (m Model) paletteInnerWidth() int {
 	if m.width > 2 && boxW > m.width-2 {
 		boxW = m.width - 2
 	}
-	inner := boxW - 4
-	// Never floor ABOVE the clamped box: on a <26-column terminal a 20-cell
-	// minimum exceeds the actual content area and the rows wrap the border.
-	// Floor at 1 only, to keep the row math non-negative.
+	// Content capacity is boxW minus the rounded border (2) AND the dialogBorder
+	// Padding(1,2) (4) — lipgloss draws the border INSIDE Width, so a row of
+	// boxW-4 would soft-wrap its trailing (right-aligned) shortcut onto the next
+	// line. boxW-6 is the true usable width.
+	inner := boxW - 6
 	if inner < 1 {
 		inner = 1
 	}

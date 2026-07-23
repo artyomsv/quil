@@ -107,6 +107,8 @@ func TestMessageTypes(t *testing.T) {
 		ipc.MsgPaneHistoryResp,
 		ipc.MsgPaneHistoryEntryReq,
 		ipc.MsgPaneHistoryEntryResp,
+		ipc.MsgPaneSearchReq,
+		ipc.MsgPaneSearchResp,
 	}
 	for _, typ := range types {
 		if typ == "" {
@@ -303,5 +305,37 @@ func TestEncodeFrame_RejectsOversizedFrame(t *testing.T) {
 	}
 	if _, err := ipc.EncodeFrame(msg); err == nil {
 		t.Fatal("EncodeFrame produced a frame larger than the wire maximum")
+	}
+}
+
+func TestPaneSearchPayload_RoundTrip(t *testing.T) {
+	req := ipc.PaneSearchReqPayload{Query: "connection refused"}
+	msg, err := ipc.NewMessage(ipc.MsgPaneSearchReq, req)
+	if err != nil {
+		t.Fatalf("marshal req: %v", err)
+	}
+	var gotReq ipc.PaneSearchReqPayload
+	if err := msg.DecodePayload(&gotReq); err != nil {
+		t.Fatalf("decode req: %v", err)
+	}
+	if gotReq.Query != req.Query {
+		t.Errorf("query = %q, want %q", gotReq.Query, req.Query)
+	}
+
+	resp := ipc.PaneSearchRespPayload{
+		Query:     "refused",
+		Hits:      []ipc.PaneSearchHit{{PaneID: "p1", Matches: 3, Excerpt: "connection refused"}},
+		Truncated: true,
+	}
+	msg2, err := ipc.NewMessage(ipc.MsgPaneSearchResp, resp)
+	if err != nil {
+		t.Fatalf("marshal resp: %v", err)
+	}
+	var gotResp ipc.PaneSearchRespPayload
+	if err := msg2.DecodePayload(&gotResp); err != nil {
+		t.Fatalf("decode resp: %v", err)
+	}
+	if len(gotResp.Hits) != 1 || gotResp.Hits[0].Matches != 3 || !gotResp.Truncated {
+		t.Errorf("resp round-trip mismatch: %+v", gotResp)
 	}
 }

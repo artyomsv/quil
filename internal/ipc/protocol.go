@@ -91,6 +91,10 @@ const (
 	MsgPaneHistoryEntryReq  = "pane_history_entry_req"
 	MsgPaneHistoryEntryResp = "pane_history_entry_resp"
 
+	// Pane content search (M11 command palette)
+	MsgPaneSearchReq  = "pane_search_req"
+	MsgPaneSearchResp = "pane_search_resp"
+
 	// Auto-update (TUI ⇄ daemon)
 	MsgStageUpdateReq  = "stage_update_req"  // TUI → daemon (empty payload)
 	MsgStageUpdateResp = "stage_update_resp" // daemon → TUI (unicast)
@@ -436,6 +440,31 @@ type PaneHistoryEntryRespPayload struct {
 	TsMs   int64  `json:"ts_ms"`
 	Text   string `json:"text"`
 	Found  bool   `json:"found"`
+}
+
+// PaneSearchReqPayload asks the daemon to scan every pane's scrollback for a
+// literal, case-insensitive substring. Query is the raw search term (no leading
+// slash — the TUI strips the "/" mode sigil before sending).
+type PaneSearchReqPayload struct {
+	Query string `json:"query"`
+}
+
+// PaneSearchHit is one matching pane. The TUI resolves the display label itself
+// from PaneID (it already holds tab/pane metadata), so the daemon returns only
+// the id, the total match count, and a single preview line.
+type PaneSearchHit struct {
+	PaneID  string `json:"pane_id"`
+	Matches int    `json:"matches"`
+	Excerpt string `json:"excerpt"`
+}
+
+// PaneSearchRespPayload carries the hits for one search. Query echoes the
+// request term so the TUI can drop responses that arrived after the user typed
+// more (stale). Truncated is set when any pane hit the per-pane match cap.
+type PaneSearchRespPayload struct {
+	Query     string          `json:"query"`
+	Hits      []PaneSearchHit `json:"hits"`
+	Truncated bool            `json:"truncated,omitempty"`
 }
 
 // UpdateInfo rides the workspace_state broadcast under the "update" key

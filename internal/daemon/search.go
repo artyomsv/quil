@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"log"
 	"sort"
 	"strings"
 
@@ -88,4 +89,22 @@ func (d *Daemon) searchPanes(term string) (hits []ipc.PaneSearchHit, truncated b
 		return hits[i].PaneID < hits[j].PaneID
 	})
 	return hits, truncated
+}
+
+// handlePaneSearchReq answers a content search: scan all panes, return hits
+// (unicast to the requesting conn). Never spawns panes; muted panes are
+// included (mute governs notifications, not search).
+func (d *Daemon) handlePaneSearchReq(conn *ipc.Conn, msg *ipc.Message) {
+	var req ipc.PaneSearchReqPayload
+	if err := msg.DecodePayload(&req); err != nil {
+		log.Printf("handlePaneSearchReq: decode: %v", err)
+		respondTo(conn, msg.ID, ipc.MsgPaneSearchResp, ipc.PaneSearchRespPayload{})
+		return
+	}
+	hits, truncated := d.searchPanes(req.Query)
+	respondTo(conn, msg.ID, ipc.MsgPaneSearchResp, ipc.PaneSearchRespPayload{
+		Query:     strings.TrimSpace(req.Query),
+		Hits:      hits,
+		Truncated: truncated,
+	})
 }

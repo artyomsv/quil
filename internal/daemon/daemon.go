@@ -800,6 +800,8 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		d.handleListPanesReq(conn, msg)
 	case ipc.MsgReadPaneOutputReq:
 		d.handleReadPaneOutputReq(conn, msg)
+	case ipc.MsgPaneSearchReq:
+		d.handlePaneSearchReq(conn, msg)
 	case ipc.MsgPaneStatusReq:
 		d.handlePaneStatusReq(conn, msg)
 	case ipc.MsgCreatePaneReq:

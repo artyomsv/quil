@@ -191,6 +191,7 @@ export const features: Feature[] = [
   },
   {
     slug: "command-palette",
+    image: "https://cdn.stukans.com/quil/screenshots/command-palette-1-800.webp",
     icon: "zap",
     title: "Command palette",
     blurb:

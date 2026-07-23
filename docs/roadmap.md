@@ -237,7 +237,7 @@ discoverable, and each row shows its keybinding so the palette teaches the
 shortcuts as you use it.
 
 v1 ships a modal, centered, keyboard-first launcher (`dialogCommandPalette`)
-with section-grouped entries (Pane / Go to pane / Tabs / System), cross-tab
+with section-grouped entries (Go to pane / Tabs / Pane / System, navigation first), cross-tab
 navigation, a greedy subsequence fuzzy scorer, and the `command_palette`
 keybinding (default `alt+shift+p`; `ctrl+shift+p` is intercepted by many
 terminals' own palette, so it is opt-in). **Deferred to Phase 2:**

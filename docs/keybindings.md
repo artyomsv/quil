@@ -161,8 +161,8 @@ If the clipboard has no text but contains an image, Quil decodes the DIB, saves 
 | `Esc` | Close |
 
 The palette is a modal launcher for **every** action plus jump-to-tab and
-jump-to-pane. Entries are grouped under dim section headers — **Pane**, **Go to
-pane**, **Tabs**, **System** — with actions first; headers disappear once you
+jump-to-pane. Entries are grouped under dim section headers — **Go to pane**,
+**Tabs**, **Pane**, **System** — navigation first; headers disappear once you
 start typing. Each row shows its shortcut, so the palette teaches the bindings as
 you go, and it dispatches into the same handlers the keybindings use.
 

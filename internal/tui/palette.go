@@ -212,9 +212,10 @@ func tabIndexName(i int, tab *TabModel) string {
 
 // buildPaletteCommands assembles the full command registry, rebuilt on every
 // open so dynamic entries (tabs/panes) and per-active-pane gates/labels are
-// current. Entries are grouped under dim section headers (Pane / Go to pane /
-// Tabs / System), in that order — actions first, navigation second. Headers are
-// shown only while browsing (empty query) and skipped by the cursor.
+// current. Entries are grouped under dim section headers (Go to pane / Tabs /
+// Pane / System), in that order — navigation first (jumping to a pane/tab is the
+// most common reason to open the palette), then pane actions, then system.
+// Headers are shown only while browsing (empty query) and skipped by the cursor.
 func (m *Model) buildPaletteCommands() []paletteCommand {
 	kb := m.cfg.Keybindings
 	home, _ := os.UserHomeDir()
@@ -245,25 +246,10 @@ func (m *Model) buildPaletteCommands() []paletteCommand {
 		}
 	}
 
-	// --- Pane: actions on the active pane ----------------------------------
-	header("Pane")
-	cmds = append(cmds,
-		paletteCommand{action: palActSplitH, enabled: true, label: "Split horizontal", detail: kbDisplay(kb.SplitHorizontal), keywords: []string{"hsplit", "horizontal"}},
-		paletteCommand{action: palActSplitV, enabled: true, label: "Split vertical", detail: kbDisplay(kb.SplitVertical), keywords: []string{"vsplit", "vertical"}},
-		paletteCommand{action: palActFocus, enabled: true, label: "Toggle focus mode", detail: kbDisplay(kb.FocusPane), keywords: []string{"fullscreen", "zoom", "maximize"}},
-		paletteCommand{action: palActNotes, enabled: true, label: "Toggle notes", detail: kbDisplay(kb.NotesToggle), keywords: []string{"note", "editor"}},
-		paletteCommand{action: palActRenamePane, enabled: true, label: "Rename pane", detail: kbDisplay(kb.RenamePane)},
-		paletteCommand{action: palActMute, enabled: true, label: muteLabel, detail: kbDisplay(kb.MutePane), keywords: []string{"mute", "silence", "notification"}},
-		paletteCommand{action: palActEager, enabled: true, label: eagerLabel, detail: kbDisplay(kb.ToggleEager), keywords: []string{"eager", "restore", "restart"}},
-		paletteCommand{action: palActHistory, enabled: historyOK, label: "Input history", detail: kbDisplay(kb.CommandHistory), keywords: []string{"history", "prompts"}},
-		paletteCommand{action: palActLazygit, enabled: lazygitOK, label: "Open lazygit", detail: kbDisplay(kb.ToggleLazygit), keywords: []string{"git", "lazygit"}},
-		paletteCommand{action: palActNewPane, enabled: true, label: "New pane…", detail: "ctrl+n", keywords: []string{"create", "plugin", "claude", "terminal"}},
-		paletteCommand{action: palActRestartPane, enabled: true, label: "Restart pane…", detail: kbDisplay(kb.RestartPane), keywords: []string{"restart", "respawn"}},
-		paletteCommand{action: palActClosePane, enabled: true, label: "Close pane…", detail: kbDisplay(kb.ClosePane), keywords: []string{"close", "kill"}},
-	)
-
-	// --- Go to pane: one row per pane across every tab, distinguished by a
-	// tab.pane index + plugin type so same-name/same-CWD panes are told apart.
+	// --- Go to pane: navigation leads — jumping to a pane is the most common
+	// reason to open the palette. One row per pane across every tab,
+	// distinguished by a tab.pane index + plugin type so same-name/same-CWD
+	// panes are told apart.
 	header("Go to pane")
 	for i, tab := range m.tabs {
 		if tab == nil {
@@ -288,9 +274,8 @@ func (m *Model) buildPaletteCommands() []paletteCommand {
 		}
 	}
 
-	// --- Tabs --------------------------------------------------------------
+	// --- Tabs: switch-to (navigation) first, then tab management -----------
 	header("Tabs")
-	cmds = append(cmds, paletteCommand{action: palActNewTab, enabled: true, label: "New tab", detail: kbDisplay(kb.NewTab), keywords: []string{"tab", "create"}})
 	for i, tab := range m.tabs {
 		if tab == nil {
 			continue
@@ -304,9 +289,27 @@ func (m *Model) buildPaletteCommands() []paletteCommand {
 		})
 	}
 	cmds = append(cmds,
+		paletteCommand{action: palActNewTab, enabled: true, label: "New tab", detail: kbDisplay(kb.NewTab), keywords: []string{"tab", "create"}},
 		paletteCommand{action: palActCloseTab, enabled: true, label: "Close tab…", detail: kbDisplay(kb.CloseTab), keywords: []string{"tab", "close"}},
 		paletteCommand{action: palActRenameTab, enabled: true, label: "Rename tab", detail: kbDisplay(kb.RenameTab), keywords: []string{"tab", "rename"}},
 		paletteCommand{action: palActCycleTabColor, enabled: true, label: "Cycle tab color", detail: kbDisplay(kb.CycleTabColor), keywords: []string{"tab", "color"}},
+	)
+
+	// --- Pane: actions on the active pane ----------------------------------
+	header("Pane")
+	cmds = append(cmds,
+		paletteCommand{action: palActSplitH, enabled: true, label: "Split horizontal", detail: kbDisplay(kb.SplitHorizontal), keywords: []string{"hsplit", "horizontal"}},
+		paletteCommand{action: palActSplitV, enabled: true, label: "Split vertical", detail: kbDisplay(kb.SplitVertical), keywords: []string{"vsplit", "vertical"}},
+		paletteCommand{action: palActFocus, enabled: true, label: "Toggle focus mode", detail: kbDisplay(kb.FocusPane), keywords: []string{"fullscreen", "zoom", "maximize"}},
+		paletteCommand{action: palActNotes, enabled: true, label: "Toggle notes", detail: kbDisplay(kb.NotesToggle), keywords: []string{"note", "editor"}},
+		paletteCommand{action: palActRenamePane, enabled: true, label: "Rename pane", detail: kbDisplay(kb.RenamePane)},
+		paletteCommand{action: palActMute, enabled: true, label: muteLabel, detail: kbDisplay(kb.MutePane), keywords: []string{"mute", "silence", "notification"}},
+		paletteCommand{action: palActEager, enabled: true, label: eagerLabel, detail: kbDisplay(kb.ToggleEager), keywords: []string{"eager", "restore", "restart"}},
+		paletteCommand{action: palActHistory, enabled: historyOK, label: "Input history", detail: kbDisplay(kb.CommandHistory), keywords: []string{"history", "prompts"}},
+		paletteCommand{action: palActLazygit, enabled: lazygitOK, label: "Open lazygit", detail: kbDisplay(kb.ToggleLazygit), keywords: []string{"git", "lazygit"}},
+		paletteCommand{action: palActNewPane, enabled: true, label: "New pane…", detail: "ctrl+n", keywords: []string{"create", "plugin", "claude", "terminal"}},
+		paletteCommand{action: palActRestartPane, enabled: true, label: "Restart pane…", detail: kbDisplay(kb.RestartPane), keywords: []string{"restart", "respawn"}},
+		paletteCommand{action: palActClosePane, enabled: true, label: "Close pane…", detail: kbDisplay(kb.ClosePane), keywords: []string{"close", "kill"}},
 	)
 
 	// --- System ------------------------------------------------------------

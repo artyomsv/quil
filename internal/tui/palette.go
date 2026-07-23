@@ -33,9 +33,9 @@ type paletteState struct {
 type paletteAction int
 
 const (
-	palActNone paletteAction = iota
-	palActGoToPane  // arg = paneID
-	palActSwitchTab // arg = tabID
+	palActNone      paletteAction = iota
+	palActGoToPane                // arg = paneID
+	palActSwitchTab               // arg = tabID
 	palActSplitH
 	palActSplitV
 	palActFocus
@@ -443,12 +443,25 @@ func (m Model) handleCommandPaletteKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd)
 		m.palette.query += " "
 		m.refilterPalette()
 		return m, nil
-	case msg.Text != "":
+	case msg.Text != "" && isPrintableText(msg.Text):
+		// Only printable text extends the query; a key we do not handle above
+		// (e.g. tab) may carry a control character in msg.Text — never inject it.
 		m.palette.query += msg.Text
 		m.refilterPalette()
 		return m, nil
 	}
 	return m, nil
+}
+
+// isPrintableText reports whether every rune in s is printable — the guard that
+// keeps control characters (tab, etc.) out of the palette query.
+func isPrintableText(s string) bool {
+	for _, r := range s {
+		if !unicode.IsPrint(r) {
+			return false
+		}
+	}
+	return true
 }
 
 // executePaletteCommand closes the palette and dispatches into the SAME handler
@@ -559,4 +572,3 @@ func (m Model) executePaletteCommand(c paletteCommand) (tea.Model, tea.Cmd) {
 	}
 	return m, nil
 }
-

@@ -131,6 +131,19 @@ func TestPalette_DisabledCommandInert(t *testing.T) {
 	}
 }
 
+func TestPalette_ControlTextNotInjected(t *testing.T) {
+	t.Parallel()
+	m := newSplitDragTestModel(t)
+	opened, _ := m.openCommandPalette()
+	got := opened.(Model)
+	// A key we do not handle whose Text carries a control char (e.g. tab → \t)
+	// must not extend the query.
+	updated, _ := got.handleCommandPaletteKey(tea.KeyPressMsg{Text: "\t"})
+	if q := updated.(Model).palette.query; q != "" {
+		t.Errorf("query = %q, want empty (control text rejected)", q)
+	}
+}
+
 func TestPalette_SwitchTabExecutes(t *testing.T) {
 	t.Parallel()
 	m := newSplitDragTestModel(t)

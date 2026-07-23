@@ -901,6 +901,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			text := strings.ReplaceAll(msg.Content, "\r", "")
 			m.notesEditor.HandlePaste(text)
 			return m, nil
+		} else if m.dialog == dialogCommandPalette {
+			// Fold pasted text into the fuzzy query, keeping only printable runes
+			// (same guard as typed input — drops newlines, tabs, control bytes).
+			// Without this branch the paste would fall through to
+			// sendClipboardToPane and be injected into the hidden pane's PTY — an
+			// input-isolation break and a clipboard leak into a background shell
+			// (a trailing newline could even execute it).
+			m.palette.query += sanitizePaletteQuery(msg.Content)
+			m.refilterPalette()
+			return m, nil
 		} else {
 			// Empty bracketed-paste content means the terminal (e.g. Windows
 			// Terminal on Ctrl+V) fired a paste for a clipboard that holds an

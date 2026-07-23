@@ -79,6 +79,12 @@ type paletteCommand struct {
 // and, if so, a score (higher = better). It rewards consecutive runs, a match
 // at the target start, a match right after a separator, and earlier position.
 // Empty query returns (0, true) — everything passes.
+//
+// Matching is greedy: each query rune takes the FIRST available target position,
+// not the globally best alignment. This can under-rank a target whose better
+// (more consecutive) run sits after a poorer early match. Acceptable for the
+// short, well-separated command labels here; revisit with a full DP scorer only
+// if ranking quality ever becomes a complaint.
 func fuzzyScore(query, target string) (int, bool) {
 	if query == "" {
 		return 0, true
@@ -351,7 +357,13 @@ func renderPaletteRow(c paletteCommand, cursor bool, inner int) string {
 		prefix = "› "
 	}
 	contentW := inner - 2 // prefix takes 2 cells
+	// Bound the detail first so a long shortcut cannot overflow a narrow row;
+	// leave at least 2 cells for a label + gap. Then bound the label against the
+	// remaining budget. Both are cell-aware so wide glyphs never wrap the box.
 	detail := c.detail
+	if maxDetail := contentW - 2; maxDetail >= 0 && lipgloss.Width(detail) > maxDetail {
+		detail = truncateToWidth(detail, maxDetail)
+	}
 	detailW := lipgloss.Width(detail)
 	labelMax := contentW - detailW - 1 // ≥1 space gap
 	if labelMax < 1 {
@@ -359,7 +371,7 @@ func renderPaletteRow(c paletteCommand, cursor bool, inner int) string {
 	}
 	label := c.label
 	if lipgloss.Width(label) > labelMax {
-		label = truncateHistory(label, labelMax) // rune-aware, appends …
+		label = truncateToWidth(label, labelMax)
 	}
 	gap := contentW - lipgloss.Width(label) - detailW
 	if gap < 1 {
@@ -453,6 +465,18 @@ func (m Model) handleCommandPaletteKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd)
 	return m, nil
 }
 
+// sanitizePaletteQuery keeps only printable runes from s — the paste-path
+// counterpart to isPrintableText, used to fold clipboard text into the query
+// without letting newlines/tabs/control bytes through.
+func sanitizePaletteQuery(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsPrint(r) {
+			return r
+		}
+		return -1
+	}, s)
+}
+
 // isPrintableText reports whether every rune in s is printable — the guard that
 // keeps control characters (tab, etc.) out of the palette query.
 func isPrintableText(s string) bool {
@@ -462,6 +486,31 @@ func isPrintableText(s string) bool {
 		}
 	}
 	return true
+}
+
+// truncateToWidth shortens s to at most w display cells (lipgloss.Width),
+// appending "…". Cell-aware, NOT rune-count: a CJK/emoji label — a pane or tab
+// name is user-settable — would otherwise render up to 2× its budget and wrap
+// the palette box border. Returns "" for w <= 0.
+func truncateToWidth(s string, w int) string {
+	if w <= 0 {
+		return ""
+	}
+	if lipgloss.Width(s) <= w {
+		return s
+	}
+	target := w - 1 // reserve one cell for the ellipsis
+	var b strings.Builder
+	width := 0
+	for _, r := range s {
+		rw := lipgloss.Width(string(r))
+		if width+rw > target {
+			break
+		}
+		b.WriteRune(r)
+		width += rw
+	}
+	return b.String() + "…"
 }
 
 // executePaletteCommand closes the palette and dispatches into the SAME handler

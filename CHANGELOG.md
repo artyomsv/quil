@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.39.0] - 2026-07-23
+
 ### Added
 - Command palette (`Alt+Shift+P`) — a modal, keyboard-first fuzzy-find launcher for every action plus jump-to-tab and jump-to-pane across the workspace. Entries are grouped under section headers (Pane / Go to pane / Tabs / System) with actions first; headers disappear when you type. Type to filter, `Enter` to run, `Esc` to close; each row shows its keybinding. Dispatches into the same handlers the keybindings use. Configurable via `command_palette` (`Ctrl+Shift+P` is opt-in — many terminals intercept it).
 

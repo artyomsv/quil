@@ -335,7 +335,24 @@ func TestPaneSearchPayload_RoundTrip(t *testing.T) {
 	if err := msg2.DecodePayload(&gotResp); err != nil {
 		t.Fatalf("decode resp: %v", err)
 	}
-	if len(gotResp.Hits) != 1 || gotResp.Hits[0].Matches != 3 || !gotResp.Truncated {
-		t.Errorf("resp round-trip mismatch: %+v", gotResp)
+	if len(gotResp.Hits) != 1 {
+		t.Errorf("Hits length = %d, want 1", len(gotResp.Hits))
+	}
+	if gotResp.Query != resp.Query {
+		t.Errorf("query = %q, want %q", gotResp.Query, resp.Query)
+	}
+	if len(gotResp.Hits) >= 1 {
+		if gotResp.Hits[0].PaneID != resp.Hits[0].PaneID {
+			t.Errorf("PaneID = %q, want %q", gotResp.Hits[0].PaneID, resp.Hits[0].PaneID)
+		}
+		if gotResp.Hits[0].Matches != resp.Hits[0].Matches {
+			t.Errorf("Matches = %d, want %d", gotResp.Hits[0].Matches, resp.Hits[0].Matches)
+		}
+		if gotResp.Hits[0].Excerpt != resp.Hits[0].Excerpt {
+			t.Errorf("Excerpt = %q, want %q", gotResp.Hits[0].Excerpt, resp.Hits[0].Excerpt)
+		}
+	}
+	if gotResp.Truncated != resp.Truncated {
+		t.Errorf("Truncated = %v, want %v", gotResp.Truncated, resp.Truncated)
 	}
 }

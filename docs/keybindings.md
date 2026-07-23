@@ -24,6 +24,7 @@ The five keys you'll use most:
 
 | Key | Action |
 |---|---|
+| `Ctrl+Shift+P` | Command palette — fuzzy-find any action or jump to any pane/tab |
 | `F1` | About menu → Settings, Plugins, Memory, log viewers |
 | `Ctrl+N` | New typed pane (Claude Code, OpenCode, terminal, …) |
 | `Ctrl+T` | New tab |
@@ -148,6 +149,23 @@ If the clipboard has no text but contains an image, Quil decodes the DIB, saves 
 | Click on scrollbar | Jump the scrollbar thumb to that Y position (rightmost content column of the pane) |
 | Click + drag on scrollbar | Continuous scroll — drag follows cursor Y, even off-pane |
 | `Alt+Up` / `Alt+Down` *(in log viewer)* | Jump cursor by `[ui] log_viewer_page_lines` (default 40) |
+
+## Command palette
+
+| Key | Action |
+|---|---|
+| `Ctrl+Shift+P` / `Alt+Shift+P` | Open the command palette (`command_palette`) |
+| Type | Fuzzy-filter the list (matches labels + keywords) |
+| `↑` / `↓` (or `Ctrl+P` / `Ctrl+N`) | Move the selection |
+| `Enter` | Run the highlighted command |
+| `Esc` | Close |
+
+The palette is a modal launcher for **every** action plus jump-to-tab and
+jump-to-pane. It dispatches into the same handlers the keybindings use, and each
+row shows its shortcut so the palette teaches the bindings as you go. Both
+default keys are provided because some terminals cannot tell `Ctrl+Shift+P` from
+`Ctrl+P`; `Alt+Shift+P` always works. Rebind via `command_palette` in
+`config.toml`. Unavailable while the notes editor is open.
 
 ## Dialogs (F1 menus)
 

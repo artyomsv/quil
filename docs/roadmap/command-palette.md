@@ -5,7 +5,7 @@
 | Priority | 4 |
 | Effort | Medium |
 | Impact | High |
-| Status | Proposed |
+| Status | Implemented (v1) — see `docs/superpowers/specs/2026-07-23-command-palette-design.md` |
 | Depends on | — |
 
 ## Problem
@@ -104,16 +104,16 @@ Or use a lightweight Go fuzzy library.
 
 ## Success Criteria
 
-- [ ] `Ctrl+Shift+P` opens command palette overlay
-- [ ] Typing filters commands with fuzzy matching
-- [ ] Enter executes the selected command
-- [ ] All existing keybinding actions are available as commands
-- [ ] Current tabs/panes appear as "Go to" commands
-- [ ] Saved plugin instances appear as "Create" commands
-- [ ] Response feels instant (< 16ms per keystroke)
+- [x] `Ctrl+Shift+P` (and `Alt+Shift+P`) opens the command palette
+- [x] Typing filters commands with fuzzy matching
+- [x] Enter executes the selected command
+- [x] Existing keybinding actions are available as commands (dispatch into the same handlers)
+- [x] Current tabs/panes appear as "Go to" / "Switch to tab" commands
+- [ ] Saved plugin instances appear as "Create" commands — **deferred to Phase 2** (single "New pane…" ships in v1; per-plugin/instance quick-create needs the multi-step setup flow)
+- [x] Response feels instant (< 16ms per keystroke)
 
-## Open Questions
+## Open Questions — resolved for v1
 
-- Should the palette support ":" prefix for direct command mode (`:split h`)?
-- MRU (most recently used) persistence across sessions?
-- Should it also search terminal output (like VS Code's "Go to Symbol")?
+- `":"` prefix for direct command mode — **deferred to Phase 2** (redundant with fuzzy in v1).
+- MRU (most recently used) persistence — **deferred to Phase 2** (v1 shows a curated fixed order when the query is empty).
+- Search terminal output (VS Code "Go to Symbol") — **deferred to Phase 2** (its own feature: content search across pane buffers, alt-screen-vs-scrollback split, daemon-side search).

@@ -163,9 +163,11 @@ type KeybindingsConfig struct {
 	// whose plugin sets [display] wide_canvas; no-op elsewhere.
 	ToggleWrap string `toml:"toggle_wrap"`
 	// CommandPalette opens the fuzzy command palette — a modal, centered
-	// launcher for every action plus jump-to-tab/pane. Default is a two-key
-	// list: ctrl+shift+p (VS Code muscle memory) plus alt+shift+p, the reliable
-	// fallback on terminals that cannot distinguish ctrl+shift+p from ctrl+p.
+	// launcher for every action plus jump-to-tab/pane. Default is alt+shift+p:
+	// ctrl+shift+p is intercepted by many terminals' own command palette
+	// (Windows Terminal, VS Code's terminal) before it reaches Quil, so it is
+	// deliberately NOT a default. Add it back in config.toml if your terminal
+	// leaves it free (e.g. `command_palette = "ctrl+shift+p,alt+shift+p"`).
 	CommandPalette string `toml:"command_palette"`
 }
 
@@ -257,9 +259,9 @@ func Default() Config {
 			// Mnemonic: W for wrap; the Alt+Shift layer dodges AI-tool
 			// Alt-letter bindings (same reasoning as the split keys).
 			ToggleWrap: "alt+shift+w",
-			// ctrl+shift+p is the VS Code / Sublime trigger; alt+shift+p is the
-			// reliable fallback (legacy terminals fold ctrl+shift+p into ctrl+p).
-			CommandPalette: "ctrl+shift+p,alt+shift+p",
+			// alt+shift+p only: ctrl+shift+p is grabbed by many terminals' own
+			// command palette before Quil sees it (Windows Terminal, VS Code).
+			CommandPalette: "alt+shift+p",
 		},
 	}
 }

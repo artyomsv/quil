@@ -1,4 +1,4 @@
-# Command Palette (`Ctrl+Shift+P`)
+# Command Palette (`Alt+Shift+P`)
 
 | Field | Value |
 |-------|-------|
@@ -14,7 +14,7 @@ Quil has many features behind keybindings, but discoverability is poor. Users ne
 
 ## Proposed Solution
 
-A fuzzy-find overlay triggered by `Ctrl+Shift+P` that provides instant access to:
+A fuzzy-find overlay triggered by `Alt+Shift+P` (the default; `Ctrl+Shift+P` is intercepted by many terminals' own palette) that provides instant access to:
 
 - **Search panes** by name, plugin type, CWD
 - **Execute commands**: split, close, rename, resize
@@ -89,7 +89,7 @@ Or use a lightweight Go fuzzy library.
 
 - New `dialogPalette` state in dialog system
 - Full-width overlay with input field + scrollable results
-- `Ctrl+Shift+P` keybinding (configurable)
+- `command_palette` keybinding (configurable; default `alt+shift+p`)
 - Results update on every keystroke
 - Enter executes selected command, Esc closes
 
@@ -104,7 +104,7 @@ Or use a lightweight Go fuzzy library.
 
 ## Success Criteria
 
-- [x] `Ctrl+Shift+P` (and `Alt+Shift+P`) opens the command palette
+- [x] `Alt+Shift+P` opens the command palette (`Ctrl+Shift+P` opt-in; terminals often intercept it)
 - [x] Typing filters commands with fuzzy matching
 - [x] Enter executes the selected command
 - [x] Existing keybinding actions are available as commands (dispatch into the same handlers)

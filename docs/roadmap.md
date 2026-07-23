@@ -229,7 +229,7 @@ Define workspace blueprints committed to git: tabs, panes, plugins, CWDs, comman
 
 ### M11: Command Palette — [PRD](roadmap/command-palette.md)
 
-> `Ctrl+Shift+P` fuzzy-find overlay for everything. **Implemented (v1).**
+> `Alt+Shift+P` fuzzy-find overlay for everything. **Implemented (v1).**
 
 Search commands, switch tabs, jump to any pane, create panes — all from a single
 keyboard shortcut. Fuzzy string matching makes every feature instantly
@@ -237,11 +237,12 @@ discoverable, and each row shows its keybinding so the palette teaches the
 shortcuts as you use it.
 
 v1 ships a modal, centered, keyboard-first launcher (`dialogCommandPalette`)
-with cross-tab navigation, all pane/tab/create/system actions, a greedy
-subsequence fuzzy scorer, and the `command_palette` keybinding
-(`ctrl+shift+p,alt+shift+p`). **Deferred to Phase 2:** per-plugin/instance
-quick-create, `/` content search across pane buffers, `:` direct-command mode,
-and MRU ordering.
+with section-grouped entries (Pane / Go to pane / Tabs / System), cross-tab
+navigation, a greedy subsequence fuzzy scorer, and the `command_palette`
+keybinding (default `alt+shift+p`; `ctrl+shift+p` is intercepted by many
+terminals' own palette, so it is opt-in). **Deferred to Phase 2:**
+per-plugin/instance quick-create, `/` content search across pane buffers, `:`
+direct-command mode, and MRU ordering.
 
 ---
 
@@ -406,7 +407,7 @@ section above.
 | 3 | **[gap]** Screen-content agent detection + broad agent support (M14) | Medium | Very High | Core |
 | 4 | **[gap]** Git worktree-per-session + diff viewer (M15) | Medium | Very High | Core |
 | 5 | Project workspace files (`.quil.toml`) + repo hooks **[gap #19]** | Medium | Very High | Core |
-| ~~6~~ | ~~Command palette (`Ctrl+Shift+P`)~~ | ~~Medium~~ | ~~High~~ | ~~Done (v1)~~ |
+| ~~6~~ | ~~Command palette (`Alt+Shift+P`)~~ | ~~Medium~~ | ~~High~~ | ~~Done (v1)~~ |
 | 7 | **[gap]** Sound + OS/desktop notifications (M17) | Small | High | Polish |
 | 8 | **[gap]** General shell CLI to script panes | Medium | High | Core |
 | 9 | Community plugin registry + executable plugins **[gap]** | Medium | High | Growth |

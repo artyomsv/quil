@@ -126,9 +126,11 @@ Full mouse support — click tabs to switch, click panes to focus, scroll wheel 
 
 ### Command palette
 
-Press `Ctrl+Shift+P` (or `Alt+Shift+P`) to open a modal, keyboard-first launcher for **everything**: split/close/rename/focus a pane, new/close/rename a tab, jump to any pane or tab across the whole workspace, create a pane, and open Settings, Plugins, Memory, or the log viewers. Type a fragment of the intent (`split`, `restart`, `backend`) and the list filters live by fuzzy score; `↑`/`↓` (or `Ctrl+P`/`Ctrl+N`) move the selection, `Enter` runs it, `Esc` closes.
+Press `Alt+Shift+P` to open a modal, keyboard-first launcher for **everything**: split/close/rename/focus a pane, new/close/rename a tab, jump to any pane or tab across the whole workspace, create a pane, and open Settings, Plugins, Memory, or the log viewers. Type a fragment of the intent (`split`, `restart`, `backend`) and the list filters live by fuzzy score; `↑`/`↓` (or `Ctrl+P`/`Ctrl+N`) move the selection, `Enter` runs it, `Esc` closes.
 
-Every command dispatches into the same handler the keybinding uses — the palette is a launcher, not a second implementation — and each row shows its shortcut, so it teaches the bindings as you go. Rows that don't apply grey out (Input history without `record_history`, Open lazygit without the binary). Two default keys ship because some terminals fold `Ctrl+Shift+P` into `Ctrl+P`; `Alt+Shift+P` always works. Rebind via `command_palette` in `config.toml`. (Phase 2 will add per-plugin/instance quick-create and cross-pane content search.)
+Entries are grouped under dim section headers — **Pane**, **Go to pane**, **Tabs**, **System** — with actions first, so the organization is obvious at a glance; headers disappear once you start typing. Panes are listed by `tab.pane` index and plugin type so same-name or same-directory panes are easy to tell apart. Every command dispatches into the same handler the keybinding uses — the palette is a launcher, not a second implementation — and each row shows its shortcut, so it teaches the bindings as you go. Rows that don't apply grey out (Input history without `record_history`, Open lazygit without the binary).
+
+The default is `Alt+Shift+P` because `Ctrl+Shift+P` (the VS Code key) is intercepted by many terminals' own command palette — Windows Terminal, VS Code's integrated terminal — before Quil sees it. Add it back via `command_palette = "ctrl+shift+p,alt+shift+p"` if your terminal leaves it free. (Phase 2 will add per-plugin/instance quick-create and cross-pane content search.)
 
 ### Pane context menu
 

@@ -24,7 +24,7 @@ The five keys you'll use most:
 
 | Key | Action |
 |---|---|
-| `Ctrl+Shift+P` | Command palette — fuzzy-find any action or jump to any pane/tab |
+| `Alt+Shift+P` | Command palette — fuzzy-find any action or jump to any pane/tab |
 | `F1` | About menu → Settings, Plugins, Memory, log viewers |
 | `Ctrl+N` | New typed pane (Claude Code, OpenCode, terminal, …) |
 | `Ctrl+T` | New tab |
@@ -154,18 +154,23 @@ If the clipboard has no text but contains an image, Quil decodes the DIB, saves 
 
 | Key | Action |
 |---|---|
-| `Ctrl+Shift+P` / `Alt+Shift+P` | Open the command palette (`command_palette`) |
+| `Alt+Shift+P` | Open the command palette (`command_palette`) |
 | Type | Fuzzy-filter the list (matches labels + keywords) |
-| `↑` / `↓` (or `Ctrl+P` / `Ctrl+N`) | Move the selection |
+| `↑` / `↓` (or `Ctrl+P` / `Ctrl+N`) | Move the selection (section headers are skipped) |
 | `Enter` | Run the highlighted command |
 | `Esc` | Close |
 
 The palette is a modal launcher for **every** action plus jump-to-tab and
-jump-to-pane. It dispatches into the same handlers the keybindings use, and each
-row shows its shortcut so the palette teaches the bindings as you go. Both
-default keys are provided because some terminals cannot tell `Ctrl+Shift+P` from
-`Ctrl+P`; `Alt+Shift+P` always works. Rebind via `command_palette` in
-`config.toml`. Unavailable while the notes editor is open.
+jump-to-pane. Entries are grouped under dim section headers — **Pane**, **Go to
+pane**, **Tabs**, **System** — with actions first; headers disappear once you
+start typing. Each row shows its shortcut, so the palette teaches the bindings as
+you go, and it dispatches into the same handlers the keybindings use.
+
+The default is `Alt+Shift+P` because `Ctrl+Shift+P` (the VS Code key) is grabbed
+by many terminals' own command palette — Windows Terminal, VS Code's integrated
+terminal — before Quil sees it. If your terminal leaves it free, add it back:
+`command_palette = "ctrl+shift+p,alt+shift+p"`. Unavailable while the notes
+editor is open.
 
 ## Dialogs (F1 menus)
 

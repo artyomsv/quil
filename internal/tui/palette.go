@@ -25,6 +25,13 @@ type paletteState struct {
 	cursor   int
 	commands []paletteCommand // full registry, rebuilt on open
 	filtered []paletteCommand // commands matching query, best score first
+
+	// Content-search mode (entered by a leading "/").
+	mode      paletteMode
+	term      string       // query minus the "/" sigil
+	hits      []paletteHit // resolved matches, daemon-sorted
+	searching bool         // a request is in flight, no fresh response yet
+	truncated bool         // some pane hit the per-pane match cap
 }
 
 // paletteAction identifies one command palette entry. Dispatch in

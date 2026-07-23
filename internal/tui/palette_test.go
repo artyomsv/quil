@@ -4,6 +4,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"charm.land/lipgloss/v2"
 )
 
 func cmd(label string, kw ...string) paletteCommand {
@@ -149,6 +151,37 @@ func TestRenderCommandPalette_EmptyResults(t *testing.T) {
 	out := renderCommandPalette(*m)
 	if !strings.Contains(out, "No matching") {
 		t.Errorf("empty results should show a 'No matching' row, got:\n%s", out)
+	}
+}
+
+func TestTruncateToWidth(t *testing.T) {
+	t.Parallel()
+	if got := truncateToWidth("hello", 10); got != "hello" {
+		t.Errorf("no truncation needed: got %q, want hello", got)
+	}
+	if got := truncateToWidth("hello world", 5); lipgloss.Width(got) > 5 {
+		t.Errorf("ascii truncation width %d > 5: %q", lipgloss.Width(got), got)
+	}
+	// Wide glyphs must be counted by cell, not rune.
+	if got := truncateToWidth("你好世界", 3); lipgloss.Width(got) > 3 {
+		t.Errorf("wide truncation width %d > 3: %q", lipgloss.Width(got), got)
+	}
+	if got := truncateToWidth("x", 0); got != "" {
+		t.Errorf("w=0: got %q, want empty", got)
+	}
+}
+
+func TestRenderPaletteRow_WideLabelNoOverflow(t *testing.T) {
+	t.Parallel()
+	// A wide-glyph label (a tab/pane name is user-settable) plus a long detail,
+	// at a narrow inner width, must never render wider than inner — otherwise
+	// lipgloss wraps the row and breaks the palette box border.
+	c := paletteCommand{label: "🚀🚀🚀🚀🚀🚀🚀🚀 deploy service", detail: "alt+f2 / alt+shift+r", enabled: true}
+	for _, inner := range []int{20, 30, 68} {
+		row := renderPaletteRow(c, false, inner)
+		if w := lipgloss.Width(row); w > inner {
+			t.Errorf("inner=%d: row width = %d, want <= %d", inner, w, inner)
+		}
 	}
 }
 

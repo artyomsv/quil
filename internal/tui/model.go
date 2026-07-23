@@ -199,6 +199,7 @@ const (
 	dialogGitRepoPick // Alt+G repo picker (Task 12 fills handler/render)
 	dialogCommandHistory
 	dialogUpdateNotice
+	dialogCommandPalette
 )
 
 // tuiClient is the subset of *ipc.Client the TUI uses on the Model. Defined
@@ -318,6 +319,10 @@ type Model struct {
 	// ctxMenu is the pane context menu overlay (right-click / quick_actions).
 	// Zero value = closed. Not a dialogScreen — see ctxmenu.go.
 	ctxMenu ctxMenuState
+
+	// palette is the command-palette state (dialogCommandPalette). Zero value
+	// = empty; m.dialog is the sole open/closed authority. See palette.go.
+	palette paletteState
 
 	// Event-loop performance stats. Pointer so mutations persist across
 	// Bubble Tea's value-receiver copies.
@@ -895,6 +900,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else if m.notesMode && m.notesEditor != nil {
 			text := strings.ReplaceAll(msg.Content, "\r", "")
 			m.notesEditor.HandlePaste(text)
+			return m, nil
+		} else if m.dialog == dialogCommandPalette {
+			// Fold pasted text into the fuzzy query, keeping only printable runes
+			// (same guard as typed input — drops newlines, tabs, control bytes).
+			// Without this branch the paste would fall through to
+			// sendClipboardToPane and be injected into the hidden pane's PTY — an
+			// input-isolation break and a clipboard leak into a background shell
+			// (a trailing newline could even execute it).
+			m.palette.query += sanitizePaletteQuery(msg.Content)
+			m.refilterPalette()
 			return m, nil
 		} else {
 			// Empty bracketed-paste content means the terminal (e.g. Windows
@@ -1804,6 +1819,54 @@ func (m Model) openHistoryForActivePane() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// openCloseTabConfirm opens the close-tab confirm for the active tab. Extracted
+// from the kb.CloseTab case; shared with the command palette.
+func (m Model) openCloseTabConfirm() (tea.Model, tea.Cmd) {
+	if tab := m.activeTabModel(); tab != nil {
+		m.dialog = dialogConfirm
+		m.confirmKind = "tab"
+		m.confirmID = tab.ID
+		m.confirmName = tab.Name
+	}
+	return m, tea.ClearScreen
+}
+
+// beginTabRename enters inline tab-rename mode for the active tab. Extracted
+// from the kb.RenameTab case; shared with the command palette.
+func (m Model) beginTabRename() (tea.Model, tea.Cmd) {
+	if tab := m.activeTabModel(); tab != nil {
+		m.renaming = true
+		m.renameInput = tab.Name
+	}
+	return m, nil
+}
+
+// openCreatePaneDialog opens the create-pane dialog at step 0 (the Ctrl+N flow).
+// Extracted from the `key == "ctrl+n"` case; shared with the command palette.
+func (m Model) openCreatePaneDialog() (tea.Model, tea.Cmd) {
+	m.dialog = dialogCreatePane
+	m.dialogCursor = 0
+	m.createPaneStep = 0
+	m.selectedCategory = 0
+	return m, tea.ClearScreen
+}
+
+// forceRedraw is the full-repaint recovery hatch: drop every pane's render
+// cache and every tab's leaves cache, then ClearScreen + re-probe the terminal
+// size. Extracted verbatim from the kb.Redraw case; shared with the command
+// palette. It mutates m.tabs, so it cannot be a bare func() tea.Cmd.
+func (m Model) forceRedraw() (tea.Model, tea.Cmd) {
+	for _, tab := range m.tabs {
+		tab.invalidateLeaves()
+		if tab.Root != nil {
+			for _, pane := range tab.Leaves() {
+				pane.invalidateRenderCache()
+			}
+		}
+	}
+	return m, tea.Batch(tea.ClearScreen, sizePollProbe)
+}
+
 // notesEditorBox computes the screen bounding box of the bordered notes
 // notesPanelWidthNumerator / Denominator set the default notes-panel
 // width as a fraction of the available tab area (numerator/denominator).
@@ -2315,13 +2378,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.openRestartPaneConfirm()
 
 	case kbMatches(key, kb.CloseTab):
-		if tab := m.activeTabModel(); tab != nil {
-			m.dialog = dialogConfirm
-			m.confirmKind = "tab"
-			m.confirmID = tab.ID
-			m.confirmName = tab.Name
-		}
-		return m, tea.ClearScreen
+		return m.openCloseTabConfirm()
 
 	case kbMatches(key, kb.SplitHorizontal):
 		if tab := m.activeTabModel(); tab != nil && tab.FocusMode() {
@@ -2336,11 +2393,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, m.splitPane(SplitVertical)
 
 	case kbMatches(key, kb.RenameTab):
-		if tab := m.activeTabModel(); tab != nil {
-			m.renaming = true
-			m.renameInput = tab.Name
-		}
-		return m, nil
+		return m.beginTabRename()
 
 	case kbMatches(key, kb.RenamePane):
 		return m.beginPaneRename()
@@ -2351,22 +2404,8 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case kbMatches(key, kb.Redraw):
 		// Recovery hatch for rendering artifacts: cell-diff drift (width
 		// disagreements with the host terminal) accumulates until a full
-		// repaint. sizePollProbe additionally recovers from a stale size —
-		// it grows the conhost grid if the window outgrew it (legacy
-		// conhost never grows it back itself) and re-queries the size.
-		// ClearScreen alone would repaint the same stale-size frame.
-		// Also drop every pane's render cache and every tab's leaves cache —
-		// the user-facing escape hatch for a hypothetical stale-cache bug
-		// (a renderKey field gap or a missed leaves invalidation).
-		for _, tab := range m.tabs {
-			tab.invalidateLeaves()
-			if tab.Root != nil {
-				for _, pane := range tab.Leaves() {
-					pane.invalidateRenderCache()
-				}
-			}
-		}
-		return m, tea.Batch(tea.ClearScreen, sizePollProbe)
+		// repaint. See forceRedraw — shared with the command palette.
+		return m.forceRedraw()
 
 	case kbMatches(key, kb.ScrollPageUp):
 		if tab := m.activeTabModel(); tab != nil {
@@ -2447,16 +2486,15 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.toggleNotesMode()
 
 	case key == "ctrl+n":
-		m.dialog = dialogCreatePane
-		m.dialogCursor = 0
-		m.createPaneStep = 0
-		m.selectedCategory = 0
-		return m, tea.ClearScreen
+		return m.openCreatePaneDialog()
 
 	case key == "f1":
 		m.dialog = dialogAbout
 		m.dialogCursor = 0
 		return m, tea.ClearScreen
+
+	case kbMatches(key, kb.CommandPalette):
+		return m.openCommandPalette()
 
 	case key == "alt+1" || key == "alt+2" || key == "alt+3" ||
 		key == "alt+4" || key == "alt+5" || key == "alt+6" ||

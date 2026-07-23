@@ -189,6 +189,13 @@ func TestDefaultKeybindings_CommandHistory(t *testing.T) {
 	}
 }
 
+func TestDefaultKeybindings_CommandPalette(t *testing.T) {
+	cfg := config.Default()
+	if got := cfg.Keybindings.CommandPalette; got != "alt+shift+p" {
+		t.Errorf("CommandPalette default = %q, want %q", got, "alt+shift+p")
+	}
+}
+
 func TestDefault_UpdateSection(t *testing.T) {
 	cfg := config.Default()
 	if !cfg.Update.Check {

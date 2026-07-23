@@ -1,11 +1,11 @@
-# Command Palette (`Ctrl+Shift+P`)
+# Command Palette (`Alt+Shift+P`)
 
 | Field | Value |
 |-------|-------|
 | Priority | 4 |
 | Effort | Medium |
 | Impact | High |
-| Status | Proposed |
+| Status | Implemented (v1) — see `docs/superpowers/specs/2026-07-23-command-palette-design.md` |
 | Depends on | — |
 
 ## Problem
@@ -14,7 +14,7 @@ Quil has many features behind keybindings, but discoverability is poor. Users ne
 
 ## Proposed Solution
 
-A fuzzy-find overlay triggered by `Ctrl+Shift+P` that provides instant access to:
+A fuzzy-find overlay triggered by `Alt+Shift+P` (the default; `Ctrl+Shift+P` is intercepted by many terminals' own palette) that provides instant access to:
 
 - **Search panes** by name, plugin type, CWD
 - **Execute commands**: split, close, rename, resize
@@ -89,7 +89,7 @@ Or use a lightweight Go fuzzy library.
 
 - New `dialogPalette` state in dialog system
 - Full-width overlay with input field + scrollable results
-- `Ctrl+Shift+P` keybinding (configurable)
+- `command_palette` keybinding (configurable; default `alt+shift+p`)
 - Results update on every keystroke
 - Enter executes selected command, Esc closes
 
@@ -104,16 +104,16 @@ Or use a lightweight Go fuzzy library.
 
 ## Success Criteria
 
-- [ ] `Ctrl+Shift+P` opens command palette overlay
-- [ ] Typing filters commands with fuzzy matching
-- [ ] Enter executes the selected command
-- [ ] All existing keybinding actions are available as commands
-- [ ] Current tabs/panes appear as "Go to" commands
-- [ ] Saved plugin instances appear as "Create" commands
-- [ ] Response feels instant (< 16ms per keystroke)
+- [x] `Alt+Shift+P` opens the command palette (`Ctrl+Shift+P` opt-in; terminals often intercept it)
+- [x] Typing filters commands with fuzzy matching
+- [x] Enter executes the selected command
+- [x] Existing keybinding actions are available as commands (dispatch into the same handlers)
+- [x] Current tabs/panes appear as "Go to" / "Switch to tab" commands
+- [ ] Saved plugin instances appear as "Create" commands — **deferred to Phase 2** (single "New pane…" ships in v1; per-plugin/instance quick-create needs the multi-step setup flow)
+- [x] Response feels instant (< 16ms per keystroke)
 
-## Open Questions
+## Open Questions — resolved for v1
 
-- Should the palette support ":" prefix for direct command mode (`:split h`)?
-- MRU (most recently used) persistence across sessions?
-- Should it also search terminal output (like VS Code's "Go to Symbol")?
+- `":"` prefix for direct command mode — **deferred to Phase 2** (redundant with fuzzy in v1).
+- MRU (most recently used) persistence — **deferred to Phase 2** (v1 shows a curated fixed order when the query is empty).
+- Search terminal output (VS Code "Go to Symbol") — **deferred to Phase 2** (its own feature: content search across pane buffers, alt-screen-vs-scrollback split, daemon-side search).

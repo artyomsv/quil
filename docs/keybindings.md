@@ -24,6 +24,7 @@ The five keys you'll use most:
 
 | Key | Action |
 |---|---|
+| `Alt+Shift+P` | Command palette — fuzzy-find any action or jump to any pane/tab |
 | `F1` | About menu → Settings, Plugins, Memory, log viewers |
 | `Ctrl+N` | New typed pane (Claude Code, OpenCode, terminal, …) |
 | `Ctrl+T` | New tab |
@@ -148,6 +149,28 @@ If the clipboard has no text but contains an image, Quil decodes the DIB, saves 
 | Click on scrollbar | Jump the scrollbar thumb to that Y position (rightmost content column of the pane) |
 | Click + drag on scrollbar | Continuous scroll — drag follows cursor Y, even off-pane |
 | `Alt+Up` / `Alt+Down` *(in log viewer)* | Jump cursor by `[ui] log_viewer_page_lines` (default 40) |
+
+## Command palette
+
+| Key | Action |
+|---|---|
+| `Alt+Shift+P` | Open the command palette (`command_palette`) |
+| Type | Fuzzy-filter the list (matches labels + keywords) |
+| `↑` / `↓` (or `Ctrl+P` / `Ctrl+N`) | Move the selection (section headers are skipped) |
+| `Enter` | Run the highlighted command |
+| `Esc` | Close |
+
+The palette is a modal launcher for **every** action plus jump-to-tab and
+jump-to-pane. Entries are grouped under dim section headers — **Go to pane**,
+**Tabs**, **Pane**, **System** — navigation first; headers disappear once you
+start typing. Each row shows its shortcut, so the palette teaches the bindings as
+you go, and it dispatches into the same handlers the keybindings use.
+
+The default is `Alt+Shift+P` because `Ctrl+Shift+P` (the VS Code key) is grabbed
+by many terminals' own command palette — Windows Terminal, VS Code's integrated
+terminal — before Quil sees it. If your terminal leaves it free, add it back:
+`command_palette = "ctrl+shift+p,alt+shift+p"`. Unavailable while the notes
+editor is open.
 
 ## Dialogs (F1 menus)
 

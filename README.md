@@ -30,6 +30,9 @@ Type `quil` after a reboot — every tab, pane, working directory, layout split,
 | **Resize with the mouse** | **Right-click pane menu** |
 | <img src="https://cdn.stukans.com/quil/screenshots/pane-resize-800.webp" alt="Dragging a split border with the mouse to resize neighboring panes" width="420"> | <img src="https://cdn.stukans.com/quil/screenshots/mouse-right-click-menu-800.webp" alt="Right-click context menu with per-pane actions and the target pane highlighted" width="420"> |
 | Drag any split border — nested panes clamp to minimums, PTYs see one resize on release. | Per-pane actions under the cursor: history, notes, lazygit, attention pin, restart, close. |
+| **Command palette: jump anywhere** | **…and run anything** |
+| <img src="https://cdn.stukans.com/quil/screenshots/command-palette-1-800.webp" alt="Command palette showing Go to pane and Tabs sections for cross-workspace navigation" width="420"> | <img src="https://cdn.stukans.com/quil/screenshots/command-palette-2-800.webp" alt="Command palette Pane section listing actions with their keybindings" width="420"> |
+| `Alt+Shift+P` fuzzy-finds every pane and tab — navigation grouped at the top. | Every action grouped below, each showing its keybinding; type to filter instantly. |
 
 ## Install
 

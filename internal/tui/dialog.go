@@ -259,6 +259,7 @@ func shortcutsList(m *Model) []struct{ key, desc string } {
 	// the macOS-friendly fallback on Rename pane).
 	list := []struct{ key, desc string }{
 		{kbDisplay(kb.Quit), "Quit"},
+		{kbDisplay(kb.CommandPalette), "Command palette (fuzzy-find any action)"},
 		{kbDisplay(kb.NewTab), "New tab"},
 		{kbDisplay(kb.ClosePane), "Close pane"},
 		{kbDisplay(kb.QuickActions), "Pane context menu (also mouse right-click)"},
@@ -359,6 +360,8 @@ func (m Model) handleDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.handleCommandHistoryKey(msg)
 	case dialogUpdateNotice:
 		return m.handleUpdateNoticeKey(msg)
+	case dialogCommandPalette:
+		return m.handleCommandPaletteKey(msg)
 	}
 	return m, nil
 }
@@ -762,6 +765,9 @@ func (m Model) renderDialog() string {
 	case dialogUpdateNotice:
 		width = dialogWidth
 		content = m.renderUpdateNoticeDialog()
+	case dialogCommandPalette:
+		width = paletteWidth
+		content = renderCommandPalette(m)
 	}
 
 	// Never render wider than the terminal (border adds +2 outside Width).

@@ -4,9 +4,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/charmbracelet/x/ansi"
-
 	"github.com/artyomsv/quil/internal/ipc"
+	"github.com/charmbracelet/x/ansi"
 )
 
 const (
@@ -31,11 +30,11 @@ func scanPaneMatches(raw []byte, lowerTerm string) (matches int, excerpt string,
 	var lastLine string
 	for _, line := range strings.Split(stripped, "\n") {
 		if strings.Contains(strings.ToLower(line), lowerTerm) {
-			matches++
 			lastLine = line
-			if matches >= maxPaneMatches {
+			if matches < maxPaneMatches {
+				matches++
+			} else {
 				truncated = true
-				break
 			}
 		}
 	}

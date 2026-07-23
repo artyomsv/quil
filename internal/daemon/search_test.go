@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/artyomsv/quil/internal/ringbuf"
@@ -39,12 +40,17 @@ func TestScanPaneMatches(t *testing.T) {
 
 func TestScanPaneMatches_Cap(t *testing.T) {
 	var sb []byte
-	for i := 0; i < maxPaneMatches+50; i++ {
-		sb = append(sb, []byte("needle line\n")...)
+	total := maxPaneMatches + 50
+	for i := 0; i < total; i++ {
+		sb = append(sb, []byte(fmt.Sprintf("needle line %d\n", i))...)
 	}
-	n, _, trunc := scanPaneMatches(sb, "needle")
+	n, exc, trunc := scanPaneMatches(sb, "needle")
 	if n != maxPaneMatches || !trunc {
 		t.Errorf("cap: matches=%d truncated=%v, want %d,true", n, trunc, maxPaneMatches)
+	}
+	wantExc := fmt.Sprintf("needle line %d", total-1)
+	if exc != wantExc {
+		t.Errorf("excerpt = %q, want %q (must be the most-recent match, not the one at the cap)", exc, wantExc)
 	}
 }
 
@@ -76,6 +82,43 @@ func TestSearchPanes_AcrossTabs(t *testing.T) {
 	}
 	if hits[0].Excerpt != "connection refused" {
 		t.Errorf("excerpt = %q, want last match", hits[0].Excerpt)
+	}
+}
+
+func TestSearchPanes_SortsByMatchCountThenPaneID(t *testing.T) {
+	d := newTestDaemon(t)
+	mkPane := func(id, tabID, content string) *Pane {
+		p := &Pane{ID: id, TabID: tabID, Type: "terminal", OutputBuf: ringbuf.NewRingBuffer(8192)}
+		p.OutputBuf.Write([]byte(content))
+		return p
+	}
+	// pane-0000000z has the most matches, so it must sort first even though its
+	// ID is lexicographically last. pane-0000000a and pane-0000000b tie on match
+	// count, so the lower pane ID must come first between them.
+	d.session.RestoreTab(
+		&Tab{ID: "tab-0000000d", Name: "D", Panes: []string{"pane-0000000z", "pane-0000000b", "pane-0000000a"}},
+		[]*Pane{
+			mkPane("pane-0000000z", "tab-0000000d", "err\nerr\nerr\n"),
+			mkPane("pane-0000000b", "tab-0000000d", "err\n"),
+			mkPane("pane-0000000a", "tab-0000000d", "err\n"),
+		},
+	)
+
+	hits, trunc := d.searchPanes("err")
+	if trunc {
+		t.Errorf("truncated = true, want false")
+	}
+	if len(hits) != 3 {
+		t.Fatalf("hits = %d, want 3: %+v", len(hits), hits)
+	}
+	wantOrder := []string{"pane-0000000z", "pane-0000000a", "pane-0000000b"}
+	for i, want := range wantOrder {
+		if hits[i].PaneID != want {
+			t.Errorf("hits[%d].PaneID = %q, want %q (full order: %+v)", i, hits[i].PaneID, want, hits)
+		}
+	}
+	if hits[0].Matches != 3 {
+		t.Errorf("hits[0].Matches = %d, want 3", hits[0].Matches)
 	}
 }
 

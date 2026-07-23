@@ -198,7 +198,7 @@ export const features: Feature[] = [
     category: "interaction",
     detail: [
       "Type a fragment of the intent (split, restart, backend) and the list filters live by fuzzy score; Enter runs the highlighted command, Esc closes.",
-      "Entries are grouped under section headers — Pane, Go to pane, Tabs, System — with actions first, so the organization is obvious; headers disappear once you type. Panes are listed by tab.pane index and type so duplicates are easy to tell apart.",
+      "Entries are grouped under section headers — Go to pane, Tabs, Pane, System — with navigation first (jumping to a pane or tab is the most common reason to open it); headers disappear once you type. Panes are listed by tab.pane index and type so duplicates are easy to tell apart.",
       "Covers everything: split/close/rename/focus a pane, new/close/rename a tab, jump to any pane or tab, create a pane, and open Settings, Plugins, Memory, or the log viewers.",
       "Every command dispatches into the same handler its keybinding uses — a launcher, not a second code path — and each row shows its shortcut, so the palette teaches the bindings as you use it.",
       "Rows that don't apply grey out (input history without an AI pane, lazygit without the binary). Configurable via command_palette; Ctrl+Shift+P is opt-in since many terminals intercept it.",

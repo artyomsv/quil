@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -64,16 +65,23 @@ const (
 )
 
 // paletteCommand is one row of the palette. Disabled rows render greyed and are
-// inert on Enter. arg carries a navigation target id (paneID/tabID); it is empty
-// for static commands. keywords are extra fuzzy targets beyond the label.
+// inert on Enter. header rows are dim section titles: not selectable, skipped by
+// the cursor, and hidden while a query is active. arg carries a navigation
+// target id (paneID/tabID); it is empty for static commands. keywords are extra
+// fuzzy targets beyond the label.
 type paletteCommand struct {
 	action   paletteAction
 	label    string
 	detail   string
 	keywords []string
 	enabled  bool
+	header   bool
 	arg      string
 }
+
+// selectable reports whether the cursor may land on this row and Enter may run
+// it — everything except section headers and disabled rows.
+func (c paletteCommand) selectable() bool { return !c.header && c.enabled }
 
 // fuzzyScore reports whether query is a case-insensitive subsequence of target
 // and, if so, a score (higher = better). It rewards consecutive runs, a match
@@ -139,17 +147,23 @@ func commandScore(query string, c paletteCommand) (int, bool) {
 	return best, matched
 }
 
-// filterPalette keeps commands matching query, sorted by score descending with
-// a STABLE sort so equal scores preserve registry order (the navigation →
-// system grouping survives). Empty query returns all commands in registry order
-// (a fresh slice — never the caller's backing array).
+// filterPalette produces the visible rows for query. Empty query = browse mode:
+// all commands in registry order, section headers included. Non-empty query =
+// search mode: headers are dropped and matching commands are sorted by score
+// descending with a STABLE sort so equal scores preserve registry order.
 func filterPalette(query string, commands []paletteCommand) []paletteCommand {
+	if query == "" {
+		return append([]paletteCommand(nil), commands...)
+	}
 	type scored struct {
 		c paletteCommand
 		s int
 	}
 	matched := make([]scored, 0, len(commands))
 	for _, c := range commands {
+		if c.header {
+			continue // headers are section labels, never search hits
+		}
 		if s, ok := commandScore(query, c); ok {
 			matched = append(matched, scored{c, s})
 		}
@@ -162,6 +176,34 @@ func filterPalette(query string, commands []paletteCommand) []paletteCommand {
 	return out
 }
 
+// firstSelectable returns the index of the first row the cursor may land on
+// (skipping headers and disabled rows), or -1 if none.
+func firstSelectable(cmds []paletteCommand) int {
+	for i, c := range cmds {
+		if c.selectable() {
+			return i
+		}
+	}
+	return -1
+}
+
+// nextSelectable returns the next selectable index from cur in direction dir
+// (+1 down, -1 up), skipping headers and disabled rows WITHOUT wrapping (the
+// cursor stays put at the ends). cur == -1 resolves to the first/last.
+func nextSelectable(cmds []paletteCommand, cur, dir int) int {
+	i := cur + dir
+	for i >= 0 && i < len(cmds) {
+		if cmds[i].selectable() {
+			return i
+		}
+		i += dir
+	}
+	if cur >= 0 && cur < len(cmds) && cmds[cur].selectable() {
+		return cur // no move available; stay
+	}
+	return firstSelectable(cmds)
+}
+
 // tabIndexName renders a tab's 1-based index + name, matching the tab bar
 // prefix (e.g. "1:Shell").
 func tabIndexName(i int, tab *TabModel) string {
@@ -170,40 +212,16 @@ func tabIndexName(i int, tab *TabModel) string {
 
 // buildPaletteCommands assembles the full command registry, rebuilt on every
 // open so dynamic entries (tabs/panes) and per-active-pane gates/labels are
-// current. Assembly order defines the empty-query display order.
+// current. Entries are grouped under dim section headers (Pane / Go to pane /
+// Tabs / System), in that order — actions first, navigation second. Headers are
+// shown only while browsing (empty query) and skipped by the cursor.
 func (m *Model) buildPaletteCommands() []paletteCommand {
 	kb := m.cfg.Keybindings
+	home, _ := os.UserHomeDir()
 	var cmds []paletteCommand
+	header := func(label string) { cmds = append(cmds, paletteCommand{header: true, label: label}) }
 
-	// --- Navigation: one Switch-to per tab, one Go-to per pane -------------
-	for i, tab := range m.tabs {
-		if tab == nil {
-			continue
-		}
-		cmds = append(cmds, paletteCommand{
-			action:   palActSwitchTab,
-			arg:      tab.ID,
-			enabled:  true,
-			label:    "Switch to tab: " + tabIndexName(i, tab),
-			detail:   "tab",
-			keywords: []string{"tab", "goto"},
-		})
-		for _, p := range tab.Leaves() {
-			if p == nil {
-				continue
-			}
-			cmds = append(cmds, paletteCommand{
-				action:   palActGoToPane,
-				arg:      p.ID,
-				enabled:  true,
-				label:    "Go to: " + tabIndexName(i, tab) + " / " + paneDisplayName(p),
-				detail:   p.Type,
-				keywords: []string{"pane", "goto", "focus"},
-			})
-		}
-	}
-
-	// --- Per-active-pane gates + toggle labels -----------------------------
+	// Per-active-pane gates + toggle labels.
 	historyOK, lazygitOK := false, false
 	muteLabel, eagerLabel := "Mute notifications", "Enable eager restore"
 	if tab := m.activeTabModel(); tab != nil {
@@ -227,7 +245,8 @@ func (m *Model) buildPaletteCommands() []paletteCommand {
 		}
 	}
 
-	// --- Pane actions (act on the active pane) -----------------------------
+	// --- Pane: actions on the active pane ----------------------------------
+	header("Pane")
 	cmds = append(cmds,
 		paletteCommand{action: palActSplitH, enabled: true, label: "Split horizontal", detail: kbDisplay(kb.SplitHorizontal), keywords: []string{"hsplit", "horizontal"}},
 		paletteCommand{action: palActSplitV, enabled: true, label: "Split vertical", detail: kbDisplay(kb.SplitVertical), keywords: []string{"vsplit", "vertical"}},
@@ -238,37 +257,90 @@ func (m *Model) buildPaletteCommands() []paletteCommand {
 		paletteCommand{action: palActEager, enabled: true, label: eagerLabel, detail: kbDisplay(kb.ToggleEager), keywords: []string{"eager", "restore", "restart"}},
 		paletteCommand{action: palActHistory, enabled: historyOK, label: "Input history", detail: kbDisplay(kb.CommandHistory), keywords: []string{"history", "prompts"}},
 		paletteCommand{action: palActLazygit, enabled: lazygitOK, label: "Open lazygit", detail: kbDisplay(kb.ToggleLazygit), keywords: []string{"git", "lazygit"}},
+		paletteCommand{action: palActNewPane, enabled: true, label: "New pane…", detail: "ctrl+n", keywords: []string{"create", "plugin", "claude", "terminal"}},
 		paletteCommand{action: palActRestartPane, enabled: true, label: "Restart pane…", detail: kbDisplay(kb.RestartPane), keywords: []string{"restart", "respawn"}},
 		paletteCommand{action: palActClosePane, enabled: true, label: "Close pane…", detail: kbDisplay(kb.ClosePane), keywords: []string{"close", "kill"}},
 	)
 
-	// --- Tab actions -------------------------------------------------------
+	// --- Go to pane: one row per pane across every tab, distinguished by a
+	// tab.pane index + plugin type so same-name/same-CWD panes are told apart.
+	header("Go to pane")
+	for i, tab := range m.tabs {
+		if tab == nil {
+			continue
+		}
+		for j, p := range tab.Leaves() {
+			if p == nil {
+				continue
+			}
+			label := fmt.Sprintf("%d.%d · %s", i+1, j+1, p.Type)
+			if p.Name != "" {
+				label += " · " + p.Name
+			}
+			cmds = append(cmds, paletteCommand{
+				action:   palActGoToPane,
+				arg:      p.ID,
+				enabled:  true,
+				label:    label,
+				detail:   shortCWD(p.CWD, home),
+				keywords: []string{"go to", "goto", "pane", "focus", p.Name, filepath.Base(p.CWD), p.Type},
+			})
+		}
+	}
+
+	// --- Tabs --------------------------------------------------------------
+	header("Tabs")
+	cmds = append(cmds, paletteCommand{action: palActNewTab, enabled: true, label: "New tab", detail: kbDisplay(kb.NewTab), keywords: []string{"tab", "create"}})
+	for i, tab := range m.tabs {
+		if tab == nil {
+			continue
+		}
+		cmds = append(cmds, paletteCommand{
+			action:   palActSwitchTab,
+			arg:      tab.ID,
+			enabled:  true,
+			label:    "Switch to " + tabIndexName(i, tab),
+			keywords: []string{"tab", "go to", "goto", "switch"},
+		})
+	}
 	cmds = append(cmds,
-		paletteCommand{action: palActNewTab, enabled: true, label: "New tab", detail: kbDisplay(kb.NewTab), keywords: []string{"tab", "create"}},
 		paletteCommand{action: palActCloseTab, enabled: true, label: "Close tab…", detail: kbDisplay(kb.CloseTab), keywords: []string{"tab", "close"}},
 		paletteCommand{action: palActRenameTab, enabled: true, label: "Rename tab", detail: kbDisplay(kb.RenameTab), keywords: []string{"tab", "rename"}},
 		paletteCommand{action: palActCycleTabColor, enabled: true, label: "Cycle tab color", detail: kbDisplay(kb.CycleTabColor), keywords: []string{"tab", "color"}},
 	)
 
-	// --- Create ------------------------------------------------------------
-	cmds = append(cmds,
-		paletteCommand{action: palActNewPane, enabled: true, label: "New pane…", detail: "ctrl+n", keywords: []string{"create", "pane", "plugin", "claude", "terminal"}},
-	)
-
 	// --- System ------------------------------------------------------------
+	header("System")
 	cmds = append(cmds,
-		paletteCommand{action: palActSettings, enabled: true, label: "Settings", detail: "", keywords: []string{"config", "preferences"}},
-		paletteCommand{action: palActShortcuts, enabled: true, label: "Keyboard shortcuts", detail: "", keywords: []string{"keys", "bindings", "help"}},
-		paletteCommand{action: palActPlugins, enabled: true, label: "Plugins", detail: "", keywords: []string{"plugin", "toml"}},
-		paletteCommand{action: palActMemory, enabled: true, label: "Memory report", detail: "", keywords: []string{"memory", "mem", "ram"}},
+		paletteCommand{action: palActSettings, enabled: true, label: "Settings", keywords: []string{"config", "preferences"}},
+		paletteCommand{action: palActShortcuts, enabled: true, label: "Keyboard shortcuts", keywords: []string{"keys", "bindings", "help"}},
+		paletteCommand{action: palActPlugins, enabled: true, label: "Plugins", keywords: []string{"plugin", "toml"}},
+		paletteCommand{action: palActMemory, enabled: true, label: "Memory report", keywords: []string{"memory", "mem", "ram"}},
 		paletteCommand{action: palActAbout, enabled: true, label: "About", detail: "f1", keywords: []string{"about", "version"}},
-		paletteCommand{action: palActClientLog, enabled: true, label: "View client log", detail: "", keywords: []string{"log", "client"}},
-		paletteCommand{action: palActDaemonLog, enabled: true, label: "View daemon log", detail: "", keywords: []string{"log", "daemon"}},
-		paletteCommand{action: palActMCPLog, enabled: true, label: "View MCP logs", detail: "", keywords: []string{"log", "mcp"}},
+		paletteCommand{action: palActClientLog, enabled: true, label: "View client log", keywords: []string{"log", "client"}},
+		paletteCommand{action: palActDaemonLog, enabled: true, label: "View daemon log", keywords: []string{"log", "daemon"}},
+		paletteCommand{action: palActMCPLog, enabled: true, label: "View MCP logs", keywords: []string{"log", "mcp"}},
 		paletteCommand{action: palActRedraw, enabled: true, label: "Force redraw", detail: kbDisplay(kb.Redraw), keywords: []string{"redraw", "repaint", "refresh"}},
 	)
 
 	return cmds
+}
+
+// shortCWD renders a compact, tail-preserving directory hint: home is collapsed
+// to ~ and an over-long path keeps its last cells (the meaningful basename) with
+// a leading ellipsis.
+func shortCWD(cwd, home string) string {
+	if cwd == "" {
+		return ""
+	}
+	if home != "" && strings.HasPrefix(cwd, home) {
+		cwd = "~" + cwd[len(home):]
+	}
+	const maxCWD = 22
+	if lipgloss.Width(cwd) > maxCWD {
+		cwd = "…" + lastCellsToWidth(cwd, maxCWD-1)
+	}
+	return cwd
 }
 
 // paletteInnerWidth is the usable content width inside the dialog border for the
@@ -331,7 +403,11 @@ func renderCommandPalette(m Model) string {
 		b.WriteByte('\n')
 	}
 	for i := start; i < end; i++ {
-		b.WriteString(renderPaletteRow(filtered[i], i == m.palette.cursor, inner))
+		if filtered[i].header {
+			b.WriteString(renderPaletteHeader(filtered[i].label, inner))
+		} else {
+			b.WriteString(renderPaletteRow(filtered[i], i == m.palette.cursor, inner))
+		}
 		b.WriteByte('\n')
 	}
 	if end < len(filtered) {
@@ -361,6 +437,11 @@ func paletteWindow(cursor, n int) (int, int) {
 		start = 0
 	}
 	return start, start + paletteVisibleRows
+}
+
+// renderPaletteHeader draws a dim, upper-cased section title bounded to inner.
+func renderPaletteHeader(label string, inner int) string {
+	return ctxMenuDisabledStyle.Render(truncateToWidth(strings.ToUpper(label), inner))
 }
 
 // renderPaletteRow lays out one result row: "› "/"  " cursor prefix, label left,
@@ -422,6 +503,7 @@ func (m Model) openCommandPalette() (tea.Model, tea.Cmd) {
 	m.palette = paletteState{}
 	m.palette.commands = m.buildPaletteCommands()
 	m.palette.filtered = filterPalette("", m.palette.commands)
+	m.palette.cursor = firstSelectable(m.palette.filtered)
 	m.dialog = dialogCommandPalette
 	return m, tea.ClearScreen
 }
@@ -437,7 +519,7 @@ func (m *Model) closeCommandPalette() {
 // resets the cursor to the top.
 func (m *Model) refilterPalette() {
 	m.palette.filtered = filterPalette(m.palette.query, m.palette.commands)
-	m.palette.cursor = 0
+	m.palette.cursor = firstSelectable(m.palette.filtered)
 }
 
 // handleCommandPaletteKey routes keys while the palette is open. Value receiver,
@@ -449,19 +531,15 @@ func (m Model) handleCommandPaletteKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd)
 		m.closeCommandPalette()
 		return m, nil
 	case key == "enter":
-		if c := m.palette.cursor; c >= 0 && c < len(m.palette.filtered) && m.palette.filtered[c].enabled {
+		if c := m.palette.cursor; c >= 0 && c < len(m.palette.filtered) && m.palette.filtered[c].selectable() {
 			return m.executePaletteCommand(m.palette.filtered[c])
 		}
 		return m, nil
 	case key == "up" || key == "ctrl+p":
-		if m.palette.cursor > 0 {
-			m.palette.cursor--
-		}
+		m.palette.cursor = nextSelectable(m.palette.filtered, m.palette.cursor, -1)
 		return m, nil
 	case key == "down" || key == "ctrl+n":
-		if m.palette.cursor < len(m.palette.filtered)-1 {
-			m.palette.cursor++
-		}
+		m.palette.cursor = nextSelectable(m.palette.filtered, m.palette.cursor, +1)
 		return m, nil
 	case key == "backspace":
 		if q := []rune(m.palette.query); len(q) > 0 {
@@ -560,7 +638,7 @@ func lastCellsToWidth(s string, w int) string {
 // every other command acts on the active pane, exactly like pressing its key.
 func (m Model) executePaletteCommand(c paletteCommand) (tea.Model, tea.Cmd) {
 	m.closeCommandPalette()
-	if !c.enabled {
+	if !c.selectable() {
 		return m, nil
 	}
 	switch c.action {

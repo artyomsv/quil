@@ -68,31 +68,68 @@ func TestPalette_TypingFiltersAndResetsCursor(t *testing.T) {
 	}
 }
 
-func TestPalette_CursorNavigationClamps(t *testing.T) {
+func TestPalette_CursorNavigationSkipsHeaders(t *testing.T) {
 	t.Parallel()
 	m := newSplitDragTestModel(t)
 	opened, _ := m.openCommandPalette()
 	got := opened.(Model)
-	// Up at the top stays at 0.
-	updated, _ := got.handleCommandPaletteKey(tea.KeyPressMsg{Code: tea.KeyUp})
-	if updated.(Model).palette.cursor != 0 {
-		t.Error("up at top should clamp to 0")
+	first := firstSelectable(got.palette.filtered)
+	if got.palette.cursor != first {
+		t.Fatalf("initial cursor = %d, want firstSelectable %d", got.palette.cursor, first)
 	}
-	// Down moves.
-	updated, _ = got.handleCommandPaletteKey(tea.KeyPressMsg{Code: tea.KeyDown})
-	if updated.(Model).palette.cursor != 1 {
-		t.Error("down should move the cursor to 1")
+	if got.palette.filtered[got.palette.cursor].header {
+		t.Fatal("cursor must never start on a header")
 	}
-	// ctrl+n / ctrl+p are aliases for down / up.
-	updated, _ = got.handleCommandPaletteKey(tea.KeyPressMsg{Code: 'n', Mod: tea.ModCtrl})
-	if updated.(Model).palette.cursor != 1 {
-		t.Errorf("ctrl+n should move down, cursor = %d", updated.(Model).palette.cursor)
+	// Up at the top stays on the first selectable row (never onto a header).
+	up, _ := got.handleCommandPaletteKey(tea.KeyPressMsg{Code: tea.KeyUp})
+	if up.(Model).palette.cursor != first {
+		t.Errorf("up at top: cursor = %d, want %d", up.(Model).palette.cursor, first)
 	}
-	// Down at the bottom clamps to len-1.
-	got.palette.cursor = len(got.palette.filtered) - 1
-	updated, _ = got.handleCommandPaletteKey(tea.KeyPressMsg{Code: tea.KeyDown})
-	if c := updated.(Model).palette.cursor; c != len(got.palette.filtered)-1 {
-		t.Errorf("down at bottom should clamp, cursor = %d, want %d", c, len(got.palette.filtered)-1)
+	// Down moves forward to another selectable row.
+	down, _ := got.handleCommandPaletteKey(tea.KeyPressMsg{Code: tea.KeyDown})
+	dc := down.(Model).palette.cursor
+	if dc <= first || !down.(Model).palette.filtered[dc].selectable() {
+		t.Errorf("down: cursor = %d is not a forward selectable row", dc)
+	}
+	// ctrl+n mirrors down.
+	cn, _ := got.handleCommandPaletteKey(tea.KeyPressMsg{Code: 'n', Mod: tea.ModCtrl})
+	if cn.(Model).palette.cursor != dc {
+		t.Errorf("ctrl+n cursor = %d, want %d", cn.(Model).palette.cursor, dc)
+	}
+	// Down at the last selectable row clamps.
+	lastSel := -1
+	for i := range got.palette.filtered {
+		if got.palette.filtered[i].selectable() {
+			lastSel = i
+		}
+	}
+	got.palette.cursor = lastSel
+	db, _ := got.handleCommandPaletteKey(tea.KeyPressMsg{Code: tea.KeyDown})
+	if db.(Model).palette.cursor != lastSel {
+		t.Errorf("down at bottom: cursor = %d, want %d", db.(Model).palette.cursor, lastSel)
+	}
+}
+
+func TestPalette_HeadersBrowseNotSearch(t *testing.T) {
+	t.Parallel()
+	m := newSplitDragTestModel(t)
+	opened, _ := m.openCommandPalette()
+	got := opened.(Model)
+	headers := 0
+	for _, c := range got.palette.filtered {
+		if c.header {
+			headers++
+		}
+	}
+	if headers == 0 {
+		t.Error("browse mode (empty query) should show section headers")
+	}
+	// Typing switches to search mode — headers must disappear.
+	typed, _ := got.handleCommandPaletteKey(tea.KeyPressMsg{Text: "split"})
+	for _, c := range typed.(Model).palette.filtered {
+		if c.header {
+			t.Error("search mode must hide section headers")
+		}
 	}
 }
 

@@ -2483,6 +2483,9 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.dialogCursor = 0
 		return m, tea.ClearScreen
 
+	case kbMatches(key, kb.CommandPalette):
+		return m.openCommandPalette()
+
 	case key == "alt+1" || key == "alt+2" || key == "alt+3" ||
 		key == "alt+4" || key == "alt+5" || key == "alt+6" ||
 		key == "alt+7" || key == "alt+8" || key == "alt+9":

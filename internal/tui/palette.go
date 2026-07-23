@@ -2,11 +2,15 @@ package tui
 
 import (
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 	"unicode"
 
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+
+	"github.com/artyomsv/quil/internal/config"
 )
 
 const paletteVisibleRows = 12 // result rows shown before the list scrolls
@@ -374,5 +378,185 @@ func renderPaletteRow(c paletteCommand, cursor bool, inner int) string {
 		row += dialogSubtle.Render(detail)
 	}
 	return row
+}
+
+// openCommandPalette builds the command registry and opens the palette. No-op
+// in notes mode: its actions restructure the layout under the notes editor.
+// This explicit guard mirrors openQuickActionsMenu — notesKeyExempt only
+// governs the editor-focused path, so absence from it is NOT enough to keep the
+// palette out of the pane-focused notes path.
+func (m Model) openCommandPalette() (tea.Model, tea.Cmd) {
+	if m.notesMode {
+		return m, nil
+	}
+	m.palette = paletteState{}
+	m.palette.commands = m.buildPaletteCommands()
+	m.palette.filtered = filterPalette("", m.palette.commands)
+	m.dialog = dialogCommandPalette
+	return m, tea.ClearScreen
+}
+
+// closeCommandPalette closes the palette and clears its state. m.dialog is the
+// open/closed authority.
+func (m *Model) closeCommandPalette() {
+	m.dialog = dialogNone
+	m.palette = paletteState{}
+}
+
+// refilterPalette recomputes the visible results for the current query and
+// resets the cursor to the top.
+func (m *Model) refilterPalette() {
+	m.palette.filtered = filterPalette(m.palette.query, m.palette.commands)
+	m.palette.cursor = 0
+}
+
+// handleCommandPaletteKey routes keys while the palette is open. Value receiver,
+// like the sibling handleXKey dialog handlers.
+func (m Model) handleCommandPaletteKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	key := msg.String()
+	switch {
+	case key == "esc":
+		m.closeCommandPalette()
+		return m, nil
+	case key == "enter":
+		if c := m.palette.cursor; c >= 0 && c < len(m.palette.filtered) && m.palette.filtered[c].enabled {
+			return m.executePaletteCommand(m.palette.filtered[c])
+		}
+		return m, nil
+	case key == "up" || key == "ctrl+p":
+		if m.palette.cursor > 0 {
+			m.palette.cursor--
+		}
+		return m, nil
+	case key == "down" || key == "ctrl+n":
+		if m.palette.cursor < len(m.palette.filtered)-1 {
+			m.palette.cursor++
+		}
+		return m, nil
+	case key == "backspace":
+		if q := []rune(m.palette.query); len(q) > 0 {
+			m.palette.query = string(q[:len(q)-1])
+			m.refilterPalette()
+		}
+		return m, nil
+	case key == "space":
+		m.palette.query += " "
+		m.refilterPalette()
+		return m, nil
+	case msg.Text != "":
+		m.palette.query += msg.Text
+		m.refilterPalette()
+		return m, nil
+	}
+	return m, nil
+}
+
+// executePaletteCommand closes the palette and dispatches into the SAME handler
+// the keybinding case calls. Navigation commands change the active tab/pane;
+// every other command acts on the active pane, exactly like pressing its key.
+func (m Model) executePaletteCommand(c paletteCommand) (tea.Model, tea.Cmd) {
+	m.closeCommandPalette()
+	if !c.enabled {
+		return m, nil
+	}
+	switch c.action {
+	// --- Navigation --------------------------------------------------------
+	case palActGoToPane:
+		pane, idx := m.findPaneAndTab(c.arg)
+		if pane == nil || idx < 0 || idx >= len(m.tabs) {
+			return m, nil
+		}
+		// Clear the previously-active tab's active-pane flag BEFORE switchTab
+		// moves m.activeTab (ordering is load-bearing for the border repaint).
+		if cur := m.activeTabModel(); cur != nil {
+			if old := cur.ActivePaneModel(); old != nil {
+				old.Active = false
+			}
+		}
+		m.tabs[idx].ActivePane = c.arg
+		pane.Active = true
+		return m, m.switchTab(idx)
+	case palActSwitchTab:
+		for i, tab := range m.tabs {
+			if tab != nil && tab.ID == c.arg {
+				return m, m.switchTab(i)
+			}
+		}
+		return m, nil
+
+	// --- Layout / pane (active pane) ---------------------------------------
+	case palActSplitH:
+		if tab := m.activeTabModel(); tab != nil && tab.FocusMode() {
+			tab.ExitFocus()
+		}
+		return m, m.splitPane(SplitHorizontal)
+	case palActSplitV:
+		if tab := m.activeTabModel(); tab != nil && tab.FocusMode() {
+			tab.ExitFocus()
+		}
+		return m, m.splitPane(SplitVertical)
+	case palActFocus:
+		return m.toggleFocusForActiveTab()
+	case palActNotes:
+		return m.toggleNotesMode()
+	case palActRenamePane:
+		return m.beginPaneRename()
+	case palActMute:
+		return m, m.toggleActivePaneMute()
+	case palActEager:
+		return m, m.toggleActivePaneEager()
+	case palActHistory:
+		return m.openHistoryForActivePane()
+	case palActLazygit:
+		return m, m.handleToggleLazygit()
+	case palActRestartPane:
+		return m.openRestartPaneConfirm()
+	case palActClosePane:
+		return m.openClosePaneConfirm()
+
+	// --- Tab ---------------------------------------------------------------
+	case palActNewTab:
+		return m, m.createTab()
+	case palActCloseTab:
+		return m.openCloseTabConfirm()
+	case palActRenameTab:
+		return m.beginTabRename()
+	case palActCycleTabColor:
+		return m, m.cycleTabColor()
+
+	// --- Create ------------------------------------------------------------
+	case palActNewPane:
+		return m.openCreatePaneDialog()
+
+	// --- System ------------------------------------------------------------
+	case palActSettings:
+		m.dialog = dialogSettings
+		m.dialogCursor = 0
+		return m, tea.ClearScreen
+	case palActShortcuts:
+		m.dialog = dialogShortcuts
+		m.dialogCursor = 0
+		return m, tea.ClearScreen
+	case palActPlugins:
+		m.dialog = dialogPlugins
+		m.dialogCursor = 0
+		return m, tea.ClearScreen
+	case palActMemory:
+		m = m.openMemoryDialog()
+		return m, m.refreshMemory()
+	case palActAbout:
+		m.dialog = dialogAbout
+		m.dialogCursor = 0
+		return m, tea.ClearScreen
+	case palActClientLog:
+		return m.openLogViewer("Client log", filepath.Join(config.QuilDir(), "quil.log"))
+	case palActDaemonLog:
+		return m.openLogViewer("Daemon log", filepath.Join(config.QuilDir(), "quild.log"))
+	case palActMCPLog:
+		return m.openMCPLogsViewer()
+	case palActRedraw:
+		return m.forceRedraw()
+	}
+	return m, nil
 }
 

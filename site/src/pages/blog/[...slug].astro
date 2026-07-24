@@ -10,8 +10,9 @@
  */
 import { getCollection, render } from "astro:content";
 import Page from "@/layouts/Page.astro";
+import Faq from "@/components/Faq.astro";
 import { SITE, canonical } from "@/data/seo";
-import { breadcrumbSchema } from "@/data/schemas";
+import { breadcrumbSchema, faqSchema } from "@/data/schemas";
 
 export async function getStaticPaths() {
   const posts = await getCollection("blog", ({ data }) => !data.draft);
@@ -52,6 +53,9 @@ const blogPosting = {
 
 const schemas = [
   blogPosting,
+  // FAQPage only when the post ships an FAQ — the same entries render as
+  // a visible accordion below, satisfying Google's visible-content rule.
+  ...(post.data.faq.length > 0 ? [faqSchema(post.data.faq)] : []),
   breadcrumbSchema([
     { name: "Home", path: "/" },
     { name: "Blog", path: "/blog" },
@@ -92,6 +96,13 @@ const displayDate = post.data.pubDate.toLocaleDateString("en-US", {
     <div class="blog-body">
       <Content />
     </div>
+
+    {post.data.faq.length > 0 && (
+      <section class="blog-faq" aria-labelledby="faq-heading">
+        <h2 id="faq-heading">Frequently asked questions</h2>
+        <Faq items={post.data.faq} />
+      </section>
+    )}
 
     <footer class="blog-foot">
       <a href="/install/" class="btn btn-primary"><span>▸ install quil</span></a>
@@ -184,6 +195,21 @@ const displayDate = post.data.pubDate.toLocaleDateString("en-US", {
     margin: 1.5rem 0;
     font-size: 0.92rem;
     line-height: 1.6;
+  }
+
+  /* FAQ — accordion markup + styling live in the shared Faq.astro; here
+     we only style the section wrapper. Driven by the post's `faq`
+     frontmatter, mirrored in FAQPage JSON-LD so visible text and
+     structured data stay in sync. */
+  .blog-faq {
+    margin-top: 3.5rem;
+    padding-top: 2rem;
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+  }
+  .blog-faq h2 {
+    font-size: 1.5rem;
+    line-height: 1.2;
+    margin: 0 0 1.25rem;
   }
 
   .blog-foot {

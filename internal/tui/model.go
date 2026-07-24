@@ -909,8 +909,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// input-isolation break and a clipboard leak into a background shell
 			// (a trailing newline could even execute it).
 			m.palette.query += sanitizePaletteQuery(msg.Content)
-			m.refilterPalette()
-			return m, nil
+			return m.afterPaletteQueryChange()
 		} else {
 			// Empty bracketed-paste content means the terminal (e.g. Windows
 			// Terminal on Ctrl+V) fired a paste for a clipboard that holds an
@@ -1174,6 +1173,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case memoryReportMsg:
 		m = m.applyMemoryReport(msg.Resp)
+		return m, m.listenForMessages()
+
+	case paletteSearchDebounceMsg:
+		// Only fire if still open on the same non-empty query. Local timer —
+		// consumed no daemon message, so it must NOT re-arm listenForMessages.
+		if m.dialog == dialogCommandPalette && m.palette.query == msg.query && strings.TrimSpace(msg.query) != "" {
+			m.palette.searching = true
+			return m, tea.Batch(m.requestPaneSearch(msg.query), paletteSearchTimeout(msg.query))
+		}
+		return m, nil
+
+	case paletteSearchTimeoutMsg:
+		// The request for this query never answered — surface it instead of
+		// leaving "Searching…" up forever. Also a local timer: no re-arm.
+		if m.dialog == dialogCommandPalette &&
+			m.palette.query == msg.query && m.palette.searching {
+			m.palette.searching = false
+			m.palette.timedOut = true
+		}
+		return m, nil
+
+	case paneSearchRespMsg:
+		m = m.applyPaneSearch(msg.Resp)
 		return m, m.listenForMessages()
 
 	case stageUpdateRespMsg:
@@ -3687,6 +3709,14 @@ func (m Model) listenForMessages() tea.Cmd {
 				return listenContinueMsg{}
 			}
 			return historyEntryMsg{Resp: payload}
+
+		case ipc.MsgPaneSearchResp:
+			var payload ipc.PaneSearchRespPayload
+			if err := msg.DecodePayload(&payload); err != nil {
+				log.Printf("decode pane_search_resp: %v", err)
+				return listenContinueMsg{}
+			}
+			return paneSearchRespMsg{Resp: payload}
 
 		case ipc.MsgRestartPaneResp:
 			// Response to the Alt+R restart confirm. The respawned pane

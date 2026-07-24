@@ -145,12 +145,14 @@ func TestRenderCommandPalette_WidthAndCursor(t *testing.T) {
 func TestRenderCommandPalette_EmptyResults(t *testing.T) {
 	t.Parallel()
 	m := newSplitDragTestModel(t)
+	// A query that matches no command and (with no search in flight) no pane
+	// falls through to the content section's no-matches status row.
 	m.palette = paletteState{query: "zzzzzz"}
 	m.palette.commands = m.buildPaletteCommands()
 	m.palette.filtered = filterPalette("zzzzzz", m.palette.commands)
 	out := renderCommandPalette(*m)
-	if !strings.Contains(out, "No matching") {
-		t.Errorf("empty results should show a 'No matching' row, got:\n%s", out)
+	if !strings.Contains(out, "No matches in any pane") {
+		t.Errorf("empty results should show a no-matches row, got:\n%s", out)
 	}
 }
 
@@ -276,23 +278,37 @@ func TestPaletteInnerWidth_NeverExceedsBox(t *testing.T) {
 	}
 }
 
-func TestPaletteWindow_KeepsCursorVisible(t *testing.T) {
+func TestPaletteWindow_LineBudget(t *testing.T) {
 	t.Parallel()
-	// n below the cap: full list, no scroll.
-	if s, e := paletteWindow(0, 5); s != 0 || e != 5 {
-		t.Errorf("small list: got [%d,%d), want [0,5)", s, e)
+	oneLine := paletteCommand{action: palActSplitH, enabled: true, label: "c"}
+	twoLine := paletteCommand{action: palActGoToPane, enabled: true, label: "p", excerpt: "hit"}
+
+	// Sum of rendered lines within budget → full list, no scroll.
+	small := []paletteCommand{oneLine, oneLine, oneLine}
+	if s, e := paletteWindow(small, 0); s != 0 || e != len(small) {
+		t.Errorf("small list: got [%d,%d), want [0,%d)", s, e, len(small))
 	}
-	// Cursor past the first window shifts the window down.
-	s, e := paletteWindow(paletteVisibleRows+3, 40)
-	if s == 0 {
-		t.Error("cursor beyond first window should shift start > 0")
+
+	// A list of two-line rows must be budgeted by RENDERED lines: with a 12-line
+	// budget, at most 6 two-line hit rows fit, and the box must not overflow.
+	hits := make([]paletteCommand, 20)
+	for i := range hits {
+		hits[i] = twoLine
 	}
-	if cursor := paletteVisibleRows + 3; cursor < s || cursor >= e {
-		t.Errorf("cursor %d not in window [%d,%d)", cursor, s, e)
-	}
-	// Cursor at the end clamps to the last window.
-	s, e = paletteWindow(39, 40)
-	if e != 40 || s != 40-paletteVisibleRows {
-		t.Errorf("end cursor: got [%d,%d), want [%d,40)", s, e, 40-paletteVisibleRows)
+	for _, cursor := range []int{0, 10, 19} {
+		s, e := paletteWindow(hits, cursor)
+		if cursor < s || cursor >= e {
+			t.Errorf("cursor %d not in window [%d,%d)", cursor, s, e)
+		}
+		lines := 0
+		for _, c := range hits[s:e] {
+			lines += rowLines(c)
+		}
+		if lines > paletteVisibleLines {
+			t.Errorf("cursor %d: window [%d,%d) renders %d lines, over budget %d", cursor, s, e, lines, paletteVisibleLines)
+		}
+		if want := paletteVisibleLines / 2; e-s > want {
+			t.Errorf("cursor %d: %d two-line rows shown, budget allows at most %d", cursor, e-s, want)
+		}
 	}
 }

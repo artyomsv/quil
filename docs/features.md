@@ -130,7 +130,16 @@ Press `Alt+Shift+P` to open a modal, keyboard-first launcher for **everything**:
 
 Entries are grouped under dim section headers — **Go to pane**, **Tabs**, **Pane**, **System** — with navigation first (jumping to a pane or tab is the most common reason to open it), so the organization is obvious at a glance; headers disappear once you start typing. Panes are listed by `tab.pane` index and plugin type so same-name or same-directory panes are easy to tell apart. Every command dispatches into the same handler the keybinding uses — the palette is a launcher, not a second implementation — and each row shows its shortcut, so it teaches the bindings as you go. Rows that don't apply grey out (Input history without `record_history`, Open lazygit without the binary).
 
-The default is `Alt+Shift+P` because `Ctrl+Shift+P` (the VS Code key) is intercepted by many terminals' own command palette — Windows Terminal, VS Code's integrated terminal — before Quil sees it. Add it back via `command_palette = "ctrl+shift+p,alt+shift+p"` if your terminal leaves it free. (Phase 2 will add per-plugin/instance quick-create and cross-pane content search.)
+- **Content search** — as you type, the palette also searches every pane's
+  scrollback and lists matching panes in a **Found in panes** section beneath the
+  filtered commands (match count + a preview line), so one query narrows commands
+  and finds content at once — no separate mode or prefix. Enter on a pane match
+  jumps to it. Literal, case-insensitive; covers background and muted panes too.
+  It reads each pane's **loaded** output buffer and never wakes a dormant pane, so
+  it stays fast across many tabs — but because Quil restores panes lazily, a pane
+  you haven't opened yet this session may not appear in results until you visit it.
+
+The default is `Alt+Shift+P` because `Ctrl+Shift+P` (the VS Code key) is intercepted by many terminals' own command palette — Windows Terminal, VS Code's integrated terminal — before Quil sees it. Add it back via `command_palette = "ctrl+shift+p,alt+shift+p"` if your terminal leaves it free. (Phase 2 will add per-plugin/instance quick-create.)
 
 ### Pane context menu
 

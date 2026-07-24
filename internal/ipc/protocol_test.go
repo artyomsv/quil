@@ -107,6 +107,8 @@ func TestMessageTypes(t *testing.T) {
 		ipc.MsgPaneHistoryResp,
 		ipc.MsgPaneHistoryEntryReq,
 		ipc.MsgPaneHistoryEntryResp,
+		ipc.MsgPaneSearchReq,
+		ipc.MsgPaneSearchResp,
 	}
 	for _, typ := range types {
 		if typ == "" {
@@ -303,5 +305,54 @@ func TestEncodeFrame_RejectsOversizedFrame(t *testing.T) {
 	}
 	if _, err := ipc.EncodeFrame(msg); err == nil {
 		t.Fatal("EncodeFrame produced a frame larger than the wire maximum")
+	}
+}
+
+func TestPaneSearchPayload_RoundTrip(t *testing.T) {
+	req := ipc.PaneSearchReqPayload{Query: "connection refused"}
+	msg, err := ipc.NewMessage(ipc.MsgPaneSearchReq, req)
+	if err != nil {
+		t.Fatalf("marshal req: %v", err)
+	}
+	var gotReq ipc.PaneSearchReqPayload
+	if err := msg.DecodePayload(&gotReq); err != nil {
+		t.Fatalf("decode req: %v", err)
+	}
+	if gotReq.Query != req.Query {
+		t.Errorf("query = %q, want %q", gotReq.Query, req.Query)
+	}
+
+	resp := ipc.PaneSearchRespPayload{
+		Query:     "refused",
+		Hits:      []ipc.PaneSearchHit{{PaneID: "p1", Matches: 3, Excerpt: "connection refused"}},
+		Truncated: true,
+	}
+	msg2, err := ipc.NewMessage(ipc.MsgPaneSearchResp, resp)
+	if err != nil {
+		t.Fatalf("marshal resp: %v", err)
+	}
+	var gotResp ipc.PaneSearchRespPayload
+	if err := msg2.DecodePayload(&gotResp); err != nil {
+		t.Fatalf("decode resp: %v", err)
+	}
+	if len(gotResp.Hits) != 1 {
+		t.Errorf("Hits length = %d, want 1", len(gotResp.Hits))
+	}
+	if gotResp.Query != resp.Query {
+		t.Errorf("query = %q, want %q", gotResp.Query, resp.Query)
+	}
+	if len(gotResp.Hits) >= 1 {
+		if gotResp.Hits[0].PaneID != resp.Hits[0].PaneID {
+			t.Errorf("PaneID = %q, want %q", gotResp.Hits[0].PaneID, resp.Hits[0].PaneID)
+		}
+		if gotResp.Hits[0].Matches != resp.Hits[0].Matches {
+			t.Errorf("Matches = %d, want %d", gotResp.Hits[0].Matches, resp.Hits[0].Matches)
+		}
+		if gotResp.Hits[0].Excerpt != resp.Hits[0].Excerpt {
+			t.Errorf("Excerpt = %q, want %q", gotResp.Hits[0].Excerpt, resp.Hits[0].Excerpt)
+		}
+	}
+	if gotResp.Truncated != resp.Truncated {
+		t.Errorf("Truncated = %v, want %v", gotResp.Truncated, resp.Truncated)
 	}
 }

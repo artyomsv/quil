@@ -112,8 +112,12 @@ Or use a lightweight Go fuzzy library.
 - [ ] Saved plugin instances appear as "Create" commands — **deferred to Phase 2** (single "New pane…" ships in v1; per-plugin/instance quick-create needs the multi-step setup flow)
 - [x] Response feels instant (< 16ms per keystroke)
 
+## Shipped since v1
+
+- **Content search** — type `/<text>` in the palette to switch it into content-search mode: literal, case-insensitive matching against every pane's buffered scrollback across all tabs (including background and muted panes). Results are one entry per matching pane (match count + most-recent-match preview), sorted by match count; Enter jumps to the pane. New IPC pair `pane_search_req`/`pane_search_resp`, daemon-side scan in `internal/daemon/search.go`, TUI side in `internal/tui/palette_search.go`. See `docs/keybindings.md` and `docs/features.md`.
+
 ## Open Questions — resolved for v1
 
 - `":"` prefix for direct command mode — **deferred to Phase 2** (redundant with fuzzy in v1).
 - MRU (most recently used) persistence — **deferred to Phase 2** (v1 shows a curated fixed order when the query is empty).
-- Search terminal output (VS Code "Go to Symbol") — **deferred to Phase 2** (its own feature: content search across pane buffers, alt-screen-vs-scrollback split, daemon-side search).
+- Search terminal output (VS Code "Go to Symbol") — **shipped**, see "Shipped since v1" above. Jumping to a specific matching line (not just the pane) and an MCP search tool remain deferred to Phase 2.

@@ -166,6 +166,11 @@ jump-to-pane. Entries are grouped under dim section headers — **Go to pane**,
 start typing. Each row shows its shortcut, so the palette teaches the bindings as
 you go, and it dispatches into the same handlers the keybindings use.
 
+Inside the palette, type a leading `/` to switch to **content search**: the query
+after the `/` is matched (literal, case-insensitive) against every pane's
+scrollback. Matching panes are listed with a match count and a preview line;
+press Enter to jump to the pane. Backspacing away the `/` returns to command mode.
+
 The default is `Alt+Shift+P` because `Ctrl+Shift+P` (the VS Code key) is grabbed
 by many terminals' own command palette — Windows Terminal, VS Code's integrated
 terminal — before Quil sees it. If your terminal leaves it free, add it back:

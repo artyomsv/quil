@@ -3,7 +3,6 @@ package tui
 import (
 	"fmt"
 	"log"
-	"os"
 	"strings"
 	"time"
 
@@ -47,22 +46,25 @@ type paletteSearchDebounceMsg struct{ term string }
 // paneSearchRespMsg carries a daemon content-search response into Update.
 type paneSearchRespMsg struct{ Resp ipc.PaneSearchRespPayload }
 
-// paneNavLabel resolves a pane id to its navigation label and short CWD, or
-// ok=false if the pane is gone. Iterates tabs/leaves so it can compute the
-// same 1-based i.j indices formatPaneNav uses.
-func (m *Model) paneNavLabel(paneID string) (label, cwd string, ok bool) {
-	home, _ := os.UserHomeDir()
+// paletteSearchTimeoutMsg fires paletteSearchTimeout after a request was
+// issued; term is the search term captured when the tick was scheduled.
+type paletteSearchTimeoutMsg struct{ term string }
+
+// paneNavLabel resolves a pane id to its navigation label, or ok=false if the
+// pane is gone. Iterates tabs/leaves so it can compute the same 1-based i.j
+// indices formatPaneNav uses.
+func (m *Model) paneNavLabel(paneID string) (label string, ok bool) {
 	for i, tab := range m.tabs {
 		if tab == nil {
 			continue
 		}
 		for j, p := range tab.Leaves() {
 			if p != nil && p.ID == paneID {
-				return formatPaneNav(i, j, p), shortCWD(p.CWD, home), true
+				return formatPaneNav(i, j, p), true
 			}
 		}
 	}
-	return "", "", false
+	return "", false
 }
 
 // requestPaneSearch fires MsgPaneSearchReq for term (fire-and-forget); the
@@ -78,6 +80,9 @@ func (m Model) requestPaneSearch(term string) tea.Cmd {
 			log.Printf("requestPaneSearch: marshal: %v", err)
 			return nil
 		}
+		// The ID is decorative here: respondTo unicasts to this conn regardless
+		// of it, and staleness is resolved by the echoed query — do not trust
+		// it as a correlation mechanism.
 		msg.ID = fmt.Sprintf("search-%d", time.Now().UnixNano())
 		if err := m.client.Send(msg); err != nil {
 			log.Printf("requestPaneSearch: send: %v", err)
@@ -95,27 +100,42 @@ func paletteSearchDebounce(term string) tea.Cmd {
 	})
 }
 
+// paletteSearchTimeout schedules the failure fallback for an issued request.
+// If it fires while the same term is still outstanding, the palette shows a
+// diagnosable message instead of sitting on "Searching…" forever — which is
+// what a wedged daemon, or a new TUI talking to a daemon that does not know
+// MsgPaneSearchReq (handleMessage silently drops unknown types), would produce.
+func paletteSearchTimeout(term string) tea.Cmd {
+	return tea.Tick(3*time.Second, func(time.Time) tea.Msg {
+		return paletteSearchTimeoutMsg{term: term}
+	})
+}
+
 // applyPaneSearch stores a fresh result set, resolving each hit's label locally.
 // Stale responses (echoed Query != current term) are ignored — the same guard
-// applyHistoryList uses against the active dialog.
+// applyHistoryList uses against the active dialog. A response for the current
+// term is accepted even after the timeout fired, and clears the timed-out state.
 func (m Model) applyPaneSearch(resp ipc.PaneSearchRespPayload) Model {
 	if m.palette.mode != paletteModeContent || resp.Query != m.palette.term {
 		return m
 	}
 	hits := make([]paletteHit, 0, len(resp.Hits))
 	for _, h := range resp.Hits {
-		label, _, ok := m.paneNavLabel(h.PaneID)
+		label, ok := m.paneNavLabel(h.PaneID)
 		if !ok {
 			continue // pane vanished since the daemon scanned
 		}
 		detail := fmt.Sprintf("%d×", h.Matches)
-		if resp.Truncated {
+		if h.Truncated {
+			// Per-HIT flag: the payload-level Truncated is a "some pane was
+			// capped" summary and would mislabel every honest count here.
 			detail += " capped"
 		}
 		hits = append(hits, paletteHit{paneID: h.PaneID, label: label, detail: detail, excerpt: h.Excerpt})
 	}
 	m.palette.hits = hits
 	m.palette.searching = false
+	m.palette.timedOut = false
 	m.palette.truncated = resp.Truncated
 	if m.palette.cursor >= len(hits) {
 		m.palette.cursor = len(hits) - 1
@@ -168,19 +188,8 @@ func renderPaletteContent(m Model, inner int) string {
 
 	const hint = "↑↓ nav · Enter go · Esc close"
 
-	switch {
-	case strings.TrimSpace(m.palette.term) == "":
-		b.WriteString(subtle("  Type to search across all panes"))
-		b.WriteString("\n\n")
-		b.WriteString(subtle(hint))
-		return b.String()
-	case len(m.palette.hits) == 0 && m.palette.searching:
-		b.WriteString(subtle("  Searching…"))
-		b.WriteString("\n\n")
-		b.WriteString(subtle(hint))
-		return b.String()
-	case len(m.palette.hits) == 0:
-		b.WriteString(subtle("  No matches in any pane"))
+	if state := paletteContentState(m); state != "" {
+		b.WriteString(subtle("  " + state))
 		b.WriteString("\n\n")
 		b.WriteString(subtle(hint))
 		return b.String()
@@ -202,9 +211,31 @@ func renderPaletteContent(m Model, inner int) string {
 		b.WriteString(subtle(fmt.Sprintf("  ↓ %d more", len(m.palette.hits)-end)))
 		b.WriteByte('\n')
 	}
+	if m.palette.truncated {
+		b.WriteString(subtle("  some panes hit the per-pane match cap"))
+		b.WriteByte('\n')
+	}
 	b.WriteByte('\n')
 	b.WriteString(subtle(hint))
 	return b.String()
+}
+
+// paletteContentState returns the message for the empty/searching/timed-out/
+// no-hits states, or "" when there are hits to render. One place so the four
+// branches cannot drift apart in wording or ordering.
+func paletteContentState(m Model) string {
+	switch {
+	case strings.TrimSpace(m.palette.term) == "":
+		return "Type to search across all panes"
+	case len(m.palette.hits) > 0:
+		return ""
+	case m.palette.timedOut:
+		return "Search timed out — is the daemon running?"
+	case m.palette.searching:
+		return "Searching…"
+	default:
+		return "No matches in any pane"
+	}
 }
 
 // renderPaletteHitRow renders a hit's label row through the SHARED row

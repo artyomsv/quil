@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -68,6 +69,124 @@ func TestApplyPaneSearch_DropsStale(t *testing.T) {
 	m2 := m.applyPaneSearch(stale)
 	if len(m2.palette.hits) != 1 || m2.palette.hits[0].paneID != "p1" {
 		t.Errorf("stale response must not replace hits, got %+v", m2.palette.hits)
+	}
+}
+
+// TestApplyPaneSearch_AcceptsDaemonEcho is the TUI half of the staleness seam
+// pinned daemon-side by TestPaneSearchResponse_EchoesQueryVerbatim: whatever
+// term the TUI sends, the daemon echoes it verbatim, and the TUI must ACCEPT
+// that response. Terms with leading/trailing whitespace are the ones that broke
+// when the daemon trimmed its echo — the response was dropped forever and the
+// palette hung on "Searching…".
+func TestApplyPaneSearch_AcceptsDaemonEcho(t *testing.T) {
+	for _, term := range []string{"refused", " refused", "refused ", "two words"} {
+		t.Run(fmt.Sprintf("%q", term), func(t *testing.T) {
+			m := newSplitDragTestModel(t)
+			// Drive the real query path so term is derived exactly as it is at
+			// runtime (parsePaletteQuery keeps the term untrimmed).
+			m.palette.query = "/" + term
+			m.palette.mode, m.palette.term = parsePaletteQuery(m.palette.query)
+			m.palette.searching = true
+			m.palette.timedOut = true // a late response must clear this too
+
+			// What the daemon sends back: the request query, verbatim.
+			resp := ipc.PaneSearchRespPayload{
+				Query: m.palette.term,
+				Hits:  []ipc.PaneSearchHit{{PaneID: "p1", Matches: 2, Excerpt: "connection refused"}},
+			}
+			got := m.applyPaneSearch(resp)
+			if len(got.palette.hits) != 1 {
+				t.Fatalf("hits = %d, want 1 — the daemon's own echo must never look stale", len(got.palette.hits))
+			}
+			if got.palette.searching {
+				t.Error("searching should clear once the response is applied")
+			}
+			if got.palette.timedOut {
+				t.Error("a response for the current term must clear the timed-out state")
+			}
+		})
+	}
+}
+
+// TestApplyPaneSearch_CappedLabelIsPerHit: the payload-level Truncated is a
+// "some pane capped" summary, so labelling every hit from it would mark honest
+// counts as capped.
+func TestApplyPaneSearch_CappedLabelIsPerHit(t *testing.T) {
+	m := newSplitDragTestModel(t)
+	m.palette.mode = paletteModeContent
+	m.palette.term = "err"
+
+	got := m.applyPaneSearch(ipc.PaneSearchRespPayload{
+		Query:     "err",
+		Truncated: true,
+		Hits: []ipc.PaneSearchHit{
+			{PaneID: "p1", Matches: 1000, Truncated: true},
+			{PaneID: "p2", Matches: 2},
+		},
+	})
+	if len(got.palette.hits) != 2 {
+		t.Fatalf("hits = %d, want 2", len(got.palette.hits))
+	}
+	if got.palette.hits[0].detail != "1000× capped" {
+		t.Errorf("capped hit detail = %q, want %q", got.palette.hits[0].detail, "1000× capped")
+	}
+	if got.palette.hits[1].detail != "2×" {
+		t.Errorf("uncapped hit detail = %q, want %q (a sibling pane's cap must not mislabel it)", got.palette.hits[1].detail, "2×")
+	}
+}
+
+// TestRenderPaletteContent_TimedOut: a request that never answers must render a
+// diagnosable message, not an indefinite "Searching…".
+func TestRenderPaletteContent_TimedOut(t *testing.T) {
+	m := newSplitDragTestModel(t)
+	m.palette.mode = paletteModeContent
+	m.palette.term = "refused"
+	m.palette.timedOut = true
+	out := renderPaletteContent(*m, m.paletteInnerWidth())
+	if !strings.Contains(out, "timed out") {
+		t.Errorf("timed-out message missing:\n%s", out)
+	}
+	if strings.Contains(out, "Searching") {
+		t.Errorf("timed-out state must replace the searching hint:\n%s", out)
+	}
+}
+
+// TestPaletteSearchTimeout_Update drives the Update branch: the timeout applies
+// only to the still-outstanding current term, and never re-arms the IPC listen
+// loop (it consumed no daemon message).
+func TestPaletteSearchTimeout_Update(t *testing.T) {
+	base := func() Model {
+		m := newSplitDragTestModel(t)
+		m.dialog = dialogCommandPalette
+		m.palette.mode = paletteModeContent
+		m.palette.term = "refused"
+		m.palette.searching = true
+		return *m
+	}
+
+	updated, cmd := base().Update(paletteSearchTimeoutMsg{term: "refused"})
+	got := updated.(Model)
+	if !got.palette.timedOut || got.palette.searching {
+		t.Errorf("current outstanding term should time out: timedOut=%v searching=%v", got.palette.timedOut, got.palette.searching)
+	}
+	if cmd != nil {
+		t.Error("the timeout is a LOCAL timer — returning a cmd here would double-arm listenForMessages")
+	}
+
+	// Term moved on since the tick was scheduled.
+	moved := base()
+	moved.palette.term = "refused now"
+	updated, _ = moved.Update(paletteSearchTimeoutMsg{term: "refused"})
+	if updated.(Model).palette.timedOut {
+		t.Error("a tick for a superseded term must not time out the current search")
+	}
+
+	// The response already landed (searching cleared).
+	answered := base()
+	answered.palette.searching = false
+	updated, _ = answered.Update(paletteSearchTimeoutMsg{term: "refused"})
+	if updated.(Model).palette.timedOut {
+		t.Error("no request outstanding — the tick must be a no-op")
 	}
 }
 

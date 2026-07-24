@@ -31,6 +31,7 @@ type paletteState struct {
 	term      string       // query minus the "/" sigil
 	hits      []paletteHit // resolved matches, daemon-sorted
 	searching bool         // a request is in flight, no fresh response yet
+	timedOut  bool         // the in-flight request never answered (see paletteSearchTimeout)
 	truncated bool         // some pane hit the per-pane match cap
 }
 
@@ -625,6 +626,7 @@ func (m Model) afterPaletteQueryChange() (tea.Model, tea.Cmd) {
 		if strings.TrimSpace(m.palette.term) == "" {
 			m.palette.hits = nil
 			m.palette.searching = false
+			m.palette.timedOut = false
 			m.palette.cursor = 0
 			return m, nil
 		}
@@ -633,9 +635,11 @@ func (m Model) afterPaletteQueryChange() (tea.Model, tea.Cmd) {
 			// they never render under the new query header while the debounce
 			// is pending. Marking searching here (not just once the debounce
 			// fires) also makes "Searching…" reachable on every refinement,
-			// not only the first search after entering content mode.
+			// not only the first search after entering content mode. Any
+			// previous term's timeout state goes with them.
 			m.palette.hits = nil
 			m.palette.searching = true
+			m.palette.timedOut = false
 		}
 		m.palette.cursor = 0
 		return m, paletteSearchDebounce(m.palette.term)

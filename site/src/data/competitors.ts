@@ -180,6 +180,16 @@ export const competitors: Record<CompetitorInfo["slug"], CompetitorInfo> = {
         answer:
           "It depends on what you use tmux for. If you need reboot persistence + AI session continuity, yes. If you need a headless multiplexer for classical server administration, tmux remains the right tool.",
       },
+      {
+        question: "Is Quil a good tmux alternative for AI coding agents?",
+        answer:
+          "For AI-heavy work, yes. tmux keeps sessions alive while its server runs, but it loses everything on a host reboot and has no concept of an AI session. Quil survives a full reboot, auto-resumes Claude Code and OpenCode sessions with the current (post-rotation) session id, and exposes an MCP server so an AI assistant can read and drive the panes directly. For classic headless server administration, tmux is still the better fit.",
+      },
+      {
+        question: "What is the best tmux alternative that survives a reboot?",
+        answer:
+          "tmux, Zellij, WezTerm and GNU Screen all lose their sessions when the host reboots — their persistence only lasts while the server process is alive. Quil was built specifically for this gap: its daemon snapshots the whole workspace to disk continuously, so after a reboot you type one command and the layout, working directories, scrollback, and AI sessions come back in under 30 seconds.",
+      },
     ],
   },
 
@@ -275,6 +285,16 @@ export const competitors: Record<CompetitorInfo["slug"], CompetitorInfo> = {
         question: "Is screen actively maintained?",
         answer:
           "Yes, but slowly. Version 5.0 shipped in 2024 — the first major release since 2014.",
+      },
+      {
+        question: "What is a modern alternative to GNU Screen?",
+        answer:
+          "Any current multiplexer — tmux, Zellij, or Quil — is a straight upgrade from Screen's 1987-era UX, mouse-less defaults, and dated config syntax. Quil goes further than the others by surviving a full host reboot and auto-resuming AI coding sessions, which even tmux doesn't do. If you only need detach-and-reattach on a headless server, tmux is the closest like-for-like replacement.",
+      },
+      {
+        question: "Does Quil run on Windows, unlike GNU Screen?",
+        answer:
+          "Yes. GNU Screen is Unix-only. Quil ships a native Windows binary using ConPTY — no WSL required — alongside its Linux and macOS builds, so it's a cross-platform alternative to Screen for developers who also work on Windows.",
       },
     ],
   },

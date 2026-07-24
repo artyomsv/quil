@@ -11,15 +11,69 @@ import (
 	"github.com/artyomsv/quil/internal/ipc"
 )
 
-// hitRows returns just the palActGoToPane rows from a display list.
-func hitRows(display []paletteCommand) []paletteCommand {
-	var hits []paletteCommand
-	for _, c := range display {
-		if c.action == palActGoToPane && !c.header && !c.info {
-			hits = append(hits, c)
+func TestClampPaletteCursor(t *testing.T) {
+	hdr := paletteCommand{header: true, label: "H"}
+	info := paletteCommand{info: true, label: "i"}
+	cmd := paletteCommand{action: palActSplitH, enabled: true, label: "c"}
+	for _, tc := range []struct {
+		name      string
+		display   []paletteCommand
+		cur, want int
+	}{
+		{"empty display", nil, 3, -1},
+		{"negative snaps to first selectable", []paletteCommand{hdr, cmd}, -1, 1},
+		{"past end clamps back to a selectable", []paletteCommand{cmd, hdr}, 9, 0},
+		{"on a selectable row stays", []paletteCommand{cmd, cmd}, 1, 1},
+		{"on a header snaps forward to the next hit", []paletteCommand{cmd, hdr, cmd}, 1, 2},
+		{"nothing selectable returns -1", []paletteCommand{hdr, info}, 0, -1},
+	} {
+		if got := clampPaletteCursor(tc.display, tc.cur); got != tc.want {
+			t.Errorf("%s: clampPaletteCursor(%d) = %d, want %d", tc.name, tc.cur, got, tc.want)
 		}
 	}
-	return hits
+}
+
+// TestRenderCommandPalette_ScrollWindowWithHits exercises the scroll window over
+// a combined list longer than paletteVisibleRows that mixes one-line commands
+// and two-line hit rows, with the cursor at the end: every rendered line must fit
+// the box interior and a "more" scroll indicator must appear.
+func TestRenderCommandPalette_ScrollWindowWithHits(t *testing.T) {
+	m := newSplitDragTestModel(t)
+	m.palette.commands = m.buildPaletteCommands()
+	m.palette.query = "e"
+	m.palette.filtered = filterPalette("e", m.palette.commands)
+	var hits []paletteCommand
+	for i := 0; i < 20; i++ {
+		hits = append(hits, paletteCommand{
+			action:  palActGoToPane,
+			arg:     fmt.Sprintf("p%d", i),
+			enabled: true,
+			label:   fmt.Sprintf("1.%d · terminal", i),
+			detail:  "1×",
+			excerpt: "match line here",
+		})
+	}
+	m.palette.contentHits = hits
+	display := m.paletteDisplay()
+	m.palette.cursor = len(display) - 1 // deep in the list, forces a shifted window
+
+	out := renderCommandPalette(*m)
+	inner := m.paletteInnerWidth()
+	lineCount := strings.Count(out, "\n") + 1
+	for i, line := range strings.Split(out, "\n") {
+		if w := lipgloss.Width(line); w > inner {
+			t.Errorf("line %d width %d exceeds inner %d: %q", i, w, inner, line)
+		}
+	}
+	if !strings.Contains(out, "more") {
+		t.Error("a combined list longer than the window should show a ↑/↓ more scroll indicator")
+	}
+	// Height must be bounded: query row + blank + (≤ paletteVisibleLines content
+	// lines) + scroll indicators + blank + hint. Two-line hit rows must NOT be
+	// allowed to push the box off a short terminal.
+	if budget := paletteVisibleLines + 8; lineCount > budget {
+		t.Errorf("rendered %d lines, over height budget %d — two-line hit rows are overflowing the window", lineCount, budget)
+	}
 }
 
 func TestApplyPaneSearch_BuildsGoToPaneRows(t *testing.T) {
@@ -327,6 +381,15 @@ func TestPaletteSearchDebounce_Update(t *testing.T) {
 	if _, cmd := moved.Update(paletteSearchDebounceMsg{query: "refused"}); cmd != nil {
 		t.Error("a debounce for a superseded query must not fire a request")
 	}
+
+	// Palette already closed when the tick fires → no-op (a stale tick must not
+	// resurrect search state against a closed palette).
+	closed := base()
+	closed.dialog = dialogNone
+	up, cmd := closed.Update(paletteSearchDebounceMsg{query: "refused"})
+	if cmd != nil || up.(Model).palette.searching {
+		t.Error("a debounce that fires after the palette closed must be a no-op")
+	}
 }
 
 // TestPaletteSearchTimeout_Update drives the Update branch: the timeout applies
@@ -364,5 +427,13 @@ func TestPaletteSearchTimeout_Update(t *testing.T) {
 	updated, _ = answered.Update(paletteSearchTimeoutMsg{query: "refused"})
 	if updated.(Model).palette.timedOut {
 		t.Error("no request outstanding — the tick must be a no-op")
+	}
+
+	// Palette already closed when the tick fires → no-op.
+	closed := base()
+	closed.dialog = dialogNone
+	updated, cmd = closed.Update(paletteSearchTimeoutMsg{query: "refused"})
+	if cmd != nil || updated.(Model).palette.timedOut {
+		t.Error("a timeout that fires after the palette closed must be a no-op")
 	}
 }

@@ -14,8 +14,8 @@ import (
 	"github.com/artyomsv/quil/internal/config"
 )
 
-const paletteVisibleRows = 12 // result rows shown before the list scrolls
-const paletteWidth = 72       // outer dialog width; renderDialog clamps to m.width-2
+const paletteVisibleLines = 12 // rendered lines shown before the list scrolls (a hit row is 2 lines)
+const paletteWidth = 72        // outer dialog width; renderDialog clamps to m.width-2
 
 // paletteState holds the command-palette query buffer + result cursor. There is
 // NO `open` field — m.dialog == dialogCommandPalette is the sole open/closed
@@ -424,17 +424,11 @@ func renderCommandPalette(m Model) string {
 
 	// The displayed list is the filtered commands plus, once the query is
 	// non-empty, the "Found in panes" content-search section — one list the
-	// cursor walks across.
+	// cursor walks across. It is never empty: the command registry always has
+	// System rows, and any non-empty query appends the content section (a hit or
+	// a status row), so there is no "no rows at all" case to guard.
 	display := m.paletteDisplay()
-	if len(display) == 0 {
-		b.WriteString(subtle("  No matching commands"))
-		b.WriteByte('\n')
-		b.WriteByte('\n')
-		b.WriteString(subtle(hint))
-		return b.String()
-	}
-
-	start, end := paletteWindow(m.palette.cursor, len(display))
+	start, end := paletteWindow(display, m.palette.cursor)
 	if start > 0 {
 		b.WriteString(subtle(fmt.Sprintf("  ↑ %d more", start)))
 		b.WriteByte('\n')
@@ -516,23 +510,59 @@ func clampPaletteCursor(display []paletteCommand, cur int) int {
 	return firstSelectable(display)
 }
 
-// paletteWindow returns the [start, end) slice of a length-n result list to
-// render, sized to paletteVisibleRows and shifted to keep cursor visible.
-func paletteWindow(cursor, n int) (int, int) {
-	if n <= paletteVisibleRows {
+// rowLines is how many rendered lines a display row occupies: a content-hit row
+// draws a label line PLUS a dim excerpt line (2); everything else is 1.
+func rowLines(c paletteCommand) int {
+	if c.excerpt != "" && !c.header && !c.info {
+		return 2
+	}
+	return 1
+}
+
+// paletteWindow returns the [start, end) slice of display to render, sized to at
+// most paletteVisibleLines RENDERED lines (a hit row counts as 2, not 1) and
+// grown outward from the cursor so it stays visible. Budgeting by rendered lines
+// — not entry count — keeps the box from overflowing a short terminal when the
+// visible slice fills with two-line pane-match rows.
+func paletteWindow(display []paletteCommand, cursor int) (int, int) {
+	n := len(display)
+	if n == 0 {
+		return 0, 0
+	}
+	total := 0
+	for _, c := range display {
+		total += rowLines(c)
+	}
+	if total <= paletteVisibleLines {
 		return 0, n
 	}
-	start := 0
-	if cursor >= paletteVisibleRows {
-		start = cursor - paletteVisibleRows + 1
+	if cursor < 0 {
+		cursor = 0
 	}
-	if max := n - paletteVisibleRows; start > max {
-		start = max
+	if cursor >= n {
+		cursor = n - 1
 	}
-	if start < 0 {
-		start = 0
+	start, end := cursor, cursor+1
+	used := rowLines(display[cursor])
+	// Grow forward first (show what follows the cursor), then backward, until the
+	// next row on either side would exceed the line budget.
+	for used < paletteVisibleLines {
+		grew := false
+		if end < n && used+rowLines(display[end]) <= paletteVisibleLines {
+			used += rowLines(display[end])
+			end++
+			grew = true
+		}
+		if start > 0 && used+rowLines(display[start-1]) <= paletteVisibleLines {
+			used += rowLines(display[start-1])
+			start--
+			grew = true
+		}
+		if !grew {
+			break
+		}
 	}
-	return start, start + paletteVisibleRows
+	return start, end
 }
 
 // renderPaletteHeader draws a dim, upper-cased section title bounded to inner.

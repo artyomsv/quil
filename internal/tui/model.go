@@ -1176,6 +1176,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m = m.applyMemoryReport(msg.Resp)
 		return m, m.listenForMessages()
 
+	case paletteSearchDebounceMsg:
+		// Only fire if still open in content mode on the same term.
+		if m.dialog == dialogCommandPalette && m.palette.mode == paletteModeContent && m.palette.term == msg.term && strings.TrimSpace(msg.term) != "" {
+			m.palette.searching = true
+			return m, m.requestPaneSearch(msg.term)
+		}
+		return m, nil
+
+	case paneSearchRespMsg:
+		m = m.applyPaneSearch(msg.Resp)
+		return m, m.listenForMessages()
+
 	case stageUpdateRespMsg:
 		switch {
 		case msg.Resp.Success:
@@ -3687,6 +3699,14 @@ func (m Model) listenForMessages() tea.Cmd {
 				return listenContinueMsg{}
 			}
 			return historyEntryMsg{Resp: payload}
+
+		case ipc.MsgPaneSearchResp:
+			var payload ipc.PaneSearchRespPayload
+			if err := msg.DecodePayload(&payload); err != nil {
+				log.Printf("decode pane_search_resp: %v", err)
+				return listenContinueMsg{}
+			}
+			return paneSearchRespMsg{Resp: payload}
 
 		case ipc.MsgRestartPaneResp:
 			// Response to the Alt+R restart confirm. The respawned pane

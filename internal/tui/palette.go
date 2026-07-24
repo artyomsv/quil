@@ -217,6 +217,22 @@ func tabIndexName(i int, tab *TabModel) string {
 	return fmt.Sprintf("%d:%s", i+1, tab.Name)
 }
 
+// formatPaneNav renders the shared palette navigation label for a pane:
+// "i.j · type[· name]" with 1-based tab/pane indices. Empty type falls back to
+// "terminal" (the daemon default); an unnamed pane omits the trailing segment
+// so there is never a dangling separator.
+func formatPaneNav(tabIdx, paneIdx int, p *PaneModel) string {
+	paneType := p.Type
+	if paneType == "" {
+		paneType = "terminal"
+	}
+	parts := []string{fmt.Sprintf("%d.%d", tabIdx+1, paneIdx+1), paneType}
+	if p.Name != "" {
+		parts = append(parts, p.Name)
+	}
+	return strings.Join(parts, " · ")
+}
+
 // buildPaletteCommands assembles the full command registry, rebuilt on every
 // open so dynamic entries (tabs/panes) and per-active-pane gates/labels are
 // current. Entries are grouped under dim section headers (Go to pane / Tabs /
@@ -266,22 +282,17 @@ func (m *Model) buildPaletteCommands() []paletteCommand {
 			if p == nil {
 				continue
 			}
-			// Join only the non-empty parts with " · " so a typeless or
-			// unnamed pane never renders a dangling/doubled separator. Empty
-			// type falls back to "terminal" (the daemon's default plugin).
+			// Label format is shared with content-search hit resolution
+			// (paneNavLabel) via formatPaneNav — one implementation.
 			paneType := p.Type
 			if paneType == "" {
 				paneType = "terminal"
-			}
-			parts := []string{fmt.Sprintf("%d.%d", i+1, j+1), paneType}
-			if p.Name != "" {
-				parts = append(parts, p.Name)
 			}
 			cmds = append(cmds, paletteCommand{
 				action:   palActGoToPane,
 				arg:      p.ID,
 				enabled:  true,
-				label:    strings.Join(parts, " · "),
+				label:    formatPaneNav(i, j, p),
 				detail:   shortCWD(p.CWD, home),
 				keywords: []string{"go to", "goto", "pane", "focus", p.Name, filepath.Base(p.CWD), paneType},
 			})

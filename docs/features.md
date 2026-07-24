@@ -199,6 +199,7 @@ Each plugin defines its own spawn command, default args, resume strategy, idle p
 
 Plugins that opt in via `prompts_cwd = true` or `[[command.toggles]]` get a setup step in the Ctrl+N flow with:
 
+- A **recent-locations quick pick** — the last 5 working directories you used are offered as selectable rows (Enter opens there instantly), with a **Browse…** row to drop into the full browser. The list persists across restarts (`~/.quil/recent-cwds.json`) and skips folders that no longer exist, so hopping between projects is one keystroke instead of a re-navigation.
 - A **directory browser** pre-loaded with the active pane's CWD (tracked via OSC 7). Tab/arrows navigate, Enter descends, Backspace goes up, `Ctrl+V` jumps to a pasted path.
 - One **checkbox per runtime toggle** declared in the plugin TOML. Toggle args are appended to `InstanceArgs`, persist across daemon restarts, and are off by default. Toggles with the same `group` value behave as mutually-exclusive radio buttons.
 

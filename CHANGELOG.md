@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Recent working directories: the pane setup dialog (`Ctrl+N` for plugins with
+  `prompts_cwd`, e.g. Claude Code) now offers the last 5 used folders as a
+  one-keystroke quick pick, persisted to `~/.quil/recent-cwds.json` and surviving
+  daemon/TUI restart. Stale (deleted) folders are skipped; **Browse…** still opens
+  the full directory browser. Git-repo discovery keeps priority when it finds repos.
+
+### Changed
+- Shortened the Claude Code permission/Chrome toggle labels so they no longer wrap
+  mid-word on narrow terminals.
+
 ## [1.40.0] - 2026-07-24
 
 ## [1.39.0] - 2026-07-23

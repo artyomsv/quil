@@ -10,7 +10,9 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
+	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/kubediscover"
 	"github.com/artyomsv/quil/internal/plugin"
 )
@@ -1317,6 +1319,217 @@ func TestSetupRepoKey_DownAtBrowseRowStays(t *testing.T) {
 	got := out.(Model)
 	if got.cwdBrowseCursor != 2 {
 		t.Errorf("cursor = %d, want 2 (clamped at Browse… row)", got.cwdBrowseCursor)
+	}
+}
+
+// --- Recent-locations quick pick ---
+
+// registryWithAICWD returns a registry with a minimal prompts_cwd plugin (no
+// discover) — the shape that drops into the recent-locations pick list.
+func registryWithAICWD(t *testing.T) *plugin.Registry {
+	t.Helper()
+	dir := t.TempDir()
+	content := `[plugin]
+name = "ai"
+
+[command]
+cmd = "ai"
+prompts_cwd = true
+`
+	if err := os.WriteFile(filepath.Join(dir, "ai.toml"), []byte(content), 0o644); err != nil {
+		t.Fatalf("write test toml: %v", err)
+	}
+	r := plugin.NewRegistry()
+	if err := r.LoadFromDir(dir); err != nil {
+		t.Fatalf("LoadFromDir: %v", err)
+	}
+	r.Get("ai").Available = true
+	return r
+}
+
+// recentPickModel builds a Model sitting in the setup dialog in recent-pick
+// mode, mirroring what enterSetupOrSplit produces when no git repos exist.
+func recentPickModel(t *testing.T, candidates []string) Model {
+	t.Helper()
+	return Model{
+		dialog:           dialogCreatePaneSetup,
+		recentCandidates: candidates,
+		cwdBrowseDir:     candidates[0],
+		pluginRegistry:   registryWithAICWD(t),
+		selectedPlugin:   "ai",
+	}
+}
+
+func TestEnterSetup_RecentPickWhenNoRepos(t *testing.T) {
+	dir := t.TempDir()
+	m := &Model{recentCWDs: []string{dir, filepath.Join(dir, "gone")}}
+	p := &plugin.PanePlugin{Name: "ai", Command: plugin.CommandConfig{PromptsCWD: true}}
+	m.enterSetupOrSplit(p)
+	// Only the existing dir survives the os.Stat filter.
+	if !reflect.DeepEqual(m.recentCandidates, []string{dir}) {
+		t.Errorf("recentCandidates = %v, want [%q]", m.recentCandidates, dir)
+	}
+	if m.cwdBrowseDir != dir {
+		t.Errorf("cwdBrowseDir = %q, want first candidate %q", m.cwdBrowseDir, dir)
+	}
+	if m.dialog != dialogCreatePaneSetup {
+		t.Errorf("dialog = %v, want dialogCreatePaneSetup", m.dialog)
+	}
+}
+
+func TestEnterSetup_RecentAllStaleFallsToBrowser(t *testing.T) {
+	base := t.TempDir()
+	m := &Model{recentCWDs: []string{filepath.Join(base, "gone1"), filepath.Join(base, "gone2")}}
+	p := &plugin.PanePlugin{Name: "ai", Command: plugin.CommandConfig{PromptsCWD: true}}
+	m.enterSetupOrSplit(p)
+	if len(m.recentCandidates) != 0 {
+		t.Errorf("recentCandidates = %v, want empty (all stale)", m.recentCandidates)
+	}
+	if m.cwdBrowseDir == "" {
+		t.Error("expected directory-browser fallback to set cwdBrowseDir")
+	}
+}
+
+func TestEnterSetup_GitReposWinOverRecent(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	pane := NewPaneModel("pane-1", 1024)
+	pane.CWD = root
+	tab := NewTabModel("tab-1", "t")
+	tab.Root = NewLeaf(pane)
+	tab.ActivePane = pane.ID
+
+	m := &Model{tabs: []*TabModel{tab}, activeTab: 0, recentCWDs: []string{t.TempDir()}}
+	p := &plugin.PanePlugin{Name: "lazygit", Command: plugin.CommandConfig{Cmd: "lazygit", PromptsCWD: true, Discover: "git"}}
+	m.enterSetupOrSplit(p)
+
+	if len(m.repoCandidates) != 1 || m.repoCandidates[0] != root {
+		t.Fatalf("repoCandidates = %v, want [%q]", m.repoCandidates, root)
+	}
+	if m.recentCandidates != nil {
+		t.Errorf("recentCandidates = %v, want nil (git repos take priority)", m.recentCandidates)
+	}
+}
+
+func TestSetupRecentKey_EnterSubmitsCandidate(t *testing.T) {
+	dir := t.TempDir()
+	m := recentPickModel(t, []string{dir})
+	out, _ := m.handleCreatePaneSetupKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	got := out.(Model)
+	if got.selectedCWD != dir {
+		t.Errorf("selectedCWD = %q, want %q (submitted recent location)", got.selectedCWD, dir)
+	}
+}
+
+func TestSetupRecentKey_BrowseRowFallsBackToBrowser(t *testing.T) {
+	m := recentPickModel(t, []string{t.TempDir()})
+	m.cwdBrowseCursor = 1 // the "Browse…" row (index == len(candidates))
+	out, _ := m.handleCreatePaneSetupKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	got := out.(Model)
+	if got.recentCandidates != nil {
+		t.Errorf("recentCandidates = %v, want nil after Browse…", got.recentCandidates)
+	}
+}
+
+// TestHandleCreatePaneSplit_PersistsRecentCWD covers the integration point:
+// selecting a placement at step 3 must push the chosen CWD into recentCWDs and
+// persist it to disk. QUIL_HOME is redirected to a tempdir so the production
+// ~/.quil is never touched.
+func TestHandleCreatePaneSplit_PersistsRecentCWD(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	dir := t.TempDir()
+	m := Model{selectedCWD: dir}
+	out, _ := m.handleCreatePaneSplit()
+	got := out.(Model)
+
+	want := filepath.Clean(dir)
+	if len(got.recentCWDs) != 1 || got.recentCWDs[0] != want {
+		t.Errorf("in-memory recentCWDs = %v, want [%q]", got.recentCWDs, want)
+	}
+	if disk := LoadRecentCWDs(config.RecentCWDsPath()); len(disk) != 1 || disk[0] != want {
+		t.Errorf("persisted recentCWDs = %v, want [%q]", disk, want)
+	}
+}
+
+func TestHandleCreatePaneSplit_BlankCWD_NoPersist(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	m := Model{selectedCWD: ""}
+	out, _ := m.handleCreatePaneSplit()
+	got := out.(Model)
+	if len(got.recentCWDs) != 0 {
+		t.Errorf("recentCWDs = %v, want empty for blank cwd", got.recentCWDs)
+	}
+	if disk := LoadRecentCWDs(config.RecentCWDsPath()); len(disk) != 0 {
+		t.Errorf("persisted %v, want nothing written for blank cwd", disk)
+	}
+}
+
+// TestRenderSetup_RecentPick_NoDuplicatePathLine guards issue 1: in pick mode
+// the highlighted row IS the selected path, so there must be no separate
+// "current path" line duplicating it above the list.
+func TestRenderSetup_RecentPick_NoDuplicatePathLine(t *testing.T) {
+	const short = "/tmp/proj" // short enough that leftTruncPath won't shorten it
+	m := recentPickModel(t, []string{short})
+	m.setupFieldCursor = 0 // focus the CWD field
+	out := m.renderCreatePaneSetupDialog()
+	if n := strings.Count(out, short); n != 1 {
+		t.Errorf("path %q appears %d times in pick-mode render, want exactly 1 (the highlighted row)", short, n)
+	}
+}
+
+// TestRenderSetup_BrowserHint_FitsTextArea guards issue 2: no rendered line may
+// exceed the box text area (width-4), or it wraps onto a second line. Uses a
+// narrow width that reproduced the original hint wrap.
+func TestRenderSetup_BrowserHint_FitsTextArea(t *testing.T) {
+	entries := []string{".."}
+	for i := 0; i < 15; i++ {
+		entries = append(entries, fmt.Sprintf("dir%02d", i))
+	}
+	m := Model{
+		dialog:           dialogCreatePaneSetup,
+		pluginRegistry:   registryWithAICWD(t),
+		selectedPlugin:   "ai",
+		cwdBrowseDir:     `E:\Projects\Stukans\monorepo`,
+		cwdBrowseEntries: entries,
+		setupFieldCursor: 0,
+		width:            64, // narrow box → text area 58; the old 65-wide hint wrapped here
+	}
+	out := m.renderCreatePaneSetupDialog()
+	textArea := m.setupDialogWidth() - 4
+	for _, line := range strings.Split(out, "\n") {
+		if w := lipgloss.Width(line); w > textArea {
+			t.Errorf("line %q width %d exceeds text area %d (would wrap)", line, w, textArea)
+		}
+	}
+}
+
+// TestClaudeCodeToggleLabelsFitFloor guards Part 1: the shortened toggle
+// labels must fit the floor-70 setup box so they never wrap mid-word.
+func TestClaudeCodeToggleLabelsFitFloor(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := plugin.EnsureDefaultPlugins(dir); err != nil {
+		t.Fatalf("ensure defaults: %v", err)
+	}
+	r := plugin.NewRegistry()
+	if err := r.LoadFromDir(dir); err != nil {
+		t.Fatalf("LoadFromDir: %v", err)
+	}
+	p := r.Get("claude-code")
+	if p == nil {
+		t.Fatal("claude-code plugin not found")
+	}
+	// Floor-70 box: 6 cells row chrome ("> " + "[x] ") + 4 cells padding =>
+	// 60 usable label cells.
+	const maxLabel = 60
+	for _, tg := range p.Command.Toggles {
+		if w := lipgloss.Width(tg.Label); w > maxLabel {
+			t.Errorf("label %q width %d exceeds %d (would wrap in floor-70 box)", tg.Label, w, maxLabel)
+		}
 	}
 }
 

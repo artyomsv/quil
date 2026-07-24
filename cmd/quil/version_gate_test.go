@@ -3,13 +3,22 @@ package main
 import (
 	"errors"
 	"net"
-	"path/filepath"
+	"os"
 	"strings"
 	"testing"
+
+	"github.com/artyomsv/quil/internal/config"
 )
 
 // stubStopSpawn swaps both side effects of restartDaemonForUpgrade for the
 // duration of a test and restores them afterwards.
+//
+// These are package-level vars, so every test using this helper MUST stay
+// sequential — adding t.Parallel() to any of them (or running the package
+// with -parallel) would race the swap against a concurrent test's restore.
+// The vars are the pattern CONTRIBUTING.md sanctions for test seams; the
+// sequential assumption is the price, and it is cheap here because these
+// tests are pure bookkeeping with no I/O to overlap.
 func stubStopSpawn(t *testing.T, stop func(bool) (bool, error), spawn func() (int, error)) {
 	t.Helper()
 	origStop, origSpawn := stopDaemonForUpgradeFn, spawnDaemonForUpgradeFn
@@ -17,6 +26,26 @@ func stubStopSpawn(t *testing.T, stop func(bool) (bool, error), spawn func() (in
 	t.Cleanup(func() {
 		stopDaemonForUpgradeFn, spawnDaemonForUpgradeFn = origStop, origSpawn
 	})
+}
+
+// quilHome points config.SocketPath() (and every other derived path) at a
+// temp dir for the duration of a test, so nothing here can reach the
+// developer's live ~/.quil. Returns the socket path the daemon would use.
+//
+// Deliberately NOT t.TempDir(): that embeds the test's own name in the path,
+// and a sockaddr_un holds ~108 bytes. These test names are long enough to
+// blow that budget once Windows prepends C:\Users\<user>\AppData\Local\Temp —
+// the listen then fails with "bind: invalid argument" on Windows while
+// passing on Linux, where the /tmp prefix is short enough to squeak under.
+func quilHome(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "quil")
+	if err != nil {
+		t.Fatalf("temp dir: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	t.Setenv("QUIL_HOME", dir)
+	return config.SocketPath()
 }
 
 // TestRestartDaemonForUpgrade_StopFails_NeverSpawns is the regression test for
@@ -34,7 +63,8 @@ func TestRestartDaemonForUpgrade_StopFails_NeverSpawns(t *testing.T) {
 		func() (int, error) { spawned = true; return 0, nil },
 	)
 
-	client, err := restartDaemonForUpgrade(filepath.Join(t.TempDir(), "quild.sock"))
+	quilHome(t)
+	client, err := restartDaemonForUpgrade()
 	if err == nil {
 		t.Fatal("restartDaemonForUpgrade with a failed stop = nil error, want the upgrade aborted")
 	}
@@ -55,7 +85,8 @@ func TestRestartDaemonForUpgrade_StopFails_ErrorNamesTheDaemon(t *testing.T) {
 		func() (int, error) { t.Fatal("must not spawn"); return 0, nil },
 	)
 
-	_, err := restartDaemonForUpgrade(filepath.Join(t.TempDir(), "quild.sock"))
+	quilHome(t)
+	_, err := restartDaemonForUpgrade()
 	if err == nil {
 		t.Fatal("want an error")
 	}
@@ -68,7 +99,7 @@ func TestRestartDaemonForUpgrade_StopFails_ErrorNamesTheDaemon(t *testing.T) {
 // path: once the old daemon is confirmed gone, a fresh one is spawned and the
 // caller gets a client connected to it.
 func TestRestartDaemonForUpgrade_StopSucceeds_SpawnsAndReconnects(t *testing.T) {
-	sock := filepath.Join(t.TempDir(), "quild.sock")
+	sock := quilHome(t)
 	ln, err := net.Listen("unix", sock) // stands in for the freshly spawned daemon
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -81,7 +112,7 @@ func TestRestartDaemonForUpgrade_StopSucceeds_SpawnsAndReconnects(t *testing.T) 
 		func() (int, error) { spawned = true; return 4242, nil },
 	)
 
-	client, err := restartDaemonForUpgrade(sock)
+	client, err := restartDaemonForUpgrade()
 	if err != nil {
 		t.Fatalf("restartDaemonForUpgrade: %v", err)
 	}
@@ -102,7 +133,8 @@ func TestRestartDaemonForUpgrade_SpawnFails_Reports(t *testing.T) {
 		func() (int, error) { return 0, errors.New("exec: no such file") },
 	)
 
-	if _, err := restartDaemonForUpgrade(filepath.Join(t.TempDir(), "quild.sock")); err == nil {
+	quilHome(t)
+	if _, err := restartDaemonForUpgrade(); err == nil {
 		t.Fatal("spawn failure = nil error, want it reported")
 	}
 }

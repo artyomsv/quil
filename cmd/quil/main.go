@@ -321,7 +321,7 @@ func launchTUI() {
 	// returns a NEW client connected to a freshly-spawned daemon (after
 	// user-confirmed upgrade restart), or exits the process outright
 	// (TUI older than daemon — blocking dialog path).
-	client = gateVersionCheck(client, sockPath)
+	client = gateVersionCheck(client)
 	defer client.Close()
 
 	// Ensure default plugins exist and detect stale ones needing migration

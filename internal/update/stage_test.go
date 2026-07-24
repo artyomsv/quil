@@ -147,7 +147,7 @@ func TestStage_TarGzHappyPath_WritesBinariesAndManifest(t *testing.T) {
 	if man.Version != "0.0.3" || gotDir != dir {
 		t.Errorf("FindStaged = (%q, %q), want (0.0.3, %q)", man.Version, gotDir, dir)
 	}
-	if err := VerifyStaged(dir, man); err != nil {
+	if err := VerifyStaged(dir, man, BinaryNames(s.GOOS)); err != nil {
 		t.Errorf("VerifyStaged on fresh tar.gz stage: %v", err)
 	}
 }
@@ -172,7 +172,7 @@ func TestStage_HappyPath_WritesBinariesAndManifest(t *testing.T) {
 	if man.Version != "0.0.2" || gotDir != dir {
 		t.Errorf("FindStaged = (%q, %q), want (0.0.2, %q)", man.Version, gotDir, dir)
 	}
-	if err := VerifyStaged(dir, man); err != nil {
+	if err := VerifyStaged(dir, man, BinaryNames(s.GOOS)); err != nil {
 		t.Errorf("VerifyStaged on fresh stage: %v", err)
 	}
 }
@@ -203,8 +203,53 @@ func TestVerifyStaged_DetectsCorruption(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "quil.exe"), []byte("corrupted"), 0700); err != nil {
 		t.Fatalf("corrupt file: %v", err)
 	}
-	if err := VerifyStaged(dir, man); err == nil {
+	if err := VerifyStaged(dir, man, BinaryNames(s.GOOS)); err == nil {
 		t.Error("VerifyStaged on corrupted file = nil error, want error")
+	}
+}
+
+// TestVerifyStaged_ManifestOmittingABinary_Rejected: the gate must cover the
+// set the caller INSTALLS, not the set the manifest chooses to declare. The
+// manifest lives in the staged dir alongside the binaries, so anything able to
+// plant a binary can also write the manifest that vouches for it. A manifest
+// naming only quil.exe used to pass while quild.exe was installed and run
+// unverified — a mismatched pair that defeated the whole gate.
+func TestVerifyStaged_ManifestOmittingABinary_Rejected(t *testing.T) {
+	rel, _ := stageFixture(t, false)
+	root := t.TempDir()
+	s := &Stager{Root: root, GOOS: "windows", GOARCH: "amd64"}
+	if err := s.Stage(context.Background(), rel); err != nil {
+		t.Fatalf("Stage: %v", err)
+	}
+	man, dir, _ := FindStaged(root)
+
+	delete(man.Files, "quild.exe")
+
+	err := VerifyStaged(dir, man, BinaryNames("windows"))
+	if err == nil {
+		t.Fatal("VerifyStaged with quild.exe undeclared = nil error, want rejection")
+	}
+	if !strings.Contains(err.Error(), "quild.exe") {
+		t.Errorf("error = %q, want it to name the uncovered binary", err)
+	}
+}
+
+// TestVerifyStaged_EmptyManifest_Rejected: the degenerate case. Ranging over an
+// empty map hashes nothing and returns nil, so a manifest carrying only a
+// version string passed the gate with both binaries entirely unverified.
+func TestVerifyStaged_EmptyManifest_Rejected(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range BinaryNames("linux") {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("planted"), 0700); err != nil {
+			t.Fatalf("plant %s: %v", name, err)
+		}
+	}
+
+	if err := VerifyStaged(dir, &Manifest{Version: "99.0.0"}, BinaryNames("linux")); err == nil {
+		t.Fatal("VerifyStaged on a manifest with no files = nil error, want rejection")
+	}
+	if err := VerifyStaged(dir, nil, BinaryNames("linux")); err == nil {
+		t.Error("VerifyStaged with a nil manifest = nil error, want rejection")
 	}
 }
 

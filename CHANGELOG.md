@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- The staged-update integrity gate now verifies the set of binaries it is about
+  to install rather than the set the manifest chooses to declare. `VerifyStaged`
+  ranged over `manifest.files`, so a manifest with no `files` key hashed nothing
+  and passed, and one naming only `quil` let `quild` be installed and executed
+  unverified. It now rejects a manifest that does not cover every binary the
+  swap installs. Reaching this required write access to
+  `$QUIL_HOME/update/staged/`, so it was not a privilege escalation on a default
+  single-user install — but it was the control that exists to be the tamper gate.
+
 ### Fixed
 - Self-update no longer fails permanently with `back up …: Access is denied` on
   Windows. A backup left by an earlier update (`quild.exe.old`) stays locked for

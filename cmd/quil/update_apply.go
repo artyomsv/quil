@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/update"
@@ -36,8 +37,10 @@ func maybeApplyStagedUpdate(preConfirmed bool) bool {
 	if err != nil || cmp <= 0 {
 		return false
 	}
-	// Corruption/tamper gate: re-hash staged files against the manifest.
-	if err := update.VerifyStaged(dir, man); err != nil {
+	// Corruption/tamper gate: re-hash staged files against the manifest, and
+	// require it to cover BOTH binaries swapPair is about to install — a
+	// manifest that simply omits one would otherwise let it through unhashed.
+	if err := update.VerifyStaged(dir, man, update.BinaryNames(runtime.GOOS)); err != nil {
 		log.Printf("staged update v%s failed verification: %v — discarding", man.Version, err)
 		os.RemoveAll(dir)
 		return false
@@ -61,9 +64,19 @@ func maybeApplyStagedUpdate(preConfirmed bool) bool {
 			man.Version, err, versionpkg.Current())
 		return false
 	}
-	if err := swapBinaries(exe, dir); err != nil {
+	// Hold the lock across the swap only. respawnSelf below blocks for the
+	// whole child session, and the swap is finished by then.
+	release, locked := acquireApplyLock(config.UpdateDir())
+	if !locked {
+		fmt.Fprintf(os.Stderr, "another quil is applying an update right now — continuing on v%s\n",
+			versionpkg.Current())
+		return false
+	}
+	swapErr := swapBinaries(exe, dir)
+	release()
+	if swapErr != nil {
 		fmt.Fprintf(os.Stderr, "update to v%s failed: %v — continuing on v%s\n",
-			man.Version, err, versionpkg.Current())
+			man.Version, swapErr, versionpkg.Current())
 		return false
 	}
 	log.Printf("update: swapped binaries to v%s, respawning", man.Version)
@@ -137,6 +150,56 @@ func swapPair(quilTarget, quildTarget, stagedDir, goos string) error {
 		return err
 	}
 	return nil
+}
+
+const (
+	// applyLockName marks a swap in progress, inside config.UpdateDir().
+	applyLockName = "apply.lock"
+	// applyLockStale is when a lock counts as abandoned. The swap it guards is
+	// one rename plus one file copy per binary — orders of magnitude below
+	// this — so a lock older than that belongs to a process that died mid-swap
+	// and must not wedge updates forever.
+	applyLockStale = 2 * time.Minute
+)
+
+// acquireApplyLock takes an exclusive marker for the duration of the binary
+// swap, returning a release func and whether it was taken.
+//
+// Two `quil` processes starting together both pass verification and both swap.
+// That alone is survivable, but each one's cleanup sweep deletes backups by
+// name — so P2 can unlink the backup P1 is mid-swap on, and if P1's copy then
+// fails, its rollback finds nothing and NO binary is left at the target path.
+// The racing parties are separate processes, so the exclusion has to live on
+// disk rather than in a mutex.
+func acquireApplyLock(dir string) (release func(), ok bool) {
+	noop := func() {}
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return noop, false
+	}
+	path := filepath.Join(dir, applyLockName)
+	// Two attempts: the second exists only to claim a lock found stale on the
+	// first. If another process wins that race, O_EXCL fails again and we back
+	// off rather than looping.
+	for attempt := 0; attempt < 2; attempt++ {
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+		if err == nil {
+			fmt.Fprintf(f, "%d\n", os.Getpid()) // diagnostics only
+			f.Close()
+			return func() { os.Remove(path) }, true
+		}
+		info, statErr := os.Stat(path)
+		if statErr != nil || time.Since(info.ModTime()) <= applyLockStale {
+			return noop, false
+		}
+		os.Remove(path)
+	}
+	return noop, false
+}
+
+// applyInProgress reports whether another process holds a fresh apply lock.
+func applyInProgress(dir string) bool {
+	info, err := os.Stat(filepath.Join(dir, applyLockName))
+	return err == nil && time.Since(info.ModTime()) <= applyLockStale
 }
 
 // maxBackupSlots bounds the ".old.N" search in freeBackupPath. Reaching it
@@ -257,16 +320,29 @@ func respawnSelf(exe string) bool {
 // retries, and a backup pinned for good no longer blocks anything because
 // freeBackupPath routes around it.
 func cleanupAppliedUpdate() {
+	// Never sweep while another process is mid-swap: its in-flight backup is
+	// named exactly like a leftover, and deleting it strands that process with
+	// no way to roll back.
+	if applyInProgress(config.UpdateDir()) {
+		return
+	}
 	man, dir, err := update.FindStaged(config.UpdateDir())
 	if err == nil && man != nil {
 		if cmp, cErr := versionpkg.Compare(man.Version, versionpkg.Current()); cErr == nil && cmp <= 0 {
 			os.RemoveAll(dir)
 		}
 	}
-	if exe, exeErr := os.Executable(); exeErr == nil {
-		removeBackups(exe)
+	exe, exeErr := os.Executable()
+	if exeErr != nil {
+		return
 	}
-	if quild := findDaemonBinaryForUpgrade(); filepath.IsAbs(quild) {
+	removeBackups(exe)
+	// Only sweep the daemon's backups when it sits next to us.
+	// findDaemonBinaryForUpgrade falls through to a PATH lookup, and deleting
+	// "<path>.old[.N]" in a directory this install does not own is not ours to
+	// do — the more so now that the sweep covers the numbered slots too.
+	if quild := findDaemonBinaryForUpgrade(); filepath.IsAbs(quild) &&
+		filepath.Dir(quild) == filepath.Dir(exe) {
 		removeBackups(quild)
 	}
 }

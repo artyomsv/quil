@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // pinBackup makes "<target>.old" impossible to remove on EVERY platform, so
@@ -145,6 +146,59 @@ func TestRemoveBackups_RemovesCanonicalAndSuffixed(t *testing.T) {
 	if _, err := os.Stat(target); err != nil {
 		t.Errorf("the live binary must survive cleanup, stat err = %v", err)
 	}
+}
+
+// TestAcquireApplyLock_SecondCallerRefused: the point of the lock. Two quil
+// processes swapping at once can have one delete the other's in-flight backup,
+// leaving no binary at the target if the victim's copy then fails.
+func TestAcquireApplyLock_SecondCallerRefused(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "update")
+
+	release, ok := acquireApplyLock(dir)
+	if !ok {
+		t.Fatal("first acquire failed, want the lock taken")
+	}
+	if _, ok := acquireApplyLock(dir); ok {
+		t.Error("second acquire succeeded while the lock was held")
+	}
+	if !applyInProgress(dir) {
+		t.Error("applyInProgress = false while the lock was held")
+	}
+
+	release()
+
+	if applyInProgress(dir) {
+		t.Error("applyInProgress = true after release")
+	}
+	if _, ok := acquireApplyLock(dir); !ok {
+		t.Error("acquire after release failed, want the lock reusable")
+	}
+}
+
+// TestAcquireApplyLock_StaleLockTakenOver: a process killed mid-swap must not
+// wedge every future update, so a lock older than applyLockStale is claimable.
+func TestAcquireApplyLock_StaleLockTakenOver(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "update")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	lock := filepath.Join(dir, applyLockName)
+	if err := os.WriteFile(lock, []byte("999999\n"), 0600); err != nil {
+		t.Fatalf("plant lock: %v", err)
+	}
+	stale := time.Now().Add(-applyLockStale - time.Minute)
+	if err := os.Chtimes(lock, stale, stale); err != nil {
+		t.Fatalf("age lock: %v", err)
+	}
+
+	if applyInProgress(dir) {
+		t.Error("applyInProgress = true for a stale lock, want it ignored")
+	}
+	release, ok := acquireApplyLock(dir)
+	if !ok {
+		t.Fatal("could not take over a stale lock — a crashed apply would wedge updates forever")
+	}
+	release()
 }
 
 func TestSwapOne_MissingStaged_RollsBack(t *testing.T) {

@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
 	versionpkg "github.com/artyomsv/quil/internal/version"
 )
@@ -27,7 +28,7 @@ const releasesURL = "https://github.com/artyomsv/quil/releases"
 // spawned daemon.
 //
 // Returns the client the caller should use from here on, or exits.
-func gateVersionCheck(client *ipc.Client, sockPath string) *ipc.Client {
+func gateVersionCheck(client *ipc.Client) *ipc.Client {
 	res := versionHandshake(client)
 
 	switch {
@@ -62,7 +63,7 @@ func gateVersionCheck(client *ipc.Client, sockPath string) *ipc.Client {
 		// before it runs rather than leaving a second client attached to a
 		// daemon we are about to shut down.
 		client.Close()
-		newClient, err := restartDaemonForUpgrade(sockPath)
+		newClient, err := restartDaemonForUpgrade()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Daemon restart failed: %v\n", err)
 			os.Exit(1)
@@ -162,7 +163,11 @@ var (
 // `claude --resume` on an already-resumed session id. Refusing to spawn a
 // second daemon is the only safe response to a stop that could not be
 // confirmed.
-func restartDaemonForUpgrade(sockPath string) (*ipc.Client, error) {
+// The socket is resolved here rather than accepted as a parameter: the stop
+// path reads config.SocketPath()/config.PidPath() internally, so a caller
+// passing a different socket would stop one daemon and then wait on another.
+func restartDaemonForUpgrade() (*ipc.Client, error) {
+	sockPath := config.SocketPath()
 	if _, err := stopDaemonForUpgradeFn(false); err != nil {
 		return nil, fmt.Errorf("stop the running daemon: %w", err)
 	}

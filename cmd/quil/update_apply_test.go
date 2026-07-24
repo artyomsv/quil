@@ -1,8 +1,10 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -85,6 +87,44 @@ func TestFreeBackupPath_PinnedCanonical_FallsBackToSuffix(t *testing.T) {
 	}
 }
 
+// TestFreeBackupPath_AllSlotsPinned_Errors: the exhaustion branch. Its message
+// is the one hand-written string on this path that reaches the user, and the
+// swap must refuse rather than pick a slot it cannot actually use.
+func TestFreeBackupPath_AllSlotsPinned_Errors(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "quild.exe")
+	os.WriteFile(target, []byte("current"), 0755)
+
+	pinBackup(t, target) // the canonical slot
+	for i := 1; i <= maxBackupSlots; i++ {
+		slot := fmt.Sprintf("%s.old.%d", target, i)
+		if err := os.Mkdir(slot, 0755); err != nil {
+			t.Fatalf("pin slot %d: %v", i, err)
+		}
+		if err := os.WriteFile(filepath.Join(slot, "keep"), []byte("x"), 0644); err != nil {
+			t.Fatalf("populate slot %d: %v", i, err)
+		}
+	}
+
+	got, err := freeBackupPath(target)
+	if err == nil {
+		t.Fatalf("freeBackupPath with every slot pinned = %q, want an error", got)
+	}
+	if !strings.Contains(err.Error(), target) {
+		t.Errorf("error = %q, want it to name the target", err)
+	}
+
+	// And the swap must refuse rather than proceed.
+	staged := filepath.Join(dir, "staged")
+	os.WriteFile(staged, []byte("new"), 0755)
+	if _, err := swapOne(target, staged); err == nil {
+		t.Error("swapOne with no usable backup slot = nil error, want refusal")
+	}
+	if got, _ := os.ReadFile(target); string(got) != "current" {
+		t.Errorf("target = %q, want the live binary untouched when no slot is free", got)
+	}
+}
+
 func TestSwapOne_PinnedBackup_StillSwaps(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "quild.exe")
@@ -135,10 +175,14 @@ func TestRemoveBackups_RemovesCanonicalAndSuffixed(t *testing.T) {
 	os.WriteFile(target+".old", []byte("v1"), 0755)
 	os.WriteFile(target+".old.1", []byte("v2"), 0755)
 	os.WriteFile(target+".old.3", []byte("v3"), 0755) // gap: .old.2 never existed
+	// The last slot freeBackupPath can hand out — pins the loop bound against
+	// an off-by-one that would orphan it forever.
+	os.WriteFile(fmt.Sprintf("%s.old.%d", target, maxBackupSlots), []byte("v4"), 0755)
 
 	removeBackups(target)
 
-	for _, p := range []string{target + ".old", target + ".old.1", target + ".old.3"} {
+	for _, p := range []string{target + ".old", target + ".old.1", target + ".old.3",
+		fmt.Sprintf("%s.old.%d", target, maxBackupSlots)} {
 		if _, err := os.Stat(p); !os.IsNotExist(err) {
 			t.Errorf("%s should have been removed, stat err = %v", filepath.Base(p), err)
 		}

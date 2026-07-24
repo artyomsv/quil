@@ -134,7 +134,16 @@ func TestRestartDaemonForUpgrade_SpawnFails_Reports(t *testing.T) {
 	)
 
 	quilHome(t)
-	if _, err := restartDaemonForUpgrade(); err == nil {
+	_, err := restartDaemonForUpgrade()
+	if err == nil {
 		t.Fatal("spawn failure = nil error, want it reported")
+	}
+	// Assert the CAUSE, not merely that something failed: without the early
+	// return on spawn error, the code falls through to waitForDaemonReady on
+	// a socket nothing will ever open and returns the generic "did not open
+	// socket" error after the full 30 s budget — an err != nil check alone
+	// passes that too, just slowly.
+	if !strings.Contains(err.Error(), "exec: no such file") {
+		t.Errorf("error = %q, want it to carry the spawn failure", err)
 	}
 }

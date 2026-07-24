@@ -65,7 +65,29 @@ func gateVersionCheck(client *ipc.Client) *ipc.Client {
 		client.Close()
 		newClient, err := restartDaemonForUpgrade()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Daemon restart failed: %v\n", err)
+			// Every later launch hits this same wall — the old daemon is
+			// still there and still the wrong version — so a bare one-liner
+			// would strand the user with a TUI that refuses to start and no
+			// idea why. Log it too: "quil won't start" is otherwise a report
+			// with nothing behind it in quil.log.
+			log.Printf("version gate: daemon restart failed: %v", err)
+			fmt.Fprintf(os.Stderr,
+				"\n"+
+					"  Daemon restart failed: %v\n"+
+					"\n"+
+					"  The running daemon is a different version and could not be stopped,\n"+
+					"  so Quil will not start a second one beside it — two daemons would\n"+
+					"  fight over the same workspace and duplicate every pane.\n"+
+					"\n"+
+					"  Recover with:\n"+
+					"    quil daemon status    # which daemon is running, and its pid\n"+
+					"    quil daemon stop      # stop it (escalates to a force kill)\n"+
+					"\n"+
+					"  If it still will not stop, end the quild process from your task\n"+
+					"  manager, then run quil again. Panes respawn from the saved\n"+
+					"  workspace; in-flight shell commands are lost.\n"+
+					"\n",
+				err)
 			os.Exit(1)
 		}
 		// Verify the freshly spawned daemon is actually the expected
@@ -168,7 +190,12 @@ var (
 // passing a different socket would stop one daemon and then wait on another.
 func restartDaemonForUpgrade() (*ipc.Client, error) {
 	sockPath := config.SocketPath()
-	if _, err := stopDaemonForUpgradeFn(false); err != nil {
+	// verbose=true: this runs in the foreground before tea.NewProgram takes
+	// the terminal, and the escalation can spend 5+3+2 s across its tiers.
+	// Silent, that reads as a hang right after the user answered the prompt;
+	// the tier lines ("did not exit within 5s (wedged?), escalating") are
+	// exactly what explains the wait.
+	if _, err := stopDaemonForUpgradeFn(true); err != nil {
 		return nil, fmt.Errorf("stop the running daemon: %w", err)
 	}
 
@@ -204,9 +231,9 @@ func spawnDaemonForUpgrade() (int, error) {
 	if err := cmd.Start(); err != nil {
 		return 0, fmt.Errorf("spawn daemon %q: %w", binary, err)
 	}
-	if cmd.Process == nil {
-		return 0, nil
-	}
+	// Start succeeded, so cmd.Process is set. Returning 0 here instead would
+	// silently downgrade waitForDaemonReady to a blind 30 s poll with no
+	// crash detection.
 	pid := cmd.Process.Pid
 	cmd.Process.Release()
 	return pid, nil

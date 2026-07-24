@@ -18,7 +18,12 @@ import (
 //
 // An ordinary os.Open reproduces the lock: Go opens files on Windows with
 // FILE_SHARE_READ|FILE_SHARE_WRITE and deliberately not FILE_SHARE_DELETE, so
-// the handle denies delete and rename exactly like a mapped image does.
+// the handle denies DELETE — which is all freeBackupPath needs to observe.
+// The proxy is strictly stricter than production, not identical: a mapped
+// image denies DELETE but PERMITS rename (that is the whole premise of
+// swapOne renaming the running binary aside), whereas an open handle without
+// FILE_SHARE_DELETE denies both. The gap does not weaken the test, because
+// nothing ever renames INTO an occupied slot.
 func TestSwapOne_BackupPinnedByOpenHandle(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "quild.exe")

@@ -397,6 +397,9 @@ func (m Model) paletteInnerWidth() int {
 // blank, footer hint.
 func renderCommandPalette(m Model) string {
 	inner := m.paletteInnerWidth()
+	if m.palette.mode == paletteModeContent {
+		return renderPaletteContent(m, inner)
+	}
 	var b strings.Builder
 
 	// Query row: "> " (2 cells) + query + caret (1 cell). Show the TAIL of a long
@@ -472,10 +475,12 @@ func renderPaletteHeader(label string, inner int) string {
 	return ctxMenuDisabledStyle.Render(truncateToWidth(strings.ToUpper(label), inner))
 }
 
-// renderPaletteRow lays out one result row: "› "/"  " cursor prefix, label left,
-// detail (shortcut) right-aligned, padded to inner width. Disabled rows render
-// greyed; the cursor row is bold.
-func renderPaletteRow(c paletteCommand, cursor bool, inner int) string {
+// renderPaletteLine lays out one palette row: "› "/"  " cursor prefix, label
+// left, detail right-aligned, padded to inner width. Shared by command rows and
+// content-search hit rows — the single source of the width-clamp math. Both the
+// detail and the label are bounded cell-aware (wide glyphs never wrap the box):
+// the detail is clamped first so a long shortcut cannot starve the label.
+func renderPaletteLine(label, detail string, cursor, disabled bool, inner int) string {
 	prefix := "  "
 	if cursor {
 		prefix = "› "
@@ -484,10 +489,6 @@ func renderPaletteRow(c paletteCommand, cursor bool, inner int) string {
 	if contentW < 1 {
 		contentW = 1
 	}
-	// Bound the detail first so a long shortcut cannot overflow a narrow row;
-	// leave at least 2 cells for a label + gap. Then bound the label against the
-	// remaining budget. Both are cell-aware so wide glyphs never wrap the box.
-	detail := c.detail
 	if maxDetail := contentW - 2; maxDetail >= 0 && lipgloss.Width(detail) > maxDetail {
 		detail = truncateToWidth(detail, maxDetail)
 	}
@@ -496,7 +497,6 @@ func renderPaletteRow(c paletteCommand, cursor bool, inner int) string {
 	if labelMax < 1 {
 		labelMax = 1
 	}
-	label := c.label
 	if lipgloss.Width(label) > labelMax {
 		label = truncateToWidth(label, labelMax)
 	}
@@ -504,10 +504,9 @@ func renderPaletteRow(c paletteCommand, cursor bool, inner int) string {
 	if gap < 1 {
 		gap = 1
 	}
-
 	labelStyle := dialogNormal
 	switch {
-	case !c.enabled:
+	case disabled:
 		labelStyle = ctxMenuDisabledStyle
 	case cursor:
 		labelStyle = dialogSelected
@@ -517,6 +516,11 @@ func renderPaletteRow(c paletteCommand, cursor bool, inner int) string {
 		row += dialogSubtle.Render(detail)
 	}
 	return row
+}
+
+// renderPaletteRow renders one command row via the shared layout.
+func renderPaletteRow(c paletteCommand, cursor bool, inner int) string {
+	return renderPaletteLine(c.label, c.detail, cursor, !c.enabled, inner)
 }
 
 // openCommandPalette builds the command registry and opens the palette. No-op
@@ -554,38 +558,80 @@ func (m *Model) refilterPalette() {
 // like the sibling handleXKey dialog handlers.
 func (m Model) handleCommandPaletteKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
+	content := m.palette.mode == paletteModeContent
 	switch {
 	case key == "esc":
 		m.closeCommandPalette()
 		return m, nil
 	case key == "enter":
+		if content {
+			if c := m.palette.cursor; c >= 0 && c < len(m.palette.hits) {
+				paneID := m.palette.hits[c].paneID
+				m.closeCommandPalette()
+				return m.goToPane(paneID)
+			}
+			return m, nil
+		}
 		if c := m.palette.cursor; c >= 0 && c < len(m.palette.filtered) && m.palette.filtered[c].selectable() {
 			return m.executePaletteCommand(m.palette.filtered[c])
 		}
 		return m, nil
 	case key == "up" || key == "ctrl+p":
+		if content {
+			if m.palette.cursor > 0 {
+				m.palette.cursor--
+			}
+			return m, nil
+		}
 		m.palette.cursor = nextSelectable(m.palette.filtered, m.palette.cursor, -1)
 		return m, nil
 	case key == "down" || key == "ctrl+n":
+		if content {
+			if m.palette.cursor < len(m.palette.hits)-1 {
+				m.palette.cursor++
+			}
+			return m, nil
+		}
 		m.palette.cursor = nextSelectable(m.palette.filtered, m.palette.cursor, +1)
 		return m, nil
 	case key == "backspace":
 		if q := []rune(m.palette.query); len(q) > 0 {
 			m.palette.query = string(q[:len(q)-1])
-			m.refilterPalette()
+			return m.afterPaletteQueryChange()
 		}
 		return m, nil
 	case key == "space":
 		m.palette.query += " "
-		m.refilterPalette()
-		return m, nil
+		return m.afterPaletteQueryChange()
 	case msg.Text != "" && isPrintableText(msg.Text):
 		// Only printable text extends the query; a key we do not handle above
 		// (e.g. tab) may carry a control character in msg.Text — never inject it.
 		m.palette.query += msg.Text
-		m.refilterPalette()
-		return m, nil
+		return m.afterPaletteQueryChange()
 	}
+	return m, nil
+}
+
+// afterPaletteQueryChange re-parses the query into (mode, term), refreshes the
+// command filter or resets content state, and returns a debounce cmd when in
+// content mode with a non-empty term. Single choke point for every path that
+// mutates m.palette.query (typed text, backspace, space, paste) so mode
+// switching and the 150ms debounce behave identically regardless of how the
+// query changed.
+func (m Model) afterPaletteQueryChange() (tea.Model, tea.Cmd) {
+	m.palette.mode, m.palette.term = parsePaletteQuery(m.palette.query)
+	if m.palette.mode == paletteModeContent {
+		if strings.TrimSpace(m.palette.term) == "" {
+			m.palette.hits = nil
+			m.palette.searching = false
+			m.palette.cursor = 0
+			return m, nil
+		}
+		m.palette.cursor = 0
+		return m, paletteSearchDebounce(m.palette.term)
+	}
+	// Command mode: reuse the existing filter path.
+	m.refilterPalette()
 	return m, nil
 }
 
@@ -661,6 +707,25 @@ func lastCellsToWidth(s string, w int) string {
 	return string(runes[i:])
 }
 
+// goToPane switches to the tab containing paneID and makes it the active pane.
+// Shared by the command palette's "Go to pane" rows and content-search Enter.
+// The old tab's active-pane flag is cleared BEFORE switchTab moves m.activeTab
+// (ordering is load-bearing for the border repaint).
+func (m Model) goToPane(paneID string) (tea.Model, tea.Cmd) {
+	pane, idx := m.findPaneAndTab(paneID)
+	if pane == nil || idx < 0 || idx >= len(m.tabs) {
+		return m, nil
+	}
+	if cur := m.activeTabModel(); cur != nil {
+		if old := cur.ActivePaneModel(); old != nil {
+			old.Active = false
+		}
+	}
+	m.tabs[idx].ActivePane = paneID
+	pane.Active = true
+	return m, m.switchTab(idx)
+}
+
 // executePaletteCommand closes the palette and dispatches into the SAME handler
 // the keybinding case calls. Navigation commands change the active tab/pane;
 // every other command acts on the active pane, exactly like pressing its key.
@@ -672,20 +737,7 @@ func (m Model) executePaletteCommand(c paletteCommand) (tea.Model, tea.Cmd) {
 	switch c.action {
 	// --- Navigation --------------------------------------------------------
 	case palActGoToPane:
-		pane, idx := m.findPaneAndTab(c.arg)
-		if pane == nil || idx < 0 || idx >= len(m.tabs) {
-			return m, nil
-		}
-		// Clear the previously-active tab's active-pane flag BEFORE switchTab
-		// moves m.activeTab (ordering is load-bearing for the border repaint).
-		if cur := m.activeTabModel(); cur != nil {
-			if old := cur.ActivePaneModel(); old != nil {
-				old.Active = false
-			}
-		}
-		m.tabs[idx].ActivePane = c.arg
-		pane.Active = true
-		return m, m.switchTab(idx)
+		return m.goToPane(c.arg)
 	case palActSwitchTab:
 		for i, tab := range m.tabs {
 			if tab != nil && tab.ID == c.arg {

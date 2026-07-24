@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"charm.land/lipgloss/v2"
+
 	"github.com/artyomsv/quil/internal/ipc"
 )
 
@@ -65,5 +67,70 @@ func TestApplyPaneSearch_DropsStale(t *testing.T) {
 	m2 := m.applyPaneSearch(stale)
 	if len(m2.palette.hits) != 1 || m2.palette.hits[0].paneID != "p1" {
 		t.Errorf("stale response must not replace hits, got %+v", m2.palette.hits)
+	}
+}
+
+func TestPaletteHitWindow(t *testing.T) {
+	if s, e := paletteHitWindow(0, 3); s != 0 || e != 3 {
+		t.Errorf("small: got [%d,%d), want [0,3)", s, e)
+	}
+	s, e := paletteHitWindow(paletteVisibleHits+2, 40)
+	if cursor := paletteVisibleHits + 2; cursor < s || cursor >= e {
+		t.Errorf("cursor %d not in window [%d,%d)", cursor, s, e)
+	}
+}
+
+func TestRenderPaletteContent_States(t *testing.T) {
+	m := newSplitDragTestModel(t)
+	// Empty term.
+	m.palette.mode = paletteModeContent
+	m.palette.term = ""
+	if out := renderPaletteContent(*m, m.paletteInnerWidth()); !strings.Contains(out, "Type to search") {
+		t.Errorf("empty term hint missing:\n%s", out)
+	}
+	// Searching.
+	m.palette.term = "x"
+	m.palette.searching = true
+	if out := renderPaletteContent(*m, m.paletteInnerWidth()); !strings.Contains(out, "Searching") {
+		t.Errorf("searching hint missing:\n%s", out)
+	}
+	// No hits.
+	m.palette.searching = false
+	m.palette.hits = nil
+	if out := renderPaletteContent(*m, m.paletteInnerWidth()); !strings.Contains(out, "No matches") {
+		t.Errorf("no-match hint missing:\n%s", out)
+	}
+}
+
+func TestRenderPaletteContent_WidthSafe(t *testing.T) {
+	m := newSplitDragTestModel(t)
+	m.width = 30
+	m.palette.mode = paletteModeContent
+	m.palette.term = "x"
+	m.palette.hits = []paletteHit{{
+		paneID:  "p1",
+		label:   "🚀🚀🚀🚀 very long pane name here",
+		detail:  "999×",
+		excerpt: strings.Repeat("long excerpt ", 20),
+	}}
+	inner := m.paletteInnerWidth()
+	for i, line := range strings.Split(renderPaletteContent(*m, inner), "\n") {
+		if w := lipgloss.Width(line); w > inner {
+			t.Errorf("line %d width %d exceeds inner %d: %q", i, w, inner, line)
+		}
+	}
+}
+
+func TestPaletteContent_EnterNavigatesDirect(t *testing.T) {
+	m := newSplitDragTestModel(t)
+	m.dialog = dialogCommandPalette
+	m.palette.mode = paletteModeContent
+	m.palette.hits = []paletteHit{{paneID: "p2", label: "1.2 · terminal"}}
+	m.palette.cursor = 0
+
+	updated, _ := m.goToPane("p2")
+	m2 := updated.(Model)
+	if tab := m2.activeTabModel(); tab == nil || tab.ActivePane != "p2" {
+		t.Errorf("goToPane should activate p2")
 	}
 }

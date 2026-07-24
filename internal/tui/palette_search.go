@@ -125,3 +125,91 @@ func (m Model) applyPaneSearch(resp ipc.PaneSearchRespPayload) Model {
 	}
 	return m
 }
+
+const paletteVisibleHits = 6 // pane hits shown before the list scrolls (2 lines each)
+
+// paletteHitWindow returns the [start,end) slice of hits to render, sized to
+// paletteVisibleHits and shifted to keep cursor visible.
+func paletteHitWindow(cursor, n int) (int, int) {
+	if n <= paletteVisibleHits {
+		return 0, n
+	}
+	start := 0
+	if cursor >= paletteVisibleHits {
+		start = cursor - paletteVisibleHits + 1
+	}
+	if max := n - paletteVisibleHits; start > max {
+		start = max
+	}
+	if start < 0 {
+		start = 0
+	}
+	return start, start + paletteVisibleHits
+}
+
+// renderPaletteContent renders the content-search view: a "Search pane content"
+// header + term, then one two-line entry per matching pane (a selectable label
+// row and a dim excerpt row), or a state hint. Every line is clamped to inner.
+func renderPaletteContent(m Model, inner int) string {
+	var b strings.Builder
+	subtle := func(s string) string { return dialogSubtle.Render(truncateToWidth(s, inner)) }
+
+	// Header: "/ " prompt + term + caret.
+	qAvail := inner - 3
+	if qAvail < 1 {
+		qAvail = 1
+	}
+	b.WriteString(dialogTitle.Render("/ "))
+	b.WriteString(dialogEditStyle.Render(lastCellsToWidth(m.palette.term, qAvail) + "│"))
+	b.WriteByte('\n')
+	b.WriteString(subtle("Search pane content"))
+	b.WriteByte('\n')
+	b.WriteByte('\n')
+
+	const hint = "↑↓ nav · Enter go · Esc close"
+
+	switch {
+	case strings.TrimSpace(m.palette.term) == "":
+		b.WriteString(subtle("  Type to search across all panes"))
+		b.WriteString("\n\n")
+		b.WriteString(subtle(hint))
+		return b.String()
+	case len(m.palette.hits) == 0 && m.palette.searching:
+		b.WriteString(subtle("  Searching…"))
+		b.WriteString("\n\n")
+		b.WriteString(subtle(hint))
+		return b.String()
+	case len(m.palette.hits) == 0:
+		b.WriteString(subtle("  No matches in any pane"))
+		b.WriteString("\n\n")
+		b.WriteString(subtle(hint))
+		return b.String()
+	}
+
+	start, end := paletteHitWindow(m.palette.cursor, len(m.palette.hits))
+	if start > 0 {
+		b.WriteString(subtle(fmt.Sprintf("  ↑ %d more", start)))
+		b.WriteByte('\n')
+	}
+	for i := start; i < end; i++ {
+		h := m.palette.hits[i]
+		b.WriteString(renderPaletteHitRow(h, i == m.palette.cursor, inner))
+		b.WriteByte('\n')
+		b.WriteString(ctxMenuDisabledStyle.Render(truncateToWidth("    "+h.excerpt, inner)))
+		b.WriteByte('\n')
+	}
+	if end < len(m.palette.hits) {
+		b.WriteString(subtle(fmt.Sprintf("  ↓ %d more", len(m.palette.hits)-end)))
+		b.WriteByte('\n')
+	}
+	b.WriteByte('\n')
+	b.WriteString(subtle(hint))
+	return b.String()
+}
+
+// renderPaletteHitRow renders a hit's label row through the SHARED row
+// renderer (renderPaletteLine, palette.go) so command rows and hit rows cannot
+// drift apart.
+func renderPaletteHitRow(h paletteHit, cursor bool, inner int) string {
+	return renderPaletteLine(h.label, h.detail, cursor, false, inner)
+}

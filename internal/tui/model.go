@@ -909,8 +909,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// input-isolation break and a clipboard leak into a background shell
 			// (a trailing newline could even execute it).
 			m.palette.query += sanitizePaletteQuery(msg.Content)
-			m.refilterPalette()
-			return m, nil
+			return m.afterPaletteQueryChange()
 		} else {
 			// Empty bracketed-paste content means the terminal (e.g. Windows
 			// Terminal on Ctrl+V) fired a paste for a clipboard that holds an

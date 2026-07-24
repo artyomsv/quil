@@ -100,7 +100,12 @@ func TestWaitForDaemonReadyWithin_DeadPidAbortsEarly(t *testing.T) {
 	if got {
 		t.Fatal("expected ready=false when the daemon process is dead")
 	}
-	if elapsed > time.Second {
+	// Bound as a fraction of the 5 s budget rather than a flat second:
+	// processProbe shells out to `tasklist` on Windows, which routinely costs
+	// ~1 s by itself, so a flat-second assertion fails there for a reason that
+	// has nothing to do with whether the abort fired. Half the budget still
+	// distinguishes "aborted early" from "waited it out".
+	if elapsed > 2500*time.Millisecond {
 		t.Errorf("dead pid should abort fast, took %v (near the 5s budget = not aborting)", elapsed)
 	}
 }

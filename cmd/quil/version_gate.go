@@ -9,17 +9,11 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"time"
 
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
 	versionpkg "github.com/artyomsv/quil/internal/version"
 )
-
-// restartDaemonWaitInterval paces the polling loop that watches the
-// socket disappear after MsgShutdown during a graceful restart. The
-// reappear-after-respawn wait is handled by waitForDaemonReady.
-const restartDaemonWaitInterval = 100 * time.Millisecond
 
 // releasesURL is shown to users running an older TUI against a newer
 // daemon. Kept in one place so future URL changes don't need to hunt
@@ -34,7 +28,7 @@ const releasesURL = "https://github.com/artyomsv/quil/releases"
 // spawned daemon.
 //
 // Returns the client the caller should use from here on, or exits.
-func gateVersionCheck(client *ipc.Client, sockPath string) *ipc.Client {
+func gateVersionCheck(client *ipc.Client) *ipc.Client {
 	res := versionHandshake(client)
 
 	switch {
@@ -65,9 +59,35 @@ func gateVersionCheck(client *ipc.Client, sockPath string) *ipc.Client {
 			client.Close()
 			os.Exit(0)
 		}
-		newClient, err := restartDaemonForUpgrade(client, sockPath)
+		// The stop path dials its own connection, so hand the socket back
+		// before it runs rather than leaving a second client attached to a
+		// daemon we are about to shut down.
+		client.Close()
+		newClient, err := restartDaemonForUpgrade()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Daemon restart failed: %v\n", err)
+			// Every later launch hits this same wall — the old daemon is
+			// still there and still the wrong version — so a bare one-liner
+			// would strand the user with a TUI that refuses to start and no
+			// idea why. Log it too: "quil won't start" is otherwise a report
+			// with nothing behind it in quil.log.
+			log.Printf("version gate: daemon restart failed: %v", err)
+			fmt.Fprintf(os.Stderr,
+				"\n"+
+					"  Daemon restart failed: %v\n"+
+					"\n"+
+					"  The running daemon is a different version and could not be stopped,\n"+
+					"  so Quil will not start a second one beside it — two daemons would\n"+
+					"  fight over the same workspace and duplicate every pane.\n"+
+					"\n"+
+					"  Recover with:\n"+
+					"    quil daemon status    # which daemon is running, and its pid\n"+
+					"    quil daemon stop      # stop it (escalates to a force kill)\n"+
+					"\n"+
+					"  If it still will not stop, end the quild process from your task\n"+
+					"  manager, then run quil again. Panes respawn from the saved\n"+
+					"  workspace; in-flight shell commands are lost.\n"+
+					"\n",
+				err)
 			os.Exit(1)
 		}
 		// Verify the freshly spawned daemon is actually the expected
@@ -143,66 +163,50 @@ func promptRestartDaemon(tuiVer, daemonVer string, unknown bool) bool {
 	return answer == "y" || answer == "yes"
 }
 
-// restartDaemonForUpgrade gracefully stops the current daemon, spawns
-// a fresh one from the TUI's own install directory, and returns a
-// connected client to the new daemon. The old client is closed.
-func restartDaemonForUpgrade(oldClient *ipc.Client, sockPath string) (*ipc.Client, error) {
-	// 1. Send MsgShutdown so the old daemon exits cleanly (defers in its
-	//    main() run: PID file removal, log close, snapshot flush).
-	shutdown, err := ipc.NewMessage(ipc.MsgShutdown, nil)
+// Side effects of restartDaemonForUpgrade, swappable so the abort-before-spawn
+// ordering can be tested without real processes.
+var (
+	stopDaemonForUpgradeFn  = stopDaemonEscalating
+	spawnDaemonForUpgradeFn = spawnDaemonForUpgrade
+)
+
+// restartDaemonForUpgrade stops the current daemon, spawns a fresh one from
+// the TUI's own install directory, and returns a connected client to it.
+//
+// The stop goes through the same escalating path as `quil daemon stop`
+// (IPC shutdown → SIGTERM → SIGKILL, with a PID-reuse guard) and an upgrade
+// ABORTS when it fails. The earlier version sent a bare MsgShutdown, waited
+// 5 s, and — if the daemon was still there — deleted its socket and PID file
+// and spawned a replacement anyway. That daemon kept running: detached, still
+// owning every pane PTY, and now untrackable, since the PID file the stop
+// path reads had just been erased. The replacement then restored the same
+// workspace snapshot into a duplicate set of panes, so each update could
+// leave behind another daemon, another copy of every pane, and another
+// `claude --resume` on an already-resumed session id. Refusing to spawn a
+// second daemon is the only safe response to a stop that could not be
+// confirmed.
+// The socket is resolved here rather than accepted as a parameter: the stop
+// path reads config.SocketPath()/config.PidPath() internally, so a caller
+// passing a different socket would stop one daemon and then wait on another.
+func restartDaemonForUpgrade() (*ipc.Client, error) {
+	sockPath := config.SocketPath()
+	// verbose=true: this runs in the foreground before tea.NewProgram takes
+	// the terminal, and the escalation can spend 5+3+2 s across its tiers.
+	// Silent, that reads as a hang right after the user answered the prompt;
+	// the tier lines ("did not exit within 5s (wedged?), escalating") are
+	// exactly what explains the wait.
+	if _, err := stopDaemonForUpgradeFn(true); err != nil {
+		return nil, fmt.Errorf("stop the running daemon: %w", err)
+	}
+
+	pid, err := spawnDaemonForUpgradeFn()
 	if err != nil {
-		return nil, fmt.Errorf("build shutdown msg: %w", err)
-	}
-	if err := oldClient.Send(shutdown); err != nil {
-		// Non-fatal — the daemon may already be crashing. Proceed to
-		// the wait-for-socket-gone step either way.
-		log.Printf("restart: send MsgShutdown: %v", err)
-	}
-	oldClient.Close()
-
-	// 2. Wait for the socket file to go away, bounded. If the daemon
-	//    hangs, remove stale socket/PID files so the respawn path
-	//    doesn't refuse to claim them.
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(sockPath); os.IsNotExist(err) {
-			break
-		}
-		time.Sleep(restartDaemonWaitInterval)
-	}
-	if _, err := os.Stat(sockPath); err == nil {
-		log.Printf("restart: socket %s still present after shutdown — removing", sockPath)
-		os.Remove(sockPath)
-	}
-	// Stale PID file removal is best-effort; the daemon's normal boot
-	// path also cleans these up, so a failure here isn't blocking.
-	if pidPath := config.PidPath(); pidPath != "" {
-		if _, err := os.Stat(pidPath); err == nil {
-			os.Remove(pidPath)
-		}
+		return nil, err
 	}
 
-	// 3. Spawn a fresh daemon. Prefer the executable-adjacent binary
-	//    over PATH so a stale `quild` earlier on PATH doesn't shadow
-	//    the bundled one the user just upgraded to.
-	binary := findDaemonBinaryForUpgrade()
-	log.Printf("restart: spawning %s", binary)
-	cmd := exec.Command(binary, "--background")
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-	cmd.SysProcAttr = daemonSysProcAttr()
-	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("spawn daemon %q: %w", binary, err)
-	}
-	pid := 0
-	if cmd.Process != nil {
-		pid = cmd.Process.Pid
-		cmd.Process.Release()
-	}
-
-	// 4. Wait for the new daemon's socket and reconnect. Shares the crash-aware
-	//    readiness wait used by every other spawn path — tolerates a slow
-	//    restore, aborts early if the spawned daemon dies.
+	// Wait for the new daemon's socket and reconnect. Shares the crash-aware
+	// readiness wait used by every other spawn path — tolerates a slow
+	// restore, aborts early if the spawned daemon dies.
 	if !waitForDaemonReady(sockPath, pid) {
 		return nil, fmt.Errorf("daemon did not open socket %s within %s",
 			sockPath, daemonReadyTimeout)
@@ -212,6 +216,27 @@ func restartDaemonForUpgrade(oldClient *ipc.Client, sockPath string) (*ipc.Clien
 		return nil, fmt.Errorf("reconnect after restart: %w", err)
 	}
 	return newClient, nil
+}
+
+// spawnDaemonForUpgrade starts a detached daemon and returns its pid. Prefers
+// the executable-adjacent binary over PATH so a stale `quild` earlier on PATH
+// doesn't shadow the bundled one the user just upgraded to.
+func spawnDaemonForUpgrade() (int, error) {
+	binary := findDaemonBinaryForUpgrade()
+	log.Printf("restart: spawning %s", binary)
+	cmd := exec.Command(binary, "--background")
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	cmd.SysProcAttr = daemonSysProcAttr()
+	if err := cmd.Start(); err != nil {
+		return 0, fmt.Errorf("spawn daemon %q: %w", binary, err)
+	}
+	// Start succeeded, so cmd.Process is set. Returning 0 here instead would
+	// silently downgrade waitForDaemonReady to a blind 30 s poll with no
+	// crash detection.
+	pid := cmd.Process.Pid
+	cmd.Process.Release()
+	return pid, nil
 }
 
 // findDaemonBinaryForUpgrade is the upgrade-path analogue of

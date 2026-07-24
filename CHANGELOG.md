@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- The staged-update integrity gate now verifies the set of binaries it is about
+  to install rather than the set the manifest chooses to declare. `VerifyStaged`
+  ranged over `manifest.files`, so a manifest with no `files` key hashed nothing
+  and passed, and one naming only `quil` let `quild` be installed and executed
+  unverified. It now rejects a manifest that does not cover every binary the
+  swap installs. Reaching this required write access to
+  `$QUIL_HOME/update/staged/`, so it was not a privilege escalation on a default
+  single-user install — but it was the control that exists to be the tamper gate.
+
+### Fixed
+- Self-update no longer fails permanently with `back up …: Access is denied` on
+  Windows. A backup left by an earlier update (`quild.exe.old`) stays locked for
+  as long as some process still runs it as its image — an orphaned daemon that
+  survived that update, or an antivirus handle. Windows refuses to delete such a
+  file, which broke both the stale-backup cleanup and the rename that follows, so
+  a single leftover wedged every subsequent update. The swap now falls back to
+  `.old.1`, `.old.2`, … when the canonical backup slot cannot be cleared, and
+  startup cleanup sweeps those fallbacks once they are free again.
+- An upgrade no longer leaves the previous daemon running. The version-gate
+  restart sent a shutdown, waited 5 s, and — if the daemon had not exited —
+  deleted its socket and PID file and spawned a replacement anyway. The old
+  daemon kept running with every pane PTY attached and no bookkeeping left to
+  find it by, while the new one restored the same workspace into a duplicate
+  set of panes (including a second `claude --resume` on an already-resumed
+  session). The restart now uses the same escalating stop as
+  `quil daemon stop` (IPC → SIGTERM → SIGKILL, PID-reuse guarded) and aborts
+  the upgrade instead of spawning a second daemon when the stop cannot be
+  confirmed.
+
 ## [1.41.0] - 2026-07-24
 
 ### Added

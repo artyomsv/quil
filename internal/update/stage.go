@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -333,8 +334,26 @@ func FindStaged(root string) (*Manifest, string, error) {
 }
 
 // VerifyStaged re-hashes every file listed in the manifest against the
-// staged dir — the pre-swap corruption/tamper gate.
-func VerifyStaged(dir string, m *Manifest) error {
+// staged dir and requires the manifest to cover every name in required —
+// the pre-swap corruption/tamper gate. Callers pass the names they are about
+// to install (BinaryNames).
+func VerifyStaged(dir string, m *Manifest, required []string) error {
+	if m == nil {
+		return errors.New("no staged manifest")
+	}
+	// Verifying only the DECLARED set is vacuous. The set of files the caller
+	// INSTALLS is fixed (BinaryNames), but the set verified here came from the
+	// manifest — and the manifest is attacker-controlled the moment anything
+	// can write into the staged dir. A manifest with no "files" key hashed
+	// nothing and still passed; one naming only quil let quild be installed
+	// and executed unverified, a genuinely mismatched pair. Require the caller
+	// to name what it is about to install, and refuse to vouch for anything
+	// the manifest declines to cover.
+	for _, name := range required {
+		if _, ok := m.Files[name]; !ok {
+			return fmt.Errorf("staged manifest does not cover %s — refusing to install unverified", name)
+		}
+	}
 	for name, want := range m.Files {
 		f, err := os.Open(filepath.Join(dir, name))
 		if err != nil {

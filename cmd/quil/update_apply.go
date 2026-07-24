@@ -2,8 +2,10 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"os"
 	"os/exec"
@@ -117,40 +119,92 @@ func swapPair(quilTarget, quildTarget, stagedDir, goos string) error {
 	names := update.BinaryNames(goos)
 	quilName, quildName := names[0], names[1]
 
-	if err := swapOne(quilTarget, filepath.Join(stagedDir, quilName)); err != nil {
+	quilBackup, err := swapOne(quilTarget, filepath.Join(stagedDir, quilName))
+	if err != nil {
 		return err
 	}
-	if err := swapOne(quildTarget, filepath.Join(stagedDir, quildName)); err != nil {
-		// Roll the first swap back so quil/quild stay version-matched.
-		// os.Rename replaces an existing destination on both Windows and
-		// POSIX, so quilTarget (holding the just-installed, non-running
-		// new binary) doesn't need removing first — an unchecked Remove
-		// here would leave NO quil binary on disk if this rename failed.
-		if rbErr := os.Rename(quilTarget+".old", quilTarget); rbErr != nil {
-			return fmt.Errorf("%w (AND quil rollback failed: %v — restore %s.old manually)", err, rbErr, quilTarget)
+	if _, err := swapOne(quildTarget, filepath.Join(stagedDir, quildName)); err != nil {
+		// Roll the first swap back so quil/quild stay version-matched, from
+		// the path swapOne actually used — it is not always "<target>.old"
+		// (see freeBackupPath). os.Rename replaces an existing destination
+		// on both Windows and POSIX, so quilTarget (holding the
+		// just-installed, non-running new binary) doesn't need removing
+		// first — an unchecked Remove here would leave NO quil binary on
+		// disk if this rename failed.
+		if rbErr := os.Rename(quilBackup, quilTarget); rbErr != nil {
+			return fmt.Errorf("%w (AND quil rollback failed: %v — restore %s manually)", err, rbErr, quilBackup)
 		}
 		return err
 	}
 	return nil
 }
 
-// swapOne backs the target up as <target>.old (renaming a running
-// executable is legal on Windows — NT locks the image by open handle, not
-// path) and copies the staged binary into place. On failure the backup is
-// renamed back.
-func swapOne(target, staged string) error {
-	backup := target + ".old"
-	os.Remove(backup) // stale backup from a previous update (best-effort)
+// maxBackupSlots bounds the ".old.N" search in freeBackupPath. Reaching it
+// means N surviving processes each pin a distinct backup — a real problem
+// worth reporting rather than probing forever.
+const maxBackupSlots = 20
+
+// freeBackupPath returns a path that can receive target's backup, clearing a
+// stale backup left by an earlier update when it can. The canonical
+// "<target>.old" is preferred and recycled whenever it is deletable.
+//
+// When it is NOT deletable, fall back to "<target>.old.1", ".2", … On Windows
+// a backup is unremovable whenever some process still runs it as its image:
+// an earlier update renamed a live quild aside, and that daemon kept running
+// from the renamed file. NT refuses DELETE on a mapped image, which fails
+// os.Remove AND the rename-replace that follows (MOVEFILE_REPLACE_EXISTING
+// must delete the destination first) — both with "Access is denied". Without
+// a fallback, one such leftover wedges EVERY future update permanently, since
+// nothing ever clears it. Third-party handles (antivirus, indexers) pin files
+// the same way, so this is not specific to orphaned daemons.
+func freeBackupPath(target string) (string, error) {
+	for i := 0; i <= maxBackupSlots; i++ {
+		path := target + ".old"
+		if i > 0 {
+			path = fmt.Sprintf("%s.%d", path, i)
+		}
+		os.Remove(path) // best-effort: a pinned backup survives this
+		if _, err := os.Lstat(path); errors.Is(err, fs.ErrNotExist) {
+			return path, nil
+		}
+	}
+	return "", fmt.Errorf("no free backup slot for %s (%s.old and .1-.%d are all occupied and undeletable)",
+		target, target, maxBackupSlots)
+}
+
+// swapOne backs the target up (renaming a running executable is legal on
+// Windows — NT locks the image by open handle, not path) and copies the
+// staged binary into place. Returns the backup path actually used so the
+// caller can roll back; it is usually "<target>.old" but see freeBackupPath.
+// On failure the backup is renamed back.
+func swapOne(target, staged string) (string, error) {
+	backup, err := freeBackupPath(target)
+	if err != nil {
+		return "", fmt.Errorf("back up %s: %w", target, err)
+	}
 	if err := os.Rename(target, backup); err != nil {
-		return fmt.Errorf("back up %s: %w", target, err)
+		return "", fmt.Errorf("back up %s: %w", target, err)
 	}
 	if err := copyFile(staged, target); err != nil {
 		if rbErr := os.Rename(backup, target); rbErr != nil {
-			return fmt.Errorf("install %s: %w (AND rollback failed: %v — restore %s manually)", target, err, rbErr, backup)
+			return "", fmt.Errorf("install %s: %w (AND rollback failed: %v — restore %s manually)", target, err, rbErr, backup)
 		}
-		return fmt.Errorf("install %s: %w", target, err)
+		return "", fmt.Errorf("install %s: %w", target, err)
 	}
-	return nil
+	return backup, nil
+}
+
+// removeBackups deletes every backup swapOne may have left for target — the
+// canonical "<target>.old" plus any ".old.N" fallbacks. Best-effort and
+// gap-tolerant (slot 1 can outlive slot 2): a backup still pinned by a
+// surviving process stays, and a later launch retries. Built by construction
+// rather than filepath.Glob so an install path containing glob metacharacters
+// ("[", "*") still matches its own backups.
+func removeBackups(target string) {
+	os.Remove(target + ".old")
+	for i := 1; i <= maxBackupSlots; i++ {
+		os.Remove(fmt.Sprintf("%s.old.%d", target, i))
+	}
 }
 
 func copyFile(src, dst string) error {
@@ -196,11 +250,12 @@ func respawnSelf(exe string) bool {
 	return true
 }
 
-// cleanupAppliedUpdate removes .old backups and the staged dir once the
-// running version has caught up with the staged one. Best-effort: on
-// Windows the wrapper parent from the apply respawn may still hold
-// quil.exe.old open as its process image, so deletion can fail — the next
-// launch (no wrapper) retries.
+// cleanupAppliedUpdate removes backups and the staged dir once the running
+// version has caught up with the staged one. Best-effort: on Windows the
+// wrapper parent from the apply respawn may still hold quil.exe.old open as
+// its process image, so deletion can fail — the next launch (no wrapper)
+// retries, and a backup pinned for good no longer blocks anything because
+// freeBackupPath routes around it.
 func cleanupAppliedUpdate() {
 	man, dir, err := update.FindStaged(config.UpdateDir())
 	if err == nil && man != nil {
@@ -209,10 +264,10 @@ func cleanupAppliedUpdate() {
 		}
 	}
 	if exe, exeErr := os.Executable(); exeErr == nil {
-		os.Remove(exe + ".old")
+		removeBackups(exe)
 	}
 	if quild := findDaemonBinaryForUpgrade(); filepath.IsAbs(quild) {
-		os.Remove(quild + ".old")
+		removeBackups(quild)
 	}
 }
 

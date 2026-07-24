@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Self-update no longer fails permanently with `back up …: Access is denied` on
+  Windows. A backup left by an earlier update (`quild.exe.old`) stays locked for
+  as long as some process still runs it as its image — an orphaned daemon that
+  survived that update, or an antivirus handle. Windows refuses to delete such a
+  file, which broke both the stale-backup cleanup and the rename that follows, so
+  a single leftover wedged every subsequent update. The swap now falls back to
+  `.old.1`, `.old.2`, … when the canonical backup slot cannot be cleared, and
+  startup cleanup sweeps those fallbacks once they are free again.
+
 ## [1.41.0] - 2026-07-24
 
 ### Added

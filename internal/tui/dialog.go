@@ -1279,6 +1279,10 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 	cwd := m.selectedCWD
 	if cwd != "" {
 		m.lastSelectedCWD = cwd
+		m.recentCWDs = pushRecentCWD(m.recentCWDs, cwd, recentCWDMax)
+		if err := SaveRecentCWDs(config.RecentCWDsPath(), m.recentCWDs); err != nil {
+			log.Printf("create pane: save recent cwds: %v", err)
+		}
 	}
 	m.dialog = dialogNone
 	m.createPaneStep = 0
@@ -2171,6 +2175,7 @@ func (m *Model) enterSetupOrSplit(p *plugin.PanePlugin) tea.Cmd {
 	m.cwdBrowseCursor = 0
 	m.cwdBrowseScroll = 0
 	m.repoCandidates = nil
+	m.recentCandidates = nil
 	m.kubeContexts = nil
 	m.kubeCursor = 0
 
@@ -2197,11 +2202,23 @@ func (m *Model) enterSetupOrSplit(p *plugin.PanePlugin) tea.Cmd {
 				m.repoCandidates = m.repoCandidates[:maxRepoCandidates]
 			}
 		}
-		if len(m.repoCandidates) > 0 {
-			// Pre-select the first candidate so Enter-through submits it.
+		switch {
+		case len(m.repoCandidates) > 0:
+			// Pre-select the first git candidate so Enter-through submits it.
 			m.cwdBrowseDir = m.repoCandidates[0]
 			m.cwdBrowseCursor = 0
-		} else {
+		case len(m.recentCWDs) > 0:
+			// Offer the last-used directories as a quick pick (skipping any
+			// that no longer exist). Falls through to the browser if the
+			// filtered list is empty.
+			m.recentCandidates = existingDirs(m.recentCWDs)
+			if len(m.recentCandidates) > 0 {
+				m.cwdBrowseDir = m.recentCandidates[0]
+				m.cwdBrowseCursor = 0
+			} else {
+				m.initSetupBrowser()
+			}
+		default:
 			m.initSetupBrowser()
 		}
 	}
@@ -2229,6 +2246,19 @@ func (m *Model) enterSetupOrSplit(p *plugin.PanePlugin) tea.Cmd {
 	m.dialogEdit = false // browser doesn't use edit mode
 	m.dialog = dialogCreatePaneSetup
 	return tea.ClearScreen
+}
+
+// existingDirs filters paths down to those that still resolve to a directory,
+// preserving order. Keeps stale (deleted) entries out of the recent-locations
+// pick list.
+func existingDirs(paths []string) []string {
+	out := make([]string, 0, len(paths))
+	for _, p := range paths {
+		if fi, err := os.Stat(p); err == nil && fi.IsDir() {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // initSetupBrowser seeds the directory browser using the standard pre-fill
@@ -2549,8 +2579,8 @@ func (m Model) handleCreatePaneSetupKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd
 // The browser shows a scrollable directory listing; arrows navigate, Enter
 // descends/ascends, and Ctrl+V pastes a path to jump there.
 func (m Model) handleSetupCWDKey(p *plugin.PanePlugin, key string) (tea.Model, tea.Cmd) {
-	if len(m.repoCandidates) > 0 {
-		return m.handleSetupRepoKey(p, key)
+	if pick, _ := m.activeCWDPick(); len(pick) > 0 {
+		return m.handleSetupPickKey(p, key)
 	}
 	if len(m.cwdBrowseEntries) == 0 {
 		// Browser failed to load — Enter still submits using empty selectedCWD.
@@ -2679,19 +2709,31 @@ func (m Model) handleSetupCWDKey(p *plugin.PanePlugin, key string) (tea.Model, t
 	return m, nil
 }
 
-// handleSetupRepoKey processes keystrokes when the CWD field is in repo-pick
-// mode (discover="git" found candidates). Rows are the candidates plus one
-// trailing "Browse…" escape hatch. cwdBrowseCursor is the row cursor and
-// cwdBrowseDir mirrors the highlighted candidate so submitSetupDialog's
-// selectedCWD = cwdBrowseDir capture works unchanged.
-func (m Model) handleSetupRepoKey(p *plugin.PanePlugin, key string) (tea.Model, tea.Cmd) {
-	rows := len(m.repoCandidates) + 1 // +1 for Browse…
+// activeCWDPick returns the pick list currently offered by the CWD field and
+// whether it is the recent-locations list (vs. discovered git repos). Git
+// candidates take priority when both are present. An empty result means the
+// field is in directory-browser mode.
+func (m Model) activeCWDPick() (pick []string, isRecent bool) {
+	if len(m.repoCandidates) > 0 {
+		return m.repoCandidates, false
+	}
+	return m.recentCandidates, len(m.recentCandidates) > 0
+}
+
+// handleSetupPickKey processes keystrokes when the CWD field is in pick-list
+// mode — either discover="git" repo candidates or recent locations. Rows are
+// the candidates plus one trailing "Browse…" escape hatch. cwdBrowseCursor is
+// the row cursor and cwdBrowseDir mirrors the highlighted candidate so
+// submitSetupDialog's selectedCWD = cwdBrowseDir capture works unchanged.
+func (m Model) handleSetupPickKey(p *plugin.PanePlugin, key string) (tea.Model, tea.Cmd) {
+	pick, _ := m.activeCWDPick()
+	rows := len(pick) + 1 // +1 for Browse…
 
 	// syncSelection keeps cwdBrowseDir aligned with the highlighted candidate
 	// row. Not called when the cursor is on the "Browse…" row.
 	syncSelection := func() {
-		if m.cwdBrowseCursor < len(m.repoCandidates) {
-			m.cwdBrowseDir = m.repoCandidates[m.cwdBrowseCursor]
+		if m.cwdBrowseCursor < len(pick) {
+			m.cwdBrowseDir = pick[m.cwdBrowseCursor]
 		}
 	}
 
@@ -2711,19 +2753,20 @@ func (m Model) handleSetupRepoKey(p *plugin.PanePlugin, key string) (tea.Model, 
 		return m, nil
 
 	case "enter":
-		if m.cwdBrowseCursor == len(m.repoCandidates) {
-			// Browse… — drop candidate mode, fall back to the directory
-			// browser with its normal pre-fill chain.
+		if m.cwdBrowseCursor == len(pick) {
+			// Browse… — drop pick mode, fall back to the directory browser
+			// with its normal pre-fill chain.
 			m.repoCandidates = nil
+			m.recentCandidates = nil
 			m.cwdBrowseDir = ""
 			m.cwdBrowseCursor = 0
 			m.initSetupBrowser()
 			return m, nil
 		}
-		// Selecting a candidate submits the dialog (the repo IS the answer
+		// Selecting a candidate submits the dialog (the folder IS the answer
 		// to the CWD question; toggles keep their defaults unless the user
 		// tabbed to them first).
-		m.cwdBrowseDir = m.repoCandidates[m.cwdBrowseCursor]
+		m.cwdBrowseDir = pick[m.cwdBrowseCursor]
 		return m.submitSetupDialog(p)
 	}
 	return m, nil
@@ -2904,6 +2947,13 @@ func (m Model) setupDialogWidth() int {
 	return width
 }
 
+// renderSetupHint renders a subtle footer hint clamped to the box's text area
+// (width-4: the Padding(1,2) on dialogBorder is 2 cells each side) so a long
+// hint truncates with an ellipsis instead of wrapping onto a second line.
+func (m Model) renderSetupHint(text string) string {
+	return dialogSubtle.Render(truncateToWidth(text, m.setupDialogWidth()-4))
+}
+
 // renderCreatePaneSetupDialog renders the setup dialog: a CWD directory
 // browser (optional) + one checkbox per plugin Toggle + a Continue button.
 // The focused field is highlighted; inside the browser the selected entry
@@ -2931,35 +2981,39 @@ func (m Model) renderCreatePaneSetupDialog() string {
 		}
 		b.WriteString(label + "\n")
 
-		// Current path on its own line so it's always visible regardless of
-		// where the cursor is in the listing.
-		path := m.cwdBrowseDir
-		if path == "" && runtime.GOOS == "windows" && len(m.cwdBrowseEntries) > 0 {
-			path = dialogSubtle.Render("Select drive:")
-		} else if path == "" {
-			path = dialogSubtle.Render("(no directory loaded — daemon default will be used)")
-		} else {
-			path = dialogValStyle.Render(path)
+		pick, pickIsRecent := m.activeCWDPick()
+
+		// In directory-browser mode, show the current path on its own line for
+		// context above the listing. In pick-list mode the highlighted row IS
+		// the selected path, so a separate line would duplicate it and merge
+		// visually with the list — skip it and let the highlight do the work.
+		if len(pick) == 0 {
+			path := m.cwdBrowseDir
+			if path == "" && runtime.GOOS == "windows" && len(m.cwdBrowseEntries) > 0 {
+				path = dialogSubtle.Render("Select drive:")
+			} else if path == "" {
+				path = dialogSubtle.Render("(no directory loaded — daemon default will be used)")
+			} else {
+				path = dialogValStyle.Render(path)
+			}
+			b.WriteString("    " + path + "\n")
 		}
-		b.WriteString("    " + path + "\n")
 
 		if m.cwdInputError != "" {
 			b.WriteString("    " + dialogErrorStyle.Render("✗ "+m.cwdInputError) + "\n")
 		}
 
-		if len(m.repoCandidates) > 0 {
-			// Repo pick-list mode: show discovered git repo candidates plus a
-			// trailing "Browse…" escape hatch. Uses the same cursor-row
-			// prefix/style as the directory browser for visual consistency.
-			// Track the dialog width: 6 cells go to the "  > " prefix + border,
-			// the rest is usable for the repo path (matches the historical 64 at
-			// the floor width of 70).
-			setupPickMaxWidth := m.setupDialogWidth() - 6
-			rows := len(m.repoCandidates) + 1 // +1 for Browse…
+		if len(pick) > 0 {
+			// Pick-list mode: show discovered git repos or recent locations
+			// plus a trailing "Browse…" escape hatch. Uses the same cursor-row
+			// prefix/style as the directory browser. Path budget is width-8:
+			// the box text area (width-4) minus the 4-cell "  > " row prefix.
+			setupPickMaxWidth := m.setupDialogWidth() - 8
+			rows := len(pick) + 1 // +1 for Browse…
 			for i := 0; i < rows; i++ {
 				var displayName string
-				if i < len(m.repoCandidates) {
-					displayName = leftTruncPath(m.repoCandidates[i], setupPickMaxWidth)
+				if i < len(pick) {
+					displayName = leftTruncPath(pick[i], setupPickMaxWidth)
 				} else {
 					displayName = "Browse…"
 				}
@@ -2969,7 +3023,11 @@ func (m Model) renderCreatePaneSetupDialog() string {
 					b.WriteString("    " + dialogNormal.Render(displayName) + "\n")
 				}
 			}
-			b.WriteString(dialogSubtle.Render("    ↑↓ navigate  Enter select  Browse… for manual path") + "\n")
+			hint := "    ↑↓ move  Enter select  Browse… to type a path"
+			if pickIsRecent {
+				hint = "    ↑↓ move  Enter open  Browse… for another folder"
+			}
+			b.WriteString(m.renderSetupHint(hint) + "\n")
 		} else {
 			// Listing window — always allocate `browserVisibleRows` lines so the
 			// dialog height stays stable across navigation.
@@ -2999,11 +3057,12 @@ func (m Model) renderCreatePaneSetupDialog() string {
 				}
 			}
 
-			// Scroll indicator — shows position inside the list.
+			// Scroll indicator — shows position inside the list. Clamped so the
+			// hint never wraps onto a second line on a narrow box.
 			if len(entries) > visible {
-				b.WriteString(dialogSubtle.Render(fmt.Sprintf("    %d/%d  ↑↓ navigate  Enter descend  ← parent  Ctrl+V paste path", m.cwdBrowseCursor+1, len(entries))) + "\n")
+				b.WriteString(m.renderSetupHint(fmt.Sprintf("    %d/%d  ↑↓ move  Enter descend  ← up  Ctrl+V paste", m.cwdBrowseCursor+1, len(entries))) + "\n")
 			} else if len(entries) > 0 {
-				b.WriteString(dialogSubtle.Render("    ↑↓ navigate  Enter descend  ← parent  Ctrl+V paste path") + "\n")
+				b.WriteString(m.renderSetupHint("    ↑↓ move  Enter descend  ← up  Ctrl+V paste") + "\n")
 			} else {
 				b.WriteString(dialogSubtle.Render("    (empty directory)") + "\n")
 			}

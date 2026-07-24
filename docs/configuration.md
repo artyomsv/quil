@@ -220,6 +220,10 @@ Multiple modifiers stack with `+` (no spaces). Mouse buttons are not bindable he
 
 Quil persists plugin "instance" presets (saved hostnames for SSH, named claude-code workdirs, etc.) in `~/.quil/instances.json`. This file is **not** edited by hand — use the `Ctrl+N` setup dialog. Hand-editing risks deserialization errors; back it up first.
 
+## Recent working directories
+
+When a pane plugin asks for a working directory (`prompts_cwd`, e.g. Claude Code), the setup dialog offers your **last 5 used folders** as a one-keystroke quick pick, so switching between projects doesn't mean re-navigating the directory tree each time. Select a recent folder and press Enter to open there, or choose **Browse…** to open the full directory browser. Folders that no longer exist are skipped automatically. The list is stored in `~/.quil/recent-cwds.json` (managed by Quil — no hand-editing) and survives daemon/TUI restart. Git-repo discovery (`discover = "git"`, e.g. lazygit) takes priority over the recent list when it finds repos near the active pane.
+
 ## How edits get persisted
 
 - **Edits via the F1 → Settings dialog** auto-save on TUI exit. The setter for each row flips `m.configChanged = true`; `main.go` writes the file atomically via temp + rename.

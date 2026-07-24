@@ -6,7 +6,7 @@ name = "claude-code"
 display_name = "Claude Code"
 category = "ai"
 description = "AI coding assistant"
-schema_version = 7
+schema_version = 8
 
 [command]
 cmd = "claude"
@@ -24,14 +24,14 @@ record_history = true  # capture submitted prompts to <quilDir>/history/<paneID>
 # interactive confirmations).
 [[command.toggles]]
 name = "dangerously_skip_permissions"
-label = "Dangerously skip permissions (unattended mode — no confirmations)"
+label = "Dangerously skip permissions (no confirmations)"
 args_when_on = ["--dangerously-skip-permissions"]
 default = false
 group = "permission_mode"
 
 [[command.toggles]]
 name = "enable_auto_mode"
-label = "Enable auto mode (safer alternative to skipping permissions)"
+label = "Enable auto mode (safer than skipping permissions)"
 args_when_on = ["--enable-auto-mode"]
 default = false
 group = "permission_mode"
@@ -42,7 +42,7 @@ group = "permission_mode"
 # claude >= 2.0.73; the flag only connects the CLI to the extension.
 [[command.toggles]]
 name = "chrome"
-label = "Chrome support (connect to the Claude in Chrome browser extension)"
+label = "Chrome support (Claude in Chrome extension)"
 args_when_on = ["--chrome"]
 default = false
 

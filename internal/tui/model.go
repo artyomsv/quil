@@ -261,6 +261,8 @@ type Model struct {
 	kubeContexts       []kubediscover.Context // contexts offered by the setup dialog (discover="kube"); nil = none
 	kubeCursor         int                    // row cursor in the kube field: 0 = Default context, 1.. = kubeContexts
 	lastSelectedCWD    string                 // remembers previous CWD selection across pane creations
+	recentCWDs         []string               // last N committed CWDs (persisted, recent-cwds.json)
+	recentCandidates   []string               // recent CWDs offered by the setup dialog; nil = not in recent-pick mode
 	selectedCWD        string                 // CWD chosen in dialogCreatePaneSetup (empty = daemon default)
 	cwdInputError      string                 // validation error shown under CWD input (empty = ok)
 	toggleStates       []bool                 // checkbox states; one entry per plugin's Toggles slice, same indexing
@@ -389,6 +391,7 @@ func NewModel(client *ipc.Client, cfg config.Config, version string, registry *p
 		devMode:          os.Getenv("QUIL_HOME") != "",
 		pluginRegistry:   registry,
 		instanceStore:    LoadInstances(config.InstancesPath()),
+		recentCWDs:       LoadRecentCWDs(config.RecentCWDsPath()),
 		mcpHighlights:    make(map[string]bool),
 		mcpHighlightSeq:  make(map[string]int),
 		notifications:    NewNotificationCenter(cfg.Notification.SidebarWidth, cfg.Notification.MaxEvents),

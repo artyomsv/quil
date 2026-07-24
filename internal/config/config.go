@@ -392,6 +392,12 @@ func InstancesPath() string {
 	return filepath.Join(QuilDir(), "instances.json")
 }
 
+// RecentCWDsPath returns the file storing the last-used working directories
+// offered as a quick pick in the pane setup dialog. TUI-owned, single writer.
+func RecentCWDsPath() string {
+	return filepath.Join(QuilDir(), "recent-cwds.json")
+}
+
 func MCPLogDir(cfg MCPConfig) string {
 	if cfg.LogDir != "" {
 		return cfg.LogDir

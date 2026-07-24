@@ -443,8 +443,9 @@ type PaneHistoryEntryRespPayload struct {
 }
 
 // PaneSearchReqPayload asks the daemon to scan every pane's scrollback for a
-// literal, case-insensitive substring. Query is the raw search term (no leading
-// slash — the TUI strips the "/" mode sigil before sending).
+// literal, case-insensitive substring. Query is the palette query verbatim —
+// content search runs inline with the command filter, so there is no sigil to
+// strip; the daemon trims it only for matching and echoes it back unchanged.
 type PaneSearchReqPayload struct {
 	Query string `json:"query"`
 }

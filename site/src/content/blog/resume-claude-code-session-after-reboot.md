@@ -2,6 +2,7 @@
 title: "How to Resume Your Claude Code Session After a Reboot — Automatically"
 description: "Reboot your machine and your Claude Code conversation is gone. Here's the manual fix with claude --resume, why it doesn't scale, and how to make it automatic."
 pubDate: 2026-06-14
+updatedDate: 2026-07-24
 ogImage: "https://cdn.stukans.com/quil/screenshots/pane-restoration-og.png"
 keywords:
   - "resume claude code session after reboot"
@@ -9,6 +10,15 @@ keywords:
   - "claude code continue session"
   - "tmux that survives reboot"
   - "reboot-proof terminal"
+faq:
+  - question: "How do I resume a Claude Code session after a reboot?"
+    answer: "The conversation transcript survives a reboot as a JSONL file under ~/.claude/projects/, but the running claude process does not. From the project directory, run claude --continue to reattach to the latest session, or claude --resume to pick one from a list. To make this happen automatically for your whole workspace, use a reboot-proof multiplexer that records each pane's current session id and re-runs claude --resume for you."
+  - question: "What is the difference between claude --continue and claude --resume?"
+    answer: "claude --continue (short form claude -c) grabs the most recent session for the current working directory and drops you straight back in. claude --resume opens a picker of past sessions in that folder, and claude --resume followed by a session id jumps straight to a specific one."
+  - question: "Where are Claude Code sessions stored?"
+    answer: "On your local machine as JSONL files under ~/.claude/projects/. There is one directory per project, named after the project path, and one .jsonl file per session — the filename is the session id."
+  - question: "Why doesn't claude --continue work well with multiple agents in one repo?"
+    answer: "claude --continue only knows the most recent session for a folder, so it cannot tell apart two or three Claude Code sessions running against the same repo — you end up hunting for the right session id under ~/.claude/projects/. Compaction and /clear also rotate the id, so an id you noted earlier may already be stale."
 draft: false
 ---
 
@@ -75,7 +85,7 @@ What you actually want is for the machine to come back, you type one command, an
 
 ## Making it automatic
 
-This is the specific problem [Quil](/) was built to solve. Quil is an open-source terminal multiplexer (a tmux alternative) with one defining trait: it survives a full host reboot, and it treats an AI coding session as first-class state to be restored — not just a pane to respawn.
+This is the specific problem [Quil](/) was built to solve. Quil is an open-source terminal multiplexer (a [tmux alternative](/vs/tmux/)) with one defining trait: it survives a full host reboot, and it treats an AI coding session as first-class state to be restored — not just a pane to respawn.
 
 Here's the mechanism, because the "how" matters for trusting it:
 

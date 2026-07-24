@@ -29,6 +29,16 @@ const blog = defineCollection({
     ogImage: z.string().optional(),
     /** Target + secondary keywords (Bing/Yandex meta; Google ignores). */
     keywords: z.array(z.string()).default([]),
+    /**
+     * Optional FAQ. Each entry renders BOTH a visible <details> accordion
+     * at the foot of the post AND a FAQPage JSON-LD block. Google only
+     * honours FAQ structured data when the same text is visible on the
+     * page, so both are driven from this one array — they can't drift.
+     * Answers must be plain prose (no Markdown), grounded in the post body.
+     */
+    faq: z
+      .array(z.object({ question: z.string(), answer: z.string() }))
+      .default([]),
     /** Hide from listing + sitemap until ready. */
     draft: z.boolean().default(false),
     /** Rare: point our copy's canonical at an external origin. */

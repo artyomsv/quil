@@ -1,0 +1,66 @@
+---
+/**
+ * Faq — a reusable FAQ accordion (the repeated, CSS-heavy part).
+ *
+ * Renders a list of <details> items from an array of {question, answer}.
+ * Callers supply their own surrounding <section> + heading so each page
+ * controls its own chrome; this component owns only the accordion so the
+ * markup + styling live in one place (home page, blog posts).
+ *
+ * The SAME array should also feed `faqSchema(...)` so the visible text
+ * and the FAQPage JSON-LD stay in sync — Google only honours FAQ
+ * structured data when the answer text is visible on the page.
+ *
+ * The /vs/* comparison pages keep their own mono-styled accordion
+ * (ComparePage.astro); Astro scopes these styles, so there's no clash.
+ */
+import type { FaqItem } from "@/data/faq";
+
+interface Props {
+  items: FaqItem[];
+}
+
+const { items } = Astro.props;
+---
+{items.length > 0 && (
+  <div class="faq-list">
+    {items.map((item) => (
+      <details class="faq-item">
+        <summary>{item.question}</summary>
+        <p>{item.answer}</p>
+      </details>
+    ))}
+  </div>
+)}
+
+<style>
+  .faq-item {
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    padding: 0.9rem 0;
+  }
+  .faq-item summary {
+    cursor: pointer;
+    font-weight: 600;
+    font-size: 1.05rem;
+    line-height: 1.4;
+    list-style: none;
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem;
+  }
+  .faq-item summary::-webkit-details-marker { display: none; }
+  .faq-item summary::after {
+    content: "+";
+    color: var(--flame, #ff6a2b);
+    font-weight: 400;
+    transition: transform 0.15s;
+  }
+  .faq-item[open] summary::after { content: "−"; }
+  .faq-item summary:hover { color: var(--flame, #ff6a2b); }
+  .faq-item p {
+    margin: 0.75rem 0 0.25rem;
+    font-size: 1.02rem;
+    line-height: 1.7;
+    opacity: 0.85;
+  }
+</style>

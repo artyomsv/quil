@@ -5,16 +5,18 @@
  * Sections: hero (with animated restore viz) → features grid →
  * interactive 4-pane demo → compare teaser → install CTA.
  *
- * SEO / JSON-LD is unchanged: SoftwareApplication + FAQPage schemas
- * still ship as part of the head. Visible FAQ block was dropped from
- * the previous iteration; schema-only stays to keep the Google rich
- * result eligible.
+ * SEO / JSON-LD: SoftwareApplication + FAQPage schemas ship in the
+ * head, and the FAQPage entries are ALSO rendered as a visible
+ * accordion (the §06 FAQ section) — Google only honours FAQ structured
+ * data when the same answer text is visible on the page, so both are
+ * driven from the one `homeFaq` array.
  *
  * Inline scripts are Astro-processed (bundled to a single `page.js`
  * chunk on build). No client hydration — the scripts just wire up
  * static DOM.
  */
 import Page from "@/layouts/Page.astro";
+import Faq from "@/components/Faq.astro";
 import { SITE } from "@/data/seo";
 import { softwareApplicationSchema, faqSchema } from "@/data/schemas";
 import { homeFaq } from "@/data/faq";
@@ -50,7 +52,7 @@ const topFeatures = [
     number: "◇ 02",
     title: "Claude Code resumes itself",
     tag: "← AI CONTINUITY",
-    body: `Each AI pane owns a UUID at spawn. On restart, Quil runs <span class="mono" style="color:var(--flame);">claude --resume &lt;id&gt;</span> automatically. No copy-paste, no context rebuild, no re-explaining what you were doing. Your conversation is where you left it.`,
+    body: `Each AI pane owns a UUID at spawn. On restart, Quil runs <span class="mono" style="color:var(--flame);">claude --resume &lt;id&gt;</span> automatically. No copy-paste, no context rebuild, no re-explaining what you were doing. Your conversation is where you left it. <a href="/blog/resume-claude-code-session-after-reboot/" style="color:var(--flame); white-space:nowrap;">How auto-resume works →</a>`,
   },
   {
     number: "◇ 03",
@@ -91,7 +93,7 @@ const revTimestamp = new Date().toISOString().slice(0, 10).replace(/-/g, "");
   <section class="hero">
     <div class="container-ember stack">
       <div class="hero-ruler">
-        <span>§ <b>01</b> / 05 · HERO</span>
+        <span>§ <b>01</b> / 06 · HERO</span>
         <span>LAT <b>48.8566° N</b></span>
         <span>LON <b>2.3522° E</b></span>
         <span>BUILD <b>{SITE.software.version}-release</b></span>
@@ -178,7 +180,7 @@ const revTimestamp = new Date().toISOString().slice(0, 10).replace(/-/g, "");
   <!-- ================================ FEATURES ================================ -->
   <section class="features">
     <div class="container-ember stack">
-      <div class="hr-ascii">┏━━━ <b>§ 02 / 05</b> ━ WHAT IT DOES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓</div>
+      <div class="hr-ascii">┏━━━ <b>§ 02 / 06</b> ━ WHAT IT DOES━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓</div>
 
       <div class="features-head">
         <div>
@@ -220,7 +222,7 @@ const revTimestamp = new Date().toISOString().slice(0, 10).replace(/-/g, "");
   <!-- ================================ INTERACTIVE DEMO ================================ -->
   <section class="demo" id="demo">
     <div class="container-ember stack">
-      <div class="hr-ascii">┣━━━ <b>§ 03 / 05</b> ━ LIVE DEMO ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫</div>
+      <div class="hr-ascii">┣━━━ <b>§ 03 / 06</b> ━ LIVE DEMO━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫</div>
 
       <div class="demo-head">
         <div class="section-tag"><span class="dot"></span>CLICK ANY PANE · TRY A COMMAND</div>
@@ -289,7 +291,7 @@ const revTimestamp = new Date().toISOString().slice(0, 10).replace(/-/g, "");
   <!-- ================================ COMPARE TEASER ================================ -->
   <section class="compare">
     <div class="container-ember stack">
-      <div class="hr-ascii">┣━━━ <b>§ 04 / 05</b> ━ VS THE FIELD ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫</div>
+      <div class="hr-ascii">┣━━━ <b>§ 04 / 06</b> ━ VS THE FIELD━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫</div>
 
       <div class="compare-grid">
         <div>
@@ -356,11 +358,38 @@ const revTimestamp = new Date().toISOString().slice(0, 10).replace(/-/g, "");
     </div>
   </section>
 
+  <!-- ================================ FAQ ================================ -->
+  <section class="faq-section">
+    <div class="container-ember stack">
+      <div class="hr-ascii">┣━━━ <b>§ 05 / 06</b> ━ COMMON QUESTIONS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫</div>
+
+      <div class="features-head">
+        <div>
+          <div class="section-tag"><span class="dot"></span>BEFORE YOU INSTALL</div>
+          <h2 class="h2" style="margin-top:18px;">
+            Questions, <span class="flame-text">answered.</span>
+          </h2>
+        </div>
+        <div>
+          <p>
+            The honest version — what Quil does, how the persistence
+            actually works, where it runs, and when you genuinely don't
+            need it. No marketing hedging.
+          </p>
+        </div>
+      </div>
+
+      <div class="faq-home">
+        <Faq items={homeFaq} />
+      </div>
+    </div>
+  </section>
+
   <!-- ================================ CTA ================================ -->
   <section class="cta">
     <div class="container-ember stack">
       <div class="cta-inner">
-        <div class="hr-ascii" style="text-align:center;">┗━━━ <b>§ 05 / 05</b> ━ TAKE IT HOME ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛</div>
+        <div class="hr-ascii" style="text-align:center;">┗━━━ <b>§ 06 / 06</b> ━ TAKE IT HOME━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛</div>
 
         <pre class="cta-ascii" aria-hidden="true">
     ┌──────────────────────────────────────────────────┐
@@ -397,6 +426,18 @@ const revTimestamp = new Date().toISOString().slice(0, 10).replace(/-/g, "");
 </Page>
 
 <style>
+  /* FAQ section — mirrors the vertical rhythm of the other numbered
+     sections (features/demo/compare) which get their padding from
+     ember.css; this section has no ember class of its own. */
+  .faq-section {
+    padding: 96px 0;
+    border-top: 1px solid var(--line);
+  }
+  .faq-home {
+    margin-top: 40px;
+    max-width: 56rem;
+  }
+
   .mini-pane {
     border: 1px solid var(--line-2);
     padding: 8px 10px;

@@ -1,7 +1,9 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -219,8 +221,89 @@ func TestAcquireApplyLock_SecondCallerRefused(t *testing.T) {
 	}
 }
 
-// TestAcquireApplyLock_StaleLockTakenOver: a process killed mid-swap must not
-// wedge every future update, so a lock older than applyLockStale is claimable.
+// TestAcquireApplyLock_ReleaseOnlyRemovesOwnLock: release() must not delete a
+// lock it no longer owns. If P1's swap outran the staleness window, P2 can take
+// the lock over — and P1 blindly removing the path on the way out would hand
+// P3 a lock while P2 is mid-swap, which is the exact interleaving the lock
+// exists to prevent.
+func TestAcquireApplyLock_ReleaseOnlyRemovesOwnLock(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "update")
+
+	release, ok := acquireApplyLock(dir)
+	if !ok {
+		t.Fatal("acquire failed")
+	}
+	// Another process takes it over.
+	lock := filepath.Join(dir, applyLockName)
+	if err := os.WriteFile(lock, []byte("424242\n"), 0600); err != nil {
+		t.Fatalf("simulate takeover: %v", err)
+	}
+
+	release()
+
+	data, err := os.ReadFile(lock)
+	if err != nil {
+		t.Fatalf("release deleted a lock it did not own: %v", err)
+	}
+	if strings.TrimSpace(string(data)) != "424242" {
+		t.Errorf("lock content = %q, want the new holder's pid intact", data)
+	}
+}
+
+// TestAcquireApplyLock_DeadHolderReclaimedImmediately: a crashed applier's lock
+// is reclaimable at once, without waiting out the age window — the recorded pid
+// makes that a fact rather than a guess.
+func TestAcquireApplyLock_DeadHolderReclaimedImmediately(t *testing.T) {
+	const deadPID = 0x7fffffff
+	if alive, _ := processProbe(deadPID); alive {
+		t.Skipf("pid %d unexpectedly alive; cannot exercise the dead-holder path", deadPID)
+	}
+	dir := filepath.Join(t.TempDir(), "update")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// Freshly written, so only the liveness check can free it.
+	if err := os.WriteFile(filepath.Join(dir, applyLockName),
+		[]byte(fmt.Sprintf("%d\n", deadPID)), 0600); err != nil {
+		t.Fatalf("plant lock: %v", err)
+	}
+
+	if applyInProgress(dir) {
+		t.Error("applyInProgress = true for a dead holder's fresh lock")
+	}
+	release, ok := acquireApplyLock(dir)
+	if !ok {
+		t.Fatal("could not reclaim a dead holder's lock")
+	}
+	release()
+}
+
+// TestApplyInProgress_UnstattableLockFailsClosed: an unreadable lock must
+// suppress the sweep, not enable it. A lock we cannot stat is not proof that
+// no swap is running, and the cost of skipping a sweep is a few stale files.
+func TestApplyInProgress_UnstattableLockFailsClosed(t *testing.T) {
+	// A regular file where the update dir should be: stat of "<file>/apply.lock"
+	// fails with something other than NotExist on every platform.
+	notADir := filepath.Join(t.TempDir(), "update")
+	if err := os.WriteFile(notADir, []byte("x"), 0600); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	// Windows reports "a path component is not a directory" as
+	// ERROR_PATH_NOT_FOUND, which Go classifies as fs.ErrNotExist — so this
+	// construct cannot produce a non-NotExist stat error there. The branch
+	// still matters on Windows (a permission failure reaches it); it just is
+	// not reproducible portably, so assert only where the premise holds.
+	if _, err := os.Stat(filepath.Join(notADir, applyLockName)); errors.Is(err, fs.ErrNotExist) {
+		t.Skip("stat reports NotExist for a non-directory parent on this platform")
+	}
+	if !applyInProgress(notADir) {
+		t.Error("applyInProgress = false for an unstattable lock path, want fail-closed")
+	}
+}
+
+// TestAcquireApplyLock_StaleLockTakenOver: a lock too old to belong to a live
+// swap is claimable — the backstop for a pid since recycled by an unrelated
+// process, which liveness alone would read as "held" forever.
 func TestAcquireApplyLock_StaleLockTakenOver(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "update")
 	if err := os.MkdirAll(dir, 0700); err != nil {

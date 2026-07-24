@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -177,18 +178,27 @@ func acquireApplyLock(dir string) (release func(), ok bool) {
 		return noop, false
 	}
 	path := filepath.Join(dir, applyLockName)
-	// Two attempts: the second exists only to claim a lock found stale on the
-	// first. If another process wins that race, O_EXCL fails again and we back
-	// off rather than looping.
+	self := strconv.Itoa(os.Getpid())
+	// Two attempts: the second exists only to claim a lock found abandoned on
+	// the first. If another process wins that race, O_EXCL fails again and we
+	// back off rather than looping.
 	for attempt := 0; attempt < 2; attempt++ {
 		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 		if err == nil {
-			fmt.Fprintf(f, "%d\n", os.Getpid()) // diagnostics only
+			fmt.Fprintln(f, self)
 			f.Close()
-			return func() { os.Remove(path) }, true
+			// Release only OUR lock. If this swap somehow outran the staleness
+			// window, another process may already hold the path, and removing
+			// it by name would hand a third process a lock while the second is
+			// mid-swap — precisely the interleaving this exists to prevent.
+			return func() {
+				if data, rErr := os.ReadFile(path); rErr == nil &&
+					strings.TrimSpace(string(data)) == self {
+					os.Remove(path)
+				}
+			}, true
 		}
-		info, statErr := os.Stat(path)
-		if statErr != nil || time.Since(info.ModTime()) <= applyLockStale {
+		if !applyLockAbandoned(path) {
 			return noop, false
 		}
 		os.Remove(path)
@@ -196,10 +206,42 @@ func acquireApplyLock(dir string) (release func(), ok bool) {
 	return noop, false
 }
 
-// applyInProgress reports whether another process holds a fresh apply lock.
+// applyLockAbandoned reports whether the lock at path can be taken over.
+//
+// The recorded pid makes this mostly a fact rather than a guess: a lock whose
+// holder is gone is reclaimable immediately, without waiting out the age
+// window. The age cap stays as the backstop for the two cases liveness cannot
+// answer — an unparseable/legacy lock file, and a pid since recycled by an
+// unrelated long-running process, which would otherwise read as "held"
+// forever. A live holder older than the cap is therefore still treated as
+// abandoned; the swap it guards is two file copies, so it cannot legitimately
+// run that long, and the ownership check in release() keeps the takeover safe
+// if it somehow does.
+func applyLockAbandoned(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false // cannot judge it — leave it alone
+	}
+	if data, rErr := os.ReadFile(path); rErr == nil {
+		if pid, pErr := strconv.Atoi(strings.TrimSpace(string(data))); pErr == nil && pid > 0 {
+			if alive, _ := processProbe(pid); !alive {
+				return true
+			}
+		}
+	}
+	return time.Since(info.ModTime()) > applyLockStale
+}
+
+// applyInProgress reports whether another process holds a live apply lock.
 func applyInProgress(dir string) bool {
-	info, err := os.Stat(filepath.Join(dir, applyLockName))
-	return err == nil && time.Since(info.ModTime()) <= applyLockStale
+	path := filepath.Join(dir, applyLockName)
+	if _, err := os.Stat(path); err != nil {
+		// Fail CLOSED on anything but "no lock": if the lock cannot even be
+		// stat'd, we cannot prove no swap is running, and the cost of
+		// skipping a cleanup sweep is a few leftover files.
+		return !errors.Is(err, fs.ErrNotExist)
+	}
+	return !applyLockAbandoned(path)
 }
 
 // maxBackupSlots bounds the ".old.N" search in freeBackupPath. Reaching it
@@ -255,6 +297,23 @@ func swapOne(target, staged string) (string, error) {
 		return "", fmt.Errorf("install %s: %w", target, err)
 	}
 	return backup, nil
+}
+
+// sameDir reports whether two files live in the same directory, comparing by
+// identity rather than by string. exec.LookPath can hand back a different
+// casing — or an 8.3 short name on Windows — for the very directory
+// os.Executable() resolved to, and a byte compare would then silently skip the
+// sweep in the one branch the guard exists for.
+func sameDir(a, b string) bool {
+	fa, err := os.Stat(filepath.Dir(a))
+	if err != nil {
+		return false
+	}
+	fb, err := os.Stat(filepath.Dir(b))
+	if err != nil {
+		return false
+	}
+	return os.SameFile(fa, fb)
 }
 
 // removeBackups deletes every backup swapOne may have left for target — the
@@ -341,8 +400,7 @@ func cleanupAppliedUpdate() {
 	// findDaemonBinaryForUpgrade falls through to a PATH lookup, and deleting
 	// "<path>.old[.N]" in a directory this install does not own is not ours to
 	// do — the more so now that the sweep covers the numbered slots too.
-	if quild := findDaemonBinaryForUpgrade(); filepath.IsAbs(quild) &&
-		filepath.Dir(quild) == filepath.Dir(exe) {
+	if quild := findDaemonBinaryForUpgrade(); filepath.IsAbs(quild) && sameDir(quild, exe) {
 		removeBackups(quild)
 	}
 }

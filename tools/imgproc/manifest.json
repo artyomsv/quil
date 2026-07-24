@@ -23,6 +23,8 @@
     { "src": "pane-resize.png",                "type": "content", "profiles": ["hero", "card"] },
     { "src": "mouse-right-click-menu.png",     "type": "content", "profiles": ["hero", "card"] },
     { "src": "command-palette-1.png",          "type": "dialog",  "profiles": ["hero", "card"] },
-    { "src": "command-palette-2.png",          "type": "dialog",  "profiles": ["hero", "card"] }
+    { "src": "command-palette-2.png",          "type": "dialog",  "profiles": ["hero", "card"] },
+    { "src": "command-palette-search-1.png",   "type": "dialog",  "profiles": ["hero", "card"] },
+    { "src": "command-palette-search-2.png",   "type": "dialog",  "profiles": ["hero", "card"] }
   ]
 }

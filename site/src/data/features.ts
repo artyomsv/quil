@@ -191,18 +191,18 @@ export const features: Feature[] = [
   },
   {
     slug: "command-palette",
-    image: "https://cdn.stukans.com/quil/screenshots/command-palette-1-800.webp",
+    image: "https://cdn.stukans.com/quil/screenshots/command-palette-search-1-800.webp",
     icon: "zap",
-    title: "Command palette",
+    title: "Command palette + content search",
     blurb:
-      "Alt+Shift+P opens a fuzzy-find launcher for every action, plus jump-to-tab and jump-to-pane across the whole workspace.",
+      "Alt+Shift+P opens a fuzzy-find launcher for every action and every pane — and as you type it also searches the scrollback of all your panes.",
     category: "interaction",
     detail: [
       "Type a fragment of the intent (split, restart, backend) and the list filters live by fuzzy score; Enter runs the highlighted command, Esc closes.",
       "Entries are grouped under section headers — Go to pane, Tabs, Pane, System — with navigation first (jumping to a pane or tab is the most common reason to open it); headers disappear once you type. Panes are listed by tab.pane index and type so duplicates are easy to tell apart.",
-      "Covers everything: split/close/rename/focus a pane, new/close/rename a tab, jump to any pane or tab, create a pane, and open Settings, Plugins, Memory, or the log viewers.",
-      "Every command dispatches into the same handler its keybinding uses — a launcher, not a second code path — and each row shows its shortcut, so the palette teaches the bindings as you use it.",
-      "Rows that don't apply grey out (input history without an AI pane, lazygit without the binary). Configurable via command_palette; Ctrl+Shift+P is opt-in since many terminals intercept it.",
+      "Content search is built in — no separate mode. Start typing and, alongside the filtered commands, a Found in panes section lists every pane whose scrollback contains your text (case-insensitive), with a match count and a preview of the most recent hit. Arrow to a match and press Enter to jump straight to that pane. Great for 'which pane had that error / URL / container id?'",
+      "It searches each pane's loaded output buffer and never wakes a dormant pane, so it's fast even across many tabs. Because Quil restores panes lazily, a pane you haven't opened yet this session may not show up in results until you visit it.",
+      "Every command dispatches into the same handler its keybinding uses — a launcher, not a second code path — and each row shows its shortcut, so the palette teaches the bindings as you use it. Rows that don't apply grey out (input history without an AI pane, lazygit without the binary). Configurable via command_palette; Ctrl+Shift+P is opt-in since many terminals intercept it.",
     ],
   },
   {

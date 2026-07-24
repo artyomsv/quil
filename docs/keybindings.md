@@ -171,7 +171,9 @@ scrollback (literal, case-insensitive) — matching panes appear in a **Found in
 panes** section below the filtered commands, each with a match count and a preview
 line. Arrow to one and press Enter to jump to that pane; Enter on a command still
 runs the command. There is no separate mode or prefix — commands and pane matches
-share one list, narrowing together as you type.
+share one list, narrowing together as you type. Search reads each pane's loaded
+output buffer and never wakes a dormant pane; with lazy pane restore, a pane you
+haven't opened yet this session may not appear until you visit it.
 
 The default is `Alt+Shift+P` because `Ctrl+Shift+P` (the VS Code key) is grabbed
 by many terminals' own command palette — Windows Terminal, VS Code's integrated

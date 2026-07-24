@@ -33,6 +33,9 @@ Type `quil` after a reboot — every tab, pane, working directory, layout split,
 | **Command palette: jump anywhere** | **…and run anything** |
 | <img src="https://cdn.stukans.com/quil/screenshots/command-palette-1-800.webp" alt="Command palette showing Go to pane and Tabs sections for cross-workspace navigation" width="420"> | <img src="https://cdn.stukans.com/quil/screenshots/command-palette-2-800.webp" alt="Command palette Pane section listing actions with their keybindings" width="420"> |
 | `Alt+Shift+P` fuzzy-finds every pane and tab — navigation grouped at the top. | Every action grouped below, each showing its keybinding; type to filter instantly. |
+| **…and search inside every pane** | **Jump to the match** |
+| <img src="https://cdn.stukans.com/quil/screenshots/command-palette-search-1-800.webp" alt="Command palette with a query showing matching commands and a Found in panes section listing panes whose scrollback contains the text" width="420"> | <img src="https://cdn.stukans.com/quil/screenshots/command-palette-search-2-800.webp" alt="Found in panes results with per-pane match counts and a preview line of the most recent match" width="420"> |
+| Start typing and the palette also searches every loaded pane's scrollback — match counts + a preview under **Found in panes**. | `Enter` on a pane match jumps straight to it. Searches loaded panes; lazily-restored panes appear once you open them. |
 
 ## Install
 

@@ -134,8 +134,10 @@ Entries are grouped under dim section headers — **Go to pane**, **Tabs**, **Pa
   scrollback and lists matching panes in a **Found in panes** section beneath the
   filtered commands (match count + a preview line), so one query narrows commands
   and finds content at once — no separate mode or prefix. Enter on a pane match
-  jumps to it. Literal, case-insensitive; searches all tabs including background
-  and muted panes.
+  jumps to it. Literal, case-insensitive; covers background and muted panes too.
+  It reads each pane's **loaded** output buffer and never wakes a dormant pane, so
+  it stays fast across many tabs — but because Quil restores panes lazily, a pane
+  you haven't opened yet this session may not appear in results until you visit it.
 
 The default is `Alt+Shift+P` because `Ctrl+Shift+P` (the VS Code key) is intercepted by many terminals' own command palette — Windows Terminal, VS Code's integrated terminal — before Quil sees it. Add it back via `command_palette = "ctrl+shift+p,alt+shift+p"` if your terminal leaves it free. (Phase 2 will add per-plugin/instance quick-create.)
 

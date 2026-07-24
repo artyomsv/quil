@@ -26,13 +26,15 @@ type paletteState struct {
 	commands []paletteCommand // full registry, rebuilt on open
 	filtered []paletteCommand // commands matching query, best score first
 
-	// Content-search mode (entered by a leading "/").
-	mode      paletteMode
-	term      string       // query minus the "/" sigil
-	hits      []paletteHit // resolved matches, daemon-sorted
-	searching bool         // a request is in flight, no fresh response yet
-	timedOut  bool         // the in-flight request never answered (see paletteSearchTimeout)
-	truncated bool         // some pane hit the per-pane match cap
+	// Content search runs ALONGSIDE the command filter whenever the query is
+	// non-empty — there is no separate mode or sigil. Matching panes render as a
+	// "Found in panes" section below the filtered commands, each a palActGoToPane
+	// row so Enter/navigation reuse the command machinery. paletteDisplay()
+	// assembles filtered + this section into the single list the cursor walks.
+	contentHits []paletteCommand // resolved pane matches (palActGoToPane rows), daemon-sorted
+	searching   bool             // a content request is in flight, no fresh response yet
+	timedOut    bool             // the in-flight request never answered (see paletteSearchTimeout)
+	truncated   bool             // some pane hit the per-pane match cap
 }
 
 // paletteAction identifies one command palette entry. Dispatch in
@@ -73,10 +75,11 @@ const (
 )
 
 // paletteCommand is one row of the palette. Disabled rows render greyed and are
-// inert on Enter. header rows are dim section titles: not selectable, skipped by
-// the cursor, and hidden while a query is active. arg carries a navigation
-// target id (paneID/tabID); it is empty for static commands. keywords are extra
-// fuzzy targets beyond the label.
+// inert on Enter. header rows are dim section titles and info rows are dim status
+// lines ("Searching…", "No matches…"): neither is selectable, both are skipped by
+// the cursor. arg carries a navigation target id (paneID/tabID); it is empty for
+// static commands. keywords are extra fuzzy targets beyond the label. excerpt, when
+// set on a content-hit row, renders as a dim preview line beneath the row.
 type paletteCommand struct {
 	action   paletteAction
 	label    string
@@ -84,12 +87,14 @@ type paletteCommand struct {
 	keywords []string
 	enabled  bool
 	header   bool
+	info     bool
 	arg      string
+	excerpt  string
 }
 
 // selectable reports whether the cursor may land on this row and Enter may run
-// it — everything except section headers and disabled rows.
-func (c paletteCommand) selectable() bool { return !c.header && c.enabled }
+// it — everything except section headers, status rows, and disabled rows.
+func (c paletteCommand) selectable() bool { return !c.header && !c.info && c.enabled }
 
 // fuzzyScore reports whether query is a case-insensitive subsequence of target
 // and, if so, a score (higher = better). It rewards consecutive runs, a match
@@ -398,9 +403,6 @@ func (m Model) paletteInnerWidth() int {
 // blank, footer hint.
 func renderCommandPalette(m Model) string {
 	inner := m.paletteInnerWidth()
-	if m.palette.mode == paletteModeContent {
-		return renderPaletteContent(m, inner)
-	}
 	var b strings.Builder
 
 	// Query row: "> " (2 cells) + query + caret (1 cell). Show the TAIL of a long
@@ -420,8 +422,11 @@ func renderCommandPalette(m Model) string {
 	subtle := func(s string) string { return dialogSubtle.Render(truncateToWidth(s, inner)) }
 	const hint = "↑↓ nav · Enter run · Esc close"
 
-	filtered := m.palette.filtered
-	if len(filtered) == 0 {
+	// The displayed list is the filtered commands plus, once the query is
+	// non-empty, the "Found in panes" content-search section — one list the
+	// cursor walks across.
+	display := m.paletteDisplay()
+	if len(display) == 0 {
 		b.WriteString(subtle("  No matching commands"))
 		b.WriteByte('\n')
 		b.WriteByte('\n')
@@ -429,27 +434,86 @@ func renderCommandPalette(m Model) string {
 		return b.String()
 	}
 
-	start, end := paletteWindow(m.palette.cursor, len(filtered))
+	start, end := paletteWindow(m.palette.cursor, len(display))
 	if start > 0 {
 		b.WriteString(subtle(fmt.Sprintf("  ↑ %d more", start)))
 		b.WriteByte('\n')
 	}
 	for i := start; i < end; i++ {
-		if filtered[i].header {
-			b.WriteString(renderPaletteHeader(filtered[i].label, inner))
-		} else {
-			b.WriteString(renderPaletteRow(filtered[i], i == m.palette.cursor, inner))
+		row := display[i]
+		switch {
+		case row.header:
+			b.WriteString(renderPaletteHeader(row.label, inner))
+		case row.info:
+			b.WriteString(subtle("  " + row.label))
+		default:
+			b.WriteString(renderPaletteRow(row, i == m.palette.cursor, inner))
+			if row.excerpt != "" {
+				b.WriteByte('\n')
+				b.WriteString(ctxMenuDisabledStyle.Render(truncateToWidth("    "+row.excerpt, inner)))
+			}
 		}
 		b.WriteByte('\n')
 	}
-	if end < len(filtered) {
-		b.WriteString(subtle(fmt.Sprintf("  ↓ %d more", len(filtered)-end)))
+	if end < len(display) {
+		b.WriteString(subtle(fmt.Sprintf("  ↓ %d more", len(display)-end)))
 		b.WriteByte('\n')
 	}
 
 	b.WriteByte('\n')
 	b.WriteString(subtle(hint))
 	return b.String()
+}
+
+// paletteDisplay assembles the single list the cursor walks: the filtered
+// commands, then — whenever the query is non-empty — a "Found in panes" section
+// carrying the content-search results (or a status line while it resolves).
+// Content hits are palActGoToPane rows, so the cursor, Enter dispatch, and row
+// rendering all reuse the command machinery unchanged.
+func (m Model) paletteDisplay() []paletteCommand {
+	display := append([]paletteCommand(nil), m.palette.filtered...)
+	if strings.TrimSpace(m.palette.query) == "" {
+		return display
+	}
+	display = append(display, paletteCommand{header: true, label: "Found in panes"})
+	switch {
+	case len(m.palette.contentHits) > 0:
+		display = append(display, m.palette.contentHits...)
+		if m.palette.truncated {
+			display = append(display, paletteCommand{info: true, label: "some panes hit the per-pane match cap"})
+		}
+	case m.palette.timedOut:
+		display = append(display, paletteCommand{info: true, label: "Search timed out — is the daemon running?"})
+	case m.palette.searching:
+		display = append(display, paletteCommand{info: true, label: "Searching…"})
+	default:
+		display = append(display, paletteCommand{info: true, label: "No matches in any pane"})
+	}
+	return display
+}
+
+// clampPaletteCursor keeps cur in range and on a selectable row, preferring to
+// leave it where it is (so an arriving content response does not yank the cursor
+// off a command the user navigated to). Returns -1 when nothing is selectable.
+func clampPaletteCursor(display []paletteCommand, cur int) int {
+	if len(display) == 0 {
+		return -1
+	}
+	if cur < 0 {
+		cur = 0
+	}
+	if cur >= len(display) {
+		cur = len(display) - 1
+	}
+	if display[cur].selectable() {
+		return cur
+	}
+	for i := cur; i < len(display); i++ {
+		if display[i].selectable() {
+			return i
+		}
+	}
+	return firstSelectable(display)
 }
 
 // paletteWindow returns the [start, end) slice of a length-n result list to
@@ -548,52 +612,25 @@ func (m *Model) closeCommandPalette() {
 	m.palette = paletteState{}
 }
 
-// refilterPalette recomputes the visible results for the current query and
-// resets the cursor to the top.
-func (m *Model) refilterPalette() {
-	m.palette.filtered = filterPalette(m.palette.query, m.palette.commands)
-	m.palette.cursor = firstSelectable(m.palette.filtered)
-}
-
 // handleCommandPaletteKey routes keys while the palette is open. Value receiver,
 // like the sibling handleXKey dialog handlers.
 func (m Model) handleCommandPaletteKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
-	content := m.palette.mode == paletteModeContent
 	switch {
 	case key == "esc":
 		m.closeCommandPalette()
 		return m, nil
 	case key == "enter":
-		if content {
-			if c := m.palette.cursor; c >= 0 && c < len(m.palette.hits) {
-				paneID := m.palette.hits[c].paneID
-				m.closeCommandPalette()
-				return m.goToPane(paneID)
-			}
-			return m, nil
-		}
-		if c := m.palette.cursor; c >= 0 && c < len(m.palette.filtered) && m.palette.filtered[c].selectable() {
-			return m.executePaletteCommand(m.palette.filtered[c])
+		display := m.paletteDisplay()
+		if c := m.palette.cursor; c >= 0 && c < len(display) && display[c].selectable() {
+			return m.executePaletteCommand(display[c])
 		}
 		return m, nil
 	case key == "up" || key == "ctrl+p":
-		if content {
-			if m.palette.cursor > 0 {
-				m.palette.cursor--
-			}
-			return m, nil
-		}
-		m.palette.cursor = nextSelectable(m.palette.filtered, m.palette.cursor, -1)
+		m.palette.cursor = nextSelectable(m.paletteDisplay(), m.palette.cursor, -1)
 		return m, nil
 	case key == "down" || key == "ctrl+n":
-		if content {
-			if m.palette.cursor < len(m.palette.hits)-1 {
-				m.palette.cursor++
-			}
-			return m, nil
-		}
-		m.palette.cursor = nextSelectable(m.palette.filtered, m.palette.cursor, +1)
+		m.palette.cursor = nextSelectable(m.paletteDisplay(), m.palette.cursor, +1)
 		return m, nil
 	case key == "backspace":
 		if q := []rune(m.palette.query); len(q) > 0 {
@@ -613,40 +650,31 @@ func (m Model) handleCommandPaletteKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd)
 	return m, nil
 }
 
-// afterPaletteQueryChange re-parses the query into (mode, term), refreshes the
-// command filter or resets content state, and returns a debounce cmd when in
-// content mode with a non-empty term. Single choke point for every path that
-// mutates m.palette.query (typed text, backspace, space, paste) so mode
-// switching and the 150ms debounce behave identically regardless of how the
-// query changed.
+// afterPaletteQueryChange refilters the command list and, whenever the query is
+// non-empty, kicks off a debounced content search across all panes — both feed
+// the one list paletteDisplay assembles. Single choke point for every path that
+// mutates m.palette.query (typed text, backspace, space, paste) so the filter and
+// the 150ms debounce behave identically regardless of how the query changed.
 func (m Model) afterPaletteQueryChange() (tea.Model, tea.Cmd) {
-	prevTerm := m.palette.term
-	m.palette.mode, m.palette.term = parsePaletteQuery(m.palette.query)
-	if m.palette.mode == paletteModeContent {
-		if strings.TrimSpace(m.palette.term) == "" {
-			m.palette.hits = nil
-			m.palette.searching = false
-			m.palette.timedOut = false
-			m.palette.cursor = 0
-			return m, nil
-		}
-		if m.palette.term != prevTerm {
-			// The term changed — drop the previous term's hits immediately so
-			// they never render under the new query header while the debounce
-			// is pending. Marking searching here (not just once the debounce
-			// fires) also makes "Searching…" reachable on every refinement,
-			// not only the first search after entering content mode. Any
-			// previous term's timeout state goes with them.
-			m.palette.hits = nil
-			m.palette.searching = true
-			m.palette.timedOut = false
-		}
-		m.palette.cursor = 0
-		return m, paletteSearchDebounce(m.palette.term)
+	m.palette.filtered = filterPalette(m.palette.query, m.palette.commands)
+	q := m.palette.query
+	if strings.TrimSpace(q) == "" {
+		// Empty query: browse commands only, no content search.
+		m.palette.contentHits = nil
+		m.palette.searching = false
+		m.palette.timedOut = false
+		m.palette.cursor = firstSelectable(m.paletteDisplay())
+		return m, nil
 	}
-	// Command mode: reuse the existing filter path.
-	m.refilterPalette()
-	return m, nil
+	// Non-empty query — drop the previous query's hits immediately so they never
+	// render under the new query, show "Searching…" right away (not only once the
+	// debounce fires), and schedule the content search. Any prior timeout state
+	// goes with the stale hits.
+	m.palette.contentHits = nil
+	m.palette.searching = true
+	m.palette.timedOut = false
+	m.palette.cursor = firstSelectable(m.paletteDisplay())
+	return m, paletteSearchDebounce(q)
 }
 
 // sanitizePaletteQuery keeps only printable runes from s — the paste-path

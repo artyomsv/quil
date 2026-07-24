@@ -1176,19 +1176,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.listenForMessages()
 
 	case paletteSearchDebounceMsg:
-		// Only fire if still open in content mode on the same term. Local timer
-		// — consumed no daemon message, so it must NOT re-arm listenForMessages.
-		if m.dialog == dialogCommandPalette && m.palette.mode == paletteModeContent && m.palette.term == msg.term && strings.TrimSpace(msg.term) != "" {
+		// Only fire if still open on the same non-empty query. Local timer —
+		// consumed no daemon message, so it must NOT re-arm listenForMessages.
+		if m.dialog == dialogCommandPalette && m.palette.query == msg.query && strings.TrimSpace(msg.query) != "" {
 			m.palette.searching = true
-			return m, tea.Batch(m.requestPaneSearch(msg.term), paletteSearchTimeout(msg.term))
+			return m, tea.Batch(m.requestPaneSearch(msg.query), paletteSearchTimeout(msg.query))
 		}
 		return m, nil
 
 	case paletteSearchTimeoutMsg:
-		// The request for this term never answered — surface it instead of
+		// The request for this query never answered — surface it instead of
 		// leaving "Searching…" up forever. Also a local timer: no re-arm.
-		if m.dialog == dialogCommandPalette && m.palette.mode == paletteModeContent &&
-			m.palette.term == msg.term && m.palette.searching {
+		if m.dialog == dialogCommandPalette &&
+			m.palette.query == msg.query && m.palette.searching {
 			m.palette.searching = false
 			m.palette.timedOut = true
 		}

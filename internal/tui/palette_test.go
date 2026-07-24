@@ -145,12 +145,14 @@ func TestRenderCommandPalette_WidthAndCursor(t *testing.T) {
 func TestRenderCommandPalette_EmptyResults(t *testing.T) {
 	t.Parallel()
 	m := newSplitDragTestModel(t)
+	// A query that matches no command and (with no search in flight) no pane
+	// falls through to the content section's no-matches status row.
 	m.palette = paletteState{query: "zzzzzz"}
 	m.palette.commands = m.buildPaletteCommands()
 	m.palette.filtered = filterPalette("zzzzzz", m.palette.commands)
 	out := renderCommandPalette(*m)
-	if !strings.Contains(out, "No matching") {
-		t.Errorf("empty results should show a 'No matching' row, got:\n%s", out)
+	if !strings.Contains(out, "No matches in any pane") {
+		t.Errorf("empty results should show a no-matches row, got:\n%s", out)
 	}
 }
 

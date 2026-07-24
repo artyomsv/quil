@@ -114,7 +114,7 @@ Or use a lightweight Go fuzzy library.
 
 ## Shipped since v1
 
-- **Content search** — type `/<text>` in the palette to switch it into content-search mode: literal, case-insensitive matching against every pane's buffered scrollback across all tabs (including background and muted panes). Results are one entry per matching pane (match count + most-recent-match preview), sorted by match count; Enter jumps to the pane. New IPC pair `pane_search_req`/`pane_search_resp`, daemon-side scan in `internal/daemon/search.go`, TUI side in `internal/tui/palette_search.go`. See `docs/keybindings.md` and `docs/features.md`.
+- **Content search** — runs alongside the command filter on every non-empty query (no `/` prefix, no separate mode): literal, case-insensitive matching against every pane's buffered scrollback across all tabs (including background and muted panes). Matching panes render in a **Found in panes** section below the filtered commands — one entry per pane (match count + most-recent-match preview), sorted by match count — as `palActGoToPane` rows so Enter/navigation reuse the command machinery. New IPC pair `pane_search_req`/`pane_search_resp`, daemon-side scan in `internal/daemon/search.go`, TUI side in `internal/tui/palette_search.go`. See `docs/keybindings.md` and `docs/features.md`.
 
 ## Open Questions — resolved for v1
 

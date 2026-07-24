@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/ringbuf"
 )
 
@@ -119,6 +120,77 @@ func TestSearchPanes_SortsByMatchCountThenPaneID(t *testing.T) {
 	}
 	if hits[0].Matches != 3 {
 		t.Errorf("hits[0].Matches = %d, want 3", hits[0].Matches)
+	}
+}
+
+// TestSearchPanes_TruncatedIsPerHit pins that the cap flag rides the HIT, not
+// just the payload: a pane with an honest, uncapped count must never be
+// labelled "capped" because some other pane in the same result set was.
+func TestSearchPanes_TruncatedIsPerHit(t *testing.T) {
+	d := newTestDaemon(t)
+	var capped []byte
+	for i := 0; i < maxPaneMatches+5; i++ {
+		capped = append(capped, []byte(fmt.Sprintf("needle %d\n", i))...)
+	}
+	mkPane := func(id, tabID string, content []byte) *Pane {
+		p := &Pane{ID: id, TabID: tabID, Type: "terminal", OutputBuf: ringbuf.NewRingBuffer(1 << 16)}
+		p.OutputBuf.Write(content)
+		return p
+	}
+	d.session.RestoreTab(
+		&Tab{ID: "tab-0000000e", Name: "E", Panes: []string{"pane-0000000n", "pane-0000000m"}},
+		[]*Pane{
+			mkPane("pane-0000000n", "tab-0000000e", capped),
+			mkPane("pane-0000000m", "tab-0000000e", []byte("needle once\n")),
+		},
+	)
+
+	hits, truncated := d.searchPanes("needle")
+	if !truncated {
+		t.Error("payload-level truncated should be set when any pane capped")
+	}
+	if len(hits) != 2 {
+		t.Fatalf("hits = %d, want 2: %+v", len(hits), hits)
+	}
+	if hits[0].PaneID != "pane-0000000n" || !hits[0].Truncated {
+		t.Errorf("capped pane hit = %+v, want pane-0000000n with Truncated=true", hits[0])
+	}
+	if hits[1].PaneID != "pane-0000000m" || hits[1].Truncated {
+		t.Errorf("uncapped pane hit = %+v, want pane-0000000m with Truncated=false", hits[1])
+	}
+}
+
+// TestPaneSearchResponse_EchoesQueryVerbatim pins the daemon half of the
+// staleness seam. The TUI compares the echoed query against its own
+// DELIBERATELY UNTRIMMED search term ("/ foo" searches for " foo"), so any
+// normalization here makes a whitespace-bearing term look permanently stale:
+// applyPaneSearch drops every response and the palette hangs on "Searching…"
+// forever. searchPanes still trims internally for matching — that must not leak
+// into the echo. The TUI half is TestApplyPaneSearch_AcceptsDaemonEcho
+// (internal/tui), over the same terms.
+func TestPaneSearchResponse_EchoesQueryVerbatim(t *testing.T) {
+	d := newTestDaemon(t)
+	p := &Pane{ID: "pane-0000000f", TabID: "tab-0000000f", Type: "terminal", OutputBuf: ringbuf.NewRingBuffer(8192)}
+	p.OutputBuf.Write([]byte("boot ok\nconnection refused twice\ntwo words here\n"))
+	d.session.RestoreTab(
+		&Tab{ID: "tab-0000000f", Name: "F", Panes: []string{"pane-0000000f"}},
+		[]*Pane{p},
+	)
+
+	for _, q := range []string{"refused", " refused", "refused ", "two words"} {
+		t.Run(fmt.Sprintf("%q", q), func(t *testing.T) {
+			msg, err := ipc.NewMessage(ipc.MsgPaneSearchReq, ipc.PaneSearchReqPayload{Query: q})
+			if err != nil {
+				t.Fatalf("NewMessage: %v", err)
+			}
+			resp := d.paneSearchResponse(msg)
+			if resp.Query != q {
+				t.Errorf("echoed Query = %q, want %q verbatim (the TUI drops anything else as stale)", resp.Query, q)
+			}
+			if len(resp.Hits) != 1 {
+				t.Errorf("hits = %d, want 1 — internal trimming must still match", len(resp.Hits))
+			}
+		})
 	}
 }
 

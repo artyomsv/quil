@@ -451,16 +451,20 @@ type PaneSearchReqPayload struct {
 
 // PaneSearchHit is one matching pane. The TUI resolves the display label itself
 // from PaneID (it already holds tab/pane metadata), so the daemon returns only
-// the id, the total match count, and a single preview line.
+// the id, the total match count, a single preview line, and whether THIS pane's
+// count was capped (the per-hit flag is what the "capped" label renders from —
+// the payload-level Truncated is only a "some pane was capped" summary).
 type PaneSearchHit struct {
-	PaneID  string `json:"pane_id"`
-	Matches int    `json:"matches"`
-	Excerpt string `json:"excerpt"`
+	PaneID    string `json:"pane_id"`
+	Matches   int    `json:"matches"`
+	Excerpt   string `json:"excerpt"`
+	Truncated bool   `json:"truncated,omitempty"`
 }
 
 // PaneSearchRespPayload carries the hits for one search. Query echoes the
-// request term so the TUI can drop responses that arrived after the user typed
-// more (stale). Truncated is set when any pane hit the per-pane match cap.
+// request term VERBATIM (never trimmed — the TUI compares it against its own
+// untrimmed term to drop responses that arrived after the user typed more).
+// Truncated is set when any pane hit the per-pane match cap.
 type PaneSearchRespPayload struct {
 	Query     string          `json:"query"`
 	Hits      []PaneSearchHit `json:"hits"`

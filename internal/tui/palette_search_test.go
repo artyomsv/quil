@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
 	"github.com/artyomsv/quil/internal/ipc"
@@ -132,5 +133,63 @@ func TestPaletteContent_EnterNavigatesDirect(t *testing.T) {
 	m2 := updated.(Model)
 	if tab := m2.activeTabModel(); tab == nil || tab.ActivePane != "p2" {
 		t.Errorf("goToPane should activate p2")
+	}
+}
+
+// TestPaletteContent_EnterFullPath drives Enter through handleCommandPaletteKey
+// (not a direct goToPane call) so a regression that drops or reorders the
+// closeCommandPalette() call in the content-mode Enter branch is caught.
+func TestPaletteContent_EnterFullPath(t *testing.T) {
+	m := newSplitDragTestModel(t)
+	m.dialog = dialogCommandPalette
+	m.palette.mode = paletteModeContent
+	m.palette.hits = []paletteHit{{paneID: "p2", label: "1.2 · terminal"}}
+	m.palette.cursor = 0
+
+	updated, _ := m.handleCommandPaletteKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	got := updated.(Model)
+	if got.dialog != dialogNone {
+		t.Errorf("dialog = %v, want dialogNone (palette should close on Enter)", got.dialog)
+	}
+	if tab := got.activeTabModel(); tab == nil || tab.ActivePane != "p2" {
+		t.Error("Enter in content mode should activate the pane under the cursor")
+	}
+}
+
+// TestAfterPaletteQueryChange_ClearsStaleHitsOnTermChange drives the actual
+// mutation path (afterPaletteQueryChange), not renderPaletteContent's state
+// switch directly — a query change that leaves old hits in place would
+// otherwise render the previous term's results under the new query header.
+func TestAfterPaletteQueryChange_ClearsStaleHitsOnTermChange(t *testing.T) {
+	m := newSplitDragTestModel(t)
+	m.palette.mode = paletteModeContent
+	m.palette.query = "/e"
+	m.palette.term = "e"
+	m.palette.hits = []paletteHit{{paneID: "p1", label: "stale hit for 'e'"}}
+	m.palette.searching = false
+
+	// Extend the term: "/e" -> "/er". The previous term's hits must not
+	// survive into the new term's (pre-response) state.
+	m.palette.query = "/er"
+	updated, _ := m.afterPaletteQueryChange()
+	got := updated.(Model)
+
+	if len(got.palette.hits) != 0 {
+		t.Errorf("hits after term change = %+v, want cleared", got.palette.hits)
+	}
+	if !got.palette.searching {
+		t.Error("searching should be true immediately after a term change, so \"Searching…\" is reachable on refinement")
+	}
+	if got.palette.term != "er" {
+		t.Fatalf("term = %q, want %q", got.palette.term, "er")
+	}
+
+	// The rendered view must not show the stale "e" hit under the "er" header.
+	out := renderPaletteContent(got, got.paletteInnerWidth())
+	if strings.Contains(out, "stale hit for 'e'") {
+		t.Errorf("stale hit rendered under changed query:\n%s", out)
+	}
+	if !strings.Contains(out, "Searching") {
+		t.Errorf("expected the Searching state to be reachable on term change:\n%s", out)
 	}
 }

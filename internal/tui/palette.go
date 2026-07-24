@@ -619,6 +619,7 @@ func (m Model) handleCommandPaletteKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd)
 // switching and the 150ms debounce behave identically regardless of how the
 // query changed.
 func (m Model) afterPaletteQueryChange() (tea.Model, tea.Cmd) {
+	prevTerm := m.palette.term
 	m.palette.mode, m.palette.term = parsePaletteQuery(m.palette.query)
 	if m.palette.mode == paletteModeContent {
 		if strings.TrimSpace(m.palette.term) == "" {
@@ -626,6 +627,15 @@ func (m Model) afterPaletteQueryChange() (tea.Model, tea.Cmd) {
 			m.palette.searching = false
 			m.palette.cursor = 0
 			return m, nil
+		}
+		if m.palette.term != prevTerm {
+			// The term changed — drop the previous term's hits immediately so
+			// they never render under the new query header while the debounce
+			// is pending. Marking searching here (not just once the debounce
+			// fires) also makes "Searching…" reachable on every refinement,
+			// not only the first search after entering content mode.
+			m.palette.hits = nil
+			m.palette.searching = true
 		}
 		m.palette.cursor = 0
 		return m, paletteSearchDebounce(m.palette.term)

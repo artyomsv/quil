@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.41.1] - 2026-07-24
+
 ### Security
 - The staged-update integrity gate now verifies the set of binaries it is about
   to install rather than the set the manifest chooses to declare. `VerifyStaged`

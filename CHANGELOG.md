@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.41.0] - 2026-07-24
+
 ### Added
 - Recent working directories: the pane setup dialog (`Ctrl+N` for plugins with
   `prompts_cwd`, e.g. Claude Code) now offers the last 5 used folders as a

@@ -81,17 +81,32 @@ var listClaudeSessionsFn = claudesessions.List
 // client, already inside the 0600 socket. The TUI only ever issues one request
 // per directory change, so it never trips this.
 func (d *Daemon) handleClaudeSessionsReq(conn *ipc.Conn, msg *ipc.Message) {
-	if !d.sessionScanning.CompareAndSwap(false, true) {
-		respondTo(conn, msg.ID, ipc.MsgClaudeSessionsResp, ipc.ClaudeSessionsRespPayload{
-			CWD:   claudeSessionsReqCWD(msg),
-			Error: "another session scan is already running",
-		})
+	rejection, ok := d.beginClaudeSessionsScan(msg)
+	if !ok {
+		respondTo(conn, msg.ID, ipc.MsgClaudeSessionsResp, rejection)
 		return
 	}
 	go func() {
 		defer d.sessionScanning.Store(false)
 		respondTo(conn, msg.ID, ipc.MsgClaudeSessionsResp, d.claudeSessionsResponse(msg))
 	}()
+}
+
+// beginClaudeSessionsScan claims the single-flight slot. When the slot is
+// already taken it returns the rejection payload the caller must send back and
+// ok=false; the caller releases the slot with d.sessionScanning.Store(false).
+//
+// Split out from the handler because ipc.Conn cannot be constructed outside its
+// own package, so the handler wrapper is untestable — but the decision it makes
+// is exactly the part worth pinning, and this way a test can drive it.
+func (d *Daemon) beginClaudeSessionsScan(msg *ipc.Message) (ipc.ClaudeSessionsRespPayload, bool) {
+	if d.sessionScanning.CompareAndSwap(false, true) {
+		return ipc.ClaudeSessionsRespPayload{}, true
+	}
+	return ipc.ClaudeSessionsRespPayload{
+		CWD:   claudeSessionsReqCWD(msg),
+		Error: "another session scan is already running",
+	}, false
 }
 
 // claudeSessionsReqCWD extracts just the CWD from a request so a rejected

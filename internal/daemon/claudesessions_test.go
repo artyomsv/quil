@@ -33,6 +33,27 @@ func stubHookSessionID(t *testing.T, byPane map[string]string) {
 	t.Cleanup(func() { readHookSessionIDFn = prev })
 }
 
+// withClaudePlugin loads the SHIPPED default plugins into the daemon's
+// registry. Daemon.New leaves it empty (Start does the loading), so without
+// this spawnPane resolves "claude-code" to nil, falls back to the terminal
+// built-in, and never reaches the preassign_id branch under test. Loading the
+// real defaults also means these tests exercise the config that actually ships.
+func withClaudePlugin(t *testing.T, d *Daemon) {
+	t.Helper()
+	dir := t.TempDir()
+	if _, err := plugin.EnsureDefaultPlugins(dir); err != nil {
+		t.Fatalf("EnsureDefaultPlugins: %v", err)
+	}
+	reg := plugin.NewRegistry()
+	if err := reg.LoadFromDir(dir); err != nil {
+		t.Fatalf("LoadFromDir: %v", err)
+	}
+	if reg.Get("claude-code") == nil {
+		t.Fatal("claude-code plugin missing from the loaded defaults")
+	}
+	d.registry = reg
+}
+
 func sessionsReq(t *testing.T, cwd string) *ipc.Message {
 	t.Helper()
 	msg, err := ipc.NewMessage(ipc.MsgClaudeSessionsReq, ipc.ClaudeSessionsReqPayload{CWD: cwd})
@@ -316,34 +337,112 @@ func TestRefreshPluginStateFromHooks_RetiresResumeTarget(t *testing.T) {
 	}
 }
 
-// TestHandleClaudeSessionsReq_SingleFlight: one listing reads up to 200
+// TestBeginClaudeSessionsScan_SingleFlight: one listing reads up to 200
 // transcript heads, far more work than parsing the frame that asked for it, so
 // a client looping on this message type must not be able to stack workers.
-func TestHandleClaudeSessionsReq_SingleFlight(t *testing.T) {
+//
+// Drives beginClaudeSessionsScan rather than handleClaudeSessionsReq because
+// ipc.Conn has no exported constructor, so the handler wrapper cannot be called
+// from this package. The wrapper is three lines around this function; the
+// decision is here.
+func TestBeginClaudeSessionsScan_SingleFlight(t *testing.T) {
 	d := newTestDaemon(t)
-	if !d.sessionScanning.CompareAndSwap(false, true) {
-		t.Fatal("guard should start unset")
-	}
-	t.Cleanup(func() { d.sessionScanning.Store(false) })
-
-	// With a scan already in flight the handler must answer immediately rather
-	// than spawning a second worker — and the rejection still has to echo the
-	// CWD, or the TUI drops it as stale and waits out its timeout instead of
-	// showing the reason.
-	called := false
-	stubSessionList(t, func(string) ([]claudesessions.Session, bool, error) {
-		called = true
-		return nil, false, nil
-	})
-
 	msg := sessionsReq(t, "/proj")
-	if got := claudeSessionsReqCWD(msg); got != "/proj" {
-		t.Errorf("claudeSessionsReqCWD = %q, want /proj", got)
+
+	// First caller claims the slot and gets no rejection payload.
+	rejection, ok := d.beginClaudeSessionsScan(msg)
+	if !ok {
+		t.Fatal("first scan must claim the slot")
 	}
-	if called {
-		t.Error("no scan should have run")
+	if rejection.Error != "" {
+		t.Errorf("first scan returned a rejection %+v, want none", rejection)
+	}
+
+	// Second caller is refused while the first is still in flight.
+	rejection, ok = d.beginClaudeSessionsScan(msg)
+	if ok {
+		t.Fatal("a second concurrent scan must be refused")
+	}
+	if rejection.Error == "" {
+		t.Error("refusal must carry an Error the field can display")
+	}
+	// The rejection has to echo the CWD, or the TUI drops it as stale and sits
+	// on "Scanning…" until its own timeout instead of showing the reason.
+	if rejection.CWD != "/proj" {
+		t.Errorf("rejection CWD = %q, want /proj echoed", rejection.CWD)
+	}
+
+	// Releasing makes the slot reusable — otherwise one scan would disable the
+	// picker for the rest of the daemon's life.
+	d.sessionScanning.Store(false)
+	if _, ok := d.beginClaudeSessionsScan(msg); !ok {
+		t.Error("slot must be reusable once the in-flight scan releases it")
+	}
+	d.sessionScanning.Store(false)
+}
+
+// TestSpawnPane_SeedsSessionIDFromResumeTarget covers the seeding branch end to
+// end at the spawnPane level: a resume target must become the pane's session_id
+// rather than having a fresh UUID minted alongside it, or every downstream
+// consumer (restore probe, model/context readout, hook reconciliation) would be
+// looking at an id that never existed.
+func TestSpawnPane_SeedsSessionIDFromResumeTarget(t *testing.T) {
+	resumeID := "2db05609-f1d5-4576-b5b2-ff114519726b"
+	d := newTestDaemon(t)
+	withClaudePlugin(t, d)
+	stubHookSessionID(t, nil) // no hook file yet — the pane has just been created
+
+	pane := &Pane{
+		ID:          "pane-0000000a",
+		Type:        "claude-code",
+		PluginState: map[string]string{"resume_session_id": resumeID},
+	}
+	if err := d.spawnPane(pane, &fakeSession{}, false); err != nil {
+		t.Fatalf("spawnPane: %v", err)
+	}
+
+	if got := pane.PluginState["session_id"]; got != resumeID {
+		t.Errorf("session_id = %q, want the resume target %q (not a minted UUID)", got, resumeID)
 	}
 }
+
+// TestSpawnPane_RestartPrefersHookSessionOverStaleResumeTarget: Alt+R spawns
+// with restoring=false, so it takes the same branch as creation. A pane created
+// to resume session A, whose conversation later rotated to B via /clear, must
+// restart into B — replaying A would silently abandon the live conversation.
+func TestSpawnPane_RestartPrefersHookSessionOverStaleResumeTarget(t *testing.T) {
+	original := "2db05609-f1d5-4576-b5b2-ff114519726b"
+	rotated := "9f8e7d6c-1a2b-3c4d-5e6f-0a1b2c3d4e5f"
+	d := newTestDaemon(t)
+	withClaudePlugin(t, d)
+	stubHookSessionID(t, map[string]string{"pane-0000000a": rotated})
+
+	pane := &Pane{
+		ID:   "pane-0000000a",
+		Type: "claude-code",
+		PluginState: map[string]string{
+			"session_id":        original,
+			"resume_session_id": original,
+		},
+	}
+	if err := d.spawnPane(pane, &fakeSession{}, false); err != nil {
+		t.Fatalf("spawnPane: %v", err)
+	}
+
+	if got := pane.PluginState["session_id"]; got != rotated {
+		t.Errorf("session_id = %q, want the hook-recorded %q", got, rotated)
+	}
+	if got, ok := pane.PluginState["resume_session_id"]; ok {
+		t.Errorf("resume_session_id = %q, want it retired once the pane has its own session", got)
+	}
+}
+
+// NOTE: handleCreatePane and handleReplacePane both call applyResumeSessionID,
+// but neither is covered end to end here — both construct their PTY through
+// apty.New() rather than the newSessionFn seam, so driving them would spawn a
+// real process. The same gap exists for every other handler in this package.
+// applyResumeSessionID's own behaviour is pinned by the tests above; what is
+// untested is only that the two call sites keep calling it.
 
 // claudeResumePlugin mirrors the shipped claude-code plugin's spawn config.
 func claudeResumePlugin() *plugin.PanePlugin {

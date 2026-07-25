@@ -335,6 +335,121 @@ func TestHandleCreatePaneSetupKey_TabToSessionFieldScans(t *testing.T) {
 	}
 }
 
+// sessionKeyModel puts the cursor on the session field with rows loaded, ready
+// to be driven through the real key dispatcher.
+func sessionKeyModel(t *testing.T, rows ...ipc.ClaudeSessionInfo) (Model, *plugin.PanePlugin) {
+	t.Helper()
+	m := renderableSessionModel(t, rows...)
+	p := m.pluginRegistry.Get("ai")
+	m.setupFieldCursor = 1 // cwd = 0, session = 1
+	if kind, _ := m.setupFieldKind(p, m.setupFieldCursor); kind != "session" {
+		t.Fatalf("cursor is on %q, want the session field", kind)
+	}
+	return m, p
+}
+
+// The following mirror the kube field's TestSetupKubeKey_* set: they drive
+// handleCreatePaneSetupKey rather than calling the movement helpers directly,
+// so a routing regression (the session case dropped from the kind switch) is
+// caught rather than passing on the helpers alone.
+
+func TestSetupSessionKey_DownMovesAndUpClampsAtTop(t *testing.T) {
+	m, _ := sessionKeyModel(t, sessionRow("s1", "one", ""), sessionRow("s2", "two", ""))
+
+	next, _ := m.handleCreatePaneSetupKey(tea.KeyPressMsg{Code: tea.KeyDown})
+	if got := next.(Model).sessionCursor; got != 1 {
+		t.Errorf("cursor after down = %d, want 1", got)
+	}
+
+	m = next.(Model)
+	next, _ = m.handleCreatePaneSetupKey(tea.KeyPressMsg{Code: tea.KeyUp})
+	if got := next.(Model).sessionCursor; got != 0 {
+		t.Errorf("cursor after up = %d, want 0", got)
+	}
+
+	// Already at the top: up must clamp, not wrap onto the last row.
+	m = next.(Model)
+	next, _ = m.handleCreatePaneSetupKey(tea.KeyPressMsg{Code: tea.KeyUp})
+	if got := next.(Model).sessionCursor; got != 0 {
+		t.Errorf("cursor after up at top = %d, want it clamped to 0", got)
+	}
+}
+
+func TestSetupSessionKey_DownClampsAtBottom(t *testing.T) {
+	m, _ := sessionKeyModel(t, sessionRow("s1", "one", ""))
+	m.sessionCursor = 1 // last row (0 = New session, 1 = s1)
+
+	next, _ := m.handleCreatePaneSetupKey(tea.KeyPressMsg{Code: tea.KeyDown})
+	if got := next.(Model).sessionCursor; got != 1 {
+		t.Errorf("cursor after down at bottom = %d, want it clamped to 1", got)
+	}
+}
+
+func TestSetupSessionKey_HomeEndAndPaging(t *testing.T) {
+	rows := make([]ipc.ClaudeSessionInfo, 40)
+	for i := range rows {
+		rows[i] = sessionRow("s", "row", "")
+	}
+	m, _ := sessionKeyModel(t, rows...)
+	last := m.sessionRowCount() - 1
+
+	next, _ := m.handleCreatePaneSetupKey(tea.KeyPressMsg{Code: tea.KeyEnd})
+	if got := next.(Model).sessionCursor; got != last {
+		t.Errorf("cursor after End = %d, want %d", got, last)
+	}
+
+	m = next.(Model)
+	next, _ = m.handleCreatePaneSetupKey(tea.KeyPressMsg{Code: tea.KeyHome})
+	if got := next.(Model).sessionCursor; got != 0 {
+		t.Errorf("cursor after Home = %d, want 0", got)
+	}
+
+	m = next.(Model)
+	next, _ = m.handleCreatePaneSetupKey(tea.KeyPressMsg{Code: tea.KeyPgDown})
+	if got := next.(Model).sessionCursor; got != m.sessionVisibleRows() {
+		t.Errorf("cursor after PgDn = %d, want one page (%d)", got, m.sessionVisibleRows())
+	}
+}
+
+func TestSetupSessionKey_EnterOnFreeRowCommitsAndSubmits(t *testing.T) {
+	m, _ := sessionKeyModel(t, sessionRow("s1", "resumable", ""))
+	m.sessionCursor = 1
+
+	next, _ := m.handleCreatePaneSetupKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	got := next.(Model)
+
+	if got.selectedSessionID != "s1" {
+		t.Errorf("selectedSessionID = %q, want s1", got.selectedSessionID)
+	}
+	if got.createPaneStep != 3 {
+		t.Errorf("createPaneStep = %d, want 3 (submitted through to split selection)", got.createPaneStep)
+	}
+}
+
+// TestSetupSessionKey_EnterOnBlockedRowIsRefused is the guard's UI half: Enter
+// on a session another live pane holds must neither commit nor advance the
+// dialog, while the cursor stays put so the footer can keep explaining why.
+func TestSetupSessionKey_EnterOnBlockedRowIsRefused(t *testing.T) {
+	m, _ := sessionKeyModel(t,
+		sessionRow("free", "free one", ""),
+		sessionRow("busy", "held elsewhere", "pane-0000000a"),
+	)
+	m.sessionCursor = 2 // the blocked row
+
+	next, _ := m.handleCreatePaneSetupKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	got := next.(Model)
+
+	if got.selectedSessionID != "" {
+		t.Errorf("selectedSessionID = %q, want empty — the row is blocked", got.selectedSessionID)
+	}
+	if got.createPaneStep == 3 {
+		t.Error("dialog advanced past a refused selection")
+	}
+	if got.sessionCursor != 2 {
+		t.Errorf("cursor moved to %d; it must stay on the blocked row so the footer explains it", got.sessionCursor)
+	}
+}
+
 // TestEnsureSessionScan_RetriesAfterFailure: the timed-out message tells the
 // user the daemon may not be running, which invites a retry — refusing it would
 // leave the field stuck until they navigate away and back.

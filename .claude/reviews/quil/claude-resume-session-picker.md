@@ -1,9 +1,13 @@
 # Code Review State: quil / claude-resume-session-picker
 
 Last reviewed: 2026-07-26
-Rounds completed: 1
+Rounds completed: 2
 
 ## Resolved (fixed in code; do not re-raise)
+- [greptile/P1] Session claim was check-then-set across dispatch goroutines, and a pane that had claimed a session but not yet spawned was invisible to the running-only occupancy test — two concurrent creates could both resume one transcript. Added `Daemon.resumeClaimMu` around the check+write, split `claimedClaudeSessionIDs` (admission: live + pending claims) from `liveClaudeSessionIDs` (display: running only), and moved `handleReplacePane`'s claim after the pane is published. Covered by `TestApplyResumeSessionID_ConcurrentCreatesClaimOnce`, which fails with 3 winners when the lock is removed — round 2
+- [qa/1] `TestHandleClaudeSessionsReq_SingleFlight` never called the handler — vacuous, would pass with the guard deleted. Split `beginClaudeSessionsScan` out (ipc.Conn has no exported constructor) and the test now drives claim / refuse-with-echoed-CWD / release-and-reclaim — round 2
+- [qa/2] `handleSetupSessionKey` had no dispatcher-level coverage; added `TestSetupSessionKey_*` mirroring the kube set (clamping, Home/End/PgDn, Enter on free vs blocked rows) — round 2
+- [qa/4] `spawnPane`'s seeding branch was untested; added direct tests. The first version passed while proving nothing because `Daemon.New` leaves the registry empty, so `claude-code` resolved to the terminal built-in and the `preassign_id` branch never ran — the tests now load the shipped defaults — round 2
 - [security/M1 + code-quality/8] `claude_sessions_req` had no single-flight; added `Daemon.sessionScanning` atomic mirroring `updateStaging`, rejection echoes the CWD — round 1
 - [security/M2 + code-quality/7] "already open in another pane" was enforced only in the TUI; `applyResumeSessionID` is now a Daemon method that consults `liveClaudeSessionIDs()` and drops the id on conflict, closing both the bypass and the TOCTOU — round 1
 - [security/M3] `pane.PluginState` read without `PluginMu` in `resolveSpawnArgs`; the resume id is now a parameter captured under the lock by `spawnPane` — round 1
@@ -31,4 +35,5 @@ Rounds completed: 1
 ## Dismissed (acknowledged, will not fix; agents may escalate with explicit justification)
 - [rules/3 + security-adjacent] No timeout/cancellation on discovery filesystem I/O — deferred rather than dismissed: filed as `techdebt/3-3-discovery-packages-have-no-io-timeout.md` because the same gap exists in `gitdiscover` and `kubediscover`, and the fix belongs in one shared pass over all three rather than in this feature (round 1)
 - [code-quality/suggestion] Session cursor requires an explicit Enter while the kube field commits on cursor move — kept deliberately: resuming the wrong conversation is costlier than selecting the wrong kube context, and the collapsed summary line always shows the committed value so the state is never misrepresented (round 1)
+- [qa/5] `handleCreatePane` / `handleReplacePane` have no end-to-end coverage of the `applyResumeSessionID` call site — both build their PTY via `apty.New()` rather than the `newSessionFn` seam, so driving them spawns a real process. Same gap as every other handler in the package; recorded as a code comment rather than papered over with a test that cannot fail (round 2)
 - [code-quality/suggestion] `onSetupFieldFocused` never runs for the initially-focused field — benign today (index 0 is the CWD field for every plugin that opts into `sessions`, which now requires `prompts_cwd`); revisit if a future field arrangement puts a scanning field first (round 1)

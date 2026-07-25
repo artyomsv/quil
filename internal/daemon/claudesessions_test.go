@@ -2,7 +2,9 @@ package daemon
 
 import (
 	"errors"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -272,6 +274,85 @@ func TestApplyResumeSessionID_RefusesSessionHeldByLivePane(t *testing.T) {
 
 	if got := fresh.PluginState["resume_session_id"]; got != "" {
 		t.Errorf("resume_session_id = %q, want empty — the session is held by a live pane", got)
+	}
+}
+
+// TestApplyResumeSessionID_RefusesSessionClaimedByUnspawnedPane is the race a
+// running-only occupancy test cannot see: a pane created moments ago has
+// claimed a session but has no PTY yet, so it looks exactly like "not running".
+// Two clients creating panes for the same session on their own dispatch
+// goroutines would both find it free and both spawn `claude --resume` on one
+// transcript.
+func TestApplyResumeSessionID_RefusesSessionClaimedByUnspawnedPane(t *testing.T) {
+	wanted := "2db05609-f1d5-4576-b5b2-ff114519726b"
+	d := newTestDaemon(t)
+	stubHookSessionID(t, nil)
+
+	// First pane claimed the session but has not spawned — no PTY.
+	claimed := &Pane{
+		ID: "pane-0000000a", TabID: "tab-0000000a", Type: "claude-code",
+		PluginState: map[string]string{"resume_session_id": wanted},
+	}
+	d.session.RestoreTab(
+		&Tab{ID: "tab-0000000a", Name: "A", Panes: []string{"pane-0000000a"}},
+		[]*Pane{claimed},
+	)
+
+	second := &Pane{ID: "pane-0000000b"}
+	d.applyResumeSessionID(second, wanted)
+
+	if got := second.PluginState["resume_session_id"]; got != "" {
+		t.Errorf("resume_session_id = %q, want empty — the session is already claimed by an unspawned pane", got)
+	}
+	// The picker's own display still only marks RUNNING panes, so an unspawned
+	// claim must not surface as "open in another pane".
+	if _, shown := d.liveClaudeSessionIDs()[wanted]; shown {
+		t.Error("an unspawned claim must not render as in-use in the picker")
+	}
+}
+
+// TestApplyResumeSessionID_ConcurrentCreatesClaimOnce drives the actual race:
+// N goroutines racing to claim one session must produce exactly one winner.
+func TestApplyResumeSessionID_ConcurrentCreatesClaimOnce(t *testing.T) {
+	wanted := "2db05609-f1d5-4576-b5b2-ff114519726b"
+	d := newTestDaemon(t)
+	stubHookSessionID(t, nil)
+
+	const racers = 8
+	panes := make([]*Pane, racers)
+	ids := make([]string, racers)
+	for i := range panes {
+		ids[i] = fmt.Sprintf("pane-0000000%x", i)
+		panes[i] = &Pane{ID: ids[i], TabID: "tab-0000000a", Type: "claude-code"}
+	}
+	d.session.RestoreTab(
+		&Tab{ID: "tab-0000000a", Name: "A", Panes: ids},
+		panes,
+	)
+
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for _, p := range panes {
+		wg.Add(1)
+		go func(p *Pane) {
+			defer wg.Done()
+			<-start
+			d.applyResumeSessionID(p, wanted)
+		}(p)
+	}
+	close(start)
+	wg.Wait()
+
+	winners := 0
+	for _, p := range panes {
+		p.PluginMu.Lock()
+		if p.PluginState["resume_session_id"] == wanted {
+			winners++
+		}
+		p.PluginMu.Unlock()
+	}
+	if winners != 1 {
+		t.Errorf("%d panes claimed the same session, want exactly 1 — concurrent claims must be serialized", winners)
 	}
 }
 

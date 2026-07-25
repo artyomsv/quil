@@ -100,6 +100,14 @@ type Daemon struct {
 	// it — so an unguarded handler lets a looping client accumulate worker
 	// goroutines until the daemon is starved.
 	sessionScanning atomic.Bool
+
+	// resumeClaimMu serializes the claim of a Claude session by a new pane.
+	// The occupancy test and the write that acts on it must be one atomic
+	// step: handleCreatePane runs on the requesting conn's dispatch
+	// goroutine, so two clients creating panes for the same session would
+	// otherwise both observe it free and both spawn `claude --resume` on one
+	// transcript — the corruption this feature exists to prevent.
+	resumeClaimMu sync.Mutex
 }
 
 func New(cfg config.Config) *Daemon {
@@ -1187,7 +1195,6 @@ func (d *Daemon) handleReplacePane(payload ipc.CreatePanePayload, cwd, paneType 
 	newPane.Type = paneType
 	newPane.InstanceName = payload.InstanceName
 	newPane.InstanceArgs = payload.InstanceArgs
-	d.applyResumeSessionID(newPane, payload.ResumeSessionID)
 	log.Printf("pane replace: %s -> %s (type=%s)", payload.ReplacePaneID, newPane.ID, paneType)
 
 	// Atomically swap old → new in the tab's pane list
@@ -1198,6 +1205,11 @@ func (d *Daemon) handleReplacePane(payload ipc.CreatePanePayload, cwd, paneType 
 	// The old pane is no longer reachable via the session — clean up its
 	// hook artifacts so the spool watcher stops re-polling a dead file.
 	d.cleanupPaneArtifacts(payload.ReplacePaneID)
+
+	// Claim the resume target only once the pane is published, so the claim is
+	// visible to a create racing on the same session (the occupancy scan walks
+	// the session maps).
+	d.applyResumeSessionID(newPane, payload.ResumeSessionID)
 
 	ptySession := apty.New()
 	if err := d.spawnPane(newPane, ptySession, false); err != nil {

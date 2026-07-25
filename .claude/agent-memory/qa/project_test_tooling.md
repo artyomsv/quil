@@ -14,3 +14,10 @@ All tests run via Docker through `./scripts/dev.sh test` (uses `golang:1.25` ima
 
 **Why:** No local Go installation — Docker-first tooling policy per `local-environment.md`.
 **How to apply:** Always use `./scripts/dev.sh test` when running tests. Never suggest `go test` as a bare command.
+
+## Transient bind-mount glitches on this Windows host
+
+Direct `docker run -v "$(pwd -W):/src" ...` against the repo on this Windows host occasionally serves a stale/inconsistent view of the source tree to a freshly-started container: observed a phantom `go vet` error for a nonexistent file (`open internal/tui/zz_tmp_height_check_test.go: no such file or directory`) and a phantom build failure in a package whose test file appeared to have an old function signature that didn't match the current on-disk source — both vanished on an immediate retry of the exact same command with no code changes in between.
+
+**Why:** Docker Desktop's Windows file-sharing layer (gRPC-FUSE/VirtioFS) for bind mounts can desync briefly, especially right after other containers have just read/written the same mounted path.
+**How to apply:** Never report a build/vet/test failure from a single docker run as real without retrying it once first (ideally with `-count=1` for tests to bypass any cache). If a failure disappears on retry with zero source changes, it was the bind-mount glitch, not a code issue — don't mention it in a QA report except perhaps as a footnote. If it reproduces on retry, it's real.

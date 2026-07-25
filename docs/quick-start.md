@@ -57,12 +57,13 @@ Press `Ctrl+N`. The plugin picker opens with categories:
 Pick **AI Assistant → Claude Code** (if you have `claude` on your `PATH`). The setup dialog asks for:
 
 - A **working directory** — the active pane's CWD is pre-filled. Tab/arrows navigate, Enter descends, Backspace goes up.
+- A **session** — `New session` by default. Tab onto this field and it expands into the sessions already recorded for the folder above, newest first, each titled with the first prompt you typed in it. Pick one to continue that conversation instead of starting cold.
 - A **permission mode** toggle — two mutually-exclusive radio buttons:
   - `--dangerously-skip-permissions` (unattended)
   - `--enable-auto-mode` (safer alternative)
   - (Pick neither for the standard interactive flow)
 
-Finish the dialog. Quil spawns Claude Code with `--session-id <new-uuid>` so the session is uniquely addressable, and the pane fills the tab.
+Finish the dialog. Quil spawns Claude Code with `--session-id <new-uuid>` so the session is uniquely addressable — or `--resume <id>` if you picked an existing session — and the pane fills the tab.
 
 ## Save your workspace
 

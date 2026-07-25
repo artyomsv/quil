@@ -92,6 +92,48 @@ func TestEnsureDefaultPlugins_ClaudeCodeRecordsHistory(t *testing.T) {
 	}
 }
 
+// TestEnsureDefaultPlugins_ClaudeCodeOffersSessions guards the setup dialog's
+// resume picker: without this opt-in the field never renders, and the feature
+// silently disappears from a shipped build.
+func TestEnsureDefaultPlugins_ClaudeCodeOffersSessions(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := EnsureDefaultPlugins(dir); err != nil {
+		t.Fatalf("EnsureDefaultPlugins: %v", err)
+	}
+	p, err := loadPluginTOML(filepath.Join(dir, "claude-code.toml"))
+	if err != nil {
+		t.Fatalf("load claude-code.toml: %v", err)
+	}
+	if p.Command.Sessions != "claude" {
+		t.Errorf("Command.Sessions = %q, want \"claude\"", p.Command.Sessions)
+	}
+	// The picker lists sessions for the directory the dialog selects, so the
+	// CWD prompt is a prerequisite.
+	if !p.Command.PromptsCWD {
+		t.Error("sessions picker requires PromptsCWD, which is now false")
+	}
+}
+
+// TestLoadPluginTOML_UnknownSessionsSource fails the load rather than silently
+// ignoring a typo — same contract as an unknown discover mode.
+func TestLoadPluginTOML_UnknownSessionsSource(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bad.toml")
+	content := `[plugin]
+name = "bad"
+
+[command]
+cmd = "bad"
+sessions = "opencode"
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := loadPluginTOML(path); err == nil {
+		t.Fatal("expected an error for an unknown sessions source, got nil")
+	}
+}
+
 func TestEnsureDefaultPlugins_WritesLazygit(t *testing.T) {
 	dir := t.TempDir()
 	if _, err := EnsureDefaultPlugins(dir); err != nil {

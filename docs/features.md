@@ -25,6 +25,7 @@ A capability-by-capability tour of what Quil does. For configuration knobs, see 
 - [Typed panes & plugins](#typed-panes--plugins)
   - [Built-in plugins](#built-in-plugins)
   - [Pane setup dialog](#pane-setup-dialog)
+  - [Resume a past session at pane creation](#resume-a-past-session-at-pane-creation)
   - [Custom plugins via TOML](#custom-plugins-via-toml)
   - [Lazygit integration](#lazygit-integration)
   - [k9s integration](#k9s-integration)
@@ -204,6 +205,27 @@ Plugins that opt in via `prompts_cwd = true` or `[[command.toggles]]` get a setu
 - One **checkbox per runtime toggle** declared in the plugin TOML. Toggle args are appended to `InstanceArgs`, persist across daemon restarts, and are off by default. Toggles with the same `group` value behave as mutually-exclusive radio buttons.
 
 The shipped `claude-code` plugin uses both: it asks for the working directory (preserving project-specific `.claude/` context that Claude Code ties to the directory) and offers radio-button toggles for permission mode (`--dangerously-skip-permissions` vs `--enable-auto-mode` vs neither).
+
+### Resume a past session at pane creation
+
+Claude Code panes can start **inside an earlier conversation** instead of a fresh one. The setup dialog's **Session** field lists the sessions recorded for the folder you selected — newest first, each row showing a relative age and the first prompt you typed in it:
+
+```
+> Session:
+  > New session
+      2h ago   Add resume option to claude pane setup dialog
+      1d ago   fix(update): release only our own apply lock
+      3d ago   I would like to add more mouse controls. For e…
+    2/22  ↑↓ PgUp/PgDn move  Enter select
+```
+
+The field stays collapsed to one line until you `Tab` onto it, so creating a normal fresh pane looks and costs exactly what it did before — the listing is only fetched when you actually go looking for it.
+
+Sessions **already open in another pane** are shown greyed with an `[open in 2.Claude]` marker and cannot be selected: two `claude` processes attached to one transcript would overwrite each other's history. Changing the working directory clears the choice and rescans, since a session from another project is not a meaningful resume target.
+
+Picking a session spawns `claude --resume <id>`; permission-mode and `--chrome` toggles still apply. From then on the pane behaves like any other — including surviving a daemon restart back into the same conversation.
+
+Beats `--resume` inside the pane on two counts: you see richer rows (real titles, ages) without waiting for Claude to boot its own picker, and Quil knows which session the pane is on from the first instant, so restore, input history, and the model/context status segment are all correct immediately.
 
 ### Custom plugins via TOML
 

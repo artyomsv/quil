@@ -1,0 +1,347 @@
+// Package claudesessions enumerates the Claude Code sessions recorded for a
+// working directory. Claude writes one JSONL transcript per session under
+// ~/.claude/projects/<escaped-cwd>/<session-id>.jsonl; this package maps a CWD
+// to that directory and reads a short, human-recognizable title out of each
+// transcript.
+//
+// Pure reads with no process spawning and no network I/O: every failure
+// (missing directory, unreadable file, malformed JSON) degrades to "fewer
+// sessions" rather than an error, so session discovery can never block pane
+// creation. Titles are sanitized of control characters — a transcript records
+// whatever the user typed, and the value is rendered into a TUI.
+package claudesessions
+
+import (
+	"bytes"
+	"encoding/json"
+	"io"
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+	"unicode"
+	"unicode/utf16"
+)
+
+const (
+	// MaxSessions bounds how many sessions List returns. Claude never prunes
+	// transcripts, so a long-lived project accumulates hundreds; the newest
+	// ones are the only plausible resume targets and the cap keeps both the
+	// scan cost and the IPC frame bounded.
+	MaxSessions = 200
+
+	// MaxTitleRunes bounds a title before it reaches the wire. Consumers
+	// truncate again to their render width; this only stops a pasted wall of
+	// text from riding along in every response.
+	MaxTitleRunes = 240
+
+	// titleScanBytes caps how much of a transcript head is read while looking
+	// for the first typed prompt. Transcripts reach several MB, but the first
+	// human prompt sits near the top — the largest offset observed across this
+	// repo's 22 transcripts was byte 14442 in a 3 MB file, so 64 KB is a wide
+	// margin. A transcript whose first prompt falls outside the window simply
+	// yields no title.
+	titleScanBytes = 64 << 10
+)
+
+// Session is one Claude Code transcript discovered for a working directory.
+type Session struct {
+	// ID is the session UUID — the transcript's filename stem, and the value
+	// passed to `claude --resume`.
+	ID string
+	// Title is the first prompt the user typed in this session, sanitized and
+	// truncated. Empty when no typed prompt was found in the scanned head.
+	Title string
+	// Modified is the transcript file's modification time, i.e. when the
+	// session was last active.
+	Modified time.Time
+}
+
+// EscapeCWD mirrors Claude Code's per-project directory naming under
+// ~/.claude/projects/, transcribed from the claude binary (2026-07-05, v2.x):
+//
+//	t = cwd.replace(/[^a-zA-Z0-9]/g, "-")           // per UTF-16 code unit
+//	if (t.length <= 200) return t
+//	return t.slice(0, 200) + "-" + base36(abs(h))   // h = Java-31x hash
+//	// h: for each UTF-16 unit u: h = (h<<5) - h + u | 0   (int32 wrap)
+//
+// Operating per UTF-16 code unit (not rune) matches the JS regex without the
+// /u flag: an astral char (emoji) becomes TWO dashes. Note the hash argument
+// is the ORIGINAL cwd, not the dashified string.
+//
+// Getting this wrong fails quietly rather than loudly, which is why it is
+// transcribed rather than approximated: an earlier version replaced only
+// : \ / and _ and missed '.', so any CWD containing a dot probed a
+// nonexistent directory and every restored pane fell back to --continue,
+// all resuming the SAME session after a daemon restart (2026-07-05 incident).
+func EscapeCWD(cwd string) string {
+	const maxLen = 200 // claude's truncation threshold
+	units := utf16.Encode([]rune(cwd))
+	b := make([]byte, len(units))
+	for i, u := range units {
+		switch {
+		case u >= 'a' && u <= 'z', u >= 'A' && u <= 'Z', u >= '0' && u <= '9':
+			b[i] = byte(u)
+		default:
+			b[i] = '-'
+		}
+	}
+	t := string(b)
+	if len(t) <= maxLen {
+		return t
+	}
+	var h int32
+	for _, u := range units {
+		h = (h << 5) - h + int32(u) // int32 wrap == JS |0
+	}
+	abs := int64(h)
+	if abs < 0 {
+		abs = -abs // JS Math.abs; int64 widening handles MinInt32 exactly
+	}
+	return t[:maxLen] + "-" + strconv.FormatInt(abs, 36)
+}
+
+// ProjectDir returns the absolute directory Claude stores this CWD's session
+// transcripts in, or "" when the user's home directory cannot be resolved.
+func ProjectDir(cwd string) string {
+	if cwd == "" {
+		return ""
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".claude", "projects", EscapeCWD(cwd))
+}
+
+// TranscriptPath returns the absolute path of one session's transcript, or ""
+// when the home directory is unavailable or either argument is empty.
+func TranscriptPath(cwd, sessionID string) string {
+	dir := ProjectDir(cwd)
+	if dir == "" || sessionID == "" {
+		return ""
+	}
+	return filepath.Join(dir, sessionID+".jsonl")
+}
+
+// List returns the sessions recorded for cwd, newest first, capped at
+// MaxSessions. truncated reports whether older sessions were dropped by that
+// cap, so callers can say so rather than inferring it from a full-looking
+// result (a directory holding exactly MaxSessions is not truncated).
+//
+// A CWD Claude has never been run in has no project directory; that is a normal
+// state, not an error, and yields an empty slice with a nil error. Individual
+// unreadable transcripts are skipped rather than failing the whole listing.
+func List(cwd string) (sessions []Session, truncated bool, err error) {
+	dir := ProjectDir(cwd)
+	if dir == "" {
+		return nil, false, nil
+	}
+	return listDir(dir)
+}
+
+// listDir is the filesystem half of List, split out so tests can point it at a
+// t.TempDir() instead of depending on the real home directory.
+func listDir(dir string) (sessions []Session, truncated bool, err error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+
+	type candidate struct {
+		id   string
+		path string
+		info os.FileInfo
+	}
+	candidates := make([]candidate, 0, len(entries))
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), ".jsonl") {
+			continue
+		}
+		// The entry must be a REGULAR file, which rules out two things the
+		// suffix alone does not. Session UUIDs also appear as sibling
+		// DIRECTORIES (claude keeps per-session scratch state there). And
+		// DirEntry.Info() reports lstat data, so a symlink fails IsRegular
+		// here rather than being followed by the os.Open in readTitle —
+		// matching the symlink discipline in persist/notes.go and
+		// opencodehook.ReadPersistedSessionID. That also keeps a
+		// symlink-to-FIFO from parking the scan in open(2) forever.
+		info, err := e.Info()
+		if err != nil || !info.Mode().IsRegular() || info.Size() == 0 {
+			continue
+		}
+		candidates = append(candidates, candidate{
+			id:   strings.TrimSuffix(e.Name(), ".jsonl"),
+			path: filepath.Join(dir, e.Name()),
+			info: info,
+		})
+	}
+
+	// Newest first. Ties break on ID so the order is deterministic — two
+	// transcripts can share an mtime at filesystem timestamp granularity.
+	sort.Slice(candidates, func(i, j int) bool {
+		ti, tj := candidates[i].info.ModTime(), candidates[j].info.ModTime()
+		if ti.Equal(tj) {
+			return candidates[i].id < candidates[j].id
+		}
+		return ti.After(tj)
+	})
+	if len(candidates) > MaxSessions {
+		candidates = candidates[:MaxSessions]
+		truncated = true
+	}
+
+	// Title extraction is deferred until after the cap so a project with 500
+	// transcripts only pays for the 200 that can actually be shown.
+	out := make([]Session, 0, len(candidates))
+	for _, c := range candidates {
+		out = append(out, Session{
+			ID:       c.id,
+			Title:    readTitle(c.path),
+			Modified: c.info.ModTime(),
+		})
+	}
+	return out, truncated, nil
+}
+
+// transcriptLine mirrors the subset of a transcript entry needed to recognize
+// a typed human prompt and pull its text. Extra fields are ignored.
+type transcriptLine struct {
+	Type         string `json:"type"`
+	IsSidechain  bool   `json:"isSidechain"`
+	PromptSource string `json:"promptSource"`
+	Message      struct {
+		// Content is a string for a plain prompt and an array of content
+		// blocks when the prompt carries attachments — both shapes occur in
+		// the wild, so it is decoded in a second pass.
+		Content json.RawMessage `json:"content"`
+	} `json:"message"`
+}
+
+// readTitle returns the first typed human prompt in the head of a transcript,
+// sanitized to a single line. Any failure yields "" — a session with no title
+// still lists, it just displays by ID.
+func readTitle(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+
+	buf, err := io.ReadAll(io.LimitReader(f, titleScanBytes))
+	if err != nil || len(buf) == 0 {
+		return ""
+	}
+	lines := bytes.Split(buf, []byte{'\n'})
+	// A filled window almost certainly ends mid-line; that trailing fragment
+	// would fail to parse anyway, but dropping it explicitly keeps the intent
+	// clear. Only when the window ends ON a newline is the last element a
+	// complete line (in fact the empty string after it) — a file exactly
+	// titleScanBytes long with no trailing newline would otherwise lose a
+	// perfectly good final line.
+	if len(buf) == titleScanBytes && buf[len(buf)-1] != '\n' && len(lines) > 0 {
+		lines = lines[:len(lines)-1]
+	}
+
+	for _, line := range lines {
+		// Cheap pre-filter: typed prompts are a small minority of lines and a
+		// full Unmarshal per line is the expensive part of this scan.
+		if !bytes.Contains(line, []byte(`"promptSource":"typed"`)) {
+			continue
+		}
+		var tl transcriptLine
+		if err := json.Unmarshal(bytes.TrimSpace(line), &tl); err != nil {
+			continue
+		}
+		// Sidechain entries belong to subagents, not the user's conversation.
+		if tl.Type != "user" || tl.IsSidechain || tl.PromptSource != "typed" {
+			continue
+		}
+		if text := sanitizeTitle(contentText(tl.Message.Content)); text != "" {
+			return text
+		}
+	}
+	return ""
+}
+
+// contentText flattens a message content field into plain text, accepting both
+// the bare-string shape and the content-block array shape.
+func contentText(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(raw, &blocks); err != nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, blk := range blocks {
+		if blk.Type != "text" || blk.Text == "" {
+			continue
+		}
+		if b.Len() > 0 {
+			b.WriteByte(' ')
+		}
+		b.WriteString(blk.Text)
+		// One block is enough for a title; stop before concatenating a whole
+		// multi-block prompt just to throw most of it away at truncation.
+		if b.Len() >= MaxTitleRunes {
+			break
+		}
+	}
+	return b.String()
+}
+
+// sanitizeTitle collapses a prompt to a single clean line, then truncates it
+// on a rune boundary.
+//
+// Whitespace controls (newline, tab, CR) become spaces so the words either side
+// stay separated; every other control character — notably ESC, the lead byte of
+// an ANSI sequence — is dropped outright, so a prompt containing a pasted
+// terminal capture cannot inject control codes into the TUI. Dropping rather
+// than space-substituting matters for readability: substituting would split
+// "\x1b[31mtext" into two visible fragments.
+//
+// Unicode format characters (category Cf) are dropped too, which IsControl does
+// NOT cover: a bidi override or isolate (U+202A–U+202E, U+2066–U+2069) survives
+// both IsControl and strings.Fields, and would render the row reversed while
+// still measuring its pre-override width — Trojan-source-style display spoofing
+// that could have you resume a different session than the one you read. A user
+// only has to paste web or repo content into their first prompt to trigger it.
+// ZWSP goes for the same reason: invisible, but it defeats whitespace collapse.
+// Exported so the TUI can re-apply it to titles arriving over IPC — a title is
+// user-authored text that reaches the screen without passing through the VT
+// emulator, so it is worth sanitizing on both sides of the socket.
+func SanitizeTitle(s string) string { return sanitizeTitle(s) }
+
+func sanitizeTitle(s string) string {
+	mapped := strings.Map(func(r rune) rune {
+		switch {
+		case r == '\n' || r == '\r' || r == '\t':
+			return ' '
+		case unicode.IsControl(r), unicode.Is(unicode.Cf, r):
+			return -1
+		default:
+			return r
+		}
+	}, s)
+	title := strings.Join(strings.Fields(mapped), " ")
+
+	runes := []rune(title)
+	if len(runes) > MaxTitleRunes {
+		title = strings.TrimSpace(string(runes[:MaxTitleRunes])) + "…"
+	}
+	return title
+}

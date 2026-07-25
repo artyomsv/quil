@@ -313,6 +313,7 @@ type tomlPlugin struct {
 		RawKeys       []string `toml:"raw_keys"`
 		Discover      string   `toml:"discover"`
 		RecordHistory bool     `toml:"record_history"`
+		Sessions      string   `toml:"sessions"`
 	} `toml:"command"`
 	Persistence struct {
 		Strategy    string `toml:"strategy"`
@@ -380,6 +381,20 @@ func loadPluginTOML(path string) (*PanePlugin, error) {
 		return nil, fmt.Errorf("plugin %q: unknown discover mode %q", tp.Plugin.Name, tp.Command.Discover)
 	}
 
+	switch tp.Command.Sessions {
+	case "", "claude":
+		// valid
+	default:
+		return nil, fmt.Errorf("plugin %q: unknown sessions source %q", tp.Plugin.Name, tp.Command.Sessions)
+	}
+	// The session listing is scoped to the directory the setup dialog selects,
+	// so without that prompt the field can only ever render an empty list and a
+	// misleading "no earlier sessions for this folder". Reject the combination
+	// rather than shipping a dead control.
+	if tp.Command.Sessions != "" && !tp.Command.PromptsCWD {
+		return nil, fmt.Errorf("plugin %q: sessions = %q requires prompts_cwd = true (the listing is scoped to the selected directory)", tp.Plugin.Name, tp.Command.Sessions)
+	}
+
 	displayName := tp.Plugin.DisplayName
 	if displayName == "" {
 		displayName = tp.Plugin.Name
@@ -411,6 +426,7 @@ func loadPluginTOML(path string) (*PanePlugin, error) {
 			RawKeys:          rawKeys,
 			Discover:         tp.Command.Discover,
 			RecordHistory:    tp.Command.RecordHistory,
+			Sessions:         tp.Command.Sessions,
 		},
 		Persistence: PersistenceConfig{
 			Strategy:    tp.Persistence.Strategy,

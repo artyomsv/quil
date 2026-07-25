@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Claude Code panes can start inside an **earlier conversation** instead of a
+  fresh one. The pane setup dialog gains a **Session** field listing the
+  sessions recorded for the working directory you selected — newest first, each
+  row showing a relative age and the first prompt you typed in that session.
+  Picking one spawns `claude --resume <id>` in place of the usual
+  `--session-id <new-uuid>`; permission-mode and `--chrome` toggles still apply,
+  and the pane rejoins the normal restore machinery from the first instant.
+
+  The field stays collapsed to one line until focused and only fetches the
+  listing when you go looking for it, so creating an ordinary fresh pane is
+  unchanged and costs no extra I/O. Sessions already open in another live pane
+  are listed but blocked from selection — two `claude` processes attached to one
+  transcript overwrite each other's history. Changing the working directory
+  clears the choice and rescans.
+
+  Opt-in per pane type via the new `[command] sessions = "claude"` plugin key
+  (`claude-code.toml` schema_version 8 → 9, so the plugin-migration dialog will
+  offer the merge once on first launch).
+
 ## [1.41.1] - 2026-07-24
 
 ### Security

@@ -76,6 +76,21 @@ export const features: Feature[] = [
     ],
   },
   {
+    slug: "resume-session-picker",
+    icon: "book-open",
+    title: "Pick a past session when you open a pane",
+    blurb:
+      "New Claude Code pane, but continue yesterday's conversation. The setup dialog lists the sessions for that folder — titled with your own first prompt.",
+    category: "ai",
+    detail: [
+      "The Session field lists every Claude Code session recorded for the folder you picked, newest first, each row showing a relative age and the first prompt you typed in it.",
+      "Beats running --resume inside the pane: you get real titles and ages without waiting for Claude to boot its own picker, and Quil knows which session the pane is on from the first instant — so restore, input history, and the model/context readout are correct immediately.",
+      "Sessions already open in another pane are shown greyed and cannot be picked — two claude processes on one transcript would overwrite each other's history.",
+      "The field stays collapsed to a single line until you Tab onto it, and the listing is only fetched when you do, so creating an ordinary fresh pane costs nothing.",
+      "Opt-in per pane type via `[command] sessions = \"claude\"`; picking a session spawns `claude --resume <id>` with your permission-mode toggles still applied.",
+    ],
+  },
+  {
     slug: "mcp-server",
     image: "https://cdn.stukans.com/quil/screenshots/claude-code-quil-mcp-800.webp",
     icon: "zap",

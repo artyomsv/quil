@@ -6,7 +6,7 @@ name = "claude-code"
 display_name = "Claude Code"
 category = "ai"
 description = "AI coding assistant"
-schema_version = 8
+schema_version = 9
 
 [command]
 cmd = "claude"
@@ -14,6 +14,11 @@ cmd = "claude"
 detect = "claude --version"
 prompts_cwd = true  # ask user which folder to open Claude in (preserves .claude/ project context)
 record_history = true  # capture submitted prompts to <quilDir>/history/<paneID>.jsonl (hook producer)
+# Offer a "resume an existing session" pick-list in the setup dialog, listing
+# the transcripts Claude recorded for the directory chosen above. Picking one
+# spawns `--resume <id>` in place of the `--session-id <new-uuid>` start args
+# below. Set to "" to always start a fresh session.
+sessions = "claude"
 
 # Runtime toggles — rendered in the pane setup dialog.
 #

@@ -1276,6 +1276,7 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 	pluginName := m.selectedPlugin
 	instanceName := m.selectedInstanceName
 	instanceArgs := m.selectedInstanceArgs
+	resumeSessionID := m.selectedSessionID
 	cwd := m.selectedCWD
 	if cwd != "" {
 		m.lastSelectedCWD = cwd
@@ -1294,6 +1295,7 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 	m.cwdBrowseEntries = nil
 	m.cwdBrowseCursor = 0
 	m.cwdBrowseScroll = 0
+	m.resetSessionSelection()
 
 	tab := m.activeTabModel()
 	if tab == nil {
@@ -1334,12 +1336,13 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 
 		return m, func() tea.Msg {
 			msg, _ := ipc.NewMessage(ipc.MsgCreatePane, ipc.CreatePanePayload{
-				TabID:         tabID,
-				CWD:           cwd,
-				Type:          pluginName,
-				InstanceName:  instanceName,
-				InstanceArgs:  instanceArgs,
-				ReplacePaneID: oldPaneID,
+				TabID:           tabID,
+				CWD:             cwd,
+				Type:            pluginName,
+				InstanceName:    instanceName,
+				InstanceArgs:    instanceArgs,
+				ReplacePaneID:   oldPaneID,
+				ResumeSessionID: resumeSessionID,
 			})
 			client.Send(msg)
 			return nil
@@ -1366,11 +1369,12 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 
 	return m, func() tea.Msg {
 		msg, _ := ipc.NewMessage(ipc.MsgCreatePane, ipc.CreatePanePayload{
-			TabID:        tabID,
-			CWD:          cwd,
-			Type:         pluginName,
-			InstanceName: instanceName,
-			InstanceArgs: instanceArgs,
+			TabID:           tabID,
+			CWD:             cwd,
+			Type:            pluginName,
+			InstanceName:    instanceName,
+			InstanceArgs:    instanceArgs,
+			ResumeSessionID: resumeSessionID,
 		})
 		client.Send(msg)
 		return nil
@@ -2178,8 +2182,10 @@ func (m *Model) enterSetupOrSplit(p *plugin.PanePlugin) tea.Cmd {
 	m.recentCandidates = nil
 	m.kubeContexts = nil
 	m.kubeCursor = 0
+	m.resetSessionSelection()
 
-	needsSetup := p != nil && (p.Command.PromptsCWD || len(p.Command.Toggles) > 0 || p.Command.Discover == "kube")
+	needsSetup := p != nil && (p.Command.PromptsCWD || len(p.Command.Toggles) > 0 ||
+		p.Command.Discover == "kube" || p.Command.Sessions == "claude")
 	if !needsSetup {
 		m.createPaneStep = 3
 		return nil
@@ -2450,7 +2456,8 @@ func enforceToggleGroups(toggles []plugin.Toggle, states []bool, winner int) {
 }
 
 // setupFieldCount returns the number of focusable fields in the setup dialog:
-// CWD (if PromptsCWD) + one per toggle + 1 for the Continue button.
+// CWD (if PromptsCWD) + kube context (if discover="kube") + session picker (if
+// sessions="claude") + one per toggle + 1 for the Continue button.
 func (m Model) setupFieldCount(p *plugin.PanePlugin) int {
 	n := len(p.Command.Toggles) + 1 // +1 for Continue
 	if p.Command.PromptsCWD {
@@ -2459,11 +2466,18 @@ func (m Model) setupFieldCount(p *plugin.PanePlugin) int {
 	if p.Command.Discover == "kube" {
 		n++
 	}
+	if p.Command.Sessions == "claude" {
+		n++
+	}
 	return n
 }
 
 // setupFieldKind reports what field is at the given cursor index in the setup
-// dialog. Returns "cwd", "kube", "toggle" (with toggleIdx), or "continue".
+// dialog. Returns "cwd", "kube", "session", "toggle" (with toggleIdx), or
+// "continue".
+//
+// The session field sits after the CWD field because its contents depend on it:
+// the listing is scoped to the directory selected above.
 func (m Model) setupFieldKind(p *plugin.PanePlugin, cursor int) (kind string, toggleIdx int) {
 	i := cursor
 	if p.Command.PromptsCWD {
@@ -2475,6 +2489,12 @@ func (m Model) setupFieldKind(p *plugin.PanePlugin, cursor int) (kind string, to
 	if p.Command.Discover == "kube" {
 		if i == 0 {
 			return "kube", -1
+		}
+		i--
+	}
+	if p.Command.Sessions == "claude" {
+		if i == 0 {
+			return "session", -1
 		}
 		i--
 	}
@@ -2515,13 +2535,10 @@ func (m Model) handleCreatePaneSetupKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd
 		return m, tea.ClearScreen
 
 	case "tab":
-		m.setupFieldCursor = (m.setupFieldCursor + 1) % m.setupFieldCount(p)
-		return m, nil
+		return m.moveSetupCursor(p, 1)
 
 	case "shift+tab":
-		n := m.setupFieldCount(p)
-		m.setupFieldCursor = (m.setupFieldCursor - 1 + n) % n
-		return m, nil
+		return m.moveSetupCursor(p, -1)
 	}
 
 	// Field-specific behavior.
@@ -2547,30 +2564,114 @@ func (m Model) handleCreatePaneSetupKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd
 			}
 			return m, nil
 		case "up", "k":
-			n := m.setupFieldCount(p)
-			m.setupFieldCursor = (m.setupFieldCursor - 1 + n) % n
-			return m, nil
+			return m.moveSetupCursor(p, -1)
 		case "down", "j":
-			m.setupFieldCursor = (m.setupFieldCursor + 1) % m.setupFieldCount(p)
-			return m, nil
+			return m.moveSetupCursor(p, 1)
 		case "enter":
 			return m.submitSetupDialog(p)
 		}
 		return m, nil
 
+	case "session":
+		return m.handleSetupSessionKey(p, key)
+
 	case "continue":
 		switch key {
 		case "up", "k":
-			n := m.setupFieldCount(p)
-			m.setupFieldCursor = (m.setupFieldCursor - 1 + n) % n
-			return m, nil
+			return m.moveSetupCursor(p, -1)
 		case "down", "j":
-			m.setupFieldCursor = (m.setupFieldCursor + 1) % m.setupFieldCount(p)
-			return m, nil
+			return m.moveSetupCursor(p, 1)
 		case "enter":
 			return m.submitSetupDialog(p)
 		}
 		return m, nil
+	}
+	return m, nil
+}
+
+// moveSetupCursor advances the setup-dialog field cursor by delta (wrapping)
+// and runs whatever the newly focused field needs on arrival.
+//
+// Every cursor move routes through here — Tab, Shift+Tab, and the up/down keys
+// on the toggle and Continue rows — which is what makes the session field's
+// lazy scan fire no matter which direction the cursor arrives from.
+func (m Model) moveSetupCursor(p *plugin.PanePlugin, delta int) (tea.Model, tea.Cmd) {
+	n := m.setupFieldCount(p)
+	if n <= 0 {
+		return m, nil
+	}
+	m.setupFieldCursor = ((m.setupFieldCursor+delta)%n + n) % n
+	// Sequenced deliberately rather than inlined into the return: the call has
+	// a pointer receiver and mutates the same `m` being returned, and Go does
+	// not specify the evaluation order of a return statement's operands
+	// relative to a call among them. It happens to work inlined today; written
+	// this way it cannot silently stop working, which would leave the field
+	// stuck with a request in flight whose echoed CWD never matches.
+	cmd := m.onSetupFieldFocused(p)
+	return m, cmd
+}
+
+// onSetupFieldFocused runs the side effect the now-focused field needs. Only
+// the session picker has one: its listing is fetched on first focus rather than
+// when the dialog opens, so creating a pane with a fresh session — the common
+// case — performs no session I/O at all.
+func (m *Model) onSetupFieldFocused(p *plugin.PanePlugin) tea.Cmd {
+	if kind, _ := m.setupFieldKind(p, m.setupFieldCursor); kind == "session" {
+		return m.ensureSessionScan()
+	}
+	return nil
+}
+
+// handleSetupSessionKey processes keystrokes when the session picker is
+// focused. Row 0 is "New session" (no --resume); rows 1..N are the sessions
+// recorded for the selected directory, newest first.
+//
+// Enter on a selectable row commits it and submits the dialog, matching the
+// kube field. Enter on a row another live pane already holds is refused — the
+// cursor still lands there so the footer can explain why.
+func (m Model) handleSetupSessionKey(p *plugin.PanePlugin, key string) (tea.Model, tea.Cmd) {
+	last := m.sessionRowCount() - 1
+	// Paging matters more here than in the directory browser: a long-lived
+	// project can hold 200 sessions, and arrow-only navigation would cost 200
+	// keypresses to reach the oldest.
+	page := m.sessionVisibleRows()
+
+	move := func(to int) (tea.Model, tea.Cmd) {
+		if to < 0 {
+			to = 0
+		}
+		if to > last {
+			to = last
+		}
+		m.sessionCursor = to
+		m.adjustSessionScroll()
+		return m, nil
+	}
+
+	switch key {
+	case "up", "k":
+		return move(m.sessionCursor - 1)
+
+	case "down", "j":
+		return move(m.sessionCursor + 1)
+
+	case "pgup":
+		return move(m.sessionCursor - page)
+
+	case "pgdown":
+		return move(m.sessionCursor + page)
+
+	case "home":
+		return move(0)
+
+	case "end":
+		return move(last)
+
+	case "enter":
+		if !m.commitSessionSelection() {
+			return m, nil
+		}
+		return m.submitSetupDialog(p)
 	}
 	return m, nil
 }
@@ -2807,6 +2908,16 @@ func (m Model) submitSetupDialog(p *plugin.PanePlugin) (tea.Model, tea.Cmd) {
 	}
 	m.cwdInputError = ""
 
+	// A resume target is only valid for the directory it was listed under. The
+	// user can pick a session, Shift+Tab back to the browser, move to another
+	// project, and press Continue without ever re-focusing the session field —
+	// so the authoritative check belongs here, at the moment the choice is
+	// committed, not only on the field's own focus path.
+	if m.selectedSessionID != "" && m.sessionScanCWD != m.cwdBrowseDir {
+		logger.Debug("setup dialog: dropping resume session (listed for %q, submitting %q)", m.sessionScanCWD, m.cwdBrowseDir)
+		m.selectedSessionID = ""
+	}
+
 	// Inject the chosen kube context (row 0 = Default = no --context flag).
 	if p.Command.Discover == "kube" && m.kubeCursor > 0 && m.kubeCursor-1 < len(m.kubeContexts) {
 		ctx := m.kubeContexts[m.kubeCursor-1].Name
@@ -2835,6 +2946,97 @@ func (m Model) submitSetupDialog(p *plugin.PanePlugin) (tea.Model, tea.Cmd) {
 	m.dialogCursor = 0
 	m.dialogEdit = false
 	return m, tea.ClearScreen
+}
+
+// renderSetupSessionField draws the resume-session picker.
+//
+// Collapsed to a single summary line while unfocused, so a dialog that already
+// carries a 12-row directory browser does not grow another 12 rows for a field
+// most panes never touch; it expands into the scrolling list on focus.
+func (m Model) renderSetupSessionField(focused bool) string {
+	var b strings.Builder
+
+	label := "Session:"
+	if focused {
+		b.WriteString(dialogSelected.Render("> "+label) + "\n")
+	} else {
+		// Collapsed: label and current value share one line.
+		b.WriteString(dialogNormal.Render("  "+label) + "  " +
+			dialogValStyle.Render(m.sessionSummaryLine()) +
+			dialogSubtle.Render("   (Tab here to resume)") + "\n\n")
+		return b.String()
+	}
+
+	switch m.sessionState {
+	case sessionScanning:
+		b.WriteString(dialogSubtle.Render("    Scanning session history…") + "\n\n")
+		return b.String()
+	case sessionScanTimedOut:
+		b.WriteString(dialogSubtle.Render("    Timed out — is the daemon running?") + "\n\n")
+		return b.String()
+	case sessionScanFailed:
+		b.WriteString(dialogErrorStyle.Render("    ✗ "+m.sessionError) + "\n\n")
+		return b.String()
+	}
+
+	// Path budget matches the CWD pick list: box text area minus the "  > "
+	// row prefix.
+	maxWidth := m.setupDialogWidth() - 8
+	rows := m.sessionRowCount()
+	visible := m.sessionVisibleRows()
+	start := m.sessionScroll
+	end := start + visible
+	if end > rows {
+		end = rows
+	}
+
+	for i := start; i < end; i++ {
+		text := "New session"
+		blocked := false
+		if s := m.sessionRowAt(i); s != nil {
+			text = sessionRowLabel(*s)
+			if s.InUsePaneID != "" {
+				blocked = true
+				if label, ok := m.paneNavLabel(s.InUsePaneID); ok {
+					text += "  [open in " + label + "]"
+				} else {
+					text += "  [open in another pane]"
+				}
+			}
+		}
+		text = truncateToWidth(text, maxWidth)
+		switch {
+		case i == m.sessionCursor && blocked:
+			// Cursor may rest here so the footer can explain the block; the
+			// row itself stays subdued to signal it is not actionable.
+			b.WriteString("  > " + dialogSubtle.Render(text) + "\n")
+		case i == m.sessionCursor:
+			b.WriteString("  > " + dialogSelected.Render(text) + "\n")
+		case blocked:
+			b.WriteString("    " + dialogSubtle.Render(text) + "\n")
+		default:
+			b.WriteString("    " + dialogNormal.Render(text) + "\n")
+		}
+	}
+
+	// Footer: explain a blocked row when the cursor is on it, otherwise show
+	// position and keys.
+	switch {
+	case !m.sessionRowSelectable(m.sessionCursor):
+		b.WriteString(m.renderSetupHint("    Already open in another pane — close it first, or pick another") + "\n")
+	case len(m.sessionRows) == 0:
+		b.WriteString(dialogSubtle.Render("    (no earlier sessions for this folder)") + "\n")
+	case rows > visible:
+		hint := fmt.Sprintf("    %d/%d  ↑↓ PgUp/PgDn move  Enter select", m.sessionCursor+1, rows)
+		if m.sessionTruncated {
+			hint += "  (older sessions not listed)"
+		}
+		b.WriteString(m.renderSetupHint(hint) + "\n")
+	default:
+		b.WriteString(m.renderSetupHint("    ↑↓ move  Enter select") + "\n")
+	}
+	b.WriteString("\n")
+	return b.String()
 }
 
 // validateAndNormalizeCWD cleans a user-entered path, expands a leading ~,
@@ -3115,6 +3317,11 @@ func (m Model) renderCreatePaneSetupDialog() string {
 			b.WriteString(dialogSubtle.Render("    ↑↓ navigate  Enter select") + "\n")
 		}
 		b.WriteString("\n")
+		fieldIdx++
+	}
+
+	if p.Command.Sessions == "claude" {
+		b.WriteString(m.renderSetupSessionField(cursor == fieldIdx))
 		fieldIdx++
 	}
 

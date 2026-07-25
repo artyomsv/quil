@@ -59,6 +59,15 @@ type CommandConfig struct {
 	// <quilDir>/history/<paneID>.jsonl. Meaningful only for plugins with a
 	// hook producer (claude-code; opencode is a follow-up).
 	RecordHistory bool
+	// Sessions enables the pane setup dialog's "resume an existing session"
+	// field for this plugin. "" = off (a new pane always starts a fresh
+	// session). "claude" = list the Claude Code transcripts recorded for the
+	// selected working directory and, when one is chosen, spawn
+	// `--resume <id>` instead of the preassign_id strategy's start args.
+	//
+	// Only meaningful together with PromptsCWD: the list is scoped to the
+	// directory chosen in the dialog.
+	Sessions string
 }
 
 // FormField defines a user-fillable field for creating plugin instances.

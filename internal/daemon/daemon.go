@@ -18,11 +18,11 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
-	"unicode/utf16"
 
 	"regexp"
 
 	"github.com/artyomsv/quil/internal/claudehook"
+	"github.com/artyomsv/quil/internal/claudesessions"
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/hookevents"
 	"github.com/artyomsv/quil/internal/ipc"
@@ -93,6 +93,13 @@ type Daemon struct {
 	updateMu      sync.Mutex
 	updateInfo    *ipc.UpdateInfo
 	updateStaging atomic.Bool
+
+	// sessionScanning is the single-flight guard for the Claude session
+	// listing (MsgClaudeSessionsReq). One scan reads up to 200 transcript
+	// heads off disk — far more work than parsing the frame that requested
+	// it — so an unguarded handler lets a looping client accumulate worker
+	// goroutines until the daemon is starved.
+	sessionScanning atomic.Bool
 }
 
 func New(cfg config.Config) *Daemon {
@@ -316,6 +323,14 @@ func (d *Daemon) refreshPluginStateFromHooks() {
 				pane.PluginState = make(map[string]string)
 			}
 			pane.PluginState["session_id"] = hookID
+			// The hook has now confirmed this pane's own session, so the
+			// creation-time resume target has served its only purpose: covering
+			// the window before the first SessionStart hook fired. Retiring it
+			// here keeps it from outliving that window — otherwise a pane that
+			// resumed session X, then moved on via /clear, could be pulled back
+			// into X by a later restore that finds no hook file. "The
+			// conversation I cleared came back" is a surprise worth preventing.
+			delete(pane.PluginState, "resume_session_id")
 			pane.PluginMu.Unlock()
 		}
 	}
@@ -802,6 +817,8 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		d.handleReadPaneOutputReq(conn, msg)
 	case ipc.MsgPaneSearchReq:
 		d.handlePaneSearchReq(conn, msg)
+	case ipc.MsgClaudeSessionsReq:
+		d.handleClaudeSessionsReq(conn, msg)
 	case ipc.MsgPaneStatusReq:
 		d.handlePaneStatusReq(conn, msg)
 	case ipc.MsgCreatePaneReq:
@@ -1153,6 +1170,7 @@ func (d *Daemon) handleCreatePane(msg *ipc.Message) {
 		pane.Muted = true
 		pane.PluginMu.Unlock()
 	}
+	d.applyResumeSessionID(pane, payload.ResumeSessionID)
 	log.Printf("pane created: %s (type=%s, tab=%s, overlay=%v)", pane.ID, paneType, payload.TabID, payload.Overlay)
 
 	ptySession := apty.New()
@@ -1169,6 +1187,7 @@ func (d *Daemon) handleReplacePane(payload ipc.CreatePanePayload, cwd, paneType 
 	newPane.Type = paneType
 	newPane.InstanceName = payload.InstanceName
 	newPane.InstanceArgs = payload.InstanceArgs
+	d.applyResumeSessionID(newPane, payload.ResumeSessionID)
 	log.Printf("pane replace: %s -> %s (type=%s)", payload.ReplacePaneID, newPane.ID, paneType)
 
 	// Atomically swap old → new in the tab's pane list
@@ -2026,81 +2045,25 @@ func claudeHookSpawnPrep(quilDir, paneID, hookMode string, userArgs []string) (p
 	}
 }
 
-// escapeClaudeCWD mirrors Claude Code's on-disk naming for per-project
-// session directories under ~/.claude/projects/. Path separators, the
-// Windows drive-letter colon, AND the underscore all become '-'.
-//
-// The underscore case is the one that silently broke restore: a macOS
-// home like /Users/Foo_Bar lands under ~/.claude/projects/-Users-Foo-Bar
-// (not -Users-Foo_Bar), so the on-disk probe with an underscore-preserving
-// encoding always returned false and every Claude pane fell back to
-// --continue at restart. Confirmed against real directories on macOS
-// (Jun 2026) and Windows (E:\Projects\Stukans → "E--Projects-Stukans").
-//
-// Other non-alphanumeric characters Claude may also encode (spaces, dots)
-// are not handled here — no concrete examples observed in the wild yet.
-// Extend the replacer when a real path forces the issue.
-// escapeClaudeCWD mirrors Claude Code's per-project directory naming under
-// ~/.claude/projects/, extracted verbatim from the claude binary
-// (2026-07-05, v2.x):
-//
-//	t = cwd.replace(/[^a-zA-Z0-9]/g, "-")           // per UTF-16 code unit
-//	if (t.length <= 200) return t
-//	return t.slice(0, 200) + "-" + base36(abs(h))   // h = Java-31x hash
-//	// h: for each UTF-16 unit u: h = (h<<5) - h + u | 0   (int32 wrap)
-//
-// Operating per UTF-16 code unit (not rune) matches the JS regex without
-// the /u flag: an astral char (emoji) becomes TWO dashes. Earlier versions
-// replaced only : \ / _ and missed '.', so any CWD containing a dot (e.g.
-// a .claude/worktrees checkout) probed a nonexistent directory,
-// claudeSessionFileExists returned false, and every restored pane fell
-// back to --continue — all resuming the SAME latest session after a
-// daemon restart (2026-07-05 dev incident). Same rule on every OS; the
-// separators and drive colons all collapse to '-'.
-func escapeClaudeCWD(cwd string) string {
-	const maxLen = 200 // claude's truncation threshold (Lws/Xrt in the bundle)
-	units := utf16.Encode([]rune(cwd))
-	b := make([]byte, len(units))
-	for i, u := range units {
-		switch {
-		case u >= 'a' && u <= 'z', u >= 'A' && u <= 'Z', u >= '0' && u <= '9':
-			b[i] = byte(u)
-		default:
-			b[i] = '-'
-		}
-	}
-	t := string(b)
-	if len(t) <= maxLen {
-		return t
-	}
-	var h int32
-	for _, u := range units {
-		h = (h << 5) - h + int32(u) // int32 wrap == JS |0
-	}
-	abs := int64(h)
-	if abs < 0 {
-		abs = -abs // JS Math.abs; int64 widening handles MinInt32 exactly
-	}
-	return t[:maxLen] + "-" + strconv.FormatInt(abs, 36)
-}
-
 // claudeSessionFileExists reports whether Claude has persisted a session
 // file for the given CWD + session ID. Called on the restore path for
 // claude-code panes; a true result means the pane can resume its own
 // unique session, a false result forces the --continue fallback.
 //
+// The CWD → directory mapping lives in internal/claudesessions, which owns the
+// transcription of Claude's naming rule for both this probe and the setup
+// dialog's session picker. Keeping one definition matters: an earlier private
+// copy here missed '.', so any CWD containing a dot probed a nonexistent
+// directory and every restored pane silently fell back to --continue.
+//
 // Any os.Stat error (including permission denial or the home dir being
 // unavailable) returns false — the fallback path is always safe.
 func claudeSessionFileExists(cwd, sessionID string) bool {
-	if cwd == "" || sessionID == "" {
+	path := claudesessions.TranscriptPath(cwd, sessionID)
+	if path == "" {
 		return false
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return false
-	}
-	path := filepath.Join(home, ".claude", "projects", escapeClaudeCWD(cwd), sessionID+".jsonl")
-	_, err = os.Stat(path)
+	_, err := os.Stat(path)
 	return err == nil
 }
 
@@ -2143,11 +2106,29 @@ func claudeResumeTemplate(p *plugin.PanePlugin, pane *Pane) []string {
 	// the lock is released — never hold a mutex across syscalls.
 	pane.PluginMu.Lock()
 	sessionID := ""
+	resumeID := ""
 	if pane.PluginState != nil {
 		sessionID = pane.PluginState["session_id"]
+		resumeID = pane.PluginState["resume_session_id"]
 	}
 	pane.PluginMu.Unlock()
 	if sessionID != "" && claudeSessionExistsFn(pane.CWD, sessionID) {
+		return []string{"--resume", "{session_id}"}
+	}
+	// Last resort before --continue: a pane the user explicitly created to
+	// resume a chosen session, restarted before its SessionStart hook could
+	// record an id and before claude had written the transcript the probe
+	// above looks for. --continue would silently attach it to whatever session
+	// in this CWD is most recent, which is exactly the session the user did
+	// NOT choose. The id was validated on the way in and the pane is about to
+	// spawn against it either way.
+	if resumeID != "" {
+		pane.PluginMu.Lock()
+		if pane.PluginState == nil {
+			pane.PluginState = make(map[string]string)
+		}
+		pane.PluginState["session_id"] = resumeID
+		pane.PluginMu.Unlock()
 		return []string{"--resume", "{session_id}"}
 	}
 	return p.Persistence.ResumeArgs
@@ -2206,7 +2187,14 @@ func templateHasPlaceholder(template []string) bool {
 // arg-merging matrix can be table-tested. Callers (i.e. spawnPane) are
 // responsible for populating pane.PluginState["session_id"] before invoking
 // this function on the fresh-start preassign_id path.
-func resolveSpawnArgs(p *plugin.PanePlugin, pane *Pane, restoring bool) []string {
+// resumeID is the pane's PluginState["resume_session_id"], captured by the
+// caller UNDER PluginMu rather than read from the map here. Every other access
+// to PluginState in this file is lock-guarded, and a concurrent map read and
+// write in Go is a fatal runtime throw that would take the daemon and every
+// pane's PTY down with it — the plugin scraper and refreshPluginStateFromHooks
+// are both live writers to this same map. Passing the value in also keeps this
+// function honestly pure for the arg-merging table tests.
+func resolveSpawnArgs(p *plugin.PanePlugin, pane *Pane, restoring bool, resumeID string) []string {
 	args := append([]string{}, p.Command.Args...)
 
 	// Instance-specific args override base args.
@@ -2216,8 +2204,18 @@ func resolveSpawnArgs(p *plugin.PanePlugin, pane *Pane, restoring bool) []string
 
 	// Fresh start under preassign_id: append the plugin's StartArgs (after
 	// {placeholder} expansion from PluginState).
+	//
+	// Unless the pane was created to resume an existing session, in which case
+	// --resume REPLACES the start args rather than joining them: claude's
+	// `--session-id <new>` (mint this id) and `--resume <existing>` (attach to
+	// that id) are contradictory, and passing both is not a valid invocation.
+	// The branch runs after the InstanceArgs override above, so runtime toggles
+	// (--dangerously-skip-permissions, --enable-auto-mode, --chrome) still
+	// compose with the resume exactly as they do with a fresh session.
 	if !restoring && p.Persistence.Strategy == "preassign_id" {
-		if len(p.Persistence.StartArgs) > 0 {
+		if resumeID != "" {
+			args = append(args, "--resume", resumeID)
+		} else if len(p.Persistence.StartArgs) > 0 {
 			startArgs := plugin.ExpandResumeArgs(p.Persistence.StartArgs, pane.PluginState)
 			if startArgs != nil {
 				args = append(args, startArgs...)
@@ -2305,18 +2303,53 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 	// Generate a session UUID for fresh preassign_id panes before computing
 	// args, since resolveSpawnArgs expects PluginState["session_id"] to be
 	// populated for the {session_id} expansion.
+	//
+	// A pane created with a resume target adopts THAT id instead of minting a
+	// new one: the session it is about to join is its real session, so every
+	// downstream consumer (refreshPluginStateFromHooks, the model/context
+	// status segment, the restore probe) sees a coherent id from the first
+	// instant rather than a UUID that never existed.
+	//
+	// resumeID is also captured here, under the same lock, and handed to
+	// resolveSpawnArgs — see the note on that function for why it must not
+	// read PluginState itself.
+	var resumeID string
 	if !restoring && p.Persistence.Strategy == "preassign_id" {
+		// This branch is not only pane creation: handleRestartPaneReq (Alt+R)
+		// also calls spawnPane with restoring=false. So a creation-time resume
+		// pick must not be replayed blindly here — if the pane has since
+		// recorded its own session (a /clear rotates it, and the hook writes
+		// the new id), a restart has to reattach to THAT conversation, not the
+		// one chosen days ago. The stale pick is retired at the same time so it
+		// cannot resurface on a later restore either. Read off-lock: never hold
+		// PluginMu across a file read.
+		hookID := ""
+		if p.Name == "claude-code" {
+			if id, err := readHookSessionIDFn(pane.ID); err == nil {
+				hookID = id
+			}
+		}
 		pane.PluginMu.Lock()
 		if pane.PluginState == nil {
 			pane.PluginState = make(map[string]string)
 		}
+		resumeID = pane.PluginState["resume_session_id"]
+		if resumeID != "" && hookID != "" && hookID != resumeID {
+			delete(pane.PluginState, "resume_session_id")
+			pane.PluginState["session_id"] = hookID
+			resumeID = ""
+		}
 		if pane.PluginState["session_id"] == "" {
-			pane.PluginState["session_id"] = uuid.New().String()
+			if resumeID != "" {
+				pane.PluginState["session_id"] = resumeID
+			} else {
+				pane.PluginState["session_id"] = uuid.New().String()
+			}
 		}
 		pane.PluginMu.Unlock()
 	}
 
-	args := resolveSpawnArgs(p, pane, restoring)
+	args := resolveSpawnArgs(p, pane, restoring, resumeID)
 
 	// Shell integration (only for terminal-type panes)
 	if p.Command.ShellIntegration {

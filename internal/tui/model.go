@@ -271,25 +271,39 @@ type Model struct {
 	cwdBrowseEntries   []string               // browser listing: ".." (if not at root) + sorted subdirs
 	cwdBrowseCursor    int                    // selected entry index in cwdBrowseEntries
 	cwdBrowseScroll    int                    // scroll offset (top index) for the visible window of cwdBrowseEntries
-	tomlEditor         *TextEditor            // active TOML editor (nil when not editing)
-	selection          *Selection             // active text selection (nil when none)
-	mouseDown          bool                   // true while left mouse button is held
-	mouseStartX        int                    // screen X of mouse press
-	mouseStartY        int                    // screen Y of mouse press
-	configChanged      bool                   // true when config needs saving on exit
-	disclaimerTipIdx   int                    // random tip index for disclaimer dialog
-	mcpHighlights      map[string]bool        // pane IDs with active MCP highlight
-	mcpHighlightSeq    map[string]int         // sequence number for highlight timer reset
-	notifications      *NotificationCenter    // notification sidebar
-	paneHistory        []PaneRef              // navigation history (bounded, 20 max)
-	sidebarFocused     bool                   // true when notification sidebar has keyboard focus
-	notesMode          bool                   // true when pane notes editor is open for the active pane
-	notesEditor        *NotesEditor           // active notes editor (nil when notesMode is false)
-	notesPaneFocused   bool                   // true when keyboard input goes to the bound pane (PTY) instead of the notes editor
-	notesEnteredFocus  bool                   // true when toggleNotesMode was the one that turned the tab's focus mode on (so exit reverts)
-	notesMouseDown     bool                   // true while a left-button drag is in progress inside the notes editor
-	notesAnchorRow     int                    // document row where a notes-editor drag began (resolved once on click)
-	notesAnchorCol     int                    // document col where a notes-editor drag began (resolved once on click)
+	// Session-picker state (plugins with [command] sessions = "claude"). Rows
+	// are scoped to sessionScanCWD; when the browser moves to a different
+	// directory the rows AND selectedSessionID are discarded, since a session
+	// recorded under another project is not a meaningful resume target.
+	// selectedSessionID is what handleCreatePaneSplit reads for
+	// CreatePanePayload.ResumeSessionID; empty means "start a fresh session".
+	sessionRows       []ipc.ClaudeSessionInfo // listing for sessionScanCWD, newest first
+	sessionCursor     int                     // row cursor: 0 = "New session", 1.. = sessionRows
+	sessionScroll     int                     // scroll offset for the visible window of the expanded list
+	sessionScanCWD    string                  // directory sessionRows belong to
+	sessionState      sessionScanState        // request lifecycle for the session field
+	sessionError      string                  // daemon-reported error (sessionScanFailed)
+	sessionTruncated  bool                    // daemon capped the listing
+	selectedSessionID string                  // committed resume target (empty = fresh session)
+	tomlEditor        *TextEditor             // active TOML editor (nil when not editing)
+	selection         *Selection              // active text selection (nil when none)
+	mouseDown         bool                    // true while left mouse button is held
+	mouseStartX       int                     // screen X of mouse press
+	mouseStartY       int                     // screen Y of mouse press
+	configChanged     bool                    // true when config needs saving on exit
+	disclaimerTipIdx  int                     // random tip index for disclaimer dialog
+	mcpHighlights     map[string]bool         // pane IDs with active MCP highlight
+	mcpHighlightSeq   map[string]int          // sequence number for highlight timer reset
+	notifications     *NotificationCenter     // notification sidebar
+	paneHistory       []PaneRef               // navigation history (bounded, 20 max)
+	sidebarFocused    bool                    // true when notification sidebar has keyboard focus
+	notesMode         bool                    // true when pane notes editor is open for the active pane
+	notesEditor       *NotesEditor            // active notes editor (nil when notesMode is false)
+	notesPaneFocused  bool                    // true when keyboard input goes to the bound pane (PTY) instead of the notes editor
+	notesEnteredFocus bool                    // true when toggleNotesMode was the one that turned the tab's focus mode on (so exit reverts)
+	notesMouseDown    bool                    // true while a left-button drag is in progress inside the notes editor
+	notesAnchorRow    int                     // document row where a notes-editor drag began (resolved once on click)
+	notesAnchorCol    int                     // document col where a notes-editor drag began (resolved once on click)
 
 	// Scrollbar click-and-drag. Set on a left-click that hits a pane's
 	// rightmost content column (the scrollbar track). While
@@ -1200,6 +1214,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case paneSearchRespMsg:
 		m = m.applyPaneSearch(msg.Resp)
 		return m, m.listenForMessages()
+
+	case claudeSessionsRespMsg:
+		m = m.applyClaudeSessions(msg.Resp)
+		return m, m.listenForMessages()
+
+	case sessionScanTimeoutMsg:
+		// Turn a never-answered listing into something diagnosable instead of
+		// leaving "Scanning…" up forever. Local timer: no re-arm.
+		if m.sessionScanCWD == msg.cwd && m.sessionState == sessionScanning {
+			m.sessionState = sessionScanTimedOut
+		}
+		return m, nil
 
 	case stageUpdateRespMsg:
 		switch {
@@ -3720,6 +3746,14 @@ func (m Model) listenForMessages() tea.Cmd {
 				return listenContinueMsg{}
 			}
 			return paneSearchRespMsg{Resp: payload}
+
+		case ipc.MsgClaudeSessionsResp:
+			var payload ipc.ClaudeSessionsRespPayload
+			if err := msg.DecodePayload(&payload); err != nil {
+				log.Printf("decode claude_sessions_resp: %v", err)
+				return listenContinueMsg{}
+			}
+			return claudeSessionsRespMsg{Resp: payload}
 
 		case ipc.MsgRestartPaneResp:
 			// Response to the Alt+R restart confirm. The respawned pane

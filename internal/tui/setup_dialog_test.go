@@ -1483,8 +1483,8 @@ func TestRenderSetup_RecentPick_NoDuplicatePathLine(t *testing.T) {
 }
 
 // TestRenderSetup_BrowserHint_FitsTextArea guards issue 2: no rendered line may
-// exceed the box text area (width-4), or it wraps onto a second line. Uses a
-// narrow width that reproduced the original hint wrap.
+// exceed the box text area, or it wraps onto a second line. Uses a narrow width
+// that reproduced the original hint wrap.
 func TestRenderSetup_BrowserHint_FitsTextArea(t *testing.T) {
 	entries := []string{".."}
 	for i := 0; i < 15; i++ {
@@ -1500,11 +1500,41 @@ func TestRenderSetup_BrowserHint_FitsTextArea(t *testing.T) {
 		width:            64, // narrow box → text area 58; the old 65-wide hint wrapped here
 	}
 	out := m.renderCreatePaneSetupDialog()
-	textArea := m.setupDialogWidth() - 4
+	textArea := m.setupTextWidth()
 	for _, line := range strings.Split(out, "\n") {
 		if w := lipgloss.Width(line); w > textArea {
 			t.Errorf("line %q width %d exceeds text area %d (would wrap)", line, w, textArea)
 		}
+	}
+}
+
+// TestSetupBoxChrome_MatchesLipglossWrapLimit pins setupBoxChrome to what
+// lipgloss actually does, rather than to a reading of its docs. Every content
+// budget in the setup dialog derives from this constant, so if a lipgloss
+// upgrade moves the border inside or outside Style.Width, this fails here
+// instead of silently re-wrapping the session list.
+//
+// Two-sided on purpose: too small and rows wrap; too large and every row is
+// truncated shorter than it needs to be, which is invisible in a screenshot.
+func TestSetupBoxChrome_MatchesLipglossWrapLimit(t *testing.T) {
+	const boxW = 70
+	// A line of exactly n cells ending in a separate word, so reflow has a
+	// break point — an unbreakable token wraps under different rules.
+	line := func(n int) string { return strings.Repeat("a", n-5) + " word" }
+	lines := func(s string) int {
+		return len(strings.Split(dialogBorder.Width(boxW).Render(s), "\n"))
+	}
+
+	base := lines("x")
+	limit := boxW - setupBoxChrome
+
+	if got := lines(line(limit)); got != base {
+		t.Errorf("a %d-cell line wrapped inside a %d-wide box (%d lines, want %d): setupBoxChrome=%d is too small",
+			limit, boxW, got, base, setupBoxChrome)
+	}
+	if got := lines(line(limit + 1)); got != base+1 {
+		t.Errorf("a %d-cell line did not wrap inside a %d-wide box (%d lines, want %d): setupBoxChrome=%d is larger than needed, so rows truncate early",
+			limit+1, boxW, got, base+1, setupBoxChrome)
 	}
 }
 
@@ -1523,9 +1553,9 @@ func TestClaudeCodeToggleLabelsFitFloor(t *testing.T) {
 	if p == nil {
 		t.Fatal("claude-code plugin not found")
 	}
-	// Floor-70 box: 6 cells row chrome ("> " + "[x] ") + 4 cells padding =>
-	// 60 usable label cells.
-	const maxLabel = 60
+	// Floor-70 box: 6 cells row chrome ("> " + "[x] ") + setupBoxChrome (6) =>
+	// 58 usable label cells.
+	const maxLabel = 70 - 6 - setupBoxChrome
 	for _, tg := range p.Command.Toggles {
 		if w := lipgloss.Width(tg.Label); w > maxLabel {
 			t.Errorf("label %q width %d exceeds %d (would wrap in floor-70 box)", tg.Label, w, maxLabel)
@@ -1712,12 +1742,13 @@ func TestEnterSetupOrSplit_GitDiscover_CapsCandidates(t *testing.T) {
 // helper's overhead constants change meaning but not value.
 func TestSetupDialogWidth_FloorGrowthAndCap(t *testing.T) {
 	// rowOverhead mirrors setupDialogWidth: "> " prefix (2) + "[x] " box (4) +
-	// dialogBorder Padding(1,2) → 4 = 10 cells on top of the label width.
-	const rowOverhead = 10
+	// setupBoxChrome (6: 2 border + Padding(1,2)'s 4) = 12 cells on top of the
+	// label width.
+	const rowOverhead = 12
 
 	// A label long enough to push the box well past the floor of 70.
-	longLabel := strings.Repeat("x", 80) // 80 cells wide (ASCII → 1 cell each)
-	grownWidth := rowOverhead + len(longLabel) // 90
+	longLabel := strings.Repeat("x", 80)       // 80 cells wide (ASCII → 1 cell each)
+	grownWidth := rowOverhead + len(longLabel) // 92
 
 	dir := t.TempDir()
 	// Plugin "wide" has a long label; "narrow" has only a short label.

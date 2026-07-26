@@ -84,6 +84,7 @@ export const features: Feature[] = [
     category: "ai",
     detail: [
       "The Session field lists every Claude Code session recorded for the folder you picked, newest first, each row showing a relative age and the first prompt you typed in it.",
+      "Press i on a session for details: when it started, when it was last touched, how many prompts you typed, and the last prompt you left it on — the thing that actually identifies a conversation, and which appears nowhere else. Arrow keys re-read for the next session so you can compare candidates.",
       "Beats running --resume inside the pane: you get real titles and ages without waiting for Claude to boot its own picker, and Quil knows which session the pane is on from the first instant — so restore, input history, and the model/context readout are correct immediately.",
       "Sessions already open in another pane are shown greyed and cannot be picked — two claude processes on one transcript would overwrite each other's history.",
       "The field stays collapsed to a single line until you Tab onto it, and the listing is only fetched when you do, so creating an ordinary fresh pane costs nothing.",

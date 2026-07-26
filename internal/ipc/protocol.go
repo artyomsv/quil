@@ -96,8 +96,10 @@ const (
 	MsgPaneSearchResp = "pane_search_resp"
 
 	// Claude Code session discovery (pane setup dialog "resume" picker)
-	MsgClaudeSessionsReq  = "claude_sessions_req"
-	MsgClaudeSessionsResp = "claude_sessions_resp"
+	MsgClaudeSessionsReq       = "claude_sessions_req"
+	MsgClaudeSessionsResp      = "claude_sessions_resp"
+	MsgClaudeSessionDetailReq  = "claude_session_detail_req"
+	MsgClaudeSessionDetailResp = "claude_session_detail_resp"
 
 	// Auto-update (TUI ⇄ daemon)
 	MsgStageUpdateReq  = "stage_update_req"  // TUI → daemon (empty payload)
@@ -519,6 +521,36 @@ type ClaudeSessionsRespPayload struct {
 	Sessions  []ClaudeSessionInfo `json:"sessions"`
 	Truncated bool                `json:"truncated,omitempty"`
 	Error     string              `json:"error,omitempty"`
+}
+
+// ClaudeSessionDetailReqPayload asks for the deep read of ONE session — the
+// listing head-reads every transcript in a directory, so this is issued per
+// user request (the picker's info key), never per listing.
+type ClaudeSessionDetailReqPayload struct {
+	CWD       string `json:"cwd"`
+	SessionID string `json:"session_id"`
+}
+
+// ClaudeSessionDetailRespPayload answers with one session's summary. CWD and
+// SessionID echo the request VERBATIM for the same staleness contract
+// ClaudeSessionsRespPayload documents — here the pair is what identifies which
+// highlighted row the answer belongs to, since the user can keep moving the
+// cursor while the read is in flight.
+//
+// StartedMs is 0 when no opening entry carried a timestamp. Prompts are
+// multi-line: they render as paragraphs, not rows. UserPrompts counts only what
+// the user typed — see claudesessions.Detail for why no assistant-side count is
+// reported.
+type ClaudeSessionDetailRespPayload struct {
+	CWD         string `json:"cwd"`
+	SessionID   string `json:"session_id"`
+	FirstPrompt string `json:"first_prompt,omitempty"`
+	LastPrompt  string `json:"last_prompt,omitempty"`
+	UserPrompts int    `json:"user_prompts,omitempty"`
+	StartedMs   int64  `json:"started_ms,omitempty"`
+	ModifiedMs  int64  `json:"modified_ms,omitempty"`
+	SizeBytes   int64  `json:"size_bytes,omitempty"`
+	Error       string `json:"error,omitempty"`
 }
 
 // UpdateInfo rides the workspace_state broadcast under the "update" key

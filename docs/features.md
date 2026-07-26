@@ -216,10 +216,12 @@ Claude Code panes can start **inside an earlier conversation** instead of a fres
       2h ago   Add resume option to claude pane setup dialog
       1d ago   fix(update): release only our own apply lock
       3d ago   I would like to add more mouse controls. For e…
-    2/22  ↑↓ PgUp/PgDn move  Enter select
+    2/22  ↑↓ PgUp/PgDn move  Enter select  i details
 ```
 
 The field stays collapsed to one line until you `Tab` onto it, so creating a normal fresh pane looks and costs exactly what it did before — the listing is only fetched when you actually go looking for it.
+
+When an age and a title are not enough to tell two sessions apart, press **`i`** for details: when the session started, when it was last touched, how many prompts you typed, and — the useful part — **the last prompt you left it on**, which appears nowhere else. `↑`/`↓` move to another session and re-read for it, so you can compare candidates without toggling the panel per row; `i` or `Esc` goes back to the list.
 
 Sessions **already open in another pane** are shown greyed with an `[open in 2.Claude]` marker and cannot be selected: two `claude` processes attached to one transcript would overwrite each other's history. Changing the working directory clears the choice and rescans, since a session from another project is not a meaningful resume target.
 

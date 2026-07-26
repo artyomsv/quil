@@ -132,6 +132,9 @@ func (m *Model) ensureSessionScan() tea.Cmd {
 	m.sessionCursor = 0
 	m.sessionScroll = 0
 	m.selectedSessionID = ""
+	// The panel describes a row that is about to be replaced, and its response
+	// is matched on the CWD that just changed — it could never resolve.
+	m.closeSessionDetail()
 	return tea.Batch(m.requestClaudeSessions(cwd), sessionScanTimeoutCmd(cwd))
 }
 
@@ -146,6 +149,7 @@ func (m *Model) resetSessionSelection() {
 	m.sessionScanCWD = ""
 	m.sessionState = sessionScanIdle
 	m.selectedSessionID = ""
+	m.closeSessionDetail()
 }
 
 // applyClaudeSessions stores a fresh listing. Responses whose echoed CWD is not
@@ -183,6 +187,109 @@ func (m Model) applyClaudeSessions(resp ipc.ClaudeSessionsRespPayload) Model {
 	m.sessionError = ""
 	m.sessionCursor = 0
 	m.sessionScroll = 0
+	return m
+}
+
+// sessionDetailPanel is the picker's info panel, following the same shape as
+// ctxMenuState and paletteState: one struct on the Model whose zero value is
+// "closed", so nothing else has to be reset when it goes away.
+//
+// It replaces the list in place rather than compositing over it, so it needs no
+// overlay plumbing and cannot desynchronize from the row it describes: id names
+// that row, and a response for any other id is dropped as stale.
+type sessionDetailPanel struct {
+	open  bool                               // panel is showing instead of the list
+	id    string                             // session it describes ("" = the New session row)
+	state sessionScanState                   // request lifecycle
+	data  ipc.ClaudeSessionDetailRespPayload // last accepted read
+}
+
+// claudeSessionDetailRespMsg carries one session's deep read into Update.
+type claudeSessionDetailRespMsg struct {
+	Resp ipc.ClaudeSessionDetailRespPayload
+}
+
+// sessionDetailTimeoutMsg fires sessionScanTimeout after a detail request. id is
+// the session captured when the tick was scheduled, so a response for a row the
+// user has since moved off cannot be mistaken for this one.
+type sessionDetailTimeoutMsg struct{ id string }
+
+// requestClaudeSessionDetail fires MsgClaudeSessionDetailReq (fire-and-forget);
+// the response arrives via listenForMessages. Mirrors requestClaudeSessions.
+func (m Model) requestClaudeSessionDetail(cwd, sessionID string) tea.Cmd {
+	return func() tea.Msg {
+		if m.client == nil {
+			return nil
+		}
+		msg, err := ipc.NewMessage(ipc.MsgClaudeSessionDetailReq,
+			ipc.ClaudeSessionDetailReqPayload{CWD: cwd, SessionID: sessionID})
+		if err != nil {
+			log.Printf("requestClaudeSessionDetail: marshal: %v", err)
+			return nil
+		}
+		msg.ID = fmt.Sprintf("session-detail-%d", time.Now().UnixNano())
+		if err := m.client.Send(msg); err != nil {
+			log.Printf("requestClaudeSessionDetail: send: %v", err)
+		}
+		return nil
+	}
+}
+
+// ensureSessionDetail requests the deep read for the highlighted row, unless the
+// panel already holds it. Returns nil when there is nothing to fetch — the "New
+// session" row has no transcript, and re-reading a row already on screen would
+// re-stream a multi-MB file for no new information.
+//
+// Unlike ensureSessionScan this does NOT treat a failure as settled either: the
+// panel says the read failed, which invites the retry that pressing i again is.
+func (m *Model) ensureSessionDetail() tea.Cmd {
+	s := m.sessionRowAt(m.sessionCursor)
+	if s == nil {
+		// The "New session" row. Keep the panel open (it explains what a fresh
+		// session means) but there is nothing to read.
+		m.sessionDetail = sessionDetailPanel{open: true}
+		return nil
+	}
+	if m.sessionDetail.id == s.ID &&
+		(m.sessionDetail.state == sessionScanning || m.sessionDetail.state == sessionScanReady) {
+		return nil
+	}
+	m.sessionDetail = sessionDetailPanel{open: true, id: s.ID, state: sessionScanning}
+	return tea.Batch(
+		m.requestClaudeSessionDetail(m.sessionScanCWD, s.ID),
+		tea.Tick(sessionScanTimeout, func(time.Time) tea.Msg {
+			return sessionDetailTimeoutMsg{id: s.ID}
+		}),
+	)
+}
+
+// closeSessionDetail returns the field to the list. The fetched detail is
+// discarded rather than cached: transcripts grow while you look at them, and a
+// stale turn count presented as current is worse than reading again.
+func (m *Model) closeSessionDetail() {
+	m.sessionDetail = sessionDetailPanel{}
+}
+
+// applyClaudeSessionDetail stores a deep read. Responses are matched on BOTH
+// echoed keys: the session the panel is waiting on, and the directory the rows
+// were listed for. The user can keep moving the cursor while a read is in
+// flight, so an unmatched response is a stale answer to a row they left.
+func (m Model) applyClaudeSessionDetail(resp ipc.ClaudeSessionDetailRespPayload) Model {
+	if resp.SessionID != m.sessionDetail.id || resp.CWD != m.sessionScanCWD {
+		return m
+	}
+	// Re-sanitize on arrival for the same reason applyClaudeSessions does: these
+	// are user-authored prompt strings rendered straight to the screen, never
+	// through the VT emulator.
+	resp.FirstPrompt = claudesessions.SanitizePrompt(resp.FirstPrompt)
+	resp.LastPrompt = claudesessions.SanitizePrompt(resp.LastPrompt)
+
+	m.sessionDetail.data = resp
+	if resp.Error != "" {
+		m.sessionDetail.state = sessionScanFailed
+		return m
+	}
+	m.sessionDetail.state = sessionScanReady
 	return m
 }
 
@@ -272,6 +379,35 @@ func shortSessionID(id string) string {
 		return id[:8]
 	}
 	return id
+}
+
+// absoluteTime renders a unix-millisecond timestamp for the detail panel, where
+// the exact moment matters (relativeAge answers "recent?", this answers "which
+// afternoon was that?"). Local time, since every other timestamp the user sees
+// in this TUI is theirs.
+func absoluteTime(ms int64) string {
+	if ms <= 0 {
+		return "—"
+	}
+	return time.UnixMilli(ms).Local().Format("2006-01-02 15:04")
+}
+
+// formatBytes renders a byte count compactly. Deliberately decimal (KB = 1000):
+// this sits next to a file the user can check in their own file manager, which
+// on both Windows and macOS reports decimal.
+func formatBytes(n int64) string {
+	switch {
+	case n <= 0:
+		return "—"
+	case n < 1000:
+		return fmt.Sprintf("%d B", n)
+	case n < 1000*1000:
+		return fmt.Sprintf("%.0f KB", float64(n)/1000)
+	case n < 1000*1000*1000:
+		return fmt.Sprintf("%.1f MB", float64(n)/(1000*1000))
+	default:
+		return fmt.Sprintf("%.1f GB", float64(n)/(1000*1000*1000))
+	}
 }
 
 // relativeAge renders a unix-millisecond timestamp as a compact age such as

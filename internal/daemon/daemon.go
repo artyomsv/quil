@@ -101,6 +101,13 @@ type Daemon struct {
 	// goroutines until the daemon is starved.
 	sessionScanning atomic.Bool
 
+	// sessionDetailReading is the single-flight guard for the per-session deep
+	// read (MsgClaudeSessionDetailReq). Separate from sessionScanning on
+	// purpose: sharing one slot would make opening the info panel fail
+	// whenever a directory listing happened to be in flight, which is exactly
+	// when the user opens it.
+	sessionDetailReading atomic.Bool
+
 	// resumeClaimMu serializes the claim of a Claude session by a new pane.
 	// The occupancy test and the write that acts on it must be one atomic
 	// step: handleCreatePane runs on the requesting conn's dispatch
@@ -825,6 +832,8 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		d.handleReadPaneOutputReq(conn, msg)
 	case ipc.MsgPaneSearchReq:
 		d.handlePaneSearchReq(conn, msg)
+	case ipc.MsgClaudeSessionDetailReq:
+		d.handleClaudeSessionDetailReq(conn, msg)
 	case ipc.MsgClaudeSessionsReq:
 		d.handleClaudeSessionsReq(conn, msg)
 	case ipc.MsgPaneStatusReq:

@@ -637,3 +637,181 @@ func TestClaudeResumeTemplate_ResumeIDFallback(t *testing.T) {
 		}
 	})
 }
+
+// --- session detail --------------------------------------------------------
+
+// stubSessionDetail swaps the deep-read seam for the duration of a test.
+func stubSessionDetail(t *testing.T, fn func(cwd, id string) (claudesessions.Detail, error)) {
+	t.Helper()
+	prev := readClaudeSessionDetailFn
+	readClaudeSessionDetailFn = fn
+	t.Cleanup(func() { readClaudeSessionDetailFn = prev })
+}
+
+func sessionDetailReq(t *testing.T, cwd, id string) *ipc.Message {
+	t.Helper()
+	msg, err := ipc.NewMessage(ipc.MsgClaudeSessionDetailReq,
+		ipc.ClaudeSessionDetailReqPayload{CWD: cwd, SessionID: id})
+	if err != nil {
+		t.Fatalf("NewMessage: %v", err)
+	}
+	return msg
+}
+
+const testSessionUUID = "2db05609-f1d5-4576-b2a1-9e0c3a7f1188"
+
+func TestClaudeSessionDetailResponse_ReturnsSummary(t *testing.T) {
+	started := time.Now().Add(-48 * time.Hour)
+	modified := time.Now().Add(-30 * time.Minute)
+	stubSessionDetail(t, func(cwd, id string) (claudesessions.Detail, error) {
+		return claudesessions.Detail{
+			ID:          id,
+			FirstPrompt: "first",
+			LastPrompt:  "last",
+			UserPrompts: 47,
+			Started:     started,
+			Modified:    modified,
+			SizeBytes:   1800000,
+		}, nil
+	})
+
+	resp := claudeSessionDetailResponse(sessionDetailReq(t, "/proj", testSessionUUID))
+	if resp.Error != "" {
+		t.Fatalf("unexpected error: %q", resp.Error)
+	}
+	if resp.FirstPrompt != "first" || resp.LastPrompt != "last" {
+		t.Errorf("prompts = %q / %q, want first / last", resp.FirstPrompt, resp.LastPrompt)
+	}
+	if resp.UserPrompts != 47 || resp.SizeBytes != 1800000 {
+		t.Errorf("UserPrompts = %d, SizeBytes = %d", resp.UserPrompts, resp.SizeBytes)
+	}
+	if resp.StartedMs != started.UnixMilli() || resp.ModifiedMs != modified.UnixMilli() {
+		t.Errorf("timestamps not carried: started=%d modified=%d", resp.StartedMs, resp.ModifiedMs)
+	}
+}
+
+// TestClaudeSessionDetailResponse_EchoesKeyVerbatim: the TUI matches responses
+// on BOTH echoed keys to decide whether the answer belongs to the row the
+// cursor is on. Any normalization here would make a legitimate request look
+// permanently stale and hang the panel on "Reading…".
+func TestClaudeSessionDetailResponse_EchoesKeyVerbatim(t *testing.T) {
+	stubSessionDetail(t, func(cwd, id string) (claudesessions.Detail, error) {
+		return claudesessions.Detail{ID: id}, nil
+	})
+	const raw = `C:\Projects\Quil\..\Quil` // deliberately un-cleaned
+
+	resp := claudeSessionDetailResponse(sessionDetailReq(t, raw, testSessionUUID))
+	if resp.CWD != raw {
+		t.Errorf("CWD = %q, want the request echoed verbatim (%q)", resp.CWD, raw)
+	}
+	if resp.SessionID != testSessionUUID {
+		t.Errorf("SessionID = %q, want %q", resp.SessionID, testSessionUUID)
+	}
+}
+
+// TestClaudeSessionDetailResponse_RejectsMalformedSessionID is the security
+// case: the id becomes a filename component, and any process inside the 0600
+// socket can send one. A traversal attempt must never reach the filesystem.
+func TestClaudeSessionDetailResponse_RejectsMalformedSessionID(t *testing.T) {
+	reached := false
+	stubSessionDetail(t, func(cwd, id string) (claudesessions.Detail, error) {
+		reached = true
+		return claudesessions.Detail{}, nil
+	})
+
+	for _, id := range []string{
+		"../../../etc/passwd",
+		"..",
+		`..\..\Windows\System32\config\SAM`,
+		"not-a-uuid",
+		"2db05609-f1d5-4576-b2a1-9e0c3a7f1188.jsonl",
+		"--dangerously-skip-permissions",
+		strings.Repeat("a", 200),
+	} {
+		resp := claudeSessionDetailResponse(sessionDetailReq(t, "/proj", id))
+		if resp.Error == "" {
+			t.Errorf("session id %q was accepted", id)
+		}
+		// The rejection still identifies the row, or the TUI drops it as stale.
+		if resp.SessionID != id {
+			t.Errorf("rejection for %q echoed SessionID %q", id, resp.SessionID)
+		}
+	}
+	if reached {
+		t.Error("a malformed session id reached the filesystem read")
+	}
+}
+
+func TestClaudeSessionDetailResponse_EmptyRequestIsRefused(t *testing.T) {
+	stubSessionDetail(t, func(cwd, id string) (claudesessions.Detail, error) {
+		t.Error("read must not be attempted for an empty request")
+		return claudesessions.Detail{}, nil
+	})
+	for _, tc := range []struct{ cwd, id string }{{"", testSessionUUID}, {"/proj", ""}} {
+		if resp := claudeSessionDetailResponse(sessionDetailReq(t, tc.cwd, tc.id)); resp.Error == "" {
+			t.Errorf("cwd=%q id=%q was accepted", tc.cwd, tc.id)
+		}
+	}
+}
+
+func TestClaudeSessionDetailResponse_ReadFailureIsReported(t *testing.T) {
+	stubSessionDetail(t, func(cwd, id string) (claudesessions.Detail, error) {
+		return claudesessions.Detail{}, errors.New("permission denied")
+	})
+
+	resp := claudeSessionDetailResponse(sessionDetailReq(t, "/proj", testSessionUUID))
+	if resp.Error == "" {
+		t.Fatal("a read failure must be reported so the panel can say so")
+	}
+	// The daemon-side error text is logged, not forwarded: it can name paths.
+	if strings.Contains(resp.Error, "permission denied") {
+		t.Errorf("Error = %q, want a message that does not forward the raw error", resp.Error)
+	}
+}
+
+func TestBeginClaudeSessionDetailRead_SingleFlight(t *testing.T) {
+	d := newTestDaemon(t)
+	msg := sessionDetailReq(t, "/proj", testSessionUUID)
+
+	rejection, ok := d.beginClaudeSessionDetailRead(msg)
+	if !ok {
+		t.Fatal("first read must claim the slot")
+	}
+	if rejection.Error != "" {
+		t.Errorf("first read returned a rejection %+v, want none", rejection)
+	}
+
+	rejection, ok = d.beginClaudeSessionDetailRead(msg)
+	if ok {
+		t.Fatal("a second concurrent read must be refused")
+	}
+	if rejection.Error == "" {
+		t.Error("refusal must carry an Error the panel can display")
+	}
+	if rejection.CWD != "/proj" || rejection.SessionID != testSessionUUID {
+		t.Errorf("rejection must echo the key, got cwd=%q id=%q", rejection.CWD, rejection.SessionID)
+	}
+
+	d.sessionDetailReading.Store(false)
+	if _, ok := d.beginClaudeSessionDetailRead(msg); !ok {
+		t.Error("slot must be reusable once the in-flight read releases it")
+	}
+	d.sessionDetailReading.Store(false)
+}
+
+// TestSessionDetailAndListingAreIndependent pins why the two single-flight
+// guards are separate atomics: sharing one would make opening the info panel
+// fail whenever a directory listing happened to be in flight, which is exactly
+// when the user opens it.
+func TestSessionDetailAndListingAreIndependent(t *testing.T) {
+	d := newTestDaemon(t)
+
+	if _, ok := d.beginClaudeSessionsScan(sessionsReq(t, "/proj")); !ok {
+		t.Fatal("listing must claim its slot")
+	}
+	if _, ok := d.beginClaudeSessionDetailRead(sessionDetailReq(t, "/proj", testSessionUUID)); !ok {
+		t.Error("a detail read must not be blocked by an in-flight listing")
+	}
+	d.sessionScanning.Store(false)
+	d.sessionDetailReading.Store(false)
+}

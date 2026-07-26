@@ -41,6 +41,7 @@ export const plugins: PluginEntry[] = [
     features: [
       "Setup dialog (Ctrl+N → AI → Claude Code) browses the filesystem starting from the active pane's OSC 7 working directory. On Windows, backspace at a drive root shows all available drives for cross-drive navigation.",
       "Resume picker: the same dialog lists the sessions already recorded for the folder you picked — newest first, titled with the first prompt you typed in each — so a new pane can continue yesterday's conversation instead of starting cold. Sessions open in another pane are greyed out and blocked, since two claude processes on one transcript would overwrite each other's history.",
+      "Press `i` on a listed session for details — when it started, when it was last touched, how many prompts you typed, and the last prompt you left it on. Arrow keys re-read for the next session, so two similar-looking conversations can be told apart without opening either.",
       "`Dangerously skip permissions` checkbox is off by default; when on, the toggle args persist across daemon restarts (the resume strategy now appends ResumeArgs to InstanceArgs instead of replacing).",
       "Auto-resume on daemon restart via `claude --continue`, with daemon-side `EvalSymlinks` re-resolution closing the spawn-time TOCTOU window.",
       "Idle-state detection surfaces to the notification center.",

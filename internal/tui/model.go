@@ -285,6 +285,7 @@ type Model struct {
 	sessionError      string                  // daemon-reported error (sessionScanFailed)
 	sessionTruncated  bool                    // daemon capped the listing
 	selectedSessionID string                  // committed resume target (empty = fresh session)
+	sessionDetail     sessionDetailPanel      // the picker's "i" panel (zero value = closed)
 	tomlEditor        *TextEditor             // active TOML editor (nil when not editing)
 	selection         *Selection              // active text selection (nil when none)
 	mouseDown         bool                    // true while left mouse button is held
@@ -1224,6 +1225,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// leaving "Scanning…" up forever. Local timer: no re-arm.
 		if m.sessionScanCWD == msg.cwd && m.sessionState == sessionScanning {
 			m.sessionState = sessionScanTimedOut
+		}
+		return m, nil
+
+	case claudeSessionDetailRespMsg:
+		m = m.applyClaudeSessionDetail(msg.Resp)
+		return m, m.listenForMessages()
+
+	case sessionDetailTimeoutMsg:
+		// Same contract as sessionScanTimeoutMsg: local timer, no re-arm.
+		if m.sessionDetail.id == msg.id && m.sessionDetail.state == sessionScanning {
+			m.sessionDetail.state = sessionScanTimedOut
 		}
 		return m, nil
 
@@ -3754,6 +3766,14 @@ func (m Model) listenForMessages() tea.Cmd {
 				return listenContinueMsg{}
 			}
 			return claudeSessionsRespMsg{Resp: payload}
+
+		case ipc.MsgClaudeSessionDetailResp:
+			var payload ipc.ClaudeSessionDetailRespPayload
+			if err := msg.DecodePayload(&payload); err != nil {
+				log.Printf("decode claude_session_detail_resp: %v", err)
+				return listenContinueMsg{}
+			}
+			return claudeSessionDetailRespMsg{Resp: payload}
 
 		case ipc.MsgRestartPaneResp:
 			// Response to the Alt+R restart confirm. The respawned pane

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // TestEscapeCWD locks in claude's on-disk naming convention for per-project
@@ -391,5 +392,215 @@ func TestReadTitle_PromptBeyondScanWindow_ReturnsEmpty(t *testing.T) {
 	}
 	if got := readTitle(path); got != "" {
 		t.Errorf("readTitle = %q, want empty for a prompt past the scan window", got)
+	}
+}
+
+// --- ReadDetail ------------------------------------------------------------
+
+// toolResult builds the shape claude records for a tool result: type "user",
+// but with no promptSource, because the user did not type it.
+func toolResult(text string) string {
+	return fmt.Sprintf(
+		`{"type":"user","isSidechain":false,"message":{"role":"user","content":%q},"timestamp":"2026-07-01T10:05:00.000Z"}`,
+		text)
+}
+
+func assistantMsg(text string) string {
+	return fmt.Sprintf(
+		`{"type":"assistant","isSidechain":false,"message":{"role":"assistant","content":%q},"timestamp":"2026-07-01T10:01:00.000Z"}`,
+		text)
+}
+
+// TestReadDetail_CountsOnlyTypedPrompts is the finding that shaped this whole
+// read: claude records a tool RESULT as type "user" too. Counting raw user
+// entries reports hundreds for a conversation with a handful of real prompts.
+func TestReadDetail_CountsOnlyTypedPrompts(t *testing.T) {
+	dir := t.TempDir()
+	writeSession(t, dir, "s1", time.Now(),
+		typedPrompt("first thing"),
+		assistantMsg("working on it"),
+		toolResult("tool output that is not a prompt"),
+		toolResult("more tool output"),
+		typedPrompt("second thing"),
+		assistantMsg("done"),
+		typedPrompt("last thing"),
+	)
+
+	d, err := readDetail(filepath.Join(dir, "s1.jsonl"), "s1")
+	if err != nil {
+		t.Fatalf("readDetail: %v", err)
+	}
+	if d.UserPrompts != 3 {
+		t.Errorf("UserPrompts = %d, want 3 (tool results are type \"user\" but were not typed)", d.UserPrompts)
+	}
+	if d.FirstPrompt != "first thing" {
+		t.Errorf("FirstPrompt = %q, want %q", d.FirstPrompt, "first thing")
+	}
+	if d.LastPrompt != "last thing" {
+		t.Errorf("LastPrompt = %q, want %q", d.LastPrompt, "last thing")
+	}
+}
+
+// TestReadDetail_SkipsSidechainPrompts: sidechain entries are a subagent's
+// conversation, not the user's, and must not be attributed to them.
+func TestReadDetail_SkipsSidechainPrompts(t *testing.T) {
+	dir := t.TempDir()
+	sidechain := `{"type":"user","isSidechain":true,"promptSource":"typed","message":{"role":"user","content":"subagent task"},"timestamp":"2026-07-01T10:02:00.000Z"}`
+	writeSession(t, dir, "s1", time.Now(), typedPrompt("mine"), sidechain)
+
+	d, err := readDetail(filepath.Join(dir, "s1.jsonl"), "s1")
+	if err != nil {
+		t.Fatalf("readDetail: %v", err)
+	}
+	if d.UserPrompts != 1 {
+		t.Errorf("UserPrompts = %d, want 1", d.UserPrompts)
+	}
+	if d.LastPrompt != "mine" {
+		t.Errorf("LastPrompt = %q, want the user's own prompt", d.LastPrompt)
+	}
+}
+
+func TestReadDetail_ReportsStartedSizeAndModified(t *testing.T) {
+	dir := t.TempDir()
+	mtime := time.Now().Add(-3 * time.Hour).Truncate(time.Second)
+	writeSession(t, dir, "s1", mtime, typedPrompt("hello"))
+
+	d, err := readDetail(filepath.Join(dir, "s1.jsonl"), "s1")
+	if err != nil {
+		t.Fatalf("readDetail: %v", err)
+	}
+	if d.Started.IsZero() {
+		t.Error("Started is zero — the opening entry carried a timestamp")
+	}
+	if !d.Modified.Equal(mtime) {
+		t.Errorf("Modified = %v, want %v", d.Modified, mtime)
+	}
+	if d.SizeBytes <= 0 {
+		t.Errorf("SizeBytes = %d, want the file size", d.SizeBytes)
+	}
+	if d.ID != "s1" {
+		t.Errorf("ID = %q, want s1", d.ID)
+	}
+}
+
+// TestReadDetail_StartTimestampBeyondOpeningLines: the start scan is bounded,
+// so a transcript that opens with many undated entries reports no start time
+// rather than parsing the whole file looking for one.
+func TestReadDetail_StartTimestampBeyondOpeningLines(t *testing.T) {
+	dir := t.TempDir()
+	lines := make([]string, 0, startScanLines+2)
+	for i := 0; i < startScanLines+1; i++ {
+		lines = append(lines, `{"type":"system","note":"no timestamp here"}`)
+	}
+	lines = append(lines, typedPrompt("late"))
+	writeSession(t, dir, "s1", time.Now(), lines...)
+
+	d, err := readDetail(filepath.Join(dir, "s1.jsonl"), "s1")
+	if err != nil {
+		t.Fatalf("readDetail: %v", err)
+	}
+	if !d.Started.IsZero() {
+		t.Errorf("Started = %v, want zero past the opening-line budget", d.Started)
+	}
+	// The prompt itself is still found — only the start scan is bounded.
+	if d.UserPrompts != 1 {
+		t.Errorf("UserPrompts = %d, want 1", d.UserPrompts)
+	}
+}
+
+func TestReadDetail_MalformedAndPartialLinesSkipped(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "s1.jsonl")
+	// No trailing newline on the last line: a transcript a live claude is
+	// appending to routinely ends mid-entry.
+	body := typedPrompt("good") + "\n" +
+		`{"type":"user","promptSource":"typed",` + "\n" +
+		`{"type":"user","isSidechain":false,"promptSource":"typed","message":{"role":"user","content":"trunc`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	d, err := readDetail(path, "s1")
+	if err != nil {
+		t.Fatalf("readDetail: %v", err)
+	}
+	if d.UserPrompts != 1 || d.LastPrompt != "good" {
+		t.Errorf("UserPrompts = %d, LastPrompt = %q; want 1 and %q — malformed lines must be skipped, not counted",
+			d.UserPrompts, d.LastPrompt, "good")
+	}
+}
+
+func TestReadDetail_MissingFileIsAnError(t *testing.T) {
+	if _, err := readDetail(filepath.Join(t.TempDir(), "nope.jsonl"), "nope"); err == nil {
+		t.Error("readDetail on a missing transcript returned nil error")
+	}
+}
+
+// TestReadDetail_RejectsTraversalSessionID guards the path the id takes: it is
+// a filename component built from a value that arrives over a socket.
+func TestReadDetail_RejectsTraversalSessionID(t *testing.T) {
+	for _, id := range []string{
+		"",
+		"..",
+		".",
+		"../secrets",
+		"sub/dir",
+		`..\windows`,
+	} {
+		if _, err := ReadDetail(t.TempDir(), id); err == nil {
+			t.Errorf("ReadDetail accepted session id %q", id)
+		}
+	}
+}
+
+func TestSanitizePrompt(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"keeps line structure", "line one\nline two", "line one\nline two"},
+		{"crlf collapses to lf", "line one\r\nline two", "line one\nline two"},
+		{"tab becomes space", "a\tb", "a b"},
+		{"drops escape sequences", "red \x1b[31mtext\x1b[0m", "red [31mtext[0m"},
+		{"drops bidi override", "safe‮txet", "safetxet"},
+		{"collapses blank runs", "a\n\n\n\nb", "a\n\nb"},
+		{"drops leading blanks", "\n\n\nhello", "hello"},
+		{"trims trailing blanks", "hello\n\n\n", "hello"},
+		{"strips trailing spaces", "hello   \nworld  ", "hello\nworld"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := sanitizePrompt(tt.in); got != tt.want {
+				t.Errorf("sanitizePrompt(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSanitizePrompt_TruncatesOnRuneBoundary(t *testing.T) {
+	in := strings.Repeat("é", MaxPromptRunes+50)
+	got := sanitizePrompt(in)
+	runes := []rune(got)
+	if len(runes) != MaxPromptRunes+1 { // +1 for the ellipsis
+		t.Errorf("len = %d runes, want %d", len(runes), MaxPromptRunes+1)
+	}
+	if runes[len(runes)-1] != '…' {
+		t.Errorf("truncated prompt must end with an ellipsis, got %q", string(runes[len(runes)-1]))
+	}
+	if !utf8.ValidString(got) {
+		t.Error("truncation split a multi-byte rune")
+	}
+}
+
+// TestSanitizePrompt_MultilineSurvivesTitleCollapse pins the difference between
+// the two sanitizers: a title is one row, a prompt is a paragraph.
+func TestSanitizePrompt_MultilineSurvivesTitleCollapse(t *testing.T) {
+	in := "first line\nsecond line"
+	if got := sanitizeTitle(in); strings.Contains(got, "\n") {
+		t.Errorf("sanitizeTitle kept a newline: %q", got)
+	}
+	if got := sanitizePrompt(in); !strings.Contains(got, "\n") {
+		t.Errorf("sanitizePrompt dropped the line break: %q", got)
 	}
 }

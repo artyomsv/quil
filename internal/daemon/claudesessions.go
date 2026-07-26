@@ -188,6 +188,119 @@ func (d *Daemon) claudeSessionsResponse(msg *ipc.Message) ipc.ClaudeSessionsResp
 	}
 }
 
+// readClaudeSessionDetailFn is the deep-read seam, mirroring
+// listClaudeSessionsFn so tests never touch a real ~/.claude directory.
+var readClaudeSessionDetailFn = claudesessions.ReadDetail
+
+// handleClaudeSessionDetailReq answers the picker's info key for one session.
+//
+// Worker goroutine and single-flight for the same reasons as
+// handleClaudeSessionsReq, but on a SEPARATE atomic: a detail read and a
+// directory listing are different requests, and making one wait on the other
+// would have opening the info panel fail merely because a listing was in
+// flight — which is exactly when the user opens it.
+//
+// One request streams a whole transcript, which is unbounded in a way the
+// listing is not (that one head-reads a fixed 64 KiB per file). The pre-filter
+// in ReadDetail keeps it a byte scan rather than a full unmarshal, but the
+// single-flight is what stops a client looping on this message type from
+// stacking concurrent multi-MB reads.
+func (d *Daemon) handleClaudeSessionDetailReq(conn *ipc.Conn, msg *ipc.Message) {
+	rejection, ok := d.beginClaudeSessionDetailRead(msg)
+	if !ok {
+		respondTo(conn, msg.ID, ipc.MsgClaudeSessionDetailResp, rejection)
+		return
+	}
+	go func() {
+		defer d.sessionDetailReading.Store(false)
+		respondTo(conn, msg.ID, ipc.MsgClaudeSessionDetailResp, claudeSessionDetailResponse(msg))
+	}()
+}
+
+// beginClaudeSessionDetailRead claims the single-flight slot, returning the
+// rejection payload to send back when it is already taken. Split from the
+// handler for the same reason beginClaudeSessionsScan is: ipc.Conn cannot be
+// constructed outside its package, so the decision is only testable on its own.
+func (d *Daemon) beginClaudeSessionDetailRead(msg *ipc.Message) (ipc.ClaudeSessionDetailRespPayload, bool) {
+	if d.sessionDetailReading.CompareAndSwap(false, true) {
+		return ipc.ClaudeSessionDetailRespPayload{}, true
+	}
+	cwd, id := claudeSessionDetailReqKey(msg)
+	return ipc.ClaudeSessionDetailRespPayload{
+		CWD:       cwd,
+		SessionID: id,
+		Error:     "another session read is already running",
+	}, false
+}
+
+// claudeSessionDetailReqKey extracts the echo key from a request so a rejection
+// still identifies the row it belongs to. Without it the TUI drops the error as
+// stale and the panel sits on "Reading…" until its timeout.
+func claudeSessionDetailReqKey(msg *ipc.Message) (cwd, sessionID string) {
+	var req ipc.ClaudeSessionDetailReqPayload
+	if err := msg.DecodePayload(&req); err != nil {
+		return "", ""
+	}
+	return req.CWD, req.SessionID
+}
+
+// claudeSessionDetailResponse decodes a request and summarizes the one
+// transcript it names. No receiver: unlike the listing, nothing here consults
+// daemon state — occupancy is already carried by the row the user is looking at.
+//
+// CONTRACT: CWD and SessionID echo the request VERBATIM, the same staleness
+// contract claudeSessionsResponse documents. The directory READ is the
+// symlink-resolved one, for the same reason: claude keys its project directory
+// off the resolved path, so a CWD reached through a symlink would otherwise
+// look like a session that does not exist.
+//
+// The session id is validated against the canonical UUID shape before it
+// reaches the filesystem. ReadDetail rejects separators on its own, but this
+// value arrives over a socket any pane's child process can reach, and a
+// filename component built from unvalidated input is worth refusing twice.
+func claudeSessionDetailResponse(msg *ipc.Message) ipc.ClaudeSessionDetailRespPayload {
+	var req ipc.ClaudeSessionDetailReqPayload
+	if err := msg.DecodePayload(&req); err != nil {
+		log.Printf("handleClaudeSessionDetailReq: decode: %v", err)
+		return ipc.ClaudeSessionDetailRespPayload{Error: "malformed request"}
+	}
+	echo := ipc.ClaudeSessionDetailRespPayload{CWD: req.CWD, SessionID: req.SessionID}
+	if req.CWD == "" || req.SessionID == "" {
+		echo.Error = "no session selected"
+		return echo
+	}
+	if !resumeSessionIDRe.MatchString(req.SessionID) {
+		// By length only, never by value: the id is attacker-controlled text.
+		log.Printf("claude session detail: rejecting malformed session id (len=%d)", len(req.SessionID))
+		echo.Error = "invalid session id"
+		return echo
+	}
+
+	readCWD := req.CWD
+	if resolved, err := filepath.EvalSymlinks(req.CWD); err == nil {
+		readCWD = resolved
+	}
+
+	detail, err := readClaudeSessionDetailFn(readCWD, req.SessionID)
+	if err != nil {
+		log.Printf("claude session detail: read %q: %v", req.SessionID, err)
+		echo.Error = "could not read this session's transcript"
+		return echo
+	}
+
+	echo.FirstPrompt = detail.FirstPrompt
+	echo.LastPrompt = detail.LastPrompt
+	echo.UserPrompts = detail.UserPrompts
+	echo.SizeBytes = detail.SizeBytes
+	if !detail.Started.IsZero() {
+		echo.StartedMs = detail.Started.UnixMilli()
+	}
+	if !detail.Modified.IsZero() {
+		echo.ModifiedMs = detail.Modified.UnixMilli()
+	}
+	return echo
+}
+
 // liveClaudeSessionIDs maps each session id currently held by a RUNNING
 // claude-code pane to that pane's id. This is what the picker displays as
 // "open in another pane"; use claimedClaudeSessionIDs for the admission check,

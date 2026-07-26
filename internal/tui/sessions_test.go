@@ -8,6 +8,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/plugin"
@@ -25,20 +26,28 @@ func claudeLikePlugin() *plugin.PanePlugin {
 	}
 }
 
-// TestSetupFieldKind_SessionAfterCWD pins the field order. The session listing
-// is scoped to the directory chosen above it, so it must come after the CWD
-// field — a session field the user reaches first would have nothing to list.
-func TestSetupFieldKind_SessionAfterCWD(t *testing.T) {
+// TestSetupFieldKind_SessionAfterCWDAndToggles pins the field order. Two
+// constraints meet here: the listing is scoped to the directory chosen above it,
+// so the session field must come after CWD — a session field the user reaches
+// first would have nothing to list — and it is the only field that expands, so
+// it sits last, below the fixed-height toggle rows it would otherwise displace.
+func TestSetupFieldKind_SessionAfterCWDAndToggles(t *testing.T) {
 	m := Model{}
 	p := claudeLikePlugin()
 
 	if got, want := m.setupFieldCount(p), 5; got != want {
-		t.Fatalf("setupFieldCount = %d, want %d (cwd, session, 2 toggles, continue)", got, want)
+		t.Fatalf("setupFieldCount = %d, want %d (cwd, 2 toggles, session, continue)", got, want)
 	}
-	wantKinds := []string{"cwd", "session", "toggle", "toggle", "continue"}
+	wantKinds := []string{"cwd", "toggle", "toggle", "session", "continue"}
 	for i, want := range wantKinds {
 		if kind, _ := m.setupFieldKind(p, i); kind != want {
 			t.Errorf("kind at index %d = %q, want %q", i, kind, want)
+		}
+	}
+	// The toggle index must keep tracking the slice position, not the cursor.
+	for cursor, wantIdx := range map[int]int{1: 0, 2: 1} {
+		if _, got := m.setupFieldKind(p, cursor); got != wantIdx {
+			t.Errorf("toggleIdx at cursor %d = %d, want %d", cursor, got, wantIdx)
 		}
 	}
 }
@@ -630,5 +639,70 @@ func TestRenderSetupSessionField_EmptyListing(t *testing.T) {
 	got := m.renderSetupSessionField(true)
 	if !strings.Contains(got, "no earlier sessions") {
 		t.Errorf("an empty listing needs an honest empty state:\n%s", got)
+	}
+}
+
+// longTitleSessionModel is a model whose session titles all overflow the row
+// budget — the shape that exposed the wrap.
+func longTitleSessionModel(t *testing.T) Model {
+	t.Helper()
+	m := renderableSessionModel(t,
+		sessionRow("s1", "there is a strange deployments restart happening in the homelab cluster", ""),
+		sessionRow("s2", "we need to create a new gateway for our company web portal service", ""),
+		sessionRow("s3", "test me ai project, ingestion mailbox scheduled processing rewrite", ""),
+	)
+	m.createPaneStep = 2
+	m.setupFieldCursor = 1 // the session field (0 is the CWD browser)
+	m.height = 60
+	return m
+}
+
+// TestRenderCreatePaneSetup_SessionRowsDoNotWrap is the end-to-end guard for
+// the defect: rows were truncated to the box width minus padding but NOT minus
+// the border, which lipgloss counts inside Style.Width. Every row then sat two
+// cells over the wrap limit, and reflow dropped its last word onto a line of
+// its own at column 0, shredding the list.
+//
+// Asserts against the boxed render rather than the raw content, so it fails on
+// any future accounting drift regardless of which constant caused it.
+func TestRenderCreatePaneSetup_SessionRowsDoNotWrap(t *testing.T) {
+	m := longTitleSessionModel(t)
+
+	content := m.renderCreatePaneSetupDialog()
+	for _, line := range strings.Split(content, "\n") {
+		if w := lipgloss.Width(line); w > m.setupTextWidth() {
+			t.Errorf("line width %d exceeds the box text area %d (wraps):\n%q",
+				w, m.setupTextWidth(), line)
+		}
+	}
+
+	// Line-count equality is what actually proves nothing wrapped: the box adds
+	// exactly two border rows and Padding(1,2)'s two blank rows.
+	const boxRows = 4
+	want := len(strings.Split(content, "\n")) + boxRows
+	got := len(strings.Split(dialogBorder.Width(m.setupDialogWidth()).Render(content), "\n"))
+	if got != want {
+		t.Errorf("boxed render is %d lines, want %d — %d line(s) wrapped", got, want, got-want)
+	}
+}
+
+// TestRenderSetupSessionField_BlockedMarkerSurvivesLongTitle guards the second
+// half of the fix: appending the marker and truncating the whole row dropped
+// "[open in …]" off exactly the rows long enough to need it, leaving a blocked
+// row visually identical to a selectable one until Enter refused it.
+func TestRenderSetupSessionField_BlockedMarkerSurvivesLongTitle(t *testing.T) {
+	m := renderableSessionModel(t, sessionRow("busy",
+		"a very long earlier prompt that on its own already fills the whole row budget and then some",
+		"pane-0000000a"))
+	m.height = 60
+
+	got := m.renderSetupSessionField(true)
+	if !strings.Contains(got, "open in") {
+		t.Errorf("the in-use marker must survive a title that fills the row:\n%s", got)
+	}
+	for _, line := range strings.Split(got, "\n") {
+		if w := lipgloss.Width(line); w > m.setupTextWidth() {
+			t.Errorf("marked row width %d exceeds the text area %d:\n%q", w, m.setupTextWidth(), line)
+		}
 	}
 }

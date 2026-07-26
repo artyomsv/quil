@@ -23,9 +23,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   transcript overwrite each other's history. Changing the working directory
   clears the choice and rescans.
 
+  Press **`i`** on a session for details: when it started, when it was last
+  touched, how many prompts you typed, and the last prompt you left it on —
+  which appears nowhere else and is usually what identifies a conversation.
+  `↑`/`↓` re-read for the next session, so candidates can be compared without
+  toggling the panel per row. The transcript is read on demand, never as part of
+  the listing.
+
   Opt-in per pane type via the new `[command] sessions = "claude"` plugin key
   (`claude-code.toml` schema_version 8 → 9, so the plugin-migration dialog will
   offer the merge once on first launch).
+
+### Fixed
+- Rows in the pane setup dialog no longer wrap onto a second line. Every content
+  budget in that dialog reserved the box's padding but not its border, which
+  lipgloss counts inside `Style.Width` — so a row that filled its budget sat two
+  cells past the wrap limit and reflow dropped its last word onto a line of its
+  own. Most visible in the session picker, where long titles made every row wrap;
+  the working-directory pick list and the footer hints had the same two-cell
+  overrun. All four now derive from one `setupTextWidth()`, pinned to lipgloss's
+  actual behaviour by a test that fails in both directions.
+- A session already open in another pane keeps its `[open in …]` marker when its
+  title is long. The marker was appended and the whole row then truncated, so it
+  was cut off exactly the rows that needed it — leaving a blocked row looking
+  selectable until `Enter` refused it.
 
 ## [1.41.1] - 2026-07-24
 

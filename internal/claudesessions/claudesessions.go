@@ -12,8 +12,10 @@
 package claudesessions
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -44,6 +46,16 @@ const (
 	// margin. A transcript whose first prompt falls outside the window simply
 	// yields no title.
 	titleScanBytes = 64 << 10
+
+	// MaxPromptRunes bounds each prompt ReadDetail returns. Larger than
+	// MaxTitleRunes because the detail view shows a prompt as a paragraph
+	// rather than a row, but still bounded: a prompt can carry a pasted file.
+	MaxPromptRunes = 1200
+
+	// startScanLines bounds the search for the session's start timestamp. The
+	// first entry normally carries one, but a transcript may open with a
+	// summary or meta entry that does not.
+	startScanLines = 20
 )
 
 // Session is one Claude Code transcript discovered for a working directory.
@@ -215,12 +227,139 @@ type transcriptLine struct {
 	Type         string `json:"type"`
 	IsSidechain  bool   `json:"isSidechain"`
 	PromptSource string `json:"promptSource"`
+	Timestamp    string `json:"timestamp"`
 	Message      struct {
 		// Content is a string for a plain prompt and an array of content
 		// blocks when the prompt carries attachments — both shapes occur in
 		// the wild, so it is decoded in a second pass.
 		Content json.RawMessage `json:"content"`
 	} `json:"message"`
+}
+
+// Detail is the on-demand deep read of a single transcript, answering "is this
+// the conversation I want to resume?" without opening it. Unlike List — which
+// head-reads every transcript in a directory — this reads one file end to end,
+// so it is issued per user request, never per listing.
+type Detail struct {
+	// ID is the session UUID the detail describes.
+	ID string
+	// FirstPrompt and LastPrompt are the first and last prompts the user
+	// typed, sanitized but NOT collapsed to one line: the detail view renders
+	// them as paragraphs. Either may be empty.
+	FirstPrompt string
+	LastPrompt  string
+	// UserPrompts counts entries the user typed. Tool results are recorded as
+	// type "user" too, so they are excluded by the same promptSource=="typed"
+	// test the title scan uses — counting raw user entries would report
+	// hundreds for a conversation with a few dozen actual prompts.
+	//
+	// Deliberately the ONLY count reported. An assistant-entry count was tried
+	// and dropped: measured against real transcripts it reads 11638 against 87
+	// prompts, because every tool call is its own entry — a number no human
+	// reads as "replies". Dropping it also made the scan ~20× faster, since
+	// confirming those entries meant unmarshaling the bulk of the file.
+	UserPrompts int
+	// Started is the timestamp on the transcript's first dated entry; zero when
+	// none of the opening entries carried one.
+	Started time.Time
+	// Modified is the file's mtime — when the session was last active.
+	Modified time.Time
+	// SizeBytes is the transcript size on disk.
+	SizeBytes int64
+}
+
+// ReadDetail reads one session's transcript for cwd and summarizes it.
+//
+// sessionID is a filename component, so it is validated here as well as at the
+// IPC boundary: this package is importable on its own, and a caller that passes
+// through an unchecked id would otherwise turn "../../.ssh/id_rsa" into a read
+// outside the project directory.
+func ReadDetail(cwd, sessionID string) (Detail, error) {
+	if sessionID == "" || sessionID != filepath.Base(sessionID) ||
+		sessionID == "." || sessionID == ".." || strings.ContainsRune(sessionID, filepath.Separator) {
+		return Detail{}, fmt.Errorf("invalid session id")
+	}
+	path := TranscriptPath(cwd, sessionID)
+	if path == "" {
+		return Detail{}, fmt.Errorf("no transcript path for this session")
+	}
+	return readDetail(path, sessionID)
+}
+
+// readDetail is the filesystem half of ReadDetail, split out so tests can point
+// it at a t.TempDir() rather than the real home directory.
+func readDetail(path, id string) (Detail, error) {
+	// Lstat, not Stat: a symlinked transcript is rejected rather than followed,
+	// matching listDir's IsRegular filter.
+	info, err := os.Lstat(path)
+	if err != nil {
+		return Detail{}, err
+	}
+	if !info.Mode().IsRegular() {
+		return Detail{}, fmt.Errorf("transcript is not a regular file")
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		return Detail{}, err
+	}
+	defer f.Close()
+
+	d := Detail{ID: id, Modified: info.ModTime(), SizeBytes: info.Size()}
+
+	// The whole file is streamed — the last prompt is only knowable at the end —
+	// but a line is rejected by a byte-compare before any JSON parsing, the same
+	// pre-filter readTitle uses. Typed prompts are a tiny minority of entries,
+	// so a multi-MB transcript costs a memchr pass and a few dozen unmarshals
+	// rather than one per entry. That is the difference between this being
+	// affordable on a keypress and not: the largest transcript on hand is 88 MB.
+	r := bufio.NewReaderSize(f, 64<<10)
+	typedMark := []byte(`"promptSource":"typed"`)
+	for lineNo := 0; ; lineNo++ {
+		// A non-nil error still yields the trailing bytes: a transcript a live
+		// claude process is appending to routinely ends mid-line, and that
+		// fragment simply fails to parse and is skipped.
+		line, readErr := r.ReadBytes('\n')
+		if len(line) > 0 {
+			d.consume(line, lineNo, typedMark)
+		}
+		if readErr != nil {
+			break
+		}
+	}
+	return d, nil
+}
+
+// consume folds one transcript line into the accumulating detail.
+func (d *Detail) consume(line []byte, lineNo int, typedMark []byte) {
+	// The start timestamp comes from the first dated entry of any type, so it
+	// is the only reason to parse an opening line that is not a typed prompt.
+	needStart := d.Started.IsZero() && lineNo < startScanLines
+
+	if !needStart && !bytes.Contains(line, typedMark) {
+		return
+	}
+
+	var tl transcriptLine
+	if err := json.Unmarshal(bytes.TrimSpace(line), &tl); err != nil {
+		return
+	}
+	if needStart && tl.Timestamp != "" {
+		if ts, err := time.Parse(time.RFC3339, tl.Timestamp); err == nil {
+			d.Started = ts
+		}
+	}
+	// Sidechain entries belong to subagents, not the user's conversation.
+	if tl.IsSidechain || tl.Type != "user" || tl.PromptSource != "typed" {
+		return
+	}
+	d.UserPrompts++
+	if text := sanitizePrompt(contentText(tl.Message.Content, MaxPromptRunes)); text != "" {
+		if d.FirstPrompt == "" {
+			d.FirstPrompt = text
+		}
+		d.LastPrompt = text
+	}
 }
 
 // readTitle returns the first typed human prompt in the head of a transcript,
@@ -262,7 +401,7 @@ func readTitle(path string) string {
 		if tl.Type != "user" || tl.IsSidechain || tl.PromptSource != "typed" {
 			continue
 		}
-		if text := sanitizeTitle(contentText(tl.Message.Content)); text != "" {
+		if text := sanitizeTitle(contentText(tl.Message.Content, MaxTitleRunes)); text != "" {
 			return text
 		}
 	}
@@ -270,8 +409,10 @@ func readTitle(path string) string {
 }
 
 // contentText flattens a message content field into plain text, accepting both
-// the bare-string shape and the content-block array shape.
-func contentText(raw json.RawMessage) string {
+// the bare-string shape and the content-block array shape. limit caps how much
+// text is assembled from blocks — the caller truncates for display, this only
+// stops a multi-block prompt being concatenated in full just to be thrown away.
+func contentText(raw json.RawMessage, limit int) string {
 	if len(raw) == 0 {
 		return ""
 	}
@@ -295,9 +436,7 @@ func contentText(raw json.RawMessage) string {
 			b.WriteByte(' ')
 		}
 		b.WriteString(blk.Text)
-		// One block is enough for a title; stop before concatenating a whole
-		// multi-block prompt just to throw most of it away at truncation.
-		if b.Len() >= MaxTitleRunes {
+		if b.Len() >= limit {
 			break
 		}
 	}
@@ -325,6 +464,59 @@ func contentText(raw json.RawMessage) string {
 // user-authored text that reaches the screen without passing through the VT
 // emulator, so it is worth sanitizing on both sides of the socket.
 func SanitizeTitle(s string) string { return sanitizeTitle(s) }
+
+// SanitizePrompt is sanitizeTitle's multi-line counterpart, for text rendered
+// as a paragraph rather than a row: line breaks are PRESERVED (the shape of a
+// prompt is most of its readability) while every other control character and
+// Unicode format character is dropped, for the same display-spoofing reasons
+// documented on SanitizeTitle. Runs of blank lines collapse to one so a prompt
+// padded with newlines cannot push the rest of the panel off-screen, and
+// trailing whitespace goes because it only ever renders as ragged rows.
+//
+// Exported for the same reason SanitizeTitle is: the TUI re-applies it to text
+// arriving over IPC, which reaches the screen without passing through the VT
+// emulator.
+func SanitizePrompt(s string) string { return sanitizePrompt(s) }
+
+func sanitizePrompt(s string) string {
+	mapped := strings.Map(func(r rune) rune {
+		switch {
+		case r == '\n':
+			return r
+		case r == '\r':
+			return -1 // CRLF collapses to LF rather than doubling the break
+		case r == '\t':
+			return ' '
+		case unicode.IsControl(r), unicode.Is(unicode.Cf, r):
+			return -1
+		default:
+			return r
+		}
+	}, s)
+
+	var out []string
+	blank := 0
+	for _, line := range strings.Split(mapped, "\n") {
+		line = strings.TrimRight(line, " \t")
+		if line == "" {
+			blank++
+			// Drop leading blanks entirely; collapse interior runs to one.
+			if blank > 1 || len(out) == 0 {
+				continue
+			}
+		} else {
+			blank = 0
+		}
+		out = append(out, line)
+	}
+	text := strings.TrimRight(strings.Join(out, "\n"), "\n")
+
+	runes := []rune(text)
+	if len(runes) > MaxPromptRunes {
+		text = strings.TrimRight(string(runes[:MaxPromptRunes]), " \n") + "…"
+	}
+	return text
+}
 
 func sanitizeTitle(s string) string {
 	mapped := strings.Map(func(r rune) rune {

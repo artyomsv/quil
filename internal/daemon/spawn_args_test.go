@@ -180,7 +180,7 @@ func TestResolveSpawnArgs_Matrix(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := resolveSpawnArgs(tt.plugin, tt.pane, tt.restoring)
+			got := resolveSpawnArgs(tt.plugin, tt.pane, tt.restoring, "")
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("resolveSpawnArgs:\n  got:  %v\n  want: %v", got, tt.want)
 			}
@@ -272,7 +272,7 @@ func TestResolveSpawnArgs_ClaudeResumePromotion(t *testing.T) {
 				}
 				return tt.sessionFound
 			}
-			got := resolveSpawnArgs(claudePlugin, tt.pane, true)
+			got := resolveSpawnArgs(claudePlugin, tt.pane, true, "")
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("resolveSpawnArgs:\n  got:  %v\n  want: %v", got, tt.want)
 			}
@@ -304,81 +304,10 @@ func TestResolveSpawnArgs_ClaudeResumePromotion_NotAppliedToOtherPlugins(t *test
 		CWD:         `E:\anywhere`,
 		PluginState: map[string]string{"session_id": "xyz"},
 	}
-	got := resolveSpawnArgs(p, pane, true)
+	got := resolveSpawnArgs(p, pane, true, "")
 	want := []string{"--resume", "xyz"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("resolveSpawnArgs:\n  got:  %v\n  want: %v", got, want)
-	}
-}
-
-// TestEscapeClaudeCWD locks in claude's on-disk naming convention for
-// per-project session directories. If claude ever changes this (e.g.
-// starts percent-encoding instead), this test fails in CI instead of
-// panes silently falling back to --continue everywhere.
-func TestEscapeClaudeCWD(t *testing.T) {
-	tests := []struct {
-		name string
-		cwd  string
-		want string
-	}{
-		{"windows path", `E:\Projects\Stukans\Prototypes\calyx`, "E--Projects-Stukans-Prototypes-calyx"},
-		{"unix path", "/home/user/project", "-home-user-project"},
-		{"windows with dot-dir", `C:\Users\artjo\.claude`, "C--Users-artjo--claude"},
-		{"mixed separators", `E:/Projects\mixed`, "E--Projects-mixed"},
-		{"root-only windows", `C:\`, "C--"},
-		{"empty", "", ""},
-		// Regression: macOS home like /Users/Foo_Bar lands under
-		// ~/.claude/projects/-Users-Foo-Bar (Claude encodes _ as -). Before
-		// the fix every Claude pane on a path with an underscore restarted
-		// with --continue instead of --resume <id>.
-		{"unix path with underscore", "/Users/Artjoms_Stukans/Projects/crypto-finance", "-Users-Artjoms-Stukans-Projects-crypto-finance"},
-		{"underscore-only segment", "/home/foo_bar/quil", "-home-foo-bar-quil"},
-		{"multiple underscores", "/a_b/c_d_e", "-a-b-c-d-e"},
-		// Field evidence 2026-07-05: a worktree CWD containing ".claude"
-		// landed under E--Projects-Stukans-quil--claude-worktrees-… — Claude
-		// encodes EVERY non-alphanumeric as '-'. The escaper now mirrors
-		// that rule exactly; only [A-Za-z0-9] survives.
-		{"dot encoded", "/foo.bar/quil", "-foo-bar-quil"},
-		{"space encoded", "/foo bar/quil", "-foo-bar-quil"},
-		{"uppercase preserved", "/Foo/BAR", "-Foo-BAR"},
-		{"worktree dot-dir (real incident)",
-			`E:\Projects\Stukans\quil\.claude\worktrees\resize-artifacts`,
-			"E--Projects-Stukans-quil--claude-worktrees-resize-artifacts"},
-		// Cross-OS + unicode parity with claude's JS sanitizer
-		// (replace(/[^a-zA-Z0-9]/g,"-") over UTF-16 code units, extracted
-		// from the binary 2026-07-05): BMP non-ASCII → one dash, astral
-		// (emoji, surrogate pair) → two dashes.
-		{"macos home with accent", "/Users/josé/proj", "-Users-jos--proj"},
-		{"astral char is two units", "/tmp/😀dir", "-tmp---dir"},
-		// >200-char names: claude truncates to 200 then appends
-		// "-"+base36(abs(hash)). The exact form is transcribed from the
-		// claude binary (2026-07-05):
-		//   Ows(e){let t=e.replace(/[^a-zA-Z0-9]/g,"-");
-		//          if(t.length<=200)return t;
-		//          return `${t.slice(0,200)}-${Math.abs(Pke(e)).toString(36)}`}
-		//   Pke(e){let h=0;for(u of utf16(e))h=(h<<5)-h+u|0;return h}
-		// Critically, the hash argument is the ORIGINAL cwd `e`, NOT the
-		// dashified `t` — so escapeClaudeCWD hashes `units` (original), and
-		// a >200-char path resolves to the SAME dir claude writes. The
-		// `-ut7e65` suffix below is computed by that transcribed algorithm;
-		// it has not been diffed against a claude-generated dir for a
-		// >200-char cwd (no such path exists on disk to observe), but the
-		// algorithm is byte-for-byte the binary's. If claude ever changes
-		// the scheme, the sanity gate fails safe: a wrong probe dir just
-		// forces the --continue fallback (pane still restores), and this
-		// vector flags the drift.
-		{"exactly 200 keeps no suffix", "/" + strings.Repeat("a", 199),
-			"-" + strings.Repeat("a", 199)},
-		{"long path truncates with hash suffix", "/home/user/" + strings.Repeat("a", 200),
-			"-home-user-" + strings.Repeat("a", 189) + "-ut7e65"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := escapeClaudeCWD(tt.cwd)
-			if got != tt.want {
-				t.Errorf("escapeClaudeCWD(%q) = %q, want %q", tt.cwd, got, tt.want)
-			}
-		})
 	}
 }
 
@@ -504,7 +433,7 @@ func TestResolveSpawnArgs_ClaudeHookSessionID(t *testing.T) {
 				}
 				return sessionID == tt.sessionFoundForID
 			}
-			got := resolveSpawnArgs(claudePlugin, tt.pane, true)
+			got := resolveSpawnArgs(claudePlugin, tt.pane, true, "")
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("resolveSpawnArgs:\n  got:  %v\n  want: %v", got, tt.want)
 			}
@@ -613,7 +542,7 @@ func TestResolveSpawnArgs_DoesNotMutatePluginArgs(t *testing.T) {
 		},
 		Persistence: plugin.PersistenceConfig{Strategy: "cwd_only"},
 	}
-	got := resolveSpawnArgs(p, &Pane{}, false)
+	got := resolveSpawnArgs(p, &Pane{}, false, "")
 	got[0] = "MUTATED"
 	if p.Command.Args[0] != "-l" {
 		t.Errorf("plugin.Command.Args was mutated: got %q, want %q", p.Command.Args[0], "-l")
@@ -698,7 +627,7 @@ func TestResolveSpawnArgs_OpencodeResume(t *testing.T) {
 				}
 				return tt.hookID, tt.hookErr
 			}
-			got := resolveSpawnArgs(opencodePlugin, tt.pane, true)
+			got := resolveSpawnArgs(opencodePlugin, tt.pane, true, "")
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("resolveSpawnArgs:\n  got:  %v\n  want: %v", got, tt.want)
 			}

@@ -35,11 +35,13 @@ export const plugins: PluginEntry[] = [
     name: "Claude Code",
     kind: "built-in",
     description:
-      "An AI session pane that runs Anthropic's Claude Code CLI. A setup dialog asks for the working directory (so project-specific `.claude/` context is preserved) and offers a `Dangerously skip permissions` checkbox for unattended runs. Sessions resume across daemon restarts.",
+      "An AI session pane that runs Anthropic's Claude Code CLI. A setup dialog asks for the working directory (so project-specific `.claude/` context is preserved), lets you resume one of that folder's earlier sessions instead of starting fresh, and offers a `Dangerously skip permissions` checkbox for unattended runs. Sessions resume across daemon restarts.",
     spawnExample:
       '# claude-code.toml — relevant fields\n[plugin]\nname = "claude-code"\nschema_version = 2\n\n[command]\ncmd = "claude"\nprompts_cwd = true\n\n[[command.toggles]]\nname = "skip"\nlabel = "Dangerously skip permissions"\nargs_when_on = ["--dangerously-skip-permissions"]\ndefault = false\n\n[persistence]\nstrategy = "preassign_id"\nresume_args = ["--continue"]',
     features: [
       "Setup dialog (Ctrl+N → AI → Claude Code) browses the filesystem starting from the active pane's OSC 7 working directory. On Windows, backspace at a drive root shows all available drives for cross-drive navigation.",
+      "Resume picker: the same dialog lists the sessions already recorded for the folder you picked — newest first, titled with the first prompt you typed in each — so a new pane can continue yesterday's conversation instead of starting cold. Sessions open in another pane are greyed out and blocked, since two claude processes on one transcript would overwrite each other's history.",
+      "Press `i` on a listed session for details — when it started, when it was last touched, how many prompts you typed, and the last prompt you left it on. Arrow keys re-read for the next session, so two similar-looking conversations can be told apart without opening either.",
       "`Dangerously skip permissions` checkbox is off by default; when on, the toggle args persist across daemon restarts (the resume strategy now appends ResumeArgs to InstanceArgs instead of replacing).",
       "Auto-resume on daemon restart via `claude --continue`, with daemon-side `EvalSymlinks` re-resolution closing the spawn-time TOCTOU window.",
       "Idle-state detection surfaces to the notification center.",

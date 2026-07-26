@@ -89,6 +89,7 @@ arg_template = ["-p", "{port}", "{user}@{host}"]
 | `discover` | string | No | `""` | Discovery mode for the setup dialog. `"git"` replaces the plain directory browser with a git-repo candidate list: the enclosing repo of the active pane's CWD plus one-level sub-repos, capped at 10, with a final "Browse…" row that falls back to the plain browser (only meaningful with `prompts_cwd = true`). `"kube"` adds a kube-context pick field: "Default context" (the kubeconfig current-context, no flag) plus the contexts found in `KUBECONFIG` / `~/.kube/config` (current-context marked), and injects `--context <name>` into the launch args — CWD-independent, so it works with `prompts_cwd = false`. Unknown values fail plugin load. |
 | `raw_keys` | string[] | No | `[]` | List of key strings (e.g. `["shift+tab"]`) that bypass Quil's global shortcut layer for panes of this type and are forwarded directly to the PTY. Capped at 64 entries. Single-rune printable entries (e.g. `["a"]`) shadow ordinary typing for the entire pane and are warned about in the daemon log. The default plugins **do not** opt in — Tab and Shift+Tab reach the PTY naturally because pane navigation lives on `Alt+Arrow`. The mechanism is available for custom plugins that need to override some other global shortcut. |
 | `record_history` | bool | No | `false` | If `true`, the daemon sets `QUIL_RECORD_HISTORY=1` in the pane's PTY env and the plugin's hook producer appends each submitted user prompt to `~/.quil/history/<paneID>.jsonl` (capped per-entry, ring-trimmed to the last 200). The active pane's history is browsable via the `command_history` keybinding (`Alt+Shift+I`). Only meaningful for plugins that have a hook producer recording prompts — currently the `claude-code` default. Has no effect for plugins without such a producer. |
+| `sessions` | string | No | `""` | Session source for the setup dialog's **resume** picker. `"claude"` lists the Claude Code transcripts recorded for the selected working directory (`~/.claude/projects/<escaped-cwd>/*.jsonl`, newest first, capped at 200) and, when the user picks one, spawns `--resume <id>` **instead of** the `preassign_id` strategy's `start_args`. Requires `prompts_cwd = true` — the listing is scoped to the directory chosen in the dialog, so the combination is rejected at plugin load rather than rendering a field that can never list anything. Unknown values fail plugin load too. See [Resume Picker](#resume-picker). |
 
 ### Form Fields — `[[command.form_fields]]`
 
@@ -178,10 +179,63 @@ If a plugin declares any `toggles` (or sets `prompts_cwd = true`), the setup dia
 When a plugin opts in via `prompts_cwd = true` or `[[command.toggles]]`, Quil inserts a setup step between plugin selection and split-direction selection. The dialog renders:
 
 1. **Working directory** text input (only if `prompts_cwd = true`), pre-filled with the active pane's CWD. Validated on Enter: the path is trimmed, stripped of surrounding quotes (to accept Windows `Copy as path` output), `~` is expanded, then verified via `os.Stat` as an existing directory. Empty input is accepted and means "use daemon default".
-2. **One checkbox per toggle**, in declaration order.
-3. **Continue** button.
+2. **Kube context** pick list (only if `discover = "kube"`).
+3. **One checkbox per toggle**, in declaration order.
+4. **Session** picker (only if `sessions = "claude"`). See [Resume Picker](#resume-picker).
+5. **Continue** button.
 
 Navigation: `Tab` / `Shift+Tab` / `↑` / `↓` cycle fields. `Space` flips the focused checkbox. `Enter` validates and submits. `Esc` unwinds — back to the instance form if the plugin also has `form_fields`, otherwise back to the plugin picker. `Ctrl+V` pastes into the CWD field.
+
+### Resume Picker
+
+With `sessions = "claude"`, the setup dialog gains a **Session** field below the toggles, just above **Continue**. Two constraints put it there: it must come after the working directory, because the listing is scoped to the folder selected above it, and it is the only field that expands — keeping it last means focusing it does not shift the fixed-height rows above.
+
+The field is **collapsed** to a single line while unfocused, showing the current choice (`New session` by default), so a dialog that already carries a directory browser does not grow for a field most panes never touch. `Tab` onto it and it expands into a scrolling list:
+
+```
+> Session:
+  > New session
+      2h ago   Add resume option to claude pane setup dialog
+      1d ago   fix(update): release only our own apply lock
+      3d ago   I would like to add more mouse controls. For e…
+    2/22  ↑↓ PgUp/PgDn move  Enter select  i details
+```
+
+Each row shows a relative age and a title. The title is the first prompt you typed in that session, read from the head of the transcript; a transcript with no typed prompt in the scanned window falls back to its short session id.
+
+Row 0 is always `New session` and is pre-selected, so a user who never touches the field gets the previous behavior exactly.
+
+**Sessions already open in another live pane are listed but blocked.** They render greyed with an `[open in 2.Claude]` marker, and `Enter` is refused — two `claude` processes attached to one transcript overwrite each other's history. The cursor can still land on the row so the footer can explain why it is blocked, matching how the Ctrl+N plugin list treats an uninstalled binary.
+
+Changing the working directory discards the selection and rescans: a session recorded under another project is not a meaningful resume target.
+
+The listing is fetched from the daemon on first focus, not when the dialog opens — creating a pane with a fresh session performs no session I/O at all. If the daemon does not answer within 3 seconds the field says so rather than sitting on `Scanning…`, and `New session` stays selectable through every failure mode.
+
+#### Session details (`i`)
+
+A row's age and title are often not enough to tell two sessions apart. Press `i` on a highlighted session and the list is replaced in place by a detail panel:
+
+```
+> Session:
+    2db05609-f1d5-4576-b2a1-9e0c3a7f1188
+    Started    2026-07-24 09:12  (2d ago)
+    Last used  2026-07-26 08:41  (36m ago)
+    Prompts    47 typed · 1.8 MB
+
+    First  we are working with sqube gateway - UI redesign. I
+           will need to rework the panel layout so the candidate
+           list keeps its filters when you switch tabs, and the…
+    Last   check why the deploy job is flaking on the arm64
+           runner
+```
+
+**Last** is the point of the panel — it is the prompt you left the conversation on, and it appears nowhere else. **First** is capped at three lines because it is already the row's title in the list.
+
+`i` or `Esc` returns to the list; `Enter` selects the session as usual. The panel is a mode you browse in: `↑` / `↓` move to another session and re-read for it, so comparing candidates does not mean toggling the panel per row.
+
+The read happens on demand, once per session you look at, and streams the whole transcript because the last prompt is only knowable at the end. It stays affordable on a keypress by rejecting each line with a byte comparison before any JSON parsing — the largest transcript in the author's `~/.claude` is 88 MB and reads in about a second. Only prompts **you typed** are counted: Claude records a tool result as a `user` entry too, so counting raw user entries reports hundreds for a conversation with a few dozen real prompts.
+
+Picking a session spawns `claude --resume <id>` in place of `start_args`. Runtime toggles still compose: `--dangerously-skip-permissions`, `--enable-auto-mode`, and `--chrome` are appended exactly as they are for a fresh session. Once Claude boots, its `SessionStart` hook records the live session id, so restore after a daemon restart works through the existing machinery with no special-casing.
 
 ---
 

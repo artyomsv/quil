@@ -95,6 +95,12 @@ const (
 	MsgPaneSearchReq  = "pane_search_req"
 	MsgPaneSearchResp = "pane_search_resp"
 
+	// Claude Code session discovery (pane setup dialog "resume" picker)
+	MsgClaudeSessionsReq       = "claude_sessions_req"
+	MsgClaudeSessionsResp      = "claude_sessions_resp"
+	MsgClaudeSessionDetailReq  = "claude_session_detail_req"
+	MsgClaudeSessionDetailResp = "claude_session_detail_resp"
+
 	// Auto-update (TUI ⇄ daemon)
 	MsgStageUpdateReq  = "stage_update_req"  // TUI → daemon (empty payload)
 	MsgStageUpdateResp = "stage_update_resp" // daemon → TUI (unicast)
@@ -129,6 +135,18 @@ type CreatePanePayload struct {
 	// the same socket trust model as every other field (the MCP bridge
 	// deliberately does not expose it).
 	Overlay bool `json:"overlay,omitempty"`
+	// ResumeSessionID resumes an existing Claude Code session instead of
+	// starting a fresh one: the daemon spawns `claude --resume <id>` in place
+	// of the preassign_id strategy's `--session-id <new-uuid>`. Empty (the
+	// default) preserves the fresh-session behavior.
+	//
+	// Trust: like Overlay, any IPC client can set this. The daemon validates
+	// it against the canonical UUID shape before it reaches argv, and also
+	// refuses a session a live pane already holds — two claude processes on
+	// one transcript overwrite each other's history. Either rejection falls
+	// back to a fresh session rather than failing the spawn. The MCP bridge
+	// deliberately does not expose this field.
+	ResumeSessionID string `json:"resume_session_id,omitempty"`
 }
 
 type DestroyPanePayload struct {
@@ -470,6 +488,69 @@ type PaneSearchRespPayload struct {
 	Query     string          `json:"query"`
 	Hits      []PaneSearchHit `json:"hits"`
 	Truncated bool            `json:"truncated,omitempty"`
+}
+
+// ClaudeSessionsReqPayload asks the daemon to enumerate the Claude Code
+// sessions recorded for CWD. CWD is the directory currently highlighted in the
+// pane setup dialog — not yet committed, which is why the response echoes it
+// back for staleness comparison.
+type ClaudeSessionsReqPayload struct {
+	CWD string `json:"cwd"`
+}
+
+// ClaudeSessionInfo is one resumable session. InUsePaneID identifies the live
+// pane already attached to this session (empty when free) — two claude
+// processes on one transcript would fight over it, so the TUI renders those
+// rows blocked. Like PaneSearchHit, only the id travels: the TUI already holds
+// tab/pane metadata and resolves the display label itself.
+type ClaudeSessionInfo struct {
+	ID          string `json:"id"`
+	Title       string `json:"title"`
+	ModifiedMs  int64  `json:"modified_ms"`
+	InUsePaneID string `json:"in_use_pane_id,omitempty"`
+}
+
+// ClaudeSessionsRespPayload carries one directory's sessions, newest first.
+// CWD echoes the request VERBATIM (never cleaned or resolved — the TUI compares
+// it against its own value to drop responses that arrived after the user moved
+// to a different directory; any daemon-side normalization would make a
+// legitimate request look permanently stale). Truncated is set when the
+// directory held more sessions than the discovery cap returns.
+type ClaudeSessionsRespPayload struct {
+	CWD       string              `json:"cwd"`
+	Sessions  []ClaudeSessionInfo `json:"sessions"`
+	Truncated bool                `json:"truncated,omitempty"`
+	Error     string              `json:"error,omitempty"`
+}
+
+// ClaudeSessionDetailReqPayload asks for the deep read of ONE session — the
+// listing head-reads every transcript in a directory, so this is issued per
+// user request (the picker's info key), never per listing.
+type ClaudeSessionDetailReqPayload struct {
+	CWD       string `json:"cwd"`
+	SessionID string `json:"session_id"`
+}
+
+// ClaudeSessionDetailRespPayload answers with one session's summary. CWD and
+// SessionID echo the request VERBATIM for the same staleness contract
+// ClaudeSessionsRespPayload documents — here the pair is what identifies which
+// highlighted row the answer belongs to, since the user can keep moving the
+// cursor while the read is in flight.
+//
+// StartedMs is 0 when no opening entry carried a timestamp. Prompts are
+// multi-line: they render as paragraphs, not rows. UserPrompts counts only what
+// the user typed — see claudesessions.Detail for why no assistant-side count is
+// reported.
+type ClaudeSessionDetailRespPayload struct {
+	CWD         string `json:"cwd"`
+	SessionID   string `json:"session_id"`
+	FirstPrompt string `json:"first_prompt,omitempty"`
+	LastPrompt  string `json:"last_prompt,omitempty"`
+	UserPrompts int    `json:"user_prompts,omitempty"`
+	StartedMs   int64  `json:"started_ms,omitempty"`
+	ModifiedMs  int64  `json:"modified_ms,omitempty"`
+	SizeBytes   int64  `json:"size_bytes,omitempty"`
+	Error       string `json:"error,omitempty"`
 }
 
 // UpdateInfo rides the workspace_state broadcast under the "update" key

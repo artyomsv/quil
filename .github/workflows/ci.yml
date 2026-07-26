@@ -47,3 +47,45 @@ jobs:
 
       - name: installer regression test
         run: sh scripts/test-install.sh
+
+  # The release workflow only inserts a version header above whatever is under
+  # `## [Unreleased]` — it never writes prose. So an entry that is not written
+  # HERE, while the author still has the context, is never written at all: the
+  # version section ships empty and stays empty. Catching it at release time
+  # (release.yml has that gate too, as a backstop) means blocking a release on
+  # a changelog nobody remembers the details for.
+  changelog:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          fetch-depth: 0
+
+      - name: Require a CHANGELOG entry for user-facing changes
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          CHANGED=$(git diff --name-only "$(git merge-base "$BASE" "$HEAD")" "$HEAD")
+          echo "--- changed files ---"
+          echo "$CHANGED"
+          echo "---"
+
+          # Production Go code only. Test-only, docs-only, site-only, workflow-
+          # only, and plugin-TOML-only PRs are exempt — they can't change what a
+          # user sees in the binary.
+          CODE=$(echo "$CHANGED" | grep -E '^(cmd|internal)/.*\.go$' | grep -v '_test\.go$' || true)
+          if [ -z "$CODE" ]; then
+            echo "::notice::No production Go changes — changelog entry not required"
+            exit 0
+          fi
+
+          if echo "$CHANGED" | grep -qx 'CHANGELOG.md'; then
+            echo "::notice::CHANGELOG.md updated"
+            exit 0
+          fi
+
+          echo "::error file=CHANGELOG.md::This PR changes production code but does not touch CHANGELOG.md. Add an entry under '## [Unreleased]' describing the change from a user's point of view — the release workflow copies that section verbatim and cannot write it for you. If the change is genuinely invisible to users (pure refactor, internal cleanup), add the literal line '_No user-facing changes._' under '## [Unreleased]' to say so explicitly."
+          exit 1

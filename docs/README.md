@@ -31,7 +31,7 @@
 
 | Doc | What's in it |
 |---|---|
-| [Architecture](architecture.md) | All 24 ADRs — client-daemon split, IPC protocol, PTY cross-platform, persistence model, plugin system |
+| [Architecture](architecture.md) | All 25 ADRs — client-daemon split, IPC protocol, PTY cross-platform, persistence model, plugin system |
 | [Vision](vision.md) | The project's why — what problem Quil solves and how |
 | [Product requirements](prd.md) | Original PRD (historical reference) |
 | [Roadmap](roadmap.md) | Milestone summary + planned work — see also [roadmap/](roadmap/) for per-feature PRDs |

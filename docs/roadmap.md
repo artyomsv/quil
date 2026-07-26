@@ -2,6 +2,13 @@
 
 Detailed progress tracker and future plans for Quil.
 
+**Reflects shipped state as of v1.42.1.** Completed entries are ordered roughly
+chronologically and tagged with the release that shipped them; anything below the
+`In Progress` divider is unimplemented unless it says otherwise. When a feature
+ships, update this file in the same PR — the `Completed` section is the answer to
+"what does Quil actually do today", and it drifts fast when features ship straight
+from a plan in `docs/superpowers/plans/` with no PRD in `docs/roadmap/`.
+
 ---
 
 ## Completed
@@ -24,14 +31,21 @@ Session resume infrastructure is complete. The `preassign_id` strategy generates
 ### M4: Plugin System
 > Typed panes with TOML plugins, plugin registry, pane creation dialog.
 
-The plugin system is fully operational. 4 built-in plugins ship with Quil:
+The plugin system is fully operational. 9 built-in plugins ship with Quil — two Go
+built-ins plus seven embedded TOML defaults written to `~/.quil/plugins/` on first
+run (user copies override them):
 
-| Plugin | Status | Persistence |
-|--------|--------|-------------|
-| **Terminal** | Production | `cwd_only` — restore working directory |
-| **Claude Code** | Production | `preassign_id` — UUID-based session resume |
-| **SSH** | POC | `rerun` — reconnect with same args |
-| **Stripe** | POC | `rerun` — re-listen with same webhook URL |
+| Plugin | Status | Persistence | Shipped |
+|--------|--------|-------------|---------|
+| **Terminal** | Production | `cwd_only` — restore working directory | M4 |
+| **Terminal (wide canvas)** | Production | `cwd_only` — keeps content on squeeze | v1.34.0 |
+| **Claude Code** | Production | `preassign_id` / `--resume` — session resume | M4 |
+| **OpenCode** | Production | `session_scrape` via JS plugin hook | v1.12.0 |
+| **SSH** | POC | `rerun` — reconnect with same args | M4 |
+| **Stripe** | POC | `rerun` — re-listen with same webhook URL | M4 |
+| **lazygit** | Tool | `rerun` — plus per-tab `Alt+G` overlay | v1.22.0 |
+| **k9s** | Tool | `rerun` — kube-context pick via `discover = "kube"` | v1.27.0 |
+| **lazysql** | Tool | `rerun` — connections stay in lazysql's manager | v1.28.0 |
 
 Key capabilities:
 - **TOML plugin format** — user-created plugins in `~/.quil/plugins/*.toml`
@@ -90,7 +104,7 @@ Key capabilities:
 `quil mcp` subcommand bridges MCP JSON-RPC (stdio) to daemon IPC (socket). AI assistants can read pane output, send commands, take screenshots, navigate tabs, restart panes, and control the TUI. No other terminal multiplexer offers this.
 
 Key capabilities:
-- **17 MCP tools** — Phase A (workspace control): `list_panes`, `read_pane_output`, `send_to_pane`, `get_pane_status`, `create_pane`. Phase B (interaction + introspection): `send_keys`, `restart_pane`, `screenshot_pane`, `switch_tab`, `list_tabs`, `destroy_pane`, `set_active_pane`, `close_tui`. Notification Center (M12): `get_notifications`, `watch_notifications`. Memory Reporting (M13): `get_memory_report`, `get_pane_memory`
+- **18 MCP tools** — Phase A (workspace control): `list_panes`, `read_pane_output`, `send_to_pane`, `get_pane_status`, `create_pane`. Phase B (interaction + introspection): `send_keys`, `restart_pane`, `screenshot_pane`, `switch_tab`, `list_tabs`, `destroy_pane`, `set_active_pane`, `close_tui`. Notification Center (M12): `get_notifications`, `watch_notifications`, `dismiss_notifications`. Memory Reporting (M13): `get_memory_report`, `get_pane_memory`
 - **Official MCP SDK** — `modelcontextprotocol/go-sdk` v1.4+, typed tool handlers with struct-based input schemas
 - **Request-response IPC** — backward-compatible `Message.ID` field for correlation; daemon responds to specific connection
 - **VT-emulated screenshots** — `charmbracelet/x/vt` renders ring buffer into text grid showing actual screen state
@@ -179,6 +193,97 @@ Key capabilities:
 - **Notes outlive the pane** — closing or destroying a pane does not delete its notes file; browser ships in Phase 2
 - **TextEditor reuse** — the existing rune-aware editor (selection, clipboard, multi-line paste, word jumps) gained a `Highlight` field so it can render plain text with no TOML colouring
 
+### v1.17.0: Robust Restart — Lazy Restore, Log Rotation, IPC Backpressure
+> Daemon restart survives a large workspace instead of stalling on it.
+
+`respawnPanes` now spawns only the active tab's panes plus panes flagged **always resume** (`Alt+Shift+E`, `●` in the tab bar) before it starts listening; everything else is marked pending and spawned on first access. IPC gained a dual-queue design per connection — a must-deliver critical queue and a droppable live-output queue — so one wedged client can no longer block broadcast to the others. Log rotation (`max_size_mb` / `max_files`) landed in the same release.
+
+Follow-ups: **v1.34.1** raised the client-side readiness wait from 2 s to 30 s (crash-aware, aborts early if the spawned daemon actually dies) and added a single-instance guard so a redundant `quild --background` defers to the healthy daemon instead of stealing its socket and orphaning it.
+
+### v1.18.0–v1.19.0, v1.33.0: Agent Work-State Indicators & Hook-Events Pipeline
+> The TUI knows when an agent is working, blocked, or done — from the agent's own hooks, not from screen scraping.
+
+Quil registers hooks into Claude Code (native `quild claude-hook` subcommand, 12 events, inline `--settings`) and OpenCode (embedded JS plugin, `OPENCODE_CONFIG_CONTENT`) at every spawn, never touching the user's own config. Events land in a per-pane JSONL spool, are rate-limited and debounce-coalesced by `internal/hookevents`, and flow through the existing notification pipeline.
+
+Key capabilities:
+- **Working spinner** — braille spinner on the tab label and the pane's top border while a turn or any background subagent is running. Subagents are counted, so a parallel 3-subagent spawn does not undercount to 1
+- **Persistent unseen mark** (v1.19.0) — a completed turn leaves a green pane border and green tab label until you focus the pane. Replaced the old 5 s tab flash, which you missed if you were looking elsewhere
+- **Blocked-for-input edges** — permission prompts and option prompts park the spinner and raise the unseen mark, then resume when you answer
+- **Model + context segment** (v1.33.0) — AI panes show the last completed turn's model id and context-window token count in the status bar (`opus-4.8 · 612k ctx`), riding the same hook events with no new IPC. Compaction renders `· compacting` until the next turn reports the true reduced size
+- **Hook health fallback** — if hooks never load, the legacy idle-pattern analysis still fires, so notification coverage degrades rather than disappearing
+
+### v1.20.0–v1.21.0: Daemon Lifecycle CLI + Pane Restart
+> `quil restart`, `quil daemon stop|restart`, and `Alt+R` to restart a single pane.
+
+Bounded escalation for stopping a daemon — IPC `MsgShutdown` (5 s) → SIGTERM (3 s, Unix) → SIGKILL (2 s) — shared by the CLI and the upgrade path, with a PID-reuse guard that refuses to signal a PID whose image name is not `quild*`. `Alt+R` restarts the active pane through the same daemon-side kill+respawn the MCP `restart_pane` tool uses, behind a confirm dialog.
+
+### v1.22.0–v1.29.0: Tool Plugins & Discoverability
+> lazygit, k9s, and lazysql as first-class pane types; uninstalled tools stay visible.
+
+- **lazygit** (v1.22.0) — built-in plugin plus a per-tab `Alt+G` overlay that drops into a git UI for whatever repo the active pane is in. Overlays are ephemeral: one per tab, excluded from snapshots, auto-destroyed when you quit lazygit. New `discover = "git"` plugin field lists repos near the pane's CWD in the setup dialog
+- **k9s** (v1.27.0) — Kubernetes TUI with a kube-context picker backed by the new `discover = "kube"` field, reading context names only from `KUBECONFIG` / `~/.kube/config`, never credentials
+- **lazysql** (v1.28.0) — database TUI; connection selection and credentials stay inside lazysql's own manager, deliberately with no Quil-side DSN picker
+- **Greyed-not-hidden plugins** (v1.27.0) — plugins whose binary is not on `PATH` now appear greyed in `Ctrl+N` with a `homepage` link instead of vanishing, so the feature is discoverable before the tool is installed
+
+### v1.30.0: Per-Pane Input History
+> `Alt+Shift+I` lists every prompt you submitted to an AI pane.
+
+Recorded by the Claude Code `UserPromptSubmit` hook (opt-in per plugin via `[command] record_history = true`), stored at `~/.quil/history/<pane>.jsonl`, ring-trimmed to the last 200 entries, and removed when the pane is destroyed. `Enter` opens the full text in the read-only viewer. Machine-injected turns (background-task notifications) are filtered on write, on read, and on compaction so they never pollute the list. OpenCode support is still pending — its message handler does not yet extract prompt text.
+
+### v1.31.0: Bundled OpenConsole for Windows 10 — [ADR-25](architecture.md)
+> Fixes the `Hello` → `H ello` caret gap when typing in AI panes on Windows 10.
+
+The Windows 10 inbox console host re-serializes claude-code's incremental input render incorrectly. Quil now bundles Microsoft's OpenConsole (MIT) and routes the three pseudoconsole syscalls through it — on Windows 10 and older only, detected via `RtlGetVersion().BuildNumber < 22000`. Windows 11 keeps its unaffected inbox host. Falls back to the inbox host if the bundle is missing. Binaries are fetched at build time, not committed.
+
+### v1.32.0: Mouse-Wheel Forwarding + macOS Render Fixes
+> The wheel scrolls the app's own viewport in AI/TUI panes; claude-code no longer corrupts on Terminal.app.
+
+Apps that enable DEC mouse tracking run on the alternate screen and never fill Quil's scrollback, so the wheel had nothing to scroll. The daemon is the authority on tracking state — it is the only component that sees the mode-enable burst on every attach, including reattach to an already-running session — and the client forwards each notch as the matching SGR or X10 sequence.
+
+Same release fixed two macOS-only defects: the bundled emulator terminated OSC strings on a raw `0x9C` byte even mid-UTF-8, so claude-code's `✳` title spilled into the visible grid (doubled logo, `AAA` → `AAAude Code`); Quil now filters window-title OSCs before the emulator. And `Alt+<printable>` is forwarded as Meta so Option-based readline word navigation works.
+
+### v1.34.0: Wide-Canvas Panes with a Native Threshold
+> AI panes stop reformatting themselves every time the layout changes.
+
+AI panes render on a window-sized canvas so grid, zoom, and sidebar changes never resize their PTY. v1.34.0 added the inverse: once a pane's inner width reaches `[display] min_native_cols` (default 80) it renders **natively** at its real size, which restores mouse and keyboard selection for free. Below the threshold it falls back to the canvas plus a preview crop, with mouse selection mapped through the inverse layout. The `terminal-wide` built-in exposes the same behaviour for shells.
+
+### v1.35.0: `quil status`
+> Scriptable daemon and session introspection.
+
+Top-level command (alias `quil daemon status`) reporting daemon liveness, pid, version, environment, approximate uptime, and per-tab/pane session metrics with state and memory. `--json` for scripting; exit codes distinguish healthy / not-running / wedged.
+
+### v1.37.0: Automatic Updates — [plan](superpowers/plans/2026-07-18-auto-update.md)
+> Detect, stage, and apply a new release without leaving Quil.
+
+The daemon checks GitHub releases 1 min after startup then every 24 h, publishes the result on the workspace broadcast, and can stage the download in the background. Staging is sha256-verified and extracts to `$QUIL_HOME/update/staged/<ver>/` with `manifest.json` written last as the atomic completion marker. Applying does a rename-aside binary swap with pair rollback, then respawns itself.
+
+Key capabilities:
+- **Status-bar segment** — `↑ vX [ready]`, plus an About-menu row that triggers a real check rather than repeating stale broadcast state
+- **Two config knobs** — `[update] check` / `auto`, both exposed in the Settings dialog
+- **Compiled out of dev/debug builds** — applying a release binary over `quil-dev.exe` would strip its baked-in dev-mode ldflag and silently attach the next launch to production `~/.quil`
+- **Backup-slot fallback** — a backup file still held open by an orphaned process cannot be deleted or replaced on Windows, so the swap falls back to `.old.1`, `.old.2`, … instead of wedging every future update
+
+### v1.38.0: Pane Context Menu — [plan](superpowers/plans/2026-07-19-pane-context-menu.md)
+> Right-click a pane (or `Alt+A`) for its actions.
+
+A compositor overlay, not a modal — it targets the pane under the cursor, highlights it, and dispatches into the same handler methods the keybindings use. Rows are grouped (view actions / pane settings / destructive) and greyed when unavailable (history without `record_history`, lazygit without the binary). Adds **Mark attention**, a pinned green border that survives focus, unlike the automatic unseen mark. Right-click with an active selection still copies.
+
+### M11: Command Palette — [PRD](roadmap/command-palette.md), [plan](superpowers/plans/2026-07-23-command-palette.md)
+> `Alt+Shift+P` fuzzy-find launcher — commands, tabs, panes, and pane content in one query. Shipped v1.39.0–v1.40.0.
+
+A modal, centered, keyboard-first launcher. Entries are grouped under section headers with navigation first (Go to pane / Tabs / Pane / System); headers disappear as soon as you type. A greedy subsequence scorer rewards consecutive runs and word boundaries. Each row shows its keybinding, so the palette teaches the shortcuts as you use it. Default `alt+shift+p` only — `ctrl+shift+p` is intercepted by Windows Terminal and VS Code before Quil ever sees it, so it stays opt-in.
+
+**Content search is unified into the same query** (v1.40.0), not a separate `/` mode as originally specced: every keystroke both filters the command list and fires a debounced search across every pane's buffered scrollback — all tabs, including background and muted panes. Matches appear under a `Found in panes` header with a match count and a preview line, and `Enter` jumps to the pane. Because hits are stored as ordinary jump-to-pane commands, cursor navigation, dispatch, and rendering all reuse the command machinery. A local timeout turns an unanswered request into a diagnosable row instead of an endless `Searching…`.
+
+**Deferred to Phase 2:** per-plugin/instance quick-create, `:` direct-command mode, MRU ordering.
+
+### v1.41.0–v1.42.1: Pane Setup Dialog — Recent Locations & Session Picker
+> Two fewer keystrokes between `Ctrl+N` and a working AI pane.
+
+- **Recent locations** (v1.41.0) — the last 5 committed working directories are offered as a one-keystroke quick pick, persisted to `~/.quil/recent-cwds.json`, with deleted folders filtered out. Git-repo discovery keeps priority; **Browse…** still opens the full picker
+- **Claude resume-session picker** (v1.42.0) — see M5 below
+- **Committed-value marker** (v1.42.1) — the chosen directory (and kube context) stays visible with a `▸` marker once the cursor moves off it or the field loses focus. Previously the selection highlight was drawn only on the focused field's cursor row, so the answer disappeared from the dialog exactly while you configured the rest of it
+
 ---
 
 ## In Progress
@@ -211,6 +316,11 @@ Key capabilities:
 - **Mouse split-border drag-resize** ([PR #93](https://github.com/artyomsv/quil/pull/93)) — click and drag any border between panes to move the split. Ratio clamped in cells against subtree minimums (10×4 floor, nested splits included); adjacent panes show a transient highlight; PTY resize + layout persistence fire once on release (mid-drag only rects move — unpaired emulator resizes garble content). Border hit zone widened and given priority over the scrollbar's overlap cells. Disabled in focus/notes modes.
 - **Claude Code resume-session picker** ([PR #105](https://github.com/artyomsv/quil/pull/105)) — the pane setup dialog gains a **Session** field (opt-in per plugin via `[command] sessions = "claude"`) listing the transcripts recorded for the selected folder, newest first, each row titled with the first prompt typed in that session. Picking one spawns `claude --resume <id>` in place of the `preassign_id` strategy's `--session-id <new>`; toggles still compose, and the pane joins the normal restore machinery from the first instant. New `internal/claudesessions` package owns Claude's `~/.claude/projects/<escaped-cwd>` naming rule (moved out of the daemon, so the rule that silently breaks restore when wrong exists once). Sessions held by a live pane are listed but blocked — the guarantee is enforced daemon-side under a claim mutex, not just greyed in the UI, since any IPC client can send an id directly. Press `i` on a row for details: start/last-used timestamps, typed-prompt count, transcript size, and the first and last prompts — read on demand per session, streaming the whole transcript but rejecting each line by byte-compare before any JSON parsing (88 MB in ~1 s).
 - **Setup-dialog width accounting fix** (shipped with the above) — every content budget in the pane setup dialog reserved the box's padding but not its border, which lipgloss counts inside `Style.Width`; rows that filled their budget sat two cells past the wrap limit and reflow dropped the last word onto its own line. Session rows, the working-directory pick list, and the footer hints now all derive from one `setupTextWidth()`, pinned to lipgloss's actual behaviour by a two-sided test.
+- **Client CWD propagation** (v1.11.0) — the TUI sends `os.Getwd()` on attach so new panes and tabs spawn in the client's directory, not the daemon's frozen-at-spawn-time one.
+- **Tab drag-to-reorder, scrollbar drag, multi-binding keys** (v1.15.0) — drag a tab along the bar to reorder it (daemon stays authoritative, so a stale client never has to race for an accurate tab count); click-and-drag the scrollbar thumb with a 3-cell hit zone; any keybinding accepts comma-separated alternatives (`rename_pane = "alt+f2,alt+shift+r"` — F2 is eaten by macOS by default).
+- **Notification broadcast hardening** (v1.16.0) — events carry the triggering output lines as an excerpt; per-pane mute (`Alt+M`) drops events at the source.
+- **Per-pane restore activity indicator** (v1.26.0) — a checklist shows what the daemon is doing while a restored pane comes back, instead of an opaque wait.
+- **Stop daemon moved to the About root menu** (v1.29.0) — behind a `y`-only confirm, deliberately not `Enter`, so finger memory cannot kill every pane child.
 - **Wide-canvas terminal variant** — `terminal-wide` built-in ("Terminal (keeps content on squeeze)"): same shell auto-detection as the native terminal, but the pane keeps its PTY/emulator on the window-sized canvas below `min_native_cols` (like AI panes), so pane squeezes never cut content — at the cost of window-width output formatting while narrow. Native terminal remains the default for interactive work; proper reflow-on-resize is tracked below.
 
 **Remaining:**
@@ -229,22 +339,7 @@ Key capabilities:
 
 Define workspace blueprints committed to git: tabs, panes, plugins, CWDs, commands. `cd my-project && quil` materializes the entire dev environment. Every team member gets the exact same setup. **Network effect within teams.**
 
-### M11: Command Palette — [PRD](roadmap/command-palette.md)
-
-> `Alt+Shift+P` fuzzy-find overlay for everything. **Implemented (v1).**
-
-Search commands, switch tabs, jump to any pane, create panes — all from a single
-keyboard shortcut. Fuzzy string matching makes every feature instantly
-discoverable, and each row shows its keybinding so the palette teaches the
-shortcuts as you use it.
-
-v1 ships a modal, centered, keyboard-first launcher (`dialogCommandPalette`)
-with section-grouped entries (Go to pane / Tabs / Pane / System, navigation first), cross-tab
-navigation, a greedy subsequence fuzzy scorer, and the `command_palette`
-keybinding (default `alt+shift+p`; `ctrl+shift+p` is intercepted by many
-terminals' own palette, so it is opt-in). **Deferred to Phase 2:**
-per-plugin/instance quick-create, `/` content search across pane buffers, `:`
-direct-command mode, and MRU ordering.
+> M11 (Command Palette) shipped in v1.39.0–v1.40.0 — see **Completed** above.
 
 ---
 
@@ -260,7 +355,7 @@ The entire pitch in one visual. Goes on README, Hacker News, r/programming, Twit
 
 > `quil plugin install aider` — community TOML plugins via GitHub.
 
-GitHub repo as registry, `quil plugin install/search/update` CLI. High-value plugins: Aider, lazygit, k9s, Docker Compose, ngrok, pgcli. Every plugin makes Quil useful to a new audience.
+GitHub repo as registry, `quil plugin install/search/update` CLI. lazygit, k9s, and lazysql now ship as built-ins (v1.22.0–v1.28.0), which is exactly the argument for a registry: each one cost a PR, and the queue behind them — Aider, Docker Compose, ngrok, pgcli, and whatever ships next month — should not. Every plugin makes Quil useful to a new audience.
 
 ### Native Docs on quil.cc
 
@@ -315,9 +410,10 @@ Remote workspace viewing and collaboration over TCP+TLS. Read-only by default, c
 
 Both competitors are agent-orchestrators like Quil, but each is broader in one
 axis: herdr on **agent breadth + scriptable extensibility**, AoE on **web/remote
-access + sandboxing**. Quil already leads on **native Windows**, the **MCP
-server**, **pane notes**, and **memory reporting** — those are moats to defend,
-not gaps to close.
+access + sandboxing**. Quil already leads on **native Windows** (including the
+bundled OpenConsole fix for Windows 10), the **MCP server**, **pane notes**,
+**memory reporting**, **per-pane input history**, and **in-app auto-update** —
+those are moats to defend, not gaps to close.
 
 ### M14: Agent Fleet — breadth + detection *(highest ROI)*
 
@@ -325,12 +421,22 @@ The starkest deficit: rivals detect 13–18 agents out of the box; Quil ships 2.
 
 1. **Screen-content agent state detection** — infer blocked/working/done from
    terminal output for *any* agent, with no hooks required (herdr ships updatable
-   TOML detection manifests). Quil today only pattern-matches idle. Extends
-   [process-health](roadmap/process-health.md).
+   TOML detection manifests). *Partly closed:* Quil now derives working / blocked /
+   done from **hook events** for Claude Code and OpenCode (v1.18.0–v1.19.0, see
+   Completed above), which is more accurate than screen scraping but only works for
+   agents Quil ships an integration for. The gap that remains is the hookless
+   fallback — output heuristics that generalise to an agent nobody wrote an
+   integration for. Extends [process-health](roadmap/process-health.md).
 2. **Broad agent support + detection registry** — Codex, Gemini, Cursor, Copilot,
    Droid, Devin, Kimi, and more, detected by process name + output heuristics.
+   Still the starkest deficit: Quil's agent integrations remain Claude Code and
+   OpenCode.
 3. **One-command agent integration installer** — `quil integration install
    <agent>` writes the agent's hooks/settings for you (both rivals do this).
+   *Partly closed by a different route:* Quil installs its hooks **per spawn**
+   via inline `--settings` / `OPENCODE_CONFIG_CONTENT` and never writes to the
+   agent's own config, so there is nothing to install for the two supported
+   agents. A registry-driven installer only becomes necessary at #2's breadth.
 4. **Session fork** — branch a conversation into a new independent session, parent
    untouched (AoE).
 
@@ -406,7 +512,7 @@ section above.
 | ~~—~~ | ~~MCP server for AI integration~~ | ~~Medium~~ | ~~Very High~~ | ~~Done~~ |
 | ~~—~~ | ~~Notification center (sidebar + pane history)~~ | ~~Medium~~ | ~~High~~ | ~~Done~~ |
 | 2 | "Holy Shit" demo GIF/video | Small | Critical | Growth |
-| 3 | **[gap]** Screen-content agent detection + broad agent support (M14) | Medium | Very High | Core |
+| 3 | **[gap]** Broad agent support + hookless state detection (M14) — hook-based detection for Claude Code / OpenCode already ships | Medium | Very High | Core |
 | 4 | **[gap]** Git worktree-per-session + diff viewer (M15) | Medium | Very High | Core |
 | 5 | Project workspace files (`.quil.toml`) + repo hooks **[gap #19]** | Medium | Very High | Core |
 | ~~6~~ | ~~Command palette (`Alt+Shift+P`)~~ | ~~Medium~~ | ~~High~~ | ~~Done (v1)~~ |
@@ -444,10 +550,11 @@ Items 1-2 (install + demo) cost almost nothing and are **prerequisites for every
 
 The **notification center** (M12), **process health** (advanced), and **cross-pane events** (advanced) form a layered system:
 
-| Layer | Feature | Role |
-|-------|---------|------|
-| UI | Notification Center (M12) | Sidebar, pane navigation, history stack |
-| Monitoring | Process Health | Health states, auto-restart, stale detection |
-| Orchestration | Cross-Pane Events | Event bus, pane-to-pane context passing |
+| Layer | Feature | Status | Role |
+|-------|---------|--------|------|
+| UI | Notification Center (M12) | Shipped | Sidebar, pane navigation, history stack |
+| Signal | Hook-events pipeline (v1.18.0) | Shipped | Agent-reported work state, model/context, input history |
+| Monitoring | Process Health | Planned | Health states, auto-restart, stale detection |
+| Orchestration | Cross-Pane Events | Planned | Event bus, pane-to-pane context passing |
 
-M12 ships first as a standalone feature (process exit + output patterns). The other two extend it when they ship — health states and cross-pane events feed into the notification center's event queue.
+M12 shipped first as a standalone feature (process exit + output patterns). The hook-events pipeline then landed underneath it, feeding structured agent-reported events into the same queue — which is why work-state indicators, the model/context status segment, and per-pane input history all reuse it with no new IPC. Process health and cross-pane events are the remaining two layers; both extend the same queue rather than replacing it.

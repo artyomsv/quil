@@ -207,7 +207,7 @@ Project docs are now organized as a navigable tree under `docs/` (with the index
 - `docs/mcp.md` — User-facing MCP guide (client wiring, all 18 tools, redaction model)
 - `docs/plugin-reference.md` — TOML plugin schema (every field, every strategy, examples)
 - `docs/troubleshooting.md` — Daemon won't start, MCP not detected, log file locations, reset
-- `docs/architecture.md` — 24 ADRs (moved from root `ARCHITECTURE.md`)
+- `docs/architecture.md` — 25 ADRs (moved from root `ARCHITECTURE.md`)
 - `docs/vision.md` — Project vision (moved from root `VISION.md`)
 - `docs/prd.md` — Original v1 PRD, historical reference (moved from root `PRD.md`)
 - `docs/roadmap.md` — Milestone status + planned work (moved from root `ROADMAP.md`)

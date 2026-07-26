@@ -1817,3 +1817,182 @@ default = false
 		})
 	}
 }
+
+// --- Blurred-field selection markers -----------------------------------------
+//
+// Tabbing off a pick-list field used to erase every trace of what was chosen:
+// the highlight was gated on `focused`, so the CWD field read as "nothing
+// selected" while the rest of the pane was being configured. These guard the
+// idle marker that stands in for the cursor caret on the committed row.
+// Assertions run on ANSI-stripped output and key off the plain-text row prefix
+// — bold survives no color profile, but the marker does.
+
+func TestRenderSetup_PickBlurred_MarksCommittedRow(t *testing.T) {
+	const picked, other = "/tmp/alpha", "/tmp/beta"
+	m := recentPickModel(t, []string{picked, other})
+	m.setupFieldCursor = 1 // Continue — the CWD field is blurred
+
+	out := stripANSI(m.renderCreatePaneSetupDialog())
+	if !strings.Contains(out, setupRowIdleMark+picked) {
+		t.Errorf("blurred pick list must mark the committed row %q with %q\n%s", picked, setupRowIdleMark, out)
+	}
+	if strings.Contains(out, setupRowIdleMark+other) {
+		t.Errorf("only the committed row may carry the idle mark, but %q has it too\n%s", other, out)
+	}
+	if strings.Contains(out, "  > "+picked) {
+		t.Errorf("blurred field must not draw the cursor caret\n%s", out)
+	}
+}
+
+// When the cursor already sits on the committed row, the caret wins and no
+// second indicator is drawn — one row, one marker.
+func TestRenderSetup_PickFocused_CursorRowTakesCaretNotIdleMark(t *testing.T) {
+	const picked = "/tmp/alpha"
+	m := recentPickModel(t, []string{picked, "/tmp/beta"})
+	m.setupFieldCursor = 0 // CWD focused, cursor on row 0 = the committed row
+
+	out := stripANSI(m.renderCreatePaneSetupDialog())
+	if !strings.Contains(out, "  > "+picked) {
+		t.Errorf("focused pick list must keep the cursor caret on the cursor row\n%s", out)
+	}
+	if strings.Contains(out, setupRowIdleMark) {
+		t.Errorf("committed row already has the caret; it must not also be marked\n%s", out)
+	}
+}
+
+// The blurred case is not the only way to lose the indicator: parking the
+// cursor on "Browse…" while the field is still FOCUSED leaves the caret on a
+// row that syncSelection never commits, so without a mark the dialog again
+// shows nothing for the directory it will actually use.
+func TestRenderSetup_PickFocused_CursorOnBrowseMarksCommitted(t *testing.T) {
+	const first, second = "/tmp/alpha", "/tmp/beta"
+	m := recentPickModel(t, []string{first, second})
+	m.cwdBrowseDir = second
+	m.cwdBrowseCursor = 2 // the trailing "Browse…" row
+	m.setupFieldCursor = 0
+
+	out := stripANSI(m.renderCreatePaneSetupDialog())
+	if !strings.Contains(out, setupRowIdleMark+second) {
+		t.Errorf("focused field with the cursor on Browse… must still mark %q\n%s", second, out)
+	}
+	if !strings.Contains(out, "  > Browse…") {
+		t.Errorf("the caret must stay on the cursor row\n%s", out)
+	}
+	if strings.Contains(out, setupRowIdleMark+first) {
+		t.Errorf("only the committed row may carry the idle mark\n%s", out)
+	}
+}
+
+// The cursor can be parked on "Browse…" when the field is blurred; the marker
+// must follow cwdBrowseDir (what submitSetupDialog reads), not the cursor.
+func TestRenderSetup_PickBlurred_CursorOnBrowseMarksCommitted(t *testing.T) {
+	const first, second = "/tmp/alpha", "/tmp/beta"
+	m := recentPickModel(t, []string{first, second})
+	m.cwdBrowseDir = second
+	m.cwdBrowseCursor = 2 // the trailing "Browse…" row
+	m.setupFieldCursor = 1
+
+	out := stripANSI(m.renderCreatePaneSetupDialog())
+	if !strings.Contains(out, setupRowIdleMark+second) {
+		t.Errorf("idle mark must follow cwdBrowseDir %q, not the cursor row\n%s", second, out)
+	}
+	if strings.Contains(out, setupRowIdleMark+"Browse…") {
+		t.Errorf("Browse… is not a committed value and must never carry the idle mark\n%s", out)
+	}
+}
+
+// Focusing and blurring must not add or remove a row, or every field below the
+// CWD list would shift under the cursor on each Tab.
+func TestRenderSetup_PickFocusChange_HeightStable(t *testing.T) {
+	m := recentPickModel(t, []string{"/tmp/alpha", "/tmp/beta"})
+
+	m.setupFieldCursor = 0
+	focused := strings.Count(m.renderCreatePaneSetupDialog(), "\n")
+	m.setupFieldCursor = 1
+	blurred := strings.Count(m.renderCreatePaneSetupDialog(), "\n")
+
+	if focused != blurred {
+		t.Errorf("row count changed on blur: focused=%d blurred=%d", focused, blurred)
+	}
+}
+
+func TestRenderSetup_KubeBlurred_MarksSelectedRow(t *testing.T) {
+	m := kubePickModel(t, []kubediscover.Context{{Name: "prod"}, {Name: "staging"}})
+	m.kubeCursor = 2 // row 0 = Default, row 1 = prod, row 2 = staging
+	m.setupFieldCursor = 1
+
+	out := stripANSI(m.renderCreatePaneSetupDialog())
+	if !strings.Contains(out, setupRowIdleMark+"staging") {
+		t.Errorf("blurred kube field must mark the selected context\n%s", out)
+	}
+	if strings.Contains(out, setupRowIdleMark+"Default context") {
+		t.Errorf("only the selected kube row may carry the idle mark\n%s", out)
+	}
+}
+
+// The mark stands in for the "  > " caret, so it must cost the same four cells
+// — leftTruncPath's budget is setupTextWidth() - setupRowIndent, and a wider
+// mark would silently push every marked row one cell past the wrap limit.
+// U+25B8 is East-Asian-Ambiguous, so this pins what lipgloss actually measures
+// rather than what the glyph "should" be (same exposure as the pre-existing
+// "● " current-context marker).
+func TestSetupRowIdleMark_MatchesRowIndent(t *testing.T) {
+	t.Parallel()
+	if got := lipgloss.Width(setupRowIdleMark); got != setupRowIndent {
+		t.Errorf("lipgloss.Width(setupRowIdleMark) = %d, want %d", got, setupRowIndent)
+	}
+}
+
+// Directory-browser mode has no list row to mark — the chosen directory is the
+// standalone path line above the listing. It needs the mark for the same reason
+// the pick list does: dialogValStyle and dialogNormal are the same declaration
+// and dialogSelectedIdle differs from both by SGR bold alone, so on a terminal
+// that drops bold the mark carries the entire signal.
+func TestRenderSetup_BrowserBlurred_MarksPathLine(t *testing.T) {
+	const dir = `E:\Projects\Stukans\monorepo`
+	m := Model{
+		dialog:           dialogCreatePaneSetup,
+		pluginRegistry:   registryWithAICWD(t),
+		selectedPlugin:   "ai",
+		cwdBrowseDir:     dir,
+		cwdBrowseEntries: []string{"..", "cmd", "internal"},
+		width:            100,
+	}
+
+	m.setupFieldCursor = 1 // blurred
+	blurred := m.renderCreatePaneSetupDialog()
+	if !strings.Contains(stripANSI(blurred), setupRowIdleMark+dir) {
+		t.Errorf("blurred browser mode must mark the path line\n%s", stripANSI(blurred))
+	}
+	// Assert on the raw frame too: the mark is the fallback, bold is the
+	// primary signal, and only unstripped output can prove the style applied.
+	if !strings.Contains(blurred, dialogSelectedIdle.Render(dir)) {
+		t.Errorf("blurred path line must use dialogSelectedIdle\n%q", blurred)
+	}
+
+	m.setupFieldCursor = 0 // focused
+	focused := m.renderCreatePaneSetupDialog()
+	if strings.Contains(stripANSI(focused), setupRowIdleMark+dir) {
+		t.Errorf("focused browser mode must not mark the path line\n%s", stripANSI(focused))
+	}
+	if !strings.Contains(focused, dialogValStyle.Render(dir)) {
+		t.Errorf("focused path line must use dialogValStyle\n%q", focused)
+	}
+}
+
+// Mirror of the CWD case for kube. The kube branch's correctness depends on
+// case ORDER inside renderRow's switch, so this is the test that catches a
+// reorder — without it, a focused row could silently take the idle mark.
+func TestRenderSetup_KubeFocused_NoIdleMark(t *testing.T) {
+	m := kubePickModel(t, []kubediscover.Context{{Name: "prod"}, {Name: "staging"}})
+	m.kubeCursor = 2
+	m.setupFieldCursor = 0 // kube field focused
+
+	out := stripANSI(m.renderCreatePaneSetupDialog())
+	if !strings.Contains(out, "  > staging") {
+		t.Errorf("focused kube field must draw the caret on the selected row\n%s", out)
+	}
+	if strings.Contains(out, setupRowIdleMark) {
+		t.Errorf("focused kube field must not draw the idle mark\n%s", out)
+	}
+}

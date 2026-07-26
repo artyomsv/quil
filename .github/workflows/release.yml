@@ -171,6 +171,45 @@ jobs:
           echo "skip=false" >> $GITHUB_OUTPUT
           echo "::notice::Version bump: ${CURRENT} → ${NEW_VERSION} (${BUMP})"
 
+      - name: Require a non-empty [Unreleased] section
+        # The release "generator" does NOT write changelog prose — it only
+        # inserts a `## [X.Y.Z] - DATE` header above whatever is already under
+        # `## [Unreleased]`. So a PR that ships without an Unreleased entry
+        # produces a version section that is permanently empty in CHANGELOG.md.
+        # That silently happened 42 times (v0.10.2 through v1.40.0), including
+        # feature releases: quil status, split-border drag, auto-update, the
+        # pane context menu, and the command palette's content search all
+        # shipped with no changelog entry at all.
+        #
+        # The goreleaser job's fallback (generate notes from commits) only
+        # rescues the GitHub Release *page* — CHANGELOG.md itself stays blank
+        # forever, and backfilling it later is archaeology. Fail here instead,
+        # BEFORE the version bump is committed and tagged, so the fix is a
+        # one-line commit rather than a released-with-no-notes version.
+        #
+        # Escape hatch for a release with genuinely nothing to tell users
+        # (CI-only, refactor-only): put the sentinel line below in
+        # `## [Unreleased]`. It is deliberately an explicit, greppable
+        # statement — "nothing to say" and "forgot to write it" must not look
+        # identical to this check.
+        #
+        # One failure here is NOT the author's fault: when two PRs merge
+        # back-to-back, this job checks out master at trigger time, so run #1
+        # can sweep BOTH entries into version #1 and leave run #2 with an empty
+        # section. That is how v1.32.1's macOS fixes ended up filed under
+        # v1.32.0, and v1.40.0's palette content search under v1.39.0. If this
+        # gate fires immediately after another release, check whether the
+        # previous version's section is holding this one's entry, and move it
+        # down rather than writing a new one.
+        if: steps.bump.outputs.skip != 'true' && inputs.publish_tag == ''
+        run: |
+          UNRELEASED=$(sed -n '/^## \[Unreleased\]/,/^## \[/{ /^## \[Unreleased\]/d; /^## \[/d; p; }' CHANGELOG.md)
+          if [ -z "$(printf '%s' "$UNRELEASED" | tr -d '[:space:]')" ]; then
+            echo "::error file=CHANGELOG.md::The [Unreleased] section is empty — refusing to cut a release with no changelog entry. Add one under '## [Unreleased]' describing the change from a user's point of view, or, if this release genuinely has nothing user-facing, add the literal line '_No user-facing changes._' there."
+            exit 1
+          fi
+          echo "::notice::[Unreleased] section present ($(printf '%s\n' "$UNRELEASED" | wc -l) lines)"
+
       - name: Update version files
         if: steps.bump.outputs.skip != 'true' && inputs.publish_tag == ''
         env:
@@ -327,6 +366,15 @@ jobs:
           # lone newline (1 byte) for an empty CHANGELOG section, which `[ -s ]`
           # wrongly accepts as non-empty — that bug shipped v1.31.1 with a blank
           # body. Strip whitespace and test for genuinely-empty content.
+          #
+          # The "_No user-facing changes._" sentinel (see the release job's
+          # [Unreleased] gate) counts as empty HERE on purpose: it is an honest
+          # thing to keep in CHANGELOG.md, but a useless release page. Falling
+          # through to the generated notes gives readers the commits instead.
+          if grep -qx '_No user-facing changes\._' release-notes.md; then
+            echo "::notice::CHANGELOG section for v${VERSION} is the no-user-facing-changes sentinel — generating notes from commits/PRs"
+            : > release-notes.md
+          fi
           if [ -z "$(tr -d '[:space:]' < release-notes.md)" ]; then
             echo "::warning::CHANGELOG section for v${VERSION} is empty — generating notes from commits/PRs"
             gh api --method POST "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \

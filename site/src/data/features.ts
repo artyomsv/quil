@@ -138,6 +138,21 @@ export const features: Feature[] = [
   },
 
   {
+    slug: "model-context-readout",
+    icon: "sparkles",
+    title: "Model and context readout",
+    blurb:
+      "The status bar shows which model an AI pane is on and how much context it has burned — without asking the agent or reading its header.",
+    category: "ai",
+    detail: [
+      "AI panes show the model id and context-window token count from the last completed turn, e.g. `opus-4.8 · 612k ctx`.",
+      "Deliberately tokens, not a percentage: neither Claude Code nor OpenCode records the window size in its data, and a Claude session may be running at 200k or at 1M — a percentage would be a guess presented as a fact.",
+      "Right after a compaction the pane reads `· compacting` until the next turn reports the reduced size. The transcript doesn't contain the new count yet at that moment, so showing the old one would be worse than showing nothing.",
+      "Rides the same hook-event stream as the work indicators — no polling, no extra IPC, and it keeps working while the pane is muted.",
+    ],
+  },
+
+  {
     slug: "input-history",
     image: "https://cdn.stukans.com/quil/screenshots/input-history-800.webp",
     icon: "book-open",
@@ -163,9 +178,10 @@ export const features: Feature[] = [
       "Terminals are not all the same. Quil understands pane types and gives each one context-aware behaviour — including a per-spawn setup dialog with directory browser and runtime checkboxes.",
     category: "interaction",
     detail: [
-      "Five built-in pane types: Terminal, Claude Code, OpenCode (beta), SSH, Stripe.",
+      "Nine built-in pane types: Terminal, Terminal (keeps content on squeeze), Claude Code, OpenCode (beta), SSH, Stripe, lazygit, k9s, lazysql.",
       "Each type has its own resume strategy, error handler, and status line.",
       "Pane setup dialog (opt-in via plugin TOML): a directory browser pre-filled with the active pane's CWD plus one checkbox per declared `[[command.toggles]]` entry. claude-code uses both — picks up the project's `.claude/` context automatically and offers a `Dangerously skip permissions` toggle for unattended runs.",
+      "The directory step remembers where you've been: the last five folders you actually opened a pane in are offered as a one-keystroke quick pick (deleted ones filtered out), and for git-aware pane types the repositories discovered near the active pane take priority. Browse… always drops to the full picker.",
       "Toggle state rides through the existing `InstanceArgs` IPC field and survives daemon restarts; no IPC schema changes.",
       "User-definable additional types via TOML plugin files in ~/.quil/plugins/.",
     ],
@@ -180,7 +196,8 @@ export const features: Feature[] = [
     category: "interaction",
     detail: [
       "Binary split tree, each split with its own direction and ratio.",
-      "Click any pane to focus it; scroll wheel traverses terminal history.",
+      "Click any pane to focus it; the scroll wheel traverses terminal history.",
+      "Over a pane running something that handles its own mouse input — claude-code, opencode, vim, htop, lazygit — the wheel scrolls that program's viewport instead. Those apps run on the alternate screen and never fill Quil's scrollback, so the wheel is forwarded to them as the mouse sequence they expect. The daemon is what detects this, so it stays correct even when you reattach to a session that was already running.",
       "Click the scrollbar to jump the thumb; click-and-drag scrolls continuously. The hit zone is three cells wide so off-by-one clicks register as scroll instead of text selection.",
       "Spatial pane navigation: Alt+Left/Right/Up/Down focuses the closest neighbour in that direction. Three tie-breakers (gap, perpendicular overlap, perpendicular center distance) match tmux/vim/iTerm muscle memory.",
       "Drag any tab in the tab bar to reorder it — intermediate tabs slide one slot at a time. A click without motion still switches tabs. The active tab is prefixed with `* ` so it's visible at a glance even when colored.",
@@ -353,6 +370,21 @@ export const features: Feature[] = [
     ],
   },
   {
+    slug: "auto-update",
+    icon: "refresh-ccw",
+    title: "Updates without leaving the app",
+    blurb:
+      "Quil notices a new release, stages it in the background, and installs it on your say-so — no re-running the install script, no manual binary swap.",
+    category: "observability",
+    detail: [
+      "The daemon checks for new releases shortly after startup and once a day after that; the status bar shows `↑ v1.42.0 [ready]` once one is staged, and F1 → Check for updates runs a real check on demand.",
+      "Applying swaps both binaries and restarts — your tabs, panes, and AI sessions come back from the workspace snapshot exactly as they do after any restart.",
+      "Downloads are checksum-verified before anything is swapped, and the previous binaries are kept as a backup that is restored automatically if the swap fails halfway.",
+      "Two settings under `[update]` in config.toml, both in the Settings dialog: `check` (look for releases) and `auto` (download in the background so applying is instant). Turn both off and Quil never contacts GitHub.",
+      "Dev and debug builds have the pipeline compiled out entirely — a release binary applied over `quil-dev` would strip its dev-mode wiring and silently point the next launch at your production data directory.",
+    ],
+  },
+  {
     slug: "version-handshake",
     icon: "refresh-ccw",
     title: "Client/daemon version handshake",
@@ -375,6 +407,7 @@ export const features: Feature[] = [
     category: "observability",
     detail: [
       "`quil restart` stops the daemon with bounded escalation (graceful IPC shutdown with final snapshot → SIGTERM → force-kill, each tier timed out so even a deadlocked daemon can't stall it), cleans stale pid/socket files, starts fresh, and reopens the TUI.",
+      "`quil status` answers \"is it actually healthy?\" before you reach for restart: daemon state, pid, version, environment, uptime, and a per-tab/pane breakdown with each pane's state and memory. `--json` for scripts, and exit codes that distinguish healthy from not-running from wedged — so it works in a monitoring loop, not just by eye.",
       "Prints the target environment first — production (~/.quil) vs dev (QUIL_HOME) — so you can never kill the wrong daemon. PID-reuse guard: a recorded PID is only signaled if it actually belongs to a quild binary.",
       "Per-pane input isolation: every pane's stdin is written by its own goroutine behind a bounded queue. A process that stops reading input costs you a 'Pane not accepting input' sidebar warning on that one pane — everything else stays interactive. Alt+R restarts the stuck pane in place with its AI session resumed.",
       "Liveness watchdog: if no workspace snapshot completes for 2 minutes, the daemon writes a full goroutine stack dump to quild.log — a wedge becomes a precise bug report instead of a silent freeze.",
@@ -423,6 +456,7 @@ export const features: Feature[] = [
     category: "interaction",
     detail: [
       "PTY via creack/pty on Unix, ConPTY on Windows.",
+      "On Windows 10, Quil bundles Microsoft's OpenConsole (MIT) and hosts panes through it. The Windows 10 inbox console re-serializes an app's incremental screen updates incorrectly — typing `Hello` in claude-code showed `H ello`. Windows 11's built-in host is unaffected and is left alone; if the bundle is missing, Quil falls back to the inbox host rather than failing to start.",
       "IPC via Unix domain sockets on Linux/macOS, Named Pipes on Windows.",
       "Pre-built binaries for linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64.",
     ],

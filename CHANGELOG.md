@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.42.1] - 2026-07-26
+
 ### Fixed
 - The pane setup dialog keeps showing which working directory the pane will
   start in while you configure the rest of it. The selection highlight was drawn

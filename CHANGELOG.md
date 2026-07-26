@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only on the focused field, so tabbing from **Working directory** on to the
   toggles erased every trace of the directory you had picked — and the field was
   equally blank while still focused if the cursor sat on the trailing "Browse…"
-  row, which never becomes the answer. The committed row now carries a `•`
+  row, which never becomes the answer. The committed row now carries a `▸`
   marker whenever the cursor is not already on it, so the directory that will
   actually be used stays on screen for the whole dialog. The kube-context list
   had the same gap and gets the same marker.
@@ -110,28 +110,118 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.40.0] - 2026-07-24
 
-## [1.39.0] - 2026-07-23
-
 ### Added
-- Command palette (`Alt+Shift+P`) — a modal, keyboard-first fuzzy-find launcher for every action plus jump-to-tab and jump-to-pane across the workspace. Entries are grouped under section headers (Pane / Go to pane / Tabs / System) with actions first; headers disappear when you type. Type to filter, `Enter` to run, `Esc` to close; each row shows its keybinding. Dispatches into the same handlers the keybindings use. Configurable via `command_palette` (`Ctrl+Shift+P` is opt-in — many terminals intercept it).
 - Command palette content search: as you type, the palette also searches every
   pane's scrollback and lists matching panes in a "Found in panes" section below
   the filtered commands (match count + preview) — one query narrows commands and
   finds content at once, no separate mode. Enter on a match jumps to that pane.
+  Background and muted panes are searched too; a search that never comes back
+  shows a timed-out row instead of an endless "Searching…".
+
+## [1.39.0] - 2026-07-23
+
+### Added
+- Command palette (`Alt+Shift+P`) — a modal, keyboard-first fuzzy-find launcher for every action plus jump-to-tab and jump-to-pane across the workspace. Entries are grouped under section headers (Pane / Go to pane / Tabs / System) with actions first; headers disappear when you type. Type to filter, `Enter` to run, `Esc` to close; each row shows its keybinding. Dispatches into the same handlers the keybindings use. Configurable via `command_palette` (`Ctrl+Shift+P` is opt-in — many terminals intercept it).
 
 ## [1.38.0] - 2026-07-19
 
+### Added
+- **Pane context menu** — right-click a pane (or press `Alt+A`) for a popup of
+  everything you can do to it: split, focus, rename, notes, input history,
+  lazygit, mute, always-resume, restart, close. The menu targets the pane under
+  the cursor and highlights it, so it works on any pane without focusing it
+  first. Rows that don't apply are greyed with the reason (input history on a
+  pane type that doesn't record it, lazygit when the binary isn't installed).
+- **Mark attention** — a context-menu action that pins the green attention
+  border to a pane and keeps it there until you clear it. Unlike the automatic
+  unseen mark, focusing the pane does not remove it, so you can flag a pane to
+  come back to.
+
+### Changed
+- Right-clicking a pane that has an active text selection still copies the
+  selection, as before — the menu only opens when there is nothing selected.
+
 ## [1.37.0] - 2026-07-18
+
+### Added
+- **Automatic updates** — Quil now notices new releases, downloads them in the
+  background, and can install one without you leaving the app. The status bar
+  shows `↑ v1.37.0 [ready]` when an update is staged, and F1 → "Check for
+  updates" runs a real check on demand. Applying swaps both binaries and
+  restarts Quil; your panes come back from the workspace snapshot as they do
+  after any restart.
+- Two settings under `[update]` in `~/.quil/config.toml`, both editable in the
+  F1 → Settings dialog: `check` (look for new releases; on by default) and
+  `auto` (download them in the background so applying is instant).
+
+### Fixed
+- Downloads are verified against the release checksums before anything is
+  swapped, and the previous binaries are kept as a backup that is restored if
+  the swap fails halfway.
+
+### Changed
+- Dev and debug builds have the whole update pipeline compiled out. Applying a
+  release build over `quil-dev` would strip its dev-mode wiring and silently
+  point the next launch at your production `~/.quil` data.
 
 ## [1.36.2] - 2026-07-17
 
+### Fixed
+- **Orphaned MCP bridges on Windows** — `quil mcp` processes no longer pile up
+  after the AI client that spawned them exits. Stdin EOF is not a reliable
+  end-of-life signal on Windows: clients spawn stdio servers concurrently, and a
+  sibling process inherits the pipe handle, so the bridge kept waiting on a
+  stdin that would never close. Observed as 20 abandoned bridges accumulating
+  over a week, each holding a live connection to the daemon. The bridge now
+  watches the process that started it and exits when that process does, with a
+  guard against a recycled process id being mistaken for a live parent. Covers
+  pane kill, pane restart, session restart, and client crash.
+
 ## [1.36.1] - 2026-07-16
+
+### Fixed
+- **Work spinner going dark while subagents are still running** — Claude Code
+  runs subagents detached, so the main turn reports "stop" while the subagents
+  are still grinding. The spinner treated that as end-of-work and the pane went
+  quiet with a green "done" mark exactly during the heaviest phase. Outstanding
+  subagents are now counted: the spinner keeps running until the last one
+  finishes, and only then does the pane get its unseen mark. A session ending
+  clears the count, so a lost subagent event can't leave the spinner stuck on.
 
 ## [1.36.0] - 2026-07-15
 
+### Added
+- **Drag a split border to resize panes** — click and drag any border between
+  two panes to move the split, like every other tiling terminal. The panes on
+  each side of the dragged line highlight while you drag. The size is clamped so
+  no pane can be squeezed below a usable minimum, including through nested
+  splits. The PTY resize and the layout save happen once when you release the
+  mouse, not continuously during the drag — mid-drag resizes are what garble a
+  running program's output. Disabled in focus mode, notes mode, and on
+  single-pane tabs; the scrollbar keeps priority over its own column.
+
 ## [1.35.0] - 2026-07-09
 
+### Added
+- **`quil status`** — a scriptable health check for the daemon (alias
+  `quil daemon status`). Reports whether the daemon is running, its pid,
+  version, environment (production or dev), roughly how long it has been up,
+  and a per-tab/pane breakdown with each pane's state and memory use. `--json`
+  emits the same data for scripts. Exit codes distinguish a healthy daemon from
+  one that isn't running from one that is wedged, so it works in a monitoring
+  loop.
+
 ## [1.34.2] - 2026-07-08
+
+### Fixed
+- **Input history filled with machine-generated turns** — the `Alt+Shift+I`
+  history for Claude Code panes listed `<task-notification>` blocks (task ids,
+  tool-use ids, usage stats) alongside your actual prompts. Claude Code fires
+  the same prompt-submitted hook for synthetic turns, which is how the harness
+  resumes the loop when a background task finishes. Those turns are now skipped
+  when recording, filtered when the list is displayed (so history recorded
+  before this release is clean too), and dropped when the file is trimmed. A
+  prompt of yours that merely quotes the tag is preserved.
 
 ## [1.34.1] - 2026-07-08
 
@@ -155,27 +245,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.34.0] - 2026-07-06
 
+### Added
+- **AI panes render at their real size when they're wide enough** — a Claude
+  Code or OpenCode pane used to always render on a window-wide canvas and show a
+  cropped view of it, which protected the program from constant resizes but cost
+  you selection and made the crop visible. Once a pane is at least 80 columns
+  wide (`[display] min_native_cols`) it now renders natively at its own size,
+  which brings back mouse and keyboard text selection. Below the threshold it
+  falls back to the canvas as before — and even then, mouse selection now works
+  on the cropped view.
+
 ## [1.33.1] - 2026-07-05
+
+### Fixed
+- **Garbled claude-code panes after working in a multi-pane tab** — mixed-width
+  line wraps and duplicated chunks of transcript accumulated over a session.
+  Claude Code hard-wraps its transcript at the width it streamed at and
+  re-renders its tail on every resize, and Quil resized panes far more often
+  than a real terminal does: toggling the notification sidebar, entering focus
+  mode, splitting, and every state broadcast each triggered one. The
+  notification sidebar is now drawn as an overlay that reserves no layout width,
+  so `Alt+N` no longer resizes anything, and same-size resizes are dropped
+  before they reach the PTY.
+- **Session resume after a pane restart** — restarting a Claude Code pane could
+  reattach to the session chosen when the pane was created rather than the
+  conversation it is actually in now.
 
 ## [1.33.0] - 2026-07-03
 
+### Added
+- **Model and context usage in the status bar** — AI panes show the model and
+  the context-window token count from the last completed turn, e.g.
+  `opus-4.8 · 612k ctx`. The number is the real total (input plus cached
+  tokens), deliberately shown as tokens and not a percentage, because the window
+  size isn't recorded in either tool's data and a Claude session may run at 200k
+  or 1M. Right after a compaction the pane shows `· compacting` until the next
+  turn reports the reduced size, rather than displaying a stale pre-compaction
+  count.
+
 ## [1.32.2] - 2026-07-03
 
+### Fixed
+- **Work spinner broken by muting a pane** — muting a pane instantly killed its
+  work-in-progress spinner and unmuting never brought it back, even while the
+  pane was still working. Mute is meant to silence the notification sidebar, not
+  to blind the spinner; work-state events now keep flowing to the TUI for a
+  muted pane while its notification cards stay suppressed.
+
 ## [1.32.1] - 2026-07-03
-
-## [1.32.0] - 2026-07-02
-
-### Added
-
-- **Mouse-wheel scrolling in AI/TUI panes** — scrolling the wheel over a pane
-  running an app that handles its own mouse input (opencode, claude-code, vim,
-  htop, lazygit, …) now scrolls that app's viewport instead of doing nothing.
-  These apps run on the alternate screen, which never fills Quil's local
-  scrollback, so the wheel is forwarded straight to the program. The daemon
-  detects when a pane's program enables mouse tracking — reliable even when you
-  reattach to an already-running session — and the client forwards each wheel
-  notch as the matching mouse sequence. Plain terminal/shell panes keep
-  scrolling Quil's own scrollback as before.
 
 ### Fixed
 
@@ -193,9 +310,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   keys, so claude-code and shell readline word navigation work with no extra
   configuration. `Ctrl+Arrow` word-jump on Windows/Linux is unchanged.
 
+## [1.32.0] - 2026-07-02
+
+### Added
+
+- **Mouse-wheel scrolling in AI/TUI panes** — scrolling the wheel over a pane
+  running an app that handles its own mouse input (opencode, claude-code, vim,
+  htop, lazygit, …) now scrolls that app's viewport instead of doing nothing.
+  These apps run on the alternate screen, which never fills Quil's local
+  scrollback, so the wheel is forwarded straight to the program. The daemon
+  detects when a pane's program enables mouse tracking — reliable even when you
+  reattach to an already-running session — and the client forwards each wheel
+  notch as the matching mouse sequence. Plain terminal/shell panes keep
+  scrolling Quil's own scrollback as before.
+
 ## [1.31.2] - 2026-06-18
 
+### Fixed
+- Releases whose changelog section contained only whitespace were published with
+  a blank description instead of falling back to generated notes — the check
+  treated a lone newline as real content. This shipped v1.31.1 with an empty
+  release page.
+
 ## [1.31.1] - 2026-06-18
+
+### Fixed
+- Every release now gets a description: when a release ships without a changelog
+  entry, the release page falls back to notes generated from its commits and
+  pull requests instead of publishing empty (as v1.29.0 and v1.31.0 did).
+- Fixed a race that made quil.cc deployments fail with "Deployment failed, try
+  again later" when a release and a site change landed together. The release
+  workflow no longer deploys the site itself; the version bump it pushes
+  triggers the site workflow, which is now the only thing that deploys.
 
 ## [1.31.0] - 2026-06-18
 
@@ -233,6 +379,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.29.0] - 2026-06-17
 
+### Changed
+- **Stop daemon moved to the F1 root menu** — it now sits alongside Settings,
+  Shortcuts, Plugins, Memory, and the log viewers instead of being buried in the
+  Settings list. Confirming still requires `y` rather than Enter, so a reflexive
+  Enter can't take down every pane, and Esc returns to the menu with the cursor
+  where you left it.
+- **Wider lazygit repository picker** — the picker shown when a pane's directory
+  contains several git repositories grew from 60 to 90 columns, so long paths
+  keep the tail that tells them apart instead of being truncated to a common
+  prefix.
+
 ## [1.28.0] - 2026-06-15
 
 ### Added
@@ -267,13 +424,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.26.0] - 2026-06-15
 
+### Added
+- **Restore progress for panes that are coming back** — a restored or
+  slow-starting pane now shows a centered checklist instead of an empty box that
+  looks frozen: session loaded → history restored (with the line count) or
+  restored via the tool's own resume, or none saved → resuming the tool →
+  waiting for first output, with a spinner on the current step. It stays up
+  through a multi-second boot (claude-code clears the screen before it paints)
+  and disappears the moment real output arrives. Panes on other tabs that are
+  restored lazily show it when they actually start, not at the original restart.
+
 ## [1.25.1] - 2026-06-15
+
+### Fixed
+- Website: social preview images on pages with an absolute image URL were
+  double-prefixed and failed to load.
 
 ## [1.25.0] - 2026-06-15
 
+### Changed
+- Website: real product screenshots on quil.cc and in the README, served from a
+  CDN, replacing the placeholder imagery on the landing page, feature catalog,
+  and blog.
+
 ## [1.24.0] - 2026-06-15
 
+### Added
+- Website: a blog at [quil.cc/blog](https://quil.cc/blog), starting with a post
+  on how Claude Code session resume works in Quil.
+
 ## [1.23.1] - 2026-06-14
+
+### Fixed
+- Website: corrected the advertised MCP tool count and the AI-resume claim on
+  quil.cc, which had drifted behind the shipped feature set, plus an SEO title
+  fix.
 
 ## [1.23.0] - 2026-06-13
 
@@ -289,17 +474,84 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.21.1] - 2026-06-12
 
+### Fixed
+- **Daemon freeze whenever Claude Code rang the terminal bell** — the whole
+  daemon (every pane, every tab) could stop responding, most often right when
+  Claude asked for your attention or finished compacting. The bell handler held
+  a per-pane lock while raising the notification event, and raising the event
+  needed the same lock to check whether the pane was muted — so the first
+  un-cooled-down bell deadlocked the pane's output goroutine, and the snapshot
+  loop, idle checker, memory report, and pane input all piled up behind it. This
+  was the root cause of the remaining production freezes, caught by the
+  goroutine dump added in v1.20.3.
+
 ## [1.21.0] - 2026-06-12
+
+### Added
+- **Restart a pane from the keyboard** — `Alt+R` restarts the active pane behind
+  a confirmation dialog, using the same kill-and-respawn path as the MCP
+  `restart_pane` tool, so session resume and pane settings are preserved.
+  Configurable via the `restart_pane` keybinding.
 
 ## [1.20.3] - 2026-06-12
 
+### Fixed
+- **Daemon freeze caused by a pane that stops reading input** — a child process
+  that stalls (observed with Claude Code after context compaction) filled its
+  input buffer, and the daemon blocked forever trying to write to it. Because
+  that write happened on the connection's shared dispatch path, *every* pane's
+  keyboard input died with it. Input is now handed to a per-pane writer with a
+  bounded queue; a stalled pane drops its own keystrokes and posts a "Pane not
+  accepting input" notification instead of freezing the app.
+- **Daemon freeze when closing a pane or tab whose child won't exit** — closing
+  waited for the child to be reaped while holding the lock that every other
+  operation needs, so the snapshot loop, attach, tab switch, and memory
+  reporting all died behind it. Panes are now detached under the lock and closed
+  outside it.
+- Added a watchdog that dumps all goroutine stacks to the log when no workspace
+  snapshot completes for two minutes, so a future freeze names its own culprit.
+
 ## [1.20.2] - 2026-06-12
+
+### Fixed
+- Made an internal connection-teardown test deterministic; it intermittently
+  failed CI and blocked releases.
 
 ## [1.20.1] - 2026-06-12
 
+### Fixed
+- **Tab color cycle stuck on the last color** — cycling a tab's color with
+  `Alt+C` wrapped back to "no color" in the client, but the daemon read the
+  empty color as "leave it unchanged" and the next state broadcast snapped the
+  tab back to orange. Clearing a color is now sent explicitly, so the cycle
+  completes.
+
 ## [1.20.0] - 2026-06-11
 
+### Added
+- **`quil restart`** — stops the daemon and starts a fresh one with the TUI in a
+  single command, plus `quil daemon stop` / `quil daemon restart` for the daemon
+  alone. Stopping escalates: a graceful shutdown request, then a terminate
+  signal, then a kill, each with its own bounded wait, so it also works against
+  a daemon that has stopped responding. Stale socket and pid files are cleaned
+  up afterwards, and the command prints which environment (production or dev) it
+  acted on before doing anything.
+
+### Fixed
+- `quil daemon stop` no longer intermittently does nothing. The shutdown request
+  was queued on a connection that the command then closed, discarding it.
+
 ## [1.19.1] - 2026-06-11
+
+### Fixed
+- **macOS: `zsh: killed quil` after upgrading** — the installer overwrote
+  binaries in place, reusing the file's identity on disk. macOS caches code
+  signatures per file, so the kernel killed the newly installed binary at launch
+  as an invalid signature, and reinstalling never fixed it. The installer now
+  writes each binary to a temporary file and moves it into place, which both
+  prevents the problem and repairs machines already stuck in that state — just
+  re-run the normal install command. Added a troubleshooting entry with the
+  diagnosis and the manual fallback for anyone on an old copy of the installer.
 
 ## [1.19.0] - 2026-06-11
 
@@ -357,9 +609,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.18.0] - 2026-06-09
 
+### Added
+- **Work-in-progress indicators for AI panes** — a spinner appears on the pane
+  border and its tab label while a Claude Code or OpenCode pane is working, and
+  clears when the turn ends. It is driven by the agent's own lifecycle hooks
+  rather than by guessing from screen output, so it is accurate through long
+  turns with no output. A pane that is waiting on you — a permission prompt or
+  an option prompt — stops spinning and flags for attention, then resumes when
+  you answer.
+- **Native Claude Code hook** — Quil's hook is now a built-in subcommand instead
+  of a generated shell/PowerShell script. It starts in tens of milliseconds
+  rather than seconds, and it removes an entire class of encoding bugs that
+  broke the old scripts on non-UTF-8 Windows code pages. Quil still registers
+  its hooks per pane at launch and never modifies your `~/.claude/settings.json`.
+
 ## [1.17.0] - 2026-06-09
 
+### Added
+- **Always resume** (`Alt+Shift+E`) — mark a pane to be started immediately on
+  daemon restart instead of when you first visit it. Tabs containing such a pane
+  show a `●` marker.
+
+### Changed
+- **Restarting with a large workspace no longer disconnects the TUI.** With many
+  tabs and AI panes, the daemon restored everything at once and force-closed the
+  busy client mid-restore (observed: 13 tabs / 12 Claude panes, TUI closing
+  itself about a minute after launch). Two changes fix it: on restart the daemon
+  now starts only the active tab's panes plus any marked "always resume", and
+  defers the rest until you switch to them; and a client that falls behind now
+  sheds live output frames instead of being disconnected — only a genuinely
+  wedged client is dropped.
+
+### Fixed
+- **Log files grow without bound** — `quild.log` and `quil.log` now rotate at
+  `[logging] max_size_mb` (default 5 MB), keeping `max_files` timestamped
+  archives (default 10) and pruning the rest. These settings existed but were
+  never honored; production logs had reached 74 MB and 182 MB.
+
 ## [1.16.1] - 2026-06-08
+
+### Fixed
+Windows rendering and pane-sizing fixes, all seen in the legacy console host:
+- **No visible caret** in interactive panes (claude-code, opencode). Every pane
+  type now draws its own caret into the frame.
+- **Column drift after emoji or CJK characters** — a phantom space was emitted
+  for the second half of a double-width character, pushing everything after it
+  one cell to the right.
+- **Panes stuck at 80×24 after starting or restoring** — the Windows console
+  drops resize events sent before the child starts reading input and never
+  replays them. The size is now re-applied on the pane's first output, and pane
+  dimensions are saved so restored panes start at the right size.
+- **Window resize not picked up** — maximizing or restoring the window could
+  leave Quil rendering at the old size. A one-second size poll recovers it, and
+  the new `redraw` keybinding (`Alt+Shift+L`) forces a full repaint plus a size
+  re-query.
 
 ## [1.16.0] - 2026-06-08
 
@@ -415,6 +718,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.13.0] - 2026-06-05
 
+### Changed
+- Documentation restructured into a navigable `docs/` tree with an index, and a
+  new user-facing MCP guide covering client setup, every tool, and the
+  redaction model. Only `README.md`, `CHANGELOG.md`, `CONTRIBUTING.md`, and
+  `LICENSE` remain at the repository root.
+
 ## [1.12.0] - 2026-05-22
 
 ### Added
@@ -447,6 +756,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Notes editor focus indicator is now non-subtle** — when the pane-notes editor (Alt+E) is open, the header carries a persistent reverse-video badge: `INPUT` on bright blue when keystrokes route to the editor, `PANE` on orange when they route to the bound PTY. Border colour alone was easy to miss in peripheral vision, leaving a defence-in-depth gap against synthesised mouse-click focus redirection. At narrow widths the badge degrades to single-letter form (`I` / `P`) before falling back to an empty header — never to a corrupted partial that would give the same visual on both sides. Implementation uses explicit `Background`+`Foreground` rather than `Reverse(true)` so the fill colour is stable across terminal themes.
 
 ## [1.10.1] - 2026-04-25
+
+### Changed
+- Documentation caught up with v1.8.0–v1.9.x: the version handshake, the VT
+  drain fix, and the Claude Code session hook are now described in the README,
+  roadmap, and architecture docs.
 
 ## [1.10.0] - 2026-04-24
 
@@ -520,7 +834,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Pane CWD ignored on creation** — selecting a working directory in the pane setup dialog (Ctrl+N → CWD browser) had no effect; the spawned process always started in the daemon's own working directory. `spawnPane()` now calls `ptySession.SetCWD(pane.CWD)` before `Start()`. The redundant `SetCWD` calls in `respawnPanes()` were removed — `spawnPane` is now the single source of truth for CWD application.
 
 ## [1.4.2] - 2026-04-14
+
+### Fixed
+- The release workflow now deploys quil.cc, so the website no longer lags a
+  release.
 ## [1.4.1] - 2026-04-14
+
+### Fixed
+- Website: a FAQ entry was missing its question text.
 
 ## [1.4.0] - 2026-04-14
 
@@ -546,6 +867,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`quild` background mode** — stdout/stderr prints gated on `!background` instead of redirecting to `/dev/null` (eliminates a file descriptor leak).
 
 ## [1.3.1] - 2026-04-09
+
+### Fixed
+- Release notes were not being applied to published releases, and the version
+  pill on quil.cc stayed at 1.2.1 regardless of the release.
 
 ## [1.3.0] - 2026-04-08
 
@@ -586,11 +911,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.2.1] - 2026-04-07
 
+### Changed
+- Website redesign: ember palette, monospace hero, matte-black cards.
+
+### Fixed
+- Website: sitemap entries and canonical URLs now match how GitHub Pages
+  actually serves the site, so search engines see one URL per page instead of
+  two.
+
 ## [1.2.0] - 2026-04-07
+
+### Added
+- Website: per-page social preview images, richer structured data, and a web app
+  manifest; page freshness dates now come from git history.
 
 ## [1.1.0] - 2026-04-07
 
+### Added
+- The marketing site at [quil.cc](https://quil.cc) — landing page, feature
+  catalog, install instructions, and plugin overview.
+
 ## [1.0.0] - 2026-04-07
+
+### Changed
+- **Renamed the project from Aethel to Quil.** The binaries are now `quil` and
+  `quild`, the data directory is `~/.quil/`, the config file is
+  `~/.quil/config.toml`, and the environment override is `QUIL_HOME`. There is
+  no automatic migration: move `~/.aethel/` to `~/.quil/` to keep an existing
+  workspace, and update any MCP client configuration that referenced the old
+  binary name.
 
 ## [0.13.0] - 2026-04-07
 
@@ -617,6 +966,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `cmd/quil/main.go` calls `Model.FlushNotes()` on TUI exit as a safety net for unsaved notes
 
 ## [0.12.1] - 2026-04-05
+
+### Fixed
+- Release notes are now applied to published GitHub releases.
 
 ## [0.12.0] - 2026-04-05
 
@@ -664,6 +1016,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Notification center PRD update** — added MCP integration section: `watch_notifications` blocking tool, event hub architecture, AI as event consumer
 
 ## [0.10.2] - 2026-03-24
+
+### Fixed
+- Fixed the release build, which was failing to produce binaries.
 
 ## [0.10.1] - 2026-03-24
 

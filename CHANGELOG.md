@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.42.0] - 2026-07-26
+
 ### Added
 - Claude Code panes can start inside an **earlier conversation** instead of a
   fresh one. The pane setup dialog gains a **Session** field listing the

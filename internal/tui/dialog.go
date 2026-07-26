@@ -102,6 +102,14 @@ var (
 			Foreground(lipgloss.Color("230")).
 			Bold(true)
 
+	// dialogSelectedIdle marks a row that holds the field's committed value
+	// while the field itself is NOT focused. Bold (so the choice stays
+	// readable at a glance) but not the bright white of dialogSelected, so it
+	// never competes with the row the cursor is actually on.
+	dialogSelectedIdle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("250")).
+				Bold(true)
+
 	dialogNormal = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("250"))
 
@@ -3293,6 +3301,18 @@ const setupBoxChrome = 6
 // four spaces) in the CWD pick list and the session picker.
 const setupRowIndent = 4
 
+// setupRowIdleMark prefixes the row holding a field's committed value when the
+// cursor caret is not already on it — the field is blurred, or it is focused
+// with the cursor parked on a row that will never be submitted ("Browse…").
+// Reads as a dimmer caret next to the "  > " cursor row, which is the intended
+// relationship: one is where you are, the other is what you picked.
+//
+// Exactly setupRowIndent cells wide, so it costs a row no path budget
+// (TestSetupRowIdleMark_MatchesRowIndent). Deliberately not "  • ": the kube
+// list prefixes its current context with "● ", and "  • ● prod" puts two
+// near-identical glyphs side by side with the newly-added one leading.
+const setupRowIdleMark = "  ▸ "
+
 // setupDialogWidth returns the box width for the pane setup dialog. Each toggle
 // row costs 6 cells of chrome — the 2-char cursor prefix plus "[x] " — on top
 // of its label, so a long label wraps onto a second line once the row exceeds
@@ -3370,15 +3390,27 @@ func (m Model) renderCreatePaneSetupDialog() string {
 		// the selected path, so a separate line would duplicate it and merge
 		// visually with the list — skip it and let the highlight do the work.
 		if len(pick) == 0 {
-			path := m.cwdBrowseDir
-			if path == "" && runtime.GOOS == "windows" && len(m.cwdBrowseEntries) > 0 {
+			path, prefix := m.cwdBrowseDir, "    "
+			switch {
+			case path == "" && runtime.GOOS == "windows" && len(m.cwdBrowseEntries) > 0:
 				path = dialogSubtle.Render("Select drive:")
-			} else if path == "" {
+			case path == "":
 				path = dialogSubtle.Render("(no directory loaded — daemon default will be used)")
-			} else {
+			case focused:
+				// While focused this line is just "where the listing is" — the
+				// cursor row below owns the emphasis.
 				path = dialogValStyle.Render(path)
+			default:
+				// Blurred: this line is now the only evidence of the chosen
+				// directory, so it takes the same mark the pick list uses.
+				// Bold alone would not carry it — dialogValStyle and
+				// dialogNormal are the same declaration, and dialogSelectedIdle
+				// differs from both by SGR 1 only, so on a terminal that drops
+				// bold the mark is the entire signal.
+				prefix = setupRowIdleMark
+				path = dialogSelectedIdle.Render(path)
 			}
-			b.WriteString("    " + path + "\n")
+			b.WriteString(prefix + path + "\n")
 		}
 
 		if m.cwdInputError != "" {
@@ -3399,9 +3431,29 @@ func (m Model) renderCreatePaneSetupDialog() string {
 				} else {
 					displayName = "Browse…"
 				}
-				if focused && i == m.cwdBrowseCursor {
+				switch {
+				case focused && i == m.cwdBrowseCursor:
 					b.WriteString("  > " + dialogSelected.Render(displayName) + "\n")
-				} else {
+				case i < len(pick) && pick[i] == m.cwdBrowseDir:
+					// The directory the pane will actually spawn in, marked
+					// whenever the caret above is not already on it: the field
+					// is blurred, OR it is focused with the cursor parked on
+					// the trailing "Browse…" row, which syncSelection
+					// deliberately never commits. Both states otherwise read as
+					// "nothing chosen" — the same hole, one just happens to be
+					// reachable without leaving the field.
+					//
+					// Matched on cwdBrowseDir (the value submitSetupDialog
+					// reads) rather than on the cursor, which is what makes the
+					// Browse… case work at all. In pick mode cwdBrowseDir is
+					// only ever assigned by copying an element out of this same
+					// slice, so == is exact by construction and never depends on
+					// pathEqual's case folding.
+					//
+					// Same 4-cell prefix width as the other rows, so
+					// leftTruncPath's budget is unchanged.
+					b.WriteString(setupRowIdleMark + dialogSelectedIdle.Render(displayName) + "\n")
+				default:
 					b.WriteString("    " + dialogNormal.Render(displayName) + "\n")
 				}
 			}
@@ -3469,9 +3521,20 @@ func (m Model) renderCreatePaneSetupDialog() string {
 		// focused row's selection styling covers the whole line instead of
 		// being truncated by a nested ANSI reset from dialogSubtle.
 		renderRow := func(rowIdx int, text, suffix string) {
-			if focused && rowIdx == m.kubeCursor {
+			switch {
+			case focused && rowIdx == m.kubeCursor:
 				b.WriteString("  > " + dialogSelected.Render(text+suffix) + "\n")
-			} else {
+			case !focused && rowIdx == m.kubeCursor:
+				// Blurred but still the context this pane will launch with —
+				// same reasoning as the CWD pick list above. Unlike that list
+				// there is no non-committal row (row 0, "Default context", is a
+				// real choice), so kubeCursor IS the committed value and needs
+				// no value indirection. The !focused is redundant with the case
+				// order above and spelled out regardless: without it, reordering
+				// these two cases would silently draw the idle mark on the
+				// focused row, and nothing would fail.
+				b.WriteString(setupRowIdleMark + dialogSelectedIdle.Render(text+suffix) + "\n")
+			default:
 				line := dialogNormal.Render(text)
 				if suffix != "" {
 					line += dialogSubtle.Render(suffix)

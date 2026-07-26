@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- The pane setup dialog keeps showing which working directory the pane will
+  start in while you configure the rest of it. The selection highlight was drawn
+  only on the focused field, so tabbing from **Working directory** on to the
+  toggles erased every trace of the directory you had picked — and the field was
+  equally blank while still focused if the cursor sat on the trailing "Browse…"
+  row, which never becomes the answer. The committed row now carries a `•`
+  marker whenever the cursor is not already on it, so the directory that will
+  actually be used stays on screen for the whole dialog. The kube-context list
+  had the same gap and gets the same marker.
+
 ## [1.42.0] - 2026-07-26
 
 ### Added

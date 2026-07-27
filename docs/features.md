@@ -38,6 +38,7 @@ A capability-by-capability tour of what Quil does. For configuration knobs, see 
 - [Operations](#operations)
   - [Self-healing daemon](#self-healing-daemon)
   - [Client/daemon version handshake](#clientdaemon-version-handshake)
+  - [Remote daemon over SSH](#remote-daemon-over-ssh)
   - [Cross-platform](#cross-platform)
 
 ---
@@ -379,6 +380,25 @@ under `~/.quil/update/`. The next `quil` launch applies the update with
 one confirmation and restarts the daemon; tabs, layouts, CWDs, notes,
 and Claude sessions are preserved via the workspace snapshot. Configure
 via `[update]` in `config.toml`; About (F1) has a manual "Update now".
+
+### Remote daemon over SSH
+
+`quil --remote gpu01` attaches the TUI to a daemon running on another machine. The panes, tabs, and AI sessions live on that host and keep running there when you close the laptop — the TUI is only a viewer.
+
+**No network port is opened on the remote host.** Quil runs `ssh -T gpu01 "quil --stdio"` and speaks its normal length-prefixed protocol over that single channel, so anything SSH can reach works: a bastion behind `ProxyJump`, a Tailscale or WireGuard address, a box on the public internet. The remote daemon is started on demand if it isn't already running.
+
+The destination string is passed to `ssh` verbatim, so your `~/.ssh/config` keeps working unchanged — `Host` aliases, `ProxyJump`, `ControlMaster` multiplexing, per-host `IdentityFile`, hardware tokens (FIDO2/PKCS#11), and SSH certificates all apply. Quil layers on only two things: keepalives (`ServerAliveInterval=15`, `ServerAliveCountMax=3`) so a dead link is detected rather than hanging, and a set of options it forces **off** for this connection regardless of your config — agent forwarding, X11 forwarding, port forwarding, and local-command execution. The remote side never needs them, and the daemon protocol is powerful enough (it spawns processes) that reducing what a compromised remote can reach back through is worth the loss of flexibility.
+
+Commands that manage a daemon's lifecycle refuse under `--remote` instead of silently acting on the wrong machine:
+
+| Command | Behavior with `--remote` |
+|---|---|
+| `quil restart` | Refuses — manage the remote daemon over a normal SSH session |
+| `quil daemon start\|stop\|restart` | Refuses |
+| Upgrade-restart prompt | Reports the version mismatch and exits |
+| `quil --remote <host> mcp` | Refuses — the MCP bridge is local-only |
+
+**Current limits.** This is the first phase. A dropped SSH connection ends the session — there is no automatic reconnect yet, though the panes on the server survive and re-attaching restores them. Dialogs that browse a filesystem (the pane working-directory picker, git-repository and kube-context discovery, the Claude session list) still read your **local** disk rather than the server's, so creating remote panes works best with paths you type. Pane notes, clipboard paste, and the log viewer are local by design. `quil status` reports on the local daemon.
 
 ### Cross-platform
 

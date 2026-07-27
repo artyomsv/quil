@@ -1,6 +1,7 @@
 package ipc
 
 import (
+	"context"
 	"net"
 	"time"
 )
@@ -36,4 +37,20 @@ func (c *Client) SetReadDeadline(t time.Time) error {
 
 func (c *Client) Close() error {
 	return c.conn.Close()
+}
+
+// DialFunc establishes one transport-level connection to a daemon. It is the
+// seam that lets a Client run over something other than a Unix socket (an SSH
+// channel today, a TLS connection later) without the protocol layer knowing.
+type DialFunc func(ctx context.Context) (net.Conn, error)
+
+// NewClientWithDialer builds a Client over whatever connection dial returns.
+// NewClient remains the Unix-socket convenience wrapper used by every local
+// call site.
+func NewClientWithDialer(ctx context.Context, dial DialFunc) (*Client, error) {
+	raw, err := dial(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &Client{conn: newConn(raw)}, nil
 }

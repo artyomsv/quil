@@ -174,6 +174,13 @@ func findDaemonBinary() string {
 // process spawned) — that invariant lets callers treat pid==0 as "socket is
 // already up". Spawn failures exit the process (os.Exit) rather than return 0.
 func startDaemon(quiet bool) int {
+	if remoteMode() {
+		// Defense in depth: launchTUI never reaches here in remote mode, but
+		// startDaemon spawns against config.SocketPath() and a future caller
+		// that forgets would start a daemon on the wrong machine.
+		fmt.Fprintln(os.Stderr, "internal error: startDaemon called while attached to a remote daemon")
+		exitFn(1)
+	}
 	sockPath := config.SocketPath()
 
 	// Probe existing socket — if daemon is dead, clean up stale
@@ -197,7 +204,7 @@ func startDaemon(quiet bool) int {
 	quilDir := config.QuilDir()
 	if err := os.MkdirAll(quilDir, 0700); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to create data dir %q: %v\n", quilDir, err)
-		os.Exit(1)
+		exitFn(1)
 	}
 	cmd := exec.Command(quild, "--background")
 	cmd.Dir = quilDir
@@ -214,7 +221,7 @@ func startDaemon(quiet bool) int {
 	cmd.SysProcAttr = daemonSysProcAttr()
 	if err := cmd.Start(); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to start daemon: %v\n", err)
-		os.Exit(1)
+		exitFn(1)
 	}
 
 	pid := cmd.Process.Pid

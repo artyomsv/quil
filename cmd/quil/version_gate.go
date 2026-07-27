@@ -189,6 +189,9 @@ var (
 // path reads config.SocketPath()/config.PidPath() internally, so a caller
 // passing a different socket would stop one daemon and then wait on another.
 func restartDaemonForUpgrade() (*ipc.Client, error) {
+	if remoteMode() {
+		return nil, errRemoteMode
+	}
 	sockPath := config.SocketPath()
 	// verbose=true: this runs in the foreground before tea.NewProgram takes
 	// the terminal, and the escalation can spend 5+3+2 s across its tiers.

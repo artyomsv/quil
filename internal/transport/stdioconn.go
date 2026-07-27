@@ -34,6 +34,16 @@ func (a stdioAddr) String() string  { return string(a) }
 // Write deadlines are honestly unsupported: the only caller
 // (internal/ipc/server.go:260) discards the error, and OpenSSH's
 // ServerAliveInterval provides the wedged-peer detection the deadline would.
+//
+// Callers must ensure a single reader at a time per conn, same discipline as
+// ipc.Conn.Receive (internal/ipc/server.go:265-268): stdioConn is only ever
+// consumed through ipc.Conn, whose bufio.Reader is already single-reader by
+// construction. Two concurrent Read calls can each land a held-over remainder
+// in the shared `held` field (see Read); the second write clobbers the first
+// and silently drops bytes. The fix is this documented constraint, not a
+// wider lock — holding mu across the blocked select in Read would also block
+// SetReadDeadline, which is exactly the call the version handshake uses to
+// break a blocked Read out of that same select.
 type stdioConn struct {
 	r    *os.File // parent's read end of the child's stdout
 	w    *os.File // parent's write end of the child's stdin
@@ -93,6 +103,11 @@ func (c *stdioConn) pump() {
 	}
 }
 
+// Read is not safe for concurrent use by multiple goroutines — see the
+// single-reader note on stdioConn. Two overlapping calls can each receive a
+// chunk larger than their buffer and try to stash the remainder in `held`;
+// whichever write lands second wins, and the other call's remainder is lost
+// rather than merged.
 func (c *stdioConn) Read(p []byte) (int, error) {
 	c.mu.Lock()
 	if len(c.held) > 0 {

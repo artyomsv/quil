@@ -165,3 +165,64 @@ func TestStdioConn_Addrs_AreDescriptive(t *testing.T) {
 		t.Errorf("String() = %q, want %q", got, "test")
 	}
 }
+
+// TestStdioConn_Close_UnblocksBlockedRead pins that a Read parked in the
+// select (no data, no deadline) returns promptly once Close fires, via the
+// <-c.done case, rather than hanging forever.
+func TestStdioConn_Close_UnblocksBlockedRead(t *testing.T) {
+	c, _, _ := pipePair(t)
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := c.Read(make([]byte, 4))
+		result <- err
+	}()
+
+	time.Sleep(30 * time.Millisecond) // let Read park in the select
+	c.Close()
+
+	select {
+	case err := <-result:
+		if err == nil {
+			t.Fatal("Read succeeded after Close, want an error")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Read did not return after Close — blocked select never unblocked")
+	}
+}
+
+// TestStdioConn_Close_UnblocksPumpBlockedOnSend pins that the pump goroutine
+// does not leak when it is blocked handing a chunk to readCh (buffer full,
+// nothing draining it) at the moment Close fires. The first chunk fills the
+// buffered channel; the second is read by the pump but can't be delivered,
+// parking it in the `case c.readCh <- chunk` / `case <-c.done` select. Close
+// must free it via the done case so the pump's deferred close(readCh) runs.
+func TestStdioConn_Close_UnblocksPumpBlockedOnSend(t *testing.T) {
+	c, feed, _ := pipePair(t)
+
+	go func() { feed.Write([]byte("first")) }()
+	time.Sleep(30 * time.Millisecond) // pump reads "first", fills readCh (cap 1)
+
+	go func() { feed.Write([]byte("second")) }()
+	time.Sleep(30 * time.Millisecond) // pump reads "second", blocks trying to send it
+
+	c.Close()
+
+	// Drain whatever was buffered; the channel must eventually report closed
+	// (proving the pump exited) rather than hang forever.
+	drained := make(chan struct{})
+	go func() {
+		for {
+			if _, ok := <-c.readCh; !ok {
+				close(drained)
+				return
+			}
+		}
+	}()
+
+	select {
+	case <-drained:
+	case <-time.After(time.Second):
+		t.Fatal("pump never exited after Close (readCh stayed open) — goroutine leak")
+	}
+}

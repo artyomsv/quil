@@ -130,3 +130,40 @@ func TestStartDaemon_RemoteMode_ExitFnReturns_DoesNotProceed(t *testing.T) {
 		t.Error(`startDaemon returned 0, which asserts "daemon already listening" — false after a remote-mode refusal`)
 	}
 }
+
+// TestStartDaemon_SpawnFailure_ExitFnReturns_DoesNotProceed pins the same
+// fall-through hazard at the cmd.Start() failure site, which Step 7 of this
+// task turned from a bare os.Exit(1) (provably non-returning) into the
+// swappable exitFn(1) (not provably non-returning). Without the explicit
+// return added alongside it, a returning exitFn double falls through to
+// `pid := cmd.Process.Pid` two lines later — cmd.Process is nil after a
+// failed Start, so that fall-through is a nil-pointer panic, not merely a
+// misbehaviour. The daemon binary ("quild") is not present in the test
+// environment (no PATH entry, not alongside the test binary), so cmd.Start()
+// fails on its own without needing a fake binary or mocked exec.Command.
+func TestStartDaemon_SpawnFailure_ExitFnReturns_DoesNotProceed(t *testing.T) {
+	// Isolated data dir: real os.MkdirAll/os.OpenFile calls in the spawn path
+	// land here, never under the developer's real ~/.quil/.
+	quilDir := filepath.Join(t.TempDir(), "quilhome")
+	t.Setenv("QUIL_HOME", quilDir)
+
+	exitCalls := 0
+	prev := exitFn
+	exitFn = func(c int) { exitCalls++ } // records and RETURNS, unlike os.Exit
+	t.Cleanup(func() { exitFn = prev })
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("startDaemon panicked (%v) — it proceeded past the spawn-failure guard into cmd.Process.Pid", r)
+		}
+	}()
+
+	got := startDaemon(true)
+
+	if exitCalls != 1 {
+		t.Fatalf("exitFn called %d times, want 1", exitCalls)
+	}
+	if got == 0 {
+		t.Error(`startDaemon returned 0, which asserts "daemon already listening" — false after a spawn failure`)
+	}
+}

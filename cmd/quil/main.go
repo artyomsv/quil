@@ -217,6 +217,7 @@ func startDaemon(quiet bool) int {
 	if err := os.MkdirAll(quilDir, 0700); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to create data dir %q: %v\n", quilDir, err)
 		exitFn(1)
+		return -1 // unreachable in production; see the guard above for why
 	}
 	cmd := exec.Command(quild, "--background")
 	cmd.Dir = quilDir
@@ -234,6 +235,7 @@ func startDaemon(quiet bool) int {
 	if err := cmd.Start(); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to start daemon: %v\n", err)
 		exitFn(1)
+		return -1 // unreachable in production; see the guard above for why
 	}
 
 	pid := cmd.Process.Pid

@@ -59,6 +59,10 @@ type stdioConn struct {
 	pumpErr  error
 
 	closeOnce sync.Once
+
+	// stderr holds ssh's captured diagnostics when the dial ran in batch mode.
+	// Nil on interactive dials, where stderr went straight to the terminal.
+	stderr *lockedBuffer
 }
 
 // newStdioConn wires an already-started command's pipes into a net.Conn and
@@ -195,6 +199,15 @@ func (c *stdioConn) SetReadDeadline(t time.Time) error {
 // safe here rather than papered over with a lie that returns nil.
 func (c *stdioConn) SetWriteDeadline(t time.Time) error {
 	return os.ErrNoDeadline
+}
+
+// Stderr returns whatever the child wrote to stderr, or "" when stderr was not
+// captured. Used to turn "read: EOF" into ssh's own explanation.
+func (c *stdioConn) Stderr() string {
+	if c.stderr == nil {
+		return ""
+	}
+	return c.stderr.String()
 }
 
 // compile-time proof the adapter satisfies the interface ipc.DialFunc returns.

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // --- Established --------------------------------------------------------
@@ -195,5 +196,35 @@ func TestSSH_RejectsOptionShapedDestination(t *testing.T) {
 		if !strings.Contains(err.Error(), "must not begin with '-'") {
 			t.Errorf("SSH(%q) err = %v, want a leading-dash rejection", dest, err)
 		}
+	}
+}
+
+// TestTruncateForMessage_BoundsRemoteText pins that a hostile or merely chatty
+// remote host cannot push unbounded text into one error line. The buffer this
+// draws from is filled by the far side and has no size limit of its own.
+func TestTruncateForMessage_BoundsRemoteText(t *testing.T) {
+	short := "ssh: Could not resolve hostname gpu01"
+	if got := truncateForMessage(short); got != short {
+		t.Errorf("truncateForMessage shortened a short message: %q", got)
+	}
+
+	long := strings.Repeat("A", maxStderrInMessage*3)
+	got := truncateForMessage(long)
+	if len(got) > maxStderrInMessage+len("…[truncated]") {
+		t.Errorf("truncated length %d exceeds the cap", len(got))
+	}
+	if !strings.HasSuffix(got, "…[truncated]") {
+		t.Errorf("truncated message lacks its marker: ...%q", got[max(0, len(got)-20):])
+	}
+}
+
+// TestTruncateForMessage_CutsOnARuneBoundary — truncation must not manufacture
+// invalid UTF-8, which is exactly the class of bug the C1 handling above exists
+// to deal with.
+func TestTruncateForMessage_CutsOnARuneBoundary(t *testing.T) {
+	// Multi-byte runes straddling the cut point.
+	got := truncateForMessage(strings.Repeat("é", maxStderrInMessage))
+	if !utf8.ValidString(got) {
+		t.Errorf("truncateForMessage produced invalid UTF-8: %q", got)
 	}
 }

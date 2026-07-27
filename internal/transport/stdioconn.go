@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 )
 
 // readChunk is the pump's buffer size. IPC frames are usually far smaller;
@@ -316,9 +317,33 @@ func (c *stdioConn) LinkErr() error {
 	// terminal, so unsanitized it is an escape-sequence injection into the
 	// operator's local terminal (OSC 52 clipboard write, UI spoofing).
 	if msg := strings.TrimSpace(sanitizeForTerminal(c.Stderr())); msg != "" {
-		return fmt.Errorf("%s: %s", c.desc, msg)
+		return fmt.Errorf("%s: %s", c.desc, truncateForMessage(msg))
 	}
 	return fmt.Errorf("%s: %w", c.desc, err)
+}
+
+// maxStderrInMessage bounds how much captured stderr an error message may
+// carry. ssh's real diagnostics are one or two lines; anything beyond this is
+// a remote shell's rc-file noise or a deliberate flood.
+const maxStderrInMessage = 2000
+
+// truncateForMessage caps remote-influenced text at a length a terminal can
+// reasonably show.
+//
+// The buffer this draws from is filled by the far side (ssh relays the remote
+// command's fd 2 onto its own stderr) and is otherwise unbounded, so without a
+// cap a hostile or merely chatty host could push megabytes through a single
+// error line. Cut on a rune boundary so the truncation cannot itself emit
+// invalid UTF-8.
+func truncateForMessage(s string) string {
+	if len(s) <= maxStderrInMessage {
+		return s
+	}
+	cut := maxStderrInMessage
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "…[truncated]"
 }
 
 // sanitizeForTerminal strips control bytes that a terminal would interpret,

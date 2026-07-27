@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -16,6 +17,7 @@ import (
 	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/logger"
 	"github.com/artyomsv/quil/internal/plugin"
+	"github.com/artyomsv/quil/internal/transport"
 	"github.com/artyomsv/quil/internal/tui"
 	versionpkg "github.com/artyomsv/quil/internal/version"
 )
@@ -87,6 +89,16 @@ func main() {
 		}
 	}
 
+	// --remote binds this TUI to a daemon on another host. Parsed before the
+	// subcommand switch so the lifecycle guards are armed for everything below.
+	if dest, rest, err := parseRemoteFlag(os.Args); err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	} else if dest != "" {
+		remoteDest = dest
+		os.Args = rest
+	}
+
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "daemon":
@@ -99,6 +111,10 @@ func main() {
 			fmt.Println("quil v" + version)
 			return
 		case "restart":
+			if remoteMode() {
+				fmt.Fprintf(os.Stderr, "quil restart: not available with --remote (target: %s)\n", remoteDest)
+				os.Exit(1)
+			}
 			// Recovery path for a hung/wedged daemon: stop with bounded
 			// escalation, start fresh, then drop into the normal TUI.
 			restartDaemonCmd()
@@ -117,6 +133,12 @@ func main() {
 }
 
 func handleDaemon() {
+	if remoteMode() {
+		fmt.Fprintf(os.Stderr, "quil daemon: not available with --remote (target: %s)\n"+
+			"Manage the remote daemon over ssh, or drop --remote to manage the local one.\n", remoteDest)
+		os.Exit(1)
+	}
+
 	if len(os.Args) < 3 {
 		fmt.Fprintln(os.Stderr, "usage: quil daemon [start|stop|restart|status]")
 		os.Exit(1)
@@ -311,17 +333,37 @@ func launchTUI() {
 	sockPath := config.SocketPath()
 	log.Printf("config loaded, AutoStart=%v", cfg.Daemon.AutoStart)
 
-	// Try connecting; auto-start if needed
-
-	client, err := ipc.NewClient(sockPath)
+	var client *ipc.Client
+	var err error
 	spawnedButNotReady := false
-	if err != nil && cfg.Daemon.AutoStart {
-		log.Printf("daemon not reachable, auto-starting...")
-		pid := startDaemon(true) // quiet — no stdout during TUI launch
-		if waitForDaemonReady(sockPath, pid) {
-			client, err = ipc.NewClient(sockPath)
-		} else {
-			spawnedButNotReady = true
+
+	if remoteMode() {
+		// No local daemon is involved: `quil --stdio` on the far side ensures
+		// the remote one. Batch=false so this first dial can prompt for a
+		// host-key fingerprint or key passphrase — it runs before tea.NewProgram
+		// takes the terminal.
+		log.Printf("remote mode: dialing %s over ssh", remoteDest)
+		client, err = ipc.NewClientWithDialer(
+			context.Background(),
+			transport.SSH(remoteDest, transport.SSHOptions{}),
+		)
+		if err != nil {
+			log.Printf("cannot connect to remote daemon %s: %v", remoteDest, err)
+			fmt.Fprintf(os.Stderr, "cannot connect to %s: %v\n"+
+				"Check that you can run: ssh %s quil --stdio\n", remoteDest, err, remoteDest)
+			os.Exit(1)
+		}
+	} else {
+		// Try connecting; auto-start if needed
+		client, err = ipc.NewClient(sockPath)
+		if err != nil && cfg.Daemon.AutoStart {
+			log.Printf("daemon not reachable, auto-starting...")
+			pid := startDaemon(true) // quiet — no stdout during TUI launch
+			if waitForDaemonReady(sockPath, pid) {
+				client, err = ipc.NewClient(sockPath)
+			} else {
+				spawnedButNotReady = true
+			}
 		}
 	}
 	if err != nil {

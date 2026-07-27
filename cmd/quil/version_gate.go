@@ -49,6 +49,30 @@ func gateVersionCheck(client *ipc.Client) *ipc.Client {
 		return nil
 
 	default:
+		if remoteMode() {
+			// The restart path below manages the LOCAL daemon and is guarded
+			// against remote mode, so there is nothing to offer here — say what
+			// is wrong and how to fix it instead of prompting for an action
+			// that cannot run.
+			reported := res.DaemonVersion
+			if reported == "" {
+				reported = "unknown"
+			}
+			client.Close()
+			fmt.Fprintf(os.Stderr,
+				"\n"+
+					"  Version mismatch with the remote daemon.\n"+
+					"\n"+
+					"    this TUI:            %s\n"+
+					"    daemon at %s: %s\n"+
+					"\n"+
+					"  Upgrade one of them so both run the same version, then try again.\n"+
+					"  To upgrade the remote daemon:\n"+
+					"    ssh %s 'quil daemon restart'\n"+
+					"\n",
+				versionpkg.Current(), remoteDest, reported, remoteDest)
+			os.Exit(1)
+		}
 		// Either TUI > daemon, or the daemon timed out / returned an
 		// unparseable version (treated as "pre-versioning daemon", same
 		// handling: offer to restart).

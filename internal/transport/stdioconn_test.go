@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 )
@@ -224,5 +225,89 @@ func TestStdioConn_Close_UnblocksPumpBlockedOnSend(t *testing.T) {
 	case <-drained:
 	case <-time.After(time.Second):
 		t.Fatal("pump never exited after Close (readCh stayed open) — goroutine leak")
+	}
+}
+
+// --- LinkErr -----------------------------------------------------------
+//
+// LinkErr is what lets a caller tell "the ssh channel died" apart from "the
+// daemon answered badly". Both reach the version gate as a failed read, and
+// without this distinction an unreachable host is reported as a version
+// mismatch.
+
+func TestStdioConn_LinkErr_NilWhileLinkIsHealthy(t *testing.T) {
+	c, _, _ := pipePair(t)
+
+	if err := c.LinkErr(); err != nil {
+		t.Errorf("LinkErr() on a live conn = %v, want nil", err)
+	}
+}
+
+// drainUntilError reads until the conn reports an error, which guarantees the
+// pump has already recorded pumpErr (pump sets it before its deferred
+// close(readCh) runs, and Read only observes the closed channel after that).
+// Deterministic, so the test needs no sleep.
+func drainUntilError(t *testing.T, c *stdioConn) error {
+	t.Helper()
+	buf := make([]byte, 64)
+	for i := 0; i < 100; i++ {
+		if _, err := c.Read(buf); err != nil {
+			return err
+		}
+	}
+	t.Fatal("conn never reported a read error")
+	return nil
+}
+
+func TestStdioConn_LinkErr_ReportsFailureAfterChildStdoutCloses(t *testing.T) {
+	c, feed, _ := pipePair(t)
+
+	// Closing the far end is what an exiting ssh process does to our read pipe.
+	feed.Close()
+	drainUntilError(t, c)
+
+	err := c.LinkErr()
+	if err == nil {
+		t.Fatal("LinkErr() after the pipe closed = nil, want an error")
+	}
+	if !strings.Contains(err.Error(), "test") {
+		t.Errorf("LinkErr() = %q, want it to name the destination %q", err, "test")
+	}
+}
+
+// TestStdioConn_LinkErr_PrefersCapturedStderr pins that ssh's own diagnosis
+// wins over our generic pipe error. "Could not resolve hostname" tells the user
+// what to fix; "read |0: EOF" does not.
+func TestStdioConn_LinkErr_PrefersCapturedStderr(t *testing.T) {
+	c, feed, _ := pipePair(t)
+
+	const sshSays = "ssh: Could not resolve hostname gpu01: Name or service not known"
+	c.stderr = &lockedBuffer{}
+	c.stderr.Write([]byte(sshSays + "\n"))
+
+	feed.Close()
+	drainUntilError(t, c)
+
+	err := c.LinkErr()
+	if err == nil {
+		t.Fatal("LinkErr() = nil, want an error")
+	}
+	if !strings.Contains(err.Error(), sshSays) {
+		t.Errorf("LinkErr() = %q, want it to carry ssh's message %q", err, sshSays)
+	}
+	if strings.Contains(err.Error(), "EOF") {
+		t.Errorf("LinkErr() = %q, want ssh's message INSTEAD of the raw pipe error", err)
+	}
+}
+
+// TestStdioConn_LinkErr_SatisfiesLinkStatus guards the seam the version gate
+// type-asserts on: a change to the method set here breaks that call site
+// silently, because a failed assertion just leaves the check disabled.
+func TestStdioConn_LinkErr_SatisfiesLinkStatus(t *testing.T) {
+	c, _, _ := pipePair(t)
+
+	var conn net.Conn = c
+	if _, ok := conn.(LinkStatus); !ok {
+		t.Error("a stdioConn behind a net.Conn no longer satisfies LinkStatus")
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSSHArgs_PassesDestinationVerbatim(t *testing.T) {
@@ -144,5 +145,58 @@ func TestSSH_MissingBinary_ReturnsError(t *testing.T) {
 	dial := SSH("gpu01", SSHOptions{SSHPath: "definitely-not-a-real-ssh-binary"})
 	if _, err := dial(context.Background()); err == nil {
 		t.Fatal("dial with a bogus ssh path succeeded, want error")
+	}
+}
+
+// TestSSHArgs_BoundsTheConnectHandshake pins that the TCP handshake is always
+// bounded. Without it ssh inherits the OS connect timeout, which for a silently
+// dropped SYN is minutes — and the dial runs before the TUI starts, so there is
+// no UI to interrupt and no deadline on the call site.
+func TestSSHArgs_BoundsTheConnectHandshake(t *testing.T) {
+	args := sshArgs("gpu01", SSHOptions{})
+	found := false
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "-o" && strings.HasPrefix(args[i+1], "ConnectTimeout=") {
+			found = true
+			if args[i+1] == "ConnectTimeout=0" {
+				t.Errorf("ConnectTimeout=0 means NO timeout to OpenSSH, got %q", args[i+1])
+			}
+		}
+	}
+	if !found {
+		t.Errorf("no (\"-o\", \"ConnectTimeout=...\") pair in %v", args)
+	}
+}
+
+func TestConnectTimeoutSecs(t *testing.T) {
+	tests := []struct {
+		name string
+		in   time.Duration
+		want int
+	}{
+		{"zero uses the default", 0, int(defaultConnectTimeout / time.Second)},
+		{"negative uses the default", -5 * time.Second, int(defaultConnectTimeout / time.Second)},
+		{"whole seconds pass through", 30 * time.Second, 30},
+		{"truncates to whole seconds", 2500 * time.Millisecond, 2},
+		// A sub-second request must never become 0 — OpenSSH reads
+		// ConnectTimeout=0 as "no timeout", inverting the caller's intent.
+		{"sub-second rounds up to one", 400 * time.Millisecond, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := connectTimeoutSecs(tt.in); got != tt.want {
+				t.Errorf("connectTimeoutSecs(%v) = %d, want %d", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestSSHArgs_ConnectTimeoutHonoursTheCaller guards the seam Phase 2's
+// reconnect path needs: a shorter bound for an unattended retry.
+func TestSSHArgs_ConnectTimeoutHonoursTheCaller(t *testing.T) {
+	args := sshArgs("gpu01", SSHOptions{ConnectTimeout: 3 * time.Second})
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "ConnectTimeout=3") {
+		t.Errorf("caller's ConnectTimeout not honoured in %q", joined)
 	}
 }

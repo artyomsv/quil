@@ -387,7 +387,18 @@ via `[update]` in `config.toml`; About (F1) has a manual "Update now".
 
 **No network port is opened on the remote host.** Quil runs `ssh -T gpu01 "quil --stdio"` and speaks its normal length-prefixed protocol over that single channel, so anything SSH can reach works: a bastion behind `ProxyJump`, a Tailscale or WireGuard address, a box on the public internet. The remote daemon is started on demand if it isn't already running.
 
-The destination string is passed to `ssh` verbatim, so your `~/.ssh/config` keeps working unchanged — `Host` aliases, `ProxyJump`, `ControlMaster` multiplexing, per-host `IdentityFile`, hardware tokens (FIDO2/PKCS#11), and SSH certificates all apply. Quil layers on only two things: keepalives (`ServerAliveInterval=15`, `ServerAliveCountMax=3`) so a dead link is detected rather than hanging, and a set of options it forces **off** for this connection regardless of your config — agent forwarding, X11 forwarding, port forwarding, and local-command execution. The remote side never needs them, and the daemon protocol is powerful enough (it spawns processes) that reducing what a compromised remote can reach back through is worth the loss of flexibility.
+The destination string is passed to `ssh` verbatim, so your `~/.ssh/config` keeps working unchanged — `Host` aliases, `ProxyJump`, `ControlMaster` multiplexing, per-host `IdentityFile`, hardware tokens (FIDO2/PKCS#11), and SSH certificates all apply. Quil layers on only two things: bounded timeouts, and a set of options it forces **off** for this connection regardless of your config — agent forwarding, X11 forwarding, port forwarding, and local-command execution. The remote side never needs them, and the daemon protocol is powerful enough (it spawns processes) that reducing what a compromised remote can reach back through is worth the loss of flexibility.
+
+Both ends of the connection's life are bounded, because an unbounded one has nowhere to report to — the dial happens before the TUI starts, so there is no interface to press Ctrl+C in:
+
+| Option | Value | Bounds |
+|---|---|---|
+| `ConnectTimeout` | 15s | The TCP handshake. Without it, a silently-dropped SYN inherits the OS connect timeout — minutes. |
+| `ServerAliveInterval` / `ServerAliveCountMax` | 15s / 3 | An established link going dead. Detected in ~45s. This is the only liveness check; there is no application-layer heartbeat. |
+
+These are set on the command line, which OpenSSH resolves before any config file ("first obtained value wins"), so they override a `ConnectTimeout` in your own `ssh_config`. That is deliberate: a bounded, diagnosable failure beats an unbounded hang.
+
+When the connection fails, Quil reports it as a connection failure and prints the exact command to reproduce it by hand (`ssh <host> quil --stdio`, which should print nothing and stay open). It does **not** report it as a version mismatch — an unreachable host and an out-of-date daemon look identical from the client's side unless the transport is asked directly, and conflating them sent users off upgrading binaries that were fine.
 
 Commands that manage a daemon's lifecycle refuse under `--remote` instead of silently acting on the wrong machine:
 

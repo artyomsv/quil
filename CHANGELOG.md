@@ -19,11 +19,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The destination is handed to `ssh` verbatim, so everything in your
   `~/.ssh/config` still applies: `Host` aliases, `ProxyJump`, `ControlMaster`
   multiplexing, per-host keys, hardware tokens and SSH certificates. Quil adds
-  only keepalives and a set of hardening options it forces off — agent
-  forwarding, X11 forwarding, port forwarding and local-command execution are
-  all disabled for this connection regardless of what your config says, because
-  the remote side never needs them. The remote daemon is started on demand if it
-  is not already running.
+  only timeouts and a set of hardening options it forces off — agent forwarding,
+  X11 forwarding, port forwarding and local-command execution are all disabled
+  for this connection regardless of what your config says, because the remote
+  side never needs them. The remote daemon is started on demand if it is not
+  already running.
+
+  Both ends of the connection's life are bounded, so it fails fast and visibly
+  rather than hanging. Connecting to a host that silently drops packets gives up
+  after 15 seconds instead of inheriting the operating system's multi-minute
+  connect timeout, and once attached, keepalives detect a dead link within about
+  45 seconds. When the connection cannot be made at all, Quil says so and shows
+  you the exact command to test by hand (`ssh <host> quil --stdio`) rather than
+  reporting it as a version problem.
 
   Commands that manage a daemon's lifecycle refuse to run under `--remote`
   rather than silently acting on the wrong machine: `quil restart`,

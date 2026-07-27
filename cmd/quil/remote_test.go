@@ -2,6 +2,8 @@ package main
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -80,3 +82,51 @@ func TestStartDaemon_RemoteMode_Exits(t *testing.T) {
 }
 
 var errTestExit = errors.New("test exit")
+
+// TestStartDaemon_RemoteMode_ExitFnReturns_DoesNotProceed pins the guard's
+// structural safety, independent of exitFn's behavior. TestStartDaemon_
+// RemoteMode_Exits above proves the guard fires when exitFn panics (what
+// os.Exit effectively does — it never returns control to the caller). This
+// test proves the guard ALSO holds when exitFn is a double that simply
+// records the call and returns, which is a completely reasonable double for
+// someone to write. Without the explicit `return` after exitFn(1) in the
+// guard, execution would fall through into the spawn path — os.MkdirAll on
+// config.QuilDir(), then exec.Command against config.SocketPath() — which in
+// remote mode is the LOCAL machine's daemon, not the one the session is
+// attached to. Do not delete this test.
+func TestStartDaemon_RemoteMode_ExitFnReturns_DoesNotProceed(t *testing.T) {
+	withRemote(t, "gpu01")
+
+	// Isolate config.QuilDir() so that even if the guard fails to stop
+	// execution, the spawn path's os.MkdirAll/exec.Command land in a
+	// throwaway temp dir instead of the developer's real ~/.quil/.
+	quilDir := filepath.Join(t.TempDir(), "quilhome")
+	t.Setenv("QUIL_HOME", quilDir)
+
+	exitCalls := 0
+	prev := exitFn
+	exitFn = func(c int) { exitCalls++ } // records and RETURNS, unlike os.Exit
+	t.Cleanup(func() { exitFn = prev })
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("startDaemon panicked (%v) — it proceeded past the guard into the spawn path", r)
+		}
+	}()
+
+	got := startDaemon(true)
+
+	if exitCalls != 1 {
+		t.Fatalf("exitFn called %d times, want 1", exitCalls)
+	}
+	// The spawn path — reached only if the guard fell through — creates
+	// quilDir via os.MkdirAll before it ever touches the daemon binary. Its
+	// absence is the observable proof that startDaemon returned at the guard
+	// instead of continuing into the spawn path.
+	if _, err := os.Stat(quilDir); !os.IsNotExist(err) {
+		t.Fatalf("quilDir %q was created (stat err = %v) — startDaemon proceeded past the guard", quilDir, err)
+	}
+	if got == 0 {
+		t.Error(`startDaemon returned 0, which asserts "daemon already listening" — false after a remote-mode refusal`)
+	}
+}

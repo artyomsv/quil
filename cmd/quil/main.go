@@ -180,6 +180,18 @@ func startDaemon(quiet bool) int {
 		// that forgets would start a daemon on the wrong machine.
 		fmt.Fprintln(os.Stderr, "internal error: startDaemon called while attached to a remote daemon")
 		exitFn(1)
+		// Unreachable in production: exitFn is os.Exit, which never returns.
+		// The explicit return exists so a test double that DOES return (a
+		// perfectly reasonable double to write) cannot fall through into the
+		// spawn path below and start a real daemon against
+		// config.SocketPath() — the LOCAL machine's, not the one the remote
+		// session is attached to. -1 is not a real PID: 0 already means "a
+		// daemon was already listening, nothing spawned" (see the doc comment
+		// above), and asserting that here would be false — nothing was
+		// checked. Callers' pid > 0 gates (waitForDaemonReady, processProbe)
+		// treat -1 the same as "no process to watch", which is the true
+		// state.
+		return -1
 	}
 	sockPath := config.SocketPath()
 

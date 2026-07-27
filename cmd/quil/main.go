@@ -104,6 +104,9 @@ func main() {
 			restartDaemonCmd()
 			launchTUI()
 			return
+		case "--stdio":
+			runStdio()
+			return
 		case "status":
 			runStatus(os.Args[2:])
 			return

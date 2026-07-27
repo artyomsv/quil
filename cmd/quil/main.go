@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -124,6 +125,18 @@ func main() {
 			runStdio()
 			return
 		case "status":
+			if remoteMode() {
+				// runStatus resolves config.SocketPath(), daemonPID() and
+				// config.PidPath() — all local. Without this it answers
+				// confidently about THIS machine while naming none of it, and
+				// --json emits {"running":true,...} with no field saying which
+				// host replied. Refused rather than silently wrong; reading the
+				// remote status over the transport is Phase 3 work.
+				fmt.Fprintf(os.Stderr, "quil status: not available with --remote (target: %s)\n"+
+					"Run it on the remote host instead:\n"+
+					"    ssh %s quil status\n", remoteDest, remoteDest)
+				os.Exit(1)
+			}
 			runStatus(os.Args[2:])
 			return
 		}
@@ -343,10 +356,35 @@ func launchTUI() {
 		// host-key fingerprint or key passphrase — it runs before tea.NewProgram
 		// takes the terminal.
 		log.Printf("remote mode: dialing %s over ssh", remoteDest)
+		// Keep hold of the transport so the version gate can tell a dead ssh
+		// channel from a daemon that answered badly. The dial below only fails
+		// when ssh could not be STARTED (binary missing, pipe exhaustion) —
+		// every network-level failure survives the dial and surfaces later.
+		var link transport.LinkStatus
+		dialSSH := transport.SSH(remoteDest, transport.SSHOptions{})
 		client, err = ipc.NewClientWithDialer(
 			context.Background(),
-			transport.SSH(remoteDest, transport.SSHOptions{}),
+			func(ctx context.Context) (net.Conn, error) {
+				conn, dialErr := dialSSH(ctx)
+				if conn != nil {
+					ls, ok := conn.(transport.LinkStatus)
+					if !ok {
+						// Not fatal, but it silently disables the only check
+						// that tells "unreachable host" from "version
+						// mismatch", so it must not pass unnoticed. A
+						// compile-time assertion covers *stdioConn itself;
+						// this catches a future wrapper type around it.
+						log.Printf("remote: transport %T does not report link status — link diagnosis disabled", conn)
+					}
+					link = ls
+				}
+				return conn, dialErr
+			},
 		)
+		if link != nil {
+			remoteLinkErrFn = link.LinkErr
+			remoteLinkEstablishedFn = link.Established
+		}
 		if err != nil {
 			log.Printf("cannot connect to remote daemon %s: %v", remoteDest, err)
 			fmt.Fprintf(os.Stderr, "cannot connect to %s: %v\n"+
@@ -411,6 +449,10 @@ func launchTUI() {
 	restoreWindowSize()
 
 	model := tui.NewModel(client, cfg, version, reg, stalePlugins)
+	// Drives the [remote <host>] status-bar indicator and suppresses the
+	// update controls, which are wired to local disk and would target the
+	// wrong machine. Empty for a local session.
+	model.SetRemoteDest(remoteDest)
 	p := tea.NewProgram(model)
 	finalModel, err := p.Run()
 	if err != nil {
@@ -434,7 +476,12 @@ func launchTUI() {
 		// About → Update now / notice → Update now: the confirm dialog
 		// already asked, so apply pre-confirmed. The respawned TUI runs a
 		// fresh session; this process waits as a wrapper.
-		if m.ApplyUpdateRequested() {
+		// The TUI suppresses every route to this flag in remote mode, since the
+		// banner it would come from describes the REMOTE daemon's staging dir
+		// while the apply reads the LOCAL one. Re-checked here rather than
+		// trusted: this is the branch that swaps binaries on disk, and a
+		// belt-and-braces guard on it costs one comparison.
+		if m.ApplyUpdateRequested() && !remoteMode() {
 			if maybeApplyStagedUpdate(true) {
 				return
 			}

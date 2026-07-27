@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -214,5 +216,86 @@ func TestStartDaemon_SpawnFailure_ExitFnReturns_DoesNotProceed(t *testing.T) {
 	}
 	if got == 0 {
 		t.Error(`startDaemon returned 0, which asserts "daemon already listening" — false after a spawn failure`)
+	}
+}
+
+// --- remote link failure ------------------------------------------------
+
+// TestRemoteLinkError_NilWhenNoRemoteDialHappened pins that the helper is safe
+// in a local session, where launchTUI never installs a probe. The version gate
+// calls it unconditionally inside its remote branch, and a nil-func panic there
+// would replace a diagnosable error with a stack trace.
+func TestRemoteLinkError_NilWhenNoRemoteDialHappened(t *testing.T) {
+	prev := remoteLinkErrFn
+	remoteLinkErrFn = nil
+	t.Cleanup(func() { remoteLinkErrFn = prev })
+
+	if err := remoteLinkError(); err != nil {
+		t.Errorf("remoteLinkError() with no probe installed = %v, want nil", err)
+	}
+}
+
+func TestRemoteLinkError_ReportsWhatTheProbeReports(t *testing.T) {
+	prev := remoteLinkErrFn
+	t.Cleanup(func() { remoteLinkErrFn = prev })
+
+	tests := []struct {
+		name  string
+		probe func() error
+		want  error
+	}{
+		{"healthy link", func() error { return nil }, nil},
+		{"dead link", func() error { return errLinkTest }, errLinkTest},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			remoteLinkErrFn = tt.probe
+			got := remoteLinkError()
+			if !errors.Is(got, tt.want) {
+				t.Errorf("remoteLinkError() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+var errLinkTest = errors.New("gpu01: ssh: Could not resolve hostname gpu01")
+
+// TestReportRemoteLinkFailure_NamesTheHostAndTheCheck pins the two things the
+// message exists to convey: which host failed, and the exact command the user
+// should run to reproduce it outside Quil. A version-mismatch message was
+// printed here before, which sent users to upgrade binaries that were fine.
+func TestReportRemoteLinkFailure_NamesTheHostAndTheCheck(t *testing.T) {
+	prevDest := remoteDest
+	remoteDest = "gpu01"
+	t.Cleanup(func() { remoteDest = prevDest })
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	prevStderr := os.Stderr
+	os.Stderr = w
+	reportRemoteLinkFailure(errLinkTest)
+	os.Stderr = prevStderr
+	w.Close()
+
+	var buf bytes.Buffer
+	if _, err := buf.ReadFrom(r); err != nil {
+		t.Fatalf("read captured stderr: %v", err)
+	}
+	out := buf.String()
+
+	for _, want := range []string{
+		"gpu01",
+		"ssh gpu01 quil --stdio",
+		errLinkTest.Error(),
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("message is missing %q; got:\n%s", want, out)
+		}
+	}
+	// The whole point of the fix: this is not a version problem.
+	if strings.Contains(strings.ToLower(out), "version mismatch") {
+		t.Errorf("message still blames a version mismatch; got:\n%s", out)
 	}
 }

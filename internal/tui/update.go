@@ -143,6 +143,14 @@ func (m *Model) noteWorkspaceState(update *ipc.UpdateInfo) {
 // only the informational disclaimer yields (spec: migration > update notice
 // > disclaimer — the disclaimer reappears next launch).
 func (m *Model) maybeShowUpdateNotice() {
+	// Never in remote mode: m.updateInfo comes from the REMOTE daemon, while
+	// accepting the notice applies a LOCAL staged update. Beyond offering the
+	// wrong action, showing it would also write the remote's LatestVersion
+	// into this machine's notified-version marker and suppress the genuine
+	// local notice for that version.
+	if m.RemoteMode() {
+		return
+	}
 	if !updateAvailable(m.updateInfo, m.version) {
 		return
 	}

@@ -31,6 +31,27 @@ const releasesURL = "https://github.com/artyomsv/quil/releases"
 func gateVersionCheck(client *ipc.Client) *ipc.Client {
 	res := versionHandshake(client)
 
+	// Checked BEFORE the switch, not inside the mismatch arm, for two reasons.
+	//
+	// A dead transport invalidates every branch below it — there is no daemon
+	// version to compare, no upgrade to offer, and nothing to attach to. And
+	// the switch's first arm returns early for any non-release build, so a
+	// check placed further down never runs on a dev binary at all: the gate
+	// would hand back a client whose connection is closed and the TUI would
+	// launch against it, showing a blank screen with no diagnosis. Since
+	// .claude/rules/dev-environment.md mandates dev builds for work on this
+	// repo, that is the path exercised most.
+	//
+	// Ordering note: this must also precede any client.Close() below. Close
+	// unblocks pump via <-done, which can return WITHOUT ever setting pumpErr,
+	// so LinkErr() would go nil and the misdiagnosis would return.
+	if remoteMode() && !remoteLinkEstablished() {
+		linkErr := remoteLinkError()
+		client.Close()
+		reportRemoteLinkFailure(linkErr)
+		os.Exit(1)
+	}
+
 	switch {
 	case res.ClientSkipped:
 		log.Printf("version gate: skipped (non-release TUI)")
@@ -50,6 +71,10 @@ func gateVersionCheck(client *ipc.Client) *ipc.Client {
 
 	default:
 		if remoteMode() {
+			// Reaching here means the link DID deliver bytes (the check above
+			// the switch would have exited otherwise), so a daemon really did
+			// answer and a version verdict is the right one.
+
 			// The restart path below manages the LOCAL daemon and is guarded
 			// against remote mode, so there is nothing to offer here — say what
 			// is wrong and how to fix it instead of prompting for an action

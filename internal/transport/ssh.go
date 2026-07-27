@@ -148,6 +148,9 @@ func SSH(dest string, opts SSHOptions) func(context.Context) (net.Conn, error) {
 
 		conn := newStdioConn(cmd, parentRead, parentWrite, dest)
 		if errBuf != nil {
+			// Safe post-construction write: this goroutine is the only one
+			// holding conn so far (it hasn't been returned yet), and pump()
+			// — already running — never touches stderr.
 			conn.stderr = errBuf
 		}
 		return conn, nil

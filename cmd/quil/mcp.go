@@ -129,6 +129,10 @@ func runMCP() {
 	// MCP uses stdout for JSON-RPC — redirect logs to stderr early
 	log.SetOutput(os.Stderr)
 
+	if refuseRemoteMCP() {
+		return
+	}
+
 	// Tie this bridge's lifetime to the AI client that spawned it. Stdin
 	// EOF alone is not a reliable termination signal on Windows (sibling
 	// processes inherit the pipe's write handle and keep it open past the
@@ -188,6 +192,39 @@ func runMCP() {
 		fmt.Fprintf(os.Stderr, "mcp server: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// refuseRemoteMCP reports whether this session is attached to a remote
+// daemon over --remote and, if so, prints a refusal to stderr and calls
+// exitFn(1). Extracted from runMCP as a testable seam: runMCP's very next
+// steps are watchParentExit (real OpenProcess/Getppid calls) and
+// connectToDaemon (a real socket dial), neither of which a test may trigger.
+//
+// Without this guard, connectToDaemon's ipc.NewClient(sockPath) succeeds
+// silently whenever a local daemon is already listening — the common case on
+// a developer machine that runs quil as its daily driver — so
+// startDaemon's own remote-mode refusal is never reached. The AI client then
+// believes it is driving --remote's host while every tool call
+// (create_pane, send_to_pane, destroy_pane, …) acts on the user's live local
+// session instead.
+//
+// The explicit bool return (checked by the caller) mirrors startDaemon's
+// remote guard in main.go: exitFn is swappable for tests, and a double that
+// records the call and returns (a reasonable double to write, unlike the
+// real os.Exit which never returns) must not let runMCP fall through into
+// connectToDaemon.
+func refuseRemoteMCP() bool {
+	if !remoteMode() {
+		return false
+	}
+	fmt.Fprintf(os.Stderr,
+		"quil mcp: refusing to start — this session is attached to --remote %s.\n"+
+			"The MCP bridge must run on the same host as the daemon it drives: run "+
+			"'quil mcp' on %s itself (e.g. inside a pane there), not by bridging to "+
+			"it from this machine.\n",
+		remoteDest, remoteDest)
+	exitFn(1)
+	return true
 }
 
 // connectToDaemon connects to the daemon socket, auto-starting it if needed.

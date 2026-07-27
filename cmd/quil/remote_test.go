@@ -83,6 +83,55 @@ func TestStartDaemon_RemoteMode_Exits(t *testing.T) {
 
 var errTestExit = errors.New("test exit")
 
+// TestRefuseRemoteMCP_RemoteMode_Refuses is a regression canary.
+//
+// Without it: connectToDaemon's ipc.NewClient(sockPath) succeeds silently
+// whenever a local daemon is already listening — the common case on a
+// developer machine that runs quil as its daily driver — so `quil --remote
+// gpu01 mcp` would attach the MCP bridge to the LOCAL daemon while the AI
+// client believes it is driving gpu01. startDaemon's own remote-mode refusal
+// is never reached because connectToDaemon never falls through to it.
+//
+// runMCP itself is not called here: it does real I/O (watchParentExit's
+// OpenProcess/Getppid calls, connectToDaemon's socket dial) that a test must
+// never trigger, so refuseRemoteMCP is the extracted, testable seam. Do not
+// delete this test.
+func TestRefuseRemoteMCP_RemoteMode_Refuses(t *testing.T) {
+	withRemote(t, "gpu01")
+
+	called := false
+	code := 0
+	prev := exitFn
+	exitFn = func(c int) { called = true; code = c } // records and returns, unlike os.Exit
+	t.Cleanup(func() { exitFn = prev })
+
+	if refused := refuseRemoteMCP(); !refused {
+		t.Fatal("refuseRemoteMCP() = false, want true in remote mode")
+	}
+	if !called {
+		t.Fatal("exitFn was not called")
+	}
+	if code == 0 {
+		t.Errorf("exit code = 0, want non-zero")
+	}
+}
+
+// TestRefuseRemoteMCP_LocalMode_NoOp pins the other half of the gate: a local
+// session must never be refused or touch exitFn.
+func TestRefuseRemoteMCP_LocalMode_NoOp(t *testing.T) {
+	called := false
+	prev := exitFn
+	exitFn = func(c int) { called = true }
+	t.Cleanup(func() { exitFn = prev })
+
+	if refused := refuseRemoteMCP(); refused {
+		t.Fatal("refuseRemoteMCP() = true in local mode, want false")
+	}
+	if called {
+		t.Error("exitFn was called in local mode, want no-op")
+	}
+}
+
 // TestStartDaemon_RemoteMode_ExitFnReturns_DoesNotProceed pins the guard's
 // structural safety, independent of exitFn's behavior. TestStartDaemon_
 // RemoteMode_Exits above proves the guard fires when exitFn panics (what

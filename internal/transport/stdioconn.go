@@ -62,6 +62,10 @@ type stdioConn struct {
 
 	// stderr holds ssh's captured diagnostics when the dial ran in batch mode.
 	// Nil on interactive dials, where stderr went straight to the terminal.
+	// Assigned by SSH (ssh.go) AFTER newStdioConn returns and pump() is
+	// already running — safe only because pump() never reads or writes this
+	// field; see newStdioConn's assignment site for the other half of the
+	// argument.
 	stderr *lockedBuffer
 }
 

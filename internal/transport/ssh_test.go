@@ -30,9 +30,14 @@ func TestSSHArgs_PassesDestinationVerbatim(t *testing.T) {
 	}
 }
 
+// TestSSHArgs_ForcesSecurityOptions asserts each forced option positionally —
+// a ("-o", want) adjacent pair — rather than via a space-joined Contains
+// check. Joining with spaces makes "-o ForwardAgent=no" (two argv elements,
+// what OpenSSH expects) indistinguishable from "-o ForwardAgent=no" produced
+// by a single malformed element (which OpenSSH would mis-parse): both join
+// to the same string, so a refactor that broke the pairing would still pass.
 func TestSSHArgs_ForcesSecurityOptions(t *testing.T) {
 	args := sshArgs("gpu01", SSHOptions{})
-	joined := strings.Join(args, " ")
 	for _, want := range []string{
 		"ForwardAgent=no",
 		"ForwardX11=no",
@@ -41,8 +46,15 @@ func TestSSHArgs_ForcesSecurityOptions(t *testing.T) {
 		"ClearAllForwardings=yes",
 		"RequestTTY=no",
 	} {
-		if !strings.Contains(joined, want) {
-			t.Errorf("missing forced option %q in %v", want, args)
+		found := false
+		for i := 0; i+1 < len(args); i++ {
+			if args[i] == "-o" && args[i+1] == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("missing forced option pair (\"-o\", %q) in %v", want, args)
 		}
 	}
 }

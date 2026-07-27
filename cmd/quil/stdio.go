@@ -46,6 +46,10 @@ func runStdio() {
 // from runStdio so it can be tested without real stdio or a real daemon.
 func proxyStdio(daemon net.Conn, in io.Reader, out io.Writer) {
 	done := make(chan struct{}, 2)
+	// io.Copy's errors are deliberately discarded: whichever direction ends
+	// first ends the session either way, and by then the process is tearing
+	// down — there is no distinct action to take on a copy error versus a
+	// clean EOF.
 	go func() { io.Copy(daemon, in); done <- struct{}{} }()
 	go func() { io.Copy(out, daemon); done <- struct{}{} }()
 	// One direction ending means the session is over; the deferred Close in

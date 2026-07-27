@@ -49,7 +49,10 @@ func gateVersionCheck(client *ipc.Client) *ipc.Client {
 		linkErr := remoteLinkError()
 		client.Close()
 		reportRemoteLinkFailure(linkErr)
-		os.Exit(1)
+		exitFn(1)
+		// exitFn is a swappable var, so the compiler cannot know it does not
+		// return; without this the guard would fall through into the switch.
+		return nil
 	}
 
 	switch {

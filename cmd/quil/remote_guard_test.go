@@ -122,6 +122,38 @@ func TestParseRemoteFlag_RejectsFlagShapedDestination(t *testing.T) {
 	}
 }
 
+// TestParseRemoteFlag_PositionIndependent pins that the flag is recognised
+// wherever it appears. main() parses it before the subcommand switch, so
+// `quil status --remote gpu01` must arm remote mode and still dispatch status —
+// otherwise a guard the user believed was active silently is not.
+func TestParseRemoteFlag_PositionIndependent(t *testing.T) {
+	tests := []struct {
+		name     string
+		args     []string
+		wantDest string
+		wantRest []string
+	}{
+		{"leading", []string{"quil", "--remote", "gpu01", "status"}, "gpu01", []string{"quil", "status"}},
+		{"after a subcommand", []string{"quil", "status", "--remote", "gpu01"}, "gpu01", []string{"quil", "status"}},
+		{"joined form after a subcommand", []string{"quil", "status", "--remote=gpu01"}, "gpu01", []string{"quil", "status"}},
+		{"between two args", []string{"quil", "daemon", "--remote", "gpu01", "stop"}, "gpu01", []string{"quil", "daemon", "stop"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dest, rest, err := parseRemoteFlag(tt.args)
+			if err != nil {
+				t.Fatalf("parseRemoteFlag(%v) = %v", tt.args, err)
+			}
+			if dest != tt.wantDest {
+				t.Errorf("dest = %q, want %q", dest, tt.wantDest)
+			}
+			if strings.Join(rest, " ") != strings.Join(tt.wantRest, " ") {
+				t.Errorf("rest = %v, want %v", rest, tt.wantRest)
+			}
+		})
+	}
+}
+
 // TestRemoteLinkEstablished_DefaultsTrueWithoutAProbe pins the fail-safe
 // direction. A missing probe means "cannot tell"; reporting unreachable there
 // would break every working session rather than mis-explain a broken one.

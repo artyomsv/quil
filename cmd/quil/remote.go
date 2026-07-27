@@ -85,8 +85,8 @@ func reportRemoteLinkFailure(linkErr error) {
 			"\n"+
 			"    %s\n"+
 			"\n"+
-			"  The ssh connection ended before the daemon answered, so this is a\n"+
-			"  connection problem (hostname, network, key, or host key) rather than\n"+
+			"  The daemon never answered over this ssh connection, so the problem is\n"+
+			"  reaching the host (hostname, network, key, or host key) rather than\n"+
 			"  anything about Quil itself. Any ssh error printed above is the cause.\n"+
 			"\n"+
 			"  Check that this works, then try again:\n"+

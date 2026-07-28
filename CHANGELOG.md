@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.43.0] - 2026-07-28
+
 ### Added
 - **Attach a Quil TUI to a daemon on another machine** over SSH:
   `quil --remote gpu01`. The panes, tabs and AI sessions live on the remote

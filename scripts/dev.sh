@@ -7,8 +7,65 @@ GO_IMAGE="golang:1.25-alpine"
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd -W 2>/dev/null || pwd)"
 DOCKER_RUN="docker run --rm -v ${PROJECT_DIR}:/src -v quil-gomod:/go/pkg/mod -w //src ${GO_IMAGE}"
 
+# refuse_if_dev_daemon_running stops a build that would silently half-finish.
+#
+# Neither platform lets you overwrite a running executable: Windows reports
+# "permission denied" and Linux returns ETXTBSY. The failure itself is not the
+# problem — the ORDER is. quil-dev is built before quild-dev in the chain below
+# and succeeds, so a held quild-dev leaves a NEW TUI beside a STALE daemon.
+# That pair fails the version gate at launch, which reads as a bug in whatever
+# you were working on rather than as a build that ran halfway.
+#
+# Scope is deliberately narrow: the PROJECT-ROOT .quil/quild.pid and nothing
+# else. The production daemon lives in ~/.quil and is never this script's
+# business (see .claude/rules/dev-environment.md); its binaries are installed
+# elsewhere, so they cannot block this build in any case.
+#
+# There is no override flag on purpose. "Build anyway" produces exactly the
+# mismatched pair this exists to prevent.
+refuse_if_dev_daemon_running() {
+  pidfile="$PROJECT_DIR/.quil/quild.pid"
+  [ -f "$pidfile" ] || return 0
+
+  pid="$(tr -d '[:space:]' < "$pidfile" 2>/dev/null || true)"
+  case "$pid" in
+    '' | *[!0-9]*) return 0 ;; # absent or unparseable: nothing to act on
+  esac
+
+  # A pid file outlives an unclean shutdown, and pids get reused, so confirm
+  # the process is both alive AND actually a quild before refusing.
+  case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN*)
+      running="$(tasklist //FI "PID eq $pid" //NH 2>/dev/null | grep -i quild || true)" ;;
+    *)
+      running="$(ps -p "$pid" -o comm= 2>/dev/null | grep -i quild || true)" ;;
+  esac
+  [ -n "$running" ] || return 0
+
+  devtui="$PROJECT_DIR/quil-dev.exe"
+  [ -f "$devtui" ] || devtui="$PROJECT_DIR/quil-dev"
+
+  cat >&2 <<EOF
+
+  A dev daemon from this project is running (pid $pid).
+
+  It holds quild-dev open, so this build would write quil-dev successfully and
+  then fail on quild-dev — leaving a new TUI beside a stale daemon.
+
+  Stop it, then build again:
+
+    QUIL_HOME="$PROJECT_DIR/.quil" "$devtui" daemon stop
+
+  Only $pidfile was inspected.
+  Your production daemon in ~/.quil is untouched.
+
+EOF
+  exit 1
+}
+
 case "${1:-help}" in
   build)
+    refuse_if_dev_daemon_running
     $DOCKER_RUN sh -c "\
       apk add --no-cache curl unzip >/dev/null 2>&1 && \
       sh scripts/fetch-conpty.sh && \
@@ -67,6 +124,9 @@ case "${1:-help}" in
     ;;
 
   clean)
+    # Same reason as build: rm cannot remove a held executable, and `set -e`
+    # would abort the cleanup partway through.
+    refuse_if_dev_daemon_running
     rm -f "$PROJECT_DIR/quil" "$PROJECT_DIR/quild" \
           "$PROJECT_DIR/quil.exe" "$PROJECT_DIR/quild.exe" \
           "$PROJECT_DIR/quil-dev.exe" "$PROJECT_DIR/quild-dev.exe" \

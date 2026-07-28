@@ -63,6 +63,8 @@ Ldflags: `buildDevMode` (auto-sets `QUIL_HOME`), `buildLogLevel` (overrides conf
 
 Go module cache is persisted in a Docker volume (`quil-gomod`) for fast repeated builds.
 
+`build` and `clean` refuse to run while a dev daemon from this project is alive (`refuse_if_dev_daemon_running` in `scripts/dev.sh`). Neither platform can overwrite a running executable — Windows reports "permission denied", Linux returns ETXTBSY — and the ORDER is what makes it dangerous rather than the failure: `quil-dev` is built before `quild-dev` and succeeds, so a held `quild-dev` leaves a NEW TUI beside a STALE daemon, which then fails the version gate at launch and reads as a bug in whatever you were working on. The check reads the PROJECT-ROOT `.quil/quild.pid` ONLY (never `~/.quil`), and confirms the pid is both alive and a `quild` before refusing, so a stale or malformed pid file never blocks a build. There is deliberately no override flag: "build anyway" produces exactly the mismatched pair it exists to prevent.
+
 ### Windows Icon
 
 `build` and `cross` embed the Quil brand mark as a Windows executable icon via `go-winres` (v0.3.3). Build assets live in `winres/` (icon PNGs + `winres.json` manifest with `RT_GROUP_ICON` + `RT_VERSION`). The build script installs `go-winres` inside the Docker container and generates `.syso` files in `cmd/quil/` and `cmd/quild/` before `go build`. The Go linker picks up `.syso` files automatically (Windows only — ignored on Linux/Darwin). Generated `.syso` files are gitignored.

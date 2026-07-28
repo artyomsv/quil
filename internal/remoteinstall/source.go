@@ -6,10 +6,13 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/artyomsv/quil/internal/update"
 )
@@ -86,10 +89,9 @@ func PackDir(dir string, p Platform) (Source, error) {
 	tw := tar.NewWriter(gz)
 
 	for _, name := range binaryNames {
-		path := filepath.Join(dir, name)
-		info, err := os.Stat(path)
+		path, info, err := findBinary(dir, name, p)
 		if err != nil {
-			return Source{}, fmt.Errorf("%s must contain %q built for %s: %w", dir, name, p, err)
+			return Source{}, err
 		}
 		if info.Size() > maxBinarySize {
 			return Source{}, fmt.Errorf("%s is %d bytes, larger than the %d-byte limit", path, info.Size(), maxBinarySize)
@@ -101,7 +103,16 @@ func PackDir(dir string, p Platform) (Source, error) {
 		if err := checkBinaryFormat(name, body, p); err != nil {
 			return Source{}, err
 		}
-		hdr := &tar.Header{Name: name, Mode: 0o755, Size: int64(len(body))}
+		// Typeflag explicitly: the zero value is the deprecated TypeRegA. A
+		// fixed ModTime keeps the archive byte-identical for identical inputs,
+		// which matters because its sha256 is what the remote re-verifies.
+		hdr := &tar.Header{
+			Name:     name,
+			Mode:     0o755,
+			Size:     int64(len(body)),
+			Typeflag: tar.TypeReg,
+			ModTime:  time.Unix(0, 0).UTC(),
+		}
 		if err := tw.WriteHeader(hdr); err != nil {
 			return Source{}, fmt.Errorf("write tar header for %s: %w", name, err)
 		}
@@ -121,13 +132,41 @@ func PackDir(dir string, p Platform) (Source, error) {
 	return Source{Archive: buf.Bytes(), SHA256: hex.EncodeToString(sum[:])}, nil
 }
 
-// checkBinaryFormat rejects a binary that obviously cannot run on the target.
+// findBinary locates one binary inside a --from-dir directory.
 //
-// Only the executable-format magic is checked, not the architecture: the point
-// is to catch the mistake --from-dir invites — pointing it at a local build
-// directory holding this machine's binaries — before pushing something whose
-// only symptom on the far side is exit 126 or 127, the latter being
-// indistinguishable from "not installed".
+// Two layouts are accepted, because the two obvious sources of binaries name
+// them differently: a release archive unpacks to plain `quil`/`quild`, while
+// this repo's own `scripts/dev.sh cross` writes `dist/quil-linux-arm64` and
+// friends. A dev build has no release to fetch, so --from-dir IS its only
+// route — requiring a manual rename first would make the documented workflow
+// fail on its first use.
+func findBinary(dir, name string, p Platform) (string, os.FileInfo, error) {
+	candidates := []string{
+		name,
+		fmt.Sprintf("%s-%s-%s", name, p.GOOS, p.GOARCH),
+	}
+	for _, candidate := range candidates {
+		path := filepath.Join(dir, candidate)
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			return path, info, nil
+		}
+	}
+	return "", nil, fmt.Errorf("%s contains no %s for %s: looked for %s",
+		dir, name, p, strings.Join(candidates, " and "))
+}
+
+// checkBinaryFormat rejects a binary that cannot run on the target.
+//
+// Both the executable format AND the CPU architecture are checked. Format alone
+// would miss the more likely --from-dir mistake of the two: same-OS, wrong-arch
+// binaries (amd64 build pushed to an arm64 server) are ELF either way, and
+// pushing them replaces BOTH remote binaries with ones that cannot exec. The
+// far-side symptom is exit 126 or 127 — and 127 is indistinguishable from "not
+// installed", so it presents as a loop rather than a failure.
+//
+// Unrecognised architectures pass rather than fail: this is a guard against an
+// obvious mistake, not an allowlist, and quil only publishes amd64 and arm64
+// (PlatformFor rejects everything else long before this runs).
 func checkBinaryFormat(name string, body []byte, p Platform) error {
 	if len(body) < 4 {
 		return fmt.Errorf("%s is too small to be an executable", name)
@@ -140,7 +179,69 @@ func checkBinaryFormat(name string, body []byte, p Platform) error {
 	case p.GOOS == "darwin" && !isMachO(body):
 		return fmt.Errorf("%s is not a Mach-O executable, but the remote host is %s", name, p)
 	}
+	if arch, ok := binaryArch(body); ok && arch != p.GOARCH {
+		return fmt.Errorf("%s is built for %s, but the remote host is %s", name, arch, p)
+	}
 	return nil
+}
+
+// ELF and Mach-O architecture identifiers, from their respective ABI specs.
+const (
+	elfMachineAMD64   = 0x3e   // EM_X86_64
+	elfMachineARM64   = 0xb7   // EM_AARCH64
+	machoCPUTypeAMD64 = 0x01000007
+	machoCPUTypeARM64 = 0x0100000c
+)
+
+// binaryArch reports the GOARCH an executable targets. ok is false when the
+// architecture cannot be determined — a truncated header, a format not handled
+// here, or a universal Mach-O binary, which carries several at once and so
+// cannot be wrong about any single one.
+func binaryArch(body []byte) (arch string, ok bool) {
+	switch {
+	case bytes.HasPrefix(body, []byte("\x7fELF")):
+		// e_machine is a 2-byte field at offset 0x12, in the byte order named
+		// by EI_DATA (e_ident[5]): 1 little-endian, 2 big-endian.
+		if len(body) < 0x14 {
+			return "", false
+		}
+		var machine uint16
+		switch body[5] {
+		case 1:
+			machine = binary.LittleEndian.Uint16(body[0x12:0x14])
+		case 2:
+			machine = binary.BigEndian.Uint16(body[0x12:0x14])
+		default:
+			return "", false
+		}
+		switch machine {
+		case elfMachineAMD64:
+			return "amd64", true
+		case elfMachineARM64:
+			return "arm64", true
+		}
+	case bytes.HasPrefix(body, []byte{0xcf, 0xfa, 0xed, 0xfe}): // 64-bit little-endian
+		if len(body) < 8 {
+			return "", false
+		}
+		switch binary.LittleEndian.Uint32(body[4:8]) {
+		case machoCPUTypeAMD64:
+			return "amd64", true
+		case machoCPUTypeARM64:
+			return "arm64", true
+		}
+	case bytes.HasPrefix(body, []byte{0xfe, 0xed, 0xfa, 0xcf}): // 64-bit big-endian
+		if len(body) < 8 {
+			return "", false
+		}
+		switch binary.BigEndian.Uint32(body[4:8]) {
+		case machoCPUTypeAMD64:
+			return "amd64", true
+		case machoCPUTypeARM64:
+			return "arm64", true
+		}
+	}
+	return "", false
 }
 
 // isMachO reports whether body starts with a Mach-O magic number: 64-bit

@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -199,14 +200,44 @@ func TestGateVersionCheck_ReadsExitCodeAfterClose(t *testing.T) {
 	offerRemoteInstallFn = func(string, remoteinstall.Remedy) bool { return false }
 	exitFn = func(int) {}
 
-	client := deadClient(t)
-	// The client's Close is not observable from here, so the ordering is pinned
-	// on the two seams that bracket it: LinkErr before, ExitCode after.
+	// Close is the event the ordering is ABOUT, so it has to appear in the
+	// trace. Recording only the two seams around it would pass unchanged if a
+	// refactor hoisted the ExitCode read above Close — precisely the bug this
+	// guards against.
+	client := clientRecordingClose(t, &order)
 	captureStderr(t, func() { gateVersionCheck(client) })
 
-	if len(order) != 2 || order[0] != "linkerr" || order[1] != "exitcode" {
-		t.Errorf("seam order = %v, want [linkerr exitcode]", order)
+	want := []string{"linkerr", "close", "exitcode"}
+	if !slices.Equal(order, want) {
+		t.Errorf("order = %v, want %v", order, want)
 	}
+}
+
+// recordingConn notes when the connection is closed, so a test can assert what
+// happens on either side of it.
+type recordingConn struct {
+	net.Conn
+	order *[]string
+}
+
+func (c recordingConn) Close() error {
+	*c.order = append(*c.order, "close")
+	return c.Conn.Close()
+}
+
+func clientRecordingClose(t *testing.T, order *[]string) *ipc.Client {
+	t.Helper()
+	ours, peer := net.Pipe()
+	peer.Close()
+
+	client, err := ipc.NewClientWithDialer(context.Background(),
+		func(context.Context) (net.Conn, error) {
+			return recordingConn{Conn: ours, order: order}, nil
+		})
+	if err != nil {
+		t.Fatalf("build client: %v", err)
+	}
+	return client
 }
 
 // TestGateVersionCheck_LocalSession_SkipsTheLinkGuard is the control: the guard

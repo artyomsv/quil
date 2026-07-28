@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"os"
 	"strings"
@@ -27,16 +28,34 @@ const remoteSetupTimeout = 10 * time.Minute
 // tested. Mirrors the existing seam pattern (stopDaemonForUpgradeFn).
 var isReleaseFn = versionpkg.IsRelease
 
-// remoteInstallAttempted records that this process already ran an install.
+// alreadyProvisionedFn reports whether a previous run already installed quil on
+// dest — i.e. whether a binary path was recorded for it. Swappable for tests.
 //
-// It is the loop guard. A binary that will not execute makes the remote shell
-// report 127 — the same status as "not installed" — so without it a launch
-// would install, retry, see 127 again, and offer to install forever.
-var remoteInstallAttempted bool
+// This is the loop guard, and it has to be PERSISTENT rather than a package
+// bool. A binary that will not execute makes the remote shell report 127, the
+// same status as "not installed", so the loop it guards against is: install →
+// exit → user re-runs → 127 again → offer again. Every iteration is a separate
+// process, so process-local state would never see the second one. A recorded
+// config entry survives exactly as long as the condition it describes.
+var alreadyProvisionedFn = func(dest string) bool {
+	cfg, err := config.Load(config.ConfigPath())
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return false
+	}
+	return cfg.RemoteBinary(dest) != ""
+}
 
 // offerRemoteInstallFn is offerRemoteInstall, swappable for tests of the
 // version gate.
 var offerRemoteInstallFn = offerRemoteInstall
+
+// errSetupAborted reports that the user declined at the confirmation prompt.
+//
+// A package-level sentinel matched with errors.Is, rather than a comparison on
+// the message text: the callers need to tell "user said no" (silent, exit 1)
+// from a real failure (print the cause), and a string comparison breaks the
+// moment anything wraps it with %w.
+var errSetupAborted = errors.New("aborted")
 
 // setupOptions are the flags of `quil remote setup`.
 type setupOptions struct {
@@ -102,22 +121,34 @@ func runRemoteSetup(dest string, opts setupOptions) error {
 
 	target := remoteinstall.PlanTarget(probe)
 
-	src, err := resolveSource(ctx, opts, probe.Platform)
+	// Resolve WHICH version before asking, but download it after. The version
+	// is knowable from the flags and this binary alone, so pulling ~15 MB
+	// before the user has agreed to anything wastes their bandwidth on a
+	// question they may answer "no" to — and on a slow link it also spends the
+	// deadline that the push still needs.
+	planned, err := plannedVersion(opts, probe.Platform)
 	if err != nil {
 		return err
 	}
 
 	upgrade := probe.ExistingPath != ""
-	if !opts.Yes && !confirmRemoteInstall(dest, probe, target, src, upgrade) {
-		return errors.New("aborted")
+	if !opts.Yes && !confirmRemoteInstall(dest, probe, target, planned, upgrade) {
+		return errSetupAborted
+	}
+
+	src, err := resolveSource(ctx, opts, probe.Platform)
+	if err != nil {
+		return err
 	}
 
 	// Stop the existing daemon before replacing its binary. Ordered before the
 	// push so the new quild is not left racing an old daemon that still owns
 	// every pane PTY.
+	var stopWarning string
 	if upgrade {
 		fmt.Fprintf(os.Stderr, "Stopping the remote daemon…\n")
-		if err := remoteinstall.StopRemoteDaemon(ctx, runner, probe.ExistingPath); err != nil {
+		stopWarning, err = remoteinstall.StopRemoteDaemon(ctx, runner, probe.ExistingPath)
+		if err != nil {
 			return err
 		}
 	}
@@ -137,33 +168,44 @@ func runRemoteSetup(dest string, opts setupOptions) error {
 		return nil
 	}
 
-	reportInstalled(dest, target, src)
+	reportInstalled(dest, target, src, stopWarning)
 	return nil
 }
 
-// resolveSource picks what to install.
+// plannedVersion reports what will be installed, without fetching anything, so
+// the consent prompt can name it. Returns "" for a --from-dir source, whose
+// contents carry no version metadata.
+func plannedVersion(opts setupOptions, p remoteinstall.Platform) (string, error) {
+	if opts.FromDir != "" {
+		return "", nil
+	}
+	if opts.Version != "" {
+		return opts.Version, nil
+	}
+	// A dev build has no matching release, and installing "latest" would
+	// produce a remote daemon this TUI then refuses to attach to — turning a
+	// missing binary into a version mismatch. Refuse and name both ways out
+	// rather than guess.
+	if !isReleaseFn() {
+		return "", fmt.Errorf(
+			"this is a development build (%s), which has no matching release to install.\n"+
+				"  Use --from-dir <path> to push locally built binaries for %s,\n"+
+				"  or --version <x.y.z> to install a published release",
+			versionpkg.Current(), p)
+	}
+	return versionpkg.Current(), nil
+}
+
+// resolveSource produces the bytes to push, after consent has been given.
 func resolveSource(ctx context.Context, opts setupOptions, p remoteinstall.Platform) (remoteinstall.Source, error) {
 	if opts.FromDir != "" {
 		fmt.Fprintf(os.Stderr, "Packing binaries from %s…\n", opts.FromDir)
 		return remoteinstall.PackDir(opts.FromDir, p)
 	}
-
-	version := opts.Version
-	if version == "" {
-		// A dev build has no matching release, and installing "latest" would
-		// produce a remote daemon this TUI then refuses to attach to — turning
-		// a missing binary into a version mismatch. Refuse and name both ways
-		// out rather than guess.
-		if !isReleaseFn() {
-			return remoteinstall.Source{}, fmt.Errorf(
-				"this is a development build (%s), which has no matching release to install.\n"+
-					"  Use --from-dir <path> to push locally built binaries for %s,\n"+
-					"  or --version <x.y.z> to install a published release",
-				versionpkg.Current(), p)
-		}
-		version = versionpkg.Current()
+	version, err := plannedVersion(opts, p)
+	if err != nil {
+		return remoteinstall.Source{}, err
 	}
-
 	fmt.Fprintf(os.Stderr, "Downloading quil %s for %s…\n", version, p)
 	return remoteinstall.FetchRelease(ctx, version, p)
 }
@@ -173,8 +215,8 @@ func resolveSource(ctx context.Context, opts setupOptions, p remoteinstall.Platf
 // Installing software on another machine is not something to do as a side
 // effect, so the prompt names the host, the exact path, the version, and — for
 // an upgrade — that the daemon stops and in-flight commands die with it.
-func confirmRemoteInstall(dest string, probe remoteinstall.Probe, target remoteinstall.Target, src remoteinstall.Source, upgrade bool) bool {
-	version := src.Version
+func confirmRemoteInstall(dest string, probe remoteinstall.Probe, target remoteinstall.Target, plannedVer string, upgrade bool) bool {
+	version := plannedVer
 	if version == "" {
 		version = "locally built binaries"
 	}
@@ -215,7 +257,12 @@ func confirmRemoteInstall(dest string, probe remoteinstall.Probe, target remotei
 func recordRemoteBinary(dest, binary string) error {
 	path := config.ConfigPath()
 	cfg, err := config.Load(path)
-	if err != nil {
+	// A missing config.toml is the NORMAL first-run state, not a failure —
+	// config.Load surfaces DecodeFile's fs.ErrNotExist verbatim. Treating it as
+	// one would break exactly the case this feature exists for: a fresh machine
+	// provisioning its first remote, where failing to record the path leaves the
+	// next launch failing identically to before the install.
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("load config: %w", err)
 	}
 	cfg.SetRemoteBinary(dest, binary)
@@ -225,9 +272,25 @@ func recordRemoteBinary(dest, binary string) error {
 	return nil
 }
 
-func reportInstalled(dest string, target remoteinstall.Target, src remoteinstall.Source) {
+func reportInstalled(dest string, target remoteinstall.Target, src remoteinstall.Source, stopWarning string) {
 	fmt.Fprintf(os.Stderr, "\n  Installed %s on %s.\n\n", displayVersion(src), dest)
 	fmt.Fprintf(os.Stderr, "    %s\n", target.BinaryPath())
+	if stopWarning != "" {
+		// The new binaries are on disk, but a daemon that refused to stop keeps
+		// running the OLD ones — renaming over a running executable leaves the
+		// process on its original inode. Say so, or the next attach reports a
+		// version mismatch the user believes they already fixed.
+		fmt.Fprintf(os.Stderr,
+			"\n  Warning: the remote daemon did not confirm shutdown:\n"+
+				"    %s\n"+
+				"  The new binaries are installed, but a daemon still running keeps\n"+
+				"  serving the old version. If attaching reports a version mismatch:\n"+
+				"    ssh %s %s\n",
+			stopWarning, dest,
+			// Quoted, so a path with an apostrophe yields a command the user can
+			// actually paste rather than one that breaks on the shell.
+			remoteinstall.ShellSingleQuote(remoteinstall.DaemonStopCommand(target.BinaryPath())))
+	}
 	if target.Shadowed != "" {
 		fmt.Fprintf(os.Stderr, "\n  %s is still present and is what a bare `ssh %s quil` finds.\n",
 			target.Shadowed, dest)
@@ -250,11 +313,13 @@ func offerRemoteInstall(dest string, remedy remoteinstall.Remedy) bool {
 		return false
 	}
 
-	// The loop guard. Reaching here a second time means the binaries we just
-	// installed do not execute on that host — almost always an architecture
-	// the probe read one way and the loader another (a 64-bit-kernel Raspberry
-	// Pi OS reports aarch64 while its userland is armhf).
-	if remoteInstallAttempted {
+	// The loop guard. A recorded path plus a shell that still cannot run the
+	// binary means a previous install landed and does not execute — almost
+	// always an architecture the probe read one way and the loader another (a
+	// 64-bit-kernel Raspberry Pi OS reports aarch64 while its userland is
+	// armhf). An upgrade is exempt: quil ran over there, so the binary is fine
+	// and a recorded path proves nothing about it.
+	if remedy != remoteinstall.RemedyUpgrade && alreadyProvisionedFn(dest) {
 		fmt.Fprintf(os.Stderr,
 			"\n"+
 				"  Quil was installed on %s, but will not run there.\n"+
@@ -276,11 +341,15 @@ func offerRemoteInstall(dest string, remedy remoteinstall.Remedy) bool {
 	case remoteinstall.RemedyReinstall:
 		fmt.Fprintf(os.Stderr, "\n  Quil is installed on %s but will not execute"+
 			" (wrong architecture).\n", dest)
+	case remoteinstall.RemedyUpgrade:
+		// Deliberately says nothing here: the caller has already printed both
+		// versions, and the probe is about to print the installed path. Claiming
+		// "not installed" about a daemon that just answered with its version
+		// would contradict the two lines either side of it.
 	}
 
-	remoteInstallAttempted = true
 	if err := runRemoteSetup(dest, setupOptions{}); err != nil {
-		if err.Error() == "aborted" {
+		if errors.Is(err, errSetupAborted) {
 			return false
 		}
 		fmt.Fprintf(os.Stderr, "\n  Install failed: %v\n", err)
@@ -311,6 +380,9 @@ func handleRemote() {
 	rest := args[1:]
 	for i := 0; i < len(rest); i++ {
 		switch arg := rest[i]; {
+		case arg == "--help" || arg == "-h":
+			printRemoteUsage()
+			return
 		case arg == "--yes" || arg == "-y":
 			opts.Yes = true
 		case arg == "--from-dir":
@@ -343,8 +415,15 @@ func handleRemote() {
 		}
 	}
 
+	// --from-dir wins over --version in resolveSource, so accepting both would
+	// silently ignore one of them. Say so instead.
+	if opts.FromDir != "" && opts.Version != "" {
+		fmt.Fprintln(os.Stderr, "quil remote setup: --from-dir and --version are mutually exclusive")
+		os.Exit(1)
+	}
+
 	if err := runRemoteSetup(dest, opts); err != nil {
-		if err.Error() == "aborted" {
+		if errors.Is(err, errSetupAborted) {
 			fmt.Fprintln(os.Stderr, "Aborted — nothing was written to the remote host.")
 			os.Exit(1)
 		}

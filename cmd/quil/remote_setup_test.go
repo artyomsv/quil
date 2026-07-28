@@ -9,11 +9,11 @@ import (
 
 func resetRemoteSetupState(t *testing.T) {
 	t.Helper()
-	prevAttempted := remoteInstallAttempted
+	prevProvisioned := alreadyProvisionedFn
 	prevIsRelease := isReleaseFn
 	prevDest := remoteDest
 	t.Cleanup(func() {
-		remoteInstallAttempted = prevAttempted
+		alreadyProvisionedFn = prevProvisioned
 		isReleaseFn = prevIsRelease
 		remoteDest = prevDest
 	})
@@ -43,11 +43,11 @@ func TestRunRemoteSetup_RejectsEmptyDestination(t *testing.T) {
 // A dev build has no matching release. Installing "latest" instead would turn
 // a missing binary into a version mismatch, so it must refuse and name both
 // ways out.
-func TestResolveSource_RefusesDevBuildWithoutASource(t *testing.T) {
+func TestPlannedVersion_RefusesDevBuildWithoutASource(t *testing.T) {
 	resetRemoteSetupState(t)
 	isReleaseFn = func() bool { return false }
 
-	_, err := resolveSource(t.Context(), setupOptions{}, remoteinstall.Platform{GOOS: "linux", GOARCH: "amd64"})
+	_, err := plannedVersion(setupOptions{}, remoteinstall.Platform{GOOS: "linux", GOARCH: "amd64"})
 	if err == nil {
 		t.Fatal("error = nil, want refusal")
 	}
@@ -63,7 +63,8 @@ func TestResolveSource_RefusesDevBuildWithoutASource(t *testing.T) {
 // forever.
 func TestOfferRemoteInstall_RefusesASecondAttempt(t *testing.T) {
 	resetRemoteSetupState(t)
-	remoteInstallAttempted = true
+	// A recorded binary path is what says "we already installed here".
+	alreadyProvisionedFn = func(string) bool { return true }
 
 	if offerRemoteInstall("gpu01", remoteinstall.RemedyInstall) {
 		t.Error("offered a second install in the same process")
@@ -75,14 +76,14 @@ func TestOfferRemoteInstall_RefusesASecondAttempt(t *testing.T) {
 
 func TestOfferRemoteInstall_IgnoresRemedyNone(t *testing.T) {
 	resetRemoteSetupState(t)
-	remoteInstallAttempted = false
+	provisioned := false
+	alreadyProvisionedFn = func(string) bool { return provisioned }
 
 	if offerRemoteInstall("gpu01", remoteinstall.RemedyNone) {
 		t.Error("offered an install for a failure that is not about a missing binary")
 	}
-	// RemedyNone must not consume the one attempt the guard allows.
-	if remoteInstallAttempted {
-		t.Error("RemedyNone tripped the loop guard")
+	if provisioned {
+		t.Error("RemedyNone should not have provisioned anything")
 	}
 }
 

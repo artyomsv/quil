@@ -4,16 +4,23 @@
 # failure from a probe finding, so "connected fine, found nothing" and "never
 # connected" must not look alike. There is deliberately no `set -e`.
 #
-# Output contract — exactly five lines, in order, positional:
+# Output contract — a sentinel line, then exactly five lines, in order:
 #
+#   __quil_probe__
 #   1  $HOME
 #   2  uname -s            (or -)
 #   3  uname -m            (or -)
 #   4  existing quil path  (or -)
-#   5  rw | ro | -         (is that path's directory writable)
+#   5  rw | ro | -         (is that path's directory safely writable)
 #
-# Anything printed after line five is ignored by the parser, so a host with a
-# chatty rc file still probes cleanly.
+# The sentinel exists because positional parsing from line 0 breaks on anything
+# the remote shell prints BEFORE us: ~/.zshenv is read for every zsh invocation
+# including non-interactive ones, ~/.profile may echo, and an rc file touching
+# stty emits "Inappropriate ioctl". Any of those shifts every field by one and
+# yields a diagnosis pointing at something unrelated. Lines after the five are
+# ignored, so trailing noise is harmless too.
+
+printf '__quil_probe__\n'
 
 h=${HOME:-}
 printf '%s\n' "$h"
@@ -44,10 +51,19 @@ if [ -z "$found" ]; then
 else
   printf '%s\n' "$found"
   d=$(dirname "$found")
-  # Only a plain "rw" is read as permission to write. Any other answer — including
-  # one this script could not determine — makes the caller fall back to ~/.local/bin
-  # rather than attempt a write it cannot perform without sudo.
-  if [ -w "$d" ]; then
+  # "rw" means BOTH writable by us AND not writable by group or other.
+  #
+  # Plain [ -w ] is not enough. This directory is adopted as the install target
+  # for an in-place upgrade and then recorded locally and executed as the ssh
+  # remote command on every later attach, with no further prompt. A shared
+  # /opt/bin, a group-writable /usr/local/bin (the Homebrew default on
+  # multi-admin macOS), or "." on PATH would let another local user on that host
+  # replace the binary afterwards. Reporting "ro" instead just routes us to
+  # ~/.local/bin, which is the safe branch and already handled.
+  #
+  # Anything other than a plain "rw" is read as not-writable by the parser, so a
+  # find(1) that is missing or errors degrades safely.
+  if [ -w "$d" ] && [ -z "$(find "$d" -maxdepth 0 -perm -0022 2>/dev/null)" ]; then
     printf 'rw\n'
   else
     printf 'ro\n'

@@ -17,10 +17,44 @@ type Runner interface {
 	Run(ctx context.Context, command string, stdin io.Reader, stdout, stderr io.Writer) (int, error)
 }
 
+// maxRemoteOutput caps what any single remote command may return.
+//
+// The buffers below hold whatever the far side writes, and nothing else bounds
+// them: the 10-minute setup timeout is the only other limit, which at ssh
+// throughput is gigabytes. A host with an endlessly-writing rc file would
+// otherwise exhaust local memory before the consent prompt is even reached,
+// since the probe runs first. Generous for a five-line contract.
+const maxRemoteOutput = 64 << 10
+
+// capWriter discards everything past a byte limit, reporting full writes so the
+// exec copier treats it as a healthy sink rather than a short-write error.
+type capWriter struct {
+	buf   bytes.Buffer
+	limit int
+}
+
+func (w *capWriter) Write(p []byte) (int, error) {
+	// n is captured BEFORE the slice below is narrowed. Returning the truncated
+	// length would be a short write, which io.Copy and exec's copier goroutine
+	// both treat as an error — turning "the host said too much" into "the
+	// command failed".
+	n := len(p)
+	if room := w.limit - w.buf.Len(); room > 0 {
+		if len(p) > room {
+			p = p[:room]
+		}
+		w.buf.Write(p)
+	}
+	return n, nil
+}
+
+func (w *capWriter) String() string { return w.buf.String() }
+
 // RunProbe asks the remote host what it is and whether quil is already there.
 func RunProbe(ctx context.Context, r Runner) (Probe, error) {
-	var stdout, stderr bytes.Buffer
-	code, err := r.Run(ctx, probeCommand, strings.NewReader(probeScript), &stdout, &stderr)
+	stdout := &capWriter{limit: maxRemoteOutput}
+	stderr := &capWriter{limit: maxRemoteOutput}
+	code, err := r.Run(ctx, probeCommand, strings.NewReader(probeScript), stdout, stderr)
 	if err != nil {
 		return Probe{}, fmt.Errorf("run remote probe: %w", err)
 	}
@@ -38,24 +72,46 @@ func RunProbe(ctx context.Context, r Runner) (Probe, error) {
 	return p, nil
 }
 
-// StopRemoteDaemon stops the daemon owned by an existing remote install, so its
-// binary can be replaced underneath it.
+// notRunningMarker is what `quil daemon stop` prints when there was nothing to
+// stop. Matched to tell that benign outcome apart from a real failure.
+const notRunningMarker = "daemon not running"
+
+// StopRemoteDaemon stops the daemon owned by an existing remote install, so the
+// replacement binary is what serves the next attach.
 //
-// A non-zero exit is not an error: the overwhelmingly common case is a daemon
-// that was not running, which is exactly the state we want and which `quil
-// daemon stop` reports as a failure.
-func StopRemoteDaemon(ctx context.Context, r Runner, binaryPath string) error {
-	var out bytes.Buffer
-	if _, err := r.Run(ctx, DaemonStopCommand(binaryPath), nil, &out, &out); err != nil {
-		return fmt.Errorf("stop remote daemon: %w", err)
+// It returns a WARNING string rather than an error, because the exit code alone
+// cannot answer the question. `quil daemon stop` exits 1 both when the stop
+// genuinely failed and when no daemon was running — and the second is the
+// common case and precisely the state we want. Propagating non-zero would abort
+// every upgrade of an idle host; swallowing it hides a daemon that refused to
+// die, which then keeps serving the OLD binary (renaming over a running
+// executable leaves the running process on its original inode), so the next
+// attach reports a version mismatch the user has already "fixed".
+//
+// So: classify on the marker our own CLI prints, and treat everything else as
+// worth surfacing. A remote running an OLDER quil may word it differently,
+// which costs a spurious warning — never a silent failure.
+func StopRemoteDaemon(ctx context.Context, r Runner, binaryPath string) (warning string, err error) {
+	out := &capWriter{limit: maxRemoteOutput}
+	code, err := r.Run(ctx, DaemonStopCommand(binaryPath), nil, out, out)
+	if err != nil {
+		return "", fmt.Errorf("stop remote daemon: %w", err)
 	}
-	return nil
+	if code == 0 || strings.Contains(out.String(), notRunningMarker) {
+		return "", nil
+	}
+	detail := firstLine(out.String())
+	if detail == "" {
+		detail = fmt.Sprintf("exited %d with no output", code)
+	}
+	return detail, nil
 }
 
 // Push streams the archive into the remote install script.
 func Push(ctx context.Context, r Runner, t Target, src Source) error {
-	var stdout, stderr bytes.Buffer
-	code, err := r.Run(ctx, InstallCommand(t, src), bytes.NewReader(src.Archive), &stdout, &stderr)
+	stdout := &capWriter{limit: maxRemoteOutput}
+	stderr := &capWriter{limit: maxRemoteOutput}
+	code, err := r.Run(ctx, InstallCommand(t, src), bytes.NewReader(src.Archive), stdout, stderr)
 	if err != nil {
 		return fmt.Errorf("run remote installer: %w", err)
 	}

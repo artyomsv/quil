@@ -17,7 +17,7 @@ DT=
 # Also removes the staging temp files: they live inside DIR so the rename below
 # never crosses a filesystem, and an abort between staging and rename would
 # otherwise leave dotfiles in the user's bin directory.
-trap 'rm -rf "$TMP"; [ -z "$QT" ] || rm -f "$QT"; [ -z "$DT" ] || rm -f "$DT"; true' EXIT
+trap 'rm -rf "$TMP"; [ -z "$QT" ] || rm -f "$QT"; [ -z "$DT" ] || rm -f "$DT"; true' EXIT INT TERM HUP
 
 cat > "$TMP/quil.tar.gz"
 

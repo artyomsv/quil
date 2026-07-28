@@ -125,10 +125,17 @@ func newStdioConn(cmd *exec.Cmd, r, w *os.File, desc string) *stdioConn {
 // reap waits for the child and records its exit status.
 //
 // Idempotent because exec.Cmd.Wait must not be called twice and both pump() and
-// Close() reach here. Calling Wait from the pump goroutine is safe only because
-// SSH() gives the command *os.File stdin/stdout rather than StdinPipe/
-// StdoutPipe: exec therefore starts no copier goroutines, and Wait closes none
-// of the parent's descriptors.
+// Close() reach here.
+//
+// Two things make waiting from either goroutine safe. Wait closes none of the
+// PARENT's descriptors, because SSH() gives the command *os.File stdin/stdout
+// rather than StdinPipe/StdoutPipe. And Wait is bounded, because SSH() sets
+// cmd.WaitDelay — stderr is NOT an *os.File (it is a sanitizer or a buffer), so
+// exec does create a pipe and a copier goroutine for it, and Wait blocks until
+// every process holding that pipe's write end exits. Killing ssh is not enough:
+// a ProxyCommand or ProxyJump helper inherits stderr and outlives its parent,
+// and without WaitDelay a bastion hop would park Close — which is on the TUI's
+// exit path — for as long as that helper lived.
 func (c *stdioConn) reap() {
 	c.reapOnce.Do(func() {
 		if c.cmd == nil {
@@ -262,9 +269,9 @@ func (c *stdioConn) Close() error {
 			// Wait, reaping an unkilled child would hang Close for as long as
 			// ssh stayed alive. Killing first guarantees that Wait returns.
 			//
-			// Killing a child that has already exited is a no-op on a PID that
-			// cannot have been reused: it is an unreaped zombie precisely
-			// because nothing has waited on it yet.
+			// Killing an already-exited child is safe even though pump may have
+			// reaped it first: os.Process records that it has been waited on and
+			// returns ErrProcessDone rather than signalling a recycled PID.
 			_ = c.cmd.Process.Kill()
 			c.reap()
 		}

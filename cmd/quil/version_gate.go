@@ -54,7 +54,7 @@ func gateVersionCheck(client *ipc.Client) *ipc.Client {
 		// makes its exit status final. Reading it earlier races a child that is
 		// still exiting and would report "still running" for one that already
 		// failed. The mirror image of LinkErr's requirement, deliberately so.
-		remedy := remoteinstall.ClassifyExit(remoteExitCode(), false)
+		remedy := remoteinstall.ClassifyExit(remoteExitCode(), remoteLinkEstablished())
 		if offerRemoteInstallFn(remoteDest, remedy) {
 			// The binaries are in place, but this process is holding a dead
 			// connection and half-built state, and the config entry the install
@@ -86,7 +86,7 @@ func gateVersionCheck(client *ipc.Client) *ipc.Client {
 		// refuse to attach, print actionable instructions, exit.
 		client.Close()
 		promptUpgradeClient(versionpkg.Current(), res.DaemonVersion)
-		os.Exit(0)
+		exitFn(0)
 		return nil
 
 	default:
@@ -115,10 +115,11 @@ func gateVersionCheck(client *ipc.Client) *ipc.Client {
 			// Offer to upgrade rather than advise. The advice this replaced —
 			// `ssh <host> 'quil daemon restart'` — could not work: restarting
 			// the same binary reports the same version.
-			if offerRemoteInstallFn(remoteDest, remoteinstall.RemedyInstall) {
+			if offerRemoteInstallFn(remoteDest, remoteinstall.RemedyUpgrade) {
 				fmt.Fprintf(os.Stderr,
 					"  Run `quil --remote %s` again to attach.\n\n", remoteDest)
-				os.Exit(0)
+				exitFn(0)
+				return nil
 			}
 			fmt.Fprintf(os.Stderr,
 				"\n"+
@@ -127,7 +128,8 @@ func gateVersionCheck(client *ipc.Client) *ipc.Client {
 					"    quil remote setup %s\n"+
 					"\n",
 				remoteDest)
-			os.Exit(1)
+			exitFn(1)
+			return nil
 		}
 		// Either TUI > daemon, or the daemon timed out / returned an
 		// unparseable version (treated as "pre-versioning daemon", same
@@ -137,7 +139,8 @@ func gateVersionCheck(client *ipc.Client) *ipc.Client {
 		if !updateRestartPreapproved() && !promptRestartDaemon(versionpkg.Current(), res.DaemonVersion, res.DaemonUnknown) {
 			fmt.Fprintln(os.Stderr, "Aborted — daemon left running at the older version.")
 			client.Close()
-			os.Exit(0)
+			exitFn(0)
+			return nil
 		}
 		// The stop path dials its own connection, so hand the socket back
 		// before it runs rather than leaving a second client attached to a
@@ -168,7 +171,8 @@ func gateVersionCheck(client *ipc.Client) *ipc.Client {
 					"  workspace; in-flight shell commands are lost.\n"+
 					"\n",
 				err)
-			os.Exit(1)
+			exitFn(1)
+			return nil
 		}
 		// Verify the freshly spawned daemon is actually the expected
 		// version. If PATH has an older quild shadowing the bundled
@@ -183,7 +187,8 @@ func gateVersionCheck(client *ipc.Client) *ipc.Client {
 					"the same version, or remove the stale quild from PATH.\n",
 				verify.DaemonVersion, versionpkg.Current(),
 			)
-			os.Exit(1)
+			exitFn(1)
+			return nil
 		}
 		log.Printf("version gate: reconnected to daemon %s after restart", verify.DaemonVersion)
 		return newClient

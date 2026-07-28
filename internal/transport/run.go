@@ -51,8 +51,19 @@ func RunSSH(ctx context.Context, dest string, opts SSHOptions, command string,
 	cmd.Stdin = stdin
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
+	// See SSH(): a non-*os.File stderr gives exec a copier goroutine that Wait
+	// blocks on, and a ProxyCommand helper can outlive the killed child.
+	cmd.WaitDelay = waitDelay
 
 	if err := cmd.Run(); err != nil {
+		// Checked BEFORE the ExitError branch. CommandContext kills the child on
+		// deadline, which surfaces as an ExitError (status -1, "signal: killed")
+		// — so without this a timeout would be reported as "the remote command
+		// exited -1", and the caller would blame the far side for a clock that
+		// ran out on this one.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return -1, fmt.Errorf("ssh to %s: %w", dest, ctxErr)
+		}
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
 			return exitErr.ExitCode(), nil
@@ -61,12 +72,3 @@ func RunSSH(ctx context.Context, dest string, opts SSHOptions, command string,
 	}
 	return 0, nil
 }
-
-// NewTerminalSanitizer wraps a terminal-bound writer so remote-influenced
-// output cannot emit control sequences into it.
-//
-// Exported because callers outside this package now run ssh commands whose
-// stderr reaches the operator's terminal, and that stream carries whatever the
-// remote shell and its rc files wrote — verbatim, and attacker-controlled if
-// the host is compromised.
-func NewTerminalSanitizer(w io.Writer) io.Writer { return &terminalSanitizer{w: w} }

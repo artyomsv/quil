@@ -13,6 +13,13 @@ const (
 	// RemedyReinstall means the remote shell found quil and could not execute
 	// it — almost always a binary built for another architecture.
 	RemedyReinstall
+
+	// RemedyUpgrade means quil ran over there and reported a version this TUI
+	// cannot attach to. Distinct from RemedyInstall because the two produce
+	// opposite headlines, and saying "Quil is not installed" about a daemon
+	// that just answered with its version is a visible contradiction — the
+	// probe on the very next line reports the install it supposedly lacks.
+	RemedyUpgrade
 )
 
 func (r Remedy) String() string {
@@ -21,6 +28,8 @@ func (r Remedy) String() string {
 		return "install"
 	case RemedyReinstall:
 		return "reinstall"
+	case RemedyUpgrade:
+		return "upgrade"
 	default:
 		return "none"
 	}

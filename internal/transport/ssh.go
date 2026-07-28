@@ -68,6 +68,12 @@ var livenessSSHOptions = []string{
 // that a wrong hostname is reported in seconds rather than minutes.
 const defaultConnectTimeout = 15 * time.Second
 
+// waitDelay bounds how long Wait may block on a stderr pipe that a surviving
+// grandchild still holds open, after the child itself has been killed. Long
+// enough that a healthy ssh's final diagnostics are not truncated, short enough
+// that a wedged bastion helper cannot hang the TUI's exit.
+const waitDelay = 5 * time.Second
+
 // SSHOptions tunes the ssh invocation.
 type SSHOptions struct {
 	// SSHPath overrides the ssh binary. Empty means "ssh" from PATH.
@@ -177,6 +183,15 @@ func SSH(dest string, opts SSHOptions) func(context.Context) (net.Conn, error) {
 		cmd := exec.CommandContext(ctx, resolved, sshArgs(dest, opts)...)
 		cmd.Stdin = childIn
 		cmd.Stdout = childOut
+		// Bound Wait. cmd.Stderr below is NOT an *os.File, so exec creates a
+		// pipe and a copier goroutine for it, and Wait blocks until every
+		// process holding that pipe's write end has exited. Killing ssh does not
+		// cover a ProxyCommand or ProxyJump helper, which inherits stderr and
+		// outlives its parent — and those are explicitly supported here (bastion
+		// hops are a core requirement, which is why ProxyCommand is not forced
+		// off). Without this, closing a bastion-routed connection would park the
+		// TUI's exit path for as long as the helper lived.
+		cmd.WaitDelay = waitDelay
 
 		// ssh's own diagnostics ("Permission denied (publickey)", "Host key
 		// verification failed") are better than anything we would write, so

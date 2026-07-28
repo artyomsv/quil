@@ -96,6 +96,10 @@ type stdioConn struct {
 	// (on pipe EOF) and Close() reach it.
 	reapOnce sync.Once
 
+	// reaped closes once the child's status has been recorded, so Close can
+	// wait for a natural exit instead of overwriting the status with a kill.
+	reaped chan struct{}
+
 	// stderr holds ssh's captured diagnostics when the dial ran in batch mode.
 	// Nil on interactive dials, where stderr went straight to the terminal.
 	// Assigned by SSH (ssh.go) AFTER newStdioConn returns and pump() is
@@ -115,6 +119,7 @@ func newStdioConn(cmd *exec.Cmd, r, w *os.File, desc string) *stdioConn {
 		cmd:    cmd,
 		desc:   desc,
 		readCh: make(chan []byte, 1),
+		reaped: make(chan struct{}),
 		done:   make(chan struct{}),
 	}
 	c.exitCode.Store(noExitCode)
@@ -138,6 +143,7 @@ func newStdioConn(cmd *exec.Cmd, r, w *os.File, desc string) *stdioConn {
 // exit path — for as long as that helper lived.
 func (c *stdioConn) reap() {
 	c.reapOnce.Do(func() {
+		defer close(c.reaped)
 		if c.cmd == nil {
 			return
 		}
@@ -264,10 +270,28 @@ func (c *stdioConn) Close() error {
 		_ = c.w.Close()
 		_ = c.r.Close()
 		if c.cmd != nil && c.cmd.Process != nil {
-			// Kill BEFORE reap, not after. sync.Once.Do blocks the second
-			// caller until the first returns, so when pump is already parked in
-			// Wait, reaping an unkilled child would hang Close for as long as
-			// ssh stayed alive. Killing first guarantees that Wait returns.
+			// When the pipe has already failed, the child is on its way out by
+			// itself and its real exit status IS the diagnosis — 127 for a
+			// remote command the shell could not find, 126 for one it could not
+			// execute. Killing it here would overwrite that: on Windows Kill is
+			// TerminateProcess(handle, 1), so a child caught mid-teardown
+			// reports 1 and every "quil is not installed over there" becomes an
+			// unexplained failure. Measured against a real host — stdout closes
+			// before ssh finishes exiting, and Close fires inside that window.
+			//
+			// So wait briefly for the natural exit first, and kill only if it
+			// does not come. The wait costs nothing on a healthy link, where
+			// pumpErr is nil and the child has no intention of exiting: that
+			// case skips straight to the kill.
+			if c.pumpFailed() {
+				select {
+				case <-c.reaped:
+				case <-time.After(exitGrace):
+				}
+			}
+			// Kill BEFORE reap. sync.Once.Do blocks the second caller until the
+			// first returns, so when pump is already parked in Wait, reaping an
+			// unkilled child would hang Close for as long as ssh stayed alive.
 			//
 			// Killing an already-exited child is safe even though pump may have
 			// reaped it first: os.Process records that it has been waited on and
@@ -364,6 +388,20 @@ func (c *stdioConn) Established() bool { return c.bytesIn.Load() > 0 }
 // reaped. See LinkStatus.ExitCode for what the ssh values mean and why this is
 // read after Close rather than before.
 func (c *stdioConn) ExitCode() int { return int(c.exitCode.Load()) }
+
+// exitGrace is how long Close waits for a child that is already exiting to
+// finish, before killing it. Long enough for ssh's teardown after it closes
+// stdout, short enough to be invisible on the TUI's exit path — and only ever
+// spent when the pipe has already failed.
+const exitGrace = 2 * time.Second
+
+// pumpFailed reports whether the read pump has recorded an error, which means
+// the child is ending on its own rather than being torn down by us.
+func (c *stdioConn) pumpFailed() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.pumpErr != nil
+}
 
 // LinkErr reports the child's failure once its stdout has closed, or nil while
 // the pipe is still live.

@@ -54,7 +54,15 @@ func gateVersionCheck(client *ipc.Client) *ipc.Client {
 		// makes its exit status final. Reading it earlier races a child that is
 		// still exiting and would report "still running" for one that already
 		// failed. The mirror image of LinkErr's requirement, deliberately so.
-		remedy := remoteinstall.ClassifyExit(remoteExitCode(), remoteLinkEstablished())
+		exitCode, established := remoteExitCode(), remoteLinkEstablished()
+		remedy := remoteinstall.ClassifyExit(exitCode, established)
+		// The remedy decides whether the user is offered an install or told the
+		// host is unreachable, and those look identical from outside when the
+		// exit code is wrong — which is exactly how the Kill-before-reap bug hid.
+		// Logged from the SAME values the decision used, not re-read: a second
+		// read would report a different moment than the one that decided.
+		log.Printf("remote: dead link — exit=%d established=%v remedy=%v",
+			exitCode, established, remedy)
 		if offerRemoteInstallFn(remoteDest, remedy) {
 			// The binaries are in place, but this process is holding a dead
 			// connection and half-built state, and the config entry the install

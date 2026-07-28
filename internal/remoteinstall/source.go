@@ -54,7 +54,18 @@ type Source struct {
 // against hostile archive entry names. Repacking its output costs a temp dir
 // and buys no second copy of that logic.
 func FetchRelease(ctx context.Context, version string, p Platform) (Source, error) {
-	rel, err := (&update.Checker{}).Release(ctx, version)
+	return fetchReleaseFrom(ctx, "", version, p)
+}
+
+// fetchReleaseFrom is FetchRelease with the GitHub API host injectable, so the
+// whole download → verify → repack path can be tested against an httptest
+// server instead of the real network. Empty baseURL means the real API.
+//
+// Pointing the Checker at a test host is sufficient to redirect everything: the
+// asset download URLs come from the release JSON it returns, so the Stager
+// follows them without needing its own seam.
+func fetchReleaseFrom(ctx context.Context, baseURL, version string, p Platform) (Source, error) {
+	rel, err := (&update.Checker{BaseURL: baseURL}).Release(ctx, version)
 	if err != nil {
 		return Source{}, fmt.Errorf("look up release: %w", err)
 	}

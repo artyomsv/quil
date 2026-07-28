@@ -1,6 +1,7 @@
 package main
 
 import (
+	"github.com/artyomsv/quil/internal/config"
 	"strings"
 	"testing"
 
@@ -107,4 +108,121 @@ func TestDisplayVersion(t *testing.T) {
 	if got := displayVersion(remoteinstall.Source{}); !strings.Contains(got, "locally built") {
 		t.Errorf("displayVersion = %q, want it to name a local build", got)
 	}
+}
+
+func TestParseRemoteArgs(t *testing.T) {
+	tests := []struct {
+		name      string
+		args      []string
+		wantDest  string
+		wantOpts  setupOptions
+		wantUsage bool
+		wantErr   string
+	}{
+		{name: "destination only", args: []string{"gpu01"}, wantDest: "gpu01"},
+		{name: "yes long", args: []string{"gpu01", "--yes"}, wantDest: "gpu01", wantOpts: setupOptions{Yes: true}},
+		{name: "yes short", args: []string{"-y", "gpu01"}, wantDest: "gpu01", wantOpts: setupOptions{Yes: true}},
+		{
+			name: "from-dir separate value", args: []string{"gpu01", "--from-dir", "./dist"},
+			wantDest: "gpu01", wantOpts: setupOptions{FromDir: "./dist"},
+		},
+		{
+			name: "from-dir equals form", args: []string{"gpu01", "--from-dir=./dist"},
+			wantDest: "gpu01", wantOpts: setupOptions{FromDir: "./dist"},
+		},
+		{
+			name: "version separate value", args: []string{"gpu01", "--version", "1.43.1"},
+			wantDest: "gpu01", wantOpts: setupOptions{Version: "1.43.1"},
+		},
+		{
+			name: "version equals form", args: []string{"--version=1.43.1", "gpu01"},
+			wantDest: "gpu01", wantOpts: setupOptions{Version: "1.43.1"},
+		},
+		{name: "help long", args: []string{"--help"}, wantUsage: true},
+		{name: "help short", args: []string{"-h", "gpu01"}, wantUsage: true},
+
+		{name: "missing from-dir value", args: []string{"gpu01", "--from-dir"}, wantErr: "requires a value"},
+		{name: "empty from-dir value", args: []string{"gpu01", "--from-dir="}, wantErr: "requires a value"},
+		{name: "missing version value", args: []string{"gpu01", "--version"}, wantErr: "requires a value"},
+		{name: "empty version value", args: []string{"gpu01", "--version="}, wantErr: "requires a value"},
+		{name: "unknown flag", args: []string{"gpu01", "--force"}, wantErr: "unknown flag"},
+		{name: "two destinations", args: []string{"gpu01", "gpu02"}, wantErr: "unexpected argument"},
+		// --from-dir wins in resolveSource, so accepting both would silently
+		// ignore one of them.
+		{
+			name:    "mutually exclusive sources",
+			args:    []string{"gpu01", "--from-dir", "./dist", "--version", "1.43.1"},
+			wantErr: "mutually exclusive",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts, dest, usage, err := parseRemoteArgs(tt.args)
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatalf("error = nil, want one containing %q", tt.wantErr)
+				}
+				if !strings.Contains(err.Error(), tt.wantErr) {
+					t.Errorf("error %q does not contain %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("error = %v", err)
+			}
+			if usage != tt.wantUsage {
+				t.Errorf("showUsage = %v, want %v", usage, tt.wantUsage)
+			}
+			if usage {
+				return
+			}
+			if dest != tt.wantDest {
+				t.Errorf("dest = %q, want %q", dest, tt.wantDest)
+			}
+			if opts != tt.wantOpts {
+				t.Errorf("opts = %+v, want %+v", opts, tt.wantOpts)
+			}
+		})
+	}
+}
+
+// remoteSSHOptions decides between `ssh host quil --stdio` and the recorded
+// absolute path — the thing that makes attaching work when the remote's
+// non-interactive PATH cannot see the install directory.
+func TestRemoteSSHOptions(t *testing.T) {
+	prevDest := remoteDest
+	t.Cleanup(func() { remoteDest = prevDest })
+	remoteDest = "gpu01"
+
+	t.Run("no recorded binary falls back to the transport default", func(t *testing.T) {
+		if got := remoteSSHOptions(config.Config{}).RemoteCommand; got != "" {
+			t.Errorf("RemoteCommand = %q, want empty so transport's default applies", got)
+		}
+	})
+
+	t.Run("recorded binary becomes the remote command", func(t *testing.T) {
+		var cfg config.Config
+		cfg.SetRemoteBinary("gpu01", "/home/a/.local/bin/quil")
+		got := remoteSSHOptions(cfg).RemoteCommand
+		if want := `'/home/a/.local/bin/quil' --stdio`; got != want {
+			t.Errorf("RemoteCommand = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("a path with an apostrophe is escaped", func(t *testing.T) {
+		var cfg config.Config
+		cfg.SetRemoteBinary("gpu01", "/home/o'brien/bin/quil")
+		got := remoteSSHOptions(cfg).RemoteCommand
+		if !strings.Contains(got, `'\''brien`) {
+			t.Errorf("RemoteCommand = %q, want the apostrophe escaped", got)
+		}
+	})
+
+	t.Run("another host's entry is not used", func(t *testing.T) {
+		var cfg config.Config
+		cfg.SetRemoteBinary("other-host", "/opt/quil")
+		if got := remoteSSHOptions(cfg).RemoteCommand; got != "" {
+			t.Errorf("RemoteCommand = %q, want empty for an unrecorded destination", got)
+		}
+	})
 }

@@ -373,53 +373,14 @@ func handleRemote() {
 		os.Exit(1)
 	}
 
-	var (
-		opts setupOptions
-		dest string
-	)
-	rest := args[1:]
-	for i := 0; i < len(rest); i++ {
-		switch arg := rest[i]; {
-		case arg == "--help" || arg == "-h":
-			printRemoteUsage()
-			return
-		case arg == "--yes" || arg == "-y":
-			opts.Yes = true
-		case arg == "--from-dir":
-			if i+1 >= len(rest) {
-				fmt.Fprintln(os.Stderr, "quil remote setup: --from-dir requires a path")
-				os.Exit(1)
-			}
-			i++
-			opts.FromDir = rest[i]
-		case strings.HasPrefix(arg, "--from-dir="):
-			opts.FromDir = strings.TrimPrefix(arg, "--from-dir=")
-		case arg == "--version":
-			if i+1 >= len(rest) {
-				fmt.Fprintln(os.Stderr, "quil remote setup: --version requires a version")
-				os.Exit(1)
-			}
-			i++
-			opts.Version = rest[i]
-		case strings.HasPrefix(arg, "--version="):
-			opts.Version = strings.TrimPrefix(arg, "--version=")
-		case strings.HasPrefix(arg, "-"):
-			fmt.Fprintf(os.Stderr, "quil remote setup: unknown flag %q\n", arg)
-			os.Exit(1)
-		default:
-			if dest != "" {
-				fmt.Fprintf(os.Stderr, "quil remote setup: unexpected argument %q\n", arg)
-				os.Exit(1)
-			}
-			dest = arg
-		}
-	}
-
-	// --from-dir wins over --version in resolveSource, so accepting both would
-	// silently ignore one of them. Say so instead.
-	if opts.FromDir != "" && opts.Version != "" {
-		fmt.Fprintln(os.Stderr, "quil remote setup: --from-dir and --version are mutually exclusive")
+	opts, dest, showUsage, err := parseRemoteArgs(args[1:])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "quil remote setup: %v\n", err)
 		os.Exit(1)
+	}
+	if showUsage {
+		printRemoteUsage()
+		return
 	}
 
 	if err := runRemoteSetup(dest, opts); err != nil {
@@ -430,6 +391,60 @@ func handleRemote() {
 		fmt.Fprintf(os.Stderr, "quil remote setup: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// parseRemoteArgs parses the flags of `quil remote setup`.
+//
+// Pure and returning errors rather than calling os.Exit, so the whole flag
+// surface is testable — the same reason plannedVersion was split out of
+// resolveSource.
+func parseRemoteArgs(args []string) (opts setupOptions, dest string, showUsage bool, err error) {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		// takeValue consumes the value of a flag given in either form.
+		takeValue := func(flag string) (string, error) {
+			if v, ok := strings.CutPrefix(arg, flag+"="); ok {
+				if v == "" {
+					return "", fmt.Errorf("%s requires a value", flag)
+				}
+				return v, nil
+			}
+			if i+1 >= len(args) || args[i+1] == "" {
+				return "", fmt.Errorf("%s requires a value", flag)
+			}
+			i++
+			return args[i], nil
+		}
+
+		switch {
+		case arg == "--help" || arg == "-h":
+			return setupOptions{}, "", true, nil
+		case arg == "--yes" || arg == "-y":
+			opts.Yes = true
+		case arg == "--from-dir" || strings.HasPrefix(arg, "--from-dir="):
+			if opts.FromDir, err = takeValue("--from-dir"); err != nil {
+				return setupOptions{}, "", false, err
+			}
+		case arg == "--version" || strings.HasPrefix(arg, "--version="):
+			if opts.Version, err = takeValue("--version"); err != nil {
+				return setupOptions{}, "", false, err
+			}
+		case strings.HasPrefix(arg, "-"):
+			return setupOptions{}, "", false, fmt.Errorf("unknown flag %q", arg)
+		default:
+			if dest != "" {
+				return setupOptions{}, "", false, fmt.Errorf("unexpected argument %q (destination is already %q)", arg, dest)
+			}
+			dest = arg
+		}
+	}
+
+	// --from-dir wins over --version in resolveSource, so accepting both would
+	// silently ignore one of them. Say so instead.
+	if opts.FromDir != "" && opts.Version != "" {
+		return setupOptions{}, "", false, errors.New("--from-dir and --version are mutually exclusive")
+	}
+	return opts, dest, false, nil
 }
 
 func printRemoteUsage() {

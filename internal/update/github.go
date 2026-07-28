@@ -20,6 +20,9 @@ const DefaultBaseURL = "https://api.github.com"
 // latestReleasePath is the repo-specific /releases/latest endpoint.
 const latestReleasePath = "/repos/artyomsv/quil/releases/latest"
 
+// tagReleasePath is the by-tag endpoint; the tag is appended.
+const tagReleasePath = "/repos/artyomsv/quil/releases/tags/"
+
 // requestTimeout bounds every update HTTP request. No retry — callers run
 // on a daily ticker, so the next tick is the retry.
 const requestTimeout = 10 * time.Second
@@ -63,11 +66,37 @@ func (c *Checker) httpClient() *http.Client {
 
 // Latest fetches the newest published release. One GET, no retry.
 func (c *Checker) Latest(ctx context.Context) (*Release, error) {
+	return c.Release(ctx, "")
+}
+
+// Release fetches one published release by tag, or the newest when tag is
+// empty. The tag may be given with or without its leading "v".
+//
+// Fetching by tag exists for remote provisioning: installing "latest" on the
+// far side when this TUI is not itself latest would simply invert the version
+// mismatch it was called to fix.
+func (c *Checker) Release(ctx context.Context, tag string) (*Release, error) {
 	base := c.BaseURL
 	if base == "" {
 		base = DefaultBaseURL
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+latestReleasePath, nil)
+
+	path := latestReleasePath
+	if tag != "" {
+		if !strings.HasPrefix(tag, "v") {
+			tag = "v" + tag
+		}
+		// The tag becomes a URL path segment. Anything that could escape it —
+		// a slash, a traversal, a query or fragment introducer — is rejected
+		// rather than escaped, because no real tag contains them and a
+		// permissive reading here would let a caller redirect the request.
+		if strings.ContainsAny(tag, "/\\?#%") || strings.Contains(tag, "..") {
+			return nil, fmt.Errorf("invalid release tag %q", tag)
+		}
+		path = tagReleasePath + tag
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+path, nil)
 	if err != nil {
 		return nil, fmt.Errorf("build release request: %w", err)
 	}

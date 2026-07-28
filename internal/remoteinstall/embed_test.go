@@ -296,6 +296,36 @@ func TestInstallScript_OverwritesAndLeavesNoTempFiles(t *testing.T) {
 	}
 }
 
+// PackDir's tar layout and the install script's `tar -xzf` are the two halves
+// of another agreement that otherwise only meet on a real remote host: a stray
+// path prefix or a missing mode would extract to the wrong place, or land
+// non-executable, with nothing local to catch it.
+func TestInstallScript_AcceptsPackDirOutput(t *testing.T) {
+	posixShell(t)
+	from := t.TempDir()
+	for _, name := range binaryNames {
+		body := append([]byte("\x7fELF"), []byte("-"+name)...)
+		if err := os.WriteFile(filepath.Join(from, name), body, 0o755); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+
+	src, err := PackDir(from, Platform{"linux", "amd64"})
+	if err != nil {
+		t.Fatalf("PackDir error = %v", err)
+	}
+
+	dir := filepath.Join(t.TempDir(), "bin")
+	if code, out := runInstall(t, dir, src.Archive, src.SHA256); code != 0 {
+		t.Fatalf("install of a PackDir archive exited %d: %s", code, out)
+	}
+	for _, name := range binaryNames {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Errorf("%s did not land: %v", name, err)
+		}
+	}
+}
+
 // A directory containing an apostrophe is the case ShellSingleQuote exists for,
 // and it must survive the whole round trip into the script's $1.
 func TestInstallScript_HandlesAwkwardDirectoryNames(t *testing.T) {

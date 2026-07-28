@@ -4,10 +4,12 @@ import (
 	"context"
 	"net"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/artyomsv/quil/internal/ipc"
+	"github.com/artyomsv/quil/internal/remoteinstall"
 )
 
 // deadClient builds a real *ipc.Client whose peer is already gone, which is
@@ -116,6 +118,128 @@ func TestGateVersionCheck_RemoteLinkNeverEstablished_ExitsBeforeTheSwitch(t *tes
 	}
 }
 
+// remoteGateSeams parks every remote seam the gate reads and restores them.
+func remoteGateSeams(t *testing.T, established bool, exitCode int) *remoteinstall.Remedy {
+	t.Helper()
+	prevEstablished := remoteLinkEstablishedFn
+	prevErr := remoteLinkErrFn
+	prevExitCode := remoteExitCodeFn
+	prevOffer := offerRemoteInstallFn
+	prevExit := exitFn
+	t.Cleanup(func() {
+		remoteLinkEstablishedFn = prevEstablished
+		remoteLinkErrFn = prevErr
+		remoteExitCodeFn = prevExitCode
+		offerRemoteInstallFn = prevOffer
+		exitFn = prevExit
+	})
+
+	remoteLinkEstablishedFn = func() bool { return established }
+	remoteLinkErrFn = func() error { return errLinkTest }
+	remoteExitCodeFn = func() int { return exitCode }
+
+	var offered remoteinstall.Remedy
+	offerRemoteInstallFn = func(_ string, r remoteinstall.Remedy) bool {
+		offered = r
+		return false // decline, so the gate falls through to its report
+	}
+	exitFn = func(int) {}
+	return &offered
+}
+
+// Exit 127 from the remote shell means quil is missing over there, which is
+// actionable in a way "unreachable host" is not.
+func TestGateVersionCheck_OffersInstallOnCommandNotFound(t *testing.T) {
+	withRemote(t, "gpu01")
+	offered := remoteGateSeams(t, false, 127)
+
+	captureStderr(t, func() { gateVersionCheck(deadClient(t)) })
+
+	if *offered != remoteinstall.RemedyInstall {
+		t.Errorf("remedy = %v, want RemedyInstall", *offered)
+	}
+}
+
+// Exit 255 is ssh's own failure — auth, host key, DNS. There is nothing on the
+// far side to install, and offering would send the user to fix the wrong thing.
+func TestGateVersionCheck_DoesNotOfferInstallOnSSHFailure(t *testing.T) {
+	withRemote(t, "gpu01")
+	offered := remoteGateSeams(t, false, 255)
+
+	captureStderr(t, func() { gateVersionCheck(deadClient(t)) })
+
+	if *offered != remoteinstall.RemedyNone {
+		t.Errorf("remedy = %v, want RemedyNone for an ssh-level failure", *offered)
+	}
+}
+
+// The exit code must be read AFTER Close, which is what reaps the ssh child.
+// Reading it before races a child that is still exiting and reports "still
+// running" for one that already failed — the mirror image of LinkErr, which
+// Close can clear and so must be read first.
+func TestGateVersionCheck_ReadsExitCodeAfterClose(t *testing.T) {
+	withRemote(t, "gpu01")
+
+	prevEstablished := remoteLinkEstablishedFn
+	prevErr := remoteLinkErrFn
+	prevExitCode := remoteExitCodeFn
+	prevOffer := offerRemoteInstallFn
+	prevExit := exitFn
+	t.Cleanup(func() {
+		remoteLinkEstablishedFn = prevEstablished
+		remoteLinkErrFn = prevErr
+		remoteExitCodeFn = prevExitCode
+		offerRemoteInstallFn = prevOffer
+		exitFn = prevExit
+	})
+
+	var order []string
+	remoteLinkEstablishedFn = func() bool { return false }
+	remoteLinkErrFn = func() error { order = append(order, "linkerr"); return errLinkTest }
+	remoteExitCodeFn = func() int { order = append(order, "exitcode"); return 127 }
+	offerRemoteInstallFn = func(string, remoteinstall.Remedy) bool { return false }
+	exitFn = func(int) {}
+
+	// Close is the event the ordering is ABOUT, so it has to appear in the
+	// trace. Recording only the two seams around it would pass unchanged if a
+	// refactor hoisted the ExitCode read above Close — precisely the bug this
+	// guards against.
+	client := clientRecordingClose(t, &order)
+	captureStderr(t, func() { gateVersionCheck(client) })
+
+	want := []string{"linkerr", "close", "exitcode"}
+	if !slices.Equal(order, want) {
+		t.Errorf("order = %v, want %v", order, want)
+	}
+}
+
+// recordingConn notes when the connection is closed, so a test can assert what
+// happens on either side of it.
+type recordingConn struct {
+	net.Conn
+	order *[]string
+}
+
+func (c recordingConn) Close() error {
+	*c.order = append(*c.order, "close")
+	return c.Conn.Close()
+}
+
+func clientRecordingClose(t *testing.T, order *[]string) *ipc.Client {
+	t.Helper()
+	ours, peer := net.Pipe()
+	peer.Close()
+
+	client, err := ipc.NewClientWithDialer(context.Background(),
+		func(context.Context) (net.Conn, error) {
+			return recordingConn{Conn: ours, order: order}, nil
+		})
+	if err != nil {
+		t.Fatalf("build client: %v", err)
+	}
+	return client
+}
+
 // TestGateVersionCheck_LocalSession_SkipsTheLinkGuard is the control: the guard
 // must be conditional on remote mode, or every local session would exit.
 func TestGateVersionCheck_LocalSession_SkipsTheLinkGuard(t *testing.T) {
@@ -138,5 +262,69 @@ func TestGateVersionCheck_LocalSession_SkipsTheLinkGuard(t *testing.T) {
 
 	if exitCalled {
 		t.Error("link guard fired in a local session, want it skipped")
+	}
+}
+
+// A successful install must ask the caller to re-dial, not exit. The user's
+// command was "attach"; making them retype it after the obstacle was removed
+// is a worse answer than doing what they asked.
+func TestGateVersionCheck_SignalsRetryAfterInstall(t *testing.T) {
+	withRemote(t, "gpu01")
+
+	prevRetry := remoteInstallRetry
+	t.Cleanup(func() { remoteInstallRetry = prevRetry })
+	remoteInstallRetry = false
+
+	prevEstablished := remoteLinkEstablishedFn
+	prevErr := remoteLinkErrFn
+	prevExitCode := remoteExitCodeFn
+	prevOffer := offerRemoteInstallFn
+	prevExit := exitFn
+	t.Cleanup(func() {
+		remoteLinkEstablishedFn = prevEstablished
+		remoteLinkErrFn = prevErr
+		remoteExitCodeFn = prevExitCode
+		offerRemoteInstallFn = prevOffer
+		exitFn = prevExit
+	})
+
+	remoteLinkEstablishedFn = func() bool { return false }
+	remoteLinkErrFn = func() error { return errLinkTest }
+	remoteExitCodeFn = func() int { return 127 }
+	offerRemoteInstallFn = func(string, remoteinstall.Remedy) bool { return true } // installed
+
+	exited := false
+	exitFn = func(int) { exited = true }
+
+	out := captureStderr(t, func() { gateVersionCheck(deadClient(t)) })
+
+	if !remoteInstallRetry {
+		t.Error("remoteInstallRetry = false after a successful install; the caller will not re-dial")
+	}
+	if exited {
+		t.Error("gate exited after a successful install instead of handing back for a retry")
+	}
+	// The old behaviour told the user to run the command again. If that text
+	// survives, the retry is not actually wired up.
+	if strings.Contains(out, "again to attach") {
+		t.Errorf("still telling the user to retype the command:\n%s", out)
+	}
+}
+
+// A DECLINED install must not set the retry flag — nothing changed on the far
+// side, so re-dialling would just fail identically.
+func TestGateVersionCheck_NoRetryWhenInstallDeclined(t *testing.T) {
+	withRemote(t, "gpu01")
+
+	prevRetry := remoteInstallRetry
+	t.Cleanup(func() { remoteInstallRetry = prevRetry })
+	remoteInstallRetry = false
+
+	remoteGateSeams(t, false, 127) // its offer stub declines
+
+	captureStderr(t, func() { gateVersionCheck(deadClient(t)) })
+
+	if remoteInstallRetry {
+		t.Error("remoteInstallRetry = true after a declined install")
 	}
 }

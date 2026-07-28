@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`quil remote setup <host>` installs Quil on the machine you want to work
+  on.** Attaching to a remote daemon previously assumed Quil was already there,
+  and getting it there by hand meant working out the server's platform,
+  downloading the right archive, verifying it, copying it over, and putting it
+  somewhere a non-interactive shell could find — then repeating the whole thing
+  on every version bump. Now your own machine downloads the release for the
+  *remote's* platform, verifies its checksum locally, and pushes it over the SSH
+  connection you already have. The server needs no route to GitHub, which
+  matters because cluster nodes frequently have none.
+
+  You rarely need to run it yourself. `quil --remote <host>` against a machine
+  with no Quil offers to install it and then **attaches** — the command asked to
+  attach, so that is what it finishes doing. A version mismatch offers an
+  upgrade the same way. Nothing happens without an explicit `y`, and the prompt
+  names the host, the exact path, the version, and — for an upgrade — that the
+  remote daemon will be stopped.
+
+  This also fixes a trap that was easy to hit and hard to read: `ssh host quil
+  --stdio` runs a *non-interactive* shell, and on Debian and Ubuntu `~/.bashrc`
+  returns before reaching any `PATH` line, so a binary in `~/.local/bin` is
+  invisible and the failure looks identical to an unreachable host. Setup
+  records the absolute path per destination and uses it directly, so `PATH`
+  never participates. Installs never use `sudo`.
+
+  Supported remote platforms are Linux and macOS on amd64 and arm64; any local
+  platform can provision any of them. Windows remotes are not supported — a
+  running `.exe` cannot be overwritten, which makes the *upgrade* half
+  impossible to do the way the Unix path does it.
+
+- **`--from-dir` pushes locally built binaries** instead of a release, which is
+  the only route available to a development build.
+
+### Changed
+- A version mismatch against a remote daemon now offers to upgrade it. The
+  previous message suggested `ssh <host> 'quil daemon restart'`, which could not
+  work — restarting the same binary reports the same version.
+
 ## [1.43.1] - 2026-07-28
 
 ### Fixed

@@ -402,6 +402,30 @@ These are set on the command line, which OpenSSH resolves before any config file
 
 When the connection fails, Quil reports it as a connection failure and prints the exact command to reproduce it by hand (`ssh <host> quil --stdio`, which should print nothing and stay open). It does **not** report it as a version mismatch — an unreachable host and an out-of-date daemon look identical from the client's side unless the transport is asked directly, and conflating them sent users off upgrading binaries that were fine.
 
+#### Installing Quil on the remote
+
+```bash
+quil remote setup gpu01
+```
+
+Quil downloads the release for the **remote's** platform onto your machine, verifies its checksum there, and pushes it over the SSH connection. The server needs no route to GitHub — which matters, because cluster nodes frequently have none. The version installed matches your TUI by construction, so the two cannot disagree afterwards.
+
+You rarely need to run it yourself. `quil --remote <host>` on a machine that has no Quil offers to install it, and **attaches once it has** — the command you typed asked to attach, so that is what it finishes doing. A version mismatch offers an upgrade the same way. Nothing is installed without an explicit `y`, and the prompt names the host, the exact path, the version, and — for an upgrade — that the remote daemon will be stopped.
+
+This also solves a problem that is otherwise easy to hit and hard to diagnose. `ssh host quil --stdio` runs a *non-interactive* shell, and on Debian and Ubuntu `~/.bashrc` returns before it reaches any `PATH` line — so a binary in `~/.local/bin` is invisible, and the failure looks exactly like an unreachable host. Setup records the absolute path per destination and uses it as the remote command, so `PATH` never participates. Installs go to `~/.local/bin` and **never use `sudo`**; an upgrade replaces an existing binary in place only where that directory is already writable.
+
+| Remote platform | Supported |
+|---|---|
+| `linux/amd64`, `linux/arm64` | Yes |
+| `darwin/amd64`, `darwin/arm64` | Yes |
+| `windows/amd64` | No — see below |
+
+Any local platform can provision any supported remote; a Windows laptop setting up a Linux ARM server is not a special case. The far side needs only `sh`, `uname`, `tar`, and either `sha256sum` or `shasum`. Alpine and other musl distributions work, because releases are built with `CGO_ENABLED=0` and are statically linked.
+
+Windows remotes are excluded for a concrete reason rather than a lack of interest: a running `.exe` cannot be overwritten. Renaming over a running ELF binary works — the process keeps its inode — which is what makes upgrading a live daemon safe on Unix. Windows locks the image file instead. A fresh install would be straightforward; the upgrade path is the hard half, and shipping one without the other would strand you the second time you used it.
+
+`--from-dir <path>` pushes locally built binaries instead of a release. Development builds have no matching release to download, so this is the only path available to them.
+
 Commands that manage a daemon's lifecycle refuse under `--remote` instead of silently acting on the wrong machine:
 
 | Command | Behavior with `--remote` |

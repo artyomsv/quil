@@ -22,6 +22,40 @@ type Config struct {
 	MCP          MCPConfig          `toml:"mcp"`
 	Notification NotificationConfig `toml:"notification"`
 	Update       UpdateConfig       `toml:"update"`
+	Remote       RemoteConfig       `toml:"remote"`
+}
+
+// RemoteConfig holds per-destination settings for `quil --remote`, keyed by the
+// destination string exactly as the user types it — an ssh_config Host alias,
+// a hostname, or user@host.
+type RemoteConfig struct {
+	Hosts map[string]RemoteHost `toml:"hosts"`
+}
+
+// RemoteHost pins how to reach quil on one remote destination.
+type RemoteHost struct {
+	// Binary is the absolute path to quil on that host, as resolved by
+	// `quil remote setup`. It is used verbatim as the ssh remote command,
+	// which is what makes attaching work when the non-interactive PATH cannot
+	// see the install directory — the normal case for ~/.local/bin on Debian
+	// and Ubuntu, where ~/.bashrc returns before reaching any PATH line.
+	Binary string `toml:"binary"`
+}
+
+// SetRemoteBinary records where quil lives on dest, creating the map on first
+// use so callers need not care whether the config predates this section.
+func (c *Config) SetRemoteBinary(dest, binary string) {
+	if c.Remote.Hosts == nil {
+		c.Remote.Hosts = make(map[string]RemoteHost)
+	}
+	c.Remote.Hosts[dest] = RemoteHost{Binary: binary}
+}
+
+// RemoteBinary returns the recorded quil path for dest, or "" when none has
+// been recorded — in which case the caller falls back to a bare `quil`, which
+// works only if the remote's non-interactive PATH can see it.
+func (c *Config) RemoteBinary(dest string) string {
+	return c.Remote.Hosts[dest].Binary
 }
 
 type NotificationConfig struct {

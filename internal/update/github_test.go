@@ -86,3 +86,67 @@ func TestFindAssets(t *testing.T) {
 		t.Error("FindAssets for missing platform = nil error, want error")
 	}
 }
+
+// The tag becomes a URL path segment, so it is validated before the request is
+// built. Rejecting rather than escaping: no real tag contains these, and a
+// permissive reading would let a caller redirect the request.
+func TestChecker_Release_RejectsUnsafeTags(t *testing.T) {
+	var requested []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requested = append(requested, r.URL.Path)
+		w.Write([]byte(`{"tag_name":"v1.0.0"}`))
+	}))
+	defer srv.Close()
+
+	tags := []string{
+		"1.0.0/../../../etc",
+		"../1.0.0",
+		"1.0.0?foo=bar",
+		"1.0.0#frag",
+		"1.0.0%2f",
+		`1.0.0\evil`,
+	}
+	c := &Checker{BaseURL: srv.URL}
+	for _, tag := range tags {
+		t.Run(tag, func(t *testing.T) {
+			if _, err := c.Release(context.Background(), tag); err == nil {
+				t.Errorf("Release(%q) error = nil, want rejection", tag)
+			}
+		})
+	}
+	if len(requested) != 0 {
+		t.Errorf("a rejected tag still reached the network: %v", requested)
+	}
+}
+
+func TestChecker_Release_ByTag(t *testing.T) {
+	tests := []struct {
+		name, tag, wantPath string
+	}{
+		{"bare version", "1.43.1", "/repos/artyomsv/quil/releases/tags/v1.43.1"},
+		{"already prefixed", "v1.43.1", "/repos/artyomsv/quil/releases/tags/v1.43.1"},
+		// Empty means latest — the endpoint Latest() uses.
+		{"empty means latest", "", "/repos/artyomsv/quil/releases/latest"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotPath string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotPath = r.URL.Path
+				w.Write([]byte(`{"tag_name":"v1.43.1"}`))
+			}))
+			defer srv.Close()
+
+			rel, err := (&Checker{BaseURL: srv.URL}).Release(context.Background(), tt.tag)
+			if err != nil {
+				t.Fatalf("Release error = %v", err)
+			}
+			if gotPath != tt.wantPath {
+				t.Errorf("requested %q, want %q", gotPath, tt.wantPath)
+			}
+			if rel.Version() != "1.43.1" {
+				t.Errorf("Version = %q", rel.Version())
+			}
+		})
+	}
+}

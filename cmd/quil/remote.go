@@ -1,10 +1,19 @@
 package main
 
 import (
+	"context"
+	"log"
+	"net"
+
 	"errors"
 	"fmt"
+	"github.com/artyomsv/quil/internal/ipc"
 	"os"
 	"strings"
+
+	"github.com/artyomsv/quil/internal/config"
+	"github.com/artyomsv/quil/internal/remoteinstall"
+	"github.com/artyomsv/quil/internal/transport"
 )
 
 // remoteDest is empty for a local session and holds the --remote destination
@@ -40,6 +49,41 @@ var remoteLinkErrFn func() error
 // remoteLinkEstablishedFn reports whether the remote transport has ever
 // delivered a byte. Installed alongside remoteLinkErrFn.
 var remoteLinkEstablishedFn func() bool
+
+// remoteExitCodeFn reports the ssh child's exit status, or -1 when it has not
+// exited. Installed alongside remoteLinkErrFn.
+//
+// Meaningful only AFTER the connection is closed, because Close is what reaps
+// the child. That is the opposite of remoteLinkErrFn, which Close can silently
+// clear — so the two are read on either side of the same Close call.
+var remoteExitCodeFn func() int
+
+// remoteExitCode reports how the ssh child exited, or -1 when it has not, when
+// no probe is installed, or in a local session.
+func remoteExitCode() int {
+	if remoteExitCodeFn == nil {
+		return -1
+	}
+	return remoteExitCodeFn()
+}
+
+// remoteSSHOptions builds the dial options for the configured destination.
+//
+// When `quil remote setup` has recorded an absolute path for this host, it
+// becomes the remote command. That is what makes attaching work on a host where
+// quil lives in ~/.local/bin: `ssh host quil --stdio` runs a non-interactive
+// shell, which on Debian and Ubuntu returns from ~/.bashrc before reaching any
+// PATH line, so the directory is invisible there.
+//
+// With nothing recorded the transport's default (`quil --stdio`) applies, which
+// works when the remote's non-interactive PATH can already see it.
+func remoteSSHOptions(cfg config.Config) transport.SSHOptions {
+	var opts transport.SSHOptions
+	if binary := cfg.RemoteBinary(remoteDest); binary != "" {
+		opts.RemoteCommand = remoteinstall.ShellSingleQuote(binary) + " --stdio"
+	}
+	return opts
+}
 
 // remoteLinkError reports a dead remote transport, or nil when the link is
 // alive, still connecting, or unknown. Safe to call in a local session.
@@ -152,4 +196,57 @@ func validateRemoteDest(dest string) error {
 		return fmt.Errorf("invalid --remote destination %q: must not begin with '-'", dest)
 	}
 	return nil
+}
+
+// remoteInstallRetry is set by the version gate when a remote install has just
+// succeeded, telling launchTUI to re-dial instead of exiting.
+//
+// A flag rather than a return value because the gate's signature already
+// carries "the client to use from here on", and the retry is a different kind
+// of answer: there is no client yet, and the caller — not the gate — owns
+// dialling.
+var remoteInstallRetry bool
+
+// dialRemote opens an ssh-backed client to remoteDest and installs the link
+// seams the version gate reads.
+//
+// Split out of launchTUI so it can be called twice: once for the initial
+// attach, and again after an install has removed the reason the first one
+// failed. Each call re-installs the seams, so the gate never reads a previous
+// connection's status.
+func dialRemote(cfg config.Config) (*ipc.Client, error) {
+	// Batch=false so this dial can prompt for a host-key fingerprint or a key
+	// passphrase — it runs before tea.NewProgram takes the terminal.
+	log.Printf("remote mode: dialing %s over ssh", remoteDest)
+
+	// Keep hold of the transport so the version gate can tell a dead ssh
+	// channel from a daemon that answered badly. The dial only fails when ssh
+	// could not be STARTED (binary missing, pipe exhaustion) — every
+	// network-level failure survives it and surfaces later.
+	var link transport.LinkStatus
+	dialSSH := transport.SSH(remoteDest, remoteSSHOptions(cfg))
+	client, err := ipc.NewClientWithDialer(
+		context.Background(),
+		func(ctx context.Context) (net.Conn, error) {
+			conn, dialErr := dialSSH(ctx)
+			if conn != nil {
+				ls, ok := conn.(transport.LinkStatus)
+				if !ok {
+					// Not fatal, but it silently disables the only check that
+					// tells "unreachable host" from "version mismatch", so it
+					// must not pass unnoticed. A compile-time assertion covers
+					// *stdioConn itself; this catches a future wrapper type.
+					log.Printf("remote: transport %T does not report link status — link diagnosis disabled", conn)
+				}
+				link = ls
+			}
+			return conn, dialErr
+		},
+	)
+	if link != nil {
+		remoteLinkErrFn = link.LinkErr
+		remoteLinkEstablishedFn = link.Established
+		remoteExitCodeFn = link.ExitCode
+	}
+	return client, err
 }

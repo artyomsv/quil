@@ -1,11 +1,9 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"log"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,7 +16,6 @@ import (
 	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/logger"
 	"github.com/artyomsv/quil/internal/plugin"
-	"github.com/artyomsv/quil/internal/transport"
 	"github.com/artyomsv/quil/internal/tui"
 	versionpkg "github.com/artyomsv/quil/internal/version"
 )
@@ -110,6 +107,12 @@ func main() {
 			return
 		case "version":
 			fmt.Println("quil v" + version)
+			return
+		case "remote":
+			// `quil remote setup <dest>` — distinct from the `--remote <dest>`
+			// FLAG, which parseRemoteFlag has already stripped from os.Args by
+			// the time this switch runs.
+			handleRemote()
 			return
 		case "restart":
 			if remoteMode() {
@@ -355,36 +358,7 @@ func launchTUI() {
 		// the remote one. Batch=false so this first dial can prompt for a
 		// host-key fingerprint or key passphrase — it runs before tea.NewProgram
 		// takes the terminal.
-		log.Printf("remote mode: dialing %s over ssh", remoteDest)
-		// Keep hold of the transport so the version gate can tell a dead ssh
-		// channel from a daemon that answered badly. The dial below only fails
-		// when ssh could not be STARTED (binary missing, pipe exhaustion) —
-		// every network-level failure survives the dial and surfaces later.
-		var link transport.LinkStatus
-		dialSSH := transport.SSH(remoteDest, transport.SSHOptions{})
-		client, err = ipc.NewClientWithDialer(
-			context.Background(),
-			func(ctx context.Context) (net.Conn, error) {
-				conn, dialErr := dialSSH(ctx)
-				if conn != nil {
-					ls, ok := conn.(transport.LinkStatus)
-					if !ok {
-						// Not fatal, but it silently disables the only check
-						// that tells "unreachable host" from "version
-						// mismatch", so it must not pass unnoticed. A
-						// compile-time assertion covers *stdioConn itself;
-						// this catches a future wrapper type around it.
-						log.Printf("remote: transport %T does not report link status — link diagnosis disabled", conn)
-					}
-					link = ls
-				}
-				return conn, dialErr
-			},
-		)
-		if link != nil {
-			remoteLinkErrFn = link.LinkErr
-			remoteLinkEstablishedFn = link.Established
-		}
+		client, err = dialRemote(cfg)
 		if err != nil {
 			log.Printf("cannot connect to remote daemon %s: %v", remoteDest, err)
 			fmt.Fprintf(os.Stderr, "cannot connect to %s: %v\n"+
@@ -426,6 +400,33 @@ func launchTUI() {
 	// user-confirmed upgrade restart), or exits the process outright
 	// (TUI older than daemon — blocking dialog path).
 	client = gateVersionCheck(client)
+
+	// A remote install just succeeded, so the reason this launch failed is
+	// gone. Re-dial rather than making the user retype the command they
+	// already ran — attaching was the whole point of it.
+	//
+	// The config is reloaded first: it was read before the install, so the
+	// binary path `remote setup` just recorded is not in this process's copy,
+	// and that path is what the next dial must use as the remote command.
+	//
+	// Bounded to one attempt by construction rather than by a counter. The
+	// install wrote a binary path for this destination, so if the far side
+	// still cannot run quil, offerRemoteInstall's guard sees a provisioned
+	// host and refuses instead of offering again.
+	if client == nil && remoteInstallRetry {
+		remoteInstallRetry = false
+		if reloaded, loadErr := config.Load(config.ConfigPath()); loadErr == nil {
+			cfg = reloaded
+		}
+		log.Printf("remote: install succeeded, re-dialing %s", remoteDest)
+		fmt.Fprintf(os.Stderr, "  Attaching…\n\n")
+		client, err = dialRemote(cfg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "cannot connect to %s after installing: %v\n", remoteDest, err)
+			os.Exit(1)
+		}
+		client = gateVersionCheck(client)
+	}
 	defer client.Close()
 
 	// Ensure default plugins exist and detect stale ones needing migration

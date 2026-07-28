@@ -19,6 +19,12 @@ import (
 // this only bounds how much one Read syscall can pull at once.
 const readChunk = 32 * 1024
 
+// noExitCode marks a child that has not been reaped — still running, still
+// connecting, or never started. Distinct from every real exit status, including
+// the -1 that os/exec reports for a signalled process, only in meaning: both
+// say "no status the caller can act on".
+const noExitCode = -1
+
 // stdioAddr reports a stdio-backed connection's endpoint for net.Conn's
 // LocalAddr/RemoteAddr. Purely descriptive — nothing routes on it.
 type stdioAddr string
@@ -80,6 +86,16 @@ type stdioConn struct {
 
 	closeOnce sync.Once
 
+	// exitCode is the child's wait status once reaped, or noExitCode while it
+	// is still running. Atomic for the same reason as bytesIn: it is read
+	// precisely when a read has just failed, and must not be able to block or
+	// be blocked by a parked Read.
+	exitCode atomic.Int32
+
+	// reapOnce guards cmd.Wait, which must not be called twice. Both pump()
+	// (on pipe EOF) and Close() reach it.
+	reapOnce sync.Once
+
 	// stderr holds ssh's captured diagnostics when the dial ran in batch mode.
 	// Nil on interactive dials, where stderr went straight to the terminal.
 	// Assigned by SSH (ssh.go) AFTER newStdioConn returns and pump() is
@@ -101,14 +117,41 @@ func newStdioConn(cmd *exec.Cmd, r, w *os.File, desc string) *stdioConn {
 		readCh: make(chan []byte, 1),
 		done:   make(chan struct{}),
 	}
+	c.exitCode.Store(noExitCode)
 	go c.pump()
 	return c
+}
+
+// reap waits for the child and records its exit status.
+//
+// Idempotent because exec.Cmd.Wait must not be called twice and both pump() and
+// Close() reach here. Calling Wait from the pump goroutine is safe only because
+// SSH() gives the command *os.File stdin/stdout rather than StdinPipe/
+// StdoutPipe: exec therefore starts no copier goroutines, and Wait closes none
+// of the parent's descriptors.
+func (c *stdioConn) reap() {
+	c.reapOnce.Do(func() {
+		if c.cmd == nil {
+			return
+		}
+		// The error here is the child's non-zero status, which is exactly what
+		// this function exists to record — not a failure of the wait itself.
+		_ = c.cmd.Wait()
+		if st := c.cmd.ProcessState; st != nil {
+			c.exitCode.Store(int32(st.ExitCode()))
+		}
+	})
 }
 
 // pump drains the pipe into readCh until the pipe errors or the conn closes.
 // Closing readCh is what turns a dead child into a read error rather than a
 // permanent block.
 func (c *stdioConn) pump() {
+	// Deferred LIFO: close(readCh) runs FIRST, unparking any blocked reader,
+	// and only then does reap() park this goroutine in Wait. Reversed, a child
+	// that closed stdout without exiting would hold every reader blocked until
+	// Close killed it.
+	defer c.reap()
 	defer close(c.readCh)
 	buf := make([]byte, readChunk)
 	for {
@@ -209,15 +252,21 @@ func (c *stdioConn) Close() error {
 		// connection the caller has already finished with, and there is no
 		// recovery for any of them. A pipe that fails to close is already
 		// closed; Kill fails only when the child is already dead, which is the
-		// outcome we wanted; Wait then returns that child's non-zero exit
-		// status, which for a killed process is expected rather than an error.
-		// Reporting any of it would turn a normal close into a spurious
-		// failure. Close itself returns nil for the same reason.
+		// outcome we wanted. Reporting any of it would turn a normal close into
+		// a spurious failure. Close itself returns nil for the same reason.
 		_ = c.w.Close()
 		_ = c.r.Close()
 		if c.cmd != nil && c.cmd.Process != nil {
+			// Kill BEFORE reap, not after. sync.Once.Do blocks the second
+			// caller until the first returns, so when pump is already parked in
+			// Wait, reaping an unkilled child would hang Close for as long as
+			// ssh stayed alive. Killing first guarantees that Wait returns.
+			//
+			// Killing a child that has already exited is a no-op on a PID that
+			// cannot have been reused: it is an unreaped zombie precisely
+			// because nothing has waited on it yet.
 			_ = c.cmd.Process.Kill()
-			_ = c.cmd.Wait()
+			c.reap()
 		}
 	})
 	return nil
@@ -282,12 +331,32 @@ type LinkStatus interface {
 	// EXPLANATION once Established() has established there is a problem, never
 	// as the test for whether one exists.
 	LinkErr() error
+
+	// ExitCode reports the child's exit status, or -1 if it has not been
+	// reaped.
+	//
+	// For an ssh child this separates a failure on the far side from ssh's own:
+	// 255 is ssh itself (auth, host key, DNS, refused connect), while the
+	// remote shell's codes pass through untouched — 127 for a command it could
+	// not find, 126 for one it found and could not execute. That distinction is
+	// what makes "quil is not installed over there" actionable rather than just
+	// another unreachable host.
+	//
+	// Read it AFTER Close, which is what reaps the child and makes the status
+	// final. This is the mirror image of LinkErr, which must be read BEFORE
+	// Close because Close can clear it.
+	ExitCode() int
 }
 
 // Established reports whether the far side has ever delivered a byte. See
 // LinkStatus for why this, not LinkErr, is the test for a link that never came
 // up.
 func (c *stdioConn) Established() bool { return c.bytesIn.Load() > 0 }
+
+// ExitCode reports the child's exit status, or noExitCode if it has not been
+// reaped. See LinkStatus.ExitCode for what the ssh values mean and why this is
+// read after Close rather than before.
+func (c *stdioConn) ExitCode() int { return int(c.exitCode.Load()) }
 
 // LinkErr reports the child's failure once its stdout has closed, or nil while
 // the pipe is still live.

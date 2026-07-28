@@ -95,6 +95,10 @@ Three caveats worth knowing:
 ## Phase 1 — shipped (BETA)
 
 - `quil --remote <dest>` attaches over SSH; the remote daemon starts on demand.
+- `quil remote setup <dest>` installs or upgrades Quil on the far side. The
+  archive is downloaded and checksum-verified on **your** machine and pushed
+  over the SSH connection, so the server needs no route to GitHub. Offered
+  automatically when a launch finds no `quil` there, or finds the wrong version.
 - `internal/transport` behind an `ipc.DialFunc` seam, with `Local` (Unix socket)
   and `SSH` backends. The seam is shaped so a TLS backend can be added without
   the protocol layer knowing.
@@ -127,12 +131,42 @@ These are real and current. None are bugs to be reported; all are scoped work.
 | **Notes, log viewer are local by design** | Pane notes and the F1 log viewer read local files. Not planned to change — the daemon logs are reachable over SSH. | — |
 | **No multi-client editing** | Two TUIs may attach to one daemon, but the layout is last-writer-wins. | Not planned |
 
+### Provisioning the remote
+
+```bash
+quil remote setup gpu01                    # install or upgrade
+quil remote setup gpu01 --from-dir ./dist  # push locally built binaries
+quil remote setup gpu01 --version 1.43.1   # pin a release
+```
+
+Supported **remote** platforms: `linux/amd64`, `linux/arm64`, `darwin/amd64`,
+`darwin/arm64`. Any local platform can provision any of them — the download and
+verification happen locally, so what the laptop runs is irrelevant to what the
+server gets. Requirements on the far side are `sh`, `uname`, `tar` and either
+`sha256sum` or `shasum`. Alpine/musl works: releases are built `CGO_ENABLED=0`.
+
+**Windows remotes are not supported.** There is no `uname` or `sh` (the OpenSSH
+server's default shell is `cmd.exe`), the archives are `.zip`, and — the actual
+blocker — a running `.exe` cannot be overwritten. `mv -f` over a running ELF
+works because the process keeps its inode; Windows locks the image file, which
+is why the local updater carries the `freeBackupPath` rename-aside logic. A
+fresh install would be easy; upgrade is the hard half, and shipping one without
+the other strands the user on second use.
+
+Installs go to `~/.local/bin` — **never `sudo`**. An upgrade replaces the
+existing binary in place when that directory is already writable, and otherwise
+falls back to `~/.local/bin` and tells you the old copy is now shadowed.
+
 ### Operational notes
 
-- **`quil` must be on the remote's non-interactive `PATH`.** `ssh host quil --stdio`
+- **`PATH` is handled for you after `remote setup`.** `ssh host quil --stdio`
   runs a non-interactive shell, which on Debian/Ubuntu returns from `~/.bashrc`
-  before any `PATH` line. `~/.local/bin` is therefore usually invisible; install
-  to `/usr/local/bin`. Verify with `ssh <host> command -v quil`.
+  before any `PATH` line, so `~/.local/bin` is usually invisible there. Setup
+  records the absolute path per destination (`[remote.hosts.<dest>] binary` in
+  `config.toml`) and uses it as the SSH remote command, so `PATH` never
+  participates. A **hand-installed** host still hits this — install to
+  `/usr/local/bin` or run `quil remote setup` to record the path. Verify with
+  `ssh <host> command -v quil`.
 - **`ssh <host> quil --stdio` must print nothing.** Its stdout is the IPC
   channel; a shell banner or MOTD on stdout corrupts the first frame. This is
   the single fastest way to isolate a transport problem from a Quil problem.

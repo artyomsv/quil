@@ -458,3 +458,84 @@ func TestCapWriter_StopsAtTheLimit(t *testing.T) {
 		t.Errorf("buffered %d bytes, want 16", got)
 	}
 }
+
+// fatHeader builds a universal Mach-O header declaring the given cputypes.
+func fatHeader(cpuTypes ...uint32) []byte {
+	b := make([]byte, 8+len(cpuTypes)*20)
+	binary.BigEndian.PutUint32(b[0:4], 0xcafebabe)
+	binary.BigEndian.PutUint32(b[4:8], uint32(len(cpuTypes)))
+	for i, cpu := range cpuTypes {
+		binary.BigEndian.PutUint32(b[8+i*20:12+i*20], cpu)
+	}
+	return b
+}
+
+// A universal binary is not automatically safe. An earlier version treated one
+// as "architecture unknown" and skipped validation entirely, on the reasoning
+// that a binary carrying several architectures cannot be wrong about any one —
+// which is false: a fat binary holding only arm64 fails on an Intel Mac exactly
+// as a thin one would.
+func TestBinaryArchs_UniversalBinaries(t *testing.T) {
+	tests := []struct {
+		name string
+		body []byte
+		want []string
+	}{
+		{"both slices", fatHeader(machoCPUTypeAMD64, machoCPUTypeARM64), []string{"amd64", "arm64"}},
+		{"arm64 only", fatHeader(machoCPUTypeARM64), []string{"arm64"}},
+		{"amd64 only", fatHeader(machoCPUTypeAMD64), []string{"amd64"}},
+		// Unrecognised slices are simply not listed; an all-unknown fat binary
+		// yields nothing and so is not rejected.
+		{"unknown slice", fatHeader(0x0000000c), nil},
+		{"no slices", fatHeader(), nil},
+		{"truncated header", []byte{0xca, 0xfe, 0xba, 0xbe}, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := binaryArchs(tt.body)
+			if len(got) != len(tt.want) {
+				t.Fatalf("binaryArchs = %v, want %v", got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("binaryArchs = %v, want %v", got, tt.want)
+				}
+			}
+		})
+	}
+}
+
+// A hostile or corrupt count must not drive an unbounded loop.
+func TestBinaryArchs_RejectsAbsurdSliceCount(t *testing.T) {
+	b := make([]byte, 8)
+	binary.BigEndian.PutUint32(b[0:4], 0xcafebabe)
+	binary.BigEndian.PutUint32(b[4:8], 0xffffffff)
+	if got := binaryArchs(b); got != nil {
+		t.Errorf("binaryArchs = %v, want nil for an absurd slice count", got)
+	}
+}
+
+func TestPackDir_RejectsUniversalBinaryMissingTheHostSlice(t *testing.T) {
+	dir := t.TempDir()
+	writeFakeBinaries(t, dir, fatHeader(machoCPUTypeARM64))
+
+	_, err := PackDir(dir, Platform{"darwin", "amd64"})
+	if err == nil {
+		t.Fatal("error = nil, want rejection of a fat binary with no amd64 slice")
+	}
+	if !strings.Contains(err.Error(), "arm64") {
+		t.Errorf("error %q does not name what the binary actually carries", err)
+	}
+}
+
+func TestPackDir_AcceptsUniversalBinaryContainingTheHostSlice(t *testing.T) {
+	for _, goarch := range []string{"amd64", "arm64"} {
+		t.Run(goarch, func(t *testing.T) {
+			dir := t.TempDir()
+			writeFakeBinaries(t, dir, fatHeader(machoCPUTypeAMD64, machoCPUTypeARM64))
+			if _, err := PackDir(dir, Platform{"darwin", goarch}); err != nil {
+				t.Errorf("PackDir error = %v", err)
+			}
+		})
+	}
+}

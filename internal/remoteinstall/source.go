@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -190,24 +191,103 @@ func checkBinaryFormat(name string, body []byte, p Platform) error {
 	case p.GOOS == "darwin" && !isMachO(body):
 		return fmt.Errorf("%s is not a Mach-O executable, but the remote host is %s", name, p)
 	}
-	if arch, ok := binaryArch(body); ok && arch != p.GOARCH {
-		return fmt.Errorf("%s is built for %s, but the remote host is %s", name, arch, p)
+	if archs := binaryArchs(body); len(archs) > 0 && !slices.Contains(archs, p.GOARCH) {
+		return fmt.Errorf("%s is built for %s, but the remote host is %s",
+			name, strings.Join(archs, "/"), p)
 	}
 	return nil
 }
 
 // ELF and Mach-O architecture identifiers, from their respective ABI specs.
 const (
-	elfMachineAMD64   = 0x3e   // EM_X86_64
-	elfMachineARM64   = 0xb7   // EM_AARCH64
+	elfMachineAMD64   = 0x3e // EM_X86_64
+	elfMachineARM64   = 0xb7 // EM_AARCH64
 	machoCPUTypeAMD64 = 0x01000007
 	machoCPUTypeARM64 = 0x0100000c
 )
 
-// binaryArch reports the GOARCH an executable targets. ok is false when the
-// architecture cannot be determined — a truncated header, a format not handled
-// here, or a universal Mach-O binary, which carries several at once and so
-// cannot be wrong about any single one.
+// maxFatSlices caps how many architectures a universal binary may declare
+// before the header is treated as unreadable. Apple ships at most a handful;
+// a larger count means a corrupt or hostile file, not a real fat binary.
+const maxFatSlices = 32
+
+// fat header magics. The header fields are big-endian in the canonical form
+// and byte-swapped in the CIGAM variants; the _64 forms differ only in the
+// per-slice entry size.
+const (
+	fatMagic     = 0xcafebabe
+	fatCigam     = 0xbebafeca
+	fatMagic64   = 0xcafebabf
+	fatCigam64   = 0xbfbafeca
+	fatEntrySize = 20 // 32-bit fat_arch
+	fatEntry64   = 32 // fat_arch_64
+)
+
+// binaryArchs reports every GOARCH an executable can run as. Empty means the
+// architecture could not be determined — a truncated header, or a format not
+// handled here.
+//
+// A universal Mach-O returns one entry per slice. An earlier version returned
+// "unknown" for those on the reasoning that a binary carrying several
+// architectures cannot be wrong about any one of them, which is false: a fat
+// binary holding only arm64 fails on an Intel Mac exactly as a thin one would.
+//
+// Rosetta 2 does let an amd64 binary run on an arm64 Mac, so rejecting that
+// pair is stricter than the hardware requires — but the daemon is launched over
+// a non-interactive ssh session, where Rosetta's install-on-first-use prompt
+// has nobody to answer it. Pushing the native slice is the fix either way.
+func binaryArchs(body []byte) []string {
+	if arch, ok := binaryArch(body); ok {
+		return []string{arch}
+	}
+	return fatArchs(body)
+}
+
+// fatArchs reads the cputype of every slice in a universal Mach-O.
+func fatArchs(body []byte) []string {
+	if len(body) < 8 {
+		return nil
+	}
+	magic := binary.BigEndian.Uint32(body[0:4])
+
+	var order binary.ByteOrder = binary.BigEndian
+	var entrySize int
+	switch magic {
+	case fatMagic:
+		entrySize = fatEntrySize
+	case fatMagic64:
+		entrySize = fatEntry64
+	case fatCigam:
+		order, entrySize = binary.LittleEndian, fatEntrySize
+	case fatCigam64:
+		order, entrySize = binary.LittleEndian, fatEntry64
+	default:
+		return nil
+	}
+
+	count := int(order.Uint32(body[4:8]))
+	if count <= 0 || count > maxFatSlices {
+		return nil
+	}
+
+	var archs []string
+	for i := 0; i < count; i++ {
+		start := 8 + i*entrySize
+		if start+4 > len(body) {
+			break
+		}
+		// cputype is the first field of every fat_arch variant.
+		switch order.Uint32(body[start : start+4]) {
+		case machoCPUTypeAMD64:
+			archs = append(archs, "amd64")
+		case machoCPUTypeARM64:
+			archs = append(archs, "arm64")
+		}
+	}
+	return archs
+}
+
+// binaryArch reports the single GOARCH a thin executable targets.
 func binaryArch(body []byte) (arch string, ok bool) {
 	switch {
 	case bytes.HasPrefix(body, []byte("\x7fELF")):

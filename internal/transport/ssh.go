@@ -187,7 +187,18 @@ func SSH(dest string, opts SSHOptions) func(context.Context) (net.Conn, error) {
 			errBuf = &lockedBuffer{}
 			cmd.Stderr = errBuf
 		} else {
-			cmd.Stderr = os.Stderr
+			// Sanitized, not raw. ssh multiplexes the REMOTE command's fd 2
+			// onto its own stderr, and this fd stays attached for the whole
+			// session — so without the filter a compromised remote host has an
+			// unfiltered escape-sequence channel to the operator's terminal
+			// (OSC 52 clipboard write, UI spoofing), bypassing every protection
+			// the pane path applies to its output.
+			//
+			// ssh's own prompts are unaffected: host-key confirmation and
+			// passphrase entry go to /dev/tty directly, not through this pipe.
+			// Its diagnostics ("Could not resolve hostname …") are plain text
+			// and pass through unchanged.
+			cmd.Stderr = &terminalSanitizer{w: os.Stderr}
 		}
 
 		if err := cmd.Start(); err != nil {

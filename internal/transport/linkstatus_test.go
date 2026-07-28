@@ -228,3 +228,63 @@ func TestTruncateForMessage_CutsOnARuneBoundary(t *testing.T) {
 		t.Errorf("truncateForMessage produced invalid UTF-8: %q", got)
 	}
 }
+
+// --- interactive stderr sanitisation -------------------------------------
+
+// TestTerminalSanitizer_StripsControlsFromAStream guards the one unfiltered
+// escape path from the remote host to the local terminal. ssh multiplexes the
+// remote command's fd 2 onto its own stderr, and on an interactive dial that fd
+// stays attached to the terminal for the whole session — so a compromised
+// remote could otherwise write OSC 52 (clipboard) or CSI directly to the
+// operator's screen, bypassing everything the pane path filters.
+func TestTerminalSanitizer_StripsControlsFromAStream(t *testing.T) {
+	var out strings.Builder
+	s := &terminalSanitizer{w: &out}
+
+	in := []byte("ssh: connect failed\n\x1b]52;c;cGF5bG9hZA==\x07\x1b[2Jspoofed\ttext\r\n")
+	n, err := s.Write(in)
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	// Short counts make io.Copy and exec's writer goroutine treat filtering as
+	// a write error, so the full input length must be reported as consumed.
+	if n != len(in) {
+		t.Errorf("Write returned n=%d, want %d (the caller's full length)", n, len(in))
+	}
+
+	got := out.String()
+	for _, forbidden := range []string{"\x1b", "\x07", "\r"} {
+		if strings.Contains(got, forbidden) {
+			t.Errorf("output %q still contains control byte %q", got, forbidden)
+		}
+	}
+	// Readable diagnostics must survive — they are the reason stderr is shown
+	// at all, and ssh explains failures better than Quil can.
+	if !strings.Contains(got, "ssh: connect failed") {
+		t.Errorf("output %q dropped ssh's own message", got)
+	}
+	if !strings.Contains(got, "spoofed\ttext") {
+		t.Errorf("output %q dropped tab or text, which must be preserved", got)
+	}
+}
+
+// TestTerminalSanitizer_PreservesUTF8AcrossWrites pins why this filters at BYTE
+// level rather than reusing the rune-based sanitizeForTerminal: every byte it
+// drops is < 0x80, so a multi-byte rune split across two Writes survives. A
+// rune-level filter would mangle the boundary.
+func TestTerminalSanitizer_PreservesUTF8AcrossWrites(t *testing.T) {
+	var out strings.Builder
+	s := &terminalSanitizer{w: &out}
+
+	// "é" is C3 A9 — split deliberately across the two calls.
+	if _, err := s.Write([]byte{0xC3}); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if _, err := s.Write([]byte{0xA9}); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	if got := out.String(); got != "é" {
+		t.Errorf("output = %q, want %q — a split rune was corrupted", got, "é")
+	}
+}

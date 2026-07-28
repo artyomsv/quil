@@ -4,6 +4,7 @@ package transport
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -344,6 +345,45 @@ func truncateForMessage(s string) string {
 		cut--
 	}
 	return s[:cut] + "…[truncated]"
+}
+
+// terminalSanitizer strips the control bytes a terminal acts on from a stream
+// before forwarding it, for output that is remote-influenced and terminal-bound.
+//
+// Filters at BYTE level, and only C0 (plus DEL), which is what makes it safe to
+// apply to an arbitrary stream: every byte it removes is < 0x80, so it can
+// never be part of a multi-byte UTF-8 sequence and a rune split across two
+// Writes is untouched. The rune-level sanitizeForTerminal cannot offer that —
+// it would mangle a sequence straddling a chunk boundary.
+//
+// C1 (0x80-0x9f) is deliberately left alone here for the same reason: at byte
+// level those are indistinguishable from UTF-8 continuation bytes, and dropping
+// them would corrupt legitimate text. Removing ESC and BEL already defangs the
+// sequences that matter — a bare 0x9b CSI introducer is not treated as a
+// control by terminals in UTF-8 mode.
+type terminalSanitizer struct{ w io.Writer }
+
+func (t *terminalSanitizer) Write(p []byte) (int, error) {
+	clean := make([]byte, 0, len(p))
+	for _, b := range p {
+		switch {
+		case b == '\n' || b == '\t':
+			clean = append(clean, b)
+		case b < 0x20 || b == 0x7f: // C0 controls and DEL
+			// dropped
+		default:
+			clean = append(clean, b)
+		}
+	}
+	if len(clean) > 0 {
+		if _, err := t.w.Write(clean); err != nil {
+			return 0, err
+		}
+	}
+	// Report the caller's full length: the bytes were consumed, and a short
+	// count would make io.Copy and exec's writer goroutine treat filtering as
+	// a write error.
+	return len(p), nil
 }
 
 // sanitizeForTerminal strips control bytes that a terminal would interpret,

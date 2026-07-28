@@ -85,7 +85,10 @@ Three caveats worth knowing:
 3. **Trust now flows server → laptop.** Remote output renders on your terminal.
    Mitigated by Quil re-rendering VT cells rather than forwarding raw escapes,
    OSC 0/1/2 window-title stripping, and the absence of any OSC 52 path — the
-   local clipboard is not reachable from remote output.
+   local clipboard is not reachable from remote output. ssh's stderr is the one
+   stream that does not go through the pane path (ssh multiplexes the remote
+   command's fd 2 onto it), so it is byte-filtered for control sequences before
+   reaching the screen.
 
 ---
 
@@ -151,9 +154,13 @@ Make a dropped link a pause rather than an ending.
   today with `context.Background()`, but the natural reconnect code
   (`WithTimeout` + `defer cancel()`) would kill a healthy session. Either scope
   `ctx` to the dial or document it as the connection's lifetime.
-- Divert ssh's stderr to `quil.log` once the TUI owns the terminal. It currently
-  stays attached for the whole session, so a late ssh diagnostic can corrupt the
-  display.
+- Divert ssh's stderr to `quil.log` once the TUI owns the terminal. It stays
+  attached for the whole session, so a late ssh diagnostic (`packet_write_wait:
+  Broken pipe`) can still land mid-render and corrupt the display. The
+  *security* half of this is already fixed — that stream is byte-filtered for
+  terminal control sequences before it reaches the screen, since ssh
+  multiplexes the remote command's fd 2 onto it — but cosmetically it remains
+  an uninvited writer to a terminal the TUI thinks it owns.
 
 ## Phase 3 — remote-correct UI (planned)
 

@@ -1096,6 +1096,23 @@ main, header.site-header, footer.site-footer {
   letter-spacing: -0.01em;
   margin: 0;
 }
+/* Maturity marker beside a feature title (data layer's `badge` field).
+   Deliberately quiet — it qualifies the claim next to it rather than
+   competing with it, and an over-loud badge reads as a promotion. */
+.feat-badge {
+  display: inline-block;
+  margin-left: 10px;
+  padding: 2px 7px;
+  border: 1px solid var(--flame);
+  border-radius: 3px;
+  font-family: var(--mono-stack);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--flame);
+  vertical-align: middle;
+}
 .feat-item .blurb {
   margin-top: 8px;
   color: var(--ink-2);

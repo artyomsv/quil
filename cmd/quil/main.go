@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +18,7 @@ import (
 	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/logger"
 	"github.com/artyomsv/quil/internal/plugin"
+	"github.com/artyomsv/quil/internal/transport"
 	"github.com/artyomsv/quil/internal/tui"
 	versionpkg "github.com/artyomsv/quil/internal/version"
 )
@@ -87,6 +90,16 @@ func main() {
 		}
 	}
 
+	// --remote binds this TUI to a daemon on another host. Parsed before the
+	// subcommand switch so the lifecycle guards are armed for everything below.
+	if dest, rest, err := parseRemoteFlag(os.Args); err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	} else if dest != "" {
+		remoteDest = dest
+		os.Args = rest
+	}
+
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "daemon":
@@ -99,12 +112,31 @@ func main() {
 			fmt.Println("quil v" + version)
 			return
 		case "restart":
+			if remoteMode() {
+				fmt.Fprintf(os.Stderr, "quil restart: not available with --remote (target: %s)\n", remoteDest)
+				os.Exit(1)
+			}
 			// Recovery path for a hung/wedged daemon: stop with bounded
 			// escalation, start fresh, then drop into the normal TUI.
 			restartDaemonCmd()
 			launchTUI()
 			return
+		case "--stdio":
+			runStdio()
+			return
 		case "status":
+			if remoteMode() {
+				// runStatus resolves config.SocketPath(), daemonPID() and
+				// config.PidPath() — all local. Without this it answers
+				// confidently about THIS machine while naming none of it, and
+				// --json emits {"running":true,...} with no field saying which
+				// host replied. Refused rather than silently wrong; reading the
+				// remote status over the transport is Phase 3 work.
+				fmt.Fprintf(os.Stderr, "quil status: not available with --remote (target: %s)\n"+
+					"Run it on the remote host instead:\n"+
+					"    ssh %s quil status\n", remoteDest, remoteDest)
+				os.Exit(1)
+			}
 			runStatus(os.Args[2:])
 			return
 		}
@@ -114,6 +146,12 @@ func main() {
 }
 
 func handleDaemon() {
+	if remoteMode() {
+		fmt.Fprintf(os.Stderr, "quil daemon: not available with --remote (target: %s)\n"+
+			"Manage the remote daemon over ssh, or drop --remote to manage the local one.\n", remoteDest)
+		os.Exit(1)
+	}
+
 	if len(os.Args) < 3 {
 		fmt.Fprintln(os.Stderr, "usage: quil daemon [start|stop|restart|status]")
 		os.Exit(1)
@@ -171,6 +209,25 @@ func findDaemonBinary() string {
 // process spawned) — that invariant lets callers treat pid==0 as "socket is
 // already up". Spawn failures exit the process (os.Exit) rather than return 0.
 func startDaemon(quiet bool) int {
+	if remoteMode() {
+		// Defense in depth: launchTUI never reaches here in remote mode, but
+		// startDaemon spawns against config.SocketPath() and a future caller
+		// that forgets would start a daemon on the wrong machine.
+		fmt.Fprintln(os.Stderr, "internal error: startDaemon called while attached to a remote daemon")
+		exitFn(1)
+		// Unreachable in production: exitFn is os.Exit, which never returns.
+		// The explicit return exists so a test double that DOES return (a
+		// perfectly reasonable double to write) cannot fall through into the
+		// spawn path below and start a real daemon against
+		// config.SocketPath() — the LOCAL machine's, not the one the remote
+		// session is attached to. -1 is not a real PID: 0 already means "a
+		// daemon was already listening, nothing spawned" (see the doc comment
+		// above), and asserting that here would be false — nothing was
+		// checked. Callers' pid > 0 gates (waitForDaemonReady, processProbe)
+		// treat -1 the same as "no process to watch", which is the true
+		// state.
+		return -1
+	}
 	sockPath := config.SocketPath()
 
 	// Probe existing socket — if daemon is dead, clean up stale
@@ -194,7 +251,8 @@ func startDaemon(quiet bool) int {
 	quilDir := config.QuilDir()
 	if err := os.MkdirAll(quilDir, 0700); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to create data dir %q: %v\n", quilDir, err)
-		os.Exit(1)
+		exitFn(1)
+		return -1 // unreachable in production; see the guard above for why
 	}
 	cmd := exec.Command(quild, "--background")
 	cmd.Dir = quilDir
@@ -211,7 +269,8 @@ func startDaemon(quiet bool) int {
 	cmd.SysProcAttr = daemonSysProcAttr()
 	if err := cmd.Start(); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to start daemon: %v\n", err)
-		os.Exit(1)
+		exitFn(1)
+		return -1 // unreachable in production; see the guard above for why
 	}
 
 	pid := cmd.Process.Pid
@@ -287,17 +346,62 @@ func launchTUI() {
 	sockPath := config.SocketPath()
 	log.Printf("config loaded, AutoStart=%v", cfg.Daemon.AutoStart)
 
-	// Try connecting; auto-start if needed
-
-	client, err := ipc.NewClient(sockPath)
+	var client *ipc.Client
+	var err error
 	spawnedButNotReady := false
-	if err != nil && cfg.Daemon.AutoStart {
-		log.Printf("daemon not reachable, auto-starting...")
-		pid := startDaemon(true) // quiet — no stdout during TUI launch
-		if waitForDaemonReady(sockPath, pid) {
-			client, err = ipc.NewClient(sockPath)
-		} else {
-			spawnedButNotReady = true
+
+	if remoteMode() {
+		// No local daemon is involved: `quil --stdio` on the far side ensures
+		// the remote one. Batch=false so this first dial can prompt for a
+		// host-key fingerprint or key passphrase — it runs before tea.NewProgram
+		// takes the terminal.
+		log.Printf("remote mode: dialing %s over ssh", remoteDest)
+		// Keep hold of the transport so the version gate can tell a dead ssh
+		// channel from a daemon that answered badly. The dial below only fails
+		// when ssh could not be STARTED (binary missing, pipe exhaustion) —
+		// every network-level failure survives the dial and surfaces later.
+		var link transport.LinkStatus
+		dialSSH := transport.SSH(remoteDest, transport.SSHOptions{})
+		client, err = ipc.NewClientWithDialer(
+			context.Background(),
+			func(ctx context.Context) (net.Conn, error) {
+				conn, dialErr := dialSSH(ctx)
+				if conn != nil {
+					ls, ok := conn.(transport.LinkStatus)
+					if !ok {
+						// Not fatal, but it silently disables the only check
+						// that tells "unreachable host" from "version
+						// mismatch", so it must not pass unnoticed. A
+						// compile-time assertion covers *stdioConn itself;
+						// this catches a future wrapper type around it.
+						log.Printf("remote: transport %T does not report link status — link diagnosis disabled", conn)
+					}
+					link = ls
+				}
+				return conn, dialErr
+			},
+		)
+		if link != nil {
+			remoteLinkErrFn = link.LinkErr
+			remoteLinkEstablishedFn = link.Established
+		}
+		if err != nil {
+			log.Printf("cannot connect to remote daemon %s: %v", remoteDest, err)
+			fmt.Fprintf(os.Stderr, "cannot connect to %s: %v\n"+
+				"Check that you can run: ssh %s quil --stdio\n", remoteDest, err, remoteDest)
+			os.Exit(1)
+		}
+	} else {
+		// Try connecting; auto-start if needed
+		client, err = ipc.NewClient(sockPath)
+		if err != nil && cfg.Daemon.AutoStart {
+			log.Printf("daemon not reachable, auto-starting...")
+			pid := startDaemon(true) // quiet — no stdout during TUI launch
+			if waitForDaemonReady(sockPath, pid) {
+				client, err = ipc.NewClient(sockPath)
+			} else {
+				spawnedButNotReady = true
+			}
 		}
 	}
 	if err != nil {
@@ -345,6 +449,10 @@ func launchTUI() {
 	restoreWindowSize()
 
 	model := tui.NewModel(client, cfg, version, reg, stalePlugins)
+	// Drives the [remote <host>] status-bar indicator and suppresses the
+	// update controls, which are wired to local disk and would target the
+	// wrong machine. Empty for a local session.
+	model.SetRemoteDest(remoteDest)
 	p := tea.NewProgram(model)
 	finalModel, err := p.Run()
 	if err != nil {
@@ -368,7 +476,12 @@ func launchTUI() {
 		// About → Update now / notice → Update now: the confirm dialog
 		// already asked, so apply pre-confirmed. The respawned TUI runs a
 		// fresh session; this process waits as a wrapper.
-		if m.ApplyUpdateRequested() {
+		// The TUI suppresses every route to this flag in remote mode, since the
+		// banner it would come from describes the REMOTE daemon's staging dir
+		// while the apply reads the LOCAL one. Re-checked here rather than
+		// trusted: this is the branch that swaps binaries on disk, and a
+		// belt-and-braces guard on it costs one comparison.
+		if m.ApplyUpdateRequested() && !remoteMode() {
 			if maybeApplyStagedUpdate(true) {
 				return
 			}

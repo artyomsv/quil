@@ -65,6 +65,9 @@ func isQuildName(comm string) bool {
 // and no live PID existed. A non-nil error means a daemon process may still
 // be alive after all tiers.
 func stopDaemonEscalating(verbose bool) (wasRunning bool, err error) {
+	if remoteMode() {
+		return false, errRemoteMode
+	}
 	sockPath := config.SocketPath()
 	pid := daemonPID()
 

@@ -238,6 +238,7 @@ type Model struct {
 	confirmID            string                 // ID of pane/tab to delete
 	confirmName          string                 // display name for confirmation
 	devMode              bool                   // true when QUIL_HOME is set
+	remoteDest           string                 // non-empty when attached to a daemon on another host
 	pluginRegistry       *plugin.Registry       // plugin registry (shared with daemon)
 	lastWidth            int                    // last known window width (for persistence)
 	lastHeight           int                    // last known window height (for persistence)
@@ -397,6 +398,17 @@ type Model struct {
 	// swap after tea.Program returns (set by the apply confirm).
 	applyUpdateOnExit bool
 }
+
+// SetRemoteDest marks this session as attached to a daemon on another host and
+// names it. Empty (the default) means a local session.
+//
+// A setter rather than a NewModel parameter: it is display-and-gating state
+// that every existing caller and test can keep ignoring, and NewModel already
+// takes five arguments.
+func (m *Model) SetRemoteDest(dest string) { m.remoteDest = dest }
+
+// RemoteMode reports whether the daemon this TUI drives lives on another host.
+func (m *Model) RemoteMode() bool { return m.remoteDest != "" }
 
 func NewModel(client *ipc.Client, cfg config.Config, version string, registry *plugin.Registry, stalePlugins []plugin.StalePlugin) Model {
 	m := Model{
@@ -3589,11 +3601,28 @@ func (m Model) renderStatusBar() string {
 		total := m.lastMemResp.Total + m.tuiLocalMemTotal()
 		right = "mem " + memreport.HumanBytes(total) + " | " + right
 	}
-	if seg := updateStatusSegment(m.updateInfo, m.version); seg != "" {
-		right = seg + " | " + right
+	// Suppressed in remote mode: m.updateInfo is broadcast by the REMOTE
+	// daemon and describes its staging dir, but every apply path reads the
+	// LOCAL config.UpdateDir(). Offering "↑ v1.43.0 [ready]" here would either
+	// fail ("staged files missing") or, worse, silently install whatever
+	// different version this machine happens to have staged. Showing nothing
+	// is better than showing a control wired to the wrong host.
+	if !m.RemoteMode() {
+		if seg := updateStatusSegment(m.updateInfo, m.version); seg != "" {
+			right = seg + " | " + right
+		}
 	}
 	if m.devMode {
 		right = "[dev] " + right
+	}
+	// Placed after [dev] so it renders leftmost of the two, i.e. first in
+	// reading order: which MACHINE you are driving outranks which build you
+	// are running. Without it the status bar is identical whether the panes
+	// are on this laptop or a cluster node, which is what makes any
+	// wrong-host bug silent — and these panes routinely run AI agents with
+	// permission prompts disabled.
+	if m.remoteDest != "" {
+		right = "[remote " + m.remoteDest + "] " + right
 	}
 	if count := m.notifications.Count(); count > 0 && !m.notifications.visible {
 		right = fmt.Sprintf("[%d events] ", count) + right

@@ -31,6 +31,30 @@ const releasesURL = "https://github.com/artyomsv/quil/releases"
 func gateVersionCheck(client *ipc.Client) *ipc.Client {
 	res := versionHandshake(client)
 
+	// Checked BEFORE the switch, not inside the mismatch arm, for two reasons.
+	//
+	// A dead transport invalidates every branch below it — there is no daemon
+	// version to compare, no upgrade to offer, and nothing to attach to. And
+	// the switch's first arm returns early for any non-release build, so a
+	// check placed further down never runs on a dev binary at all: the gate
+	// would hand back a client whose connection is closed and the TUI would
+	// launch against it, showing a blank screen with no diagnosis. Since
+	// .claude/rules/dev-environment.md mandates dev builds for work on this
+	// repo, that is the path exercised most.
+	//
+	// Ordering note: this must also precede any client.Close() below. Close
+	// unblocks pump via <-done, which can return WITHOUT ever setting pumpErr,
+	// so LinkErr() would go nil and the misdiagnosis would return.
+	if remoteMode() && !remoteLinkEstablished() {
+		linkErr := remoteLinkError()
+		client.Close()
+		reportRemoteLinkFailure(linkErr)
+		exitFn(1)
+		// exitFn is a swappable var, so the compiler cannot know it does not
+		// return; without this the guard would fall through into the switch.
+		return nil
+	}
+
 	switch {
 	case res.ClientSkipped:
 		log.Printf("version gate: skipped (non-release TUI)")
@@ -49,6 +73,34 @@ func gateVersionCheck(client *ipc.Client) *ipc.Client {
 		return nil
 
 	default:
+		if remoteMode() {
+			// Reaching here means the link DID deliver bytes (the check above
+			// the switch would have exited otherwise), so a daemon really did
+			// answer and a version verdict is the right one.
+
+			// The restart path below manages the LOCAL daemon and is guarded
+			// against remote mode, so there is nothing to offer here — say what
+			// is wrong and how to fix it instead of prompting for an action
+			// that cannot run.
+			reported := res.DaemonVersion
+			if reported == "" {
+				reported = "unknown"
+			}
+			client.Close()
+			fmt.Fprintf(os.Stderr,
+				"\n"+
+					"  Version mismatch with the remote daemon.\n"+
+					"\n"+
+					"    this TUI:            %s\n"+
+					"    daemon at %s: %s\n"+
+					"\n"+
+					"  Upgrade one of them so both run the same version, then try again.\n"+
+					"  To upgrade the remote daemon:\n"+
+					"    ssh %s 'quil daemon restart'\n"+
+					"\n",
+				versionpkg.Current(), remoteDest, reported, remoteDest)
+			os.Exit(1)
+		}
 		// Either TUI > daemon, or the daemon timed out / returned an
 		// unparseable version (treated as "pre-versioning daemon", same
 		// handling: offer to restart).
@@ -189,6 +241,9 @@ var (
 // path reads config.SocketPath()/config.PidPath() internally, so a caller
 // passing a different socket would stop one daemon and then wait on another.
 func restartDaemonForUpgrade() (*ipc.Client, error) {
+	if remoteMode() {
+		return nil, errRemoteMode
+	}
 	sockPath := config.SocketPath()
 	// verbose=true: this runs in the foreground before tea.NewProgram takes
 	// the terminal, and the escalation can spend 5+3+2 s across its tiers.

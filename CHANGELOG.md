@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Attach a Quil TUI to a daemon on another machine** over SSH:
+  `quil --remote gpu01`. The panes, tabs and AI sessions live on the remote
+  host and keep running there when you close the laptop; the TUI is only a
+  viewer. Nothing listens on a network port on the remote side — Quil runs
+  `ssh -T gpu01 "quil --stdio"` and speaks its normal protocol over that one
+  channel, so a host reachable only through a bastion, a Tailscale/WireGuard
+  address, or a jump chain works with no extra setup.
+
+  The destination is handed to `ssh` verbatim, so everything in your
+  `~/.ssh/config` still applies: `Host` aliases, `ProxyJump`, `ControlMaster`
+  multiplexing, per-host keys, hardware tokens and SSH certificates. Quil adds
+  only timeouts and a set of hardening options it forces off — agent forwarding,
+  X11 forwarding, port forwarding and local-command execution are all disabled
+  for this connection regardless of what your config says, because the remote
+  side never needs them. The remote daemon is started on demand if it is not
+  already running.
+
+  Both ends of the connection's life are bounded, so it fails fast and visibly
+  rather than hanging. Connecting to a host that silently drops packets gives up
+  after 15 seconds instead of inheriting the operating system's multi-minute
+  connect timeout, and once attached, keepalives detect a dead link within about
+  45 seconds. When the connection cannot be made at all, Quil says so and shows
+  you the exact command to test by hand (`ssh <host> quil --stdio`) rather than
+  reporting it as a version problem.
+
+  Commands that manage a daemon's lifecycle refuse to run under `--remote`
+  rather than silently acting on the wrong machine: `quil restart`,
+  `quil daemon start|stop|restart`, the upgrade-restart prompt, and
+  `quil --remote <host> mcp`. Manage the remote daemon over a normal SSH
+  session, or drop `--remote` to manage the local one.
+
+  This is the first phase and has limits worth knowing before you rely on it.
+  A dropped SSH connection ends the session — there is no automatic reconnect
+  yet, though the panes on the server survive and you can re-attach. Dialogs
+  that browse the filesystem (the pane working-directory picker, git repository
+  and kube-context discovery, the Claude session list) still read your **local**
+  disk rather than the server's, so creating panes remotely works best with
+  paths you type. Pane notes, clipboard paste and the log viewer are local by
+  design. `quil status` also reports on the local daemon.
+
 ## [1.42.1] - 2026-07-26
 
 ### Fixed

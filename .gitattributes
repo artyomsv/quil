@@ -1,0 +1,25 @@
+# Line endings
+#
+# POSIX shells do not treat CR as whitespace: in a CRLF checkout the word `fi\r`
+# is not the `fi` keyword, so an `if` block never closes and the parser dies at
+# the next construct it cannot absorb — "syntax error near unexpected token
+# `$'{\r'`". Two paths in this repo make that a real failure rather than a
+# cosmetic one, and both bite only when the build host is Windows:
+#
+#   scripts/*.sh                    run inside the Docker build container, so a
+#                                   CRLF checkout breaks `dev.sh build`
+#
+#   internal/shellinit/scripts/**   go:embed'ed INTO the daemon binary. A
+#                                   Windows-built quild therefore ships CRLF
+#                                   inside itself and breaks shell integration
+#                                   on every Linux host it runs on — including
+#                                   a remote daemon reached via `quil --remote`,
+#                                   where the symptom is a broken prompt AND a
+#                                   PATH missing everything ~/.bashrc adds,
+#                                   because the failed parse aborts before the
+#                                   script sources it.
+#
+# Marking them eol=lf keeps the working tree LF on every platform, so what
+# go:embed sees is what git stores.
+*.sh text eol=lf
+internal/shellinit/scripts/** text eol=lf

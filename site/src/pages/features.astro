@@ -102,7 +102,10 @@ for (const feature of features) {
               <div class="feat-item" id={feature.slug}>
                 <span class="idx">[{sectionNo}.{String(featureIdx + 1).padStart(2, "0")}]</span>
                 <div>
-                  <h3>{feature.title}</h3>
+                  <h3>
+                    {feature.title}
+                    {feature.badge && <span class="feat-badge">{feature.badge}</span>}
+                  </h3>
                   <p class="blurb">{feature.blurb}</p>
                   <ul>
                     {feature.detail.map((bullet) => (

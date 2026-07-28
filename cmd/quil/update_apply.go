@@ -346,6 +346,28 @@ func copyFile(src, dst string) error {
 	return cpErr
 }
 
+// respawnArgs rebuilds the child's argv for an update respawn.
+//
+// os.Args cannot be used directly: main() STRIPS --remote from it (remote.go's
+// parseRemoteFlag, applied at main.go) and records the destination only in the
+// process-local remoteDest. --dev survives the same rewrite because it is
+// re-exported as QUIL_HOME and respawnSelf passes os.Environ(); --remote has no
+// such carrier, so respawning the rewritten argv drops it silently and the
+// replacement process attaches to — or starts — the LOCAL daemon while the
+// operator believes they are still on the remote host. In a project whose panes
+// routinely run `claude --dangerously-skip-permissions`, keystrokes then land
+// on the wrong machine with nothing on screen to contradict it.
+func respawnArgs() []string {
+	args := os.Args[1:]
+	if !remoteMode() {
+		return args
+	}
+	// Rebuilt rather than restored from a saved copy so the flag is re-emitted
+	// in the canonical two-token form regardless of which spelling the user
+	// typed (--remote X or --remote=X).
+	return append([]string{"--remote", remoteDest}, args...)
+}
+
 // respawnSelf runs the freshly-installed quil at exe (the same path
 // maybeApplyStagedUpdate resolved BEFORE the swap — see the comment there;
 // re-resolving via os.Executable() here would return the just-renamed-aside
@@ -358,7 +380,7 @@ func copyFile(src, dst string) error {
 // (renamed-away) old binary's launch path — the user just relaunches
 // manually.
 func respawnSelf(exe string) bool {
-	cmd := exec.Command(exe, os.Args[1:]...)
+	cmd := exec.Command(exe, respawnArgs()...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

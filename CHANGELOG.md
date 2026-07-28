@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Claude Code panes no longer come back blank after you reattach.** Closing the
+  TUI and reopening it left them showing an empty rectangle, which looked exactly
+  like the session had died. It hadn't — the process was still running and the
+  conversation was still there, and pressing a key brought it straight back. AI
+  panes deliberately don't save scrollback (replaying a captured full-screen app
+  produces garbage rather than history), so there was simply nothing to draw
+  until the program next wrote something, and a full-screen program has no reason
+  to redraw unprompted. Quil now asks such a pane to repaint itself when you
+  reattach, so what you see matches what is actually running.
+
+  Pane types opt in to this by declaring the key that makes their program
+  repaint (`redraw_key` in the plugin's `[persistence]` section) — it is sent to
+  the program's input, so a pane that might be reading input as data must not
+  declare one. Claude Code is set up for it; OpenCode is not yet, pending
+  someone verifying which key it responds to.
+
 ## [1.43.0] - 2026-07-28
 
 ### Added
@@ -50,6 +67,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   paths you type. Pane notes, clipboard paste and the log viewer are local by
   design. `quil status` also reports on the local daemon.
 
+||||||| parent of 3df441f (fix(daemon): repaint replay-less panes when a client reattaches)
 ## [1.42.1] - 2026-07-26
 
 ### Fixed

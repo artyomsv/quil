@@ -64,13 +64,11 @@ func gateVersionCheck(client *ipc.Client) *ipc.Client {
 		log.Printf("remote: dead link — exit=%d established=%v remedy=%v",
 			exitCode, established, remedy)
 		if offerRemoteInstallFn(remoteDest, remedy) {
-			// The binaries are in place, but this process is holding a dead
-			// connection and half-built state, and the config entry the install
-			// just wrote is not loaded here. Relaunching is cleaner than
-			// re-dialing in place, and costs one command on first setup only.
-			fmt.Fprintf(os.Stderr,
-				"  Run `quil --remote %s` again to attach.\n\n", remoteDest)
-			exitFn(0)
+			// The reason this launch failed is gone, and attaching was what the
+			// user asked for — so tell the caller to re-dial rather than making
+			// them retype the command. The caller owns dialling, which is why
+			// this is a flag and not a return value.
+			remoteInstallRetry = true
 			return nil
 		}
 		reportRemoteLinkFailure(linkErr)
@@ -124,9 +122,7 @@ func gateVersionCheck(client *ipc.Client) *ipc.Client {
 			// `ssh <host> 'quil daemon restart'` — could not work: restarting
 			// the same binary reports the same version.
 			if offerRemoteInstallFn(remoteDest, remoteinstall.RemedyUpgrade) {
-				fmt.Fprintf(os.Stderr,
-					"  Run `quil --remote %s` again to attach.\n\n", remoteDest)
-				exitFn(0)
+				remoteInstallRetry = true
 				return nil
 			}
 			fmt.Fprintf(os.Stderr,

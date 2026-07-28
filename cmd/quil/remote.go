@@ -1,8 +1,13 @@
 package main
 
 import (
+	"context"
+	"log"
+	"net"
+
 	"errors"
 	"fmt"
+	"github.com/artyomsv/quil/internal/ipc"
 	"os"
 	"strings"
 
@@ -191,4 +196,57 @@ func validateRemoteDest(dest string) error {
 		return fmt.Errorf("invalid --remote destination %q: must not begin with '-'", dest)
 	}
 	return nil
+}
+
+// remoteInstallRetry is set by the version gate when a remote install has just
+// succeeded, telling launchTUI to re-dial instead of exiting.
+//
+// A flag rather than a return value because the gate's signature already
+// carries "the client to use from here on", and the retry is a different kind
+// of answer: there is no client yet, and the caller — not the gate — owns
+// dialling.
+var remoteInstallRetry bool
+
+// dialRemote opens an ssh-backed client to remoteDest and installs the link
+// seams the version gate reads.
+//
+// Split out of launchTUI so it can be called twice: once for the initial
+// attach, and again after an install has removed the reason the first one
+// failed. Each call re-installs the seams, so the gate never reads a previous
+// connection's status.
+func dialRemote(cfg config.Config) (*ipc.Client, error) {
+	// Batch=false so this dial can prompt for a host-key fingerprint or a key
+	// passphrase — it runs before tea.NewProgram takes the terminal.
+	log.Printf("remote mode: dialing %s over ssh", remoteDest)
+
+	// Keep hold of the transport so the version gate can tell a dead ssh
+	// channel from a daemon that answered badly. The dial only fails when ssh
+	// could not be STARTED (binary missing, pipe exhaustion) — every
+	// network-level failure survives it and surfaces later.
+	var link transport.LinkStatus
+	dialSSH := transport.SSH(remoteDest, remoteSSHOptions(cfg))
+	client, err := ipc.NewClientWithDialer(
+		context.Background(),
+		func(ctx context.Context) (net.Conn, error) {
+			conn, dialErr := dialSSH(ctx)
+			if conn != nil {
+				ls, ok := conn.(transport.LinkStatus)
+				if !ok {
+					// Not fatal, but it silently disables the only check that
+					// tells "unreachable host" from "version mismatch", so it
+					// must not pass unnoticed. A compile-time assertion covers
+					// *stdioConn itself; this catches a future wrapper type.
+					log.Printf("remote: transport %T does not report link status — link diagnosis disabled", conn)
+				}
+				link = ls
+			}
+			return conn, dialErr
+		},
+	)
+	if link != nil {
+		remoteLinkErrFn = link.LinkErr
+		remoteLinkEstablishedFn = link.Established
+		remoteExitCodeFn = link.ExitCode
+	}
+	return client, err
 }

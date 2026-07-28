@@ -264,3 +264,67 @@ func TestGateVersionCheck_LocalSession_SkipsTheLinkGuard(t *testing.T) {
 		t.Error("link guard fired in a local session, want it skipped")
 	}
 }
+
+// A successful install must ask the caller to re-dial, not exit. The user's
+// command was "attach"; making them retype it after the obstacle was removed
+// is a worse answer than doing what they asked.
+func TestGateVersionCheck_SignalsRetryAfterInstall(t *testing.T) {
+	withRemote(t, "gpu01")
+
+	prevRetry := remoteInstallRetry
+	t.Cleanup(func() { remoteInstallRetry = prevRetry })
+	remoteInstallRetry = false
+
+	prevEstablished := remoteLinkEstablishedFn
+	prevErr := remoteLinkErrFn
+	prevExitCode := remoteExitCodeFn
+	prevOffer := offerRemoteInstallFn
+	prevExit := exitFn
+	t.Cleanup(func() {
+		remoteLinkEstablishedFn = prevEstablished
+		remoteLinkErrFn = prevErr
+		remoteExitCodeFn = prevExitCode
+		offerRemoteInstallFn = prevOffer
+		exitFn = prevExit
+	})
+
+	remoteLinkEstablishedFn = func() bool { return false }
+	remoteLinkErrFn = func() error { return errLinkTest }
+	remoteExitCodeFn = func() int { return 127 }
+	offerRemoteInstallFn = func(string, remoteinstall.Remedy) bool { return true } // installed
+
+	exited := false
+	exitFn = func(int) { exited = true }
+
+	out := captureStderr(t, func() { gateVersionCheck(deadClient(t)) })
+
+	if !remoteInstallRetry {
+		t.Error("remoteInstallRetry = false after a successful install; the caller will not re-dial")
+	}
+	if exited {
+		t.Error("gate exited after a successful install instead of handing back for a retry")
+	}
+	// The old behaviour told the user to run the command again. If that text
+	// survives, the retry is not actually wired up.
+	if strings.Contains(out, "again to attach") {
+		t.Errorf("still telling the user to retype the command:\n%s", out)
+	}
+}
+
+// A DECLINED install must not set the retry flag — nothing changed on the far
+// side, so re-dialling would just fail identically.
+func TestGateVersionCheck_NoRetryWhenInstallDeclined(t *testing.T) {
+	withRemote(t, "gpu01")
+
+	prevRetry := remoteInstallRetry
+	t.Cleanup(func() { remoteInstallRetry = prevRetry })
+	remoteInstallRetry = false
+
+	remoteGateSeams(t, false, 127) // its offer stub declines
+
+	captureStderr(t, func() { gateVersionCheck(deadClient(t)) })
+
+	if remoteInstallRetry {
+		t.Error("remoteInstallRetry = true after a declined install")
+	}
+}

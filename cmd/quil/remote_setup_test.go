@@ -226,3 +226,24 @@ func TestRemoteSSHOptions(t *testing.T) {
 		}
 	})
 }
+
+// Everything offerRemoteInstall prints happens BEFORE the probe, so it may only
+// claim what the exit code proves. Exit 127 means the remote SHELL could not
+// find quil — a binary in ~/.local/bin is invisible to a non-interactive shell,
+// which is the problem this feature exists to solve. Claiming "not installed"
+// contradicted the probe's own "currently installed: …" one line later.
+func TestOfferRemoteInstall_DoesNotClaimTheHostLacksQuil(t *testing.T) {
+	resetRemoteSetupState(t)
+	alreadyProvisionedFn = func(string) bool { return false }
+
+	// runRemoteSetup will fail at the probe (no such host); we only care about
+	// what was printed before it.
+	out := captureStderr(t, func() { offerRemoteInstall("nonexistent.invalid", remoteinstall.RemedyInstall) })
+
+	if strings.Contains(out, "not installed") {
+		t.Errorf("claims the host lacks quil, which exit 127 does not prove:\n%s", out)
+	}
+	if !strings.Contains(out, "could not be started") {
+		t.Errorf("does not report what actually happened:\n%s", out)
+	}
+}

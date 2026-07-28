@@ -335,17 +335,22 @@ func offerRemoteInstall(dest string, remedy remoteinstall.Remedy) bool {
 		return false
 	}
 
+	// Every line here is printed BEFORE the probe runs, so it may only say what
+	// the exit code actually proves. Exit 127 means the remote SHELL could not
+	// find quil — not that the host lacks it: a binary in ~/.local/bin is
+	// invisible to a non-interactive shell, which is the very problem this
+	// feature exists to solve. Asserting "not installed" here contradicted the
+	// probe's own summary one line later ("currently installed: …") on every
+	// hand-installed host.
 	switch remedy {
 	case remoteinstall.RemedyInstall:
-		fmt.Fprintf(os.Stderr, "\n  Quil is not installed on %s.\n", dest)
+		fmt.Fprintf(os.Stderr, "\n  Quil could not be started on %s.\n", dest)
 	case remoteinstall.RemedyReinstall:
-		fmt.Fprintf(os.Stderr, "\n  Quil is installed on %s but will not execute"+
+		fmt.Fprintf(os.Stderr, "\n  Quil is present on %s but will not execute"+
 			" (wrong architecture).\n", dest)
 	case remoteinstall.RemedyUpgrade:
-		// Deliberately says nothing here: the caller has already printed both
-		// versions, and the probe is about to print the installed path. Claiming
-		// "not installed" about a daemon that just answered with its version
-		// would contradict the two lines either side of it.
+		// Says nothing: the caller has already printed both versions, and the
+		// probe is about to print the installed path.
 	}
 
 	if err := runRemoteSetup(dest, setupOptions{}); err != nil {

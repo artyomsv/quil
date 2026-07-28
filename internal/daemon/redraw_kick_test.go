@@ -1,98 +1,142 @@
 package daemon
 
 import (
+	"os"
+	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/artyomsv/quil/internal/ipc"
+	"github.com/artyomsv/quil/internal/plugin"
 )
 
 // redrawKick exists because plugins with ghost_buffer = false get no replay on
 // attach, so a reconnecting client is sent nothing for a pane whose process is
 // alive and mid-conversation. The rectangle stays blank until the child writes
-// something, and an alternate-screen app has no reason to do that unprompted.
+// something, and a full-screen program has no reason to do that unprompted.
 //
-// These tests pin the two halves that matter: that the kick produces a real
-// size CHANGE (a same-size resize is swallowed and repaints nothing), and that
-// it declines in every state where there is nothing safe to signal.
+// The mechanism is the plugin's declared RedrawKey written to stdin. It is
+// opt-in per plugin because it is INPUT, not a signal: a program reading its
+// own stdin for data would receive it as data. SIGWINCH would need no opt-in
+// and does not work — claude-code emits 0 bytes from its main UI after a
+// resize, where vim emits ~5 KB.
 
-func TestRedrawKick_JigglesThenRestoresTheSize(t *testing.T) {
-	fake := &fakeSession{}
+// recordingSession captures stdin writes so a test can observe what the redraw
+// kick actually delivered to the child.
+type recordingSession struct {
+	fakeSession
+	mu      sync.Mutex
+	written []byte
+}
 
-	redrawKick("pane-1", "claude-code", fake, 120, 40)
+func (r *recordingSession) Write(data []byte) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.written = append(r.written, data...)
+	return len(data), nil
+}
 
-	// A single Resize to the size the PTY already has is a no-op the kernel
-	// never turns into SIGWINCH — the child would not repaint and the whole
-	// call would be silently useless. The jiggle is what makes it a change.
-	if len(fake.resizes) != 2 {
-		t.Fatalf("resizes = %v, want exactly 2 (jiggle then restore)", fake.resizes)
+func (r *recordingSession) got() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return string(r.written)
+}
+
+// waitForInput polls until the pane's input writer has drained the queue into
+// the PTY. EnqueueInput hands off to a goroutine, so the write is not visible
+// synchronously.
+func waitForInput(t *testing.T, s *recordingSession, want string) bool {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if s.got() == want {
+			return true
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
-	if got, want := fake.resizes[0], [2]uint16{40, 119}; got != want {
-		t.Errorf("jiggle resize = %v, want %v (one column narrower)", got, want)
+	return false
+}
+
+// daemonWithPlugin loads a single plugin from TOML, so these tests also cover
+// the redraw_key parsing rather than hand-constructing the struct — a field
+// that never reaches the registry would otherwise pass every assertion here.
+func daemonWithPlugin(t *testing.T, name, redrawKey string, ghost bool) *Daemon {
+	t.Helper()
+	dir := t.TempDir()
+	redrawLine := ""
+	if redrawKey != "" {
+		// Written as a TOML escape so this exercises the same decoding path a
+		// real plugin file takes.
+		redrawLine = "redraw_key = \"\\f\"\n"
+		if redrawKey != "\f" {
+			t.Fatalf("fixture only models the \\f case, got %q", redrawKey)
+		}
 	}
-	// Ending on the real size matters as much as the jiggle: leaving the child
-	// one column narrow would make every pane render wrong until the next
-	// genuine resize.
-	if got, want := fake.resizes[1], [2]uint16{40, 120}; got != want {
-		t.Errorf("restore resize = %v, want %v (the pane's true size)", got, want)
+	toml := "[plugin]\n" +
+		"name = \"" + name + "\"\n" +
+		"display_name = \"" + name + "\"\n" +
+		"category = \"test\"\n" +
+		"schema_version = 1\n" +
+		"[command]\n" +
+		"cmd = \"echo\"\n" +
+		"[persistence]\n" +
+		"ghost_buffer = " + map[bool]string{true: "true", false: "false"}[ghost] + "\n" +
+		redrawLine
+	if err := os.WriteFile(filepath.Join(dir, name+".toml"), []byte(toml), 0o600); err != nil {
+		t.Fatalf("write plugin toml: %v", err)
+	}
+	reg := plugin.NewRegistry()
+	if err := reg.LoadFromDir(dir); err != nil {
+		t.Fatalf("LoadFromDir: %v", err)
+	}
+	if reg.Get(name) == nil {
+		t.Fatalf("plugin %q not loaded", name)
+	}
+	return &Daemon{registry: reg, session: NewSessionManager(4096)}
+}
+
+func TestRedrawKick_SendsThePluginsDeclaredKey(t *testing.T) {
+	d := daemonWithPlugin(t, "claude-code", "\f", false)
+	pty := &recordingSession{}
+	pane := &Pane{ID: "p1", Type: "claude-code", PTY: pty}
+	t.Cleanup(pane.StopInput)
+
+	d.redrawKick(pane, "claude-code")
+
+	if !waitForInput(t, pty, "\f") {
+		t.Errorf("child received %q, want %q (Ctrl+L)", pty.got(), "\f")
 	}
 }
 
-func TestRedrawKick_DeclinesWhenThereIsNothingToSignal(t *testing.T) {
+// TestRedrawKick_SilentWithoutAnOptIn is the safety property. Every pane that
+// got no replay reaches this call, including plain terminals — and a terminal
+// might be sitting in `cat > file` or at a password prompt, where an injected
+// form feed is data corruption, not a repaint.
+func TestRedrawKick_SilentWithoutAnOptIn(t *testing.T) {
 	tests := []struct {
-		name       string
-		nilPTY     bool
-		cols, rows int
-		why        string
+		name      string
+		plugin    string
+		redrawKey string
+		paneType  string
 	}{
-		{
-			name:   "no PTY",
-			nilPTY: true, cols: 120, rows: 40,
-			why: "a Pending lazy-restore pane has no child to signal",
-		},
-		{
-			name: "size never recorded",
-			cols: 0, rows: 0,
-			why: "no client has sized this pane, so there is no correct size to restore to",
-		},
-		{
-			name: "width recorded but height not",
-			cols: 120, rows: 0,
-			why: "a half-known size would resize the child to zero rows",
-		},
-		{
-			name: "single column",
-			cols: 1, rows: 40,
-			why: "cols-1 would be 0; resizeKick skips the jiggle, so only the restore lands",
-		},
+		{"plugin declares no key", "terminal", "", "terminal"},
+		{"pane type is not registered", "terminal", "\f", "some-unknown-plugin"},
 	}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			fake := &fakeSession{}
-			var pty *fakeSession
-			if !tt.nilPTY {
-				pty = fake
-			}
+			d := daemonWithPlugin(t, tt.plugin, tt.redrawKey, true)
+			pty := &recordingSession{}
+			pane := &Pane{ID: "p1", Type: tt.paneType, PTY: pty}
+			t.Cleanup(pane.StopInput)
 
-			// Must not panic on a nil PTY, which is the whole point of the
-			// running check at the call site.
-			if pty == nil {
-				redrawKick("pane-1", "claude-code", nil, tt.cols, tt.rows)
-			} else {
-				redrawKick("pane-1", "claude-code", pty, tt.cols, tt.rows)
-			}
+			d.redrawKick(pane, tt.paneType)
 
-			if tt.cols == 1 {
-				// Degenerate but valid: resizeKick guards cols > 1 for the
-				// jiggle, so exactly one Resize lands. Pinned so a future
-				// change to that guard is visible here.
-				if len(fake.resizes) != 1 {
-					t.Errorf("resizes = %v, want 1 (restore only, no jiggle at width 1)", fake.resizes)
-				}
-				return
-			}
-			if len(fake.resizes) != 0 {
-				t.Errorf("resizes = %v, want none — %s", fake.resizes, tt.why)
+			// Give the writer goroutine a chance to deliver anything it was
+			// wrongly handed, so this cannot pass by being merely early.
+			time.Sleep(100 * time.Millisecond)
+			if got := pty.got(); got != "" {
+				t.Errorf("child received %q, want nothing written", got)
 			}
 		})
 	}
@@ -103,10 +147,10 @@ func TestRedrawKick_DeclinesWhenThereIsNothingToSignal(t *testing.T) {
 // pane.Cols/Rows used to be written just OUTSIDE handleResizePane's PluginMu
 // span, and were documented on the struct as "immutable once set". They are
 // not: handleResizePane rewrites them on every genuine resize from the
-// resizing conn's dispatch goroutine, while handleAttach (a different conn),
-// the PTY output goroutine's resizeKick, and snapshot() all read them. Three
-// live data races, invisible because no test ran a resize concurrently with a
-// read — `go test -race` only reports races it actually executes.
+// resizing conn's dispatch goroutine, while attach, lazy spawn, restart,
+// screenshot, snapshot, and the PTY output goroutine's resizeKick all read
+// them. Six live data races, invisible because no test ran a resize
+// concurrently with a read — `go test -race` only reports races it executes.
 //
 // This fails under -race if the write moves back out of the lock, or if a new
 // reader takes the field without it.
@@ -136,12 +180,10 @@ func TestPaneSize_ConcurrentResizeAndRead(t *testing.T) {
 		}
 	}()
 
-	// Reader: stands in for handleAttach / resizeKick / snapshot, all of which
-	// read the pair the same way.
+	// Reader: stands in for every guarded reader, all of which take the pair
+	// the same way via paneSize.
 	for i := 0; i < iterations; i++ {
-		pane.PluginMu.Lock()
-		cols, rows := pane.Cols, pane.Rows
-		pane.PluginMu.Unlock()
+		cols, rows := paneSize(pane)
 		if cols != 0 && (cols < 100 || cols > 101 || rows != 40) {
 			t.Fatalf("torn read: %dx%d", cols, rows)
 		}

@@ -14,15 +14,15 @@ type StalePlugin struct {
 // PanePlugin defines a pane type with its command, persistence strategy,
 // and optional error handlers.
 type PanePlugin struct {
-	Name          string
-	DisplayName   string
-	Category      string
-	Description   string
-	Homepage      string // optional project/tool URL, shown when the binary is missing
-	Command       CommandConfig
-	Persistence   PersistenceConfig
-	Display       DisplayConfig
-	Instances     []InstanceConfig
+	Name                 string
+	DisplayName          string
+	Category             string
+	Description          string
+	Homepage             string // optional project/tool URL, shown when the binary is missing
+	Command              CommandConfig
+	Persistence          PersistenceConfig
+	Display              DisplayConfig
+	Instances            []InstanceConfig
 	ErrorHandlers        []ErrorHandler
 	NotificationHandlers []NotificationHandler
 	IdleHandlers         []IdleHandler
@@ -32,7 +32,7 @@ type PanePlugin struct {
 // CommandConfig describes how to launch the plugin's process.
 type CommandConfig struct {
 	Cmd              string
-	Path             string      // optional: full path to binary (overrides PATH lookup)
+	Path             string // optional: full path to binary (overrides PATH lookup)
 	Args             []string
 	Env              []string
 	DetectCmd        string
@@ -96,11 +96,27 @@ type Toggle struct {
 
 // PersistenceConfig describes how to restore the pane after daemon restart.
 type PersistenceConfig struct {
-	Strategy    string // "none", "cwd_only", "rerun", "session_scrape", "preassign_id"
+	Strategy    string   // "none", "cwd_only", "rerun", "session_scrape", "preassign_id"
 	StartArgs   []string // template args for fresh start (e.g., ["--session-id", "{session_id}"])
 	ResumeArgs  []string
 	Scrapers    []ScrapePattern
 	GhostBuffer bool // save PTY output to disk for replay on reconnect (default true)
+
+	// RedrawKey is written to the pane's stdin when a client attaches and the
+	// pane had no ghost replay to send. Empty (the default) means send nothing.
+	//
+	// Only meaningful with GhostBuffer = false, which is what leaves a
+	// reconnecting client with a blank rectangle in front of a live process.
+	// It is opt-IN per plugin on purpose: this is INPUT, not a signal, so the
+	// plugin author is asserting that their program treats the byte as
+	// "repaint" and that nothing else is reading its stdin. A pane running
+	// `cat > file` or a password prompt would receive it as data.
+	//
+	// SIGWINCH would be the safe universal alternative and does not work:
+	// claude-code re-lays-out on a resize but only paints on its own render
+	// tick, so a resize produces zero output (measured — vim repaints with
+	// ~5 KB under the same test, claude-code with 0 bytes).
+	RedrawKey string
 }
 
 // ScrapePattern extracts named values from PTY output via regex.

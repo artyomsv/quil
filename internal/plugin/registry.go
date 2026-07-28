@@ -316,11 +316,12 @@ type tomlPlugin struct {
 		Sessions      string   `toml:"sessions"`
 	} `toml:"command"`
 	Persistence struct {
-		Strategy    string `toml:"strategy"`
+		Strategy    string   `toml:"strategy"`
 		StartArgs   []string `toml:"start_args"`
 		ResumeArgs  []string `toml:"resume_args"`
-		GhostBuffer *bool  `toml:"ghost_buffer"` // pointer to detect unset (default true)
-		Scrape     []struct {
+		GhostBuffer *bool    `toml:"ghost_buffer"` // pointer to detect unset (default true)
+		RedrawKey   string   `toml:"redraw_key"`   // stdin byte(s) that make this program repaint; see PersistenceConfig
+		Scrape      []struct {
 			Name    string `toml:"name"`
 			Pattern string `toml:"pattern"`
 		} `toml:"scrape"`
@@ -433,6 +434,7 @@ func loadPluginTOML(path string) (*PanePlugin, error) {
 			StartArgs:   append([]string{}, tp.Persistence.StartArgs...),
 			ResumeArgs:  append([]string{}, tp.Persistence.ResumeArgs...),
 			GhostBuffer: tp.Persistence.GhostBuffer == nil || *tp.Persistence.GhostBuffer, // default true
+			RedrawKey:   tp.Persistence.RedrawKey,
 		},
 		Display: DisplayConfig{
 			BorderColor:   tp.Display.BorderColor,

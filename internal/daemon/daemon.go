@@ -984,16 +984,14 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 			// needs a live PTY, and reading it separately would race a restart.
 			// Same discipline as handleResizePane — pointer under the lock, the
 			// Resize syscall outside it.
-			kickPTY := pane.PTY
 			kickRunning := pane.PTY != nil && pane.ExitCode == nil
-			kickCols, kickRows := pane.Cols, pane.Rows
 			pane.PluginMu.Unlock()
 			if !ghostEnabled || len(ghost) == 0 {
 				// Nothing was replayed, so this pane's rectangle is blank on the
 				// client that just attached — even though the process behind it
 				// is alive and mid-conversation. Ask the child to repaint.
 				if kickRunning {
-					redrawKick(pane.ID, typ, kickPTY, kickCols, kickRows)
+					d.redrawKick(pane, typ)
 				}
 				continue
 			}
@@ -1564,33 +1562,35 @@ func resizeKick(pty apty.Session, cols, rows int) {
 // output can begin mid-escape-sequence, so replaying it produces garbage rather
 // than history. The cost is that a reconnecting client is sent nothing at all
 // for such a pane — the PTY is attached and the process is mid-conversation,
-// but the rectangle is blank until the child next writes something. An
-// alternate-screen app has no reason to do that unprompted, so the pane looks
-// dead until the user types into it.
+// but the rectangle is blank until the child next writes something, and a
+// full-screen program has no reason to do that unprompted. The pane reads as
+// dead when it is perfectly healthy.
 //
-// SIGWINCH is the way to ask, and the reason is worth stating: redrawing on a
-// size change is the one behaviour every TUI genuinely implements, and it
-// arrives out-of-band. Writing Ctrl+L (0x0C) instead would be INPUT — it lands
-// in the child's stdin, and only means "redraw" for programs that choose to
-// read it that way. A pane sitting in `cat > file`, a password prompt, or any
-// REPL reading raw bytes would receive a literal form feed, silently corrupting
-// real work. A program that ignores SIGWINCH just ignores it; the default
-// disposition is to do nothing, so the no-op case is safe rather than
-// destructive.
+// The mechanism is the plugin's declared RedrawKey, written to the child's
+// stdin. That is INPUT rather than a signal, which is why it is opt-in per
+// plugin rather than applied to every replay-less pane: the plugin author is
+// asserting both that their program treats the byte as "repaint" and that
+// nothing else is reading its stdin. A pane sitting in `cat > file` or at a
+// password prompt would receive it as data.
 //
-// This resizes the PTY only. The client's VT emulator is sized by the client
-// and is not touched here, so it never sees an unpaired resize — the failure
-// mode behind the 2026-07-15 split-drag corruption, where intermediate widths
-// rewrapped content with no matching redraw.
-func redrawKick(paneID, typ string, pty apty.Session, cols, rows int) {
-	if pty == nil || cols <= 0 || rows <= 0 {
-		// No size recorded yet means no client has ever sized this pane, so
-		// there is no correct size to jiggle back to. The first resize_pane
-		// will paint it.
+// SIGWINCH via a resize would be the safe universal alternative, needs no
+// per-plugin opt-in, and does not work. Measured on a real PTY: vim repaints
+// with ~5 KB of output after a 1-column jiggle, claude-code emits 0 bytes from
+// its main UI. It re-lays-out on a resize but only paints on its own render
+// tick, which input drives. An earlier version of this fix used the jiggle and
+// silently did nothing.
+//
+// Writes go through EnqueueInput, never pane.PTY.Write directly: a child that
+// has stopped reading stdin fills the kernel buffer and blocks the writer
+// forever, and this runs on the attaching client's dispatch goroutine.
+func (d *Daemon) redrawKick(pane *Pane, typ string) {
+	p := d.registry.Get(typ)
+	if p == nil || p.Persistence.RedrawKey == "" {
 		return
 	}
-	log.Printf("attach: redraw kick pane %s (type=%s, no ghost replay, %dx%d)", paneID, typ, cols, rows)
-	resizeKick(pty, cols, rows)
+	log.Printf("attach: redraw kick pane %s (type=%s, no ghost replay, %d bytes)",
+		pane.ID, typ, len(p.Persistence.RedrawKey))
+	pane.EnqueueInput([]byte(p.Persistence.RedrawKey))
 }
 
 func (d *Daemon) streamPTYOutput(paneID string, pty apty.Session) {

@@ -12,6 +12,7 @@ import (
 
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
+	"github.com/artyomsv/quil/internal/remoteinstall"
 	versionpkg "github.com/artyomsv/quil/internal/version"
 )
 
@@ -46,8 +47,24 @@ func gateVersionCheck(client *ipc.Client) *ipc.Client {
 	// unblocks pump via <-done, which can return WITHOUT ever setting pumpErr,
 	// so LinkErr() would go nil and the misdiagnosis would return.
 	if remoteMode() && !remoteLinkEstablished() {
+		// Read BEFORE Close, per the ordering note above.
 		linkErr := remoteLinkError()
 		client.Close()
+		// Read AFTER Close: Close kills and reaps the ssh child, which is what
+		// makes its exit status final. Reading it earlier races a child that is
+		// still exiting and would report "still running" for one that already
+		// failed. The mirror image of LinkErr's requirement, deliberately so.
+		remedy := remoteinstall.ClassifyExit(remoteExitCode(), false)
+		if offerRemoteInstallFn(remoteDest, remedy) {
+			// The binaries are in place, but this process is holding a dead
+			// connection and half-built state, and the config entry the install
+			// just wrote is not loaded here. Relaunching is cleaner than
+			// re-dialing in place, and costs one command on first setup only.
+			fmt.Fprintf(os.Stderr,
+				"  Run `quil --remote %s` again to attach.\n\n", remoteDest)
+			exitFn(0)
+			return nil
+		}
 		reportRemoteLinkFailure(linkErr)
 		exitFn(1)
 		// exitFn is a swappable var, so the compiler cannot know it does not
@@ -92,13 +109,24 @@ func gateVersionCheck(client *ipc.Client) *ipc.Client {
 					"  Version mismatch with the remote daemon.\n"+
 					"\n"+
 					"    this TUI:            %s\n"+
-					"    daemon at %s: %s\n"+
-					"\n"+
+					"    daemon at %s: %s\n",
+				versionpkg.Current(), remoteDest, reported)
+
+			// Offer to upgrade rather than advise. The advice this replaced —
+			// `ssh <host> 'quil daemon restart'` — could not work: restarting
+			// the same binary reports the same version.
+			if offerRemoteInstallFn(remoteDest, remoteinstall.RemedyInstall) {
+				fmt.Fprintf(os.Stderr,
+					"  Run `quil --remote %s` again to attach.\n\n", remoteDest)
+				os.Exit(0)
+			}
+			fmt.Fprintf(os.Stderr,
+				"\n"+
 					"  Upgrade one of them so both run the same version, then try again.\n"+
 					"  To upgrade the remote daemon:\n"+
-					"    ssh %s 'quil daemon restart'\n"+
+					"    quil remote setup %s\n"+
 					"\n",
-				versionpkg.Current(), remoteDest, reported, remoteDest)
+				remoteDest)
 			os.Exit(1)
 		}
 		// Either TUI > daemon, or the daemon timed out / returned an

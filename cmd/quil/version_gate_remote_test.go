@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/artyomsv/quil/internal/ipc"
+	"github.com/artyomsv/quil/internal/remoteinstall"
 )
 
 // deadClient builds a real *ipc.Client whose peer is already gone, which is
@@ -113,6 +114,98 @@ func TestGateVersionCheck_RemoteLinkNeverEstablished_ExitsBeforeTheSwitch(t *tes
 	// The whole point: this must not be reported as a version problem.
 	if strings.Contains(out, "Version mismatch") {
 		t.Errorf("stderr blames a version mismatch on a dead link:\n%s", out)
+	}
+}
+
+// remoteGateSeams parks every remote seam the gate reads and restores them.
+func remoteGateSeams(t *testing.T, established bool, exitCode int) *remoteinstall.Remedy {
+	t.Helper()
+	prevEstablished := remoteLinkEstablishedFn
+	prevErr := remoteLinkErrFn
+	prevExitCode := remoteExitCodeFn
+	prevOffer := offerRemoteInstallFn
+	prevExit := exitFn
+	t.Cleanup(func() {
+		remoteLinkEstablishedFn = prevEstablished
+		remoteLinkErrFn = prevErr
+		remoteExitCodeFn = prevExitCode
+		offerRemoteInstallFn = prevOffer
+		exitFn = prevExit
+	})
+
+	remoteLinkEstablishedFn = func() bool { return established }
+	remoteLinkErrFn = func() error { return errLinkTest }
+	remoteExitCodeFn = func() int { return exitCode }
+
+	var offered remoteinstall.Remedy
+	offerRemoteInstallFn = func(_ string, r remoteinstall.Remedy) bool {
+		offered = r
+		return false // decline, so the gate falls through to its report
+	}
+	exitFn = func(int) {}
+	return &offered
+}
+
+// Exit 127 from the remote shell means quil is missing over there, which is
+// actionable in a way "unreachable host" is not.
+func TestGateVersionCheck_OffersInstallOnCommandNotFound(t *testing.T) {
+	withRemote(t, "gpu01")
+	offered := remoteGateSeams(t, false, 127)
+
+	captureStderr(t, func() { gateVersionCheck(deadClient(t)) })
+
+	if *offered != remoteinstall.RemedyInstall {
+		t.Errorf("remedy = %v, want RemedyInstall", *offered)
+	}
+}
+
+// Exit 255 is ssh's own failure — auth, host key, DNS. There is nothing on the
+// far side to install, and offering would send the user to fix the wrong thing.
+func TestGateVersionCheck_DoesNotOfferInstallOnSSHFailure(t *testing.T) {
+	withRemote(t, "gpu01")
+	offered := remoteGateSeams(t, false, 255)
+
+	captureStderr(t, func() { gateVersionCheck(deadClient(t)) })
+
+	if *offered != remoteinstall.RemedyNone {
+		t.Errorf("remedy = %v, want RemedyNone for an ssh-level failure", *offered)
+	}
+}
+
+// The exit code must be read AFTER Close, which is what reaps the ssh child.
+// Reading it before races a child that is still exiting and reports "still
+// running" for one that already failed — the mirror image of LinkErr, which
+// Close can clear and so must be read first.
+func TestGateVersionCheck_ReadsExitCodeAfterClose(t *testing.T) {
+	withRemote(t, "gpu01")
+
+	prevEstablished := remoteLinkEstablishedFn
+	prevErr := remoteLinkErrFn
+	prevExitCode := remoteExitCodeFn
+	prevOffer := offerRemoteInstallFn
+	prevExit := exitFn
+	t.Cleanup(func() {
+		remoteLinkEstablishedFn = prevEstablished
+		remoteLinkErrFn = prevErr
+		remoteExitCodeFn = prevExitCode
+		offerRemoteInstallFn = prevOffer
+		exitFn = prevExit
+	})
+
+	var order []string
+	remoteLinkEstablishedFn = func() bool { return false }
+	remoteLinkErrFn = func() error { order = append(order, "linkerr"); return errLinkTest }
+	remoteExitCodeFn = func() int { order = append(order, "exitcode"); return 127 }
+	offerRemoteInstallFn = func(string, remoteinstall.Remedy) bool { return false }
+	exitFn = func(int) {}
+
+	client := deadClient(t)
+	// The client's Close is not observable from here, so the ordering is pinned
+	// on the two seams that bracket it: LinkErr before, ExitCode after.
+	captureStderr(t, func() { gateVersionCheck(client) })
+
+	if len(order) != 2 || order[0] != "linkerr" || order[1] != "exitcode" {
+		t.Errorf("seam order = %v, want [linkerr exitcode]", order)
 	}
 }
 

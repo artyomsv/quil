@@ -5,6 +5,10 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/artyomsv/quil/internal/config"
+	"github.com/artyomsv/quil/internal/remoteinstall"
+	"github.com/artyomsv/quil/internal/transport"
 )
 
 // remoteDest is empty for a local session and holds the --remote destination
@@ -40,6 +44,41 @@ var remoteLinkErrFn func() error
 // remoteLinkEstablishedFn reports whether the remote transport has ever
 // delivered a byte. Installed alongside remoteLinkErrFn.
 var remoteLinkEstablishedFn func() bool
+
+// remoteExitCodeFn reports the ssh child's exit status, or -1 when it has not
+// exited. Installed alongside remoteLinkErrFn.
+//
+// Meaningful only AFTER the connection is closed, because Close is what reaps
+// the child. That is the opposite of remoteLinkErrFn, which Close can silently
+// clear — so the two are read on either side of the same Close call.
+var remoteExitCodeFn func() int
+
+// remoteExitCode reports how the ssh child exited, or -1 when it has not, when
+// no probe is installed, or in a local session.
+func remoteExitCode() int {
+	if remoteExitCodeFn == nil {
+		return -1
+	}
+	return remoteExitCodeFn()
+}
+
+// remoteSSHOptions builds the dial options for the configured destination.
+//
+// When `quil remote setup` has recorded an absolute path for this host, it
+// becomes the remote command. That is what makes attaching work on a host where
+// quil lives in ~/.local/bin: `ssh host quil --stdio` runs a non-interactive
+// shell, which on Debian and Ubuntu returns from ~/.bashrc before reaching any
+// PATH line, so the directory is invisible there.
+//
+// With nothing recorded the transport's default (`quil --stdio`) applies, which
+// works when the remote's non-interactive PATH can already see it.
+func remoteSSHOptions(cfg config.Config) transport.SSHOptions {
+	var opts transport.SSHOptions
+	if binary := cfg.RemoteBinary(remoteDest); binary != "" {
+		opts.RemoteCommand = remoteinstall.ShellSingleQuote(binary) + " --stdio"
+	}
+	return opts
+}
 
 // remoteLinkError reports a dead remote transport, or nil when the link is
 // alive, still connecting, or unknown. Safe to call in a local session.

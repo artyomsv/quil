@@ -111,6 +111,12 @@ func main() {
 		case "version":
 			fmt.Println("quil v" + version)
 			return
+		case "remote":
+			// `quil remote setup <dest>` — distinct from the `--remote <dest>`
+			// FLAG, which parseRemoteFlag has already stripped from os.Args by
+			// the time this switch runs.
+			handleRemote()
+			return
 		case "restart":
 			if remoteMode() {
 				fmt.Fprintf(os.Stderr, "quil restart: not available with --remote (target: %s)\n", remoteDest)
@@ -361,7 +367,7 @@ func launchTUI() {
 		// when ssh could not be STARTED (binary missing, pipe exhaustion) —
 		// every network-level failure survives the dial and surfaces later.
 		var link transport.LinkStatus
-		dialSSH := transport.SSH(remoteDest, transport.SSHOptions{})
+		dialSSH := transport.SSH(remoteDest, remoteSSHOptions(cfg))
 		client, err = ipc.NewClientWithDialer(
 			context.Background(),
 			func(ctx context.Context) (net.Conn, error) {
@@ -384,6 +390,7 @@ func launchTUI() {
 		if link != nil {
 			remoteLinkErrFn = link.LinkErr
 			remoteLinkEstablishedFn = link.Established
+			remoteExitCodeFn = link.ExitCode
 		}
 		if err != nil {
 			log.Printf("cannot connect to remote daemon %s: %v", remoteDest, err)

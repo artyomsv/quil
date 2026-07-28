@@ -288,6 +288,20 @@ A modal, centered, keyboard-first launcher. Entries are grouped under section he
 
 ## In Progress
 
+### Remote Daemon Attach — [PRD](roadmap/remote-daemon.md) · **BETA**
+
+> `quil --remote gpu01` — the panes run on another machine and keep running when the laptop sleeps.
+
+**Phase 1 shipped (beta).** SSH transport with no port opened on the remote host: Quil runs `ssh -T <host> "quil --stdio"` and speaks its normal IPC protocol over that one channel, so bastions, Tailscale/WireGuard, and public-internet hosts all work with no extra setup. The destination is passed to `ssh` verbatim, so `~/.ssh/config` applies unchanged. New `internal/transport` package behind an `ipc.DialFunc` seam (`Local` + `SSH` backends), shaped so a TLS backend can be added later. Every local-daemon lifecycle command refuses under `--remote` rather than acting on the wrong machine, and the status bar carries `[remote <host>]`.
+
+**Known limits — see the [PRD](roadmap/remote-daemon.md#known-limits) for the full table:**
+- No automatic reconnect; a dropped link ends the session (panes survive, re-attach manually) — *Phase 2*
+- Filesystem dialogs (CWD picker, git/kube discovery, Claude session list) read the **local** disk — *Phase 3*
+- Plugin availability is detected locally, so `Ctrl+N` greys out the wrong set — *Phase 3*
+- `quil status` and the update controls are blocked rather than silently targeting the wrong host — *Phase 3*
+
+**Planned:** Phase 2 reconnect (drop becomes a pause, not an ending) → Phase 3 remote-correct UI (four filesystem RPCs + plugin registry RPC) → Phase 4 mTLS transport, which the dialer seam already anticipates and which is the prerequisite for anything web-facing (M18 #18–19).
+
 ### M5: Polish
 > Production-quality UX, plugin refinements, observability, encrypted tokens.
 
@@ -488,9 +502,12 @@ review the diff.
 Where AoE is pulling away for the mobile/remote crowd. Sequenced last because each
 is a major surface and cuts against Quil's TUI/Windows-native focus.
 
-17. **Remote SSH thin-client attach** — `quil --remote host` makes the local
-    machine a thin client of a remote daemon, bridging local clipboard image paste
-    into remote agents (herdr). Extends [session-sharing](roadmap/session-sharing.md).
+17. ~~**Remote SSH thin-client attach**~~ — **Phase 1 shipped (beta)**, see
+    [Remote Daemon Attach](roadmap/remote-daemon.md) under *In Progress*.
+    `quil --remote host` works today; reconnect (Phase 2) and remote-correct
+    filesystem dialogs (Phase 3) are the remaining work. Bridging local
+    clipboard image paste into remote agents (herdr) lands with Phase 3, since
+    it needs the same remote-path plumbing.
 18. **Web dashboard** — real terminal + diffs in the browser, installable as a PWA
     (AoE). The single largest surface Quil is missing.
 19. **Remote phone access** — expose the dashboard over a Tailscale/Cloudflare

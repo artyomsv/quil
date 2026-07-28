@@ -383,6 +383,8 @@ via `[update]` in `config.toml`; About (F1) has a manual "Update now".
 
 ### Remote daemon over SSH
 
+> **BETA.** Phase 1 of [Remote Daemon Attach](roadmap/remote-daemon.md). Usable for real work, with the limits at the end of this section — chiefly no automatic reconnect, and filesystem dialogs that still read your local disk.
+
 `quil --remote gpu01` attaches the TUI to a daemon running on another machine. The panes, tabs, and AI sessions live on that host and keep running there when you close the laptop — the TUI is only a viewer.
 
 **No network port is opened on the remote host.** Quil runs `ssh -T gpu01 "quil --stdio"` and speaks its normal length-prefixed protocol over that single channel, so anything SSH can reach works: a bastion behind `ProxyJump`, a Tailscale or WireGuard address, a box on the public internet. The remote daemon is started on demand if it isn't already running.
@@ -409,7 +411,23 @@ Commands that manage a daemon's lifecycle refuse under `--remote` instead of sil
 | Upgrade-restart prompt | Reports the version mismatch and exits |
 | `quil --remote <host> mcp` | Refuses — the MCP bridge is local-only |
 
-**Current limits.** This is the first phase. A dropped SSH connection ends the session — there is no automatic reconnect yet, though the panes on the server survive and re-attaching restores them. Dialogs that browse a filesystem (the pane working-directory picker, git-repository and kube-context discovery, the Claude session list) still read your **local** disk rather than the server's, so creating remote panes works best with paths you type. Pane notes, clipboard paste, and the log viewer are local by design. `quil status` reports on the local daemon.
+Two setup requirements are worth stating, because both fail in confusing ways. **`quil` must be on the remote's non-interactive `PATH`** — `ssh host quil --stdio` runs a non-interactive shell, which on Debian/Ubuntu returns from `~/.bashrc` before any `PATH` line, so `~/.local/bin` is usually invisible; install to `/usr/local/bin` and check with `ssh <host> command -v quil`. And **`ssh <host> quil --stdio` must print nothing** — its stdout *is* the IPC channel, so a shell banner or MOTD on stdout corrupts the first frame. That command is the fastest way to tell a transport problem from a Quil problem.
+
+#### Current limits (beta)
+
+Phase 1 is the transport. These are known and scoped, not bugs:
+
+| Limit | Effect |
+|---|---|
+| No automatic reconnect | A dropped link ends the session. The panes on the server survive and re-attaching restores them, but it is a manual step. |
+| Filesystem dialogs read the **local** disk | The working-directory picker, git-repository and kube-context discovery, and the Claude session list browse the machine running the TUI. Type remote paths rather than browsing. |
+| Plugin availability detected locally | `Ctrl+N` greys out plugins based on what *your* machine has installed, not the server's. |
+| `quil status` refuses under `--remote` | It would report on the local daemon. Use `ssh <host> quil status`. |
+| Update controls hidden in remote mode | The banner describes the remote daemon while every apply path writes to local disk, so it is suppressed rather than offered wrongly. |
+| Clipboard image paste is local-only | The PNG is written locally and a local path is typed into a remote pane, where it does not resolve. |
+| Notes and the log viewer are local | By design — the daemon's own logs are reachable over SSH. |
+
+Reconnect is Phase 2; making every filesystem-reading surface read the *server's* is Phase 3. See the [PRD](roadmap/remote-daemon.md) for the plan and the reasoning behind the transport choices.
 
 ### Cross-platform
 

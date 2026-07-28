@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.44.0] - 2026-07-28
+
 ### Added
 - **`quil remote setup <host>` installs Quil on the machine you want to work
   on.** Attaching to a remote daemon previously assumed Quil was already there,

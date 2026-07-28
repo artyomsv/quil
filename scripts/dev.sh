@@ -7,65 +7,68 @@ GO_IMAGE="golang:1.25-alpine"
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd -W 2>/dev/null || pwd)"
 DOCKER_RUN="docker run --rm -v ${PROJECT_DIR}:/src -v quil-gomod:/go/pkg/mod -w //src ${GO_IMAGE}"
 
-# refuse_if_dev_daemon_running stops a build that would silently half-finish.
+# BUILT_BINARIES are every file `build` writes and `clean` removes, in this
+# project directory. Production installs live elsewhere and are never touched.
+BUILT_BINARIES="quil-dev.exe quild-dev.exe quil-debug.exe quild-debug.exe quil.exe quild.exe quil quild"
+
+# refuse_if_binaries_held stops a build that would silently half-finish.
 #
-# Neither platform lets you overwrite a running executable: Windows reports
-# "permission denied" and Linux returns ETXTBSY. The failure itself is not the
-# problem — the ORDER is. quil-dev is built before quild-dev in the chain below
-# and succeeds, so a held quild-dev leaves a NEW TUI beside a STALE daemon.
-# That pair fails the version gate at launch, which reads as a bug in whatever
-# you were working on rather than as a build that ran halfway.
+# Neither platform lets you overwrite a running executable: Windows fails the
+# open with a sharing violation, Linux returns ETXTBSY. The failure itself is
+# not the problem — the ORDER is. The chain below builds six binaries in
+# sequence with &&, so a holder on the Nth leaves the first N-1 freshly built
+# and the rest stale. A new TUI beside a stale daemon fails the version gate at
+# launch, which reads as a bug in whatever you were working on rather than as a
+# build that ran halfway.
 #
-# Scope is deliberately narrow: the PROJECT-ROOT .quil/quild.pid and nothing
-# else. The production daemon lives in ~/.quil and is never this script's
-# business (see .claude/rules/dev-environment.md); its binaries are installed
-# elsewhere, so they cannot block this build in any case.
+# Detection is a non-destructive probe rather than a process query: opening each
+# target for APPEND asks the operating system the exact question the build is
+# about to ask, and append never truncates. That catches every holder — the
+# daemon, a TUI left running, a debug variant, an antivirus scanner — without
+# enumerating processes or trusting a pid file.
 #
-# There is no override flag on purpose. "Build anyway" produces exactly the
+# An earlier version read .quil/quild.pid and looked for a daemon. It missed a
+# dev TUI holding quil-dev.exe and let exactly the half-build above through on
+# its first real use, which is why this asks the filesystem instead of guessing
+# who the holder might be.
+#
+# There is no override flag on purpose. "Build anyway" produces precisely the
 # mismatched pair this exists to prevent.
-refuse_if_dev_daemon_running() {
-  pidfile="$PROJECT_DIR/.quil/quild.pid"
-  [ -f "$pidfile" ] || return 0
+refuse_if_binaries_held() {
+  held=""
+  for name in $BUILT_BINARIES; do
+    target="$PROJECT_DIR/$name"
+    [ -f "$target" ] || continue
+    # Subshell so the descriptor closes with it; >> never truncates, so a
+    # writable target is left byte-identical.
+    if ! (exec 3>>"$target") 2>/dev/null; then
+      held="$held $name"
+    fi
+  done
+  [ -z "$held" ] || {
+    printf '\n  These binaries are in use and cannot be rebuilt:\n' >&2
+    for name in $held; do printf '    %s\n' "$name" >&2; done
+    cat >&2 <<EOF
 
-  pid="$(tr -d '[:space:]' < "$pidfile" 2>/dev/null || true)"
-  case "$pid" in
-    '' | *[!0-9]*) return 0 ;; # absent or unparseable: nothing to act on
-  esac
+  Building anyway would rewrite the ones that are free and fail on these,
+  leaving a mismatched set — typically a new TUI against a stale daemon,
+  which then fails the version gate at launch.
 
-  # A pid file outlives an unclean shutdown, and pids get reused, so confirm
-  # the process is both alive AND actually a quild before refusing.
-  case "$(uname -s)" in
-    MINGW* | MSYS* | CYGWIN*)
-      running="$(tasklist //FI "PID eq $pid" //NH 2>/dev/null | grep -i quild || true)" ;;
-    *)
-      running="$(ps -p "$pid" -o comm= 2>/dev/null | grep -i quild || true)" ;;
-  esac
-  [ -n "$running" ] || return 0
+  Close any Quil started from this directory. If a dev daemon is running:
 
-  devtui="$PROJECT_DIR/quil-dev.exe"
-  [ -f "$devtui" ] || devtui="$PROJECT_DIR/quil-dev"
+    QUIL_HOME="$PROJECT_DIR/.quil" "$PROJECT_DIR/quil-dev.exe" daemon stop
 
-  cat >&2 <<EOF
-
-  A dev daemon from this project is running (pid $pid).
-
-  It holds quild-dev open, so this build would write quil-dev successfully and
-  then fail on quild-dev — leaving a new TUI beside a stale daemon.
-
-  Stop it, then build again:
-
-    QUIL_HOME="$PROJECT_DIR/.quil" "$devtui" daemon stop
-
-  Only $pidfile was inspected.
-  Your production daemon in ~/.quil is untouched.
+  Only files in $PROJECT_DIR were checked.
+  A production install elsewhere is untouched.
 
 EOF
-  exit 1
+    exit 1
+  }
 }
 
 case "${1:-help}" in
   build)
-    refuse_if_dev_daemon_running
+    refuse_if_binaries_held
     $DOCKER_RUN sh -c "\
       apk add --no-cache curl unzip >/dev/null 2>&1 && \
       sh scripts/fetch-conpty.sh && \
@@ -126,7 +129,7 @@ case "${1:-help}" in
   clean)
     # Same reason as build: rm cannot remove a held executable, and `set -e`
     # would abort the cleanup partway through.
-    refuse_if_dev_daemon_running
+    refuse_if_binaries_held
     rm -f "$PROJECT_DIR/quil" "$PROJECT_DIR/quild" \
           "$PROJECT_DIR/quil.exe" "$PROJECT_DIR/quild.exe" \
           "$PROJECT_DIR/quil-dev.exe" "$PROJECT_DIR/quild-dev.exe" \

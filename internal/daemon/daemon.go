@@ -711,7 +711,7 @@ func (d *Daemon) respawnPanes() {
 // sanity check and the fallback-to-terminal recovery. Extracted from
 // respawnPanes so the lazy-spawn path (ensurePaneSpawned) reuses it verbatim.
 func (d *Daemon) spawnRestoredPane(pane *Pane) {
-	ptySession := newRestoredPTY(pane)
+	ptySession := newRestoredPTY(paneSize(pane))
 	if pane.CWD != "" {
 		if info, err := os.Stat(pane.CWD); err != nil || !info.IsDir() {
 			log.Printf("pane %s: saved cwd %q gone, using default", pane.ID, pane.CWD)
@@ -730,12 +730,13 @@ func (d *Daemon) spawnRestoredPane(pane *Pane) {
 		pane.PluginMu.Lock()
 		pane.Type = "terminal"
 		pane.PluginMu.Unlock()
-		ptySession2 := newRestoredPTY(pane)
+		ptySession2 := newRestoredPTY(paneSize(pane))
 		if err := d.spawnPane(pane, ptySession2, false); err != nil {
 			log.Printf("fallback shell for pane %s also failed: %v", pane.ID, err)
 		}
 	} else {
-		log.Printf("respawned pane %s (type=%s, cwd=%s, size=%dx%d)", pane.ID, pane.Type, pane.CWD, pane.Cols, pane.Rows)
+		cols, rows := paneSize(pane)
+		log.Printf("respawned pane %s (type=%s, cwd=%s, size=%dx%d)", pane.ID, pane.Type, pane.CWD, cols, rows)
 	}
 }
 
@@ -767,9 +768,28 @@ func (d *Daemon) ensureTabSpawned(tabID string) {
 // (which interactive TUIs latch onto when the first resize event is lost —
 // see resizeKick). Falls back to the default constructor for pre-size
 // snapshots where Cols/Rows were never recorded.
-func newRestoredPTY(pane *Pane) apty.Session {
-	if pane.Cols > 0 && pane.Rows > 0 {
-		return newSessionFn(pane.Cols, pane.Rows)
+// paneSize reads a pane's last known dimensions under PluginMu.
+//
+// Every caller runs on a goroutine that can race handleResizePane, which writes
+// the pair from the resizing conn's dispatch goroutine: attach, lazy spawn,
+// restart, screenshot, snapshot, and the PTY output goroutine's resizeKick.
+// Reading the two fields together also keeps them consistent — a torn pair
+// (new cols, old rows) would size a PTY to a geometry that never existed.
+//
+// Callers already holding PluginMu must NOT use this; the mutex is not
+// reentrant. Those sites read the fields directly inside their own span.
+func paneSize(pane *Pane) (cols, rows int) {
+	pane.PluginMu.Lock()
+	defer pane.PluginMu.Unlock()
+	return pane.Cols, pane.Rows
+}
+
+// Takes the size explicitly rather than reading it off the pane: this runs on
+// the lazy-spawn path while the IPC server is live, so pane.Cols/Rows must be
+// snapshotted under PluginMu by the caller (see paneSize).
+func newRestoredPTY(cols, rows int) apty.Session {
+	if cols > 0 && rows > 0 {
+		return newSessionFn(cols, rows)
 	}
 	return newSessionFn(0, 0)
 }
@@ -1599,11 +1619,10 @@ func (d *Daemon) streamPTYOutput(paneID string, pty apty.Session) {
 			// the size in case the initial resize event was dropped during
 			// boot (see resizeKick).
 			if pane := d.session.Pane(paneID); pane != nil {
-				// Snapshot under the lock: this is the PTY output goroutine and
-				// handleResizePane writes these from a conn dispatch goroutine.
-				pane.PluginMu.Lock()
-				cols, rows := pane.Cols, pane.Rows
-				pane.PluginMu.Unlock()
+				// paneSize, not a direct read: this is the PTY output goroutine
+				// and handleResizePane writes the pair from a conn dispatch
+				// goroutine.
+				cols, rows := paneSize(pane)
 				resizeKick(pty, cols, rows)
 			}
 		},
@@ -3368,8 +3387,9 @@ func (d *Daemon) handleRestartPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 		pane.OutputBuf.Reset()
 	}
 
-	// Respawn with same config, using last known dimensions
-	cols, rows := pane.Cols, pane.Rows
+	// Respawn with same config, using last known dimensions. Under PluginMu:
+	// another client can be resizing this pane while this restart runs.
+	cols, rows := paneSize(pane)
 	if cols <= 0 {
 		cols = 80
 	}
@@ -3410,9 +3430,13 @@ func (d *Daemon) handleScreenshotPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 	d.ensurePaneSpawned(pane)
 	d.highlightPane(pane.ID)
 
+	// Snapshotted together under PluginMu — a concurrent resize would
+	// otherwise render the screenshot at a geometry that never existed.
+	paneCols, paneRows := paneSize(pane)
+
 	width := req.Width
 	if width <= 0 {
-		width = pane.Cols
+		width = paneCols
 	}
 	if width <= 0 {
 		width = 80
@@ -3422,7 +3446,7 @@ func (d *Daemon) handleScreenshotPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 	}
 	height := req.Height
 	if height <= 0 {
-		height = pane.Rows
+		height = paneRows
 	}
 	if height <= 0 {
 		height = 24

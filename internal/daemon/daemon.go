@@ -966,13 +966,14 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 			// Resize syscall outside it.
 			kickPTY := pane.PTY
 			kickRunning := pane.PTY != nil && pane.ExitCode == nil
+			kickCols, kickRows := pane.Cols, pane.Rows
 			pane.PluginMu.Unlock()
 			if !ghostEnabled || len(ghost) == 0 {
 				// Nothing was replayed, so this pane's rectangle is blank on the
 				// client that just attached — even though the process behind it
 				// is alive and mid-conversation. Ask the child to repaint.
 				if kickRunning {
-					redrawKick(pane.ID, typ, kickPTY, pane.Cols, pane.Rows)
+					redrawKick(pane.ID, typ, kickPTY, kickCols, kickRows)
 				}
 				continue
 			}
@@ -1428,13 +1429,17 @@ func (d *Daemon) handleResizePane(msg *ipc.Message) {
 		log.Printf("resize pane %s to %dx%d: %v", payload.PaneID, payload.Cols, payload.Rows, err)
 		return
 	}
-	// Record only after the syscall succeeds.
+	// Record only after the syscall succeeds. Cols/Rows are written INSIDE the
+	// lock with the applied* guards: they used to be set just below it, which
+	// made them a genuine data race — this runs on the resizing conn's dispatch
+	// goroutine while handleAttach (another conn), the PTY output goroutine's
+	// resizeKick, and snapshot() all read them concurrently.
 	pane.PluginMu.Lock()
 	pane.appliedCols = int(payload.Cols)
 	pane.appliedRows = int(payload.Rows)
-	pane.PluginMu.Unlock()
 	pane.Cols = int(payload.Cols)
 	pane.Rows = int(payload.Rows)
+	pane.PluginMu.Unlock()
 }
 
 func (d *Daemon) handleUpdatePane(msg *ipc.Message) {
@@ -1594,7 +1599,12 @@ func (d *Daemon) streamPTYOutput(paneID string, pty apty.Session) {
 			// the size in case the initial resize event was dropped during
 			// boot (see resizeKick).
 			if pane := d.session.Pane(paneID); pane != nil {
-				resizeKick(pty, pane.Cols, pane.Rows)
+				// Snapshot under the lock: this is the PTY output goroutine and
+				// handleResizePane writes these from a conn dispatch goroutine.
+				pane.PluginMu.Lock()
+				cols, rows := pane.Cols, pane.Rows
+				pane.PluginMu.Unlock()
+				resizeKick(pty, cols, rows)
 			}
 		},
 		func(b []byte) { d.flushPaneOutput(paneID, b) },
@@ -1924,6 +1934,10 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			if pane.Eager {
 				paneData["eager"] = true
 			}
+			// Captured here rather than read below: this runs on the snapshot
+			// goroutine while handleResizePane writes them from a conn dispatch
+			// goroutine.
+			snapCols, snapRows := pane.Cols, pane.Rows
 			pane.PluginMu.Unlock()
 			// Pending (deferred, not yet lazy-spawned) is spawnMu-guarded —
 			// read it the same way list_panes does. The TUI uses it to show the
@@ -1980,9 +1994,9 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			// ConPTY at the right dimensions instead of the 80x24 default
 			// (children that boot before the first resize event would
 			// otherwise render an 80-column UI — see resizeKick).
-			if pane.Cols > 0 && pane.Rows > 0 {
-				paneData["cols"] = pane.Cols
-				paneData["rows"] = pane.Rows
+			if snapCols > 0 && snapRows > 0 {
+				paneData["cols"] = snapCols
+				paneData["rows"] = snapRows
 			}
 			if isOverlay {
 				paneData["overlay"] = true

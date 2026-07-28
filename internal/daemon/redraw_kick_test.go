@@ -1,6 +1,10 @@
 package daemon
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/artyomsv/quil/internal/ipc"
+)
 
 // redrawKick exists because plugins with ghost_buffer = false get no replay on
 // attach, so a reconnecting client is sent nothing for a pane whose process is
@@ -92,4 +96,55 @@ func TestRedrawKick_DeclinesWhenThereIsNothingToSignal(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestPaneSize_ConcurrentResizeAndRead is a race-detector regression guard.
+//
+// pane.Cols/Rows used to be written just OUTSIDE handleResizePane's PluginMu
+// span, and were documented on the struct as "immutable once set". They are
+// not: handleResizePane rewrites them on every genuine resize from the
+// resizing conn's dispatch goroutine, while handleAttach (a different conn),
+// the PTY output goroutine's resizeKick, and snapshot() all read them. Three
+// live data races, invisible because no test ran a resize concurrently with a
+// read — `go test -race` only reports races it actually executes.
+//
+// This fails under -race if the write moves back out of the lock, or if a new
+// reader takes the field without it.
+func TestPaneSize_ConcurrentResizeAndRead(t *testing.T) {
+	d := &Daemon{session: NewSessionManager(4096)}
+	pane := &Pane{ID: "p1", PTY: &fakeSession{}}
+	d.session.panes["p1"] = pane
+
+	const iterations = 200
+
+	// Built on the test goroutine, not inside the writer below: resizeMsg
+	// calls t.Fatalf, and testing.T's failure methods are only valid from the
+	// goroutine running the test. Alternating sizes so the same-size guard
+	// never short-circuits the write — a guard hit would make this vacuous.
+	msgs := make([]*ipc.Message, iterations)
+	for i := range msgs {
+		msgs[i] = resizeMsg(t, "p1", uint16(100+i%2), 40)
+	}
+
+	done := make(chan struct{})
+
+	// Writer: the resizing client's dispatch goroutine.
+	go func() {
+		defer close(done)
+		for _, m := range msgs {
+			d.handleResizePane(m)
+		}
+	}()
+
+	// Reader: stands in for handleAttach / resizeKick / snapshot, all of which
+	// read the pair the same way.
+	for i := 0; i < iterations; i++ {
+		pane.PluginMu.Lock()
+		cols, rows := pane.Cols, pane.Rows
+		pane.PluginMu.Unlock()
+		if cols != 0 && (cols < 100 || cols > 101 || rows != 40) {
+			t.Fatalf("torn read: %dx%d", cols, rows)
+		}
+	}
+	<-done
 }

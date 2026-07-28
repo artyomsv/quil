@@ -6,7 +6,7 @@ name = "claude-code"
 display_name = "Claude Code"
 category = "ai"
 description = "AI coding assistant"
-schema_version = 9
+schema_version = 10
 
 [command]
 cmd = "claude"
@@ -54,6 +54,19 @@ default = false
 [persistence]
 strategy = "preassign_id"
 ghost_buffer = false
+# Written to this pane's stdin when a client attaches and the pane had no ghost
+# replay to send — which is exactly what ghost_buffer = false above causes, and
+# what otherwise leaves a reconnecting client staring at a blank rectangle in
+# front of a live conversation.
+#
+# Ctrl+L (form feed) rather than a resize: claude-code re-lays-out on SIGWINCH
+# but only paints on its own render tick, so a resize produces nothing at all.
+# Measured on a real PTY — vim repaints with ~5 KB after a 1-column jiggle,
+# claude-code emits 0 bytes from its main UI.
+#
+# This is INPUT rather than a signal, which is why it is opt-in per plugin: a
+# program that reads its own stdin for data would receive this as data.
+redraw_key = "\f"
 # Pre-assign a UUID to the new session so Quil can identify the pane.
 start_args = ["--session-id", "{session_id}"]
 # On restore, the daemon picks one of two templates per pane:

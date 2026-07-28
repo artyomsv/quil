@@ -711,7 +711,7 @@ func (d *Daemon) respawnPanes() {
 // sanity check and the fallback-to-terminal recovery. Extracted from
 // respawnPanes so the lazy-spawn path (ensurePaneSpawned) reuses it verbatim.
 func (d *Daemon) spawnRestoredPane(pane *Pane) {
-	ptySession := newRestoredPTY(pane)
+	ptySession := newRestoredPTY(paneSize(pane))
 	if pane.CWD != "" {
 		if info, err := os.Stat(pane.CWD); err != nil || !info.IsDir() {
 			log.Printf("pane %s: saved cwd %q gone, using default", pane.ID, pane.CWD)
@@ -730,12 +730,13 @@ func (d *Daemon) spawnRestoredPane(pane *Pane) {
 		pane.PluginMu.Lock()
 		pane.Type = "terminal"
 		pane.PluginMu.Unlock()
-		ptySession2 := newRestoredPTY(pane)
+		ptySession2 := newRestoredPTY(paneSize(pane))
 		if err := d.spawnPane(pane, ptySession2, false); err != nil {
 			log.Printf("fallback shell for pane %s also failed: %v", pane.ID, err)
 		}
 	} else {
-		log.Printf("respawned pane %s (type=%s, cwd=%s, size=%dx%d)", pane.ID, pane.Type, pane.CWD, pane.Cols, pane.Rows)
+		cols, rows := paneSize(pane)
+		log.Printf("respawned pane %s (type=%s, cwd=%s, size=%dx%d)", pane.ID, pane.Type, pane.CWD, cols, rows)
 	}
 }
 
@@ -767,9 +768,28 @@ func (d *Daemon) ensureTabSpawned(tabID string) {
 // (which interactive TUIs latch onto when the first resize event is lost —
 // see resizeKick). Falls back to the default constructor for pre-size
 // snapshots where Cols/Rows were never recorded.
-func newRestoredPTY(pane *Pane) apty.Session {
-	if pane.Cols > 0 && pane.Rows > 0 {
-		return newSessionFn(pane.Cols, pane.Rows)
+// paneSize reads a pane's last known dimensions under PluginMu.
+//
+// Every caller runs on a goroutine that can race handleResizePane, which writes
+// the pair from the resizing conn's dispatch goroutine: attach, lazy spawn,
+// restart, screenshot, snapshot, and the PTY output goroutine's resizeKick.
+// Reading the two fields together also keeps them consistent — a torn pair
+// (new cols, old rows) would size a PTY to a geometry that never existed.
+//
+// Callers already holding PluginMu must NOT use this; the mutex is not
+// reentrant. Those sites read the fields directly inside their own span.
+func paneSize(pane *Pane) (cols, rows int) {
+	pane.PluginMu.Lock()
+	defer pane.PluginMu.Unlock()
+	return pane.Cols, pane.Rows
+}
+
+// Takes the size explicitly rather than reading it off the pane: this runs on
+// the lazy-spawn path while the IPC server is live, so pane.Cols/Rows must be
+// snapshotted under PluginMu by the caller (see paneSize).
+func newRestoredPTY(cols, rows int) apty.Session {
+	if cols > 0 && rows > 0 {
+		return newSessionFn(cols, rows)
 	}
 	return newSessionFn(0, 0)
 }
@@ -960,8 +980,19 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 				}
 				pane.GhostSnap = nil // take-and-clear under the lock
 			}
+			// Captured in the same span as Type/GhostSnap: the redraw kick below
+			// needs a live PTY, and reading it separately would race a restart.
+			// Same discipline as handleResizePane — pointer under the lock, the
+			// Resize syscall outside it.
+			kickRunning := pane.PTY != nil && pane.ExitCode == nil
 			pane.PluginMu.Unlock()
 			if !ghostEnabled || len(ghost) == 0 {
+				// Nothing was replayed, so this pane's rectangle is blank on the
+				// client that just attached — even though the process behind it
+				// is alive and mid-conversation. Ask the child to repaint.
+				if kickRunning {
+					d.redrawKick(pane, typ)
+				}
 				continue
 			}
 			log.Printf("attach: ghost replay pane %s (type=%s, source=%s, bytes=%d)",
@@ -1416,13 +1447,17 @@ func (d *Daemon) handleResizePane(msg *ipc.Message) {
 		log.Printf("resize pane %s to %dx%d: %v", payload.PaneID, payload.Cols, payload.Rows, err)
 		return
 	}
-	// Record only after the syscall succeeds.
+	// Record only after the syscall succeeds. Cols/Rows are written INSIDE the
+	// lock with the applied* guards: they used to be set just below it, which
+	// made them a genuine data race — this runs on the resizing conn's dispatch
+	// goroutine while handleAttach (another conn), the PTY output goroutine's
+	// resizeKick, and snapshot() all read them concurrently.
 	pane.PluginMu.Lock()
 	pane.appliedCols = int(payload.Cols)
 	pane.appliedRows = int(payload.Rows)
-	pane.PluginMu.Unlock()
 	pane.Cols = int(payload.Cols)
 	pane.Rows = int(payload.Rows)
+	pane.PluginMu.Unlock()
 }
 
 func (d *Daemon) handleUpdatePane(msg *ipc.Message) {
@@ -1519,6 +1554,45 @@ func resizeKick(pty apty.Session, cols, rows int) {
 	}
 }
 
+// redrawKick asks a live child to repaint itself, for a pane that received no
+// ghost replay on attach.
+//
+// Plugins with ghost_buffer = false (the AI panes) are deliberately excluded
+// from replay: they run on the alternate screen, and a ring buffer of their
+// output can begin mid-escape-sequence, so replaying it produces garbage rather
+// than history. The cost is that a reconnecting client is sent nothing at all
+// for such a pane — the PTY is attached and the process is mid-conversation,
+// but the rectangle is blank until the child next writes something, and a
+// full-screen program has no reason to do that unprompted. The pane reads as
+// dead when it is perfectly healthy.
+//
+// The mechanism is the plugin's declared RedrawKey, written to the child's
+// stdin. That is INPUT rather than a signal, which is why it is opt-in per
+// plugin rather than applied to every replay-less pane: the plugin author is
+// asserting both that their program treats the byte as "repaint" and that
+// nothing else is reading its stdin. A pane sitting in `cat > file` or at a
+// password prompt would receive it as data.
+//
+// SIGWINCH via a resize would be the safe universal alternative, needs no
+// per-plugin opt-in, and does not work. Measured on a real PTY: vim repaints
+// with ~5 KB of output after a 1-column jiggle, claude-code emits 0 bytes from
+// its main UI. It re-lays-out on a resize but only paints on its own render
+// tick, which input drives. An earlier version of this fix used the jiggle and
+// silently did nothing.
+//
+// Writes go through EnqueueInput, never pane.PTY.Write directly: a child that
+// has stopped reading stdin fills the kernel buffer and blocks the writer
+// forever, and this runs on the attaching client's dispatch goroutine.
+func (d *Daemon) redrawKick(pane *Pane, typ string) {
+	p := d.registry.Get(typ)
+	if p == nil || p.Persistence.RedrawKey == "" {
+		return
+	}
+	log.Printf("attach: redraw kick pane %s (type=%s, no ghost replay, %d bytes)",
+		pane.ID, typ, len(p.Persistence.RedrawKey))
+	pane.EnqueueInput([]byte(p.Persistence.RedrawKey))
+}
+
 func (d *Daemon) streamPTYOutput(paneID string, pty apty.Session) {
 	readBuf := make([]byte, 32*1024)
 	dataCh := make(chan []byte, 64)
@@ -1545,7 +1619,11 @@ func (d *Daemon) streamPTYOutput(paneID string, pty apty.Session) {
 			// the size in case the initial resize event was dropped during
 			// boot (see resizeKick).
 			if pane := d.session.Pane(paneID); pane != nil {
-				resizeKick(pty, pane.Cols, pane.Rows)
+				// paneSize, not a direct read: this is the PTY output goroutine
+				// and handleResizePane writes the pair from a conn dispatch
+				// goroutine.
+				cols, rows := paneSize(pane)
+				resizeKick(pty, cols, rows)
 			}
 		},
 		func(b []byte) { d.flushPaneOutput(paneID, b) },
@@ -1875,6 +1953,10 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			if pane.Eager {
 				paneData["eager"] = true
 			}
+			// Captured here rather than read below: this runs on the snapshot
+			// goroutine while handleResizePane writes them from a conn dispatch
+			// goroutine.
+			snapCols, snapRows := pane.Cols, pane.Rows
 			pane.PluginMu.Unlock()
 			// Pending (deferred, not yet lazy-spawned) is spawnMu-guarded —
 			// read it the same way list_panes does. The TUI uses it to show the
@@ -1931,9 +2013,9 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			// ConPTY at the right dimensions instead of the 80x24 default
 			// (children that boot before the first resize event would
 			// otherwise render an 80-column UI — see resizeKick).
-			if pane.Cols > 0 && pane.Rows > 0 {
-				paneData["cols"] = pane.Cols
-				paneData["rows"] = pane.Rows
+			if snapCols > 0 && snapRows > 0 {
+				paneData["cols"] = snapCols
+				paneData["rows"] = snapRows
 			}
 			if isOverlay {
 				paneData["overlay"] = true
@@ -3305,8 +3387,9 @@ func (d *Daemon) handleRestartPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 		pane.OutputBuf.Reset()
 	}
 
-	// Respawn with same config, using last known dimensions
-	cols, rows := pane.Cols, pane.Rows
+	// Respawn with same config, using last known dimensions. Under PluginMu:
+	// another client can be resizing this pane while this restart runs.
+	cols, rows := paneSize(pane)
 	if cols <= 0 {
 		cols = 80
 	}
@@ -3347,9 +3430,13 @@ func (d *Daemon) handleScreenshotPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 	d.ensurePaneSpawned(pane)
 	d.highlightPane(pane.ID)
 
+	// Snapshotted together under PluginMu — a concurrent resize would
+	// otherwise render the screenshot at a geometry that never existed.
+	paneCols, paneRows := paneSize(pane)
+
 	width := req.Width
 	if width <= 0 {
-		width = pane.Cols
+		width = paneCols
 	}
 	if width <= 0 {
 		width = 80
@@ -3359,7 +3446,7 @@ func (d *Daemon) handleScreenshotPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 	}
 	height := req.Height
 	if height <= 0 {
-		height = pane.Rows
+		height = paneRows
 	}
 	if height <= 0 {
 		height = 24

@@ -40,8 +40,13 @@ type Pane struct {
 	// branches (CWD="" when the saved dir is gone, Type="terminal" on spawn
 	// fallback) WHILE the IPC server is live, racing snapshot() /
 	// workspaceStateFromSnapshot / buildPaneInfos / handlePaneStatusReq
-	// readers. Immutable post-creation fields (ID, TabID, OutputBuf pointer,
-	// Cols/Rows once set) are read without it.
+	// readers. Cols/Rows join the set too: handleResizePane rewrites them on
+	// every genuine resize, from the resizing conn's dispatch goroutine, while
+	// handleAttach (a different conn), the PTY output goroutine's resizeKick,
+	// and snapshot() all read them. They were previously described here as
+	// "immutable once set" and written just outside this lock, which made all
+	// three readers data races. Only genuinely immutable post-creation fields
+	// (ID, TabID, OutputBuf pointer) are read without it.
 	PluginMu     sync.Mutex
 	InstanceName string    // Which instance config was used
 	InstanceArgs []string  // Args used to start (for rerun strategy)

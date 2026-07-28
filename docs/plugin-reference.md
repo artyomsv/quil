@@ -255,6 +255,23 @@ resume_args = ["--resume", "{session_id}"]
 |-------|------|----------|---------|-------------|
 | `strategy` | string | No | `""` (none) | Resume mechanism. See [Strategy Reference](#strategy-reference). |
 | `ghost_buffer` | bool | No | `true` | If `true`, PTY output is saved to disk and replayed on reconnect (shows previous terminal content with a dimmed "restored" label). Set to `false` for TUI apps that manage their own display. |
+| `redraw_key` | string | No | `""` | Byte(s) written to the pane's stdin when a client attaches and the pane had **no** ghost replay to send. Only meaningful with `ghost_buffer = false`, which is what leaves a reconnecting client with a blank rectangle in front of a live process. See below before setting it. |
+
+#### `redraw_key` — when to set it, and when not to
+
+With `ghost_buffer = false` there is nothing to replay on reconnect, so the pane renders blank until the program next writes something — and a full-screen program has no reason to do that unprompted. The pane looks dead while being perfectly healthy. `redraw_key` is how a plugin says "this byte makes my program repaint."
+
+**This is input, not a signal.** It lands in the child's stdin, so only set it when you know both that the program treats the byte as "redraw" *and* that nothing else is reading its stdin as data. A pane that might be sitting in `cat > file` or at a password prompt must leave it unset — there, a stray `\f` is silent data corruption rather than a repaint. That is why there is no default.
+
+**Why not `SIGWINCH`?** A resize would need no opt-in and would be safe everywhere, and it does not work for the programs that need this. Measured on a real PTY with a 1-column resize jiggle: `vim` repaints with ~5 KB of output, `claude-code` emits **0 bytes** from its main UI. It re-lays-out on a resize but only paints on its own render tick, which input drives.
+
+Verify before setting it rather than assuming. Spawn the program on a PTY, let it settle, confirm it is idle, write the candidate byte, and check that output follows.
+
+```toml
+[persistence]
+ghost_buffer = false
+redraw_key = "\f"   # Ctrl+L — verified to repaint claude-code
+```
 | `start_args` | string[] | No | `[]` | Template arguments appended on **fresh** pane creation. `{key}` placeholders expanded from plugin state (e.g., generated UUIDs). Used with `preassign_id` strategy. |
 | `resume_args` | string[] | No | `[]` | Template arguments used when **restoring** a pane after daemon restart. `{key}` placeholders expanded from previously scraped state. If any placeholder cannot be resolved, the pane starts fresh instead. |
 

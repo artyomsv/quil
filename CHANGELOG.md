@@ -18,10 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   connection you already have. The server needs no route to GitHub, which
   matters because cluster nodes frequently have none.
 
-  A launch that finds no `quil` on the far side offers to install it, and one
-  that finds the wrong version offers to upgrade. Nothing happens without an
-  explicit `y`, and the prompt names the host, the exact path, the version, and
-  — for an upgrade — that the remote daemon will be stopped.
+  You rarely need to run it yourself. `quil --remote <host>` against a machine
+  with no Quil offers to install it and then **attaches** — the command asked to
+  attach, so that is what it finishes doing. A version mismatch offers an
+  upgrade the same way. Nothing happens without an explicit `y`, and the prompt
+  names the host, the exact path, the version, and — for an upgrade — that the
+  remote daemon will be stopped.
 
   This also fixes a trap that was easy to hit and hard to read: `ssh host quil
   --stdio` runs a *non-interactive* shell, and on Debian and Ubuntu `~/.bashrc`

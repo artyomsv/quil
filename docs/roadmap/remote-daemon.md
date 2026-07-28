@@ -98,7 +98,9 @@ Three caveats worth knowing:
 - `quil remote setup <dest>` installs or upgrades Quil on the far side. The
   archive is downloaded and checksum-verified on **your** machine and pushed
   over the SSH connection, so the server needs no route to GitHub. Offered
-  automatically when a launch finds no `quil` there, or finds the wrong version.
+  automatically when a launch finds no `quil` there, or finds the wrong version
+  — and the launch then **attaches**, rather than asking you to re-run the
+  command you already ran.
 - `internal/transport` behind an `ipc.DialFunc` seam, with `Local` (Unix socket)
   and `SSH` backends. The seam is shaped so a TLS backend can be added without
   the protocol layer knowing.

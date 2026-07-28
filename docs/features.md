@@ -410,7 +410,7 @@ quil remote setup gpu01
 
 Quil downloads the release for the **remote's** platform onto your machine, verifies its checksum there, and pushes it over the SSH connection. The server needs no route to GitHub — which matters, because cluster nodes frequently have none. The version installed matches your TUI by construction, so the two cannot disagree afterwards.
 
-A launch that finds no `quil` on the far side offers this automatically, as does one that finds the wrong version. Nothing is installed without an explicit `y`.
+You rarely need to run it yourself. `quil --remote <host>` on a machine that has no Quil offers to install it, and **attaches once it has** — the command you typed asked to attach, so that is what it finishes doing. A version mismatch offers an upgrade the same way. Nothing is installed without an explicit `y`, and the prompt names the host, the exact path, the version, and — for an upgrade — that the remote daemon will be stopped.
 
 This also solves a problem that is otherwise easy to hit and hard to diagnose. `ssh host quil --stdio` runs a *non-interactive* shell, and on Debian and Ubuntu `~/.bashrc` returns before it reaches any `PATH` line — so a binary in `~/.local/bin` is invisible, and the failure looks exactly like an unreachable host. Setup records the absolute path per destination and uses it as the remote command, so `PATH` never participates. Installs go to `~/.local/bin` and **never use `sudo`**; an upgrade replaces an existing binary in place only where that directory is already writable.
 

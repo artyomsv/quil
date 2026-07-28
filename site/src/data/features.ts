@@ -449,10 +449,11 @@ export const features: Feature[] = [
     category: "persistence",
     detail: [
       "No network port is opened on the remote host. Quil runs `ssh -T <host> \"quil --stdio\"` and speaks its normal protocol over that one channel — so a bastion behind ProxyJump, a Tailscale or WireGuard address, and a box on the public internet all work with no extra setup.",
+      "The server does not need Quil installed first. Point `--remote` at a bare machine and it offers to install one, then attaches. Your laptop downloads the release for the *remote's* platform, verifies the checksum locally, and pushes it over the SSH connection you already have — so a cluster node with no route to GitHub is provisioned just as easily as one with. Linux and macOS, amd64 and arm64; nothing is installed without an explicit yes.",
       "The destination goes to `ssh` verbatim, so your ~/.ssh/config keeps working unchanged: Host aliases, ProxyJump, ControlMaster, per-host keys, hardware tokens, and SSH certificates all apply.",
       "Quil forces off what the remote never needs — agent forwarding, X11, port forwarding, local-command execution — and bounds both ends of the connection's life so a dead host fails in seconds rather than hanging. Host-key policy is left to your config, because forcing it could only weaken it.",
       "Every command that manages a daemon's lifecycle refuses under --remote rather than silently acting on your laptop, and the status bar carries [remote <host>] so the machine you are driving is never ambiguous.",
-      "Beta limits: no automatic reconnect yet (a dropped link ends the session, though the panes survive and re-attaching restores them), and dialogs that browse a filesystem still read your local disk rather than the server's.",
+      "Beta limits: no automatic reconnect yet (a dropped link ends the session, though the panes survive and re-attaching restores them), dialogs that browse a filesystem still read your local disk rather than the server's, and the remote must be Linux or macOS — a running Windows executable cannot be replaced in place, which makes the upgrade half of provisioning impossible there.",
     ],
   },
 

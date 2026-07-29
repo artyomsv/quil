@@ -177,6 +177,19 @@ func listDir(ctx context.Context, dir string) (sessions []Session, truncated boo
 	}
 	candidates := make([]candidate, 0, len(entries))
 	for _, e := range entries {
+		// Guarded as well as the title loop below, and arguably more
+		// importantly: that one is capped at MaxSessions, this one runs over
+		// EVERY entry in the project directory and calls e.Info() — a stat per
+		// entry on most platforms. The capped loop costs more per item; this
+		// one has no bound on how many items there are.
+		// Guarded as well as the title loop below, and arguably more
+		// importantly: that one is capped at MaxSessions, this one runs over
+		// EVERY entry in the project directory and calls e.Info() — a stat per
+		// entry on most platforms. The capped loop costs more per item; this
+		// one has no bound on how many items there are.
+		if ctx.Err() != nil {
+			return nil, false, nil
+		}
 		if !strings.HasSuffix(e.Name(), ".jsonl") {
 			continue
 		}

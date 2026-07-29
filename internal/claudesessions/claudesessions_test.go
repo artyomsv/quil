@@ -641,3 +641,35 @@ func TestReadDetail_CancelledContext_ReturnsError(t *testing.T) {
 		t.Fatalf("err = %v, want it to wrap context.Canceled", err)
 	}
 }
+
+// A cancelled scan must not claim it truncated anything.
+//
+// This also pins WHERE the cancellation check sits. The candidate-gathering
+// loop runs over every entry in the directory and stats each one; the title
+// loop below it is already capped at MaxSessions. Guarding only the capped loop
+// leaves the unbounded one running, and the tell is `truncated`: the cap is
+// applied before titles are read, so a scan that reached it did all the stats
+// and then reported a truncation it should never have discovered.
+func TestListDir_CancelledContext_DoesNotReportTruncation(t *testing.T) {
+	dir := t.TempDir()
+	base := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < MaxSessions+1; i++ {
+		writeSession(t, dir, fmt.Sprintf("s%04d", i),
+			base.Add(time.Duration(i)*time.Minute), typedPrompt("prompt"))
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	sessions, truncated, err := listDir(ctx, dir)
+	if err != nil {
+		t.Fatalf("listDir returned an error on cancel: %v", err)
+	}
+	if len(sessions) != 0 {
+		t.Errorf("sessions = %d, want 0", len(sessions))
+	}
+	if truncated {
+		t.Error("truncated = true on a cancelled scan; the candidate loop ran to " +
+			"completion, so the check is guarding only the capped title loop")
+	}
+}

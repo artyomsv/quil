@@ -305,7 +305,7 @@ type Detail struct {
 // a truncated one is not.
 func ReadDetail(ctx context.Context, cwd, sessionID string) (Detail, error) {
 	if err := ctx.Err(); err != nil {
-		return Detail{}, err
+		return Detail{}, fmt.Errorf("read session detail: %w", err)
 	}
 	if sessionID == "" || sessionID != filepath.Base(sessionID) ||
 		sessionID == "." || sessionID == ".." || strings.ContainsRune(sessionID, filepath.Separator) {
@@ -353,7 +353,7 @@ func readDetail(ctx context.Context, path, id string) (Detail, error) {
 		// call on each one would be a measurable share of that budget.
 		if lineNo%4096 == 0 {
 			if err := ctx.Err(); err != nil {
-				return Detail{}, err
+				return Detail{}, fmt.Errorf("scan transcript %s at line %d: %w", id, lineNo, err)
 			}
 		}
 		// A non-nil error still yields the trailing bytes: a transcript a live

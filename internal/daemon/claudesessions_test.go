@@ -824,3 +824,65 @@ func TestSessionDetailAndListingAreIndependent(t *testing.T) {
 	d.sessionScanning.Store(false)
 	d.sessionDetailReading.Store(false)
 }
+
+// The stub helpers above adapt a ctx-free function onto the ctx-aware seam,
+// which is convenient but blind: every test that uses them would still pass if
+// the handler stopped deriving a bounded context and passed a bare
+// context.Background() instead.
+//
+// That is the exact regression RD-004 exists to prevent. These two tests bypass
+// the adapters and assign the seam directly so the context the handler actually
+// builds can be inspected. Both handlers hold a single-flight slot for the life
+// of their call, so an unbounded scan does not stall one request — it makes the
+// feature answer "already running" until the daemon is restarted.
+func TestClaudeSessionsResponse_PassesABoundedContext(t *testing.T) {
+	d := newTestDaemon(t)
+
+	prev := listClaudeSessionsFn
+	t.Cleanup(func() { listClaudeSessionsFn = prev })
+
+	var gotCtx context.Context
+	listClaudeSessionsFn = func(ctx context.Context, _ string) ([]claudesessions.Session, bool, error) {
+		gotCtx = ctx
+		return nil, false, nil
+	}
+
+	d.claudeSessionsResponse(sessionsReq(t, t.TempDir()))
+
+	if gotCtx == nil {
+		t.Fatal("handler never called the discovery seam")
+	}
+	deadline, ok := gotCtx.Deadline()
+	if !ok {
+		t.Fatal("discovery ran on a context with no deadline; the scan is unbounded " +
+			"and holds the single-flight slot for as long as it takes")
+	}
+	if d := time.Until(deadline); d <= 0 || d > discoveryTimeout {
+		t.Errorf("deadline is %v away, want (0, %v]", d, discoveryTimeout)
+	}
+}
+
+func TestClaudeSessionDetailResponse_PassesABoundedContext(t *testing.T) {
+	prev := readClaudeSessionDetailFn
+	t.Cleanup(func() { readClaudeSessionDetailFn = prev })
+
+	var gotCtx context.Context
+	readClaudeSessionDetailFn = func(ctx context.Context, _, _ string) (claudesessions.Detail, error) {
+		gotCtx = ctx
+		return claudesessions.Detail{}, nil
+	}
+
+	claudeSessionDetailResponse(sessionDetailReq(t, t.TempDir(), "aaaaaaaa-0000-4000-8000-000000000000"))
+
+	if gotCtx == nil {
+		t.Fatal("handler never called the detail seam")
+	}
+	deadline, ok := gotCtx.Deadline()
+	if !ok {
+		t.Fatal("detail read ran on a context with no deadline; it streams a whole " +
+			"transcript and holds sessionDetailReading while it does")
+	}
+	if d := time.Until(deadline); d <= 0 || d > discoveryTimeout {
+		t.Errorf("deadline is %v away, want (0, %v]", d, discoveryTimeout)
+	}
+}

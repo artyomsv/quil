@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -297,5 +298,65 @@ func TestReportRemoteLinkFailure_NamesTheHostAndTheCheck(t *testing.T) {
 	// The whole point of the fix: this is not a version problem.
 	if strings.Contains(strings.ToLower(out), "version mismatch") {
 		t.Errorf("message still blames a version mismatch; got:\n%s", out)
+	}
+}
+
+// redirectRemoteStderr is called unconditionally by launchTUI on EVERY launch,
+// including purely local ones where no remote dial ever installed a redirect.
+// A missing nil guard there would panic before the TUI starts — for every user,
+// not just remote ones. Mirrors TestRemoteLinkError_NilWhenNoRemoteDialHappened,
+// which covers the sibling seam installed at the same site in dialRemote.
+func TestRedirectRemoteStderr_NoopWhenNoRemoteDialHappened(t *testing.T) {
+	prev := remoteStderrRedirectFn
+	remoteStderrRedirectFn = nil
+	t.Cleanup(func() { remoteStderrRedirectFn = prev })
+
+	// Must not panic. A nil sink is also legal — it means "discard".
+	redirectRemoteStderr(io.Discard)
+	redirectRemoteStderr(nil)
+}
+
+func TestRedirectRemoteStderr_ForwardsTheWriterToTheTransport(t *testing.T) {
+	prev := remoteStderrRedirectFn
+	t.Cleanup(func() { remoteStderrRedirectFn = prev })
+
+	var got io.Writer
+	called := false
+	remoteStderrRedirectFn = func(w io.Writer) {
+		called = true
+		got = w
+	}
+
+	want := &bytes.Buffer{}
+	redirectRemoteStderr(want)
+
+	if !called {
+		t.Fatal("redirectRemoteStderr did not call the installed redirect")
+	}
+	if got != io.Writer(want) {
+		t.Errorf("redirect received %v, want the writer it was given (%v)", got, want)
+	}
+}
+
+// Passing nil must reach the transport as nil rather than being swallowed —
+// nil is the "discard further diagnostics" instruction, not "do nothing".
+func TestRedirectRemoteStderr_ForwardsNilAsDiscard(t *testing.T) {
+	prev := remoteStderrRedirectFn
+	t.Cleanup(func() { remoteStderrRedirectFn = prev })
+
+	called := false
+	var got io.Writer = io.Discard
+	remoteStderrRedirectFn = func(w io.Writer) {
+		called = true
+		got = w
+	}
+
+	redirectRemoteStderr(nil)
+
+	if !called {
+		t.Fatal("redirectRemoteStderr did not call the installed redirect for a nil writer")
+	}
+	if got != nil {
+		t.Errorf("redirect received %v, want nil", got)
 	}
 }

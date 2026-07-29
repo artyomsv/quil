@@ -935,3 +935,130 @@ func TestReconnect_SuccessPathResetsWorkState(t *testing.T) {
 			"that it finished something while the link was down")
 	}
 }
+
+// Exactly one listen loop may drive the Model after a swap.
+//
+// The old loop is still parked in Receive on the dead client when the
+// replacement goes live; when it finally errors, its linkLostMsg carries the
+// old generation. This drives the full sequence rather than injecting a stale
+// generation directly, so it also covers the bump in finishReconnect.
+func TestReconnect_OldListenLoopCannotStartASecondReconnect(t *testing.T) {
+	dials := 0
+	m := Model{clientGen: 1, attached: true}
+	m.SetRemoteDest("gpu01")
+	m.SetRedialFunc(func(Client) (Client, error) {
+		dials++
+		return &failingClient{err: errors.New("unused")}, nil
+	})
+
+	// Link drops, then a redial succeeds — the generation moves to 2.
+	updated, _ := m.Update(linkLostMsg{gen: 1, err: errors.New("EOF")})
+	m = updated.(Model)
+	updated, _ = m.Update(redialResultMsg{gen: 1, client: &failingClient{err: errors.New("live")}})
+	m = updated.(Model)
+	if m.clientGen != 2 {
+		t.Fatalf("clientGen = %d after a successful reconnect, want 2", m.clientGen)
+	}
+	if m.reconnect.active {
+		t.Fatal("reconnect still active after success")
+	}
+
+	// Now the DEAD client's loop finally errors, reporting the old generation.
+	updated, cmd := m.Update(linkLostMsg{gen: 1, err: errors.New("EOF")})
+	got := updated.(Model)
+
+	if got.reconnect.active {
+		t.Error("a stale listen loop restarted the reconnect")
+	}
+	if cmd != nil {
+		t.Error("stale link loss produced a command")
+	}
+	if got.clientGen != 2 {
+		t.Errorf("clientGen = %d, want 2 (untouched by the stale report)", got.clientGen)
+	}
+}
+
+// A genuine second drop on the CURRENT generation must still reconnect. The
+// stale-report guard must reject old generations without deafening the Model to
+// real ones — a session that heals once and then dies silently is worse than
+// one that never healed.
+func TestReconnect_SecondGenuineDropStillReconnects(t *testing.T) {
+	m := Model{clientGen: 1, attached: true}
+	m.SetRemoteDest("gpu01")
+	m.SetRedialFunc(func(Client) (Client, error) {
+		return &failingClient{err: errors.New("unused")}, nil
+	})
+
+	updated, _ := m.Update(linkLostMsg{gen: 1, err: errors.New("EOF")})
+	m = updated.(Model)
+	updated, _ = m.Update(redialResultMsg{gen: 1, client: &failingClient{err: errors.New("live")}})
+	m = updated.(Model)
+
+	// The NEW client's own loop reports a drop, stamped with the new generation.
+	updated, cmd := m.Update(linkLostMsg{gen: m.clientGen, err: errors.New("EOF again")})
+	got := updated.(Model)
+
+	if !got.reconnect.active {
+		t.Error("a genuine second drop did not start a reconnect")
+	}
+	if cmd == nil {
+		t.Error("no retry armed for the second drop")
+	}
+}
+
+// sawFirstState must survive a reconnect, so the once-per-launch update notice
+// cannot reopen when the daemon re-broadcasts workspace_state on reattach.
+//
+// Belt-and-braces today: maybeShowUpdateNotice returns early in remote mode
+// (its update info describes the REMOTE daemon while accepting applies a LOCAL
+// staged update), and canReconnect requires remote mode — so the two conditions
+// never coincide. This pins the invariant for RD-027, which makes update
+// controls remote-aware and would otherwise reintroduce it silently.
+func TestReconnect_DoesNotReopenUpdateNotice(t *testing.T) {
+	m := Model{clientGen: 1, attached: true, sawFirstState: true,
+		reconnect: reconnectState{active: true, attempt: 1}}
+	m.SetRemoteDest("gpu01")
+
+	updated, _ := m.Update(redialResultMsg{gen: 1, client: &failingClient{err: errors.New("unused")}})
+
+	if got := updated.(Model); !got.sawFirstState {
+		t.Error("sawFirstState was cleared by the reconnect; the update notice would reopen " +
+			"on the reattach broadcast once RD-027 makes it remote-aware")
+	}
+}
+
+// The reconnect must not resurrect a dialog or leave one stranded. Dialog state
+// is client-independent, so it is left exactly as the user had it.
+func TestReconnect_LeavesDialogStateAlone(t *testing.T) {
+	m := Model{clientGen: 1, attached: true, dialog: dialogAbout, dialogCursor: 3,
+		reconnect: reconnectState{active: true, attempt: 1}}
+	m.SetRemoteDest("gpu01")
+
+	updated, _ := m.Update(redialResultMsg{gen: 1, client: &failingClient{err: errors.New("unused")}})
+	got := updated.(Model)
+
+	if got.dialog != dialogAbout {
+		t.Errorf("dialog = %v after reconnect, want dialogAbout (unchanged)", got.dialog)
+	}
+	if got.dialogCursor != 3 {
+		t.Errorf("dialogCursor = %d, want 3 (unchanged)", got.dialogCursor)
+	}
+}
+
+// Ghost re-dim on reconnect is ACCEPTED behaviour, recorded rather than fixed
+// (RD-016). resetForReattach clears liveOutputSeen so the replay is treated as
+// ghost output exactly as on a first attach, which means panes briefly show the
+// muted "restored" border again. Pinning it means a future change to the
+// ghost/live latch has to make this decision deliberately.
+func TestReconnect_GhostDimIsAcceptedNotAvoided(t *testing.T) {
+	m := newReconnectTestModel(t, 1)
+	p := m.tabs[0].Leaves()[0]
+	p.liveOutputSeen = true
+
+	m.resetPanesForReattach()
+
+	if p.liveOutputSeen {
+		t.Error("liveOutputSeen survived; the ghost→live transition and its settle repaints " +
+			"would not re-fire for the replayed content")
+	}
+}

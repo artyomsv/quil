@@ -88,6 +88,12 @@ func main() {
 		}
 	}
 
+	// Record the console mode before anything we spawn can disturb it. A
+	// non-batch ssh dial reconfigures it and is killed rather than allowed to
+	// restore it, which leaves every later diagnostic staircasing down the
+	// screen — see consolemode_windows.go. No-op off Windows.
+	saveConsoleMode()
+
 	// --remote binds this TUI to a daemon on another host. Parsed before the
 	// subcommand switch so the lifecycle guards are armed for everything below.
 	if dest, rest, err := parseRemoteFlag(os.Args); err != nil {

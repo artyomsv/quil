@@ -56,6 +56,10 @@ func gateVersionCheck(client *ipc.Client) *ipc.Client {
 		// failed. The mirror image of LinkErr's requirement, deliberately so.
 		exitCode, established := remoteExitCode(), remoteLinkEstablished()
 		remedy := remoteinstall.ClassifyExit(exitCode, established)
+		// Placed after the two ordered reads above so it cannot disturb them,
+		// and before every print below: Close killed ssh, so the console is
+		// still in the mode ssh set and never restored.
+		restoreConsoleMode()
 		// The remedy decides whether the user is offered an install or told the
 		// host is unreachable, and those look identical from outside when the
 		// exit code is wrong — which is exactly how the Kill-before-reap bug hid.
@@ -110,6 +114,10 @@ func gateVersionCheck(client *ipc.Client) *ipc.Client {
 				reported = "unknown"
 			}
 			client.Close()
+			// Close killed ssh, which never got to restore the console mode it
+			// set — so put it back before printing, or every line below lands
+			// one indent further right than the last.
+			restoreConsoleMode()
 			fmt.Fprintf(os.Stderr,
 				"\n"+
 					"  Version mismatch with the remote daemon.\n"+

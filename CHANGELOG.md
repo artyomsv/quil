@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Remote error messages no longer cascade down the screen on Windows.** When a
+  `--remote` launch could not go ahead — the daemon on the far side running a
+  different version, or the host not answering — the explanation was printed with
+  each line starting further right than the one above it, trailing off the edge
+  and wrapping mid-word. `ssh` reconfigures the console when it starts and puts
+  it back when it exits, but Quil stops it rather than waiting, so it never got
+  the chance; Quil now restores the console itself before printing. This only
+  ever affected the messages that explain a failed connection, which is where it
+  mattered most.
+
 ### Added
 - **A dropped connection to a remote daemon is now a pause, not an ending.**
   Closing a laptop lid, losing wifi, or changing network used to end a

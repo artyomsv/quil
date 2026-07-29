@@ -272,10 +272,19 @@ Small, and two items are hard prerequisites. Do this before Phase 2.
 
 | ID | Item | Kind | Blocks | Status |
 |---|---|---|---|---|
-| RD-001 | Settle the `DialFunc` context contract — `SSH()` binds the ssh child's lifetime to the *dial* ctx | code | RD-011 | todo |
-| RD-002 | Divert ssh stderr to `quil.log` once the TUI owns the terminal | code | — | todo |
-| RD-003 | Correct the stale `runStatus` claim in `.claude/CLAUDE.md` | docs | — | todo |
-| RD-004 | Plumb `context.Context` into `gitdiscover`, `kubediscover`, `claudesessions` | code | RD-020, RD-021, RD-022 | todo |
+| RD-001 | Settle the `DialFunc` context contract — `SSH()` binds the ssh child's lifetime to the *dial* ctx | code | RD-011 | done |
+| RD-002 | Divert ssh stderr to `quil.log` once the TUI owns the terminal | code | — | done |
+| RD-003 | Correct the stale `runStatus` claim in `.claude/CLAUDE.md` | docs | — | done |
+| RD-004 | Plumb `context.Context` into `gitdiscover`, `kubediscover`, `claudesessions` | code | RD-020, RD-021, RD-022 | done |
+
+**Residual after RD-004, carried into RD-020.** The daemon's session handlers
+now bound their reads at 10 s, but the TUI's own call sites still pass
+`context.Background()` — deliberately, since they run against local disk inside
+a synchronous dialog and RD-020 replaces them with RPCs where a deadline is
+meaningful. Separately, a `ctx` check between syscalls bounds a scan that is
+*making progress*; it cannot interrupt a call already blocked in the kernel on
+a dead mount, because Go has no mechanism for that. Read the guarantee as
+"bounded work", not "bounded time".
 
 **Why RD-001 is a blocker, not a cleanup.** `transport.SSH()` calls
 `exec.CommandContext(ctx, …)`, so cancelling the dial context kills the ssh

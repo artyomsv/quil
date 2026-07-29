@@ -6,6 +6,7 @@
 package gitdiscover
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -87,8 +88,12 @@ func EnclosingRepo(dir string) (string, bool) {
 
 // SubRepos returns the immediate (one level down) subdirectories of dir that
 // contain a .git entry. Returns nil on any read error.
-func SubRepos(dir string) []string {
-	if dir == "" {
+//
+// ctx is checked between entries, so a large directory stops early when the
+// caller gives up. It cannot interrupt a stat already blocked in the kernel —
+// see Candidates for what that bound is and is not worth.
+func SubRepos(ctx context.Context, dir string) []string {
+	if dir == "" || ctx.Err() != nil {
 		return nil
 	}
 	abs, ok := canonical(dir)
@@ -101,6 +106,9 @@ func SubRepos(dir string) []string {
 	}
 	var repos []string
 	for _, e := range entries {
+		if ctx.Err() != nil {
+			return repos
+		}
 		if !e.IsDir() {
 			continue
 		}
@@ -114,8 +122,16 @@ func SubRepos(dir string) []string {
 
 // Candidates returns the repos to offer for dir: the enclosing repo first
 // (if any), then one-level sub-repos, deduplicated, absolute paths.
-func Candidates(dir string) []string {
-	if dir == "" {
+//
+// ctx bounds a scan that is still making progress — a directory with thousands
+// of entries, or a slow-but-live network mount — and a cancelled scan returns
+// what it already had rather than an error, matching how every other failure in
+// this package degrades. It deliberately does NOT protect against a hung mount:
+// a syscall already blocked in the kernel cannot be cancelled from Go, so the
+// first stat against a dead NFS server hangs regardless. Read this as "bounded
+// work", not "bounded time".
+func Candidates(ctx context.Context, dir string) []string {
+	if dir == "" || ctx.Err() != nil {
 		return nil
 	}
 	var out []string
@@ -124,7 +140,7 @@ func Candidates(dir string) []string {
 		out = append(out, root)
 		seen[root] = true
 	}
-	for _, r := range SubRepos(dir) {
+	for _, r := range SubRepos(ctx, dir) {
 		if !seen[r] {
 			out = append(out, r)
 			seen[r] = true

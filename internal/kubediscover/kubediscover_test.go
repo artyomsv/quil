@@ -1,6 +1,7 @@
 package kubediscover
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -74,7 +75,7 @@ func TestContexts(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := writeConfig(t, t.TempDir(), "config", tt.body)
 			t.Setenv("KUBECONFIG", cfg)
-			if got := Contexts(); !reflect.DeepEqual(got, tt.want) {
+			if got := Contexts(context.Background()); !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("Contexts() = %+v, want %+v", got, tt.want)
 			}
 		})
@@ -87,7 +88,7 @@ func TestContexts_KubeconfigList_FirstFileWins(t *testing.T) {
 	b := writeConfig(t, dir, "b", "contexts:\n- name: dup\n  context:\n    namespace: from-b\n- name: only-b\n  context: {}\n")
 	t.Setenv("KUBECONFIG", a+string(os.PathListSeparator)+b)
 
-	got := Contexts()
+	got := Contexts(context.Background())
 	if len(got) != 2 {
 		t.Fatalf("got %d, want 2 (dup deduped + only-b): %+v", len(got), got)
 	}
@@ -98,7 +99,7 @@ func TestContexts_KubeconfigList_FirstFileWins(t *testing.T) {
 
 func TestContexts_MissingFile_DegradesToEmpty(t *testing.T) {
 	t.Setenv("KUBECONFIG", filepath.Join(t.TempDir(), "nope"))
-	if got := Contexts(); len(got) != 0 {
+	if got := Contexts(context.Background()); len(got) != 0 {
 		t.Errorf("got %+v, want empty", got)
 	}
 }
@@ -113,7 +114,7 @@ func TestContexts_SymlinkedConfig_Resolved(t *testing.T) {
 	t.Setenv("KUBECONFIG", link)
 	// A symlinked kubeconfig (dotfile managers, multi-cluster tooling) must be
 	// followed to its target, not rejected — it's the exact file k9s reads.
-	got := Contexts()
+	got := Contexts(context.Background())
 	if len(got) != 2 || got[0].Name != "prod" {
 		t.Errorf("symlinked kubeconfig must be resolved, got %+v", got)
 	}
@@ -124,5 +125,16 @@ func TestKubeconfigPaths_SplitsListSeparator(t *testing.T) {
 	got := KubeconfigPaths()
 	if len(got) != 2 || got[0] != "x" || got[1] != "y" {
 		t.Errorf("got %v, want [x y]", got)
+	}
+}
+
+// A cancelled context stops before any kubeconfig is read. Degrades to empty,
+// matching how this package already treats every other failure.
+func TestContexts_CancelledContext_ReturnsEmpty(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if got := Contexts(ctx); len(got) != 0 {
+		t.Errorf("Contexts on a cancelled context = %v, want empty", got)
 	}
 }

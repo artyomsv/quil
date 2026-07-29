@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -17,7 +18,13 @@ import (
 func stubSessionList(t *testing.T, fn func(cwd string) ([]claudesessions.Session, bool, error)) {
 	t.Helper()
 	prev := listClaudeSessionsFn
-	listClaudeSessionsFn = fn
+	// Adapts the ctx-free stub the tests write onto the ctx-aware seam. Keeping
+	// the ergonomic signature here avoids threading a parameter through every
+	// stub body when none of them exercise cancellation — the packages that own
+	// that behaviour test it directly.
+	listClaudeSessionsFn = func(_ context.Context, cwd string) ([]claudesessions.Session, bool, error) {
+		return fn(cwd)
+	}
 	t.Cleanup(func() { listClaudeSessionsFn = prev })
 }
 
@@ -644,7 +651,9 @@ func TestClaudeResumeTemplate_ResumeIDFallback(t *testing.T) {
 func stubSessionDetail(t *testing.T, fn func(cwd, id string) (claudesessions.Detail, error)) {
 	t.Helper()
 	prev := readClaudeSessionDetailFn
-	readClaudeSessionDetailFn = fn
+	readClaudeSessionDetailFn = func(_ context.Context, cwd, id string) (claudesessions.Detail, error) {
+		return fn(cwd, id)
+	}
 	t.Cleanup(func() { readClaudeSessionDetailFn = prev })
 }
 

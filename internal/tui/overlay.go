@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"log"
 
 	tea "charm.land/bubbletea/v2"
@@ -47,7 +48,10 @@ func (m *Model) handleToggleLazygit() tea.Cmd {
 	if normalPane != nil {
 		cwd = normalPane.CWD
 	}
-	candidates := gitdiscover.Candidates(cwd)
+	// Background for now: this runs on the local disk, where the call is fast
+	// and the user is already waiting on a keypress. RD-020 moves it behind an
+	// RPC, which is where a real deadline belongs.
+	candidates := gitdiscover.Candidates(context.Background(), cwd)
 
 	// Step 3: no candidates.
 	if len(candidates) == 0 {

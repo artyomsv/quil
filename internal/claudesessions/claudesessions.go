@@ -14,6 +14,7 @@ package claudesessions
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -146,17 +147,21 @@ func TranscriptPath(cwd, sessionID string) string {
 // A CWD Claude has never been run in has no project directory; that is a normal
 // state, not an error, and yields an empty slice with a nil error. Individual
 // unreadable transcripts are skipped rather than failing the whole listing.
-func List(cwd string) (sessions []Session, truncated bool, err error) {
+// A cancelled ctx is treated as one more way to end up with fewer sessions: it
+// yields what was gathered, with a nil error. The listing feeds a pane-creation
+// dialog that must never be blocked by discovery, so surfacing cancellation as a
+// failure there would be a downgrade.
+func List(ctx context.Context, cwd string) (sessions []Session, truncated bool, err error) {
 	dir := ProjectDir(cwd)
-	if dir == "" {
+	if dir == "" || ctx.Err() != nil {
 		return nil, false, nil
 	}
-	return listDir(dir)
+	return listDir(ctx, dir)
 }
 
 // listDir is the filesystem half of List, split out so tests can point it at a
 // t.TempDir() instead of depending on the real home directory.
-func listDir(dir string) (sessions []Session, truncated bool, err error) {
+func listDir(ctx context.Context, dir string) (sessions []Session, truncated bool, err error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -212,6 +217,12 @@ func listDir(dir string) (sessions []Session, truncated bool, err error) {
 	// transcripts only pays for the 200 that can actually be shown.
 	out := make([]Session, 0, len(candidates))
 	for _, c := range candidates {
+		// The expensive loop: up to MaxSessions × titleScanBytes of reads, and
+		// the span the daemon holds its single-flight slot across. Cancelling
+		// here returns the titles already read; the rest list by ID.
+		if ctx.Err() != nil {
+			return out, truncated, nil
+		}
 		out = append(out, Session{
 			ID:       c.id,
 			Title:    readTitle(c.path),
@@ -274,7 +285,15 @@ type Detail struct {
 // IPC boundary: this package is importable on its own, and a caller that passes
 // through an unchecked id would otherwise turn "../../.ssh/id_rsa" into a read
 // outside the project directory.
-func ReadDetail(cwd, sessionID string) (Detail, error) {
+// Unlike List, a cancelled ctx here is an ERROR rather than a degraded result.
+// ReadDetail answers about one specific highlighted session, and a partial read
+// would silently under-report that session's prompt count — a wrong number the
+// user has no way to distinguish from a right one. An empty panel is honest;
+// a truncated one is not.
+func ReadDetail(ctx context.Context, cwd, sessionID string) (Detail, error) {
+	if err := ctx.Err(); err != nil {
+		return Detail{}, err
+	}
 	if sessionID == "" || sessionID != filepath.Base(sessionID) ||
 		sessionID == "." || sessionID == ".." || strings.ContainsRune(sessionID, filepath.Separator) {
 		return Detail{}, fmt.Errorf("invalid session id")
@@ -283,12 +302,12 @@ func ReadDetail(cwd, sessionID string) (Detail, error) {
 	if path == "" {
 		return Detail{}, fmt.Errorf("no transcript path for this session")
 	}
-	return readDetail(path, sessionID)
+	return readDetail(ctx, path, sessionID)
 }
 
 // readDetail is the filesystem half of ReadDetail, split out so tests can point
 // it at a t.TempDir() rather than the real home directory.
-func readDetail(path, id string) (Detail, error) {
+func readDetail(ctx context.Context, path, id string) (Detail, error) {
 	// Lstat, not Stat: a symlinked transcript is rejected rather than followed,
 	// matching listDir's IsRegular filter.
 	info, err := os.Lstat(path)
@@ -316,6 +335,14 @@ func readDetail(path, id string) (Detail, error) {
 	r := bufio.NewReaderSize(f, 64<<10)
 	typedMark := []byte(`"promptSource":"typed"`)
 	for lineNo := 0; ; lineNo++ {
+		// Checked in blocks rather than per line: the whole point of this loop
+		// is that it byte-compares millions of lines cheaply, and a ctx.Err()
+		// call on each one would be a measurable share of that budget.
+		if lineNo%4096 == 0 {
+			if err := ctx.Err(); err != nil {
+				return Detail{}, err
+			}
+		}
 		// A non-nil error still yields the trailing bytes: a transcript a live
 		// claude process is appending to routinely ends mid-line, and that
 		// fragment simply fails to parse and is skipped.

@@ -47,6 +47,9 @@ func RunSSH(ctx context.Context, dest string, opts SSHOptions, command string,
 	}
 
 	opts.RemoteCommand = command
+	// CommandContext is correct HERE and wrong in ssh.go's dialer: a one-shot
+	// remote command is a bounded operation, so killing it when ctx expires is
+	// exactly the intent. A dialed session is not bounded by its dial.
 	cmd := exec.CommandContext(ctx, resolved, sshArgs(dest, opts)...)
 	cmd.Stdin = stdin
 	cmd.Stdout = stdout

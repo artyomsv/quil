@@ -42,6 +42,12 @@ func (c *Client) Close() error {
 // DialFunc establishes one transport-level connection to a daemon. It is the
 // seam that lets a Client run over something other than a Unix socket (an SSH
 // channel today, a TLS connection later) without the protocol layer knowing.
+//
+// CONTRACT: ctx bounds the dial only. Once a DialFunc returns a net.Conn, that
+// conn owns any underlying process or socket and releases it on Close —
+// cancelling ctx afterwards must not disturb a live connection. Reconnect loops
+// depend on this: they dial under a per-attempt timeout with a deferred cancel,
+// and would otherwise destroy each session as they created it.
 type DialFunc func(ctx context.Context) (net.Conn, error)
 
 // NewClientWithDialer builds a Client over whatever connection dial returns.

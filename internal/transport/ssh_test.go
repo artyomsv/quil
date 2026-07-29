@@ -2,6 +2,9 @@ package transport
 
 import (
 	"context"
+	"errors"
+	"os"
+	"os/exec"
 	"reflect"
 	"strings"
 	"testing"
@@ -145,6 +148,83 @@ func TestSSH_MissingBinary_ReturnsError(t *testing.T) {
 	dial := SSH("gpu01", SSHOptions{SSHPath: "definitely-not-a-real-ssh-binary"})
 	if _, err := dial(context.Background()); err == nil {
 		t.Fatal("dial with a bogus ssh path succeeded, want error")
+	}
+}
+
+// A dialed connection must outlive the context that dialed it.
+//
+// exec.CommandContext binds the child's lifetime to ctx, so the ordinary
+// reconnect shape — ctx, cancel := context.WithTimeout(...); defer cancel() —
+// would kill each session at the moment the dial handed it back.
+//
+// The assertion is on the reaped channel, NOT on ExitCode: noExitCode is -1 and
+// os/exec also reports -1 for a signalled process, so an exit-code comparison
+// passes whether or not the cancel killed the child. reaped closes only when a
+// status has actually been recorded.
+func TestSSH_ConnSurvivesDialContextCancel(t *testing.T) {
+	orig := startCommand
+	t.Cleanup(func() { startCommand = orig })
+	used := false
+	startCommand = func(_ string, _ ...string) *exec.Cmd {
+		used = true
+		c := exec.Command(os.Args[0], "-test.run=TestHelperSleep")
+		c.Env = append(os.Environ(), "QUIL_HELPER_SLEEP=1")
+		return c
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	conn, err := SSH("helper", SSHOptions{SSHPath: os.Args[0]})(ctx)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	// Without this the test is bypassable: reverting to exec.CommandContext
+	// skips the seam entirely, the fake never runs, and any failure that
+	// follows is incidental rather than a report about ctx ownership.
+	if !used {
+		t.Fatal("SSH did not build its child through startCommand; the ctx-ownership " +
+			"assertion below is not exercising the production path")
+	}
+
+	sc, ok := conn.(*stdioConn)
+	if !ok {
+		t.Fatalf("conn is %T, want *stdioConn", conn)
+	}
+
+	cancel()
+	time.Sleep(300 * time.Millisecond) // let a cancel-kill land, if one is coming
+
+	select {
+	case <-sc.reaped:
+		t.Fatal("the ssh child was reaped after the dial context was cancelled; " +
+			"a connection must own its own lifetime, or every reconnect attempt " +
+			"kills the session it just established")
+	default:
+	}
+}
+
+// TestHelperSleep is a child process, not a test. It stays alive until killed.
+func TestHelperSleep(t *testing.T) {
+	if os.Getenv("QUIL_HELPER_SLEEP") == "" {
+		t.Skip("helper process")
+	}
+	time.Sleep(30 * time.Second)
+}
+
+// An already-cancelled context must not leave a live child behind. ctx no longer
+// owns the process, so refusing to spawn is the only place it can still apply.
+func TestSSH_RefusesAlreadyCancelledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	conn, err := SSH("gpu01", SSHOptions{})(ctx)
+	if err == nil {
+		conn.Close()
+		t.Fatal("dial with a cancelled context succeeded, want error")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want it to wrap context.Canceled", err)
 	}
 }
 

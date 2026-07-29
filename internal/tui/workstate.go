@@ -67,12 +67,20 @@ func (m *Model) findPaneAndTab(paneID string) (*PaneModel, int) {
 // inside the 50 ms debounce window arrive as ONE PaneEvent with
 // data["coalesced"] = "N".
 //
-// Replay safety: the daemon replays the queued event history on attach,
-// and attach happens exactly once per TUI process (Model.attached guard) —
-// counters always start from zero and the ordered replay reconstructs the
-// live state. The ring's oldest-first eviction can only ever orphan a
-// SubagentStop (never strand a start behind its stop), and orphan stops
-// are ignored below.
+// Replay safety: the daemon replays the queued event history on attach, and
+// the ordered replay reconstructs the live state PROVIDED the counters start
+// from zero. The ring's oldest-first eviction can only ever orphan a
+// SubagentStop (never strand a start behind its stop), and orphan stops are
+// ignored below.
+//
+// That zero-start premise used to be free: attach happened exactly once per
+// TUI process, guarded by Model.attached. Remote reconnect (RD-011) broke
+// that — a restored link attaches again into a Model whose counters already
+// reflect every event about to be replayed, and this function has no dedup,
+// so a replayed SubagentStart stacks on top of the one it is repeating and
+// wedges the spinner until SessionEnd. resetWorkStateForReattach
+// (reconnect.go) re-establishes the premise before each reattach. Any future
+// path that attaches a second time owes the same reset.
 func (m *Model) applyWorkTransition(paneID, eventType string, data map[string]string) {
 	kind := workEventKind(eventType)
 	if kind == workNone {

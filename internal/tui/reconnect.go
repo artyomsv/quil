@@ -224,30 +224,67 @@ func (p *PaneModel) resetForReattach() {
 	p.liveOutputSeen = false
 }
 
-// resetPanesForReattach resets every pane that the coming attach will replay.
+// eachClientPane calls fn for every pane this client holds.
 //
-// That means every tab, not just the active one — a single attach replays
-// background tabs too — and each tab's overlay pane, which is a live daemon
-// pane replayed like any other but deliberately kept OUTSIDE the layout tree,
-// so a Leaves()-only walk misses it.
-func (m *Model) resetPanesForReattach() {
+// Every tab, not just the active one — a single attach replays background tabs
+// too — plus each tab's overlay pane, which is a live daemon pane replayed like
+// any other but deliberately kept OUTSIDE the layout tree, so a Leaves()-only
+// walk misses it.
+//
+// Shared by both reattach resets so the two enumerations cannot drift: a pane
+// class added to one and forgotten in the other is precisely the bug that would
+// survive review, because each reset looks complete on its own.
+func (m *Model) eachClientPane(fn func(*PaneModel)) {
 	for _, tab := range m.tabs {
 		if tab == nil {
 			continue
 		}
 		for _, p := range tab.Leaves() {
 			if p != nil {
-				p.resetForReattach()
+				fn(p)
 			}
 		}
 		if tab.overlayPane != nil {
-			tab.overlayPane.resetForReattach()
+			fn(tab.overlayPane)
 		}
 	}
+}
+
+// resetPanesForReattach resets every pane that the coming attach will replay.
+func (m *Model) resetPanesForReattach() {
+	m.eachClientPane((*PaneModel).resetForReattach)
 	// Selection is Model-level, and anchors to row/column coordinates inside
 	// content that has just been discarded. Keeping it would highlight whatever
 	// happens to land in those cells after replay.
 	m.selection = nil
+}
+
+// resetWorkStateForReattach zeroes in-flight execution state on every pane.
+//
+// applyWorkTransition has no dedup, so replayed SubagentStart events would
+// re-increment counters that already reflect them and wedge the spinner until
+// SessionEnd. Filtering the replay by seen event id was the alternative;
+// zeroing wins because work state is already documented as non-persistent —
+// panes start idle after a daemon restart and the next hook event corrects
+// them — so this is the existing contract rather than a new compromise.
+//
+// Two things are deliberately preserved:
+//
+//   - unseen and pinnedAttention. Both are user-facing marks about work the
+//     user has not looked at, not in-flight execution. unseen is the only
+//     signal that a background pane finished something while the link was
+//     down, which is often exactly why the user is reconnecting.
+//   - m.workTickRunning. The spinner loop is self-stopping: the tick already
+//     in flight observes !anyPaneWorking() and clears the flag itself.
+//     Clearing it here while that tick is still scheduled would let the next
+//     hook event start a SECOND loop beside it, and the spinner would animate
+//     at double rate for the rest of the session.
+func (m *Model) resetWorkStateForReattach() {
+	m.eachClientPane(func(p *PaneModel) {
+		p.working = false
+		p.turnActive = false
+		p.subagents = 0
+	})
 }
 
 // redialTickMsg fires when the backoff for one attempt has elapsed.
@@ -321,7 +358,7 @@ func (m Model) finishReconnect(c Client) (tea.Model, tea.Cmd) {
 	// sending the moment it processes MsgAttach, and a reset arriving late would
 	// wipe the replay it was meant to make room for.
 	m.resetPanesForReattach()
-	// RD-014 (work-state reset) joins here.
+	m.resetWorkStateForReattach()
 
 	return m, tea.Batch(m.attachToDaemon(), m.listenForMessages())
 }

@@ -801,3 +801,137 @@ func TestReconnect_SuccessPathResetsPanes(t *testing.T) {
 		t.Error("selection survived the reconnect")
 	}
 }
+
+// Replayed SubagentStart events must not wedge the spinner. applyWorkTransition
+// has no dedup, so a replay re-increments counters that already reflect it.
+func TestReconnect_ResetsWorkCounters(t *testing.T) {
+	m := newReconnectTestModel(t, 1)
+	p := m.tabs[0].Leaves()[0]
+
+	m.applyWorkTransition(p.ID, "hook.claude.UserPromptSubmit", nil)
+	m.applyWorkTransition(p.ID, "hook.claude.SubagentStart", map[string]string{"coalesced": "3"})
+	if !p.working {
+		t.Fatal("fixture did not put the pane into a working state")
+	}
+	if p.subagents != 3 {
+		t.Fatalf("fixture subagents = %d, want 3 (coalesced burst)", p.subagents)
+	}
+
+	m.resetWorkStateForReattach()
+
+	if p.working {
+		t.Error("pane still working after reset")
+	}
+	if p.subagents != 0 {
+		t.Errorf("subagents = %d, want 0 — a replayed start would stack on top of this", p.subagents)
+	}
+	if p.turnActive {
+		t.Error("turnActive survived the reset")
+	}
+}
+
+// The unseen mark reports unread COMPLETED work, not a live turn. It is the only
+// signal that a background pane finished something while the link was down, so
+// clearing it would lose exactly the information the user reconnected to see.
+func TestReconnect_KeepsUnseenMark(t *testing.T) {
+	m := newReconnectTestModel(t, 1)
+	p := m.tabs[0].Leaves()[0]
+	p.unseen = true
+
+	m.resetWorkStateForReattach()
+
+	if !p.unseen {
+		t.Error("unseen mark cleared by reconnect; it reports unread work, not a live turn")
+	}
+}
+
+// pinnedAttention is a user-set pin with no connection to execution state.
+func TestReconnect_KeepsPinnedAttention(t *testing.T) {
+	m := newReconnectTestModel(t, 1)
+	p := m.tabs[0].Leaves()[0]
+	p.pinnedAttention = true
+
+	m.resetWorkStateForReattach()
+
+	if !p.pinnedAttention {
+		t.Error("the user's attention pin was cleared by a reconnect")
+	}
+}
+
+// workTickRunning must NOT be cleared here. The spinner loop is self-stopping:
+// the in-flight tick observes !anyPaneWorking() and clears the flag itself.
+// Clearing it while that tick is still scheduled lets the next hook event start
+// a SECOND loop, and the spinner then animates at double rate forever.
+func TestReconnect_DoesNotClearWorkTickRunning(t *testing.T) {
+	m := newReconnectTestModel(t, 1)
+	m.workTickRunning = true
+
+	m.resetWorkStateForReattach()
+
+	if !m.workTickRunning {
+		t.Error("workTickRunning was cleared; a later hook event will start a second spinner loop " +
+			"alongside the tick still in flight")
+	}
+}
+
+// Background tabs are replayed on the same attach, so their counters need the
+// same reset.
+func TestReconnect_ResetsWorkStateInBackgroundTabs(t *testing.T) {
+	m := newReconnectTestModel(t, 1)
+	bg := NewTabModel("tab-2", "BG")
+	p := NewPaneModel("bg0", 4096)
+	t.Cleanup(p.Dispose)
+	bg.Root = NewLeaf(p)
+	bg.ActivePane = "bg0"
+	bg.Resize(80, 24)
+	m.tabs = append(m.tabs, bg)
+
+	m.applyWorkTransition("bg0", "hook.claude.UserPromptSubmit", nil)
+	if !p.working {
+		t.Fatal("fixture did not start a turn on the background pane")
+	}
+
+	m.resetWorkStateForReattach()
+
+	if p.working || p.turnActive {
+		t.Error("background-tab work state survived the reset")
+	}
+}
+
+// The reset must be reached BY the reconnect, not merely exist.
+//
+// The unseen assertion is made on the NON-focused pane deliberately.
+// applyWorkTransition only ever marks a pane that is not the focused pane of
+// the active tab, and Update's ackFocusedPane clears the focused one at entry —
+// so an unseen mark on the focused pane is a state that cannot arise, and
+// asserting it survives would be testing against the ack rather than the
+// reconnect. A background pane finishing work while the link was down is both
+// the realistic case and the one the user reconnected to find out about.
+func TestReconnect_SuccessPathResetsWorkState(t *testing.T) {
+	m := newReconnectTestModel(t, 2)
+	m.clientGen = 5
+	m.attached = true
+	m.reconnect = reconnectState{active: true, attempt: 1}
+	focused := m.tabs[0].Leaves()[0]
+	other := m.tabs[0].Leaves()[1]
+	if focused.ID != m.tabs[0].ActivePane {
+		focused, other = other, focused
+	}
+
+	m.applyWorkTransition(focused.ID, "hook.claude.UserPromptSubmit", nil)
+	m.applyWorkTransition(focused.ID, "hook.claude.SubagentStart", map[string]string{"coalesced": "2"})
+	other.unseen = true
+
+	m.Update(redialResultMsg{gen: 5, client: &failingClient{err: errors.New("unused")}})
+
+	if focused.working {
+		t.Error("pane still working after a successful reconnect")
+	}
+	if focused.subagents != 0 {
+		t.Errorf("subagents = %d after reconnect, want 0", focused.subagents)
+	}
+	if !other.unseen {
+		t.Error("the reconnect cleared a background pane's unseen mark — the only signal " +
+			"that it finished something while the link was down")
+	}
+}

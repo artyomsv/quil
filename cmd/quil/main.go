@@ -464,9 +464,16 @@ func launchTUI() {
 	// ssh keeps its stderr for the whole session and multiplexes the remote
 	// command's fd 2 onto it, so from here on a diagnostic would land mid-render
 	// on a screen Bubble Tea owns. Every prompt that needs a terminal already
-	// happened during the dial. A nil sink discards, which is the right answer
-	// when there is no log file to write to.
-	redirectRemoteStderr(logSink)
+	// happened during the dial.
+	//
+	// Only when there is somewhere to put them. logSink is nil if the log could
+	// not be opened at all, and redirecting to nil discards — which would delete
+	// the only remaining explanation of a failure in a session that already
+	// cannot log. Leaving them on the terminal there is the lesser harm: a
+	// cosmetic corruption in an already-degraded setup beats silence.
+	if logSink != nil {
+		redirectRemoteStderr(logSink)
+	}
 
 	p := tea.NewProgram(model)
 	finalModel, err := p.Run()

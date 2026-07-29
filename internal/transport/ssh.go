@@ -165,10 +165,14 @@ func SSH(dest string, opts SSHOptions) func(context.Context) (net.Conn, error) {
 			return nil, fmt.Errorf("invalid ssh destination %q: must not begin with '-'", dest)
 		}
 
-		// Checked before anything else is touched. ctx no longer owns the child
-		// (see the cmd construction below), so refusing to spawn is the only
-		// place it can still apply — and a caller who has already given up
-		// should not even pay for a PATH lookup.
+		// Deliberately AFTER the destination check above and before everything
+		// else. ctx no longer owns the child (see the cmd construction below),
+		// so refusing to spawn is the only place it can still apply, and a
+		// caller who has already given up should not pay for a PATH lookup.
+		//
+		// The ordering is load-bearing in one direction only: an option-shaped
+		// destination is rejected whether or not ctx is live, so a cancelled
+		// context can never be a way past that guard.
 		if err := ctx.Err(); err != nil {
 			return nil, fmt.Errorf("dial %s: %w", dest, err)
 		}

@@ -544,6 +544,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.closeCtxMenu()
 		}
 	}
+	// The link is down: user input is dropped rather than queued. Placed ahead
+	// of the type switch so a future input message type is frozen by default
+	// instead of quietly reaching a live PTY through a branch nobody updated.
+	if m.reconnect.active {
+		if cmd, frozen := m.freezeInput(msg); frozen {
+			return m, cmd
+		}
+	}
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		// Poll echo: size matches both the applied and any pending value —
@@ -2278,6 +2286,14 @@ func (m Model) View() tea.View {
 		sections = append(sections, m.renderStatusBar())
 
 		content = lipgloss.JoinVertical(lipgloss.Left, sections...)
+	}
+
+	// Reconnect banner: an overlay over row 0 (the tab bar), so it reserves no
+	// layout height and appearing or clearing it never resizes a pane. The tab
+	// bar is the right thing to cover — tab switching is frozen anyway, and
+	// obscuring pane content would hide the state the user is waiting on.
+	if m.reconnect.active {
+		content = overlayAt(content, m.renderReconnectBanner(m.width), 0, 0, m.width)
 	}
 
 	v := tea.NewView(content)

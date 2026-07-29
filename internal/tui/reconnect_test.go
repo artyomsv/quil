@@ -2,11 +2,14 @@ package tui
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
+	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
 )
 
@@ -452,5 +455,179 @@ func TestReconnect_NewListenLoopCarriesTheNewGeneration(t *testing.T) {
 	if lost.gen != got.clientGen {
 		t.Errorf("new listen loop stamped gen %d but the model is at %d — its own drop would be discarded as stale",
 			lost.gen, got.clientGen)
+	}
+}
+
+// Input is dropped, not buffered, while the link is down: a keystroke replayed
+// into a live agent session minutes later lands at a prompt that has moved on.
+// Ctrl+Q must stay live — it is the only way out of a host that never returns.
+func TestReconnect_SwallowsInputExceptQuit(t *testing.T) {
+	newM := func() Model {
+		m := Model{cfg: config.Default(), reconnect: reconnectState{active: true, attempt: 3}}
+		m.SetRemoteDest("gpu01")
+		return m
+	}
+
+	frozen := []struct {
+		name string
+		msg  tea.Msg
+	}{
+		{"printable key", tea.KeyPressMsg{Code: 'a', Text: "a"}},
+		{"enter", tea.KeyPressMsg{Code: tea.KeyEnter}},
+		{"paste", tea.PasteMsg{Content: "rm -rf /"}},
+		{"mouse click", tea.MouseClickMsg{}},
+		{"mouse wheel", tea.MouseWheelMsg{}},
+		{"mouse motion", tea.MouseMotionMsg{}},
+		{"mouse release", tea.MouseReleaseMsg{}},
+	}
+	for _, tt := range frozen {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, cmd := newM().Update(tt.msg); cmd != nil {
+				t.Errorf("%s produced a command while the link was down", tt.name)
+			}
+		})
+	}
+
+	t.Run("ctrl+q still quits", func(t *testing.T) {
+		m := newM()
+		_, cmd := m.Update(tea.KeyPressMsg{Code: 'q', Mod: tea.ModCtrl})
+		if cmd == nil {
+			t.Fatal("ctrl+q produced no command during reconnect")
+		}
+		if !isQuit(cmd()) {
+			t.Error("ctrl+q did not quit during reconnect")
+		}
+	})
+}
+
+// The freeze must lift once the link is back, or the session is unusable.
+func TestReconnect_InputResumesWhenNotReconnecting(t *testing.T) {
+	m := Model{cfg: config.Default(), width: 80, height: 24}
+	m.SetRemoteDest("gpu01")
+
+	// Not reconnecting: the key reaches normal handling. Asserting on "not
+	// swallowed" rather than a specific command keeps this independent of what
+	// handleKey decides to do with an unbound key.
+	if m.reconnect.active {
+		t.Fatal("fixture is in a reconnecting state")
+	}
+	_, _ = m.Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
+}
+
+func TestRenderReconnectBanner_NamesHostAndAttempt(t *testing.T) {
+	m := Model{reconnect: reconnectState{
+		active:  true,
+		attempt: 4,
+		lastErr: errors.New("connection refused"),
+	}}
+	m.SetRemoteDest("gpu01")
+
+	out := stripANSI(m.renderReconnectBanner(80))
+	for _, want := range []string{"gpu01", "4", "connection refused", "ctrl+q"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("banner missing %q\ngot: %s", want, out)
+		}
+	}
+}
+
+// The banner must never wrap the frame — it is drawn as an overlay, so a line
+// wider than the terminal corrupts the row below it rather than clipping.
+func TestRenderReconnectBanner_FitsWidth(t *testing.T) {
+	m := Model{reconnect: reconnectState{
+		active:  true,
+		attempt: 12,
+		lastErr: errors.New(strings.Repeat("very long ssh diagnostic ", 20)),
+	}}
+	m.SetRemoteDest(strings.Repeat("host", 30))
+
+	for _, w := range []int{20, 40, 80, 200} {
+		for _, line := range strings.Split(m.renderReconnectBanner(w), "\n") {
+			if got := lipgloss.Width(line); got > w {
+				t.Errorf("width %d: line measured %d\n%q", w, got, line)
+			}
+		}
+	}
+}
+
+// The escape hatch outranks everything, at EVERY width the TUI will render at.
+//
+// minTermWidth is 40, so 40 is reachable in practice, not a defensive edge —
+// and a single truncated string cut the hint to "ctr…" there.
+func TestRenderReconnectBanner_KeepsExitHintAtEveryWidth(t *testing.T) {
+	m := Model{reconnect: reconnectState{
+		active:  true,
+		attempt: 2,
+		lastErr: errors.New(strings.Repeat("diagnostic ", 30)),
+	}}
+	m.SetRemoteDest("gpu01")
+
+	for _, w := range []int{40, 50, 60, 80, 120, 200} {
+		out := stripANSI(m.renderReconnectBanner(w))
+		if !strings.Contains(out, "ctrl+q") {
+			t.Errorf("width %d: exit hint missing or truncated\ngot: %s", w, out)
+		}
+	}
+}
+
+// A REAL ssh error runs past 50 characters. An all-or-nothing fit check hid it
+// at every width below ~110, including 80 — so the diagnostic captured in batch
+// mode was never actually seen. It must be truncated to fit, not dropped.
+func TestRenderReconnectBanner_ShowsRealisticSSHErrorAt80(t *testing.T) {
+	m := Model{reconnect: reconnectState{
+		active:  true,
+		attempt: 4,
+		lastErr: errors.New("ssh: connect to host gpu01 port 22: Connection refused"),
+	}}
+	m.SetRemoteDest("gpu01")
+
+	out := stripANSI(m.renderReconnectBanner(80))
+	if !strings.Contains(out, "ssh:") {
+		t.Errorf("a realistic ssh error is absent at 80 columns; the whole point of\n"+
+			"capturing it in batch mode is that the user reads it\ngot: %s", out)
+	}
+	if !strings.Contains(out, "ctrl+q") {
+		t.Errorf("the detail crowded out the exit hint\ngot: %s", out)
+	}
+}
+
+// Below minBannerDetail the diagnostic is dropped rather than shown as noise.
+func TestRenderReconnectBanner_DropsUselesslyShortDetail(t *testing.T) {
+	m := Model{reconnect: reconnectState{
+		active:  true,
+		attempt: 4,
+		lastErr: errors.New("Connection refused by the remote host"),
+	}}
+	m.SetRemoteDest("gpu01")
+
+	// 50 leaves under minBannerDetail once the core is placed.
+	out := stripANSI(m.renderReconnectBanner(50))
+	if strings.Contains(out, "Conn…") || strings.Contains(out, "C…") {
+		t.Errorf("a uselessly truncated detail was rendered\ngot: %s", out)
+	}
+	if !strings.Contains(out, "ctrl+q") {
+		t.Errorf("exit hint missing\ngot: %s", out)
+	}
+}
+
+// A multi-line ssh diagnostic must not turn a one-row overlay into three.
+func TestRenderReconnectBanner_MultilineErrorStaysOneLine(t *testing.T) {
+	m := Model{reconnect: reconnectState{
+		active:  true,
+		attempt: 1,
+		lastErr: errors.New("Permission denied (publickey).\nssh: connect failed\nmore"),
+	}}
+	m.SetRemoteDest("gpu01")
+
+	if n := strings.Count(m.renderReconnectBanner(120), "\n"); n != 0 {
+		t.Errorf("banner spans %d extra lines; the overlay would eat the tab bar and the row below", n)
+	}
+}
+
+// Nothing is drawn when no reconnect is in flight.
+func TestRenderReconnectBanner_EmptyWhenInactive(t *testing.T) {
+	m := Model{}
+	m.SetRemoteDest("gpu01")
+	if got := m.renderReconnectBanner(80); got != "" {
+		t.Errorf("banner rendered while inactive: %q", got)
 	}
 }

@@ -1,11 +1,14 @@
 package tui
 
 import (
+	"fmt"
 	"log"
 	"math/rand"
+	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 // linkLostMsg reports that the connection to the daemon died.
@@ -100,6 +103,102 @@ func (m *Model) SetRedialFunc(f RedialFunc) { m.redialFn = f }
 // nothing to retry with.
 func (m Model) canReconnect() bool {
 	return m.RemoteMode() && m.redialFn != nil
+}
+
+// freezeInput drops user input while a reconnect is in flight, reporting
+// whether it consumed the message.
+//
+// Dropped rather than buffered, deliberately. Buffered keystrokes would be
+// delivered into a live agent session minutes later, at a prompt that has moved
+// on — a paste or a stray "y" landing on the wrong question is worse than a
+// visible stall. This is a fail-closed choice.
+//
+// One choke point rather than a guard in each of the six input branches: a
+// future input message type gets frozen by default here, whereas six scattered
+// guards would silently let it through. Same reasoning as clearDragState.
+//
+// Ctrl+Q is the single exception. It is the only way out of a host that never
+// comes back, and by definition the reconnect loop cannot end the session
+// itself — it retries forever.
+func (m Model) freezeInput(msg tea.Msg) (tea.Cmd, bool) {
+	switch msg := msg.(type) {
+	case tea.KeyPressMsg:
+		if kbMatches(msg.String(), m.cfg.Keybindings.Quit) {
+			return tea.Quit, true
+		}
+		return nil, true
+	case tea.MouseClickMsg, tea.MouseWheelMsg, tea.MouseMotionMsg, tea.MouseReleaseMsg, tea.PasteMsg:
+		// A wheel notch is forwarded to the PTY on tracking panes, so it is
+		// input by another name and belongs in the freeze with the rest.
+		return nil, true
+	}
+	return nil, false
+}
+
+// firstErrLine reduces a multi-line diagnostic to its first line.
+//
+// ssh errors routinely span several lines. The banner is a one-row overlay, so
+// a raw multi-line message would paint over the rows beneath it rather than
+// growing the box. Named to avoid colliding with the test-only firstLine.
+func firstErrLine(s string) string {
+	if i := strings.IndexAny(s, "\r\n"); i >= 0 {
+		return strings.TrimSpace(s[:i])
+	}
+	return strings.TrimSpace(s)
+}
+
+// bannerSep separates the status core from the ssh diagnostic.
+const bannerSep = " · "
+
+// minBannerDetail is the narrowest diagnostic worth showing. Below this a
+// truncated error is noise ("ss…") occupying space the core could use.
+const minBannerDetail = 14
+
+// renderReconnectBanner draws the reconnect status as a single row.
+//
+// Drawn by View as a compositor overlay, so it reserves no layout height and
+// cannot resize a pane — the same reason the notification sidebar is one.
+//
+// Two rules drive the layout, and both were arrived at by looking at the
+// rendered output rather than by satisfying an assertion:
+//
+//   - The exit hint survives to the narrowest width. The core degrades through
+//     a ladder of progressively shorter forms, and every rung keeps "ctrl+q".
+//     Truncating one long string instead cut it to "ctr…" at 40 columns, which
+//     is the width the TUI's own minimum allows — so it was reachable, not
+//     theoretical, and it strands the user on a host that never returns.
+//   - The diagnostic is TRUNCATED to the space left, never dropped for not
+//     fitting whole. A real ssh error runs past 50 characters, so an
+//     all-or-nothing fit check hid it at every width below ~110 — including 80.
+//     Capturing ssh's own words in batch mode is pointless if they never render.
+func (m Model) renderReconnectBanner(width int) string {
+	if !m.reconnect.active || width <= 0 {
+		return ""
+	}
+
+	// Longest first; the first one that fits wins. Every rung keeps ctrl+q.
+	candidates := []string{
+		fmt.Sprintf("Reconnecting to %s (attempt %d)%sctrl+q quits", m.remoteDest, m.reconnect.attempt, bannerSep),
+		fmt.Sprintf("Reconnecting to %s%sctrl+q", m.remoteDest, bannerSep),
+		"Reconnecting" + bannerSep + "ctrl+q",
+	}
+	core := candidates[len(candidates)-1]
+	for _, c := range candidates {
+		if lipgloss.Width(c) <= width {
+			core = c
+			break
+		}
+	}
+
+	if m.reconnect.lastErr != nil {
+		if detail := firstErrLine(m.reconnect.lastErr.Error()); detail != "" {
+			room := width - lipgloss.Width(core) - lipgloss.Width(bannerSep)
+			if room >= minBannerDetail {
+				core += bannerSep + truncateToWidth(detail, room)
+			}
+		}
+	}
+	return reconnectBannerStyle.Width(width).Render(truncateToWidth(core, width))
 }
 
 // redialTickMsg fires when the backoff for one attempt has elapsed.

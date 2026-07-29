@@ -39,4 +39,16 @@ var (
 		Foreground(lipgloss.Color("250")).
 		Background(lipgloss.Color("236")).
 		Padding(0, 1)
+
+	// reconnectBannerStyle marks a session whose link is down. Amber, because
+	// the state is recoverable — red would read as a failure the user has to
+	// act on, and the whole point is that Quil is handling it.
+	//
+	// Deliberately no Padding: renderReconnectBanner sizes its content to the
+	// exact terminal width, and lipgloss adds padding OUTSIDE .Width(), so any
+	// here would push the row past the frame it is overlaid on.
+	reconnectBannerStyle = lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("232")).
+		Background(lipgloss.Color("214"))
 )

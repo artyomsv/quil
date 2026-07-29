@@ -185,18 +185,16 @@ Make a dropped link a pause rather than an ending.
 - Re-dial with backoff, in batch mode (no prompts under raw-mode rendering).
 - Re-attach and re-sync workspace state without respawning anything — the panes
   never stopped.
-- Decide the `DialFunc` context contract first: `SSH()` currently binds the ssh
-  child's lifetime to the *dial* context via `exec.CommandContext`. Harmless
-  today with `context.Background()`, but the natural reconnect code
-  (`WithTimeout` + `defer cancel()`) would kill a healthy session. Either scope
-  `ctx` to the dial or document it as the connection's lifetime.
-- Divert ssh's stderr to `quil.log` once the TUI owns the terminal. It stays
-  attached for the whole session, so a late ssh diagnostic (`packet_write_wait:
-  Broken pipe`) can still land mid-render and corrupt the display. The
-  *security* half of this is already fixed — that stream is byte-filtered for
-  terminal control sequences before it reaches the screen, since ssh
-  multiplexes the remote command's fd 2 onto it — but cosmetically it remains
-  an uninvited writer to a terminal the TUI thinks it owns.
+
+**Both prerequisites are done** (RD-001, RD-002 — Phase 1.5):
+
+- The `DialFunc` contract is settled and documented: `ctx` bounds the dial, and
+  the returned conn owns the ssh child and releases it on `Close`. The redial
+  loop can use `WithTimeout` + `defer cancel()` without killing the session it
+  just opened, which `exec.CommandContext` would have done.
+- ssh's stderr moves to `quil.log` at `tea.NewProgram`, so a late diagnostic no
+  longer lands mid-render. It still reaches the terminal during the dial, where
+  host-key and passphrase prompts have to be readable.
 
 ## Phase 3 — remote-correct UI (planned)
 

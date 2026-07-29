@@ -9,6 +9,7 @@ When things go sideways, this is the first place to look.
 - [macOS: `zsh: killed quil` after upgrading](#macos-zsh-killed-quil-after-upgrading)
 - [The TUI shows a blank screen](#the-tui-shows-a-blank-screen)
 - [Version mismatch — daemon won't accept the TUI](#version-mismatch--daemon-wont-accept-the-tui)
+- [A `--remote` session ends without saying why](#a---remote-session-ends-without-saying-why)
 - [MCP — AI client doesn't see Quil](#mcp--ai-client-doesnt-see-quil)
 - [`Ctrl+V` doesn't paste on Windows](#ctrlv-doesnt-paste-on-windows)
 - [Extra space / garbled text when typing on Windows 10](#extra-space--garbled-text-when-typing-on-windows-10)
@@ -94,6 +95,31 @@ If the auto-restart fails, do it manually:
 ```bash
 quil restart          # stop (escalating) + fresh daemon + TUI
 ```
+
+## A `--remote` session ends without saying why
+
+Symptoms: a `quil --remote <host>` session exits back to your shell with no
+error on screen. The panes are fine — they are on the server — but nothing says
+what happened.
+
+**The explanation is in the client log, not on the terminal.** `ssh` keeps its
+error stream open for the whole session, so a message it emits late
+(`packet_write_wait: Broken pipe`, `Timeout, server not responding`) would land
+in the middle of whatever Quil was drawing. Those messages therefore go to
+`quil.log` once the interface starts, and the screen stays clean:
+
+```bash
+tail -20 ~/.quil/quil.log        # Linux/macOS
+Get-Content "$env:USERPROFILE\.quil\quil.log" -Tail 20   # Windows
+```
+
+Errors during *connection setup* — before the interface takes the screen — still
+print to the terminal as normal. That is where host-key confirmation and
+passphrase prompts appear, so a failure to connect at all is still visible where
+you would expect it.
+
+Until automatic reconnect ships, a dropped link ends the session. Re-running the
+same `quil --remote <host>` re-attaches, and the panes are where you left them.
 
 ## MCP — AI client doesn't see Quil
 

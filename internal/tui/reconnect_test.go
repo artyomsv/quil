@@ -2,6 +2,7 @@ package tui
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -629,5 +630,174 @@ func TestRenderReconnectBanner_EmptyWhenInactive(t *testing.T) {
 	m.SetRemoteDest("gpu01")
 	if got := m.renderReconnectBanner(80); got != "" {
 		t.Errorf("banner rendered while inactive: %q", got)
+	}
+}
+
+// newReconnectTestModel builds a Model with one tab holding n layout panes plus
+// an overlay pane. The overlay lives OUTSIDE the layout tree, so it is the case
+// a tree walk silently misses.
+func newReconnectTestModel(t *testing.T, n int) *Model {
+	t.Helper()
+	tab := NewTabModel("tab-1", "T")
+	prevID := ""
+	for i := 0; i < n; i++ {
+		p := NewPaneModel(fmt.Sprintf("p%d", i), 4096)
+		t.Cleanup(p.Dispose)
+		if tab.Root == nil {
+			tab.Root = NewLeaf(p)
+		} else {
+			ph := tab.Root.SplitLeaf(prevID, SplitHorizontal)
+			ph.Pane = p
+		}
+		prevID = p.ID
+	}
+	tab.ActivePane = "p0"
+
+	ov := NewPaneModel("overlay", 4096)
+	t.Cleanup(ov.Dispose)
+	tab.overlayPane = ov
+
+	tab.Resize(80, 24)
+
+	m := &Model{tabs: []*TabModel{tab}, width: 80, height: 24, cfg: config.Default()}
+	m.SetRemoteDest("gpu01")
+	return m
+}
+
+// reconnectTestPanes returns every pane the reset must touch, overlay included.
+func reconnectTestPanes(m *Model) []*PaneModel {
+	var out []*PaneModel
+	for _, tab := range m.tabs {
+		out = append(out, tab.Leaves()...)
+		if tab.overlayPane != nil {
+			out = append(out, tab.overlayPane)
+		}
+	}
+	return out
+}
+
+// One reconnect must not double a pane's scrollback. handleAttach replays the
+// whole output buffer as ghost chunks on EVERY attach and handlePaneOutput
+// appends unconditionally, so without this the next reconnect triples it.
+func TestReconnect_ResetsScrollbackBeforeReplay(t *testing.T) {
+	m := newReconnectTestModel(t, 2)
+	panes := reconnectTestPanes(m)
+	if len(panes) != 3 {
+		t.Fatalf("fixture built %d panes, want 3 (2 layout + 1 overlay)", len(panes))
+	}
+	for _, p := range panes {
+		p.AppendOutput([]byte("line one\r\nline two\r\n"))
+		p.scrollBack = 5
+		p.liveOutputSeen = true
+	}
+	if panes[0].rawBuf.Len() == 0 {
+		t.Fatal("fixture wrote no output")
+	}
+	m.selection = &Selection{PaneID: "p0"}
+
+	m.resetPanesForReattach()
+
+	for _, p := range panes {
+		if got := p.rawBuf.Len(); got != 0 {
+			t.Errorf("pane %s: rawBuf = %d bytes after reset, want 0", p.ID, got)
+		}
+		if p.scrollBack != 0 {
+			t.Errorf("pane %s: scrollBack = %d, want 0", p.ID, p.scrollBack)
+		}
+		if p.liveOutputSeen {
+			t.Errorf("pane %s: liveOutputSeen survived; the ghost/live transition will not re-fire", p.ID)
+		}
+	}
+	if m.selection != nil {
+		t.Error("selection survived; it anchors to coordinates in content that was just discarded")
+	}
+}
+
+// Terminal panes are reset too. The existing rule that terminal panes skip
+// ResetVT protects RESTORED content from a respawned shell's init output —
+// nothing respawns here and the content is about to be re-sent, so applying
+// that rule would be the bug.
+func TestReconnect_ResetsTerminalPanesAlso(t *testing.T) {
+	m := newReconnectTestModel(t, 1)
+	p := m.tabs[0].Leaves()[0]
+	p.Type = "terminal"
+	p.AppendOutput([]byte("shell output\r\n"))
+
+	m.resetPanesForReattach()
+
+	if got := p.rawBuf.Len(); got != 0 {
+		t.Errorf("terminal pane not reset: %d bytes remain", got)
+	}
+}
+
+// The overlay pane is a live daemon pane that gets replayed like any other, but
+// it sits outside the layout tree — so a Leaves()-only walk misses it and its
+// scrollback doubles while every other pane is fine.
+func TestReconnect_ResetsOverlayPane(t *testing.T) {
+	m := newReconnectTestModel(t, 1)
+	ov := m.tabs[0].overlayPane
+	ov.AppendOutput([]byte("lazygit screen\r\n"))
+	if ov.rawBuf.Len() == 0 {
+		t.Fatal("fixture wrote nothing to the overlay pane")
+	}
+
+	m.resetPanesForReattach()
+
+	if got := ov.rawBuf.Len(); got != 0 {
+		t.Errorf("overlay pane not reset: %d bytes remain", got)
+	}
+}
+
+// Panes in BACKGROUND tabs are replayed on the same attach, so they need the
+// same reset — a walk over the active tab only would leave them doubling.
+func TestReconnect_ResetsBackgroundTabs(t *testing.T) {
+	m := newReconnectTestModel(t, 1)
+	bg := NewTabModel("tab-2", "BG")
+	p := NewPaneModel("bg0", 4096)
+	t.Cleanup(p.Dispose)
+	bg.Root = NewLeaf(p)
+	bg.ActivePane = "bg0"
+	bg.Resize(80, 24)
+	m.tabs = append(m.tabs, bg)
+
+	p.AppendOutput([]byte("background output\r\n"))
+	if p.rawBuf.Len() == 0 {
+		t.Fatal("fixture wrote nothing to the background pane")
+	}
+
+	m.resetPanesForReattach()
+
+	if got := p.rawBuf.Len(); got != 0 {
+		t.Errorf("background-tab pane not reset: %d bytes remain", got)
+	}
+}
+
+// The reset must be reached BY the reconnect, not merely exist. This drives the
+// real path: a successful redial result arriving in Update.
+func TestReconnect_SuccessPathResetsPanes(t *testing.T) {
+	m := newReconnectTestModel(t, 2)
+	m.clientGen = 3
+	m.attached = true
+	m.reconnect = reconnectState{active: true, attempt: 1}
+
+	panes := reconnectTestPanes(m)
+	for _, p := range panes {
+		p.AppendOutput([]byte("pre-reconnect content\r\n"))
+	}
+	m.selection = &Selection{PaneID: "p0"}
+
+	updated, cmd := m.Update(redialResultMsg{gen: 3, client: &failingClient{err: errors.New("unused")}})
+	got := updated.(Model)
+
+	if cmd == nil {
+		t.Fatal("no attach/listen command returned")
+	}
+	for _, p := range panes {
+		if n := p.rawBuf.Len(); n != 0 {
+			t.Errorf("pane %s still holds %d bytes after a successful reconnect — the replay will double it", p.ID, n)
+		}
+	}
+	if got.selection != nil {
+		t.Error("selection survived the reconnect")
 	}
 }

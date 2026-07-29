@@ -201,6 +201,55 @@ func (m Model) renderReconnectBanner(width int) string {
 	return reconnectBannerStyle.Width(width).Render(truncateToWidth(core, width))
 }
 
+// resetForReattach clears everything the daemon is about to replay into this
+// pane.
+//
+// handleAttach replays the whole output buffer as ghost chunks on EVERY attach,
+// and handlePaneOutput appends unconditionally, so a reconnect without this
+// doubles the pane's scrollback — and the one after that triples it.
+//
+// Terminal panes are NOT exempt. The rule that terminal panes skip ResetVT
+// protects RESTORED content against a respawned shell's init output; here
+// nothing respawns and the content is about to arrive again, so applying that
+// rule would be the bug rather than the safeguard.
+//
+// ResetVT already clears rawBuf and the mirrored mouse-mode flags, so this only
+// adds the scroll position and the ghost/live latch. The daemon re-broadcasts
+// its own MouseModes on reattach, so dropping the local mirror loses nothing.
+func (p *PaneModel) resetForReattach() {
+	p.ResetVT()
+	p.ResetScroll()
+	// Let the ghost→live transition and its settle repaints fire again; the
+	// replay that follows is ghost output, exactly as on a first attach.
+	p.liveOutputSeen = false
+}
+
+// resetPanesForReattach resets every pane that the coming attach will replay.
+//
+// That means every tab, not just the active one — a single attach replays
+// background tabs too — and each tab's overlay pane, which is a live daemon
+// pane replayed like any other but deliberately kept OUTSIDE the layout tree,
+// so a Leaves()-only walk misses it.
+func (m *Model) resetPanesForReattach() {
+	for _, tab := range m.tabs {
+		if tab == nil {
+			continue
+		}
+		for _, p := range tab.Leaves() {
+			if p != nil {
+				p.resetForReattach()
+			}
+		}
+		if tab.overlayPane != nil {
+			tab.overlayPane.resetForReattach()
+		}
+	}
+	// Selection is Model-level, and anchors to row/column coordinates inside
+	// content that has just been discarded. Keeping it would highlight whatever
+	// happens to land in those cells after replay.
+	m.selection = nil
+}
+
 // redialTickMsg fires when the backoff for one attempt has elapsed.
 type redialTickMsg struct {
 	gen     int
@@ -268,8 +317,11 @@ func (m Model) finishReconnect(c Client) (tea.Model, tea.Cmd) {
 	m.clientGen++
 	m.reconnect = reconnectState{}
 
-	// RD-013 (pane reset) and RD-014 (work-state reset) belong here, before the
-	// attach that triggers replay.
+	// Before the attach that triggers replay, not after: the daemon starts
+	// sending the moment it processes MsgAttach, and a reset arriving late would
+	// wipe the replay it was meant to make room for.
+	m.resetPanesForReattach()
+	// RD-014 (work-state reset) joins here.
 
 	return m, tea.Batch(m.attachToDaemon(), m.listenForMessages())
 }

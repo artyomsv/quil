@@ -461,6 +461,13 @@ func launchTUI() {
 	// wrong machine. Empty for a local session.
 	model.SetRemoteDest(remoteDest)
 
+	// Only remote sessions reconnect. A local daemon that dies takes its panes
+	// with it, so there is nothing to reattach to and retrying would hide the
+	// loss; leaving redialFn nil is what makes that path stay fatal.
+	if remoteMode() {
+		model.SetRedialFunc(redialRemote(cfg))
+	}
+
 	// ssh keeps its stderr for the whole session and multiplexes the remote
 	// command's fd 2 onto it, so from here on a diagnostic would land mid-render
 	// on a screen Bubble Tea owns. Every prompt that needs a terminal already

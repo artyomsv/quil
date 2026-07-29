@@ -2,6 +2,7 @@ package tui
 
 import (
 	"log"
+	"math/rand"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -101,10 +102,20 @@ func (m Model) canReconnect() bool {
 	return m.RemoteMode() && m.redialFn != nil
 }
 
-// beginReconnect enters the reconnecting state.
-//
-// The redial loop itself arrives in RD-011; this function is separate so the
-// entry condition can be tested without a dialer in the tree.
+// redialTickMsg fires when the backoff for one attempt has elapsed.
+type redialTickMsg struct {
+	gen     int
+	attempt int
+}
+
+// redialResultMsg carries one attempt's outcome.
+type redialResultMsg struct {
+	gen    int
+	client Client
+	err    error
+}
+
+// beginReconnect enters the reconnecting state and arms the first attempt.
 func (m Model) beginReconnect(cause error) (tea.Model, tea.Cmd) {
 	if m.reconnect.active {
 		return m, nil // already reconnecting; one loop only
@@ -114,5 +125,52 @@ func (m Model) beginReconnect(cause error) (tea.Model, tea.Cmd) {
 	// A drag in flight refers to coordinates and panes that the post-reattach
 	// state may not have; drop it rather than resolve it later.
 	m.clearDragState()
-	return m, nil
+	return m.scheduleRedial()
+}
+
+// scheduleRedial arms the next attempt's timer.
+func (m Model) scheduleRedial() (tea.Model, tea.Cmd) {
+	m.reconnect.attempt++
+	delay := reconnectDelay(m.reconnect.attempt, rand.Float64())
+	m.reconnect.nextAt = time.Now().Add(delay)
+	gen, attempt := m.clientGen, m.reconnect.attempt
+	return m, tea.Tick(delay, func(time.Time) tea.Msg {
+		return redialTickMsg{gen: gen, attempt: attempt}
+	})
+}
+
+// redialCmd performs one dial off the Update goroutine.
+//
+// The dead client is handed to the dialer rather than closed here: Client is
+// only Send/Receive, so this package cannot release the underlying ssh child,
+// and cmd/quil is the layer that knows the value is really an *ipc.Client.
+func (m Model) redialCmd() tea.Cmd {
+	gen, dial, old := m.clientGen, m.redialFn, m.client
+	return func() tea.Msg {
+		c, err := dial(old)
+		return redialResultMsg{gen: gen, client: c, err: err}
+	}
+}
+
+// finishReconnect swaps in the new client and re-attaches.
+//
+// The generation bump is what retires every closure still holding the dead
+// client: their linkLostMsg and redialResultMsg all carry the old number and
+// are dropped on arrival. It must happen BEFORE listenForMessages is built,
+// since that closure stamps its reports with whatever it captures.
+//
+// m.attached is deliberately NOT cleared. It gates the first-WindowSizeMsg
+// attach path, so clearing it would make the next resize attach a SECOND time —
+// and the daemon replays the whole output buffer on every attach, so that is a
+// doubled scrollback rather than a redundant no-op.
+func (m Model) finishReconnect(c Client) (tea.Model, tea.Cmd) {
+	log.Printf("remote link restored after %d attempt(s)", m.reconnect.attempt)
+	m.client = c
+	m.clientGen++
+	m.reconnect = reconnectState{}
+
+	// RD-013 (pane reset) and RD-014 (work-state reset) belong here, before the
+	// attach that triggers replay.
+
+	return m, tea.Batch(m.attachToDaemon(), m.listenForMessages())
 }

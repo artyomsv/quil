@@ -11,10 +11,12 @@ import (
 	"github.com/artyomsv/quil/internal/ipc"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/remoteinstall"
 	"github.com/artyomsv/quil/internal/transport"
+	"github.com/artyomsv/quil/internal/tui"
 )
 
 // remoteDest is empty for a local session and holds the --remote destination
@@ -238,37 +240,113 @@ func dialRemote(cfg config.Config) (*ipc.Client, error) {
 	// passphrase — it runs before tea.NewProgram takes the terminal.
 	log.Printf("remote mode: dialing %s over ssh", remoteDest)
 
-	// Keep hold of the transport so the version gate can tell a dead ssh
-	// channel from a daemon that answered badly. The dial only fails when ssh
-	// could not be STARTED (binary missing, pipe exhaustion) — every
-	// network-level failure survives it and surfaces later.
-	var link transport.LinkStatus
-	dialSSH := transport.SSH(remoteDest, remoteSSHOptions(cfg))
-	client, err := ipc.NewClientWithDialer(
-		context.Background(),
-		func(ctx context.Context) (net.Conn, error) {
-			conn, dialErr := dialSSH(ctx)
-			if conn != nil {
-				ls, ok := conn.(transport.LinkStatus)
-				if !ok {
-					// Not fatal, but it silently disables the only check that
-					// tells "unreachable host" from "version mismatch", so it
-					// must not pass unnoticed. A compile-time assertion covers
-					// *stdioConn itself; this catches a future wrapper type.
-					log.Printf("remote: transport %T does not report link status — link diagnosis disabled", conn)
-				}
-				link = ls
-				if r, ok := conn.(transport.StderrRedirector); ok {
-					remoteStderrRedirectFn = r.RedirectStderr
-				}
-			}
-			return conn, dialErr
-		},
-	)
+	client, link, err := dialRemoteTransport(context.Background(), cfg, false)
 	if link != nil {
 		remoteLinkErrFn = link.LinkErr
 		remoteLinkEstablishedFn = link.Established
 		remoteExitCodeFn = link.ExitCode
 	}
 	return client, err
+}
+
+// dialRemoteTransport performs one ssh-backed dial and returns the client
+// alongside the transport's link probe.
+//
+// This is the single dial implementation, shared by the startup dial and the
+// reconnect loop, for the same reason transport.RunSSH shares sshArgs with the
+// dialer: a second call site assembling its own options is free to drop a
+// forced hardening flag or the leading-'-' destination check, and nothing would
+// notice until it mattered.
+//
+// batch=false lets ssh prompt on the terminal, which is only safe before
+// tea.NewProgram takes it. Every dial after that point must pass true.
+//
+// ctx bounds the DIAL only. Per the ipc.DialFunc contract the returned conn
+// owns the ssh child and releases it on Close, so a caller may cancel this
+// context the moment the dial returns without killing the session it opened.
+func dialRemoteTransport(ctx context.Context, cfg config.Config, batch bool) (*ipc.Client, transport.LinkStatus, error) {
+	opts := remoteSSHOptions(cfg)
+	opts.Batch = batch
+
+	// Keep hold of the transport so callers can tell a dead ssh channel from a
+	// daemon that answered badly. The dial only fails when ssh could not be
+	// STARTED (binary missing, pipe exhaustion) — every network-level failure
+	// survives it and surfaces later as a failed handshake.
+	var link transport.LinkStatus
+	dialSSH := transport.SSH(remoteDest, opts)
+	client, err := ipc.NewClientWithDialer(ctx, func(c context.Context) (net.Conn, error) {
+		conn, dialErr := dialSSH(c)
+		if conn != nil {
+			ls, ok := conn.(transport.LinkStatus)
+			if !ok {
+				// Not fatal, but it silently disables the only check that tells
+				// "unreachable host" from "version mismatch", so it must not
+				// pass unnoticed. A compile-time assertion covers *stdioConn
+				// itself; this catches a future wrapper type.
+				log.Printf("remote: transport %T does not report link status — link diagnosis disabled", conn)
+			}
+			link = ls
+			// Only the interactive dial writes this: a batch dial captures
+			// stderr into its own buffer and never reaches the terminal, so
+			// there is nothing to redirect, and a reconnect runs on a
+			// background goroutine where writing a package global would be a
+			// race against nothing but is still not worth doing.
+			if !batch {
+				if r, ok := conn.(transport.StderrRedirector); ok {
+					remoteStderrRedirectFn = r.RedirectStderr
+				}
+			}
+		}
+		return conn, dialErr
+	})
+	return client, link, err
+}
+
+// redialTimeout bounds one reconnect attempt. Longer than the transport's own
+// ConnectTimeout so authentication has room after the TCP connect succeeds.
+const redialTimeout = 30 * time.Second
+
+// redialRemote builds the Model's reconnect dialer.
+//
+// Batch is TRUE here, unlike the startup dial. By reconnect time Bubble Tea
+// owns the terminal in raw mode, so ssh must not prompt for a host key or a
+// passphrase: there is nowhere for the prompt to be read from, and it would
+// hang the attempt until the timeout killed it. A host whose key is unknown at
+// reconnect time therefore fails fast with a captured error, which is honest.
+//
+// The dial runs under WithTimeout with a deferred cancel. That is only safe
+// because transport.SSH builds its child with exec.Command rather than
+// exec.CommandContext (RD-001) — otherwise this cancel would kill the ssh child
+// of every attempt at the moment it succeeded.
+func redialRemote(cfg config.Config) tui.RedialFunc {
+	return func(old tui.Client) (tui.Client, error) {
+		// Release the dead connection's ssh child. The TUI cannot do this: its
+		// Client is only Send/Receive, and this is the layer that knows better.
+		if c, ok := old.(*ipc.Client); ok && c != nil {
+			c.Close()
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), redialTimeout)
+		defer cancel()
+
+		client, link, err := dialRemoteTransport(ctx, cfg, true)
+		if err != nil {
+			// Prefer ssh's own words. A network failure reaches us as a failed
+			// handshake, which on its own reads as a timeout and names no
+			// cause; batch mode captured the real message into LinkErr.
+			if link != nil {
+				if le := link.LinkErr(); le != nil {
+					return nil, le
+				}
+			}
+			return nil, err
+		}
+		if client == nil {
+			// Defensive: returning a nil *ipc.Client into the interface would
+			// produce a non-nil tui.Client holding a nil pointer, and the next
+			// Receive would panic rather than reconnect.
+			return nil, errors.New("ssh dial returned no connection")
+		}
+		return client, nil
+	}
 }

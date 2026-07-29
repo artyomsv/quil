@@ -220,3 +220,237 @@ func TestReconnectDelay_NeverDropsBelowFloorAtAnyAttempt(t *testing.T) {
 		}
 	}
 }
+
+// recordingDialer counts calls and returns a scripted outcome.
+type recordingDialer struct {
+	calls   int
+	client  Client
+	err     error
+	lastOld Client
+}
+
+func (d *recordingDialer) dial(old Client) (Client, error) {
+	d.calls++
+	d.lastOld = old
+	return d.client, d.err
+}
+
+// Entering the reconnect state must arm the first attempt, not just record it.
+func TestReconnect_BeginArmsFirstAttempt(t *testing.T) {
+	d := &recordingDialer{err: errors.New("refused")}
+	m := Model{clientGen: 1}
+	m.SetRemoteDest("gpu01")
+	m.SetRedialFunc(d.dial)
+
+	updated, cmd := m.Update(linkLostMsg{gen: 1, err: errors.New("EOF")})
+	got := updated.(Model)
+
+	if !got.reconnect.active {
+		t.Fatal("reconnect not active")
+	}
+	if got.reconnect.attempt != 1 {
+		t.Errorf("attempt = %d, want 1", got.reconnect.attempt)
+	}
+	if cmd == nil {
+		t.Fatal("no timer armed; the reconnect would never fire")
+	}
+	if got.reconnect.nextAt.IsZero() {
+		t.Error("nextAt not set; the banner has no countdown to show")
+	}
+}
+
+// A second link loss while already reconnecting must not start a parallel loop.
+func TestReconnect_SecondLinkLossDoesNotStackLoops(t *testing.T) {
+	d := &recordingDialer{err: errors.New("refused")}
+	m := Model{clientGen: 1}
+	m.SetRemoteDest("gpu01")
+	m.SetRedialFunc(d.dial)
+
+	updated, _ := m.Update(linkLostMsg{gen: 1, err: errors.New("EOF")})
+	m = updated.(Model)
+	updated, cmd := m.Update(linkLostMsg{gen: 1, err: errors.New("EOF again")})
+	got := updated.(Model)
+
+	if got.reconnect.attempt != 1 {
+		t.Errorf("attempt = %d, want 1 — a second loop was armed", got.reconnect.attempt)
+	}
+	if cmd != nil {
+		t.Error("a second timer was armed")
+	}
+}
+
+// The tick for the current generation runs the dialer.
+func TestReconnect_TickRunsDialer(t *testing.T) {
+	d := &recordingDialer{err: errors.New("refused")}
+	old := &failingClient{err: errors.New("dead")}
+	m := Model{clientGen: 4, client: old, reconnect: reconnectState{active: true, attempt: 1}}
+	m.SetRemoteDest("gpu01")
+	m.SetRedialFunc(d.dial)
+
+	_, cmd := m.Update(redialTickMsg{gen: 4, attempt: 1})
+	if cmd == nil {
+		t.Fatal("tick produced no dial command")
+	}
+	msg := cmd()
+
+	if d.calls != 1 {
+		t.Errorf("dialer called %d times, want 1", d.calls)
+	}
+	if d.lastOld != Client(old) {
+		t.Error("the dead client was not handed to the dialer; it can never be closed")
+	}
+	res, ok := msg.(redialResultMsg)
+	if !ok {
+		t.Fatalf("msg is %T, want redialResultMsg", msg)
+	}
+	if res.gen != 4 {
+		t.Errorf("result gen = %d, want 4", res.gen)
+	}
+}
+
+// A tick for a superseded generation must not dial.
+func TestReconnect_StaleTickDoesNotDial(t *testing.T) {
+	d := &recordingDialer{err: errors.New("refused")}
+	m := Model{clientGen: 9, reconnect: reconnectState{active: true, attempt: 1}}
+	m.SetRemoteDest("gpu01")
+	m.SetRedialFunc(d.dial)
+
+	_, cmd := m.Update(redialTickMsg{gen: 8, attempt: 1})
+	if cmd != nil {
+		t.Fatal("a stale tick produced a dial command")
+	}
+	if d.calls != 0 {
+		t.Errorf("dialer called %d times on a stale tick", d.calls)
+	}
+}
+
+// Success swaps the client, bumps the generation, clears the state, and
+// re-attaches.
+func TestReconnect_SuccessSwapsClientAndBumpsGeneration(t *testing.T) {
+	fresh := &failingClient{err: errors.New("unused")}
+	m := Model{clientGen: 7, reconnect: reconnectState{active: true, attempt: 2}}
+	m.SetRemoteDest("gpu01")
+
+	updated, cmd := m.Update(redialResultMsg{gen: 7, client: fresh})
+	got := updated.(Model)
+
+	if got.clientGen != 8 {
+		t.Errorf("clientGen = %d, want 8", got.clientGen)
+	}
+	if got.reconnect.active {
+		t.Error("reconnect still active after success")
+	}
+	if got.client != Client(fresh) {
+		t.Error("client was not swapped")
+	}
+	if cmd == nil {
+		t.Fatal("no command returned; expected re-attach plus a new listen loop")
+	}
+}
+
+// A failed attempt schedules another and leaves the state active.
+func TestReconnect_FailureSchedulesAnother(t *testing.T) {
+	m := Model{clientGen: 2, reconnect: reconnectState{active: true, attempt: 1}}
+	m.SetRemoteDest("gpu01")
+	m.SetRedialFunc(func(Client) (Client, error) { return nil, errors.New("refused") })
+
+	updated, cmd := m.Update(redialResultMsg{gen: 2, err: errors.New("refused")})
+	got := updated.(Model)
+
+	if !got.reconnect.active {
+		t.Error("reconnect ended on a failed attempt")
+	}
+	if got.reconnect.attempt != 2 {
+		t.Errorf("attempt = %d, want 2", got.reconnect.attempt)
+	}
+	if got.reconnect.lastErr == nil || got.reconnect.lastErr.Error() != "refused" {
+		t.Errorf("lastErr = %v, want the dial error for the banner", got.reconnect.lastErr)
+	}
+	if cmd == nil {
+		t.Error("no retry scheduled")
+	}
+}
+
+// A result addressed to a superseded generation is dropped, INCLUDING one that
+// carries a live client: a slow first attempt completing after a fast second
+// one would otherwise replace a working connection with one nobody reads.
+func TestReconnect_StaleResultDroppedEvenWhenLive(t *testing.T) {
+	live := &failingClient{err: errors.New("unused")}
+	current := &failingClient{err: errors.New("current")}
+	m := Model{clientGen: 9, client: current}
+	m.SetRemoteDest("gpu01")
+
+	updated, cmd := m.Update(redialResultMsg{gen: 8, client: live})
+	got := updated.(Model)
+
+	if got.clientGen != 9 {
+		t.Errorf("clientGen = %d, want 9 (unchanged)", got.clientGen)
+	}
+	if got.client != Client(current) {
+		t.Error("a stale result replaced the live client")
+	}
+	if cmd != nil {
+		t.Error("stale result produced a command")
+	}
+}
+
+// A dialer that reports success with no client must be treated as a failure.
+// Go's typed-nil trap makes this reachable in practice: a *ipc.Client nil
+// returned into a Client interface is NOT == nil, so a naive check passes it
+// through and the next Receive panics.
+func TestReconnect_NilClientWithoutErrorIsAFailure(t *testing.T) {
+	m := Model{clientGen: 3, reconnect: reconnectState{active: true, attempt: 1}}
+	m.SetRemoteDest("gpu01")
+	m.SetRedialFunc(func(Client) (Client, error) { return nil, nil })
+
+	updated, cmd := m.Update(redialResultMsg{gen: 3, client: nil, err: nil})
+	got := updated.(Model)
+
+	if got.clientGen != 3 {
+		t.Errorf("clientGen = %d, want 3 — a nil client was installed", got.clientGen)
+	}
+	if !got.reconnect.active {
+		t.Error("reconnect ended after a nil client was returned")
+	}
+	if cmd == nil {
+		t.Error("no retry scheduled after a nil client")
+	}
+}
+
+// m.attached must SURVIVE a reconnect. It gates the first-WindowSizeMsg attach
+// path, so clearing it makes the next resize attach a second time — and the
+// daemon replays the entire output buffer on every attach, so the cost is a
+// doubled scrollback, not a redundant no-op. Invisible until you scroll up.
+func TestReconnect_KeepsAttachedFlag(t *testing.T) {
+	fresh := &failingClient{err: errors.New("unused")}
+	m := Model{clientGen: 1, attached: true, reconnect: reconnectState{active: true, attempt: 1}}
+	m.SetRemoteDest("gpu01")
+
+	updated, _ := m.Update(redialResultMsg{gen: 1, client: fresh})
+
+	if got := updated.(Model); !got.attached {
+		t.Error("attached was cleared by the reconnect; the next resize will attach again and double every pane's scrollback")
+	}
+}
+
+// The generation must be bumped BEFORE the new listen loop is built, or that
+// loop stamps its reports with the old number and its own link loss is
+// discarded as stale — leaving a session that can never reconnect again.
+func TestReconnect_NewListenLoopCarriesTheNewGeneration(t *testing.T) {
+	fresh := &failingClient{err: errors.New("second death")}
+	m := Model{clientGen: 7, attached: true, reconnect: reconnectState{active: true, attempt: 1}}
+	m.SetRemoteDest("gpu01")
+
+	updated, _ := m.Update(redialResultMsg{gen: 7, client: fresh})
+	got := updated.(Model)
+
+	msg := got.listenForMessages()()
+	lost, ok := msg.(linkLostMsg)
+	if !ok {
+		t.Fatalf("msg is %T, want linkLostMsg", msg)
+	}
+	if lost.gen != got.clientGen {
+		t.Errorf("new listen loop stamped gen %d but the model is at %d — its own drop would be discarded as stale",
+			lost.gen, got.clientGen)
+	}
+}

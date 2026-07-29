@@ -597,6 +597,35 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m.beginReconnect(msg.err)
 
+	case redialTickMsg:
+		if msg.gen != m.clientGen || !m.reconnect.active {
+			return m, nil
+		}
+		return m, m.redialCmd()
+
+	case redialResultMsg:
+		// Dropped for a superseded generation even when it carries a LIVE
+		// client: a slow attempt completing after a fast one would otherwise
+		// replace a working connection with a second one, leaving the first
+		// with a listen loop nobody reads.
+		if msg.gen != m.clientGen {
+			if msg.client != nil {
+				log.Printf("discarding late reconnect from gen %d (current %d)", msg.gen, m.clientGen)
+			}
+			return m, nil
+		}
+		// msg.client == nil with no error is not a success. A dialer returning
+		// a typed nil pointer produces a non-nil interface, so this check is
+		// the last place that can catch it before Receive panics on it.
+		if msg.err != nil || msg.client == nil {
+			if msg.err == nil {
+				msg.err = errors.New("dialer returned no connection")
+			}
+			m.reconnect.lastErr = msg.err
+			return m.scheduleRedial()
+		}
+		return m.finishReconnect(msg.client)
+
 	case sizePollMsg:
 		return m, tea.Batch(sizePollProbe, sizePollTick())
 

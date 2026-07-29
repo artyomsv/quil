@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"log"
 	"net"
 
@@ -65,6 +66,24 @@ func remoteExitCode() int {
 		return -1
 	}
 	return remoteExitCodeFn()
+}
+
+// remoteStderrRedirectFn moves ssh's diagnostics off the terminal. Installed by
+// dialRemote when the transport supports it; nil in a local session.
+var remoteStderrRedirectFn func(io.Writer)
+
+// redirectRemoteStderr sends further ssh diagnostics to w, or discards them when
+// w is nil. Safe to call in a local session, where it does nothing.
+//
+// Called once the TUI owns the screen. ssh holds its stderr for the whole
+// session and multiplexes the remote command's fd 2 onto it, so a late
+// diagnostic would otherwise land mid-render on a terminal Bubble Tea believes
+// it controls. The dial itself must NOT be redirected — host-key and passphrase
+// prompts have to be visible before that point.
+func redirectRemoteStderr(w io.Writer) {
+	if remoteStderrRedirectFn != nil {
+		remoteStderrRedirectFn(w)
+	}
 }
 
 // remoteSSHOptions builds the dial options for the configured destination.
@@ -239,6 +258,9 @@ func dialRemote(cfg config.Config) (*ipc.Client, error) {
 					log.Printf("remote: transport %T does not report link status — link diagnosis disabled", conn)
 				}
 				link = ls
+				if r, ok := conn.(transport.StderrRedirector); ok {
+					remoteStderrRedirectFn = r.RedirectStderr
+				}
 			}
 			return conn, dialErr
 		},

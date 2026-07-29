@@ -1,6 +1,8 @@
 package claudesessions
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -131,7 +133,7 @@ func writeSession(t *testing.T, dir, id string, mtime time.Time, lines ...string
 }
 
 func TestListDir_MissingDirectory_ReturnsEmptyNotError(t *testing.T) {
-	got, _, err := listDir(filepath.Join(t.TempDir(), "does-not-exist"))
+	got, _, err := listDir(context.Background(), filepath.Join(t.TempDir(), "does-not-exist"))
 	if err != nil {
 		t.Fatalf("listDir on missing dir returned error: %v", err)
 	}
@@ -151,7 +153,7 @@ func TestListDir_ExactlyCapIsNotTruncated(t *testing.T) {
 			base.Add(time.Duration(i)*time.Minute), typedPrompt("prompt"))
 	}
 
-	got, truncated, err := listDir(dir)
+	got, truncated, err := listDir(context.Background(), dir)
 	if err != nil {
 		t.Fatalf("listDir: %v", err)
 	}
@@ -170,7 +172,7 @@ func TestListDir_SortsNewestFirst(t *testing.T) {
 	writeSession(t, dir, "newest", base, typedPrompt("third task"))
 	writeSession(t, dir, "middle", base.Add(-24*time.Hour), typedPrompt("second task"))
 
-	got, _, err := listDir(dir)
+	got, _, err := listDir(context.Background(), dir)
 	if err != nil {
 		t.Fatalf("listDir: %v", err)
 	}
@@ -194,7 +196,7 @@ func TestListDir_ExtractsFirstTypedPrompt(t *testing.T) {
 		typedPrompt("a later prompt that must not win"),
 	)
 
-	got, _, err := listDir(dir)
+	got, _, err := listDir(context.Background(), dir)
 	if err != nil {
 		t.Fatalf("listDir: %v", err)
 	}
@@ -216,7 +218,7 @@ func TestListDir_SkipsSidechainAndNonTypedPrompts(t *testing.T) {
 		typedPrompt("the real first prompt"),
 	)
 
-	got, _, err := listDir(dir)
+	got, _, err := listDir(context.Background(), dir)
 	if err != nil {
 		t.Fatalf("listDir: %v", err)
 	}
@@ -231,7 +233,7 @@ func TestListDir_ContentBlockArrayShape(t *testing.T) {
 		`{"type":"user","isSidechain":false,"promptSource":"typed","message":{"role":"user","content":[{"type":"text","text":"prompt with attachment"},{"type":"image","source":{}}]}}`,
 	)
 
-	got, _, err := listDir(dir)
+	got, _, err := listDir(context.Background(), dir)
 	if err != nil {
 		t.Fatalf("listDir: %v", err)
 	}
@@ -247,7 +249,7 @@ func TestListDir_MalformedLinesSkipped(t *testing.T) {
 		typedPrompt("valid prompt"),
 	)
 
-	got, _, err := listDir(dir)
+	got, _, err := listDir(context.Background(), dir)
 	if err != nil {
 		t.Fatalf("listDir: %v", err)
 	}
@@ -262,7 +264,7 @@ func TestListDir_NoTypedPrompt_EmptyTitleStillListed(t *testing.T) {
 		`{"type":"mode","mode":"normal","sessionId":"s1"}`,
 	)
 
-	got, _, err := listDir(dir)
+	got, _, err := listDir(context.Background(), dir)
 	if err != nil {
 		t.Fatalf("listDir: %v", err)
 	}
@@ -285,7 +287,7 @@ func TestListDir_IgnoresDirectoriesAndNonJSONL(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	got, _, err := listDir(dir)
+	got, _, err := listDir(context.Background(), dir)
 	if err != nil {
 		t.Fatalf("listDir: %v", err)
 	}
@@ -300,7 +302,7 @@ func TestListDir_SkipsEmptyFiles(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	got, _, err := listDir(dir)
+	got, _, err := listDir(context.Background(), dir)
 	if err != nil {
 		t.Fatalf("listDir: %v", err)
 	}
@@ -317,7 +319,7 @@ func TestListDir_CapsAtMaxSessions(t *testing.T) {
 			base.Add(time.Duration(i)*time.Minute), typedPrompt("prompt"))
 	}
 
-	got, truncated, err := listDir(dir)
+	got, truncated, err := listDir(context.Background(), dir)
 	if err != nil {
 		t.Fatalf("listDir: %v", err)
 	}
@@ -426,7 +428,7 @@ func TestReadDetail_CountsOnlyTypedPrompts(t *testing.T) {
 		typedPrompt("last thing"),
 	)
 
-	d, err := readDetail(filepath.Join(dir, "s1.jsonl"), "s1")
+	d, err := readDetail(context.Background(), filepath.Join(dir, "s1.jsonl"), "s1")
 	if err != nil {
 		t.Fatalf("readDetail: %v", err)
 	}
@@ -448,7 +450,7 @@ func TestReadDetail_SkipsSidechainPrompts(t *testing.T) {
 	sidechain := `{"type":"user","isSidechain":true,"promptSource":"typed","message":{"role":"user","content":"subagent task"},"timestamp":"2026-07-01T10:02:00.000Z"}`
 	writeSession(t, dir, "s1", time.Now(), typedPrompt("mine"), sidechain)
 
-	d, err := readDetail(filepath.Join(dir, "s1.jsonl"), "s1")
+	d, err := readDetail(context.Background(), filepath.Join(dir, "s1.jsonl"), "s1")
 	if err != nil {
 		t.Fatalf("readDetail: %v", err)
 	}
@@ -465,7 +467,7 @@ func TestReadDetail_ReportsStartedSizeAndModified(t *testing.T) {
 	mtime := time.Now().Add(-3 * time.Hour).Truncate(time.Second)
 	writeSession(t, dir, "s1", mtime, typedPrompt("hello"))
 
-	d, err := readDetail(filepath.Join(dir, "s1.jsonl"), "s1")
+	d, err := readDetail(context.Background(), filepath.Join(dir, "s1.jsonl"), "s1")
 	if err != nil {
 		t.Fatalf("readDetail: %v", err)
 	}
@@ -495,7 +497,7 @@ func TestReadDetail_StartTimestampBeyondOpeningLines(t *testing.T) {
 	lines = append(lines, typedPrompt("late"))
 	writeSession(t, dir, "s1", time.Now(), lines...)
 
-	d, err := readDetail(filepath.Join(dir, "s1.jsonl"), "s1")
+	d, err := readDetail(context.Background(), filepath.Join(dir, "s1.jsonl"), "s1")
 	if err != nil {
 		t.Fatalf("readDetail: %v", err)
 	}
@@ -520,7 +522,7 @@ func TestReadDetail_MalformedAndPartialLinesSkipped(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	d, err := readDetail(path, "s1")
+	d, err := readDetail(context.Background(), path, "s1")
 	if err != nil {
 		t.Fatalf("readDetail: %v", err)
 	}
@@ -531,7 +533,7 @@ func TestReadDetail_MalformedAndPartialLinesSkipped(t *testing.T) {
 }
 
 func TestReadDetail_MissingFileIsAnError(t *testing.T) {
-	if _, err := readDetail(filepath.Join(t.TempDir(), "nope.jsonl"), "nope"); err == nil {
+	if _, err := readDetail(context.Background(), filepath.Join(t.TempDir(), "nope.jsonl"), "nope"); err == nil {
 		t.Error("readDetail on a missing transcript returned nil error")
 	}
 }
@@ -547,7 +549,7 @@ func TestReadDetail_RejectsTraversalSessionID(t *testing.T) {
 		"sub/dir",
 		`..\windows`,
 	} {
-		if _, err := ReadDetail(t.TempDir(), id); err == nil {
+		if _, err := ReadDetail(context.Background(), t.TempDir(), id); err == nil {
 			t.Errorf("ReadDetail accepted session id %q", id)
 		}
 	}
@@ -602,5 +604,72 @@ func TestSanitizePrompt_MultilineSurvivesTitleCollapse(t *testing.T) {
 	}
 	if got := sanitizePrompt(in); !strings.Contains(got, "\n") {
 		t.Errorf("sanitizePrompt dropped the line break: %q", got)
+	}
+}
+
+// List degrades to an empty result on a cancelled context rather than failing.
+// Every failure in this package already degrades to fewer sessions, never an
+// error that blocks pane creation, and cancellation is the same class of event.
+func TestList_CancelledContext_DegradesWithoutError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	sessions, truncated, err := List(ctx, t.TempDir())
+	if err != nil {
+		t.Fatalf("List returned an error on cancel: %v (want degraded, not failed)", err)
+	}
+	if len(sessions) != 0 {
+		t.Errorf("sessions = %d, want 0", len(sessions))
+	}
+	if truncated {
+		t.Error("truncated set on a cancelled scan")
+	}
+}
+
+// ReadDetail is the deliberate asymmetry: it returns the error instead of
+// degrading. It answers about ONE highlighted row, and a truncated read would
+// silently misreport that session's prompt count -- worse than an empty panel.
+func TestReadDetail_CancelledContext_ReturnsError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := ReadDetail(ctx, t.TempDir(), "aaaaaaaa-0000-4000-8000-000000000000")
+	if err == nil {
+		t.Fatal("ReadDetail succeeded on a cancelled context, want an error")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want it to wrap context.Canceled", err)
+	}
+}
+
+// A cancelled scan must not claim it truncated anything.
+//
+// This also pins WHERE the cancellation check sits. The candidate-gathering
+// loop runs over every entry in the directory and stats each one; the title
+// loop below it is already capped at MaxSessions. Guarding only the capped loop
+// leaves the unbounded one running, and the tell is `truncated`: the cap is
+// applied before titles are read, so a scan that reached it did all the stats
+// and then reported a truncation it should never have discovered.
+func TestListDir_CancelledContext_DoesNotReportTruncation(t *testing.T) {
+	dir := t.TempDir()
+	base := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < MaxSessions+1; i++ {
+		writeSession(t, dir, fmt.Sprintf("s%04d", i),
+			base.Add(time.Duration(i)*time.Minute), typedPrompt("prompt"))
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	sessions, truncated, err := listDir(ctx, dir)
+	if err != nil {
+		t.Fatalf("listDir returned an error on cancel: %v", err)
+	}
+	if len(sessions) != 0 {
+		t.Errorf("sessions = %d, want 0", len(sessions))
+	}
+	if truncated {
+		t.Error("truncated = true on a cancelled scan; the candidate loop ran to " +
+			"completion, so the check is guarding only the capped title loop")
 	}
 }

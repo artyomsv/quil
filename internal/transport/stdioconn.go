@@ -100,6 +100,11 @@ type stdioConn struct {
 	// wait for a natural exit instead of overwriting the status with a kill.
 	reaped chan struct{}
 
+	// termErr is the live sink behind the interactive dial's stderr path, so it
+	// can be moved off the terminal once the TUI owns the screen. Nil on a batch
+	// dial, where stderr was captured into the buffer below instead.
+	termErr *switchWriter
+
 	// stderr holds ssh's captured diagnostics when the dial ran in batch mode.
 	// Nil on interactive dials, where stderr went straight to the terminal.
 	// Assigned by SSH (ssh.go) AFTER newStdioConn returns and pump() is

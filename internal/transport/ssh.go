@@ -18,6 +18,16 @@ import (
 // binaries together so quil is present wherever quild is.
 const DefaultRemoteCommand = "quil --stdio"
 
+// startCommand builds the ssh child process.
+//
+// A package var rather than a direct exec.Command call because SSH() passes
+// ssh's own argument vector to the binary, so a test cannot point SSHPath at a
+// helper and still control what that helper is asked to do. Mirrors the
+// injectable-function-var pattern used throughout this codebase.
+var startCommand = func(name string, args ...string) *exec.Cmd {
+	return exec.Command(name, args...)
+}
+
 // forcedSSHOptions are passed as -o flags ahead of the user's ssh_config.
 // OpenSSH uses the FIRST obtained value for each parameter and processes
 // command-line -o before any configuration file, so these win over a user's
@@ -155,6 +165,18 @@ func SSH(dest string, opts SSHOptions) func(context.Context) (net.Conn, error) {
 			return nil, fmt.Errorf("invalid ssh destination %q: must not begin with '-'", dest)
 		}
 
+		// Deliberately AFTER the destination check above and before everything
+		// else. ctx no longer owns the child (see the cmd construction below),
+		// so refusing to spawn is the only place it can still apply, and a
+		// caller who has already given up should not pay for a PATH lookup.
+		//
+		// The ordering is load-bearing in one direction only: an option-shaped
+		// destination is rejected whether or not ctx is live, so a cancelled
+		// context can never be a way past that guard.
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("dial %s: %w", dest, err)
+		}
+
 		sshPath := opts.SSHPath
 		if sshPath == "" {
 			sshPath = "ssh"
@@ -180,7 +202,15 @@ func SSH(dest string, opts SSHOptions) func(context.Context) (net.Conn, error) {
 			return nil, fmt.Errorf("create stdout pipe: %w", err)
 		}
 
-		cmd := exec.CommandContext(ctx, resolved, sshArgs(dest, opts)...)
+		// ctx bounds the DIAL, not the connection. exec.CommandContext would bind
+		// the ssh child's lifetime to it, so a caller writing the ordinary
+		// `ctx, cancel := context.WithTimeout(...)` with a deferred cancel would
+		// kill the session at the moment the dial returned it. The conn owns the
+		// child and releases it in Close (kill + reap).
+		//
+		// run.go's RunSSH deliberately keeps CommandContext: a one-shot remote
+		// command IS a bounded operation, so there the two lifetimes coincide.
+		cmd := startCommand(resolved, sshArgs(dest, opts)...)
 		cmd.Stdin = childIn
 		cmd.Stdout = childOut
 		// Bound Wait. cmd.Stderr below is NOT an *os.File, so exec creates a
@@ -198,6 +228,7 @@ func SSH(dest string, opts SSHOptions) func(context.Context) (net.Conn, error) {
 		// keep them. On the first dial stderr goes to the terminal so prompts
 		// are visible; on reconnect it is captured for the error message.
 		var errBuf *lockedBuffer
+		var termErr *switchWriter
 		if opts.Batch {
 			errBuf = &lockedBuffer{}
 			cmd.Stderr = errBuf
@@ -213,7 +244,12 @@ func SSH(dest string, opts SSHOptions) func(context.Context) (net.Conn, error) {
 			// passphrase entry go to /dev/tty directly, not through this pipe.
 			// Its diagnostics ("Could not resolve hostname …") are plain text
 			// and pass through unchanged.
-			cmd.Stderr = &terminalSanitizer{w: os.Stderr}
+			// Swappable so cmd/quil can move these diagnostics to quil.log once
+			// the TUI owns the screen. Sanitized either way — the stream carries
+			// the remote command's fd 2, so it is attacker-influenced no matter
+			// where it lands.
+			termErr = &switchWriter{w: os.Stderr}
+			cmd.Stderr = &terminalSanitizer{w: termErr}
 		}
 
 		if err := cmd.Start(); err != nil {
@@ -233,6 +269,11 @@ func SSH(dest string, opts SSHOptions) func(context.Context) (net.Conn, error) {
 		childOut.Close()
 
 		conn := newStdioConn(cmd, parentRead, parentWrite, dest)
+		if termErr != nil {
+			// Same safety note as the stderr assignment below: this goroutine is
+			// still the only holder of conn, and pump() never touches termErr.
+			conn.termErr = termErr
+		}
 		if errBuf != nil {
 			// Safe post-construction write: this goroutine is the only one
 			// holding conn so far (it hasn't been returned yet), and pump()

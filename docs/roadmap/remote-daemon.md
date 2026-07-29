@@ -185,18 +185,16 @@ Make a dropped link a pause rather than an ending.
 - Re-dial with backoff, in batch mode (no prompts under raw-mode rendering).
 - Re-attach and re-sync workspace state without respawning anything — the panes
   never stopped.
-- Decide the `DialFunc` context contract first: `SSH()` currently binds the ssh
-  child's lifetime to the *dial* context via `exec.CommandContext`. Harmless
-  today with `context.Background()`, but the natural reconnect code
-  (`WithTimeout` + `defer cancel()`) would kill a healthy session. Either scope
-  `ctx` to the dial or document it as the connection's lifetime.
-- Divert ssh's stderr to `quil.log` once the TUI owns the terminal. It stays
-  attached for the whole session, so a late ssh diagnostic (`packet_write_wait:
-  Broken pipe`) can still land mid-render and corrupt the display. The
-  *security* half of this is already fixed — that stream is byte-filtered for
-  terminal control sequences before it reaches the screen, since ssh
-  multiplexes the remote command's fd 2 onto it — but cosmetically it remains
-  an uninvited writer to a terminal the TUI thinks it owns.
+
+**Both prerequisites are done** (RD-001, RD-002 — Phase 1.5):
+
+- The `DialFunc` contract is settled and documented: `ctx` bounds the dial, and
+  the returned conn owns the ssh child and releases it on `Close`. The redial
+  loop can use `WithTimeout` + `defer cancel()` without killing the session it
+  just opened, which `exec.CommandContext` would have done.
+- ssh's stderr moves to `quil.log` at `tea.NewProgram`, so a late diagnostic no
+  longer lands mid-render. It still reaches the terminal during the dial, where
+  host-key and passphrase prompts have to be readable.
 
 ## Phase 3 — remote-correct UI (planned)
 
@@ -272,10 +270,19 @@ Small, and two items are hard prerequisites. Do this before Phase 2.
 
 | ID | Item | Kind | Blocks | Status |
 |---|---|---|---|---|
-| RD-001 | Settle the `DialFunc` context contract — `SSH()` binds the ssh child's lifetime to the *dial* ctx | code | RD-011 | todo |
-| RD-002 | Divert ssh stderr to `quil.log` once the TUI owns the terminal | code | — | todo |
-| RD-003 | Correct the stale `runStatus` claim in `.claude/CLAUDE.md` | docs | — | todo |
-| RD-004 | Plumb `context.Context` into `gitdiscover`, `kubediscover`, `claudesessions` | code | RD-020, RD-021, RD-022 | todo |
+| RD-001 | Settle the `DialFunc` context contract — `SSH()` binds the ssh child's lifetime to the *dial* ctx | code | RD-011 | done |
+| RD-002 | Divert ssh stderr to `quil.log` once the TUI owns the terminal | code | — | done |
+| RD-003 | Correct the stale `runStatus` claim in `.claude/CLAUDE.md` | docs | — | done |
+| RD-004 | Plumb `context.Context` into `gitdiscover`, `kubediscover`, `claudesessions` | code | RD-020, RD-021, RD-022 | done |
+
+**Residual after RD-004, carried into RD-020.** The daemon's session handlers
+now bound their reads at 10 s, but the TUI's own call sites still pass
+`context.Background()` — deliberately, since they run against local disk inside
+a synchronous dialog and RD-020 replaces them with RPCs where a deadline is
+meaningful. Separately, a `ctx` check between syscalls bounds a scan that is
+*making progress*; it cannot interrupt a call already blocked in the kernel on
+a dead mount, because Go has no mechanism for that. Read the guarantee as
+"bounded work", not "bounded time".
 
 **Why RD-001 is a blocker, not a cleanup.** `transport.SSH()` calls
 `exec.CommandContext(ctx, …)`, so cancelling the dial context kills the ssh

@@ -10,6 +10,7 @@
 package kubediscover
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -59,11 +60,20 @@ type kubeconfigFile struct {
 // Contexts merges the kubeconfig path list (first-file-wins for duplicate
 // context names, matching kubectl) and returns the contexts with the
 // current-context marked.
-func Contexts() []Context {
+// ctx is checked before each kubeconfig file is read. Cancellation yields the
+// contexts already parsed, matching this package's degrade-to-empty contract for
+// every other failure.
+func Contexts(ctx context.Context) []Context {
 	var out []Context
+	if ctx.Err() != nil {
+		return nil
+	}
 	seen := make(map[string]bool)
 	current := ""
 	for _, path := range KubeconfigPaths() {
+		if ctx.Err() != nil {
+			break
+		}
 		// os.ReadFile follows symlinks — reading the target is correct: a
 		// symlinked ~/.kube/config (dotfile managers, multi-cluster tooling)
 		// is the exact file k9s/kubectl read. We only extract context names,

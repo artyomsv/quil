@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -319,10 +320,15 @@ func launchTUI() {
 	if buildLogLevel != "" {
 		logLevel = buildLogLevel
 	}
+	// Held beyond this block so ssh's stderr can be pointed at the same rotating
+	// handle once the TUI owns the screen. Reopening the file separately would
+	// put two writers on one rotating log, which is what breaks rotation.
+	var logSink io.Writer
 	if logDir != "" {
 		logWriter, err := logger.NewRotatingWriter(logDir, "quil.log", int64(cfg.Logging.MaxSizeMB)<<20, cfg.Logging.MaxFiles)
 		if err == nil && logWriter != nil {
 			logger.Init(logLevel, logWriter)
+			logSink = logWriter
 			defer logWriter.Close()
 		}
 	}
@@ -454,6 +460,21 @@ func launchTUI() {
 	// update controls, which are wired to local disk and would target the
 	// wrong machine. Empty for a local session.
 	model.SetRemoteDest(remoteDest)
+
+	// ssh keeps its stderr for the whole session and multiplexes the remote
+	// command's fd 2 onto it, so from here on a diagnostic would land mid-render
+	// on a screen Bubble Tea owns. Every prompt that needs a terminal already
+	// happened during the dial.
+	//
+	// Only when there is somewhere to put them. logSink is nil if the log could
+	// not be opened at all, and redirecting to nil discards — which would delete
+	// the only remaining explanation of a failure in a session that already
+	// cannot log. Leaving them on the terminal there is the lesser harm: a
+	// cosmetic corruption in an already-degraded setup beats silence.
+	if logSink != nil {
+		redirectRemoteStderr(logSink)
+	}
+
 	p := tea.NewProgram(model)
 	finalModel, err := p.Run()
 	if err != nil {

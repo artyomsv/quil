@@ -1,6 +1,7 @@
 package gitdiscover
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -103,7 +104,7 @@ func TestSubRepos_OneLevel(t *testing.T) {
 	}
 	mkRepo(t, filepath.Join(base, "plain", "deep"))
 
-	got := SubRepos(base)
+	got := SubRepos(context.Background(), base)
 	want := map[string]bool{
 		filepath.Join(base, "proj-a"):  true,
 		filepath.Join(base, "proj-b"):  true,
@@ -121,7 +122,7 @@ func TestSubRepos_OneLevel(t *testing.T) {
 
 func TestSubRepos_UnreadableDir_ReturnsNil(t *testing.T) {
 	t.Parallel()
-	if got := SubRepos(filepath.Join(t.TempDir(), "nope")); got != nil {
+	if got := SubRepos(context.Background(), filepath.Join(t.TempDir(), "nope")); got != nil {
 		t.Errorf("expected nil for unreadable dir, got %v", got)
 	}
 }
@@ -136,7 +137,7 @@ func TestCandidates_EnclosingFirstThenSubsDeduped(t *testing.T) {
 	sub := filepath.Join(base, "vendor-fork")
 	mkRepo(t, sub)
 
-	got := Candidates(base)
+	got := Candidates(context.Background(), base)
 	if len(got) != 2 {
 		t.Fatalf("got %v, want [base sub]", got)
 	}
@@ -151,7 +152,7 @@ func TestSubRepos_NoSubRepos_ReturnsEmpty(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(base, "plain"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if got := SubRepos(base); len(got) != 0 {
+	if got := SubRepos(context.Background(), base); len(got) != 0 {
 		t.Errorf("expected no sub-repos, got %v", got)
 	}
 }
@@ -171,7 +172,7 @@ func TestCandidates_SymlinkDir_CanonicalAndDeduped(t *testing.T) {
 		t.Skipf("symlink creation not permitted: %v", err)
 	}
 
-	got := Candidates(link)
+	got := Candidates(context.Background(), link)
 	if len(got) != 2 {
 		t.Fatalf("got %v, want exactly 2 entries [%q %q]", got, real, sub)
 	}
@@ -182,7 +183,7 @@ func TestCandidates_SymlinkDir_CanonicalAndDeduped(t *testing.T) {
 
 func TestCandidates_EmptyDir(t *testing.T) {
 	t.Parallel()
-	if got := Candidates(""); got != nil {
+	if got := Candidates(context.Background(), ""); got != nil {
 		t.Errorf("expected nil for empty dir, got %v", got)
 	}
 }
@@ -234,7 +235,7 @@ func TestCanonical_RejectsUNC(t *testing.T) {
 			if got, ok := EnclosingRepo(p); ok || got != "" {
 				t.Errorf("EnclosingRepo(%q) = (%q, %v), want (\"\", false)", p, got, ok)
 			}
-			if got := Candidates(p); got != nil {
+			if got := Candidates(context.Background(), p); got != nil {
 				t.Errorf("Candidates(%q) = %v, want nil", p, got)
 			}
 		})
@@ -254,5 +255,34 @@ func TestCanonical_NormalPathStillWorks(t *testing.T) {
 	got, ok := EnclosingRepo(base)
 	if !ok || got != base {
 		t.Errorf("EnclosingRepo(%q) = (%q, %v), want (%q, true)", base, got, ok, base)
+	}
+}
+
+// A cancelled context stops discovery before any filesystem work.
+//
+// Note what this does and does not buy: ctx is checked BETWEEN syscalls, so it
+// bounds a slow scan that is still making progress. It cannot interrupt a call
+// already blocked in the kernel on a dead network mount — Go has no mechanism
+// for that — and nothing here should be read as protection against one.
+func TestCandidates_CancelledContext_ReturnsEmpty(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if got := Candidates(ctx, t.TempDir()); len(got) != 0 {
+		t.Errorf("Candidates on a cancelled context = %v, want empty", got)
+	}
+}
+
+// A live context must leave the pre-existing behaviour untouched.
+func TestCandidates_LiveContext_FindsEnclosingRepo(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir .git: %v", err)
+	}
+
+	got := Candidates(context.Background(), root)
+
+	if len(got) == 0 {
+		t.Fatal("Candidates found nothing in a directory that is a git repo")
 	}
 }

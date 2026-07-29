@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **A failing ssh connection no longer writes over the screen.** In a
+  `--remote` session, `ssh` keeps its error stream attached for the whole life
+  of the connection and multiplexes the remote command's errors onto it, so a
+  message such as `packet_write_wait: Broken pipe` could surface anywhere on
+  the display — through a pane, across the tab bar — on a screen Quil believes
+  it controls. From the moment the interface starts, those messages go to
+  `quil.log` instead. They still print to the terminal during connection setup,
+  which is where they are useful and where host-key confirmation and passphrase
+  prompts have to stay readable.
+
 ## [1.44.0] - 2026-07-28
 
 ### Added

@@ -1,9 +1,11 @@
 package daemon
 
 import (
+	"context"
 	"log"
 	"path/filepath"
 	"regexp"
+	"time"
 
 	"github.com/artyomsv/quil/internal/claudesessions"
 	"github.com/artyomsv/quil/internal/ipc"
@@ -73,6 +75,11 @@ func (d *Daemon) applyResumeSessionID(pane *Pane, raw string) {
 // listClaudeSessionsFn is the discovery seam. Package-level var (not a direct
 // call) so tests can enumerate sessions without a real ~/.claude directory —
 // same pattern as claudeSessionExistsFn / readHookSessionIDFn.
+// discoveryTimeout bounds one filesystem discovery call. Both users hold a
+// single-flight slot, so an unbounded read wedges the feature rather than just
+// the request that triggered it.
+const discoveryTimeout = 10 * time.Second
+
 var listClaudeSessionsFn = claudesessions.List
 
 // handleClaudeSessionsReq answers the pane setup dialog's session picker.
@@ -165,7 +172,15 @@ func (d *Daemon) claudeSessionsResponse(msg *ipc.Message) ipc.ClaudeSessionsResp
 		scanCWD = resolved
 	}
 
-	sessions, truncated, err := listClaudeSessionsFn(scanCWD)
+	// Bounded because this call holds the single-flight slot: a scan that never
+	// returns does not just stall its own request, it makes every later one
+	// answer "another session scan is already running" for the life of the
+	// daemon. The budget is generous — 200 transcripts × 64 KiB of reads is
+	// normally well under a second.
+	ctx, cancel := context.WithTimeout(context.Background(), discoveryTimeout)
+	defer cancel()
+
+	sessions, truncated, err := listClaudeSessionsFn(ctx, scanCWD)
 	if err != nil {
 		log.Printf("claude sessions: list %q: %v", scanCWD, err)
 		return ipc.ClaudeSessionsRespPayload{CWD: req.CWD, Error: "could not read session history"}
@@ -281,7 +296,13 @@ func claudeSessionDetailResponse(msg *ipc.Message) ipc.ClaudeSessionDetailRespPa
 		readCWD = resolved
 	}
 
-	detail, err := readClaudeSessionDetailFn(readCWD, req.SessionID)
+	// Same reasoning as the listing: this holds sessionDetailReading, and the
+	// read streams a whole transcript (88 MB observed) because the last prompt
+	// is only knowable at the end.
+	ctx, cancel := context.WithTimeout(context.Background(), discoveryTimeout)
+	defer cancel()
+
+	detail, err := readClaudeSessionDetailFn(ctx, readCWD, req.SessionID)
 	if err != nil {
 		log.Printf("claude session detail: read %q: %v", req.SessionID, err)
 		echo.Error = "could not read this session's transcript"

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"io/fs"
@@ -2211,7 +2212,9 @@ func (m *Model) enterSetupOrSplit(p *plugin.PanePlugin) tea.Cmd {
 					base = pane.CWD
 				}
 			}
-			m.repoCandidates = gitdiscover.Candidates(base)
+			// Background for now — local disk, synchronous dialog. RD-020 moves
+			// this behind an RPC where a deadline is meaningful.
+			m.repoCandidates = gitdiscover.Candidates(context.Background(), base)
 			if len(m.repoCandidates) > maxRepoCandidates {
 				m.repoCandidates = m.repoCandidates[:maxRepoCandidates]
 			}
@@ -2238,7 +2241,7 @@ func (m *Model) enterSetupOrSplit(p *plugin.PanePlugin) tea.Cmd {
 	}
 
 	if p.Command.Discover == "kube" {
-		m.kubeContexts = kubediscover.Contexts()
+		m.kubeContexts = kubediscover.Contexts(context.Background())
 		if len(m.kubeContexts) > maxKubeContexts {
 			m.kubeContexts = m.kubeContexts[:maxKubeContexts]
 		}

@@ -31,6 +31,50 @@ type reconnectState struct {
 	nextAt  time.Time // when the next attempt fires, for the countdown
 }
 
+const (
+	// reconnectBaseDelay is the nominal wait before the first attempt. Short
+	// enough that a brief blip heals before the user reaches for the keyboard.
+	reconnectBaseDelay = 500 * time.Millisecond
+	// reconnectMaxDelay caps the backoff. Budgeted for Windows, where OpenSSH
+	// has no ControlMaster and every attempt pays a full TCP and auth handshake.
+	reconnectMaxDelay = 30 * time.Second
+)
+
+// reconnectDelay returns how long to wait before attempt n (1-based).
+//
+// Exponential from reconnectBaseDelay, capped at reconnectMaxDelay, then scaled
+// by jitter into [50%, 100%] of that value — so attempt 1 is 250-500ms, not a
+// flat 500ms. Jitter is a parameter rather than an internal rand call so the
+// curve is deterministic under test; callers pass rand.Float64().
+//
+// Full jitter (scaling into [0, delay]) was not used: it puts real weight near
+// zero, and a near-instant retry against a host that is still down is a hot
+// loop with extra steps. Half jitter keeps the herd spread without that.
+func reconnectDelay(attempt int, jitter float64) time.Duration {
+	if attempt < 1 {
+		attempt = 1
+	}
+	d := reconnectBaseDelay << (attempt - 1)
+	// The d <= 0 half is load-bearing, and not for the reason it looks like.
+	// This is a runtime shift on an int64, so it wraps rather than saturates:
+	// from attempt 36 the product exceeds int64 and can come back NEGATIVE,
+	// which "d > reconnectMaxDelay" does not catch — it would flow through to
+	// tea.Tick, fire immediately, and become the hot loop the cap exists to
+	// prevent. Exact zero only arrives at attempt 57, once the shift count
+	// reaches 64. Both cases are covered here.
+	// TestReconnectDelay_NeverDropsBelowFloorAtAnyAttempt pins this.
+	if d > reconnectMaxDelay || d <= 0 {
+		d = reconnectMaxDelay
+	}
+	if jitter < 0 {
+		jitter = 0
+	}
+	if jitter > 1 {
+		jitter = 1
+	}
+	return time.Duration(float64(d) * (0.5 + 0.5*jitter))
+}
+
 // RedialFunc dials a replacement connection after a drop.
 //
 // The dead client is passed in so the caller can close it: Client is

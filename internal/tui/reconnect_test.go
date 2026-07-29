@@ -3,6 +3,7 @@ package tui
 import (
 	"errors"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -125,5 +126,97 @@ func TestUpdate_LinkLost_StaleGeneration_Ignored(t *testing.T) {
 	}
 	if cmd != nil {
 		t.Error("a stale generation produced a command")
+	}
+}
+
+// The curve doubles from the base delay and caps, with jitter scaling each
+// result into [50%, 100%] of the nominal value. Bounds below are therefore
+// [nominal/2, nominal] — attempt 1 is 250-500ms, not 500ms-1s.
+func TestReconnectDelay_GrowsAndCaps(t *testing.T) {
+	tests := []struct {
+		name    string
+		attempt int
+		wantMin time.Duration
+		wantMax time.Duration
+	}{
+		{"first attempt is prompt", 1, 250 * time.Millisecond, 500 * time.Millisecond},
+		{"second doubles", 2, 500 * time.Millisecond, 1 * time.Second},
+		{"third doubles again", 3, 1 * time.Second, 2 * time.Second},
+		{"caps at 30s", 12, 15 * time.Second, 30 * time.Second},
+		{"stays capped past the shift width", 100, 15 * time.Second, 30 * time.Second},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, j := range []float64{0, 0.5, 0.999} {
+				got := reconnectDelay(tt.attempt, j)
+				if got < tt.wantMin || got > tt.wantMax {
+					t.Errorf("reconnectDelay(%d, %v) = %v, want within [%v, %v]",
+						tt.attempt, j, got, tt.wantMin, tt.wantMax)
+				}
+			}
+		})
+	}
+}
+
+// Jitter must actually vary the result, or every client of a restarted server
+// redials in lockstep and the herd hits it together.
+func TestReconnectDelay_JitterVaries(t *testing.T) {
+	if reconnectDelay(5, 0) == reconnectDelay(5, 0.99) {
+		t.Error("jitter had no effect")
+	}
+}
+
+// The curve must never go backwards as attempts climb.
+func TestReconnectDelay_MonotonicAtFixedJitter(t *testing.T) {
+	for _, j := range []float64{0, 0.5, 1} {
+		prev := time.Duration(0)
+		for a := 1; a <= 15; a++ {
+			got := reconnectDelay(a, j)
+			if got < prev {
+				t.Errorf("jitter %v: attempt %d = %v, shorter than attempt %d = %v", j, a, got, a-1, prev)
+			}
+			prev = got
+		}
+	}
+}
+
+// Attempt 0 and negatives must not produce a zero or trivial delay — a hot
+// redial loop against an unreachable host is worse than the outage.
+func TestReconnectDelay_NonPositiveAttempt_StillDelays(t *testing.T) {
+	floor := reconnectBaseDelay / 2 // the shortest the jitter window can yield
+	for _, a := range []int{-1, 0} {
+		if got := reconnectDelay(a, 0); got < floor {
+			t.Errorf("reconnectDelay(%d, 0) = %v, want >= %v", a, got, floor)
+		}
+	}
+}
+
+// jitter is documented as [0,1) but is a parameter, so an out-of-range value
+// must clamp rather than produce a negative or over-long delay.
+func TestReconnectDelay_OutOfRangeJitter_Clamps(t *testing.T) {
+	nominal := 4 * time.Second // attempt 4: 500ms << 3
+	if got := reconnectDelay(4, -5); got != nominal/2 {
+		t.Errorf("negative jitter = %v, want %v (the 50%% floor)", got, nominal/2)
+	}
+	if got := reconnectDelay(4, 9); got != nominal {
+		t.Errorf("jitter above 1 = %v, want %v (the 100%% ceiling)", got, nominal)
+	}
+}
+
+// The floor must hold for EVERY attempt, not just small ones. The exponent is
+// a runtime shift on an int64, so intermediate values wrap rather than
+// saturate: 500ms is 2^8 * 1953125 ns, and 1953125 is odd, so the product is
+// exactly zero only once the shift reaches 56. Between the first overflow and
+// that point the wrapped value is nonzero and its sign is whatever bit 63
+// happens to be — a positive wrap smaller than the cap would slip past a
+// guard that only tests for zero or negative, and produce a hot redial loop.
+func TestReconnectDelay_NeverDropsBelowFloorAtAnyAttempt(t *testing.T) {
+	floor := reconnectBaseDelay / 2
+	for a := 1; a <= 300; a++ {
+		for _, j := range []float64{0, 0.5, 1} {
+			if got := reconnectDelay(a, j); got < floor {
+				t.Fatalf("reconnectDelay(%d, %v) = %v, below the %v floor", a, j, got, floor)
+			}
+		}
 	}
 }

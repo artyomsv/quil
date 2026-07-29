@@ -237,6 +237,151 @@ verbatim pass-through is also the extension seam: a `ProxyCommand` in
 
 ---
 
+## Work registry
+
+The canonical list of remaining work. Every item has a permanent `RD-###`
+identifier: cite it in commit subjects, techdebt files, branch names and
+plan documents.
+
+**IDs are flat and phase is an attribute, not part of the number.** A
+positional id (`RD-2.3`) asserts "third item of phase two", which stops being
+true the first time work is resequenced — and resequencing is expected here,
+because each phase's shape depends on what the previous one settles. Numbers
+are never reused and never renumbered; an item that moves phase keeps its id
+and changes its row.
+
+Detailed implementation plans live in `docs/superpowers/plans/` (untracked,
+one per phase). This table is the durable index; the plans are the working
+detail and may be rewritten between attempts.
+
+### Status legend
+
+`todo` · `in progress` · `done` · `blocked` · `dropped`
+
+### Phase 1 — transport and safety (shipped, v1.44.0)
+
+Complete. Recorded for id continuity only.
+
+| ID | Item | Status |
+|---|---|---|
+| RD-000 | Dialer seam, SSH/Local backends, `quil --stdio`, lifecycle guards, auto-install | done |
+
+### Phase 1.5 — debt that gates the next phases
+
+Small, and two items are hard prerequisites. Do this before Phase 2.
+
+| ID | Item | Kind | Blocks | Status |
+|---|---|---|---|---|
+| RD-001 | Settle the `DialFunc` context contract — `SSH()` binds the ssh child's lifetime to the *dial* ctx | code | RD-011 | todo |
+| RD-002 | Divert ssh stderr to `quil.log` once the TUI owns the terminal | code | — | todo |
+| RD-003 | Correct the stale `runStatus` claim in `.claude/CLAUDE.md` | docs | — | todo |
+| RD-004 | Plumb `context.Context` into `gitdiscover`, `kubediscover`, `claudesessions` | code | RD-020, RD-021, RD-022 | todo |
+
+**Why RD-001 is a blocker, not a cleanup.** `transport.SSH()` calls
+`exec.CommandContext(ctx, …)`, so cancelling the dial context kills the ssh
+child. Inert today only because `dialRemote` passes `context.Background()`.
+The natural reconnect code is `ctx, cancel := context.WithTimeout(…)` plus
+`defer cancel()` — which would kill each session at the moment it succeeds.
+The trap sits exactly where Phase 2's first code goes.
+
+**Why RD-004 is a blocker.** Phase 3 moves directory listing, git discovery
+and kube discovery behind RPCs. Those packages do unbounded, uncancellable
+filesystem I/O (`techdebt/3-3-discovery-packages-have-no-io-timeout.md`).
+Locally that is a slow dialog; behind an RPC holding a single-flight slot it
+is a stalled scan that rejects every retry while the TUI reports a timeout.
+
+### Phase 2 — reconnect
+
+Goal: a dropped link becomes a pause, not an ending.
+
+| ID | Item | Blocked by | Status |
+|---|---|---|---|
+| RD-010 | Distinguish link loss from `MsgCloseTUI` in `listenForMessages` | — | todo |
+| RD-011 | Redial loop: exponential backoff + jitter, ~30 s cap, unbounded retries, Ctrl+Q aborts | RD-001, RD-010 | todo |
+| RD-012 | Input freeze + reconnecting banner | RD-010 | todo |
+| RD-013 | VT, raw ring, scroll offset and selection reset for **every** pane before replay | RD-010 | todo |
+| RD-014 | Work-state reset or replayed-event dedup (`applyWorkTransition` has no dedup) | RD-010 | todo |
+| RD-015 | Exactly one live listen loop across the client swap | RD-011 | todo |
+| RD-016 | `sawFirstState` survives reconnect; ghost re-dim accepted as cosmetic | RD-011 | todo |
+
+**Decision gate — application-layer liveness.** `MsgHeartbeat` is declared in
+`internal/ipc/protocol.go` and never sent anywhere. Phase 2 must either
+implement it or record that detection rests on ssh's
+`ServerAliveInterval=15` / `ServerAliveCountMax=3` (~45 s). Recommendation:
+rely on ssh for v1 — the keepalive already exists, works through
+`ProxyJump`, and an app-layer heartbeat duplicates it without covering a
+failure mode ssh misses. Revisit if Phase 4 removes ssh.
+
+### Phase 3 — remote-correct UI
+
+Goal: every surface that reads a filesystem reads the *server's*.
+
+| ID | Item | Blocked by | Status |
+|---|---|---|---|
+| RD-020 | Directory-listing RPC — the root fix; every other picker keys off the CWD it returns | RD-004 | todo |
+| RD-021 | Git repo discovery RPC | RD-004 | todo |
+| RD-022 | Kube context discovery RPC | RD-004 | todo |
+| RD-023 | Plugin registry RPC with server-side `DetectAvailability` | — | todo |
+| RD-024 | Per-target `recent-cwds.json` | RD-020 | todo |
+| RD-025 | Empty `AttachPayload.CWD` in remote mode | RD-020 | todo |
+| RD-026 | `quil status` over the transport, or documented local-only | — | todo |
+| RD-027 | Update controls targeted at the remote daemon, or explicitly labelled | — | todo |
+| RD-028 | Async setup-dialog refactor without regressing pinned-height invariants | RD-020 | todo |
+
+**Correction to the limits table above.** The Claude session *listing* is
+already remote-correct — `handleClaudeSessionsReq` runs daemon-side and scans
+the daemon's disk. What is wrong is the **CWD fed to it**, which comes from
+the local directory browser. RD-020 fixes it; no separate session-listing RPC
+is needed.
+
+### Phase 4 — mTLS transport
+
+Goal: remove the ssh dependency for users who want Quil to be its own
+service. Prerequisite for anything web-facing.
+
+| ID | Item | Blocked by | Status |
+|---|---|---|---|
+| RD-030 | TLS `DialFunc` backend with client certificates | — | todo |
+| RD-031 | Daemon-side TLS listener behind config, off by default | RD-030 | todo |
+| RD-032 | Certificate configuration, trust store, and rotation story | RD-030 | todo |
+| RD-033 | Threat-model update — a pre-auth port in front of an RCE-equivalent protocol | RD-031 | todo |
+| RD-034 | Decide whether Quil issues certificates or only consumes them | — | todo |
+
+RD-034 is the gate for the whole phase. Issuing certificates makes Quil a CA
+responsible for issuance, expiry, storage and revocation. Consuming only
+(bring-your-own PKI) is far smaller and is the recommended starting point.
+
+### Recommended order
+
+```
+RD-003  ──────────────────────────────►  (independent, do anytime)
+RD-001  ──┐
+RD-002  ──┼──►  RD-010 ─► RD-012/013/014 ─► RD-011 ─► RD-015/016
+          │                                             (Phase 2 ships)
+RD-004  ──┴──►  RD-020 ─► RD-021/022/024/025/028
+                RD-023, RD-026, RD-027 (independent within Phase 3)
+                                              (Phase 3 ships)
+                RD-034 ─► RD-030 ─► RD-031 ─► RD-032/033
+```
+
+RD-010 comes before RD-011 deliberately: detection is testable against a fake
+dialer with no backoff logic present, and getting the `MsgCloseTUI`
+distinction wrong makes every later reconnect test ambiguous.
+
+### Open questions
+
+Carried from the design spec; each needs an answer before its phase closes.
+
+| # | Question | Owned by |
+|---|---|---|
+| 1 | Does `quil status` gain remote support, or stay documented local-only? | RD-026 |
+| 2 | Does the Settings dialog hide daemon-owned rows in remote mode, or show them disabled with an explanation? | RD-027 |
+| 3 | Should notes move daemon-side? Storage is already atomic and pane-keyed, so it is a contained follow-up. | unassigned |
+| 4 | Application-layer heartbeat, or rely on ssh keepalive? | RD-011 |
+| 5 | Does Quil issue certificates, or only consume them? | RD-034 |
+
+---
+
 ## Related
 
 - [Session Sharing](session-sharing.md) — multi-user, distinct problem

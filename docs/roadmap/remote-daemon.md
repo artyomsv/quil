@@ -291,11 +291,13 @@ The natural reconnect code is `ctx, cancel := context.WithTimeout(…)` plus
 `defer cancel()` — which would kill each session at the moment it succeeds.
 The trap sits exactly where Phase 2's first code goes.
 
-**Why RD-004 is a blocker.** Phase 3 moves directory listing, git discovery
-and kube discovery behind RPCs. Those packages do unbounded, uncancellable
-filesystem I/O (`techdebt/3-3-discovery-packages-have-no-io-timeout.md`).
-Locally that is a slow dialog; behind an RPC holding a single-flight slot it
-is a stalled scan that rejects every retry while the TUI reports a timeout.
+**Why RD-004 was a blocker.** Phase 3 moves directory listing, git discovery
+and kube discovery behind RPCs. Those packages did unbounded, uncancellable
+filesystem I/O. Locally that is a slow dialog; behind an RPC holding a
+single-flight slot it is a stalled scan that rejects every retry while the TUI
+reports a timeout. The residual — a scan already parked in a syscall still
+wedges the single-flight slot for the daemon's lifetime — is tracked in
+`techdebt/3-3-discovery-scan-cannot-be-interrupted-mid-syscall.md`.
 
 ### Phase 2 — reconnect
 

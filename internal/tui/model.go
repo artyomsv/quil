@@ -211,12 +211,24 @@ type tuiClient interface {
 	Receive() (*ipc.Message, error)
 }
 
+// Client is the exported spelling of tuiClient, so callers outside this package
+// can write a RedialFunc: cmd/quil builds the reconnect dialer and cannot name
+// an unexported type.
+//
+// An alias rather than a second interface declaration — the two are the same
+// type, so no conversion exists at any boundary and the internal name stays
+// the one used throughout this file.
+type Client = tuiClient
+
 type Model struct {
 	tabs                 []*TabModel
 	activeTab            int
 	width                int
 	height               int
 	client               tuiClient
+	clientGen            int            // bumped on every client swap; see linkLostMsg for why
+	reconnect            reconnectState // zero value = not reconnecting
+	redialFn             RedialFunc     // nil in local mode: a dead local daemon is fatal
 	cfg                  config.Config
 	version              string
 	attached             bool
@@ -572,6 +584,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Tick(150*time.Millisecond, func(t time.Time) tea.Msg {
 			return resizeTickMsg{seq: seq}
 		})
+
+	case linkLostMsg:
+		// A report from a superseded client: its replacement is already live,
+		// so there is nothing to reconnect.
+		if msg.gen != m.clientGen {
+			log.Printf("ignoring link loss from gen %d (current %d)", msg.gen, m.clientGen)
+			return m, nil
+		}
+		if !m.canReconnect() {
+			return m, tea.Quit
+		}
+		return m.beginReconnect(msg.err)
 
 	case sizePollMsg:
 		return m, tea.Batch(sizePollProbe, sizePollTick())
@@ -3709,8 +3733,11 @@ func (m Model) listenForMessages() tea.Cmd {
 	return func() tea.Msg {
 		msg, err := m.client.Receive()
 		if err != nil {
-			log.Printf("listen error: %v", err)
-			return tea.QuitMsg{}
+			log.Printf("listen error (gen %d): %v", m.clientGen, err)
+			// Reported as data, not as a quit. Update decides whether this is a
+			// reconnectable drop or a fatal one — the MsgCloseTUI case below is
+			// the deliberate-exit path and must stay distinguishable from it.
+			return linkLostMsg{gen: m.clientGen, err: err}
 		}
 
 		switch msg.Type {

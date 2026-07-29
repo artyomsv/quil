@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.44.1] - 2026-07-29
+
 ### Fixed
 - **A failing ssh connection no longer writes over the screen.** In a
   `--remote` session, `ssh` keeps its error stream attached for the whole life

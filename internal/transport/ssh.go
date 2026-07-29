@@ -224,6 +224,7 @@ func SSH(dest string, opts SSHOptions) func(context.Context) (net.Conn, error) {
 		// keep them. On the first dial stderr goes to the terminal so prompts
 		// are visible; on reconnect it is captured for the error message.
 		var errBuf *lockedBuffer
+		var termErr *switchWriter
 		if opts.Batch {
 			errBuf = &lockedBuffer{}
 			cmd.Stderr = errBuf
@@ -239,7 +240,12 @@ func SSH(dest string, opts SSHOptions) func(context.Context) (net.Conn, error) {
 			// passphrase entry go to /dev/tty directly, not through this pipe.
 			// Its diagnostics ("Could not resolve hostname …") are plain text
 			// and pass through unchanged.
-			cmd.Stderr = &terminalSanitizer{w: os.Stderr}
+			// Swappable so cmd/quil can move these diagnostics to quil.log once
+			// the TUI owns the screen. Sanitized either way — the stream carries
+			// the remote command's fd 2, so it is attacker-influenced no matter
+			// where it lands.
+			termErr = &switchWriter{w: os.Stderr}
+			cmd.Stderr = &terminalSanitizer{w: termErr}
 		}
 
 		if err := cmd.Start(); err != nil {
@@ -259,6 +265,11 @@ func SSH(dest string, opts SSHOptions) func(context.Context) (net.Conn, error) {
 		childOut.Close()
 
 		conn := newStdioConn(cmd, parentRead, parentWrite, dest)
+		if termErr != nil {
+			// Same safety note as the stderr assignment below: this goroutine is
+			// still the only holder of conn, and pump() never touches termErr.
+			conn.termErr = termErr
+		}
 		if errBuf != nil {
 			// Safe post-construction write: this goroutine is the only one
 			// holding conn so far (it hasn't been returned yet), and pump()

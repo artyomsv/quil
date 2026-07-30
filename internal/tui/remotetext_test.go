@@ -26,6 +26,20 @@ func TestSanitizeRemoteText_StripsControlClasses(t *testing.T) {
 		{"C1 high, U+009F", "a" + string(rune(0x9f)) + "b", "ab"},
 		{"tab becomes a space", "a\tb", "a b"},
 		{"multiple controls in one name", "\x1bevil" + string(rune(0x9b)) + ".name\x7f", "evil.name"},
+		// Bidi embeddings/overrides (U+202A-U+202E) and isolates
+		// (U+2066-U+2069): this is the surface those exist to attack — a CWD
+		// pick-list row where the raw value becomes the pane's spawn
+		// directory, so a visually-reordered name would open the real path
+		// while displaying a different one.
+		{"LRE, U+202A", "a" + string(rune(0x202a)) + "b", "ab"},
+		{"RLE, U+202B", "a" + string(rune(0x202b)) + "b", "ab"},
+		{"PDF, U+202C", "a" + string(rune(0x202c)) + "b", "ab"},
+		{"LRO, U+202D", "a" + string(rune(0x202d)) + "b", "ab"},
+		{"RLO, U+202E", "a" + string(rune(0x202e)) + "b", "ab"},
+		{"LRI, U+2066", "a" + string(rune(0x2066)) + "b", "ab"},
+		{"RLI, U+2067", "a" + string(rune(0x2067)) + "b", "ab"},
+		{"FSI, U+2068", "a" + string(rune(0x2068)) + "b", "ab"},
+		{"PDI, U+2069", "a" + string(rune(0x2069)) + "b", "ab"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -33,6 +47,38 @@ func TestSanitizeRemoteText_StripsControlClasses(t *testing.T) {
 				t.Errorf("sanitizeRemoteText(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+// The reported reproduction: a name that visually reads "gnp.txt.safe" (or
+// similar, terminal-dependent) while the raw bytes are "safe" + RLO +
+// "gnp.txt" — U+202E reorders everything after it right-to-left until a
+// terminator or the end of the run. Pinned as its own test because it is the
+// exact shape a spoofed extension attack takes, not just one more entry in
+// the control-class table.
+func TestSanitizeRemoteText_DropsBidiOverride_SpoofedExtension(t *testing.T) {
+	in := "safe" + string(rune(0x202e)) + "gnp.txt"
+	want := "safegnp.txt"
+	if got := sanitizeRemoteText(in); got != want {
+		t.Errorf("sanitizeRemoteText(%q) = %q, want %q", in, got, want)
+	}
+}
+
+// ZWJ (U+200D) and combining marks are Unicode formatting/combining
+// characters too, in the same general neighborhood as the bidi controls, but
+// sanitizeRemoteText's range check is deliberately narrower than
+// unicode.Is(unicode.Cf, r) and must not touch them. ZWJ composes multi-glyph
+// emoji sequences (family/profession emoji); combining marks compose
+// accented letters. Both are legitimate in a directory name.
+func TestSanitizeRemoteText_PreservesZWJAndCombiningMarks(t *testing.T) {
+	cases := []string{
+		"👨‍👩‍👧‍👦",                  // man + ZWJ + woman + ZWJ + girl + ZWJ + boy
+		"e" + string(rune(0x0301)), // "e" + COMBINING ACUTE ACCENT
+	}
+	for _, in := range cases {
+		if got := sanitizeRemoteText(in); got != in {
+			t.Errorf("sanitizeRemoteText(%q) = %q, want unchanged", in, got)
+		}
 	}
 }
 

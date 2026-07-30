@@ -1813,6 +1813,12 @@ func TestRenderSetup_BrowserBlurred_MarksPathLine(t *testing.T) {
 // the test process detects, and the invariant must hold either way — a
 // hostile NAME must not ADD an ESC byte, regardless of how many the box's own
 // styling contributes.
+//
+// The ESC-count diff alone is vacuous against a bug that dropped the row
+// entirely (fewer bytes total, including the clean row's own chrome, can
+// also leave the ESC count unchanged) — so this also asserts the sanitized
+// name is still PRESENT, on the ANSI-stripped render so real SGR codes from
+// the box's own styling can't hide a missing row inside them.
 func TestRenderSetup_HostileEntryName_NoRawESCByte(t *testing.T) {
 	clean := Model{
 		dialog:           dialogCreatePaneSetup,
@@ -1823,7 +1829,8 @@ func TestRenderSetup_HostileEntryName_NoRawESCByte(t *testing.T) {
 		width:            100,
 	}
 	hostile := clean
-	hostile.cwdBrowseEntries = []string{"..", "alpha\x1b[31m;rm -rf\x1b[0m", "beta"}
+	hostileName := "alpha\x1b[31m;rm -rf\x1b[0m"
+	hostile.cwdBrowseEntries = []string{"..", hostileName, "beta"}
 
 	cleanOut := clean.renderCreatePaneSetupDialog()
 	hostileOut := hostile.renderCreatePaneSetupDialog()
@@ -1831,6 +1838,11 @@ func TestRenderSetup_HostileEntryName_NoRawESCByte(t *testing.T) {
 	wantESC := strings.Count(cleanOut, "\x1b")
 	if got := strings.Count(hostileOut, "\x1b"); got != wantESC {
 		t.Errorf("hostile entry name changed the raw ESC byte count: got %d, want %d (dialog-chrome baseline)\n%s", got, wantESC, hostileOut)
+	}
+
+	wantContent := sanitizeRemoteText(hostileName + "/") // "/" appended for a directory row
+	if !strings.Contains(stripANSI(hostileOut), wantContent) {
+		t.Errorf("sanitized entry name %q missing from render — row may have been dropped rather than cleaned\n%s", wantContent, stripANSI(hostileOut))
 	}
 }
 
@@ -1919,12 +1931,13 @@ func TestRenderSetup_HostileRepoCandidate_NoRawESCByte(t *testing.T) {
 		width:          100,
 	}
 	hostile := clean
-	hostile.repoCandidates = []string{"/home/dev/alpha\x1b[31m;rm -rf\x1b[0m", "/home/dev/beta"}
+	hostileRepo := "/home/dev/alpha\x1b[31m;rm -rf\x1b[0m"
+	hostile.repoCandidates = []string{hostileRepo, "/home/dev/beta"}
 	// Mirrors applyGitReposPickList, which pre-selects repoCandidates[0] into
 	// cwdBrowseDir verbatim — the idle-mark comparison at the render site
 	// only lines up (pick[i] == m.cwdBrowseDir) when this is the same raw
 	// string, so a test that skipped it would exercise the unmarked branch.
-	hostile.cwdBrowseDir = hostile.repoCandidates[0]
+	hostile.cwdBrowseDir = hostileRepo
 
 	cleanOut := clean.renderCreatePaneSetupDialog()
 	hostileOut := hostile.renderCreatePaneSetupDialog()
@@ -1933,6 +1946,13 @@ func TestRenderSetup_HostileRepoCandidate_NoRawESCByte(t *testing.T) {
 	if got := strings.Count(hostileOut, "\x1b"); got != wantESC {
 		t.Errorf("hostile repo candidate changed the raw ESC byte count: got %d, want %d (dialog-chrome baseline)\n%s", got, wantESC, hostileOut)
 	}
+
+	// The ESC-count diff alone would pass vacuously if the row were dropped
+	// instead of cleaned — assert the sanitized candidate is still there.
+	wantContent := sanitizeRemoteText(hostileRepo)
+	if !strings.Contains(stripANSI(hostileOut), wantContent) {
+		t.Errorf("sanitized repo candidate %q missing from render — row may have been dropped rather than cleaned\n%s", wantContent, stripANSI(hostileOut))
+	}
 }
 
 // Same property, for the Alt+G repo picker (renderGitRepoPickDialog), which
@@ -1940,8 +1960,9 @@ func TestRenderSetup_HostileRepoCandidate_NoRawESCByte(t *testing.T) {
 // populated by a separate caller (resolveLazygitOverlay), so it needs its
 // own render-level pin even though both go through leftTruncPath.
 func TestRenderGitRepoPick_HostileCandidate_NoRawESCByte(t *testing.T) {
+	hostileRepo := "/home/dev/alpha\x1b[31m;rm -rf\x1b[0m"
 	clean := Model{repoPickCandidates: []string{"/home/dev/alpha", "/home/dev/beta"}}
-	hostile := Model{repoPickCandidates: []string{"/home/dev/alpha\x1b[31m;rm -rf\x1b[0m", "/home/dev/beta"}}
+	hostile := Model{repoPickCandidates: []string{hostileRepo, "/home/dev/beta"}}
 
 	cleanOut := clean.renderGitRepoPickDialog()
 	hostileOut := hostile.renderGitRepoPickDialog()
@@ -1949,6 +1970,13 @@ func TestRenderGitRepoPick_HostileCandidate_NoRawESCByte(t *testing.T) {
 	wantESC := strings.Count(cleanOut, "\x1b")
 	if got := strings.Count(hostileOut, "\x1b"); got != wantESC {
 		t.Errorf("hostile repo candidate changed the raw ESC byte count: got %d, want %d (dialog-chrome baseline)\n%s", got, wantESC, hostileOut)
+	}
+
+	// The ESC-count diff alone would pass vacuously if the row were dropped
+	// instead of cleaned — assert the sanitized candidate is still there.
+	wantContent := sanitizeRemoteText(hostileRepo)
+	if !strings.Contains(stripANSI(hostileOut), wantContent) {
+		t.Errorf("sanitized repo candidate %q missing from render — row may have been dropped rather than cleaned\n%s", wantContent, stripANSI(hostileOut))
 	}
 }
 

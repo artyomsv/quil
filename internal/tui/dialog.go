@@ -2464,8 +2464,8 @@ func (m *Model) nextBrowseCandidate() tea.Cmd {
 // direction of knowledge runs dialog → client and not the other way: the client
 // half reports what it observed, and only this side knows what a failure means
 // to a dialog that is still choosing its opening directory.
-func (m *Model) applyBrowseResponse(resp ipc.BrowseDirRespPayload) tea.Cmd {
-	switch m.applyBrowseDir(resp) {
+func (m *Model) applyBrowseResponse(resp ipc.BrowseDirRespPayload, gen string) tea.Cmd {
+	switch m.applyBrowseDir(resp, gen) {
 	case browseFailed:
 		return m.advanceBrowseCandidates(resp.Path)
 	case browseFilled:

@@ -90,12 +90,12 @@ func TestRequestBrowseDir_SendsRequestAndRecordsState(t *testing.T) {
 func TestApplyBrowseDir_StalePathIgnored(t *testing.T) {
 	t.Parallel()
 	m, _, _ := overlayTestModel(t, "/a")
-	m.browse = browseState{path: "/a", pending: true}
+	m.browse = browseState{path: "/a", pending: true, gen: "g1"}
 
 	got := m.applyBrowseDir(ipc.BrowseDirRespPayload{
 		Path:    "/b",
 		Entries: []ipc.BrowseEntry{{Name: "sub", IsDir: true}},
-	})
+	}, "g1")
 
 	if got != browseDropped {
 		t.Errorf("outcome = %v, want browseDropped", got)
@@ -113,13 +113,13 @@ func TestApplyBrowseDir_StalePathIgnored(t *testing.T) {
 func TestApplyBrowseDir_StaleChildIgnored(t *testing.T) {
 	t.Parallel()
 	m, _, _ := overlayTestModel(t, "/a")
-	m.browse = browseState{path: "/a", child: "current", pending: true}
+	m.browse = browseState{path: "/a", child: "current", pending: true, gen: "g1"}
 
 	got := m.applyBrowseDir(ipc.BrowseDirRespPayload{
 		Path:    "/a",
 		Child:   "other",
 		Entries: []ipc.BrowseEntry{{Name: "sub", IsDir: true}},
-	})
+	}, "g1")
 
 	if got != browseDropped {
 		t.Errorf("outcome = %v, want browseDropped", got)
@@ -136,7 +136,7 @@ func TestApplyBrowseDir_StaleChildIgnored(t *testing.T) {
 func TestApplyBrowseDir_MatchFillsListingAndClearsPending(t *testing.T) {
 	t.Parallel()
 	m, _, _ := overlayTestModel(t, "/a")
-	m.browse = browseState{path: "/a", child: "sub", pending: true}
+	m.browse = browseState{path: "/a", child: "sub", pending: true, gen: "g1"}
 
 	got := m.applyBrowseDir(ipc.BrowseDirRespPayload{
 		Path:     "/a",
@@ -147,7 +147,7 @@ func TestApplyBrowseDir_MatchFillsListingAndClearsPending(t *testing.T) {
 			{Name: "a", IsDir: true},
 			{Name: "file.txt", IsDir: false},
 		},
-	})
+	}, "g1")
 
 	if got != browseFilled {
 		t.Errorf("outcome = %v, want browseFilled", got)
@@ -177,12 +177,12 @@ func TestApplyBrowseDir_ErrorLeavesListingUntouched(t *testing.T) {
 	m, _, _ := overlayTestModel(t, "/a")
 	m.cwdBrowseDir = "/previous"
 	m.cwdBrowseEntries = []string{"kept"}
-	m.browse = browseState{path: "/a", pending: true}
+	m.browse = browseState{path: "/a", pending: true, gen: "g1"}
 
 	got := m.applyBrowseDir(ipc.BrowseDirRespPayload{
 		Path:  "/a",
 		Error: "permission denied",
-	})
+	}, "g1")
 
 	if got != browseFailed {
 		t.Errorf("outcome = %v, want browseFailed", got)
@@ -217,7 +217,7 @@ func TestApplyBrowseDir_ShowUp(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			m, _, _ := overlayTestModel(t, "/a")
-			m.browse = browseState{path: "/a", pending: true}
+			m.browse = browseState{path: "/a", pending: true, gen: "g1"}
 
 			m.applyBrowseDir(ipc.BrowseDirRespPayload{
 				Path:     "/a",
@@ -225,7 +225,7 @@ func TestApplyBrowseDir_ShowUp(t *testing.T) {
 				Parent:   tt.parent,
 				Roots:    tt.roots,
 				Entries:  []ipc.BrowseEntry{{Name: "sub", IsDir: true}},
-			})
+			}, "g1")
 
 			hasUp := len(m.cwdBrowseEntries) > 0 && m.cwdBrowseEntries[0] == ".."
 			if hasUp != tt.want {
@@ -240,7 +240,7 @@ func TestApplyBrowseDir_ShowUp(t *testing.T) {
 func TestApplyBrowseDir_SelectNamePositionsCursor(t *testing.T) {
 	t.Parallel()
 	m, _, _ := overlayTestModel(t, "/a")
-	m.browse = browseState{path: "/a", pending: true, select_: "target"}
+	m.browse = browseState{path: "/a", pending: true, select_: "target", gen: "g1"}
 
 	m.applyBrowseDir(ipc.BrowseDirRespPayload{
 		Path:     "/a",
@@ -250,7 +250,7 @@ func TestApplyBrowseDir_SelectNamePositionsCursor(t *testing.T) {
 			{Name: "target", IsDir: true},
 			{Name: "zzz", IsDir: true},
 		},
-	})
+	}, "g1")
 
 	want := -1
 	for i, name := range m.cwdBrowseEntries {
@@ -297,9 +297,9 @@ func TestBrowseTimeout_IsOverriddenForTestsWithoutDrivingTheTimeoutPath(t *testi
 func TestApplyBrowseTimeout_StaleTickIgnored(t *testing.T) {
 	t.Parallel()
 	m, _, _ := overlayTestModel(t, "/a")
-	m.browse = browseState{path: "/current", child: "c", pending: true}
+	m.browse = browseState{path: "/current", child: "c", pending: true, gen: "g1"}
 
-	runCmd(m.applyBrowseTimeout("/old", "c"))
+	runCmd(m.applyBrowseTimeout("/old", "c", "g1"))
 
 	if !m.browse.pending {
 		t.Error("a stale timeout cancelled the live request")
@@ -322,21 +322,23 @@ func TestApplyBrowseTimeout_StaleTickIgnored(t *testing.T) {
 func TestApplyBrowseTimeout_AfterSuccessDoesNotOverwrite(t *testing.T) {
 	t.Parallel()
 	m, _, _ := overlayTestModel(t, "/a")
-	m.browse = browseState{path: "/a", child: "c", pending: true}
+	m.browse = browseState{path: "/a", child: "c", pending: true, gen: "g1"}
 
 	m.applyBrowseDir(ipc.BrowseDirRespPayload{
 		Path:     "/a",
 		Child:    "c",
 		Resolved: "/a/c",
 		Entries:  []ipc.BrowseEntry{{Name: "sub", IsDir: true}},
-	})
+	}, "g1")
 	if m.browse.pending {
 		t.Fatal("setup: pending must be false after the successful match")
 	}
 
 	// The same request's own timer, scheduled back when the request was
-	// issued, fires only now — after the response already landed.
-	runCmd(m.applyBrowseTimeout("/a", "c"))
+	// issued, fires only now — after the response already landed. Same gen:
+	// it genuinely IS the same request's own late tick, which is exactly what
+	// this test pins pending (not gen) as the guard for.
+	runCmd(m.applyBrowseTimeout("/a", "c", "g1"))
 
 	if m.browse.err != "" {
 		t.Errorf("browse.err = %q, want empty; a request's own late timeout must not overwrite its own successful result", m.browse.err)
@@ -351,15 +353,59 @@ func TestApplyBrowseTimeout_AfterSuccessDoesNotOverwrite(t *testing.T) {
 func TestApplyBrowseTimeout_MatchClearsAndSetsError(t *testing.T) {
 	t.Parallel()
 	m, _, _ := overlayTestModel(t, "/a")
-	m.browse = browseState{path: "/a", child: "c", pending: true}
+	m.browse = browseState{path: "/a", child: "c", pending: true, gen: "g1"}
 
-	runCmd(m.applyBrowseTimeout("/a", "c"))
+	runCmd(m.applyBrowseTimeout("/a", "c", "g1"))
 
 	if m.browse.pending {
 		t.Error("pending survived a matching timeout")
 	}
 	if m.browse.err == "" {
 		t.Error("a timed-out request left no diagnosable error")
+	}
+}
+
+// TestApplyBrowseTimeout_IdenticalRerequestUnaffectedByStaleTick pins the
+// browse equivalent of the review-round-1 crossing finding — Task A's
+// deferred minor, fixed alongside repoScan in the same round: (path, child)
+// identifies WHAT was asked, but a repeated pair is reachable in earnest (the
+// pre-fill chain retrying a candidate, or the user re-descending into the
+// same directory), and content alone cannot tell request N's tick apart from
+// a DIFFERENT request N+1 that happens to share the same key.
+//
+// Reproduced exactly as it is reachable: request N is issued for /x; before
+// its answer (or its own timeout) resolves, request N+1 is issued for the
+// IDENTICAL /x; N's timeout tick — scheduled 8s out when N was issued — fires
+// while N+1 is still genuinely pending.
+//
+// Confirmed to fail against e0382ea (this task's prior commit, before gen was
+// added): reproduced there with a standalone test using e0382ea's actual
+// 2-argument applyBrowseTimeout(path, child), which incorrectly cleared
+// N+1's pending flag and set "directory listing timed out" for a request that
+// was still legitimately in flight.
+func TestApplyBrowseTimeout_IdenticalRerequestUnaffectedByStaleTick(t *testing.T) {
+	t.Parallel()
+	m, _, _ := overlayTestModel(t, "/a")
+
+	runCmd(m.requestBrowseDir("/x", "", ""))
+	genN := m.browse.gen
+
+	// Request N+1 for the IDENTICAL (path, child) — the one shape (path,
+	// child) alone cannot tell apart from N.
+	runCmd(m.requestBrowseDir("/x", "", ""))
+	if m.browse.gen == genN {
+		t.Fatalf("setup: requests N and N+1 must get distinct generations, got %q twice", genN)
+	}
+
+	// N's tick, scheduled back when N was issued, fires only now — after
+	// N+1 is already in flight for the same directory.
+	runCmd(m.applyBrowseTimeout("/x", "", genN))
+
+	if !m.browse.pending {
+		t.Error("N's stale tick incorrectly resolved N+1's still-pending request")
+	}
+	if m.browse.err != "" {
+		t.Errorf("browse.err = %q, want empty — N's stale tick must not report a timeout for N+1", m.browse.err)
 	}
 }
 
@@ -409,7 +455,7 @@ func failCurrent(t *testing.T, m *Model) {
 		Path:  m.browse.path,
 		Child: m.browse.child,
 		Error: "no such directory",
-	}))
+	}, m.browse.gen))
 }
 
 // A candidate the daemon cannot list hands off to the next one. The chain was
@@ -541,7 +587,7 @@ func TestBrowseCandidateChain_SuccessEndsChain(t *testing.T) {
 		Resolved: "/remembered",
 		Parent:   "/",
 		Entries:  []ipc.BrowseEntry{{Name: "sub", IsDir: true}},
-	}))
+	}, m.browse.gen))
 
 	// Now a user-driven descend fails.
 	runCmd(m.browseTo("/remembered", "sub", ""))
@@ -982,20 +1028,20 @@ func TestApplyBrowseDir_RecordsAndClearsTruncated(t *testing.T) {
 	t.Parallel()
 	m, _, _ := overlayTestModel(t, "/a")
 
-	m.browse = browseState{path: "/big", pending: true}
+	m.browse = browseState{path: "/big", pending: true, gen: "g1"}
 	m.applyBrowseDir(ipc.BrowseDirRespPayload{
 		Path: "/big", Resolved: "/big", Truncated: true,
 		Entries: []ipc.BrowseEntry{{Name: "sub", IsDir: true}},
-	})
+	}, "g1")
 	if !m.cwdBrowseTruncated {
 		t.Error("Truncated was not recorded from the response")
 	}
 
-	m.browse = browseState{path: "/small", pending: true}
+	m.browse = browseState{path: "/small", pending: true, gen: "g2"}
 	m.applyBrowseDir(ipc.BrowseDirRespPayload{
 		Path: "/small", Resolved: "/small",
 		Entries: []ipc.BrowseEntry{{Name: "sub", IsDir: true}},
-	})
+	}, "g2")
 	if m.cwdBrowseTruncated {
 		t.Error("a complete listing left the previous listing's cap warning up")
 	}

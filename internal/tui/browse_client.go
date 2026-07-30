@@ -9,11 +9,15 @@ import (
 	"github.com/artyomsv/quil/internal/ipc"
 )
 
-// browseDirMsg carries one directory-listing response.
-type browseDirMsg struct{ Resp ipc.BrowseDirRespPayload }
+// browseDirMsg carries one directory-listing response. Gen echoes the
+// requesting message's ID — see browseState.gen for why a response needs one.
+type browseDirMsg struct {
+	Resp ipc.BrowseDirRespPayload
+	Gen  string
+}
 
 // browseTimeoutMsg fires when a browse request went unanswered.
-type browseTimeoutMsg struct{ path, child string }
+type browseTimeoutMsg struct{ path, child, gen string }
 
 // browseTimeout bounds one directory-browser round trip from the client
 // side. Matches gitScanTimeout rather than the 3 s session-picker timeout:
@@ -37,11 +41,25 @@ var browseTimeout = 8 * time.Second
 // an empty path as "nothing in flight": "" is itself a valid request (the
 // daemon's default CWD), so it cannot double as the zero-value sentinel.
 type browseState struct {
-	path    string // echoed back; half of the staleness key
-	child   string // echoed back; the other half
+	path    string // echoed back; identifies WHAT was asked, together with child
+	child   string // echoed back; the other half of what was asked
 	pending bool
 	err     string
 	select_ string // entry to highlight when the listing lands ("up" navigation)
+	// gen identifies WHICH request this is, on top of (path, child)
+	// identifying what it asked about. The pre-fill chain and user navigation
+	// both funnel through requestBrowseDir, and a repeated (path, child) pair
+	// is reachable in earnest — descending into the same directory twice,
+	// or the chain re-trying a candidate — so content alone cannot always
+	// tell two overlapping requests apart. Concretely: request N's timeout
+	// tick is scheduled 8s out; if request N+1 re-asks about the exact same
+	// (path, child) inside that window, N's tick would otherwise match N+1's
+	// still-live slot and report a false timeout out from under it. gen (from
+	// nextReqGen) is carried in the wire message's ID (echoed back verbatim by
+	// respondTo) and in the timeout closure, so both are matched against the
+	// CURRENT request's instance, not just its content. Mirrors
+	// repoScanState.gen / Model.clientGen.
+	gen string
 }
 
 // requestBrowseDir asks the daemon to list one directory, descending into
@@ -49,7 +67,8 @@ type browseState struct {
 // os.ReadDir here would list THIS machine's filesystem, which is the wrong
 // disk whenever the daemon is remote — the same reasoning as requestGitRepos.
 func (m *Model) requestBrowseDir(path, child, selectName string) tea.Cmd {
-	m.browse = browseState{path: path, child: child, pending: true, select_: selectName}
+	gen := m.nextReqGen()
+	m.browse = browseState{path: path, child: child, pending: true, select_: selectName, gen: gen}
 	return tea.Batch(
 		func() tea.Msg {
 			msg, err := ipc.NewMessage(ipc.MsgBrowseDirReq, ipc.BrowseDirReqPayload{Path: path, Child: child})
@@ -57,16 +76,17 @@ func (m *Model) requestBrowseDir(path, child, selectName string) tea.Cmd {
 				log.Printf("browse dir: encode: %v", err)
 				return nil
 			}
+			msg.ID = gen
 			m.client.Send(msg)
 			return nil
 		},
-		browseTimeoutCmd(path, child),
+		browseTimeoutCmd(path, child, gen),
 	)
 }
 
-func browseTimeoutCmd(path, child string) tea.Cmd {
+func browseTimeoutCmd(path, child, gen string) tea.Cmd {
 	return tea.Tick(browseTimeout, func(time.Time) tea.Msg {
-		return browseTimeoutMsg{path: path, child: child}
+		return browseTimeoutMsg{path: path, child: child, gen: gen}
 	})
 }
 
@@ -88,15 +108,17 @@ const (
 // applyBrowseDir resumes the directory-browser state machine with the
 // daemon's answer, and reports what it observed.
 //
-// Matched on BOTH echoed fields, not Path alone: two descents from one
-// directory differ only in Child, and matching on Path would let the second
-// request's answer land as though it belonged to the first (or vice versa).
+// Matched on Path, Child, AND gen: two descents from one directory differ
+// only in Child, so Path alone would let the second request's answer land as
+// though it belonged to the first. gen is needed on top of that pair — see
+// browseState.gen — for the case where two DIFFERENT requests ask about the
+// exact same (Path, Child), which content matching alone cannot tell apart.
 //
 // Deliberately holds no policy of its own — what a failure or a fresh listing
 // MEANS to the setup dialog (the pre-fill chain) is the dialog's business, and
 // lives in applyBrowseResponse.
-func (m *Model) applyBrowseDir(resp ipc.BrowseDirRespPayload) browseOutcome {
-	if resp.Path != m.browse.path || resp.Child != m.browse.child {
+func (m *Model) applyBrowseDir(resp ipc.BrowseDirRespPayload, gen string) browseOutcome {
+	if resp.Path != m.browse.path || resp.Child != m.browse.child || gen != m.browse.gen {
 		return browseDropped
 	}
 	m.browse.pending = false
@@ -132,20 +154,26 @@ func (m *Model) applyBrowseDir(resp ipc.BrowseDirRespPayload) browseOutcome {
 // spinning.
 //
 // Local timer: it must NOT re-arm listenForMessages, unlike the response
-// branch. Matched on the requested (path, child) AND pending — the key alone
-// is not enough here, unlike gitScanTimeoutMsg's match against repoScanState:
-// that reference clears its key back to the zero value on a match, so a late
-// tick can no longer find it. applyBrowseDir cannot do the same, because ""
-// is a valid Path (the daemon's default CWD) and clearing to the zero value
-// would make a genuinely idle browser indistinguishable from one mid-request.
-// applyBrowseDir therefore leaves path/child in place after a match, which
-// means the request's own timeout tick — scheduled alongside the send in
-// requestBrowseDir — is still sitting there and would otherwise fire 8s
-// later and overwrite a just-applied successful listing with a stale
-// "timed out". Gating on pending closes that: a match already cleared it, so
-// the same request's later tick is a no-op.
-func (m *Model) applyBrowseTimeout(path, child string) tea.Cmd {
-	if !m.browse.pending || m.browse.path != path || m.browse.child != child {
+// branch. Matched on the requested (path, child), gen, AND pending.
+//
+// pending and gen fix two DIFFERENT gaps and neither can stand in for the
+// other. pending is what tells a request's OWN late tick — firing after that
+// SAME request already succeeded — from a tick that still means something:
+// applyBrowseDir cannot clear path/child back to a zero value on a match
+// (unlike repoScanState, "" is a valid Path — the daemon's default CWD — so
+// clearing to zero would make a genuinely idle browser indistinguishable from
+// one mid-request), so the request's own timeout tick, scheduled alongside
+// the send in requestBrowseDir, is still sitting there after a successful
+// match and would otherwise fire 8s later and overwrite the listing it just
+// delivered with a stale "timed out". gen is what tells a DIFFERENT request's
+// tick apart from the CURRENT one when both happen to share the same
+// (path, child) — the pre-fill chain and user navigation both funnel through
+// requestBrowseDir, and a repeated pair is reachable in earnest (see
+// browseState.gen). Without gen, request N's tick firing while request N+1 —
+// for the identical (path, child) — is still genuinely pending would
+// incorrectly report N+1 as timed out.
+func (m *Model) applyBrowseTimeout(path, child, gen string) tea.Cmd {
+	if !m.browse.pending || m.browse.path != path || m.browse.child != child || m.browse.gen != gen {
 		return nil
 	}
 	m.browse.pending = false

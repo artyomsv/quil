@@ -9,11 +9,15 @@ import (
 	"github.com/artyomsv/quil/internal/ipc"
 )
 
-// gitReposMsg carries one git-discovery response.
-type gitReposMsg struct{ Resp ipc.GitReposRespPayload }
+// gitReposMsg carries one git-discovery response. Gen echoes the requesting
+// message's ID — see repoScanState.gen for why a response needs one.
+type gitReposMsg struct {
+	Resp ipc.GitReposRespPayload
+	Gen  string
+}
 
 // gitScanTimeoutMsg fires when a discovery request went unanswered.
-type gitScanTimeoutMsg struct{ cwd string }
+type gitScanTimeoutMsg struct{ cwd, gen string }
 
 // gitScanTimeout bounds one git-discovery round trip from the client side.
 //
@@ -52,9 +56,24 @@ const (
 // The zero value means "nothing in flight", matching the ctxMenu/palette
 // convention in this package: no separate open bool that could drift.
 type repoScanState struct {
-	cwd     string // echoed back by the daemon; the staleness key
+	cwd     string // echoed back by the daemon; identifies WHAT was asked
 	tabID   string // the tab that asked (repoScanOverlay only), resolved again on arrival
 	purpose repoScanPurpose
+	// gen identifies WHICH request this is, on top of cwd identifying what it
+	// asked about. cwd alone is not enough: the overlay and the pick list can
+	// both be asked about the SAME directory (e.g. Alt+G on a pane, then
+	// Ctrl+N on a discover="git" plugin for that same pane, before Alt+G's
+	// answer lands), and a purely content-keyed match cannot tell those two
+	// requests' responses apart — a response could still be routed to the
+	// PURPOSE that happened to overwrite this slot last, not the request that
+	// actually produced it. gen is minted fresh per request (nextReqGen) and
+	// carried both in the wire message's ID (echoed back verbatim by
+	// respondTo, same as CWD) and in the local timeout closure, so both the
+	// daemon's answer and this request's own timeout tick can be told apart
+	// from a different request that happens to share the same cwd. Mirrors
+	// Model.clientGen, which solves the identical problem for the reconnect
+	// dial.
+	gen string
 }
 
 // requestGitRepos asks the daemon which repositories are near cwd.
@@ -67,7 +86,8 @@ type repoScanState struct {
 // Used in local mode too, deliberately. The answer is identical when the daemon
 // is local, and a path exercised only by remote sessions is one that rots.
 func (m *Model) requestGitRepos(cwd, tabID string, purpose repoScanPurpose) tea.Cmd {
-	m.repoScan = repoScanState{cwd: cwd, tabID: tabID, purpose: purpose}
+	gen := m.nextReqGen()
+	m.repoScan = repoScanState{cwd: cwd, tabID: tabID, purpose: purpose, gen: gen}
 	return tea.Batch(
 		func() tea.Msg {
 			msg, err := ipc.NewMessage(ipc.MsgGitReposReq, ipc.GitReposReqPayload{CWD: cwd})
@@ -75,16 +95,20 @@ func (m *Model) requestGitRepos(cwd, tabID string, purpose repoScanPurpose) tea.
 				log.Printf("git discovery: encode: %v", err)
 				return nil
 			}
+			// The daemon's respondTo echoes ID back on the response verbatim
+			// (same mechanism MCP request-response correlation uses) — this is
+			// what lets applyGitRepos tell two requests for the same cwd apart.
+			msg.ID = gen
 			m.client.Send(msg)
 			return nil
 		},
-		gitScanTimeoutCmd(cwd),
+		gitScanTimeoutCmd(cwd, gen),
 	)
 }
 
-func gitScanTimeoutCmd(cwd string) tea.Cmd {
+func gitScanTimeoutCmd(cwd, gen string) tea.Cmd {
 	return tea.Tick(gitScanTimeout, func(time.Time) tea.Msg {
-		return gitScanTimeoutMsg{cwd: cwd}
+		return gitScanTimeoutMsg{cwd: cwd, gen: gen}
 	})
 }
 
@@ -96,10 +120,11 @@ func gitScanTimeoutCmd(cwd string) tea.Cmd {
 // Responses for a directory the user has since left are dropped: either
 // caller can issue a second request before the first answer lands, and acting
 // on a superseded one would apply repositories that belong to a directory the
-// user is no longer looking at. Matched on the echoed CWD, the same staleness
-// contract the browse and session listings use.
-func (m *Model) applyGitRepos(resp ipc.GitReposRespPayload) tea.Cmd {
-	if resp.CWD != m.repoScan.cwd {
+// user is no longer looking at. Matched on the echoed CWD AND gen — see
+// repoScanState.gen for why CWD alone cannot tell two overlapping requests
+// for the same directory apart.
+func (m *Model) applyGitRepos(resp ipc.GitReposRespPayload, gen string) tea.Cmd {
+	if resp.CWD != m.repoScan.cwd || gen != m.repoScan.gen {
 		return nil
 	}
 	purpose := m.repoScan.purpose
@@ -149,10 +174,11 @@ func (m *Model) tabByID(id string) *TabModel {
 // diagnosable rather than a keypress that silently did nothing.
 //
 // Local timer: it must NOT re-arm listenForMessages, unlike the response
-// branch. Matched on the requested CWD so a late tick from a superseded request
-// cannot clear a live one.
-func (m *Model) applyGitScanTimeout(cwd string) tea.Cmd {
-	if m.repoScan.cwd != cwd {
+// branch. Matched on the requested CWD AND gen, so a late tick from a
+// superseded request cannot clear a live one — including a live request that
+// asked about the exact same directory (see repoScanState.gen).
+func (m *Model) applyGitScanTimeout(cwd, gen string) tea.Cmd {
+	if m.repoScan.cwd != cwd || m.repoScan.gen != gen {
 		return nil
 	}
 	m.repoScan = repoScanState{}

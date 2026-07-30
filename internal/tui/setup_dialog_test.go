@@ -987,7 +987,7 @@ func TestEnterSetupOrSplit_GitDiscover_PopulatesCandidates(t *testing.T) {
 		},
 	}
 	runCmd(m.enterSetupOrSplit(p))
-	runCmd(m.applyGitRepos(ipc.GitReposRespPayload{CWD: root, Repos: []string{root}}))
+	runCmd(m.applyGitRepos(ipc.GitReposRespPayload{CWD: root, Repos: []string{root}}, m.repoScan.gen))
 
 	if len(m.repoCandidates) != 1 || m.repoCandidates[0] != root {
 		t.Fatalf("repoCandidates = %v, want [%q]", m.repoCandidates, root)
@@ -1023,7 +1023,7 @@ func TestEnterSetupOrSplit_GitDiscover_NoRepo_FallsBackToBrowser(t *testing.T) {
 	// back to the same recent/browser chain a non-git PromptsCWD plugin uses.
 	// That fallback used to run synchronously inside enterSetupOrSplit; it now
 	// runs in applyGitReposPickList once this response lands.
-	runCmd(m.applyGitRepos(ipc.GitReposRespPayload{CWD: plain}))
+	runCmd(m.applyGitRepos(ipc.GitReposRespPayload{CWD: plain}, m.repoScan.gen))
 
 	if len(m.repoCandidates) != 0 {
 		t.Fatalf("repoCandidates = %v, want empty", m.repoCandidates)
@@ -1225,7 +1225,7 @@ func TestEnterSetup_GitReposWinOverRecent(t *testing.T) {
 	m := &Model{tabs: []*TabModel{tab}, activeTab: 0, recentCWDs: []string{t.TempDir()}, client: fake}
 	p := &plugin.PanePlugin{Name: "lazygit", Command: plugin.CommandConfig{Cmd: "lazygit", PromptsCWD: true, Discover: "git"}}
 	runCmd(m.enterSetupOrSplit(p))
-	runCmd(m.applyGitRepos(ipc.GitReposRespPayload{CWD: root, Repos: []string{root}}))
+	runCmd(m.applyGitRepos(ipc.GitReposRespPayload{CWD: root, Repos: []string{root}}, m.repoScan.gen))
 
 	if len(m.repoCandidates) != 1 || m.repoCandidates[0] != root {
 		t.Fatalf("repoCandidates = %v, want [%q]", m.repoCandidates, root)
@@ -1546,7 +1546,7 @@ func TestEnterSetupOrSplit_GitDiscover_CapsCandidates(t *testing.T) {
 	for i := range repos {
 		repos[i] = fmt.Sprintf("%s/repo-%02d", base, i)
 	}
-	runCmd(m.applyGitRepos(ipc.GitReposRespPayload{CWD: base, Repos: repos}))
+	runCmd(m.applyGitRepos(ipc.GitReposRespPayload{CWD: base, Repos: repos}, m.repoScan.gen))
 
 	if len(m.repoCandidates) != maxRepoCandidates {
 		t.Fatalf("len(repoCandidates) = %d, want %d (capped)", len(m.repoCandidates), maxRepoCandidates)

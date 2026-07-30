@@ -310,6 +310,7 @@ type Model struct {
 	sessionScroll     int                     // scroll offset for the visible window of the expanded list
 	repoScan          repoScanState           // in-flight git discovery — Alt+G overlay or setup-dialog pick list (zero value = none)
 	browse            browseState             // in-flight directory-browser request (zero value = none)
+	reqGen            int                     // monotonic instance id source for repoScan/browse; see nextReqGen
 	sessionScanCWD    string                  // directory sessionRows belong to
 	sessionState      sessionScanState        // request lifecycle for the session field
 	sessionError      string                  // daemon-reported error (sessionScanFailed)
@@ -1393,22 +1394,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case gitReposMsg:
 		// MUST re-arm the listen loop, like every other IPC response branch —
 		// omitting it kills IPC for the session, a bug this package has shipped.
-		cmd := m.applyGitRepos(msg.Resp)
+		cmd := m.applyGitRepos(msg.Resp, msg.Gen)
 		return m, tea.Batch(cmd, m.listenForMessages())
 
 	case gitScanTimeoutMsg:
 		// Local timer, so deliberately no re-arm.
-		return m, m.applyGitScanTimeout(msg.cwd)
+		return m, m.applyGitScanTimeout(msg.cwd, msg.gen)
 
 	case browseDirMsg:
 		// MUST re-arm the listen loop, like every other IPC response branch —
 		// omitting it kills IPC for the session, a bug this package has shipped.
-		cmd := m.applyBrowseResponse(msg.Resp)
+		cmd := m.applyBrowseResponse(msg.Resp, msg.Gen)
 		return m, tea.Batch(cmd, m.listenForMessages())
 
 	case browseTimeoutMsg:
 		// Local timer, so deliberately no re-arm.
-		return m, m.applyBrowseTimeout(msg.path, msg.child)
+		return m, m.applyBrowseTimeout(msg.path, msg.child, msg.gen)
 
 	case sessionScanTimeoutMsg:
 		// Turn a never-answered listing into something diagnosable instead of
@@ -3928,6 +3929,20 @@ func (m *Model) setFlash(text string) {
 	m.flashUntil = time.Now().Add(flashDuration)
 }
 
+// nextReqGen returns a fresh instance id for a one-shot request whose content
+// key (a CWD, or a (path, child) pair) can repeat across genuinely different
+// requests — repoScanState and browseState both use it, mirroring clientGen's
+// role for the reconnect dial: without it, a slot that matches on content
+// alone cannot tell "this is the answer to the request I just asked" from
+// "this is a late answer to a PREVIOUS request that happened to ask about the
+// same thing". Shared by both slots rather than one counter each — a
+// generation only ever has to be unique within its OWN slot's comparisons,
+// never across slots, so splitting the source buys nothing.
+func (m *Model) nextReqGen() string {
+	m.reqGen++
+	return strconv.Itoa(m.reqGen)
+}
+
 // Daemon communication commands
 
 func (m Model) attachToDaemon() tea.Cmd {
@@ -4072,7 +4087,10 @@ func (m Model) listenForMessages() tea.Cmd {
 				log.Printf("decode git_repos_resp: %v", err)
 				return listenContinueMsg{}
 			}
-			return gitReposMsg{Resp: payload}
+			// msg.ID echoes the requesting message's ID verbatim (respondTo on
+			// the daemon side) — this is the request instance correlator
+			// applyGitRepos needs on top of the echoed CWD; see repoScanState.gen.
+			return gitReposMsg{Resp: payload, Gen: msg.ID}
 
 		case ipc.MsgBrowseDirResp:
 			var payload ipc.BrowseDirRespPayload
@@ -4080,7 +4098,8 @@ func (m Model) listenForMessages() tea.Cmd {
 				log.Printf("decode browse_dir_resp: %v", err)
 				return listenContinueMsg{}
 			}
-			return browseDirMsg{Resp: payload}
+			// Same correlator as MsgGitReposResp above; see browseState.gen.
+			return browseDirMsg{Resp: payload, Gen: msg.ID}
 
 		case ipc.MsgClaudeSessionDetailResp:
 			var payload ipc.ClaudeSessionDetailRespPayload

@@ -115,6 +115,12 @@ type Daemon struct {
 	// whenever it followed the other closely enough.
 	browseScanning atomic.Bool
 
+	// gitDiscovering is the single-flight guard for git repo discovery
+	// (MsgGitReposReq). Separate from browseScanning because the setup dialog
+	// resolves a directory and then discovers repos inside it, so one shared
+	// slot would make each step fail whenever it closely followed the other.
+	gitDiscovering atomic.Bool
+
 	// resumeClaimMu serializes the claim of a Claude session by a new pane.
 	// The occupancy test and the write that acts on it must be one atomic
 	// step: handleCreatePane runs on the requesting conn's dispatch
@@ -865,6 +871,8 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		d.handleClaudeSessionsReq(conn, msg)
 	case ipc.MsgBrowseDirReq:
 		d.handleBrowseDirReq(conn, msg)
+	case ipc.MsgGitReposReq:
+		d.handleGitReposReq(conn, msg)
 	case ipc.MsgPaneStatusReq:
 		d.handlePaneStatusReq(conn, msg)
 	case ipc.MsgCreatePaneReq:

@@ -106,6 +106,13 @@ const (
 	MsgBrowseDirReq  = "browse_dir_req"
 	MsgBrowseDirResp = "browse_dir_resp"
 
+	// Git repo discovery (Alt+G lazygit overlay, and the setup dialog's
+	// discover = "git" pick list). Same reason as the browser: it used to stat
+	// the TUI's own disk, so against a remote host it reported "no git repo
+	// here" for a directory that is a repo on the machine that matters.
+	MsgGitReposReq  = "git_repos_req"
+	MsgGitReposResp = "git_repos_resp"
+
 	// Auto-update (TUI ⇄ daemon)
 	MsgStageUpdateReq  = "stage_update_req"  // TUI → daemon (empty payload)
 	MsgStageUpdateResp = "stage_update_resp" // daemon → TUI (unicast)
@@ -584,6 +591,30 @@ type BrowseDirRespPayload struct {
 	Entries   []BrowseEntry `json:"entries,omitempty"`
 	Truncated bool          `json:"truncated,omitempty"`
 	Error     string        `json:"error,omitempty"`
+}
+
+// GitReposReqPayload asks the daemon which git repositories are near CWD —
+// the enclosing repo plus one level of sub-repos. An empty CWD means the
+// daemon's default.
+type GitReposReqPayload struct {
+	CWD string `json:"cwd"`
+}
+
+// GitReposRespPayload carries the discovered repositories, enclosing repo
+// first.
+//
+// CWD echoes the request VERBATIM, the same staleness contract the browse and
+// session listings use: the answer is only meaningful for the directory that
+// was asked about, and the user may have moved on by the time it lands.
+//
+// An empty Repos with an empty Error is a real answer — "there is no repo
+// here" — and is deliberately distinguishable from a failure, because the two
+// produce different UI: the first flashes a finding, the second must not claim
+// one.
+type GitReposRespPayload struct {
+	CWD   string   `json:"cwd"`
+	Repos []string `json:"repos,omitempty"`
+	Error string   `json:"error,omitempty"`
 }
 
 // ClaudeSessionDetailReqPayload asks for the deep read of ONE session — the

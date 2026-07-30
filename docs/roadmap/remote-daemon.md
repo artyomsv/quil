@@ -127,7 +127,8 @@ These are real and current. None are bugs to be reported; all are scoped work.
 | Limit | Effect | Fixed in |
 |---|---|---|
 | **Reconnect is only partly verified against a real link** | A dropped link shows a banner and redials with backoff (Phase 2, v1.45.0). Two of eight manual checks have been run on a real ssh link; the rest still rest on unit tests against a fake dialer. The highest-value one — reconnecting a pane whose plugin has `ghost_buffer = false` — is outstanding, and is exactly the case the two passing checks could not have caught. | Phase 2 manual checks |
-| **Filesystem dialogs read the *local* disk** | The pane working-directory picker, git-repository discovery, kube-context discovery and the Claude session list all browse the machine running the TUI, not the one running the panes. Type remote paths instead of browsing. | Phase 3 |
+| **Kube-context discovery reads the *local* disk** | `discover = "kube"` parses the kubeconfig on the machine running the TUI, so a remote pane is offered your laptop's contexts. The working-directory picker and git-repository discovery were fixed in RD-020/RD-021 and now read the daemon's filesystem; the Claude session list was always daemon-side. | RD-022 |
+| **Recent locations are empty in remote mode** | The recent-directories pick list is filtered by a local `os.Stat`, so every server path is silently dropped and the list looks like it was never used. No error is shown, because an empty list is indistinguishable from an unused feature. | RD-024 |
 | **Plugin availability is decided locally** | `Ctrl+N` greys out a plugin based on whether the binary exists on *your* machine, not the server's. A tool installed only on the remote is shown unavailable, and vice versa. | Phase 3 |
 | **`quil status` refuses under `--remote`** | It reports on the local daemon, so it is blocked rather than silently wrong. Use `ssh <host> quil status`. | Phase 3 |
 | **Update controls are hidden in remote mode** | The update banner describes the *remote* daemon's staged version while every apply path writes to *local* disk. Suppressed rather than offered wrongly. | Phase 3 |
@@ -489,7 +490,7 @@ Goal: every surface that reads a filesystem reads the *server's*.
 
 | ID | Item | Blocked by | Status |
 |---|---|---|---|
-| RD-020 | Directory-listing RPC — the root fix; every other picker keys off the CWD it returns | RD-004 | daemon half done; TUI half todo |
+| RD-020 | Directory-listing RPC — the root fix; every other picker keys off the CWD it returns | RD-004 | **done** (browser reads the daemon; roots, ~, Abs and joins all server-side) |
 | RD-021 | Git repo discovery RPC | RD-004 | **done, confirmed on a real link** (Alt+G; setup-dialog pick list still local) |
 | RD-022 | Kube context discovery RPC | RD-004 | todo |
 | RD-023 | Plugin registry RPC with server-side `DetectAvailability` | — | todo |
@@ -497,7 +498,7 @@ Goal: every surface that reads a filesystem reads the *server's*.
 | RD-025 | Empty `AttachPayload.CWD` in remote mode | RD-020 | todo |
 | RD-026 | `quil status` over the transport, or documented local-only | — | todo |
 | RD-027 | Update controls targeted at the remote daemon, or explicitly labelled | — | todo |
-| RD-028 | Async setup-dialog refactor without regressing pinned-height invariants | RD-020 | todo |
+| RD-028 | Async setup-dialog refactor without regressing pinned-height invariants | RD-020 | **done** (async browser; height invariant held, pinned-height tests untouched) |
 
 **Correction to the limits table above.** The Claude session *listing* is
 already remote-correct — `handleClaudeSessionsReq` runs daemon-side and scans

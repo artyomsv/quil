@@ -84,10 +84,14 @@ func TestUpdate_PasteMsgEmptyContent_FallsBackToImagePaste(t *testing.T) {
 	}
 }
 
-// TestUpdate_PasteMsgWithText_SendsTextVerbatim is the regression guard for the
-// fix: a bracketed paste carrying real text must still be typed verbatim and
-// must NOT be hijacked by the image fallback.
-func TestUpdate_PasteMsgWithText_SendsTextVerbatim(t *testing.T) {
+// TestUpdate_PasteMsgWithText_SendsBracketedPaste guards two things: a
+// bracketed paste carrying real text must NOT be hijacked by the image
+// fallback, and it must be re-wrapped in bracketed paste markers before being
+// injected into the pane's PTY. The outer terminal's own \x1b[200~/\x1b[201~
+// markers terminate at Bubble Tea (stripped when building tea.PasteMsg), so
+// without re-wrapping the program inside the pane sees the paste as a stream
+// of ordinary keystrokes and replays it character by character.
+func TestUpdate_PasteMsgWithText_SendsBracketedPaste(t *testing.T) {
 	fake := &fakeSender{}
 	m := pasteTestModel(fake)
 
@@ -96,7 +100,8 @@ func TestUpdate_PasteMsgWithText_SendsTextVerbatim(t *testing.T) {
 	if len(fake.sent) != 1 {
 		t.Fatalf("want exactly 1 IPC send, got %d", len(fake.sent))
 	}
-	if got := string(paneInputData(t, fake.sent[0])); got != "hello world" {
-		t.Errorf("sent data = %q, want %q", got, "hello world")
+	want := "\x1b[200~hello world\x1b[201~"
+	if got := string(paneInputData(t, fake.sent[0])); got != want {
+		t.Errorf("sent data = %q, want %q", got, want)
 	}
 }

@@ -4258,10 +4258,7 @@ func (m Model) pasteClipboard() tea.Cmd {
 		}
 		// Wrap in bracketed paste sequences so the shell treats newlines
 		// as literal text, not as Enter presses.
-		var data []byte
-		data = append(data, "\x1b[200~"...)
-		data = append(data, []byte(text)...)
-		data = append(data, "\x1b[201~"...)
+		data := bracketedPaste(text)
 		logger.Debug("pasteClipboard: sending %d bytes to pane %s", len(data), pane.ID)
 		msg, _ := ipc.NewMessage(ipc.MsgPaneInput, ipc.PaneInputPayload{
 			PaneID: pane.ID,
@@ -4585,10 +4582,17 @@ func sanitizeDialogInput(s string) string {
 	return b.String()
 }
 
-// sendClipboardToPane sends text to the active pane as PTY input.
-// NOTE: This does NOT wrap in bracketed paste sequences because it handles
-// tea.PasteMsg events, which originate from the terminal's own bracketed paste
-// — the terminal has already signaled paste mode to the shell.
+// bracketedPaste wraps text in bracketed paste markers (\x1b[200~ … \x1b[201~)
+// so the program inside the pane's PTY receives it as a single paste rather
+// than a stream of typed characters.
+func bracketedPaste(text string) []byte {
+	data := make([]byte, 0, len(text)+12)
+	data = append(data, "\x1b[200~"...)
+	data = append(data, text...)
+	data = append(data, "\x1b[201~"...)
+	return data
+}
+
 // sendInputToPane writes raw bytes to a specific pane's PTY stdin via IPC.
 // Used to forward encoded mouse-wheel events to mouse-tracking apps.
 func (m Model) sendInputToPane(paneID string, data []byte) {
@@ -4605,6 +4609,12 @@ func (m Model) sendInputToPane(paneID string, data []byte) {
 	_ = m.client.Send(msg)
 }
 
+// sendClipboardToPane sends pasted text to the active pane as PTY input,
+// re-wrapped in bracketed paste markers. tea.PasteMsg carries text from the
+// outer terminal's bracketed paste, but those markers terminate at Bubble Tea
+// — the program inside the pane never sees them. Without re-wrapping, that
+// program treats the paste as ordinary keystrokes and replays it character by
+// character (visible with Chrome Remote Desktop + Claude Code, among others).
 func (m Model) sendClipboardToPane(text string) {
 	if text == "" {
 		return
@@ -4619,7 +4629,7 @@ func (m Model) sendClipboardToPane(text string) {
 	}
 	msg, _ := ipc.NewMessage(ipc.MsgPaneInput, ipc.PaneInputPayload{
 		PaneID: pane.ID,
-		Data:   []byte(text),
+		Data:   bracketedPaste(text),
 	})
 	m.client.Send(msg)
 }

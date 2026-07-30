@@ -108,6 +108,13 @@ type Daemon struct {
 	// when the user opens it.
 	sessionDetailReading atomic.Bool
 
+	// browseScanning is the single-flight guard for the directory listing
+	// (MsgBrowseDirReq). Its own slot for the same reason
+	// sessionDetailReading has one: the setup dialog browses a directory and
+	// then scans it for sessions, so sharing would make each step fail
+	// whenever it followed the other closely enough.
+	browseScanning atomic.Bool
+
 	// resumeClaimMu serializes the claim of a Claude session by a new pane.
 	// The occupancy test and the write that acts on it must be one atomic
 	// step: handleCreatePane runs on the requesting conn's dispatch
@@ -856,6 +863,8 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		d.handleClaudeSessionDetailReq(conn, msg)
 	case ipc.MsgClaudeSessionsReq:
 		d.handleClaudeSessionsReq(conn, msg)
+	case ipc.MsgBrowseDirReq:
+		d.handleBrowseDirReq(conn, msg)
 	case ipc.MsgPaneStatusReq:
 		d.handlePaneStatusReq(conn, msg)
 	case ipc.MsgCreatePaneReq:

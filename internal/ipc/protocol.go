@@ -101,6 +101,11 @@ const (
 	MsgClaudeSessionDetailReq  = "claude_session_detail_req"
 	MsgClaudeSessionDetailResp = "claude_session_detail_resp"
 
+	// Directory browsing (pane setup dialog CWD picker). The dialog used to
+	// read the machine running the TUI, which in remote mode is the wrong disk.
+	MsgBrowseDirReq  = "browse_dir_req"
+	MsgBrowseDirResp = "browse_dir_resp"
+
 	// Auto-update (TUI ⇄ daemon)
 	MsgStageUpdateReq  = "stage_update_req"  // TUI → daemon (empty payload)
 	MsgStageUpdateResp = "stage_update_resp" // daemon → TUI (unicast)
@@ -524,6 +529,41 @@ type ClaudeSessionsRespPayload struct {
 	Sessions  []ClaudeSessionInfo `json:"sessions"`
 	Truncated bool                `json:"truncated,omitempty"`
 	Error     string              `json:"error,omitempty"`
+}
+
+// BrowseDirReqPayload asks the daemon to list one directory. An empty Path
+// means "wherever you would spawn a pane by default".
+type BrowseDirReqPayload struct {
+	Path string `json:"path"`
+}
+
+// BrowseEntry is one child of a listed directory. Only the leaf name travels —
+// the client already knows the parent it asked about, and repeating the full
+// path on every entry would multiply the frame for nothing.
+type BrowseEntry struct {
+	Name  string `json:"name"`
+	IsDir bool   `json:"is_dir"`
+}
+
+// BrowseDirRespPayload carries one directory listing, directories first.
+//
+// Path and Resolved are separate ON PURPOSE and must not be merged. Path echoes
+// the request VERBATIM and is the client's staleness key — the browser fires a
+// request per keystroke of navigation, so answers routinely arrive after the
+// user has moved on, and the client drops any whose echo does not match where
+// it is now. Resolved is the cleaned absolute path: the usable answer, what the
+// dialog displays and ultimately commits. Collapsing the two would break the
+// echo the first time the daemon cleaned a trailing separator, and the field
+// would hang on its pending state until the timeout fired.
+//
+// Truncated reports that the directory held more than the listing cap.
+type BrowseDirRespPayload struct {
+	Path      string        `json:"path"`
+	Resolved  string        `json:"resolved,omitempty"`
+	Parent    string        `json:"parent,omitempty"`
+	Entries   []BrowseEntry `json:"entries,omitempty"`
+	Truncated bool          `json:"truncated,omitempty"`
+	Error     string        `json:"error,omitempty"`
 }
 
 // ClaudeSessionDetailReqPayload asks for the deep read of ONE session — the

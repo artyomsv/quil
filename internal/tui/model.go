@@ -301,6 +301,7 @@ type Model struct {
 	sessionCursor     int                     // row cursor: 0 = "New session", 1.. = sessionRows
 	sessionScroll     int                     // scroll offset for the visible window of the expanded list
 	repoScan          repoScanState           // in-flight Alt+G git discovery (zero value = none)
+	browse            browseState             // in-flight directory-browser request (zero value = none)
 	sessionScanCWD    string                  // directory sessionRows belong to
 	sessionState      sessionScanState        // request lifecycle for the session field
 	sessionError      string                  // daemon-reported error (sessionScanFailed)

@@ -243,7 +243,7 @@ func dialRemote(cfg config.Config) (*ipc.Client, error) {
 	// passphrase — it runs before tea.NewProgram takes the terminal.
 	log.Printf("remote mode: dialing %s over ssh", remoteDest)
 
-	client, link, err := dialRemoteTransport(context.Background(), cfg, false, nil)
+	client, link, err := dialRemoteTransportFn(context.Background(), cfg, false, nil)
 	if link != nil {
 		remoteLinkErrFn = link.LinkErr
 		remoteLinkEstablishedFn = link.Established
@@ -308,6 +308,17 @@ func dialRemoteTransport(ctx context.Context, cfg config.Config, batch bool, std
 	})
 	return client, link, err
 }
+
+// dialRemoteTransportFn is the dial seam, swappable so redialRemote's own wiring
+// can be asserted without spawning ssh.
+//
+// The same reason markPermanentLinkFailure was extracted, one level up: the
+// transport proves it tees a batch dial's stderr to StderrSink, and
+// sshStderrLogger proves it frames what it is given — but nothing proved
+// redialRemote actually JOINS them. Passing nil there, or moving the sink inside
+// the closure so each attempt gets a fresh byte budget, leaves every existing
+// test green while quietly undoing RD-018.
+var dialRemoteTransportFn = dialRemoteTransport
 
 // sshStderrBudget caps how much ssh stderr one session may write to the log.
 //
@@ -530,7 +541,7 @@ func redialRemote(cfg config.Config) tui.RedialFunc {
 		ctx, cancel := context.WithTimeout(context.Background(), redialTimeout)
 		defer cancel()
 
-		client, link, err := dialRemoteTransport(ctx, cfg, true, stderrSink)
+		client, link, err := dialRemoteTransportFn(ctx, cfg, true, stderrSink)
 		if err != nil {
 			// No LinkErr fallback here, deliberately: transport.SSH returns a
 			// nil conn on failure and `link` is only assigned when the dialer

@@ -5,12 +5,14 @@ Rounds completed: 1
 
 Scope: PR #113, `git diff master..HEAD` on `feat/remote-phase-2-reconnect`.
 Remote daemon Phase 2 (RD-010…RD-016). Four agents (security-officer,
-code-reviewer, rules-compliance, qa) plus Greptile (5/5, no actionable defects,
-no inline comments — both before and after these fixes).
+code-reviewer, rules-compliance, qa) plus Greptile, which scored 5/5 on both
+passes but raised a **P1 inline comment on the second** — see the greptile/P1
+entry below. Worth noting for next round: the score is not the finding list, and
+reading only the score missed it the first time.
 
 ## Resolved (fixed in code; do not re-raise)
 
-- [code-quality/CRITICAL-1] `resetPanesForReattach` wiped panes the daemon never repaints — `handleAttach` replays only `ghost_buffer = true` plugins, so opencode/lazygit/k9s/lazysql were cleared with nothing coming back. Now gated on `paneRepaintsOnAttach` (replay OR redraw key). claude-code still reset, since its `\f` kick lands cleaner on a cleared grid — round 1
+- [code-quality/CRITICAL-1] `resetPanesForReattach` wiped panes the daemon never repaints — `handleAttach` replays only `ghost_buffer = true` plugins, so opencode/lazygit/k9s/lazysql were cleared with nothing coming back. The first fix gated on the plugin registry and was itself wrong (see greptile/P1); the reset is now armed and consumed by the daemon's actual replay — round 1
 - [code-quality/2] `verifyRemoteLink`'s read deadline did not bound the LOOP — held-remainder and bufio fast paths never block, so continuous broadcast traffic looped forever. Added an explicit wall-clock bound; a failed `SetReadDeadline` is now logged rather than fatal — round 1
 - [security/L1 + code-quality] `LinkErr` was read AFTER `Close` on the verify-failure path, contradicting the invariant `version_gate.go` documents and pins. Read before Close now; the dial-error branch's fallback removed as unreachable (`link` is always nil there) — round 1
 - [security/L3 + code-quality/11] Version probe accepted any `MsgVersionResp` regardless of ID, and swallowed a decode error. Now matches `probeRequestID`, logs a mismatch as a warning, and reports an undecodable payload — round 1

@@ -76,6 +76,55 @@ That's enough to start. See [docs/quick-start.md](docs/quick-start.md) for the f
 
 If anything ever hangs: `quil restart` recovers the daemon (escalating stop → fresh start → tabs restored from the last snapshot), and `Alt+R` restarts a single stuck pane in place with its AI session resumed.
 
+## Run the work somewhere else
+
+```bash
+quil --remote gpu01
+```
+
+The machine doing the work and the machine you sit at are increasingly not the
+same one — a GPU box, a cluster node, a beefy desktop reached from a laptop. An
+AI agent mid-task is exactly the workload you least want tied to a laptop lid.
+
+```mermaid
+flowchart LR
+    subgraph laptop["your laptop"]
+        TUI["quil<br/><i>a viewer — holds no state</i>"]
+    end
+    subgraph host["gpu01"]
+        D["quild"]
+        P1["claude"]
+        P2["shell"]
+        P3["lazygit"]
+        D --> P1
+        D --> P2
+        D --> P3
+    end
+    TUI -->|"ssh -T · one channel · no open port"| D
+```
+
+**No port is opened on the remote.** Quil runs `ssh -T gpu01 "quil --stdio"` and
+speaks its normal protocol over that single channel, so anything SSH reaches
+works — a bastion behind `ProxyJump`, a Tailscale address, a box on the public
+internet. The destination goes to `ssh` verbatim, so your `~/.ssh/config` keeps
+working: `Host` aliases, jump hosts, per-host keys, hardware tokens, certificates.
+
+**The server needs nothing installed first.** Point `--remote` at a bare machine
+and it offers to install one, then attaches. Your laptop downloads the release
+for the *remote's* platform and pushes it over the connection you already have,
+so a node with no route to GitHub provisions as easily as one with.
+
+**A dropped link is a pause, not an ending.** Close the lid, lose wifi, change
+network — an amber bar names the host, counts the attempts, and shows what `ssh`
+said, retrying with backoff until it lands. The panes never stopped, so there is
+nothing to resume. Keystrokes are *dropped* rather than queued while the link is
+down: a key typed at a dead connection would otherwise arrive minutes later in a
+live agent session, answering a question that had already moved on.
+
+Beta, and honest about it: filesystem dialogs still browse *your* disk rather
+than the server's, and remotes must be Linux or macOS. Details and the roadmap
+are in [docs/features.md](docs/features.md#remote-daemon-over-ssh).
+
 ## Let your AI assistant drive Quil
 
 Add this to your AI client's MCP config (Claude Desktop, Claude Code, Cursor, VS Code Copilot):

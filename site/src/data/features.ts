@@ -453,7 +453,9 @@ export const features: Feature[] = [
       "The destination goes to `ssh` verbatim, so your ~/.ssh/config keeps working unchanged: Host aliases, ProxyJump, ControlMaster, per-host keys, hardware tokens, and SSH certificates all apply.",
       "Quil forces off what the remote never needs — agent forwarding, X11, port forwarding, local-command execution — and bounds both ends of the connection's life so a dead host fails in seconds rather than hanging. Host-key policy is left to your config, because forcing it could only weaken it.",
       "Every command that manages a daemon's lifecycle refuses under --remote rather than silently acting on your laptop, and the status bar carries [remote <host>] so the machine you are driving is never ambiguous.",
-      "Beta limits: no automatic reconnect yet (a dropped link ends the session, though the panes survive and re-attaching restores them), dialogs that browse a filesystem still read your local disk rather than the server's, and the remote must be Linux or macOS — a running Windows executable cannot be replaced in place, which makes the upgrade half of provisioning impossible there.",
+      "A dropped link is a pause, not an ending. Close the lid, lose wifi, switch networks — an amber bar names the host, counts the attempts, and shows what ssh actually said, while retries back off from half a second to at most thirty and never stop. When the host answers again the panes come back with their contents intact, because nothing ever stopped running.",
+      "Keystrokes are dropped while the link is down rather than queued: a key typed at a dead connection would otherwise arrive minutes later in a live agent session, answering a question that had already moved on. ctrl+q stays live throughout, for a host that is not coming back.",
+      "Beta limits: dialogs that browse a filesystem still read your local disk rather than the server's, and the remote must be Linux or macOS — a running Windows executable cannot be replaced in place, which makes the upgrade half of provisioning impossible there.",
     ],
   },
 

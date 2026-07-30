@@ -338,13 +338,25 @@ confirmed".
 
 Outstanding manual verification:
 
-| Check | Confirms |
-|---|---|
-| Kill the ssh process mid-session | banner, frozen input, reconnect, and **scrollback not doubled** (RD-013) |
-| Sleep the laptop 2 minutes, wake | reconnect with no intervention |
-| Shut the remote host down | backoff reaches the 30 s cap, banner keeps counting, Ctrl+Q exits cleanly |
-| Drop the link mid-agent-turn with subagents running | spinner reflects reality rather than wedging (RD-014) |
-| Local session, daemon stopped | still exits rather than spinning — the local path must be unchanged |
+| Check | Confirms | Status |
+|---|---|---|
+| Kill the ssh process mid-session | banner, frozen input, reconnect | **done** — reconnected in 343 ms, 1 attempt |
+| Shut the remote host down | backoff climbs, banner persists and names the host unreachable | **done** — 466 ms → 770 ms → 1.288 s, restored on attempt 3 |
+| **Reconnect an `opencode` pane and confirm it is NOT blank** | the ghost-replay gate (see below) | **outstanding — highest value** |
+| Scroll a reconnected pane to the top | scrollback not doubled (RD-013) | outstanding |
+| Sleep the laptop 2 minutes, wake | reconnect with no intervention | outstanding |
+| Ctrl+Q during an outage | the only exit from a host that never returns | outstanding |
+| Drop the link mid-agent-turn with subagents running | spinner reflects reality rather than wedging (RD-014) | outstanding |
+| Local session, daemon stopped | still exits rather than spinning — the local path must be unchanged | outstanding |
+
+**Why the opencode check is now the most valuable one.** The two checks marked
+done both used a *terminal* pane, and code review then found that terminals are
+exactly the case that works: `handleAttach` replays only plugins with
+`ghost_buffer = true`, so opencode, lazygit, k9s and lazysql got reset with
+nothing coming back — a blank rectangle in front of a live process. Fixed by
+gating the reset on a replay actually arriving, and covered by a test driven from
+the shipped defaults, but not yet seen on a real link. The live run that passed
+could not have caught it.
 
 **Decision gate — application-layer liveness: ANSWERED, ssh keepalive.**
 `MsgHeartbeat` remains declared in `internal/ipc/protocol.go` and unsent.
@@ -355,14 +367,13 @@ would duplicate it without covering a failure mode ssh misses. Revisit if
 Phase 4 removes ssh, or if the manual checks show drops going unnoticed for
 materially longer than 45 s.
 
-**Known Windows hazard on this path.** `stdioConn.Close` can block racing the
-pump's read on Windows, and `redialRemote` closes the dead client on every
-attempt — so a reconnect could in principle wedge with the banner stuck on
-attempt 1. Pre-existing (it predates Phase 2 and reproduces on the Phase 1.5
-tree), unproven against a real session, and tracked in
-`techdebt/3-3-stdioconn-close-races-pump-read-on-windows.md`. Worth watching
-for during the manual checks above, since they are the first time this path
-runs for real.
+**Known hazards on this path**, all tracked, none blocking:
+
+| Hazard | Nature | Tracked in |
+|---|---|---|
+| `stdioConn.Close` can block racing the pump's uncancellable read on Windows, and a redial closes a client every attempt | pre-existing; reproduces unchanged on the Phase 1.5 tree | `techdebt/3-3-stdioconn-close-races-pump-read-on-windows.md` |
+| Batch dials buffer ssh stderr with no cap and no logging — and Phase 2 made those conns session-length for the first time | transport design newly exposed by reconnect; also loses post-reconnect ssh diagnostics from `quil.log` | `techdebt/3-3-batch-ssh-stderr-unbounded-and-unlogged.md` |
+| A reconnect cannot tell a permanent auth failure from a transient one, so a passphrase-protected key with no agent retries forever and can trip a fail2ban jail | mitigated by rate decay (~120 → ~33 attempts/hour), not eliminated | `techdebt/3-3-reconnect-cannot-classify-permanent-ssh-failure.md` |
 
 ### Phase 3 — remote-correct UI
 

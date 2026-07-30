@@ -3,6 +3,7 @@ package daemon
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"testing"
 	"time"
@@ -239,6 +240,46 @@ func TestBrowseDirResponse_ChildWithSeparatorIsRefused(t *testing.T) {
 	}
 	if got.Entries != nil {
 		t.Errorf("entries returned for a refused request: %+v", got.Entries)
+	}
+}
+
+// TestBrowseDirResponse_NonRootReportsParentNotRoots pins that the two are
+// mutually exclusive: an ordinary directory has somewhere to go up TO, so the
+// client should navigate by Parent and never see a root list.
+func TestBrowseDirResponse_NonRootReportsParentNotRoots(t *testing.T) {
+	got := browseDirResponse(ipc.BrowseDirReqPayload{Path: t.TempDir()}, "")
+
+	if got.Parent == "" {
+		t.Error("Parent is empty for a non-root directory; the browser has no way up")
+	}
+	if len(got.Roots) != 0 {
+		t.Errorf("Roots = %v on a non-root directory; it is only meaningful AT a root", got.Roots)
+	}
+}
+
+// TestBrowseDirResponse_RootReportsRootsNotParent is the other half. A root is
+// its own parent, so reporting Parent would render an "up" row that navigates
+// to where the user already is; what sits above it is the root list, which only
+// the daemon can enumerate.
+func TestBrowseDirResponse_RootReportsRootsNotParent(t *testing.T) {
+	// The platform's own root, so this holds on both Unix ("/") and Windows
+	// (the volume of the temp dir).
+	root := filepath.VolumeName(t.TempDir()) + string(filepath.Separator)
+
+	got := browseDirResponse(ipc.BrowseDirReqPayload{Path: root}, "")
+
+	if got.Error != "" {
+		t.Fatalf("Error = %q listing the filesystem root", got.Error)
+	}
+	if got.Parent != "" {
+		t.Errorf("Parent = %q at a root; a root is its own parent", got.Parent)
+	}
+	if runtime.GOOS == "windows" {
+		if len(got.Roots) == 0 {
+			t.Error("no drive letters reported at a Windows root; 'up' from C:\\ has nothing to show")
+		}
+	} else if len(got.Roots) != 0 {
+		t.Errorf("Roots = %v on Unix; / has nothing above it", got.Roots)
 	}
 }
 

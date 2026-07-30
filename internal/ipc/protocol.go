@@ -582,6 +582,16 @@ type BrowseEntry struct {
 // Parent is the daemon's own answer for "one level up", never computed by the
 // client, for the separator reason described on the request.
 //
+// Roots lists the filesystem roots, and is populated only when Resolved IS a
+// root. On Unix a root has nothing above it, so it stays empty; on Windows it
+// carries the available drive letters, which is what "up" from `C:\` offers.
+//
+// It exists because the client cannot enumerate them: the old browser walked
+// A:\ to Z:\ with os.Stat under a runtime.GOOS check, and both halves describe
+// the machine DRAWING the picker rather than the one holding the disk. Against
+// a Linux daemon there are no drives at all, and against a Windows daemon the
+// letters are the server's.
+//
 // Truncated reports that the directory held more than the listing cap.
 type BrowseDirRespPayload struct {
 	Path      string        `json:"path"`
@@ -589,6 +599,7 @@ type BrowseDirRespPayload struct {
 	Resolved  string        `json:"resolved,omitempty"`
 	Parent    string        `json:"parent,omitempty"`
 	Entries   []BrowseEntry `json:"entries,omitempty"`
+	Roots     []string      `json:"roots,omitempty"`
 	Truncated bool          `json:"truncated,omitempty"`
 	Error     string        `json:"error,omitempty"`
 }

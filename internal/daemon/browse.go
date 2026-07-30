@@ -108,9 +108,14 @@ func browseDirResponse(req ipc.BrowseDirReqPayload, fallback string) ipc.BrowseD
 	}
 	out.Resolved = filepath.Clean(abs)
 	// A root directory is its own parent; reporting that would render an "up"
-	// row that navigates to where the user already is.
+	// row that navigates to where the user already is. At a root, Roots carries
+	// whatever sits above it instead — the drive list on Windows, nothing on
+	// Unix. The client cannot decide either of these: both depend on the
+	// platform holding the filesystem, not the one drawing the picker.
 	if parent := filepath.Dir(out.Resolved); parent != out.Resolved {
 		out.Parent = parent
+	} else {
+		out.Roots = filesystemRoots()
 	}
 
 	entries, err := readDirWithin(out.Resolved, browseTimeout)

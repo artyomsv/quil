@@ -426,9 +426,18 @@ A dropped link is a pause, not an ending. Close the lid, lose wifi, switch from
 ethernet to a hotspot — the session holds.
 
 An amber bar takes the top row, names the host, counts the attempts, and shows
-what `ssh` actually said. Retries back off from half a second to at most thirty,
-and never stop. When the host answers again the panes are reattached with their
-contents intact; nothing respawns, because nothing ever stopped.
+what `ssh` actually said. Retries back off from half a second to at most thirty.
+When the host answers again the panes are reattached with their contents intact;
+nothing respawns, because nothing ever stopped.
+
+**Retrying stops when it cannot possibly help.** A key the server rejects, a host
+key that changed, an agent that went away — none of these improve by being tried
+again, so the banner says so and waits, and `r` retries once you have fixed the
+cause. This is worth more than tidiness: every attempt is a full SSH login, and a
+laptop left retrying a rejected key overnight can get its own address banned by
+the server's brute-force protection. Anything Quil cannot confidently identify as
+permanent keeps retrying, because stopping a session that would have recovered is
+the worse mistake.
 
 **Keystrokes are dropped while the link is down, not queued.** A key typed at a
 dead connection would otherwise be delivered minutes later, into a live agent

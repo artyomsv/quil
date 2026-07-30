@@ -1,7 +1,9 @@
 # Remote Daemon Attach — `quil --remote`
 
-> **Status: Phase 1 shipped, BETA.** Usable for real work with the limits below.
-> Phases 2 and 3 are planned, not built.
+> **Status: Phases 1 and 2 shipped, BETA.** Usable for real work with the limits
+> below. Phase 2's reconnect shipped in v1.45.0 and was hardened in v1.45.1; it
+> is partially verified against a real link — see the manual-check table.
+> Phases 3 and 4 are planned, not built.
 
 Attach a local Quil TUI to a daemon running on another machine. Panes, tabs and
 AI sessions live on the remote host and keep running there when the laptop
@@ -124,7 +126,7 @@ These are real and current. None are bugs to be reported; all are scoped work.
 
 | Limit | Effect | Fixed in |
 |---|---|---|
-| **Reconnect is unverified against a real link** | A dropped link now shows a banner and redials with backoff (Phase 2), but every claim about it rests on unit tests against a fake dialer — no manual ssh drop has been exercised yet. Treat it as unproven rather than absent. | Phase 2 manual checks |
+| **Reconnect is only partly verified against a real link** | A dropped link shows a banner and redials with backoff (Phase 2, v1.45.0). Two of eight manual checks have been run on a real ssh link; the rest still rest on unit tests against a fake dialer. The highest-value one — reconnecting a pane whose plugin has `ghost_buffer = false` — is outstanding, and is exactly the case the two passing checks could not have caught. | Phase 2 manual checks |
 | **Filesystem dialogs read the *local* disk** | The pane working-directory picker, git-repository discovery, kube-context discovery and the Claude session list all browse the machine running the TUI, not the one running the panes. Type remote paths instead of browsing. | Phase 3 |
 | **Plugin availability is decided locally** | `Ctrl+N` greys out a plugin based on whether the binary exists on *your* machine, not the server's. A tool installed only on the remote is shown unavailable, and vice versa. | Phase 3 |
 | **`quil status` refuses under `--remote`** | It reports on the local daemon, so it is blocked rather than silently wrong. Use `ssh <host> quil status`. | Phase 3 |
@@ -177,15 +179,28 @@ falls back to `~/.local/bin` and tells you the old copy is now shadowed.
 
 ---
 
-## Phase 2 — reconnect (code complete, unverified on a real link)
+## Phase 2 — reconnect (shipped v1.45.0, hardened v1.45.1)
 
 A dropped link is a pause rather than an ending.
 
 - The drop is reported as data, not as a quit, so it stays distinguishable from
   the daemon deliberately asking the TUI to exit.
-- Redial backs off from 500 ms to a 30 s cap with half jitter, retries without
-  limit, and runs in **batch mode** — by then Bubble Tea holds the terminal in
-  raw mode, so ssh has nowhere to prompt and a prompt would hang the attempt.
+- Redial backs off from 500 ms to a 30 s cap with half jitter and runs in
+  **batch mode** — by then Bubble Tea holds the terminal in raw mode, so ssh has
+  nowhere to prompt and a prompt would hang the attempt.
+- **An attempt counts as restored only once the far side answers.** A dial
+  proves the ssh *binary* started, nothing more; against an unreachable host
+  every attempt reported success, blanked the panes for a replay that never
+  came, and reset the counter so the backoff never engaged. Each attempt now
+  completes a version round-trip before the banner clears.
+- **Retries stop when retrying cannot help** (v1.45.1). A short list of ssh
+  failures that will not fix themselves — rejected key, changed host key, no
+  agreeable algorithm — parks the loop instead of retrying; `r` resumes without
+  undoing the rate decay. Reachable without an attacker: the first dial is
+  non-batch so ssh can prompt for a passphrase, every redial is batch, so a
+  passphrase-only key authenticates once and fails `publickey` forever after —
+  straight into a default fail2ban jail. Anything unmatched stays transient,
+  because mis-parking a session that would have healed is the worse error.
 - Input is frozen, not buffered. A keystroke typed at a dead link would arrive
   in a live agent session minutes later at a prompt that has moved on. `Ctrl+Q`
   stays live as the only exit from a host that never returns.
@@ -315,14 +330,14 @@ reports a timeout. The residual — a scan already parked in a syscall still
 wedges the single-flight slot for the daemon's lifetime — is tracked in
 `techdebt/3-3-discovery-scan-cannot-be-interrupted-mid-syscall.md`.
 
-### Phase 2 — reconnect
+### Phase 2 — reconnect (shipped, v1.45.0 + v1.45.1)
 
 Goal: a dropped link becomes a pause, not an ending.
 
 | ID | Item | Blocked by | Status |
 |---|---|---|---|
 | RD-010 | Distinguish link loss from `MsgCloseTUI` in `listenForMessages` | — | done (code) |
-| RD-011 | Redial loop: exponential backoff + jitter, ~30 s cap, unbounded retries, Ctrl+Q aborts | RD-001, RD-010 | done (code) |
+| RD-011 | Redial loop: exponential backoff + jitter, ~30 s cap, unbounded retries (narrowed by RD-019), Ctrl+Q aborts | RD-001, RD-010 | done (code) |
 | RD-012 | Input freeze + reconnecting banner | RD-010 | done (code) |
 | RD-013 | VT, raw ring, scroll offset and selection reset for **every** pane before replay | RD-010 | done (code) |
 | RD-014 | Work-state reset or replayed-event dedup (`applyWorkTransition` has no dedup) | RD-010 | done (code) |
@@ -332,12 +347,33 @@ Goal: a dropped link becomes a pause, not an ending.
 | RD-018 | Cap the batch-dial stderr buffer; tee it sanitized into `quil.log` | — | done |
 | RD-019 | Park the reconnect loop on a permanent ssh failure; `r` resumes | RD-018 | done |
 
-**"done (code)" is deliberate wording.** All seven are implemented and covered
-by 47 unit tests against a fake dialer, with `test`, `test-race` and `vet` green
-and the Windows TUI suite passing natively. **None has been exercised against a
-real ssh link.** The phase is not closed until the manual checks below pass;
-until then the status means "the code is written", not "the behaviour is
-confirmed".
+**"done (code)" is deliberate wording.** Every item is implemented, shipped and
+covered by unit tests against a fake dialer — 65 test functions in
+`internal/tui/reconnect_test.go`, 75 across `internal/transport`, and 4 more in
+`cmd/quil/remote_redial_test.go` covering the dial wiring itself — with
+`test`, `test-race` and `vet` green and the Windows suites passing natively.
+**Two of the eight manual checks below have been exercised against a real ssh
+link; six have not.** Shipping did not change what the wording means: for the
+outstanding rows the status still reads "the code is written", not "the
+behaviour is confirmed", and the phase is not closed until they pass.
+
+RD-017…RD-019 carry a plain `done` rather than `done (code)`. Each was
+reproduced first — a 3-in-8 native-Windows hang, an unbounded remote-fed buffer,
+a batch dial whose stderr reached no log — and each has a test that fails
+against the unfixed code, so the evidence is not "a real link would have shown
+it".
+
+Their **wiring** is now pinned too, which the unit tests did not cover: the
+transport proves it tees a batch dial's stderr, and the classifier proves it
+reads its three signals, but nothing proved `redialRemote` joined either one.
+Each of the three new guards was checked by breaking the code and watching it
+fail — dialling with a nil sink, building a fresh sink per attempt (which resets
+the session byte budget on exactly the flapping link it exists for), and turning
+`client.Close()` into `defer client.Close()`. That last one is a one-word edit
+that reads as tidier Go, and it silently reverts RD-019: `ExitCode` is only final
+once `Close` has reaped the child, so deferring makes every read `-1`, fails the
+classifier's 255 gate, and returns every permanent auth failure to an unbounded
+retry.
 
 Outstanding manual verification:
 
@@ -351,6 +387,13 @@ Outstanding manual verification:
 | Ctrl+Q during an outage | the only exit from a host that never returns | outstanding |
 | Drop the link mid-agent-turn with subagents running | spinner reflects reality rather than wedging (RD-014) | outstanding |
 | Local session, daemon stopped | still exits rather than spinning — the local path must be unchanged | outstanding |
+| Read `quil.log` after a reconnect and find ssh's own lines in it | RD-018 — the batch arm had no sanitizer and no sink, so diagnostics vanished exactly once a link started flapping. The wiring is now pinned by test; what a real link adds is that the lines are *legible and useful*, which no assertion can judge | outstanding |
+| Remove the key from the remote's `authorized_keys`, drop the link | RD-019 — the banner parks and says why, `r` resumes after restoring the key. Classification and its ordering are pinned by test; what a real link adds is that OpenSSH's actual wording still matches the marker list | outstanding |
+
+The two runs recorded above were made on the PR #113 tree, i.e. **before**
+RD-017. On Windows that tree could hang on close roughly 3 times in 8, so a
+pass there was probabilistic rather than evidence of the fixed behaviour —
+re-running both on v1.45.1 is worth the two minutes it costs.
 
 **Why the opencode check is now the most valuable one.** The two checks marked
 done both used a *terminal* pane, and code review then found that terminals are
@@ -370,13 +413,23 @@ would duplicate it without covering a failure mode ssh misses. Revisit if
 Phase 4 removes ssh, or if the manual checks show drops going unnoticed for
 materially longer than 45 s.
 
-**Known hazards on this path**, all tracked, none blocking:
+**Known hazards on this path — all three cleared in v1.45.1.** Recorded here
+because each was found by review of Phase 2 rather than by using it, and the
+techdebt files they were tracked in have been deleted along with the defects.
 
-| Hazard | Nature | Tracked in |
+| Hazard | Nature | Cleared by |
 |---|---|---|
-| `stdioConn.Close` can block racing the pump's uncancellable read on Windows, and a redial closes a client every attempt | pre-existing; reproduces unchanged on the Phase 1.5 tree | `techdebt/3-3-stdioconn-close-races-pump-read-on-windows.md` |
-| Batch dials buffer ssh stderr with no cap and no logging — and Phase 2 made those conns session-length for the first time | transport design newly exposed by reconnect; also loses post-reconnect ssh diagnostics from `quil.log` | `techdebt/3-3-batch-ssh-stderr-unbounded-and-unlogged.md` |
-| A reconnect cannot tell a permanent auth failure from a transient one, so a passphrase-protected key with no agent retries forever and can trip a fail2ban jail | mitigated by rate decay (~120 → ~33 attempts/hour), not eliminated | `techdebt/3-3-reconnect-cannot-classify-permanent-ssh-failure.md` |
+| `stdioConn.Close` blocks racing the pump's uncancellable read on Windows, and a redial closes a client every attempt | pre-existing; Phase 2 turned a per-session event into a per-attempt one. Reproduced natively at 3 hangs in 8 whole-package runs, 0 in 12 after | RD-017 |
+| Batch dials buffer ssh stderr with no cap and no logging — Phase 2 made those conns session-length for the first time | ssh multiplexes the *remote* command's fd 2 onto that stream, so the writer is remote-influenced and unbounded. Also silently lost post-reconnect diagnostics from `quil.log` | RD-018 |
+| A reconnect cannot tell a permanent auth failure from a transient one, so a passphrase-protected key with no agent retries forever and can trip a fail2ban jail | mitigated by rate decay (~120 → ~33 attempts/hour), not eliminated | RD-019 |
+
+The same property that made RD-018 a hazard also shaped RD-019's fix: because
+ssh's stderr carries remote output, the text alone cannot be trusted to say
+*ssh* failed — an ordinary `~/.bashrc` printing `permission denied` would
+otherwise park the session, and a compromised remote could do it on purpose.
+Two independent gates make the text attributable to ssh before it can park
+anything: no byte may have arrived on stdout, and the exit status must be ssh's
+own 255.
 
 ### Phase 3 — remote-correct UI
 

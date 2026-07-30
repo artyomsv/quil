@@ -321,6 +321,17 @@ func TestStdioConn_LinkErr_SatisfiesLinkStatus(t *testing.T) {
 // the kill that would end the read sits BELOW the close that never returns.
 // Without this test that shows up only as the whole package timing out at
 // random, which reads as flakiness rather than as the bug it is.
+//
+// **INERT ON LINUX — this is documentation on CI, not a gate.** Verified by
+// mutation: with the fix reverted, this test still PASSES in the Linux
+// container, because os.Pipe descriptors there are netpoller-integrated and
+// Close unparks a blocked read immediately. There is no deadlock to observe off
+// Windows, and this project's CI is a Linux container. The real gate is a
+// native Windows run — build a Windows test binary in Docker and execute the
+// .exe on the host (the repo's established pattern for Windows-only behaviour);
+// the baseline was 3 hangs in 8 whole-package runs, 0 in 10 after the fix.
+// Kept anyway: it pins the descriptor-ownership contract for a human reader and
+// does gate the defect for anyone who runs it where the defect exists.
 func TestStdioConn_Close_ReturnsWhilePumpIsParkedInRead(t *testing.T) {
 	inR, inW, err := os.Pipe()
 	if err != nil {

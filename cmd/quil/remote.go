@@ -363,6 +363,35 @@ func (s *sshStderrLogger) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// markPermanentLinkFailure wraps cause with tui.ErrLinkPermanent when the
+// link's own signals attribute the failure to ssh rather than to the far side.
+//
+// Extracted from redialRemote so the wiring is testable: the classifier is
+// covered in internal/transport and the TUI's reaction to an already-wrapped
+// sentinel is covered in internal/tui, but neither proves the two are joined
+// correctly — that the right string is classified, and that the wrap survives
+// errors.Is in the direction the banner needs.
+//
+// MUST be called AFTER the conn is closed. Close is what reaps the child, so
+// ExitCode is only final then; LinkErr is the opposite and must be read before.
+// The caller owns that ordering — this function cannot enforce it.
+//
+// A nil link means no signals at all, so nothing is attributable and the caller
+// keeps retrying.
+func markPermanentLinkFailure(cause error, link transport.LinkStatus) error {
+	if link == nil {
+		return cause
+	}
+	if transport.ClassifyLinkFailure(cause.Error(), link.Established(), link.ExitCode()) != transport.LinkFailurePermanent {
+		return cause
+	}
+	// cause FIRST, sentinel second. %w works in any position since Go 1.20 and
+	// errors.Is is unaffected — but the banner renders this string, and leading
+	// with the sentinel would spend ~35 cells on boilerplate before reaching
+	// ssh's own words, on a row that already fights for width.
+	return fmt.Errorf("%v: %w", cause, tui.ErrLinkPermanent)
+}
+
 // redialTimeout bounds one reconnect attempt. Longer than the transport's own
 // ConnectTimeout so authentication has room after the TCP connect succeeds.
 const redialTimeout = 30 * time.Second
@@ -555,16 +584,7 @@ func redialRemote(cfg config.Config) tui.RedialFunc {
 			//
 			// nil link means no signals at all, so nothing is attributable and
 			// the loop keeps retrying.
-			if link != nil &&
-				transport.ClassifyLinkFailure(cause.Error(), link.Established(), link.ExitCode()) == transport.LinkFailurePermanent {
-				// cause FIRST, sentinel second. %w works in any position since
-				// Go 1.20 and errors.Is is unaffected — but the banner renders
-				// this string, and leading with the sentinel would spend ~35
-				// cells on boilerplate before reaching ssh's own words, on a row
-				// that already fights for width.
-				return nil, fmt.Errorf("%v: %w", cause, tui.ErrLinkPermanent)
-			}
-			return nil, cause
+			return nil, markPermanentLinkFailure(cause, link)
 		}
 		return client, nil
 	}

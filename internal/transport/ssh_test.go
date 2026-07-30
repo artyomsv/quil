@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"reflect"
@@ -397,4 +398,54 @@ func TestHelperStderr(t *testing.T) {
 	// OSC 52 is a clipboard write — the concrete capability a compromised remote
 	// gains if this stream reaches a renderer unfiltered.
 	fmt.Fprint(os.Stderr, "\x1b]52;c;cGF5bG9hZA==\x07warned\n")
+}
+
+// errWriter fails every write, which is the only condition bestEffort exists to
+// absorb.
+type errWriter struct{ n int }
+
+func (e *errWriter) Write(p []byte) (int, error) {
+	e.n++
+	return 0, errors.New("disk full")
+}
+
+// TestBestEffort_AbsorbsSinkErrors pins the property the whole StderrSink tee
+// depends on.
+//
+// io.MultiWriter ABORTS at the first writer error, so without this a failed log
+// write — disk full, or rotation holding the file on Windows — would stop exec's
+// copier entirely and errBuf would go silent too, losing the diagnostics LinkErr
+// and the classifier actually read. A logging failure must never cost the error
+// message.
+func TestBestEffort_AbsorbsSinkErrors(t *testing.T) {
+	inner := &errWriter{}
+	var kept lockedBuffer
+	tee := io.MultiWriter(&kept, bestEffort{inner})
+
+	payload := []byte("ssh: Permission denied (publickey)\n")
+	for i := 0; i < 3; i++ {
+		n, err := tee.Write(payload)
+		if err != nil {
+			t.Fatalf("write %d: MultiWriter aborted on a sink error: %v", i, err)
+		}
+		if n != len(payload) {
+			t.Fatalf("write %d returned %d, want %d", i, n, len(payload))
+		}
+	}
+
+	if inner.n != 3 {
+		t.Errorf("the failing sink saw %d writes, want 3 — it must still be attempted", inner.n)
+	}
+	if got := kept.String(); strings.Count(got, "Permission denied") != 3 {
+		t.Errorf("the diagnostic buffer lost content to the sink's failure: %q", got)
+	}
+}
+
+// TestBestEffort_NilSinkIsSafe covers the guard that lets a caller pass no sink
+// at all without a nil dereference on the exec copier's goroutine.
+func TestBestEffort_NilSinkIsSafe(t *testing.T) {
+	n, err := bestEffort{nil}.Write([]byte("anything"))
+	if err != nil || n != len("anything") {
+		t.Errorf("bestEffort{nil}.Write = (%d, %v), want (%d, nil)", n, err, len("anything"))
+	}
 }

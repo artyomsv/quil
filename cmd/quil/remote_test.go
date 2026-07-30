@@ -9,6 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/artyomsv/quil/internal/transport"
+	"github.com/artyomsv/quil/internal/tui"
 )
 
 // withRemote sets remote mode for one test and restores it afterwards.
@@ -462,5 +465,84 @@ func TestSSHStderrLogger_StopsAtTheBudget(t *testing.T) {
 	n, err := s.Write([]byte("more\n"))
 	if err != nil || n != len("more\n") {
 		t.Errorf("post-budget Write = (%d, %v), want (%d, nil)", n, err, len("more\n"))
+	}
+}
+
+// fakeLink is a transport.LinkStatus whose signals a test controls.
+type fakeLink struct {
+	err         error
+	established bool
+	exitCode    int
+}
+
+func (f fakeLink) LinkErr() error    { return f.err }
+func (f fakeLink) Established() bool { return f.established }
+func (f fakeLink) ExitCode() int     { return f.exitCode }
+
+// TestMarkPermanentLinkFailure joins the two halves neither package's own tests
+// can: the classifier is covered in internal/transport and the TUI's reaction to
+// a wrapped sentinel in internal/tui, but nothing proved they are actually wired
+// together — that the right string reaches the classifier, and that the wrap
+// survives errors.Is in the direction the banner needs.
+func TestMarkPermanentLinkFailure(t *testing.T) {
+	denied := errors.New("ssh: Permission denied (publickey)")
+	timedOut := errors.New("ssh: connect to host gpu01 port 22: Connection timed out")
+
+	tests := []struct {
+		name      string
+		cause     error
+		link      transport.LinkStatus
+		permanent bool
+	}{
+		{
+			name:      "ssh denied before the remote ever ran",
+			cause:     denied,
+			link:      fakeLink{established: false, exitCode: transport.ExitSSHOwnFailure},
+			permanent: true,
+		},
+		{
+			name:      "the same words once the remote has spoken are the remote's",
+			cause:     denied,
+			link:      fakeLink{established: true, exitCode: transport.ExitSSHOwnFailure},
+			permanent: false,
+		},
+		{
+			name:      "the same words with the remote command's own status",
+			cause:     denied,
+			link:      fakeLink{established: false, exitCode: 127},
+			permanent: false,
+		},
+		{
+			name:      "a transient failure is never marked",
+			cause:     timedOut,
+			link:      fakeLink{established: false, exitCode: transport.ExitSSHOwnFailure},
+			permanent: false,
+		},
+		{
+			name:      "no link means no signals, so nothing is attributable",
+			cause:     denied,
+			link:      nil,
+			permanent: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := markPermanentLinkFailure(tt.cause, tt.link)
+
+			if errors.Is(got, tui.ErrLinkPermanent) != tt.permanent {
+				t.Errorf("errors.Is(_, ErrLinkPermanent) = %v, want %v (err: %v)",
+					!tt.permanent, tt.permanent, got)
+			}
+			// The cause must survive either way — it is what the banner shows,
+			// and losing it leaves the user a sentence naming nothing they can
+			// act on.
+			if !strings.Contains(got.Error(), tt.cause.Error()) {
+				t.Errorf("wrapped error %q dropped the cause %q", got, tt.cause)
+			}
+			if tt.permanent && !strings.HasPrefix(got.Error(), tt.cause.Error()) {
+				t.Errorf("wrapped error %q does not LEAD with the cause; the banner "+
+					"would spend its width on boilerplate before ssh's own words", got)
+			}
+		})
 	}
 }

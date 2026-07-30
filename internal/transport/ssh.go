@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -109,6 +110,15 @@ type SSHOptions struct {
 	// deadlock the display — on Windows especially, since ssh reads CONIN$
 	// directly rather than stdin.
 	Batch bool
+
+	// StderrSink receives a sanitized copy of the child's stderr on a batch
+	// dial. Nil discards it, which is the pre-reconnect behaviour.
+	//
+	// Only meaningful with Batch. A non-batch dial's stderr goes to the terminal
+	// and moves to the log later through RedirectStderr instead — a seam that is
+	// a no-op here, because there is no switchWriter on this path, which is why
+	// post-reconnect diagnostics needed their own route.
+	StderrSink io.Writer
 }
 
 // connectTimeoutSecs converts a Duration to the whole seconds ssh expects,
@@ -232,6 +242,14 @@ func SSH(dest string, opts SSHOptions) func(context.Context) (net.Conn, error) {
 		if opts.Batch {
 			errBuf = &lockedBuffer{}
 			cmd.Stderr = errBuf
+			if opts.StderrSink != nil {
+				// Sanitized into the sink, raw into the buffer. LinkErr
+				// sanitizes the buffer when it reads it, but the sink is
+				// quil.log — rendered by the F1 viewer and read with cat — and
+				// this stream carries the remote command's fd 2, so it is
+				// attacker-influenced wherever it lands.
+				cmd.Stderr = io.MultiWriter(errBuf, &terminalSanitizer{w: bestEffort{opts.StderrSink}})
+			}
 		} else {
 			// Sanitized, not raw. ssh multiplexes the REMOTE command's fd 2
 			// onto its own stderr, and this fd stays attached for the whole
@@ -284,17 +302,73 @@ func SSH(dest string, opts SSHOptions) func(context.Context) (net.Conn, error) {
 	}
 }
 
+// stderrBufCap bounds what a batch dial retains from ssh's stderr.
+//
+// ssh multiplexes the REMOTE command's fd 2 onto its own stderr, and a
+// successful batch reconnect now holds its conn for the whole session — so
+// without a cap a noisy or hostile remote grows this process without bound, and
+// LinkErr's sanitize pass runs a full copy over whatever accumulated. LinkErr
+// already truncates the MESSAGE to 2000 bytes and wants the most recent output,
+// so keeping the tail loses nothing any caller reads.
+const stderrBufCap = 64 << 10
+
 // lockedBuffer is a bytes.Buffer safe for the exec package's writer goroutine
-// to fill while the dial path reads it on error.
+// to fill while the dial path reads it on error. Bounded at stderrBufCap,
+// tail-kept.
 type lockedBuffer struct {
-	mu  sync.Mutex
+	mu sync.Mutex
+	// NAMED, never embedded. Embedding promotes bytes.Buffer.ReadFrom, which
+	// makes io.Copy take its ReaderFrom fast path — bypassing both the mutex
+	// and the cap below into an unbounded read straight off a remote-fed pipe.
 	buf bytes.Buffer
 }
 
 func (b *lockedBuffer) Write(p []byte) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.buf.Write(p)
+	n, err := b.buf.Write(p)
+	// Trimmed at TWICE the cap, not at the cap. Trimming on every write past
+	// the limit costs a 64 KiB alloc + copy per call regardless of how few
+	// bytes arrived, so a remote pacing one byte at a time turns each byte into
+	// 64 KiB of work. Letting it run to 2× amortizes that to O(1) per byte
+	// while keeping the same guarantee: the retained tail is never shorter than
+	// stderrBufCap, and LinkErr truncates to 2000 bytes anyway.
+	if b.buf.Len() > 2*stderrBufCap {
+		// Copy the tail out BEFORE Reset: the slice Bytes() returns aliases the
+		// buffer's own storage, which Reset rewinds and the next Write
+		// overwrites in place.
+		cur := b.buf.Bytes()
+		tail := make([]byte, stderrBufCap)
+		copy(tail, cur[len(cur)-stderrBufCap:])
+		b.buf.Reset()
+		b.buf.Write(tail)
+	}
+	// n is the inner count, not the post-trim length: reporting anything less
+	// than len(p) makes io.Copy treat it as a short write and retry forever.
+	return n, err
+}
+
+// bestEffort reports every write as a full success.
+//
+// It sits under the stderr tee because io.MultiWriter ABORTS at the first
+// writer error: without it, one failed log write (disk full, rotation holding
+// the file on Windows) stops exec's copier entirely and the diagnostic buffer
+// LinkErr reads goes silent too. A dropped log line is the acceptable loss; a
+// lost error message is not. Same reasoning as switchWriter's nil sink.
+type bestEffort struct{ w io.Writer }
+
+func (b bestEffort) Write(p []byte) (int, error) {
+	if b.w != nil {
+		_, _ = b.w.Write(p)
+	}
+	return len(p), nil
+}
+
+// Len reports the retained byte count. Used by tests to assert the bound.
+func (b *lockedBuffer) Len() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Len()
 }
 
 func (b *lockedBuffer) String() string {

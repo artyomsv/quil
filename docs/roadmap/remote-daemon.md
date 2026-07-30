@@ -328,6 +328,9 @@ Goal: a dropped link becomes a pause, not an ending.
 | RD-014 | Work-state reset or replayed-event dedup (`applyWorkTransition` has no dedup) | RD-010 | done (code) |
 | RD-015 | Exactly one live listen loop across the client swap | RD-011 | done (code) |
 | RD-016 | `sawFirstState` survives reconnect; ghost re-dim accepted as cosmetic | RD-011 | done (code) |
+| RD-017 | `stdioConn.Close` no longer closes the read handle the pump is parked on (Windows) | — | done |
+| RD-018 | Cap the batch-dial stderr buffer; tee it sanitized into `quil.log` | — | done |
+| RD-019 | Park the reconnect loop on a permanent ssh failure; `r` resumes | RD-018 | done |
 
 **"done (code)" is deliberate wording.** All seven are implemented and covered
 by 47 unit tests against a fake dialer, with `test`, `test-race` and `vet` green

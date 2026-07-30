@@ -166,10 +166,28 @@ func (c *stdioConn) reap() {
 // permanent block.
 func (c *stdioConn) pump() {
 	// Deferred LIFO: close(readCh) runs FIRST, unparking any blocked reader,
-	// and only then does reap() park this goroutine in Wait. Reversed, a child
-	// that closed stdout without exiting would hold every reader blocked until
-	// Close killed it.
+	// then c.r is released, and only then does reap() park this goroutine in
+	// Wait. Reversed, a child that closed stdout without exiting would hold
+	// every reader blocked until Close killed it.
+	//
+	// c.r is closed HERE, by its only reader, and never by Close. Windows pipe
+	// handles are non-overlapped — the same property that forces SetReadDeadline
+	// into this adapter — so a parked ReadFile cannot be cancelled and
+	// internal/poll.FD.Close blocks until that read's reference drops. Closing
+	// from Close deadlocks against this goroutine, and the kill that would end
+	// the read sits BELOW the close that never returns. Reordering Close to kill
+	// first is not the fix: it waits for a natural exit on purpose, because Kill
+	// is TerminateProcess(handle, 1) on Windows and would overwrite the 127/126
+	// statuses remoteinstall detection reads.
+	//
+	// The trade: Close no longer force-unparks this read. A real conn is fine —
+	// Close kills ssh, stdout EOFs, this returns — and a cmd-less conn is EOF'd
+	// when its write end goes. A cmd-less conn whose write end is held open
+	// elsewhere keeps this goroutine and descriptor alive until that holder lets
+	// go; a test-only shape, traded against a deadlock that was reachable from
+	// the TUI exit path and every reconnect attempt.
 	defer c.reap()
+	defer c.r.Close()
 	defer close(c.readCh)
 	buf := make([]byte, readChunk)
 	for {
@@ -273,7 +291,10 @@ func (c *stdioConn) Close() error {
 		// outcome we wanted. Reporting any of it would turn a normal close into
 		// a spurious failure. Close itself returns nil for the same reason.
 		_ = c.w.Close()
-		_ = c.r.Close()
+		// c.r is NOT closed here — pump owns it. Closing ssh's stdin above and
+		// killing the child below is what ends the pump's read; it then releases
+		// the descriptor on its way out. See pump's defer stack for why this
+		// goroutine must not do it.
 		if c.cmd != nil && c.cmd.Process != nil {
 			// When the pipe has already failed, the child is on its way out by
 			// itself and its real exit status IS the diagnosis — 127 for a

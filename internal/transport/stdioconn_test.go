@@ -311,3 +311,60 @@ func TestStdioConn_LinkErr_SatisfiesLinkStatus(t *testing.T) {
 		t.Error("a stdioConn behind a net.Conn no longer satisfies LinkStatus")
 	}
 }
+
+// TestStdioConn_Close_ReturnsWhilePumpIsParkedInRead pins the descriptor
+// ownership that keeps Close off the pump's in-flight read.
+//
+// Windows pipe handles are non-overlapped, so a parked ReadFile cannot be
+// cancelled and internal/poll.FD.Close blocks until its reference drops. If
+// Close ever closes c.r itself while the pump is inside Read, the two deadlock:
+// the kill that would end the read sits BELOW the close that never returns.
+// Without this test that shows up only as the whole package timing out at
+// random, which reads as flakiness rather than as the bug it is.
+//
+// **INERT ON LINUX — this is documentation on CI, not a gate.** Verified by
+// mutation: with the fix reverted, this test still PASSES in the Linux
+// container, because os.Pipe descriptors there are netpoller-integrated and
+// Close unparks a blocked read immediately. There is no deadlock to observe off
+// Windows, and this project's CI is a Linux container. The real gate is a
+// native Windows run — build a Windows test binary in Docker and execute the
+// .exe on the host (the repo's established pattern for Windows-only behaviour);
+// the baseline was 3 hangs in 8 whole-package runs, 0 in 10 after the fix.
+// Kept anyway: it pins the descriptor-ownership contract for a human reader and
+// does gate the defect for anyone who runs it where the defect exists.
+func TestStdioConn_Close_ReturnsWhilePumpIsParkedInRead(t *testing.T) {
+	inR, inW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	// inW stays open for the whole test so the pump's read genuinely parks
+	// instead of taking an immediate EOF. Cleanup rather than defer: it must
+	// outlive the Close under test, and closing it is what finally lets the
+	// pump exit and release inR.
+	t.Cleanup(func() { inW.Close(); outR.Close() })
+
+	// A never-started command, matching pipePair: Process is nil, so Close
+	// skips the kill and reaches the pipe closes with nothing to unpark it.
+	c := newStdioConn(exec.Command("nonexistent-by-design"), inR, outW, "parked-read")
+
+	// Let the pump reach its read. Without this the race is not set up and the
+	// test would pass for the wrong reason.
+	time.Sleep(300 * time.Millisecond)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		c.Close()
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close blocked while the pump was parked in Read — the read " +
+			"descriptor is being closed from the wrong goroutine")
+	}
+}

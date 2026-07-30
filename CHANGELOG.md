@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Reconnecting now stops when retrying cannot possibly help.** If a remote
+  session drops for a reason that will not fix itself — a key the server
+  rejects, a host key that changed, an agent that went away — Quil no longer
+  retries forever. It says so in the banner and waits; press `r` to try again
+  once you have fixed the cause, or `ctrl+q` to quit. This matters beyond
+  tidiness: every retry is a full SSH login, and a laptop left overnight
+  retrying a rejected key can get its own address banned by the server's
+  brute-force protection. Anything Quil cannot confidently identify as
+  permanent still retries as before, because a session that would have
+  recovered must never be stopped by mistake.
+
+### Fixed
+- **Quil no longer freezes when a remote session ends on Windows.** Closing a
+  remote session, or reconnecting after a drop, could hang indefinitely instead
+  of finishing — leaving the banner stuck on the first attempt with the
+  keyboard unresponsive. The cleanup was waiting on a read that could never be
+  interrupted while the step that would have ended it waited behind the same
+  cleanup.
+- **SSH's own explanations reach `quil.log` again after a reconnect.** Once a
+  remote session had reconnected even once, warnings from `ssh` — a timeout, a
+  server that stopped responding — went nowhere, so a connection that kept
+  dropping became hardest to diagnose exactly when you needed the detail. They
+  are recorded again, one entry per line.
+- **A remote host can no longer grow Quil's memory or flood its log.** Output
+  from the far side is now kept within a fixed size, and what reaches the log
+  is limited per session, so a noisy or misbehaving host cannot consume memory
+  without bound or push the rest of your log history out of the archive.
+
 ## [1.45.0] - 2026-07-30
 
 ### Fixed

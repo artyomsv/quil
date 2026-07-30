@@ -1517,3 +1517,141 @@ func armAndReplayAll(t *testing.T, m *Model, data string) {
 		deliverGhost(t, m, p.ID, data)
 	}
 }
+
+// TestReconnect_PermanentFailureParksInsteadOfRetrying pins the fail2ban guard.
+//
+// Every reconnect is a full authentication, so a rejected key retried forever
+// is a stream of failed auths from the operator's own address — which a default
+// sshd jail bans, locking them out of a host that was never unreachable.
+func TestReconnect_PermanentFailureParksInsteadOfRetrying(t *testing.T) {
+	m := newReconnectTestModel(t, 1)
+	m.reconnect.active = true
+	m.reconnect.attempt = 3
+
+	updated, cmd := m.Update(redialResultMsg{
+		gen: m.clientGen,
+		err: fmt.Errorf("Permission denied (publickey): %w", ErrLinkPermanent),
+	})
+	got := updated.(Model)
+
+	if !got.reconnect.parked {
+		t.Fatal("a permanent failure must park the loop")
+	}
+	if cmd != nil {
+		t.Error("parking must not schedule another redial")
+	}
+	if !got.reconnect.active {
+		t.Error("the banner must stay up while parked — the session is paused, not over")
+	}
+	if got.reconnect.attempt != 3 {
+		t.Errorf("attempt = %d, want it left at 3: parking is not a retry", got.reconnect.attempt)
+	}
+}
+
+// TestReconnect_TransientFailureStillRetries is the control arm. Without it the
+// park test passes for a model that parks on EVERY failure.
+func TestReconnect_TransientFailureStillRetries(t *testing.T) {
+	m := newReconnectTestModel(t, 1)
+	m.reconnect.active = true
+	m.reconnect.attempt = 3
+
+	updated, cmd := m.Update(redialResultMsg{
+		gen: m.clientGen,
+		err: errors.New("ssh: connect to host gpu01 port 22: Connection timed out"),
+	})
+	got := updated.(Model)
+
+	if got.reconnect.parked {
+		t.Error("an unclassified failure must keep retrying, not park")
+	}
+	if cmd == nil {
+		t.Error("a transient failure must schedule another redial")
+	}
+}
+
+// TestReconnect_ResumeKeyRestartsAParkedLoop covers the way back. A parked
+// session with no resume path would leave "quit and relaunch" as the only
+// option, which is what the banner exists to avoid.
+func TestReconnect_ResumeKeyRestartsAParkedLoop(t *testing.T) {
+	m := newReconnectTestModel(t, 1)
+	m.reconnect.active = true
+	m.reconnect.parked = true
+	m.reconnect.attempt = 3
+	m.reconnect.lastErr = errors.New("Permission denied (publickey)")
+
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: 'r', Text: "r"})
+	got := updated.(Model)
+
+	if got.reconnect.parked {
+		t.Error("the resume key must clear the parked state")
+	}
+	if cmd == nil {
+		t.Fatal("resuming must schedule a redial")
+	}
+	if got.reconnect.attempt < 3 {
+		t.Errorf("attempt = %d, want it carried forward: resuming does not un-happen "+
+			"the earlier failures, and restarting the ladder undoes the rate decay",
+			got.reconnect.attempt)
+	}
+}
+
+// TestReconnect_OrdinaryKeysStayFrozenWhileParked guards the freeze. Only the
+// resume key and the quit escape may act.
+func TestReconnect_OrdinaryKeysStayFrozenWhileParked(t *testing.T) {
+	m := newReconnectTestModel(t, 1)
+	m.reconnect.active = true
+	m.reconnect.parked = true
+
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: 'x', Text: "x"})
+	got := updated.(Model)
+
+	if !got.reconnect.parked {
+		t.Error("an ordinary key must not resume a parked loop")
+	}
+	if cmd != nil {
+		t.Error("an ordinary key must produce no command while frozen")
+	}
+}
+
+// TestBannerCandidates_ParkedRungsKeepBothKeys extends the exit-hint invariant
+// to the parked phase. Asserting the bare letter "r" would be tautological —
+// every rung already contains one in "ctrl+q" — so this pins the hint literal.
+func TestBannerCandidates_ParkedRungsKeepBothKeys(t *testing.T) {
+	m := Model{reconnect: reconnectState{active: true, attempt: 3, parked: true}}
+	m.SetRemoteDest("gpu01")
+
+	got := m.bannerCandidates()
+	if len(got) == 0 {
+		t.Fatal("no candidates; renderReconnectBanner would have nothing to fall back to")
+	}
+	for i, c := range got {
+		if !strings.Contains(c, "ctrl+q") {
+			t.Errorf("parked rung %d (%q) has no exit hint", i, c)
+		}
+		if !strings.Contains(c, bannerResumeHint) {
+			t.Errorf("parked rung %d (%q) has no resume hint", i, c)
+		}
+		if strings.Contains(c, "Connecting") {
+			t.Errorf("parked rung %d (%q) claims a connection is in progress; "+
+				"nothing is connecting until the operator acts", i, c)
+		}
+	}
+}
+
+// TestRenderReconnectBanner_ParkedNamesTheCause checks the rendered row, not
+// just the ladder: two real banner defects on this component were invisible to
+// passing unit tests and only showed up in the output.
+func TestRenderReconnectBanner_ParkedNamesTheCause(t *testing.T) {
+	m := newReconnectTestModel(t, 1)
+	m.reconnect.active = true
+	m.reconnect.parked = true
+	m.reconnect.lastErr = errors.New("Permission denied (publickey)")
+	m.SetRemoteDest("gpu01")
+
+	banner := stripANSI(m.renderReconnectBanner(80))
+	for _, want := range []string{"Permission denied", bannerResumeHint, "ctrl+q"} {
+		if !strings.Contains(banner, want) {
+			t.Errorf("banner %q is missing %q", banner, want)
+		}
+	}
+}

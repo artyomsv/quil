@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log"
@@ -11,6 +12,7 @@ import (
 	"github.com/artyomsv/quil/internal/ipc"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/artyomsv/quil/internal/config"
@@ -241,7 +243,7 @@ func dialRemote(cfg config.Config) (*ipc.Client, error) {
 	// passphrase — it runs before tea.NewProgram takes the terminal.
 	log.Printf("remote mode: dialing %s over ssh", remoteDest)
 
-	client, link, err := dialRemoteTransport(context.Background(), cfg, false)
+	client, link, err := dialRemoteTransport(context.Background(), cfg, false, nil)
 	if link != nil {
 		remoteLinkErrFn = link.LinkErr
 		remoteLinkEstablishedFn = link.Established
@@ -265,9 +267,13 @@ func dialRemote(cfg config.Config) (*ipc.Client, error) {
 // ctx bounds the DIAL only. Per the ipc.DialFunc contract the returned conn
 // owns the ssh child and releases it on Close, so a caller may cancel this
 // context the moment the dial returns without killing the session it opened.
-func dialRemoteTransport(ctx context.Context, cfg config.Config, batch bool) (*ipc.Client, transport.LinkStatus, error) {
+func dialRemoteTransport(ctx context.Context, cfg config.Config, batch bool, stderrSink io.Writer) (*ipc.Client, transport.LinkStatus, error) {
 	opts := remoteSSHOptions(cfg)
 	opts.Batch = batch
+	// Only consulted on a batch dial. The interactive dial's stderr belongs on
+	// the terminal, where host-key and passphrase prompts have to be readable,
+	// and moves to the log later via RedirectStderr.
+	opts.StderrSink = stderrSink
 
 	// Keep hold of the transport so callers can tell a dead ssh channel from a
 	// daemon that answered badly. The dial only fails when ssh could not be
@@ -301,6 +307,89 @@ func dialRemoteTransport(ctx context.Context, cfg config.Config, batch bool) (*i
 		return conn, dialErr
 	})
 	return client, link, err
+}
+
+// sshStderrBudget caps how much ssh stderr one session may write to the log.
+//
+// The sink is remote-influenced and lives as long as the session, and the
+// rotating writer keeps only max_files archives — so an unbounded remote could
+// roll the whole archive set and evict every other record of what happened.
+// Disk is never at risk; local history is.
+const sshStderrBudget = 256 << 10
+
+// sshStderrLogger turns ssh's stderr into whole, quoted log records.
+//
+// Writing the bytes straight at the log is not safe even though they are
+// sanitized first: terminalSanitizer deliberately PRESERVES \n, which is
+// correct for its original terminal use and load-bearing here. Every other path
+// that puts remote text in the log goes through log.Printf and slog quotes it
+// inside msg="…"; bytes appended verbatim land at column 0 instead, so a remote
+// could emit a line that reads exactly like a genuine slog record — and the F1
+// log viewer renders it as one. A chunk not ending in \n would also glue the
+// next real record onto the remote's line.
+//
+// So: accumulate, split on \n, and emit each line through %q.
+type sshStderrLogger struct {
+	mu      sync.Mutex
+	dest    string
+	partial []byte
+	written int
+	stopped bool
+}
+
+func (s *sshStderrLogger) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.stopped {
+		return len(p), nil
+	}
+	s.written += len(p)
+	if s.written > sshStderrBudget {
+		s.stopped = true
+		s.partial = nil
+		log.Printf("remote: ssh stderr suppressed after %d bytes from %s", s.written, s.dest)
+		return len(p), nil
+	}
+	s.partial = append(s.partial, p...)
+	for {
+		i := bytes.IndexByte(s.partial, '\n')
+		if i < 0 {
+			break
+		}
+		// %q so a newline the sanitizer preserved cannot begin a new record.
+		log.Printf("remote: ssh stderr: %q", string(s.partial[:i]))
+		s.partial = s.partial[i+1:]
+	}
+	return len(p), nil
+}
+
+// markPermanentLinkFailure wraps cause with tui.ErrLinkPermanent when the
+// link's own signals attribute the failure to ssh rather than to the far side.
+//
+// Extracted from redialRemote so the wiring is testable: the classifier is
+// covered in internal/transport and the TUI's reaction to an already-wrapped
+// sentinel is covered in internal/tui, but neither proves the two are joined
+// correctly — that the right string is classified, and that the wrap survives
+// errors.Is in the direction the banner needs.
+//
+// MUST be called AFTER the conn is closed. Close is what reaps the child, so
+// ExitCode is only final then; LinkErr is the opposite and must be read before.
+// The caller owns that ordering — this function cannot enforce it.
+//
+// A nil link means no signals at all, so nothing is attributable and the caller
+// keeps retrying.
+func markPermanentLinkFailure(cause error, link transport.LinkStatus) error {
+	if link == nil {
+		return cause
+	}
+	if transport.ClassifyLinkFailure(cause.Error(), link.Established(), link.ExitCode()) != transport.LinkFailurePermanent {
+		return cause
+	}
+	// cause FIRST, sentinel second. %w works in any position since Go 1.20 and
+	// errors.Is is unaffected — but the banner renders this string, and leading
+	// with the sentinel would spend ~35 cells on boilerplate before reaching
+	// ssh's own words, on a row that already fights for width.
+	return fmt.Errorf("%v: %w", cause, tui.ErrLinkPermanent)
 }
 
 // redialTimeout bounds one reconnect attempt. Longer than the transport's own
@@ -421,7 +510,16 @@ const probeRequestID = "reconnect-version-probe"
 // because transport.SSH builds its child with exec.Command rather than
 // exec.CommandContext (RD-001) — otherwise this cancel would kill the ssh child
 // of every attempt at the moment it succeeded.
+//
+// Every reconnect's ssh diagnostics go to the log through sshStderrLogger. The
+// startup dial routes them through RedirectStderr instead, but that seam is a
+// no-op on a batch dial — stderr is captured into a buffer and never reaches a
+// terminal — so without this a flapping link becomes undiagnosable after its
+// first reconnect, which is exactly when the diagnosis is wanted.
 func redialRemote(cfg config.Config) tui.RedialFunc {
+	// One framer for the whole session, so its byte budget cannot be reset by
+	// reconnecting.
+	stderrSink := &sshStderrLogger{dest: remoteDest}
 	return func(old tui.Client) (tui.Client, error) {
 		// Release the dead connection's ssh child. The TUI cannot do this: its
 		// Client is only Send/Receive, and this is the layer that knows better.
@@ -432,7 +530,7 @@ func redialRemote(cfg config.Config) tui.RedialFunc {
 		ctx, cancel := context.WithTimeout(context.Background(), redialTimeout)
 		defer cancel()
 
-		client, link, err := dialRemoteTransport(ctx, cfg, true)
+		client, link, err := dialRemoteTransport(ctx, cfg, true, stderrSink)
 		if err != nil {
 			// No LinkErr fallback here, deliberately: transport.SSH returns a
 			// nil conn on failure and `link` is only assigned when the dialer
@@ -466,7 +564,27 @@ func redialRemote(cfg config.Config) tui.RedialFunc {
 				}
 			}
 			client.Close()
-			return nil, cause
+			// Classified HERE rather than in the dial-failure branch above.
+			// That branch cannot see an authentication failure: transport.SSH
+			// returns a nil conn on failure so link is always nil there, and a
+			// dial only fails at spawn level, because exec.Cmd.Start succeeds
+			// as soon as the ssh BINARY launches. Every auth and network
+			// failure arrives here instead.
+			//
+			// ClassifyLinkFailure takes the two attribution gates as well as the
+			// text, because the text alone is remote-influenced: ssh
+			// multiplexes the REMOTE command's fd 2 onto its own stderr. See
+			// that function for why each gate is load-bearing.
+			//
+			// Read AFTER Close, deliberately, and in the opposite order from
+			// LinkErr above: Close is what reaps the child, so the exit status
+			// is only final here — and it preserves ssh's natural status when
+			// the pipe already failed, which is exactly the case where ssh's
+			// own diagnostics are authoritative.
+			//
+			// nil link means no signals at all, so nothing is attributable and
+			// the loop keeps retrying.
+			return nil, markPermanentLinkFailure(cause, link)
 		}
 		return client, nil
 	}

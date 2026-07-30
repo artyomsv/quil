@@ -4,10 +4,14 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/artyomsv/quil/internal/transport"
+	"github.com/artyomsv/quil/internal/tui"
 )
 
 // withRemote sets remote mode for one test and restores it afterwards.
@@ -358,5 +362,187 @@ func TestRedirectRemoteStderr_ForwardsNilAsDiscard(t *testing.T) {
 	}
 	if got != nil {
 		t.Errorf("redirect received %v, want nil", got)
+	}
+}
+
+// captureLog redirects the standard logger for one test and returns what was
+// written. sshStderrLogger emits through log.Printf so that slog quotes the
+// value; asserting on the emitted record is the only way to see the framing.
+func captureLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prevOut, prevFlags, prevPrefix := log.Writer(), log.Flags(), log.Prefix()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	log.SetPrefix("")
+	t.Cleanup(func() {
+		log.SetOutput(prevOut)
+		log.SetFlags(prevFlags)
+		log.SetPrefix(prevPrefix)
+	})
+	return &buf
+}
+
+// TestSSHStderrLogger_EscapesNewlinesSoRemoteTextCannotForgeARecord is the
+// finding this type exists for.
+//
+// terminalSanitizer deliberately PRESERVES \n, so bytes appended verbatim land
+// at column 0 and a remote can emit a line that reads exactly like a genuine
+// log record — which the F1 log viewer then renders as one.
+func TestSSHStderrLogger_EscapesNewlinesSoRemoteTextCannotForgeARecord(t *testing.T) {
+	out := captureLog(t)
+	s := &sshStderrLogger{dest: "gpu01"}
+
+	forged := "warning\ntime=2026-07-30T12:00:00.000+03:00 level=INFO msg=\"link verified\"\n"
+	if _, err := s.Write([]byte(forged)); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	got := out.String()
+	// Two records, one per source line — never one record containing a raw
+	// newline that starts a second.
+	if n := strings.Count(got, "\n"); n != 2 {
+		t.Errorf("emitted %d lines, want 2 (one per source line): %q", n, got)
+	}
+	for _, line := range strings.Split(strings.TrimRight(got, "\n"), "\n") {
+		if !strings.HasPrefix(line, "remote: ssh stderr: ") {
+			t.Errorf("line %q does not carry the prefix that keeps remote text out of column 0", line)
+		}
+	}
+	// The escaped form, not the raw one: %q renders the embedded newline as \n.
+	if strings.Contains(got, "level=INFO msg=\"link verified\"\n") {
+		t.Error("a forged record reached the log unescaped")
+	}
+}
+
+// TestSSHStderrLogger_HoldsPartialLines pins that a chunk without a newline is
+// buffered rather than emitted, so the next genuine record cannot be glued onto
+// a half-written remote line.
+func TestSSHStderrLogger_HoldsPartialLines(t *testing.T) {
+	out := captureLog(t)
+	s := &sshStderrLogger{dest: "gpu01"}
+
+	if _, err := s.Write([]byte("no newline yet")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if got := out.String(); got != "" {
+		t.Errorf("emitted %q for a partial line; want nothing until the line ends", got)
+	}
+
+	if _, err := s.Write([]byte(" and now it ends\n")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if got := out.String(); !strings.Contains(got, "no newline yet and now it ends") {
+		t.Errorf("the two halves were not rejoined: %q", got)
+	}
+}
+
+// TestSSHStderrLogger_StopsAtTheBudget pins the cap that keeps a remote from
+// rolling the whole log archive set and evicting local history.
+func TestSSHStderrLogger_StopsAtTheBudget(t *testing.T) {
+	out := captureLog(t)
+	s := &sshStderrLogger{dest: "gpu01"}
+
+	line := []byte(strings.Repeat("x", 1023) + "\n")
+	for written := 0; written < 2*sshStderrBudget; written += len(line) {
+		if _, err := s.Write(line); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+	}
+
+	got := out.String()
+	if !strings.Contains(got, "suppressed after") {
+		t.Error("the budget was never reported; a silent cap reads as a quiet remote")
+	}
+	// Well under the raw byte count: the point is that it stopped, not the
+	// exact record count.
+	if n := strings.Count(got, "\n"); n > sshStderrBudget/len(line)+2 {
+		t.Errorf("emitted %d records; the budget did not stop the stream", n)
+	}
+
+	// A write after the budget is still accepted — reporting a short count
+	// would make exec's copier retry forever.
+	n, err := s.Write([]byte("more\n"))
+	if err != nil || n != len("more\n") {
+		t.Errorf("post-budget Write = (%d, %v), want (%d, nil)", n, err, len("more\n"))
+	}
+}
+
+// fakeLink is a transport.LinkStatus whose signals a test controls.
+type fakeLink struct {
+	err         error
+	established bool
+	exitCode    int
+}
+
+func (f fakeLink) LinkErr() error    { return f.err }
+func (f fakeLink) Established() bool { return f.established }
+func (f fakeLink) ExitCode() int     { return f.exitCode }
+
+// TestMarkPermanentLinkFailure joins the two halves neither package's own tests
+// can: the classifier is covered in internal/transport and the TUI's reaction to
+// a wrapped sentinel in internal/tui, but nothing proved they are actually wired
+// together — that the right string reaches the classifier, and that the wrap
+// survives errors.Is in the direction the banner needs.
+func TestMarkPermanentLinkFailure(t *testing.T) {
+	denied := errors.New("ssh: Permission denied (publickey)")
+	timedOut := errors.New("ssh: connect to host gpu01 port 22: Connection timed out")
+
+	tests := []struct {
+		name      string
+		cause     error
+		link      transport.LinkStatus
+		permanent bool
+	}{
+		{
+			name:      "ssh denied before the remote ever ran",
+			cause:     denied,
+			link:      fakeLink{established: false, exitCode: transport.ExitSSHOwnFailure},
+			permanent: true,
+		},
+		{
+			name:      "the same words once the remote has spoken are the remote's",
+			cause:     denied,
+			link:      fakeLink{established: true, exitCode: transport.ExitSSHOwnFailure},
+			permanent: false,
+		},
+		{
+			name:      "the same words with the remote command's own status",
+			cause:     denied,
+			link:      fakeLink{established: false, exitCode: 127},
+			permanent: false,
+		},
+		{
+			name:      "a transient failure is never marked",
+			cause:     timedOut,
+			link:      fakeLink{established: false, exitCode: transport.ExitSSHOwnFailure},
+			permanent: false,
+		},
+		{
+			name:      "no link means no signals, so nothing is attributable",
+			cause:     denied,
+			link:      nil,
+			permanent: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := markPermanentLinkFailure(tt.cause, tt.link)
+
+			if errors.Is(got, tui.ErrLinkPermanent) != tt.permanent {
+				t.Errorf("errors.Is(_, ErrLinkPermanent) = %v, want %v (err: %v)",
+					!tt.permanent, tt.permanent, got)
+			}
+			// The cause must survive either way — it is what the banner shows,
+			// and losing it leaves the user a sentence naming nothing they can
+			// act on.
+			if !strings.Contains(got.Error(), tt.cause.Error()) {
+				t.Errorf("wrapped error %q dropped the cause %q", got, tt.cause)
+			}
+			if tt.permanent && !strings.HasPrefix(got.Error(), tt.cause.Error()) {
+				t.Errorf("wrapped error %q does not LEAD with the cause; the banner "+
+					"would spend its width on boilerplate before ssh's own words", got)
+			}
+		})
 	}
 }

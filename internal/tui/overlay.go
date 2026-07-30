@@ -1,12 +1,10 @@
 package tui
 
 import (
-	"context"
 	"log"
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/artyomsv/quil/internal/gitdiscover"
 	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/logger"
 )
@@ -48,11 +46,31 @@ func (m *Model) handleToggleLazygit() tea.Cmd {
 	if normalPane != nil {
 		cwd = normalPane.CWD
 	}
-	// Background for now: this runs on the local disk, where the call is fast
-	// and the user is already waiting on a keypress. RD-020 moves it behind an
-	// RPC, which is where a real deadline belongs.
-	candidates := gitdiscover.Candidates(context.Background(), cwd)
+	// No CWD means the pane has not reported one yet (no OSC 7, or a pane that
+	// never had a shell). Asking the daemon would have it substitute its OWN
+	// default and answer about a directory the user is not in — so an overlay
+	// could open on an unrelated repository. Fall through to the same
+	// no-candidates handling the discovery would have produced.
+	if cwd == "" {
+		return m.resolveLazygitOverlay(tab, nil)
+	}
+	// Asked of the DAEMON, never resolved here. Running gitdiscover in this
+	// process stats the machine drawing the UI, so against a remote host Alt+G
+	// reported "no git repo here" for a directory that is a repository on the
+	// machine that actually holds it — and nothing in that message hinted the
+	// wrong disk had been consulted. The rest of the state machine resumes in
+	// applyGitRepos when the answer lands.
+	return m.requestGitRepos(cwd, tab.ID)
+}
 
+// resolveLazygitOverlay runs steps 3-7 of the Alt+G state machine against an
+// already-resolved candidate list.
+//
+// Split from the discovery above so the decision half can be driven directly.
+// Discovery is about to move behind an RPC (RD-021) because it currently stats
+// the TUI's own disk — which against a remote host describes the wrong machine —
+// and everything below here is unaffected by where the list came from.
+func (m *Model) resolveLazygitOverlay(tab *TabModel, candidates []string) tea.Cmd {
 	// Step 3: no candidates.
 	if len(candidates) == 0 {
 		if tab.overlayPane != nil {

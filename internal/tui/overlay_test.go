@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/artyomsv/quil/internal/config"
+	"github.com/artyomsv/quil/internal/gitdiscover"
 	"github.com/artyomsv/quil/internal/ipc"
 )
 
@@ -102,6 +104,19 @@ func sentTypesFiltered(fake *fakeSender, include ...string) []string {
 }
 
 // ---------------------------------------------------------------------------
+// toggleWithDiscovery drives Alt+G's decision half against candidates resolved
+// for cwd.
+//
+// Alt+G itself now ASKS THE DAEMON (RD-021) instead of reading the local disk,
+// because the TUI's filesystem is the wrong one whenever the daemon is remote.
+// A test calling handleToggleLazygit would therefore assert only that a request
+// was sent. These tests are about steps 3-7 — show, match, availability gate,
+// picker, create — so they resolve candidates the same way the daemon does and
+// drive that half directly.
+func toggleWithDiscovery(m *Model, tab *TabModel, cwd string) tea.Cmd {
+	return m.resolveLazygitOverlay(tab, gitdiscover.Candidates(context.Background(), cwd))
+}
+
 // handleToggleLazygit tests
 // ---------------------------------------------------------------------------
 
@@ -134,9 +149,9 @@ func TestHandleToggleLazygit_NoRepo_NoOverlay_Flashes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m, fake, _ := overlayTestModel(t, plain)
+	m, fake, tab := overlayTestModel(t, plain)
 
-	cmd := m.handleToggleLazygit()
+	cmd := toggleWithDiscovery(m, tab, plain)
 	runCmd(cmd)
 
 	if m.flashText == "" {
@@ -160,7 +175,7 @@ func TestHandleToggleLazygit_NoRepo_ExistingOverlay_Shows(t *testing.T) {
 	tab.overlayPane = overlay
 	tab.overlayVisible = false
 
-	cmd := m.handleToggleLazygit()
+	cmd := toggleWithDiscovery(m, tab, plain)
 	runCmd(cmd)
 
 	if !tab.overlayVisible {
@@ -181,7 +196,7 @@ func TestHandleToggleLazygit_MatchingRepo_ShowsNoCreate(t *testing.T) {
 	tab.overlayPane = overlay
 	tab.overlayVisible = false
 
-	cmd := m.handleToggleLazygit()
+	cmd := toggleWithDiscovery(m, tab, repo)
 	runCmd(cmd)
 
 	if !tab.overlayVisible {
@@ -202,7 +217,7 @@ func TestHandleToggleLazygit_SingleRepo_NoOverlay_Creates(t *testing.T) {
 	repo := gitRepoDir(t)
 	m, fake, tab := overlayTestModel(t, repo)
 
-	cmd := m.handleToggleLazygit()
+	cmd := toggleWithDiscovery(m, tab, repo)
 	runCmd(cmd)
 
 	// pendingOverlayShow must be set for the tab.
@@ -260,7 +275,7 @@ func TestHandleToggleLazygit_DifferentRepo_DestroysAndCreates(t *testing.T) {
 	tab.overlayPane = old
 	tab.overlayVisible = false
 
-	cmd := m.handleToggleLazygit()
+	cmd := toggleWithDiscovery(m, tab, repo)
 	runCmd(cmd)
 
 	destroys := sentTypesFiltered(fake, ipc.MsgDestroyPane)
@@ -282,11 +297,11 @@ func TestHandleToggleLazygit_DifferentRepo_DestroysAndCreates(t *testing.T) {
 func TestHandleToggleLazygit_LazygitUnavailable_Flashes(t *testing.T) {
 	t.Parallel()
 	repo := gitRepoDir(t)
-	m, fake, _ := overlayTestModel(t, repo)
+	m, fake, tab := overlayTestModel(t, repo)
 	// Force the plugin unavailable.
 	m.pluginRegistry.Get("lazygit").Available = false
 
-	cmd := m.handleToggleLazygit()
+	cmd := toggleWithDiscovery(m, tab, repo)
 	runCmd(cmd)
 
 	if m.flashText == "" {
@@ -311,9 +326,9 @@ func TestHandleToggleLazygit_TwoCandidates_OpensPicker(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	m, fake, _ := overlayTestModel(t, base)
+	m, fake, tab := overlayTestModel(t, base)
 
-	cmd := m.handleToggleLazygit()
+	cmd := toggleWithDiscovery(m, tab, base)
 	runCmd(cmd)
 
 	if m.dialog != dialogGitRepoPick {
@@ -432,11 +447,11 @@ func TestToggleLazygit_MultipleRepos_Unavailable_FlashesNoPicker(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	m, fake, _ := overlayTestModel(t, base)
+	m, fake, tab := overlayTestModel(t, base)
 	// Force lazygit unavailable.
 	m.pluginRegistry.Get("lazygit").Available = false
 
-	cmd := m.handleToggleLazygit()
+	cmd := toggleWithDiscovery(m, tab, base)
 	runCmd(cmd)
 
 	if m.flashText == "" {
@@ -465,9 +480,9 @@ func TestToggleLazygit_ManyRepos_PickerCapped(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	m, _, _ := overlayTestModel(t, base)
+	m, _, tab := overlayTestModel(t, base)
 
-	cmd := m.handleToggleLazygit()
+	cmd := toggleWithDiscovery(m, tab, base)
 	runCmd(cmd)
 
 	if m.dialog != dialogGitRepoPick {

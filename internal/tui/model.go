@@ -300,6 +300,7 @@ type Model struct {
 	sessionRows       []ipc.ClaudeSessionInfo // listing for sessionScanCWD, newest first
 	sessionCursor     int                     // row cursor: 0 = "New session", 1.. = sessionRows
 	sessionScroll     int                     // scroll offset for the visible window of the expanded list
+	repoScan          repoScanState           // in-flight Alt+G git discovery (zero value = none)
 	sessionScanCWD    string                  // directory sessionRows belong to
 	sessionState      sessionScanState        // request lifecycle for the session field
 	sessionError      string                  // daemon-reported error (sessionScanFailed)
@@ -1379,6 +1380,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case claudeSessionsRespMsg:
 		m = m.applyClaudeSessions(msg.Resp)
 		return m, m.listenForMessages()
+
+	case gitReposMsg:
+		// MUST re-arm the listen loop, like every other IPC response branch —
+		// omitting it kills IPC for the session, a bug this package has shipped.
+		cmd := m.applyGitRepos(msg.Resp)
+		return m, tea.Batch(cmd, m.listenForMessages())
+
+	case gitScanTimeoutMsg:
+		// Local timer, so deliberately no re-arm.
+		return m, m.applyGitScanTimeout(msg.cwd)
 
 	case sessionScanTimeoutMsg:
 		// Turn a never-answered listing into something diagnosable instead of
@@ -4035,6 +4046,14 @@ func (m Model) listenForMessages() tea.Cmd {
 				return listenContinueMsg{}
 			}
 			return claudeSessionsRespMsg{Resp: payload}
+
+		case ipc.MsgGitReposResp:
+			var payload ipc.GitReposRespPayload
+			if err := msg.DecodePayload(&payload); err != nil {
+				log.Printf("decode git_repos_resp: %v", err)
+				return listenContinueMsg{}
+			}
+			return gitReposMsg{Resp: payload}
 
 		case ipc.MsgClaudeSessionDetailResp:
 			var payload ipc.ClaudeSessionDetailRespPayload

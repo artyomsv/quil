@@ -413,6 +413,11 @@ and `Alt+G` reports `no git repo here`, because `overlay.go:54` calls
 on Windows (RD-021). The pane had to be created by sending `create_pane` over the
 transport by hand.
 
+**RD-021 is now fixed and confirmed against that same VM**: with the RPC deployed
+to both ends, `Alt+G` from the claude-code pane opened lazygit on
+`/home/artyom/homelab` directly. The reproduction below is retained because it
+is what the fix has to keep being measured against.
+
 RD-021 produced the clearest artifact of the two, because a single screen
 contradicted itself: with a claude-code pane open at `/home/artyom/homelab`,
 `Alt+G` flashed `no git repo here` in the status bar while the agent running in
@@ -485,7 +490,7 @@ Goal: every surface that reads a filesystem reads the *server's*.
 | ID | Item | Blocked by | Status |
 |---|---|---|---|
 | RD-020 | Directory-listing RPC — the root fix; every other picker keys off the CWD it returns | RD-004 | daemon half done; TUI half todo |
-| RD-021 | Git repo discovery RPC | RD-004 | **done** (Alt+G; setup-dialog pick list still local) |
+| RD-021 | Git repo discovery RPC | RD-004 | **done, confirmed on a real link** (Alt+G; setup-dialog pick list still local) |
 | RD-022 | Kube context discovery RPC | RD-004 | todo |
 | RD-023 | Plugin registry RPC with server-side `DetectAvailability` | — | todo |
 | RD-024 | Per-target `recent-cwds.json` | RD-020 | todo |

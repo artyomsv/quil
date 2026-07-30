@@ -92,10 +92,20 @@ func (m *Model) applyBrowseDir(resp ipc.BrowseDirRespPayload) tea.Cmd {
 // spinning.
 //
 // Local timer: it must NOT re-arm listenForMessages, unlike the response
-// branch. Matched on the requested (path, child) so a late tick from a
-// superseded request cannot cancel a live one.
+// branch. Matched on the requested (path, child) AND pending — the key alone
+// is not enough here, unlike gitScanTimeoutMsg's match against repoScanState:
+// that reference clears its key back to the zero value on a match, so a late
+// tick can no longer find it. applyBrowseDir cannot do the same, because ""
+// is a valid Path (the daemon's default CWD) and clearing to the zero value
+// would make a genuinely idle browser indistinguishable from one mid-request.
+// applyBrowseDir therefore leaves path/child in place after a match, which
+// means the request's own timeout tick — scheduled alongside the send in
+// requestBrowseDir — is still sitting there and would otherwise fire 8s
+// later and overwrite a just-applied successful listing with a stale
+// "timed out". Gating on pending closes that: a match already cleared it, so
+// the same request's later tick is a no-op.
 func (m *Model) applyBrowseTimeout(path, child string) tea.Cmd {
-	if m.browse.path != path || m.browse.child != child {
+	if !m.browse.pending || m.browse.path != path || m.browse.child != child {
 		return nil
 	}
 	m.browse.pending = false

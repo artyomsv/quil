@@ -238,6 +238,40 @@ func TestApplyBrowseTimeout_StaleTickIgnored(t *testing.T) {
 	}
 }
 
+// A request's own timeout tick must not fire AFTER its own successful
+// response and overwrite the listing it just delivered. requestBrowseDir
+// schedules the tick alongside the send, and applyBrowseDir leaves
+// path/child in place on a match (it cannot clear them to the zero value —
+// "" is itself a valid Path), so the key alone cannot tell "this tick
+// belongs to the request that already finished" from "this tick belongs to
+// a request still in flight". pending is what makes the distinction.
+func TestApplyBrowseTimeout_AfterSuccessDoesNotOverwrite(t *testing.T) {
+	t.Parallel()
+	m, _, _ := overlayTestModel(t, "/a")
+	m.browse = browseState{path: "/a", child: "c", pending: true}
+
+	runCmd(m.applyBrowseDir(ipc.BrowseDirRespPayload{
+		Path:     "/a",
+		Child:    "c",
+		Resolved: "/a/c",
+		Entries:  []ipc.BrowseEntry{{Name: "sub", IsDir: true}},
+	}))
+	if m.browse.pending {
+		t.Fatal("setup: pending must be false after the successful match")
+	}
+
+	// The same request's own timer, scheduled back when the request was
+	// issued, fires only now — after the response already landed.
+	runCmd(m.applyBrowseTimeout("/a", "c"))
+
+	if m.browse.err != "" {
+		t.Errorf("browse.err = %q, want empty; a request's own late timeout must not overwrite its own successful result", m.browse.err)
+	}
+	if m.cwdBrowseDir != "/a/c" {
+		t.Errorf("cwdBrowseDir = %q, want /a/c; the successful listing must survive the late timeout", m.cwdBrowseDir)
+	}
+}
+
 // The matching case: a genuinely unanswered request becomes diagnosable
 // rather than leaving the browser spinning forever.
 func TestApplyBrowseTimeout_MatchClearsAndSetsError(t *testing.T) {

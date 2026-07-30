@@ -485,7 +485,7 @@ Goal: every surface that reads a filesystem reads the *server's*.
 | ID | Item | Blocked by | Status |
 |---|---|---|---|
 | RD-020 | Directory-listing RPC — the root fix; every other picker keys off the CWD it returns | RD-004 | daemon half done; TUI half todo |
-| RD-021 | Git repo discovery RPC | RD-004 | todo |
+| RD-021 | Git repo discovery RPC | RD-004 | **done** (Alt+G; setup-dialog pick list still local) |
 | RD-022 | Kube context discovery RPC | RD-004 | todo |
 | RD-023 | Plugin registry RPC with server-side `DetectAvailability` | — | todo |
 | RD-024 | Per-target `recent-cwds.json` | RD-020 | todo |

@@ -533,8 +533,20 @@ type ClaudeSessionsRespPayload struct {
 
 // BrowseDirReqPayload asks the daemon to list one directory. An empty Path
 // means "wherever you would spawn a pane by default".
+//
+// Child descends: when set, the daemon lists the entry of that name inside
+// Path. The client cannot do this join itself, and that is the point. Path
+// separators are a property of the machine holding the filesystem, not of the
+// one rendering the picker — a Windows TUI attached to a Linux daemon would
+// build `C:\srv\work` shaped paths with filepath.Join and list nothing. The
+// daemon joins with its own separator, so the client never has to know.
+//
+// Child is a single path element and is rejected if it contains a separator.
+// Only the daemon can safely interpret one, so accepting it here would let a
+// client smuggle traversal through a field documented as a leaf name.
 type BrowseDirReqPayload struct {
-	Path string `json:"path"`
+	Path  string `json:"path"`
+	Child string `json:"child,omitempty"`
 }
 
 // BrowseEntry is one child of a listed directory. Only the leaf name travels —
@@ -556,9 +568,17 @@ type BrowseEntry struct {
 // echo the first time the daemon cleaned a trailing separator, and the field
 // would hang on its pending state until the timeout fired.
 //
+// Child echoes the request's Child for the same reason, so the staleness key is
+// the whole request rather than half of it — two descents from one directory
+// differ only in this field.
+//
+// Parent is the daemon's own answer for "one level up", never computed by the
+// client, for the separator reason described on the request.
+//
 // Truncated reports that the directory held more than the listing cap.
 type BrowseDirRespPayload struct {
 	Path      string        `json:"path"`
+	Child     string        `json:"child,omitempty"`
 	Resolved  string        `json:"resolved,omitempty"`
 	Parent    string        `json:"parent,omitempty"`
 	Entries   []BrowseEntry `json:"entries,omitempty"`

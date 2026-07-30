@@ -170,6 +170,78 @@ func TestBrowseDirResponse_BrokenSymlinkIsListedNotADir(t *testing.T) {
 	}
 }
 
+// TestBrowseDirResponse_ChildDescends pins the server-side join.
+//
+// The client cannot compute this path: separators belong to the machine holding
+// the filesystem, so a Windows TUI attached to a Linux daemon would build a
+// `C:\srv\work` shaped string with filepath.Join and list nothing at all.
+func TestBrowseDirResponse_ChildDescends(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "sub"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.Mkdir(filepath.Join(root, "sub", "leaf"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	got := browseDirResponse(ipc.BrowseDirReqPayload{Path: root, Child: "sub"}, "")
+
+	if got.Error != "" {
+		t.Fatalf("Error = %q, want empty", got.Error)
+	}
+	if got.Resolved != filepath.Join(root, "sub") {
+		t.Errorf("Resolved = %q, want the child directory", got.Resolved)
+	}
+	// Both halves of the request echo, or two descents from one directory are
+	// indistinguishable as staleness keys.
+	if got.Path != root || got.Child != "sub" {
+		t.Errorf("echo = (%q, %q), want (%q, %q)", got.Path, got.Child, root, "sub")
+	}
+	if len(got.Entries) != 1 || got.Entries[0].Name != "leaf" {
+		t.Errorf("entries = %+v, want the child's contents", got.Entries)
+	}
+}
+
+func TestValidBrowseChild(t *testing.T) {
+	tests := []struct {
+		name string
+		want bool
+	}{
+		{"work", true},
+		{"a b", true},
+		{"", false},
+		{".", false},
+		{"..", false},
+		// Rejected on EVERY platform, not just where the separator is native:
+		// Windows accepts both, so a filepath.Separator-only check would miss
+		// exactly the platform that has two.
+		{"a/b", false},
+		{`a\b`, false},
+		{"../etc", false},
+		{"/etc", false},
+	}
+	for _, tt := range tests {
+		if got := validBrowseChild(tt.name); got != tt.want {
+			t.Errorf("validBrowseChild(%q) = %v, want %v", tt.name, got, tt.want)
+		}
+	}
+}
+
+// A traversal attempt is refused rather than sanitised — the client has no
+// reason to send one, and a silent rewrite lists a directory nobody asked for.
+func TestBrowseDirResponse_ChildWithSeparatorIsRefused(t *testing.T) {
+	root := t.TempDir()
+
+	got := browseDirResponse(ipc.BrowseDirReqPayload{Path: root, Child: ".."}, "")
+
+	if got.Error == "" {
+		t.Error("a '..' child was accepted")
+	}
+	if got.Entries != nil {
+		t.Errorf("entries returned for a refused request: %+v", got.Entries)
+	}
+}
+
 // A missing directory is an answer, not a transport failure.
 func TestBrowseDirResponse_MissingDir_ReportsError(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "nope")

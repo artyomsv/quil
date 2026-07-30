@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/artyomsv/quil/internal/ipc"
@@ -80,7 +81,7 @@ func browseReq(msg *ipc.Message) ipc.BrowseDirReqPayload {
 // CONTRACT: Path echoes req.Path VERBATIM on every path INCLUDING the error
 // ones. It is the client's staleness key, not a statement about what was read.
 func browseDirResponse(req ipc.BrowseDirReqPayload, fallback string) ipc.BrowseDirRespPayload {
-	out := ipc.BrowseDirRespPayload{Path: req.Path}
+	out := ipc.BrowseDirRespPayload{Path: req.Path, Child: req.Child}
 
 	target := req.Path
 	if target == "" {
@@ -89,6 +90,16 @@ func browseDirResponse(req ipc.BrowseDirReqPayload, fallback string) ipc.BrowseD
 	if target == "" {
 		out.Error = "no directory to list and no default available"
 		return out
+	}
+	// The join happens HERE because separators belong to the machine holding
+	// the filesystem. A client computing it would use its own, and a Windows
+	// TUI against a Linux daemon would ask for a path that cannot exist.
+	if req.Child != "" {
+		if !validBrowseChild(req.Child) {
+			out.Error = fmt.Sprintf("invalid directory name %q", req.Child)
+			return out
+		}
+		target = filepath.Join(target, req.Child)
 	}
 	abs, err := filepath.Abs(target)
 	if err != nil {
@@ -132,6 +143,24 @@ func browseDirResponse(req ipc.BrowseDirReqPayload, fallback string) ipc.BrowseD
 		})
 	}
 	return out
+}
+
+// validBrowseChild reports whether name is a single path element.
+//
+// Child is documented as a leaf name and is joined onto a caller-supplied
+// directory, so anything carrying a separator — or ".." — is not the thing the
+// field is for. Rejecting rather than sanitising: the client has no reason to
+// send one, every legitimate value comes straight from a listing this daemon
+// produced, and a silent rewrite would list a directory nobody asked for.
+//
+// Both separators are checked on every platform. Windows accepts '/' as well as
+// '\', so a check using only filepath.Separator would miss half the cases on the
+// platform that has two.
+func validBrowseChild(name string) bool {
+	if name == "" || name == "." || name == ".." {
+		return false
+	}
+	return !strings.ContainsAny(name, `/\`)
 }
 
 // entryIsDir reports whether e is a directory, resolving links.

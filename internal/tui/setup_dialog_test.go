@@ -1881,6 +1881,77 @@ func TestRenderSetup_HostileResolvedAndError_NoInjectedSGR(t *testing.T) {
 	}
 }
 
+// --- Remote-sourced repository paths (Task C follow-on) ---------------------
+//
+// GitReposRespPayload.Repos is daemon-supplied and reaches two render sites
+// through leftTruncPath: the setup dialog's CWD pick list (repoCandidates)
+// and the Alt+G "Open lazygit for which repo?" picker (repoPickCandidates).
+// leftTruncPath itself now sanitizes — see its doc comment in dialog.go for
+// why sanitizing happens BEFORE truncating rather than after.
+
+// Demonstrates why leftTruncPath must sanitize before it measures the
+// truncation budget. Real content sits at the front, garbage padding at the
+// end: truncating on the RAW rune count keeps a trailing window that lands
+// entirely inside the garbage, and sanitizing THAT afterward would leave
+// nothing but the "…" prefix — the one part of the name that was ever real
+// is gone. Sanitizing first means maxWidth only ever budgets runes that
+// survive to be drawn.
+func TestLeftTruncPath_SanitizesBeforeTruncating(t *testing.T) {
+	hostile := "realname" + strings.Repeat("\x1b", 50)
+	if got := leftTruncPath(hostile, 20); got != "realname" {
+		t.Errorf("leftTruncPath(hostile, 20) = %q, want %q (full real content, untruncated once the padding is gone)", got, "realname")
+	}
+}
+
+// A hostile git-discovered repo path must not let a raw ESC byte reach the
+// setup dialog's CWD pick list. Differential against a same-shaped clean
+// pick list, same reasoning as TestRenderSetup_HostileEntryName_NoRawESCByte:
+// whether lipgloss's own styling emits ESC-prefixed codes depends on the
+// color profile the test process detects, so the invariant checked is that a
+// hostile candidate does not ADD any.
+func TestRenderSetup_HostileRepoCandidate_NoRawESCByte(t *testing.T) {
+	clean := Model{
+		dialog:         dialogCreatePaneSetup,
+		pluginRegistry: registryWithAICWD(t),
+		selectedPlugin: "ai",
+		repoCandidates: []string{"/home/dev/alpha", "/home/dev/beta"},
+		cwdBrowseDir:   "/home/dev/alpha",
+		width:          100,
+	}
+	hostile := clean
+	hostile.repoCandidates = []string{"/home/dev/alpha\x1b[31m;rm -rf\x1b[0m", "/home/dev/beta"}
+	// Mirrors applyGitReposPickList, which pre-selects repoCandidates[0] into
+	// cwdBrowseDir verbatim — the idle-mark comparison at the render site
+	// only lines up (pick[i] == m.cwdBrowseDir) when this is the same raw
+	// string, so a test that skipped it would exercise the unmarked branch.
+	hostile.cwdBrowseDir = hostile.repoCandidates[0]
+
+	cleanOut := clean.renderCreatePaneSetupDialog()
+	hostileOut := hostile.renderCreatePaneSetupDialog()
+
+	wantESC := strings.Count(cleanOut, "\x1b")
+	if got := strings.Count(hostileOut, "\x1b"); got != wantESC {
+		t.Errorf("hostile repo candidate changed the raw ESC byte count: got %d, want %d (dialog-chrome baseline)\n%s", got, wantESC, hostileOut)
+	}
+}
+
+// Same property, for the Alt+G repo picker (renderGitRepoPickDialog), which
+// draws repoPickCandidates rather than repoCandidates — a separate field
+// populated by a separate caller (resolveLazygitOverlay), so it needs its
+// own render-level pin even though both go through leftTruncPath.
+func TestRenderGitRepoPick_HostileCandidate_NoRawESCByte(t *testing.T) {
+	clean := Model{repoPickCandidates: []string{"/home/dev/alpha", "/home/dev/beta"}}
+	hostile := Model{repoPickCandidates: []string{"/home/dev/alpha\x1b[31m;rm -rf\x1b[0m", "/home/dev/beta"}}
+
+	cleanOut := clean.renderGitRepoPickDialog()
+	hostileOut := hostile.renderGitRepoPickDialog()
+
+	wantESC := strings.Count(cleanOut, "\x1b")
+	if got := strings.Count(hostileOut, "\x1b"); got != wantESC {
+		t.Errorf("hostile repo candidate changed the raw ESC byte count: got %d, want %d (dialog-chrome baseline)\n%s", got, wantESC, hostileOut)
+	}
+}
+
 // Mirror of the CWD case for kube. The kube branch's correctness depends on
 // case ORDER inside renderRow's switch, so this is the test that catches a
 // reorder — without it, a focused row could silently take the idle mark.

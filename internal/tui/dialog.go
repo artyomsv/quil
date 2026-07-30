@@ -1076,7 +1076,24 @@ func (m Model) renderGitRepoPickDialog() string {
 // leftTruncPath truncates s to at most maxWidth runes, preserving the
 // rightmost characters (the repo basename / distinguishing tail).
 // A leading "…" is prepended when truncation occurs.
+//
+// Both of this function's callers draw daemon-supplied repository paths (the
+// setup dialog's CWD pick list and the Alt+G repo picker both render
+// GitReposRespPayload.Repos), so s is sanitized here rather than at each call
+// site — one point neither caller can forget, and it is a no-op for the
+// local, already-trusted strings the pick list also carries (recent CWDs).
+//
+// Sanitized BEFORE truncating, not after: maxWidth is a budget on the runes
+// that will actually be drawn, and truncating first would spend that budget
+// on runes sanitizeRemoteText is about to delete anyway. A name front-loaded
+// with control bytes ahead of a few real characters would have those real
+// characters truncated away by a length count that includes bytes with no
+// final width at all — the same "confidently wrong" failure this codebase's
+// other truncate-vs-cap orderings already avoid (see browseDirResponse's
+// sort-before-cap in internal/daemon/browse.go). Sanitizing first also means
+// the "…" prefix always sits against genuinely visible text.
 func leftTruncPath(s string, maxWidth int) string {
+	s = sanitizeRemoteText(s)
 	runes := []rune(s)
 	if len(runes) <= maxWidth {
 		return s

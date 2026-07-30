@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.45.1] - 2026-07-30
+
 ### Added
 - **Reconnecting now stops when retrying cannot possibly help.** If a remote
   session drops for a reason that will not fix itself — a key the server

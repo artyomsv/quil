@@ -44,24 +44,60 @@ var permanentMarkers = []string{
 	"too many authentication failures", // the agent offered more keys than sshd accepts
 }
 
-// ClassifyLinkFailure reports whether ssh's stderr describes a failure that
-// retrying cannot fix.
-//
-// The asymmetry is deliberate and load-bearing: anything unmatched is
-// TRANSIENT. Mis-parking a session that would have healed is worse than
-// retrying one that will not, because the retry costs authentication attempts
-// while the mis-park costs the user their session.
+// ExitSSHOwnFailure is the status ssh reserves for its own failures — auth,
+// host key, DNS, refused connect. The remote shell's codes pass through
+// untouched (127, 126, and whatever the command returned), so this value is
+// what separates "ssh could not connect" from "the far side had something to
+// say". Same signal remoteinstall reads from the other direction.
+const ExitSSHOwnFailure = 255
+
+// matchesPermanentMarker reports whether text contains a diagnostic that means
+// an identical retry cannot succeed.
 //
 // Lower-cased before matching. ssh's own casing is stable, but this stream also
 // carries the remote command's fd 2 and any server banner, and a case-sensitive
 // match would fail silently — the loop simply never parks, with nothing to
 // notice.
-func ClassifyLinkFailure(stderr string) LinkFailure {
-	s := strings.ToLower(stderr)
+func matchesPermanentMarker(text string) bool {
+	s := strings.ToLower(text)
 	for _, m := range permanentMarkers {
 		if strings.Contains(s, m) {
-			return LinkFailurePermanent
+			return true
 		}
+	}
+	return false
+}
+
+// ClassifyLinkFailure reports whether a failed link is worth retrying.
+//
+// stderr alone is NOT sufficient evidence and must never be used alone, which
+// is why this takes all three signals rather than exposing the string match.
+// ssh multiplexes the REMOTE command's fd 2 onto its own stderr, so the text
+// includes whatever the far side's rc files printed — and "permission denied"
+// is one of the most common strings any Unix shell emits. Trusting it alone
+// lets an unreadable path in someone's ~/.bashrc park the session, and lets a
+// compromised remote do it deliberately.
+//
+// Two independent gates make the text attributable to ssh itself:
+//
+//   - established — bytes the pump read, which is STDOUT only. Any byte proves
+//     the remote command ran, which proves ssh authenticated, which means an
+//     auth or host-key marker cannot be ssh's own.
+//   - exitCode — 255 is ssh's own failure. If the remote command ran and
+//     exited, its status passes through instead. And when ssh is still alive
+//     and Close has to kill it, the status is the kill rather than 255 — so a
+//     transient drop fails this gate too, which is the safe direction.
+//
+// The asymmetry is deliberate and load-bearing: anything unproven is
+// TRANSIENT. Mis-parking a session that would have healed costs the user their
+// session; retrying one that will not costs authentication attempts, which the
+// backoff decay already bounds.
+func ClassifyLinkFailure(stderr string, established bool, exitCode int) LinkFailure {
+	if established || exitCode != ExitSSHOwnFailure {
+		return LinkFailureTransient
+	}
+	if matchesPermanentMarker(stderr) {
+		return LinkFailurePermanent
 	}
 	return LinkFailureTransient
 }

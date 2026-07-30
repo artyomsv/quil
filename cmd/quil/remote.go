@@ -542,21 +542,21 @@ func redialRemote(cfg config.Config) tui.RedialFunc {
 			// as soon as the ssh BINARY launches. Every auth and network
 			// failure arrives here instead.
 			//
-			// !Established() is the gate, and it is load-bearing rather than a
-			// refinement. ClassifyLinkFailure reads ssh's stderr, but ssh
-			// multiplexes the REMOTE command's fd 2 onto that same stream — so
-			// the text is remote-influenced, and "permission denied" is one of
-			// the most common strings any Unix shell emits. Without this gate an
-			// ordinary ~/.bashrc touching an unreadable path would park the
-			// user's session permanently, and a compromised remote could do it
-			// deliberately. Established() counts only bytes the PUMP read, and
-			// the pump reads stdout; stderr never reaches it. So a link that
-			// delivered a byte proves the remote command ran, which proves ssh
-			// authenticated, which means an auth or host-key marker in that
-			// stream cannot be ssh's own. Same override shape as
-			// remoteinstall.ClassifyExit's `established` parameter.
-			established := link != nil && link.Established()
-			if !established && transport.ClassifyLinkFailure(cause.Error()) == transport.LinkFailurePermanent {
+			// ClassifyLinkFailure takes the two attribution gates as well as the
+			// text, because the text alone is remote-influenced: ssh
+			// multiplexes the REMOTE command's fd 2 onto its own stderr. See
+			// that function for why each gate is load-bearing.
+			//
+			// Read AFTER Close, deliberately, and in the opposite order from
+			// LinkErr above: Close is what reaps the child, so the exit status
+			// is only final here — and it preserves ssh's natural status when
+			// the pipe already failed, which is exactly the case where ssh's
+			// own diagnostics are authoritative.
+			//
+			// nil link means no signals at all, so nothing is attributable and
+			// the loop keeps retrying.
+			if link != nil &&
+				transport.ClassifyLinkFailure(cause.Error(), link.Established(), link.ExitCode()) == transport.LinkFailurePermanent {
 				// cause FIRST, sentinel second. %w works in any position since
 				// Go 1.20 and errors.Is is unaffected — but the banner renders
 				// this string, and leading with the sentinel would spend ~35

@@ -40,8 +40,8 @@ func TestClassifyLinkFailure(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := ClassifyLinkFailure(tt.stderr); got != tt.want {
-				t.Errorf("ClassifyLinkFailure(%q) = %v, want %v", tt.stderr, got, tt.want)
+			if got := ClassifyLinkFailure(tt.stderr, false, ExitSSHOwnFailure); got != tt.want {
+				t.Errorf("ClassifyLinkFailure(%q, unestablished, 255) = %v, want %v", tt.stderr, got, tt.want)
 			}
 		})
 	}
@@ -52,7 +52,7 @@ func TestClassifyLinkFailure(t *testing.T) {
 // Without it the matcher is a silent no-op on any casing ssh did not use, and
 // nothing fails loudly — the loop simply never parks.
 func TestClassifyLinkFailure_IsCaseInsensitive(t *testing.T) {
-	if got := ClassifyLinkFailure("PERMISSION DENIED (PUBLICKEY)."); got != LinkFailurePermanent {
+	if got := ClassifyLinkFailure("PERMISSION DENIED (PUBLICKEY).", false, ExitSSHOwnFailure); got != LinkFailurePermanent {
 		t.Errorf("upper-cased denial classified as %v, want %v", got, LinkFailurePermanent)
 	}
 }
@@ -68,23 +68,61 @@ func TestLinkFailure_String(t *testing.T) {
 	}
 }
 
-// TestClassifyLinkFailure_MatchesRemoteShellNoise documents WHY callers must
-// gate on Established() rather than trusting this verdict alone.
+// TestClassifyLinkFailure_RemoteShellNoiseCannotPark is the finding this
+// signature exists for.
 //
-// ssh multiplexes the remote command's fd 2 onto its own stderr, so this
-// function's input includes whatever the remote's rc files print. "Permission
-// denied" is one of the most common strings any Unix shell emits — an ordinary
-// ~/.bashrc touching an unreadable path produces it. The classifier cannot tell
-// that from ssh's own denial and is not supposed to try; the caller has the
-// signal that can (bytes on stdout prove ssh authenticated).
-//
-// If this test ever starts failing because the classifier grew source
-// awareness, delete it — but then also revisit the caller's gate.
-func TestClassifyLinkFailure_MatchesRemoteShellNoise(t *testing.T) {
+// ssh multiplexes the remote command's fd 2 onto its own stderr, so the text
+// includes whatever the far side's rc files printed — and "permission denied"
+// is among the most common strings any Unix shell emits. The raw marker match
+// cannot tell that from ssh's own denial, so the gates must, or an unreadable
+// path in someone's ~/.bashrc parks their session and a compromised remote can
+// do it on purpose.
+func TestClassifyLinkFailure_RemoteShellNoiseCannotPark(t *testing.T) {
 	shellNoise := "bash: /etc/profile.d/corp.sh: Permission denied"
-	if got := ClassifyLinkFailure(shellNoise); got != LinkFailurePermanent {
-		t.Fatalf("ClassifyLinkFailure(%q) = %v; this test encodes the KNOWN "+
-			"limitation that innocent remote output matches, which is why "+
-			"cmd/quil gates the verdict on Established()", shellNoise, got)
+
+	// The raw matcher DOES match it — that is the hazard, stated explicitly so
+	// the gates below are not mistaken for belt-and-braces.
+	if !matchesPermanentMarker(shellNoise) {
+		t.Fatal("premise changed: the raw matcher no longer matches shell noise, " +
+			"so the gates below may no longer be load-bearing — re-derive them")
+	}
+
+	tests := []struct {
+		name        string
+		established bool
+		exitCode    int
+		want        LinkFailure
+	}{
+		// The remote command ran and spoke, so ssh authenticated: any auth
+		// marker in this stream belongs to the far side, not to ssh.
+		{"remote command produced output", true, ExitSSHOwnFailure, LinkFailureTransient},
+		// ssh passed through the remote command's status, so ssh itself did not
+		// fail — again the text is the far side's.
+		{"remote command's own exit status", false, 127, LinkFailureTransient},
+		// Close killed a still-live ssh: a transient drop, not ssh's verdict.
+		{"killed rather than exited", false, 1, LinkFailureTransient},
+		{"never reaped", false, -1, LinkFailureTransient},
+		// Both gates say ssh failed on its own before the remote ever ran.
+		{"ssh's own failure", false, ExitSSHOwnFailure, LinkFailurePermanent},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ClassifyLinkFailure(shellNoise, tt.established, tt.exitCode)
+			if got != tt.want {
+				t.Errorf("ClassifyLinkFailure(shellNoise, established=%v, exit=%d) = %v, want %v",
+					tt.established, tt.exitCode, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestClassifyLinkFailure_EstablishedNeverParks pins the stronger of the two
+// gates against EVERY permanent marker, so a marker added later cannot quietly
+// become parkable on a link that already proved it authenticated.
+func TestClassifyLinkFailure_EstablishedNeverParks(t *testing.T) {
+	for _, m := range permanentMarkers {
+		if got := ClassifyLinkFailure(m, true, ExitSSHOwnFailure); got != LinkFailureTransient {
+			t.Errorf("marker %q on an established link = %v, want %v", m, got, LinkFailureTransient)
+		}
 	}
 }

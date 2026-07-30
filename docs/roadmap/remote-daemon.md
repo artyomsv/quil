@@ -403,6 +403,20 @@ round-trip `verifyRemoteLink` performs on every reconnect, so the transport, the
 remote daemon and the version gate are confirmed end to end — what the remaining
 rows need is a terminal, not a working link.
 
+**Phase 3 blocks this check, which is worth stating plainly.** Attempting the run
+on 2026-07-30 could not create a lazygit pane at all: the setup dialog's CWD
+browser calls `os.ReadDir` in the TUI process, so it offers only the laptop's
+drives and can never reach `/home/artyom/homelab` (RD-020); pasting the path with
+`ctrl+v` fails too, because `validateAndNormalizeCWD` stats the target locally;
+and `Alt+G` silently does nothing, because `overlay.go` calls
+`gitdiscover.Candidates` in the TUI as well, handing it a Linux CWD to `os.Stat`
+on Windows (RD-021). The pane had to be created by sending `create_pane` over the
+transport by hand.
+
+So RD-020 and RD-021 are not only UX debt — until they land, the only pane types
+that can verify the Phase 2 ghost-replay gate cannot be created through the UI on
+a remote host. That raises their priority above the rest of Phase 3.
+
 **claude-code cannot stand in for this check.** It is the obvious substitute —
 it is a `ghost_buffer = false` plugin, so it takes the same no-replay path — but
 it is the ONLY one that also declares a `redraw_key` (`"\f"`), and `redrawKick`

@@ -61,15 +61,34 @@ func browseTimeoutCmd(path, child string) tea.Cmd {
 	})
 }
 
+// browseOutcome reports what applyBrowseDir did with one response.
+//
+// Returned rather than stored: it is the ONE piece of knowledge only
+// applyBrowseDir has — whether the echoed (Path, Child) matched — and it is
+// consumed in the same breath as it is produced (pending is false either way
+// afterwards). A caller that needed it later would have to re-run the
+// comparison, and that comparison must exist in exactly one place.
+type browseOutcome int
+
+const (
+	browseDropped browseOutcome = iota // stale answer; nothing changed
+	browseFilled                       // listing replaced with this answer
+	browseFailed                       // matched, but the daemon reported an error
+)
+
 // applyBrowseDir resumes the directory-browser state machine with the
-// daemon's answer.
+// daemon's answer, and reports what it observed.
 //
 // Matched on BOTH echoed fields, not Path alone: two descents from one
 // directory differ only in Child, and matching on Path would let the second
 // request's answer land as though it belonged to the first (or vice versa).
-func (m *Model) applyBrowseDir(resp ipc.BrowseDirRespPayload) tea.Cmd {
+//
+// Deliberately holds no policy of its own — what a failure or a fresh listing
+// MEANS to the setup dialog (the pre-fill chain) is the dialog's business, and
+// lives in applyBrowseResponse.
+func (m *Model) applyBrowseDir(resp ipc.BrowseDirRespPayload) browseOutcome {
 	if resp.Path != m.browse.path || resp.Child != m.browse.child {
-		return nil
+		return browseDropped
 	}
 	m.browse.pending = false
 
@@ -80,11 +99,17 @@ func (m *Model) applyBrowseDir(resp ipc.BrowseDirRespPayload) tea.Cmd {
 	// produced a replacement.
 	if resp.Error != "" {
 		m.browse.err = resp.Error
-		return nil
+		return browseFailed
 	}
 	m.browse.err = ""
+
+	// Recorded for "up" navigation, which must use the daemon's own answer
+	// rather than a filepath.Dir computed against this machine's separators.
+	m.cwdBrowseParent = resp.Parent
+	m.cwdBrowseRoots = resp.Roots
+
 	m.applyBrowseListing(resp.Resolved, resp.Entries, resp.Parent != "" || len(resp.Roots) > 0, m.browse.select_)
-	return nil
+	return browseFilled
 }
 
 // applyBrowseTimeout turns a never-answered request into something

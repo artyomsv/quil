@@ -287,10 +287,17 @@ type Model struct {
 	cwdInputError      string                 // validation error shown under CWD input (empty = ok)
 	toggleStates       []bool                 // checkbox states; one entry per plugin's Toggles slice, same indexing
 	setupFieldCursor   int                    // focused field in setup dialog: 0 = CWD (if PromptsCWD), then toggles, then Continue
-	cwdBrowseDir       string                 // current dir shown in the setup dialog's directory browser
+	cwdBrowseDir       string                 // current dir shown in the setup dialog's directory browser ("" = showing the root list)
 	cwdBrowseEntries   []string               // browser listing: ".." (if not at root) + sorted subdirs
 	cwdBrowseCursor    int                    // selected entry index in cwdBrowseEntries
 	cwdBrowseScroll    int                    // scroll offset (top index) for the visible window of cwdBrowseEntries
+	// The daemon's own answers for "what is above cwdBrowseDir". Kept rather
+	// than recomputed: separators and the set of filesystem roots belong to the
+	// machine holding the disk, so filepath.Dir here would answer for the wrong
+	// one whenever the daemon is remote.
+	cwdBrowseParent  string   // parent of cwdBrowseDir; "" when it is a filesystem root
+	cwdBrowseRoots   []string // filesystem roots, reported only when at a root (Windows drives; empty on Unix)
+	browseCandidates []string // remaining pre-fill candidates for the setup browser's start-up chain
 	// Session-picker state (plugins with [command] sessions = "claude"). Rows
 	// are scoped to sessionScanCWD; when the browser moves to a different
 	// directory the rows AND selectedSessionID are discarded, since a session
@@ -1391,6 +1398,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case gitScanTimeoutMsg:
 		// Local timer, so deliberately no re-arm.
 		return m, m.applyGitScanTimeout(msg.cwd)
+
+	case browseDirMsg:
+		// MUST re-arm the listen loop, like every other IPC response branch —
+		// omitting it kills IPC for the session, a bug this package has shipped.
+		cmd := m.applyBrowseResponse(msg.Resp)
+		return m, tea.Batch(cmd, m.listenForMessages())
+
+	case browseTimeoutMsg:
+		// Local timer, so deliberately no re-arm.
+		return m, m.applyBrowseTimeout(msg.path, msg.child)
 
 	case sessionScanTimeoutMsg:
 		// Turn a never-answered listing into something diagnosable instead of
@@ -4055,6 +4072,14 @@ func (m Model) listenForMessages() tea.Cmd {
 				return listenContinueMsg{}
 			}
 			return gitReposMsg{Resp: payload}
+
+		case ipc.MsgBrowseDirResp:
+			var payload ipc.BrowseDirRespPayload
+			if err := msg.DecodePayload(&payload); err != nil {
+				log.Printf("decode browse_dir_resp: %v", err)
+				return listenContinueMsg{}
+			}
+			return browseDirMsg{Resp: payload}
 
 		case ipc.MsgClaudeSessionDetailResp:
 			var payload ipc.ClaudeSessionDetailRespPayload

@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -16,60 +15,6 @@ import (
 	"github.com/artyomsv/quil/internal/kubediscover"
 	"github.com/artyomsv/quil/internal/plugin"
 )
-
-func TestValidateAndNormalizeCWD(t *testing.T) {
-	// Create one tmp dir to reuse as the canonical "valid dir" case.
-	validDir := t.TempDir()
-
-	// Create a file (not a dir) to test the "not a directory" branch.
-	notDirPath := filepath.Join(t.TempDir(), "file.txt")
-	if err := os.WriteFile(notDirPath, []byte{}, 0644); err != nil {
-		t.Fatalf("create test file: %v", err)
-	}
-
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Fatalf("UserHomeDir: %v", err)
-	}
-
-	cases := []struct {
-		name       string
-		input      string
-		wantErrSub string // empty = no error; otherwise substring expected in error
-		wantAbs    string // if non-empty, the cleaned path must equal this
-	}{
-		{"empty accepted", "", "", ""},
-		{"whitespace only accepted", "   ", "", ""},
-		{"quotes only accepted", `""`, "", ""},
-		{"valid tmpdir", validDir, "", validDir},
-		{"quoted valid tmpdir", `"` + validDir + `"`, "", validDir},
-		{"trailing whitespace", validDir + "   ", "", validDir},
-		{"tilde alone resolves to home", "~", "", home},
-		{"nonexistent", filepath.Join(os.TempDir(), "definitely-not-here-xyz-9999"), "does not exist", ""},
-		{"file not dir", notDirPath, "not a directory", ""},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := validateAndNormalizeCWD(tc.input)
-			if tc.wantErrSub == "" {
-				if err != nil {
-					t.Fatalf("unexpected error: %v", err)
-				}
-				if tc.wantAbs != "" && got != tc.wantAbs {
-					t.Errorf("got %q, want %q", got, tc.wantAbs)
-				}
-				return
-			}
-			if err == nil {
-				t.Fatalf("expected error containing %q, got none", tc.wantErrSub)
-			}
-			if !strings.Contains(err.Error(), tc.wantErrSub) {
-				t.Errorf("error %q does not contain %q", err.Error(), tc.wantErrSub)
-			}
-		})
-	}
-}
 
 func TestSanitizePastedPath(t *testing.T) {
 	cases := map[string]string{
@@ -169,11 +114,11 @@ func TestEnterSetupOrSplit_RoutingAndDefaults(t *testing.T) {
 		}
 	})
 
-	t.Run("cwd only — opens setup with browser pre-loaded from home", func(t *testing.T) {
-		m := &Model{}
+	t.Run("cwd only — opens setup and asks the daemon for the home fallback", func(t *testing.T) {
+		m, fake, _ := overlayTestModel(t, "") // no pane CWD: that candidate is skipped
 		cmd := m.enterSetupOrSplit(pluginCWD)
 		if cmd == nil {
-			t.Error("expected non-nil cmd (ClearScreen) when opening dialog")
+			t.Fatal("expected non-nil cmd (ClearScreen + browse request) when opening dialog")
 		}
 		if m.dialog != dialogCreatePaneSetup {
 			t.Errorf("expected dialog = dialogCreatePaneSetup, got %v", m.dialog)
@@ -184,10 +129,12 @@ func TestEnterSetupOrSplit_RoutingAndDefaults(t *testing.T) {
 		if m.setupFieldCursor != 0 {
 			t.Errorf("expected cursor at 0 (CWD), got %d", m.setupFieldCursor)
 		}
-		// With no active pane, the browser falls back to user home and
-		// pre-loads its directory listing. cwdBrowseDir should be set.
-		if m.cwdBrowseDir == "" {
-			t.Error("expected cwdBrowseDir to be set from user home fallback")
+		runCmd(cmd)
+		// The home fallback is the literal "~" for the DAEMON to expand.
+		// os.UserHomeDir here would name this machine's home, which against a
+		// remote host is a directory that does not exist there.
+		if got := browseReqPaths(t, fake); len(got) != 1 || got[0] != "~" {
+			t.Errorf("browse requests = %v, want exactly [~]", got)
 		}
 	})
 
@@ -217,67 +164,31 @@ func TestEnterSetupOrSplit_RoutingAndDefaults(t *testing.T) {
 		}
 	})
 
-	t.Run("cwd — lastSelectedCWD wins over home fallback", func(t *testing.T) {
-		remembered := t.TempDir()
-		m := &Model{lastSelectedCWD: remembered}
-		m.enterSetupOrSplit(pluginCWD)
-		if m.cwdBrowseDir != remembered {
-			t.Errorf("expected cwdBrowseDir = %q (from lastSelectedCWD), got %q", remembered, m.cwdBrowseDir)
+	// The chain is ordered lastSelectedCWD -> active pane CWD -> "~", and only
+	// the head of it is asked about up front. Its later links are exercised in
+	// browse_client_test.go, where the failing responses that advance them can
+	// be delivered.
+	t.Run("cwd — lastSelectedCWD is asked about first", func(t *testing.T) {
+		m, fake, _ := overlayTestModel(t, "/pane/cwd")
+		m.lastSelectedCWD = "/remembered"
+		runCmd(m.enterSetupOrSplit(pluginCWD))
+		if got := browseReqPaths(t, fake); len(got) != 1 || got[0] != "/remembered" {
+			t.Errorf("browse requests = %v, want exactly [/remembered]", got)
 		}
 	})
 
-	t.Run("cwd — stale lastSelectedCWD cleared and falls through", func(t *testing.T) {
-		stale := filepath.Join(t.TempDir(), "gone")
-		m := &Model{lastSelectedCWD: stale}
-		m.enterSetupOrSplit(pluginCWD)
-		if m.lastSelectedCWD != "" {
-			t.Errorf("expected lastSelectedCWD cleared after stale dir, got %q", m.lastSelectedCWD)
-		}
-		// Should have fallen through to home directory
-		if m.cwdBrowseDir == "" {
-			t.Error("expected cwdBrowseDir to be set from home fallback after stale dir")
-		}
-		if m.cwdBrowseDir == stale {
-			t.Error("cwdBrowseDir should not be the stale directory")
+	t.Run("cwd — active pane CWD is asked about when nothing is remembered", func(t *testing.T) {
+		m, fake, _ := overlayTestModel(t, "/pane/cwd")
+		runCmd(m.enterSetupOrSplit(pluginCWD))
+		if got := browseReqPaths(t, fake); len(got) != 1 || got[0] != "/pane/cwd" {
+			t.Errorf("browse requests = %v, want exactly [/pane/cwd]", got)
 		}
 	})
 }
 
-// TestLoadBrowseDir verifies the directory browser populates correctly,
-// prepends ".." for non-root paths, sorts entries, and skips files.
-func TestLoadBrowseDir(t *testing.T) {
-	root := t.TempDir()
-
-	// Set up a known structure: 3 dirs (banana, apple, cherry — to verify sort)
-	// + 1 file (which must NOT appear in the listing).
-	for _, name := range []string{"banana", "apple", "cherry"} {
-		if err := os.Mkdir(filepath.Join(root, name), 0755); err != nil {
-			t.Fatalf("mkdir %s: %v", name, err)
-		}
-	}
-	if err := os.WriteFile(filepath.Join(root, "ignore_me.txt"), []byte("x"), 0644); err != nil {
-		t.Fatalf("write file: %v", err)
-	}
-
-	m := &Model{}
-	if err := m.loadBrowseDir(root); err != nil {
-		t.Fatalf("loadBrowseDir: %v", err)
-	}
-
-	// Expected: ".." first (non-root), then sorted dirs, no file.
-	want := []string{"..", "apple", "banana", "cherry"}
-	if len(m.cwdBrowseEntries) != len(want) {
-		t.Fatalf("entries = %v, want %v", m.cwdBrowseEntries, want)
-	}
-	for i, w := range want {
-		if m.cwdBrowseEntries[i] != w {
-			t.Errorf("entries[%d] = %q, want %q", i, m.cwdBrowseEntries[i], w)
-		}
-	}
-	if m.cwdBrowseCursor != 0 {
-		t.Errorf("cursor = %d, want 0", m.cwdBrowseCursor)
-	}
-}
+// The listing itself is no longer read here — it arrives from the daemon, and
+// applyBrowseDir's fill (sort, file filtering, the ".." row) is covered in
+// browse_client_test.go.
 
 // TestAdjustBrowseScroll verifies the visible-window math keeps the cursor
 // inside the viewport for both upward and downward navigation.
@@ -325,42 +236,10 @@ func TestAdjustBrowseScroll(t *testing.T) {
 	}
 }
 
-// TestSetupDialog_PathValidationOnDifferentOS is a sanity check that the validator
-// behaves sensibly on the host platform (Windows paths with backslashes, etc.).
-// It doesn't try to be exhaustive — just confirms the validator doesn't reject
-// a known-good path from the current OS.
-func TestSetupDialog_PathValidationOnDifferentOS(t *testing.T) {
-	tmp := t.TempDir()
-	cleaned, err := validateAndNormalizeCWD(tmp)
-	if err != nil {
-		t.Fatalf("validator rejected t.TempDir(): %v", err)
-	}
-	// Compare against the symlink-resolved expected path. The validator now
-	// runs filepath.EvalSymlinks so the result may differ from filepath.Abs
-	// on systems where /tmp (or %TEMP%) is itself a symlink (macOS, some
-	// Linux containers).
-	abs, _ := filepath.Abs(tmp)
-	expected, evalErr := filepath.EvalSymlinks(abs)
-	if evalErr != nil {
-		expected = abs
-	}
-	if cleaned != expected {
-		t.Errorf("cleaned path %q != expected %q", cleaned, expected)
-	}
-
-	// Also sanity-check on Windows that forward-slash separators still validate.
-	if runtime.GOOS == "windows" {
-		fwd := filepath.ToSlash(tmp)
-		if _, err := validateAndNormalizeCWD(fwd); err != nil {
-			t.Errorf("validator rejected forward-slash path on Windows: %v", err)
-		}
-	}
-}
-
 // TestSanitizePastedPath_StripsControlBytes guards the S1 security fix:
 // clipboard payloads with embedded OSC/CSI escape sequences must NOT survive
-// past sanitizePastedPath, otherwise an os.Stat error message that quotes the
-// input could inject terminal escapes into the rendered cwdInputError.
+// past sanitizePastedPath, otherwise a daemon error message that quotes the
+// input could inject terminal escapes into the rendered browse error.
 func TestSanitizePastedPath_StripsControlBytes(t *testing.T) {
 	cases := map[string]string{
 		// ESC (0x1b) and BEL (0x07) are stripped; "]", "0", ";" etc. are
@@ -919,55 +798,12 @@ func TestHandleSetupCWDKey_BrowserNavigation(t *testing.T) {
 		}
 	})
 
-	t.Run("enter on real subdir descends into it", func(t *testing.T) {
-		// Real filesystem this time so loadBrowseDir succeeds.
-		root := t.TempDir()
-		if err := os.Mkdir(filepath.Join(root, "child"), 0755); err != nil {
-			t.Fatalf("mkdir: %v", err)
-		}
-		m := Model{}
-		if err := m.loadBrowseDir(root); err != nil {
-			t.Fatalf("loadBrowseDir: %v", err)
-		}
-		// Find "child" in the listing — it should be index 1 (after "..").
-		for i, e := range m.cwdBrowseEntries {
-			if e == "child" {
-				m.cwdBrowseCursor = i
-				break
-			}
-		}
-		next, _ := m.handleSetupCWDKey(p, "enter")
-		m = next.(Model)
-		if filepath.Base(m.cwdBrowseDir) != "child" {
-			t.Errorf("after enter on child: cwdBrowseDir = %q, want .../child", m.cwdBrowseDir)
-		}
-	})
-
-	t.Run("backspace navigates to parent and highlights child we came from", func(t *testing.T) {
-		root := t.TempDir()
-		childPath := filepath.Join(root, "subdir")
-		if err := os.Mkdir(childPath, 0755); err != nil {
-			t.Fatalf("mkdir: %v", err)
-		}
-		m := Model{}
-		if err := m.loadBrowseDir(childPath); err != nil {
-			t.Fatalf("loadBrowseDir child: %v", err)
-		}
-		// In the child dir now. Press backspace → parent.
-		next, _ := m.handleSetupCWDKey(p, "backspace")
-		m = next.(Model)
-		// EvalSymlinks may resolve macOS /tmp etc., so compare bases instead.
-		if filepath.Base(m.cwdBrowseDir) != filepath.Base(root) {
-			t.Errorf("after backspace: dir base = %q, want %q",
-				filepath.Base(m.cwdBrowseDir), filepath.Base(root))
-		}
-		// Cursor should land on "subdir" (the child we came from).
-		if m.cwdBrowseCursor < 0 || m.cwdBrowseCursor >= len(m.cwdBrowseEntries) ||
-			m.cwdBrowseEntries[m.cwdBrowseCursor] != "subdir" {
-			t.Errorf("cursor not positioned on child we came from: cursor=%d entries=%v",
-				m.cwdBrowseCursor, m.cwdBrowseEntries)
-		}
-	})
+	// Descend and up no longer touch the local filesystem — they emit a request
+	// and the listing arrives from the daemon. What they SEND is the thing worth
+	// pinning now, and that lives in browse_client_test.go:
+	// TestSetupCWDKey_DescendSendsChildNotAJoin,
+	// TestSetupCWDKey_UpSendsDaemonReportedParent and
+	// TestSetupCWDKey_UpCarriesTheExitedLeafAsSelectName.
 
 	t.Run("empty browser submits via enter", func(t *testing.T) {
 		m := Model{cwdBrowseEntries: nil}
@@ -1123,33 +959,8 @@ default = false
 	})
 }
 
-// TestLoadBrowseDirAndSelect_PositionsCursorOnChild guards the Q12 polish fix:
-// going up to the parent should highlight the directory we just exited.
-func TestLoadBrowseDirAndSelect_PositionsCursorOnChild(t *testing.T) {
-	root := t.TempDir()
-	for _, name := range []string{"alpha", "beta", "gamma"} {
-		if err := os.Mkdir(filepath.Join(root, name), 0755); err != nil {
-			t.Fatalf("mkdir %s: %v", name, err)
-		}
-	}
-
-	m := &Model{}
-	if err := m.loadBrowseDirAndSelect(root, "beta"); err != nil {
-		t.Fatalf("loadBrowseDirAndSelect: %v", err)
-	}
-	// Listing: ["..", "alpha", "beta", "gamma"]; "beta" is index 2.
-	if m.cwdBrowseCursor != 2 {
-		t.Errorf("cursor = %d, want 2 (beta)", m.cwdBrowseCursor)
-	}
-
-	// Unknown name leaves cursor at 0.
-	if err := m.loadBrowseDirAndSelect(root, "no-such-dir"); err != nil {
-		t.Fatalf("loadBrowseDirAndSelect: %v", err)
-	}
-	if m.cwdBrowseCursor != 0 {
-		t.Errorf("cursor = %d, want 0 for unknown selectName", m.cwdBrowseCursor)
-	}
-}
+// The cursor-positioning half of the Q12 polish fix now lives on the daemon's
+// listing — see TestApplyBrowseListing_SelectName in browse_client_test.go.
 
 func TestEnterSetupOrSplit_GitDiscover_PopulatesCandidates(t *testing.T) {
 	root, err := filepath.EvalSymlinks(t.TempDir())
@@ -1199,7 +1010,8 @@ func TestEnterSetupOrSplit_GitDiscover_NoRepo_FallsBackToBrowser(t *testing.T) {
 	tab.Root = NewLeaf(pane)
 	tab.ActivePane = pane.ID
 
-	m := &Model{tabs: []*TabModel{tab}, activeTab: 0}
+	fake := &fakeSender{}
+	m := &Model{tabs: []*TabModel{tab}, activeTab: 0, client: fake}
 	p := &plugin.PanePlugin{
 		Name: "lazygit",
 		Command: plugin.CommandConfig{
@@ -1208,13 +1020,15 @@ func TestEnterSetupOrSplit_GitDiscover_NoRepo_FallsBackToBrowser(t *testing.T) {
 			Discover:   "git",
 		},
 	}
-	m.enterSetupOrSplit(p)
+	runCmd(m.enterSetupOrSplit(p))
 
 	if len(m.repoCandidates) != 0 {
 		t.Fatalf("repoCandidates = %v, want empty", m.repoCandidates)
 	}
-	if m.cwdBrowseDir != plain {
-		t.Errorf("cwdBrowseDir = %q, want pane CWD %q as browser fallback", m.cwdBrowseDir, plain)
+	// The listing now arrives from the daemon, so the fallback shows up as the
+	// request it asks about rather than as a filled cwdBrowseDir.
+	if got := browseReqPaths(t, fake); len(got) != 1 || got[0] != plain {
+		t.Errorf("browse requests = %v, want [%q] (the pane CWD as browser fallback)", got, plain)
 	}
 }
 
@@ -1379,14 +1193,20 @@ func TestEnterSetup_RecentPickWhenNoRepos(t *testing.T) {
 
 func TestEnterSetup_RecentAllStaleFallsToBrowser(t *testing.T) {
 	base := t.TempDir()
-	m := &Model{recentCWDs: []string{filepath.Join(base, "gone1"), filepath.Join(base, "gone2")}}
+	fake := &fakeSender{}
+	m := &Model{
+		recentCWDs: []string{filepath.Join(base, "gone1"), filepath.Join(base, "gone2")},
+		client:     fake,
+	}
 	p := &plugin.PanePlugin{Name: "ai", Command: plugin.CommandConfig{PromptsCWD: true}}
-	m.enterSetupOrSplit(p)
+	runCmd(m.enterSetupOrSplit(p))
 	if len(m.recentCandidates) != 0 {
 		t.Errorf("recentCandidates = %v, want empty (all stale)", m.recentCandidates)
 	}
-	if m.cwdBrowseDir == "" {
-		t.Error("expected directory-browser fallback to set cwdBrowseDir")
+	// No tab, nothing remembered, so the chain is down to its "~" tail — but a
+	// request going out at all is what proves the browser took over.
+	if got := browseReqPaths(t, fake); len(got) != 1 || got[0] != "~" {
+		t.Errorf("browse requests = %v, want [~] (directory-browser fallback)", got)
 	}
 }
 

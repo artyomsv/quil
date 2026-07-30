@@ -476,6 +476,20 @@ func redialRemote(cfg config.Config, logW io.Writer) tui.RedialFunc {
 				}
 			}
 			client.Close()
+			// Classified HERE rather than in the dial-failure branch above.
+			// That branch cannot see an authentication failure: transport.SSH
+			// returns a nil conn on failure so link is always nil there, and a
+			// dial only fails at spawn level, because exec.Cmd.Start succeeds
+			// as soon as the ssh BINARY launches. Every auth and network
+			// failure arrives here instead.
+			if transport.ClassifyLinkFailure(cause.Error()) == transport.LinkFailurePermanent {
+				// cause FIRST, sentinel second. %w works in any position since
+				// Go 1.20 and errors.Is is unaffected — but the banner renders
+				// this string, and leading with the sentinel would spend ~35
+				// cells on boilerplate before reaching ssh's own words, on a row
+				// that already fights for width.
+				return nil, fmt.Errorf("%v: %w", cause, tui.ErrLinkPermanent)
+			}
 			return nil, cause
 		}
 		return client, nil

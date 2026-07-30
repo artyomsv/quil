@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"math/rand"
@@ -38,6 +39,12 @@ type reconnectState struct {
 	// beginReconnect.
 	lastUpAt       time.Time
 	settledAttempt int
+	// parked stops the retry loop after a failure that cannot heal on its own —
+	// a rejected key, a changed host key, an algorithm mismatch. The banner
+	// stays up because the session is paused rather than over, and
+	// reconnectResumeKey restarts the loop once the operator has fixed the
+	// cause. Never set for a failure the classifier did not recognise.
+	parked bool
 }
 
 // reconnectFlapWindow is how long a restored link must survive before the next
@@ -76,12 +83,12 @@ const (
 	// service on the host. A laptop left with the banner up overnight locks its
 	// owner out. Five minutes brings it to ~15/hour.
 	//
-	// This REDUCES the risk rather than removing it: the first few fast
-	// attempts can still trip a strict jail, and only classifying the failure
-	// as permanent would truly fix it — which needs ssh's prose, since exit
-	// code 255 covers both a permanent denial and a transient timeout, and
-	// matching prose is what this codebase deliberately avoids elsewhere. See
-	// techdebt/3-3-reconnect-cannot-classify-permanent-ssh-failure.md.
+	// Classification now closes the rest of the gap: a failure that
+	// transport.ClassifyLinkFailure calls permanent parks the loop outright
+	// instead of retrying it (see ErrLinkPermanent). This decay still governs
+	// everything it cannot classify, which is the default — exit code 255
+	// covers both a permanent denial and a transient timeout, so an unmatched
+	// message stays transient on purpose.
 	reconnectSlowMaxDelay = 5 * time.Minute
 )
 
@@ -220,6 +227,30 @@ func (m Model) freezeInput(msg tea.Msg) (tea.Cmd, bool) {
 // editing one config value, which is too sharp an edge to leave in place.
 var freezeEscapeKeys = []string{"ctrl+q", "ctrl+c"}
 
+// ErrLinkPermanent marks a dial failure that an identical retry cannot fix — a
+// rejected key, a changed host key, an algorithm mismatch.
+//
+// The dialer wraps it and the loop tests with errors.Is. A sentinel rather than
+// a bool on redialResultMsg so the classification travels WITH the error it
+// describes, and cannot be dropped by a future call site that forgets to copy a
+// field.
+var ErrLinkPermanent = errors.New("remote link failure is permanent")
+
+// resumeReconnect leaves the parked state and arms a fresh attempt.
+//
+// The attempt counter is deliberately NOT reset. The operator resuming does not
+// make the earlier failures un-happen, and restarting at the base delay would
+// undo the rate decay that keeps a still-broken key under a fail2ban threshold.
+func (m Model) resumeReconnect() (tea.Model, tea.Cmd) {
+	log.Printf("remote: resuming a parked reconnect at attempt %d", m.reconnect.attempt)
+	m.reconnect.parked = false
+	m.reconnect.lastErr = nil
+	// scheduleRedial returns (tea.Model, tea.Cmd) and carries the mutated copy
+	// forward — Model is a value type, so returning m here instead would drop
+	// whatever it set.
+	return m.scheduleRedial()
+}
+
 // isFreezeEscape reports whether a key should end a frozen session.
 func isFreezeEscape(key, configuredQuit string) bool {
 	if kbMatches(key, configuredQuit) {
@@ -254,6 +285,22 @@ func firstErrLine(s string) string {
 }
 
 // bannerSep separates the status core from the ssh diagnostic.
+// reconnectResumeKey restarts a parked loop.
+//
+// Checked in Update ahead of the freezeInput choke point, because freezeInput
+// has a value receiver and returns (tea.Cmd, bool) — it can neither clear the
+// parked state nor hand back a mutated Model. It is also not a freeze ESCAPE:
+// isFreezeEscape means "this key ends the session", which resuming is not.
+const reconnectResumeKey = "r"
+
+// bannerResumeHint is the parked banner's resume affordance.
+//
+// A named constant because the banner test and the bannerCandidates invariant
+// test must assert the SAME literal. Asserting the bare key letter cannot fail:
+// every existing rung already contains an "r" — "ctrl+q", "unreachable",
+// "Connecting" — so the assertion would pass with no hint rendered at all.
+const bannerResumeHint = "r retries"
+
 const bannerSep = " · "
 
 // minBannerDetail is the narrowest diagnostic worth showing. Below this a
@@ -278,6 +325,17 @@ const minBannerDetail = 14
 // sentence.
 func (m Model) bannerCandidates() []string {
 	host, attempt := m.remoteDest, m.reconnect.attempt
+	// Checked BEFORE both phases. nextAt is stale-past while parked, so the
+	// countdown branch below falls through to "Connecting" — the single most
+	// misleading string available, since nothing is connecting and nothing will
+	// until the operator acts.
+	if m.reconnect.parked {
+		return []string{
+			fmt.Sprintf("%s unreachable — stopped, %s%sctrl+q quits", host, bannerResumeHint, bannerSep),
+			fmt.Sprintf("Stopped — %s%sctrl+q", bannerResumeHint, bannerSep),
+			bannerResumeHint + bannerSep + "ctrl+q",
+		}
+	}
 	if remain := time.Until(m.reconnect.nextAt); remain > 0 {
 		// +1 so a sub-second remainder reads as "1s" rather than "0s".
 		secs := int(remain.Seconds()) + 1

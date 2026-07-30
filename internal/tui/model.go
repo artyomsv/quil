@@ -549,6 +549,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// of the type switch so a future input message type is frozen by default
 	// instead of quietly reaching a live PTY through a branch nobody updated.
 	if m.reconnect.active {
+		// The resume key is checked BEFORE the freeze, or it would be swallowed
+		// with every other keystroke. It cannot live inside freezeInput: that
+		// has a value receiver and returns (tea.Cmd, bool), so it can neither
+		// clear the parked state nor hand back a mutated Model.
+		if key, ok := msg.(tea.KeyPressMsg); ok && m.reconnect.parked &&
+			kbMatches(key.String(), reconnectResumeKey) {
+			return m.resumeReconnect()
+		}
 		if cmd, frozen := m.freezeInput(msg); frozen {
 			return m, cmd
 		}
@@ -646,6 +654,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				msg.err = errors.New("dialer returned no connection")
 			}
 			m.reconnect.lastErr = msg.err
+			if errors.Is(msg.err, ErrLinkPermanent) {
+				// Every reconnect is a full authentication, so retrying a
+				// rejected key produces a steady stream of failed auths from the
+				// operator's own address — which a default fail2ban sshd jail
+				// bans, locking them out of a host that was never unreachable.
+				// The banner stays up: the session is paused, not over.
+				m.reconnect.parked = true
+				log.Printf("remote: parking reconnect after a permanent failure: %v", msg.err)
+				return m, nil
+			}
 			return m.scheduleRedial()
 		}
 		return m.finishReconnect(msg.client)

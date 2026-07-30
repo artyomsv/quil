@@ -545,8 +545,8 @@ Carried from the design spec; each needs an answer before its phase closes.
 
 | # | Question | Owned by |
 |---|---|---|
-| 1 | Does `quil status` gain remote support, or stay documented local-only? | RD-026 |
-| 2 | Does the Settings dialog hide daemon-owned rows in remote mode, or show them disabled with an explanation? | RD-027 |
+| 1 | ~~Does `quil status` gain remote support, or stay documented local-only?~~ **Answered: remote support.** The daemon already answers a version handshake, so `MsgStatusReq` is a thin addition. The deciding case is `--json`: a script that gains `--remote` and keeps reporting on the wrong machine is a live failure mode, and refusing prevents it only for as long as the guard is remembered. | RD-026 (decided) |
+| 2 | ~~Does the Settings dialog hide daemon-owned rows in remote mode, or show them disabled with an explanation?~~ **Answered: target them at the remote.** Apply drives `quil remote setup <dest>`, which has installed and upgraded over ssh since v1.44.0 — so this is wiring, not new capability. Merely labelling the controls is a strict subset and is the fallback if the phase runs long. | RD-027 (decided) |
 | 3 | Should notes move daemon-side? Storage is already atomic and pane-keyed, so it is a contained follow-up. | unassigned |
 | 4 | ~~Application-layer heartbeat, or rely on ssh keepalive?~~ **Answered: ssh keepalive** (~45 s detection). See the Phase 2 decision gate. | RD-011 (closed) |
 | 5 | Does Quil issue certificates, or only consume them? | RD-034 |

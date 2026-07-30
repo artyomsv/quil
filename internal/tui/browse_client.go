@@ -20,7 +20,16 @@ type browseTimeoutMsg struct{ path, child string }
 // this request can cross the same ssh link, where a first round trip after
 // an idle period pays a TCP handshake and, on Windows, a full ssh
 // authentication with no ControlMaster to amortise it.
-const browseTimeout = 8 * time.Second
+//
+// A var rather than a const purely so the test binary can shorten it, in the
+// same spirit as clipboardReadText in this package: no branch, no build tag,
+// no test detection, and production reads the value declared here. tea.Tick's
+// Cmd blocks for its whole duration, and the test helper that drains a
+// tea.Batch runs its children synchronously, so every test that issues a
+// browse request otherwise sleeps the full eight seconds for a timer it is not
+// asserting on. It is overridden ONCE, from TestMain — these tests run in
+// parallel, so mutating it mid-run would be a genuine data race.
+var browseTimeout = 8 * time.Second
 
 // browseState tracks an in-flight directory-browser request.
 //
@@ -107,6 +116,12 @@ func (m *Model) applyBrowseDir(resp ipc.BrowseDirRespPayload) browseOutcome {
 	// rather than a filepath.Dir computed against this machine's separators.
 	m.cwdBrowseParent = resp.Parent
 	m.cwdBrowseRoots = resp.Roots
+
+	// A capped listing is a PARTIAL answer, and rendering it like a complete
+	// one is the same confidently-wrong failure as rendering an error as an
+	// empty directory: a user who scrolls a huge directory without finding a
+	// folder concludes it is not there.
+	m.cwdBrowseTruncated = resp.Truncated
 
 	m.applyBrowseListing(resp.Resolved, resp.Entries, resp.Parent != "" || len(resp.Roots) > 0, m.browse.select_)
 	return browseFilled

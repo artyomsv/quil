@@ -1,9 +1,13 @@
 package tui
 
 import (
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
+
+	"charm.land/lipgloss/v2"
 
 	"github.com/artyomsv/quil/internal/clipboard"
 	"github.com/artyomsv/quil/internal/ipc"
@@ -259,6 +263,32 @@ func TestApplyBrowseDir_SelectNamePositionsCursor(t *testing.T) {
 	}
 	if m.cwdBrowseCursor != want {
 		t.Errorf("cwdBrowseCursor = %d, want %d (the row for %q)", m.cwdBrowseCursor, want, "target")
+	}
+}
+
+// TestMain shortens browseTimeout so the suite does not sleep on a timer it
+// never asserts on. That is only safe because the timeout path is driven
+// DIRECTLY — every TestApplyBrowseTimeout_* calls applyBrowseTimeout with an
+// explicit (path, child) rather than waiting for a tick — and because runCmd
+// discards whatever message a Cmd returns instead of dispatching it, so a tick
+// that fires during a test cannot reach Update. This pins both, so shrinking
+// the timer can never quietly become the thing under test.
+func TestBrowseTimeout_IsOverriddenForTestsWithoutDrivingTheTimeoutPath(t *testing.T) {
+	t.Parallel()
+	if browseTimeout >= 8*time.Second {
+		t.Errorf("browseTimeout = %v; TestMain is expected to shorten it for the suite", browseTimeout)
+	}
+
+	m, _, _ := overlayTestModel(t, "/a")
+	// A real request, whose tick is now due almost immediately.
+	runCmd(m.requestBrowseDir("/a", "", ""))
+	time.Sleep(50 * time.Millisecond) // well past the shortened timer
+
+	// The tick fired into runCmd, which dropped its message. Nothing observed
+	// it, so the request is still pending and carries no error.
+	if !m.browse.pending || m.browse.err != "" {
+		t.Errorf("a fired tick reached the model: pending=%v err=%q; runCmd must discard the message",
+			m.browse.pending, m.browse.err)
 	}
 }
 
@@ -798,7 +828,19 @@ func TestRenderSetup_BrowserStates_HeightStable(t *testing.T) {
 	failed.cwdBrowseEntries = []string{"..", "cmd", "internal"}
 	failed.browse = browseState{path: "/srv/work", err: "listing /srv/nope timed out after 10s — is it an unreachable network mount?"}
 
-	states := map[string]Model{"loaded": loaded, "empty": empty, "pending": pending, "failed": failed}
+	truncated := base()
+	truncated.cwdBrowseDir = "/srv/big"
+	truncated.cwdBrowseEntries = []string{"..", "cmd", "internal"}
+	truncated.cwdBrowseTruncated = true
+
+	truncatedEmpty := base()
+	truncatedEmpty.cwdBrowseDir = "/srv/allfiles"
+	truncatedEmpty.cwdBrowseTruncated = true
+
+	states := map[string]Model{
+		"loaded": loaded, "empty": empty, "pending": pending, "failed": failed,
+		"truncated": truncated, "truncated-empty": truncatedEmpty,
+	}
 	want := strings.Count(loaded.renderCreatePaneSetupDialog(), "\n")
 	for name, m := range states {
 		if got := strings.Count(m.renderCreatePaneSetupDialog(), "\n"); got != want {
@@ -846,6 +888,116 @@ func TestRenderSetup_PendingAndErrorAreNotEmptyDirectory(t *testing.T) {
 	out = stripANSI(empty.renderCreatePaneSetupDialog())
 	if !strings.Contains(out, "(empty directory)") {
 		t.Errorf("a genuinely empty listing lost its empty state\n%s", out)
+	}
+}
+
+// A capped listing must not read as a complete one. Otherwise a user scrolling
+// a large directory without finding a folder concludes it is absent — the same
+// confidently-wrong answer as rendering a failure as an empty directory.
+func TestRenderSetup_TruncatedListingSaysSo(t *testing.T) {
+	base := func(truncated bool) Model {
+		return Model{
+			dialog:             dialogCreatePaneSetup,
+			pluginRegistry:     registryWithAICWD(t),
+			selectedPlugin:     "ai",
+			width:              100,
+			cwdBrowseDir:       "/srv/big",
+			cwdBrowseEntries:   []string{"..", "a", "b"},
+			cwdBrowseTruncated: truncated,
+		}
+	}
+	complete := stripANSI(base(false).renderCreatePaneSetupDialog())
+	capped := stripANSI(base(true).renderCreatePaneSetupDialog())
+
+	if complete == capped {
+		t.Fatalf("a capped listing rendered identically to a complete one\n%s", capped)
+	}
+	if !strings.Contains(capped, "capped") {
+		t.Errorf("capped listing does not say so\n%s", capped)
+	}
+	if strings.Contains(complete, "capped") {
+		t.Errorf("a complete listing claimed it was capped\n%s", complete)
+	}
+	// The navigation hint survives alongside the warning — the marker leads so
+	// the width clamp eats the hints, not the news.
+	if !strings.Contains(capped, "↑↓ move") {
+		t.Errorf("capped listing lost its navigation hint\n%s", capped)
+	}
+}
+
+// The cap marker LEADS the hint so the width clamp eats the navigation text —
+// which the user has already read — instead of the one part of the line that is
+// news. Checked at the narrow width that made the original hint wrap, since
+// that is the only place the ordering can be observed.
+func TestRenderSetup_TruncatedMarkerSurvivesNarrowBox(t *testing.T) {
+	entries := []string{".."}
+	for i := 0; i < 15; i++ {
+		entries = append(entries, fmt.Sprintf("dir%02d", i))
+	}
+	m := Model{
+		dialog:             dialogCreatePaneSetup,
+		pluginRegistry:     registryWithAICWD(t),
+		selectedPlugin:     "ai",
+		cwdBrowseDir:       `E:\Projects\Stukans\monorepo`,
+		cwdBrowseEntries:   entries,
+		cwdBrowseTruncated: true,
+		width:              64,
+	}
+	out := m.renderCreatePaneSetupDialog()
+	textArea := m.setupTextWidth()
+	for _, line := range strings.Split(out, "\n") {
+		if w := lipgloss.Width(line); w > textArea {
+			t.Errorf("line %q width %d exceeds text area %d (would wrap)", line, w, textArea)
+		}
+	}
+	if !strings.Contains(stripANSI(out), "capped") {
+		t.Errorf("the cap warning was clamped away on a narrow box\n%s", stripANSI(out))
+	}
+}
+
+// Capped with nothing to show: every entry that survived the cap was a file.
+// Silence here would imply the directory holds no folders.
+func TestRenderSetup_TruncatedWithNoEntriesIsNotEmptyDirectory(t *testing.T) {
+	m := Model{
+		dialog:             dialogCreatePaneSetup,
+		pluginRegistry:     registryWithAICWD(t),
+		selectedPlugin:     "ai",
+		width:              100,
+		cwdBrowseDir:       "/srv/allfiles",
+		cwdBrowseTruncated: true,
+	}
+	out := stripANSI(m.renderCreatePaneSetupDialog())
+	if strings.Contains(out, "(empty directory)") {
+		t.Errorf("a capped listing rendered as an empty directory\n%s", out)
+	}
+	if !strings.Contains(out, "capped") {
+		t.Errorf("a capped listing does not say so\n%s", out)
+	}
+}
+
+// Truncated is recorded from the response, and cleared by the next answer that
+// is complete — a stale warning about a directory no longer on screen is its
+// own wrong answer.
+func TestApplyBrowseDir_RecordsAndClearsTruncated(t *testing.T) {
+	t.Parallel()
+	m, _, _ := overlayTestModel(t, "/a")
+
+	m.browse = browseState{path: "/big", pending: true}
+	m.applyBrowseDir(ipc.BrowseDirRespPayload{
+		Path: "/big", Resolved: "/big", Truncated: true,
+		Entries: []ipc.BrowseEntry{{Name: "sub", IsDir: true}},
+	})
+	if !m.cwdBrowseTruncated {
+		t.Error("Truncated was not recorded from the response")
+	}
+
+	m.browse = browseState{path: "/small", pending: true}
+	m.applyBrowseDir(ipc.BrowseDirRespPayload{
+		Path: "/small", Resolved: "/small",
+		Entries: []ipc.BrowseEntry{{Name: "sub", IsDir: true}},
+	})
+	if m.cwdBrowseTruncated {
+		t.Error("a complete listing left the previous listing's cap warning up")
 	}
 }
 

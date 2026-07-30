@@ -2274,6 +2274,7 @@ func (m *Model) enterSetupOrSplit(p *plugin.PanePlugin) tea.Cmd {
 	m.cwdBrowseScroll = 0
 	m.cwdBrowseParent = ""
 	m.cwdBrowseRoots = nil
+	m.cwdBrowseTruncated = false
 	m.browseCandidates = nil
 	// Also drop any in-flight browse from the previous plugin, so its answer
 	// cannot land in this dialog's listing. Safe to zero: no call site ever
@@ -2538,6 +2539,9 @@ func (m *Model) showRootsList() {
 	m.cwdBrowseScroll = 0
 	m.cwdInputError = ""
 	m.browse.err = ""
+	// The root list is the daemon's complete answer — carrying the previous
+	// directory's cap forward would warn about a listing no longer on screen.
+	m.cwdBrowseTruncated = false
 }
 
 // applyBrowseListing fills the directory browser from an already-resolved
@@ -2590,6 +2594,16 @@ func (m *Model) applyBrowseListing(resolved string, entries []ipc.BrowseEntry, s
 
 // browserVisibleRows is the height of the directory browser viewport.
 const browserVisibleRows = 12
+
+// truncatedHintPrefix marks a listing the daemon capped.
+//
+// Deliberately says "hidden" rather than naming a number: the cap counts
+// ENTRIES, the browser shows DIRECTORIES, and the daemon sorts directories
+// ahead of files before capping — so a capped listing may have lost only files
+// and still show every folder. The client cannot tell the two apart, and the
+// honest claim it can always make is that the answer is partial. Quoting a
+// count here would be precise about the wrong thing.
+const truncatedHintPrefix = "⚠ capped, some entries hidden  "
 
 // maxRepoCandidates bounds the setup-dialog pick list: the dialog has no
 // scroll machinery for this mode, so the list must fit the box. Overflow
@@ -3643,12 +3657,26 @@ func (m Model) renderCreatePaneSetupDialog() string {
 				b.WriteString(m.renderSetupHint("    ✗ "+m.browse.err) + "\n")
 			case m.browse.pending:
 				b.WriteString(dialogSubtle.Render("    (loading…)") + "\n")
-			case len(entries) > visible:
-				// Scroll indicator — shows position inside the list. Clamped so
-				// the hint never wraps onto a second line on a narrow box.
-				b.WriteString(m.renderSetupHint(fmt.Sprintf("    %d/%d  ↑↓ move  Enter descend  ← up  Ctrl+V paste", m.cwdBrowseCursor+1, len(entries))) + "\n")
 			case len(entries) > 0:
-				b.WriteString(m.renderSetupHint("    ↑↓ move  Enter descend  ← up  Ctrl+V paste") + "\n")
+				hint := "↑↓ move  Enter descend  ← up  Ctrl+V paste"
+				if len(entries) > visible {
+					// Scroll indicator — position inside the list.
+					hint = fmt.Sprintf("%d/%d  %s", m.cwdBrowseCursor+1, len(entries), hint)
+				}
+				if m.cwdBrowseTruncated {
+					// LEADING, so the width clamp can only ever eat the
+					// navigation hints — which the user has already read —
+					// rather than the one part of this line that is news. Same
+					// reasoning as the session picker's [open in …] marker,
+					// which is kept while the title truncates around it.
+					hint = truncatedHintPrefix + hint
+				}
+				b.WriteString(m.renderSetupHint("    "+hint) + "\n")
+			case m.cwdBrowseTruncated:
+				// Capped, yet nothing to show: every entry that survived the cap
+				// was a file. There is nothing to navigate, but the answer is
+				// still partial and saying nothing would imply otherwise.
+				b.WriteString(m.renderSetupHint("    "+truncatedHintPrefix) + "\n")
 			default:
 				b.WriteString(dialogSubtle.Render("    (empty directory)") + "\n")
 			}

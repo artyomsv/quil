@@ -388,12 +388,20 @@ Outstanding manual verification:
 | Drop the link mid-agent-turn with subagents running | spinner reflects reality rather than wedging (RD-014) | outstanding |
 | Local session, daemon stopped | still exits rather than spinning — the local path must be unchanged | outstanding |
 | Read `quil.log` after a reconnect and find ssh's own lines in it | RD-018 — the batch arm had no sanitizer and no sink, so diagnostics vanished exactly once a link started flapping. The wiring is now pinned by test; what a real link adds is that the lines are *legible and useful*, which no assertion can judge | outstanding |
-| Remove the key from the remote's `authorized_keys`, drop the link | RD-019 — the banner parks and says why, `r` resumes after restoring the key. Classification and its ordering are pinned by test; what a real link adds is that OpenSSH's actual wording still matches the marker list | outstanding |
+| Remove the key from the remote's `authorized_keys`, drop the link | RD-019 — the banner parks and says why, `r` resumes after restoring the key | **classification confirmed** against a live link (2026-07-30): one batch dial with an unauthorized key returned exit 255 and `<user>@<host>: Permission denied (publickey).`, matching the marker list, with nothing established. The banner and `r` still need a terminal |
 
 The two runs recorded above were made on the PR #113 tree, i.e. **before**
 RD-017. On Windows that tree could hang on close roughly 3 times in 8, so a
 pass there was probabilistic rather than evidence of the fixed behaviour —
 re-running both on v1.45.1 is worth the two minutes it costs.
+
+**Verified against the live VM on 2026-07-30, without a terminal.** Both ends
+report v1.45.1, and a hand-framed `version_req` sent through
+`ssh <host> quil --stdio` came back as a `version_resp` carrying the matching
+request id and `"version":"1.45.1"`, with ssh's stderr empty. That is the exact
+round-trip `verifyRemoteLink` performs on every reconnect, so the transport, the
+remote daemon and the version gate are confirmed end to end — what the remaining
+rows need is a terminal, not a working link.
 
 **Why the opencode check is now the most valuable one.** The two checks marked
 done both used a *terminal* pane, and code review then found that terminals are

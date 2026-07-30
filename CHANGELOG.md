@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.45.0] - 2026-07-30
+
 ### Fixed
 - **Remote error messages no longer cascade down the screen on Windows.** When a
   `--remote` launch could not go ahead — the daemon on the far side running a

@@ -2772,6 +2772,16 @@ func (m *Model) handlePaneOutput(msg PaneOutputMsg) tea.Cmd {
 	for _, tab := range m.tabs {
 		if tab.overlayPane != nil && tab.overlayPane.ID == msg.PaneID {
 			tab.overlayPane.preparing = false
+			// Same armed-reset consume as the layout-tree branch below. This
+			// branch returns early, so without it an overlay pane's replay would
+			// append onto content it was supposed to replace. Today's only
+			// overlay (lazygit) has ghost_buffer = false and so never receives a
+			// replay at all, leaving the flag armed and harmless — but the
+			// asymmetry is what would bite a future overlay plugin that does.
+			if msg.Ghost && tab.overlayPane.reattachReset {
+				tab.overlayPane.reattachReset = false
+				tab.overlayPane.resetForReattach()
+			}
 			tab.overlayPane.AppendOutput(msg.Data)
 			return nil
 		}
@@ -2782,6 +2792,16 @@ func (m *Model) handlePaneOutput(msg PaneOutputMsg) tea.Cmd {
 		}
 		if leaf := tab.Root.FindLeaf(msg.PaneID); leaf != nil {
 			oldCWD := leaf.Pane.CWD
+			// Reattach reset, applied on the daemon's FIRST replayed chunk rather
+			// than predicted before the attach. Only a replay can double a pane's
+			// scrollback, so only a replay needs the reset — and this is the one
+			// place that knows a replay actually arrived. Doing it here needs no
+			// agreement with the daemon about which plugins replay; see
+			// armReattachReset.
+			if msg.Ghost && leaf.Pane.reattachReset {
+				leaf.Pane.reattachReset = false
+				leaf.Pane.resetForReattach()
+			}
 			if msg.Ghost && m.cfg.GhostBuffer.Dimmed {
 				if !leaf.Pane.ghost {
 					log.Printf("pane %s: ghost=true (received %d bytes)", msg.PaneID, len(msg.Data))

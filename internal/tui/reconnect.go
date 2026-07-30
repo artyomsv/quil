@@ -393,56 +393,39 @@ func (m *Model) eachClientPane(fn func(*PaneModel)) {
 	}
 }
 
-// paneRepaintsOnAttach reports whether the daemon will put something back into
-// this pane type's rectangle when we re-attach.
+// armReattachReset marks every pane to be reset when — and only when — the
+// daemon's replay for it actually arrives. The reset itself happens in the
+// PaneOutputMsg handler on the first `Ghost` chunk.
 //
-// `handleAttach` (daemon.go) sends a ghost replay only when the plugin has
-// `ghost_buffer = true`; otherwise it sends NOTHING and falls through to
-// `redrawKick`, which is itself a no-op unless the plugin declares a
-// `redraw_key`. Of the shipped defaults, `ghost_buffer = false` holds for
-// claude-code, opencode, lazygit, k9s and lazysql — and only claude-code has a
-// redraw key.
+// Deferred rather than predicted, and that is the whole point. Resetting exists
+// to stop a replay DOUBLING a pane's scrollback, so it is worth paying only
+// where a replay comes; `handleAttach` sends one only for plugins with
+// `ghost_buffer = true`, and wiping a pane that gets nothing leaves a blank
+// rectangle in front of a live process — indefinitely, in a background tab.
 //
-// Unknown types and a nil registry answer TRUE, matching `builtin.go`'s
-// `GhostBuffer: true` default: over-resetting a terminal costs a replayed
-// repaint, while under-resetting one doubles its scrollback, and the replay is
-// the cheaper mistake.
-func (m Model) paneRepaintsOnAttach(typ string) bool {
-	if m.pluginRegistry == nil {
-		return true
-	}
-	p := m.pluginRegistry.Get(typ)
-	if p == nil {
-		return true
-	}
-	return p.Persistence.GhostBuffer || p.Persistence.RedrawKey != ""
-}
-
-// resetPanesForReattach resets the panes that the coming attach will repaint.
+// The obvious implementation is to ask the plugin registry which types replay.
+// That is wrong here, in a way worth writing down: the registry the Model holds
+// is loaded from `config.PluginsDir()` — **this** machine's plugins — while
+// `handleAttach` decides from the DAEMON's registry. In remote mode those are
+// different machines and can disagree arbitrarily; even locally the TUI reloads
+// its own registry when a plugin TOML is saved, ahead of the daemon processing
+// the reload. Either way a mismatch corrupts the reattach in both directions:
+// clear a pane nothing repaints, or preserve one that is replayed and double it.
+// Reconciling the two registries is RD-023's job (Phase 3).
 //
-// Gated, not unconditional. Resetting exists to stop the replay from DOUBLING a
-// pane's scrollback, so it is only ever worth paying where a replay (or a redraw
-// kick) is actually coming. Wiping a pane that gets neither destroys the only
-// content it has and replaces it with a blank rectangle in front of a live
-// process — indefinitely, if the pane sits in a background tab. That is strictly
-// worse than the duplication it was guarding against, and it would have hit
-// opencode, lazygit, k9s and lazysql: every AI pane except claude-code.
+// Waiting for the replay removes the guess entirely. The daemon's action is the
+// signal, so no agreement about plugin config is needed.
 //
-// claude-code IS reset: it has no replay but does have `redraw_key = "\f"`, and
-// a full repaint lands more cleanly on a cleared grid than over a stale one,
-// where a shorter new paint would leave old rows beneath it. It loses scrollback
-// in exchange, which for a full-screen alternate-screen app is its own internal
-// scroll rather than terminal history.
-func (m *Model) resetPanesForReattach() {
-	m.eachClientPane(func(p *PaneModel) {
-		if !m.paneRepaintsOnAttach(p.Type) {
-			return
-		}
-		p.resetForReattach()
-	})
-	// Selection is Model-level, and anchors to row/column coordinates inside
-	// content that has just been discarded. Keeping it would highlight whatever
-	// happens to land in those cells after replay.
+// Panes that never receive a replay keep their content and stay armed, which is
+// harmless: only an attach replay ever sets `Ghost`, so the flag can only be
+// consumed by the thing it is waiting for. claude-code is one of those — it gets
+// a `redraw_key` kick instead, and repaints over its existing grid exactly as it
+// did before reconnect existed.
+func (m *Model) armReattachReset() {
+	m.eachClientPane(func(p *PaneModel) { p.reattachReset = true })
+	// Selection is Model-level and anchors to row/column coordinates that any
+	// replay invalidates. Dropped now rather than armed: there is no per-pane
+	// chunk to hang it off, and a selection surviving an outage is worth nothing.
 	m.selection = nil
 }
 
@@ -578,7 +561,7 @@ func (m Model) finishReconnect(c Client) (tea.Model, tea.Cmd) {
 	// Before the attach that triggers replay, not after: the daemon starts
 	// sending the moment it processes MsgAttach, and a reset arriving late would
 	// wipe the replay it was meant to make room for.
-	m.resetPanesForReattach()
+	m.armReattachReset()
 	m.resetWorkStateForReattach()
 
 	return m, tea.Batch(m.attachToDaemon(), m.listenForMessages())

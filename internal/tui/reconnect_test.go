@@ -12,7 +12,6 @@ import (
 
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
-	"github.com/artyomsv/quil/internal/plugin"
 )
 
 // failingClient returns err from Receive forever.
@@ -746,7 +745,7 @@ func TestReconnect_ResetsScrollbackBeforeReplay(t *testing.T) {
 		t.Fatalf("fixture built %d panes, want 3 (2 layout + 1 overlay)", len(panes))
 	}
 	for _, p := range panes {
-		p.AppendOutput([]byte("line one\r\nline two\r\n"))
+		p.AppendOutput([]byte("PREDROP line one\r\nPREDROP line two\r\n"))
 		p.scrollBack = 5
 		p.liveOutputSeen = true
 	}
@@ -755,11 +754,17 @@ func TestReconnect_ResetsScrollbackBeforeReplay(t *testing.T) {
 	}
 	m.selection = &Selection{PaneID: "p0"}
 
-	m.resetPanesForReattach()
+	armAndReplayAll(t, m, "replayed after reattach")
 
+	// Asserted as "the pre-drop content is gone", not "the buffer is empty":
+	// the reset is now consumed BY the replay, so afterwards the buffer holds
+	// the replayed chunk. Surviving pre-drop content is precisely the doubling.
 	for _, p := range panes {
-		if got := p.rawBuf.Len(); got != 0 {
-			t.Errorf("pane %s: rawBuf = %d bytes after reset, want 0", p.ID, got)
+		if got := string(p.rawBuf.Bytes()); strings.Contains(got, "PREDROP") {
+			t.Errorf("pane %s: pre-drop content survived the replay, so scrollback doubled:\n%q", p.ID, got)
+		}
+		if got := string(p.rawBuf.Bytes()); !strings.Contains(got, "replayed after reattach") {
+			t.Errorf("pane %s: the replayed chunk did not land:\n%q", p.ID, got)
 		}
 		if p.scrollBack != 0 {
 			t.Errorf("pane %s: scrollBack = %d, want 0", p.ID, p.scrollBack)
@@ -781,12 +786,12 @@ func TestReconnect_ResetsTerminalPanesAlso(t *testing.T) {
 	m := newReconnectTestModel(t, 1)
 	p := m.tabs[0].Leaves()[0]
 	p.Type = "terminal"
-	p.AppendOutput([]byte("shell output\r\n"))
+	p.AppendOutput([]byte("PREDROP shell output\r\n"))
 
-	m.resetPanesForReattach()
+	armAndReplayAll(t, m, "replayed after reattach")
 
-	if got := p.rawBuf.Len(); got != 0 {
-		t.Errorf("terminal pane not reset: %d bytes remain", got)
+	if got := string(p.rawBuf.Bytes()); strings.Contains(got, "PREDROP") {
+		t.Errorf("terminal pane not reset, pre-drop content survived:\n%q", got)
 	}
 }
 
@@ -796,15 +801,17 @@ func TestReconnect_ResetsTerminalPanesAlso(t *testing.T) {
 func TestReconnect_ResetsOverlayPane(t *testing.T) {
 	m := newReconnectTestModel(t, 1)
 	ov := m.tabs[0].overlayPane
-	ov.AppendOutput([]byte("lazygit screen\r\n"))
+	ov.AppendOutput([]byte("PREDROP lazygit screen\r\n"))
 	if ov.rawBuf.Len() == 0 {
 		t.Fatal("fixture wrote nothing to the overlay pane")
 	}
 
-	m.resetPanesForReattach()
+	armAndReplayAll(t, m, "replayed after reattach")
 
-	if got := ov.rawBuf.Len(); got != 0 {
-		t.Errorf("overlay pane not reset: %d bytes remain", got)
+	// Overlay panes are served by their own branch in handlePaneOutput that
+	// returns early, so this also pins that the branch consumes the armed reset.
+	if got := string(ov.rawBuf.Bytes()); strings.Contains(got, "PREDROP") {
+		t.Errorf("overlay pane not reset, pre-drop content survived:\n%q", got)
 	}
 }
 
@@ -820,15 +827,15 @@ func TestReconnect_ResetsBackgroundTabs(t *testing.T) {
 	bg.Resize(80, 24)
 	m.tabs = append(m.tabs, bg)
 
-	p.AppendOutput([]byte("background output\r\n"))
+	p.AppendOutput([]byte("PREDROP background output\r\n"))
 	if p.rawBuf.Len() == 0 {
 		t.Fatal("fixture wrote nothing to the background pane")
 	}
 
-	m.resetPanesForReattach()
+	armAndReplayAll(t, m, "replayed after reattach")
 
-	if got := p.rawBuf.Len(); got != 0 {
-		t.Errorf("background-tab pane not reset: %d bytes remain", got)
+	if got := string(p.rawBuf.Bytes()); strings.Contains(got, "PREDROP") {
+		t.Errorf("background-tab pane not reset, pre-drop content survived:\n%q", got)
 	}
 }
 
@@ -842,7 +849,7 @@ func TestReconnect_SuccessPathResetsPanes(t *testing.T) {
 
 	panes := reconnectTestPanes(m)
 	for _, p := range panes {
-		p.AppendOutput([]byte("pre-reconnect content\r\n"))
+		p.AppendOutput([]byte("PREDROP pre-reconnect content\r\n"))
 	}
 	m.selection = &Selection{PaneID: "p0"}
 
@@ -852,13 +859,28 @@ func TestReconnect_SuccessPathResetsPanes(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("no attach/listen command returned")
 	}
+	// The reconnect ARMS the reset; the daemon's replay consumes it. Both halves
+	// are asserted, because arming without a replay ever landing was the bug that
+	// blanked every pane with no ghost buffer.
 	for _, p := range panes {
-		if n := p.rawBuf.Len(); n != 0 {
-			t.Errorf("pane %s still holds %d bytes after a successful reconnect — the replay will double it", p.ID, n)
+		if !p.reattachReset {
+			t.Errorf("pane %s was not armed by the reconnect", p.ID)
+		}
+		if got := string(p.rawBuf.Bytes()); !strings.Contains(got, "PREDROP") {
+			t.Errorf("pane %s was wiped at arm time rather than on the replay", p.ID)
 		}
 	}
 	if got.selection != nil {
 		t.Error("selection survived the reconnect")
+	}
+
+	for _, p := range panes {
+		deliverGhost(t, &got, p.ID, "replayed after reattach")
+	}
+	for _, p := range panes {
+		if s := string(p.rawBuf.Bytes()); strings.Contains(s, "PREDROP") {
+			t.Errorf("pane %s: pre-drop content survived its replay, so scrollback doubled:\n%q", p.ID, s)
+		}
 	}
 }
 
@@ -1115,7 +1137,7 @@ func TestReconnect_GhostDimIsAcceptedNotAvoided(t *testing.T) {
 	p := m.tabs[0].Leaves()[0]
 	p.liveOutputSeen = true
 
-	m.resetPanesForReattach()
+	armAndReplayAll(t, m, "replayed after reattach")
 
 	if p.liveOutputSeen {
 		t.Error("liveOutputSeen survived; the ghost→live transition and its settle repaints " +
@@ -1273,79 +1295,85 @@ func TestReconnectDelay_DecayBoundary(t *testing.T) {
 // pane destroys the only content it has and leaves a blank rectangle in front of
 // a live process — indefinitely, if the pane is in a background tab.
 //
-// Of the shipped defaults that affects opencode, lazygit, k9s and lazysql: every
-// AI pane except claude-code, which does declare a redraw key. The live test that
-// validated reconnect used a terminal pane, which is exactly the case that DOES
-// get a replay, so nothing caught this.
-// Driven by the REAL shipped defaults rather than a synthetic registry, so it
-// also fails if someone later flips a ghost_buffer or adds a redraw_key without
-// reconsidering the reset.
-func TestReconnect_DoesNotWipePanesThatGetNoReplay(t *testing.T) {
-	dir := t.TempDir()
-	if _, err := plugin.EnsureDefaultPlugins(dir); err != nil {
-		t.Fatalf("write default plugins: %v", err)
-	}
-	reg := plugin.NewRegistry()
-	if err := reg.LoadFromDir(dir); err != nil {
-		t.Fatalf("load default plugins: %v", err)
-	}
+// THE CRITICAL REGRESSION, and the P1 that followed the first fix.
+//
+// handleAttach replays only plugins with ghost_buffer = true; the rest get
+// nothing and fall through to redrawKick, itself a no-op without a redraw_key.
+// Resetting such a pane leaves a blank rectangle in front of a live process —
+// indefinitely, in a background tab. That hit opencode, lazygit, k9s and lazysql.
+//
+// The first fix predicted the daemon's choice from the Model's plugin registry.
+// That registry is loaded from THIS machine's config.PluginsDir(), while
+// handleAttach decides from the DAEMON's — different machines in remote mode, and
+// even locally the TUI reloads its own registry when a plugin TOML is saved,
+// ahead of the daemon. A mismatch corrupts the reattach in both directions.
+//
+// So the reset is now armed and consumed by the daemon's ACTUAL replay. No
+// registry, no prediction, no agreement needed. These tests drive that contract:
+// a pane that receives a replay is reset exactly once before the replay lands; a
+// pane that receives none keeps everything it had.
+func TestReconnect_ResetIsConsumedByTheReplayNotPredicted(t *testing.T) {
+	t.Run("a replayed pane is reset before the chunk lands", func(t *testing.T) {
+		m := newReconnectTestModel(t, 1)
+		p := m.tabs[0].Leaves()[0]
+		p.AppendOutput([]byte("stale content from before the drop\r\n"))
+		if p.rawBuf.Len() == 0 {
+			t.Fatal("fixture wrote nothing")
+		}
 
-	cases := []struct {
-		typ         string
-		wantReset   bool
-		wantsReason string
-	}{
-		{"terminal", true, "ghost_buffer = true, so a replay arrives and would double"},
-		{"claude-code", true, "no replay, but redraw_key = \"\\f\" repaints it"},
-		{"opencode", false, "no replay and no redraw key — nothing would come back"},
-		{"lazygit", false, "no replay and no redraw key"},
-		{"k9s", false, "no replay and no redraw key"},
-		{"lazysql", false, "no replay and no redraw key"},
-	}
+		m.armReattachReset()
+		if p.rawBuf.Len() == 0 {
+			t.Error("arming alone wiped the pane — the reset must wait for the replay, " +
+				"or a pane that never gets one is left blank")
+		}
 
-	for _, tc := range cases {
-		t.Run(tc.typ, func(t *testing.T) {
-			m := newReconnectTestModel(t, 1)
-			m.pluginRegistry = reg
-			p := m.tabs[0].Leaves()[0]
-			p.Type = tc.typ
+		deliverGhost(t, m, p.ID, "replayed\r\n")
+
+		if p.reattachReset {
+			t.Error("the armed flag survived its replay; a later chunk would reset again mid-replay")
+		}
+		if got := string(p.rawBuf.Bytes()); strings.Contains(got, "stale content") {
+			t.Errorf("the pre-drop content survived the replay, so scrollback doubled:\n%q", got)
+		}
+		if got := string(p.rawBuf.Bytes()); !strings.Contains(got, "replayed") {
+			t.Errorf("the replayed chunk did not land:\n%q", got)
+		}
+	})
+
+	t.Run("a pane with no replay keeps its content", func(t *testing.T) {
+		m := newReconnectTestModel(t, 2)
+		replayed, silent := m.tabs[0].Leaves()[0], m.tabs[0].Leaves()[1]
+		for _, p := range []*PaneModel{replayed, silent} {
 			p.AppendOutput([]byte("content that predates the reconnect\r\n"))
-			if p.rawBuf.Len() == 0 {
-				t.Fatal("fixture wrote nothing")
-			}
+		}
 
-			m.resetPanesForReattach()
+		m.armReattachReset()
+		deliverGhost(t, m, replayed.ID, "only this pane is replayed\r\n")
 
-			wiped := p.rawBuf.Len() == 0
-			if wiped != tc.wantReset {
-				if tc.wantReset {
-					t.Errorf("%s was NOT reset but should be (%s)", tc.typ, tc.wantsReason)
-				} else {
-					t.Errorf("%s was wiped but should not be (%s) — it renders blank "+
-						"in front of a live process, indefinitely in a background tab",
-						tc.typ, tc.wantsReason)
-				}
-			}
-		})
-	}
-}
+		if silent.rawBuf.Len() == 0 {
+			t.Error("a pane the daemon never replayed was wiped — nothing will repaint it, " +
+				"so it renders blank in front of a live process")
+		}
+		if !silent.reattachReset {
+			t.Error("the un-replayed pane's flag was consumed by another pane's chunk")
+		}
+	})
 
-// An unknown type and a nil registry must both be treated as replayed. Over-
-// resetting a terminal costs a repaint; under-resetting one doubles its
-// scrollback, so the replay assumption is the cheaper default — and it matches
-// builtin.go's GhostBuffer: true.
-func TestReconnect_UnknownPaneTypeIsTreatedAsReplayed(t *testing.T) {
-	m := newReconnectTestModel(t, 1)
+	t.Run("only a ghost chunk consumes the reset, not live output", func(t *testing.T) {
+		m := newReconnectTestModel(t, 1)
+		p := m.tabs[0].Leaves()[0]
+		p.AppendOutput([]byte("before\r\n"))
 
-	m.pluginRegistry = nil
-	if !m.paneRepaintsOnAttach("anything") {
-		t.Error("nil registry: want true (assume a replay is coming)")
-	}
+		m.armReattachReset()
+		// Live output is not a replay and must not be mistaken for one.
+		updated, _ := m.Update(PaneOutputMsg{PaneID: p.ID, Data: []byte("live\r\n")})
+		m = func() *Model { g := updated.(Model); return &g }()
 
-	m.pluginRegistry = plugin.NewRegistry()
-	if !m.paneRepaintsOnAttach("not-registered") {
-		t.Error("unknown type: want true (assume a replay is coming)")
-	}
+		if !p.reattachReset {
+			t.Error("live output consumed the armed reset; the real replay would then " +
+				"append onto content it should have replaced")
+		}
+	})
 }
 
 // Every rung of the banner ladder must keep the exit hint, in both phases. The
@@ -1467,5 +1495,25 @@ func TestReconnect_BannerRendersOverADialog(t *testing.T) {
 		if got := lipgloss.Width(line); got > m.width {
 			t.Errorf("line %d measured %d cells, wider than the %d-cell frame", i, got, m.width)
 		}
+	}
+}
+
+// deliverGhost simulates the daemon replaying a chunk for one pane, which is
+// what consumes an armed reattach reset.
+func deliverGhost(t *testing.T, m *Model, paneID string, data string) {
+	t.Helper()
+	updated, _ := m.Update(PaneOutputMsg{PaneID: paneID, Data: []byte(data), Ghost: true})
+	got := updated.(Model)
+	*m = got
+}
+
+// armAndReplayAll simulates a full reattach in which the daemon replays every
+// pane: arm the reset, then deliver a ghost chunk to each. Most reset tests mean
+// this, since the reset is now consumed by the replay rather than predicted.
+func armAndReplayAll(t *testing.T, m *Model, data string) {
+	t.Helper()
+	m.armReattachReset()
+	for _, p := range reconnectTestPanes(m) {
+		deliverGhost(t, m, p.ID, data)
 	}
 }

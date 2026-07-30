@@ -403,6 +403,23 @@ round-trip `verifyRemoteLink` performs on every reconnect, so the transport, the
 remote daemon and the version gate are confirmed end to end — what the remaining
 rows need is a terminal, not a working link.
 
+**claude-code cannot stand in for this check.** It is the obvious substitute —
+it is a `ghost_buffer = false` plugin, so it takes the same no-replay path — but
+it is the ONLY one that also declares a `redraw_key` (`"\f"`), and `redrawKick`
+(`daemon.go`) writes that to the child on every replay-less attach. claude
+repaints over whatever is on screen, so a pane that had been wrongly cleared
+comes back looking correct. Testing with it produces a **false pass** on exactly
+the bug the row exists to catch. The four plugins that expose the gate are the
+four it broke — opencode, lazygit, k9s, lazysql — and what they have in common
+is `ghost_buffer = false` with **no** `redraw_key`, i.e. nothing repaints them.
+Verified 2026-07-30 against a VM that had only claude-code installed.
+
+The TUI half of the contract is nonetheless pinned, and pinned
+plugin-agnostically: `TestReconnect_ResetIsConsumedByTheReplayNotPredicted`
+drives it at the message level — one pane replayed, one not — so it does not
+depend on any plugin's configuration. What a live run still adds is the DAEMON
+half: that `handleAttach` really does withhold a replay for those types.
+
 **Why the opencode check is now the most valuable one.** The two checks marked
 done both used a *terminal* pane, and code review then found that terminals are
 exactly the case that works: `handleAttach` replays only plugins with

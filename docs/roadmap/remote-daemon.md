@@ -408,10 +408,18 @@ on 2026-07-30 could not create a lazygit pane at all: the setup dialog's CWD
 browser calls `os.ReadDir` in the TUI process, so it offers only the laptop's
 drives and can never reach `/home/artyom/homelab` (RD-020); pasting the path with
 `ctrl+v` fails too, because `validateAndNormalizeCWD` stats the target locally;
-and `Alt+G` silently does nothing, because `overlay.go` calls
+and `Alt+G` reports `no git repo here`, because `overlay.go:54` calls
 `gitdiscover.Candidates` in the TUI as well, handing it a Linux CWD to `os.Stat`
 on Windows (RD-021). The pane had to be created by sending `create_pane` over the
 transport by hand.
+
+RD-021 produced the clearest artifact of the two, because a single screen
+contradicted itself: with a claude-code pane open at `/home/artyom/homelab`,
+`Alt+G` flashed `no git repo here` in the status bar while the agent running in
+that same directory on the VM answered `git status` with `On branch master` and
+three modified files. The status bar was describing the laptop's filesystem and
+presenting it as a fact about the remote path. `overlay.go:51` already carried a
+comment saying the call runs on the local disk and that an RPC would replace it.
 
 So RD-020 and RD-021 are not only UX debt — until they land, the only pane types
 that can verify the Phase 2 ghost-replay gate cannot be created through the UI on

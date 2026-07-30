@@ -34,7 +34,7 @@ pass. Treat code-quality and test-design as UNDER-reviewed if a round 2 runs.
 
 ## Notes for the next round
 
-- **code-reviewer and qa produced no report.** The RD-017 descriptor-ownership
+- **code-reviewer produced no report.** The RD-017 descriptor-ownership
   change is the one with real deadlock/leak risk and never got an independent
   read: verify `c.r` is closed exactly once on every conn shape (real child,
   never-started, `newStdioConn(nil, …)`, close-before-output, double Close).
@@ -44,3 +44,12 @@ pass. Treat code-quality and test-design as UNDER-reviewed if a round 2 runs.
 - **Nothing here is verified on a real link.** Phase 2's outstanding manual
   checks still stand, plus two new ones: ssh diagnostics reaching `quil.log`
   after a reconnect, and a rejected key parking rather than retrying.
+
+## Round 1 addendum — qa report (arrived late)
+
+- [qa/1] `redialRemote`'s classify-and-wrap step was untested — the classifier and the TUI's sentinel handling were each covered, but nothing proved they were joined. Extracted as `markPermanentLinkFailure` and table-tested against a fake link, covering both attribution gates, the nil-link case, and that the wrap leads with the cause — resolved
+- [qa/2] `bestEffort`'s error-swallowing path was dead code to the tests; the only sink exercised never errors. Covered with an always-failing writer, asserting `io.MultiWriter` does not abort and the diagnostic buffer keeps every write — resolved
+- [qa/3] **`TestStdioConn_Close_ReturnsWhilePumpIsParkedInRead` is inert on Linux CI.** qa mutation-verified it: with the fix reverted it still passes, because `os.Pipe` descriptors on Linux are netpoller-integrated and `Close` unparks a blocked read. The deadlock exists only on Windows' non-overlapped handles. Test kept and relabelled with the measured native-Windows numbers (3/8 → 0/10) naming the real gate — resolved as documentation, NOT as a CI gate
+- [qa/4] `parked` reset across `beginReconnect`/`finishReconnect` untested. Not fixed: both replace `m.reconnect` with a fresh struct literal, so the field zeroes structurally rather than by an assignment that could be forgotten. Accepted as incidental rather than pinned
+- qa confirmed no tautological tests among the new ones, and mutation-verified `TestSSH_BatchStderrSink_ReceivesSanitizedOutput`, `TestClassifyLinkFailure_RemoteShellNoiseCannotPark` and `TestClassifyLinkFailure_EstablishedNeverParks` as genuinely sensitive
+- **Process note:** qa reported working-tree drift and files appearing/vanishing mid-review. That was this session editing the same checkout concurrently, including a `git stash`/`stash pop` cycle. Its findings against committed SHAs are sound; a shared checkout is a poor substrate for a review agent and a worktree would avoid it next time

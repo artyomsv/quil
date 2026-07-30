@@ -3601,7 +3601,10 @@ func (m Model) renderCreatePaneSetupDialog() string {
 		// the selected path, so a separate line would duplicate it and merge
 		// visually with the list — skip it and let the highlight do the work.
 		if len(pick) == 0 {
-			path, prefix := m.cwdBrowseDir, "    "
+			// Resolved is the daemon's answer (BrowseDirRespPayload.Resolved) and
+			// may be remote — sanitize before it reaches a rendered row. The
+			// raw value stays in m.cwdBrowseDir for the actual spawn CWD.
+			path, prefix := sanitizeRemoteText(m.cwdBrowseDir), "    "
 			switch {
 			// No runtime.GOOS check: the roots come from the daemon, and only a
 			// Windows daemon reports any, so their presence IS the condition.
@@ -3698,6 +3701,12 @@ func (m Model) renderCreatePaneSetupDialog() string {
 				if name != ".." && !strings.HasSuffix(name, `\`) {
 					displayName = name + "/"
 				}
+				// name is BrowseEntry.Name off the wire and may be remote —
+				// sanitized here, at render, on the DISPLAY copy only. The
+				// ".." / trailing-"\" checks above run against the raw value on
+				// purpose: they compare against the synthetic ".." marker this
+				// package adds itself, not the daemon's bytes.
+				displayName = sanitizeRemoteText(displayName)
 				if focused && idx == m.cwdBrowseCursor {
 					b.WriteString("  > " + dialogSelected.Render(displayName) + "\n")
 				} else {
@@ -3721,7 +3730,10 @@ func (m Model) renderCreatePaneSetupDialog() string {
 			// genuinely came back with nothing in it.
 			switch {
 			case m.browse.err != "":
-				b.WriteString(m.renderSetupHint("    ✗ "+m.browse.err) + "\n")
+				// browse.err is usually BrowseDirRespPayload.Error, which can
+				// embed a remote path — sanitize on the way out, same as the
+				// other two browse fields.
+				b.WriteString(m.renderSetupHint("    ✗ "+sanitizeRemoteText(m.browse.err)) + "\n")
 			case m.browse.pending:
 				b.WriteString(dialogSubtle.Render("    (loading…)") + "\n")
 			case len(entries) > 0:

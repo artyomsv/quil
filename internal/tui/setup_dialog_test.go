@@ -1799,6 +1799,88 @@ func TestRenderSetup_BrowserBlurred_MarksPathLine(t *testing.T) {
 	}
 }
 
+// --- Remote-sourced browse text (Phase 3 security) --------------------------
+//
+// Name, Resolved, and Error in BrowseDirRespPayload come from the daemon,
+// which may be remote. These pin that renderCreatePaneSetupDialog never lets
+// a raw control byte out of that payload reach the frame — see
+// sanitizeRemoteText in remotetext.go for the function under test here.
+
+// A hostile entry name containing a raw ESC byte must not let that byte
+// reach the frame. Checked differentially against a same-shaped clean
+// listing rather than asserting an absolute zero: whether lipgloss's own
+// styling emits SGR (ESC-prefixed) codes at all depends on the color profile
+// the test process detects, and the invariant must hold either way — a
+// hostile NAME must not ADD an ESC byte, regardless of how many the box's own
+// styling contributes.
+func TestRenderSetup_HostileEntryName_NoRawESCByte(t *testing.T) {
+	clean := Model{
+		dialog:           dialogCreatePaneSetup,
+		pluginRegistry:   registryWithAICWD(t),
+		selectedPlugin:   "ai",
+		cwdBrowseDir:     `/home/dev/projects`,
+		cwdBrowseEntries: []string{"..", "alpha", "beta"},
+		width:            100,
+	}
+	hostile := clean
+	hostile.cwdBrowseEntries = []string{"..", "alpha\x1b[31m;rm -rf\x1b[0m", "beta"}
+
+	cleanOut := clean.renderCreatePaneSetupDialog()
+	hostileOut := hostile.renderCreatePaneSetupDialog()
+
+	wantESC := strings.Count(cleanOut, "\x1b")
+	if got := strings.Count(hostileOut, "\x1b"); got != wantESC {
+		t.Errorf("hostile entry name changed the raw ESC byte count: got %d, want %d (dialog-chrome baseline)\n%s", got, wantESC, hostileOut)
+	}
+}
+
+// A hostile entry name could try to grow the dialog by embedding a raw
+// newline instead of an escape. sanitizeRemoteText drops C0 controls
+// (\t is the sole exception, mapped to a space) — \n included — so this must
+// not change the box's line count. Mirrors
+// TestRenderSetup_PickFocusChange_HeightStable.
+func TestRenderSetup_HostileEntryName_HeightStable(t *testing.T) {
+	base := Model{
+		dialog:           dialogCreatePaneSetup,
+		pluginRegistry:   registryWithAICWD(t),
+		selectedPlugin:   "ai",
+		cwdBrowseDir:     `/home/dev/projects`,
+		cwdBrowseEntries: []string{"..", "alpha", "beta"},
+		width:            100,
+	}
+	hostile := base
+	hostile.cwdBrowseEntries = []string{"..", "alpha\nfake-row\ninjected", "beta"}
+
+	baseLines := strings.Count(base.renderCreatePaneSetupDialog(), "\n")
+	hostileLines := strings.Count(hostile.renderCreatePaneSetupDialog(), "\n")
+	if baseLines != hostileLines {
+		t.Errorf("hostile entry with an embedded newline changed dialog height: got %d lines, want %d", hostileLines, baseLines)
+	}
+}
+
+// Resolved (cwdBrowseDir) and Error (browse.err) are the other two
+// remote-sourced browse fields. Checked by looking for the exact injected
+// SGR sequence rather than counting ESC bytes, since these two render sites
+// are single-shot (not list rows), so there is no same-shaped clean baseline
+// to diff against the way the entry-name test has one.
+func TestRenderSetup_HostileResolvedAndError_NoInjectedSGR(t *testing.T) {
+	const inject = "\x1b[31m"
+	m := Model{
+		dialog:         dialogCreatePaneSetup,
+		pluginRegistry: registryWithAICWD(t),
+		selectedPlugin: "ai",
+		cwdBrowseDir:   "/home/dev/" + inject + "evil",
+		width:          100,
+	}
+	m.browse.err = "permission denied: /etc/" + inject + "shadow"
+	m.setupFieldCursor = 0 // focus the CWD field so the path line renders
+
+	out := m.renderCreatePaneSetupDialog()
+	if strings.Contains(out, inject) {
+		t.Errorf("hostile Resolved/Error text leaked a raw SGR escape into the render:\n%q", out)
+	}
+}
+
 // Mirror of the CWD case for kube. The kube branch's correctness depends on
 // case ORDER inside renderRow's switch, so this is the test that catches a
 // reorder — without it, a focused row could silently take the idle mark.

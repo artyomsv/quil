@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -358,5 +359,108 @@ func TestRedirectRemoteStderr_ForwardsNilAsDiscard(t *testing.T) {
 	}
 	if got != nil {
 		t.Errorf("redirect received %v, want nil", got)
+	}
+}
+
+// captureLog redirects the standard logger for one test and returns what was
+// written. sshStderrLogger emits through log.Printf so that slog quotes the
+// value; asserting on the emitted record is the only way to see the framing.
+func captureLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prevOut, prevFlags, prevPrefix := log.Writer(), log.Flags(), log.Prefix()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	log.SetPrefix("")
+	t.Cleanup(func() {
+		log.SetOutput(prevOut)
+		log.SetFlags(prevFlags)
+		log.SetPrefix(prevPrefix)
+	})
+	return &buf
+}
+
+// TestSSHStderrLogger_EscapesNewlinesSoRemoteTextCannotForgeARecord is the
+// finding this type exists for.
+//
+// terminalSanitizer deliberately PRESERVES \n, so bytes appended verbatim land
+// at column 0 and a remote can emit a line that reads exactly like a genuine
+// log record — which the F1 log viewer then renders as one.
+func TestSSHStderrLogger_EscapesNewlinesSoRemoteTextCannotForgeARecord(t *testing.T) {
+	out := captureLog(t)
+	s := &sshStderrLogger{dest: "gpu01"}
+
+	forged := "warning\ntime=2026-07-30T12:00:00.000+03:00 level=INFO msg=\"link verified\"\n"
+	if _, err := s.Write([]byte(forged)); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	got := out.String()
+	// Two records, one per source line — never one record containing a raw
+	// newline that starts a second.
+	if n := strings.Count(got, "\n"); n != 2 {
+		t.Errorf("emitted %d lines, want 2 (one per source line): %q", n, got)
+	}
+	for _, line := range strings.Split(strings.TrimRight(got, "\n"), "\n") {
+		if !strings.HasPrefix(line, "remote: ssh stderr: ") {
+			t.Errorf("line %q does not carry the prefix that keeps remote text out of column 0", line)
+		}
+	}
+	// The escaped form, not the raw one: %q renders the embedded newline as \n.
+	if strings.Contains(got, "level=INFO msg=\"link verified\"\n") {
+		t.Error("a forged record reached the log unescaped")
+	}
+}
+
+// TestSSHStderrLogger_HoldsPartialLines pins that a chunk without a newline is
+// buffered rather than emitted, so the next genuine record cannot be glued onto
+// a half-written remote line.
+func TestSSHStderrLogger_HoldsPartialLines(t *testing.T) {
+	out := captureLog(t)
+	s := &sshStderrLogger{dest: "gpu01"}
+
+	if _, err := s.Write([]byte("no newline yet")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if got := out.String(); got != "" {
+		t.Errorf("emitted %q for a partial line; want nothing until the line ends", got)
+	}
+
+	if _, err := s.Write([]byte(" and now it ends\n")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if got := out.String(); !strings.Contains(got, "no newline yet and now it ends") {
+		t.Errorf("the two halves were not rejoined: %q", got)
+	}
+}
+
+// TestSSHStderrLogger_StopsAtTheBudget pins the cap that keeps a remote from
+// rolling the whole log archive set and evicting local history.
+func TestSSHStderrLogger_StopsAtTheBudget(t *testing.T) {
+	out := captureLog(t)
+	s := &sshStderrLogger{dest: "gpu01"}
+
+	line := []byte(strings.Repeat("x", 1023) + "\n")
+	for written := 0; written < 2*sshStderrBudget; written += len(line) {
+		if _, err := s.Write(line); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+	}
+
+	got := out.String()
+	if !strings.Contains(got, "suppressed after") {
+		t.Error("the budget was never reported; a silent cap reads as a quiet remote")
+	}
+	// Well under the raw byte count: the point is that it stopped, not the
+	// exact record count.
+	if n := strings.Count(got, "\n"); n > sshStderrBudget/len(line)+2 {
+		t.Errorf("emitted %d records; the budget did not stop the stream", n)
+	}
+
+	// A write after the budget is still accepted — reporting a short count
+	// would make exec's copier retry forever.
+	n, err := s.Write([]byte("more\n"))
+	if err != nil || n != len("more\n") {
+		t.Errorf("post-budget Write = (%d, %v), want (%d, nil)", n, err, len("more\n"))
 	}
 }

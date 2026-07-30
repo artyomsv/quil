@@ -101,6 +101,7 @@ func browseDirResponse(req ipc.BrowseDirReqPayload, fallback string) ipc.BrowseD
 		}
 		target = filepath.Join(target, req.Child)
 	}
+	target = expandHome(target)
 	abs, err := filepath.Abs(target)
 	if err != nil {
 		out.Error = fmt.Sprintf("resolve %s: %v", target, err)
@@ -148,6 +149,34 @@ func browseDirResponse(req ipc.BrowseDirReqPayload, fallback string) ipc.BrowseD
 		})
 	}
 	return out
+}
+
+// expandHome resolves a leading ~ against the DAEMON's home directory.
+//
+// Done here rather than in the client, and for the same reason the path join
+// is: "~" names a directory on the machine holding the filesystem. The setup
+// dialog expanded it with the TUI's own os.UserHomeDir, so a user typing
+// ~/project against a remote host asked for C:\Users\them\project on a Linux
+// server. filepath.Abs has the identical problem for a relative path — it
+// resolves against the caller's working directory — which is why that also runs
+// here, immediately after this.
+//
+// A bare "~" and a "~/..." prefix are expanded; "~user" is deliberately not,
+// since resolving another account's home needs a user database lookup and no
+// caller has asked for it. It falls through as a literal, which fails visibly
+// rather than silently landing somewhere unintended.
+func expandHome(path string) string {
+	if path != "~" && !strings.HasPrefix(path, "~/") && !strings.HasPrefix(path, `~\`) {
+		return path
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return path
+	}
+	if path == "~" {
+		return home
+	}
+	return filepath.Join(home, path[2:])
 }
 
 // validBrowseChild reports whether name is a single path element.

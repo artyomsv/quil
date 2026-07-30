@@ -283,6 +283,56 @@ func TestBrowseDirResponse_RootReportsRootsNotParent(t *testing.T) {
 	}
 }
 
+// TestExpandHome pins that "~" is the DAEMON's home.
+//
+// The setup dialog expanded it with the TUI's own os.UserHomeDir, so against a
+// remote host "~/project" asked for C:\Users\them\project on a Linux server.
+func TestExpandHome(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skipf("no home directory available: %v", err)
+	}
+
+	if got := expandHome("~"); got != home {
+		t.Errorf("expandHome(\"~\") = %q, want %q", got, home)
+	}
+	if got := expandHome("~/project"); got != filepath.Join(home, "project") {
+		t.Errorf("expandHome(\"~/project\") = %q, want %q", got, filepath.Join(home, "project"))
+	}
+	// Not a prefix we expand: resolving another account's home needs a user
+	// database lookup. Passing it through fails visibly rather than landing
+	// somewhere unintended.
+	if got := expandHome("~someone/x"); got != "~someone/x" {
+		t.Errorf("expandHome(\"~someone/x\") = %q, want it untouched", got)
+	}
+	// An ordinary path is never rewritten.
+	if got := expandHome("/srv/work"); got != "/srv/work" {
+		t.Errorf("expandHome(\"/srv/work\") = %q, want it untouched", got)
+	}
+}
+
+// The handler must actually apply the expansion, not merely offer it.
+func TestBrowseDirResponse_ExpandsTilde(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skipf("no home directory available: %v", err)
+	}
+
+	got := browseDirResponse(ipc.BrowseDirReqPayload{Path: "~"}, "")
+
+	if got.Error != "" {
+		t.Fatalf("Error = %q listing ~", got.Error)
+	}
+	if got.Resolved != filepath.Clean(home) {
+		t.Errorf("Resolved = %q, want the daemon's home %q", got.Resolved, filepath.Clean(home))
+	}
+	// The echo is untouched by expansion: it is the client's staleness key, and
+	// the client sent "~".
+	if got.Path != "~" {
+		t.Errorf("Path = %q, want the request echoed verbatim", got.Path)
+	}
+}
+
 // A missing directory is an answer, not a transport failure.
 func TestBrowseDirResponse_MissingDir_ReportsError(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "nope")

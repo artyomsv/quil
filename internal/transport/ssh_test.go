@@ -304,14 +304,34 @@ func TestLockedBuffer_Write_KeepsOnlyTheTailOnceCapped(t *testing.T) {
 	}
 
 	got := b.String()
-	if len(got) > stderrBufCap {
-		t.Errorf("buffer grew to %d bytes, want at most %d", len(got), stderrBufCap)
+	// 2× is the real bound, not 1×: the trim fires at twice the cap so the
+	// per-write cost amortizes. Asserting the tighter bound would pass here by
+	// luck of this write pattern and fail on another.
+	if len(got) > 2*stderrBufCap {
+		t.Errorf("buffer grew to %d bytes, want at most %d", len(got), 2*stderrBufCap)
 	}
 	if strings.Contains(got, "a") {
-		t.Error("oldest content survived; the cap must drop from the front")
+		t.Error("oldest content survived; the trim must drop from the front")
 	}
 	if !strings.Contains(got, "c") {
-		t.Error("newest content was dropped; the cap must keep the tail")
+		t.Error("newest content was dropped; the trim must keep the tail")
+	}
+}
+
+// TestLockedBuffer_Write_StaysBoundedUnderManySmallWrites is the shape a remote
+// actually produces, and the one the amortized trim is tuned for. A trim that
+// never fired would grow without limit here.
+func TestLockedBuffer_Write_StaysBoundedUnderManySmallWrites(t *testing.T) {
+	var b lockedBuffer
+	chunk := []byte("x")
+	for i := 0; i < 5*stderrBufCap; i++ {
+		if _, err := b.Write(chunk); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+	}
+	if got := b.Len(); got > 2*stderrBufCap {
+		t.Errorf("buffer grew to %d bytes under %d one-byte writes, want at most %d",
+			got, 5*stderrBufCap, 2*stderrBufCap)
 	}
 }
 

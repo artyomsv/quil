@@ -21,17 +21,17 @@ func TestClassifyLinkFailure(t *testing.T) {
 		{"denied among ssh's own noise", "debug1: Offering public key\nPermission denied (publickey,password).\n", LinkFailurePermanent},
 		{"host key changed", "@@@@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @@@@\nHost key verification failed.", LinkFailurePermanent},
 		{"batch refused the host-key prompt", "Host key verification failed.", LinkFailurePermanent},
-		{"host key type negotiation", "Unable to negotiate with 10.0.0.1 port 22: no matching host key type found.", LinkFailurePermanent},
-		{"cipher negotiation", "Unable to negotiate with 10.0.0.1 port 22: no matching cipher found.", LinkFailurePermanent},
-		{"mac negotiation", "Unable to negotiate with 10.0.0.1 port 22: no matching mac found.", LinkFailurePermanent},
-		{"agent offered too many keys", "Received disconnect from 10.0.0.1 port 22:2: Too many authentication failures", LinkFailurePermanent},
+		{"host key type negotiation", "Unable to negotiate with 203.0.113.1 port 22: no matching host key type found.", LinkFailurePermanent},
+		{"cipher negotiation", "Unable to negotiate with 203.0.113.1 port 22: no matching cipher found.", LinkFailurePermanent},
+		{"mac negotiation", "Unable to negotiate with 203.0.113.1 port 22: no matching mac found.", LinkFailurePermanent},
+		{"agent offered too many keys", "Received disconnect from 203.0.113.1 port 22:2: Too many authentication failures", LinkFailurePermanent},
 
 		// Transient: retrying is exactly the right response.
 		{"connect timeout", "ssh: connect to host gpu01 port 22: Connection timed out", LinkFailureTransient},
 		{"refused", "ssh: connect to host 127.0.0.1 port 59999: Connection refused", LinkFailureTransient},
 		{"dns", "ssh: Could not resolve hostname gpu01: Name or service not known", LinkFailureTransient},
-		{"keepalive gave up", "Timeout, server 10.0.0.1 not responding.", LinkFailureTransient},
-		{"broken pipe", "packet_write_wait: Connection to 10.0.0.1 port 22: Broken pipe", LinkFailureTransient},
+		{"keepalive gave up", "Timeout, server 203.0.113.1 not responding.", LinkFailureTransient},
+		{"broken pipe", "packet_write_wait: Connection to 203.0.113.1 port 22: Broken pipe", LinkFailureTransient},
 		{"remote rebooted", "Connection to gpu01 closed by remote host.", LinkFailureTransient},
 		{"network unreachable", "ssh: connect to host gpu01 port 22: Network is unreachable", LinkFailureTransient},
 
@@ -65,5 +65,26 @@ func TestLinkFailure_String(t *testing.T) {
 	}
 	if got := LinkFailureTransient.String(); got != "transient" {
 		t.Errorf("LinkFailureTransient.String() = %q", got)
+	}
+}
+
+// TestClassifyLinkFailure_MatchesRemoteShellNoise documents WHY callers must
+// gate on Established() rather than trusting this verdict alone.
+//
+// ssh multiplexes the remote command's fd 2 onto its own stderr, so this
+// function's input includes whatever the remote's rc files print. "Permission
+// denied" is one of the most common strings any Unix shell emits — an ordinary
+// ~/.bashrc touching an unreadable path produces it. The classifier cannot tell
+// that from ssh's own denial and is not supposed to try; the caller has the
+// signal that can (bytes on stdout prove ssh authenticated).
+//
+// If this test ever starts failing because the classifier grew source
+// awareness, delete it — but then also revisit the caller's gate.
+func TestClassifyLinkFailure_MatchesRemoteShellNoise(t *testing.T) {
+	shellNoise := "bash: /etc/profile.d/corp.sh: Permission denied"
+	if got := ClassifyLinkFailure(shellNoise); got != LinkFailurePermanent {
+		t.Fatalf("ClassifyLinkFailure(%q) = %v; this test encodes the KNOWN "+
+			"limitation that innocent remote output matches, which is why "+
+			"cmd/quil gates the verdict on Established()", shellNoise, got)
 	}
 }

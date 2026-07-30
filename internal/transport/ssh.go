@@ -316,7 +316,10 @@ const stderrBufCap = 64 << 10
 // to fill while the dial path reads it on error. Bounded at stderrBufCap,
 // tail-kept.
 type lockedBuffer struct {
-	mu  sync.Mutex
+	mu sync.Mutex
+	// NAMED, never embedded. Embedding promotes bytes.Buffer.ReadFrom, which
+	// makes io.Copy take its ReaderFrom fast path — bypassing both the mutex
+	// and the cap below into an unbounded read straight off a remote-fed pipe.
 	buf bytes.Buffer
 }
 
@@ -324,7 +327,13 @@ func (b *lockedBuffer) Write(p []byte) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	n, err := b.buf.Write(p)
-	if b.buf.Len() > stderrBufCap {
+	// Trimmed at TWICE the cap, not at the cap. Trimming on every write past
+	// the limit costs a 64 KiB alloc + copy per call regardless of how few
+	// bytes arrived, so a remote pacing one byte at a time turns each byte into
+	// 64 KiB of work. Letting it run to 2× amortizes that to O(1) per byte
+	// while keeping the same guarantee: the retained tail is never shorter than
+	// stderrBufCap, and LinkErr truncates to 2000 bytes anyway.
+	if b.buf.Len() > 2*stderrBufCap {
 		// Copy the tail out BEFORE Reset: the slice Bytes() returns aliases the
 		// buffer's own storage, which Reset rewinds and the next Write
 		// overwrites in place.
@@ -353,6 +362,13 @@ func (b bestEffort) Write(p []byte) (int, error) {
 		_, _ = b.w.Write(p)
 	}
 	return len(p), nil
+}
+
+// Len reports the retained byte count. Used by tests to assert the bound.
+func (b *lockedBuffer) Len() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Len()
 }
 
 func (b *lockedBuffer) String() string {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log"
@@ -11,6 +12,7 @@ import (
 	"github.com/artyomsv/quil/internal/ipc"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/artyomsv/quil/internal/config"
@@ -307,6 +309,60 @@ func dialRemoteTransport(ctx context.Context, cfg config.Config, batch bool, std
 	return client, link, err
 }
 
+// sshStderrBudget caps how much ssh stderr one session may write to the log.
+//
+// The sink is remote-influenced and lives as long as the session, and the
+// rotating writer keeps only max_files archives — so an unbounded remote could
+// roll the whole archive set and evict every other record of what happened.
+// Disk is never at risk; local history is.
+const sshStderrBudget = 256 << 10
+
+// sshStderrLogger turns ssh's stderr into whole, quoted log records.
+//
+// Writing the bytes straight at the log is not safe even though they are
+// sanitized first: terminalSanitizer deliberately PRESERVES \n, which is
+// correct for its original terminal use and load-bearing here. Every other path
+// that puts remote text in the log goes through log.Printf and slog quotes it
+// inside msg="…"; bytes appended verbatim land at column 0 instead, so a remote
+// could emit a line that reads exactly like a genuine slog record — and the F1
+// log viewer renders it as one. A chunk not ending in \n would also glue the
+// next real record onto the remote's line.
+//
+// So: accumulate, split on \n, and emit each line through %q.
+type sshStderrLogger struct {
+	mu      sync.Mutex
+	dest    string
+	partial []byte
+	written int
+	stopped bool
+}
+
+func (s *sshStderrLogger) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.stopped {
+		return len(p), nil
+	}
+	s.written += len(p)
+	if s.written > sshStderrBudget {
+		s.stopped = true
+		s.partial = nil
+		log.Printf("remote: ssh stderr suppressed after %d bytes from %s", s.written, s.dest)
+		return len(p), nil
+	}
+	s.partial = append(s.partial, p...)
+	for {
+		i := bytes.IndexByte(s.partial, '\n')
+		if i < 0 {
+			break
+		}
+		// %q so a newline the sanitizer preserved cannot begin a new record.
+		log.Printf("remote: ssh stderr: %q", string(s.partial[:i]))
+		s.partial = s.partial[i+1:]
+	}
+	return len(p), nil
+}
+
 // redialTimeout bounds one reconnect attempt. Longer than the transport's own
 // ConnectTimeout so authentication has room after the TCP connect succeeds.
 const redialTimeout = 30 * time.Second
@@ -426,12 +482,15 @@ const probeRequestID = "reconnect-version-probe"
 // exec.CommandContext (RD-001) — otherwise this cancel would kill the ssh child
 // of every attempt at the moment it succeeded.
 //
-// logW receives ssh's diagnostics for every reconnect. The startup dial routes
-// them through RedirectStderr instead, but that seam is a no-op on a batch dial
-// — stderr is captured into a buffer and never reaches a terminal — so without
-// this a flapping link becomes undiagnosable after its first reconnect, which
-// is exactly when the diagnosis is wanted.
-func redialRemote(cfg config.Config, logW io.Writer) tui.RedialFunc {
+// Every reconnect's ssh diagnostics go to the log through sshStderrLogger. The
+// startup dial routes them through RedirectStderr instead, but that seam is a
+// no-op on a batch dial — stderr is captured into a buffer and never reaches a
+// terminal — so without this a flapping link becomes undiagnosable after its
+// first reconnect, which is exactly when the diagnosis is wanted.
+func redialRemote(cfg config.Config) tui.RedialFunc {
+	// One framer for the whole session, so its byte budget cannot be reset by
+	// reconnecting.
+	stderrSink := &sshStderrLogger{dest: remoteDest}
 	return func(old tui.Client) (tui.Client, error) {
 		// Release the dead connection's ssh child. The TUI cannot do this: its
 		// Client is only Send/Receive, and this is the layer that knows better.
@@ -442,7 +501,7 @@ func redialRemote(cfg config.Config, logW io.Writer) tui.RedialFunc {
 		ctx, cancel := context.WithTimeout(context.Background(), redialTimeout)
 		defer cancel()
 
-		client, link, err := dialRemoteTransport(ctx, cfg, true, logW)
+		client, link, err := dialRemoteTransport(ctx, cfg, true, stderrSink)
 		if err != nil {
 			// No LinkErr fallback here, deliberately: transport.SSH returns a
 			// nil conn on failure and `link` is only assigned when the dialer
@@ -482,7 +541,22 @@ func redialRemote(cfg config.Config, logW io.Writer) tui.RedialFunc {
 			// dial only fails at spawn level, because exec.Cmd.Start succeeds
 			// as soon as the ssh BINARY launches. Every auth and network
 			// failure arrives here instead.
-			if transport.ClassifyLinkFailure(cause.Error()) == transport.LinkFailurePermanent {
+			//
+			// !Established() is the gate, and it is load-bearing rather than a
+			// refinement. ClassifyLinkFailure reads ssh's stderr, but ssh
+			// multiplexes the REMOTE command's fd 2 onto that same stream — so
+			// the text is remote-influenced, and "permission denied" is one of
+			// the most common strings any Unix shell emits. Without this gate an
+			// ordinary ~/.bashrc touching an unreadable path would park the
+			// user's session permanently, and a compromised remote could do it
+			// deliberately. Established() counts only bytes the PUMP read, and
+			// the pump reads stdout; stderr never reaches it. So a link that
+			// delivered a byte proves the remote command ran, which proves ssh
+			// authenticated, which means an auth or host-key marker in that
+			// stream cannot be ssh's own. Same override shape as
+			// remoteinstall.ClassifyExit's `established` parameter.
+			established := link != nil && link.Established()
+			if !established && transport.ClassifyLinkFailure(cause.Error()) == transport.LinkFailurePermanent {
 				// cause FIRST, sentinel second. %w works in any position since
 				// Go 1.20 and errors.Is is unaffected — but the banner renders
 				// this string, and leading with the sentinel would spend ~35

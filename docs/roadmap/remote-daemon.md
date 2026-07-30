@@ -437,7 +437,7 @@ Goal: every surface that reads a filesystem reads the *server's*.
 
 | ID | Item | Blocked by | Status |
 |---|---|---|---|
-| RD-020 | Directory-listing RPC — the root fix; every other picker keys off the CWD it returns | RD-004 | todo |
+| RD-020 | Directory-listing RPC — the root fix; every other picker keys off the CWD it returns | RD-004 | daemon half done; TUI half todo |
 | RD-021 | Git repo discovery RPC | RD-004 | todo |
 | RD-022 | Kube context discovery RPC | RD-004 | todo |
 | RD-023 | Plugin registry RPC with server-side `DetectAvailability` | — | todo |

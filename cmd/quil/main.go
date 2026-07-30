@@ -471,7 +471,7 @@ func launchTUI() {
 	// with it, so there is nothing to reattach to and retrying would hide the
 	// loss; leaving redialFn nil is what makes that path stay fatal.
 	if remoteMode() {
-		model.SetRedialFunc(redialRemote(cfg))
+		model.SetRedialFunc(redialRemote(cfg, logSink))
 		// The Model cannot close a connection itself — tui.Client is only
 		// Send/Receive. Without this, the `defer client.Close()` above releases
 		// the STARTUP client, which after a reconnect is already dead, while the

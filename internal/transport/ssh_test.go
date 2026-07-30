@@ -3,6 +3,7 @@ package transport
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"reflect"
@@ -279,4 +280,101 @@ func TestSSHArgs_ConnectTimeoutHonoursTheCaller(t *testing.T) {
 	if !strings.Contains(joined, "ConnectTimeout=3") {
 		t.Errorf("caller's ConnectTimeout not honoured in %q", joined)
 	}
+}
+
+// TestLockedBuffer_Write_KeepsOnlyTheTailOnceCapped pins the bound on a buffer
+// a remote host can fill.
+//
+// ssh multiplexes the REMOTE command's fd 2 onto its own stderr, and a
+// successful batch reconnect holds its conn for the whole session — so without
+// a cap this grows without limit under a writer the far side controls.
+func TestLockedBuffer_Write_KeepsOnlyTheTailOnceCapped(t *testing.T) {
+	var b lockedBuffer
+	// Three full caps of distinguishable content. LinkErr wants the most recent
+	// diagnostic, so the TAIL is what must survive.
+	for i := 0; i < 3; i++ {
+		chunk := []byte(strings.Repeat(string(rune('a'+i)), stderrBufCap))
+		n, err := b.Write(chunk)
+		if err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		if n != len(chunk) {
+			t.Fatalf("Write returned %d, want %d — a short count makes io.Copy retry forever", n, len(chunk))
+		}
+	}
+
+	got := b.String()
+	if len(got) > stderrBufCap {
+		t.Errorf("buffer grew to %d bytes, want at most %d", len(got), stderrBufCap)
+	}
+	if strings.Contains(got, "a") {
+		t.Error("oldest content survived; the cap must drop from the front")
+	}
+	if !strings.Contains(got, "c") {
+		t.Error("newest content was dropped; the cap must keep the tail")
+	}
+}
+
+// TestSSH_BatchStderrSink_ReceivesSanitizedOutput pins that a batch dial's
+// diagnostics reach the log sink with control sequences already filtered.
+//
+// A re-exec helper rather than `sh -c`: this package's test binary is run
+// NATIVELY on Windows, where there is no sh. Mirrors TestHelperSleep, including
+// SSHPath: os.Args[0] so exec.LookPath is deterministic instead of finding a
+// real ssh on PATH.
+func TestSSH_BatchStderrSink_ReceivesSanitizedOutput(t *testing.T) {
+	orig := startCommand
+	t.Cleanup(func() { startCommand = orig })
+	used := false
+	startCommand = func(_ string, _ ...string) *exec.Cmd {
+		used = true
+		c := exec.Command(os.Args[0], "-test.run=TestHelperStderr")
+		c.Env = append(os.Environ(), "QUIL_HELPER_STDERR=1")
+		return c
+	}
+
+	// lockedBuffer, not bytes.Buffer: exec's copier goroutine writes this while
+	// the poll below reads it, and -race would flag the unsynchronised access.
+	var sink lockedBuffer
+	conn, err := SSH("helper", SSHOptions{
+		SSHPath:    os.Args[0],
+		Batch:      true,
+		StderrSink: &sink,
+	})(context.Background())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	if !used {
+		t.Fatal("SSH did not build its child through startCommand; the assertion below is not exercising the production path")
+	}
+
+	// Poll rather than sleep: the copier goroutine is asynchronous, so a fixed
+	// sleep is either flaky or slow.
+	var got string
+	for i := 0; i < 150; i++ {
+		if got = sink.String(); strings.Contains(got, "warned") {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	if !strings.Contains(got, "warned") {
+		t.Fatalf("plain diagnostic text never reached the sink: %q", got)
+	}
+	if strings.Contains(got, "\x1b") {
+		t.Errorf("an escape byte reached the sink unsanitized: %q", got)
+	}
+}
+
+// TestHelperStderr is a child process, not a test. It writes one
+// hostile-looking diagnostic to stderr and exits.
+func TestHelperStderr(t *testing.T) {
+	if os.Getenv("QUIL_HELPER_STDERR") == "" {
+		t.Skip("helper process")
+	}
+	// OSC 52 is a clipboard write — the concrete capability a compromised remote
+	// gains if this stream reaches a renderer unfiltered.
+	fmt.Fprint(os.Stderr, "\x1b]52;c;cGF5bG9hZA==\x07warned\n")
 }

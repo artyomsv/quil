@@ -306,6 +306,65 @@ func dialRemoteTransport(ctx context.Context, cfg config.Config, batch bool) (*i
 // ConnectTimeout so authentication has room after the TCP connect succeeds.
 const redialTimeout = 30 * time.Second
 
+// linkVerifyTimeout bounds the post-dial liveness probe.
+//
+// Sized to sit just past the transport's ConnectTimeout (15 s): against a host
+// that is down, ssh spends that long trying to connect and then exits, which is
+// what turns the probe's read into an error. A shorter deadline would report
+// "unreachable" while ssh was still legitimately connecting over a slow link.
+const linkVerifyTimeout = 20 * time.Second
+
+// verifyRemoteLink proves the far side is a live daemon speaking the Quil
+// protocol, and is what makes a reconnect attempt honest.
+//
+// Without it, an attempt "succeeds" the moment ssh's BINARY starts. exec.Cmd
+// .Start returns long before ssh has resolved the host or authenticated, so a
+// dial cannot fail for network reasons — the same property that forces the
+// version gate to consult LinkStatus before blaming a version mismatch. Against
+// an unreachable host that produced a reconnect loop which reported success
+// every few hundred milliseconds, cleared the banner, reset every pane for a
+// replay that never came, and left the panes blank; because each false success
+// zeroed the reconnect state, the attempt counter never climbed past 1 and the
+// backoff never engaged.
+//
+// Frames other than the response are discarded. The connection has not attached
+// yet, so there is no state to lose: a broadcast that arrives in this window is
+// superseded by the full state the attach itself triggers.
+//
+// The daemon's version is logged rather than compared. A mid-session upgrade of
+// the remote is the only way it can differ, and there is no good recovery for
+// that here — the terminal belongs to Bubble Tea, so nothing can be prompted —
+// but it must at least be diagnosable from the log.
+func verifyRemoteLink(client *ipc.Client, timeout time.Duration) error {
+	req, err := ipc.NewMessage(ipc.MsgVersionReq, struct{}{})
+	if err != nil {
+		return fmt.Errorf("build version probe: %w", err)
+	}
+	req.ID = "reconnect-version-probe"
+	if err := client.Send(req); err != nil {
+		return fmt.Errorf("send version probe: %w", err)
+	}
+	if err := client.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+		return fmt.Errorf("set probe deadline: %w", err)
+	}
+	defer client.SetReadDeadline(time.Time{})
+
+	for {
+		msg, err := client.Receive()
+		if err != nil {
+			return fmt.Errorf("await version response: %w", err)
+		}
+		if msg.Type != ipc.MsgVersionResp {
+			continue
+		}
+		var resp ipc.VersionRespPayload
+		if err := msg.DecodePayload(&resp); err == nil {
+			log.Printf("remote: link verified, daemon version %q", resp.Version)
+		}
+		return nil
+	}
+}
+
 // redialRemote builds the Model's reconnect dialer.
 //
 // Batch is TRUE here, unlike the startup dial. By reconnect time Bubble Tea
@@ -346,6 +405,22 @@ func redialRemote(cfg config.Config) tui.RedialFunc {
 			// produce a non-nil tui.Client holding a nil pointer, and the next
 			// Receive would panic rather than reconnect.
 			return nil, errors.New("ssh dial returned no connection")
+		}
+
+		// The dial proves only that ssh started. Confirm a daemon actually
+		// answers before reporting the link restored — see verifyRemoteLink.
+		if err := verifyRemoteLink(client, linkVerifyTimeout); err != nil {
+			client.Close()
+			// Prefer ssh's own words again. "await version response: i/o
+			// timeout" names nothing the user can act on, while ssh's captured
+			// stderr says "connect to host ... Connection timed out" — and this
+			// error is what the reconnect banner shows.
+			if link != nil {
+				if le := link.LinkErr(); le != nil {
+					return nil, le
+				}
+			}
+			return nil, err
 		}
 		return client, nil
 	}

@@ -154,6 +154,41 @@ const bannerSep = " · "
 // truncated error is noise ("ss…") occupying space the core could use.
 const minBannerDetail = 14
 
+// bannerCandidates builds the banner's degradation ladder for the current phase,
+// longest first. Every rung keeps ctrl+q — see renderReconnectBanner.
+//
+// There are two phases and they must not read the same. nextAt is in the future
+// while the backoff waits, and in the past once the tick has fired and a dial is
+// in flight — which against a host that is down lasts as long as the transport's
+// ConnectTimeout, 15 s. Labelling both "Reconnecting" leaves no way to tell a
+// wedged TUI from one patiently waiting, and the wording carries the state
+// instead: the host is named as unreachable, with a countdown to the next try.
+//
+// The 1 s window poll (sizePollTick) already re-renders while the link is down,
+// so the countdown advances without a ticker of its own.
+//
+// Composed per phase rather than as a shared prefix plus host, because the host
+// sits in a different place in each — "Host unreachable … to gpu01" is not a
+// sentence.
+func (m Model) bannerCandidates() []string {
+	host, attempt := m.remoteDest, m.reconnect.attempt
+	if remain := time.Until(m.reconnect.nextAt); remain > 0 {
+		// +1 so a sub-second remainder reads as "1s" rather than "0s".
+		secs := int(remain.Seconds()) + 1
+		return []string{
+			fmt.Sprintf("%s unreachable — retry in %ds (attempt %d)%sctrl+q quits",
+				host, secs, attempt, bannerSep),
+			fmt.Sprintf("%s unreachable — retry in %ds%sctrl+q", host, secs, bannerSep),
+			fmt.Sprintf("Unreachable — retry in %ds%sctrl+q", secs, bannerSep),
+		}
+	}
+	return []string{
+		fmt.Sprintf("Connecting to %s (attempt %d)%sctrl+q quits", host, attempt, bannerSep),
+		fmt.Sprintf("Connecting to %s%sctrl+q", host, bannerSep),
+		"Connecting" + bannerSep + "ctrl+q",
+	}
+}
+
 // renderReconnectBanner draws the reconnect status as a single row.
 //
 // Drawn by View as a compositor overlay, so it reserves no layout height and
@@ -177,11 +212,7 @@ func (m Model) renderReconnectBanner(width int) string {
 	}
 
 	// Longest first; the first one that fits wins. Every rung keeps ctrl+q.
-	candidates := []string{
-		fmt.Sprintf("Reconnecting to %s (attempt %d)%sctrl+q quits", m.remoteDest, m.reconnect.attempt, bannerSep),
-		fmt.Sprintf("Reconnecting to %s%sctrl+q", m.remoteDest, bannerSep),
-		"Reconnecting" + bannerSep + "ctrl+q",
-	}
+	candidates := m.bannerCandidates()
 	core := candidates[len(candidates)-1]
 	for _, c := range candidates {
 		if lipgloss.Width(c) <= width {
@@ -314,10 +345,18 @@ func (m Model) beginReconnect(cause error) (tea.Model, tea.Cmd) {
 }
 
 // scheduleRedial arms the next attempt's timer.
+//
+// Every attempt is logged. Only the first drop and the eventual success used to
+// be, which is exactly backwards: a reconnect that succeeds needs no diagnosis,
+// while one that never does left the log silent after a single "link lost" line.
+// The failure cause is logged with it, since that is what the user is looking at
+// in the banner and what they will quote when reporting it.
 func (m Model) scheduleRedial() (tea.Model, tea.Cmd) {
 	m.reconnect.attempt++
 	delay := reconnectDelay(m.reconnect.attempt, rand.Float64())
 	m.reconnect.nextAt = time.Now().Add(delay)
+	log.Printf("remote: reconnect attempt %d in %v (last error: %v)",
+		m.reconnect.attempt, delay.Round(time.Millisecond), m.reconnect.lastErr)
 	gen, attempt := m.clientGen, m.reconnect.attempt
 	return m, tea.Tick(delay, func(time.Time) tea.Msg {
 		return redialTickMsg{gen: gen, attempt: attempt}

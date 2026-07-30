@@ -1062,3 +1062,87 @@ func TestReconnect_GhostDimIsAcceptedNotAvoided(t *testing.T) {
 			"would not re-fire for the replayed content")
 	}
 }
+
+// While the backoff waits, the banner must say the host is unreachable and count
+// down — the substance of "I would rather see that it is still trying" than a
+// line that looks identical whether the TUI is working or wedged.
+func TestRenderReconnectBanner_WaitingPhase_NamesUnreachableAndCountsDown(t *testing.T) {
+	m := Model{reconnect: reconnectState{
+		active:  true,
+		attempt: 6,
+		nextAt:  time.Now().Add(8 * time.Second),
+		lastErr: errors.New("connection timed out"),
+	}}
+	m.SetRemoteDest("gpu01")
+
+	out := stripANSI(m.renderReconnectBanner(120))
+	for _, want := range []string{"gpu01", "unreachable", "retry in", "s", "attempt 6", "ctrl+q"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("waiting-phase banner missing %q\ngot: %s", want, out)
+		}
+	}
+}
+
+// Once the tick fires and a dial is in flight, the wording changes. Against a
+// down host that state lasts as long as the transport's ConnectTimeout, so it
+// must be distinguishable from waiting rather than sharing one label.
+func TestRenderReconnectBanner_ConnectingPhase_DiffersFromWaiting(t *testing.T) {
+	base := reconnectState{active: true, attempt: 3, lastErr: errors.New("timed out")}
+
+	waiting := Model{reconnect: base}
+	waiting.reconnect.nextAt = time.Now().Add(5 * time.Second)
+	waiting.SetRemoteDest("gpu01")
+
+	connecting := Model{reconnect: base} // nextAt zero = in the past
+	connecting.SetRemoteDest("gpu01")
+
+	w := stripANSI(waiting.renderReconnectBanner(120))
+	c := stripANSI(connecting.renderReconnectBanner(120))
+
+	if w == c {
+		t.Fatalf("both phases render identically:\n%s", w)
+	}
+	if !strings.Contains(c, "Connecting") {
+		t.Errorf("in-flight phase does not say it is connecting\ngot: %s", c)
+	}
+	if strings.Contains(c, "retry in") {
+		t.Errorf("in-flight phase shows a countdown it is not waiting on\ngot: %s", c)
+	}
+}
+
+// A sub-second remainder must read as "1s", never "0s" — a countdown that sits
+// on zero looks stuck, which is the impression the wording exists to avoid.
+func TestRenderReconnectBanner_CountdownNeverShowsZero(t *testing.T) {
+	for _, remain := range []time.Duration{
+		1 * time.Millisecond, 200 * time.Millisecond, 999 * time.Millisecond,
+	} {
+		m := Model{reconnect: reconnectState{active: true, attempt: 1, nextAt: time.Now().Add(remain)}}
+		m.SetRemoteDest("gpu01")
+		out := stripANSI(m.renderReconnectBanner(120))
+		if strings.Contains(out, "in 0s") {
+			t.Errorf("remain=%v rendered a zero countdown\ngot: %s", remain, out)
+		}
+	}
+}
+
+// Both phases keep the exit hint at the narrowest width the TUI will render at.
+func TestRenderReconnectBanner_BothPhasesKeepExitHintAtMinWidth(t *testing.T) {
+	for _, wait := range []time.Duration{0, 9 * time.Second} {
+		m := Model{reconnect: reconnectState{
+			active:  true,
+			attempt: 12,
+			lastErr: errors.New(strings.Repeat("diagnostic ", 20)),
+		}}
+		if wait > 0 {
+			m.reconnect.nextAt = time.Now().Add(wait)
+		}
+		m.SetRemoteDest("some-rather-long-hostname.example.internal")
+
+		for _, w := range []int{40, 60, 80} {
+			out := stripANSI(m.renderReconnectBanner(w))
+			if !strings.Contains(out, "ctrl+q") {
+				t.Errorf("wait=%v width=%d: exit hint missing\ngot: %s", wait, w, out)
+			}
+		}
+	}
+}

@@ -124,7 +124,7 @@ These are real and current. None are bugs to be reported; all are scoped work.
 
 | Limit | Effect | Fixed in |
 |---|---|---|
-| **No automatic reconnect** | A dropped SSH link ends the session. Panes survive on the server and re-attaching restores them, but it is a manual step. | Phase 2 |
+| **Reconnect is unverified against a real link** | A dropped link now shows a banner and redials with backoff (Phase 2), but every claim about it rests on unit tests against a fake dialer — no manual ssh drop has been exercised yet. Treat it as unproven rather than absent. | Phase 2 manual checks |
 | **Filesystem dialogs read the *local* disk** | The pane working-directory picker, git-repository discovery, kube-context discovery and the Claude session list all browse the machine running the TUI, not the one running the panes. Type remote paths instead of browsing. | Phase 3 |
 | **Plugin availability is decided locally** | `Ctrl+N` greys out a plugin based on whether the binary exists on *your* machine, not the server's. A tool installed only on the remote is shown unavailable, and vice versa. | Phase 3 |
 | **`quil status` refuses under `--remote`** | It reports on the local daemon, so it is blocked rather than silently wrong. Use `ssh <host> quil status`. | Phase 3 |
@@ -177,24 +177,40 @@ falls back to `~/.local/bin` and tells you the old copy is now shadowed.
 
 ---
 
-## Phase 2 — reconnect (planned)
+## Phase 2 — reconnect (code complete, unverified on a real link)
 
-Make a dropped link a pause rather than an ending.
+A dropped link is a pause rather than an ending.
 
-- Detect the drop, show a reconnecting state instead of exiting.
-- Re-dial with backoff, in batch mode (no prompts under raw-mode rendering).
-- Re-attach and re-sync workspace state without respawning anything — the panes
-  never stopped.
+- The drop is reported as data, not as a quit, so it stays distinguishable from
+  the daemon deliberately asking the TUI to exit.
+- Redial backs off from 500 ms to a 30 s cap with half jitter, retries without
+  limit, and runs in **batch mode** — by then Bubble Tea holds the terminal in
+  raw mode, so ssh has nowhere to prompt and a prompt would hang the attempt.
+- Input is frozen, not buffered. A keystroke typed at a dead link would arrive
+  in a live agent session minutes later at a prompt that has moved on. `Ctrl+Q`
+  stays live as the only exit from a host that never returns.
+- Every pane's emulator, raw ring, scroll position and the text selection are
+  reset before the attach that triggers replay, so reconnecting restores
+  scrollback rather than doubling it.
+- Work counters are zeroed so replayed `SubagentStart` events cannot wedge the
+  spinner. The unseen mark and the user's attention pin survive — they report
+  unread work, not a live turn.
+- Nothing respawns: the panes never stopped.
 
-**Both prerequisites are done** (RD-001, RD-002 — Phase 1.5):
+Detection rests on ssh's keepalive (~45 s), not an application-layer heartbeat —
+see the decision gate in the work registry.
+
+**Both prerequisites were done in Phase 1.5** (RD-001, RD-002):
 
 - The `DialFunc` contract is settled and documented: `ctx` bounds the dial, and
   the returned conn owns the ssh child and releases it on `Close`. The redial
-  loop can use `WithTimeout` + `defer cancel()` without killing the session it
-  just opened, which `exec.CommandContext` would have done.
+  loop uses `WithTimeout` + `defer cancel()`, which under the old
+  `exec.CommandContext` would have killed every session at the moment it
+  succeeded.
 - ssh's stderr moves to `quil.log` at `tea.NewProgram`, so a late diagnostic no
   longer lands mid-render. It still reaches the terminal during the dial, where
-  host-key and passphrase prompts have to be readable.
+  host-key and passphrase prompts have to be readable — and batch-mode redials
+  capture it instead, which is what the reconnect banner shows.
 
 ## Phase 3 — remote-correct UI (planned)
 
@@ -305,21 +321,59 @@ Goal: a dropped link becomes a pause, not an ending.
 
 | ID | Item | Blocked by | Status |
 |---|---|---|---|
-| RD-010 | Distinguish link loss from `MsgCloseTUI` in `listenForMessages` | — | todo |
-| RD-011 | Redial loop: exponential backoff + jitter, ~30 s cap, unbounded retries, Ctrl+Q aborts | RD-001, RD-010 | todo |
-| RD-012 | Input freeze + reconnecting banner | RD-010 | todo |
-| RD-013 | VT, raw ring, scroll offset and selection reset for **every** pane before replay | RD-010 | todo |
-| RD-014 | Work-state reset or replayed-event dedup (`applyWorkTransition` has no dedup) | RD-010 | todo |
-| RD-015 | Exactly one live listen loop across the client swap | RD-011 | todo |
-| RD-016 | `sawFirstState` survives reconnect; ghost re-dim accepted as cosmetic | RD-011 | todo |
+| RD-010 | Distinguish link loss from `MsgCloseTUI` in `listenForMessages` | — | done (code) |
+| RD-011 | Redial loop: exponential backoff + jitter, ~30 s cap, unbounded retries, Ctrl+Q aborts | RD-001, RD-010 | done (code) |
+| RD-012 | Input freeze + reconnecting banner | RD-010 | done (code) |
+| RD-013 | VT, raw ring, scroll offset and selection reset for **every** pane before replay | RD-010 | done (code) |
+| RD-014 | Work-state reset or replayed-event dedup (`applyWorkTransition` has no dedup) | RD-010 | done (code) |
+| RD-015 | Exactly one live listen loop across the client swap | RD-011 | done (code) |
+| RD-016 | `sawFirstState` survives reconnect; ghost re-dim accepted as cosmetic | RD-011 | done (code) |
 
-**Decision gate — application-layer liveness.** `MsgHeartbeat` is declared in
-`internal/ipc/protocol.go` and never sent anywhere. Phase 2 must either
-implement it or record that detection rests on ssh's
-`ServerAliveInterval=15` / `ServerAliveCountMax=3` (~45 s). Recommendation:
-rely on ssh for v1 — the keepalive already exists, works through
-`ProxyJump`, and an app-layer heartbeat duplicates it without covering a
-failure mode ssh misses. Revisit if Phase 4 removes ssh.
+**"done (code)" is deliberate wording.** All seven are implemented and covered
+by 47 unit tests against a fake dialer, with `test`, `test-race` and `vet` green
+and the Windows TUI suite passing natively. **None has been exercised against a
+real ssh link.** The phase is not closed until the manual checks below pass;
+until then the status means "the code is written", not "the behaviour is
+confirmed".
+
+Outstanding manual verification:
+
+| Check | Confirms | Status |
+|---|---|---|
+| Kill the ssh process mid-session | banner, frozen input, reconnect | **done** — reconnected in 343 ms, 1 attempt |
+| Shut the remote host down | backoff climbs, banner persists and names the host unreachable | **done** — 466 ms → 770 ms → 1.288 s, restored on attempt 3 |
+| **Reconnect an `opencode` pane and confirm it is NOT blank** | the ghost-replay gate (see below) | **outstanding — highest value** |
+| Scroll a reconnected pane to the top | scrollback not doubled (RD-013) | outstanding |
+| Sleep the laptop 2 minutes, wake | reconnect with no intervention | outstanding |
+| Ctrl+Q during an outage | the only exit from a host that never returns | outstanding |
+| Drop the link mid-agent-turn with subagents running | spinner reflects reality rather than wedging (RD-014) | outstanding |
+| Local session, daemon stopped | still exits rather than spinning — the local path must be unchanged | outstanding |
+
+**Why the opencode check is now the most valuable one.** The two checks marked
+done both used a *terminal* pane, and code review then found that terminals are
+exactly the case that works: `handleAttach` replays only plugins with
+`ghost_buffer = true`, so opencode, lazygit, k9s and lazysql got reset with
+nothing coming back — a blank rectangle in front of a live process. Fixed by
+gating the reset on a replay actually arriving, and covered by a test driven from
+the shipped defaults, but not yet seen on a real link. The live run that passed
+could not have caught it.
+
+**Decision gate — application-layer liveness: ANSWERED, ssh keepalive.**
+`MsgHeartbeat` remains declared in `internal/ipc/protocol.go` and unsent.
+Detection rests on ssh's `ServerAliveInterval=15` / `ServerAliveCountMax=3`,
+so a silently dead link is noticed in ~45 s. Chosen because the keepalive
+already exists, already works through `ProxyJump`, and an app-layer heartbeat
+would duplicate it without covering a failure mode ssh misses. Revisit if
+Phase 4 removes ssh, or if the manual checks show drops going unnoticed for
+materially longer than 45 s.
+
+**Known hazards on this path**, all tracked, none blocking:
+
+| Hazard | Nature | Tracked in |
+|---|---|---|
+| `stdioConn.Close` can block racing the pump's uncancellable read on Windows, and a redial closes a client every attempt | pre-existing; reproduces unchanged on the Phase 1.5 tree | `techdebt/3-3-stdioconn-close-races-pump-read-on-windows.md` |
+| Batch dials buffer ssh stderr with no cap and no logging — and Phase 2 made those conns session-length for the first time | transport design newly exposed by reconnect; also loses post-reconnect ssh diagnostics from `quil.log` | `techdebt/3-3-batch-ssh-stderr-unbounded-and-unlogged.md` |
+| A reconnect cannot tell a permanent auth failure from a transient one, so a passphrase-protected key with no agent retries forever and can trip a fail2ban jail | mitigated by rate decay (~120 → ~33 attempts/hour), not eliminated | `techdebt/3-3-reconnect-cannot-classify-permanent-ssh-failure.md` |
 
 ### Phase 3 — remote-correct UI
 
@@ -386,7 +440,7 @@ Carried from the design spec; each needs an answer before its phase closes.
 | 1 | Does `quil status` gain remote support, or stay documented local-only? | RD-026 |
 | 2 | Does the Settings dialog hide daemon-owned rows in remote mode, or show them disabled with an explanation? | RD-027 |
 | 3 | Should notes move daemon-side? Storage is already atomic and pane-keyed, so it is a contained follow-up. | unassigned |
-| 4 | Application-layer heartbeat, or rely on ssh keepalive? | RD-011 |
+| 4 | ~~Application-layer heartbeat, or rely on ssh keepalive?~~ **Answered: ssh keepalive** (~45 s detection). See the Phase 2 decision gate. | RD-011 (closed) |
 | 5 | Does Quil issue certificates, or only consume them? | RD-034 |
 
 ---

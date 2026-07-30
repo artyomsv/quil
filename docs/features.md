@@ -383,9 +383,26 @@ via `[update]` in `config.toml`; About (F1) has a manual "Update now".
 
 ### Remote daemon over SSH
 
-> **BETA.** Phase 1 of [Remote Daemon Attach](roadmap/remote-daemon.md). Usable for real work, with the limits at the end of this section — chiefly no automatic reconnect, and filesystem dialogs that still read your local disk.
+> **BETA.** Phases 1 and 2 of [Remote Daemon Attach](roadmap/remote-daemon.md). Usable for real work, with the limits at the end of this section — chiefly that filesystem dialogs still read your local disk.
 
 `quil --remote gpu01` attaches the TUI to a daemon running on another machine. The panes, tabs, and AI sessions live on that host and keep running there when you close the laptop — the TUI is only a viewer.
+
+```
+   your laptop                                  gpu01
+┌────────────────┐                     ┌──────────────────────┐
+│  quil (TUI)    │   ssh -T            │  quild (daemon)      │
+│                │═══════════════════▶ │   ├── pane: claude   │
+│  a viewer.     │  "quil --stdio"     │   ├── pane: shell    │
+│  holds no      │                     │   └── pane: lazygit  │
+│  state.        │  one channel,       │                      │
+└────────────────┘  no open port       │  the work lives here │
+        ╎                              └──────────────────────┘
+        ╎ lid closes, wifi drops, you change network
+        ╎
+        ▼
+  link dies → banner, input frozen, redial with backoff
+            → panes never stopped; reattach and carry on
+```
 
 **No network port is opened on the remote host.** Quil runs `ssh -T gpu01 "quil --stdio"` and speaks its normal length-prefixed protocol over that single channel, so anything SSH can reach works: a bastion behind `ProxyJump`, a Tailscale or WireGuard address, a box on the public internet. The remote daemon is started on demand if it isn't already running.
 
@@ -397,6 +414,31 @@ Both ends of the connection's life are bounded, because an unbounded one has now
 |---|---|---|
 | `ConnectTimeout` | 15s | The TCP handshake. Without it, a silently-dropped SYN inherits the OS connect timeout — minutes. |
 | `ServerAliveInterval` / `ServerAliveCountMax` | 15s / 3 | An established link going dead. Detected in ~45s. This is the only liveness check; there is no application-layer heartbeat. |
+
+#### When the link drops
+
+A dropped link is a pause, not an ending. Close the lid, lose wifi, switch from
+ethernet to a hotspot — the session holds.
+
+An amber bar takes the top row, names the host, counts the attempts, and shows
+what `ssh` actually said. Retries back off from half a second to at most thirty,
+and never stop. When the host answers again the panes are reattached with their
+contents intact; nothing respawns, because nothing ever stopped.
+
+**Keystrokes are dropped while the link is down, not queued.** A key typed at a
+dead connection would otherwise be delivered minutes later, into a live agent
+session, answering a question that had already moved on. A visible stall is the
+lesser failure. `ctrl+q` stays live throughout — it is the only way out of a host
+that is not coming back.
+
+An attempt is only reported as restored once the far side has actually answered.
+That distinction matters more than it sounds: `ssh` reports success the moment
+its own binary starts, long before it has resolved the host or authenticated, so
+"the dial worked" is not evidence that anything is there.
+
+Detection rests on `ssh`'s keepalive above (~45s for a link that dies silently);
+a link that dies loudly — the host rebooting, the process being killed — is
+noticed at once.
 
 These are set on the command line, which OpenSSH resolves before any config file ("first obtained value wins"), so they override a `ConnectTimeout` in your own `ssh_config`. That is deliberate: a bounded, diagnosable failure beats an unbounded hang.
 
@@ -439,11 +481,10 @@ Two setup requirements are worth stating, because both fail in confusing ways. *
 
 #### Current limits (beta)
 
-Phase 1 is the transport. These are known and scoped, not bugs:
+Phase 1 is the transport, Phase 2 is reconnect. These are known and scoped, not bugs:
 
 | Limit | Effect |
 |---|---|
-| No automatic reconnect | A dropped link ends the session. The panes on the server survive and re-attaching restores them, but it is a manual step. |
 | Filesystem dialogs read the **local** disk | The working-directory picker, git-repository and kube-context discovery, and the Claude session list browse the machine running the TUI. Type remote paths rather than browsing. |
 | Plugin availability detected locally | `Ctrl+N` greys out plugins based on what *your* machine has installed, not the server's. |
 | `quil status` refuses under `--remote` | It would report on the local daemon. Use `ssh <host> quil status`. |
@@ -451,7 +492,7 @@ Phase 1 is the transport. These are known and scoped, not bugs:
 | Clipboard image paste is local-only | The PNG is written locally and a local path is typed into a remote pane, where it does not resolve. |
 | Notes and the log viewer are local | By design — the daemon's own logs are reachable over SSH. |
 
-Reconnect is Phase 2; making every filesystem-reading surface read the *server's* is Phase 3. See the [PRD](roadmap/remote-daemon.md) for the plan and the reasoning behind the transport choices.
+Making every filesystem-reading surface read the *server's* is Phase 3. See the [PRD](roadmap/remote-daemon.md) for the plan and the reasoning behind the transport choices.
 
 ### Cross-platform
 

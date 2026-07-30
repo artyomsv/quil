@@ -88,6 +88,12 @@ func main() {
 		}
 	}
 
+	// Record the console mode before anything we spawn can disturb it. A
+	// non-batch ssh dial reconfigures it and is killed rather than allowed to
+	// restore it, which leaves every later diagnostic staircasing down the
+	// screen — see consolemode_windows.go. No-op off Windows.
+	saveConsoleMode()
+
 	// --remote binds this TUI to a daemon on another host. Parsed before the
 	// subcommand switch so the lifecycle guards are armed for everything below.
 	if dest, rest, err := parseRemoteFlag(os.Args); err != nil {
@@ -461,6 +467,22 @@ func launchTUI() {
 	// wrong machine. Empty for a local session.
 	model.SetRemoteDest(remoteDest)
 
+	// Only remote sessions reconnect. A local daemon that dies takes its panes
+	// with it, so there is nothing to reattach to and retrying would hide the
+	// loss; leaving redialFn nil is what makes that path stay fatal.
+	if remoteMode() {
+		model.SetRedialFunc(redialRemote(cfg))
+		// The Model cannot close a connection itself — tui.Client is only
+		// Send/Receive. Without this, the `defer client.Close()` above releases
+		// the STARTUP client, which after a reconnect is already dead, while the
+		// live ssh child is only reachable through the Model and outlives us.
+		model.SetClientCloser(func(c tui.Client) {
+			if ic, ok := c.(*ipc.Client); ok && ic != nil {
+				ic.Close()
+			}
+		})
+	}
+
 	// ssh keeps its stderr for the whole session and multiplexes the remote
 	// command's fd 2 onto it, so from here on a diagnostic would land mid-render
 	// on a screen Bubble Tea owns. Every prompt that needs a terminal already
@@ -486,6 +508,11 @@ func launchTUI() {
 	// Save window size and config changes for next launch
 	if m, ok := finalModel.(tui.Model); ok {
 		m.FlushNotes()
+		// Release the connection the Model actually holds. The deferred
+		// client.Close() above only knows about the startup client, so after a
+		// reconnect it closes a corpse and leaves the live ssh child running.
+		// No-op in local mode, where no closer is installed.
+		m.CloseClient()
 		saveWindowSize(m)
 		if m.ConfigChanged() {
 			if err := config.Save(config.ConfigPath(), m.Config()); err != nil {

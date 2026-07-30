@@ -38,7 +38,7 @@ func TestConfig_RemoteHosts_RoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	cfg := Default()
 	cfg.SetRemoteBinary("gpu-01.lan", "/opt/bin/quil")
-	cfg.SetRemoteBinary("artyom@192.168.6.12", "/usr/local/bin/quil")
+	cfg.SetRemoteBinary("dev@203.0.113.5", "/usr/local/bin/quil")
 
 	if err := Save(path, cfg); err != nil {
 		t.Fatalf("Save: %v", err)
@@ -50,7 +50,7 @@ func TestConfig_RemoteHosts_RoundTrip(t *testing.T) {
 	if got.RemoteBinary("gpu-01.lan") != "/opt/bin/quil" {
 		t.Errorf("round trip lost the alias entry: %+v", got.Remote)
 	}
-	if got.RemoteBinary("artyom@192.168.6.12") != "/usr/local/bin/quil" {
+	if got.RemoteBinary("dev@203.0.113.5") != "/usr/local/bin/quil" {
 		t.Errorf("round trip lost the user@host entry: %+v", got.Remote)
 	}
 }

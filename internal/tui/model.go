@@ -211,12 +211,25 @@ type tuiClient interface {
 	Receive() (*ipc.Message, error)
 }
 
+// Client is the exported spelling of tuiClient, so callers outside this package
+// can write a RedialFunc: cmd/quil builds the reconnect dialer and cannot name
+// an unexported type.
+//
+// An alias rather than a second interface declaration — the two are the same
+// type, so no conversion exists at any boundary and the internal name stays
+// the one used throughout this file.
+type Client = tuiClient
+
 type Model struct {
 	tabs                 []*TabModel
 	activeTab            int
 	width                int
 	height               int
 	client               tuiClient
+	clientGen            int            // bumped on every client swap; see linkLostMsg for why
+	reconnect            reconnectState // zero value = not reconnecting
+	redialFn             RedialFunc     // nil in local mode: a dead local daemon is fatal
+	closeClientFn        func(Client)   // releases a connection; see SetClientCloser
 	cfg                  config.Config
 	version              string
 	attached             bool
@@ -532,6 +545,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.closeCtxMenu()
 		}
 	}
+	// The link is down: user input is dropped rather than queued. Placed ahead
+	// of the type switch so a future input message type is frozen by default
+	// instead of quietly reaching a live PTY through a branch nobody updated.
+	if m.reconnect.active {
+		if cmd, frozen := m.freezeInput(msg); frozen {
+			return m, cmd
+		}
+	}
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		// Poll echo: size matches both the applied and any pending value —
@@ -572,6 +593,62 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Tick(150*time.Millisecond, func(t time.Time) tea.Msg {
 			return resizeTickMsg{seq: seq}
 		})
+
+	case linkLostMsg:
+		// A report from a superseded client: its replacement is already live,
+		// so there is nothing to reconnect.
+		if msg.gen != m.clientGen {
+			log.Printf("ignoring link loss from gen %d (current %d)", msg.gen, m.clientGen)
+			return m, nil
+		}
+		if !m.canReconnect() {
+			return m, tea.Quit
+		}
+		return m.beginReconnect(msg.err)
+
+	case redialTickMsg:
+		// msg.attempt is checked, not just carried. It makes a second concurrent
+		// dial impossible by construction rather than by argument: only the tick
+		// for the attempt currently armed can start one, so the "slow attempt
+		// completing after a fast one" case the result branch guards against has
+		// no way to arise in the first place.
+		if msg.gen != m.clientGen || !m.reconnect.active || msg.attempt != m.reconnect.attempt {
+			return m, nil
+		}
+		return m, m.redialCmd()
+
+	case redialResultMsg:
+		// Dropped for a superseded generation even when it carries a LIVE
+		// client: a slow attempt completing after a fast one would otherwise
+		// replace a working connection with a second one, leaving the first
+		// with a listen loop nobody reads.
+		if msg.gen != m.clientGen || !m.reconnect.active {
+			// The !active half mirrors the tick branch above. Without it a
+			// failure result arriving with active already false would call
+			// scheduleRedial, incrementing attempt and arming a tick that the
+			// tick branch then drops for !active — leaving a session with no
+			// timer, no banner, and no way back.
+			if msg.client != nil {
+				// Closed through the seam because tui.Client is only
+				// Send/Receive: this package structurally cannot release the
+				// ssh child behind it, and dropping the reference leaks that
+				// child plus its remote `quil --stdio` for the whole session.
+				log.Printf("releasing late reconnect from gen %d (current %d)", msg.gen, m.clientGen)
+				m.closeClient(msg.client)
+			}
+			return m, nil
+		}
+		// msg.client == nil with no error is not a success. A dialer returning
+		// a typed nil pointer produces a non-nil interface, so this check is
+		// the last place that can catch it before Receive panics on it.
+		if msg.err != nil || msg.client == nil {
+			if msg.err == nil {
+				msg.err = errors.New("dialer returned no connection")
+			}
+			m.reconnect.lastErr = msg.err
+			return m.scheduleRedial()
+		}
+		return m.finishReconnect(msg.client)
 
 	case sizePollMsg:
 		return m, tea.Batch(sizePollProbe, sizePollTick())
@@ -2227,6 +2304,14 @@ func (m Model) View() tea.View {
 		content = lipgloss.JoinVertical(lipgloss.Left, sections...)
 	}
 
+	// Reconnect banner: an overlay over row 0 (the tab bar), so it reserves no
+	// layout height and appearing or clearing it never resizes a pane. The tab
+	// bar is the right thing to cover — tab switching is frozen anyway, and
+	// obscuring pane content would hide the state the user is waiting on.
+	if m.reconnect.active {
+		content = overlayAt(content, m.renderReconnectBanner(m.width), 0, 0, m.width)
+	}
+
 	v := tea.NewView(content)
 	v.AltScreen = true
 	v.MouseMode = tea.MouseModeCellMotion
@@ -2687,6 +2772,16 @@ func (m *Model) handlePaneOutput(msg PaneOutputMsg) tea.Cmd {
 	for _, tab := range m.tabs {
 		if tab.overlayPane != nil && tab.overlayPane.ID == msg.PaneID {
 			tab.overlayPane.preparing = false
+			// Same armed-reset consume as the layout-tree branch below. This
+			// branch returns early, so without it an overlay pane's replay would
+			// append onto content it was supposed to replace. Today's only
+			// overlay (lazygit) has ghost_buffer = false and so never receives a
+			// replay at all, leaving the flag armed and harmless — but the
+			// asymmetry is what would bite a future overlay plugin that does.
+			if msg.Ghost && tab.overlayPane.reattachReset {
+				tab.overlayPane.reattachReset = false
+				tab.overlayPane.resetForReattach()
+			}
 			tab.overlayPane.AppendOutput(msg.Data)
 			return nil
 		}
@@ -2697,6 +2792,16 @@ func (m *Model) handlePaneOutput(msg PaneOutputMsg) tea.Cmd {
 		}
 		if leaf := tab.Root.FindLeaf(msg.PaneID); leaf != nil {
 			oldCWD := leaf.Pane.CWD
+			// Reattach reset, applied on the daemon's FIRST replayed chunk rather
+			// than predicted before the attach. Only a replay can double a pane's
+			// scrollback, so only a replay needs the reset — and this is the one
+			// place that knows a replay actually arrived. Doing it here needs no
+			// agreement with the daemon about which plugins replay; see
+			// armReattachReset.
+			if msg.Ghost && leaf.Pane.reattachReset {
+				leaf.Pane.reattachReset = false
+				leaf.Pane.resetForReattach()
+			}
 			if msg.Ghost && m.cfg.GhostBuffer.Dimmed {
 				if !leaf.Pane.ghost {
 					log.Printf("pane %s: ghost=true (received %d bytes)", msg.PaneID, len(msg.Data))
@@ -3709,8 +3814,11 @@ func (m Model) listenForMessages() tea.Cmd {
 	return func() tea.Msg {
 		msg, err := m.client.Receive()
 		if err != nil {
-			log.Printf("listen error: %v", err)
-			return tea.QuitMsg{}
+			log.Printf("listen error (gen %d): %v", m.clientGen, err)
+			// Reported as data, not as a quit. Update decides whether this is a
+			// reconnectable drop or a fatal one — the MsgCloseTUI case below is
+			// the deliberate-exit path and must stay distinguishable from it.
+			return linkLostMsg{gen: m.clientGen, err: err}
 		}
 
 		switch msg.Type {

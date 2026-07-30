@@ -328,7 +328,7 @@ export const competitors: Record<CompetitorInfo["slug"], CompetitorInfo> = {
       { feature: "Executable plugins (actions / event hooks / link handlers)", quil: "partial", them: "yes", note: "Quil plugins are declarative TOML pane types; herdr runs any-language plugins." },
       { feature: "Plugin marketplace", quil: "no", them: "yes" },
       { feature: "General CLI to script the multiplexer", quil: "no", them: "yes", note: "Quil scripts via MCP (for AI); herdr adds a shell CLI for humans." },
-      { feature: "Remote SSH thin-client attach", quil: "no", them: "yes" },
+      { feature: "Remote SSH thin-client attach", quil: "yes", them: "yes", note: "`quil --remote <host>` since v1.44; opens no port, reconnects on its own after a dropped link, and installs itself on a bare server." },
       { feature: "Named sessions / live server handoff", quil: "no", them: "yes" },
       { feature: "Sound + desktop notifications", quil: "partial", them: "yes", note: "Quil has an in-TUI notification center but no sound or OS notifications." },
       { feature: "Themes with light/dark auto-switch", quil: "partial", them: "yes" },

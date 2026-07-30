@@ -11,10 +11,13 @@ import (
 	"github.com/artyomsv/quil/internal/ipc"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/remoteinstall"
 	"github.com/artyomsv/quil/internal/transport"
+	"github.com/artyomsv/quil/internal/tui"
+	versionpkg "github.com/artyomsv/quil/internal/version"
 )
 
 // remoteDest is empty for a local session and holds the --remote destination
@@ -238,37 +241,233 @@ func dialRemote(cfg config.Config) (*ipc.Client, error) {
 	// passphrase — it runs before tea.NewProgram takes the terminal.
 	log.Printf("remote mode: dialing %s over ssh", remoteDest)
 
-	// Keep hold of the transport so the version gate can tell a dead ssh
-	// channel from a daemon that answered badly. The dial only fails when ssh
-	// could not be STARTED (binary missing, pipe exhaustion) — every
-	// network-level failure survives it and surfaces later.
-	var link transport.LinkStatus
-	dialSSH := transport.SSH(remoteDest, remoteSSHOptions(cfg))
-	client, err := ipc.NewClientWithDialer(
-		context.Background(),
-		func(ctx context.Context) (net.Conn, error) {
-			conn, dialErr := dialSSH(ctx)
-			if conn != nil {
-				ls, ok := conn.(transport.LinkStatus)
-				if !ok {
-					// Not fatal, but it silently disables the only check that
-					// tells "unreachable host" from "version mismatch", so it
-					// must not pass unnoticed. A compile-time assertion covers
-					// *stdioConn itself; this catches a future wrapper type.
-					log.Printf("remote: transport %T does not report link status — link diagnosis disabled", conn)
-				}
-				link = ls
-				if r, ok := conn.(transport.StderrRedirector); ok {
-					remoteStderrRedirectFn = r.RedirectStderr
-				}
-			}
-			return conn, dialErr
-		},
-	)
+	client, link, err := dialRemoteTransport(context.Background(), cfg, false)
 	if link != nil {
 		remoteLinkErrFn = link.LinkErr
 		remoteLinkEstablishedFn = link.Established
 		remoteExitCodeFn = link.ExitCode
 	}
 	return client, err
+}
+
+// dialRemoteTransport performs one ssh-backed dial and returns the client
+// alongside the transport's link probe.
+//
+// This is the single dial implementation, shared by the startup dial and the
+// reconnect loop, for the same reason transport.RunSSH shares sshArgs with the
+// dialer: a second call site assembling its own options is free to drop a
+// forced hardening flag or the leading-'-' destination check, and nothing would
+// notice until it mattered.
+//
+// batch=false lets ssh prompt on the terminal, which is only safe before
+// tea.NewProgram takes it. Every dial after that point must pass true.
+//
+// ctx bounds the DIAL only. Per the ipc.DialFunc contract the returned conn
+// owns the ssh child and releases it on Close, so a caller may cancel this
+// context the moment the dial returns without killing the session it opened.
+func dialRemoteTransport(ctx context.Context, cfg config.Config, batch bool) (*ipc.Client, transport.LinkStatus, error) {
+	opts := remoteSSHOptions(cfg)
+	opts.Batch = batch
+
+	// Keep hold of the transport so callers can tell a dead ssh channel from a
+	// daemon that answered badly. The dial only fails when ssh could not be
+	// STARTED (binary missing, pipe exhaustion) — every network-level failure
+	// survives it and surfaces later as a failed handshake.
+	var link transport.LinkStatus
+	dialSSH := transport.SSH(remoteDest, opts)
+	client, err := ipc.NewClientWithDialer(ctx, func(c context.Context) (net.Conn, error) {
+		conn, dialErr := dialSSH(c)
+		if conn != nil {
+			ls, ok := conn.(transport.LinkStatus)
+			if !ok {
+				// Not fatal, but it silently disables the only check that tells
+				// "unreachable host" from "version mismatch", so it must not
+				// pass unnoticed. A compile-time assertion covers *stdioConn
+				// itself; this catches a future wrapper type.
+				log.Printf("remote: transport %T does not report link status — link diagnosis disabled", conn)
+			}
+			link = ls
+			// Only the interactive dial writes this: a batch dial captures
+			// stderr into its own buffer and never reaches the terminal, so
+			// there is nothing to redirect, and a reconnect runs on a
+			// background goroutine where writing a package global would be a
+			// race against nothing but is still not worth doing.
+			if !batch {
+				if r, ok := conn.(transport.StderrRedirector); ok {
+					remoteStderrRedirectFn = r.RedirectStderr
+				}
+			}
+		}
+		return conn, dialErr
+	})
+	return client, link, err
+}
+
+// redialTimeout bounds one reconnect attempt. Longer than the transport's own
+// ConnectTimeout so authentication has room after the TCP connect succeeds.
+const redialTimeout = 30 * time.Second
+
+// linkVerifyTimeout bounds the post-dial liveness probe.
+//
+// Sized to sit just past the transport's ConnectTimeout (15 s): against a host
+// that is down, ssh spends that long trying to connect and then exits, which is
+// what turns the probe's read into an error. A shorter deadline would report
+// "unreachable" while ssh was still legitimately connecting over a slow link.
+const linkVerifyTimeout = 20 * time.Second
+
+// verifyRemoteLink proves the far side is a live daemon speaking the Quil
+// protocol, and is what makes a reconnect attempt honest.
+//
+// Without it, an attempt "succeeds" the moment ssh's BINARY starts. exec.Cmd
+// .Start returns long before ssh has resolved the host or authenticated, so a
+// dial cannot fail for network reasons — the same property that forces the
+// version gate to consult LinkStatus before blaming a version mismatch. Against
+// an unreachable host that produced a reconnect loop which reported success
+// every few hundred milliseconds, cleared the banner, reset every pane for a
+// replay that never came, and left the panes blank; because each false success
+// zeroed the reconnect state, the attempt counter never climbed past 1 and the
+// backoff never engaged.
+//
+// Frames other than the response are discarded. The connection has not attached
+// yet, so there is no state to lose: a broadcast that arrives in this window is
+// superseded by the full state the attach itself triggers.
+//
+// The daemon's version is logged rather than compared. A mid-session upgrade of
+// the remote is the only way it can differ, and there is no good recovery for
+// that here — the terminal belongs to Bubble Tea, so nothing can be prompted —
+// but it must at least be diagnosable from the log.
+func verifyRemoteLink(client *ipc.Client, timeout time.Duration) error {
+	req, err := ipc.NewMessage(ipc.MsgVersionReq, struct{}{})
+	if err != nil {
+		return fmt.Errorf("build version probe: %w", err)
+	}
+	req.ID = probeRequestID
+	if err := client.Send(req); err != nil {
+		return fmt.Errorf("send version probe: %w", err)
+	}
+	// The deadline and an explicit wall-clock bound, because the deadline alone
+	// does not bound this LOOP. It only fires when a read actually blocks, and
+	// neither of the two layers below here is guaranteed to block: stdioConn.Read
+	// hands back leftover bytes from `held` before consulting the deadline, and
+	// ipc.Conn.Receive reads through a bufio.Reader, so a frame that is already
+	// buffered costs no read at all. A daemon that never answers MsgVersionReq
+	// while any pane is producing output would `continue` this loop on its
+	// broadcast stream forever — the attempt would never finish, and the banner
+	// would sit on "Connecting" with no further attempt ever scheduled.
+	until := time.Now().Add(timeout)
+	if err := client.SetReadDeadline(until); err != nil {
+		// Logged, not fatal. Returning here would make a transport that cannot
+		// set deadlines (SetWriteDeadline's ErrNoDeadline has a precedent)
+		// break every reconnect permanently, when the wall-clock check below is
+		// sufficient on its own.
+		log.Printf("remote: probe deadline not set (%v) — relying on the wall-clock bound", err)
+	}
+	defer client.SetReadDeadline(time.Time{})
+
+	for {
+		if !time.Now().Before(until) {
+			return fmt.Errorf("await version response: %w", os.ErrDeadlineExceeded)
+		}
+		msg, err := client.Receive()
+		if err != nil {
+			return fmt.Errorf("await version response: %w", err)
+		}
+		// Matched on the ID we sent, not merely on the type: the daemon
+		// responds to the requesting conn when Message.ID is set, so anything
+		// carrying a different ID answers somebody else's request and is not
+		// evidence that OUR probe was seen.
+		if msg.Type != ipc.MsgVersionResp || msg.ID != probeRequestID {
+			continue
+		}
+		var resp ipc.VersionRespPayload
+		if err := msg.DecodePayload(&resp); err != nil {
+			// The frame is the right type and ID, so the daemon answered — the
+			// link is proven even if the payload is unreadable. Not fatal.
+			log.Printf("remote: link verified, version payload undecodable: %v", err)
+			return nil
+		}
+		// A mismatch can only mean the remote was upgraded mid-session, since
+		// gateVersionCheck matched the versions at launch. There is no good
+		// recovery from here — Bubble Tea owns the terminal, so nothing can be
+		// prompted, and refusing would end a session whose panes are healthy —
+		// but it must be loud enough to find afterwards, because a protocol the
+		// local TUI does not fully speak fails SILENTLY: an unhandled message
+		// type is dropped with no error anywhere.
+		if cur := versionpkg.Current(); resp.Version != "" && resp.Version != cur {
+			log.Printf("remote: WARNING link verified but daemon version %q != this TUI %q "+
+				"— the remote was upgraded mid-session; restart the TUI to re-gate",
+				resp.Version, cur)
+		} else {
+			log.Printf("remote: link verified, daemon version %q", resp.Version)
+		}
+		return nil
+	}
+}
+
+// probeRequestID correlates the liveness probe with its response. A literal
+// rather than a fresh id per attempt: only one probe is ever in flight on a
+// given conn, and a stable value keeps the log greppable.
+const probeRequestID = "reconnect-version-probe"
+
+// redialRemote builds the Model's reconnect dialer.
+//
+// Batch is TRUE here, unlike the startup dial. By reconnect time Bubble Tea
+// owns the terminal in raw mode, so ssh must not prompt for a host key or a
+// passphrase: there is nowhere for the prompt to be read from, and it would
+// hang the attempt until the timeout killed it. A host whose key is unknown at
+// reconnect time therefore fails fast with a captured error, which is honest.
+//
+// The dial runs under WithTimeout with a deferred cancel. That is only safe
+// because transport.SSH builds its child with exec.Command rather than
+// exec.CommandContext (RD-001) — otherwise this cancel would kill the ssh child
+// of every attempt at the moment it succeeded.
+func redialRemote(cfg config.Config) tui.RedialFunc {
+	return func(old tui.Client) (tui.Client, error) {
+		// Release the dead connection's ssh child. The TUI cannot do this: its
+		// Client is only Send/Receive, and this is the layer that knows better.
+		if c, ok := old.(*ipc.Client); ok && c != nil {
+			c.Close()
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), redialTimeout)
+		defer cancel()
+
+		client, link, err := dialRemoteTransport(ctx, cfg, true)
+		if err != nil {
+			// No LinkErr fallback here, deliberately: transport.SSH returns a
+			// nil conn on failure and `link` is only assigned when the dialer
+			// saw one, so on this path it is always nil. A dial can only fail
+			// at spawn level — ssh's binary missing, pipes exhausted — and err
+			// already names that.
+			return nil, err
+		}
+		if client == nil {
+			// Defensive: returning a nil *ipc.Client into the interface would
+			// produce a non-nil tui.Client holding a nil pointer, and the next
+			// Receive would panic rather than reconnect.
+			return nil, errors.New("ssh dial returned no connection")
+		}
+
+		// The dial proves only that ssh started. Confirm a daemon actually
+		// answers before reporting the link restored — see verifyRemoteLink.
+		if verr := verifyRemoteLink(client, linkVerifyTimeout); verr != nil {
+			// LinkErr is read BEFORE Close, matching the ordering the version
+			// gate documents and pins. Close unblocks the transport's pump via
+			// <-done, and that return path can complete WITHOUT ever setting
+			// pumpErr — so a read afterwards can come back nil and lose ssh's
+			// own words, leaving the banner showing "await version response:
+			// i/o timeout", which names nothing the user can act on. That
+			// generic message is the exact outcome this fallback exists to
+			// avoid, so reading it in the wrong order defeats the purpose.
+			cause := verr
+			if link != nil {
+				if le := link.LinkErr(); le != nil {
+					cause = le
+				}
+			}
+			client.Close()
+			return nil, cause
+		}
+		return client, nil
+	}
 }

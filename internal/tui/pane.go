@@ -75,6 +75,7 @@ type PaneModel struct {
 	focusMode          bool                // set by Model before View() when in focus mode
 	mcpHighlight       bool                // set by Model before View() when MCP is interacting
 	liveOutputSeen     bool                // first live (non-ghost) output received — settle repaints scheduled
+	reattachReset      bool                // armed on reattach; consumed by the daemon's next replayed chunk (see armReattachReset)
 	working            bool                // derived spinner state: turnActive || subagents > 0 (hook-driven)
 	turnActive         bool                // main turn in flight (UserPromptSubmit/PostToolUse → Stop/park)
 	subagents          int                 // outstanding background subagents (SubagentStart/Stop, burst-aware)

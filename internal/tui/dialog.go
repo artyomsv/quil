@@ -2411,25 +2411,52 @@ func (m *Model) loadBrowseDirAndSelect(path, selectName string) error {
 	if err != nil {
 		return fmt.Errorf("abs path: %w", err)
 	}
-	entries, err := os.ReadDir(abs)
+	dirEntries, err := os.ReadDir(abs)
 	if err != nil {
 		return fmt.Errorf("read dir: %w", err)
 	}
 
-	dirs := make([]string, 0, len(entries))
-	for _, e := range entries {
-		// Plain directory — keep.
-		if e.IsDir() {
-			dirs = append(dirs, e.Name())
-			continue
-		}
+	entries := make([]ipc.BrowseEntry, 0, len(dirEntries))
+	for _, e := range dirEntries {
+		isDir := e.IsDir()
 		// Directory symlink / Windows junction: DirEntry reports them as
 		// ModeSymlink (not ModeDir) so the IsDir() above misses them. Stat
 		// follows the link and tells us whether the target is a directory.
-		if e.Type()&fs.ModeSymlink != 0 {
+		if !isDir && e.Type()&fs.ModeSymlink != 0 {
 			if info, err := os.Stat(filepath.Join(abs, e.Name())); err == nil && info.IsDir() {
-				dirs = append(dirs, e.Name())
+				isDir = true
 			}
+		}
+		entries = append(entries, ipc.BrowseEntry{Name: e.Name(), IsDir: isDir})
+	}
+
+	// "Up" exists unless this is a filesystem root. On Windows a drive root
+	// still offers it, because there it navigates to the drive list.
+	showUp := filepath.Dir(abs) != abs || runtime.GOOS == "windows"
+
+	m.applyBrowseListing(abs, entries, showUp, selectName)
+	return nil
+}
+
+// applyBrowseListing fills the directory browser from an already-resolved
+// listing. Only directories are shown; ".." is prepended when showUp is set.
+//
+// Split from the read above so the browser can be fed from the daemon (RD-020)
+// without duplicating any of this. The signature is deliberately the shape a
+// BrowseDirRespPayload arrives in — entries carry IsDir because the daemon
+// reports files too, and showUp is a decision the SERVER makes: it owns both
+// the "is this a root" test and, on Windows, the drive list, neither of which
+// the client can compute for a filesystem it cannot see.
+//
+// Sorting is case-insensitive here rather than relying on the daemon's order.
+// The daemon sorts directories first so its entry cap cannot strip every
+// folder from a large listing; that is a cap-safety measure, not a
+// presentation choice, and presentation belongs on this side.
+func (m *Model) applyBrowseListing(resolved string, entries []ipc.BrowseEntry, showUp bool, selectName string) {
+	dirs := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir {
+			dirs = append(dirs, e.Name)
 		}
 	}
 	sort.Slice(dirs, func(i, j int) bool {
@@ -2437,15 +2464,12 @@ func (m *Model) loadBrowseDirAndSelect(path, selectName string) error {
 	})
 
 	listing := make([]string, 0, len(dirs)+1)
-	if parent := filepath.Dir(abs); parent != abs {
-		listing = append(listing, "..")
-	} else if runtime.GOOS == "windows" {
-		// At a drive root (e.g., C:\) — show ".." that navigates to drive list.
+	if showUp {
 		listing = append(listing, "..")
 	}
 	listing = append(listing, dirs...)
 
-	m.cwdBrowseDir = abs
+	m.cwdBrowseDir = resolved
 	m.cwdBrowseEntries = listing
 	m.cwdBrowseCursor = 0
 	m.cwdBrowseScroll = 0
@@ -2460,7 +2484,6 @@ func (m *Model) loadBrowseDirAndSelect(path, selectName string) error {
 			}
 		}
 	}
-	return nil
 }
 
 // loadDriveList populates the directory browser with available Windows drive

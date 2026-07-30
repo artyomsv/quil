@@ -31,6 +31,8 @@ no inline comments — both before and after these fixes).
 - [rules/2] `.claude/CLAUDE.md` had no entry for the Phase 2 subsystem, and its ResetVT-skip line needed scoping (the claim was incomplete, not false — the ghost→live path is untouched) — round 1
 - [security/M3] A real private LAN address and username in `internal/config/remote_test.go` in a public repo. Replaced with RFC 5737 documentation space, in its own commit since it predates this branch — round 1
 
+- [greptile/P1] The first fix for the critical finding predicted the daemon's replay from the Model's plugin registry — loaded from THIS machine's `config.PluginsDir()` while `handleAttach` decides from the DAEMON's. Different machines in remote mode; even locally the TUI reloads ahead of the daemon. A mismatch blanks a pane or doubles it. Replaced with an armed flag consumed by the daemon's first replayed chunk — no registry, no prediction. The overlay branch of `handlePaneOutput` consumes it too, since it returns early — round 1
+
 ## Dismissed (acknowledged, will not fix)
 
 - [security/semgrep] `math/rand` for backoff jitter — the jitter spreads retry timing and guards nothing; `reconnectDelay` takes it as a parameter precisely so the curve is deterministic under test. `crypto/rand` adds an error path for no security benefit (round 1)

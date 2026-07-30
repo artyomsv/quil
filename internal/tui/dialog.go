@@ -18,7 +18,6 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/artyomsv/quil/internal/config"
-	"github.com/artyomsv/quil/internal/gitdiscover"
 	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/kubediscover"
 	"github.com/artyomsv/quil/internal/logger"
@@ -2280,6 +2279,13 @@ func (m *Model) enterSetupOrSplit(p *plugin.PanePlugin) tea.Cmd {
 	// cannot land in this dialog's listing. Safe to zero: no call site ever
 	// requests the empty Path, so the zero value cannot match a real response.
 	m.browse = browseState{}
+	// Same reasoning for an in-flight git-repo scan — whether it was this
+	// dialog's own pick-list request for a prior plugin, or a still-running
+	// Alt+G overlay discovery, its answer must not land in whatever setup
+	// session is open when it finally arrives. Losing an in-flight Alt+G scan
+	// this way is a deliberate trade: the user has since moved into Ctrl+N, and
+	// pressing Alt+G again costs one keypress against a wrong-repo overlay.
+	m.repoScan = repoScanState{}
 	m.repoCandidates = nil
 	m.recentCandidates = nil
 	m.kubeContexts = nil
@@ -2309,31 +2315,15 @@ func (m *Model) enterSetupOrSplit(p *plugin.PanePlugin) tea.Cmd {
 					base = pane.CWD
 				}
 			}
-			// Background for now — local disk, synchronous dialog. RD-020 moves
-			// this behind an RPC where a deadline is meaningful.
-			m.repoCandidates = gitdiscover.Candidates(context.Background(), base)
-			if len(m.repoCandidates) > maxRepoCandidates {
-				m.repoCandidates = m.repoCandidates[:maxRepoCandidates]
-			}
-		}
-		switch {
-		case len(m.repoCandidates) > 0:
-			// Pre-select the first git candidate so Enter-through submits it.
-			m.cwdBrowseDir = m.repoCandidates[0]
-			m.cwdBrowseCursor = 0
-		case len(m.recentCWDs) > 0:
-			// Offer the last-used directories as a quick pick (skipping any
-			// that no longer exist). Falls through to the browser if the
-			// filtered list is empty.
-			m.recentCandidates = existingDirs(m.recentCWDs)
-			if len(m.recentCandidates) > 0 {
-				m.cwdBrowseDir = m.recentCandidates[0]
-				m.cwdBrowseCursor = 0
-			} else {
-				browseCmd = m.initSetupBrowser()
-			}
-		default:
-			browseCmd = m.initSetupBrowser()
+			// Asked of the DAEMON, never resolved here — gitdiscover run in this
+			// process stats the machine drawing the UI, which is the wrong disk
+			// whenever the daemon is remote (RD-021). Whether there turn out to
+			// be any candidates isn't known until the answer lands, so the
+			// recent-locations/browser fallback that used to run right below
+			// this branch now runs in applyGitReposPickList instead.
+			browseCmd = m.requestGitRepos(base, "", repoScanPickList)
+		} else {
+			browseCmd = m.fallbackToRecentOrBrowser()
 		}
 	}
 
@@ -2360,6 +2350,32 @@ func (m *Model) enterSetupOrSplit(p *plugin.PanePlugin) tea.Cmd {
 	m.dialogEdit = false // browser doesn't use edit mode
 	m.dialog = dialogCreatePaneSetup
 	return tea.Batch(tea.ClearScreen, browseCmd)
+}
+
+// fallbackToRecentOrBrowser offers the recent-locations quick pick, falling
+// back to the directory-browser pre-fill chain if none of those still exist
+// (or there is nothing remembered at all).
+//
+// Shared by two callers: a PromptsCWD plugin with no git discovery goes
+// straight here from enterSetupOrSplit, and the git pick list falls back to
+// the exact same choice — from applyGitReposPickList — once a scan comes back
+// with nothing to offer, whether that's a real "no repo here" or a failed
+// scan. The two used to be one inline switch; discovery moving behind an RPC
+// split it, because "did the scan find anything" is no longer known at the
+// point enterSetupOrSplit returns.
+func (m *Model) fallbackToRecentOrBrowser() tea.Cmd {
+	if len(m.recentCWDs) > 0 {
+		// Offer the last-used directories as a quick pick (skipping any that no
+		// longer exist). Falls through to the browser if the filtered list is
+		// empty.
+		m.recentCandidates = existingDirs(m.recentCWDs)
+		if len(m.recentCandidates) > 0 {
+			m.cwdBrowseDir = m.recentCandidates[0]
+			m.cwdBrowseCursor = 0
+			return nil
+		}
+	}
+	return m.initSetupBrowser()
 }
 
 // existingDirs filters paths down to those that still resolve to a directory,
@@ -2475,6 +2491,57 @@ func (m *Model) advanceBrowseCandidates(failed string) tea.Cmd {
 		m.lastSelectedCWD = "" // clear stale memory
 	}
 	return m.nextBrowseCandidate()
+}
+
+// applyGitReposPickList is the setup dialog's whole reaction to a git pick-list
+// discovery response that came back without an error: populate the candidate
+// list, or — if the scan genuinely found nothing — fall back to the same
+// recent-locations/browser chain a non-git PromptsCWD plugin uses.
+//
+// discover_client.go's applyGitRepos deliberately holds none of this policy —
+// see its doc comment — because the pick list is only one of two callers and
+// what a response MEANS to it (a candidate list to render, a cap to enforce,
+// a fallback to run) is dialog-specific knowledge the client half has no
+// business carrying.
+//
+// Dropped if the setup dialog has since closed (Esc, submit, or a different
+// plugin selected — all of which change m.dialog away from
+// dialogCreatePaneSetup): applying it would populate a pick list nobody is
+// looking at, or worse, one belonging to whatever setup the user opened next.
+func (m *Model) applyGitReposPickList(repos []string) tea.Cmd {
+	if m.dialog != dialogCreatePaneSetup {
+		return nil
+	}
+	m.repoCandidates = repos
+	if len(m.repoCandidates) > maxRepoCandidates {
+		m.repoCandidates = m.repoCandidates[:maxRepoCandidates]
+	}
+	if len(m.repoCandidates) == 0 {
+		return m.fallbackToRecentOrBrowser()
+	}
+	// Pre-select the first git candidate so Enter-through submits it.
+	m.cwdBrowseDir = m.repoCandidates[0]
+	m.cwdBrowseCursor = 0
+	return nil
+}
+
+// applyGitReposPickListError is the pick list's reaction to a failed scan.
+//
+// The fallback is identical to applyGitReposPickList's "found nothing" case —
+// the dialog still needs a CWD from somewhere — but a failure must not be
+// indistinguishable from "no repositories here", which is a real, confidently
+// reportable finding. The flash is what keeps the two apart; discover_client.go
+// has already logged the underlying error.
+func (m *Model) applyGitReposPickListError() tea.Cmd {
+	if m.dialog != dialogCreatePaneSetup {
+		return nil
+	}
+	// Already nil from enterSetupOrSplit's reset — set explicitly anyway so
+	// this function states the "empty pick list" guarantee itself rather than
+	// relying on that reset never changing.
+	m.repoCandidates = nil
+	m.setFlash("repo scan failed")
+	return tea.Batch(m.flashCmd(), m.fallbackToRecentOrBrowser())
 }
 
 // browseTo issues a user-driven navigation request.

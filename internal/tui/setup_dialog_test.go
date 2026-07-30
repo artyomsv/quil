@@ -12,6 +12,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/artyomsv/quil/internal/config"
+	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/kubediscover"
 	"github.com/artyomsv/quil/internal/plugin"
 )
@@ -963,13 +964,11 @@ default = false
 // listing — see TestApplyBrowseListing_SelectName in browse_client_test.go.
 
 func TestEnterSetupOrSplit_GitDiscover_PopulatesCandidates(t *testing.T) {
-	root, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	// No .git directory needed on disk any more — discovery is asked of the
+	// daemon (RD-021), and the answer below is what a real scan would have
+	// found. Only the base path this test's fake daemon is asked about, and
+	// echoes back, has to be real.
+	root := t.TempDir()
 
 	pane := NewPaneModel("pane-1", 1024)
 	pane.CWD = root
@@ -977,7 +976,8 @@ func TestEnterSetupOrSplit_GitDiscover_PopulatesCandidates(t *testing.T) {
 	tab.Root = NewLeaf(pane)
 	tab.ActivePane = pane.ID
 
-	m := &Model{tabs: []*TabModel{tab}, activeTab: 0}
+	fake := &fakeSender{}
+	m := &Model{tabs: []*TabModel{tab}, activeTab: 0, client: fake}
 	p := &plugin.PanePlugin{
 		Name: "lazygit",
 		Command: plugin.CommandConfig{
@@ -986,7 +986,8 @@ func TestEnterSetupOrSplit_GitDiscover_PopulatesCandidates(t *testing.T) {
 			Discover:   "git",
 		},
 	}
-	m.enterSetupOrSplit(p)
+	runCmd(m.enterSetupOrSplit(p))
+	runCmd(m.applyGitRepos(ipc.GitReposRespPayload{CWD: root, Repos: []string{root}}))
 
 	if len(m.repoCandidates) != 1 || m.repoCandidates[0] != root {
 		t.Fatalf("repoCandidates = %v, want [%q]", m.repoCandidates, root)
@@ -1000,10 +1001,7 @@ func TestEnterSetupOrSplit_GitDiscover_PopulatesCandidates(t *testing.T) {
 }
 
 func TestEnterSetupOrSplit_GitDiscover_NoRepo_FallsBackToBrowser(t *testing.T) {
-	plain, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	plain := t.TempDir()
 	pane := NewPaneModel("pane-1", 1024)
 	pane.CWD = plain
 	tab := NewTabModel("tab-1", "t")
@@ -1021,6 +1019,11 @@ func TestEnterSetupOrSplit_GitDiscover_NoRepo_FallsBackToBrowser(t *testing.T) {
 		},
 	}
 	runCmd(m.enterSetupOrSplit(p))
+	// No error and no repos is a real finding — "no repo here" — which falls
+	// back to the same recent/browser chain a non-git PromptsCWD plugin uses.
+	// That fallback used to run synchronously inside enterSetupOrSplit; it now
+	// runs in applyGitReposPickList once this response lands.
+	runCmd(m.applyGitRepos(ipc.GitReposRespPayload{CWD: plain}))
 
 	if len(m.repoCandidates) != 0 {
 		t.Fatalf("repoCandidates = %v, want empty", m.repoCandidates)
@@ -1211,22 +1214,18 @@ func TestEnterSetup_RecentAllStaleFallsToBrowser(t *testing.T) {
 }
 
 func TestEnterSetup_GitReposWinOverRecent(t *testing.T) {
-	root, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	root := t.TempDir()
 	pane := NewPaneModel("pane-1", 1024)
 	pane.CWD = root
 	tab := NewTabModel("tab-1", "t")
 	tab.Root = NewLeaf(pane)
 	tab.ActivePane = pane.ID
 
-	m := &Model{tabs: []*TabModel{tab}, activeTab: 0, recentCWDs: []string{t.TempDir()}}
+	fake := &fakeSender{}
+	m := &Model{tabs: []*TabModel{tab}, activeTab: 0, recentCWDs: []string{t.TempDir()}, client: fake}
 	p := &plugin.PanePlugin{Name: "lazygit", Command: plugin.CommandConfig{Cmd: "lazygit", PromptsCWD: true, Discover: "git"}}
-	m.enterSetupOrSplit(p)
+	runCmd(m.enterSetupOrSplit(p))
+	runCmd(m.applyGitRepos(ipc.GitReposRespPayload{CWD: root, Repos: []string{root}}))
 
 	if len(m.repoCandidates) != 1 || m.repoCandidates[0] != root {
 		t.Fatalf("repoCandidates = %v, want [%q]", m.repoCandidates, root)
@@ -1522,23 +1521,15 @@ func TestEnterSetupOrSplit_Kube_CapsContexts(t *testing.T) {
 // bound: the pick list has no scroll machinery, so discovery must never hand
 // the dialog more rows than fit the box.
 func TestEnterSetupOrSplit_GitDiscover_CapsCandidates(t *testing.T) {
-	base, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	for i := 0; i < 12; i++ {
-		if err := os.MkdirAll(filepath.Join(base, fmt.Sprintf("repo-%02d", i), ".git"), 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
-
+	base := t.TempDir()
 	pane := NewPaneModel("pane-1", 1024)
 	pane.CWD = base
 	tab := NewTabModel("tab-1", "t")
 	tab.Root = NewLeaf(pane)
 	tab.ActivePane = pane.ID
 
-	m := &Model{tabs: []*TabModel{tab}, activeTab: 0}
+	fake := &fakeSender{}
+	m := &Model{tabs: []*TabModel{tab}, activeTab: 0, client: fake}
 	p := &plugin.PanePlugin{
 		Name: "lazygit",
 		Command: plugin.CommandConfig{
@@ -1547,7 +1538,15 @@ func TestEnterSetupOrSplit_GitDiscover_CapsCandidates(t *testing.T) {
 			Discover:   "git",
 		},
 	}
-	m.enterSetupOrSplit(p)
+	runCmd(m.enterSetupOrSplit(p))
+
+	// The daemon reports 12 candidates; the client-side cap must still trim
+	// to maxRepoCandidates — the pick list has no scroll machinery.
+	repos := make([]string, 12)
+	for i := range repos {
+		repos[i] = fmt.Sprintf("%s/repo-%02d", base, i)
+	}
+	runCmd(m.applyGitRepos(ipc.GitReposRespPayload{CWD: base, Repos: repos}))
 
 	if len(m.repoCandidates) != maxRepoCandidates {
 		t.Fatalf("len(repoCandidates) = %d, want %d (capped)", len(m.repoCandidates), maxRepoCandidates)

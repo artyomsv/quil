@@ -60,7 +60,7 @@ func (m *Model) handleToggleLazygit() tea.Cmd {
 	// machine that actually holds it — and nothing in that message hinted the
 	// wrong disk had been consulted. The rest of the state machine resumes in
 	// applyGitRepos when the answer lands.
-	return m.requestGitRepos(cwd, tab.ID)
+	return m.requestGitRepos(cwd, tab.ID, repoScanOverlay)
 }
 
 // resolveLazygitOverlay runs steps 3-7 of the Alt+G state machine against an

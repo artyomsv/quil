@@ -308,7 +308,7 @@ type Model struct {
 	sessionRows       []ipc.ClaudeSessionInfo // listing for sessionScanCWD, newest first
 	sessionCursor     int                     // row cursor: 0 = "New session", 1.. = sessionRows
 	sessionScroll     int                     // scroll offset for the visible window of the expanded list
-	repoScan          repoScanState           // in-flight Alt+G git discovery (zero value = none)
+	repoScan          repoScanState           // in-flight git discovery — Alt+G overlay or setup-dialog pick list (zero value = none)
 	browse            browseState             // in-flight directory-browser request (zero value = none)
 	sessionScanCWD    string                  // directory sessionRows belong to
 	sessionState      sessionScanState        // request lifecycle for the session field

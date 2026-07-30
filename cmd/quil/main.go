@@ -472,6 +472,15 @@ func launchTUI() {
 	// loss; leaving redialFn nil is what makes that path stay fatal.
 	if remoteMode() {
 		model.SetRedialFunc(redialRemote(cfg))
+		// The Model cannot close a connection itself — tui.Client is only
+		// Send/Receive. Without this, the `defer client.Close()` above releases
+		// the STARTUP client, which after a reconnect is already dead, while the
+		// live ssh child is only reachable through the Model and outlives us.
+		model.SetClientCloser(func(c tui.Client) {
+			if ic, ok := c.(*ipc.Client); ok && ic != nil {
+				ic.Close()
+			}
+		})
 	}
 
 	// ssh keeps its stderr for the whole session and multiplexes the remote
@@ -499,6 +508,11 @@ func launchTUI() {
 	// Save window size and config changes for next launch
 	if m, ok := finalModel.(tui.Model); ok {
 		m.FlushNotes()
+		// Release the connection the Model actually holds. The deferred
+		// client.Close() above only knows about the startup client, so after a
+		// reconnect it closes a corpse and leaves the live ssh child running.
+		// No-op in local mode, where no closer is installed.
+		m.CloseClient()
 		saveWindowSize(m)
 		if m.ConfigChanged() {
 			if err := config.Save(config.ConfigPath(), m.Config()); err != nil {

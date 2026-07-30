@@ -71,8 +71,22 @@ func restoreConsoleMode() {
 		if !s.ok {
 			continue
 		}
-		if r, _, err := setConsoleMode.Call(uintptr(s.h), uintptr(s.mode)); r == 0 {
+		if r, err := setConsoleModeCall(s.h, s.mode); r == 0 {
 			log.Printf("restore console mode on handle %v: %v", s.h, err)
 		}
 	}
+}
+
+// setConsoleModeCall is a package var so a test can observe whether the
+// skip-on-failed-probe guard above is honoured.
+//
+// That guard is the most dangerous thing here to get wrong, and its failure is
+// silent: a failed GetConsoleMode leaves mode at zero, and SetConsoleMode(h, 0)
+// on a real console clears ENABLE_PROCESSED_OUTPUT and virtual-terminal handling
+// outright — turning a cosmetic indentation bug into a console with no ANSI at
+// all. Asserting "this syscall was not reached" needs a seam, because the real
+// call succeeds-by-failing on an invalid handle and leaves nothing to observe.
+var setConsoleModeCall = func(h syscall.Handle, mode uint32) (uintptr, error) {
+	r, _, err := setConsoleMode.Call(uintptr(h), uintptr(mode))
+	return r, err
 }

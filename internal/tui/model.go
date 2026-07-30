@@ -229,6 +229,7 @@ type Model struct {
 	clientGen            int            // bumped on every client swap; see linkLostMsg for why
 	reconnect            reconnectState // zero value = not reconnecting
 	redialFn             RedialFunc     // nil in local mode: a dead local daemon is fatal
+	closeClientFn        func(Client)   // releases a connection; see SetClientCloser
 	cfg                  config.Config
 	version              string
 	attached             bool
@@ -606,7 +607,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.beginReconnect(msg.err)
 
 	case redialTickMsg:
-		if msg.gen != m.clientGen || !m.reconnect.active {
+		// msg.attempt is checked, not just carried. It makes a second concurrent
+		// dial impossible by construction rather than by argument: only the tick
+		// for the attempt currently armed can start one, so the "slow attempt
+		// completing after a fast one" case the result branch guards against has
+		// no way to arise in the first place.
+		if msg.gen != m.clientGen || !m.reconnect.active || msg.attempt != m.reconnect.attempt {
 			return m, nil
 		}
 		return m, m.redialCmd()
@@ -616,9 +622,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// client: a slow attempt completing after a fast one would otherwise
 		// replace a working connection with a second one, leaving the first
 		// with a listen loop nobody reads.
-		if msg.gen != m.clientGen {
+		if msg.gen != m.clientGen || !m.reconnect.active {
+			// The !active half mirrors the tick branch above. Without it a
+			// failure result arriving with active already false would call
+			// scheduleRedial, incrementing attempt and arming a tick that the
+			// tick branch then drops for !active — leaving a session with no
+			// timer, no banner, and no way back.
 			if msg.client != nil {
-				log.Printf("discarding late reconnect from gen %d (current %d)", msg.gen, m.clientGen)
+				// Closed through the seam because tui.Client is only
+				// Send/Receive: this package structurally cannot release the
+				// ssh child behind it, and dropping the reference leaks that
+				// child plus its remote `quil --stdio` for the whole session.
+				log.Printf("releasing late reconnect from gen %d (current %d)", msg.gen, m.clientGen)
+				m.closeClient(msg.client)
 			}
 			return m, nil
 		}

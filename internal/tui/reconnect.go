@@ -33,15 +33,56 @@ type reconnectState struct {
 	attempt int       // 1-based; drives the backoff
 	lastErr error     // shown in the banner
 	nextAt  time.Time // when the next attempt fires, for the countdown
+	// lastUpAt and settledAttempt survive a successful reconnect so a flapping
+	// link cannot restart the backoff ladder from scratch each time. See
+	// beginReconnect.
+	lastUpAt       time.Time
+	settledAttempt int
 }
+
+// reconnectFlapWindow is how long a restored link must survive before the next
+// drop counts as a fresh outage rather than a continuing one. Matches the
+// backoff cap: a link that dies faster than we would have waited to retry it has
+// not really recovered.
+const reconnectFlapWindow = reconnectMaxDelay
 
 const (
 	// reconnectBaseDelay is the nominal wait before the first attempt. Short
 	// enough that a brief blip heals before the user reaches for the keyboard.
 	reconnectBaseDelay = 500 * time.Millisecond
-	// reconnectMaxDelay caps the backoff. Budgeted for Windows, where OpenSSH
-	// has no ControlMaster and every attempt pays a full TCP and auth handshake.
+	// reconnectMaxDelay caps the backoff while a drop still looks transient.
+	// Budgeted for Windows, where OpenSSH has no ControlMaster and every
+	// attempt pays a full TCP and auth handshake.
 	reconnectMaxDelay = 30 * time.Second
+	// reconnectDecayAfter is how many attempts stay on the fast curve before
+	// the loop assumes the failure is not transient. Four spans roughly four
+	// seconds, which covers the case this is tuned for: a host rebooting, where
+	// a real reconnect landed on attempt 3.
+	reconnectDecayAfter = 4
+	// reconnectSlowMaxDelay is the plateau for a sustained failure.
+	//
+	// This exists for a reason that is not politeness. Every attempt is a fresh
+	// ssh with BatchMode=yes, so every attempt is a full authentication — and
+	// there is a realistic case where authentication can never succeed while
+	// the link itself is fine: the startup dial runs NON-batch and may prompt
+	// for a key passphrase, while every reconnect runs batch and cannot. An
+	// operator with a passphrase-protected key and no agent authenticates once
+	// interactively, then every reconnect fails `publickey` permanently. A
+	// changed host key and a dead agent socket behave the same way.
+	//
+	// On the 30 s cap that is ~120 failed authentications an hour from the
+	// operator's own address; a default fail2ban sshd jail (5 failures /
+	// 10 min) bans them, and the recidive jail escalates it across every
+	// service on the host. A laptop left with the banner up overnight locks its
+	// owner out. Five minutes brings it to ~15/hour.
+	//
+	// This REDUCES the risk rather than removing it: the first few fast
+	// attempts can still trip a strict jail, and only classifying the failure
+	// as permanent would truly fix it — which needs ssh's prose, since exit
+	// code 255 covers both a permanent denial and a transient timeout, and
+	// matching prose is what this codebase deliberately avoids elsewhere. See
+	// techdebt/3-3-reconnect-cannot-classify-permanent-ssh-failure.md.
+	reconnectSlowMaxDelay = 5 * time.Minute
 )
 
 // reconnectDelay returns how long to wait before attempt n (1-based).
@@ -62,13 +103,23 @@ func reconnectDelay(attempt int, jitter float64) time.Duration {
 	// The d <= 0 half is load-bearing, and not for the reason it looks like.
 	// This is a runtime shift on an int64, so it wraps rather than saturates:
 	// from attempt 36 the product exceeds int64 and can come back NEGATIVE,
-	// which "d > reconnectMaxDelay" does not catch — it would flow through to
-	// tea.Tick, fire immediately, and become the hot loop the cap exists to
-	// prevent. Exact zero only arrives at attempt 57, once the shift count
-	// reaches 64. Both cases are covered here.
+	// which a cap test alone does not catch — it would flow through to tea.Tick,
+	// fire immediately, and become the hot loop the cap exists to prevent. Exact
+	// zero arrives at attempt 57, where the shift count is 56 — 500ms is
+	// 1953125 × 2^8 and 1953125 is odd, so the product is only a multiple of
+	// 2^64 once 8 + shift reaches 64. Both cases are covered here.
 	// TestReconnectDelay_NeverDropsBelowFloorAtAnyAttempt pins this.
-	if d > reconnectMaxDelay || d <= 0 {
-		d = reconnectMaxDelay
+	//
+	// A positive wrap cannot slip through either: any nonzero wrapped value is a
+	// multiple of 2^(8+shift) ≥ 2^43 ns, three orders of magnitude above the
+	// cap, so it is caught by the first clause. The two together are exactly
+	// sufficient.
+	ceiling := reconnectMaxDelay
+	if attempt > reconnectDecayAfter {
+		ceiling = reconnectSlowMaxDelay
+	}
+	if d > ceiling || d <= 0 {
+		d = ceiling
 	}
 	if jitter < 0 {
 		jitter = 0
@@ -93,6 +144,29 @@ type RedialFunc func(old Client) (Client, error)
 // A setter rather than a NewModel parameter for the same reason SetRemoteDest
 // is one: NewModel's signature is already at five arguments.
 func (m *Model) SetRedialFunc(f RedialFunc) { m.redialFn = f }
+
+// SetClientCloser installs the way to release a connection.
+//
+// Needed because Client is deliberately only Send/Receive, so this package
+// cannot close the ssh child behind one. Two callers need it: discarding a
+// late-arriving reconnect, and releasing the LIVE connection on exit — which
+// `cmd/quil`'s own `defer client.Close()` cannot do, because it captured the
+// startup client and after a reconnect the live one only exists on the Model.
+// This repo has already paid for leaked child processes on Windows once.
+func (m *Model) SetClientCloser(f func(Client)) { m.closeClientFn = f }
+
+// closeClient releases c, if a closer was installed. Safe with a nil closer
+// (local sessions never install one) and a nil client.
+func (m Model) closeClient(c Client) {
+	if m.closeClientFn == nil || c == nil {
+		return
+	}
+	m.closeClientFn(c)
+}
+
+// CloseClient releases the connection the Model currently holds. Called by
+// cmd/quil on exit, after the Bubble Tea program has returned.
+func (m Model) CloseClient() { m.closeClient(m.client) }
 
 // canReconnect reports whether a dropped link should be retried rather than
 // being fatal.
@@ -123,7 +197,7 @@ func (m Model) canReconnect() bool {
 func (m Model) freezeInput(msg tea.Msg) (tea.Cmd, bool) {
 	switch msg := msg.(type) {
 	case tea.KeyPressMsg:
-		if kbMatches(msg.String(), m.cfg.Keybindings.Quit) {
+		if isFreezeEscape(msg.String(), m.cfg.Keybindings.Quit) {
 			return tea.Quit, true
 		}
 		return nil, true
@@ -135,16 +209,48 @@ func (m Model) freezeInput(msg tea.Msg) (tea.Cmd, bool) {
 	return nil, false
 }
 
-// firstErrLine reduces a multi-line diagnostic to its first line.
+// freezeEscapeKeys are always honoured during a freeze, whatever the config says.
 //
-// ssh errors routinely span several lines. The banner is a one-row overlay, so
-// a raw multi-line message would paint over the rows beneath it rather than
+// The configured quit binding is checked first and normally does the work. These
+// exist because kbMatches returns false for an EMPTY configured string, so a
+// config with `quit = ""` would leave a frozen session with no key out at all:
+// every other binding is swallowed, and Bubble Tea v2 delivers ctrl+c as an
+// ordinary KeyPressMsg, so that is swallowed too. The only recourse would be
+// killing the process from another terminal — an unrecoverable UI reached by
+// editing one config value, which is too sharp an edge to leave in place.
+var freezeEscapeKeys = []string{"ctrl+q", "ctrl+c"}
+
+// isFreezeEscape reports whether a key should end a frozen session.
+func isFreezeEscape(key, configuredQuit string) bool {
+	if kbMatches(key, configuredQuit) {
+		return true
+	}
+	for _, k := range freezeEscapeKeys {
+		if key == k {
+			return true
+		}
+	}
+	return false
+}
+
+// firstErrLine reduces a multi-line diagnostic to a single banner-safe line.
+//
+// ssh errors routinely span several lines. The banner is a one-row overlay, so a
+// raw multi-line message would paint over the rows beneath it rather than
 // growing the box. Named to avoid colliding with the test-only firstLine.
+//
+// Tabs become spaces, and that is not cosmetic. The transport's sanitizer
+// deliberately PRESERVES \t (correct for multi-line log output), while
+// lipgloss.Width measures a tab as ZERO cells — so a remote emitting a few
+// hundred tabs to its stderr produces a string that passes both the width
+// budget here and the overlay's own width gate, then expands across many screen
+// rows once the terminal renders it, displacing the frame. Remote-controlled
+// text reaching a fixed-width row has to be measured the way it will be drawn.
 func firstErrLine(s string) string {
 	if i := strings.IndexAny(s, "\r\n"); i >= 0 {
-		return strings.TrimSpace(s[:i])
+		s = s[:i]
 	}
-	return strings.TrimSpace(s)
+	return strings.TrimSpace(strings.ReplaceAll(s, "\t", " "))
 }
 
 // bannerSep separates the status core from the ssh diagnostic.
@@ -213,6 +319,12 @@ func (m Model) renderReconnectBanner(width int) string {
 
 	// Longest first; the first one that fits wins. Every rung keeps ctrl+q.
 	candidates := m.bannerCandidates()
+	if len(candidates) == 0 {
+		// Unreachable today (both branches return three rungs), but this is the
+		// render path — an index panic here takes the whole frame down at the
+		// worst possible moment, during an outage.
+		return ""
+	}
 	core := candidates[len(candidates)-1]
 	for _, c := range candidates {
 		if lipgloss.Width(c) <= width {
@@ -281,9 +393,53 @@ func (m *Model) eachClientPane(fn func(*PaneModel)) {
 	}
 }
 
-// resetPanesForReattach resets every pane that the coming attach will replay.
+// paneRepaintsOnAttach reports whether the daemon will put something back into
+// this pane type's rectangle when we re-attach.
+//
+// `handleAttach` (daemon.go) sends a ghost replay only when the plugin has
+// `ghost_buffer = true`; otherwise it sends NOTHING and falls through to
+// `redrawKick`, which is itself a no-op unless the plugin declares a
+// `redraw_key`. Of the shipped defaults, `ghost_buffer = false` holds for
+// claude-code, opencode, lazygit, k9s and lazysql — and only claude-code has a
+// redraw key.
+//
+// Unknown types and a nil registry answer TRUE, matching `builtin.go`'s
+// `GhostBuffer: true` default: over-resetting a terminal costs a replayed
+// repaint, while under-resetting one doubles its scrollback, and the replay is
+// the cheaper mistake.
+func (m Model) paneRepaintsOnAttach(typ string) bool {
+	if m.pluginRegistry == nil {
+		return true
+	}
+	p := m.pluginRegistry.Get(typ)
+	if p == nil {
+		return true
+	}
+	return p.Persistence.GhostBuffer || p.Persistence.RedrawKey != ""
+}
+
+// resetPanesForReattach resets the panes that the coming attach will repaint.
+//
+// Gated, not unconditional. Resetting exists to stop the replay from DOUBLING a
+// pane's scrollback, so it is only ever worth paying where a replay (or a redraw
+// kick) is actually coming. Wiping a pane that gets neither destroys the only
+// content it has and replaces it with a blank rectangle in front of a live
+// process — indefinitely, if the pane sits in a background tab. That is strictly
+// worse than the duplication it was guarding against, and it would have hit
+// opencode, lazygit, k9s and lazysql: every AI pane except claude-code.
+//
+// claude-code IS reset: it has no replay but does have `redraw_key = "\f"`, and
+// a full repaint lands more cleanly on a cleared grid than over a stale one,
+// where a shorter new paint would leave old rows beneath it. It loses scrollback
+// in exchange, which for a full-screen alternate-screen app is its own internal
+// scroll rather than terminal history.
 func (m *Model) resetPanesForReattach() {
-	m.eachClientPane((*PaneModel).resetForReattach)
+	m.eachClientPane(func(p *PaneModel) {
+		if !m.paneRepaintsOnAttach(p.Type) {
+			return
+		}
+		p.resetForReattach()
+	})
 	// Selection is Model-level, and anchors to row/column coordinates inside
 	// content that has just been discarded. Keeping it would highlight whatever
 	// happens to land in those cells after replay.
@@ -337,10 +493,30 @@ func (m Model) beginReconnect(cause error) (tea.Model, tea.Cmd) {
 		return m, nil // already reconnecting; one loop only
 	}
 	log.Printf("remote link lost, reconnecting: %v", cause)
-	m.reconnect = reconnectState{active: true, lastErr: cause}
+	// Carry the attempt count forward when the link barely survived. Clearing it
+	// on every success means a remote daemon that accepts, verifies, attaches and
+	// then dies restarts the ladder at 500 ms every time — a crash-looping daemon
+	// gets a fresh ssh roughly twice a second forever, with the counter never
+	// passing 1. That is the same signature as the false-success bug
+	// verifyRemoteLink was added to fix, reached by a different route, and the
+	// 30 s cap only protects against it if the counter survives.
+	carried := 0
+	if !m.reconnect.lastUpAt.IsZero() && time.Since(m.reconnect.lastUpAt) < reconnectFlapWindow {
+		carried = m.reconnect.settledAttempt
+		log.Printf("remote: link lasted %v (<%v) — resuming backoff at attempt %d rather than restarting it",
+			time.Since(m.reconnect.lastUpAt).Round(time.Millisecond), reconnectFlapWindow, carried+1)
+	}
+	m.reconnect = reconnectState{active: true, lastErr: cause, attempt: carried}
 	// A drag in flight refers to coordinates and panes that the post-reattach
 	// state may not have; drop it rather than resolve it later.
 	m.clearDragState()
+	// Transient pickers are worthless after an outage and their input is frozen,
+	// so leaving them open strands the user in a UI that ignores Esc. Dialogs
+	// proper are deliberately left alone — they may hold unsaved work.
+	m.closeCtxMenu()
+	if m.dialog == dialogCommandPalette {
+		m.dialog = dialogNone
+	}
 	return m.scheduleRedial()
 }
 
@@ -391,7 +567,13 @@ func (m Model) finishReconnect(c Client) (tea.Model, tea.Cmd) {
 	log.Printf("remote link restored after %d attempt(s)", m.reconnect.attempt)
 	m.client = c
 	m.clientGen++
-	m.reconnect = reconnectState{}
+	// Not the zero value: lastUpAt and settledAttempt carry forward so a link
+	// that dies again within reconnectFlapWindow resumes the backoff instead of
+	// restarting it. Everything else is cleared.
+	m.reconnect = reconnectState{
+		lastUpAt:       time.Now(),
+		settledAttempt: m.reconnect.attempt,
+	}
 
 	// Before the attach that triggers replay, not after: the daemon starts
 	// sending the moment it processes MsgAttach, and a reset arriving late would

@@ -95,6 +95,12 @@ func gateVersionCheck(client *ipc.Client) *ipc.Client {
 		// TUI is older than the running daemon. Blocking path: we
 		// refuse to attach, print actionable instructions, exit.
 		client.Close()
+		// Reachable in remote mode whenever the remote daemon is NEWER than
+		// this TUI: the link delivered bytes, so the dead-link guard above did
+		// not fire and we arrived here with a killed ssh child and a console
+		// still in the mode it set. Without this the twelve lines below
+		// staircase off the right edge. Sibling arms already restore.
+		restoreConsoleMode()
 		promptUpgradeClient(versionpkg.Current(), res.DaemonVersion)
 		exitFn(0)
 		return nil

@@ -19,15 +19,35 @@ import (
 // Verified by construction rather than against a live console: the test binary
 // has no console to probe, which is exactly why the ok flag exists.
 func TestRestoreConsoleMode_SkipsHandlesThatWereNotConsoles(t *testing.T) {
-	saved := savedConsoleModes
-	t.Cleanup(func() { savedConsoleModes = saved })
+	savedModes := savedConsoleModes
+	savedCall := setConsoleModeCall
+	t.Cleanup(func() {
+		savedConsoleModes = savedModes
+		setConsoleModeCall = savedCall
+	})
 
-	// An invalid handle with ok=false. If restore honoured it, SetConsoleMode
-	// would be called on garbage; the assertion is that it is not reached.
-	savedConsoleModes = []savedMode{
-		{h: syscall.Handle(^uintptr(0)), mode: 0, ok: false},
+	// Recorded rather than merely "did not panic": the real syscall returns 0 on
+	// an invalid handle and the code logs and continues, so deleting the guard
+	// left the previous version of this test passing.
+	var calls []savedMode
+	setConsoleModeCall = func(h syscall.Handle, mode uint32) (uintptr, error) {
+		calls = append(calls, savedMode{h: h, mode: mode})
+		return 1, nil
 	}
-	restoreConsoleMode() // must not call SetConsoleMode, must not panic
+
+	savedConsoleModes = []savedMode{
+		{h: syscall.Handle(^uintptr(0)), mode: 0, ok: false}, // probe failed
+		{h: syscall.Handle(42), mode: 0x7, ok: true},         // real console
+	}
+	restoreConsoleMode()
+
+	if len(calls) != 1 {
+		t.Fatalf("SetConsoleMode called %d times, want 1 — a handle whose probe failed "+
+			"was restored, and mode 0 clears ENABLE_PROCESSED_OUTPUT and VT handling", len(calls))
+	}
+	if calls[0].h != syscall.Handle(42) || calls[0].mode != 0x7 {
+		t.Errorf("restored handle %v mode %#x, want handle 42 mode 0x7", calls[0].h, calls[0].mode)
+	}
 }
 
 // saveConsoleMode records one entry per standard handle, whether or not each is

@@ -41,11 +41,15 @@ func readFrame(peer net.Conn) error {
 	return err
 }
 
-func writeFrame(peer net.Conn, typ string) error {
+// writeFrame sends one framed message, echoing id the way the daemon's
+// respondTo does — a response to a request with Message.ID set carries that same
+// ID back. Getting this wrong in the fixture is what caught the ID check.
+func writeFrame(peer net.Conn, typ, id string) error {
 	msg, err := ipc.NewMessage(typ, ipc.VersionRespPayload{Version: "1.44.1"})
 	if err != nil {
 		return err
 	}
+	msg.ID = id
 	raw, err := json.Marshal(msg)
 	if err != nil {
 		return err
@@ -57,14 +61,21 @@ func writeFrame(peer net.Conn, typ string) error {
 	return err
 }
 
-// fakeDaemon reads one frame and replies with the given message type.
+// fakeDaemon reads one frame and replies with the given message type, echoing
+// the probe's ID as a real daemon would.
+//
+// The write error is checked rather than dropped: a failure here would surface
+// only as the probe timing out, which is indistinguishable from the behaviour
+// the silent-peer test deliberately exercises.
 func fakeDaemon(t *testing.T, peer net.Conn, replyType string) {
 	t.Helper()
 	go func() {
 		if err := readFrame(peer); err != nil {
 			return
 		}
-		writeFrame(peer, replyType)
+		if err := writeFrame(peer, replyType, probeRequestID); err != nil {
+			t.Errorf("fakeDaemon: write reply: %v", err)
+		}
 	}()
 }
 
@@ -117,7 +128,7 @@ func TestVerifyRemoteLink_SkipsUnrelatedFramesThenSucceeds(t *testing.T) {
 			return
 		}
 		for _, typ := range []string{ipc.MsgWorkspaceState, ipc.MsgPaneOutput, ipc.MsgVersionResp} {
-			if err := writeFrame(peer, typ); err != nil {
+			if err := writeFrame(peer, typ, probeRequestID); err != nil {
 				return
 			}
 		}
@@ -154,5 +165,62 @@ func TestVerifyRemoteLink_ClearsDeadlineOnSuccess(t *testing.T) {
 		}
 	case <-time.After(500 * time.Millisecond):
 		// Still blocked, which is correct: no deadline is in force.
+	}
+}
+
+// A version response carrying somebody else's ID is not evidence that OUR probe
+// was seen. The daemon answers the requesting conn when Message.ID is set, so an
+// ID we did not send belongs to another request.
+func TestVerifyRemoteLink_WrongResponseID_DoesNotSatisfyProbe(t *testing.T) {
+	client, peer := clientOverPipe(t)
+	go func() {
+		if err := readFrame(peer); err != nil {
+			return
+		}
+		if err := writeFrame(peer, ipc.MsgVersionResp, "someone-elses-request"); err != nil {
+			return
+		}
+	}()
+
+	if err := verifyRemoteLink(client, 250*time.Millisecond); err == nil {
+		t.Fatal("a response with a foreign ID satisfied the probe")
+	}
+}
+
+// The deadline alone does not bound the LOOP: it fires only when a read actually
+// blocks, and neither stdioConn's held-remainder fast path nor ipc's buffered
+// reader is guaranteed to block. A peer streaming frames we skip must still hit
+// the wall-clock bound rather than looping forever — otherwise the attempt never
+// completes and the banner sits on "Connecting" with nothing scheduled.
+func TestVerifyRemoteLink_ContinuousUnrelatedTraffic_StillTimesOut(t *testing.T) {
+	client, peer := clientOverPipe(t)
+	stop := make(chan struct{})
+	t.Cleanup(func() { close(stop) })
+	go func() {
+		if err := readFrame(peer); err != nil {
+			return
+		}
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			// Never the response type, so the loop always continues.
+			if err := writeFrame(peer, ipc.MsgPaneOutput, probeRequestID); err != nil {
+				return
+			}
+		}
+	}()
+
+	start := time.Now()
+	err := verifyRemoteLink(client, 300*time.Millisecond)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("continuous unrelated traffic was treated as a verified link")
+	}
+	if elapsed > 5*time.Second {
+		t.Errorf("took %v to give up — the loop outlived its bound", elapsed)
 	}
 }

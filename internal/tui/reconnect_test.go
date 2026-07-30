@@ -12,6 +12,7 @@ import (
 
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
+	"github.com/artyomsv/quil/internal/plugin"
 )
 
 // failingClient returns err from Receive forever.
@@ -146,8 +147,12 @@ func TestReconnectDelay_GrowsAndCaps(t *testing.T) {
 		{"first attempt is prompt", 1, 250 * time.Millisecond, 500 * time.Millisecond},
 		{"second doubles", 2, 500 * time.Millisecond, 1 * time.Second},
 		{"third doubles again", 3, 1 * time.Second, 2 * time.Second},
-		{"caps at 30s", 12, 15 * time.Second, 30 * time.Second},
-		{"stays capped past the shift width", 100, 15 * time.Second, 30 * time.Second},
+		{"last of the fast curve", 4, 2 * time.Second, 4 * time.Second},
+		// Past reconnectDecayAfter the ceiling rises to reconnectSlowMaxDelay,
+		// so the curve keeps doubling instead of plateauing at 30s.
+		{"keeps doubling past the fast cap", 7, 16 * time.Second, 32 * time.Second},
+		{"caps at the slow plateau", 12, 150 * time.Second, 5 * time.Minute},
+		{"stays capped past the shift width", 100, 150 * time.Second, 5 * time.Minute},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -445,23 +450,62 @@ func TestReconnect_NewListenLoopCarriesTheNewGeneration(t *testing.T) {
 	m := Model{clientGen: 7, attached: true, reconnect: reconnectState{active: true, attempt: 1}}
 	m.SetRemoteDest("gpu01")
 
-	updated, _ := m.Update(redialResultMsg{gen: 7, client: fresh})
+	updated, cmd := m.Update(redialResultMsg{gen: 7, client: fresh})
 	got := updated.(Model)
+	if got.clientGen != 8 {
+		t.Fatalf("clientGen = %d, want 8", got.clientGen)
+	}
+	if cmd == nil {
+		t.Fatal("no command returned")
+	}
 
-	msg := got.listenForMessages()()
-	lost, ok := msg.(linkLostMsg)
-	if !ok {
-		t.Fatalf("msg is %T, want linkLostMsg", msg)
+	// Runs the cmd finishReconnect ACTUALLY built, and compares against a
+	// literal. An earlier version called got.listenForMessages() afresh and
+	// compared to got.clientGen — but listenForMessages is a value receiver that
+	// stamps gen from m.clientGen at call time, so that compared a field to
+	// itself and could never fail. Verified: building the cmd before the bump
+	// left the whole suite passing.
+	lost := findLinkLostMsg(t, cmd)
+	if lost.gen != 8 {
+		t.Errorf("the listen loop finishReconnect built stamped gen %d, want 8 — it was built "+
+			"before the generation bump, so its own drop would be discarded as stale and the "+
+			"session could never reconnect again", lost.gen)
 	}
-	if lost.gen != got.clientGen {
-		t.Errorf("new listen loop stamped gen %d but the model is at %d — its own drop would be discarded as stale",
-			lost.gen, got.clientGen)
+}
+
+// findLinkLostMsg runs a (possibly batched) command and returns the linkLostMsg
+// one of its branches produces. The client in these tests fails every Receive,
+// so the listen branch yields one immediately.
+func findLinkLostMsg(t *testing.T, cmd tea.Cmd) linkLostMsg {
+	t.Helper()
+	switch msg := cmd().(type) {
+	case linkLostMsg:
+		return msg
+	case tea.BatchMsg:
+		for _, c := range msg {
+			if c == nil {
+				continue
+			}
+			if lost, ok := c().(linkLostMsg); ok {
+				return lost
+			}
+		}
 	}
+	t.Fatal("no linkLostMsg among the returned commands; the listen loop was not started")
+	return linkLostMsg{}
 }
 
 // Input is dropped, not buffered, while the link is down: a keystroke replayed
 // into a live agent session minutes later lands at a prompt that has moved on.
 // Ctrl+Q must stay live — it is the only way out of a host that never returns.
+//
+// Coverage note: the table below asserts cmd == nil, and on this fixture (no
+// tabs, no client) several of those messages would return nil through NORMAL
+// handling too — so those rows would still pass with freezeInput deleted. The
+// ctrl+q subtest is genuinely load-bearing, and
+// TestReconnect_InputResumesWhenNotReconnecting is the control that proves the
+// freeze is what suppresses input, by running the same key with the link up and
+// down and requiring the outcomes to differ.
 func TestReconnect_SwallowsInputExceptQuit(t *testing.T) {
 	newM := func() Model {
 		m := Model{cfg: config.Default(), reconnect: reconnectState{active: true, attempt: 3}}
@@ -502,17 +546,33 @@ func TestReconnect_SwallowsInputExceptQuit(t *testing.T) {
 }
 
 // The freeze must lift once the link is back, or the session is unusable.
+//
+// Asserted on an observable the freeze would suppress, not on "it did not
+// panic": an earlier version of this test called Update and discarded both
+// returns, which could only ever have failed on a crash and would have passed
+// with freezeInput deleted.
 func TestReconnect_InputResumesWhenNotReconnecting(t *testing.T) {
-	m := Model{cfg: config.Default(), width: 80, height: 24}
-	m.SetRemoteDest("gpu01")
-
-	// Not reconnecting: the key reaches normal handling. Asserting on "not
-	// swallowed" rather than a specific command keeps this independent of what
-	// handleKey decides to do with an unbound key.
-	if m.reconnect.active {
-		t.Fatal("fixture is in a reconnecting state")
+	newM := func(active bool) Model {
+		m := Model{cfg: config.Default(), width: 80, height: 24}
+		m.SetRemoteDest("gpu01")
+		m.reconnect.active = active
+		return m
 	}
-	_, _ = m.Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
+
+	// F1 opens the About dialog — a Model-visible effect needing no pane, no
+	// client and no daemon, so the two arms differ only by the freeze.
+	key := tea.KeyPressMsg{Code: tea.KeyF1}
+
+	frozen, _ := newM(true).Update(key)
+	if got := frozen.(Model); got.dialog != dialogNone {
+		t.Errorf("a keypress opened dialog %v while the link was down", got.dialog)
+	}
+
+	live, _ := newM(false).Update(key)
+	if got := live.(Model); got.dialog != dialogAbout {
+		t.Errorf("the same keypress left dialog = %v with the link up; the freeze did not "+
+			"lift, or this test no longer observes anything", got.dialog)
+	}
 }
 
 func TestRenderReconnectBanner_NamesHostAndAttempt(t *testing.T) {
@@ -1143,6 +1203,269 @@ func TestRenderReconnectBanner_BothPhasesKeepExitHintAtMinWidth(t *testing.T) {
 			if !strings.Contains(out, "ctrl+q") {
 				t.Errorf("wait=%v width=%d: exit hint missing\ngot: %s", wait, w, out)
 			}
+		}
+	}
+}
+
+// Sustained failure must slow the retry RATE, not just cap it.
+//
+// Every attempt is a full ssh authentication, and there is a real case where
+// authentication can never succeed while the link is fine: the startup dial runs
+// non-batch and may prompt for a key passphrase, every reconnect runs batch and
+// cannot. On a flat 30s cap that is ~120 failed authentications an hour from the
+// operator's own address, which a default fail2ban sshd jail bans — locking the
+// owner out of their own host overnight. This pins the decay that reduces it.
+func TestReconnectDelay_SustainedFailureSlowsTheRate(t *testing.T) {
+	// Worst case for the rate is minimum jitter throughout.
+	const jitter = 0.0
+	attemptsInFirstHour := 0
+	var elapsed time.Duration
+	for a := 1; elapsed < time.Hour; a++ {
+		elapsed += reconnectDelay(a, jitter)
+		attemptsInFirstHour++
+	}
+
+	// ~33 at worst-case jitter, against ~120 on the old flat 30s cap. The bound
+	// is set from the design rather than from the measurement: anything near the
+	// old figure means the decay stopped working.
+	if attemptsInFirstHour > 40 {
+		t.Errorf("%d attempts in the first hour of sustained failure — the decay is not "+
+			"bounding the rate (a flat 30s cap gives ~120)", attemptsInFirstHour)
+	}
+
+	// The load-bearing property, and the honest one. The early burst still puts
+	// ~11 attempts in the first ten minutes, which a strict jail can act on —
+	// that is stated in reconnectSlowMaxDelay's comment and is not fixable
+	// without classifying the failure as permanent. What IS guaranteed is the
+	// STEADY state: once the ladder reaches its plateau, the spacing keeps a
+	// rolling ten-minute window under the usual 5-failure threshold.
+	const jailWindow = 10 * time.Minute
+	const jailThreshold = 5
+	plateau := reconnectDelay(60, jitter) // well past the decay boundary
+	if perWindow := int(jailWindow / plateau); perWindow >= jailThreshold {
+		t.Errorf("steady-state spacing %v allows %d attempts per %v, at or above the %d-failure "+
+			"threshold a default jail acts on", plateau, perWindow, jailWindow, jailThreshold)
+	}
+
+	// Guard the other direction: the early attempts must stay quick, or a
+	// transient blip takes minutes to heal when it should take under a second.
+	if got := reconnectDelay(1, jitter); got > time.Second {
+		t.Errorf("first attempt = %v, too slow for a transient drop", got)
+	}
+}
+
+// The decay boundary is where the ceiling changes, so pin it directly rather
+// than inferring it from the curve.
+func TestReconnectDelay_DecayBoundary(t *testing.T) {
+	// At and below the boundary the fast cap applies.
+	if got := reconnectDelay(reconnectDecayAfter, 1); got > reconnectMaxDelay {
+		t.Errorf("attempt %d = %v, want <= the fast cap %v", reconnectDecayAfter, got, reconnectMaxDelay)
+	}
+	// Far past it the slow plateau applies.
+	if got := reconnectDelay(reconnectDecayAfter+40, 1); got != reconnectSlowMaxDelay {
+		t.Errorf("attempt %d = %v, want the slow plateau %v", reconnectDecayAfter+40, got, reconnectSlowMaxDelay)
+	}
+}
+
+// THE CRITICAL REGRESSION. handleAttach replays only panes whose plugin has
+// ghost_buffer = true; for the rest it sends NOTHING and falls through to
+// redrawKick, which is itself a no-op without a redraw_key. Resetting such a
+// pane destroys the only content it has and leaves a blank rectangle in front of
+// a live process — indefinitely, if the pane is in a background tab.
+//
+// Of the shipped defaults that affects opencode, lazygit, k9s and lazysql: every
+// AI pane except claude-code, which does declare a redraw key. The live test that
+// validated reconnect used a terminal pane, which is exactly the case that DOES
+// get a replay, so nothing caught this.
+// Driven by the REAL shipped defaults rather than a synthetic registry, so it
+// also fails if someone later flips a ghost_buffer or adds a redraw_key without
+// reconsidering the reset.
+func TestReconnect_DoesNotWipePanesThatGetNoReplay(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := plugin.EnsureDefaultPlugins(dir); err != nil {
+		t.Fatalf("write default plugins: %v", err)
+	}
+	reg := plugin.NewRegistry()
+	if err := reg.LoadFromDir(dir); err != nil {
+		t.Fatalf("load default plugins: %v", err)
+	}
+
+	cases := []struct {
+		typ         string
+		wantReset   bool
+		wantsReason string
+	}{
+		{"terminal", true, "ghost_buffer = true, so a replay arrives and would double"},
+		{"claude-code", true, "no replay, but redraw_key = \"\\f\" repaints it"},
+		{"opencode", false, "no replay and no redraw key — nothing would come back"},
+		{"lazygit", false, "no replay and no redraw key"},
+		{"k9s", false, "no replay and no redraw key"},
+		{"lazysql", false, "no replay and no redraw key"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.typ, func(t *testing.T) {
+			m := newReconnectTestModel(t, 1)
+			m.pluginRegistry = reg
+			p := m.tabs[0].Leaves()[0]
+			p.Type = tc.typ
+			p.AppendOutput([]byte("content that predates the reconnect\r\n"))
+			if p.rawBuf.Len() == 0 {
+				t.Fatal("fixture wrote nothing")
+			}
+
+			m.resetPanesForReattach()
+
+			wiped := p.rawBuf.Len() == 0
+			if wiped != tc.wantReset {
+				if tc.wantReset {
+					t.Errorf("%s was NOT reset but should be (%s)", tc.typ, tc.wantsReason)
+				} else {
+					t.Errorf("%s was wiped but should not be (%s) — it renders blank "+
+						"in front of a live process, indefinitely in a background tab",
+						tc.typ, tc.wantsReason)
+				}
+			}
+		})
+	}
+}
+
+// An unknown type and a nil registry must both be treated as replayed. Over-
+// resetting a terminal costs a repaint; under-resetting one doubles its
+// scrollback, so the replay assumption is the cheaper default — and it matches
+// builtin.go's GhostBuffer: true.
+func TestReconnect_UnknownPaneTypeIsTreatedAsReplayed(t *testing.T) {
+	m := newReconnectTestModel(t, 1)
+
+	m.pluginRegistry = nil
+	if !m.paneRepaintsOnAttach("anything") {
+		t.Error("nil registry: want true (assume a replay is coming)")
+	}
+
+	m.pluginRegistry = plugin.NewRegistry()
+	if !m.paneRepaintsOnAttach("not-registered") {
+		t.Error("unknown type: want true (assume a replay is coming)")
+	}
+}
+
+// Every rung of the banner ladder must keep the exit hint, in both phases. The
+// width-sampled tests cover today's rungs; this pins the invariant itself so a
+// rung added later without ctrl+q fails immediately rather than at some width
+// nobody sampled.
+func TestBannerCandidates_EveryRungKeepsTheExitHint(t *testing.T) {
+	for _, wait := range []time.Duration{0, 9 * time.Second} {
+		m := Model{reconnect: reconnectState{active: true, attempt: 3}}
+		if wait > 0 {
+			m.reconnect.nextAt = time.Now().Add(wait)
+		}
+		m.SetRemoteDest("gpu01")
+
+		got := m.bannerCandidates()
+		if len(got) == 0 {
+			t.Fatalf("wait=%v: no candidates; renderReconnectBanner would have nothing to fall back to", wait)
+		}
+		for i, c := range got {
+			if !strings.Contains(c, "ctrl+q") {
+				t.Errorf("wait=%v rung %d (%q) has no exit hint", wait, i, c)
+			}
+		}
+	}
+}
+
+// A flapping link must not restart the backoff ladder each time. A remote daemon
+// that accepts, verifies, attaches and dies immediately would otherwise get a
+// fresh ssh roughly twice a second forever with the counter stuck at 1 — the same
+// signature as the false-success bug verifyRemoteLink was added to fix.
+func TestReconnect_FlappingLinkCarriesTheBackoffForward(t *testing.T) {
+	m := Model{clientGen: 1, attached: true}
+	m.SetRemoteDest("gpu01")
+	m.SetRedialFunc(func(Client) (Client, error) {
+		return &failingClient{err: errors.New("unused")}, nil
+	})
+
+	// Climb a few attempts, then succeed.
+	updated, _ := m.Update(linkLostMsg{gen: 1, err: errors.New("EOF")})
+	m = updated.(Model)
+	for i := 0; i < 2; i++ {
+		updated, _ = m.Update(redialResultMsg{gen: m.clientGen, err: errors.New("refused")})
+		m = updated.(Model)
+	}
+	settled := m.reconnect.attempt
+	if settled < 3 {
+		t.Fatalf("fixture only reached attempt %d, want >= 3", settled)
+	}
+	updated, _ = m.Update(redialResultMsg{gen: m.clientGen, client: &failingClient{err: errors.New("live")}})
+	m = updated.(Model)
+
+	// It dies again immediately — well inside reconnectFlapWindow.
+	updated, _ = m.Update(linkLostMsg{gen: m.clientGen, err: errors.New("EOF again")})
+	got := updated.(Model)
+
+	if got.reconnect.attempt <= 1 {
+		t.Errorf("attempt reset to %d after a flap; the ladder restarts at 500ms and the "+
+			"backoff never engages", got.reconnect.attempt)
+	}
+}
+
+// A link that survived comfortably is a real recovery, so the next outage starts
+// from scratch rather than inheriting a stale penalty.
+func TestReconnect_SettledLinkResetsTheBackoff(t *testing.T) {
+	m := Model{clientGen: 1, attached: true}
+	m.SetRemoteDest("gpu01")
+	m.SetRedialFunc(func(Client) (Client, error) { return nil, errors.New("unused") })
+	// Restored long enough ago to count as settled.
+	m.reconnect = reconnectState{
+		lastUpAt:       time.Now().Add(-2 * reconnectFlapWindow),
+		settledAttempt: 7,
+	}
+
+	updated, _ := m.Update(linkLostMsg{gen: 1, err: errors.New("EOF")})
+	got := updated.(Model)
+
+	if got.reconnect.attempt != 1 {
+		t.Errorf("attempt = %d after a settled link dropped, want 1 (a fresh ladder)", got.reconnect.attempt)
+	}
+}
+
+// A dialog open when the link drops must not keep taking keys. The freeze sits
+// ahead of the whole type switch, so it runs before any dialog key handling —
+// reachable in practice (Settings open, wifi blips) and previously untested.
+func TestReconnect_FreezeAppliesWithADialogOpen(t *testing.T) {
+	newM := func(active bool) Model {
+		m := Model{cfg: config.Default(), width: 80, height: 24,
+			dialog: dialogAbout, dialogCursor: 0}
+		m.SetRemoteDest("gpu01")
+		m.reconnect.active = active
+		return m
+	}
+
+	down, _ := newM(true).Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	if got := down.(Model); got.dialogCursor != 0 {
+		t.Errorf("dialog cursor moved to %d while the link was down", got.dialogCursor)
+	}
+
+	up, _ := newM(false).Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	if got := up.(Model); got.dialogCursor == 0 {
+		t.Error("the same key did not move the cursor with the link up — this test " +
+			"no longer observes the freeze")
+	}
+}
+
+// The banner is drawn over row 0 regardless of what else is on screen, so a
+// dialog open during an outage must not stop it rendering, and the frame must
+// stay within its width.
+func TestReconnect_BannerRendersOverADialog(t *testing.T) {
+	m := newReconnectTestModel(t, 1)
+	m.reconnect = reconnectState{active: true, attempt: 2, lastErr: errors.New("timed out")}
+	m.dialog = dialogAbout
+
+	out := stripANSI(m.View().Content)
+	if !strings.Contains(out, "ctrl+q") {
+		t.Error("the reconnect banner is absent while a dialog is open")
+	}
+	for i, line := range strings.Split(out, "\n") {
+		if got := lipgloss.Width(line); got > m.width {
+			t.Errorf("line %d measured %d cells, wider than the %d-cell frame", i, got, m.width)
 		}
 	}
 }

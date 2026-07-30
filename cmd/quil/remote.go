@@ -17,6 +17,7 @@ import (
 	"github.com/artyomsv/quil/internal/remoteinstall"
 	"github.com/artyomsv/quil/internal/transport"
 	"github.com/artyomsv/quil/internal/tui"
+	versionpkg "github.com/artyomsv/quil/internal/version"
 )
 
 // remoteDest is empty for a local session and holds the --remote destination
@@ -340,30 +341,73 @@ func verifyRemoteLink(client *ipc.Client, timeout time.Duration) error {
 	if err != nil {
 		return fmt.Errorf("build version probe: %w", err)
 	}
-	req.ID = "reconnect-version-probe"
+	req.ID = probeRequestID
 	if err := client.Send(req); err != nil {
 		return fmt.Errorf("send version probe: %w", err)
 	}
-	if err := client.SetReadDeadline(time.Now().Add(timeout)); err != nil {
-		return fmt.Errorf("set probe deadline: %w", err)
+	// The deadline and an explicit wall-clock bound, because the deadline alone
+	// does not bound this LOOP. It only fires when a read actually blocks, and
+	// neither of the two layers below here is guaranteed to block: stdioConn.Read
+	// hands back leftover bytes from `held` before consulting the deadline, and
+	// ipc.Conn.Receive reads through a bufio.Reader, so a frame that is already
+	// buffered costs no read at all. A daemon that never answers MsgVersionReq
+	// while any pane is producing output would `continue` this loop on its
+	// broadcast stream forever — the attempt would never finish, and the banner
+	// would sit on "Connecting" with no further attempt ever scheduled.
+	until := time.Now().Add(timeout)
+	if err := client.SetReadDeadline(until); err != nil {
+		// Logged, not fatal. Returning here would make a transport that cannot
+		// set deadlines (SetWriteDeadline's ErrNoDeadline has a precedent)
+		// break every reconnect permanently, when the wall-clock check below is
+		// sufficient on its own.
+		log.Printf("remote: probe deadline not set (%v) — relying on the wall-clock bound", err)
 	}
 	defer client.SetReadDeadline(time.Time{})
 
 	for {
+		if !time.Now().Before(until) {
+			return fmt.Errorf("await version response: %w", os.ErrDeadlineExceeded)
+		}
 		msg, err := client.Receive()
 		if err != nil {
 			return fmt.Errorf("await version response: %w", err)
 		}
-		if msg.Type != ipc.MsgVersionResp {
+		// Matched on the ID we sent, not merely on the type: the daemon
+		// responds to the requesting conn when Message.ID is set, so anything
+		// carrying a different ID answers somebody else's request and is not
+		// evidence that OUR probe was seen.
+		if msg.Type != ipc.MsgVersionResp || msg.ID != probeRequestID {
 			continue
 		}
 		var resp ipc.VersionRespPayload
-		if err := msg.DecodePayload(&resp); err == nil {
+		if err := msg.DecodePayload(&resp); err != nil {
+			// The frame is the right type and ID, so the daemon answered — the
+			// link is proven even if the payload is unreadable. Not fatal.
+			log.Printf("remote: link verified, version payload undecodable: %v", err)
+			return nil
+		}
+		// A mismatch can only mean the remote was upgraded mid-session, since
+		// gateVersionCheck matched the versions at launch. There is no good
+		// recovery from here — Bubble Tea owns the terminal, so nothing can be
+		// prompted, and refusing would end a session whose panes are healthy —
+		// but it must be loud enough to find afterwards, because a protocol the
+		// local TUI does not fully speak fails SILENTLY: an unhandled message
+		// type is dropped with no error anywhere.
+		if cur := versionpkg.Current(); resp.Version != "" && resp.Version != cur {
+			log.Printf("remote: WARNING link verified but daemon version %q != this TUI %q "+
+				"— the remote was upgraded mid-session; restart the TUI to re-gate",
+				resp.Version, cur)
+		} else {
 			log.Printf("remote: link verified, daemon version %q", resp.Version)
 		}
 		return nil
 	}
 }
+
+// probeRequestID correlates the liveness probe with its response. A literal
+// rather than a fresh id per attempt: only one probe is ever in flight on a
+// given conn, and a stable value keeps the log greppable.
+const probeRequestID = "reconnect-version-probe"
 
 // redialRemote builds the Model's reconnect dialer.
 //
@@ -390,14 +434,11 @@ func redialRemote(cfg config.Config) tui.RedialFunc {
 
 		client, link, err := dialRemoteTransport(ctx, cfg, true)
 		if err != nil {
-			// Prefer ssh's own words. A network failure reaches us as a failed
-			// handshake, which on its own reads as a timeout and names no
-			// cause; batch mode captured the real message into LinkErr.
-			if link != nil {
-				if le := link.LinkErr(); le != nil {
-					return nil, le
-				}
-			}
+			// No LinkErr fallback here, deliberately: transport.SSH returns a
+			// nil conn on failure and `link` is only assigned when the dialer
+			// saw one, so on this path it is always nil. A dial can only fail
+			// at spawn level — ssh's binary missing, pipes exhausted — and err
+			// already names that.
 			return nil, err
 		}
 		if client == nil {
@@ -409,18 +450,23 @@ func redialRemote(cfg config.Config) tui.RedialFunc {
 
 		// The dial proves only that ssh started. Confirm a daemon actually
 		// answers before reporting the link restored — see verifyRemoteLink.
-		if err := verifyRemoteLink(client, linkVerifyTimeout); err != nil {
-			client.Close()
-			// Prefer ssh's own words again. "await version response: i/o
-			// timeout" names nothing the user can act on, while ssh's captured
-			// stderr says "connect to host ... Connection timed out" — and this
-			// error is what the reconnect banner shows.
+		if verr := verifyRemoteLink(client, linkVerifyTimeout); verr != nil {
+			// LinkErr is read BEFORE Close, matching the ordering the version
+			// gate documents and pins. Close unblocks the transport's pump via
+			// <-done, and that return path can complete WITHOUT ever setting
+			// pumpErr — so a read afterwards can come back nil and lose ssh's
+			// own words, leaving the banner showing "await version response:
+			// i/o timeout", which names nothing the user can act on. That
+			// generic message is the exact outcome this fallback exists to
+			// avoid, so reading it in the wrong order defeats the purpose.
+			cause := verr
 			if link != nil {
 				if le := link.LinkErr(); le != nil {
-					return nil, le
+					cause = le
 				}
 			}
-			return nil, err
+			client.Close()
+			return nil, cause
 		}
 		return client, nil
 	}

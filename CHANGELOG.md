@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.45.2] - 2026-07-31
+
 ### Fixed
 - **Pasting into a pane no longer arrives one character at a time.** Text
   pasted with your terminal's own paste — Ctrl+V, right-click, middle-click,

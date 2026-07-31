@@ -1,9 +1,11 @@
 package tui
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/plugin"
 )
@@ -72,13 +74,30 @@ func TestSaveMigrationAndAdvance_RemoteModeKeepsAdoptedAvailability(t *testing.T
 		"cmd = \"claude\"\n" +
 		"record_history = true\n"
 
+	// A REAL plugins dir with a real TOML in it. Without this, PluginsDir()
+	// does not exist, LoadFromDir takes its os.IsNotExist early-out, and the
+	// reload this test reasons about never runs at all — the test then passes
+	// against any implementation.
+	if err := os.MkdirAll(config.PluginsDir(), 0o700); err != nil {
+		t.Fatalf("mkdir plugins dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(config.PluginsDir(), "claude-code.toml"), []byte(content), 0o600); err != nil {
+		t.Fatalf("write plugin toml: %v", err)
+	}
+
 	reg := plugin.NewRegistry()
 	// Simulate an availability answer already adopted from the daemon over
 	// IPC before this dialog resolved.
-	reg.SetAvailability(map[string]bool{"terminal-wide": false})
+	//
+	// The marker is "terminal", NOT "terminal-wide": LoadFromDir's
+	// prune-on-reload exempts only "terminal" (registry.go), so a real reload
+	// deletes "terminal-wide" outright and Get() would return nil here. Same
+	// hazard documented at dialog_test.go's sibling test.
+	reg.SetAvailability(map[string]bool{"terminal": false})
 
+	fake := &fakeSender{}
 	m := Model{
-		client:         &fakeSender{},
+		client:         fake,
 		pluginRegistry: reg,
 		migrationIdx:   0,
 		migrationPlugins: []plugin.StalePlugin{{
@@ -90,9 +109,25 @@ func TestSaveMigrationAndAdvance_RemoteModeKeepsAdoptedAvailability(t *testing.T
 	}
 	m.SetRemoteDest("gpu01")
 
-	out, _ := m.saveMigrationAndAdvance()
+	out, cmd := m.saveMigrationAndAdvance()
 	got := out.(Model)
-	if got.pluginRegistry.Get("terminal-wide").Available {
+	if got.pluginRegistry.Get("terminal").Available {
 		t.Error("Available = true — a local DetectAvailability pass ran in remote mode and clobbered the daemon's answer")
+	}
+
+	// Skipping local detection is only half the contract. LoadFromDir replaces
+	// every TOML-backed plugin and Available is runtime-only, so the flags are
+	// all false now; without a re-ask, remote mode greys out every plugin for
+	// the rest of the session.
+	runCmd(cmd)
+	var asked bool
+	for _, sent := range fake.sent {
+		if sent.Type == ipc.MsgPluginListReq {
+			asked = true
+		}
+	}
+	if !asked {
+		t.Errorf("no %s sent after the migration reload — availability is never repopulated",
+			ipc.MsgPluginListReq)
 	}
 }

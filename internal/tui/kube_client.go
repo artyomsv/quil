@@ -146,6 +146,13 @@ func (m *Model) applyKubeScanTimeout(gen string) tea.Cmd {
 	if gen == "" || gen != m.kubeScan.gen || m.kubeScan.phase != kubeScanning {
 		return nil
 	}
+	// Same dialog-closed guard its response sibling carries, and that both
+	// recent_client.go functions carry. Inert today — this only sets a phase
+	// nothing renders outside the dialog — but an unstated divergence between
+	// the three client files is exactly what rots.
+	if m.dialog != dialogCreatePaneSetup {
+		return nil
+	}
 	m.kubeScan.phase = kubeScanFailed
 	return nil
 }

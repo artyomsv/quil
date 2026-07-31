@@ -421,16 +421,32 @@ func (d *Daemon) handleDirsExistReq(conn *ipc.Conn, msg *ipc.Message) {
 	if err := msg.DecodePayload(&req); err != nil {
 		log.Printf("handleDirsExistReq: decode: %v", err)
 	}
-	if !d.dirsChecking.CompareAndSwap(false, true) {
-		respondTo(conn, msg.ID, ipc.MsgDirsExistResp, ipc.DirsExistRespPayload{
-			Error: "another existence check is already running",
-		})
+	rejection, ok := d.beginDirsCheck()
+	if !ok {
+		respondTo(conn, msg.ID, ipc.MsgDirsExistResp, rejection)
 		return
 	}
 	go func() {
 		defer d.dirsChecking.Store(false)
 		respondTo(conn, msg.ID, ipc.MsgDirsExistResp, dirsExistResponse(req))
 	}()
+}
+
+// beginDirsCheck claims the single-flight slot, returning the rejection to send
+// when it is already taken.
+//
+// Split from the handler for the same reason as beginBrowseScan and
+// beginGitDiscover: ipc.Conn cannot be built outside its package, so a test can
+// only reach this decision through a seam. Without it the slot-independence
+// property — this handler must NOT share browseScanning — is untestable, and it
+// is the invariant here most likely to be "tidied" away by a later refactor.
+func (d *Daemon) beginDirsCheck() (ipc.DirsExistRespPayload, bool) {
+	if d.dirsChecking.CompareAndSwap(false, true) {
+		return ipc.DirsExistRespPayload{}, true
+	}
+	return ipc.DirsExistRespPayload{
+		Error: "another existence check is already running",
+	}, false
 }
 
 // dirsExistResponse is the pure half.

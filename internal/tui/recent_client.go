@@ -109,8 +109,17 @@ func (m *Model) applyExistingDirs(resp ipc.DirsExistRespPayload, gen string) tea
 		return m.initSetupBrowser()
 	}
 
-	m.recentCandidates = resp.Paths
-	m.cwdBrowseDir = resp.Paths[0]
+	// Cap on receipt. The daemon caps the REQUEST, but a cap enforced only by
+	// the sender is not a cap once the sender is a host the user may not
+	// control — the same reasoning applyKubeContexts states. It matters more
+	// here than for a rendered list: paths[0] becomes cwdBrowseDir, which is
+	// the pane's spawn directory.
+	paths := resp.Paths
+	if len(paths) > recentCWDMax {
+		paths = paths[:recentCWDMax]
+	}
+	m.recentCandidates = paths
+	m.cwdBrowseDir = paths[0]
 	m.cwdBrowseCursor = 0
 	return nil
 }

@@ -181,6 +181,22 @@ func (r *Registry) LoadFromDir(dir string) error {
 	return nil
 }
 
+// Availability snapshots each plugin's availability under the read lock.
+//
+// All() hands out LIVE pointers and then releases the lock, so reading
+// p.Available off them races DetectAvailability's writes — reachable with two
+// attached clients, since ipc dispatches one read loop per connection and a
+// plugin reload on one conn can run while another asks for the list.
+func (r *Registry) Availability() map[string]bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make(map[string]bool, len(r.plugins))
+	for name, p := range r.plugins {
+		out[name] = p.Available
+	}
+	return out
+}
+
 // DetectAvailability checks whether each plugin's tool is installed.
 // Search order: 1) explicit Path field, 2) PATH lookup, 3) common install locations.
 func (r *Registry) DetectAvailability() {

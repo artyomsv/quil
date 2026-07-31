@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"sort"
+
 	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/plugin"
 )
@@ -17,11 +19,21 @@ func (d *Daemon) handlePluginListReq(conn *ipc.Conn, msg *ipc.Message) {
 }
 
 // pluginListResponse is the pure half.
+//
+// Reads through Registry.Availability rather than All(): All hands out live
+// *PanePlugin pointers and drops the lock, so touching p.Available off them
+// races DetectAvailability, which writes that field under the write lock. Two
+// attached clients are enough — ipc runs one dispatch loop per connection.
+//
+// Sorted by name so the response is reproducible. Map iteration order is
+// random, which makes an otherwise-identical answer differ frame to frame and
+// leaves a test unable to assert on order.
 func pluginListResponse(reg *plugin.Registry) ipc.PluginListRespPayload {
-	all := reg.All()
-	out := ipc.PluginListRespPayload{Plugins: make([]ipc.PluginInfo, 0, len(all))}
-	for _, p := range all {
-		out.Plugins = append(out.Plugins, ipc.PluginInfo{Name: p.Name, Available: p.Available})
+	avail := reg.Availability()
+	out := ipc.PluginListRespPayload{Plugins: make([]ipc.PluginInfo, 0, len(avail))}
+	for name, ok := range avail {
+		out.Plugins = append(out.Plugins, ipc.PluginInfo{Name: name, Available: ok})
 	}
+	sort.Slice(out.Plugins, func(i, j int) bool { return out.Plugins[i].Name < out.Plugins[j].Name })
 	return out
 }

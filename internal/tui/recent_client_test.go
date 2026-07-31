@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"reflect"
 	"testing"
 
@@ -170,5 +171,24 @@ func TestApplyExistingDirsTimeout_StaleGenerationDoesNotClearALiveScan(t *testin
 
 	if m.recentScan.gen != live {
 		t.Error("a superseded timeout tick cleared the live scan")
+	}
+}
+
+// TestApplyExistingDirs_CapsAnOversizedResponse pins the cap-on-receipt rule.
+// The daemon caps the REQUEST, but a cap enforced only by the sender is not a
+// cap once the sender is a host the user may not control — and paths[0] becomes
+// cwdBrowseDir, the pane's spawn directory.
+func TestApplyExistingDirs_CapsAnOversizedResponse(t *testing.T) {
+	m := recentClientModel(t)
+	m.requestExistingDirs([]string{"/a"})
+
+	big := make([]string, recentCWDMax+5)
+	for i := range big {
+		big[i] = fmt.Sprintf("/dir-%d", i)
+	}
+	m.applyExistingDirs(ipc.DirsExistRespPayload{Paths: big}, m.recentScan.gen)
+
+	if len(m.recentCandidates) != recentCWDMax {
+		t.Errorf("recentCandidates = %d, want capped to %d", len(m.recentCandidates), recentCWDMax)
 	}
 }

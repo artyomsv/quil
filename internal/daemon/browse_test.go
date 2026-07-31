@@ -842,3 +842,56 @@ func TestDirsExistResponse_OneHungPathCostsOneStat(t *testing.T) {
 		t.Errorf("Paths = %v, want empty — a path whose stat never answered is not a directory", out.Paths)
 	}
 }
+
+// TestDirsCheckAndBrowse_HaveIndependentSlots pins the single-flight invariant
+// this handler most needs pinned: dirsChecking is NOT browseScanning.
+//
+// The two look like the same question and are not, because of timing. The
+// existence check hands over to the directory browser when the client gives up
+// at 8 s, while the daemon holds its slot for as long as the syscall really runs
+// — up to browseTimeout (10 s). Sharing one guard would make that handover's
+// browse requests rejected by the very request that just timed out, dead-ending
+// the dialog in exactly the dead-mount case the bound exists for.
+//
+// Claims through beginDirsCheck rather than the atomic directly: pointing the
+// handler's CompareAndSwap at browseScanning must FAIL this test, and it only
+// does if the test walks the same path the handler walks.
+func TestDirsCheckAndBrowse_HaveIndependentSlots(t *testing.T) {
+	d := &Daemon{}
+
+	if _, ok := d.beginDirsCheck(); !ok {
+		t.Fatal("existence check refused while its slot was free")
+	}
+	if _, ok := d.beginBrowseScan(ipc.BrowseDirReqPayload{Path: "/a"}); !ok {
+		t.Error("a held existence-check slot blocked a directory listing; the guards are shared")
+	}
+
+	gitMsg, err := ipc.NewMessage(ipc.MsgGitReposReq, ipc.GitReposReqPayload{CWD: "/a"})
+	if err != nil {
+		t.Fatalf("build message: %v", err)
+	}
+	if _, ok := d.beginGitDiscover(gitMsg); !ok {
+		t.Error("a held existence-check slot blocked git discovery; the guards are shared")
+	}
+}
+
+// TestBeginDirsCheck_RejectsWhileHeld pins the rejection path, which is
+// otherwise unreachable from a test because ipc.Conn cannot be constructed
+// outside its package.
+func TestBeginDirsCheck_RejectsWhileHeld(t *testing.T) {
+	d := &Daemon{}
+	if _, ok := d.beginDirsCheck(); !ok {
+		t.Fatal("first claim refused")
+	}
+	rejection, ok := d.beginDirsCheck()
+	if ok {
+		t.Fatal("second claim succeeded while the slot was held")
+	}
+	if rejection.Error == "" {
+		t.Error("rejection carries no Error — the client cannot tell it from an empty answer, " +
+			"and an empty answer means 'none of your directories exist'")
+	}
+	if len(rejection.Paths) != 0 {
+		t.Errorf("rejection carries Paths = %v, want none", rejection.Paths)
+	}
+}

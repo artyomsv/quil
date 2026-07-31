@@ -1856,14 +1856,15 @@ func (m Model) handlePluginsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if err := m.pluginRegistry.LoadFromDir(config.PluginsDir()); err != nil {
 			log.Printf("reload plugins: %v", err)
 		}
-		m.pluginRegistry.DetectAvailability()
-		client := m.client
-		m.dialog = dialogNone
-		return m, func() tea.Msg {
-			msg, _ := ipc.NewMessage(ipc.MsgReloadPlugins, nil)
-			client.Send(msg)
-			return nil
+		// Local detection only in local mode — in remote mode this would
+		// discard whatever availability answer the daemon already supplied
+		// with a detection pass over the wrong machine. reloadPluginsThenAskCmd
+		// below re-asks the daemon instead, once its own reload has finished.
+		if !m.RemoteMode() {
+			m.pluginRegistry.DetectAvailability()
 		}
+		m.dialog = dialogNone
+		return m, reloadPluginsThenAskCmd(m.client)
 	}
 
 	return m, nil
@@ -1944,16 +1945,15 @@ func (m Model) handleTOMLEditorKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if err := m.pluginRegistry.LoadFromDir(config.PluginsDir()); err != nil {
 			log.Printf("reload plugins: %v", err)
 		}
-		m.pluginRegistry.DetectAvailability()
+		// Local detection only in local mode — see the identical guard on the
+		// Plugins dialog's Reload/Restore buttons above.
+		if !m.RemoteMode() {
+			m.pluginRegistry.DetectAvailability()
+		}
 		m.tomlEditor = nil
 		m.dialog = dialogPlugins
 		m.dialogCursor = 0
-		client := m.client
-		reloadCmd := func() tea.Msg {
-			msg, _ := ipc.NewMessage(ipc.MsgReloadPlugins, nil)
-			client.Send(msg)
-			return nil
-		}
+		reloadCmd := reloadPluginsThenAskCmd(m.client)
 		if cmd != nil {
 			return m, tea.Batch(reloadCmd, cmd)
 		}

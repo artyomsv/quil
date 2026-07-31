@@ -47,9 +47,8 @@ func TestRequestPluginList_LocalModeAsksNothing(t *testing.T) {
 	m := pluginClientModel(t) // no SetRemoteDest
 	if cmd := m.requestPluginList(); cmd != nil {
 		runCmd(cmd)
-		if sent := m.client.(*fakeSender).sent; len(sent) != 0 {
-			t.Errorf("sent %d messages in local mode, want 0", len(sent))
-		}
+		t.Fatalf("local mode returned a command; %d messages sent, want no command at all",
+			len(m.client.(*fakeSender).sent))
 	}
 }
 
@@ -64,5 +63,76 @@ func TestRequestPluginList_RemoteModeAsks(t *testing.T) {
 	sent := m.client.(*fakeSender).sent
 	if len(sent) != 1 || sent[0].Type != ipc.MsgPluginListReq {
 		t.Errorf("sent = %+v, want one %s", sent, ipc.MsgPluginListReq)
+	}
+}
+
+// A nil registry must not panic: applyPluginList can run before NewModel has
+// wired one up, or in a test harness that never sets it.
+func TestApplyPluginList_NilRegistryDoesNotPanic(t *testing.T) {
+	m := &Model{client: &fakeSender{}} // pluginRegistry left nil
+	cmd := m.applyPluginList(ipc.PluginListRespPayload{
+		Plugins: []ipc.PluginInfo{{Name: "terminal", Available: true}},
+	})
+	if cmd != nil {
+		t.Errorf("cmd = %v, want nil", cmd)
+	}
+}
+
+// attachToDaemon is requestPluginList's only call site; nothing else fails
+// if that batching gets dropped, so pin it directly rather than relying on
+// requestPluginList's own tests to stand in for it.
+func TestAttachToDaemon_RemoteModeAlsoAsksForPluginList(t *testing.T) {
+	m := Model{client: &fakeSender{}, pluginRegistry: plugin.NewRegistry()}
+	m.SetRemoteDest("gpu01")
+
+	cmd := m.attachToDaemon()
+	if cmd == nil {
+		t.Fatal("attachToDaemon returned no command")
+	}
+	runCmd(cmd)
+
+	sent := m.client.(*fakeSender).sent
+	var sawAttach, sawPluginList bool
+	for _, msg := range sent {
+		switch msg.Type {
+		case ipc.MsgAttach:
+			sawAttach = true
+		case ipc.MsgPluginListReq:
+			sawPluginList = true
+		}
+	}
+	if !sawAttach {
+		t.Error("attachToDaemon did not send MsgAttach")
+	}
+	if !sawPluginList {
+		t.Error("attachToDaemon did not also ask for the plugin list in remote mode — every .Available consumer would describe the wrong machine until the next reload")
+	}
+}
+
+// The ordering here is a correctness requirement, not a style preference:
+// handleReloadPlugins ending with its own DetectAvailability is the one
+// moment the daemon's registry becomes fresh, so an ask that reaches the
+// daemon before the reload lands reads the PRE-reload state.
+// reloadPluginsThenAskCmd must issue both sends from inside ONE tea.Cmd
+// (never a tea.Batch of two), which this test also pins by calling the
+// returned command directly rather than through runCmd — a tea.Batch would
+// yield a tea.BatchMsg here instead of nil.
+func TestReloadPluginsThenAskCmd_SendsReloadBeforeAskFromOneCommand(t *testing.T) {
+	fake := &fakeSender{}
+	cmd := reloadPluginsThenAskCmd(fake)
+	if cmd == nil {
+		t.Fatal("reloadPluginsThenAskCmd returned no command")
+	}
+	if msg := cmd(); msg != nil {
+		t.Fatalf("cmd() = %v, want nil (a single command, not a tea.Batch)", msg)
+	}
+	if len(fake.sent) != 2 {
+		t.Fatalf("sent %d messages, want 2", len(fake.sent))
+	}
+	if fake.sent[0].Type != ipc.MsgReloadPlugins {
+		t.Errorf("sent[0].Type = %q, want %q — reload must be sent first", fake.sent[0].Type, ipc.MsgReloadPlugins)
+	}
+	if fake.sent[1].Type != ipc.MsgPluginListReq {
+		t.Errorf("sent[1].Type = %q, want %q", fake.sent[1].Type, ipc.MsgPluginListReq)
 	}
 }

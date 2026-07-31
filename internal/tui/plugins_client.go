@@ -67,3 +67,37 @@ func (m *Model) applyPluginList(resp ipc.PluginListRespPayload) tea.Cmd {
 	m.pluginRegistry.SetAvailability(avail)
 	return nil
 }
+
+// reloadPluginsThenAskCmd sends MsgReloadPlugins and MsgPluginListReq from a
+// SINGLE tea.Cmd, reload first.
+//
+// This must never be split into tea.Batch(reloadCmd, askCmd): batched
+// commands run on separate goroutines with no ordering guarantee between
+// them, so the ask could reach the daemon before the reload does and read
+// the daemon's PRE-reload registry — handleReloadPlugins ending with its own
+// DetectAvailability is the one moment the daemon's cached answer becomes
+// fresh, and that is exactly the moment a raced ask would miss.
+// internal/ipc/server.go dispatches one connection's messages sequentially
+// on a single goroutine, so two sends issued in order from inside ONE
+// command are handled in that same order; two sends from two independently
+// scheduled commands are not.
+//
+// Used by both places the Plugins dialog reloads: the Reload/Restore
+// buttons and a TOML editor save. Unconditional (no RemoteMode guard around
+// the ask): the daemon's post-reload registry is exactly as fresh as
+// whatever the TUI would compute locally, so asking after a reload is
+// harmless in local mode too, and keeping the two sites' commands identical
+// beats special-casing one of them.
+func reloadPluginsThenAskCmd(client tuiClient) tea.Cmd {
+	return func() tea.Msg {
+		msg, _ := ipc.NewMessage(ipc.MsgReloadPlugins, nil)
+		client.Send(msg)
+		req, err := ipc.NewMessage(ipc.MsgPluginListReq, ipc.PluginListReqPayload{})
+		if err != nil {
+			log.Printf("plugin list: encode: %v", err)
+			return nil
+		}
+		client.Send(req)
+		return nil
+	}
+}

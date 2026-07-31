@@ -167,7 +167,14 @@ func (m Model) saveMigrationAndAdvance() (tea.Model, tea.Cmd) {
 	if err := m.pluginRegistry.LoadFromDir(config.PluginsDir()); err != nil {
 		log.Printf("migration: reload plugins: %v", err)
 	}
-	m.pluginRegistry.DetectAvailability()
+	// Local detection only in local mode — see the identical guard in
+	// dialog.go's Plugins dialog. This dialog resolves after the first
+	// attach, so a remote session has already adopted the daemon's answer by
+	// the time this runs; a local DetectAvailability pass here would discard
+	// it with a detection pass over the wrong machine.
+	if !m.RemoteMode() {
+		m.pluginRegistry.DetectAvailability()
+	}
 	m.migrationLeft = nil
 	m.migrationRight = nil
 	m.migrationPlugins = nil

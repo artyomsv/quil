@@ -260,8 +260,9 @@ See the full [plugin reference](plugin-reference.md) for every field.
   as a regular pane — a Kubernetes cluster TUI. Unlike lazygit, k9s is
   cluster-scoped rather than directory-scoped, so there is no working-directory
   prompt. The setup dialog instead offers a **kube-context picker**: "Default
-  context" (your kubeconfig current-context) plus the contexts found in
-  `KUBECONFIG` / `~/.kube/config`, and pins the pane to the chosen one via
+  context" (the kubeconfig's current-context) plus the contexts found in
+  `KUBECONFIG` / `~/.kube/config` **on the machine the daemon runs on**, and
+  pins the pane to the chosen one via
   `--context`. When `k9s` is not on `PATH` the entry is shown greyed with a
   link to its homepage (rather than hidden), so it stays discoverable.
   Cross-platform (Windows, macOS, Linux).
@@ -388,7 +389,7 @@ via `[update]` in `config.toml`; About (F1) has a manual "Update now".
 
 ### Remote daemon over SSH
 
-> **BETA.** Phases 1, 2, and most of 3 of [Remote Daemon Attach](roadmap/remote-daemon.md). Usable for real work, with the limits at the end of this section — chiefly that kube contexts and plugin availability are still decided from your local machine.
+> **BETA.** Phases 1, 2, and most of 3 of [Remote Daemon Attach](roadmap/remote-daemon.md). Usable for real work, with the limits at the end of this section — chiefly that plugin *definitions* still come from your local machine, and that `quil status` and the update controls are blocked in remote mode rather than targeting the wrong host.
 
 `quil --remote gpu01` attaches the TUI to a daemon running on another machine. The panes, tabs, and AI sessions live on that host and keep running there when you close the laptop — the TUI is only a viewer.
 
@@ -500,9 +501,8 @@ dialogs to the server. These are known and scoped, not bugs:
 
 | Limit | Effect |
 |---|---|
-| Kube contexts read the **local** kubeconfig | A `k9s` pane on a remote host is offered *your* machine's contexts. Leave it on "Default context" and let the server's own kubeconfig apply. |
-| Plugin availability detected locally | `Ctrl+N` greys out plugins based on what *your* machine has installed, not the server's. |
-| Recent locations are empty in remote mode | The recent-directories list is filtered by a local existence check, so server paths are silently dropped and the list looks unused rather than broken. Use the browser or paste a path. |
+| Plugin availability can be stale on the server | `Ctrl+N` now greys out what the *server* lacks, but the daemon checks which tools are installed at startup and on plugin reload only — and it is built to run for weeks. Install something on the server mid-session and it stays greyed until the daemon restarts. |
+| Plugin *definitions* still come from your machine | Only availability crosses the link. A plugin defined on the server but not locally cannot be offered at all, and the F1 → Plugins editor reads and writes your own `~/.quil/plugins/`. |
 | `quil status` refuses under `--remote` | It would report on the local daemon. Use `ssh <host> quil status`. |
 | Update controls hidden in remote mode | The banner describes the remote daemon while every apply path writes to local disk, so it is suppressed rather than offered wrongly. |
 | Clipboard image paste is local-only | The PNG is written locally and a local path is typed into a remote pane, where it does not resolve. |

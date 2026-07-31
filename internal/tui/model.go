@@ -284,7 +284,7 @@ type Model struct {
 	recentScan         recentScanState        // in-flight recent-directory existence check (zero value = none)
 	kubeTruncated      bool                   // the daemon capped this listing — what is shown is not all there is
 	lastSelectedCWD    string                 // remembers previous CWD selection across pane creations
-	recentCWDs         []string               // last N committed CWDs (persisted, recent-cwds.json)
+	recentCWDs         []string               // last N committed CWDs (persisted; scoped per remote host — see config.RecentCWDsPath)
 	recentCandidates   []string               // recent CWDs offered by the setup dialog; nil = not in recent-pick mode
 	selectedCWD        string                 // CWD chosen in dialogCreatePaneSetup (empty = daemon default)
 	cwdInputError      string                 // validation error shown under CWD input (empty = ok)

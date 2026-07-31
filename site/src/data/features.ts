@@ -326,11 +326,11 @@ export const features: Feature[] = [
     icon: "layers",
     title: "k9s for Kubernetes",
     blurb:
-      "Open k9s as a pane (Ctrl+N → Tools → k9s) to drive your Kubernetes cluster, with a context picker sourced from your kubeconfig.",
+      "Open k9s as a pane (Ctrl+N → Tools → k9s) to drive your Kubernetes cluster, with a context picker sourced from the kubeconfig on the machine the daemon runs on.",
     category: "extensibility",
     detail: [
       "k9s opens as an ordinary pane (not an overlay — it's a long-lived monitoring view you can split alongside your other panes).",
-      "The setup dialog lists the contexts from your KUBECONFIG / ~/.kube/config (current one marked) and pins the pane to your choice via --context; \"Default context\" uses the kubeconfig's current-context.",
+      "The setup dialog lists the contexts from KUBECONFIG / ~/.kube/config on the machine the daemon runs on (current one marked) and pins the pane to your choice via --context; \"Default context\" uses that kubeconfig's current-context. In a remote session those are the server's clusters, not your laptop's.",
       "A read-only toggle (--readonly) lets you browse a cluster with all mutating commands disabled, and a start-on-Pods toggle jumps straight to the pods view.",
       "Cross-platform (Windows, macOS, Linux). Offered only when the k9s binary is on PATH — otherwise it shows greyed in Ctrl+N with a link to install it. Re-runs and reconnects on daemon restart.",
     ],
@@ -456,7 +456,8 @@ export const features: Feature[] = [
       "A dropped link is a pause, not an ending. Close the lid, lose wifi, switch networks — an amber bar names the host, counts the attempts, and shows what ssh actually said, while retries back off from half a second to at most thirty and never stop. When the host answers again the panes come back with their contents intact, because nothing ever stopped running.",
       "Keystrokes are dropped while the link is down rather than queued: a key typed at a dead connection would otherwise arrive minutes later in a live agent session, answering a question that had already moved on. ctrl+q stays live throughout, for a host that is not coming back.",
       "Dialogs that browse a filesystem read the server's disk, not yours. The working-directory picker, `~`, relative paths, drive and root listings, and git-repository discovery all ask the daemon — before that, `Alt+G` could report no repository in a directory where the agent in that very pane answered `git status` with the branch name. Names and paths coming back from a host you may not control are stripped of terminal escapes and of the invisible characters that reverse text direction, so a folder name cannot scramble the dialog or read as something other than what it is.",
-      "Beta limits: kube contexts and plugin availability are still decided from your local machine, and the remote must be Linux or macOS — a running Windows executable cannot be replaced in place, which makes the upgrade half of provisioning impossible there.",
+      "Kube contexts, plugin availability and the recent-directories list follow the same rule: they describe the server. The recent list is kept per host, and whether a remembered directory still exists is asked of the daemon — checking it locally dropped every server path, so the list rendered empty, which is indistinguishable from a feature nobody had used.",
+      "Beta limits: plugin definitions still come from your local machine, the daemon checks which tools are installed only at startup and on plugin reload (so a tool installed on the server mid-session stays greyed until then), and the remote must be Linux or macOS — a running Windows executable cannot be replaced in place, which makes the upgrade half of provisioning impossible there.",
     ],
   },
 

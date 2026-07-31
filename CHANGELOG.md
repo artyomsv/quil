@@ -8,6 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **The rest of the pane setup dialog now describes the remote machine.** The
+  kube-context picker lists the contexts from the **daemon's** kubeconfig rather
+  than your laptop's, so a `k9s` pane no longer launches with a `--context`
+  naming a cluster the server may not have. `Ctrl+N` greys out plugins based on
+  what is installed on the **server** — a tool present only there used to be
+  hidden, and one present only locally was offered and then quietly opened as a
+  plain shell. The recent-directories quick pick keeps a separate list per
+  remote host and checks those paths against the daemon's disk; it previously
+  rendered empty in remote mode, because a local existence check silently
+  dropped every server path and an empty list looks exactly like a feature you
+  have never used.
+- **A remote daemon is no longer told your laptop's working directory** as the
+  place to spawn new panes. It validated that path and fell back when it did not
+  exist on the server, so this was safe — but only by coincidence, and a path
+  that happens to exist on both machines is where the coincidence stops.
 - **Choosing a folder in a remote session now shows the remote machine's
   files.** Every dialog that looks at a filesystem — the directory browser when
   you create a pane, and `Alt+G` for lazygit — was reading the disk of the

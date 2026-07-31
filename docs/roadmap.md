@@ -306,17 +306,23 @@ answered `git status` with the branch name. Moving those strings onto the wire
 also moved a trust boundary, so daemon-supplied names, paths and errors are
 stripped of control sequences and bidi overrides at render.
 
+Kube-context discovery, plugin availability and the recent-directories quick
+pick followed. The recent list is now kept per remote host, and whether a
+remembered directory still exists is asked of the daemon — a local check
+dropped every server path, so the list rendered silently empty, which is
+indistinguishable from a feature nobody had used. A remote daemon is also no
+longer told the laptop's working directory as the place to spawn new panes.
+
 **Known limits — see the [PRD](roadmap/remote-daemon.md#known-limits) for the full table:**
-- Kube-context discovery reads the **local** kubeconfig — *Phase 3 (RD-022)*
-- Plugin availability is detected locally, so `Ctrl+N` greys out the wrong set — *Phase 3 (RD-023)*
-- Recent locations render silently empty in remote mode, because a local existence check drops every server path — *Phase 3 (RD-024)*
+- Plugin availability comes from the server now, but the daemon detects installed tools only at startup and on plugin reload, so a tool installed mid-session stays greyed until one of those happens — *Phase 3 (RD-023, partial)*
+- Plugin *definitions* are still read from the local machine, so a plugin the server defines and your machine does not cannot be offered — *unassigned*
 - `quil status` and the update controls are blocked rather than silently targeting the wrong host — *Phase 3 (RD-026/RD-027, both now decided: status gains remote support, update controls target the remote)*
 - Six of eight reconnect manual checks are outstanding, chiefly reconnecting a pane whose plugin keeps no ghost buffer — *Phase 2 close-out*
 
-**Planned:** the rest of Phase 3 (kube + plugin-registry RPCs, per-target recent
-locations, `quil status` and update controls over the transport) → Phase 4 mTLS
-transport, which the dialer seam already anticipates and which is the
-prerequisite for anything web-facing (M18 #18–19).
+**Planned:** the rest of Phase 3 (`quil status` and update controls over the
+transport, plugin definitions served by the daemon) → Phase 4 mTLS transport,
+which the dialer seam already anticipates and which is the prerequisite for
+anything web-facing (M18 #18–19).
 
 ### M5: Polish
 > Production-quality UX, plugin refinements, observability, encrypted tokens.

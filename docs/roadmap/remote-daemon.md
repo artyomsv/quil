@@ -3,10 +3,12 @@
 > **Status: Phases 1 and 2 shipped, Phase 3 partly shipped. BETA.** Usable for
 > real work with the limits below. Phase 2's reconnect shipped in v1.45.0 and was
 > hardened in v1.45.1; it is partially verified against a real link — see the
-> manual-check table. Phase 3 has landed its filesystem half (RD-020, RD-021,
-> RD-028): the working-directory browser and git-repository discovery read the
-> daemon's disk. Kube contexts, plugin availability, `quil status` and the update
-> controls are still local. Phase 4 is planned, not built.
+> manual-check table. Phase 3 has landed every picker that reads a filesystem or
+> probes a binary (RD-020…RD-025, RD-028): the working-directory browser, git
+> repository discovery, kube contexts, plugin availability and the recent-
+> directories list all describe the daemon's machine. `quil status` and the
+> update controls are still refused rather than retargeted. Phase 4 is planned,
+> not built.
 
 Attach a local Quil TUI to a daemon running on another machine. Panes, tabs and
 AI sessions live on the remote host and keep running there when the laptop
@@ -130,9 +132,8 @@ These are real and current. None are bugs to be reported; all are scoped work.
 | Limit | Effect | Fixed in |
 |---|---|---|
 | **Reconnect is only partly verified against a real link** | A dropped link shows a banner and redials with backoff (Phase 2, v1.45.0). Two of eight manual checks have been run on a real ssh link; the rest still rest on unit tests against a fake dialer. The highest-value one — reconnecting a pane whose plugin has `ghost_buffer = false` — is outstanding, and is exactly the case the two passing checks could not have caught. | Phase 2 manual checks |
-| **Kube-context discovery reads the *local* disk** | `discover = "kube"` parses the kubeconfig on the machine running the TUI, so a remote pane is offered your laptop's contexts. The working-directory picker and git-repository discovery were fixed in RD-020/RD-021 and now read the daemon's filesystem; the Claude session list was always daemon-side. | RD-022 |
-| **Recent locations are empty in remote mode** | The recent-directories pick list is filtered by a local `os.Stat`, so every server path is silently dropped and the list looks like it was never used. No error is shown, because an empty list is indistinguishable from an unused feature. | RD-024 |
-| **Plugin availability is decided locally** | `Ctrl+N` greys out a plugin based on whether the binary exists on *your* machine, not the server's. A tool installed only on the remote is shown unavailable, and vice versa. | Phase 3 |
+| **Plugin availability is a daemon-lifetime cache** | `Ctrl+N` now greys out what the *server* lacks (RD-023). But the daemon runs `DetectAvailability` at startup and on plugin reload only, and is designed to run for weeks — so a tool installed on the server mid-session stays greyed until the daemon restarts or plugins are reloaded. Local sessions deliberately keep their own detection, which is fresher and describes the same machine. | RD-029 |
+| **Plugin *definitions* are still local** | Only availability crosses the wire. A plugin the server defines and the client does not cannot be offered at all, and the F1 → Plugins editor reads and writes the *client's* `PluginsDir()` before telling the remote daemon to reload from its own — so editing plugins over a remote link edits the wrong machine's files. | RD-035 |
 | **`quil status` refuses under `--remote`** | It reports on the local daemon, so it is blocked rather than silently wrong. Use `ssh <host> quil status`. | Phase 3 |
 | **Update controls are hidden in remote mode** | The update banner describes the *remote* daemon's staged version while every apply path writes to *local* disk. Suppressed rather than offered wrongly. | Phase 3 |
 | **Clipboard image paste is local-only** | The DIB→PNG proxy writes the file to the local `~/.quil/paste/` and types a local path into a remote pane, where it does not resolve. | Phase 3 |
@@ -257,13 +258,20 @@ Two consequences worth carrying into the rest of the phase:
 
 **Remaining.**
 
-- Kube-context discovery RPC (RD-022).
-- Plugin registry RPC with server-side `DetectAvailability`, so `Ctrl+N` greys
-  out what the *server* lacks (RD-023).
-- Per-target recent locations (RD-024) and an empty `AttachPayload.CWD` in
-  remote mode (RD-025).
 - `quil status` over the transport rather than refused (RD-026, decided).
 - Update controls targeted at the remote daemon (RD-027, decided).
+- Re-detect plugin availability on request instead of serving a daemon-lifetime
+  cache (RD-029) — blocked on removing `Registry.Get`'s pointer escape first.
+- Plugin *definitions* served by the daemon, and an F1 → Plugins editor that
+  points at the machine that will load them (RD-035).
+- Palette CWD abbreviation against the local home (RD-036, display-only).
+
+**Landed since.** RD-022 (kube contexts, own `kubeDiscovering` slot, names and
+namespaces sanitized at render, and scanning/empty/failed rendered apart so an
+in-flight scan no longer reads as "no contexts"), RD-023 (plugin availability,
+remote-mode only — see RD-029 for why local sessions keep their own detection),
+RD-024 (per-host recent list *and* a daemon-side existence check; either alone
+leaves the list wrong remotely) and RD-025 (empty `AttachPayload.CWD`).
 
 ## Phase 4 — mTLS transport (planned, no date)
 
@@ -517,13 +525,16 @@ Goal: every surface that reads a filesystem reads the *server's*.
 |---|---|---|---|
 | RD-020 | Directory-listing RPC — the root fix; every other picker keys off the CWD it returns | RD-004 | **done** (browser reads the daemon; roots, ~, Abs and joins all server-side) |
 | RD-021 | Git repo discovery RPC | RD-004 | **done, confirmed on a real link** (Alt+G *and* the setup-dialog pick list, both through `requestGitRepos`) |
-| RD-022 | Kube context discovery RPC | RD-004 | todo |
-| RD-023 | Plugin registry RPC with server-side `DetectAvailability` | — | todo |
-| RD-024 | Per-target `recent-cwds.json` | RD-020 | todo |
-| RD-025 | Empty `AttachPayload.CWD` in remote mode | RD-020 | todo |
+| RD-022 | Kube context discovery RPC | RD-004 | **done** (own `kubeDiscovering` slot; contexts sanitized at render; scanning/empty/failed rendered apart) |
+| RD-023 | Plugin registry RPC with server-side `DetectAvailability` | — | **done, remote-mode only** (see RD-029 for the staleness residual) |
+| RD-024 | Per-target `recent-cwds.json` | RD-020 | **done** (per-host file *and* a daemon-side existence check — either alone leaves the list wrong remotely) |
+| RD-025 | Empty `AttachPayload.CWD` in remote mode | RD-020 | **done** |
 | RD-026 | `quil status` over the transport, or documented local-only | — | todo |
 | RD-027 | Update controls targeted at the remote daemon, or explicitly labelled | — | todo |
 | RD-028 | Async setup-dialog refactor without regressing pinned-height invariants | RD-020 | **done** (async browser; height invariant held, pinned-height tests untouched) |
+| RD-029 | Re-detect plugin availability on request instead of serving a daemon-lifetime cache | RD-023 | todo — **blocked on removing `Registry.Get`'s pointer escape.** `DetectAvailability` holds the write lock for the whole PATH walk *and* writes `p.Command.Cmd`, while `Get` hands out a raw `*PanePlugin` whose fields every caller reads outside any lock. That race is latent today because detection runs twice in a daemon's life; moving it onto every `Ctrl+N` would make it reachable |
+| RD-035 | Serve plugin *definitions* from the daemon, and point the F1 → Plugins editor at the machine that will load them | — | todo |
+| RD-036 | `buildPaletteCommands` abbreviates pane CWDs against the *local* `os.UserHomeDir()`, so a server path is shortened against the laptop's home wherever the prefixes coincide | — | todo (display-only) |
 
 **Correction to the limits table above.** The Claude session *listing* is
 already remote-correct — `handleClaudeSessionsReq` runs daemon-side and scans

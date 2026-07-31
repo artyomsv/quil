@@ -127,6 +127,17 @@ type Daemon struct {
 	// back, and one guard would make each fail whenever it followed the other.
 	kubeDiscovering atomic.Bool
 
+	// dirsChecking is the single-flight guard for the recent-locations
+	// existence check (MsgDirsExistReq). Its own slot rather than sharing
+	// browseScanning, and the reason is timing rather than tidiness: that check
+	// hands over to the directory browser when it gives up, the client gives up
+	// after 8 s, and this slot is held for as long as the syscall really runs —
+	// up to browseTimeout (10 s) when a stat parks on a dead mount. One shared
+	// guard would make the handover's browse requests rejected by the very
+	// request that just timed out, dead-ending the dialog in exactly the case
+	// the bound exists for.
+	dirsChecking atomic.Bool
+
 	// resumeClaimMu serializes the claim of a Claude session by a new pane.
 	// The occupancy test and the write that acts on it must be one atomic
 	// step: handleCreatePane runs on the requesting conn's dispatch
@@ -877,6 +888,8 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		d.handleClaudeSessionsReq(conn, msg)
 	case ipc.MsgBrowseDirReq:
 		d.handleBrowseDirReq(conn, msg)
+	case ipc.MsgDirsExistReq:
+		d.handleDirsExistReq(conn, msg)
 	case ipc.MsgGitReposReq:
 		d.handleGitReposReq(conn, msg)
 	case ipc.MsgKubeCtxReq:

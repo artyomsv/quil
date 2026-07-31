@@ -113,6 +113,14 @@ const (
 	MsgGitReposReq  = "git_repos_req"
 	MsgGitReposResp = "git_repos_resp"
 
+	// Recent-directory existence check (pane setup dialog's quick pick). The
+	// list was filtered with a local os.Stat, so against a remote host every
+	// server path failed the test and the pick list rendered silently empty —
+	// indistinguishable from a feature that had never been used, because
+	// structurally nothing had failed.
+	MsgDirsExistReq  = "dirs_exist_req"
+	MsgDirsExistResp = "dirs_exist_resp"
+
 	// Auto-update (TUI ⇄ daemon)
 	MsgStageUpdateReq  = "stage_update_req"  // TUI → daemon (empty payload)
 	MsgStageUpdateResp = "stage_update_resp" // daemon → TUI (unicast)
@@ -619,6 +627,29 @@ type BrowseDirRespPayload struct {
 	Roots     []string      `json:"roots,omitempty"`
 	Truncated bool          `json:"truncated,omitempty"`
 	Error     string        `json:"error,omitempty"`
+}
+
+// DirsExistReqPayload asks the daemon which of Paths still resolve to
+// directories on ITS filesystem.
+type DirsExistReqPayload struct {
+	Paths []string `json:"paths"`
+}
+
+// DirsExistRespPayload carries the surviving directories.
+//
+// Paths is the subset of the request that resolved to a directory, in the
+// request's order. It is deliberately NOT an echo of the request, so it cannot
+// serve as a staleness key the way BrowseDirRespPayload.Path does — correlation
+// is by the per-request generation in Message.ID instead, because a path LIST is
+// a poor key: two requests differing only in order would compare equal under any
+// cheap comparison, and comparing them properly costs more than the generation.
+//
+// An empty Paths with an empty Error is a real answer — "none of these exist any
+// more" — and must stay distinguishable from a failure, because only one of the
+// two justifies telling the user their remembered directories are gone.
+type DirsExistRespPayload struct {
+	Paths []string `json:"paths,omitempty"`
+	Error string   `json:"error,omitempty"`
 }
 
 // GitReposReqPayload asks the daemon which git repositories are near CWD —

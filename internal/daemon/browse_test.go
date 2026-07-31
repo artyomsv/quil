@@ -1,8 +1,10 @@
 package daemon
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
@@ -742,5 +744,101 @@ func TestBrowseDirResponse_HungLinkStillReturnsWithinTheBudget(t *testing.T) {
 	if elapsed > 10*budget {
 		t.Errorf("took %v against a %v budget — the listing is unbounded and the "+
 			"single-flight slot stays held", elapsed, budget)
+	}
+}
+
+// TestDirsExistResponse_KeepsDirectoriesInRequestOrder pins the whole point of
+// the RPC: the surviving entries, in the order the client asked, with files and
+// deleted paths dropped.
+func TestDirsExistResponse_KeepsDirectoriesInRequestOrder(t *testing.T) {
+	waitForFSCallsDrained(t)
+
+	tmp := t.TempDir()
+	alpha := filepath.Join(tmp, "alpha")
+	bravo := filepath.Join(tmp, "bravo")
+	for _, d := range []string{alpha, bravo} {
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+	}
+	file := filepath.Join(tmp, "plain.txt")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	gone := filepath.Join(tmp, "deleted")
+
+	out := dirsExistResponse(ipc.DirsExistReqPayload{Paths: []string{bravo, gone, file, alpha}})
+
+	want := []string{bravo, alpha}
+	if !reflect.DeepEqual(out.Paths, want) {
+		t.Errorf("Paths = %v, want %v (request order, non-directories dropped)", out.Paths, want)
+	}
+	if out.Error != "" {
+		t.Errorf("Error = %q, want none — nothing failed", out.Error)
+	}
+}
+
+// TestDirsExistResponse_EmptyResultIsNotAnError keeps "none of these exist any
+// more" distinguishable from a failure. Only one of the two justifies telling
+// the user their remembered directories are gone.
+func TestDirsExistResponse_EmptyResultIsNotAnError(t *testing.T) {
+	waitForFSCallsDrained(t)
+
+	out := dirsExistResponse(ipc.DirsExistReqPayload{
+		Paths: []string{filepath.Join(t.TempDir(), "never-existed")},
+	})
+	if out.Error != "" {
+		t.Errorf("Error = %q, want none — an absent directory is a finding, not a failure", out.Error)
+	}
+	if len(out.Paths) != 0 {
+		t.Errorf("Paths = %v, want empty", out.Paths)
+	}
+}
+
+// TestDirsExistResponse_RefusesPastTheCap bounds how many blocking stats one
+// request can start. recentCWDMax is 5, so this is a hostile-client backstop.
+func TestDirsExistResponse_RefusesPastTheCap(t *testing.T) {
+	paths := make([]string, maxDirsExistPaths+1)
+	for i := range paths {
+		paths[i] = fmt.Sprintf("/nope-%d", i)
+	}
+	out := dirsExistResponse(ipc.DirsExistReqPayload{Paths: paths})
+	if out.Error == "" {
+		t.Error("Error = empty — an oversized request was accepted, so one client can start " +
+			"an unbounded number of blocking stats")
+	}
+	if len(out.Paths) != 0 {
+		t.Errorf("Paths = %v, want empty on refusal", out.Paths)
+	}
+}
+
+// TestDirsExistResponse_OneHungPathCostsOneStat is the refutation test for the
+// SHARED deadline. Mirrors TestClassifyEntries_OneHungLinkCostsOneGoroutine: a
+// budget per path would park one thread per entry on a dead mount, and a daemon
+// runs for weeks.
+func TestDirsExistResponse_OneHungPathCostsOneStat(t *testing.T) {
+	waitForFSCallsDrained(t)
+
+	block := make(chan struct{})
+	var calls atomic.Int64
+	origStat, origTimeout := statPath, browseTimeout
+	statPath = func(string) (os.FileInfo, error) {
+		calls.Add(1)
+		<-block
+		return nil, os.ErrNotExist
+	}
+	browseTimeout = 50 * time.Millisecond
+	t.Cleanup(func() {
+		restoreSeam(t, block, func() { statPath, browseTimeout = origStat, origTimeout })
+	})
+
+	out := dirsExistResponse(ipc.DirsExistReqPayload{Paths: []string{"/a", "/b", "/c", "/d"}})
+
+	if n := calls.Load(); n != 1 {
+		t.Errorf("stat calls = %d, want 1 — the first path's timeout must spend the shared "+
+			"budget, or a dead mount costs one parked thread per entry", n)
+	}
+	if len(out.Paths) != 0 {
+		t.Errorf("Paths = %v, want empty — a path whose stat never answered is not a directory", out.Paths)
 	}
 }

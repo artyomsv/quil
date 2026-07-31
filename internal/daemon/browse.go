@@ -393,3 +393,68 @@ var (
 	statPath    = os.Stat
 	readDirPath = os.ReadDir
 )
+
+// maxDirsExistPaths bounds one existence request.
+//
+// recentCWDMax is 5, so this is a hostile-client backstop rather than a product
+// limit: what matters is that a single request cannot start an unbounded number
+// of blocking stats.
+const maxDirsExistPaths = 32
+
+// handleDirsExistReq answers "which of these paths are still directories".
+//
+// The recent-locations pick list used to answer this in the TUI with os.Stat,
+// which reads the machine drawing the UI. Against a remote daemon every server
+// path failed that test and the list rendered silently empty — indistinguishable
+// from a feature that had never been used, because structurally nothing failed.
+//
+// Its OWN single-flight slot, never browseScanning's. The two look like the same
+// question and are not, because of TIMING: this check hands over to the directory
+// browser when it gives up, the client gives up after recentScanTimeout (8 s),
+// and the daemon holds its slot for as long as the syscall really runs — up to
+// browseTimeout (10 s) when a stat parks. Sharing would make that handover's
+// browse requests rejected by the very request that just timed out, dead-ending
+// the dialog in exactly the dead-mount case the bound exists for. Same reasoning
+// that gave gitDiscovering its own slot.
+func (d *Daemon) handleDirsExistReq(conn *ipc.Conn, msg *ipc.Message) {
+	var req ipc.DirsExistReqPayload
+	if err := msg.DecodePayload(&req); err != nil {
+		log.Printf("handleDirsExistReq: decode: %v", err)
+	}
+	if !d.dirsChecking.CompareAndSwap(false, true) {
+		respondTo(conn, msg.ID, ipc.MsgDirsExistResp, ipc.DirsExistRespPayload{
+			Error: "another existence check is already running",
+		})
+		return
+	}
+	go func() {
+		defer d.dirsChecking.Store(false)
+		respondTo(conn, msg.ID, ipc.MsgDirsExistResp, dirsExistResponse(req))
+	}()
+}
+
+// dirsExistResponse is the pure half.
+//
+// ONE deadline is shared by every stat, exactly as classifyEntries shares one
+// with the directory read that precedes it. That makes the timeout
+// self-propagating: a stat that times out has by definition spent the budget, so
+// every later path sees a non-positive one and is dropped without a syscall —
+// capping a list of dead mounts at ONE abandoned goroutine rather than one per
+// entry.
+//
+// A path that does not answer is omitted rather than reported as an error. The
+// caller's fallback is the directory browser either way, and an unreachable
+// entry is exactly as unusable as a deleted one.
+func dirsExistResponse(req ipc.DirsExistReqPayload) ipc.DirsExistRespPayload {
+	if len(req.Paths) > maxDirsExistPaths {
+		return ipc.DirsExistRespPayload{Error: "too many paths in one existence check"}
+	}
+	deadline := time.Now().Add(browseTimeout)
+	var out ipc.DirsExistRespPayload
+	for _, p := range req.Paths {
+		if isDir, answered := statIsDirWithin(p, time.Until(deadline)); answered && isDir {
+			out.Paths = append(out.Paths, p)
+		}
+	}
+	return out
+}

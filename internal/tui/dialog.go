@@ -2303,6 +2303,9 @@ func (m *Model) enterSetupOrSplit(p *plugin.PanePlugin) tea.Cmd {
 	m.repoScan = repoScanState{}
 	m.repoCandidates = nil
 	m.recentCandidates = nil
+	// Same reasoning as the repoScan reset above: an existence check still in
+	// flight from the previous plugin must not land in this dialog's pick list.
+	m.recentScan = recentScanState{}
 	m.kubeContexts = nil
 	m.kubeCursor = 0
 	m.kubeScan = kubeScanState{}
@@ -2379,30 +2382,18 @@ func (m *Model) enterSetupOrSplit(p *plugin.PanePlugin) tea.Cmd {
 // point enterSetupOrSplit returns.
 func (m *Model) fallbackToRecentOrBrowser() tea.Cmd {
 	if len(m.recentCWDs) > 0 {
-		// Offer the last-used directories as a quick pick (skipping any that no
-		// longer exist). Falls through to the browser if the filtered list is
-		// empty.
-		m.recentCandidates = existingDirs(m.recentCWDs)
-		if len(m.recentCandidates) > 0 {
-			m.cwdBrowseDir = m.recentCandidates[0]
-			m.cwdBrowseCursor = 0
-			return nil
-		}
+		// Which of the remembered directories still exist is a question about
+		// the DAEMON's disk. Answered here with os.Stat until RD-024, which
+		// reads the machine drawing the UI: against a remote host every server
+		// path failed that test and the pick list rendered silently empty —
+		// indistinguishable from a feature that had never been used, because
+		// structurally nothing had failed.
+		//
+		// The fallback to the browser moves with it, into applyExistingDirs:
+		// whether anything survives is no longer known when this returns.
+		return m.requestExistingDirs(m.recentCWDs)
 	}
 	return m.initSetupBrowser()
-}
-
-// existingDirs filters paths down to those that still resolve to a directory,
-// preserving order. Keeps stale (deleted) entries out of the recent-locations
-// pick list.
-func existingDirs(paths []string) []string {
-	out := make([]string, 0, len(paths))
-	for _, p := range paths {
-		if fi, err := os.Stat(p); err == nil && fi.IsDir() {
-			out = append(out, p)
-		}
-	}
-	return out
 }
 
 // initSetupBrowser seeds the directory browser using the standard pre-fill

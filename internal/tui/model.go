@@ -281,6 +281,7 @@ type Model struct {
 	kubeContexts       []kubediscover.Context // contexts offered by the setup dialog (discover="kube"); nil = none
 	kubeCursor         int                    // row cursor in the kube field: 0 = Default context, 1.. = kubeContexts
 	kubeScan           kubeScanState          // in-flight kube-context request (zero value = none); see kubeScanState.gen
+	recentScan         recentScanState        // in-flight recent-directory existence check (zero value = none)
 	kubeTruncated      bool                   // the daemon capped this listing — what is shown is not all there is
 	lastSelectedCWD    string                 // remembers previous CWD selection across pane creations
 	recentCWDs         []string               // last N committed CWDs (persisted, recent-cwds.json)
@@ -1422,6 +1423,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case kubeScanTimeoutMsg:
 		// Local timer, so deliberately no re-arm.
 		return m, m.applyKubeScanTimeout(msg.gen)
+
+	case recentDirsMsg:
+		// MUST re-arm the listen loop, like every other IPC response branch —
+		// omitting it kills IPC for the session, a bug this package has shipped.
+		cmd := m.applyExistingDirs(msg.Resp, msg.Gen)
+		return m, tea.Batch(cmd, m.listenForMessages())
+
+	case recentScanTimeoutMsg:
+		// Local timer, so deliberately no re-arm.
+		return m, m.applyExistingDirsTimeout(msg.gen)
 
 	case pluginListMsg:
 		// MUST re-arm the listen loop, like every other IPC response branch.
@@ -4149,6 +4160,17 @@ func (m Model) listenForMessages() tea.Cmd {
 			}
 			// Same correlator as MsgGitReposResp above; see kubeScanState.gen.
 			return kubeCtxMsg{Resp: payload, Gen: msg.ID}
+
+		case ipc.MsgDirsExistResp:
+			var payload ipc.DirsExistRespPayload
+			if err := msg.DecodePayload(&payload); err != nil {
+				log.Printf("decode dirs_exist_resp: %v", err)
+				return listenContinueMsg{}
+			}
+			// The echoed ID is the ONLY correlator here — unlike the browse and
+			// git responses there is no content key, because a path list makes a
+			// poor staleness key. See recentScanState.gen.
+			return recentDirsMsg{Resp: payload, Gen: msg.ID}
 
 		case ipc.MsgPluginListResp:
 			var payload ipc.PluginListRespPayload

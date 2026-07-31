@@ -1177,23 +1177,40 @@ func recentPickModel(t *testing.T, candidates []string) Model {
 	}
 }
 
+// TestEnterSetup_RecentPickWhenNoRepos pins the same behaviour it always did —
+// the surviving recent directories become the pick list and the first is
+// committed — but the survivors are now decided by the DAEMON (RD-024), so the
+// answer arrives one round trip later. Deciding it here meant stat-ing the
+// machine drawing the UI, which is the wrong disk whenever the daemon is remote.
 func TestEnterSetup_RecentPickWhenNoRepos(t *testing.T) {
 	dir := t.TempDir()
-	m := &Model{recentCWDs: []string{dir, filepath.Join(dir, "gone")}}
+	fake := &fakeSender{}
+	m := &Model{recentCWDs: []string{dir, filepath.Join(dir, "gone")}, client: fake}
 	p := &plugin.PanePlugin{Name: "ai", Command: plugin.CommandConfig{PromptsCWD: true}}
-	m.enterSetupOrSplit(p)
-	// Only the existing dir survives the os.Stat filter.
+
+	runCmd(m.enterSetupOrSplit(p))
+
+	if m.dialog != dialogCreatePaneSetup {
+		t.Errorf("dialog = %v, want dialogCreatePaneSetup", m.dialog)
+	}
+	if m.recentScan.gen == "" {
+		t.Fatal("no existence check in flight — the recent list was not asked about at all")
+	}
+
+	// The daemon answers with only the directory that still exists.
+	m.applyExistingDirs(ipc.DirsExistRespPayload{Paths: []string{dir}}, m.recentScan.gen)
+
 	if !reflect.DeepEqual(m.recentCandidates, []string{dir}) {
 		t.Errorf("recentCandidates = %v, want [%q]", m.recentCandidates, dir)
 	}
 	if m.cwdBrowseDir != dir {
 		t.Errorf("cwdBrowseDir = %q, want first candidate %q", m.cwdBrowseDir, dir)
 	}
-	if m.dialog != dialogCreatePaneSetup {
-		t.Errorf("dialog = %v, want dialogCreatePaneSetup", m.dialog)
-	}
 }
 
+// TestEnterSetup_RecentAllStaleFallsToBrowser is the same handover as before,
+// now driven by the daemon's answer rather than a local stat: nothing survives,
+// so the browser takes over.
 func TestEnterSetup_RecentAllStaleFallsToBrowser(t *testing.T) {
 	base := t.TempDir()
 	fake := &fakeSender{}
@@ -1202,7 +1219,10 @@ func TestEnterSetup_RecentAllStaleFallsToBrowser(t *testing.T) {
 		client:     fake,
 	}
 	p := &plugin.PanePlugin{Name: "ai", Command: plugin.CommandConfig{PromptsCWD: true}}
+
 	runCmd(m.enterSetupOrSplit(p))
+	runCmd(m.applyExistingDirs(ipc.DirsExistRespPayload{}, m.recentScan.gen))
+
 	if len(m.recentCandidates) != 0 {
 		t.Errorf("recentCandidates = %v, want empty (all stale)", m.recentCandidates)
 	}
@@ -1210,6 +1230,27 @@ func TestEnterSetup_RecentAllStaleFallsToBrowser(t *testing.T) {
 	// request going out at all is what proves the browser took over.
 	if got := browseReqPaths(t, fake); len(got) != 1 || got[0] != "~" {
 		t.Errorf("browse requests = %v, want [~] (directory-browser fallback)", got)
+	}
+}
+
+// TestEnterSetup_RecentCheckFailureStillReachesTheBrowser separates the two
+// outcomes that both end in the browser. A failed check is NOT "none of your
+// directories exist" — reporting it as one would be a wrong answer stated
+// confidently, which is the failure this phase exists to remove.
+func TestEnterSetup_RecentCheckFailureStillReachesTheBrowser(t *testing.T) {
+	base := t.TempDir()
+	fake := &fakeSender{}
+	m := &Model{recentCWDs: []string{filepath.Join(base, "somewhere")}, client: fake}
+	p := &plugin.PanePlugin{Name: "ai", Command: plugin.CommandConfig{PromptsCWD: true}}
+
+	runCmd(m.enterSetupOrSplit(p))
+	runCmd(m.applyExistingDirs(
+		ipc.DirsExistRespPayload{Error: "another existence check is already running"},
+		m.recentScan.gen,
+	))
+
+	if got := browseReqPaths(t, fake); len(got) != 1 || got[0] != "~" {
+		t.Errorf("browse requests = %v, want [~] — a failed check dead-ended the dialog", got)
 	}
 }
 

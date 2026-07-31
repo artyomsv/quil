@@ -24,5 +24,6 @@ func TestMain(m *testing.M) {
 	browseTimeout = 10 * time.Millisecond
 	gitScanTimeout = 10 * time.Millisecond
 	kubeScanTimeout = 10 * time.Millisecond
+	recentScanTimeout = 10 * time.Millisecond
 	os.Exit(m.Run())
 }

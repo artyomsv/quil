@@ -409,6 +409,25 @@ func TestHistoryTimeout(t *testing.T) {
 		}
 	})
 
+	// Esc closes the dialog without resetting m.history, so the in-flight tick
+	// still arrives — and must not mark state the user has navigated away from.
+	t.Run("a tick after the dialog closed is stale", func(t *testing.T) {
+		t.Parallel()
+		closed, _ := base().handleCommandHistoryKey(keyPressFor("esc"))
+		m := closed.(Model)
+		if m.dialog != dialogNone {
+			t.Fatalf("setup: esc left dialog=%v", m.dialog)
+		}
+		if !m.history.loading {
+			t.Fatal("setup: esc is expected to leave history state untouched")
+		}
+		got := m.applyHistoryTimeout("pane-a")
+		if got.history.timedOut || !got.history.loading {
+			t.Fatalf("tick fired after the dialog closed: timedOut=%v loading=%v",
+				got.history.timedOut, got.history.loading)
+		}
+	})
+
 	t.Run("a response that beat the tick wins", func(t *testing.T) {
 		t.Parallel()
 		m := base().applyHistoryList(ipc.PaneHistoryRespPayload{

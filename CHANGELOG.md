@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Pasting into a pane no longer arrives one character at a time.** Text
+  pasted with your terminal's own paste — Ctrl+V, right-click, middle-click,
+  or over a remote desktop — reached the program inside the pane as if you had
+  typed it. Interactive tools such as Claude Code redrew the screen for every
+  character, so a long paste crawled, even though pasting into a plain shell
+  in the same terminal was instant. It now arrives as a single paste, the way
+  it does outside Quil. The same change stops a paste from running itself: a
+  multi-line paste into a shell used to execute every line but the last the
+  moment it landed, and now waits for you to press Enter. Programs that do not
+  understand pastes — a command reading plain input, an older shell over SSH —
+  still receive the text unchanged, so nothing that worked before starts
+  seeing stray characters in its input.
+- **Mouse-wheel scrolling inside tools like lazygit and opencode no longer
+  fails intermittently.** When a program announced its mouse support at
+  exactly the wrong moment — split across two reads of its output — Quil
+  missed the announcement and kept scrolling its own history instead of
+  passing the wheel through to the program. Uncommon, but once it happened the
+  pane never recovered until it was restarted.
+
 ## [1.45.1] - 2026-07-30
 
 ### Added

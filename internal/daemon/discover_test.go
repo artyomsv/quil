@@ -219,3 +219,64 @@ func TestGitReposResponse_HungWalkReportsTimeoutNotEmpty(t *testing.T) {
 		t.Errorf("CWD = %q, want the request echoed even on the timeout path", got.CWD)
 	}
 }
+
+// TestGitDiscover_SlotIsReleasedWhenTheWalkHangs pins that a hung walk does NOT
+// hold the single-flight slot.
+//
+// Raised in review as still-broken after b8a7f0f: the claim was that
+// gitDiscovering is released only when the abandoned worker exits, so one dead
+// mount disables every later scan until the daemon restarts. That is not what
+// the code does, and the distinction is the whole point of the fix — TWO
+// goroutines are involved. The one holding gitDiscovering runs gitReposResponse
+// and returns when discoverWithin hits its deadline; the one parked in the walk
+// holds only a blockingFSCalls slot and owns nothing the dialog depends on.
+//
+// Mirrors handleGitReposReq's structure rather than calling it, because ipc.Conn
+// cannot be constructed outside its own package — the same documented limit that
+// put beginGitDiscover in its own function.
+func TestGitDiscover_SlotIsReleasedWhenTheWalkHangs(t *testing.T) {
+	waitForFSCallsDrained(t)
+
+	block := make(chan struct{})
+	origDiscover, origTimeout := discoverCandidates, gitDiscoverTimeout
+	discoverCandidates = func(context.Context, string) []string {
+		<-block
+		return nil
+	}
+	gitDiscoverTimeout = 100 * time.Millisecond
+	t.Cleanup(func() {
+		restoreSeam(t, block, func() {
+			discoverCandidates, gitDiscoverTimeout = origDiscover, origTimeout
+		})
+	})
+
+	d := &Daemon{}
+	msg, err := ipc.NewMessage(ipc.MsgGitReposReq, ipc.GitReposReqPayload{CWD: "/srv/work"})
+	if err != nil {
+		t.Fatalf("build message: %v", err)
+	}
+	if _, ok := d.beginGitDiscover(msg); !ok {
+		t.Fatal("slot refused while free")
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		// Exactly handleGitReposReq's defer. Registered second, so it runs
+		// before close(done): by the time this test observes done, the slot
+		// release has already happened.
+		defer d.gitDiscovering.Store(false)
+		gitReposResponse(gitReposReq(msg), "")
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the worker never returned; the hung walk is holding the slot")
+	}
+
+	if _, ok := d.beginGitDiscover(msg); !ok {
+		t.Error("the slot is still held after the walk timed out; every later scan " +
+			"would be rejected until the daemon restarts")
+	}
+}

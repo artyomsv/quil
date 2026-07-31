@@ -583,10 +583,14 @@ func (p *PaneModel) ScrollToRelY(relY, innerH int) {
 // restoreSettled reports whether the resuming/preparing restore state should
 // clear: the pane is now showing visible content (after the minimum display
 // time), or the safety cap elapsed. "Visible content" — not merely "first byte
-// received" — is the right signal. claude-code (ghost_buffer=false) emits
-// terminal-setup bytes and a screen clear seconds before the resumed session
-// paints, so gating on the first byte (liveOutputSeen) cleared the indicator
-// while the pane was still blank for 5-15s.
+// received" — is the right signal. claude-code emits terminal-setup bytes and a
+// screen clear seconds before the resumed session paints, so gating on the first
+// byte (liveOutputSeen) cleared the indicator while the pane was still blank for
+// 5-15s.
+//
+// Since claude-code gained ghost_buffer = true this mostly settles immediately
+// for it — a replayed pane is not blank — so the blank-boot gap now belongs to
+// panes with nothing to replay: a fresh one, or one whose buffer was lost.
 func (p *PaneModel) restoreSettled() bool {
 	if time.Since(p.resumeStart) >= restoreSafetyCap {
 		return true

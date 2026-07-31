@@ -178,10 +178,14 @@ func TestPaneView_NoIndicatorOnceContentArrives(t *testing.T) {
 }
 
 // TestPaneView_IndicatorPersistsThroughBootClear is the regression test for the
-// reported bug: claude-code (ghost_buffer=false) emits early bytes and clears
-// the screen ~0.5s in, then spends 5-15s resuming before painting. The indicator
-// must stay visible through that blank boot gap rather than vanishing on the
-// first byte.
+// reported bug: claude-code emits early bytes and clears the screen ~0.5s in,
+// then spends 5-15s resuming before painting. The indicator must stay visible
+// through that blank boot gap rather than vanishing on the first byte.
+//
+// The pane here is driven with no replayed content on purpose. Now that
+// claude-code sets ghost_buffer = true, a restored pane is not blank and settles
+// at once — so the gap this guards belongs to a pane with nothing to replay: a
+// fresh one, or one whose buffer was lost.
 func TestPaneView_IndicatorPersistsThroughBootClear(t *testing.T) {
 	t.Parallel()
 	p := NewPaneModel("p-boot", testRingBufSize)

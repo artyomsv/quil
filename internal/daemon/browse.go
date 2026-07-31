@@ -147,7 +147,14 @@ func browseDirResponse(req ipc.BrowseDirReqPayload, fallback string) ipc.BrowseD
 	if parent := filepath.Dir(out.Resolved); parent != out.Resolved {
 		out.Parent = parent
 	} else {
-		out.Roots = filesystemRoots(deadline)
+		var complete bool
+		out.Roots, complete = listFilesystemRoots(deadline)
+		// Reported separately from Truncated, which describes the ENTRIES. At a
+		// root the two are independent: a sweep can give up on unresponsive
+		// drives while the directory read that follows succeeds completely, and
+		// flagging the entries there would claim the file list is capped when it
+		// is not.
+		out.RootsTruncated = !complete
 	}
 
 	entries, err := readDirWithin(out.Resolved, time.Until(deadline))
@@ -275,7 +282,16 @@ func classifyEntries(dir string, entries []os.DirEntry, deadline time.Time) []ip
 // may have consumed the whole deadline, and a goroutine started only to be
 // abandoned in the same breath is pure cost.
 func statIsDirWithin(path string, d time.Duration) (isDir, answered bool) {
-	if d <= 0 || !claimBlockingFSCall() {
+	return statIsDirWithinLimit(path, d, maxBlockingFSCalls)
+}
+
+// statIsDirWithinLimit is statIsDirWithin with an explicit ceiling on how many
+// blocking calls may already be outstanding before this one is allowed to start.
+//
+// The parameter exists so a LOW-PRIORITY caller can be made unable to take the
+// last permits from a high-priority one — see maxRootProbePermits.
+func statIsDirWithinLimit(path string, d time.Duration, limit int64) (isDir, answered bool) {
+	if d <= 0 || !claimBlockingFSCallUpTo(limit) {
 		return false, false
 	}
 	ch := make(chan bool, 1)
@@ -311,6 +327,14 @@ func statIsDirWithin(path string, d time.Duration) (isDir, answered bool) {
 // denying the feature outright. The channel is buffered so that goroutine can
 // hand off its result and exit rather than blocking on a receiver that has gone.
 func readDirWithin(dir string, d time.Duration) ([]os.DirEntry, error) {
+	if d <= 0 {
+		// Refused without spawning anything, for the same reason
+		// statIsDirWithin refuses: a goroutine started only to be abandoned in
+		// the same breath takes a permit and pins an OS thread for a result no
+		// one is left to read. Reachable because the roots sweep runs FIRST and
+		// can spend the shared deadline before the read that follows it.
+		return nil, fmt.Errorf("listing %s was not attempted — the request budget was already spent", dir)
+	}
 	if !claimBlockingFSCall() {
 		return nil, fmt.Errorf("too many directory listings are stuck on unresponsive paths; "+
 			"listing %s was not attempted", dir)
@@ -363,8 +387,22 @@ const maxBlockingFSCalls = 8
 var blockingFSCalls atomic.Int64
 
 // claimBlockingFSCall reserves a slot, reporting false when the cap is reached.
-func claimBlockingFSCall() bool {
-	if blockingFSCalls.Add(1) > maxBlockingFSCalls {
+func claimBlockingFSCall() bool { return claimBlockingFSCallUpTo(maxBlockingFSCalls) }
+
+// claimBlockingFSCallUpTo reserves a slot only while fewer than limit are
+// already outstanding.
+//
+// A limit below maxBlockingFSCalls leaves the difference as a RESERVE that the
+// caller passing it can never consume. That is what stops a low-priority
+// speculative sweep from spending the permits the request it precedes will need,
+// which per-sweep bounds alone cannot do: bounding each sweep to k abandoned
+// calls still lets ⌈cap/k⌉ successive sweeps drain the pool between them, and
+// nothing resets the counter but the kernel finally answering.
+func claimBlockingFSCallUpTo(limit int64) bool {
+	if limit > maxBlockingFSCalls {
+		limit = maxBlockingFSCalls
+	}
+	if blockingFSCalls.Add(1) > limit {
 		blockingFSCalls.Add(-1)
 		return false
 	}
@@ -393,6 +431,21 @@ var (
 	statPath    = os.Stat
 	readDirPath = os.ReadDir
 )
+
+// listFilesystemRoots is the same kind of seam for the root sweep, and it exists
+// because the propagation of its "complete" answer is otherwise UNTESTABLE on
+// the platform CI runs.
+//
+// filesystemRoots is a build-tagged pair: the Unix half always reports complete,
+// because a machine with one root has nothing to enumerate and nothing to give up
+// on. So on Linux `out.RootsTruncated = !complete` is statically dead — inverting
+// it, or deleting it, passes every test in this repo. The one arm that can report
+// an incomplete list is the Windows one, which the Linux image never compiles.
+//
+// That is exactly the shape of the bug this file has already shipped once: a
+// bound behind //go:build windows that no test could reach. Routing the call
+// through a var lets the mapping be driven from a test on any platform.
+var listFilesystemRoots = filesystemRoots
 
 // maxDirsExistPaths bounds one existence request.
 //

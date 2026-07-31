@@ -2289,6 +2289,7 @@ func (m *Model) enterSetupOrSplit(p *plugin.PanePlugin) tea.Cmd {
 	m.cwdBrowseParent = ""
 	m.cwdBrowseRoots = nil
 	m.cwdBrowseTruncated = false
+	m.cwdBrowseRootsTruncated = false
 	m.browseCandidates = nil
 	// Also drop any in-flight browse from the previous plugin, so its answer
 	// cannot land in this dialog's listing. Safe to zero: no call site ever
@@ -2611,9 +2612,12 @@ func (m *Model) showRootsList() {
 	m.cwdBrowseScroll = 0
 	m.cwdInputError = ""
 	m.browse.err = ""
-	// The root list is the daemon's complete answer — carrying the previous
-	// directory's cap forward would warn about a listing no longer on screen.
-	m.cwdBrowseTruncated = false
+	// Swapped, not cleared. Carrying the previous directory's cap forward would
+	// warn about a listing no longer on screen, but the root list is not
+	// automatically complete either: the daemon abandons the sweep after a
+	// couple of unresponsive drives, and a drive missing for that reason is
+	// indistinguishable from one that was never mapped.
+	m.cwdBrowseTruncated = m.cwdBrowseRootsTruncated
 }
 
 // applyBrowseListing fills the directory browser from an already-resolved

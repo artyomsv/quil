@@ -22,17 +22,6 @@ import "time"
 // wedge the picker for every later listing in the session. sweepRoots bounds
 // both halves of that: each probe individually, and the number of probes the
 // sweep may abandon.
-func filesystemRoots(deadline time.Time) []string {
-	return sweepRoots(driveLetters(), deadline, statIsDirWithin)
-}
-
-// driveLetters is the candidate set: every letter, in order, because a drive
-// map is arbitrary and there is no cheaper way to learn which exist that does
-// not reintroduce the GetLogicalDrives problem described above.
-func driveLetters() []string {
-	out := make([]string, 0, 26)
-	for c := 'A'; c <= 'Z'; c++ {
-		out = append(out, string(c)+`:\`)
-	}
-	return out
+func filesystemRoots(deadline time.Time) (roots []string, complete bool) {
+	return sweepRoots(driveLetters(), deadline, probeRoot)
 }

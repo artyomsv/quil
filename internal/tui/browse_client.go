@@ -144,6 +144,10 @@ func (m *Model) applyBrowseDir(resp ipc.BrowseDirRespPayload, gen string) browse
 	// empty directory: a user who scrolls a huge directory without finding a
 	// folder concludes it is not there.
 	m.cwdBrowseTruncated = resp.Truncated
+	// Same reasoning, for the list the user sees after navigating up. A drive
+	// that stopped answering is exactly a drive whose absence looks like it was
+	// never there.
+	m.cwdBrowseRootsTruncated = resp.RootsTruncated
 
 	m.applyBrowseListing(resp.Resolved, resp.Entries, resp.Parent != "" || len(resp.Roots) > 0, m.browse.select_)
 	return browseFilled

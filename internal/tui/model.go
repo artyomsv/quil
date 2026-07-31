@@ -301,6 +301,10 @@ type Model struct {
 	cwdBrowseParent    string   // parent of cwdBrowseDir; "" when it is a filesystem root
 	cwdBrowseRoots     []string // filesystem roots, reported only when at a root (Windows drives; empty on Unix)
 	cwdBrowseTruncated bool     // the daemon capped this listing — what is shown is not all there is
+	// Held separately from cwdBrowseTruncated because the two describe different
+	// listings and only one of them is on screen at a time: this one applies once
+	// showRootsList promotes the roots to BE the listing.
+	cwdBrowseRootsTruncated bool // the daemon gave up part-way through enumerating roots
 	browseCandidates   []string // remaining pre-fill candidates for the setup browser's start-up chain
 	// Session-picker state (plugins with [command] sessions = "claude"). Rows
 	// are scoped to sessionScanCWD; when the browser moves to a different

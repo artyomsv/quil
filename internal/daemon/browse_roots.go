@@ -39,6 +39,45 @@ const rootProbeTimeout = time.Second
 // by someone else, adding more probes to the queue is the wrong move.
 const maxRootProbeTimeouts = 2
 
+// maxRootProbePermits is the ceiling the sweep claims against, leaving the rest
+// of maxBlockingFSCalls as a reserve it can never touch.
+//
+// The per-sweep cap above is not sufficient on its own, and the arithmetic is
+// the argument: it bounds ONE sweep at maxRootProbeTimeouts abandoned calls, but
+// nothing returns those permits except the kernel finally answering, so
+// ⌈maxBlockingFSCalls / maxRootProbeTimeouts⌉ successive sweeps still drain the
+// pool. Pressing "up" from C:\ four times is not an attack, it is navigation.
+//
+// The reserve is what makes the drain unreachable rather than merely slower. It
+// also encodes a priority: the root list is a speculative affordance for the
+// "up" row, while the directory read that follows it is what the user actually
+// asked for, so the sweep must never be able to starve that read. A sweep
+// refused a permit reports an incomplete list, which the caller passes on.
+const maxRootProbePermits = maxBlockingFSCalls / 2
+
+// driveLetters is the Windows candidate set: every letter, in order, because a
+// drive map is arbitrary and there is no cheaper way to learn which exist that
+// does not reintroduce the GetLogicalDrives problem filesystemRoots describes.
+//
+// Tag-free despite being Windows-only in effect, so the tests exercise THIS
+// function rather than a copy of it. A duplicate in the test file would keep
+// passing if this one changed — skipping A:/B:, reversing order, adding volume
+// GUID paths — which is the same reason sweepRoots was extracted at all. It is a
+// pure string loop with no platform dependency, so nothing is lost by moving it.
+func driveLetters() []string {
+	out := make([]string, 0, 26)
+	for c := 'A'; c <= 'Z'; c++ {
+		out = append(out, string(c)+`:\`)
+	}
+	return out
+}
+
+// probeRoot is the real probe: a bounded stat that additionally respects the
+// reserve above.
+func probeRoot(path string, d time.Duration) (isDir, answered bool) {
+	return statIsDirWithinLimit(path, d, maxRootProbePermits)
+}
+
 // sweepRoots probes each candidate and returns those that answer as directories.
 //
 // Split from the Windows-only caller on purpose. The drive-letter alphabet is
@@ -51,16 +90,21 @@ const maxRootProbeTimeouts = 2
 // that parks in the kernel on demand.
 //
 // A partial list is returned on either give-up path rather than none: the roots
-// found so far are still navigable, and the directory read that follows reports
-// its own timeout.
-func sweepRoots(candidates []string, deadline time.Time, probe func(string, time.Duration) (isDir, answered bool)) []string {
-	var roots []string
+// found so far are still navigable. complete reports whether every candidate
+// gave a DEFINITIVE answer — not merely whether the loop reached the end.
+// A drive that failed to answer is absent from the result for a reason the user
+// cannot see, exactly like one dropped past the cap, so both make the list
+// partial. The caller must pass that on: the drives are shown AS the listing
+// when the user navigates up, and "my D: drive vanished" is otherwise how a
+// network problem presents. Saying nothing would be the same confidently-wrong
+// answer that asking the daemon about its own filesystem exists to remove.
+func sweepRoots(candidates []string, deadline time.Time, probe func(string, time.Duration) (isDir, answered bool)) (roots []string, complete bool) {
 	stuck := 0
 	for _, root := range candidates {
 		budget := time.Until(deadline)
 		if budget <= 0 {
 			// The sweep has spent the response's whole budget.
-			break
+			return roots, false
 		}
 		if budget > rootProbeTimeout {
 			budget = rootProbeTimeout
@@ -69,7 +113,7 @@ func sweepRoots(candidates []string, deadline time.Time, probe func(string, time
 		if !answered {
 			stuck++
 			if stuck >= maxRootProbeTimeouts {
-				break
+				return roots, false
 			}
 			continue
 		}
@@ -77,5 +121,5 @@ func sweepRoots(candidates []string, deadline time.Time, probe func(string, time
 			roots = append(roots, root)
 		}
 	}
-	return roots
+	return roots, stuck == 0
 }

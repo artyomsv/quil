@@ -602,6 +602,84 @@ func twoLinksAndADir(t *testing.T) (string, []os.DirEntry) {
 	return root, entries
 }
 
+// TestBrowseDirResponse_ReportsAnIncompleteRootList pins the mapping from the
+// sweep's answer onto the wire.
+//
+// This needs the listFilesystemRoots seam to exist at all. The Unix build of
+// filesystemRoots always reports complete — one root, nothing to enumerate — so
+// on the platform CI runs this assignment is statically dead, and inverting or
+// deleting it passes every other test in the repo. The only arm that can report
+// an incomplete list is the Windows one, which the Linux image never compiles:
+// the same untestable-behind-a-build-tag shape that let the permit exhaustion
+// ship in the first place.
+func TestBrowseDirResponse_ReportsAnIncompleteRootList(t *testing.T) {
+	dir := t.TempDir()
+
+	tests := []struct {
+		name     string
+		complete bool
+		want     bool
+	}{
+		{"sweep gave up on unresponsive drives", false, true},
+		{"every drive answered", true, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			orig := listFilesystemRoots
+			listFilesystemRoots = func(time.Time) ([]string, bool) {
+				return []string{`C:\`}, tt.complete
+			}
+			t.Cleanup(func() { listFilesystemRoots = orig })
+
+			// A path that IS its own parent, so the response takes the roots
+			// branch rather than reporting a parent directory.
+			resp := browseDirResponse(ipc.BrowseDirReqPayload{Path: rootOf(dir)}, "")
+
+			if resp.RootsTruncated != tt.want {
+				t.Errorf("RootsTruncated = %v, want %v — the daemon's own warning never reaches the client",
+					resp.RootsTruncated, tt.want)
+			}
+			// The entry listing is a separate statement and must not be dragged
+			// along: the directory read here succeeds completely.
+			if resp.Truncated {
+				t.Error("Truncated = true — an incomplete drive sweep was reported as a capped file listing")
+			}
+		})
+	}
+}
+
+// rootOf walks up until the path is its own parent, which is the condition
+// browseDirResponse uses to decide it is at a filesystem root.
+func rootOf(path string) string {
+	for {
+		parent := filepath.Dir(path)
+		if parent == path {
+			return path
+		}
+		path = parent
+	}
+}
+
+// TestReadDirWithin_SpentBudgetStartsNoGoroutine mirrors the guard
+// statIsDirWithin has always had, on the function that lacked it.
+//
+// A goroutine spawned only to be abandoned in the same breath is pure cost: it
+// takes a process-wide permit and pins an OS thread for a result no one is left
+// to read. This is reachable rather than theoretical because the roots sweep
+// runs FIRST and shares the response's deadline, so it can hand this call a
+// budget that is already gone.
+func TestReadDirWithin_SpentBudgetStartsNoGoroutine(t *testing.T) {
+	waitForFSCallsDrained(t)
+
+	if _, err := readDirWithin(t.TempDir(), 0); err == nil {
+		t.Fatal("readDirWithin accepted a spent budget")
+	}
+
+	if n := blockingFSCalls.Load(); n != 0 {
+		t.Errorf("outstanding blocking calls = %d, want 0 — a permit was taken for a read that could not finish", n)
+	}
+}
+
 // TestReadDirWithin_RefusesPastTheCap pins the accumulation bound.
 //
 // Every listing that times out leaves its goroutine parked in the syscall, and a

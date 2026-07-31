@@ -16,4 +16,6 @@ import "time"
 // platform variants remain interchangeable at the call site, which is what lets
 // the caller hold one deadline for the whole response without a build tag of
 // its own.
-func filesystemRoots(time.Time) []string { return nil }
+// complete is true because there was nothing to enumerate, not because a sweep
+// succeeded — an empty root list here is the whole and correct answer.
+func filesystemRoots(time.Time) (roots []string, complete bool) { return nil, true }

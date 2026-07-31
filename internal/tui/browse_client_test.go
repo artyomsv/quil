@@ -246,6 +246,63 @@ func TestApplyBrowseDir_ShowUp(t *testing.T) {
 	}
 }
 
+// TestApplyBrowseDir_RootsTruncatedSurfacesWhenTheRootsBecomeTheListing pins the
+// whole propagation chain for a partial drive list.
+//
+// The daemon abandons the drive sweep after a couple of unresponsive mappings,
+// so the roots it reports can be incomplete while the directory read in the same
+// response succeeds. Two flags rather than one, because the client shows the
+// roots AS the listing only after the user navigates up: until then Truncated
+// must describe the entries, and afterwards it must describe the roots. Carrying
+// the wrong one either warns about a listing that is not on screen or lets a
+// short drive list pass for the whole truth — and a drive missing because its
+// server stopped answering looks exactly like one that was never mapped.
+func TestApplyBrowseDir_RootsTruncatedSurfacesWhenTheRootsBecomeTheListing(t *testing.T) {
+	t.Parallel()
+	m, _, _ := overlayTestModel(t, `C:\`)
+	m.browse = browseState{path: `C:\`, pending: true, gen: "g1"}
+
+	m.applyBrowseDir(ipc.BrowseDirRespPayload{
+		Path:           `C:\`,
+		Resolved:       `C:\`,
+		Roots:          []string{`C:\`},
+		RootsTruncated: true,
+		Entries:        []ipc.BrowseEntry{{Name: "sub", IsDir: true}},
+		// The directory itself read completely; only the sweep gave up.
+		Truncated: false,
+	}, "g1")
+
+	if m.cwdBrowseTruncated {
+		t.Error("the entry listing was flagged as capped when only the drive sweep gave up")
+	}
+	if !m.cwdBrowseRootsTruncated {
+		t.Fatal("RootsTruncated was dropped on arrival — the daemon's warning never reaches the user")
+	}
+
+	// Navigating up promotes the roots to be the listing, and the warning has to
+	// travel with them.
+	m.showRootsList()
+
+	if !m.cwdBrowseTruncated {
+		t.Error("the drive list is shown as complete after the daemon reported it was not")
+	}
+}
+
+// The other direction: a complete sweep must not inherit the previous
+// directory's cap, or "up" warns about a listing no longer on screen.
+func TestShowRootsList_CompleteSweepClearsThePreviousListingsCap(t *testing.T) {
+	t.Parallel()
+	m, _, _ := overlayTestModel(t, `C:\`)
+	m.cwdBrowseTruncated = true // the directory we are leaving was capped
+	m.cwdBrowseRootsTruncated = false
+
+	m.showRootsList()
+
+	if m.cwdBrowseTruncated {
+		t.Error("carried a capped-entries warning onto a complete drive list")
+	}
+}
+
 // select_ positions the cursor on the named entry — used by "up" navigation
 // to keep the user oriented on the directory they just exited.
 func TestApplyBrowseDir_SelectNamePositionsCursor(t *testing.T) {

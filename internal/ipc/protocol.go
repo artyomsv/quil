@@ -618,15 +618,24 @@ type BrowseEntry struct {
 // letters are the server's.
 //
 // Truncated reports that the directory held more than the listing cap.
+//
+// RootsTruncated is the same statement about Roots, and is deliberately a
+// SECOND flag rather than a reuse of Truncated. The two are independent: the
+// drive sweep can give up on unresponsive mappings while the directory read
+// that follows it succeeds completely, and the client shows the roots AS the
+// listing once the user navigates up — so one flag would either claim the file
+// list was capped when it was not, or let a short drive list pass for a
+// complete one.
 type BrowseDirRespPayload struct {
-	Path      string        `json:"path"`
-	Child     string        `json:"child,omitempty"`
-	Resolved  string        `json:"resolved,omitempty"`
-	Parent    string        `json:"parent,omitempty"`
-	Entries   []BrowseEntry `json:"entries,omitempty"`
-	Roots     []string      `json:"roots,omitempty"`
-	Truncated bool          `json:"truncated,omitempty"`
-	Error     string        `json:"error,omitempty"`
+	Path           string        `json:"path"`
+	Child          string        `json:"child,omitempty"`
+	Resolved       string        `json:"resolved,omitempty"`
+	Parent         string        `json:"parent,omitempty"`
+	Entries        []BrowseEntry `json:"entries,omitempty"`
+	Roots          []string      `json:"roots,omitempty"`
+	Truncated      bool          `json:"truncated,omitempty"`
+	RootsTruncated bool          `json:"roots_truncated,omitempty"`
+	Error          string        `json:"error,omitempty"`
 }
 
 // DirsExistReqPayload asks the daemon which of Paths still resolve to

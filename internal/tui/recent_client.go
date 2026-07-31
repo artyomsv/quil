@@ -41,6 +41,13 @@ var recentScanTimeout = 8 * time.Second
 // nextReqGen never returns "".
 type recentScanState struct {
 	gen string
+	// asked is the list this request sent. Kept so the answer can be
+	// intersected against it: the daemon is a host the user may not control,
+	// and the surviving paths must be a SUBSET of what was asked about, not
+	// whatever the far side chose to name. paths[0] becomes the pane's spawn
+	// directory and is persisted into the local recent list on submit, so a
+	// substituted entry is not merely cosmetic.
+	asked []string
 }
 
 // requestExistingDirs asks the daemon which remembered directories still exist.
@@ -55,7 +62,7 @@ type recentScanState struct {
 // is local, and a path exercised only by remote sessions is one that rots.
 func (m *Model) requestExistingDirs(paths []string) tea.Cmd {
 	gen := m.nextReqGen()
-	m.recentScan = recentScanState{gen: gen}
+	m.recentScan = recentScanState{gen: gen, asked: paths}
 	return tea.Batch(
 		func() tea.Msg {
 			msg, err := ipc.NewMessage(ipc.MsgDirsExistReq, ipc.DirsExistReqPayload{Paths: paths})
@@ -96,6 +103,7 @@ func (m *Model) applyExistingDirs(resp ipc.DirsExistRespPayload, gen string) tea
 	if gen == "" || gen != m.recentScan.gen {
 		return nil
 	}
+	asked := m.recentScan.asked
 	m.recentScan = recentScanState{}
 	if m.dialog != dialogCreatePaneSetup {
 		return nil
@@ -105,18 +113,22 @@ func (m *Model) applyExistingDirs(resp ipc.DirsExistRespPayload, gen string) tea
 		log.Printf("recent locations: %s", resp.Error)
 		return m.initSetupBrowser()
 	}
-	if len(resp.Paths) == 0 {
-		return m.initSetupBrowser()
-	}
 
-	// Cap on receipt. The daemon caps the REQUEST, but a cap enforced only by
-	// the sender is not a cap once the sender is a host the user may not
-	// control — the same reasoning applyKubeContexts states. It matters more
-	// here than for a rendered list: paths[0] becomes cwdBrowseDir, which is
-	// the pane's spawn directory.
-	paths := resp.Paths
+	// Keep only what was actually asked about, then cap. The daemon bounds the
+	// REQUEST, but a bound enforced only by the sender is not a bound once the
+	// sender is a host the user may not control — the same reasoning
+	// applyKubeContexts states, and it bites harder here than on a rendered
+	// list: paths[0] becomes cwdBrowseDir, the pane's spawn directory, and is
+	// written into the local recent list when the dialog is submitted. An
+	// unfiltered answer would let the far side both name a directory the user
+	// never visited and, with a long enough list, wedge the renderer — the pick
+	// list has no visible window, unlike the browser.
+	paths := intersectOrdered(resp.Paths, asked)
 	if len(paths) > recentCWDMax {
 		paths = paths[:recentCWDMax]
+	}
+	if len(paths) == 0 {
+		return m.initSetupBrowser()
 	}
 	m.recentCandidates = paths
 	m.cwdBrowseDir = paths[0]
@@ -140,4 +152,34 @@ func (m *Model) applyExistingDirsTimeout(gen string) tea.Cmd {
 		return nil
 	}
 	return m.initSetupBrowser()
+}
+
+// intersectOrdered returns the members of got that appear in allowed,
+// preserving got's order and dropping duplicates.
+//
+// Compared exactly, never through pathEqual: these strings made a round trip
+// and came back, so the only claim worth trusting is that a returned value is
+// byte-identical to one that was sent. Case-folding a remote answer would let a
+// case-sensitive host hand back an entry the local list does not contain.
+func intersectOrdered(got, allowed []string) []string {
+	if len(got) == 0 || len(allowed) == 0 {
+		return nil
+	}
+	permitted := make(map[string]struct{}, len(allowed))
+	for _, a := range allowed {
+		permitted[a] = struct{}{}
+	}
+	out := make([]string, 0, len(got))
+	seen := make(map[string]struct{}, len(got))
+	for _, g := range got {
+		if _, ok := permitted[g]; !ok {
+			continue
+		}
+		if _, dup := seen[g]; dup {
+			continue
+		}
+		seen[g] = struct{}{}
+		out = append(out, g)
+	}
+	return out
 }

@@ -128,7 +128,9 @@ func (m *Model) applyKubeContexts(resp ipc.KubeCtxRespPayload, gen string) tea.C
 	m.kubeContexts = make([]kubediscover.Context, 0, len(ctxs))
 	for _, c := range ctxs {
 		m.kubeContexts = append(m.kubeContexts, kubediscover.Context{
-			Name: c.Name, Namespace: c.Namespace, Current: c.Current,
+			Name:      clampRemoteRunes(c.Name, maxKubeNameRunes),
+			Namespace: clampRemoteRunes(c.Namespace, maxKubeNameRunes),
+			Current:   c.Current,
 		})
 	}
 	m.kubeCursor = 0 // Default context row
@@ -155,4 +157,33 @@ func (m *Model) applyKubeScanTimeout(gen string) tea.Cmd {
 	}
 	m.kubeScan.phase = kubeScanFailed
 	return nil
+}
+
+// maxKubeNameRunes bounds one context name or namespace.
+//
+// maxKubeContexts caps the COUNT; nothing capped the length. sanitizeRemoteText
+// strips control characters but deliberately preserves printable non-ASCII
+// byte-for-byte, so it imposes no budget either — and renderCreatePaneSetupDialog
+// writes the name into a fixed-width box that lipgloss SOFT-WRAPS rather than
+// clips (renderDialog's lipgloss.Place does not clip). Fifty contexts with
+// 200 KB names therefore fit one frame and turn into thousands of rendered rows
+// on every repaint while the dialog is open.
+//
+// Clamped where the value ENTERS state rather than only at render, because it is
+// the state value that becomes the pane's --context argument. 128 runes is far
+// past any real Kubernetes context name (RFC 1123 subdomains cap at 253 bytes,
+// and kubectl's own names are far shorter) while staying obviously bounded.
+const maxKubeNameRunes = 128
+
+// clampRemoteRunes truncates on a RUNE boundary, so a clamped multi-byte name
+// cannot end mid-sequence and render as a replacement character.
+func clampRemoteRunes(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max])
 }

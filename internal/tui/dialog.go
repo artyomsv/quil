@@ -3711,7 +3711,12 @@ func (m Model) renderCreatePaneSetupDialog() string {
 				// ".." / trailing-"\" checks above run against the raw value on
 				// purpose: they compare against the synthetic ".." marker this
 				// package adds itself, not the daemon's bytes.
-				displayName = sanitizeRemoteText(displayName)
+				// Truncated as well as sanitized. sanitizeRemoteText preserves
+				// printable non-ASCII byte-for-byte and imposes no budget, and
+				// renderDialog's lipgloss.Place does not clip — so one very long
+				// remote filename soft-wraps into as many rows as it needs and
+				// breaks the box out of its own height.
+				displayName = truncateToWidth(sanitizeRemoteText(displayName), m.setupTextWidth()-setupRowIndent)
 				if focused && idx == m.cwdBrowseCursor {
 					b.WriteString("  > " + dialogSelected.Render(displayName) + "\n")
 				} else {
@@ -3808,6 +3813,12 @@ func (m Model) renderCreatePaneSetupDialog() string {
 		}
 		renderRow(0, "Default context", "")
 		for i, c := range m.kubeContexts {
+			// Budgeted as well as sanitized, for the same reason as the browser
+			// entries above: sanitizeRemoteText imposes no length limit and
+			// lipgloss.Place does not clip, so an over-long remote context name
+			// would soft-wrap the box apart. applyKubeContexts already clamps
+			// what enters state; this is the render-side half.
+			budget := m.setupTextWidth() - setupRowIndent
 			name := sanitizeRemoteText(c.Name)
 			if c.Current {
 				name = "● " + name
@@ -3815,6 +3826,9 @@ func (m Model) renderCreatePaneSetupDialog() string {
 			suffix := ""
 			if ns := sanitizeRemoteText(c.Namespace); ns != "" {
 				suffix = "  (" + ns + ")"
+			}
+			if lipgloss.Width(name+suffix) > budget {
+				name = truncateToWidth(name, budget-lipgloss.Width(suffix))
 			}
 			renderRow(i+1, name, suffix)
 		}

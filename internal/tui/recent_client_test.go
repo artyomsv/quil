@@ -180,15 +180,57 @@ func TestApplyExistingDirsTimeout_StaleGenerationDoesNotClearALiveScan(t *testin
 // cwdBrowseDir, the pane's spawn directory.
 func TestApplyExistingDirs_CapsAnOversizedResponse(t *testing.T) {
 	m := recentClientModel(t)
-	m.requestExistingDirs([]string{"/a"})
 
+	// Asked about ALL of them, so the subset check passes them through and the
+	// cap is what this test actually exercises.
 	big := make([]string, recentCWDMax+5)
 	for i := range big {
 		big[i] = fmt.Sprintf("/dir-%d", i)
 	}
+	m.requestExistingDirs(big)
+
 	m.applyExistingDirs(ipc.DirsExistRespPayload{Paths: big}, m.recentScan.gen)
 
 	if len(m.recentCandidates) != recentCWDMax {
 		t.Errorf("recentCandidates = %d, want capped to %d", len(m.recentCandidates), recentCWDMax)
+	}
+}
+
+// TestApplyExistingDirs_RejectsPathsNeverAsked pins the subset check. The
+// daemon is a host the user may not control; the surviving directories must be
+// a subset of what was asked about, not whatever the far side names. paths[0]
+// becomes the pane's spawn directory and is persisted into the local recent
+// list on submit, so a substituted entry is not merely cosmetic.
+func TestApplyExistingDirs_RejectsPathsNeverAsked(t *testing.T) {
+	m := recentClientModel(t)
+	m.requestExistingDirs([]string{"/asked-a", "/asked-b"})
+
+	m.applyExistingDirs(ipc.DirsExistRespPayload{
+		Paths: []string{"/never-asked", "/asked-b"},
+	}, m.recentScan.gen)
+
+	if !reflect.DeepEqual(m.recentCandidates, []string{"/asked-b"}) {
+		t.Errorf("recentCandidates = %v, want only the asked-about path", m.recentCandidates)
+	}
+	if m.cwdBrowseDir == "/never-asked" {
+		t.Error("a path the client never sent became the committed spawn directory")
+	}
+}
+
+// An answer made entirely of paths that were never asked about is not a list;
+// it is a failed check. Hand over to the browser rather than showing it.
+func TestApplyExistingDirs_AllUnaskedFallsThroughToTheBrowser(t *testing.T) {
+	m := recentClientModel(t)
+	m.requestExistingDirs([]string{"/asked"})
+
+	cmd := m.applyExistingDirs(ipc.DirsExistRespPayload{
+		Paths: []string{"/spoofed-1", "/spoofed-2"},
+	}, m.recentScan.gen)
+
+	if len(m.recentCandidates) != 0 {
+		t.Errorf("recentCandidates = %v, want empty", m.recentCandidates)
+	}
+	if cmd == nil {
+		t.Error("no command returned — the dialog is left with neither a pick list nor a browser")
 	}
 }

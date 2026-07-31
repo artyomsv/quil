@@ -2,7 +2,9 @@ package tui
 
 import (
 	"fmt"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/artyomsv/quil/internal/ipc"
 )
@@ -161,5 +163,72 @@ func TestRequestKubeContexts_ClearsStaleTruncated(t *testing.T) {
 	m.requestKubeContexts()
 	if m.kubeTruncated {
 		t.Error("kubeTruncated survived a new request")
+	}
+}
+
+// Mirrors TestApplyExistingDirs_DroppedAfterDialogClosed and
+// TestApplyGitRepos_PickList_DroppedAfterDialogClosed. The guard exists in all
+// three client files; without a test for this one, only two of the three are
+// protected from a later "cleanup".
+func TestApplyKubeContexts_DroppedAfterDialogClosed(t *testing.T) {
+	m := kubeClientModel(t)
+	m.requestKubeContexts()
+	gen := m.kubeScan.gen
+	m.dialog = dialogNone // user pressed Esc
+
+	m.applyKubeContexts(ipc.KubeCtxRespPayload{
+		Contexts: []ipc.KubeContextInfo{{Name: "prod"}},
+	}, gen)
+
+	if len(m.kubeContexts) != 0 {
+		t.Errorf("kubeContexts = %v, want empty — state mutated outside the dialog", m.kubeContexts)
+	}
+}
+
+func TestApplyKubeScanTimeout_DroppedAfterDialogClosed(t *testing.T) {
+	m := kubeClientModel(t)
+	m.requestKubeContexts()
+	gen := m.kubeScan.gen
+	m.dialog = dialogNone
+
+	m.applyKubeScanTimeout(gen)
+
+	if m.kubeScan.phase == kubeScanFailed {
+		t.Error("a timeout tick set the failed phase after the dialog closed")
+	}
+}
+
+// A remote host controls these strings. sanitizeRemoteText strips controls but
+// preserves printable non-ASCII with no budget, and lipgloss.Place does not
+// clip — so an unbounded name soft-wraps the dialog apart.
+func TestApplyKubeContexts_ClampsAnOverlongName(t *testing.T) {
+	m := kubeClientModel(t)
+	m.requestKubeContexts()
+
+	long := strings.Repeat("a", maxKubeNameRunes*3)
+	m.applyKubeContexts(ipc.KubeCtxRespPayload{
+		Contexts: []ipc.KubeContextInfo{{Name: long, Namespace: long}},
+	}, m.kubeScan.gen)
+
+	if len(m.kubeContexts) != 1 {
+		t.Fatalf("kubeContexts = %d, want 1", len(m.kubeContexts))
+	}
+	if n := len([]rune(m.kubeContexts[0].Name)); n != maxKubeNameRunes {
+		t.Errorf("Name = %d runes, want clamped to %d", n, maxKubeNameRunes)
+	}
+	if n := len([]rune(m.kubeContexts[0].Namespace)); n != maxKubeNameRunes {
+		t.Errorf("Namespace = %d runes, want clamped to %d", n, maxKubeNameRunes)
+	}
+}
+
+// Truncating on a byte boundary would leave a dangling partial sequence that
+// renders as U+FFFD.
+func TestClampRemoteRunes_CutsOnARuneBoundary(t *testing.T) {
+	got := clampRemoteRunes(strings.Repeat("é", 10), 4)
+	if len([]rune(got)) != 4 {
+		t.Errorf("runes = %d, want 4", len([]rune(got)))
+	}
+	if !utf8.ValidString(got) {
+		t.Errorf("clamped value %q is not valid UTF-8 — it was cut mid-sequence", got)
 	}
 }

@@ -131,7 +131,7 @@ These are real and current. None are bugs to be reported; all are scoped work.
 
 | Limit | Effect | Fixed in |
 |---|---|---|
-| **Reconnect is only partly verified against a real link** | A dropped link shows a banner and redials with backoff (Phase 2, v1.45.0). Two of eight manual checks have been run on a real ssh link; the rest still rest on unit tests against a fake dialer. The highest-value one — reconnecting a pane whose plugin has `ghost_buffer = false` — is outstanding, and is exactly the case the two passing checks could not have caught. | Phase 2 manual checks |
+| **Reconnect is only partly verified against a real link** | A dropped link shows a banner and redials with backoff (Phase 2, v1.45.0). Three of eight manual checks have been run on a real ssh link; the rest still rest on unit tests against a fake dialer. The highest-value one — reattaching to a pane whose plugin has `ghost_buffer = false` — ran on 2026-07-31 and **failed**, exactly as the analysis below predicted: it exposed RD-040, now fixed and re-verified. What remains on that row is a real link *drop* rather than a clean detach, which additionally exercises the redial. | Phase 2 manual checks |
 | **Plugin availability is a daemon-lifetime cache** | `Ctrl+N` now greys out what the *server* lacks (RD-023). But the daemon runs `DetectAvailability` at startup and on plugin reload only, and is designed to run for weeks — so a tool installed on the server mid-session stays greyed until the daemon restarts or plugins are reloaded. Local sessions deliberately keep their own detection, which is fresher and describes the same machine. | RD-029 |
 | **Plugin *definitions* are still local** | Only availability crosses the wire. A plugin the server defines and the client does not cannot be offered at all, and the F1 → Plugins editor reads and writes the *client's* `PluginsDir()` before telling the remote daemon to reload from its own — so editing plugins over a remote link edits the wrong machine's files. | RD-035 |
 | **`quil status` refuses under `--remote`** | It reports on the local daemon, so it is blocked rather than silently wrong. Use `ssh <host> quil status`. | Phase 3 |
@@ -386,10 +386,13 @@ covered by unit tests against a fake dialer — 65 test functions in
 `internal/tui/reconnect_test.go`, 75 across `internal/transport`, and 4 more in
 `cmd/quil/remote_redial_test.go` covering the dial wiring itself — with
 `test`, `test-race` and `vet` green and the Windows suites passing natively.
-**Two of the eight manual checks below have been exercised against a real ssh
-link; six have not.** Shipping did not change what the wording means: for the
+**Three of the eight manual checks below have been exercised against a real ssh
+link; five have not.** Shipping did not change what the wording means: for the
 outstanding rows the status still reads "the code is written", not "the
-behaviour is confirmed", and the phase is not closed until they pass.
+behaviour is confirmed", and the phase is not closed until they pass. The third
+one ran on 2026-07-31 and failed on its first attempt, which is the argument for
+the remaining five: it had a passing unit test and a written analysis, and the
+defect was in neither.
 
 RD-017…RD-019 carry a plain `done` rather than `done (code)`. Each was
 reproduced first — a 3-in-8 native-Windows hang, an unbounded remote-fed buffer,
@@ -481,6 +484,25 @@ drives it at the message level — one pane replayed, one not — so it does not
 depend on any plugin's configuration. What a live run still adds is the DAEMON
 half: that `handleAttach` really does withhold a replay for those types.
 
+**Run 2026-07-31, and it failed — as predicted, on the plugins predicted.** An
+opencode pane mid-conversation, TUI closed and reattached, came back as a blank
+rectangle with a live process behind it. The daemon half is confirmed by that
+failure: `handleAttach` really does withhold the replay. What the analysis above
+stopped one step short of is that "nothing repaints them" was not merely the
+property that makes these plugins *useful* for the check — it was the defect.
+`redrawKick` returned silently for a plugin with no `redraw_key`.
+
+Fixed in RD-040 and re-verified on the same link: opencode and lazygit both
+repaint on reattach. The fix is a resize jiggle, not a key, because the two
+triggers are not interchangeable — measured the same day, opencode emits a full
+repaint on SIGWINCH and nothing on Ctrl+L, the exact inverse of claude-code.
+Adding `redraw_key = "\f"` to opencode, the obvious fix, would have been a
+no-op that looked like a fix.
+
+Still outstanding on this row: a real link **drop** (ssh killed mid-session)
+rather than a clean detach-and-reattach. The two paths share the replay gate,
+which is what was broken, but not the redial that precedes it.
+
 **Why the opencode check is now the most valuable one.** The two checks marked
 done both used a *terminal* pane, and code review then found that terminals are
 exactly the case that works: `handleAttach` replays only plugins with
@@ -550,6 +572,7 @@ surface built on it.
 | ID | Item | Blocked by | Status |
 |---|---|---|---|
 | RD-038 | Decide whether Quil should ALWAYS set `TERM` for pane children rather than only when the daemon has none (RD-039's fix). Quil *is* the terminal for a pane — it emulates VT via `charmbracelet/x/vt` and re-renders every cell — so the child's `TERM` arguably ought to describe Quil's emulator rather than whichever terminal launched the daemon. Deferred because it changes behaviour for every local user to fix nothing they experience | RD-039 | todo |
+| RD-040 | Keyless `ghost_buffer = false` panes never repaint on reattach | — | **done, confirmed on a real link** (`redrawKick` returned silently for a plugin declaring no `redraw_key`, so opencode and lazygit came back blank with a live process behind them — locally as well as remotely. Falls back to a resize jiggle; a declared key now means "I ignore SIGWINCH". The triggers are not interchangeable: opencode repaints on SIGWINCH and ignores Ctrl+L, claude-code the exact inverse) |
 | RD-039 | Pane children inherit no `TERM` over a remote link | — | **done, confirmed on a real link** (`ssh -T` allocates no TTY and exports no `TERM`; the daemon started by `quil --stdio` had none and every pane child inherited the gap, so tcell-based tools — k9s, lazysql — exited 1 within milliseconds. Supplied when absent in `internal/pty`; Unix only, since ConPTY children use the Win32 API rather than terminfo) |
 | RD-037 | Answer unknown request types instead of dropping them. `handleMessage`'s dispatch switch has no `default:`, so a request the daemon does not understand produces no response and no client-visible signal — the caller waits out its timeout and renders the same empty state a genuine "nothing found" produces. Respond with an error naming the unrecognised type when `msg.ID` is set (a correlated request expecting an answer); broadcasts stay silent | — | todo |
 

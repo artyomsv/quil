@@ -1,9 +1,12 @@
 # Remote Daemon Attach — `quil --remote`
 
-> **Status: Phases 1 and 2 shipped, BETA.** Usable for real work with the limits
-> below. Phase 2's reconnect shipped in v1.45.0 and was hardened in v1.45.1; it
-> is partially verified against a real link — see the manual-check table.
-> Phases 3 and 4 are planned, not built.
+> **Status: Phases 1 and 2 shipped, Phase 3 partly shipped. BETA.** Usable for
+> real work with the limits below. Phase 2's reconnect shipped in v1.45.0 and was
+> hardened in v1.45.1; it is partially verified against a real link — see the
+> manual-check table. Phase 3 has landed its filesystem half (RD-020, RD-021,
+> RD-028): the working-directory browser and git-repository discovery read the
+> daemon's disk. Kube contexts, plugin availability, `quil status` and the update
+> controls are still local. Phase 4 is planned, not built.
 
 Attach a local Quil TUI to a daemon running on another machine. Panes, tabs and
 AI sessions live on the remote host and keep running there when the laptop
@@ -228,17 +231,39 @@ see the decision gate in the work registry.
   host-key and passphrase prompts have to be readable — and batch-mode redials
   capture it instead, which is what the reconnect banner shows.
 
-## Phase 3 — remote-correct UI (planned)
+## Phase 3 — remote-correct UI (partly shipped)
 
 Make every surface that reads a filesystem read the *server's*.
 
-- Four RPCs: directory listing, git-repository discovery, kube-context
-  discovery, Claude session listing — each already a pure function over a path,
-  which is why they are movable.
+**Landed (RD-020, RD-021, RD-028).** Directory listing and git-repository
+discovery are RPCs; the Claude session listing was already daemon-side, so three
+of the four "RPCs" this phase was scoped around turned out to be two. With them
+went `~` expansion, `filepath.Abs`, path joins, filesystem roots, and existence —
+each of which had been answering for the wrong machine, and none of which reads
+like an RPC until you notice the separator belongs to the disk's platform.
+
+Two consequences worth carrying into the rest of the phase:
+
+- **The trust boundary moved.** Names, paths and error text now arrive from a
+  host the user may not control, and are sanitised at render (`sanitizeRemoteText`)
+  while raw values stay in state, because the resolved path becomes a spawn CWD
+  and a repo path becomes lazygit's `--path`. Any further RPC returning
+  daemon-supplied *display* strings inherits this requirement.
+- **Every blocking filesystem call now needs a wall-clock bound, not a context.**
+  A context cannot interrupt an `os.Stat` or `os.ReadDir` already parked in the
+  kernel, which is exactly what an unresponsive mount produces — and each of
+  these handlers holds a single-flight slot while it runs. RD-022 walks a
+  kubeconfig that may live on such a mount.
+
+**Remaining.**
+
+- Kube-context discovery RPC (RD-022).
 - Plugin registry RPC with server-side `DetectAvailability`, so `Ctrl+N` greys
-  out what the *server* lacks.
-- `quil status` over the transport rather than refused.
-- Update controls targeted at the remote daemon, or explicitly labelled.
+  out what the *server* lacks (RD-023).
+- Per-target recent locations (RD-024) and an empty `AttachPayload.CWD` in
+  remote mode (RD-025).
+- `quil status` over the transport rather than refused (RD-026, decided).
+- Update controls targeted at the remote daemon (RD-027, decided).
 
 ## Phase 4 — mTLS transport (planned, no date)
 

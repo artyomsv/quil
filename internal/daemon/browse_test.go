@@ -371,25 +371,72 @@ func TestBrowseDirResponse_EmptyPathUsesTheFallback(t *testing.T) {
 	}
 }
 
-// TestReadDirWithin_TimesOut pins that the deadline bounds the SYSCALL.
+// A missing directory is reported as an error, not as an empty listing.
 //
-// Bounding only the loop over already-returned entries protects nothing: that
-// loop is pure CPU. The blocking case is os.ReadDir on a dead network mount,
-// and if it is unbounded the single-flight slot is held for the rest of the
-// session — every later listing answered "another directory listing is already
-// running" by something that will never finish.
-//
-// Driven through a directory that cannot be read rather than a real hung mount:
-// what is asserted is that the call RETURNS within the budget, which is the
-// property the slot depends on.
-func TestReadDirWithin_TimesOut(t *testing.T) {
-	start := time.Now()
+// This test used to be named for the timeout and claimed to pin it. It never
+// did: ENOENT returns instantly, so the timer branch was unreachable and
+// deleting the entire select-and-timer mechanism left it green. It is kept for
+// what it actually checks, and the timeout has its own test below.
+func TestReadDirWithin_MissingDirErrors(t *testing.T) {
 	_, err := readDirWithin(filepath.Join(t.TempDir(), "absent"), 50*time.Millisecond)
 	if err == nil {
 		t.Fatal("readDirWithin returned no error for an absent directory")
 	}
-	if elapsed := time.Since(start); elapsed > 5*time.Second {
-		t.Errorf("readDirWithin took %v; it is not bounded", elapsed)
+	if strings.Contains(err.Error(), "timed out") {
+		t.Errorf("error = %q, want the underlying ENOENT rather than a timeout", err)
+	}
+}
+
+// TestReadDirWithin_TimerFiresOnAHungRead pins that the deadline bounds the
+// SYSCALL — the branch the old test never reached.
+//
+// Bounding only the loop over already-returned entries protects nothing: that
+// loop is pure CPU. The blocking case is os.ReadDir on a dead network mount, and
+// if it is unbounded the single-flight slot is held for the rest of the session,
+// with every later listing answered "another directory listing is already
+// running" by something that will never finish.
+func TestReadDirWithin_TimerFiresOnAHungRead(t *testing.T) {
+	waitForFSCallsDrained(t)
+
+	block := make(chan struct{})
+	orig := readDirPath
+	readDirPath = func(string) ([]os.DirEntry, error) {
+		<-block
+		return nil, nil
+	}
+	t.Cleanup(func() { restoreSeam(t, block, func() { readDirPath = orig }) })
+
+	start := time.Now()
+	entries, err := readDirWithin("/never-answers", 50*time.Millisecond)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("a read that never returns produced no error; the timer branch is dead")
+	}
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Errorf("error = %q, want it to name the timeout so the user can diagnose it", err)
+	}
+	if entries != nil {
+		t.Errorf("entries = %v, want nil when the read never answered", entries)
+	}
+	if elapsed > time.Second {
+		t.Errorf("took %v against a 50ms budget; the read is not bounded", elapsed)
+	}
+}
+
+// Both halves of "nothing to list": an empty request with no fallback is an
+// answer, not a crash and not a listing of some arbitrary directory.
+func TestBrowseDirResponse_NoPathAndNoFallback(t *testing.T) {
+	got := browseDirResponse(ipc.BrowseDirReqPayload{}, "")
+
+	if got.Error == "" {
+		t.Error("Error is empty when there is nothing to list and no default")
+	}
+	if got.Entries != nil {
+		t.Errorf("entries = %+v, want none", got.Entries)
+	}
+	if got.Resolved != "" {
+		t.Errorf("Resolved = %q, want empty — nothing was resolved", got.Resolved)
 	}
 }
 
@@ -513,12 +560,7 @@ func TestClassifyEntries_OneHungLinkCostsOneGoroutine(t *testing.T) {
 		<-block
 		return nil, os.ErrNotExist
 	}
-	t.Cleanup(func() {
-		statPath = orig
-		// Released last so the parked goroutines return their FS slots; leaving
-		// them held would starve every later test in this package.
-		close(block)
-	})
+	t.Cleanup(func() { restoreSeam(t, block, func() { statPath = orig }) })
 
 	got := classifyEntries(root, entries, time.Now().Add(50*time.Millisecond))
 
@@ -605,6 +647,28 @@ func TestBlockingFSCalls_SlotIsReturned(t *testing.T) {
 	waitForFSCallsDrained(t)
 }
 
+// restoreSeam unparks a test's fake filesystem call, waits for its goroutine to
+// actually exit, and only then puts the real function back.
+//
+// The order is the whole point, and getting it wrong is a genuine data race that
+// -race reports: statPath and readDirPath are plain package vars, so restoring
+// one while a goroutine is still parked INSIDE it is an unsynchronized write
+// against that goroutine's read. Logically the read already happened, but
+// nothing establishes a happens-before edge, which is exactly the situation the
+// detector exists to catch. Waiting on the counter supplies that edge, because
+// the parked goroutine's own deferred releaseBlockingFSCall is an atomic write
+// this loop reads.
+//
+// This ran clean under -race before the third seam test was added, which is
+// worth remembering: race detection observes actual interleavings and proves
+// nothing about the ones it did not see.
+func restoreSeam(t *testing.T, unpark chan struct{}, restore func()) {
+	t.Helper()
+	close(unpark)
+	waitForFSCallsDrained(t)
+	restore()
+}
+
 // waitForFSCallsDrained blocks until no blocking filesystem call is outstanding.
 //
 // The counter is process-wide and releaseBlockingFSCall runs in the WORKER
@@ -651,8 +715,7 @@ func TestBrowseDirResponse_HungLinkStillReturnsWithinTheBudget(t *testing.T) {
 	}
 	browseTimeout = budget
 	t.Cleanup(func() {
-		statPath, browseTimeout = origStat, origTimeout
-		close(block)
+		restoreSeam(t, block, func() { statPath, browseTimeout = origStat, origTimeout })
 	})
 
 	start := time.Now()

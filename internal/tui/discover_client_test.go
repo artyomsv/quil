@@ -155,6 +155,14 @@ func TestHandleToggleLazygit_AsksTheDaemon(t *testing.T) {
 			if p.CWD != "/srv/work" {
 				t.Errorf("asked about %q, want the pane's CWD", p.CWD)
 			}
+			// The generation must reach the WIRE, not just the Model — see the
+			// same assertion in TestRequestBrowseDir_SendsRequestAndRecordsState.
+			// The comparison logic is well covered; the line that puts gen on the
+			// message was exercised only by inference until this check existed.
+			if msg.ID == "" || msg.ID != m.repoScan.gen {
+				t.Errorf("sent ID = %q, want the recorded generation %q — the "+
+					"staleness key never reaches the daemon", msg.ID, m.repoScan.gen)
+			}
 		}
 	}
 	if !asked {

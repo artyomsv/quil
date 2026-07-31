@@ -140,3 +140,18 @@ func TestGitDiscoverAndBrowse_HaveIndependentSlots(t *testing.T) {
 		t.Error("a held git-discovery slot blocked a directory listing; the guards are shared")
 	}
 }
+
+// The parallel of TestBrowseDirResponse_NoPathAndNoFallback: an empty request
+// with no fallback is an answer, and it must be distinguishable from the
+// genuine finding "no repositories here" — only one of the two is news.
+func TestGitReposResponse_NoCWDAndNoFallback(t *testing.T) {
+	got := gitReposResponse(ipc.GitReposReqPayload{}, "")
+
+	if got.Error == "" {
+		t.Error("Error is empty when there is nothing to scan and no default; " +
+			"the caller cannot tell this from 'no repository here'")
+	}
+	if len(got.Repos) != 0 {
+		t.Errorf("Repos = %v, want none", got.Repos)
+	}
+}

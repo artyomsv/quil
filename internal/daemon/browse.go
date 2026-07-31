@@ -319,7 +319,7 @@ func readDirWithin(dir string, d time.Duration) ([]os.DirEntry, error) {
 	ch := make(chan result, 1)
 	go func() {
 		defer releaseBlockingFSCall()
-		entries, err := os.ReadDir(dir)
+		entries, err := readDirPath(dir)
 		ch <- result{entries, err}
 	}()
 
@@ -373,12 +373,20 @@ func claimBlockingFSCall() bool {
 // held for as long as the syscall really is, not for as long as anyone waits.
 func releaseBlockingFSCall() { blockingFSCalls.Add(-1) }
 
-// statPath is the seam link resolution goes through, following the package-var
-// pattern of readHookSessionIDFn and claudeSessionExistsFn.
+// statPath and readDirPath are the seams the two blocking filesystem calls go
+// through, following the package-var pattern of readHookSessionIDFn and
+// claudeSessionExistsFn.
 //
-// The rule worth pinning here is that ONE unanswered link stops resolution for
-// the rest of the listing, and expressing it needs a path that genuinely never
-// answers. No real filesystem offers one on demand — a dead NFS mount is the
-// production case and cannot be conjured in a unit test — so without this seam
-// the guard that bounds the whole feature's goroutine cost would ship untested.
-var statPath = os.Stat
+// Both exist for the same reason: the branches worth pinning are the ones where
+// the syscall NEVER returns, and no real filesystem offers that on demand — a
+// dead NFS mount is the production case and cannot be conjured in a unit test.
+//
+// readDirPath was added after review found the timeout test was passing for the
+// wrong reason. It drove an ABSENT directory, which fails instantly with ENOENT,
+// so the timer branch never ran: deleting the whole select-and-timer mechanism
+// left that test green. A test that cannot fail is worse than no test, because
+// it reports coverage of exactly the branch it never reaches.
+var (
+	statPath    = os.Stat
+	readDirPath = os.ReadDir
+)

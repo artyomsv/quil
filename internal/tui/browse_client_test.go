@@ -76,6 +76,17 @@ func TestRequestBrowseDir_SendsRequestAndRecordsState(t *testing.T) {
 			if p.Path != "/a" || p.Child != "sub" {
 				t.Errorf("sent payload = %+v, want Path=/a Child=sub", p)
 			}
+			// The generation must reach the WIRE, not just the Model. Every
+			// other test in this file feeds gen straight from m.browse.gen into
+			// applyBrowseDir, which pins the comparison but never the two lines
+			// that put the value on the message and read it back off — so
+			// deleting `msg.ID = gen` broke nothing until this assertion existed.
+			// The daemon echoes ID verbatim via respondTo, so an empty or wrong
+			// ID here silently disables cross-request matching entirely.
+			if msg.ID == "" || msg.ID != m.browse.gen {
+				t.Errorf("sent ID = %q, want the recorded generation %q — the "+
+					"staleness key never reaches the daemon", msg.ID, m.browse.gen)
+			}
 		}
 	}
 	if !found {

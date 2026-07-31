@@ -542,6 +542,31 @@ the daemon's disk. What is wrong is the **CWD fed to it**, which comes from
 the local directory browser. RD-020 fixes it; no separate session-listing RPC
 is needed.
 
+### Cross-cutting — protocol and diagnostics
+
+Not owned by a phase: these describe the IPC layer itself rather than any one
+surface built on it.
+
+| ID | Item | Blocked by | Status |
+|---|---|---|---|
+| RD-037 | Answer unknown request types instead of dropping them. `handleMessage`'s dispatch switch has no `default:`, so a request the daemon does not understand produces no response and no client-visible signal — the caller waits out its timeout and renders the same empty state a genuine "nothing found" produces. Respond with an error naming the unrecognised type when `msg.ID` is set (a correlated request expecting an answer); broadcasts stay silent | — | todo |
+
+**Why this is worth an id despite being low severity.** The version gate
+already covers the case that reaches users: the daemon is long-lived, so a
+stale *running* daemon reports its own compiled-in version and the mismatch is
+caught at attach. What it cannot catch is two builds that share a version
+string and differ in protocol support — in practice an unreleased branch build
+against the release.
+
+That is a developer-and-tester hazard rather than a user-facing bug, and it is
+recorded because the *diagnostic distance* was the real cost, not the failure.
+Hit on 2026-07-31 testing RD-022…RD-025: three unrelated-looking symptoms (no
+kube contexts, an empty working-directory browser, k9s starting wrong) all
+traced to one daemon that predated the handlers. The information needed already
+existed on the wire — the daemon knew it did not recognise `kube_ctx_req` and
+said so, in a log on the other machine. One error response turns a cross-machine
+investigation into a message on screen.
+
 ### Phase 4 — mTLS transport
 
 Goal: remove the ssh dependency for users who want Quil to be its own

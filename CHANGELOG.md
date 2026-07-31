@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Input history is readable again.** The list showed each prompt as up to
+  three lines with a blank line between entries, and every one of those lines
+  wrapped onto a second row — so a handful of prompts filled the screen and
+  none of them could be skimmed. Each prompt is now a single line, truncated to
+  fit, in a wider box. Prompts past the bottom of the list were also drawn
+  off-screen with no way to reach them: the list now scrolls, follows the
+  selection, and tells you where you are (`12-31/200`). `PgUp`, `PgDn`, `Home`,
+  `End` and the mouse wheel all move through it.
+- **Machine-written turns no longer appear in your input history.** When a
+  background task finishes or a subagent reports back, the agent submits that
+  report as if it were a prompt. Those were being recorded and shown alongside
+  the things you actually typed, and on a busy session they outnumbered them. A
+  prompt that merely mentions one of those markers is still kept — only a turn
+  that is nothing but machine output is dropped.
+- **Reading a past prompt in full now works.** Opening an entry showed one
+  screen-width of each line and hid the rest, with no way to scroll sideways —
+  so a pasted paragraph or stack trace was mostly unreachable, including
+  unreachable to the selection you opened it to copy. It now wraps, opens at the
+  top, and can be selected by dragging, copied with a right-click or `Enter`, or
+  selected whole with `Ctrl+A`. The footer says so, which it previously did not.
+- **Clicking or dragging inside a dialog no longer changes the layout behind
+  it.** With any dialog open, a press-and-drag reached the panes underneath:
+  split boundaries moved, panes resized, and the new layout was saved — none of
+  it visible, because the dialog covers the screen. A click on the top row
+  switched tabs the same way. Dialogs now absorb the mouse.
+- **Text from a past prompt can no longer disturb your terminal.** Prompts are
+  free text you may have pasted into, and neither the history list nor the
+  full-text view passed it through the terminal emulation that protects normal
+  pane output. Pasted content carrying terminal control codes could repaint the
+  screen, or — with codes some terminals honour — quietly replace your
+  clipboard when you re-read the prompt. Such codes are now removed before
+  display, on both the sending and receiving side, which matters most when the
+  daemon is on another machine.
+- **The history list says when the daemon does not answer.** It used to show
+  `Loading…` indefinitely. It now reports the failure after a few seconds and
+  offers `r` to retry.
+
 ## [1.45.2] - 2026-07-31
 
 ### Fixed

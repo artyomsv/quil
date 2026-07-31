@@ -3010,21 +3010,30 @@ func (m *Model) handlePaneOutput(msg PaneOutputMsg) tea.Cmd {
 				}
 				leaf.Pane.ghost = true
 			} else if !msg.Ghost {
-				// Transitioning from ghost/restored to live output.
-				// Reset VT only for non-terminal panes (e.g. Claude Code)
-				// where ghost buffer ANSI sequences pollute cursor state.
-				// Terminal panes keep their history — the ghost buffer IS
-				// the terminal state and should be preserved.
+				// Transitioning from replayed to live output. The replayed
+				// content is KEPT, for every pane type.
+				//
+				// This used to reset the VT for claude-code specifically, on the
+				// theory that replayed ANSI pollutes cursor state. The branch was
+				// written in the same commit that introduced ghost_buffer — which
+				// set claude-code to false — so nothing could ever satisfy it: a
+				// pane with no ghost replay never sets Pane.ghost. It named the
+				// one plugin that could not reach it, and sat unexercised until
+				// the flag was flipped.
+				//
+				// It then destroyed exactly what the flag exists to restore.
+				// ResetVT installs a fresh emulator, and the emulator's scrollback
+				// is where the replayed history lives, so the pane came back with
+				// its history and lost it on the first keystroke — the reset fires
+				// on the live frame, and typing is what produces one.
+				//
+				// ghost_buffer = true already states that a pane's replayed
+				// content is wanted; a type name in the TUI cannot know better
+				// than the plugin's own setting. Cursor state needs no help here
+				// either: the live frame that triggers this transition IS the
+				// child painting, which is what fixes the cursor.
 				if leaf.Pane.ghost {
-					// Only reset VT for TUI app panes (claude-code) where ghost
-					// ANSI sequences pollute cursor state. Terminal-like panes
-					// (terminal, ssh, etc.) preserve their ghost buffer as-is.
-					if leaf.Pane.Type == "claude-code" {
-						log.Printf("pane %s: ghost->live transition, resetting VT (type=%s)", msg.PaneID, leaf.Pane.Type)
-						leaf.Pane.ResetVT()
-					} else {
-						log.Printf("pane %s: ghost->live transition, preserving VT (type=%q)", msg.PaneID, leaf.Pane.Type)
-					}
+					log.Printf("pane %s: ghost->live transition, preserving VT (type=%q)", msg.PaneID, leaf.Pane.Type)
 				}
 				leaf.Pane.ghost = false
 			}

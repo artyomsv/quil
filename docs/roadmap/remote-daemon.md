@@ -418,7 +418,7 @@ Outstanding manual verification:
 |---|---|---|
 | Kill the ssh process mid-session | banner, frozen input, reconnect | **done** — reconnected in 343 ms, 1 attempt |
 | Shut the remote host down | backoff climbs, banner persists and names the host unreachable | **done** — 466 ms → 770 ms → 1.288 s, restored on attempt 3 |
-| **Reconnect an `opencode` pane and confirm it is NOT blank** | the ghost-replay gate (see below) | **outstanding — highest value** |
+| **Reconnect an `opencode` pane and confirm it is NOT blank** | the ghost-replay gate (see below) | **done** — run 2026-07-31 FAILED as predicted (blank rectangle, live process behind it), which is what confirmed the daemon half; fixed in RD-040 and re-verified on the same link, opencode and lazygit both repaint |
 | Scroll a reconnected pane to the top | scrollback not doubled (RD-013) | outstanding |
 | Sleep the laptop 2 minutes, wake | reconnect with no intervention | outstanding |
 | Ctrl+Q during an outage | the only exit from a host that never returns | outstanding |
@@ -477,6 +477,13 @@ the bug the row exists to catch. The four plugins that expose the gate are the
 four it broke — opencode, lazygit, k9s, lazysql — and what they have in common
 is `ghost_buffer = false` with **no** `redraw_key`, i.e. nothing repaints them.
 Verified 2026-07-30 against a VM that had only claude-code installed.
+
+**Superseded in v1.46.0, and the conclusion strengthens rather than softens.**
+claude-code now ships `ghost_buffer = true` (schema_version 11), so it no longer
+takes the no-replay path at all — the premise of the paragraph above is gone,
+but so is any argument for substituting it: a plugin that receives a replay
+never exercises `redrawKick`, so it cannot exercise the gate under any outcome.
+The four plugins that expose it are still opencode, lazygit, k9s and lazysql.
 
 The TUI half of the contract is nonetheless pinned, and pinned
 plugin-agnostically: `TestReconnect_ResetIsConsumedByTheReplayNotPredicted`

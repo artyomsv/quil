@@ -254,7 +254,7 @@ resume_args = ["--resume", "{session_id}"]
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `strategy` | string | No | `""` (none) | Resume mechanism. See [Strategy Reference](#strategy-reference). |
-| `ghost_buffer` | bool | No | `true` | If `true`, PTY output is saved to disk and replayed on reconnect (shows previous terminal content with a dimmed "restored" label). Set to `false` for TUI apps that manage their own display. |
+| `ghost_buffer` | bool | No | `true` | If `true`, PTY output is saved to disk and replayed on reconnect (shows previous terminal content with a dimmed "restored" label). Set to `false` for TUI apps that manage their own display — but measure first: "full-screen app" is not the test. A program that writes to the **main** screen and scrolls normally (so it is scrollable while attached) replays into coherent history, and `false` throws that history away on every reattach. `claude-code` ships `true` for exactly this reason. `false` is for programs that own the **alternate** screen. |
 | `redraw_key` | string | No | `""` | Byte(s) written to the pane's stdin when a client attaches and the pane had **no** ghost replay to send. Only meaningful with `ghost_buffer = false`, which is what leaves a reconnecting client with a blank rectangle in front of a live process. See below before setting it. |
 
 #### `redraw_key` — when to set it, and when not to

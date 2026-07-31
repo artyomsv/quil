@@ -525,14 +525,21 @@ Where AoE is pulling away for the mobile/remote crowd. Sequenced last because ea
 is a major surface and cuts against Quil's TUI/Windows-native focus.
 
 17. ~~**Remote SSH thin-client attach**~~ — **Phases 1 and 2 shipped (beta),
-    Phase 3 in progress**, see [Remote Daemon Attach](roadmap/remote-daemon.md)
-    under *In Progress*. `quil --remote host` works today, survives a dropped
-    link, and browses the server's filesystem rather than yours; kube contexts,
-    plugin availability, `quil status` and the update controls are the remaining
-    Phase 3 work. Bridging local clipboard image paste into remote agents
-    (herdr) lands with Phase 3, since it needs the same remote-path plumbing.
+    Phase 3 shipped except two items**, see
+    [Remote Daemon Attach](roadmap/remote-daemon.md) under *In Progress*.
+    `quil --remote host` works today, survives a dropped link, and resolves
+    every picker that reads a filesystem or probes a binary against the
+    server: the directory browser, git repositories, kube contexts, plugin
+    availability and the recent-directories list (v1.46.0). Still refused
+    rather than retargeted: `quil status` (RD-026) and the update controls
+    (RD-027). Bridging local clipboard image paste into remote agents (herdr)
+    did **not** land with Phase 3 and has no registry item yet — the PNG is
+    still written locally and a local path typed into a remote pane.
 18. **Web dashboard** — real terminal + diffs in the browser, installable as a PWA
-    (AoE). The single largest surface Quil is missing.
+    (AoE). The single largest surface Quil is missing. **Gated on Phase 4
+    (mTLS)** — a browser cannot speak `ssh -T host "quil --stdio"`, so
+    something has to terminate a network connection carrying real client
+    identity before this can start.
 19. **Remote phone access** — expose the dashboard over a Tailscale/Cloudflare
     tunnel with QR + passphrase pairing and Web Push (AoE). Builds on #18.
 20. **Container sandboxing** — isolate agents in Docker/Podman with shared auth

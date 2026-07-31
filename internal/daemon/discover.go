@@ -15,7 +15,7 @@ import (
 // unresponsive network mount can park it. gitdiscover already takes a context
 // for exactly this reason (RD-004); this is the deadline that finally supplies
 // one — the TUI-side caller it replaces passed context.Background().
-const gitDiscoverTimeout = 10 * time.Second
+var gitDiscoverTimeout = 10 * time.Second
 
 // handleGitReposReq answers "which git repositories are near this directory".
 //
@@ -77,16 +77,59 @@ func gitReposResponse(req ipc.GitReposReqPayload, fallback string) ipc.GitReposR
 		return out
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), gitDiscoverTimeout)
-	defer cancel()
-
-	out.Repos = gitdiscover.Candidates(ctx, dir)
+	repos, answered := discoverWithin(dir, gitDiscoverTimeout)
+	out.Repos = repos
 	// Report a timeout as an error rather than as "no repositories". The two
 	// render differently and only one of them is a finding — telling the user
 	// there is no repo because a slow mount ran out the clock is a wrong answer
 	// stated confidently, which is the failure this whole phase is about.
-	if ctx.Err() != nil && len(out.Repos) == 0 {
+	if !answered && len(out.Repos) == 0 {
 		out.Error = "repository scan timed out"
 	}
 	return out
 }
+
+// discoverWithin runs the discovery walk under a wall-clock budget, reporting
+// whether it answered in time.
+//
+// gitdiscover.Candidates already takes a context and checks it between steps,
+// and that was believed to be the bound. It is not: a context cannot interrupt
+// an os.Stat or os.ReadDir already blocked in the kernel, which is exactly what
+// an unresponsive NFS or SMB mount produces — and a home directory on such a
+// mount is the case gitDiscoverTimeout was written for. The context bounds the
+// WALK; this bounds the CALL, and the call is what holds the single-flight slot.
+// Without it, one Alt+G into a dead mount answers every later scan in the
+// session with "another repository scan is already running", by something that
+// will never finish.
+//
+// Same abandoned-goroutine trade as readDirWithin, and it shares that function's
+// process-wide cap for the same reason: a parked syscall pins an OS thread.
+func discoverWithin(dir string, d time.Duration) ([]string, bool) {
+	if d <= 0 || !claimBlockingFSCall() {
+		return nil, false
+	}
+	ch := make(chan []string, 1)
+	go func() {
+		defer releaseBlockingFSCall()
+		// The inner context still earns its place: it stops the walk promptly at
+		// every point that is NOT blocked in a syscall, so the abandoned
+		// goroutine usually exits soon after we stop waiting for it.
+		ctx, cancel := context.WithTimeout(context.Background(), d)
+		defer cancel()
+		ch <- discoverCandidates(ctx, dir)
+	}()
+
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case r := <-ch:
+		return r, true
+	case <-timer.C:
+		return nil, false
+	}
+}
+
+// discoverCandidates is the seam the walk goes through, paired with statPath and
+// readDirPath in browse.go and existing for the same reason: the branch worth
+// pinning is the one where the walk never returns.
+var discoverCandidates = gitdiscover.Candidates

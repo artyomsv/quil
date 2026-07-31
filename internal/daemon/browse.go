@@ -130,6 +130,15 @@ func browseDirResponse(req ipc.BrowseDirReqPayload, fallback string) ipc.BrowseD
 		return out
 	}
 	out.Resolved = filepath.Clean(abs)
+
+	// ONE deadline for every blocking call this response makes: the root probe,
+	// the read, and the link resolution after it. All three hold the
+	// single-flight slot, so what has to be bounded is their SUM — a budget per
+	// call would let a listing hold the slot for a multiple of what the constant
+	// claims. Declared here rather than beside the read because the root probe
+	// runs first and stats up to 26 drive letters.
+	deadline := time.Now().Add(browseTimeout)
+
 	// A root directory is its own parent; reporting that would render an "up"
 	// row that navigates to where the user already is. At a root, Roots carries
 	// whatever sits above it instead — the drive list on Windows, nothing on
@@ -138,15 +147,8 @@ func browseDirResponse(req ipc.BrowseDirReqPayload, fallback string) ipc.BrowseD
 	if parent := filepath.Dir(out.Resolved); parent != out.Resolved {
 		out.Parent = parent
 	} else {
-		out.Roots = filesystemRoots()
+		out.Roots = filesystemRoots(deadline)
 	}
-
-	// ONE deadline for the read and the link resolution that follows it. Both
-	// hold the single-flight slot, so what has to be bounded is their sum, not
-	// each in isolation: two budgets of browseTimeout each would let a directory
-	// full of links into a dead mount hold the slot for twice as long as the
-	// constant claims.
-	deadline := time.Now().Add(browseTimeout)
 
 	entries, err := readDirWithin(out.Resolved, time.Until(deadline))
 	if err != nil {
@@ -253,25 +255,26 @@ func classifyEntries(dir string, entries []os.DirEntry, deadline time.Time) []ip
 	for _, e := range entries {
 		isDir := e.IsDir()
 		if !isDir && e.Type()&os.ModeSymlink != 0 {
-			isDir, _ = symlinkIsDirWithin(filepath.Join(dir, e.Name()), time.Until(deadline))
+			isDir, _ = statIsDirWithin(filepath.Join(dir, e.Name()), time.Until(deadline))
 		}
 		out = append(out, ipc.BrowseEntry{Name: e.Name(), IsDir: isDir})
 	}
 	return out
 }
 
-// symlinkIsDirWithin reports whether path resolves to a directory, and whether
-// the stat answered within d at all.
+// statIsDirWithin reports whether path is a directory, and whether the stat
+// answered within d at all.
 //
-// os.Stat FOLLOWS the link, so it parks on a dead mount exactly as os.ReadDir
-// does — and it runs after the read, while the single-flight slot is still held.
-// A link that never answers degrades to "not a directory", the same rendering a
-// broken link already gets.
+// os.Stat FOLLOWS symlinks, so it parks on a dead mount exactly as os.ReadDir
+// does — and every caller here runs while the single-flight slot is held. A
+// path that never answers degrades to "not a directory", which for a link is
+// the same rendering a broken one already gets and for a drive letter means the
+// drive is simply omitted.
 //
-// A non-positive budget is refused without spawning anything: the read may have
-// consumed the whole deadline, and a goroutine started only to be abandoned in
-// the same breath is pure cost.
-func symlinkIsDirWithin(path string, d time.Duration) (isDir, answered bool) {
+// A non-positive budget is refused without spawning anything: an earlier call
+// may have consumed the whole deadline, and a goroutine started only to be
+// abandoned in the same breath is pure cost.
+func statIsDirWithin(path string, d time.Duration) (isDir, answered bool) {
 	if d <= 0 || !claimBlockingFSCall() {
 		return false, false
 	}

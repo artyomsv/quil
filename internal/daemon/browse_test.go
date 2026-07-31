@@ -476,7 +476,7 @@ func TestBeginBrowseScan_RejectionEchoesBothKeyHalves(t *testing.T) {
 	}
 }
 
-// TestSymlinkIsDirWithin_ExhaustedBudgetDoesNotStat pins that link resolution
+// TestStatIsDirWithin_ExhaustedBudgetDoesNotStat pins that link resolution
 // respects a spent deadline.
 //
 // os.Stat follows the link, so it parks on a dead mount exactly as os.ReadDir
@@ -484,7 +484,7 @@ func TestBeginBrowseScan_RejectionEchoesBothKeyHalves(t *testing.T) {
 // An unbounded stat here would move the wedge one syscall later rather than
 // preventing it: every subsequent listing in the session answered "another
 // directory listing is already running" by something that never finishes.
-func TestSymlinkIsDirWithin_ExhaustedBudgetDoesNotStat(t *testing.T) {
+func TestStatIsDirWithin_ExhaustedBudgetDoesNotStat(t *testing.T) {
 	root := t.TempDir()
 	target := filepath.Join(root, "real")
 	if err := os.Mkdir(target, 0o755); err != nil {
@@ -497,11 +497,11 @@ func TestSymlinkIsDirWithin_ExhaustedBudgetDoesNotStat(t *testing.T) {
 
 	// A healthy link that WOULD resolve, so a pass cannot come from the link
 	// being unresolvable anyway.
-	if isDir, answered := symlinkIsDirWithin(link, time.Second); !answered || !isDir {
+	if isDir, answered := statIsDirWithin(link, time.Second); !answered || !isDir {
 		t.Fatalf("with budget: isDir=%v answered=%v, want both true", isDir, answered)
 	}
 
-	isDir, answered := symlinkIsDirWithin(link, 0)
+	isDir, answered := statIsDirWithin(link, 0)
 	if answered {
 		t.Error("a spent budget still statted the link; the deadline does not bound resolution")
 	}

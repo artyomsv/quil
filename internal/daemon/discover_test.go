@@ -1,9 +1,11 @@
 package daemon
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/artyomsv/quil/internal/ipc"
 )
@@ -153,5 +155,67 @@ func TestGitReposResponse_NoCWDAndNoFallback(t *testing.T) {
 	}
 	if len(got.Repos) != 0 {
 		t.Errorf("Repos = %v, want none", got.Repos)
+	}
+}
+
+// TestDiscoverWithin_TimerFiresOnAHungWalk pins that the CALL is bounded, not
+// just the walk.
+//
+// gitdiscover.Candidates takes a context and checks it between steps, which
+// reads like a bound but is not one: a context cannot interrupt an os.Stat or
+// os.ReadDir already blocked in the kernel, and an unresponsive mount is exactly
+// that. The call holds the single-flight slot, so an unbounded one answers every
+// later Alt+G in the session with "another repository scan is already running".
+func TestDiscoverWithin_TimerFiresOnAHungWalk(t *testing.T) {
+	waitForFSCallsDrained(t)
+
+	block := make(chan struct{})
+	orig := discoverCandidates
+	discoverCandidates = func(context.Context, string) []string {
+		<-block
+		return nil
+	}
+	t.Cleanup(func() { restoreSeam(t, block, func() { discoverCandidates = orig }) })
+
+	start := time.Now()
+	repos, answered := discoverWithin("/never-answers", 50*time.Millisecond)
+	elapsed := time.Since(start)
+
+	if answered {
+		t.Error("a walk that never returns reported as answered")
+	}
+	if repos != nil {
+		t.Errorf("repos = %v, want nil when the walk never answered", repos)
+	}
+	if elapsed > time.Second {
+		t.Errorf("took %v against a 50ms budget; the scan is not bounded", elapsed)
+	}
+}
+
+// The timeout must reach the user as an error, not as the finding "no repos".
+func TestGitReposResponse_HungWalkReportsTimeoutNotEmpty(t *testing.T) {
+	waitForFSCallsDrained(t)
+
+	block := make(chan struct{})
+	origDiscover, origTimeout := discoverCandidates, gitDiscoverTimeout
+	discoverCandidates = func(context.Context, string) []string {
+		<-block
+		return nil
+	}
+	gitDiscoverTimeout = 100 * time.Millisecond
+	t.Cleanup(func() {
+		restoreSeam(t, block, func() {
+			discoverCandidates, gitDiscoverTimeout = origDiscover, origTimeout
+		})
+	})
+
+	got := gitReposResponse(ipc.GitReposReqPayload{CWD: "/srv/work"}, "")
+
+	if got.Error == "" {
+		t.Error("a timed-out scan reported as 'no repositories here'; only one of " +
+			"those two is a finding")
+	}
+	if got.CWD != "/srv/work" {
+		t.Errorf("CWD = %q, want the request echoed even on the timeout path", got.CWD)
 	}
 }

@@ -39,9 +39,7 @@ func (s *unixSession) SetCWD(dir string) {
 
 func (s *unixSession) Start(cmd string, args ...string) error {
 	s.cmd = exec.Command(cmd, args...)
-	if len(s.env) > 0 {
-		s.cmd.Env = append(os.Environ(), s.env...)
-	}
+	s.cmd.Env = childEnv(s.env)
 	if s.cwd != "" {
 		s.cmd.Dir = s.cwd
 	}
@@ -97,4 +95,39 @@ func (s *unixSession) WaitExit() int {
 		}
 	})
 	return s.exitCode
+}
+
+// defaultTERM is what Quil's own emulator answers to.
+//
+// internal/tui renders every pane cell through charmbracelet/x/vt, so this
+// describes Quil rather than whatever terminal happens to be attached, and the
+// entry is present in every terminfo database the supported platforms ship.
+const defaultTERM = "xterm-256color"
+
+// childEnv assembles the environment for a PTY child, supplying TERM when the
+// daemon's own environment has none.
+//
+// That absence is the normal case under `quil --remote`: the daemon is started
+// through `ssh -T`, which allocates no TTY and therefore exports no TERM, and
+// every pane child inherits the gap. Tools built on tcell — k9s and lazysql
+// among the shipped plugins — refuse to start without it and exit 1 within
+// milliseconds, which presents as a pane that opens and instantly dies rather
+// than as a missing variable. Locally the daemon is spawned from a real
+// terminal and inherits one, so this only ever bites over a remote link.
+//
+// Set only when ABSENT, never overridden: an inherited value describes the
+// attached terminal accurately, and replacing it would be a behaviour change
+// for every local user to fix a problem they do not have.
+//
+// Unix only, deliberately. The Windows path leaves the environment untouched:
+// ConPTY children drive the console through the Win32 API and VT processing
+// rather than terminfo, so they neither need TERM nor currently receive one —
+// introducing it there would change behaviour on a platform where nothing is
+// broken.
+func childEnv(extra []string) []string {
+	env := os.Environ()
+	if os.Getenv("TERM") == "" {
+		env = append(env, "TERM="+defaultTERM)
+	}
+	return append(env, extra...)
 }

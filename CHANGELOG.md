@@ -8,6 +8,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **OpenCode and lazygit panes come back with their content after you
+  reattach.** They showed an empty rectangle with a live process behind it —
+  the same symptom fixed for Claude Code in 1.43.1, which turned out to have
+  been fixed only for Claude Code. Pane types that skip saving scrollback opt
+  in to a repaint by naming the key their program answers, and neither of these
+  names one. Measured against real panes, they would not have helped if they
+  did: OpenCode emits nothing at all for that key and repaints fully on a
+  window-size change, and Claude Code is the exact reverse. Panes that name no
+  key are now given a size change instead, which no program mistakes for input.
+  This was never remote-only — it happened on every reattach, locally too.
+- **Full-screen tools start in a remote session.** `k9s` and `lazysql` opened
+  and exited within a moment, leaving a pane that looked like it had crashed
+  for no reason. A daemon reached over SSH has no terminal type set — the
+  connection carries no terminal — and tools built on that library refuse to
+  start without one, so the pane died before it could say why. Quil now gives
+  its panes a terminal type when the daemon has none, and leaves an inherited
+  one alone.
+- **Browsing for a folder on Windows keeps working when mapped network drives
+  are unreachable.** Listing the drives probes each one, and a mapping whose
+  server has gone away cannot be interrupted — it holds a slot until the
+  operating system gives up. With enough dead mappings, one press of "up" from
+  `C:\` consumed every slot the daemon had, after which directory browsing, git
+  repository discovery and kube-context discovery were all refused until a
+  stalled probe finished. The sweep now gives up after the first couple of
+  unresponsive drives, can never take the slots the directory listing itself
+  needs, and says when the drive list it shows is incomplete — a drive missing
+  because its server stopped answering otherwise looks exactly like one that
+  was never mapped.
+- **A pane's `$PWD` names the pane's own directory again.** Panes for tools
+  that set no environment variables of their own — `k9s`, `lazygit`,
+  `lazysql`, `ssh`, `stripe` — inherited the daemon's instead, which over a
+  remote connection is the SSH login directory rather than the folder the pane
+  was opened in. Anything trusting `$PWD` over asking the operating system
+  resolved relative paths against the wrong folder, while the pane's own shell
+  reported the right one.
 - **The rest of the pane setup dialog now describes the remote machine.** The
   kube-context picker lists the contexts from the **daemon's** kubeconfig rather
   than your laptop's, so a `k9s` pane no longer launches with a `--context`

@@ -3744,6 +3744,13 @@ func (d *Daemon) handleMemoryReportReq(conn *ipc.Conn, msg *ipc.Message) {
 	respondTo(conn, msg.ID, ipc.MsgMemoryReportResp, resp)
 }
 
+// historyPreviewBytes caps each list row's flattened preview. The TUI renders
+// one row per entry and truncates to the dialog's cell width, so this only has
+// to comfortably exceed the widest row a terminal can show — 512 bytes covers
+// ~500 columns of ASCII and ~170 of 3-byte UTF-8, while keeping the response
+// for a full 200-entry ring around 100 KB rather than unbounded.
+const historyPreviewBytes = 512
+
 // handlePaneHistoryReq serves the per-pane input-history preview list, newest
 // first. It compacts the file to the ring cap before reading so the on-disk
 // history never grows unbounded.
@@ -3769,7 +3776,7 @@ func (d *Daemon) handlePaneHistoryReq(conn *ipc.Conn, msg *ipc.Message) {
 		e := entries[i]
 		resp.Entries = append(resp.Entries, ipc.HistoryEntryMeta{
 			TsMs:    e.TsMs,
-			Preview: panehistory.Preview(e.Text, 3, 200),
+			Preview: panehistory.PreviewLine(e.Text, historyPreviewBytes),
 		})
 	}
 	respondTo(conn, msg.ID, ipc.MsgPaneHistoryResp, resp)

@@ -882,6 +882,69 @@ func (e *TextEditor) cursorVisualRow(layout []visualRow) int {
 	return len(layout) - 1
 }
 
+// --- Mouse-driven cursor / selection ---
+//
+// These three sit on TextEditor rather than on one wrapper because both the
+// notes editor and the read-only full-screen viewer drive selection from the
+// mouse, and a second copy of the clamping rules is a second place for the
+// off-by-one at end-of-line to be fixed only once.
+
+// clampPos clamps (row, col) to a valid document position.
+func (e *TextEditor) clampPos(row, col int) (int, int) {
+	if len(e.Lines) == 0 {
+		return 0, 0
+	}
+	if row < 0 {
+		row = 0
+	}
+	if row >= len(e.Lines) {
+		row = len(e.Lines) - 1
+	}
+	if col < 0 {
+		col = 0
+	}
+	// col == runeLen is the valid past-the-last-rune caret position.
+	if lineLen := runeLen(e.Lines[row]); col > lineLen {
+		col = lineLen
+	}
+	return row, col
+}
+
+// setCursorAt moves the cursor to (row, col) and drops any active selection.
+func (e *TextEditor) setCursorAt(row, col int) {
+	row, col = e.clampPos(row, col)
+	e.CursorRow, e.CursorCol = row, col
+	e.Sel = nil
+	e.ensureCursorVisible()
+}
+
+// beginSelectionAt anchors a fresh, empty selection at (row, col). Subsequent
+// extendSelectionAt calls grow it from this anchor.
+func (e *TextEditor) beginSelectionAt(row, col int) {
+	row, col = e.clampPos(row, col)
+	e.CursorRow, e.CursorCol = row, col
+	e.Sel = &EditorSel{
+		Anchor: EditorPos{Row: row, Col: col},
+		Cursor: EditorPos{Row: row, Col: col},
+	}
+}
+
+// extendSelectionAt moves the selection's cursor end to (row, col), keeping the
+// anchor fixed. Used during a mouse drag.
+func (e *TextEditor) extendSelectionAt(row, col int) {
+	row, col = e.clampPos(row, col)
+	if e.Sel == nil {
+		e.Sel = &EditorSel{
+			Anchor: EditorPos{Row: row, Col: col},
+			Cursor: EditorPos{Row: row, Col: col},
+		}
+	} else {
+		e.Sel.Cursor = EditorPos{Row: row, Col: col}
+	}
+	e.CursorRow, e.CursorCol = row, col
+	e.ensureCursorVisible()
+}
+
 // visualToLogical converts a visual (row, col) screen position back into
 // a logical (row, col) position in Lines. Clamps vrow to the valid range
 // and vcol to the visual row's width.

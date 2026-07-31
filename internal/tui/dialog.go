@@ -86,6 +86,13 @@ var disclaimerTips = []struct {
 	}},
 }
 
+// dialogBoxChrome is what dialogBorder costs every content line: the two
+// vertical border glyphs plus Padding(1, 2)'s 4 horizontal cells. lipgloss
+// draws the border INSIDE Style.Width, so a dialog's usable content width is
+// its box width minus this — budgeting only the padding leaves rows two cells
+// too wide and reflow wraps each one onto a second line.
+const dialogBoxChrome = 6
+
 var (
 	dialogBorder = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
@@ -376,25 +383,51 @@ func (m Model) handleDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 }
 
 // handleCommandHistoryKey processes a key press while the input-history modal
-// is open. Mirrors handleMemoryDialogKey's raw-string key idiom.
+// is open. Mirrors handleMemoryDialogKey's raw-string key idiom. Every cursor
+// move ends in syncHistoryScroll: the list holds up to 200 entries against a
+// window of ~30 rows, so navigation that does not move the window can only walk
+// off-screen.
 func (m Model) handleCommandHistoryKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	last := len(m.history.entries) - 1
+	// A page is the visible window minus one row of overlap, so the row the
+	// user was reading stays on screen and gives them their bearings.
+	page := m.historyVisibleRows() - 1
+	if page < 1 {
+		page = 1
+	}
 	switch msg.String() {
 	case "esc":
 		m.dialog = dialogNone
 		return m, tea.ClearScreen
 	case "up", "k":
-		if m.history.cursor > 0 {
-			m.history.cursor--
-		}
+		m.history.cursor--
 	case "down", "j":
-		if m.history.cursor < len(m.history.entries)-1 {
-			m.history.cursor++
-		}
+		m.history.cursor++
+	case "pgup":
+		m.history.cursor -= page
+	case "pgdown":
+		m.history.cursor += page
+	case "home":
+		m.history.cursor = 0
+	case "end":
+		m.history.cursor = last
 	case "enter":
-		if m.history.supported && m.history.cursor >= 0 && m.history.cursor < len(m.history.entries) {
+		if m.history.supported && m.history.cursor >= 0 && m.history.cursor <= last {
 			return m, m.requestHistoryEntry(m.history.paneID, m.history.entries[m.history.cursor].TsMs)
 		}
+		return m, nil
+	default:
+		return m, nil
 	}
+	// Clamp once, here, rather than per branch — a page jump near either end
+	// lands past the list by design and is expected to stop at it.
+	if m.history.cursor > last {
+		m.history.cursor = last
+	}
+	if m.history.cursor < 0 {
+		m.history.cursor = 0
+	}
+	m.syncHistoryScroll()
 	return m, nil
 }
 
@@ -769,7 +802,7 @@ func (m Model) renderDialog() string {
 		width = gitRepoPickWidth
 		content = m.renderGitRepoPickDialog()
 	case dialogCommandHistory:
-		width = 80
+		width = historyDialogWidth
 		content = m.renderCommandHistory()
 	case dialogUpdateNotice:
 		width = dialogWidth
@@ -1943,8 +1976,25 @@ func (m Model) newLogViewerEditor(content, path string) *TextEditor {
 // openReadonlyText opens arbitrary in-memory content in the same full-screen
 // read-only TextEditor used by the log viewer. label appears in the editor's
 // path field.
+//
+// Two deliberate differences from the log viewer, both because the content is a
+// prompt rather than a log: it soft-wraps, and it opens at the TOP.
+//
+// A prompt is frequently one very long logical line (a pasted paragraph, a
+// stack trace, a JSON blob). Hard truncation puts everything past the right
+// edge permanently out of reach — including out of reach of the selection the
+// user opened the entry to copy, since there is no horizontal scroll. A log's
+// lines are already short and its interesting end is the bottom, so it keeps
+// truncation and its end-of-buffer landing.
 func (m Model) openReadonlyText(label, content string) (tea.Model, tea.Cmd) {
-	m.tomlEditor = m.newLogViewerEditor(content, label)
+	e := m.newLogViewerEditor(content, label)
+	// Order matters: with SoftWrap on, ScrollTop is a VISUAL row index, so the
+	// flag has to be set before the position is chosen.
+	e.SoftWrap = true
+	e.CursorRow = 0
+	e.CursorCol = 0
+	e.ScrollTop = 0
+	m.tomlEditor = e
 	m.dialog = dialogLogViewer
 	// Esc returns to the history list this was opened from, not the About menu
 	// (the log viewer's default parent).
@@ -3294,11 +3344,13 @@ func sanitizePastedPath(s string) string {
 
 // setupBoxChrome is what the dialog box costs every content line: the two
 // border columns plus Padding(1,2)'s 2 cells per side. lipgloss draws the
-// border INSIDE Style.Width (same accounting paletteInnerWidth uses), so a
-// content line wider than width-6 wraps — width-4 leaves the line sitting two
-// cells past the limit, which reflow then word-wraps, dropping the last word
-// onto its own line at column 0.
-const setupBoxChrome = 6
+// border INSIDE Style.Width, so a content line wider than width-6 wraps —
+// width-4 leaves the line sitting two cells past the limit, which reflow then
+// word-wraps, dropping the last word onto its own line at column 0. Aliases the
+// shared dialogBoxChrome; kept as its own name because
+// TestSetupBoxChrome_MatchesLipglossWrapLimit pins it two-sidedly against
+// lipgloss's actual behaviour for the setup dialog.
+const setupBoxChrome = dialogBoxChrome
 
 // setupRowIndent is the cell cost of a list row's cursor prefix ("  > " or
 // four spaces) in the CWD pick list and the session picker.

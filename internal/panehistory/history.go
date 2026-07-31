@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode"
 )
 
 const (
@@ -59,14 +60,22 @@ func Dir(quilDir string) string { return filepath.Join(quilDir, "history") }
 func Path(quilDir, paneID string) string { return filepath.Join(Dir(quilDir), paneID+".jsonl") }
 
 // syntheticTags are the open/close tag pairs Claude Code uses for turns it
-// injects that the user never typed. The confirmed offender is
-// <task-notification>: when a background Task/subagent finishes, the harness
-// resumes the main loop by submitting that block as a UserPromptSubmit, so
-// without this filter machine-generated notifications land in input history.
-// The open tag intentionally omits the closing ">" so a future attribute
-// (<task-notification version="2">) still matches.
+// injects that the user never typed. Two confirmed offenders:
+//
+//   - <task-notification>: when a background Task/subagent finishes, the
+//     harness resumes the main loop by submitting that block as a
+//     UserPromptSubmit.
+//   - <agent-message>: when a subagent reports back to its parent, the report
+//     is delivered the same way — as a prompt the user never typed. A single
+//     turn may carry several concatenated blocks; the both-ends rule below
+//     still matches, since the first opens and the last closes.
+//
+// Without this filter those machine-generated turns land in input history.
+// Each open tag intentionally omits the closing ">" so a future attribute
+// (<task-notification version="2">, <agent-message from="x">) still matches.
 var syntheticTags = []struct{ open, close string }{
 	{"<task-notification", "</task-notification>"},
+	{"<agent-message", "</agent-message>"},
 }
 
 // IsSyntheticPrompt reports whether text is a harness-injected turn (not real
@@ -248,21 +257,44 @@ func readEntries(r *bufio.Reader) ([]Entry, error) {
 	return entries, nil
 }
 
-// Preview returns up to maxLines logical lines of text, each truncated (rune-
-// aware) to maxBytes with a trailing "…". Tabs become four spaces and CRs are
-// stripped so the list renders cleanly.
-func Preview(text string, maxLines, maxBytes int) []string {
-	text = strings.ReplaceAll(text, "\r", "")
-	text = strings.ReplaceAll(text, "\t", "    ")
-	lines := strings.Split(text, "\n")
-	if len(lines) > maxLines {
-		lines = lines[:maxLines]
+// PreviewLine renders text as a SINGLE display line for the history list: every
+// run of whitespace (newlines and tabs included) collapses to one space, and
+// the result is truncated rune-aware to maxBytes with a trailing "…".
+//
+// Flattening happens daemon-side rather than in the TUI because the list shows
+// exactly one row per entry: a multi-line prompt has to become one line
+// somewhere, and doing it before the wire keeps the payload proportional to
+// what is actually displayed.
+//
+// Control characters (C0, DEL and C1) are DROPPED, not substituted. A prompt is
+// free text the user may have pasted into, so it can carry an ANSI escape; an
+// ESC that reached the list would repaint or reposition inside a fixed-width
+// bordered modal that assumes one cell per printed column. Substituting a
+// visible placeholder would keep the row honest about length but add noise to
+// every row for a case that is always accidental — dropping is the quieter fix,
+// and the full text is still available verbatim in the detail view.
+func PreviewLine(text string, maxBytes int) string {
+	var b strings.Builder
+	b.Grow(len(text))
+	pendingSpace := false
+	for _, r := range text {
+		switch {
+		case unicode.IsSpace(r):
+			pendingSpace = true
+		case r < 0x20 || (r >= 0x7f && r <= 0x9f):
+			// Drop: C0 controls, DEL, and C1 (U+009B is the CSI introducer).
+		default:
+			// b.Len() == 0 means nothing printable has been written yet, so a
+			// leading run of whitespace emits nothing. A trailing run never
+			// emits either — the space is written before the NEXT printable.
+			if pendingSpace && b.Len() > 0 {
+				b.WriteByte(' ')
+			}
+			pendingSpace = false
+			b.WriteRune(r)
+		}
 	}
-	out := make([]string, 0, len(lines))
-	for _, ln := range lines {
-		out = append(out, truncRunes(ln, maxBytes))
-	}
-	return out
+	return truncRunes(b.String(), maxBytes)
 }
 
 // truncRunes truncates s to at most maxBytes bytes on a rune boundary,

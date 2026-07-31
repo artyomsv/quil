@@ -389,8 +389,8 @@ func (m Model) paletteInnerWidth() int {
 	// Content capacity is boxW minus the rounded border (2) AND the dialogBorder
 	// Padding(1,2) (4) — lipgloss draws the border INSIDE Width, so a row of
 	// boxW-4 would soft-wrap its trailing (right-aligned) shortcut onto the next
-	// line. boxW-6 is the true usable width.
-	inner := boxW - 6
+	// line. boxW-dialogBoxChrome is the true usable width.
+	inner := boxW - dialogBoxChrome
 	if inner < 1 {
 		inner = 1
 	}

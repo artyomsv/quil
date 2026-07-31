@@ -268,14 +268,14 @@ func TestPaneHistoryPayloads_RoundTrip(t *testing.T) {
 
 	resp := ipc.PaneHistoryRespPayload{
 		PaneID:  "pane-1",
-		Entries: []ipc.HistoryEntryMeta{{TsMs: 9, Preview: []string{"a", "b"}}},
+		Entries: []ipc.HistoryEntryMeta{{TsMs: 9, Preview: "a b"}},
 	}
 	rmsg, _ := ipc.NewMessage(ipc.MsgPaneHistoryResp, resp)
 	var gotResp ipc.PaneHistoryRespPayload
 	if err := rmsg.DecodePayload(&gotResp); err != nil {
 		t.Fatalf("DecodePayload resp: %v", err)
 	}
-	if len(gotResp.Entries) != 1 || gotResp.Entries[0].TsMs != 9 || gotResp.Entries[0].Preview[1] != "b" {
+	if len(gotResp.Entries) != 1 || gotResp.Entries[0].TsMs != 9 || gotResp.Entries[0].Preview != "a b" {
 		t.Fatalf("resp round-trip mismatch: %+v", gotResp)
 	}
 

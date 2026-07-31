@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -18,6 +17,14 @@ const syntheticSample = "<task-notification>\n" +
 	"<tool-use-id>toolu_01EpT6QV91j5eWigUTc8HE5V</tool-use-id>\n" +
 	"<summary>Agent finished</summary>\n" +
 	"</task-notification>"
+
+// agentMessageSample mirrors the <agent-message> block delivered as a
+// UserPromptSubmit when a subagent reports back to its parent — same class of
+// machine-generated turn as syntheticSample, and the one users actually saw
+// filling their history list.
+const agentMessageSample = `<agent-message from="impl-final">` + "\n" +
+	"STATUS: Done. Config block corrected, committed on top of 3a1f24f95e\n" +
+	"</agent-message>"
 
 // writeRawLine appends one entry directly to the pane file, bypassing Append's
 // filters — used to seed pre-existing synthetic junk that predates the fix.
@@ -50,12 +57,19 @@ func TestIsSyntheticPrompt_MatchesKnownTags(t *testing.T) {
 		{"task notification", syntheticSample, true},
 		{"leading whitespace before tag", "\n\t  " + syntheticSample, true},
 		{"tag with attribute", `<task-notification version="2">x</task-notification>`, true},
+		{"agent message", agentMessageSample, true},
+		{"agent message trailing whitespace", agentMessageSample + "\n\n", true},
+		// A turn can carry several concatenated reports; the first opens and the
+		// last closes, so the both-ends rule still classifies it.
+		{"two agent messages in one turn", agentMessageSample + "\n" + agentMessageSample, true},
 		{"real prompt", "fix the input history bug", false},
 		{"empty", "", false},
 		{"tag mentioned mid-sentence", "why does <task-notification> appear?", false},
+		{"agent message tag mid-sentence", "what is an <agent-message> block?", false},
 		// Opens with the tag but is not a complete block — a user quoting the
 		// tag in a real question must be preserved (requires the close tag too).
 		{"open tag without close", "<task-notification is confusing, what is it?", false},
+		{"agent message open without close", "<agent-message keeps showing up, why?", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -386,32 +400,73 @@ func TestRead_RejectsSymlink(t *testing.T) {
 	}
 }
 
-func TestPreview_MultilineTruncated(t *testing.T) {
+func TestPreviewLine_FlattensToOneLine(t *testing.T) {
 	t.Parallel()
-	text := "line one\nline two\nline three\nline four"
-	got := Preview(text, 3, 100)
-	want := []string{"line one", "line two", "line three"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("got %q want %q", got, want)
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"multiline joined by single spaces", "line one\nline two\nline three", "line one line two line three"},
+		{"tabs and CRLF collapse", "a\tb\r\nc", "a b c"},
+		{"whitespace runs collapse", "a  \n\n\t  b", "a b"},
+		{"leading and trailing whitespace dropped", "\n\n  hello  \n\n", "hello"},
+		{"blank lines only", "\n\t\n  ", ""},
+		{"already one line unchanged", "just a prompt", "just a prompt"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := PreviewLine(tt.in, 200); got != tt.want {
+				t.Fatalf("PreviewLine(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
 	}
 }
 
-func TestPreview_LongLineWidthCapped(t *testing.T) {
+// The list row is drawn inside a fixed-width bordered modal, so an escape
+// sequence pasted into a prompt would repaint or reposition the box. U+009B is
+// included because it is the C1 CSI introducer — a control that no
+// "is it below 0x20?" filter catches.
+func TestPreviewLine_DropsControlCharacters(t *testing.T) {
 	t.Parallel()
-	got := Preview(strings.Repeat("x", 50), 3, 10)
-	if len(got) != 1 {
-		t.Fatalf("want 1 line, got %d", len(got))
+	got := PreviewLine("red\x1b[31mtext\x07 end0m", 200)
+	want := "red[31mtext end0m"
+	if got != want {
+		t.Fatalf("PreviewLine = %q, want %q", got, want)
 	}
-	if !strings.HasSuffix(got[0], "…") || len([]rune(got[0])) > 10 {
-		t.Fatalf("line not width-capped: %q (%d runes)", got[0], len([]rune(got[0])))
+	for _, r := range got {
+		if r < 0x20 || (r >= 0x7f && r <= 0x9f) {
+			t.Fatalf("control rune %U survived in %q", r, got)
+		}
 	}
 }
 
-func TestPreview_NormalizesTabsAndCR(t *testing.T) {
+// Ranging a Go string yields utf8.RuneError for an invalid byte, and writing
+// that back out encodes a proper U+FFFD — so a prompt carrying raw non-UTF-8
+// bytes still leaves a valid string for lipgloss to measure and truncate.
+func TestPreviewLine_InvalidUTF8YieldsValidString(t *testing.T) {
 	t.Parallel()
-	got := Preview("a\tb\r\nc", 3, 100)
-	if got[0] != "a    b" || got[1] != "c" {
-		t.Fatalf("tabs/CR not normalized: %q", got)
+	got := PreviewLine("ok\xff\xfe end", 200)
+	if !utf8.ValidString(got) {
+		t.Fatalf("PreviewLine returned invalid UTF-8: %q", got)
+	}
+	if !strings.HasPrefix(got, "ok") || !strings.HasSuffix(got, "end") {
+		t.Fatalf("printable text not preserved around invalid bytes: %q", got)
+	}
+}
+
+func TestPreviewLine_TruncatesRuneSafe(t *testing.T) {
+	t.Parallel()
+	got := PreviewLine(strings.Repeat("é", 50), 10)
+	if !strings.HasSuffix(got, "…") {
+		t.Fatalf("want ellipsis suffix, got %q", got)
+	}
+	if len(got) > 10 {
+		t.Fatalf("want <= 10 bytes, got %d (%q)", len(got), got)
+	}
+	if !utf8.ValidString(got) {
+		t.Fatalf("truncation sliced a rune: %q", got)
 	}
 }
 

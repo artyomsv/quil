@@ -433,10 +433,13 @@ type PaneHistoryReqPayload struct {
 	PaneID string `json:"pane_id"`
 }
 
-// HistoryEntryMeta is one list row: a stable id (TsMs) and up to 3 preview lines.
+// HistoryEntryMeta is one list row: a stable id (TsMs) and a single-line
+// preview. The list renders exactly one row per entry, so the preview is
+// flattened daemon-side (panehistory.PreviewLine) rather than shipped as the
+// prompt's separate lines — the wire carries what is displayed, nothing more.
 type HistoryEntryMeta struct {
-	TsMs    int64    `json:"ts_ms"`
-	Preview []string `json:"preview"`
+	TsMs    int64  `json:"ts_ms"`
+	Preview string `json:"preview"`
 }
 
 // PaneHistoryRespPayload carries the preview list, newest first.

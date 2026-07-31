@@ -24,7 +24,8 @@ func TestScanMouseModes(t *testing.T) {
 		// never set must NOT clear a different, active tracking mode.
 		{"reset unset mode preserves others", mouseModeState{button: true}, "\x1b[?1000l", mouseModeState{button: true}},
 		{"cursor-hide does not trigger", mouseModeState{}, "\x1b[?25l", mouseModeState{}},
-		{"bracketed-paste does not trigger", mouseModeState{}, "\x1b[?2004h", mouseModeState{}},
+		{"bracketed-paste tracked", mouseModeState{}, "\x1b[?2004h", mouseModeState{bracketedPaste: true}},
+		{"bracketed-paste reset", mouseModeState{bracketedPaste: true}, "\x1b[?2004l", mouseModeState{}},
 		{"alt-screen does not trigger", mouseModeState{}, "\x1b[?1049h", mouseModeState{}},
 		{"mouse set amid other output", mouseModeState{},
 			"text\x1b[?25l more\x1b[?1002h\x1b[?1006h done", mouseModeState{button: true, sgr: true}},

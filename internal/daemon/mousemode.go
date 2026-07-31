@@ -15,17 +15,22 @@ import "bytes"
 // introducer can't toggle any mouse mode, so the full scan is skipped.
 var privateModeIntro = []byte("\x1b[?")
 
-// mouseModeState is the set of DEC mouse modes a child app has enabled, tracked
-// one bool per mode. Keeping them separate (rather than collapsing into a single
-// "tracking" bool) mirrors the TUI's PaneModel flags and is what makes disabling
-// a mode that was never set safe: `CSI ? 1000 l` cannot clear a `?1002`-driven
-// tracking state. sgr (?1006) is an encoding modifier, not a tracking mode.
+// mouseModeState is the set of DEC private modes a child app has enabled,
+// tracked one bool per mode. Keeping them separate (rather than collapsing into
+// a single "tracking" bool) mirrors the TUI's PaneModel flags and is what makes
+// disabling a mode that was never set safe: `CSI ? 1000 l` cannot clear a
+// `?1002`-driven tracking state. sgr (?1006) is an encoding modifier, not a
+// tracking mode. bracketedPaste (?2004) is the one non-mouse mode tracked here:
+// it needs the same daemon-side lifetime as the mouse modes (see the header
+// comment) and rides the same scanner, so it lives in this struct rather than
+// a parallel one.
 type mouseModeState struct {
-	x10    bool // ?9   (X10 compatibility)
-	normal bool // ?1000 (normal tracking)
-	button bool // ?1002 (button-event tracking)
-	any    bool // ?1003 (any-event tracking)
-	sgr    bool // ?1006 (SGR extended encoding)
+	x10            bool // ?9   (X10 compatibility)
+	normal         bool // ?1000 (normal tracking)
+	button         bool // ?1002 (button-event tracking)
+	any            bool // ?1003 (any-event tracking)
+	sgr            bool // ?1006 (SGR extended encoding)
+	bracketedPaste bool // ?2004 (bracketed paste)
 }
 
 // tracking reports whether any mouse-tracking mode is active — i.e. the child
@@ -37,7 +42,8 @@ func (m mouseModeState) tracking() bool {
 // scanMouseModes updates the per-mode state from a raw output chunk. It walks
 // every `CSI ? <params> (h|l)` sequence and applies each set/reset that touches
 // a tracked mode. Tracking modes: 9 (X10), 1000 (normal), 1002 (button-event),
-// 1003 (any-event). SGR encoding: 1006. Combined-parameter sequences (e.g.
+// 1003 (any-event). SGR encoding: 1006. Bracketed paste: 2004.
+// Combined-parameter sequences (e.g.
 // `CSI ? 1000 ; 1006 h`) are handled. Sequences split across chunk boundaries
 // are ignored (negligible in practice — apps emit the mouse-enable burst as one
 // write); a miss only falls back to no-forwarding, never a wrong-forwarding.
@@ -79,6 +85,8 @@ func scanMouseModes(m mouseModeState, data []byte) mouseModeState {
 					m.any = set
 				case "1006":
 					m.sgr = set
+				case "2004":
+					m.bracketedPaste = set
 				}
 			}
 		}

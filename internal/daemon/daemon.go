@@ -1935,6 +1935,7 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			isOverlay := pane.Overlay
 			mouseTracking := pane.MouseModes.tracking()
 			mouseSGR := pane.MouseModes.sgr
+			bracketedPaste := pane.MouseModes.bracketedPaste
 			sessionID := pane.PluginState["session_id"]
 			historyLines := pane.HistoryLines
 			lastModel := pane.LastModel
@@ -1989,6 +1990,9 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 				}
 				if mouseSGR {
 					paneData["mouse_sgr"] = true
+				}
+				if bracketedPaste {
+					paneData["bracketed_paste"] = true
 				}
 				// Model/context usage of the last completed AI turn is
 				// runtime-only (broadcast, never persisted): a stale token

@@ -74,6 +74,11 @@ type PaneInfo struct {
 	// should be forwarded to it. Mirrored onto PaneModel for the wheel handler.
 	MouseTracking bool
 	MouseSGR      bool
+	// BracketedPaste is daemon-authoritative (scanned from the PTY stream):
+	// the child app has enabled bracketed paste (?2004), so pasted text should
+	// be wrapped in \x1b[200~/\x1b[201~ markers. Mirrored onto PaneModel for
+	// the paste paths.
+	BracketedPaste bool
 	// Model/ContextTokens are daemon-authoritative (extracted from hook event
 	// data at turn boundaries): the model id and context-window token count of
 	// the pane's last completed AI turn. Empty/zero for non-AI panes.
@@ -4050,6 +4055,9 @@ func parseWorkspaceState(raw map[string]any) WorkspaceStateMsg {
 				if ms, ok := pm["mouse_sgr"].(bool); ok {
 					pi.MouseSGR = ms
 				}
+				if bp, ok := pm["bracketed_paste"].(bool); ok {
+					pi.BracketedPaste = bp
+				}
 				if model, ok := pm["model"].(string); ok {
 					pi.Model = model
 				}
@@ -4256,9 +4264,9 @@ func (m Model) pasteClipboard() tea.Cmd {
 		if pane == nil {
 			return nil
 		}
-		// Wrap in bracketed paste sequences so the shell treats newlines
-		// as literal text, not as Enter presses.
-		data := bracketedPaste(text)
+		// Wrap in bracketed paste sequences (when the app enabled the mode) so
+		// the shell treats newlines as literal text, not as Enter presses.
+		data := pastePayload(pane, text)
 		logger.Debug("pasteClipboard: sending %d bytes to pane %s", len(data), pane.ID)
 		msg, _ := ipc.NewMessage(ipc.MsgPaneInput, ipc.PaneInputPayload{
 			PaneID: pane.ID,
@@ -4582,15 +4590,37 @@ func sanitizeDialogInput(s string) string {
 	return b.String()
 }
 
-// bracketedPaste wraps text in bracketed paste markers (\x1b[200~ … \x1b[201~)
-// so the program inside the pane's PTY receives it as a single paste rather
-// than a stream of typed characters.
+// Bracketed paste markers (DECSET 2004): a wrapped paste arrives at the child
+// app as a single paste event instead of a stream of typed characters.
+const (
+	pasteStart = "\x1b[200~"
+	pasteEnd   = "\x1b[201~"
+)
+
+// bracketedPaste wraps text in bracketed paste markers. Callers must only use
+// it for panes whose app has enabled the mode (BracketedPasteEnabled) — apps
+// that didn't ask for it would receive the markers as literal input.
 func bracketedPaste(text string) []byte {
-	data := make([]byte, 0, len(text)+12)
-	data = append(data, "\x1b[200~"...)
+	// A payload containing the end marker would close the paste early and
+	// hand the remainder to the child as typed input — the classic
+	// bracketed-paste escape (a trailing \r would execute it in a shell).
+	// Clipboard content is attacker-influenceable, so strip it.
+	text = strings.ReplaceAll(text, pasteEnd, "")
+	data := make([]byte, 0, len(text)+len(pasteStart)+len(pasteEnd))
+	data = append(data, pasteStart...)
 	data = append(data, text...)
-	data = append(data, "\x1b[201~"...)
+	data = append(data, pasteEnd...)
 	return data
+}
+
+// pastePayload encodes text for injection into pane's PTY: bracketed when the
+// pane's app has enabled paste mode, raw bytes otherwise — the same decision a
+// real terminal makes before bracketing a paste.
+func pastePayload(pane *PaneModel, text string) []byte {
+	if pane.BracketedPasteEnabled() {
+		return bracketedPaste(text)
+	}
+	return []byte(text)
 }
 
 // sendInputToPane writes raw bytes to a specific pane's PTY stdin via IPC.
@@ -4610,11 +4640,12 @@ func (m Model) sendInputToPane(paneID string, data []byte) {
 }
 
 // sendClipboardToPane sends pasted text to the active pane as PTY input,
-// re-wrapped in bracketed paste markers. tea.PasteMsg carries text from the
-// outer terminal's bracketed paste, but those markers terminate at Bubble Tea
-// — the program inside the pane never sees them. Without re-wrapping, that
-// program treats the paste as ordinary keystrokes and replays it character by
-// character (visible with Chrome Remote Desktop + Claude Code, among others).
+// re-wrapped in bracketed paste markers when the pane's app enabled the mode.
+// tea.PasteMsg carries text from the outer terminal's bracketed paste, but
+// those markers terminate at Bubble Tea — the program inside the pane never
+// sees them. Without re-wrapping, that program treats the paste as ordinary
+// keystrokes: interactive TUIs replay it character by character, and a
+// multi-line paste into a shell executes every line but the last.
 func (m Model) sendClipboardToPane(text string) {
 	if text == "" {
 		return
@@ -4629,7 +4660,7 @@ func (m Model) sendClipboardToPane(text string) {
 	}
 	msg, _ := ipc.NewMessage(ipc.MsgPaneInput, ipc.PaneInputPayload{
 		PaneID: pane.ID,
-		Data:   bracketedPaste(text),
+		Data:   pastePayload(pane, text),
 	})
 	m.client.Send(msg)
 }

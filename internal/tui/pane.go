@@ -90,18 +90,20 @@ type PaneModel struct {
 	// SGR extended-encoding mode (?1006). When any tracking mode is active the
 	// wheel handler forwards the event to the PTY instead of scrolling Quil's
 	// own scrollback (which alt-screen TUI apps never populate).
-	mouseX10    bool // ?9
-	mouseNormal bool // ?1000
-	mouseButton bool // ?1002
-	mouseAny    bool // ?1003
-	mouseSGR    bool // ?1006
-	// daemonMouseTracking/daemonMouseSGR mirror the daemon-authoritative mouse
-	// state from the workspace snapshot. The daemon sees the one-time
-	// mouse-enable burst on every attach; the local emulator does not when
-	// reattaching to an already-running app (ghost_buffer=false, e.g.
-	// opencode), so this is the reliable signal. Set in syncPaneMeta.
-	daemonMouseTracking bool
-	daemonMouseSGR      bool
+	mouseX10       bool // ?9
+	mouseNormal    bool // ?1000
+	mouseButton    bool // ?1002
+	mouseAny       bool // ?1003
+	mouseSGR       bool // ?1006
+	bracketedPaste bool // ?2004 (gates paste wrapping, not mouse forwarding)
+	// daemonMouseTracking/daemonMouseSGR/daemonBracketedPaste mirror the
+	// daemon-authoritative mode state from the workspace snapshot. The daemon
+	// sees the one-time mode-enable burst on every attach; the local emulator
+	// does not when reattaching to an already-running app (ghost_buffer=false,
+	// e.g. opencode), so this is the reliable signal. Set in syncPaneMeta.
+	daemonMouseTracking  bool
+	daemonMouseSGR       bool
+	daemonBracketedPaste bool
 
 	// Render cache: View() output is reused while renderKey() is unchanged.
 	// contentGen covers VT-grid/raw-buffer mutations (the grid itself has no
@@ -362,10 +364,11 @@ func (p *PaneModel) ResetVT() {
 	p.installVT(p.newVTEmulator(w, h))
 	p.rawBuf.Reset()
 	p.cursorVisible = true
-	// Fresh emulator starts with every mouse mode off; clear the mirrored
-	// flags so a wheel event isn't forwarded until the new app re-enables
-	// tracking.
+	// Fresh emulator starts with every mode off; clear the mirrored flags so
+	// a wheel event isn't forwarded — and a paste isn't bracketed — until the
+	// new app re-enables the mode.
 	p.mouseX10, p.mouseNormal, p.mouseButton, p.mouseAny, p.mouseSGR = false, false, false, false, false
+	p.bracketedPaste = false
 	p.contentGen++
 }
 
@@ -420,9 +423,10 @@ func (p *PaneModel) ResetScroll() {
 	p.scrollBack = 0
 }
 
-// setMouseMode records a DEC mouse mode toggle reported by the VT emulator's
-// EnableMode/DisableMode callback. Only mouse-related modes are tracked; every
-// other mode is ignored. Runs on the Update goroutine (inside vt.Write).
+// setMouseMode records a DEC private mode toggle reported by the VT emulator's
+// EnableMode/DisableMode callback. Only the mouse modes and bracketed paste
+// (?2004) are tracked; every other mode is ignored. Runs on the Update
+// goroutine (inside vt.Write).
 func (p *PaneModel) setMouseMode(mode ansi.Mode, on bool) {
 	switch mode {
 	case ansi.ModeMouseX10:
@@ -435,6 +439,8 @@ func (p *PaneModel) setMouseMode(mode ansi.Mode, on bool) {
 		p.mouseAny = on
 	case ansi.ModeMouseExtSgr:
 		p.mouseSGR = on
+	case ansi.ModeBracketedPaste:
+		p.bracketedPaste = on
 	}
 }
 
@@ -446,6 +452,17 @@ func (p *PaneModel) setMouseMode(mode ansi.Mode, on bool) {
 // reattach, where the burst was emitted before this client connected).
 func (p *PaneModel) MouseTracking() bool {
 	return p.mouseX10 || p.mouseNormal || p.mouseButton || p.mouseAny || p.daemonMouseTracking
+}
+
+// BracketedPasteEnabled reports whether the pane's child app has enabled
+// bracketed paste (?2004) — i.e. pasted text should be wrapped in
+// \x1b[200~/\x1b[201~ markers. Apps that never enabled the mode must receive
+// pastes as raw bytes: injecting markers they didn't ask for corrupts their
+// stdin (e.g. `cat > file` writes the escape bytes into the file). Combines
+// the local emulator state with the daemon-authoritative flag, same as
+// MouseTracking.
+func (p *PaneModel) BracketedPasteEnabled() bool {
+	return p.bracketedPaste || p.daemonBracketedPaste
 }
 
 // wheelForwardSeq returns the mouse-wheel escape sequence to forward to the

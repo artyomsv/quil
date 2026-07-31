@@ -228,6 +228,21 @@ func (r *Registry) DetectAvailability() {
 	}
 }
 
+// SetAvailability replaces locally-detected availability with an authoritative
+// answer from elsewhere — in practice the daemon, which may be on another host.
+//
+// A plugin absent from avail becomes unavailable rather than keeping its local
+// value: if the answering side has no definition for it, spawning that type
+// there falls back to "terminal", so the pane would open as a shell wearing the
+// wrong name. Greying it is the honest answer.
+func (r *Registry) SetAvailability(avail map[string]bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for name, p := range r.plugins {
+		p.Available = avail[name]
+	}
+}
+
 // searchBinary finds a binary when exec.LookPath fails. The motivating case
 // is Windows: when Quil is launched from Explorer (rather than a Terminal
 // session) the inherited PATH can be incomplete and PATHEXT lookups can

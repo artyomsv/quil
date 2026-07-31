@@ -881,6 +881,8 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		d.handleGitReposReq(conn, msg)
 	case ipc.MsgKubeCtxReq:
 		d.handleKubeCtxReq(conn, msg)
+	case ipc.MsgPluginListReq:
+		d.handlePluginListReq(conn, msg)
 	case ipc.MsgPaneStatusReq:
 		d.handlePaneStatusReq(conn, msg)
 	case ipc.MsgCreatePaneReq:

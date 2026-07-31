@@ -124,6 +124,15 @@ const (
 	// may not have.
 	MsgKubeCtxReq  = "kube_ctx_req"
 	MsgKubeCtxResp = "kube_ctx_resp"
+
+	// Plugin availability (Ctrl+N and its consumers: context menu, palette,
+	// Alt+G overlay). Availability used to be detected only on the machine
+	// drawing the UI, which is the wrong machine whenever the daemon is
+	// remote — a tool installed only on the server was greyed out, and one
+	// installed only locally was offered and then spawned as a fallback
+	// terminal.
+	MsgPluginListReq  = "plugin_list_req"
+	MsgPluginListResp = "plugin_list_resp"
 )
 
 // Message is the wire format for IPC communication.
@@ -708,6 +717,29 @@ type KubeCtxRespPayload struct {
 	Contexts  []KubeContextInfo `json:"contexts,omitempty"`
 	Truncated bool              `json:"truncated,omitempty"`
 	Error     string            `json:"error,omitempty"`
+}
+
+// PluginListReqPayload is deliberately empty: the answer is "the daemon's
+// whole registry", not scoped to any request-supplied key.
+type PluginListReqPayload struct{}
+
+// PluginInfo is one plugin's availability as the daemon sees it.
+//
+// No Homepage field: a greyed row already links out via the LOCAL plugin
+// definition's own Homepage, which points at the same URL either machine
+// would give. The field would only matter for a plugin the TUI does not
+// define, which it cannot render at all — so it is dropped rather than
+// carried unused.
+type PluginInfo struct {
+	Name      string `json:"name"`
+	Available bool   `json:"available"`
+}
+
+// PluginListRespPayload carries the daemon's own registry. Deliberately no
+// generation field: every response describes the same daemon and applying it
+// is idempotent, so a late answer says exactly what a fresh one would.
+type PluginListRespPayload struct {
+	Plugins []PluginInfo `json:"plugins,omitempty"`
 }
 
 // NewMessage creates a Message with a typed payload.

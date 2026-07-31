@@ -1413,6 +1413,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Local timer, so deliberately no re-arm.
 		return m, m.applyKubeScanTimeout(msg.gen)
 
+	case pluginListMsg:
+		// MUST re-arm the listen loop, like every other IPC response branch.
+		cmd := m.applyPluginList(msg.Resp)
+		return m, tea.Batch(cmd, m.listenForMessages())
+
 	case browseDirMsg:
 		// MUST re-arm the listen loop, like every other IPC response branch —
 		// omitting it kills IPC for the session, a bug this package has shipped.
@@ -3958,7 +3963,7 @@ func (m *Model) nextReqGen() string {
 // Daemon communication commands
 
 func (m Model) attachToDaemon() tea.Cmd {
-	return func() tea.Msg {
+	attachCmd := func() tea.Msg {
 		// Subtract chrome (tab bar + status bar), then pane border (2)
 		tabH := m.height - chromeHeight
 		cols := m.width - 2
@@ -3979,6 +3984,12 @@ func (m Model) attachToDaemon() tea.Cmd {
 		m.client.Send(msg)
 		return nil
 	}
+	// requestPluginList is batched here rather than at Ctrl+N: .Available is
+	// also read by the context menu, the palette and the Alt+G overlay, so
+	// asking only on dialog open would leave those describing the wrong
+	// machine. Attach also covers reconnect, which is where a daemon that
+	// restarted (and therefore re-detected) shows up. No-op in local mode.
+	return tea.Batch(attachCmd, m.requestPluginList())
 }
 
 // listenContinueMsg signals the TUI to keep listening for daemon messages.
@@ -4112,6 +4123,14 @@ func (m Model) listenForMessages() tea.Cmd {
 			}
 			// Same correlator as MsgGitReposResp above; see kubeScanState.gen.
 			return kubeCtxMsg{Resp: payload, Gen: msg.ID}
+
+		case ipc.MsgPluginListResp:
+			var payload ipc.PluginListRespPayload
+			if err := msg.DecodePayload(&payload); err != nil {
+				log.Printf("decode plugin_list_resp: %v", err)
+				return listenContinueMsg{}
+			}
+			return pluginListMsg{Resp: payload}
 
 		case ipc.MsgBrowseDirResp:
 			var payload ipc.BrowseDirRespPayload

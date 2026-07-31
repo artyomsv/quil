@@ -523,7 +523,7 @@ Goal: every surface that reads a filesystem reads the *server's*.
 
 | ID | Item | Blocked by | Status |
 |---|---|---|---|
-| RD-020 | Directory-listing RPC — the root fix; every other picker keys off the CWD it returns | RD-004 | **done** (browser reads the daemon; roots, ~, Abs and joins all server-side) |
+| RD-020 | Directory-listing RPC — the root fix; every other picker keys off the CWD it returns | RD-004 | **done, confirmed on a real link** (browser reads the daemon; roots, ~, Abs and joins all server-side) |
 | RD-021 | Git repo discovery RPC | RD-004 | **done, confirmed on a real link** (Alt+G *and* the setup-dialog pick list, both through `requestGitRepos`) |
 | RD-022 | Kube context discovery RPC | RD-004 | **done** (own `kubeDiscovering` slot; contexts sanitized at render; scanning/empty/failed rendered apart) |
 | RD-023 | Plugin registry RPC with server-side `DetectAvailability` | — | **done, remote-mode only** (see RD-029 for the staleness residual) |
@@ -549,6 +549,8 @@ surface built on it.
 
 | ID | Item | Blocked by | Status |
 |---|---|---|---|
+| RD-038 | Decide whether Quil should ALWAYS set `TERM` for pane children rather than only when the daemon has none (RD-039's fix). Quil *is* the terminal for a pane — it emulates VT via `charmbracelet/x/vt` and re-renders every cell — so the child's `TERM` arguably ought to describe Quil's emulator rather than whichever terminal launched the daemon. Deferred because it changes behaviour for every local user to fix nothing they experience | RD-039 | todo |
+| RD-039 | Pane children inherit no `TERM` over a remote link | — | **done, confirmed on a real link** (`ssh -T` allocates no TTY and exports no `TERM`; the daemon started by `quil --stdio` had none and every pane child inherited the gap, so tcell-based tools — k9s, lazysql — exited 1 within milliseconds. Supplied when absent in `internal/pty`; Unix only, since ConPTY children use the Win32 API rather than terminfo) |
 | RD-037 | Answer unknown request types instead of dropping them. `handleMessage`'s dispatch switch has no `default:`, so a request the daemon does not understand produces no response and no client-visible signal — the caller waits out its timeout and renders the same empty state a genuine "nothing found" produces. Respond with an error naming the unrecognised type when `msg.ID` is set (a correlated request expecting an answer); broadcasts stay silent | — | todo |
 
 **Why this is worth an id despite being low severity.** The version gate

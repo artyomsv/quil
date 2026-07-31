@@ -5,6 +5,7 @@ package pty
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 
 	cpty "github.com/creack/pty/v2"
@@ -39,10 +40,10 @@ func (s *unixSession) SetCWD(dir string) {
 
 func (s *unixSession) Start(cmd string, args ...string) error {
 	s.cmd = exec.Command(cmd, args...)
-	s.cmd.Env = childEnv(s.env)
 	if s.cwd != "" {
 		s.cmd.Dir = s.cwd
 	}
+	s.cmd.Env = childEnv(s.cwd, s.env)
 	ws := &cpty.Winsize{Cols: uint16(s.cols), Rows: uint16(s.rows)}
 	ptmx, err := cpty.StartWithSize(s.cmd, ws)
 	if err != nil {
@@ -124,10 +125,42 @@ const defaultTERM = "xterm-256color"
 // rather than terminfo, so they neither need TERM nor currently receive one —
 // introducing it there would change behaviour on a platform where nothing is
 // broken.
-func childEnv(extra []string) []string {
+// PWD is set here rather than left to os/exec, which sets it only when Cmd.Env
+// is nil.
+//
+// That condition is the whole hazard. exec updates PWD to match Cmd.Dir, but
+// deliberately only for a nil Env, so as not to override a value the caller
+// meant to set (go.dev/issue/50599). Before TERM was introduced this function
+// did not exist and Env was left nil for any pane whose plugin contributed no
+// variables — so those panes, and only those, got the fixup. Assigning Env
+// unconditionally silently took it away from them: they began inheriting the
+// DAEMON's PWD, which under `quil --remote` is ssh's login directory rather
+// than the directory the pane was opened in. A child that trusts $PWD over
+// getcwd() would resolve relative paths against the wrong directory, with the
+// pane's own shell reporting the right one.
+//
+// Appended before extra, like TERM, so a plugin that sets PWD itself still wins.
+//
+// That precedence is provided by os/exec, NOT by execve. Cmd.environ() runs
+// dedupEnv over the slice and keeps the LAST occurrence of each name, so the
+// child receives exactly one TERM and one PWD. execve itself would pass both
+// through, and a first-wins consumer is entirely legal there — glibc and musl
+// getenv() both scan forward and return the first match. The distinction is
+// worth stating because it is what constrains this slice's future: handing it
+// to syscall.Exec or posix_spawn instead of exec.Cmd would silently invert
+// plugin-vs-default precedence with nothing failing.
+func childEnv(cwd string, extra []string) []string {
 	env := os.Environ()
 	if os.Getenv("TERM") == "" {
 		env = append(env, "TERM="+defaultTERM)
+	}
+	if cwd != "" {
+		// Absolute, because PWD is defined as an absolute pathname; a relative
+		// one is worse than none. A path that cannot be made absolute is left
+		// alone rather than guessed at.
+		if abs, err := filepath.Abs(cwd); err == nil {
+			env = append(env, "PWD="+abs)
+		}
 	}
 	return append(env, extra...)
 }

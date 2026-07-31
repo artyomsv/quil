@@ -284,7 +284,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   paths you type. Pane notes, clipboard paste and the log viewer are local by
   design. `quil status` also reports on the local daemon.
 
-||||||| parent of 3df441f (fix(daemon): repaint replay-less panes when a client reattaches)
 ## [1.42.1] - 2026-07-26
 
 ### Fixed

@@ -27,7 +27,14 @@ const MaxBrowseEntries = 500
 // Both block on the same thing — an unresponsive mount — and both run while the
 // single-flight slot is held, so a budget covering only the read would leave the
 // slot pinned by the stats instead. Same wedge, one syscall later.
-const browseTimeout = 10 * time.Second
+//
+// A var rather than a const purely so a test can shorten it, matching the
+// client-side browseTimeout/gitScanTimeout in internal/tui. The property worth
+// pinning is that browseDirResponse RETURNS — releasing the slot — even when a
+// link never answers, and asserting that against the production value would cost
+// a real ten seconds per run. Production reads the value declared here; the
+// tests that override it run sequentially within this package.
+var browseTimeout = 10 * time.Second
 
 // handleBrowseDirReq answers a directory listing.
 //

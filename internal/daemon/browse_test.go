@@ -566,6 +566,7 @@ func twoLinksAndADir(t *testing.T) (string, []os.DirEntry) {
 // navigation into a mount that never answers has an unbounded path to killing
 // the daemon and every pane with it. Refusing loudly is the better outcome.
 func TestReadDirWithin_RefusesPastTheCap(t *testing.T) {
+	waitForFSCallsDrained(t)
 	for i := 0; i < maxBlockingFSCalls; i++ {
 		if !claimBlockingFSCall() {
 			t.Fatalf("claim %d refused below the cap of %d", i, maxBlockingFSCalls)
@@ -595,19 +596,88 @@ func TestReadDirWithin_RefusesPastTheCap(t *testing.T) {
 
 // The cap must be self-healing, or one burst disables browsing permanently.
 func TestBlockingFSCalls_SlotIsReturned(t *testing.T) {
-	before := blockingFSCalls.Load()
+	waitForFSCallsDrained(t)
 
 	if _, err := readDirWithin(t.TempDir(), time.Second); err != nil {
 		t.Fatalf("readDirWithin: %v", err)
 	}
 
-	// The release happens in the worker goroutine, so it is not ordered against
-	// this line by anything but the handoff the successful read already made.
+	waitForFSCallsDrained(t)
+}
+
+// waitForFSCallsDrained blocks until no blocking filesystem call is outstanding.
+//
+// The counter is process-wide and releaseBlockingFSCall runs in the WORKER
+// goroutine — after it has handed its result to the caller, not before — so a
+// test that has already returned can still be holding a slot for a moment
+// longer. Every test in this file therefore has to wait for the baseline rather
+// than assume it, or it races whichever test ran before it. That ordering is
+// deliberate in the production code (the slot is held for as long as the syscall
+// really runs, not for as long as anyone waits), so the test is what has to
+// adapt.
+func waitForFSCallsDrained(t *testing.T) {
+	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
-	for blockingFSCalls.Load() != before && time.Now().Before(deadline) {
+	for {
+		if n := blockingFSCalls.Load(); n == 0 {
+			return
+		} else if time.Now().After(deadline) {
+			t.Fatalf("%d blocking filesystem calls still outstanding after 2s", n)
+		}
 		time.Sleep(time.Millisecond)
 	}
-	if got := blockingFSCalls.Load(); got != before {
-		t.Errorf("outstanding calls = %d, want %d — a completed read did not return its slot", got, before)
+}
+
+// TestBrowseDirResponse_HungLinkStillReturnsWithinTheBudget pins the property
+// the whole shared-deadline design exists for, at the level that actually
+// matters: browseDirResponse RETURNS when a link never answers, which is what
+// releases the single-flight slot.
+//
+// The two halves are pinned separately elsewhere, but neither proves the sum.
+// This is the end-to-end statement — a listing containing an unresponsive link
+// is bounded, and it still answers with a complete listing rather than failing.
+func TestBrowseDirResponse_HungLinkStillReturnsWithinTheBudget(t *testing.T) {
+	waitForFSCallsDrained(t)
+	root, entries := twoLinksAndADir(t)
+
+	const budget = 200 * time.Millisecond
+	block := make(chan struct{})
+	var calls atomic.Int64
+	origStat, origTimeout := statPath, browseTimeout
+	statPath = func(string) (os.FileInfo, error) {
+		calls.Add(1)
+		<-block
+		return nil, os.ErrNotExist
+	}
+	browseTimeout = budget
+	t.Cleanup(func() {
+		statPath, browseTimeout = origStat, origTimeout
+		close(block)
+	})
+
+	start := time.Now()
+	got := browseDirResponse(ipc.BrowseDirReqPayload{Path: root}, "")
+	elapsed := time.Since(start)
+
+	// A hung LINK is not a failed listing: the directory read succeeded, so the
+	// user gets their entries with the unresolvable one marked non-navigable.
+	if got.Error != "" {
+		t.Fatalf("Error = %q; a hung link must not fail the whole listing", got.Error)
+	}
+	if len(got.Entries) != len(entries) {
+		t.Errorf("entries = %d, want all %d listed", len(got.Entries), len(entries))
+	}
+	// The deterministic half. Timing alone is too weak to pin this: with only
+	// two links, a per-call budget instead of a shared one costs 2×budget, which
+	// any threshold loose enough to survive a slow CI box would also admit.
+	if n := calls.Load(); n != 1 {
+		t.Errorf("stat calls = %d, want 1 — the budget is per-call rather than "+
+			"shared, so cost scales with the number of links", n)
+	}
+	// Headroom over the budget rather than a tight bound: what is pinned is that
+	// the call is bounded AT ALL, and a loaded CI box is slow, not broken.
+	if elapsed > 10*budget {
+		t.Errorf("took %v against a %v budget — the listing is unbounded and the "+
+			"single-flight slot stays held", elapsed, budget)
 	}
 }

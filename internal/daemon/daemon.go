@@ -1713,8 +1713,16 @@ func (d *Daemon) flushPaneOutput(paneID string, data []byte) {
 	now := time.Now()
 	pane.LastOutputAt = now
 	pane.IdleNotified = false
-	newModes := scanMouseModes(pane.MouseModes, data)
+	scanData := data
+	if len(pane.modeScanTail) > 0 {
+		scanData = make([]byte, 0, len(pane.modeScanTail)+len(data))
+		scanData = append(append(scanData, pane.modeScanTail...), data...)
+	}
+	newModes, tail := scanMouseModes(pane.MouseModes, scanData)
 	pane.MouseModes = newModes
+	// Copy: tail aliases scanData, which may alias the caller's reused read
+	// buffer.
+	pane.modeScanTail = append(pane.modeScanTail[:0], tail...)
 	// A mouse-mode toggle (rare: once at startup, once at exit) must reach the
 	// TUI so it can start/stop forwarding wheel events to the app. broadcastState
 	// builds a full workspace snapshot, and the child fully controls its PTY
@@ -3378,6 +3386,7 @@ func (d *Daemon) handleRestartPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 	// Mirrors the TUI's ResetVT clearing its local flags on respawn. Reset the
 	// broadcast bookkeeping too so the fresh (empty) state is delivered promptly.
 	pane.MouseModes = mouseModeState{}
+	pane.modeScanTail = nil
 	pane.mouseBroadcast = mouseModeState{}
 	pane.lastMouseBroadcastAt = time.Time{}
 	// Clear model/context usage: the respawned child starts a fresh (or

@@ -107,6 +107,11 @@ type Pane struct {
 	MouseModes           mouseModeState
 	mouseBroadcast       mouseModeState
 	lastMouseBroadcastAt time.Time
+	// modeScanTail carries an unterminated `CSI ?` prefix from the end of one
+	// output chunk into the next scan, so a mode-enable sequence split across
+	// PTY reads is not lost (see scanMouseModes). Guarded by PluginMu; cleared
+	// on restart/respawn like MouseModes.
+	modeScanTail []byte
 	// Pending is true between restore and first spawn for a deferred pane: the
 	// model + ghost buffer exist but no PTY has been created yet. Runtime-only,
 	// never persisted. Cleared by ensurePaneSpawned.

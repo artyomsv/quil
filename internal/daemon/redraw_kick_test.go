@@ -3,6 +3,7 @@ package daemon
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -16,11 +17,21 @@ import (
 // alive and mid-conversation. The rectangle stays blank until the child writes
 // something, and a full-screen program has no reason to do that unprompted.
 //
-// The mechanism is the plugin's declared RedrawKey written to stdin. It is
-// opt-in per plugin because it is INPUT, not a signal: a program reading its
-// own stdin for data would receive it as data. SIGWINCH would need no opt-in
-// and does not work — claude-code emits 0 bytes from its main UI after a
-// resize, where vim emits ~5 KB.
+// There are TWO mechanisms and neither is universal, which is the whole point:
+//
+//   - A declared RedrawKey, written to stdin. Opt-in per plugin because it is
+//     INPUT, not a signal: a program reading its own stdin for data would
+//     receive it as data. claude-code needs this — it emits 0 bytes from its
+//     main UI after a resize, where vim emits ~5 KB.
+//   - Otherwise a resize jiggle (SIGWINCH), which needs no opt-in because it
+//     cannot be misread as data.
+//
+// An earlier version concluded from claude-code alone that SIGWINCH "does not
+// work" and shipped the key as the only mechanism. Measured 2026-07-31 against
+// a real pane, opencode is the exact inverse: ~8 KB of repaint on SIGWINCH,
+// nothing at all on Ctrl+L. So opencode and lazygit — ghost_buffer = false and
+// no redraw_key — came back blank from every reattach. Declaring a key now
+// means "I ignore SIGWINCH"; everything else gets the signal.
 
 // recordingSession captures stdin writes so a test can observe what the redraw
 // kick actually delivered to the child.
@@ -113,7 +124,14 @@ func TestRedrawKick_SendsThePluginsDeclaredKey(t *testing.T) {
 // got no replay reaches this call, including plain terminals — and a terminal
 // might be sitting in `cat > file` or at a password prompt, where an injected
 // form feed is data corruption, not a repaint.
-func TestRedrawKick_SilentWithoutAnOptIn(t *testing.T) {
+// TestRedrawKick_JigglesWhenNoKeyIsDeclared covers the case opencode and
+// lazygit fall into: ghost_buffer = false, no redraw_key. They repaint on
+// SIGWINCH and previously received nothing at all, so a reattach showed a blank
+// rectangle with a live process behind it.
+//
+// Nothing may be written to stdin on this path — the jiggle exists precisely
+// because a key would be delivered as data to a program reading its own input.
+func TestRedrawKick_JigglesWhenNoKeyIsDeclared(t *testing.T) {
 	tests := []struct {
 		name      string
 		plugin    string
@@ -127,7 +145,7 @@ func TestRedrawKick_SilentWithoutAnOptIn(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			d := daemonWithPlugin(t, tt.plugin, tt.redrawKey, true)
 			pty := &recordingSession{}
-			pane := &Pane{ID: "p1", Type: tt.paneType, PTY: pty}
+			pane := &Pane{ID: "p1", Type: tt.paneType, PTY: pty, Cols: 100, Rows: 40}
 			t.Cleanup(pane.StopInput)
 
 			d.redrawKick(pane, tt.paneType)
@@ -136,10 +154,61 @@ func TestRedrawKick_SilentWithoutAnOptIn(t *testing.T) {
 			// wrongly handed, so this cannot pass by being merely early.
 			time.Sleep(100 * time.Millisecond)
 			if got := pty.got(); got != "" {
-				t.Errorf("child received %q, want nothing written", got)
+				t.Errorf("child received %q on stdin, want nothing — the jiggle is a signal, not input", got)
+			}
+			// Jiggle then restore, so the child sees a real size CHANGE and
+			// ends up back at the size it had.
+			want := [][2]uint16{{40, 99}, {40, 100}}
+			if !reflect.DeepEqual(pty.resizes, want) {
+				t.Errorf("resizes = %v, want %v — no SIGWINCH reached the child", pty.resizes, want)
 			}
 		})
 	}
+}
+
+// A declared key means "I ignore SIGWINCH", so the pane must NOT also be
+// resized — claude-code emits nothing on resize, and jiggling it would be
+// pointless churn against a process mid-render.
+func TestRedrawKick_DeclaredKeySuppressesTheJiggle(t *testing.T) {
+	d := daemonWithPlugin(t, "claude-code", "\f", false)
+	pty := &recordingSession{}
+	pane := &Pane{ID: "p1", Type: "claude-code", PTY: pty, Cols: 100, Rows: 40}
+	t.Cleanup(pane.StopInput)
+
+	d.redrawKick(pane, "claude-code")
+
+	if !waitForInput(t, pty, "\f") {
+		t.Fatalf("child received %q, want %q (Ctrl+L)", pty.got(), "\f")
+	}
+	if len(pty.resizes) != 0 {
+		t.Errorf("resizes = %v, want none — a plugin with a key must not also be jiggled", pty.resizes)
+	}
+}
+
+// A pane whose size is not yet known must not be resized to zero. resizeKick
+// guards this, and the guard is worth pinning here because the attach path is
+// exactly where a pane can be alive before its first resize_pane arrives.
+func TestRedrawKick_UnknownSizeDoesNotResize(t *testing.T) {
+	d := daemonWithPlugin(t, "terminal", "", true)
+	pty := &recordingSession{}
+	pane := &Pane{ID: "p1", Type: "terminal", PTY: pty} // Cols/Rows still zero
+	t.Cleanup(pane.StopInput)
+
+	d.redrawKick(pane, "terminal")
+
+	if len(pty.resizes) != 0 {
+		t.Errorf("resizes = %v, want none for a pane of unknown size", pty.resizes)
+	}
+}
+
+// An exited pane has no PTY. The attach path guards this too, but redrawKick
+// dereferences the pointer itself now, so it must be safe alone.
+func TestRedrawKick_NoPTYDoesNotPanic(t *testing.T) {
+	d := daemonWithPlugin(t, "terminal", "", true)
+	pane := &Pane{ID: "p1", Type: "terminal", Cols: 100, Rows: 40}
+	t.Cleanup(pane.StopInput)
+
+	d.redrawKick(pane, "terminal") // must not panic
 }
 
 // TestPaneSize_ConcurrentResizeAndRead is a race-detector regression guard.

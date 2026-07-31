@@ -1624,13 +1624,34 @@ func resizeKick(pty apty.Session, cols, rows int) {
 // has stopped reading stdin fills the kernel buffer and blocks the writer
 // forever, and this runs on the attaching client's dispatch goroutine.
 func (d *Daemon) redrawKick(pane *Pane, typ string) {
-	p := d.registry.Get(typ)
-	if p == nil || p.Persistence.RedrawKey == "" {
+	if p := d.registry.Get(typ); p != nil && p.Persistence.RedrawKey != "" {
+		log.Printf("attach: redraw kick pane %s (type=%s, no ghost replay, %d bytes)",
+			pane.ID, typ, len(p.Persistence.RedrawKey))
+		pane.EnqueueInput([]byte(p.Persistence.RedrawKey))
 		return
 	}
-	log.Printf("attach: redraw kick pane %s (type=%s, no ghost replay, %d bytes)",
-		pane.ID, typ, len(p.Persistence.RedrawKey))
-	pane.EnqueueInput([]byte(p.Persistence.RedrawKey))
+
+	// No key declared — jiggle the size instead. The two triggers are NOT
+	// interchangeable and neither is universal: measured 2026-07-31 against a
+	// real pane, opencode emits a full repaint (~8 KB) on SIGWINCH and NOTHING
+	// on Ctrl+L, while claude-code is the exact inverse. Declaring a key is
+	// therefore how a plugin says "I ignore SIGWINCH"; everything else gets the
+	// signal, which needs no opt-in because it is not delivered as stdin data
+	// and so cannot be misread by a program reading its own input.
+	//
+	// Without this, opencode and lazygit — ghost_buffer = false, no redraw_key —
+	// came back from every reattach as a blank rectangle with a live process
+	// behind it.
+	pane.PluginMu.Lock()
+	pty, cols, rows := pane.PTY, pane.Cols, pane.Rows
+	pane.PluginMu.Unlock()
+	if pty == nil {
+		return
+	}
+	log.Printf("attach: redraw kick pane %s (type=%s, no ghost replay, resize jiggle %dx%d)",
+		pane.ID, typ, cols, rows)
+	// Resize syscall outside the lock, same discipline as handleResizePane.
+	resizeKick(pty, cols, rows)
 }
 
 func (d *Daemon) streamPTYOutput(paneID string, pty apty.Session) {

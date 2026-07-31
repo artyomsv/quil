@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode"
 )
 
 const (
@@ -59,31 +60,51 @@ func Dir(quilDir string) string { return filepath.Join(quilDir, "history") }
 func Path(quilDir, paneID string) string { return filepath.Join(Dir(quilDir), paneID+".jsonl") }
 
 // syntheticTags are the open/close tag pairs Claude Code uses for turns it
-// injects that the user never typed. The confirmed offender is
-// <task-notification>: when a background Task/subagent finishes, the harness
-// resumes the main loop by submitting that block as a UserPromptSubmit, so
-// without this filter machine-generated notifications land in input history.
-// The open tag intentionally omits the closing ">" so a future attribute
-// (<task-notification version="2">) still matches.
+// injects that the user never typed. Two confirmed offenders:
+//
+//   - <task-notification>: when a background Task/subagent finishes, the
+//     harness resumes the main loop by submitting that block as a
+//     UserPromptSubmit.
+//   - <agent-message>: when a subagent reports back to its parent, the report
+//     is delivered the same way — as a prompt the user never typed. A single
+//     turn may carry several concatenated blocks; the both-ends rule below
+//     still matches, since the first opens and the last closes.
+//
+// Without this filter those machine-generated turns land in input history.
+// Each open tag intentionally omits the closing ">" so a future attribute
+// (<task-notification version="2">, <agent-message from="x">) still matches.
 var syntheticTags = []struct{ open, close string }{
 	{"<task-notification", "</task-notification>"},
+	{"<agent-message", "</agent-message>"},
 }
 
 // IsSyntheticPrompt reports whether text is a harness-injected turn (not real
 // user input) that must be excluded from history. A prompt is synthetic only
-// when, after trimming surrounding whitespace, it BOTH opens with a known tag
-// AND closes with its matching end tag — i.e. it is the whole notification
-// block and nothing else. Requiring both ends means a real prompt that merely
-// quotes or discusses the tag ("<task-notification is confusing, what is it?")
-// is preserved; only a pure, complete block is dropped.
+// when, after trimming surrounding whitespace, it BOTH opens with SOME known
+// tag AND closes with SOME known end tag — i.e. it is machine-generated blocks
+// and nothing else. Requiring both ends means a real prompt that merely quotes
+// or discusses a tag ("<task-notification is confusing, what is it?") is
+// preserved; only a pure, complete block is dropped.
+//
+// The two ends are matched INDEPENDENTLY rather than as a pair, because one
+// turn can carry blocks of different kinds: with parallel subagents, a
+// <task-notification> and an <agent-message> arrive concatenated, and a
+// pair-wise test matches neither (the first tag's open hits but not its close,
+// the second's close hits but not its open) — letting exactly the noisiest
+// machine turns through. No real prompt both starts with one of these tags and
+// ends with one of them.
 func IsSyntheticPrompt(text string) bool {
 	t := strings.TrimSpace(text)
+	opens, closes := false, false
 	for _, tag := range syntheticTags {
-		if strings.HasPrefix(t, tag.open) && strings.HasSuffix(t, tag.close) {
-			return true
+		if strings.HasPrefix(t, tag.open) {
+			opens = true
+		}
+		if strings.HasSuffix(t, tag.close) {
+			closes = true
 		}
 	}
-	return false
+	return opens && closes
 }
 
 // Append writes one entry to the pane's history file. Empty/whitespace text and
@@ -248,21 +269,53 @@ func readEntries(r *bufio.Reader) ([]Entry, error) {
 	return entries, nil
 }
 
-// Preview returns up to maxLines logical lines of text, each truncated (rune-
-// aware) to maxBytes with a trailing "…". Tabs become four spaces and CRs are
-// stripped so the list renders cleanly.
-func Preview(text string, maxLines, maxBytes int) []string {
-	text = strings.ReplaceAll(text, "\r", "")
-	text = strings.ReplaceAll(text, "\t", "    ")
-	lines := strings.Split(text, "\n")
-	if len(lines) > maxLines {
-		lines = lines[:maxLines]
+// PreviewLine renders text as a SINGLE display line for the history list: every
+// run of whitespace (newlines and tabs included) collapses to one space, and
+// the result is truncated rune-aware to maxBytes with a trailing "…".
+//
+// Flattening happens daemon-side rather than in the TUI because the list shows
+// exactly one row per entry: a multi-line prompt has to become one line
+// somewhere, and doing it before the wire keeps the payload proportional to
+// what is actually displayed.
+//
+// Control characters (category Cc — C0, DEL and C1) are DROPPED, not
+// substituted. A prompt is free text the user may have pasted into, so it can
+// carry an ANSI escape; an ESC that reached the list would repaint or
+// reposition inside a fixed-width bordered modal that assumes one cell per
+// printed column. Substituting a visible placeholder would keep the row honest
+// about length but add noise to every row for a case that is always accidental.
+//
+// Unicode format characters (category Cf) go too, which IsControl does NOT
+// cover and IsSpace does not catch either. A bidi override or isolate
+// (U+202A–U+202E, U+2066–U+2069) renders the row reversed while still measuring
+// its pre-override width, and the user picks which prompt to open from exactly
+// that row — so the row could read as something other than what Enter fetches.
+// ZWSP is the quiet half: invisible, not IsSpace, and therefore able to defeat
+// the whitespace collapse this function is built around. Same reasoning, same
+// categories as claudesessions.SanitizeTitle, which sanitizes the sibling data
+// class (Claude session titles) for the same non-VT render path.
+func PreviewLine(text string, maxBytes int) string {
+	var b strings.Builder
+	b.Grow(len(text))
+	pendingSpace := false
+	for _, r := range text {
+		switch {
+		case unicode.IsSpace(r):
+			pendingSpace = true
+		case unicode.IsControl(r), unicode.Is(unicode.Cf, r):
+			// Drop. Cc is exactly C0 + DEL + C1 (U+009B is the CSI introducer).
+		default:
+			// b.Len() == 0 means nothing printable has been written yet, so a
+			// leading run of whitespace emits nothing. A trailing run never
+			// emits either — the space is written before the NEXT printable.
+			if pendingSpace && b.Len() > 0 {
+				b.WriteByte(' ')
+			}
+			pendingSpace = false
+			b.WriteRune(r)
+		}
 	}
-	out := make([]string, 0, len(lines))
-	for _, ln := range lines {
-		out = append(out, truncRunes(ln, maxBytes))
-	}
-	return out
+	return truncRunes(b.String(), maxBytes)
 }
 
 // truncRunes truncates s to at most maxBytes bytes on a rune boundary,

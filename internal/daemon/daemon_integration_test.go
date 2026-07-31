@@ -244,8 +244,9 @@ func dialDaemon(t *testing.T, sockPath string) net.Conn {
 
 // TestHandlePaneHistoryReq_ReturnsPreviewsNewestFirst seeds two history
 // entries for a pane, then verifies MsgPaneHistoryReq returns their previews
-// newest-first with multiline text yielding multiple preview lines. Exercises
-// the full IPC round-trip through handlePaneHistoryReq.
+// newest-first, with multiline text flattened to ONE line (the list renders one
+// row per entry). Exercises the full IPC round-trip through
+// handlePaneHistoryReq.
 func TestHandlePaneHistoryReq_ReturnsPreviewsNewestFirst(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("QUIL_HOME", tmp)
@@ -294,8 +295,11 @@ func TestHandlePaneHistoryReq_ReturnsPreviewsNewestFirst(t *testing.T) {
 	if out.Entries[0].TsMs != 2 {
 		t.Errorf("Entries[0].TsMs = %d, want 2 (newest first)", out.Entries[0].TsMs)
 	}
-	if len(out.Entries[0].Preview) != 2 {
-		t.Errorf("Entries[0].Preview len = %d, want 2 (multiline)", len(out.Entries[0].Preview))
+	if want := "second multiline"; out.Entries[0].Preview != want {
+		t.Errorf("Entries[0].Preview = %q, want %q (multiline flattened to one row)", out.Entries[0].Preview, want)
+	}
+	if strings.Contains(out.Entries[0].Preview, "\n") {
+		t.Errorf("Entries[0].Preview contains a newline: %q", out.Entries[0].Preview)
 	}
 	if out.Entries[1].TsMs != 1 {
 		t.Errorf("Entries[1].TsMs = %d, want 1", out.Entries[1].TsMs)

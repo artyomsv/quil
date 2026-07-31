@@ -228,7 +228,7 @@ Bounded escalation for stopping a daemon — IPC `MsgShutdown` (5 s) → SIGTERM
 ### v1.30.0: Per-Pane Input History
 > `Alt+Shift+I` lists every prompt you submitted to an AI pane.
 
-Recorded by the Claude Code `UserPromptSubmit` hook (opt-in per plugin via `[command] record_history = true`), stored at `~/.quil/history/<pane>.jsonl`, ring-trimmed to the last 200 entries, and removed when the pane is destroyed. `Enter` opens the full text in the read-only viewer. Machine-injected turns (background-task notifications) are filtered on write, on read, and on compaction so they never pollute the list. OpenCode support is still pending — its message handler does not yet extract prompt text.
+Recorded by the Claude Code `UserPromptSubmit` hook (opt-in per plugin via `[command] record_history = true`), stored at `~/.quil/history/<pane>.jsonl`, ring-trimmed to the last 200 entries, and removed when the pane is destroyed. The list is one row per prompt, scrollable with `↑↓`/`PgUp`/`PgDn`/`Home`/`End`; `Enter` opens the full text in the read-only viewer, soft-wrapped and selectable by drag. Machine-injected turns are filtered on write, on read, and on compaction so they never pollute the list — both background-task notifications and subagent reports (`<agent-message>`). OpenCode support is still pending — its message handler does not yet extract prompt text.
 
 ### v1.31.0: Bundled OpenConsole for Windows 10 — [ADR-25](architecture.md)
 > Fixes the `Hello` → `H ello` caret gap when typing in AI panes on Windows 10.

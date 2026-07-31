@@ -59,7 +59,7 @@ The active tab is prefixed with `* ` in the tab bar so it's visible even when [t
 | `Alt+Shift+W` | Toggle the active AI pane's preview between left-edge crop (default) and soft-wrap. Only affects `wide_canvas` panes rendered smaller than the window. |
 | `Alt+G` | Toggle lazygit overlay (git repo from active pane's directory) |
 | `Alt+Shift+L` | Force a full screen redraw — clears rendering artifacts (scrambled/misplaced characters) without restarting. Mnemonic: `Ctrl+L` redraws a shell. |
-| `Alt+Shift+I` | Open the active pane's input history — a list of prompts you submitted, each shown as a 3-line preview. `↑/↓` navigate, `Enter` opens the full text read-only (scroll + copy), `Esc` closes. Only AI panes whose plugin sets `record_history` (Claude Code) capture history; other pane types show an empty state. |
+| `Alt+Shift+I` | Open the active pane's input history — one row per prompt you submitted, newest first. `↑/↓` navigate, `PgUp/PgDn/Home/End` jump, `Enter` opens the full text in a soft-wrapped read-only viewer (drag or `Ctrl+A` to select, right-click or `Enter` to copy), `Esc` closes. Only AI panes whose plugin sets `record_history` (Claude Code) capture history; other pane types show an empty state. |
 | `Alt+A` | Open the pane context menu for the active pane (`quick_actions`). Same menu as right-click — see [Mouse: pane context menu](#mouse-pane-context-menu) below. |
 
 ### Mouse: pane context menu

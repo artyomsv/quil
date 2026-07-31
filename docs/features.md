@@ -173,11 +173,16 @@ Three paste keys: `Ctrl+V`, `Ctrl+Alt+V`, and `F8`. **`F8` is the recommended Wi
 
 AI panes produce a lot of output, and the prompt you actually typed scrolls far out of view. Quil records each prompt you submit and lets you pull it back up.
 
-- **`Alt+Shift+I`** opens the input-history modal for the active pane: your past prompts as 3-line previews, newest first.
-- **`↑`/`↓`** to navigate, **`Enter`** to open the selected prompt's full text in a read-only viewer (scroll and copy supported), **`Esc`** back to the list, **`Esc`** again back to the pane.
+- **`Alt+Shift+I`** opens the input-history modal for the active pane: one row per past prompt, newest first. A multi-line prompt is flattened to a single line and truncated to the box, so the list stays scannable however long the prompts were.
+- **`↑`/`↓`** to navigate, **`PgUp`/`PgDn`/`Home`/`End`** to move faster; the list scrolls to keep the cursor in view and shows its position (`12-31/200`) whenever there is more than one screenful.
+- **`Enter`** opens the selected prompt's full text in a read-only viewer, **`Esc`** back to the list, **`Esc`** again back to the pane. The viewer **soft-wraps** (a pasted paragraph or stack trace is one very long logical line — without wrapping, most of it would be unreachable) and opens at the top. Drag to select, right-click or `Enter` to copy, `Ctrl+A` to select all, mouse wheel to scroll.
 - History **persists across daemon restarts** at `~/.quil/history/<pane-id>.jsonl` (one JSON line per prompt, capped at 64 KiB per entry and ring-trimmed to the last 200), and is deleted when the pane is destroyed.
 
 Capture is **opt-in per pane type**. A plugin enables it with `record_history = true` under `[command]` (see [Plugin reference](plugin-reference.md)); the built-in **Claude Code** plugin sets it. The source of truth is the agent's own `UserPromptSubmit` hook — not keystroke scraping — so multiline prompts, pastes, and edits are captured exactly as submitted. Pane types without the opt-in (terminal, lazygit, k9s, lazysql, …) show "No input history for this pane type." OpenCode support is planned.
+
+Turns the harness submits on your behalf are filtered out on write, on read, and on compaction — background-task notifications (`<task-notification>`) and subagent reports (`<agent-message>`) are things the agent said to itself, not prompts you typed. A prompt that merely *mentions* one of those tags is kept: a turn is only dropped when it both starts and ends with those markers and holds nothing else.
+
+Prompt text is sanitized before display, on both sides of the connection — control characters and Unicode format characters (bidi overrides, zero-width spaces) are stripped from the list rows and from the detail view. A prompt is free text you may have pasted into, and neither surface passes through the terminal emulator that makes ordinary pane output safe.
 
 ---
 

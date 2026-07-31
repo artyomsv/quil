@@ -16,6 +16,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/artyomsv/quil/internal/claudesessions"
 	"github.com/artyomsv/quil/internal/clipboard"
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
@@ -324,6 +325,9 @@ type Model struct {
 	notesMouseDown    bool                    // true while a left-button drag is in progress inside the notes editor
 	notesAnchorRow    int                     // document row where a notes-editor drag began (resolved once on click)
 	notesAnchorCol    int                     // document col where a notes-editor drag began (resolved once on click)
+	viewerMouseDown   bool                    // true while a left-button drag is in progress inside the read-only full-screen viewer
+	viewerAnchorRow   int                     // document row where a viewer drag began (resolved once on click)
+	viewerAnchorCol   int                     // document col where a viewer drag began (resolved once on click)
 
 	// Scrollbar click-and-drag. Set on a left-click that hits a pane's
 	// rightmost content column (the scrollbar track). While
@@ -701,6 +705,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Mod.Contains(tea.ModCtrl) {
 			return m, nil
 		}
+		// The full-screen read-only viewer paints over EVERYTHING — panes,
+		// sidebar, lazygit overlay — so it owns the mouse while it is open.
+		// Checked ahead of every swallow below: a tab that happens to have an
+		// overlay pane would otherwise eat clicks aimed at a dialog drawn on
+		// top of it.
+		if m.viewerOwnsMouse() {
+			return m.handleViewerMouseClick(msg)
+		}
+		// A modal is up: the panes are not on screen, so nothing below may act
+		// on them. clearDragState aborts a drag armed before the dialog opened.
+		if m.modalSwallowsMouse() {
+			m.clearDragState()
+			return m, nil
+		}
 		// Overlay visible: swallow all mouse clicks (keyboard-only v1).
 		// clearDragState ensures no drag flag stays set from before the overlay opened.
 		// The context menu can never be open while the lazygit overlay is
@@ -857,6 +875,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.MouseMotionMsg:
+		if m.viewerOwnsMouse() {
+			return m.handleViewerMouseMotion(msg)
+		}
+		if m.modalSwallowsMouse() {
+			return m, nil
+		}
 		// Overlay visible: swallow all motion (keyboard-only v1).
 		if tab := m.activeTabModel(); tab != nil && tab.overlayVisible {
 			return m, nil
@@ -916,6 +940,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.MouseReleaseMsg:
+		if m.viewerOwnsMouse() {
+			// The selection stays — release only ends the drag.
+			m.viewerMouseDown = false
+			return m, nil
+		}
+		if m.modalSwallowsMouse() {
+			m.clearDragState()
+			return m, nil
+		}
 		// Overlay visible: clear any stale drag state and swallow the release.
 		if tab := m.activeTabModel(); tab != nil && tab.overlayVisible {
 			m.clearDragState()
@@ -962,6 +995,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.MouseWheelMsg:
+		if m.viewerOwnsMouse() {
+			m.scrollViewer(msg.Button)
+			return m, nil
+		}
+		// The history list is a scrolling list drawn over the panes; without
+		// this the wheel would scroll a pane's scrollback behind the modal.
+		if m.dialog == dialogCommandHistory {
+			m.scrollHistoryList(msg.Button)
+			return m, nil
+		}
+		// Every other modal has nothing to scroll, but the panes behind it must
+		// not scroll either.
+		if m.modalSwallowsMouse() {
+			return m, nil
+		}
 		if m.ctxMenu.open() {
 			return m, nil // wheel is swallowed while the menu is open
 		}
@@ -1369,6 +1417,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m = m.applyHistoryList(msg.Resp)
 		return m, m.listenForMessages()
 
+	case historyTimeoutMsg:
+		// LOCAL timer — deliberately does NOT re-arm listenForMessages. Doing so
+		// would put a second reader on the IPC connection.
+		return m.applyHistoryTimeout(msg.paneID), nil
+
 	case historyEntryMsg:
 		// All branches must keep the IPC listen loop alive — these messages
 		// originate from listenForMessages.
@@ -1384,7 +1437,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(m.requestHistory(m.history.paneID), m.listenForMessages())
 		}
 		label := fmt.Sprintf("Input @ %s", time.UnixMilli(msg.Resp.TsMs).Format("2006-01-02 15:04:05"))
-		mdl, cmd := m.openReadonlyText(label, msg.Resp.Text)
+		// The viewer writes straight to the terminal — a full-screen editor is
+		// not a pane, so nothing re-renders this through the VT emulator. A
+		// recorded prompt is free text the user pasted into, and content lifted
+		// from a README, an issue or a terminal capture can carry OSC 52, which
+		// several terminals honour as "set the system clipboard": re-reading an
+		// old prompt would silently replace what the next paste types. Same
+		// sanitizer, same reasoning as sessions.go's prompt panel; line breaks
+		// survive because the shape of a prompt is most of its readability.
+		// Tabs become spaces, which the editor needs anyway — it does not expand
+		// them, so a literal tab drifts the columns its selection math assumes.
+		mdl, cmd := m.openReadonlyText(label, claudesessions.SanitizePrompt(msg.Resp.Text))
 		return mdl, tea.Batch(cmd, m.listenForMessages())
 
 	case listenContinueMsg:
@@ -1665,6 +1728,7 @@ func (m *Model) clearDragState() {
 	m.scrollDragRect = PaneRect{}
 	m.mouseDown = false
 	m.notesMouseDown = false
+	m.viewerMouseDown = false
 	m.splitDragNode = nil
 	m.splitDragRect = BorderHit{}
 }
@@ -2146,6 +2210,48 @@ func (m Model) notesEditorPosAt(screenX, screenY int) (row, col int, ok bool) {
 		return row, col, true
 	}
 	return vrow, vcol, true
+}
+
+// logViewerPosAt converts screen (x, y) to a logical (row, col) position in the
+// full-screen read-only viewer (dialogLogViewer), accounting for the title bar,
+// the status bar, the line-number gutter, and the editor's scroll offset.
+//
+// Geometry mirrors renderTOMLEditorFullScreen exactly: row 0 is the title bar,
+// the last row is the status bar, and everything between is editor body whose
+// first GutterWidth() columns are line numbers. Returns ok=false outside the
+// body; inside it, gutter columns clamp to column 0 so a drag that wanders left
+// still selects from the start of the line.
+func (m Model) logViewerPosAt(screenX, screenY int) (row, col int, ok bool) {
+	e := m.tomlEditor
+	if e == nil {
+		return 0, 0, false
+	}
+	const bodyY0 = 1 // title bar
+	bodyY1 := m.height - 1
+	if bodyY1 <= bodyY0 || screenY < bodyY0 || screenY >= bodyY1 {
+		return 0, 0, false
+	}
+	bodyX0 := e.GutterWidth()
+	if screenX < bodyX0 {
+		screenX = bodyX0
+	}
+	vrow := e.ScrollTop + (screenY - bodyY0)
+	vcol := screenX - bodyX0
+	if e.SoftWrap {
+		// ScrollTop is a visual-row index while wrapping; translate back to the
+		// logical position the selection API expects.
+		layout := e.visualLayout(e.contentWForLayout())
+		row, col = e.visualToLogical(layout, vrow, vcol)
+	} else {
+		row, col = vrow, vcol
+	}
+	// Both branches return a position that is valid to index Lines with. The
+	// SoftWrap branch is already clamped by visualToLogical; the other is not —
+	// a click below the last line yields a row past the end. Today's callers
+	// clamp again, so nothing is out of range, but leaving the two branches with
+	// different contracts hands the next caller a panic for free.
+	row, col = e.clampPos(row, col)
+	return row, col, true
 }
 
 // notesKeyExempt reports whether a key should bypass the notes editor and
@@ -3661,7 +3767,10 @@ func (m Model) renderTOMLEditorFullScreen() string {
 			status = fmt.Sprintf(" Enter copy  Ctrl+X cut  Esc clear    Ln %d, Col %d", e.CursorRow+1, e.CursorCol+1)
 		}
 	case e.ReadOnly:
-		status = fmt.Sprintf(" Esc close    Ln %d, Col %d", e.CursorRow+1, e.CursorCol+1)
+		// Selection and copy already worked here, but nothing said so — the
+		// hint listed only "Esc close", so a user who opened a history entry to
+		// copy it had no way to discover Ctrl+A or drag-select.
+		status = fmt.Sprintf(" Ctrl+A select all  drag/shift+arrows select  Esc close    Ln %d, Col %d", e.CursorRow+1, e.CursorCol+1)
 	default:
 		status = fmt.Sprintf(" Ctrl+S save  Ctrl+V paste  Esc close    Ln %d, Col %d", e.CursorRow+1, e.CursorCol+1)
 	}

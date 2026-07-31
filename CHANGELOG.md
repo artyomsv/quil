@@ -18,6 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   window-size change, and Claude Code is the exact reverse. Panes that name no
   key are now given a size change instead, which no program mistakes for input.
   This was never remote-only — it happened on every reattach, locally too.
+- **Turning on scrollback for a Claude Code pane now works.** Setting
+  `ghost_buffer = true` in `claude-code.toml` restores the pane's history when
+  you reattach — but the first key you pressed erased all of it, leaving just
+  the input box. The restored history lives in the pane's scrollback, and the
+  first live output from the program threw that scrollback away. A pane type
+  no longer overrides what its own plugin file asks for. This is off by
+  default, so it affects you only if you turned it on.
 - **Full-screen tools start in a remote session.** `k9s` and `lazysql` opened
   and exited within a moment, leaving a pane that looked like it had crashed
   for no reason. A daemon reached over SSH has no terminal type set — the

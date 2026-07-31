@@ -201,6 +201,29 @@ func TestRedrawKick_UnknownSizeDoesNotResize(t *testing.T) {
 	}
 }
 
+// TestRedrawKick_ExitedPaneIsNotResized covers the window between handleAttach's
+// liveness check and this one.
+//
+// handleAttach decides a pane is worth kicking under its own lock span, then
+// releases it. If onPaneExit lands in the gap, the PTY pointer is still non-nil
+// while the process behind it is gone — so a check that reads only PTY resizes a
+// closed one. ExitCode is read in the SAME span as the pointer precisely so the
+// two cannot disagree, and without this test that pairing could be split again
+// with nothing failing.
+func TestRedrawKick_ExitedPaneIsNotResized(t *testing.T) {
+	d := daemonWithPlugin(t, "terminal", "", true)
+	pty := &recordingSession{}
+	code := 0
+	pane := &Pane{ID: "p1", Type: "terminal", PTY: pty, Cols: 100, Rows: 40, ExitCode: &code}
+	t.Cleanup(pane.StopInput)
+
+	d.redrawKick(pane, "terminal")
+
+	if len(pty.resizes) != 0 {
+		t.Errorf("resizes = %v, want none — the process behind this PTY has already exited", pty.resizes)
+	}
+}
+
 // An exited pane has no PTY. The attach path guards this too, but redrawKick
 // dereferences the pointer itself now, so it must be safe alone.
 func TestRedrawKick_NoPTYDoesNotPanic(t *testing.T) {

@@ -1606,19 +1606,35 @@ func resizeKick(pty apty.Session, cols, rows int) {
 // full-screen program has no reason to do that unprompted. The pane reads as
 // dead when it is perfectly healthy.
 //
-// The mechanism is the plugin's declared RedrawKey, written to the child's
-// stdin. That is INPUT rather than a signal, which is why it is opt-in per
-// plugin rather than applied to every replay-less pane: the plugin author is
-// asserting both that their program treats the byte as "repaint" and that
-// nothing else is reading its stdin. A pane sitting in `cat > file` or at a
-// password prompt would receive it as data.
+// There are TWO mechanisms, and the load-bearing fact is that NEITHER is
+// universal — no single trigger repaints every full-screen program.
 //
-// SIGWINCH via a resize would be the safe universal alternative, needs no
-// per-plugin opt-in, and does not work. Measured on a real PTY: vim repaints
-// with ~5 KB of output after a 1-column jiggle, claude-code emits 0 bytes from
-// its main UI. It re-lays-out on a resize but only paints on its own render
-// tick, which input drives. An earlier version of this fix used the jiggle and
-// silently did nothing.
+// A plugin's declared RedrawKey is written to the child's stdin. That is INPUT
+// rather than a signal, which is why it is opt-in per plugin rather than
+// applied to every replay-less pane: the plugin author is asserting both that
+// their program treats the byte as "repaint" and that nothing else is reading
+// its stdin. A pane sitting in `cat > file` or at a password prompt would
+// receive it as data.
+//
+// Everything else gets a resize jiggle instead, which needs no opt-in because
+// SIGWINCH is a signal and cannot be misread as data. Declaring a key therefore
+// MEANS "I ignore SIGWINCH", and suppresses the jiggle.
+//
+// The measurements are why it is split this way, and they are counter-intuitive
+// in both directions. On a real PTY: vim repaints with ~5 KB after a 1-column
+// jiggle; claude-code emits 0 bytes from its main UI, because it re-lays-out on
+// a resize but only paints on its own render tick, which input drives; opencode
+// is the exact inverse of claude-code, emitting ~8 KB on SIGWINCH and NOTHING
+// on Ctrl+L (measured 2026-07-31).
+//
+// Both halves of this have already shipped as bugs. The first version used only
+// the jiggle and silently did nothing for claude-code. Its fix concluded from
+// that one program that SIGWINCH "does not work" and made the key the ONLY
+// mechanism — which left opencode and lazygit (ghost_buffer = false, no
+// redraw_key) coming back blank from every reattach, locally as well as
+// remotely, with a live process behind them. Adding redraw_key = "\f" to
+// opencode, the obvious fix that the plugin schema invites, would have been a
+// no-op.
 //
 // Writes go through EnqueueInput, never pane.PTY.Write directly: a child that
 // has stopped reading stdin fills the kernel buffer and blocks the writer
@@ -1631,21 +1647,25 @@ func (d *Daemon) redrawKick(pane *Pane, typ string) {
 		return
 	}
 
-	// No key declared — jiggle the size instead. The two triggers are NOT
-	// interchangeable and neither is universal: measured 2026-07-31 against a
-	// real pane, opencode emits a full repaint (~8 KB) on SIGWINCH and NOTHING
-	// on Ctrl+L, while claude-code is the exact inverse. Declaring a key is
-	// therefore how a plugin says "I ignore SIGWINCH"; everything else gets the
-	// signal, which needs no opt-in because it is not delivered as stdin data
-	// and so cannot be misread by a program reading its own input.
+	// No key declared, so jiggle the size. This also covers a pane whose type is
+	// not in the registry at all, which is the safe direction: a signal cannot
+	// corrupt a program's input the way a guessed key could.
 	//
-	// Without this, opencode and lazygit — ghost_buffer = false, no redraw_key —
-	// came back from every reattach as a blank rectangle with a live process
-	// behind it.
+	// The size is the PREVIOUS client's, because this runs inside handleAttach
+	// and the new client's resize_pane has not arrived yet. A laptop attaching
+	// after a desktop therefore gets one frame laid out for the old width. That
+	// is transient rather than stuck: the real resize that follows is itself a
+	// SIGWINCH, and a program that repaints on this one repaints on that one
+	// too. Skipping the kick when the size is about to change is not available —
+	// nothing here knows the incoming client's geometry.
+	//
+	// PTY and ExitCode are read in ONE span, together with the size. Taking them
+	// separately would let onPaneExit land in between and leave this resizing a
+	// closed PTY with a live-looking pointer.
 	pane.PluginMu.Lock()
-	pty, cols, rows := pane.PTY, pane.Cols, pane.Rows
+	pty, exited, cols, rows := pane.PTY, pane.ExitCode != nil, pane.Cols, pane.Rows
 	pane.PluginMu.Unlock()
-	if pty == nil {
+	if pty == nil || exited {
 		return
 	}
 	log.Printf("attach: redraw kick pane %s (type=%s, no ghost replay, resize jiggle %dx%d)",

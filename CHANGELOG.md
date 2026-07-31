@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.45.3] - 2026-07-31
+
 ### Fixed
 - **Input history is readable again.** The list showed each prompt as up to
   three lines with a blank line between entries, and every one of those lines

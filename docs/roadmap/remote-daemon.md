@@ -491,7 +491,7 @@ Goal: every surface that reads a filesystem reads the *server's*.
 | ID | Item | Blocked by | Status |
 |---|---|---|---|
 | RD-020 | Directory-listing RPC — the root fix; every other picker keys off the CWD it returns | RD-004 | **done** (browser reads the daemon; roots, ~, Abs and joins all server-side) |
-| RD-021 | Git repo discovery RPC | RD-004 | **done, confirmed on a real link** (Alt+G; setup-dialog pick list still local) |
+| RD-021 | Git repo discovery RPC | RD-004 | **done, confirmed on a real link** (Alt+G *and* the setup-dialog pick list, both through `requestGitRepos`) |
 | RD-022 | Kube context discovery RPC | RD-004 | todo |
 | RD-023 | Plugin registry RPC with server-side `DetectAvailability` | — | todo |
 | RD-024 | Per-target `recent-cwds.json` | RD-020 | todo |

@@ -388,7 +388,7 @@ via `[update]` in `config.toml`; About (F1) has a manual "Update now".
 
 ### Remote daemon over SSH
 
-> **BETA.** Phases 1 and 2 of [Remote Daemon Attach](roadmap/remote-daemon.md). Usable for real work, with the limits at the end of this section — chiefly that filesystem dialogs still read your local disk.
+> **BETA.** Phases 1, 2, and most of 3 of [Remote Daemon Attach](roadmap/remote-daemon.md). Usable for real work, with the limits at the end of this section — chiefly that kube contexts and plugin availability are still decided from your local machine.
 
 `quil --remote gpu01` attaches the TUI to a daemon running on another machine. The panes, tabs, and AI sessions live on that host and keep running there when you close the laptop — the TUI is only a viewer.
 
@@ -495,18 +495,31 @@ Two setup requirements are worth stating, because both fail in confusing ways. *
 
 #### Current limits (beta)
 
-Phase 1 is the transport, Phase 2 is reconnect. These are known and scoped, not bugs:
+Phase 1 is the transport, Phase 2 is reconnect, Phase 3 moves the filesystem
+dialogs to the server. These are known and scoped, not bugs:
 
 | Limit | Effect |
 |---|---|
-| Filesystem dialogs read the **local** disk | The working-directory picker, git-repository and kube-context discovery, and the Claude session list browse the machine running the TUI. Type remote paths rather than browsing. |
+| Kube contexts read the **local** kubeconfig | A `k9s` pane on a remote host is offered *your* machine's contexts. Leave it on "Default context" and let the server's own kubeconfig apply. |
 | Plugin availability detected locally | `Ctrl+N` greys out plugins based on what *your* machine has installed, not the server's. |
+| Recent locations are empty in remote mode | The recent-directories list is filtered by a local existence check, so server paths are silently dropped and the list looks unused rather than broken. Use the browser or paste a path. |
 | `quil status` refuses under `--remote` | It would report on the local daemon. Use `ssh <host> quil status`. |
 | Update controls hidden in remote mode | The banner describes the remote daemon while every apply path writes to local disk, so it is suppressed rather than offered wrongly. |
 | Clipboard image paste is local-only | The PNG is written locally and a local path is typed into a remote pane, where it does not resolve. |
 | Notes and the log viewer are local | By design — the daemon's own logs are reachable over SSH. |
 
-Making every filesystem-reading surface read the *server's* is Phase 3. See the [PRD](roadmap/remote-daemon.md) for the plan and the reasoning behind the transport choices.
+What Phase 3 already fixed: the working-directory browser, `~` expansion,
+relative paths, drive and root listings, and git-repository discovery — both
+`Alt+G` and the setup dialog's candidate list — now ask the daemon, so they
+describe the machine that actually holds the files. The Claude session list was
+always daemon-side. See the [PRD](roadmap/remote-daemon.md) for the remaining
+work and the reasoning behind the transport choices.
+
+Because those names, paths and error messages now arrive from a host you may not
+control, they are stripped of terminal control sequences before being drawn, and
+of the invisible characters that reverse text direction — a folder name cannot
+scramble the dialog around it, or read as something other than what it is on the
+list you pick a working directory from. The real name is always what gets opened.
 
 ### Cross-platform
 

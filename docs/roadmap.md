@@ -296,13 +296,27 @@ A modal, centered, keyboard-first launcher. Entries are grouped under section he
 
 **Phase 2 shipped (v1.45.0), hardened (v1.45.1).** A dropped link is a pause, not an ending: banner on the top row naming the host and what `ssh` said, input frozen rather than queued, redial backing off 500 ms → 30 s with jitter, and every pane's emulator reset before the replay so scrollback is restored rather than doubled. An attempt only counts as restored once the far side answers — `ssh` reports success the moment its own binary starts, long before it has resolved or authenticated the host. v1.45.1 stops retrying on failures that cannot fix themselves (rejected key, changed host key), since every retry is a full login and an overnight loop can get the laptop banned by the server's brute-force protection; `r` resumes. Verification against a real link is **partial** — two of eight manual checks — so treat the behaviour as shipped but not fully proven.
 
+**Phase 3 partly shipped.** The working-directory browser and git-repository
+discovery now ask the daemon, so they describe the machine that holds the files
+— along with `~` expansion, relative paths, path joins, and drive and root
+listings, each of which was answering for the wrong machine. The reproducing
+case was one screen making two contradictory claims about one path: `Alt+G`
+reporting no repository in a directory where the agent in that very pane
+answered `git status` with the branch name. Moving those strings onto the wire
+also moved a trust boundary, so daemon-supplied names, paths and errors are
+stripped of control sequences and bidi overrides at render.
+
 **Known limits — see the [PRD](roadmap/remote-daemon.md#known-limits) for the full table:**
-- Filesystem dialogs (CWD picker, git/kube discovery, Claude session list) read the **local** disk — *Phase 3*
-- Plugin availability is detected locally, so `Ctrl+N` greys out the wrong set — *Phase 3*
-- `quil status` and the update controls are blocked rather than silently targeting the wrong host — *Phase 3*
+- Kube-context discovery reads the **local** kubeconfig — *Phase 3 (RD-022)*
+- Plugin availability is detected locally, so `Ctrl+N` greys out the wrong set — *Phase 3 (RD-023)*
+- Recent locations render silently empty in remote mode, because a local existence check drops every server path — *Phase 3 (RD-024)*
+- `quil status` and the update controls are blocked rather than silently targeting the wrong host — *Phase 3 (RD-026/RD-027, both now decided: status gains remote support, update controls target the remote)*
 - Six of eight reconnect manual checks are outstanding, chiefly reconnecting a pane whose plugin keeps no ghost buffer — *Phase 2 close-out*
 
-**Planned:** Phase 3 remote-correct UI (four filesystem RPCs + plugin registry RPC) → Phase 4 mTLS transport, which the dialer seam already anticipates and which is the prerequisite for anything web-facing (M18 #18–19).
+**Planned:** the rest of Phase 3 (kube + plugin-registry RPCs, per-target recent
+locations, `quil status` and update controls over the transport) → Phase 4 mTLS
+transport, which the dialer seam already anticipates and which is the
+prerequisite for anything web-facing (M18 #18–19).
 
 ### M5: Polish
 > Production-quality UX, plugin refinements, observability, encrypted tokens.
@@ -504,12 +518,13 @@ review the diff.
 Where AoE is pulling away for the mobile/remote crowd. Sequenced last because each
 is a major surface and cuts against Quil's TUI/Windows-native focus.
 
-17. ~~**Remote SSH thin-client attach**~~ — **Phases 1 and 2 shipped (beta)**,
-    see [Remote Daemon Attach](roadmap/remote-daemon.md) under *In Progress*.
-    `quil --remote host` works today and survives a dropped link; remote-correct
-    filesystem dialogs (Phase 3) are the remaining work. Bridging local
-    clipboard image paste into remote agents (herdr) lands with Phase 3, since
-    it needs the same remote-path plumbing.
+17. ~~**Remote SSH thin-client attach**~~ — **Phases 1 and 2 shipped (beta),
+    Phase 3 in progress**, see [Remote Daemon Attach](roadmap/remote-daemon.md)
+    under *In Progress*. `quil --remote host` works today, survives a dropped
+    link, and browses the server's filesystem rather than yours; kube contexts,
+    plugin availability, `quil status` and the update controls are the remaining
+    Phase 3 work. Bridging local clipboard image paste into remote agents
+    (herdr) lands with Phase 3, since it needs the same remote-path plumbing.
 18. **Web dashboard** — real terminal + diffs in the browser, installable as a PWA
     (AoE). The single largest surface Quil is missing.
 19. **Remote phone access** — expose the dashboard over a Tailscale/Cloudflare

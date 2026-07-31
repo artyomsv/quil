@@ -8,6 +8,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/artyomsv/quil/internal/claudesessions"
 	"github.com/artyomsv/quil/internal/ipc"
 )
 
@@ -25,11 +26,17 @@ const historyDialogWidth = 100
 const historyRowPrefix = 2
 
 const (
-	// historyMinRows is the floor on the list window. Below this the modal
-	// stops being usable, and renderDialog's lipgloss.Place does not clip, so
-	// something has to give on a very short terminal — we let the box overflow
-	// rather than render zero rows.
-	historyMinRows = 3
+	// historyMinRows is the floor on the list window: one row, never zero.
+	//
+	// It is 1 rather than a friendlier number because renderDialog's
+	// lipgloss.Place does NOT clip — a box taller than the terminal is drawn
+	// past the edge, and on this dialog what falls off is the footer. Any floor
+	// above the height actually available manufactures exactly that overflow: a
+	// 3-row floor forced a 10-row box onto terminals with 6-9 rows, each of
+	// which had room for a shorter one. With a floor of 1 the box exceeds the
+	// terminal only below historyChromeRows+1 rows, where the CHROME alone does
+	// not fit and no choice of list height helps.
+	historyMinRows = 1
 	// historyChromeRows is every row the modal spends outside the list: the
 	// rounded border (2), dialogBorder's Padding(1,2) top and bottom (2), the
 	// title, the blank row above the footer, the footer, and one spare so the
@@ -48,6 +55,13 @@ type historyState struct {
 	paneType  string
 	supported bool
 	loading   bool
+	// timedOut is set when no response arrived within historyReqTimeout. Without
+	// it, loading is cleared only by applyHistoryList, so a response that is
+	// never delivered — dropped, or rejected by DecodePayload, which
+	// listenForMessages answers with a bare listenContinueMsg — leaves the modal
+	// showing "Loading…" forever with nothing to diagnose it by. Same failure
+	// mode paletteSearchTimeout and sessionScanTimeout exist for.
+	timedOut  bool
 	entries   []ipc.HistoryEntryMeta
 	cursor    int
 	// scroll is the index of the first entry drawn. The list holds up to
@@ -69,6 +83,15 @@ type historyEntryMsg struct {
 	Resp ipc.PaneHistoryEntryRespPayload
 }
 
+// historyTimeoutMsg fires historyReqTimeout after a list request was issued. It
+// is a LOCAL timer, so its Update branch must NOT re-arm listenForMessages —
+// doing so would add a second concurrent reader on the IPC connection.
+type historyTimeoutMsg struct{ paneID string }
+
+// historyReqTimeout bounds the wait for MsgPaneHistoryResp. The daemon answers
+// from a file read, so anything near this is a wedge rather than slow I/O.
+const historyReqTimeout = 3 * time.Second
+
 // openHistoryDialog transitions the Model into the input-history modal for the
 // given pane. loading is true only when the pane type supports history (the
 // caller pairs this with requestHistory); otherwise the modal renders the
@@ -86,10 +109,11 @@ func (m Model) openHistoryDialog(paneID, paneType string, supported bool) Model 
 }
 
 // requestHistory issues MsgPaneHistoryReq to the daemon as a fire-and-forget
-// send. The corresponding MsgPaneHistoryResp is dispatched by
-// listenForMessages → historyListMsg → Update. Mirrors refreshMemory.
+// send, paired with the timeout tick that bounds the wait. The corresponding
+// MsgPaneHistoryResp is dispatched by listenForMessages → historyListMsg →
+// Update. Mirrors refreshMemory.
 func (m Model) requestHistory(paneID string) tea.Cmd {
-	return func() tea.Msg {
+	send := func() tea.Msg {
 		if m.client == nil {
 			return nil
 		}
@@ -104,6 +128,21 @@ func (m Model) requestHistory(paneID string) tea.Cmd {
 		}
 		return nil
 	}
+	return tea.Batch(send, tea.Tick(historyReqTimeout, func(time.Time) tea.Msg {
+		return historyTimeoutMsg{paneID: paneID}
+	}))
+}
+
+// applyHistoryTimeout marks the list as timed out, but only if it is still
+// waiting for the pane the tick was armed for. A response that arrived first
+// cleared loading, and a tick from a previous pane's request is stale.
+func (m Model) applyHistoryTimeout(paneID string) Model {
+	if m.dialog != dialogCommandHistory || paneID != m.history.paneID || !m.history.loading {
+		return m
+	}
+	m.history.loading = false
+	m.history.timedOut = true
+	return m
 }
 
 // requestHistoryEntry issues MsgPaneHistoryEntryReq for one entry's full text,
@@ -133,8 +172,22 @@ func (m Model) applyHistoryList(resp ipc.PaneHistoryRespPayload) Model {
 	if resp.PaneID != m.history.paneID {
 		return m
 	}
+	// Re-sanitize on arrival even though the daemon already ran PreviewLine.
+	// Under `quil --remote <host>` the daemon that produced these rows is on a
+	// machine the user may not control, and the version handshake only proves
+	// the binaries match — not that the peer is honest. A row reaches the
+	// terminal without passing through the VT emulator, and truncateToWidth
+	// measures an escape sequence as zero cells, so it would survive truncation
+	// intact. Same both-sides-of-the-socket rule sessions.go applies to session
+	// titles, using the same sanitizer; its 240-rune cap is far above any row
+	// width, so it costs nothing here.
+	for i := range resp.Entries {
+		resp.Entries[i].Preview = claudesessions.SanitizeTitle(resp.Entries[i].Preview)
+	}
 	m.history.entries = resp.Entries
 	m.history.loading = false
+	// A response that beat the retry recovers the modal on its own.
+	m.history.timedOut = false
 	if m.history.cursor >= len(m.history.entries) {
 		m.history.cursor = len(m.history.entries) - 1
 	}
@@ -150,15 +203,7 @@ func (m Model) applyHistoryList(resp ipc.PaneHistoryRespPayload) Model {
 // subtracting dialogBoxChrome (not the border alone) is the whole point: the
 // previous budget was two cells too generous, so every row wrapped.
 func (m Model) historyInnerWidth() int {
-	boxW := historyDialogWidth
-	if m.width > 2 && boxW > m.width-2 {
-		boxW = m.width - 2
-	}
-	inner := boxW - dialogBoxChrome
-	if inner < 1 {
-		inner = 1
-	}
-	return inner
+	return dialogInnerWidth(m.width, historyDialogWidth)
 }
 
 // historyVisibleRows is how many entries fit in the list for the current
@@ -259,16 +304,24 @@ func (m Model) renderCommandHistory() string {
 		return b.String()
 	}
 
+	// These go through truncateToWidth like every other line: at minTermWidth
+	// (40) the box clamps to 38 and inner to 32, which is shorter than the
+	// unsupported-pane message — and an untruncated line reflows onto a second
+	// row, eating one of the chrome rows the height budget assumes.
+	status := func(text, hint string) string {
+		b.WriteString(truncateToWidth(text, inner))
+		b.WriteByte('\n')
+		return footer(hint)
+	}
 	switch {
 	case m.history.loading:
-		b.WriteString("Loading…\n")
-		return footer("Esc close")
+		return status("Loading…", "Esc close")
+	case m.history.timedOut:
+		return status("No response from the daemon.", "r retry · Esc close")
 	case !m.history.supported:
-		b.WriteString("No input history for this pane type.\n")
-		return footer("Esc close")
+		return status("No input history for this pane type.", "Esc close")
 	case len(m.history.entries) == 0:
-		b.WriteString("No input history yet.\n")
-		return footer("Esc close")
+		return status("No input history yet.", "Esc close")
 	}
 
 	visible := m.historyVisibleRows()

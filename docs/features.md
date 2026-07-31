@@ -180,7 +180,9 @@ AI panes produce a lot of output, and the prompt you actually typed scrolls far 
 
 Capture is **opt-in per pane type**. A plugin enables it with `record_history = true` under `[command]` (see [Plugin reference](plugin-reference.md)); the built-in **Claude Code** plugin sets it. The source of truth is the agent's own `UserPromptSubmit` hook — not keystroke scraping — so multiline prompts, pastes, and edits are captured exactly as submitted. Pane types without the opt-in (terminal, lazygit, k9s, lazysql, …) show "No input history for this pane type." OpenCode support is planned.
 
-Turns the harness submits on your behalf are filtered out on write, on read, and on compaction — background-task notifications (`<task-notification>`) and subagent reports (`<agent-message>`) are things the agent said to itself, not prompts you typed. A prompt that merely *mentions* one of those tags is kept: a turn is only dropped when it is a complete block and nothing else.
+Turns the harness submits on your behalf are filtered out on write, on read, and on compaction — background-task notifications (`<task-notification>`) and subagent reports (`<agent-message>`) are things the agent said to itself, not prompts you typed. A prompt that merely *mentions* one of those tags is kept: a turn is only dropped when it both starts and ends with those markers and holds nothing else.
+
+Prompt text is sanitized before display, on both sides of the connection — control characters and Unicode format characters (bidi overrides, zero-width spaces) are stripped from the list rows and from the detail view. A prompt is free text you may have pasted into, and neither surface passes through the terminal emulator that makes ordinary pane output safe.
 
 ---
 

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"unicode"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -67,6 +68,38 @@ func TestApplyHistoryList(t *testing.T) {
 	})
 }
 
+// Under `quil --remote`, the daemon that ran PreviewLine is on a host the user
+// may not control, and a row reaches the terminal without passing through the
+// VT emulator. truncateToWidth measures an escape as zero cells, so it would
+// survive truncation intact — the client has to sanitize what arrives, not
+// assume the peer already did.
+func TestApplyHistoryList_SanitizesPreviewsArrivingOverIPC(t *testing.T) {
+	t.Parallel()
+	hostile := []ipc.HistoryEntryMeta{
+		{TsMs: 1, Preview: "clear\x1b[2J\x1b[H screen"},
+		{TsMs: 2, Preview: "clip\x1b]52;c;aGF4\x07 board"},
+		{TsMs: 3, Preview: "safe ‮reversed"},
+		{TsMs: 4, Preview: "zero​width"},
+	}
+	m := Model{width: 100, height: 40, history: historyState{paneID: "pane-a"}}
+	got := m.applyHistoryList(ipc.PaneHistoryRespPayload{PaneID: "pane-a", Entries: hostile})
+
+	if len(got.history.entries) != len(hostile) {
+		t.Fatalf("entries = %d, want %d", len(got.history.entries), len(hostile))
+	}
+	for i, e := range got.history.entries {
+		for _, r := range e.Preview {
+			if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+				t.Errorf("entry %d: rune %U survived sanitization in %q", i, r, e.Preview)
+			}
+		}
+	}
+	// Sanitization must neutralize, not blank the row out.
+	if !strings.Contains(got.history.entries[0].Preview, "screen") {
+		t.Errorf("visible text lost: %q", got.history.entries[0].Preview)
+	}
+}
+
 func TestHistoryWindow(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -116,11 +149,13 @@ func keyPressFor(name string) tea.KeyPressMsg {
 		"enter":  tea.KeyEnter,
 		"esc":    tea.KeyEscape,
 	}
-	code, ok := codes[name]
-	if !ok {
-		panic("keyPressFor: unmapped key " + name)
+	if code, ok := codes[name]; ok {
+		return tea.KeyPressMsg{Code: code}
 	}
-	return tea.KeyPressMsg{Code: code}
+	if r := []rune(name); len(r) == 1 {
+		return tea.KeyPressMsg{Code: r[0], Text: name}
+	}
+	panic("keyPressFor: unmapped key " + name)
 }
 
 // ansiStripForTest removes styling so assertions read the visible text.
@@ -168,6 +203,50 @@ func TestRenderCommandHistory_RowsNeverWrapTheBox(t *testing.T) {
 					t.Fatalf("box line %d width = %d, want %d (row wrapped or overflowed): %q",
 						i, w, boxW, ansiStripForTest(line))
 				}
+			}
+		})
+	}
+}
+
+// renderDialog's lipgloss.Place does not clip, so a box taller than the
+// terminal is drawn past the edge and the footer is what falls off. The list is
+// the only element that can give, so it must absorb a short terminal down to
+// the point where the chrome alone no longer fits.
+func TestRenderCommandHistory_BoxNeverExceedsTerminalHeight(t *testing.T) {
+	t.Parallel()
+	// historyChromeRows budgets one spare row, so the smallest box that can
+	// hold the chrome plus one list row is historyChromeRows rows tall. Below
+	// that no choice of list height fits and overflow is unavoidable.
+	for h := historyChromeRows; h <= 50; h++ {
+		m := historyModel(200, 100, h)
+		boxW := historyDialogWidth
+		if m.width > 2 && boxW > m.width-2 {
+			boxW = m.width - 2
+		}
+		box := dialogBorder.Width(boxW).Render(m.renderCommandHistory())
+		if got := len(strings.Split(box, "\n")); got > h {
+			t.Fatalf("terminal height %d: box is %d rows (%d rows off-screen), visibleRows=%d",
+				h, got, got-h, m.historyVisibleRows())
+		}
+	}
+}
+
+// The loading / unsupported / empty branches render their own fixed body and
+// must respect the same ceiling.
+func TestRenderCommandHistory_ShortBranchesFitTheTerminal(t *testing.T) {
+	t.Parallel()
+	branches := map[string]historyState{
+		"loading":     {paneID: "pane-a", paneType: "claude-code", supported: true, loading: true},
+		"unsupported": {paneID: "pane-a", paneType: "terminal"},
+		"empty":       {paneID: "pane-a", paneType: "claude-code", supported: true},
+	}
+	for name, st := range branches {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			m := Model{width: 100, height: historyChromeRows, cfg: config.Default(), history: st}
+			box := dialogBorder.Width(historyDialogWidth).Render(m.renderCommandHistory())
+			if got := len(strings.Split(box, "\n")); got > m.height {
+				t.Fatalf("box is %d rows against a %d-row terminal", got, m.height)
 			}
 		})
 	}
@@ -296,6 +375,110 @@ func TestScrollHistoryList(t *testing.T) {
 	}
 }
 
+// Without a timeout, `loading` is cleared only by applyHistoryList — a response
+// that never arrives (dropped, or rejected by DecodePayload, which
+// listenForMessages answers with a bare listenContinueMsg) leaves the modal on
+// "Loading…" forever with nothing to diagnose it by.
+func TestHistoryTimeout(t *testing.T) {
+	t.Parallel()
+	base := func() Model {
+		return Model{
+			width: 100, height: 30, cfg: config.Default(),
+			dialog:  dialogCommandHistory,
+			history: historyState{paneID: "pane-a", paneType: "claude-code", supported: true, loading: true},
+		}
+	}
+
+	t.Run("marks timed out and offers a retry", func(t *testing.T) {
+		t.Parallel()
+		got := base().applyHistoryTimeout("pane-a")
+		if got.history.loading || !got.history.timedOut {
+			t.Fatalf("loading=%v timedOut=%v", got.history.loading, got.history.timedOut)
+		}
+		body := ansiStripForTest(got.renderCommandHistory())
+		if !strings.Contains(body, "No response") || !strings.Contains(body, "r retry") {
+			t.Fatalf("want a diagnostic and a retry hint:\n%s", body)
+		}
+	})
+
+	t.Run("a tick for another pane is stale", func(t *testing.T) {
+		t.Parallel()
+		got := base().applyHistoryTimeout("pane-b")
+		if got.history.timedOut {
+			t.Fatal("a tick armed for a different pane must not fire")
+		}
+	})
+
+	t.Run("a response that beat the tick wins", func(t *testing.T) {
+		t.Parallel()
+		m := base().applyHistoryList(ipc.PaneHistoryRespPayload{
+			PaneID: "pane-a", Entries: []ipc.HistoryEntryMeta{{TsMs: 1, Preview: "hi"}},
+		})
+		got := m.applyHistoryTimeout("pane-a")
+		if got.history.timedOut {
+			t.Fatal("the tick fired after the list had already loaded")
+		}
+	})
+
+	t.Run("a late response clears the timeout", func(t *testing.T) {
+		t.Parallel()
+		m := base().applyHistoryTimeout("pane-a")
+		got := m.applyHistoryList(ipc.PaneHistoryRespPayload{
+			PaneID: "pane-a", Entries: []ipc.HistoryEntryMeta{{TsMs: 1, Preview: "hi"}},
+		})
+		if got.history.timedOut {
+			t.Fatal("a response arriving after the timeout should recover the modal")
+		}
+	})
+
+	t.Run("r retries only while timed out", func(t *testing.T) {
+		t.Parallel()
+		m := base().applyHistoryTimeout("pane-a")
+		mdl, cmd := m.handleCommandHistoryKey(keyPressFor("r"))
+		got := mdl.(Model)
+		if got.history.timedOut || !got.history.loading || cmd == nil {
+			t.Fatalf("retry did not re-request: timedOut=%v loading=%v cmd=%v",
+				got.history.timedOut, got.history.loading, cmd != nil)
+		}
+
+		listed := historyModel(5, 100, 30)
+		listed.history.cursor = 2
+		mdl2, cmd2 := listed.handleCommandHistoryKey(keyPressFor("r"))
+		if cmd2 != nil || mdl2.(Model).history.cursor != 2 {
+			t.Fatal("r must be inert in the normal list state")
+		}
+	})
+}
+
+// renderDialog's clamp means a narrow terminal can leave less room than these
+// fixed messages need, and an untruncated line reflows onto a second row —
+// eating one of the chrome rows the height budget assumes.
+func TestRenderCommandHistory_StatusLinesTruncateToTheBox(t *testing.T) {
+	t.Parallel()
+	states := map[string]historyState{
+		"loading":     {paneID: "p", paneType: "claude-code", supported: true, loading: true},
+		"timed out":   {paneID: "p", paneType: "claude-code", supported: true, timedOut: true},
+		"unsupported": {paneID: "p", paneType: "terminal"},
+		"empty":       {paneID: "p", paneType: "claude-code", supported: true},
+	}
+	for name, st := range states {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			m := Model{width: minTermWidth, height: 30, cfg: config.Default(), history: st}
+			boxW := historyDialogWidth
+			if boxW > m.width-2 {
+				boxW = m.width - 2
+			}
+			box := dialogBorder.Width(boxW).Render(m.renderCommandHistory())
+			for i, line := range strings.Split(box, "\n") {
+				if w := lipgloss.Width(line); w != boxW {
+					t.Fatalf("line %d width = %d, want %d: %q", i, w, boxW, ansiStripForTest(line))
+				}
+			}
+		})
+	}
+}
+
 // A prompt is often one long logical line; without wrapping, everything past
 // the right edge is unreachable — including unreachable to the selection the
 // user opened the entry to copy.
@@ -324,6 +507,47 @@ func TestOpenReadonlyText_SoftWrapsFromTheTop(t *testing.T) {
 	if e.CursorRow != 0 || e.CursorCol != 0 || e.ScrollTop != 0 {
 		t.Errorf("want the buffer opened at the top, got row=%d col=%d scroll=%d",
 			e.CursorRow, e.CursorCol, e.ScrollTop)
+	}
+}
+
+// The detail viewer is a full-screen editor, not a pane — its bytes reach the
+// terminal without passing through the VT emulator that makes pane output safe.
+// A recorded prompt is free text the user pasted into, so it can carry OSC 52,
+// which several terminals honour as "set the system clipboard".
+func TestUpdate_HistoryEntry_SanitizesBeforeOpeningTheViewer(t *testing.T) {
+	t.Parallel()
+	const hostile = "before\x1b]52;c;aGF4\x07 after\n\nkeep\ttab\nsafe ‮reversed"
+	m := Model{
+		width: 100, height: 30, cfg: config.Default(),
+		dialog:  dialogCommandHistory,
+		history: historyState{paneID: "pane-a", paneType: "claude-code", supported: true},
+	}
+	// The returned Cmd is never run, so the nil client is never dialled.
+	mdl, _ := m.Update(historyEntryMsg{Resp: ipc.PaneHistoryEntryRespPayload{
+		PaneID: "pane-a", TsMs: 1, Text: hostile, Found: true,
+	}})
+	got := mdl.(Model)
+
+	if got.dialog != dialogLogViewer || got.tomlEditor == nil {
+		t.Fatalf("viewer did not open: dialog=%v editor=%v", got.dialog, got.tomlEditor)
+	}
+	body := strings.Join(got.tomlEditor.Lines, "\n")
+	for _, r := range body {
+		if r == '\n' {
+			continue // line breaks are preserved on purpose
+		}
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			t.Errorf("rune %U reached the viewer: %q", r, body)
+		}
+	}
+	// Neutralized, not gutted — the point of the viewer is to read and copy.
+	for _, want := range []string{"before", "after", "keep", "tab", "reversed"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("visible text %q lost: %q", want, body)
+		}
+	}
+	if len(got.tomlEditor.Lines) < 2 {
+		t.Errorf("line structure collapsed: %q", body)
 	}
 }
 

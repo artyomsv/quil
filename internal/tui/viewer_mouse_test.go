@@ -40,6 +40,76 @@ func TestViewerOwnsMouse(t *testing.T) {
 	}
 }
 
+// View() renders ONLY the dialog while a modal is open, so any mouse event that
+// falls through to the pane hit-tests acts on a layout the user cannot see. The
+// concrete pre-existing bug: a press inside the history modal armed
+// hitTestSplitBorder and the release ran finishSplitDrag — moving a split ratio,
+// resizing two PTYs and persisting the new layout, entirely invisibly.
+func TestModalSwallowsMouse(t *testing.T) {
+	t.Parallel()
+	t.Run("every modal swallows", func(t *testing.T) {
+		t.Parallel()
+		for _, d := range []dialogScreen{
+			dialogCommandHistory, dialogAbout, dialogSettings, dialogCreatePane,
+			dialogCommandPalette, dialogMemory, dialogConfirm,
+		} {
+			m := Model{width: 100, height: 30, dialog: d}
+			if !m.modalSwallowsMouse() {
+				t.Errorf("dialog %v does not swallow the mouse", d)
+			}
+		}
+	})
+
+	t.Run("no dialog does not swallow", func(t *testing.T) {
+		t.Parallel()
+		m := Model{width: 100, height: 30, dialog: dialogNone}
+		if m.modalSwallowsMouse() {
+			t.Error("panes must keep the mouse when no dialog is open")
+		}
+	})
+
+	// The read-only viewer IS a dialog but handles its own mouse — a blanket
+	// swallow ahead of viewerOwnsMouse would take back its drag-selection.
+	t.Run("the viewer keeps its own mouse", func(t *testing.T) {
+		t.Parallel()
+		m := viewerModel(t, "alpha\nbravo", 80, 24, false)
+		if !m.viewerOwnsMouse() {
+			t.Fatal("viewerOwnsMouse must be true for dialogLogViewer")
+		}
+		gutter := m.tomlEditor.GutterWidth()
+		mdl, _ := m.handleViewerMouseClick(tea.MouseClickMsg{Button: tea.MouseLeft, X: gutter, Y: 1})
+		if !mdl.(Model).viewerMouseDown {
+			t.Error("viewer drag must still arm while a dialog is open")
+		}
+	})
+}
+
+// Terminals routinely drop the release when the button comes up outside the
+// window. Without a reset on open, the next viewer's first hover resumed the
+// previous drag from a document position in a different buffer.
+func TestOpenViewer_ClearsAStaleDrag(t *testing.T) {
+	t.Parallel()
+	m := viewerModel(t, "alpha\nbravo", 80, 24, false)
+	gutter := m.tomlEditor.GutterWidth()
+	mdl, _ := m.handleViewerMouseClick(tea.MouseClickMsg{Button: tea.MouseLeft, X: gutter, Y: 1})
+	m = mdl.(Model)
+	m.viewerAnchorRow, m.viewerAnchorCol = 1, 5
+	if !m.viewerMouseDown {
+		t.Fatal("setup: drag should be armed")
+	}
+
+	// No release arrives; the user Escs out and opens a different entry.
+	mdl2, _ := m.openReadonlyText("Input @ other", "completely different text")
+	got := mdl2.(Model)
+	if got.viewerMouseDown {
+		t.Fatal("a stale drag survived into the next viewer session")
+	}
+	mdl3, _ := got.handleViewerMouseMotion(tea.MouseMotionMsg{X: gutter + 4, Y: 1})
+	if sel := mdl3.(Model).tomlEditor.Sel; sel != nil {
+		t.Fatalf("hover with no button held created a selection: %+v", sel)
+	}
+}
+
 func TestLogViewerPosAt(t *testing.T) {
 	t.Parallel()
 	// Three short lines, no wrapping — geometry only.
@@ -66,6 +136,21 @@ func TestLogViewerPosAt(t *testing.T) {
 		row, col, ok := m.logViewerPosAt(0, 2)
 		if !ok || row != 1 || col != 0 {
 			t.Fatalf("got (row=%d col=%d ok=%v), want (1, 0, true)", row, col, ok)
+		}
+	})
+	// Both branches of logViewerPosAt must return a position that is valid to
+	// index Lines with, so ok==true means "valid document position" for every
+	// caller — not just the ones that happen to clamp again.
+	t.Run("click below the last line clamps into the document", func(t *testing.T) {
+		row, col, ok := m.logViewerPosAt(gutter+200, m.height-2)
+		if !ok {
+			t.Fatal("a click inside the body should resolve")
+		}
+		if row < 0 || row >= len(m.tomlEditor.Lines) {
+			t.Fatalf("row %d out of range for %d lines", row, len(m.tomlEditor.Lines))
+		}
+		if lineLen := runeLen(m.tomlEditor.Lines[row]); col < 0 || col > lineLen {
+			t.Fatalf("col %d out of range for a %d-rune line", col, lineLen)
 		}
 	})
 	t.Run("scroll offset is applied", func(t *testing.T) {

@@ -80,19 +80,31 @@ var syntheticTags = []struct{ open, close string }{
 
 // IsSyntheticPrompt reports whether text is a harness-injected turn (not real
 // user input) that must be excluded from history. A prompt is synthetic only
-// when, after trimming surrounding whitespace, it BOTH opens with a known tag
-// AND closes with its matching end tag — i.e. it is the whole notification
-// block and nothing else. Requiring both ends means a real prompt that merely
-// quotes or discusses the tag ("<task-notification is confusing, what is it?")
-// is preserved; only a pure, complete block is dropped.
+// when, after trimming surrounding whitespace, it BOTH opens with SOME known
+// tag AND closes with SOME known end tag — i.e. it is machine-generated blocks
+// and nothing else. Requiring both ends means a real prompt that merely quotes
+// or discusses a tag ("<task-notification is confusing, what is it?") is
+// preserved; only a pure, complete block is dropped.
+//
+// The two ends are matched INDEPENDENTLY rather than as a pair, because one
+// turn can carry blocks of different kinds: with parallel subagents, a
+// <task-notification> and an <agent-message> arrive concatenated, and a
+// pair-wise test matches neither (the first tag's open hits but not its close,
+// the second's close hits but not its open) — letting exactly the noisiest
+// machine turns through. No real prompt both starts with one of these tags and
+// ends with one of them.
 func IsSyntheticPrompt(text string) bool {
 	t := strings.TrimSpace(text)
+	opens, closes := false, false
 	for _, tag := range syntheticTags {
-		if strings.HasPrefix(t, tag.open) && strings.HasSuffix(t, tag.close) {
-			return true
+		if strings.HasPrefix(t, tag.open) {
+			opens = true
+		}
+		if strings.HasSuffix(t, tag.close) {
+			closes = true
 		}
 	}
-	return false
+	return opens && closes
 }
 
 // Append writes one entry to the pane's history file. Empty/whitespace text and
@@ -266,13 +278,22 @@ func readEntries(r *bufio.Reader) ([]Entry, error) {
 // somewhere, and doing it before the wire keeps the payload proportional to
 // what is actually displayed.
 //
-// Control characters (C0, DEL and C1) are DROPPED, not substituted. A prompt is
-// free text the user may have pasted into, so it can carry an ANSI escape; an
-// ESC that reached the list would repaint or reposition inside a fixed-width
-// bordered modal that assumes one cell per printed column. Substituting a
-// visible placeholder would keep the row honest about length but add noise to
-// every row for a case that is always accidental — dropping is the quieter fix,
-// and the full text is still available verbatim in the detail view.
+// Control characters (category Cc — C0, DEL and C1) are DROPPED, not
+// substituted. A prompt is free text the user may have pasted into, so it can
+// carry an ANSI escape; an ESC that reached the list would repaint or
+// reposition inside a fixed-width bordered modal that assumes one cell per
+// printed column. Substituting a visible placeholder would keep the row honest
+// about length but add noise to every row for a case that is always accidental.
+//
+// Unicode format characters (category Cf) go too, which IsControl does NOT
+// cover and IsSpace does not catch either. A bidi override or isolate
+// (U+202A–U+202E, U+2066–U+2069) renders the row reversed while still measuring
+// its pre-override width, and the user picks which prompt to open from exactly
+// that row — so the row could read as something other than what Enter fetches.
+// ZWSP is the quiet half: invisible, not IsSpace, and therefore able to defeat
+// the whitespace collapse this function is built around. Same reasoning, same
+// categories as claudesessions.SanitizeTitle, which sanitizes the sibling data
+// class (Claude session titles) for the same non-VT render path.
 func PreviewLine(text string, maxBytes int) string {
 	var b strings.Builder
 	b.Grow(len(text))
@@ -281,8 +302,8 @@ func PreviewLine(text string, maxBytes int) string {
 		switch {
 		case unicode.IsSpace(r):
 			pendingSpace = true
-		case r < 0x20 || (r >= 0x7f && r <= 0x9f):
-			// Drop: C0 controls, DEL, and C1 (U+009B is the CSI introducer).
+		case unicode.IsControl(r), unicode.Is(unicode.Cf, r):
+			// Drop. Cc is exactly C0 + DEL + C1 (U+009B is the CSI introducer).
 		default:
 			// b.Len() == 0 means nothing printable has been written yet, so a
 			// leading run of whitespace emits nothing. A trailing run never

@@ -16,6 +16,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/artyomsv/quil/internal/claudesessions"
 	"github.com/artyomsv/quil/internal/clipboard"
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
@@ -712,6 +713,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.viewerOwnsMouse() {
 			return m.handleViewerMouseClick(msg)
 		}
+		// A modal is up: the panes are not on screen, so nothing below may act
+		// on them. clearDragState aborts a drag armed before the dialog opened.
+		if m.modalSwallowsMouse() {
+			m.clearDragState()
+			return m, nil
+		}
 		// Overlay visible: swallow all mouse clicks (keyboard-only v1).
 		// clearDragState ensures no drag flag stays set from before the overlay opened.
 		// The context menu can never be open while the lazygit overlay is
@@ -871,6 +878,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.viewerOwnsMouse() {
 			return m.handleViewerMouseMotion(msg)
 		}
+		if m.modalSwallowsMouse() {
+			return m, nil
+		}
 		// Overlay visible: swallow all motion (keyboard-only v1).
 		if tab := m.activeTabModel(); tab != nil && tab.overlayVisible {
 			return m, nil
@@ -935,6 +945,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.viewerMouseDown = false
 			return m, nil
 		}
+		if m.modalSwallowsMouse() {
+			m.clearDragState()
+			return m, nil
+		}
 		// Overlay visible: clear any stale drag state and swallow the release.
 		if tab := m.activeTabModel(); tab != nil && tab.overlayVisible {
 			m.clearDragState()
@@ -989,6 +1003,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// this the wheel would scroll a pane's scrollback behind the modal.
 		if m.dialog == dialogCommandHistory {
 			m.scrollHistoryList(msg.Button)
+			return m, nil
+		}
+		// Every other modal has nothing to scroll, but the panes behind it must
+		// not scroll either.
+		if m.modalSwallowsMouse() {
 			return m, nil
 		}
 		if m.ctxMenu.open() {
@@ -1398,6 +1417,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m = m.applyHistoryList(msg.Resp)
 		return m, m.listenForMessages()
 
+	case historyTimeoutMsg:
+		// LOCAL timer — deliberately does NOT re-arm listenForMessages. Doing so
+		// would put a second reader on the IPC connection.
+		return m.applyHistoryTimeout(msg.paneID), nil
+
 	case historyEntryMsg:
 		// All branches must keep the IPC listen loop alive — these messages
 		// originate from listenForMessages.
@@ -1413,7 +1437,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(m.requestHistory(m.history.paneID), m.listenForMessages())
 		}
 		label := fmt.Sprintf("Input @ %s", time.UnixMilli(msg.Resp.TsMs).Format("2006-01-02 15:04:05"))
-		mdl, cmd := m.openReadonlyText(label, msg.Resp.Text)
+		// The viewer writes straight to the terminal — a full-screen editor is
+		// not a pane, so nothing re-renders this through the VT emulator. A
+		// recorded prompt is free text the user pasted into, and content lifted
+		// from a README, an issue or a terminal capture can carry OSC 52, which
+		// several terminals honour as "set the system clipboard": re-reading an
+		// old prompt would silently replace what the next paste types. Same
+		// sanitizer, same reasoning as sessions.go's prompt panel; line breaks
+		// survive because the shape of a prompt is most of its readability.
+		// Tabs become spaces, which the editor needs anyway — it does not expand
+		// them, so a literal tab drifts the columns its selection math assumes.
+		mdl, cmd := m.openReadonlyText(label, claudesessions.SanitizePrompt(msg.Resp.Text))
 		return mdl, tea.Batch(cmd, m.listenForMessages())
 
 	case listenContinueMsg:
@@ -2208,9 +2242,16 @@ func (m Model) logViewerPosAt(screenX, screenY int) (row, col int, ok bool) {
 		// logical position the selection API expects.
 		layout := e.visualLayout(e.contentWForLayout())
 		row, col = e.visualToLogical(layout, vrow, vcol)
-		return row, col, true
+	} else {
+		row, col = vrow, vcol
 	}
-	return vrow, vcol, true
+	// Both branches return a position that is valid to index Lines with. The
+	// SoftWrap branch is already clamped by visualToLogical; the other is not —
+	// a click below the last line yields a row past the end. Today's callers
+	// clamp again, so nothing is out of range, but leaving the two branches with
+	// different contracts hands the next caller a panic for free.
+	row, col = e.clampPos(row, col)
+	return row, col, true
 }
 
 // notesKeyExempt reports whether a key should bypass the notes editor and

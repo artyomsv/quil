@@ -382,19 +382,11 @@ func shortCWD(cwd, home string) string {
 // dialogBorder Padding(1,2) → 4 cells). Kept in lockstep with renderDialog's
 // width clamp so the box and its content agree.
 func (m Model) paletteInnerWidth() int {
-	boxW := paletteWidth
-	if m.width > 2 && boxW > m.width-2 {
-		boxW = m.width - 2
-	}
-	// Content capacity is boxW minus the rounded border (2) AND the dialogBorder
-	// Padding(1,2) (4) — lipgloss draws the border INSIDE Width, so a row of
-	// boxW-4 would soft-wrap its trailing (right-aligned) shortcut onto the next
-	// line. boxW-dialogBoxChrome is the true usable width.
-	inner := boxW - dialogBoxChrome
-	if inner < 1 {
-		inner = 1
-	}
-	return inner
+	// Content capacity is the box minus the rounded border (2) AND the
+	// dialogBorder Padding(1,2) (4) — lipgloss draws the border INSIDE Width, so
+	// a row of boxW-4 would soft-wrap its trailing (right-aligned) shortcut onto
+	// the next line. dialogInnerWidth owns that accounting for every dialog.
+	return dialogInnerWidth(m.width, paletteWidth)
 }
 
 // renderCommandPalette returns the palette box CONTENT (renderDialog wraps it in

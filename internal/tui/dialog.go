@@ -93,6 +93,27 @@ var disclaimerTips = []struct {
 // too wide and reflow wraps each one onto a second line.
 const dialogBoxChrome = 6
 
+// dialogInnerWidth is the usable content width for a dialog whose box is boxW
+// columns wide in a termW-column terminal. It applies renderDialog's own clamp
+// and then subtracts dialogBoxChrome, so a caller sizing its rows against this
+// can never exceed the box lipgloss draws.
+//
+// One function rather than the copy each dialog used to keep: the clamp and the
+// chrome have to agree with renderDialog, and a copy that drifts reintroduces
+// exactly the two-cells-too-wide reflow that made the history list unreadable —
+// silently, with the other copies' tests still green. termW <= 2 means the
+// terminal size is not known yet (before the first WindowSizeMsg), where
+// renderDialog also skips the clamp.
+func dialogInnerWidth(termW, boxW int) int {
+	if termW > 2 && boxW > termW-2 {
+		boxW = termW - 2
+	}
+	if inner := boxW - dialogBoxChrome; inner > 1 {
+		return inner
+	}
+	return 1
+}
+
 var (
 	dialogBorder = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
@@ -399,6 +420,15 @@ func (m Model) handleCommandHistoryKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd)
 	case "esc":
 		m.dialog = dialogNone
 		return m, tea.ClearScreen
+	case "r":
+		// Retry after a timeout. Guarded on timedOut so "r" stays free for a
+		// future binding in the normal list state.
+		if m.history.timedOut {
+			m.history.timedOut = false
+			m.history.loading = true
+			return m, m.requestHistory(m.history.paneID)
+		}
+		return m, nil
 	case "up", "k":
 		m.history.cursor--
 	case "down", "j":
@@ -1958,7 +1988,15 @@ func (m Model) logViewerViewport() (w, h int) {
 // newLogViewerEditor builds a read-only TextEditor pre-positioned at the end
 // of the buffer (so the freshest log lines are in view) and stamped with the
 // configured log-viewer page size.
-func (m Model) newLogViewerEditor(content, path string) *TextEditor {
+// The receiver is a POINTER so this can also be the one place a stale mouse
+// drag is cleared. Terminals routinely drop the release when the button comes
+// up outside the window, and nothing on the close path resets viewerMouseDown —
+// so without this, the first hover over the NEXT buffer resumed the previous
+// one's drag, anchoring a selection at a document position from a different
+// prompt with no button held. Every viewer entry point funnels through here, so
+// clearing here cannot be forgotten by a future one.
+func (m *Model) newLogViewerEditor(content, path string) *TextEditor {
+	m.clearDragState()
 	viewW, viewH := m.logViewerViewport()
 	editor := NewTextEditor(content, path, viewW, viewH)
 	editor.Highlight = HighlightPlain
@@ -3401,7 +3439,10 @@ func (m Model) setupDialogWidth() int {
 // Every budget in this dialog derives from here — deriving them separately is
 // what let the session picker's rows sit exactly two cells over the limit.
 func (m Model) setupTextWidth() int {
-	return m.setupDialogWidth() - setupBoxChrome
+	// setupDialogWidth has already applied the terminal clamp; dialogInnerWidth
+	// is idempotent over it and is where the chrome subtraction lives for every
+	// dialog, so the two cannot drift apart.
+	return dialogInnerWidth(m.width, m.setupDialogWidth())
 }
 
 // renderSetupHint renders a subtle footer hint clamped to the box's text area

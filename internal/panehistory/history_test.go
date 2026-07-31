@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -62,6 +63,12 @@ func TestIsSyntheticPrompt_MatchesKnownTags(t *testing.T) {
 		// A turn can carry several concatenated reports; the first opens and the
 		// last closes, so the both-ends rule still classifies it.
 		{"two agent messages in one turn", agentMessageSample + "\n" + agentMessageSample, true},
+		// Mixed kinds in one turn — the realistic parallel-subagent case. The
+		// ends must be matched independently, not as a pair, or this slips
+		// through: task-notification's open matches but not its close, and
+		// agent-message's close matches but not its open.
+		{"task notification then agent message", syntheticSample + "\n" + agentMessageSample, true},
+		{"agent message then task notification", agentMessageSample + "\n" + syntheticSample, true},
 		{"real prompt", "fix the input history bug", false},
 		{"empty", "", false},
 		{"tag mentioned mid-sentence", "why does <task-notification> appear?", false},
@@ -439,6 +446,39 @@ func TestPreviewLine_DropsControlCharacters(t *testing.T) {
 		if r < 0x20 || (r >= 0x7f && r <= 0x9f) {
 			t.Fatalf("control rune %U survived in %q", r, got)
 		}
+	}
+}
+
+// Bidi overrides and ZWSP are category Cf: printable to unicode.IsControl and
+// invisible to unicode.IsSpace, so neither the control filter nor the
+// whitespace collapse catches them without an explicit Cf case. The row is what
+// the user reads before pressing Enter, so a reversed row could name a
+// different prompt than the one that opens.
+func TestPreviewLine_DropsUnicodeFormatCharacters(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"bidi override", "safe ‮reversed", "safe reversed"},
+		{"bidi isolates", "⁦a⁩ ⁧b⁩", "a b"},
+		{"zero-width space defeats whitespace collapse", "one​two", "onetwo"},
+		{"LRM/RLM", "a‎b‏c", "abc"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := PreviewLine(tt.in, 200)
+			if got != tt.want {
+				t.Fatalf("PreviewLine(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+			for _, r := range got {
+				if unicode.Is(unicode.Cf, r) {
+					t.Fatalf("format rune %U survived in %q", r, got)
+				}
+			}
+		})
 	}
 }
 

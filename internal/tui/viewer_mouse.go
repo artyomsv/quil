@@ -30,6 +30,24 @@ func (m Model) viewerOwnsMouse() bool {
 	return m.dialog == dialogLogViewer && m.tomlEditor != nil
 }
 
+// modalSwallowsMouse reports whether a modal dialog is up and must absorb the
+// event instead of letting it reach the panes.
+//
+// View() renders ONLY the dialog while one is open — the panes are not on
+// screen at all. Anything that falls through therefore acts on a layout the
+// user cannot see: a left-press inside the history modal used to arm
+// hitTestSplitBorder, and the release ran finishSplitDrag, moving a split ratio,
+// resizing two PTYs and persisting the new layout to the daemon with no visible
+// feedback whatsoever. A press at row 0 reached hitTestTab and switched the
+// active tab behind the dialog the same way.
+//
+// This is checked AFTER viewerOwnsMouse: the full-screen read-only viewer is
+// itself a dialog and handles its own mouse, so a blanket swallow ahead of it
+// would take back the selection support this very commit adds.
+func (m Model) modalSwallowsMouse() bool {
+	return m.dialog != dialogNone
+}
+
 // handleViewerMouseClick arms a selection drag on left press and copies the
 // current selection on right press, mirroring the notes editor and the pane
 // text-selection gestures.
@@ -91,7 +109,12 @@ func (m Model) handleViewerMouseMotion(msg tea.MouseMotionMsg) (tea.Model, tea.C
 // ScrollTop directly and leaves the cursor alone: a wheel is a look-around
 // gesture, and dragging the cursor with it would silently collapse an active
 // selection the user is about to copy.
-func (m Model) scrollViewer(button tea.MouseButton) {
+//
+// Pointer receiver even though every write today lands through the m.tomlEditor
+// pointer — a value receiver makes a later `m.field = x` a silent no-op on a
+// discarded copy, and a test asserting only on editor state would still pass.
+// scrollHistoryList, called three lines away in Update, has the same shape.
+func (m *Model) scrollViewer(button tea.MouseButton) {
 	e := m.tomlEditor
 	lines := m.cfg.UI.MouseScrollLines
 	if lines < 1 {

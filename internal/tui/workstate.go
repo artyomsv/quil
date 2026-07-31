@@ -287,6 +287,7 @@ func syncPaneMeta(pane *PaneModel, info *PaneInfo, wideCanvas bool, minNativeCol
 	pane.HistoryLines = info.HistoryLines
 	pane.daemonMouseTracking = info.MouseTracking
 	pane.daemonMouseSGR = info.MouseSGR
+	pane.daemonBracketedPaste = info.BracketedPaste
 	// Unconditional copy, like the other daemon-authoritative fields: the
 	// daemon writes LastModel BEFORE broadcasting the hook event and IPC
 	// delivery is ordered per connection, so a snapshot can never lag behind

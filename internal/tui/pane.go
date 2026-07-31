@@ -90,18 +90,25 @@ type PaneModel struct {
 	// SGR extended-encoding mode (?1006). When any tracking mode is active the
 	// wheel handler forwards the event to the PTY instead of scrolling Quil's
 	// own scrollback (which alt-screen TUI apps never populate).
-	mouseX10    bool // ?9
-	mouseNormal bool // ?1000
-	mouseButton bool // ?1002
-	mouseAny    bool // ?1003
-	mouseSGR    bool // ?1006
-	// daemonMouseTracking/daemonMouseSGR mirror the daemon-authoritative mouse
-	// state from the workspace snapshot. The daemon sees the one-time
-	// mouse-enable burst on every attach; the local emulator does not when
-	// reattaching to an already-running app (ghost_buffer=false, e.g.
-	// opencode), so this is the reliable signal. Set in syncPaneMeta.
-	daemonMouseTracking bool
-	daemonMouseSGR      bool
+	mouseX10       bool // ?9
+	mouseNormal    bool // ?1000
+	mouseButton    bool // ?1002
+	mouseAny       bool // ?1003
+	mouseSGR       bool // ?1006
+	bracketedPaste bool // ?2004 (gates paste wrapping, not mouse forwarding)
+	// bracketedPasteSeen records that this client's emulator has observed a
+	// ?2004 toggle in the pane's own output. Once it has, bracketedPaste is a
+	// live signal and the daemon mirror below is ignored — see
+	// BracketedPasteEnabled for why OR-ing the two is wrong for this mode.
+	bracketedPasteSeen bool
+	// daemonMouseTracking/daemonMouseSGR/daemonBracketedPaste mirror the
+	// daemon-authoritative mode state from the workspace snapshot. The daemon
+	// sees the one-time mode-enable burst on every attach; the local emulator
+	// does not when reattaching to an already-running app (ghost_buffer=false,
+	// e.g. opencode), so this is the reliable signal. Set in syncPaneMeta.
+	daemonMouseTracking  bool
+	daemonMouseSGR       bool
+	daemonBracketedPaste bool
 
 	// Render cache: View() output is reused while renderKey() is unchanged.
 	// contentGen covers VT-grid/raw-buffer mutations (the grid itself has no
@@ -362,10 +369,11 @@ func (p *PaneModel) ResetVT() {
 	p.installVT(p.newVTEmulator(w, h))
 	p.rawBuf.Reset()
 	p.cursorVisible = true
-	// Fresh emulator starts with every mouse mode off; clear the mirrored
-	// flags so a wheel event isn't forwarded until the new app re-enables
-	// tracking.
+	// Fresh emulator starts with every mode off; clear the mirrored flags so
+	// a wheel event isn't forwarded — and a paste isn't bracketed — until the
+	// new app re-enables the mode.
 	p.mouseX10, p.mouseNormal, p.mouseButton, p.mouseAny, p.mouseSGR = false, false, false, false, false
+	p.bracketedPaste, p.bracketedPasteSeen = false, false
 	p.contentGen++
 }
 
@@ -420,9 +428,10 @@ func (p *PaneModel) ResetScroll() {
 	p.scrollBack = 0
 }
 
-// setMouseMode records a DEC mouse mode toggle reported by the VT emulator's
-// EnableMode/DisableMode callback. Only mouse-related modes are tracked; every
-// other mode is ignored. Runs on the Update goroutine (inside vt.Write).
+// setMouseMode records a DEC private mode toggle reported by the VT emulator's
+// EnableMode/DisableMode callback. Only the mouse modes and bracketed paste
+// (?2004) are tracked; every other mode is ignored. Runs on the Update
+// goroutine (inside vt.Write).
 func (p *PaneModel) setMouseMode(mode ansi.Mode, on bool) {
 	switch mode {
 	case ansi.ModeMouseX10:
@@ -435,6 +444,9 @@ func (p *PaneModel) setMouseMode(mode ansi.Mode, on bool) {
 		p.mouseAny = on
 	case ansi.ModeMouseExtSgr:
 		p.mouseSGR = on
+	case ansi.ModeBracketedPaste:
+		p.bracketedPaste = on
+		p.bracketedPasteSeen = true
 	}
 }
 
@@ -446,6 +458,29 @@ func (p *PaneModel) setMouseMode(mode ansi.Mode, on bool) {
 // reattach, where the burst was emitted before this client connected).
 func (p *PaneModel) MouseTracking() bool {
 	return p.mouseX10 || p.mouseNormal || p.mouseButton || p.mouseAny || p.daemonMouseTracking
+}
+
+// BracketedPasteEnabled reports whether the pane's child app has enabled
+// bracketed paste (?2004) — i.e. pasted text should be wrapped in
+// \x1b[200~/\x1b[201~ markers. Apps that never enabled the mode must receive
+// pastes as raw bytes: injecting markers they didn't ask for corrupts their
+// stdin (e.g. `cat > file` writes the escape bytes into the file).
+//
+// Deliberately NOT the `local || daemon` shape MouseTracking uses. The daemon
+// flag rides the workspace snapshot, which is throttled by the mode-broadcast
+// cooldown, so it lags a disable by up to that window. OR-ing the two would
+// keep wrapping pastes for an app that has just turned the mode off — and for
+// this mode the cost is escape bytes injected into the app's stdin, the exact
+// corruption the gate exists to prevent, rather than MouseTracking's cosmetic
+// stray wheel notch. So the local emulator wins once it has actually seen a
+// toggle for this pane; the daemon flag covers only the case the local
+// emulator cannot answer — reattaching to an app that announced the mode
+// before this client connected.
+func (p *PaneModel) BracketedPasteEnabled() bool {
+	if p.bracketedPasteSeen {
+		return p.bracketedPaste
+	}
+	return p.daemonBracketedPaste
 }
 
 // wheelForwardSeq returns the mouse-wheel escape sequence to forward to the

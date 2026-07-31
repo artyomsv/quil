@@ -39,11 +39,17 @@ func (m mouseModeState) tracking() bool {
 	return m.x10 || m.normal || m.button || m.any
 }
 
-// maxModeSeqLen bounds the carried tail of an unterminated sequence at a chunk
-// boundary: `ESC [ ?` plus the longest real parameter run fits comfortably; a
-// longer digit/`;` run cannot be a mode sequence we track, so it is dropped
-// rather than carried indefinitely.
-const maxModeSeqLen = 24
+// maxModeSeqLen bounds both how far back a chunk is searched for the start of
+// an unterminated sequence and how many bytes are carried into the next scan.
+// It must exceed the longest sequence we care about, or a split inside a long
+// one is silently dropped: every tracked mode combined is
+// `ESC [ ? 9;1000;1002;1003;1006;2004` = 29 bytes before the final byte, and a
+// real app may list untracked modes (1049, 25, 2026, …) in the same run. 64
+// leaves room for that while still bounding the carry — a longer digit/`;` run
+// is dropped rather than carried indefinitely. Do not shrink this below 29
+// without re-deriving it: the previous value of 24 sat under the all-modes
+// figure and lost exactly those splits.
+const maxModeSeqLen = 64
 
 // scanMouseModes updates the per-mode state from a raw output chunk. It walks
 // every `CSI ? <params> (h|l)` sequence and applies each set/reset that touches

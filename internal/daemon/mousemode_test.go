@@ -36,7 +36,15 @@ func TestScanMouseModes(t *testing.T) {
 		{"esc-bracket at end carried as tail", mouseModeState{}, "text\x1b[", mouseModeState{}, "\x1b["},
 		{"complete sequence leaves no tail", mouseModeState{}, "\x1b[?2004h", mouseModeState{bracketedPaste: true}, ""},
 		{"non-mode escape leaves no tail", mouseModeState{}, "\x1b[31mred", mouseModeState{}, ""},
-		{"overlong param run dropped, not carried", mouseModeState{}, "\x1b[?12345678901234567890123456789", mouseModeState{}, ""},
+		// Sized against maxModeSeqLen: the all-tracked-modes run must be
+		// carried, a run past the cap must be dropped. The first row is the
+		// regression guard for a cap set below the real maximum — at 24 the
+		// tail came back empty and the split enable was lost for good.
+		{"all-modes combined run carried", mouseModeState{},
+			"\x1b[?9;1000;1002;1003;1006;2004", mouseModeState{}, "\x1b[?9;1000;1002;1003;1006;2004"},
+		{"overlong param run dropped, not carried", mouseModeState{},
+			"\x1b[?" + "1234567890123456789012345678901234567890123456789012345678901234567890",
+			mouseModeState{}, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -71,6 +79,32 @@ func TestScanMouseModes_SplitAcrossChunks(t *testing.T) {
 		m, tail = scanMouseModes(m, append(append([]byte{}, tail...), seq[at:]...))
 		if !m.bracketedPaste {
 			t.Errorf("split at %d: bracketedPaste not set after carry", at)
+		}
+		if len(tail) != 0 {
+			t.Errorf("split at %d: leftover tail %q after complete sequence", at, tail)
+		}
+	}
+}
+
+// TestScanMouseModes_SplitInsideCombinedRun is the guard for maxModeSeqLen
+// being sized below the longest sequence it has to carry. An app that enables
+// every mode in one combined run produces 29 bytes before the final byte; with
+// the cap at 24 the backward search could not reach the ESC for the later
+// split points, so the tail came back empty and the ?2004 enable was lost with
+// no way to recover it. Splitting at every byte pins the whole range rather
+// than the one offset that happened to be tried.
+func TestScanMouseModes_SplitInsideCombinedRun(t *testing.T) {
+	t.Parallel()
+	const seq = "\x1b[?9;1000;1002;1003;1006;2004h"
+	want := mouseModeState{x10: true, normal: true, button: true, any: true, sgr: true, bracketedPaste: true}
+	for at := 1; at < len(seq); at++ {
+		m, tail := scanMouseModes(mouseModeState{}, []byte(seq[:at]))
+		if m != (mouseModeState{}) {
+			t.Fatalf("split at %d: mode set from incomplete fragment: %+v", at, m)
+		}
+		m, tail = scanMouseModes(m, append(append([]byte{}, tail...), seq[at:]...))
+		if m != want {
+			t.Errorf("split at %d: got %+v, want %+v", at, m, want)
 		}
 		if len(tail) != 0 {
 			t.Errorf("split at %d: leftover tail %q after complete sequence", at, tail)

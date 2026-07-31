@@ -101,9 +101,46 @@ const (
 	MsgClaudeSessionDetailReq  = "claude_session_detail_req"
 	MsgClaudeSessionDetailResp = "claude_session_detail_resp"
 
+	// Directory browsing (pane setup dialog CWD picker). The dialog used to
+	// read the machine running the TUI, which in remote mode is the wrong disk.
+	MsgBrowseDirReq  = "browse_dir_req"
+	MsgBrowseDirResp = "browse_dir_resp"
+
+	// Git repo discovery (Alt+G lazygit overlay, and the setup dialog's
+	// discover = "git" pick list). Same reason as the browser: it used to stat
+	// the TUI's own disk, so against a remote host it reported "no git repo
+	// here" for a directory that is a repo on the machine that matters.
+	MsgGitReposReq  = "git_repos_req"
+	MsgGitReposResp = "git_repos_resp"
+
+	// Recent-directory existence check (pane setup dialog's quick pick). The
+	// list was filtered with a local os.Stat, so against a remote host every
+	// server path failed the test and the pick list rendered silently empty —
+	// indistinguishable from a feature that had never been used, because
+	// structurally nothing had failed.
+	MsgDirsExistReq  = "dirs_exist_req"
+	MsgDirsExistResp = "dirs_exist_resp"
+
 	// Auto-update (TUI ⇄ daemon)
 	MsgStageUpdateReq  = "stage_update_req"  // TUI → daemon (empty payload)
 	MsgStageUpdateResp = "stage_update_resp" // daemon → TUI (unicast)
+
+	// Kube-context discovery (pane setup dialog, discover = "kube"). Same
+	// reason as the browser and git discovery: it used to parse the
+	// kubeconfig on the machine drawing the UI, so against a remote host it
+	// offered the laptop's clusters and launched with a --context the server
+	// may not have.
+	MsgKubeCtxReq  = "kube_ctx_req"
+	MsgKubeCtxResp = "kube_ctx_resp"
+
+	// Plugin availability (Ctrl+N and its consumers: context menu, palette,
+	// Alt+G overlay). Availability used to be detected only on the machine
+	// drawing the UI, which is the wrong machine whenever the daemon is
+	// remote — a tool installed only on the server was greyed out, and one
+	// installed only locally was offered and then spawned as a fallback
+	// terminal.
+	MsgPluginListReq  = "plugin_list_req"
+	MsgPluginListResp = "plugin_list_resp"
 )
 
 // Message is the wire format for IPC communication.
@@ -526,6 +563,128 @@ type ClaudeSessionsRespPayload struct {
 	Error     string              `json:"error,omitempty"`
 }
 
+// BrowseDirReqPayload asks the daemon to list one directory. An empty Path
+// means "wherever you would spawn a pane by default".
+//
+// Child descends: when set, the daemon lists the entry of that name inside
+// Path. The client cannot do this join itself, and that is the point. Path
+// separators are a property of the machine holding the filesystem, not of the
+// one rendering the picker — a Windows TUI attached to a Linux daemon would
+// build `C:\srv\work` shaped paths with filepath.Join and list nothing. The
+// daemon joins with its own separator, so the client never has to know.
+//
+// Child is a single path element and is rejected if it contains a separator.
+// Only the daemon can safely interpret one, so accepting it here would let a
+// client smuggle traversal through a field documented as a leaf name.
+type BrowseDirReqPayload struct {
+	Path  string `json:"path"`
+	Child string `json:"child,omitempty"`
+}
+
+// BrowseEntry is one child of a listed directory. Only the leaf name travels —
+// the client already knows the parent it asked about, and repeating the full
+// path on every entry would multiply the frame for nothing.
+type BrowseEntry struct {
+	Name  string `json:"name"`
+	IsDir bool   `json:"is_dir"`
+}
+
+// BrowseDirRespPayload carries one directory listing, directories first.
+//
+// Path and Resolved are separate ON PURPOSE and must not be merged. Path echoes
+// the request VERBATIM and is the client's staleness key — the browser fires a
+// request per keystroke of navigation, so answers routinely arrive after the
+// user has moved on, and the client drops any whose echo does not match where
+// it is now. Resolved is the cleaned absolute path: the usable answer, what the
+// dialog displays and ultimately commits. Collapsing the two would break the
+// echo the first time the daemon cleaned a trailing separator, and the field
+// would hang on its pending state until the timeout fired.
+//
+// Child echoes the request's Child for the same reason, so the staleness key is
+// the whole request rather than half of it — two descents from one directory
+// differ only in this field.
+//
+// Parent is the daemon's own answer for "one level up", never computed by the
+// client, for the separator reason described on the request.
+//
+// Roots lists the filesystem roots, and is populated only when Resolved IS a
+// root. On Unix a root has nothing above it, so it stays empty; on Windows it
+// carries the available drive letters, which is what "up" from `C:\` offers.
+//
+// It exists because the client cannot enumerate them: the old browser walked
+// A:\ to Z:\ with os.Stat under a runtime.GOOS check, and both halves describe
+// the machine DRAWING the picker rather than the one holding the disk. Against
+// a Linux daemon there are no drives at all, and against a Windows daemon the
+// letters are the server's.
+//
+// Truncated reports that the directory held more than the listing cap.
+//
+// RootsTruncated is the same statement about Roots, and is deliberately a
+// SECOND flag rather than a reuse of Truncated. The two are independent: the
+// drive sweep can give up on unresponsive mappings while the directory read
+// that follows it succeeds completely, and the client shows the roots AS the
+// listing once the user navigates up — so one flag would either claim the file
+// list was capped when it was not, or let a short drive list pass for a
+// complete one.
+type BrowseDirRespPayload struct {
+	Path           string        `json:"path"`
+	Child          string        `json:"child,omitempty"`
+	Resolved       string        `json:"resolved,omitempty"`
+	Parent         string        `json:"parent,omitempty"`
+	Entries        []BrowseEntry `json:"entries,omitempty"`
+	Roots          []string      `json:"roots,omitempty"`
+	Truncated      bool          `json:"truncated,omitempty"`
+	RootsTruncated bool          `json:"roots_truncated,omitempty"`
+	Error          string        `json:"error,omitempty"`
+}
+
+// DirsExistReqPayload asks the daemon which of Paths still resolve to
+// directories on ITS filesystem.
+type DirsExistReqPayload struct {
+	Paths []string `json:"paths"`
+}
+
+// DirsExistRespPayload carries the surviving directories.
+//
+// Paths is the subset of the request that resolved to a directory, in the
+// request's order. It is deliberately NOT an echo of the request, so it cannot
+// serve as a staleness key the way BrowseDirRespPayload.Path does — correlation
+// is by the per-request generation in Message.ID instead, because a path LIST is
+// a poor key: two requests differing only in order would compare equal under any
+// cheap comparison, and comparing them properly costs more than the generation.
+//
+// An empty Paths with an empty Error is a real answer — "none of these exist any
+// more" — and must stay distinguishable from a failure, because only one of the
+// two justifies telling the user their remembered directories are gone.
+type DirsExistRespPayload struct {
+	Paths []string `json:"paths,omitempty"`
+	Error string   `json:"error,omitempty"`
+}
+
+// GitReposReqPayload asks the daemon which git repositories are near CWD —
+// the enclosing repo plus one level of sub-repos. An empty CWD means the
+// daemon's default.
+type GitReposReqPayload struct {
+	CWD string `json:"cwd"`
+}
+
+// GitReposRespPayload carries the discovered repositories, enclosing repo
+// first.
+//
+// CWD echoes the request VERBATIM, the same staleness contract the browse and
+// session listings use: the answer is only meaningful for the directory that
+// was asked about, and the user may have moved on by the time it lands.
+//
+// An empty Repos with an empty Error is a real answer — "there is no repo
+// here" — and is deliberately distinguishable from a failure, because the two
+// produce different UI: the first flashes a finding, the second must not claim
+// one.
+type GitReposRespPayload struct {
+	CWD   string   `json:"cwd"`
+	Repos []string `json:"repos,omitempty"`
+	Error string   `json:"error,omitempty"`
+}
+
 // ClaudeSessionDetailReqPayload asks for the deep read of ONE session — the
 // listing head-reads every transcript in a directory, so this is issued per
 // user request (the picker's info key), never per listing.
@@ -572,6 +731,55 @@ type StageUpdateRespPayload struct {
 	Success bool   `json:"success"`
 	Version string `json:"version,omitempty"`
 	Error   string `json:"error,omitempty"`
+}
+
+// KubeCtxReqPayload is deliberately empty: kube-context discovery is
+// CWD-independent, so there is no content key that could go stale. The
+// per-request generation in Message.ID is the whole correlator.
+type KubeCtxReqPayload struct{}
+
+// KubeContextInfo is one context enumerated from the daemon's kubeconfig.
+// Current is carried per entry rather than as a top-level name, matching
+// kubediscover.Context — the setup dialog draws ● from this field directly.
+type KubeContextInfo struct {
+	Name      string `json:"name"`
+	Namespace string `json:"namespace,omitempty"`
+	Current   bool   `json:"current,omitempty"`
+}
+
+// KubeCtxRespPayload carries the discovered kube contexts.
+//
+// An empty Contexts with an empty Error is a real answer — "no kubeconfig
+// here" — deliberately distinguishable from a failure: only one of the two
+// justifies telling the user there are no contexts. Truncated is set when the
+// daemon capped the list at maxKubeContexts.
+type KubeCtxRespPayload struct {
+	Contexts  []KubeContextInfo `json:"contexts,omitempty"`
+	Truncated bool              `json:"truncated,omitempty"`
+	Error     string            `json:"error,omitempty"`
+}
+
+// PluginListReqPayload is deliberately empty: the answer is "the daemon's
+// whole registry", not scoped to any request-supplied key.
+type PluginListReqPayload struct{}
+
+// PluginInfo is one plugin's availability as the daemon sees it.
+//
+// No Homepage field: a greyed row already links out via the LOCAL plugin
+// definition's own Homepage, which points at the same URL either machine
+// would give. The field would only matter for a plugin the TUI does not
+// define, which it cannot render at all — so it is dropped rather than
+// carried unused.
+type PluginInfo struct {
+	Name      string `json:"name"`
+	Available bool   `json:"available"`
+}
+
+// PluginListRespPayload carries the daemon's own registry. Deliberately no
+// generation field: every response describes the same daemon and applying it
+// is idempotent, so a late answer says exactly what a fresh one would.
+type PluginListRespPayload struct {
+	Plugins []PluginInfo `json:"plugins,omitempty"`
 }
 
 // NewMessage creates a Message with a typed payload.

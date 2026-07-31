@@ -1289,18 +1289,18 @@ func TestReconnectDelay_DecayBoundary(t *testing.T) {
 	}
 }
 
-// THE CRITICAL REGRESSION. handleAttach replays only panes whose plugin has
-// ghost_buffer = true; for the rest it sends NOTHING and falls through to
-// redrawKick, which is itself a no-op without a redraw_key. Resetting such a
-// pane destroys the only content it has and leaves a blank rectangle in front of
-// a live process — indefinitely, if the pane is in a background tab.
-//
 // THE CRITICAL REGRESSION, and the P1 that followed the first fix.
 //
 // handleAttach replays only plugins with ghost_buffer = true; the rest get
-// nothing and fall through to redrawKick, itself a no-op without a redraw_key.
-// Resetting such a pane leaves a blank rectangle in front of a live process —
-// indefinitely, in a background tab. That hit opencode, lazygit, k9s and lazysql.
+// nothing and fall through to redrawKick. Resetting such a pane destroys the
+// only content it has, and if nothing then repaints it the result is a blank
+// rectangle in front of a live process — indefinitely, in a background tab.
+// That hit opencode, lazygit, k9s and lazysql.
+//
+// redrawKick now covers the keyless case with a resize rather than returning
+// silently, so the blank window is bounded in practice. This test does not rely
+// on that: the reset must not happen regardless of whether a later repaint
+// would have papered over it.
 //
 // The first fix predicted the daemon's choice from the Model's plugin registry.
 // That registry is loaded from THIS machine's config.PluginsDir(), while

@@ -259,18 +259,30 @@ resume_args = ["--resume", "{session_id}"]
 
 #### `redraw_key` — when to set it, and when not to
 
-With `ghost_buffer = false` there is nothing to replay on reconnect, so the pane renders blank until the program next writes something — and a full-screen program has no reason to do that unprompted. The pane looks dead while being perfectly healthy. `redraw_key` is how a plugin says "this byte makes my program repaint."
+With `ghost_buffer = false` there is nothing to replay on reconnect, so the pane renders blank until the program next writes something — and a full-screen program has no reason to do that unprompted. The pane looks dead while being perfectly healthy.
 
-**This is input, not a signal.** It lands in the child's stdin, so only set it when you know both that the program treats the byte as "redraw" *and* that nothing else is reading its stdin as data. A pane that might be sitting in `cat > file` or at a password prompt must leave it unset — there, a stray `\f` is silent data corruption rather than a repaint. That is why there is no default.
+**Leaving it unset does not mean nothing happens.** A pane with no `redraw_key` is given a 1-column resize instead, so its program repaints via `SIGWINCH`. That is the default because a signal cannot be misread: it needs no opt-in and is safe for every pane.
 
-**Why not `SIGWINCH`?** A resize would need no opt-in and would be safe everywhere, and it does not work for the programs that need this. Measured on a real PTY with a 1-column resize jiggle: `vim` repaints with ~5 KB of output, `claude-code` emits **0 bytes** from its main UI. It re-lays-out on a resize but only paints on its own render tick, which input drives.
+Setting `redraw_key` therefore means **"my program ignores `SIGWINCH` — send this instead"**, and it *suppresses* the resize. Only set it if that is true.
 
-Verify before setting it rather than assuming. Spawn the program on a PTY, let it settle, confirm it is idle, write the candidate byte, and check that output follows.
+**A key is input, not a signal.** It lands in the child's stdin, so only set it when you know both that the program treats the byte as "redraw" *and* that nothing else is reading its stdin as data. A pane that might be sitting in `cat > file` or at a password prompt must leave it unset — there, a stray `\f` is silent data corruption rather than a repaint.
+
+**Neither trigger is universal, and measurements are counter-intuitive in both directions.** On a real PTY:
+
+| Program | 1-column resize (`SIGWINCH`) | `Ctrl+L` (`\f`) |
+|---|---|---|
+| `vim` | ~5 KB repaint | — |
+| `claude-code` | **0 bytes** | ~3.8 KB repaint |
+| `opencode` | ~8 KB repaint | **0 bytes** |
+
+`claude-code` re-lays-out on a resize but only paints on its own render tick, which input drives — so it needs the key. `opencode` is the exact reverse, so adding `redraw_key = "\f"` to it would replace a working mechanism with a no-op. That is not hypothetical: it is how `opencode` and `lazygit` panes came to render blank on every reattach.
+
+Measure before declaring. Spawn the program on a PTY, let it settle, confirm it is idle, write the candidate byte, and check that output follows. If it does not, leave the field unset and let the resize do the work.
 
 ```toml
 [persistence]
 ghost_buffer = false
-redraw_key = "\f"   # Ctrl+L — verified to repaint claude-code
+redraw_key = "\f"   # Ctrl+L — measured to repaint claude-code, which ignores SIGWINCH
 ```
 | `start_args` | string[] | No | `[]` | Template arguments appended on **fresh** pane creation. `{key}` placeholders expanded from plugin state (e.g., generated UUIDs). Used with `preassign_id` strategy. |
 | `resume_args` | string[] | No | `[]` | Template arguments used when **restoring** a pane after daemon restart. `{key}` placeholders expanded from previously scraped state. If any placeholder cannot be resolved, the pane starts fresh instead. |

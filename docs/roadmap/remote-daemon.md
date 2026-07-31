@@ -1,7 +1,14 @@
 # Remote Daemon Attach — `quil --remote`
 
-> **Status: Phase 1 shipped, BETA.** Usable for real work with the limits below.
-> Phases 2 and 3 are planned, not built.
+> **Status: Phases 1 and 2 shipped, Phase 3 partly shipped. BETA.** Usable for
+> real work with the limits below. Phase 2's reconnect shipped in v1.45.0 and was
+> hardened in v1.45.1; it is partially verified against a real link — see the
+> manual-check table. Phase 3 has landed every picker that reads a filesystem or
+> probes a binary (RD-020…RD-025, RD-028): the working-directory browser, git
+> repository discovery, kube contexts, plugin availability and the recent-
+> directories list all describe the daemon's machine. `quil status` and the
+> update controls are still refused rather than retargeted. Phase 4 is planned,
+> not built.
 
 Attach a local Quil TUI to a daemon running on another machine. Panes, tabs and
 AI sessions live on the remote host and keep running there when the laptop
@@ -124,9 +131,9 @@ These are real and current. None are bugs to be reported; all are scoped work.
 
 | Limit | Effect | Fixed in |
 |---|---|---|
-| **Reconnect is unverified against a real link** | A dropped link now shows a banner and redials with backoff (Phase 2), but every claim about it rests on unit tests against a fake dialer — no manual ssh drop has been exercised yet. Treat it as unproven rather than absent. | Phase 2 manual checks |
-| **Filesystem dialogs read the *local* disk** | The pane working-directory picker, git-repository discovery, kube-context discovery and the Claude session list all browse the machine running the TUI, not the one running the panes. Type remote paths instead of browsing. | Phase 3 |
-| **Plugin availability is decided locally** | `Ctrl+N` greys out a plugin based on whether the binary exists on *your* machine, not the server's. A tool installed only on the remote is shown unavailable, and vice versa. | Phase 3 |
+| **Reconnect is only partly verified against a real link** | A dropped link shows a banner and redials with backoff (Phase 2, v1.45.0). Three of eight manual checks have been run on a real ssh link; the rest still rest on unit tests against a fake dialer. The highest-value one — reattaching to a pane whose plugin has `ghost_buffer = false` — ran on 2026-07-31 and **failed**, exactly as the analysis below predicted: it exposed RD-040, now fixed and re-verified. What remains on that row is a real link *drop* rather than a clean detach, which additionally exercises the redial. | Phase 2 manual checks |
+| **Plugin availability is a daemon-lifetime cache** | `Ctrl+N` now greys out what the *server* lacks (RD-023). But the daemon runs `DetectAvailability` at startup and on plugin reload only, and is designed to run for weeks — so a tool installed on the server mid-session stays greyed until the daemon restarts or plugins are reloaded. Local sessions deliberately keep their own detection, which is fresher and describes the same machine. | RD-029 |
+| **Plugin *definitions* are still local** | Only availability crosses the wire. A plugin the server defines and the client does not cannot be offered at all, and the F1 → Plugins editor reads and writes the *client's* `PluginsDir()` before telling the remote daemon to reload from its own — so editing plugins over a remote link edits the wrong machine's files. | RD-035 |
 | **`quil status` refuses under `--remote`** | It reports on the local daemon, so it is blocked rather than silently wrong. Use `ssh <host> quil status`. | Phase 3 |
 | **Update controls are hidden in remote mode** | The update banner describes the *remote* daemon's staged version while every apply path writes to *local* disk. Suppressed rather than offered wrongly. | Phase 3 |
 | **Clipboard image paste is local-only** | The DIB→PNG proxy writes the file to the local `~/.quil/paste/` and types a local path into a remote pane, where it does not resolve. | Phase 3 |
@@ -177,15 +184,28 @@ falls back to `~/.local/bin` and tells you the old copy is now shadowed.
 
 ---
 
-## Phase 2 — reconnect (code complete, unverified on a real link)
+## Phase 2 — reconnect (shipped v1.45.0, hardened v1.45.1)
 
 A dropped link is a pause rather than an ending.
 
 - The drop is reported as data, not as a quit, so it stays distinguishable from
   the daemon deliberately asking the TUI to exit.
-- Redial backs off from 500 ms to a 30 s cap with half jitter, retries without
-  limit, and runs in **batch mode** — by then Bubble Tea holds the terminal in
-  raw mode, so ssh has nowhere to prompt and a prompt would hang the attempt.
+- Redial backs off from 500 ms to a 30 s cap with half jitter and runs in
+  **batch mode** — by then Bubble Tea holds the terminal in raw mode, so ssh has
+  nowhere to prompt and a prompt would hang the attempt.
+- **An attempt counts as restored only once the far side answers.** A dial
+  proves the ssh *binary* started, nothing more; against an unreachable host
+  every attempt reported success, blanked the panes for a replay that never
+  came, and reset the counter so the backoff never engaged. Each attempt now
+  completes a version round-trip before the banner clears.
+- **Retries stop when retrying cannot help** (v1.45.1). A short list of ssh
+  failures that will not fix themselves — rejected key, changed host key, no
+  agreeable algorithm — parks the loop instead of retrying; `r` resumes without
+  undoing the rate decay. Reachable without an attacker: the first dial is
+  non-batch so ssh can prompt for a passphrase, every redial is batch, so a
+  passphrase-only key authenticates once and fails `publickey` forever after —
+  straight into a default fail2ban jail. Anything unmatched stays transient,
+  because mis-parking a session that would have healed is the worse error.
 - Input is frozen, not buffered. A keystroke typed at a dead link would arrive
   in a live agent session minutes later at a prompt that has moved on. `Ctrl+Q`
   stays live as the only exit from a host that never returns.
@@ -212,17 +232,46 @@ see the decision gate in the work registry.
   host-key and passphrase prompts have to be readable — and batch-mode redials
   capture it instead, which is what the reconnect banner shows.
 
-## Phase 3 — remote-correct UI (planned)
+## Phase 3 — remote-correct UI (partly shipped)
 
 Make every surface that reads a filesystem read the *server's*.
 
-- Four RPCs: directory listing, git-repository discovery, kube-context
-  discovery, Claude session listing — each already a pure function over a path,
-  which is why they are movable.
-- Plugin registry RPC with server-side `DetectAvailability`, so `Ctrl+N` greys
-  out what the *server* lacks.
-- `quil status` over the transport rather than refused.
-- Update controls targeted at the remote daemon, or explicitly labelled.
+**Landed (RD-020, RD-021, RD-028).** Directory listing and git-repository
+discovery are RPCs; the Claude session listing was already daemon-side, so three
+of the four "RPCs" this phase was scoped around turned out to be two. With them
+went `~` expansion, `filepath.Abs`, path joins, filesystem roots, and existence —
+each of which had been answering for the wrong machine, and none of which reads
+like an RPC until you notice the separator belongs to the disk's platform.
+
+Two consequences worth carrying into the rest of the phase:
+
+- **The trust boundary moved.** Names, paths and error text now arrive from a
+  host the user may not control, and are sanitised at render (`sanitizeRemoteText`)
+  while raw values stay in state, because the resolved path becomes a spawn CWD
+  and a repo path becomes lazygit's `--path`. Any further RPC returning
+  daemon-supplied *display* strings inherits this requirement.
+- **Every blocking filesystem call now needs a wall-clock bound, not a context.**
+  A context cannot interrupt an `os.Stat` or `os.ReadDir` already parked in the
+  kernel, which is exactly what an unresponsive mount produces — and each of
+  these handlers holds a single-flight slot while it runs. RD-022 walks a
+  kubeconfig that may live on such a mount.
+
+**Remaining.**
+
+- `quil status` over the transport rather than refused (RD-026, decided).
+- Update controls targeted at the remote daemon (RD-027, decided).
+- Re-detect plugin availability on request instead of serving a daemon-lifetime
+  cache (RD-029) — blocked on removing `Registry.Get`'s pointer escape first.
+- Plugin *definitions* served by the daemon, and an F1 → Plugins editor that
+  points at the machine that will load them (RD-035).
+- Palette CWD abbreviation against the local home (RD-036, display-only).
+
+**Landed since.** RD-022 (kube contexts, own `kubeDiscovering` slot, names and
+namespaces sanitized at render, and scanning/empty/failed rendered apart so an
+in-flight scan no longer reads as "no contexts"), RD-023 (plugin availability,
+remote-mode only — see RD-029 for why local sessions keep their own detection),
+RD-024 (per-host recent list *and* a daemon-side existence check; either alone
+leaves the list wrong remotely) and RD-025 (empty `AttachPayload.CWD`).
 
 ## Phase 4 — mTLS transport (planned, no date)
 
@@ -315,14 +364,14 @@ reports a timeout. The residual — a scan already parked in a syscall still
 wedges the single-flight slot for the daemon's lifetime — is tracked in
 `techdebt/3-3-discovery-scan-cannot-be-interrupted-mid-syscall.md`.
 
-### Phase 2 — reconnect
+### Phase 2 — reconnect (shipped, v1.45.0 + v1.45.1)
 
 Goal: a dropped link becomes a pause, not an ending.
 
 | ID | Item | Blocked by | Status |
 |---|---|---|---|
 | RD-010 | Distinguish link loss from `MsgCloseTUI` in `listenForMessages` | — | done (code) |
-| RD-011 | Redial loop: exponential backoff + jitter, ~30 s cap, unbounded retries, Ctrl+Q aborts | RD-001, RD-010 | done (code) |
+| RD-011 | Redial loop: exponential backoff + jitter, ~30 s cap, unbounded retries (narrowed by RD-019), Ctrl+Q aborts | RD-001, RD-010 | done (code) |
 | RD-012 | Input freeze + reconnecting banner | RD-010 | done (code) |
 | RD-013 | VT, raw ring, scroll offset and selection reset for **every** pane before replay | RD-010 | done (code) |
 | RD-014 | Work-state reset or replayed-event dedup (`applyWorkTransition` has no dedup) | RD-010 | done (code) |
@@ -332,12 +381,36 @@ Goal: a dropped link becomes a pause, not an ending.
 | RD-018 | Cap the batch-dial stderr buffer; tee it sanitized into `quil.log` | — | done |
 | RD-019 | Park the reconnect loop on a permanent ssh failure; `r` resumes | RD-018 | done |
 
-**"done (code)" is deliberate wording.** All seven are implemented and covered
-by 47 unit tests against a fake dialer, with `test`, `test-race` and `vet` green
-and the Windows TUI suite passing natively. **None has been exercised against a
-real ssh link.** The phase is not closed until the manual checks below pass;
-until then the status means "the code is written", not "the behaviour is
-confirmed".
+**"done (code)" is deliberate wording.** Every item is implemented, shipped and
+covered by unit tests against a fake dialer — 65 test functions in
+`internal/tui/reconnect_test.go`, 75 across `internal/transport`, and 4 more in
+`cmd/quil/remote_redial_test.go` covering the dial wiring itself — with
+`test`, `test-race` and `vet` green and the Windows suites passing natively.
+**Three of the eight manual checks below have been exercised against a real ssh
+link; five have not.** Shipping did not change what the wording means: for the
+outstanding rows the status still reads "the code is written", not "the
+behaviour is confirmed", and the phase is not closed until they pass. The third
+one ran on 2026-07-31 and failed on its first attempt, which is the argument for
+the remaining five: it had a passing unit test and a written analysis, and the
+defect was in neither.
+
+RD-017…RD-019 carry a plain `done` rather than `done (code)`. Each was
+reproduced first — a 3-in-8 native-Windows hang, an unbounded remote-fed buffer,
+a batch dial whose stderr reached no log — and each has a test that fails
+against the unfixed code, so the evidence is not "a real link would have shown
+it".
+
+Their **wiring** is now pinned too, which the unit tests did not cover: the
+transport proves it tees a batch dial's stderr, and the classifier proves it
+reads its three signals, but nothing proved `redialRemote` joined either one.
+Each of the three new guards was checked by breaking the code and watching it
+fail — dialling with a nil sink, building a fresh sink per attempt (which resets
+the session byte budget on exactly the flapping link it exists for), and turning
+`client.Close()` into `defer client.Close()`. That last one is a one-word edit
+that reads as tidier Go, and it silently reverts RD-019: `ExitCode` is only final
+once `Close` has reaped the child, so deferring makes every read `-1`, fails the
+classifier's 255 gate, and returns every permanent auth failure to an unbounded
+retry.
 
 Outstanding manual verification:
 
@@ -351,6 +424,84 @@ Outstanding manual verification:
 | Ctrl+Q during an outage | the only exit from a host that never returns | outstanding |
 | Drop the link mid-agent-turn with subagents running | spinner reflects reality rather than wedging (RD-014) | outstanding |
 | Local session, daemon stopped | still exits rather than spinning — the local path must be unchanged | outstanding |
+| Read `quil.log` after a reconnect and find ssh's own lines in it | RD-018 — the batch arm had no sanitizer and no sink, so diagnostics vanished exactly once a link started flapping. The wiring is now pinned by test; what a real link adds is that the lines are *legible and useful*, which no assertion can judge | outstanding |
+| Remove the key from the remote's `authorized_keys`, drop the link | RD-019 — the banner parks and says why, `r` resumes after restoring the key | **classification confirmed** against a live link (2026-07-30): one batch dial with an unauthorized key returned exit 255 and `<user>@<host>: Permission denied (publickey).`, matching the marker list, with nothing established. The banner and `r` still need a terminal |
+
+The two runs recorded above were made on the PR #113 tree, i.e. **before**
+RD-017. On Windows that tree could hang on close roughly 3 times in 8, so a
+pass there was probabilistic rather than evidence of the fixed behaviour —
+re-running both on v1.45.1 is worth the two minutes it costs.
+
+**Verified against the live VM on 2026-07-30, without a terminal.** Both ends
+report v1.45.1, and a hand-framed `version_req` sent through
+`ssh <host> quil --stdio` came back as a `version_resp` carrying the matching
+request id and `"version":"1.45.1"`, with ssh's stderr empty. That is the exact
+round-trip `verifyRemoteLink` performs on every reconnect, so the transport, the
+remote daemon and the version gate are confirmed end to end — what the remaining
+rows need is a terminal, not a working link.
+
+**Phase 3 blocks this check, which is worth stating plainly.** Attempting the run
+on 2026-07-30 could not create a lazygit pane at all: the setup dialog's CWD
+browser calls `os.ReadDir` in the TUI process, so it offers only the laptop's
+drives and can never reach `/home/artyom/homelab` (RD-020); pasting the path with
+`ctrl+v` fails too, because `validateAndNormalizeCWD` stats the target locally;
+and `Alt+G` reports `no git repo here`, because `overlay.go:54` calls
+`gitdiscover.Candidates` in the TUI as well, handing it a Linux CWD to `os.Stat`
+on Windows (RD-021). The pane had to be created by sending `create_pane` over the
+transport by hand.
+
+**RD-021 is now fixed and confirmed against that same VM**: with the RPC deployed
+to both ends, `Alt+G` from the claude-code pane opened lazygit on
+`/home/artyom/homelab` directly. The reproduction below is retained because it
+is what the fix has to keep being measured against.
+
+RD-021 produced the clearest artifact of the two, because a single screen
+contradicted itself: with a claude-code pane open at `/home/artyom/homelab`,
+`Alt+G` flashed `no git repo here` in the status bar while the agent running in
+that same directory on the VM answered `git status` with `On branch master` and
+three modified files. The status bar was describing the laptop's filesystem and
+presenting it as a fact about the remote path. `overlay.go:51` already carried a
+comment saying the call runs on the local disk and that an RPC would replace it.
+
+So RD-020 and RD-021 are not only UX debt — until they land, the only pane types
+that can verify the Phase 2 ghost-replay gate cannot be created through the UI on
+a remote host. That raises their priority above the rest of Phase 3.
+
+**claude-code cannot stand in for this check.** It is the obvious substitute —
+it is a `ghost_buffer = false` plugin, so it takes the same no-replay path — but
+it is the ONLY one that also declares a `redraw_key` (`"\f"`), and `redrawKick`
+(`daemon.go`) writes that to the child on every replay-less attach. claude
+repaints over whatever is on screen, so a pane that had been wrongly cleared
+comes back looking correct. Testing with it produces a **false pass** on exactly
+the bug the row exists to catch. The four plugins that expose the gate are the
+four it broke — opencode, lazygit, k9s, lazysql — and what they have in common
+is `ghost_buffer = false` with **no** `redraw_key`, i.e. nothing repaints them.
+Verified 2026-07-30 against a VM that had only claude-code installed.
+
+The TUI half of the contract is nonetheless pinned, and pinned
+plugin-agnostically: `TestReconnect_ResetIsConsumedByTheReplayNotPredicted`
+drives it at the message level — one pane replayed, one not — so it does not
+depend on any plugin's configuration. What a live run still adds is the DAEMON
+half: that `handleAttach` really does withhold a replay for those types.
+
+**Run 2026-07-31, and it failed — as predicted, on the plugins predicted.** An
+opencode pane mid-conversation, TUI closed and reattached, came back as a blank
+rectangle with a live process behind it. The daemon half is confirmed by that
+failure: `handleAttach` really does withhold the replay. What the analysis above
+stopped one step short of is that "nothing repaints them" was not merely the
+property that makes these plugins *useful* for the check — it was the defect.
+`redrawKick` returned silently for a plugin with no `redraw_key`.
+
+Fixed in RD-040 and re-verified on the same link: opencode and lazygit both
+repaint on reattach. The fix is a resize jiggle, not a key, because the two
+triggers are not interchangeable — measured the same day, opencode emits a full
+repaint on SIGWINCH and nothing on Ctrl+L, the exact inverse of claude-code.
+Adding `redraw_key = "\f"` to opencode, the obvious fix, would have been a
+no-op that looked like a fix.
+
+Still outstanding on this row: a real link **drop** (ssh killed mid-session)
+rather than a clean detach-and-reattach. The two paths share the replay gate,
+which is what was broken, but not the redial that precedes it.
 
 **Why the opencode check is now the most valuable one.** The two checks marked
 done both used a *terminal* pane, and code review then found that terminals are
@@ -370,13 +521,23 @@ would duplicate it without covering a failure mode ssh misses. Revisit if
 Phase 4 removes ssh, or if the manual checks show drops going unnoticed for
 materially longer than 45 s.
 
-**Known hazards on this path**, all tracked, none blocking:
+**Known hazards on this path — all three cleared in v1.45.1.** Recorded here
+because each was found by review of Phase 2 rather than by using it, and the
+techdebt files they were tracked in have been deleted along with the defects.
 
-| Hazard | Nature | Tracked in |
+| Hazard | Nature | Cleared by |
 |---|---|---|
-| `stdioConn.Close` can block racing the pump's uncancellable read on Windows, and a redial closes a client every attempt | pre-existing; reproduces unchanged on the Phase 1.5 tree | `techdebt/3-3-stdioconn-close-races-pump-read-on-windows.md` |
-| Batch dials buffer ssh stderr with no cap and no logging — and Phase 2 made those conns session-length for the first time | transport design newly exposed by reconnect; also loses post-reconnect ssh diagnostics from `quil.log` | `techdebt/3-3-batch-ssh-stderr-unbounded-and-unlogged.md` |
-| A reconnect cannot tell a permanent auth failure from a transient one, so a passphrase-protected key with no agent retries forever and can trip a fail2ban jail | mitigated by rate decay (~120 → ~33 attempts/hour), not eliminated | `techdebt/3-3-reconnect-cannot-classify-permanent-ssh-failure.md` |
+| `stdioConn.Close` blocks racing the pump's uncancellable read on Windows, and a redial closes a client every attempt | pre-existing; Phase 2 turned a per-session event into a per-attempt one. Reproduced natively at 3 hangs in 8 whole-package runs, 0 in 12 after | RD-017 |
+| Batch dials buffer ssh stderr with no cap and no logging — Phase 2 made those conns session-length for the first time | ssh multiplexes the *remote* command's fd 2 onto that stream, so the writer is remote-influenced and unbounded. Also silently lost post-reconnect diagnostics from `quil.log` | RD-018 |
+| A reconnect cannot tell a permanent auth failure from a transient one, so a passphrase-protected key with no agent retries forever and can trip a fail2ban jail | mitigated by rate decay (~120 → ~33 attempts/hour), not eliminated | RD-019 |
+
+The same property that made RD-018 a hazard also shaped RD-019's fix: because
+ssh's stderr carries remote output, the text alone cannot be trusted to say
+*ssh* failed — an ordinary `~/.bashrc` printing `permission denied` would
+otherwise park the session, and a compromised remote could do it on purpose.
+Two independent gates make the text attributable to ssh before it can park
+anything: no byte may have arrived on stdout, and the exit status must be ssh's
+own 255.
 
 ### Phase 3 — remote-correct UI
 
@@ -384,21 +545,56 @@ Goal: every surface that reads a filesystem reads the *server's*.
 
 | ID | Item | Blocked by | Status |
 |---|---|---|---|
-| RD-020 | Directory-listing RPC — the root fix; every other picker keys off the CWD it returns | RD-004 | todo |
-| RD-021 | Git repo discovery RPC | RD-004 | todo |
-| RD-022 | Kube context discovery RPC | RD-004 | todo |
-| RD-023 | Plugin registry RPC with server-side `DetectAvailability` | — | todo |
-| RD-024 | Per-target `recent-cwds.json` | RD-020 | todo |
-| RD-025 | Empty `AttachPayload.CWD` in remote mode | RD-020 | todo |
+| RD-020 | Directory-listing RPC — the root fix; every other picker keys off the CWD it returns | RD-004 | **done, confirmed on a real link** (browser reads the daemon; roots, ~, Abs and joins all server-side) |
+| RD-021 | Git repo discovery RPC | RD-004 | **done, confirmed on a real link** (Alt+G *and* the setup-dialog pick list, both through `requestGitRepos`) |
+| RD-022 | Kube context discovery RPC | RD-004 | **done** (own `kubeDiscovering` slot; contexts sanitized at render; scanning/empty/failed rendered apart) |
+| RD-023 | Plugin registry RPC with server-side `DetectAvailability` | — | **done, remote-mode only** (see RD-029 for the staleness residual) |
+| RD-024 | Per-target `recent-cwds.json` | RD-020 | **done** (per-host file *and* a daemon-side existence check — either alone leaves the list wrong remotely) |
+| RD-025 | Empty `AttachPayload.CWD` in remote mode | RD-020 | **done** |
 | RD-026 | `quil status` over the transport, or documented local-only | — | todo |
 | RD-027 | Update controls targeted at the remote daemon, or explicitly labelled | — | todo |
-| RD-028 | Async setup-dialog refactor without regressing pinned-height invariants | RD-020 | todo |
+| RD-028 | Async setup-dialog refactor without regressing pinned-height invariants | RD-020 | **done** (async browser; height invariant held, pinned-height tests untouched) |
+| RD-029 | Re-detect plugin availability on request instead of serving a daemon-lifetime cache | RD-023 | todo — **blocked on removing `Registry.Get`'s pointer escape.** `DetectAvailability` holds the write lock for the whole PATH walk *and* writes `p.Command.Cmd`, while `Get` hands out a raw `*PanePlugin` whose fields every caller reads outside any lock. That race is latent today because detection runs twice in a daemon's life; moving it onto every `Ctrl+N` would make it reachable |
+| RD-035 | Serve plugin *definitions* from the daemon, and point the F1 → Plugins editor at the machine that will load them | — | todo |
+| RD-036 | `buildPaletteCommands` abbreviates pane CWDs against the *local* `os.UserHomeDir()`, so a server path is shortened against the laptop's home wherever the prefixes coincide | — | todo (display-only) |
+| RD-041 | Windows root sweeps could drain the process-wide blocking-call pool | RD-020 | **done** (`filesystemRoots` was the sole call site giving each probe its own sub-budget, so a timed-out probe barely touched the shared deadline and the next drive started a fresh abandoned goroutine holding another `maxBlockingFSCalls` permit; eight dead mappings refused browse, git and kube discovery daemon-wide. Capping abandoned probes per sweep was NOT enough — nothing returns a permit but the kernel, so ⌈pool/cap⌉ successive sweeps still drained it and pressing "up" four times is navigation — so `probeRoot` also claims against a reserve it can never take from the read that follows. The sweep and `driveLetters` were split out from behind `//go:build windows`, and `listFilesystemRoots` is a seam because the Unix arm always reports complete, leaving the wire mapping statically dead on the platform CI runs) |
+| RD-042 | A partial drive list was presented as the whole truth | RD-041 | **done** (`sweepRoots` reports whether every candidate ANSWERED — a timed-out drive is missing as invisibly as a capped one — carried on its own `RootsTruncated` wire flag, since the sweep can give up while the same response's directory read succeeds; `showRootsList` swaps it in when the roots become the listing) |
+| RD-043 | Pane children inherited the daemon's `PWD` | RD-039 | **done** (`os/exec` sets `PWD` from `Cmd.Dir` only when `Cmd.Env` is nil, so the panes contributing no plugin env were exactly the ones getting it, and RD-039's unconditional assignment took it away — under `--remote` they inherited ssh's login directory. Both this and RD-039 lived in `Start`'s one-line call rather than in `childEnv`, so the unit tests could not reach either; covered now by a real spawn through the public `Session` API) |
 
 **Correction to the limits table above.** The Claude session *listing* is
 already remote-correct — `handleClaudeSessionsReq` runs daemon-side and scans
 the daemon's disk. What is wrong is the **CWD fed to it**, which comes from
 the local directory browser. RD-020 fixes it; no separate session-listing RPC
 is needed.
+
+### Cross-cutting — protocol and diagnostics
+
+Not owned by a phase: these describe the IPC layer itself rather than any one
+surface built on it.
+
+| ID | Item | Blocked by | Status |
+|---|---|---|---|
+| RD-038 | Decide whether Quil should ALWAYS set `TERM` for pane children rather than only when the daemon has none (RD-039's fix). Quil *is* the terminal for a pane — it emulates VT via `charmbracelet/x/vt` and re-renders every cell — so the child's `TERM` arguably ought to describe Quil's emulator rather than whichever terminal launched the daemon. Deferred because it changes behaviour for every local user to fix nothing they experience | RD-039 | todo |
+| RD-040 | Keyless `ghost_buffer = false` panes never repaint on reattach | — | **done, confirmed on a real link** (`redrawKick` returned silently for a plugin declaring no `redraw_key`, so opencode and lazygit came back blank with a live process behind them — locally as well as remotely. Falls back to a resize jiggle; a declared key now means "I ignore SIGWINCH". The triggers are not interchangeable: opencode repaints on SIGWINCH and ignores Ctrl+L, claude-code the exact inverse) |
+| RD-039 | Pane children inherit no `TERM` over a remote link | — | **done, confirmed on a real link** (`ssh -T` allocates no TTY and exports no `TERM`; the daemon started by `quil --stdio` had none and every pane child inherited the gap, so tcell-based tools — k9s, lazysql — exited 1 within milliseconds. Supplied when absent in `internal/pty`; Unix only, since ConPTY children use the Win32 API rather than terminfo) |
+| RD-044 | AI panes lose their scrollback across any reattach. `ghost_buffer = false` makes `handleAttach` replay nothing, and `redrawKick` restores only the CURRENT SCREEN — so a claude-code or opencode pane comes back looking healthy with no history above the fold. Not remote-specific and not new: a local `ctrl+q` and relaunch does the same, and it predates Phase 2. RD-040 raised its visibility rather than causing it, by replacing a blank rectangle with a complete-looking one. The daemon still holds the bytes in `OutputBuf`; it declines to send them. **The rationale is worth re-measuring before designing around it**: "replaying a full-screen app produces garbage" was decided when these panes were assumed to live on the alternate screen, but users DO scroll them while attached, which means claude-code writes to the main screen and scrolls normally — append-only text replays fine, and the real hazards are its cursor-positioned input-box redraws and a ring buffer that can begin mid-escape-sequence. Flipping the flag on a test host answers it in minutes; the fallback is replaying the VT's RENDERED scrollback as plain text, which cannot corrupt and loses only colour. Reported from manual testing 2026-07-31 | — | **done for claude-code; opencode outstanding.** The flag was flipped on the VM and **the replay is NOT garbage** — history came back correct and scrollable, so the founding assumption was wrong, the third such this session. It exposed a real defect instead: the TUI reset the VT on the ghost→live transition for `claude-code` specifically, wiping the restored scrollback on the first keystroke. Fixed and pinned. BOTH replay paths were then confirmed on a real link — in-memory after a TUI quit, and from disk after a daemon restart, the latter landing under a freshly respawned `--resume` process, which is the collision the deleted reset would nominally have hidden. `claude-code.toml` now ships `ghost_buffer = true` at schema_version 11 (bumped because a user's own copy overrides the embedded one, so without it an existing install would never see the change). `opencode` is deliberately NOT flipped: its `false` was never the reset's fault, nothing in this result predicts it, and it is the plugin that behaves OPPOSITE to claude-code on redraw triggers — it needs its own measurement |
+| RD-037 | Answer unknown request types instead of dropping them. `handleMessage`'s dispatch switch has no `default:`, so a request the daemon does not understand produces no response and no client-visible signal — the caller waits out its timeout and renders the same empty state a genuine "nothing found" produces. Respond with an error naming the unrecognised type when `msg.ID` is set (a correlated request expecting an answer); broadcasts stay silent | — | todo |
+
+**Why this is worth an id despite being low severity.** The version gate
+already covers the case that reaches users: the daemon is long-lived, so a
+stale *running* daemon reports its own compiled-in version and the mismatch is
+caught at attach. What it cannot catch is two builds that share a version
+string and differ in protocol support — in practice an unreleased branch build
+against the release.
+
+That is a developer-and-tester hazard rather than a user-facing bug, and it is
+recorded because the *diagnostic distance* was the real cost, not the failure.
+Hit on 2026-07-31 testing RD-022…RD-025: three unrelated-looking symptoms (no
+kube contexts, an empty working-directory browser, k9s starting wrong) all
+traced to one daemon that predated the handlers. The information needed already
+existed on the wire — the daemon knew it did not recognise `kube_ctx_req` and
+said so, in a log on the other machine. One error response turns a cross-machine
+investigation into a message on screen.
 
 ### Phase 4 — mTLS transport
 
@@ -440,8 +636,8 @@ Carried from the design spec; each needs an answer before its phase closes.
 
 | # | Question | Owned by |
 |---|---|---|
-| 1 | Does `quil status` gain remote support, or stay documented local-only? | RD-026 |
-| 2 | Does the Settings dialog hide daemon-owned rows in remote mode, or show them disabled with an explanation? | RD-027 |
+| 1 | ~~Does `quil status` gain remote support, or stay documented local-only?~~ **Answered: remote support.** The daemon already answers a version handshake, so `MsgStatusReq` is a thin addition. The deciding case is `--json`: a script that gains `--remote` and keeps reporting on the wrong machine is a live failure mode, and refusing prevents it only for as long as the guard is remembered. | RD-026 (decided) |
+| 2 | ~~Does the Settings dialog hide daemon-owned rows in remote mode, or show them disabled with an explanation?~~ **Answered: target them at the remote.** Apply drives `quil remote setup <dest>`, which has installed and upgraded over ssh since v1.44.0 — so this is wiring, not new capability. Merely labelling the controls is a strict subset and is the fallback if the phase runs long. | RD-027 (decided) |
 | 3 | Should notes move daemon-side? Storage is already atomic and pane-keyed, so it is a contained follow-up. | unassigned |
 | 4 | ~~Application-layer heartbeat, or rely on ssh keepalive?~~ **Answered: ssh keepalive** (~45 s detection). See the Phase 2 decision gate. | RD-011 (closed) |
 | 5 | Does Quil issue certificates, or only consume them? | RD-034 |

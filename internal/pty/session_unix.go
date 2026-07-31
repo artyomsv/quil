@@ -5,6 +5,7 @@ package pty
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 
 	cpty "github.com/creack/pty/v2"
@@ -39,12 +40,10 @@ func (s *unixSession) SetCWD(dir string) {
 
 func (s *unixSession) Start(cmd string, args ...string) error {
 	s.cmd = exec.Command(cmd, args...)
-	if len(s.env) > 0 {
-		s.cmd.Env = append(os.Environ(), s.env...)
-	}
 	if s.cwd != "" {
 		s.cmd.Dir = s.cwd
 	}
+	s.cmd.Env = childEnv(s.cwd, s.env)
 	ws := &cpty.Winsize{Cols: uint16(s.cols), Rows: uint16(s.rows)}
 	ptmx, err := cpty.StartWithSize(s.cmd, ws)
 	if err != nil {
@@ -97,4 +96,71 @@ func (s *unixSession) WaitExit() int {
 		}
 	})
 	return s.exitCode
+}
+
+// defaultTERM is what Quil's own emulator answers to.
+//
+// internal/tui renders every pane cell through charmbracelet/x/vt, so this
+// describes Quil rather than whatever terminal happens to be attached, and the
+// entry is present in every terminfo database the supported platforms ship.
+const defaultTERM = "xterm-256color"
+
+// childEnv assembles the environment for a PTY child, supplying TERM when the
+// daemon's own environment has none.
+//
+// That absence is the normal case under `quil --remote`: the daemon is started
+// through `ssh -T`, which allocates no TTY and therefore exports no TERM, and
+// every pane child inherits the gap. Tools built on tcell — k9s and lazysql
+// among the shipped plugins — refuse to start without it and exit 1 within
+// milliseconds, which presents as a pane that opens and instantly dies rather
+// than as a missing variable. Locally the daemon is spawned from a real
+// terminal and inherits one, so this only ever bites over a remote link.
+//
+// Set only when ABSENT, never overridden: an inherited value describes the
+// attached terminal accurately, and replacing it would be a behaviour change
+// for every local user to fix a problem they do not have.
+//
+// Unix only, deliberately. The Windows path leaves the environment untouched:
+// ConPTY children drive the console through the Win32 API and VT processing
+// rather than terminfo, so they neither need TERM nor currently receive one —
+// introducing it there would change behaviour on a platform where nothing is
+// broken.
+// PWD is set here rather than left to os/exec, which sets it only when Cmd.Env
+// is nil.
+//
+// That condition is the whole hazard. exec updates PWD to match Cmd.Dir, but
+// deliberately only for a nil Env, so as not to override a value the caller
+// meant to set (go.dev/issue/50599). Before TERM was introduced this function
+// did not exist and Env was left nil for any pane whose plugin contributed no
+// variables — so those panes, and only those, got the fixup. Assigning Env
+// unconditionally silently took it away from them: they began inheriting the
+// DAEMON's PWD, which under `quil --remote` is ssh's login directory rather
+// than the directory the pane was opened in. A child that trusts $PWD over
+// getcwd() would resolve relative paths against the wrong directory, with the
+// pane's own shell reporting the right one.
+//
+// Appended before extra, like TERM, so a plugin that sets PWD itself still wins.
+//
+// That precedence is provided by os/exec, NOT by execve. Cmd.environ() runs
+// dedupEnv over the slice and keeps the LAST occurrence of each name, so the
+// child receives exactly one TERM and one PWD. execve itself would pass both
+// through, and a first-wins consumer is entirely legal there — glibc and musl
+// getenv() both scan forward and return the first match. The distinction is
+// worth stating because it is what constrains this slice's future: handing it
+// to syscall.Exec or posix_spawn instead of exec.Cmd would silently invert
+// plugin-vs-default precedence with nothing failing.
+func childEnv(cwd string, extra []string) []string {
+	env := os.Environ()
+	if os.Getenv("TERM") == "" {
+		env = append(env, "TERM="+defaultTERM)
+	}
+	if cwd != "" {
+		// Absolute, because PWD is defined as an absolute pathname; a relative
+		// one is worse than none. A path that cannot be made absolute is left
+		// alone rather than guessed at.
+		if abs, err := filepath.Abs(cwd); err == nil {
+			env = append(env, "PWD="+abs)
+		}
+	}
+	return append(env, extra...)
 }

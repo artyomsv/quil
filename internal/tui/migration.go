@@ -11,7 +11,6 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/artyomsv/quil/internal/config"
-	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/plugin"
 )
 
@@ -167,7 +166,14 @@ func (m Model) saveMigrationAndAdvance() (tea.Model, tea.Cmd) {
 	if err := m.pluginRegistry.LoadFromDir(config.PluginsDir()); err != nil {
 		log.Printf("migration: reload plugins: %v", err)
 	}
-	m.pluginRegistry.DetectAvailability()
+	// Local detection only in local mode — see the identical guard in
+	// dialog.go's Plugins dialog. This dialog resolves after the first
+	// attach, so a remote session has already adopted the daemon's answer by
+	// the time this runs; a local DetectAvailability pass here would discard
+	// it with a detection pass over the wrong machine.
+	if !m.RemoteMode() {
+		m.pluginRegistry.DetectAvailability()
+	}
 	m.migrationLeft = nil
 	m.migrationRight = nil
 	m.migrationPlugins = nil
@@ -176,14 +182,21 @@ func (m Model) saveMigrationAndAdvance() (tea.Model, tea.Cmd) {
 	// once at startup and keeps a stale in-memory copy; without an explicit
 	// reload it spawns panes with the OLD schema (e.g. record_history still
 	// false) until it restarts. Mirrors the Plugins dialog's reload (dialog.go).
+	// Must ask for availability again, not merely reload. LoadFromDir above
+	// REPLACES every TOML-backed plugin with a freshly parsed one, and
+	// Available is a runtime-only field (plugin.go), so every replacement
+	// comes back false. In local mode DetectAvailability repopulates them; in
+	// remote mode the guard above skips it, so without the re-ask every plugin
+	// but the Go built-in "terminal" would read as unavailable for the rest of
+	// the session — the exact silent wrong answer RD-023 exists to remove.
+	// Hence the shared command rather than a bare MsgReloadPlugins; see
+	// reloadPluginsThenAskCmd for why the two sends must leave together.
 	client := m.client
 	reloadCmd := func() tea.Msg {
 		if client == nil {
 			return nil
 		}
-		msg, _ := ipc.NewMessage(ipc.MsgReloadPlugins, nil)
-		client.Send(msg)
-		return nil
+		return reloadPluginsThenAskCmd(client)()
 	}
 	return m, tea.Batch(reloadCmd, tea.ClearScreen)
 }

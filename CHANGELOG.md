@@ -7,6 +7,102 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **OpenCode and lazygit panes come back with their content after you
+  reattach.** They showed an empty rectangle with a live process behind it —
+  the same symptom fixed for Claude Code in 1.43.1, which turned out to have
+  been fixed only for Claude Code. Pane types that skip saving scrollback opt
+  in to a repaint by naming the key their program answers, and neither of these
+  names one. Measured against real panes, they would not have helped if they
+  did: OpenCode emits nothing at all for that key and repaints fully on a
+  window-size change, and Claude Code is the exact reverse. Panes that name no
+  key are now given a size change instead, which no program mistakes for input.
+  This was never remote-only — it happened on every reattach, locally too.
+- **Claude Code panes keep their conversation history when you reattach.**
+  Closing the TUI, dropping an SSH link, or restarting the daemon used to leave
+  the pane showing only its current screen — the conversation was still there
+  in the program, but you could not scroll back to any of it. Quil now saves
+  and replays these panes like it always has for terminals, so the history
+  comes back and stays as you keep working.
+
+  It was off because replaying a full-screen program was expected to produce
+  garbage. Measured against a real pane, it does not: Claude Code writes to the
+  normal screen and scrolls like any other program, which is why you can scroll
+  it while attached.
+
+  Two consequences worth knowing. Pane output is now written to disk under
+  `~/.quil/buffers/`, as it already was for every terminal pane. And how much
+  history returns is bounded by `[ghost_buffer] max_lines` — an AI pane spends
+  that budget faster than a shell does, because every redraw costs bytes.
+
+  You will be shown the change on next launch, since your own copy of
+  `claude-code.toml` takes precedence over the shipped one. OpenCode panes are
+  unchanged for now.
+- **Full-screen tools start in a remote session.** `k9s` and `lazysql` opened
+  and exited within a moment, leaving a pane that looked like it had crashed
+  for no reason. A daemon reached over SSH has no terminal type set — the
+  connection carries no terminal — and tools built on that library refuse to
+  start without one, so the pane died before it could say why. Quil now gives
+  its panes a terminal type when the daemon has none, and leaves an inherited
+  one alone.
+- **Browsing for a folder on Windows keeps working when mapped network drives
+  are unreachable.** Listing the drives probes each one, and a mapping whose
+  server has gone away cannot be interrupted — it holds a slot until the
+  operating system gives up. With enough dead mappings, one press of "up" from
+  `C:\` consumed every slot the daemon had, after which directory browsing, git
+  repository discovery and kube-context discovery were all refused until a
+  stalled probe finished. The sweep now gives up after the first couple of
+  unresponsive drives, can never take the slots the directory listing itself
+  needs, and says when the drive list it shows is incomplete — a drive missing
+  because its server stopped answering otherwise looks exactly like one that
+  was never mapped.
+- **A pane's `$PWD` names the pane's own directory again.** Panes for tools
+  that set no environment variables of their own — `k9s`, `lazygit`,
+  `lazysql`, `ssh`, `stripe` — inherited the daemon's instead, which over a
+  remote connection is the SSH login directory rather than the folder the pane
+  was opened in. Anything trusting `$PWD` over asking the operating system
+  resolved relative paths against the wrong folder, while the pane's own shell
+  reported the right one.
+- **The rest of the pane setup dialog now describes the remote machine.** The
+  kube-context picker lists the contexts from the **daemon's** kubeconfig rather
+  than your laptop's, so a `k9s` pane no longer launches with a `--context`
+  naming a cluster the server may not have. `Ctrl+N` greys out plugins based on
+  what is installed on the **server** — a tool present only there used to be
+  hidden, and one present only locally was offered and then quietly opened as a
+  plain shell. The recent-directories quick pick keeps a separate list per
+  remote host and checks those paths against the daemon's disk; it previously
+  rendered empty in remote mode, because a local existence check silently
+  dropped every server path and an empty list looks exactly like a feature you
+  have never used.
+- **A remote daemon is no longer told your laptop's working directory** as the
+  place to spawn new panes. It validated that path and fell back when it did not
+  exist on the server, so this was safe — but only by coincidence, and a path
+  that happens to exist on both machines is where the coincidence stops.
+- **Choosing a folder in a remote session now shows the remote machine's
+  files.** Every dialog that looks at a filesystem — the directory browser when
+  you create a pane, and `Alt+G` for lazygit — was reading the disk of the
+  computer in front of you, even when the session was attached to another
+  machine over SSH. The result was a screen making two contradictory claims
+  about one path: `Alt+G` would report no repository in a directory where the
+  agent running in that very pane answered `git status` with the branch name.
+  Typing `~/project` asked for your laptop's home directory on a Linux server,
+  relative paths resolved against the wrong working directory, the browser
+  offered your laptop's drives, and the suggested starting locations pointed at
+  folders that existed only locally. All of them now ask the machine that
+  actually holds the files.
+
+### Security
+- **A remote machine cannot use a folder name to garble the picker or disguise
+  which folder you are choosing.** Now that directory names, resolved paths and
+  error messages arrive from a host you may not control, they are stripped of
+  terminal control sequences before being drawn, so a crafted name cannot
+  scramble the dialog around it. Characters that override text direction are
+  removed as well — those are printable, so they survive an ordinary
+  control-character filter while making a name read as something other than
+  what it is, which matters most on the list you pick a working directory from.
+  Names in Cyrillic, Chinese, Japanese and emoji are untouched and display
+  normally, and the real name is always what gets opened.
+
 ## [1.45.3] - 2026-07-31
 
 ### Fixed
@@ -243,7 +339,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   paths you type. Pane notes, clipboard paste and the log viewer are local by
   design. `quil status` also reports on the local daemon.
 
-||||||| parent of 3df441f (fix(daemon): repaint replay-less panes when a client reattaches)
 ## [1.42.1] - 2026-07-26
 
 ### Fixed

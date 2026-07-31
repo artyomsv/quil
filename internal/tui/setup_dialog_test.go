@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -13,63 +12,10 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/artyomsv/quil/internal/config"
+	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/kubediscover"
 	"github.com/artyomsv/quil/internal/plugin"
 )
-
-func TestValidateAndNormalizeCWD(t *testing.T) {
-	// Create one tmp dir to reuse as the canonical "valid dir" case.
-	validDir := t.TempDir()
-
-	// Create a file (not a dir) to test the "not a directory" branch.
-	notDirPath := filepath.Join(t.TempDir(), "file.txt")
-	if err := os.WriteFile(notDirPath, []byte{}, 0644); err != nil {
-		t.Fatalf("create test file: %v", err)
-	}
-
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Fatalf("UserHomeDir: %v", err)
-	}
-
-	cases := []struct {
-		name       string
-		input      string
-		wantErrSub string // empty = no error; otherwise substring expected in error
-		wantAbs    string // if non-empty, the cleaned path must equal this
-	}{
-		{"empty accepted", "", "", ""},
-		{"whitespace only accepted", "   ", "", ""},
-		{"quotes only accepted", `""`, "", ""},
-		{"valid tmpdir", validDir, "", validDir},
-		{"quoted valid tmpdir", `"` + validDir + `"`, "", validDir},
-		{"trailing whitespace", validDir + "   ", "", validDir},
-		{"tilde alone resolves to home", "~", "", home},
-		{"nonexistent", filepath.Join(os.TempDir(), "definitely-not-here-xyz-9999"), "does not exist", ""},
-		{"file not dir", notDirPath, "not a directory", ""},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := validateAndNormalizeCWD(tc.input)
-			if tc.wantErrSub == "" {
-				if err != nil {
-					t.Fatalf("unexpected error: %v", err)
-				}
-				if tc.wantAbs != "" && got != tc.wantAbs {
-					t.Errorf("got %q, want %q", got, tc.wantAbs)
-				}
-				return
-			}
-			if err == nil {
-				t.Fatalf("expected error containing %q, got none", tc.wantErrSub)
-			}
-			if !strings.Contains(err.Error(), tc.wantErrSub) {
-				t.Errorf("error %q does not contain %q", err.Error(), tc.wantErrSub)
-			}
-		})
-	}
-}
 
 func TestSanitizePastedPath(t *testing.T) {
 	cases := map[string]string{
@@ -169,11 +115,11 @@ func TestEnterSetupOrSplit_RoutingAndDefaults(t *testing.T) {
 		}
 	})
 
-	t.Run("cwd only — opens setup with browser pre-loaded from home", func(t *testing.T) {
-		m := &Model{}
+	t.Run("cwd only — opens setup and asks the daemon for the home fallback", func(t *testing.T) {
+		m, fake, _ := overlayTestModel(t, "") // no pane CWD: that candidate is skipped
 		cmd := m.enterSetupOrSplit(pluginCWD)
 		if cmd == nil {
-			t.Error("expected non-nil cmd (ClearScreen) when opening dialog")
+			t.Fatal("expected non-nil cmd (ClearScreen + browse request) when opening dialog")
 		}
 		if m.dialog != dialogCreatePaneSetup {
 			t.Errorf("expected dialog = dialogCreatePaneSetup, got %v", m.dialog)
@@ -184,10 +130,12 @@ func TestEnterSetupOrSplit_RoutingAndDefaults(t *testing.T) {
 		if m.setupFieldCursor != 0 {
 			t.Errorf("expected cursor at 0 (CWD), got %d", m.setupFieldCursor)
 		}
-		// With no active pane, the browser falls back to user home and
-		// pre-loads its directory listing. cwdBrowseDir should be set.
-		if m.cwdBrowseDir == "" {
-			t.Error("expected cwdBrowseDir to be set from user home fallback")
+		runCmd(cmd)
+		// The home fallback is the literal "~" for the DAEMON to expand.
+		// os.UserHomeDir here would name this machine's home, which against a
+		// remote host is a directory that does not exist there.
+		if got := browseReqPaths(t, fake); len(got) != 1 || got[0] != "~" {
+			t.Errorf("browse requests = %v, want exactly [~]", got)
 		}
 	})
 
@@ -217,67 +165,31 @@ func TestEnterSetupOrSplit_RoutingAndDefaults(t *testing.T) {
 		}
 	})
 
-	t.Run("cwd — lastSelectedCWD wins over home fallback", func(t *testing.T) {
-		remembered := t.TempDir()
-		m := &Model{lastSelectedCWD: remembered}
-		m.enterSetupOrSplit(pluginCWD)
-		if m.cwdBrowseDir != remembered {
-			t.Errorf("expected cwdBrowseDir = %q (from lastSelectedCWD), got %q", remembered, m.cwdBrowseDir)
+	// The chain is ordered lastSelectedCWD -> active pane CWD -> "~", and only
+	// the head of it is asked about up front. Its later links are exercised in
+	// browse_client_test.go, where the failing responses that advance them can
+	// be delivered.
+	t.Run("cwd — lastSelectedCWD is asked about first", func(t *testing.T) {
+		m, fake, _ := overlayTestModel(t, "/pane/cwd")
+		m.lastSelectedCWD = "/remembered"
+		runCmd(m.enterSetupOrSplit(pluginCWD))
+		if got := browseReqPaths(t, fake); len(got) != 1 || got[0] != "/remembered" {
+			t.Errorf("browse requests = %v, want exactly [/remembered]", got)
 		}
 	})
 
-	t.Run("cwd — stale lastSelectedCWD cleared and falls through", func(t *testing.T) {
-		stale := filepath.Join(t.TempDir(), "gone")
-		m := &Model{lastSelectedCWD: stale}
-		m.enterSetupOrSplit(pluginCWD)
-		if m.lastSelectedCWD != "" {
-			t.Errorf("expected lastSelectedCWD cleared after stale dir, got %q", m.lastSelectedCWD)
-		}
-		// Should have fallen through to home directory
-		if m.cwdBrowseDir == "" {
-			t.Error("expected cwdBrowseDir to be set from home fallback after stale dir")
-		}
-		if m.cwdBrowseDir == stale {
-			t.Error("cwdBrowseDir should not be the stale directory")
+	t.Run("cwd — active pane CWD is asked about when nothing is remembered", func(t *testing.T) {
+		m, fake, _ := overlayTestModel(t, "/pane/cwd")
+		runCmd(m.enterSetupOrSplit(pluginCWD))
+		if got := browseReqPaths(t, fake); len(got) != 1 || got[0] != "/pane/cwd" {
+			t.Errorf("browse requests = %v, want exactly [/pane/cwd]", got)
 		}
 	})
 }
 
-// TestLoadBrowseDir verifies the directory browser populates correctly,
-// prepends ".." for non-root paths, sorts entries, and skips files.
-func TestLoadBrowseDir(t *testing.T) {
-	root := t.TempDir()
-
-	// Set up a known structure: 3 dirs (banana, apple, cherry — to verify sort)
-	// + 1 file (which must NOT appear in the listing).
-	for _, name := range []string{"banana", "apple", "cherry"} {
-		if err := os.Mkdir(filepath.Join(root, name), 0755); err != nil {
-			t.Fatalf("mkdir %s: %v", name, err)
-		}
-	}
-	if err := os.WriteFile(filepath.Join(root, "ignore_me.txt"), []byte("x"), 0644); err != nil {
-		t.Fatalf("write file: %v", err)
-	}
-
-	m := &Model{}
-	if err := m.loadBrowseDir(root); err != nil {
-		t.Fatalf("loadBrowseDir: %v", err)
-	}
-
-	// Expected: ".." first (non-root), then sorted dirs, no file.
-	want := []string{"..", "apple", "banana", "cherry"}
-	if len(m.cwdBrowseEntries) != len(want) {
-		t.Fatalf("entries = %v, want %v", m.cwdBrowseEntries, want)
-	}
-	for i, w := range want {
-		if m.cwdBrowseEntries[i] != w {
-			t.Errorf("entries[%d] = %q, want %q", i, m.cwdBrowseEntries[i], w)
-		}
-	}
-	if m.cwdBrowseCursor != 0 {
-		t.Errorf("cursor = %d, want 0", m.cwdBrowseCursor)
-	}
-}
+// The listing itself is no longer read here — it arrives from the daemon, and
+// applyBrowseDir's fill (sort, file filtering, the ".." row) is covered in
+// browse_client_test.go.
 
 // TestAdjustBrowseScroll verifies the visible-window math keeps the cursor
 // inside the viewport for both upward and downward navigation.
@@ -325,42 +237,10 @@ func TestAdjustBrowseScroll(t *testing.T) {
 	}
 }
 
-// TestSetupDialog_PathValidationOnDifferentOS is a sanity check that the validator
-// behaves sensibly on the host platform (Windows paths with backslashes, etc.).
-// It doesn't try to be exhaustive — just confirms the validator doesn't reject
-// a known-good path from the current OS.
-func TestSetupDialog_PathValidationOnDifferentOS(t *testing.T) {
-	tmp := t.TempDir()
-	cleaned, err := validateAndNormalizeCWD(tmp)
-	if err != nil {
-		t.Fatalf("validator rejected t.TempDir(): %v", err)
-	}
-	// Compare against the symlink-resolved expected path. The validator now
-	// runs filepath.EvalSymlinks so the result may differ from filepath.Abs
-	// on systems where /tmp (or %TEMP%) is itself a symlink (macOS, some
-	// Linux containers).
-	abs, _ := filepath.Abs(tmp)
-	expected, evalErr := filepath.EvalSymlinks(abs)
-	if evalErr != nil {
-		expected = abs
-	}
-	if cleaned != expected {
-		t.Errorf("cleaned path %q != expected %q", cleaned, expected)
-	}
-
-	// Also sanity-check on Windows that forward-slash separators still validate.
-	if runtime.GOOS == "windows" {
-		fwd := filepath.ToSlash(tmp)
-		if _, err := validateAndNormalizeCWD(fwd); err != nil {
-			t.Errorf("validator rejected forward-slash path on Windows: %v", err)
-		}
-	}
-}
-
 // TestSanitizePastedPath_StripsControlBytes guards the S1 security fix:
 // clipboard payloads with embedded OSC/CSI escape sequences must NOT survive
-// past sanitizePastedPath, otherwise an os.Stat error message that quotes the
-// input could inject terminal escapes into the rendered cwdInputError.
+// past sanitizePastedPath, otherwise a daemon error message that quotes the
+// input could inject terminal escapes into the rendered browse error.
 func TestSanitizePastedPath_StripsControlBytes(t *testing.T) {
 	cases := map[string]string{
 		// ESC (0x1b) and BEL (0x07) are stripped; "]", "0", ";" etc. are
@@ -919,55 +799,12 @@ func TestHandleSetupCWDKey_BrowserNavigation(t *testing.T) {
 		}
 	})
 
-	t.Run("enter on real subdir descends into it", func(t *testing.T) {
-		// Real filesystem this time so loadBrowseDir succeeds.
-		root := t.TempDir()
-		if err := os.Mkdir(filepath.Join(root, "child"), 0755); err != nil {
-			t.Fatalf("mkdir: %v", err)
-		}
-		m := Model{}
-		if err := m.loadBrowseDir(root); err != nil {
-			t.Fatalf("loadBrowseDir: %v", err)
-		}
-		// Find "child" in the listing — it should be index 1 (after "..").
-		for i, e := range m.cwdBrowseEntries {
-			if e == "child" {
-				m.cwdBrowseCursor = i
-				break
-			}
-		}
-		next, _ := m.handleSetupCWDKey(p, "enter")
-		m = next.(Model)
-		if filepath.Base(m.cwdBrowseDir) != "child" {
-			t.Errorf("after enter on child: cwdBrowseDir = %q, want .../child", m.cwdBrowseDir)
-		}
-	})
-
-	t.Run("backspace navigates to parent and highlights child we came from", func(t *testing.T) {
-		root := t.TempDir()
-		childPath := filepath.Join(root, "subdir")
-		if err := os.Mkdir(childPath, 0755); err != nil {
-			t.Fatalf("mkdir: %v", err)
-		}
-		m := Model{}
-		if err := m.loadBrowseDir(childPath); err != nil {
-			t.Fatalf("loadBrowseDir child: %v", err)
-		}
-		// In the child dir now. Press backspace → parent.
-		next, _ := m.handleSetupCWDKey(p, "backspace")
-		m = next.(Model)
-		// EvalSymlinks may resolve macOS /tmp etc., so compare bases instead.
-		if filepath.Base(m.cwdBrowseDir) != filepath.Base(root) {
-			t.Errorf("after backspace: dir base = %q, want %q",
-				filepath.Base(m.cwdBrowseDir), filepath.Base(root))
-		}
-		// Cursor should land on "subdir" (the child we came from).
-		if m.cwdBrowseCursor < 0 || m.cwdBrowseCursor >= len(m.cwdBrowseEntries) ||
-			m.cwdBrowseEntries[m.cwdBrowseCursor] != "subdir" {
-			t.Errorf("cursor not positioned on child we came from: cursor=%d entries=%v",
-				m.cwdBrowseCursor, m.cwdBrowseEntries)
-		}
-	})
+	// Descend and up no longer touch the local filesystem — they emit a request
+	// and the listing arrives from the daemon. What they SEND is the thing worth
+	// pinning now, and that lives in browse_client_test.go:
+	// TestSetupCWDKey_DescendSendsChildNotAJoin,
+	// TestSetupCWDKey_UpSendsDaemonReportedParent and
+	// TestSetupCWDKey_UpCarriesTheExitedLeafAsSelectName.
 
 	t.Run("empty browser submits via enter", func(t *testing.T) {
 		m := Model{cwdBrowseEntries: nil}
@@ -1123,42 +960,15 @@ default = false
 	})
 }
 
-// TestLoadBrowseDirAndSelect_PositionsCursorOnChild guards the Q12 polish fix:
-// going up to the parent should highlight the directory we just exited.
-func TestLoadBrowseDirAndSelect_PositionsCursorOnChild(t *testing.T) {
-	root := t.TempDir()
-	for _, name := range []string{"alpha", "beta", "gamma"} {
-		if err := os.Mkdir(filepath.Join(root, name), 0755); err != nil {
-			t.Fatalf("mkdir %s: %v", name, err)
-		}
-	}
-
-	m := &Model{}
-	if err := m.loadBrowseDirAndSelect(root, "beta"); err != nil {
-		t.Fatalf("loadBrowseDirAndSelect: %v", err)
-	}
-	// Listing: ["..", "alpha", "beta", "gamma"]; "beta" is index 2.
-	if m.cwdBrowseCursor != 2 {
-		t.Errorf("cursor = %d, want 2 (beta)", m.cwdBrowseCursor)
-	}
-
-	// Unknown name leaves cursor at 0.
-	if err := m.loadBrowseDirAndSelect(root, "no-such-dir"); err != nil {
-		t.Fatalf("loadBrowseDirAndSelect: %v", err)
-	}
-	if m.cwdBrowseCursor != 0 {
-		t.Errorf("cursor = %d, want 0 for unknown selectName", m.cwdBrowseCursor)
-	}
-}
+// The cursor-positioning half of the Q12 polish fix now lives on the daemon's
+// listing — see TestApplyBrowseListing_SelectName in browse_client_test.go.
 
 func TestEnterSetupOrSplit_GitDiscover_PopulatesCandidates(t *testing.T) {
-	root, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	// No .git directory needed on disk any more — discovery is asked of the
+	// daemon (RD-021), and the answer below is what a real scan would have
+	// found. Only the base path this test's fake daemon is asked about, and
+	// echoes back, has to be real.
+	root := t.TempDir()
 
 	pane := NewPaneModel("pane-1", 1024)
 	pane.CWD = root
@@ -1166,7 +976,8 @@ func TestEnterSetupOrSplit_GitDiscover_PopulatesCandidates(t *testing.T) {
 	tab.Root = NewLeaf(pane)
 	tab.ActivePane = pane.ID
 
-	m := &Model{tabs: []*TabModel{tab}, activeTab: 0}
+	fake := &fakeSender{}
+	m := &Model{tabs: []*TabModel{tab}, activeTab: 0, client: fake}
 	p := &plugin.PanePlugin{
 		Name: "lazygit",
 		Command: plugin.CommandConfig{
@@ -1175,7 +986,8 @@ func TestEnterSetupOrSplit_GitDiscover_PopulatesCandidates(t *testing.T) {
 			Discover:   "git",
 		},
 	}
-	m.enterSetupOrSplit(p)
+	runCmd(m.enterSetupOrSplit(p))
+	runCmd(m.applyGitRepos(ipc.GitReposRespPayload{CWD: root, Repos: []string{root}}, m.repoScan.gen))
 
 	if len(m.repoCandidates) != 1 || m.repoCandidates[0] != root {
 		t.Fatalf("repoCandidates = %v, want [%q]", m.repoCandidates, root)
@@ -1189,17 +1001,15 @@ func TestEnterSetupOrSplit_GitDiscover_PopulatesCandidates(t *testing.T) {
 }
 
 func TestEnterSetupOrSplit_GitDiscover_NoRepo_FallsBackToBrowser(t *testing.T) {
-	plain, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	plain := t.TempDir()
 	pane := NewPaneModel("pane-1", 1024)
 	pane.CWD = plain
 	tab := NewTabModel("tab-1", "t")
 	tab.Root = NewLeaf(pane)
 	tab.ActivePane = pane.ID
 
-	m := &Model{tabs: []*TabModel{tab}, activeTab: 0}
+	fake := &fakeSender{}
+	m := &Model{tabs: []*TabModel{tab}, activeTab: 0, client: fake}
 	p := &plugin.PanePlugin{
 		Name: "lazygit",
 		Command: plugin.CommandConfig{
@@ -1208,13 +1018,20 @@ func TestEnterSetupOrSplit_GitDiscover_NoRepo_FallsBackToBrowser(t *testing.T) {
 			Discover:   "git",
 		},
 	}
-	m.enterSetupOrSplit(p)
+	runCmd(m.enterSetupOrSplit(p))
+	// No error and no repos is a real finding — "no repo here" — which falls
+	// back to the same recent/browser chain a non-git PromptsCWD plugin uses.
+	// That fallback used to run synchronously inside enterSetupOrSplit; it now
+	// runs in applyGitReposPickList once this response lands.
+	runCmd(m.applyGitRepos(ipc.GitReposRespPayload{CWD: plain}, m.repoScan.gen))
 
 	if len(m.repoCandidates) != 0 {
 		t.Fatalf("repoCandidates = %v, want empty", m.repoCandidates)
 	}
-	if m.cwdBrowseDir != plain {
-		t.Errorf("cwdBrowseDir = %q, want pane CWD %q as browser fallback", m.cwdBrowseDir, plain)
+	// The listing now arrives from the daemon, so the fallback shows up as the
+	// request it asks about rather than as a filled cwdBrowseDir.
+	if got := browseReqPaths(t, fake); len(got) != 1 || got[0] != plain {
+		t.Errorf("browse requests = %v, want [%q] (the pane CWD as browser fallback)", got, plain)
 	}
 }
 
@@ -1360,53 +1177,96 @@ func recentPickModel(t *testing.T, candidates []string) Model {
 	}
 }
 
+// TestEnterSetup_RecentPickWhenNoRepos pins the same behaviour it always did —
+// the surviving recent directories become the pick list and the first is
+// committed — but the survivors are now decided by the DAEMON (RD-024), so the
+// answer arrives one round trip later. Deciding it here meant stat-ing the
+// machine drawing the UI, which is the wrong disk whenever the daemon is remote.
 func TestEnterSetup_RecentPickWhenNoRepos(t *testing.T) {
 	dir := t.TempDir()
-	m := &Model{recentCWDs: []string{dir, filepath.Join(dir, "gone")}}
+	fake := &fakeSender{}
+	m := &Model{recentCWDs: []string{dir, filepath.Join(dir, "gone")}, client: fake}
 	p := &plugin.PanePlugin{Name: "ai", Command: plugin.CommandConfig{PromptsCWD: true}}
-	m.enterSetupOrSplit(p)
-	// Only the existing dir survives the os.Stat filter.
+
+	runCmd(m.enterSetupOrSplit(p))
+
+	if m.dialog != dialogCreatePaneSetup {
+		t.Errorf("dialog = %v, want dialogCreatePaneSetup", m.dialog)
+	}
+	if m.recentScan.gen == "" {
+		t.Fatal("no existence check in flight — the recent list was not asked about at all")
+	}
+
+	// The daemon answers with only the directory that still exists.
+	m.applyExistingDirs(ipc.DirsExistRespPayload{Paths: []string{dir}}, m.recentScan.gen)
+
 	if !reflect.DeepEqual(m.recentCandidates, []string{dir}) {
 		t.Errorf("recentCandidates = %v, want [%q]", m.recentCandidates, dir)
 	}
 	if m.cwdBrowseDir != dir {
 		t.Errorf("cwdBrowseDir = %q, want first candidate %q", m.cwdBrowseDir, dir)
 	}
-	if m.dialog != dialogCreatePaneSetup {
-		t.Errorf("dialog = %v, want dialogCreatePaneSetup", m.dialog)
-	}
 }
 
+// TestEnterSetup_RecentAllStaleFallsToBrowser is the same handover as before,
+// now driven by the daemon's answer rather than a local stat: nothing survives,
+// so the browser takes over.
 func TestEnterSetup_RecentAllStaleFallsToBrowser(t *testing.T) {
 	base := t.TempDir()
-	m := &Model{recentCWDs: []string{filepath.Join(base, "gone1"), filepath.Join(base, "gone2")}}
+	fake := &fakeSender{}
+	m := &Model{
+		recentCWDs: []string{filepath.Join(base, "gone1"), filepath.Join(base, "gone2")},
+		client:     fake,
+	}
 	p := &plugin.PanePlugin{Name: "ai", Command: plugin.CommandConfig{PromptsCWD: true}}
-	m.enterSetupOrSplit(p)
+
+	runCmd(m.enterSetupOrSplit(p))
+	runCmd(m.applyExistingDirs(ipc.DirsExistRespPayload{}, m.recentScan.gen))
+
 	if len(m.recentCandidates) != 0 {
 		t.Errorf("recentCandidates = %v, want empty (all stale)", m.recentCandidates)
 	}
-	if m.cwdBrowseDir == "" {
-		t.Error("expected directory-browser fallback to set cwdBrowseDir")
+	// No tab, nothing remembered, so the chain is down to its "~" tail — but a
+	// request going out at all is what proves the browser took over.
+	if got := browseReqPaths(t, fake); len(got) != 1 || got[0] != "~" {
+		t.Errorf("browse requests = %v, want [~] (directory-browser fallback)", got)
+	}
+}
+
+// TestEnterSetup_RecentCheckFailureStillReachesTheBrowser separates the two
+// outcomes that both end in the browser. A failed check is NOT "none of your
+// directories exist" — reporting it as one would be a wrong answer stated
+// confidently, which is the failure this phase exists to remove.
+func TestEnterSetup_RecentCheckFailureStillReachesTheBrowser(t *testing.T) {
+	base := t.TempDir()
+	fake := &fakeSender{}
+	m := &Model{recentCWDs: []string{filepath.Join(base, "somewhere")}, client: fake}
+	p := &plugin.PanePlugin{Name: "ai", Command: plugin.CommandConfig{PromptsCWD: true}}
+
+	runCmd(m.enterSetupOrSplit(p))
+	runCmd(m.applyExistingDirs(
+		ipc.DirsExistRespPayload{Error: "another existence check is already running"},
+		m.recentScan.gen,
+	))
+
+	if got := browseReqPaths(t, fake); len(got) != 1 || got[0] != "~" {
+		t.Errorf("browse requests = %v, want [~] — a failed check dead-ended the dialog", got)
 	}
 }
 
 func TestEnterSetup_GitReposWinOverRecent(t *testing.T) {
-	root, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	root := t.TempDir()
 	pane := NewPaneModel("pane-1", 1024)
 	pane.CWD = root
 	tab := NewTabModel("tab-1", "t")
 	tab.Root = NewLeaf(pane)
 	tab.ActivePane = pane.ID
 
-	m := &Model{tabs: []*TabModel{tab}, activeTab: 0, recentCWDs: []string{t.TempDir()}}
+	fake := &fakeSender{}
+	m := &Model{tabs: []*TabModel{tab}, activeTab: 0, recentCWDs: []string{t.TempDir()}, client: fake}
 	p := &plugin.PanePlugin{Name: "lazygit", Command: plugin.CommandConfig{Cmd: "lazygit", PromptsCWD: true, Discover: "git"}}
-	m.enterSetupOrSplit(p)
+	runCmd(m.enterSetupOrSplit(p))
+	runCmd(m.applyGitRepos(ipc.GitReposRespPayload{CWD: root, Repos: []string{root}}, m.repoScan.gen))
 
 	if len(m.repoCandidates) != 1 || m.repoCandidates[0] != root {
 		t.Fatalf("repoCandidates = %v, want [%q]", m.repoCandidates, root)
@@ -1451,7 +1311,7 @@ func TestHandleCreatePaneSplit_PersistsRecentCWD(t *testing.T) {
 	if len(got.recentCWDs) != 1 || got.recentCWDs[0] != want {
 		t.Errorf("in-memory recentCWDs = %v, want [%q]", got.recentCWDs, want)
 	}
-	if disk := LoadRecentCWDs(config.RecentCWDsPath()); len(disk) != 1 || disk[0] != want {
+	if disk := LoadRecentCWDs(config.RecentCWDsPath("")); len(disk) != 1 || disk[0] != want {
 		t.Errorf("persisted recentCWDs = %v, want [%q]", disk, want)
 	}
 }
@@ -1464,7 +1324,7 @@ func TestHandleCreatePaneSplit_BlankCWD_NoPersist(t *testing.T) {
 	if len(got.recentCWDs) != 0 {
 		t.Errorf("recentCWDs = %v, want empty for blank cwd", got.recentCWDs)
 	}
-	if disk := LoadRecentCWDs(config.RecentCWDsPath()); len(disk) != 0 {
+	if disk := LoadRecentCWDs(config.RecentCWDsPath("")); len(disk) != 0 {
 		t.Errorf("persisted %v, want nothing written for blank cwd", disk)
 	}
 }
@@ -1677,21 +1537,38 @@ func TestSetupKubeKey_EnterSubmitsAndInjects(t *testing.T) {
 	}
 }
 
-func TestEnterSetupOrSplit_Kube_CapsContexts(t *testing.T) {
-	dir := t.TempDir()
-	var b strings.Builder
-	b.WriteString("contexts:\n")
-	for i := 0; i < maxKubeContexts+5; i++ {
-		fmt.Fprintf(&b, "- name: ctx-%d\n  context: {}\n", i)
-	}
-	cfg := filepath.Join(dir, "config")
-	if err := os.WriteFile(cfg, []byte(b.String()), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("KUBECONFIG", cfg)
+// TestEnterSetupOrSplit_Kube_RequestsFromDaemonAndCaps mirrors
+// TestEnterSetupOrSplit_GitDiscover_PopulatesCandidates: entering the setup
+// dialog on a discover="kube" plugin now asks the daemon rather than reading
+// the local kubeconfig synchronously (RD-022) — kubediscover run in this
+// process would parse the machine drawing the UI, the wrong one whenever the
+// daemon is remote. The cap this test used to exercise via a real KUBECONFIG
+// file is enforced again on receipt; see
+// TestApplyKubeContexts_CapsAnOversizedResponse for that seam pinned in
+// isolation.
+func TestEnterSetupOrSplit_Kube_RequestsFromDaemonAndCaps(t *testing.T) {
+	fake := &fakeSender{}
+	m := &Model{client: fake, pluginRegistry: registryWithK9s(t)}
+	runCmd(m.enterSetupOrSplit(m.pluginRegistry.Get("k9s")))
 
-	m := &Model{pluginRegistry: registryWithK9s(t)}
-	m.enterSetupOrSplit(m.pluginRegistry.Get("k9s"))
+	var asked bool
+	for _, msg := range fake.sent {
+		if msg.Type == ipc.MsgKubeCtxReq {
+			asked = true
+		}
+	}
+	if !asked {
+		t.Fatalf("entering setup for a discover=kube plugin sent no %s (sent: %v)", ipc.MsgKubeCtxReq, debugSentTypes(fake))
+	}
+	if m.kubeScan.phase != kubeScanning {
+		t.Errorf("phase = %v, want kubeScanning", m.kubeScan.phase)
+	}
+
+	big := make([]ipc.KubeContextInfo, maxKubeContexts+5)
+	for i := range big {
+		big[i] = ipc.KubeContextInfo{Name: fmt.Sprintf("ctx-%d", i)}
+	}
+	m.applyKubeContexts(ipc.KubeCtxRespPayload{Contexts: big}, m.kubeScan.gen)
 
 	if len(m.kubeContexts) != maxKubeContexts {
 		t.Errorf("kubeContexts = %d, want capped to %d", len(m.kubeContexts), maxKubeContexts)
@@ -1702,23 +1579,15 @@ func TestEnterSetupOrSplit_Kube_CapsContexts(t *testing.T) {
 // bound: the pick list has no scroll machinery, so discovery must never hand
 // the dialog more rows than fit the box.
 func TestEnterSetupOrSplit_GitDiscover_CapsCandidates(t *testing.T) {
-	base, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	for i := 0; i < 12; i++ {
-		if err := os.MkdirAll(filepath.Join(base, fmt.Sprintf("repo-%02d", i), ".git"), 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
-
+	base := t.TempDir()
 	pane := NewPaneModel("pane-1", 1024)
 	pane.CWD = base
 	tab := NewTabModel("tab-1", "t")
 	tab.Root = NewLeaf(pane)
 	tab.ActivePane = pane.ID
 
-	m := &Model{tabs: []*TabModel{tab}, activeTab: 0}
+	fake := &fakeSender{}
+	m := &Model{tabs: []*TabModel{tab}, activeTab: 0, client: fake}
 	p := &plugin.PanePlugin{
 		Name: "lazygit",
 		Command: plugin.CommandConfig{
@@ -1727,7 +1596,15 @@ func TestEnterSetupOrSplit_GitDiscover_CapsCandidates(t *testing.T) {
 			Discover:   "git",
 		},
 	}
-	m.enterSetupOrSplit(p)
+	runCmd(m.enterSetupOrSplit(p))
+
+	// The daemon reports 12 candidates; the client-side cap must still trim
+	// to maxRepoCandidates — the pick list has no scroll machinery.
+	repos := make([]string, 12)
+	for i := range repos {
+		repos[i] = fmt.Sprintf("%s/repo-%02d", base, i)
+	}
+	runCmd(m.applyGitRepos(ipc.GitReposRespPayload{CWD: base, Repos: repos}, m.repoScan.gen))
 
 	if len(m.repoCandidates) != maxRepoCandidates {
 		t.Fatalf("len(repoCandidates) = %d, want %d (capped)", len(m.repoCandidates), maxRepoCandidates)
@@ -1916,6 +1793,63 @@ func TestRenderSetup_PickFocusChange_HeightStable(t *testing.T) {
 	}
 }
 
+// Context names now come from a host the user may not control. U+202E
+// (RIGHT-TO-LEFT OVERRIDE) is printable, so it passes any control-character
+// filter while reversing the text on the list the user picks a cluster from.
+func TestRenderSetup_KubeRowsSanitizeRemoteText(t *testing.T) {
+	m := kubePickModel(t, []kubediscover.Context{
+		{Name: "prod‮txt.exe", Namespace: "ns\x1b[31m"},
+	})
+	out := m.renderCreatePaneSetupDialog()
+	if strings.ContainsRune(out, '‮') {
+		t.Error("rendered output carries U+202E — a remote context name can reverse the pick list")
+	}
+	if strings.Contains(out, "\x1b[31m") {
+		t.Error("rendered output carries a raw CSI sequence from a remote namespace")
+	}
+}
+
+// The switch that picks the kube field's footer line is order-sensitive with
+// "(no kube contexts found)" as its default arm, so a reorder would silently
+// fall through to that confidently-wrong answer while a scan is still in
+// flight — the exact failure the three-state phase exists to remove. Mirrors
+// the reorder-canary pattern this package already uses for the idle mark
+// (TestRenderSetup_KubeFocused_NoIdleMark).
+func TestRenderSetup_KubeScanning_ShowsScanningNotEmpty(t *testing.T) {
+	m := kubePickModel(t, nil)
+	m.kubeScan.phase = kubeScanning
+	out := stripANSI(m.renderCreatePaneSetupDialog())
+	if !strings.Contains(out, "Scanning for kube contexts") {
+		t.Errorf("scanning phase did not render its own message\n%s", out)
+	}
+	if strings.Contains(out, "no kube contexts found") {
+		t.Errorf("scanning phase fell through to the empty-result message\n%s", out)
+	}
+}
+
+func TestRenderSetup_KubeFailed_ShowsFailedNotEmpty(t *testing.T) {
+	m := kubePickModel(t, nil)
+	m.kubeScan.phase = kubeScanFailed
+	out := stripANSI(m.renderCreatePaneSetupDialog())
+	if !strings.Contains(out, "kube context scan failed") {
+		t.Errorf("failed phase did not render its own message\n%s", out)
+	}
+	if strings.Contains(out, "no kube contexts found") {
+		t.Errorf("failed phase fell through to the empty-result message\n%s", out)
+	}
+}
+
+// A capped context list must say so — otherwise 50 rendered rows reads as the
+// whole answer when the daemon actually had more.
+func TestRenderSetup_KubeTruncated_ShowsCappedHint(t *testing.T) {
+	m := kubePickModel(t, []kubediscover.Context{{Name: "ctx-a"}})
+	m.kubeTruncated = true
+	out := stripANSI(m.renderCreatePaneSetupDialog())
+	if !strings.Contains(out, truncatedHintPrefix) {
+		t.Errorf("truncated kube list did not render the capped hint\n%s", out)
+	}
+}
+
 func TestRenderSetup_KubeBlurred_MarksSelectedRow(t *testing.T) {
 	m := kubePickModel(t, []kubediscover.Context{{Name: "prod"}, {Name: "staging"}})
 	m.kubeCursor = 2 // row 0 = Default, row 1 = prod, row 2 = staging
@@ -1977,6 +1911,187 @@ func TestRenderSetup_BrowserBlurred_MarksPathLine(t *testing.T) {
 	}
 	if !strings.Contains(focused, dialogValStyle.Render(dir)) {
 		t.Errorf("focused path line must use dialogValStyle\n%q", focused)
+	}
+}
+
+// --- Remote-sourced browse text (Phase 3 security) --------------------------
+//
+// Name, Resolved, and Error in BrowseDirRespPayload come from the daemon,
+// which may be remote. These pin that renderCreatePaneSetupDialog never lets
+// a raw control byte out of that payload reach the frame — see
+// sanitizeRemoteText in remotetext.go for the function under test here.
+
+// A hostile entry name containing a raw ESC byte must not let that byte
+// reach the frame. Checked differentially against a same-shaped clean
+// listing rather than asserting an absolute zero: whether lipgloss's own
+// styling emits SGR (ESC-prefixed) codes at all depends on the color profile
+// the test process detects, and the invariant must hold either way — a
+// hostile NAME must not ADD an ESC byte, regardless of how many the box's own
+// styling contributes.
+//
+// The ESC-count diff alone is vacuous against a bug that dropped the row
+// entirely (fewer bytes total, including the clean row's own chrome, can
+// also leave the ESC count unchanged) — so this also asserts the sanitized
+// name is still PRESENT, on the ANSI-stripped render so real SGR codes from
+// the box's own styling can't hide a missing row inside them.
+func TestRenderSetup_HostileEntryName_NoRawESCByte(t *testing.T) {
+	clean := Model{
+		dialog:           dialogCreatePaneSetup,
+		pluginRegistry:   registryWithAICWD(t),
+		selectedPlugin:   "ai",
+		cwdBrowseDir:     `/home/dev/projects`,
+		cwdBrowseEntries: []string{"..", "alpha", "beta"},
+		width:            100,
+	}
+	hostile := clean
+	hostileName := "alpha\x1b[31m;rm -rf\x1b[0m"
+	hostile.cwdBrowseEntries = []string{"..", hostileName, "beta"}
+
+	cleanOut := clean.renderCreatePaneSetupDialog()
+	hostileOut := hostile.renderCreatePaneSetupDialog()
+
+	wantESC := strings.Count(cleanOut, "\x1b")
+	if got := strings.Count(hostileOut, "\x1b"); got != wantESC {
+		t.Errorf("hostile entry name changed the raw ESC byte count: got %d, want %d (dialog-chrome baseline)\n%s", got, wantESC, hostileOut)
+	}
+
+	wantContent := sanitizeRemoteText(hostileName + "/") // "/" appended for a directory row
+	if !strings.Contains(stripANSI(hostileOut), wantContent) {
+		t.Errorf("sanitized entry name %q missing from render — row may have been dropped rather than cleaned\n%s", wantContent, stripANSI(hostileOut))
+	}
+}
+
+// A hostile entry name could try to grow the dialog by embedding a raw
+// newline instead of an escape. sanitizeRemoteText drops C0 controls
+// (\t is the sole exception, mapped to a space) — \n included — so this must
+// not change the box's line count. Mirrors
+// TestRenderSetup_PickFocusChange_HeightStable.
+func TestRenderSetup_HostileEntryName_HeightStable(t *testing.T) {
+	base := Model{
+		dialog:           dialogCreatePaneSetup,
+		pluginRegistry:   registryWithAICWD(t),
+		selectedPlugin:   "ai",
+		cwdBrowseDir:     `/home/dev/projects`,
+		cwdBrowseEntries: []string{"..", "alpha", "beta"},
+		width:            100,
+	}
+	hostile := base
+	hostile.cwdBrowseEntries = []string{"..", "alpha\nfake-row\ninjected", "beta"}
+
+	baseLines := strings.Count(base.renderCreatePaneSetupDialog(), "\n")
+	hostileLines := strings.Count(hostile.renderCreatePaneSetupDialog(), "\n")
+	if baseLines != hostileLines {
+		t.Errorf("hostile entry with an embedded newline changed dialog height: got %d lines, want %d", hostileLines, baseLines)
+	}
+}
+
+// Resolved (cwdBrowseDir) and Error (browse.err) are the other two
+// remote-sourced browse fields. Checked by looking for the exact injected
+// SGR sequence rather than counting ESC bytes, since these two render sites
+// are single-shot (not list rows), so there is no same-shaped clean baseline
+// to diff against the way the entry-name test has one.
+func TestRenderSetup_HostileResolvedAndError_NoInjectedSGR(t *testing.T) {
+	const inject = "\x1b[31m"
+	m := Model{
+		dialog:         dialogCreatePaneSetup,
+		pluginRegistry: registryWithAICWD(t),
+		selectedPlugin: "ai",
+		cwdBrowseDir:   "/home/dev/" + inject + "evil",
+		width:          100,
+	}
+	m.browse.err = "permission denied: /etc/" + inject + "shadow"
+	m.setupFieldCursor = 0 // focus the CWD field so the path line renders
+
+	out := m.renderCreatePaneSetupDialog()
+	if strings.Contains(out, inject) {
+		t.Errorf("hostile Resolved/Error text leaked a raw SGR escape into the render:\n%q", out)
+	}
+}
+
+// --- Remote-sourced repository paths (Task C follow-on) ---------------------
+//
+// GitReposRespPayload.Repos is daemon-supplied and reaches two render sites
+// through leftTruncPath: the setup dialog's CWD pick list (repoCandidates)
+// and the Alt+G "Open lazygit for which repo?" picker (repoPickCandidates).
+// leftTruncPath itself now sanitizes — see its doc comment in dialog.go for
+// why sanitizing happens BEFORE truncating rather than after.
+
+// Demonstrates why leftTruncPath must sanitize before it measures the
+// truncation budget. Real content sits at the front, garbage padding at the
+// end: truncating on the RAW rune count keeps a trailing window that lands
+// entirely inside the garbage, and sanitizing THAT afterward would leave
+// nothing but the "…" prefix — the one part of the name that was ever real
+// is gone. Sanitizing first means maxWidth only ever budgets runes that
+// survive to be drawn.
+func TestLeftTruncPath_SanitizesBeforeTruncating(t *testing.T) {
+	hostile := "realname" + strings.Repeat("\x1b", 50)
+	if got := leftTruncPath(hostile, 20); got != "realname" {
+		t.Errorf("leftTruncPath(hostile, 20) = %q, want %q (full real content, untruncated once the padding is gone)", got, "realname")
+	}
+}
+
+// A hostile git-discovered repo path must not let a raw ESC byte reach the
+// setup dialog's CWD pick list. Differential against a same-shaped clean
+// pick list, same reasoning as TestRenderSetup_HostileEntryName_NoRawESCByte:
+// whether lipgloss's own styling emits ESC-prefixed codes depends on the
+// color profile the test process detects, so the invariant checked is that a
+// hostile candidate does not ADD any.
+func TestRenderSetup_HostileRepoCandidate_NoRawESCByte(t *testing.T) {
+	clean := Model{
+		dialog:         dialogCreatePaneSetup,
+		pluginRegistry: registryWithAICWD(t),
+		selectedPlugin: "ai",
+		repoCandidates: []string{"/home/dev/alpha", "/home/dev/beta"},
+		cwdBrowseDir:   "/home/dev/alpha",
+		width:          100,
+	}
+	hostile := clean
+	hostileRepo := "/home/dev/alpha\x1b[31m;rm -rf\x1b[0m"
+	hostile.repoCandidates = []string{hostileRepo, "/home/dev/beta"}
+	// Mirrors applyGitReposPickList, which pre-selects repoCandidates[0] into
+	// cwdBrowseDir verbatim — the idle-mark comparison at the render site
+	// only lines up (pick[i] == m.cwdBrowseDir) when this is the same raw
+	// string, so a test that skipped it would exercise the unmarked branch.
+	hostile.cwdBrowseDir = hostileRepo
+
+	cleanOut := clean.renderCreatePaneSetupDialog()
+	hostileOut := hostile.renderCreatePaneSetupDialog()
+
+	wantESC := strings.Count(cleanOut, "\x1b")
+	if got := strings.Count(hostileOut, "\x1b"); got != wantESC {
+		t.Errorf("hostile repo candidate changed the raw ESC byte count: got %d, want %d (dialog-chrome baseline)\n%s", got, wantESC, hostileOut)
+	}
+
+	// The ESC-count diff alone would pass vacuously if the row were dropped
+	// instead of cleaned — assert the sanitized candidate is still there.
+	wantContent := sanitizeRemoteText(hostileRepo)
+	if !strings.Contains(stripANSI(hostileOut), wantContent) {
+		t.Errorf("sanitized repo candidate %q missing from render — row may have been dropped rather than cleaned\n%s", wantContent, stripANSI(hostileOut))
+	}
+}
+
+// Same property, for the Alt+G repo picker (renderGitRepoPickDialog), which
+// draws repoPickCandidates rather than repoCandidates — a separate field
+// populated by a separate caller (resolveLazygitOverlay), so it needs its
+// own render-level pin even though both go through leftTruncPath.
+func TestRenderGitRepoPick_HostileCandidate_NoRawESCByte(t *testing.T) {
+	hostileRepo := "/home/dev/alpha\x1b[31m;rm -rf\x1b[0m"
+	clean := Model{repoPickCandidates: []string{"/home/dev/alpha", "/home/dev/beta"}}
+	hostile := Model{repoPickCandidates: []string{hostileRepo, "/home/dev/beta"}}
+
+	cleanOut := clean.renderGitRepoPickDialog()
+	hostileOut := hostile.renderGitRepoPickDialog()
+
+	wantESC := strings.Count(cleanOut, "\x1b")
+	if got := strings.Count(hostileOut, "\x1b"); got != wantESC {
+		t.Errorf("hostile repo candidate changed the raw ESC byte count: got %d, want %d (dialog-chrome baseline)\n%s", got, wantESC, hostileOut)
+	}
+
+	// The ESC-count diff alone would pass vacuously if the row were dropped
+	// instead of cleaned — assert the sanitized candidate is still there.
+	wantContent := sanitizeRemoteText(hostileRepo)
+	if !strings.Contains(stripANSI(hostileOut), wantContent) {
+		t.Errorf("sanitized repo candidate %q missing from render — row may have been dropped rather than cleaned\n%s", wantContent, stripANSI(hostileOut))
 	}
 }
 

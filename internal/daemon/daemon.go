@@ -108,6 +108,36 @@ type Daemon struct {
 	// when the user opens it.
 	sessionDetailReading atomic.Bool
 
+	// browseScanning is the single-flight guard for the directory listing
+	// (MsgBrowseDirReq). Its own slot for the same reason
+	// sessionDetailReading has one: the setup dialog browses a directory and
+	// then scans it for sessions, so sharing would make each step fail
+	// whenever it followed the other closely enough.
+	browseScanning atomic.Bool
+
+	// gitDiscovering is the single-flight guard for git repo discovery
+	// (MsgGitReposReq). Separate from browseScanning because the setup dialog
+	// resolves a directory and then discovers repos inside it, so one shared
+	// slot would make each step fail whenever it closely followed the other.
+	gitDiscovering atomic.Bool
+
+	// kubeDiscovering is the single-flight guard for kube context discovery
+	// (MsgKubeCtxReq). Its own slot, not shared with gitDiscovering: a
+	// discover="kube" plugin and a discover="git" one can be opened back to
+	// back, and one guard would make each fail whenever it followed the other.
+	kubeDiscovering atomic.Bool
+
+	// dirsChecking is the single-flight guard for the recent-locations
+	// existence check (MsgDirsExistReq). Its own slot rather than sharing
+	// browseScanning, and the reason is timing rather than tidiness: that check
+	// hands over to the directory browser when it gives up, the client gives up
+	// after 8 s, and this slot is held for as long as the syscall really runs —
+	// up to browseTimeout (10 s) when a stat parks on a dead mount. One shared
+	// guard would make the handover's browse requests rejected by the very
+	// request that just timed out, dead-ending the dialog in exactly the case
+	// the bound exists for.
+	dirsChecking atomic.Bool
+
 	// resumeClaimMu serializes the claim of a Claude session by a new pane.
 	// The occupancy test and the write that acts on it must be one atomic
 	// step: handleCreatePane runs on the requesting conn's dispatch
@@ -856,6 +886,16 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		d.handleClaudeSessionDetailReq(conn, msg)
 	case ipc.MsgClaudeSessionsReq:
 		d.handleClaudeSessionsReq(conn, msg)
+	case ipc.MsgBrowseDirReq:
+		d.handleBrowseDirReq(conn, msg)
+	case ipc.MsgDirsExistReq:
+		d.handleDirsExistReq(conn, msg)
+	case ipc.MsgGitReposReq:
+		d.handleGitReposReq(conn, msg)
+	case ipc.MsgKubeCtxReq:
+		d.handleKubeCtxReq(conn, msg)
+	case ipc.MsgPluginListReq:
+		d.handlePluginListReq(conn, msg)
 	case ipc.MsgPaneStatusReq:
 		d.handlePaneStatusReq(conn, msg)
 	case ipc.MsgCreatePaneReq:
@@ -1566,31 +1606,72 @@ func resizeKick(pty apty.Session, cols, rows int) {
 // full-screen program has no reason to do that unprompted. The pane reads as
 // dead when it is perfectly healthy.
 //
-// The mechanism is the plugin's declared RedrawKey, written to the child's
-// stdin. That is INPUT rather than a signal, which is why it is opt-in per
-// plugin rather than applied to every replay-less pane: the plugin author is
-// asserting both that their program treats the byte as "repaint" and that
-// nothing else is reading its stdin. A pane sitting in `cat > file` or at a
-// password prompt would receive it as data.
+// There are TWO mechanisms, and the load-bearing fact is that NEITHER is
+// universal — no single trigger repaints every full-screen program.
 //
-// SIGWINCH via a resize would be the safe universal alternative, needs no
-// per-plugin opt-in, and does not work. Measured on a real PTY: vim repaints
-// with ~5 KB of output after a 1-column jiggle, claude-code emits 0 bytes from
-// its main UI. It re-lays-out on a resize but only paints on its own render
-// tick, which input drives. An earlier version of this fix used the jiggle and
-// silently did nothing.
+// A plugin's declared RedrawKey is written to the child's stdin. That is INPUT
+// rather than a signal, which is why it is opt-in per plugin rather than
+// applied to every replay-less pane: the plugin author is asserting both that
+// their program treats the byte as "repaint" and that nothing else is reading
+// its stdin. A pane sitting in `cat > file` or at a password prompt would
+// receive it as data.
+//
+// Everything else gets a resize jiggle instead, which needs no opt-in because
+// SIGWINCH is a signal and cannot be misread as data. Declaring a key therefore
+// MEANS "I ignore SIGWINCH", and suppresses the jiggle.
+//
+// The measurements are why it is split this way, and they are counter-intuitive
+// in both directions. On a real PTY: vim repaints with ~5 KB after a 1-column
+// jiggle; claude-code emits 0 bytes from its main UI, because it re-lays-out on
+// a resize but only paints on its own render tick, which input drives; opencode
+// is the exact inverse of claude-code, emitting ~8 KB on SIGWINCH and NOTHING
+// on Ctrl+L (measured 2026-07-31).
+//
+// Both halves of this have already shipped as bugs. The first version used only
+// the jiggle and silently did nothing for claude-code. Its fix concluded from
+// that one program that SIGWINCH "does not work" and made the key the ONLY
+// mechanism — which left opencode and lazygit (ghost_buffer = false, no
+// redraw_key) coming back blank from every reattach, locally as well as
+// remotely, with a live process behind them. Adding redraw_key = "\f" to
+// opencode, the obvious fix that the plugin schema invites, would have been a
+// no-op.
 //
 // Writes go through EnqueueInput, never pane.PTY.Write directly: a child that
 // has stopped reading stdin fills the kernel buffer and blocks the writer
 // forever, and this runs on the attaching client's dispatch goroutine.
 func (d *Daemon) redrawKick(pane *Pane, typ string) {
-	p := d.registry.Get(typ)
-	if p == nil || p.Persistence.RedrawKey == "" {
+	if p := d.registry.Get(typ); p != nil && p.Persistence.RedrawKey != "" {
+		log.Printf("attach: redraw kick pane %s (type=%s, no ghost replay, %d bytes)",
+			pane.ID, typ, len(p.Persistence.RedrawKey))
+		pane.EnqueueInput([]byte(p.Persistence.RedrawKey))
 		return
 	}
-	log.Printf("attach: redraw kick pane %s (type=%s, no ghost replay, %d bytes)",
-		pane.ID, typ, len(p.Persistence.RedrawKey))
-	pane.EnqueueInput([]byte(p.Persistence.RedrawKey))
+
+	// No key declared, so jiggle the size. This also covers a pane whose type is
+	// not in the registry at all, which is the safe direction: a signal cannot
+	// corrupt a program's input the way a guessed key could.
+	//
+	// The size is the PREVIOUS client's, because this runs inside handleAttach
+	// and the new client's resize_pane has not arrived yet. A laptop attaching
+	// after a desktop therefore gets one frame laid out for the old width. That
+	// is transient rather than stuck: the real resize that follows is itself a
+	// SIGWINCH, and a program that repaints on this one repaints on that one
+	// too. Skipping the kick when the size is about to change is not available —
+	// nothing here knows the incoming client's geometry.
+	//
+	// PTY and ExitCode are read in ONE span, together with the size. Taking them
+	// separately would let onPaneExit land in between and leave this resizing a
+	// closed PTY with a live-looking pointer.
+	pane.PluginMu.Lock()
+	pty, exited, cols, rows := pane.PTY, pane.ExitCode != nil, pane.Cols, pane.Rows
+	pane.PluginMu.Unlock()
+	if pty == nil || exited {
+		return
+	}
+	log.Printf("attach: redraw kick pane %s (type=%s, no ghost replay, resize jiggle %dx%d)",
+		pane.ID, typ, cols, rows)
+	// Resize syscall outside the lock, same discipline as handleResizePane.
+	resizeKick(pty, cols, rows)
 }
 
 func (d *Daemon) streamPTYOutput(paneID string, pty apty.Session) {

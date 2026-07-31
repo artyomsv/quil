@@ -103,19 +103,31 @@ type PersistenceConfig struct {
 	GhostBuffer bool // save PTY output to disk for replay on reconnect (default true)
 
 	// RedrawKey is written to the pane's stdin when a client attaches and the
-	// pane had no ghost replay to send. Empty (the default) means send nothing.
+	// pane had no ghost replay to send.
 	//
 	// Only meaningful with GhostBuffer = false, which is what leaves a
 	// reconnecting client with a blank rectangle in front of a live process.
-	// It is opt-IN per plugin on purpose: this is INPUT, not a signal, so the
-	// plugin author is asserting that their program treats the byte as
-	// "repaint" and that nothing else is reading its stdin. A pane running
-	// `cat > file` or a password prompt would receive it as data.
 	//
-	// SIGWINCH would be the safe universal alternative and does not work:
-	// claude-code re-lays-out on a resize but only paints on its own render
-	// tick, so a resize produces zero output (measured — vim repaints with
-	// ~5 KB under the same test, claude-code with 0 bytes).
+	// Empty (the default) does NOT mean "do nothing": such a pane is given a
+	// resize instead, so its program repaints via SIGWINCH. Declaring a key
+	// therefore means "my program IGNORES SIGWINCH, send this instead", and
+	// suppresses the resize. Declare one only if that is true — adding a key to
+	// a program that does repaint on SIGWINCH replaces a working mechanism with
+	// a broken one, which is exactly how opencode came to be blank on every
+	// reattach.
+	//
+	// It is opt-IN because a key is INPUT, not a signal: the plugin author is
+	// asserting that their program treats the byte as "repaint" and that nothing
+	// else is reading its stdin. A pane running `cat > file` or a password
+	// prompt would receive it as data. SIGWINCH carries no such risk, which is
+	// why it needs no opt-in and is the default.
+	//
+	// Neither trigger is universal, and the measurements are counter-intuitive
+	// in both directions: vim repaints with ~5 KB on a resize; claude-code emits
+	// 0 bytes there (it re-lays-out but only paints on its own render tick,
+	// which input drives) and ~3.8 KB on Ctrl+L; opencode is the exact inverse
+	// of claude-code, ~8 KB on a resize and nothing on Ctrl+L. Measure before
+	// declaring.
 	RedrawKey string
 }
 

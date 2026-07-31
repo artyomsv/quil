@@ -35,6 +35,14 @@ func (f LinkFailure) String() string {
 // every major shell.
 //
 // Confirmed against OpenSSH 10.2p1. Re-check when a marker stops firing.
+//
+// Re-confirmed 2026-07-30 against a live link rather than from memory: one
+// batch-mode connection with an unauthorized key returned exit 255 and
+// "<user>@<host>: Permission denied (publickey)." — the exact shape the
+// "publickey denied" case below already carries, and both attribution gates
+// held (255, and nothing established because auth fails before the remote
+// command can run). The wording is what this list is exposed to, so it is worth
+// checking against a real sshd and not only against what the code expects.
 var permanentMarkers = []string{
 	"permission denied",                // publickey/password exhausted
 	"host key verification failed",     // known_hosts mismatch, or BatchMode refusing the prompt

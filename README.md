@@ -121,9 +121,12 @@ nothing to resume. Keystrokes are *dropped* rather than queued while the link is
 down: a key typed at a dead connection would otherwise arrive minutes later in a
 live agent session, answering a question that had already moved on.
 
-Beta, and honest about it: filesystem dialogs still browse *your* disk rather
-than the server's, and remotes must be Linux or macOS. Details and the roadmap
-are in [docs/features.md](docs/features.md#remote-daemon-over-ssh).
+Filesystem dialogs browse the *server's* disk — the working-directory picker,
+`~`, relative paths, and git-repository discovery all ask the daemon rather than
+answering for the wrong machine. Beta, and honest about it: kube contexts and
+plugin availability are still decided locally, and remotes must be Linux or
+macOS. Details and the roadmap are in
+[docs/features.md](docs/features.md#remote-daemon-over-ssh).
 
 ## Let your AI assistant drive Quil
 

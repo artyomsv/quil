@@ -263,3 +263,36 @@ func TestUpdatePaths_UnderQuilDir(t *testing.T) {
 		t.Errorf("UpdateNotifiedPath = %q, want %q", got, want)
 	}
 }
+
+func TestRecentCWDsPath_LocalIsUnchanged(t *testing.T) {
+	if got := filepath.Base(config.RecentCWDsPath("")); got != "recent-cwds.json" {
+		t.Errorf("basename = %q, want recent-cwds.json — local users must see no migration", got)
+	}
+}
+
+func TestRecentCWDsPath_PerRemoteTarget(t *testing.T) {
+	if config.RecentCWDsPath("") == config.RecentCWDsPath("gpu01") {
+		t.Fatal("remote and local share one recent-cwds file")
+	}
+	if config.RecentCWDsPath("gpu01") == config.RecentCWDsPath("gpu02") {
+		t.Fatal("two destinations share one recent-cwds file")
+	}
+}
+
+// Destinations are user input and reach a filename.
+func TestRecentCWDsPath_SanitizesDestination(t *testing.T) {
+	for _, dest := range []string{"user@host", "host:22", "../../etc/passwd", `a/b\c`, "", "  "} {
+		got := filepath.Base(config.RecentCWDsPath(dest))
+		if strings.ContainsAny(got, `/\:`) || strings.Contains(got, "..") {
+			t.Errorf("RecentCWDsPath(%q) basename = %q, unsafe", dest, got)
+		}
+	}
+}
+
+// Collapsing unsafe characters must not collapse distinct destinations onto one
+// another: "a/b" and "a-b" both sanitize to "a-b" without the hash.
+func TestRecentCWDsPath_CollapsedDestinationsStayDistinct(t *testing.T) {
+	if config.RecentCWDsPath("a/b") == config.RecentCWDsPath("a-b") {
+		t.Error("two destinations that sanitize alike share one file")
+	}
+}

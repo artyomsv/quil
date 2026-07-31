@@ -280,17 +280,32 @@ type Model struct {
 	repoPickCandidates []string               // candidates for dialogGitRepoPick (Alt+G, multiple repos)
 	kubeContexts       []kubediscover.Context // contexts offered by the setup dialog (discover="kube"); nil = none
 	kubeCursor         int                    // row cursor in the kube field: 0 = Default context, 1.. = kubeContexts
+	kubeScan           kubeScanState          // in-flight kube-context request (zero value = none); see kubeScanState.gen
+	recentScan         recentScanState        // in-flight recent-directory existence check (zero value = none)
+	kubeTruncated      bool                   // the daemon capped this listing — what is shown is not all there is
 	lastSelectedCWD    string                 // remembers previous CWD selection across pane creations
-	recentCWDs         []string               // last N committed CWDs (persisted, recent-cwds.json)
+	recentCWDs         []string               // last N committed CWDs (persisted; scoped per remote host — see config.RecentCWDsPath)
 	recentCandidates   []string               // recent CWDs offered by the setup dialog; nil = not in recent-pick mode
 	selectedCWD        string                 // CWD chosen in dialogCreatePaneSetup (empty = daemon default)
 	cwdInputError      string                 // validation error shown under CWD input (empty = ok)
 	toggleStates       []bool                 // checkbox states; one entry per plugin's Toggles slice, same indexing
 	setupFieldCursor   int                    // focused field in setup dialog: 0 = CWD (if PromptsCWD), then toggles, then Continue
-	cwdBrowseDir       string                 // current dir shown in the setup dialog's directory browser
+	cwdBrowseDir       string                 // current dir shown in the setup dialog's directory browser ("" = showing the root list)
 	cwdBrowseEntries   []string               // browser listing: ".." (if not at root) + sorted subdirs
 	cwdBrowseCursor    int                    // selected entry index in cwdBrowseEntries
 	cwdBrowseScroll    int                    // scroll offset (top index) for the visible window of cwdBrowseEntries
+	// The daemon's own answers for "what is above cwdBrowseDir". Kept rather
+	// than recomputed: separators and the set of filesystem roots belong to the
+	// machine holding the disk, so filepath.Dir here would answer for the wrong
+	// one whenever the daemon is remote.
+	cwdBrowseParent    string   // parent of cwdBrowseDir; "" when it is a filesystem root
+	cwdBrowseRoots     []string // filesystem roots, reported only when at a root (Windows drives; empty on Unix)
+	cwdBrowseTruncated bool     // the daemon capped this listing — what is shown is not all there is
+	// Held separately from cwdBrowseTruncated because the two describe different
+	// listings and only one of them is on screen at a time: this one applies once
+	// showRootsList promotes the roots to BE the listing.
+	cwdBrowseRootsTruncated bool // the daemon gave up part-way through enumerating roots
+	browseCandidates   []string // remaining pre-fill candidates for the setup browser's start-up chain
 	// Session-picker state (plugins with [command] sessions = "claude"). Rows
 	// are scoped to sessionScanCWD; when the browser moves to a different
 	// directory the rows AND selectedSessionID are discarded, since a session
@@ -300,6 +315,9 @@ type Model struct {
 	sessionRows       []ipc.ClaudeSessionInfo // listing for sessionScanCWD, newest first
 	sessionCursor     int                     // row cursor: 0 = "New session", 1.. = sessionRows
 	sessionScroll     int                     // scroll offset for the visible window of the expanded list
+	repoScan          repoScanState           // in-flight git discovery — Alt+G overlay or setup-dialog pick list (zero value = none)
+	browse            browseState             // in-flight directory-browser request (zero value = none)
+	reqGen            int                     // monotonic instance id source for repoScan/browse; see nextReqGen
 	sessionScanCWD    string                  // directory sessionRows belong to
 	sessionState      sessionScanState        // request lifecycle for the session field
 	sessionError      string                  // daemon-reported error (sessionScanFailed)
@@ -432,6 +450,16 @@ func (m *Model) SetRemoteDest(dest string) { m.remoteDest = dest }
 // RemoteMode reports whether the daemon this TUI drives lives on another host.
 func (m *Model) RemoteMode() bool { return m.remoteDest != "" }
 
+// SetRecentCWDs replaces the remembered working-directory list.
+//
+// Exists because the list is scoped per remote destination while NewModel —
+// which runs before the destination is known — can only load the local one.
+// Kept as an explicit setter rather than a side effect inside SetRemoteDest:
+// that setter is called from ~46 tests which build a Model directly and never
+// set QUIL_HOME, and a disk read there would point every one of them at the
+// developer's real ~/.quil.
+func (m *Model) SetRecentCWDs(list []string) { m.recentCWDs = list }
+
 func NewModel(client *ipc.Client, cfg config.Config, version string, registry *plugin.Registry, stalePlugins []plugin.StalePlugin) Model {
 	m := Model{
 		client:           client,
@@ -440,7 +468,7 @@ func NewModel(client *ipc.Client, cfg config.Config, version string, registry *p
 		devMode:          os.Getenv("QUIL_HOME") != "",
 		pluginRegistry:   registry,
 		instanceStore:    LoadInstances(config.InstancesPath()),
-		recentCWDs:       LoadRecentCWDs(config.RecentCWDsPath()),
+		recentCWDs:       LoadRecentCWDs(config.RecentCWDsPath("")),
 		mcpHighlights:    make(map[string]bool),
 		mcpHighlightSeq:  make(map[string]int),
 		notifications:    NewNotificationCenter(cfg.Notification.SidebarWidth, cfg.Notification.MaxEvents),
@@ -1379,6 +1407,51 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case claudeSessionsRespMsg:
 		m = m.applyClaudeSessions(msg.Resp)
 		return m, m.listenForMessages()
+
+	case gitReposMsg:
+		// MUST re-arm the listen loop, like every other IPC response branch —
+		// omitting it kills IPC for the session, a bug this package has shipped.
+		cmd := m.applyGitRepos(msg.Resp, msg.Gen)
+		return m, tea.Batch(cmd, m.listenForMessages())
+
+	case gitScanTimeoutMsg:
+		// Local timer, so deliberately no re-arm.
+		return m, m.applyGitScanTimeout(msg.cwd, msg.gen)
+
+	case kubeCtxMsg:
+		// MUST re-arm the listen loop, like every other IPC response branch —
+		// omitting it kills IPC for the session, a bug this package has shipped.
+		cmd := m.applyKubeContexts(msg.Resp, msg.Gen)
+		return m, tea.Batch(cmd, m.listenForMessages())
+
+	case kubeScanTimeoutMsg:
+		// Local timer, so deliberately no re-arm.
+		return m, m.applyKubeScanTimeout(msg.gen)
+
+	case recentDirsMsg:
+		// MUST re-arm the listen loop, like every other IPC response branch —
+		// omitting it kills IPC for the session, a bug this package has shipped.
+		cmd := m.applyExistingDirs(msg.Resp, msg.Gen)
+		return m, tea.Batch(cmd, m.listenForMessages())
+
+	case recentScanTimeoutMsg:
+		// Local timer, so deliberately no re-arm.
+		return m, m.applyExistingDirsTimeout(msg.gen)
+
+	case pluginListMsg:
+		// MUST re-arm the listen loop, like every other IPC response branch.
+		cmd := m.applyPluginList(msg.Resp)
+		return m, tea.Batch(cmd, m.listenForMessages())
+
+	case browseDirMsg:
+		// MUST re-arm the listen loop, like every other IPC response branch —
+		// omitting it kills IPC for the session, a bug this package has shipped.
+		cmd := m.applyBrowseResponse(msg.Resp, msg.Gen)
+		return m, tea.Batch(cmd, m.listenForMessages())
+
+	case browseTimeoutMsg:
+		// Local timer, so deliberately no re-arm.
+		return m, m.applyBrowseTimeout(msg.path, msg.child, msg.gen)
 
 	case sessionScanTimeoutMsg:
 		// Turn a never-answered listing into something diagnosable instead of
@@ -2937,21 +3010,30 @@ func (m *Model) handlePaneOutput(msg PaneOutputMsg) tea.Cmd {
 				}
 				leaf.Pane.ghost = true
 			} else if !msg.Ghost {
-				// Transitioning from ghost/restored to live output.
-				// Reset VT only for non-terminal panes (e.g. Claude Code)
-				// where ghost buffer ANSI sequences pollute cursor state.
-				// Terminal panes keep their history — the ghost buffer IS
-				// the terminal state and should be preserved.
+				// Transitioning from replayed to live output. The replayed
+				// content is KEPT, for every pane type.
+				//
+				// This used to reset the VT for claude-code specifically, on the
+				// theory that replayed ANSI pollutes cursor state. The branch was
+				// written in the same commit that introduced ghost_buffer — which
+				// set claude-code to false — so nothing could ever satisfy it: a
+				// pane with no ghost replay never sets Pane.ghost. It named the
+				// one plugin that could not reach it, and sat unexercised until
+				// the flag was flipped.
+				//
+				// It then destroyed exactly what the flag exists to restore.
+				// ResetVT installs a fresh emulator, and the emulator's scrollback
+				// is where the replayed history lives, so the pane came back with
+				// its history and lost it on the first keystroke — the reset fires
+				// on the live frame, and typing is what produces one.
+				//
+				// ghost_buffer = true already states that a pane's replayed
+				// content is wanted; a type name in the TUI cannot know better
+				// than the plugin's own setting. Cursor state needs no help here
+				// either: the live frame that triggers this transition IS the
+				// child painting, which is what fixes the cursor.
 				if leaf.Pane.ghost {
-					// Only reset VT for TUI app panes (claude-code) where ghost
-					// ANSI sequences pollute cursor state. Terminal-like panes
-					// (terminal, ssh, etc.) preserve their ghost buffer as-is.
-					if leaf.Pane.Type == "claude-code" {
-						log.Printf("pane %s: ghost->live transition, resetting VT (type=%s)", msg.PaneID, leaf.Pane.Type)
-						leaf.Pane.ResetVT()
-					} else {
-						log.Printf("pane %s: ghost->live transition, preserving VT (type=%q)", msg.PaneID, leaf.Pane.Type)
-					}
+					log.Printf("pane %s: ghost->live transition, preserving VT (type=%q)", msg.PaneID, leaf.Pane.Type)
 				}
 				leaf.Pane.ghost = false
 			}
@@ -3898,10 +3980,40 @@ func (m *Model) setFlash(text string) {
 	m.flashUntil = time.Now().Add(flashDuration)
 }
 
+// nextReqGen returns a fresh instance id for a one-shot request whose content
+// key (a CWD, or a (path, child) pair) can repeat across genuinely different
+// requests — repoScanState and browseState both use it, mirroring clientGen's
+// role for the reconnect dial: without it, a slot that matches on content
+// alone cannot tell "this is the answer to the request I just asked" from
+// "this is a late answer to a PREVIOUS request that happened to ask about the
+// same thing". Shared by both slots rather than one counter each — a
+// generation only ever has to be unique within its OWN slot's comparisons,
+// never across slots, so splitting the source buys nothing.
+func (m *Model) nextReqGen() string {
+	m.reqGen++
+	return strconv.Itoa(m.reqGen)
+}
+
 // Daemon communication commands
 
+// attachCWD returns the working directory to advertise to the daemon so it can
+// spawn new panes where the client is.
+//
+// Empty in remote mode: os.Getwd() names a directory on the laptop, and the
+// daemon would test it against the SERVER's disk. defaultCWD() validates and
+// falls back, so this was safe — but only by coincidence, and a path that
+// happens to exist on both machines is exactly where the coincidence stops. An
+// empty value makes the daemon use its own working directory, which is a real
+// directory on the machine that will hold the pane.
+func attachCWD(remoteDest, localCWD string) string {
+	if remoteDest != "" {
+		return ""
+	}
+	return localCWD
+}
+
 func (m Model) attachToDaemon() tea.Cmd {
-	return func() tea.Msg {
+	attachCmd := func() tea.Msg {
 		// Subtract chrome (tab bar + status bar), then pane border (2)
 		tabH := m.height - chromeHeight
 		cols := m.width - 2
@@ -3913,15 +4025,21 @@ func (m Model) attachToDaemon() tea.Cmd {
 			rows = 1
 		}
 		// Best-effort; if Getwd fails the daemon falls back to its own CWD.
-		clientCWD, _ := os.Getwd()
+		localCWD, _ := os.Getwd()
 		msg, _ := ipc.NewMessage(ipc.MsgAttach, ipc.AttachPayload{
 			Cols: cols,
 			Rows: rows,
-			CWD:  clientCWD,
+			CWD:  attachCWD(m.remoteDest, localCWD),
 		})
 		m.client.Send(msg)
 		return nil
 	}
+	// requestPluginList is batched here rather than at Ctrl+N: .Available is
+	// also read by the context menu, the palette and the Alt+G overlay, so
+	// asking only on dialog open would leave those describing the wrong
+	// machine. Attach also covers reconnect, which is where a daemon that
+	// restarted (and therefore re-detected) shows up. No-op in local mode.
+	return tea.Batch(attachCmd, m.requestPluginList())
 }
 
 // listenContinueMsg signals the TUI to keep listening for daemon messages.
@@ -4035,6 +4153,54 @@ func (m Model) listenForMessages() tea.Cmd {
 				return listenContinueMsg{}
 			}
 			return claudeSessionsRespMsg{Resp: payload}
+
+		case ipc.MsgGitReposResp:
+			var payload ipc.GitReposRespPayload
+			if err := msg.DecodePayload(&payload); err != nil {
+				log.Printf("decode git_repos_resp: %v", err)
+				return listenContinueMsg{}
+			}
+			// msg.ID echoes the requesting message's ID verbatim (respondTo on
+			// the daemon side) — this is the request instance correlator
+			// applyGitRepos needs on top of the echoed CWD; see repoScanState.gen.
+			return gitReposMsg{Resp: payload, Gen: msg.ID}
+
+		case ipc.MsgKubeCtxResp:
+			var payload ipc.KubeCtxRespPayload
+			if err := msg.DecodePayload(&payload); err != nil {
+				log.Printf("decode kube_ctx_resp: %v", err)
+				return listenContinueMsg{}
+			}
+			// Same correlator as MsgGitReposResp above; see kubeScanState.gen.
+			return kubeCtxMsg{Resp: payload, Gen: msg.ID}
+
+		case ipc.MsgDirsExistResp:
+			var payload ipc.DirsExistRespPayload
+			if err := msg.DecodePayload(&payload); err != nil {
+				log.Printf("decode dirs_exist_resp: %v", err)
+				return listenContinueMsg{}
+			}
+			// The echoed ID is the ONLY correlator here — unlike the browse and
+			// git responses there is no content key, because a path list makes a
+			// poor staleness key. See recentScanState.gen.
+			return recentDirsMsg{Resp: payload, Gen: msg.ID}
+
+		case ipc.MsgPluginListResp:
+			var payload ipc.PluginListRespPayload
+			if err := msg.DecodePayload(&payload); err != nil {
+				log.Printf("decode plugin_list_resp: %v", err)
+				return listenContinueMsg{}
+			}
+			return pluginListMsg{Resp: payload}
+
+		case ipc.MsgBrowseDirResp:
+			var payload ipc.BrowseDirRespPayload
+			if err := msg.DecodePayload(&payload); err != nil {
+				log.Printf("decode browse_dir_resp: %v", err)
+				return listenContinueMsg{}
+			}
+			// Same correlator as MsgGitReposResp above; see browseState.gen.
+			return browseDirMsg{Resp: payload, Gen: msg.ID}
 
 		case ipc.MsgClaudeSessionDetailResp:
 			var payload ipc.ClaudeSessionDetailRespPayload

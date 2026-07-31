@@ -6,7 +6,10 @@ name = "claude-code"
 display_name = "Claude Code"
 category = "ai"
 description = "AI coding assistant"
-schema_version = 10
+# 11: ghost_buffer false -> true. Bumped because the file a user already has
+# OVERRIDES this one, so without it an existing install keeps the old default
+# and never sees the change; the bump is what raises the migration dialog.
+schema_version = 11
 
 [command]
 cmd = "claude"
@@ -53,16 +56,33 @@ default = false
 
 [persistence]
 strategy = "preassign_id"
-ghost_buffer = false
-# Written to this pane's stdin when a client attaches and the pane had no ghost
-# replay to send — which is exactly what ghost_buffer = false above causes, and
-# what otherwise leaves a reconnecting client staring at a blank rectangle in
-# front of a live conversation.
+# Scrollback is saved and replayed, so a reattached pane keeps its conversation
+# history rather than only the current screen.
+#
+# This was false until 2026-08-01, on the stated grounds that replaying a
+# full-screen app produces garbage rather than history. Measured against a real
+# pane, that is not what happens: claude-code writes to the MAIN screen and
+# scrolls normally — which is why you can scroll it while attached — so its
+# output stream replays into coherent history. Both paths were checked, an
+# in-memory replay after closing the TUI and a from-disk replay after a daemon
+# restart, the second landing under a freshly respawned `--resume` process.
+#
+# The cost is that pane output is persisted under $QUIL_HOME/buffers, as it
+# already is for every terminal pane. How much history comes back is bounded by
+# [ghost_buffer] max_lines, and an AI pane spends that budget faster than a
+# shell does because every repaint is bytes.
+ghost_buffer = true
+# Sent when a client attaches and the pane had NO replay to send — now only a
+# brand-new pane, or one whose buffer was lost, since ghost_buffer above covers
+# the rest.
 #
 # Ctrl+L (form feed) rather than a resize: claude-code re-lays-out on SIGWINCH
 # but only paints on its own render tick, so a resize produces nothing at all.
 # Measured on a real PTY — vim repaints with ~5 KB after a 1-column jiggle,
-# claude-code emits 0 bytes from its main UI.
+# claude-code emits 0 bytes from its main UI. Declaring a key also SUPPRESSES
+# the resize fallback, which is correct here and wrong for a program that
+# repaints on SIGWINCH; opencode is exactly that, and declaring one for it would
+# replace a working mechanism with a no-op.
 #
 # This is INPUT rather than a signal, which is why it is opt-in per plugin: a
 # program that reads its own stdin for data would receive this as data.

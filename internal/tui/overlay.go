@@ -1,12 +1,10 @@
 package tui
 
 import (
-	"context"
 	"log"
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/artyomsv/quil/internal/gitdiscover"
 	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/logger"
 )
@@ -15,7 +13,9 @@ import (
 //
 // Precedence:
 //  1. Overlay visible → hide it. Never replaces from the overlay itself.
-//  2. Overlay hidden/absent → resolve gitdiscover.Candidates(activeNormalPane.CWD).
+//  2. Overlay hidden/absent → ask the daemon which repos are near
+//     activeNormalPane.CWD (requestGitRepos); resumes at step 3 in
+//     resolveLazygitOverlay once the answer lands.
 //  3. No candidates: if an overlay exists → show it anyway;
 //     else flash "no git repo here".
 //  4. Any candidate == existing overlay's repo (compare to overlayPane.CWD) →
@@ -48,11 +48,35 @@ func (m *Model) handleToggleLazygit() tea.Cmd {
 	if normalPane != nil {
 		cwd = normalPane.CWD
 	}
-	// Background for now: this runs on the local disk, where the call is fast
-	// and the user is already waiting on a keypress. RD-020 moves it behind an
-	// RPC, which is where a real deadline belongs.
-	candidates := gitdiscover.Candidates(context.Background(), cwd)
+	// No CWD means the pane has not reported one yet (no OSC 7, or a pane that
+	// never had a shell). Asking the daemon would have it substitute its OWN
+	// default and answer about a directory the user is not in — so an overlay
+	// could open on an unrelated repository. Fall through to the same
+	// no-candidates handling the discovery would have produced.
+	if cwd == "" {
+		return m.resolveLazygitOverlay(tab, nil)
+	}
+	// Asked of the DAEMON, never resolved here. Running gitdiscover in this
+	// process stats the machine drawing the UI, so against a remote host Alt+G
+	// reported "no git repo here" for a directory that is a repository on the
+	// machine that actually holds it — and nothing in that message hinted the
+	// wrong disk had been consulted. The rest of the state machine resumes in
+	// applyGitRepos when the answer lands.
+	return m.requestGitRepos(cwd, tab.ID, repoScanOverlay)
+}
 
+// resolveLazygitOverlay runs steps 3-7 of the Alt+G state machine against an
+// already-resolved candidate list.
+//
+// Split from the discovery above so the decision half can be driven directly:
+// handleToggleLazygit calls it for the no-CWD case (candidates known to be
+// nil without a round trip), and applyGitRepos calls it once the daemon's
+// answer lands (RD-021 — discovery itself runs on the daemon, never stats
+// this process's disk). Everything below here is unaffected by where the
+// list came from. overlay_test.go's toggleWithDiscovery also drives this half
+// directly, resolving candidates the same way the daemon does, so tests don't
+// need a live RPC round trip to exercise steps 3-7.
+func (m *Model) resolveLazygitOverlay(tab *TabModel, candidates []string) tea.Cmd {
 	// Step 3: no candidates.
 	if len(candidates) == 0 {
 		if tab.overlayPane != nil {

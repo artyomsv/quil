@@ -2,14 +2,11 @@ package tui
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"io"
-	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -19,11 +16,8 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/google/uuid"
 
-	"github.com/artyomsv/quil/internal/clipboard"
 	"github.com/artyomsv/quil/internal/config"
-	"github.com/artyomsv/quil/internal/gitdiscover"
 	"github.com/artyomsv/quil/internal/ipc"
-	"github.com/artyomsv/quil/internal/kubediscover"
 	"github.com/artyomsv/quil/internal/logger"
 	"github.com/artyomsv/quil/internal/plugin"
 )
@@ -1080,7 +1074,24 @@ func (m Model) renderGitRepoPickDialog() string {
 // leftTruncPath truncates s to at most maxWidth runes, preserving the
 // rightmost characters (the repo basename / distinguishing tail).
 // A leading "…" is prepended when truncation occurs.
+//
+// Both of this function's callers draw daemon-supplied repository paths (the
+// setup dialog's CWD pick list and the Alt+G repo picker both render
+// GitReposRespPayload.Repos), so s is sanitized here rather than at each call
+// site — one point neither caller can forget, and it is a no-op for the
+// local, already-trusted strings the pick list also carries (recent CWDs).
+//
+// Sanitized BEFORE truncating, not after: maxWidth is a budget on the runes
+// that will actually be drawn, and truncating first would spend that budget
+// on runes sanitizeRemoteText is about to delete anyway. A name front-loaded
+// with control bytes ahead of a few real characters would have those real
+// characters truncated away by a length count that includes bytes with no
+// final width at all — the same "confidently wrong" failure this codebase's
+// other truncate-vs-cap orderings already avoid (see browseDirResponse's
+// sort-before-cap in internal/daemon/browse.go). Sanitizing first also means
+// the "…" prefix always sits against genuinely visible text.
 func leftTruncPath(s string, maxWidth int) string {
+	s = sanitizeRemoteText(s)
 	runes := []rune(s)
 	if len(runes) <= maxWidth {
 		return s
@@ -1353,7 +1364,7 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 	if cwd != "" {
 		m.lastSelectedCWD = cwd
 		m.recentCWDs = pushRecentCWD(m.recentCWDs, cwd, recentCWDMax)
-		if err := SaveRecentCWDs(config.RecentCWDsPath(), m.recentCWDs); err != nil {
+		if err := SaveRecentCWDs(config.RecentCWDsPath(m.remoteDest), m.recentCWDs); err != nil {
 			log.Printf("create pane: save recent cwds: %v", err)
 		}
 	}
@@ -1845,14 +1856,15 @@ func (m Model) handlePluginsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if err := m.pluginRegistry.LoadFromDir(config.PluginsDir()); err != nil {
 			log.Printf("reload plugins: %v", err)
 		}
-		m.pluginRegistry.DetectAvailability()
-		client := m.client
-		m.dialog = dialogNone
-		return m, func() tea.Msg {
-			msg, _ := ipc.NewMessage(ipc.MsgReloadPlugins, nil)
-			client.Send(msg)
-			return nil
+		// Local detection only in local mode — in remote mode this would
+		// discard whatever availability answer the daemon already supplied
+		// with a detection pass over the wrong machine. reloadPluginsThenAskCmd
+		// below re-asks the daemon instead, once its own reload has finished.
+		if !m.RemoteMode() {
+			m.pluginRegistry.DetectAvailability()
 		}
+		m.dialog = dialogNone
+		return m, reloadPluginsThenAskCmd(m.client)
 	}
 
 	return m, nil
@@ -1933,16 +1945,15 @@ func (m Model) handleTOMLEditorKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if err := m.pluginRegistry.LoadFromDir(config.PluginsDir()); err != nil {
 			log.Printf("reload plugins: %v", err)
 		}
-		m.pluginRegistry.DetectAvailability()
+		// Local detection only in local mode — see the identical guard on the
+		// Plugins dialog's Reload/Restore buttons above.
+		if !m.RemoteMode() {
+			m.pluginRegistry.DetectAvailability()
+		}
 		m.tomlEditor = nil
 		m.dialog = dialogPlugins
 		m.dialogCursor = 0
-		client := m.client
-		reloadCmd := func() tea.Msg {
-			msg, _ := ipc.NewMessage(ipc.MsgReloadPlugins, nil)
-			client.Send(msg)
-			return nil
-		}
+		reloadCmd := reloadPluginsThenAskCmd(m.client)
 		if cmd != nil {
 			return m, tea.Batch(reloadCmd, cmd)
 		}
@@ -2248,7 +2259,7 @@ func (m Model) renderPluginErrorDialog() string {
 // renderCreatePaneSetupDialog, setupFieldCount, setupFieldKind) all use a
 // value receiver and return the (modified) `m` for the framework to install
 // as the next state. Helpers they call internally — enterSetupOrSplit,
-// loadBrowseDir, loadBrowseDirAndSelect, adjustBrowseScroll — mutate state
+// initSetupBrowser, browseTo, browseUp, adjustBrowseScroll — mutate state
 // in place and use a pointer receiver, since they're invoked via the
 // addressable local `m` inside a value-receiver method (Go takes its address
 // implicitly). Mixing the two styles is intentional and matches the pattern
@@ -2275,10 +2286,31 @@ func (m *Model) enterSetupOrSplit(p *plugin.PanePlugin) tea.Cmd {
 	m.cwdBrowseEntries = nil
 	m.cwdBrowseCursor = 0
 	m.cwdBrowseScroll = 0
+	m.cwdBrowseParent = ""
+	m.cwdBrowseRoots = nil
+	m.cwdBrowseTruncated = false
+	m.cwdBrowseRootsTruncated = false
+	m.browseCandidates = nil
+	// Also drop any in-flight browse from the previous plugin, so its answer
+	// cannot land in this dialog's listing. Safe to zero: no call site ever
+	// requests the empty Path, so the zero value cannot match a real response.
+	m.browse = browseState{}
+	// Same reasoning for an in-flight git-repo scan — whether it was this
+	// dialog's own pick-list request for a prior plugin, or a still-running
+	// Alt+G overlay discovery, its answer must not land in whatever setup
+	// session is open when it finally arrives. Losing an in-flight Alt+G scan
+	// this way is a deliberate trade: the user has since moved into Ctrl+N, and
+	// pressing Alt+G again costs one keypress against a wrong-repo overlay.
+	m.repoScan = repoScanState{}
 	m.repoCandidates = nil
 	m.recentCandidates = nil
+	// Same reasoning as the repoScan reset above: an existence check still in
+	// flight from the previous plugin must not land in this dialog's pick list.
+	m.recentScan = recentScanState{}
 	m.kubeContexts = nil
 	m.kubeCursor = 0
+	m.kubeScan = kubeScanState{}
+	m.kubeTruncated = false
 	m.resetSessionSelection()
 
 	needsSetup := p != nil && (p.Command.PromptsCWD || len(p.Command.Toggles) > 0 ||
@@ -2287,6 +2319,10 @@ func (m *Model) enterSetupOrSplit(p *plugin.PanePlugin) tea.Cmd {
 		m.createPaneStep = 3
 		return nil
 	}
+
+	// The browser's pre-fill now costs a round trip, so the dialog opens first
+	// and fills in when the daemon answers.
+	var browseCmd tea.Cmd
 
 	if p.Command.PromptsCWD {
 		if p.Command.Discover == "git" {
@@ -2300,40 +2336,21 @@ func (m *Model) enterSetupOrSplit(p *plugin.PanePlugin) tea.Cmd {
 					base = pane.CWD
 				}
 			}
-			// Background for now — local disk, synchronous dialog. RD-020 moves
-			// this behind an RPC where a deadline is meaningful.
-			m.repoCandidates = gitdiscover.Candidates(context.Background(), base)
-			if len(m.repoCandidates) > maxRepoCandidates {
-				m.repoCandidates = m.repoCandidates[:maxRepoCandidates]
-			}
-		}
-		switch {
-		case len(m.repoCandidates) > 0:
-			// Pre-select the first git candidate so Enter-through submits it.
-			m.cwdBrowseDir = m.repoCandidates[0]
-			m.cwdBrowseCursor = 0
-		case len(m.recentCWDs) > 0:
-			// Offer the last-used directories as a quick pick (skipping any
-			// that no longer exist). Falls through to the browser if the
-			// filtered list is empty.
-			m.recentCandidates = existingDirs(m.recentCWDs)
-			if len(m.recentCandidates) > 0 {
-				m.cwdBrowseDir = m.recentCandidates[0]
-				m.cwdBrowseCursor = 0
-			} else {
-				m.initSetupBrowser()
-			}
-		default:
-			m.initSetupBrowser()
+			// Asked of the DAEMON, never resolved here — gitdiscover run in this
+			// process stats the machine drawing the UI, which is the wrong disk
+			// whenever the daemon is remote (RD-021). Whether there turn out to
+			// be any candidates isn't known until the answer lands, so the
+			// recent-locations/browser fallback that used to run right below
+			// this branch now runs in applyGitReposPickList instead.
+			browseCmd = m.requestGitRepos(base, "", repoScanPickList)
+		} else {
+			browseCmd = m.fallbackToRecentOrBrowser()
 		}
 	}
 
+	var kubeCmd tea.Cmd
 	if p.Command.Discover == "kube" {
-		m.kubeContexts = kubediscover.Contexts(context.Background())
-		if len(m.kubeContexts) > maxKubeContexts {
-			m.kubeContexts = m.kubeContexts[:maxKubeContexts]
-		}
-		m.kubeCursor = 0 // Default context row
+		kubeCmd = m.requestKubeContexts()
 	}
 
 	// Initialize toggle states from defaults. For mutually-exclusive groups
@@ -2350,86 +2367,278 @@ func (m *Model) enterSetupOrSplit(p *plugin.PanePlugin) tea.Cmd {
 
 	m.dialogEdit = false // browser doesn't use edit mode
 	m.dialog = dialogCreatePaneSetup
-	return tea.ClearScreen
+	return tea.Batch(tea.ClearScreen, browseCmd, kubeCmd)
 }
 
-// existingDirs filters paths down to those that still resolve to a directory,
-// preserving order. Keeps stale (deleted) entries out of the recent-locations
-// pick list.
-func existingDirs(paths []string) []string {
-	out := make([]string, 0, len(paths))
-	for _, p := range paths {
-		if fi, err := os.Stat(p); err == nil && fi.IsDir() {
-			out = append(out, p)
-		}
+// fallbackToRecentOrBrowser offers the recent-locations quick pick, falling
+// back to the directory-browser pre-fill chain if none of those still exist
+// (or there is nothing remembered at all).
+//
+// Shared by two callers: a PromptsCWD plugin with no git discovery goes
+// straight here from enterSetupOrSplit, and the git pick list falls back to
+// the exact same choice — from applyGitReposPickList — once a scan comes back
+// with nothing to offer, whether that's a real "no repo here" or a failed
+// scan. The two used to be one inline switch; discovery moving behind an RPC
+// split it, because "did the scan find anything" is no longer known at the
+// point enterSetupOrSplit returns.
+func (m *Model) fallbackToRecentOrBrowser() tea.Cmd {
+	if len(m.recentCWDs) > 0 {
+		// Which of the remembered directories still exist is a question about
+		// the DAEMON's disk. Answered here with os.Stat until RD-024, which
+		// reads the machine drawing the UI: against a remote host every server
+		// path failed that test and the pick list rendered silently empty —
+		// indistinguishable from a feature that had never been used, because
+		// structurally nothing had failed.
+		//
+		// The fallback to the browser moves with it, into applyExistingDirs:
+		// whether anything survives is no longer known when this returns.
+		return m.requestExistingDirs(m.recentCWDs)
 	}
-	return out
+	return m.initSetupBrowser()
 }
 
 // initSetupBrowser seeds the directory browser using the standard pre-fill
-// chain: last selected CWD -> active pane OSC7 CWD -> home. Stale entries
-// are skipped (and lastSelectedCWD cleared) exactly as before.
-func (m *Model) initSetupBrowser() {
+// chain: last selected CWD -> active pane OSC7 CWD -> home.
+//
+// The daemon answers each candidate, so what was a loop is now a chain: this
+// asks about the first candidate and applyBrowseDir advances to the next one
+// when the answer carries an Error. Stale entries are still skipped (and
+// lastSelectedCWD still cleared), just one round trip apart.
+//
+// The home fallback is the literal "~", expanded by the DAEMON. os.UserHomeDir
+// names a directory on the machine DRAWING the dialog — against a remote host
+// that path does not exist there, so the chain would exhaust on every remote
+// session and leave the browser empty. Locally the two are the same directory.
+func (m *Model) initSetupBrowser() tea.Cmd {
 	candidates := []string{m.lastSelectedCWD}
 	if tab := m.activeTabModel(); tab != nil {
 		if pane := tab.ActivePaneModel(); pane != nil {
 			candidates = append(candidates, pane.CWD)
 		}
 	}
-	if home, err := os.UserHomeDir(); err == nil {
-		candidates = append(candidates, home)
+	// The LITERAL "~", deliberately — not os.UserHomeDir(). See above.
+	candidates = append(candidates, "~")
+
+	// Consecutive duplicates are dropped. The remembered directory is very
+	// often the active pane's CWD, and asking twice costs a round trip to be
+	// told the same thing — or, when it fails, to fail identically. It also
+	// keeps the chain from ever issuing two requests with the same (Path,
+	// Child) key back to back, which is the one shape the browse client's
+	// staleness key cannot tell apart.
+	m.browseCandidates = dedupeAdjacent(candidates)
+	return m.nextBrowseCandidate()
+}
+
+// dedupeAdjacent drops runs of equal strings, preserving order. Compared
+// verbatim: these are candidate paths bound for the daemon, and case-folding or
+// separator-normalising them here would be this machine answering for the one
+// holding the filesystem.
+func dedupeAdjacent(in []string) []string {
+	out := in[:0:0]
+	for i, s := range in {
+		if i > 0 && s == in[i-1] {
+			continue
+		}
+		out = append(out, s)
 	}
-	for _, dir := range candidates {
+	return out
+}
+
+// nextBrowseCandidate asks about the next pre-fill candidate, skipping empty
+// ones without spending a round trip on them.
+//
+// Returns nil once the chain is exhausted, which is what stops the browser from
+// looping: the last error stays on screen and the listing stays empty, rather
+// than the chain restarting from the top.
+func (m *Model) nextBrowseCandidate() tea.Cmd {
+	for len(m.browseCandidates) > 0 {
+		dir := m.browseCandidates[0]
+		m.browseCandidates = m.browseCandidates[1:]
 		if dir == "" {
 			continue
 		}
-		if err := m.loadBrowseDir(dir); err != nil {
-			log.Printf("setup dialog: load browse dir %q failed, trying next: %v", dir, err)
-			if dir == m.lastSelectedCWD {
-				m.lastSelectedCWD = "" // clear stale memory
-			}
-			continue
+		return m.requestBrowseDir(dir, "", "")
+	}
+	return nil
+}
+
+// applyBrowseResponse is the setup dialog's whole reaction to one browse
+// answer: apply it, then let the pre-fill chain react to what it turned out to
+// be.
+//
+// The chain policy lives HERE rather than inside applyBrowseDir so the
+// direction of knowledge runs dialog → client and not the other way: the client
+// half reports what it observed, and only this side knows what a failure means
+// to a dialog that is still choosing its opening directory.
+func (m *Model) applyBrowseResponse(resp ipc.BrowseDirRespPayload, gen string) tea.Cmd {
+	switch m.applyBrowseDir(resp, gen) {
+	case browseFailed:
+		return m.advanceBrowseCandidates(resp.Path)
+	case browseFilled:
+		m.browseCandidates = nil // a candidate answered; the chain is done
+	}
+	return nil
+}
+
+// advanceBrowseCandidates continues the pre-fill chain past a candidate the
+// daemon could not list. `failed` is the request path the response echoed.
+//
+// An empty chain means this failure was not a pre-fill attempt — the user
+// navigated somewhere unreadable — so nothing advances and nothing is
+// forgotten. That check comes first for exactly that reason: browseTo abandons
+// the chain, so "chain non-empty" IS "we are still pre-filling", and only there
+// does a failure say something about the REMEMBERED directory rather than about
+// where the user just tried to go.
+func (m *Model) advanceBrowseCandidates(failed string) tea.Cmd {
+	if len(m.browseCandidates) == 0 {
+		return nil
+	}
+	if failed != "" && failed == m.lastSelectedCWD {
+		m.lastSelectedCWD = "" // clear stale memory
+	}
+	return m.nextBrowseCandidate()
+}
+
+// applyGitReposPickList is the setup dialog's whole reaction to a git pick-list
+// discovery response that came back without an error: populate the candidate
+// list, or — if the scan genuinely found nothing — fall back to the same
+// recent-locations/browser chain a non-git PromptsCWD plugin uses.
+//
+// discover_client.go's applyGitRepos deliberately holds none of this policy —
+// see its doc comment — because the pick list is only one of two callers and
+// what a response MEANS to it (a candidate list to render, a cap to enforce,
+// a fallback to run) is dialog-specific knowledge the client half has no
+// business carrying.
+//
+// Dropped if the setup dialog has since closed (Esc, submit, or a different
+// plugin selected — all of which change m.dialog away from
+// dialogCreatePaneSetup): applying it would populate a pick list nobody is
+// looking at, or worse, one belonging to whatever setup the user opened next.
+func (m *Model) applyGitReposPickList(repos []string) tea.Cmd {
+	if m.dialog != dialogCreatePaneSetup {
+		return nil
+	}
+	m.repoCandidates = repos
+	if len(m.repoCandidates) > maxRepoCandidates {
+		m.repoCandidates = m.repoCandidates[:maxRepoCandidates]
+	}
+	if len(m.repoCandidates) == 0 {
+		return m.fallbackToRecentOrBrowser()
+	}
+	// Pre-select the first git candidate so Enter-through submits it.
+	m.cwdBrowseDir = m.repoCandidates[0]
+	m.cwdBrowseCursor = 0
+	return nil
+}
+
+// applyGitReposPickListError is the pick list's reaction to a failed scan.
+//
+// The fallback is identical to applyGitReposPickList's "found nothing" case —
+// the dialog still needs a CWD from somewhere — but a failure must not be
+// indistinguishable from "no repositories here", which is a real, confidently
+// reportable finding. The flash is what keeps the two apart; discover_client.go
+// has already logged the underlying error.
+func (m *Model) applyGitReposPickListError() tea.Cmd {
+	if m.dialog != dialogCreatePaneSetup {
+		return nil
+	}
+	// Already nil from enterSetupOrSplit's reset — set explicitly anyway so
+	// this function states the "empty pick list" guarantee itself rather than
+	// relying on that reset never changing.
+	m.repoCandidates = nil
+	m.setFlash("repo scan failed")
+	return tea.Batch(m.flashCmd(), m.fallbackToRecentOrBrowser())
+}
+
+// browseTo issues a user-driven navigation request.
+//
+// It abandons any pre-fill chain still in flight: the user has said where they
+// want to be, and bouncing them to a fallback directory because THIS request
+// failed would move the browser somewhere nobody asked for. Also clears the
+// clipboard error, which belongs to the previous keystroke.
+func (m *Model) browseTo(path, child, selectName string) tea.Cmd {
+	m.browseCandidates = nil
+	m.cwdInputError = ""
+	return m.requestBrowseDir(path, child, selectName)
+}
+
+// browseUp navigates one level up, using the daemon's own answer for what that
+// means. Nothing here computes a parent: separators and the set of filesystem
+// roots are properties of the machine holding the disk.
+func (m *Model) browseUp() tea.Cmd {
+	if m.cwdBrowseDir == "" {
+		return nil // already showing the root list; nothing above it
+	}
+	if m.cwdBrowseParent == "" {
+		// At a filesystem root. Above it is the root list when the daemon
+		// reported one (Windows drives) and nothing at all when it did not
+		// (Unix, where "/" has no parent).
+		if len(m.cwdBrowseRoots) > 0 {
+			m.showRootsList()
 		}
-		break
+		return nil
 	}
+	// selectName keeps the user oriented: the cursor lands on the folder they
+	// just left rather than at the top of the parent listing.
+	return m.browseTo(m.cwdBrowseParent, "", browseLeaf(m.cwdBrowseDir, m.cwdBrowseParent))
 }
 
-// loadBrowseDir reads `path` and populates the directory browser state. Only
-// directories are listed; ".." is prepended unless `path` is at the filesystem
-// root. The cursor is reset to position 0. On error, the existing browser
-// state is left untouched and the error is returned.
-func (m *Model) loadBrowseDir(path string) error {
-	return m.loadBrowseDirAndSelect(path, "")
+// browseLeaf returns the final element of dir, given the parent the daemon
+// reported for it.
+//
+// Derived by subtracting one daemon-supplied string from the other rather than
+// with filepath.Base, which splits on the LOCAL platform's separators: a Unix
+// client would read `C:\srv\work` as a single element and a Windows client
+// would mis-split a path containing a literal backslash. Both inputs come from
+// the same machine, so their difference is the leaf whatever its separator is.
+//
+// Degrades to "" when the two do not line up, which simply leaves the cursor at
+// the top of the parent listing.
+func browseLeaf(dir, parent string) string {
+	if parent == "" || !strings.HasPrefix(dir, parent) {
+		return ""
+	}
+	return strings.Trim(dir[len(parent):], `/\`)
 }
 
-// loadBrowseDirAndSelect is loadBrowseDir but positions the cursor on
-// `selectName` (without trailing slash) if it appears in the listing.
-// Used by parent-up navigation to keep the user oriented on the directory
-// they just exited.
-func (m *Model) loadBrowseDirAndSelect(path, selectName string) error {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return fmt.Errorf("abs path: %w", err)
-	}
-	entries, err := os.ReadDir(abs)
-	if err != nil {
-		return fmt.Errorf("read dir: %w", err)
-	}
+// showRootsList renders the daemon-reported filesystem roots as the listing.
+// cwdBrowseDir = "" is the existing "showing the root list, not inside any
+// directory" sentinel.
+func (m *Model) showRootsList() {
+	m.cwdBrowseDir = ""
+	m.cwdBrowseParent = ""
+	m.cwdBrowseEntries = m.cwdBrowseRoots
+	m.cwdBrowseCursor = 0
+	m.cwdBrowseScroll = 0
+	m.cwdInputError = ""
+	m.browse.err = ""
+	// Swapped, not cleared. Carrying the previous directory's cap forward would
+	// warn about a listing no longer on screen, but the root list is not
+	// automatically complete either: the daemon abandons the sweep after a
+	// couple of unresponsive drives, and a drive missing for that reason is
+	// indistinguishable from one that was never mapped.
+	m.cwdBrowseTruncated = m.cwdBrowseRootsTruncated
+}
 
+// applyBrowseListing fills the directory browser from an already-resolved
+// listing. Only directories are shown; ".." is prepended when showUp is set.
+//
+// Split from the read above so the browser can be fed from the daemon (RD-020)
+// without duplicating any of this. The signature is deliberately the shape a
+// BrowseDirRespPayload arrives in — entries carry IsDir because the daemon
+// reports files too, and showUp is a decision the SERVER makes: it owns both
+// the "is this a root" test and, on Windows, the drive list, neither of which
+// the client can compute for a filesystem it cannot see.
+//
+// Sorting is case-insensitive here rather than relying on the daemon's order.
+// The daemon sorts directories first so its entry cap cannot strip every
+// folder from a large listing; that is a cap-safety measure, not a
+// presentation choice, and presentation belongs on this side.
+func (m *Model) applyBrowseListing(resolved string, entries []ipc.BrowseEntry, showUp bool, selectName string) {
 	dirs := make([]string, 0, len(entries))
 	for _, e := range entries {
-		// Plain directory — keep.
-		if e.IsDir() {
-			dirs = append(dirs, e.Name())
-			continue
-		}
-		// Directory symlink / Windows junction: DirEntry reports them as
-		// ModeSymlink (not ModeDir) so the IsDir() above misses them. Stat
-		// follows the link and tells us whether the target is a directory.
-		if e.Type()&fs.ModeSymlink != 0 {
-			if info, err := os.Stat(filepath.Join(abs, e.Name())); err == nil && info.IsDir() {
-				dirs = append(dirs, e.Name())
-			}
+		if e.IsDir {
+			dirs = append(dirs, e.Name)
 		}
 	}
 	sort.Slice(dirs, func(i, j int) bool {
@@ -2437,15 +2646,12 @@ func (m *Model) loadBrowseDirAndSelect(path, selectName string) error {
 	})
 
 	listing := make([]string, 0, len(dirs)+1)
-	if parent := filepath.Dir(abs); parent != abs {
-		listing = append(listing, "..")
-	} else if runtime.GOOS == "windows" {
-		// At a drive root (e.g., C:\) — show ".." that navigates to drive list.
+	if showUp {
 		listing = append(listing, "..")
 	}
 	listing = append(listing, dirs...)
 
-	m.cwdBrowseDir = abs
+	m.cwdBrowseDir = resolved
 	m.cwdBrowseEntries = listing
 	m.cwdBrowseCursor = 0
 	m.cwdBrowseScroll = 0
@@ -2460,29 +2666,20 @@ func (m *Model) loadBrowseDirAndSelect(path, selectName string) error {
 			}
 		}
 	}
-	return nil
-}
-
-// loadDriveList populates the directory browser with available Windows drive
-// letters (e.g., "C:\", "D:\"). cwdBrowseDir is set to "" as a sentinel
-// meaning "showing drive list, not inside any directory."
-func (m *Model) loadDriveList() {
-	var drives []string
-	for c := 'A'; c <= 'Z'; c++ {
-		root := string(c) + `:\`
-		if _, err := os.Stat(root); err == nil {
-			drives = append(drives, root)
-		}
-	}
-	m.cwdBrowseDir = ""
-	m.cwdBrowseEntries = drives
-	m.cwdBrowseCursor = 0
-	m.cwdBrowseScroll = 0
-	m.cwdInputError = ""
 }
 
 // browserVisibleRows is the height of the directory browser viewport.
 const browserVisibleRows = 12
+
+// truncatedHintPrefix marks a listing the daemon capped.
+//
+// Deliberately says "hidden" rather than naming a number: the cap counts
+// ENTRIES, the browser shows DIRECTORIES, and the daemon sorts directories
+// ahead of files before capping — so a capped listing may have lost only files
+// and still show every folder. The client cannot tell the two apart, and the
+// honest claim it can always make is that the answer is partial. Quoting a
+// count here would be precise about the wrong thing.
+const truncatedHintPrefix = "⚠ capped, some entries hidden  "
 
 // maxRepoCandidates bounds the setup-dialog pick list: the dialog has no
 // scroll machinery for this mode, so the list must fit the box. Overflow
@@ -2810,11 +3007,19 @@ func (m Model) handleSetupCWDKey(p *plugin.PanePlugin, key string) (tea.Model, t
 		return m.handleSetupPickKey(p, key)
 	}
 	if len(m.cwdBrowseEntries) == 0 {
-		// Browser failed to load — Enter still submits using empty selectedCWD.
-		if key == "enter" {
+		switch key {
+		case "enter":
+			// Browser failed to load — Enter still submits using empty
+			// selectedCWD.
 			return m.submitSetupDialog(p)
+		case "ctrl+v":
+			// Falls through to the paste branch below. There is nothing to
+			// navigate, but a pasted path can still get the browser somewhere —
+			// and after a pre-fill chain that failed on every candidate it is
+			// the only way out of an empty listing.
+		default:
+			return m, nil
 		}
-		return m, nil
 	}
 
 	switch key {
@@ -2860,78 +3065,44 @@ func (m Model) handleSetupCWDKey(p *plugin.PanePlugin, key string) (tea.Model, t
 
 	case "enter", "right", "l":
 		entry := m.cwdBrowseEntries[m.cwdBrowseCursor]
-		var target string
-		if entry == ".." {
-			parent := filepath.Dir(m.cwdBrowseDir)
-			if parent == m.cwdBrowseDir && runtime.GOOS == "windows" {
-				// At drive root — ".." opens drive list
-				m.loadDriveList()
-				return m, nil
-			}
-			target = parent
-		} else if m.cwdBrowseDir == "" && runtime.GOOS == "windows" {
-			// Selecting a drive from the drive list
-			target = entry
-		} else {
-			target = filepath.Join(m.cwdBrowseDir, entry)
+		switch {
+		case entry == "..":
+			return m, m.browseUp()
+		case m.cwdBrowseDir == "":
+			// Root list: every row is already a full root path, so it is asked
+			// about directly rather than joined onto anything.
+			return m, m.browseTo(entry, "", "")
+		default:
+			// Child, not a join. The daemon joins with its own separator — see
+			// BrowseDirReqPayload — so a Windows TUI against a Linux daemon
+			// cannot ask for a path shaped like its own filesystem.
+			return m, m.browseTo(m.cwdBrowseDir, entry, "")
 		}
-		if err := m.loadBrowseDir(target); err != nil {
-			m.cwdInputError = err.Error()
-		} else {
-			m.cwdInputError = ""
-		}
-		return m, nil
 
 	case "backspace", "left", "h":
-		if m.cwdBrowseDir == "" {
-			return m, nil // already at drive list (or no dir loaded)
-		}
-		parent := filepath.Dir(m.cwdBrowseDir)
-		if parent == m.cwdBrowseDir {
-			// At filesystem root — on Windows, show drive list.
-			if runtime.GOOS == "windows" {
-				m.loadDriveList()
-			}
-			return m, nil
-		}
-		// Remember which child we came from so we can highlight it in the
-		// parent listing — keeps the user oriented during quick up/down
-		// navigation.
-		child := filepath.Base(m.cwdBrowseDir)
-		if err := m.loadBrowseDirAndSelect(parent, child); err != nil {
-			m.cwdInputError = err.Error()
-		} else {
-			m.cwdInputError = ""
-		}
-		return m, nil
+		return m, m.browseUp()
 
 	case "ctrl+v":
-		text, err := clipboard.Read()
+		// Through the clipboardReadText seam, like the pane paste path: the
+		// real reader touches the OS clipboard, which no test can rely on.
+		text, err := clipboardReadText()
 		if err != nil {
 			log.Printf("setup dialog: clipboard read: %v", err)
 			m.cwdInputError = fmt.Sprintf("clipboard: %v", err)
 			return m, nil
 		}
+		// sanitizePastedPath is the whole of the client-side cleaning: trim,
+		// unquote (Windows "Copy as path" wraps in double quotes), and strip
+		// control bytes so a clipboard payload cannot inject escapes into the
+		// error line. Everything else the old path did here — ~ expansion, Abs,
+		// and the existence check — is the DAEMON's answer to give: statting
+		// locally is what made a perfectly valid remote path unpasteable, and
+		// the response's Error reports a bad path honestly.
 		path := sanitizePastedPath(text)
 		if path == "" {
 			return m, nil
 		}
-		// Validate before jumping; reuse the same normalize logic so ~ and
-		// quoted Windows paths work in the browser too.
-		cleaned, vErr := validateAndNormalizeCWD(path)
-		if vErr != nil {
-			m.cwdInputError = vErr.Error()
-			return m, nil
-		}
-		if cleaned == "" {
-			return m, nil // empty after normalization
-		}
-		if err := m.loadBrowseDir(cleaned); err != nil {
-			m.cwdInputError = err.Error()
-		} else {
-			m.cwdInputError = ""
-		}
-		return m, nil
+		return m, m.browseTo(path, "", "")
 	}
 	return m, nil
 }
@@ -2987,8 +3158,7 @@ func (m Model) handleSetupPickKey(p *plugin.PanePlugin, key string) (tea.Model, 
 			m.recentCandidates = nil
 			m.cwdBrowseDir = ""
 			m.cwdBrowseCursor = 0
-			m.initSetupBrowser()
-			return m, nil
+			return m, m.initSetupBrowser()
 		}
 		// Selecting a candidate submits the dialog (the folder IS the answer
 		// to the CWD question; toggles keep their defaults unless the user
@@ -3300,62 +3470,16 @@ func wrapToLines(text string, width, max int) []string {
 	return lines
 }
 
-// validateAndNormalizeCWD cleans a user-entered path, expands a leading ~,
-// runs filepath.Abs, and verifies the target exists and is a directory.
-// An empty string is accepted (daemon falls back to its own os.Getwd).
-func validateAndNormalizeCWD(raw string) (string, error) {
-	s := strings.TrimSpace(raw)
-	s = strings.Trim(s, `"`) // Windows "Copy as path" wraps the path in quotes
-	if s == "" {
-		return "", nil
-	}
-
-	// Expand a leading ~ (Go stdlib doesn't do this).
-	if s == "~" || strings.HasPrefix(s, "~/") || strings.HasPrefix(s, `~\`) {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", fmt.Errorf("expand ~: %w", err)
-		}
-		switch {
-		case s == "~":
-			s = home
-		case strings.HasPrefix(s, "~/"):
-			s = filepath.Join(home, s[2:])
-		case strings.HasPrefix(s, `~\`):
-			s = filepath.Join(home, s[2:])
-		}
-	}
-
-	abs, err := filepath.Abs(s)
-	if err != nil {
-		return "", fmt.Errorf("invalid path: %w", err)
-	}
-	info, err := os.Stat(abs)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "", fmt.Errorf("path does not exist")
-		}
-		return "", fmt.Errorf("stat path: %w", err)
-	}
-	if !info.IsDir() {
-		return "", fmt.Errorf("not a directory")
-	}
-	// Resolve symlinks so the daemon receives a canonical path. This also
-	// closes the small TOCTOU window between Stat (above) and the eventual
-	// PTY spawn — a symlink swap on the original path can no longer redirect
-	// the spawn to a different directory. EvalSymlinks failure is non-fatal:
-	// fall back to the lexically-cleaned absolute path.
-	if resolved, evalErr := filepath.EvalSymlinks(abs); evalErr == nil {
-		return resolved, nil
-	}
-	return abs, nil
-}
-
 // sanitizePastedPath strips common clipboard noise (whitespace, surrounding
 // quotes, and any control bytes) so paths copied from GUI file managers are
 // accepted cleanly. Control bytes are dropped to prevent terminal-escape
 // injection: a clipboard payload containing OSC/CSI sequences would otherwise
-// flow through os.Stat into m.cwdInputError and reach the rendered dialog.
+// be echoed back inside a daemon error message and reach the rendered dialog.
+//
+// This is the whole of the client-side cleaning for a pasted path. It
+// deliberately does NOT expand ~, make the path absolute, or check that it
+// exists: all three are answers only the machine holding the filesystem can
+// give, and giving them here is what made a valid remote path unpasteable.
 func sanitizePastedPath(s string) string {
 	s = strings.TrimSpace(s)
 	s = strings.Trim(s, `"`)
@@ -3486,9 +3610,15 @@ func (m Model) renderCreatePaneSetupDialog() string {
 		// the selected path, so a separate line would duplicate it and merge
 		// visually with the list — skip it and let the highlight do the work.
 		if len(pick) == 0 {
-			path, prefix := m.cwdBrowseDir, "    "
+			// Resolved is the daemon's answer (BrowseDirRespPayload.Resolved) and
+			// may be remote — sanitize before it reaches a rendered row. The
+			// raw value stays in m.cwdBrowseDir for the actual spawn CWD.
+			path, prefix := sanitizeRemoteText(m.cwdBrowseDir), "    "
 			switch {
-			case path == "" && runtime.GOOS == "windows" && len(m.cwdBrowseEntries) > 0:
+			// No runtime.GOOS check: the roots come from the daemon, and only a
+			// Windows daemon reports any, so their presence IS the condition.
+			// Testing this machine's OS answered for the wrong one.
+			case path == "" && len(m.cwdBrowseEntries) > 0:
 				path = dialogSubtle.Render("Select drive:")
 			case path == "":
 				path = dialogSubtle.Render("(no directory loaded — daemon default will be used)")
@@ -3580,6 +3710,17 @@ func (m Model) renderCreatePaneSetupDialog() string {
 				if name != ".." && !strings.HasSuffix(name, `\`) {
 					displayName = name + "/"
 				}
+				// name is BrowseEntry.Name off the wire and may be remote —
+				// sanitized here, at render, on the DISPLAY copy only. The
+				// ".." / trailing-"\" checks above run against the raw value on
+				// purpose: they compare against the synthetic ".." marker this
+				// package adds itself, not the daemon's bytes.
+				// Truncated as well as sanitized. sanitizeRemoteText preserves
+				// printable non-ASCII byte-for-byte and imposes no budget, and
+				// renderDialog's lipgloss.Place does not clip — so one very long
+				// remote filename soft-wraps into as many rows as it needs and
+				// breaks the box out of its own height.
+				displayName = truncateToWidth(sanitizeRemoteText(displayName), m.setupTextWidth()-setupRowIndent)
 				if focused && idx == m.cwdBrowseCursor {
 					b.WriteString("  > " + dialogSelected.Render(displayName) + "\n")
 				} else {
@@ -3587,13 +3728,49 @@ func (m Model) renderCreatePaneSetupDialog() string {
 				}
 			}
 
-			// Scroll indicator — shows position inside the list. Clamped so the
-			// hint never wraps onto a second line on a narrow box.
-			if len(entries) > visible {
-				b.WriteString(m.renderSetupHint(fmt.Sprintf("    %d/%d  ↑↓ move  Enter descend  ← up  Ctrl+V paste", m.cwdBrowseCursor+1, len(entries))) + "\n")
-			} else if len(entries) > 0 {
-				b.WriteString(m.renderSetupHint("    ↑↓ move  Enter descend  ← up  Ctrl+V paste") + "\n")
-			} else {
+			// One line, whatever the state — the listing window above already
+			// writes browserVisibleRows lines unconditionally, so the dialog's
+			// height must not depend on which of these branches is taken.
+			//
+			// The error comes FIRST because it is the only branch reporting that
+			// something went wrong, and it is reachable with a listing still on
+			// screen: a failed descend deliberately leaves the previous listing
+			// in place (applyBrowseDir), so ordering it behind the scroll hints
+			// would render an ordinary hint and make the keypress look ignored.
+			// Pending outranks the hints for the same reason — it is the only
+			// feedback that the keypress registered at all.
+			//
+			// "(empty directory)" therefore stays reachable only when a listing
+			// genuinely came back with nothing in it.
+			switch {
+			case m.browse.err != "":
+				// browse.err is usually BrowseDirRespPayload.Error, which can
+				// embed a remote path — sanitize on the way out, same as the
+				// other two browse fields.
+				b.WriteString(m.renderSetupHint("    ✗ "+sanitizeRemoteText(m.browse.err)) + "\n")
+			case m.browse.pending:
+				b.WriteString(dialogSubtle.Render("    (loading…)") + "\n")
+			case len(entries) > 0:
+				hint := "↑↓ move  Enter descend  ← up  Ctrl+V paste"
+				if len(entries) > visible {
+					// Scroll indicator — position inside the list.
+					hint = fmt.Sprintf("%d/%d  %s", m.cwdBrowseCursor+1, len(entries), hint)
+				}
+				if m.cwdBrowseTruncated {
+					// LEADING, so the width clamp can only ever eat the
+					// navigation hints — which the user has already read —
+					// rather than the one part of this line that is news. Same
+					// reasoning as the session picker's [open in …] marker,
+					// which is kept while the title truncates around it.
+					hint = truncatedHintPrefix + hint
+				}
+				b.WriteString(m.renderSetupHint("    "+hint) + "\n")
+			case m.cwdBrowseTruncated:
+				// Capped, yet nothing to show: every entry that survived the cap
+				// was a file. There is nothing to navigate, but the answer is
+				// still partial and saying nothing would imply otherwise.
+				b.WriteString(m.renderSetupHint("    "+truncatedHintPrefix) + "\n")
+			default:
 				b.WriteString(dialogSubtle.Render("    (empty directory)") + "\n")
 			}
 		}
@@ -3640,20 +3817,42 @@ func (m Model) renderCreatePaneSetupDialog() string {
 		}
 		renderRow(0, "Default context", "")
 		for i, c := range m.kubeContexts {
-			name := c.Name
+			// Budgeted as well as sanitized, for the same reason as the browser
+			// entries above: sanitizeRemoteText imposes no length limit and
+			// lipgloss.Place does not clip, so an over-long remote context name
+			// would soft-wrap the box apart. applyKubeContexts already clamps
+			// what enters state; this is the render-side half.
+			budget := m.setupTextWidth() - setupRowIndent
+			name := sanitizeRemoteText(c.Name)
 			if c.Current {
 				name = "● " + name
 			}
 			suffix := ""
-			if c.Namespace != "" {
-				suffix = "  (" + c.Namespace + ")"
+			if ns := sanitizeRemoteText(c.Namespace); ns != "" {
+				suffix = "  (" + ns + ")"
+			}
+			if lipgloss.Width(name+suffix) > budget {
+				name = truncateToWidth(name, budget-lipgloss.Width(suffix))
 			}
 			renderRow(i+1, name, suffix)
 		}
-		if len(m.kubeContexts) == 0 {
+		switch {
+		case len(m.kubeContexts) > 0:
+			hint := "↑↓ navigate  Enter select"
+			if m.kubeTruncated {
+				// LEADING, same reasoning as the CWD browser's
+				// truncatedHintPrefix use: the width clamp can only ever eat
+				// the navigation hints, which the user has already read,
+				// rather than the one part of this line that is news.
+				hint = truncatedHintPrefix + hint
+			}
+			b.WriteString(dialogSubtle.Render("    "+hint) + "\n")
+		case m.kubeScan.phase == kubeScanning:
+			b.WriteString(dialogSubtle.Render("    Scanning for kube contexts…") + "\n")
+		case m.kubeScan.phase == kubeScanFailed:
+			b.WriteString(dialogSubtle.Render("    (kube context scan failed — k9s uses its current context)") + "\n")
+		default:
 			b.WriteString(dialogSubtle.Render("    (no kube contexts found — k9s uses its current context)") + "\n")
-		} else {
-			b.WriteString(dialogSubtle.Render("    ↑↓ navigate  Enter select") + "\n")
 		}
 		b.WriteString("\n")
 		fieldIdx++

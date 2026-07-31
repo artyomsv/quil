@@ -281,6 +281,7 @@ type Model struct {
 	kubeContexts       []kubediscover.Context // contexts offered by the setup dialog (discover="kube"); nil = none
 	kubeCursor         int                    // row cursor in the kube field: 0 = Default context, 1.. = kubeContexts
 	kubeScan           kubeScanState          // in-flight kube-context request (zero value = none); see kubeScanState.gen
+	kubeTruncated      bool                   // the daemon capped this listing — what is shown is not all there is
 	lastSelectedCWD    string                 // remembers previous CWD selection across pane creations
 	recentCWDs         []string               // last N committed CWDs (persisted, recent-cwds.json)
 	recentCandidates   []string               // recent CWDs offered by the setup dialog; nil = not in recent-pick mode

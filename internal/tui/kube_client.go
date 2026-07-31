@@ -67,6 +67,7 @@ func (m *Model) requestKubeContexts() tea.Cmd {
 	m.kubeScan = kubeScanState{gen: gen, phase: kubeScanning}
 	m.kubeContexts = nil
 	m.kubeCursor = 0
+	m.kubeTruncated = false
 	return tea.Batch(
 		func() tea.Msg {
 			msg, err := ipc.NewMessage(ipc.MsgKubeCtxReq, ipc.KubeCtxReqPayload{})
@@ -112,6 +113,11 @@ func (m *Model) applyKubeContexts(resp ipc.KubeCtxRespPayload, gen string) tea.C
 		m.kubeScan.phase = kubeScanFailed
 		return nil
 	}
+
+	// Set from BOTH signals, not just the daemon's own flag: a daemon that
+	// over-sends without setting Truncated must still be caught, the same
+	// reason the length is capped again below rather than trusted outright.
+	m.kubeTruncated = resp.Truncated || len(resp.Contexts) > maxKubeContexts
 
 	// Cap again on receipt. The daemon caps too, but a cap enforced only by the
 	// sender is not a cap once the sender is a host the user may not control.

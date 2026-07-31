@@ -348,32 +348,60 @@ func TestKubeCtxResponse_NoContextsIsNotAnError(t *testing.T) {
 
 // The refutation test for the bound: a parse that never returns must not hold
 // the single-flight slot, and must be reported as a timeout rather than as
-// "no contexts". Mirrors TestGitReposResponse_HungWalkReportsTimeoutNotEmpty.
+// "no contexts". Mirrors TestGitReposResponse_HungWalkReportsTimeoutNotEmpty —
+// same waitForFSCallsDrained baseline (this test would otherwise pass green
+// with the fake seam never invoked, if blockingFSCalls happened to be at the
+// cap already) and the same unconditional restoreSeam cleanup (a bare
+// t.Cleanup would restore the seam while the fake could still be parked
+// inside it, on the path where the select below never fires).
 func TestKubeCtxResponse_HungReadReportsTimeoutNotEmpty(t *testing.T) {
-	restoreFn, restoreTimeout := kubeContexts, kubeDiscoverTimeout
-	t.Cleanup(func() { kubeContexts, kubeDiscoverTimeout = restoreFn, restoreTimeout })
+	waitForFSCallsDrained(t)
 
 	unpark := make(chan struct{})
+	origFn, origTimeout := kubeContexts, kubeDiscoverTimeout
 	kubeContexts = func(context.Context) []kubediscover.Context {
 		<-unpark
 		return nil
 	}
-	kubeDiscoverTimeout = 50 * time.Millisecond
+	kubeDiscoverTimeout = 100 * time.Millisecond
+	t.Cleanup(func() {
+		restoreSeam(t, unpark, func() {
+			kubeContexts, kubeDiscoverTimeout = origFn, origTimeout
+		})
+	})
 
-	done := make(chan ipc.KubeCtxRespPayload, 1)
-	go func() { done <- kubeCtxResponse() }()
-
-	select {
-	case out := <-done:
-		if out.Error == "" {
-			t.Error("Error = empty — a timed-out scan reported as 'no contexts' is a wrong answer stated confidently")
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("kubeCtxResponse never returned — the wall-clock bound is not in force")
+	out := kubeCtxResponse()
+	if out.Error == "" {
+		t.Error("Error = empty — a timed-out scan reported as 'no contexts' is a wrong answer stated confidently")
 	}
+}
 
-	// Release the parked reader and wait for the slot before the seam is
-	// restored: restoring it while a goroutine is still inside is a data race.
-	close(unpark)
-	waitForFSCallsDrained(t)
+// Changing d.kubeDiscovering to d.gitDiscovering in handleKubeCtxReq (or
+// beginKubeDiscover) would leave the whole suite green: nothing else pins
+// that the two guards are independent slots. Mirrors
+// TestGitDiscoverAndBrowse_HaveIndependentSlots.
+//
+// Claims through beginKubeDiscover rather than d.kubeDiscovering directly:
+// the field alone is not what needs pinning — a test that flips the bare
+// field would pass even if the handler had been changed to guard on a
+// different field entirely, since the two are just two names beside each
+// other. Going through beginKubeDiscover guarantees this exercises the exact
+// CompareAndSwap handleKubeCtxReq calls (confirmed by temporarily changing
+// both of handleKubeCtxReq's kubeDiscovering references to gitDiscovering: a
+// field-manipulating version of this test stayed green).
+func TestKubeDiscover_HasItsOwnSlot(t *testing.T) {
+	d := &Daemon{}
+	if _, ok := d.beginKubeDiscover(); !ok {
+		t.Fatal("kube slot refused while free")
+	}
+	gitMsg, err := ipc.NewMessage(ipc.MsgGitReposReq, ipc.GitReposReqPayload{CWD: "/a"})
+	if err != nil {
+		t.Fatalf("build message: %v", err)
+	}
+	if _, ok := d.beginGitDiscover(gitMsg); !ok {
+		t.Error("a held kube slot blocked git discovery; the guards are shared")
+	}
+	if _, ok := d.beginBrowseScan(ipc.BrowseDirReqPayload{Path: "/a"}); !ok {
+		t.Error("a held kube slot blocked a directory listing; the guards are shared")
+	}
 }

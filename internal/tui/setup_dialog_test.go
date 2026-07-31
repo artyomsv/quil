@@ -1768,6 +1768,47 @@ func TestRenderSetup_KubeRowsSanitizeRemoteText(t *testing.T) {
 	}
 }
 
+// The switch that picks the kube field's footer line is order-sensitive with
+// "(no kube contexts found)" as its default arm, so a reorder would silently
+// fall through to that confidently-wrong answer while a scan is still in
+// flight — the exact failure the three-state phase exists to remove. Mirrors
+// the reorder-canary pattern this package already uses for the idle mark
+// (TestRenderSetup_KubeFocused_NoIdleMark).
+func TestRenderSetup_KubeScanning_ShowsScanningNotEmpty(t *testing.T) {
+	m := kubePickModel(t, nil)
+	m.kubeScan.phase = kubeScanning
+	out := stripANSI(m.renderCreatePaneSetupDialog())
+	if !strings.Contains(out, "Scanning for kube contexts") {
+		t.Errorf("scanning phase did not render its own message\n%s", out)
+	}
+	if strings.Contains(out, "no kube contexts found") {
+		t.Errorf("scanning phase fell through to the empty-result message\n%s", out)
+	}
+}
+
+func TestRenderSetup_KubeFailed_ShowsFailedNotEmpty(t *testing.T) {
+	m := kubePickModel(t, nil)
+	m.kubeScan.phase = kubeScanFailed
+	out := stripANSI(m.renderCreatePaneSetupDialog())
+	if !strings.Contains(out, "kube context scan failed") {
+		t.Errorf("failed phase did not render its own message\n%s", out)
+	}
+	if strings.Contains(out, "no kube contexts found") {
+		t.Errorf("failed phase fell through to the empty-result message\n%s", out)
+	}
+}
+
+// A capped context list must say so — otherwise 50 rendered rows reads as the
+// whole answer when the daemon actually had more.
+func TestRenderSetup_KubeTruncated_ShowsCappedHint(t *testing.T) {
+	m := kubePickModel(t, []kubediscover.Context{{Name: "ctx-a"}})
+	m.kubeTruncated = true
+	out := stripANSI(m.renderCreatePaneSetupDialog())
+	if !strings.Contains(out, truncatedHintPrefix) {
+		t.Errorf("truncated kube list did not render the capped hint\n%s", out)
+	}
+}
+
 func TestRenderSetup_KubeBlurred_MarksSelectedRow(t *testing.T) {
 	m := kubePickModel(t, []kubediscover.Context{{Name: "prod"}, {Name: "staging"}})
 	m.kubeCursor = 2 // row 0 = Default, row 1 = prod, row 2 = staging

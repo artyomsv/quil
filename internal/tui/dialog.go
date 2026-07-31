@@ -2306,6 +2306,7 @@ func (m *Model) enterSetupOrSplit(p *plugin.PanePlugin) tea.Cmd {
 	m.kubeContexts = nil
 	m.kubeCursor = 0
 	m.kubeScan = kubeScanState{}
+	m.kubeTruncated = false
 	m.resetSessionSelection()
 
 	needsSetup := p != nil && (p.Command.PromptsCWD || len(p.Command.Toggles) > 0 ||
@@ -3828,7 +3829,15 @@ func (m Model) renderCreatePaneSetupDialog() string {
 		}
 		switch {
 		case len(m.kubeContexts) > 0:
-			b.WriteString(dialogSubtle.Render("    ↑↓ navigate  Enter select") + "\n")
+			hint := "↑↓ navigate  Enter select"
+			if m.kubeTruncated {
+				// LEADING, same reasoning as the CWD browser's
+				// truncatedHintPrefix use: the width clamp can only ever eat
+				// the navigation hints, which the user has already read,
+				// rather than the one part of this line that is news.
+				hint = truncatedHintPrefix + hint
+			}
+			b.WriteString(dialogSubtle.Render("    "+hint) + "\n")
 		case m.kubeScan.phase == kubeScanning:
 			b.WriteString(dialogSubtle.Render("    Scanning for kube contexts…") + "\n")
 		case m.kubeScan.phase == kubeScanFailed:

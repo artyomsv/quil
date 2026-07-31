@@ -154,22 +154,37 @@ var kubeContexts = kubediscover.Contexts
 
 // handleKubeCtxReq answers "which kube contexts does this machine's
 // kubeconfig name".
-//
-// Answered inline rather than via a dedicated begin* helper: unlike browse and
-// git discovery, the request carries no content key to echo back on
-// rejection, so there is nothing for a split helper to pin beyond the
-// CompareAndSwap itself.
 func (d *Daemon) handleKubeCtxReq(conn *ipc.Conn, msg *ipc.Message) {
-	if !d.kubeDiscovering.CompareAndSwap(false, true) {
-		respondTo(conn, msg.ID, ipc.MsgKubeCtxResp, ipc.KubeCtxRespPayload{
-			Error: "another kube context scan is already running",
-		})
+	rejection, ok := d.beginKubeDiscover()
+	if !ok {
+		respondTo(conn, msg.ID, ipc.MsgKubeCtxResp, rejection)
 		return
 	}
 	go func() {
 		defer d.kubeDiscovering.Store(false)
 		respondTo(conn, msg.ID, ipc.MsgKubeCtxResp, kubeCtxResponse())
 	}()
+}
+
+// beginKubeDiscover claims the single-flight slot, returning the rejection to
+// send when it is already taken.
+//
+// Split from the handler for the same reason beginGitDiscover and
+// beginBrowseScan are: ipc.Conn cannot be constructed outside its own
+// package, so handleKubeCtxReq itself is untestable — but unlike those two,
+// there is no request-derived content key to echo back on rejection
+// (KubeCtxReqPayload is empty), so a test manipulating d.kubeDiscovering
+// directly would look equivalent to calling through the handler while
+// actually exercising a field the handler might not even use. This function
+// is that one seam: a test that calls it is guaranteed to be exercising the
+// same CompareAndSwap the handler calls, not a same-named field beside it.
+func (d *Daemon) beginKubeDiscover() (ipc.KubeCtxRespPayload, bool) {
+	if d.kubeDiscovering.CompareAndSwap(false, true) {
+		return ipc.KubeCtxRespPayload{}, true
+	}
+	return ipc.KubeCtxRespPayload{
+		Error: "another kube context scan is already running",
+	}, false
 }
 
 // kubeCtxResponse is the pure half.

@@ -121,3 +121,45 @@ func TestApplyKubeScanTimeout_StaleGenerationDoesNotClearALiveScan(t *testing.T)
 		t.Error("a superseded timeout tick cleared the live scan")
 	}
 }
+
+// The daemon's Truncated flag must survive the wire crossing, or a
+// 55-context kubeconfig renders 50 rows and says nothing about the other 5.
+func TestApplyKubeContexts_SetsTruncatedFromResponse(t *testing.T) {
+	m := kubeClientModel(t)
+	m.requestKubeContexts()
+	m.applyKubeContexts(ipc.KubeCtxRespPayload{
+		Contexts:  []ipc.KubeContextInfo{{Name: "ctx-a"}},
+		Truncated: true,
+	}, m.kubeScan.gen)
+	if !m.kubeTruncated {
+		t.Error("kubeTruncated = false, want true — the daemon's Truncated flag was dropped")
+	}
+}
+
+// The OR with the client-side cap check is load-bearing: a daemon that
+// over-sends without setting Truncated must still be caught, the same way
+// TestApplyKubeContexts_CapsAnOversizedResponse pins the length cap itself.
+func TestApplyKubeContexts_TruncatedAlsoInferredFromOversizedResponse(t *testing.T) {
+	m := kubeClientModel(t)
+	m.requestKubeContexts()
+	big := make([]ipc.KubeContextInfo, maxKubeContexts+5)
+	for i := range big {
+		big[i] = ipc.KubeContextInfo{Name: fmt.Sprintf("ctx-%d", i)}
+	}
+	m.applyKubeContexts(ipc.KubeCtxRespPayload{Contexts: big, Truncated: false}, m.kubeScan.gen)
+	if !m.kubeTruncated {
+		t.Error("kubeTruncated = false, want true — an oversized response with Truncated=false must still be caught")
+	}
+}
+
+// A stale truncation marker left over from a previous scan must not survive
+// into a new one — it would render as "capped" for content the new scan
+// hasn't even reported yet.
+func TestRequestKubeContexts_ClearsStaleTruncated(t *testing.T) {
+	m := kubeClientModel(t)
+	m.kubeTruncated = true
+	m.requestKubeContexts()
+	if m.kubeTruncated {
+		t.Error("kubeTruncated survived a new request")
+	}
+}

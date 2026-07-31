@@ -176,3 +176,52 @@ func TestUpdate_PasteMsg_DaemonAuthoritativePasteMode(t *testing.T) {
 		t.Errorf("sent data = %q, want %q", got, want)
 	}
 }
+
+// TestUpdate_PasteMsg_LocalDisableBeatsStaleDaemonFlag pins the precedence
+// rule in BracketedPasteEnabled. The daemon flag arrives on the workspace
+// snapshot, which is throttled by the mode-broadcast cooldown, so it still
+// reads "enabled" for a window after the app emits `CSI ? 2004 l`. If the two
+// signals were OR-ed, every paste in that window would inject marker bytes
+// into the stdin of an app that just said it does not want them — the exact
+// corruption the gate exists to prevent. The local emulator has already seen
+// the disable, so it wins.
+func TestUpdate_PasteMsg_LocalDisableBeatsStaleDaemonFlag(t *testing.T) {
+	fake := &fakeSender{}
+	m := pasteTestModel(fake)
+	pane := m.tabs[0].ActivePaneModel()
+	// Snapshot said enabled; the app has since turned it off, and this client's
+	// emulator saw the reset before the next snapshot could correct the mirror.
+	pane.daemonBracketedPaste = true
+	pane.AppendOutput([]byte("\x1b[?2004h"))
+	pane.AppendOutput([]byte("\x1b[?2004l"))
+
+	_, _ = m.Update(tea.PasteMsg{Content: "hello world"})
+
+	if len(fake.sent) != 1 {
+		t.Fatalf("want exactly 1 IPC send, got %d", len(fake.sent))
+	}
+	if got := string(paneInputData(t, fake.sent[0])); got != "hello world" {
+		t.Errorf("sent data = %q, want raw %q", got, "hello world")
+	}
+}
+
+// TestPaneModel_BracketedPasteEnabled_ResetVTFallsBackToDaemon guards the
+// other half of the precedence rule: ResetVT installs a fresh emulator that
+// has observed nothing, so the pane must fall back to the daemon flag rather
+// than latching the pre-reset local value.
+func TestPaneModel_BracketedPasteEnabled_ResetVTFallsBackToDaemon(t *testing.T) {
+	fake := &fakeSender{}
+	m := pasteTestModel(fake)
+	pane := m.tabs[0].ActivePaneModel()
+	pane.AppendOutput([]byte("\x1b[?2004l"))
+	pane.daemonBracketedPaste = true
+	if pane.BracketedPasteEnabled() {
+		t.Fatal("local disable did not win before ResetVT")
+	}
+
+	pane.ResetVT()
+
+	if !pane.BracketedPasteEnabled() {
+		t.Error("BracketedPasteEnabled() = false after ResetVT, want the daemon flag to apply again")
+	}
+}

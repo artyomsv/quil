@@ -96,6 +96,11 @@ type PaneModel struct {
 	mouseAny       bool // ?1003
 	mouseSGR       bool // ?1006
 	bracketedPaste bool // ?2004 (gates paste wrapping, not mouse forwarding)
+	// bracketedPasteSeen records that this client's emulator has observed a
+	// ?2004 toggle in the pane's own output. Once it has, bracketedPaste is a
+	// live signal and the daemon mirror below is ignored — see
+	// BracketedPasteEnabled for why OR-ing the two is wrong for this mode.
+	bracketedPasteSeen bool
 	// daemonMouseTracking/daemonMouseSGR/daemonBracketedPaste mirror the
 	// daemon-authoritative mode state from the workspace snapshot. The daemon
 	// sees the one-time mode-enable burst on every attach; the local emulator
@@ -368,7 +373,7 @@ func (p *PaneModel) ResetVT() {
 	// a wheel event isn't forwarded — and a paste isn't bracketed — until the
 	// new app re-enables the mode.
 	p.mouseX10, p.mouseNormal, p.mouseButton, p.mouseAny, p.mouseSGR = false, false, false, false, false
-	p.bracketedPaste = false
+	p.bracketedPaste, p.bracketedPasteSeen = false, false
 	p.contentGen++
 }
 
@@ -441,6 +446,7 @@ func (p *PaneModel) setMouseMode(mode ansi.Mode, on bool) {
 		p.mouseSGR = on
 	case ansi.ModeBracketedPaste:
 		p.bracketedPaste = on
+		p.bracketedPasteSeen = true
 	}
 }
 
@@ -458,11 +464,23 @@ func (p *PaneModel) MouseTracking() bool {
 // bracketed paste (?2004) — i.e. pasted text should be wrapped in
 // \x1b[200~/\x1b[201~ markers. Apps that never enabled the mode must receive
 // pastes as raw bytes: injecting markers they didn't ask for corrupts their
-// stdin (e.g. `cat > file` writes the escape bytes into the file). Combines
-// the local emulator state with the daemon-authoritative flag, same as
-// MouseTracking.
+// stdin (e.g. `cat > file` writes the escape bytes into the file).
+//
+// Deliberately NOT the `local || daemon` shape MouseTracking uses. The daemon
+// flag rides the workspace snapshot, which is throttled by the mode-broadcast
+// cooldown, so it lags a disable by up to that window. OR-ing the two would
+// keep wrapping pastes for an app that has just turned the mode off — and for
+// this mode the cost is escape bytes injected into the app's stdin, the exact
+// corruption the gate exists to prevent, rather than MouseTracking's cosmetic
+// stray wheel notch. So the local emulator wins once it has actually seen a
+// toggle for this pane; the daemon flag covers only the case the local
+// emulator cannot answer — reattaching to an app that announced the mode
+// before this client connected.
 func (p *PaneModel) BracketedPasteEnabled() bool {
-	return p.bracketedPaste || p.daemonBracketedPaste
+	if p.bracketedPasteSeen {
+		return p.bracketedPaste
+	}
+	return p.daemonBracketedPaste
 }
 
 // wheelForwardSeq returns the mouse-wheel escape sequence to forward to the

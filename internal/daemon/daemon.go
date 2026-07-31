@@ -121,6 +121,12 @@ type Daemon struct {
 	// slot would make each step fail whenever it closely followed the other.
 	gitDiscovering atomic.Bool
 
+	// kubeDiscovering is the single-flight guard for kube context discovery
+	// (MsgKubeCtxReq). Its own slot, not shared with gitDiscovering: a
+	// discover="kube" plugin and a discover="git" one can be opened back to
+	// back, and one guard would make each fail whenever it followed the other.
+	kubeDiscovering atomic.Bool
+
 	// resumeClaimMu serializes the claim of a Claude session by a new pane.
 	// The occupancy test and the write that acts on it must be one atomic
 	// step: handleCreatePane runs on the requesting conn's dispatch
@@ -873,6 +879,8 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		d.handleBrowseDirReq(conn, msg)
 	case ipc.MsgGitReposReq:
 		d.handleGitReposReq(conn, msg)
+	case ipc.MsgKubeCtxReq:
+		d.handleKubeCtxReq(conn, msg)
 	case ipc.MsgPaneStatusReq:
 		d.handlePaneStatusReq(conn, msg)
 	case ipc.MsgCreatePaneReq:

@@ -2,12 +2,14 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/artyomsv/quil/internal/ipc"
+	"github.com/artyomsv/quil/internal/kubediscover"
 )
 
 // mkRepo creates a directory that gitdiscover will recognise as a repository.
@@ -279,4 +281,99 @@ func TestGitDiscover_SlotIsReleasedWhenTheWalkHangs(t *testing.T) {
 		t.Error("the slot is still held after the walk timed out; every later scan " +
 			"would be rejected until the daemon restarts")
 	}
+}
+
+func TestKubeCtxResponse_ReportsContextsWithCurrentMarked(t *testing.T) {
+	restore := kubeContexts
+	t.Cleanup(func() { kubeContexts = restore })
+	kubeContexts = func(context.Context) []kubediscover.Context {
+		return []kubediscover.Context{
+			{Name: "ctx-a", Namespace: "ns-a"},
+			{Name: "ctx-b", Current: true},
+		}
+	}
+
+	out := kubeCtxResponse()
+	if out.Error != "" {
+		t.Fatalf("Error = %q, want none", out.Error)
+	}
+	if len(out.Contexts) != 2 {
+		t.Fatalf("Contexts = %d, want 2", len(out.Contexts))
+	}
+	if out.Contexts[0].Name != "ctx-a" || out.Contexts[0].Namespace != "ns-a" {
+		t.Errorf("Contexts[0] = %+v, want name ctx-a namespace ns-a", out.Contexts[0])
+	}
+	if !out.Contexts[1].Current {
+		t.Error("Contexts[1].Current = false — the current-context marker did not survive the conversion")
+	}
+}
+
+// The cap is enforced daemon-side so a hostile or misconfigured kubeconfig
+// cannot hand the TUI an unbounded list to render.
+func TestKubeCtxResponse_CapsAtMaxKubeContexts(t *testing.T) {
+	restore := kubeContexts
+	t.Cleanup(func() { kubeContexts = restore })
+	kubeContexts = func(context.Context) []kubediscover.Context {
+		out := make([]kubediscover.Context, maxKubeContexts+5)
+		for i := range out {
+			out[i] = kubediscover.Context{Name: fmt.Sprintf("ctx-%d", i)}
+		}
+		return out
+	}
+
+	out := kubeCtxResponse()
+	if len(out.Contexts) != maxKubeContexts {
+		t.Errorf("Contexts = %d, want capped to %d", len(out.Contexts), maxKubeContexts)
+	}
+	if !out.Truncated {
+		t.Error("Truncated = false, want true — a silently short list reads as the whole list")
+	}
+}
+
+// An absent kubeconfig is a real finding ("no contexts"), NOT a failure. The
+// two render differently and only one of them is worth a diagnostic.
+func TestKubeCtxResponse_NoContextsIsNotAnError(t *testing.T) {
+	restore := kubeContexts
+	t.Cleanup(func() { kubeContexts = restore })
+	kubeContexts = func(context.Context) []kubediscover.Context { return nil }
+
+	out := kubeCtxResponse()
+	if out.Error != "" {
+		t.Errorf("Error = %q, want none — an empty kubeconfig is not a failure", out.Error)
+	}
+	if len(out.Contexts) != 0 {
+		t.Errorf("Contexts = %d, want 0", len(out.Contexts))
+	}
+}
+
+// The refutation test for the bound: a parse that never returns must not hold
+// the single-flight slot, and must be reported as a timeout rather than as
+// "no contexts". Mirrors TestGitReposResponse_HungWalkReportsTimeoutNotEmpty.
+func TestKubeCtxResponse_HungReadReportsTimeoutNotEmpty(t *testing.T) {
+	restoreFn, restoreTimeout := kubeContexts, kubeDiscoverTimeout
+	t.Cleanup(func() { kubeContexts, kubeDiscoverTimeout = restoreFn, restoreTimeout })
+
+	unpark := make(chan struct{})
+	kubeContexts = func(context.Context) []kubediscover.Context {
+		<-unpark
+		return nil
+	}
+	kubeDiscoverTimeout = 50 * time.Millisecond
+
+	done := make(chan ipc.KubeCtxRespPayload, 1)
+	go func() { done <- kubeCtxResponse() }()
+
+	select {
+	case out := <-done:
+		if out.Error == "" {
+			t.Error("Error = empty — a timed-out scan reported as 'no contexts' is a wrong answer stated confidently")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("kubeCtxResponse never returned — the wall-clock bound is not in force")
+	}
+
+	// Release the parked reader and wait for the slot before the seam is
+	// restored: restoring it while a goroutine is still inside is a data race.
+	close(unpark)
+	waitForFSCallsDrained(t)
 }

@@ -280,6 +280,7 @@ type Model struct {
 	repoPickCandidates []string               // candidates for dialogGitRepoPick (Alt+G, multiple repos)
 	kubeContexts       []kubediscover.Context // contexts offered by the setup dialog (discover="kube"); nil = none
 	kubeCursor         int                    // row cursor in the kube field: 0 = Default context, 1.. = kubeContexts
+	kubeScan           kubeScanState          // in-flight kube-context request (zero value = none); see kubeScanState.gen
 	lastSelectedCWD    string                 // remembers previous CWD selection across pane creations
 	recentCWDs         []string               // last N committed CWDs (persisted, recent-cwds.json)
 	recentCandidates   []string               // recent CWDs offered by the setup dialog; nil = not in recent-pick mode
@@ -1400,6 +1401,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case gitScanTimeoutMsg:
 		// Local timer, so deliberately no re-arm.
 		return m, m.applyGitScanTimeout(msg.cwd, msg.gen)
+
+	case kubeCtxMsg:
+		// MUST re-arm the listen loop, like every other IPC response branch —
+		// omitting it kills IPC for the session, a bug this package has shipped.
+		cmd := m.applyKubeContexts(msg.Resp, msg.Gen)
+		return m, tea.Batch(cmd, m.listenForMessages())
+
+	case kubeScanTimeoutMsg:
+		// Local timer, so deliberately no re-arm.
+		return m, m.applyKubeScanTimeout(msg.gen)
 
 	case browseDirMsg:
 		// MUST re-arm the listen loop, like every other IPC response branch —
@@ -4091,6 +4102,15 @@ func (m Model) listenForMessages() tea.Cmd {
 			// the daemon side) — this is the request instance correlator
 			// applyGitRepos needs on top of the echoed CWD; see repoScanState.gen.
 			return gitReposMsg{Resp: payload, Gen: msg.ID}
+
+		case ipc.MsgKubeCtxResp:
+			var payload ipc.KubeCtxRespPayload
+			if err := msg.DecodePayload(&payload); err != nil {
+				log.Printf("decode kube_ctx_resp: %v", err)
+				return listenContinueMsg{}
+			}
+			// Same correlator as MsgGitReposResp above; see kubeScanState.gen.
+			return kubeCtxMsg{Resp: payload, Gen: msg.ID}
 
 		case ipc.MsgBrowseDirResp:
 			var payload ipc.BrowseDirRespPayload

@@ -1496,21 +1496,38 @@ func TestSetupKubeKey_EnterSubmitsAndInjects(t *testing.T) {
 	}
 }
 
-func TestEnterSetupOrSplit_Kube_CapsContexts(t *testing.T) {
-	dir := t.TempDir()
-	var b strings.Builder
-	b.WriteString("contexts:\n")
-	for i := 0; i < maxKubeContexts+5; i++ {
-		fmt.Fprintf(&b, "- name: ctx-%d\n  context: {}\n", i)
-	}
-	cfg := filepath.Join(dir, "config")
-	if err := os.WriteFile(cfg, []byte(b.String()), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("KUBECONFIG", cfg)
+// TestEnterSetupOrSplit_Kube_RequestsFromDaemonAndCaps mirrors
+// TestEnterSetupOrSplit_GitDiscover_PopulatesCandidates: entering the setup
+// dialog on a discover="kube" plugin now asks the daemon rather than reading
+// the local kubeconfig synchronously (RD-022) — kubediscover run in this
+// process would parse the machine drawing the UI, the wrong one whenever the
+// daemon is remote. The cap this test used to exercise via a real KUBECONFIG
+// file is enforced again on receipt; see
+// TestApplyKubeContexts_CapsAnOversizedResponse for that seam pinned in
+// isolation.
+func TestEnterSetupOrSplit_Kube_RequestsFromDaemonAndCaps(t *testing.T) {
+	fake := &fakeSender{}
+	m := &Model{client: fake, pluginRegistry: registryWithK9s(t)}
+	runCmd(m.enterSetupOrSplit(m.pluginRegistry.Get("k9s")))
 
-	m := &Model{pluginRegistry: registryWithK9s(t)}
-	m.enterSetupOrSplit(m.pluginRegistry.Get("k9s"))
+	var asked bool
+	for _, msg := range fake.sent {
+		if msg.Type == ipc.MsgKubeCtxReq {
+			asked = true
+		}
+	}
+	if !asked {
+		t.Fatalf("entering setup for a discover=kube plugin sent no %s (sent: %v)", ipc.MsgKubeCtxReq, debugSentTypes(fake))
+	}
+	if m.kubeScan.phase != kubeScanning {
+		t.Errorf("phase = %v, want kubeScanning", m.kubeScan.phase)
+	}
+
+	big := make([]ipc.KubeContextInfo, maxKubeContexts+5)
+	for i := range big {
+		big[i] = ipc.KubeContextInfo{Name: fmt.Sprintf("ctx-%d", i)}
+	}
+	m.applyKubeContexts(ipc.KubeCtxRespPayload{Contexts: big}, m.kubeScan.gen)
 
 	if len(m.kubeContexts) != maxKubeContexts {
 		t.Errorf("kubeContexts = %d, want capped to %d", len(m.kubeContexts), maxKubeContexts)
@@ -1732,6 +1749,22 @@ func TestRenderSetup_PickFocusChange_HeightStable(t *testing.T) {
 
 	if focused != blurred {
 		t.Errorf("row count changed on blur: focused=%d blurred=%d", focused, blurred)
+	}
+}
+
+// Context names now come from a host the user may not control. U+202E
+// (RIGHT-TO-LEFT OVERRIDE) is printable, so it passes any control-character
+// filter while reversing the text on the list the user picks a cluster from.
+func TestRenderSetup_KubeRowsSanitizeRemoteText(t *testing.T) {
+	m := kubePickModel(t, []kubediscover.Context{
+		{Name: "prod‮txt.exe", Namespace: "ns\x1b[31m"},
+	})
+	out := m.renderCreatePaneSetupDialog()
+	if strings.ContainsRune(out, '‮') {
+		t.Error("rendered output carries U+202E — a remote context name can reverse the pick list")
+	}
+	if strings.Contains(out, "\x1b[31m") {
+		t.Error("rendered output carries a raw CSI sequence from a remote namespace")
 	}
 }
 

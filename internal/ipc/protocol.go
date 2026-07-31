@@ -116,6 +116,14 @@ const (
 	// Auto-update (TUI ⇄ daemon)
 	MsgStageUpdateReq  = "stage_update_req"  // TUI → daemon (empty payload)
 	MsgStageUpdateResp = "stage_update_resp" // daemon → TUI (unicast)
+
+	// Kube-context discovery (pane setup dialog, discover = "kube"). Same
+	// reason as the browser and git discovery: it used to parse the
+	// kubeconfig on the machine drawing the UI, so against a remote host it
+	// offered the laptop's clusters and launched with a --context the server
+	// may not have.
+	MsgKubeCtxReq  = "kube_ctx_req"
+	MsgKubeCtxResp = "kube_ctx_resp"
 )
 
 // Message is the wire format for IPC communication.
@@ -674,6 +682,32 @@ type StageUpdateRespPayload struct {
 	Success bool   `json:"success"`
 	Version string `json:"version,omitempty"`
 	Error   string `json:"error,omitempty"`
+}
+
+// KubeCtxReqPayload is deliberately empty: kube-context discovery is
+// CWD-independent, so there is no content key that could go stale. The
+// per-request generation in Message.ID is the whole correlator.
+type KubeCtxReqPayload struct{}
+
+// KubeContextInfo is one context enumerated from the daemon's kubeconfig.
+// Current is carried per entry rather than as a top-level name, matching
+// kubediscover.Context — the setup dialog draws ● from this field directly.
+type KubeContextInfo struct {
+	Name      string `json:"name"`
+	Namespace string `json:"namespace,omitempty"`
+	Current   bool   `json:"current,omitempty"`
+}
+
+// KubeCtxRespPayload carries the discovered kube contexts.
+//
+// An empty Contexts with an empty Error is a real answer — "no kubeconfig
+// here" — deliberately distinguishable from a failure: only one of the two
+// justifies telling the user there are no contexts. Truncated is set when the
+// daemon capped the list at maxKubeContexts.
+type KubeCtxRespPayload struct {
+	Contexts  []KubeContextInfo `json:"contexts,omitempty"`
+	Truncated bool              `json:"truncated,omitempty"`
+	Error     string            `json:"error,omitempty"`
 }
 
 // NewMessage creates a Message with a typed payload.

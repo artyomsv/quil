@@ -7,6 +7,7 @@ import (
 
 	"github.com/artyomsv/quil/internal/gitdiscover"
 	"github.com/artyomsv/quil/internal/ipc"
+	"github.com/artyomsv/quil/internal/kubediscover"
 )
 
 // gitDiscoverTimeout bounds one discovery walk.
@@ -133,3 +134,91 @@ func discoverWithin(dir string, d time.Duration) ([]string, bool) {
 // readDirPath in browse.go and existing for the same reason: the branch worth
 // pinning is the one where the walk never returns.
 var discoverCandidates = gitdiscover.Candidates
+
+// kubeDiscoverTimeout bounds one kubeconfig read.
+//
+// Contexts() reads files whose paths come from KUBECONFIG, which can name a
+// network mount. kubediscover already takes a context (RD-004) and checks it
+// between files, but a context cannot interrupt an os.ReadFile already parked
+// in the kernel — the same distinction discoverWithin documents.
+var kubeDiscoverTimeout = 10 * time.Second
+
+// maxKubeContexts bounds what the daemon will report. The TUI caps again on
+// receipt: a cap enforced only by the sender is not a cap.
+const maxKubeContexts = 50
+
+// kubeContexts is the seam the read goes through, paired with discoverCandidates
+// and existing for the same reason — the branch worth pinning is the one where
+// the read never returns.
+var kubeContexts = kubediscover.Contexts
+
+// handleKubeCtxReq answers "which kube contexts does this machine's
+// kubeconfig name".
+//
+// Answered inline rather than via a dedicated begin* helper: unlike browse and
+// git discovery, the request carries no content key to echo back on
+// rejection, so there is nothing for a split helper to pin beyond the
+// CompareAndSwap itself.
+func (d *Daemon) handleKubeCtxReq(conn *ipc.Conn, msg *ipc.Message) {
+	if !d.kubeDiscovering.CompareAndSwap(false, true) {
+		respondTo(conn, msg.ID, ipc.MsgKubeCtxResp, ipc.KubeCtxRespPayload{
+			Error: "another kube context scan is already running",
+		})
+		return
+	}
+	go func() {
+		defer d.kubeDiscovering.Store(false)
+		respondTo(conn, msg.ID, ipc.MsgKubeCtxResp, kubeCtxResponse())
+	}()
+}
+
+// kubeCtxResponse is the pure half.
+//
+// An empty result with no Error is a real finding — "no kubeconfig here" — and
+// the caller must be able to tell it from a failure, because only one of the
+// two justifies telling the user there are no contexts.
+func kubeCtxResponse() ipc.KubeCtxRespPayload {
+	var out ipc.KubeCtxRespPayload
+
+	ctxs, answered := kubeContextsWithin(kubeDiscoverTimeout)
+	if !answered {
+		out.Error = "kube context scan timed out"
+		return out
+	}
+	if len(ctxs) > maxKubeContexts {
+		ctxs = ctxs[:maxKubeContexts]
+		out.Truncated = true
+	}
+	out.Contexts = make([]ipc.KubeContextInfo, 0, len(ctxs))
+	for _, c := range ctxs {
+		out.Contexts = append(out.Contexts, ipc.KubeContextInfo{
+			Name: c.Name, Namespace: c.Namespace, Current: c.Current,
+		})
+	}
+	return out
+}
+
+// kubeContextsWithin runs the read under a wall-clock budget. Same abandoned-
+// goroutine trade as discoverWithin, and it shares that function's process-wide
+// cap for the same reason: a parked syscall pins an OS thread.
+func kubeContextsWithin(d time.Duration) ([]kubediscover.Context, bool) {
+	if d <= 0 || !claimBlockingFSCall() {
+		return nil, false
+	}
+	ch := make(chan []kubediscover.Context, 1)
+	go func() {
+		defer releaseBlockingFSCall()
+		ctx, cancel := context.WithTimeout(context.Background(), d)
+		defer cancel()
+		ch <- kubeContexts(ctx)
+	}()
+
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case r := <-ch:
+		return r, true
+	case <-timer.C:
+		return nil, false
+	}
+}

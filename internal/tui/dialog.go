@@ -2,7 +2,6 @@ package tui
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"io"
 	"log"
@@ -19,7 +18,6 @@ import (
 
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
-	"github.com/artyomsv/quil/internal/kubediscover"
 	"github.com/artyomsv/quil/internal/logger"
 	"github.com/artyomsv/quil/internal/plugin"
 )
@@ -2307,6 +2305,7 @@ func (m *Model) enterSetupOrSplit(p *plugin.PanePlugin) tea.Cmd {
 	m.recentCandidates = nil
 	m.kubeContexts = nil
 	m.kubeCursor = 0
+	m.kubeScan = kubeScanState{}
 	m.resetSessionSelection()
 
 	needsSetup := p != nil && (p.Command.PromptsCWD || len(p.Command.Toggles) > 0 ||
@@ -2344,12 +2343,9 @@ func (m *Model) enterSetupOrSplit(p *plugin.PanePlugin) tea.Cmd {
 		}
 	}
 
+	var kubeCmd tea.Cmd
 	if p.Command.Discover == "kube" {
-		m.kubeContexts = kubediscover.Contexts(context.Background())
-		if len(m.kubeContexts) > maxKubeContexts {
-			m.kubeContexts = m.kubeContexts[:maxKubeContexts]
-		}
-		m.kubeCursor = 0 // Default context row
+		kubeCmd = m.requestKubeContexts()
 	}
 
 	// Initialize toggle states from defaults. For mutually-exclusive groups
@@ -2366,7 +2362,7 @@ func (m *Model) enterSetupOrSplit(p *plugin.PanePlugin) tea.Cmd {
 
 	m.dialogEdit = false // browser doesn't use edit mode
 	m.dialog = dialogCreatePaneSetup
-	return tea.Batch(tea.ClearScreen, browseCmd)
+	return tea.Batch(tea.ClearScreen, browseCmd, kubeCmd)
 }
 
 // fallbackToRecentOrBrowser offers the recent-locations quick pick, falling
@@ -3820,20 +3816,25 @@ func (m Model) renderCreatePaneSetupDialog() string {
 		}
 		renderRow(0, "Default context", "")
 		for i, c := range m.kubeContexts {
-			name := c.Name
+			name := sanitizeRemoteText(c.Name)
 			if c.Current {
 				name = "● " + name
 			}
 			suffix := ""
-			if c.Namespace != "" {
-				suffix = "  (" + c.Namespace + ")"
+			if ns := sanitizeRemoteText(c.Namespace); ns != "" {
+				suffix = "  (" + ns + ")"
 			}
 			renderRow(i+1, name, suffix)
 		}
-		if len(m.kubeContexts) == 0 {
-			b.WriteString(dialogSubtle.Render("    (no kube contexts found — k9s uses its current context)") + "\n")
-		} else {
+		switch {
+		case len(m.kubeContexts) > 0:
 			b.WriteString(dialogSubtle.Render("    ↑↓ navigate  Enter select") + "\n")
+		case m.kubeScan.phase == kubeScanning:
+			b.WriteString(dialogSubtle.Render("    Scanning for kube contexts…") + "\n")
+		case m.kubeScan.phase == kubeScanFailed:
+			b.WriteString(dialogSubtle.Render("    (kube context scan failed — k9s uses its current context)") + "\n")
+		default:
+			b.WriteString(dialogSubtle.Render("    (no kube contexts found — k9s uses its current context)") + "\n")
 		}
 		b.WriteString("\n")
 		fieldIdx++

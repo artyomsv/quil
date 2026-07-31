@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Choosing a folder in a remote session now shows the remote machine's
+  files.** Every dialog that looks at a filesystem — the directory browser when
+  you create a pane, and `Alt+G` for lazygit — was reading the disk of the
+  computer in front of you, even when the session was attached to another
+  machine over SSH. The result was a screen making two contradictory claims
+  about one path: `Alt+G` would report no repository in a directory where the
+  agent running in that very pane answered `git status` with the branch name.
+  Typing `~/project` asked for your laptop's home directory on a Linux server,
+  relative paths resolved against the wrong working directory, the browser
+  offered your laptop's drives, and the suggested starting locations pointed at
+  folders that existed only locally. All of them now ask the machine that
+  actually holds the files.
+
+### Security
+- **A remote machine cannot use a folder name to garble the picker or disguise
+  which folder you are choosing.** Now that directory names, resolved paths and
+  error messages arrive from a host you may not control, they are stripped of
+  terminal control sequences before being drawn, so a crafted name cannot
+  scramble the dialog around it. Characters that override text direction are
+  removed as well — those are printable, so they survive an ordinary
+  control-character filter while making a name read as something other than
+  what it is, which matters most on the list you pick a working directory from.
+  Names in Cyrillic, Chinese, Japanese and emoji are untouched and display
+  normally, and the real name is always what gets opened.
+
 ## [1.45.3] - 2026-07-31
 
 ### Fixed

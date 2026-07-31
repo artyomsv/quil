@@ -34,9 +34,15 @@ const rootProbeTimeout = time.Second
 // Counting unanswered probes rather than elapsed time is what makes the bound
 // tight: a probe that ANSWERS releases its permit immediately and accumulates
 // nothing, however many of those there are. Only the abandoned ones cost, so
-// they are what is capped. The cap also covers a refused claim, which
-// statIsDirWithin reports as unanswered too — if the pool is already exhausted
-// by someone else, adding more probes to the queue is the wrong move.
+// they are what is capped.
+//
+// A REFUSED claim counts too, though for a different reason and not the one an
+// earlier version of this comment gave. A refusal queues nothing — the claim is
+// add-check-subtract — so it is not about avoiding pressure. It is that a
+// refusal means the reserve is already spent, and every remaining letter would
+// be refused identically: continuing would walk all 26 to learn nothing. Ending
+// there costs the caller nothing either, because the result is reported as
+// incomplete on exactly the same footing as a timeout.
 const maxRootProbeTimeouts = 2
 
 // maxRootProbePermits is the ceiling the sweep claims against, leaving the rest

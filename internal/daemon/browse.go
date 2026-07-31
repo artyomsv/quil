@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/artyomsv/quil/internal/ipc"
@@ -20,7 +21,12 @@ import (
 // to land. At ~256 bytes per entry this bounds a listing to well under the frame.
 const MaxBrowseEntries = 500
 
-// browseTimeout bounds one listing.
+// browseTimeout bounds one listing END TO END: the directory read AND the
+// symlink resolution that follows it.
+//
+// Both block on the same thing — an unresponsive mount — and both run while the
+// single-flight slot is held, so a budget covering only the read would leave the
+// slot pinned by the stats instead. Same wedge, one syscall later.
 const browseTimeout = 10 * time.Second
 
 // handleBrowseDirReq answers a directory listing.
@@ -28,11 +34,12 @@ const browseTimeout = 10 * time.Second
 // Worker goroutine + single-flight, the shape handleClaudeSessionsReq
 // established: this is file I/O, and running it on the conn's dispatch goroutine
 // would freeze every other message from that client. The rejection still echoes
-// the requested path — the TUI matches on that echo, so an unmatched error is
+// the request key — the TUI matches on that echo, so an unmatched error is
 // dropped as stale and the field sits on its pending state until the timeout
 // fires, showing nothing about why.
 func (d *Daemon) handleBrowseDirReq(conn *ipc.Conn, msg *ipc.Message) {
-	rejection, ok := d.beginBrowseScan(msg)
+	req := browseReq(msg)
+	rejection, ok := d.beginBrowseScan(req)
 	if !ok {
 		respondTo(conn, msg.ID, ipc.MsgBrowseDirResp, rejection)
 		return
@@ -40,7 +47,7 @@ func (d *Daemon) handleBrowseDirReq(conn *ipc.Conn, msg *ipc.Message) {
 	fallback := d.defaultCWD()
 	go func() {
 		defer d.browseScanning.Store(false)
-		respondTo(conn, msg.ID, ipc.MsgBrowseDirResp, browseDirResponse(browseReq(msg), fallback))
+		respondTo(conn, msg.ID, ipc.MsgBrowseDirResp, browseDirResponse(req, fallback))
 	}()
 }
 
@@ -50,12 +57,20 @@ func (d *Daemon) handleBrowseDirReq(conn *ipc.Conn, msg *ipc.Message) {
 // Split from the handler for the reason beginClaudeSessionsScan is: ipc.Conn
 // cannot be constructed outside its own package, so the handler wrapper is
 // untestable — but the decision it makes is the part worth pinning.
-func (d *Daemon) beginBrowseScan(msg *ipc.Message) (ipc.BrowseDirRespPayload, bool) {
+//
+// Takes the decoded request rather than the message so the echo cannot drift
+// from what browseDirResponse echoes: BOTH halves of the key are copied here,
+// because the client matches a response on (Path, Child) together. A rejection
+// carrying only Path is dropped as stale by every descend request — the field
+// then waits out its full client-side timeout for an answer it already holds,
+// which is the exact failure this echo exists to prevent.
+func (d *Daemon) beginBrowseScan(req ipc.BrowseDirReqPayload) (ipc.BrowseDirRespPayload, bool) {
 	if d.browseScanning.CompareAndSwap(false, true) {
 		return ipc.BrowseDirRespPayload{}, true
 	}
 	return ipc.BrowseDirRespPayload{
-		Path:  browseReq(msg).Path,
+		Path:  req.Path,
+		Child: req.Child,
 		Error: "another directory listing is already running",
 	}, false
 }
@@ -119,7 +134,14 @@ func browseDirResponse(req ipc.BrowseDirReqPayload, fallback string) ipc.BrowseD
 		out.Roots = filesystemRoots()
 	}
 
-	entries, err := readDirWithin(out.Resolved, browseTimeout)
+	// ONE deadline for the read and the link resolution that follows it. Both
+	// hold the single-flight slot, so what has to be bounded is their sum, not
+	// each in isolation: two budgets of browseTimeout each would let a directory
+	// full of links into a dead mount hold the slot for twice as long as the
+	// constant claims.
+	deadline := time.Now().Add(browseTimeout)
+
+	entries, err := readDirWithin(out.Resolved, time.Until(deadline))
 	if err != nil {
 		out.Error = err.Error()
 		return out
@@ -141,13 +163,9 @@ func browseDirResponse(req ipc.BrowseDirReqPayload, fallback string) ipc.BrowseD
 		entries = entries[:MaxBrowseEntries]
 		out.Truncated = true
 	}
-	out.Entries = make([]ipc.BrowseEntry, 0, len(entries))
-	for _, e := range entries {
-		out.Entries = append(out.Entries, ipc.BrowseEntry{
-			Name:  e.Name(),
-			IsDir: entryIsDir(out.Resolved, e),
-		})
-	}
+	// Classified AFTER the cap, so the number of links that can be stated is
+	// bounded by MaxBrowseEntries rather than by the directory's real size.
+	out.Entries = classifyEntries(out.Resolved, entries, deadline)
 	return out
 }
 
@@ -197,7 +215,8 @@ func validBrowseChild(name string) bool {
 	return !strings.ContainsAny(name, `/\`)
 }
 
-// entryIsDir reports whether e is a directory, resolving links.
+// classifyEntries turns directory records into wire entries, resolving links
+// under the deadline that already bounded the read.
 //
 // os.ReadDir returns an fs.DirEntry built from the directory record alone, so a
 // symlink — and a Windows junction, which reports the same way — has type
@@ -210,15 +229,60 @@ func validBrowseChild(name string) bool {
 // broken or unreadable link degrades to "not a directory", which renders it as
 // a non-navigable entry rather than dropping it — the name is still evidence
 // that something is there.
-func entryIsDir(dir string, e os.DirEntry) bool {
-	if e.IsDir() {
-		return true
+//
+// The SHARED deadline is what bounds the goroutine cost, and it needs no
+// help: a stat that times out has by definition consumed the remaining budget,
+// so every later link sees a non-positive one and is classified from its
+// directory record without a syscall. One hung link therefore costs exactly one
+// abandoned goroutine for the whole listing, not one per entry — which is what
+// keeps a directory of 500 links into a dead mount from pinning 500 OS threads
+// on a single keypress.
+//
+// An explicit "stop resolving" flag was tried here and removed: it could only
+// ever fire in states the deadline already covers, so it was a second mechanism
+// asserting what the first guarantees.
+func classifyEntries(dir string, entries []os.DirEntry, deadline time.Time) []ipc.BrowseEntry {
+	out := make([]ipc.BrowseEntry, 0, len(entries))
+	for _, e := range entries {
+		isDir := e.IsDir()
+		if !isDir && e.Type()&os.ModeSymlink != 0 {
+			isDir, _ = symlinkIsDirWithin(filepath.Join(dir, e.Name()), time.Until(deadline))
+		}
+		out = append(out, ipc.BrowseEntry{Name: e.Name(), IsDir: isDir})
 	}
-	if e.Type()&os.ModeSymlink == 0 {
-		return false
+	return out
+}
+
+// symlinkIsDirWithin reports whether path resolves to a directory, and whether
+// the stat answered within d at all.
+//
+// os.Stat FOLLOWS the link, so it parks on a dead mount exactly as os.ReadDir
+// does — and it runs after the read, while the single-flight slot is still held.
+// A link that never answers degrades to "not a directory", the same rendering a
+// broken link already gets.
+//
+// A non-positive budget is refused without spawning anything: the read may have
+// consumed the whole deadline, and a goroutine started only to be abandoned in
+// the same breath is pure cost.
+func symlinkIsDirWithin(path string, d time.Duration) (isDir, answered bool) {
+	if d <= 0 || !claimBlockingFSCall() {
+		return false, false
 	}
-	info, err := os.Stat(filepath.Join(dir, e.Name()))
-	return err == nil && info.IsDir()
+	ch := make(chan bool, 1)
+	go func() {
+		defer releaseBlockingFSCall()
+		info, err := statPath(path)
+		ch <- err == nil && info.IsDir()
+	}()
+
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case r := <-ch:
+		return r, true
+	case <-timer.C:
+		return false, false
+	}
 }
 
 // readDirWithin reads a directory, giving up after d.
@@ -237,12 +301,17 @@ func entryIsDir(dir string, e os.DirEntry) bool {
 // denying the feature outright. The channel is buffered so that goroutine can
 // hand off its result and exit rather than blocking on a receiver that has gone.
 func readDirWithin(dir string, d time.Duration) ([]os.DirEntry, error) {
+	if !claimBlockingFSCall() {
+		return nil, fmt.Errorf("too many directory listings are stuck on unresponsive paths; "+
+			"listing %s was not attempted", dir)
+	}
 	type result struct {
 		entries []os.DirEntry
 		err     error
 	}
 	ch := make(chan result, 1)
 	go func() {
+		defer releaseBlockingFSCall()
 		entries, err := os.ReadDir(dir)
 		ch <- result{entries, err}
 	}()
@@ -256,3 +325,53 @@ func readDirWithin(dir string, d time.Duration) ([]os.DirEntry, error) {
 		return nil, fmt.Errorf("listing %s timed out after %v — is it an unreachable network mount?", dir, d)
 	}
 }
+
+// maxBlockingFSCalls bounds how many uncancellable filesystem calls may be in
+// flight across the whole process.
+//
+// Single-flight already serialises browsing, so this is not about concurrency —
+// it is about ACCUMULATION. Every listing that times out leaves its goroutine
+// parked in the syscall, and a goroutine blocked in a syscall pins an OS thread;
+// the Go runtime aborts the process past 10 000 of them. A daemon stays up for
+// weeks, so a client re-driving navigation into a mount that never comes back —
+// a retry loop, or a user who simply keeps trying — has an unbounded path to
+// killing the daemon and every pane with it. Past the cap a listing is refused
+// with a message that names the situation, which is a far better outcome than
+// the process dying.
+//
+// The cap is small on purpose. Reaching it at all means several paths are hung
+// simultaneously, and at that point refusing loudly beats queueing more work
+// behind mounts that are not answering.
+const maxBlockingFSCalls = 8
+
+// blockingFSCalls counts the calls currently outstanding.
+//
+// Package scope rather than a Daemon field, because the resource it protects is
+// process-scoped: OS threads are counted by the runtime, not per Daemon. It also
+// keeps browseDirResponse a pure function of its arguments, which is what makes
+// the whole resolve→read→sort→cap chain testable without constructing a Daemon.
+var blockingFSCalls atomic.Int64
+
+// claimBlockingFSCall reserves a slot, reporting false when the cap is reached.
+func claimBlockingFSCall() bool {
+	if blockingFSCalls.Add(1) > maxBlockingFSCalls {
+		blockingFSCalls.Add(-1)
+		return false
+	}
+	return true
+}
+
+// releaseBlockingFSCall returns a slot. Called from the worker goroutine, which
+// may be long after the caller gave up on it — that is the point: the slot is
+// held for as long as the syscall really is, not for as long as anyone waits.
+func releaseBlockingFSCall() { blockingFSCalls.Add(-1) }
+
+// statPath is the seam link resolution goes through, following the package-var
+// pattern of readHookSessionIDFn and claudeSessionExistsFn.
+//
+// The rule worth pinning here is that ONE unanswered link stops resolution for
+// the rest of the listing, and expressing it needs a path that genuinely never
+// answers. No real filesystem offers one on demand — a dead NFS mount is the
+// production case and cannot be conjured in a unit test — so without this seam
+// the guard that bounds the whole feature's goroutine cost would ship untested.
+var statPath = os.Stat

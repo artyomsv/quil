@@ -133,15 +133,10 @@ func TestGitDiscoverAndBrowse_HaveIndependentSlots(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build message: %v", err)
 	}
-	browseMsg, err := ipc.NewMessage(ipc.MsgBrowseDirReq, ipc.BrowseDirReqPayload{Path: "/a"})
-	if err != nil {
-		t.Fatalf("build message: %v", err)
-	}
-
 	if _, ok := d.beginGitDiscover(gitMsg); !ok {
 		t.Fatal("git slot refused while free")
 	}
-	if _, ok := d.beginBrowseScan(browseMsg); !ok {
+	if _, ok := d.beginBrowseScan(ipc.BrowseDirReqPayload{Path: "/a"}); !ok {
 		t.Error("a held git-discovery slot blocked a directory listing; the guards are shared")
 	}
 }

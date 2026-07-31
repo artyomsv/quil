@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -391,31 +393,221 @@ func TestReadDirWithin_TimesOut(t *testing.T) {
 	}
 }
 
-// The rejection must carry the requested path, or the TUI drops it as stale and
-// waits out its whole timeout on an answer it already has.
-func TestBeginBrowseScan_RejectionEchoesThePath(t *testing.T) {
+// TestBeginBrowseScan_RejectionEchoesBothKeyHalves pins the FULL staleness key
+// on the rejection path.
+//
+// The client matches a response on (Path, Child) together, so a rejection
+// carrying only Path is dropped as stale by every descend request — and a
+// descend is the common case, since that is what clicking a folder sends. The
+// user then waits out the entire client-side timeout for an answer the daemon
+// delivered immediately, and sees nothing about why.
+func TestBeginBrowseScan_RejectionEchoesBothKeyHalves(t *testing.T) {
 	d := &Daemon{}
-	msg, err := ipc.NewMessage(ipc.MsgBrowseDirReq, ipc.BrowseDirReqPayload{Path: "/srv/work"})
-	if err != nil {
-		t.Fatalf("build message: %v", err)
-	}
+	req := ipc.BrowseDirReqPayload{Path: "/srv/work", Child: "sub"}
 
-	if _, ok := d.beginBrowseScan(msg); !ok {
+	if _, ok := d.beginBrowseScan(req); !ok {
 		t.Fatal("first claim was refused; the slot starts free")
 	}
-	rejection, ok := d.beginBrowseScan(msg)
+	rejection, ok := d.beginBrowseScan(req)
 	if ok {
 		t.Fatal("second claim succeeded; the single-flight guard does not hold")
 	}
-	if rejection.Path != "/srv/work" {
-		t.Errorf("rejection Path = %q, want the request echoed", rejection.Path)
+	if rejection.Path != req.Path {
+		t.Errorf("rejection Path = %q, want the request echoed (%q)", rejection.Path, req.Path)
+	}
+	if rejection.Child != req.Child {
+		t.Errorf("rejection Child = %q, want %q — the client matches on BOTH halves, so a "+
+			"rejection missing this one is dropped as stale", rejection.Child, req.Child)
 	}
 	if rejection.Error == "" {
 		t.Error("rejection carries no reason")
 	}
 
 	d.browseScanning.Store(false)
-	if _, ok := d.beginBrowseScan(msg); !ok {
+	if _, ok := d.beginBrowseScan(req); !ok {
 		t.Error("slot was not released")
+	}
+}
+
+// TestSymlinkIsDirWithin_ExhaustedBudgetDoesNotStat pins that link resolution
+// respects a spent deadline.
+//
+// os.Stat follows the link, so it parks on a dead mount exactly as os.ReadDir
+// does — and it runs AFTER the read, while the single-flight slot is still held.
+// An unbounded stat here would move the wedge one syscall later rather than
+// preventing it: every subsequent listing in the session answered "another
+// directory listing is already running" by something that never finishes.
+func TestSymlinkIsDirWithin_ExhaustedBudgetDoesNotStat(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "real")
+	if err := os.Mkdir(target, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	link := filepath.Join(root, "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink unsupported here: %v", err)
+	}
+
+	// A healthy link that WOULD resolve, so a pass cannot come from the link
+	// being unresolvable anyway.
+	if isDir, answered := symlinkIsDirWithin(link, time.Second); !answered || !isDir {
+		t.Fatalf("with budget: isDir=%v answered=%v, want both true", isDir, answered)
+	}
+
+	isDir, answered := symlinkIsDirWithin(link, 0)
+	if answered {
+		t.Error("a spent budget still statted the link; the deadline does not bound resolution")
+	}
+	if isDir {
+		t.Error("isDir reported true without a stat")
+	}
+}
+
+// TestClassifyEntries_SpentDeadlineLeavesLinksUnresolved pins the user-visible
+// half: an exhausted budget degrades links to non-navigable entries, and still
+// LISTS them — the name is evidence something is there.
+func TestClassifyEntries_SpentDeadlineLeavesLinksUnresolved(t *testing.T) {
+	root, entries := twoLinksAndADir(t)
+
+	// Fresh deadline first, so a pass cannot come from an unresolvable fixture.
+	live := classifyEntries(root, entries, time.Now().Add(time.Second))
+	for _, e := range live {
+		if strings.HasPrefix(e.Name, "link-") && !e.IsDir {
+			t.Fatalf("%q did not resolve with a live deadline; the fixture is wrong", e.Name)
+		}
+	}
+
+	spent := classifyEntries(root, entries, time.Now().Add(-time.Second))
+	if len(spent) != len(entries) {
+		t.Fatalf("entries = %d, want all %d listed even when unresolved", len(spent), len(entries))
+	}
+	for _, e := range spent {
+		if strings.HasPrefix(e.Name, "link-") && e.IsDir {
+			t.Errorf("%q resolved despite a spent deadline", e.Name)
+		}
+		// A plain directory needs no stat, so the budget must not touch it.
+		if e.Name == "real" && !e.IsDir {
+			t.Error("a plain directory was misreported; only LINKS depend on the budget")
+		}
+	}
+}
+
+// TestClassifyEntries_OneHungLinkCostsOneGoroutine pins the goroutine bound.
+//
+// A stat that times out has consumed the shared budget, so every later link is
+// classified without a syscall. Without that sharing, a directory holding 500
+// links into an unreachable mount would park 500 goroutines — and a goroutine
+// blocked in a syscall pins an OS thread — from one keypress.
+//
+// Driven through the statPath seam because a path that never answers is exactly
+// what no real filesystem provides on demand, and this rule is unobservable
+// without one.
+func TestClassifyEntries_OneHungLinkCostsOneGoroutine(t *testing.T) {
+	root, entries := twoLinksAndADir(t)
+
+	block := make(chan struct{})
+	var calls atomic.Int64
+	orig := statPath
+	statPath = func(string) (os.FileInfo, error) {
+		calls.Add(1)
+		<-block
+		return nil, os.ErrNotExist
+	}
+	t.Cleanup(func() {
+		statPath = orig
+		// Released last so the parked goroutines return their FS slots; leaving
+		// them held would starve every later test in this package.
+		close(block)
+	})
+
+	got := classifyEntries(root, entries, time.Now().Add(50*time.Millisecond))
+
+	if n := calls.Load(); n != 1 {
+		t.Errorf("stat calls = %d, want 1 — the first link's timeout must spend the shared "+
+			"budget, or a dead mount costs one parked thread per entry", n)
+	}
+	if len(got) != len(entries) {
+		t.Errorf("entries = %d, want all %d listed", len(got), len(entries))
+	}
+	for _, e := range got {
+		if strings.HasPrefix(e.Name, "link-") && e.IsDir {
+			t.Errorf("%q reported as a directory though its stat never answered", e.Name)
+		}
+	}
+}
+
+// twoLinksAndADir builds a directory holding two symlinks (sorting first) and
+// the real directory they point at.
+func twoLinksAndADir(t *testing.T) (string, []os.DirEntry) {
+	t.Helper()
+	root := t.TempDir()
+	target := filepath.Join(root, "real")
+	if err := os.Mkdir(target, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	for _, name := range []string{"link-a", "link-b"} {
+		if err := os.Symlink(target, filepath.Join(root, name)); err != nil {
+			// Windows needs developer mode or elevation for symlinks.
+			t.Skipf("symlink unsupported here: %v", err)
+		}
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	return root, entries
+}
+
+// TestReadDirWithin_RefusesPastTheCap pins the accumulation bound.
+//
+// Every listing that times out leaves its goroutine parked in the syscall, and a
+// goroutine blocked in a syscall pins an OS thread — the runtime aborts the
+// process past 10 000. A daemon runs for weeks, so a client re-driving
+// navigation into a mount that never answers has an unbounded path to killing
+// the daemon and every pane with it. Refusing loudly is the better outcome.
+func TestReadDirWithin_RefusesPastTheCap(t *testing.T) {
+	for i := 0; i < maxBlockingFSCalls; i++ {
+		if !claimBlockingFSCall() {
+			t.Fatalf("claim %d refused below the cap of %d", i, maxBlockingFSCalls)
+		}
+	}
+	t.Cleanup(func() {
+		for i := 0; i < maxBlockingFSCalls; i++ {
+			releaseBlockingFSCall()
+		}
+	})
+
+	if claimBlockingFSCall() {
+		releaseBlockingFSCall()
+		t.Fatal("the cap admitted one more than it allows")
+	}
+
+	// A directory that reads instantly, so a returned error can only come from
+	// the cap and not from the listing itself.
+	_, err := readDirWithin(t.TempDir(), time.Second)
+	if err == nil {
+		t.Fatal("readDirWithin ran past the cap; abandoned readers are unbounded")
+	}
+	if !strings.Contains(err.Error(), "stuck") {
+		t.Errorf("error = %q, want it to name the situation", err)
+	}
+}
+
+// The cap must be self-healing, or one burst disables browsing permanently.
+func TestBlockingFSCalls_SlotIsReturned(t *testing.T) {
+	before := blockingFSCalls.Load()
+
+	if _, err := readDirWithin(t.TempDir(), time.Second); err != nil {
+		t.Fatalf("readDirWithin: %v", err)
+	}
+
+	// The release happens in the worker goroutine, so it is not ordered against
+	// this line by anything but the handoff the successful read already made.
+	deadline := time.Now().Add(2 * time.Second)
+	for blockingFSCalls.Load() != before && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := blockingFSCalls.Load(); got != before {
+		t.Errorf("outstanding calls = %d, want %d — a completed read did not return its slot", got, before)
 	}
 }

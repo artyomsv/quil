@@ -466,6 +466,9 @@ func launchTUI() {
 	// update controls, which are wired to local disk and would target the
 	// wrong machine. Empty for a local session.
 	model.SetRemoteDest(remoteDest)
+	if remoteDest != "" {
+		model.SetRecentCWDs(tui.LoadRecentCWDs(config.RecentCWDsPath(remoteDest)))
+	}
 
 	// Only remote sessions reconnect. A local daemon that dies takes its panes
 	// with it, so there is nothing to reattach to and retrying would hide the

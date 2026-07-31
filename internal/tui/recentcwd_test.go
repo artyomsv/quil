@@ -112,3 +112,15 @@ func TestSaveRecentCWDs_WriteError(t *testing.T) {
 		t.Error("expected error when destination is a directory, got nil")
 	}
 }
+
+func TestAttachCWD_RemoteMode_OmitsLocalCWD(t *testing.T) {
+	if got := attachCWD("gpu01", "/home/laptop/project"); got != "" {
+		t.Errorf("CWD = %q, want empty — a laptop path is not a server directory", got)
+	}
+}
+
+func TestAttachCWD_LocalMode_SendsTheWorkingDirectory(t *testing.T) {
+	if got := attachCWD("", "/home/laptop/project"); got != "/home/laptop/project" {
+		t.Errorf("CWD = %q, want the local working directory", got)
+	}
+}

@@ -1270,7 +1270,7 @@ func TestHandleCreatePaneSplit_PersistsRecentCWD(t *testing.T) {
 	if len(got.recentCWDs) != 1 || got.recentCWDs[0] != want {
 		t.Errorf("in-memory recentCWDs = %v, want [%q]", got.recentCWDs, want)
 	}
-	if disk := LoadRecentCWDs(config.RecentCWDsPath()); len(disk) != 1 || disk[0] != want {
+	if disk := LoadRecentCWDs(config.RecentCWDsPath("")); len(disk) != 1 || disk[0] != want {
 		t.Errorf("persisted recentCWDs = %v, want [%q]", disk, want)
 	}
 }
@@ -1283,7 +1283,7 @@ func TestHandleCreatePaneSplit_BlankCWD_NoPersist(t *testing.T) {
 	if len(got.recentCWDs) != 0 {
 		t.Errorf("recentCWDs = %v, want empty for blank cwd", got.recentCWDs)
 	}
-	if disk := LoadRecentCWDs(config.RecentCWDsPath()); len(disk) != 0 {
+	if disk := LoadRecentCWDs(config.RecentCWDsPath("")); len(disk) != 0 {
 		t.Errorf("persisted %v, want nothing written for blank cwd", disk)
 	}
 }

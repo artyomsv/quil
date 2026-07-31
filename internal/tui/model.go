@@ -445,6 +445,16 @@ func (m *Model) SetRemoteDest(dest string) { m.remoteDest = dest }
 // RemoteMode reports whether the daemon this TUI drives lives on another host.
 func (m *Model) RemoteMode() bool { return m.remoteDest != "" }
 
+// SetRecentCWDs replaces the remembered working-directory list.
+//
+// Exists because the list is scoped per remote destination while NewModel —
+// which runs before the destination is known — can only load the local one.
+// Kept as an explicit setter rather than a side effect inside SetRemoteDest:
+// that setter is called from ~46 tests which build a Model directly and never
+// set QUIL_HOME, and a disk read there would point every one of them at the
+// developer's real ~/.quil.
+func (m *Model) SetRecentCWDs(list []string) { m.recentCWDs = list }
+
 func NewModel(client *ipc.Client, cfg config.Config, version string, registry *plugin.Registry, stalePlugins []plugin.StalePlugin) Model {
 	m := Model{
 		client:           client,
@@ -453,7 +463,7 @@ func NewModel(client *ipc.Client, cfg config.Config, version string, registry *p
 		devMode:          os.Getenv("QUIL_HOME") != "",
 		pluginRegistry:   registry,
 		instanceStore:    LoadInstances(config.InstancesPath()),
-		recentCWDs:       LoadRecentCWDs(config.RecentCWDsPath()),
+		recentCWDs:       LoadRecentCWDs(config.RecentCWDsPath("")),
 		mcpHighlights:    make(map[string]bool),
 		mcpHighlightSeq:  make(map[string]int),
 		notifications:    NewNotificationCenter(cfg.Notification.SidebarWidth, cfg.Notification.MaxEvents),
@@ -3962,6 +3972,22 @@ func (m *Model) nextReqGen() string {
 
 // Daemon communication commands
 
+// attachCWD returns the working directory to advertise to the daemon so it can
+// spawn new panes where the client is.
+//
+// Empty in remote mode: os.Getwd() names a directory on the laptop, and the
+// daemon would test it against the SERVER's disk. defaultCWD() validates and
+// falls back, so this was safe — but only by coincidence, and a path that
+// happens to exist on both machines is exactly where the coincidence stops. An
+// empty value makes the daemon use its own working directory, which is a real
+// directory on the machine that will hold the pane.
+func attachCWD(remoteDest, localCWD string) string {
+	if remoteDest != "" {
+		return ""
+	}
+	return localCWD
+}
+
 func (m Model) attachToDaemon() tea.Cmd {
 	attachCmd := func() tea.Msg {
 		// Subtract chrome (tab bar + status bar), then pane border (2)
@@ -3975,11 +4001,11 @@ func (m Model) attachToDaemon() tea.Cmd {
 			rows = 1
 		}
 		// Best-effort; if Getwd fails the daemon falls back to its own CWD.
-		clientCWD, _ := os.Getwd()
+		localCWD, _ := os.Getwd()
 		msg, _ := ipc.NewMessage(ipc.MsgAttach, ipc.AttachPayload{
 			Cols: cols,
 			Rows: rows,
-			CWD:  clientCWD,
+			CWD:  attachCWD(m.remoteDest, localCWD),
 		})
 		m.client.Send(msg)
 		return nil

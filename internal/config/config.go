@@ -2,6 +2,8 @@ package config
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"os"
@@ -428,8 +430,49 @@ func InstancesPath() string {
 
 // RecentCWDsPath returns the file storing the last-used working directories
 // offered as a quick pick in the pane setup dialog. TUI-owned, single writer.
-func RecentCWDsPath() string {
-	return filepath.Join(QuilDir(), "recent-cwds.json")
+//
+// dest scopes the file to one remote destination. Empty — the local case —
+// keeps the historical name exactly, so existing installs need no migration.
+// Without the scoping, one flat list mixed laptop and server directories: after
+// a remote session the local picker offered paths that exist only on the server,
+// and vice versa.
+func RecentCWDsPath(dest string) string {
+	if dest == "" {
+		return filepath.Join(QuilDir(), "recent-cwds.json")
+	}
+	return filepath.Join(QuilDir(), "recent-cwds-"+destFileKey(dest)+".json")
+}
+
+// destFileKey turns an ssh destination into a safe, stable filename component.
+//
+// The destination is user input that reaches a path, so every character outside
+// [A-Za-z0-9_-] is replaced rather than escaped — "../../etc/passwd" and
+// "host:22" must both produce an ordinary basename. '.' is deliberately NOT in
+// the passthrough set even though it is filename-safe on its own: a destination
+// with consecutive dots ("../../etc/passwd") would otherwise survive as
+// "..-..-etc-passwd", which still contains ".." and reads as a traversal
+// marker even though it can't actually traverse (no separators reach the
+// basename). Collapsing alone is not enough to keep distinct destinations
+// distinct either: "a/b" and "a-b" would then share a file, so a short digest
+// of the ORIGINAL string is appended and is what actually does that job. The
+// readable half is kept only so the file can be recognised by eye.
+func destFileKey(dest string) string {
+	const maxReadable = 32
+	var b strings.Builder
+	for _, r := range dest {
+		switch {
+		case r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z', r >= '0' && r <= '9',
+			r == '_', r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('-')
+		}
+		if b.Len() >= maxReadable {
+			break
+		}
+	}
+	sum := sha256.Sum256([]byte(dest))
+	return b.String() + "-" + hex.EncodeToString(sum[:4])
 }
 
 func MCPLogDir(cfg MCPConfig) string {

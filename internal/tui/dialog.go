@@ -1364,7 +1364,7 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 	if cwd != "" {
 		m.lastSelectedCWD = cwd
 		m.recentCWDs = pushRecentCWD(m.recentCWDs, cwd, recentCWDMax)
-		if err := SaveRecentCWDs(config.RecentCWDsPath(), m.recentCWDs); err != nil {
+		if err := SaveRecentCWDs(config.RecentCWDsPath(m.remoteDest), m.recentCWDs); err != nil {
 			log.Printf("create pane: save recent cwds: %v", err)
 		}
 	}

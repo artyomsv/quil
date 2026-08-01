@@ -194,6 +194,113 @@ func TestApplyWorkspaceStateReusesTabAndPaneAcrossRebuild(t *testing.T) {
 	}
 }
 
+// The client half of the tab-drag round trip (the daemon half is
+// TestReorderTabMovesTheOwningProjectsTabIDs in internal/daemon): tab ORDER
+// comes from the project's tab_ids, never from the broadcast's flat `tabs`
+// array. The two are given DIFFERENT orders here so the assertion can only
+// pass for one of them — the daemon's reorder lands in tab_ids, and a client
+// that ordered by `tabs` would revert every drag on the next broadcast.
+func TestApplyWorkspaceStateOrdersTabsByProjectTabIDs(t *testing.T) {
+	var m Model
+	m.applyWorkspaceState(WorkspaceStateMsg{
+		Projects: []ProjectInfo{{ID: "proj-a", TabIDs: []string{"tab-3", "tab-1", "tab-2"}}},
+		Tabs: []TabInfo{
+			{ID: "tab-1", Name: "One", ProjectID: "proj-a"},
+			{ID: "tab-2", Name: "Two", ProjectID: "proj-a"},
+			{ID: "tab-3", Name: "Three", ProjectID: "proj-a"},
+		},
+	}, "")
+
+	var got []string
+	for _, tab := range m.curTabs() {
+		got = append(got, tab.ID)
+	}
+	want := []string{"tab-3", "tab-1", "tab-2"}
+	if len(got) != len(want) {
+		t.Fatalf("tabs = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("tab order = %v, want %v (tab_ids order, not the `tabs` array's)", got, want)
+		}
+	}
+}
+
+// Two project-less destinations must not collide on one synthetic ID.
+// indexOfProject resolves by ID alone, so a shared proj-interim would put the
+// active pointer on whichever came first: focus the remote's tabs and the next
+// local broadcast drags you back to the local ones.
+func TestBroadcastProjectsQualifiesTheSyntheticIDPerDest(t *testing.T) {
+	state := WorkspaceStateMsg{Tabs: []TabInfo{{ID: "tab-1", Name: "One"}}}
+
+	local := broadcastProjects(state, "")
+	if len(local) != 1 || local[0].ID != interimProjectID {
+		t.Fatalf("local synthetic project = %+v, want the bare %q — existing clients hold that ID",
+			local, interimProjectID)
+	}
+	remote := broadcastProjects(state, "gpu01")
+	if len(remote) != 1 || remote[0].ID == interimProjectID {
+		t.Fatalf("remote synthetic project = %+v, want an ID distinct from %q", remote, interimProjectID)
+	}
+
+	// The end the collision is actually felt at: two project-less dests, both
+	// present, and focus stays where the user put it.
+	m := Model{}
+	m.applyWorkspaceState(state, "")
+	m.applyWorkspaceState(WorkspaceStateMsg{Tabs: []TabInfo{{ID: "tab-9", Name: "Nine"}}}, "gpu01")
+	if len(m.projects) != 2 {
+		t.Fatalf("projects = %d, want 2 — the two dests collapsed onto one synthetic ID", len(m.projects))
+	}
+	m.activeProject = 1
+	focused := m.projects[1].ID
+	m.applyWorkspaceState(state, "")
+	if p := m.cur(); p == nil || p.ID != focused {
+		t.Fatalf("active project = %v, want %q — a local broadcast stole focus from the remote", p, focused)
+	}
+}
+
+// The dispose sweep must run AFTER m.projects is rebuilt, and must span every
+// project. Both halves are asserted here because each fails a different way
+// and neither is visible elsewhere in the suite:
+//
+//   - Sweeping before the assignment leaves m.projects still holding the
+//     project this broadcast dropped, so its panes look alive and leak their
+//     VT emulators for the session's lifetime. (A rebuilt project's own pane
+//     churn does NOT show this: proj.tabs is assigned on the reused pointer,
+//     so the old slice already reflects the new tabs.)
+//   - Sweeping only the rebuilt projects disposes another dest's live panes.
+func TestApplyWorkspaceStateDisposesOnlyTheDroppedProjectsPanes(t *testing.T) {
+	livePane := NewPaneModel("pane-local", 4096)
+	liveTab := NewTabModel("tab-1", "One")
+	liveTab.Root = NewLeaf(livePane)
+
+	orphanPane := NewPaneModel("pane-b", 4096)
+	orphanTab := NewTabModel("tab-2", "Two")
+	orphanTab.Root = NewLeaf(orphanPane)
+
+	m := Model{projects: []*ProjectModel{
+		{ID: "proj-local", Dest: "", tabs: []*TabModel{liveTab}},
+		{ID: "proj-a", Dest: "gpu01", tabs: []*TabModel{NewTabModel("tab-9", "Nine")}},
+		{ID: "proj-b", Dest: "gpu01", tabs: []*TabModel{orphanTab}},
+	}}
+
+	// gpu01 no longer has proj-b.
+	m.applyWorkspaceState(WorkspaceStateMsg{
+		Dest:     "gpu01",
+		Projects: []ProjectInfo{{ID: "proj-a", TabIDs: []string{"tab-9"}}},
+		Tabs:     []TabInfo{{ID: "tab-9", Name: "Nine", ProjectID: "proj-a"}},
+	}, "gpu01")
+
+	// Dispose nils the emulator; a live pane still has one.
+	if livePane.vt == nil {
+		t.Error("a pane of another dest's project was disposed by this dest's broadcast")
+	}
+	if orphanPane.vt != nil {
+		t.Error("a dropped project's pane was not disposed — the sweep ran before " +
+			"m.projects was rebuilt, so the dropped project still looked alive")
+	}
+}
+
 // A stale TabIDs entry — the project list still names a tab whose own
 // project_id has moved on — must not build that tab into both projects: one
 // TabModel in two tab bars would fight over a single layout tree.

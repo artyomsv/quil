@@ -96,7 +96,8 @@ func (m Model) activeTabIdx() int {
 	return 0
 }
 
-// broadcastProjects returns the projects a workspace broadcast describes.
+// broadcastProjects returns the projects a workspace broadcast from dest
+// describes.
 //
 // A daemon that sent tabs but no projects is either older than the project
 // layer or lost its project list; folding every tab into ONE synthetic project
@@ -107,7 +108,7 @@ func (m Model) activeTabIdx() int {
 //
 // A broadcast with no tabs AND no projects describes an empty daemon and gets
 // no synthetic project — an empty project list is the honest answer there.
-func broadcastProjects(state WorkspaceStateMsg) []ProjectInfo {
+func broadcastProjects(state WorkspaceStateMsg, dest string) []ProjectInfo {
 	if len(state.Projects) > 0 || len(state.Tabs) == 0 {
 		return state.Projects
 	}
@@ -116,11 +117,28 @@ func broadcastProjects(state WorkspaceStateMsg) []ProjectInfo {
 		ids = append(ids, t.ID)
 	}
 	return []ProjectInfo{{
-		ID:        interimProjectID,
+		ID:        interimProjectIDFor(dest),
 		Name:      interimProjectName,
 		TabIDs:    ids,
 		ActiveTab: state.ActiveTab,
 	}}
+}
+
+// interimProjectIDFor qualifies the synthetic project's ID with the
+// destination it was synthesised for. Two project-less daemons would otherwise
+// both be called proj-interim, and indexOfProject resolves by ID alone — so
+// focusing the second one's project would hand focus straight back to the
+// first on its next broadcast, which is exactly the focus steal the
+// per-destination scoping exists to prevent.
+//
+// An empty dest keeps the bare constant byte-identically: that is the local
+// daemon, it is the ID every existing client already holds, and changing it
+// there would strand the client's own tabs on the first broadcast.
+func interimProjectIDFor(dest string) string {
+	if dest == "" {
+		return interimProjectID
+	}
+	return interimProjectID + "@" + dest
 }
 
 // indexOfTab returns the ordinal of the tab with the given ID, or 0 when it is

@@ -3194,7 +3194,7 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg, dest string) ([]str
 		activeID = state.ActiveProject
 	}
 
-	infos := broadcastProjects(state)
+	infos := broadcastProjects(state, dest)
 	rebuilt := make([]*ProjectModel, 0, len(infos))
 	for _, info := range infos {
 		proj, ok := existingProjects[info.ID]

@@ -37,6 +37,19 @@ concurrency:
   group: release
   cancel-in-progress: false
 
+# Read-only floor for GITHUB_TOKEN. Both jobs below raise themselves to
+# `contents: write` because they genuinely need it, so this changes nothing
+# today — it exists so a job added LATER inherits read-only instead of the
+# repository default, which can be read+write. That silent inheritance is
+# exactly the state ci.yml was in.
+#
+# Note this bounds only the auto-minted GITHUB_TOKEN. The release job checks
+# out with RELEASE_PAT when that secret is set, and a PAT's authority is
+# whatever the PAT was granted -- no `permissions:` block constrains it. See
+# the header for why the bot token cannot be used for the version-bump push.
+permissions:
+  contents: read
+
 jobs:
   release:
     runs-on: ubuntu-latest

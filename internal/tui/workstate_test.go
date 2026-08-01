@@ -449,6 +449,41 @@ func TestApplyWorkTransition_LedgerIsBounded(t *testing.T) {
 	}
 }
 
+func TestApplyWorkTransition_OverflowedAgentsKeepSpinnerLit(t *testing.T) {
+	t.Parallel()
+	// The cap discards a start it cannot name-track, and that agent is then
+	// invisible to the ledger. Draining the tracked ones must NOT declare the
+	// pane idle: the discarded agent may still be running, and turning the
+	// spinner off while work is in flight is the exact bug this whole branch
+	// exists to fix. Overflow is therefore sticky until a terminal edge —
+	// wrong-on is the safe direction, wrong-off is the one users report.
+	m := modelWithBackgroundTab()
+	pane := m.tabs[1].Root.Leaves()[0]
+
+	total := maxTrackedSubagents + 5
+	for i := 0; i < total; i++ {
+		m.applyWorkTransition("p2", "hook.claude.SubagentStart",
+			map[string]string{"agent_type": "agent-" + strconv.Itoa(i)})
+	}
+	// Drain every agent the ledger managed to track.
+	for i := 0; i < total; i++ {
+		m.applyWorkTransition("p2", "hook.claude.SubagentStop",
+			map[string]string{"agent_type": "agent-" + strconv.Itoa(i)})
+	}
+	if len(pane.subagents) != 0 {
+		t.Fatalf("precondition: every tracked agent should have drained; got %v", pane.subagents)
+	}
+	if !pane.working {
+		t.Error("spinner went dark while agents refused by the cap may still be running")
+	}
+
+	// SessionEnd is terminal for the whole session — nothing can still be live.
+	m.applyWorkTransition("p2", "hook.claude.SessionEnd", nil)
+	if pane.working {
+		t.Error("SessionEnd must clear the overflow flag, not leave the spinner wedged forever")
+	}
+}
+
 func TestApplyWorkTransition_PhantomSubagentStop_DoesNotDrainNamedAgent(t *testing.T) {
 	t.Parallel()
 	// Claude Code emits ONE unpaired SubagentStop carrying an empty agent_type

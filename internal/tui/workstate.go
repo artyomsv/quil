@@ -63,8 +63,8 @@ func (m *Model) findPaneAndTab(paneID string) (*PaneModel, int) {
 // focuses the pane (ackFocusedPane at Update entry). There is no timer.
 //
 // `working` is DERIVED — recomputed at a single point below as
-// turnActive || len(subagents) > 0 — never assigned by hand in a branch, so
-// no future edge can desync the spinner from its inputs. The main turn
+// turnActive || len(subagents) > 0 || subagentsOverflow — never assigned by
+// hand in a branch, so no future edge can desync the spinner. The main turn
 // (turnActive) and the outstanding background subagents (subagents) are
 // tracked separately: Claude Code runs subagents detached by default, so the
 // main turn's Stop routinely fires while they are still grinding — the
@@ -125,11 +125,22 @@ func (m *Model) applyWorkTransition(paneID, eventType string, data map[string]st
 		_, live := pane.subagents[agentType]
 		if !live && len(pane.subagents) >= maxTrackedSubagents {
 			// agent_type is producer-controlled, so key cardinality is too,
-			// in a process that runs for weeks. Refusing a NEW key past the
-			// ceiling cannot turn the spinner off — `working` derives from
-			// len() > 0, already true here — and an unmatched stop is
-			// ignored by design, so the refusal costs only precision about
-			// how many agents are outstanding, never the indicator itself.
+			// in a process that runs for weeks. Past the ceiling we stop
+			// name-tracking, which makes that agent invisible to the ledger —
+			// so record THAT rather than dropping it silently. Without this
+			// flag, draining the tracked agents would take len() to zero and
+			// turn the spinner off while a refused agent was still running:
+			// the exact bug this ledger exists to prevent, reappearing at the
+			// cap boundary.
+			//
+			// Sticky until a terminal edge, deliberately. We never learn that
+			// an untracked agent finished (its stop names a key we do not
+			// hold), so there is no sound moment to clear it early; SessionEnd
+			// and process_exit are the only points where nothing can still be
+			// live. Wrong-on is the safe direction — a spinner that lingers on
+			// a pathological pane costs a glyph, wrong-off costs the user the
+			// one cue that work is happening.
+			pane.subagentsOverflow = true
 			break
 		}
 		if pane.subagents == nil {
@@ -177,18 +188,21 @@ func (m *Model) applyWorkTransition(paneID, eventType string, data map[string]st
 		if kind == workStopFinal {
 			// Terminal stop (session end): no subagent of the session can
 			// still be alive — drop the ledger so a lost SubagentStop can't
-			// wedge the spinner forever.
+			// wedge the spinner forever. This is also the only sound point to
+			// clear an overflow, for the same reason.
 			clear(pane.subagents)
+			pane.subagentsOverflow = false
 		}
 	case workAbort:
 		pane.turnActive = false
 		clear(pane.subagents)
+		pane.subagentsOverflow = false
 		abort = true
 	}
 
 	// Single derivation point for the spinner; the edge actions below key
 	// off the before/after pair so they fire exactly once per transition.
-	pane.working = pane.turnActive || len(pane.subagents) > 0
+	pane.working = pane.turnActive || len(pane.subagents) > 0 || pane.subagentsOverflow
 	switch {
 	case pane.working && !wasWorking:
 		// Rising edge: seed the pane spinner with the shared frame so the

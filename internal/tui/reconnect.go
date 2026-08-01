@@ -512,6 +512,7 @@ func (m *Model) resetWorkStateForReattach() {
 		p.working = false
 		p.turnActive = false
 		clear(p.subagents)
+		p.subagentsOverflow = false
 	})
 }
 

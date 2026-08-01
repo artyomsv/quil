@@ -3,6 +3,7 @@ package daemon
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
@@ -14,11 +15,12 @@ import (
 )
 
 type Tab struct {
-	ID     string
-	Name   string
-	Color  string
-	Panes  []string        // Pane IDs in order
-	Layout json.RawMessage // Opaque layout tree from TUI
+	ID        string
+	Name      string
+	Color     string
+	Panes     []string        // Pane IDs in order
+	Layout    json.RawMessage // Opaque layout tree from TUI
+	ProjectID string          // Project this tab belongs to (see project.go)
 }
 
 type Pane struct {
@@ -156,6 +158,12 @@ type SessionManager struct {
 	activeTab string
 	bufSize   int // ring buffer capacity per pane (bytes)
 	mu        sync.RWMutex
+
+	// projects/projectOrder/activeProject: see project.go. Guarded by mu,
+	// same as tabs/tabOrder/activeTab above.
+	projects      map[string]*Project
+	projectOrder  []string
+	activeProject string
 }
 
 // inputQueueSize bounds the per-pane stdin queue. Generous for interactive
@@ -240,15 +248,44 @@ func releasePanes(panes []*Pane) {
 
 func NewSessionManager(bufSize int) *SessionManager {
 	return &SessionManager{
-		tabs:    make(map[string]*Tab),
-		panes:   make(map[string]*Pane),
-		bufSize: bufSize,
+		tabs:     make(map[string]*Tab),
+		panes:    make(map[string]*Pane),
+		bufSize:  bufSize,
+		projects: make(map[string]*Project),
 	}
 }
 
 func (sm *SessionManager) CreateTab(name string) *Tab {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
+	return sm.createTabLocked(sm.activeProject, name)
+}
+
+// createTabLocked builds a tab and registers it with its project. Caller holds
+// sm.mu — sm.mu is not reentrant, so this must never take it.
+//
+// An empty projectID bootstraps a "Default" project. That is not a defensive
+// nicety: on a fresh install there is no snapshot to migrate and nobody has
+// called CreateProject, so handleAttach (daemon.go:988) creates the default
+// Shell tab with activeProject still "". A tab registered to no project is
+// invisible to the client, which builds tabs only from project TabIDs.
+func (sm *SessionManager) createTabLocked(projectID, name string) *Tab {
+	if projectID == "" {
+		if len(sm.projectOrder) > 0 {
+			projectID = sm.projectOrder[0]
+		} else {
+			cwd, _ := os.Getwd()
+			p := &Project{
+				ID:      "proj-" + uuid.New().String()[:8],
+				Name:    "Default",
+				RootDir: cwd,
+			}
+			sm.projects[p.ID] = p
+			sm.projectOrder = append(sm.projectOrder, p.ID)
+			projectID = p.ID
+		}
+		sm.activeProject = projectID
+	}
 
 	id := "tab-" + uuid.New().String()[:8]
 	tab := &Tab{ID: id, Name: name}
@@ -257,6 +294,14 @@ func (sm *SessionManager) CreateTab(name string) *Tab {
 
 	if sm.activeTab == "" {
 		sm.activeTab = id
+	}
+
+	tab.ProjectID = projectID
+	if p, ok := sm.projects[projectID]; ok {
+		p.TabIDs = append(p.TabIDs, tab.ID)
+		if p.ActiveTab == "" {
+			p.ActiveTab = tab.ID
+		}
 	}
 	return tab
 }
@@ -277,6 +322,16 @@ func (sm *SessionManager) DestroyTab(tabID string) error {
 		if pane, ok := sm.panes[paneID]; ok {
 			orphans = append(orphans, pane)
 			delete(sm.panes, paneID)
+		}
+	}
+
+	// De-register from the owning project before removing the tab. A
+	// dangling ID in TabIDs gets persisted and broadcast, and the client
+	// then looks up a TabInfo that does not exist.
+	if p, ok := sm.projects[tab.ProjectID]; ok {
+		p.TabIDs = removeString(p.TabIDs, tabID)
+		if p.ActiveTab == tabID {
+			p.ActiveTab = ""
 		}
 	}
 
@@ -436,8 +491,15 @@ func (sm *SessionManager) ActiveTabID() string {
 func (sm *SessionManager) SwitchTab(tabID string) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-	if _, ok := sm.tabs[tabID]; ok {
-		sm.activeTab = tabID
+	tab, ok := sm.tabs[tabID]
+	if !ok {
+		return
+	}
+	sm.activeTab = tabID
+	// Without this the client re-derives activeTab from an always-empty
+	// Project.ActiveTab on every broadcast and snaps back to tab 1.
+	if p, ok := sm.projects[tab.ProjectID]; ok {
+		p.ActiveTab = tabID
 	}
 }
 

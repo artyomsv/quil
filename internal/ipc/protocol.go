@@ -29,6 +29,17 @@ const (
 	MsgUpdateTab   = "update_tab"
 	MsgReorderTab  = "reorder_tab"
 
+	// Project lifecycle (mirrors the tab message set).
+	MsgCreateProject  = "create_project"
+	MsgDestroyProject = "destroy_project"
+	MsgUpdateProject  = "update_project"
+	MsgSwitchProject  = "switch_project"
+	MsgReorderProject = "reorder_project"
+
+	// MsgLinkLost is synthesised CLIENT-SIDE by the router when a connection
+	// fails. It is never written to a socket.
+	MsgLinkLost = "link_lost"
+
 	// I/O (bidirectional)
 	MsgPaneInput  = "pane_input"
 	MsgPaneOutput = "pane_output"
@@ -148,6 +159,12 @@ type Message struct {
 	Type    string          `json:"type"`
 	ID      string          `json:"id,omitempty"` // request-response correlation (MCP bridge)
 	Payload json.RawMessage `json:"payload,omitempty"`
+	// Origin names the daemon a message came from (set by the router on receive)
+	// or is destined for (set by the Model on send). Client-side routing state
+	// only: `json:"-"` keeps it off the wire, so adding it needs no protocol
+	// version bump. Empty on receive means the local daemon; empty on send means
+	// "resolve it" — see router.Send.
+	Origin string `json:"-"`
 }
 
 // Payload types
@@ -235,6 +252,30 @@ type UpdateTabPayload struct {
 type ReorderTabPayload struct {
 	TabID    string `json:"tab_id"`
 	NewIndex int    `json:"new_index"`
+}
+
+type CreateProjectPayload struct {
+	Name    string `json:"name"`
+	RootDir string `json:"root_dir"`
+}
+
+type DestroyProjectPayload struct {
+	ProjectID string `json:"project_id"`
+}
+
+type UpdateProjectPayload struct {
+	ProjectID string `json:"project_id"`
+	Name      string `json:"name"`
+	RootDir   string `json:"root_dir"`
+}
+
+type SwitchProjectPayload struct {
+	ProjectID string `json:"project_id"`
+}
+
+type ReorderProjectPayload struct {
+	ProjectID string `json:"project_id"`
+	NewIndex  int    `json:"new_index"`
 }
 
 type UpdatePanePayload struct {

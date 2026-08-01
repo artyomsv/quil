@@ -222,8 +222,12 @@ func validateRemoteDest(dest string) error {
 	return nil
 }
 
-// remoteInstallRetry is set by the version gate when a remote install has just
-// succeeded, telling launchTUI to re-dial instead of exiting.
+// remoteInstallRetry is set by the version gate when whatever blocked the
+// launch is resolved, telling launchTUI to re-dial instead of exiting.
+//
+// The name predates the second way that happens: an install is one, and
+// healRemoteRecord correcting a stale binary path is the other, which resolves
+// the launch without installing anything.
 //
 // A flag rather than a return value because the gate's signature already
 // carries "the client to use from here on", and the retry is a different kind

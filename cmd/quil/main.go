@@ -413,31 +413,54 @@ func launchTUI() {
 	// (TUI older than daemon — blocking dialog path).
 	client = gateVersionCheck(client)
 
-	// A remote install just succeeded, so the reason this launch failed is
-	// gone. Re-dial rather than making the user retype the command they
-	// already ran — attaching was the whole point of it.
+	// The reason this launch failed is gone — either an install just succeeded,
+	// or healRemoteRecord found quil at a path other than the one we dialed and
+	// corrected the record. Re-dial rather than making the user retype the
+	// command they already ran; attaching was the whole point of it.
 	//
-	// The config is reloaded first: it was read before the install, so the
-	// binary path `remote setup` just recorded is not in this process's copy,
-	// and that path is what the next dial must use as the remote command.
+	// The config is reloaded first: it was read before either of those wrote to
+	// it, so the recorded binary path is not in this process's copy, and that
+	// path is what the next dial must use as the remote command.
 	//
-	// Bounded to one attempt by construction rather than by a counter. The
-	// install wrote a binary path for this destination, so if the far side
-	// still cannot run quil, offerRemoteInstall's guard sees a provisioned
-	// host and refuses instead of offering again.
+	// Bounded to one attempt by construction rather than by a counter. Both
+	// paths leave a binary at the recorded path, so a far side that still
+	// cannot run quil makes healRemoteRecord's probe report ExistingPath equal
+	// to the record — the wrong-architecture arm, which refuses rather than
+	// offering again.
 	if client == nil && remoteInstallRetry {
 		remoteInstallRetry = false
 		if reloaded, loadErr := config.Load(config.ConfigPath()); loadErr == nil {
 			cfg = reloaded
 		}
-		log.Printf("remote: install succeeded, re-dialing %s", remoteDest)
+		log.Printf("remote: the launch blocker is resolved, re-dialing %s", remoteDest)
 		fmt.Fprintf(os.Stderr, "  Attaching…\n\n")
 		client, err = dialRemote(cfg)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "cannot connect to %s after installing: %v\n", remoteDest, err)
+			fmt.Fprintf(os.Stderr, "cannot connect to %s: %v\n", remoteDest, err)
 			os.Exit(1)
 		}
 		client = gateVersionCheck(client)
+		// gateVersionCheck returns nil whenever it wants ANOTHER re-dial, and
+		// remoteInstallRetry was consumed above — so nothing re-enters this
+		// block and control would fall to `defer client.Close()`, which is
+		// c.conn.Close() with no nil guard. The panic is caught by launchTUI's
+		// recover, turning a diagnosable state into a stack dump printed the
+		// instant the user approved an install.
+		//
+		// Reachable from both arms, not only the new one: the RemedyUpgrade arm
+		// skips healRemoteRecord entirely, and reportInstalled's stopWarning
+		// path is a documented case where a remote daemon keeps serving the old
+		// binary from its original inode, so the retry reports the same version
+		// mismatch and offers the upgrade a second time. One re-dial is all this
+		// path offers; anything still wrong here needs a human.
+		if client == nil {
+			fmt.Fprintf(os.Stderr,
+				"\n  Still cannot attach to %s after retrying.\n"+
+					"  Provision it explicitly and read the output:\n"+
+					"    quil remote setup %s\n\n", remoteDest, remoteDest)
+			exitFn(1)
+			return
+		}
 	}
 	defer client.Close()
 

@@ -125,7 +125,26 @@ func checkRemotePath(what, p string) error {
 	return nil
 }
 
-// isControl reports the C0, DEL and C1 ranges — everything a terminal acts on.
+// isControl reports the C0, DEL and C1 ranges — everything a terminal acts on —
+// plus the bidi overrides and isolates.
+//
+// Bidi is the non-obvious half, and the reason it belongs in a function named
+// for control characters: U+202E is PRINTABLE, so it passes any C0/C1 filter
+// while reversing the text after it. internal/tui/remotetext.go exists for the
+// same hazard on the render path. It matters more here than there, because
+// these paths are printed in the consent summary a dozen lines above the [y/N]
+// prompt and in the diagnostics that follow a failed attach — a reversed path
+// misrepresents what the operator is approving, and rejecting is right for the
+// same reason the control-character check rejects: a sanitized path would still
+// be the wrong path.
 func isControl(r rune) bool {
-	return r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f)
+	switch {
+	case r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f):
+		return true
+	case r >= 0x202a && r <= 0x202e: // LRE, RLE, PDF, LRO, RLO
+		return true
+	case r >= 0x2066 && r <= 0x2069: // LRI, RLI, FSI, PDI
+		return true
+	}
+	return false
 }

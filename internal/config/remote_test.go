@@ -32,6 +32,36 @@ func TestConfig_SetRemoteBinary_Overwrites(t *testing.T) {
 	}
 }
 
+func TestConfig_ClearRemoteBinary_RemovesOnlyThatHost(t *testing.T) {
+	var cfg Config
+	cfg.SetRemoteBinary("gpu01", "/home/a/.local/bin/quil")
+	cfg.SetRemoteBinary("other", "/usr/local/bin/quil")
+
+	cfg.ClearRemoteBinary("gpu01")
+
+	if got := cfg.RemoteBinary("gpu01"); got != "" {
+		t.Errorf("RemoteBinary(gpu01) = %q, want empty after clear", got)
+	}
+	if got := cfg.RemoteBinary("other"); got != "/usr/local/bin/quil" {
+		t.Errorf("clearing one host disturbed another: %q", got)
+	}
+}
+
+// The zero value has a nil Hosts map, which is what a config predating the
+// [remote] section loads as. Clearing must be a no-op there rather than a
+// panic: this runs on the failure path, where a crash would replace a
+// diagnosable error with no diagnosis at all.
+func TestConfig_ClearRemoteBinary_NilMapAndAbsentKey(t *testing.T) {
+	var cfg Config
+	cfg.ClearRemoteBinary("never-seen")
+
+	cfg.SetRemoteBinary("gpu01", "/p/quil")
+	cfg.ClearRemoteBinary("never-seen")
+	if got := cfg.RemoteBinary("gpu01"); got != "/p/quil" {
+		t.Errorf("clearing an absent key disturbed a present one: %q", got)
+	}
+}
+
 // A destination is an arbitrary user string — an ssh_config Host alias can
 // carry dots, dashes and an @ — so it has to survive a TOML key round trip.
 func TestConfig_RemoteHosts_RoundTrip(t *testing.T) {

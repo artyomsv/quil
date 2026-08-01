@@ -60,6 +60,21 @@ func (c *Config) RemoteBinary(dest string) string {
 	return c.Remote.Hosts[dest].Binary
 }
 
+// ClearRemoteBinary forgets the recorded quil path for dest.
+//
+// Called only when the host probe has ANSWERED and reported no quil at all: the
+// record is then known-false, and keeping it means the next launch runs the
+// same missing path and fails identically. A probe that errored is not
+// evidence — see healRemoteRecord in cmd/quil.
+//
+// Deleting from a nil map is a no-op in Go, so a config predating the [remote]
+// section needs no special case. That matters here rather than being a
+// curiosity: this runs on the failure path, where a panic would replace a
+// diagnosable error with a crash.
+func (c *Config) ClearRemoteBinary(dest string) {
+	delete(c.Remote.Hosts, dest)
+}
+
 type NotificationConfig struct {
 	SidebarWidth int                     `toml:"sidebar_width"` // default 30
 	MaxEvents    int                     `toml:"max_events"`    // default 200

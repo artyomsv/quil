@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Attaching to a host whose Quil was removed now offers to reinstall it,
+  instead of blaming your CPU.** If the binary on a remote disappeared — the
+  machine was rebuilt from an image, the home directory was wiped, an admin
+  moved it, the OS was reinstalled — `quil --remote <host>` reported *"Quil was
+  installed on <host>, but will not run there"*, suggested the architecture was
+  wrong, and never offered to install. The suggested `uname -sm` came back
+  looking perfectly correct, because the architecture was never the problem.
+  The only escape was deleting a line from `config.toml` by hand.
+
+  Quil recorded where it installed the binary and then read that record as
+  proof the binary was still there. It now asks the host instead, and repairs
+  the record from the answer: gone means reinstall, and found somewhere else
+  means use the new location and reconnect — which also fixes attaching to a
+  host where you installed Quil yourself. A genuinely unrunnable binary still
+  reports the architecture mismatch, now naming the file it actually found.
+
+  Nothing is forgotten on a failed check: if the host cannot be reached, the
+  record is left exactly as it was, since an unreachable host proves nothing
+  about what is installed on it. Quil also declines to adopt a Quil it finds in
+  a directory that other users on that host can write to — a shared `/opt/bin`,
+  or the group-writable `/usr/local/bin` that Homebrew creates on multi-admin
+  Macs — because adopting it would run it on every later connection with no
+  further prompt. It offers a normal install into your own directory instead.
+
+### Security
+- **A remote host can no longer smuggle a command into the diagnostics Quil
+  tells you to run.** When a remote binary cannot be executed, Quil prints an
+  `ssh … 'uname -sm; file …'` line to paste into your own shell. The path in it
+  comes from the remote, and an apostrophe in that path closed the quoting — so
+  a malicious or compromised host could append a command that ran on **your**
+  machine when you pasted the line. The path is now escaped, which also fixes
+  the ordinary case: the suggestion used to break on any legitimate path
+  containing an apostrophe.
+- **Remote-reported paths can no longer contain invisible text-direction
+  overrides.** Quil already rejected control characters in paths a remote
+  reports, because those paths are printed in the confirmation prompt you
+  approve an install from. Bidirectional overrides are *printable*, so they
+  passed that check while reversing how the rest of the path reads on screen.
+  They are now rejected too.
+
 ## [1.46.0] - 2026-07-31
 
 ### Fixed

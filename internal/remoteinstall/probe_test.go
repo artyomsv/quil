@@ -181,6 +181,15 @@ func TestParseProbe_RejectsControlCharactersInPaths(t *testing.T) {
 		{"bell in home", probeOut("/home/u\x07", "Linux", "x86_64", "-", "-")},
 		{"c1 csi in home", probeOut("/home/u2J", "Linux", "x86_64", "-", "-")},
 		{"escape in existing path", probeOut("/home/u", "Linux", "x86_64", "/opt/\x1b[2Jquil", "rw")},
+
+		// Bidi overrides are PRINTABLE, so they pass any C0/C1 filter while
+		// reversing everything after them — the hazard internal/tui/remotetext.go
+		// exists for, reaching the consent summary here instead of a pane. A
+		// path rendered right-to-left misrepresents what the operator approves.
+		{"rlo in home", probeOut("/home/u‮limb/", "Linux", "x86_64", "-", "-")},
+		{"rlo in existing path", probeOut("/home/u", "Linux", "x86_64", "/opt/‮quil", "rw")},
+		{"rle in existing path", probeOut("/home/u", "Linux", "x86_64", "/opt/‫quil", "rw")},
+		{"rli isolate in existing path", probeOut("/home/u", "Linux", "x86_64", "/opt/⁧quil", "rw")},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

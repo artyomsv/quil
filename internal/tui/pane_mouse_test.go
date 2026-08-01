@@ -184,7 +184,7 @@ func TestUpdateMouseSelection_PreviewPane_RoutesThroughLayout(t *testing.T) {
 	}
 	m.applyWorkspaceState(state)
 	m.resizeTabs()
-	tab := m.tabs[0]
+	tab := m.curTabs()[0]
 	p := tab.Leaves()[0]
 	if !p.previewMode() {
 		t.Fatalf("setup: pane must be in preview (innerW %d, vt %d)", p.Width-2, p.vt.Width())

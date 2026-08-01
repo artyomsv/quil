@@ -349,8 +349,7 @@ func TestHandleKey_ToggleWrap(t *testing.T) {
 	m := Model{
 		cfg:           cfg,
 		client:        &fakeSender{},
-		tabs:          []*TabModel{tab},
-		activeTab:     0,
+		projects:      oneProject(tab),
 		notifications: NewNotificationCenter(30, 50),
 	}
 
@@ -371,7 +370,7 @@ func TestHandleKey_ToggleWrap(t *testing.T) {
 	tab2 := NewTabModel("t2", "T2")
 	tab2.Root = NewLeaf(plain)
 	tab2.ActivePane = "plain"
-	m.tabs = []*TabModel{tab2}
+	m.setTabs([]*TabModel{tab2})
 	m.handleKey(tea.KeyPressMsg{Code: tea.KeyF9})
 	if plain.previewWrap {
 		t.Error("toggle_wrap must not set previewWrap on a non-canvas pane")
@@ -388,8 +387,8 @@ func TestPreviewPosAt_CropRoundTrip(t *testing.T) {
 	// instead of the "a" row, which is not what this test is exercising.
 	p := canvasPane(t, 100, 4, strings.Repeat("a", 95)+"\r\nshort\r\n")
 	defer p.Dispose()
-	p.Width = 42  // innerW 40
-	p.Height = 6  // innerH 4
+	p.Width = 42 // innerW 40
+	p.Height = 6 // innerH 4
 	if !p.previewMode() {
 		t.Fatalf("setup: want preview mode (innerW 40 < vt %d)", p.vt.Width())
 	}

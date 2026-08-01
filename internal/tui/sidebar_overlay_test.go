@@ -19,8 +19,7 @@ func newSidebarTestModel() Model {
 		attached:      true,
 		width:         200,
 		height:        50,
-		tabs:          []*TabModel{NewTabModel("tab-1", "Shell")},
-		activeTab:     0,
+		projects:      oneProject(NewTabModel("tab-1", "Shell")),
 	}
 }
 
@@ -55,7 +54,7 @@ func TestSidebarOverlayWidth_States(t *testing.T) {
 func TestSidebarOverlayWidth_FocusMode_StillVisible(t *testing.T) {
 	m := newSidebarTestModel()
 	m.notifications.visible = true
-	m.tabs[0].focusMode = true
+	m.curTabs()[0].focusMode = true
 	if got := m.sidebarOverlayWidth(); got != m.notifications.width {
 		t.Errorf("focus mode: got %d, want %d (overlay draws in focus mode too)", got, m.notifications.width)
 	}

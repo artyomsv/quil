@@ -28,8 +28,7 @@ func twoPaneFocusModel(t *testing.T, width, height int) (Model, *PaneModel, *Pan
 		height:        height,
 		notifications: NewNotificationCenter(30, 50),
 		mcpHighlights: make(map[string]bool),
-		tabs:          []*TabModel{tab},
-		activeTab:     0,
+		projects:      oneProject(tab),
 		cfg:           config.Default(),
 	}
 	return m, left, right
@@ -44,8 +43,8 @@ func twoPaneFocusModel(t *testing.T, width, height int) (Model, *PaneModel, *Pan
 func TestModel_HitTestScrollbar_FocusModeUsesActivePaneFullWidth(t *testing.T) {
 	t.Parallel()
 	m, left, right := twoPaneFocusModel(t, 100, 30)
-	m.tabs[0].ToggleFocus()
-	if !m.tabs[0].FocusMode() {
+	m.curTabs()[0].ToggleFocus()
+	if !m.curTabs()[0].FocusMode() {
 		t.Fatal("ToggleFocus did not enter focus mode on a two-pane tab")
 	}
 
@@ -83,8 +82,7 @@ func TestModel_HitTestScrollbar_NotesModeSinglePaneUsesReducedWidth(t *testing.T
 		height:        30,
 		notifications: NewNotificationCenter(30, 50),
 		mcpHighlights: make(map[string]bool),
-		tabs:          []*TabModel{tab},
-		activeTab:     0,
+		projects:      oneProject(tab),
 		cfg:           cfg,
 	}
 
@@ -93,7 +91,7 @@ func TestModel_HitTestScrollbar_NotesModeSinglePaneUsesReducedWidth(t *testing.T
 	if !m.notesMode {
 		t.Fatal("notesMode not active after toggle")
 	}
-	if m.tabs[0].FocusMode() {
+	if m.curTabs()[0].FocusMode() {
 		t.Fatal("single-pane tab should NOT be in focus mode in notes mode")
 	}
 	// Force the same layout pass View() performs so pane.Width is the reduced

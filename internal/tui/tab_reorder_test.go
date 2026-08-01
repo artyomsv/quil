@@ -19,16 +19,16 @@ func newModelForTest(names []string, activeIdx int) Model {
 		tabDragFromIdx: -1,
 	}
 	for _, n := range names {
-		m.tabs = append(m.tabs, NewTabModel(n, n))
+		m.appendTab(NewTabModel(n, n))
 	}
-	m.activeTab = activeIdx
+	m.setActiveTabIdx(activeIdx)
 	return m
 }
 
 func tabNames(t *testing.T, m Model) []string {
 	t.Helper()
-	out := make([]string, 0, len(m.tabs))
-	for _, tab := range m.tabs {
+	out := make([]string, 0, len(m.curTabs()))
+	for _, tab := range m.curTabs() {
 		out = append(out, tab.Name)
 	}
 	return out
@@ -65,8 +65,8 @@ func TestModel_MoveTab(t *testing.T) {
 			if strings.Join(got, ",") != strings.Join(tc.want, ",") {
 				t.Errorf("after move: got %v, want %v", got, tc.want)
 			}
-			if m.activeTab != tc.wantActive {
-				t.Errorf("activeTab = %d, want %d", m.activeTab, tc.wantActive)
+			if m.activeTabIdx() != tc.wantActive {
+				t.Errorf("activeTab = %d, want %d", m.activeTabIdx(), tc.wantActive)
 			}
 		})
 	}

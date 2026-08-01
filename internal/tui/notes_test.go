@@ -444,7 +444,7 @@ func TestModel_NotesEditorPosAt_ConvertsScreenCoordsAndScroll(t *testing.T) {
 		width:         100,
 		height:        30,
 		notifications: NewNotificationCenter(30, 50),
-		tabs:          []*TabModel{NewTabModel("t1", "Shell")},
+		projects:      oneProject(NewTabModel("t1", "Shell")),
 	}
 
 	// notesW = (100 - 0) * 2 / 5 = 40 → boxX0 = 60, boxX1 = 100, boxY0 = 1, boxY1 = 29
@@ -497,7 +497,7 @@ func TestModel_NotesEditorPosAt_SoftWrap_ClickOnContinuationRow(t *testing.T) {
 		width:         100,
 		height:        30,
 		notifications: NewNotificationCenter(30, 50),
-		tabs:          []*TabModel{NewTabModel("t1", "Shell")},
+		projects:      oneProject(NewTabModel("t1", "Shell")),
 	}
 
 	// notesW = 100 * 2 / 5 = 40. Outer box x = [60, 100). Production
@@ -684,14 +684,14 @@ func TestTextEditor_GutterWidth(t *testing.T) {
 		numLines int
 		want     int
 	}{
-		{"empty document", 0, 4},     // max(3, 1) + 1
-		{"single line", 1, 4},        // max(3, 1) + 1
-		{"99 lines", 99, 4},          // max(3, 2) + 1
-		{"100 lines", 100, 4},        // max(3, 3) + 1
-		{"999 lines", 999, 4},        // max(3, 3) + 1
-		{"1000 lines", 1000, 5},      // max(3, 4) + 1
-		{"10000 lines", 10000, 6},    // max(3, 5) + 1
-		{"100000 lines", 100000, 7},  // max(3, 6) + 1
+		{"empty document", 0, 4},    // max(3, 1) + 1
+		{"single line", 1, 4},       // max(3, 1) + 1
+		{"99 lines", 99, 4},         // max(3, 2) + 1
+		{"100 lines", 100, 4},       // max(3, 3) + 1
+		{"999 lines", 999, 4},       // max(3, 3) + 1
+		{"1000 lines", 1000, 5},     // max(3, 4) + 1
+		{"10000 lines", 10000, 6},   // max(3, 5) + 1
+		{"100000 lines", 100000, 7}, // max(3, 6) + 1
 	}
 	for _, tt := range tests {
 		tt := tt
@@ -719,7 +719,7 @@ func newNotesTestModel(t *testing.T, ne *NotesEditor) *Model {
 		height:        30,
 		notifications: NewNotificationCenter(30, 50),
 		mcpHighlights: make(map[string]bool),
-		tabs:          []*TabModel{NewTabModel("t1", "Shell")},
+		projects:      oneProject(NewTabModel("t1", "Shell")),
 		cfg:           config.Default(),
 	}
 	return m
@@ -804,7 +804,7 @@ func TestModel_ExitNotesModeInPlace_ResetsAllFlagsAndRevertsFocus(t *testing.T) 
 	m.notesAnchorCol = 3
 	// Simulate "we owned the focus toggle" — populate two leaves on the
 	// only tab so ToggleFocus is not a no-op, then enable focus mode.
-	tab := m.tabs[0]
+	tab := m.curTabs()[0]
 	tab.Root = NewLeaf(NewPaneModel("p1", 1024))
 	tab.Root.SplitLeaf("p1", SplitVertical)
 	tab.Root.FillPlaceholder(NewPaneModel("p2", 1024))
@@ -851,7 +851,7 @@ func TestModel_ExitNotesModeInPlace_DoesNotRevertUserFocus(t *testing.T) {
 	// User entered focus mode themselves; we did NOT own the toggle.
 	m.notesEnteredFocus = false
 
-	tab := m.tabs[0]
+	tab := m.curTabs()[0]
 	tab.Root = NewLeaf(NewPaneModel("p1", 1024))
 	tab.Root.SplitLeaf("p1", SplitVertical)
 	tab.Root.FillPlaceholder(NewPaneModel("p2", 1024))
@@ -876,8 +876,8 @@ func TestModel_SwitchTab_FlushesNotesMode(t *testing.T) {
 
 	m := newNotesTestModel(t, ne)
 	// Two tabs so switchTab(1) is valid.
-	m.tabs = append(m.tabs, NewTabModel("t2", "Build"))
-	m.activeTab = 0
+	m.appendTab(NewTabModel("t2", "Build"))
+	m.setActiveTabIdx(0)
 
 	m.switchTab(1)
 
@@ -887,8 +887,8 @@ func TestModel_SwitchTab_FlushesNotesMode(t *testing.T) {
 	if m.notesEditor != nil {
 		t.Error("notesEditor should be nil after switchTab")
 	}
-	if m.activeTab != 1 {
-		t.Errorf("activeTab = %d, want 1", m.activeTab)
+	if m.activeTabIdx() != 1 {
+		t.Errorf("activeTab = %d, want 1", m.activeTabIdx())
 	}
 	got, _ := persist.LoadNotes(dir, "pane-switch")
 	if got != "z\n" {
@@ -910,8 +910,7 @@ func TestModel_ToggleNotesMode_SinglePaneTab_NoFocusRevert(t *testing.T) {
 		height:        30,
 		notifications: NewNotificationCenter(30, 50),
 		mcpHighlights: make(map[string]bool),
-		tabs:          []*TabModel{tab},
-		activeTab:     0,
+		projects:      oneProject(tab),
 		cfg:           cfg,
 	}
 
@@ -1065,7 +1064,7 @@ func TestModel_ApplyWorkspaceState_BoundPaneNotActive_ResyncsActive(t *testing.T
 	m := newNotesTestModel(t, ne)
 	// Pre-populate the tab with two panes; bound is "pane-bound" but
 	// the tab's ActivePane is "pane-other".
-	tab := m.tabs[0]
+	tab := m.curTabs()[0]
 	tab.Root = NewLeaf(NewPaneModel("pane-bound", 1024))
 	tab.Root.SplitLeaf("pane-bound", SplitVertical)
 	tab.Root.FillPlaceholder(NewPaneModel("pane-other", 1024))
@@ -1088,7 +1087,7 @@ func TestModel_ApplyWorkspaceState_BoundPaneNotActive_ResyncsActive(t *testing.T
 	if !m.notesMode {
 		t.Error("notesMode should still be true after re-sync")
 	}
-	if m.tabs[0].ActivePane != "pane-bound" {
-		t.Errorf("ActivePane = %q after re-sync, want %q", m.tabs[0].ActivePane, "pane-bound")
+	if m.curTabs()[0].ActivePane != "pane-bound" {
+		t.Errorf("ActivePane = %q after re-sync, want %q", m.curTabs()[0].ActivePane, "pane-bound")
 	}
 }

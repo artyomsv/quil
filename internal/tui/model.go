@@ -227,8 +227,11 @@ type tuiClient interface {
 type Client = tuiClient
 
 type Model struct {
-	tabs                 []*TabModel
-	activeTab            int
+	// projects owns every tab. There is no flat tab list: activeProject
+	// selects the project, and that project's own activeTab selects the tab
+	// within it, so switching projects restores the tab each was left on.
+	projects             []*ProjectModel
+	activeProject        int
 	width                int
 	height               int
 	client               tuiClient
@@ -304,8 +307,8 @@ type Model struct {
 	// Held separately from cwdBrowseTruncated because the two describe different
 	// listings and only one of them is on screen at a time: this one applies once
 	// showRootsList promotes the roots to BE the listing.
-	cwdBrowseRootsTruncated bool // the daemon gave up part-way through enumerating roots
-	browseCandidates   []string // remaining pre-fill candidates for the setup browser's start-up chain
+	cwdBrowseRootsTruncated bool     // the daemon gave up part-way through enumerating roots
+	browseCandidates        []string // remaining pre-fill candidates for the setup browser's start-up chain
 	// Session-picker state (plugins with [command] sessions = "claude"). Rows
 	// are scoped to sessionScanCWD; when the browser moves to a different
 	// directory the rows AND selectedSessionID are discarded, since a session
@@ -927,8 +930,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// without releasing.
 		if m.tabDragFromIdx >= 0 && msg.Y == 0 {
 			target := m.hitTestTab(msg.X)
-			if target >= 0 && target != m.tabDragFromIdx && m.tabDragFromIdx < len(m.tabs) {
-				tabID := m.tabs[m.tabDragFromIdx].ID
+			if target >= 0 && target != m.tabDragFromIdx && m.tabDragFromIdx < len(m.curTabs()) {
+				tabID := m.curTabs()[m.tabDragFromIdx].ID
 				if m.moveTab(m.tabDragFromIdx, target) {
 					m.tabDragFromIdx = target
 					return m, m.sendReorderTab(tabID, target)
@@ -1175,7 +1178,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// tick chain per pane: spinnerTickRunning (set at the start site) is
 		// cleared here when the chain stops, so a re-arm can start a fresh one
 		// without ever stacking two chains (which would double the frame rate).
-		for _, tab := range m.tabs {
+		for _, tab := range m.allTabs() {
 			if tab.Root == nil {
 				continue
 			}
@@ -1210,7 +1213,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.workSpinnerFrame++
 		// Mirror the shared frame onto every working pane so the top-border
 		// spinner (rendered inside PaneModel.View) stays in sync with the tab.
-		for _, tab := range m.tabs {
+		for _, tab := range m.allTabs() {
 			if tab.Root == nil {
 				continue
 			}
@@ -1273,9 +1276,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case setActivePaneMsg:
 		// Find which tab contains this pane and switch to it
-		for i, tab := range m.tabs {
+		for i, tab := range m.curTabs() {
 			if tab.Root != nil && tab.Root.PaneIDs()[msg.PaneID] {
-				m.activeTab = i
+				m.setActiveTabIdx(i)
 				tab.ActivePane = msg.PaneID
 				log.Printf("set_active_pane: switched to tab %d pane %s", i, msg.PaneID)
 				return m, m.listenForMessages()
@@ -1536,9 +1539,9 @@ func (m Model) handleNotificationKey(key string) (tea.Model, tea.Cmd) {
 	case "navigate":
 		// Push current location to history, then jump to event's pane in focus mode
 		m.pushPaneHistory()
-		for i, tab := range m.tabs {
+		for i, tab := range m.curTabs() {
 			if tab.Root != nil && tab.Root.PaneIDs()[paneID] {
-				m.activeTab = i
+				m.setActiveTabIdx(i)
 				tab.ActivePane = paneID
 				if !tab.FocusMode() {
 					tab.ToggleFocus()
@@ -1573,7 +1576,7 @@ func (m Model) handleNotificationKey(key string) (tea.Model, tea.Cmd) {
 
 func (m *Model) pushPaneHistory() {
 	if tab := m.activeTabModel(); tab != nil && tab.ActivePane != "" {
-		ref := PaneRef{TabIndex: m.activeTab, PaneID: tab.ActivePane}
+		ref := PaneRef{TabIndex: m.activeTabIdx(), PaneID: tab.ActivePane}
 		m.paneHistory = append(m.paneHistory, ref)
 		if len(m.paneHistory) > 20 {
 			m.paneHistory = m.paneHistory[len(m.paneHistory)-20:]
@@ -1585,10 +1588,10 @@ func (m Model) popPaneHistory() (tea.Model, tea.Cmd) {
 	for len(m.paneHistory) > 0 {
 		ref := m.paneHistory[len(m.paneHistory)-1]
 		m.paneHistory = m.paneHistory[:len(m.paneHistory)-1]
-		if ref.TabIndex < len(m.tabs) {
-			tab := m.tabs[ref.TabIndex]
+		if ref.TabIndex < len(m.curTabs()) {
+			tab := m.curTabs()[ref.TabIndex]
 			if tab.Root != nil && tab.Root.PaneIDs()[ref.PaneID] {
-				m.activeTab = ref.TabIndex
+				m.setActiveTabIdx(ref.TabIndex)
 				tab.ActivePane = ref.PaneID
 				return m, nil
 			}
@@ -1920,7 +1923,8 @@ func (m *Model) finishSplitDrag() tea.Cmd {
 	return tea.Batch(m.resizeAllPanes(), m.sendAllLayouts())
 }
 
-// moveTab repositions m.tabs[from] to ordinal `to`, sliding the tabs
+// moveTab repositions the active project's tab at `from` to ordinal `to`,
+// sliding the tabs
 // between them by one position. Other multiplexers and every browser tab
 // strip use this UX — a swap would teleport the displaced tab to the
 // dragged tab's old slot, which feels wrong when dragging across several
@@ -1928,19 +1932,20 @@ func (m *Model) finishSplitDrag() tea.Cmd {
 //
 // Returns true when the order actually changed.
 func (m *Model) moveTab(from, to int) bool {
-	if from == to || from < 0 || to < 0 || from >= len(m.tabs) || to >= len(m.tabs) {
+	tabs := m.curTabs()
+	if from == to || from < 0 || to < 0 || from >= len(tabs) || to >= len(tabs) {
 		return false
 	}
-	tab := m.tabs[from]
+	tab := tabs[from]
 	if from < to {
-		copy(m.tabs[from:to], m.tabs[from+1:to+1])
+		copy(tabs[from:to], tabs[from+1:to+1])
 	} else {
-		copy(m.tabs[to+1:from+1], m.tabs[to:from])
+		copy(tabs[to+1:from+1], tabs[to:from])
 	}
-	m.tabs[to] = tab
+	tabs[to] = tab
 	// activeTab tracks position, not identity — adjust to the dragged
 	// tab's new ordinal so the visual selection follows it.
-	m.activeTab = to
+	m.setActiveTabIdx(to)
 	return true
 }
 
@@ -1966,7 +1971,7 @@ func (m *Model) activePaneByID(id string) *PaneModel {
 // only — overlay panes live outside the tree). Used to guard spinner-tick
 // chains against stacking.
 func (m *Model) leafByID(id string) *LayoutNode {
-	for _, tab := range m.tabs {
+	for _, tab := range m.allTabs() {
 		if tab.Root == nil {
 			continue
 		}
@@ -2166,9 +2171,9 @@ func (m Model) openCreatePaneDialog() (tea.Model, tea.Cmd) {
 // forceRedraw is the full-repaint recovery hatch: drop every pane's render
 // cache and every tab's leaves cache, then ClearScreen + re-probe the terminal
 // size. Extracted verbatim from the kb.Redraw case; shared with the command
-// palette. It mutates m.tabs, so it cannot be a bare func() tea.Cmd.
+// palette. It mutates tab state, so it cannot be a bare func() tea.Cmd.
 func (m Model) forceRedraw() (tea.Model, tea.Cmd) {
-	for _, tab := range m.tabs {
+	for _, tab := range m.allTabs() {
 		tab.invalidateLeaves()
 		if tab.Root != nil {
 			for _, pane := range tab.Leaves() {
@@ -2213,7 +2218,7 @@ func (m Model) notesPanelWidth() int {
 // exclusive) of the notes editor. Returns ok=false when notes mode is
 // inactive or the terminal is too narrow to render the editor.
 func (m Model) notesEditorBox() (boxX0, boxY0, boxX1, boxY1 int, ok bool) {
-	if !m.notesMode || m.notesEditor == nil || m.activeTab >= len(m.tabs) {
+	if !m.notesMode || m.notesEditor == nil || m.activeTabModel() == nil {
 		return 0, 0, 0, 0, false
 	}
 	notesW := m.notesPanelWidth()
@@ -2404,8 +2409,8 @@ func (m Model) notesKeyExempt(key string) bool {
 // reconciliation, switchTab) delegate to this function so the teardown is
 // guaranteed consistent.
 //
-// IMPORTANT: this function operates on the tab referenced by m.activeTab
-// at the time of the call. Callers that are about to change m.activeTab
+// IMPORTANT: this function operates on the active project's active tab
+// at the time of the call. Callers that are about to change that tab
 // (e.g. switchTab) must invoke this FIRST so focus reverts on the old tab.
 func (m *Model) exitNotesModeInPlace() {
 	if m.notesEditor != nil {
@@ -2470,9 +2475,7 @@ func (m Model) View() tea.View {
 		// mouse handlers stay in lockstep with this renderer).
 		tabH := m.height - chromeHeight
 		notesW := m.notesPanelWidth()
-		if m.activeTab < len(m.tabs) {
-			tab := m.tabs[m.activeTab]
-
+		if tab := m.activeTabModel(); tab != nil {
 			tab.SetCanvas(m.width, tabH)
 			tab.Resize(m.width-notesW, tabH)
 			// Pass per-frame state to panes for rendering
@@ -2971,7 +2974,7 @@ func (m Model) handlePaneRenameKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 func (m *Model) handlePaneOutput(msg PaneOutputMsg) tea.Cmd {
 	// Overlay panes live outside the layout tree — check them first.
-	for _, tab := range m.tabs {
+	for _, tab := range m.allTabs() {
 		if tab.overlayPane != nil && tab.overlayPane.ID == msg.PaneID {
 			tab.overlayPane.preparing = false
 			// Same armed-reset consume as the layout-tree branch below. This
@@ -2988,7 +2991,7 @@ func (m *Model) handlePaneOutput(msg PaneOutputMsg) tea.Cmd {
 			return nil
 		}
 	}
-	for _, tab := range m.tabs {
+	for _, tab := range m.allTabs() {
 		if tab.Root == nil {
 			continue
 		}
@@ -3090,7 +3093,7 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) ([]string, []tea.Cm
 	// Index existing tabs and panes for preservation.
 	existingTabs := make(map[string]*TabModel)
 	existingPanes := make(map[string]*PaneModel)
-	for _, tab := range m.tabs {
+	for _, tab := range m.allTabs() {
 		existingTabs[tab.ID] = tab
 		if tab.Root != nil {
 			for _, pane := range tab.Leaves() {
@@ -3107,7 +3110,10 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) ([]string, []tea.Cm
 		paneMap[state.Panes[i].ID] = &state.Panes[i]
 	}
 
-	m.tabs = nil
+	// Interim shape: every broadcast tab lands in ONE synthetic project.
+	// WorkspaceStateMsg carries no projects yet, so there is nothing to
+	// partition on — Task 7 replaces this with the parsed set.
+	m.setTabs(nil)
 	for _, tabInfo := range state.Tabs {
 		// Reuse existing tab if possible (preserves layout tree).
 		tab, exists := existingTabs[tabInfo.ID]
@@ -3129,7 +3135,7 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) ([]string, []tea.Cm
 				if shown {
 					overlayResizeCmds = append(overlayResizeCmds, m.overlayResizeCmd(tab))
 				}
-				m.tabs = append(m.tabs, tab)
+				m.appendTab(tab)
 				continue
 			}
 		}
@@ -3264,7 +3270,7 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) ([]string, []tea.Cm
 
 		m.finalizeTabPanes(tab)
 		log.Printf("apply: tab %s finalized", tab.ID)
-		m.tabs = append(m.tabs, tab)
+		m.appendTab(tab)
 	}
 
 	// Dispose panes that did not survive reconciliation — both panes pruned
@@ -3272,7 +3278,7 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) ([]string, []tea.Cm
 	// this, each removed pane leaks its VT emulator (drain goroutine +
 	// scrollback grid) for the TUI session's lifetime.
 	surviving := make(map[string]bool)
-	for _, tab := range m.tabs {
+	for _, tab := range m.allTabs() {
 		if tab.Root != nil {
 			for id := range tab.Root.PaneIDs() {
 				surviving[id] = true
@@ -3288,16 +3294,16 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) ([]string, []tea.Cm
 		}
 	}
 
-	for i, tab := range m.tabs {
+	for i, tab := range m.curTabs() {
 		if tab.ID == state.ActiveTab {
-			m.activeTab = i
+			m.setActiveTabIdx(i)
 			break
 		}
 	}
-	if m.activeTab >= len(m.tabs) {
-		m.activeTab = max(0, len(m.tabs)-1)
+	if m.activeTabIdx() >= len(m.curTabs()) {
+		m.setActiveTabIdx(max(0, len(m.curTabs())-1))
 	}
-	log.Printf("apply: active tab = %d", m.activeTab)
+	log.Printf("apply: active tab = %d", m.activeTabIdx())
 
 	// Reconcile notes mode after daemon state sync:
 	//   (a) If the bound pane no longer exists in any tab, tear down
@@ -3314,7 +3320,7 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) ([]string, []tea.Cm
 	if m.notesMode && m.notesEditor != nil {
 		bound := m.notesEditor.PaneID()
 		var boundTab *TabModel
-		for _, tab := range m.tabs {
+		for _, tab := range m.allTabs() {
 			if tab.Root != nil && tab.Root.PaneIDs()[bound] {
 				boundTab = tab
 				break
@@ -3504,19 +3510,12 @@ func (m *Model) replayBufSize() int {
 
 func (m *Model) resizeTabs() {
 	tabH := m.height - chromeHeight
-	for _, tab := range m.tabs {
+	for _, tab := range m.allTabs() {
 		// Canvas = full window area, independent of notes squeeze, so
 		// wide-canvas panes only ever resize on a real window resize.
 		tab.SetCanvas(m.width, tabH)
 		tab.Resize(m.paneAreaWidth(), tabH)
 	}
-}
-
-func (m Model) activeTabModel() *TabModel {
-	if m.activeTab < len(m.tabs) {
-		return m.tabs[m.activeTab]
-	}
-	return nil
 }
 
 // isActivePane reports whether paneID is the pane the user is currently
@@ -3537,17 +3536,17 @@ func (m Model) isActivePane(paneID string) bool {
 // switchTab sets the active tab locally and notifies the daemon so its
 // active_tab stays in sync (prevents stale overwrites on broadcastState).
 func (m *Model) switchTab(idx int) tea.Cmd {
-	if idx < 0 || idx >= len(m.tabs) {
+	if idx < 0 || idx >= len(m.curTabs()) {
 		return nil
 	}
 	// Switching tabs leaves the notes-bound pane behind. Flush and exit
-	// notes mode BEFORE m.activeTab changes so exitNotesModeInPlace
+	// notes mode BEFORE the active tab changes so exitNotesModeInPlace
 	// reverts focus mode on the OLD tab.
 	if m.notesMode && m.notesEditor != nil {
 		m.exitNotesModeInPlace()
 	}
-	m.activeTab = idx
-	tabID := m.tabs[idx].ID
+	tabID := m.curTabs()[idx].ID
+	m.setActiveTabIdx(idx)
 	return func() tea.Msg {
 		msg, _ := ipc.NewMessage(ipc.MsgSwitchTab, ipc.SwitchTabPayload{
 			TabID: tabID,
@@ -3564,10 +3563,11 @@ const eagerTabMarker = "●"
 
 // tabHasEagerPane reports whether any pane in the tab at idx has Eager set.
 func (m Model) tabHasEagerPane(idx int) bool {
-	if m.tabs[idx].Root == nil {
+	tabs := m.curTabs()
+	if idx < 0 || idx >= len(tabs) || tabs[idx].Root == nil {
 		return false
 	}
-	for _, p := range m.tabs[idx].Leaves() {
+	for _, p := range tabs[idx].Leaves() {
 		if p != nil && p.Eager {
 			return true
 		}
@@ -3581,17 +3581,17 @@ func (m Model) tabHasEagerPane(idx int) bool {
 // `hitTestTab` MUST go through this helper so click coordinates stay aligned
 // with the rendered widths.
 func (m Model) tabLabel(idx int) string {
-	if m.renaming && idx == m.activeTab {
+	if m.renaming && idx == m.activeTabIdx() {
 		return "* " + m.renameInput + "▎"
 	}
-	name := fmt.Sprintf("%d:%s", idx+1, m.tabs[idx].Name)
+	name := fmt.Sprintf("%d:%s", idx+1, m.curTabs()[idx].Name)
 	if m.tabHasEagerPane(idx) {
 		name = eagerTabMarker + name
 	}
 	if m.tabHasWorkingPane(idx) {
 		name = spinnerFrames[m.workSpinnerFrame%len(spinnerFrames)] + " " + name
 	}
-	if idx == m.activeTab {
+	if idx == m.activeTabIdx() {
 		return "* " + name
 	}
 	return name
@@ -3603,8 +3603,8 @@ func (m Model) tabLabel(idx int) string {
 // color > active/inactive default. Shared by renderTabBar and hitTestTab so
 // rendered widths and click hit-testing never diverge.
 func (m Model) tabStyle(idx int) lipgloss.Style {
-	tab := m.tabs[idx]
-	active := idx == m.activeTab
+	tab := m.curTabs()[idx]
+	active := idx == m.activeTabIdx()
 	// tabUnseen self-excludes the active tab; tabPinnedAttention deliberately
 	// does not (a pin colors the active tab's label unless the pinned pane is
 	// the one in focus).
@@ -3625,7 +3625,8 @@ func (m Model) tabStyle(idx int) lipgloss.Style {
 }
 
 func (m Model) renderTabBar() string {
-	if len(m.tabs) == 0 {
+	tabs := m.curTabs()
+	if len(tabs) == 0 {
 		return lipgloss.NewStyle().Width(m.width).Render("")
 	}
 
@@ -3635,8 +3636,8 @@ func (m Model) renderTabBar() string {
 	}
 
 	// Pre-render all tabs
-	all := make([]renderedTab, len(m.tabs))
-	for i := range m.tabs {
+	all := make([]renderedTab, len(tabs))
+	for i := range tabs {
 		name := m.tabLabel(i)
 		style := m.tabStyle(i)
 		rendered := style.Render(name)
@@ -3663,17 +3664,18 @@ func (m Model) renderTabBar() string {
 	}
 
 	// Overflow: include active tab, expand outward, show indicator for hidden
-	included := make([]bool, len(m.tabs))
-	included[m.activeTab] = true
-	usedW := all[m.activeTab].width
+	included := make([]bool, len(tabs))
+	activeIdx := m.activeTabIdx()
+	included[activeIdx] = true
+	usedW := all[activeIdx].width
 
 	// Reserve space for overflow indicator (e.g. " «3 more»")
 	indicatorReserve := 12
 
 	// Expand left, then right from active tab
-	left := m.activeTab - 1
-	right := m.activeTab + 1
-	for left >= 0 || right < len(m.tabs) {
+	left := activeIdx - 1
+	right := activeIdx + 1
+	for left >= 0 || right < len(tabs) {
 		if left >= 0 {
 			need := all[left].width + 1 // +1 for separator
 			if usedW+need+indicatorReserve <= m.width {
@@ -3684,14 +3686,14 @@ func (m Model) renderTabBar() string {
 				left = -1 // stop expanding left
 			}
 		}
-		if right < len(m.tabs) {
+		if right < len(tabs) {
 			need := all[right].width + 1
 			if usedW+need+indicatorReserve <= m.width {
 				included[right] = true
 				usedW += need
 				right++
 			} else {
-				right = len(m.tabs) // stop expanding right
+				right = len(tabs) // stop expanding right
 			}
 		}
 	}
@@ -3722,7 +3724,8 @@ func (m Model) renderTabBar() string {
 // hitTestTab returns the tab index at screen X coordinate, or -1 if none.
 // Mirrors renderTabBar() width/overflow logic exactly.
 func (m *Model) hitTestTab(x int) int {
-	if len(m.tabs) == 0 {
+	tabs := m.curTabs()
+	if len(tabs) == 0 {
 		return -1
 	}
 
@@ -3732,8 +3735,8 @@ func (m *Model) hitTestTab(x int) int {
 	}
 
 	// Pre-render tab widths using the same styling as renderTabBar.
-	all := make([]renderedTab, len(m.tabs))
-	for i := range m.tabs {
+	all := make([]renderedTab, len(tabs))
+	for i := range tabs {
 		name := m.tabLabel(i)
 		style := m.tabStyle(i)
 		rendered := style.Render(name)
@@ -3749,19 +3752,20 @@ func (m *Model) hitTestTab(x int) int {
 		}
 	}
 
-	included := make([]bool, len(m.tabs))
+	included := make([]bool, len(tabs))
 	if totalW <= m.width {
 		for i := range included {
 			included[i] = true
 		}
 	} else {
-		included[m.activeTab] = true
-		usedW := all[m.activeTab].width
+		activeIdx := m.activeTabIdx()
+		included[activeIdx] = true
+		usedW := all[activeIdx].width
 		indicatorReserve := 12
 
-		left := m.activeTab - 1
-		right := m.activeTab + 1
-		for left >= 0 || right < len(m.tabs) {
+		left := activeIdx - 1
+		right := activeIdx + 1
+		for left >= 0 || right < len(tabs) {
 			if left >= 0 {
 				need := all[left].width + 1
 				if usedW+need+indicatorReserve <= m.width {
@@ -3772,14 +3776,14 @@ func (m *Model) hitTestTab(x int) int {
 					left = -1
 				}
 			}
-			if right < len(m.tabs) {
+			if right < len(tabs) {
 				need := all[right].width + 1
 				if usedW+need+indicatorReserve <= m.width {
 					included[right] = true
 					usedW += need
 					right++
 				} else {
-					right = len(m.tabs)
+					right = len(tabs)
 				}
 			}
 		}
@@ -3874,7 +3878,7 @@ func (m Model) renderStatusBar() string {
 		if tab.Root != nil {
 			paneCount = len(tab.Leaves())
 		}
-		paneInfo := fmt.Sprintf("tab %d/%d  panes:%d", m.activeTab+1, len(m.tabs), paneCount)
+		paneInfo := fmt.Sprintf("tab %d/%d  panes:%d", m.activeTabIdx()+1, len(m.curTabs()), paneCount)
 
 		if pane := tab.ActivePaneModel(); pane != nil {
 			displayPath := pane.CWD
@@ -5049,7 +5053,7 @@ func keyToBytes(keyMsg tea.KeyPressMsg) []byte {
 
 func (m Model) resizeAllPanes() tea.Cmd {
 	return func() tea.Msg {
-		for _, tab := range m.tabs {
+		for _, tab := range m.allTabs() {
 			if tab.Root == nil {
 				continue
 			}
@@ -5155,7 +5159,7 @@ func (m Model) toggleActivePaneEager() tea.Cmd {
 
 func (m Model) sendAllLayouts() tea.Cmd {
 	return func() tea.Msg {
-		for _, tab := range m.tabs {
+		for _, tab := range m.allTabs() {
 			if tab.Root == nil {
 				continue
 			}

@@ -17,8 +17,7 @@ func modelForActivePaneTest(activePaneID string) Model {
 	tab.ActivePane = activePaneID
 	return Model{
 		client:        &fakeSender{},
-		tabs:          []*TabModel{tab},
-		activeTab:     0,
+		projects:      oneProject(tab),
 		notifications: NewNotificationCenter(cfg.Notification.SidebarWidth, cfg.Notification.MaxEvents),
 	}
 }
@@ -103,8 +102,7 @@ func TestIsActivePane_NoActiveTab(t *testing.T) {
 	cfg := config.Default()
 	m := Model{
 		client:        &fakeSender{},
-		tabs:          nil,
-		activeTab:     0,
+		projects:      oneProject(),
 		notifications: NewNotificationCenter(cfg.Notification.SidebarWidth, cfg.Notification.MaxEvents),
 	}
 	if m.isActivePane("anything") {

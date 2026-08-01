@@ -20,10 +20,10 @@ func TestApplyWorkspaceState_OverlayPane_NotInLayoutTree(t *testing.T) {
 	}
 	m.applyWorkspaceState(state)
 
-	if len(m.tabs) != 1 {
-		t.Fatalf("tabs = %d, want 1", len(m.tabs))
+	if len(m.curTabs()) != 1 {
+		t.Fatalf("tabs = %d, want 1", len(m.curTabs()))
 	}
-	tab := m.tabs[0]
+	tab := m.curTabs()[0]
 	if tab.Root == nil || len(tab.Leaves()) != 1 || tab.Leaves()[0].ID != "pane-n" {
 		t.Errorf("layout tree must hold only the normal pane, got %v", tab.Leaves())
 	}
@@ -47,7 +47,7 @@ func TestApplyWorkspaceState_OverlayGone_ClearsSlot(t *testing.T) {
 		},
 	}
 	m.applyWorkspaceState(withOverlay)
-	m.tabs[0].overlayVisible = true
+	m.curTabs()[0].overlayVisible = true
 
 	// Overlay exits (user pressed q in lazygit) — daemon broadcasts without it.
 	without := WorkspaceStateMsg{
@@ -57,7 +57,7 @@ func TestApplyWorkspaceState_OverlayGone_ClearsSlot(t *testing.T) {
 	}
 	m.applyWorkspaceState(without)
 
-	tab := m.tabs[0]
+	tab := m.curTabs()[0]
 	if tab.overlayPane != nil || tab.overlayVisible {
 		t.Errorf("overlay slot must be cleared, got pane=%v visible=%v", tab.overlayPane, tab.overlayVisible)
 	}
@@ -89,10 +89,10 @@ func TestApplyWorkspaceState_RestoredLayout_OverlayAdoptedNotInTree(t *testing.T
 	}
 	m.applyWorkspaceState(state)
 
-	if len(m.tabs) != 1 {
-		t.Fatalf("tabs = %d, want 1", len(m.tabs))
+	if len(m.curTabs()) != 1 {
+		t.Fatalf("tabs = %d, want 1", len(m.curTabs()))
 	}
-	tab := m.tabs[0]
+	tab := m.curTabs()[0]
 	if tab.Root == nil || len(tab.Leaves()) != 1 || tab.Leaves()[0].ID != "pane-n" {
 		t.Errorf("restored layout tree must hold only the normal pane, got %v", tab.Leaves())
 	}
@@ -117,7 +117,7 @@ func TestApplyWorkspaceState_PendingOverlayShow_ShowsOnArrival(t *testing.T) {
 	}
 	m.applyWorkspaceState(state)
 
-	tab := m.tabs[0]
+	tab := m.curTabs()[0]
 	if tab.overlayPane == nil || !tab.overlayVisible {
 		t.Fatalf("overlay must show on arrival when this TUI requested it (pane=%v visible=%v)", tab.overlayPane, tab.overlayVisible)
 	}

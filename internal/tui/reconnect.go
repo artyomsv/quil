@@ -436,7 +436,7 @@ func (p *PaneModel) resetForReattach() {
 // class added to one and forgotten in the other is precisely the bug that would
 // survive review, because each reset looks complete on its own.
 func (m *Model) eachClientPane(fn func(*PaneModel)) {
-	for _, tab := range m.tabs {
+	for _, tab := range m.allTabs() {
 		if tab == nil {
 			continue
 		}

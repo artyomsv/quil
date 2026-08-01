@@ -12,8 +12,8 @@ func runCycle(t *testing.T, startColor string) (*TabModel, ipc.UpdateTabPayload)
 	t.Helper()
 
 	fake := &fakeSender{}
-	m := Model{activeTab: 0, client: fake}
-	m.tabs = []*TabModel{{ID: "tab-1", Name: "Shell", Color: startColor}}
+	m := Model{client: fake}
+	m.setTabs([]*TabModel{{ID: "tab-1", Name: "Shell", Color: startColor}})
 
 	cmd := m.cycleTabColor()
 	if cmd == nil {
@@ -28,7 +28,7 @@ func runCycle(t *testing.T, startColor string) (*TabModel, ipc.UpdateTabPayload)
 	if err := fake.sent[0].DecodePayload(&payload); err != nil {
 		t.Fatalf("DecodePayload: %v", err)
 	}
-	return m.tabs[0], payload
+	return m.curTabs()[0], payload
 }
 
 func TestCycleTabColor_AdvancesToNextColor(t *testing.T) {

@@ -2,8 +2,12 @@ package tui
 
 // TabModel represents a single tab containing a tree of panes.
 type TabModel struct {
-	ID         string
-	Name       string
+	ID   string
+	Name string
+	// Dest is the destination the tab's project arrived on — client-side
+	// only, empty for the local daemon. Carried on the tab so a pane event
+	// can be routed without walking back up to the project.
+	Dest       string
 	Color      string
 	Root       *LayoutNode // binary split tree (nil = empty tab)
 	ActivePane string      // pane ID of the active pane

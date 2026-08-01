@@ -61,8 +61,7 @@ func modelForWorkTest() Model {
 	tab.ActivePane = "p1"
 	return Model{
 		client:        &fakeSender{},
-		tabs:          []*TabModel{tab},
-		activeTab:     0,
+		projects:      oneProject(tab),
 		notifications: NewNotificationCenter(cfg.Notification.SidebarWidth, cfg.Notification.MaxEvents),
 	}
 }
@@ -75,8 +74,8 @@ func modelWithBackgroundTab() Model {
 	tab2 := NewTabModel("tab-2", "background")
 	tab2.Root = NewLeaf(NewPaneModel("p2", 1024))
 	tab2.ActivePane = "p2"
-	m.tabs = append(m.tabs, tab2)
-	m.activeTab = 0
+	m.appendTab(tab2)
+	m.setActiveTabIdx(0)
 	return m
 }
 
@@ -85,13 +84,13 @@ func modelWithBackgroundTab() Model {
 // transitions on "p1b" exercise the unfocused-sibling marking rules.
 func modelWithSplitActiveTab() Model {
 	m := modelForWorkTest()
-	m.tabs[0].Root = &LayoutNode{
+	m.curTabs()[0].Root = &LayoutNode{
 		Split: SplitHorizontal,
 		Ratio: 0.5,
-		Left:  m.tabs[0].Root,
+		Left:  m.curTabs()[0].Root,
 		Right: NewLeaf(NewPaneModel("p1b", 1024)),
 	}
-	m.tabs[0].invalidateLeaves()
+	m.curTabs()[0].invalidateLeaves()
 	return m
 }
 
@@ -99,7 +98,7 @@ func TestApplyWorkTransition_StartSetsWorking(t *testing.T) {
 	t.Parallel()
 	m := modelForWorkTest()
 	m.applyWorkTransition("p1", "hook.claude.UserPromptSubmit", nil)
-	if !m.tabs[0].Root.Leaves()[0].working {
+	if !m.curTabs()[0].Root.Leaves()[0].working {
 		t.Fatal("expected pane.working = true after start event")
 	}
 	if !m.anyPaneWorking() {
@@ -115,10 +114,10 @@ func TestApplyWorkTransition_StopOnBackgroundTab_SetsUnseen(t *testing.T) {
 	m := modelWithBackgroundTab()
 	m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit", nil)
 	m.applyWorkTransition("p2", "hook.claude.Stop", nil)
-	if m.tabs[1].Root.Leaves()[0].working {
+	if m.curTabs()[1].Root.Leaves()[0].working {
 		t.Error("pane.working should be false after stop")
 	}
-	if !m.tabs[1].Root.Leaves()[0].unseen {
+	if !m.curTabs()[1].Root.Leaves()[0].unseen {
 		t.Error("background-tab pane should be marked unseen after a genuine stop")
 	}
 	if !m.tabUnseen(1) {
@@ -132,10 +131,10 @@ func TestApplyWorkTransition_StopOnFocusedPane_NoMark(t *testing.T) {
 	m := modelForWorkTest()
 	m.applyWorkTransition("p1", "hook.claude.UserPromptSubmit", nil)
 	m.applyWorkTransition("p1", "hook.claude.Stop", nil)
-	if m.tabs[0].Root.Leaves()[0].working {
+	if m.curTabs()[0].Root.Leaves()[0].working {
 		t.Error("pane.working should be false after stop")
 	}
-	if m.tabs[0].Root.Leaves()[0].unseen {
+	if m.curTabs()[0].Root.Leaves()[0].unseen {
 		t.Error("the focused pane of the active tab must never be marked unseen")
 	}
 }
@@ -148,7 +147,7 @@ func TestApplyWorkTransition_StopOnUnfocusedSibling_MarksPaneOnly(t *testing.T) 
 	m := modelWithSplitActiveTab()
 	m.applyWorkTransition("p1b", "hook.claude.UserPromptSubmit", nil)
 	m.applyWorkTransition("p1b", "hook.claude.Stop", nil)
-	if !m.tabs[0].Root.Right.Pane.unseen {
+	if !m.curTabs()[0].Root.Right.Pane.unseen {
 		t.Error("unfocused sibling pane should be marked unseen")
 	}
 	if m.tabUnseen(0) {
@@ -171,10 +170,10 @@ func TestApplyWorkTransition_ParkForInput_MarksBackgroundPane(t *testing.T) {
 			m := modelWithBackgroundTab()
 			m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit", nil)
 			m.applyWorkTransition("p2", evt, nil)
-			if m.tabs[1].Root.Leaves()[0].working {
+			if m.curTabs()[1].Root.Leaves()[0].working {
 				t.Errorf("%s: pane.working should be false after a park-for-input edge", evt)
 			}
-			if !m.tabs[1].Root.Leaves()[0].unseen {
+			if !m.curTabs()[1].Root.Leaves()[0].unseen {
 				t.Errorf("%s: pane should be marked unseen when the agent parks", evt)
 			}
 		})
@@ -188,7 +187,7 @@ func TestApplyWorkTransition_ResumeAfterParkClearsUnseenAndReArms(t *testing.T) 
 	m := modelWithBackgroundTab()
 	m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit", nil)
 	m.applyWorkTransition("p2", "hook.claude.PermissionRequest", nil) // park
-	pane := m.tabs[1].Root.Leaves()[0]
+	pane := m.curTabs()[1].Root.Leaves()[0]
 	if pane.working {
 		t.Fatal("precondition: pane should be parked (not working) before resume")
 	}
@@ -210,9 +209,9 @@ func TestApplyWorkTransition_StartClearsStaleUnseen(t *testing.T) {
 	// A fresh turn must clear a lingering mark from the previous turn — the
 	// spinner supersedes the green "finished" cue.
 	m := modelWithBackgroundTab()
-	m.tabs[1].Root.Leaves()[0].unseen = true
+	m.curTabs()[1].Root.Leaves()[0].unseen = true
 	m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit", nil)
-	if m.tabs[1].Root.Leaves()[0].unseen {
+	if m.curTabs()[1].Root.Leaves()[0].unseen {
 		t.Error("a new turn (UserPromptSubmit) should clear a stale unseen mark")
 	}
 }
@@ -222,18 +221,18 @@ func TestApplyWorkTransition_AbortClearsWorkingWithoutMarking(t *testing.T) {
 	m := modelWithBackgroundTab()
 	m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit", nil)
 	m.applyWorkTransition("p2", "process_exit", nil)
-	if m.tabs[1].Root.Leaves()[0].working {
+	if m.curTabs()[1].Root.Leaves()[0].working {
 		t.Error("pane.working should be false after process_exit")
 	}
-	if m.tabs[1].Root.Leaves()[0].unseen {
+	if m.curTabs()[1].Root.Leaves()[0].unseen {
 		t.Error("process_exit must NOT mark the pane unseen (a crash is not a completed turn)")
 	}
 
 	// An existing mark from an earlier completion survives an abort.
 	m2 := modelWithBackgroundTab()
-	m2.tabs[1].Root.Leaves()[0].unseen = true
+	m2.curTabs()[1].Root.Leaves()[0].unseen = true
 	m2.applyWorkTransition("p2", "process_exit", nil)
-	if !m2.tabs[1].Root.Leaves()[0].unseen {
+	if !m2.curTabs()[1].Root.Leaves()[0].unseen {
 		t.Error("abort must not clear an existing unseen mark")
 	}
 }
@@ -243,7 +242,7 @@ func TestApplyWorkTransition_StopWithoutPriorStart_NoMark(t *testing.T) {
 	// A Stop with no in-progress turn (pane was already idle) must not mark.
 	m := modelWithBackgroundTab()
 	m.applyWorkTransition("p2", "hook.claude.Stop", nil)
-	if m.tabs[1].Root.Leaves()[0].unseen {
+	if m.curTabs()[1].Root.Leaves()[0].unseen {
 		t.Error("stop on an already-idle pane must not mark the pane unseen")
 	}
 }
@@ -261,7 +260,7 @@ func TestApplyWorkTransition_StopWithOutstandingSubagents_KeepsSpinner(t *testin
 			m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit", nil)
 			m.applyWorkTransition("p2", "hook.claude.SubagentStart", map[string]string{"agent_type": "Explore"})
 			m.applyWorkTransition("p2", stopEdge, nil)
-			pane := m.tabs[1].Root.Leaves()[0]
+			pane := m.curTabs()[1].Root.Leaves()[0]
 			if !pane.working {
 				t.Errorf("%s with an outstanding subagent must keep the spinner", stopEdge)
 			}
@@ -289,7 +288,7 @@ func TestApplyWorkTransition_SubagentStopBeforeStop_TurnKeepsSpinner(t *testing.
 	m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit", nil)
 	m.applyWorkTransition("p2", "hook.claude.SubagentStart", map[string]string{"agent_type": "Explore"})
 	m.applyWorkTransition("p2", "hook.claude.SubagentStop", map[string]string{"agent_type": "Explore"})
-	pane := m.tabs[1].Root.Leaves()[0]
+	pane := m.curTabs()[1].Root.Leaves()[0]
 	if !pane.working {
 		t.Error("subagent drain during an active turn must keep the spinner")
 	}
@@ -316,7 +315,7 @@ func TestApplyWorkTransition_CoalescedSubagentBursts(t *testing.T) {
 	m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit", nil)
 	m.applyWorkTransition("p2", "hook.claude.SubagentStart", map[string]string{"agent_type": "Explore", "coalesced": "3"})
 	m.applyWorkTransition("p2", "hook.claude.Stop", nil)
-	pane := m.tabs[1].Root.Leaves()[0]
+	pane := m.curTabs()[1].Root.Leaves()[0]
 
 	m.applyWorkTransition("p2", "hook.claude.SubagentStop", map[string]string{"agent_type": "Explore", "coalesced": "2"})
 	if !pane.working {
@@ -337,7 +336,7 @@ func TestApplyWorkTransition_OrphanSubagentStop_NoUnderflow(t *testing.T) {
 	// must be a no-op — and must NOT push the counter negative, which would
 	// make the next SubagentStart+SubagentStop pair fail to balance.
 	m := modelWithBackgroundTab()
-	pane := m.tabs[1].Root.Leaves()[0]
+	pane := m.curTabs()[1].Root.Leaves()[0]
 	m.applyWorkTransition("p2", "hook.claude.SubagentStop", map[string]string{"agent_type": "Explore"}) // orphan
 	if pane.working {
 		t.Fatal("orphan SubagentStop on an idle pane must not start the spinner")
@@ -365,7 +364,7 @@ func TestApplyWorkTransition_SessionEndClearsOutstandingSubagents(t *testing.T) 
 	m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit", nil)
 	m.applyWorkTransition("p2", "hook.claude.SubagentStart", map[string]string{"agent_type": "Explore"})
 	m.applyWorkTransition("p2", "hook.claude.SessionEnd", nil)
-	pane := m.tabs[1].Root.Leaves()[0]
+	pane := m.curTabs()[1].Root.Leaves()[0]
 	if pane.working {
 		t.Error("SessionEnd must stop the spinner even with an outstanding subagent count")
 	}
@@ -597,7 +596,7 @@ func TestApplyWorkTransition_ProcessExitClearsOutstandingSubagents(t *testing.T)
 	m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit", nil)
 	m.applyWorkTransition("p2", "hook.claude.SubagentStart", map[string]string{"agent_type": "Explore"})
 	m.applyWorkTransition("p2", "process_exit", nil)
-	pane := m.tabs[1].Root.Leaves()[0]
+	pane := m.curTabs()[1].Root.Leaves()[0]
 	if len(pane.subagents) != 0 {
 		t.Fatalf("process_exit must clear the subagent ledger; got %v", pane.subagents)
 	}
@@ -623,7 +622,7 @@ func TestApplyWorkTransition_SubagentStartFromIdle_SetsWorkingAndClearsUnseen(t 
 	// subagent can spawn (or an event replay can start mid-cycle): the spawn
 	// alone must light the spinner and supersede a stale unseen mark.
 	m := modelWithBackgroundTab()
-	pane := m.tabs[1].Root.Leaves()[0]
+	pane := m.curTabs()[1].Root.Leaves()[0]
 	pane.unseen = true
 	m.applyWorkTransition("p2", "hook.claude.SubagentStart", map[string]string{"agent_type": "Explore"})
 	if !pane.working {
@@ -675,13 +674,13 @@ func TestTabUnseen_DerivedAndBounds(t *testing.T) {
 	if m.tabUnseen(1) {
 		t.Error("background tab with no unseen pane must report false")
 	}
-	m.tabs[1].Root.Leaves()[0].unseen = true
+	m.curTabs()[1].Root.Leaves()[0].unseen = true
 	if !m.tabUnseen(1) {
 		t.Error("background tab with an unseen pane must report true")
 	}
 	// The same tab reports false the moment it is active — the label cue is
 	// suppressed while the user is on the tab (the pane border takes over).
-	m.activeTab = 1
+	m.setActiveTabIdx(1)
 	if m.tabUnseen(1) {
 		t.Error("the active tab must never report unseen")
 	}
@@ -695,13 +694,13 @@ func TestTabStyle_UnseenOverridesInactive(t *testing.T) {
 	// rendered 256-color background SGR: unseen=48;5;28, active=48;5;57.
 
 	// Background tab with an unseen pane → green label.
-	m.tabs[1].Root.Leaves()[0].unseen = true
+	m.curTabs()[1].Root.Leaves()[0].unseen = true
 	if !strings.Contains(m.tabStyle(1).Render("x"), "48;5;28") {
 		t.Error("unseen background tab should render with green background (48;5;28)")
 	}
 
 	// Active tab never renders the green label, even with an unseen pane.
-	m.tabs[0].Root.Leaves()[0].unseen = true
+	m.curTabs()[0].Root.Leaves()[0].unseen = true
 	if strings.Contains(m.tabStyle(0).Render("x"), "48;5;28") {
 		t.Error("active tab must never use the green unseen background")
 	}
@@ -716,14 +715,14 @@ func TestUpdate_PaneEvent_MutedPaneTracksWorkingWithoutCard(t *testing.T) {
 	// daemon.emitEvent) so `working` stays accurate across mute/unmute — but
 	// muting must still suppress the visible sidebar card.
 	m := modelForWorkTest()
-	m.tabs[0].Root.Leaves()[0].Muted = true
+	m.curTabs()[0].Root.Leaves()[0].Muted = true
 
 	start := paneEventMsg(ipc.PaneEventPayload{
 		ID: "e1", PaneID: "p1", Type: "hook.claude.UserPromptSubmit", Title: "Working on: x",
 	})
 	next, _ := m.Update(start)
 	nm := next.(Model)
-	if !nm.tabs[0].Root.Leaves()[0].working {
+	if !nm.curTabs()[0].Root.Leaves()[0].working {
 		t.Fatal("muted pane should still track working=true from a live work-state event")
 	}
 	if nm.notifications.Count() != 0 {
@@ -735,7 +734,7 @@ func TestUpdate_PaneEvent_MutedPaneTracksWorkingWithoutCard(t *testing.T) {
 	})
 	next2, _ := nm.Update(stop)
 	nm2 := next2.(Model)
-	if nm2.tabs[0].Root.Leaves()[0].working {
+	if nm2.curTabs()[0].Root.Leaves()[0].working {
 		t.Error("muted pane should still clear working=false from a live Stop event")
 	}
 	if nm2.notifications.Count() != 0 {
@@ -766,15 +765,15 @@ func TestUpdate_WorkSpinnerTick_AdvancesAndStops(t *testing.T) {
 	t.Parallel()
 	m := modelForWorkTest()
 	// Pane working → tick should advance the frame and keep running.
-	m.tabs[0].Root.Leaves()[0].working = true
+	m.curTabs()[0].Root.Leaves()[0].working = true
 	m.workTickRunning = true
 	next, cmd := m.Update(workSpinnerTickMsg{})
 	nm := next.(Model)
 	if nm.workSpinnerFrame != 1 {
 		t.Errorf("frame = %d, want 1", nm.workSpinnerFrame)
 	}
-	if nm.tabs[0].Root.Leaves()[0].workFrame != 1 {
-		t.Errorf("pane.workFrame = %d, want 1 (mirrored)", nm.tabs[0].Root.Leaves()[0].workFrame)
+	if nm.curTabs()[0].Root.Leaves()[0].workFrame != 1 {
+		t.Errorf("pane.workFrame = %d, want 1 (mirrored)", nm.curTabs()[0].Root.Leaves()[0].workFrame)
 	}
 	if cmd == nil {
 		t.Error("tick should reschedule while a pane is working")
@@ -795,7 +794,7 @@ func TestUpdate_WorkSpinnerTick_AdvancesAndStops(t *testing.T) {
 func TestTabLabel_ShowsSpinnerWhenWorking(t *testing.T) {
 	t.Parallel()
 	m := modelForWorkTest()
-	m.tabs[0].Name = "Build"
+	m.curTabs()[0].Name = "Build"
 	m.workSpinnerFrame = 0 // spinnerFrames[0] == "⠋"
 
 	// Not working: no spinner glyph.
@@ -804,7 +803,7 @@ func TestTabLabel_ShowsSpinnerWhenWorking(t *testing.T) {
 	}
 
 	// Working: leading spinner frame present.
-	m.tabs[0].Root.Leaves()[0].working = true
+	m.curTabs()[0].Root.Leaves()[0].working = true
 	got := m.tabLabel(0)
 	if !strings.Contains(got, "⠋") {
 		t.Errorf("working tab label %q should contain frame ⠋", got)
@@ -852,8 +851,8 @@ func TestSyncPaneMeta_MuteDoesNotDisturbWorking(t *testing.T) {
 func TestAckFocusedPane_ClearsOnlyFocusedPane(t *testing.T) {
 	t.Parallel()
 	m := modelWithSplitActiveTab()
-	focused := m.tabs[0].Root.Left.Pane  // "p1" — tab.ActivePane
-	sibling := m.tabs[0].Root.Right.Pane // "p1b" — unfocused
+	focused := m.curTabs()[0].Root.Left.Pane  // "p1" — tab.ActivePane
+	sibling := m.curTabs()[0].Root.Right.Pane // "p1b" — unfocused
 	focused.unseen = true
 	sibling.unseen = true
 	m.ackFocusedPane()
@@ -868,7 +867,7 @@ func TestAckFocusedPane_ClearsOnlyFocusedPane(t *testing.T) {
 func TestAckFocusedPane_BackgroundTabUntouched(t *testing.T) {
 	t.Parallel()
 	m := modelWithBackgroundTab()
-	bg := m.tabs[1].Root.Leaves()[0] // "p2" is tab-2's ActivePane, but tab-2 is background
+	bg := m.curTabs()[1].Root.Leaves()[0] // "p2" is tab-2's ActivePane, but tab-2 is background
 	bg.unseen = true
 	m.ackFocusedPane()
 	if !bg.unseen {
@@ -917,9 +916,10 @@ func TestUpdate_AcksFocusedPaneAtEntry(t *testing.T) {
 	// active tab on every message — focusing is the acknowledgement (see
 	// ackFocusedPane; a focused pane never renders the mark anyway).
 	m := modelForWorkTest()
-	m.tabs[0].Root.Leaves()[0].unseen = true
+	m.curTabs()[0].Root.Leaves()[0].unseen = true
 	next, _ := m.Update(workSpinnerTickMsg{})
-	if next.(Model).tabs[0].Root.Leaves()[0].unseen {
+	nextM := next.(Model)
+	if nextM.curTabs()[0].Root.Leaves()[0].unseen {
 		t.Error("Update entry must acknowledge the focused pane of the active tab")
 	}
 }
@@ -927,7 +927,7 @@ func TestUpdate_AcksFocusedPaneAtEntry(t *testing.T) {
 func TestWorkSpinnerTick_FrameWraparoundMirrors(t *testing.T) {
 	t.Parallel()
 	m := modelForWorkTest()
-	m.tabs[0].Root.Leaves()[0].working = true
+	m.curTabs()[0].Root.Leaves()[0].working = true
 	m.workTickRunning = true
 	// Push the frame to the last index so the next tick crosses the modulo
 	// boundary — the raw frame keeps incrementing and the pane mirror must
@@ -938,9 +938,9 @@ func TestWorkSpinnerTick_FrameWraparoundMirrors(t *testing.T) {
 	if nm.workSpinnerFrame != len(spinnerFrames) {
 		t.Fatalf("frame = %d, want %d", nm.workSpinnerFrame, len(spinnerFrames))
 	}
-	if nm.tabs[0].Root.Leaves()[0].workFrame != len(spinnerFrames) {
+	if nm.curTabs()[0].Root.Leaves()[0].workFrame != len(spinnerFrames) {
 		t.Errorf("pane.workFrame = %d, want %d (mirrors raw frame)",
-			nm.tabs[0].Root.Leaves()[0].workFrame, len(spinnerFrames))
+			nm.curTabs()[0].Root.Leaves()[0].workFrame, len(spinnerFrames))
 	}
 	// Rendering at the wrapped frame must not panic (modulo guards the index).
 	_ = nm.tabLabel(0)

@@ -24,8 +24,7 @@ func pasteTestModel(client tuiClient) Model {
 	m := Model{
 		cfg:           cfg,
 		client:        client,
-		tabs:          []*TabModel{tab},
-		activeTab:     0,
+		projects:      oneProject(tab),
 		width:         80,
 		height:        24,
 		notifications: NewNotificationCenter(cfg.Notification.SidebarWidth, cfg.Notification.MaxEvents),
@@ -90,7 +89,7 @@ func TestUpdate_PasteMsgEmptyContent_FallsBackToImagePaste(t *testing.T) {
 	m := pasteTestModel(fake)
 	// The receiving app (claude-code) has paste mode on, so the typed image
 	// path is expected to arrive bracketed.
-	m.tabs[0].ActivePaneModel().AppendOutput([]byte("\x1b[?2004h"))
+	m.curTabs()[0].ActivePaneModel().AppendOutput([]byte("\x1b[?2004h"))
 
 	_, cmd := m.Update(tea.PasteMsg{Content: ""})
 	if cmd == nil {
@@ -127,7 +126,7 @@ func TestUpdate_PasteMsgWithText_SendsBracketedPaste(t *testing.T) {
 	m := pasteTestModel(fake)
 	// Enable ?2004 the way a real app does: through the pane's PTY output
 	// stream, exercising the emulator-callback tracking path.
-	m.tabs[0].ActivePaneModel().AppendOutput([]byte("\x1b[?2004h"))
+	m.curTabs()[0].ActivePaneModel().AppendOutput([]byte("\x1b[?2004h"))
 
 	_, _ = m.Update(tea.PasteMsg{Content: "hello world"})
 
@@ -164,7 +163,7 @@ func TestUpdate_PasteMsgWithText_RawWhenPasteModeOff(t *testing.T) {
 func TestUpdate_PasteMsg_DaemonAuthoritativePasteMode(t *testing.T) {
 	fake := &fakeSender{}
 	m := pasteTestModel(fake)
-	m.tabs[0].ActivePaneModel().daemonBracketedPaste = true
+	m.curTabs()[0].ActivePaneModel().daemonBracketedPaste = true
 
 	_, _ = m.Update(tea.PasteMsg{Content: "hi"})
 
@@ -188,7 +187,7 @@ func TestUpdate_PasteMsg_DaemonAuthoritativePasteMode(t *testing.T) {
 func TestUpdate_PasteMsg_LocalDisableBeatsStaleDaemonFlag(t *testing.T) {
 	fake := &fakeSender{}
 	m := pasteTestModel(fake)
-	pane := m.tabs[0].ActivePaneModel()
+	pane := m.curTabs()[0].ActivePaneModel()
 	// Snapshot said enabled; the app has since turned it off, and this client's
 	// emulator saw the reset before the next snapshot could correct the mirror.
 	pane.daemonBracketedPaste = true
@@ -212,7 +211,7 @@ func TestUpdate_PasteMsg_LocalDisableBeatsStaleDaemonFlag(t *testing.T) {
 func TestPaneModel_BracketedPasteEnabled_ResetVTFallsBackToDaemon(t *testing.T) {
 	fake := &fakeSender{}
 	m := pasteTestModel(fake)
-	pane := m.tabs[0].ActivePaneModel()
+	pane := m.curTabs()[0].ActivePaneModel()
 	pane.AppendOutput([]byte("\x1b[?2004l"))
 	pane.daemonBracketedPaste = true
 	if pane.BracketedPasteEnabled() {

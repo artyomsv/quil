@@ -27,8 +27,7 @@ func overlayTestModel(t *testing.T, paneCWD string) (*Model, *fakeSender, *TabMo
 	fake := &fakeSender{}
 	m := &Model{
 		cfg:            config.Default(),
-		tabs:           []*TabModel{tab},
-		activeTab:      0,
+		projects:       oneProject(tab),
 		client:         fake,
 		pluginRegistry: registryWithLazygit(t),
 	}
@@ -375,7 +374,7 @@ func TestHandleOverlayKey_AltNum_SwitchesTab(t *testing.T) {
 	t.Parallel()
 	m, fake, tab := overlayTestModel(t, "")
 	// Add a second and third tab so alt+2 and alt+3 are valid.
-	m.tabs = append(m.tabs, NewTabModel("tab-2", "b"), NewTabModel("tab-3", "c"))
+	m.appendTab(NewTabModel("tab-2", "b"), NewTabModel("tab-3", "c"))
 	overlay := NewPaneModel("pane-o", 1024)
 	tab.overlayPane = overlay
 	tab.overlayVisible = true

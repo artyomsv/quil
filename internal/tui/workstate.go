@@ -42,10 +42,11 @@ func workEventKind(eventType string) workTransition {
 	return hookevents.ClassifyWorkEvent(eventType)
 }
 
-// findPaneAndTab locates a pane by ID and the index of its containing tab.
-// Returns (nil, -1) if not found.
+// findPaneAndTab locates a pane by ID and the index of its containing tab
+// within the ACTIVE project — the index is what switchTab and activeTab are
+// expressed in, so it cannot span projects. Returns (nil, -1) if not found.
 func (m *Model) findPaneAndTab(paneID string) (*PaneModel, int) {
-	for i, tab := range m.tabs {
+	for i, tab := range m.curTabs() {
 		if tab.Root == nil {
 			continue
 		}
@@ -221,7 +222,7 @@ func (m *Model) applyWorkTransition(paneID, eventType string, data map[string]st
 		// IS marked — its green border is the cue. An abort (process exit)
 		// clears the spinner without marking: a crash is not a completed
 		// turn.
-		focused := tabIdx == m.activeTab && m.tabs[tabIdx].ActivePane == paneID
+		focused := tabIdx == m.activeTabIdx() && m.curTabs()[tabIdx].ActivePane == paneID
 		if !focused {
 			pane.unseen = true
 		}
@@ -249,10 +250,7 @@ func coalescedCount(data map[string]string) int {
 // a newly focused pane is acknowledged on the next message (the 1 s size
 // poll bounds the wait). Unfocused panes keep their mark until focused.
 func (m *Model) ackFocusedPane() {
-	if m.activeTab < 0 || m.activeTab >= len(m.tabs) {
-		return
-	}
-	tab := m.tabs[m.activeTab]
+	tab := m.activeTabModel()
 	if tab == nil || tab.Root == nil || tab.ActivePane == "" {
 		return
 	}
@@ -268,7 +266,7 @@ func (m *Model) ackFocusedPane() {
 
 // anyPaneWorking reports whether any pane in any tab is mid-turn.
 func (m Model) anyPaneWorking() bool {
-	for _, tab := range m.tabs {
+	for _, tab := range m.allTabs() {
 		if tab.Root == nil {
 			continue
 		}
@@ -283,10 +281,11 @@ func (m Model) anyPaneWorking() bool {
 
 // tabHasWorkingPane reports whether the tab at idx has at least one mid-turn pane.
 func (m Model) tabHasWorkingPane(idx int) bool {
-	if idx < 0 || idx >= len(m.tabs) || m.tabs[idx].Root == nil {
+	tabs := m.curTabs()
+	if idx < 0 || idx >= len(tabs) || tabs[idx].Root == nil {
 		return false
 	}
-	for _, p := range m.tabs[idx].Leaves() {
+	for _, p := range tabs[idx].Leaves() {
 		if p != nil && p.working {
 			return true
 		}
@@ -299,10 +298,11 @@ func (m Model) tabHasWorkingPane(idx int) bool {
 // state — the active tab always reports false (the user is on it; the pane
 // border carries the cue there).
 func (m Model) tabUnseen(idx int) bool {
-	if idx < 0 || idx >= len(m.tabs) || idx == m.activeTab || m.tabs[idx].Root == nil {
+	tabs := m.curTabs()
+	if idx < 0 || idx >= len(tabs) || idx == m.activeTabIdx() || tabs[idx].Root == nil {
 		return false
 	}
-	for _, p := range m.tabs[idx].Leaves() {
+	for _, p := range tabs[idx].Leaves() {
 		if p != nil && p.unseen {
 			return true
 		}
@@ -316,14 +316,15 @@ func (m Model) tabUnseen(idx int) bool {
 // seen/unseen state — except when the pinned pane is the focused pane of
 // the active tab (the user is looking straight at it).
 func (m Model) tabPinnedAttention(idx int) bool {
-	if idx < 0 || idx >= len(m.tabs) || m.tabs[idx].Root == nil {
+	tabs := m.curTabs()
+	if idx < 0 || idx >= len(tabs) || tabs[idx].Root == nil {
 		return false
 	}
-	for _, p := range m.tabs[idx].Leaves() {
+	for _, p := range tabs[idx].Leaves() {
 		if p == nil || !p.pinnedAttention {
 			continue
 		}
-		if idx == m.activeTab && p.ID == m.tabs[idx].ActivePane {
+		if idx == m.activeTabIdx() && p.ID == tabs[idx].ActivePane {
 			continue
 		}
 		return true

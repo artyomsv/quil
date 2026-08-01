@@ -124,7 +124,7 @@ wide_canvas = true
 	m.applyWorkspaceState(state)
 	m.resizeTabs()
 
-	tab := m.tabs[0]
+	tab := m.curTabs()[0]
 	leaves := tab.Leaves()
 	if len(leaves) != 2 {
 		t.Fatalf("leaves = %d, want 2", len(leaves))
@@ -193,7 +193,7 @@ func TestApplyWorkspaceState_RestorePath_CanvasFlag(t *testing.T) {
 	m.applyWorkspaceState(state)
 	m.resizeTabs()
 
-	leaves := m.tabs[0].Leaves()
+	leaves := m.curTabs()[0].Leaves()
 	if len(leaves) != 1 {
 		t.Fatalf("leaves = %d, want 1", len(leaves))
 	}
@@ -225,7 +225,7 @@ func TestApplyWorkspaceState_MidSessionFlip_CanvasFlag(t *testing.T) {
 		Panes:     []PaneInfo{{ID: "pane-m1", TabID: "t1", Type: "claude-code"}},
 	}
 	m.applyWorkspaceState(state)
-	if m.tabs[0].Leaves()[0].WideCanvas {
+	if m.curTabs()[0].Leaves()[0].WideCanvas {
 		t.Fatal("setup: pane must start non-canvas before migration")
 	}
 
@@ -235,7 +235,7 @@ func TestApplyWorkspaceState_MidSessionFlip_CanvasFlag(t *testing.T) {
 	m.applyWorkspaceState(state)
 	m.resizeTabs()
 
-	pane := m.tabs[0].Leaves()[0]
+	pane := m.curTabs()[0].Leaves()[0]
 	if !pane.WideCanvas {
 		t.Error("resync-in-tree branch did not pick up the post-migration flag flip")
 	}
@@ -290,7 +290,7 @@ func TestSyncPaneMeta_SetsMinNativeCols(t *testing.T) {
 		Panes:     []PaneInfo{{ID: "p1", TabID: "t1", Type: "claude-code"}},
 	}
 	m.applyWorkspaceState(state)
-	if got := m.tabs[0].Leaves()[0].MinNativeCols; got != 100 {
+	if got := m.curTabs()[0].Leaves()[0].MinNativeCols; got != 100 {
 		t.Errorf("pane MinNativeCols = %d, want 100", got)
 	}
 }
@@ -347,7 +347,7 @@ func TestApplyWorkspaceState_ThresholdSelectsNativeOrCanvas(t *testing.T) {
 	// 209-wide window, horizontal split → each rect ≈104-105 inner cols
 	// (rect-2 ≥ 80) → native (previewMode false).
 	wide := newModel(209, 58)
-	for _, p := range wide.tabs[0].Leaves() {
+	for _, p := range wide.curTabs()[0].Leaves() {
 		if p.previewMode() {
 			t.Errorf("wide window: pane %s in preview, want native (rect %d)", p.ID, p.Width-2)
 		}
@@ -357,7 +357,7 @@ func TestApplyWorkspaceState_ThresholdSelectsNativeOrCanvas(t *testing.T) {
 	// → canvas (previewMode true, since the 120-wide canvas is wider than
 	// the 60-wide rect).
 	narrow := newModel(120, 40)
-	for _, p := range narrow.tabs[0].Leaves() {
+	for _, p := range narrow.curTabs()[0].Leaves() {
 		if !p.previewMode() {
 			t.Errorf("narrow window: pane %s native, want preview (rect %d < threshold)", p.ID, p.Width-2)
 		}

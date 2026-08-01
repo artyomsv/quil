@@ -20,7 +20,7 @@ func newSplitDragTestModel(t *testing.T) *Model {
 	t.Helper()
 	m := newModelForTest([]string{"T"}, 0)
 	m.notifications = NewNotificationCenter(30, 200)
-	tab := m.tabs[0]
+	tab := m.curTabs()[0]
 	p1 := NewPaneModel("p1", 1024)
 	p2 := NewPaneModel("p2", 1024)
 	tab.Root = NewLeaf(p1)
@@ -53,16 +53,16 @@ func TestModel_HitTestSplitBorder(t *testing.T) {
 	}
 
 	hit := m.hitTestSplitBorder(50, 10)
-	if hit == nil || hit.Node != m.tabs[0].Root {
+	if hit == nil || hit.Node != m.curTabs()[0].Root {
 		t.Fatal("hit should resolve to the root split node")
 	}
 
 	// Guards: focus mode and notes mode disable the hit test entirely.
-	m.tabs[0].ToggleFocus()
+	m.curTabs()[0].ToggleFocus()
 	if m.hitTestSplitBorder(50, 10) != nil {
 		t.Error("focus mode must disable border hit test")
 	}
-	m.tabs[0].ExitFocus()
+	m.curTabs()[0].ExitFocus()
 	m.notesMode = true
 	if m.hitTestSplitBorder(50, 10) != nil {
 		t.Error("notes mode must disable border hit test")
@@ -71,7 +71,7 @@ func TestModel_HitTestSplitBorder(t *testing.T) {
 
 	// Single-pane tab: no internal nodes, no hit.
 	single := newModelForTest([]string{"S"}, 0)
-	single.tabs[0].Root = NewLeaf(NewPaneModel("only", 1024))
+	single.curTabs()[0].Root = NewLeaf(NewPaneModel("only", 1024))
 	single.width, single.height = 100, 40
 	if single.hitTestSplitBorder(50, 10) != nil {
 		t.Error("single-pane tab must produce no border hits")
@@ -81,7 +81,7 @@ func TestModel_HitTestSplitBorder(t *testing.T) {
 func TestModel_DragSplitBorder(t *testing.T) {
 	t.Parallel()
 	m := newSplitDragTestModel(t)
-	root := m.tabs[0].Root
+	root := m.curTabs()[0].Root
 	p1 := root.Left.Pane
 	p2 := root.Right.Pane
 
@@ -114,12 +114,12 @@ func TestModel_DragSplitBorder(t *testing.T) {
 func TestModel_DragSplitBorder_NestedMinimum(t *testing.T) {
 	t.Parallel()
 	m := newSplitDragTestModel(t)
-	root := m.tabs[0].Root
+	root := m.curTabs()[0].Root
 	// Split p1 again horizontally: root.Left becomes (p1 | p3), so the
 	// left subtree's minimum width is 2*minPaneW.
 	root.SplitLeaf("p1", SplitHorizontal)
 	root.Left.Right.Pane = NewPaneModel("p3", 1024)
-	m.tabs[0].Resize(100, 38)
+	m.curTabs()[0].Resize(100, 38)
 
 	hit := m.hitTestSplitBorder(50, 10) // root line at col 49-50
 	if hit == nil || hit.Node != root {
@@ -201,14 +201,14 @@ func TestModel_FinishSplitDrag_CommitsToDaemon(t *testing.T) {
 func TestModel_SetSplitDragHighlight(t *testing.T) {
 	t.Parallel()
 	m := newSplitDragTestModel(t)
-	root := m.tabs[0].Root
+	root := m.curTabs()[0].Root
 	// Make the LEFT side nested: root.Left = V-split (p1 / p3). Both p1 and
 	// p3 touch the root's vertical line with their right edges; p2 touches
 	// it with its left edge — all three highlight. Dragging the INNER line
 	// (between p1 and p3) must highlight only p1 and p3.
 	root.Left = &LayoutNode{Split: SplitVertical, Ratio: 0.5,
 		Left: root.Left, Right: NewLeaf(NewPaneModel("p3", 1024))}
-	m.tabs[0].Resize(100, 38)
+	m.curTabs()[0].Resize(100, 38)
 	p1 := root.Left.Left.Pane
 	p3 := root.Left.Right.Pane
 	p2 := root.Right.Pane
@@ -251,7 +251,7 @@ func TestModel_ClearDragState_ClearsHighlight(t *testing.T) {
 	m.setSplitDragHighlight(hit, true)
 
 	m.clearDragState()
-	for _, p := range m.tabs[0].Leaves() {
+	for _, p := range m.curTabs()[0].Leaves() {
 		if p.splitDragHighlight {
 			t.Errorf("pane %s highlight must clear with the drag state", p.ID)
 		}
@@ -279,7 +279,7 @@ func TestModel_SplitDrag_UpdateLifecycle(t *testing.T) {
 	m.notifications = NewNotificationCenter(30, 200)
 	m.perfStats = newEventLoopStats()
 	m.client = &fakeSender{}
-	root := m.tabs[0].Root
+	root := m.curTabs()[0].Root
 
 	// Click on the split line (columns 49-50).
 	next, _ := m.Update(tea.MouseClickMsg{X: 50, Y: 10, Button: tea.MouseLeft})
@@ -320,7 +320,7 @@ func TestModel_SplitDrag_UpdateLifecycle(t *testing.T) {
 func TestModel_DragSplitBorder_Vertical(t *testing.T) {
 	t.Parallel()
 	m := newModelForTest([]string{"T"}, 0)
-	tab := m.tabs[0]
+	tab := m.curTabs()[0]
 	p1 := NewPaneModel("p1", 1024)
 	p2 := NewPaneModel("p2", 1024)
 	tab.Root = NewLeaf(p1)
@@ -410,7 +410,7 @@ func TestModel_DragSplitBorder_VTResizeDeferredToRelease(t *testing.T) {
 	t.Parallel()
 	m := newSplitDragTestModel(t)
 	m.client = &fakeSender{}
-	root := m.tabs[0].Root
+	root := m.curTabs()[0].Root
 	p1 := root.Left.Pane
 	vtW, vtH := p1.vt.Width(), p1.vt.Height()
 

@@ -718,7 +718,7 @@ func newReconnectTestModel(t *testing.T, n int) *Model {
 
 	tab.Resize(80, 24)
 
-	m := &Model{tabs: []*TabModel{tab}, width: 80, height: 24, cfg: config.Default()}
+	m := &Model{projects: oneProject(tab), width: 80, height: 24, cfg: config.Default()}
 	m.SetRemoteDest("gpu01")
 	return m
 }
@@ -726,7 +726,7 @@ func newReconnectTestModel(t *testing.T, n int) *Model {
 // reconnectTestPanes returns every pane the reset must touch, overlay included.
 func reconnectTestPanes(m *Model) []*PaneModel {
 	var out []*PaneModel
-	for _, tab := range m.tabs {
+	for _, tab := range m.curTabs() {
 		out = append(out, tab.Leaves()...)
 		if tab.overlayPane != nil {
 			out = append(out, tab.overlayPane)
@@ -784,7 +784,7 @@ func TestReconnect_ResetsScrollbackBeforeReplay(t *testing.T) {
 // that rule would be the bug.
 func TestReconnect_ResetsTerminalPanesAlso(t *testing.T) {
 	m := newReconnectTestModel(t, 1)
-	p := m.tabs[0].Leaves()[0]
+	p := m.curTabs()[0].Leaves()[0]
 	p.Type = "terminal"
 	p.AppendOutput([]byte("PREDROP shell output\r\n"))
 
@@ -800,7 +800,7 @@ func TestReconnect_ResetsTerminalPanesAlso(t *testing.T) {
 // scrollback doubles while every other pane is fine.
 func TestReconnect_ResetsOverlayPane(t *testing.T) {
 	m := newReconnectTestModel(t, 1)
-	ov := m.tabs[0].overlayPane
+	ov := m.curTabs()[0].overlayPane
 	ov.AppendOutput([]byte("PREDROP lazygit screen\r\n"))
 	if ov.rawBuf.Len() == 0 {
 		t.Fatal("fixture wrote nothing to the overlay pane")
@@ -825,7 +825,7 @@ func TestReconnect_ResetsBackgroundTabs(t *testing.T) {
 	bg.Root = NewLeaf(p)
 	bg.ActivePane = "bg0"
 	bg.Resize(80, 24)
-	m.tabs = append(m.tabs, bg)
+	m.appendTab(bg)
 
 	p.AppendOutput([]byte("PREDROP background output\r\n"))
 	if p.rawBuf.Len() == 0 {
@@ -888,7 +888,7 @@ func TestReconnect_SuccessPathResetsPanes(t *testing.T) {
 // has no dedup, so a replay re-increments counters that already reflect it.
 func TestReconnect_ResetsWorkCounters(t *testing.T) {
 	m := newReconnectTestModel(t, 1)
-	p := m.tabs[0].Leaves()[0]
+	p := m.curTabs()[0].Leaves()[0]
 
 	m.applyWorkTransition(p.ID, "hook.claude.UserPromptSubmit", nil)
 	m.applyWorkTransition(p.ID, "hook.claude.SubagentStart", map[string]string{"agent_type": "Explore", "coalesced": "3"})
@@ -917,7 +917,7 @@ func TestReconnect_ResetsWorkCounters(t *testing.T) {
 // clearing it would lose exactly the information the user reconnected to see.
 func TestReconnect_KeepsUnseenMark(t *testing.T) {
 	m := newReconnectTestModel(t, 1)
-	p := m.tabs[0].Leaves()[0]
+	p := m.curTabs()[0].Leaves()[0]
 	p.unseen = true
 
 	m.resetWorkStateForReattach()
@@ -930,7 +930,7 @@ func TestReconnect_KeepsUnseenMark(t *testing.T) {
 // pinnedAttention is a user-set pin with no connection to execution state.
 func TestReconnect_KeepsPinnedAttention(t *testing.T) {
 	m := newReconnectTestModel(t, 1)
-	p := m.tabs[0].Leaves()[0]
+	p := m.curTabs()[0].Leaves()[0]
 	p.pinnedAttention = true
 
 	m.resetWorkStateForReattach()
@@ -966,7 +966,7 @@ func TestReconnect_ResetsWorkStateInBackgroundTabs(t *testing.T) {
 	bg.Root = NewLeaf(p)
 	bg.ActivePane = "bg0"
 	bg.Resize(80, 24)
-	m.tabs = append(m.tabs, bg)
+	m.appendTab(bg)
 
 	m.applyWorkTransition("bg0", "hook.claude.UserPromptSubmit", nil)
 	if !p.working {
@@ -994,9 +994,9 @@ func TestReconnect_SuccessPathResetsWorkState(t *testing.T) {
 	m.clientGen = 5
 	m.attached = true
 	m.reconnect = reconnectState{active: true, attempt: 1}
-	focused := m.tabs[0].Leaves()[0]
-	other := m.tabs[0].Leaves()[1]
-	if focused.ID != m.tabs[0].ActivePane {
+	focused := m.curTabs()[0].Leaves()[0]
+	other := m.curTabs()[0].Leaves()[1]
+	if focused.ID != m.curTabs()[0].ActivePane {
 		focused, other = other, focused
 	}
 
@@ -1134,7 +1134,7 @@ func TestReconnect_LeavesDialogStateAlone(t *testing.T) {
 // ghost/live latch has to make this decision deliberately.
 func TestReconnect_GhostDimIsAcceptedNotAvoided(t *testing.T) {
 	m := newReconnectTestModel(t, 1)
-	p := m.tabs[0].Leaves()[0]
+	p := m.curTabs()[0].Leaves()[0]
 	p.liveOutputSeen = true
 
 	armAndReplayAll(t, m, "replayed after reattach")
@@ -1315,7 +1315,7 @@ func TestReconnectDelay_DecayBoundary(t *testing.T) {
 func TestReconnect_ResetIsConsumedByTheReplayNotPredicted(t *testing.T) {
 	t.Run("a replayed pane is reset before the chunk lands", func(t *testing.T) {
 		m := newReconnectTestModel(t, 1)
-		p := m.tabs[0].Leaves()[0]
+		p := m.curTabs()[0].Leaves()[0]
 		p.AppendOutput([]byte("stale content from before the drop\r\n"))
 		if p.rawBuf.Len() == 0 {
 			t.Fatal("fixture wrote nothing")
@@ -1342,7 +1342,7 @@ func TestReconnect_ResetIsConsumedByTheReplayNotPredicted(t *testing.T) {
 
 	t.Run("a pane with no replay keeps its content", func(t *testing.T) {
 		m := newReconnectTestModel(t, 2)
-		replayed, silent := m.tabs[0].Leaves()[0], m.tabs[0].Leaves()[1]
+		replayed, silent := m.curTabs()[0].Leaves()[0], m.curTabs()[0].Leaves()[1]
 		for _, p := range []*PaneModel{replayed, silent} {
 			p.AppendOutput([]byte("content that predates the reconnect\r\n"))
 		}
@@ -1361,7 +1361,7 @@ func TestReconnect_ResetIsConsumedByTheReplayNotPredicted(t *testing.T) {
 
 	t.Run("only a ghost chunk consumes the reset, not live output", func(t *testing.T) {
 		m := newReconnectTestModel(t, 1)
-		p := m.tabs[0].Leaves()[0]
+		p := m.curTabs()[0].Leaves()[0]
 		p.AppendOutput([]byte("before\r\n"))
 
 		m.armReattachReset()

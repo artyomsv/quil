@@ -48,7 +48,7 @@ func TestUpdate_ModalOpen_MouseDoesNotArmSplitDrag(t *testing.T) {
 			t.Parallel()
 			m := newSplitDragTestModel(t)
 			m.dialog = d.dialog
-			before := m.tabs[0].Root.Ratio
+			before := m.curTabs()[0].Root.Ratio
 
 			updated, _ := m.Update(tea.MouseClickMsg{X: borderX, Y: borderY, Button: tea.MouseLeft})
 			got := updated.(Model)
@@ -63,7 +63,8 @@ func TestUpdate_ModalOpen_MouseDoesNotArmSplitDrag(t *testing.T) {
 			// armed some other way.
 			updated, _ = got.Update(tea.MouseMotionMsg{X: borderX - 20, Y: borderY, Button: tea.MouseLeft})
 			updated, _ = updated.(Model).Update(tea.MouseReleaseMsg{X: borderX - 20, Y: borderY, Button: tea.MouseLeft})
-			if after := updated.(Model).tabs[0].Root.Ratio; after != before {
+			afterM := updated.(Model)
+			if after := afterM.curTabs()[0].Root.Ratio; after != before {
 				t.Errorf("split ratio moved behind the dialog: %v → %v", before, after)
 			}
 		})
@@ -100,7 +101,8 @@ func TestUpdate_ModalOpen_MouseDoesNotSwitchTabs(t *testing.T) {
 		t.Parallel()
 		m := mk(t)
 		updated, _ := m.Update(tea.MouseClickMsg{X: clickX, Y: 0, Button: tea.MouseLeft})
-		if updated.(Model).activeTab == 0 {
+		got := updated.(Model)
+		if got.activeTabIdx() == 0 {
 			t.Fatalf("fixture click at X=%d did not switch tabs — the swallow assertion below would pass vacuously", clickX)
 		}
 	})
@@ -111,8 +113,8 @@ func TestUpdate_ModalOpen_MouseDoesNotSwitchTabs(t *testing.T) {
 		m.dialog = dialogCommandHistory
 		updated, _ := m.Update(tea.MouseClickMsg{X: clickX, Y: 0, Button: tea.MouseLeft})
 		got := updated.(Model)
-		if got.activeTab != 0 {
-			t.Errorf("active tab moved to %d behind the dialog", got.activeTab)
+		if got.activeTabIdx() != 0 {
+			t.Errorf("active tab moved to %d behind the dialog", got.activeTabIdx())
 		}
 		if got.tabDragFromIdx >= 0 {
 			t.Errorf("tab reorder drag armed behind the dialog (idx %d)", got.tabDragFromIdx)
@@ -126,7 +128,7 @@ func TestUpdate_ModalOpen_WheelDoesNotScrollPanes(t *testing.T) {
 	t.Parallel()
 	m := newSplitDragTestModel(t)
 	m.dialog = dialogAbout
-	pane := m.tabs[0].ActivePaneModel()
+	pane := m.curTabs()[0].ActivePaneModel()
 	if pane == nil {
 		t.Fatal("fixture has no active pane")
 	}
@@ -142,7 +144,8 @@ func TestUpdate_ModalOpen_WheelDoesNotScrollPanes(t *testing.T) {
 	pane.ResetScroll()
 
 	updated, _ := m.Update(tea.MouseWheelMsg{X: 20, Y: 10, Button: tea.MouseWheelUp})
-	if after := updated.(Model).tabs[0].ActivePaneModel().scrollBack; after != 0 {
+	afterM := updated.(Model)
+	if after := afterM.curTabs()[0].ActivePaneModel().scrollBack; after != 0 {
 		t.Errorf("pane scrolled behind the dialog: 0 → %d", after)
 	}
 }

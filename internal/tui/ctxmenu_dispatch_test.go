@@ -21,7 +21,7 @@ func TestCtxMenu_RightClickOpensForPaneUnderCursor(t *testing.T) {
 	if got.ctxMenu.paneID != "p2" {
 		t.Errorf("target = %q, want p2 (pane under cursor, not active pane)", got.ctxMenu.paneID)
 	}
-	if !got.tabs[0].Root.Right.Pane.ctxTargetHighlight {
+	if !got.curTabs()[0].Root.Right.Pane.ctxTargetHighlight {
 		t.Error("target pane border highlight should be set")
 	}
 	// Position is clamped inside the content area.
@@ -58,7 +58,7 @@ func TestCtxMenu_LeftClickOutsideCloses(t *testing.T) {
 	if got.mouseDown {
 		t.Error("the closing click must be swallowed, not arm a selection drag")
 	}
-	if got.tabs[0].Root.Left.Pane.ctxTargetHighlight {
+	if got.curTabs()[0].Root.Left.Pane.ctxTargetHighlight {
 		t.Error("target highlight should clear on close")
 	}
 }
@@ -73,10 +73,10 @@ func TestCtxMenu_RightClickElsewhereRetargets(t *testing.T) {
 	if got.ctxMenu.paneID != "p2" {
 		t.Errorf("retarget: paneID = %q, want p2", got.ctxMenu.paneID)
 	}
-	if got.tabs[0].Root.Left.Pane.ctxTargetHighlight {
+	if got.curTabs()[0].Root.Left.Pane.ctxTargetHighlight {
 		t.Error("old target highlight should be cleared on retarget")
 	}
-	if !got.tabs[0].Root.Right.Pane.ctxTargetHighlight {
+	if !got.curTabs()[0].Root.Right.Pane.ctxTargetHighlight {
 		t.Error("new target highlight should be set")
 	}
 }
@@ -120,8 +120,8 @@ func TestCtxMenu_ExecuteClose_SwitchesTargetAndOpensConfirm(t *testing.T) {
 	if got.ctxMenu.open() {
 		t.Error("menu should close on execute")
 	}
-	if got.tabs[0].ActivePane != "p2" {
-		t.Errorf("ActivePane = %q, want p2 (dispatch focuses the target first)", got.tabs[0].ActivePane)
+	if got.curTabs()[0].ActivePane != "p2" {
+		t.Errorf("ActivePane = %q, want p2 (dispatch focuses the target first)", got.curTabs()[0].ActivePane)
 	}
 	if got.dialog != dialogConfirm || got.confirmKind != "pane" || got.confirmID != "p2" {
 		t.Errorf("close confirm not armed for p2: dialog=%v kind=%q id=%q", got.dialog, got.confirmKind, got.confirmID)
@@ -131,22 +131,22 @@ func TestCtxMenu_ExecuteClose_SwitchesTargetAndOpensConfirm(t *testing.T) {
 func TestCtxMenu_Execute_SyncsActiveFlagOnBothPanes(t *testing.T) {
 	t.Parallel()
 	m := newSplitDragTestModel(t) // ActivePane = p1
-	p1 := m.tabs[0].Root.Left.Pane
-	p2 := m.tabs[0].Root.Right.Pane
+	p1 := m.curTabs()[0].Root.Left.Pane
+	p2 := m.curTabs()[0].Root.Right.Pane
 	p1.Active = true
 	p2.Active = false
 	updated, _ := m.Update(tea.MouseClickMsg{X: 70, Y: 10, Button: tea.MouseRight})
 	got := updated.(Model) // targeting p2
 	updated, _ = got.executeCtxMenuItem(ctxMenuItem{id: ctxActMute, label: "Mute notifications", enabled: true})
 	got = updated.(Model)
-	if !got.tabs[0].Root.Right.Pane.Active {
+	if !got.curTabs()[0].Root.Right.Pane.Active {
 		t.Error("p2.Active should be true after dispatch focuses it")
 	}
-	if got.tabs[0].Root.Left.Pane.Active {
+	if got.curTabs()[0].Root.Left.Pane.Active {
 		t.Error("p1.Active should be false — the old active pane must be cleared")
 	}
-	if got.tabs[0].ActivePane != "p2" {
-		t.Errorf("ActivePane = %q, want p2", got.tabs[0].ActivePane)
+	if got.curTabs()[0].ActivePane != "p2" {
+		t.Errorf("ActivePane = %q, want p2", got.curTabs()[0].ActivePane)
 	}
 }
 
@@ -157,7 +157,7 @@ func TestCtxMenu_ExecuteAttention_TogglesPin(t *testing.T) {
 	got := updated.(Model)
 	updated, _ = got.executeCtxMenuItem(ctxMenuItem{id: ctxActAttention, label: "Mark attention", enabled: true})
 	got = updated.(Model)
-	if !got.tabs[0].Root.Right.Pane.pinnedAttention {
+	if !got.curTabs()[0].Root.Right.Pane.pinnedAttention {
 		t.Error("attention pin should be set on p2")
 	}
 }
@@ -185,8 +185,8 @@ func TestCtxMenu_VanishedTargetClosesOnNextMessage(t *testing.T) {
 	updated, _ := m.Update(tea.MouseClickMsg{X: 70, Y: 10, Button: tea.MouseRight})
 	got := updated.(Model)
 	// Simulate daemon reconciliation pruning p2.
-	got.tabs[0].Root = NewLeaf(got.tabs[0].Root.Left.Pane)
-	got.tabs[0].ActivePane = "p1"
+	got.curTabs()[0].Root = NewLeaf(got.curTabs()[0].Root.Left.Pane)
+	got.curTabs()[0].ActivePane = "p1"
 	updated, _ = got.Update(tea.MouseMotionMsg{X: 1, Y: 1})
 	if updated.(Model).ctxMenu.open() {
 		t.Error("menu must close when its target pane no longer exists")
@@ -286,7 +286,7 @@ func TestCtxMenu_NarrowTerminalGuard_NoInvisibleMenu(t *testing.T) {
 	if got.ctxMenu.open() {
 		t.Error("menu must not open when its box cannot fit inside the content area")
 	}
-	if got.tabs[0].Root.Left.Pane.ctxTargetHighlight || got.tabs[0].Root.Right.Pane.ctxTargetHighlight {
+	if got.curTabs()[0].Root.Left.Pane.ctxTargetHighlight || got.curTabs()[0].Root.Right.Pane.ctxTargetHighlight {
 		t.Error("no pane should get the target highlight when the menu fails to open")
 	}
 }
@@ -310,7 +310,7 @@ func TestCtxMenu_ExecuteRestart_OpensConfirm(t *testing.T) {
 func TestCtxMenu_ExecuteRename_EntersRenameModeForTarget(t *testing.T) {
 	t.Parallel()
 	m := newSplitDragTestModel(t) // ActivePane = p1
-	m.tabs[0].Root.Right.Pane.Name = "Build"
+	m.curTabs()[0].Root.Right.Pane.Name = "Build"
 	updated, _ := m.Update(tea.MouseClickMsg{X: 70, Y: 10, Button: tea.MouseRight})
 	got := updated.(Model) // targeting p2
 	updated, _ = got.executeCtxMenuItem(ctxMenuItem{id: ctxActRename, label: "Rename pane", enabled: true})
@@ -332,7 +332,7 @@ func TestCtxMenu_ExecuteFocus_TogglesFocusModeOnActiveTab(t *testing.T) {
 	got := updated.(Model) // targeting p2
 	updated, _ = got.executeCtxMenuItem(ctxMenuItem{id: ctxActFocus, label: "Focus mode", enabled: true})
 	got = updated.(Model)
-	if !got.tabs[0].FocusMode() {
+	if !got.curTabs()[0].FocusMode() {
 		t.Error("active tab should be in focus mode after ctxActFocus dispatch")
 	}
 }
@@ -403,8 +403,8 @@ func TestCtxMenu_ExecuteLazygit_NilRegistryDoesNotPanic(t *testing.T) {
 func TestCtxMenu_FocusModeRightClick(t *testing.T) {
 	t.Parallel()
 	m := newSplitDragTestModel(t)
-	m.tabs[0].ToggleFocus()
-	if !m.tabs[0].FocusMode() {
+	m.curTabs()[0].ToggleFocus()
+	if !m.curTabs()[0].FocusMode() {
 		t.Fatal("fixture: ToggleFocus should enter focus mode on a multi-pane tab")
 	}
 
@@ -415,7 +415,7 @@ func TestCtxMenu_FocusModeRightClick(t *testing.T) {
 	}
 
 	m2 := newSplitDragTestModel(t)
-	m2.tabs[0].ToggleFocus()
+	m2.curTabs()[0].ToggleFocus()
 	updated, _ = m2.Update(tea.MouseClickMsg{X: 50, Y: m2.height - 1, Button: tea.MouseRight})
 	got2 := updated.(Model)
 	if got2.ctxMenu.open() {
@@ -482,7 +482,7 @@ func TestCtxMenu_ViewSwitchesToAllMotionWhileOpen(t *testing.T) {
 func TestCtxMenu_TitleShowsPaneDisplayName(t *testing.T) {
 	t.Parallel()
 	m := newSplitDragTestModel(t)
-	m.tabs[0].Root.Right.Pane.Name = "builds"
+	m.curTabs()[0].Root.Right.Pane.Name = "builds"
 	updated, _ := m.Update(tea.MouseClickMsg{X: 70, Y: 10, Button: tea.MouseRight})
 	got := updated.(Model)
 	if got.ctxMenu.title != "builds" {

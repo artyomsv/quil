@@ -260,7 +260,7 @@ func (m *Model) handleOverlayKey(msg tea.KeyPressMsg, tab *TabModel) tea.Cmd {
 
 	// Redraw — mirrors the Redraw case in handleKey exactly.
 	if kbMatches(key, kb.Redraw) {
-		for _, t := range m.tabs {
+		for _, t := range m.allTabs() {
 			t.invalidateLeaves()
 			if t.Root != nil {
 				for _, pane := range t.Leaves() {

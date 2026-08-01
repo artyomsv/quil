@@ -19,12 +19,12 @@ import (
 
 func TestSanitizePastedPath(t *testing.T) {
 	cases := map[string]string{
-		`  /foo/bar  `:  "/foo/bar",
-		`"/foo/bar"`:    "/foo/bar",
-		`  "/foo" `:     "/foo",
-		`/no/changes`:   "/no/changes",
-		``:              "",
-		`"  "`:          "  ", // inner whitespace preserved, only outer trimmed
+		`  /foo/bar  `: "/foo/bar",
+		`"/foo/bar"`:   "/foo/bar",
+		`  "/foo" `:    "/foo",
+		`/no/changes`:  "/no/changes",
+		``:             "",
+		`"  "`:         "  ", // inner whitespace preserved, only outer trimmed
 	}
 	for in, want := range cases {
 		if got := sanitizePastedPath(in); got != want {
@@ -86,7 +86,7 @@ func TestSetupFieldKind_AndCount(t *testing.T) {
 
 func TestEnterSetupOrSplit_RoutingAndDefaults(t *testing.T) {
 	pluginCWD := &plugin.PanePlugin{
-		Name: "cwd-only",
+		Name:    "cwd-only",
 		Command: plugin.CommandConfig{PromptsCWD: true},
 	}
 	pluginToggleOnly := &plugin.PanePlugin{
@@ -97,7 +97,7 @@ func TestEnterSetupOrSplit_RoutingAndDefaults(t *testing.T) {
 		}},
 	}
 	pluginNeither := &plugin.PanePlugin{
-		Name: "plain",
+		Name:    "plain",
 		Command: plugin.CommandConfig{},
 	}
 
@@ -246,13 +246,13 @@ func TestSanitizePastedPath_StripsControlBytes(t *testing.T) {
 		// ESC (0x1b) and BEL (0x07) are stripped; "]", "0", ";" etc. are
 		// printable ASCII and stay, but the OSC/CSI framing is broken.
 		"\x1b]0;evil\x07/foo/bar": "]0;evil/foo/bar",
-		"/foo/\x00bar":            "/foo/bar",  // NUL stripped
+		"/foo/\x00bar":            "/foo/bar", // NUL stripped
 		// \r is trimmed by TrimSpace at the end, \n trimmed at the end too.
-		"/foo/\rbar":      "/foo/bar",  // \r stripped mid-string
-		"\x7fdel":         "del",       // DEL (0x7f) stripped
-		"'/foo/bar'":      "/foo/bar",  // single quotes stripped
-		"\x01\x02\x03/foo": "/foo",     // misc control bytes stripped
-		"/foo\tbar":       "/foo\tbar", // tab preserved
+		"/foo/\rbar":       "/foo/bar",  // \r stripped mid-string
+		"\x7fdel":          "del",       // DEL (0x7f) stripped
+		"'/foo/bar'":       "/foo/bar",  // single quotes stripped
+		"\x01\x02\x03/foo": "/foo",      // misc control bytes stripped
+		"/foo\tbar":        "/foo\tbar", // tab preserved
 	}
 	for in, want := range cases {
 		if got := sanitizePastedPath(in); got != want {
@@ -343,8 +343,7 @@ raw_keys = ["shift+tab"]
 	pane := &PaneModel{ID: "p1", Name: "p1", Type: "rawkey-test", Active: true}
 	tab := &TabModel{ID: "t1", Name: "Shell", ActivePane: pane.ID, Root: NewLeaf(pane)}
 	m := Model{
-		tabs:           []*TabModel{tab},
-		activeTab:      0,
+		projects:       oneProject(tab),
 		pluginRegistry: r,
 	}
 
@@ -977,7 +976,7 @@ func TestEnterSetupOrSplit_GitDiscover_PopulatesCandidates(t *testing.T) {
 	tab.ActivePane = pane.ID
 
 	fake := &fakeSender{}
-	m := &Model{tabs: []*TabModel{tab}, activeTab: 0, client: fake}
+	m := &Model{projects: oneProject(tab), client: fake}
 	p := &plugin.PanePlugin{
 		Name: "lazygit",
 		Command: plugin.CommandConfig{
@@ -1009,7 +1008,7 @@ func TestEnterSetupOrSplit_GitDiscover_NoRepo_FallsBackToBrowser(t *testing.T) {
 	tab.ActivePane = pane.ID
 
 	fake := &fakeSender{}
-	m := &Model{tabs: []*TabModel{tab}, activeTab: 0, client: fake}
+	m := &Model{projects: oneProject(tab), client: fake}
 	p := &plugin.PanePlugin{
 		Name: "lazygit",
 		Command: plugin.CommandConfig{
@@ -1263,7 +1262,7 @@ func TestEnterSetup_GitReposWinOverRecent(t *testing.T) {
 	tab.ActivePane = pane.ID
 
 	fake := &fakeSender{}
-	m := &Model{tabs: []*TabModel{tab}, activeTab: 0, recentCWDs: []string{t.TempDir()}, client: fake}
+	m := &Model{projects: oneProject(tab), recentCWDs: []string{t.TempDir()}, client: fake}
 	p := &plugin.PanePlugin{Name: "lazygit", Command: plugin.CommandConfig{Cmd: "lazygit", PromptsCWD: true, Discover: "git"}}
 	runCmd(m.enterSetupOrSplit(p))
 	runCmd(m.applyGitRepos(ipc.GitReposRespPayload{CWD: root, Repos: []string{root}}, m.repoScan.gen))
@@ -1587,7 +1586,7 @@ func TestEnterSetupOrSplit_GitDiscover_CapsCandidates(t *testing.T) {
 	tab.ActivePane = pane.ID
 
 	fake := &fakeSender{}
-	m := &Model{tabs: []*TabModel{tab}, activeTab: 0, client: fake}
+	m := &Model{projects: oneProject(tab), client: fake}
 	p := &plugin.PanePlugin{
 		Name: "lazygit",
 		Command: plugin.CommandConfig{

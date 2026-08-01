@@ -25,7 +25,7 @@ type paletteSearchTimeoutMsg struct{ query string }
 // pane is gone. Iterates tabs/leaves so it can compute the same 1-based i.j
 // indices formatPaneNav uses.
 func (m *Model) paneNavLabel(paneID string) (label string, ok bool) {
-	for i, tab := range m.tabs {
+	for i, tab := range m.curTabs() {
 		if tab == nil {
 			continue
 		}

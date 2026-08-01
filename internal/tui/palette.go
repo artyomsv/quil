@@ -280,7 +280,7 @@ func (m *Model) buildPaletteCommands() []paletteCommand {
 	// distinguished by a tab.pane index + plugin type so same-name/same-CWD
 	// panes are told apart.
 	header("Go to pane")
-	for i, tab := range m.tabs {
+	for i, tab := range m.curTabs() {
 		if tab == nil {
 			continue
 		}
@@ -307,7 +307,7 @@ func (m *Model) buildPaletteCommands() []paletteCommand {
 
 	// --- Tabs: switch-to (navigation) first, then tab management -----------
 	header("Tabs")
-	for i, tab := range m.tabs {
+	for i, tab := range m.curTabs() {
 		if tab == nil {
 			continue
 		}
@@ -773,11 +773,11 @@ func lastCellsToWidth(s string, w int) string {
 
 // goToPane switches to the tab containing paneID and makes it the active pane.
 // Shared by the command palette's "Go to pane" rows and content-search Enter.
-// The old tab's active-pane flag is cleared BEFORE switchTab moves m.activeTab
-// (ordering is load-bearing for the border repaint).
+// The old tab's active-pane flag is cleared BEFORE switchTab moves the active
+// tab (ordering is load-bearing for the border repaint).
 func (m Model) goToPane(paneID string) (tea.Model, tea.Cmd) {
 	pane, idx := m.findPaneAndTab(paneID)
-	if pane == nil || idx < 0 || idx >= len(m.tabs) {
+	if pane == nil || idx < 0 || idx >= len(m.curTabs()) {
 		return m, nil
 	}
 	if cur := m.activeTabModel(); cur != nil {
@@ -785,7 +785,7 @@ func (m Model) goToPane(paneID string) (tea.Model, tea.Cmd) {
 			old.Active = false
 		}
 	}
-	m.tabs[idx].ActivePane = paneID
+	m.curTabs()[idx].ActivePane = paneID
 	pane.Active = true
 	return m, m.switchTab(idx)
 }
@@ -803,7 +803,7 @@ func (m Model) executePaletteCommand(c paletteCommand) (tea.Model, tea.Cmd) {
 	case palActGoToPane:
 		return m.goToPane(c.arg)
 	case palActSwitchTab:
-		for i, tab := range m.tabs {
+		for i, tab := range m.curTabs() {
 			if tab != nil && tab.ID == c.arg {
 				return m, m.switchTab(i)
 			}

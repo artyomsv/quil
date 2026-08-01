@@ -36,10 +36,25 @@ concurrency:
   group: pages
   cancel-in-progress: true
 
+# Least privilege, split per job rather than granted workflow-wide.
+#
+# The build job below runs `npm ci` over the Astro dependency tree, which
+# executes third-party install scripts. Granting it `pages: write` would let a
+# compromised dependency publish arbitrary content to quil.cc, and
+# `id-token: write` would let it mint an OIDC token carrying this repo's
+# identity, exchangeable with any cloud provider configured to trust
+# repo:artyomsv/quil. It needs neither: upload-pages-artifact is tar plus
+# actions/upload-artifact, which authenticates with ACTIONS_RUNTIME_TOKEN and
+# never touches the Pages API or GITHUB_TOKEN.
+#
+# Only deploy runs deploy-pages, so only deploy gets those two scopes. Note
+# that a job-level block REPLACES this one rather than merging with it, which
+# is why deploy restates contents: read.
+#
+# GitHub's own Pages starter workflow puts all three here at the top level;
+# that is convenience, not least privilege.
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 jobs:
   build:
@@ -102,6 +117,10 @@ jobs:
     name: Deploy to GitHub Pages
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write      # create the Pages deployment
+      id-token: write   # OIDC token deploy-pages exchanges for the deployment
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

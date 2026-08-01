@@ -321,21 +321,37 @@ func writeSessionFile(env HookEnv, sessionID, transcriptPath string) error {
 // re-keys the transcript, leaving the path SessionStart recorded pointing at a
 // file that is no longer there.
 //
-// Deliberately NOT an id writer: SessionStart owns rotation, so a payload whose
-// session id differs from the record is left alone rather than adopted. Without
-// that gate this would silently repoint a pane at a sibling session — the
-// failure this whole path exists to prevent. Best-effort throughout: the record
-// is only rewritten when the path actually changed, so the common Stop costs
-// one read.
+// It writes the SIDECAR only, never <paneID>.id. Hook invocations are
+// independent processes with no locking, so a read-modify-write of the id file
+// would let a Stop that read before a concurrent SessionStart write the
+// PRE-rotation id back — resurrecting the session the user just left, which is
+// the same wrong-conversation failure this path exists to prevent. Confining
+// the write to the sidecar makes the id unreachable from here: the worst a lost
+// race can do is leave the path stale, and a stale path never renames a session.
+//
+// The id is still recorded IN the sidecar so a reader can tell whether the path
+// describes the session it is asking about. Best-effort throughout, and written
+// only when the path actually changed, so the common Stop costs one read.
 func refreshTranscriptPath(env HookEnv, sessionID, transcriptPath string) {
 	if sessionID == "" || transcriptPath == "" {
+		return
+	}
+	// Same guards writeSessionFile applies, for the same reasons: a newline
+	// would forge a second record line, and a non-uuid id is not ours to record.
+	if !sessionIDRe.MatchString(sessionID) || strings.ContainsAny(transcriptPath, "\r\n") {
 		return
 	}
 	rec, err := ReadPersistedSession(env.QuilDir, env.PaneID)
 	if err != nil || rec.ID != sessionID || rec.TranscriptPath == transcriptPath {
 		return
 	}
-	if err := writeSessionFile(env, sessionID, transcriptPath); err != nil {
+	sessionsDir := filepath.Join(env.QuilDir, "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o700); err != nil {
+		hookLog(env.QuilDir, env.PaneID, "mkdir sessions dir failed: "+err.Error())
+		return
+	}
+	body := []byte(sessionID + "\n" + transcriptPath + "\n")
+	if err := atomicWrite(transcriptFile(env.QuilDir, env.PaneID), body, 0o600); err != nil {
 		hookLog(env.QuilDir, env.PaneID, "refresh transcript path failed: "+err.Error())
 	}
 }

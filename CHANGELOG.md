@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **A restored Claude Code pane could come back holding a different pane's
+  conversation.** On the first daemon restart after a pane was created, panes
+  whose own session could not be found on disk were quietly attached to
+  whichever session in the same folder had been touched most recently — in
+  practice, the sibling pane that had just respawned. Several panes could end
+  up driving one conversation at once, appending over each other. Nothing was
+  lost, but the wrong history came back and kept growing.
+
+  The session itself was never missing, only unfindable: Claude files a
+  conversation under the folder it is *working in*, so an agent that moves into
+  a git worktree takes the conversation with it, and Quil was looking in the
+  folder the pane started in. Quil now records where the conversation actually
+  lives, and a pane it cannot locate is resumed by name rather than swapped for
+  the nearest one — a session Claude rejects is an error you can see, where the
+  wrong session is a silent loss. Restore also refuses to hand one conversation
+  to two panes: the second pane starts a fresh session instead.
+
 ## [1.46.1] - 2026-08-01
 
 ### Fixed

@@ -285,6 +285,43 @@ func statIsDirWithin(path string, d time.Duration) (isDir, answered bool) {
 	return statIsDirWithinLimit(path, d, maxBlockingFSCalls)
 }
 
+// transcriptProbeTimeout bounds one recorded-transcript probe. Short on purpose:
+// the answer only ranks candidates the caller will use either way, so waiting
+// longer buys nothing while the caller may be the pre-listen restore loop.
+const transcriptProbeTimeout = 2 * time.Second
+
+// statExistsWithinBudget reports whether path exists, and whether the stat
+// answered at all.
+//
+// It joins the same process-wide budget as the browse probes because it has the
+// same hazard and a worse blast radius: the path comes from a hook payload and
+// from workspace.json, both of which a pane's own child can influence, and the
+// caller is `respawnPanes` — which runs BEFORE the IPC server listens. An
+// unbounded stat on a dead mount or a UNC path there does not just stall one
+// request, it spends the client's whole readiness budget on every launch, from a
+// value that persists on disk. A refused or timed-out probe reports
+// answered=false, which the caller must treat as "no evidence", never as
+// "absent".
+func statExistsWithinBudget(path string) (exists, answered bool) {
+	if path == "" || !claimBlockingFSCall() {
+		return false, false
+	}
+	ch := make(chan bool, 1)
+	go func() {
+		defer releaseBlockingFSCall()
+		_, err := statPath(path)
+		ch <- err == nil
+	}()
+	timer := time.NewTimer(transcriptProbeTimeout)
+	defer timer.Stop()
+	select {
+	case r := <-ch:
+		return r, true
+	case <-timer.C:
+		return false, false
+	}
+}
+
 // statIsDirWithinLimit is statIsDirWithin with an explicit ceiling on how many
 // blocking calls may already be outstanding before this one is allowed to start.
 //

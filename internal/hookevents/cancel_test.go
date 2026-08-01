@@ -33,6 +33,37 @@ func TestIngester_Cancel_DropsPendingForPane(t *testing.T) {
 	}
 }
 
+// TestIngester_Cancel_DropsPendingSubagentKeys pins Cancel against the THIRD
+// key segment. Subagent events key as (paneID, hook_event, agent_type), so a
+// pane destroyed mid-coalesce-window now has pending entries whose keys are
+// longer than the two-part form Cancel was written for. Cancel matches on the
+// `paneID + "\x00"` PREFIX, which is why it still reaps them — but nothing
+// pinned that, and a future key layout that stops leading with paneID would
+// resurrect the stale-emit-after-destroy bug Cancel exists to prevent.
+func TestIngester_Cancel_DropsPendingSubagentKeys(t *testing.T) {
+	t.Parallel()
+	rec := &emitRecorder{}
+	ing := NewIngester(rec.emit)
+
+	// Two distinct agent types → two distinct pending entries for one pane.
+	for i, agentType := range []string{"impl-task7", "rev-task7"} {
+		p := basePayload(uint64(i + 1))
+		p.HookEvent = "SubagentStart"
+		p.Data = map[string]string{"agent_type": agentType}
+		ing.Submit(p)
+	}
+	// Plus a plain two-segment entry, so the sweep must cover both shapes.
+	ing.Submit(basePayload(3))
+
+	ing.Cancel("pane-1")
+
+	time.Sleep(150 * time.Millisecond)
+
+	if got := rec.drain(); len(got) != 0 {
+		t.Errorf("Cancel must reap agent_type-keyed pending entries too; recorder saw %d payloads: %+v", len(got), got)
+	}
+}
+
 func TestIngester_Cancel_DoesNotAffectOtherPanes(t *testing.T) {
 	t.Parallel()
 	rec := &emitRecorder{}

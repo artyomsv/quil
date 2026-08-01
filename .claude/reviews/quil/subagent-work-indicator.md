@@ -17,6 +17,7 @@ Rounds completed: 2
 - [code-quality/Suggestion-5] `outstanding <= 0` guard unpinned (mutating it to `== 0` kept the whole tui suite green) — added TestApplyWorkTransition_OverCountedStopDrainsWithoutWedging; a producer-controlled `coalesced` larger than the outstanding count would otherwise leave a negative entry and wedge the spinner ON (round 2)
 - [code-quality/Suggestion-6] `return` in the unmatched-stop branch bypassed the stated single derivation point — changed to `break` (round 2)
 - [code-quality/Suggestion-7] Ingester lacked the named-vs-phantom coalescing case — added TestIngester_Submit_PhantomStopDoesNotSwallowNamedStop (round 2)
+- [qa/L1] `Cancel()` unpinned against the new third key segment — it matches on the `paneID + "\x00"` prefix so agent_type-keyed pending entries were already reaped correctly, but nothing tested it; added TestIngester_Cancel_DropsPendingSubagentKeys (mutation-verified: exact-match Cancel leaks all 3 pending entries) (round 2)
 - [security/L2] NUL in `hook_event`/`agent_type` made the composite coalesce key non-injective — `("SubagentStart", "\x00X")` collided with `("SubagentStart\x00", "X")`, coalescing last-wins and erasing an identity. Introduced by the round-2 key change; fixed with `keyFieldEscaper` (identity for all legitimate values, so real keys are byte-identical) (round 2)
 
 ## Dismissed (acknowledged, will not fix; agents may escalate with explicit justification)

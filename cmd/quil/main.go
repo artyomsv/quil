@@ -413,18 +413,20 @@ func launchTUI() {
 	// (TUI older than daemon — blocking dialog path).
 	client = gateVersionCheck(client)
 
-	// A remote install just succeeded, so the reason this launch failed is
-	// gone. Re-dial rather than making the user retype the command they
-	// already ran — attaching was the whole point of it.
+	// The reason this launch failed is gone — either an install just succeeded,
+	// or healRemoteRecord found quil at a path other than the one we dialed and
+	// corrected the record. Re-dial rather than making the user retype the
+	// command they already ran; attaching was the whole point of it.
 	//
-	// The config is reloaded first: it was read before the install, so the
-	// binary path `remote setup` just recorded is not in this process's copy,
-	// and that path is what the next dial must use as the remote command.
+	// The config is reloaded first: it was read before either of those wrote to
+	// it, so the recorded binary path is not in this process's copy, and that
+	// path is what the next dial must use as the remote command.
 	//
-	// Bounded to one attempt by construction rather than by a counter. The
-	// install wrote a binary path for this destination, so if the far side
-	// still cannot run quil, offerRemoteInstall's guard sees a provisioned
-	// host and refuses instead of offering again.
+	// Bounded to one attempt by construction rather than by a counter. Both
+	// paths leave a binary at the recorded path, so a far side that still
+	// cannot run quil makes healRemoteRecord's probe report ExistingPath equal
+	// to the record — the wrong-architecture arm, which refuses rather than
+	// offering again.
 	if client == nil && remoteInstallRetry {
 		remoteInstallRetry = false
 		if reloaded, loadErr := config.Load(config.ConfigPath()); loadErr == nil {

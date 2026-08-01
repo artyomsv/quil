@@ -23,8 +23,18 @@ import (
 // instead of a second reconnect.
 type linkLostMsg struct {
 	gen int
-	err error
+	// dest names the connection that died, for a client holding several. Empty
+	// is the local daemon — and also what every single-connection drop reports,
+	// so the existing handling is unchanged.
+	dest string
+	err  error
 }
+
+// errLinkLost is the cause carried by a router-synthesised drop. The router's
+// pump discards the transport error (Receive's contract is one message or one
+// MsgLinkLost, and ipc.Message has nowhere to put an error), so the banner
+// needs a non-nil cause of its own — beginReconnect renders msg.err.
+var errLinkLost = errors.New("connection to the daemon was lost")
 
 // reconnectState tracks an in-progress reconnect. The zero value means "not
 // reconnecting", matching the ctxMenu/palette convention in this package: there

@@ -147,6 +147,10 @@ func (m *Model) createOverlay(tab *TabModel, repo string) tea.Cmd {
 
 	var cmds []tea.Cmd
 
+	// The overlay is the tab's pane, so both sends below follow the TAB's
+	// daemon — Alt+G is reachable from a background project's tab.
+	tabDest := tab.Dest
+
 	// Destroy the old overlay if one exists (different repo).
 	if tab.overlayPane != nil {
 		oldID := tab.overlayPane.ID
@@ -159,7 +163,7 @@ func (m *Model) createOverlay(tab *TabModel, repo string) tea.Cmd {
 				log.Printf("overlay: destroy pane encode: %v", err)
 				return nil
 			}
-			m.client.Send(msg)
+			m.sendForDest(tabDest, msg)
 			return nil
 		})
 	}
@@ -189,7 +193,7 @@ func (m *Model) createOverlay(tab *TabModel, repo string) tea.Cmd {
 			log.Printf("overlay: create pane encode: %v", err)
 			return nil
 		}
-		m.client.Send(msg)
+		m.sendForDest(tabDest, msg)
 		return nil
 	})
 
@@ -203,7 +207,7 @@ func (m *Model) overlayResizeCmd(tab *TabModel) tea.Cmd {
 	if tab.overlayPane == nil {
 		return nil
 	}
-	paneID := tab.overlayPane.ID
+	paneID, dest := tab.overlayPane.ID, tab.Dest
 	cols := tab.Width - 2
 	rows := tab.Height - 2
 	if cols < 1 {
@@ -224,7 +228,7 @@ func (m *Model) overlayResizeCmd(tab *TabModel) tea.Cmd {
 			log.Printf("overlay: resize pane encode: %v", err)
 			return nil
 		}
-		m.client.Send(msg)
+		m.sendForDest(dest, msg)
 		return nil
 	}
 }

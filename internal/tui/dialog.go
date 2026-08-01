@@ -678,7 +678,7 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 					log.Printf("restart pane %s: marshal: %v", id, reqErr)
 					return m, nil
 				}
-				if sendErr := m.client.Send(req); sendErr != nil {
+				if sendErr := m.sendForPane(id, req); sendErr != nil {
 					log.Printf("restart pane %s: send: %v", id, sendErr)
 				}
 			}
@@ -714,19 +714,28 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 
 		m.dialog = dialogNone
-		client := m.client
+		// The dest is resolved HERE, on the Update goroutine, rather than
+		// inside the command: the confirm is what named the target, and by the
+		// time the command runs a broadcast may already have pruned it.
+		var dest string
+		switch kind {
+		case "pane":
+			dest = m.destOfPane(id)
+		case "tab":
+			dest = m.destOfTab(id)
+		}
 		return m, func() tea.Msg {
 			switch kind {
 			case "pane":
 				req, _ := ipc.NewMessage(ipc.MsgDestroyPane, ipc.DestroyPanePayload{
 					PaneID: id,
 				})
-				client.Send(req)
+				m.sendForDest(dest, req)
 			case "tab":
 				req, _ := ipc.NewMessage(ipc.MsgDestroyTab, ipc.DestroyTabPayload{
 					TabID: id,
 				})
-				client.Send(req)
+				m.sendForDest(dest, req)
 			}
 			return nil
 		}
@@ -1389,8 +1398,10 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	tabID := tab.ID
-	client := m.client
+	// The new pane belongs to the tab it is being created in, so the tab's own
+	// dest is the routing answer — not the active project's, which a background
+	// tab does not share.
+	tabID, tabDest := tab.ID, tab.Dest
 
 	logger.Debug("create pane: sending IPC with cwd=%q type=%s instance=%s", cwd, pluginName, instanceName)
 
@@ -1427,7 +1438,7 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 				ReplacePaneID:   oldPaneID,
 				ResumeSessionID: resumeSessionID,
 			})
-			client.Send(msg)
+			m.sendForDest(tabDest, msg)
 			return nil
 		}
 	}
@@ -1459,7 +1470,7 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 			InstanceArgs:    instanceArgs,
 			ResumeSessionID: resumeSessionID,
 		})
-		client.Send(msg)
+		m.sendForDest(tabDest, msg)
 		return nil
 	}
 }

@@ -3212,6 +3212,10 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg, dest string) ([]str
 
 	m.projects = append(kept, rebuilt...)
 	m.activeProject = indexOfProject(m.projects, activeID)
+	// Both halves of the router's default just changed — the project list and
+	// which of them is active — so push the answer immediately rather than at
+	// the end of the function, where a later early return could skip it.
+	m.syncActiveDest()
 
 	// Dispose panes that did not survive reconciliation — both panes pruned
 	// from surviving tabs and every pane of tabs the daemon dropped. Without
@@ -3675,13 +3679,14 @@ func (m *Model) switchTab(idx int) tea.Cmd {
 	if m.notesMode && m.notesEditor != nil {
 		m.exitNotesModeInPlace()
 	}
-	tabID := m.curTabs()[idx].ID
+	target := m.curTabs()[idx]
+	tabID, dest := target.ID, target.Dest
 	m.setActiveTabIdx(idx)
 	return func() tea.Msg {
 		msg, _ := ipc.NewMessage(ipc.MsgSwitchTab, ipc.SwitchTabPayload{
 			TabID: tabID,
 		})
-		m.client.Send(msg)
+		m.sendForDest(dest, msg)
 		return nil
 	}
 }
@@ -4206,6 +4211,16 @@ func (m Model) listenForMessages() tea.Cmd {
 		}
 
 		switch msg.Type {
+		case ipc.MsgLinkLost:
+			// Synthesised by the Router when one of its connections died — it
+			// never reaches a socket. Receive itself cannot report that error,
+			// because the other daemons are still up, so the loss arrives as
+			// data naming the dest that died. The generation is the CURRENT
+			// one: a router's pumps are not superseded the way a whole client
+			// swap is, and a zero here would be discarded as stale.
+			log.Printf("ipc recv: link_lost from %q", msg.Origin)
+			return linkLostMsg{gen: m.clientGen, dest: msg.Origin, err: errLinkLost}
+
 		case ipc.MsgPaneOutput:
 			var payload ipc.PaneOutputPayload
 			msg.DecodePayload(&payload)
@@ -4556,17 +4571,18 @@ func (m *Model) splitPane(dir SplitDir) tea.Cmd {
 	}
 	m.pendingSplit[tab.ID] = placeholder
 
-	tabID := tab.ID
+	tabID, dest := tab.ID, tab.Dest
 	return func() tea.Msg {
 		msg, _ := ipc.NewMessage(ipc.MsgCreatePane, ipc.CreatePanePayload{
 			TabID: tabID,
 		})
-		m.client.Send(msg)
+		m.sendForDest(dest, msg)
 		return nil
 	}
 }
 
 func (m Model) updateTab(tabID, name, color string) tea.Cmd {
+	dest := m.destOfTab(tabID)
 	return func() tea.Msg {
 		msg, _ := ipc.NewMessage(ipc.MsgUpdateTab, ipc.UpdateTabPayload{
 			TabID: tabID,
@@ -4577,7 +4593,7 @@ func (m Model) updateTab(tabID, name, color string) tea.Cmd {
 			// to end up colorless, so the flag is safe to derive.
 			ClearColor: color == "",
 		})
-		m.client.Send(msg)
+		m.sendForDest(dest, msg)
 		return nil
 	}
 }
@@ -4586,13 +4602,14 @@ func (m Model) updateTab(tabID, name, color string) tea.Cmd {
 // The daemon snapshots + broadcasts; the next workspace_state arriving at
 // the TUI just confirms what we already rearranged locally.
 func (m Model) sendReorderTab(tabID string, newIdx int) tea.Cmd {
+	dest := m.destOfTab(tabID)
 	return func() tea.Msg {
 		msg, _ := ipc.NewMessage(ipc.MsgReorderTab, ipc.ReorderTabPayload{
 			TabID:    tabID,
 			NewIndex: newIdx,
 		})
 		if m.client != nil {
-			_ = m.client.Send(msg)
+			_ = m.sendForDest(dest, msg)
 		}
 		return nil
 	}
@@ -4672,7 +4689,7 @@ func (m Model) forwardInputBytes(data []byte) tea.Cmd {
 			PaneID: pane.ID,
 			Data:   data,
 		})
-		m.client.Send(msg)
+		m.sendForPane(pane.ID, msg)
 		return nil
 	}
 }
@@ -4725,7 +4742,7 @@ func (m Model) pasteClipboard() tea.Cmd {
 			PaneID: pane.ID,
 			Data:   data,
 		})
-		m.client.Send(msg)
+		m.sendForPane(pane.ID, msg)
 		// Wait for PTY echo to arrive before triggering re-render
 		time.Sleep(100 * time.Millisecond)
 		return pasteRefreshMsg{}
@@ -5089,7 +5106,7 @@ func (m Model) sendInputToPane(paneID string, data []byte) {
 		PaneID: paneID,
 		Data:   data,
 	})
-	_ = m.client.Send(msg)
+	_ = m.sendForPane(paneID, msg)
 }
 
 // sendClipboardToPane sends pasted text to the active pane as PTY input,
@@ -5115,7 +5132,7 @@ func (m Model) sendClipboardToPane(text string) {
 		PaneID: pane.ID,
 		Data:   pastePayload(pane, text),
 	})
-	m.client.Send(msg)
+	m.sendForPane(pane.ID, msg)
 }
 
 func keyToBytes(keyMsg tea.KeyPressMsg) []byte {
@@ -5225,23 +5242,28 @@ func keyToBytes(keyMsg tea.KeyPressMsg) []byte {
 	return nil
 }
 
+// resizeAllPanes walks the projects rather than allTabs() so each pane's
+// message can carry its own daemon: this is a broadcast over EVERY project, so
+// the active dest would be the right answer for at most one of them.
 func (m Model) resizeAllPanes() tea.Cmd {
 	return func() tea.Msg {
-		for _, tab := range m.allTabs() {
-			if tab.Root == nil {
-				continue
-			}
-			for _, pane := range tab.Leaves() {
-				// paneVTSize keeps the PTY in lockstep with the VT: rect
-				// size for normal panes, tab canvas for wide-canvas panes.
-				// The daemon drops exact duplicates (same-size guard).
-				cols, rows := paneVTSize(pane.WideCanvas, pane.MinNativeCols, pane.Width, pane.Height, tab.CanvasW, tab.CanvasH)
-				msg, _ := ipc.NewMessage(ipc.MsgResizePane, ipc.ResizePanePayload{
-					PaneID: pane.ID,
-					Cols:   uint16(cols),
-					Rows:   uint16(rows),
-				})
-				m.client.Send(msg)
+		for _, proj := range m.projects {
+			for _, tab := range proj.tabs {
+				if tab.Root == nil {
+					continue
+				}
+				for _, pane := range tab.Leaves() {
+					// paneVTSize keeps the PTY in lockstep with the VT: rect
+					// size for normal panes, tab canvas for wide-canvas panes.
+					// The daemon drops exact duplicates (same-size guard).
+					cols, rows := paneVTSize(pane.WideCanvas, pane.MinNativeCols, pane.Width, pane.Height, tab.CanvasW, tab.CanvasH)
+					msg, _ := ipc.NewMessage(ipc.MsgResizePane, ipc.ResizePanePayload{
+						PaneID: pane.ID,
+						Cols:   uint16(cols),
+						Rows:   uint16(rows),
+					})
+					m.sendForDest(proj.Dest, msg)
+				}
 			}
 		}
 		return nil
@@ -5254,7 +5276,7 @@ func (m Model) updatePane(paneID, name string) tea.Cmd {
 			PaneID: paneID,
 			Name:   name,
 		})
-		m.client.Send(msg)
+		m.sendForPane(paneID, msg)
 		return nil
 	}
 }
@@ -5265,7 +5287,7 @@ func (m Model) updatePaneCWD(paneID, cwd string) tea.Cmd {
 			PaneID: paneID,
 			CWD:    cwd,
 		})
-		m.client.Send(msg)
+		m.sendForPane(paneID, msg)
 		return nil
 	}
 }
@@ -5294,7 +5316,7 @@ func (m Model) toggleActivePaneMute() tea.Cmd {
 			log.Printf("toggleActivePaneMute build msg: %v", err)
 			return nil
 		}
-		if err := m.client.Send(msg); err != nil {
+		if err := m.sendForPane(paneID, msg); err != nil {
 			log.Printf("toggleActivePaneMute send: %v", err)
 		}
 		return nil
@@ -5324,28 +5346,32 @@ func (m Model) toggleActivePaneEager() tea.Cmd {
 			log.Printf("toggleActivePaneEager build msg: %v", err)
 			return nil
 		}
-		if err := m.client.Send(msg); err != nil {
+		if err := m.sendForPane(paneID, msg); err != nil {
 			log.Printf("toggleActivePaneEager send: %v", err)
 		}
 		return nil
 	}
 }
 
+// sendAllLayouts walks the projects for the same reason resizeAllPanes does —
+// every tab's layout has to reach the daemon that owns that tab.
 func (m Model) sendAllLayouts() tea.Cmd {
 	return func() tea.Msg {
-		for _, tab := range m.allTabs() {
-			if tab.Root == nil {
-				continue
+		for _, proj := range m.projects {
+			for _, tab := range proj.tabs {
+				if tab.Root == nil {
+					continue
+				}
+				data, err := MarshalLayout(tab.Root)
+				if err != nil {
+					continue
+				}
+				msg, _ := ipc.NewMessage(ipc.MsgUpdateLayout, ipc.UpdateLayoutPayload{
+					TabID:  tab.ID,
+					Layout: data,
+				})
+				m.sendForDest(proj.Dest, msg)
 			}
-			data, err := MarshalLayout(tab.Root)
-			if err != nil {
-				continue
-			}
-			msg, _ := ipc.NewMessage(ipc.MsgUpdateLayout, ipc.UpdateLayoutPayload{
-				TabID:  tab.ID,
-				Layout: data,
-			})
-			m.client.Send(msg)
 		}
 		return nil
 	}

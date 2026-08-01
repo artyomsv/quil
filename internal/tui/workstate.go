@@ -83,6 +83,9 @@ func (m *Model) jumpToPane(paneID string) bool {
 	}
 	proj.activeTab = tabIdx
 	proj.tabs[tabIdx].ActivePane = paneID
+	// The jump may have crossed a project — and therefore a daemon — boundary,
+	// so every later unstamped send has a new right answer.
+	m.syncActiveDest()
 	return true
 }
 

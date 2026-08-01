@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"net"
 	"os"
 	"slices"
@@ -36,6 +37,16 @@ func deadClient(t *testing.T) *ipc.Client {
 // the message grows past the buffer, and the message embeds a remote-supplied
 // string bounded only by transport.maxStderrInMessage. Draining in parallel
 // removes the size assumption entirely.
+//
+// The drain reads to EOF, not once. A single Read returns whatever is in the
+// pipe at that moment, so with a caller that writes in several Fprintf calls
+// it can wake on the first one and return before the rest arrive — the caller
+// then asserts against a truncated prefix. That is a FLAKE, not a failure: it
+// depends purely on how the writer and the reader interleave, and it produced
+// false failures under -race on assertions that span two lines (offerRemoteInstall
+// prints "Checking <dest>…" and "Quil could not be started on <dest>" as
+// separate writes). EOF arrives when the caller below closes w, which happens
+// only after fn has returned.
 func captureStderr(t *testing.T, fn func()) string {
 	t.Helper()
 	r, w, err := os.Pipe()
@@ -47,9 +58,8 @@ func captureStderr(t *testing.T, fn func()) string {
 
 	out := make(chan string, 1)
 	go func() {
-		var buf [1 << 16]byte
-		n, _ := r.Read(buf[:])
-		out <- string(buf[:n])
+		b, _ := io.ReadAll(r)
+		out <- string(b)
 	}()
 
 	fn()

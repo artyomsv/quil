@@ -209,6 +209,39 @@ func TestRunHook_SessionStart_WritesSessionFile_NoSpool(t *testing.T) {
 	}
 }
 
+func TestRunHook_SubagentStop_WithoutAgentType_NotSpooled(t *testing.T) {
+	t.Parallel()
+	// Claude Code fires one SubagentStop with an EMPTY agent_type at the end
+	// of every main turn — the root turn's own completion, not a background
+	// subagent. Spooling it produced a sidebar card titled literally " done"
+	// on every turn of every AI pane, which the queue then aggregated into
+	// `" done" ×N` and re-promoted to the top each time. It also names no
+	// agent, so the TUI work ledger discards it regardless. Drop it at the
+	// producer; the TUI-side guard stays as defence in depth.
+	dir := t.TempDir()
+	env := HookEnv{PaneID: "pane-nosub", QuilDir: dir, Mode: "default"}
+	stdin := `{"hook_event_name":"SubagentStop"}`
+	if err := RunHook(strings.NewReader(stdin), env, 1); err != nil {
+		t.Fatalf("RunHook: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "events", "pane-nosub.jsonl")); !os.IsNotExist(err) {
+		t.Errorf("an unnamed SubagentStop must not be spooled (err=%v)", err)
+	}
+
+	// A NAMED stop is still spooled — it is a real completion the ledger needs.
+	stdin = `{"hook_event_name":"SubagentStop","agent_type":"Explore"}`
+	if err := RunHook(strings.NewReader(stdin), env, 2); err != nil {
+		t.Fatalf("RunHook (named): %v", err)
+	}
+	got := readSpool(t, dir, "pane-nosub")
+	if len(got) != 1 {
+		t.Fatalf("named SubagentStop: want 1 spool line, got %d", len(got))
+	}
+	if got[0].Data["agent_type"] != "Explore" {
+		t.Errorf("agent_type = %q, want %q", got[0].Data["agent_type"], "Explore")
+	}
+}
+
 func TestRunHook_SessionStart_RejectsNonUUID(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

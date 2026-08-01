@@ -13,6 +13,14 @@ import (
 // spinner (shared by tab and pane indicators).
 const workSpinnerInterval = 100 * time.Millisecond
 
+// maxTrackedSubagents caps the DISTINCT agent_type keys one pane's ledger may
+// hold. The ledger is keyed by a producer-controlled string in a TUI process
+// that runs for weeks, so its cardinality needs a ceiling that does not depend
+// on the child behaving; the ceiling sits far above any real fan-out (observed
+// sessions peak in the low tens of distinct agent names, and entries are
+// deleted as they drain) so a healthy pane never reaches it.
+const maxTrackedSubagents = 64
+
 // workTransition classifies a pane event's effect on a pane's working state.
 // Alias of hookevents.WorkEventKind — that package is the single source of
 // truth (shared with the daemon's mute-bypass logic in emitEvent).
@@ -104,10 +112,30 @@ func (m *Model) applyWorkTransition(paneID, eventType string, data map[string]st
 	case workStart:
 		pane.turnActive = true
 	case workSubagentStart:
+		agentType := data["agent_type"]
+		if agentType == "" {
+			// A start must NAME the agent it starts, and every observed one
+			// does. Enforcing it is what turns "the empty key is never live"
+			// from a measurement into an invariant: the empty key is exactly
+			// the one the unpaired end-of-turn stop carries, so admitting it
+			// here would let that phantom drain real work again — silently,
+			// if the producer ever renames or drops the field.
+			break
+		}
+		_, live := pane.subagents[agentType]
+		if !live && len(pane.subagents) >= maxTrackedSubagents {
+			// agent_type is producer-controlled, so key cardinality is too,
+			// in a process that runs for weeks. Refusing a NEW key past the
+			// ceiling cannot turn the spinner off — `working` derives from
+			// len() > 0, already true here — and an unmatched stop is
+			// ignored by design, so the refusal costs only precision about
+			// how many agents are outstanding, never the indicator itself.
+			break
+		}
 		if pane.subagents == nil {
 			pane.subagents = make(map[string]int, 1)
 		}
-		pane.subagents[data["agent_type"]] += coalescedCount(data)
+		pane.subagents[agentType] += coalescedCount(data)
 	case workSubagentStop:
 		agentType := data["agent_type"]
 		outstanding, live := pane.subagents[agentType]
@@ -131,7 +159,12 @@ func (m *Model) applyWorkTransition(paneID, eventType string, data map[string]st
 			// old zero-guard could not catch it either — it only fires when
 			// the count is already zero, which is precisely when no agent is
 			// at risk.
-			return
+			//
+			// break, not return: the derivation below is the single point
+			// that owns `working`, and leaving the function around it would
+			// make that property depend on this branch never mattering.
+			// Recomputing an unchanged state is free and fires no edge.
+			break
 		}
 		outstanding -= coalescedCount(data)
 		if outstanding <= 0 {

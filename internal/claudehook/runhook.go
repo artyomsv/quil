@@ -170,6 +170,19 @@ func dispatchHookEvent(env HookEnv, in claudeStdin, nowMs int64) error {
 			truncate("Spawned: "+in.AgentType, hookevents.MaxTitleBytes), hookevents.SeverityInfo,
 			map[string]string{"agent_type": truncate(in.AgentType, hookevents.MaxDataValueBytes)})
 	case "SubagentStop":
+		if in.AgentType == "" {
+			// Claude Code fires one SubagentStop with an EMPTY agent_type at
+			// the end of EVERY main turn (measured 1:1 against Stop across
+			// every AI pane). It is the root turn's own completion — its start
+			// edge is UserPromptSubmit, not a SubagentStart — so it names no
+			// background agent and reports nothing a user can act on. Spooled,
+			// it became a sidebar card titled literally " done" once per turn,
+			// aggregated to `" done" ×N` and re-promoted to the top each time.
+			// The TUI work ledger already discards it (a stop matches only a
+			// start it can name); dropping it here removes the noise at the
+			// source and leaves that guard as defence in depth.
+			return nil
+		}
 		return spoolEvent(env, nowMs, "SubagentStop", in.SessionID,
 			truncate(in.AgentType+" done", hookevents.MaxTitleBytes), hookevents.SeverityInfo,
 			map[string]string{"agent_type": truncate(in.AgentType, hookevents.MaxDataValueBytes)})

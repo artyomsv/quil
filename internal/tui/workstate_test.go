@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 
@@ -258,7 +259,7 @@ func TestApplyWorkTransition_StopWithOutstandingSubagents_KeepsSpinner(t *testin
 			t.Parallel()
 			m := modelWithBackgroundTab()
 			m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit", nil)
-			m.applyWorkTransition("p2", "hook.claude.SubagentStart", nil)
+			m.applyWorkTransition("p2", "hook.claude.SubagentStart", map[string]string{"agent_type": "Explore"})
 			m.applyWorkTransition("p2", stopEdge, nil)
 			pane := m.tabs[1].Root.Leaves()[0]
 			if !pane.working {
@@ -269,7 +270,7 @@ func TestApplyWorkTransition_StopWithOutstandingSubagents_KeepsSpinner(t *testin
 			}
 
 			// The last subagent finishing IS the completion edge now.
-			m.applyWorkTransition("p2", "hook.claude.SubagentStop", nil)
+			m.applyWorkTransition("p2", "hook.claude.SubagentStop", map[string]string{"agent_type": "Explore"})
 			if pane.working {
 				t.Error("draining the last subagent after the turn ended must stop the spinner")
 			}
@@ -286,8 +287,8 @@ func TestApplyWorkTransition_SubagentStopBeforeStop_TurnKeepsSpinner(t *testing.
 	// stop the spinner — the turn itself is still mid-flight.
 	m := modelWithBackgroundTab()
 	m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit", nil)
-	m.applyWorkTransition("p2", "hook.claude.SubagentStart", nil)
-	m.applyWorkTransition("p2", "hook.claude.SubagentStop", nil)
+	m.applyWorkTransition("p2", "hook.claude.SubagentStart", map[string]string{"agent_type": "Explore"})
+	m.applyWorkTransition("p2", "hook.claude.SubagentStop", map[string]string{"agent_type": "Explore"})
 	pane := m.tabs[1].Root.Leaves()[0]
 	if !pane.working {
 		t.Error("subagent drain during an active turn must keep the spinner")
@@ -313,15 +314,15 @@ func TestApplyWorkTransition_CoalescedSubagentBursts(t *testing.T) {
 	// parallel spawn of 3 subagents would be undercounted as 1.
 	m := modelWithBackgroundTab()
 	m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit", nil)
-	m.applyWorkTransition("p2", "hook.claude.SubagentStart", map[string]string{"coalesced": "3"})
+	m.applyWorkTransition("p2", "hook.claude.SubagentStart", map[string]string{"agent_type": "Explore", "coalesced": "3"})
 	m.applyWorkTransition("p2", "hook.claude.Stop", nil)
 	pane := m.tabs[1].Root.Leaves()[0]
 
-	m.applyWorkTransition("p2", "hook.claude.SubagentStop", map[string]string{"coalesced": "2"})
+	m.applyWorkTransition("p2", "hook.claude.SubagentStop", map[string]string{"agent_type": "Explore", "coalesced": "2"})
 	if !pane.working {
 		t.Fatal("2 of 3 subagents drained — one is still outstanding, spinner must stay")
 	}
-	m.applyWorkTransition("p2", "hook.claude.SubagentStop", nil) // last one
+	m.applyWorkTransition("p2", "hook.claude.SubagentStop", map[string]string{"agent_type": "Explore"}) // last one
 	if pane.working {
 		t.Error("all 3 subagents drained — spinner must stop")
 	}
@@ -337,7 +338,7 @@ func TestApplyWorkTransition_OrphanSubagentStop_NoUnderflow(t *testing.T) {
 	// make the next SubagentStart+SubagentStop pair fail to balance.
 	m := modelWithBackgroundTab()
 	pane := m.tabs[1].Root.Leaves()[0]
-	m.applyWorkTransition("p2", "hook.claude.SubagentStop", nil) // orphan
+	m.applyWorkTransition("p2", "hook.claude.SubagentStop", map[string]string{"agent_type": "Explore"}) // orphan
 	if pane.working {
 		t.Fatal("orphan SubagentStop on an idle pane must not start the spinner")
 	}
@@ -346,11 +347,11 @@ func TestApplyWorkTransition_OrphanSubagentStop_NoUnderflow(t *testing.T) {
 	}
 
 	// Counter must still balance: one start + one stop = drained.
-	m.applyWorkTransition("p2", "hook.claude.SubagentStart", nil)
+	m.applyWorkTransition("p2", "hook.claude.SubagentStart", map[string]string{"agent_type": "Explore"})
 	if !pane.working {
 		t.Fatal("SubagentStart after an orphan stop must start the spinner")
 	}
-	m.applyWorkTransition("p2", "hook.claude.SubagentStop", nil)
+	m.applyWorkTransition("p2", "hook.claude.SubagentStop", map[string]string{"agent_type": "Explore"})
 	if pane.working {
 		t.Error("counter went negative on the orphan stop — start/stop pair no longer balances")
 	}
@@ -362,7 +363,7 @@ func TestApplyWorkTransition_SessionEndClearsOutstandingSubagents(t *testing.T) 
 	// subagent of that session — a stale counter must not wedge the spinner.
 	m := modelWithBackgroundTab()
 	m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit", nil)
-	m.applyWorkTransition("p2", "hook.claude.SubagentStart", nil)
+	m.applyWorkTransition("p2", "hook.claude.SubagentStart", map[string]string{"agent_type": "Explore"})
 	m.applyWorkTransition("p2", "hook.claude.SessionEnd", nil)
 	pane := m.tabs[1].Root.Leaves()[0]
 	if pane.working {
@@ -370,6 +371,81 @@ func TestApplyWorkTransition_SessionEndClearsOutstandingSubagents(t *testing.T) 
 	}
 	if !pane.unseen {
 		t.Error("SessionEnd is a genuine completion — background pane should be marked")
+	}
+}
+
+func TestApplyWorkTransition_SubagentStartWithoutAgentType_IsRefused(t *testing.T) {
+	t.Parallel()
+	// The ledger's whole guarantee is that the empty key is NEVER live —
+	// that is what makes the unpaired end-of-turn stop (which always carries
+	// an empty agent_type) unable to cancel anything. Measured: Claude Code
+	// never emits a start without naming its agent. Enforce it rather than
+	// assume it: if the producer ever renames or drops the field, both edges
+	// would collapse onto the empty key and the phantom would silently drain
+	// real work again, with no test failing to say so.
+	m := modelWithBackgroundTab()
+	pane := m.tabs[1].Root.Leaves()[0]
+
+	m.applyWorkTransition("p2", "hook.claude.SubagentStart", map[string]string{"agent_type": ""})
+	if pane.working {
+		t.Error("a SubagentStart naming no agent must not enter the ledger")
+	}
+	m.applyWorkTransition("p2", "hook.claude.SubagentStart", nil)
+	if pane.working {
+		t.Error("a SubagentStart with no data at all must not enter the ledger")
+	}
+	if len(pane.subagents) != 0 {
+		t.Errorf("ledger must stay empty; got %v", pane.subagents)
+	}
+}
+
+func TestApplyWorkTransition_OverCountedStopDrainsWithoutWedging(t *testing.T) {
+	t.Parallel()
+	// data["coalesced"] is producer-controlled and the ingester only rewrites
+	// it on a real burst, so a stop can claim a larger count than the ledger
+	// holds. The entry must be removed rather than left negative: len() > 0
+	// is the spinner's input, so a negative-valued entry would wedge it ON
+	// until SessionEnd — the mirror of the bug this branch fixes.
+	m := modelWithBackgroundTab()
+	pane := m.tabs[1].Root.Leaves()[0]
+
+	m.applyWorkTransition("p2", "hook.claude.SubagentStart", map[string]string{"agent_type": "A"})
+	m.applyWorkTransition("p2", "hook.claude.SubagentStop", map[string]string{"agent_type": "A", "coalesced": "3"})
+
+	if pane.working {
+		t.Error("over-counted stop left the spinner lit — the ledger entry was not removed")
+	}
+	if len(pane.subagents) != 0 {
+		t.Errorf("over-counted stop left a residual entry: %v", pane.subagents)
+	}
+}
+
+func TestApplyWorkTransition_LedgerIsBounded(t *testing.T) {
+	t.Parallel()
+	// agent_type is producer-controlled, so the ledger's key cardinality is
+	// too. Cap it: the pane's own child can otherwise grow the map without
+	// limit in a TUI process that runs for weeks. Refusing new keys at the
+	// ceiling cannot turn the spinner off — `working` derives from len() > 0,
+	// which is already true once the ledger is full.
+	m := modelWithBackgroundTab()
+	pane := m.tabs[1].Root.Leaves()[0]
+
+	for i := 0; i < maxTrackedSubagents*3; i++ {
+		m.applyWorkTransition("p2", "hook.claude.SubagentStart",
+			map[string]string{"agent_type": "agent-" + strconv.Itoa(i)})
+	}
+	if len(pane.subagents) > maxTrackedSubagents {
+		t.Errorf("ledger grew to %d entries, want <= %d", len(pane.subagents), maxTrackedSubagents)
+	}
+	if !pane.working {
+		t.Error("a full ledger must still report work in progress")
+	}
+
+	// A terminal edge still clears it completely.
+	m.applyWorkTransition("p2", "hook.claude.SessionEnd", nil)
+	if len(pane.subagents) != 0 || pane.working {
+		t.Errorf("SessionEnd must clear a capped ledger; got %d entries, working=%v",
+			len(pane.subagents), pane.working)
 	}
 }
 
@@ -484,9 +560,12 @@ func TestApplyWorkTransition_ProcessExitClearsOutstandingSubagents(t *testing.T)
 	t.Parallel()
 	m := modelWithBackgroundTab()
 	m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit", nil)
-	m.applyWorkTransition("p2", "hook.claude.SubagentStart", nil)
+	m.applyWorkTransition("p2", "hook.claude.SubagentStart", map[string]string{"agent_type": "Explore"})
 	m.applyWorkTransition("p2", "process_exit", nil)
 	pane := m.tabs[1].Root.Leaves()[0]
+	if len(pane.subagents) != 0 {
+		t.Fatalf("process_exit must clear the subagent ledger; got %v", pane.subagents)
+	}
 	if pane.working {
 		t.Fatal("process_exit must clear the spinner regardless of subagent count")
 	}
@@ -511,7 +590,7 @@ func TestApplyWorkTransition_SubagentStartFromIdle_SetsWorkingAndClearsUnseen(t 
 	m := modelWithBackgroundTab()
 	pane := m.tabs[1].Root.Leaves()[0]
 	pane.unseen = true
-	m.applyWorkTransition("p2", "hook.claude.SubagentStart", nil)
+	m.applyWorkTransition("p2", "hook.claude.SubagentStart", map[string]string{"agent_type": "Explore"})
 	if !pane.working {
 		t.Error("SubagentStart on an idle pane must start the spinner")
 	}

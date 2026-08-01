@@ -1,1 +1,2 @@
 - [OSC7 CWD taint source](project_osc7_cwd_taint.md) — pane.CWD is attacker-influenced (OSC7 from PTY); flows TUI→daemon→workspace.json; flag unguarded filesystem/network use
+- [hookevents taint boundary](project_hookevents_taint.md) — spool payloads are pane-controlled; the real bounds are ~50 events/s/pane and 1 KiB per data value (not the 128-byte producer cap)

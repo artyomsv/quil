@@ -60,14 +60,6 @@ func (sm *SessionManager) DestroyProject(id string) []*Pane {
 		}
 		delete(sm.tabs, tabID)
 		sm.tabOrder = removeString(sm.tabOrder, tabID)
-		// Repair activeTab the way DestroyTab does — a stale one feeds
-		// SnapshotState, the restore eager-spawn decision, and the broadcast.
-		if sm.activeTab == tabID {
-			sm.activeTab = ""
-		}
-	}
-	if sm.activeTab == "" && len(sm.tabOrder) > 0 {
-		sm.activeTab = sm.tabOrder[0]
 	}
 
 	delete(sm.projects, id)
@@ -78,6 +70,23 @@ func (sm *SessionManager) DestroyProject(id string) []*Pane {
 			sm.activeProject = sm.projectOrder[0]
 		}
 	}
+
+	// activeTab must name a tab that belongs to the (possibly new)
+	// activeProject — never derived from the global tabOrder, which can
+	// hand back a tab belonging to a DIFFERENT project than the one now
+	// active. Task 7's client scopes the visible tab list to the active
+	// project's TabIDs alone, so a mismatch here renders as a highlighted
+	// tab absent from that list, or an active project with nothing
+	// highlighted.
+	sm.activeTab = ""
+	if ap, ok := sm.projects[sm.activeProject]; ok {
+		if ap.ActiveTab != "" {
+			sm.activeTab = ap.ActiveTab
+		} else if len(ap.TabIDs) > 0 {
+			sm.activeTab = ap.TabIDs[0]
+		}
+	}
+
 	return detached
 }
 

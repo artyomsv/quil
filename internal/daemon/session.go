@@ -264,14 +264,20 @@ func (sm *SessionManager) CreateTab(name string) *Tab {
 // createTabLocked builds a tab and registers it with its project. Caller holds
 // sm.mu — sm.mu is not reentrant, so this must never take it.
 //
-// An empty projectID bootstraps a "Default" project. That is not a defensive
-// nicety: on a fresh install there is no snapshot to migrate and nobody has
-// called CreateProject, so handleAttach (daemon.go:988) creates the default
-// Shell tab with activeProject still "". A tab registered to no project is
-// invisible to the client, which builds tabs only from project TabIDs.
+// An empty OR unknown projectID resolves to: the active project if it still
+// exists, else the first remaining project, else a bootstrapped "Default"
+// project. Empty is the fresh-install case — no snapshot to migrate, nobody
+// has called CreateProject, so handleAttach (daemon.go:988) creates the
+// default Shell tab with activeProject still "". Unknown is a race: a client
+// can call CreateTabInProject with a projectID that another connection's
+// DestroyProject removed in between. Either way, a tab must always end up in
+// a project that exists — one registered to no project is invisible to the
+// client, which builds tabs only from project TabIDs.
 func (sm *SessionManager) createTabLocked(projectID, name string) *Tab {
-	if projectID == "" {
-		if len(sm.projectOrder) > 0 {
+	if _, ok := sm.projects[projectID]; projectID == "" || !ok {
+		if _, ok := sm.projects[sm.activeProject]; ok {
+			projectID = sm.activeProject
+		} else if len(sm.projectOrder) > 0 {
 			projectID = sm.projectOrder[0]
 		} else {
 			cwd, _ := os.Getwd()

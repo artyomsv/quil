@@ -121,7 +121,7 @@ wide_canvas = true
 			{ID: "pane-c2", TabID: "t1", Type: "claude-code"},
 		},
 	}
-	m.applyWorkspaceState(state)
+	m.applyWorkspaceState(state, "")
 	m.resizeTabs()
 
 	tab := m.curTabs()[0]
@@ -190,7 +190,7 @@ func TestApplyWorkspaceState_RestorePath_CanvasFlag(t *testing.T) {
 		Tabs:      []TabInfo{{ID: "t1", Name: "AI", Panes: []string{"pane-r1"}, Layout: layout}},
 		Panes:     []PaneInfo{{ID: "pane-r1", TabID: "t1", Type: "claude-code"}},
 	}
-	m.applyWorkspaceState(state)
+	m.applyWorkspaceState(state, "")
 	m.resizeTabs()
 
 	leaves := m.curTabs()[0].Leaves()
@@ -224,7 +224,7 @@ func TestApplyWorkspaceState_MidSessionFlip_CanvasFlag(t *testing.T) {
 		Tabs:      []TabInfo{{ID: "t1", Name: "AI", Panes: []string{"pane-m1"}}},
 		Panes:     []PaneInfo{{ID: "pane-m1", TabID: "t1", Type: "claude-code"}},
 	}
-	m.applyWorkspaceState(state)
+	m.applyWorkspaceState(state, "")
 	if m.curTabs()[0].Leaves()[0].WideCanvas {
 		t.Fatal("setup: pane must start non-canvas before migration")
 	}
@@ -232,7 +232,7 @@ func TestApplyWorkspaceState_MidSessionFlip_CanvasFlag(t *testing.T) {
 	// Migration reloads the registry with wide_canvas = true, then the next
 	// broadcast re-reconciles the same tab/pane (resync-in-tree branch).
 	m.pluginRegistry = flaggedCanvasRegistry(t)
-	m.applyWorkspaceState(state)
+	m.applyWorkspaceState(state, "")
 	m.resizeTabs()
 
 	pane := m.curTabs()[0].Leaves()[0]
@@ -289,7 +289,7 @@ func TestSyncPaneMeta_SetsMinNativeCols(t *testing.T) {
 		Tabs:      []TabInfo{{ID: "t1", Name: "AI", Panes: []string{"p1"}}},
 		Panes:     []PaneInfo{{ID: "p1", TabID: "t1", Type: "claude-code"}},
 	}
-	m.applyWorkspaceState(state)
+	m.applyWorkspaceState(state, "")
 	if got := m.curTabs()[0].Leaves()[0].MinNativeCols; got != 100 {
 		t.Errorf("pane MinNativeCols = %d, want 100", got)
 	}
@@ -339,7 +339,7 @@ func TestApplyWorkspaceState_ThresholdSelectsNativeOrCanvas(t *testing.T) {
 				{ID: "p2", TabID: "t1", Type: "claude-code"},
 			},
 		}
-		m.applyWorkspaceState(state)
+		m.applyWorkspaceState(state, "")
 		m.resizeTabs()
 		return m
 	}

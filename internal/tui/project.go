@@ -96,11 +96,67 @@ func (m Model) activeTabIdx() int {
 	return 0
 }
 
-// interimProject returns the project every broadcast tab is folded into until
-// Task 7 parses real ones: the active project when there is one, otherwise a
-// freshly created synthetic one. It also normalises activeProject, so a Model
-// built directly by a test (or a client at startup, before the first
-// broadcast) is a legal write target.
+// broadcastProjects returns the projects a workspace broadcast describes.
+//
+// A daemon that sent tabs but no projects is either older than the project
+// layer or lost its project list; folding every tab into ONE synthetic project
+// keeps those tabs on screen instead of blanking the client, and reproduces
+// exactly the shape the client used before it parsed projects at all. Tab
+// order and active tab come from the broadcast's own global fields, which is
+// what a single-project workspace means.
+//
+// A broadcast with no tabs AND no projects describes an empty daemon and gets
+// no synthetic project — an empty project list is the honest answer there.
+func broadcastProjects(state WorkspaceStateMsg) []ProjectInfo {
+	if len(state.Projects) > 0 || len(state.Tabs) == 0 {
+		return state.Projects
+	}
+	ids := make([]string, 0, len(state.Tabs))
+	for _, t := range state.Tabs {
+		ids = append(ids, t.ID)
+	}
+	return []ProjectInfo{{
+		ID:        interimProjectID,
+		Name:      interimProjectName,
+		TabIDs:    ids,
+		ActiveTab: state.ActiveTab,
+	}}
+}
+
+// indexOfTab returns the ordinal of the tab with the given ID, or 0 when it is
+// absent — the active-tab pointer must always land on a real tab, and a
+// project whose remembered tab the daemon has since dropped falls back to its
+// first one rather than to an index that renders nothing.
+func indexOfTab(tabs []*TabModel, id string) int {
+	for i, t := range tabs {
+		if t.ID == id {
+			return i
+		}
+	}
+	return 0
+}
+
+// indexOfProject is indexOfTab for the project list, with the same
+// always-somewhere-valid contract.
+func indexOfProject(projects []*ProjectModel, id string) int {
+	for i, p := range projects {
+		if p.ID == id {
+			return i
+		}
+	}
+	return 0
+}
+
+// interimProject returns the project the tab WRITERS below target: the active
+// project when there is one, otherwise a freshly created synthetic one. It
+// also normalises activeProject, so a Model built directly by a test (or a
+// client at startup, before the first broadcast) is a legal write target.
+//
+// Workspace broadcasts no longer come through here — applyWorkspaceState
+// parses the daemon's real projects and rebuilds each one's tabs in place. The
+// synthetic project survives for the paths that still have no project to name:
+// the pre-attach client, the ~46 tests that build a Model directly, and
+// broadcastProjects' fallback for a daemon that sent tabs without projects.
 //
 // Resolving through cur() rather than indexing projects[0] keeps the writers
 // and the readers on the SAME project. With one project the two are the same

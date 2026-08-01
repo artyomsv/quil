@@ -1046,7 +1046,7 @@ func TestModel_ApplyWorkspaceState_BoundPanePruned_ExitsNotes(t *testing.T) {
 		},
 		ActiveTab: "t1",
 	}
-	m.applyWorkspaceState(state)
+	m.applyWorkspaceState(state, "")
 	if m.notesMode {
 		t.Error("notesMode should be false after bound pane was pruned")
 	}
@@ -1082,7 +1082,7 @@ func TestModel_ApplyWorkspaceState_BoundPaneNotActive_ResyncsActive(t *testing.T
 		},
 		ActiveTab: "t1",
 	}
-	m.applyWorkspaceState(state)
+	m.applyWorkspaceState(state, "")
 
 	if !m.notesMode {
 		t.Error("notesMode should still be true after re-sync")

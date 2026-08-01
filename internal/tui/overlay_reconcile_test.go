@@ -18,7 +18,7 @@ func TestApplyWorkspaceState_OverlayPane_NotInLayoutTree(t *testing.T) {
 			{ID: "pane-o", TabID: "tab-1", Type: "lazygit", CWD: "/repo", Overlay: true},
 		},
 	}
-	m.applyWorkspaceState(state)
+	m.applyWorkspaceState(state, "")
 
 	if len(m.curTabs()) != 1 {
 		t.Fatalf("tabs = %d, want 1", len(m.curTabs()))
@@ -46,7 +46,7 @@ func TestApplyWorkspaceState_OverlayGone_ClearsSlot(t *testing.T) {
 			{ID: "pane-o", TabID: "tab-1", Type: "lazygit", Overlay: true},
 		},
 	}
-	m.applyWorkspaceState(withOverlay)
+	m.applyWorkspaceState(withOverlay, "")
 	m.curTabs()[0].overlayVisible = true
 
 	// Overlay exits (user pressed q in lazygit) — daemon broadcasts without it.
@@ -55,7 +55,7 @@ func TestApplyWorkspaceState_OverlayGone_ClearsSlot(t *testing.T) {
 		Tabs:      []TabInfo{{ID: "tab-1", Name: "t", Panes: []string{"pane-n"}}},
 		Panes:     []PaneInfo{{ID: "pane-n", TabID: "tab-1", Type: "terminal"}},
 	}
-	m.applyWorkspaceState(without)
+	m.applyWorkspaceState(without, "")
 
 	tab := m.curTabs()[0]
 	if tab.overlayPane != nil || tab.overlayVisible {
@@ -65,7 +65,7 @@ func TestApplyWorkspaceState_OverlayGone_ClearsSlot(t *testing.T) {
 	// Regression: a third apply (still no overlay) must not panic — the
 	// dropped overlay PaneModel must be disposed exactly once (by the
 	// surviving sweep), never a second time.
-	m.applyWorkspaceState(without)
+	m.applyWorkspaceState(without, "")
 }
 
 // Regression: restoreTabLayout (the fast path for new tabs with saved layout)
@@ -87,7 +87,7 @@ func TestApplyWorkspaceState_RestoredLayout_OverlayAdoptedNotInTree(t *testing.T
 			{ID: "pane-o", TabID: "tab-1", Type: "lazygit", Overlay: true},
 		},
 	}
-	m.applyWorkspaceState(state)
+	m.applyWorkspaceState(state, "")
 
 	if len(m.curTabs()) != 1 {
 		t.Fatalf("tabs = %d, want 1", len(m.curTabs()))
@@ -115,7 +115,7 @@ func TestApplyWorkspaceState_PendingOverlayShow_ShowsOnArrival(t *testing.T) {
 			{ID: "pane-o", TabID: "tab-1", Type: "lazygit", Overlay: true},
 		},
 	}
-	m.applyWorkspaceState(state)
+	m.applyWorkspaceState(state, "")
 
 	tab := m.curTabs()[0]
 	if tab.overlayPane == nil || !tab.overlayVisible {

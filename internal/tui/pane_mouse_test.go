@@ -182,7 +182,7 @@ func TestUpdateMouseSelection_PreviewPane_RoutesThroughLayout(t *testing.T) {
 			{ID: "p2", TabID: "t1", Type: "claude-code"},
 		},
 	}
-	m.applyWorkspaceState(state)
+	m.applyWorkspaceState(state, "")
 	m.resizeTabs()
 	tab := m.curTabs()[0]
 	p := tab.Leaves()[0]

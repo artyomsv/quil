@@ -46,16 +46,43 @@ type WorkspaceStateMsg struct {
 	ActiveTab string
 	Tabs      []TabInfo
 	Panes     []PaneInfo
+	// Projects is the sending daemon's project grouping, in its own order;
+	// ActiveProject is the project that daemon considers current. A broadcast
+	// is the FULL state of ONE daemon, so both describe that daemon only.
+	Projects      []ProjectInfo
+	ActiveProject string
+	// Dest is the destination this broadcast arrived on — client-side only,
+	// empty for the local daemon. It has to ride the message because
+	// listenForMessages returns the parsed state directly as the tea.Msg, so
+	// Update, not the parse site, is where applyWorkspaceState is called.
+	Dest string
 	// Update is the daemon's announced newer release (nil when up to date).
 	Update *ipc.UpdateInfo
 }
 
+// ProjectInfo is one daemon-side project as broadcast. TabIDs carries the
+// project's own tab ORDER — the tab bar renders it verbatim — and ActiveTab is
+// the tab that project was last left on (the daemon keeps it in sync with the
+// global active tab for the active project, so it needs no special casing).
+type ProjectInfo struct {
+	ID        string
+	Name      string
+	RootDir   string
+	TabIDs    []string
+	ActiveTab string
+}
+
 type TabInfo struct {
-	ID     string
-	Name   string
-	Color  string
-	Panes  []string
-	Layout json.RawMessage
+	ID   string
+	Name string
+	// ProjectID is the owning project as the TAB records it. Project.TabIDs is
+	// what a rebuild iterates; this is the tab's own answer to the same
+	// question, used to reject a stale TabIDs entry that would otherwise build
+	// one TabModel into two projects at once.
+	ProjectID string
+	Color     string
+	Panes     []string
+	Layout    json.RawMessage
 }
 
 type PaneInfo struct {
@@ -1245,7 +1272,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// in the same PR. Keep the breadcrumbs for ~2 weeks of watchdog-clean
 		// runs, then either delete or demote them to logger.Debug.
 		log.Printf("WorkspaceState: %d tabs, %d panes", len(msg.Tabs), len(msg.Panes))
-		newPaneIDs, overlayResizeCmds := m.applyWorkspaceState(msg)
+		newPaneIDs, overlayResizeCmds := m.applyWorkspaceState(msg, msg.Dest)
 		log.Printf("apply: returned, %d new panes", len(newPaneIDs))
 		m.resizeTabs()
 		log.Printf("apply: resizeTabs done")
@@ -3103,19 +3130,25 @@ func (m *Model) handlePaneOutput(msg PaneOutputMsg) tea.Cmd {
 	return nil
 }
 
-// applyWorkspaceState rebuilds the TUI state from daemon data.
-// Returns IDs of newly created panes (for spinner activation).
-// applyWorkspaceState rebuilds the TUI state from daemon data. Returns:
+// applyWorkspaceState rebuilds the TUI state from one daemon's broadcast.
+// dest names the destination that broadcast arrived on (empty = the local
+// daemon) and scopes the merge: a broadcast is the FULL state of ONE daemon,
+// so it may only replace THAT daemon's projects. Returns:
 //   - newPaneIDs: IDs of PaneModels created during this reconciliation (for
 //     spinner setup in the caller).
 //   - overlayResizeCmds: resize commands that must be batched by the caller
 //     for overlay panes that just became visible on initial creation (fixing
 //     the 80×24 boot size they would otherwise keep until a window resize).
-func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) ([]string, []tea.Cmd) {
+func (m *Model) applyWorkspaceState(state WorkspaceStateMsg, dest string) ([]string, []tea.Cmd) {
 	var newPaneIDs []string
 	var overlayResizeCmds []tea.Cmd
 
-	// Index existing tabs and panes for preservation.
+	// Index existing tabs and panes for preservation. Both maps span EVERY
+	// project, not just the ones this broadcast rebuilds: reuse is keyed by ID
+	// alone, so a tab or pane the daemon moved between projects keeps its
+	// layout tree / VT emulator / scrollback instead of being rebuilt at its
+	// new home while the original lives on in the old one. The dispose sweep
+	// below can also only visit what is indexed here.
 	existingTabs := make(map[string]*TabModel)
 	existingPanes := make(map[string]*PaneModel)
 	for _, tab := range m.allTabs() {
@@ -3135,11 +3168,147 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) ([]string, []tea.Cm
 		paneMap[state.Panes[i].ID] = &state.Panes[i]
 	}
 
-	// Interim shape: every broadcast tab lands in ONE synthetic project.
-	// WorkspaceStateMsg carries no projects yet, so there is nothing to
-	// partition on — Task 7 replaces this with the parsed set.
-	m.setTabs(nil)
-	for _, tabInfo := range state.Tabs {
+	// Preserve every project that did NOT come from this dest — clearing all
+	// of them lets two daemons clobber each other on every tick. The rest are
+	// indexed for reuse, so a project the daemon still has keeps its identity
+	// (and its ProjectModel pointer) across the rebuild.
+	kept := make([]*ProjectModel, 0, len(m.projects))
+	existingProjects := make(map[string]*ProjectModel, len(m.projects))
+	for _, p := range m.projects {
+		if p.Dest != dest {
+			kept = append(kept, p)
+			continue
+		}
+		existingProjects[p.ID] = p
+	}
+
+	// Which project is active is the CLIENT's state: a broadcast from one
+	// daemon must never pull focus off another's project. state.ActiveProject
+	// is adopted only when there is no active project yet — startup, before
+	// any broadcast has been applied.
+	activeID := ""
+	if p := m.cur(); p != nil {
+		activeID = p.ID
+	}
+	if activeID == "" {
+		activeID = state.ActiveProject
+	}
+
+	infos := broadcastProjects(state)
+	rebuilt := make([]*ProjectModel, 0, len(infos))
+	for _, info := range infos {
+		proj, ok := existingProjects[info.ID]
+		if !ok {
+			proj = &ProjectModel{ID: info.ID, Dest: dest}
+		}
+		proj.Name, proj.RootDir = info.Name, info.RootDir
+		tabs, projPaneIDs, projResizeCmds := m.rebuildTabs(info, state, existingTabs, existingPanes, paneMap, dest)
+		proj.tabs = tabs
+		proj.activeTab = indexOfTab(proj.tabs, info.ActiveTab)
+		newPaneIDs = append(newPaneIDs, projPaneIDs...)
+		overlayResizeCmds = append(overlayResizeCmds, projResizeCmds...)
+		rebuilt = append(rebuilt, proj)
+	}
+
+	m.projects = append(kept, rebuilt...)
+	m.activeProject = indexOfProject(m.projects, activeID)
+
+	// Dispose panes that did not survive reconciliation — both panes pruned
+	// from surviving tabs and every pane of tabs the daemon dropped. Without
+	// this, each removed pane leaks its VT emulator (drain goroutine +
+	// scrollback grid) for the TUI session's lifetime. The sweep spans every
+	// project for the same reason the index does: a pane this broadcast did
+	// not mention is still live if some other dest's project holds it.
+	surviving := make(map[string]bool)
+	for _, tab := range m.allTabs() {
+		if tab.Root != nil {
+			for id := range tab.Root.PaneIDs() {
+				surviving[id] = true
+			}
+		}
+		if tab.overlayPane != nil {
+			surviving[tab.overlayPane.ID] = true
+		}
+	}
+	for id, pane := range existingPanes {
+		if !surviving[id] {
+			pane.Dispose()
+		}
+	}
+
+	log.Printf("apply: active project = %d, active tab = %d", m.activeProject, m.activeTabIdx())
+
+	// Reconcile notes mode after daemon state sync:
+	//   (a) If the bound pane no longer exists in any tab, tear down
+	//       notes mode — the notes file is orphaned and the editor would
+	//       otherwise keep writing to a dead pane ID.
+	//   (b) If the bound pane still exists but the containing tab's
+	//       ActivePane is now something else (e.g., a split created a new
+	//       pane and the daemon promoted it), force ActivePane back to the
+	//       bound pane so the focus-mode render shows the right pane next
+	//       to the editor. Without this, the editor would silently sit
+	//       next to an unrelated pane while still writing to the bound
+	//       pane's notes file.
+	log.Printf("apply: notes reconciliation start (mode=%v)", m.notesMode)
+	if m.notesMode && m.notesEditor != nil {
+		bound := m.notesEditor.PaneID()
+		var boundTab *TabModel
+		for _, tab := range m.allTabs() {
+			if tab.Root != nil && tab.Root.PaneIDs()[bound] {
+				boundTab = tab
+				break
+			}
+		}
+		if boundTab == nil {
+			log.Printf("notes: bound pane %s pruned — exiting notes mode", bound)
+			m.exitNotesModeInPlace()
+		} else if boundTab.ActivePane != bound {
+			log.Printf("notes: bound pane %s is no longer active (active=%s) — re-syncing", bound, boundTab.ActivePane)
+			for _, p := range boundTab.Leaves() {
+				p.Active = (p.ID == bound)
+			}
+			boundTab.ActivePane = bound
+		}
+	}
+	log.Printf("apply: notes reconciliation done")
+
+	return newPaneIDs, overlayResizeCmds
+}
+
+// rebuildTabs reconciles ONE project's tab list against the broadcast — the
+// per-tab reuse-or-restore loop applyWorkspaceState used to run over every tab
+// in the message, now scoped to info.TabIDs so a project can only ever rebuild
+// its own tabs.
+//
+// The order is info.TabIDs' order: the project owns its tab order, and the tab
+// bar renders the result verbatim. A TabID the broadcast does not describe is
+// skipped rather than materialised as an empty tab.
+//
+// Returns the project's tabs, the pane IDs it created (the caller arms a
+// spinner per ID) and the overlay resize commands the caller must batch.
+func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingTabs map[string]*TabModel, existingPanes map[string]*PaneModel, paneMap map[string]*PaneInfo, dest string) ([]*TabModel, []string, []tea.Cmd) {
+	var newPaneIDs []string
+	var overlayResizeCmds []tea.Cmd
+
+	tabByID := make(map[string]TabInfo, len(state.Tabs))
+	for _, t := range state.Tabs {
+		tabByID[t.ID] = t
+	}
+
+	out := make([]*TabModel, 0, len(info.TabIDs))
+	for _, tabID := range info.TabIDs {
+		tabInfo, ok := tabByID[tabID]
+		if !ok {
+			// The project claims a tab this broadcast does not describe.
+			continue
+		}
+		// The tab's own project_id disagrees with the list that named it:
+		// building it here would put ONE TabModel in two projects at once
+		// (the tab bar would then render it twice and both copies would
+		// fight over the same layout tree). The tab's own answer wins.
+		if tabInfo.ProjectID != "" && tabInfo.ProjectID != info.ID {
+			continue
+		}
 		// Reuse existing tab if possible (preserves layout tree).
 		tab, exists := existingTabs[tabInfo.ID]
 		if !exists {
@@ -3148,6 +3317,7 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) ([]string, []tea.Cm
 			// New tab that doesn't exist locally — try to restore layout from daemon.
 			if len(tabInfo.Layout) > 0 {
 				tab = m.restoreTabLayout(tab, tabInfo, paneMap, existingPanes)
+				tab.Dest = dest
 				// All non-overlay panes in a restored tab are new.
 				for _, pid := range tabInfo.Panes {
 					if isOverlayPane(paneMap, pid) {
@@ -3160,10 +3330,11 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) ([]string, []tea.Cm
 				if shown {
 					overlayResizeCmds = append(overlayResizeCmds, m.overlayResizeCmd(tab))
 				}
-				m.appendTab(tab)
+				out = append(out, tab)
 				continue
 			}
 		}
+		tab.Dest = dest
 		tab.Name = tabInfo.Name
 		tab.Color = tabInfo.Color
 
@@ -3295,76 +3466,10 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) ([]string, []tea.Cm
 
 		m.finalizeTabPanes(tab)
 		log.Printf("apply: tab %s finalized", tab.ID)
-		m.appendTab(tab)
+		out = append(out, tab)
 	}
 
-	// Dispose panes that did not survive reconciliation — both panes pruned
-	// from surviving tabs and every pane of tabs the daemon dropped. Without
-	// this, each removed pane leaks its VT emulator (drain goroutine +
-	// scrollback grid) for the TUI session's lifetime.
-	surviving := make(map[string]bool)
-	for _, tab := range m.allTabs() {
-		if tab.Root != nil {
-			for id := range tab.Root.PaneIDs() {
-				surviving[id] = true
-			}
-		}
-		if tab.overlayPane != nil {
-			surviving[tab.overlayPane.ID] = true
-		}
-	}
-	for id, pane := range existingPanes {
-		if !surviving[id] {
-			pane.Dispose()
-		}
-	}
-
-	for i, tab := range m.curTabs() {
-		if tab.ID == state.ActiveTab {
-			m.setActiveTabIdx(i)
-			break
-		}
-	}
-	if m.activeTabIdx() >= len(m.curTabs()) {
-		m.setActiveTabIdx(max(0, len(m.curTabs())-1))
-	}
-	log.Printf("apply: active tab = %d", m.activeTabIdx())
-
-	// Reconcile notes mode after daemon state sync:
-	//   (a) If the bound pane no longer exists in any tab, tear down
-	//       notes mode — the notes file is orphaned and the editor would
-	//       otherwise keep writing to a dead pane ID.
-	//   (b) If the bound pane still exists but the containing tab's
-	//       ActivePane is now something else (e.g., a split created a new
-	//       pane and the daemon promoted it), force ActivePane back to the
-	//       bound pane so the focus-mode render shows the right pane next
-	//       to the editor. Without this, the editor would silently sit
-	//       next to an unrelated pane while still writing to the bound
-	//       pane's notes file.
-	log.Printf("apply: notes reconciliation start (mode=%v)", m.notesMode)
-	if m.notesMode && m.notesEditor != nil {
-		bound := m.notesEditor.PaneID()
-		var boundTab *TabModel
-		for _, tab := range m.allTabs() {
-			if tab.Root != nil && tab.Root.PaneIDs()[bound] {
-				boundTab = tab
-				break
-			}
-		}
-		if boundTab == nil {
-			log.Printf("notes: bound pane %s pruned — exiting notes mode", bound)
-			m.exitNotesModeInPlace()
-		} else if boundTab.ActivePane != bound {
-			log.Printf("notes: bound pane %s is no longer active (active=%s) — re-syncing", bound, boundTab.ActivePane)
-			for _, p := range boundTab.Leaves() {
-				p.Active = (p.ID == bound)
-			}
-			boundTab.ActivePane = bound
-		}
-	}
-	log.Printf("apply: notes reconciliation done")
-
-	return newPaneIDs, overlayResizeCmds
+	return out, newPaneIDs, overlayResizeCmds
 }
 
 // restoreTabLayout rebuilds a tab's layout tree from serialized daemon state.
@@ -4110,7 +4215,12 @@ func (m Model) listenForMessages() tea.Cmd {
 			log.Print("ipc recv: workspace_state")
 			var raw map[string]any
 			msg.DecodePayload(&raw)
-			return parseWorkspaceState(raw)
+			state := parseWorkspaceState(raw)
+			// Origin is client-side routing state, never on the wire, so it
+			// cannot come out of the payload — stamp it here, where the message
+			// still exists. Empty means the local daemon.
+			state.Dest = msg.Origin
+			return state
 
 		case ipc.MsgPluginError:
 			log.Printf("ipc recv: plugin_error")
@@ -4286,6 +4396,42 @@ func parseWorkspaceState(raw map[string]any) WorkspaceStateMsg {
 			state.Update = info
 		}
 	}
+	if ap, ok := raw["active_project"].(string); ok {
+		state.ActiveProject = ap
+	}
+	if projects, ok := raw["projects"].([]any); ok {
+		for _, p := range projects {
+			pm, ok := p.(map[string]any)
+			if !ok {
+				continue
+			}
+			pi := ProjectInfo{}
+			if id, ok := pm["id"].(string); ok {
+				pi.ID = id
+			}
+			if name, ok := pm["name"].(string); ok {
+				pi.Name = name
+			}
+			if root, ok := pm["root_dir"].(string); ok {
+				pi.RootDir = root
+			}
+			if at, ok := pm["active_tab"].(string); ok {
+				pi.ActiveTab = at
+			}
+			if ids, ok := pm["tab_ids"].([]any); ok {
+				for _, tid := range ids {
+					if s, ok := tid.(string); ok {
+						pi.TabIDs = append(pi.TabIDs, s)
+					}
+				}
+			}
+			// A project with no ID cannot be matched against the client's own
+			// list, so every broadcast would rebuild it from scratch.
+			if pi.ID != "" {
+				state.Projects = append(state.Projects, pi)
+			}
+		}
+	}
 	if tabs, ok := raw["tabs"].([]any); ok {
 		for _, t := range tabs {
 			if tm, ok := t.(map[string]any); ok {
@@ -4295,6 +4441,9 @@ func parseWorkspaceState(raw map[string]any) WorkspaceStateMsg {
 				}
 				if name, ok := tm["name"].(string); ok {
 					ti.Name = name
+				}
+				if pid, ok := tm["project_id"].(string); ok {
+					ti.ProjectID = pid
 				}
 				if color, ok := tm["color"].(string); ok {
 					ti.Color = color

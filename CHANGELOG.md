@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.46.1] - 2026-08-01
+
 ### Fixed
 - **Attaching to a host whose Quil was removed now offers to reinstall it,
   instead of blaming your CPU.** If the binary on a remote disappeared — the

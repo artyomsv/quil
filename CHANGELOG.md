@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Attaching to a host whose Quil was removed now offers to reinstall it,
+  instead of blaming your CPU.** If the binary on a remote disappeared — the
+  machine was rebuilt from an image, the home directory was wiped, an admin
+  moved it, the OS was reinstalled — `quil --remote <host>` reported *"Quil was
+  installed on <host>, but will not run there"*, suggested the architecture was
+  wrong, and never offered to install. The suggested `uname -sm` came back
+  looking perfectly correct, because the architecture was never the problem.
+  The only escape was deleting a line from `config.toml` by hand.
+
+  Quil recorded where it installed the binary and then read that record as
+  proof the binary was still there. It now asks the host instead, and repairs
+  the record from the answer: gone means reinstall, and found somewhere else
+  means use the new location and reconnect — which also fixes attaching to a
+  host where you installed Quil yourself. A genuinely unrunnable binary still
+  reports the architecture mismatch, now naming the file it actually found.
+
+  Nothing is forgotten on a failed check: if the host cannot be reached, the
+  record is left exactly as it was, since an unreachable host proves nothing
+  about what is installed on it.
+
 ## [1.46.0] - 2026-07-31
 
 ### Fixed

@@ -28,22 +28,42 @@ const remoteSetupTimeout = 10 * time.Minute
 // tested. Mirrors the existing seam pattern (stopDaemonForUpgradeFn).
 var isReleaseFn = versionpkg.IsRelease
 
-// alreadyProvisionedFn reports whether a previous run already installed quil on
-// dest — i.e. whether a binary path was recorded for it. Swappable for tests.
+// recordedRemoteBinaryFn reads the path a previous run recorded for dest, or ""
+// when none was. Swappable for tests.
 //
-// This is the loop guard, and it has to be PERSISTENT rather than a package
-// bool. A binary that will not execute makes the remote shell report 127, the
-// same status as "not installed", so the loop it guards against is: install →
-// exit → user re-runs → 127 again → offer again. Every iteration is a separate
-// process, so process-local state would never see the second one. A recorded
-// config entry survives exactly as long as the condition it describes.
-var alreadyProvisionedFn = func(dest string) bool {
+// It replaces an older alreadyProvisionedFn that answered a bool. The bool was
+// the bug: it collapsed "a path is recorded" into "quil is installed there",
+// and those diverge every time a remote binary disappears behind Quil's back.
+// The decision needs the path itself, so it can be compared with what the host
+// actually reports. See healRemoteRecord.
+var recordedRemoteBinaryFn = func(dest string) string {
 	cfg, err := config.Load(config.ConfigPath())
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return false
+		return ""
 	}
-	return cfg.RemoteBinary(dest) != ""
+	return cfg.RemoteBinary(dest)
 }
+
+// probeRemoteFn asks the host what quil it actually has. Swappable so the
+// reconciliation truth table is testable without ssh.
+var probeRemoteFn = func(dest string) (remoteinstall.Probe, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), remoteProbeTimeout)
+	defer cancel()
+	return remoteinstall.RunProbe(ctx, sshRunner{dest: dest})
+}
+
+// recordRemoteBinaryFn and clearRemoteBinaryFn are the config writes, swappable
+// so a test can assert WHICH mutation a branch chose — the difference between
+// healing a stale record and destroying a good one.
+var (
+	recordRemoteBinaryFn = recordRemoteBinary
+	clearRemoteBinaryFn  = clearRemoteBinary
+)
+
+// remoteProbeTimeout bounds the reconciliation probe. One ssh round trip on a
+// path that has already failed, so it is short: the user is waiting on an
+// answer about a launch that did not work.
+const remoteProbeTimeout = 60 * time.Second
 
 // offerRemoteInstallFn is offerRemoteInstall, swappable for tests of the
 // version gate.
@@ -69,6 +89,16 @@ type setupOptions struct {
 
 	// Yes skips the confirmation prompt. For scripted provisioning only.
 	Yes bool
+
+	// probe carries a host probe the caller already ran, so the attach path
+	// costs one ssh round trip rather than two. nil means "probe here", which
+	// is what the `quil remote setup` CLI passes.
+	//
+	// A pointer rather than a value because setupOptions is compared with != in
+	// the flag-parsing tests, and Probe is comparable — but "not supplied" must
+	// be distinguishable from a zero Probe, which is a real answer meaning the
+	// host has no quil.
+	probe *remoteinstall.Probe
 }
 
 // sshRunner adapts transport.RunSSH to remoteinstall.Runner.
@@ -113,10 +143,20 @@ func runRemoteSetup(dest string, opts setupOptions) error {
 		opts: transport.SSHOptions{},
 	}
 
-	fmt.Fprintf(os.Stderr, "Checking %s…\n", dest)
-	probe, err := remoteinstall.RunProbe(ctx, runner)
-	if err != nil {
-		return err
+	// Reuse the caller's probe when it has one. The attach path probes to
+	// reconcile the recorded binary path (healRemoteRecord), and probing again
+	// here would spend a second ssh round trip re-asking a question already
+	// answered — on a launch the user is already waiting on.
+	probe := remoteinstall.Probe{}
+	if opts.probe != nil {
+		probe = *opts.probe
+	} else {
+		fmt.Fprintf(os.Stderr, "Checking %s…\n", dest)
+		var err error
+		probe, err = remoteinstall.RunProbe(ctx, runner)
+		if err != nil {
+			return err
+		}
 	}
 
 	target := remoteinstall.PlanTarget(probe)
@@ -254,22 +294,40 @@ func confirmRemoteInstall(dest string, probe remoteinstall.Probe, target remotei
 
 // recordRemoteBinary saves the resolved absolute path so later launches skip
 // the remote's PATH entirely.
-func recordRemoteBinary(dest, binary string) error {
+// mutateConfig applies fn to the config on disk and writes it back.
+//
+// A missing config.toml is the NORMAL first-run state, not a failure —
+// config.Load surfaces DecodeFile's fs.ErrNotExist verbatim. Treating it as one
+// would break exactly the case this feature exists for: a fresh machine
+// provisioning its first remote, where failing to record the path leaves the
+// next launch failing identically to before the install.
+//
+// Shared by the record and clear paths so that tolerance is stated once. Two
+// copies would be free to drift, and the clear path runs on the failure branch
+// where a spurious error is least likely to be noticed.
+func mutateConfig(fn func(*config.Config)) error {
 	path := config.ConfigPath()
 	cfg, err := config.Load(path)
-	// A missing config.toml is the NORMAL first-run state, not a failure —
-	// config.Load surfaces DecodeFile's fs.ErrNotExist verbatim. Treating it as
-	// one would break exactly the case this feature exists for: a fresh machine
-	// provisioning its first remote, where failing to record the path leaves the
-	// next launch failing identically to before the install.
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("load config: %w", err)
 	}
-	cfg.SetRemoteBinary(dest, binary)
+	fn(&cfg)
 	if err := config.Save(path, cfg); err != nil {
 		return fmt.Errorf("save config: %w", err)
 	}
 	return nil
+}
+
+func recordRemoteBinary(dest, binary string) error {
+	return mutateConfig(func(c *config.Config) { c.SetRemoteBinary(dest, binary) })
+}
+
+// clearRemoteBinary forgets dest's recorded path.
+//
+// Only ever called after the host probe ANSWERED and reported no quil — see
+// healRemoteRecord for why a probe error must never reach here.
+func clearRemoteBinary(dest string) error {
+	return mutateConfig(func(c *config.Config) { c.ClearRemoteBinary(dest) })
 }
 
 func reportInstalled(dest string, target remoteinstall.Target, src remoteinstall.Source, stopWarning string) {
@@ -306,6 +364,112 @@ func displayVersion(src remoteinstall.Source) string {
 	return "quil " + src.Version
 }
 
+// healRemoteRecord reconciles the recorded binary path with what the host
+// actually has, and is the loop guard.
+//
+// The guard used to read the CONFIG: a recorded path meant "we already
+// installed here", so a second 127 had to be a binary that will not execute —
+// almost always an architecture the probe read one way and the loader another
+// (a 64-bit-kernel Raspberry Pi OS reports aarch64 while its userland is
+// armhf). The persistence was right; the fact was not. A recorded path proves
+// an install landed ONCE and says nothing about now, so every way a remote
+// binary can vanish — image rebuilt, home wiped, ~/.local/bin cleaned, binary
+// moved by an admin, OS reinstalled on the same hostname — produced an
+// architecture theory for a host whose arch was always correct, refused to
+// offer the install, and left editing config.toml by hand as the only way out.
+//
+// The discriminator already existed and already ran: Probe.ExistingPath is ""
+// when the host has none, and the probe checks absolute paths BEFORE
+// `command -v` precisely because ~/.local/bin is invisible to a
+// non-interactive shell. runRemoteSetup was calling RunProbe fourteen lines
+// into the function this branch decides whether to skip, so the fact was
+// fetched one branch too late.
+//
+// Returns done=true when the caller must stop and use retry as its result;
+// done=false means "carry on and offer an install". The probe is handed back so
+// the install can reuse it rather than spending a second ssh round trip; it is
+// nil when the probe failed, which is exactly when runRemoteSetup should run
+// its own and report the real error.
+func healRemoteRecord(dest string) (probed *remoteinstall.Probe, done, retry bool) {
+	recorded := recordedRemoteBinaryFn(dest)
+
+	probe, err := probeRemoteFn(dest)
+	if err != nil {
+		// POSITIVE EVIDENCE ONLY. A probe that failed is not evidence the
+		// binary is gone — the host may be down, the key rejected, the link
+		// flapping. Clearing here would silently downgrade a working host to a
+		// bare `quil` on the non-interactive PATH, which is invisible on Debian
+		// and Ubuntu and is the exact failure the recorded path exists to
+		// prevent. Fall through and let runRemoteSetup's own probe report the
+		// real error, which is more useful than anything this branch could say.
+		log.Printf("remote: probe failed while reconciling %s: %v", dest, err)
+		return nil, false, false
+	}
+
+	switch {
+	case probe.ExistingPath == "":
+		// The host has no quil at all. Any record is known-false; keeping it
+		// means the next launch runs the same missing path and fails
+		// identically. Offer the install this branch used to suppress.
+		if recorded != "" {
+			log.Printf("remote: %s has no quil; clearing the recorded path %q", dest, recorded)
+			if err := clearRemoteBinaryFn(dest); err != nil {
+				// Not fatal: the install below records a fresh path anyway, and
+				// refusing to install because a config write failed would be a
+				// worse outcome than the stale line it leaves behind.
+				fmt.Fprintf(os.Stderr, "\n  Could not clear the stale path in your config: %v\n", err)
+			}
+		}
+		return &probe, false, false
+
+	case probe.ExistingPath == recorded:
+		// We ran exactly the path the host reports, and it still would not
+		// execute. This is the genuine wrong-architecture case, and the only
+		// one that must not loop: "offer forever" requires a path that exists,
+		// which becomes true only after a successful write.
+		reportRemoteBinaryWontRun(dest, probe.ExistingPath)
+		return &probe, true, false
+
+	default:
+		// quil is present somewhere other than where we looked — an admin moved
+		// it, or the host was installed by hand and never recorded. Correct the
+		// record and re-dial rather than reinstalling something already there.
+		log.Printf("remote: %s has quil at %q, not %q; correcting the record",
+			dest, probe.ExistingPath, recorded)
+		if err := recordRemoteBinaryFn(dest, probe.ExistingPath); err != nil {
+			// Without the record the retry would dial the same wrong path and
+			// land right back here, so this one does have to stop.
+			fmt.Fprintf(os.Stderr, "\n  Found quil at %s on %s, but could not record it: %v\n",
+				probe.ExistingPath, dest, err)
+			return &probe, true, false
+		}
+		fmt.Fprintf(os.Stderr, "\n  Found quil at %s on %s. Reconnecting…\n\n", probe.ExistingPath, dest)
+		return &probe, true, true
+	}
+}
+
+// reportRemoteBinaryWontRun explains a binary the host has and cannot execute.
+//
+// It names the path the probe actually found rather than guessing at one. The
+// older text asserted the binary "was just written" and pointed at
+// ~/.local/bin/quil unconditionally, which sent a user whose install had simply
+// been deleted to run `uname -sm` — and it came back correct, because the
+// architecture was never the problem.
+func reportRemoteBinaryWontRun(dest, path string) {
+	fmt.Fprintf(os.Stderr,
+		"\n"+
+			"  Quil is installed on %s at %s, but will not run there.\n"+
+			"\n"+
+			"  The remote shell finds the file and cannot execute it, which\n"+
+			"  almost always means it was built for a different architecture\n"+
+			"  than the host actually runs.\n"+
+			"\n"+
+			"  Check what the host really is:\n"+
+			"    ssh %s 'uname -sm; file %s'\n"+
+			"\n",
+		dest, path, dest, path)
+}
+
 // offerRemoteInstall handles a launch that failed because the far side has no
 // usable quil. Returns true when an install succeeded.
 func offerRemoteInstall(dest string, remedy remoteinstall.Remedy) bool {
@@ -313,26 +477,18 @@ func offerRemoteInstall(dest string, remedy remoteinstall.Remedy) bool {
 		return false
 	}
 
-	// The loop guard. A recorded path plus a shell that still cannot run the
-	// binary means a previous install landed and does not execute — almost
-	// always an architecture the probe read one way and the loader another (a
-	// 64-bit-kernel Raspberry Pi OS reports aarch64 while its userland is
-	// armhf). An upgrade is exempt: quil ran over there, so the binary is fine
-	// and a recorded path proves nothing about it.
-	if remedy != remoteinstall.RemedyUpgrade && alreadyProvisionedFn(dest) {
-		fmt.Fprintf(os.Stderr,
-			"\n"+
-				"  Quil was installed on %s, but will not run there.\n"+
-				"\n"+
-				"  The remote shell reports the binary as missing or not executable\n"+
-				"  even though it was just written, which almost always means it was\n"+
-				"  built for a different architecture than the host actually runs.\n"+
-				"\n"+
-				"  Check what the host really is:\n"+
-				"    ssh %s 'uname -sm; file ~/.local/bin/quil'\n"+
-				"\n",
-			dest, dest)
-		return false
+	// The loop guard, and it asks the HOST rather than the config.
+	//
+	// An upgrade is exempt: quil ran over there, so the binary is fine and no
+	// probe result could change the decision — probing would spend an ssh round
+	// trip to re-answer a settled question.
+	var probe *remoteinstall.Probe
+	if remedy != remoteinstall.RemedyUpgrade {
+		p, done, retry := healRemoteRecord(dest)
+		if done {
+			return retry
+		}
+		probe = p
 	}
 
 	// Every line here is printed BEFORE the probe runs, so it may only say what
@@ -353,7 +509,7 @@ func offerRemoteInstall(dest string, remedy remoteinstall.Remedy) bool {
 		// probe is about to print the installed path.
 	}
 
-	if err := runRemoteSetup(dest, setupOptions{}); err != nil {
+	if err := runRemoteSetup(dest, setupOptions{probe: probe}); err != nil {
 		if errors.Is(err, errSetupAborted) {
 			return false
 		}

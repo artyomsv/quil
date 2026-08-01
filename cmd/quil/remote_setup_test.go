@@ -1,23 +1,58 @@
 package main
 
 import (
-	"github.com/artyomsv/quil/internal/config"
+	"errors"
 	"strings"
 	"testing"
 
+	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/remoteinstall"
 )
 
 func resetRemoteSetupState(t *testing.T) {
 	t.Helper()
-	prevProvisioned := alreadyProvisionedFn
+	prevRecorded := recordedRemoteBinaryFn
+	prevProbe := probeRemoteFn
+	prevRecord := recordRemoteBinaryFn
+	prevClear := clearRemoteBinaryFn
 	prevIsRelease := isReleaseFn
 	prevDest := remoteDest
 	t.Cleanup(func() {
-		alreadyProvisionedFn = prevProvisioned
+		recordedRemoteBinaryFn = prevRecorded
+		probeRemoteFn = prevProbe
+		recordRemoteBinaryFn = prevRecord
+		clearRemoteBinaryFn = prevClear
 		isReleaseFn = prevIsRelease
 		remoteDest = prevDest
 	})
+	// Default to a host that answers "nothing installed" so a test which does
+	// not care about the probe cannot accidentally reach the real ssh path.
+	probeRemoteFn = func(string) (remoteinstall.Probe, error) {
+		return remoteinstall.Probe{}, nil
+	}
+	recordedRemoteBinaryFn = func(string) string { return "" }
+}
+
+// healSpy captures which config mutation a branch chose. Asserting on the
+// mutation rather than only the return value is the point: healing a stale
+// record and destroying a good one are both "no install offered" from outside.
+type healSpy struct {
+	cleared  []string
+	recorded map[string]string
+}
+
+func newHealSpy(t *testing.T) *healSpy {
+	t.Helper()
+	s := &healSpy{recorded: map[string]string{}}
+	clearRemoteBinaryFn = func(dest string) error {
+		s.cleared = append(s.cleared, dest)
+		return nil
+	}
+	recordRemoteBinaryFn = func(dest, binary string) error {
+		s.recorded[dest] = binary
+		return nil
+	}
+	return s
 }
 
 // ssh parses a leading '-' as an option, and -oProxyCommand= executes a command
@@ -59,32 +94,158 @@ func TestPlannedVersion_RefusesDevBuildWithoutASource(t *testing.T) {
 	}
 }
 
-// The loop guard. A binary that will not execute reports 127 — the same status
-// as "not installed" — so without this a launch would install, retry, and offer
-// forever.
-func TestOfferRemoteInstall_RefusesASecondAttempt(t *testing.T) {
+// The loop guard, re-keyed onto a fact. A binary that will not execute reports
+// 127 — the same status as "not installed" — so without this a launch would
+// install, retry, and offer forever. What makes it terminate is that the probe
+// reports the SAME path we ran: "offer forever" needs a path that exists, which
+// becomes true only after a successful write.
+func TestHealRemoteRecord_ProbeMatchesRecord_RefusesASecondAttempt(t *testing.T) {
 	resetRemoteSetupState(t)
-	// A recorded binary path is what says "we already installed here".
-	alreadyProvisionedFn = func(string) bool { return true }
+	spy := newHealSpy(t)
+	const path = "/home/a/.local/bin/quil"
+	recordedRemoteBinaryFn = func(string) string { return path }
+	probeRemoteFn = func(string) (remoteinstall.Probe, error) {
+		return remoteinstall.Probe{ExistingPath: path}, nil
+	}
 
 	if offerRemoteInstall("gpu01", remoteinstall.RemedyInstall) {
-		t.Error("offered a second install in the same process")
+		t.Error("offered an install for a binary the host has and cannot run")
 	}
 	if offerRemoteInstall("gpu01", remoteinstall.RemedyReinstall) {
 		t.Error("offered a second install for a reinstall remedy")
+	}
+	if len(spy.cleared) != 0 {
+		t.Errorf("cleared the record for a binary that is actually there: %v", spy.cleared)
+	}
+}
+
+// The shipped bug. The host's binary was deleted, so the recorded path is
+// known-false — but the old guard read the record as proof of an install and
+// printed an architecture theory instead of offering to reinstall.
+func TestHealRemoteRecord_ProbeFindsNothing_ClearsRecordAndOffers(t *testing.T) {
+	resetRemoteSetupState(t)
+	spy := newHealSpy(t)
+	recordedRemoteBinaryFn = func(string) string { return "/home/a/.local/bin/quil" }
+	probeRemoteFn = func(string) (remoteinstall.Probe, error) {
+		return remoteinstall.Probe{ExistingPath: ""}, nil
+	}
+
+	_, done, retry := healRemoteRecord("gpu01")
+	if done {
+		t.Error("done = true, want the caller to carry on and offer an install")
+	}
+	if retry {
+		t.Error("retry = true, want false — nothing has been fixed yet")
+	}
+	if len(spy.cleared) != 1 || spy.cleared[0] != "gpu01" {
+		t.Errorf("cleared = %v, want exactly [gpu01]", spy.cleared)
+	}
+}
+
+// An admin moved the binary. quil is there, just not where we looked — so the
+// record is wrong rather than stale, and reinstalling would be the wrong fix.
+func TestHealRemoteRecord_ProbeFindsDifferentPath_RecordsAndRetries(t *testing.T) {
+	resetRemoteSetupState(t)
+	spy := newHealSpy(t)
+	recordedRemoteBinaryFn = func(string) string { return "/home/a/.local/bin/quil" }
+	probeRemoteFn = func(string) (remoteinstall.Probe, error) {
+		return remoteinstall.Probe{ExistingPath: "/usr/local/bin/quil"}, nil
+	}
+
+	_, done, retry := healRemoteRecord("gpu01")
+	if !done || !retry {
+		t.Errorf("done, retry = %v, %v; want true, true so the caller re-dials", done, retry)
+	}
+	if got := spy.recorded["gpu01"]; got != "/usr/local/bin/quil" {
+		t.Errorf("recorded = %q, want the path the probe found", got)
+	}
+	if len(spy.cleared) != 0 {
+		t.Errorf("cleared a record that should have been corrected: %v", spy.cleared)
+	}
+}
+
+// The same branch covers a host installed by hand and never recorded: we dialed
+// a bare `quil`, the non-interactive PATH could not see it, and the probe found
+// it by absolute path. offerRemoteInstall's own comment already flagged this as
+// contradicting the probe's summary one line later.
+func TestHealRemoteRecord_HandInstalledUnrecorded_RecordsAndRetries(t *testing.T) {
+	resetRemoteSetupState(t)
+	spy := newHealSpy(t)
+	recordedRemoteBinaryFn = func(string) string { return "" }
+	probeRemoteFn = func(string) (remoteinstall.Probe, error) {
+		return remoteinstall.Probe{ExistingPath: "/opt/quil/bin/quil"}, nil
+	}
+
+	_, done, retry := healRemoteRecord("gpu01")
+	if !done || !retry {
+		t.Errorf("done, retry = %v, %v; want true, true", done, retry)
+	}
+	if got := spy.recorded["gpu01"]; got != "/opt/quil/bin/quil" {
+		t.Errorf("recorded = %q, want the hand-installed path", got)
+	}
+}
+
+// POSITIVE EVIDENCE ONLY, and the case most likely to be lost in a later
+// refactor. A probe that failed says nothing about whether the binary is there:
+// the host may be down or the key rejected. Clearing on it would downgrade a
+// working host to a bare `quil` on the non-interactive PATH — invisible on
+// Debian and Ubuntu, and the exact failure the record exists to prevent.
+func TestHealRemoteRecord_ProbeError_LeavesRecordUntouched(t *testing.T) {
+	resetRemoteSetupState(t)
+	spy := newHealSpy(t)
+	recordedRemoteBinaryFn = func(string) string { return "/home/a/.local/bin/quil" }
+	probeRemoteFn = func(string) (remoteinstall.Probe, error) {
+		return remoteinstall.Probe{}, errors.New("ssh: connect to host gpu01 port 22: No route to host")
+	}
+
+	_, done, retry := healRemoteRecord("gpu01")
+	if done || retry {
+		t.Errorf("done, retry = %v, %v; want false, false so setup reports the real error", done, retry)
+	}
+	if len(spy.cleared) != 0 {
+		t.Errorf("cleared the record on a FAILED probe: %v", spy.cleared)
+	}
+	if len(spy.recorded) != 0 {
+		t.Errorf("rewrote the record on a FAILED probe: %v", spy.recorded)
+	}
+}
+
+// An upgrade means quil RAN over there, so the binary is fine and no probe
+// result could change the decision. Probing anyway would spend an ssh round
+// trip to answer a question already settled.
+func TestOfferRemoteInstall_UpgradeRemedy_SkipsTheProbe(t *testing.T) {
+	resetRemoteSetupState(t)
+	newHealSpy(t)
+	probed := false
+	probeRemoteFn = func(string) (remoteinstall.Probe, error) {
+		probed = true
+		return remoteinstall.Probe{}, nil
+	}
+	// Stop before the install itself: a dev build refuses to resolve a version,
+	// which is enough to prove the guard was passed without running ssh.
+	isReleaseFn = func() bool { return false }
+
+	offerRemoteInstall("gpu01", remoteinstall.RemedyUpgrade)
+
+	if probed {
+		t.Error("probed the host for an upgrade, where the binary is known to run")
 	}
 }
 
 func TestOfferRemoteInstall_IgnoresRemedyNone(t *testing.T) {
 	resetRemoteSetupState(t)
-	provisioned := false
-	alreadyProvisionedFn = func(string) bool { return provisioned }
+	newHealSpy(t)
+	probed := false
+	probeRemoteFn = func(string) (remoteinstall.Probe, error) {
+		probed = true
+		return remoteinstall.Probe{}, nil
+	}
 
 	if offerRemoteInstall("gpu01", remoteinstall.RemedyNone) {
 		t.Error("offered an install for a failure that is not about a missing binary")
 	}
-	if provisioned {
-		t.Error("RemedyNone should not have provisioned anything")
+	if probed {
+		t.Error("probed the host for a failure that is not about a missing binary")
 	}
 }
 
@@ -227,17 +388,19 @@ func TestRemoteSSHOptions(t *testing.T) {
 	})
 }
 
-// Everything offerRemoteInstall prints happens BEFORE the probe, so it may only
-// claim what the exit code proves. Exit 127 means the remote SHELL could not
-// find quil — a binary in ~/.local/bin is invisible to a non-interactive shell,
-// which is the problem this feature exists to solve. Claiming "not installed"
-// contradicted the probe's own "currently installed: …" one line later.
+// The pre-install line may only claim what the exit code proves. Exit 127 means
+// the remote SHELL could not find quil — a binary in ~/.local/bin is invisible
+// to a non-interactive shell, which is the problem this feature exists to
+// solve. Claiming "not installed" contradicted the probe's own
+// "currently installed: …" one line later.
 func TestOfferRemoteInstall_DoesNotClaimTheHostLacksQuil(t *testing.T) {
 	resetRemoteSetupState(t)
-	alreadyProvisionedFn = func(string) bool { return false }
+	newHealSpy(t)
+	// A host with nothing installed and nothing recorded: the reconciliation
+	// falls straight through to the offer, which is the path being asserted on.
+	// isReleaseFn stops runRemoteSetup before it reaches the network.
+	isReleaseFn = func() bool { return false }
 
-	// runRemoteSetup will fail at the probe (no such host); we only care about
-	// what was printed before it.
 	out := captureStderr(t, func() { offerRemoteInstall("nonexistent.invalid", remoteinstall.RemedyInstall) })
 
 	if strings.Contains(out, "not installed") {

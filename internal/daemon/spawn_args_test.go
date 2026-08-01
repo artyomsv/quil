@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/artyomsv/quil/internal/claudehook"
 	"github.com/artyomsv/quil/internal/plugin"
 )
 
@@ -180,7 +181,7 @@ func TestResolveSpawnArgs_Matrix(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := resolveSpawnArgs(tt.plugin, tt.pane, tt.restoring, "")
+			got := resolveSpawnArgs(tt.plugin, tt.pane, tt.restoring, "", nil)
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("resolveSpawnArgs:\n  got:  %v\n  want: %v", got, tt.want)
 			}
@@ -272,7 +273,7 @@ func TestResolveSpawnArgs_ClaudeResumePromotion(t *testing.T) {
 				}
 				return tt.sessionFound
 			}
-			got := resolveSpawnArgs(claudePlugin, tt.pane, true, "")
+			got := resolveSpawnArgs(claudePlugin, tt.pane, true, "", nil)
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("resolveSpawnArgs:\n  got:  %v\n  want: %v", got, tt.want)
 			}
@@ -304,7 +305,7 @@ func TestResolveSpawnArgs_ClaudeResumePromotion_NotAppliedToOtherPlugins(t *test
 		CWD:         `E:\anywhere`,
 		PluginState: map[string]string{"session_id": "xyz"},
 	}
-	got := resolveSpawnArgs(p, pane, true, "")
+	got := resolveSpawnArgs(p, pane, true, "", nil)
 	want := []string{"--resume", "xyz"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("resolveSpawnArgs:\n  got:  %v\n  want: %v", got, want)
@@ -409,23 +410,23 @@ func TestResolveSpawnArgs_ClaudeHookSessionID(t *testing.T) {
 	}
 
 	// NOTE: subtests are intentionally NOT marked t.Parallel(). They mutate
-	// package-level vars (readHookSessionIDFn, claudeSessionExistsFn) and a
+	// package-level vars (readHookSessionFn, claudeSessionExistsFn) and a
 	// concurrent run would cross-contaminate. The Cleanup below restores both
 	// when the outer test completes.
-	origHook := readHookSessionIDFn
+	origHook := readHookSessionFn
 	origProbe := claudeSessionExistsFn
 	t.Cleanup(func() {
-		readHookSessionIDFn = origHook
+		readHookSessionFn = origHook
 		claudeSessionExistsFn = origProbe
 	})
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			readHookSessionIDFn = func(paneID string) (string, error) {
+			readHookSessionFn = func(paneID string) (claudehook.SessionRecord, error) {
 				if paneID != tt.pane.ID {
 					t.Errorf("hook read paneID = %q, want %q", paneID, tt.pane.ID)
 				}
-				return tt.hookID, tt.hookErr
+				return claudehook.SessionRecord{ID: tt.hookID}, tt.hookErr
 			}
 			claudeSessionExistsFn = func(cwd, sessionID string) bool {
 				if cwd != tt.pane.CWD {
@@ -433,7 +434,7 @@ func TestResolveSpawnArgs_ClaudeHookSessionID(t *testing.T) {
 				}
 				return sessionID == tt.sessionFoundForID
 			}
-			got := resolveSpawnArgs(claudePlugin, tt.pane, true, "")
+			got := resolveSpawnArgs(claudePlugin, tt.pane, true, "", nil)
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("resolveSpawnArgs:\n  got:  %v\n  want: %v", got, tt.want)
 			}
@@ -542,7 +543,7 @@ func TestResolveSpawnArgs_DoesNotMutatePluginArgs(t *testing.T) {
 		},
 		Persistence: plugin.PersistenceConfig{Strategy: "cwd_only"},
 	}
-	got := resolveSpawnArgs(p, &Pane{}, false, "")
+	got := resolveSpawnArgs(p, &Pane{}, false, "", nil)
 	got[0] = "MUTATED"
 	if p.Command.Args[0] != "-l" {
 		t.Errorf("plugin.Command.Args was mutated: got %q, want %q", p.Command.Args[0], "-l")
@@ -627,7 +628,7 @@ func TestResolveSpawnArgs_OpencodeResume(t *testing.T) {
 				}
 				return tt.hookID, tt.hookErr
 			}
-			got := resolveSpawnArgs(opencodePlugin, tt.pane, true, "")
+			got := resolveSpawnArgs(opencodePlugin, tt.pane, true, "", nil)
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("resolveSpawnArgs:\n  got:  %v\n  want: %v", got, tt.want)
 			}

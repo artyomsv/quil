@@ -343,6 +343,24 @@ func (d *Daemon) claimedClaudeSessionIDs() map[string]string {
 	return d.claudeSessionIDs(true)
 }
 
+// claudeSessionHolder is the restore path's occupancy check — the sessionClaimFn
+// spawnPane hands to resolveSpawnArgs.
+//
+// It takes resumeClaimMu for the same reason applyResumeSessionID does: a lazy
+// spawn (tab switch, MCP op) runs on its caller's goroutine and can race another
+// pane's spawn for the same session, and both would otherwise read the id as
+// free. The lock makes the read and the caller's use of it one step against
+// other claimants.
+func (d *Daemon) claudeSessionHolder(sessionID string) (string, bool) {
+	if sessionID == "" {
+		return "", false
+	}
+	d.resumeClaimMu.Lock()
+	defer d.resumeClaimMu.Unlock()
+	holder, busy := d.claimedClaudeSessionIDs()[sessionID]
+	return holder, busy
+}
+
 // claudeSessionIDs maps each session id held by a claude-code pane to that
 // pane's id.
 //
@@ -409,8 +427,8 @@ func (d *Daemon) claudeSessionIDs(includePending bool) map[string]string {
 	inUse := make(map[string]string, len(captured))
 	for _, p := range captured {
 		id := p.stateID
-		if hookID, err := readHookSessionIDFn(p.paneID); err == nil && hookID != "" {
-			id = hookID
+		if rec, err := readHookSessionFn(p.paneID); err == nil && rec.ID != "" {
+			id = rec.ID
 		}
 		// A pane that has not spawned yet has no session_id until spawnPane
 		// seeds one, so its claim lives in resume_session_id.

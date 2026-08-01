@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/artyomsv/quil/internal/claudehook"
 	"github.com/artyomsv/quil/internal/claudesessions"
 	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/plugin"
@@ -32,14 +33,14 @@ func stubSessionList(t *testing.T, fn func(cwd string) ([]claudesessions.Session
 // $QUIL_HOME/sessions/.
 func stubHookSessionID(t *testing.T, byPane map[string]string) {
 	t.Helper()
-	prev := readHookSessionIDFn
-	readHookSessionIDFn = func(paneID string) (string, error) {
+	prev := readHookSessionFn
+	readHookSessionFn = func(paneID string) (claudehook.SessionRecord, error) {
 		if id, ok := byPane[paneID]; ok {
-			return id, nil
+			return claudehook.SessionRecord{ID: id}, nil
 		}
-		return "", errors.New("no hook file")
+		return claudehook.SessionRecord{}, errors.New("no hook file")
 	}
-	t.Cleanup(func() { readHookSessionIDFn = prev })
+	t.Cleanup(func() { readHookSessionFn = prev })
 }
 
 // withClaudePlugin loads the SHIPPED default plugins into the daemon's
@@ -590,7 +591,7 @@ func TestResolveSpawnArgs_FreshResume(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := resolveSpawnArgs(p, tt.pane, false, tt.resumeID)
+			got := resolveSpawnArgs(p, tt.pane, false, tt.resumeID, nil)
 			if strings.Join(got, " ") != strings.Join(tt.want, " ") {
 				t.Errorf("resolveSpawnArgs:\n  got:  %v\n  want: %v", got, tt.want)
 			}
@@ -623,7 +624,7 @@ func TestClaudeResumeTemplate_ResumeIDFallback(t *testing.T) {
 			"session_id":        chosen,
 			"resume_session_id": chosen,
 		}}
-		got := claudeResumeTemplate(p, pane)
+		got := claudeResumeTemplate(p, pane, nil)
 		want := []string{"--resume", "{session_id}"}
 		if strings.Join(got, " ") != strings.Join(want, " ") {
 			t.Fatalf("template = %v, want %v", got, want)
@@ -638,7 +639,7 @@ func TestClaudeResumeTemplate_ResumeIDFallback(t *testing.T) {
 		pane := &Pane{ID: "pane-0000000b", CWD: `E:\proj`, PluginState: map[string]string{
 			"session_id": "some-preassigned-id",
 		}}
-		got := claudeResumeTemplate(p, pane)
+		got := claudeResumeTemplate(p, pane, nil)
 		if strings.Join(got, " ") != "--continue" {
 			t.Errorf("template = %v, want [--continue]", got)
 		}

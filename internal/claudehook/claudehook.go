@@ -190,36 +190,87 @@ func sessionIDFile(quilDir, paneID string) string {
 	return filepath.Join(quilDir, "sessions", paneID+".id")
 }
 
-// ReadPersistedSessionID returns the session id the SessionStart hook last
-// wrote for the given pane. A missing file is reported via the returned
-// error satisfying errors.Is(err, os.ErrNotExist) so callers can cleanly
-// distinguish "no hook fired yet" from a corrupted file.
+// SessionRecord is what the hook persists for a pane: the live Claude session
+// id, plus the absolute path of that session's transcript.
+//
+// The path is recorded because it cannot be derived. Claude keys a transcript's
+// project directory off the session's OWN working directory, and an agent that
+// moves into a git worktree moves the transcript with it — so reconstructing
+// the path from the pane's spawn CWD looks in a directory the file was never
+// in. TranscriptPath is empty for records written by an older Quil (and for a
+// session whose SessionStart carried no path); callers must treat that as
+// "unknown", never as "missing".
+type SessionRecord struct {
+	ID             string
+	TranscriptPath string
+	ModTime        time.Time
+}
+
+// ReadPersistedSession returns the session record the hook last wrote for the
+// given pane. A missing file is reported via the returned error satisfying
+// errors.Is(err, os.ErrNotExist) so callers can cleanly distinguish "no hook
+// fired yet" from a corrupted file.
 //
 // Reads the file via a single open file descriptor + Stat so the reported
-// modTime always corresponds to the bytes returned, even if the hook rotates
+// ModTime always corresponds to the bytes returned, even if the hook rotates
 // the file between calls.
-func ReadPersistedSessionID(quilDir, paneID string) (id string, modTime time.Time, err error) {
+func ReadPersistedSession(quilDir, paneID string) (SessionRecord, error) {
 	if quilDir == "" {
-		return "", time.Time{}, errors.New("claudehook: empty quilDir")
+		return SessionRecord{}, errors.New("claudehook: empty quilDir")
 	}
 	if err := validatePaneID(paneID); err != nil {
-		return "", time.Time{}, err
+		return SessionRecord{}, err
 	}
 	f, err := os.Open(sessionIDFile(quilDir, paneID))
 	if err != nil {
-		return "", time.Time{}, err
+		return SessionRecord{}, err
 	}
 	defer f.Close()
 	info, err := f.Stat()
 	if err != nil {
-		return "", time.Time{}, err
+		return SessionRecord{}, err
 	}
-	// Hook writes a single uuid line; cap the read to keep a malformed file
-	// from forcing us to read megabytes.
-	const maxIDBytes = 256
-	buf, err := io.ReadAll(io.LimitReader(f, maxIDBytes))
+	// The record is one uuid line plus one path line; cap the read to keep a
+	// malformed file from forcing us to read megabytes. Sized for a long
+	// Windows path rather than the bare uuid the file used to hold.
+	const maxRecordBytes = 8 << 10
+	buf, err := io.ReadAll(io.LimitReader(f, maxRecordBytes))
 	if err != nil {
-		return "", info.ModTime(), err
+		return SessionRecord{ModTime: info.ModTime()}, err
 	}
-	return strings.TrimSpace(string(buf)), info.ModTime(), nil
+	rec := parseSessionRecord(string(buf))
+	rec.ModTime = info.ModTime()
+	return rec, nil
+}
+
+// maxIDBytes bounds the id line. The record as a whole has to be large enough
+// for a long Windows path, but the id within it is a uuid — anything past this
+// is a corrupt file, and the value ends up in `claude --resume <id>` argv.
+const maxIDBytes = 256
+
+// parseSessionRecord splits the on-disk record. Line 1 is the session id, line
+// 2 (optional) the transcript path. Trimming per line rather than over the
+// whole file is what keeps the id clean now that a second line exists — the
+// previous whole-file TrimSpace would have returned both glued together.
+//
+// An over-long id line yields an EMPTY id rather than a truncated one: half a
+// corrupt token is not a better resume target than none, and the caller's
+// no-session-recorded path is already correct.
+func parseSessionRecord(body string) SessionRecord {
+	var rec SessionRecord
+	lines := strings.SplitN(body, "\n", 3)
+	if id := strings.TrimSpace(lines[0]); len(id) <= maxIDBytes {
+		rec.ID = id
+	}
+	if len(lines) > 1 {
+		rec.TranscriptPath = strings.TrimSpace(lines[1])
+	}
+	return rec
+}
+
+// ReadPersistedSessionID returns just the session id from the pane's record.
+// Retained for the call sites that only ever needed the id.
+func ReadPersistedSessionID(quilDir, paneID string) (id string, modTime time.Time, err error) {
+	rec, err := ReadPersistedSession(quilDir, paneID)
+	return rec.ID, rec.ModTime, err
 }

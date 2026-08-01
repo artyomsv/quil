@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/artyomsv/quil/internal/claudehook"
 	"github.com/artyomsv/quil/internal/config"
 )
 
@@ -205,10 +206,10 @@ func TestDaemon_DefaultCWD(t *testing.T) {
 // parallel scheduler would let two stubs collide.
 func saveHookStubs(t *testing.T) {
 	t.Helper()
-	origClaudeHook := readHookSessionIDFn
+	origClaudeHook := readHookSessionFn
 	origOpencodeHook := readOpencodeSessionIDFn
 	t.Cleanup(func() {
-		readHookSessionIDFn = origClaudeHook
+		readHookSessionFn = origClaudeHook
 		readOpencodeSessionIDFn = origOpencodeHook
 	})
 }
@@ -238,14 +239,14 @@ func TestDaemon_RefreshPluginStateFromHooks(t *testing.T) {
 	}
 	d.session.RestoreTab(tab, panes)
 
-	readHookSessionIDFn = func(paneID string) (string, error) {
+	readHookSessionFn = func(paneID string) (claudehook.SessionRecord, error) {
 		switch paneID {
 		case "pane-claude":
-			return "live-claude-id", nil
+			return claudehook.SessionRecord{ID: "live-claude-id"}, nil
 		case "pane-nilstate":
-			return "live-nilstate-id", nil
+			return claudehook.SessionRecord{ID: "live-nilstate-id"}, nil
 		}
-		return "", nil
+		return claudehook.SessionRecord{}, nil
 	}
 	readOpencodeSessionIDFn = func(paneID string) (string, error) {
 		if paneID == "pane-opencode" {
@@ -285,10 +286,14 @@ func TestDaemon_RefreshPluginStateFromHooks_EmptyHookIDPreservesExisting(t *test
 
 	cases := []struct {
 		name string
-		stub func(string) (string, error)
+		stub func(string) (claudehook.SessionRecord, error)
 	}{
-		{"empty string no error", func(string) (string, error) { return "", nil }},
-		{"read error", func(string) (string, error) { return "", errors.New("simulated disk error") }},
+		{"empty string no error", func(string) (claudehook.SessionRecord, error) {
+			return claudehook.SessionRecord{}, nil
+		}},
+		{"read error", func(string) (claudehook.SessionRecord, error) {
+			return claudehook.SessionRecord{}, errors.New("simulated disk error")
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -298,7 +303,7 @@ func TestDaemon_RefreshPluginStateFromHooks_EmptyHookIDPreservesExisting(t *test
 				{ID: "pane-claude", TabID: "tab-1", Type: "claude-code", PluginState: map[string]string{"session_id": "preassigned-fallback"}},
 			}
 			d.session.RestoreTab(tab, panes)
-			readHookSessionIDFn = tc.stub
+			readHookSessionFn = tc.stub
 
 			d.refreshPluginStateFromHooks()
 

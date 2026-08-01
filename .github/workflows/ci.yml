@@ -17,6 +17,16 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
+# Least privilege for GITHUB_TOKEN, workflow-wide. Without this block both jobs
+# inherit the repository default, which can be read+write — so a compromised
+# third-party action (or one of its transitive deps) would hold a token able to
+# push commits and edit releases, on a workflow that runs against PR branches.
+# Neither job needs write: `test` checks out and builds, `changelog` checks out
+# and diffs, and its ::error annotation goes over stdout rather than the API.
+# A job that later needs more declares its own block, as release.yml does.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest

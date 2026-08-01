@@ -55,23 +55,31 @@ func (m *Model) findPaneAndTab(paneID string) (*PaneModel, int) {
 // focuses the pane (ackFocusedPane at Update entry). There is no timer.
 //
 // `working` is DERIVED — recomputed at a single point below as
-// turnActive || subagents > 0 — never assigned by hand in a branch, so no
-// future edge can desync the spinner from its inputs. The main turn
-// (turnActive) and the outstanding background-subagent count (subagents)
-// are tracked separately: Claude Code runs subagents detached by default,
-// so the main turn's Stop routinely fires while they are still grinding —
-// the spinner must survive that edge and the unseen mark is deferred until
-// the LAST subagent drains (which then becomes the completion edge).
+// turnActive || len(subagents) > 0 — never assigned by hand in a branch, so
+// no future edge can desync the spinner from its inputs. The main turn
+// (turnActive) and the outstanding background subagents (subagents) are
+// tracked separately: Claude Code runs subagents detached by default, so the
+// main turn's Stop routinely fires while they are still grinding — the
+// spinner must survive that edge and the unseen mark is deferred until the
+// LAST subagent drains (which then becomes the completion edge).
 //
-// data carries the ingester's coalesced burst count: N same-type events
-// inside the 50 ms debounce window arrive as ONE PaneEvent with
-// data["coalesced"] = "N".
+// The ledger is keyed by agent_type rather than being a bare count, because
+// a SubagentStop must only cancel a SubagentStart it can be MATCHED to.
+// Claude Code emits one unpaired stop with an empty agent_type at the end of
+// every main turn; with fungible stops that phantom drains an unrelated live
+// agent and the spinner dies mid-work. See the workSubagentStop branch.
+//
+// data carries the ingester's coalesced burst count: N events with the same
+// (pane, hook_event, agent_type) inside the 50 ms debounce window arrive as
+// ONE PaneEvent with data["coalesced"] = "N". agent_type is part of that key
+// (internal/hookevents/ingest.go) precisely so this ledger can rely on the
+// identity surviving coalescing.
 //
 // Replay safety: the daemon replays the queued event history on attach, and
-// the ordered replay reconstructs the live state PROVIDED the counters start
-// from zero. The ring's oldest-first eviction can only ever orphan a
-// SubagentStop (never strand a start behind its stop), and orphan stops are
-// ignored below.
+// the ordered replay reconstructs the live state PROVIDED the ledger starts
+// empty. The ring's oldest-first eviction can only ever orphan a
+// SubagentStop (never strand a start behind its stop), and a stop naming no
+// live agent is ignored below.
 //
 // That zero-start premise used to be free: attach happened exactly once per
 // TUI process, guarded by Model.attached. Remote reconnect (RD-011) broke
@@ -96,35 +104,58 @@ func (m *Model) applyWorkTransition(paneID, eventType string, data map[string]st
 	case workStart:
 		pane.turnActive = true
 	case workSubagentStart:
-		pane.subagents += coalescedCount(data)
+		if pane.subagents == nil {
+			pane.subagents = make(map[string]int, 1)
+		}
+		pane.subagents[data["agent_type"]] += coalescedCount(data)
 	case workSubagentStop:
-		if pane.subagents == 0 {
-			// Orphan stop (replay truncated by ring eviction, lost start) —
-			// ignore rather than underflow, or the next start/stop pair
-			// stops balancing.
+		agentType := data["agent_type"]
+		outstanding, live := pane.subagents[agentType]
+		if !live {
+			// The stop names no agent this pane has running, so there is
+			// nothing for it to cancel. Two ways to get here, both real:
+			//
+			//   - Claude Code emits ONE unpaired SubagentStop carrying an
+			//     EMPTY agent_type at the end of every main turn (measured
+			//     1:1 against Stop on every AI pane; a SubagentStart with an
+			//     empty agent_type never occurs). It is the root turn's own
+			//     completion — its start edge is UserPromptSubmit, not a
+			//     SubagentStart — so it can never have a partner here.
+			//   - A replay truncated by ring eviction, or a lost start.
+			//
+			// Ignoring it is what makes the ledger self-correcting. A bare
+			// counter cannot: stops are fungible there, so the phantom is
+			// spent on whichever background agent happens to be outstanding
+			// and the spinner goes dark while that agent is still working
+			// (2026-08-02: a 27-minute agent ran with no indicator). The
+			// old zero-guard could not catch it either — it only fires when
+			// the count is already zero, which is precisely when no agent is
+			// at risk.
 			return
 		}
-		pane.subagents -= coalescedCount(data)
-		if pane.subagents < 0 {
-			pane.subagents = 0
+		outstanding -= coalescedCount(data)
+		if outstanding <= 0 {
+			delete(pane.subagents, agentType)
+		} else {
+			pane.subagents[agentType] = outstanding
 		}
 	case workStop, workStopFinal:
 		pane.turnActive = false
 		if kind == workStopFinal {
 			// Terminal stop (session end): no subagent of the session can
-			// still be alive — drop the count so a lost SubagentStop can't
+			// still be alive — drop the ledger so a lost SubagentStop can't
 			// wedge the spinner forever.
-			pane.subagents = 0
+			clear(pane.subagents)
 		}
 	case workAbort:
 		pane.turnActive = false
-		pane.subagents = 0
+		clear(pane.subagents)
 		abort = true
 	}
 
 	// Single derivation point for the spinner; the edge actions below key
 	// off the before/after pair so they fire exactly once per transition.
-	pane.working = pane.turnActive || pane.subagents > 0
+	pane.working = pane.turnActive || len(pane.subagents) > 0
 	switch {
 	case pane.working && !wasWorking:
 		// Rising edge: seed the pane spinner with the shared frame so the

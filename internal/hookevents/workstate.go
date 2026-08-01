@@ -17,13 +17,17 @@ const (
 	WorkEventAbort                      // process exited → clear working, no mark
 	// Background subagents (Claude Code runs them detached by default)
 	// outlive the main turn's Stop, so they carry their own edges: the TUI
-	// keeps an outstanding count per pane and only lets a Stop end the
-	// spinner once that count is drained. A permanently lost SubagentStop
-	// (e.g. dropped during an ingester rate-limit storm) keeps the spinner
-	// lit until a terminal edge — recovery is deliberately deferred to
-	// WorkEventStopFinal / process-exit rather than an age-based drain,
-	// because there is no signal that distinguishes a long-running subagent
-	// from a lost stop.
+	// keeps a per-pane ledger of outstanding agents KEYED BY agent_type and
+	// only lets a Stop end the spinner once that ledger is empty. The key
+	// is what makes a stop cancel only the start it names — Claude Code
+	// emits an unpaired SubagentStop with an EMPTY agent_type at the end of
+	// every main turn (the root turn's own completion), and a fungible
+	// count spends it on a live background agent instead. A permanently
+	// lost SubagentStop (e.g. dropped during an ingester rate-limit storm)
+	// keeps the spinner lit until a terminal edge — recovery is
+	// deliberately deferred to WorkEventStopFinal / process-exit rather
+	// than an age-based drain, because there is no signal that
+	// distinguishes a long-running subagent from a lost stop.
 	WorkEventSubagentStart // a subagent spawned → spinner on
 	WorkEventSubagentStop  // a subagent finished → spinner off once drained AND turn over
 	WorkEventStopFinal     // terminal stop (session end) → also clears the outstanding count

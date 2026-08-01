@@ -76,9 +76,9 @@ type PaneModel struct {
 	mcpHighlight       bool                // set by Model before View() when MCP is interacting
 	liveOutputSeen     bool                // first live (non-ghost) output received — settle repaints scheduled
 	reattachReset      bool                // armed on reattach; consumed by the daemon's next replayed chunk (see armReattachReset)
-	working            bool                // derived spinner state: turnActive || subagents > 0 (hook-driven)
+	working            bool                // derived spinner state: turnActive || len(subagents) > 0 (hook-driven)
 	turnActive         bool                // main turn in flight (UserPromptSubmit/PostToolUse → Stop/park)
-	subagents          int                 // outstanding background subagents (SubagentStart/Stop, burst-aware)
+	subagents          map[string]int      // agent_type → outstanding count (SubagentStart/Stop, burst-aware); a stop only cancels a start it can name
 	unseen             bool                // work finished/parked while this pane was not focused; cleared on focus
 	pinnedAttention    bool                // context-menu "Mark attention" pin — green border that SURVIVES focus; cleared only by Unmark. TUI-session state, never persisted
 	workFrame          int                 // shared spinner frame index, mirrored here for top-border render

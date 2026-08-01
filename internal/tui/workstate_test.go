@@ -373,6 +373,113 @@ func TestApplyWorkTransition_SessionEndClearsOutstandingSubagents(t *testing.T) 
 	}
 }
 
+func TestApplyWorkTransition_PhantomSubagentStop_DoesNotDrainNamedAgent(t *testing.T) {
+	t.Parallel()
+	// Claude Code emits ONE unpaired SubagentStop carrying an empty agent_type
+	// at the end of every main turn — measured 1:1 against Stop across every
+	// AI pane in a real workspace, and a SubagentStart with an empty
+	// agent_type never occurs. It names no live agent, so it must cancel
+	// nothing. A ledger that treats stops as fungible spends it on whichever
+	// background agent happens to be outstanding, and the spinner goes dark
+	// while that agent is still working.
+	m := modelWithBackgroundTab()
+	m.applyWorkTransition("p2", "hook.claude.SubagentStart", map[string]string{"agent_type": "impl-task7"})
+	m.applyWorkTransition("p2", "hook.claude.Stop", nil)
+	pane := m.tabs[1].Root.Leaves()[0]
+	if !pane.working {
+		t.Fatal("precondition: Stop with an outstanding subagent must keep the spinner")
+	}
+
+	m.applyWorkTransition("p2", "hook.claude.SubagentStop", map[string]string{"agent_type": ""})
+	if !pane.working {
+		t.Error("phantom SubagentStop (empty agent_type) drained a live named agent and killed the spinner")
+	}
+	if pane.unseen {
+		t.Error("phantom SubagentStop must not produce a completion mark — nothing completed")
+	}
+
+	// The agent's own stop is still the completion edge.
+	m.applyWorkTransition("p2", "hook.claude.SubagentStop", map[string]string{"agent_type": "impl-task7"})
+	if pane.working {
+		t.Error("the named agent's own SubagentStop must drain it and stop the spinner")
+	}
+	if !pane.unseen {
+		t.Error("draining the last agent after the turn ended must mark the background pane")
+	}
+}
+
+func TestApplyWorkTransition_SubagentStopForUnknownAgent_DoesNotDrainAnother(t *testing.T) {
+	t.Parallel()
+	// Identity, not arithmetic: a stop may only cancel a start it can be
+	// matched to. A stop naming an agent this pane never saw start (replay
+	// gap, lost start, a stop from a session we did not track) must be
+	// ignored rather than spent on an unrelated live agent.
+	m := modelWithBackgroundTab()
+	m.applyWorkTransition("p2", "hook.claude.SubagentStart", map[string]string{"agent_type": "impl-task7"})
+	m.applyWorkTransition("p2", "hook.claude.SubagentStop", map[string]string{"agent_type": "rev-task7"})
+	pane := m.tabs[1].Root.Leaves()[0]
+	if !pane.working {
+		t.Error("a stop naming a different agent drained impl-task7 — stops must be matched by identity")
+	}
+}
+
+func TestApplyWorkTransition_ConcurrentNamedAgentsDrainIndependently(t *testing.T) {
+	t.Parallel()
+	// Two background agents in flight: each is drained only by its own stop,
+	// and the spinner survives until the last one is gone.
+	m := modelWithBackgroundTab()
+	m.applyWorkTransition("p2", "hook.claude.SubagentStart", map[string]string{"agent_type": "impl-task7"})
+	m.applyWorkTransition("p2", "hook.claude.SubagentStart", map[string]string{"agent_type": "rev-task7"})
+	m.applyWorkTransition("p2", "hook.claude.Stop", nil)
+	pane := m.tabs[1].Root.Leaves()[0]
+
+	m.applyWorkTransition("p2", "hook.claude.SubagentStop", map[string]string{"agent_type": "rev-task7"})
+	if !pane.working {
+		t.Fatal("impl-task7 is still outstanding — spinner must stay lit")
+	}
+	// A repeat stop for an agent already drained must not consume the other.
+	m.applyWorkTransition("p2", "hook.claude.SubagentStop", map[string]string{"agent_type": "rev-task7"})
+	if !pane.working {
+		t.Error("a duplicate stop for an already-drained agent consumed impl-task7's slot")
+	}
+
+	m.applyWorkTransition("p2", "hook.claude.SubagentStop", map[string]string{"agent_type": "impl-task7"})
+	if pane.working {
+		t.Error("both agents drained — spinner must stop")
+	}
+}
+
+func TestApplyWorkTransition_ProductionPhantomSequence_KeepsSpinnerLit(t *testing.T) {
+	t.Parallel()
+	// Regression: the exact event order captured from pane-8ebb2d53's spool on
+	// 2026-08-02, where the work indicator went dark while impl-task7 ran for
+	// 27 minutes. Each main turn ends Stop → phantom SubagentStop(""), and one
+	// of those phantoms landed 2 s after impl-task7 spawned.
+	m := modelWithBackgroundTab()
+	pane := m.tabs[1].Root.Leaves()[0]
+	named := func(t string) map[string]string { return map[string]string{"agent_type": t} }
+	phantom := map[string]string{"agent_type": ""}
+
+	m.applyWorkTransition("p2", "hook.claude.SubagentStop", named("rev-task7")) // drains the prior agent
+	m.applyWorkTransition("p2", "hook.claude.SubagentStart", named("impl-task7"))
+	m.applyWorkTransition("p2", "hook.claude.Stop", nil)
+	m.applyWorkTransition("p2", "hook.claude.SubagentStop", phantom)
+	m.applyWorkTransition("p2", "hook.claude.Stop", nil)
+	m.applyWorkTransition("p2", "hook.claude.SubagentStop", phantom)
+	m.applyWorkTransition("p2", "hook.claude.Notification", nil)
+	// Several further turns run to completion while impl-task7 keeps working.
+	for i := 0; i < 3; i++ {
+		m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit", nil)
+		m.applyWorkTransition("p2", "hook.claude.Stop", nil)
+		m.applyWorkTransition("p2", "hook.claude.SubagentStop", phantom)
+		m.applyWorkTransition("p2", "hook.claude.Notification", nil)
+	}
+
+	if !pane.working {
+		t.Error("impl-task7 never stopped — the spinner must still be lit after the phantom stops")
+	}
+}
+
 func TestApplyWorkTransition_ProcessExitClearsOutstandingSubagents(t *testing.T) {
 	t.Parallel()
 	m := modelWithBackgroundTab()

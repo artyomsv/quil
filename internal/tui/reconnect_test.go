@@ -895,8 +895,8 @@ func TestReconnect_ResetsWorkCounters(t *testing.T) {
 	if !p.working {
 		t.Fatal("fixture did not put the pane into a working state")
 	}
-	if p.subagents != 3 {
-		t.Fatalf("fixture subagents = %d, want 3 (coalesced burst)", p.subagents)
+	if got := p.subagents[""]; got != 3 {
+		t.Fatalf("fixture subagents[\"\"] = %d, want 3 (coalesced burst)", got)
 	}
 
 	m.resetWorkStateForReattach()
@@ -904,8 +904,8 @@ func TestReconnect_ResetsWorkCounters(t *testing.T) {
 	if p.working {
 		t.Error("pane still working after reset")
 	}
-	if p.subagents != 0 {
-		t.Errorf("subagents = %d, want 0 — a replayed start would stack on top of this", p.subagents)
+	if len(p.subagents) != 0 {
+		t.Errorf("subagents = %v, want empty — a replayed start would stack on top of this", p.subagents)
 	}
 	if p.turnActive {
 		t.Error("turnActive survived the reset")
@@ -1009,8 +1009,8 @@ func TestReconnect_SuccessPathResetsWorkState(t *testing.T) {
 	if focused.working {
 		t.Error("pane still working after a successful reconnect")
 	}
-	if focused.subagents != 0 {
-		t.Errorf("subagents = %d after reconnect, want 0", focused.subagents)
+	if len(focused.subagents) != 0 {
+		t.Errorf("subagents = %v after reconnect, want empty", focused.subagents)
 	}
 	if !other.unseen {
 		t.Error("the reconnect cleared a background pane's unseen mark — the only signal " +

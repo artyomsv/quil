@@ -241,13 +241,26 @@ func stormPayload(paneID, source string, now time.Time) Payload {
 	}
 }
 
-// coalesce buffers a payload under its (paneID, hook_event) key. The first
-// event in a new window arms the timer; subsequent events in the window
-// replace the buffered payload and bump the burst counter. When the timer
-// fires we emit the LAST buffered payload (so the freshest state wins) with
-// the burst count attached so consumers can render ×N.
+// coalesce buffers a payload under its (paneID, hook_event, agent_type) key.
+// The first event in a new window arms the timer; subsequent events in the
+// window replace the buffered payload and bump the burst counter. When the
+// timer fires we emit the LAST buffered payload (so the freshest state wins)
+// with the burst count attached so consumers can render ×N.
+//
+// agent_type joins the key because coalescing is LAST-WINS and the TUI's work
+// ledger matches a SubagentStop to the SubagentStart naming the same agent
+// (internal/tui/workstate.go). Merging two different agents' starts into one
+// payload would erase the loser's identity: its own stop would then match
+// nothing while the winner's count never drains, wedging the spinner until
+// SessionEnd. Only the Subagent* events carry agent_type, so every other
+// event keys exactly as before — and a burst of the SAME agent still
+// collapses to one emit with the burst count, which is the behaviour the
+// count exists for.
 func (i *Ingester) coalesce(p Payload, now time.Time) {
 	key := p.PaneID + "\x00" + p.HookEvent
+	if agentType := p.Data["agent_type"]; agentType != "" {
+		key += "\x00" + agentType
+	}
 
 	i.mu.Lock()
 	pending, exists := i.pending[key]

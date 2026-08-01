@@ -86,6 +86,69 @@ func TestIngester_Submit_DifferentEventsDoNotCoalesce(t *testing.T) {
 	}
 }
 
+func TestIngester_Submit_DifferentSubagentsDoNotCoalesce(t *testing.T) {
+	t.Parallel()
+	// The TUI's work ledger matches a SubagentStop to the SubagentStart that
+	// names the same agent. Coalescing is last-wins, so merging two DIFFERENT
+	// agents' starts into one payload would erase the loser's identity: its
+	// own stop then matches nothing and the winner's count never drains,
+	// wedging the spinner. Distinct agent_type values must stay distinct.
+	rec := &emitRecorder{}
+	ing := NewIngester(rec.emit)
+
+	a := basePayload(1)
+	a.HookEvent = "SubagentStart"
+	a.Data = map[string]string{"agent_type": "impl-task7"}
+	b := basePayload(2)
+	b.HookEvent = "SubagentStart"
+	b.Data = map[string]string{"agent_type": "rev-task7"}
+
+	ing.Submit(a)
+	ing.Submit(b)
+
+	time.Sleep(150 * time.Millisecond)
+
+	got := rec.drain()
+	if len(got) != 2 {
+		t.Fatalf("two distinct agent types: want 2 emits, got %d", len(got))
+	}
+	seen := map[string]bool{}
+	for _, p := range got {
+		seen[p.Data["agent_type"]] = true
+	}
+	for _, want := range []string{"impl-task7", "rev-task7"} {
+		if !seen[want] {
+			t.Errorf("agent_type %q was coalesced away; emitted set: %v", want, seen)
+		}
+	}
+}
+
+func TestIngester_Submit_SameSubagentTypeStillCoalesces(t *testing.T) {
+	t.Parallel()
+	// Three instances of the SAME agent spawning in one window is a real
+	// parallel fan-out: it must still collapse to one emit carrying the burst
+	// count, so the ledger records 3 outstanding rather than 1.
+	rec := &emitRecorder{}
+	ing := NewIngester(rec.emit)
+
+	for i := 1; i <= 3; i++ {
+		p := basePayload(uint64(i))
+		p.HookEvent = "SubagentStart"
+		p.Data = map[string]string{"agent_type": "Explore"}
+		ing.Submit(p)
+	}
+
+	time.Sleep(150 * time.Millisecond)
+
+	got := rec.drain()
+	if len(got) != 1 {
+		t.Fatalf("same agent type burst: want 1 emit, got %d", len(got))
+	}
+	if got[0].Data["coalesced"] != "3" {
+		t.Errorf("burst count: got %q, want %q", got[0].Data["coalesced"], "3")
+	}
+}
+
 func TestIngester_Submit_DifferentPanesDoNotCoalesce(t *testing.T) {
 	t.Parallel()
 	rec := &emitRecorder{}

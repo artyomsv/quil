@@ -886,6 +886,38 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 	case ipc.MsgShutdown:
 		d.shutdownOnce.Do(func() { close(d.shutdown) })
 
+	// Project lifecycle
+	case ipc.MsgCreateProject:
+		var p ipc.CreateProjectPayload
+		msg.DecodePayload(&p)
+		d.session.CreateProject(p.Name, p.RootDir)
+		d.broadcastState()
+
+	case ipc.MsgDestroyProject:
+		var p ipc.DestroyProjectPayload
+		msg.DecodePayload(&p)
+		detached := d.session.DestroyProject(p.ProjectID)
+		releasePanes(detached)
+		d.broadcastState()
+
+	case ipc.MsgUpdateProject:
+		var p ipc.UpdateProjectPayload
+		msg.DecodePayload(&p)
+		d.session.UpdateProject(p.ProjectID, p.Name, p.RootDir)
+		d.broadcastState()
+
+	case ipc.MsgSwitchProject:
+		var p ipc.SwitchProjectPayload
+		msg.DecodePayload(&p)
+		d.session.SwitchProject(p.ProjectID)
+		d.broadcastState()
+
+	case ipc.MsgReorderProject:
+		var p ipc.ReorderProjectPayload
+		msg.DecodePayload(&p)
+		d.session.ReorderProject(p.ProjectID, p.NewIndex)
+		d.broadcastState()
+
 	// MCP request-response
 	case ipc.MsgListPanesReq:
 		d.handleListPanesReq(conn, msg)

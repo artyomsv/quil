@@ -3,6 +3,8 @@ package daemon
 import (
 	"testing"
 	"time"
+
+	"github.com/artyomsv/quil/internal/ipc"
 )
 
 func TestCreateProjectAppendsAndActivatesFirst(t *testing.T) {
@@ -216,5 +218,27 @@ func TestCreateTabInProjectFallsBackForUnknownProjectID(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("project %q TabIDs = %v, want to contain %s", owner.ID, owner.TabIDs, tab.ID)
+	}
+}
+
+func TestHandleProjectMessagesMutateState(t *testing.T) {
+	d := newTestDaemon(t)
+	p := d.session.CreateProject("alpha", t.TempDir())
+
+	rename, _ := ipc.NewMessage(ipc.MsgUpdateProject, ipc.UpdateProjectPayload{
+		ProjectID: p.ID, Name: "renamed", RootDir: "/tmp",
+	})
+	d.handleMessage(nil, rename)
+
+	got := d.session.Projects()
+	if len(got) != 1 || got[0].Name != "renamed" {
+		t.Fatalf("projects = %v, want one named renamed", got)
+	}
+
+	destroy, _ := ipc.NewMessage(ipc.MsgDestroyProject, ipc.DestroyProjectPayload{ProjectID: p.ID})
+	d.handleMessage(nil, destroy)
+
+	if len(d.session.Projects()) != 0 {
+		t.Fatal("project survived destroy")
 	}
 }

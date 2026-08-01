@@ -22,7 +22,6 @@ import (
 	"regexp"
 
 	"github.com/artyomsv/quil/internal/claudehook"
-	"github.com/artyomsv/quil/internal/claudesessions"
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/hookevents"
 	"github.com/artyomsv/quil/internal/ipc"
@@ -347,11 +346,11 @@ func (d *Daemon) Wait() {
 func (d *Daemon) refreshPluginStateFromHooks() {
 	for _, tab := range d.session.Tabs() {
 		for _, pane := range d.session.Panes(tab.ID) {
-			var hookID string
+			var hookID, transcript string
 			switch pane.Type {
 			case "claude-code":
-				if id, err := readHookSessionIDFn(pane.ID); err == nil {
-					hookID = id
+				if rec, err := readHookSessionFn(pane.ID); err == nil {
+					hookID, transcript = rec.ID, rec.TranscriptPath
 				}
 			case "opencode":
 				if id, err := readOpencodeSessionIDFn(pane.ID); err == nil {
@@ -368,6 +367,18 @@ func (d *Daemon) refreshPluginStateFromHooks() {
 				pane.PluginState = make(map[string]string)
 			}
 			pane.PluginState["session_id"] = hookID
+			// The transcript path is stored as one unit with the id it belongs
+			// to: only that pairing makes it evidence. A path left behind while
+			// the id moves on would vouch for a transcript nobody checked, so an
+			// id arriving without one drops the key rather than keeping the
+			// previous session's. This is what lets a restore locate the session
+			// after the hook file itself is lost — the path cannot be rebuilt
+			// from the pane's CWD, which is the whole reason it is recorded.
+			if transcript != "" {
+				pane.PluginState["transcript_path"] = transcript
+			} else {
+				delete(pane.PluginState, "transcript_path")
+			}
 			// The hook has now confirmed this pane's own session, so the
 			// creation-time resume target has served its only purpose: covering
 			// the window before the first SessionStart hook fired. Retiring it
@@ -1323,7 +1334,7 @@ func (d *Daemon) cleanupPaneArtifacts(paneID string) {
 	if d.hookIngester != nil {
 		d.hookIngester.Cancel(paneID)
 	}
-	for _, name := range []string{paneID + ".id", "opencode-" + paneID + ".id"} {
+	for _, name := range []string{paneID + ".id", paneID + ".transcript", "opencode-" + paneID + ".id"} {
 		p := filepath.Join(config.SessionsDir(), name)
 		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
 			log.Printf("cleanup pane %s: remove session id %s: %v", paneID, name, err)
@@ -2124,20 +2135,24 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 	}
 }
 
-// claudeSessionExistsFn is the probe resolveSpawnArgs uses to decide whether
-// a restored claude-code pane can use --resume <uuid> (unique session) or
-// must fall back to --continue (Claude's most-recent-in-CWD lookup).
+// transcriptExistsFn probes an ABSOLUTE transcript path recorded by the hook.
+// It reports (exists, answered): an unanswered probe is NOT evidence of absence,
+// which is the distinction the caller's classification turns on.
 //
-// Defaults to the real filesystem check; tests override with a stub so the
-// arg-merging matrix never reaches ~/.claude.
-var claudeSessionExistsFn = claudeSessionFileExists
+// There is deliberately no CWD-derived probe any more. Deriving a transcript's
+// project directory from the pane's CWD was the root cause of the bug this file
+// now guards against — Claude keys that directory off the SESSION's working
+// directory, so a session that moved into a git worktree is not under the pane's
+// spawn CWD and the probe reported a live session as absent.
+//
+// Package var so tests never reach the real filesystem.
+var transcriptExistsFn = statExistsWithinBudget
 
-// readHookSessionIDFn reads the hook-recorded session id for a pane. Defaults
-// to the real claudehook.ReadPersistedSessionID; tests override it so
+// readHookSessionFn reads the hook-recorded session record for a pane.
+// Defaults to the real claudehook.ReadPersistedSession; tests override it so
 // resolveSpawnArgs matrix tests never touch $QUIL_HOME/sessions/.
-var readHookSessionIDFn = func(paneID string) (string, error) {
-	id, _, err := claudehook.ReadPersistedSessionID(config.QuilDir(), paneID)
-	return id, err
+var readHookSessionFn = func(paneID string) (claudehook.SessionRecord, error) {
+	return claudehook.ReadPersistedSession(config.QuilDir(), paneID)
 }
 
 // claudeHookExeFn resolves the path to the running quild binary, which the
@@ -2241,35 +2256,13 @@ func claudeHookSpawnPrep(quilDir, paneID, hookMode string, userArgs []string) (p
 	}
 }
 
-// claudeSessionFileExists reports whether Claude has persisted a session
-// file for the given CWD + session ID. Called on the restore path for
-// claude-code panes; a true result means the pane can resume its own
-// unique session, a false result forces the --continue fallback.
-//
-// The CWD → directory mapping lives in internal/claudesessions, which owns the
-// transcription of Claude's naming rule for both this probe and the setup
-// dialog's session picker. Keeping one definition matters: an earlier private
-// copy here missed '.', so any CWD containing a dot probed a nonexistent
-// directory and every restored pane silently fell back to --continue.
-//
-// Any os.Stat error (including permission denial or the home dir being
-// unavailable) returns false — the fallback path is always safe.
-func claudeSessionFileExists(cwd, sessionID string) bool {
-	path := claudesessions.TranscriptPath(cwd, sessionID)
-	if path == "" {
-		return false
-	}
-	_, err := os.Stat(path)
-	return err == nil
-}
-
 // resumeTemplateFor returns the resume-arg template resolveSpawnArgs should
 // expand on the restore branch. Dispatches by plugin name to plugin-specific
 // promotion logic; default falls back to the plugin's configured ResumeArgs.
-func resumeTemplateFor(p *plugin.PanePlugin, pane *Pane) []string {
+func resumeTemplateFor(p *plugin.PanePlugin, pane *Pane, claim sessionClaimFn) []string {
 	switch {
 	case p.Name == "claude-code" && p.Persistence.Strategy == "preassign_id":
-		return claudeResumeTemplate(p, pane)
+		return claudeResumeTemplate(p, pane, claim)
 	case p.Name == "opencode" && p.Persistence.Strategy == "session_scrape":
 		return opencodeResumeTemplate(p, pane)
 	default:
@@ -2277,57 +2270,209 @@ func resumeTemplateFor(p *plugin.PanePlugin, pane *Pane) []string {
 	}
 }
 
-// claudeResumeTemplate decides between --resume <id> (unique session) and
-// the configured fallback (typically --continue) for a claude-code pane.
+// sessionClaimFn atomically selects and CLAIMS the first candidate no other
+// pane already holds, recording it on the pane.
 //
-// Prefers the id recorded by the SessionStart hook — it reflects any /clear,
-// /resume, or compaction rotation that happened after the original
-// preassigned id was generated. A missing or empty value falls through to
-// the original probe so panes on older Quil installs still work.
-func claudeResumeTemplate(p *plugin.PanePlugin, pane *Pane) []string {
-	if hookID, err := readHookSessionIDFn(pane.ID); err == nil && hookID != "" {
-		if claudeSessionExistsFn(pane.CWD, hookID) {
-			pane.PluginMu.Lock()
-			if pane.PluginState == nil {
-				pane.PluginState = make(map[string]string)
-			}
-			pane.PluginState["session_id"] = hookID
-			pane.PluginMu.Unlock()
-			return []string{"--resume", "{session_id}"}
+// Selection and the write that records it MUST be one step. Two panes restoring
+// concurrently (a tab switch and an MCP op arrive on different dispatch
+// goroutines) would otherwise both observe the same session free and both spawn
+// `claude --resume` on it — the duplicate-resume this guard exists to prevent,
+// and reachable precisely because a pane that has not spawned yet has no PTY and
+// so is invisible to a running-only test. Returns the first blocking holder when
+// every candidate is taken.
+//
+// Threaded in as a parameter rather than read off the Daemon so the arg-merging
+// matrix stays a table test; production passes (*Daemon).claimResumeSession.
+type sessionClaimFn func(pane *Pane, cands []resumeCandidate) (chosen resumeCandidate, holder string, ok bool)
+
+// candidateState is what we know about a candidate's transcript.
+//
+// The three-way split matters because "we could not find it" and "it is not
+// there" are different facts, and conflating them is what produced the original
+// bug: a session that had merely moved was treated as gone.
+type candidateState int
+
+const (
+	candidateUnknown candidateState = iota // no evidence either way
+	candidateLocated                       // the recorded path names this id and the file is there
+	candidateMissing                       // the recorded path names this id and the file is NOT there
+)
+
+// resumeCandidate is one session a restored pane could attach to.
+type resumeCandidate struct {
+	id         string
+	source     string
+	transcript string
+	state      candidateState
+}
+
+// claudeResumeTemplate decides which session a restored claude-code pane
+// attaches to.
+//
+// The rule that matters: --continue is NOT a neutral fallback. It is Claude's
+// most-recent-session-in-CWD lookup, so a pane whose own session we merely
+// failed to LOCATE gets attached to a sibling pane's conversation — and on
+// restore the sibling that respawned a second earlier is exactly the one it
+// finds. Three panes appending into one transcript is a real incident this
+// produced (2026-08-01).
+//
+// So a recorded id is resumed on its own authority. Candidates are ordered by
+// SOURCE, not by whether we managed to find their transcript: locating a
+// session is evidence it exists, but failing to locate one is not evidence it
+// does not, and ranking a located low-authority id above an unlocated
+// high-authority one reinstates the same silent swap in a narrower case. Only a
+// candidate we can positively prove absent is skipped.
+func claudeResumeTemplate(p *plugin.PanePlugin, pane *Pane, claim sessionClaimFn) []string {
+	cands, sawRecorded := claudeResumeCandidates(pane)
+	usable := usableResumeCandidates(cands)
+
+	if len(usable) == 0 {
+		if sawRecorded {
+			// This pane HAS a session; we just cannot safely name one (every
+			// candidate was proven gone, or was rejected as malformed). Falling
+			// back to ResumeArgs here would be the --continue hijack.
+			return freshClaudeSession(p, pane, "no usable recorded session")
 		}
+		// Genuinely no recorded session: nothing to preserve, so the plugin's
+		// configured fallback stands. This is the one case --continue still owns.
+		return p.Persistence.ResumeArgs
 	}
 
-	// Snapshot the preassigned id under PluginMu so a concurrent scraper
-	// goroutine cannot mutate the map underneath us. Disk probe runs after
-	// the lock is released — never hold a mutex across syscalls.
+	chosen, holder, ok := claim(pane, usable)
+	if !ok {
+		return freshClaudeSession(p, pane, "every candidate session is held by another pane (first: "+holder+")")
+	}
+	log.Printf("restore pane %s: resuming session %q (source=%s, located=%t)",
+		pane.ID, chosen.id, chosen.source, chosen.state == candidateLocated)
+	return []string{"--resume", "{session_id}"}
+}
+
+// freshClaudeSession gives the pane a brand-new session identity and returns the
+// plugin's fresh-start args.
+//
+// Minting the id here is what "we will not resume" has to MEAN. Leaving the old
+// value in PluginState would leave the pane advertising a session it is not in,
+// so the occupancy map would report it as the holder — and a later Alt+R, which
+// spawns with restoring=false, would hand that id straight to --session-id and
+// adopt another pane's conversation for real.
+func freshClaudeSession(p *plugin.PanePlugin, pane *Pane, why string) []string {
+	id := uuid.New().String()
 	pane.PluginMu.Lock()
-	sessionID := ""
-	resumeID := ""
-	if pane.PluginState != nil {
-		sessionID = pane.PluginState["session_id"]
-		resumeID = pane.PluginState["resume_session_id"]
+	if pane.PluginState == nil {
+		pane.PluginState = make(map[string]string)
 	}
+	pane.PluginState["session_id"] = id
+	delete(pane.PluginState, "transcript_path")
 	pane.PluginMu.Unlock()
-	if sessionID != "" && claudeSessionExistsFn(pane.CWD, sessionID) {
-		return []string{"--resume", "{session_id}"}
-	}
-	// Last resort before --continue: a pane the user explicitly created to
-	// resume a chosen session, restarted before its SessionStart hook could
-	// record an id and before claude had written the transcript the probe
-	// above looks for. --continue would silently attach it to whatever session
-	// in this CWD is most recent, which is exactly the session the user did
-	// NOT choose. The id was validated on the way in and the pane is about to
-	// spawn against it either way.
-	if resumeID != "" {
-		pane.PluginMu.Lock()
-		if pane.PluginState == nil {
-			pane.PluginState = make(map[string]string)
+	log.Printf("restore pane %s: starting a fresh session — %s", pane.ID, why)
+	return p.Persistence.StartArgs
+}
+
+// claudeResumeCandidates lists the sessions a pane could resume, most
+// authoritative first:
+//
+//  1. the hook record — the only source that tracks /clear, /resume and
+//     compaction rotations, and the one that carries the transcript's real path;
+//  2. PluginState["session_id"] from workspace.json — refreshed at shutdown, so
+//     it lags a rotation;
+//  3. PluginState["resume_session_id"] — the session the user picked at pane
+//     creation, covering a restart before the first SessionStart hook fired.
+//
+// sawRecorded reports whether the pane named ANY session, including ones
+// rejected as malformed. The caller needs that apart from the candidate count:
+// "no session" and "a session we refuse to name" must not both fall through to
+// --continue.
+//
+// Every pane field is captured under PluginMu and every probe runs after it is
+// released: holding a pane mutex across a syscall is the shape of the daemon
+// wedges this package documents at length.
+func claudeResumeCandidates(pane *Pane) (cands []resumeCandidate, sawRecorded bool) {
+	rec, err := readHookSessionFn(pane.ID)
+	if err != nil {
+		// A missing file is the ordinary case (no hook has fired yet). Anything
+		// else means the authoritative source was silently discarded on the one
+		// code path that exists to be trustworthy — say so.
+		if !errors.Is(err, os.ErrNotExist) {
+			log.Printf("restore pane %s: reading the hook session record failed: %v", pane.ID, err)
 		}
-		pane.PluginState["session_id"] = resumeID
-		pane.PluginMu.Unlock()
-		return []string{"--resume", "{session_id}"}
+		rec = claudehook.SessionRecord{}
 	}
-	return p.Persistence.ResumeArgs
+
+	pane.PluginMu.Lock()
+	stateID := pane.PluginState["session_id"]
+	statePath := pane.PluginState["transcript_path"]
+	resumeID := pane.PluginState["resume_session_id"]
+	pane.PluginMu.Unlock()
+
+	add := func(id, source, transcript string) {
+		if id == "" {
+			return
+		}
+		sawRecorded = true
+		// EVERY id is shape-checked, not just the unlocated ones. The id becomes
+		// an argv token, and a recorded transcript path cannot stand in for that
+		// check the way an on-disk <id>.jsonl filename does — the path is an
+		// independent string, so any existing file would otherwise vouch for any
+		// id. Logged by length, never by value, so a hostile string cannot forge
+		// a log line (the daemon log is rendered by the F1 viewer, which does not
+		// pass through a VT emulator).
+		if !resumeSessionIDRe.MatchString(id) {
+			log.Printf("restore pane %s: ignoring %s session id of length %d — not a canonical uuid",
+				pane.ID, source, len(id))
+			return
+		}
+		for _, c := range cands {
+			if c.id == id {
+				return // same session reached by two routes
+			}
+		}
+		cands = append(cands, resumeCandidate{
+			id: id, source: source, transcript: transcript, state: transcriptState(id, transcript),
+		})
+	}
+	add(rec.ID, "hook", rec.TranscriptPath)
+	// The workspace pair is written as one unit, so its path speaks only for its
+	// own id. Both sources are consulted because either can be the survivor: the
+	// hook file dies with a wiped $QUIL_HOME/sessions, the workspace copy with a
+	// daemon killed before its shutdown refresh.
+	add(stateID, "workspace", statePath)
+	add(resumeID, "user-chosen", "")
+	return cands, sawRecorded
+}
+
+// transcriptState classifies the evidence we hold for one candidate.
+//
+// A recorded path may only speak for the id it NAMES. Claude files a transcript
+// as <session-id>.jsonl, so the filename is the binding; without that check an
+// unrelated existing file would mark any id as located, and the id goes into
+// argv. An unanswered probe is "no evidence", never "absent" — a stat that times
+// out on a dead mount must not be read as proof a session was deleted.
+func transcriptState(id, transcript string) candidateState {
+	if transcript == "" || filepath.Base(transcript) != id+".jsonl" {
+		return candidateUnknown
+	}
+	exists, answered := transcriptExistsFn(transcript)
+	switch {
+	case !answered:
+		return candidateUnknown
+	case exists:
+		return candidateLocated
+	default:
+		return candidateMissing
+	}
+}
+
+// usableResumeCandidates drops the candidates we can prove are gone, preserving
+// SOURCE order for the rest. Order is never rearranged by whether a transcript
+// was located — see claudeResumeTemplate for why that would reinstate the bug.
+func usableResumeCandidates(cands []resumeCandidate) []resumeCandidate {
+	usable := make([]resumeCandidate, 0, len(cands))
+	for _, c := range cands {
+		if c.state != candidateMissing {
+			usable = append(usable, c)
+		}
+	}
+	return usable
 }
 
 // opencodeResumeTemplate decides between --session <id> (resume exact
@@ -2390,7 +2535,11 @@ func templateHasPlaceholder(template []string) bool {
 // pane's PTY down with it — the plugin scraper and refreshPluginStateFromHooks
 // are both live writers to this same map. Passing the value in also keeps this
 // function honestly pure for the arg-merging table tests.
-func resolveSpawnArgs(p *plugin.PanePlugin, pane *Pane, restoring bool, resumeID string) []string {
+// claim selects and records the session the restore branch will resume, refusing
+// one another pane already holds. It is never nil: callers with no occupancy
+// information pass claimAny, so a forgotten wiring fails in a test rather than
+// silently dropping the guard in production.
+func resolveSpawnArgs(p *plugin.PanePlugin, pane *Pane, restoring bool, resumeID string, claim sessionClaimFn) []string {
 	args := append([]string{}, p.Command.Args...)
 
 	// Instance-specific args override base args.
@@ -2426,7 +2575,7 @@ func resolveSpawnArgs(p *plugin.PanePlugin, pane *Pane, restoring bool, resumeID
 	if restoring {
 		switch p.Persistence.Strategy {
 		case "preassign_id", "session_scrape":
-			template := resumeTemplateFor(p, pane)
+			template := resumeTemplateFor(p, pane, claim)
 			if len(template) > 0 {
 				// Static templates (no {placeholder}) pass through directly so
 				// a session_scrape pane that never received a hook event still
@@ -2521,8 +2670,8 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 		// PluginMu across a file read.
 		hookID := ""
 		if p.Name == "claude-code" {
-			if id, err := readHookSessionIDFn(pane.ID); err == nil {
-				hookID = id
+			if rec, err := readHookSessionFn(pane.ID); err == nil {
+				hookID = rec.ID
 			}
 		}
 		pane.PluginMu.Lock()
@@ -2545,7 +2694,7 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 		pane.PluginMu.Unlock()
 	}
 
-	args := resolveSpawnArgs(p, pane, restoring, resumeID)
+	args := resolveSpawnArgs(p, pane, restoring, resumeID, d.claimResumeSession)
 
 	// Shell integration (only for terminal-type panes)
 	if p.Command.ShellIntegration {

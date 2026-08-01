@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/artyomsv/quil/internal/claudehook"
 	"github.com/artyomsv/quil/internal/config"
 )
 
@@ -205,10 +206,10 @@ func TestDaemon_DefaultCWD(t *testing.T) {
 // parallel scheduler would let two stubs collide.
 func saveHookStubs(t *testing.T) {
 	t.Helper()
-	origClaudeHook := readHookSessionIDFn
+	origClaudeHook := readHookSessionFn
 	origOpencodeHook := readOpencodeSessionIDFn
 	t.Cleanup(func() {
-		readHookSessionIDFn = origClaudeHook
+		readHookSessionFn = origClaudeHook
 		readOpencodeSessionIDFn = origOpencodeHook
 	})
 }
@@ -238,14 +239,14 @@ func TestDaemon_RefreshPluginStateFromHooks(t *testing.T) {
 	}
 	d.session.RestoreTab(tab, panes)
 
-	readHookSessionIDFn = func(paneID string) (string, error) {
+	readHookSessionFn = func(paneID string) (claudehook.SessionRecord, error) {
 		switch paneID {
 		case "pane-claude":
-			return "live-claude-id", nil
+			return claudehook.SessionRecord{ID: "live-claude-id"}, nil
 		case "pane-nilstate":
-			return "live-nilstate-id", nil
+			return claudehook.SessionRecord{ID: "live-nilstate-id"}, nil
 		}
-		return "", nil
+		return claudehook.SessionRecord{}, nil
 	}
 	readOpencodeSessionIDFn = func(paneID string) (string, error) {
 		if paneID == "pane-opencode" {
@@ -285,10 +286,14 @@ func TestDaemon_RefreshPluginStateFromHooks_EmptyHookIDPreservesExisting(t *test
 
 	cases := []struct {
 		name string
-		stub func(string) (string, error)
+		stub func(string) (claudehook.SessionRecord, error)
 	}{
-		{"empty string no error", func(string) (string, error) { return "", nil }},
-		{"read error", func(string) (string, error) { return "", errors.New("simulated disk error") }},
+		{"empty string no error", func(string) (claudehook.SessionRecord, error) {
+			return claudehook.SessionRecord{}, nil
+		}},
+		{"read error", func(string) (claudehook.SessionRecord, error) {
+			return claudehook.SessionRecord{}, errors.New("simulated disk error")
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -298,7 +303,7 @@ func TestDaemon_RefreshPluginStateFromHooks_EmptyHookIDPreservesExisting(t *test
 				{ID: "pane-claude", TabID: "tab-1", Type: "claude-code", PluginState: map[string]string{"session_id": "preassigned-fallback"}},
 			}
 			d.session.RestoreTab(tab, panes)
-			readHookSessionIDFn = tc.stub
+			readHookSessionFn = tc.stub
 
 			d.refreshPluginStateFromHooks()
 
@@ -534,5 +539,65 @@ func TestOnPaneExit_NormalPaneSurvivesExit(t *testing.T) {
 	normal.PluginMu.Unlock()
 	if exitCode == nil || *exitCode != 1 {
 		t.Errorf("ExitCode = %v, want 1", exitCode)
+	}
+}
+
+// TestDaemon_RefreshPluginStateFromHooks_PersistsTranscriptPath copies the
+// hook-recorded transcript path into workspace.json alongside the id, so a pane
+// whose hook file is later lost can still be located without inferring a
+// project directory from its CWD.
+func TestDaemon_RefreshPluginStateFromHooks_PersistsTranscriptPath(t *testing.T) {
+	// NOTE: stubs mutate package-level vars — must not be marked t.Parallel().
+	saveHookStubs(t)
+
+	const path = "/home/u/.claude/projects/proj--claude-worktrees-faq/live-id.jsonl"
+	d := New(config.Default())
+	tab := &Tab{ID: "tab-1", Name: "test", Panes: []string{"pane-claude"}}
+	panes := []*Pane{
+		{ID: "pane-claude", TabID: "tab-1", Type: "claude-code", PluginState: map[string]string{"session_id": "stale-id"}},
+	}
+	d.session.RestoreTab(tab, panes)
+	readHookSessionFn = func(string) (claudehook.SessionRecord, error) {
+		return claudehook.SessionRecord{ID: "live-id", TranscriptPath: path}, nil
+	}
+
+	d.refreshPluginStateFromHooks()
+
+	if got := panes[0].PluginState["session_id"]; got != "live-id" {
+		t.Errorf("session_id = %q, want %q", got, "live-id")
+	}
+	if got := panes[0].PluginState["transcript_path"]; got != path {
+		t.Errorf("transcript_path = %q, want %q", got, path)
+	}
+}
+
+// TestDaemon_RefreshPluginStateFromHooks_DropsPathWithoutOne keeps the pair
+// consistent. The id and the path are only meaningful together: adopting a new
+// id while leaving the previous session's path behind would let it vouch for a
+// transcript that was never checked.
+func TestDaemon_RefreshPluginStateFromHooks_DropsPathWithoutOne(t *testing.T) {
+	// NOTE: stubs mutate package-level vars — must not be marked t.Parallel().
+	saveHookStubs(t)
+
+	d := New(config.Default())
+	tab := &Tab{ID: "tab-1", Name: "test", Panes: []string{"pane-claude"}}
+	panes := []*Pane{
+		{ID: "pane-claude", TabID: "tab-1", Type: "claude-code", PluginState: map[string]string{
+			"session_id":      "old-id",
+			"transcript_path": "/home/u/.claude/projects/proj/old-id.jsonl",
+		}},
+	}
+	d.session.RestoreTab(tab, panes)
+	readHookSessionFn = func(string) (claudehook.SessionRecord, error) {
+		return claudehook.SessionRecord{ID: "rotated-id"}, nil
+	}
+
+	d.refreshPluginStateFromHooks()
+
+	if got := panes[0].PluginState["session_id"]; got != "rotated-id" {
+		t.Errorf("session_id = %q, want %q", got, "rotated-id")
+	}
+	if got, ok := panes[0].PluginState["transcript_path"]; ok {
+		t.Errorf("transcript_path = %q, want the key dropped — it described the previous session", got)
 	}
 }

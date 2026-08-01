@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/artyomsv/quil/internal/claudehook"
 	"github.com/artyomsv/quil/internal/claudesessions"
 	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/plugin"
@@ -32,14 +33,14 @@ func stubSessionList(t *testing.T, fn func(cwd string) ([]claudesessions.Session
 // $QUIL_HOME/sessions/.
 func stubHookSessionID(t *testing.T, byPane map[string]string) {
 	t.Helper()
-	prev := readHookSessionIDFn
-	readHookSessionIDFn = func(paneID string) (string, error) {
+	prev := readHookSessionFn
+	readHookSessionFn = func(paneID string) (claudehook.SessionRecord, error) {
 		if id, ok := byPane[paneID]; ok {
-			return id, nil
+			return claudehook.SessionRecord{ID: id}, nil
 		}
-		return "", errors.New("no hook file")
+		return claudehook.SessionRecord{}, errors.New("no hook file")
 	}
-	t.Cleanup(func() { readHookSessionIDFn = prev })
+	t.Cleanup(func() { readHookSessionFn = prev })
 }
 
 // withClaudePlugin loads the SHIPPED default plugins into the daemon's
@@ -590,7 +591,7 @@ func TestResolveSpawnArgs_FreshResume(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := resolveSpawnArgs(p, tt.pane, false, tt.resumeID)
+			got := resolveSpawnArgs(p, tt.pane, false, tt.resumeID, claimAny)
 			if strings.Join(got, " ") != strings.Join(tt.want, " ") {
 				t.Errorf("resolveSpawnArgs:\n  got:  %v\n  want: %v", got, tt.want)
 			}
@@ -614,16 +615,16 @@ func TestClaudeResumeTemplate_ResumeIDFallback(t *testing.T) {
 
 	// No hook file, and no transcript on disk for any id.
 	stubHookSessionID(t, nil)
-	prevExists := claudeSessionExistsFn
-	claudeSessionExistsFn = func(string, string) bool { return false }
-	t.Cleanup(func() { claudeSessionExistsFn = prevExists })
+	prevExists := transcriptExistsFn
+	transcriptExistsFn = func(string) (bool, bool) { return false, true }
+	t.Cleanup(func() { transcriptExistsFn = prevExists })
 
 	t.Run("falls back to the chosen resume id", func(t *testing.T) {
 		pane := &Pane{ID: "pane-0000000a", CWD: `E:\proj`, PluginState: map[string]string{
 			"session_id":        chosen,
 			"resume_session_id": chosen,
 		}}
-		got := claudeResumeTemplate(p, pane)
+		got := claudeResumeTemplate(p, pane, claimAny)
 		want := []string{"--resume", "{session_id}"}
 		if strings.Join(got, " ") != strings.Join(want, " ") {
 			t.Fatalf("template = %v, want %v", got, want)
@@ -634,11 +635,25 @@ func TestClaudeResumeTemplate_ResumeIDFallback(t *testing.T) {
 		}
 	})
 
-	t.Run("no resume id still falls back to configured resume args", func(t *testing.T) {
+	// A recorded id we refuse to put in argv is NOT the same as no recorded
+	// session: --continue would attach this pane to a sibling's conversation, so
+	// it takes a fresh identity instead.
+	t.Run("malformed recorded id starts a fresh session", func(t *testing.T) {
 		pane := &Pane{ID: "pane-0000000b", CWD: `E:\proj`, PluginState: map[string]string{
 			"session_id": "some-preassigned-id",
 		}}
-		got := claudeResumeTemplate(p, pane)
+		got := claudeResumeTemplate(p, pane, claimAny)
+		if want := "--session-id {session_id}"; strings.Join(got, " ") != want {
+			t.Errorf("template = %v, want [%s]", got, want)
+		}
+		if id := pane.PluginState["session_id"]; !resumeSessionIDRe.MatchString(id) {
+			t.Errorf("session_id = %q, want a freshly minted uuid", id)
+		}
+	})
+
+	t.Run("no recorded session at all keeps the configured fallback", func(t *testing.T) {
+		pane := &Pane{ID: "pane-0000000c", CWD: `E:\proj`}
+		got := claudeResumeTemplate(p, pane, claimAny)
 		if strings.Join(got, " ") != "--continue" {
 			t.Errorf("template = %v, want [--continue]", got)
 		}
@@ -884,5 +899,83 @@ func TestClaudeSessionDetailResponse_PassesABoundedContext(t *testing.T) {
 	}
 	if d := time.Until(deadline); d <= 0 || d > discoveryTimeout {
 		t.Errorf("deadline is %v away, want (0, %v]", d, discoveryTimeout)
+	}
+}
+
+// TestClaimResumeSession_RefusesSessionHeldByLivePane exercises the REAL
+// sessionClaimFn wired into spawnPane. Every other occupancy test injects a
+// stub, so without this nothing pins that production still refuses anything.
+func TestClaimResumeSession_RefusesSessionHeldByLivePane(t *testing.T) {
+	d := newTestDaemon(t)
+	stubHookSessionID(t, nil)
+	held := "2db05609-f1d5-4576-b5b2-ff114519726b"
+
+	d.session.RestoreTab(
+		&Tab{ID: "tab-0000000a", Name: "A", Panes: []string{"pane-0000000a"}},
+		[]*Pane{{ID: "pane-0000000a", TabID: "tab-0000000a", Type: "claude-code",
+			PTY:         &fakeSession{},
+			PluginState: map[string]string{"session_id": held}}},
+	)
+
+	newcomer := &Pane{ID: "pane-0000000b", Type: "claude-code"}
+	_, holder, ok := d.claimResumeSession(newcomer, []resumeCandidate{{id: held}})
+	if ok {
+		t.Fatal("claim succeeded for a session a live pane holds")
+	}
+	if holder != "pane-0000000a" {
+		t.Errorf("holder = %q, want pane-0000000a", holder)
+	}
+	if _, set := newcomer.PluginState["session_id"]; set {
+		t.Error("a refused claim must not record the session on the pane")
+	}
+}
+
+// TestClaimResumeSession_FallsThroughToAnUnheldCandidate: refusing the top
+// candidate must not cost the pane its own next-best session.
+func TestClaimResumeSession_FallsThroughToAnUnheldCandidate(t *testing.T) {
+	d := newTestDaemon(t)
+	stubHookSessionID(t, nil)
+	held := "2db05609-f1d5-4576-b5b2-ff114519726b"
+	free := "9c7c1f4a-2b6d-4f2e-9a1b-77c0d5e3a412"
+
+	d.session.RestoreTab(
+		&Tab{ID: "tab-0000000a", Name: "A", Panes: []string{"pane-0000000a"}},
+		[]*Pane{{ID: "pane-0000000a", TabID: "tab-0000000a", Type: "claude-code",
+			PTY:         &fakeSession{},
+			PluginState: map[string]string{"session_id": held}}},
+	)
+
+	newcomer := &Pane{ID: "pane-0000000b", Type: "claude-code"}
+	chosen, _, ok := d.claimResumeSession(newcomer, []resumeCandidate{{id: held}, {id: free}})
+	if !ok {
+		t.Fatal("claim failed even though a candidate was free")
+	}
+	if chosen.id != free {
+		t.Errorf("chosen = %q, want the unheld %q", chosen.id, free)
+	}
+	if newcomer.PluginState["session_id"] != free {
+		t.Errorf("session_id = %q, want %q recorded by the claim", newcomer.PluginState["session_id"], free)
+	}
+}
+
+// TestClaimResumeSession_AllowsSessionOfExitedPane mirrors the create path: an
+// exited pane's transcript is free again, or the session would stay blocked
+// behind a pane with nothing running in it.
+func TestClaimResumeSession_AllowsSessionOfExitedPane(t *testing.T) {
+	d := newTestDaemon(t)
+	stubHookSessionID(t, nil)
+	sess := "2db05609-f1d5-4576-b5b2-ff114519726b"
+	code := 0
+
+	d.session.RestoreTab(
+		&Tab{ID: "tab-0000000a", Name: "A", Panes: []string{"pane-0000000a"}},
+		[]*Pane{{ID: "pane-0000000a", TabID: "tab-0000000a", Type: "claude-code",
+			PTY: &fakeSession{}, ExitCode: &code,
+			PluginState: map[string]string{"session_id": sess}}},
+	)
+
+	newcomer := &Pane{ID: "pane-0000000b", Type: "claude-code"}
+	if _, _, ok := d.claimResumeSession(newcomer, []resumeCandidate{{id: sess}}); !ok {
+		t.Fatal("claim refused a session whose only holder has exited")
 	}
 }

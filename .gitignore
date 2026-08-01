@@ -46,3 +46,8 @@ Thumbs.db
 
 # Superpowers brainstorm runtime scratch (plugin state, server.pid, etc.)
 /.superpowers/
+
+# Agent-created git worktrees (EnterWorktree places them here). The worktree
+# is a full checkout nested inside the repo, so without this every file in it
+# shows up as untracked in the parent.
+/.claude/worktrees/

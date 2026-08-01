@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/artyomsv/quil/internal/hookevents"
@@ -102,7 +103,7 @@ func RunHook(r io.Reader, env HookEnv, nowMs int64) error {
 func dispatchHookEvent(env HookEnv, in claudeStdin, nowMs int64) error {
 	switch in.HookEventName {
 	case "SessionStart":
-		return writeSessionFile(env, in.SessionID)
+		return writeSessionFile(env, in.SessionID, in.TranscriptPath)
 	case "SessionEnd":
 		return spoolEvent(env, nowMs, "SessionEnd", in.SessionID, "Session ended", hookevents.SeverityInfo, nil)
 	case "UserPromptSubmit":
@@ -127,6 +128,10 @@ func dispatchHookEvent(env HookEnv, in claudeStdin, nowMs int64) error {
 			truncate("Needs approval: "+in.ToolName, hookevents.MaxTitleBytes), hookevents.SeverityWarning,
 			map[string]string{"tool": truncate(in.ToolName, hookevents.MaxDataValueBytes)})
 	case "Stop":
+		// Turn boundary: cheap, low-frequency, and already carrying the live
+		// transcript path for modelUsageData — the natural place to notice that
+		// the session has moved project directories since SessionStart.
+		refreshTranscriptPath(env, in.SessionID, in.TranscriptPath)
 		return spoolEvent(env, nowMs, "Stop", in.SessionID, "Reply ready", hookevents.SeverityWarning,
 			modelUsageData(env, in.TranscriptPath))
 	case "PostToolUse":
@@ -276,9 +281,14 @@ func spoolEvent(env HookEnv, nowMs int64, hookEvent, sessionID, title, sev strin
 	return nil
 }
 
-// writeSessionFile validates and atomically writes the rotating session id to
-// $QuilDir/sessions/<paneID>.id, consumed by the daemon's restore path.
-func writeSessionFile(env HookEnv, sessionID string) error {
+// writeSessionFile validates and atomically writes the rotating session id and
+// its transcript path to $QuilDir/sessions/<paneID>.id, consumed by the
+// daemon's restore path.
+//
+// transcriptPath may be empty (the record then carries the id alone, exactly
+// as before it was recorded); it is written verbatim on its own line because
+// only Claude knows which project directory the session actually lives in.
+func writeSessionFile(env HookEnv, sessionID, transcriptPath string) error {
 	if sessionID == "" {
 		hookLog(env.QuilDir, env.PaneID, "no session_id extracted from stdin")
 		return nil
@@ -292,12 +302,58 @@ func writeSessionFile(env HookEnv, sessionID string) error {
 		hookLog(env.QuilDir, env.PaneID, "mkdir sessions dir failed: "+err.Error())
 		return err
 	}
+	body := sessionID + "\n"
+	// A newline in the path would forge a record line; drop rather than
+	// truncate, so a hostile value costs the path and never the id.
+	if transcriptPath != "" && !strings.ContainsAny(transcriptPath, "\r\n") {
+		body += transcriptPath + "\n"
+	}
 	out := filepath.Join(sessionsDir, env.PaneID+".id")
-	if err := atomicWrite(out, []byte(sessionID+"\n"), 0o600); err != nil {
+	if err := atomicWrite(out, []byte(body), 0o600); err != nil {
 		hookLog(env.QuilDir, env.PaneID, "write session file failed: "+err.Error())
 		return err
 	}
 	return nil
+}
+
+// refreshTranscriptPath keeps the recorded path correct for a session that
+// moves project directories mid-flight — an agent cd-ing into a git worktree
+// re-keys the transcript, leaving the path SessionStart recorded pointing at a
+// file that is no longer there.
+//
+// It writes the SIDECAR only, never <paneID>.id. Hook invocations are
+// independent processes with no locking, so a read-modify-write of the id file
+// would let a Stop that read before a concurrent SessionStart write the
+// PRE-rotation id back — resurrecting the session the user just left, which is
+// the same wrong-conversation failure this path exists to prevent. Confining
+// the write to the sidecar makes the id unreachable from here: the worst a lost
+// race can do is leave the path stale, and a stale path never renames a session.
+//
+// The id is still recorded IN the sidecar so a reader can tell whether the path
+// describes the session it is asking about. Best-effort throughout, and written
+// only when the path actually changed, so the common Stop costs one read.
+func refreshTranscriptPath(env HookEnv, sessionID, transcriptPath string) {
+	if sessionID == "" || transcriptPath == "" {
+		return
+	}
+	// Same guards writeSessionFile applies, for the same reasons: a newline
+	// would forge a second record line, and a non-uuid id is not ours to record.
+	if !sessionIDRe.MatchString(sessionID) || strings.ContainsAny(transcriptPath, "\r\n") {
+		return
+	}
+	rec, err := ReadPersistedSession(env.QuilDir, env.PaneID)
+	if err != nil || rec.ID != sessionID || rec.TranscriptPath == transcriptPath {
+		return
+	}
+	sessionsDir := filepath.Join(env.QuilDir, "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o700); err != nil {
+		hookLog(env.QuilDir, env.PaneID, "mkdir sessions dir failed: "+err.Error())
+		return
+	}
+	body := []byte(sessionID + "\n" + transcriptPath + "\n")
+	if err := atomicWrite(transcriptFile(env.QuilDir, env.PaneID), body, 0o600); err != nil {
+		hookLog(env.QuilDir, env.PaneID, "refresh transcript path failed: "+err.Error())
+	}
 }
 
 // hookLog appends a best-effort breadcrumb to $QuilDir/claudehook/hook.log.

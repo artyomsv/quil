@@ -3,10 +3,12 @@ package daemon
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/artyomsv/quil/internal/claudehook"
 	"github.com/artyomsv/quil/internal/plugin"
 )
 
@@ -180,7 +182,7 @@ func TestResolveSpawnArgs_Matrix(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := resolveSpawnArgs(tt.plugin, tt.pane, tt.restoring, "")
+			got := resolveSpawnArgs(tt.plugin, tt.pane, tt.restoring, "", claimAny)
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("resolveSpawnArgs:\n  got:  %v\n  want: %v", got, tt.want)
 			}
@@ -188,13 +190,15 @@ func TestResolveSpawnArgs_Matrix(t *testing.T) {
 	}
 }
 
-// TestResolveSpawnArgs_ClaudeResumePromotion covers the restore-path logic
-// that upgrades claude-code's resume args from the fallback ["--continue"]
-// to ["--resume", "<uuid>"] when the pre-assigned session file is already
-// on disk. Without this promotion, N panes sharing a CWD all converge on
-// claude's "most recent session in cwd" — the exact bug this guards
-// against. The filesystem probe is stubbed so the test never touches
-// ~/.claude/.
+// TestResolveSpawnArgs_ClaudeResumePromotion covers the restore-path logic that
+// resumes a claude-code pane's own session instead of the plugin's --continue
+// fallback. Without it, N panes sharing a CWD all converge on claude's
+// most-recent-session-in-cwd lookup — the bug this guards against.
+//
+// Ids here are canonical uuids ON PURPOSE. An earlier version of this table used
+// "abc-123", which the argv shape gate rejects outright, so every case passed
+// through the malformed-id branch and the promotion under test was never
+// exercised. The transcript probe is stubbed so the test never touches ~/.claude.
 func TestResolveSpawnArgs_ClaudeResumePromotion(t *testing.T) {
 	claudePlugin := &plugin.PanePlugin{
 		Name:    "claude-code",
@@ -205,74 +209,75 @@ func TestResolveSpawnArgs_ClaudeResumePromotion(t *testing.T) {
 			ResumeArgs: []string{"--continue"},
 		},
 	}
+	const sess = "2db05609-f1d5-4576-b5b2-ff114519726b"
+	// Joined with filepath so the separator matches the test platform: the
+	// id/path binding uses filepath.Base, which only splits on the host's
+	// separator, so a hard-coded Windows path would silently fail to bind on Linux.
+	transcript := filepath.Join("/home/u/.claude/projects/E--proj", sess+".jsonl")
 
 	tests := []struct {
-		name         string
-		pane         *Pane
-		sessionFound bool // stub return value for claudeSessionExistsFn
-		want         []string
+		name  string
+		pane  *Pane
+		found bool // does the recorded transcript exist?
+		want  []string
 	}{
 		{
-			name: "session file on disk — promoted to --resume",
+			name: "transcript located — resumed",
 			pane: &Pane{
-				CWD:         `E:\Projects\Stukans\Prototypes\calyx`,
-				PluginState: map[string]string{"session_id": "abc-123"},
+				CWD: `E:\Projects\Stukans\Prototypes\calyx`,
+				PluginState: map[string]string{
+					"session_id":      sess,
+					"transcript_path": transcript,
+				},
 			},
-			sessionFound: true,
-			want:         []string{"--resume", "abc-123"},
+			found:      true,
+			want:       []string{"--resume", sess},
 		},
 		{
-			name: "session file missing — falls back to --continue",
+			// The behaviour this PR inverted: a session we cannot find is still
+			// OUR session. --continue would hand the pane a sibling's conversation.
+			name: "transcript not located — still resumed, never --continue",
 			pane: &Pane{
 				CWD:         `E:\Projects\Stukans\Prototypes\calyx`,
-				PluginState: map[string]string{"session_id": "abc-123"},
+				PluginState: map[string]string{"session_id": sess},
 			},
-			sessionFound: false,
-			want:         []string{"--continue"},
+			found:      false,
+			want:       []string{"--resume", sess},
 		},
 		{
-			name: "InstanceArgs + session file on disk — toggle preserved, --resume appended",
+			name: "InstanceArgs preserved alongside the resume",
 			pane: &Pane{
 				CWD:          `E:\Projects\Stukans\Prototypes\calyx`,
 				InstanceArgs: []string{"--dangerously-skip-permissions"},
-				PluginState:  map[string]string{"session_id": "abc-123"},
+				PluginState: map[string]string{
+					"session_id":      sess,
+					"transcript_path": transcript,
+				},
 			},
-			sessionFound: true,
-			want:         []string{"--dangerously-skip-permissions", "--resume", "abc-123"},
+			found:      true,
+			want:       []string{"--dangerously-skip-permissions", "--resume", sess},
 		},
 		{
-			name: "InstanceArgs + session file missing — toggle preserved, --continue fallback",
-			pane: &Pane{
-				CWD:          `E:\Projects\Stukans\Prototypes\calyx`,
-				InstanceArgs: []string{"--dangerously-skip-permissions"},
-				PluginState:  map[string]string{"session_id": "abc-123"},
-			},
-			sessionFound: false,
-			want:         []string{"--dangerously-skip-permissions", "--continue"},
-		},
-		{
-			name: "empty session_id — no promotion even if stub says found",
+			name: "empty session_id — nothing recorded, configured fallback stands",
 			pane: &Pane{
 				CWD:         `E:\Projects\Stukans\Prototypes\calyx`,
 				PluginState: map[string]string{"session_id": ""},
 			},
-			sessionFound: true,
-			want:         []string{"--continue"},
+			found:      true,
+			want:       []string{"--continue"},
 		},
 	}
 
-	origProbe := claudeSessionExistsFn
-	t.Cleanup(func() { claudeSessionExistsFn = origProbe })
+	origHook, origProbe := readHookSessionFn, transcriptExistsFn
+	t.Cleanup(func() { readHookSessionFn, transcriptExistsFn = origHook, origProbe })
+	readHookSessionFn = func(string) (claudehook.SessionRecord, error) {
+		return claudehook.SessionRecord{}, os.ErrNotExist
+	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			claudeSessionExistsFn = func(cwd, sessionID string) bool {
-				if cwd != tt.pane.CWD {
-					t.Errorf("probe cwd = %q, want %q", cwd, tt.pane.CWD)
-				}
-				return tt.sessionFound
-			}
-			got := resolveSpawnArgs(claudePlugin, tt.pane, true, "")
+			transcriptExistsFn = func(p string) (bool, bool) { return tt.found && p == transcript, true }
+			got := resolveSpawnArgs(claudePlugin, tt.pane, true, "", claimAny)
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("resolveSpawnArgs:\n  got:  %v\n  want: %v", got, tt.want)
 			}
@@ -285,11 +290,11 @@ func TestResolveSpawnArgs_ClaudeResumePromotion(t *testing.T) {
 // even if they happen to use the preassign_id strategy. The probe should
 // not be called at all.
 func TestResolveSpawnArgs_ClaudeResumePromotion_NotAppliedToOtherPlugins(t *testing.T) {
-	origProbe := claudeSessionExistsFn
-	t.Cleanup(func() { claudeSessionExistsFn = origProbe })
-	claudeSessionExistsFn = func(cwd, sessionID string) bool {
-		t.Errorf("probe was called for a non-claude plugin (cwd=%q, id=%q)", cwd, sessionID)
-		return true
+	origProbe := transcriptExistsFn
+	t.Cleanup(func() { transcriptExistsFn = origProbe })
+	transcriptExistsFn = func(path string) (bool, bool) {
+		t.Errorf("probe was called for a non-claude plugin (path=%q)", path)
+		return true, true
 	}
 
 	p := &plugin.PanePlugin{
@@ -304,18 +309,23 @@ func TestResolveSpawnArgs_ClaudeResumePromotion_NotAppliedToOtherPlugins(t *test
 		CWD:         `E:\anywhere`,
 		PluginState: map[string]string{"session_id": "xyz"},
 	}
-	got := resolveSpawnArgs(p, pane, true, "")
+	got := resolveSpawnArgs(p, pane, true, "", claimAny)
 	want := []string{"--resume", "xyz"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("resolveSpawnArgs:\n  got:  %v\n  want: %v", got, want)
 	}
 }
 
-// TestResolveSpawnArgs_ClaudeHookSessionID covers the restore-path logic that
-// prefers the SessionStart hook's recorded session id over the preassigned
-// one. This is what keeps /clear, /resume, and compaction rotations working:
-// the hook file captures the live id and resumeTemplateFor promotes it to
-// --resume when the matching jsonl is on disk.
+// TestResolveSpawnArgs_ClaudeHookSessionID covers the restore-path rule that
+// prefers the SessionStart hook's recorded id over the preassigned one. That is
+// what keeps /clear, /resume and compaction rotations working: the hook file
+// captures the live id.
+//
+// The hook id wins on AUTHORITY, not on whether its transcript could be found —
+// ranking a located preassigned id above an unlocated hook id would resume the
+// pre-rotation conversation, which is the silent wrong-session failure this
+// package exists to prevent. It yields only to positive proof: a recorded path
+// that names the hook id and is not there.
 func TestResolveSpawnArgs_ClaudeHookSessionID(t *testing.T) {
 	claudePlugin := &plugin.PanePlugin{
 		Name:    "claude-code",
@@ -326,114 +336,83 @@ func TestResolveSpawnArgs_ClaudeHookSessionID(t *testing.T) {
 			ResumeArgs: []string{"--continue"},
 		},
 	}
+	const (
+		rotated     = "9c7c1f4a-2b6d-4f2e-9a1b-77c0d5e3a412"
+		preassigned = "2db05609-f1d5-4576-b5b2-ff114519726b"
+	)
+	rotatedPath := filepath.Join("/home/u/.claude/projects/E--proj", rotated+".jsonl")
+	preassignedPath := filepath.Join("/home/u/.claude/projects/E--proj", preassigned+".jsonl")
 
 	tests := []struct {
-		name              string
-		pane              *Pane
-		hookID            string
-		hookErr           error
-		sessionFoundForID string // claudeSessionExistsFn returns true only for this id
-		want              []string
+		name    string
+		hookRec claudehook.SessionRecord
+		pane    *Pane
+		onDisk  []string // transcripts that exist
+		want    []string
 	}{
 		{
-			name: "hook id present, hook file on disk — resume via hook id",
-			pane: &Pane{
-				ID:          "pane-abc",
-				CWD:         `E:\project`,
-				PluginState: map[string]string{"session_id": "preassigned-111"},
-			},
-			hookID:            "rotated-222",
-			sessionFoundForID: "rotated-222",
-			want:              []string{"--resume", "rotated-222"},
+			name:    "hook id located — resumed",
+			hookRec: claudehook.SessionRecord{ID: rotated, TranscriptPath: rotatedPath},
+			pane: &Pane{ID: "pane-abc", CWD: `E:\project`,
+				PluginState: map[string]string{"session_id": preassigned}},
+			onDisk: []string{rotatedPath, preassignedPath},
+			want:   []string{"--resume", rotated},
 		},
 		{
-			name: "hook id present, hook file missing, preassigned on disk — falls back to preassigned",
-			pane: &Pane{
-				ID:          "pane-abc",
-				CWD:         `E:\project`,
-				PluginState: map[string]string{"session_id": "preassigned-111"},
-			},
-			hookID:            "rotated-222",
-			sessionFoundForID: "preassigned-111",
-			want:              []string{"--resume", "preassigned-111"},
+			name:    "hook id unlocated, preassigned located — hook id still wins",
+			hookRec: claudehook.SessionRecord{ID: rotated}, // no path recorded, so no proof
+			pane: &Pane{ID: "pane-abc", CWD: `E:\project`,
+				PluginState: map[string]string{
+					"session_id":      preassigned,
+					"transcript_path": preassignedPath,
+				}},
+			onDisk: []string{preassignedPath},
+			want:   []string{"--resume", rotated},
 		},
 		{
-			name: "hook id present, neither file on disk — --continue fallback",
-			pane: &Pane{
-				ID:          "pane-abc",
-				CWD:         `E:\project`,
-				PluginState: map[string]string{"session_id": "preassigned-111"},
-			},
-			hookID:            "rotated-222",
-			sessionFoundForID: "", // neither matches
-			want:              []string{"--continue"},
+			name:    "hook id PROVEN gone — yields to the preassigned id",
+			hookRec: claudehook.SessionRecord{ID: rotated, TranscriptPath: rotatedPath},
+			pane: &Pane{ID: "pane-abc", CWD: `E:\project`,
+				PluginState: map[string]string{
+					"session_id":      preassigned,
+					"transcript_path": preassignedPath,
+				}},
+			onDisk: []string{preassignedPath}, // rotatedPath is absent
+			want:   []string{"--resume", preassigned},
 		},
 		{
-			name: "no hook file — legacy path, preassigned on disk",
-			pane: &Pane{
-				ID:          "pane-abc",
-				CWD:         `E:\project`,
-				PluginState: map[string]string{"session_id": "preassigned-111"},
-			},
-			hookErr:           os.ErrNotExist,
-			sessionFoundForID: "preassigned-111",
-			want:              []string{"--resume", "preassigned-111"},
-		},
-		{
-			name: "InstanceArgs + hook id — toggle preserved, hook id wins",
-			pane: &Pane{
-				ID:           "pane-abc",
-				CWD:          `E:\project`,
-				InstanceArgs: []string{"--dangerously-skip-permissions"},
-				PluginState:  map[string]string{"session_id": "preassigned-111"},
-			},
-			hookID:            "rotated-222",
-			sessionFoundForID: "rotated-222",
-			want:              []string{"--dangerously-skip-permissions", "--resume", "rotated-222"},
-		},
-		{
-			// Hook file exists but is empty after trim (hook fired before
-			// session_id was extracted). Should fall through to the
-			// preassigned-id probe identically to the ErrNotExist case.
-			name: "hook returns empty string with no error — fallthrough to preassigned",
-			pane: &Pane{
-				ID:          "pane-abc",
-				CWD:         `E:\project`,
-				PluginState: map[string]string{"session_id": "preassigned-111"},
-			},
-			hookID:            "",
-			hookErr:           nil,
-			sessionFoundForID: "preassigned-111",
-			want:              []string{"--resume", "preassigned-111"},
+			name:    "no hook record — preassigned id resumed",
+			hookRec: claudehook.SessionRecord{},
+			pane: &Pane{ID: "pane-abc", CWD: `E:\project`,
+				PluginState: map[string]string{"session_id": preassigned}},
+			onDisk: nil,
+			want:   []string{"--resume", preassigned},
 		},
 	}
 
-	// NOTE: subtests are intentionally NOT marked t.Parallel(). They mutate
-	// package-level vars (readHookSessionIDFn, claudeSessionExistsFn) and a
-	// concurrent run would cross-contaminate. The Cleanup below restores both
-	// when the outer test completes.
-	origHook := readHookSessionIDFn
-	origProbe := claudeSessionExistsFn
-	t.Cleanup(func() {
-		readHookSessionIDFn = origHook
-		claudeSessionExistsFn = origProbe
-	})
+	origHook, origProbe := readHookSessionFn, transcriptExistsFn
+	t.Cleanup(func() { readHookSessionFn, transcriptExistsFn = origHook, origProbe })
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			readHookSessionIDFn = func(paneID string) (string, error) {
+			readHookSessionFn = func(paneID string) (claudehook.SessionRecord, error) {
 				if paneID != tt.pane.ID {
 					t.Errorf("hook read paneID = %q, want %q", paneID, tt.pane.ID)
 				}
-				return tt.hookID, tt.hookErr
-			}
-			claudeSessionExistsFn = func(cwd, sessionID string) bool {
-				if cwd != tt.pane.CWD {
-					t.Errorf("probe cwd = %q, want %q", cwd, tt.pane.CWD)
+				if tt.hookRec.ID == "" {
+					return claudehook.SessionRecord{}, os.ErrNotExist
 				}
-				return sessionID == tt.sessionFoundForID
+				return tt.hookRec, nil
 			}
-			got := resolveSpawnArgs(claudePlugin, tt.pane, true, "")
+			transcriptExistsFn = func(p string) (bool, bool) {
+				for _, d := range tt.onDisk {
+					if d == p {
+						return true, true
+					}
+				}
+				return false, true
+			}
+			got := resolveSpawnArgs(claudePlugin, tt.pane, true, "", claimAny)
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("resolveSpawnArgs:\n  got:  %v\n  want: %v", got, tt.want)
 			}
@@ -542,7 +521,7 @@ func TestResolveSpawnArgs_DoesNotMutatePluginArgs(t *testing.T) {
 		},
 		Persistence: plugin.PersistenceConfig{Strategy: "cwd_only"},
 	}
-	got := resolveSpawnArgs(p, &Pane{}, false, "")
+	got := resolveSpawnArgs(p, &Pane{}, false, "", claimAny)
 	got[0] = "MUTATED"
 	if p.Command.Args[0] != "-l" {
 		t.Errorf("plugin.Command.Args was mutated: got %q, want %q", p.Command.Args[0], "-l")
@@ -627,7 +606,7 @@ func TestResolveSpawnArgs_OpencodeResume(t *testing.T) {
 				}
 				return tt.hookID, tt.hookErr
 			}
-			got := resolveSpawnArgs(opencodePlugin, tt.pane, true, "")
+			got := resolveSpawnArgs(opencodePlugin, tt.pane, true, "", claimAny)
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("resolveSpawnArgs:\n  got:  %v\n  want: %v", got, tt.want)
 			}

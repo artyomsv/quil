@@ -343,6 +343,75 @@ func (d *Daemon) claimedClaudeSessionIDs() map[string]string {
 	return d.claudeSessionIDs(true)
 }
 
+// claimResumeSession is the restore path's occupancy guard — the sessionClaimFn
+// spawnPane hands to resolveSpawnArgs. It takes the first candidate no other
+// pane holds and records it, or reports the holder that blocked the first one.
+//
+// The whole walk runs under resumeClaimMu, for the same reason
+// applyResumeSessionID does: a lazy spawn (tab switch, MCP op) runs on its
+// caller's goroutine and can race another pane's spawn for the same session.
+// Querying occupancy under the lock and writing the claim after it were TWO
+// steps, so both panes could see the session free and both resume it — the
+// duplicate-resume the guard exists to prevent, and reachable in the ordinary
+// case where two panes were left holding the same id.
+//
+// The map is built ONCE for the whole list rather than per candidate: building
+// it walks every pane and reads every hook record, and respawnPanes calls this
+// once per restored pane inside the pre-listen readiness budget.
+func (d *Daemon) claimResumeSession(pane *Pane, cands []resumeCandidate) (resumeCandidate, string, bool) {
+	d.resumeClaimMu.Lock()
+	defer d.resumeClaimMu.Unlock()
+
+	held := d.claimedClaudeSessionIDs()
+	blocker := ""
+	for _, c := range cands {
+		if holder, busy := held[c.id]; busy && holder != pane.ID {
+			if blocker == "" {
+				blocker = holder
+			}
+			continue
+		}
+		recordResumeSession(pane, c)
+		return c, "", true
+	}
+	return resumeCandidate{}, blocker, false
+}
+
+// recordResumeSession writes the chosen id and its transcript path as ONE unit.
+//
+// The pair is only meaningful together: a path left behind while the id moves on
+// would vouch for a transcript nobody checked, so a candidate with no path
+// DELETES the key rather than inheriting the previous session's. Callers hold
+// resumeClaimMu; PluginMu nests inside it, matching applyResumeSessionID.
+func recordResumeSession(pane *Pane, c resumeCandidate) {
+	pane.PluginMu.Lock()
+	defer pane.PluginMu.Unlock()
+	if pane.PluginState == nil {
+		pane.PluginState = make(map[string]string)
+	}
+	pane.PluginState["session_id"] = c.id
+	if c.transcript != "" {
+		pane.PluginState["transcript_path"] = c.transcript
+	} else {
+		delete(pane.PluginState, "transcript_path")
+	}
+}
+
+// claimAny is the sessionClaimFn for callers with no occupancy information: it
+// takes the first candidate unconditionally. Used by the pure arg-matrix tests.
+//
+// It exists so sessionClaimFn is never nil. A nullable behaviour-changing
+// callback survives exactly as long as nobody adds a second production call
+// site; with this, a forgotten wiring fails loudly in a test rather than
+// silently dropping the guard in production.
+func claimAny(pane *Pane, cands []resumeCandidate) (resumeCandidate, string, bool) {
+	if len(cands) == 0 {
+		return resumeCandidate{}, "", false
+	}
+	recordResumeSession(pane, cands[0])
+	return cands[0], "", true
+}
+
 // claudeSessionIDs maps each session id held by a claude-code pane to that
 // pane's id.
 //
@@ -409,8 +478,8 @@ func (d *Daemon) claudeSessionIDs(includePending bool) map[string]string {
 	inUse := make(map[string]string, len(captured))
 	for _, p := range captured {
 		id := p.stateID
-		if hookID, err := readHookSessionIDFn(p.paneID); err == nil && hookID != "" {
-			id = hookID
+		if rec, err := readHookSessionFn(p.paneID); err == nil && rec.ID != "" {
+			id = rec.ID
 		}
 		// A pane that has not spawned yet has no session_id until spawnPane
 		// seeds one, so its claim lives in resume_session_id.

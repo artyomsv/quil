@@ -511,7 +511,8 @@ func (m *Model) resetWorkStateForReattach() {
 	m.eachClientPane(func(p *PaneModel) {
 		p.working = false
 		p.turnActive = false
-		p.subagents = 0
+		clear(p.subagents)
+		p.subagentsOverflow = false
 	})
 }
 

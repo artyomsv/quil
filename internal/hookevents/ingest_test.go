@@ -86,6 +86,142 @@ func TestIngester_Submit_DifferentEventsDoNotCoalesce(t *testing.T) {
 	}
 }
 
+func TestIngester_Submit_DifferentSubagentsDoNotCoalesce(t *testing.T) {
+	t.Parallel()
+	// The TUI's work ledger matches a SubagentStop to the SubagentStart that
+	// names the same agent. Coalescing is last-wins, so merging two DIFFERENT
+	// agents' starts into one payload would erase the loser's identity: its
+	// own stop then matches nothing and the winner's count never drains,
+	// wedging the spinner. Distinct agent_type values must stay distinct.
+	rec := &emitRecorder{}
+	ing := NewIngester(rec.emit)
+
+	a := basePayload(1)
+	a.HookEvent = "SubagentStart"
+	a.Data = map[string]string{"agent_type": "impl-task7"}
+	b := basePayload(2)
+	b.HookEvent = "SubagentStart"
+	b.Data = map[string]string{"agent_type": "rev-task7"}
+
+	ing.Submit(a)
+	ing.Submit(b)
+
+	time.Sleep(150 * time.Millisecond)
+
+	got := rec.drain()
+	if len(got) != 2 {
+		t.Fatalf("two distinct agent types: want 2 emits, got %d", len(got))
+	}
+	seen := map[string]bool{}
+	for _, p := range got {
+		seen[p.Data["agent_type"]] = true
+	}
+	for _, want := range []string{"impl-task7", "rev-task7"} {
+		if !seen[want] {
+			t.Errorf("agent_type %q was coalesced away; emitted set: %v", want, seen)
+		}
+	}
+}
+
+func TestIngester_Submit_PhantomStopDoesNotSwallowNamedStop(t *testing.T) {
+	t.Parallel()
+	// The highest-value coalescing case: a NAMED SubagentStop followed by the
+	// unpaired end-of-turn stop (empty agent_type) inside one window. Under a
+	// key without agent_type these merged last-wins and the phantom WON,
+	// destroying the named drain on the wire — the ledger would then never
+	// clear that agent and the spinner would wedge ON, the mirror of the bug
+	// this branch fixes. Both must survive as separate emits.
+	rec := &emitRecorder{}
+	ing := NewIngester(rec.emit)
+
+	named := basePayload(1)
+	named.HookEvent = "SubagentStop"
+	named.Data = map[string]string{"agent_type": "Explore"}
+	phantom := basePayload(2)
+	phantom.HookEvent = "SubagentStop"
+	phantom.Data = map[string]string{"agent_type": ""}
+
+	ing.Submit(named)
+	ing.Submit(phantom)
+
+	time.Sleep(150 * time.Millisecond)
+
+	got := rec.drain()
+	if len(got) != 2 {
+		t.Fatalf("named stop and phantom stop merged: want 2 emits, got %d", len(got))
+	}
+	var sawNamed bool
+	for _, p := range got {
+		if p.Data["agent_type"] == "Explore" {
+			sawNamed = true
+		}
+	}
+	if !sawNamed {
+		t.Error("the named agent's stop was coalesced away by the phantom — its ledger entry would never drain")
+	}
+}
+
+func TestIngester_Submit_ControlCharsCannotForgeCoalesceKey(t *testing.T) {
+	t.Parallel()
+	// The coalesce key joins two FREE-FORM payload fields (hook_event and
+	// agent_type) with a NUL separator, and JSON admits U+0000 in either. A
+	// naive join lets two logically DIFFERENT events produce the same key —
+	// which coalesces them last-wins and erases one identity, precisely the
+	// failure this ledger exists to prevent. Pane IDs are NUL-free by
+	// validation (safePaneID), so only the hook_event/agent_type boundary is
+	// at risk; the key build must stay injective across it.
+	rec := &emitRecorder{}
+	ing := NewIngester(rec.emit)
+
+	a := basePayload(1)
+	a.HookEvent = "SubagentStart"
+	a.Data = map[string]string{"agent_type": "\x00X"}
+	b := basePayload(2)
+	b.HookEvent = "SubagentStart\x00"
+	b.Data = map[string]string{"agent_type": "X"}
+
+	ing.Submit(a)
+	ing.Submit(b)
+
+	time.Sleep(150 * time.Millisecond)
+
+	got := rec.drain()
+	if len(got) != 2 {
+		t.Fatalf("distinct (hook_event, agent_type) pairs collided into one coalesce key: want 2 emits, got %d", len(got))
+	}
+	for _, p := range got {
+		if p.Data["coalesced"] != "" {
+			t.Errorf("neither event should have been merged; got coalesced=%q", p.Data["coalesced"])
+		}
+	}
+}
+
+func TestIngester_Submit_SameSubagentTypeStillCoalesces(t *testing.T) {
+	t.Parallel()
+	// Three instances of the SAME agent spawning in one window is a real
+	// parallel fan-out: it must still collapse to one emit carrying the burst
+	// count, so the ledger records 3 outstanding rather than 1.
+	rec := &emitRecorder{}
+	ing := NewIngester(rec.emit)
+
+	for i := 1; i <= 3; i++ {
+		p := basePayload(uint64(i))
+		p.HookEvent = "SubagentStart"
+		p.Data = map[string]string{"agent_type": "Explore"}
+		ing.Submit(p)
+	}
+
+	time.Sleep(150 * time.Millisecond)
+
+	got := rec.drain()
+	if len(got) != 1 {
+		t.Fatalf("same agent type burst: want 1 emit, got %d", len(got))
+	}
+	if got[0].Data["coalesced"] != "3" {
+		t.Errorf("burst count: got %q, want %q", got[0].Data["coalesced"], "3")
+	}
+}
+
 func TestIngester_Submit_DifferentPanesDoNotCoalesce(t *testing.T) {
 	t.Parallel()
 	rec := &emitRecorder{}

@@ -26,8 +26,8 @@ const EventStorm = "internal.event_storm"
 //     synthesised so the user sees the problem rather than wondering where
 //     the events went.
 //
-//  2. Per-(paneID, hook_event) COALESCER with a 50 ms debounce. When the
-//     same logical event fires N times within the window (e.g. the
+//  2. Per-(paneID, hook_event, agent_type) COALESCER with a 50 ms debounce.
+//     When the same logical event fires N times within the window (e.g. the
 //     OpenCode "session.status busy → idle → busy → idle" flapping during
 //     a tool call), only the LAST payload in the window is forwarded to
 //     emit, with data["coalesced"] bumped to N. This keeps the eventQueue
@@ -48,7 +48,7 @@ type Ingester struct {
 	mu      sync.Mutex
 	closed  bool                     // FlushAll set; future Submits no-op
 	rates   map[string]*paneRate     // paneID → sliding window
-	pending map[string]*pendingEvent // (paneID + "\x00" + hookEvent) → buffered coalesce
+	pending map[string]*pendingEvent // coalesceKey(paneID, hookEvent, agentType) → buffered coalesce
 }
 
 const (
@@ -65,7 +65,7 @@ const (
 	// log-stamp noise from a sustained issue.
 	stormPenaltyDuration = 10 * time.Second
 
-	// coalesceDelay is the per-(paneID, hook_event) debounce. The first
+	// coalesceDelay is the per-(paneID, hook_event, agent_type) debounce. The first
 	// event arms a timer; subsequent events in the window replace the
 	// buffered payload and DO NOT re-arm. When the timer fires the last
 	// payload wins, with the burst count attached.
@@ -115,7 +115,7 @@ func NewIngester(emit func(Payload)) *Ingester {
 // Submit accepts a payload for ingest. May be called from any goroutine.
 // Returns immediately — the actual emit happens after the coalesce window
 // closes (typically 50 ms later, sometimes immediately for the first event
-// of a new (pane, hook_event) pair).
+// of a new (pane, hook_event, agent_type) key).
 //
 // Validation failures are silently dropped: Submit assumes the caller has
 // already validated. The Spool reader does this before calling Submit;
@@ -241,13 +241,23 @@ func stormPayload(paneID, source string, now time.Time) Payload {
 	}
 }
 
-// coalesce buffers a payload under its (paneID, hook_event) key. The first
-// event in a new window arms the timer; subsequent events in the window
-// replace the buffered payload and bump the burst counter. When the timer
-// fires we emit the LAST buffered payload (so the freshest state wins) with
-// the burst count attached so consumers can render ×N.
+// coalesce buffers a payload under its (paneID, hook_event, agent_type) key.
+// The first event in a new window arms the timer; subsequent events in the
+// window replace the buffered payload and bump the burst counter. When the
+// timer fires we emit the LAST buffered payload (so the freshest state wins)
+// with the burst count attached so consumers can render ×N.
+//
+// agent_type joins the key because coalescing is LAST-WINS and the TUI's work
+// ledger matches a SubagentStop to the SubagentStart naming the same agent
+// (internal/tui/workstate.go). Merging two different agents' starts into one
+// payload would erase the loser's identity: its own stop would then match
+// nothing while the winner's count never drains, wedging the spinner until
+// SessionEnd. Only the Subagent* events carry agent_type, so every other
+// event keys exactly as before — and a burst of the SAME agent still
+// collapses to one emit with the burst count, which is the behaviour the
+// count exists for.
 func (i *Ingester) coalesce(p Payload, now time.Time) {
-	key := p.PaneID + "\x00" + p.HookEvent
+	key := coalesceKey(p.PaneID, p.HookEvent, p.Data["agent_type"])
 
 	i.mu.Lock()
 	pending, exists := i.pending[key]
@@ -269,6 +279,32 @@ func (i *Ingester) coalesce(p Payload, now time.Time) {
 	i.pending[key] = pending
 	i.mu.Unlock()
 }
+
+// coalesceKey builds the debounce key for a payload.
+//
+// paneID is NUL-free by validation (safePaneID) and stays the FIRST segment,
+// which is what keeps Cancel's `paneID + "\x00"` prefix match correct.
+//
+// hook_event and agent_type, however, are free-form payload strings and JSON
+// admits U+0000 in either. Two variable fields joined by a separator that
+// either may contain is NOT injective: ("SubagentStart", "\x00X") and
+// ("SubagentStart\x00", "X") would otherwise produce the same key, coalesce
+// last-wins, and erase one of the two identities — exactly the failure adding
+// agent_type to the key exists to prevent. Escaping the separator out of both
+// fields restores injectivity. The escape is identity for every value a real
+// producer emits, so legitimate keys are byte-identical to the unescaped form.
+func coalesceKey(paneID, hookEvent, agentType string) string {
+	key := paneID + "\x00" + keyFieldEscaper.Replace(hookEvent)
+	if agentType != "" {
+		key += "\x00" + keyFieldEscaper.Replace(agentType)
+	}
+	return key
+}
+
+// keyFieldEscaper makes a free-form key component unambiguous by removing the
+// separator from its alphabet. Escaping the escape character too is what keeps
+// the mapping reversible — and therefore collision-free.
+var keyFieldEscaper = strings.NewReplacer(`\`, `\\`, "\x00", `\0`)
 
 // flush emits the buffered payload for key and removes the pending entry.
 // Called from the AfterFunc timer goroutine.

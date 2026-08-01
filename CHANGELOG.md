@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **The working indicator went dark while a Claude Code background agent was
+  still running.** A pane could sit with no spinner on its border and none on
+  its tab while an agent worked for half an hour. The one cue that says
+  "something is still happening here" was missing exactly when it was needed,
+  and the tab looked idle enough to close.
+
+  Claude Code reports the end of every ordinary turn as a subagent finishing,
+  without saying which one. Quil counted background agents rather than tracking
+  them by name, so each of those unnamed reports cancelled out a real agent that
+  was still working. Once the tally had drifted, later genuine "finished"
+  reports were discarded as well, and the pane never recovered until the session
+  ended. Quil now tracks background agents by name and clears one only when its
+  own completion arrives, so the indicator stays lit for as long as there is
+  real work in flight.
+
+- **The notification sidebar no longer fills with blank " done" entries.** The
+  same unnamed report was also posted to the sidebar once per turn on every
+  Claude Code pane, where it collapsed into a single `" done" ×N` row that
+  jumped back to the top every time it fired — pushing real notifications down
+  and naming nothing you could act on. Those reports are now discarded where
+  they are produced; notifications for background agents that actually have a
+  name are unchanged.
+
 ## [1.46.2] - 2026-08-01
 
 ### Fixed

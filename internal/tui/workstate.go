@@ -13,6 +13,14 @@ import (
 // spinner (shared by tab and pane indicators).
 const workSpinnerInterval = 100 * time.Millisecond
 
+// maxTrackedSubagents caps the DISTINCT agent_type keys one pane's ledger may
+// hold. The ledger is keyed by a producer-controlled string in a TUI process
+// that runs for weeks, so its cardinality needs a ceiling that does not depend
+// on the child behaving; the ceiling sits far above any real fan-out (observed
+// sessions peak in the low tens of distinct agent names, and entries are
+// deleted as they drain) so a healthy pane never reaches it.
+const maxTrackedSubagents = 64
+
 // workTransition classifies a pane event's effect on a pane's working state.
 // Alias of hookevents.WorkEventKind — that package is the single source of
 // truth (shared with the daemon's mute-bypass logic in emitEvent).
@@ -55,23 +63,31 @@ func (m *Model) findPaneAndTab(paneID string) (*PaneModel, int) {
 // focuses the pane (ackFocusedPane at Update entry). There is no timer.
 //
 // `working` is DERIVED — recomputed at a single point below as
-// turnActive || subagents > 0 — never assigned by hand in a branch, so no
-// future edge can desync the spinner from its inputs. The main turn
-// (turnActive) and the outstanding background-subagent count (subagents)
-// are tracked separately: Claude Code runs subagents detached by default,
-// so the main turn's Stop routinely fires while they are still grinding —
-// the spinner must survive that edge and the unseen mark is deferred until
-// the LAST subagent drains (which then becomes the completion edge).
+// turnActive || len(subagents) > 0 || subagentsOverflow — never assigned by
+// hand in a branch, so no future edge can desync the spinner. The main turn
+// (turnActive) and the outstanding background subagents (subagents) are
+// tracked separately: Claude Code runs subagents detached by default, so the
+// main turn's Stop routinely fires while they are still grinding — the
+// spinner must survive that edge and the unseen mark is deferred until the
+// LAST subagent drains (which then becomes the completion edge).
 //
-// data carries the ingester's coalesced burst count: N same-type events
-// inside the 50 ms debounce window arrive as ONE PaneEvent with
-// data["coalesced"] = "N".
+// The ledger is keyed by agent_type rather than being a bare count, because
+// a SubagentStop must only cancel a SubagentStart it can be MATCHED to.
+// Claude Code emits one unpaired stop with an empty agent_type at the end of
+// every main turn; with fungible stops that phantom drains an unrelated live
+// agent and the spinner dies mid-work. See the workSubagentStop branch.
+//
+// data carries the ingester's coalesced burst count: N events with the same
+// (pane, hook_event, agent_type) inside the 50 ms debounce window arrive as
+// ONE PaneEvent with data["coalesced"] = "N". agent_type is part of that key
+// (internal/hookevents/ingest.go) precisely so this ledger can rely on the
+// identity surviving coalescing.
 //
 // Replay safety: the daemon replays the queued event history on attach, and
-// the ordered replay reconstructs the live state PROVIDED the counters start
-// from zero. The ring's oldest-first eviction can only ever orphan a
-// SubagentStop (never strand a start behind its stop), and orphan stops are
-// ignored below.
+// the ordered replay reconstructs the live state PROVIDED the ledger starts
+// empty. The ring's oldest-first eviction can only ever orphan a
+// SubagentStop (never strand a start behind its stop), and a stop naming no
+// live agent is ignored below.
 //
 // That zero-start premise used to be free: attach happened exactly once per
 // TUI process, guarded by Model.attached. Remote reconnect (RD-011) broke
@@ -96,35 +112,97 @@ func (m *Model) applyWorkTransition(paneID, eventType string, data map[string]st
 	case workStart:
 		pane.turnActive = true
 	case workSubagentStart:
-		pane.subagents += coalescedCount(data)
-	case workSubagentStop:
-		if pane.subagents == 0 {
-			// Orphan stop (replay truncated by ring eviction, lost start) —
-			// ignore rather than underflow, or the next start/stop pair
-			// stops balancing.
-			return
+		agentType := data["agent_type"]
+		if agentType == "" {
+			// A start must NAME the agent it starts, and every observed one
+			// does. Enforcing it is what turns "the empty key is never live"
+			// from a measurement into an invariant: the empty key is exactly
+			// the one the unpaired end-of-turn stop carries, so admitting it
+			// here would let that phantom drain real work again — silently,
+			// if the producer ever renames or drops the field.
+			break
 		}
-		pane.subagents -= coalescedCount(data)
-		if pane.subagents < 0 {
-			pane.subagents = 0
+		_, live := pane.subagents[agentType]
+		if !live && len(pane.subagents) >= maxTrackedSubagents {
+			// agent_type is producer-controlled, so key cardinality is too,
+			// in a process that runs for weeks. Past the ceiling we stop
+			// name-tracking, which makes that agent invisible to the ledger —
+			// so record THAT rather than dropping it silently. Without this
+			// flag, draining the tracked agents would take len() to zero and
+			// turn the spinner off while a refused agent was still running:
+			// the exact bug this ledger exists to prevent, reappearing at the
+			// cap boundary.
+			//
+			// Sticky until a terminal edge, deliberately. We never learn that
+			// an untracked agent finished (its stop names a key we do not
+			// hold), so there is no sound moment to clear it early; SessionEnd
+			// and process_exit are the only points where nothing can still be
+			// live. Wrong-on is the safe direction — a spinner that lingers on
+			// a pathological pane costs a glyph, wrong-off costs the user the
+			// one cue that work is happening.
+			pane.subagentsOverflow = true
+			break
+		}
+		if pane.subagents == nil {
+			pane.subagents = make(map[string]int, 1)
+		}
+		pane.subagents[agentType] += coalescedCount(data)
+	case workSubagentStop:
+		agentType := data["agent_type"]
+		outstanding, live := pane.subagents[agentType]
+		if !live {
+			// The stop names no agent this pane has running, so there is
+			// nothing for it to cancel. Two ways to get here, both real:
+			//
+			//   - Claude Code emits ONE unpaired SubagentStop carrying an
+			//     EMPTY agent_type at the end of every main turn (measured
+			//     1:1 against Stop on every AI pane; a SubagentStart with an
+			//     empty agent_type never occurs). It is the root turn's own
+			//     completion — its start edge is UserPromptSubmit, not a
+			//     SubagentStart — so it can never have a partner here.
+			//   - A replay truncated by ring eviction, or a lost start.
+			//
+			// Ignoring it is what makes the ledger self-correcting. A bare
+			// counter cannot: stops are fungible there, so the phantom is
+			// spent on whichever background agent happens to be outstanding
+			// and the spinner goes dark while that agent is still working
+			// (2026-08-02: a 27-minute agent ran with no indicator). The
+			// old zero-guard could not catch it either — it only fires when
+			// the count is already zero, which is precisely when no agent is
+			// at risk.
+			//
+			// break, not return: the derivation below is the single point
+			// that owns `working`, and leaving the function around it would
+			// make that property depend on this branch never mattering.
+			// Recomputing an unchanged state is free and fires no edge.
+			break
+		}
+		outstanding -= coalescedCount(data)
+		if outstanding <= 0 {
+			delete(pane.subagents, agentType)
+		} else {
+			pane.subagents[agentType] = outstanding
 		}
 	case workStop, workStopFinal:
 		pane.turnActive = false
 		if kind == workStopFinal {
 			// Terminal stop (session end): no subagent of the session can
-			// still be alive — drop the count so a lost SubagentStop can't
-			// wedge the spinner forever.
-			pane.subagents = 0
+			// still be alive — drop the ledger so a lost SubagentStop can't
+			// wedge the spinner forever. This is also the only sound point to
+			// clear an overflow, for the same reason.
+			clear(pane.subagents)
+			pane.subagentsOverflow = false
 		}
 	case workAbort:
 		pane.turnActive = false
-		pane.subagents = 0
+		clear(pane.subagents)
+		pane.subagentsOverflow = false
 		abort = true
 	}
 
 	// Single derivation point for the spinner; the edge actions below key
 	// off the before/after pair so they fire exactly once per transition.
-	pane.working = pane.turnActive || pane.subagents > 0
+	pane.working = pane.turnActive || len(pane.subagents) > 0 || pane.subagentsOverflow
 	switch {
 	case pane.working && !wasWorking:
 		// Rising edge: seed the pane spinner with the shared frame so the

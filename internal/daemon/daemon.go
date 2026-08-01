@@ -347,11 +347,11 @@ func (d *Daemon) Wait() {
 func (d *Daemon) refreshPluginStateFromHooks() {
 	for _, tab := range d.session.Tabs() {
 		for _, pane := range d.session.Panes(tab.ID) {
-			var hookID string
+			var hookID, transcript string
 			switch pane.Type {
 			case "claude-code":
 				if rec, err := readHookSessionFn(pane.ID); err == nil {
-					hookID = rec.ID
+					hookID, transcript = rec.ID, rec.TranscriptPath
 				}
 			case "opencode":
 				if id, err := readOpencodeSessionIDFn(pane.ID); err == nil {
@@ -368,6 +368,18 @@ func (d *Daemon) refreshPluginStateFromHooks() {
 				pane.PluginState = make(map[string]string)
 			}
 			pane.PluginState["session_id"] = hookID
+			// The transcript path is stored as one unit with the id it belongs
+			// to: only that pairing makes it evidence. A path left behind while
+			// the id moves on would vouch for a transcript nobody checked, so an
+			// id arriving without one drops the key rather than keeping the
+			// previous session's. This is what lets a restore locate the session
+			// after the hook file itself is lost — the path cannot be rebuilt
+			// from the pane's CWD, which is the whole reason it is recorded.
+			if transcript != "" {
+				pane.PluginState["transcript_path"] = transcript
+			} else {
+				delete(pane.PluginState, "transcript_path")
+			}
 			// The hook has now confirmed this pane's own session, so the
 			// creation-time resume target has served its only purpose: covering
 			// the window before the first SessionStart hook fired. Retiring it
@@ -2375,6 +2387,7 @@ func claudeResumeCandidates(pane *Pane) []resumeCandidate {
 	pane.PluginMu.Lock()
 	cwd := pane.CWD
 	stateID := pane.PluginState["session_id"]
+	statePath := pane.PluginState["transcript_path"]
 	resumeID := pane.PluginState["resume_session_id"]
 	pane.PluginMu.Unlock()
 
@@ -2387,6 +2400,16 @@ func claudeResumeCandidates(pane *Pane) []resumeCandidate {
 			if c.id == id {
 				return // same session reached by two routes
 			}
+		}
+		// A recorded path is bound to the id it was written with, so it may
+		// only vouch for that id — a rotated session leaves the workspace pair
+		// describing the OLD transcript, and letting it verify the new id would
+		// report a file nobody looked for as located. Both sources are consulted
+		// because either can be the one that survived: the hook file is lost by
+		// a wiped $QUIL_HOME/sessions, the workspace copy by a killed daemon
+		// that never ran its shutdown refresh.
+		if transcript == "" && id == stateID {
+			transcript = statePath
 		}
 		// The recorded path is authoritative; the CWD-derived probe is the
 		// fallback for records written before the path was recorded.

@@ -162,3 +162,68 @@ func TestClaudeResumeTemplate_NoKnownSession_KeepsConfiguredFallback(t *testing.
 		t.Fatalf("template = %v, want %v", got, want)
 	}
 }
+
+// TestClaudeResumeCandidates_VerifiesFromPersistedTranscriptPath covers the
+// pane whose hook file is gone (wiped $QUIL_HOME/sessions, a truncated write).
+// workspace.json carries the id/path pair copied at the last clean shutdown, so
+// the session is still locatable without inferring anything from the CWD.
+func TestClaudeResumeCandidates_VerifiesFromPersistedTranscriptPath(t *testing.T) {
+	const (
+		id   = "8f8c8498-bbe4-41b2-b8e4-817f87f754fe"
+		path = `C:\Users\u\.claude\projects\E--proj--claude-worktrees-faq\` + id + ".jsonl"
+	)
+	stubResumeSeams(t,
+		claudehook.SessionRecord{}, // no hook file at all
+		func(string, string) bool { return false },
+		func(p string) bool { return p == path },
+	)
+
+	pane := &Pane{ID: "pane-66666666", CWD: `E:\proj`, PluginState: map[string]string{
+		"session_id":      id,
+		"transcript_path": path,
+	}}
+	got := claudeResumeCandidates(pane)
+
+	if len(got) != 1 {
+		t.Fatalf("got %d candidates, want 1: %+v", len(got), got)
+	}
+	if got[0].id != id {
+		t.Errorf("id = %q, want %q", got[0].id, id)
+	}
+	if !got[0].verified {
+		t.Error("candidate not verified — the persisted transcript path was not consulted")
+	}
+}
+
+// TestClaudeResumeCandidates_PersistedPathOnlyVerifiesItsOwnID pins that the
+// path is bound to the id it was recorded with. A session that rotated leaves
+// the pair describing the OLD session, and letting that path vouch for the new
+// id would report a transcript we never found as located.
+func TestClaudeResumeCandidates_PersistedPathOnlyVerifiesItsOwnID(t *testing.T) {
+	const (
+		hookID  = "b279136b-3610-4096-844a-ad211ebff2eb"
+		stateID = "8f8c8498-bbe4-41b2-b8e4-817f87f754fe"
+		path    = `C:\Users\u\.claude\projects\E--proj\` + stateID + ".jsonl"
+	)
+	stubResumeSeams(t,
+		claudehook.SessionRecord{ID: hookID}, // rotated; no path recorded yet
+		func(string, string) bool { return false },
+		func(p string) bool { return p == path },
+	)
+
+	pane := &Pane{ID: "pane-77777777", CWD: `E:\proj`, PluginState: map[string]string{
+		"session_id":      stateID,
+		"transcript_path": path,
+	}}
+	got := claudeResumeCandidates(pane)
+
+	if len(got) != 2 {
+		t.Fatalf("got %d candidates, want 2: %+v", len(got), got)
+	}
+	if got[0].id != hookID || got[0].verified {
+		t.Errorf("hook candidate = %+v, want id %q unverified (the persisted path belongs to another session)", got[0], hookID)
+	}
+	if got[1].id != stateID || !got[1].verified {
+		t.Errorf("workspace candidate = %+v, want id %q verified", got[1], stateID)
+	}
+}

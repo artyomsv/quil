@@ -134,7 +134,7 @@ func TestSessionManagerSnapshotState(t *testing.T) {
 	tab2 := sm.CreateTab("tab-2")
 	sm.CreatePane(tab2.ID, "/home")
 
-	activeTab, tabs, panesByTab := sm.SnapshotState()
+	activeTab, tabs, panesByTab, _, _ := sm.SnapshotState()
 
 	if activeTab != tab1.ID {
 		t.Errorf("activeTab: got %s, want %s", activeTab, tab1.ID)

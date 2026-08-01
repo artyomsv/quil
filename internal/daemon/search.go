@@ -86,7 +86,7 @@ func (d *Daemon) searchPanes(term string) (hits []ipc.PaneSearchHit, truncated b
 		return nil, false
 	}
 	lower := strings.ToLower(term)
-	_, tabs, panesByTab := d.session.SnapshotState()
+	_, tabs, panesByTab, _, _ := d.session.SnapshotState()
 	for _, tab := range tabs {
 		for _, pane := range panesByTab[tab.ID] {
 			if pane.OutputBuf == nil {

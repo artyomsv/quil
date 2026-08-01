@@ -440,8 +440,8 @@ func (d *Daemon) snapshot() {
 	// allowed a pane create/destroy between the two calls to slip through
 	// — the workspace.json said N panes while the buffer flush iterated
 	// N±1, surfacing as the "snapshot pane count oscillation" bug.
-	activeTab, tabs, panesByTab := d.session.SnapshotState()
-	state := d.workspaceStateFromSnapshot(activeTab, tabs, panesByTab, false)
+	activeTab, tabs, panesByTab, projects, activeProject := d.session.SnapshotState()
+	state := d.workspaceStateFromSnapshot(activeTab, tabs, panesByTab, projects, activeProject, false)
 
 	if err := persist.Save(config.WorkspacePath(), state); err != nil {
 		log.Printf("snapshot workspace: %v", err)
@@ -560,11 +560,22 @@ func (d *Daemon) restoreWorkspace() error {
 		return nil // Fresh workspace
 	}
 
+	// A workspace snapshot written before projects existed has no "projects"
+	// key (or an empty one — a snapshot built entirely from RestoreTab, which
+	// never touches sm.projects, produces the same shape). Migrating in place
+	// here means every tab's "project_id" is stamped by the time the restore
+	// loop below reads it, exactly as a post-migration snapshot would have
+	// written it directly.
+	migrateToDefaultProject(state)
+
 	log.Println("restoring workspace from disk...")
 
 	activeTab, _ := state["active_tab"].(string)
 	tabs, _ := state["tabs"].([]any)
 	panes, _ := state["panes"].([]any)
+	activeProject, _ := state["active_project"].(string)
+
+	d.session.RestoreProjects(parseRestoredProjects(state["projects"]), activeProject)
 
 	// Build pane lookup
 	panesByID := make(map[string]map[string]any, len(panes))
@@ -601,6 +612,12 @@ func (d *Daemon) restoreWorkspace() error {
 			Name:  tabName,
 			Color: tabColor,
 		}
+		// A rebuilt *Tab with an empty ProjectID makes DestroyTab's project
+		// de-registration a silent no-op, leaving a dangling ID in
+		// Project.TabIDs that only surfaces after this restart, when someone
+		// closes the tab. migrateToDefaultProject above guarantees every tab
+		// map carries "project_id" by the time this loop runs.
+		tab.ProjectID, _ = tabMap["project_id"].(string)
 
 		// Restore layout
 		if layoutRaw, ok := tabMap["layout"]; ok {
@@ -706,6 +723,61 @@ func (d *Daemon) restoreWorkspace() error {
 	d.restored = true
 	log.Printf("restored %d tabs, %d panes from disk", len(tabs), restoredPanes)
 	return nil
+}
+
+// parseRestoredProjects turns the disk-loaded "projects" list (already
+// present pre-migration, or synthesized in place by migrateToDefaultProject)
+// back into typed *Project values for SessionManager.RestoreProjects.
+//
+// An empty RootDir is filled from the daemon's own os.Getwd() — resolved at
+// most once for the whole call, not per project — because
+// migrateToDefaultProject deliberately leaves RootDir blank rather than
+// guessing it (see that function's doc comment).
+func parseRestoredProjects(raw any) []*Project {
+	rawList, ok := raw.([]any)
+	if !ok {
+		return nil
+	}
+	var cwd string
+	var cwdResolved bool
+	projects := make([]*Project, 0, len(rawList))
+	for _, rp := range rawList {
+		pm, ok := rp.(map[string]any)
+		if !ok {
+			continue
+		}
+		id, _ := pm["id"].(string)
+		if id == "" {
+			continue
+		}
+		name, _ := pm["name"].(string)
+		rootDir, _ := pm["root_dir"].(string)
+		if rootDir == "" {
+			if !cwdResolved {
+				cwd, _ = os.Getwd()
+				cwdResolved = true
+			}
+			rootDir = cwd
+		}
+		activeTab, _ := pm["active_tab"].(string)
+		var tabIDs []string
+		if rawIDs, ok := pm["tab_ids"].([]any); ok {
+			tabIDs = make([]string, 0, len(rawIDs))
+			for _, rid := range rawIDs {
+				if s, ok := rid.(string); ok {
+					tabIDs = append(tabIDs, s)
+				}
+			}
+		}
+		projects = append(projects, &Project{
+			ID:        id,
+			Name:      name,
+			RootDir:   rootDir,
+			TabIDs:    tabIDs,
+			ActiveTab: activeTab,
+		})
+	}
+	return projects
 }
 
 // isValidHexID checks that an ID matches the format prefix + 8 hex chars (e.g. "pane-a1b2c3d4").
@@ -1990,8 +2062,8 @@ func (d *Daemon) broadcastState() {
 }
 
 func (d *Daemon) buildWorkspaceState() map[string]any {
-	activeTab, tabs, panesByTab := d.session.SnapshotState()
-	state := d.workspaceStateFromSnapshot(activeTab, tabs, panesByTab, true)
+	activeTab, tabs, panesByTab, projects, activeProject := d.session.SnapshotState()
+	state := d.workspaceStateFromSnapshot(activeTab, tabs, panesByTab, projects, activeProject, true)
 	// Broadcast-only (never persisted): announced newer release, if any.
 	if info := d.currentUpdateInfo(); info != nil {
 		state["update"] = info
@@ -2007,7 +2079,13 @@ func (d *Daemon) buildWorkspaceState() map[string]any {
 // includeOverlays controls whether ephemeral overlay panes are present in the
 // output. Pass true for live broadcasts (TUI needs them for routing) and false
 // for disk snapshots (overlays are intentionally ephemeral — gone on restart).
-func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panesByTab map[string][]*Pane, includeOverlays bool) map[string]any {
+//
+// projects/activeProject come from the SAME SnapshotState call as tabs/
+// panesByTab — see SnapshotState's doc comment. They ride both the disk
+// snapshot and the live broadcast because this function is shared by both
+// (buildWorkspaceState and snapshot()); writing them only at the persist.Save
+// call site would leave every broadcast project-less.
+func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panesByTab map[string][]*Pane, projects []Project, activeProject string, includeOverlays bool) map[string]any {
 	tabList := make([]map[string]any, 0, len(tabs))
 	paneList := make([]map[string]any, 0)
 
@@ -2033,10 +2111,11 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			paneIDs = append(paneIDs, pid)
 		}
 		tabData := map[string]any{
-			"id":    tab.ID,
-			"name":  tab.Name,
-			"color": tab.Color,
-			"panes": paneIDs,
+			"id":         tab.ID,
+			"name":       tab.Name,
+			"color":      tab.Color,
+			"panes":      paneIDs,
+			"project_id": tab.ProjectID,
 		}
 		if len(tab.Layout) > 0 {
 			tabData["layout"] = tab.Layout
@@ -2160,10 +2239,28 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 		}
 	}
 
+	// []any (not []map[string]any, unlike tabList/paneList above): in-process
+	// callers (buildWorkspaceState's own tests, e.g.) read this key with a
+	// plain `.([]any)` assertion, matching what a JSON-decoded array becomes
+	// on the wire — so the Go-side value already carries that shape rather
+	// than the tabs/panes convention.
+	projectList := make([]any, 0, len(projects))
+	for _, p := range projects {
+		projectList = append(projectList, map[string]any{
+			"id":         p.ID,
+			"name":       p.Name,
+			"root_dir":   p.RootDir,
+			"tab_ids":    p.TabIDs,
+			"active_tab": p.ActiveTab,
+		})
+	}
+
 	return map[string]any{
-		"active_tab": activeTab,
-		"tabs":       tabList,
-		"panes":      paneList,
+		"active_tab":     activeTab,
+		"tabs":           tabList,
+		"panes":          paneList,
+		"projects":       projectList,
+		"active_project": activeProject,
 	}
 }
 
@@ -3395,7 +3492,7 @@ func withExcerpt(e PaneEvent, excerpt string) PaneEvent {
 // a pane could in principle flip Pending→spawned between the two reads, but the
 // list is informational and the worst case is a momentarily stale flag.
 func (d *Daemon) buildPaneInfos() []ipc.PaneInfo {
-	_, tabs, panesByTab := d.session.SnapshotState()
+	_, tabs, panesByTab, _, _ := d.session.SnapshotState()
 
 	var panes []ipc.PaneInfo
 	for _, tab := range tabs {
@@ -3785,7 +3882,7 @@ func (d *Daemon) handleSwitchTabReq(conn *ipc.Conn, msg *ipc.Message) {
 }
 
 func (d *Daemon) handleListTabsReq(conn *ipc.Conn, msg *ipc.Message) {
-	activeTab, tabs, panesByTab := d.session.SnapshotState()
+	activeTab, tabs, panesByTab, _, _ := d.session.SnapshotState()
 
 	var tabInfos []ipc.TabInfo
 	for _, tab := range tabs {
@@ -3992,7 +4089,7 @@ func (d *Daemon) handleMemoryReportReq(conn *ipc.Conn, msg *ipc.Message) {
 	}
 	// Embed the current tab list so MCP callers don't need a second
 	// MsgListTabsReq round-trip just to map tab IDs to human names.
-	activeTab, tabs, panesByTab := d.session.SnapshotState()
+	activeTab, tabs, panesByTab, _, _ := d.session.SnapshotState()
 	resp.Tabs = make([]ipc.TabInfo, 0, len(tabs))
 	for _, tab := range tabs {
 		resp.Tabs = append(resp.Tabs, ipc.TabInfo{

@@ -568,10 +568,33 @@ func (sm *SessionManager) RestoreTab(tab *Tab, panes []*Pane) {
 	}
 }
 
+// RestoreProjects installs a pre-built project set loaded from disk (or
+// synthesized by migrateToDefaultProject), mirroring RestoreTab. Order in
+// projects becomes projectOrder. activeProject is adopted only when
+// non-empty, so a caller that has nothing to restore (fresh workspace)
+// cannot clobber a project already created earlier in startup.
+func (sm *SessionManager) RestoreProjects(projects []*Project, activeProject string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	for _, p := range projects {
+		sm.projects[p.ID] = p
+		sm.projectOrder = append(sm.projectOrder, p.ID)
+	}
+	if activeProject != "" {
+		sm.activeProject = activeProject
+	}
+}
+
 // SnapshotState returns a consistent view of the entire session state under
 // a single RLock hold. This prevents torn reads when tabs/panes are
 // created or destroyed concurrently.
-func (sm *SessionManager) SnapshotState() (activeTab string, tabs []*Tab, panesByTab map[string][]*Pane) {
+//
+// projects/activeProject ride this SAME lock hold rather than a second call
+// to Projects()/ActiveProject() — a nested RLock on this goroutine could
+// deadlock behind a writer parked between the two acquisitions (the
+// oscillation hazard noted at daemon.go's snapshot()).
+func (sm *SessionManager) SnapshotState() (activeTab string, tabs []*Tab, panesByTab map[string][]*Pane, projects []Project, activeProject string) {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 
@@ -591,6 +614,20 @@ func (sm *SessionManager) SnapshotState() (activeTab string, tabs []*Tab, panesB
 		}
 		panesByTab[id] = tabPanes
 	}
+
+	// Same COPY discipline as Projects(): a caller holding this slice past
+	// the unlock must not be able to race UpdateProject mutating Name/RootDir.
+	projects = make([]Project, 0, len(sm.projectOrder))
+	for _, id := range sm.projectOrder {
+		p, ok := sm.projects[id]
+		if !ok {
+			continue
+		}
+		cp := *p
+		cp.TabIDs = append([]string(nil), p.TabIDs...)
+		projects = append(projects, cp)
+	}
+	activeProject = sm.activeProject
 	return
 }
 

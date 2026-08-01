@@ -85,7 +85,7 @@ func TestWorkspaceStateFromSnapshot(t *testing.T) {
 		},
 	}
 
-	state := d.workspaceStateFromSnapshot("tab-aaaaaaaa", tabs, panesByTab, false)
+	state := d.workspaceStateFromSnapshot("tab-aaaaaaaa", tabs, panesByTab, nil, "", false)
 
 	if got := state["active_tab"]; got != "tab-aaaaaaaa" {
 		t.Errorf("active_tab = %v, want tab-aaaaaaaa", got)
@@ -341,7 +341,7 @@ func TestWorkspaceState_OverlayPane_BroadcastVsDisk(t *testing.T) {
 	panesByTab := map[string][]*Pane{tab.ID: {normal, overlay}}
 
 	// Broadcast: overlay pane must be included and carry overlay=true.
-	live := d.workspaceStateFromSnapshot(tab.ID, tabs, panesByTab, true)
+	live := d.workspaceStateFromSnapshot(tab.ID, tabs, panesByTab, nil, "", true)
 	livePanes := live["panes"].([]map[string]any)
 	if len(livePanes) != 2 {
 		t.Fatalf("broadcast panes = %d, want 2", len(livePanes))
@@ -362,7 +362,7 @@ func TestWorkspaceState_OverlayPane_BroadcastVsDisk(t *testing.T) {
 
 	// Disk: overlay pane must be absent from both the pane list and the
 	// tab's pane-ID list.
-	disk := d.workspaceStateFromSnapshot(tab.ID, tabs, panesByTab, false)
+	disk := d.workspaceStateFromSnapshot(tab.ID, tabs, panesByTab, nil, "", false)
 	diskPanes := disk["panes"].([]map[string]any)
 	if len(diskPanes) != 1 {
 		t.Fatalf("disk panes = %d, want 1", len(diskPanes))
@@ -473,7 +473,7 @@ func TestWorkspaceState_OverlayFlip_NoRace(t *testing.T) {
 	}()
 
 	for i := 0; i < iters; i++ {
-		_ = d.workspaceStateFromSnapshot(tab.ID, tabs, panesByTab, true)
+		_ = d.workspaceStateFromSnapshot(tab.ID, tabs, panesByTab, nil, "", true)
 	}
 	<-done
 }

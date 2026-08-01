@@ -444,7 +444,7 @@ func (d *Daemon) claudeSessionIDs(includePending bool) map[string]string {
 		resumeID string
 		pending  bool
 	}
-	_, tabs, panesByTab := d.session.SnapshotState()
+	_, tabs, panesByTab, _, _ := d.session.SnapshotState()
 
 	var captured []claudePane
 	for _, tab := range tabs {

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.46.2] - 2026-08-01
+
 ### Fixed
 - **A restored Claude Code pane could come back holding a different pane's
   conversation.** On the first daemon restart after a pane was created, panes

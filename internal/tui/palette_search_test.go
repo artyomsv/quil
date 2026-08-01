@@ -110,6 +110,29 @@ func TestApplyPaneSearch_BuildsGoToPaneRows(t *testing.T) {
 	}
 }
 
+// Content search runs daemon-wide across every pane, including ones in
+// background projects. Before paneNavLabel walked every project, a hit for a
+// background-project pane failed to resolve a label and was silently
+// dropped from the results — the fix mirrors findPaneAndTab's traversal.
+func TestApplyPaneSearch_ResolvesHitInBackgroundProject(t *testing.T) {
+	t.Parallel()
+	m := twoProjectModel()
+	m.palette.query = "p"
+	m.palette.searching = true
+
+	resp := ipc.PaneSearchRespPayload{
+		Query: "p",
+		Hits:  []ipc.PaneSearchHit{{PaneID: "p-bg", Matches: 2, Excerpt: "found in background"}},
+	}
+	got := m.applyPaneSearch(resp)
+	if len(got.palette.contentHits) != 1 {
+		t.Fatalf("contentHits = %d, want 1 — a background-project hit must not be dropped", len(got.palette.contentHits))
+	}
+	if !strings.Contains(got.palette.contentHits[0].label, "Background") {
+		t.Errorf("label = %q, want it to carry the owning project's name", got.palette.contentHits[0].label)
+	}
+}
+
 func TestApplyPaneSearch_DropsStale(t *testing.T) {
 	m := newSplitDragTestModel(t)
 	m.palette.query = "current"

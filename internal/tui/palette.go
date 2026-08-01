@@ -224,10 +224,14 @@ func tabIndexName(i int, tab *TabModel) string {
 }
 
 // formatPaneNav renders the shared palette navigation label for a pane:
-// "i.j · type[· name]" with 1-based tab/pane indices. Empty type falls back to
-// "terminal" (the daemon default); an unnamed pane omits the trailing segment
-// so there is never a dangling separator.
-func formatPaneNav(tabIdx, paneIdx int, p *PaneModel) string {
+// "i.j · type[· name][· project]" with 1-based tab/pane indices. Empty type
+// falls back to "terminal" (the daemon default); an unnamed pane omits the
+// trailing segment so there is never a dangling separator. project is
+// appended only when non-empty: callers pass it for a pane outside the
+// active project so two tabs both named "Shell" in different projects stay
+// distinguishable, and omit it for the active project's own panes (it would
+// only repeat what's already on screen).
+func formatPaneNav(tabIdx, paneIdx int, p *PaneModel, project string) string {
 	paneType := p.Type
 	if paneType == "" {
 		paneType = "terminal"
@@ -235,6 +239,9 @@ func formatPaneNav(tabIdx, paneIdx int, p *PaneModel) string {
 	parts := []string{fmt.Sprintf("%d.%d", tabIdx+1, paneIdx+1), paneType}
 	if p.Name != "" {
 		parts = append(parts, p.Name)
+	}
+	if project != "" {
+		parts = append(parts, project)
 	}
 	return strings.Join(parts, " · ")
 }
@@ -276,32 +283,46 @@ func (m *Model) buildPaletteCommands() []paletteCommand {
 	}
 
 	// --- Go to pane: navigation leads — jumping to a pane is the most common
-	// reason to open the palette. One row per pane across every tab,
-	// distinguished by a tab.pane index + plugin type so same-name/same-CWD
-	// panes are told apart.
+	// reason to open the palette. One row per pane across EVERY project (not
+	// just the active one — an agent stuck in a background project still
+	// needs to be reachable), distinguished by a tab.pane index + plugin
+	// type so same-name/same-CWD panes are told apart, plus the project name
+	// for a pane outside the active project.
+	//
+	// This loop, paneNavLabel (palette_search.go), and findPaneAndTab
+	// (workstate.go) must all resolve the SAME (project, tabIdx, paneIdx)
+	// triple for a given pane — a label built by one and an action resolved
+	// by another would name the wrong tab — so all three walk m.projects
+	// then a project's own tabs/panes with the same per-project indices.
 	header("Go to pane")
-	for i, tab := range m.curTabs() {
-		if tab == nil {
-			continue
+	for _, proj := range m.projects {
+		projName := ""
+		if proj != m.cur() {
+			projName = proj.Name
 		}
-		for j, p := range tab.Leaves() {
-			if p == nil {
+		for i, tab := range proj.tabs {
+			if tab == nil {
 				continue
 			}
-			// Label format is shared with content-search hit resolution
-			// (paneNavLabel) via formatPaneNav — one implementation.
-			paneType := p.Type
-			if paneType == "" {
-				paneType = "terminal"
+			for j, p := range tab.Leaves() {
+				if p == nil {
+					continue
+				}
+				// Label format is shared with content-search hit resolution
+				// (paneNavLabel) via formatPaneNav — one implementation.
+				paneType := p.Type
+				if paneType == "" {
+					paneType = "terminal"
+				}
+				cmds = append(cmds, paletteCommand{
+					action:   palActGoToPane,
+					arg:      p.ID,
+					enabled:  true,
+					label:    formatPaneNav(i, j, p, projName),
+					detail:   shortCWD(p.CWD, home),
+					keywords: []string{"go to", "goto", "pane", "focus", p.Name, filepath.Base(p.CWD), paneType, proj.Name},
+				})
 			}
-			cmds = append(cmds, paletteCommand{
-				action:   palActGoToPane,
-				arg:      p.ID,
-				enabled:  true,
-				label:    formatPaneNav(i, j, p),
-				detail:   shortCWD(p.CWD, home),
-				keywords: []string{"go to", "goto", "pane", "focus", p.Name, filepath.Base(p.CWD), paneType},
-			})
 		}
 	}
 
@@ -771,23 +792,28 @@ func lastCellsToWidth(s string, w int) string {
 	return string(runes[i:])
 }
 
-// goToPane switches to the tab containing paneID and makes it the active pane.
-// Shared by the command palette's "Go to pane" rows and content-search Enter.
-// The old tab's active-pane flag is cleared BEFORE switchTab moves the active
-// tab (ordering is load-bearing for the border repaint).
+// goToPane switches to the tab containing paneID and makes it the active
+// pane — crossing a project boundary if that's where the pane lives.
+// Shared by the command palette's "Go to pane" rows and content-search
+// Enter. The old active pane's Active flag is cleared BEFORE jumpToPane
+// moves the active project/tab (ordering is load-bearing for the border
+// repaint); jumpToPane itself sends no IPC, so the daemon is told about the
+// new active tab via switchTab afterward.
 func (m Model) goToPane(paneID string) (tea.Model, tea.Cmd) {
-	pane, idx := m.findPaneAndTab(paneID)
-	if pane == nil || idx < 0 || idx >= len(m.curTabs()) {
-		return m, nil
-	}
 	if cur := m.activeTabModel(); cur != nil {
 		if old := cur.ActivePaneModel(); old != nil {
 			old.Active = false
 		}
 	}
-	m.curTabs()[idx].ActivePane = paneID
-	pane.Active = true
-	return m, m.switchTab(idx)
+	if !m.jumpToPane(paneID) {
+		return m, nil
+	}
+	if tab := m.activeTabModel(); tab != nil {
+		if pane := tab.ActivePaneModel(); pane != nil {
+			pane.Active = true
+		}
+	}
+	return m, m.switchTab(m.activeTabIdx())
 }
 
 // executePaletteCommand closes the palette and dispatches into the SAME handler

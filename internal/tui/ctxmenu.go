@@ -346,7 +346,7 @@ func (m *Model) openCtxMenu(pane *PaneModel, anchorX, anchorY int) {
 // call when already closed; nil-safe when the target pane has vanished.
 func (m *Model) closeCtxMenu() {
 	if m.ctxMenu.paneID != "" {
-		if pane, _ := m.findPaneAndTab(m.ctxMenu.paneID); pane != nil {
+		if pane, _, _ := m.findPaneAndTab(m.ctxMenu.paneID); pane != nil {
 			pane.ctxTargetHighlight = false
 		}
 	}
@@ -420,7 +420,7 @@ func (m Model) executeCtxMenuItem(item ctxMenuItem) (tea.Model, tea.Cmd) {
 		old.Active = false
 	}
 	tab.ActivePane = paneID
-	if pane, _ := m.findPaneAndTab(paneID); pane != nil {
+	if pane, _, _ := m.findPaneAndTab(paneID); pane != nil {
 		pane.Active = true
 	}
 
@@ -438,7 +438,7 @@ func (m Model) executeCtxMenuItem(item ctxMenuItem) (tea.Model, tea.Cmd) {
 	case ctxActMute:
 		return m, m.toggleActivePaneMute()
 	case ctxActAttention:
-		if pane, _ := m.findPaneAndTab(paneID); pane != nil {
+		if pane, _, _ := m.findPaneAndTab(paneID); pane != nil {
 			pane.pinnedAttention = !pane.pinnedAttention
 		}
 		return m, nil

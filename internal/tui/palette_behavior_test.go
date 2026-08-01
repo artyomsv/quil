@@ -325,6 +325,32 @@ func TestPalette_GoToPaneCrossTab(t *testing.T) {
 	}
 }
 
+// TestPalette_GoToPaneCrossProject verifies goToPane reaches a pane in a
+// BACKGROUND project — the same jumpToPane path setActivePaneMsg and
+// notification navigate now share — switching the active project as well as
+// the active tab, not just the tab within whatever project was active.
+func TestPalette_GoToPaneCrossProject(t *testing.T) {
+	t.Parallel()
+	m := twoProjectModel()
+	m.notifications = NewNotificationCenter(30, 200)
+	m.dialog = dialogCommandPalette
+	fgPane := m.curTabs()[0].Root.Pane
+	fgPane.Active = true
+
+	updated, _ := m.executePaletteCommand(paletteCommand{action: palActGoToPane, arg: "p-bg", enabled: true})
+	got := updated.(Model)
+
+	if got.activeProject != 1 {
+		t.Fatalf("activeProject = %d, want 1 (proj-bg)", got.activeProject)
+	}
+	if got.activeTabModel() == nil || got.activeTabModel().ActivePane != "p-bg" {
+		t.Fatal("target pane in the background project was not focused")
+	}
+	if fgPane.Active {
+		t.Error("previously-active pane in the OLD project should be cleared")
+	}
+}
+
 func TestPalette_ControlTextNotInjected(t *testing.T) {
 	t.Parallel()
 	m := newSplitDragTestModel(t)

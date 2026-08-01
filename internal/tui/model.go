@@ -143,10 +143,15 @@ type pasteRefreshMsg struct{}
 // sidebarTickMsg triggers a periodic sidebar re-render to update relative timestamps.
 type sidebarTickMsg struct{}
 
-// PaneRef stores a pane location for navigation history.
+// PaneRef stores a pane location for navigation history. ProjectID names the
+// project the location was recorded under — a bare TabIndex is only
+// meaningful relative to ITS OWN project's tab list, so restoring one
+// without first resolving the project it belongs to can reinterpret it
+// against whichever project happens to be active at pop time.
 type PaneRef struct {
-	TabIndex int
-	PaneID   string
+	ProjectID string
+	TabIndex  int
+	PaneID    string
 }
 
 // highlightPaneMsg triggers an orange border highlight on a pane for MCP interactions.
@@ -581,7 +586,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// pane destroy) closes itself. Single choke point — no need to audit
 	// every pruning path. findPaneAndTab is nil-safe.
 	if m.ctxMenu.open() {
-		if pane, _ := m.findPaneAndTab(m.ctxMenu.paneID); pane == nil {
+		if pane, _, _ := m.findPaneAndTab(m.ctxMenu.paneID); pane == nil {
 			m.closeCtxMenu()
 		}
 	}
@@ -1275,16 +1280,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 
 	case setActivePaneMsg:
-		// Find which tab contains this pane and switch to it
-		for i, tab := range m.curTabs() {
-			if tab.Root != nil && tab.Root.PaneIDs()[msg.PaneID] {
-				m.setActiveTabIdx(i)
-				tab.ActivePane = msg.PaneID
-				log.Printf("set_active_pane: switched to tab %d pane %s", i, msg.PaneID)
-				return m, m.listenForMessages()
-			}
+		// MCP set_active_pane targets any pane daemon-wide, including one in
+		// a background project — jumpToPane spans every project so the
+		// request cannot silently no-op just because the target isn't in the
+		// project currently on screen.
+		if m.jumpToPane(msg.PaneID) {
+			log.Printf("set_active_pane: switched to pane %s", msg.PaneID)
+		} else {
+			log.Printf("set_active_pane: pane %s not found", msg.PaneID)
 		}
-		log.Printf("set_active_pane: pane %s not found", msg.PaneID)
 		return m, m.listenForMessages()
 
 	case highlightPaneMsg:
@@ -1326,7 +1330,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// (see emitEvent) so `working` tracks reality across mute/unmute —
 		// but muting must still mean "no visible notification", so suppress
 		// the sidebar card for any event sourced from a muted pane.
-		eventPane, _ := m.findPaneAndTab(msg.PaneID)
+		eventPane, _, _ := m.findPaneAndTab(msg.PaneID)
 		muted := eventPane != nil && eventPane.Muted
 		workStateOnly := msg.Type == "hook.claude.PostToolUse"
 		if !muted && !workStateOnly && !(msg.Type == "output_idle" && m.isActivePane(msg.PaneID)) {
@@ -1537,19 +1541,21 @@ func (m Model) handleNotificationKey(key string) (tea.Model, tea.Cmd) {
 	action, eventID, paneID := m.notifications.HandleKey(key)
 	switch action {
 	case "navigate":
-		// Push current location to history, then jump to event's pane in focus mode
-		m.pushPaneHistory()
-		for i, tab := range m.curTabs() {
-			if tab.Root != nil && tab.Root.PaneIDs()[paneID] {
-				m.setActiveTabIdx(i)
-				tab.ActivePane = paneID
-				if !tab.FocusMode() {
-					tab.ToggleFocus()
-				}
-				m.sidebarFocused = false
-				break
-			}
+		// The sidebar carries events from every pane in every project, so the
+		// jump must be able to cross a project boundary. History has to be
+		// pushed BEFORE the jump (it records the location being left) but
+		// only once the jump is known to land — checked first so a pane that
+		// vanished between the event firing and the user pressing Enter
+		// doesn't grow history for a jump that never happened.
+		if pane, _, _ := m.findPaneAndTab(paneID); pane == nil {
+			return m, nil
 		}
+		m.pushPaneHistory()
+		m.jumpToPane(paneID)
+		if tab := m.activeTabModel(); tab != nil && !tab.FocusMode() {
+			tab.ToggleFocus()
+		}
+		m.sidebarFocused = false
 		return m, nil
 	case "dismiss":
 		if eventID != "" {
@@ -1575,8 +1581,12 @@ func (m Model) handleNotificationKey(key string) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) pushPaneHistory() {
+	proj := m.cur()
+	if proj == nil {
+		return
+	}
 	if tab := m.activeTabModel(); tab != nil && tab.ActivePane != "" {
-		ref := PaneRef{TabIndex: m.activeTabIdx(), PaneID: tab.ActivePane}
+		ref := PaneRef{ProjectID: proj.ID, TabIndex: m.activeTabIdx(), PaneID: tab.ActivePane}
 		m.paneHistory = append(m.paneHistory, ref)
 		if len(m.paneHistory) > 20 {
 			m.paneHistory = m.paneHistory[len(m.paneHistory)-20:]
@@ -1584,17 +1594,32 @@ func (m *Model) pushPaneHistory() {
 	}
 }
 
+// popPaneHistory restores the most recent history entry that is still valid,
+// pop-and-skip past any entry whose project has since closed or whose pane
+// has since been destroyed (degrades safely rather than jumping somewhere
+// wrong). ProjectID is resolved to a project FIRST — a TabIndex recorded
+// under a background project is meaningless against whichever project
+// happens to be active now, which is exactly what made cross-project
+// back-navigation unreachable before ProjectID existed. Once the recorded
+// (project, tab, pane) triple is confirmed to still hold, the actual
+// project/tab/pane move is delegated to jumpToPane so there is one
+// implementation of that sequence.
 func (m Model) popPaneHistory() (tea.Model, tea.Cmd) {
 	for len(m.paneHistory) > 0 {
 		ref := m.paneHistory[len(m.paneHistory)-1]
 		m.paneHistory = m.paneHistory[:len(m.paneHistory)-1]
-		if ref.TabIndex < len(m.curTabs()) {
-			tab := m.curTabs()[ref.TabIndex]
-			if tab.Root != nil && tab.Root.PaneIDs()[ref.PaneID] {
-				m.setActiveTabIdx(ref.TabIndex)
-				tab.ActivePane = ref.PaneID
-				return m, nil
+		for _, proj := range m.projects {
+			if proj.ID != ref.ProjectID {
+				continue
 			}
+			if ref.TabIndex < len(proj.tabs) {
+				tab := proj.tabs[ref.TabIndex]
+				if tab.Root != nil && tab.Root.PaneIDs()[ref.PaneID] {
+					m.jumpToPane(ref.PaneID)
+					return m, nil
+				}
+			}
+			break
 		}
 	}
 	return m, nil

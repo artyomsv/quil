@@ -22,16 +22,25 @@ type paneSearchRespMsg struct{ Resp ipc.PaneSearchRespPayload }
 type paletteSearchTimeoutMsg struct{ query string }
 
 // paneNavLabel resolves a pane id to its navigation label, or ok=false if the
-// pane is gone. Iterates tabs/leaves so it can compute the same 1-based i.j
-// indices formatPaneNav uses.
+// pane is gone. Content search runs daemon-wide across every pane, so this
+// walks EVERY project — mirroring findPaneAndTab — or a hit in a background
+// project would resolve to nothing and silently vanish from the results. Also
+// mirrors buildPaletteCommands' own traversal (same per-project i.j indices)
+// so the two can never disagree about a pane's label.
 func (m *Model) paneNavLabel(paneID string) (label string, ok bool) {
-	for i, tab := range m.curTabs() {
-		if tab == nil {
-			continue
+	for _, proj := range m.projects {
+		projName := ""
+		if proj != m.cur() {
+			projName = proj.Name
 		}
-		for j, p := range tab.Leaves() {
-			if p != nil && p.ID == paneID {
-				return formatPaneNav(i, j, p), true
+		for i, tab := range proj.tabs {
+			if tab == nil {
+				continue
+			}
+			for j, p := range tab.Leaves() {
+				if p != nil && p.ID == paneID {
+					return formatPaneNav(i, j, p, projName), true
+				}
 			}
 		}
 	}

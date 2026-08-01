@@ -945,3 +945,150 @@ func TestWorkSpinnerTick_FrameWraparoundMirrors(t *testing.T) {
 	// Rendering at the wrapped frame must not panic (modulo guards the index).
 	_ = nm.tabLabel(0)
 }
+
+// Task 6: cross-project resolution. Tasks 1-4 built the daemon-side project
+// layer; Task 5 scoped most client reads to the active project. These sites
+// are the minority that must span every project instead.
+
+// A hook event for a pane in a BACKGROUND project must still update that
+// pane's working state — that is the whole point of the sidebar: an agent
+// working in a project the user isn't currently looking at still needs its
+// spinner and unseen mark tracked.
+func TestPaneEventFromBackgroundProjectUpdatesState(t *testing.T) {
+	bgPane := &PaneModel{ID: "pane-bg"}
+	bg := NewTabModel("tab-bg", "Agent")
+	bg.Root = NewLeaf(bgPane)
+
+	m := Model{
+		projects: []*ProjectModel{
+			{ID: "proj-fg", tabs: []*TabModel{NewTabModel("tab-fg", "Shell")}},
+			{ID: "proj-bg", tabs: []*TabModel{bg}},
+		},
+		activeProject: 0, // the event's pane is NOT in the active project
+	}
+
+	m.applyWorkTransition("pane-bg", "hook.claude.UserPromptSubmit", nil)
+
+	if !bgPane.working {
+		t.Fatal("a pane event for a background project must still update it — " +
+			"this is the whole point of the sidebar")
+	}
+}
+
+func TestFindPaneAndTabReportsOwningProject(t *testing.T) {
+	tab := NewTabModel("tab-bg", "Agent")
+	tab.Root = NewLeaf(&PaneModel{ID: "pane-bg"})
+	m := Model{projects: []*ProjectModel{
+		{ID: "proj-fg", tabs: []*TabModel{NewTabModel("tab-fg", "Shell")}},
+		{ID: "proj-bg", tabs: []*TabModel{tab}},
+	}}
+
+	pane, proj, idx := m.findPaneAndTab("pane-bg")
+	if pane == nil || proj == nil || proj.ID != "proj-bg" || idx != 0 {
+		t.Fatalf("findPaneAndTab = (%v, %v, %d), want proj-bg tab 0", pane, proj, idx)
+	}
+}
+
+// twoProjectModel builds a Model with two projects: "proj-fg" (active,
+// holding pane "p-fg") and "proj-bg" (background, holding pane "p-bg").
+func twoProjectModel() Model {
+	fgTab := NewTabModel("tab-fg", "Shell")
+	fgTab.Root = NewLeaf(NewPaneModel("p-fg", 1024))
+	fgTab.ActivePane = "p-fg"
+	fg := &ProjectModel{ID: "proj-fg", Name: "Foreground", tabs: []*TabModel{fgTab}}
+
+	bgTab := NewTabModel("tab-bg", "Agent")
+	bgTab.Root = NewLeaf(NewPaneModel("p-bg", 1024))
+	bgTab.ActivePane = "p-bg"
+	bg := &ProjectModel{ID: "proj-bg", Name: "Background", tabs: []*TabModel{bgTab}}
+
+	return Model{projects: []*ProjectModel{fg, bg}, activeProject: 0}
+}
+
+func TestJumpToPane_SwitchesProjectAndTab(t *testing.T) {
+	t.Parallel()
+	m := twoProjectModel()
+	if !m.jumpToPane("p-bg") {
+		t.Fatal("jumpToPane should report success for an existing pane")
+	}
+	if m.activeProject != 1 {
+		t.Fatalf("activeProject = %d, want 1 (proj-bg)", m.activeProject)
+	}
+	if got := m.activeTabModel(); got == nil || got.ID != "tab-bg" {
+		t.Fatalf("activeTabModel = %v, want tab-bg", got)
+	}
+	if m.activeTabModel().ActivePane != "p-bg" {
+		t.Fatalf("ActivePane = %q, want p-bg", m.activeTabModel().ActivePane)
+	}
+}
+
+func TestJumpToPane_MissingPaneReturnsFalseWithoutMutating(t *testing.T) {
+	t.Parallel()
+	m := twoProjectModel()
+	if m.jumpToPane("does-not-exist") {
+		t.Fatal("jumpToPane should report failure for a pane that does not exist")
+	}
+	if m.activeProject != 0 {
+		t.Fatalf("activeProject changed to %d on a failed jump", m.activeProject)
+	}
+}
+
+// MCP set_active_pane must reach a pane in a background project instead of
+// silently no-oping, which is what curTabs()-scoped resolution used to do.
+func TestUpdate_SetActivePaneMsg_CrossProject(t *testing.T) {
+	t.Parallel()
+	m := twoProjectModel()
+	next, _ := m.Update(setActivePaneMsg{PaneID: "p-bg"})
+	got := next.(Model)
+	if got.activeProject != 1 {
+		t.Fatalf("activeProject = %d, want 1 (proj-bg)", got.activeProject)
+	}
+	if got.activeTabModel() == nil || got.activeTabModel().ActivePane != "p-bg" {
+		t.Fatal("set_active_pane did not focus the background project's pane")
+	}
+}
+
+func TestUpdate_SetActivePaneMsg_MissingPaneNoOps(t *testing.T) {
+	t.Parallel()
+	m := twoProjectModel()
+	next, _ := m.Update(setActivePaneMsg{PaneID: "does-not-exist"})
+	got := next.(Model)
+	if got.activeProject != 0 {
+		t.Fatalf("activeProject changed to %d for a pane that does not exist", got.activeProject)
+	}
+}
+
+// Sidebar notification navigation must jump across projects, and must not
+// grow pane-navigation history for a jump that never happened (the pane
+// named by the event no longer exists).
+func TestHandleNotificationKey_Navigate_CrossProject(t *testing.T) {
+	t.Parallel()
+	m := twoProjectModel()
+	m.notifications = NewNotificationCenter(30, 50)
+	m.notifications.AddEvent(ipc.PaneEventPayload{ID: "e1", PaneID: "p-bg"})
+
+	next, _ := m.handleNotificationKey("enter")
+	got := next.(Model)
+	if got.activeProject != 1 {
+		t.Fatalf("activeProject = %d, want 1 (proj-bg)", got.activeProject)
+	}
+	if len(got.paneHistory) != 1 || got.paneHistory[0].ProjectID != "proj-fg" || got.paneHistory[0].PaneID != "p-fg" {
+		t.Fatalf("paneHistory = %+v, want one entry recording proj-fg/p-fg", got.paneHistory)
+	}
+}
+
+func TestHandleNotificationKey_Navigate_FailedJumpDoesNotGrowHistory(t *testing.T) {
+	t.Parallel()
+	m := twoProjectModel()
+	m.notifications = NewNotificationCenter(30, 50)
+	m.notifications.AddEvent(ipc.PaneEventPayload{ID: "e1", PaneID: "does-not-exist"})
+
+	next, _ := m.handleNotificationKey("enter")
+	got := next.(Model)
+	if got.activeProject != 0 {
+		t.Fatalf("activeProject changed to %d for a jump that should have failed", got.activeProject)
+	}
+	if len(got.paneHistory) != 0 {
+		t.Fatalf("paneHistory grew to %d entries for a jump that never happened", len(got.paneHistory))
+	}
+}

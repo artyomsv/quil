@@ -58,7 +58,16 @@ func (m Model) activeTabModel() *TabModel {
 // allTabs iterates EVERY project. Use it only where the operation genuinely
 // spans projects and carries no index — resolving an incoming pane event,
 // sweeping caches, the memory report. Everywhere else wants curTabs().
+//
+// Single-project fast path: handlePaneOutput calls this twice per PTY-output
+// message and both spinner loops call it per frame, so the common case (one
+// project — every install until Task 7 parses real ones) must not allocate.
+// Every caller only reads the result, so handing back the lone project's own
+// slice directly is safe.
 func (m *Model) allTabs() []*TabModel {
+	if len(m.projects) == 1 {
+		return m.projects[0].tabs
+	}
 	var out []*TabModel
 	for _, p := range m.projects {
 		out = append(out, p.tabs...)

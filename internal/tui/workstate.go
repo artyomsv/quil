@@ -42,19 +42,48 @@ func workEventKind(eventType string) workTransition {
 	return hookevents.ClassifyWorkEvent(eventType)
 }
 
-// findPaneAndTab locates a pane by ID and the index of its containing tab
-// within the ACTIVE project — the index is what switchTab and activeTab are
-// expressed in, so it cannot span projects. Returns (nil, -1) if not found.
-func (m *Model) findPaneAndTab(paneID string) (*PaneModel, int) {
-	for i, tab := range m.curTabs() {
-		if tab.Root == nil {
-			continue
-		}
-		if leaf := tab.Root.FindLeaf(paneID); leaf != nil {
-			return leaf.Pane, i
+// findPaneAndTab locates a pane by ID across EVERY project and reports the
+// owning project and the tab's index within it.
+//
+// Cross-project is a correctness requirement, not a convenience: agents in
+// background projects keep firing hook events, and scoping this to the
+// active project would leave a blocked background agent invisible. Returns
+// (nil, nil, -1) if not found.
+func (m *Model) findPaneAndTab(paneID string) (*PaneModel, *ProjectModel, int) {
+	for _, proj := range m.projects {
+		for i, tab := range proj.tabs {
+			if tab.Root == nil {
+				continue
+			}
+			if leaf := tab.Root.FindLeaf(paneID); leaf != nil {
+				return leaf.Pane, proj, i
+			}
 		}
 	}
-	return nil, -1
+	return nil, nil, -1
+}
+
+// jumpToPane moves the active project, active tab, and focused pane to reach
+// paneID anywhere in the workspace. Returns false when the pane no longer
+// exists, so callers can skip recording navigation history for a jump that
+// did not happen. Shared by every navigation path that needs to cross a
+// project boundary (MCP set_active_pane, sidebar notification navigate,
+// pane-history back-navigation, the command palette's goToPane) — one
+// implementation instead of four hand-rolled copies of the same sequence.
+func (m *Model) jumpToPane(paneID string) bool {
+	pane, proj, tabIdx := m.findPaneAndTab(paneID)
+	if pane == nil {
+		return false
+	}
+	for i, p := range m.projects {
+		if p == proj {
+			m.activeProject = i
+			break
+		}
+	}
+	proj.activeTab = tabIdx
+	proj.tabs[tabIdx].ActivePane = paneID
+	return true
 }
 
 // applyWorkTransition updates the working state of the pane identified by
@@ -103,7 +132,7 @@ func (m *Model) applyWorkTransition(paneID, eventType string, data map[string]st
 	if kind == workNone {
 		return
 	}
-	pane, tabIdx := m.findPaneAndTab(paneID)
+	pane, proj, tabIdx := m.findPaneAndTab(paneID)
 	if pane == nil {
 		return
 	}
@@ -222,7 +251,7 @@ func (m *Model) applyWorkTransition(paneID, eventType string, data map[string]st
 		// IS marked — its green border is the cue. An abort (process exit)
 		// clears the spinner without marking: a crash is not a completed
 		// turn.
-		focused := tabIdx == m.activeTabIdx() && m.curTabs()[tabIdx].ActivePane == paneID
+		focused := proj == m.cur() && tabIdx == proj.activeTab && proj.tabs[tabIdx].ActivePane == paneID
 		if !focused {
 			pane.unseen = true
 		}

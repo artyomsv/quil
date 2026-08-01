@@ -26,7 +26,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   Nothing is forgotten on a failed check: if the host cannot be reached, the
   record is left exactly as it was, since an unreachable host proves nothing
-  about what is installed on it.
+  about what is installed on it. Quil also declines to adopt a Quil it finds in
+  a directory that other users on that host can write to — a shared `/opt/bin`,
+  or the group-writable `/usr/local/bin` that Homebrew creates on multi-admin
+  Macs — because adopting it would run it on every later connection with no
+  further prompt. It offers a normal install into your own directory instead.
+
+### Security
+- **A remote host can no longer smuggle a command into the diagnostics Quil
+  tells you to run.** When a remote binary cannot be executed, Quil prints an
+  `ssh … 'uname -sm; file …'` line to paste into your own shell. The path in it
+  comes from the remote, and an apostrophe in that path closed the quoting — so
+  a malicious or compromised host could append a command that ran on **your**
+  machine when you pasted the line. The path is now escaped, which also fixes
+  the ordinary case: the suggestion used to break on any legitimate path
+  containing an apostrophe.
+- **Remote-reported paths can no longer contain invisible text-direction
+  overrides.** Quil already rejected control characters in paths a remote
+  reports, because those paths are printed in the confirmation prompt you
+  approve an install from. Bidirectional overrides are *printable*, so they
+  passed that check while reversing how the rest of the path reads on screen.
+  They are now rejected too.
 
 ## [1.46.0] - 2026-07-31
 

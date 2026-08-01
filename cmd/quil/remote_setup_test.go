@@ -31,6 +31,19 @@ func resetRemoteSetupState(t *testing.T) {
 		return remoteinstall.Probe{}, nil
 	}
 	recordedRemoteBinaryFn = func(string) string { return "" }
+	// The same argument applies with MORE force to the two writers: the accident
+	// there is not a slow test, it is a write to the developer's real
+	// ~/.quil/config.toml, which .claude/rules/dev-environment.md forbids
+	// touching. Fail loudly instead of defaulting to the live implementation —
+	// a test that needs these calls newHealSpy.
+	recordRemoteBinaryFn = func(dest, binary string) error {
+		t.Errorf("unstubbed recordRemoteBinaryFn(%q, %q) — call newHealSpy first", dest, binary)
+		return nil
+	}
+	clearRemoteBinaryFn = func(dest string) error {
+		t.Errorf("unstubbed clearRemoteBinaryFn(%q) — call newHealSpy first", dest)
+		return nil
+	}
 }
 
 // healSpy captures which config mutation a branch chose. Asserting on the
@@ -39,6 +52,12 @@ func resetRemoteSetupState(t *testing.T) {
 type healSpy struct {
 	cleared  []string
 	recorded map[string]string
+}
+
+// dropProbe discards healRemoteRecord's probe return so a test asserting only
+// the control flow reads as two values rather than three.
+func dropProbe(_ *remoteinstall.Probe, done, retry bool) (bool, bool) {
+	return done, retry
 }
 
 func newHealSpy(t *testing.T) *healSpy {
@@ -149,7 +168,7 @@ func TestHealRemoteRecord_ProbeFindsDifferentPath_RecordsAndRetries(t *testing.T
 	spy := newHealSpy(t)
 	recordedRemoteBinaryFn = func(string) string { return "/home/a/.local/bin/quil" }
 	probeRemoteFn = func(string) (remoteinstall.Probe, error) {
-		return remoteinstall.Probe{ExistingPath: "/usr/local/bin/quil"}, nil
+		return remoteinstall.Probe{ExistingPath: "/usr/local/bin/quil", ExistingDirWritable: true}, nil
 	}
 
 	_, done, retry := healRemoteRecord("gpu01")
@@ -173,7 +192,7 @@ func TestHealRemoteRecord_HandInstalledUnrecorded_RecordsAndRetries(t *testing.T
 	spy := newHealSpy(t)
 	recordedRemoteBinaryFn = func(string) string { return "" }
 	probeRemoteFn = func(string) (remoteinstall.Probe, error) {
-		return remoteinstall.Probe{ExistingPath: "/opt/quil/bin/quil"}, nil
+		return remoteinstall.Probe{ExistingPath: "/opt/quil/bin/quil", ExistingDirWritable: true}, nil
 	}
 
 	_, done, retry := healRemoteRecord("gpu01")
@@ -182,6 +201,141 @@ func TestHealRemoteRecord_HandInstalledUnrecorded_RecordsAndRetries(t *testing.T
 	}
 	if got := spy.recorded["gpu01"]; got != "/opt/quil/bin/quil" {
 		t.Errorf("recorded = %q, want the hand-installed path", got)
+	}
+}
+
+// A directory writable by group or other must NOT be adopted. Recording a path
+// is what makes it the ssh remote command on every later attach with no further
+// prompt, so adopting a shared /opt/bin or a group-writable /usr/local/bin (the
+// Homebrew default on multi-admin macOS) would let another local user on that
+// host replace the binary and run as us. PlanTarget already refuses such a
+// directory for an in-place upgrade; the reconciliation has to refuse it too,
+// or it becomes a way around that guard which never prompts.
+func TestHealRemoteRecord_GroupWritableDir_NotAdopted(t *testing.T) {
+	resetRemoteSetupState(t)
+	spy := newHealSpy(t)
+	recordedRemoteBinaryFn = func(string) string { return "" }
+	probeRemoteFn = func(string) (remoteinstall.Probe, error) {
+		return remoteinstall.Probe{
+			ExistingPath:        "/usr/local/bin/quil",
+			ExistingDirWritable: false, // the probe reported "ro"
+		}, nil
+	}
+
+	done, retry := dropProbe(healRemoteRecord("gpu01"))
+	if done || retry {
+		t.Errorf("done, retry = %v, %v; want false, false so the install is offered instead", done, retry)
+	}
+	if len(spy.recorded) != 0 {
+		t.Errorf("adopted a directory writable by group or other: %v", spy.recorded)
+	}
+}
+
+// The suggested command is pasted into the user's OWN shell, and `path` is
+// remote-reported — checkRemotePath admits an apostrophe. Interpolating it raw
+// inside single quotes lets a crafted path close the quote and append a command
+// that runs LOCALLY. It also breaks on legitimate input: this package's own
+// config test uses /home/o'brien/bin/quil.
+func TestReportRemoteBinaryWontRun_QuotesTheSuggestedCommand(t *testing.T) {
+	const evil = `/tmp/a'; touch /tmp/pwned; echo '`
+	out := captureStderr(t, func() { reportRemoteBinaryWontRun("gpu01", evil) })
+
+	// The payload must not sit outside a quoted region. Everything after the
+	// `ssh gpu01 ` prefix is one ShellSingleQuote'd argument, so the injected
+	// apostrophe has to appear in its escaped form.
+	if strings.Contains(out, "; touch /tmp/pwned;") && !strings.Contains(out, `'\''`) {
+		t.Errorf("suggested command lets a crafted path break out of the quotes:\n%s", out)
+	}
+	if !strings.Contains(out, `'\''`) {
+		t.Errorf("apostrophe was not shell-escaped, so the line cannot be pasted:\n%s", out)
+	}
+}
+
+// The probe must run exactly ONCE across the attach path. Both probe sites
+// announce themselves with "Checking <dest>…", so counting that line is what
+// distinguishes one ssh round trip from two — and a regression that made
+// runRemoteSetup ignore opts.probe and re-probe would otherwise pass every
+// other test in this file while silently doubling the wait on a failed launch.
+func TestRunRemoteSetup_ReusesASuppliedProbe(t *testing.T) {
+	resetRemoteSetupState(t)
+	newHealSpy(t)
+	// A dev build refuses at plannedVersion, which runs immediately after the
+	// probe-reuse block — far enough to prove the branch, short of the network.
+	isReleaseFn = func() bool { return false }
+
+	probe := remoteinstall.Probe{
+		Home:         "/home/a",
+		Platform:     remoteinstall.Platform{GOOS: "linux", GOARCH: "amd64"},
+		ExistingPath: "",
+	}
+	out := captureStderr(t, func() {
+		_ = runRemoteSetup("gpu01", setupOptions{probe: &probe})
+	})
+
+	if n := strings.Count(out, "Checking"); n != 0 {
+		t.Errorf("probed again despite being handed a probe (%d times):\n%s", n, out)
+	}
+}
+
+func TestOfferRemoteInstall_ProbesExactlyOnce(t *testing.T) {
+	resetRemoteSetupState(t)
+	newHealSpy(t)
+	isReleaseFn = func() bool { return false }
+	calls := 0
+	probeRemoteFn = func(string) (remoteinstall.Probe, error) {
+		calls++
+		return remoteinstall.Probe{
+			Home:     "/home/a",
+			Platform: remoteinstall.Platform{GOOS: "linux", GOARCH: "amd64"},
+		}, nil
+	}
+
+	out := captureStderr(t, func() {
+		offerRemoteInstall("gpu01", remoteinstall.RemedyInstall)
+	})
+
+	if calls != 1 {
+		t.Errorf("probeRemoteFn called %d times, want exactly 1", calls)
+	}
+	if n := strings.Count(out, "Checking"); n != 1 {
+		t.Errorf("announced a probe %d times, want exactly 1:\n%s", n, out)
+	}
+}
+
+// The record and clear paths are stubbed everywhere else in this file, so the
+// real load → mutate → save — including the fs.ErrNotExist tolerance the
+// comment on mutateConfig calls load-bearing for a fresh machine's first
+// remote — is otherwise never executed. QUIL_HOME redirects config.ConfigPath
+// into a temp dir, so nothing here can touch the developer's real ~/.quil.
+func TestRecordAndClearRemoteBinary_RoundTripOnDisk(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+
+	// First write against a config.toml that does not exist yet.
+	if err := recordRemoteBinary("gpu01", "/home/a/.local/bin/quil"); err != nil {
+		t.Fatalf("recordRemoteBinary on a missing config: %v", err)
+	}
+	cfg, err := config.Load(config.ConfigPath())
+	if err != nil {
+		t.Fatalf("load after record: %v", err)
+	}
+	if got := cfg.RemoteBinary("gpu01"); got != "/home/a/.local/bin/quil" {
+		t.Fatalf("RemoteBinary = %q, want the recorded path", got)
+	}
+	// A default config must have been written, not a zeroed one — otherwise the
+	// first remote provisioned on a fresh machine silently resets every setting.
+	if cfg.Daemon.SnapshotInterval == "" {
+		t.Error("recording into a missing config wrote a zeroed config, not a default one")
+	}
+
+	if err := clearRemoteBinary("gpu01"); err != nil {
+		t.Fatalf("clearRemoteBinary: %v", err)
+	}
+	cfg, err = config.Load(config.ConfigPath())
+	if err != nil {
+		t.Fatalf("load after clear: %v", err)
+	}
+	if got := cfg.RemoteBinary("gpu01"); got != "" {
+		t.Errorf("RemoteBinary = %q after clear, want empty", got)
 	}
 }
 
@@ -388,25 +542,60 @@ func TestRemoteSSHOptions(t *testing.T) {
 	})
 }
 
-// The pre-install line may only claim what the exit code proves. Exit 127 means
-// the remote SHELL could not find quil — a binary in ~/.local/bin is invisible
-// to a non-interactive shell, which is the problem this feature exists to
-// solve. Claiming "not installed" contradicted the probe's own
-// "currently installed: …" one line later.
-func TestOfferRemoteInstall_DoesNotClaimTheHostLacksQuil(t *testing.T) {
-	resetRemoteSetupState(t)
-	newHealSpy(t)
-	// A host with nothing installed and nothing recorded: the reconciliation
-	// falls straight through to the offer, which is the path being asserted on.
-	// isReleaseFn stops runRemoteSetup before it reaches the network.
-	isReleaseFn = func() bool { return false }
+// The pre-install line may claim the host lacks quil ONLY when the probe proved
+// it. Exit 127 alone does not: it means the remote SHELL could not find quil,
+// and a binary in ~/.local/bin is invisible to a non-interactive shell, which is
+// the problem this feature exists to solve. Saying "not installed" on the exit
+// code alone contradicted the probe's own "currently installed: …" one line
+// later on every hand-installed host.
+//
+// The probe now runs first, so this is no longer a prohibition but a
+// precondition — which is the stronger property, and the one worth pinning.
+func TestOfferRemoteInstall_ClaimsTheHostLacksQuilOnlyWhenProbed(t *testing.T) {
+	// isReleaseFn stops runRemoteSetup before it reaches the network in both
+	// subtests; all we assert on is what was printed before that.
+	t.Run("probe failed — must not claim it", func(t *testing.T) {
+		resetRemoteSetupState(t)
+		newHealSpy(t)
+		isReleaseFn = func() bool { return false }
+		probeRemoteFn = func(string) (remoteinstall.Probe, error) {
+			return remoteinstall.Probe{}, errors.New("no route to host")
+		}
 
-	out := captureStderr(t, func() { offerRemoteInstall("nonexistent.invalid", remoteinstall.RemedyInstall) })
+		out := captureStderr(t, func() {
+			offerRemoteInstall("nonexistent.invalid", remoteinstall.RemedyInstall)
+		})
 
-	if strings.Contains(out, "not installed") {
-		t.Errorf("claims the host lacks quil, which exit 127 does not prove:\n%s", out)
-	}
-	if !strings.Contains(out, "could not be started") {
-		t.Errorf("does not report what actually happened:\n%s", out)
-	}
+		if strings.Contains(out, "not installed") {
+			t.Errorf("claims the host lacks quil on a FAILED probe, which proves nothing:\n%s", out)
+		}
+		if !strings.Contains(out, "could not be started") {
+			t.Errorf("does not report what actually happened:\n%s", out)
+		}
+	})
+
+	// Exit 126 says the shell found something and could not exec it, but the
+	// probe's discovery test is `[ -x "$p" ]` — so a binary whose execute bit
+	// was removed yields 126 from the shell and "" from the probe. Announcing
+	// "present but will not execute" there would contradict the probe that just
+	// reported the host has none.
+	t.Run("probe confirms none — may say so even for a reinstall remedy", func(t *testing.T) {
+		resetRemoteSetupState(t)
+		newHealSpy(t)
+		isReleaseFn = func() bool { return false }
+		probeRemoteFn = func(string) (remoteinstall.Probe, error) {
+			return remoteinstall.Probe{ExistingPath: ""}, nil
+		}
+
+		out := captureStderr(t, func() {
+			offerRemoteInstall("nonexistent.invalid", remoteinstall.RemedyReinstall)
+		})
+
+		if strings.Contains(out, "will not execute") {
+			t.Errorf("claims a binary is present when the probe reported none:\n%s", out)
+		}
+		if !strings.Contains(out, "not installed") {
+			t.Errorf("does not report the probe's finding:\n%s", out)
+		}
+	})
 }

@@ -432,14 +432,35 @@ func launchTUI() {
 		if reloaded, loadErr := config.Load(config.ConfigPath()); loadErr == nil {
 			cfg = reloaded
 		}
-		log.Printf("remote: install succeeded, re-dialing %s", remoteDest)
+		log.Printf("remote: the launch blocker is resolved, re-dialing %s", remoteDest)
 		fmt.Fprintf(os.Stderr, "  Attaching…\n\n")
 		client, err = dialRemote(cfg)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "cannot connect to %s after installing: %v\n", remoteDest, err)
+			fmt.Fprintf(os.Stderr, "cannot connect to %s: %v\n", remoteDest, err)
 			os.Exit(1)
 		}
 		client = gateVersionCheck(client)
+		// gateVersionCheck returns nil whenever it wants ANOTHER re-dial, and
+		// remoteInstallRetry was consumed above — so nothing re-enters this
+		// block and control would fall to `defer client.Close()`, which is
+		// c.conn.Close() with no nil guard. The panic is caught by launchTUI's
+		// recover, turning a diagnosable state into a stack dump printed the
+		// instant the user approved an install.
+		//
+		// Reachable from both arms, not only the new one: the RemedyUpgrade arm
+		// skips healRemoteRecord entirely, and reportInstalled's stopWarning
+		// path is a documented case where a remote daemon keeps serving the old
+		// binary from its original inode, so the retry reports the same version
+		// mismatch and offers the upgrade a second time. One re-dial is all this
+		// path offers; anything still wrong here needs a human.
+		if client == nil {
+			fmt.Fprintf(os.Stderr,
+				"\n  Still cannot attach to %s after retrying.\n"+
+					"  Provision it explicitly and read the output:\n"+
+					"    quil remote setup %s\n\n", remoteDest, remoteDest)
+			exitFn(1)
+			return
+		}
 	}
 	defer client.Close()
 

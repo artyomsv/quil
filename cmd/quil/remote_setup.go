@@ -60,10 +60,15 @@ var (
 	clearRemoteBinaryFn  = clearRemoteBinary
 )
 
-// remoteProbeTimeout bounds the reconciliation probe. One ssh round trip on a
-// path that has already failed, so it is short: the user is waiting on an
-// answer about a launch that did not work.
-const remoteProbeTimeout = 60 * time.Second
+// remoteProbeTimeout bounds the reconciliation probe.
+//
+// It is one ssh round trip, but the budget is not sized for the network. This
+// dial is deliberately non-batch — the record exists partly for hosts reached
+// with a passphrase-only key and no agent, and forcing BatchMode here would
+// make the reconciliation permanently unavailable to exactly those. So ssh may
+// prompt for a host-key fingerprint or a passphrase, and the deadline has to
+// cover a HUMAN reading and answering, not just a round trip.
+const remoteProbeTimeout = 3 * time.Minute
 
 // offerRemoteInstallFn is offerRemoteInstall, swappable for tests of the
 // version gate.
@@ -95,9 +100,13 @@ type setupOptions struct {
 	// is what the `quil remote setup` CLI passes.
 	//
 	// A pointer rather than a value because setupOptions is compared with != in
-	// the flag-parsing tests, and Probe is comparable — but "not supplied" must
-	// be distinguishable from a zero Probe, which is a real answer meaning the
-	// host has no quil.
+	// the flag-parsing tests, and Probe is comparable — but "not supplied" has
+	// to stay distinguishable from a zero Probe. Not because a zero Probe is a
+	// real answer: RunProbe cannot produce one, since ParseProbe rejects an
+	// empty HOME outright and PlatformFor must succeed. It is that a zero Probe
+	// reaching PlanTarget yields Dir = ".local/bin" — a RELATIVE remote install
+	// path — so the value that must never be mistaken for an answer is exactly
+	// the one a `setupOptions{}` literal would supply.
 	probe *remoteinstall.Probe
 }
 
@@ -198,7 +207,7 @@ func runRemoteSetup(dest string, opts setupOptions) error {
 		return err
 	}
 
-	if err := recordRemoteBinary(dest, target.BinaryPath()); err != nil {
+	if err := recordRemoteBinaryFn(dest, target.BinaryPath()); err != nil {
 		// The install succeeded; only the shortcut for next time did not.
 		// Reporting it as a failure would be wrong, and silence would leave a
 		// confusing "not found" on the next launch.
@@ -292,8 +301,6 @@ func confirmRemoteInstall(dest string, probe remoteinstall.Probe, target remotei
 	return answer == "y" || answer == "yes"
 }
 
-// recordRemoteBinary saves the resolved absolute path so later launches skip
-// the remote's PATH entirely.
 // mutateConfig applies fn to the config on disk and writes it back.
 //
 // A missing config.toml is the NORMAL first-run state, not a failure —
@@ -318,6 +325,8 @@ func mutateConfig(fn func(*config.Config)) error {
 	return nil
 }
 
+// recordRemoteBinary saves the resolved absolute path so later launches skip
+// the remote's PATH entirely.
 func recordRemoteBinary(dest, binary string) error {
 	return mutateConfig(func(c *config.Config) { c.SetRemoteBinary(dest, binary) })
 }
@@ -393,6 +402,13 @@ func displayVersion(src remoteinstall.Source) string {
 func healRemoteRecord(dest string) (probed *remoteinstall.Probe, done, retry bool) {
 	recorded := recordedRemoteBinaryFn(dest)
 
+	// Announce it. runRemoteSetup prints this before its own probe, but that
+	// branch is skipped whenever a probe is handed to it — which is every path
+	// that reaches here. Without it the terminal is silent for up to
+	// remoteProbeTimeout right after a failed launch, and ssh may be waiting
+	// behind that silence for a passphrase the user cannot see it asking for.
+	fmt.Fprintf(os.Stderr, "Checking %s…\n", dest)
+
 	probe, err := probeRemoteFn(dest)
 	if err != nil {
 		// POSITIVE EVIDENCE ONLY. A probe that failed is not evidence the
@@ -427,6 +443,17 @@ func healRemoteRecord(dest string) (probed *remoteinstall.Probe, done, retry boo
 		// execute. This is the genuine wrong-architecture case, and the only
 		// one that must not loop: "offer forever" requires a path that exists,
 		// which becomes true only after a successful write.
+		//
+		// That termination proof rests on a fact in ANOTHER package, so it is
+		// written down here rather than left to be rediscovered. The probe's
+		// search order (internal/remoteinstall/scripts/remote-probe.sh) is
+		// $HOME/.local/bin/quil, then /usr/local/bin/quil, then `command -v`;
+		// PlanTarget only ever installs to path.Dir(ExistingPath) or to
+		// $HOME/.local/bin. Both are what the NEXT probe reports first —
+		// including the shadowed case, because ~/.local/bin has priority in that
+		// loop. So `recorded == probe.ExistingPath` is guaranteed after any
+		// install this tool performs. Reorder that shell loop and this guard
+		// breaks with every Go test still green.
 		reportRemoteBinaryWontRun(dest, probe.ExistingPath)
 		return &probe, true, false
 
@@ -434,13 +461,43 @@ func healRemoteRecord(dest string) (probed *remoteinstall.Probe, done, retry boo
 		// quil is present somewhere other than where we looked — an admin moved
 		// it, or the host was installed by hand and never recorded. Correct the
 		// record and re-dial rather than reinstalling something already there.
+		//
+		// Adopt ONLY a directory the probe reports as `rw`: writable by us AND
+		// not writable by group or other. This is the same gate PlanTarget
+		// applies before choosing an in-place upgrade, and it has to be repeated
+		// here because recording a path is what makes it the ssh remote command
+		// executed on every later attach with no further prompt. Adopting a
+		// shared /opt/bin or a group-writable /usr/local/bin (the Homebrew
+		// default on multi-admin macOS) would let another local user on that
+		// host replace the binary and run as us. The probe finds such a binary
+		// by ABSOLUTE path precisely because the non-interactive PATH cannot see
+		// it — so a bare `ssh host quil --stdio` would never have run it, and
+		// recording it is what grants the reach.
+		//
+		// Declining to adopt is not a dead end: it falls through to the install
+		// offer, where PlanTarget routes to ~/.local/bin and reports the
+		// shadowing. That is exactly what happened before this reconciliation
+		// existed, so the degradation is to the previous behaviour rather than
+		// to a new failure mode.
+		if !probe.ExistingDirWritable {
+			log.Printf("remote: %s has quil at %q but its directory is not exclusively writable; "+
+				"not adopting it, offering an install instead", dest, probe.ExistingPath)
+			return &probe, false, false
+		}
 		log.Printf("remote: %s has quil at %q, not %q; correcting the record",
 			dest, probe.ExistingPath, recorded)
 		if err := recordRemoteBinaryFn(dest, probe.ExistingPath); err != nil {
 			// Without the record the retry would dial the same wrong path and
-			// land right back here, so this one does have to stop.
-			fmt.Fprintf(os.Stderr, "\n  Found quil at %s on %s, but could not record it: %v\n",
-				probe.ExistingPath, dest, err)
+			// land right back here, so this one does have to stop. The correct
+			// path IS known at this point, so hand it over rather than leaving
+			// the user with a bare error — reportRemoteBinaryWontRun sets the
+			// bar for this file.
+			fmt.Fprintf(os.Stderr,
+				"\n  Found quil at %s on %s, but could not record it: %v\n"+
+					"\n  Fix the config write, or add this to %s:\n"+
+					"    [remote.hosts.%q]\n"+
+					"      binary = %q\n\n",
+				probe.ExistingPath, dest, err, config.ConfigPath(), dest, probe.ExistingPath)
 			return &probe, true, false
 		}
 		fmt.Fprintf(os.Stderr, "\n  Found quil at %s on %s. Reconnecting…\n\n", probe.ExistingPath, dest)
@@ -455,6 +512,14 @@ func healRemoteRecord(dest string) (probed *remoteinstall.Probe, done, retry boo
 // ~/.local/bin/quil unconditionally, which sent a user whose install had simply
 // been deleted to run `uname -sm` — and it came back correct, because the
 // architecture was never the problem.
+//
+// The suggested command is ShellSingleQuote'd, following the same rule as the
+// stop-daemon hint below. `path` is REMOTE-REPORTED and reaches checkRemotePath
+// only for control characters and a leading slash — an apostrophe passes, and
+// this message tells the user to paste the line into their own shell. Naive
+// interpolation inside single quotes lets a crafted path close the quote and
+// append a command that runs LOCALLY. It also simply breaks on legitimate
+// input: this package's own tests use /home/o'brien/bin/quil.
 func reportRemoteBinaryWontRun(dest, path string) {
 	fmt.Fprintf(os.Stderr,
 		"\n"+
@@ -465,13 +530,18 @@ func reportRemoteBinaryWontRun(dest, path string) {
 			"  than the host actually runs.\n"+
 			"\n"+
 			"  Check what the host really is:\n"+
-			"    ssh %s 'uname -sm; file %s'\n"+
+			"    ssh %s %s\n"+
 			"\n",
-		dest, path, dest, path)
+		dest, path, dest, remoteinstall.ShellSingleQuote("uname -sm; file "+path))
 }
 
 // offerRemoteInstall handles a launch that failed because the far side has no
-// usable quil. Returns true when an install succeeded.
+// usable quil.
+//
+// Returns true when the reason the launch failed is GONE and the caller should
+// re-dial — which is no longer the same as "an install succeeded". Reconciling
+// a stale record can resolve it without installing anything, when the host had
+// quil somewhere other than where we looked.
 func offerRemoteInstall(dest string, remedy remoteinstall.Remedy) bool {
 	if remedy == remoteinstall.RemedyNone {
 		return false
@@ -491,20 +561,33 @@ func offerRemoteInstall(dest string, remedy remoteinstall.Remedy) bool {
 		probe = p
 	}
 
-	// Every line here is printed BEFORE the probe runs, so it may only say what
-	// the exit code actually proves. Exit 127 means the remote SHELL could not
-	// find quil — not that the host lacks it: a binary in ~/.local/bin is
-	// invisible to a non-interactive shell, which is the very problem this
-	// feature exists to solve. Asserting "not installed" here contradicted the
-	// probe's own summary one line later ("currently installed: …") on every
-	// hand-installed host.
-	switch remedy {
-	case remoteinstall.RemedyInstall:
-		fmt.Fprintf(os.Stderr, "\n  Quil could not be started on %s.\n", dest)
-	case remoteinstall.RemedyReinstall:
+	// These lines used to be printed BEFORE any probe, so they could only say
+	// what the exit code proved — exit 127 means the remote SHELL could not find
+	// quil, not that the host lacks it, since a binary in ~/.local/bin is
+	// invisible to a non-interactive shell. Asserting "not installed" there
+	// contradicted the probe's own summary one line later on every hand-installed
+	// host.
+	//
+	// The probe now runs first for these remedies, so `probe` is the better
+	// source and the exit code is only a fallback for RemedyUpgrade (which skips
+	// reconciliation) and for a probe that failed.
+	//
+	// RemedyReinstall specifically must NOT be trusted on its own. It is exit
+	// 126 — the shell found something and could not exec it — but the probe's
+	// discovery test is `[ -x "$p" ]`, so a binary whose execute bit was removed
+	// yields 126 from the shell and "" from the probe. Announcing "present but
+	// will not execute" there contradicts the probe that just reported the host
+	// has no quil, which is the same class of error this block was rewritten to
+	// remove.
+	switch {
+	case probe != nil && probe.ExistingPath == "":
+		fmt.Fprintf(os.Stderr, "\n  Quil is not installed on %s.\n", dest)
+	case remedy == remoteinstall.RemedyReinstall:
 		fmt.Fprintf(os.Stderr, "\n  Quil is present on %s but will not execute"+
 			" (wrong architecture).\n", dest)
-	case remoteinstall.RemedyUpgrade:
+	case remedy == remoteinstall.RemedyInstall:
+		fmt.Fprintf(os.Stderr, "\n  Quil could not be started on %s.\n", dest)
+	case remedy == remoteinstall.RemedyUpgrade:
 		// Says nothing: the caller has already printed both versions, and the
 		// probe is about to print the installed path.
 	}

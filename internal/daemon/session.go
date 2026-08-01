@@ -509,47 +509,44 @@ func (sm *SessionManager) SwitchTab(tabID string) {
 	}
 }
 
-// ReorderTab moves the tab with tabID to the given ordinal newIdx in the
-// session's tabOrder. newIdx is clamped to [0, len(tabOrder)-1]; out-of-
-// range values silently snap to the nearest valid slot rather than
-// erroring, so a stale TUI doesn't have to race the daemon for an
-// authoritative tab count.
+// ReorderTab moves the tab with tabID to ordinal newIdx within its OWN
+// project. The tab bar renders one project's tabs and nothing else, so a drag
+// can only ever reorder within a project and newIdx is a PROJECT-relative
+// ordinal. newIdx is clamped to that project's bounds; out-of-range values
+// silently snap to the nearest valid slot rather than erroring, so a stale TUI
+// doesn't have to race the daemon for an authoritative tab count.
+//
+// Project.TabIDs is the half that must move. The client rebuilds each
+// project's tab list from it, so a slide that touched only sm.tabOrder was
+// undone by the very broadcast it triggered — the drag snapped back, and
+// nothing was persisted either, since the snapshot writes tab_ids too.
+//
+// sm.tabOrder is RE-ANCHORED rather than slid by the same index: it is the
+// global list, in which a project-relative ordinal means nothing. Reinserting
+// the tab beside its new project neighbour leaves every other project's tabs
+// exactly where they were and keeps daemon-side iteration (Tabs(), list_tabs,
+// the snapshot's tabs array) agreeing with what the user sees.
+//
+// A tab whose project is unknown — or whose project does not list it — falls
+// back to the pre-project behaviour and slides the global order directly.
 //
 // Returns true when the order actually changed (caller decides whether to
 // snapshot/broadcast).
 func (sm *SessionManager) ReorderTab(tabID string, newIdx int) bool {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-	if _, ok := sm.tabs[tabID]; !ok {
+	tab, ok := sm.tabs[tabID]
+	if !ok {
 		return false
 	}
-	from := -1
-	for i, id := range sm.tabOrder {
-		if id == tabID {
-			from = i
-			break
-		}
+	p, ok := sm.projects[tab.ProjectID]
+	if !ok || indexOfString(p.TabIDs, tabID) < 0 {
+		return slideString(sm.tabOrder, tabID, newIdx)
 	}
-	if from < 0 {
+	if !slideString(p.TabIDs, tabID, newIdx) {
 		return false
 	}
-	if newIdx < 0 {
-		newIdx = 0
-	}
-	if newIdx >= len(sm.tabOrder) {
-		newIdx = len(sm.tabOrder) - 1
-	}
-	if from == newIdx {
-		return false
-	}
-	// Slide the slice without allocating: pull tabID out, shift the gap
-	// across the affected range, drop tabID into newIdx.
-	if from < newIdx {
-		copy(sm.tabOrder[from:newIdx], sm.tabOrder[from+1:newIdx+1])
-	} else {
-		copy(sm.tabOrder[newIdx+1:from+1], sm.tabOrder[newIdx:from])
-	}
-	sm.tabOrder[newIdx] = tabID
+	sm.tabOrder = reanchorTab(sm.tabOrder, p.TabIDs, tabID)
 	return true
 }
 

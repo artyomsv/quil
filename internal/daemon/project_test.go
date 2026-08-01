@@ -1,11 +1,128 @@
 package daemon
 
 import (
+	"reflect"
 	"testing"
 	"time"
 
+	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
 )
+
+// tabIDsOf returns one project's tab order as the daemon holds it.
+func tabIDsOf(t *testing.T, sm *SessionManager, projectID string) []string {
+	t.Helper()
+	for _, p := range sm.Projects() {
+		if p.ID == projectID {
+			return p.TabIDs
+		}
+	}
+	t.Fatalf("project %q not found", projectID)
+	return nil
+}
+
+// globalTabIDs returns sm.Tabs() order — what list_tabs and the snapshot's
+// `tabs` array are built from.
+func globalTabIDs(t *testing.T, sm *SessionManager) []string {
+	t.Helper()
+	out := make([]string, 0)
+	for _, tab := range sm.Tabs() {
+		out = append(out, tab.ID)
+	}
+	return out
+}
+
+// broadcastTabIDs runs the real snapshot builder and digs out one project's
+// tab_ids — the field the client rebuilds its tab list from. This is the
+// daemon half of the drag round trip: the client half
+// (TestApplyWorkspaceStateOrdersTabsByProjectTabIDs, internal/tui) proves the
+// client follows tab_ids and not the `tabs` array.
+func broadcastTabIDs(t *testing.T, sm *SessionManager, projectID string) []string {
+	t.Helper()
+	d := New(config.Default())
+	activeTab, tabs, panesByTab, projects, activeProject := sm.SnapshotState()
+	state := d.workspaceStateFromSnapshot(activeTab, tabs, panesByTab, projects, activeProject, false)
+	list, ok := state["projects"].([]any)
+	if !ok {
+		t.Fatalf("projects = %T, want []any", state["projects"])
+	}
+	for _, raw := range list {
+		p, ok := raw.(map[string]any)
+		if !ok || p["id"] != projectID {
+			continue
+		}
+		ids, ok := p["tab_ids"].([]string)
+		if !ok {
+			t.Fatalf("tab_ids = %T, want []string", p["tab_ids"])
+		}
+		return ids
+	}
+	t.Fatalf("project %q missing from the broadcast", projectID)
+	return nil
+}
+
+// A tab drag has to survive the broadcast it triggers. The client rebuilds
+// each project's tab list from projects[].tab_ids, so the reorder must land
+// THERE: moving only the global tabOrder left the broadcast carrying the new
+// order in `tabs` and the OLD order in `tab_ids`, so the tab snapped back on
+// the next tick — and was never persisted either, since the snapshot writes
+// tab_ids too.
+func TestReorderTabMovesTheOwningProjectsTabIDs(t *testing.T) {
+	sm := NewSessionManager(1024)
+	p := sm.CreateProject("alpha", "/tmp/a")
+	a := sm.CreateTabInProject(p.ID, "A")
+	b := sm.CreateTabInProject(p.ID, "B")
+	c := sm.CreateTabInProject(p.ID, "C")
+
+	if !sm.ReorderTab(c.ID, 0) {
+		t.Fatal("ReorderTab reported no change")
+	}
+
+	want := []string{c.ID, a.ID, b.ID}
+	if got := tabIDsOf(t, sm, p.ID); !reflect.DeepEqual(got, want) {
+		t.Errorf("TabIDs = %v, want %v", got, want)
+	}
+	if got := broadcastTabIDs(t, sm, p.ID); !reflect.DeepEqual(got, want) {
+		t.Errorf("broadcast tab_ids = %v, want %v — the client rebuilds from this", got, want)
+	}
+	// The global order follows, so list_tabs and the snapshot's `tabs` array
+	// agree with what the user sees.
+	if got := globalTabIDs(t, sm); !reflect.DeepEqual(got, want) {
+		t.Errorf("global tab order = %v, want %v", got, want)
+	}
+}
+
+// NewIndex is an ordinal within the dragged tab's OWN project — the tab bar
+// never shows another project's tabs, so it cannot mean anything else. Applied
+// to the global order it would land the tab at an unrelated slot and shove
+// other projects' tabs aside; the re-anchoring keeps them put.
+func TestReorderTabLeavesOtherProjectsUntouched(t *testing.T) {
+	sm := NewSessionManager(1024)
+	alpha := sm.CreateProject("alpha", "/tmp/a")
+	beta := sm.CreateProject("beta", "/tmp/b")
+	a1 := sm.CreateTabInProject(alpha.ID, "A1")
+	b1 := sm.CreateTabInProject(beta.ID, "B1")
+	a2 := sm.CreateTabInProject(alpha.ID, "A2")
+	b2 := sm.CreateTabInProject(beta.ID, "B2")
+	// Global creation order: A1 B1 A2 B2.
+
+	// Drag beta's second tab to beta's FIRST slot — a project-relative 0.
+	if !sm.ReorderTab(b2.ID, 0) {
+		t.Fatal("ReorderTab reported no change")
+	}
+
+	if got, want := tabIDsOf(t, sm, beta.ID), []string{b2.ID, b1.ID}; !reflect.DeepEqual(got, want) {
+		t.Errorf("beta TabIDs = %v, want %v", got, want)
+	}
+	if got, want := tabIDsOf(t, sm, alpha.ID), []string{a1.ID, a2.ID}; !reflect.DeepEqual(got, want) {
+		t.Errorf("alpha TabIDs = %v, want %v — a foreign drag must not touch them", got, want)
+	}
+	// b2 is re-anchored next to its new project neighbour; alpha's tabs keep
+	// both their relative order and their surroundings.
+	if got, want := globalTabIDs(t, sm), []string{a1.ID, b2.ID, b1.ID, a2.ID}; !reflect.DeepEqual(got, want) {
+		t.Errorf("global tab order = %v, want %v", got, want)
+	}
+}
 
 func TestCreateProjectAppendsAndActivatesFirst(t *testing.T) {
 	sm := NewSessionManager(1024)

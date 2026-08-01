@@ -167,3 +167,78 @@ func removeString(s []string, v string) []string {
 	}
 	return s
 }
+
+func indexOfString(s []string, v string) int {
+	for i, x := range s {
+		if x == v {
+			return i
+		}
+	}
+	return -1
+}
+
+// slideString moves v to ordinal newIdx IN PLACE, shifting the entries between
+// the old and new positions by one. That is the tab drag's own semantics: a
+// swap would teleport the displaced tab into the dragged tab's old slot, which
+// feels wrong when dragging across several positions.
+//
+// newIdx is clamped to the slice. Reports whether anything actually moved.
+func slideString(s []string, v string, newIdx int) bool {
+	from := indexOfString(s, v)
+	if from < 0 {
+		return false
+	}
+	if newIdx < 0 {
+		newIdx = 0
+	}
+	if newIdx >= len(s) {
+		newIdx = len(s) - 1
+	}
+	if from == newIdx {
+		return false
+	}
+	if from < newIdx {
+		copy(s[from:newIdx], s[from+1:newIdx+1])
+	} else {
+		copy(s[newIdx+1:from+1], s[newIdx:from])
+	}
+	s[newIdx] = v
+	return true
+}
+
+// reanchorTab repositions tabID in the GLOBAL tab order so that its position
+// relative to its own project's other tabs matches projTabs, without moving
+// any other project's tab.
+//
+// It anchors on a NEIGHBOUR rather than on an index because the two lists are
+// not parallel: the global order interleaves projects in tab-creation order,
+// so the project-relative ordinal that named the destination has no meaning
+// in it. The tab that now precedes it inside the project is the only stable
+// reference point.
+func reanchorTab(order, projTabs []string, tabID string) []string {
+	at := indexOfString(projTabs, tabID)
+	if at < 0 {
+		return order
+	}
+	rest := removeString(order, tabID)
+	if at > 0 {
+		if i := indexOfString(rest, projTabs[at-1]); i >= 0 {
+			return insertStringAt(rest, i+1, tabID)
+		}
+	}
+	if at+1 < len(projTabs) {
+		if i := indexOfString(rest, projTabs[at+1]); i >= 0 {
+			return insertStringAt(rest, i, tabID)
+		}
+	}
+	// A project with no other tab in the global order has no neighbour to
+	// anchor against, and no visible ordering to get wrong.
+	return append(rest, tabID)
+}
+
+func insertStringAt(s []string, i int, v string) []string {
+	s = append(s, "")
+	copy(s[i+1:], s[i:])
+	s[i] = v
+	return s
+}

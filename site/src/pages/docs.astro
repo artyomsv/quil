@@ -47,7 +47,7 @@ const sections: DocSection[] = [
   {
     title: "Using Quil",
     items: [
-      { name: "Features",          path: "docs/features.md",         tag: "← TOUR",         desc: "Capability tour grouped by area: persistence, layout, typed panes, clipboard, observability, pane notes." },
+      { name: "Features",          path: "docs/features.md",         tag: "← TOUR",         desc: "Capability tour grouped by area: persistence, remote attach over SSH, the command palette, layout, typed panes, clipboard, observability, pane notes." },
       { name: "Keybindings",       path: "docs/keybindings.md",      tag: "← KEYS",         desc: "Full keymap, customization syntax, what to bind and what to leave passing through to the PTY." },
       { name: "Configuration",     path: "docs/configuration.md",    tag: "← CONFIG",       desc: "~/.quil/config.toml reference — every section and every key with defaults and effects." },
       { name: "MCP",               path: "docs/mcp.md",              tag: "← AI",           desc: "Let your AI assistant drive Quil. Client wiring for Claude / Cursor / VS Code, all 18 tools, redaction model." },
@@ -64,7 +64,7 @@ const sections: DocSection[] = [
     title: "Project context",
     items: [
       { name: "Vision",            path: "docs/vision.md",           tag: "← PHILOSOPHY",   desc: "Why Quil exists, who it's for, and what problem the reboot-proof workspace promise solves." },
-      { name: "Architecture",      path: "docs/architecture.md",     tag: "← INTERNALS",    desc: "Client-daemon model, PTY backends, IPC protocol, state persistence — 24 ADRs covering every meaningful decision." },
+      { name: "Architecture",      path: "docs/architecture.md",     tag: "← INTERNALS",    desc: "Client-daemon model, PTY backends, IPC protocol, state persistence — 25 ADRs covering every meaningful decision." },
       { name: "PRD",               path: "docs/prd.md",              tag: "← SPEC",         desc: "Original v1 product requirements: personas, user stories, success metrics, scope boundaries. Historical reference." },
       { name: "Roadmap",           path: "docs/roadmap.md",          tag: "← PLAN",         desc: "Milestone-by-milestone progress through the latest release, plus in-flight polish work and the competitive-gap milestones." },
       { name: "Competitive analysis", path: "docs/competitive-analysis.md", tag: "← COMPARE", desc: "Deep comparison vs herdr and Agent of Empires — capability matrix, the 20 gaps worth chasing, and where Quil leads. See also /vs/herdr and /vs/aoe." },
@@ -73,9 +73,15 @@ const sections: DocSection[] = [
     ],
   },
   {
+    title: "Feature PRDs — shipped & in flight",
+    items: [
+      { name: "Remote daemon attach", path: "docs/roadmap/remote-daemon.md",  tag: "← BETA",    desc: "`quil --remote <host>`: the transport, the reconnect loop, and the work to make every dialog describe the server rather than your laptop. Phases 1–3 shipped; mTLS is planned." },
+      { name: "Command palette",   path: "docs/roadmap/command-palette.md",   tag: "← SHIPPED", desc: "Fuzzy launcher for every pane, tab, and action, plus cross-pane scrollback search. Shipped — Alt+Shift+P (Ctrl+Shift+P is opt-in, since many terminals intercept it)." },
+    ],
+  },
+  {
     title: "Future roadmap PRDs",
     items: [
-      { name: "Command palette",   path: "docs/roadmap/command-palette.md",   tag: "← FUTURE", desc: "Fuzzy-search command bar accessible via Ctrl+Shift+P. Future milestone." },
       { name: "Community plugins", path: "docs/roadmap/community-plugins.md", tag: "← FUTURE", desc: "A registry + discovery mechanism for user-contributed TOML plugins." },
       { name: "Session sharing",   path: "docs/roadmap/session-sharing.md",   tag: "← FUTURE", desc: "Read-only tunnel into a live Quil workspace so a collaborator can watch your panes." },
       { name: "Process health",    path: "docs/roadmap/process-health.md",    tag: "← FUTURE", desc: "Liveness probes per pane with automatic restart policies. Think systemd for pane processes." },

@@ -18,6 +18,16 @@ export const homeFaq: FaqItem[] = [
       "tmux and Zellij are terminal multiplexers — they survive network disconnects but not full host reboots. Quil survives reboots. It also understands pane types (a Claude Code pane resumes differently than an SSH pane), ships an MCP server for AI agents, and tracks per-pane notes alongside your work. For a deeper comparison, see /vs/tmux or /vs/zellij.",
   },
   {
+    question: "Can I use Quil on a remote server over SSH?",
+    answer:
+      "Yes — `quil --remote gpu01` runs the daemon on the server and the TUI on your laptop, so the panes and AI sessions live on the remote host and keep running when you close the lid. No port is opened on the server: Quil runs `ssh -T gpu01 \"quil --stdio\"` and speaks its normal protocol over that one channel, so bastions behind ProxyJump, Tailscale addresses, hardware tokens, and your existing ~/.ssh/config all work unchanged. If the link drops, an amber bar names the host and reconnects on its own with backoff — nothing stopped running, so there is nothing to resume. The server does not need Quil installed first: point --remote at a bare machine and it downloads the release for the remote's platform onto your laptop, verifies the checksum there, and pushes it over the connection you already have. It is beta today — plugin definitions still come from your local machine, and remotes must be Linux or macOS.",
+  },
+  {
+    question: "How do I find the right pane when I have dozens open?",
+    answer:
+      "Press Alt+Shift+P for the command palette. It fuzzy-finds every pane and tab across the whole workspace (listed as tab.pane with the pane type, so duplicates are distinguishable) and every action, each row showing its keybinding. The same box also searches content: start typing and a `Found in panes` section lists every pane whose scrollback contains your text, with a match count and a preview of the most recent hit — press Enter on one to jump straight to that pane. That answers \"which pane had that error, URL, or container id?\" without hunting tab by tab. No other multiplexer searches across panes without a third-party plugin.",
+  },
+  {
     question: "Which AI tools does Quil support today?",
     answer:
       "Claude Code has first-class support via the built-in Claude Code pane type, with auto-resume on daemon restart, a setup dialog that pre-fills the active pane's working directory (so the project's `.claude/` context is preserved), and a one-click `Dangerously skip permissions` toggle for unattended runs. Quil also runs an MCP server (`quil mcp`) that exposes 18 tools so any MCP-capable client can read pane output, send keystrokes, snapshot a workspace, and query per-pane memory usage. Any other AI tool can be wrapped in a custom TOML plugin that defines its spawn command, resume strategy, and error patterns.",

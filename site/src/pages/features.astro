@@ -13,9 +13,9 @@ import { breadcrumbSchema, itemListSchema } from "@/data/schemas";
 import { features, featureCategories, type Feature } from "@/data/features";
 
 const seo = {
-  title: "Features — typed panes, AI resume, plugin system, and more",
+  title: "Features — remote attach, command palette, AI resume, typed panes",
   description:
-    "A complete tour of every Quil capability: reboot-proof persistence, typed panes, AI session auto-resume, MCP server, TOML plugin system, notification center, and pane notes.",
+    "Every Quil capability: reboot-proof persistence, remote attach over SSH, a command palette that searches every pane, AI session auto-resume, typed panes, MCP server, and TOML plugins.",
   path: "/features",
   ogImage: "/og/features.png",
   keywords: [
@@ -24,6 +24,10 @@ const seo = {
     "persistent terminal",
     "tmux alternative features",
     "ai session resume",
+    "remote terminal multiplexer",
+    "ssh remote attach",
+    "terminal command palette",
+    "search terminal scrollback",
   ],
 };
 
@@ -79,6 +83,26 @@ for (const feature of features) {
         If you came here looking for a matrix of checkboxes — this is
         the matrix.
       </p>
+
+      {/* Jump nav. Without it this page is a single 29-item scroll with no
+          index, so a feature that exists reads as a feature that is missing —
+          which is exactly the report that prompted adding this. Every entry
+          is a real anchor into the sections below. */}
+      <nav class="feat-jump" aria-label="Jump to a feature category">
+        {categoryOrder.map((cat) => (
+          <a href={`#cat-${cat}`}>
+            {featureCategories[cat]}
+            <span class="n">{byCategory[cat].length}</span>
+          </a>
+        ))}
+      </nav>
+
+      <div class="feat-jump-hint">
+        Most asked for: <a href="#remote-daemon-ssh">Remote daemon over SSH</a> ·
+        <a href="#command-palette">Command palette + content search</a> ·
+        <a href="#ai-session-resume">AI session resume</a> ·
+        <a href="#mcp-server">MCP server</a>
+      </div>
     </div>
   </section>
 
@@ -87,7 +111,7 @@ for (const feature of features) {
     if (items.length === 0) return null;
     const sectionNo = String(index + 1).padStart(2, "0");
     return (
-      <section class="feat-category">
+      <section class="feat-category" id={`cat-${cat}`}>
         <div class="container-ember stack">
           <div class="feat-category-head">
             <div>
@@ -148,6 +172,58 @@ for (const feature of features) {
 </Page>
 
 <style>
+  /* Category jump nav + "most asked for" shortcut row. */
+  .feat-jump {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 28px;
+  }
+  .feat-jump a {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 8px;
+    padding: 7px 14px;
+    border: 1px solid var(--line-2);
+    background: var(--bg-2);
+    color: var(--ink-2);
+    font-family: var(--mono-stack);
+    font-size: 12.5px;
+    letter-spacing: 0.04em;
+    text-decoration: none;
+    transition: border-color 0.15s, color 0.15s;
+  }
+  .feat-jump a:hover,
+  .feat-jump a:focus-visible {
+    border-color: var(--flame);
+    color: var(--ink);
+  }
+  .feat-jump .n {
+    color: var(--ink-4);
+    font-size: 11px;
+  }
+
+  .feat-jump-hint {
+    margin-top: 14px;
+    font-size: 13px;
+    line-height: 1.9;
+    color: var(--ink-3);
+  }
+  .feat-jump-hint a {
+    color: var(--flame);
+    text-decoration: none;
+  }
+  .feat-jump-hint a:hover {
+    text-decoration: underline;
+  }
+
+  /* Anchor targets sit under no fixed header, but a little breathing room
+     keeps the heading off the very top edge when jumped to. */
+  .feat-category,
+  .feat-item {
+    scroll-margin-top: 24px;
+  }
+
   /* Feature screenshots (opt-in via the data layer's `image` field). */
   .feat-shot {
     display: block;

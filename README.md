@@ -121,11 +121,16 @@ nothing to resume. Keystrokes are *dropped* rather than queued while the link is
 down: a key typed at a dead connection would otherwise arrive minutes later in a
 live agent session, answering a question that had already moved on.
 
-Filesystem dialogs browse the *server's* disk — the working-directory picker,
-`~`, relative paths, and git-repository discovery all ask the daemon rather than
-answering for the wrong machine. Beta, and honest about it: kube contexts and
-plugin availability are still decided locally, and remotes must be Linux or
-macOS. Details and the roadmap are in
+**Every dialog describes the server, not your laptop.** The working-directory
+picker, `~`, relative paths, drive and root listings, git-repository discovery,
+kube contexts, which tools are installed, and the recent-directories list all
+ask the daemon. Before that, `Alt+G` could report no repository in a directory
+where the agent *in that very pane* answered `git status` with the branch name.
+
+Beta, and honest about it: plugin *definitions* still come from your local
+machine, the daemon detects installed tools only at startup and on plugin
+reload, `quil status` and the update controls refuse rather than retargeting,
+and remotes must be Linux or macOS. Details and the roadmap are in
 [docs/features.md](docs/features.md#remote-daemon-over-ssh).
 
 ## Let your AI assistant drive Quil

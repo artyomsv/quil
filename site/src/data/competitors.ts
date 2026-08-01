@@ -44,6 +44,15 @@ export const competitorMatrix: CompareRow[] = [
     screen: "no",
   },
   {
+    feature: "Remote attach: local client, sessions on another host",
+    quil: "yes",
+    tmux: "no",
+    zellij: "no",
+    wezterm: "yes",
+    screen: "no",
+    note: "tmux, Zellij and Screen run their client ON the remote — you ssh in first, and a dropped link means re-attaching by hand. WezTerm's mux domains and Quil's `quil --remote <host>` both keep the client local and reconnect by themselves. Quil opens no port on the server (it is one `ssh -T` channel) and installs itself on a bare host.",
+  },
+  {
     feature: "Typed panes (Terminal / AI / SSH / Webhook)",
     quil: "yes",
     tmux: "no",
@@ -75,6 +84,24 @@ export const competitorMatrix: CompareRow[] = [
     zellij: "no",
     wezterm: "partial",
     screen: "no",
+  },
+  {
+    feature: "Command palette (fuzzy action + pane launcher)",
+    quil: "yes",
+    tmux: "partial",
+    zellij: "partial",
+    wezterm: "yes",
+    screen: "no",
+    note: "WezTerm's is built in (Ctrl+Shift+P, frecency-ranked). tmux has a command prompt but it is not fuzzy. Zellij's comes from community plugins (cmd-pal), not the core.",
+  },
+  {
+    feature: "Search every pane's scrollback from one prompt",
+    quil: "yes",
+    tmux: "no",
+    zellij: "no",
+    wezterm: "no",
+    screen: "no",
+    note: "Every other tool searches one pane at a time in copy mode — including WezTerm, whose palette is command-only. Across panes, tmux needs the third-party tmux-grep plugin. In Quil it is the same box as the command palette: type, and matching panes appear under `Found in panes` with a preview and a match count.",
   },
   {
     feature: "MCP server for AI agents",
@@ -358,7 +385,7 @@ export const competitors: Record<CompetitorInfo["slug"], CompetitorInfo> = {
     description:
       "A Rust TUI + React web dashboard that manages AI coding agents on top of tmux, with git worktrees, Docker sandboxing, a mobile-first 'structured view', and remote phone access. Backed by the Mozilla.ai community.",
     positioning:
-      "Agent of Empires and Quil solve the same problem from opposite ends. AoE wraps tmux and invests everything above it — a browser dashboard, an Agent-Client-Protocol structured view, container sandboxing, and phone access over a tunnel. Quil builds its own multiplexer and invests in the terminal itself — native Windows, an MCP server, pane notes. AoE is the richer remote/mobile experience; Quil is the tighter native-terminal and Windows experience.",
+      "Agent of Empires and Quil solve the same problem from opposite ends. AoE wraps tmux and invests everything above it — a browser dashboard, an Agent-Client-Protocol structured view, container sandboxing, and phone access over a tunnel. Quil builds its own multiplexer and invests in the terminal itself — native Windows, an MCP server, pane notes, and a remote mode that puts the panes on a server while the TUI stays on your laptop. On a phone or in a browser AoE is still far ahead; from a terminal, Quil now reaches a remote host without any of that stack.",
     keyStrength:
       "Reach and isolation. A real browser dashboard (installable PWA) with a native structured view of agent state, remote phone access via Tailscale/Cloudflare with QR + passphrase pairing and Web Push, git worktree-per-session and multi-repo workspaces, an in-TUI diff viewer, and Docker/Podman/Apple-Container sandboxing with shared auth volumes.",
     keyGap:
@@ -373,6 +400,7 @@ export const competitors: Record<CompetitorInfo["slug"], CompetitorInfo> = {
       { feature: "MCP server for AI agents", quil: "yes", them: "no", note: "AoE exposes a bespoke HTTP REST API; Quil speaks MCP natively." },
       { feature: "Pane notes editor", quil: "yes", them: "no" },
       { feature: "Per-pane memory reporting", quil: "yes", them: "no" },
+      { feature: "Remote attach from a native terminal client", quil: "yes", them: "no", note: "`quil --remote <host>` runs the TUI locally against a daemon on the server, opens no port, reconnects on its own, and installs itself on a bare machine. AoE's remote surface is the browser dashboard — for a terminal you ssh in and attach tmux by hand." },
       { feature: "Web dashboard (browser terminal + diffs, PWA)", quil: "no", them: "yes" },
       { feature: "Remote phone access (tunnel + QR/passphrase + Web Push)", quil: "no", them: "yes" },
       { feature: "ACP structured view (plan / tool / approve cards)", quil: "no", them: "yes" },

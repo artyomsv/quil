@@ -31,6 +31,20 @@ export const plugins: PluginEntry[] = [
     ],
   },
   {
+    slug: "terminal-wide",
+    name: "Terminal (keeps content on squeeze)",
+    kind: "built-in",
+    description:
+      "The same shell pane on a window-sized canvas. Squeezing the pane crops what you see instead of reflowing the shell, so long log lines survive a narrow split — the trade is that formatting assumes the wider width while the pane is narrow. Built for log tails and watch loops.",
+    spawnExample: '# built-in — same shell detection as `terminal`\n# [display] wide_canvas = true',
+    features: [
+      "Window-sized canvas: the child PTY is not resized when the pane is squeezed",
+      "Content is cropped from the left edge by default; Alt+Shift+W switches the pane to soft wrap",
+      "Renders natively once the pane is at least 80 columns wide (`[display] min_native_cols`)",
+      "Same shell detection, OSC 7 injection, and ghost buffer as the standard Terminal pane",
+    ],
+  },
+  {
     slug: "claude-code",
     name: "Claude Code",
     kind: "built-in",

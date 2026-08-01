@@ -24,7 +24,7 @@ import { homeFaq } from "@/data/faq";
 const seo = {
   title: "Reboot-proof terminal multiplexer for AI development",
   description:
-    "Quil is a reboot-proof terminal multiplexer for AI-native developers. Typed panes, auto-resuming Claude Code sessions, an MCP server. One static binary per platform.",
+    "Quil is a reboot-proof terminal multiplexer for AI-native developers. Typed panes, auto-resuming Claude Code sessions, remote attach over SSH, and an MCP server. One static binary per platform.",
   path: "/",
   ogImage: "/og/home.png",
   keywords: [
@@ -36,6 +36,9 @@ const seo = {
     "claude code multiplexer",
     "reboot-proof workflow",
     "mcp server",
+    "remote terminal multiplexer",
+    "ssh remote attach",
+    "terminal command palette",
   ],
 };
 
@@ -58,13 +61,25 @@ const topFeatures = [
     number: "◇ 03",
     title: "Typed panes, not shells",
     tag: "← TOML PLUGINS",
-    body: `A Claude Code pane resumes differently than an SSH tunnel, which resumes differently than a <span class="mono">stripe listen</span>. Five types built in — <span class="mono">terminal</span>, <span class="mono">claude-code</span>, <span class="mono">opencode</span> (beta), <span class="mono">ssh</span>, <span class="mono">stripe</span>. Yours in 30 lines of TOML. No compile, no restart, hot-reload on save.`,
+    body: `A Claude Code pane resumes differently than an SSH tunnel, which resumes differently than a <span class="mono">stripe listen</span>. Nine types built in — <span class="mono">terminal</span>, <span class="mono">claude-code</span>, <span class="mono">opencode</span> (beta), <span class="mono">ssh</span>, <span class="mono">stripe</span>, <span class="mono">lazygit</span>, <span class="mono">k9s</span>, <span class="mono">lazysql</span>. Yours in 30 lines of TOML. No compile, no restart, hot-reload on save.`,
   },
   {
     number: "◇ 04",
     title: "MCP server for agents",
     tag: "← AGENT LAYER",
     body: `Run <span class="mono" style="color:var(--flame);">quil mcp</span> and any MCP-capable client — Claude Desktop, Cursor, Claude Code — can list panes, read output, send keystrokes, and snapshot your workspace. 18 tools. Your terminal becomes addressable by AI.`,
+  },
+  {
+    number: "◇ 05",
+    title: "Panes on another machine",
+    tag: "← REMOTE · BETA",
+    body: `<span class="mono" style="color:var(--flame);">quil --remote gpu01</span> puts the daemon on the server and the TUI on your laptop. No port is opened — it is <span class="mono">ssh -T</span> and one channel. Close the lid and the panes keep working; reopen and an amber bar reconnects on its own. Every directory picker reads the <b>server's</b> disk, not yours. <a href="/features#remote-daemon-ssh" style="color:var(--flame); white-space:nowrap;">How remote attach works →</a>`,
+  },
+  {
+    number: "◇ 06",
+    title: "One key for everything",
+    tag: "← COMMAND PALETTE",
+    body: `<span class="mono" style="color:var(--flame);">Alt+Shift+P</span> fuzzy-finds every pane, tab and action — and the same box searches the scrollback of <b>every</b> pane at once. "Which pane had that container id?" becomes one query and one Enter. No other multiplexer searches across panes without a plugin.`,
   },
 ];
 
@@ -73,6 +88,13 @@ const compareRows = [
   { feature: "AI session resume",        values: ["yes", "no",  "no",  "no" ] },
   { feature: "Typed panes",              values: ["yes", "no",  "no",  "no" ] },
   { feature: "MCP server for agents",    values: ["yes", "no",  "no",  "no" ] },
+  // WezTerm gets a genuine "yes" here — its mux domains run a local client
+  // against wezterm-mux-server and reconnect on their own. tmux/Zellij run
+  // the client ON the remote over ssh, so a dropped link means re-attaching
+  // by hand. Claiming otherwise would be the kind of error a /vs page is
+  // least forgiven for.
+  { feature: "Remote attach, auto-reconnect", values: ["yes", "no", "no", "yes"] },
+  { feature: "Search every pane at once", values: ["yes", "no",  "no",  "no" ] },
   { feature: "Native Windows (no WSL)",  values: ["yes", "no",  "no",  "yes"] },
 ];
 
@@ -184,7 +206,7 @@ const revTimestamp = new Date().toISOString().slice(0, 10).replace(/-/g, "");
 
       <div class="features-head">
         <div>
-          <div class="section-tag"><span class="dot"></span>FOUR THINGS · DONE WELL</div>
+          <div class="section-tag"><span class="dot"></span>SIX THINGS · DONE WELL</div>
           <h2 class="h2" style="margin-top:18px;">
             A <span class="flame-text">multiplexer</span> is a tool. Quil is a <span class="flame-text">contract</span>.
           </h2>
@@ -193,8 +215,9 @@ const revTimestamp = new Date().toISOString().slice(0, 10).replace(/-/g, "");
           <p>
             The contract: your machine rebooting is <b style="color:var(--ink);">not</b>
             your problem. Neither is re-explaining context to Claude
-            Code, re-pasting your last screenshot, or rebuilding five
-            SSH tunnels by hand. Four capabilities, each load-bearing,
+            Code, re-pasting your last screenshot, rebuilding five SSH
+            tunnels by hand, or losing a server-side agent because your
+            laptop went to sleep. Six capabilities, each load-bearing,
             each opinionated.
           </p>
         </div>

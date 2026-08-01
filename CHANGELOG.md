@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.46.3] - 2026-08-01
+
 ### Fixed
 - **The working indicator went dark while a Claude Code background agent was
   still running.** A pane could sit with no spinner on its border and none on

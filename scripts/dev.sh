@@ -68,6 +68,9 @@ EOF
 
 case "${1:-help}" in
   build)
+    # Cheap, host-side, and it fails BEFORE the Docker run so a docs-size
+    # problem costs a second rather than a full build.
+    sh "$PROJECT_DIR/scripts/check-claude-md-size.sh"
     refuse_if_binaries_held
     $DOCKER_RUN sh -c "\
       apk add --no-cache curl unzip >/dev/null 2>&1 && \
@@ -138,6 +141,11 @@ case "${1:-help}" in
     rm -rf "$PROJECT_DIR/dist/"
     ;;
 
+  docs-size)
+    sh "$PROJECT_DIR/scripts/check-claude-md-size.sh"
+    echo "Agent-context files are within their size limits."
+    ;;
+
   help|*)
     echo "Usage: ./dev.sh <command>"
     echo ""
@@ -149,5 +157,6 @@ case "${1:-help}" in
     echo "  cross          Cross-compile for all platforms"
     echo "  image          Build Docker image (scratch-based)"
     echo "  clean          Remove built binaries"
+    echo "  docs-size      Check .claude/ agent-context files against size limits"
     ;;
 esac

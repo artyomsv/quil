@@ -1,0 +1,86 @@
+---
+description: Daemon startup, shutdown, restore, snapshots, IPC queues, event queue lock discipline, and ghost buffers. Load when touching the daemon, the IPC layer, or persistence.
+paths:
+  - "**/internal/daemon/**"
+  - "**/internal/ipc/**"
+  - "**/internal/persist/**"
+  - "**/internal/ringbuf/**"
+  - "**/cmd/quild/**"
+---
+
+# Daemon Lifecycle
+
+Extracted verbatim from `.claude/CLAUDE.md`. Loaded only when the files above are in play.
+
+## IPC transport queues
+
+### `internal/ipc/`
+
+Length-prefixed JSON protocol (4-byte big-endian uint32 + JSON). Each `Conn` owns TWO 64-slot queues — `critCh` (must-deliver: state, responses, ghost replay, lifecycle) and `outCh` (droppable: live `MsgPaneOutput` broadcast frames) — drained by a priority `sendLoop` (critical-first). `Send`/`sendFrame` are non-blocking; `SendBlocking` (unicast bulk: ghost replay + attach event replay, which routinely exceed 64 frames — two full 256 KB ghost buffers = 64 chunks) waits for `critCh` to drain below half capacity (`sendHeadroom`) instead of tripping the overflow close — backpressure slows only that client's replay, the reserved half keeps concurrent broadcast criticals from hitting a replay-saturated queue, and it aborts on conn close (`ErrConnClosed`) or a caller cancel channel (`ErrSendCanceled`, daemon shutdown). `Broadcast` marshals once, clones the wire frame, then fans out via `enqueue(frame, droppable)` where `droppable = msg.Type == MsgPaneOutput`; `Send` (unicast: ghost replay, MCP responses) is always must-deliver. A full `outCh` DROPS the frame silently (tracked via `Dropped()`) — the conn survives (lossy live output, cosmetically superseded by the next frame). A full `critCh` trips a CAS-guarded overflow (`ErrSendOverflow`), logs once, and spawns `go c.Close()` — only a genuinely wedged peer is disconnected; other clients are never blocked. `sendLoop` also enforces a 30 s `SetWriteDeadline` per frame as a belt-and-suspenders catch for kernel-buffer wedges. `Server.ConnCount()` exposes the live count for tests. Daemon-side per-event size caps (4 KiB Message, 1 KiB per Data value — fits a multi-line excerpt in `data.excerpt`, front-truncated with `…[truncated]` marker, reserved `_quil_truncated` flag) live in `internal/daemon/event.go:toPaneEventPayload`
+
+## Startup and readiness
+
+### Daemon single-instance guard
+
+`cmd/quild/main.go` calls `daemonAlreadyHealthy(config.SocketPath())` (`cmd/quild/guard.go`) BEFORE `daemon.Start()` — if a healthy daemon is serving the socket, it logs and exits cleanly (`quild already running`) instead of proceeding. Without this, `ipc.Server.Start()` unconditionally `os.Remove`s the socket and re-listens, so every redundant `quild --background` spawn would steal the socket from the running daemon and orphan it (kept alive headless, holding `quild.log` open — breaking rotation — and leaking RAM). The check is a real `MsgVersionReq`/`MsgVersionResp` handshake (`daemonAlreadyHealthyWithin`, 2 s), NOT a bare `ipc.NewClient` dial: a **wedged** daemon (accepts connections but never processes IPC — see `snapshotWatchdog`/`wedge_regression_test.go`) or a foreign process squatting the path would both accept a dial, and deferring to either would wrongly refuse a legitimate startup. Only a genuinely healthy daemon defers the spawn; a stale/wedged/foreign socket is left for `Server.Start` to reclaim. Residual TOCTOU: two daemons that both fail the handshake before either listens can still race (availability-only, same-UID; proper fix is a cross-platform advisory lock — deferred)
+
+### Daemon readiness wait
+
+every client-side spawn path (TUI auto-start, `quil daemon start`, `quil restart`, upgrade-restart in `version_gate.go`, MCP bridge) waits via `waitForDaemonReady(sock, pid)` → `waitForDaemonReadyWithin` (`cmd/quil/daemonctl.go`), polling the socket up to `daemonReadyTimeout` (30 s) with `daemonReadyPoll` (100 ms). It is **crash-aware**: when `pid > 0` and `processProbe(pid)` reports the spawned daemon dead, it aborts immediately rather than blocking the full budget — a genuine crash is reported fast, a slow-but-healthy restore is tolerated. The 30 s budget replaces an old fixed 2 s retry loop that produced false `daemon did not come up` failures on heavy restores: the daemon spawns the active tab's panes AND every `Eager`-flagged pane **serially** before it listens (`respawnPanes`, `daemon.go` — `tab.ID == active || pane.Eager`), so N eager `claude --resume` panes cost ~N×200-300 ms of pre-listen time. `startDaemon` returns the spawned pid (0 ⇒ a daemon was already listening) so the wait can watch it
+
+## Restart and shutdown
+
+### Pane restart
+
+`restart_pane` keybinding (default `alt+r`) opens a confirm dialog (`confirmKindRestartPane`) and sends `MsgRestartPaneReq` — the same request the MCP `restart_pane` tool uses, so the daemon-side kill+respawn (resume strategy, session ids) is shared. Daemon replies `MsgRestartPaneResp` unicast (respondTo works with an empty `Message.ID`); the TUI listener logs it via an explicit case. Confirm labels resolve through `paneDisplayName` (name → CWD → truncated id), shared with the Ctrl+W close confirm. Exempt in notes mode via `notesKeyExempt`
+
+### Daemon restart/stop CLI
+
+`quil restart` (stop + fresh daemon + TUI), `quil daemon stop|restart`, AND the version-gate upgrade restart (`restartDaemonForUpgrade`, `cmd/quil/version_gate.go`) share `stopDaemonEscalating` (`cmd/quil/daemonctl.go`) — bounded escalation IPC `MsgShutdown` (5s) → SIGTERM (3s, Unix only) → SIGKILL (2s), then stale sock/pid cleanup. The upgrade path ABORTS when that stop returns an error rather than spawning a replacement: it used to send a bare `MsgShutdown`, wait 5 s, then delete the socket + PID file and spawn anyway, which left the old daemon running detached with every pane PTY attached and no bookkeeping to find it by (the PID file the stop path reads had just been erased), while the new daemon restored the same snapshot into a DUPLICATE set of panes — re-resuming already-resumed claude sessions and pinning the old binary so no later update could clear it. Works against a wedged daemon (deadlocked dispatch). Prints `environment: production|dev (<dir>)` first (dev = `QUIL_HOME` set, mirrors the TUI `[dev]` indicator). PID-reuse guard: `processProbe` (`procctl_unix.go` / `procctl_windows.go`: `ps -o comm=` / `tasklist CSV`) must report a `quild*` image name (`isQuildName`) or the PID is treated as stale and never signaled. IPC-tier subtlety: `Conn.Send` only queues the frame and `Close` discards queued frames — the CLI keeps the conn open while polling for daemon exit, else the shutdown message is silently dropped (the historical `quil daemon stop` flakiness)
+
+## Restore and snapshots
+
+### Workspace restore
+
+On daemon start, `restoreWorkspace()` loads `~/.quil/workspace.json`, reconstructs tabs/panes, loads ghost buffers from `~/.quil/buffers/`, then `respawnPanes()` spawns processes per plugin type with saved CWD and resume strategy. Lazy restore: `respawnPanes` runs BEFORE the IPC server starts listening (happen-before guarantee) and spawns ONLY the active tab's panes plus any `Eager`-flagged panes; the rest are marked `Pane.Pending = true` (runtime-only, never persisted). Pending panes are spawned on first access via `ensurePaneSpawned` (single pane, guarded by `Pane.spawnMu`) or `ensureTabSpawned` (all panes in a tab, called from `handleSwitchTab`/`handleSwitchTabReq` on tab switch and from MCP pane ops). `spawnMu` is separate from `PluginMu` because `spawnPane` locks `PluginMu` on the calling goroutine — reusing it would self-deadlock. Deferred panes report `Running=false`/`Pending=true` in `list_panes`/`get_pane_status`. `Pane.Type` and `Pane.CWD` are also `PluginMu`-protected (the lazy-spawn path can rewrite them on error branches while IPC readers are live). All `d.server.Broadcast` calls go through a nil-guarded `d.broadcast` helper since `d.server` is nil during `respawnPanes`
+
+### Snapshot triggers
+
+centralized event queue via `snapshotCh` channel — `requestSnapshot()` sends non-blocking request, `Wait()` loop debounces with 500ms `time.AfterFunc`. Triggers: create/destroy tab/pane, switch tab, update layout, update pane, client disconnect. Periodic timer (30s) as safety net. Final flush on daemon stop
+
+### Ghost buffer dimming
+
+`PaneOutputPayload.Ghost` flag distinguishes replay from live output. Panes show muted border + "restored" label until first live output clears the flag. Controlled by `GhostBufferConfig.Dimmed` (default true)
+
+### GhostSnap restore
+
+`Pane.GhostSnap` stores pure disk-loaded ghost data separately from `OutputBuf` (live ring buffer). `handleAttach` prefers GhostSnap for first client after restore (prevents respawned shell init output from contaminating history replay), falls back to OutputBuf for reconnects. Cleared after first replay.
+
+**`claude-code` ships `ghost_buffer = true` as of 2026-08-01 (schema_version 11)** — the founding assumption that replaying a full-screen app yields garbage was MEASURED FALSE: claude-code writes to the MAIN screen and scrolls normally (which is why it is scrollable while attached), so its stream replays into coherent history. Both paths were confirmed on a real link — in-memory after a TUI quit, and from disk after a daemon restart, the latter landing under a freshly respawned `--resume` process. The schema bump is load-bearing: a user's own `~/.quil/plugins/claude-code.toml` OVERRIDES the embedded default, so without it an existing install keeps `false` forever and never sees the change. `redraw_key` is KEPT, because `handleAttach` still falls through to `redrawKick` when the buffer is empty (a fresh pane, or one whose buffer was lost). `opencode` stays `false` deliberately — its value was never the reset's fault, and it is the plugin that behaves OPPOSITE to claude-code on redraw triggers, so it needs its own measurement rather than an inference from this one.
+
+**The TUI preserves the VT on the ghost→live transition for EVERY pane type** (`model.go`'s `PaneOutputMsg` arm). It used to reset specifically for `claude-code`, on the theory that replayed ANSI pollutes cursor state — a branch written in the SAME commit that introduced `ghost_buffer` and set claude-code to `false`, so nothing could ever satisfy it (`Pane.ghost` is only set by a ghost frame, and that plugin receives none). It named the one plugin that could not reach it, and sat dead until the flag was flipped experimentally on 2026-07-31 — whereupon it destroyed exactly what the flag exists to restore: `ResetVT` installs a FRESH EMULATOR, and the emulator's scrollback is where replayed history lives, so the pane came back with its history and lost it on the first keystroke (the reset fires on the live frame, and typing is what produces one). `ghost_buffer = true` already states that a pane's replayed content is wanted, so a type name in the TUI cannot outrank the plugin's own setting; cursor state is self-correcting, since the live frame triggering the transition IS the child painting. A second hazard rode along: `Pane.ghost` is only set when `GhostBuffer.Dimmed` is on, so the reset was gated on a COSMETIC knob and turning dimming off silently preserved history — `TestGhostToLive_ScrollbackSurvivesRegardlessOfDimming` pins that the coupling cannot return. That preservation is scoped to the ghost→live moment and is unchanged by reconnect: `resetForReattach` (`internal/tui/reconnect.go`) resets **every** pane including terminals, deliberately, because it runs BEFORE the attach that replays them — nothing respawns there and the content is about to arrive again, so the skip's rationale (protecting restored content from a respawned shell's init output) does not apply.
+
+**`redrawKick` (`daemon.go`) covers the panes that get NO replay** — `ghost_buffer = false` means nothing is sent on attach, so the rectangle stays blank until the child writes, and a full-screen program has no reason to write unprompted. There are TWO mechanisms and **neither is universal, which is the entire point**: a declared `Persistence.RedrawKey` is written to stdin (opt-in per plugin because it is INPUT — a program reading its own stdin for data receives it as data, so a plain terminal at a password prompt or in `cat > file` must never get one), otherwise a resize jiggle, which needs no opt-in because SIGWINCH cannot be misread as data. The first version concluded from claude-code alone that resize "does not work" and shipped the key as the ONLY mechanism, leaving opencode and lazygit (`ghost_buffer = false`, no key) blank on every reattach — locally as well as remotely.
+
+**Measured 2026-07-31 against real panes: opencode emits ~8 KB on SIGWINCH and 0 bytes on Ctrl+L; claude-code is the exact inverse.** So `redraw_key = "\f"` on opencode — the obvious fix, the one the schema invites — would have been a no-op. Declaring a key now MEANS "I ignore SIGWINCH" and suppresses the jiggle. `resizeKick`'s own zero-size guard is what stops a pane whose first `resize_pane` has not arrived from being resized to 0×0
+
+## Events and idle
+
+### Notification center
+
+`internal/daemon/event.go` — bounded event queue (mutex-protected, not channel) survives TUI disconnects and replays on attach. `connWatcher` one-shot pub/sub for `watch_notifications` MCP tool. Events emitted by: process exit, OSC 133 command completion, bell detection (30s cooldown), smart idle analysis. LOCK DISCIPLINE: `emitEvent` locks the pane's `PluginMu` for the mute check, so NO emit site may call it while holding that pane's `PluginMu` (non-reentrant — `detectBellEvent` did and self-deadlocked the whole daemon on every Claude attention-bell until 2026-06-12; regression tests in `bell_event_test.go`). `internal/tui/notification.go` — sidebar toggled via Alt+N (3-state: hidden → visible+unfocused → visible+focused → hidden), F3 focuses sidebar. The sidebar is a compositor OVERLAY (`overlayRight` in `internal/tui/compose.go`): it draws over the tab content's right edge and reserves no layout width, so toggling it never resizes a pane/PTY (resize churn made claude-code panes repaint and garble scrollback — 2026-07-04 fix; `sidebarOverlayWidth`/`sidebarSwallowsMouse` in model.go gate rendering and mouse). Drawn in focus mode too. Pane history stack with Alt+Backspace navigation. Related: `handleResizePane` skips same-size PTY resizes (`Pane.appliedCols/appliedRows`, zeroed on PTY install), and AI panes render on a window-sized canvas (`[display] wide_canvas`, preview renderer in `internal/tui/pane_preview.go`) so grid/zoom/sidebar changes never resize their PTY — preview defaults to left-edge crop, `toggle_wrap` (Alt+Shift+W) switches the active pane to soft-wrap. A wide_canvas pane renders **natively** (PTY sized to its rect) once its inner width ≥ `[display] min_native_cols` (default 80, `paneVTSize` in `canvas.go` is the sole decision point); below the threshold it uses the window canvas + preview. Because `previewMode()` derives from `innerW < vt.Width()`, native panes report `previewMode()==false` and get mouse+keyboard selection for free; narrow preview panes get **mouse** selection via `previewPosAt` (inverse of the `locate` layout) with the highlight drawn in `renderPreview`. Keyboard selection stays native/zoom-only.
+
+### Smart idle analysis
+
+`idleChecker()` goroutine ticks 1s, `checkIdlePanes()` reads last 4KB of ring buffer at idle (5s no output), strips ANSI, matches against plugin `[[idle_handlers]]` patterns. 30s cooldown per pane via `LastIdleEventAt`. Single `PluginMu` lock span for read+conditional write (race fix)
+
+## Logging
+
+### Diagnostic logging
+
+daemon logs IPC dispatch (excluding high-frequency input/resize/layout), client attach/disconnect, snapshot metrics (tabs, panes, buffer bytes, duration), ghost replay details (source, bytes), spawn commands, tab/pane lifecycle. TUI logs ghost transitions, workspace state, layout restore. IPC server logs connection count on connect/disconnect.
+
+**Leveled logging**: `internal/logger/` wraps Go's stdlib `slog` and bridges the existing 152 `log.Printf` call sites at info level. Configure via `[logging] level = "debug|info|warn|error"` in `~/.quil/config.toml`. Use `logger.Debug(...)` for verbose traces (clipboard pipeline, per-key handler, etc.) that should be off by default. Both daemon (`cmd/quild/main.go`) and TUI (`cmd/quil/main.go`) load config FIRST then call `logger.Init(cfg.Logging.Level, file)` so legacy and new log paths share one filter.
+
+**Log rotation**: `quild.log`/`quil.log` rotate via `internal/logger/rotate.go` (`RotatingWriter`). Config knobs: `[logging] max_size_mb` (default 5) / `max_files` (default 10). When the active file would exceed `max_size_mb`, it is renamed to a timestamped archive (`stem-YYYYMMDD-HHMMSS.log`); the newest `max_files` archives are kept (pruned by modification time). On a failed rename (Windows file-lock), writing continues to the original path and rotation is suppressed until another `max_size_mb` bytes accumulate (back-off prevents a per-write hot-loop)
+

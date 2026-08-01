@@ -1,0 +1,19 @@
+---
+description: Update checking, staging, and the rename-aside apply/rollback swap. Load when touching the update package or the apply path.
+paths:
+  - "**/internal/update/**"
+  - "**/cmd/quil/update_apply.go"
+  - "**/internal/daemon/update.go"
+  - "**/internal/tui/update.go"
+---
+
+# Auto-update
+
+Extracted verbatim from `.claude/CLAUDE.md`. Loaded only when the files above are in play.
+
+## Auto-update
+
+### Auto-update
+
+`internal/update/` (stdlib-only: GitHub `releases/latest` checker, sha256-verified download, extract to `$QUIL_HOME/update/staged/<ver>/` with `manifest.json` written LAST as the atomic completion marker; daemon-owned `state.json`, TUI-owned `notified.json` — single writer per file). The whole pipeline is compiled off for dev/debug builds via `internal/version.SetUpdatesEnabled`/`UpdatesEnabled()` (ldflag sink `main.buildUpdatesOff`, set to `"true"` for both `F_DEV` and `F_DBG` in `scripts/dev.sh`) — without this, a staged release applied to `quil-dev.exe`/`quild-dev.exe` would strip the baked-in `buildDevMode` ldflag and the next launch would silently attach to production `~/.quil`. Daemon: `updateChecker` goroutine (`internal/daemon/update.go`, 1 min after listen then every 24 h; gated on `[update] check` + `version.IsRelease()` + `version.UpdatesEnabled()`) publishes `ipc.UpdateInfo` under the broadcast-only `update` key of `workspace_state`; the exe-dir writability probe gates STAGING only (`[update] auto`'s background stage, and the on-demand path), not the checker goroutine itself. `MsgStageUpdateReq` (on-demand stage, worker goroutine — never on the dispatch goroutine, single-flight via `updateStaging` atomic) re-checks GitHub even when nothing is stageable and answers `Error: "already up to date"`; the TUI's About row uses this to make "Check for updates" trigger a real check instead of repeating stale broadcast state. TUI (`internal/tui/update.go`): status-bar `↑ vX [ready]` segment, dynamic About row (`aboutUpdateIndex`, label becomes "Updates disabled (dev build)" when the pipeline is off; Stop daemon at index 8), update-notice dialog gated to the FIRST `WorkspaceStateMsg` per attach (`Model.sawFirstState` — every later broadcast in the session, e.g. switch tab, also carries the update key and would otherwise reopen it), `confirmKindApplyUpdate` quits with `Model.applyUpdateOnExit`. Settings dialog (`internal/tui/dialog.go:settingsFields`) exposes `[update] check`/`auto` as two boolean rows (apply on next daemon restart). Apply (`cmd/quil/update_apply.go`): verify manifest hashes → `[Y/n]` prompt (skipped when pre-confirmed) → resolve `os.Executable()` exactly ONCE before any swap (Linux's `os.Executable()` is a live `readlink /proc/self/exe`; re-resolving after `swapOne` renames the running binary aside would return the `.old` path and respawn the old binary) → rename-aside swap (`<bin>.old` backup, pair-rollback) → respawn self (at the pre-resolved path) as wrapper with `QUIL_UPDATE_RESTART=1`, which makes the version gate skip its own restart prompt; backups + staged dir cleaned (`removeBackups`) on the next launch where versions match. The backup slot comes from `freeBackupPath`, NOT a hardcoded `<bin>.old`: a backup stays undeletable for as long as a live process still runs it as its image (an orphaned daemon, an AV handle), and Windows refuses DELETE on such a file — which fails `os.Remove` AND the `MOVEFILE_REPLACE_EXISTING` rename behind `os.Rename`, both with "Access is denied". So the canonical slot is reused when it can be cleared and otherwise falls back to `<bin>.old.1`, `.2`, … (cap `maxBackupSlots`); `swapOne` returns the slot it used so `swapPair`'s rollback restores the right file. Without the fallback one leftover wedges EVERY later update, since nothing ever clears it. A confirmed "Update now" that fails to apply prints one stderr line (`cmd/quil/main.go`) instead of silently falling through to a normal launch
+

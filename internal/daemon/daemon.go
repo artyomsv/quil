@@ -962,15 +962,25 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 	case ipc.MsgCreateProject:
 		var p ipc.CreateProjectPayload
 		msg.DecodePayload(&p)
-		d.session.CreateProject(p.Name, p.RootDir)
+		proj := d.session.CreateProject(p.Name, p.RootDir)
+		// A project ships with a shell, exactly like a fresh workspace. An
+		// empty one renders as a blank screen the moment the user switches to
+		// it, and there is no in-band way out: Ctrl+T files its tab against
+		// the daemon's ACTIVE project, which a just-created one is not.
+		d.recoverEmptyProject(proj.ID)
 		d.broadcastState()
+		d.requestSnapshot()
 
 	case ipc.MsgDestroyProject:
 		var p ipc.DestroyProjectPayload
 		msg.DecodePayload(&p)
 		detached := d.session.DestroyProject(p.ProjectID)
 		releasePanes(detached)
+		// Destroying the last project leaves nothing to render, and destroying
+		// the active one can promote a project that is itself empty.
+		d.recoverEmptyProject(d.session.ActiveProject())
 		d.broadcastState()
+		d.requestSnapshot()
 
 	case ipc.MsgUpdateProject:
 		var p ipc.UpdateProjectPayload
@@ -981,8 +991,16 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 	case ipc.MsgSwitchProject:
 		var p ipc.SwitchProjectPayload
 		msg.DecodePayload(&p)
-		d.session.SwitchProject(p.ProjectID)
+		// ensureTabSpawned is the whole point of the returned tab: after a
+		// lazy restore only sm.activeTab's panes are running, so a background
+		// project's panes are Pending until something switches to their tab —
+		// and switching PROJECT never did, so they showed the restore
+		// indicator with no process behind them, indefinitely.
+		if tabID, ok := d.session.SwitchProject(p.ProjectID); ok && tabID != "" {
+			d.ensureTabSpawned(tabID)
+		}
 		d.broadcastState()
+		d.requestSnapshot()
 
 	case ipc.MsgReorderProject:
 		var p ipc.ReorderProjectPayload
@@ -1217,8 +1235,9 @@ func (d *Daemon) handleCreateTab(conn *ipc.Conn, msg *ipc.Message) {
 	d.session.SwitchTab(tab.ID)
 	log.Printf("tab created: %s %q", tab.ID, tab.Name)
 
-	// Every tab needs a default pane with a shell
-	pane, _ := d.session.CreatePane(tab.ID, d.defaultCWD())
+	// Every tab needs a default pane with a shell, rooted at the OWNING
+	// project's directory (see projectCWD).
+	pane, _ := d.session.CreatePane(tab.ID, d.projectCWD(tab.ProjectID))
 	pane.Type = "terminal"
 
 	ptySession := apty.New()
@@ -1236,6 +1255,13 @@ func (d *Daemon) handleDestroyTab(msg *ipc.Message) {
 		return
 	}
 	log.Printf("tab destroy: %s", payload.TabID)
+	// The owning project has to be read BEFORE the destroy: DestroyTab
+	// de-registers the tab from it, so afterwards there is nothing left to
+	// ask which project just lost a tab.
+	projectID := ""
+	if tab := d.session.Tab(payload.TabID); tab != nil {
+		projectID = tab.ProjectID
+	}
 	// Capture the pane list before DestroyTab removes them from the session
 	// maps, so we can clean up their artifacts after the tab is gone.
 	panes := d.session.Panes(payload.TabID)
@@ -1244,19 +1270,95 @@ func (d *Daemon) handleDestroyTab(msg *ipc.Message) {
 		d.cleanupPaneArtifacts(p.ID)
 	}
 
-	// Auto-create replacement if last tab was destroyed
-	if len(d.session.Tabs()) == 0 {
-		tab := d.session.CreateTab("Shell")
-		pane, _ := d.session.CreatePane(tab.ID, d.defaultCWD())
-		pane.Type = "terminal"
-		ptySession := apty.NewWithSize(80, 24)
-		if err := d.spawnPane(pane, ptySession, false); err != nil {
-			log.Printf("failed to start replacement shell: %v", err)
-		}
-	}
+	d.recoverEmptyProject(projectID)
 
 	d.broadcastState()
 	d.requestSnapshot()
+}
+
+// recoverEmptyProject re-creates a shell tab for a project that has no tabs
+// left, and returns without doing anything when it still has some.
+//
+// The guard is PER PROJECT, not per workspace. A workspace-wide
+// `len(Tabs()) == 0` test leaves project A empty whenever project B still has
+// tabs, and an empty ACTIVE project renders as a blank screen with no tab bar:
+// there is nothing to click and nothing to close. "Deleting the last tab
+// auto-creates a new Shell tab" is an always-on invariant of this codebase, and
+// projects made it an invariant per project.
+//
+// projectID may be empty or unknown — a tab from a pre-project snapshot, or one
+// whose project a racing DestroyProject removed. projectIsEmpty falls back to
+// the workspace-wide test there, and createTabLocked resolves the empty ID to
+// the active project or bootstraps one, so the workspace still recovers.
+func (d *Daemon) recoverEmptyProject(projectID string) {
+	if !d.projectIsEmpty(projectID) {
+		return
+	}
+	tab := d.session.CreateTabInProject(projectID, "Shell")
+	pane, err := d.session.CreatePane(tab.ID, d.projectCWD(tab.ProjectID))
+	if err != nil {
+		log.Printf("recover empty project %q: create pane: %v", projectID, err)
+		return
+	}
+	pane.Type = "terminal"
+	// Through newSessionFn rather than apty.NewWithSize directly: same 80×24
+	// default in production, and the seam is what lets a test assert the
+	// replacement shell's CWD without launching a child.
+	if err := d.spawnPane(pane, newSessionFn(80, 24), false); err != nil {
+		log.Printf("failed to start replacement shell: %v", err)
+	}
+	// DestroyTab moves the GLOBAL active tab to tabOrder[0], which can belong
+	// to a different project. If the project we just repaired is the one the
+	// user is looking at, the replacement is the tab they should land on.
+	if tab.ProjectID == d.session.ActiveProject() {
+		d.session.SwitchTab(tab.ID)
+	}
+}
+
+// projectIsEmpty reports whether projectID names a project with no tabs left.
+// An empty or unknown ID falls back to the workspace-wide test — the
+// pre-project behaviour, and still the right answer for a tab that belongs to
+// no project the daemon knows about.
+func (d *Daemon) projectIsEmpty(projectID string) bool {
+	if projectID != "" {
+		for _, p := range d.session.Projects() {
+			if p.ID == projectID {
+				return len(p.TabIDs) == 0
+			}
+		}
+	}
+	return len(d.session.Tabs()) == 0
+}
+
+// projectCWD is the directory a new tab in projectID starts its shell in: the
+// project's own RootDir when it names a real directory on THIS machine, else
+// the daemon's default.
+//
+// Without this the root directory a user picks in the New Project dialog is
+// collected, validated, persisted and editable while never being used for
+// anything — every tab in every project opens in the daemon's own CWD. A stale
+// value falls back rather than failing the spawn: a snapshot can outlive the
+// directory it names, and can be restored on a machine where that path never
+// existed.
+func (d *Daemon) projectCWD(projectID string) string {
+	if projectID == "" {
+		return d.defaultCWD()
+	}
+	for _, p := range d.session.Projects() {
+		if p.ID != projectID {
+			continue
+		}
+		if p.RootDir != "" {
+			if info, err := os.Stat(p.RootDir); err == nil && info.IsDir() {
+				if resolved, err := filepath.EvalSymlinks(p.RootDir); err == nil {
+					return resolved
+				}
+				return p.RootDir
+			}
+		}
+		break
+	}
+	return d.defaultCWD()
 }
 
 func (d *Daemon) handleSwitchTab(msg *ipc.Message) {

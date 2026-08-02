@@ -101,14 +101,44 @@ func (sm *SessionManager) UpdateProject(id, name, rootDir string) bool {
 	return true
 }
 
-func (sm *SessionManager) SwitchProject(id string) bool {
+// SwitchProject makes id the active project and moves the global active tab
+// onto that project's OWN remembered tab. It returns that tab's ID (empty for
+// a project with no tabs) and whether the project existed.
+//
+// Moving sm.activeTab is not bookkeeping. It is what respawnPanes eagerly
+// restores on the next daemon start, so leaving it on the OUTGOING project's
+// tab makes the following restore warm up the wrong project.
+//
+// The tab ID is returned rather than kept private because the caller has to
+// spawn it: after a lazy restore every tab but sm.activeTab's is Pending, and
+// nothing else on the project-switch path reaches ensureTabSpawned — so the
+// incoming project's panes would sit on the restore indicator forever, with no
+// process behind them and no resize able to rescue them.
+func (sm *SessionManager) SwitchProject(id string) (string, bool) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-	if _, ok := sm.projects[id]; !ok {
-		return false
+	p, ok := sm.projects[id]
+	if !ok {
+		return "", false
 	}
 	sm.activeProject = id
-	return true
+
+	// The remembered tab can have been destroyed since; fall back to the
+	// project's first, exactly like the client's indexOfTab. A project with no
+	// tabs at all leaves activeTab alone — there is nothing to point it at,
+	// and clearing it would strand every later "which tab" question.
+	tabID := p.ActiveTab
+	if _, live := sm.tabs[tabID]; !live {
+		tabID = ""
+		if len(p.TabIDs) > 0 {
+			tabID = p.TabIDs[0]
+		}
+	}
+	if tabID != "" {
+		sm.activeTab = tabID
+		p.ActiveTab = tabID
+	}
+	return tabID, true
 }
 
 func (sm *SessionManager) ReorderProject(id string, newIndex int) bool {

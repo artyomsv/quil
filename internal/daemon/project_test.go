@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -269,7 +271,7 @@ func TestDestroyProjectActiveTabStaysWithinActiveProject(t *testing.T) {
 	// Make C both the active project and the holder of the active tab, so
 	// destroying it forces the repair path on both activeProject and
 	// activeTab.
-	if !sm.SwitchProject(c.ID) {
+	if _, ok := sm.SwitchProject(c.ID); !ok {
 		t.Fatal("SwitchProject(c) = false")
 	}
 	sm.SwitchTab(tabC1.ID)
@@ -355,7 +357,171 @@ func TestHandleProjectMessagesMutateState(t *testing.T) {
 	destroy, _ := ipc.NewMessage(ipc.MsgDestroyProject, ipc.DestroyProjectPayload{ProjectID: p.ID})
 	d.handleMessage(nil, destroy)
 
-	if len(d.session.Projects()) != 0 {
-		t.Fatal("project survived destroy")
+	for _, pr := range d.session.Projects() {
+		if pr.ID == p.ID {
+			t.Fatal("project survived destroy")
+		}
+	}
+	// Destroying the LAST project leaves a workspace with nothing to render
+	// and no tab bar to act on, so the handler bootstraps a replacement — the
+	// same always-on invariant that auto-creates a Shell tab when the last one
+	// is closed. (This expectation changed with that fix; before it, the
+	// client was left on a blank screen.)
+	if len(d.session.Projects()) != 1 {
+		t.Fatalf("projects = %v, want exactly one bootstrapped replacement", d.session.Projects())
+	}
+	if len(d.session.Tabs()) != 1 {
+		t.Fatalf("tabs = %d, want the replacement project to ship one", len(d.session.Tabs()))
+	}
+}
+
+// TestHandleSwitchProjectSpawnsTheIncomingProjectsTab: after a lazy restore
+// only sm.activeTab's panes are running, and switching PROJECT never reached
+// ensureTabSpawned — so a background project's panes stayed Pending
+// indefinitely, showing the restore indicator with no process behind them.
+// resizeAllPanes cannot rescue that: there is no PTY to resize.
+func TestHandleSwitchProjectSpawnsTheIncomingProjectsTab(t *testing.T) {
+	d := newTestDaemon(t)
+	a := d.session.CreateProject("A", t.TempDir())
+	b := d.session.CreateProject("B", t.TempDir())
+	tabA := d.session.CreateTabInProject(a.ID, "A1")
+	tabB := d.session.CreateTabInProject(b.ID, "B1")
+
+	paneA, err := d.session.CreatePane(tabA.ID, t.TempDir())
+	if err != nil {
+		t.Fatalf("create pane A: %v", err)
+	}
+	paneB, err := d.session.CreatePane(tabB.ID, t.TempDir())
+	if err != nil {
+		t.Fatalf("create pane B: %v", err)
+	}
+	// The shape a lazy restore leaves behind: everything outside the active
+	// tab is deferred.
+	paneA.Type, paneB.Type = "terminal", "terminal"
+	paneA.Pending, paneB.Pending = true, true
+
+	if _, ok := d.session.SwitchProject(a.ID); !ok {
+		t.Fatal("SwitchProject(a) = false")
+	}
+	d.ensureTabSpawned(tabA.ID)
+	if paneB.PTY != nil {
+		t.Fatal("setup invariant broken: B's pane must still be Pending before the switch")
+	}
+
+	msg, _ := ipc.NewMessage(ipc.MsgSwitchProject, ipc.SwitchProjectPayload{ProjectID: b.ID})
+	d.handleMessage(nil, msg)
+
+	if paneB.PTY == nil || paneB.Pending {
+		t.Error("switching project left the incoming tab's panes unspawned — the user " +
+			"lands on a restore indicator with no process behind it")
+	}
+	// The secondary half: sm.activeTab is what the NEXT daemon start eagerly
+	// restores, so leaving it on the outgoing project warms the wrong one.
+	if got := d.session.ActiveTabID(); got != tabB.ID {
+		t.Errorf("ActiveTabID() = %q, want %q (the incoming project's own tab)", got, tabB.ID)
+	}
+}
+
+// TestHandleDestroyTabRecoversThePerProjectLastTab: the auto-recovery guard
+// used to be workspace-wide (len(Tabs()) == 0), so closing the last tab of
+// project A while B still had tabs left A empty — and an empty ACTIVE project
+// renders as a blank screen with no tab bar to act on.
+func TestHandleDestroyTabRecoversThePerProjectLastTab(t *testing.T) {
+	d := newTestDaemon(t)
+	a := d.session.CreateProject("A", t.TempDir())
+	b := d.session.CreateProject("B", t.TempDir())
+	tabA := d.session.CreateTabInProject(a.ID, "A1")
+	d.session.CreateTabInProject(b.ID, "B1")
+	if _, ok := d.session.SwitchProject(a.ID); !ok {
+		t.Fatal("SwitchProject(a) = false")
+	}
+
+	msg, _ := ipc.NewMessage(ipc.MsgDestroyTab, ipc.DestroyTabPayload{TabID: tabA.ID})
+	d.handleMessage(nil, msg)
+
+	ids := tabIDsOf(t, d.session, a.ID)
+	if len(ids) != 1 {
+		t.Fatalf("project A tabs = %v, want one replacement — B still having tabs "+
+			"must not stop A from recovering its own last one", ids)
+	}
+	if ids[0] == tabA.ID {
+		t.Fatal("the destroyed tab is still registered to the project")
+	}
+	// DestroyTab moves the global active tab to tabOrder[0], which here belongs
+	// to project B — a highlighted tab absent from the tab list the client
+	// renders for the active project.
+	if got := d.session.ActiveTabID(); got != ids[0] {
+		t.Errorf("ActiveTabID() = %q, want the replacement %q", got, ids[0])
+	}
+}
+
+// TestHandleCreateProjectShipsATabRootedAtTheProjectDir covers both halves of
+// the New Project flow: a project with no tab renders as a blank screen the
+// moment the user switches to it (and Ctrl+T files its tab against the ACTIVE
+// project, so there is no way out from inside it), and the RootDir the dialog
+// collects has to actually be where the shell starts.
+func TestHandleCreateProjectShipsATabRootedAtTheProjectDir(t *testing.T) {
+	d := newTestDaemon(t)
+	root := t.TempDir()
+	want := root
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		want = resolved
+	}
+
+	msg, _ := ipc.NewMessage(ipc.MsgCreateProject, ipc.CreateProjectPayload{Name: "alpha", RootDir: root})
+	d.handleMessage(nil, msg)
+
+	var proj Project
+	var found bool
+	for _, p := range d.session.Projects() {
+		if p.Name == "alpha" {
+			proj, found = p, true
+		}
+	}
+	if !found {
+		t.Fatalf("project alpha missing from %v", d.session.Projects())
+	}
+	if len(proj.TabIDs) != 1 {
+		t.Fatalf("project TabIDs = %v, want exactly one shipped tab", proj.TabIDs)
+	}
+	panes := d.session.Panes(proj.TabIDs[0])
+	if len(panes) != 1 {
+		t.Fatalf("panes = %d, want one shell", len(panes))
+	}
+	if panes[0].CWD != want {
+		t.Errorf("pane CWD = %q, want the project's root %q — the New Project dialog's "+
+			"root directory is collected, validated and persisted but never used",
+			panes[0].CWD, want)
+	}
+}
+
+// TestProjectCWDFallsBackForAnUnusableRoot: a snapshot outlives the directory
+// it names, and can be restored on a machine where that path never existed.
+// Neither may fail the spawn.
+func TestProjectCWDFallsBackForAnUnusableRoot(t *testing.T) {
+	d := newTestDaemon(t)
+	fallback := d.defaultCWD()
+
+	gone := d.session.CreateProject("gone", filepath.Join(t.TempDir(), "never-existed"))
+	if got := d.projectCWD(gone.ID); got != fallback {
+		t.Errorf("projectCWD(stale root) = %q, want the daemon default %q", got, fallback)
+	}
+
+	blank := d.session.CreateProject("blank", "")
+	if got := d.projectCWD(blank.ID); got != fallback {
+		t.Errorf("projectCWD(no root) = %q, want the daemon default %q", got, fallback)
+	}
+
+	if got := d.projectCWD("proj-does-not-exist"); got != fallback {
+		t.Errorf("projectCWD(unknown project) = %q, want the daemon default %q", got, fallback)
+	}
+
+	file := filepath.Join(t.TempDir(), "a-file")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	notADir := d.session.CreateProject("file", file)
+	if got := d.projectCWD(notADir.ID); got != fallback {
+		t.Errorf("projectCWD(file as root) = %q, want the daemon default %q", got, fallback)
 	}
 }

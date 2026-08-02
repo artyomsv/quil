@@ -880,6 +880,7 @@ func (m Model) renderDialog() string {
 	case dialogProjectNew, dialogProjectRename:
 		content = m.renderProjectDialog()
 	case dialogProjectPick:
+		width = projectPickWidth
 		content = m.renderProjectPickDialog()
 	}
 

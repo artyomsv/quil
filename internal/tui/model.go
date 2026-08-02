@@ -2922,7 +2922,12 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case kbMatches(key, kb.ProjectPicker):
 		return m.openProjectPicker()
 	case kbMatches(key, kb.ProjectToggle):
-		return m, m.toggleLastProject()
+		// Sequenced, not `return m, m.toggleLastProject()`: toggleLastProject
+		// mutates m through a pointer receiver (via switchProject), and Go
+		// does not order a plain operand against a call in the same return
+		// statement (see activateSidebarRow's identical note in project.go).
+		cmd := m.toggleLastProject()
+		return m, cmd
 	}
 
 	// Sidebar focused: route keys to notification center

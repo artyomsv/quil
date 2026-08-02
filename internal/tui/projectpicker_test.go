@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 func TestProjectPickerFiltersFuzzily(t *testing.T) {
@@ -251,6 +252,64 @@ func TestRenderProjectPickDialog_HostileCandidate_NoRawESCByte(t *testing.T) {
 	wantContent := sanitizeRemoteText(hostileName)
 	if !strings.Contains(stripANSI(hostileOut), wantContent) {
 		t.Errorf("sanitized project name %q missing from render — row may have been dropped rather than cleaned\n%s", wantContent, stripANSI(hostileOut))
+	}
+}
+
+// TestRenderDialog_ProjectPick_UsesProjectPickWidth goes through the real
+// renderDialog() switch rather than calling renderProjectPickDialog()
+// directly (which bypasses the switch entirely and cannot catch a missing
+// `width = projectPickWidth` case) — renderProjectPickDialog sizes every row
+// against dialogInnerWidth(m.width, projectPickWidth), so renderDialog's
+// case for dialogProjectPick has to set that SAME constant or the box
+// lipgloss actually draws stops matching the width the content assumed.
+// A terminal wide enough that renderDialog's own clamp never engages
+// (m.width way past projectPickWidth+2) isolates the case-statement wiring
+// from that clamp.
+func TestRenderDialog_ProjectPick_UsesProjectPickWidth(t *testing.T) {
+	m := Model{
+		width:  200,
+		height: 50,
+		dialog: dialogProjectPick,
+		projectPick: projectPickState{
+			filtered: []*ProjectModel{{ID: "proj-a", Name: "alpha"}},
+		},
+	}
+	out := m.renderDialog()
+
+	var top string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "╭") {
+			top = line
+			break
+		}
+	}
+	if top == "" {
+		t.Fatal("no top border line found in rendered dialog")
+	}
+	// lipgloss.Place pads the box out to the full m.width=200 canvas with
+	// plain, unstyled spaces on either side (centering) — trim those before
+	// measuring, or every line in a wide terminal measures 200 regardless of
+	// the box's own width.
+	top = strings.TrimSpace(top)
+	if w := lipgloss.Width(top); w != projectPickWidth {
+		t.Errorf("box width = %d, want projectPickWidth (%d) — dialogProjectPick's "+
+			"renderDialog case must set width = projectPickWidth explicitly, not fall "+
+			"through to the default dialogWidth", w, projectPickWidth)
+	}
+}
+
+// TestFilterProjectsDistinguishesSameNameByDest: two projects named "api" on
+// different hosts must stay distinguishable in the picker — filterProjects
+// matches against displayName() (Name, or Name@Dest for a remote project),
+// so a query naming the host narrows to exactly one.
+func TestFilterProjectsDistinguishesSameNameByDest(t *testing.T) {
+	m := Model{projects: []*ProjectModel{
+		{ID: "proj-a", Name: "api", Dest: "host1"},
+		{ID: "proj-b", Name: "api", Dest: "host2"},
+	}}
+	got := m.filterProjects("api@host2")
+	if len(got) != 1 || got[0].ID != "proj-b" {
+		t.Fatalf("filterProjects(api@host2) = %v, want [proj-b]", got)
 	}
 }
 

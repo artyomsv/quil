@@ -3086,6 +3086,16 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		cmd := m.toggleLastProject()
 		return m, cmd
 	case kbMatches(key, kb.AttentionQueue):
+		// An empty queue flashes rather than doing nothing, for the same
+		// reason the SidebarToggle refusal above does: a key that no-ops
+		// silently is indistinguishable from a broken one, and "nothing is
+		// waiting" is the ordinary state for anyone whose agents never stop
+		// for a permission prompt. The check lives here, not in
+		// jumpToNextBlocked, which keeps its nil-means-nowhere-to-go contract.
+		if len(m.blockedPanes()) == 0 {
+			m.setFlash("no agent is waiting on you")
+			return m, m.flashCmd()
+		}
 		// Sequenced for the same reason as ProjectToggle above:
 		// jumpToNextBlocked mutates m through a pointer receiver.
 		cmd := m.jumpToNextBlocked()

@@ -202,6 +202,55 @@ func TestJumpToNextBlockedCyclesOldestFirstAcrossProjects(t *testing.T) {
 	}
 }
 
+// TestAttentionQueueKeyEmptyQueueFlashes: with nothing blocked anywhere the
+// key used to be completely silent, which is indistinguishable from a broken
+// binding — it was reported as one. Same treatment as the SidebarToggle
+// narrow-terminal refusal. The second half pins that the flash arm does not
+// hijack the working path: with a blocked pane the jump still happens and no
+// flash is shown.
+func TestAttentionQueueKeyEmptyQueueFlashes(t *testing.T) {
+	newModel := func(panes ...*PaneModel) Model {
+		return Model{
+			client:        newFakeConn(),
+			cfg:           config.Default(),
+			width:         100,
+			height:        30,
+			notifications: NewNotificationCenter(30, 50),
+			mcpHighlights: make(map[string]bool),
+			projects: []*ProjectModel{
+				{ID: "proj-a", tabs: []*TabModel{tabWith(&PaneModel{ID: "pane-idle"})}},
+				{ID: "proj-b", tabs: []*TabModel{tabWith(panes[0])}},
+			},
+			activeProject: 0,
+		}
+	}
+	press := tea.KeyPressMsg{Mod: tea.ModAlt | tea.ModShift, Code: 'a'}
+
+	m := newModel(&PaneModel{ID: "pane-also-idle"})
+	updated, cmd := m.handleKey(press)
+	got := updated.(Model)
+	if got.flashText != "no agent is waiting on you" {
+		t.Errorf("flashText = %q, want %q", got.flashText, "no agent is waiting on you")
+	}
+	if cmd == nil {
+		t.Error("the flash must be returned with its expiry timer (flashCmd), or it never clears")
+	}
+	if got.activeProject != 0 {
+		t.Errorf("activeProject = %d, want unchanged 0 — an empty queue must not move focus", got.activeProject)
+	}
+
+	blocked := &PaneModel{ID: "pane-blocked"}
+	blocked.blockedSince = time.Now()
+	updated, _ = newModel(blocked).handleKey(press)
+	got = updated.(Model)
+	if got.flashText != "" {
+		t.Errorf("flashText = %q, want empty — a non-empty queue jumps instead of flashing", got.flashText)
+	}
+	if got.activeProject != 1 {
+		t.Errorf("activeProject = %d, want 1 — the queue must still jump into proj-b", got.activeProject)
+	}
+}
+
 // TestAttentionQueueKeyFiresWhileNotesEditorFocused pins the notesKeyExempt
 // entry for kb.AttentionQueue: Alt+Shift+A must reach jumpToNextBlocked (and
 // tear down notes mode first, on the OLD tab) rather than being consumed as

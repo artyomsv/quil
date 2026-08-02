@@ -48,10 +48,21 @@ project, so `Ctrl+T` files the new tab into whichever project you are on.
 | Mouse click a sidebar row | Switch to that project, or raise that pane |
 
 The sidebar is the reserved left column listing projects and the active
-project's panes, with a per-project agent-state marker: `⚡` while a pane is
-working, `⚠` when one is blocked waiting on you. Those markers keep updating for
-projects in the **background**, which is what makes `Alt+Shift+A` useful — it
-crosses the project boundary to reach whichever pane has been waiting longest.
+project's panes. Each project row carries a badge counting its agents: `◐N`
+while N panes are working, `⚠N` when N are blocked waiting on you. Those counts
+keep updating for projects in the **background**, which is what makes
+`Alt+Shift+A` useful — it crosses the project boundary to reach whichever pane
+has been waiting longest.
+
+Each pane row carries the same vocabulary for one pane: `◐` working (with `⋯N`
+when N subagents are still running), `⚠` blocked on you (with the tool it is
+waiting on, when the hook reported one), `✓` finished and not yet looked at,
+`○` idle.
+
+A project row can also carry a link marker, which is about the **connection**
+rather than the agents: `⟳` while that daemon is reconnecting, `⚡` when its
+reconnect is parked and it will not retry until you resume it (`r`). Only a
+remote project can show either.
 
 Unlike the notification sidebar (`Alt+N`), which draws *over* the pane area,
 this one reserves real layout width — so toggling it resizes every pane's PTY.

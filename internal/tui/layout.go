@@ -528,7 +528,16 @@ func (n *LayoutNode) FindPaneRectAt(x, y, ox, oy, w, h int) *PaneRect {
 // resizeNode recursively assigns dimensions to each node. canvasW/canvasH
 // are the full tab-area dimensions — wide-canvas panes size their VT to
 // the canvas (via paneVTSize) while their rect keeps following the tree.
-func resizeNode(n *LayoutNode, w, h, canvasW, canvasH int) {
+//
+// fullW is w plus whatever the project sidebar reserved, split by the SAME
+// ratios all the way down, so each leaf learns the width it would have had
+// with the sidebar closed. That width decides the pane's render mode and
+// nothing else — see paneVTSize. Deriving it by recursion rather than by
+// scaling a leaf's rect is what makes it exact: a proportional estimate is
+// free to land a column off, and one column is the entire difference
+// between native and canvas at the threshold. Callers with no chrome to
+// discount pass fullW == w.
+func resizeNode(n *LayoutNode, w, h, fullW, canvasW, canvasH int) {
 	if n == nil {
 		return
 	}
@@ -543,9 +552,13 @@ func resizeNode(n *LayoutNode, w, h, canvasW, canvasH int) {
 		if h < minPaneH {
 			h = minPaneH
 		}
+		if fullW < w {
+			fullW = w
+		}
 		n.Pane.Width = w
 		n.Pane.Height = h
-		n.Pane.ResizeVT(paneVTSize(n.Pane.WideCanvas, n.Pane.MinNativeCols, w, h, canvasW, canvasH))
+		n.Pane.NativeW = fullW
+		n.Pane.ResizeVT(paneVTSize(n.Pane.WideCanvas, n.Pane.MinNativeCols, w, h, fullW, canvasW, canvasH))
 		return
 	}
 
@@ -559,8 +572,16 @@ func resizeNode(n *LayoutNode, w, h, canvasW, canvasH int) {
 		if rightW < minPaneW {
 			rightW = minPaneW
 		}
-		resizeNode(n.Left, leftW, h, canvasW, canvasH)
-		resizeNode(n.Right, rightW, h, canvasW, canvasH)
+		leftFull := int(float64(fullW) * n.Ratio)
+		if leftFull < minPaneW {
+			leftFull = minPaneW
+		}
+		rightFull := fullW - leftFull
+		if rightFull < minPaneW {
+			rightFull = minPaneW
+		}
+		resizeNode(n.Left, leftW, h, leftFull, canvasW, canvasH)
+		resizeNode(n.Right, rightW, h, rightFull, canvasW, canvasH)
 
 	case SplitVertical:
 		topH := int(float64(h) * n.Ratio)
@@ -571,8 +592,10 @@ func resizeNode(n *LayoutNode, w, h, canvasW, canvasH int) {
 		if bottomH < minPaneH {
 			bottomH = minPaneH
 		}
-		resizeNode(n.Left, w, topH, canvasW, canvasH)
-		resizeNode(n.Right, w, bottomH, canvasW, canvasH)
+		// A vertical split divides height, so both children keep the full
+		// width — and therefore the full sidebar-free width too.
+		resizeNode(n.Left, w, topH, fullW, canvasW, canvasH)
+		resizeNode(n.Right, w, bottomH, fullW, canvasW, canvasH)
 	}
 }
 

@@ -11,23 +11,31 @@ import (
 
 func TestPaneVTSize(t *testing.T) {
 	cases := []struct {
-		name                     string
-		wide                     bool
-		minNativeCols            int
-		rectW, rectH, canW, canH int
-		wantCols, wantRows       int
+		name                              string
+		wide                              bool
+		minNativeCols                     int
+		rectW, rectH, nativeW, canW, canH int
+		wantCols, wantRows                int
 	}{
-		{"normal pane uses rect", false, 80, 60, 20, 200, 50, 58, 18},
-		{"wide narrow pane uses canvas", true, 80, 60, 20, 200, 50, 198, 48},
-		{"wide pane at threshold goes native", true, 80, 120, 20, 200, 50, 118, 18},
-		{"minNativeCols<=0 defaults to 80", true, 0, 60, 20, 200, 50, 198, 48},
-		{"wide canvas degenerate clamps", true, 80, 60, 20, 1, 1, 1, 1},
-		{"normal degenerate clamps", false, 80, 2, 2, 200, 50, 1, 1},
-		{"zero canvas falls back to rect", true, 80, 60, 20, 0, 0, 58, 18},
+		{"normal pane uses rect", false, 80, 60, 20, 0, 200, 50, 58, 18},
+		{"wide narrow pane uses canvas", true, 80, 60, 20, 0, 200, 50, 198, 48},
+		{"wide pane at threshold goes native", true, 80, 120, 20, 0, 200, 50, 118, 18},
+		{"minNativeCols<=0 defaults to 80", true, 0, 60, 20, 0, 200, 50, 198, 48},
+		{"wide canvas degenerate clamps", true, 80, 60, 20, 0, 1, 1, 1, 1},
+		{"normal degenerate clamps", false, 80, 2, 2, 0, 200, 50, 1, 1},
+		{"zero canvas falls back to rect", true, 80, 60, 20, 0, 0, 0, 58, 18},
+		// The sidebar cases: a pane the sidebar pushed under the threshold
+		// keeps rendering natively AT ITS OWN RECT — mode from nativeW, size
+		// from rectW. Without the split, 81-2=79 flipped it to the canvas.
+		{"sidebar-narrowed pane stays native", true, 80, 81, 54, 92, 163, 52, 79, 52},
+		{"its sibling agrees", true, 80, 82, 54, 93, 163, 52, 80, 52},
+		// A pane genuinely that narrow — no sidebar to discount — still gets
+		// the canvas. The threshold is not disabled, only made chrome-blind.
+		{"genuinely narrow pane still uses canvas", true, 80, 81, 54, 81, 163, 52, 161, 50},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			c, r := paneVTSize(tc.wide, tc.minNativeCols, tc.rectW, tc.rectH, tc.canW, tc.canH)
+			c, r := paneVTSize(tc.wide, tc.minNativeCols, tc.rectW, tc.rectH, tc.nativeW, tc.canW, tc.canH)
 			if c != tc.wantCols || r != tc.wantRows {
 				t.Errorf("got %dx%d, want %dx%d", c, r, tc.wantCols, tc.wantRows)
 			}

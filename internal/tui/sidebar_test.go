@@ -1056,3 +1056,100 @@ func TestPaneRowKeepsTheNameWhenTheReasonIsLong(t *testing.T) {
 		t.Errorf("row %q dropped a reason that had room", row)
 	}
 }
+
+// TestSidebarDoesNotRemodeAWideCanvasPane is the 2026-08-02 report: opening
+// the sidebar on a 185-column terminal moved an even two-pane split from
+// 92/93 to 81/82, straddling min_native_cols (80). One of two identical
+// siblings flipped to a 161-column canvas cropped into 79 columns while the
+// other stayed native at 80 — a 2x difference produced by one column of rect.
+//
+// The sidebar is chrome. It changes how much of a pane you can see; it must
+// not change how the pane decides to render. Asserted on the WIRE, because
+// the PTY size is what the child actually lays out against, and against a
+// genuinely narrow terminal too so the fix cannot have simply disabled the
+// threshold.
+func TestSidebarDoesNotRemodeAWideCanvasPane(t *testing.T) {
+	build := func(t *testing.T, width int, open bool) (*Model, *TabModel, *fakeConn) {
+		t.Helper()
+		a := NewPaneModel("a", testRingBufSize)
+		t.Cleanup(a.Dispose)
+		b := NewPaneModel("b", testRingBufSize)
+		t.Cleanup(b.Dispose)
+		for _, p := range []*PaneModel{a, b} {
+			p.Type = "claude-code"
+			p.WideCanvas = true
+		}
+		tab := &TabModel{
+			ID: "t1",
+			Root: &LayoutNode{
+				Split: SplitHorizontal, Ratio: 0.5,
+				Left:  &LayoutNode{Pane: a},
+				Right: &LayoutNode{Pane: b},
+			},
+			ActivePane: "a",
+		}
+		conn := newFakeConn()
+		m := &Model{
+			client: conn, width: width, height: 54,
+			sidebarOpen: open, sidebarWidth: defaultSidebarWidth,
+			projects: []*ProjectModel{{ID: "p1", Name: "Default", tabs: []*TabModel{tab}}},
+		}
+		m.resizeTabs()
+		if cmd := m.resizeAllPanes(); cmd != nil {
+			cmd()
+		}
+		return m, tab, conn
+	}
+
+	wireCols := func(t *testing.T, conn *fakeConn, paneID string) int {
+		t.Helper()
+		for _, msg := range conn.sent {
+			if msg.Type != ipc.MsgResizePane {
+				continue
+			}
+			var p ipc.ResizePanePayload
+			if err := msg.DecodePayload(&p); err != nil {
+				t.Fatalf("decode resize: %v", err)
+			}
+			if p.PaneID == paneID {
+				return int(p.Cols)
+			}
+		}
+		t.Fatalf("no resize sent for pane %s", paneID)
+		return 0
+	}
+
+	// Sidebar open at the reported geometry: both panes native, each at its
+	// own rect, and the PTY the daemon is told matches the VT.
+	_, tab, conn := build(t, 185, true)
+	for _, p := range tab.Leaves() {
+		if p.previewMode() {
+			t.Errorf("pane %s flipped to canvas because the sidebar narrowed it (rect %d, native %d)",
+				p.ID, p.Width, p.NativeW)
+		}
+		if got := wireCols(t, conn, p.ID); got != p.vt.Width() {
+			t.Errorf("pane %s: wire %d cols, VT %d — PTY and emulator disagree", p.ID, got, p.vt.Width())
+		}
+	}
+	if a, b := tab.Leaves()[0], tab.Leaves()[1]; a.vt.Width()*2 < b.vt.Width() || b.vt.Width()*2 < a.vt.Width() {
+		t.Errorf("siblings of an even split got %d and %d columns", a.vt.Width(), b.vt.Width())
+	}
+
+	// Toggling the sidebar must not change the MODE either way.
+	_, closedTab, _ := build(t, 185, false)
+	for _, p := range closedTab.Leaves() {
+		if p.previewMode() {
+			t.Errorf("pane %s in preview with the sidebar closed — setup no longer models the report", p.ID)
+		}
+	}
+
+	// A terminal genuinely too narrow still gets the canvas: the threshold is
+	// chrome-blind now, not disabled.
+	_, narrowTab, _ := build(t, 120, true)
+	for _, p := range narrowTab.Leaves() {
+		if !p.previewMode() {
+			t.Errorf("pane %s native at a 120-col terminal (rect %d, native %d), want canvas",
+				p.ID, p.Width, p.NativeW)
+		}
+	}
+}

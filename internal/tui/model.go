@@ -2819,6 +2819,7 @@ func (m Model) View() tea.View {
 		var tabContent string
 		if tab := m.activeTabModel(); tab != nil {
 			tab.SetCanvas(m.paneAreaWidth(), tabH)
+			tab.SetChrome(m.projectSidebarWidth())
 			tab.Resize(m.paneAreaWidth()-notesW, tabH)
 			// Pass per-frame state to panes for rendering
 			if tab.Root != nil {
@@ -4054,6 +4055,7 @@ func (m *Model) resizeTabs() {
 		// screen estate, so from a wide-canvas pane's perspective toggling it
 		// is indistinguishable from a real window resize.
 		tab.SetCanvas(m.paneAreaWidth(), tabH)
+		tab.SetChrome(m.projectSidebarWidth())
 		tab.Resize(m.paneAreaWidth(), tabH)
 	}
 }
@@ -5824,7 +5826,10 @@ func (m Model) resizeAllPanes() tea.Cmd {
 					// paneVTSize keeps the PTY in lockstep with the VT: rect
 					// size for normal panes, tab canvas for wide-canvas panes.
 					// The daemon drops exact duplicates (same-size guard).
-					cols, rows := paneVTSize(pane.WideCanvas, pane.MinNativeCols, pane.Width, pane.Height, tab.CanvasW, tab.CanvasH)
+					// pane.NativeW comes from the same resize pass that sized
+					// the VT, so the mode this reproduces cannot disagree with
+					// the one already applied.
+					cols, rows := paneVTSize(pane.WideCanvas, pane.MinNativeCols, pane.Width, pane.Height, pane.NativeW, tab.CanvasW, tab.CanvasH)
 					msg, _ := ipc.NewMessage(ipc.MsgResizePane, ipc.ResizePanePayload{
 						PaneID: pane.ID,
 						Cols:   uint16(cols),

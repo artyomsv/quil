@@ -56,6 +56,13 @@ type PaneModel struct {
 	oscFilter          oscTitleFilter // strips OSC 0/1/2 before the emulator (see oscfilter.go)
 	Width              int
 	Height             int
+	// NativeW is Width plus whatever the project sidebar reserved — the
+	// width this rect would have with the sidebar closed. It decides the
+	// pane's render mode and nothing else (paneVTSize), so toggling the
+	// sidebar changes how much of a pane you see, never how it renders.
+	// Written by the resize recursion so resizeAllPanes computes the same
+	// wire size the VT already took, rather than re-deriving it and drifting.
+	NativeW            int
 	Active             bool
 	scrollBack         int
 	rawBuf             *ringbuf.RingBuffer // raw PTY bytes for resize replay

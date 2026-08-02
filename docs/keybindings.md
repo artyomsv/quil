@@ -5,6 +5,7 @@ Quil's full keymap. Every binding is configurable via `~/.quil/config.toml` unde
 ## Table of contents
 
 - [Quick reference](#quick-reference)
+- [Projects](#projects)
 - [Tabs](#tabs)
 - [Panes](#panes)
 - [Pane navigation](#pane-navigation)
@@ -30,6 +31,37 @@ The five keys you'll use most:
 | `Ctrl+T` | New tab |
 | `Ctrl+W` | Close active pane |
 | `Ctrl+Q` | Quit |
+
+## Projects
+
+A project owns a set of tabs. Switching project switches the whole tab bar, and
+each project remembers the tab you left it on. Every tab belongs to exactly one
+project, so `Ctrl+T` files the new tab into whichever project you are on.
+
+| Key | Action |
+|---|---|
+| `Alt+Shift+N` | New project |
+| `Alt+P` | Project picker — fuzzy-find by name |
+| `Alt+O` | Bounce between the two most recent projects |
+| `Alt+Shift+A` | Attention queue — jump to the oldest pane waiting on you, across every project |
+| `Alt+Shift+S` | Collapse / expand the project sidebar |
+| Mouse click a sidebar row | Switch to that project, or raise that pane |
+
+The sidebar is the reserved left column listing projects and the active
+project's panes, with a per-project agent-state marker: `⚡` while a pane is
+working, `⚠` when one is blocked waiting on you. Those markers keep updating for
+projects in the **background**, which is what makes `Alt+Shift+A` useful — it
+crosses the project boundary to reach whichever pane has been waiting longest.
+
+Unlike the notification sidebar (`Alt+N`), which draws *over* the pane area,
+this one reserves real layout width — so toggling it resizes every pane's PTY.
+Its width and whether it starts open are
+[`[ui] sidebar_width` / `sidebar_open`](configuration.md#ui).
+
+`Alt+P` and `Alt+O` are plain Alt-letter keys because no AI tool binds them; the
+rest take the Alt+Shift layer for the same reason the split keys do. The group
+deliberately avoids `Alt+W`, `Alt+A` and `Alt+Shift+P` (close tab, quick
+actions, command palette).
 
 ## Tabs
 

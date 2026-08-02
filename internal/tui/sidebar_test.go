@@ -476,6 +476,50 @@ func TestSidebarToggleKeyFlipsResizesAndPersists(t *testing.T) {
 	}
 }
 
+// TestViewKeepsTheSidebarWhenTheActiveProjectHasNoTabs: View() used to build
+// the whole tab-content section — the project sidebar with it — only when
+// activeTabModel() was non-nil, so an empty active project rendered a blank
+// screen AND took away the navigation needed to leave it.
+func TestViewKeepsTheSidebarWhenTheActiveProjectHasNoTabs(t *testing.T) {
+	m := Model{
+		width: 120, height: 30,
+		sidebarOpen:  true,
+		sidebarWidth: 22,
+		projects: []*ProjectModel{
+			{ID: "proj-empty", Name: "emptyproj"},
+			{ID: "proj-other", Name: "otherproj", tabs: []*TabModel{tabWith(&PaneModel{ID: "pane-1"})}},
+		},
+		activeProject: 0,
+		notifications: NewNotificationCenter(30, 50),
+	}
+	if m.activeTabModel() != nil {
+		t.Fatal("setup invariant broken: the active project must have no tabs")
+	}
+
+	out := stripANSI(m.View().Content)
+	if !strings.Contains(out, "PROJECTS") {
+		t.Errorf("the project sidebar is missing, so there is no way back to another "+
+			"project by mouse:\n%s", out)
+	}
+	if !strings.Contains(out, "otherproj") {
+		t.Error("the sidebar rendered without the other project's row")
+	}
+	if !strings.Contains(out, "emptyproj") {
+		t.Error("the empty project's own row is missing from the sidebar")
+	}
+	// And the pane area says what happened rather than sitting blank.
+	if !strings.Contains(out, "No tabs in") {
+		t.Errorf("the empty pane area gives the user nothing to act on:\n%s", out)
+	}
+	// The frame must still fit: the sidebar reserves layout width, so a join
+	// against a wrongly-sized placeholder overflows the terminal.
+	for i, line := range strings.Split(out, "\n") {
+		if got := lipgloss.Width(line); got > m.width {
+			t.Errorf("line %d measured %d cells, wider than the %d-cell frame", i, got, m.width)
+		}
+	}
+}
+
 // TestSidebarToggleKeyRefusedOnANarrowTerminal: below minWidthForSidebar
 // sidebarWidth() answers 0 regardless of sidebarOpen, so flipping the flag
 // repaints nothing — but it still wrote cfg.UI.SidebarOpen to disk, so a

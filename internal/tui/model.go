@@ -2779,6 +2779,14 @@ func (m Model) View() tea.View {
 		tabH := m.height - chromeHeight
 		notesW := m.notesPanelWidth()
 		projSidebarW := m.projectSidebarWidth()
+		// tabContent is assembled whether or not there is an active tab. An
+		// active project with NO tabs used to skip this whole section — the
+		// project sidebar with it — so the user got an empty screen and lost
+		// the navigation needed to leave it (Alt+P/Alt+O still worked; the
+		// mouse did not). Two shipped paths reach that state, both now also
+		// repaired daemon-side, but the client must not depend on a daemon's
+		// repair to keep its own navigation painted.
+		var tabContent string
 		if tab := m.activeTabModel(); tab != nil {
 			tab.SetCanvas(m.paneAreaWidth(), tabH)
 			tab.Resize(m.paneAreaWidth()-notesW, tabH)
@@ -2790,33 +2798,35 @@ func (m Model) View() tea.View {
 					pane.mcpHighlight = m.mcpHighlights[pane.ID]
 				}
 			}
-			tabContent := tab.View()
+			tabContent = tab.View()
 			if notesW > 0 {
 				editorFocused := !m.notesPaneFocused
 				tabContent = lipgloss.JoinHorizontal(lipgloss.Top, tabContent, m.notesEditor.View(notesW, tabH, editorFocused))
 			}
-			if sw := m.sidebarOverlayWidth(); sw > 0 {
-				m.notifications.focused = m.sidebarFocused
-				// totalW is the PANE AREA, not the terminal: at this point
-				// tabContent is only paneAreaWidth wide and the project
-				// sidebar has not been joined on yet. Passing m.width made
-				// overlayRight pad every line out to the full terminal width,
-				// so the JoinHorizontal below produced a frame
-				// projectSidebarWidth() columns WIDER than the terminal. The
-				// strip's screen columns are unchanged — after the left join
-				// the pane area's right edge is still the screen's.
-				tabContent = overlayRight(tabContent, m.notifications.View(tabH), m.paneAreaWidth(), sw)
-			}
-			if projSidebarW > 0 {
-				tabContent = lipgloss.JoinHorizontal(lipgloss.Top, m.renderSidebar(tabH), tabContent)
-			}
-			if m.ctxMenu.open() {
-				// ctxMenu coords are screen rows; tabContent starts at
-				// screen row 1 (tab bar above), so shift by -1.
-				tabContent = overlayAt(tabContent, renderCtxMenu(m.ctxMenu), m.ctxMenu.x, m.ctxMenu.y-1, m.width)
-			}
-			sections = append(sections, tabContent)
+		} else {
+			tabContent = m.renderEmptyTabArea(m.paneAreaWidth(), tabH)
 		}
+		if sw := m.sidebarOverlayWidth(); sw > 0 {
+			m.notifications.focused = m.sidebarFocused
+			// totalW is the PANE AREA, not the terminal: at this point
+			// tabContent is only paneAreaWidth wide and the project
+			// sidebar has not been joined on yet. Passing m.width made
+			// overlayRight pad every line out to the full terminal width,
+			// so the JoinHorizontal below produced a frame
+			// projectSidebarWidth() columns WIDER than the terminal. The
+			// strip's screen columns are unchanged — after the left join
+			// the pane area's right edge is still the screen's.
+			tabContent = overlayRight(tabContent, m.notifications.View(tabH), m.paneAreaWidth(), sw)
+		}
+		if projSidebarW > 0 {
+			tabContent = lipgloss.JoinHorizontal(lipgloss.Top, m.renderSidebar(tabH), tabContent)
+		}
+		if m.ctxMenu.open() {
+			// ctxMenu coords are screen rows; tabContent starts at
+			// screen row 1 (tab bar above), so shift by -1.
+			tabContent = overlayAt(tabContent, renderCtxMenu(m.ctxMenu), m.ctxMenu.x, m.ctxMenu.y-1, m.width)
+		}
+		sections = append(sections, tabContent)
 
 		// Status bar
 		sections = append(sections, m.renderStatusBar())

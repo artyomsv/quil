@@ -1,12 +1,14 @@
 package tui
 
 import (
+	"log"
 	"strconv"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/artyomsv/quil/internal/hookevents"
+	"github.com/artyomsv/quil/internal/ipc"
 )
 
 // workSpinnerInterval is the animation cadence for the work-in-progress
@@ -87,7 +89,35 @@ func (m *Model) jumpToPane(paneID string) bool {
 	// The jump may have crossed a project — and therefore a daemon — boundary,
 	// so every later unstamped send has a new right answer.
 	m.syncActiveDest()
+	m.notifyTabSwitch(proj.tabs[tabIdx])
 	return true
+}
+
+// notifyTabSwitch tells a tab's OWNING daemon that this tab is now active.
+//
+// Not bookkeeping: the daemon spawns a tab's lazily-restored panes on the
+// switch, so an activeTab write that skips it lands the user on panes that are
+// still Pending — the restore indicator with no process behind it, which no
+// resize can rescue because there is no PTY to resize. It also keeps
+// Project.ActiveTab in step, which is what the next restore warms up.
+//
+// Sent synchronously rather than as a tea.Cmd, like switchProject's own
+// MsgSwitchProject: the dest is resolved here, on the Update goroutine, rather
+// than inside a closure racing a workspace rebuild of m.projects.
+func (m *Model) notifyTabSwitch(tab *TabModel) {
+	// The nil client is the ~46 Models tests build directly, and the window
+	// before a connection exists; sendForDest dereferences it unconditionally.
+	if tab == nil || m.client == nil {
+		return
+	}
+	msg, err := ipc.NewMessage(ipc.MsgSwitchTab, ipc.SwitchTabPayload{TabID: tab.ID})
+	if err != nil {
+		log.Printf("switch tab %s: encode: %v", tab.ID, err)
+		return
+	}
+	if err := m.sendForDest(tab.Dest, msg); err != nil {
+		log.Printf("switch tab %s: send: %v", tab.ID, err)
+	}
 }
 
 // applyWorkTransition updates the working state of the pane identified by

@@ -76,6 +76,11 @@ func (m *Model) jumpToNextBlocked() tea.Cmd {
 			// repairs a stale value on next read, so assigning it is the
 			// whole focus change.
 			target.Project.tabs[target.TabIndex].ActivePane = target.Pane.ID
+			// MsgSwitchProject only reaches the project's REMEMBERED tab; the
+			// blocked pane is routinely in a different one, whose panes are
+			// still Pending after a lazy restore. Without this the queue lands
+			// the user on a restore indicator with no process behind it.
+			m.notifyTabSwitch(target.Project.tabs[target.TabIndex])
 			return cmd
 		}
 	}

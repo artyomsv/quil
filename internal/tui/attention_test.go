@@ -7,6 +7,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/artyomsv/quil/internal/config"
+	"github.com/artyomsv/quil/internal/ipc"
 )
 
 func TestBlockedPanesOrderedOldestFirstAcrossProjects(t *testing.T) {
@@ -53,6 +54,55 @@ func TestJumpToNextBlockedSwitchesProject(t *testing.T) {
 	}
 	if got := m.projects[1].tabs[0].ActivePane; got != "pane-blocked" {
 		t.Fatalf("ActivePane = %s, want pane-blocked", got)
+	}
+}
+
+// TestJumpToNextBlockedTellsTheDaemonAboutTheTargetTab: MsgSwitchProject only
+// reaches the project's REMEMBERED tab, and the blocked pane is routinely in a
+// different one. After a lazy restore those panes are still Pending, so without
+// an explicit tab switch the queue lands the user on a restore indicator with
+// no process behind it.
+func TestJumpToNextBlockedTellsTheDaemonAboutTheTargetTab(t *testing.T) {
+	blocked := &PaneModel{ID: "pane-blocked"}
+	blocked.blockedSince = time.Now()
+
+	remembered := tabWith(&PaneModel{ID: "pane-other"})
+	target := tabWith(blocked)
+	target.Dest = "gpu01"
+	remembered.Dest = "gpu01"
+
+	fake := newFakeConn()
+	m := Model{
+		client: fake,
+		projects: []*ProjectModel{
+			{ID: "proj-a", tabs: []*TabModel{tabWith(&PaneModel{ID: "pane-idle"})}},
+			// activeTab 0 is the project's remembered tab; the blocked pane is
+			// in tab 1, so a project switch alone never reaches it.
+			{ID: "proj-b", Dest: "gpu01", tabs: []*TabModel{remembered, target}},
+		},
+		activeProject: 0,
+	}
+
+	m.jumpToNextBlocked()
+
+	var switched *ipc.Message
+	for _, msg := range fake.sent {
+		if msg.Type == ipc.MsgSwitchTab {
+			switched = msg
+		}
+	}
+	if switched == nil {
+		t.Fatal("no MsgSwitchTab sent — the blocked pane's tab is never spawned")
+	}
+	var payload ipc.SwitchTabPayload
+	if err := switched.DecodePayload(&payload); err != nil {
+		t.Fatalf("decode switch payload: %v", err)
+	}
+	if payload.TabID != target.ID {
+		t.Errorf("MsgSwitchTab TabID = %q, want the blocked pane's tab %q", payload.TabID, target.ID)
+	}
+	if switched.Origin != "gpu01" {
+		t.Errorf("MsgSwitchTab Origin = %q, want gpu01", switched.Origin)
 	}
 }
 

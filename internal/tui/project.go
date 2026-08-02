@@ -2,6 +2,7 @@ package tui
 
 import (
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/artyomsv/quil/internal/ipc"
 )
@@ -134,6 +135,23 @@ func (m Model) focusSidebarPane(tabIdx int, paneID string) (tea.Model, tea.Cmd) 
 		break
 	}
 	return m, cmd
+}
+
+// renderEmptyTabArea fills the pane area for a frame with no active tab. It is
+// deliberately honest about which of the two reasons applies: a project with no
+// tabs is a state the user can act on and is told how to, while a client that
+// has not yet heard from any daemon is still connecting and has nothing to
+// offer. Sized to exactly w×h so the project sidebar and the notification strip
+// composite against it the same way they do against a real tab.
+func (m Model) renderEmptyTabArea(w, h int) string {
+	if w <= 0 || h <= 0 {
+		return ""
+	}
+	msg := "Connecting to quild…"
+	if p := m.cur(); p != nil {
+		msg = "No tabs in " + sanitizeRemoteText(p.displayName()) + "\n\nCtrl+T opens one"
+	}
+	return lipgloss.Place(w, h, lipgloss.Center, lipgloss.Center, dialogSubtle.Render(msg))
 }
 
 // cur returns the active project, or nil when the Model has no projects yet.

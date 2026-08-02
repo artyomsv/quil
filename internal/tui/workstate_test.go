@@ -1104,6 +1104,46 @@ func TestJumpToPane_SwitchesProjectAndTab(t *testing.T) {
 	}
 }
 
+// TestJumpToPane_TellsTheOwningDaemonAboutTheTab: jumpToPane writes
+// proj.activeTab directly rather than going through switchTab, so nothing told
+// the daemon. After a lazy restore that matters — the daemon spawns a tab's
+// deferred panes on the switch, so a jump into a background tab landed the user
+// on panes that were still Pending, with no process behind them.
+func TestJumpToPane_TellsTheOwningDaemonAboutTheTab(t *testing.T) {
+	t.Parallel()
+	fake := newFakeConn()
+	m := twoProjectModel()
+	m.client = fake
+	m.projects[1].Dest = "gpu01"
+	m.projects[1].tabs[0].Dest = "gpu01"
+
+	if !m.jumpToPane("p-bg") {
+		t.Fatal("jumpToPane should report success for an existing pane")
+	}
+
+	var switched *ipc.Message
+	for _, msg := range fake.sent {
+		if msg.Type == ipc.MsgSwitchTab {
+			switched = msg
+		}
+	}
+	if switched == nil {
+		t.Fatal("jumpToPane sent no MsgSwitchTab — the target tab's panes stay Pending")
+	}
+	var payload ipc.SwitchTabPayload
+	if err := switched.DecodePayload(&payload); err != nil {
+		t.Fatalf("decode switch payload: %v", err)
+	}
+	if payload.TabID != "tab-bg" {
+		t.Errorf("MsgSwitchTab TabID = %q, want tab-bg", payload.TabID)
+	}
+	// Stamped for the tab's OWN daemon: an unstamped send resolves to whatever
+	// the router's current dest is, which is the wrong machine as often as not.
+	if switched.Origin != "gpu01" {
+		t.Errorf("MsgSwitchTab Origin = %q, want gpu01", switched.Origin)
+	}
+}
+
 func TestJumpToPane_MissingPaneReturnsFalseWithoutMutating(t *testing.T) {
 	t.Parallel()
 	m := twoProjectModel()

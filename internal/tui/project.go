@@ -1,5 +1,11 @@
 package tui
 
+import (
+	tea "charm.land/bubbletea/v2"
+
+	"github.com/artyomsv/quil/internal/ipc"
+)
+
 // interimProjectID / interimProjectName name the single synthetic project the
 // client folds every broadcast tab into until WorkspaceStateMsg carries real
 // projects. They are deliberately constants rather than literals so the site
@@ -24,6 +30,92 @@ type ProjectModel struct {
 
 	tabs      []*TabModel
 	activeTab int
+}
+
+// switchProject moves the client to project i, tells the OWNING daemon so its
+// own activeProject stays in step, and resyncs PTY geometry.
+//
+// The daemon notification is not bookkeeping: CreateTab files a new tab
+// against whatever project the daemon last had marked active, so without
+// MsgSwitchProject every Ctrl+T after a client-side switch lands in the
+// project that happened to be active when the daemon started.
+//
+// The resize is because the incoming project's panes were last sized under
+// whatever geometry was current when it went to the background — a window
+// resize while it was hidden never reached them.
+func (m *Model) switchProject(i int) tea.Cmd {
+	if i < 0 || i >= len(m.projects) || i == m.activeProject {
+		return nil
+	}
+	m.prevProject = m.activeProject
+	m.activeProject = i
+	// Before the send: syncActiveDest is what makes an UNSTAMPED message
+	// resolve to the incoming project's daemon rather than the outgoing
+	// one's, and resizeAllPanes below is about to fan out across all of them.
+	m.syncActiveDest()
+
+	p := m.projects[i]
+	msg, _ := ipc.NewMessage(ipc.MsgSwitchProject, ipc.SwitchProjectPayload{ProjectID: p.ID})
+	// Through sendForDest, not a raw Origin assignment: a LOCAL project's
+	// Dest is "", which routeDest reads as UNSTAMPED — so a hand-stamped
+	// local switch would be re-aimed at whatever the router's current dest
+	// happens to be. stampDest maps "" to the explicit destLocal sentinel.
+	m.sendForDest(p.Dest, msg)
+
+	return m.resizeAllPanes()
+}
+
+// activateSidebarRow applies a left click on an actionable sidebar row.
+func (m Model) activateSidebarRow(kind string, index int) (tea.Model, tea.Cmd) {
+	switch kind {
+	case sidebarRowProject:
+		// Sequenced, not `return m, m.switchProject(index)`: switchProject
+		// mutates m through a pointer receiver, and Go does not order a
+		// plain operand against a call in the same return statement.
+		cmd := m.switchProject(index)
+		return m, cmd
+	case sidebarRowPane:
+		// The row carries its tab, which sidebarHit's (kind, index) pair
+		// cannot: re-resolve it from the same rows the click was tested
+		// against rather than re-deriving the walk order a second time.
+		for _, row := range m.sidebarRows(m.projectSidebarWidth()) {
+			if row.kind == sidebarRowPane && row.index == index {
+				return m.focusSidebarPane(row.tabIdx, row.paneID)
+			}
+		}
+	}
+	return m, nil
+}
+
+// focusSidebarPane raises a pane clicked in the sidebar: its tab becomes
+// active (through switchTab, so the daemon's active-tab bookkeeping and the
+// notes teardown run exactly as they do for a tab-bar click) and the pane
+// itself takes focus within it.
+func (m Model) focusSidebarPane(tabIdx int, paneID string) (tea.Model, tea.Cmd) {
+	tabs := m.curTabs()
+	if tabIdx < 0 || tabIdx >= len(tabs) {
+		return m, nil
+	}
+	var cmd tea.Cmd
+	if tabIdx != m.activeTabIdx() {
+		cmd = m.switchTab(tabIdx)
+	}
+	tab := tabs[tabIdx]
+	if tab.Root == nil {
+		return m, cmd
+	}
+	for _, pane := range tab.Leaves() {
+		if pane.ID != paneID {
+			continue
+		}
+		if old := tab.ActivePaneModel(); old != nil {
+			old.Active = false
+		}
+		pane.Active = true
+		tab.ActivePane = pane.ID
+		break
+	}
+	return m, cmd
 }
 
 // cur returns the active project, or nil when the Model has no projects yet.

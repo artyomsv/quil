@@ -83,32 +83,85 @@ func (m *Model) linkGlyph(dest string) string {
 	}
 }
 
-// renderSidebar renders the project sidebar: every project with its
-// aggregate working/blocked counts and link health (active project marked),
-// then the active project's tabs and panes with per-pane agent-state
-// glyphs. height is the number of content rows to fill — the tab bar and
-// status bar are drawn separately by View() and are not part of this block.
+// sidebarRowProject / sidebarRowPane label an actionable sidebar row. The
+// empty kind is chrome (the two headings, the spacer, per-tab headings):
+// inert, but still inside the strip, so a click on one is swallowed rather
+// than falling through to whatever pane the strip displaced.
+const (
+	sidebarRowProject = "project"
+	sidebarRowPane    = "pane"
+)
+
+// sidebarRow is one rendered row of the project sidebar: the painted text
+// plus what it points at. renderSidebar joins the text of this slice and
+// sidebarRowAt indexes the same slice, so a row inserted into the paint
+// cannot drift out of step with what a click on that row resolves to —
+// hit-testing written as a second, independent copy of the row layout is
+// exactly how that drift happens.
+type sidebarRow struct {
+	text   string
+	kind   string
+	index  int    // project index (kind project) or pane ordinal (kind pane)
+	tabIdx int    // pane rows only: index into curTabs()
+	paneID string // pane rows only
+}
+
+// sidebarRows builds the sidebar's rows in paint order at width w: every
+// project with its aggregate working/blocked counts and link health (active
+// project marked), then the active project's tabs and panes with per-pane
+// agent-state glyphs.
+func (m *Model) sidebarRows(w int) []sidebarRow {
+	rows := []sidebarRow{{text: sidebarHeading("PROJECTS", w)}}
+	for i, p := range m.projects {
+		working, blocked := p.counts()
+		rows = append(rows, sidebarRow{
+			text: projectRow(sanitizeRemoteText(p.displayName()),
+				working, blocked, m.linkGlyph(p.Dest), i == m.activeProject, w),
+			kind:  sidebarRowProject,
+			index: i,
+		})
+	}
+
+	rows = append(rows, sidebarRow{}, sidebarRow{text: sidebarHeading("PANES", w)})
+	ordinal := 0
+	for ti, tab := range m.curTabs() {
+		rows = append(rows, sidebarRow{text: sidebarTabHeading(sanitizeRemoteText(tab.Name), w)})
+		for _, pane := range tab.Leaves() {
+			rows = append(rows, sidebarRow{
+				text:   paneRow(pane, w),
+				kind:   sidebarRowPane,
+				index:  ordinal,
+				tabIdx: ti,
+				paneID: pane.ID,
+			})
+			ordinal++
+		}
+	}
+	return rows
+}
+
+// renderSidebar renders the project sidebar. height is the number of content
+// rows to fill — the tab bar and status bar are drawn separately by View()
+// and are not part of this block.
+//
+// The width comes from projectSidebarWidth(), NOT the raw m.sidebarWidth
+// field: that field is the CONFIGURED value, and sidebarWidth() is what
+// clamps it against the terminal. Sizing the box off the raw field made the
+// pane area clamp correctly while this box did not, so the
+// lipgloss.JoinHorizontal in View() composited a frame wider than the
+// terminal for any sidebar_width larger than it. The <= 0 fallback only
+// covers callers with no window size yet (tests) — View() never draws the
+// sidebar unless projectSidebarWidth() is already positive.
 func (m *Model) renderSidebar(height int) string {
-	w := m.sidebarWidth
+	w := m.projectSidebarWidth()
 	if w <= 0 {
 		w = defaultSidebarWidth
 	}
 
-	var lines []string
-	lines = append(lines, sidebarHeading("PROJECTS", w))
-	for i, p := range m.projects {
-		working, blocked := p.counts()
-		lines = append(lines, projectRow(sanitizeRemoteText(p.displayName()),
-			working, blocked, m.linkGlyph(p.Dest), i == m.activeProject, w))
-	}
-
-	lines = append(lines, "")
-	lines = append(lines, sidebarHeading("PANES", w))
-	for _, tab := range m.curTabs() {
-		lines = append(lines, sidebarTabHeading(sanitizeRemoteText(tab.Name), w))
-		for _, pane := range tab.Leaves() {
-			lines = append(lines, paneRow(pane, w))
-		}
+	rows := m.sidebarRows(w)
+	lines := make([]string, len(rows))
+	for i, r := range rows {
+		lines[i] = r.text
 	}
 
 	content := strings.Join(lines, "\n")
@@ -118,6 +171,49 @@ func (m *Model) renderSidebar(height int) string {
 	// same reason: this block is about to sit inside a lipgloss.JoinHorizontal
 	// next to tab content, and a ragged row there staggers every line after it.
 	return lipgloss.NewStyle().Width(w).Height(height).Render(content)
+}
+
+// sidebarRowAt resolves the project-sidebar row under a SCREEN coordinate.
+// View() joins the sidebar into tabContent, which starts at screen row 1
+// (row 0 is the full-width tab bar) and ends before the status bar, so
+// screen row y is sidebar row y-1.
+func (m *Model) sidebarRowAt(x, y int) (sidebarRow, bool) {
+	w := m.projectSidebarWidth()
+	if w <= 0 || x < 0 || x >= w {
+		return sidebarRow{}, false
+	}
+	if y < 1 || y >= m.height-1 {
+		return sidebarRow{}, false
+	}
+	rows := m.sidebarRows(w)
+	if i := y - 1; i < len(rows) {
+		return rows[i], true
+	}
+	return sidebarRow{}, false
+}
+
+// sidebarHit maps a screen coordinate to the sidebar row under it, as a
+// kind ("project" / "pane") and that kind's index. Returns ("", -1) for any
+// x at or beyond the reserved width — the panes begin exactly there — and
+// for inert chrome rows inside the strip.
+func (m *Model) sidebarHit(x, y int) (kind string, index int) {
+	row, ok := m.sidebarRowAt(x, y)
+	if !ok || row.kind == "" {
+		return "", -1
+	}
+	return row.kind, row.index
+}
+
+// projectSidebarSwallowsMouse reports whether a press or wheel at (x, y)
+// lands on the project sidebar's strip. Deliberately wider than sidebarHit:
+// chrome rows resolve to no action but must still be swallowed, because the
+// pane area now starts at column projectSidebarWidth() and letting the press
+// fall through would arm a drag-selection at a column the user never
+// clicked. Row 0 (tab bar) and the last row (status bar) are exempt — both
+// are drawn full width, above and below the sidebar.
+func (m Model) projectSidebarSwallowsMouse(x, y int) bool {
+	w := m.projectSidebarWidth()
+	return w > 0 && x >= 0 && x < w && y >= 1 && y < m.height-1
 }
 
 // sidebarHeadingStyle / sidebarDimStyle / the state-glyph styles mirror the

@@ -365,17 +365,13 @@ func (m Model) openQuickActionsMenu() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if rect := m.activePaneRect(); rect != nil && rect.Pane != nil {
-		// rect.OX is pane-area-relative (every CollectRects/activePaneRect*
-		// call site starts its recursion at ox=0), not screen-absolute — it
-		// only coincided with the screen column before the project sidebar
-		// existed, when the pane area itself started at column 0. openCtxMenu
-		// positions against the FINAL composited frame (View() joins the
-		// sidebar onto tabContent's left edge before the menu is painted), so
-		// the anchor needs the sidebar's reserved width added back in. This is
-		// a paint-position fix for a KNOWN pane, not pane hit-testing — unlike
-		// the right-click path below, which already receives genuine
-		// screen-absolute mouse coordinates and needs no change.
-		m.openCtxMenu(rect.Pane, rect.OX+1+m.projectSidebarWidth(), rect.OY+1)
+		// rect.OX is screen-absolute — every rect walk in model.go seeds its
+		// recursion with projectSidebarWidth() (see the PaneRect origin
+		// contract above activePaneRectFocus), so it already counts the
+		// columns View() gives the sidebar before compositing the menu over
+		// the joined frame. Adding the sidebar width here as well double-
+		// counted it and drove the anchor a second sidebar-width to the right.
+		m.openCtxMenu(rect.Pane, rect.OX+1, rect.OY+1)
 	}
 	return m, nil
 }

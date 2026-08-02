@@ -181,11 +181,12 @@ func TestCtxMenu_QuickActionsOpensForActivePane(t *testing.T) {
 
 // The keyboard entry point (quick_actions) paints the menu against the
 // FINAL composited frame, where the project sidebar (when open) has already
-// shifted the pane area right by its width. rect.OX is pane-area-relative,
-// not screen-absolute, so the anchor must add the sidebar's reserved width
-// back in — unlike the mouse right-click path, which already receives
-// genuine screen-absolute coordinates and needs no such adjustment (covered
-// by TestCtxMenu_RightClickOpensForPaneUnderCursor, unaffected by this fix).
+// shifted the pane area right by its width. The anchor comes from
+// activePaneRect, whose OX is screen-absolute (seeded with
+// projectSidebarWidth) — this pins that it lands where the pane is actually
+// painted, whichever end of the pipeline supplies the offset. The mouse
+// right-click path receives genuine screen coordinates and is covered by
+// TestCtxMenu_RightClickOpensForPaneUnderCursor.
 func TestCtxMenu_QuickActionsAnchorsPastTheProjectSidebar(t *testing.T) {
 	t.Parallel()
 	without := newSplitDragTestModel(t) // ActivePane = p1, sidebar closed

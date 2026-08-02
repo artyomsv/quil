@@ -227,6 +227,24 @@ type KeybindingsConfig struct {
 	// deliberately NOT a default. Add it back in config.toml if your terminal
 	// leaves it free (e.g. `command_palette = "ctrl+shift+p,alt+shift+p"`).
 	CommandPalette string `toml:"command_palette"`
+	// SidebarToggle collapses / expands the PROJECT sidebar (the reserved
+	// left column, not the notification overlay on the right — that one is
+	// NotificationToggle). Unlike the overlay this reserves real layout
+	// width, so toggling it resizes every pane's PTY.
+	SidebarToggle string `toml:"sidebar_toggle"`
+	// ProjectPicker opens the fuzzy project picker, ProjectToggle bounces
+	// between the two most recent projects, AttentionQueue opens the
+	// cross-project list of panes blocked on the user, and NewProject opens
+	// the create-project dialog.
+	//
+	// The whole group deliberately avoids alt+w / alt+a / alt+shift+p
+	// (CloseTab, QuickActions, CommandPalette). alt+p and alt+o are plain
+	// Alt-letter keys because no AI tool binds them; the rest take the
+	// Alt+Shift layer for the same reason the split keys do.
+	ProjectPicker  string `toml:"project_picker"`
+	ProjectToggle  string `toml:"project_toggle"`
+	AttentionQueue string `toml:"attention_queue"`
+	NewProject     string `toml:"new_project"`
 }
 
 func Default() Config {
@@ -322,6 +340,11 @@ func Default() Config {
 			// alt+shift+p only: ctrl+shift+p is grabbed by many terminals' own
 			// command palette before Quil sees it (Windows Terminal, VS Code).
 			CommandPalette: "alt+shift+p",
+			SidebarToggle:  "alt+shift+s",
+			ProjectPicker:  "alt+p",
+			ProjectToggle:  "alt+o",
+			AttentionQueue: "alt+shift+a",
+			NewProject:     "alt+shift+n",
 		},
 	}
 }

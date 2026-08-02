@@ -262,8 +262,14 @@ type Model struct {
 	// projects owns every tab. There is no flat tab list: activeProject
 	// selects the project, and that project's own activeTab selects the tab
 	// within it, so switching projects restores the tab each was left on.
-	projects             []*ProjectModel
-	activeProject        int
+	projects      []*ProjectModel
+	activeProject int
+	// prevProject is the project switchProject moved AWAY from — the
+	// bounce target for the last-project toggle. An index, like
+	// activeProject, so a project removed by a workspace reconciliation
+	// leaves it pointing at whatever now occupies that slot rather than at
+	// a dangling id; every read clamps.
+	prevProject          int
 	width                int
 	height               int
 	client               tuiClient
@@ -851,6 +857,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.clearDragState()
 			return m, nil
 		}
+		// Project sidebar: a RESERVED left column, so the press belongs to
+		// it and never to a pane — the pane area starts at its right edge.
+		// Ordered after the context menu and the notification overlay (both
+		// paint on top of it) and before the pane region (which it
+		// displaces), so input priority matches paint priority. The whole
+		// strip is swallowed, not just its actionable rows: letting a click
+		// on a heading fall through would arm a drag-selection at a column
+		// the user never clicked on.
+		if m.projectSidebarSwallowsMouse(msg.X, msg.Y) {
+			m.clearDragState()
+			if msg.Button == tea.MouseLeft {
+				if kind, idx := m.sidebarHit(msg.X, msg.Y); kind != "" {
+					return m.activateSidebarRow(kind, idx)
+				}
+			}
+			return m, nil
+		}
 		// Right-click: copy the active selection to the clipboard. While
 		// notes mode is on, the editor's selection takes priority.
 		if msg.Button == tea.MouseRight {
@@ -1075,7 +1098,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				tab := m.activeTabModel()
 				if tab != nil && tab.Root != nil && !tab.FocusMode() && !m.notesMode {
 					tabH := m.height - chromeHeight
-					if pane := tab.Root.FindPaneAt(m.mouseStartX, m.mouseStartY, 0, 1, m.paneAreaWidth(), tabH); pane != nil {
+					if pane := tab.Root.FindPaneAt(m.mouseStartX, m.mouseStartY, m.projectSidebarWidth(), 1, m.paneAreaWidth(), tabH); pane != nil {
 						if old := tab.ActivePaneModel(); old != nil {
 							old.Active = false
 						}
@@ -1112,6 +1135,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Wheel over the sidebar overlay must not scroll the pane beneath.
 		if m.sidebarSwallowsMouse(msg.X, msg.Y) {
+			return m, nil
+		}
+		// Same for the project sidebar's reserved column — the pane it
+		// would scroll is not the one under the cursor.
+		if m.projectSidebarSwallowsMouse(msg.X, msg.Y) {
 			return m, nil
 		}
 		lines := m.cfg.UI.MouseScrollLines
@@ -1760,6 +1788,18 @@ func (m Model) sidebarSwallowsMouse(x, y int) bool {
 // longer selectable by clicking — drag selection still covers them.
 const scrollbarHitPadding = 1
 
+// PaneRect ORIGIN CONTRACT (this block and every function below it):
+// rects are SCREEN-ABSOLUTE. Their OX is seeded with projectSidebarWidth()
+// rather than 0, because View() joins the project sidebar onto the LEFT of
+// tabContent — with the sidebar open the pane area genuinely begins at
+// screen column projectSidebarWidth(), not 0. Seeding the recursion is what
+// makes every consumer correct for free: mouse coordinates arrive
+// screen-absolute, so hit tests compare like with like, and a rect handed
+// to the compositor (the context menu's anchor) is already in the frame's
+// coordinate space. Only tab-INTERNAL walks stay 0-seeded — TabModel.View
+// renders into a canvas whose own column 0 is the pane area's left edge,
+// and NavigateDirection compares rects only against each other.
+//
 // activePaneRectFocus returns the rendered rect of the active pane when the
 // active tab is in focus mode (notes mode implies focus mode), or nil when the
 // tab is not in focus mode. The geometry mirrors View(): the active pane fills
@@ -1782,7 +1822,7 @@ func (m *Model) activePaneRectFocus() *PaneRect {
 	notesW := m.notesPanelWidth()
 	return &PaneRect{
 		Pane: pane,
-		OX:   0,
+		OX:   m.projectSidebarWidth(),
 		OY:   1, // tab bar occupies row 0
 		W:    m.paneAreaWidth() - notesW,
 		H:    m.height - chromeHeight,
@@ -1802,7 +1842,7 @@ func (m *Model) activePaneRect() *PaneRect {
 	tabH := m.height - chromeHeight
 	notesW := m.notesPanelWidth()
 	var rects []PaneRect
-	tab.Root.CollectRects(0, 1, m.paneAreaWidth()-notesW, tabH, &rects)
+	tab.Root.CollectRects(m.projectSidebarWidth(), 1, m.paneAreaWidth()-notesW, tabH, &rects)
 	for i := range rects {
 		if rects[i].Pane != nil && rects[i].Pane.ID == tab.ActivePane {
 			return &rects[i]
@@ -1829,7 +1869,7 @@ func (m *Model) paneRectAt(x, y int) *PaneRect {
 	tabH := m.height - chromeHeight
 	notesW := m.notesPanelWidth()
 	var rects []PaneRect
-	tab.Root.CollectRects(0, 1, m.paneAreaWidth()-notesW, tabH, &rects)
+	tab.Root.CollectRects(m.projectSidebarWidth(), 1, m.paneAreaWidth()-notesW, tabH, &rects)
 	for i := range rects {
 		r := &rects[i]
 		if r.Pane != nil && x >= r.OX && x < r.OX+r.W && y >= r.OY && y < r.OY+r.H {
@@ -1861,7 +1901,7 @@ func (m *Model) hitTestScrollbar(x, y int) *PaneRect {
 	} else if tab.Root != nil {
 		tabH := m.height - chromeHeight
 		notesW := m.notesPanelWidth()
-		rect = tab.Root.FindPaneRectAt(x, y, 0, 1, m.paneAreaWidth()-notesW, tabH)
+		rect = tab.Root.FindPaneRectAt(x, y, m.projectSidebarWidth(), 1, m.paneAreaWidth()-notesW, tabH)
 	}
 	if rect == nil {
 		return nil
@@ -1918,7 +1958,7 @@ func (m *Model) hitTestSplitBorder(x, y int) *BorderHit {
 	}
 	tabH := m.height - chromeHeight
 	var borders []BorderHit
-	tab.Root.CollectBorders(0, 1, m.paneAreaWidth(), tabH, &borders)
+	tab.Root.CollectBorders(m.projectSidebarWidth(), 1, m.paneAreaWidth(), tabH, &borders)
 	for i := len(borders) - 1; i >= 0; i-- {
 		if borders[i].Contains(x, y) {
 			return &borders[i]
@@ -2488,6 +2528,9 @@ func (m Model) notesKeyExempt(key string) bool {
 		kb.Redraw,
 		// Notification center.
 		kb.NotificationToggle, kb.NotificationFocus, kb.GoBack, kb.MutePane, kb.ToggleEager,
+		// Project sidebar — view-level, and resizeAllPanes covers the notes
+		// layout's own dependency on paneAreaWidth().
+		kb.SidebarToggle,
 		// Preview wrap toggle — pane-level view state, harmless in notes mode.
 		kb.ToggleWrap,
 		// Pane process restart — opens a confirm dialog, never types into
@@ -2611,7 +2654,15 @@ func (m Model) View() tea.View {
 			}
 			if sw := m.sidebarOverlayWidth(); sw > 0 {
 				m.notifications.focused = m.sidebarFocused
-				tabContent = overlayRight(tabContent, m.notifications.View(tabH), m.width, sw)
+				// totalW is the PANE AREA, not the terminal: at this point
+				// tabContent is only paneAreaWidth wide and the project
+				// sidebar has not been joined on yet. Passing m.width made
+				// overlayRight pad every line out to the full terminal width,
+				// so the JoinHorizontal below produced a frame
+				// projectSidebarWidth() columns WIDER than the terminal. The
+				// strip's screen columns are unchanged — after the left join
+				// the pane area's right edge is still the screen's.
+				tabContent = overlayRight(tabContent, m.notifications.View(tabH), m.paneAreaWidth(), sw)
 			}
 			if projSidebarW > 0 {
 				tabContent = lipgloss.JoinHorizontal(lipgloss.Top, m.renderSidebar(tabH), tabContent)
@@ -2769,6 +2820,18 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(tea.ClearScreen, m.startSidebarTick())
 		}
 		return m, tea.ClearScreen
+	case kbMatches(key, kb.SidebarToggle):
+		// The PROJECT sidebar reserves real layout width (paneAreaWidth), so
+		// unlike the notification overlay above this has to resize every
+		// pane's PTY — and ClearScreen, because every column right of the
+		// strip shifts by its width in one frame, which is exactly the kind
+		// of shift Bubble Tea's cell diff mis-tracks.
+		m.sidebarOpen = !m.sidebarOpen
+		// A screen preference, not session state: persisted to config (saved
+		// on exit via ConfigChanged), never to workspace.json.
+		m.cfg.UI.SidebarOpen = m.sidebarOpen
+		m.configChanged = true
+		return m, tea.Batch(tea.ClearScreen, m.resizeAllPanes())
 	case kbMatches(key, kb.NotificationFocus):
 		// Ctrl+Alt+N: open (if hidden) and focus sidebar
 		if !m.notifications.visible {
@@ -4944,15 +5007,19 @@ func (m *Model) updateMouseSelection(tab *TabModel, curX, curY, tabH int) {
 	var ox, oy int
 
 	if tab.FocusMode() {
-		// Focus mode: active pane fills entire tab, tree splits don't apply
+		// Focus mode: active pane fills entire tab, tree splits don't apply.
+		// ox is the pane's screen-absolute left edge, which is where the
+		// project sidebar ends (see the PaneRect origin contract above
+		// activePaneRectFocus) — mouseStartX/curX below are screen columns,
+		// so a 0 here would shear every selection right by the sidebar width.
 		pane = tab.ActivePaneModel()
 		if pane == nil {
 			return
 		}
-		ox = 0
+		ox = m.projectSidebarWidth()
 		oy = 1 // tab bar
 	} else {
-		startRect := tab.Root.FindPaneRectAt(m.mouseStartX, m.mouseStartY, 0, 1, m.paneAreaWidth(), tabH)
+		startRect := tab.Root.FindPaneRectAt(m.mouseStartX, m.mouseStartY, m.projectSidebarWidth(), 1, m.paneAreaWidth(), tabH)
 		if startRect == nil {
 			return
 		}

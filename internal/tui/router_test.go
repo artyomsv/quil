@@ -196,6 +196,69 @@ func TestRouterPumpStampsOriginOnEveryMessage(t *testing.T) {
 	}
 }
 
+// The mirror of TestPaneInputRoutesToThePanesOwnDaemon, and the direction the
+// first round missed: "" is BOTH the local daemon and the zero value of an
+// unstamped Origin, so a Send that cannot tell them apart re-aims every local
+// pane at whatever remote project happens to be active.
+func TestPaneInputForALocalPaneWhileARemoteProjectIsActive(t *testing.T) {
+	local, gpu := newFakeConn(), newFakeConn()
+	r := NewRouter(map[string]Client{"": local, "gpu01": gpu})
+
+	m := Model{
+		client: r,
+		projects: []*ProjectModel{
+			{ID: "proj-local", Dest: "", tabs: []*TabModel{tabWithPane("tab-1", "pane-local")}},
+			{ID: "proj-gpu", Dest: "gpu01", tabs: []*TabModel{tabWithPane("tab-9", "pane-gpu")}},
+		},
+		activeProject: 1,
+	}
+	m.syncActiveDest()
+
+	msg, _ := ipc.NewMessage(ipc.MsgPaneInput, ipc.PaneInputPayload{PaneID: "pane-local", Data: []byte("x")})
+	m.sendForPane("pane-local", msg)
+
+	if local.sentCount() != 1 || gpu.sentCount() != 0 {
+		t.Fatalf("local=%d gpu=%d — input for a local pane must not follow the active remote project",
+			local.sentCount(), gpu.sentCount())
+	}
+}
+
+// The same hole on the broadcast paths: resizeAllPanes, sendAllLayouts and
+// overlayResizeCmd all stamp a project's or tab's dest, which is "" for local.
+func TestSendForDestLocalIsHonouredWhileARemoteProjectIsActive(t *testing.T) {
+	local, gpu := newFakeConn(), newFakeConn()
+	r := NewRouter(map[string]Client{"": local, "gpu01": gpu})
+	r.SetActiveDest("gpu01")
+
+	m := Model{client: r}
+	msg, _ := ipc.NewMessage(ipc.MsgResizePane, ipc.ResizePanePayload{PaneID: "pane-local"})
+	m.sendForDest("", msg)
+
+	if local.sentCount() != 1 || gpu.sentCount() != 0 {
+		t.Fatalf("local=%d gpu=%d — an explicit local stamp must not resolve to the active dest",
+			local.sentCount(), gpu.sentCount())
+	}
+	if got := local.lastSent().Origin; got != "" {
+		t.Fatalf("Origin = %q — the local sentinel must not escape the router", got)
+	}
+}
+
+// The sole-conn fallback has the same hole: it exists for an unstamped startup
+// send, and must not re-aim a message explicitly addressed to the local daemon
+// at the only conn when that conn is a remote one.
+func TestSoleConnFallbackIgnoresAnExplicitLocalStamp(t *testing.T) {
+	gpu := newFakeConn()
+	r := NewRouter(map[string]Client{"gpu01": gpu})
+
+	m := Model{client: r}
+	msg, _ := ipc.NewMessage(ipc.MsgPaneInput, ipc.PaneInputPayload{PaneID: "pane-local", Data: []byte("x")})
+	m.sendForDest("", msg)
+
+	if gpu.sentCount() != 0 {
+		t.Fatal("a local-stamped message must drop when no local conn exists, not fall through to the remote one")
+	}
+}
+
 func TestRouterAddStartsPumpForALaterConn(t *testing.T) {
 	local := newFakeConn()
 	r := NewRouter(map[string]Client{"": local})
@@ -217,6 +280,160 @@ func TestRouterAddStartsPumpForALaterConn(t *testing.T) {
 	got, err := r.Receive()
 	if err != nil || got.Origin != "gpu01" {
 		t.Fatalf("got = %+v, err = %v — Add must also start a pump", got, err)
+	}
+}
+
+// A live dest is never replaced: two pumps on one conn would race two readers
+// over one socket.
+func TestRouterAddIgnoresADuplicateLiveDest(t *testing.T) {
+	first, second := newFakeConn(), newFakeConn()
+	r := NewRouter(map[string]Client{"gpu01": first})
+	r.Add("gpu01", second)
+
+	msg, _ := ipc.NewMessage(ipc.MsgCreateTab, nil)
+	msg.Origin = "gpu01"
+	if err := r.Send(msg); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if first.sentCount() != 1 || second.sentCount() != 0 {
+		t.Fatalf("first=%d second=%d — Add must not displace a live conn",
+			first.sentCount(), second.sentCount())
+	}
+}
+
+// The documented reconnect path: a pump that died must leave its dest free, or
+// Add is a silent no-op and every later Send keeps hitting the dead client.
+func TestRouterAddAfterPumpDeathInstallsAFreshConn(t *testing.T) {
+	dead := newFakeConn()
+	dead.err = errors.New("connection reset")
+	r := NewRouter(map[string]Client{"gpu01": dead})
+
+	if lost, err := r.Receive(); err != nil || lost.Type != ipc.MsgLinkLost {
+		t.Fatalf("lost = %+v, err = %v", lost, err)
+	}
+
+	fresh := newFakeConn()
+	r.Add("gpu01", fresh)
+
+	msg, _ := ipc.NewMessage(ipc.MsgCreateTab, nil)
+	msg.Origin = "gpu01"
+	if err := r.Send(msg); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if fresh.sentCount() != 1 || dead.sentCount() != 0 {
+		t.Fatalf("fresh=%d dead=%d — Add after a pump death must replace the conn",
+			fresh.sentCount(), dead.sentCount())
+	}
+
+	out, _ := ipc.NewMessage(ipc.MsgWorkspaceState, nil)
+	fresh.recv <- out
+	got, err := r.Receive()
+	if err != nil || got.Origin != "gpu01" {
+		t.Fatalf("got = %+v, err = %v — the replacement needs a pump of its own", got, err)
+	}
+}
+
+// A conn the caller removed must not publish afterwards. Both the message path
+// and the failure path are checked, because a two-case select picks uniformly:
+// with a buffered r.in both cases are ready, so an unprioritised stop leaks
+// roughly half of everything a removed pump reads — including a link loss that
+// quits the TUI in local mode.
+func TestRouterRemovedPumpPublishesNothing(t *testing.T) {
+	t.Run("message", func(t *testing.T) {
+		gpu := newFakeConn()
+		r := NewRouter(map[string]Client{"gpu01": gpu})
+		// Queue the message BEFORE the removal so the pump is guaranteed to
+		// have something to publish once it wakes.
+		out, _ := ipc.NewMessage(ipc.MsgWorkspaceState, nil)
+		gpu.recv <- out
+		r.Remove("gpu01")
+		close(gpu.recv)
+
+		time.Sleep(50 * time.Millisecond)
+		select {
+		case leaked := <-r.in:
+			t.Fatalf("removed pump published %s", leaked.Type)
+		default:
+		}
+	})
+
+	t.Run("failure", func(t *testing.T) {
+		gpu := newFakeConn()
+		r := NewRouter(map[string]Client{"gpu01": gpu})
+		r.Remove("gpu01")
+		close(gpu.recv) // unparks Receive with io.EOF
+
+		time.Sleep(50 * time.Millisecond)
+		select {
+		case leaked := <-r.in:
+			t.Fatalf("removed pump published %s — a deliberate disconnect is not a link loss", leaked.Type)
+		default:
+		}
+	})
+}
+
+// A Client that breaks Receive's contract by returning (nil, nil) must not
+// crash the pump on the Origin stamp, and must not become a busy loop either.
+func TestRouterPumpSurvivesANilMessage(t *testing.T) {
+	nilConn := &nilMessageConn{}
+	r := NewRouter(map[string]Client{"gpu01": nilConn})
+
+	first, err := r.Receive()
+	if err != nil || first.Type != ipc.MsgLinkLost {
+		t.Fatalf("first = %+v, err = %v — a contract-breaking client must read as a link loss", first, err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	select {
+	case extra := <-r.in:
+		t.Fatalf("pump busy-looped on nil messages: got %s", extra.Type)
+	default:
+	}
+}
+
+// nilMessageConn returns (nil, nil) forever — the contract violation the pump's
+// nil guard exists for.
+type nilMessageConn struct{}
+
+func (c *nilMessageConn) Send(*ipc.Message) error        { return nil }
+func (c *nilMessageConn) Receive() (*ipc.Message, error) { return nil, nil }
+
+// scriptedConn replays queued messages as if they had arrived off the wire.
+type scriptedConn struct{ msgs chan *ipc.Message }
+
+func (c *scriptedConn) Send(*ipc.Message) error        { return nil }
+func (c *scriptedConn) Receive() (*ipc.Message, error) { return <-c.msgs, nil }
+
+// A daemon can put any type on the wire, link_lost included. Acting on one
+// would let the peer quit the TUI in local mode or start reconnect churn in
+// remote mode, where the daemon is on a host the user may not control.
+func TestWireBorneLinkLostIsIgnored(t *testing.T) {
+	c := &scriptedConn{msgs: make(chan *ipc.Message, 1)}
+	c.msgs <- &ipc.Message{Type: ipc.MsgLinkLost}
+
+	m := Model{client: c}
+	got := m.listenForMessages()()
+	if _, ok := got.(listenContinueMsg); !ok {
+		t.Fatalf("msg is %T, want listenContinueMsg — a daemon must not be able to drop the link", got)
+	}
+}
+
+// The router's own synthesised loss still has to get through, naming its dest.
+func TestRouterLinkLostReachesTheModel(t *testing.T) {
+	dead := newFakeConn()
+	dead.err = errors.New("connection reset")
+	r := NewRouter(map[string]Client{"gpu01": dead})
+
+	m := Model{client: r}
+	got := m.listenForMessages()()
+	lost, ok := got.(linkLostMsg)
+	if !ok {
+		t.Fatalf("msg is %T, want linkLostMsg", got)
+	}
+	if lost.dest != "gpu01" {
+		t.Fatalf("dest = %q, want gpu01", lost.dest)
+	}
+	if lost.err == nil {
+		t.Error("no cause carried; the reconnect banner has nothing to show")
 	}
 }
 

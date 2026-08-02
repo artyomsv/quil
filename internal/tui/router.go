@@ -52,9 +52,13 @@ func (r *Router) currentDest() string {
 	return d
 }
 
-// Add installs a connection for dest and starts its pump. A dest that is
-// already connected is left alone: a second pump on the same conn would race
-// two readers over one socket.
+// Add installs a connection for dest and starts its pump.
+//
+// A dest that is already connected LIVE is left alone: a second pump on the
+// same conn would race two readers over one socket. A dest whose pump has died
+// is not "already connected" — pump retires its own registration on failure
+// precisely so that this is a replace rather than a silent no-op, which is what
+// makes the documented reconnect path (a fresh conn handed to Add) work.
 func (r *Router) Add(dest string, c Client) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -71,8 +75,12 @@ func (r *Router) Add(dest string, c Client) {
 //
 // It cannot interrupt a pump parked inside Receive — Client is deliberately
 // only Send/Receive, so this package cannot close the socket underneath one;
-// that is what SetClientCloser exists for. The stop channel is what keeps the
-// pump from publishing after the removal once its read does return.
+// that is what SetClientCloser exists for. What the stop channel guarantees is
+// narrower and is checked FIRST at every publish point: a Remove that completes
+// before the parked read returns can never deliver another message or a link
+// loss for a dest the caller deliberately disconnected. (Without that ordering
+// the guarantee is a coin flip — select chooses uniformly among ready cases, and
+// a 64-buffered r.in is almost always ready.)
 func (r *Router) Remove(dest string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -83,6 +91,21 @@ func (r *Router) Remove(dest string) {
 	delete(r.conns, dest)
 }
 
+// retire drops a dead pump's OWN registration, so Add can install a replacement.
+//
+// Identity of the stop channel is the guard: a pump whose dest has since been
+// replaced by a newer conn would otherwise unregister its successor. Comparing
+// the channel is exact where comparing the dest alone is not.
+func (r *Router) retire(dest string, stop chan struct{}) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.stop[dest] != stop {
+		return
+	}
+	delete(r.stop, dest)
+	delete(r.conns, dest)
+}
+
 // pump reads one connection, stamping every message with its origin so
 // applyWorkspaceState knows whose state it is replacing.
 //
@@ -90,11 +113,29 @@ func (r *Router) Remove(dest string) {
 // fails Receive instantly, so looping floods the channel at CPU speed, pegs a
 // core and drowns the Model. This mirrors listenForMessages, which returns
 // linkLostMsg once and stops. Reconnect installs a fresh conn via Add, which
-// starts a new pump.
-func (r *Router) pump(dest string, c Client, stop <-chan struct{}) {
+// starts a new pump — reachable because retire runs BEFORE the loss is
+// published, so the registration is already gone by the time anyone can react
+// to it.
+//
+// Every publish is preceded by a non-blocking stop check rather than relying on
+// a two-case select: both cases are normally ready and Go picks uniformly, so a
+// removed conn would still deliver roughly half its messages — including a
+// MsgLinkLost for a dest the user disconnected on purpose, which quits the TUI
+// in local mode, and a stale workspace_state that rebuilds a project after a
+// reconnect has already replaced the conn.
+func (r *Router) pump(dest string, c Client, stop chan struct{}) {
 	for {
 		msg, err := c.Receive()
-		if err != nil {
+		// A nil message with a nil error breaks Receive's contract; *ipc.Client
+		// never does it, but the interface does not forbid it and the stamp
+		// below would dereference nil. Treated as a failure rather than skipped,
+		// because a client that does it once will do it every iteration and the
+		// skip would be the busy loop this pump exists to avoid.
+		if err != nil || msg == nil {
+			if stopped(stop) {
+				return
+			}
+			r.retire(dest, stop)
 			select {
 			case <-stop:
 			case r.in <- &ipc.Message{Type: ipc.MsgLinkLost, Origin: dest}:
@@ -102,6 +143,9 @@ func (r *Router) pump(dest string, c Client, stop <-chan struct{}) {
 			return
 		}
 		msg.Origin = dest
+		if stopped(stop) {
+			return
+		}
 		select {
 		case r.in <- msg:
 		case <-stop:
@@ -110,23 +154,77 @@ func (r *Router) pump(dest string, c Client, stop <-chan struct{}) {
 	}
 }
 
-// Send routes on Origin. An empty Origin resolves to the active project's
-// dest — NOT to local — so a missed stamp fails toward the daemon the user is
-// looking at. During startup there are no projects yet, so a single-connection
-// client falls back to its sole conn; that keeps remote-only mode, where no ""
-// conn exists, from dropping its own first sends. The fallback is deliberately
-// restricted to an UNSTAMPED message: a send that named a dest named it for a
-// reason, and re-aiming it at whatever conn happens to be the only one is how a
-// remote pane's keystrokes end up on the local daemon.
-func (r *Router) Send(m *ipc.Message) error {
-	dest := m.Origin
+// stopped reports whether stop is already closed, without blocking.
+func stopped(stop <-chan struct{}) bool {
+	select {
+	case <-stop:
+		return true
+	default:
+		return false
+	}
+}
+
+// destLocal is the local daemon named EXPLICITLY.
+//
+// Everywhere else in the client the local daemon's destination is "" —
+// ProjectModel.Dest, TabModel.Dest, the conns key, the Origin the local pump
+// stamps. An unstamped ipc.Message also carries "", because that is the zero
+// value of the field. Send therefore could not tell "this is for the local
+// daemon" from "nobody stamped this", and resolved both to the active project's
+// dest: with a remote project focused, every LOCAL pane's resize, every local
+// tab's layout and every local lazygit overlay went to the remote daemon, which
+// drops them as unknown ids — silently stopping local PTYs from tracking the
+// window size and local layouts from persisting.
+//
+// The sendFor* helpers therefore never emit "": stampDest translates it to this
+// sentinel and routeDest translates it back, so "" keeps meaning UNSTAMPED on
+// the one path that has to tell the two apart. A sentinel rather than a second
+// "was it set" bool for the reason ErrLinkPermanent gives in reconnect.go — a
+// field a call site can forget to copy is a field that will be forgotten.
+const destLocal = "\x00local"
+
+// stampDest records the destination a message is aimed at.
+func stampDest(m *ipc.Message, dest string) {
 	if dest == "" {
+		dest = destLocal
+	}
+	m.Origin = dest
+}
+
+// routeDest reads a stamp back, reporting whether the sender set one at all.
+func routeDest(origin string) (dest string, stamped bool) {
+	switch origin {
+	case "":
+		return "", false
+	case destLocal:
+		return "", true
+	default:
+		return origin, true
+	}
+}
+
+// Send routes on the stamp. An UNSTAMPED message resolves to the active
+// project's dest — NOT to local — so a missed stamp fails toward the daemon the
+// user is looking at. During startup there are no projects yet, so a
+// single-connection client falls back to its sole conn; that keeps remote-only
+// mode, where no "" conn exists, from dropping its own first sends. Both the
+// active-dest resolution and that fallback are restricted to unstamped
+// messages: a send that named a destination named it for a reason, and
+// re-aiming it at whatever conn happens to be the only one is how a remote
+// pane's keystrokes end up on the local daemon — or a local pane's on a remote
+// host.
+func (r *Router) Send(m *ipc.Message) error {
+	dest, stamped := routeDest(m.Origin)
+	if !stamped {
 		dest = r.currentDest()
 	}
+	// The sentinel is internal to the send path: the conn sees the plain dest,
+	// which is what every other Origin reader in the client expects.
+	m.Origin = dest
 
 	r.mu.RLock()
 	c, ok := r.conns[dest]
-	if !ok && m.Origin == "" && len(r.conns) == 1 {
+	if !ok && !stamped && len(r.conns) == 1 {
 		for _, only := range r.conns {
 			c, ok = only, true
 		}
@@ -196,16 +294,17 @@ func (m *Model) destOfPane(paneID string) string {
 // answer whenever the pane lives in a different one, and for MsgPaneInput that
 // wrong answer means keystrokes on the wrong machine.
 func (m *Model) sendForPane(paneID string, msg *ipc.Message) error {
-	msg.Origin = m.destOfPane(paneID)
-	return m.client.Send(msg)
+	return m.sendForDest(m.destOfPane(paneID), msg)
 }
 
-// sendForDest stamps an already-known destination onto a message. The tab
-// carries its project's dest, so a call site holding a *TabModel needs no
-// lookup — but it must not skip the stamp either, since a tab in a background
-// project is exactly as remote as a pane in one.
+// sendForDest stamps an already-known destination onto a message — the ONE
+// place a send-side stamp is written. The tab carries its project's dest, so a
+// call site holding a *TabModel needs no lookup, but it must not skip the stamp
+// either: a tab in a background project is exactly as remote as a pane in one,
+// and a LOCAL tab while a remote project is active needs the stamp just as
+// much (see destLocal).
 func (m *Model) sendForDest(dest string, msg *ipc.Message) error {
-	msg.Origin = dest
+	stampDest(msg, dest)
 	return m.client.Send(msg)
 }
 
@@ -216,9 +315,4 @@ func (m *Model) destOfTab(tabID string) string {
 		return p.Dest
 	}
 	return m.activeDest()
-}
-
-// sendForTab stamps a tab-scoped message with its owning daemon.
-func (m *Model) sendForTab(tabID string, msg *ipc.Message) error {
-	return m.sendForDest(m.destOfTab(tabID), msg)
 }

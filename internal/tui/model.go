@@ -4215,9 +4215,21 @@ func (m Model) listenForMessages() tea.Cmd {
 			// Synthesised by the Router when one of its connections died — it
 			// never reaches a socket. Receive itself cannot report that error,
 			// because the other daemons are still up, so the loss arrives as
-			// data naming the dest that died. The generation is the CURRENT
-			// one: a router's pumps are not superseded the way a whole client
-			// swap is, and a zero here would be discarded as stale.
+			// data naming the dest that died.
+			//
+			// Honoured ONLY from a router, because nothing stops a daemon from
+			// putting this type on the wire: acting on it would let the peer
+			// quit the TUI in local mode, or start reconnect churn in remote
+			// mode — where the daemon is on a host the user may not control.
+			// Origin is json:"-", so a wire-borne one would also arrive naming
+			// the local daemon whatever its true source.
+			if _, isRouter := m.client.(destRouter); !isRouter {
+				log.Printf("ipc recv: ignoring wire-borne link_lost")
+				return listenContinueMsg{}
+			}
+			// The generation is the CURRENT one: a router's pumps are not
+			// superseded the way a whole client swap is, and a zero here would
+			// be discarded as stale.
 			log.Printf("ipc recv: link_lost from %q", msg.Origin)
 			return linkLostMsg{gen: m.clientGen, dest: msg.Origin, err: errLinkLost}
 

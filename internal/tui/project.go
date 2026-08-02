@@ -47,6 +47,18 @@ func (m *Model) switchProject(i int) tea.Cmd {
 	if i < 0 || i >= len(m.projects) || i == m.activeProject {
 		return nil
 	}
+	// Each project carries its own activeTab, so switching projects changes
+	// the active tab implicitly — which makes this one of the callers
+	// exitNotesModeInPlace's contract names ("callers that are about to
+	// change that tab must invoke this FIRST"), exactly like switchTab.
+	// Without it the editor stays open bound to the OUTGOING project's pane,
+	// painted beside the incoming project's panes, still claiming
+	// notesPanelWidth() and still suppressing the split-border and scrollbar
+	// hit tests. applyWorkspaceState's reconciliation does not rescue it: the
+	// bound pane is alive in a background project, so it re-syncs there.
+	if m.notesMode && m.notesEditor != nil {
+		m.exitNotesModeInPlace()
+	}
 	m.prevProject = m.activeProject
 	m.activeProject = i
 	// Before the send: syncActiveDest is what makes an UNSTAMPED message
@@ -77,8 +89,9 @@ func (m Model) activateSidebarRow(kind string, index int) (tea.Model, tea.Cmd) {
 	case sidebarRowPane:
 		// The row carries its tab, which sidebarHit's (kind, index) pair
 		// cannot: re-resolve it from the same rows the click was tested
-		// against rather than re-deriving the walk order a second time.
-		for _, row := range m.sidebarRows(m.projectSidebarWidth()) {
+		// against — same width AND same height cap — rather than re-deriving
+		// the walk order a second time.
+		for _, row := range m.sidebarVisibleRows(m.projectSidebarWidth(), m.height-chromeHeight) {
 			if row.kind == sidebarRowPane && row.index == index {
 				return m.focusSidebarPane(row.tabIdx, row.paneID)
 			}

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -268,12 +269,22 @@ func TestSidebarWheelDoesNotScrollThePaneBeneath(t *testing.T) {
 	m.sidebarOpen = true
 	m.sidebarWidth = 22
 	pane := m.curTabs()[0].ActivePaneModel()
-	before := pane.scrollBack
+	for i := 0; i < 200; i++ {
+		pane.AppendOutput([]byte("filler line\r\n"))
+	}
+	// Control: maxScroll() is the VT's scrollback length, so on a fresh test
+	// pane ScrollUp clamps straight back to 0 and "did not scroll" would be
+	// true whether or not the swallow works.
+	pane.ScrollUp(3)
+	if pane.scrollBack == 0 {
+		t.Fatal("fixture pane has no scrollback to scroll")
+	}
+	pane.ResetScroll()
 
 	updated, _ := m.Update(tea.MouseWheelMsg{X: 5, Y: 5, Button: tea.MouseWheelUp})
 	got := updated.(Model)
-	if after := got.curTabs()[0].ActivePaneModel().scrollBack; after != before {
-		t.Errorf("pane scrollBack = %d, want %d — the wheel over the sidebar scrolled a pane it is not over", after, before)
+	if after := got.curTabs()[0].ActivePaneModel().scrollBack; after != 0 {
+		t.Errorf("pane scrolled behind the sidebar: 0 → %d", after)
 	}
 }
 
@@ -387,19 +398,25 @@ func TestDragSelectionAnchorsAtTheSidebarEdge(t *testing.T) {
 
 // The click-to-focus path on mouse release walks the tree with its own
 // FindPaneAt call, which is easy to miss when auditing the rect helpers.
+//
+// Column 45 is chosen because it DISCRIMINATES. The pane area is 78 wide
+// either way, so a 0-seeded walk splits it [0,39)/[39,78) and a
+// sidebar-seeded one splits it [22,61)/[61,100): column 45 is p2 under the
+// old geometry and p1 under the correct one. A column such as 70 lands in
+// p2 under both and would pass against the unfixed code.
 func TestReleaseClickFocusesThePaneUnderTheCursor(t *testing.T) {
 	m := newSplitDragTestModel(t)
 	m.sidebarOpen = true
 	m.sidebarWidth = 22
+	m.curTabs()[0].ActivePane = "p2" // start on the OTHER pane, so a no-op fails
 	m.mouseDown = true
-	// Column 70 is inside the RIGHT pane once the sidebar shifts the area
-	// ([61, 100)); with the old 0-based walk it resolved to the left one.
-	m.mouseStartX, m.mouseStartY = 70, 10
+	m.mouseStartX, m.mouseStartY = 45, 10
 
-	updated, _ := m.Update(tea.MouseReleaseMsg{X: 70, Y: 10, Button: tea.MouseLeft})
+	updated, _ := m.Update(tea.MouseReleaseMsg{X: 45, Y: 10, Button: tea.MouseLeft})
 	after := updated.(Model)
-	if got := after.curTabs()[0].ActivePane; got != "p2" {
-		t.Errorf("ActivePane = %q, want p2 — the release resolved the pane at the wrong column", got)
+	if got := after.curTabs()[0].ActivePane; got != "p1" {
+		t.Errorf("ActivePane = %q, want p1 — column 45 is inside p1's rect [22, 61); "+
+			"a 0-seeded walk puts it in p2", got)
 	}
 }
 
@@ -407,12 +424,27 @@ func TestReleaseClickFocusesThePaneUnderTheCursor(t *testing.T) {
 // Toggle keybinding
 // ---------------------------------------------------------------------------
 
+// The toggle must REFLOW, not just re-send. resizeAllPanes reads
+// pane.Width/Height and ships them; only tab.Resize (via resizeTabs) writes
+// them. The assertion is on a BACKGROUND tab because View() happens to
+// resize the active one, which would mask a missing resizeTabs.
 func TestSidebarToggleKeyFlipsResizesAndPersists(t *testing.T) {
 	m := newSplitDragTestModel(t)
 	m.cfg = config.Default()
 	if m.cfg.Keybindings.SidebarToggle != "alt+shift+s" {
 		t.Fatalf("default sidebar_toggle = %q, want alt+shift+s", m.cfg.Keybindings.SidebarToggle)
 	}
+	background := NewTabModel("tab-bg", "BG")
+	bgPane := NewPaneModel("p-bg", 1024)
+	background.Root = NewLeaf(bgPane)
+	background.ActivePane = bgPane.ID
+	m.projects[0].tabs = append(m.projects[0].tabs, background)
+	m.resizeTabs()
+	widthBefore := bgPane.Width
+	if widthBefore != 100 {
+		t.Fatalf("background pane width = %d, want 100 before the toggle", widthBefore)
+	}
+
 	// Text must be empty; Mod carries both so String() → "alt+shift+s".
 	updated, cmd := m.handleKey(tea.KeyPressMsg{Mod: tea.ModAlt | tea.ModShift, Code: 's'})
 	got := updated.(Model)
@@ -425,10 +457,209 @@ func TestSidebarToggleKeyFlipsResizesAndPersists(t *testing.T) {
 	if cmd == nil {
 		t.Error("toggling reserved layout width must return a cmd (ClearScreen + resizeAllPanes)")
 	}
+	if bgPane.Width != got.paneAreaWidth() {
+		t.Errorf("background pane width = %d, want %d (paneAreaWidth) — the toggle shipped "+
+			"pane sizes without recomputing them", bgPane.Width, got.paneAreaWidth())
+	}
+	if background.CanvasW != got.paneAreaWidth() {
+		t.Errorf("background tab CanvasW = %d, want %d", background.CanvasW, got.paneAreaWidth())
+	}
+
 	// And back.
 	updated, _ = got.handleKey(tea.KeyPressMsg{Mod: tea.ModAlt | tea.ModShift, Code: 's'})
-	if updated.(Model).sidebarOpen {
+	back := updated.(Model)
+	if back.sidebarOpen {
 		t.Error("second press must close the sidebar")
+	}
+	if bgPane.Width != widthBefore {
+		t.Errorf("background pane width = %d after closing, want %d", bgPane.Width, widthBefore)
+	}
+}
+
+// Each project owns its activeTab, so switchProject changes the active tab
+// implicitly and inherits switchTab's obligation to tear notes down first.
+// Left open, the editor paints beside the incoming project's panes still
+// bound to the outgoing project's pane, still claiming notesPanelWidth().
+func TestSwitchProjectExitsNotesMode(t *testing.T) {
+	fake := newFakeConn()
+	m := newSplitDragTestModel(t)
+	m.client = fake
+	m.projects = append(m.projects, &ProjectModel{ID: "proj-b", Name: "beta"})
+
+	// Built against a temp dir rather than through toggleNotesMode, which
+	// resolves config.NotesDir() to the real ~/.quil on a developer machine.
+	editor, err := NewNotesEditor(t.TempDir(), "p1", "p1", 40, 10)
+	if err != nil {
+		t.Fatalf("NewNotesEditor: %v", err)
+	}
+	boundTab := m.curTabs()[0]
+	boundTab.ToggleFocus()
+	m.notesMode = true
+	m.notesEditor = editor
+	m.notesEnteredFocus = boundTab.FocusMode()
+	if !boundTab.FocusMode() || m.notesPanelWidth() == 0 {
+		t.Fatal("fixture did not reach the state a real notes toggle produces")
+	}
+
+	m.switchProject(1)
+
+	if m.notesMode {
+		t.Error("notes mode survived a project switch — the editor is now bound to a background project's pane")
+	}
+	if m.notesPanelWidth() != 0 {
+		t.Error("the notes panel is still claiming layout width after the switch")
+	}
+	if boundTab.FocusMode() {
+		t.Error("exitNotesModeInPlace must revert focus mode on the OUTGOING project's tab")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Sidebar row budget and cell-width measurement
+// ---------------------------------------------------------------------------
+
+// lipgloss's .Height pads but never clips, so an unbounded row list grows
+// the composited block past the terminal and pushes the status bar off.
+func TestSidebarCapsRowsToTheAvailableHeight(t *testing.T) {
+	var tabs []*TabModel
+	for i := 0; i < 10; i++ {
+		panes := make([]*PaneModel, 0, 4)
+		for j := 0; j < 4; j++ {
+			panes = append(panes, &PaneModel{ID: fmt.Sprintf("p-%d-%d", i, j)})
+		}
+		tab := tabWith(panes...)
+		tab.ID = fmt.Sprintf("tab-%d", i)
+		tabs = append(tabs, tab)
+	}
+	m := Model{
+		projects: []*ProjectModel{
+			{ID: "proj-a", Name: "alpha", tabs: tabs},
+			{ID: "proj-b", Name: "beta"},
+			{ID: "proj-c", Name: "gamma"},
+			{ID: "proj-d", Name: "delta"},
+		},
+		sidebarOpen:  true,
+		sidebarWidth: 22, width: 200, height: 40,
+	}
+	tabH := m.height - chromeHeight
+	if len(m.sidebarRows(22)) <= tabH {
+		t.Fatal("fixture does not overflow — the cap would not be exercised")
+	}
+	lines := strings.Split(m.renderSidebar(tabH), "\n")
+	if len(lines) != tabH {
+		t.Fatalf("renderSidebar emitted %d lines for a %d-row area", len(lines), tabH)
+	}
+	// The tail is dropped and marked, so the PROJECTS block — the navigation
+	// the sidebar exists for — always survives.
+	if !strings.Contains(lines[len(lines)-1], "…") {
+		t.Errorf("last row = %q, want an overflow marker", lines[len(lines)-1])
+	}
+	if !strings.Contains(lines[1], "alpha") {
+		t.Errorf("row 1 = %q, want the first project", lines[1])
+	}
+	// The hit test must cap identically, or it indexes rows that were never
+	// painted.
+	if kind, _ := m.sidebarHit(3, tabH); kind != "" {
+		t.Errorf("the overflow marker row must not be actionable, got %q", kind)
+	}
+}
+
+// wideGlyphSidebarModel is the fixture both wide-glyph tests use: a CJK
+// project name plus a parked link (⚡, U+26A1). Both are two cells per rune
+// and one rune per rune — the gap rune counting cannot see.
+func wideGlyphSidebarModel(t *testing.T) Model {
+	t.Helper()
+	blocked := &PaneModel{ID: "pane-cjk", Name: "构建服务数据库迁移工具链"}
+	blocked.blockedSince = time.Now()
+	blocked.blockedReason = "编辑文件"
+
+	// The name is one unbroken run of wide glyphs, deliberately: lipgloss
+	// word-wraps, so a row whose excess is a run of SPACES is collapsed back
+	// inside the budget and hides the bug. Only solid content forces the
+	// wrap that shifts the rows below.
+	m := Model{
+		projects: []*ProjectModel{
+			{ID: "proj-a", Name: "数据库迁移服务集群控制台", Dest: "gpu01", tabs: []*TabModel{tabWith(blocked)}},
+			{ID: "proj-b", Name: "beta"},
+		},
+		sidebarOpen:  true,
+		sidebarWidth: 22, width: 200, height: 40,
+		links: map[string]*reconnectState{"gpu01": {parked: true}},
+	}
+	// Control: if lipgloss ever measured these as one cell the fixture would
+	// stop discriminating and both tests below would pass vacuously.
+	if m.linkGlyph("gpu01") != "⚡" {
+		t.Fatalf("fixture did not produce the parked glyph, got %q", m.linkGlyph("gpu01"))
+	}
+	if lipgloss.Width("⚡") != 2 || lipgloss.Width("构") != 2 {
+		t.Fatalf("fixture glyphs are not wide (⚡=%d 构=%d) — this test cannot fail",
+			lipgloss.Width("⚡"), lipgloss.Width("构"))
+	}
+	return m
+}
+
+// No row may exceed its column budget. Asserted on sidebarRows, BEFORE
+// renderSidebar's closing .Width(w) — that pass WRAPS an over-wide line onto
+// a second painted line rather than truncating it, so measuring the rendered
+// output would see every line within budget and miss this entirely.
+func TestSidebarRowsNeverExceedTheirColumnBudget(t *testing.T) {
+	m := wideGlyphSidebarModel(t)
+	for i, row := range m.sidebarRows(22) {
+		w := lipgloss.Width(row.text)
+		if w > 22 {
+			t.Errorf("row %d is %d cells wide against a 22-cell budget — .Width(22) will wrap it: %q",
+				i, w, row.text)
+		}
+		// Project and pane rows are padded to exactly the budget so the
+		// block joins flush against the tab content.
+		if row.kind != "" && w != 22 {
+			t.Errorf("row %d (%s) is %d cells, want exactly 22: %q", i, row.kind, w, row.text)
+		}
+	}
+}
+
+// The user-visible symptom of a wrapped row: it consumes two painted lines
+// while sidebarRowAt still maps screen row y to rows[y-1], so every row below
+// it answers for its neighbour. Click project 1, select project 0.
+func TestSidebarHitAgreesWithPaintUnderWideGlyphs(t *testing.T) {
+	m := wideGlyphSidebarModel(t)
+	tabH := m.height - chromeHeight
+	lines := strings.Split(m.renderSidebar(tabH), "\n")
+
+	const screenY = 3 // row 0 tab bar, row 1 PROJECTS, row 2 project 0
+	kind, idx := m.sidebarHit(3, screenY)
+	if kind != sidebarRowProject || idx != 1 {
+		t.Fatalf("sidebarHit(3, %d) = (%q, %d), want (project, 1)", screenY, kind, idx)
+	}
+	if got := lines[screenY-1]; !strings.Contains(got, "beta") {
+		t.Fatalf("painted sidebar row %d = %q, but the hit test calls it project 1 (beta) — "+
+			"a wide-glyph row above it wrapped and shifted the paint", screenY-1, got)
+	}
+}
+
+func TestTruncateCellsDropsStraddlingWideGlyphs(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   string
+		w    int
+		want string
+	}{
+		{"fits", "abc", 5, "abc"},
+		{"exact", "abc", 3, "abc"},
+		{"ascii cut", "abcdef", 3, "abc"},
+		{"zero width", "abc", 0, ""},
+		{"wide glyph fits", "⚡x", 3, "⚡x"},
+		{"wide glyph straddles the boundary", "a⚡", 2, "a"},
+		{"cjk straddles", "a构建", 4, "a构"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := truncateCells(tc.in, tc.w); got != tc.want {
+				t.Errorf("truncateCells(%q, %d) = %q, want %q", tc.in, tc.w, got, tc.want)
+			}
+			if got := lipgloss.Width(padOrTrunc(tc.in, tc.w)); got != max(tc.w, 0) {
+				t.Errorf("padOrTrunc(%q, %d) is %d cells, want exactly %d", tc.in, tc.w, got, tc.w)
+			}
+		})
 	}
 }
 

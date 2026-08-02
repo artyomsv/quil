@@ -158,19 +158,44 @@ func (m *Model) renderSidebar(height int) string {
 		w = defaultSidebarWidth
 	}
 
-	rows := m.sidebarRows(w)
+	rows := m.sidebarVisibleRows(w, height)
 	lines := make([]string, len(rows))
 	for i, r := range rows {
 		lines[i] = r.text
 	}
 
 	content := strings.Join(lines, "\n")
-	// .Width/.Height are the authoritative sizing pass (ANSI- and wide-glyph-
-	// aware) over the rune-count padding each row builder already applied —
-	// same belt-and-suspenders pattern NotificationCenter.View uses for the
-	// same reason: this block is about to sit inside a lipgloss.JoinHorizontal
-	// next to tab content, and a ragged row there staggers every line after it.
+	// .Width/.Height is a final sizing pass over rows this file has already
+	// padded to exactly w CELLS (padOrTrunc). It must never have anything
+	// left to do horizontally: .Width WRAPS an over-wide line onto a new
+	// one rather than truncating it, which would shift every row below it
+	// while sidebarRowAt still maps screen row y to rows[y-1].
 	return lipgloss.NewStyle().Width(w).Height(height).Render(content)
+}
+
+// sidebarVisibleRows caps sidebarRows to the rows that actually fit in
+// height. lipgloss's .Height PADS but never CLIPS, so an uncapped list
+// (1 + projects + 2 + Σ(1 + panes) rows, all unbounded) grows the composited
+// block past the terminal and pushes the status bar off the bottom —
+// the vertical twin of the width clamp, and the reason
+// NotificationCenter.View computes its own maxVisible rather than trusting
+// .Height. minWidthForSidebar gates columns only.
+//
+// The TAIL is what gets dropped, and the last visible row becomes an
+// explicit overflow marker rather than silently ending: the PROJECTS block
+// is the navigation the sidebar exists for, and trimming from the top would
+// shift every remaining row while sidebarRowAt still indexes rows[y-1].
+//
+// Both the paint and the hit test call this, with the same height — a cap
+// applied in only one of them is the row-drift bug in another form.
+func (m *Model) sidebarVisibleRows(w, height int) []sidebarRow {
+	rows := m.sidebarRows(w)
+	if height <= 0 || len(rows) <= height {
+		return rows
+	}
+	rows = rows[:height]
+	rows[height-1] = sidebarRow{text: sidebarDimStyle.Render(padOrTrunc(" …", w))}
+	return rows
 }
 
 // sidebarRowAt resolves the project-sidebar row under a SCREEN coordinate.
@@ -185,7 +210,9 @@ func (m *Model) sidebarRowAt(x, y int) (sidebarRow, bool) {
 	if y < 1 || y >= m.height-1 {
 		return sidebarRow{}, false
 	}
-	rows := m.sidebarRows(w)
+	// Same height View() passes renderSidebar, so paint and hit test cap
+	// at the identical row.
+	rows := m.sidebarVisibleRows(w, m.height-chromeHeight)
 	if i := y - 1; i < len(rows) {
 		return rows[i], true
 	}
@@ -231,11 +258,11 @@ var (
 )
 
 func sidebarHeading(title string, w int) string {
-	return sidebarHeadingStyle.Render(truncateRunes(title, w))
+	return sidebarHeadingStyle.Render(truncateCells(title, w))
 }
 
 func sidebarTabHeading(name string, w int) string {
-	return sidebarDimStyle.Render(truncateRunes(" "+name, w))
+	return sidebarDimStyle.Render(truncateCells(" "+name, w))
 }
 
 // projectRow renders one project's summary line: an active-project marker,
@@ -259,14 +286,14 @@ func projectRow(name string, working, blocked int, link string, active bool, w i
 		badge += " " + link
 	}
 
-	avail := w - runeLen(marker) - runeLen(badge)
+	avail := w - lipgloss.Width(marker) - lipgloss.Width(badge)
 	if avail < 1 {
 		avail = 1
 	}
-	name = truncateRunes(name, avail)
+	name = truncateCells(name, avail)
 
 	line := marker + name
-	if gap := w - runeLen(line) - runeLen(badge); gap > 0 {
+	if gap := w - lipgloss.Width(line) - lipgloss.Width(badge); gap > 0 {
 		line += strings.Repeat(" ", gap)
 	}
 	line += badge
@@ -312,22 +339,59 @@ func paneRow(pane *PaneModel, w int) string {
 	label = sanitizeRemoteText(label)
 
 	prefix := "  " + glyph + " "
-	avail := w - runeLen(prefix) - runeLen(suffix)
+	avail := w - lipgloss.Width(prefix) - lipgloss.Width(suffix)
 	if avail < 1 {
 		avail = 1
 	}
-	label = truncateRunes(label, avail)
+	label = truncateCells(label, avail)
 
 	return style.Render(padOrTrunc(prefix+label+suffix, w))
 }
 
+// truncateCells cuts s to at most w CELLS, not runes.
+//
+// A rune count is not a width, and the difference is not theoretical here:
+// linkGlyph's ⚡ (U+26A1) is one rune and two cells, ⚠ and the CJK or emoji
+// characters that reach these rows through project names, pane names and
+// blockedReason are the same — all remote-sourced text that
+// sanitizeRemoteText deliberately preserves non-ASCII in. Rune-counted
+// padding therefore produced rows of w runes and MORE than w cells, and
+// renderSidebar's closing .Width(w) WRAPS the excess onto a new painted
+// line instead of truncating it. That shifts every row below it down by one
+// while sidebarRowAt still maps screen row y to rows[y-1] — the user clicks
+// project 3 and selects project 2.
+//
+// A wide glyph that would straddle the boundary is dropped whole (padOrTrunc
+// backfills the odd cell with a space): emitting half of one is a different
+// character. No ellipsis — unlike palette rows these are padded to an exact
+// column count, and an ellipsis cell would come out of the content budget.
+func truncateCells(s string, w int) string {
+	if w <= 0 {
+		return ""
+	}
+	if lipgloss.Width(s) <= w {
+		return s
+	}
+	var b strings.Builder
+	used := 0
+	for _, r := range s {
+		rw := lipgloss.Width(string(r))
+		if used+rw > w {
+			break
+		}
+		b.WriteRune(r)
+		used += rw
+	}
+	return b.String()
+}
+
 // padOrTrunc truncates or right-pads (with plain spaces) s to exactly w
-// runes, so every sidebar row occupies the identical column count before
-// styling is applied — see renderSidebar's comment on why that matters for
-// lipgloss.JoinHorizontal.
+// CELLS, so every sidebar row occupies the identical column count before
+// styling is applied — see truncateCells for why cells and not runes, and
+// renderSidebar's comment on why an exact count matters.
 func padOrTrunc(s string, w int) string {
-	s = truncateRunes(s, w)
-	if pad := w - runeLen(s); pad > 0 {
+	s = truncateCells(s, w)
+	if pad := w - lipgloss.Width(s); pad > 0 {
 		s += strings.Repeat(" ", pad)
 	}
 	return s

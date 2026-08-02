@@ -1764,7 +1764,13 @@ func (m Model) sidebarOverlayWidth() int {
 	if !m.notifications.visible || m.dialog != dialogNone {
 		return 0
 	}
-	if m.width-m.notifications.width < minTermWidth {
+	// Against paneAreaWidth(), not m.width — the overlay is composited onto
+	// tabContent, which the project sidebar has already taken its columns
+	// out of (same correction notesPanelWidth carries). Measured against the
+	// full terminal, a wide sidebar_width leaves this reporting a strip that
+	// overlayRight then declines to paint (its overlayW >= totalW bail),
+	// while sidebarSwallowsMouse goes on eating clicks in those columns.
+	if m.paneAreaWidth()-m.notifications.width < minTermWidth {
 		return 0
 	}
 	return m.notifications.width
@@ -2827,6 +2833,17 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// strip shifts by its width in one frame, which is exactly the kind
 		// of shift Bubble Tea's cell diff mis-tracks.
 		m.sidebarOpen = !m.sidebarOpen
+		// resizeTabs FIRST, and it is not optional: resizeAllPanes does not
+		// compute geometry, it READS pane.Width/Height and tab.CanvasW/H and
+		// ships them. Those are written only by tab.Resize — i.e. by
+		// resizeTabs (every tab of every project) or by View (the active tab
+		// only). The toggle changes paneAreaWidth() for all of them, so
+		// without this every background tab keeps its pre-toggle PTY size
+		// until the next workspace broadcast or real window resize, and even
+		// the active tab is a race between View and this Cmd's goroutine that
+		// the daemon's same-size guard can settle the wrong way. Same
+		// ordering as resizeTickMsg and toggleFocusForActiveTab.
+		m.resizeTabs()
 		// A screen preference, not session state: persisted to config (saved
 		// on exit via ConfigChanged), never to workspace.json.
 		m.cfg.UI.SidebarOpen = m.sidebarOpen

@@ -59,7 +59,12 @@ func (m *Model) switchProject(i int) tea.Cmd {
 	if m.notesMode && m.notesEditor != nil {
 		m.exitNotesModeInPlace()
 	}
-	m.prevProject = m.activeProject
+	// Recorded by ID: the bounce target has to survive a workspace
+	// reconciliation that reorders the list, and an index does not.
+	m.prevProject = ""
+	if p := m.cur(); p != nil {
+		m.prevProject = p.ID
+	}
 	m.activeProject = i
 	// Before the send: syncActiveDest is what makes an UNSTAMPED message
 	// resolve to the incoming project's daemon rather than the outgoing
@@ -176,6 +181,51 @@ func (m *Model) allTabs() []*TabModel {
 	var out []*TabModel
 	for _, p := range m.projects {
 		out = append(out, p.tabs...)
+	}
+	return out
+}
+
+// mergeProjects folds one destination's freshly rebuilt project list back into
+// the client's, IN PLACE: every surviving project keeps the slot it already
+// occupied, projects from other destinations are untouched, and only genuinely
+// new ones are appended.
+//
+// Appending the rebuilt list wholesale (kept + rebuilt) is what this replaces,
+// and it made the ORDER a function of which daemon broadcast last: with a local
+// daemon beside one remote, the sidebar flipped on every alternating broadcast
+// — and pane/tab lifecycle, overlay exit and a mouse-mode change all broadcast,
+// so it flipped often enough to see. The order is also read as identity in two
+// places (the picker renders m.projects verbatim; Alt+O resolves a project by
+// it before Task-17's ID rewrite), so an unstable one silently moves the user
+// between daemons.
+//
+// A project this broadcast no longer describes is DROPPED — the broadcast is
+// the full state of that daemon, so its absence is the daemon saying it is gone.
+func mergeProjects(current, rebuilt []*ProjectModel, dest string) []*ProjectModel {
+	byID := make(map[string]*ProjectModel, len(rebuilt))
+	for _, p := range rebuilt {
+		byID[p.ID] = p
+	}
+
+	out := make([]*ProjectModel, 0, len(current)+len(rebuilt))
+	placed := make(map[string]bool, len(rebuilt))
+	for _, p := range current {
+		if p == nil {
+			continue
+		}
+		if p.Dest != dest {
+			out = append(out, p)
+			continue
+		}
+		if np, ok := byID[p.ID]; ok {
+			out = append(out, np)
+			placed[p.ID] = true
+		}
+	}
+	for _, p := range rebuilt {
+		if !placed[p.ID] {
+			out = append(out, p)
+		}
 	}
 	return out
 }

@@ -215,8 +215,8 @@ func TestSwitchProjectNotifiesDaemonAndResyncsGeometry(t *testing.T) {
 	if !sawSwitch {
 		t.Fatal("switchProject must send MsgSwitchProject or the daemon's activeProject goes stale")
 	}
-	if m.activeProject != 1 || m.prevProject != 0 {
-		t.Fatalf("activeProject/prevProject = %d/%d, want 1/0", m.activeProject, m.prevProject)
+	if m.activeProject != 1 || m.prevProject != "proj-a" {
+		t.Fatalf("activeProject/prevProject = %d/%q, want 1/proj-a", m.activeProject, m.prevProject)
 	}
 	// The incoming project's panes were last sized under whatever geometry
 	// was current when it went to the background.
@@ -473,6 +473,36 @@ func TestSidebarToggleKeyFlipsResizesAndPersists(t *testing.T) {
 	}
 	if bgPane.Width != widthBefore {
 		t.Errorf("background pane width = %d after closing, want %d", bgPane.Width, widthBefore)
+	}
+}
+
+// TestSidebarToggleKeyRefusedOnANarrowTerminal: below minWidthForSidebar
+// sidebarWidth() answers 0 regardless of sidebarOpen, so flipping the flag
+// repaints nothing — but it still wrote cfg.UI.SidebarOpen to disk, so a
+// narrow session silently decided how the next wide one comes up.
+func TestSidebarToggleKeyRefusedOnANarrowTerminal(t *testing.T) {
+	m := newSplitDragTestModel(t)
+	m.cfg = config.Default()
+	m.width = minWidthForSidebar - 1
+	if m.projectSidebarWidth() != 0 {
+		t.Fatalf("setup invariant broken: projectSidebarWidth = %d at width %d, want 0",
+			m.projectSidebarWidth(), m.width)
+	}
+
+	updated, cmd := m.handleKey(tea.KeyPressMsg{Mod: tea.ModAlt | tea.ModShift, Code: 's'})
+	got := updated.(Model)
+
+	if got.sidebarOpen {
+		t.Error("sidebarOpen flipped on a terminal that cannot render the sidebar")
+	}
+	if got.cfg.UI.SidebarOpen || got.configChanged {
+		t.Error("a no-op toggle wrote the sidebar preference to config")
+	}
+	if got.flashText == "" {
+		t.Error("the refusal is silent — the key must explain why nothing happened")
+	}
+	if cmd == nil {
+		t.Error("the flash needs its expiry cmd to repaint")
 	}
 }
 

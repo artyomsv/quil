@@ -138,9 +138,12 @@ func TestParseWorkspaceStateReadsProjects(t *testing.T) {
 }
 
 func TestApplyWorkspaceStateReplacesOnlyItsOwnDest(t *testing.T) {
+	// The BROADCASTING dest's project is first on purpose: with it last, an
+	// append-based merge reproduces the original order by luck and the order
+	// assertion below passes against the very bug it exists for.
 	m := Model{projects: []*ProjectModel{
-		{ID: "proj-local", Name: "quil", Dest: "", tabs: []*TabModel{NewTabModel("tab-1", "One")}},
 		{ID: "proj-gpu", Name: "api", Dest: "gpu01", tabs: []*TabModel{NewTabModel("tab-9", "Nine")}},
+		{ID: "proj-local", Name: "quil", Dest: "", tabs: []*TabModel{NewTabModel("tab-1", "One")}},
 	}}
 
 	m.applyWorkspaceState(WorkspaceStateMsg{
@@ -151,6 +154,14 @@ func TestApplyWorkspaceStateReplacesOnlyItsOwnDest(t *testing.T) {
 
 	if len(m.projects) != 2 {
 		t.Fatalf("projects = %d, want 2 — the local project was clobbered", len(m.projects))
+	}
+	// ORDER, not just membership: the broadcasting dest's projects must keep
+	// the slots they already occupied. Appending the rebuilt list instead
+	// moved proj-gpu to the end, so a session holding local + remote reordered
+	// the sidebar on every alternating broadcast.
+	if m.projects[0].ID != "proj-gpu" || m.projects[1].ID != "proj-local" {
+		t.Fatalf("order = [%s %s], want [proj-gpu proj-local] — a broadcast reordered "+
+			"the project list", m.projects[0].ID, m.projects[1].ID)
 	}
 	for _, p := range m.projects {
 		switch p.Dest {
@@ -163,6 +174,93 @@ func TestApplyWorkspaceStateReplacesOnlyItsOwnDest(t *testing.T) {
 				t.Fatalf("gpu project not updated: %+v", p)
 			}
 		}
+	}
+}
+
+// TestApplyWorkspaceStateKeepsProjectOrderAcrossAlternatingBroadcasts is the
+// regression test for the merge: with a local daemon interleaved with a remote
+// one in the list, NEITHER broadcast may move anything. The old `append(kept,
+// rebuilt...)` put whichever dest broadcast last at the end, so the two
+// daemons' projects swapped places on every tick of ordinary pane/tab traffic.
+//
+// The fixture interleaves dests (local, remote, local) deliberately: with the
+// two dests contiguous, an append-based merge reproduces the original order for
+// one of the two broadcasts by luck and the test passes half the time.
+func TestApplyWorkspaceStateKeepsProjectOrderAcrossAlternatingBroadcasts(t *testing.T) {
+	m := Model{projects: []*ProjectModel{
+		{ID: "proj-l1", Dest: "", tabs: []*TabModel{NewTabModel("tab-1", "One")}},
+		{ID: "proj-r1", Dest: "gpu01", tabs: []*TabModel{NewTabModel("tab-2", "Two")}},
+		{ID: "proj-l2", Dest: "", tabs: []*TabModel{NewTabModel("tab-3", "Three")}},
+	}}
+	want := []string{"proj-l1", "proj-r1", "proj-l2"}
+
+	local := WorkspaceStateMsg{
+		Dest: "",
+		Projects: []ProjectInfo{
+			{ID: "proj-l1", TabIDs: []string{"tab-1"}, ActiveTab: "tab-1"},
+			{ID: "proj-l2", TabIDs: []string{"tab-3"}, ActiveTab: "tab-3"},
+		},
+		Tabs: []TabInfo{
+			{ID: "tab-1", Name: "One", ProjectID: "proj-l1"},
+			{ID: "tab-3", Name: "Three", ProjectID: "proj-l2"},
+		},
+	}
+	remote := WorkspaceStateMsg{
+		Dest:     "gpu01",
+		Projects: []ProjectInfo{{ID: "proj-r1", TabIDs: []string{"tab-2"}, ActiveTab: "tab-2"}},
+		Tabs:     []TabInfo{{ID: "tab-2", Name: "Two", ProjectID: "proj-r1"}},
+	}
+
+	for i := 0; i < 4; i++ {
+		state := local
+		if i%2 == 1 {
+			state = remote
+		}
+		m.applyWorkspaceState(state, state.Dest)
+
+		got := make([]string, len(m.projects))
+		for j, p := range m.projects {
+			got[j] = p.ID
+		}
+		if len(got) != len(want) {
+			t.Fatalf("broadcast %d: projects = %v, want %v", i, got, want)
+		}
+		for j := range want {
+			if got[j] != want[j] {
+				t.Fatalf("broadcast %d from dest %q: order = %v, want %v", i, state.Dest, got, want)
+			}
+		}
+	}
+}
+
+// TestApplyWorkspaceStateAppendsOnlyGenuinelyNewProjects: a project the daemon
+// has just created has no slot to keep, so it goes to the end — and a project
+// the daemon has dropped disappears rather than lingering.
+func TestApplyWorkspaceStateAppendsOnlyGenuinelyNewProjects(t *testing.T) {
+	m := Model{projects: []*ProjectModel{
+		{ID: "proj-a", Dest: "", tabs: []*TabModel{NewTabModel("tab-1", "One")}},
+		{ID: "proj-b", Dest: "", tabs: []*TabModel{NewTabModel("tab-2", "Two")}},
+	}}
+
+	m.applyWorkspaceState(WorkspaceStateMsg{
+		Dest: "",
+		Projects: []ProjectInfo{
+			// Daemon order deliberately differs from the client's, and proj-a
+			// is gone: the client's own slot order wins for survivors.
+			{ID: "proj-c", TabIDs: []string{"tab-3"}, ActiveTab: "tab-3"},
+			{ID: "proj-b", TabIDs: []string{"tab-2"}, ActiveTab: "tab-2"},
+		},
+		Tabs: []TabInfo{
+			{ID: "tab-2", Name: "Two", ProjectID: "proj-b"},
+			{ID: "tab-3", Name: "Three", ProjectID: "proj-c"},
+		},
+	}, "")
+
+	if len(m.projects) != 2 {
+		t.Fatalf("projects = %d, want 2 (proj-a dropped, proj-c added)", len(m.projects))
+	}
+	if m.projects[0].ID != "proj-b" || m.projects[1].ID != "proj-c" {
+		t.Fatalf("order = [%s %s], want [proj-b proj-c]", m.projects[0].ID, m.projects[1].ID)
 	}
 }
 

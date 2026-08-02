@@ -267,12 +267,16 @@ type Model struct {
 	// within it, so switching projects restores the tab each was left on.
 	projects      []*ProjectModel
 	activeProject int
-	// prevProject is the project switchProject moved AWAY from — the
-	// bounce target for the last-project toggle. An index, like
-	// activeProject, so a project removed by a workspace reconciliation
-	// leaves it pointing at whatever now occupies that slot rather than at
-	// a dangling id; every read clamps.
-	prevProject          int
+	// prevProject is the ID of the project switchProject moved AWAY from —
+	// the bounce target for the last-project toggle.
+	//
+	// An ID, not an index. m.projects is rebuilt on every broadcast and can
+	// legitimately grow, shrink or (for a brand-new project) gain an entry at
+	// the end, so an index survives as a NUMBER while silently coming to mean
+	// a different project — and Alt+O would then move the user to another
+	// daemon's work without touching a key that says so. An ID that no longer
+	// resolves is a visible no-op, which is the honest failure.
+	prevProject          string
 	width                int
 	height               int
 	client               tuiClient
@@ -497,9 +501,14 @@ type Model struct {
 	flashText  string
 	flashUntil time.Time
 
-	// updateInfo mirrors the daemon's announced newer release; drives the
-	// status-bar segment, the About row, and the startup notice.
-	updateInfo *ipc.UpdateInfo
+	// updateInfos maps a destination to the newer release ITS daemon
+	// announced; drives the status-bar segment, the About row, and the
+	// startup notice. Keyed rather than a single field because a client can
+	// hold several daemons and each announces its own version — one field is
+	// whatever broadcast last, so the status bar could describe a remote host
+	// while a LOCAL project is on screen. Read through updateInfoFor /
+	// activeUpdateInfo, never indexed directly at a call site.
+	updateInfos map[string]*ipc.UpdateInfo
 
 	// sawFirstState gates the once-per-launch update notice to the FIRST
 	// WorkspaceStateMsg after attach — every broadcast thereafter (switch
@@ -1437,7 +1446,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(tea.ClearScreen, m.listenForMessages())
 
 	case WorkspaceStateMsg:
-		m.noteWorkspaceState(msg.Update)
+		m.noteWorkspaceState(msg.Update, msg.Dest)
 		// TODO(freeze-diagnostic): the 8 "apply: ..." breadcrumbs in this case
 		// and inside applyWorkspaceState were added to pinpoint a TUI Update
 		// wedge during claude-code pane creation (2026-04-22). The root cause
@@ -2955,6 +2964,16 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.ClearScreen
 	case kbMatches(key, kb.SidebarToggle):
+		// Refused below minWidthForSidebar rather than flipped invisibly:
+		// sidebarWidth() returns 0 on a narrow terminal whatever sidebarOpen
+		// says, so the toggle would repaint nothing while still writing
+		// cfg.UI.SidebarOpen to disk — the user's next launch on a wide
+		// terminal would then come up in whichever state the narrow one
+		// happened to leave behind. Flash instead, so the key is not silent.
+		if m.width < minWidthForSidebar {
+			m.setFlash(fmt.Sprintf("terminal too narrow for the project sidebar (needs %d columns)", minWidthForSidebar))
+			return m, m.flashCmd()
+		}
 		// The PROJECT sidebar reserves real layout width (paneAreaWidth), so
 		// unlike the notification overlay above this has to resize every
 		// pane's PTY — and ClearScreen, because every column right of the
@@ -3465,18 +3484,15 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg, dest string) ([]str
 		paneMap[state.Panes[i].ID] = &state.Panes[i]
 	}
 
-	// Preserve every project that did NOT come from this dest — clearing all
-	// of them lets two daemons clobber each other on every tick. The rest are
-	// indexed for reuse, so a project the daemon still has keeps its identity
-	// (and its ProjectModel pointer) across the rebuild.
-	kept := make([]*ProjectModel, 0, len(m.projects))
+	// Index this dest's existing projects for reuse, so a project the daemon
+	// still has keeps its identity (and its ProjectModel pointer) across the
+	// rebuild. Projects from OTHER dests are preserved by mergeProjects below
+	// — clearing all of them lets two daemons clobber each other on every tick.
 	existingProjects := make(map[string]*ProjectModel, len(m.projects))
 	for _, p := range m.projects {
-		if p.Dest != dest {
-			kept = append(kept, p)
-			continue
+		if p.Dest == dest {
+			existingProjects[p.ID] = p
 		}
-		existingProjects[p.ID] = p
 	}
 
 	// Which project is active is the CLIENT's state: a broadcast from one
@@ -3507,7 +3523,7 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg, dest string) ([]str
 		rebuilt = append(rebuilt, proj)
 	}
 
-	m.projects = append(kept, rebuilt...)
+	m.projects = mergeProjects(m.projects, rebuilt, dest)
 	m.activeProject = indexOfProject(m.projects, activeID)
 	// Both halves of the router's default just changed — the project list and
 	// which of them is active — so push the answer immediately rather than at
@@ -4358,14 +4374,17 @@ func (m Model) renderStatusBar() string {
 		total := m.lastMemResp.Total + m.tuiLocalMemTotal()
 		right = "mem " + memreport.HumanBytes(total) + " | " + right
 	}
-	// Suppressed in remote mode: m.updateInfo is broadcast by the REMOTE
-	// daemon and describes its staging dir, but every apply path reads the
-	// LOCAL config.UpdateDir(). Offering "↑ v1.43.0 [ready]" here would either
-	// fail ("staged files missing") or, worse, silently install whatever
-	// different version this machine happens to have staged. Showing nothing
-	// is better than showing a control wired to the wrong host.
+	// Suppressed in remote mode: the announcement describes the REMOTE
+	// daemon's staging dir, but every apply path reads the LOCAL
+	// config.UpdateDir(). Offering "↑ v1.43.0 [ready]" here would either fail
+	// ("staged files missing") or, worse, silently install whatever different
+	// version this machine happens to have staged. Showing nothing is better
+	// than showing a control wired to the wrong host. activeUpdateInfo (not a
+	// single last-broadcast field) is the other half: a mixed session would
+	// otherwise pass this gate with a LOCAL project active and then render the
+	// REMOTE daemon's version.
 	if !m.RemoteMode() {
-		if seg := updateStatusSegment(m.updateInfo, m.version); seg != "" {
+		if seg := updateStatusSegment(m.activeUpdateInfo(), m.version); seg != "" {
 			right = seg + " | " + right
 		}
 	}

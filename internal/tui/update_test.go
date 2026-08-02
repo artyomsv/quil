@@ -98,39 +98,45 @@ func TestUpdateAvailable_UpdatesDisabled(t *testing.T) {
 func TestMaybeShowUpdateNotice(t *testing.T) {
 	t.Setenv("QUIL_HOME", t.TempDir())
 
-	m := &Model{version: "0.0.1", updateInfo: &ipc.UpdateInfo{LatestVersion: "0.0.2", InstallWritable: true}}
-	m.maybeShowUpdateNotice()
+	m := &Model{version: "0.0.1", updateInfos: localUpdate(&ipc.UpdateInfo{LatestVersion: "0.0.2", InstallWritable: true})}
+	m.maybeShowUpdateNotice("")
 	if m.dialog != dialogUpdateNotice {
 		t.Fatalf("dialog = %v, want dialogUpdateNotice", m.dialog)
 	}
 
 	// Second call for the same version: already notified → no dialog.
-	m2 := &Model{version: "0.0.1", updateInfo: &ipc.UpdateInfo{LatestVersion: "0.0.2", InstallWritable: true}}
-	m2.maybeShowUpdateNotice()
+	m2 := &Model{version: "0.0.1", updateInfos: localUpdate(&ipc.UpdateInfo{LatestVersion: "0.0.2", InstallWritable: true})}
+	m2.maybeShowUpdateNotice("")
 	if m2.dialog == dialogUpdateNotice {
 		t.Error("second notice for same version shown, want suppressed")
 	}
 
 	// A modal other than the disclaimer blocks the notice.
-	m3 := &Model{version: "0.0.1", dialog: dialogPluginMigration, updateInfo: &ipc.UpdateInfo{LatestVersion: "0.0.3", InstallWritable: true}}
-	m3.maybeShowUpdateNotice()
+	m3 := &Model{version: "0.0.1", dialog: dialogPluginMigration, updateInfos: localUpdate(&ipc.UpdateInfo{LatestVersion: "0.0.3", InstallWritable: true})}
+	m3.maybeShowUpdateNotice("")
 	if m3.dialog != dialogPluginMigration {
 		t.Error("notice replaced migration dialog, want migration kept")
 	}
 
 	// The disclaimer yields to the notice (spec: update notice > disclaimer).
-	m4 := &Model{version: "0.0.1", dialog: dialogDisclaimer, updateInfo: &ipc.UpdateInfo{LatestVersion: "0.0.3", InstallWritable: true}}
-	m4.maybeShowUpdateNotice()
+	m4 := &Model{version: "0.0.1", dialog: dialogDisclaimer, updateInfos: localUpdate(&ipc.UpdateInfo{LatestVersion: "0.0.3", InstallWritable: true})}
+	m4.maybeShowUpdateNotice("")
 	if m4.dialog != dialogUpdateNotice {
 		t.Error("notice did not replace disclaimer, want replaced")
 	}
 
 	// Up to date → no dialog.
-	m5 := &Model{version: "0.0.2", updateInfo: &ipc.UpdateInfo{LatestVersion: "0.0.2"}}
-	m5.maybeShowUpdateNotice()
+	m5 := &Model{version: "0.0.2", updateInfos: localUpdate(&ipc.UpdateInfo{LatestVersion: "0.0.2"})}
+	m5.maybeShowUpdateNotice("")
 	if m5.dialog == dialogUpdateNotice {
 		t.Error("notice shown when up to date")
 	}
+}
+
+// localUpdate builds the announcement table for a single LOCAL daemon — the
+// shape every pre-multi-daemon fixture in this file describes.
+func localUpdate(info *ipc.UpdateInfo) map[string]*ipc.UpdateInfo {
+	return map[string]*ipc.UpdateInfo{"": info}
 }
 
 // TestNoteWorkspaceState_OnlyFirstBroadcastOpensNotice guards against the
@@ -142,7 +148,7 @@ func TestNoteWorkspaceState_OnlyFirstBroadcastOpensNotice(t *testing.T) {
 
 	m := &Model{version: "0.0.1"}
 	info := &ipc.UpdateInfo{LatestVersion: "0.0.2", InstallWritable: true}
-	m.noteWorkspaceState(info)
+	m.noteWorkspaceState(info, "")
 	if m.dialog != dialogUpdateNotice {
 		t.Fatalf("first broadcast: dialog = %v, want dialogUpdateNotice", m.dialog)
 	}
@@ -154,12 +160,12 @@ func TestNoteWorkspaceState_OnlyFirstBroadcastOpensNotice(t *testing.T) {
 	// version — it must NOT reopen the dialog.
 	m.dialog = dialogNone
 	newer := &ipc.UpdateInfo{LatestVersion: "0.0.3", InstallWritable: true}
-	m.noteWorkspaceState(newer)
+	m.noteWorkspaceState(newer, "")
 	if m.dialog == dialogUpdateNotice {
 		t.Error("second broadcast reopened the notice, want suppressed")
 	}
-	if m.updateInfo != newer {
-		t.Error("updateInfo not refreshed on second broadcast")
+	if m.updateInfoFor("") != newer {
+		t.Error("update info not refreshed on second broadcast")
 	}
 }
 
@@ -226,7 +232,7 @@ func TestHandleUpdateAction(t *testing.T) {
 				t.Cleanup(func() { version.SetUpdatesEnabled(true) })
 			}
 			fake := &fakeSender{}
-			m := Model{client: fake, version: tc.version, updateInfo: tc.info}
+			m := Model{client: fake, version: tc.version, updateInfos: localUpdate(tc.info)}
 			out, _ := m.handleUpdateAction()
 			got := out.(Model)
 

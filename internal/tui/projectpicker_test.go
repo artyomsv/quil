@@ -68,18 +68,18 @@ func TestFilterProjectsSingleProject(t *testing.T) {
 	}
 }
 
-// TestToggleLastProjectOutOfRangeIsNoop covers a prevProject left dangling by
-// a workspace reconciliation that removed projects out from under it —
-// negative and too-large are both "not a real index" and must not touch
-// activeProject or return a live command.
-func TestToggleLastProjectOutOfRangeIsNoop(t *testing.T) {
+// TestToggleLastProjectUnknownIDIsNoop covers a prevProject left dangling by a
+// workspace reconciliation that removed the project out from under it, plus
+// the never-switched zero value. Neither may touch activeProject or return a
+// live command — and in particular an unknown ID must not fall back to
+// project 0, which is what resolving it through indexOfProject would do.
+func TestToggleLastProjectUnknownIDIsNoop(t *testing.T) {
 	cases := []struct {
 		name        string
-		prevProject int
+		prevProject string
 	}{
-		{"negative", -1},
-		{"equal to length", 3},
-		{"past length", 99},
+		{"never switched", ""},
+		{"destroyed project", "proj-gone"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -90,7 +90,7 @@ func TestToggleLastProjectOutOfRangeIsNoop(t *testing.T) {
 				prevProject:   tc.prevProject,
 			}
 			if cmd := m.toggleLastProject(); cmd != nil {
-				t.Fatalf("toggleLastProject() with prevProject=%d returned a live command, want nil", tc.prevProject)
+				t.Fatalf("toggleLastProject() with prevProject=%q returned a live command, want nil", tc.prevProject)
 			}
 			if m.activeProject != 1 {
 				t.Fatalf("activeProject = %d, want unchanged 1", m.activeProject)
@@ -100,23 +100,52 @@ func TestToggleLastProjectOutOfRangeIsNoop(t *testing.T) {
 }
 
 // TestToggleLastProjectSameAsCurrentIsNoop covers a Model built with
-// prevProject already equal to activeProject (the zero-value pairing, or a
-// state a caller assembled directly rather than reaching via switchProject).
-// switchProject's own i==activeProject guard makes this a no-op — there is
-// no separate check in toggleLastProject, so this test pins that the shared
-// guard is enough on its own.
+// prevProject already naming the active project (a state a caller assembled
+// directly rather than reaching via switchProject). switchProject's own
+// i==activeProject guard makes this a no-op — there is no separate check in
+// toggleLastProject, so this test pins that the shared guard is enough on its
+// own.
 func TestToggleLastProjectSameAsCurrentIsNoop(t *testing.T) {
 	m := Model{
 		client:        newFakeConn(),
 		projects:      []*ProjectModel{{ID: "proj-a"}, {ID: "proj-b"}},
 		activeProject: 0,
-		prevProject:   0,
+		prevProject:   "proj-a",
 	}
 	if cmd := m.toggleLastProject(); cmd != nil {
 		t.Fatal("toggleLastProject() bouncing to the already-active project returned a live command, want nil")
 	}
 	if m.activeProject != 0 {
 		t.Fatalf("activeProject = %d, want unchanged 0", m.activeProject)
+	}
+}
+
+// TestToggleLastProjectFollowsTheIDAcrossAReorder is the regression test for
+// prevProject-as-an-index: a broadcast can legitimately reorder m.projects
+// (a new project appears, a destroyed one disappears), and an index survives
+// as a NUMBER while coming to mean a DIFFERENT project — silently moving the
+// user to another daemon's work.
+func TestToggleLastProjectFollowsTheIDAcrossAReorder(t *testing.T) {
+	m := Model{
+		client: newFakeConn(),
+		projects: []*ProjectModel{
+			{ID: "proj-local", Dest: ""}, {ID: "proj-gpu", Dest: "gpu01"},
+		},
+		activeProject: 0,
+	}
+	m.switchProject(1) // now on proj-gpu, bounce target is proj-local
+
+	// A reconciliation reorders the list: proj-local is no longer at index 0.
+	m.projects = []*ProjectModel{
+		{ID: "proj-new", Dest: "gpu01"},
+		{ID: "proj-gpu", Dest: "gpu01"},
+		{ID: "proj-local", Dest: ""},
+	}
+	m.activeProject = 1
+
+	m.toggleLastProject()
+	if got := m.projects[m.activeProject].ID; got != "proj-local" {
+		t.Fatalf("bounced to %q, want proj-local — the toggle followed the slot, not the project", got)
 	}
 }
 

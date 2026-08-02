@@ -924,7 +924,7 @@ func (m Model) renderAboutDialog() string {
 		"View client log",
 		"View daemon log",
 		"View MCP logs",
-		aboutUpdateLabel(m.updateInfo, m.version),
+		aboutUpdateLabel(m.activeUpdateInfo(), m.version),
 		"Stop daemon",
 	}
 	for i, item := range items {

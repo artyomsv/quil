@@ -51,14 +51,19 @@ func (m *Model) filterProjects(query string) []*ProjectModel {
 // toggleLastProject bounces between the two most recent projects, the way
 // `sesh pop` does for tmux sessions. switchProject records prevProject on
 // every successful switch, so repeated toggles bounce back and forth
-// indefinitely. A stale prevProject (out of range, or naming the project
-// already active) resolves through switchProject's own bounds/no-op guard
-// rather than a second check here.
+// indefinitely.
+//
+// The ID is resolved through projectByID, NOT indexOfProject: the latter
+// answers 0 for an unknown ID (its always-somewhere-valid contract, right for
+// an active-project pointer), and here that would silently bounce to the FIRST
+// project whenever the remembered one is gone. A project that no longer exists
+// must be a no-op. Naming the already-active project resolves through
+// switchProject's own no-op guard rather than a second check here.
 func (m *Model) toggleLastProject() tea.Cmd {
-	if m.prevProject < 0 || m.prevProject >= len(m.projects) {
+	if m.prevProject == "" || m.projectByID(m.prevProject) == nil {
 		return nil
 	}
-	return m.switchProject(m.prevProject)
+	return m.switchProject(indexOfProject(m.projects, m.prevProject))
 }
 
 // openProjectPicker opens the fuzzy project picker (Alt+P). Unlike the

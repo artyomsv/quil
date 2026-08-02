@@ -36,12 +36,19 @@ type pluginListMsg struct{ Resp ipc.PluginListRespPayload }
 // simply leaves local detection in place, which is the intended failure mode —
 // a wrong offer fails loudly at spawn, a wrong grey-out hides a working tool
 // silently.
-func (m *Model) requestPluginList() tea.Cmd {
-	// Unstamped — see reloadPluginsThenAskCmd and the Task 17 note on
-	// requestPluginList in the plan: this asks whichever daemon is FOREGROUND,
-	// so it gates on that same daemon rather than RemoteMode()'s process-wide
-	// answer.
-	if !m.remoteModeFor(m.activeDest()) {
+func (m *Model) requestPluginList() tea.Cmd { return m.requestPluginListFor(m.activeDest()) }
+
+// requestPluginListFor asks ONE named daemon, and every caller that knows which
+// daemon it means must use it.
+//
+// The unstamped version was wrong on the path that matters most: attach batches
+// this, and the reconnect attach is per-destination, so a BACKGROUND daemon
+// coming back asked whichever daemon happened to be in the FOREGROUND for its
+// plugin list — then adopted that answer as the reconnected host's, greying out
+// tools that exist there and offering tools that do not. Stamping makes the
+// question and the answer describe the same machine.
+func (m *Model) requestPluginListFor(dest string) tea.Cmd {
+	if !m.remoteModeFor(dest) {
 		return nil
 	}
 	return func() tea.Msg {
@@ -50,7 +57,7 @@ func (m *Model) requestPluginList() tea.Cmd {
 			log.Printf("plugin list: encode: %v", err)
 			return nil
 		}
-		m.client.Send(msg)
+		m.sendForDest(dest, msg)
 		return nil
 	}
 }

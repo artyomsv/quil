@@ -54,15 +54,19 @@ func (r *Router) currentDest() string {
 
 // Add installs a connection for dest and starts its pump.
 //
-// A dest that is already connected LIVE is left alone: a second pump on the
-// same conn would race two readers over one socket. A dest whose pump has died
-// is not "already connected" — pump retires its own registration on failure
-// precisely so that this is a replace rather than a silent no-op, which is what
-// makes the documented reconnect path (a fresh conn handed to Add) work.
+// LIVENESS IS KEYED OFF r.stop, NOT r.conns, and that is the whole reason a
+// dead connection is still reachable through Conn. A second pump on the same
+// LIVE conn would race two readers over one socket, so a live dest is left
+// alone — but "live" has to mean "a pump is still running", not "a conn is
+// still recorded". Retiring the conn to express deadness (the first shape of
+// this) made Conn(dest) nil for exactly the destination a redial was about to
+// run for, so the dialer was handed nothing to close and every reconnect leaked
+// an ssh child plus its remote `quil --stdio`. Keying on the stop channel lets
+// the record outlive the pump, which is what makes the close reachable.
 func (r *Router) Add(dest string, c Client) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if _, exists := r.conns[dest]; exists {
+	if _, live := r.stop[dest]; live {
 		return
 	}
 	stop := make(chan struct{})
@@ -74,14 +78,47 @@ func (r *Router) Add(dest string, c Client) {
 // Conn returns the connection installed for dest, or nil when none is.
 //
 // The reconnect loop needs it to hand the DEAD connection to the dialer, which
-// is the layer that can close it. Nil is a real answer rather than a defect: a
-// pump retires its own registration BEFORE publishing the loss, so a destination
-// whose link died is already gone from the table by the time a redial for it
-// runs. Callers must tolerate it — see Model.connFor.
+// is the layer that can close it — so a conn whose pump has died stays
+// reachable here until Add replaces it or Remove drops it. Nil is still a real
+// answer for a destination that was never dialled (one unreachable at launch),
+// and callers must tolerate it — see Model.connFor.
 func (r *Router) Conn(dest string) Client {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.conns[dest]
+}
+
+// Dests lists every destination the router holds a connection for, live or
+// retired. It is what the Model attaches over: a destination with no conn has
+// nothing to attach to, and one whose pump died is re-attached by the reconnect
+// path rather than by an attach sweep.
+//
+// Order is map order, i.e. unspecified. Every caller either attaches to all of
+// them or closes all of them, so no caller may depend on it.
+func (r *Router) Dests() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]string, 0, len(r.conns))
+	for dest := range r.conns {
+		out = append(out, dest)
+	}
+	return out
+}
+
+// Conns snapshots the connections themselves, for the ONE caller that has to
+// release them: Model.CloseClient on exit.
+//
+// Returning the values rather than exposing the map keeps the release loop
+// outside the lock — closing an ssh-backed conn reaps a child process, which
+// must not run under a mutex the pumps also take.
+func (r *Router) Conns() []Client {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]Client, 0, len(r.conns))
+	for _, c := range r.conns {
+		out = append(out, c)
+	}
+	return out
 }
 
 // Remove drops a connection from the routing table and signals its pump.
@@ -104,11 +141,19 @@ func (r *Router) Remove(dest string) {
 	delete(r.conns, dest)
 }
 
-// retire drops a dead pump's OWN registration, so Add can install a replacement.
+// retire drops a dead pump's OWN liveness registration, so Add can install a
+// replacement — and deliberately LEAVES r.conns[dest] in place.
 //
 // Identity of the stop channel is the guard: a pump whose dest has since been
 // replaced by a newer conn would otherwise unregister its successor. Comparing
 // the channel is exact where comparing the dest alone is not.
+//
+// The conn stays because it is the only handle on a dead ssh child. Nothing in
+// this package can close a Client (it is Send/Receive by design), so the dead
+// conn has to survive until redialCmd can hand it to the dialer in cmd/quil,
+// which does the close. Dropping it here left one leaked ssh process and one
+// leaked remote `quil --stdio` per reconnect. Remove and Add are what finally
+// clear the record, both after the close has happened.
 func (r *Router) retire(dest string, stop chan struct{}) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -116,7 +161,6 @@ func (r *Router) retire(dest string, stop chan struct{}) {
 		return
 	}
 	delete(r.stop, dest)
-	delete(r.conns, dest)
 }
 
 // pump reads one connection, stamping every message with its origin so
@@ -127,8 +171,9 @@ func (r *Router) retire(dest string, stop chan struct{}) {
 // core and drowns the Model. This mirrors listenForMessages, which returns
 // linkLostMsg once and stops. Reconnect installs a fresh conn via Add, which
 // starts a new pump — reachable because retire runs BEFORE the loss is
-// published, so the registration is already gone by the time anyone can react
-// to it.
+// published, so the LIVENESS registration is already gone by the time anyone
+// can react to it. The conn record itself deliberately survives, so the redial
+// still has something to close; see retire.
 //
 // Every publish is preceded by a non-blocking stop check rather than relying on
 // a two-case select: both cases are normally ready and Go picks uniformly, so a
@@ -226,6 +271,16 @@ func routeDest(origin string) (dest string, stamped bool) {
 // re-aiming it at whatever conn happens to be the only one is how a remote
 // pane's keystrokes end up on the local daemon — or a local pane's on a remote
 // host.
+//
+// Nothing on the startup path depends on that fallback any more, and it must
+// stay that way: it is gated on len(r.conns) == 1, so a router holding a local
+// daemon beside a remote one silently delivered the deliberately-unstamped
+// startup attach to conns[""] alone — the remote was never attached, sent no
+// workspace state, and contributed no projects, with no error anywhere. The
+// attach is per-destination and stamped now (Model.attachAllDests), and so is
+// requestPluginList. What remains is a one-conn safety net for the window
+// between launch and the first workspace_state, where activeDest() is still ""
+// because there are no projects to read it from.
 func (r *Router) Send(m *ipc.Message) error {
 	dest, stamped := routeDest(m.Origin)
 	if !stamped {
@@ -262,6 +317,39 @@ func (r *Router) Receive() (*ipc.Message, error) { return <-r.in, nil }
 // narrow interface so *ipc.Client and the test fakes stay two-method.
 type destRouter interface{ SetActiveDest(string) }
 
+// isRouter reports whether the client multiplexes destinations.
+//
+// It answers exactly one question: does a link loss arrive as DATA on a channel
+// that stays open, or as the death of the transport the listen loop was reading?
+// Only the second kind may not be re-armed. Asserted against destRouter rather
+// than *Router so a future second multiplexer needs no edit here.
+func (m Model) isRouter() bool {
+	_, ok := m.client.(destRouter)
+	return ok
+}
+
+// lastDaemon reports whether losing dest — with no way to reconnect it — ends
+// the session, because nothing else is either still up or still retrying.
+//
+// A destination counts as remaining if its link is not down (linkOf is the zero
+// value for one that has never dropped) or if it has a dialer that will keep
+// trying. A destination that is down AND has no dialer is gone for good and
+// cannot hold the session open on its own.
+//
+// A single-connection client answers true for its own "" and so keeps the
+// existing behaviour exactly: a dead local daemon is still fatal.
+func (m Model) lastDaemon(dest string) bool {
+	for _, d := range m.knownDests() {
+		if d == dest {
+			continue
+		}
+		if !m.linkOf(d).active || m.canReconnect(d) {
+			return false
+		}
+	}
+	return true
+}
+
 // activeDest is the destination of the project the user is looking at. Empty
 // means the local daemon — which is also the answer for a Model with no
 // projects yet, and for every single-daemon session.
@@ -288,9 +376,20 @@ func (m *Model) syncActiveDest() {
 // daemon pane that deliberately lives OUTSIDE that tree: Alt+G's destroy and
 // resize sends name it by ID, and a FindLeaf-only lookup would answer for the
 // wrong machine on every one of them.
+//
+// The nil guards match eachClientPane's, and they are not defensive noise: a
+// project or tab pointer can be nil while a workspace reconciliation is
+// rebuilding the list, and armReattachReset puts this walk on the OUTAGE path —
+// the worst moment available for the frame to panic.
 func (m *Model) destOfPane(paneID string) string {
 	for _, proj := range m.projects {
+		if proj == nil {
+			continue
+		}
 		for _, tab := range proj.tabs {
+			if tab == nil {
+				continue
+			}
 			if tab.Root != nil && tab.Root.FindLeaf(paneID) != nil {
 				return proj.Dest
 			}

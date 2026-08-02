@@ -39,7 +39,7 @@ func TestUpdate_WindowSizeMsg_UnchangedSizeIsNoOp(t *testing.T) {
 	m := Model{
 		cfg:           config.Default(),
 		notifications: NewNotificationCenter(30, 50),
-		attached:      true,
+		sized:         true,
 		width:         80,
 		height:        24,
 		pendingWidth:  80,
@@ -60,7 +60,7 @@ func TestUpdate_WindowSizeMsg_ChangedSizeStillDebounces(t *testing.T) {
 	m := Model{
 		cfg:           config.Default(),
 		notifications: NewNotificationCenter(30, 50),
-		attached:      true,
+		sized:         true,
 		width:         80,
 		height:        24,
 		pendingWidth:  80,

@@ -105,7 +105,7 @@ wide_canvas = true
 		notifications:  NewNotificationCenter(30, 50),
 		pluginRegistry: reg,
 		mcpHighlights:  make(map[string]bool),
-		attached:       true,
+		sized:          true,
 		width:          209,
 		height:         58,
 	}
@@ -175,7 +175,7 @@ func TestApplyWorkspaceState_RestorePath_CanvasFlag(t *testing.T) {
 		notifications:  NewNotificationCenter(30, 50),
 		pluginRegistry: flaggedCanvasRegistry(t),
 		mcpHighlights:  make(map[string]bool),
-		attached:       true,
+		sized:          true,
 		width:          209,
 		height:         58,
 	}
@@ -215,7 +215,7 @@ func TestApplyWorkspaceState_MidSessionFlip_CanvasFlag(t *testing.T) {
 		notifications:  NewNotificationCenter(30, 50),
 		pluginRegistry: plugin.NewRegistry(), // no wide_canvas yet (pre-migration)
 		mcpHighlights:  make(map[string]bool),
-		attached:       true,
+		sized:          true,
 		width:          209,
 		height:         58,
 	}
@@ -280,7 +280,7 @@ func TestSyncPaneMeta_SetsMinNativeCols(t *testing.T) {
 		notifications:  NewNotificationCenter(30, 50),
 		pluginRegistry: reg,
 		mcpHighlights:  make(map[string]bool),
-		attached:       true,
+		sized:          true,
 		width:          209,
 		height:         58,
 	}
@@ -327,7 +327,7 @@ func TestApplyWorkspaceState_ThresholdSelectsNativeOrCanvas(t *testing.T) {
 			notifications:  NewNotificationCenter(30, 50),
 			pluginRegistry: flaggedCanvasRegistry(t),
 			mcpHighlights:  make(map[string]bool),
-			attached:       true,
+			sized:          true,
 			width:          w,
 			height:         h,
 		}

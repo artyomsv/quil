@@ -3,6 +3,7 @@ package tui
 import (
 	"errors"
 	"io"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -578,5 +579,128 @@ func TestJumpToPaneSyncsTheActiveDest(t *testing.T) {
 	}
 	if gpu.sentCount() != 1 {
 		t.Fatal("a cross-project jump must move the router's default with it")
+	}
+}
+
+// A dead conn must stay REACHABLE, or nothing can ever close it.
+//
+// Client is deliberately Send/Receive only, so this package cannot release the
+// ssh child behind one — cmd/quil does, when redialCmd hands it the dead conn.
+// The pump therefore retires its LIVENESS registration and leaves the record.
+// Dropping the record instead made Conn(dest) nil for exactly the destination a
+// redial was about to run for, leaking one ssh process and one remote
+// `quil --stdio` per reconnect, for the life of the session.
+func TestRouterKeepsTheDeadConnReachableForTheRedial(t *testing.T) {
+	dead := newFakeConn()
+	dead.err = errors.New("connection reset")
+	r := NewRouter(map[string]Client{"gpu01": dead})
+
+	if lost, err := r.Receive(); err != nil || lost.Type != ipc.MsgLinkLost {
+		t.Fatalf("lost = %+v, err = %v", lost, err)
+	}
+
+	if got := r.Conn("gpu01"); got != Client(dead) {
+		t.Fatalf("Conn after a pump death = %v, want the dead conn — the dialer is "+
+			"handed this value and is the only layer that can close it", got)
+	}
+
+	// And the retirement must still let a replacement in: liveness is keyed off
+	// the stop channel now, so a lingering conn record cannot make Add a no-op.
+	fresh := newFakeConn()
+	r.Add("gpu01", fresh)
+	if got := r.Conn("gpu01"); got != Client(fresh) {
+		t.Fatal("Add did not replace the dead conn; the reconnected daemon stays silent")
+	}
+}
+
+// Exit must release every connection, not just one.
+//
+// closeClientFn type-asserts to *ipc.Client, so handing it the *Router simply
+// missed and exit closed NOTHING. cmd/quil's own deferred Close cannot cover it
+// either — it captured the startup conn of a single destination.
+func TestCloseClientReleasesEveryRouterConn(t *testing.T) {
+	local, gpu := newFakeConn(), newFakeConn()
+	r := NewRouter(map[string]Client{"": local, "gpu01": gpu})
+
+	closed := map[Client]bool{}
+	m := Model{client: r}
+	m.SetClientCloser(func(c Client) { closed[c] = true })
+
+	m.CloseClient()
+
+	if !closed[Client(local)] || !closed[Client(gpu)] {
+		t.Fatalf("closed = %d conn(s), want both — every unclosed ssh child and its "+
+			"remote `quil --stdio` outlives the client", len(closed))
+	}
+}
+
+// Every connection is attached exactly once, however many WindowSizeMsgs arrive.
+//
+// Once for correctness: a router holding two conns delivered the old unstamped
+// startup attach to conns[""] alone, so the second daemon was never attached —
+// no workspace state, no projects, no error. At MOST once because every attach
+// replays the daemon's whole ghost buffer, which doubles a pane's scrollback and
+// re-counts the work-state events inside the replay.
+func TestEveryConnIsAttachedExactlyOnce(t *testing.T) {
+	local, gpu := newFakeConn(), newFakeConn()
+	r := NewRouter(map[string]Client{"": local, "gpu01": gpu})
+	m := Model{client: r, width: 80, height: 24}
+
+	m.attachAllDests()
+	m.attachAllDests() // a second WindowSizeMsg must not re-attach
+
+	for name, c := range map[string]*fakeConn{"local": local, "gpu01": gpu} {
+		var n int
+		c.mu.Lock()
+		for _, msg := range c.sent {
+			if msg.Type == ipc.MsgAttach {
+				n++
+			}
+		}
+		c.mu.Unlock()
+		if n != 1 {
+			t.Errorf("%s got %d attaches, want exactly 1 — each attach replays the "+
+				"full ghost buffer and re-counts work-state events", name, n)
+		}
+	}
+}
+
+// The local daemon's attach carries this process's CWD; a remote one's must not.
+// os.Getwd() names a directory on the laptop and the daemon tests it against the
+// SERVER's disk, so a path that happens to exist on both is the only thing that
+// ever made it look right.
+func TestAttachCWDIsPerDestinationInAMixedSession(t *testing.T) {
+	local, gpu := newFakeConn(), newFakeConn()
+	r := NewRouter(map[string]Client{"": local, "gpu01": gpu})
+	m := Model{client: r, width: 80, height: 24}
+
+	m.attachAllDests()
+
+	cwdOf := func(t *testing.T, c *fakeConn) string {
+		t.Helper()
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		for _, msg := range c.sent {
+			if msg.Type != ipc.MsgAttach {
+				continue
+			}
+			var p ipc.AttachPayload
+			if err := msg.DecodePayload(&p); err != nil {
+				t.Fatalf("decode attach: %v", err)
+			}
+			return p.CWD
+		}
+		t.Fatal("no attach was sent")
+		return ""
+	}
+
+	if got := cwdOf(t, gpu); got != "" {
+		t.Errorf("remote attach carried CWD %q; the daemon would resolve this "+
+			"laptop's path against the server's disk", got)
+	}
+	wd, _ := os.Getwd()
+	if got := cwdOf(t, local); got != wd {
+		t.Errorf("local attach CWD = %q, want %q — new panes would open in the "+
+			"daemon's frozen working directory instead of the client's", got, wd)
 	}
 }

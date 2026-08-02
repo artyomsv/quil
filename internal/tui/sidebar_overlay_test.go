@@ -16,7 +16,7 @@ func newSidebarTestModel() Model {
 	return Model{
 		cfg:           config.Default(),
 		notifications: NewNotificationCenter(30, 50),
-		attached:      true,
+		sized:         true,
 		width:         200,
 		height:        50,
 		projects:      oneProject(NewTabModel("tab-1", "Shell")),

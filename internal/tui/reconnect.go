@@ -48,6 +48,24 @@ type reconnectState struct {
 	attempt int       // 1-based; drives the backoff
 	lastErr error     // shown in the banner
 	nextAt  time.Time // when the next attempt fires, for the countdown
+	// gen retires this destination's own in-flight timers and dials, and it
+	// lives HERE rather than on the Model because the thing it identifies is one
+	// destination's connection, not the client as a whole.
+	//
+	// Model.clientGen used to serve both. That works while only one ladder can
+	// climb: finishReconnect bumps the single counter, every stale closure
+	// carries the old number and is dropped. With a router two ladders climb at
+	// once, and one destination completing bumped the counter the OTHER
+	// destination's already-armed redialTickMsg and in-flight redialResultMsg
+	// were stamped with — so both were discarded, its `active` stayed true with
+	// no timer left to clear it, and its banner stuck for the rest of the
+	// session with nothing retrying behind it.
+	//
+	// clientGen still guards the single-connection listen loop, which is a
+	// genuinely session-wide thing: there, finishReconnect swaps m.client
+	// wholesale and the old loop must be retired. A router's r.in is never
+	// swapped, so nothing there needs a session generation.
+	gen int
 	// lastUpAt and settledAttempt survive a successful reconnect so a flapping
 	// link cannot restart the backoff ladder from scratch each time. See
 	// beginReconnect.
@@ -229,13 +247,10 @@ func (m Model) linkHost(dest string) string {
 // connFor returns the connection carrying dest, for handing the DEAD one to the
 // dialer — cmd/quil closes it there, and this package cannot.
 //
-// With a router the answer is nil in the case that matters today: the pump
-// retires its own registration BEFORE publishing the loss, so by the time a
-// redial runs the dead conn is no longer reachable through the table. Handing
-// the router itself over instead would be worse than nil — the dialer would
-// close nothing and the type assertion would silently miss — so nil is the
-// honest answer until the multi-daemon lifecycle lands (Task 17), and
-// redialRemote already tolerates it.
+// A router answers with the dead conn itself: a pump retires only its LIVENESS
+// registration and leaves the record, precisely so the redial has something to
+// release. Nil remains possible — a destination unreachable at launch never had
+// a conn — and redialRemote tolerates it.
 func (m Model) connFor(dest string) Client {
 	if r, ok := m.client.(*Router); ok {
 		return r.Conn(dest)
@@ -262,9 +277,24 @@ func (m Model) closeClient(c Client) {
 	m.closeClientFn(c)
 }
 
-// CloseClient releases the connection the Model currently holds. Called by
+// CloseClient releases every connection the Model currently holds. Called by
 // cmd/quil on exit, after the Bubble Tea program has returned.
-func (m Model) CloseClient() { m.closeClient(m.client) }
+//
+// A router is unwrapped rather than handed over whole, and that is the fix for
+// a real leak rather than a tidiness: closeClientFn type-asserts to *ipc.Client,
+// so passing the *Router simply missed and exit closed NOTHING — every ssh
+// child and every remote `quil --stdio` outlived the client, on top of the
+// per-reconnect leak retire used to cause. cmd/quil's own `defer client.Close()`
+// cannot cover this either: it captured the startup conn of ONE destination.
+func (m Model) CloseClient() {
+	if r, ok := m.client.(*Router); ok {
+		for _, c := range r.Conns() {
+			m.closeClient(c)
+		}
+		return
+	}
+	m.closeClient(m.client)
+}
 
 // canReconnect reports whether a dropped link to dest should be retried rather
 // than being fatal.
@@ -354,6 +384,14 @@ var ErrLinkPermanent = errors.New("remote link failure is permanent")
 // would be an invisible authentication attempt.
 func (m Model) resumeReconnect() (tea.Model, tea.Cmd) {
 	dest := m.activeDest()
+	// A destination can be parked with no dialer behind it: a multi-daemon
+	// session parks a link it cannot reconnect rather than quitting the whole
+	// client over it. Resuming that would reach redialCmd with a nil RedialFunc
+	// and panic. The banner does not offer the key there either, but the guard
+	// belongs at the action, not only at its affordance.
+	if !m.canReconnect(dest) {
+		return m, nil
+	}
 	ls := m.linkFor(dest)
 	log.Printf("remote: resuming a parked reconnect to %s at attempt %d", m.linkHost(dest), ls.attempt)
 	ls.parked = false
@@ -450,6 +488,18 @@ func (m Model) bannerCandidates() []string {
 	// misleading string available, since nothing is connecting and nothing will
 	// until the operator acts.
 	if ls.parked {
+		// A parked link with no dialer cannot be resumed at all — that is a
+		// multi-daemon session keeping itself alive around a daemon it can never
+		// reach again, rather than an operator-fixable ssh failure. Offering
+		// "r retries" there would be a key that does nothing, which is worse
+		// than no affordance: it reads as "still trying".
+		if !m.canReconnect(dest) {
+			return []string{
+				fmt.Sprintf("%s is gone — its panes are lost%sctrl+q quits", host, bannerSep),
+				fmt.Sprintf("%s is gone%sctrl+q", host, bannerSep),
+				"Daemon gone" + bannerSep + "ctrl+q",
+			}
+		}
 		return []string{
 			fmt.Sprintf("%s unreachable — stopped, %s%sctrl+q quits", host, bannerResumeHint, bannerSep),
 			fmt.Sprintf("Stopped — %s%sctrl+q", bannerResumeHint, bannerSep),
@@ -700,7 +750,11 @@ func (m *Model) handleLinkLost(dest string, err error) {
 		log.Printf("remote: link to %s lasted %v (<%v) — resuming backoff at attempt %d rather than restarting it",
 			m.linkHost(dest), time.Since(ls.lastUpAt).Round(time.Millisecond), reconnectFlapWindow, carried+1)
 	}
-	*ls = reconnectState{active: true, lastErr: err, attempt: carried}
+	// gen carries forward across the drop as well. It identifies this
+	// destination's connection, and a drop does not make the timers armed for the
+	// PREVIOUS one current again — resetting it here would let a redial result
+	// still in flight from before the outage be accepted as this outage's.
+	*ls = reconnectState{gen: ls.gen, active: true, lastErr: err, attempt: carried}
 
 	// The transient UI below belongs to the project on screen, so it is torn down
 	// only when the daemon that dropped is the one the user is looking at. A
@@ -746,7 +800,7 @@ func (m Model) scheduleRedial(dest string) (tea.Model, tea.Cmd) {
 	ls.nextAt = time.Now().Add(delay)
 	log.Printf("remote: reconnect attempt %d to %s in %v (last error: %v)",
 		ls.attempt, m.linkHost(dest), delay.Round(time.Millisecond), ls.lastErr)
-	gen, attempt := m.clientGen, ls.attempt
+	gen, attempt := ls.gen, ls.attempt
 	return m, tea.Tick(delay, func(time.Time) tea.Msg {
 		return redialTickMsg{gen: gen, dest: dest, attempt: attempt}
 	})
@@ -762,7 +816,7 @@ func (m Model) scheduleRedial(dest string) (tea.Model, tea.Cmd) {
 // destination too — handing over m.client would give a multi-daemon client's
 // router to a dialer that expects one connection.
 func (m Model) redialCmd(dest string) tea.Cmd {
-	gen, dial, old := m.clientGen, m.redialFns[dest], m.connFor(dest)
+	gen, dial, old := m.linkOf(dest).gen, m.redialFns[dest], m.connFor(dest)
 	return func() tea.Msg {
 		c, err := dial(old)
 		return redialResultMsg{gen: gen, dest: dest, client: c, err: err}
@@ -773,34 +827,52 @@ func (m Model) redialCmd(dest string) tea.Cmd {
 // re-attaches to it.
 //
 // The generation bump is what retires every closure still holding the dead
-// client: their linkLostMsg and redialResultMsg all carry the old number and
-// are dropped on arrival. It must happen BEFORE listenForMessages is built,
-// since that closure stamps its reports with whatever it captures.
+// connection: that destination's redialTickMsg and redialResultMsg all carry
+// the old number and are dropped on arrival. It is per-destination (see
+// reconnectState.gen), so completing one ladder no longer discards another's
+// armed timer.
 //
 // With a router there is no single client to swap: the fresh conn replaces ONE
 // entry, and the pump Add starts is what makes that daemon's messages flow
 // again. Remove cannot interrupt a pump still parked inside Receive — Client is
-// only Send/Receive — but a dead pump has already retired its own registration,
-// which is what makes the Add land rather than early-return.
+// only Send/Receive — but a dead pump has already retired its own liveness
+// registration, which is what makes the Add land rather than early-return.
 //
-// m.attached is deliberately NOT cleared. It gates the first-WindowSizeMsg
-// attach path, so clearing it would make the next resize attach a SECOND time —
-// and the daemon replays the whole output buffer on every attach, so that is a
-// doubled scrollback rather than a redundant no-op.
+// The listen loop is re-armed ONLY on the single-connection path, and the
+// asymmetry is load-bearing. There the loop died with the client and clientGen
+// must bump to retire it. A router's loop never died: the drop arrived as DATA
+// on r.in and Update's linkLostMsg branch already re-armed the one reader.
+// Arming a second here would add a goroutine per reconnect, each racing the
+// others for the same channel — unbounded over a flapping session.
+//
+// m.attached is SET rather than cleared. A destination that reconnects has been
+// attached again right here, and the flag is what stops the next WindowSizeMsg
+// attaching it a second time — the daemon replays its whole output buffer on
+// every attach, so that is a doubled scrollback rather than a redundant no-op.
+// Setting it also covers the destination that was unreachable at LAUNCH and so
+// never carried the flag at all.
 func (m Model) finishReconnect(dest string, c Client) (tea.Model, tea.Cmd) {
 	ls := m.linkFor(dest)
 	log.Printf("remote link to %s restored after %d attempt(s)", m.linkHost(dest), ls.attempt)
+	isRouter := false
 	if r, ok := m.client.(*Router); ok {
+		isRouter = true
 		r.Remove(dest)
 		r.Add(dest, c)
 	} else {
 		m.client = c // single-daemon path, unchanged
+		m.clientGen++
 	}
-	m.clientGen++
+	if m.attached == nil {
+		m.attached = map[string]bool{}
+	}
+	m.attached[dest] = true
 	// Not the zero value: lastUpAt and settledAttempt carry forward so a link
 	// that dies again within reconnectFlapWindow resumes the backoff instead of
-	// restarting it. Everything else is cleared.
+	// restarting it, and gen carries forward because it is what identifies this
+	// destination's superseded timers. Everything else is cleared.
 	*ls = reconnectState{
+		gen:            ls.gen + 1,
 		lastUpAt:       time.Now(),
 		settledAttempt: ls.attempt,
 	}
@@ -812,5 +884,8 @@ func (m Model) finishReconnect(dest string, c Client) (tea.Model, tea.Cmd) {
 	m.armReattachReset(dest)
 	m.resetWorkStateForReattach(dest)
 
+	if isRouter {
+		return m, m.attachToDest(dest)
+	}
 	return m, tea.Batch(m.attachToDest(dest), m.listenForMessages())
 }

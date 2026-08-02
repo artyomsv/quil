@@ -170,7 +170,7 @@ func TestUpdateMouseSelection_PreviewPane_RoutesThroughLayout(t *testing.T) {
 		notifications:  NewNotificationCenter(30, 50),
 		pluginRegistry: flaggedCanvasRegistry(t),
 		mcpHighlights:  make(map[string]bool),
-		attached:       true,
+		sized:          true,
 		width:          120,
 		height:         40,
 	}

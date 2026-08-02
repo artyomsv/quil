@@ -280,7 +280,8 @@ type Model struct {
 	closeClientFn        func(Client) // releases a connection; see SetClientCloser
 	cfg                  config.Config
 	version              string
-	attached             bool
+	sized                bool            // the terminal has reported its geometry at least once
+	attached             map[string]bool // destinations already attached — see attachAllDests
 	renaming             bool
 	renameInput          string
 	renamingPane         bool
@@ -725,7 +726,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		// Poll echo: size matches both the applied and any pending value —
 		// nothing to do. Keeps the 1s size poll free when idle.
-		if m.attached && msg.Width == m.width && msg.Height == m.height &&
+		//
+		// Gated on `sized`, not on the attach ledger. Those are two different
+		// questions now — has the terminal reported a geometry, versus which
+		// daemons have been attached — and only the first belongs here. A
+		// destination left unattached by a failed send is one whose connection
+		// is broken, so its pump reports the loss and finishReconnect attaches
+		// it; making the 1 s size poll a second retry path would only race that.
+		if m.sized && msg.Width == m.width && msg.Height == m.height &&
 			msg.Width == m.pendingWidth && msg.Height == m.pendingHeight {
 			return m, nil
 		}
@@ -737,14 +745,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.resizeSeq++
 
 		// First resize: apply immediately for initial attach
-		if !m.attached {
-			m.attached = true
+		if !m.sized {
+			m.sized = true
 			m.width = msg.Width
 			m.height = msg.Height
 			m.resizeTabs()
-			log.Print("first WindowSizeMsg — attaching to daemon")
-			return m, tea.Batch(m.resizeAllPanes(), m.attachToDaemon())
+			log.Print("first WindowSizeMsg — attaching to every daemon")
+			return m, tea.Batch(m.resizeAllPanes(), m.attachAllDests())
 		}
+
+		// A destination can join the router after the first resize (a host that
+		// was unreachable at launch, brought back by its reconnect ladder), and
+		// a send that failed leaves its dest unattached on purpose. Retrying
+		// here is what picks both up — the 1 s size poll makes it a bounded
+		// wait rather than a wedge. Batched into the returns below rather than
+		// returned on its own: a resize that ALSO needs an attach still has to
+		// be debounced like any other.
+		attach := m.attachAllDests()
 
 		// Full-screen dialogs (migration, disclaimer) have no panes to
 		// resize via IPC, so apply immediately — debouncing would leave
@@ -753,26 +770,58 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.dialog == dialogPluginMigration || m.dialog == dialogDisclaimer {
 			m.width = msg.Width
 			m.height = msg.Height
-			return m, nil
+			return m, attach
 		}
 
 		// Debounce subsequent resizes
 		seq := m.resizeSeq
-		return m, tea.Tick(150*time.Millisecond, func(t time.Time) tea.Msg {
+		return m, tea.Batch(attach, tea.Tick(150*time.Millisecond, func(t time.Time) tea.Msg {
 			return resizeTickMsg{seq: seq}
-		})
+		}))
 
 	case linkLostMsg:
-		// A report from a superseded client: its replacement is already live,
-		// so there is nothing to reconnect.
-		if msg.gen != m.clientGen {
+		// The generation check retires a report from a SUPERSEDED client, and it
+		// applies to the single-connection path ONLY. There finishReconnect
+		// swaps m.client wholesale, so a loop still parked in the dead client's
+		// Receive will report a death that stopped mattering. A router is never
+		// swapped: its r.in is one channel for the life of the session and the
+		// drop arrives as data on it, so there is nothing for a session
+		// generation to identify — and checking one here was a live bug, since
+		// any OTHER destination's reconnect bumped clientGen and this drop was
+		// then discarded with no ladder ever started.
+		if !m.isRouter() && msg.gen != m.clientGen {
 			log.Printf("ignoring link loss from gen %d (current %d)", msg.gen, m.clientGen)
 			return m, nil
 		}
-		if !m.canReconnect(msg.dest) {
-			return m, tea.Quit
+		// The listen loop stopped when it returned this message, and with a
+		// router that loop is the ONLY reader of every other daemon's messages —
+		// leaving it unarmed parks a healthy daemon's output behind a dead one's
+		// reconnect ladder, for as long as the ladder climbs. Re-armed only for
+		// a router: on the single-connection path the client itself is dead, so
+		// a fresh Receive fails instantly and re-arming is a hot loop.
+		// finishReconnect owns the re-arm there instead.
+		var relisten tea.Cmd
+		if m.isRouter() {
+			relisten = m.listenForMessages()
 		}
-		return m.beginReconnect(msg.dest, msg.err)
+		if !m.canReconnect(msg.dest) {
+			// Quitting is right for a session whose ONLY daemon just died: its
+			// panes died with it and there is nothing left to show. It is wrong
+			// for one of several — a local daemon crashing would take down the
+			// view of remote work that is still running perfectly well. The
+			// surviving daemons keep the session; the dead one gets an honest
+			// banner instead of a countdown that will never fire.
+			if m.lastDaemon(msg.dest) {
+				return m, tea.Quit
+			}
+			log.Printf("link to %s lost with no way to reconnect it; other daemons keep the session: %v",
+				m.linkHost(msg.dest), msg.err)
+			m.handleLinkLost(msg.dest, msg.err)
+			m.linkFor(msg.dest).parked = true
+			return m, relisten
+		}
+		mdl, cmd := m.beginReconnect(msg.dest, msg.err)
+		return mdl, tea.Batch(relisten, cmd)
 
 	case redialTickMsg:
 		// msg.attempt is checked, not just carried. It makes a second concurrent
@@ -780,9 +829,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// for the attempt currently armed can start one, so the "slow attempt
 		// completing after a fast one" case the result branch guards against has
 		// no way to arise in the first place. Per destination, since two ladders
-		// can be climbing at once and their attempt numbers are unrelated.
+		// can be climbing at once and their attempt numbers are unrelated — and
+		// so is the generation, for the same reason.
 		link := m.linkOf(msg.dest)
-		if msg.gen != m.clientGen || !link.active || msg.attempt != link.attempt {
+		if msg.gen != link.gen || !link.active || msg.attempt != link.attempt {
 			return m, nil
 		}
 		return m, m.redialCmd(msg.dest)
@@ -792,7 +842,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// client: a slow attempt completing after a fast one would otherwise
 		// replace a working connection with a second one, leaving the first
 		// with a listen loop nobody reads.
-		if msg.gen != m.clientGen || !m.linkOf(msg.dest).active {
+		if msg.gen != m.linkOf(msg.dest).gen || !m.linkOf(msg.dest).active {
 			// The !active half mirrors the tick branch above. Without it a
 			// failure result arriving with active already false would call
 			// scheduleRedial, incrementing attempt and arming a tick that the
@@ -4392,21 +4442,90 @@ func (m *Model) nextReqGen() string {
 // attachCWD returns the working directory to advertise to the daemon so it can
 // spawn new panes where the client is.
 //
-// Empty in remote mode: os.Getwd() names a directory on the laptop, and the
-// daemon would test it against the SERVER's disk. defaultCWD() validates and
-// falls back, so this was safe — but only by coincidence, and a path that
+// Empty for a remote destination: os.Getwd() names a directory on the laptop,
+// and the daemon would test it against the SERVER's disk. defaultCWD() validates
+// and falls back, so this was safe — but only by coincidence, and a path that
 // happens to exist on both machines is exactly where the coincidence stops. An
 // empty value makes the daemon use its own working directory, which is a real
 // directory on the machine that will hold the pane.
-func attachCWD(remoteDest, localCWD string) string {
-	if remoteDest != "" {
+//
+// Keyed on the destination being attached, not on a session-wide flag: a mixed
+// session attaches a local daemon and a remote one from the same client, and
+// only the local one may be told where this process is standing.
+func attachCWD(dest, localCWD string) string {
+	if dest != "" {
 		return ""
 	}
 	return localCWD
 }
 
-// attachMessage builds the MsgAttach describing this client's geometry.
-func (m Model) attachMessage() *ipc.Message {
+// knownDests lists every destination this client can talk to.
+//
+// A router answers with its whole routing table; anything else is a single
+// connection, whose destination is "" — the key its projects, its link loss and
+// its reconnect state all already use.
+func (m Model) knownDests() []string {
+	if r, ok := m.client.(*Router); ok {
+		return r.Dests()
+	}
+	return []string{""}
+}
+
+// attachAllDests attaches every destination that is not attached yet, using the
+// geometry the terminal has reported. Returns nil when there is nothing to do.
+//
+// The attached map is what keeps this idempotent, and idempotence is the whole
+// requirement: handleAttach replays the ENTIRE ghost buffer on every attach, so
+// a second one doubles a pane's scrollback and re-counts the work-state events
+// in the replay (resetWorkStateForReattach exists for the same hazard). That is
+// also why attach could not simply move to dial time in cmd/quil — attach
+// already has two owners, this one and the post-redial reattach, and a third
+// would attach every conn twice.
+//
+// Nor can it move to dial time for a second, independent reason: AttachPayload
+// carries Cols/Rows and the daemon sizes the first PTY from them, while at dial
+// time Bubble Tea has not reported a window size yet — a fresh daemon would
+// spawn its default Shell pane at 0×0.
+//
+// A send that fails leaves the destination unattached deliberately, so the next
+// WindowSizeMsg retries it.
+func (m *Model) attachAllDests() tea.Cmd {
+	// Sends run HERE rather than inside the returned command, because the ledger
+	// entry has to land on a Model that Update returns — a command holds a copy
+	// and could not write one back. That makes a client-less Model reachable in
+	// a way the old command-wrapped attach never was: dozens of tests drive
+	// Update on a Model they never gave a connection to.
+	if m.client == nil {
+		return nil
+	}
+	if m.attached == nil {
+		m.attached = map[string]bool{}
+	}
+	var cmds []tea.Cmd
+	for _, dest := range m.knownDests() {
+		if m.attached[dest] {
+			continue
+		}
+		if err := m.sendForDest(dest, m.attachMessage(dest)); err != nil {
+			log.Printf("attach to %q failed, retrying on the next resize: %v", dest, err)
+			continue
+		}
+		m.attached[dest] = true
+		// Batched per destination so each daemon is asked about its OWN
+		// registry; see requestPluginListFor.
+		if cmd := m.requestPluginListFor(dest); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+	if len(cmds) == 0 {
+		return nil
+	}
+	return tea.Batch(cmds...)
+}
+
+// attachMessage builds the MsgAttach describing this client's geometry for one
+// destination.
+func (m Model) attachMessage(dest string) *ipc.Message {
 	// Subtract chrome (tab bar + status bar), the project sidebar (if open),
 	// then pane border (2) — the same reservation resizeTabs applies, so the
 	// very first spawned pane isn't sized wider than what's about to be
@@ -4425,26 +4544,9 @@ func (m Model) attachMessage() *ipc.Message {
 	msg, _ := ipc.NewMessage(ipc.MsgAttach, ipc.AttachPayload{
 		Cols: cols,
 		Rows: rows,
-		CWD:  attachCWD(m.remoteDest, localCWD),
+		CWD:  attachCWD(dest, localCWD),
 	})
 	return msg
-}
-
-func (m Model) attachToDaemon() tea.Cmd {
-	attachCmd := func() tea.Msg {
-		// Deliberately UNSTAMPED, unlike the reconnect attach below. This is the
-		// startup path: there are no projects yet, so a stamp would name "" —
-		// which a remote-only router has no connection for, and the message would
-		// be dropped instead of reaching the sole daemon it is meant for.
-		m.client.Send(m.attachMessage())
-		return nil
-	}
-	// requestPluginList is batched here rather than at Ctrl+N: .Available is
-	// also read by the context menu, the palette and the Alt+G overlay, so
-	// asking only on dialog open would leave those describing the wrong
-	// machine. Attach also covers reconnect, which is where a daemon that
-	// restarted (and therefore re-detected) shows up. No-op in local mode.
-	return tea.Batch(attachCmd, m.requestPluginList())
 }
 
 // attachToDest re-attaches to ONE daemon after its link came back.
@@ -4454,12 +4556,17 @@ func (m Model) attachToDaemon() tea.Cmd {
 // daemon reconnecting would make the foreground one replay its whole output
 // buffer, doubling every pane's scrollback on the machine that never dropped.
 // Harmless on the single-connection path — Origin never reaches the wire.
+//
+// requestPluginListFor rides along rather than being asked at Ctrl+N: .Available
+// is also read by the context menu, the palette and the Alt+G overlay, so asking
+// only on dialog open would leave those describing the wrong machine. Reconnect
+// is where a daemon that restarted — and therefore re-detected — shows up.
 func (m Model) attachToDest(dest string) tea.Cmd {
 	attachCmd := func() tea.Msg {
-		m.sendForDest(dest, m.attachMessage())
+		m.sendForDest(dest, m.attachMessage(dest))
 		return nil
 	}
-	return tea.Batch(attachCmd, m.requestPluginList())
+	return tea.Batch(attachCmd, m.requestPluginListFor(dest))
 }
 
 // listenContinueMsg signals the TUI to keep listening for daemon messages.

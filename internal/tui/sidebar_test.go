@@ -996,3 +996,63 @@ func TestSidebarMarksTheActiveTabAndFocusedPane(t *testing.T) {
 		}
 	}
 }
+
+// TestProjectBadgeCountsFinishedPanes: a turn completing in a BACKGROUND
+// project was invisible at the project level — counts() aggregated working and
+// blocked but not unseen, so the only place you look when you are elsewhere
+// never told you the work was ready. That is most of the reason to group panes
+// by project at all.
+//
+// Also pins the ordering: a pane parked for input has ALSO finished its turn,
+// and "needs you" outranks "is ready", so it must count once, as blocked.
+func TestProjectBadgeCountsFinishedPanes(t *testing.T) {
+	done := &PaneModel{ID: "pane-done"}
+	done.unseen = true
+	busy := &PaneModel{ID: "pane-busy"}
+	busy.working = true
+	parked := &PaneModel{ID: "pane-parked"}
+	parked.unseen = true // a parked pane has finished its turn too
+	parked.blockedSince = time.Now()
+
+	p := &ProjectModel{tabs: []*TabModel{tabWith(done, busy, parked)}}
+	working, blocked, finished := p.counts()
+	if working != 1 || blocked != 1 || finished != 1 {
+		t.Fatalf("counts() = (working %d, blocked %d, done %d), want (1, 1, 1) — "+
+			"a parked pane must count once, as blocked", working, blocked, finished)
+	}
+
+	row := projectRow("alpha", working, blocked, finished, "", false, 30)
+	for _, want := range []string{"⚠1", "◐1", "✓1"} {
+		if !strings.Contains(row, want) {
+			t.Errorf("project row %q is missing the %s badge", row, want)
+		}
+	}
+}
+
+// TestPaneRowKeepsTheNameWhenTheReasonIsLong: the blocked reason is secondary
+// detail; the label is what says WHICH pane. Subtracting the suffix from the
+// budget first inverted that — at the default 22-column width a reason like
+// "AskUserQuestion" left two cells for the name, so the row read
+// "⚠ cl AskUserQuestion" and identified nothing.
+func TestPaneRowKeepsTheNameWhenTheReasonIsLong(t *testing.T) {
+	pane := &PaneModel{ID: "pane-b16e3850"}
+	pane.blockedSince = time.Now()
+	pane.blockedReason = "AskUserQuestion"
+
+	row := paneRow(pane, false, defaultSidebarWidth)
+
+	if !strings.Contains(row, "pane-b16") {
+		t.Errorf("row %q dropped the pane name; the reason crowded it out", row)
+	}
+	if got := lipgloss.Width(row); got != defaultSidebarWidth {
+		t.Errorf("row measures %d cells, want exactly %d", got, defaultSidebarWidth)
+	}
+	// A short reason still fits alongside a short name — the floor must not
+	// truncate a suffix that had room.
+	short := &PaneModel{ID: "p1"}
+	short.blockedSince = time.Now()
+	short.blockedReason = "Bash"
+	if row := paneRow(short, false, defaultSidebarWidth); !strings.Contains(row, "Bash") {
+		t.Errorf("row %q dropped a reason that had room", row)
+	}
+}

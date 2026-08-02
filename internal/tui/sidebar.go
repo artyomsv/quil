@@ -12,6 +12,11 @@ import (
 const (
 	minWidthForSidebar  = 100
 	defaultSidebarWidth = 22
+	// minPaneLabelCells is the floor a pane's own name keeps in its row, so a
+	// long blocked-reason cannot crowd out the thing that identifies which
+	// pane the row is about. Eight cells is enough for the id suffix quil
+	// generates ("pane-b16e" of "pane-b16e3850") when a pane has no name.
+	minPaneLabelCells = 8
 )
 
 // sidebarWidth returns the layout width the project sidebar reserves: 0 when
@@ -47,21 +52,30 @@ func (p *ProjectModel) displayName() string {
 
 // counts reports panes working and panes blocked on the user, for the
 // project's summary row.
-func (p *ProjectModel) counts() (working, blocked int) {
+// counts aggregates the pane states a project row summarises. `done` counts
+// panes that finished while unfocused: without it a turn completing in a
+// BACKGROUND project is invisible at the project level, so the one place the
+// user is looking when they are not in that project never tells them the work
+// is ready — which is most of the reason to group panes by project at all.
+func (p *ProjectModel) counts() (working, blocked, done int) {
 	for _, tab := range p.tabs {
 		if tab.Root == nil {
 			continue
 		}
 		for _, pane := range tab.Leaves() {
-			if pane.working {
-				working++
-			}
-			if !pane.blockedSince.IsZero() {
+			switch {
+			// Ordered, not independent: a pane parked for input has also
+			// finished its turn, and "needs you" outranks "is ready".
+			case !pane.blockedSince.IsZero():
 				blocked++
+			case pane.working:
+				working++
+			case pane.unseen:
+				done++
 			}
 		}
 	}
-	return working, blocked
+	return working, blocked, done
 }
 
 // linkGlyph reports the connection health of a destination: ⟳ reconnecting,
@@ -113,10 +127,10 @@ type sidebarRow struct {
 func (m *Model) sidebarRows(w int) []sidebarRow {
 	rows := []sidebarRow{{text: sidebarHeading("PROJECTS", w)}}
 	for i, p := range m.projects {
-		working, blocked := p.counts()
+		working, blocked, done := p.counts()
 		rows = append(rows, sidebarRow{
 			text: projectRow(sanitizeRemoteText(p.displayName()),
-				working, blocked, m.linkGlyph(p.Dest), i == m.activeProject, w),
+				working, blocked, done, m.linkGlyph(p.Dest), i == m.activeProject, w),
 			kind:  sidebarRowProject,
 			index: i,
 		})
@@ -296,17 +310,23 @@ func sidebarTabHeading(name string, active bool, w int) string {
 // working/blocked counts plus link health. name is expected pre-sanitized —
 // every call site in renderSidebar routes the raw daemon-sourced value
 // through sanitizeRemoteText before reaching here.
-func projectRow(name string, working, blocked int, link string, active bool, w int) string {
+func projectRow(name string, working, blocked, done int, link string, active bool, w int) string {
 	marker := "  "
 	if active {
 		marker = "▸ "
 	}
+	// Badge order is urgency order, and it is the same glyph vocabulary the
+	// pane rows use so the summary reads as a roll-up rather than a second
+	// notation: ⚠ needs you, ◐ still running, ✓ finished while you were away.
 	badge := ""
+	if blocked > 0 {
+		badge += fmt.Sprintf(" ⚠%d", blocked)
+	}
 	if working > 0 {
 		badge += fmt.Sprintf(" ◐%d", working)
 	}
-	if blocked > 0 {
-		badge += fmt.Sprintf(" ⚠%d", blocked)
+	if done > 0 {
+		badge += fmt.Sprintf(" ✓%d", done)
 	}
 	if link != "" {
 		badge += " " + link
@@ -374,11 +394,25 @@ func paneRow(pane *PaneModel, focused bool, w int) string {
 		marker = "▸ "
 	}
 	prefix := marker + glyph + " "
-	avail := w - lipgloss.Width(prefix) - lipgloss.Width(suffix)
+	avail := w - lipgloss.Width(prefix)
 	if avail < 1 {
 		avail = 1
 	}
-	label = truncateCells(label, avail)
+	// The label says WHICH pane; the suffix is secondary detail (the tool a
+	// pane is blocked on, its subagent count). Subtracting the suffix first
+	// inverts that: a long tool name like "AskUserQuestion" leaves two cells
+	// for the name, so the row reads "⚠ cl AskUserQuestion" and no longer
+	// identifies the pane at all. Give the label a floor and truncate the
+	// suffix into whatever is left instead.
+	labelW := avail - lipgloss.Width(suffix)
+	if labelW < minPaneLabelCells {
+		labelW = minPaneLabelCells
+	}
+	if labelW > avail {
+		labelW = avail
+	}
+	label = truncateCells(label, labelW)
+	suffix = truncateCells(suffix, avail-lipgloss.Width(label))
 
 	return style.Render(padOrTrunc(prefix+label+suffix, w))
 }

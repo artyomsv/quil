@@ -6,6 +6,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+
+	"github.com/artyomsv/quil/internal/config"
 )
 
 func TestProjectPickerFiltersFuzzily(t *testing.T) {
@@ -365,4 +367,65 @@ func keyModel(t *testing.T, m Model, msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		t.Fatalf("handleProjectPickKey() returned %T, want Model", updated)
 	}
 	return got, cmd
+}
+
+// TestProjectToggleKeyWithNoPreviousFlashes: on a fresh launch prevProject is
+// empty, because only switchProject writes it — so alt+o genuinely has nowhere
+// to bounce back to until the user has switched once. That is correct, but it
+// used to be SILENT, which reads as a broken binding and was reported as one
+// ("alt+o does not work, but starts working after I click a project"). Same
+// treatment as the AttentionQueue empty case and the SidebarToggle narrow
+// refusal. The second half pins that the flash arm does not hijack the working
+// path: with a real previous project the bounce still happens and no flash is
+// shown.
+func TestProjectToggleKeyWithNoPreviousFlashes(t *testing.T) {
+	newModel := func(prev string) Model {
+		return Model{
+			client:        newFakeConn(),
+			cfg:           config.Default(),
+			width:         100,
+			height:        30,
+			notifications: NewNotificationCenter(30, 50),
+			mcpHighlights: make(map[string]bool),
+			projects: []*ProjectModel{
+				{ID: "proj-a", tabs: []*TabModel{tabWith(&PaneModel{ID: "pane-a"})}},
+				{ID: "proj-b", tabs: []*TabModel{tabWith(&PaneModel{ID: "pane-b"})}},
+			},
+			activeProject: 1,
+			prevProject:   prev,
+		}
+	}
+	press := tea.KeyPressMsg{Mod: tea.ModAlt, Code: 'o'}
+
+	// Fresh launch: nothing switched yet.
+	m := newModel("")
+	updated, cmd := m.handleKey(press)
+	got := updated.(Model)
+	if got.flashText != "no previous project to switch back to" {
+		t.Errorf("flashText = %q, want the no-previous-project flash", got.flashText)
+	}
+	if got.activeProject != 1 {
+		t.Errorf("activeProject = %d, want 1 — a flash must not move the user", got.activeProject)
+	}
+	if cmd == nil {
+		t.Error("no command returned; the flash would never clear")
+	}
+
+	// A previous project that has since been destroyed degrades the same way.
+	m = newModel("proj-gone")
+	updated, _ = m.handleKey(press)
+	if got := updated.(Model); got.flashText != "no previous project to switch back to" {
+		t.Errorf("stale prevProject: flashText = %q, want the flash", got.flashText)
+	}
+
+	// The working path is untouched: a real previous project still bounces.
+	m = newModel("proj-a")
+	updated, _ = m.handleKey(press)
+	got = updated.(Model)
+	if got.activeProject != 0 {
+		t.Errorf("activeProject = %d, want 0 — the bounce did not happen", got.activeProject)
+	}
+	if got.flashText != "" {
+		t.Errorf("flashText = %q, want empty on the working path", got.flashText)
+	}
 }

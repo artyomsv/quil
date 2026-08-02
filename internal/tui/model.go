@@ -3079,6 +3079,20 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case kbMatches(key, kb.ProjectPicker):
 		return m.openProjectPicker()
 	case kbMatches(key, kb.ProjectToggle):
+		// No bounce target flashes rather than doing nothing, for the same
+		// reason the AttentionQueue empty case below does. This is the
+		// ORDINARY state on a fresh launch: prevProject is only written by
+		// switchProject, so until the user has switched once there is
+		// genuinely nowhere to bounce back to — and a silent key there reads
+		// as broken rather than as "not yet". It also covers a prevProject
+		// whose project has since been destroyed. The check lives here, not
+		// in toggleLastProject, which keeps its nil-means-nowhere-to-go
+		// contract (and its own guard, which this must not duplicate the
+		// meaning of).
+		if m.prevProject == "" || m.projectByID(m.prevProject) == nil {
+			m.setFlash("no previous project to switch back to")
+			return m, m.flashCmd()
+		}
 		// Sequenced, not `return m, m.toggleLastProject()`: toggleLastProject
 		// mutates m through a pointer receiver (via switchProject), and Go
 		// does not order a plain operand against a call in the same return

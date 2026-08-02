@@ -527,6 +527,58 @@ func TestTabBarFitsThePaneColumnWhenTabsOverflow(t *testing.T) {
 	}
 }
 
+// A single tab label wider than the bar escapes every budget check — the
+// overflow path includes the active tab unconditionally — and lipgloss's
+// .Width() WRAPS rather than truncates. Row 0 then becomes two lines and the
+// whole frame shifts down one row while sidebarRowAt and every pane rect
+// still compute against the unshifted layout.
+//
+// The fixture discriminates THIS regression rather than generic overflow: the
+// label overflows paneAreaWidth() but still fits m.width, so it is only
+// reachable because the bar was narrowed to the pane column.
+func TestTabBarNeverWrapsWhenOneLabelOverflowsThePaneColumn(t *testing.T) {
+	m := newSplitDragTestModel(t)
+	m.sidebarOpen = true
+	m.sidebarWidth = 22
+	m.projects[0].Name = "alpha"
+	m.curTabs()[0].Name = strings.Repeat("feature-branch-", 6)[:84]
+
+	// Control: without both bounds this is a generic-overflow test that the
+	// pre-sidebar code would also have passed.
+	labelW := lipgloss.Width(m.tabStyle(0).Render(m.tabLabel(0)))
+	if labelW <= m.paneAreaWidth() || labelW > m.width {
+		t.Fatalf("fixture label is %d cells; it must exceed paneAreaWidth=%d and still fit m.width=%d",
+			labelW, m.paneAreaWidth(), m.width)
+	}
+
+	bar := m.renderTabBar()
+	// lipgloss.Width of a WRAPPED bar reports the max line width, which is
+	// already barW — so the width check alone passes on the broken code.
+	// The line count is what actually catches it.
+	if n := strings.Count(bar, "\n") + 1; n != 1 {
+		t.Errorf("tab bar wrapped onto %d lines", n)
+	}
+	if got := lipgloss.Width(bar); got != m.paneAreaWidth() {
+		t.Errorf("tab bar is %d cells, want %d", got, m.paneAreaWidth())
+	}
+
+	lines := strings.Split(stripANSI(m.View().Content), "\n")
+	if len(lines) != m.height {
+		t.Fatalf("frame has %d rows, want %d — a wrapped tab bar pushed every row down",
+			len(lines), m.height)
+	}
+	if got := lipgloss.Width(lines[0]); got != m.width {
+		t.Errorf("row 0 measured %d cells, want %d", got, m.width)
+	}
+	// Row 1 is the pane top border, not the tail of a wrapped tab label.
+	if strings.Contains(lines[1], "feature-branch") {
+		t.Errorf("row 1 carries wrapped tab-label text: %q", lines[1])
+	}
+	if !strings.Contains(lines[1], "╭") {
+		t.Errorf("row 1 = %q, want the pane top border", lines[1])
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Toggle keybinding
 // ---------------------------------------------------------------------------

@@ -16,6 +16,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
+
 	"github.com/artyomsv/quil/internal/claudesessions"
 	"github.com/artyomsv/quil/internal/clipboard"
 	"github.com/artyomsv/quil/internal/config"
@@ -4109,6 +4111,39 @@ func (m Model) tabStyle(idx int) lipgloss.Style {
 	return inactiveTabStyle
 }
 
+// fitTabBar clamps an assembled tab bar to at most barW CELLS, so the bar is
+// always exactly one painted line.
+//
+// lipgloss's .Width() WRAPS an over-wide line onto a new one rather than
+// truncating it — the same behaviour that forced the sidebar's rows onto cell
+// measurement (see truncateCells). A wrapped tab bar is the worse version of
+// that bug: row 0 becomes two lines, so the WHOLE frame shifts down one row
+// while sidebarRowAt, the pane rects and every hit test still compute against
+// the unshifted layout, and the status bar is pushed off the bottom. Every
+// click in the UI lands one row out.
+//
+// The overflow path can produce it: the active tab is included
+// unconditionally, before any budget check, so a single label wider than the
+// whole bar survives. That was reachable when the bar spanned m.width and is
+// projectSidebarWidth() columns more reachable now that it spends
+// paneAreaWidth() — a tab named after a long branch or directory reaches it.
+//
+// ansi.Truncate measures CELLS and drops a straddling wide glyph whole rather
+// than emitting half of one; the reset closes any SGR the cut left open, so
+// the spaces .Width() pads with cannot inherit a tab's background colour.
+// An in-budget bar is returned byte-for-byte untouched.
+//
+// hitTestTab needs no mirror of this: truncation only ever removes the TAIL,
+// and the loop that fills the bar admits a second tab only while the running
+// total stays inside barW — so an over-wide active tab is alone on the bar and
+// still owns every column the hit test can be asked about.
+func fitTabBar(bar string, barW int) string {
+	if barW <= 0 || lipgloss.Width(bar) <= barW {
+		return bar
+	}
+	return ansi.Truncate(bar, barW, "") + "\x1b[0m"
+}
+
 // renderTabBar renders the tab strip that sits directly above the panes.
 //
 // It is sized to paneAreaWidth(), NOT the terminal: View() joins it into the
@@ -4154,7 +4189,7 @@ func (m Model) renderTabBar() string {
 			tabs[i] = rt.text
 		}
 		bar := strings.Join(tabs, " ")
-		return lipgloss.NewStyle().Width(barW).Render(bar)
+		return lipgloss.NewStyle().Width(barW).Render(fitTabBar(bar, barW))
 	}
 
 	// Overflow: include active tab, expand outward, show indicator for hidden
@@ -4212,7 +4247,7 @@ func (m Model) renderTabBar() string {
 		bar += lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Render(indicator)
 	}
 
-	return lipgloss.NewStyle().Width(barW).Render(bar)
+	return lipgloss.NewStyle().Width(barW).Render(fitTabBar(bar, barW))
 }
 
 // hitTestTab returns the tab index at screen X coordinate, or -1 if none.

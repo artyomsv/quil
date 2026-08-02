@@ -91,7 +91,7 @@ func redirectRemoteStderr(w io.Writer) {
 	}
 }
 
-// remoteSSHOptions builds the dial options for the configured destination.
+// remoteSSHOptions builds the dial options for one destination.
 //
 // When `quil remote setup` has recorded an absolute path for this host, it
 // becomes the remote command. That is what makes attaching work on a host where
@@ -101,9 +101,9 @@ func redirectRemoteStderr(w io.Writer) {
 //
 // With nothing recorded the transport's default (`quil --stdio`) applies, which
 // works when the remote's non-interactive PATH can already see it.
-func remoteSSHOptions(cfg config.Config) transport.SSHOptions {
+func remoteSSHOptions(cfg config.Config, dest string) transport.SSHOptions {
 	var opts transport.SSHOptions
-	if binary := cfg.RemoteBinary(remoteDest); binary != "" {
+	if binary := cfg.RemoteBinary(dest); binary != "" {
 		opts.RemoteCommand = remoteinstall.ShellSingleQuote(binary) + " --stdio"
 	}
 	return opts
@@ -242,12 +242,12 @@ var remoteInstallRetry bool
 // attach, and again after an install has removed the reason the first one
 // failed. Each call re-installs the seams, so the gate never reads a previous
 // connection's status.
-func dialRemote(cfg config.Config) (*ipc.Client, error) {
+func dialRemote(cfg config.Config, dest string) (*ipc.Client, error) {
 	// Batch=false so this dial can prompt for a host-key fingerprint or a key
 	// passphrase — it runs before tea.NewProgram takes the terminal.
-	log.Printf("remote mode: dialing %s over ssh", remoteDest)
+	log.Printf("remote mode: dialing %s over ssh", dest)
 
-	client, link, err := dialRemoteTransportFn(context.Background(), cfg, false, nil)
+	client, link, err := dialRemoteTransportFn(context.Background(), cfg, dest, false, nil)
 	if link != nil {
 		remoteLinkErrFn = link.LinkErr
 		remoteLinkEstablishedFn = link.Established
@@ -271,8 +271,8 @@ func dialRemote(cfg config.Config) (*ipc.Client, error) {
 // ctx bounds the DIAL only. Per the ipc.DialFunc contract the returned conn
 // owns the ssh child and releases it on Close, so a caller may cancel this
 // context the moment the dial returns without killing the session it opened.
-func dialRemoteTransport(ctx context.Context, cfg config.Config, batch bool, stderrSink io.Writer) (*ipc.Client, transport.LinkStatus, error) {
-	opts := remoteSSHOptions(cfg)
+func dialRemoteTransport(ctx context.Context, cfg config.Config, dest string, batch bool, stderrSink io.Writer) (*ipc.Client, transport.LinkStatus, error) {
+	opts := remoteSSHOptions(cfg, dest)
 	opts.Batch = batch
 	// Only consulted on a batch dial. The interactive dial's stderr belongs on
 	// the terminal, where host-key and passphrase prompts have to be readable,
@@ -284,7 +284,7 @@ func dialRemoteTransport(ctx context.Context, cfg config.Config, batch bool, std
 	// STARTED (binary missing, pipe exhaustion) — every network-level failure
 	// survives it and surfaces later as a failed handshake.
 	var link transport.LinkStatus
-	dialSSH := transport.SSH(remoteDest, opts)
+	dialSSH := transport.SSH(dest, opts)
 	client, err := ipc.NewClientWithDialer(ctx, func(c context.Context) (net.Conn, error) {
 		conn, dialErr := dialSSH(c)
 		if conn != nil {
@@ -531,10 +531,13 @@ const probeRequestID = "reconnect-version-probe"
 // no-op on a batch dial — stderr is captured into a buffer and never reaches a
 // terminal — so without this a flapping link becomes undiagnosable after its
 // first reconnect, which is exactly when the diagnosis is wanted.
-func redialRemote(cfg config.Config) tui.RedialFunc {
+// One dialer is built per destination, and the byte budget below is why that
+// matters beyond routing: a shared framer would let one flapping host exhaust
+// the log allowance of every other.
+func redialRemote(cfg config.Config, dest string) tui.RedialFunc {
 	// One framer for the whole session, so its byte budget cannot be reset by
 	// reconnecting.
-	stderrSink := &sshStderrLogger{dest: remoteDest}
+	stderrSink := &sshStderrLogger{dest: dest}
 	return func(old tui.Client) (tui.Client, error) {
 		// Release the dead connection's ssh child. The TUI cannot do this: its
 		// Client is only Send/Receive, and this is the layer that knows better.
@@ -545,7 +548,7 @@ func redialRemote(cfg config.Config) tui.RedialFunc {
 		ctx, cancel := context.WithTimeout(context.Background(), redialTimeout)
 		defer cancel()
 
-		client, link, err := dialRemoteTransportFn(ctx, cfg, true, stderrSink)
+		client, link, err := dialRemoteTransportFn(ctx, cfg, dest, true, stderrSink)
 		if err != nil {
 			// No LinkErr fallback here, deliberately: transport.SSH returns a
 			// nil conn on failure and `link` is only assigned when the dialer

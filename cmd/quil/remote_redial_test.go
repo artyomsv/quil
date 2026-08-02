@@ -19,7 +19,7 @@ import (
 // Every reconnect assertion in this file needs the dial to be observable and to
 // finish instantly; spawning a real ssh would make them slow, environment-
 // dependent, and unable to fabricate the link signals the classifier reads.
-func stubDial(t *testing.T, fn func(context.Context, config.Config, bool, io.Writer) (*ipc.Client, transport.LinkStatus, error)) {
+func stubDial(t *testing.T, fn func(context.Context, config.Config, string, bool, io.Writer) (*ipc.Client, transport.LinkStatus, error)) {
 	t.Helper()
 	prev := dialRemoteTransportFn
 	dialRemoteTransportFn = fn
@@ -45,12 +45,12 @@ func TestRedialRemote_DialsBatchWithTheLogSink(t *testing.T) {
 	var gotBatch bool
 	var gotSink io.Writer
 	called := false
-	stubDial(t, func(_ context.Context, _ config.Config, batch bool, sink io.Writer) (*ipc.Client, transport.LinkStatus, error) {
+	stubDial(t, func(_ context.Context, _ config.Config, _ string, batch bool, sink io.Writer) (*ipc.Client, transport.LinkStatus, error) {
 		called, gotBatch, gotSink = true, batch, sink
 		return nil, nil, errors.New("stub dial")
 	})
 
-	if _, err := redialRemote(config.Config{})(nil); err == nil {
+	if _, err := redialRemote(config.Config{}, "gpu01")(nil); err == nil {
 		t.Fatal("redial reported success on a failed dial")
 	}
 	if !called {
@@ -90,12 +90,12 @@ func TestRedialRemote_ReusesOneStderrSinkAcrossAttempts(t *testing.T) {
 	withRemote(t, "gpu01")
 
 	var sinks []io.Writer
-	stubDial(t, func(_ context.Context, _ config.Config, _ bool, sink io.Writer) (*ipc.Client, transport.LinkStatus, error) {
+	stubDial(t, func(_ context.Context, _ config.Config, _ string, _ bool, sink io.Writer) (*ipc.Client, transport.LinkStatus, error) {
 		sinks = append(sinks, sink)
 		return nil, nil, errors.New("stub dial")
 	})
 
-	redial := redialRemote(config.Config{})
+	redial := redialRemote(config.Config{}, "gpu01")
 	for i := 0; i < 3; i++ {
 		if _, err := redial(nil); err == nil {
 			t.Fatalf("attempt %d reported success on a failed dial", i+1)
@@ -161,11 +161,11 @@ func TestRedialRemote_ReadsLinkErrBeforeCloseAndExitCodeAfter(t *testing.T) {
 		},
 		order: &order,
 	}
-	stubDial(t, func(context.Context, config.Config, bool, io.Writer) (*ipc.Client, transport.LinkStatus, error) {
+	stubDial(t, func(context.Context, config.Config, string, bool, io.Writer) (*ipc.Client, transport.LinkStatus, error) {
 		return client, link, nil
 	})
 
-	if _, err := redialRemote(config.Config{})(nil); err == nil {
+	if _, err := redialRemote(config.Config{}, "gpu01")(nil); err == nil {
 		t.Fatal("redial reported success against a dead connection")
 	}
 
@@ -229,11 +229,11 @@ func TestRedialRemote_ClassifiesVerifyFailures(t *testing.T) {
 			withRemote(t, "gpu01")
 			var order []string
 			client := clientRecordingClose(t, &order)
-			stubDial(t, func(context.Context, config.Config, bool, io.Writer) (*ipc.Client, transport.LinkStatus, error) {
+			stubDial(t, func(context.Context, config.Config, string, bool, io.Writer) (*ipc.Client, transport.LinkStatus, error) {
 				return client, tt.link, nil
 			})
 
-			_, err := redialRemote(config.Config{})(nil)
+			_, err := redialRemote(config.Config{}, "gpu01")(nil)
 			if err == nil {
 				t.Fatal("redial reported success against a dead connection")
 			}

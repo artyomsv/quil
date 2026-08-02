@@ -25,6 +25,38 @@ type Config struct {
 	Notification NotificationConfig `toml:"notification"`
 	Update       UpdateConfig       `toml:"update"`
 	Remote       RemoteConfig       `toml:"remote"`
+	// Destinations are the ADDITIONAL daemons this client attaches to beside
+	// the local one, each contributing its projects to the same sidebar. A
+	// slice rather than a map because order is meaningful — it is the order the
+	// projects appear in — and TOML spells a list of tables as [[destinations]].
+	//
+	// `quil --remote <host>` ignores this list entirely: that mode is "drive
+	// THAT machine", and quietly attaching the configured extras to it would
+	// make one flag mean two different things.
+	Destinations []Destination `toml:"destinations"`
+}
+
+// Destination names one remote daemon to attach at launch.
+type Destination struct {
+	// Name labels the host in launch diagnostics. Optional; Dest is used when
+	// it is empty. It exists because Dest is an ssh destination — often
+	// `user@10.0.0.4` or an ssh_config alias — and the message a user reads
+	// when a host is unreachable at launch should be able to say "gpu box".
+	Name string `toml:"name"`
+	// Dest is passed to ssh VERBATIM, exactly like --remote: an ssh_config Host
+	// alias keeps its HostName/Port/User/ProxyJump, which is the whole reason
+	// the transport does not parse it. It is also the routing key — the key a
+	// project's Dest, its reconnect state and its link banner all carry.
+	Dest string `toml:"dest"`
+}
+
+// Label returns the name to show for a destination, falling back to the ssh
+// destination itself.
+func (d Destination) Label() string {
+	if d.Name != "" {
+		return d.Name
+	}
+	return d.Dest
 }
 
 // RemoteConfig holds per-destination settings for `quil --remote`, keyed by the

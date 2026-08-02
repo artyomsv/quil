@@ -370,7 +370,7 @@ func launchTUI() {
 		// the remote one. Batch=false so this first dial can prompt for a
 		// host-key fingerprint or key passphrase — it runs before tea.NewProgram
 		// takes the terminal.
-		client, err = dialRemote(cfg)
+		client, err = dialRemote(cfg, remoteDest)
 		if err != nil {
 			log.Printf("cannot connect to remote daemon %s: %v", remoteDest, err)
 			fmt.Fprintf(os.Stderr, "cannot connect to %s: %v\n"+
@@ -434,7 +434,7 @@ func launchTUI() {
 		}
 		log.Printf("remote: the launch blocker is resolved, re-dialing %s", remoteDest)
 		fmt.Fprintf(os.Stderr, "  Attaching…\n\n")
-		client, err = dialRemote(cfg)
+		client, err = dialRemote(cfg, remoteDest)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "cannot connect to %s: %v\n", remoteDest, err)
 			os.Exit(1)
@@ -484,7 +484,40 @@ func launchTUI() {
 	// Restore window size from previous session
 	restoreWindowSize()
 
-	model := tui.NewModel(client, cfg, version, reg, stalePlugins)
+	// The routing key of the connection dialled above. "" is the local daemon;
+	// under --remote it is the ssh destination, which is what makes that
+	// session's projects carry a Dest and its reconnect state key by host —
+	// the same keying a multi-daemon session uses, so there is only one.
+	primaryDest := remoteDest
+
+	// The primary connection is already open and version-gated, so its "dial"
+	// simply hands it over. Routing it through dialAllWith anyway keeps ONE
+	// path that builds the connection table, rather than a special case that
+	// only the extras exercise.
+	dials := map[string]func() (tui.Client, error){
+		primaryDest: func() (tui.Client, error) { return client, nil },
+	}
+	for _, d := range extraDestinations(cfg, primaryDest) {
+		log.Printf("remote: dialing configured destination %s (%s)", d.Label(), d.Dest)
+		dials[d.Dest] = dialExtra(cfg, d)
+	}
+	conns := dialAllWith(dials)
+	for _, d := range extraDestinations(cfg, primaryDest) {
+		if _, ok := conns[d.Dest]; !ok {
+			// Named on stderr as well as in the log: this happens before the
+			// TUI takes the screen, and a destination silently missing from the
+			// sidebar is the failure mode the whole message exists to prevent.
+			fmt.Fprintf(os.Stderr, "warning: %s is unreachable — its projects will not appear "+
+				"(see the log; reconnect keeps trying)\n", d.Label())
+		}
+	}
+
+	// The router is constructed BEFORE the Model and passed in, never installed
+	// afterwards: tea.NewProgram takes the Model by value, so a closure reading
+	// back through main's copy would be frozen at startup and would route every
+	// unstamped send to whichever daemon happened to be active at launch.
+	router := tui.NewRouter(conns)
+	model := tui.NewModel(router, cfg, version, reg, stalePlugins)
 	// Drives the [remote <host>] status-bar indicator and suppresses the
 	// update controls, which are wired to local disk and would target the
 	// wrong machine. Empty for a local session.
@@ -493,25 +526,34 @@ func launchTUI() {
 		model.SetRecentCWDs(tui.LoadRecentCWDs(config.RecentCWDsPath(remoteDest)))
 	}
 
-	// Only remote sessions reconnect. A local daemon that dies takes its panes
-	// with it, so there is nothing to reattach to and retrying would hide the
-	// loss; leaving redialFn nil is what makes that path stay fatal.
-	if remoteMode() {
-		// Keyed by the ROUTING destination, not the ssh host. This session holds
-		// ONE connection and routes everything unstamped, so its key is "" — the
-		// same key its link loss carries, its projects are built under, and its
-		// banner reads. A client holding several daemons keys by host instead.
-		model.SetRedialFunc("", redialRemote(cfg))
-		// The Model cannot close a connection itself — tui.Client is only
-		// Send/Receive. Without this, the `defer client.Close()` above releases
-		// the STARTUP client, which after a reconnect is already dead, while the
-		// live ssh child is only reachable through the Model and outlives us.
-		model.SetClientCloser(func(c tui.Client) {
-			if ic, ok := c.(*ipc.Client); ok && ic != nil {
-				ic.Close()
-			}
-		})
+	// Only REMOTE destinations reconnect. A local daemon that dies takes its
+	// panes with it, so there is nothing to reattach to and retrying would hide
+	// the loss; leaving its redial func nil is what keeps that fatal — and, in a
+	// mixed session, what makes the client keep the remote daemons rather than
+	// quitting over the local one.
+	//
+	// Installed per destination that actually connected. A host unreachable at
+	// launch has no conn and therefore no pump, so nothing would ever report a
+	// loss for it and the ladder could not start; that gap is a known limitation
+	// rather than something a dialer here would fix.
+	for dest := range conns {
+		if dest == "" {
+			continue
+		}
+		model.SetRedialFunc(dest, redialRemote(cfg, dest))
 	}
+	// The Model cannot close a connection itself — tui.Client is only
+	// Send/Receive. Without this, the `defer client.Close()` above releases only
+	// the STARTUP connection of ONE destination, which after a reconnect is
+	// already dead, while every live ssh child is reachable only through the
+	// Model and outlives us. Installed unconditionally now that the Model always
+	// holds a router: a local session's conn closing twice is harmless, a remote
+	// session's leaking is not.
+	model.SetClientCloser(func(c tui.Client) {
+		if ic, ok := c.(*ipc.Client); ok && ic != nil {
+			ic.Close()
+		}
+	})
 
 	// ssh keeps its stderr for the whole session and multiplexes the remote
 	// command's fd 2 onto it, so from here on a diagnostic would land mid-render

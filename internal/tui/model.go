@@ -580,7 +580,15 @@ func (m *Model) remoteModeFor(dest string) bool {
 // developer's real ~/.quil.
 func (m *Model) SetRecentCWDs(list []string) { m.recentCWDs = list }
 
-func NewModel(client *ipc.Client, cfg config.Config, version string, registry *plugin.Registry, stalePlugins []plugin.StalePlugin) Model {
+// NewModel builds the client.
+//
+// The first parameter is the Client INTERFACE rather than *ipc.Client so a
+// *Router can be passed — the router is what multiplexes several daemons behind
+// the single client the Model consumes, and it must be constructed before the
+// Model rather than installed afterwards: tea.NewProgram takes the Model BY
+// VALUE, so anything that reads back through a closure over main's copy would be
+// frozen at startup.
+func NewModel(client Client, cfg config.Config, version string, registry *plugin.Registry, stalePlugins []plugin.StalePlugin) Model {
 	m := Model{
 		client:           client,
 		cfg:              cfg,

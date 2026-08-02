@@ -505,12 +505,8 @@ func TestParseRemoteArgs(t *testing.T) {
 // absolute path — the thing that makes attaching work when the remote's
 // non-interactive PATH cannot see the install directory.
 func TestRemoteSSHOptions(t *testing.T) {
-	prevDest := remoteDest
-	t.Cleanup(func() { remoteDest = prevDest })
-	remoteDest = "gpu01"
-
 	t.Run("no recorded binary falls back to the transport default", func(t *testing.T) {
-		if got := remoteSSHOptions(config.Config{}).RemoteCommand; got != "" {
+		if got := remoteSSHOptions(config.Config{}, "gpu01").RemoteCommand; got != "" {
 			t.Errorf("RemoteCommand = %q, want empty so transport's default applies", got)
 		}
 	})
@@ -518,7 +514,7 @@ func TestRemoteSSHOptions(t *testing.T) {
 	t.Run("recorded binary becomes the remote command", func(t *testing.T) {
 		var cfg config.Config
 		cfg.SetRemoteBinary("gpu01", "/home/a/.local/bin/quil")
-		got := remoteSSHOptions(cfg).RemoteCommand
+		got := remoteSSHOptions(cfg, "gpu01").RemoteCommand
 		if want := `'/home/a/.local/bin/quil' --stdio`; got != want {
 			t.Errorf("RemoteCommand = %q, want %q", got, want)
 		}
@@ -527,7 +523,7 @@ func TestRemoteSSHOptions(t *testing.T) {
 	t.Run("a path with an apostrophe is escaped", func(t *testing.T) {
 		var cfg config.Config
 		cfg.SetRemoteBinary("gpu01", "/home/o'brien/bin/quil")
-		got := remoteSSHOptions(cfg).RemoteCommand
+		got := remoteSSHOptions(cfg, "gpu01").RemoteCommand
 		if !strings.Contains(got, `'\''brien`) {
 			t.Errorf("RemoteCommand = %q, want the apostrophe escaped", got)
 		}
@@ -536,7 +532,7 @@ func TestRemoteSSHOptions(t *testing.T) {
 	t.Run("another host's entry is not used", func(t *testing.T) {
 		var cfg config.Config
 		cfg.SetRemoteBinary("other-host", "/opt/quil")
-		if got := remoteSSHOptions(cfg).RemoteCommand; got != "" {
+		if got := remoteSSHOptions(cfg, "gpu01").RemoteCommand; got != "" {
 			t.Errorf("RemoteCommand = %q, want empty for an unrecorded destination", got)
 		}
 	})

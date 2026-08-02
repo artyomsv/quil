@@ -25,11 +25,11 @@ func TestWorkEventKind(t *testing.T) {
 		{"hook.opencode.session.idle", workStop},
 		{"hook.opencode.session.error", workStop},
 		{"process_exit", workAbort},
-		// Park-for-input edges: the agent is waiting on the user, so the turn
-		// is effectively done until they respond → stop spinner + unseen mark.
-		{"hook.claude.Notification", workStop},
-		{"hook.claude.PermissionRequest", workStop},
-		{"hook.opencode.permission.ask", workStop},
+		// Park-for-input edges: the agent is waiting on the user — distinct
+		// from a completed turn, though both stop the spinner + mark unseen.
+		{"hook.claude.Notification", workPark},
+		{"hook.claude.PermissionRequest", workPark},
+		{"hook.opencode.permission.ask", workPark},
 		// Subagent lifecycle: background subagents outlive the main turn's
 		// Stop (Claude Code runs them detached by default), so they get their
 		// own edges instead of riding Start/Stop.
@@ -177,6 +177,88 @@ func TestApplyWorkTransition_ParkForInput_MarksBackgroundPane(t *testing.T) {
 				t.Errorf("%s: pane should be marked unseen when the agent parks", evt)
 			}
 		})
+	}
+}
+
+func TestApplyWorkTransition_ParkSetsBlockedFields(t *testing.T) {
+	t.Parallel()
+	// A park edge must stamp blockedSince and carry the tool name when the
+	// hook supplies one (PermissionRequest), and leave blockedReason empty
+	// rather than inventing one when it doesn't (Notification).
+	m := modelForWorkTest()
+	m.applyWorkTransition("p1", "hook.claude.UserPromptSubmit", nil)
+	m.applyWorkTransition("p1", "hook.claude.PermissionRequest", map[string]string{"tool": "Bash"})
+	pane := m.curTabs()[0].Root.Leaves()[0]
+	if pane.blockedSince.IsZero() {
+		t.Fatal("a park edge must set blockedSince")
+	}
+	if pane.blockedReason != "Bash" {
+		t.Errorf("blockedReason = %q, want %q", pane.blockedReason, "Bash")
+	}
+
+	m2 := modelForWorkTest()
+	m2.applyWorkTransition("p1", "hook.claude.UserPromptSubmit", nil)
+	m2.applyWorkTransition("p1", "hook.claude.Notification", nil)
+	pane2 := m2.curTabs()[0].Root.Leaves()[0]
+	if pane2.blockedSince.IsZero() {
+		t.Fatal("a park edge must set blockedSince even without a tool")
+	}
+	if pane2.blockedReason != "" {
+		t.Errorf("blockedReason = %q, want empty — Notification carries no tool", pane2.blockedReason)
+	}
+}
+
+func TestApplyWorkTransition_StartAndAbortClearBlockedFields(t *testing.T) {
+	t.Parallel()
+	// A fresh turn and a process exit must both clear a lingering blocked
+	// mark from a prior park, same as they clear the unseen mark.
+	m := modelForWorkTest()
+	m.applyWorkTransition("p1", "hook.claude.UserPromptSubmit", nil)
+	m.applyWorkTransition("p1", "hook.claude.PermissionRequest", map[string]string{"tool": "Bash"})
+	pane := m.curTabs()[0].Root.Leaves()[0]
+	if pane.blockedSince.IsZero() {
+		t.Fatal("precondition: pane should be blocked after the park")
+	}
+
+	m.applyWorkTransition("p1", "hook.claude.UserPromptSubmit", nil)
+	if !pane.blockedSince.IsZero() || pane.blockedReason != "" {
+		t.Error("a new turn (UserPromptSubmit) must clear the blocked fields")
+	}
+
+	m2 := modelForWorkTest()
+	m2.applyWorkTransition("p1", "hook.claude.UserPromptSubmit", nil)
+	m2.applyWorkTransition("p1", "hook.claude.PermissionRequest", map[string]string{"tool": "Bash"})
+	pane2 := m2.curTabs()[0].Root.Leaves()[0]
+	m2.applyWorkTransition("p1", "process_exit", nil)
+	if !pane2.blockedSince.IsZero() || pane2.blockedReason != "" {
+		t.Error("process_exit must clear the blocked fields")
+	}
+}
+
+// TestTurnCompletionClearsTheBlockedMark guards the non-obvious clearing
+// edge: approving a permission prompt fires no hook of its own, so the
+// pane's next event is the turn's Stop. If a plain workStop did not clear
+// the blocked fields, the sidebar would keep showing the ⚠ marker on a pane
+// that has already finished its turn, until the user submits another
+// prompt — a completed turn is by definition not blocked.
+func TestTurnCompletionClearsTheBlockedMark(t *testing.T) {
+	t.Parallel()
+	pane := &PaneModel{ID: "pane-1"}
+	tab := NewTabModel("tab-1", "AI")
+	tab.Root = NewLeaf(pane)
+	m := Model{projects: []*ProjectModel{{ID: "proj-a", tabs: []*TabModel{tab}}}}
+
+	m.applyWorkTransition("pane-1", "hook.claude.PermissionRequest", map[string]string{"tool": "Bash"})
+	if pane.blockedSince.IsZero() {
+		t.Fatal("a permission request must mark the pane blocked")
+	}
+
+	// Approving fires no hook; the next event is the turn completing.
+	m.applyWorkTransition("pane-1", "hook.claude.Stop", nil)
+
+	if !pane.blockedSince.IsZero() {
+		t.Fatal("a completed turn must clear the blocked mark — otherwise ⚠ " +
+			"sticks on a pane that is done")
 	}
 }
 

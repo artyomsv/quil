@@ -13,7 +13,7 @@ type WorkEventKind int
 const (
 	WorkEventNone  WorkEventKind = iota // no effect
 	WorkEventStart                      // a turn began
-	WorkEventStop                       // turn completed OR parked for user input → mark pane unseen
+	WorkEventStop                       // turn completed → mark pane unseen
 	WorkEventAbort                      // process exited → clear working, no mark
 	// Background subagents (Claude Code runs them detached by default)
 	// outlive the main turn's Stop, so they carry their own edges: the TUI
@@ -31,6 +31,11 @@ const (
 	WorkEventSubagentStart // a subagent spawned → spinner on
 	WorkEventSubagentStop  // a subagent finished → spinner off once drained AND turn over
 	WorkEventStopFinal     // terminal stop (session end) → also clears the outstanding count
+	// WorkEventPark: the agent is blocked waiting on the USER — a permission
+	// prompt or an idle wait. Distinct from WorkEventStop, which means the turn
+	// finished. Both clear the spinner and mark the pane unseen; only Park means
+	// "this needs you", which is what the sidebar's ⚠ renders.
+	WorkEventPark
 )
 
 // ClassifyWorkEvent maps a composed PaneEvent Type to a work-state transition.
@@ -64,12 +69,14 @@ func ClassifyWorkEvent(eventType string) WorkEventKind {
 	// Park-for-input edges: the agent is blocked waiting on the user (permission
 	// prompt, option select, idle-input nudge). There is no "resumed after
 	// approval" hook, so we treat the park as a turn boundary — stop the spinner
-	// and mark the pane unseen to pull attention. Both Claude (Notification fires
-	// for permission + idle-wait; PermissionRequest when available) and opencode
-	// (permission.ask) are covered.
+	// and mark the pane unseen to pull attention, same as WorkEventStop, but
+	// tagged distinctly so the sidebar can tell "blocked on you" apart from
+	// "turn finished". Both Claude (Notification fires for permission +
+	// idle-wait; PermissionRequest when available) and opencode (permission.ask)
+	// are covered.
 	case "hook.claude.Notification", "hook.claude.PermissionRequest",
 		"hook.opencode.permission.ask":
-		return WorkEventStop
+		return WorkEventPark
 	case "process_exit":
 		return WorkEventAbort
 	}

@@ -29,11 +29,12 @@ type workTransition = hookevents.WorkEventKind
 const (
 	workNone          = hookevents.WorkEventNone          // no effect
 	workStart         = hookevents.WorkEventStart         // a turn began
-	workStop          = hookevents.WorkEventStop          // turn completed OR parked for user input → mark pane unseen
+	workStop          = hookevents.WorkEventStop          // turn completed → mark pane unseen
 	workAbort         = hookevents.WorkEventAbort         // process exited → clear working, no mark
 	workSubagentStart = hookevents.WorkEventSubagentStart // subagent spawned → spinner on
 	workSubagentStop  = hookevents.WorkEventSubagentStop  // subagent finished → spinner off once drained AND turn over
 	workStopFinal     = hookevents.WorkEventStopFinal     // terminal stop → also clears the outstanding count
+	workPark          = hookevents.WorkEventPark          // agent blocked on the user (permission/idle) → same spinner/unseen handling as workStop, plus blockedSince/blockedReason
 )
 
 // workEventKind maps a PaneEvent Type (the daemon encodes hook events as
@@ -144,6 +145,8 @@ func (m *Model) applyWorkTransition(paneID, eventType string, data map[string]st
 	switch kind {
 	case workStart:
 		pane.turnActive = true
+		pane.blockedSince = time.Time{}
+		pane.blockedReason = ""
 	case workSubagentStart:
 		agentType := data["agent_type"]
 		if agentType == "" {
@@ -218,6 +221,12 @@ func (m *Model) applyWorkTransition(paneID, eventType string, data map[string]st
 		}
 	case workStop, workStopFinal:
 		pane.turnActive = false
+		// A completed turn is by definition not blocked — clears on a PLAIN
+		// workStop too, not just workStopFinal. Approving a permission
+		// prompt fires no hook of its own: the pane's next event is the
+		// turn's Stop, so this is the only edge that un-blocks it.
+		pane.blockedSince = time.Time{}
+		pane.blockedReason = ""
 		if kind == workStopFinal {
 			// Terminal stop (session end): no subagent of the session can
 			// still be alive — drop the ledger so a lost SubagentStop can't
@@ -226,10 +235,23 @@ func (m *Model) applyWorkTransition(paneID, eventType string, data map[string]st
 			clear(pane.subagents)
 			pane.subagentsOverflow = false
 		}
+	case workPark:
+		// Blocked waiting on the user — handled exactly like workStop for
+		// the derived `working` recomputation and the unseen mark below;
+		// only the blocked fields differ.
+		pane.turnActive = false
+		pane.blockedSince = time.Now()
+		// Data["tool"] is set by the claude hook only for PermissionRequest
+		// and PostToolUse. Notification and opencode's permission.ask may
+		// carry no tool, so the reason is genuinely optional — render a bare
+		// marker rather than inventing one.
+		pane.blockedReason = data["tool"]
 	case workAbort:
 		pane.turnActive = false
 		clear(pane.subagents)
 		pane.subagentsOverflow = false
+		pane.blockedSince = time.Time{}
+		pane.blockedReason = ""
 		abort = true
 	}
 

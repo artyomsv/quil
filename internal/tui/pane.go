@@ -83,6 +83,8 @@ type PaneModel struct {
 	unseen             bool                // work finished/parked while this pane was not focused; cleared on focus
 	pinnedAttention    bool                // context-menu "Mark attention" pin — green border that SURVIVES focus; cleared only by Unmark. TUI-session state, never persisted
 	workFrame          int                 // shared spinner frame index, mirrored here for top-border render
+	blockedSince       time.Time           // set when the agent parks waiting on the user (permission prompt/idle-wait); zero when not blocked. Cleared on workStart/workAbort/workStop/workStopFinal — a completed turn is by definition not blocked
+	blockedReason      string              // optional tool name from the hook's Data["tool"]; genuinely absent for Notification/permission.ask, so left empty rather than invented
 
 	// Mouse-tracking state, updated by the VT EnableMode/DisableMode callbacks
 	// during AppendOutput (same goroutine as Update/View, like cursorVisible —

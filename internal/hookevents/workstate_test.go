@@ -19,9 +19,9 @@ func TestClassifyWorkEvent(t *testing.T) {
 		{"hook.claude.SessionEnd", WorkEventStopFinal},
 		{"hook.opencode.session.idle", WorkEventStop},
 		{"hook.opencode.session.error", WorkEventStop},
-		{"hook.claude.Notification", WorkEventStop},
-		{"hook.claude.PermissionRequest", WorkEventStop},
-		{"hook.opencode.permission.ask", WorkEventStop},
+		{"hook.claude.Notification", WorkEventPark},
+		{"hook.claude.PermissionRequest", WorkEventPark},
+		{"hook.opencode.permission.ask", WorkEventPark},
 		{"hook.claude.SubagentStart", WorkEventSubagentStart},
 		{"hook.claude.SubagentStop", WorkEventSubagentStop},
 		{"process_exit", WorkEventAbort},
@@ -40,5 +40,25 @@ func TestClassifyWorkEvent(t *testing.T) {
 				t.Errorf("ClassifyWorkEvent(%q) = %v, want %v", tt.eventType, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestParkEventsAreDistinctFromStop guards the split that gives "blocked on
+// the user" its own WorkEventKind: a permission prompt or idle-wait must not
+// collapse into the same value as a turn actually completing, because that
+// is the distinction the sidebar's ⚠ marker depends on.
+func TestParkEventsAreDistinctFromStop(t *testing.T) {
+	t.Parallel()
+	for _, evt := range []string{
+		"hook.claude.Notification",
+		"hook.claude.PermissionRequest",
+		"hook.opencode.permission.ask",
+	} {
+		if got := ClassifyWorkEvent(evt); got != WorkEventPark {
+			t.Errorf("ClassifyWorkEvent(%q) = %v, want WorkEventPark", evt, got)
+		}
+	}
+	if got := ClassifyWorkEvent("hook.claude.Stop"); got != WorkEventStop {
+		t.Errorf("a turn completing is Stop, not Park: got %v", got)
 	}
 }

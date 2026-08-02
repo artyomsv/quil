@@ -126,13 +126,41 @@ func (q *eventQueue) DismissAll() {
 	q.events = nil
 }
 
-// Events returns a snapshot copy of all events.
+// Events returns a snapshot copy of all events, NEWEST FIRST — the order the
+// queue stores and the order a reader browsing notifications wants.
 func (q *eventQueue) Events() []PaneEvent {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
 	out := make([]PaneEvent, len(q.events))
 	copy(out, q.events)
+	return out
+}
+
+// EventsOldestFirst returns the same snapshot in CHRONOLOGICAL order, for the
+// consumers that replay these events as a sequence of state transitions rather
+// than reading them as a list.
+//
+// The distinction is not cosmetic. A pane's work state (internal/tui/
+// workstate.go) is reconstructed by replaying its events in order, so a
+// backwards replay lands on the state implied by the OLDEST event instead of
+// the newest: a pane that ran a turn, finished, and then parked waiting for
+// the user came back from a TUI restart with its spinner running and nothing
+// behind it, because the park was applied first and the turn's start last.
+// The notification sidebar has the same dependency from the other side — it
+// PREPENDS each arriving event, so a newest-first replay left its list upside
+// down and its "cursor 0 is the newest event" contract false.
+//
+// Callers that want a list, not a replay, keep using Events(). FindSince walks
+// the stored slice in reverse for exactly this reason.
+func (q *eventQueue) EventsOldestFirst() []PaneEvent {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	out := make([]PaneEvent, len(q.events))
+	for i, e := range q.events {
+		out[len(q.events)-1-i] = e
+	}
 	return out
 }
 

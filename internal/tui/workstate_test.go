@@ -1214,3 +1214,47 @@ func TestHandleNotificationKey_Navigate_FailedJumpDoesNotGrowHistory(t *testing.
 		t.Fatalf("paneHistory grew to %d entries for a jump that never happened", len(got.paneHistory))
 	}
 }
+
+// TestApplyWorkTransition_ReplayOrderDecidesTheFinalState pins the contract the
+// daemon's attach replay has to satisfy. applyWorkTransition is an ordered
+// state machine, so the sequence it is fed IS the answer — feeding a pane's
+// history backwards reports the state implied by its oldest event.
+//
+// The sequence below is the one logged for pane-fa75ba78 on 2026-08-03: a turn
+// resumed, replied, then parked waiting for the user. Played forwards the pane
+// is blocked, which is where it really was. Played backwards it is working,
+// which is what the user saw after restarting the TUI — a spinner with nothing
+// behind it.
+func TestApplyWorkTransition_ReplayOrderDecidesTheFinalState(t *testing.T) {
+	t.Parallel()
+	history := []string{
+		"hook.claude.PostToolUse",   // resumed after AskUserQuestion
+		"hook.claude.Stop",          // reply ready
+		"hook.claude.Notification",  // parked: waiting for input
+	}
+
+	forwards := modelForWorkTest()
+	for _, evt := range history {
+		forwards.applyWorkTransition("p1", evt, nil)
+	}
+	pane := forwards.curTabs()[0].Root.Leaves()[0]
+	if pane.working {
+		t.Error("chronological replay left the pane working; its last event was a park")
+	}
+	if pane.blockedSince.IsZero() {
+		t.Error("chronological replay did not mark the pane blocked")
+	}
+
+	// The failing direction, asserted so the daemon-side ordering fix has a
+	// stated reason to exist rather than looking like a cosmetic reversal.
+	backwards := modelForWorkTest()
+	for i := len(history) - 1; i >= 0; i-- {
+		backwards.applyWorkTransition("p1", history[i], nil)
+	}
+	if got := backwards.curTabs()[0].Root.Leaves()[0]; !got.working || !got.blockedSince.IsZero() {
+		t.Errorf("reverse replay produced working=%v blocked=%v; the bug this "+
+			"pins is that it reports working with no park — if this changed, the "+
+			"daemon's replay order may no longer be load-bearing",
+			got.working, !got.blockedSince.IsZero())
+	}
+}

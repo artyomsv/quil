@@ -100,3 +100,78 @@ func TestHandleAttach_SlowClientGhostReplay_NotDisconnected(t *testing.T) {
 		}
 	}
 }
+
+// TestHandleAttach_ReplaysEventsOldestFirst pins the CALL SITE, not just the
+// queue method. The TUI rebuilds each pane's work state by applying these
+// events as ordered transitions, so replaying the queue in its stored
+// newest-first order lands on the state implied by the oldest event: three
+// claude panes parked on "Claude is waiting for your input" came back from a
+// TUI restart spinning, with nothing running behind them (2026-08-03).
+//
+// The unit tests cover eventQueue.EventsOldestFirst. Only this one catches the
+// handler being pointed back at Events().
+func TestHandleAttach_ReplaysEventsOldestFirst(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("QUIL_HOME", tmp)
+
+	d := New(config.Default())
+	tab := d.session.CreateTab("Shell")
+	pane, err := d.session.CreatePane(tab.ID, "/tmp")
+	if err != nil {
+		t.Fatalf("CreatePane: %v", err)
+	}
+
+	// One pane's history, in the order it happened. Distinct titles so the
+	// queue's (PaneID, Title) aggregation leaves all three standing.
+	history := []string{"Resumed after AskUserQuestion", "Reply ready", "Claude is waiting for your input"}
+	for i, title := range history {
+		d.events.Push(PaneEvent{
+			ID:        title,
+			PaneID:    pane.ID,
+			TabID:     tab.ID,
+			Type:      "hook.claude.Test",
+			Title:     title,
+			Timestamp: time.Now().Add(time.Duration(i) * time.Second),
+		})
+	}
+
+	if err := d.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer d.Stop()
+
+	conn := dialDaemon(t, filepath.Join(tmp, "quild.sock"))
+	defer conn.Close()
+
+	attach, err := ipc.NewMessage(ipc.MsgAttach, ipc.AttachPayload{Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("NewMessage attach: %v", err)
+	}
+	if err := ipc.WriteMessage(conn, attach); err != nil {
+		t.Fatalf("write attach: %v", err)
+	}
+
+	var seen []string
+	_ = conn.SetReadDeadline(time.Now().Add(15 * time.Second))
+	for len(seen) < len(history) {
+		msg, err := ipc.ReadMessage(conn)
+		if err != nil {
+			t.Fatalf("read after %d/%d events: %v", len(seen), len(history), err)
+		}
+		if msg.Type != ipc.MsgPaneEvent {
+			continue
+		}
+		var p ipc.PaneEventPayload
+		if err := msg.DecodePayload(&p); err != nil {
+			t.Fatalf("decode pane event: %v", err)
+		}
+		seen = append(seen, p.Title)
+	}
+
+	for i, want := range history {
+		if seen[i] != want {
+			t.Fatalf("replay order %v, want %v — a client rebuilding state from "+
+				"this sequence ends on the wrong event", seen, history)
+		}
+	}
+}

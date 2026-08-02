@@ -1174,10 +1174,14 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 		}
 	}
 
-	// Replay pending notification events. Blocking send for the same reason
-	// as ghost replay: up to MaxEvents (200) critical frames in a burst would
-	// overflow the 64-slot critical queue and force-close a busy client.
-	for _, e := range d.events.Events() {
+	// Replay pending notification events, OLDEST FIRST — this is a replay of
+	// state transitions, not a listing. The TUI rebuilds each pane's work
+	// state by applying these in order, so the newest-first storage order has
+	// to be reversed or the reconstruction ends on the oldest event's state.
+	// Blocking send for the same reason as ghost replay: up to MaxEvents (200)
+	// critical frames in a burst would overflow the 64-slot critical queue and
+	// force-close a busy client.
+	for _, e := range d.events.EventsOldestFirst() {
 		payload := toPaneEventPayload(e)
 		evtMsg, _ := ipc.NewMessage(ipc.MsgPaneEvent, payload)
 		if err := conn.SendBlocking(evtMsg, d.shutdown); err != nil {

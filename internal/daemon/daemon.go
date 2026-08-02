@@ -1690,6 +1690,7 @@ func (d *Daemon) handleResizePane(msg *ipc.Message) {
 	// runs outside the lock.
 	pane.PluginMu.Lock()
 	pty := pane.PTY
+	typ := pane.Type
 	same := pane.appliedCols == int(payload.Cols) && pane.appliedRows == int(payload.Rows)
 	pane.PluginMu.Unlock()
 	if pty == nil || same {
@@ -1715,6 +1716,44 @@ func (d *Daemon) handleResizePane(msg *ipc.Message) {
 	pane.Cols = int(payload.Cols)
 	pane.Rows = int(payload.Rows)
 	pane.PluginMu.Unlock()
+
+	d.repaintAfterResize(pane, typ)
+}
+
+// repaintAfterResize nudges a pane that has just been resized into repainting,
+// for the plugins that will not do it on their own.
+//
+// A declared redraw_key MEANS "this program ignores SIGWINCH" — that is the
+// contract redrawKick already relies on, and it is measured rather than
+// assumed: claude-code re-lays-out on a resize but paints only on its own
+// render tick, which INPUT drives, so the resize alone leaves the previous
+// paint on screen at the previous width. The result is not a pane that looks
+// stale for a moment; it is one whose old content stays wrapped at the old
+// width underneath everything drawn afterwards, which is what produced the
+// overlapping banner reported on 2026-08-02 (restored panes spawn at the
+// persisted size, then the first client resize moves them).
+//
+// This is deliberately NOT the jiggle half of redrawKick: the caller has just
+// performed a real resize, so a program that repaints on SIGWINCH has already
+// been told everything a jiggle would tell it. Only the panes that declared
+// they need input get input, which keeps the opt-in property intact — a plain
+// terminal at a password prompt must never be sent a keystroke it would read
+// as data.
+// The registry nil-check is not defensive padding: handleResizePane is reached
+// by tests that build a Daemon with only a session, and Registry.Get takes a
+// mutex on the receiver, so a nil one panics rather than answering "no plugin".
+func (d *Daemon) repaintAfterResize(pane *Pane, typ string) {
+	if d.registry == nil {
+		return
+	}
+	p := d.registry.Get(typ)
+	if p == nil || p.Persistence.RedrawKey == "" {
+		return
+	}
+	// EnqueueInput, never pane.PTY.Write: a child that has stopped reading
+	// stdin blocks the writer forever, and this runs on the resizing conn's
+	// dispatch goroutine.
+	pane.EnqueueInput([]byte(p.Persistence.RedrawKey))
 }
 
 func (d *Daemon) handleUpdatePane(msg *ipc.Message) {

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/artyomsv/quil/internal/ipc"
@@ -57,5 +58,51 @@ func TestMaybeShowUpdateNotice_StillShownLocally(t *testing.T) {
 
 	if m.dialog != dialogUpdateNotice {
 		t.Errorf("dialog = %v in a local session, want dialogUpdateNotice", m.dialog)
+	}
+}
+
+// TestRemoteModeFollowsActiveProject pins the per-project half of RemoteMode:
+// with no remoteDest set (today's --remote session's own signal, still
+// honoured — see TestModel_RemoteMode_ReflectsDest), the answer must track
+// whichever project is active, not a single process-wide flag.
+func TestRemoteModeFollowsActiveProject(t *testing.T) {
+	m := Model{projects: []*ProjectModel{
+		{ID: "proj-local", Dest: ""}, {ID: "proj-gpu", Dest: "gpu01"},
+	}}
+
+	m.activeProject = 0
+	if m.RemoteMode() {
+		t.Fatal("a local project must not report remote mode")
+	}
+	m.activeProject = 1
+	if !m.RemoteMode() {
+		t.Fatal("a project on gpu01 must report remote mode")
+	}
+}
+
+// TestStatusBarNamesTheActiveProjectsHost pins the status-bar half: the
+// [remote …] segment must name the ACTIVE project's own host, not only the
+// session-wide remoteDest.
+func TestStatusBarNamesTheActiveProjectsHost(t *testing.T) {
+	m := Model{
+		projects:      []*ProjectModel{{ID: "proj-gpu", Dest: "gpu01"}},
+		activeProject: 0, width: 120,
+		// renderStatusBar dereferences this unconditionally (notification
+		// count badge) — every other caller in this package sets it too.
+		notifications: NewNotificationCenter(30, 50),
+	}
+	if !strings.Contains(m.renderStatusBar(), "gpu01") {
+		t.Fatal("the status bar must name the host the user is actually on")
+	}
+}
+
+// TestAttachCWDIsEmptyForRemoteProject pins attachCWD's existing per-dest
+// contract — unchanged by this task, but worth pinning here alongside its
+// two new neighbours since a future per-dest attach (Task 17) call site will
+// depend on it just the same.
+func TestAttachCWDIsEmptyForRemoteProject(t *testing.T) {
+	if got := attachCWD("gpu01", "/home/me/src"); got != "" {
+		t.Fatalf("attachCWD = %q, want empty — the laptop's path is not the "+
+			"remote machine's, and defaultCWD() falls back safely", got)
 	}
 }

@@ -125,6 +125,29 @@ func TestUpdate_LinkLost_RemoteWithoutDialer_Quits(t *testing.T) {
 	}
 }
 
+// TestCanReconnect_DoesNotRequireRemoteMode pins a fix for a latent bug that
+// RemoteMode()'s per-project redefinition would otherwise have introduced:
+// canReconnect used to require RemoteMode() as a conjunct, which now answers
+// for the ACTIVE PROJECT rather than the whole process. Today's
+// `quil --remote <host>` session has no project with a stamped Dest yet (that
+// lands with the multi-daemon router) and no SetRemoteDest call from this
+// path either — it installs its redial func under the "" key regardless of
+// what is "active". Requiring RemoteMode() too would read false for that
+// session's own reconnect and silently turn every existing --remote drop
+// fatal. redialFns[dest] != nil is sufficient alone: a local dest never gets
+// a redial fn installed in the first place.
+func TestCanReconnect_DoesNotRequireRemoteMode(t *testing.T) {
+	m := Model{}
+	m.SetRedialFunc("", func(Client) (Client, error) { return nil, errors.New("unused") })
+
+	if m.RemoteMode() {
+		t.Fatal("setup invariant broken: this Model must read RemoteMode() == false")
+	}
+	if !m.canReconnect("") {
+		t.Fatal(`canReconnect("") = false — a redial fn is installed; RemoteMode() must not gate it`)
+	}
+}
+
 // One destination dropping must leave every other one alone. This is the whole
 // point of a per-daemon link table: a client holding several daemons has no
 // single "the link", and a shared flag would park a working host because an
@@ -1168,9 +1191,10 @@ func TestReconnect_SecondGenuineDropStillReconnects(t *testing.T) {
 //
 // Belt-and-braces today: maybeShowUpdateNotice returns early in remote mode
 // (its update info describes the REMOTE daemon while accepting applies a LOCAL
-// staged update), and canReconnect requires remote mode — so the two conditions
-// never coincide. This pins the invariant for RD-027, which makes update
-// controls remote-aware and would otherwise reintroduce it silently.
+// staged update), and this Model is remote (RemoteMode() reads true via
+// remoteDest) — so the two conditions coincide and reconnecting here can never
+// reach the notice at all. This pins the invariant for RD-027, which makes
+// update controls remote-aware and would otherwise reintroduce it silently.
 func TestReconnect_DoesNotReopenUpdateNotice(t *testing.T) {
 	m := Model{clientGen: 1, attached: true, sawFirstState: true,
 		links: oneLink(reconnectState{active: true, attempt: 1})}

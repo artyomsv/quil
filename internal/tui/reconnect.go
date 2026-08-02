@@ -269,12 +269,19 @@ func (m Model) CloseClient() { m.closeClient(m.client) }
 // canReconnect reports whether a dropped link to dest should be retried rather
 // than being fatal.
 //
-// Local sessions never reconnect: a dead local daemon means the panes died with
-// it, so retrying would spin against something that is not coming back while
-// hiding the loss. Remote mode without a dialer for that destination is equally
-// fatal — there is nothing to retry with.
+// redialFns[dest] != nil is the WHOLE test, deliberately with no RemoteMode
+// conjunct. A local session never installs a redial func for its dest, so the
+// nil check alone already keeps a dead local daemon fatal — retrying would
+// spin against something that is not coming back while hiding the loss, and
+// nothing here can make that reachable. The conjunct used to be redundant
+// insurance; now it is actively wrong. RemoteMode() answers for the ACTIVE
+// project, but today's `quil --remote <host>` session has no projects with a
+// stamped Dest yet (that lands with the multi-daemon router) and installs its
+// redial func under the "" key regardless of what is active — so requiring
+// RemoteMode() too would read false for that session's own reconnect and
+// silently turn every existing --remote drop fatal.
 func (m Model) canReconnect(dest string) bool {
-	return m.RemoteMode() && m.redialFns[dest] != nil
+	return m.redialFns[dest] != nil
 }
 
 // freezeInput drops user input while a reconnect is in flight, reporting

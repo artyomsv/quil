@@ -171,7 +171,7 @@ func (m Model) saveMigrationAndAdvance() (tea.Model, tea.Cmd) {
 	// attach, so a remote session has already adopted the daemon's answer by
 	// the time this runs; a local DetectAvailability pass here would discard
 	// it with a detection pass over the wrong machine.
-	if !m.RemoteMode() {
+	if !m.remoteModeFor(m.activeDest()) {
 		m.pluginRegistry.DetectAvailability()
 	}
 	m.migrationLeft = nil

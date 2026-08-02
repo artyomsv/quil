@@ -37,7 +37,11 @@ type pluginListMsg struct{ Resp ipc.PluginListRespPayload }
 // a wrong offer fails loudly at spawn, a wrong grey-out hides a working tool
 // silently.
 func (m *Model) requestPluginList() tea.Cmd {
-	if !m.RemoteMode() {
+	// Unstamped — see reloadPluginsThenAskCmd and the Task 17 note on
+	// requestPluginList in the plan: this asks whichever daemon is FOREGROUND,
+	// so it gates on that same daemon rather than RemoteMode()'s process-wide
+	// answer.
+	if !m.remoteModeFor(m.activeDest()) {
 		return nil
 	}
 	return func() tea.Msg {

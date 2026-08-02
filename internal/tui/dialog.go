@@ -1914,7 +1914,11 @@ func (m Model) handlePluginsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// discard whatever availability answer the daemon already supplied
 		// with a detection pass over the wrong machine. reloadPluginsThenAskCmd
 		// below re-asks the daemon instead, once its own reload has finished.
-		if !m.RemoteMode() {
+		//
+		// remoteModeFor(activeDest()), not RemoteMode(): the daemon this
+		// dialog reloads is the ACTIVE one, and this is the daemon-scoped
+		// counterpart to the same guard elsewhere.
+		if !m.remoteModeFor(m.activeDest()) {
 			m.pluginRegistry.DetectAvailability()
 		}
 		m.dialog = dialogNone
@@ -2001,7 +2005,7 @@ func (m Model) handleTOMLEditorKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		// Local detection only in local mode — see the identical guard on the
 		// Plugins dialog's Reload/Restore buttons above.
-		if !m.RemoteMode() {
+		if !m.remoteModeFor(m.activeDest()) {
 			m.pluginRegistry.DetectAvailability()
 		}
 		m.tomlEditor = nil

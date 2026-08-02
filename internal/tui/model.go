@@ -537,8 +537,37 @@ type Model struct {
 // takes five arguments.
 func (m *Model) SetRemoteDest(dest string) { m.remoteDest = dest }
 
-// RemoteMode reports whether the daemon this TUI drives lives on another host.
-func (m *Model) RemoteMode() bool { return m.remoteDest != "" }
+// RemoteMode reports whether the daemon behind the ACTIVE project lives on
+// another host.
+//
+// The union of two sources, deliberately: the active project's own Dest (the
+// per-project answer, once a project actually carries one) and the legacy
+// session-wide remoteDest. Today's `quil --remote <host>` session does not
+// stamp Dest on its project — that lands with the multi-daemon router — so
+// for it activeDest() reads "" and remoteDest is the only signal there is.
+// Dropping the remoteDest half here would silently turn every existing
+// --remote session "local" the moment this redefinition landed. Once the
+// router stamps Dest for real, remoteDest has no remaining reader and this
+// collapses to activeDest() != "" — tracked as a Task 17 cleanup, not
+// speculative: a live remoteDest with a DIFFERENT local project active is
+// reachable only after that router exists, and would misreport a local
+// project as remote in the meantime.
+func (m *Model) RemoteMode() bool { return m.activeDest() != "" || m.remoteDest != "" }
+
+// remoteModeFor reports whether dest names a daemon on another host — the
+// per-destination counterpart to RemoteMode, for a call site that already
+// knows which daemon it is asking about rather than defaulting to the active
+// one.
+//
+// An empty dest still defers to remoteDest, for the same reason RemoteMode
+// does: today's single --remote session routes everything unstamped, so ""
+// IS that remote daemon until the router lands.
+func (m *Model) remoteModeFor(dest string) bool {
+	if dest != "" {
+		return true
+	}
+	return m.remoteDest != ""
+}
 
 // SetRecentCWDs replaces the remembered working-directory list.
 //
@@ -4298,8 +4327,14 @@ func (m Model) renderStatusBar() string {
 	// are on this laptop or a cluster node, which is what makes any
 	// wrong-host bug silent — and these panes routinely run AI agents with
 	// permission prompts disabled.
-	if m.remoteDest != "" {
-		right = "[remote " + m.remoteDest + "] " + right
+	//
+	// linkHost(activeDest()) rather than remoteDest directly: it names the
+	// ACTIVE project's own host when it has one, and only falls back to the
+	// session-wide remoteDest for today's single --remote session, where the
+	// active project's Dest is still "". Same resolution the reconnect
+	// banner uses for the same reason.
+	if host := m.linkHost(m.activeDest()); host != "" {
+		right = "[remote " + host + "] " + right
 	}
 	if count := m.notifications.Count(); count > 0 && !m.notifications.visible {
 		right = fmt.Sprintf("[%d events] ", count) + right

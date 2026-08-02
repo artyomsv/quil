@@ -12,6 +12,7 @@ Quil reads `~/.quil/config.toml` (or `$QUIL_HOME/config.toml` when `QUIL_HOME` i
 - [`[mcp]`](#mcp)
 - [`[notification]`](#notification)
 - [`[update]`](#update)
+- [`[[destinations]]`](#destinations)
 - [`[keybindings]`](#keybindings)
 - [Per-plugin instances](#per-plugin-instances)
 - [How edits get persisted](#how-edits-get-persisted)
@@ -173,6 +174,45 @@ flag, since a self-update would strip the dev/debug ldflags baked into those
 binaries) — see `./scripts/dev.sh build`. Installs in non-writable locations
 (package managers) also never self-update; those show the release page URL
 instead.
+
+## `[[destinations]]`
+
+Extra daemons to attach at launch, alongside the local one. Each destination's
+projects appear in the same sidebar as the local ones, and each keeps its own
+tabs, panes and agent state.
+
+```toml
+[[destinations]]
+name = "gpu box"
+dest = "artyom@192.168.6.12"
+
+[[destinations]]
+name = "prod"
+dest = "prod-jump"        # an ~/.ssh/config Host alias works too
+```
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `dest` | — | Required. Passed to `ssh` **verbatim**, so an `~/.ssh/config` `Host` alias keeps its `HostName`, `Port`, `User` and `ProxyJump`. This is also the routing key Quil uses internally, so it must be unique. |
+| `name` | the `dest` | Label shown in launch warnings and in the reconnect banner. Useful when `dest` is a bare IP. |
+
+Each host needs `quil` installed and reachable over ssh — run
+`quil remote setup <dest>` once per host; it records the absolute path under
+`[remote.hosts.<dest>]` so attaching works even when the non-interactive `PATH`
+cannot see the install directory.
+
+Notes:
+
+- Hosts are dialled **in parallel and non-interactively**, so a host that is
+  switched off delays startup by one connect timeout at most and never blocks on
+  an ssh prompt. Accept a new host's key with one manual `ssh <dest>` (or
+  `quil remote setup <dest>`) before adding it here.
+- A host that is unreachable at launch is reported on stderr and skipped —
+  the client still starts with everything else. Relaunch once the host is back.
+- A host whose daemon version does not match this client is skipped with an
+  explanation in `quil.log`; run `quil remote setup <dest>` to upgrade it.
+- `quil --remote <host>` **ignores this list**. That mode means "drive that one
+  machine", so it attaches to that host alone and to no local daemon.
 
 ## `[keybindings]`
 

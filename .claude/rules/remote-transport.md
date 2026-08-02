@@ -4,10 +4,12 @@ paths:
   - "**/internal/transport/**"
   - "**/internal/remoteinstall/**"
   - "**/cmd/quil/remote*.go"
+  - "**/cmd/quil/dialall.go"
   - "**/cmd/quil/stdio.go"
   - "**/cmd/quil/version_gate.go"
   - "**/cmd/quil/daemonctl.go"
   - "**/internal/tui/reconnect.go"
+  - "**/internal/tui/router.go"
 ---
 
 # Remote Transport
@@ -44,9 +46,15 @@ Dialer backends behind `ipc.DialFunc` (`func(context.Context) (net.Conn, error)`
 
 `internal/tui/reconnect.go` + the `linkLostMsg`/`redialTickMsg`/`redialResultMsg` arms in `model.go`'s `Update`. `listenForMessages` reports a receive error as **`linkLostMsg` data, not `tea.QuitMsg`** — the two were previously indistinguishable from `ipc.MsgCloseTUI`, which is the daemon deliberately asking the TUI to exit and must never reconnect.
 
-**`Model.clientGen` is what makes the whole thing safe**: `Model` is a VALUE type, so every `tea.Cmd` closure holds its own copy of the client it was built with, and a listen loop from a superseded connection stays parked in `Receive` long after its replacement is live — every message carries the generation it was started for and is dropped when it no longer matches. `finishReconnect` bumps `clientGen` BEFORE building `listenForMessages()`, or the new loop stamps the old number and its own future drop is discarded as stale (a session that reconnects exactly once, then dies silently). `canReconnect()` = `RemoteMode() && redialFn != nil` gates every branch, so **local mode is unchanged**: a dead local daemon means dead panes, and retrying would hide that. `reconnectDelay(attempt, jitter)` is pure (jitter is a parameter so the curve is testable) — 500 ms doubling, 30 s cap, scaled into [50%,100%]; its `d <= 0` guard is load-bearing for a non-obvious reason, since the runtime int64 shift WRAPS NEGATIVE from attempt 36 (exact zero only at 57) and a negative duration handed to `tea.Tick` fires immediately. `freezeInput` sits ahead of `Update`'s type switch as ONE choke point rather than a guard in each of six input branches, so a future input message type is frozen by default; keystrokes are DROPPED not buffered (a key typed at a dead link would land in a live agent session minutes later at a prompt that moved on), and `kb.Quit` is the sole exception. `resetPanesForReattach` + `resetWorkStateForReattach` run BEFORE `attachToDaemon()` and share `eachClientPane` so the two enumerations cannot drift — it covers every tab (one attach replays all of them) plus each tab's `overlayPane`, which is a live daemon pane replayed like any other but deliberately OUTSIDE the layout tree, so a `Leaves()`-only walk misses exactly one pane per tab.
+**Generations are what make the whole thing safe, and there are TWO of them because they identify different things.** `Model` is a VALUE type, so every `tea.Cmd` closure holds its own copy of the client it was built with. `Model.clientGen` covers the SINGLE-connection path, where `finishReconnect` swaps `m.client` wholesale and a listen loop from the superseded client stays parked in `Receive` long after its replacement is live; it bumps BEFORE `listenForMessages()` is rebuilt, or the new loop stamps the old number and its own future drop is discarded as stale (a session that reconnects exactly once, then dies silently). `reconnectState.gen` covers ONE DESTINATION's timers and dials, and it had to move off the Model the moment two ladders could climb at once: a shared counter bumped by whichever destination finished discarded the OTHER destination's already-armed `redialTickMsg` and in-flight `redialResultMsg`, leaving it `active` with no timer and a banner that stuck for the session. `handleLinkLost` carries `gen` across a drop for the same reason — a drop does not make the previous connection's in-flight results current again. **A router has no session generation at all**: its `r.in` is one channel for the life of the session, so the `linkLostMsg` arm skips the `clientGen` check entirely when the client is a router (checking it there WAS the bug — any other destination's reconnect bumped the counter and the drop was discarded with no ladder started).
 
-**`m.attached` and `m.workTickRunning` are deliberately NOT cleared**: clearing `attached` makes the next `WindowSizeMsg` attach a SECOND time (and every attach replays the full buffer → doubled scrollback), and clearing `workTickRunning` while a tick is still scheduled lets the next hook event start a second spinner loop beside it. `unseen`/`pinnedAttention` survive — they report unread work, not a live turn. Client side of the dial is `cmd/quil/remote.go`: `dialRemoteTransport(ctx, cfg, batch)` is the SINGLE dial implementation shared by the startup dial and every redial (the reason `transport.RunSSH` shares `sshArgs` — a second call site assembling its own options is free to drop a forced hardening flag), and `redialRemote` sets `Batch=true` because Bubble Tea holds the terminal in raw mode by then so ssh has nowhere to prompt.
+**`canReconnect(dest)` = `redialFns[dest] != nil`, with no `RemoteMode()` conjunct**, and the conjunct is not merely redundant but wrong: `RemoteMode()` answers for the ACTIVE PROJECT, so a background remote host dropping while a local project is on screen would read false and turn a reconnectable drop fatal. A local destination never gets a dialer installed, which is what still makes **a dead local daemon fatal** — its panes died with it and retrying would hide that. `lastDaemon(dest)` is the second half of that decision: quitting is right for a session whose ONLY daemon died and wrong for one of several, so a client holding others keeps running and parks the dead destination with a banner that says the daemon is gone and offers no resume key (there is nothing to resume, and `resumeReconnect` guards on `canReconnect` so pressing it anyway cannot reach a nil `RedialFunc`). `reconnectDelay(attempt, jitter)` is pure (jitter is a parameter so the curve is testable) — 500 ms doubling, 30 s cap, scaled into [50%,100%]; its `d <= 0` guard is load-bearing for a non-obvious reason, since the runtime int64 shift WRAPS NEGATIVE from attempt 36 (exact zero only at 57) and a negative duration handed to `tea.Tick` fires immediately. `freezeInput` sits ahead of `Update`'s type switch as ONE choke point rather than a guard in each of six input branches, so a future input message type is frozen by default; keystrokes are DROPPED not buffered (a key typed at a dead link would land in a live agent session minutes later at a prompt that moved on), and `kb.Quit` is the sole exception. `armReattachReset(dest)` + `resetWorkStateForReattach(dest)` run BEFORE `attachToDest(dest)` and share `eachClientPane` so the two enumerations cannot drift — it covers every tab of every project ON THAT DESTINATION (one attach replays all of them) plus each tab's `overlayPane`, which is a live daemon pane replayed like any other but deliberately OUTSIDE the layout tree, so a `Leaves()`-only walk misses exactly one pane per tab. Both are scoped by dest because only the reconnected daemon replays: sweeping every project would zero the work counters of daemons that never dropped.
+
+**Attach is per destination and idempotent** (`Model.attachAllDests`, ledger in `m.attached map[string]bool`). Every attach replays the daemon's whole ghost buffer, so a second one doubles a pane's scrollback and re-counts the work-state events inside the replay — which is why `finishReconnect` SETS `m.attached[dest]` rather than clearing it, and why attach could not move to dial time in `cmd/quil` (it already has two owners; a third would attach every conn twice). The other reason it cannot move: `AttachPayload` carries `Cols`/`Rows` and the daemon sizes the first PTY from them, while at dial time Bubble Tea has not reported a window size — a fresh daemon would spawn its Shell pane at 0×0. `m.workTickRunning` is deliberately NOT cleared either: the spinner loop is self-stopping, and clearing the flag while a tick is scheduled lets the next hook event start a second loop beside it. `unseen`/`pinnedAttention` survive — they report unread work, not a live turn.
+
+**The listen loop is re-armed by the `linkLostMsg` arm for a router, and by `finishReconnect` for a single connection**, and the asymmetry is load-bearing in both directions. A router's loop stopped only because it delivered a synthesised loss as DATA, and it is the sole reader of every OTHER daemon's messages — leaving it unarmed parks a healthy daemon's output behind a dead one's ladder for as long as the ladder climbs. A single connection's loop died with its client, so re-arming it there means calling `Receive` on a dead conn, which fails instantly: a hot loop. `finishReconnect` therefore re-arms ONLY on the non-router path; arming a second reader of `r.in` would add one goroutine per reconnect.
+
+Client side of the dial is `cmd/quil/remote.go`: `dialRemoteTransport(ctx, cfg, dest, batch, sink)` is the SINGLE dial implementation shared by the startup dial and every redial (the reason `transport.RunSSH` shares `sshArgs` — a second call site assembling its own options is free to drop a forced hardening flag), and `redialRemote(cfg, dest)` sets `Batch=true` because Bubble Tea holds the terminal in raw mode by then so ssh has nowhere to prompt. `dest` is a PARAMETER on all of them, not the process-wide `remoteDest`: one dialer per destination is what gives each host its own `sshStderrLogger` byte budget, so a single flapping host cannot exhaust every other's log allowance.
 
 **`verifyRemoteLink` is the correctness seam, and its absence was a shipped-then-fixed bug**: a dial proves only that ssh's BINARY started, so against an unreachable host every attempt reported success, cleared the banner, reset every pane for a replay that never came (blank panes), and zeroed the reconnect state so `attempt` never passed 1 and the backoff never engaged — it now completes an `MsgVersionReq`/`MsgVersionResp` round-trip (following `daemonAlreadyHealthyWithin`) under `linkVerifyTimeout`=20 s, sized just past the transport's 15 s `ConnectTimeout` because that is what actually ends the read. Banner (`renderReconnectBanner`/`bannerCandidates`) is a compositor overlay over row 0 so it reserves no layout height, degrades through a ladder of shorter forms that EACH keep `ctrl+q` (a single truncated string cut it to `ctr…` at 40 cols, which `minTermWidth` makes reachable), truncates the ssh diagnostic into whatever room is left rather than dropping it whole (a real ssh error runs past 50 chars, so an all-or-nothing fit check hid it at 80 cols), and renders two distinct phases — `nextAt` in the future is a countdown, in the past is `Connecting`, which against a down host lasts a full `ConnectTimeout`. Liveness detection is ssh's `ServerAliveInterval`/`CountMax` (~45 s); `ipc.MsgHeartbeat` remains declared and unsent (registry open question 4, answered).
 
@@ -55,6 +63,60 @@ Dialer backends behind `ipc.DialFunc` (`func(context.Context) (net.Conn, error)`
 **`ClassifyLinkFailure(stderr, established, exitCode)` takes all three signals because the text alone is remote-influenced** — ssh multiplexes the REMOTE command's fd 2 onto its own stderr, and `permission denied` is a string any Unix shell emits, so an ordinary `~/.bashrc` touching an unreadable path would park the session and a compromised remote could do it deliberately. The raw match is unexported (`matchesPermanentMarker`) precisely so no caller can use it alone. Two independent gates make the text attributable to ssh:
 
 **`established`** counts only bytes the pump read, and the pump reads STDOUT, so any byte proves the remote command ran ⇒ ssh authenticated ⇒ an auth marker cannot be ssh's own; **`exitCode == ExitSSHOwnFailure` (255)** because ssh passes the remote command's status through untouched (127/126/…), and when `Close` has to kill a still-live ssh the status is the kill rather than 255 — so a transient drop fails this gate too, which is the safe direction. Both are read AFTER `Close` (it reaps the child, so the status is only final then), the opposite order from `LinkErr`, which `Close` can clear. `TestClassifyLinkFailure_RemoteShellNoiseCannotPark` pins the hazard and both gates; `TestClassifyLinkFailure_EstablishedNeverParks` pins the stronger gate against every marker so a later addition cannot quietly become parkable. The resume key is checked in `Update` **ahead of** `freezeInput`, which has a value receiver and so can neither clear `parked` nor return a mutated Model; `bannerCandidates` checks `parked` before both existing phases, or the stale-past `nextAt` renders `Connecting` at a session where nothing is connecting
+
+## Several daemons from one client
+
+### The router and the connection table (Task 17)
+
+`internal/tui/router.go` multiplexes N daemon connections behind the one
+`tui.Client` the Model consumes, and `cmd/quil/dialall.go` builds the table.
+**There is no single-connection path in production any more** — `launchTUI`
+always constructs a `*Router`, even for a lone local daemon — so the
+single-connection branches in `finishReconnect`, `lastDaemon` and the
+`linkLostMsg` generation check exist for the Models tests build directly.
+
+**`NewModel`'s first parameter is the `Client` interface and the router is built
+BEFORE it**, never installed afterwards and never read back through a closure:
+`tea.NewProgram` takes the Model BY VALUE, so a closure over `main`'s copy would
+freeze at startup and route every unstamped send to whatever was active at
+launch. The running program pushes the active destination the other way, through
+`Router.SetActiveDest` via `syncActiveDest()`.
+
+**Liveness is keyed off `r.stop[dest]`, and the conn record deliberately
+outlives its pump.** `retire` removes only the stop channel. That is what keeps
+`Conn(dest)` non-nil for the destination a redial is about to run for — this
+package structurally cannot close a `Client` (Send/Receive by design), so the
+dead conn has to survive until `redialCmd` hands it to the dialer in `cmd/quil`,
+which closes it. Retiring the whole record leaked one ssh child plus its remote
+`quil --stdio` per reconnect. `CloseClient` unwraps the router and releases each
+conn for the same reason: `closeClientFn` type-asserts to `*ipc.Client`, so
+handing it the `*Router` missed silently and exit closed nothing.
+
+**`Router.Send`'s sole-conn fallback is for the startup window only** — between
+launch and the first `workspace_state` there are no projects, so `activeDest()`
+is `""` and a remote-only router has no conn under that key. It is gated on
+`len(r.conns) == 1` and nothing on the startup path may depend on it: a router
+holding local + remote delivered the deliberately-unstamped startup attach to
+`conns[""]` alone, so the second daemon was never attached — no workspace state,
+no projects, no error. Attach and `requestPluginListFor` both stamp now.
+
+**`[[destinations]]` in `config.toml`** (`name`, `dest`) lists the ADDITIONAL
+daemons; `dest` is passed to ssh verbatim like `--remote` and is also the routing
+key. `quil --remote <host>` ignores the list entirely — that mode means "drive
+that machine" — and keys its own connection by the host rather than `""`, so its
+projects, reconnect state and banner key exactly as a mixed session's do.
+Background destinations dial CONCURRENTLY in batch mode: three hosts that are all
+off then cost one connect timeout rather than three, and batch is what makes the
+concurrency safe (interactive dials would interleave host-key prompts on one
+terminal). They get `gateExtraVersion`, which has none of `gateVersionCheck`'s
+interactive remedies — a background host must never open a blocking dialog, offer
+an install, or exit the process — and a refusal lands in the same
+"unreachable at launch" branch as a host that is simply off.
+
+**Known gap:** a destination unreachable at LAUNCH has no conn, so no pump, so
+nothing ever publishes a loss for it and its reconnect ladder never starts. It is
+reported on stderr at launch and needs a relaunch. Reconnect covers a destination
+that connected and then dropped.
 
 ## Remote auto-install
 

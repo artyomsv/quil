@@ -273,8 +273,17 @@ type KeybindingsConfig struct {
 	// (CloseTab, QuickActions, CommandPalette). alt+p and alt+o are plain
 	// Alt-letter keys because no AI tool binds them; the rest take the
 	// Alt+Shift layer for the same reason the split keys do.
-	ProjectPicker  string `toml:"project_picker"`
-	ProjectToggle  string `toml:"project_toggle"`
+	ProjectPicker string `toml:"project_picker"`
+	ProjectToggle string `toml:"project_toggle"`
+	// ProjectNext/ProjectPrev cycle through the project list in order, where
+	// ProjectToggle bounces between the last two. Bound to alt+shift+arrows
+	// so they read as the project-level echo of alt+arrows' pane navigation.
+	// Deliberately NOT alt+[ / alt+] : those send ESC [ and ESC ], and ESC [
+	// is the CSI introducer, so the terminal cannot tell the keypress from
+	// the start of an escape sequence. Same reason alt+O (SS3) is avoided,
+	// and alt+b/f/d are left to readline's word operations.
+	ProjectNext    string `toml:"project_next"`
+	ProjectPrev    string `toml:"project_prev"`
 	AttentionQueue string `toml:"attention_queue"`
 	NewProject     string `toml:"new_project"`
 }
@@ -375,6 +384,8 @@ func Default() Config {
 			SidebarToggle:  "alt+shift+s",
 			ProjectPicker:  "alt+p",
 			ProjectToggle:  "alt+o",
+			ProjectNext:    "alt+shift+right",
+			ProjectPrev:    "alt+shift+left",
 			AttentionQueue: "alt+shift+a",
 			NewProject:     "alt+shift+n",
 		},

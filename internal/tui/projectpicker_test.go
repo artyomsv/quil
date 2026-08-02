@@ -429,3 +429,65 @@ func TestProjectToggleKeyWithNoPreviousFlashes(t *testing.T) {
 		t.Errorf("flashText = %q, want empty on the working path", got.flashText)
 	}
 }
+
+// TestProjectCycleKeysWrapBothWays: alt+o is a bounce, so reaching a project
+// you have never visited needed its own binding. Cycling wraps at both ends,
+// and a single-project workspace flashes rather than no-opping silently —
+// which is the state every user is in until they create a second project, so
+// it is the first thing they would press it in.
+func TestProjectCycleKeysWrapBothWays(t *testing.T) {
+	newModel := func(active int, ids ...string) Model {
+		projects := make([]*ProjectModel, 0, len(ids))
+		for _, id := range ids {
+			projects = append(projects, &ProjectModel{
+				ID:   id,
+				tabs: []*TabModel{tabWith(&PaneModel{ID: "pane-" + id})},
+			})
+		}
+		return Model{
+			client:        newFakeConn(),
+			cfg:           config.Default(),
+			width:         100,
+			height:        30,
+			notifications: NewNotificationCenter(30, 50),
+			mcpHighlights: make(map[string]bool),
+			projects:      projects,
+			activeProject: active,
+		}
+	}
+	next := tea.KeyPressMsg{Mod: tea.ModAlt | tea.ModShift, Code: tea.KeyRight}
+	prev := tea.KeyPressMsg{Mod: tea.ModAlt | tea.ModShift, Code: tea.KeyLeft}
+
+	// Forward, and wrapping off the end.
+	m := newModel(0, "a", "b", "c")
+	updated, _ := m.handleKey(next)
+	if got := updated.(Model).activeProject; got != 1 {
+		t.Errorf("next from 0: activeProject = %d, want 1", got)
+	}
+	m = newModel(2, "a", "b", "c")
+	updated, _ = m.handleKey(next)
+	if got := updated.(Model).activeProject; got != 0 {
+		t.Errorf("next from the last project must wrap to 0, got %d", got)
+	}
+
+	// Backward, and wrapping off the front — the modulo has to stay positive.
+	m = newModel(0, "a", "b", "c")
+	updated, _ = m.handleKey(prev)
+	if got := updated.(Model).activeProject; got != 2 {
+		t.Errorf("prev from 0 must wrap to the last project, got %d", got)
+	}
+
+	// One project: flash, do not move, and return a command so it clears.
+	m = newModel(0, "a")
+	updated, cmd := m.handleKey(next)
+	got := updated.(Model)
+	if got.flashText != "only one project" {
+		t.Errorf("flashText = %q, want the single-project flash", got.flashText)
+	}
+	if got.activeProject != 0 {
+		t.Errorf("activeProject = %d, want 0 — a flash must not move the user", got.activeProject)
+	}
+	if cmd == nil {
+		t.Error("no command returned; the flash would never clear")
+	}
+}

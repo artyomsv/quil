@@ -59,6 +59,23 @@ func (m *Model) filterProjects(query string) []*ProjectModel {
 // project whenever the remembered one is gone. A project that no longer exists
 // must be a no-op. Naming the already-active project resolves through
 // switchProject's own no-op guard rather than a second check here.
+// cycleProject moves delta places through the project list, wrapping at both
+// ends. Distinct from toggleLastProject, which bounces between the two most
+// recent: cycling is how you reach a project you have never visited, bouncing
+// is how you return to the one you just left.
+//
+// It walks m.projects in list order rather than by ID, which is safe because
+// applyWorkspaceState merges each destination's projects in place — a
+// background daemon broadcasting no longer reshuffles the slice under the
+// user's fingers.
+func (m *Model) cycleProject(delta int) tea.Cmd {
+	n := len(m.projects)
+	if n < 2 {
+		return nil
+	}
+	return m.switchProject(((m.activeProject+delta)%n + n) % n)
+}
+
 func (m *Model) toggleLastProject() tea.Cmd {
 	if m.prevProject == "" || m.projectByID(m.prevProject) == nil {
 		return nil

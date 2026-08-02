@@ -2704,7 +2704,7 @@ func (m Model) notesKeyExempt(key string) bool {
 		// Project navigation — switchProject (reached by both) already calls
 		// exitNotesModeInPlace itself, so exempting these just lets the key
 		// reach it instead of being swallowed as editor text.
-		kb.ProjectPicker, kb.ProjectToggle,
+		kb.ProjectPicker, kb.ProjectToggle, kb.ProjectNext, kb.ProjectPrev,
 		// Attention queue — notes are exactly the sort of thing left open
 		// while an agent grinds in another pane, so "notes are focused" is a
 		// likely state at the moment the queue is needed, arguably more so
@@ -3078,6 +3078,24 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.openNewProjectDialog()
 	case kbMatches(key, kb.ProjectPicker):
 		return m.openProjectPicker()
+	case kbMatches(key, kb.ProjectNext), kbMatches(key, kb.ProjectPrev):
+		// A single project flashes rather than no-opping silently, for the
+		// same reason the empty attention queue and the narrow-terminal
+		// sidebar refusal do — and this is the ordinary state until the user
+		// creates a second project, so it is the FIRST thing they would press
+		// it in.
+		if len(m.projects) < 2 {
+			m.setFlash("only one project")
+			return m, m.flashCmd()
+		}
+		delta := 1
+		if kbMatches(key, kb.ProjectPrev) {
+			delta = -1
+		}
+		// Sequenced for the same reason as ProjectToggle below: cycleProject
+		// mutates m through a pointer receiver via switchProject.
+		cmd := m.cycleProject(delta)
+		return m, cmd
 	case kbMatches(key, kb.ProjectToggle):
 		// No bounce target flashes rather than doing nothing, for the same
 		// reason the AttentionQueue empty case below does. This is the

@@ -43,6 +43,8 @@ project, so `Ctrl+T` files the new tab into whichever project you are on.
 | `Alt+Shift+N` | New project |
 | `Alt+P` | Project picker — fuzzy-find by name |
 | `Alt+O` | Bounce between the two most recent projects |
+| `Alt+Shift+Right` | Next project (wraps) |
+| `Alt+Shift+Left` | Previous project (wraps) |
 | `Alt+Shift+A` | Attention queue — jump to the oldest pane waiting on you, across every project |
 | `Alt+Shift+S` | Collapse / expand the project sidebar |
 | Mouse click a sidebar row | Switch to that project, or raise that pane |

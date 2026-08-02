@@ -2928,6 +2928,11 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// statement (see activateSidebarRow's identical note in project.go).
 		cmd := m.toggleLastProject()
 		return m, cmd
+	case kbMatches(key, kb.AttentionQueue):
+		// Sequenced for the same reason as ProjectToggle above:
+		// jumpToNextBlocked mutates m through a pointer receiver.
+		cmd := m.jumpToNextBlocked()
+		return m, cmd
 	}
 
 	// Sidebar focused: route keys to notification center

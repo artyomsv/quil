@@ -3,6 +3,10 @@ package tui
 import (
 	"testing"
 	"time"
+
+	tea "charm.land/bubbletea/v2"
+
+	"github.com/artyomsv/quil/internal/config"
 )
 
 func TestBlockedPanesOrderedOldestFirstAcrossProjects(t *testing.T) {
@@ -145,5 +149,56 @@ func TestJumpToNextBlockedCyclesOldestFirstAcrossProjects(t *testing.T) {
 	}
 	if got := m.projects[0].tabs[0].ActivePane; got != "pane-oldest" {
 		t.Fatalf("after 3rd press: ActivePane = %s, want pane-oldest (wrapped to start)", got)
+	}
+}
+
+// TestAttentionQueueKeyFiresWhileNotesEditorFocused pins the notesKeyExempt
+// entry for kb.AttentionQueue: Alt+Shift+A must reach jumpToNextBlocked (and
+// tear down notes mode first, on the OLD tab) rather than being consumed as
+// literal "a" text by the focused notes editor — the asymmetry ProjectPicker
+// and ProjectToggle already avoid.
+func TestAttentionQueueKeyFiresWhileNotesEditorFocused(t *testing.T) {
+	dir := t.TempDir()
+	ne, err := NewNotesEditor(dir, "pane-notes", "Notes", 40, 10)
+	if err != nil {
+		t.Fatalf("NewNotesEditor: %v", err)
+	}
+
+	blocked := &PaneModel{ID: "pane-blocked"}
+	blocked.blockedSince = time.Now()
+
+	m := Model{
+		client:        newFakeConn(),
+		cfg:           config.Default(),
+		width:         100,
+		height:        30,
+		notesMode:     true,
+		notesEditor:   ne,
+		notifications: NewNotificationCenter(30, 50),
+		mcpHighlights: make(map[string]bool),
+		projects: []*ProjectModel{
+			{ID: "proj-a", tabs: []*TabModel{tabWith(&PaneModel{ID: "pane-notes-bound"})}},
+			{ID: "proj-b", tabs: []*TabModel{tabWith(blocked)}},
+		},
+		activeProject: 0,
+	}
+
+	if m.cfg.Keybindings.AttentionQueue != "alt+shift+a" {
+		t.Fatalf("default attention_queue = %q, want alt+shift+a", m.cfg.Keybindings.AttentionQueue)
+	}
+
+	// Text must be empty; Mod carries both so String() → "alt+shift+a"
+	// (mirrors TestSidebarToggleKeyFlipsResizesAndPersists).
+	updated, _ := m.handleKey(tea.KeyPressMsg{Mod: tea.ModAlt | tea.ModShift, Code: 'a'})
+	got := updated.(Model)
+
+	if got.notesMode {
+		t.Fatal("alt+shift+a while notes-editor-focused left notesMode true — the key was swallowed as text instead of exiting notes and firing the queue")
+	}
+	if got.activeProject != 1 {
+		t.Fatalf("activeProject = %d, want 1 — the queue must have fired and crossed into proj-b", got.activeProject)
+	}
+	if got := got.projects[1].tabs[0].ActivePane; got != "pane-blocked" {
+		t.Fatalf("ActivePane = %s, want pane-blocked", got)
 	}
 }

@@ -2583,6 +2583,15 @@ func (m Model) notesKeyExempt(key string) bool {
 		// exitNotesModeInPlace itself, so exempting these just lets the key
 		// reach it instead of being swallowed as editor text.
 		kb.ProjectPicker, kb.ProjectToggle,
+		// Attention queue — notes are exactly the sort of thing left open
+		// while an agent grinds in another pane, so "notes are focused" is a
+		// likely state at the moment the queue is needed, arguably more so
+		// than for the project picker above. handleKey's editor-focused
+		// exempt branch calls exitNotesModeInPlace BEFORE falling through to
+		// jumpToNextBlocked, so the teardown always lands on the OLD tab
+		// whether the jump crosses a project boundary or only moves the
+		// active tab within the current one.
+		kb.AttentionQueue,
 	}
 	for _, b := range exempt {
 		if kbMatches(key, b) {

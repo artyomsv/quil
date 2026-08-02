@@ -267,10 +267,8 @@ type Model struct {
 	width                int
 	height               int
 	client               tuiClient
-	clientGen            int            // bumped on every client swap; see linkLostMsg for why
-	reconnect            reconnectState // zero value = not reconnecting
-	redialFn             RedialFunc     // nil in local mode: a dead local daemon is fatal
-	closeClientFn        func(Client)   // releases a connection; see SetClientCloser
+	clientGen            int          // bumped on every client swap; see linkLostMsg for why
+	closeClientFn        func(Client) // releases a connection; see SetClientCloser
 	cfg                  config.Config
 	version              string
 	attached             bool
@@ -472,6 +470,20 @@ type Model struct {
 	// applyUpdateOnExit signals cmd/quil/main.go to run the staged-update
 	// swap after tea.Program returns (set by the apply confirm).
 	applyUpdateOnExit bool
+
+	// links holds ONE reconnectState per destination, keyed the way everything
+	// else in this client is keyed: "" is the daemon a single connection routes
+	// to, a host name is one of several. Absent means "never dropped" — linkOf
+	// reads that as the zero value, so a session that never loses a link
+	// allocates nothing. A map rather than a field is the whole point: one
+	// daemon reconnecting leaves every other entry, and every other project's
+	// input, untouched.
+	//
+	// redialFns is the matching dialer table. A destination with no dialer never
+	// reconnects, which is what local sessions get and what keeps a dead local
+	// daemon fatal — its panes died with it, so retrying would hide the loss.
+	links     map[string]*reconnectState
+	redialFns map[string]RedialFunc
 }
 
 // SetRemoteDest marks this session as attached to a daemon on another host and
@@ -617,15 +629,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.closeCtxMenu()
 		}
 	}
-	// The link is down: user input is dropped rather than queued. Placed ahead
-	// of the type switch so a future input message type is frozen by default
-	// instead of quietly reaching a live PTY through a branch nobody updated.
-	if m.reconnect.active {
+	// The link the user is typing into is down: input is dropped rather than
+	// queued. Placed ahead of the type switch so a future input message type is
+	// frozen by default instead of quietly reaching a live PTY through a branch
+	// nobody updated. Scoped to the ACTIVE destination — a background project's
+	// daemon dropping must not freeze typing into a local pane.
+	if link := m.linkOf(m.activeDest()); link.active {
 		// The resume key is checked BEFORE the freeze, or it would be swallowed
 		// with every other keystroke. It cannot live inside freezeInput: that
 		// has a value receiver and returns (tea.Cmd, bool), so it can neither
 		// clear the parked state nor hand back a mutated Model.
-		if key, ok := msg.(tea.KeyPressMsg); ok && m.reconnect.parked &&
+		if key, ok := msg.(tea.KeyPressMsg); ok && link.parked &&
 			kbMatches(key.String(), reconnectResumeKey) {
 			return m.resumeReconnect()
 		}
@@ -681,28 +695,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			log.Printf("ignoring link loss from gen %d (current %d)", msg.gen, m.clientGen)
 			return m, nil
 		}
-		if !m.canReconnect() {
+		if !m.canReconnect(msg.dest) {
 			return m, tea.Quit
 		}
-		return m.beginReconnect(msg.err)
+		return m.beginReconnect(msg.dest, msg.err)
 
 	case redialTickMsg:
 		// msg.attempt is checked, not just carried. It makes a second concurrent
 		// dial impossible by construction rather than by argument: only the tick
 		// for the attempt currently armed can start one, so the "slow attempt
 		// completing after a fast one" case the result branch guards against has
-		// no way to arise in the first place.
-		if msg.gen != m.clientGen || !m.reconnect.active || msg.attempt != m.reconnect.attempt {
+		// no way to arise in the first place. Per destination, since two ladders
+		// can be climbing at once and their attempt numbers are unrelated.
+		link := m.linkOf(msg.dest)
+		if msg.gen != m.clientGen || !link.active || msg.attempt != link.attempt {
 			return m, nil
 		}
-		return m, m.redialCmd()
+		return m, m.redialCmd(msg.dest)
 
 	case redialResultMsg:
 		// Dropped for a superseded generation even when it carries a LIVE
 		// client: a slow attempt completing after a fast one would otherwise
 		// replace a working connection with a second one, leaving the first
 		// with a listen loop nobody reads.
-		if msg.gen != m.clientGen || !m.reconnect.active {
+		if msg.gen != m.clientGen || !m.linkOf(msg.dest).active {
 			// The !active half mirrors the tick branch above. Without it a
 			// failure result arriving with active already false would call
 			// scheduleRedial, incrementing attempt and arming a tick that the
@@ -725,20 +741,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.err == nil {
 				msg.err = errors.New("dialer returned no connection")
 			}
-			m.reconnect.lastErr = msg.err
+			link := m.linkFor(msg.dest)
+			link.lastErr = msg.err
 			if errors.Is(msg.err, ErrLinkPermanent) {
 				// Every reconnect is a full authentication, so retrying a
 				// rejected key produces a steady stream of failed auths from the
 				// operator's own address — which a default fail2ban sshd jail
 				// bans, locking them out of a host that was never unreachable.
 				// The banner stays up: the session is paused, not over.
-				m.reconnect.parked = true
-				log.Printf("remote: parking reconnect after a permanent failure: %v", msg.err)
+				link.parked = true
+				log.Printf("remote: parking reconnect to %s after a permanent failure: %v",
+					m.linkHost(msg.dest), msg.err)
 				return m, nil
 			}
-			return m.scheduleRedial()
+			return m.scheduleRedial(msg.dest)
 		}
-		return m.finishReconnect(msg.client)
+		return m.finishReconnect(msg.dest, msg.client)
 
 	case sizePollMsg:
 		return m, tea.Batch(sizePollProbe, sizePollTick())
@@ -2565,7 +2583,11 @@ func (m Model) View() tea.View {
 	// layout height and appearing or clearing it never resizes a pane. The tab
 	// bar is the right thing to cover — tab switching is frozen anyway, and
 	// obscuring pane content would hide the state the user is waiting on.
-	if m.reconnect.active {
+	//
+	// Only for the ACTIVE project's daemon: it is one row, the user is looking at
+	// one project, and a banner naming a host whose panes are not on screen would
+	// read as an outage of the ones that are.
+	if m.linkOf(m.activeDest()).active {
 		content = overlayAt(content, m.renderReconnectBanner(m.width), 0, 0, m.width)
 	}
 
@@ -4151,26 +4173,35 @@ func attachCWD(remoteDest, localCWD string) string {
 	return localCWD
 }
 
+// attachMessage builds the MsgAttach describing this client's geometry.
+func (m Model) attachMessage() *ipc.Message {
+	// Subtract chrome (tab bar + status bar), then pane border (2)
+	tabH := m.height - chromeHeight
+	cols := m.width - 2
+	rows := tabH - 2
+	if cols < 1 {
+		cols = 1
+	}
+	if rows < 1 {
+		rows = 1
+	}
+	// Best-effort; if Getwd fails the daemon falls back to its own CWD.
+	localCWD, _ := os.Getwd()
+	msg, _ := ipc.NewMessage(ipc.MsgAttach, ipc.AttachPayload{
+		Cols: cols,
+		Rows: rows,
+		CWD:  attachCWD(m.remoteDest, localCWD),
+	})
+	return msg
+}
+
 func (m Model) attachToDaemon() tea.Cmd {
 	attachCmd := func() tea.Msg {
-		// Subtract chrome (tab bar + status bar), then pane border (2)
-		tabH := m.height - chromeHeight
-		cols := m.width - 2
-		rows := tabH - 2
-		if cols < 1 {
-			cols = 1
-		}
-		if rows < 1 {
-			rows = 1
-		}
-		// Best-effort; if Getwd fails the daemon falls back to its own CWD.
-		localCWD, _ := os.Getwd()
-		msg, _ := ipc.NewMessage(ipc.MsgAttach, ipc.AttachPayload{
-			Cols: cols,
-			Rows: rows,
-			CWD:  attachCWD(m.remoteDest, localCWD),
-		})
-		m.client.Send(msg)
+		// Deliberately UNSTAMPED, unlike the reconnect attach below. This is the
+		// startup path: there are no projects yet, so a stamp would name "" —
+		// which a remote-only router has no connection for, and the message would
+		// be dropped instead of reaching the sole daemon it is meant for.
+		m.client.Send(m.attachMessage())
 		return nil
 	}
 	// requestPluginList is batched here rather than at Ctrl+N: .Available is
@@ -4178,6 +4209,21 @@ func (m Model) attachToDaemon() tea.Cmd {
 	// asking only on dialog open would leave those describing the wrong
 	// machine. Attach also covers reconnect, which is where a daemon that
 	// restarted (and therefore re-detected) shows up. No-op in local mode.
+	return tea.Batch(attachCmd, m.requestPluginList())
+}
+
+// attachToDest re-attaches to ONE daemon after its link came back.
+//
+// Stamped, because by now the client knows which destination it is talking to
+// and an unstamped attach resolves to whatever project is ACTIVE: a background
+// daemon reconnecting would make the foreground one replay its whole output
+// buffer, doubling every pane's scrollback on the machine that never dropped.
+// Harmless on the single-connection path — Origin never reaches the wire.
+func (m Model) attachToDest(dest string) tea.Cmd {
+	attachCmd := func() tea.Msg {
+		m.sendForDest(dest, m.attachMessage())
+		return nil
+	}
 	return tea.Batch(attachCmd, m.requestPluginList())
 }
 

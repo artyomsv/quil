@@ -39,6 +39,10 @@ var errLinkLost = errors.New("connection to the daemon was lost")
 // reconnectState tracks an in-progress reconnect. The zero value means "not
 // reconnecting", matching the ctxMenu/palette convention in this package: there
 // is no separate open bool that could drift out of sync with the rest.
+//
+// One instance per DESTINATION, held in Model.links. The struct itself is
+// unchanged by that: the flap window, the backoff ladder and the parked banner
+// all still apply, now once per daemon rather than once per session.
 type reconnectState struct {
 	active  bool
 	attempt int       // 1-based; drives the backoff
@@ -155,12 +159,89 @@ func reconnectDelay(attempt int, jitter float64) time.Duration {
 // value is really an *ipc.Client.
 type RedialFunc func(old Client) (Client, error)
 
-// SetRedialFunc installs the reconnect dialer. Called by cmd/quil in remote
-// mode only; a nil func disables reconnect, which is what local sessions get.
+// SetRedialFunc installs the reconnect dialer for ONE destination. Called by
+// cmd/quil in remote mode only; a destination with no func never reconnects,
+// which is what local sessions get.
+//
+// dest is the ROUTING destination, not the ssh host name. A single-connection
+// remote session routes everything unstamped, so its key is "" — the same key
+// its link loss, its projects and its freeze all carry. Only a client holding
+// several daemons keys by host.
 //
 // A setter rather than a NewModel parameter for the same reason SetRemoteDest
 // is one: NewModel's signature is already at five arguments.
-func (m *Model) SetRedialFunc(f RedialFunc) { m.redialFn = f }
+func (m *Model) SetRedialFunc(dest string, f RedialFunc) {
+	if m.redialFns == nil {
+		m.redialFns = map[string]RedialFunc{}
+	}
+	m.redialFns[dest] = f
+}
+
+// linkFor returns the reconnect state for one destination, creating it on first
+// use. reconnectState itself is unchanged — the flap window, backoff ladder and
+// parked handling all still apply, now once per daemon.
+//
+// Pointer receiver AND pointer result, both load-bearing. Model is a value type
+// that Bubble Tea copies on every Update, so the map is what carries a mutation
+// back: writing through the returned pointer reaches the entry every copy
+// shares. The receiver has to be a pointer for the same reason in reverse — the
+// lazy map creation must land on a Model that is returned, so only a caller that
+// hands its copy back may reach this. Every read-only path uses linkOf.
+func (m *Model) linkFor(dest string) *reconnectState {
+	if m.links == nil {
+		m.links = map[string]*reconnectState{}
+	}
+	ls, ok := m.links[dest]
+	if !ok {
+		ls = &reconnectState{}
+		m.links[dest] = ls
+	}
+	return ls
+}
+
+// linkOf reports one destination's reconnect state, or the zero value for a
+// destination that has never dropped.
+//
+// The read-only counterpart to linkFor, and it exists rather than being an
+// inlined map read for two reasons: rendering a frame must not create state (a
+// value-receiver View would lose the map assignment anyway, so the entry would
+// be allocated and thrown away once per frame), and a nil map is the normal
+// state of a session that has never lost a link.
+func (m Model) linkOf(dest string) reconnectState {
+	if ls := m.links[dest]; ls != nil {
+		return *ls
+	}
+	return reconnectState{}
+}
+
+// linkHost names the daemon a message about dest is about.
+//
+// The destination IS the ssh host once a client holds several. A
+// single-connection remote session routes unstamped, so its dest is "" and the
+// name lives in remoteDest — which is also what the banner has always shown.
+func (m Model) linkHost(dest string) string {
+	if dest != "" {
+		return dest
+	}
+	return m.remoteDest
+}
+
+// connFor returns the connection carrying dest, for handing the DEAD one to the
+// dialer — cmd/quil closes it there, and this package cannot.
+//
+// With a router the answer is nil in the case that matters today: the pump
+// retires its own registration BEFORE publishing the loss, so by the time a
+// redial runs the dead conn is no longer reachable through the table. Handing
+// the router itself over instead would be worse than nil — the dialer would
+// close nothing and the type assertion would silently miss — so nil is the
+// honest answer until the multi-daemon lifecycle lands (Task 17), and
+// redialRemote already tolerates it.
+func (m Model) connFor(dest string) Client {
+	if r, ok := m.client.(*Router); ok {
+		return r.Conn(dest)
+	}
+	return m.client
+}
 
 // SetClientCloser installs the way to release a connection.
 //
@@ -185,15 +266,15 @@ func (m Model) closeClient(c Client) {
 // cmd/quil on exit, after the Bubble Tea program has returned.
 func (m Model) CloseClient() { m.closeClient(m.client) }
 
-// canReconnect reports whether a dropped link should be retried rather than
-// being fatal.
+// canReconnect reports whether a dropped link to dest should be retried rather
+// than being fatal.
 //
 // Local sessions never reconnect: a dead local daemon means the panes died with
 // it, so retrying would spin against something that is not coming back while
-// hiding the loss. Remote mode without a dialer is equally fatal — there is
-// nothing to retry with.
-func (m Model) canReconnect() bool {
-	return m.RemoteMode() && m.redialFn != nil
+// hiding the loss. Remote mode without a dialer for that destination is equally
+// fatal — there is nothing to retry with.
+func (m Model) canReconnect(dest string) bool {
+	return m.RemoteMode() && m.redialFns[dest] != nil
 }
 
 // freezeInput drops user input while a reconnect is in flight, reporting
@@ -211,7 +292,16 @@ func (m Model) canReconnect() bool {
 // Ctrl+Q is the single exception. It is the only way out of a host that never
 // comes back, and by definition the reconnect loop cannot end the session
 // itself — it retries forever.
+//
+// Scoped to the ACTIVE destination, which is the whole point of a per-daemon
+// link table: input goes to the pane the user is typing into, so only that
+// daemon being down can justify dropping it. A background project's daemon
+// dropping must not freeze typing into a local pane. The gate lives here rather
+// than only at the call site so the choke point stays correct standalone.
 func (m Model) freezeInput(msg tea.Msg) (tea.Cmd, bool) {
+	if !m.linkOf(m.activeDest()).active {
+		return nil, false
+	}
 	switch msg := msg.(type) {
 	case tea.KeyPressMsg:
 		if isFreezeEscape(msg.String(), m.cfg.Keybindings.Quit) {
@@ -251,14 +341,20 @@ var ErrLinkPermanent = errors.New("remote link failure is permanent")
 // The attempt counter is deliberately NOT reset. The operator resuming does not
 // make the earlier failures un-happen, and restarting at the base delay would
 // undo the rate decay that keeps a still-broken key under a fail2ban threshold.
+//
+// Acts on the ACTIVE destination, matching the banner: the key is pressed at a
+// banner naming one host, and resuming a daemon whose state the user cannot see
+// would be an invisible authentication attempt.
 func (m Model) resumeReconnect() (tea.Model, tea.Cmd) {
-	log.Printf("remote: resuming a parked reconnect at attempt %d", m.reconnect.attempt)
-	m.reconnect.parked = false
-	m.reconnect.lastErr = nil
+	dest := m.activeDest()
+	ls := m.linkFor(dest)
+	log.Printf("remote: resuming a parked reconnect to %s at attempt %d", m.linkHost(dest), ls.attempt)
+	ls.parked = false
+	ls.lastErr = nil
 	// scheduleRedial returns (tea.Model, tea.Cmd) and carries the mutated copy
 	// forward — Model is a value type, so returning m here instead would drop
 	// whatever it set.
-	return m.scheduleRedial()
+	return m.scheduleRedial(dest)
 }
 
 // isFreezeEscape reports whether a key should end a frozen session.
@@ -333,20 +429,27 @@ const minBannerDetail = 14
 // Composed per phase rather than as a shared prefix plus host, because the host
 // sits in a different place in each — "Host unreachable … to gpu01" is not a
 // sentence.
+//
+// Renders the ACTIVE project's destination. The banner is one row over the tab
+// bar and the user is looking at one project, so it reports the daemon behind
+// what is on screen; a background daemon's outage shows up in that project's own
+// panes when the user switches to it.
 func (m Model) bannerCandidates() []string {
-	host, attempt := m.remoteDest, m.reconnect.attempt
+	dest := m.activeDest()
+	ls := m.linkOf(dest)
+	host, attempt := m.linkHost(dest), ls.attempt
 	// Checked BEFORE both phases. nextAt is stale-past while parked, so the
 	// countdown branch below falls through to "Connecting" — the single most
 	// misleading string available, since nothing is connecting and nothing will
 	// until the operator acts.
-	if m.reconnect.parked {
+	if ls.parked {
 		return []string{
 			fmt.Sprintf("%s unreachable — stopped, %s%sctrl+q quits", host, bannerResumeHint, bannerSep),
 			fmt.Sprintf("Stopped — %s%sctrl+q", bannerResumeHint, bannerSep),
 			bannerResumeHint + bannerSep + "ctrl+q",
 		}
 	}
-	if remain := time.Until(m.reconnect.nextAt); remain > 0 {
+	if remain := time.Until(ls.nextAt); remain > 0 {
 		// +1 so a sub-second remainder reads as "1s" rather than "0s".
 		secs := int(remain.Seconds()) + 1
 		return []string{
@@ -381,7 +484,8 @@ func (m Model) bannerCandidates() []string {
 //     all-or-nothing fit check hid it at every width below ~110 — including 80.
 //     Capturing ssh's own words in batch mode is pointless if they never render.
 func (m Model) renderReconnectBanner(width int) string {
-	if !m.reconnect.active || width <= 0 {
+	ls := m.linkOf(m.activeDest())
+	if !ls.active || width <= 0 {
 		return ""
 	}
 
@@ -401,8 +505,8 @@ func (m Model) renderReconnectBanner(width int) string {
 		}
 	}
 
-	if m.reconnect.lastErr != nil {
-		if detail := firstErrLine(m.reconnect.lastErr.Error()); detail != "" {
+	if ls.lastErr != nil {
+		if detail := firstErrLine(ls.lastErr.Error()); detail != "" {
 			room := width - lipgloss.Width(core) - lipgloss.Width(bannerSep)
 			if room >= minBannerDetail {
 				core += bannerSep + truncateToWidth(detail, room)
@@ -435,28 +539,38 @@ func (p *PaneModel) resetForReattach() {
 	p.liveOutputSeen = false
 }
 
-// eachClientPane calls fn for every pane this client holds.
+// eachClientPane calls fn for every pane ONE daemon holds.
 //
-// Every tab, not just the active one — a single attach replays background tabs
-// too — plus each tab's overlay pane, which is a live daemon pane replayed like
-// any other but deliberately kept OUTSIDE the layout tree, so a Leaves()-only
-// walk misses it.
+// Every tab of every project on that destination, not just the active one — a
+// single attach replays background tabs too — plus each tab's overlay pane,
+// which is a live daemon pane replayed like any other but deliberately kept
+// OUTSIDE the layout tree, so a Leaves()-only walk misses it.
+//
+// Scoped by dest because only the reconnected daemon replays: sweeping every
+// project would arm resets no chunk ever consumes and, worse, zero the work
+// counters of daemons that never dropped — clearing a live spinner on a machine
+// that is still running the turn, corrected only by its next hook event.
 //
 // Shared by both reattach resets so the two enumerations cannot drift: a pane
 // class added to one and forgotten in the other is precisely the bug that would
 // survive review, because each reset looks complete on its own.
-func (m *Model) eachClientPane(fn func(*PaneModel)) {
-	for _, tab := range m.allTabs() {
-		if tab == nil {
+func (m *Model) eachClientPane(dest string, fn func(*PaneModel)) {
+	for _, proj := range m.projects {
+		if proj == nil || proj.Dest != dest {
 			continue
 		}
-		for _, p := range tab.Leaves() {
-			if p != nil {
-				fn(p)
+		for _, tab := range proj.tabs {
+			if tab == nil {
+				continue
 			}
-		}
-		if tab.overlayPane != nil {
-			fn(tab.overlayPane)
+			for _, p := range tab.Leaves() {
+				if p != nil {
+					fn(p)
+				}
+			}
+			if tab.overlayPane != nil {
+				fn(tab.overlayPane)
+			}
 		}
 	}
 }
@@ -489,12 +603,19 @@ func (m *Model) eachClientPane(fn func(*PaneModel)) {
 // consumed by the thing it is waiting for. claude-code is one of those — it gets
 // a `redraw_key` kick instead, and repaints over its existing grid exactly as it
 // did before reconnect existed.
-func (m *Model) armReattachReset() {
-	m.eachClientPane(func(p *PaneModel) { p.reattachReset = true })
+func (m *Model) armReattachReset(dest string) {
+	m.eachClientPane(dest, func(p *PaneModel) { p.reattachReset = true })
 	// Selection is Model-level and anchors to row/column coordinates that any
 	// replay invalidates. Dropped now rather than armed: there is no per-pane
 	// chunk to hang it off, and a selection surviving an outage is worth nothing.
-	m.selection = nil
+	//
+	// Only when it belongs to the daemon that reconnected. destOfPane falls back
+	// to the active dest for a pane the Model has not seen, so a selection on an
+	// unknown pane is dropped exactly when the active daemon is the one
+	// reconnecting — which is the case its content is about to be replaced in.
+	if m.selection != nil && m.destOfPane(m.selection.PaneID) == dest {
+		m.selection = nil
+	}
 }
 
 // resetWorkStateForReattach zeroes in-flight execution state on every pane.
@@ -517,8 +638,8 @@ func (m *Model) armReattachReset() {
 //     Clearing it here while that tick is still scheduled would let the next
 //     hook event start a SECOND loop beside it, and the spinner would animate
 //     at double rate for the rest of the session.
-func (m *Model) resetWorkStateForReattach() {
-	m.eachClientPane(func(p *PaneModel) {
+func (m *Model) resetWorkStateForReattach(dest string) {
+	m.eachClientPane(dest, func(p *PaneModel) {
 		p.working = false
 		p.turnActive = false
 		clear(p.subagents)
@@ -527,24 +648,38 @@ func (m *Model) resetWorkStateForReattach() {
 }
 
 // redialTickMsg fires when the backoff for one attempt has elapsed.
+//
+// dest rides along with the generation because a client holding several daemons
+// can have two ladders climbing at once: attempt 3 for one host is attempt 1 for
+// another, so matching on the counter alone would let one destination's tick
+// start the other's dial.
 type redialTickMsg struct {
 	gen     int
+	dest    string
 	attempt int
 }
 
-// redialResultMsg carries one attempt's outcome.
+// redialResultMsg carries one attempt's outcome, for the destination it dialled.
 type redialResultMsg struct {
 	gen    int
+	dest   string
 	client Client
 	err    error
 }
 
-// beginReconnect enters the reconnecting state and arms the first attempt.
-func (m Model) beginReconnect(cause error) (tea.Model, tea.Cmd) {
-	if m.reconnect.active {
-		return m, nil // already reconnecting; one loop only
+// handleLinkLost marks ONE destination as reconnecting.
+//
+// It deliberately does not move the active project: the client stays put and
+// renders the parked project with its last content. Being teleported into a
+// different daemon's work is worse than stale work honestly labelled.
+func (m *Model) handleLinkLost(dest string, err error) {
+	ls := m.linkFor(dest)
+	if ls.active {
+		// One ladder per destination. Re-entering would reset attempt and lose the
+		// flap carry, which is the guard beginReconnect's early return also serves
+		// — this one keeps the state half correct for a direct caller.
+		return
 	}
-	log.Printf("remote link lost, reconnecting: %v", cause)
 	// Carry the attempt count forward when the link barely survived. Clearing it
 	// on every success means a remote daemon that accepts, verifies, attaches and
 	// then dies restarts the ladder at 500 ms every time — a crash-looping daemon
@@ -553,12 +688,19 @@ func (m Model) beginReconnect(cause error) (tea.Model, tea.Cmd) {
 	// verifyRemoteLink was added to fix, reached by a different route, and the
 	// 30 s cap only protects against it if the counter survives.
 	carried := 0
-	if !m.reconnect.lastUpAt.IsZero() && time.Since(m.reconnect.lastUpAt) < reconnectFlapWindow {
-		carried = m.reconnect.settledAttempt
-		log.Printf("remote: link lasted %v (<%v) — resuming backoff at attempt %d rather than restarting it",
-			time.Since(m.reconnect.lastUpAt).Round(time.Millisecond), reconnectFlapWindow, carried+1)
+	if !ls.lastUpAt.IsZero() && time.Since(ls.lastUpAt) < reconnectFlapWindow {
+		carried = ls.settledAttempt
+		log.Printf("remote: link to %s lasted %v (<%v) — resuming backoff at attempt %d rather than restarting it",
+			m.linkHost(dest), time.Since(ls.lastUpAt).Round(time.Millisecond), reconnectFlapWindow, carried+1)
 	}
-	m.reconnect = reconnectState{active: true, lastErr: cause, attempt: carried}
+	*ls = reconnectState{active: true, lastErr: err, attempt: carried}
+
+	// The transient UI below belongs to the project on screen, so it is torn down
+	// only when the daemon that dropped is the one the user is looking at. A
+	// background host dying must not close the palette someone is typing into.
+	if dest != m.activeDest() {
+		return
+	}
 	// A drag in flight refers to coordinates and panes that the post-reattach
 	// state may not have; drop it rather than resolve it later.
 	m.clearDragState()
@@ -569,7 +711,18 @@ func (m Model) beginReconnect(cause error) (tea.Model, tea.Cmd) {
 	if m.dialog == dialogCommandPalette {
 		m.dialog = dialogNone
 	}
-	return m.scheduleRedial()
+}
+
+// beginReconnect enters the reconnecting state for ONE destination and arms its
+// first attempt. Every other destination is untouched — that is the whole point
+// of a per-daemon link table.
+func (m Model) beginReconnect(dest string, cause error) (tea.Model, tea.Cmd) {
+	if m.linkOf(dest).active {
+		return m, nil // already reconnecting; one loop per destination
+	}
+	log.Printf("remote link to %s lost, reconnecting: %v", m.linkHost(dest), cause)
+	m.handleLinkLost(dest, cause)
+	return m.scheduleRedial(dest)
 }
 
 // scheduleRedial arms the next attempt's timer.
@@ -579,15 +732,16 @@ func (m Model) beginReconnect(cause error) (tea.Model, tea.Cmd) {
 // while one that never does left the log silent after a single "link lost" line.
 // The failure cause is logged with it, since that is what the user is looking at
 // in the banner and what they will quote when reporting it.
-func (m Model) scheduleRedial() (tea.Model, tea.Cmd) {
-	m.reconnect.attempt++
-	delay := reconnectDelay(m.reconnect.attempt, rand.Float64())
-	m.reconnect.nextAt = time.Now().Add(delay)
-	log.Printf("remote: reconnect attempt %d in %v (last error: %v)",
-		m.reconnect.attempt, delay.Round(time.Millisecond), m.reconnect.lastErr)
-	gen, attempt := m.clientGen, m.reconnect.attempt
+func (m Model) scheduleRedial(dest string) (tea.Model, tea.Cmd) {
+	ls := m.linkFor(dest)
+	ls.attempt++
+	delay := reconnectDelay(ls.attempt, rand.Float64())
+	ls.nextAt = time.Now().Add(delay)
+	log.Printf("remote: reconnect attempt %d to %s in %v (last error: %v)",
+		ls.attempt, m.linkHost(dest), delay.Round(time.Millisecond), ls.lastErr)
+	gen, attempt := m.clientGen, ls.attempt
 	return m, tea.Tick(delay, func(time.Time) tea.Msg {
-		return redialTickMsg{gen: gen, attempt: attempt}
+		return redialTickMsg{gen: gen, dest: dest, attempt: attempt}
 	})
 }
 
@@ -596,42 +750,60 @@ func (m Model) scheduleRedial() (tea.Model, tea.Cmd) {
 // The dead client is handed to the dialer rather than closed here: Client is
 // only Send/Receive, so this package cannot release the underlying ssh child,
 // and cmd/quil is the layer that knows the value is really an *ipc.Client.
-func (m Model) redialCmd() tea.Cmd {
-	gen, dial, old := m.clientGen, m.redialFn, m.client
+//
+// The dialer is looked up per destination and the dead conn resolved per
+// destination too — handing over m.client would give a multi-daemon client's
+// router to a dialer that expects one connection.
+func (m Model) redialCmd(dest string) tea.Cmd {
+	gen, dial, old := m.clientGen, m.redialFns[dest], m.connFor(dest)
 	return func() tea.Msg {
 		c, err := dial(old)
-		return redialResultMsg{gen: gen, client: c, err: err}
+		return redialResultMsg{gen: gen, dest: dest, client: c, err: err}
 	}
 }
 
-// finishReconnect swaps in the new client and re-attaches.
+// finishReconnect installs the new connection for ONE destination and
+// re-attaches to it.
 //
 // The generation bump is what retires every closure still holding the dead
 // client: their linkLostMsg and redialResultMsg all carry the old number and
 // are dropped on arrival. It must happen BEFORE listenForMessages is built,
 // since that closure stamps its reports with whatever it captures.
 //
+// With a router there is no single client to swap: the fresh conn replaces ONE
+// entry, and the pump Add starts is what makes that daemon's messages flow
+// again. Remove cannot interrupt a pump still parked inside Receive — Client is
+// only Send/Receive — but a dead pump has already retired its own registration,
+// which is what makes the Add land rather than early-return.
+//
 // m.attached is deliberately NOT cleared. It gates the first-WindowSizeMsg
 // attach path, so clearing it would make the next resize attach a SECOND time —
 // and the daemon replays the whole output buffer on every attach, so that is a
 // doubled scrollback rather than a redundant no-op.
-func (m Model) finishReconnect(c Client) (tea.Model, tea.Cmd) {
-	log.Printf("remote link restored after %d attempt(s)", m.reconnect.attempt)
-	m.client = c
+func (m Model) finishReconnect(dest string, c Client) (tea.Model, tea.Cmd) {
+	ls := m.linkFor(dest)
+	log.Printf("remote link to %s restored after %d attempt(s)", m.linkHost(dest), ls.attempt)
+	if r, ok := m.client.(*Router); ok {
+		r.Remove(dest)
+		r.Add(dest, c)
+	} else {
+		m.client = c // single-daemon path, unchanged
+	}
 	m.clientGen++
 	// Not the zero value: lastUpAt and settledAttempt carry forward so a link
 	// that dies again within reconnectFlapWindow resumes the backoff instead of
 	// restarting it. Everything else is cleared.
-	m.reconnect = reconnectState{
+	*ls = reconnectState{
 		lastUpAt:       time.Now(),
-		settledAttempt: m.reconnect.attempt,
+		settledAttempt: ls.attempt,
 	}
 
 	// Before the attach that triggers replay, not after: the daemon starts
 	// sending the moment it processes MsgAttach, and a reset arriving late would
-	// wipe the replay it was meant to make room for.
-	m.armReattachReset()
-	m.resetWorkStateForReattach()
+	// wipe the replay it was meant to make room for. Scoped to dest — only this
+	// daemon is about to replay.
+	m.armReattachReset(dest)
+	m.resetWorkStateForReattach(dest)
 
-	return m, tea.Batch(m.attachToDaemon(), m.listenForMessages())
+	return m, tea.Batch(m.attachToDest(dest), m.listenForMessages())
 }

@@ -71,6 +71,19 @@ func (r *Router) Add(dest string, c Client) {
 	go r.pump(dest, c, stop)
 }
 
+// Conn returns the connection installed for dest, or nil when none is.
+//
+// The reconnect loop needs it to hand the DEAD connection to the dialer, which
+// is the layer that can close it. Nil is a real answer rather than a defect: a
+// pump retires its own registration BEFORE publishing the loss, so a destination
+// whose link died is already gone from the table by the time a redial for it
+// runs. Callers must tolerate it — see Model.connFor.
+func (r *Router) Conn(dest string) Client {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.conns[dest]
+}
+
 // Remove drops a connection from the routing table and signals its pump.
 //
 // It cannot interrupt a pump parked inside Receive — Client is deliberately

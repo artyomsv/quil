@@ -41,14 +41,26 @@ func isQuit(msg tea.Msg) bool {
 	return ok
 }
 
+// testDest is the destination a single-connection remote session keys
+// EVERYTHING by: its project's Dest, its link table, its redial func, and the
+// dest its link loss carries.
+//
+// It used to be "", because such a session routed every message unstamped and
+// so had no host to key by. The router keys `quil --remote <host>` by that host
+// now, exactly as a mixed session keys its remote daemons, so these fixtures do
+// too — and they have to, since freezeInput and the banner read the ACTIVE
+// project's dest. A link table keyed "" beside a project stamped "gpu01"
+// describes no session that can exist.
+const testDest = "gpu01"
+
 // oneLink builds a link table holding ONE destination's reconnect state, under
-// the key a single-connection session routes with: "".
+// the key a single-connection remote session routes with.
 //
 // The argument is copied, so two models built from the same reconnectState hold
 // independent state — the value semantics the singleton field used to give for
 // free, and which a shared *reconnectState would silently remove.
 func oneLink(ls reconnectState) map[string]*reconnectState {
-	return map[string]*reconnectState{"": &ls}
+	return map[string]*reconnectState{testDest: &ls}
 }
 
 // attachedTo builds the attach ledger with the given destinations already
@@ -67,7 +79,7 @@ func attachedTo(dests ...string) map[string]bool {
 // A dead link in remote mode is a reconnectable event, not a quit.
 func TestListenForMessages_RemoteLinkLoss_ReturnsLinkLostMsg(t *testing.T) {
 	m := Model{client: &failingClient{err: errors.New("EOF")}, clientGen: 3}
-	m.SetRemoteDest("gpu01")
+	m.asRemote("gpu01")
 
 	msg := m.listenForMessages()()
 
@@ -86,7 +98,7 @@ func TestListenForMessages_RemoteLinkLoss_ReturnsLinkLostMsg(t *testing.T) {
 // MsgCloseTUI is the daemon asking us to exit. It must never reconnect.
 func TestListenForMessages_CloseTUI_ReturnsQuit(t *testing.T) {
 	m := Model{client: &closeTUIClient{}}
-	m.SetRemoteDest("gpu01")
+	m.asRemote("gpu01")
 
 	if msg := m.listenForMessages()(); !isQuit(msg) {
 		t.Fatalf("msg is %T, want tea.QuitMsg", msg)
@@ -97,7 +109,7 @@ func TestListenForMessages_CloseTUI_ReturnsQuit(t *testing.T) {
 // quietly retrying would hide that.
 func TestUpdate_LinkLost_LocalMode_Quits(t *testing.T) {
 	m := Model{client: &failingClient{err: errors.New("EOF")}}
-	// no SetRemoteDest, no redial func
+	// No remote project and no redial func: the local daemon, keyed "".
 
 	_, cmd := m.Update(linkLostMsg{gen: 0, err: errors.New("EOF")})
 	if cmd == nil {
@@ -112,16 +124,16 @@ func TestUpdate_LinkLost_LocalMode_Quits(t *testing.T) {
 // quitting. This is the behaviour the whole phase is built on.
 func TestUpdate_LinkLost_RemoteMode_BeginsReconnect(t *testing.T) {
 	m := Model{clientGen: 1}
-	m.SetRemoteDest("gpu01")
-	m.SetRedialFunc("", func(Client) (Client, error) { return nil, errors.New("unused") })
+	m.asRemote("gpu01")
+	m.SetRedialFunc(testDest, func(Client) (Client, error) { return nil, errors.New("unused") })
 
-	updated, _ := m.Update(linkLostMsg{gen: 1, err: errors.New("EOF")})
+	updated, _ := m.Update(linkLostMsg{gen: 1, dest: testDest, err: errors.New("EOF")})
 	got := updated.(Model)
 
-	if !got.linkOf("").active {
+	if !got.linkOf(testDest).active {
 		t.Fatal("remote link loss did not begin a reconnect")
 	}
-	if got.linkOf("").lastErr == nil {
+	if got.linkOf(testDest).lastErr == nil {
 		t.Error("reconnect state kept no cause")
 	}
 }
@@ -130,34 +142,36 @@ func TestUpdate_LinkLost_RemoteMode_BeginsReconnect(t *testing.T) {
 // retry with, and pretending otherwise would hang the session forever.
 func TestUpdate_LinkLost_RemoteWithoutDialer_Quits(t *testing.T) {
 	m := Model{}
-	m.SetRemoteDest("gpu01")
+	m.asRemote("gpu01")
 
-	_, cmd := m.Update(linkLostMsg{gen: 0, err: errors.New("EOF")})
+	_, cmd := m.Update(linkLostMsg{gen: 0, dest: testDest, err: errors.New("EOF")})
 	if cmd == nil || !isQuit(cmd()) {
 		t.Fatal("remote link loss without a dialer did not quit")
 	}
 }
 
-// TestCanReconnect_DoesNotRequireRemoteMode pins a fix for a latent bug that
-// RemoteMode()'s per-project redefinition would otherwise have introduced:
-// canReconnect used to require RemoteMode() as a conjunct, which now answers
-// for the ACTIVE PROJECT rather than the whole process. Today's
-// `quil --remote <host>` session has no project with a stamped Dest yet (that
-// lands with the multi-daemon router) and no SetRemoteDest call from this
-// path either — it installs its redial func under the "" key regardless of
-// what is "active". Requiring RemoteMode() too would read false for that
-// session's own reconnect and silently turn every existing --remote drop
-// fatal. redialFns[dest] != nil is sufficient alone: a local dest never gets
-// a redial fn installed in the first place.
+// TestCanReconnect_DoesNotRequireRemoteMode pins that the decision is per
+// DESTINATION and reads nothing about what is active.
+//
+// canReconnect used to require RemoteMode() as a conjunct, which answers for the
+// ACTIVE PROJECT. Those are different questions the moment a client holds more
+// than one daemon: a background remote host dropping while a LOCAL project is on
+// screen would read RemoteMode() == false and turn a perfectly reconnectable
+// drop fatal. redialFns[dest] != nil is sufficient alone — a local destination
+// never gets a dialer installed in the first place, which is what keeps a dead
+// local daemon fatal.
 func TestCanReconnect_DoesNotRequireRemoteMode(t *testing.T) {
 	m := Model{}
-	m.SetRedialFunc("", func(Client) (Client, error) { return nil, errors.New("unused") })
+	m.SetRedialFunc(testDest, func(Client) (Client, error) { return nil, errors.New("unused") })
 
 	if m.RemoteMode() {
-		t.Fatal("setup invariant broken: this Model must read RemoteMode() == false")
+		t.Fatal("setup invariant broken: no project is active, so RemoteMode() must read false")
 	}
-	if !m.canReconnect("") {
-		t.Fatal(`canReconnect("") = false — a redial fn is installed; RemoteMode() must not gate it`)
+	if !m.canReconnect(testDest) {
+		t.Fatalf("canReconnect(%q) = false — a dialer is installed; what is ACTIVE must not gate it", testDest)
+	}
+	if m.canReconnect("") {
+		t.Fatal(`canReconnect("") = true for the local daemon; a dead local daemon must stay fatal`)
 	}
 }
 
@@ -230,13 +244,13 @@ func TestActiveDestDropDoesFreezeInput(t *testing.T) {
 // loop is still parked in Receive when the new client is already live.
 func TestUpdate_LinkLost_StaleGeneration_Ignored(t *testing.T) {
 	m := Model{clientGen: 5}
-	m.SetRemoteDest("gpu01")
-	m.SetRedialFunc("", func(Client) (Client, error) { return nil, errors.New("must not dial") })
+	m.asRemote("gpu01")
+	m.SetRedialFunc(testDest, func(Client) (Client, error) { return nil, errors.New("must not dial") })
 
-	updated, cmd := m.Update(linkLostMsg{gen: 4, err: errors.New("stale")})
+	updated, cmd := m.Update(linkLostMsg{gen: 4, dest: testDest, err: errors.New("stale")})
 	got := updated.(Model)
 
-	if got.linkOf("").active {
+	if got.linkOf(testDest).active {
 		t.Error("a stale generation started a reconnect")
 	}
 	if cmd != nil {
@@ -358,22 +372,22 @@ func (d *recordingDialer) dial(old Client) (Client, error) {
 func TestReconnect_BeginArmsFirstAttempt(t *testing.T) {
 	d := &recordingDialer{err: errors.New("refused")}
 	m := Model{clientGen: 1}
-	m.SetRemoteDest("gpu01")
-	m.SetRedialFunc("", d.dial)
+	m.asRemote("gpu01")
+	m.SetRedialFunc(testDest, d.dial)
 
-	updated, cmd := m.Update(linkLostMsg{gen: 1, err: errors.New("EOF")})
+	updated, cmd := m.Update(linkLostMsg{gen: 1, dest: testDest, err: errors.New("EOF")})
 	got := updated.(Model)
 
-	if !got.linkOf("").active {
+	if !got.linkOf(testDest).active {
 		t.Fatal("reconnect not active")
 	}
-	if got.linkOf("").attempt != 1 {
-		t.Errorf("attempt = %d, want 1", got.linkOf("").attempt)
+	if got.linkOf(testDest).attempt != 1 {
+		t.Errorf("attempt = %d, want 1", got.linkOf(testDest).attempt)
 	}
 	if cmd == nil {
 		t.Fatal("no timer armed; the reconnect would never fire")
 	}
-	if got.linkOf("").nextAt.IsZero() {
+	if got.linkOf(testDest).nextAt.IsZero() {
 		t.Error("nextAt not set; the banner has no countdown to show")
 	}
 }
@@ -382,16 +396,16 @@ func TestReconnect_BeginArmsFirstAttempt(t *testing.T) {
 func TestReconnect_SecondLinkLossDoesNotStackLoops(t *testing.T) {
 	d := &recordingDialer{err: errors.New("refused")}
 	m := Model{clientGen: 1}
-	m.SetRemoteDest("gpu01")
-	m.SetRedialFunc("", d.dial)
+	m.asRemote("gpu01")
+	m.SetRedialFunc(testDest, d.dial)
 
-	updated, _ := m.Update(linkLostMsg{gen: 1, err: errors.New("EOF")})
+	updated, _ := m.Update(linkLostMsg{gen: 1, dest: testDest, err: errors.New("EOF")})
 	m = updated.(Model)
-	updated, cmd := m.Update(linkLostMsg{gen: 1, err: errors.New("EOF again")})
+	updated, cmd := m.Update(linkLostMsg{gen: 1, dest: testDest, err: errors.New("EOF again")})
 	got := updated.(Model)
 
-	if got.linkOf("").attempt != 1 {
-		t.Errorf("attempt = %d, want 1 — a second loop was armed", got.linkOf("").attempt)
+	if got.linkOf(testDest).attempt != 1 {
+		t.Errorf("attempt = %d, want 1 — a second loop was armed", got.linkOf(testDest).attempt)
 	}
 	if cmd != nil {
 		t.Error("a second timer was armed")
@@ -403,10 +417,10 @@ func TestReconnect_TickRunsDialer(t *testing.T) {
 	d := &recordingDialer{err: errors.New("refused")}
 	old := &failingClient{err: errors.New("dead")}
 	m := Model{clientGen: 4, client: old, links: oneLink(reconnectState{active: true, attempt: 1, gen: 4})}
-	m.SetRemoteDest("gpu01")
-	m.SetRedialFunc("", d.dial)
+	m.asRemote("gpu01")
+	m.SetRedialFunc(testDest, d.dial)
 
-	_, cmd := m.Update(redialTickMsg{gen: 4, attempt: 1})
+	_, cmd := m.Update(redialTickMsg{gen: 4, dest: testDest, attempt: 1})
 	if cmd == nil {
 		t.Fatal("tick produced no dial command")
 	}
@@ -431,10 +445,10 @@ func TestReconnect_TickRunsDialer(t *testing.T) {
 func TestReconnect_StaleTickDoesNotDial(t *testing.T) {
 	d := &recordingDialer{err: errors.New("refused")}
 	m := Model{clientGen: 9, links: oneLink(reconnectState{active: true, attempt: 1, gen: 9})}
-	m.SetRemoteDest("gpu01")
-	m.SetRedialFunc("", d.dial)
+	m.asRemote("gpu01")
+	m.SetRedialFunc(testDest, d.dial)
 
-	_, cmd := m.Update(redialTickMsg{gen: 8, attempt: 1})
+	_, cmd := m.Update(redialTickMsg{gen: 8, dest: testDest, attempt: 1})
 	if cmd != nil {
 		t.Fatal("a stale tick produced a dial command")
 	}
@@ -448,15 +462,15 @@ func TestReconnect_StaleTickDoesNotDial(t *testing.T) {
 func TestReconnect_SuccessSwapsClientAndBumpsGeneration(t *testing.T) {
 	fresh := &failingClient{err: errors.New("unused")}
 	m := Model{clientGen: 7, links: oneLink(reconnectState{active: true, attempt: 2, gen: 7})}
-	m.SetRemoteDest("gpu01")
+	m.asRemote("gpu01")
 
-	updated, cmd := m.Update(redialResultMsg{gen: 7, client: fresh})
+	updated, cmd := m.Update(redialResultMsg{gen: 7, dest: testDest, client: fresh})
 	got := updated.(Model)
 
 	if got.clientGen != 8 {
 		t.Errorf("clientGen = %d, want 8", got.clientGen)
 	}
-	if got.linkOf("").active {
+	if got.linkOf(testDest).active {
 		t.Error("reconnect still active after success")
 	}
 	if got.client != Client(fresh) {
@@ -470,20 +484,20 @@ func TestReconnect_SuccessSwapsClientAndBumpsGeneration(t *testing.T) {
 // A failed attempt schedules another and leaves the state active.
 func TestReconnect_FailureSchedulesAnother(t *testing.T) {
 	m := Model{clientGen: 2, links: oneLink(reconnectState{active: true, attempt: 1, gen: 2})}
-	m.SetRemoteDest("gpu01")
-	m.SetRedialFunc("", func(Client) (Client, error) { return nil, errors.New("refused") })
+	m.asRemote("gpu01")
+	m.SetRedialFunc(testDest, func(Client) (Client, error) { return nil, errors.New("refused") })
 
-	updated, cmd := m.Update(redialResultMsg{gen: 2, err: errors.New("refused")})
+	updated, cmd := m.Update(redialResultMsg{gen: 2, dest: testDest, err: errors.New("refused")})
 	got := updated.(Model)
 
-	if !got.linkOf("").active {
+	if !got.linkOf(testDest).active {
 		t.Error("reconnect ended on a failed attempt")
 	}
-	if got.linkOf("").attempt != 2 {
-		t.Errorf("attempt = %d, want 2", got.linkOf("").attempt)
+	if got.linkOf(testDest).attempt != 2 {
+		t.Errorf("attempt = %d, want 2", got.linkOf(testDest).attempt)
 	}
-	if got.linkOf("").lastErr == nil || got.linkOf("").lastErr.Error() != "refused" {
-		t.Errorf("lastErr = %v, want the dial error for the banner", got.linkOf("").lastErr)
+	if got.linkOf(testDest).lastErr == nil || got.linkOf(testDest).lastErr.Error() != "refused" {
+		t.Errorf("lastErr = %v, want the dial error for the banner", got.linkOf(testDest).lastErr)
 	}
 	if cmd == nil {
 		t.Error("no retry scheduled")
@@ -497,9 +511,9 @@ func TestReconnect_StaleResultDroppedEvenWhenLive(t *testing.T) {
 	live := &failingClient{err: errors.New("unused")}
 	current := &failingClient{err: errors.New("current")}
 	m := Model{clientGen: 9, client: current}
-	m.SetRemoteDest("gpu01")
+	m.asRemote("gpu01")
 
-	updated, cmd := m.Update(redialResultMsg{gen: 8, client: live})
+	updated, cmd := m.Update(redialResultMsg{gen: 8, dest: testDest, client: live})
 	got := updated.(Model)
 
 	if got.clientGen != 9 {
@@ -519,16 +533,16 @@ func TestReconnect_StaleResultDroppedEvenWhenLive(t *testing.T) {
 // through and the next Receive panics.
 func TestReconnect_NilClientWithoutErrorIsAFailure(t *testing.T) {
 	m := Model{clientGen: 3, links: oneLink(reconnectState{active: true, attempt: 1, gen: 3})}
-	m.SetRemoteDest("gpu01")
-	m.SetRedialFunc("", func(Client) (Client, error) { return nil, nil })
+	m.asRemote("gpu01")
+	m.SetRedialFunc(testDest, func(Client) (Client, error) { return nil, nil })
 
-	updated, cmd := m.Update(redialResultMsg{gen: 3, client: nil, err: nil})
+	updated, cmd := m.Update(redialResultMsg{gen: 3, dest: testDest, client: nil, err: nil})
 	got := updated.(Model)
 
 	if got.clientGen != 3 {
 		t.Errorf("clientGen = %d, want 3 — a nil client was installed", got.clientGen)
 	}
-	if !got.linkOf("").active {
+	if !got.linkOf(testDest).active {
 		t.Error("reconnect ended after a nil client was returned")
 	}
 	if cmd == nil {
@@ -550,18 +564,18 @@ func TestReconnect_MarksTheDestAttached(t *testing.T) {
 		name  string
 		start map[string]bool
 	}{
-		{"attached at launch", attachedTo("")},
+		{"attached at launch", attachedTo(testDest)},
 		{"unreachable at launch, attached by the reconnect", map[string]bool{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fresh := &failingClient{err: errors.New("unused")}
 			m := Model{clientGen: 1, attached: tc.start,
 				links: oneLink(reconnectState{active: true, attempt: 1, gen: 1})}
-			m.SetRemoteDest("gpu01")
+			m.asRemote("gpu01")
 
-			updated, _ := m.Update(redialResultMsg{gen: 1, client: fresh})
+			updated, _ := m.Update(redialResultMsg{gen: 1, dest: testDest, client: fresh})
 
-			if got := updated.(Model); !got.attached[""] {
+			if got := updated.(Model); !got.attached[testDest] {
 				t.Error("the reconnected destination is not marked attached; the next resize " +
 					"will attach it again and double every pane's scrollback")
 			}
@@ -574,10 +588,10 @@ func TestReconnect_MarksTheDestAttached(t *testing.T) {
 // discarded as stale — leaving a session that can never reconnect again.
 func TestReconnect_NewListenLoopCarriesTheNewGeneration(t *testing.T) {
 	fresh := &failingClient{err: errors.New("second death")}
-	m := Model{clientGen: 7, attached: attachedTo(""), links: oneLink(reconnectState{active: true, attempt: 1, gen: 7})}
-	m.SetRemoteDest("gpu01")
+	m := Model{clientGen: 7, attached: attachedTo(testDest), links: oneLink(reconnectState{active: true, attempt: 1, gen: 7})}
+	m.asRemote("gpu01")
 
-	updated, cmd := m.Update(redialResultMsg{gen: 7, client: fresh})
+	updated, cmd := m.Update(redialResultMsg{gen: 7, dest: testDest, client: fresh})
 	got := updated.(Model)
 	if got.clientGen != 8 {
 		t.Fatalf("clientGen = %d, want 8", got.clientGen)
@@ -636,7 +650,7 @@ func findLinkLostMsg(t *testing.T, cmd tea.Cmd) linkLostMsg {
 func TestReconnect_SwallowsInputExceptQuit(t *testing.T) {
 	newM := func() Model {
 		m := Model{cfg: config.Default(), links: oneLink(reconnectState{active: true, attempt: 3})}
-		m.SetRemoteDest("gpu01")
+		m.asRemote("gpu01")
 		return m
 	}
 
@@ -681,8 +695,8 @@ func TestReconnect_SwallowsInputExceptQuit(t *testing.T) {
 func TestReconnect_InputResumesWhenNotReconnecting(t *testing.T) {
 	newM := func(active bool) Model {
 		m := Model{cfg: config.Default(), width: 80, height: 24}
-		m.SetRemoteDest("gpu01")
-		m.linkFor("").active = active
+		m.asRemote("gpu01")
+		m.linkFor(testDest).active = active
 		return m
 	}
 
@@ -708,7 +722,7 @@ func TestRenderReconnectBanner_NamesHostAndAttempt(t *testing.T) {
 		attempt: 4,
 		lastErr: errors.New("connection refused"),
 	})}
-	m.SetRemoteDest("gpu01")
+	m.asRemote("gpu01")
 
 	out := stripANSI(m.renderReconnectBanner(80))
 	for _, want := range []string{"gpu01", "4", "connection refused", "ctrl+q"} {
@@ -721,12 +735,13 @@ func TestRenderReconnectBanner_NamesHostAndAttempt(t *testing.T) {
 // The banner must never wrap the frame — it is drawn as an overlay, so a line
 // wider than the terminal corrupts the row below it rather than clipping.
 func TestRenderReconnectBanner_FitsWidth(t *testing.T) {
-	m := Model{links: oneLink(reconnectState{
+	host := strings.Repeat("host", 30)
+	m := Model{links: map[string]*reconnectState{host: {
 		active:  true,
 		attempt: 12,
 		lastErr: errors.New(strings.Repeat("very long ssh diagnostic ", 20)),
-	})}
-	m.SetRemoteDest(strings.Repeat("host", 30))
+	}}}
+	m.asRemote(host)
 
 	for _, w := range []int{20, 40, 80, 200} {
 		for _, line := range strings.Split(m.renderReconnectBanner(w), "\n") {
@@ -747,7 +762,7 @@ func TestRenderReconnectBanner_KeepsExitHintAtEveryWidth(t *testing.T) {
 		attempt: 2,
 		lastErr: errors.New(strings.Repeat("diagnostic ", 30)),
 	})}
-	m.SetRemoteDest("gpu01")
+	m.asRemote("gpu01")
 
 	for _, w := range []int{40, 50, 60, 80, 120, 200} {
 		out := stripANSI(m.renderReconnectBanner(w))
@@ -766,7 +781,7 @@ func TestRenderReconnectBanner_ShowsRealisticSSHErrorAt80(t *testing.T) {
 		attempt: 4,
 		lastErr: errors.New("ssh: connect to host gpu01 port 22: Connection refused"),
 	})}
-	m.SetRemoteDest("gpu01")
+	m.asRemote("gpu01")
 
 	out := stripANSI(m.renderReconnectBanner(80))
 	if !strings.Contains(out, "ssh:") {
@@ -785,7 +800,7 @@ func TestRenderReconnectBanner_DropsUselesslyShortDetail(t *testing.T) {
 		attempt: 4,
 		lastErr: errors.New("Connection refused by the remote host"),
 	})}
-	m.SetRemoteDest("gpu01")
+	m.asRemote("gpu01")
 
 	// 50 leaves under minBannerDetail once the core is placed.
 	out := stripANSI(m.renderReconnectBanner(50))
@@ -804,7 +819,7 @@ func TestRenderReconnectBanner_MultilineErrorStaysOneLine(t *testing.T) {
 		attempt: 1,
 		lastErr: errors.New("Permission denied (publickey).\nssh: connect failed\nmore"),
 	})}
-	m.SetRemoteDest("gpu01")
+	m.asRemote("gpu01")
 
 	if n := strings.Count(m.renderReconnectBanner(120), "\n"); n != 0 {
 		t.Errorf("banner spans %d extra lines; the overlay would eat the tab bar and the row below", n)
@@ -814,7 +829,7 @@ func TestRenderReconnectBanner_MultilineErrorStaysOneLine(t *testing.T) {
 // Nothing is drawn when no reconnect is in flight.
 func TestRenderReconnectBanner_EmptyWhenInactive(t *testing.T) {
 	m := Model{}
-	m.SetRemoteDest("gpu01")
+	m.asRemote("gpu01")
 	if got := m.renderReconnectBanner(80); got != "" {
 		t.Errorf("banner rendered while inactive: %q", got)
 	}
@@ -847,7 +862,7 @@ func newReconnectTestModel(t *testing.T, n int) *Model {
 	tab.Resize(80, 24)
 
 	m := &Model{projects: oneProject(tab), width: 80, height: 24, cfg: config.Default()}
-	m.SetRemoteDest("gpu01")
+	m.asRemote("gpu01")
 	return m
 }
 
@@ -972,8 +987,8 @@ func TestReconnect_ResetsBackgroundTabs(t *testing.T) {
 func TestReconnect_SuccessPathResetsPanes(t *testing.T) {
 	m := newReconnectTestModel(t, 2)
 	m.clientGen = 3
-	m.attached = attachedTo("")
-	*m.linkFor("") = reconnectState{active: true, attempt: 1, gen: m.clientGen}
+	m.attached = attachedTo(testDest)
+	*m.linkFor(testDest) = reconnectState{active: true, attempt: 1, gen: m.clientGen}
 
 	panes := reconnectTestPanes(m)
 	for _, p := range panes {
@@ -981,7 +996,7 @@ func TestReconnect_SuccessPathResetsPanes(t *testing.T) {
 	}
 	m.selection = &Selection{PaneID: "p0"}
 
-	updated, cmd := m.Update(redialResultMsg{gen: 3, client: &failingClient{err: errors.New("unused")}})
+	updated, cmd := m.Update(redialResultMsg{gen: 3, dest: testDest, client: &failingClient{err: errors.New("unused")}})
 	got := updated.(Model)
 
 	if cmd == nil {
@@ -1027,7 +1042,7 @@ func TestReconnect_ResetsWorkCounters(t *testing.T) {
 		t.Fatalf("fixture subagents[\"Explore\"] = %d, want 3 (coalesced burst)", got)
 	}
 
-	m.resetWorkStateForReattach("")
+	m.resetWorkStateForReattach(testDest)
 
 	if p.working {
 		t.Error("pane still working after reset")
@@ -1048,7 +1063,7 @@ func TestReconnect_KeepsUnseenMark(t *testing.T) {
 	p := m.curTabs()[0].Leaves()[0]
 	p.unseen = true
 
-	m.resetWorkStateForReattach("")
+	m.resetWorkStateForReattach(testDest)
 
 	if !p.unseen {
 		t.Error("unseen mark cleared by reconnect; it reports unread work, not a live turn")
@@ -1061,7 +1076,7 @@ func TestReconnect_KeepsPinnedAttention(t *testing.T) {
 	p := m.curTabs()[0].Leaves()[0]
 	p.pinnedAttention = true
 
-	m.resetWorkStateForReattach("")
+	m.resetWorkStateForReattach(testDest)
 
 	if !p.pinnedAttention {
 		t.Error("the user's attention pin was cleared by a reconnect")
@@ -1076,7 +1091,7 @@ func TestReconnect_DoesNotClearWorkTickRunning(t *testing.T) {
 	m := newReconnectTestModel(t, 1)
 	m.workTickRunning = true
 
-	m.resetWorkStateForReattach("")
+	m.resetWorkStateForReattach(testDest)
 
 	if !m.workTickRunning {
 		t.Error("workTickRunning was cleared; a later hook event will start a second spinner loop " +
@@ -1101,7 +1116,7 @@ func TestReconnect_ResetsWorkStateInBackgroundTabs(t *testing.T) {
 		t.Fatal("fixture did not start a turn on the background pane")
 	}
 
-	m.resetWorkStateForReattach("")
+	m.resetWorkStateForReattach(testDest)
 
 	if p.working || p.turnActive {
 		t.Error("background-tab work state survived the reset")
@@ -1120,8 +1135,8 @@ func TestReconnect_ResetsWorkStateInBackgroundTabs(t *testing.T) {
 func TestReconnect_SuccessPathResetsWorkState(t *testing.T) {
 	m := newReconnectTestModel(t, 2)
 	m.clientGen = 5
-	m.attached = attachedTo("")
-	*m.linkFor("") = reconnectState{active: true, attempt: 1, gen: m.clientGen}
+	m.attached = attachedTo(testDest)
+	*m.linkFor(testDest) = reconnectState{active: true, attempt: 1, gen: m.clientGen}
 	focused := m.curTabs()[0].Leaves()[0]
 	other := m.curTabs()[0].Leaves()[1]
 	if focused.ID != m.curTabs()[0].ActivePane {
@@ -1132,7 +1147,7 @@ func TestReconnect_SuccessPathResetsWorkState(t *testing.T) {
 	m.applyWorkTransition(focused.ID, "hook.claude.SubagentStart", map[string]string{"agent_type": "Explore", "coalesced": "2"})
 	other.unseen = true
 
-	m.Update(redialResultMsg{gen: 5, client: &failingClient{err: errors.New("unused")}})
+	m.Update(redialResultMsg{gen: 5, dest: testDest, client: &failingClient{err: errors.New("unused")}})
 
 	if focused.working {
 		t.Error("pane still working after a successful reconnect")
@@ -1154,30 +1169,30 @@ func TestReconnect_SuccessPathResetsWorkState(t *testing.T) {
 // generation directly, so it also covers the bump in finishReconnect.
 func TestReconnect_OldListenLoopCannotStartASecondReconnect(t *testing.T) {
 	dials := 0
-	m := Model{clientGen: 1, attached: attachedTo("")}
-	m.SetRemoteDest("gpu01")
-	m.SetRedialFunc("", func(Client) (Client, error) {
+	m := Model{clientGen: 1, attached: attachedTo(testDest)}
+	m.asRemote("gpu01")
+	m.SetRedialFunc(testDest, func(Client) (Client, error) {
 		dials++
 		return &failingClient{err: errors.New("unused")}, nil
 	})
 
 	// Link drops, then a redial succeeds — the generation moves to 2.
-	updated, _ := m.Update(linkLostMsg{gen: 1, err: errors.New("EOF")})
+	updated, _ := m.Update(linkLostMsg{gen: 1, dest: testDest, err: errors.New("EOF")})
 	m = updated.(Model)
-	updated, _ = m.Update(redialResultMsg{gen: m.linkOf("").gen, client: &failingClient{err: errors.New("live")}})
+	updated, _ = m.Update(redialResultMsg{gen: m.linkOf(testDest).gen, dest: testDest, client: &failingClient{err: errors.New("live")}})
 	m = updated.(Model)
 	if m.clientGen != 2 {
 		t.Fatalf("clientGen = %d after a successful reconnect, want 2", m.clientGen)
 	}
-	if m.linkFor("").active {
+	if m.linkFor(testDest).active {
 		t.Fatal("reconnect still active after success")
 	}
 
 	// Now the DEAD client's loop finally errors, reporting the old generation.
-	updated, cmd := m.Update(linkLostMsg{gen: 1, err: errors.New("EOF")})
+	updated, cmd := m.Update(linkLostMsg{gen: 1, dest: testDest, err: errors.New("EOF")})
 	got := updated.(Model)
 
-	if got.linkOf("").active {
+	if got.linkOf(testDest).active {
 		t.Error("a stale listen loop restarted the reconnect")
 	}
 	if cmd != nil {
@@ -1193,22 +1208,22 @@ func TestReconnect_OldListenLoopCannotStartASecondReconnect(t *testing.T) {
 // real ones — a session that heals once and then dies silently is worse than
 // one that never healed.
 func TestReconnect_SecondGenuineDropStillReconnects(t *testing.T) {
-	m := Model{clientGen: 1, attached: attachedTo("")}
-	m.SetRemoteDest("gpu01")
-	m.SetRedialFunc("", func(Client) (Client, error) {
+	m := Model{clientGen: 1, attached: attachedTo(testDest)}
+	m.asRemote("gpu01")
+	m.SetRedialFunc(testDest, func(Client) (Client, error) {
 		return &failingClient{err: errors.New("unused")}, nil
 	})
 
-	updated, _ := m.Update(linkLostMsg{gen: 1, err: errors.New("EOF")})
+	updated, _ := m.Update(linkLostMsg{gen: 1, dest: testDest, err: errors.New("EOF")})
 	m = updated.(Model)
-	updated, _ = m.Update(redialResultMsg{gen: m.linkOf("").gen, client: &failingClient{err: errors.New("live")}})
+	updated, _ = m.Update(redialResultMsg{gen: m.linkOf(testDest).gen, dest: testDest, client: &failingClient{err: errors.New("live")}})
 	m = updated.(Model)
 
 	// The NEW client's own loop reports a drop, stamped with the new generation.
-	updated, cmd := m.Update(linkLostMsg{gen: m.clientGen, err: errors.New("EOF again")})
+	updated, cmd := m.Update(linkLostMsg{gen: m.clientGen, dest: testDest, err: errors.New("EOF again")})
 	got := updated.(Model)
 
-	if !got.linkOf("").active {
+	if !got.linkOf(testDest).active {
 		t.Error("a genuine second drop did not start a reconnect")
 	}
 	if cmd == nil {
@@ -1226,11 +1241,11 @@ func TestReconnect_SecondGenuineDropStillReconnects(t *testing.T) {
 // reach the notice at all. This pins the invariant for RD-027, which makes
 // update controls remote-aware and would otherwise reintroduce it silently.
 func TestReconnect_DoesNotReopenUpdateNotice(t *testing.T) {
-	m := Model{clientGen: 1, attached: attachedTo(""), sawFirstState: true,
+	m := Model{clientGen: 1, attached: attachedTo(testDest), sawFirstState: true,
 		links: oneLink(reconnectState{active: true, attempt: 1})}
-	m.SetRemoteDest("gpu01")
+	m.asRemote("gpu01")
 
-	updated, _ := m.Update(redialResultMsg{gen: 1, client: &failingClient{err: errors.New("unused")}})
+	updated, _ := m.Update(redialResultMsg{gen: 1, dest: testDest, client: &failingClient{err: errors.New("unused")}})
 
 	if got := updated.(Model); !got.sawFirstState {
 		t.Error("sawFirstState was cleared by the reconnect; the update notice would reopen " +
@@ -1241,11 +1256,11 @@ func TestReconnect_DoesNotReopenUpdateNotice(t *testing.T) {
 // The reconnect must not resurrect a dialog or leave one stranded. Dialog state
 // is client-independent, so it is left exactly as the user had it.
 func TestReconnect_LeavesDialogStateAlone(t *testing.T) {
-	m := Model{clientGen: 1, attached: attachedTo(""), dialog: dialogAbout, dialogCursor: 3,
+	m := Model{clientGen: 1, attached: attachedTo(testDest), dialog: dialogAbout, dialogCursor: 3,
 		links: oneLink(reconnectState{active: true, attempt: 1})}
-	m.SetRemoteDest("gpu01")
+	m.asRemote("gpu01")
 
-	updated, _ := m.Update(redialResultMsg{gen: 1, client: &failingClient{err: errors.New("unused")}})
+	updated, _ := m.Update(redialResultMsg{gen: 1, dest: testDest, client: &failingClient{err: errors.New("unused")}})
 	got := updated.(Model)
 
 	if got.dialog != dialogAbout {
@@ -1284,7 +1299,7 @@ func TestRenderReconnectBanner_WaitingPhase_NamesUnreachableAndCountsDown(t *tes
 		nextAt:  time.Now().Add(8 * time.Second),
 		lastErr: errors.New("connection timed out"),
 	})}
-	m.SetRemoteDest("gpu01")
+	m.asRemote("gpu01")
 
 	out := stripANSI(m.renderReconnectBanner(120))
 	for _, want := range []string{"gpu01", "unreachable", "retry in", "s", "attempt 6", "ctrl+q"} {
@@ -1303,11 +1318,11 @@ func TestRenderReconnectBanner_ConnectingPhase_DiffersFromWaiting(t *testing.T) 
 	// oneLink copies its argument, so the two models hold independent states —
 	// the value semantics the old singleton field gave for free.
 	waiting := Model{links: oneLink(base)}
-	waiting.linkFor("").nextAt = time.Now().Add(5 * time.Second)
-	waiting.SetRemoteDest("gpu01")
+	waiting.linkFor(testDest).nextAt = time.Now().Add(5 * time.Second)
+	waiting.asRemote("gpu01")
 
 	connecting := Model{links: oneLink(base)} // nextAt zero = in the past
-	connecting.SetRemoteDest("gpu01")
+	connecting.asRemote("gpu01")
 
 	w := stripANSI(waiting.renderReconnectBanner(120))
 	c := stripANSI(connecting.renderReconnectBanner(120))
@@ -1330,7 +1345,7 @@ func TestRenderReconnectBanner_CountdownNeverShowsZero(t *testing.T) {
 		1 * time.Millisecond, 200 * time.Millisecond, 999 * time.Millisecond,
 	} {
 		m := Model{links: oneLink(reconnectState{active: true, attempt: 1, nextAt: time.Now().Add(remain)})}
-		m.SetRemoteDest("gpu01")
+		m.asRemote("gpu01")
 		out := stripANSI(m.renderReconnectBanner(120))
 		if strings.Contains(out, "in 0s") {
 			t.Errorf("remain=%v rendered a zero countdown\ngot: %s", remain, out)
@@ -1340,16 +1355,17 @@ func TestRenderReconnectBanner_CountdownNeverShowsZero(t *testing.T) {
 
 // Both phases keep the exit hint at the narrowest width the TUI will render at.
 func TestRenderReconnectBanner_BothPhasesKeepExitHintAtMinWidth(t *testing.T) {
+	const host = "some-rather-long-hostname.example.internal"
 	for _, wait := range []time.Duration{0, 9 * time.Second} {
-		m := Model{links: oneLink(reconnectState{
+		m := Model{links: map[string]*reconnectState{host: {
 			active:  true,
 			attempt: 12,
 			lastErr: errors.New(strings.Repeat("diagnostic ", 20)),
-		})}
+		}}}
 		if wait > 0 {
-			m.linkFor("").nextAt = time.Now().Add(wait)
+			m.linkFor(host).nextAt = time.Now().Add(wait)
 		}
-		m.SetRemoteDest("some-rather-long-hostname.example.internal")
+		m.asRemote(host)
 
 		for _, w := range []int{40, 60, 80} {
 			out := stripANSI(m.renderReconnectBanner(w))
@@ -1452,7 +1468,7 @@ func TestReconnect_ResetIsConsumedByTheReplayNotPredicted(t *testing.T) {
 			t.Fatal("fixture wrote nothing")
 		}
 
-		m.armReattachReset("")
+		m.armReattachReset(testDest)
 		if p.rawBuf.Len() == 0 {
 			t.Error("arming alone wiped the pane — the reset must wait for the replay, " +
 				"or a pane that never gets one is left blank")
@@ -1478,7 +1494,7 @@ func TestReconnect_ResetIsConsumedByTheReplayNotPredicted(t *testing.T) {
 			p.AppendOutput([]byte("content that predates the reconnect\r\n"))
 		}
 
-		m.armReattachReset("")
+		m.armReattachReset(testDest)
 		deliverGhost(t, m, replayed.ID, "only this pane is replayed\r\n")
 
 		if silent.rawBuf.Len() == 0 {
@@ -1495,7 +1511,7 @@ func TestReconnect_ResetIsConsumedByTheReplayNotPredicted(t *testing.T) {
 		p := m.curTabs()[0].Leaves()[0]
 		p.AppendOutput([]byte("before\r\n"))
 
-		m.armReattachReset("")
+		m.armReattachReset(testDest)
 		// Live output is not a replay and must not be mistaken for one.
 		updated, _ := m.Update(PaneOutputMsg{PaneID: p.ID, Data: []byte("live\r\n")})
 		m = func() *Model { g := updated.(Model); return &g }()
@@ -1515,9 +1531,9 @@ func TestBannerCandidates_EveryRungKeepsTheExitHint(t *testing.T) {
 	for _, wait := range []time.Duration{0, 9 * time.Second} {
 		m := Model{links: oneLink(reconnectState{active: true, attempt: 3})}
 		if wait > 0 {
-			m.linkFor("").nextAt = time.Now().Add(wait)
+			m.linkFor(testDest).nextAt = time.Now().Add(wait)
 		}
-		m.SetRemoteDest("gpu01")
+		m.asRemote("gpu01")
 
 		got := m.bannerCandidates()
 		if len(got) == 0 {
@@ -1536,53 +1552,53 @@ func TestBannerCandidates_EveryRungKeepsTheExitHint(t *testing.T) {
 // fresh ssh roughly twice a second forever with the counter stuck at 1 — the same
 // signature as the false-success bug verifyRemoteLink was added to fix.
 func TestReconnect_FlappingLinkCarriesTheBackoffForward(t *testing.T) {
-	m := Model{clientGen: 1, attached: attachedTo("")}
-	m.SetRemoteDest("gpu01")
-	m.SetRedialFunc("", func(Client) (Client, error) {
+	m := Model{clientGen: 1, attached: attachedTo(testDest)}
+	m.asRemote("gpu01")
+	m.SetRedialFunc(testDest, func(Client) (Client, error) {
 		return &failingClient{err: errors.New("unused")}, nil
 	})
 
 	// Climb a few attempts, then succeed.
-	updated, _ := m.Update(linkLostMsg{gen: 1, err: errors.New("EOF")})
+	updated, _ := m.Update(linkLostMsg{gen: 1, dest: testDest, err: errors.New("EOF")})
 	m = updated.(Model)
 	for i := 0; i < 2; i++ {
-		updated, _ = m.Update(redialResultMsg{gen: m.linkOf("").gen, err: errors.New("refused")})
+		updated, _ = m.Update(redialResultMsg{gen: m.linkOf(testDest).gen, dest: testDest, err: errors.New("refused")})
 		m = updated.(Model)
 	}
-	settled := m.linkFor("").attempt
+	settled := m.linkFor(testDest).attempt
 	if settled < 3 {
 		t.Fatalf("fixture only reached attempt %d, want >= 3", settled)
 	}
-	updated, _ = m.Update(redialResultMsg{gen: m.linkOf("").gen, client: &failingClient{err: errors.New("live")}})
+	updated, _ = m.Update(redialResultMsg{gen: m.linkOf(testDest).gen, dest: testDest, client: &failingClient{err: errors.New("live")}})
 	m = updated.(Model)
 
 	// It dies again immediately — well inside reconnectFlapWindow.
-	updated, _ = m.Update(linkLostMsg{gen: m.clientGen, err: errors.New("EOF again")})
+	updated, _ = m.Update(linkLostMsg{gen: m.clientGen, dest: testDest, err: errors.New("EOF again")})
 	got := updated.(Model)
 
-	if got.linkOf("").attempt <= 1 {
+	if got.linkOf(testDest).attempt <= 1 {
 		t.Errorf("attempt reset to %d after a flap; the ladder restarts at 500ms and the "+
-			"backoff never engages", got.linkOf("").attempt)
+			"backoff never engages", got.linkOf(testDest).attempt)
 	}
 }
 
 // A link that survived comfortably is a real recovery, so the next outage starts
 // from scratch rather than inheriting a stale penalty.
 func TestReconnect_SettledLinkResetsTheBackoff(t *testing.T) {
-	m := Model{clientGen: 1, attached: attachedTo("")}
-	m.SetRemoteDest("gpu01")
-	m.SetRedialFunc("", func(Client) (Client, error) { return nil, errors.New("unused") })
+	m := Model{clientGen: 1, attached: attachedTo(testDest)}
+	m.asRemote("gpu01")
+	m.SetRedialFunc(testDest, func(Client) (Client, error) { return nil, errors.New("unused") })
 	// Restored long enough ago to count as settled.
-	*m.linkFor("") = reconnectState{
+	*m.linkFor(testDest) = reconnectState{
 		lastUpAt:       time.Now().Add(-2 * reconnectFlapWindow),
 		settledAttempt: 7,
 	}
 
-	updated, _ := m.Update(linkLostMsg{gen: 1, err: errors.New("EOF")})
+	updated, _ := m.Update(linkLostMsg{gen: 1, dest: testDest, err: errors.New("EOF")})
 	got := updated.(Model)
 
-	if got.linkOf("").attempt != 1 {
-		t.Errorf("attempt = %d after a settled link dropped, want 1 (a fresh ladder)", got.linkOf("").attempt)
+	if got.linkOf(testDest).attempt != 1 {
+		t.Errorf("attempt = %d after a settled link dropped, want 1 (a fresh ladder)", got.linkOf(testDest).attempt)
 	}
 }
 
@@ -1593,8 +1609,8 @@ func TestReconnect_FreezeAppliesWithADialogOpen(t *testing.T) {
 	newM := func(active bool) Model {
 		m := Model{cfg: config.Default(), width: 80, height: 24,
 			dialog: dialogAbout, dialogCursor: 0}
-		m.SetRemoteDest("gpu01")
-		m.linkFor("").active = active
+		m.asRemote("gpu01")
+		m.linkFor(testDest).active = active
 		return m
 	}
 
@@ -1615,7 +1631,7 @@ func TestReconnect_FreezeAppliesWithADialogOpen(t *testing.T) {
 // stay within its width.
 func TestReconnect_BannerRendersOverADialog(t *testing.T) {
 	m := newReconnectTestModel(t, 1)
-	*m.linkFor("") = reconnectState{active: true, attempt: 2, lastErr: errors.New("timed out")}
+	*m.linkFor(testDest) = reconnectState{active: true, attempt: 2, lastErr: errors.New("timed out")}
 	m.dialog = dialogAbout
 
 	out := stripANSI(m.View().Content)
@@ -1643,7 +1659,7 @@ func deliverGhost(t *testing.T, m *Model, paneID string, data string) {
 // this, since the reset is now consumed by the replay rather than predicted.
 func armAndReplayAll(t *testing.T, m *Model, data string) {
 	t.Helper()
-	m.armReattachReset("")
+	m.armReattachReset(testDest)
 	for _, p := range reconnectTestPanes(m) {
 		deliverGhost(t, m, p.ID, data)
 	}
@@ -1656,26 +1672,27 @@ func armAndReplayAll(t *testing.T, m *Model, data string) {
 // sshd jail bans, locking them out of a host that was never unreachable.
 func TestReconnect_PermanentFailureParksInsteadOfRetrying(t *testing.T) {
 	m := newReconnectTestModel(t, 1)
-	m.linkFor("").active = true
-	m.linkFor("").attempt = 3
+	m.linkFor(testDest).active = true
+	m.linkFor(testDest).attempt = 3
 
 	updated, cmd := m.Update(redialResultMsg{
-		gen: m.linkOf("").gen,
+		gen: m.linkOf(testDest).gen,
+		dest: testDest,
 		err: fmt.Errorf("Permission denied (publickey): %w", ErrLinkPermanent),
 	})
 	got := updated.(Model)
 
-	if !got.linkOf("").parked {
+	if !got.linkOf(testDest).parked {
 		t.Fatal("a permanent failure must park the loop")
 	}
 	if cmd != nil {
 		t.Error("parking must not schedule another redial")
 	}
-	if !got.linkOf("").active {
+	if !got.linkOf(testDest).active {
 		t.Error("the banner must stay up while parked — the session is paused, not over")
 	}
-	if got.linkOf("").attempt != 3 {
-		t.Errorf("attempt = %d, want it left at 3: parking is not a retry", got.linkOf("").attempt)
+	if got.linkOf(testDest).attempt != 3 {
+		t.Errorf("attempt = %d, want it left at 3: parking is not a retry", got.linkOf(testDest).attempt)
 	}
 }
 
@@ -1683,16 +1700,17 @@ func TestReconnect_PermanentFailureParksInsteadOfRetrying(t *testing.T) {
 // park test passes for a model that parks on EVERY failure.
 func TestReconnect_TransientFailureStillRetries(t *testing.T) {
 	m := newReconnectTestModel(t, 1)
-	m.linkFor("").active = true
-	m.linkFor("").attempt = 3
+	m.linkFor(testDest).active = true
+	m.linkFor(testDest).attempt = 3
 
 	updated, cmd := m.Update(redialResultMsg{
-		gen: m.linkOf("").gen,
+		gen: m.linkOf(testDest).gen,
+		dest: testDest,
 		err: errors.New("ssh: connect to host gpu01 port 22: Connection timed out"),
 	})
 	got := updated.(Model)
 
-	if got.linkOf("").parked {
+	if got.linkOf(testDest).parked {
 		t.Error("an unclassified failure must keep retrying, not park")
 	}
 	if cmd == nil {
@@ -1708,25 +1726,25 @@ func TestReconnect_ResumeKeyRestartsAParkedLoop(t *testing.T) {
 	// A dialer, because THIS park is only reachable with one. A destination
 	// parked because it can never be redialled at all — the multi-daemon case —
 	// has no resume path and deliberately offers no key.
-	m.SetRedialFunc("", func(Client) (Client, error) { return nil, errors.New("refused") })
-	m.linkFor("").active = true
-	m.linkFor("").parked = true
-	m.linkFor("").attempt = 3
-	m.linkFor("").lastErr = errors.New("Permission denied (publickey)")
+	m.SetRedialFunc(testDest, func(Client) (Client, error) { return nil, errors.New("refused") })
+	m.linkFor(testDest).active = true
+	m.linkFor(testDest).parked = true
+	m.linkFor(testDest).attempt = 3
+	m.linkFor(testDest).lastErr = errors.New("Permission denied (publickey)")
 
 	updated, cmd := m.Update(tea.KeyPressMsg{Code: 'r', Text: "r"})
 	got := updated.(Model)
 
-	if got.linkOf("").parked {
+	if got.linkOf(testDest).parked {
 		t.Error("the resume key must clear the parked state")
 	}
 	if cmd == nil {
 		t.Fatal("resuming must schedule a redial")
 	}
-	if got.linkOf("").attempt < 3 {
+	if got.linkOf(testDest).attempt < 3 {
 		t.Errorf("attempt = %d, want it carried forward: resuming does not un-happen "+
 			"the earlier failures, and restarting the ladder undoes the rate decay",
-			got.linkOf("").attempt)
+			got.linkOf(testDest).attempt)
 	}
 }
 
@@ -1734,13 +1752,13 @@ func TestReconnect_ResumeKeyRestartsAParkedLoop(t *testing.T) {
 // resume key and the quit escape may act.
 func TestReconnect_OrdinaryKeysStayFrozenWhileParked(t *testing.T) {
 	m := newReconnectTestModel(t, 1)
-	m.linkFor("").active = true
-	m.linkFor("").parked = true
+	m.linkFor(testDest).active = true
+	m.linkFor(testDest).parked = true
 
 	updated, cmd := m.Update(tea.KeyPressMsg{Code: 'x', Text: "x"})
 	got := updated.(Model)
 
-	if !got.linkOf("").parked {
+	if !got.linkOf(testDest).parked {
 		t.Error("an ordinary key must not resume a parked loop")
 	}
 	if cmd != nil {
@@ -1753,8 +1771,8 @@ func TestReconnect_OrdinaryKeysStayFrozenWhileParked(t *testing.T) {
 // every rung already contains one in "ctrl+q" — so this pins the hint literal.
 func TestBannerCandidates_ParkedRungsKeepBothKeys(t *testing.T) {
 	m := Model{links: oneLink(reconnectState{active: true, attempt: 3, parked: true})}
-	m.SetRemoteDest("gpu01")
-	m.SetRedialFunc("", func(Client) (Client, error) { return nil, errors.New("refused") })
+	m.asRemote("gpu01")
+	m.SetRedialFunc(testDest, func(Client) (Client, error) { return nil, errors.New("refused") })
 
 	got := m.bannerCandidates()
 	if len(got) == 0 {
@@ -1779,11 +1797,11 @@ func TestBannerCandidates_ParkedRungsKeepBothKeys(t *testing.T) {
 // passing unit tests and only showed up in the output.
 func TestRenderReconnectBanner_ParkedNamesTheCause(t *testing.T) {
 	m := newReconnectTestModel(t, 1)
-	m.SetRedialFunc("", func(Client) (Client, error) { return nil, errors.New("refused") })
-	m.linkFor("").active = true
-	m.linkFor("").parked = true
-	m.linkFor("").lastErr = errors.New("Permission denied (publickey)")
-	m.SetRemoteDest("gpu01")
+	m.SetRedialFunc(testDest, func(Client) (Client, error) { return nil, errors.New("refused") })
+	m.linkFor(testDest).active = true
+	m.linkFor(testDest).parked = true
+	m.linkFor(testDest).lastErr = errors.New("Permission denied (publickey)")
+	m.asRemote("gpu01")
 
 	banner := stripANSI(m.renderReconnectBanner(80))
 	for _, want := range []string{"Permission denied", bannerResumeHint, "ctrl+q"} {
@@ -1944,7 +1962,7 @@ func TestReconnect_TickForOneDestDoesNotDialAnother(t *testing.T) {
 		"gpu01": {active: true, attempt: 1, gen: 1},
 		"prod":  {active: true, attempt: 4, gen: 1},
 	}}
-	m.SetRemoteDest("gpu01")
+	m.asRemote("gpu01")
 	m.SetRedialFunc("gpu01", func(Client) (Client, error) { gpuDials++; return nil, errors.New("refused") })
 	m.SetRedialFunc("prod", func(Client) (Client, error) { prodDials++; return nil, errors.New("refused") })
 

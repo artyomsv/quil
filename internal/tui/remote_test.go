@@ -7,24 +7,47 @@ import (
 	"github.com/artyomsv/quil/internal/ipc"
 )
 
-func TestModel_RemoteMode_ReflectsDest(t *testing.T) {
+func TestModel_RemoteMode_ReflectsTheActiveProjectsDest(t *testing.T) {
 	var m Model
 
 	if m.RemoteMode() {
 		t.Error("RemoteMode() = true on a zero Model, want false")
 	}
 
-	m.SetRemoteDest("gpu01")
+	m.asRemote("gpu01")
 	if !m.RemoteMode() {
-		t.Error("RemoteMode() = false after SetRemoteDest, want true")
-	}
-	if m.remoteDest != "gpu01" {
-		t.Errorf("remoteDest = %q, want %q", m.remoteDest, "gpu01")
+		t.Error("RemoteMode() = false with a remote project active, want true")
 	}
 
-	m.SetRemoteDest("")
+	m.asRemote("")
 	if m.RemoteMode() {
-		t.Error("RemoteMode() = true after clearing the destination, want false")
+		t.Error("RemoteMode() = true with a LOCAL project active, want false")
+	}
+}
+
+// The answer must follow the project the user is LOOKING AT, not the session.
+//
+// This is the case the deleted session-wide flag could not express, and it is
+// what every caller depends on: with a mixed client, RemoteMode() gates update
+// controls that are wired to local disk and plugin availability that describes
+// one specific machine. Answering "remote" for a local project points both at
+// the wrong host.
+func TestModel_RemoteMode_FollowsTheActiveProjectInAMixedSession(t *testing.T) {
+	m := Model{projects: []*ProjectModel{
+		{ID: "proj-local", Dest: ""},
+		{ID: "proj-gpu", Dest: "gpu01"},
+	}}
+
+	m.activeProject = 1
+	if !m.RemoteMode() {
+		t.Error("RemoteMode() = false with the remote project active")
+	}
+
+	m.activeProject = 0
+	if m.RemoteMode() {
+		t.Error("RemoteMode() = true while a LOCAL project is active; the update " +
+			"controls it suppresses are wired to this machine's disk and would " +
+			"stay hidden for a daemon that is on it")
 	}
 }
 
@@ -38,7 +61,7 @@ func TestMaybeShowUpdateNotice_SuppressedInRemoteMode(t *testing.T) {
 	t.Setenv("QUIL_HOME", t.TempDir())
 
 	m := &Model{version: "0.0.1", updateInfo: &ipc.UpdateInfo{LatestVersion: "0.0.2", InstallWritable: true}}
-	m.SetRemoteDest("gpu01")
+	m.asRemote("gpu01")
 
 	m.maybeShowUpdateNotice()
 

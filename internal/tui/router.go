@@ -336,9 +336,14 @@ func (m Model) isRouter() bool {
 // trying. A destination that is down AND has no dialer is gone for good and
 // cannot hold the session open on its own.
 //
-// A single-connection client answers true for its own "" and so keeps the
-// existing behaviour exactly: a dead local daemon is still fatal.
+// A single-connection client answers true unconditionally, which keeps the
+// existing behaviour exactly: it holds one daemon by construction, so losing it
+// IS losing the session — a dead local daemon stays fatal, and so does a
+// --remote host with no dialer behind it.
 func (m Model) lastDaemon(dest string) bool {
+	if !m.isRouter() {
+		return true
+	}
 	for _, d := range m.knownDests() {
 		if d == dest {
 			continue

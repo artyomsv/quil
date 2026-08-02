@@ -704,3 +704,23 @@ func TestAttachCWDIsPerDestinationInAMixedSession(t *testing.T) {
 			"daemon's frozen working directory instead of the client's", got, wd)
 	}
 }
+
+// asRemote points the Model's ACTIVE project at dest, which is what "this
+// session talks to a daemon on another host" means now that every project
+// carries its own destination.
+//
+// It replaces the SetRemoteDest setter, which was a session-wide flag. That flag
+// could not survive a client holding a local daemon beside a remote one: it
+// answered "remote" for whichever project was active, including a local one.
+//
+// A Model built directly by a test usually has no projects at all, so one is
+// created — the same shape interimProject builds for the pre-attach client, and
+// enough for activeDest() to have something to read.
+func (m *Model) asRemote(dest string) {
+	if p := m.cur(); p != nil {
+		p.Dest = dest
+		return
+	}
+	m.projects = []*ProjectModel{{ID: interimProjectID, Name: interimProjectName, Dest: dest}}
+	m.activeProject = 0
+}

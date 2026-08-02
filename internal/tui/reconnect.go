@@ -234,14 +234,29 @@ func (m Model) linkOf(dest string) reconnectState {
 
 // linkHost names the daemon a message about dest is about.
 //
-// The destination IS the ssh host once a client holds several. A
-// single-connection remote session routes unstamped, so its dest is "" and the
-// name lives in remoteDest — which is also what the banner has always shown.
+// The destination IS the ssh host. It used to fall back to a session-wide
+// remoteDest for an empty one, which was correct only while a single
+// connection's "" WAS the remote — with a local daemon beside `--remote gpu01`,
+// a loss on the LOCAL daemon rendered a banner naming gpu01, i.e. the one
+// machine that had not failed.
+//
+// "" therefore names the local daemon explicitly. Callers that want "is this
+// remote at all" must ask remoteModeFor, not test this for emptiness.
+//
+// A configured [[destinations]] name wins over the ssh destination, because
+// that is what the name is for: an ssh destination is routinely user@10.0.0.4,
+// and a one-row banner during an outage is exactly where a readable label earns
+// its keep.
 func (m Model) linkHost(dest string) string {
-	if dest != "" {
-		return dest
+	if dest == "" {
+		return "the local daemon"
 	}
-	return m.remoteDest
+	for _, d := range m.cfg.Destinations {
+		if d.Dest == dest {
+			return d.Label()
+		}
+	}
+	return dest
 }
 
 // connFor returns the connection carrying dest, for handing the DEAD one to the

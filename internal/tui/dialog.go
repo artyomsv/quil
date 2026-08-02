@@ -1416,7 +1416,10 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 	if cwd != "" {
 		m.lastSelectedCWD = cwd
 		m.recentCWDs = pushRecentCWD(m.recentCWDs, cwd, recentCWDMax)
-		if err := SaveRecentCWDs(config.RecentCWDsPath(m.remoteDest), m.recentCWDs); err != nil {
+		// Scoped to the ACTIVE project's daemon: the directory was picked on
+		// that machine's disk, so filing it under another host's recent list
+		// would offer a path that does not exist there.
+		if err := SaveRecentCWDs(config.RecentCWDsPath(m.activeDest()), m.recentCWDs); err != nil {
 			log.Printf("create pane: save recent cwds: %v", err)
 		}
 	}

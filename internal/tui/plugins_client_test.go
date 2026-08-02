@@ -56,7 +56,7 @@ func TestRequestPluginList_LocalModeAsksNothing(t *testing.T) {
 
 func TestRequestPluginList_RemoteModeAsks(t *testing.T) {
 	m := pluginClientModel(t)
-	m.SetRemoteDest("gpu01")
+	m.asRemote("gpu01")
 	cmd := m.requestPluginList()
 	if cmd == nil {
 		t.Fatal("requestPluginList returned no command in remote mode")
@@ -91,11 +91,12 @@ func TestAttach_RemoteModeAlsoAsksForPluginList(t *testing.T) {
 		run  func(m *Model) tea.Cmd
 	}{
 		{"startup sweep", func(m *Model) tea.Cmd { return m.attachAllDests() }},
-		{"post-redial reattach", func(m *Model) tea.Cmd { return m.attachToDest("") }},
+		{"post-redial reattach", func(m *Model) tea.Cmd { return m.attachToDest("gpu01") }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			m := Model{client: &fakeSender{}, pluginRegistry: plugin.NewRegistry()}
-			m.SetRemoteDest("gpu01")
+			gpu := newFakeConn()
+			m := Model{client: NewRouter(map[string]Client{"gpu01": gpu}), pluginRegistry: plugin.NewRegistry()}
+			m.asRemote("gpu01")
 
 			cmd := tc.run(&m)
 			if cmd == nil {
@@ -103,16 +104,8 @@ func TestAttach_RemoteModeAlsoAsksForPluginList(t *testing.T) {
 			}
 			runCmd(cmd)
 
-			sent := m.client.(*fakeSender).sent
-			var sawAttach, sawPluginList bool
-			for _, msg := range sent {
-				switch msg.Type {
-				case ipc.MsgAttach:
-					sawAttach = true
-				case ipc.MsgPluginListReq:
-					sawPluginList = true
-				}
-			}
+			sent := sentTypes(gpu)
+			sawAttach, sawPluginList := sent[ipc.MsgAttach], sent[ipc.MsgPluginListReq]
 			if !sawAttach {
 				t.Error("attach did not send MsgAttach")
 			}

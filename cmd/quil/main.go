@@ -518,10 +518,9 @@ func launchTUI() {
 	// unstamped send to whichever daemon happened to be active at launch.
 	router := tui.NewRouter(conns)
 	model := tui.NewModel(router, cfg, version, reg, stalePlugins)
-	// Drives the [remote <host>] status-bar indicator and suppresses the
-	// update controls, which are wired to local disk and would target the
-	// wrong machine. Empty for a local session.
-	model.SetRemoteDest(remoteDest)
+	// No session-wide "this is remote" flag any more: the router keys --remote's
+	// connection by host, so its projects arrive stamped with that destination
+	// and every remote-aware decision reads it from the project on screen.
 	if remoteDest != "" {
 		model.SetRecentCWDs(tui.LoadRecentCWDs(config.RecentCWDsPath(remoteDest)))
 	}

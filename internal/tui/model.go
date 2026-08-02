@@ -300,7 +300,6 @@ type Model struct {
 	confirmID            string                 // ID of pane/tab to delete
 	confirmName          string                 // display name for confirmation
 	devMode              bool                   // true when QUIL_HOME is set
-	remoteDest           string                 // non-empty when attached to a daemon on another host
 	pluginRegistry       *plugin.Registry       // plugin registry (shared with daemon)
 	lastWidth            int                    // last known window width (for persistence)
 	lastHeight           int                    // last known window height (for persistence)
@@ -530,45 +529,30 @@ type Model struct {
 	redialFns map[string]RedialFunc
 }
 
-// SetRemoteDest marks this session as attached to a daemon on another host and
-// names it. Empty (the default) means a local session.
-//
-// A setter rather than a NewModel parameter: it is display-and-gating state
-// that every existing caller and test can keep ignoring, and NewModel already
-// takes five arguments.
-func (m *Model) SetRemoteDest(dest string) { m.remoteDest = dest }
-
 // RemoteMode reports whether the daemon behind the ACTIVE project lives on
 // another host.
 //
-// The union of two sources, deliberately: the active project's own Dest (the
-// per-project answer, once a project actually carries one) and the legacy
-// session-wide remoteDest. Today's `quil --remote <host>` session does not
-// stamp Dest on its project — that lands with the multi-daemon router — so
-// for it activeDest() reads "" and remoteDest is the only signal there is.
-// Dropping the remoteDest half here would silently turn every existing
-// --remote session "local" the moment this redefinition landed. Once the
-// router stamps Dest for real, remoteDest has no remaining reader and this
-// collapses to activeDest() != "" — tracked as a Task 17 cleanup, not
-// speculative: a live remoteDest with a DIFFERENT local project active is
-// reachable only after that router exists, and would misreport a local
-// project as remote in the meantime.
-func (m *Model) RemoteMode() bool { return m.activeDest() != "" || m.remoteDest != "" }
+// The active project's Dest is now the WHOLE answer. It used to be the union of
+// that and a session-wide remoteDest field, because `quil --remote <host>`
+// routed everything unstamped and stamped no project — so activeDest() read ""
+// for a session that was entirely remote. That union had a known expiry, and
+// this is it: once a client can hold a local daemon beside a remote one, a live
+// session-wide flag answers "remote" for a LOCAL project the user is looking
+// at, which is the wrong answer for every caller — the update controls it
+// suppresses are wired to local disk, and the plugin availability it swaps out
+// describes the wrong machine. --remote now keys its own connection by host, so
+// its project carries a Dest like any other and nothing is lost.
+func (m *Model) RemoteMode() bool { return m.remoteModeFor(m.activeDest()) }
 
 // remoteModeFor reports whether dest names a daemon on another host — the
-// per-destination counterpart to RemoteMode, for a call site that already
-// knows which daemon it is asking about rather than defaulting to the active
-// one.
+// per-destination counterpart to RemoteMode, for a call site that already knows
+// which daemon it is asking about rather than defaulting to the active one.
 //
-// An empty dest still defers to remoteDest, for the same reason RemoteMode
-// does: today's single --remote session routes everything unstamped, so ""
-// IS that remote daemon until the router lands.
-func (m *Model) remoteModeFor(dest string) bool {
-	if dest != "" {
-		return true
-	}
-	return m.remoteDest != ""
-}
+// Trivial by construction, and kept as a named function anyway: "" means the
+// local daemon EVERYWHERE in this client (a project's Dest, a tab's, the
+// router's key, the Origin a local pump stamps), and this is where that
+// convention is written down rather than re-derived at each call site.
+func (m *Model) remoteModeFor(dest string) bool { return dest != "" }
 
 // SetRecentCWDs replaces the remembered working-directory list.
 //
@@ -4386,13 +4370,11 @@ func (m Model) renderStatusBar() string {
 	// wrong-host bug silent — and these panes routinely run AI agents with
 	// permission prompts disabled.
 	//
-	// linkHost(activeDest()) rather than remoteDest directly: it names the
-	// ACTIVE project's own host when it has one, and only falls back to the
-	// session-wide remoteDest for today's single --remote session, where the
-	// active project's Dest is still "". Same resolution the reconnect
-	// banner uses for the same reason.
-	if host := m.linkHost(m.activeDest()); host != "" {
-		right = "[remote " + host + "] " + right
+	// Gated on the DEST, not on the rendered host name: linkHost answers "the
+	// local daemon" for "", so testing its output for emptiness would put a
+	// "[remote …]" badge on every local session.
+	if dest := m.activeDest(); dest != "" {
+		right = "[remote " + m.linkHost(dest) + "] " + right
 	}
 	if count := m.notifications.Count(); count > 0 && !m.notifications.visible {
 		right = fmt.Sprintf("[%d events] ", count) + right

@@ -507,8 +507,15 @@ func launchTUI() {
 			// Named on stderr as well as in the log: this happens before the
 			// TUI takes the screen, and a destination silently missing from the
 			// sidebar is the failure mode the whole message exists to prevent.
-			fmt.Fprintf(os.Stderr, "warning: %s is unreachable — its projects will not appear "+
-				"(see the log; reconnect keeps trying)\n", d.Label())
+			//
+			// It says RELAUNCH, and that word is load-bearing. Reconnect is
+			// driven by a pump reporting its connection's death, and a
+			// destination that never connected has no conn and therefore no
+			// pump — so nothing will ever start a ladder for it. Telling the
+			// user it "keeps trying" leaves them waiting for something that
+			// cannot happen.
+			fmt.Fprintf(os.Stderr, "warning: %s is unreachable — its projects will not appear. "+
+				"Relaunch quil once the host is back (see the log for why).\n", d.Label())
 		}
 	}
 

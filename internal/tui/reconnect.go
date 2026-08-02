@@ -315,16 +315,20 @@ func (m Model) CloseClient() {
 // than being fatal.
 //
 // redialFns[dest] != nil is the WHOLE test, deliberately with no RemoteMode
-// conjunct. A local session never installs a redial func for its dest, so the
-// nil check alone already keeps a dead local daemon fatal — retrying would
-// spin against something that is not coming back while hiding the loss, and
-// nothing here can make that reachable. The conjunct used to be redundant
-// insurance; now it is actively wrong. RemoteMode() answers for the ACTIVE
-// project, but today's `quil --remote <host>` session has no projects with a
-// stamped Dest yet (that lands with the multi-daemon router) and installs its
-// redial func under the "" key regardless of what is active — so requiring
-// RemoteMode() too would read false for that session's own reconnect and
-// silently turn every existing --remote drop fatal.
+// conjunct. A local destination never gets a dialer installed, so the nil check
+// alone already keeps a dead local daemon fatal — retrying would spin against
+// something that is not coming back while hiding the loss.
+//
+// The conjunct is not merely redundant, it is wrong, and the multi-daemon
+// router is what made it so: RemoteMode() answers for the ACTIVE PROJECT, which
+// is a different question entirely once a client holds several daemons. A
+// background remote host dropping while a LOCAL project is on screen would read
+// false and turn a perfectly reconnectable drop fatal.
+//
+// Note this is now the ONLY thing separating the two cases. Every destination
+// is keyed by its ssh host — `quil --remote <host>` included, since the router
+// keys its connection that way too — so there is no "" special case left to
+// lean on.
 func (m Model) canReconnect(dest string) bool {
 	return m.redialFns[dest] != nil
 }

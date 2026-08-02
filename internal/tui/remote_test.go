@@ -25,32 +25,6 @@ func TestModel_RemoteMode_ReflectsTheActiveProjectsDest(t *testing.T) {
 	}
 }
 
-// The answer must follow the project the user is LOOKING AT, not the session.
-//
-// This is the case the deleted session-wide flag could not express, and it is
-// what every caller depends on: with a mixed client, RemoteMode() gates update
-// controls that are wired to local disk and plugin availability that describes
-// one specific machine. Answering "remote" for a local project points both at
-// the wrong host.
-func TestModel_RemoteMode_FollowsTheActiveProjectInAMixedSession(t *testing.T) {
-	m := Model{projects: []*ProjectModel{
-		{ID: "proj-local", Dest: ""},
-		{ID: "proj-gpu", Dest: "gpu01"},
-	}}
-
-	m.activeProject = 1
-	if !m.RemoteMode() {
-		t.Error("RemoteMode() = false with the remote project active")
-	}
-
-	m.activeProject = 0
-	if m.RemoteMode() {
-		t.Error("RemoteMode() = true while a LOCAL project is active; the update " +
-			"controls it suppresses are wired to this machine's disk and would " +
-			"stay hidden for a daemon that is on it")
-	}
-}
-
 // TestMaybeShowUpdateNotice_SuppressedInRemoteMode pins the cross-host guard.
 // m.updateInfo is broadcast by the REMOTE daemon and describes its staging
 // directory, but accepting the notice applies a LOCAL staged update — so the
@@ -84,10 +58,15 @@ func TestMaybeShowUpdateNotice_StillShownLocally(t *testing.T) {
 	}
 }
 
-// TestRemoteModeFollowsActiveProject pins the per-project half of RemoteMode:
-// with no remoteDest set (today's --remote session's own signal, still
-// honoured — see TestModel_RemoteMode_ReflectsDest), the answer must track
-// whichever project is active, not a single process-wide flag.
+// TestRemoteModeFollowsActiveProject pins the whole of RemoteMode: the answer
+// tracks whichever project is ACTIVE, and there is no process-wide flag left
+// beside it.
+//
+// This is the case the deleted session-wide flag could not express, and it is
+// what every caller depends on. With a mixed client, RemoteMode() gates update
+// controls that are wired to LOCAL disk and plugin availability that describes
+// one specific machine — so answering "remote" for a local project points both
+// at the wrong host.
 func TestRemoteModeFollowsActiveProject(t *testing.T) {
 	m := Model{projects: []*ProjectModel{
 		{ID: "proj-local", Dest: ""}, {ID: "proj-gpu", Dest: "gpu01"},
@@ -95,17 +74,21 @@ func TestRemoteModeFollowsActiveProject(t *testing.T) {
 
 	m.activeProject = 0
 	if m.RemoteMode() {
-		t.Fatal("a local project must not report remote mode")
+		t.Error("RemoteMode() = true while a LOCAL project is active; the update " +
+			"controls it suppresses are wired to this machine's disk and would " +
+			"stay hidden for a daemon that is on it")
 	}
 	m.activeProject = 1
 	if !m.RemoteMode() {
-		t.Fatal("a project on gpu01 must report remote mode")
+		t.Error("RemoteMode() = false with the remote project active")
 	}
 }
 
 // TestStatusBarNamesTheActiveProjectsHost pins the status-bar half: the
-// [remote …] segment must name the ACTIVE project's own host, not only the
-// session-wide remoteDest.
+// [remote …] segment must name the ACTIVE project's own host. In a mixed
+// session that is the only correct answer — the badge says which MACHINE the
+// panes on screen are running on, and these panes routinely run AI agents with
+// permission prompts disabled.
 func TestStatusBarNamesTheActiveProjectsHost(t *testing.T) {
 	m := Model{
 		projects:      []*ProjectModel{{ID: "proj-gpu", Dest: "gpu01"}},

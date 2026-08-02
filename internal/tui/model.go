@@ -743,7 +743,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.height = msg.Height
 			m.resizeTabs()
 			log.Print("first WindowSizeMsg — attaching to every daemon")
-			return m, tea.Batch(m.resizeAllPanes(), m.attachAllDests())
+			// Sequenced, not `return m, tea.Batch(…, m.attachAllDests())`. Go
+			// orders function CALLS within a statement left to right, but says
+			// nothing about a plain operand like `m` against them — and
+			// attachAllDests has a pointer receiver that lazily allocates the
+			// attach ledger. Copy `m` into the return slot first and the ledger
+			// is lost, so the next real resize attaches every destination a
+			// SECOND time and replays every ghost buffer twice. gc happens to
+			// evaluate the calls first today; nothing requires it to.
+			resize, attach := m.resizeAllPanes(), m.attachAllDests()
+			return m, tea.Batch(resize, attach)
 		}
 
 		// A destination can join the router after the first resize (a host that

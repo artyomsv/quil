@@ -250,3 +250,46 @@ func TestRedialRemote_ClassifiesVerifyFailures(t *testing.T) {
 		})
 	}
 }
+
+// TestRedialRemote_DialsTheDestinationItWasBuiltFor pins the parameter that
+// makes per-destination reconnect work at all.
+//
+// dialRemoteTransport, remoteSSHOptions and redialRemote all used to read the
+// process-wide remoteDest. They take a dest now, and the whole file was able to
+// go green with that parameter discarded: every other stub here ignores it, so
+// a redialer that forwarded remoteDest — or "" — instead of its own destination
+// would reconnect the WRONG host on every drop, silently, and in a mixed session
+// would point a background host's ladder at the foreground daemon.
+//
+// The process-wide value is deliberately set to something ELSE, because a test
+// that sets both to the same string cannot tell the parameter from the global.
+// The stderr sink is checked for the same reason: its per-destination byte
+// budget is what stops one flapping host from exhausting every other host's log
+// allowance, and it is keyed off the same value.
+func TestRedialRemote_DialsTheDestinationItWasBuiltFor(t *testing.T) {
+	withRemote(t, "primary-host")
+
+	var gotDest string
+	var gotSink io.Writer
+	stubDial(t, func(_ context.Context, _ config.Config, dest string, _ bool, sink io.Writer) (*ipc.Client, transport.LinkStatus, error) {
+		gotDest, gotSink = dest, sink
+		return nil, nil, errors.New("stub dial")
+	})
+
+	if _, err := redialRemote(config.Config{}, "gpu01")(nil); err == nil {
+		t.Fatal("redial reported success on a failed dial")
+	}
+
+	if gotDest != "gpu01" {
+		t.Errorf("dialled %q, want %q — the redialer forwarded something other than the "+
+			"destination it was built for, so a drop reconnects the wrong host", gotDest, "gpu01")
+	}
+	logger, ok := gotSink.(*sshStderrLogger)
+	if !ok {
+		t.Fatalf("stderr sink is %T, want *sshStderrLogger", gotSink)
+	}
+	if logger.dest != "gpu01" {
+		t.Errorf("sink dest = %q, want %q — one host's ssh diagnostics would be attributed "+
+			"to another, and they share a byte budget", logger.dest, "gpu01")
+	}
+}

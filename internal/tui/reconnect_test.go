@@ -1236,20 +1236,43 @@ func TestReconnect_SecondGenuineDropStillReconnects(t *testing.T) {
 //
 // Belt-and-braces today: maybeShowUpdateNotice returns early in remote mode
 // (its update info describes the REMOTE daemon while accepting applies a LOCAL
-// staged update), and this Model is remote (RemoteMode() reads true via
-// remoteDest) — so the two conditions coincide and reconnecting here can never
-// reach the notice at all. This pins the invariant for RD-027, which makes
-// update controls remote-aware and would otherwise reintroduce it silently.
+// staged update), and this Model is remote because its ACTIVE PROJECT carries a
+// dest — so the two conditions coincide and reconnecting here can never reach
+// the notice at all. This pins the invariant for RD-027, which makes update
+// controls remote-aware and would otherwise reintroduce it silently.
 func TestReconnect_DoesNotReopenUpdateNotice(t *testing.T) {
 	m := Model{clientGen: 1, attached: attachedTo(testDest), sawFirstState: true,
-		links: oneLink(reconnectState{active: true, attempt: 1})}
-	m.asRemote("gpu01")
+		links: oneLink(reconnectState{active: true, attempt: 1, gen: 1})}
+	m.asRemote(testDest)
 
 	updated, _ := m.Update(redialResultMsg{gen: 1, dest: testDest, client: &failingClient{err: errors.New("unused")}})
+	got := updated.(Model)
 
-	if got := updated.(Model); !got.sawFirstState {
+	requireReconnectRan(t, got)
+	if !got.sawFirstState {
 		t.Error("sawFirstState was cleared by the reconnect; the update notice would reopen " +
 			"on the reattach broadcast once RD-027 makes it remote-aware")
+	}
+}
+
+// requireReconnectRan fails unless finishReconnect actually ran for testDest.
+//
+// It exists because every "the reconnect leaves X alone" test asserts that
+// something did NOT change, and such a test passes for two entirely different
+// reasons: the reconnect preserved X, or the reconnect never happened. The
+// second is not hypothetical — moving the generation onto reconnectState.gen
+// left two of these fixtures stamping a gen the gate no longer matched, so the
+// result was dropped as stale and both assertions held because nothing had
+// touched them. Nothing in that diff pointed at the tests.
+//
+// active is the right probe: only finishReconnect clears it on a successful
+// result, and it is cleared for THIS destination, so a result routed to another
+// one cannot satisfy it either.
+func requireReconnectRan(t *testing.T, m Model) {
+	t.Helper()
+	if m.linkOf(testDest).active {
+		t.Fatalf("the reconnect never ran — the result was dropped before finishReconnect, "+
+			"so every assertion below holds vacuously (link state: %+v)", m.linkOf(testDest))
 	}
 }
 
@@ -1257,12 +1280,13 @@ func TestReconnect_DoesNotReopenUpdateNotice(t *testing.T) {
 // is client-independent, so it is left exactly as the user had it.
 func TestReconnect_LeavesDialogStateAlone(t *testing.T) {
 	m := Model{clientGen: 1, attached: attachedTo(testDest), dialog: dialogAbout, dialogCursor: 3,
-		links: oneLink(reconnectState{active: true, attempt: 1})}
-	m.asRemote("gpu01")
+		links: oneLink(reconnectState{active: true, attempt: 1, gen: 1})}
+	m.asRemote(testDest)
 
 	updated, _ := m.Update(redialResultMsg{gen: 1, dest: testDest, client: &failingClient{err: errors.New("unused")}})
 	got := updated.(Model)
 
+	requireReconnectRan(t, got)
 	if got.dialog != dialogAbout {
 		t.Errorf("dialog = %v after reconnect, want dialogAbout (unchanged)", got.dialog)
 	}

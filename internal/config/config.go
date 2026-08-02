@@ -144,6 +144,13 @@ type UIConfig struct {
 	// Alt+Down inside the F1 → log viewer. 0 falls back to the default 40.
 	LogViewerPageLines int  `toml:"log_viewer_page_lines"`
 	ShowDisclaimer     bool `toml:"show_disclaimer"`
+	// SidebarOpen/SidebarWidth control the project sidebar (a reserved left
+	// column listing projects and the active project's panes). These are
+	// screen properties, not session ones — client config, never
+	// workspace.json — so a workspace saved with the sidebar open doesn't
+	// fight a narrower terminal on restore.
+	SidebarOpen  bool `toml:"sidebar_open"`
+	SidebarWidth int  `toml:"sidebar_width"`
 }
 
 type KeybindingsConfig struct {
@@ -248,6 +255,8 @@ func Default() Config {
 			PageScrollLines:    0,  // 0 = half-page (dynamic) — used by terminal pane scrollback
 			LogViewerPageLines: 40, // Alt+Up / Alt+Down jump in F1 → log viewer
 			ShowDisclaimer:     true,
+			SidebarOpen:        false, // closed by default — existing installs keep their pane geometry unchanged
+			SidebarWidth:       22,    // internal/tui.defaultSidebarWidth — config can't import tui, kept in sync by TestUIDefault_SidebarWidthMatchesTUIDefault
 		},
 		MCP: MCPConfig{
 			HighlightDuration: "10s",

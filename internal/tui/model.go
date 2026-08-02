@@ -369,6 +369,16 @@ type Model struct {
 	notifications     *NotificationCenter     // notification sidebar
 	paneHistory       []PaneRef               // navigation history (bounded, 20 max)
 	sidebarFocused    bool                    // true when notification sidebar has keyboard focus
+	// sidebarOpen/sidebarWidth control the PROJECT sidebar (internal/tui/sidebar.go)
+	// — not to be confused with the notification sidebar above. Unlike that one
+	// (a compositor overlay, zero layout width), the project sidebar is a real
+	// reserved left column: its width is subtracted in the layout path
+	// (paneAreaWidth/resizeTabs) so pane rects and PTY sizes always agree with
+	// what gets painted. A screen property, not a session one — loaded from
+	// UIConfig at startup (NewModel), never workspace.json, so a workspace saved
+	// with it open can't fight a narrower terminal on restore.
+	sidebarOpen       bool
+	sidebarWidth      int
 	notesMode         bool                    // true when pane notes editor is open for the active pane
 	notesEditor       *NotesEditor            // active notes editor (nil when notesMode is false)
 	notesPaneFocused  bool                    // true when keyboard input goes to the bound pane (PTY) instead of the notes editor
@@ -522,6 +532,8 @@ func NewModel(client *ipc.Client, cfg config.Config, version string, registry *p
 		migrationPlugins: stalePlugins,
 		perfStats:        newEventLoopStats(),
 		tabDragFromIdx:   -1,
+		sidebarOpen:      cfg.UI.SidebarOpen,
+		sidebarWidth:     cfg.UI.SidebarWidth,
 	}
 	// Migration dialog takes priority over the disclaimer — it blocks
 	// startup until all stale plugins are resolved. Show disclaimer only
@@ -1675,8 +1687,19 @@ func (m Model) popPaneHistory() (tea.Model, tea.Cmd) {
 // NOT reserve layout width, so panes never resize when it toggles. This
 // constant width is what kills the sidebar-driven resize churn that made
 // background claude panes repaint and garble their scrollback.
+//
+// The PROJECT sidebar is the opposite: it is a real reserved left column,
+// so its width IS subtracted here — this is the single source of truth
+// resizeTabs()/View() read, which is what keeps painted pane rects and PTY
+// sizes in agreement when the sidebar toggles.
 func (m Model) paneAreaWidth() int {
-	return m.width
+	return m.width - m.projectSidebarWidth()
+}
+
+// projectSidebarWidth returns the layout width reserved for the project
+// sidebar: 0 when closed or the terminal is too narrow to spare it.
+func (m Model) projectSidebarWidth() int {
+	return sidebarWidth(m.width, m.sidebarOpen, m.sidebarWidth)
 }
 
 // pluginWideCanvas resolves the wide-canvas flag for a pane type via the
@@ -1741,7 +1764,9 @@ const scrollbarHitPadding = 1
 // active tab is in focus mode (notes mode implies focus mode), or nil when the
 // tab is not in focus mode. The geometry mirrors View(): the active pane fills
 // the area below the tab bar and left of the notes panel + notification
-// sidebar (both reserve 0 width in plain focus mode, so the pane is full-width).
+// sidebar (both reserve 0 width in plain focus mode, so the pane is
+// full-width) — and right of the project sidebar, which DOES reserve width
+// whenever it's open (paneAreaWidth), focus mode or not.
 func (m *Model) activePaneRectFocus() *PaneRect {
 	tab := m.activeTabModel()
 	if tab == nil || !tab.FocusMode() {
@@ -1752,13 +1777,14 @@ func (m *Model) activePaneRectFocus() *PaneRect {
 		return nil
 	}
 	// The notification sidebar is an overlay (reserves 0 layout width); only
-	// the notes panel narrows the pane area.
+	// the notes panel narrows the pane area further, on top of the project
+	// sidebar's own reservation.
 	notesW := m.notesPanelWidth()
 	return &PaneRect{
 		Pane: pane,
 		OX:   0,
 		OY:   1, // tab bar occupies row 0
-		W:    m.width - notesW,
+		W:    m.paneAreaWidth() - notesW,
 		H:    m.height - chromeHeight,
 	}
 }
@@ -1776,7 +1802,7 @@ func (m *Model) activePaneRect() *PaneRect {
 	tabH := m.height - chromeHeight
 	notesW := m.notesPanelWidth()
 	var rects []PaneRect
-	tab.Root.CollectRects(0, 1, m.width-notesW, tabH, &rects)
+	tab.Root.CollectRects(0, 1, m.paneAreaWidth()-notesW, tabH, &rects)
 	for i := range rects {
 		if rects[i].Pane != nil && rects[i].Pane.ID == tab.ActivePane {
 			return &rects[i]
@@ -1803,7 +1829,7 @@ func (m *Model) paneRectAt(x, y int) *PaneRect {
 	tabH := m.height - chromeHeight
 	notesW := m.notesPanelWidth()
 	var rects []PaneRect
-	tab.Root.CollectRects(0, 1, m.width-notesW, tabH, &rects)
+	tab.Root.CollectRects(0, 1, m.paneAreaWidth()-notesW, tabH, &rects)
 	for i := range rects {
 		r := &rects[i]
 		if r.Pane != nil && x >= r.OX && x < r.OX+r.W && y >= r.OY && y < r.OY+r.H {
@@ -1835,7 +1861,7 @@ func (m *Model) hitTestScrollbar(x, y int) *PaneRect {
 	} else if tab.Root != nil {
 		tabH := m.height - chromeHeight
 		notesW := m.notesPanelWidth()
-		rect = tab.Root.FindPaneRectAt(x, y, 0, 1, m.width-notesW, tabH)
+		rect = tab.Root.FindPaneRectAt(x, y, 0, 1, m.paneAreaWidth()-notesW, tabH)
 	}
 	if rect == nil {
 		return nil
@@ -2542,12 +2568,16 @@ func (m Model) View() tea.View {
 		// (overlayRight) — it takes no layout width, so panes never
 		// resize when it toggles. Layout math single source of truth:
 		// notesPanelWidth / sidebarOverlayWidth (notesEditorBox and the
-		// mouse handlers stay in lockstep with this renderer).
+		// mouse handlers stay in lockstep with this renderer). The project
+		// sidebar is different — it DOES reserve layout width
+		// (paneAreaWidth), so it is joined on the LEFT before any of the
+		// above rather than composited over anything.
 		tabH := m.height - chromeHeight
 		notesW := m.notesPanelWidth()
+		projSidebarW := m.projectSidebarWidth()
 		if tab := m.activeTabModel(); tab != nil {
-			tab.SetCanvas(m.width, tabH)
-			tab.Resize(m.width-notesW, tabH)
+			tab.SetCanvas(m.paneAreaWidth(), tabH)
+			tab.Resize(m.paneAreaWidth()-notesW, tabH)
 			// Pass per-frame state to panes for rendering
 			if tab.Root != nil {
 				for _, pane := range tab.Leaves() {
@@ -2564,6 +2594,9 @@ func (m Model) View() tea.View {
 			if sw := m.sidebarOverlayWidth(); sw > 0 {
 				m.notifications.focused = m.sidebarFocused
 				tabContent = overlayRight(tabContent, m.notifications.View(tabH), m.width, sw)
+			}
+			if projSidebarW > 0 {
+				tabContent = lipgloss.JoinHorizontal(lipgloss.Top, m.renderSidebar(tabH), tabContent)
 			}
 			if m.ctxMenu.open() {
 				// ctxMenu coords are screen rows; tabContent starts at
@@ -3667,9 +3700,11 @@ func (m *Model) replayBufSize() int {
 func (m *Model) resizeTabs() {
 	tabH := m.height - chromeHeight
 	for _, tab := range m.allTabs() {
-		// Canvas = full window area, independent of notes squeeze, so
-		// wide-canvas panes only ever resize on a real window resize.
-		tab.SetCanvas(m.width, tabH)
+		// Canvas is independent of the notes squeeze (a compositor crop) but
+		// NOT of the project sidebar — the sidebar is a real reservation of
+		// screen estate, so from a wide-canvas pane's perspective toggling it
+		// is indistinguishable from a real window resize.
+		tab.SetCanvas(m.paneAreaWidth(), tabH)
 		tab.Resize(m.paneAreaWidth(), tabH)
 	}
 }
@@ -4175,9 +4210,12 @@ func attachCWD(remoteDest, localCWD string) string {
 
 // attachMessage builds the MsgAttach describing this client's geometry.
 func (m Model) attachMessage() *ipc.Message {
-	// Subtract chrome (tab bar + status bar), then pane border (2)
+	// Subtract chrome (tab bar + status bar), the project sidebar (if open),
+	// then pane border (2) — the same reservation resizeTabs applies, so the
+	// very first spawned pane isn't sized wider than what's about to be
+	// painted for it.
 	tabH := m.height - chromeHeight
-	cols := m.width - 2
+	cols := m.paneAreaWidth() - 2
 	rows := tabH - 2
 	if cols < 1 {
 		cols = 1

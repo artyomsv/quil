@@ -84,6 +84,36 @@ func (m *Model) requestBrowseDir(path, child, selectName string) tea.Cmd {
 	)
 }
 
+// requestBrowseDirForDest is requestBrowseDir stamped for an explicit
+// destination rather than sent unstamped. requestBrowseDir's plain send
+// resolves to whatever project is CURRENTLY ACTIVE (Router.Send's unstamped
+// fallback) — correct for the pane-setup dialog, where a browsed CWD always
+// belongs to the pane about to be created in the active project. It is the
+// wrong answer for the project dialog's root-dir field: Rename can target a
+// BACKGROUND project via the sidebar context menu without switching to it,
+// so the browse has to name that project's daemon explicitly. Also clears
+// browseCandidates like browseTo does — a stale pane-setup pre-fill chain
+// left in flight would otherwise let applyBrowseResponse's fallback re-issue
+// one of ITS candidates on a failure here, silently hijacking this listing.
+func (m *Model) requestBrowseDirForDest(dest, path, child, selectName string) tea.Cmd {
+	m.browseCandidates = nil
+	gen := m.nextReqGen()
+	m.browse = browseState{path: path, child: child, pending: true, select_: selectName, gen: gen}
+	return tea.Batch(
+		func() tea.Msg {
+			msg, err := ipc.NewMessage(ipc.MsgBrowseDirReq, ipc.BrowseDirReqPayload{Path: path, Child: child})
+			if err != nil {
+				log.Printf("browse dir: encode: %v", err)
+				return nil
+			}
+			msg.ID = gen
+			m.sendForDest(dest, msg)
+			return nil
+		},
+		browseTimeoutCmd(path, child, gen),
+	)
+}
+
 func browseTimeoutCmd(path, child, gen string) tea.Cmd {
 	return tea.Tick(browseTimeout, func(time.Time) tea.Msg {
 		return browseTimeoutMsg{path: path, child: child, gen: gen}

@@ -25,6 +25,10 @@ const (
 	ctxActAttention
 	ctxActRestart
 	ctxActClose
+	// Project-row actions (Task 13) — only ever set on a menu opened via
+	// openProjectCtxMenu, never mixed into buildCtxMenuItems' pane rows.
+	ctxActRenameProject
+	ctxActDestroyProject
 )
 
 // ctxMenuItem is one row of the menu. Disabled rows render greyed, are
@@ -41,11 +45,20 @@ type ctxMenuItem struct {
 // ctxMenuState is the live state of the pane context menu — a compositor
 // overlay (overlayAt), NOT a dialogScreen: dialogs are modal and centered,
 // this popup is positional and dismiss-on-outside-click. Zero value = closed.
+//
+// projectID (Task 13) is the sidebar's project-row menu sharing this same
+// state/render/hit-test machinery: paneID and projectID are mutually
+// exclusive target discriminators, never both set. A second dedicated struct
+// was considered and rejected — none of the geometry/render/hit-test helpers
+// below (innerWidth, boxSize, ctxMenuPos, ctxMenuHitRow, renderCtxMenu,
+// nextEnabled…) touch paneID at all, so duplicating them for two rows would
+// only buy an unused field.
 type ctxMenuState struct {
-	paneID string // target pane; "" = closed
-	title  string // pane display name shown as the header row
-	x, y   int    // clamped top-left of the rendered box (screen coords)
-	cursor int    // index into items; always on an enabled item (or -1)
+	paneID    string // target pane; "" when the target is a project (or closed)
+	projectID string // target project; "" when the target is a pane (or closed)
+	title     string // pane/project display name shown as the header row
+	x, y      int    // clamped top-left of the rendered box (screen coords)
+	cursor    int    // index into items; always on an enabled item (or -1)
 	// spaced honors the items' gapAfter group separators (a blank row
 	// between action groups — near-misses at group edges land on an inert
 	// spacer, and the destructive group stays visually isolated).
@@ -55,7 +68,7 @@ type ctxMenuState struct {
 	items  []ctxMenuItem
 }
 
-func (s ctxMenuState) open() bool { return s.paneID != "" }
+func (s ctxMenuState) open() bool { return s.paneID != "" || s.projectID != "" }
 
 // ctxMenuTitleCap bounds how far the header (pane display name — often a
 // CWD) may widen the box beyond the widest item label. Longer titles are
@@ -342,6 +355,42 @@ func (m *Model) openCtxMenu(pane *PaneModel, anchorX, anchorY int) {
 	pane.ctxTargetHighlight = true
 }
 
+// buildProjectCtxMenuItems is the sidebar project row's menu: Rename and
+// Destroy. No availability gates — unlike the pane menu's history/lazygit
+// rows, both actions are always valid for any project the sidebar can show.
+func buildProjectCtxMenuItems() []ctxMenuItem {
+	return []ctxMenuItem{
+		{ctxActRenameProject, "Rename project", true, false},
+		{ctxActDestroyProject, "Destroy project…", true, false},
+	}
+}
+
+// openProjectCtxMenu opens (or re-targets) the sidebar's project-row menu,
+// mirroring openCtxMenu but keyed by projectID instead of paneID — see
+// ctxMenuState's doc comment for why the two share one type. No
+// ctxTargetHighlight equivalent: that field lives on PaneModel and marks the
+// pane border, which has no project analogue (the active-project marker in
+// the sidebar already shows which row is selected).
+func (m *Model) openProjectCtxMenu(p *ProjectModel, anchorX, anchorY int) {
+	s := ctxMenuState{
+		projectID: p.ID,
+		title:     p.Name,
+		spaced:    false,
+		cursor:    -1,
+		items:     buildProjectCtxMenuItems(),
+	}
+	s.cursor = firstEnabled(s.items)
+	w, h := s.boxSize()
+	if w > m.width || h > m.height-2 {
+		return
+	}
+	m.closeCtxMenu()
+	m.clearDragState()
+	m.selection = nil
+	s.x, s.y = ctxMenuPos(anchorX, anchorY, w, h, m.width, m.height)
+	m.ctxMenu = s
+}
+
 // closeCtxMenu closes the menu and clears the target-pane highlight. Safe to
 // call when already closed; nil-safe when the target pane has vanished.
 func (m *Model) closeCtxMenu() {
@@ -408,6 +457,24 @@ func (m Model) handleCtxMenuKey(key string) (tea.Model, tea.Cmd) {
 // handler logic the keybinding cases use. Destructive items keep their
 // confirm dialogs.
 func (m Model) executeCtxMenuItem(item ctxMenuItem) (tea.Model, tea.Cmd) {
+	// Project row (Task 13): branches out before any of the pane-focus
+	// bookkeeping below, which assumes a pane target throughout (tab lookup,
+	// ActivePane sync). Both project actions keep the destructive one behind
+	// the shared confirm dialog, same as ctxActClose/ctxActRestart.
+	if projectID := m.ctxMenu.projectID; projectID != "" {
+		m.closeCtxMenu()
+		if !item.enabled {
+			return m, nil
+		}
+		switch item.id {
+		case ctxActRenameProject:
+			return m.beginProjectRename(projectID)
+		case ctxActDestroyProject:
+			return m, m.confirmDestroyProject(projectID)
+		}
+		return m, nil
+	}
+
 	paneID := m.ctxMenu.paneID
 	m.closeCtxMenu()
 	if !item.enabled || paneID == "" {

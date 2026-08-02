@@ -283,6 +283,13 @@ const confirmKindRestartPane = "restart-pane"
 // cmd/quil/main.go runs the swap after tea.Program exits.
 const confirmKindApplyUpdate = "apply-update"
 
+// confirmKindDestroyProject is the discriminator on confirmKind for the
+// "destroy project" confirm (sidebar context menu → Destroy project…).
+// Destroying a project takes every tab and pane under it, so — unlike a
+// single pane/tab close — it never fires straight off a keystroke; see
+// confirmDestroyProject in projectdialog.go.
+const confirmKindDestroyProject = "destroy-project"
+
 func shortcutsList(m *Model) []struct{ key, desc string } {
 	kb := m.cfg.Keybindings
 	// kbDisplay renders comma-separated multi-bindings as "a / b" so the
@@ -394,6 +401,8 @@ func (m Model) handleDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.handleUpdateNoticeKey(msg)
 	case dialogCommandPalette:
 		return m.handleCommandPaletteKey(msg)
+	case dialogProjectNew, dialogProjectRename:
+		return m.handleProjectDialogKey(msg)
 	}
 	return m, nil
 }
@@ -695,6 +704,28 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 
+		// Destroy-project: fires MsgDestroyProject at the OWNING daemon —
+		// resolved here, not inside confirmDestroyProject, for the same
+		// reason the pane/tab dest is resolved below rather than closed over:
+		// a broadcast between opening the confirm and accepting it could have
+		// pruned the project. sendForDest, not a raw Origin assignment — see
+		// its doc comment on why an unstamped local send would be wrong the
+		// moment a remote project is active.
+		if kind == confirmKindDestroyProject {
+			m.dialog = dialogNone
+			if m.client != nil {
+				req, reqErr := ipc.NewMessage(ipc.MsgDestroyProject, ipc.DestroyProjectPayload{ProjectID: id})
+				if reqErr != nil {
+					log.Printf("destroy project %s: marshal: %v", id, reqErr)
+					return m, nil
+				}
+				if sendErr := m.sendForDest(m.destOfProject(id), req); sendErr != nil {
+					log.Printf("destroy project %s: send: %v", id, sendErr)
+				}
+			}
+			return m, nil
+		}
+
 		// Handle instance deletion locally (no IPC needed)
 		if kind == "instance" {
 			pluginName := m.selectedPlugin
@@ -844,6 +875,8 @@ func (m Model) renderDialog() string {
 	case dialogCommandPalette:
 		width = paletteWidth
 		content = renderCommandPalette(m)
+	case dialogProjectNew, dialogProjectRename:
+		content = m.renderProjectDialog()
 	}
 
 	// Never render wider than the terminal (border adds +2 outside Width).
@@ -1046,6 +1079,10 @@ func (m Model) renderConfirmDialog() string {
 		b.WriteString("  " + dialogSubtle.Render("The TUI restarts and the daemon respawns all panes."))
 		b.WriteString("\n")
 		b.WriteString("  " + dialogSubtle.Render("Claude sessions resume; running shell commands are killed."))
+	case confirmKindDestroyProject:
+		b.WriteString("  " + dialogNormal.Render(fmt.Sprintf("Destroy project %q?", m.confirmName)))
+		b.WriteString("\n\n")
+		b.WriteString("  " + dialogSubtle.Render("Every tab and pane in this project is destroyed too."))
 	default:
 		label := fmt.Sprintf("Close %s %q?", m.confirmKind, m.confirmName)
 		b.WriteString("  " + dialogNormal.Render(label))

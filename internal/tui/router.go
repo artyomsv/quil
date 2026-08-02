@@ -329,3 +329,15 @@ func (m *Model) destOfTab(tabID string) string {
 	}
 	return m.activeDest()
 }
+
+// destOfProject resolves which daemon owns a project, for call sites that
+// hold only its ID — the rename/destroy confirm dialogs resolve back to a
+// *ProjectModel at SEND time rather than closing over a pointer that a
+// workspace reconciliation could have invalidated while the dialog was open.
+// Falls back to the active dest, like destOfPane and destOfTab.
+func (m *Model) destOfProject(id string) string {
+	if p := m.projectByID(id); p != nil {
+		return p.Dest
+	}
+	return m.activeDest()
+}

@@ -259,6 +259,21 @@ func indexOfTab(tabs []*TabModel, id string) int {
 	return 0
 }
 
+// projectByID returns the project with the given ID, or nil. Unlike
+// indexOfProject (an always-somewhere-valid fallback for an active-project
+// pointer), a caller resolving an ID from a confirm dialog or the sidebar
+// context menu needs to know when the project is simply gone — the item
+// destroyed itself, or a workspace reconciliation removed it, while the
+// dialog sat open.
+func (m *Model) projectByID(id string) *ProjectModel {
+	for _, p := range m.projects {
+		if p.ID == id {
+			return p
+		}
+	}
+	return nil
+}
+
 // indexOfProject is indexOfTab for the project list, with the same
 // always-somewhere-valid contract.
 func indexOfProject(projects []*ProjectModel, id string) int {

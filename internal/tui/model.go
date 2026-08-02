@@ -238,6 +238,8 @@ const (
 	dialogCommandHistory
 	dialogUpdateNotice
 	dialogCommandPalette
+	dialogProjectNew    // Alt+Shift+N: create a project (Task 13)
+	dialogProjectRename // sidebar context menu: rename a project (Task 13)
 )
 
 // tuiClient is the subset of *ipc.Client the TUI uses on the Model. Defined
@@ -363,9 +365,28 @@ type Model struct {
 	sessionTruncated  bool                    // daemon capped the listing
 	selectedSessionID string                  // committed resume target (empty = fresh session)
 	sessionDetail     sessionDetailPanel      // the picker's "i" panel (zero value = closed)
-	tomlEditor        *TextEditor             // active TOML editor (nil when not editing)
-	selection         *Selection              // active text selection (nil when none)
-	mouseDown         bool                    // true while left mouse button is held
+
+	// Project New/Rename dialog state (Task 13). Shared by both dialogs —
+	// m.dialog tells them apart, and Rename pre-fills projectFormID/Name from
+	// the target project. The root-dir field reuses the SAME cwdBrowse* /
+	// browse fields the pane-setup dialog's CWD field uses (they hold
+	// whatever the currently open dialog put there — see projectdialog.go):
+	// its committed value at submit time is simply m.cwdBrowseDir, exactly
+	// like submitSetupDialog's selectedCWD capture.
+	projectFormID     string // "" for New; the project ID being edited for Rename
+	projectFormName   string // Name field's live text
+	projectFormCursor int    // focused row: 0 = name, 1 = root dir, 2 = submit button
+	projectFormErr    string // validation message shown under the form (e.g. "name required")
+	// projectFormDest is the daemon the root-dir browser asks — the OWNING
+	// project's dest for Rename (which may not be the active project; the
+	// sidebar context menu can target a background one), the active dest for
+	// New. Unlike the pane-setup dialog's CWD field, this can't rely on
+	// requestBrowseDir's unstamped-resolves-to-active-dest fallback.
+	projectFormDest string
+
+	tomlEditor *TextEditor // active TOML editor (nil when not editing)
+	selection  *Selection  // active text selection (nil when none)
+	mouseDown  bool        // true while left mouse button is held
 	mouseStartX       int                     // screen X of mouse press
 	mouseStartY       int                     // screen Y of mouse press
 	configChanged     bool                    // true when config needs saving on exit
@@ -867,9 +888,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// the user never clicked on.
 		if m.projectSidebarSwallowsMouse(msg.X, msg.Y) {
 			m.clearDragState()
-			if msg.Button == tea.MouseLeft {
+			switch msg.Button {
+			case tea.MouseLeft:
 				if kind, idx := m.sidebarHit(msg.X, msg.Y); kind != "" {
 					return m.activateSidebarRow(kind, idx)
+				}
+			case tea.MouseRight:
+				// Rename/Destroy for a project row (Task 13) — the pane
+				// context menu below never reaches here, the sidebar swallow
+				// returns first, so a project needs its own open call.
+				if kind, idx := m.sidebarHit(msg.X, msg.Y); kind == sidebarRowProject && idx >= 0 && idx < len(m.projects) {
+					m.openProjectCtxMenu(m.projects[idx], msg.X, msg.Y)
 				}
 			}
 			return m, nil
@@ -2543,7 +2572,7 @@ func (m Model) notesKeyExempt(key string) bool {
 		// the notes editor.
 		kb.RestartPane,
 		// Tools and dialogs.
-		kb.JSONTransform, kb.QuickActions, kb.CommandHistory,
+		kb.JSONTransform, kb.QuickActions, kb.CommandHistory, kb.NewProject,
 	}
 	for _, b := range exempt {
 		if kbMatches(key, b) {
@@ -2878,6 +2907,8 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.openHistoryForActivePane()
 	case kbMatches(key, kb.QuickActions):
 		return m.openQuickActionsMenu()
+	case kbMatches(key, kb.NewProject):
+		return m.openNewProjectDialog()
 	}
 
 	// Sidebar focused: route keys to notification center

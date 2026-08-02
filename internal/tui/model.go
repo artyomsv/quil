@@ -981,6 +981,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// strip is swallowed, not just its actionable rows: letting a click
 		// on a heading fall through would arm a drag-selection at a column
 		// the user never clicked on.
+		//
+		// It must also stay ahead of the Y==0 tab-bar branch below, which
+		// is a bare row test: the tab bar starts at the sidebar's right
+		// edge, so at row 0 the sidebar's own PROJECTS heading is what the
+		// user clicked, and the strip claims it here.
 		if m.projectSidebarSwallowsMouse(msg.X, msg.Y) {
 			m.clearDragState()
 			switch msg.Button {
@@ -1852,6 +1857,20 @@ func (m Model) paneAreaWidth() int {
 // sidebar: 0 when closed or the terminal is too narrow to spare it.
 func (m Model) projectSidebarWidth() int {
 	return sidebarWidth(m.width, m.sidebarOpen, m.sidebarWidth)
+}
+
+// sidebarContentHeight is how many screen rows the project sidebar spans:
+// everything except the status bar. The TAB BAR row is included — the sidebar
+// is a full-height left column and the tab bar sits inside the pane column
+// beside it, so sidebar row k is screen row k (chromeHeight, which excludes
+// both, is the PANE area's height and is the wrong budget here).
+//
+// renderSidebar, sidebarRowAt and activateSidebarRow all read this one
+// value: sidebarVisibleRows caps against it and sidebarRowAt indexes the
+// capped slice, so a height that differs between paint and hit test resolves
+// clicks to a row the user never saw.
+func (m Model) sidebarContentHeight() int {
+	return m.height - 1
 }
 
 // pluginWideCanvas resolves the wide-canvas flag for a pane type via the
@@ -2764,9 +2783,6 @@ func (m Model) View() tea.View {
 	} else {
 		var sections []string
 
-		// Tab bar (1 line)
-		sections = append(sections, m.renderTabBar())
-
 		// Active tab content + optional notes editor; the notification
 		// sidebar is composited OVER the right edge afterwards
 		// (overlayRight) — it takes no layout width, so panes never
@@ -2818,15 +2834,24 @@ func (m Model) View() tea.View {
 			// the pane area's right edge is still the screen's.
 			tabContent = overlayRight(tabContent, m.notifications.View(tabH), m.paneAreaWidth(), sw)
 		}
+		// The tab bar labels the PANE column, so it is joined above the panes
+		// and INSIDE that column — one line of paneAreaWidth() starting at
+		// screen column projectSidebarWidth(). Joining it as its own
+		// full-width section above everything instead put row 0 over the
+		// project sidebar too, so the tabs sat flush against the sidebar's
+		// left edge rather than above the panes they name. The sidebar is a
+		// full-height left column beside the pair, which is what puts its
+		// PROJECTS heading on the same screen row as the tab names.
+		paneArea := lipgloss.JoinVertical(lipgloss.Left, m.renderTabBar(), tabContent)
 		if projSidebarW > 0 {
-			tabContent = lipgloss.JoinHorizontal(lipgloss.Top, m.renderSidebar(tabH), tabContent)
+			paneArea = lipgloss.JoinHorizontal(lipgloss.Top, m.renderSidebar(m.sidebarContentHeight()), paneArea)
 		}
 		if m.ctxMenu.open() {
-			// ctxMenu coords are screen rows; tabContent starts at
-			// screen row 1 (tab bar above), so shift by -1.
-			tabContent = overlayAt(tabContent, renderCtxMenu(m.ctxMenu), m.ctxMenu.x, m.ctxMenu.y-1, m.width)
+			// ctxMenu coords are screen rows and paneArea's first line IS
+			// screen row 0 (the tab bar), so no shift.
+			paneArea = overlayAt(paneArea, renderCtxMenu(m.ctxMenu), m.ctxMenu.x, m.ctxMenu.y, m.width)
 		}
-		sections = append(sections, tabContent)
+		sections = append(sections, paneArea)
 
 		// Status bar
 		sections = append(sections, m.renderStatusBar())
@@ -4084,10 +4109,19 @@ func (m Model) tabStyle(idx int) lipgloss.Style {
 	return inactiveTabStyle
 }
 
+// renderTabBar renders the tab strip that sits directly above the panes.
+//
+// It is sized to paneAreaWidth(), NOT the terminal: View() joins it into the
+// pane COLUMN (above tabContent, right of the project sidebar), so its first
+// painted cell is screen column projectSidebarWidth() and it has exactly the
+// panes' width to spend. Sizing it to m.width instead made the bar overhang
+// the sidebar by that many columns. hitTestTab mirrors this budget — which
+// tabs overflow depends on it, so the two must read the same width.
 func (m Model) renderTabBar() string {
+	barW := m.paneAreaWidth()
 	tabs := m.curTabs()
 	if len(tabs) == 0 {
-		return lipgloss.NewStyle().Width(m.width).Render("")
+		return lipgloss.NewStyle().Width(barW).Render("")
 	}
 
 	type renderedTab struct {
@@ -4113,14 +4147,14 @@ func (m Model) renderTabBar() string {
 		}
 	}
 
-	if totalW <= m.width {
+	if totalW <= barW {
 		// Everything fits
 		tabs := make([]string, len(all))
 		for i, rt := range all {
 			tabs[i] = rt.text
 		}
 		bar := strings.Join(tabs, " ")
-		return lipgloss.NewStyle().Width(m.width).Render(bar)
+		return lipgloss.NewStyle().Width(barW).Render(bar)
 	}
 
 	// Overflow: include active tab, expand outward, show indicator for hidden
@@ -4138,7 +4172,7 @@ func (m Model) renderTabBar() string {
 	for left >= 0 || right < len(tabs) {
 		if left >= 0 {
 			need := all[left].width + 1 // +1 for separator
-			if usedW+need+indicatorReserve <= m.width {
+			if usedW+need+indicatorReserve <= barW {
 				included[left] = true
 				usedW += need
 				left--
@@ -4148,7 +4182,7 @@ func (m Model) renderTabBar() string {
 		}
 		if right < len(tabs) {
 			need := all[right].width + 1
-			if usedW+need+indicatorReserve <= m.width {
+			if usedW+need+indicatorReserve <= barW {
 				included[right] = true
 				usedW += need
 				right++
@@ -4178,12 +4212,25 @@ func (m Model) renderTabBar() string {
 		bar += lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Render(indicator)
 	}
 
-	return lipgloss.NewStyle().Width(m.width).Render(bar)
+	return lipgloss.NewStyle().Width(barW).Render(bar)
 }
 
 // hitTestTab returns the tab index at screen X coordinate, or -1 if none.
 // Mirrors renderTabBar() width/overflow logic exactly.
+//
+// x arrives SCREEN-absolute, and the bar's first cell is screen column
+// projectSidebarWidth() (View() joins it into the pane column, right of the
+// project sidebar) — so the offset comes off first and everything below runs
+// in bar-local columns against the same paneAreaWidth() budget renderTabBar
+// spends. Columns inside the sidebar answer -1: the sidebar swallows them
+// before Update ever reaches the tab-bar branch, and answering with a tab
+// would make a click on the PROJECTS heading switch tabs.
 func (m *Model) hitTestTab(x int) int {
+	barW := m.paneAreaWidth()
+	x -= m.projectSidebarWidth()
+	if x < 0 {
+		return -1
+	}
 	tabs := m.curTabs()
 	if len(tabs) == 0 {
 		return -1
@@ -4213,7 +4260,7 @@ func (m *Model) hitTestTab(x int) int {
 	}
 
 	included := make([]bool, len(tabs))
-	if totalW <= m.width {
+	if totalW <= barW {
 		for i := range included {
 			included[i] = true
 		}
@@ -4228,7 +4275,7 @@ func (m *Model) hitTestTab(x int) int {
 		for left >= 0 || right < len(tabs) {
 			if left >= 0 {
 				need := all[left].width + 1
-				if usedW+need+indicatorReserve <= m.width {
+				if usedW+need+indicatorReserve <= barW {
 					included[left] = true
 					usedW += need
 					left--
@@ -4238,7 +4285,7 @@ func (m *Model) hitTestTab(x int) int {
 			}
 			if right < len(tabs) {
 				need := all[right].width + 1
-				if usedW+need+indicatorReserve <= m.width {
+				if usedW+need+indicatorReserve <= barW {
 					included[right] = true
 					usedW += need
 					right++

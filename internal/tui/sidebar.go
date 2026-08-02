@@ -140,9 +140,10 @@ func (m *Model) sidebarRows(w int) []sidebarRow {
 	return rows
 }
 
-// renderSidebar renders the project sidebar. height is the number of content
-// rows to fill — the tab bar and status bar are drawn separately by View()
-// and are not part of this block.
+// renderSidebar renders the project sidebar. height is the number of screen
+// rows to fill, and callers pass sidebarContentHeight() — the strip spans the
+// TAB BAR row too (the bar is joined inside the pane column, to the right of
+// this block), so only the status bar is drawn separately by View().
 //
 // The width comes from projectSidebarWidth(), NOT the raw m.sidebarWidth
 // field: that field is the CONFIGURED value, and sidebarWidth() is what
@@ -199,22 +200,23 @@ func (m *Model) sidebarVisibleRows(w, height int) []sidebarRow {
 }
 
 // sidebarRowAt resolves the project-sidebar row under a SCREEN coordinate.
-// View() joins the sidebar into tabContent, which starts at screen row 1
-// (row 0 is the full-width tab bar) and ends before the status bar, so
-// screen row y is sidebar row y-1.
+// View() joins the sidebar to the LEFT of the pane column — tab bar included
+// — so the strip starts at screen row 0 and ends before the status bar, and
+// screen row y is sidebar row y. Its first row is the PROJECTS heading,
+// which is why the design puts that heading level with the tab names.
 func (m *Model) sidebarRowAt(x, y int) (sidebarRow, bool) {
 	w := m.projectSidebarWidth()
 	if w <= 0 || x < 0 || x >= w {
 		return sidebarRow{}, false
 	}
-	if y < 1 || y >= m.height-1 {
+	if y < 0 || y >= m.height-1 {
 		return sidebarRow{}, false
 	}
 	// Same height View() passes renderSidebar, so paint and hit test cap
 	// at the identical row.
-	rows := m.sidebarVisibleRows(w, m.height-chromeHeight)
-	if i := y - 1; i < len(rows) {
-		return rows[i], true
+	rows := m.sidebarVisibleRows(w, m.sidebarContentHeight())
+	if y < len(rows) {
+		return rows[y], true
 	}
 	return sidebarRow{}, false
 }
@@ -236,11 +238,16 @@ func (m *Model) sidebarHit(x, y int) (kind string, index int) {
 // chrome rows resolve to no action but must still be swallowed, because the
 // pane area now starts at column projectSidebarWidth() and letting the press
 // fall through would arm a drag-selection at a column the user never
-// clicked. Row 0 (tab bar) and the last row (status bar) are exempt — both
-// are drawn full width, above and below the sidebar.
+// clicked.
+//
+// Row 0 is INCLUDED: the tab bar no longer spans the frame, it starts where
+// the sidebar ends, so the sidebar's own first row occupies row 0 in these
+// columns. Excluding it let a click on the PROJECTS heading reach the
+// Y==0 tab-bar branch in Update and switch tabs. Only the last row (the
+// status bar, still drawn full width beneath the sidebar) is exempt.
 func (m Model) projectSidebarSwallowsMouse(x, y int) bool {
 	w := m.projectSidebarWidth()
-	return w > 0 && x >= 0 && x < w && y >= 1 && y < m.height-1
+	return w > 0 && x >= 0 && x < w && y >= 0 && y < m.height-1
 }
 
 // sidebarHeadingStyle / sidebarDimStyle / the state-glyph styles mirror the

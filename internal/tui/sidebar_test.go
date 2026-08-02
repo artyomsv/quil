@@ -85,33 +85,36 @@ func TestSidebarWidthZeroWhenClosedOrNarrow(t *testing.T) {
 // Sidebar hit-testing
 // ---------------------------------------------------------------------------
 
-// Row geometry, once, for every test below: View() draws the full-width tab
-// bar at screen row 0 and joins the sidebar into tabContent underneath it,
-// so sidebar row k is screen row k+1. Row 0 of the sidebar is the PROJECTS
-// heading, so project i sits at screen row i+2.
+// Row geometry, once, for every test below: View() joins the sidebar to the
+// LEFT of the pane column, tab bar included, so the strip starts at screen
+// row 0 and sidebar row k is screen row k. Row 0 is the PROJECTS heading —
+// level with the tab names, as the design's mockup draws it — so project i
+// sits at screen row i+1.
 func TestClickingProjectRowSwitchesProject(t *testing.T) {
 	m := Model{
 		projects:     []*ProjectModel{{ID: "proj-a", Name: "alpha"}, {ID: "proj-b", Name: "beta"}},
 		sidebarOpen:  true,
 		sidebarWidth: 22, width: 200, height: 40,
 	}
-	if kind, idx := m.sidebarHit(3, 1); kind != "" {
+	if kind, idx := m.sidebarHit(3, 0); kind != "" {
 		t.Fatalf("the PROJECTS heading is chrome, got (%q, %d)", kind, idx)
 	}
-	if kind, idx := m.sidebarHit(3, 2); kind != sidebarRowProject || idx != 0 {
-		t.Fatalf("sidebarHit(3, 2) = (%q, %d), want (project, 0)", kind, idx)
+	if kind, idx := m.sidebarHit(3, 1); kind != sidebarRowProject || idx != 0 {
+		t.Fatalf("sidebarHit(3, 1) = (%q, %d), want (project, 0)", kind, idx)
 	}
-	kind, idx := m.sidebarHit(3, 3) // second project row, under the heading
+	kind, idx := m.sidebarHit(3, 2) // second project row, under the heading
 	if kind != sidebarRowProject || idx != 1 {
 		t.Fatalf("sidebarHit = (%q, %d), want (project, 1)", kind, idx)
 	}
-	// The tab bar and the status bar are drawn full width, above and below
-	// the sidebar — a press on either belongs to them.
-	if kind, _ := m.sidebarHit(3, 0); kind != "" {
-		t.Error("row 0 is the tab bar, not the sidebar")
-	}
+	// The status bar is still drawn full width beneath the sidebar — a press
+	// on it belongs to the status bar.
 	if kind, _ := m.sidebarHit(3, m.height-1); kind != "" {
 		t.Error("the last row is the status bar, not the sidebar")
+	}
+	// The tab bar no longer spans the frame: it starts where the sidebar
+	// ends, so row 0 in these columns is the sidebar's, not the bar's.
+	if !m.projectSidebarSwallowsMouse(3, 0) {
+		t.Error("row 0 inside the sidebar's columns must belong to the sidebar")
 	}
 }
 
@@ -146,14 +149,14 @@ func TestSidebarHitAgreesWithWhatIsPainted(t *testing.T) {
 		sidebarOpen:  true,
 		sidebarWidth: 22, width: 200, height: 40,
 	}
-	lines := strings.Split(m.renderSidebar(m.height-chromeHeight), "\n")
-	const screenY = 3
+	lines := strings.Split(m.renderSidebar(m.sidebarContentHeight()), "\n")
+	const screenY = 2
 	kind, idx := m.sidebarHit(3, screenY)
 	if kind != sidebarRowProject || idx != 1 {
 		t.Fatalf("sidebarHit(3, %d) = (%q, %d), want (project, 1)", screenY, kind, idx)
 	}
-	if got := lines[screenY-1]; !strings.Contains(got, "beta") {
-		t.Fatalf("painted sidebar row %d = %q, but the hit test calls it project 1 (beta)", screenY-1, got)
+	if got := lines[screenY]; !strings.Contains(got, "beta") {
+		t.Fatalf("painted sidebar row %d = %q, but the hit test calls it project 1 (beta)", screenY, got)
 	}
 }
 
@@ -167,12 +170,13 @@ func TestSidebarHitResolvesPaneRows(t *testing.T) {
 		sidebarOpen:  true,
 		sidebarWidth: 22, width: 200, height: 40,
 	}
-	// rows: 0 PROJECTS, 1 alpha, 2 spacer, 3 PANES, 4 tab heading, 5+ panes.
-	if kind, idx := m.sidebarHit(3, 6); kind != sidebarRowPane || idx != 0 {
-		t.Fatalf("sidebarHit(3, 6) = (%q, %d), want (pane, 0)", kind, idx)
+	// rows: 0 PROJECTS, 1 alpha, 2 spacer, 3 PANES, 4 tab heading, 5+ panes —
+	// and sidebar row k is screen row k.
+	if kind, idx := m.sidebarHit(3, 5); kind != sidebarRowPane || idx != 0 {
+		t.Fatalf("sidebarHit(3, 5) = (%q, %d), want (pane, 0)", kind, idx)
 	}
-	if kind, idx := m.sidebarHit(3, 7); kind != sidebarRowPane || idx != 1 {
-		t.Fatalf("sidebarHit(3, 7) = (%q, %d), want (pane, 1)", kind, idx)
+	if kind, idx := m.sidebarHit(3, 6); kind != sidebarRowPane || idx != 1 {
+		t.Fatalf("sidebarHit(3, 6) = (%q, %d), want (pane, 1)", kind, idx)
 	}
 	// Past the last row there is nothing to hit, but the strip still
 	// swallows — the pane area does not start there.
@@ -296,8 +300,8 @@ func TestClickOnProjectRowSwitchesThroughUpdate(t *testing.T) {
 	m.sidebarWidth = 22
 	m.projects = append(m.projects, &ProjectModel{ID: "proj-b", Name: "beta", Dest: "gpu01"})
 
-	// Screen row 3 is the second project row (row 0 tab bar, row 1 heading).
-	updated, cmd := m.Update(tea.MouseClickMsg{X: 3, Y: 3, Button: tea.MouseLeft})
+	// Screen row 2 is the second project row (row 0 heading, row 1 project 0).
+	updated, cmd := m.Update(tea.MouseClickMsg{X: 3, Y: 2, Button: tea.MouseLeft})
 	if got := updated.(Model).activeProject; got != 1 {
 		t.Fatalf("activeProject = %d, want 1 after clicking the second project row", got)
 	}
@@ -417,6 +421,109 @@ func TestReleaseClickFocusesThePaneUnderTheCursor(t *testing.T) {
 	if got := after.curTabs()[0].ActivePane; got != "p1" {
 		t.Errorf("ActivePane = %q, want p1 — column 45 is inside p1's rect [22, 61); "+
 			"a 0-seeded walk puts it in p2", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tab-bar origin: the bar labels the panes, so it starts where they do
+// ---------------------------------------------------------------------------
+
+// tabBarLabelCol reports the screen column of tab idx's label text in the
+// painted frame's row 0, or -1. Deliberately measured off View()'s real
+// output rather than off renderTabBar/hitTestTab: the shipped bug was that
+// those two agreed with each other perfectly while both described a bar
+// drawn in the wrong place, so a test written against either cannot see it.
+func tabBarLabelCol(t *testing.T, m *Model, idx int) int {
+	t.Helper()
+	row0 := strings.Split(stripANSI(m.View().Content), "\n")[0]
+	// The label carries the "* " active prefix and per-style padding; the
+	// "<n>:<name>" core is the part that is stable across both.
+	return strings.Index(row0, fmt.Sprintf("%d:%s", idx+1, m.curTabs()[idx].Name))
+}
+
+// The shipped bug: View() appended the tab bar as its own FULL-WIDTH vertical
+// section, so screen row 0 spanned the terminal and the sidebar started at row
+// 1. The tabs were painted from column 0 — over the sidebar, not over the
+// panes they name — while the design puts the sidebar's PROJECTS heading on
+// that same row beside them.
+func TestTabBarStartsAtThePaneColumn(t *testing.T) {
+	closed := newSplitDragTestModel(t)
+	open := newSplitDragTestModel(t)
+	open.sidebarOpen = true
+	open.sidebarWidth = 22
+
+	sw := open.projectSidebarWidth()
+	if sw != 22 || closed.projectSidebarWidth() != 0 {
+		t.Fatalf("fixture widths are %d open / %d closed, want 22 / 0",
+			sw, closed.projectSidebarWidth())
+	}
+
+	colClosed := tabBarLabelCol(t, closed, 0)
+	colOpen := tabBarLabelCol(t, open, 0)
+	if colClosed < 0 || colOpen < 0 {
+		t.Fatalf("tab label not painted on row 0 (closed=%d open=%d)", colClosed, colOpen)
+	}
+	if want := colClosed + sw; colOpen != want {
+		t.Errorf("tab label sits at column %d with the sidebar open, want %d "+
+			"(%d closed + %d sidebar) — the bar must start at the pane column, not column 0",
+			colOpen, want, colClosed, sw)
+	}
+
+	// And row 0's left columns are the sidebar's own first row, which is
+	// what makes PROJECTS level with the tab names.
+	row0 := strings.Split(stripANSI(open.View().Content), "\n")[0]
+	wantLeft := stripANSI(strings.Split(open.renderSidebar(open.sidebarContentHeight()), "\n")[0])
+	if got := row0[:sw]; got != wantLeft {
+		t.Errorf("row 0 columns [0,%d) = %q, want the sidebar's first row %q", sw, got, wantLeft)
+	}
+
+	// The hit test has to follow the paint, not just itself: the label's
+	// painted column resolves to its tab, and the sidebar's columns resolve
+	// to no tab at all.
+	if got := open.hitTestTab(colOpen); got != 0 {
+		t.Errorf("hitTestTab(%d) = %d, want 0 — that column is where tab 0 is painted", colOpen, got)
+	}
+	if got := open.hitTestTab(colClosed); got != -1 {
+		t.Errorf("hitTestTab(%d) = %d, want -1 — column %d is inside the sidebar",
+			colClosed, got, colClosed)
+	}
+}
+
+// The bar's WIDTH moves with its origin: it has paneAreaWidth() to spend, not
+// the terminal's. A budget left at m.width overflows the frame by the
+// sidebar's columns, and — because the same budget decides which tabs are
+// dropped — silently paints tabs that no longer fit.
+func TestTabBarFitsThePaneColumnWhenTabsOverflow(t *testing.T) {
+	names := make([]string, 0, 12)
+	for i := 0; i < 12; i++ {
+		names = append(names, fmt.Sprintf("tab-name-%d", i))
+	}
+	m := newModelForTest(names, 0)
+	m.notifications = NewNotificationCenter(30, 200)
+	m.width, m.height = 100, 40
+	m.sidebarOpen = true
+	m.sidebarWidth = 22
+	m.projects[0].Name = "alpha"
+
+	bar := m.renderTabBar()
+	if got := lipgloss.Width(bar); got != m.paneAreaWidth() {
+		t.Errorf("tab bar is %d cells, want paneAreaWidth = %d", got, m.paneAreaWidth())
+	}
+	if strings.Contains(bar, "\n") {
+		t.Fatal("the tab bar wrapped onto a second line — every row below it shifts")
+	}
+	// Control: the fixture must actually overflow the pane column, or the
+	// budget under test is never consulted.
+	if !strings.Contains(stripANSI(bar), "more»") {
+		t.Fatalf("fixture does not overflow paneAreaWidth=%d — this test cannot fail: %q",
+			m.paneAreaWidth(), stripANSI(bar))
+	}
+
+	// Every frame row still measures exactly the terminal width.
+	for i, line := range strings.Split(stripANSI(m.View().Content), "\n") {
+		if got := lipgloss.Width(line); got != m.width {
+			t.Fatalf("frame row %d measured %d cells, want %d", i, got, m.width)
+		}
 	}
 }
 
@@ -615,13 +722,13 @@ func TestSidebarCapsRowsToTheAvailableHeight(t *testing.T) {
 		sidebarOpen:  true,
 		sidebarWidth: 22, width: 200, height: 40,
 	}
-	tabH := m.height - chromeHeight
-	if len(m.sidebarRows(22)) <= tabH {
+	h := m.sidebarContentHeight()
+	if len(m.sidebarRows(22)) <= h {
 		t.Fatal("fixture does not overflow — the cap would not be exercised")
 	}
-	lines := strings.Split(m.renderSidebar(tabH), "\n")
-	if len(lines) != tabH {
-		t.Fatalf("renderSidebar emitted %d lines for a %d-row area", len(lines), tabH)
+	lines := strings.Split(m.renderSidebar(h), "\n")
+	if len(lines) != h {
+		t.Fatalf("renderSidebar emitted %d lines for a %d-row area", len(lines), h)
 	}
 	// The tail is dropped and marked, so the PROJECTS block — the navigation
 	// the sidebar exists for — always survives.
@@ -632,8 +739,9 @@ func TestSidebarCapsRowsToTheAvailableHeight(t *testing.T) {
 		t.Errorf("row 1 = %q, want the first project", lines[1])
 	}
 	// The hit test must cap identically, or it indexes rows that were never
-	// painted.
-	if kind, _ := m.sidebarHit(3, tabH); kind != "" {
+	// painted. Screen row h-1 IS the marker row (sidebar row k = screen row
+	// k); h-1 is also the last row of the strip, so this is the boundary.
+	if kind, _ := m.sidebarHit(3, h-1); kind != "" {
 		t.Errorf("the overflow marker row must not be actionable, got %q", kind)
 	}
 }
@@ -693,21 +801,20 @@ func TestSidebarRowsNeverExceedTheirColumnBudget(t *testing.T) {
 }
 
 // The user-visible symptom of a wrapped row: it consumes two painted lines
-// while sidebarRowAt still maps screen row y to rows[y-1], so every row below
+// while sidebarRowAt still maps screen row y to rows[y], so every row below
 // it answers for its neighbour. Click project 1, select project 0.
 func TestSidebarHitAgreesWithPaintUnderWideGlyphs(t *testing.T) {
 	m := wideGlyphSidebarModel(t)
-	tabH := m.height - chromeHeight
-	lines := strings.Split(m.renderSidebar(tabH), "\n")
+	lines := strings.Split(m.renderSidebar(m.sidebarContentHeight()), "\n")
 
-	const screenY = 3 // row 0 tab bar, row 1 PROJECTS, row 2 project 0
+	const screenY = 2 // row 0 PROJECTS, row 1 project 0
 	kind, idx := m.sidebarHit(3, screenY)
 	if kind != sidebarRowProject || idx != 1 {
 		t.Fatalf("sidebarHit(3, %d) = (%q, %d), want (project, 1)", screenY, kind, idx)
 	}
-	if got := lines[screenY-1]; !strings.Contains(got, "beta") {
+	if got := lines[screenY]; !strings.Contains(got, "beta") {
 		t.Fatalf("painted sidebar row %d = %q, but the hit test calls it project 1 (beta) — "+
-			"a wide-glyph row above it wrapped and shifted the paint", screenY-1, got)
+			"a wide-glyph row above it wrapped and shifted the paint", screenY, got)
 	}
 }
 

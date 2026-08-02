@@ -97,7 +97,7 @@ func (m Model) activateSidebarRow(kind string, index int) (tea.Model, tea.Cmd) {
 		// cannot: re-resolve it from the same rows the click was tested
 		// against — same width AND same height cap — rather than re-deriving
 		// the walk order a second time.
-		for _, row := range m.sidebarVisibleRows(m.projectSidebarWidth(), m.height-chromeHeight) {
+		for _, row := range m.sidebarVisibleRows(m.projectSidebarWidth(), m.sidebarContentHeight()) {
 			if row.kind == sidebarRowPane && row.index == index {
 				return m.focusSidebarPane(row.tabIdx, row.paneID)
 			}

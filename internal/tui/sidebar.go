@@ -123,12 +123,22 @@ func (m *Model) sidebarRows(w int) []sidebarRow {
 	}
 
 	rows = append(rows, sidebarRow{}, sidebarRow{text: sidebarHeading("PANES", w)})
+	// The active tab and the pane inside it that holds focus are marked the
+	// same way the active project is, so one glance answers "where am I"
+	// at all three levels. Only the ACTIVE tab's focused pane is marked:
+	// every tab carries an ActivePane, and marking all of them would say
+	// "you are here" in several places at once.
+	activeTabIdx := -1
+	if p := m.cur(); p != nil {
+		activeTabIdx = p.activeTab
+	}
 	ordinal := 0
 	for ti, tab := range m.curTabs() {
-		rows = append(rows, sidebarRow{text: sidebarTabHeading(sanitizeRemoteText(tab.Name), w)})
+		onTab := ti == activeTabIdx
+		rows = append(rows, sidebarRow{text: sidebarTabHeading(sanitizeRemoteText(tab.Name), onTab, w)})
 		for _, pane := range tab.Leaves() {
 			rows = append(rows, sidebarRow{
-				text:   paneRow(pane, w),
+				text:   paneRow(pane, onTab && pane.ID == tab.ActivePane, w),
 				kind:   sidebarRowPane,
 				index:  ordinal,
 				tabIdx: ti,
@@ -268,8 +278,17 @@ func sidebarHeading(title string, w int) string {
 	return sidebarHeadingStyle.Render(truncateCells(title, w))
 }
 
-func sidebarTabHeading(name string, w int) string {
-	return sidebarDimStyle.Render(truncateCells(" "+name, w))
+// sidebarTabHeading renders one tab's name above its panes. The active tab
+// carries the same ▸ marker as the active project, in the same column, so the
+// two read as one vocabulary rather than two conventions.
+func sidebarTabHeading(name string, active bool, w int) string {
+	marker := " "
+	style := sidebarDimStyle
+	if active {
+		marker = "▸"
+		style = sidebarActiveStyle
+	}
+	return style.Render(truncateCells(marker+name, w))
 }
 
 // projectRow renders one project's summary line: an active-project marker,
@@ -318,7 +337,12 @@ func projectRow(name string, working, blocked int, link string, active bool, w i
 // done and unseen, ○ idle. Every remote-sourced string (the pane's name/ID,
 // the blocked reason) is sanitized here since this is a render path a
 // remote-attached daemon's data reaches directly.
-func paneRow(pane *PaneModel, w int) string {
+// paneRow renders one pane's agent state. `focused` marks the pane the user
+// is actually typing into — with the ▸ marker rather than a colour, because
+// the row's colour already carries the pane's STATE (blocked, working, unseen)
+// and that is the more urgent signal of the two. A blocked pane must stay
+// visibly blocked whether or not it happens to be focused.
+func paneRow(pane *PaneModel, focused bool, w int) string {
 	var glyph string
 	var style lipgloss.Style
 	var suffix string
@@ -345,7 +369,11 @@ func paneRow(pane *PaneModel, w int) string {
 	}
 	label = sanitizeRemoteText(label)
 
-	prefix := "  " + glyph + " "
+	marker := "  "
+	if focused {
+		marker = "▸ "
+	}
+	prefix := marker + glyph + " "
 	avail := w - lipgloss.Width(prefix) - lipgloss.Width(suffix)
 	if avail < 1 {
 		avail = 1

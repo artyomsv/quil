@@ -926,3 +926,73 @@ func TestUIDefault_SidebarWidthMatchesTUIDefault(t *testing.T) {
 		t.Fatalf("config.Default().UI.SidebarWidth = %d, want %d (defaultSidebarWidth)", got, defaultSidebarWidth)
 	}
 }
+
+// TestSidebarMarksTheActiveTabAndFocusedPane: the sidebar marked the active
+// PROJECT but nothing said which tab or pane you were actually in, so the
+// PANES section read as a flat list with no "you are here". The marker is the
+// same ▸ used for the project row, in the same column, so the three levels
+// share one vocabulary.
+//
+// The focused-pane marker deliberately does NOT change the row's colour: that
+// carries the pane's state (blocked / working / unseen), which is the more
+// urgent signal — a blocked pane must stay visibly blocked while focused.
+func TestSidebarMarksTheActiveTabAndFocusedPane(t *testing.T) {
+	paneA, paneB := &PaneModel{ID: "pane-a"}, &PaneModel{ID: "pane-b"}
+	first := tabWith(paneA)
+	first.Name = "first"
+	first.ActivePane = "pane-a"
+
+	second := tabWith(paneB)
+	second.Name = "second"
+	second.ActivePane = "pane-b"
+
+	m := Model{
+		width: 120, height: 30, sidebarOpen: true, sidebarWidth: 22,
+		notifications: NewNotificationCenter(30, 50),
+		projects: []*ProjectModel{{
+			ID: "proj-a", Name: "alpha",
+			tabs:      []*TabModel{first, second},
+			activeTab: 1, // "second" is active, so pane-b holds focus
+		}},
+	}
+
+	var tabRows, paneRows []string
+	for _, r := range m.sidebarRows(m.sidebarWidth) {
+		switch {
+		case strings.Contains(r.text, "first"), strings.Contains(r.text, "second"):
+			tabRows = append(tabRows, r.text)
+		case strings.Contains(r.text, "pane-a"), strings.Contains(r.text, "pane-b"):
+			paneRows = append(paneRows, r.text)
+		}
+	}
+	if len(tabRows) != 2 || len(paneRows) != 2 {
+		t.Fatalf("expected 2 tab rows and 2 pane rows, got %d and %d", len(tabRows), len(paneRows))
+	}
+
+	// Only the ACTIVE tab is marked — a background tab also has an ActivePane,
+	// and marking every one of them would claim "you are here" twice.
+	if strings.Contains(tabRows[0], "▸") {
+		t.Errorf("the inactive tab row is marked: %q", tabRows[0])
+	}
+	if !strings.Contains(tabRows[1], "▸") {
+		t.Errorf("the active tab row is not marked: %q", tabRows[1])
+	}
+	if strings.Contains(paneRows[0], "▸") {
+		t.Errorf("a pane in a non-active tab is marked as focused: %q", paneRows[0])
+	}
+	if !strings.Contains(paneRows[1], "▸") {
+		t.Errorf("the focused pane is not marked: %q", paneRows[1])
+	}
+
+	// Every row still fills exactly the sidebar's column budget — the marker
+	// replaces padding rather than widening the row, which is what keeps the
+	// hit test's y->row mapping aligned with what is painted.
+	for _, r := range m.sidebarRows(m.sidebarWidth) {
+		if r.text == "" {
+			continue
+		}
+		if got := lipgloss.Width(r.text); got > m.sidebarWidth {
+			t.Errorf("row %q measures %d cells, want <= %d", r.text, got, m.sidebarWidth)
+		}
+	}
+}

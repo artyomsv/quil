@@ -384,18 +384,18 @@ type Model struct {
 	// requestBrowseDir's unstamped-resolves-to-active-dest fallback.
 	projectFormDest string
 
-	tomlEditor *TextEditor // active TOML editor (nil when not editing)
-	selection  *Selection  // active text selection (nil when none)
-	mouseDown  bool        // true while left mouse button is held
-	mouseStartX       int                     // screen X of mouse press
-	mouseStartY       int                     // screen Y of mouse press
-	configChanged     bool                    // true when config needs saving on exit
-	disclaimerTipIdx  int                     // random tip index for disclaimer dialog
-	mcpHighlights     map[string]bool         // pane IDs with active MCP highlight
-	mcpHighlightSeq   map[string]int          // sequence number for highlight timer reset
-	notifications     *NotificationCenter     // notification sidebar
-	paneHistory       []PaneRef               // navigation history (bounded, 20 max)
-	sidebarFocused    bool                    // true when notification sidebar has keyboard focus
+	tomlEditor       *TextEditor         // active TOML editor (nil when not editing)
+	selection        *Selection          // active text selection (nil when none)
+	mouseDown        bool                // true while left mouse button is held
+	mouseStartX      int                 // screen X of mouse press
+	mouseStartY      int                 // screen Y of mouse press
+	configChanged    bool                // true when config needs saving on exit
+	disclaimerTipIdx int                 // random tip index for disclaimer dialog
+	mcpHighlights    map[string]bool     // pane IDs with active MCP highlight
+	mcpHighlightSeq  map[string]int      // sequence number for highlight timer reset
+	notifications    *NotificationCenter // notification sidebar
+	paneHistory      []PaneRef           // navigation history (bounded, 20 max)
+	sidebarFocused   bool                // true when notification sidebar has keyboard focus
 	// sidebarOpen/sidebarWidth control the PROJECT sidebar (internal/tui/sidebar.go)
 	// — not to be confused with the notification sidebar above. Unlike that one
 	// (a compositor overlay, zero layout width), the project sidebar is a real
@@ -406,16 +406,16 @@ type Model struct {
 	// with it open can't fight a narrower terminal on restore.
 	sidebarOpen       bool
 	sidebarWidth      int
-	notesMode         bool                    // true when pane notes editor is open for the active pane
-	notesEditor       *NotesEditor            // active notes editor (nil when notesMode is false)
-	notesPaneFocused  bool                    // true when keyboard input goes to the bound pane (PTY) instead of the notes editor
-	notesEnteredFocus bool                    // true when toggleNotesMode was the one that turned the tab's focus mode on (so exit reverts)
-	notesMouseDown    bool                    // true while a left-button drag is in progress inside the notes editor
-	notesAnchorRow    int                     // document row where a notes-editor drag began (resolved once on click)
-	notesAnchorCol    int                     // document col where a notes-editor drag began (resolved once on click)
-	viewerMouseDown   bool                    // true while a left-button drag is in progress inside the read-only full-screen viewer
-	viewerAnchorRow   int                     // document row where a viewer drag began (resolved once on click)
-	viewerAnchorCol   int                     // document col where a viewer drag began (resolved once on click)
+	notesMode         bool         // true when pane notes editor is open for the active pane
+	notesEditor       *NotesEditor // active notes editor (nil when notesMode is false)
+	notesPaneFocused  bool         // true when keyboard input goes to the bound pane (PTY) instead of the notes editor
+	notesEnteredFocus bool         // true when toggleNotesMode was the one that turned the tab's focus mode on (so exit reverts)
+	notesMouseDown    bool         // true while a left-button drag is in progress inside the notes editor
+	notesAnchorRow    int          // document row where a notes-editor drag began (resolved once on click)
+	notesAnchorCol    int          // document col where a notes-editor drag began (resolved once on click)
+	viewerMouseDown   bool         // true while a left-button drag is in progress inside the read-only full-screen viewer
+	viewerAnchorRow   int          // document row where a viewer drag began (resolved once on click)
+	viewerAnchorCol   int          // document col where a viewer drag began (resolved once on click)
 
 	// Scrollbar click-and-drag. Set on a left-click that hits a pane's
 	// rightmost content column (the scrollbar track). While

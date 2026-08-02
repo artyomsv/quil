@@ -93,6 +93,7 @@ func (m Model) openNewProjectDialog() (tea.Model, tea.Cmd) {
 	m.projectFormCursor = 0
 	m.projectFormErr = ""
 	m.projectFormDest = m.activeDest()
+	m.resetProjectBrowseState()
 	return m, m.requestBrowseDirForDest(m.projectFormDest, "", "", "")
 }
 
@@ -110,7 +111,38 @@ func (m Model) beginProjectRename(id string) (tea.Model, tea.Cmd) {
 	m.projectFormCursor = 0
 	m.projectFormErr = ""
 	m.projectFormDest = p.Dest
+	m.resetProjectBrowseState()
 	return m, m.requestBrowseDirForDest(m.projectFormDest, p.RootDir, "", "")
+}
+
+// resetProjectBrowseState clears the root-dir browser SYNCHRONOUSLY, before
+// the (async) browse request is even sent — mirrors enterSetupOrSplit's
+// reset for exactly the same reason. requestBrowseDirForDest's send is a
+// real IPC round trip (an SSH-hop TCP handshake plus auth on the first
+// request to a remote daemon), and submitProjectForm reads m.cwdBrowseDir as
+// the committed root dir. Without this, "open rename, fix the name, press
+// Enter" — before the round trip lands — submits whatever cwdBrowseDir held
+// from the PREVIOUS dialog session: another project's root, or the
+// pane-setup dialog's last browsed CWD. The daemon's UpdateProject has no
+// unchanged-value guard, so a rename that only touched the name would
+// silently overwrite RootDir with that stale value.
+func (m *Model) resetProjectBrowseState() {
+	m.cwdBrowseDir = ""
+	m.cwdBrowseEntries = nil
+	m.cwdBrowseCursor = 0
+	m.cwdBrowseScroll = 0
+	m.cwdBrowseParent = ""
+	m.cwdBrowseRoots = nil
+	m.cwdBrowseTruncated = false
+	m.cwdBrowseRootsTruncated = false
+	m.cwdInputError = ""
+	// Also drop any in-flight browse from a previous dialog session, so its
+	// answer cannot land in THIS one. Redundant with requestBrowseDirForDest,
+	// which overwrites m.browse again right after this call returns — kept
+	// anyway so this helper is a complete, self-contained reset on its own,
+	// matching enterSetupOrSplit's shape (its callers rely on the same
+	// guarantee independent of what runs after it).
+	m.browse = browseState{}
 }
 
 // projectBrowseTo/projectBrowseUp mirror dialog.go's browseTo/browseUp for
@@ -305,10 +337,23 @@ func (m Model) handleProjectRootDirKey(key string) (tea.Model, tea.Cmd) {
 // committed root dir is simply m.cwdBrowseDir — the field the browser keeps
 // live — exactly like submitSetupDialog's selectedCWD = cwdBrowseDir
 // capture.
+//
+// Blocked while m.browse.pending: the root-dir round trip may still be in
+// flight (resetProjectBrowseState's zeroing happens synchronously, the
+// daemon's answer does not), and submitting mid-flight would commit
+// whatever cwdBrowseDir currently holds — "" fresh after a reset — as the
+// root dir. For New that is merely a premature default; for Rename it would
+// blank an existing project's RootDir. Clears itself: pending always
+// resolves to false, either from a response or requestBrowseDirForDest's own
+// timeout, so this is a wait, not a dead end.
 func (m Model) submitProjectForm() (tea.Model, tea.Cmd) {
 	if strings.TrimSpace(m.projectFormName) == "" {
 		m.projectFormErr = "name required"
 		m.projectFormCursor = 0
+		return m, nil
+	}
+	if m.browse.pending {
+		m.projectFormErr = "waiting for the root directory to load…"
 		return m, nil
 	}
 	rootDir := m.cwdBrowseDir

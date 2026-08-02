@@ -403,6 +403,8 @@ func (m Model) handleDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.handleCommandPaletteKey(msg)
 	case dialogProjectNew, dialogProjectRename:
 		return m.handleProjectDialogKey(msg)
+	case dialogProjectPick:
+		return m.handleProjectPickKey(msg)
 	}
 	return m, nil
 }
@@ -877,6 +879,8 @@ func (m Model) renderDialog() string {
 		content = renderCommandPalette(m)
 	case dialogProjectNew, dialogProjectRename:
 		content = m.renderProjectDialog()
+	case dialogProjectPick:
+		content = m.renderProjectPickDialog()
 	}
 
 	// Never render wider than the terminal (border adds +2 outside Width).

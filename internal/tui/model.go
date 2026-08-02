@@ -240,6 +240,7 @@ const (
 	dialogCommandPalette
 	dialogProjectNew    // Alt+Shift+N: create a project (Task 13)
 	dialogProjectRename // sidebar context menu: rename a project (Task 13)
+	dialogProjectPick   // Alt+P: fuzzy project picker (Task 14)
 )
 
 // tuiClient is the subset of *ipc.Client the TUI uses on the Model. Defined
@@ -383,6 +384,11 @@ type Model struct {
 	// New. Unlike the pane-setup dialog's CWD field, this can't rely on
 	// requestBrowseDir's unstamped-resolves-to-active-dest fallback.
 	projectFormDest string
+
+	// projectPick is the fuzzy project picker's (Alt+P) query buffer, result
+	// list, and cursor — same shape as paletteState (zero value = empty,
+	// m.dialog is the sole open/closed authority). See projectpicker.go.
+	projectPick projectPickState
 
 	tomlEditor       *TextEditor         // active TOML editor (nil when not editing)
 	selection        *Selection          // active text selection (nil when none)
@@ -2573,6 +2579,10 @@ func (m Model) notesKeyExempt(key string) bool {
 		kb.RestartPane,
 		// Tools and dialogs.
 		kb.JSONTransform, kb.QuickActions, kb.CommandHistory, kb.NewProject,
+		// Project navigation — switchProject (reached by both) already calls
+		// exitNotesModeInPlace itself, so exempting these just lets the key
+		// reach it instead of being swallowed as editor text.
+		kb.ProjectPicker, kb.ProjectToggle,
 	}
 	for _, b := range exempt {
 		if kbMatches(key, b) {
@@ -2909,6 +2919,10 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.openQuickActionsMenu()
 	case kbMatches(key, kb.NewProject):
 		return m.openNewProjectDialog()
+	case kbMatches(key, kb.ProjectPicker):
+		return m.openProjectPicker()
+	case kbMatches(key, kb.ProjectToggle):
+		return m, m.toggleLastProject()
 	}
 
 	// Sidebar focused: route keys to notification center

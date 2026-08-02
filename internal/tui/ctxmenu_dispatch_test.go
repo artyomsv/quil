@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+
+	"github.com/artyomsv/quil/internal/config"
 )
 
 // Fixture: newSplitDragTestModel — window 100x40, tab area rows 1..38,
@@ -218,6 +220,58 @@ func TestCtxMenu_VanishedTargetClosesOnNextMessage(t *testing.T) {
 	updated, _ = got.Update(tea.MouseMotionMsg{X: 1, Y: 1})
 	if updated.(Model).ctxMenu.open() {
 		t.Error("menu must close when its target pane no longer exists")
+	}
+}
+
+// TestCtxMenu_ProjectMenuSurvivesUnrelatedMessages is the regression guard for
+// the project menu closing itself a frame after it opened: the vanished-target
+// guard at the top of Update resolved m.ctxMenu.paneID, which a
+// project-targeted menu never sets, so the first message to arrive — any
+// spinner tick, PTY chunk or resize — closed a menu the user had not had time
+// to touch. The second half pins the equivalent guarantee for the project
+// kind: the menu must still close when its PROJECT goes away (MsgDestroyProject
+// from another client, or a workspace reconciliation).
+func TestCtxMenu_ProjectMenuSurvivesUnrelatedMessages(t *testing.T) {
+	t.Parallel()
+	m := Model{
+		cfg:           config.Default(),
+		client:        newFakeConn(),
+		width:         200,
+		height:        40,
+		sidebarOpen:   true,
+		sidebarWidth:  22,
+		notifications: NewNotificationCenter(40, 200),
+		mcpHighlights: make(map[string]bool),
+		projects: []*ProjectModel{
+			{ID: "proj-a", Name: "alpha", tabs: []*TabModel{tabWith(&PaneModel{ID: "pane-a"})}},
+			{ID: "proj-b", Name: "beta", tabs: []*TabModel{tabWith(&PaneModel{ID: "pane-b"})}},
+		},
+		activeProject: 0,
+	}
+
+	// Sidebar row 0 is the PROJECTS heading, so project 0 sits at screen row 1.
+	updated, _ := m.Update(tea.MouseClickMsg{X: 3, Y: 1, Button: tea.MouseRight})
+	got := updated.(Model)
+	if !got.ctxMenu.open() || got.ctxMenu.projectID != "proj-a" {
+		t.Fatalf("right-click on the first project row: open=%v projectID=%q, want the menu open on proj-a",
+			got.ctxMenu.open(), got.ctxMenu.projectID)
+	}
+
+	updated, _ = got.Update(workSpinnerTickMsg{})
+	got = updated.(Model)
+	if !got.ctxMenu.open() {
+		t.Fatal("the project menu closed itself on an unrelated tick — the user never gets to select a row")
+	}
+	if got.ctxMenu.projectID != "proj-a" {
+		t.Errorf("projectID = %q, want proj-a — the target must survive too", got.ctxMenu.projectID)
+	}
+
+	// proj-a is gone; the menu targeting it must clean itself up.
+	got.projects = got.projects[1:]
+	got.activeProject = 0
+	updated, _ = got.Update(workSpinnerTickMsg{})
+	if updated.(Model).ctxMenu.open() {
+		t.Error("menu must close when the project it targets no longer exists")
 	}
 }
 

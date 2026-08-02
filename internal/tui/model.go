@@ -699,11 +699,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Acknowledge the focused pane of the active tab before processing the
 	// message — focusing is the acknowledgement; see ackFocusedPane.
 	m.ackFocusedPane()
-	// A context menu whose target pane vanished (daemon reconciliation,
-	// pane destroy) closes itself. Single choke point — no need to audit
-	// every pruning path. findPaneAndTab is nil-safe.
+	// A context menu whose target vanished (daemon reconciliation, pane
+	// destroy, MsgDestroyProject from another client) closes itself. Single
+	// choke point — no need to audit every pruning path.
+	//
+	// The two menu kinds are checked against their OWN target: a project menu
+	// has no paneID at all, so testing whether paneID resolves closed it on
+	// the very next message — any spinner tick, PTY chunk or resize — which is
+	// what the user saw as "the project menu flashes and vanishes". projectID
+	// and paneID are mutually exclusive discriminators (see ctxMenuState), so
+	// the else arm is exactly the original pane case. Both lookups are
+	// nil-safe.
 	if m.ctxMenu.open() {
-		if pane, _, _ := m.findPaneAndTab(m.ctxMenu.paneID); pane == nil {
+		if projectID := m.ctxMenu.projectID; projectID != "" {
+			if m.projectByID(projectID) == nil {
+				m.closeCtxMenu()
+			}
+		} else if pane, _, _ := m.findPaneAndTab(m.ctxMenu.paneID); pane == nil {
 			m.closeCtxMenu()
 		}
 	}

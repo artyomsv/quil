@@ -54,6 +54,12 @@ func TestSidebarWidthZeroWhenClosedOrNarrow(t *testing.T) {
 	if got := sidebarWidth(200, true, 22); got != 22 {
 		t.Fatalf("width = %d, want 22", got)
 	}
+	// A configured width larger than the terminal must not drive
+	// paneAreaWidth() negative — it reaches tab.Resize and lipgloss.Width()
+	// downstream. Clamped to leave at least minTermWidth for panes.
+	if got := sidebarWidth(200, true, 5000); got != 200-minTermWidth {
+		t.Fatalf("oversized configured width = %d, want %d (200-minTermWidth)", got, 200-minTermWidth)
+	}
 }
 
 // config can't import tui (tui already imports config), so UIConfig's

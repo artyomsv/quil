@@ -179,6 +179,33 @@ func TestCtxMenu_QuickActionsOpensForActivePane(t *testing.T) {
 	}
 }
 
+// The keyboard entry point (quick_actions) paints the menu against the
+// FINAL composited frame, where the project sidebar (when open) has already
+// shifted the pane area right by its width. rect.OX is pane-area-relative,
+// not screen-absolute, so the anchor must add the sidebar's reserved width
+// back in — unlike the mouse right-click path, which already receives
+// genuine screen-absolute coordinates and needs no such adjustment (covered
+// by TestCtxMenu_RightClickOpensForPaneUnderCursor, unaffected by this fix).
+func TestCtxMenu_QuickActionsAnchorsPastTheProjectSidebar(t *testing.T) {
+	t.Parallel()
+	without := newSplitDragTestModel(t) // ActivePane = p1, sidebar closed
+	updated, _ := without.openQuickActionsMenu()
+	xWithout := updated.(Model).ctxMenu.x
+
+	withSidebar := newSplitDragTestModel(t)
+	withSidebar.sidebarOpen = true
+	withSidebar.sidebarWidth = 22
+	updated, _ = withSidebar.openQuickActionsMenu()
+	got := updated.(Model)
+	if !got.ctxMenu.open() {
+		t.Fatal("quick actions should still open with the sidebar open")
+	}
+	if want := xWithout + 22; got.ctxMenu.x != want {
+		t.Errorf("ctxMenu.x = %d, want %d (xWithout=%d + sidebarWidth=22) — the anchor did not "+
+			"account for the project sidebar's reserved columns", got.ctxMenu.x, want, xWithout)
+	}
+}
+
 func TestCtxMenu_VanishedTargetClosesOnNextMessage(t *testing.T) {
 	t.Parallel()
 	m := newSplitDragTestModel(t)

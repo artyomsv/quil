@@ -1013,6 +1013,47 @@ func TestModel_NotesPanelWidth_SidebarDoesNotReserveWidth(t *testing.T) {
 	}
 }
 
+func TestModel_NotesPanelWidth_SidebarReservesWidthFirst(t *testing.T) {
+	t.Parallel()
+	ne, err := NewNotesEditor(t.TempDir(), "pane-w-projsidebar", "Shell", 40, 10)
+	if err != nil {
+		t.Fatalf("NewNotesEditor: %v", err)
+	}
+	m := newNotesTestModel(t, ne)
+	m.sidebarOpen = true
+	m.sidebarWidth = 22
+	// paneAreaWidth = 100 - 22 = 78. The notes fraction must be of what panes
+	// actually have left (78*2/5 = 31), not the raw terminal width
+	// (100*2/5 = 40) — unlike the notification sidebar (a compositor overlay,
+	// TestModel_NotesPanelWidth_SidebarDoesNotReserveWidth above), the project
+	// sidebar is a real reservation of screen estate and has already claimed
+	// its columns by the time notes squeezes further.
+	if got := m.notesPanelWidth(); got != 31 {
+		t.Fatalf("notesW = %d, want 31 (2/5 of paneAreaWidth=78, not raw width=100)", got)
+	}
+}
+
+func TestModel_NotesPanelWidth_CollapsesBeforePaneWidthGoesNegative(t *testing.T) {
+	t.Parallel()
+	ne, err := NewNotesEditor(t.TempDir(), "pane-w-collapse", "Shell", 40, 10)
+	if err != nil {
+		t.Fatalf("NewNotesEditor: %v", err)
+	}
+	m := newNotesTestModel(t, ne)
+	m.width = 130
+	m.sidebarOpen = true
+	m.sidebarWidth = 88 // paneAreaWidth = 42
+	// A guard checked against raw width would have let this through: raw
+	// notesW = 130*2/5 = 52, and 130-52 = 78 is nowhere near minTermWidth, so
+	// nothing would trip — but paneAreaWidth (42) can't fit a 52-wide notes
+	// panel: tab.Resize would have been called with 42-52 = -10. The guard
+	// must be checked against paneAreaWidth, not raw width, so this collapses
+	// to 0 instead.
+	if got := m.notesPanelWidth(); got != 0 {
+		t.Fatalf("notesW = %d, want 0 (paneAreaWidth=42 can't fit a floor-30 notes panel and stay >= minTermWidth)", got)
+	}
+}
+
 func TestModel_NotesPanelWidth_TooNarrow_ReturnsZero(t *testing.T) {
 	t.Parallel()
 	ne, err := NewNotesEditor(t.TempDir(), "pane-narrow", "Shell", 40, 10)

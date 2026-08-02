@@ -2296,15 +2296,27 @@ const (
 // narrow to render the editor. The notification sidebar is an overlay and
 // no longer reserves width here. Single source of truth for the layout
 // math used by both View() and notesEditorBox.
+//
+// The fraction (and its collapse guard) is taken of paneAreaWidth(), not raw
+// m.width: the project sidebar has already claimed its columns by the time
+// notes squeezes further, so basing the split on the full terminal width
+// hands the notes panel a share of space the panes never actually had.
+// Concretely, at total=100/sidebar=22 (paneAreaWidth=78), a raw-m.width split
+// gave notes 40 and panes 38 — BELOW minTermWidth=40, undetected because the
+// guard also checked against raw m.width (100-40=60, comfortably clear) — so
+// the one guard whose entire job is preventing an unusably narrow pane region
+// missed it. Splitting paneAreaWidth() gives notes 31 and panes 47, and the
+// guard now protects the width panes actually get.
 func (m Model) notesPanelWidth() int {
 	if !m.notesMode || m.notesEditor == nil {
 		return 0
 	}
-	notesW := m.width * notesPanelWidthNumerator / notesPanelWidthDenominator
+	avail := m.paneAreaWidth()
+	notesW := avail * notesPanelWidthNumerator / notesPanelWidthDenominator
 	if notesW < notesPanelMinWidth {
 		notesW = notesPanelMinWidth
 	}
-	if m.width-notesW < minTermWidth {
+	if avail-notesW < minTermWidth {
 		return 0
 	}
 	return notesW
@@ -2321,6 +2333,12 @@ func (m Model) notesEditorBox() (boxX0, boxY0, boxX1, boxY1 int, ok bool) {
 	if notesW == 0 {
 		return 0, 0, 0, 0, false
 	}
+	// m.width - notesW is still the right edge-anchored formula even with the
+	// project sidebar open: View() joins [sidebar][panes][notes] left to
+	// right, panes get exactly paneAreaWidth()-notesW, and
+	// projectSidebarWidth()+paneAreaWidth() == m.width by construction — so
+	// the notes box's screen-absolute left edge reduces to m.width-notesW
+	// regardless of how much the sidebar reserved.
 	boxX0 = m.width - notesW
 	boxY0 = 1 // y=0 is the tab bar
 	boxX1 = m.width

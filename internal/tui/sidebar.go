@@ -16,15 +16,22 @@ const (
 
 // sidebarWidth returns the layout width the project sidebar reserves: 0 when
 // closed or the terminal is too narrow to spare it, otherwise the configured
-// width (falling back to defaultSidebarWidth when unset/invalid). Model's
+// width (falling back to defaultSidebarWidth when unset/invalid, and capped
+// so at least minTermWidth columns always remain for panes). Model's
 // paneAreaWidth/resizeTabs read this — it is the single source of truth for
-// how much screen estate the sidebar takes from the panes.
+// how much screen estate the sidebar takes from the panes, so this is the one
+// place that has to bound it: an unclamped configured value larger than the
+// terminal would drive paneAreaWidth() negative and reach tab.Resize and
+// lipgloss.Width() with it.
 func sidebarWidth(total int, open bool, configured int) int {
 	if !open || total < minWidthForSidebar {
 		return 0
 	}
 	if configured <= 0 {
 		configured = defaultSidebarWidth
+	}
+	if max := total - minTermWidth; configured > max {
+		configured = max
 	}
 	return configured
 }

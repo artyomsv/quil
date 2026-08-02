@@ -31,4 +31,4 @@ Rounds completed: 2
 
 ## Notes for future rounds
 - Round-2 code review MUTATION-TESTED the new tests (reimplemented fungible-stop semantics and dropped `agent_type` from the coalesce key): all 5 new tests failed and only those. The suite genuinely pins the behaviour.
-- Pre-existing, NOT introduced here, and out of scope for this feature: real internal host `artyom@192.168.6.12` is committed in `docs/superpowers/plans/2026-07-28-remote-auto-install.md` (lines ~1423-1426) and `docs/superpowers/plans/2026-07-30-remote-phase-3-remainder.md` (line ~230) in a PUBLIC repo. A prior round standardised test *fixtures* onto RFC 5737 but missed the plan docs. Worth its own ticket.
+- Pre-existing, NOT introduced by that feature: the real internal test-VM address was committed in two `docs/superpowers/plans/` files of this PUBLIC repo. A prior round standardised test *fixtures* onto RFC 5737 but missed the plan docs. **Resolved** — both now use the `gpu01` placeholder the rest of the docs already use. Note the working tree only; the address remains in git history, which was judged not worth a rewrite for an RFC 1918 address that is unroutable from the internet.

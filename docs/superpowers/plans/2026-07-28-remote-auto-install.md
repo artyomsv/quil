@@ -1420,10 +1420,10 @@ EOF
 
 ## Manual verification before merge
 
-Unit tests cannot exercise a real install. Run these against the Ubuntu 24.04 VM at `artyom@192.168.6.12`, using `--from-dir` with `./scripts/dev.sh cross` output since local builds are dev builds:
+Unit tests cannot exercise a real install. Run these against the Ubuntu 24.04 test VM (`gpu01` below), using `--from-dir` with `./scripts/dev.sh cross` output since local builds are dev builds:
 
-1. **Fresh install** — remove `/usr/local/bin/quil*` and `~/.local/bin/quil*` on the VM, run `quil --remote 192.168.6.12`, accept the prompt, confirm it installs and the next launch attaches.
-2. **PATH independence** — confirm `ssh 192.168.6.12 command -v quil` still fails while `quil --remote` works. This is the whole point of the persisted path.
+1. **Fresh install** — remove `/usr/local/bin/quil*` and `~/.local/bin/quil*` on the VM, run `quil --remote gpu01`, accept the prompt, confirm it installs and the next launch attaches.
+2. **PATH independence** — confirm `ssh gpu01 command -v quil` still fails while `quil --remote` works. This is the whole point of the persisted path.
 3. **Upgrade** — install an older version, launch, confirm the mismatch offers an upgrade, accept, confirm the daemon restarts and panes respawn.
 4. **Decline** — answer `n`; confirm the original diagnosis is printed and nothing was written to the VM.
 5. **Loop guard** — push a deliberately wrong-arch binary via `--from-dir`, confirm the second failure reports "will not execute" rather than re-offering.

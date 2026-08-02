@@ -227,7 +227,7 @@ If (b): close RD-026 as `dropped`, keep the guard, skip to Task 6.
 
 - [ ] `test`, `vet`, `test-race` green; Windows native suites per the `go test -c` workflow.
 - [ ] **Manual, local — matters most.** Every dialog behaves exactly as before. The RPCs are on the local path too, so a regression here hits every user, not just remote ones.
-- [ ] **Manual, remote** (VM `artyom@192.168.6.12`, both ends must run the same build):
+- [ ] **Manual, remote** (test VM `gpu01`, both ends must run the same build):
   - `Ctrl+N` offers **server** directories; `/home/artyom/homelab` is reachable by browsing *and* by paste
   - git discovery finds server repos in the setup dialog, as Alt+G already does
   - kube contexts come from the server kubeconfig

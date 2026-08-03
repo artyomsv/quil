@@ -406,6 +406,10 @@ type Model struct {
 	// projectFormInstalling holds the host a remote install is running for,
 	// so its result is matched the same way a dial's is.
 	projectFormInstalling string
+	// installedDests records hosts this session has already provisioned, so a
+	// dial that still reports the binary missing afterwards reports instead of
+	// installing again.
+	installedDests map[string]bool
 	// projectFormRemote gates the ssh rows. A local project is the common
 	// case, so User/Host are hidden until this is on — and turning it off
 	// clears them, because a hidden field that still decided where the project
@@ -1506,7 +1510,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// The host answered but has no quil. Offer to provision it rather
 			// than making the user leave the dialog for `quil remote setup` —
 			// the machinery is the same, only the entry point differs.
-			if errors.Is(msg.err, ErrRemoteQuilMissing) && m.installDestFn != nil {
+			// At most ONE install per host per session. A dial that still
+			// reports the binary missing right after a successful install
+			// means something the install cannot fix — it landed somewhere the
+			// non-interactive PATH does not cover, or the recorded path never
+			// reached the dialer — and offering again just spins: install,
+			// retry, 127, install. Observed as a five-second loop. The CLI
+			// path has healRemoteRecord for the same hazard.
+			if errors.Is(msg.err, ErrRemoteQuilMissing) && m.installDestFn != nil && !m.installedDests[msg.dest] {
+				if m.installedDests == nil {
+					m.installedDests = map[string]bool{}
+				}
+				m.installedDests[msg.dest] = true
 				m.projectFormInstalling = msg.dest
 				m.projectFormErr = "quil is not installed on " + sanitizeRemoteText(msg.dest) + " — installing…"
 				return m, m.installDest(msg.dest)

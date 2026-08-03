@@ -326,3 +326,44 @@ func TestSplitSSHDest_RoundTrips(t *testing.T) {
 		}
 	}
 }
+
+// A dial that STILL reports the binary missing right after a successful
+// install means something the install cannot fix — it landed outside the
+// non-interactive PATH, or the recorded path never reached the dialer. Without
+// a guard that is a loop: install, retry, 127, install. Observed running every
+// five seconds against a host whose config record the dialer never saw.
+func TestDestDialed_InstallsAtMostOncePerHost(t *testing.T) {
+	installs := 0
+	m := Model{
+		client:             NewRouter(map[string]Client{"": newFakeConn()}),
+		projectFormDialing: "gpu01",
+		installDestFn: func(string) error {
+			installs++
+			return nil
+		},
+	}
+
+	// First failure offers the install.
+	next, cmd := m.Update(destDialedMsg{dest: "gpu01", err: ErrRemoteQuilMissing})
+	m = next.(Model)
+	if cmd != nil {
+		cmd()
+	}
+	if installs != 1 {
+		t.Fatalf("installs = %d after the first missing-binary dial, want 1", installs)
+	}
+
+	// The retry dial fails the same way. This must REPORT, not reinstall.
+	m.projectFormDialing = "gpu01"
+	next2, cmd2 := m.Update(destDialedMsg{dest: "gpu01", err: ErrRemoteQuilMissing})
+	got := next2.(Model)
+	if cmd2 != nil {
+		cmd2()
+	}
+	if installs != 1 {
+		t.Errorf("installs = %d after a second missing-binary dial, want 1 — this is the loop", installs)
+	}
+	if got.projectFormErr == "" {
+		t.Error("the second failure must say something rather than silently retrying")
+	}
+}

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"sync/atomic"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -554,8 +555,17 @@ func launchTUI() {
 	// afterwards: same hardening, same version gate, same reconnect ladder.
 	// Batch mode because Bubble Tea holds the terminal by now and ssh has
 	// nowhere to prompt.
+	// The dial reads the config through a pointer rather than closing over the
+	// launch-time VALUE, because a remote install rewrites it. runRemoteSetup
+	// records the absolute path it installed to, and remoteSSHOptions turns
+	// that into the ssh RemoteCommand — so a closure holding the old value
+	// keeps dialling bare `quil` on the non-interactive PATH, gets 127 again,
+	// and offers the install it just completed. Observed as a five-second
+	// install loop.
+	liveCfg := &atomic.Pointer[config.Config]{}
+	liveCfg.Store(&cfg)
 	model.SetDialFunc(func(dest string) (tui.Client, error) {
-		return dialExtra(cfg, config.Destination{Dest: dest})()
+		return dialExtra(*liveCfg.Load(), config.Destination{Dest: dest})()
 	})
 	model.SetRedialFactory(func(dest string) tui.RedialFunc {
 		return redialRemote(cfg, dest)
@@ -574,7 +584,24 @@ func launchTUI() {
 		// Out sends the narration to quil.log rather than the terminal, which
 		// the TUI is drawing on. Without it the progress lines land on top of
 		// the dialog that asked for the install.
-		return runRemoteSetup(dest, setupOptions{Yes: true, Out: &setupLogWriter{dest: dest}})
+		if err := runRemoteSetup(dest, setupOptions{Yes: true, Out: &setupLogWriter{dest: dest}}); err != nil {
+			return err
+		}
+		// Re-read what runRemoteSetup just wrote. The recorded binary path is
+		// the entire point of the install for a host whose non-interactive
+		// PATH cannot see ~/.local/bin, and the retry dial is the next thing
+		// to run — so publishing it here is what turns the retry into a
+		// success instead of another 127.
+		reloaded, loadErr := config.Load(config.ConfigPath())
+		if loadErr != nil {
+			// Not fatal: the install succeeded, and the retry may still work
+			// if the binary landed somewhere the PATH covers. Logged because
+			// this is the difference between one retry and a loop.
+			log.Printf("remote setup %s: installed, but re-reading config failed: %v", dest, loadErr)
+			return nil
+		}
+		liveCfg.Store(&reloaded)
+		return nil
 	})
 	// The Model cannot close a connection itself — tui.Client is only
 	// Send/Receive. Without this, the `defer client.Close()` above releases only

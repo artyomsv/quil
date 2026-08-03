@@ -99,6 +99,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   disconnect, events arrived newest-first on reattach, so a pane that had
   started and then finished work was left showing "working".
 
+- **Installing Quil on a host no longer offers to install it again.** Recording
+  the new host in your config wrote back a copy of the file made at launch,
+  which reverted the binary path the install had just recorded — the one that
+  makes attaching work when the remote's non-interactive PATH cannot see the
+  install directory. Each install ended by erasing its own result. The
+  reconnect ladder had the matching fault: a host added mid-session attached,
+  then on its first dropped link retried forever without ever reconnecting.
+
+- **Disconnecting a host makes it stay gone.** A status update already in
+  flight could put its projects back in the sidebar, where they were
+  unreachable — nothing re-attaches a host the client has forgotten.
+
+- **Closing a tab keeps you in the project you were in.** Closing the active
+  tab could jump you to a tab in a different project, and left the project you
+  were in pointing at its first tab rather than a neighbour of the one closed.
+
+- **Project names from another machine can no longer act on your terminal.**
+  Names shown in the right-click menu, the rename form and the command palette
+  are stripped of terminal escapes and text-direction overrides, as the sidebar
+  already did.
+
+- **A project root on an unreachable network share no longer freezes the
+  daemon.** Resolving it was unbounded, so a dead mount could park every pane
+  behind it; it now gives up and falls back to the default directory.
+
+- **Notes close properly when you jump to a pane in another tab.** Jumping from
+  the palette, the notification sidebar, the attention queue or an AI agent left
+  the notes editor open and bound to a pane you were no longer looking at.
+
+- **Destroying a project cleans up after its panes.** Their hook and session
+  files were left behind, and the daemon kept re-reading dead ones until it
+  restarted.
+
 ## [1.46.3] - 2026-08-01
 
 ### Fixed

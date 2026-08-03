@@ -79,6 +79,48 @@ depends on stdout for narration and stdin for confirmation, neither visible in
 its signature, and Bubble Tea owns both — the prompt landed on top of the
 dialog and could never be answered.
 
+**The RECONNECT ladder has the same config constraint as the dial, and got it
+later.** `SetRedialFactory` captured the value while `SetDialFunc` beside it
+read the pointer, so a host provisioned at runtime attached fine and then, on
+its first link drop, redialled bare `quil` forever — 127 is not classified
+permanent, so the ladder never stops and never succeeds. Both launch-time and
+runtime ladders share the pointer now.
+
+**`config.Save` writes the WHOLE struct, so two writers need `config.Mutate`.**
+The install records `[remote.hosts.<dest>].binary`; the TUI records
+destinations and UI settings from its LAUNCH-TIME copy. Saving that copy
+reverted the path written seconds earlier, so each install ended by erasing its
+own result and the next launch offered it again. Three sites did it —
+`persistDestination`, `forgetDestination`, and the exit-time save, which fires
+on every exit once any setting has been touched. The exit save additionally
+restores `c.Remote` explicitly, naming the one section the Model does not own.
+
+**A `Router.Remove` does not stop messages already buffered.** The stop channel
+covers a pump parked in `Receive`; a broadcast already in `r.in`, or one that
+passed the check just before Remove, is still delivered — and
+`applyWorkspaceState` treats a broadcast as authoritative for its dest, so a
+late one re-appends the projects the user just dismissed. They return
+unusable, since `knownDests` no longer lists the dest. `Update`'s
+`WorkspaceStateMsg` arm drops state from a dest `destConnected` rejects; that
+boundary is the only place that knows what the Model currently holds.
+
+**Sanitize at RENDER, and before any width measurement.** A remote daemon names
+its own projects. `lipgloss.Width` measures an escape sequence as ZERO cells, so
+a truncation neither counts nor cuts it — a width check is not a sanitiser, and
+that is why three paths (context-menu title, the rename form's Name field, the
+palette's pane labels) looked safe while writing an OSC 52 straight to the
+terminal. Render-only is required rather than stylistic on the form field: its
+value round-trips to the daemon on submit, so stripping it in state would
+rewrite a name the user never edited.
+
+**Every cross-tab jump owes `exitNotesModeInPlace` FIRST.** It reverts focus
+mode on whichever tab is active when it runs. `jumpToPane` — the choke point for
+MCP `set_active_pane`, the notification sidebar, pane-history back and the
+palette — moved the tab with no teardown at all, and the attention queue got it
+only when the PROJECT changed, not when just the tab did. `notesKeyExempt` does
+not cover this: that branch runs only while the editor holds focus, and notes
+open beside a working agent normally has the pane focused.
+
 ## Daemons that do not speak projects
 
 `destSupportsProjects` is **behavioural, not a version comparison**: a daemon
@@ -136,6 +178,12 @@ so the levels line up; and middle-elision for branch names and ssh
 destinations, since cutting either end of `feat/…` or `user@…` leaves a column
 where every row looks the same.
 
+`elideMiddle` takes both halves by CELL budget. Deriving head/tail from cells
+and slicing `[]rune` with them makes each half overrun on wide glyphs, and once
+the rune count drops below head+tail the two slices OVERLAP — the row repeats
+characters at roughly twice the width asked for, and `padOrTrunc` re-clamps it
+so nothing downstream complains.
+
 **The sidebar is a real reserved column**, unlike the notification sidebar's
 overlay — but it must not re-mode a pane. `paneVTSize` takes SIZE from the rect
 and MODE from `nativeW` (the width the rect would have with the sidebar
@@ -148,6 +196,11 @@ straddling `min_native_cols` and flipping ONE of two identical siblings to a
 Three plumbing calls per checkout: branch, linked worktree, ahead/behind.
 `git status --porcelain` is deliberately excluded — the one call that can take
 seconds on a large repository without fsmonitor.
+
+`referencedDirs` bounds what is PROBED; `sweep` is what bounds what is STORED.
+OSC 7 rewrites a pane's CWD on every `cd`, so without it one shell roaming a
+monorepo adds a map entry per directory it visits and `byDir` keeps every
+checkout ever seen — against a daemon that runs for weeks.
 
 **Keyed by the PER-CHECKOUT git dir, not the common dir** as the design spec
 called for: linked worktrees share a common dir while sitting on different

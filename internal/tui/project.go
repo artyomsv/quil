@@ -13,9 +13,17 @@ import (
 // client folds every broadcast tab into until WorkspaceStateMsg carries real
 // projects. They are deliberately constants rather than literals so the site
 // Task 7 must replace is greppable.
+// interimProjectName does NOT read like a real project's, deliberately. It
+// used to be "Default", which is also what a daemon calls the project it
+// bootstraps — so a host running a build with no project support was
+// indistinguishable from one that simply had a project by that name. Every
+// pane on it worked, the directory browser worked, and only Create and Rename
+// were silently dropped by a daemon with no case for those messages, which
+// cost an evening to recognise. The label now says which daemon it belongs to
+// and that it is not one of that daemon's own.
 const (
 	interimProjectID   = "proj-interim"
-	interimProjectName = "Default"
+	interimProjectName = "(no projects)"
 )
 
 // ProjectModel is the client's view of one daemon-side project plus the

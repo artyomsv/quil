@@ -389,7 +389,7 @@ func Default() Config {
 			ProjectPrev:    "alt+shift+left",
 			AttentionQueue: "alt+shift+a",
 			NewProject:     "alt+shift+n",
-			DestroyProject: "alt+shift+d",
+			DestroyProject: "alt+shift+x",
 		},
 	}
 }

@@ -721,8 +721,16 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 					log.Printf("destroy project %s: marshal: %v", id, reqErr)
 					return m, nil
 				}
-				if sendErr := m.sendForDest(m.destOfProject(id), req); sendErr != nil {
-					log.Printf("destroy project %s: send: %v", id, sendErr)
+				dest := m.destOfProject(id)
+				// Logged on success too. A destroy that appears not to happen
+				// is ambiguous from outside — the daemon cannot be left with
+				// no project, so destroying the last one on a host bootstraps
+				// a fresh "Default" that looks exactly like a delete which did
+				// nothing. This line is what separates the two afterwards.
+				if sendErr := m.sendForDest(dest, req); sendErr != nil {
+					log.Printf("destroy project %s on dest %q: send: %v", id, dest, sendErr)
+				} else {
+					log.Printf("destroy project %s on dest %q: sent", id, dest)
 				}
 			}
 			return m, nil

@@ -41,7 +41,7 @@ project, so `Ctrl+T` files the new tab into whichever project you are on.
 | Key | Action |
 |---|---|
 | `Alt+Shift+N` | New project |
-| `Alt+Shift+D` | Destroy the active project (confirms first) |
+| `Alt+Shift+X` | Destroy the active project (confirms first) |
 | `Alt+P` | Project picker — fuzzy-find by name |
 | `Alt+O` | Bounce between the two most recent projects |
 | `Alt+Shift+Right` | Next project (wraps) |

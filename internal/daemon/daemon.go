@@ -698,6 +698,7 @@ func (d *Daemon) restoreWorkspace() error {
 
 				// Load ghost buffer from disk
 				if bufData, err := persist.LoadBuffer(bufDir, paneID); err == nil && len(bufData) > 0 {
+					bufData = terminateGhostLine(bufData)
 					pane.OutputBuf.Write(bufData)
 					pane.GhostSnap = make([]byte, len(bufData))
 					copy(pane.GhostSnap, bufData)
@@ -1219,6 +1220,41 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 // in streamPTYOutput, so ghost replay feels identical to fast live output.
 // The done channel allows early abort if the daemon is shutting down or the
 // client disconnects mid-replay.
+// terminateGhostLine closes a restored buffer at a line boundary so the
+// respawned child's first output starts on a fresh row instead of landing on
+// the end of the previous session's last line.
+//
+// A shell's saved buffer ends mid-line by construction: the last thing it
+// wrote was a prompt, with the cursor parked after it waiting for input that
+// never came. The respawned shell then prints its own prompt at that cursor,
+// giving "PS E:\...> PS E:\...>" on one row — and because the seeded OutputBuf
+// is what the next snapshot persists, the concatenation is SAVED and the row
+// grows by one prompt on every restart (measured: 3387 → 3512 bytes across a
+// single restore, reported 2026-08-03).
+//
+// This is the same collision that corrupts an agent pane, from the other side.
+// There the child repaints its whole transcript, so the replay is dropped
+// (restoresOwnHistory); here it appends, and the replay is the only history
+// there is — so the join is repaired rather than removed.
+//
+// A buffer that already ends in a newline is returned UNCHANGED rather than
+// gaining a blank separator line. Adding one unconditionally would be the same
+// unbounded growth wearing different bytes: every restart would deposit
+// another blank row, forever. What remains is bounded by construction — the
+// terminator makes the buffer end in a newline, so the next restore appends
+// nothing until a child has written a fresh unterminated line of its own, and
+// one prompt row per session is honest history rather than an artifact.
+//
+// CR before LF because the column has to be reset too, not just the row.
+func terminateGhostLine(buf []byte) []byte {
+	if len(buf) == 0 || buf[len(buf)-1] == '\n' {
+		return buf
+	}
+	out := make([]byte, 0, len(buf)+2)
+	out = append(out, buf...)
+	return append(out, '\r', '\n')
+}
+
 // restoresOwnHistory reports whether a plugin's resume strategy hands the
 // respawned child a session id, so the child paints its own transcript back
 // instead of depending on Quil's replay.

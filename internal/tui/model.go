@@ -403,6 +403,9 @@ type Model struct {
 	projectFormHost    string
 	projectFormUser    string
 	projectFormDialing string
+	// projectFormInstalling holds the host a remote install is running for,
+	// so its result is matched the same way a dial's is.
+	projectFormInstalling string
 	// projectFormRemote gates the ssh rows. A local project is the common
 	// case, so User/Host are hidden until this is on — and turning it off
 	// clears them, because a hidden field that still decided where the project
@@ -567,7 +570,8 @@ type Model struct {
 	// supplied by cmd/quil (the ssh transport lives there); a Model without
 	// them keeps working with the destinations it was constructed with, which
 	// is every test Model.
-	dialDestFn   DialFunc
+	dialDestFn    DialFunc
+	installDestFn InstallFunc
 	redialDestFn func(dest string) RedialFunc
 }
 
@@ -1499,6 +1503,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.projectFormDialing = ""
 		if msg.err != nil {
+			// The host answered but has no quil. Offer to provision it rather
+			// than making the user leave the dialog for `quil remote setup` —
+			// the machinery is the same, only the entry point differs.
+			if errors.Is(msg.err, ErrRemoteQuilMissing) && m.installDestFn != nil {
+				m.projectFormInstalling = msg.dest
+				m.projectFormErr = "quil is not installed on " + sanitizeRemoteText(msg.dest) + " — installing…"
+				return m, m.installDest(msg.dest)
+			}
 			m.projectFormErr = "cannot connect: " + sanitizeRemoteText(msg.err.Error())
 			return m, nil
 		}
@@ -1511,6 +1523,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// destination it just installed.
 		browse := m.requestBrowseDirForDest(msg.dest, "", "", "")
 		return m, tea.Batch(attach, browse)
+
+	case destInstalledMsg:
+		if msg.dest != m.projectFormInstalling {
+			return m, nil // the user moved on, same as a stale dial
+		}
+		m.projectFormInstalling = ""
+		if msg.err != nil {
+			m.projectFormErr = "install failed: " + sanitizeRemoteText(msg.err.Error())
+			return m, nil
+		}
+		// Provisioned — retry the dial that failed. Retrying rather than
+		// assuming success is the point: the install proves a binary is on
+		// disk, not that this client can attach to the daemon it starts, and
+		// the version gate still has to run.
+		m.projectFormDialing = msg.dest
+		m.projectFormErr = ""
+		return m, m.dialDest(msg.dest)
 
 	case PluginErrorMsg:
 		m.dialog = dialogPluginError

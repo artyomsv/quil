@@ -10,6 +10,7 @@ import (
 
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
+	"github.com/artyomsv/quil/internal/remoteinstall"
 	"github.com/artyomsv/quil/internal/transport"
 	"github.com/artyomsv/quil/internal/tui"
 	versionpkg "github.com/artyomsv/quil/internal/version"
@@ -125,10 +126,36 @@ func dialExtra(cfg config.Config, d config.Destination) func() (tui.Client, erro
 		}
 		if gateErr := gateExtraVersion(d, client, link); gateErr != nil {
 			client.Close()
-			return nil, gateErr
+			return nil, classifyDialFailure(link, gateErr)
 		}
 		return client, nil
 	}
+}
+
+// classifyDialFailure marks a failure that means "quil is not installed over
+// there", so the caller can offer to provision the host instead of only
+// reporting it unreachable.
+//
+// The decision is the ssh child's EXIT CODE, never its message: ssh answers
+// 255 for every failure of its own, while the remote shell's codes pass
+// through untouched — 127 for a command it could not find. The message is
+// locale-dependent AND remote-influenced, since ssh multiplexes the remote
+// command's stderr onto its own, so an ordinary ~/.bashrc could otherwise
+// talk this client into an install offer.
+//
+// Read AFTER Close, which is what reaps the child and makes the status final
+// — the mirror of LinkErr, which Close can clear. dialExtra closes the client
+// on the line above.
+func classifyDialFailure(link transport.LinkStatus, err error) error {
+	if link == nil {
+		// A dial that never produced a link failed before ssh ran at all, so
+		// there is no remote status to classify.
+		return err
+	}
+	if remoteinstall.ClassifyExit(link.ExitCode(), link.Established()) == remoteinstall.RemedyInstall {
+		return fmt.Errorf("%w: %v", tui.ErrRemoteQuilMissing, err)
+	}
+	return err
 }
 
 // gateExtraVersion refuses a background destination whose daemon this client

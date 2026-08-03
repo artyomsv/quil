@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"log"
 
 	tea "charm.land/bubbletea/v2"
@@ -118,5 +119,40 @@ func (m *Model) persistDestination(dest string) {
 	m.cfg.Destinations = append(m.cfg.Destinations, config.Destination{Dest: dest})
 	if err := config.Save(config.ConfigPath(), m.cfg); err != nil {
 		log.Printf("connect %s: could not record it in config: %v", dest, err)
+	}
+}
+
+// ErrRemoteQuilMissing marks a dial that reached the host but found no quil
+// there. cmd/quil classifies it from the ssh child's EXIT CODE — 127 for a
+// command the remote shell could not find — never from the message, which is
+// locale-dependent and is also a string any shell can emit for its own
+// reasons. This package only has to recognise the wrapped sentinel.
+var ErrRemoteQuilMissing = errors.New("quil is not installed on that host")
+
+// InstallFunc provisions quil on a host, for the offer raised when a dial
+// comes back ErrRemoteQuilMissing. Supplied by cmd/quil, which owns the
+// release fetch and the ssh push.
+type InstallFunc func(dest string) error
+
+// SetInstallFunc installs the provisioner. A Model without one reports the
+// missing binary and names the CLI instead of offering.
+func (m *Model) SetInstallFunc(f InstallFunc) { m.installDestFn = f }
+
+// destInstalledMsg carries a remote install's outcome back to Update.
+type destInstalledMsg struct {
+	dest string
+	err  error
+}
+
+// installDest provisions a host in the background. Off the Update goroutine
+// for the same reason as the dial, and more so: this downloads a release and
+// streams it over ssh.
+func (m *Model) installDest(dest string) tea.Cmd {
+	if dest == "" || m.installDestFn == nil {
+		return nil
+	}
+	install := m.installDestFn
+	return func() tea.Msg {
+		return destInstalledMsg{dest: dest, err: install(dest)}
 	}
 }

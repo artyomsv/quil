@@ -560,6 +560,14 @@ func launchTUI() {
 	model.SetRedialFactory(func(dest string) tui.RedialFunc {
 		return redialRemote(cfg, dest)
 	})
+	// Provisioning a host from the dialog, for the dial that comes back
+	// ErrRemoteQuilMissing. The same runRemoteSetup the CLI subcommand uses,
+	// so a host provisioned from the TUI is byte-identical to one set up with
+	// `quil remote setup` — including the recorded absolute path that makes
+	// attaching work when the non-interactive PATH cannot see it.
+	model.SetInstallFunc(func(dest string) error {
+		return runRemoteSetup(dest, setupOptions{})
+	})
 	// The Model cannot close a connection itself — tui.Client is only
 	// Send/Receive. Without this, the `defer client.Close()` above releases only
 	// the STARTUP connection of ONE destination, which after a reconnect is

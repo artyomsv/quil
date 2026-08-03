@@ -180,10 +180,22 @@ func TestDialExtra_ReadsLinkErrBeforeClose(t *testing.T) {
 			"distinguishes an unreachable host from a daemon that answered badly", err)
 	}
 
-	want := []string{"linkerr", "close"}
-	if !slices.Equal(order, want) {
-		t.Errorf("order = %v, want %v — reading LinkErr after Close returns nil and the "+
-			"diagnostic is lost", order, want)
+	// The two reads bracket Close in OPPOSITE directions, and each is wrong on
+	// the other side of it: Close can clear LinkErr, so reading it afterwards
+	// loses the diagnostic — while Close is what REAPS the ssh child, so the
+	// exit status is not final until it has run. Asserted as positions rather
+	// than an exact sequence, so adding a read on the correct side of Close
+	// does not fail a test that is about ordering.
+	closeAt := slices.Index(order, "close")
+	if closeAt < 0 {
+		t.Fatalf("order = %v — the client was never closed", order)
+	}
+	if i := slices.Index(order, "linkerr"); i < 0 || i > closeAt {
+		t.Errorf("order = %v — LinkErr must be read BEFORE Close, which can clear it", order)
+	}
+	if i := slices.Index(order, "exitcode"); i >= 0 && i < closeAt {
+		t.Errorf("order = %v — ExitCode must be read AFTER Close, which reaps the child "+
+			"and makes the status final", order)
 	}
 }
 

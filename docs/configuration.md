@@ -71,7 +71,7 @@ auto = true                     # Download and stage in background
 # default; one table per host. See [[destinations]] below.
 # [[destinations]]
 # name = "gpu box"
-# dest = "artyom@192.168.6.12"
+# dest = "gpu01"
 
 [keybindings]
 quit = "ctrl+q"
@@ -205,7 +205,7 @@ tabs, panes and agent state.
 ```toml
 [[destinations]]
 name = "gpu box"
-dest = "artyom@192.168.6.12"
+dest = "gpu01"
 
 [[destinations]]
 name = "prod"

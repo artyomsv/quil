@@ -1150,6 +1150,24 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 				if ghost == nil {
 					ghost = pane.OutputBuf.Bytes() // reconnect — use full buffer
 					source = "outputbuf"
+				} else if restoresOwnHistory(d.registry.Get(typ)) {
+					// GhostSnap non-nil means this is the first attach after a
+					// daemon restore, so this pane's child is being respawned
+					// rather than reattached — and a session-resume strategy
+					// hands that child its own transcript, which it repaints
+					// from the top. Replaying our copy as well puts the same
+					// conversation in the grid twice, with the join corrupted:
+					// the child's first rows land wherever the replay left the
+					// cursor, so its banner overwrites the middle of the saved
+					// prompt line (reported 2026-08-02 and 2026-08-03).
+					//
+					// Scoped to GhostSnap deliberately. The OutputBuf path is a
+					// reattach to a LIVE child that will not repaint anything,
+					// where the replay is the only history there is — that is
+					// the case ghost_buffer = true was measured against and it
+					// is unchanged.
+					ghost = nil
+					source = "skipped-child-repaints"
 				}
 				pane.GhostSnap = nil // take-and-clear under the lock
 			}
@@ -1160,6 +1178,10 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 			kickRunning := pane.PTY != nil && pane.ExitCode == nil
 			pane.PluginMu.Unlock()
 			if !ghostEnabled || len(ghost) == 0 {
+				if source == "skipped-child-repaints" {
+					log.Printf("attach: skipped ghost replay pane %s (type=%s, child restores its own history)",
+						pane.ID, typ)
+				}
 				// Nothing was replayed, so this pane's rectangle is blank on the
 				// client that just attached — even though the process behind it
 				// is alive and mid-conversation. Ask the child to repaint.
@@ -1197,6 +1219,26 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 // in streamPTYOutput, so ghost replay feels identical to fast live output.
 // The done channel allows early abort if the daemon is shutting down or the
 // client disconnects mid-replay.
+// restoresOwnHistory reports whether a plugin's resume strategy hands the
+// respawned child a session id, so the child paints its own transcript back
+// instead of depending on Quil's replay.
+//
+// This is the resume-strategy question, not a plugin-name list: the two
+// strategies below are exactly the ones resolveSpawnArgs expands into
+// `--resume <id>` / `--session <id>`. `rerun` re-runs a command that starts
+// from nothing, `cwd_only` respawns a shell that will not reprint a word of
+// its scrollback, and both of those need the replay.
+func restoresOwnHistory(p *plugin.PanePlugin) bool {
+	if p == nil {
+		return false
+	}
+	switch p.Persistence.Strategy {
+	case "preassign_id", "session_scrape":
+		return true
+	}
+	return false
+}
+
 func sendGhostChunked(conn *ipc.Conn, paneID string, data []byte, done <-chan struct{}) {
 	const chunkSize = 8 * 1024 // 8 KB — typical PTY read size
 	const chunkDelay = 2 * time.Millisecond

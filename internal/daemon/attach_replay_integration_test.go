@@ -175,3 +175,98 @@ func TestHandleAttach_ReplaysEventsOldestFirst(t *testing.T) {
 		}
 	}
 }
+
+// TestHandleAttach_SkipsGhostReplayWhenTheChildRepaints pins the CALL SITE of
+// the ghost-source decision.
+//
+// A pane restored with a session-resume strategy has its whole transcript
+// painted back by the respawned child, so replaying Quil's saved copy as well
+// puts the conversation in the grid twice — and the child starts writing
+// wherever the replay left the cursor, so the join is corrupted, not merely
+// duplicated (reported 2026-08-02 and 2026-08-03).
+//
+// The terminal pane in the same attach is the control: a shell reprints none
+// of its scrollback, so dropping ITS replay would lose the user's history
+// outright. Both panes are checked in one attach so a fix that skips
+// everything cannot pass.
+func TestHandleAttach_SkipsGhostReplayWhenTheChildRepaints(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("QUIL_HOME", tmp)
+
+	d := New(config.Default())
+	tab := d.session.CreateTab("Shell")
+
+	mkPane := func(typ string) *Pane {
+		t.Helper()
+		pane, err := d.session.CreatePane(tab.ID, "/tmp")
+		if err != nil {
+			t.Fatalf("CreatePane: %v", err)
+		}
+		pane.PluginMu.Lock()
+		pane.Type = typ
+		// GhostSnap non-nil is what "first attach after a restore" means: the
+		// buffer came off disk and the child is about to be respawned.
+		pane.GhostSnap = bytes.Repeat([]byte{'g'}, 4096)
+		pane.PluginMu.Unlock()
+		return pane
+	}
+	agent := mkPane("claude-code") // strategy = preassign_id
+	shell := mkPane("terminal")    // strategy = cwd_only
+
+	if err := d.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer d.Stop()
+
+	// Guard: the daemon must actually resolve both plugins, or this test
+	// degrades into asserting that two unknown types behave alike.
+	if p := d.registry.Get("claude-code"); p == nil || !restoresOwnHistory(p) {
+		t.Fatal("setup: claude-code must resolve to a session-resuming strategy")
+	}
+	if p := d.registry.Get("terminal"); p == nil || restoresOwnHistory(p) {
+		t.Fatal("setup: terminal must NOT resolve to a session-resuming strategy")
+	}
+
+	conn := dialDaemon(t, filepath.Join(tmp, "quild.sock"))
+	defer conn.Close()
+
+	attach, err := ipc.NewMessage(ipc.MsgAttach, ipc.AttachPayload{Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("NewMessage attach: %v", err)
+	}
+	if err := ipc.WriteMessage(conn, attach); err != nil {
+		t.Fatalf("write attach: %v", err)
+	}
+
+	// Read until the shell's replay has fully arrived. The agent's frames, if
+	// the daemon wrongly sent any, precede it in the same pane loop — so by the
+	// time the shell's last byte lands, an agent frame would already be here.
+	ghost := map[string]int{}
+	_ = conn.SetReadDeadline(time.Now().Add(15 * time.Second))
+	for ghost[shell.ID] < 4096 {
+		msg, err := ipc.ReadMessage(conn)
+		if err != nil {
+			t.Fatalf("read after %v: %v", ghost, err)
+		}
+		if msg.Type != ipc.MsgPaneOutput {
+			continue
+		}
+		var p ipc.PaneOutputPayload
+		if err := msg.DecodePayload(&p); err != nil {
+			t.Fatalf("decode pane output: %v", err)
+		}
+		if p.Ghost {
+			ghost[p.PaneID] += len(p.Data)
+		}
+	}
+
+	if n := ghost[agent.ID]; n != 0 {
+		t.Errorf("claude-code pane received %d ghost bytes; the respawned child "+
+			"repaints this transcript itself, so replaying it doubles the "+
+			"conversation and corrupts the join", n)
+	}
+	if n := ghost[shell.ID]; n != 4096 {
+		t.Errorf("terminal pane received %d ghost bytes, want 4096 — a shell "+
+			"reprints none of its scrollback, so this replay is the only history", n)
+	}
+}

@@ -237,11 +237,18 @@ func formatPaneNav(tabIdx, paneIdx int, p *PaneModel, project string) string {
 		paneType = "terminal"
 	}
 	parts := []string{fmt.Sprintf("%d.%d", tabIdx+1, paneIdx+1), paneType}
+	// Both names are a daemon's answer, and a daemon may sit on a host the user
+	// does not control. Sanitizing here rather than at the two callers is what
+	// makes the palette and the content-search hit list agree: they share this
+	// one implementation precisely so a label can never differ between them.
+	// truncateToWidth downstream cannot stand in for this — it measures with
+	// lipgloss.Width, and an escape sequence is zero cells wide, so it is
+	// neither counted nor cut.
 	if p.Name != "" {
-		parts = append(parts, p.Name)
+		parts = append(parts, sanitizeRemoteText(p.Name))
 	}
 	if project != "" {
-		parts = append(parts, project)
+		parts = append(parts, sanitizeRemoteText(project))
 	}
 	return strings.Join(parts, " · ")
 }

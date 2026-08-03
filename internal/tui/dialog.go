@@ -1103,7 +1103,7 @@ func (m Model) renderConfirmDialog() string {
 		b.WriteString("\n")
 		b.WriteString("  " + dialogSubtle.Render("Claude sessions resume; running shell commands are killed."))
 	case confirmKindDestroyProject:
-		b.WriteString("  " + dialogNormal.Render(fmt.Sprintf("Destroy project %q?", m.confirmName)))
+		b.WriteString("  " + dialogNormal.Render(fmt.Sprintf("Destroy project %q?", sanitizeRemoteText(m.confirmName))))
 		b.WriteString("\n\n")
 		b.WriteString("  " + dialogSubtle.Render("Every tab and pane in this project is destroyed too."))
 	case confirmKindDisconnectHost:

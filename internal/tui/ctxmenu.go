@@ -287,7 +287,15 @@ func renderCtxMenu(s ctxMenuState) string {
 	blank := strings.Repeat(" ", innerW)
 	rows := make([]string, 0, s.contentRows())
 
-	title := s.title
+	// Sanitize BEFORE measuring. Both titles this menu carries name something a
+	// daemon told us about — a pane's name or a project's — and a daemon may be
+	// on a host the user does not control. Truncation is not a substitute:
+	// lipgloss.Width measures an escape sequence as zero cells, so a title that
+	// is nothing but escapes passes the width check untouched and reaches the
+	// terminal intact. Doing it here rather than at the two assignment sites
+	// keeps the raw value in state (the codebase's render-only rule) and covers
+	// any third title added later by construction.
+	title := sanitizeRemoteText(s.title)
 	if lipgloss.Width(title) > innerW-2 {
 		title = ansi.Truncate(title, innerW-3, "…")
 	}

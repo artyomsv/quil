@@ -628,13 +628,17 @@ func (m Model) renderProjectDialog() string {
 	} else {
 		b.WriteString(dialogNormal.Render("  Name:") + "\n")
 	}
+	// Sanitized at RENDER, never where beginProjectRename seeds the field: this
+	// value round-trips back to the daemon on submit, so stripping it in state
+	// would silently rewrite a name the user never edited. Render-only is the
+	// same rule the remote browse dialogs follow, and for the same reason.
 	switch {
 	case m.projectFormName == "":
 		b.WriteString("    " + dialogSubtle.Render("(required)") + "\n")
 	case nameFocused:
-		b.WriteString("    " + dialogValStyle.Render(truncateToWidth(m.projectFormName, textWidth-setupRowIndent)) + "\n")
+		b.WriteString("    " + dialogValStyle.Render(truncateToWidth(sanitizeRemoteText(m.projectFormName), textWidth-setupRowIndent)) + "\n")
 	default:
-		b.WriteString(setupRowIdleMark + dialogSelectedIdle.Render(truncateToWidth(m.projectFormName, textWidth-setupRowIndent)) + "\n")
+		b.WriteString(setupRowIdleMark + dialogSelectedIdle.Render(truncateToWidth(sanitizeRemoteText(m.projectFormName), textWidth-setupRowIndent)) + "\n")
 	}
 	b.WriteString("\n")
 

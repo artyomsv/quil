@@ -30,7 +30,12 @@ func (m *Model) submitNewProject(name, rootDir string) tea.Cmd {
 		log.Printf("create project: encode: %v", err)
 		return nil
 	}
-	if sendErr := m.sendForDest(m.activeDest(), msg); sendErr != nil {
+	// projectFormDest, not activeDest: the Host field may have pointed this
+	// form at a different machine — possibly one connected seconds ago — and
+	// the root dir below was browsed on THAT filesystem. Creating the project
+	// on the active daemon instead would pair a name with a path that does not
+	// exist there.
+	if sendErr := m.sendForDest(m.projectFormDest, msg); sendErr != nil {
 		log.Printf("create project: send: %v", sendErr)
 	}
 	m.dialog = dialogNone
@@ -90,7 +95,9 @@ func (m Model) openNewProjectDialog() (tea.Model, tea.Cmd) {
 	m.dialog = dialogProjectNew
 	m.projectFormID = ""
 	m.projectFormName = ""
-	m.projectFormCursor = 0
+	m.projectFormHost = ""
+	m.projectFormDialing = ""
+	m.projectFormCursor = projectRowName
 	m.projectFormErr = ""
 	m.projectFormDest = m.activeDest()
 	m.resetProjectBrowseState()
@@ -108,7 +115,9 @@ func (m Model) beginProjectRename(id string) (tea.Model, tea.Cmd) {
 	m.dialog = dialogProjectRename
 	m.projectFormID = p.ID
 	m.projectFormName = p.Name
-	m.projectFormCursor = 0
+	m.projectFormHost = p.Dest
+	m.projectFormDialing = ""
+	m.projectFormCursor = projectRowName
 	m.projectFormErr = ""
 	m.projectFormDest = p.Dest
 	m.resetProjectBrowseState()
@@ -173,9 +182,9 @@ func (m *Model) projectBrowseUp() tea.Cmd {
 
 // handleProjectDialogKey drives both dialogProjectNew and dialogProjectRename
 // — m.projectFormID ("" vs a real ID) is what submitProjectForm uses to tell
-// them apart; the key handling itself is identical. Three focusable rows:
-// 0 = Name (typed text), 1 = Root directory (the daemon-side browser,
-// mirroring the pane-setup dialog's CWD field), 2 = the submit button.
+// them apart; the key handling itself is identical. Four focusable rows:
+// Name (typed text), Host (an ssh destination, or empty for this machine),
+// Root directory (the daemon-side browser), and the submit button.
 func (m Model) handleProjectDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 
@@ -184,31 +193,98 @@ func (m Model) handleProjectDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 		m.dialog = dialogNone
 		return m, tea.ClearScreen
 	case "tab":
-		m.projectFormCursor = (m.projectFormCursor + 1) % 3
+		m.projectFormCursor = (m.projectFormCursor + 1) % projectFormRows
 		return m, nil
 	case "shift+tab":
-		m.projectFormCursor = (m.projectFormCursor + 2) % 3
+		m.projectFormCursor = (m.projectFormCursor + projectFormRows - 1) % projectFormRows
 		return m, nil
 	}
 
 	switch m.projectFormCursor {
-	case 0:
+	case projectRowName:
 		return m.handleProjectNameKey(key)
-	case 1:
+	case projectRowHost:
+		return m.handleProjectHostKey(key)
+	case projectRowRootDir:
 		return m.handleProjectRootDirKey(key)
-	case 2:
+	case projectRowSubmit:
 		switch key {
 		case "up", "k":
-			m.projectFormCursor = 1
+			m.projectFormCursor = projectRowRootDir
 			return m, nil
 		case "down", "j":
-			m.projectFormCursor = 0
+			m.projectFormCursor = projectRowName
 			return m, nil
 		case "enter":
 			return m.submitProjectForm()
 		}
 	}
 	return m, nil
+}
+
+// The form's focusable rows. Host sits between Name and Root directory
+// because the ORDER is the flow: a root directory lives on exactly one
+// machine, so the host has to be settled — and connected — before the
+// browser below it can ask anything meaningful.
+const (
+	projectRowName = iota
+	projectRowHost
+	projectRowRootDir
+	projectRowSubmit
+	projectFormRows
+)
+
+// handleProjectHostKey edits the Host field. Empty means the local daemon;
+// anything else is an ssh destination, passed to ssh verbatim exactly like
+// [[destinations]] and --remote, so an ~/.ssh/config alias keeps its
+// HostName/Port/User/ProxyJump.
+//
+// Enter CONNECTS rather than submitting the form. That is the one place this
+// field departs from the Name row's convention, and it is deliberate: the
+// root-dir browser underneath asks whichever daemon projectFormDest names, so
+// submitting before the connection exists would create the project on the
+// wrong machine with a path browsed from a third one.
+func (m Model) handleProjectHostKey(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "enter":
+		return m.connectProjectHost()
+	case "backspace":
+		if len(m.projectFormHost) > 0 {
+			m.projectFormHost = m.projectFormHost[:len(m.projectFormHost)-1]
+			m.projectFormErr = ""
+		}
+		return m, nil
+	default:
+		// No space case, unlike Name: an ssh destination cannot contain one,
+		// and accepting it would only produce a host that fails to resolve.
+		if len(key) == 1 && key != " " {
+			m.projectFormHost += key
+			m.projectFormErr = ""
+		}
+		return m, nil
+	}
+}
+
+// connectProjectHost points the form at the typed host, dialling it first when
+// it is not already connected. An empty host means local, which needs no dial.
+func (m Model) connectProjectHost() (tea.Model, tea.Cmd) {
+	dest := strings.TrimSpace(m.projectFormHost)
+	if dest == "" || m.destConnected(dest) {
+		m.projectFormDest = dest
+		m.projectFormCursor = projectRowRootDir
+		m.resetProjectBrowseState()
+		// Re-browse against the newly chosen machine: the entries on screen
+		// describe whichever daemon was asked last, and a path picked from one
+		// host's filesystem is meaningless on another.
+		return m, m.requestBrowseDirForDest(dest, "", "", "")
+	}
+	if m.dialDestFn == nil {
+		m.projectFormErr = "this build cannot connect new hosts"
+		return m, nil
+	}
+	m.projectFormDialing = dest
+	m.projectFormErr = ""
+	return m, m.dialDest(dest)
 }
 
 // handleProjectNameKey handles the Name field. Append/backspace on raw
@@ -387,7 +463,7 @@ func (m Model) renderProjectDialog() string {
 	textWidth := dialogInnerWidth(m.width, dialogWidth)
 
 	// Name field.
-	nameFocused := m.projectFormCursor == 0
+	nameFocused := m.projectFormCursor == projectRowName
 	if nameFocused {
 		b.WriteString(dialogSelected.Render("> Name:") + "\n")
 	} else {
@@ -403,8 +479,37 @@ func (m Model) renderProjectDialog() string {
 	}
 	b.WriteString("\n")
 
+	// Host field. Empty is the local daemon; anything else is an ssh
+	// destination. Enter connects rather than submitting — the browser below
+	// asks whichever machine this names, so it has to be settled first.
+	hostFocused := m.projectFormCursor == projectRowHost
+	if hostFocused {
+		b.WriteString(dialogSelected.Render("> Host:") + "\n")
+	} else {
+		b.WriteString(dialogNormal.Render("  Host:") + "\n")
+	}
+	switch {
+	case m.projectFormDialing != "":
+		b.WriteString("    " + dialogSubtle.Render("connecting to "+
+			truncateToWidth(sanitizeRemoteText(m.projectFormDialing), textWidth-setupRowIndent-14)+"…") + "\n")
+	case m.projectFormHost == "":
+		b.WriteString("    " + dialogSubtle.Render("(this machine — type a host, Enter to connect)") + "\n")
+	case hostFocused:
+		b.WriteString("    " + dialogValStyle.Render(truncateToWidth(m.projectFormHost, textWidth-setupRowIndent)) + "\n")
+	default:
+		mark := setupRowIdleMark
+		if !m.destConnected(m.projectFormHost) {
+			// Says the field holds a host that is NOT yet connected, so a user
+			// who typed one and tabbed past it is not left believing the
+			// project will land there.
+			mark = "    "
+		}
+		b.WriteString(mark + dialogSelectedIdle.Render(truncateToWidth(m.projectFormHost, textWidth-setupRowIndent)) + "\n")
+	}
+	b.WriteString("\n")
+
 	// Root directory field — the daemon-side browser.
-	rootFocused := m.projectFormCursor == 1
+	rootFocused := m.projectFormCursor == projectRowRootDir
 	if rootFocused {
 		b.WriteString(dialogSelected.Render("> Root directory:") + "\n")
 	} else {
@@ -479,7 +584,7 @@ func (m Model) renderProjectDialog() string {
 	}
 
 	// Submit button.
-	submitFocused := m.projectFormCursor == 2
+	submitFocused := m.projectFormCursor == projectRowSubmit
 	label := "[ " + submitLabel + " ]"
 	if submitFocused {
 		b.WriteString(dialogSelected.Render("> "+label) + "\n\n")

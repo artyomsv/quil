@@ -548,6 +548,18 @@ func launchTUI() {
 		}
 		model.SetRedialFunc(dest, redialRemote(cfg, dest))
 	}
+	// Connecting a host the user names at runtime, from the New Project
+	// dialog's Host field — the same dial the launch path uses, so a
+	// destination added mid-session is indistinguishable from a configured one
+	// afterwards: same hardening, same version gate, same reconnect ladder.
+	// Batch mode because Bubble Tea holds the terminal by now and ssh has
+	// nowhere to prompt.
+	model.SetDialFunc(func(dest string) (tui.Client, error) {
+		return dialExtra(cfg, config.Destination{Dest: dest})()
+	})
+	model.SetRedialFactory(func(dest string) tui.RedialFunc {
+		return redialRemote(cfg, dest)
+	})
 	// The Model cannot close a connection itself — tui.Client is only
 	// Send/Receive. Without this, the `defer client.Close()` above releases only
 	// the STARTUP connection of ONE destination, which after a reconnect is

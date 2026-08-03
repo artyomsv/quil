@@ -396,6 +396,12 @@ type Model struct {
 	projectFormName   string // Name field's live text
 	projectFormCursor int    // focused row: 0 = name, 1 = root dir, 2 = submit button
 	projectFormErr    string // validation message shown under the form (e.g. "name required")
+	// projectFormHost is the Host field's live text — an ssh destination, or
+	// empty for the local daemon. projectFormDialing holds the host a dial is
+	// currently in flight for, so a result arriving for a host the user has
+	// since retyped is discarded rather than applied to the wrong form.
+	projectFormHost    string
+	projectFormDialing string
 	// projectFormDest is the daemon the root-dir browser asks — the OWNING
 	// project's dest for Rename (which may not be the active project; the
 	// sidebar context menu can target a background one), the active dest for
@@ -550,6 +556,13 @@ type Model struct {
 	// daemon fatal — its panes died with it, so retrying would hide the loss.
 	links     map[string]*reconnectState
 	redialFns map[string]RedialFunc
+	// dialDestFn connects a destination that is not in the table yet, and
+	// redialDestFn builds the reconnect ladder for one once it is. Both are
+	// supplied by cmd/quil (the ssh transport lives there); a Model without
+	// them keeps working with the destinations it was constructed with, which
+	// is every test Model.
+	dialDestFn   DialFunc
+	redialDestFn func(dest string) RedialFunc
 }
 
 // RemoteMode reports whether the daemon behind the ACTIVE project lives on
@@ -1469,6 +1482,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, m.workSpinnerTick()
+
+	case destDialedMsg:
+		// Discard an answer for a host the user has since retyped: the dial is
+		// slow enough that editing the field during one is ordinary, and
+		// applying a stale result would point the form at a machine the user
+		// has already moved on from.
+		if msg.dest != m.projectFormDialing {
+			return m, nil
+		}
+		m.projectFormDialing = ""
+		if msg.err != nil {
+			m.projectFormErr = "cannot connect: " + sanitizeRemoteText(msg.err.Error())
+			return m, nil
+		}
+		attach := m.adoptDest(msg.dest, msg.client)
+		m.projectFormDest = msg.dest
+		m.projectFormCursor = projectRowRootDir
+		m.resetProjectBrowseState()
+		// Sequenced, not batched with the browse: adoptDest writes the attach
+		// ledger onto this Model, and the browse must be requested against the
+		// destination it just installed.
+		browse := m.requestBrowseDirForDest(msg.dest, "", "", "")
+		return m, tea.Batch(attach, browse)
 
 	case PluginErrorMsg:
 		m.dialog = dialogPluginError

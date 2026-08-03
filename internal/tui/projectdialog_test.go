@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -14,6 +15,11 @@ func TestSubmitNewProjectSendsCreateToActiveDest(t *testing.T) {
 		client:        fake,
 		projects:      []*ProjectModel{{ID: "proj-a", Dest: "gpu01"}},
 		activeProject: 0,
+		// openNewProjectDialog seeds this from the active dest. The form field
+		// is the source of truth rather than activeDest itself, because the
+		// Host row can point one form at a different machine — see
+		// TestSubmitNewProject_HostFieldOverridesTheActiveDest.
+		projectFormDest: "gpu01",
 	}
 
 	if cmd := m.submitNewProject("beta", "/src/beta"); cmd != nil {
@@ -140,3 +146,100 @@ func TestBeginProjectRenameDoesNotSubmitStaleRootDir(t *testing.T) {
 		t.Fatalf("payload = %+v, want proj-b's own root, not A's stale one", payload)
 	}
 }
+
+// The Host field's whole point: create a project on a machine that is NOT the
+// one currently on screen, without leaving the TUI. The root dir beside it was
+// browsed on that host's filesystem, so sending the create anywhere else pairs
+// a name with a path that does not exist there.
+func TestSubmitNewProject_HostFieldOverridesTheActiveDest(t *testing.T) {
+	fake := newFakeConn()
+	m := Model{
+		client:          fake,
+		projects:        []*ProjectModel{{ID: "proj-local", Dest: ""}},
+		activeProject:   0,
+		projectFormHost: "gpu01",
+		projectFormDest: "gpu01", // set once the dial landed
+	}
+
+	if cmd := m.submitNewProject("beta", "/srv/beta"); cmd != nil {
+		cmd()
+	}
+	if len(fake.sent) != 1 {
+		t.Fatalf("sent %d messages, want 1", len(fake.sent))
+	}
+	if got := fake.sent[0].Origin; got != "gpu01" {
+		t.Errorf("Origin = %q, want gpu01 — the active project is local, but the "+
+			"form names another host and the root dir came from ITS filesystem", got)
+	}
+}
+
+// A host that is already connected must not be dialled again: Router.Add
+// refuses a live destination, so a second dial would spawn an ssh child that
+// nothing ever closes.
+func TestConnectProjectHost_AlreadyConnectedSkipsTheDial(t *testing.T) {
+	dialed := 0
+	m := Model{
+		client:          NewRouter(map[string]Client{"": newFakeConn(), "gpu01": newFakeConn()}),
+		projectFormHost: "gpu01",
+		dialDestFn: func(string) (Client, error) {
+			dialed++
+			return newFakeConn(), nil
+		},
+	}
+	next, _ := m.connectProjectHost()
+	got := next.(Model)
+
+	if dialed != 0 {
+		t.Errorf("dialled %d times for an already-connected host, want 0", dialed)
+	}
+	if got.projectFormDest != "gpu01" {
+		t.Errorf("projectFormDest = %q, want gpu01", got.projectFormDest)
+	}
+	if got.projectFormCursor != projectRowRootDir {
+		t.Errorf("cursor = %d, want the root-dir row so the browser is next", got.projectFormCursor)
+	}
+}
+
+// A dial result for a host the user has since retyped must be discarded. The
+// dial takes seconds against a host that is down, and editing the field while
+// one is in flight is ordinary use.
+func TestDestDialed_StaleResultIsIgnored(t *testing.T) {
+	m := Model{
+		client:             NewRouter(map[string]Client{"": newFakeConn()}),
+		projectFormDialing: "gpu02", // the user retyped
+		projectFormDest:    "",
+	}
+	next, _ := m.Update(destDialedMsg{dest: "gpu01", client: newFakeConn()})
+	got := next.(Model)
+
+	if got.projectFormDest != "" {
+		t.Errorf("projectFormDest = %q; a result for an abandoned host was applied", got.projectFormDest)
+	}
+	if got.projectFormDialing != "gpu02" {
+		t.Errorf("projectFormDialing = %q, want the host still being awaited", got.projectFormDialing)
+	}
+}
+
+// A failed dial reports why and leaves the form on the Host row, rather than
+// silently pointing the root-dir browser at a machine that is not there.
+func TestDestDialed_FailureSurfacesAndKeepsTheDest(t *testing.T) {
+	m := Model{
+		client:             NewRouter(map[string]Client{"": newFakeConn()}),
+		projectFormDialing: "gpu01",
+		projectFormCursor:  projectRowHost,
+	}
+	next, _ := m.Update(destDialedMsg{dest: "gpu01", err: errDialTest})
+	got := next.(Model)
+
+	if got.projectFormErr == "" {
+		t.Error("a failed dial must say why")
+	}
+	if got.projectFormDest == "gpu01" {
+		t.Error("a failed dial must not point the form at the host")
+	}
+	if got.projectFormDialing != "" {
+		t.Error("the in-flight marker must clear so the field is editable again")
+	}
+}
+
+var errDialTest = errors.New("ssh: connect to host gpu01 port 22: No route to host")

@@ -50,7 +50,7 @@ func TestRedialRemote_DialsBatchWithTheLogSink(t *testing.T) {
 		return nil, nil, errors.New("stub dial")
 	})
 
-	if _, err := redialRemote(config.Config{}, "gpu01")(nil); err == nil {
+	if _, err := redialRemote(func() *config.Config { return &config.Config{} }, "gpu01")(nil); err == nil {
 		t.Fatal("redial reported success on a failed dial")
 	}
 	if !called {
@@ -95,7 +95,7 @@ func TestRedialRemote_ReusesOneStderrSinkAcrossAttempts(t *testing.T) {
 		return nil, nil, errors.New("stub dial")
 	})
 
-	redial := redialRemote(config.Config{}, "gpu01")
+	redial := redialRemote(func() *config.Config { return &config.Config{} }, "gpu01")
 	for i := 0; i < 3; i++ {
 		if _, err := redial(nil); err == nil {
 			t.Fatalf("attempt %d reported success on a failed dial", i+1)
@@ -165,7 +165,7 @@ func TestRedialRemote_ReadsLinkErrBeforeCloseAndExitCodeAfter(t *testing.T) {
 		return client, link, nil
 	})
 
-	if _, err := redialRemote(config.Config{}, "gpu01")(nil); err == nil {
+	if _, err := redialRemote(func() *config.Config { return &config.Config{} }, "gpu01")(nil); err == nil {
 		t.Fatal("redial reported success against a dead connection")
 	}
 
@@ -233,7 +233,7 @@ func TestRedialRemote_ClassifiesVerifyFailures(t *testing.T) {
 				return client, tt.link, nil
 			})
 
-			_, err := redialRemote(config.Config{}, "gpu01")(nil)
+			_, err := redialRemote(func() *config.Config { return &config.Config{} }, "gpu01")(nil)
 			if err == nil {
 				t.Fatal("redial reported success against a dead connection")
 			}
@@ -276,7 +276,7 @@ func TestRedialRemote_DialsTheDestinationItWasBuiltFor(t *testing.T) {
 		return nil, nil, errors.New("stub dial")
 	})
 
-	if _, err := redialRemote(config.Config{}, "gpu01")(nil); err == nil {
+	if _, err := redialRemote(func() *config.Config { return &config.Config{} }, "gpu01")(nil); err == nil {
 		t.Fatal("redial reported success on a failed dial")
 	}
 

@@ -534,7 +534,16 @@ const probeRequestID = "reconnect-version-probe"
 // One dialer is built per destination, and the byte budget below is why that
 // matters beyond routing: a shared framer would let one flapping host exhaust
 // the log allowance of every other.
-func redialRemote(cfg config.Config, dest string) tui.RedialFunc {
+// redialRemote builds the reconnect dialer for one destination.
+//
+// It takes an ACCESSOR rather than a config value because a remote install
+// rewrites the file mid-session, recording the absolute path it installed to —
+// and remoteSSHOptions turns that into the ssh remote command. A closure
+// holding the launch-time value keeps dialling bare `quil` on a
+// non-interactive PATH and gets 127 every time; nothing classifies that as
+// permanent, so the ladder retries forever without ever reconnecting. The
+// first dial has the same constraint and already reads through the pointer.
+func redialRemote(cfgOf func() *config.Config, dest string) tui.RedialFunc {
 	// One framer for the whole session, so its byte budget cannot be reset by
 	// reconnecting.
 	stderrSink := &sshStderrLogger{dest: dest}
@@ -548,7 +557,7 @@ func redialRemote(cfg config.Config, dest string) tui.RedialFunc {
 		ctx, cancel := context.WithTimeout(context.Background(), redialTimeout)
 		defer cancel()
 
-		client, link, err := dialRemoteTransportFn(ctx, cfg, dest, true, stderrSink)
+		client, link, err := dialRemoteTransportFn(ctx, *cfgOf(), dest, true, stderrSink)
 		if err != nil {
 			// No LinkErr fallback here, deliberately: transport.SSH returns a
 			// nil conn on failure and `link` is only assigned when the dialer

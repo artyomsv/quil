@@ -117,7 +117,20 @@ func (m *Model) persistDestination(dest string) {
 		}
 	}
 	m.cfg.Destinations = append(m.cfg.Destinations, config.Destination{Dest: dest})
-	if err := config.Save(config.ConfigPath(), m.cfg); err != nil {
+	// Read-modify-write, NOT a save of m.cfg. m.cfg is the launch-time
+	// snapshot, and the install that usually precedes this recorded the remote
+	// binary path into the same file moments ago — saving the snapshot whole
+	// would erase it and put the host back to offering an install it has
+	// already done. The in-memory append above still happens, because the
+	// idempotency check above reads it.
+	if err := config.Mutate(config.ConfigPath(), func(c *config.Config) {
+		for _, d := range c.Destinations {
+			if d.Dest == dest {
+				return
+			}
+		}
+		c.Destinations = append(c.Destinations, config.Destination{Dest: dest})
+	}); err != nil {
 		log.Printf("connect %s: could not record it in config: %v", dest, err)
 	}
 }
@@ -229,7 +242,17 @@ func (m *Model) forgetDestination(dest string) {
 		return
 	}
 	m.cfg.Destinations = kept
-	if err := config.Save(config.ConfigPath(), m.cfg); err != nil {
+	// Read-modify-write for the same reason as persistDestination: a whole-file
+	// save from the launch-time snapshot reverts everything written since.
+	if err := config.Mutate(config.ConfigPath(), func(c *config.Config) {
+		out := make([]config.Destination, 0, len(c.Destinations))
+		for _, d := range c.Destinations {
+			if d.Dest != dest {
+				out = append(out, d)
+			}
+		}
+		c.Destinations = out
+	}); err != nil {
 		log.Printf("disconnect %s: could not remove it from config: %v", dest, err)
 	}
 }

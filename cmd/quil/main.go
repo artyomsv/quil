@@ -543,11 +543,19 @@ func launchTUI() {
 	// launch has no conn and therefore no pump, so nothing would ever report a
 	// loss for it and the ladder could not start; that gap is a known limitation
 	// rather than something a dialer here would fix.
+	//
+	// liveCfg is declared here rather than beside the dial funcs below because
+	// these launch-time ladders need it too: a host configured at launch can
+	// still be installed to mid-session (its dial fails ErrRemoteQuilMissing,
+	// the dialog offers), and a redial holding the pre-install value would
+	// never reconnect afterwards.
+	liveCfg := &atomic.Pointer[config.Config]{}
+	liveCfg.Store(&cfg)
 	for dest := range conns {
 		if dest == "" {
 			continue
 		}
-		model.SetRedialFunc(dest, redialRemote(cfg, dest))
+		model.SetRedialFunc(dest, redialRemote(liveCfg.Load, dest))
 	}
 	// Connecting a host the user names at runtime, from the New Project
 	// dialog's Host field — the same dial the launch path uses, so a
@@ -562,13 +570,17 @@ func launchTUI() {
 	// keeps dialling bare `quil` on the non-interactive PATH, gets 127 again,
 	// and offers the install it just completed. Observed as a five-second
 	// install loop.
-	liveCfg := &atomic.Pointer[config.Config]{}
-	liveCfg.Store(&cfg)
 	model.SetDialFunc(func(dest string) (tui.Client, error) {
 		return dialExtra(*liveCfg.Load(), config.Destination{Dest: dest})()
 	})
+	// The reconnect ladder reads the config through the same pointer, and for
+	// the same reason — it is not enough for the FIRST dial to see the recorded
+	// binary path. A host provisioned at runtime attaches fine on the value
+	// captured here, then on its first link drop every redial goes back to bare
+	// `quil`, gets 127, and — since nothing marks that permanent — retries
+	// forever without ever reconnecting.
 	model.SetRedialFactory(func(dest string) tui.RedialFunc {
-		return redialRemote(cfg, dest)
+		return redialRemote(liveCfg.Load, dest)
 	})
 	// Provisioning a host from the dialog, for the dial that comes back
 	// ErrRemoteQuilMissing. The same runRemoteSetup the CLI subcommand uses,
@@ -648,7 +660,16 @@ func launchTUI() {
 		m.CloseClient()
 		saveWindowSize(m)
 		if m.ConfigChanged() {
-			if err := config.Save(config.ConfigPath(), m.Config()); err != nil {
+			// Read-modify-write, preserving the one section the Model does not
+			// own. A remote install records [remote.hosts.<dest>] behind the
+			// TUI's back, so writing the Model's launch-time copy whole would
+			// erase the binary path that makes the next attach work — and this
+			// runs on EVERY exit once any setting has been touched.
+			if err := config.Mutate(config.ConfigPath(), func(c *config.Config) {
+				remote := c.Remote
+				*c = m.Config()
+				c.Remote = remote
+			}); err != nil {
 				log.Printf("save config: %v", err)
 			} else {
 				log.Print("config saved (disclaimer preference updated)")

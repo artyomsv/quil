@@ -424,6 +424,28 @@ func Load(path string) (Config, error) {
 }
 
 // Save writes the config to disk atomically (write .tmp then rename).
+// Mutate applies fn to the config ON DISK — load, change, save — and is the
+// only correct way to write one section of a config another writer also owns.
+//
+// Save serialises the WHOLE struct, so saving a Config that was loaded at
+// launch silently reverts every key written since. That is not hypothetical
+// here: a remote install records the absolute path it installed to under
+// [remote.hosts.<dest>], and the very next thing the TUI does is record the new
+// destination — which, done from the launch-time snapshot, erased the path that
+// makes attaching work at all. The symptom was a host that installed
+// successfully and then offered to install again on the next launch, forever.
+//
+// A missing file is not an error: Load returns the defaults for one, which is
+// exactly what a first write should be based on.
+func Mutate(path string, fn func(*Config)) error {
+	cfg, err := Load(path)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("load config: %w", err)
+	}
+	fn(&cfg)
+	return Save(path, cfg)
+}
+
 func Save(path string, cfg Config) error {
 	var buf bytes.Buffer
 	if err := toml.NewEncoder(&buf).Encode(cfg); err != nil {

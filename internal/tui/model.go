@@ -1568,6 +1568,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(tea.ClearScreen, m.listenForMessages())
 
 	case WorkspaceStateMsg:
+		// Refuse state from a destination the Model has forgotten. Router.Remove
+		// closes the pump's stop channel and every publish point checks it, but
+		// that only covers a pump PARKED in Receive — a broadcast already in the
+		// buffer is still delivered, and one that passed the check just before
+		// Remove wins the select about half the time. applyWorkspaceState treats
+		// a broadcast as authoritative for its dest, so a late one re-appends
+		// the projects the user just dismissed, and they come back unusable:
+		// knownDests no longer lists the dest, so nothing re-attaches it and
+		// every send for its panes is dropped. Dropping the state here rather
+		// than trying to purge the channel keeps the fix at the one boundary
+		// that knows what the Model currently holds.
+		if !m.destConnected(msg.Dest) {
+			log.Printf("ignoring workspace state from %s: disconnected", msg.Dest)
+			return m, m.listenForMessages()
+		}
 		m.noteWorkspaceState(msg.Update, msg.Dest)
 		// TODO(freeze-diagnostic): the 8 "apply: ..." breadcrumbs in this case
 		// and inside applyWorkspaceState were added to pinpoint a TUI Update

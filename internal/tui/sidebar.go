@@ -149,6 +149,15 @@ func (m *Model) sidebarRows(w int) []sidebarRow {
 	ordinal := 0
 	for ti, tab := range m.curTabs() {
 		onTab := ti == activeTabIdx
+		// A blank row between tab groups. Without it the whole PANES section
+		// is one unbroken column and a tab heading reads as just another pane
+		// row — the grouping the section exists to show is the first thing
+		// lost. Not before the FIRST group: the section heading already
+		// separates it, and a second blank there is just wasted height on a
+		// strip that scrolls.
+		if ti > 0 {
+			rows = append(rows, sidebarRow{})
+		}
 		rows = append(rows, sidebarRow{text: sidebarTabHeading(sanitizeRemoteText(tab.Name), onTab, w)})
 		for _, pane := range tab.Leaves() {
 			rows = append(rows, sidebarRow{
@@ -323,7 +332,7 @@ func gitRow(pane *PaneModel, w int) string {
 	}
 	name = sanitizeRemoteText(name)
 
-	prefix := "    ⎇ "
+	prefix := "  ⎇ "
 	var suffix string
 	if pane.GitWorktree {
 		suffix += " wt"
@@ -351,7 +360,7 @@ func gitRow(pane *PaneModel, w int) string {
 	if nameW > avail {
 		nameW = avail
 	}
-	name = truncateCells(name, nameW)
+	name = elideMiddle(name, nameW)
 	suffix = truncateCells(suffix, avail-lipgloss.Width(name))
 
 	style := sidebarGitStyle
@@ -515,6 +524,31 @@ func paneRow(pane *PaneModel, focused bool, w int) string {
 // backfills the odd cell with a space): emitting half of one is a different
 // character. No ellipsis — unlike palette rows these are padded to an exact
 // column count, and an ellipsis cell would come out of the content budget.
+// elideMiddle shortens to w cells by removing the MIDDLE, keeping both ends.
+//
+// Branch names are the case this exists for. They are conventionally
+// prefix/suffix pairs — feat/projects-sidebar, fix/ghost-replay — where the
+// prefix says the kind of work and the tail says which work, so cutting either
+// end alone throws away half the identity: a column of "feat/proje…" rows is
+// indistinguishable, and a column of "…ts-sidebar" rows has lost the
+// convention the user organises by. Falls back to plain truncation below the
+// width where an elision would cost more than it saves.
+func elideMiddle(s string, w int) string {
+	if w <= 0 || lipgloss.Width(s) <= w {
+		return truncateCells(s, w)
+	}
+	// Under this, "a…b" is mostly ellipsis — a tail-truncated string carries
+	// more information than two one-character stubs.
+	const minElide = 8
+	if w < minElide {
+		return truncateCells(s, w)
+	}
+	runes := []rune(s)
+	head := (w - 1) / 2
+	tail := w - 1 - head
+	return string(runes[:head]) + "…" + string(runes[len(runes)-tail:])
+}
+
 func truncateCells(s string, w int) string {
 	if w <= 0 {
 		return ""

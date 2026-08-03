@@ -343,6 +343,15 @@ func (m Model) handleProjectRemoteKey(key string) (tea.Model, tea.Cmd) {
 			m.resetProjectBrowseState()
 			return m, m.requestBrowseDirForDest("", "", "", "")
 		}
+		// Turning Remote ON blanks the listing and requests NOTHING. The
+		// entries on screen describe this machine, and leaving them under a
+		// form that now says "remote" invites picking a path that exists here
+		// and nowhere else — the browser has no host to ask until one is
+		// connected, and saying so is more honest than showing the wrong
+		// filesystem. destDialedMsg repopulates it against the real host.
+		m.projectFormDest = ""
+		m.resetProjectBrowseState()
+		m.projectFormCursor = 2 // the User row, which is where the flow goes next
 		return m, nil
 	}
 	return m, nil
@@ -639,7 +648,14 @@ func (m Model) renderProjectDialog() string {
 		case m.projectFormHost == "":
 			b.WriteString("    " + dialogSubtle.Render("(required — Enter to connect)") + "\n")
 		case hostFocused:
-			b.WriteString("    " + dialogValStyle.Render(truncateToWidth(m.projectFormHost, textWidth-setupRowIndent)) + "\n")
+			// The connection state is shown on the field itself: this is the
+			// row whose Enter performs the test, so the answer belongs where
+			// the user is looking when they press it.
+			state := dialogSubtle.Render("  ✗ not connected — Enter to try")
+			if m.destConnected(m.projectFormDestFromFields()) {
+				state = dialogSubtle.Render("  ✓ connected")
+			}
+			b.WriteString("    " + dialogValStyle.Render(truncateToWidth(m.projectFormHost, textWidth-setupRowIndent-30)) + state + "\n")
 		default:
 			// A host that is typed but NOT connected keeps the plain indent, so
 			// a user who tabbed past it is not left believing the project will
@@ -665,6 +681,11 @@ func (m Model) renderProjectDialog() string {
 	switch {
 	case path == "" && len(m.cwdBrowseEntries) > 0:
 		path = dialogSubtle.Render("Select drive:")
+	case path == "" && m.projectFormRemote && m.projectFormDest == "":
+		// Says WHY it is empty. The generic message below promises the daemon
+		// default, which for a remote form that has not connected yet would
+		// mean the local daemon's — the wrong machine entirely.
+		path = dialogSubtle.Render("(connect a host above to browse it)")
 	case path == "":
 		path = dialogSubtle.Render("(no directory loaded — daemon default will be used)")
 	case rootFocused:

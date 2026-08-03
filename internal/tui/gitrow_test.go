@@ -103,10 +103,59 @@ func TestGitRow_BranchKeepsItsFloorAgainstLongCounts(t *testing.T) {
 		GitStale:    true,
 	}
 	got := gitRow(&pane, defaultSidebarWidth)
-	if !strings.Contains(got, "feat/pro") {
-		t.Errorf("row %q dropped the branch name; the counts crowded it out", got)
+	// Both ends of the branch survive. A branch is conventionally
+	// kind/description, so cutting either end alone throws away half the
+	// identity — a column of "feat/…" rows is indistinguishable, and a column
+	// of "…-sidebar" rows has lost the prefix the user organises by.
+	if !strings.Contains(got, "fea") || !strings.Contains(got, "bar") {
+		t.Errorf("row %q lost an end of the branch name; the counts crowded it out", got)
+	}
+	if !strings.Contains(got, "…") {
+		t.Errorf("row %q shows no elision for a branch that cannot fit", got)
 	}
 	if w := lipgloss.Width(got); w != defaultSidebarWidth {
 		t.Errorf("row measures %d cells, want exactly %d", w, defaultSidebarWidth)
+	}
+}
+
+func TestElideMiddle(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		w    int
+		want string
+	}{
+		{"fits untouched", "main", 10, "main"},
+		{"exact fit", "main", 4, "main"},
+		{"elides the middle", "feat/projects-sidebar", 12, "feat/…idebar"},
+		// Below minElide an ellipsis costs more than it saves, so this falls
+		// through to truncateCells — which cuts without a marker.
+		{"below the floor falls back to truncation", "feat/projects", 5, "feat/"},
+		{"zero width", "main", 0, ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := elideMiddle(tc.in, tc.w); got != tc.want {
+				t.Errorf("elideMiddle(%q, %d) = %q, want %q", tc.in, tc.w, got, tc.want)
+			}
+		})
+	}
+
+	// The properties that matter, stated directly rather than as a golden
+	// string: the result fits, and both ends of the original survive.
+	const branch = "feat/projects-sidebar"
+	for w := 8; w <= 24; w++ {
+		got := elideMiddle(branch, w)
+		if lipgloss.Width(got) > w {
+			t.Errorf("elideMiddle(%q, %d) = %q — wider than asked", branch, w, got)
+		}
+		if w < lipgloss.Width(branch) {
+			if !strings.HasPrefix(branch, strings.Split(got, "…")[0]) {
+				t.Errorf("w=%d: %q does not start with the branch's own head", w, got)
+			}
+			if tail := strings.Split(got, "…"); len(tail) == 2 && !strings.HasSuffix(branch, tail[1]) {
+				t.Errorf("w=%d: %q does not end with the branch's own tail", w, got)
+			}
+		}
 	}
 }

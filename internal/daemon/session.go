@@ -342,10 +342,29 @@ func (sm *SessionManager) DestroyTab(tabID string) error {
 	// De-register from the owning project before removing the tab. A
 	// dangling ID in TabIDs gets persisted and broadcast, and the client
 	// then looks up a TabInfo that does not exist.
+	//
+	// The successor is picked from the OWNING PROJECT's tabs, never from the
+	// workspace-wide tabOrder — the same rule DestroyProject states and for the
+	// same reason: a global answer hands back a tab belonging to a different
+	// project than the one still active, and the client scopes its tab list to
+	// the active project's TabIDs alone. Closing project B's active tab would
+	// promote project A's, leaving a highlighted tab that is not in the list.
+	// Its INDEX is the neighbour that slid into the closed tab's slot, which is
+	// how closing a tab behaves everywhere else.
+	successor := ""
 	if p, ok := sm.projects[tab.ProjectID]; ok {
+		idx := indexOfString(p.TabIDs, tabID)
 		p.TabIDs = removeString(p.TabIDs, tabID)
+		if len(p.TabIDs) > 0 {
+			if idx < 0 || idx >= len(p.TabIDs) {
+				idx = len(p.TabIDs) - 1
+			}
+			successor = p.TabIDs[idx]
+		}
 		if p.ActiveTab == tabID {
-			p.ActiveTab = ""
+			// Empty here is what made the client fall back to the project's
+			// FIRST tab rather than a neighbour of the one just closed.
+			p.ActiveTab = successor
 		}
 	}
 
@@ -358,10 +377,14 @@ func (sm *SessionManager) DestroyTab(tabID string) error {
 	}
 
 	if sm.activeTab == tabID {
-		if len(sm.tabOrder) > 0 {
+		sm.activeTab = successor
+		// Only when the project has no tabs LEFT is there no in-project answer
+		// to give, and then any answer is cross-project. recoverEmptyProject
+		// runs straight after this and bootstraps the project a tab, so the
+		// global fallback is what keeps the daemon from sitting with no active
+		// tab at all in the gap.
+		if sm.activeTab == "" && len(sm.tabOrder) > 0 {
 			sm.activeTab = sm.tabOrder[0]
-		} else {
-			sm.activeTab = ""
 		}
 	}
 	sm.mu.Unlock()

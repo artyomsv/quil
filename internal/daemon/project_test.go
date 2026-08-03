@@ -525,3 +525,57 @@ func TestProjectCWDFallsBackForAnUnusableRoot(t *testing.T) {
 		t.Errorf("projectCWD(file as root) = %q, want the daemon default %q", got, fallback)
 	}
 }
+
+// TestDestroyTabKeepsTheActiveTabInsideItsProject is the DestroyTab half of
+// TestDestroyProjectActiveTabStaysWithinActiveProject's invariant. DestroyProject
+// was given an explicit guard against deriving activeTab from the global
+// tabOrder, with a comment saying why; DestroyTab kept doing exactly that.
+//
+// Closing the active tab of project B therefore promoted whichever tab happens
+// to sit first in the WORKSPACE-wide order — a tab belonging to A. The result is
+// a daemon whose activeProject is B and whose activeTab is A's: respawnPanes
+// eagerly warms the wrong project's tab on the next start, list_tabs reports a
+// tab from A as active, and B's own ActiveTab is left empty so the client falls
+// back to index 0 rather than a neighbour of the tab just closed.
+func TestDestroyTabKeepsTheActiveTabInsideItsProject(t *testing.T) {
+	sm := NewSessionManager(1024)
+	a := sm.CreateProject("A", "/tmp/a")
+	b := sm.CreateProject("B", "/tmp/b")
+	// A's tab is created FIRST, so it is tabOrder[0] — the value the old code
+	// promoted. Without that ordering the bug is invisible.
+	tabA1 := sm.CreateTabInProject(a.ID, "A1")
+	sm.CreateTabInProject(b.ID, "B1")
+	tabB2 := sm.CreateTabInProject(b.ID, "B2")
+	tabB3 := sm.CreateTabInProject(b.ID, "B3")
+
+	if _, ok := sm.SwitchProject(b.ID); !ok {
+		t.Fatal("SwitchProject(b) = false")
+	}
+	sm.SwitchTab(tabB2.ID)
+
+	if err := sm.DestroyTab(tabB2.ID); err != nil {
+		t.Fatalf("DestroyTab: %v", err)
+	}
+
+	got := sm.ActiveTabID()
+	if got == tabA1.ID {
+		t.Fatalf("ActiveTabID() = %q — that is project A's tab, promoted from "+
+			"the global tabOrder while the active project is B", got)
+	}
+	// The neighbour that slid into the closed tab's slot, the way closing a
+	// browser tab behaves. B3 followed B2.
+	if got != tabB3.ID {
+		t.Fatalf("ActiveTabID() = %q, want %q (the closed tab's neighbour in B)", got, tabB3.ID)
+	}
+
+	var bActive string
+	for _, pr := range sm.Projects() {
+		if pr.ID == b.ID {
+			bActive = pr.ActiveTab
+		}
+	}
+	if bActive != tabB3.ID {
+		t.Fatalf("project B ActiveTab = %q, want %q — an empty value makes the "+
+			"client fall back to B's first tab instead of the neighbour", bActive, tabB3.ID)
+	}
+}

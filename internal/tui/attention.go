@@ -70,6 +70,14 @@ func (m *Model) jumpToNextBlocked() tea.Cmd {
 			// note in projectpicker.go). Capturing the cmd first, then
 			// applying the tab/pane focus, then returning keeps the sequence
 			// explicit regardless of how this function is later called.
+			// Before switchProject, not after: the teardown must revert focus
+			// mode on the tab being LEFT. switchProject only tears down when
+			// the project actually changes, and the queue routinely lands on
+			// another tab of the SAME project — which left the editor open,
+			// bound to a pane in the outgoing tab.
+			if m.notesMode {
+				m.exitNotesModeInPlace()
+			}
 			cmd := m.switchProject(i)
 			target.Project.activeTab = target.TabIndex
 			// TabModel.ActivePane is the pane-ID field; ActivePaneModel()

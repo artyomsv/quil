@@ -78,6 +78,20 @@ func (m *Model) jumpToPane(paneID string) bool {
 	if pane == nil {
 		return false
 	}
+	// Notes mode is torn down BEFORE the tab moves, which is the contract
+	// exitNotesModeInPlace states: it reverts focus mode on the tab that is
+	// active when it runs, so calling it afterwards reverts the wrong one.
+	//
+	// This is the choke point for every cross-tab jump that is not switchTab —
+	// MCP set_active_pane, the notification sidebar, pane-history back, the
+	// palette and the attention queue all arrive here. They each moved the
+	// active tab with the editor still open, bound to a pane in the tab being
+	// left, still claiming its share of the width. notesKeyExempt does not
+	// cover it: that branch only runs while the EDITOR has focus, and notes
+	// open beside a working agent normally has the PANE focused.
+	if m.notesMode {
+		m.exitNotesModeInPlace()
+	}
 	for i, p := range m.projects {
 		if p == proj {
 			m.activeProject = i

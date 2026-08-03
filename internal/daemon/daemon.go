@@ -698,8 +698,8 @@ func (d *Daemon) restoreWorkspace() error {
 
 				// Load ghost buffer from disk
 				if bufData, err := persist.LoadBuffer(bufDir, paneID); err == nil && len(bufData) > 0 {
-					bufData = terminateGhostLine(bufData)
 					pane.OutputBuf.Write(bufData)
+					pane.ghostSeeded = true
 					pane.GhostSnap = make([]byte, len(bufData))
 					copy(pane.GhostSnap, bufData)
 					pane.HistoryLines = bytes.Count(bufData, []byte{'\n'})
@@ -1194,6 +1194,16 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 			log.Printf("attach: ghost replay pane %s (type=%s, source=%s, bytes=%d)",
 				pane.ID, typ, source, len(ghost))
 			sendGhostChunked(conn, pane.ID, ghost, d.shutdown)
+			if source == "ghostsnap" {
+				// A DIFFERENT session's screen was just drawn, and the child
+				// about to paint over it positions absolutely against a screen
+				// it believes is its own. Push the replay into scrollback so
+				// the two never share a row. Only on this path: the outputbuf
+				// replay is this child's own byte stream, so it reproduces the
+				// screen the child already thinks it has.
+				_, rows := paneSize(pane)
+				sendGhostChunked(conn, pane.ID, ghostScrollOut(rows), d.shutdown)
+			}
 		}
 	}
 
@@ -1220,39 +1230,31 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 // in streamPTYOutput, so ghost replay feels identical to fast live output.
 // The done channel allows early abort if the daemon is shutting down or the
 // client disconnects mid-replay.
-// terminateGhostLine closes a restored buffer at a line boundary so the
-// respawned child's first output starts on a fresh row instead of landing on
-// the end of the previous session's last line.
+// ghostScrollOut is the byte sequence that pushes a replayed session off the
+// VISIBLE screen and into the emulator's scrollback, leaving blank rows for
+// the respawned child to paint on.
 //
-// A shell's saved buffer ends mid-line by construction: the last thing it
-// wrote was a prompt, with the cursor parked after it waiting for input that
-// never came. The respawned shell then prints its own prompt at that cursor,
-// giving "PS E:\...> PS E:\...>" on one row — and because the seeded OutputBuf
-// is what the next snapshot persists, the concatenation is SAVED and the row
-// grows by one prompt on every restart (measured: 3387 → 3512 bytes across a
-// single restore, reported 2026-08-03).
+// This is what makes a restored terminal coherent at all. The child paints
+// with ABSOLUTE cursor positioning against a screen it believes it owns —
+// PSReadLine redrawing an input line emits `CSI 1;30H`, row 1, column 30, one
+// past a 29-character prompt — so a replayed screen underneath it does not
+// merely look stale, it gets painted through: the fresh prompt appears at the
+// top of the pane while the previous session's rows sit below it (reported
+// 2026-08-03). No amount of repair at the join fixes that, because the child's
+// row 1 and ours are different screens.
 //
-// This is the same collision that corrupts an agent pane, from the other side.
-// There the child repaints its whole transcript, so the replay is dropped
-// (restoresOwnHistory); here it appends, and the replay is the only history
-// there is — so the join is repaired rather than removed.
-//
-// A buffer that already ends in a newline is returned UNCHANGED rather than
-// gaining a blank separator line. Adding one unconditionally would be the same
-// unbounded growth wearing different bytes: every restart would deposit
-// another blank row, forever. What remains is bounded by construction — the
-// terminator makes the buffer end in a newline, so the next restore appends
-// nothing until a child has written a fresh unterminated line of its own, and
-// one prompt row per session is honest history rather than an artifact.
-//
-// CR before LF because the column has to be reset too, not just the row.
-func terminateGhostLine(buf []byte) []byte {
-	if len(buf) == 0 || buf[len(buf)-1] == '\n' {
-		return buf
+// Scrolling rather than clearing is the point: LF at the bottom row moves a
+// line into scrollback, where the user can still reach it, while `CSI 2J`
+// would erase it. A full `rows` of them is deliberate over-scroll — the daemon
+// cannot know how many rows the replay actually occupied on the client, since
+// that depends on wrapping — so a short buffer leaves some blank rows above
+// the new session. Blank scrollback is a cosmetic cost; an under-scroll is the
+// bug returning.
+func ghostScrollOut(rows int) []byte {
+	if rows <= 0 {
+		rows = 24 // pane never sized (deferred, no client geometry yet)
 	}
-	out := make([]byte, 0, len(buf)+2)
-	out = append(out, buf...)
-	return append(out, '\r', '\n')
+	return bytes.Repeat([]byte("\r\n"), rows)
 }
 
 // restoresOwnHistory reports whether a plugin's resume strategy hands the
@@ -2124,6 +2126,19 @@ func (d *Daemon) flushPaneOutput(paneID string, data []byte) {
 		return
 	}
 	if pane.OutputBuf != nil {
+		// Hand the buffer over from the restored session to this child on its
+		// first byte. Until now OutputBuf held the PREVIOUS session's bytes so
+		// a pane the user never opened still had history to persist and to
+		// replay on reconnect; from here it is this child's stream, which is
+		// what makes a reconnect replay reproduce the child's screen exactly
+		// instead of laying it over a different session's.
+		pane.PluginMu.Lock()
+		seeded := pane.ghostSeeded
+		pane.ghostSeeded = false
+		pane.PluginMu.Unlock()
+		if seeded {
+			pane.OutputBuf.Reset()
+		}
 		pane.OutputBuf.Write(data)
 	}
 

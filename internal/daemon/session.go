@@ -32,6 +32,14 @@ type Pane struct {
 	OutputBuf    *ringbuf.RingBuffer // Captures PTY output for replay on reconnect
 	GhostSnap    []byte              // Pure disk-loaded ghost buffer, cleared after first client replay
 	HistoryLines int                 // Ghost-buffer line count, snapshotted at restore (immutable after; broadcast-only restore-checklist hint)
+	// ghostSeeded marks an OutputBuf that still holds the PREVIOUS session's
+	// bytes rather than this child's. Restore seeds it so a pane the user
+	// never opens still has history to persist and to replay on reconnect;
+	// the first byte the respawned child writes hands the buffer over (see
+	// flushPaneOutput). Without the handover the two sessions concatenate and
+	// the saved buffer grows by a screenful on every restart.
+	// PluginMu-protected.
+	ghostSeeded bool
 	Type         string              // Plugin name (default: "terminal")
 	PluginState  map[string]string   // Scraped values (e.g., "session_id": "abc123")
 	// PluginMu protects every mutable field that can be read or written

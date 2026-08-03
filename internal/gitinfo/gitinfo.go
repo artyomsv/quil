@@ -58,6 +58,10 @@ func (i Info) Empty() bool {
 var runGit = func(ctx context.Context, dir string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
+	// Windows only, and load-bearing there: the daemon runs console-less, so
+	// without this every probe allocates a console the user sees flash. See
+	// proc_windows.go.
+	hideWindow(cmd)
 	out, err := cmd.Output()
 	return string(out), err
 }

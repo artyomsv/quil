@@ -205,3 +205,51 @@ func TestGitCache_LookupNeverProbes(t *testing.T) {
 			len(f.dirCalls), len(f.probeCalls))
 	}
 }
+
+// TestGitCache_SweepsCWDsNoPaneIsInAnyMore: referencedDirs bounds what gets
+// PROBED, not what is stored, so all three maps only ever grew. OSC 7 rewrites
+// a pane's CWD on every cd, so one shell roaming a monorepo adds an entry per
+// directory it visits — and this daemon is expected to run for weeks.
+func TestGitCache_SweepsCWDsNoPaneIsInAnyMore(t *testing.T) {
+	f := &fakeGitProbes{
+		dirs: map[string][2]string{
+			"/repo/a": {"/repo/a/.git", "/repo/a/.git"},
+			"/repo/b": {"/repo/b/.git", "/repo/b/.git"},
+		},
+		infos: map[string]gitinfo.Info{
+			"/repo/a": {Branch: "main"},
+			"/repo/b": {Branch: "dev"},
+		},
+	}
+	installFakeGit(t, f)
+
+	c := newGitCache()
+	ctx := context.Background()
+
+	// Two panes, two checkouts.
+	c.refresh(ctx, []string{"/repo/a", "/repo/b"})
+	if got := len(c.cwdToDir); got != 2 {
+		t.Fatalf("cwdToDir = %d entries after resolving two CWDs, want 2", got)
+	}
+
+	// The second pane closes, or its shell cds away. Only /repo/a is live.
+	c.refresh(ctx, []string{"/repo/a"})
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, still := c.cwdToDir["/repo/b"]; still {
+		t.Error("cwdToDir still holds /repo/b, which no pane is in — the map " +
+			"grows for the life of the daemon, one entry per directory any " +
+			"shell has ever cd'd into")
+	}
+	if _, still := c.cwdAt["/repo/b"]; still {
+		t.Error("cwdAt still holds /repo/b")
+	}
+	if _, still := c.cwdToDir["/repo/a"]; !still {
+		t.Error("the sweep dropped /repo/a, which a pane IS in")
+	}
+	if len(c.byDir) != 1 {
+		t.Errorf("byDir = %d checkouts, want 1 — a checkout whose last pane is "+
+			"gone is kept forever", len(c.byDir))
+	}
+}

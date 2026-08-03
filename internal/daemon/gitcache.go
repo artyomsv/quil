@@ -210,6 +210,47 @@ func (c *gitCache) refresh(ctx context.Context, cwds []string) {
 		}
 		c.mu.Unlock()
 	}
+
+	c.sweep(cwds)
+}
+
+// sweep drops entries for CWDs no live pane is in any more.
+//
+// referencedDirs bounds what is PROBED, not what is stored, and the three maps
+// only ever grew. OSC 7 rewrites Pane.CWD on every cd, so a shell roaming a
+// monorepo adds an entry per distinct directory it visits and byDir keeps every
+// checkout ever seen — for a daemon that runs for weeks, which is the lifetime
+// this file's other budgets are all reasoned from.
+//
+// Re-resolving a directory the user returns to costs one rev-parse on the next
+// tick, off the broadcast path. That is the right trade against holding every
+// path a shell has ever printed.
+func (c *gitCache) sweep(cwds []string) {
+	live := make(map[string]bool, len(cwds))
+	for _, cwd := range cwds {
+		if cwd != "" {
+			live[cwd] = true
+		}
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	keptDirs := make(map[string]bool, len(live))
+	for cwd, dir := range c.cwdToDir {
+		if !live[cwd] {
+			delete(c.cwdToDir, cwd)
+			delete(c.cwdAt, cwd)
+			continue
+		}
+		if dir != "" {
+			keptDirs[dir] = true
+		}
+	}
+	for dir := range c.byDir {
+		if !keptDirs[dir] {
+			delete(c.byDir, dir)
+		}
+	}
 }
 
 // referencedDirs lists the distinct checkouts the given CWDs resolve to, so a

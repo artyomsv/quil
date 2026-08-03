@@ -579,3 +579,90 @@ func TestDestroyTabKeepsTheActiveTabInsideItsProject(t *testing.T) {
 			"client fall back to B's first tab instead of the neighbour", bActive, tabB3.ID)
 	}
 }
+
+// TestReorderProjectMovesTheProjectAndKeepsTheRest: dragging a project in the
+// sidebar is the only way to reorder one, and nothing exercised it at any layer
+// — not the method, not the handler, not the payload round-trip. Its tab-level
+// twin (ReorderTab) is covered thoroughly, which is what made the gap easy to
+// miss.
+func TestReorderProjectMovesTheProjectAndKeepsTheRest(t *testing.T) {
+	names := func(sm *SessionManager) []string {
+		out := []string{}
+		for _, p := range sm.Projects() {
+			out = append(out, p.Name)
+		}
+		return out
+	}
+	eq := func(t *testing.T, got []string, want ...string) {
+		t.Helper()
+		if len(got) != len(want) {
+			t.Fatalf("order = %v, want %v", got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("order = %v, want %v", got, want)
+			}
+		}
+	}
+
+	t.Run("moves later", func(t *testing.T) {
+		sm := NewSessionManager(1024)
+		a := sm.CreateProject("A", "/tmp/a")
+		sm.CreateProject("B", "/tmp/b")
+		sm.CreateProject("C", "/tmp/c")
+		if !sm.ReorderProject(a.ID, 2) {
+			t.Fatal("ReorderProject = false for a project that exists")
+		}
+		eq(t, names(sm), "B", "C", "A")
+	})
+
+	t.Run("moves earlier", func(t *testing.T) {
+		sm := NewSessionManager(1024)
+		sm.CreateProject("A", "/tmp/a")
+		sm.CreateProject("B", "/tmp/b")
+		c := sm.CreateProject("C", "/tmp/c")
+		if !sm.ReorderProject(c.ID, 0) {
+			t.Fatal("ReorderProject = false")
+		}
+		eq(t, names(sm), "C", "A", "B")
+	})
+
+	t.Run("clamps out-of-range indices", func(t *testing.T) {
+		sm := NewSessionManager(1024)
+		a := sm.CreateProject("A", "/tmp/a")
+		sm.CreateProject("B", "/tmp/b")
+		// A drag released past either end must land at that end, not panic and
+		// not silently drop the project out of projectOrder — Projects() walks
+		// that slice, so a lost id makes the project vanish from the sidebar
+		// while its tabs and panes keep running.
+		if !sm.ReorderProject(a.ID, 99) {
+			t.Fatal("ReorderProject = false")
+		}
+		eq(t, names(sm), "B", "A")
+		if !sm.ReorderProject(a.ID, -5) {
+			t.Fatal("ReorderProject = false")
+		}
+		eq(t, names(sm), "A", "B")
+	})
+
+	t.Run("unknown id changes nothing", func(t *testing.T) {
+		sm := NewSessionManager(1024)
+		sm.CreateProject("A", "/tmp/a")
+		sm.CreateProject("B", "/tmp/b")
+		if sm.ReorderProject("proj-does-not-exist", 0) {
+			t.Fatal("ReorderProject = true for an unknown id")
+		}
+		eq(t, names(sm), "A", "B")
+	})
+
+	t.Run("through the IPC handler", func(t *testing.T) {
+		d := newTestDaemon(t)
+		d.session.CreateProject("A", t.TempDir())
+		b := d.session.CreateProject("B", t.TempDir())
+		msg, _ := ipc.NewMessage(ipc.MsgReorderProject, ipc.ReorderProjectPayload{
+			ProjectID: b.ID, NewIndex: 0,
+		})
+		d.handleMessage(nil, msg)
+		eq(t, names(d.session), "B", "A")
+	})
+}

@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Info is one checkout's state. The zero value means "nothing known", which is
@@ -62,9 +63,20 @@ var runGit = func(ctx context.Context, dir string, args ...string) (string, erro
 	// without this every probe allocates a console the user sees flash. See
 	// proc_windows.go.
 	hideWindow(cmd)
+	// CommandContext kills git when the context expires, but Output() still
+	// waits for every holder of the stdout pipe to exit — and git's own
+	// children (a credential helper, fsmonitor) inherit it. One of those stuck
+	// on a dead mount would keep this call parked long past its deadline,
+	// holding the caller's blocking-FS permit with it. WaitDelay bounds the
+	// wait after the kill; internal/transport/ssh.go bounds its child the same
+	// way and for the same reason.
+	cmd.WaitDelay = gitWaitDelay
 	out, err := cmd.Output()
 	return string(out), err
 }
+
+// gitWaitDelay caps how long a killed git may hold its output pipe open.
+const gitWaitDelay = 2 * time.Second
 
 // Dirs resolves a directory's repository identity: the absolute per-checkout
 // git dir and the repository-wide common dir. They differ exactly when this

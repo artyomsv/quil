@@ -965,7 +965,14 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 	// Project lifecycle
 	case ipc.MsgCreateProject:
 		var p ipc.CreateProjectPayload
-		msg.DecodePayload(&p)
+		// Checked, unlike the four handlers below where a zero payload is a
+		// harmless no-op: a decode failure here would create a NAMELESS project
+		// rooted nowhere, ship it a shell, broadcast it and snapshot it — a
+		// malformed frame turning into persistent workspace state.
+		if err := msg.DecodePayload(&p); err != nil {
+			log.Printf("create project: malformed payload: %v", err)
+			return
+		}
 		proj := d.session.CreateProject(p.Name, p.RootDir)
 		// A project ships with a shell, exactly like a fresh workspace. An
 		// empty one renders as a blank screen the moment the user switches to
@@ -977,7 +984,10 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 
 	case ipc.MsgDestroyProject:
 		var p ipc.DestroyProjectPayload
-		msg.DecodePayload(&p)
+		if err := msg.DecodePayload(&p); err != nil {
+			log.Printf("destroy project: malformed payload: %v", err)
+			return
+		}
 		detached := d.session.DestroyProject(p.ProjectID)
 		// Destroying a project destroys every pane under it, so this is a
 		// pane-destruction path and owes the same cleanup as destroy-pane and
@@ -996,13 +1006,19 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 
 	case ipc.MsgUpdateProject:
 		var p ipc.UpdateProjectPayload
-		msg.DecodePayload(&p)
+		if err := msg.DecodePayload(&p); err != nil {
+			log.Printf("update project: malformed payload: %v", err)
+			return
+		}
 		d.session.UpdateProject(p.ProjectID, p.Name, p.RootDir)
 		d.broadcastState()
 
 	case ipc.MsgSwitchProject:
 		var p ipc.SwitchProjectPayload
-		msg.DecodePayload(&p)
+		if err := msg.DecodePayload(&p); err != nil {
+			log.Printf("switch project: malformed payload: %v", err)
+			return
+		}
 		// ensureTabSpawned is the whole point of the returned tab: after a
 		// lazy restore only sm.activeTab's panes are running, so a background
 		// project's panes are Pending until something switches to their tab —
@@ -1016,7 +1032,10 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 
 	case ipc.MsgReorderProject:
 		var p ipc.ReorderProjectPayload
-		msg.DecodePayload(&p)
+		if err := msg.DecodePayload(&p); err != nil {
+			log.Printf("reorder project: malformed payload: %v", err)
+			return
+		}
 		d.session.ReorderProject(p.ProjectID, p.NewIndex)
 		d.broadcastState()
 
@@ -1452,13 +1471,13 @@ func (d *Daemon) projectCWD(projectID string) string {
 		if p.ID != projectID {
 			continue
 		}
-		if p.RootDir != "" {
-			if info, err := os.Stat(p.RootDir); err == nil && info.IsDir() {
-				if resolved, err := filepath.EvalSymlinks(p.RootDir); err == nil {
-					return resolved
-				}
-				return p.RootDir
-			}
+		// Bounded: this runs on the conn's dispatch goroutine, and a root on a
+		// dead mount would park every pane on the daemon behind it. A refused
+		// permit or a timeout falls through to the default exactly as a stale
+		// path does — the function already treats "cannot use this" as a
+		// fallback case, so no new semantics.
+		if dir := resolveSpawnDirWithin(p.RootDir, spawnDirProbeTimeout); dir != "" {
+			return dir
 		}
 		break
 	}
@@ -3022,13 +3041,10 @@ func resolveSpawnArgs(p *plugin.PanePlugin, pane *Pane, restoring bool, resumeID
 // directory. Symlinks are resolved so all callers see the canonical path.
 func (d *Daemon) defaultCWD() string {
 	if p := d.clientCWD.Load(); p != nil && *p != "" {
-		if info, err := os.Stat(*p); err == nil && info.IsDir() {
-			if resolved, err := filepath.EvalSymlinks(*p); err == nil {
-				return resolved
-			}
-			return *p
+		if dir := resolveSpawnDirWithin(*p, spawnDirProbeTimeout); dir != "" {
+			return dir
 		}
-		// stale (directory removed since attach) — fall through
+		// stale (directory removed since attach), or unreachable — fall through
 	}
 	// Best-effort; if Getwd fails we return "" and the spawn will fail
 	// with a clear error from os/exec rather than silently land somewhere.

@@ -859,10 +859,18 @@ func TestSidebarHitAgreesWithPaintUnderWideGlyphs(t *testing.T) {
 	m := wideGlyphSidebarModel(t)
 	lines := strings.Split(m.renderSidebar(m.sidebarContentHeight()), "\n")
 
-	const screenY = 2 // row 0 PROJECTS, row 1 project 0
+	// Row 0 PROJECTS, row 1 project 0's name, row 2 its host (proj-a is
+	// remote), row 3 project 1.
+	const screenY = 3
 	kind, idx := m.sidebarHit(3, screenY)
 	if kind != sidebarRowProject || idx != 1 {
 		t.Fatalf("sidebarHit(3, %d) = (%q, %d), want (project, 1)", screenY, kind, idx)
+	}
+	// The host row belongs to the project above it: a click there must select
+	// that project rather than falling through to the pane underneath the
+	// sidebar.
+	if kind, idx := m.sidebarHit(3, 2); kind != sidebarRowProject || idx != 0 {
+		t.Errorf("sidebarHit(3, 2) = (%q, %d), want (project, 0) — the host row is part of its project", kind, idx)
 	}
 	if got := lines[screenY]; !strings.Contains(got, "beta") {
 		t.Fatalf("painted sidebar row %d = %q, but the hit test calls it project 1 (beta) — "+

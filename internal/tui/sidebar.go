@@ -128,12 +128,29 @@ func (m *Model) sidebarRows(w int) []sidebarRow {
 	rows := []sidebarRow{{text: sidebarHeading("PROJECTS", w)}}
 	for i, p := range m.projects {
 		working, blocked, done := p.counts()
+		// The NAME alone on the first row. displayName's "name@dest" was
+		// written for the picker, where a dialog is wide enough for it; at the
+		// sidebar's 22 columns "Default@artyom@192.168.6.12" leaves nothing of
+		// either half, and the badges that say whether the project needs you
+		// are what gets truncated away first.
 		rows = append(rows, sidebarRow{
-			text: projectRow(sanitizeRemoteText(p.displayName()),
+			text: projectRow(sanitizeRemoteText(p.Name),
 				working, blocked, done, m.linkGlyph(p.Dest), i == m.activeProject, w),
 			kind:  sidebarRowProject,
 			index: i,
 		})
+		// The host gets its own row, and only a remote project has one — a
+		// local project spending a line to say "this machine" would halve how
+		// many projects fit for no information. Same kind and index, so a
+		// click on either row selects the same project rather than falling
+		// through to the pane underneath.
+		if p.Dest != "" {
+			rows = append(rows, sidebarRow{
+				text:  projectDestRow(sanitizeRemoteText(p.Dest), w),
+				kind:  sidebarRowProject,
+				index: i,
+			})
+		}
 	}
 
 	rows = append(rows, sidebarRow{}, sidebarRow{text: sidebarHeading("PANES", w)})
@@ -306,6 +323,20 @@ var (
 	sidebarGitStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
 	sidebarGitStaleStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Italic(true)
 )
+
+// projectDestRow renders a remote project's host under its name. Indented and
+// dimmed so the column still reads as a list of projects rather than eight
+// entries, and elided in the middle for the same reason a branch is: an ssh
+// destination is user@host, and cutting either end alone leaves a column where
+// every row looks the same.
+func projectDestRow(dest string, w int) string {
+	const prefix = "   @"
+	avail := w - len(prefix)
+	if avail < 1 {
+		avail = 1
+	}
+	return sidebarGitStyle.Render(padOrTrunc(prefix+elideMiddle(dest, avail), w))
+}
 
 // minGitBranchCells is the floor a branch name keeps on its row, for the same
 // reason paneRow has one: the branch is the answer, the divergence counts are

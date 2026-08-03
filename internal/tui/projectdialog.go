@@ -35,8 +35,14 @@ func (m *Model) submitNewProject(name, rootDir string) tea.Cmd {
 	// the root dir below was browsed on THAT filesystem. Creating the project
 	// on the active daemon instead would pair a name with a path that does not
 	// exist there.
+	// Logged on SUCCESS too, not just failure. A create that silently does not
+	// arrive is indistinguishable from one that was never sent, and the only
+	// way to tell them apart afterwards is a record of what left this side and
+	// which daemon it was aimed at.
 	if sendErr := m.sendForDest(m.projectFormDest, msg); sendErr != nil {
-		log.Printf("create project: send: %v", sendErr)
+		log.Printf("create project %q on dest %q: send: %v", name, m.projectFormDest, sendErr)
+	} else {
+		log.Printf("create project %q on dest %q: sent", name, m.projectFormDest)
 	}
 	m.dialog = dialogNone
 	return nil

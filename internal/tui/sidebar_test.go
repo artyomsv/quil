@@ -102,7 +102,7 @@ func TestClickingProjectRowSwitchesProject(t *testing.T) {
 	if kind, idx := m.sidebarHit(3, 1); kind != sidebarRowProject || idx != 0 {
 		t.Fatalf("sidebarHit(3, 1) = (%q, %d), want (project, 0)", kind, idx)
 	}
-	kind, idx := m.sidebarHit(3, 3) // second project row: 0 heading, 1 project 0, 2 blank
+	kind, idx := m.sidebarHit(3, 2) // second project row: 0 heading, 1 project 0
 	if kind != sidebarRowProject || idx != 1 {
 		t.Fatalf("sidebarHit = (%q, %d), want (project, 1)", kind, idx)
 	}
@@ -150,7 +150,7 @@ func TestSidebarHitAgreesWithWhatIsPainted(t *testing.T) {
 		sidebarWidth: 22, width: 200, height: 40,
 	}
 	lines := strings.Split(m.renderSidebar(m.sidebarContentHeight()), "\n")
-	const screenY = 3 // 0 heading, 1 project 0, 2 blank separator
+	const screenY = 2 // 0 heading, 1 project 0
 	kind, idx := m.sidebarHit(3, screenY)
 	if kind != sidebarRowProject || idx != 1 {
 		t.Fatalf("sidebarHit(3, %d) = (%q, %d), want (project, 1)", screenY, kind, idx)
@@ -300,9 +300,9 @@ func TestClickOnProjectRowSwitchesThroughUpdate(t *testing.T) {
 	m.sidebarWidth = 22
 	m.projects = append(m.projects, &ProjectModel{ID: "proj-b", Name: "beta", Dest: "gpu01"})
 
-	// Screen row 3 is the second project row: 0 heading, 1 project 0, 2 the
-	// blank separator between projects.
-	updated, cmd := m.Update(tea.MouseClickMsg{X: 3, Y: 3, Button: tea.MouseLeft})
+	// Screen row 2 is the second project row: 0 heading, 1 project 0.
+
+	updated, cmd := m.Update(tea.MouseClickMsg{X: 3, Y: 2, Button: tea.MouseLeft})
 	if got := updated.(Model).activeProject; got != 1 {
 		t.Fatalf("activeProject = %d, want 1 after clicking the second project row", got)
 	}
@@ -861,8 +861,8 @@ func TestSidebarHitAgreesWithPaintUnderWideGlyphs(t *testing.T) {
 	lines := strings.Split(m.renderSidebar(m.sidebarContentHeight()), "\n")
 
 	// Row 0 PROJECTS, row 1 project 0's name, row 2 its host (proj-a is
-	// remote), row 3 the blank separator, row 4 project 1.
-	const screenY = 4
+	// remote), row 3 project 1.
+	const screenY = 3
 	kind, idx := m.sidebarHit(3, screenY)
 	if kind != sidebarRowProject || idx != 1 {
 		t.Fatalf("sidebarHit(3, %d) = (%q, %d), want (project, 1)", screenY, kind, idx)

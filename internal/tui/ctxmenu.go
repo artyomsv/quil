@@ -359,8 +359,14 @@ func (m *Model) openCtxMenu(pane *PaneModel, anchorX, anchorY int) {
 // buildProjectCtxMenuItems is the sidebar project row's menu: Rename and
 // Destroy. No availability gates — unlike the pane menu's history/lazygit
 // rows, both actions are always valid for any project the sidebar can show.
-func buildProjectCtxMenuItems(remote bool) []ctxMenuItem {
-	items := []ctxMenuItem{{ctxActRenameProject, "Rename project", true, false}}
+func buildProjectCtxMenuItems(remote, synthetic bool) []ctxMenuItem {
+	// Rename is greyed for the SYNTHETIC project — the placeholder the client
+	// invents for a daemon that has reported no projects yet. Its ID exists
+	// only here, so MsgUpdateProject names something the daemon has never
+	// heard of and UpdateProject's map lookup misses: the dialog accepted a
+	// new name and nothing changed, which is exactly how it was reported for a
+	// freshly connected host while local renames worked.
+	items := []ctxMenuItem{{ctxActRenameProject, "Rename project", !synthetic, false}}
 	// ONE removal action, chosen by what the project is.
 	//
 	// Offering both on a remote read as two ways to do the same thing, and the
@@ -389,7 +395,7 @@ func (m *Model) openProjectCtxMenu(p *ProjectModel, anchorX, anchorY int) {
 		title:     p.Name,
 		spaced:    false,
 		cursor:    -1,
-		items:     buildProjectCtxMenuItems(p.Dest != ""),
+		items:     buildProjectCtxMenuItems(p.Dest != "", isSyntheticProject(p.ID)),
 	}
 	s.cursor = firstEnabled(s.items)
 	w, h := s.boxSize()

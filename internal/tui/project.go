@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"strings"
+
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
@@ -390,3 +392,12 @@ func (m *Model) appendTab(tabs ...*TabModel) {
 
 // setActiveTabIdx moves the active project's tab ordinal.
 func (m *Model) setActiveTabIdx(i int) { m.interimProject().activeTab = i }
+
+// isSyntheticProject reports the placeholder the client invents for a daemon
+// that has reported no projects yet (interimProjectIDFor). Its ID exists only
+// in this process, so a message naming it reaches a daemon that has never
+// heard of it and UpdateProject's map lookup silently misses — the dialog
+// accepts a new name and nothing changes. Callers refuse the action instead.
+func isSyntheticProject(id string) bool {
+	return id == interimProjectID || strings.HasPrefix(id, interimProjectID+"@")
+}

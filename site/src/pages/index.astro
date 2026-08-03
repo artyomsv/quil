@@ -86,6 +86,11 @@ const topFeatures = [
 const compareRows = [
   { feature: "Host reboot survival",     values: ["yes", "no",  "no",  "no" ] },
   { feature: "AI session resume",        values: ["yes", "no",  "no",  "no" ] },
+  // Not "does it have a sidebar" — the claim is that the multiplexer knows an
+  // agent is mid-turn vs waiting on a permission prompt vs done. That needs a
+  // feed from the agent itself (hook events); none of the three has any notion
+  // of an agent, so this is a capability gap rather than a UI preference.
+  { feature: "Agent state at a glance",  values: ["yes", "no",  "no",  "no" ] },
   { feature: "Typed panes",              values: ["yes", "no",  "no",  "no" ] },
   { feature: "MCP server for agents",    values: ["yes", "no",  "no",  "no" ] },
   // WezTerm gets a genuine "yes" here — its mux domains run a local client

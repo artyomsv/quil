@@ -179,6 +179,23 @@ export const features: Feature[] = [
 
   // --- Interaction ---------------------------------------------------
   {
+    slug: "projects",
+    icon: "layout-panel-left",
+    title: "Projects, and a sidebar that watches all of them",
+    blurb:
+      "Group tabs into named projects with their own root directory. The left sidebar shows every project's agents at once — so one that finished or got stuck while you were elsewhere is visible from where you already are.",
+    category: "interaction",
+    detail: [
+      "A project owns its tabs and remembers which one you left it on. Ctrl+T files a new tab into the project you're on, and switching project switches the whole tab bar. Alt+Shift+N creates one, Alt+P fuzzy-finds, Alt+O bounces between the last two, Alt+Shift+←/→ cycles.",
+      "The sidebar (Alt+Shift+S) is a reserved left column, not an overlay. Each project row carries a roll-up of its agents — `◐N` working, `⚠N` blocked waiting on you — and those counts keep updating for projects in the background, which is the entire point.",
+      "Under the active project, each pane gets its own glyph: `◐` working (with `⋯N` outstanding subagents), `⚠` blocked on you and the tool it's asking about, `○` idle, `✓` finished while you weren't looking. Click any row to jump there.",
+      "Blocked is a separate state from finished. The agents' hook events always carried the distinction — Notification, PermissionRequest, permission.ask — but the old UI only needed \"mark unseen\", so they were collapsed into one. A permission prompt and a completed turn now look different, because they need different things from you.",
+      "Alt+Shift+A jumps to whichever agent has been blocked longest, anywhere in the workspace, and cycles on repeated presses. Oldest-first rather than sidebar order: with several agents running, the one waiting longest is the one costing you time.",
+      "Each pane row also shows the checkout it sits in — branch, `wt` for a linked worktree, `↑N`/`↓N` against upstream. Refreshed on a background ticker and cached per checkout, so ten panes in one repository cost one git invocation. `git status --porcelain` is deliberately not among them: it's the one call that can take seconds on a large repo without fsmonitor. A probe that doesn't answer keeps its last value and marks it stale rather than guessing.",
+      "Existing workspaces migrate on first load into a single project named Default, tab order preserved. No prompt, no data loss, nothing to opt into.",
+    ],
+  },
+  {
     slug: "typed-panes",
     image: "https://cdn.stukans.com/quil/screenshots/claude-code-setup-dialog-800.webp",
     icon: "layers",
@@ -459,6 +476,23 @@ export const features: Feature[] = [
       "Kube contexts, plugin availability and the recent-directories list follow the same rule: they describe the server. The recent list is kept per host, and whether a remembered directory still exists is asked of the daemon — checking it locally dropped every server path, so the list rendered empty, which is indistinguishable from a feature nobody had used.",
       "Full-screen tools run on the remote the same as locally. `k9s`, `lazysql` and `lazygit` open against the server's clusters, databases and repositories — an SSH connection carries no terminal type, and without one those tools exit within milliseconds, which reads as a pane that crashed rather than a missing variable. Panes that keep no scrollback, such as OpenCode, are asked to repaint when you reattach instead of showing an empty rectangle in front of a process that never stopped running.",
       "Beta limits: plugin definitions still come from your local machine, the daemon checks which tools are installed only at startup and on plugin reload (so a tool installed on the server mid-session stays greyed until then), and the remote must be Linux or macOS — a running Windows executable cannot be replaced in place, which makes the upgrade half of provisioning impossible there.",
+    ],
+  },
+
+  {
+    slug: "multi-daemon",
+    icon: "key-round",
+    title: "Several machines in one window",
+    badge: "beta",
+    blurb:
+      "A project belongs to the daemon that holds its files — so projects from your laptop and from a build host sit side by side in the same sidebar, in one TUI process.",
+    category: "persistence",
+    detail: [
+      "`quil --remote <host>` binds a whole TUI to one daemon. This does not: the client holds connections to the local daemon and any number of remote ones at once, and their projects appear as siblings in the same sidebar. Working against a laptop and a GPU box is no longer two terminals.",
+      "Add a host without relaunching. Tick Remote (ssh) in the New Project dialog, give a user and host, and press Enter on the Host row — Quil dials it, offers to install itself if the host hasn't got it, and then browses *that* machine's filesystem for the root directory. A root directory lives on exactly one machine, so connecting before submitting is the order that makes sense.",
+      "The host is remembered under `[[destinations]]` and attached at every launch. Disconnect it from the sidebar's right-click menu and it stops nothing on the far end — the remote daemon keeps every pane alive, and reconnecting restores the same workspace.",
+      "Each destination carries its own reconnect state: its own backoff ladder, its own amber banner naming the host and what ssh actually said. One daemon dying no longer ends the session — the others stay live and interactive.",
+      "Beta limits worth knowing before you rely on it: a destination unreachable at *launch* never starts a reconnect ladder (no connection means no reader, so nothing reports a loss — relaunch to pick it up), background destinations dial non-interactively so a first-time host key must be accepted once with `ssh <dest>` or `quil remote setup <dest>` first, plugin availability is a single registry fed by whichever daemon answered last, and the recent-directories list is one per client rather than one per host.",
     ],
   },
 

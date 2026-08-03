@@ -96,8 +96,10 @@ func (m Model) openNewProjectDialog() (tea.Model, tea.Cmd) {
 	m.projectFormID = ""
 	m.projectFormName = ""
 	m.projectFormHost = ""
+	m.projectFormUser = ""
+	m.projectFormRemote = false
 	m.projectFormDialing = ""
-	m.projectFormCursor = projectRowName
+	m.projectFormCursor = 0
 	m.projectFormErr = ""
 	m.projectFormDest = m.activeDest()
 	m.resetProjectBrowseState()
@@ -115,9 +117,10 @@ func (m Model) beginProjectRename(id string) (tea.Model, tea.Cmd) {
 	m.dialog = dialogProjectRename
 	m.projectFormID = p.ID
 	m.projectFormName = p.Name
-	m.projectFormHost = p.Dest
+	m.projectFormRemote = p.Dest != ""
+	m.projectFormUser, m.projectFormHost = splitSSHDest(p.Dest)
 	m.projectFormDialing = ""
-	m.projectFormCursor = projectRowName
+	m.projectFormCursor = 0
 	m.projectFormErr = ""
 	m.projectFormDest = p.Dest
 	m.resetProjectBrowseState()
@@ -193,27 +196,36 @@ func (m Model) handleProjectDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 		m.dialog = dialogNone
 		return m, tea.ClearScreen
 	case "tab":
-		m.projectFormCursor = (m.projectFormCursor + 1) % projectFormRows
+		n := len(m.projectFormVisibleRows())
+		m.projectFormCursor = (m.projectFormCursor + 1) % n
 		return m, nil
 	case "shift+tab":
-		m.projectFormCursor = (m.projectFormCursor + projectFormRows - 1) % projectFormRows
+		n := len(m.projectFormVisibleRows())
+		m.projectFormCursor = (m.projectFormCursor + n - 1) % n
 		return m, nil
 	}
 
-	switch m.projectFormCursor {
+	switch m.projectFormRowKind() {
 	case projectRowName:
 		return m.handleProjectNameKey(key)
+	case projectRowRemote:
+		return m.handleProjectRemoteKey(key)
+	case projectRowUser:
+		return m.handleProjectUserKey(key)
 	case projectRowHost:
 		return m.handleProjectHostKey(key)
 	case projectRowRootDir:
 		return m.handleProjectRootDirKey(key)
 	case projectRowSubmit:
+		// Positional, not by kind: the row above Submit is Root directory
+		// whether or not the ssh fields are showing, and len-2 says that
+		// without the arm having to know which rows are visible.
 		switch key {
 		case "up", "k":
-			m.projectFormCursor = projectRowRootDir
+			m.projectFormCursor = len(m.projectFormVisibleRows()) - 2
 			return m, nil
 		case "down", "j":
-			m.projectFormCursor = projectRowName
+			m.projectFormCursor = 0
 			return m, nil
 		case "enter":
 			return m.submitProjectForm()
@@ -222,17 +234,63 @@ func (m Model) handleProjectDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 	return m, nil
 }
 
-// The form's focusable rows. Host sits between Name and Root directory
-// because the ORDER is the flow: a root directory lives on exactly one
-// machine, so the host has to be settled — and connected — before the
-// browser below it can ask anything meaningful.
+// The form's row kinds. They sit between Name and Root directory because the
+// ORDER is the flow: a root directory lives on exactly one machine, so the
+// host has to be settled — and connected — before the browser below it can ask
+// anything meaningful.
 const (
 	projectRowName = iota
+	projectRowRemote
+	projectRowUser
 	projectRowHost
 	projectRowRootDir
 	projectRowSubmit
-	projectFormRows
 )
+
+// projectFormVisibleRows lists the row kinds currently on screen, in order.
+// projectFormCursor indexes into THIS, not into the constants — the ssh
+// fields only exist while the Remote toggle is on, and a local project is the
+// common case that should not have to tab past two empty fields.
+//
+// One list drives focus, key dispatch and render together. Three separate
+// notions of "which row is where" is how a form grows a case where the cursor
+// highlights one field and typing lands in another.
+func (m Model) projectFormVisibleRows() []int {
+	rows := []int{projectRowName, projectRowRemote}
+	if m.projectFormRemote {
+		rows = append(rows, projectRowUser, projectRowHost)
+	}
+	return append(rows, projectRowRootDir, projectRowSubmit)
+}
+
+// projectFormRowKind resolves the focused row's kind, clamping a cursor left
+// past the end by toggling Remote off.
+func (m Model) projectFormRowKind() int {
+	rows := m.projectFormVisibleRows()
+	if m.projectFormCursor < 0 || m.projectFormCursor >= len(rows) {
+		return projectRowName
+	}
+	return rows[m.projectFormCursor]
+}
+
+// projectFormDestFromFields composes the ssh destination the user described.
+// Empty when the form is local, which is what makes "" the local daemon
+// everywhere downstream.
+//
+// user@host is assembled here rather than asking the user to type it, but the
+// result is still handed to ssh VERBATIM — so an ~/.ssh/config Host alias
+// typed into Host alone keeps its own User/HostName/Port, and a user typed
+// beside it overrides that alias's User exactly as `ssh user@alias` would.
+func (m Model) projectFormDestFromFields() string {
+	host := strings.TrimSpace(m.projectFormHost)
+	if !m.projectFormRemote || host == "" {
+		return ""
+	}
+	if user := strings.TrimSpace(m.projectFormUser); user != "" {
+		return user + "@" + host
+	}
+	return host
+}
 
 // handleProjectHostKey edits the Host field. Empty means the local daemon;
 // anything else is an ssh destination, passed to ssh verbatim exactly like
@@ -267,8 +325,59 @@ func (m Model) handleProjectHostKey(key string) (tea.Model, tea.Cmd) {
 
 // connectProjectHost points the form at the typed host, dialling it first when
 // it is not already connected. An empty host means local, which needs no dial.
+// handleProjectRemoteKey toggles the Remote checkbox. Turning it off drops
+// back to the local daemon immediately rather than leaving the form pointed at
+// a host whose fields are no longer visible — a hidden field that still
+// decides where the project lands is the failure this toggle would otherwise
+// introduce.
+func (m Model) handleProjectRemoteKey(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "enter", "space", " ":
+		m.projectFormRemote = !m.projectFormRemote
+		m.projectFormErr = ""
+		if !m.projectFormRemote {
+			m.projectFormHost = ""
+			m.projectFormUser = ""
+			m.projectFormDialing = ""
+			m.projectFormDest = ""
+			m.resetProjectBrowseState()
+			return m, m.requestBrowseDirForDest("", "", "", "")
+		}
+		return m, nil
+	}
+	return m, nil
+}
+
+// handleProjectUserKey edits the ssh user. Optional: left empty, the Host
+// field alone is handed to ssh, so an ~/.ssh/config alias keeps whatever User
+// it declares.
+func (m Model) handleProjectUserKey(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "enter":
+		// Same as Host: Enter connects, because the browser below needs a
+		// machine before it can answer anything.
+		return m.connectProjectHost()
+	case "backspace":
+		if len(m.projectFormUser) > 0 {
+			m.projectFormUser = m.projectFormUser[:len(m.projectFormUser)-1]
+			m.projectFormErr = ""
+		}
+		return m, nil
+	default:
+		if len(key) == 1 && key != " " {
+			m.projectFormUser += key
+			m.projectFormErr = ""
+		}
+		return m, nil
+	}
+}
+
 func (m Model) connectProjectHost() (tea.Model, tea.Cmd) {
-	dest := strings.TrimSpace(m.projectFormHost)
+	dest := m.projectFormDestFromFields()
+	if m.projectFormRemote && dest == "" {
+		m.projectFormErr = "host required for a remote project"
+		return m, nil
+	}
 	if dest == "" || m.destConnected(dest) {
 		m.projectFormDest = dest
 		m.projectFormCursor = projectRowRootDir
@@ -463,7 +572,7 @@ func (m Model) renderProjectDialog() string {
 	textWidth := dialogInnerWidth(m.width, dialogWidth)
 
 	// Name field.
-	nameFocused := m.projectFormCursor == projectRowName
+	nameFocused := m.projectFormRowKind() == projectRowName
 	if nameFocused {
 		b.WriteString(dialogSelected.Render("> Name:") + "\n")
 	} else {
@@ -479,37 +588,73 @@ func (m Model) renderProjectDialog() string {
 	}
 	b.WriteString("\n")
 
-	// Host field. Empty is the local daemon; anything else is an ssh
-	// destination. Enter connects rather than submitting — the browser below
-	// asks whichever machine this names, so it has to be settled first.
-	hostFocused := m.projectFormCursor == projectRowHost
-	if hostFocused {
-		b.WriteString(dialogSelected.Render("> Host:") + "\n")
-	} else {
-		b.WriteString(dialogNormal.Render("  Host:") + "\n")
+	// Remote toggle, and the ssh fields it reveals. Rendered from the same
+	// visible-row list the cursor and key dispatch use, so what is painted and
+	// what is focusable cannot disagree.
+	kind := m.projectFormRowKind()
+	remoteFocused := kind == projectRowRemote
+	box := "[ ]"
+	if m.projectFormRemote {
+		box = "[x]"
 	}
-	switch {
-	case m.projectFormDialing != "":
-		b.WriteString("    " + dialogSubtle.Render("connecting to "+
-			truncateToWidth(sanitizeRemoteText(m.projectFormDialing), textWidth-setupRowIndent-14)+"…") + "\n")
-	case m.projectFormHost == "":
-		b.WriteString("    " + dialogSubtle.Render("(this machine — type a host, Enter to connect)") + "\n")
-	case hostFocused:
-		b.WriteString("    " + dialogValStyle.Render(truncateToWidth(m.projectFormHost, textWidth-setupRowIndent)) + "\n")
-	default:
-		mark := setupRowIdleMark
-		if !m.destConnected(m.projectFormHost) {
-			// Says the field holds a host that is NOT yet connected, so a user
-			// who typed one and tabbed past it is not left believing the
-			// project will land there.
-			mark = "    "
-		}
-		b.WriteString(mark + dialogSelectedIdle.Render(truncateToWidth(m.projectFormHost, textWidth-setupRowIndent)) + "\n")
+	if remoteFocused {
+		b.WriteString(dialogSelected.Render("> "+box+" Remote (ssh)") + "\n")
+	} else {
+		b.WriteString(dialogNormal.Render("  "+box+" Remote (ssh)") + "\n")
+	}
+	if !m.projectFormRemote {
+		b.WriteString("    " + dialogSubtle.Render("(this machine — Space to connect elsewhere)") + "\n")
 	}
 	b.WriteString("\n")
 
+	if m.projectFormRemote {
+		userFocused := kind == projectRowUser
+		if userFocused {
+			b.WriteString(dialogSelected.Render("> User:") + "\n")
+		} else {
+			b.WriteString(dialogNormal.Render("  User:") + "\n")
+		}
+		switch {
+		case m.projectFormUser == "":
+			b.WriteString("    " + dialogSubtle.Render("(optional — ssh config decides)") + "\n")
+		case userFocused:
+			b.WriteString("    " + dialogValStyle.Render(truncateToWidth(m.projectFormUser, textWidth-setupRowIndent)) + "\n")
+		default:
+			b.WriteString(setupRowIdleMark + dialogSelectedIdle.Render(truncateToWidth(m.projectFormUser, textWidth-setupRowIndent)) + "\n")
+		}
+		b.WriteString("\n")
+
+		// Host. Enter connects rather than submitting — the browser below asks
+		// whichever machine this names, so it has to be settled first.
+		hostFocused := kind == projectRowHost
+		if hostFocused {
+			b.WriteString(dialogSelected.Render("> Host:") + "\n")
+		} else {
+			b.WriteString(dialogNormal.Render("  Host:") + "\n")
+		}
+		switch {
+		case m.projectFormDialing != "":
+			b.WriteString("    " + dialogSubtle.Render("connecting to "+
+				truncateToWidth(sanitizeRemoteText(m.projectFormDialing), textWidth-setupRowIndent-14)+"…") + "\n")
+		case m.projectFormHost == "":
+			b.WriteString("    " + dialogSubtle.Render("(required — Enter to connect)") + "\n")
+		case hostFocused:
+			b.WriteString("    " + dialogValStyle.Render(truncateToWidth(m.projectFormHost, textWidth-setupRowIndent)) + "\n")
+		default:
+			// A host that is typed but NOT connected keeps the plain indent, so
+			// a user who tabbed past it is not left believing the project will
+			// land there.
+			mark := setupRowIdleMark
+			if !m.destConnected(m.projectFormDestFromFields()) {
+				mark = "    "
+			}
+			b.WriteString(mark + dialogSelectedIdle.Render(truncateToWidth(m.projectFormHost, textWidth-setupRowIndent)) + "\n")
+		}
+		b.WriteString("\n")
+	}
+
 	// Root directory field — the daemon-side browser.
-	rootFocused := m.projectFormCursor == projectRowRootDir
+	rootFocused := m.projectFormRowKind() == projectRowRootDir
 	if rootFocused {
 		b.WriteString(dialogSelected.Render("> Root directory:") + "\n")
 	} else {
@@ -584,7 +729,7 @@ func (m Model) renderProjectDialog() string {
 	}
 
 	// Submit button.
-	submitFocused := m.projectFormCursor == projectRowSubmit
+	submitFocused := m.projectFormRowKind() == projectRowSubmit
 	label := "[ " + submitLabel + " ]"
 	if submitFocused {
 		b.WriteString(dialogSelected.Render("> "+label) + "\n\n")
@@ -595,4 +740,15 @@ func (m Model) renderProjectDialog() string {
 	b.WriteString(dialogSubtle.Render("Tab next field    Enter select    Esc cancel"))
 
 	return b.String()
+}
+
+// splitSSHDest is the inverse of projectFormDestFromFields, for pre-filling
+// Rename from a project's stored dest. Splits on the LAST "@" so an ssh
+// destination whose user part contains one (a Kerberos principal, an AAD
+// login) round-trips instead of being cut in the middle.
+func splitSSHDest(dest string) (user, host string) {
+	if i := strings.LastIndex(dest, "@"); i >= 0 {
+		return dest[:i], dest[i+1:]
+	}
+	return "", dest
 }

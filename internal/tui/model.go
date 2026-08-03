@@ -401,7 +401,13 @@ type Model struct {
 	// currently in flight for, so a result arriving for a host the user has
 	// since retyped is discarded rather than applied to the wrong form.
 	projectFormHost    string
+	projectFormUser    string
 	projectFormDialing string
+	// projectFormRemote gates the ssh rows. A local project is the common
+	// case, so User/Host are hidden until this is on — and turning it off
+	// clears them, because a hidden field that still decided where the project
+	// landed would be the worst of both.
+	projectFormRemote bool
 	// projectFormDest is the daemon the root-dir browser asks — the OWNING
 	// project's dest for Rename (which may not be the active project; the
 	// sidebar context menu can target a background one), the active dest for

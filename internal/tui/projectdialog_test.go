@@ -154,11 +154,12 @@ func TestBeginProjectRenameDoesNotSubmitStaleRootDir(t *testing.T) {
 func TestSubmitNewProject_HostFieldOverridesTheActiveDest(t *testing.T) {
 	fake := newFakeConn()
 	m := Model{
-		client:          fake,
-		projects:        []*ProjectModel{{ID: "proj-local", Dest: ""}},
-		activeProject:   0,
-		projectFormHost: "gpu01",
-		projectFormDest: "gpu01", // set once the dial landed
+		client:            fake,
+		projects:          []*ProjectModel{{ID: "proj-local", Dest: ""}},
+		activeProject:     0,
+		projectFormRemote: true,
+		projectFormHost:   "gpu01",
+		projectFormDest:   "gpu01", // set once the dial landed
 	}
 
 	if cmd := m.submitNewProject("beta", "/srv/beta"); cmd != nil {
@@ -179,8 +180,9 @@ func TestSubmitNewProject_HostFieldOverridesTheActiveDest(t *testing.T) {
 func TestConnectProjectHost_AlreadyConnectedSkipsTheDial(t *testing.T) {
 	dialed := 0
 	m := Model{
-		client:          NewRouter(map[string]Client{"": newFakeConn(), "gpu01": newFakeConn()}),
-		projectFormHost: "gpu01",
+		client:            NewRouter(map[string]Client{"": newFakeConn(), "gpu01": newFakeConn()}),
+		projectFormRemote: true,
+		projectFormHost:   "gpu01",
 		dialDestFn: func(string) (Client, error) {
 			dialed++
 			return newFakeConn(), nil
@@ -243,3 +245,84 @@ func TestDestDialed_FailureSurfacesAndKeepsTheDest(t *testing.T) {
 }
 
 var errDialTest = errors.New("ssh: connect to host gpu01 port 22: No route to host")
+
+// The Remote toggle gates the ssh rows, and the visible-row list is what the
+// cursor, key dispatch and render all index into — so a mismatch here is the
+// class of bug where the highlight sits on one field and typing lands in
+// another.
+func TestProjectFormVisibleRows_ToggleRevealsTheSSHFields(t *testing.T) {
+	local := Model{}
+	if got := local.projectFormVisibleRows(); len(got) != 4 {
+		t.Errorf("local form has %d rows, want 4 (name, remote, root, submit)", len(got))
+	}
+	remote := Model{projectFormRemote: true}
+	rows := remote.projectFormVisibleRows()
+	if len(rows) != 6 {
+		t.Fatalf("remote form has %d rows, want 6", len(rows))
+	}
+	if rows[2] != projectRowUser || rows[3] != projectRowHost {
+		t.Errorf("ssh rows land at %v, want user then host between remote and root", rows[2:4])
+	}
+	// Submit is always last and root always immediately above it — the arm
+	// that moves up from Submit relies on that positionally.
+	if rows[len(rows)-1] != projectRowSubmit || rows[len(rows)-2] != projectRowRootDir {
+		t.Error("root directory must sit directly above submit in both layouts")
+	}
+}
+
+func TestProjectFormDest_ComposesUserAtHost(t *testing.T) {
+	tests := []struct {
+		name             string
+		remote           bool
+		user, host, want string
+	}{
+		{"local ignores the fields", false, "artyom", "gpu01", ""},
+		{"host only", true, "", "gpu01", "gpu01"},
+		{"user and host", true, "artyom", "gpu01", "artyom@gpu01"},
+		{"blank host is not a destination", true, "artyom", "  ", ""},
+		{"whitespace trimmed", true, " artyom ", " gpu01 ", "artyom@gpu01"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := Model{projectFormRemote: tc.remote, projectFormUser: tc.user, projectFormHost: tc.host}
+			if got := m.projectFormDestFromFields(); got != tc.want {
+				t.Errorf("dest = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// Turning Remote off must drop the destination too. A hidden field that still
+// decided where the project landed would be worse than no toggle at all.
+func TestProjectRemoteToggle_OffReturnsTheFormToLocal(t *testing.T) {
+	m := Model{
+		client:            NewRouter(map[string]Client{"": newFakeConn()}),
+		projectFormRemote: true,
+		projectFormUser:   "artyom",
+		projectFormHost:   "gpu01",
+		projectFormDest:   "artyom@gpu01",
+	}
+	m.projectFormCursor = 1 // the Remote row in the remote layout
+	next, _ := m.handleProjectRemoteKey("space")
+	got := next.(Model)
+
+	if got.projectFormRemote {
+		t.Fatal("toggle did not turn off")
+	}
+	if got.projectFormDest != "" || got.projectFormHost != "" || got.projectFormUser != "" {
+		t.Errorf("dest=%q host=%q user=%q — turning Remote off must return the form to this machine",
+			got.projectFormDest, got.projectFormHost, got.projectFormUser)
+	}
+}
+
+// Rename pre-fills from a stored dest, so the split has to be the exact
+// inverse of the compose — including a user part that itself contains "@".
+func TestSplitSSHDest_RoundTrips(t *testing.T) {
+	for _, dest := range []string{"gpu01", "artyom@gpu01", "artyom@corp.example@gpu01", ""} {
+		user, host := splitSSHDest(dest)
+		m := Model{projectFormRemote: dest != "", projectFormUser: user, projectFormHost: host}
+		if got := m.projectFormDestFromFields(); got != dest {
+			t.Errorf("split(%q) → user=%q host=%q → %q, want the original", dest, user, host, got)
+		}
+	}
+}

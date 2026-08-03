@@ -64,6 +64,36 @@ func TestHandleDestroyTab_CleansHookArtifacts(t *testing.T) {
 	assertGone(t, spoolFile, sessFile)
 }
 
+// TestHandleDestroyProject_CleansHookArtifacts: destroying a project destroys
+// every tab and pane under it, so it is a pane-destruction path and owes the
+// same cleanup as destroy-pane and destroy-tab. It is the newest of the three
+// and was the one that forgot: the panes' PTYs were closed but their hook
+// spool files, ingester coalescers and session-id files were left behind, so
+// the daemon kept re-polling dead spools every 200 ms until restart.
+func TestHandleDestroyProject_CleansHookArtifacts(t *testing.T) {
+	d := newTestDaemon(t)
+	d.hookSpool = hookevents.NewSpool(config.EventsDir())
+	d.hookIngester = hookevents.NewIngester(func(hookevents.Payload) {})
+
+	// Two projects, both with a tab: destroying the second leaves the first
+	// populated, so recoverEmptyProject has nothing to bootstrap and the test
+	// exercises the destroy path alone.
+	keep := d.session.CreateProject("keep", t.TempDir())
+	d.session.CreateTabInProject(keep.ID, "Keep")
+	doomed := d.session.CreateProject("doomed", t.TempDir())
+	tab := d.session.CreateTabInProject(doomed.ID, "Shell")
+	pane, err := d.session.CreatePane(tab.ID, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	spoolFile, sessFile := seedPaneArtifacts(t, pane.ID)
+
+	msg, _ := ipc.NewMessage(ipc.MsgDestroyProject, ipc.DestroyProjectPayload{ProjectID: doomed.ID})
+	d.handleMessage(nil, msg)
+
+	assertGone(t, spoolFile, sessFile)
+}
+
 // TestCleanupPaneArtifacts_RemovesAll covers the helper directly, including
 // the opencode session-id variant.
 func TestCleanupPaneArtifacts_RemovesAll(t *testing.T) {

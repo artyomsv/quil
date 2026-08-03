@@ -979,6 +979,14 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		var p ipc.DestroyProjectPayload
 		msg.DecodePayload(&p)
 		detached := d.session.DestroyProject(p.ProjectID)
+		// Destroying a project destroys every pane under it, so this is a
+		// pane-destruction path and owes the same cleanup as destroy-pane and
+		// destroy-tab: closing the PTY leaves the hook spool, the ingester's
+		// coalescers and the session-id files behind, and the spool is
+		// re-polled every 200 ms until the daemon restarts.
+		for _, pane := range detached {
+			d.cleanupPaneArtifacts(pane.ID)
+		}
 		releasePanes(detached)
 		// Destroying the last project leaves nothing to render, and destroying
 		// the active one can promote a project that is itself empty.

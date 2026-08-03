@@ -1529,9 +1529,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil // the user moved on, same as a stale dial
 		}
 		m.projectFormInstalling = ""
+		// ClearScreen on BOTH arms: runRemoteSetup still narrates its progress
+		// to stderr, which is the real terminal underneath this dialog, so
+		// whatever it printed has to be painted over before the user reads the
+		// result. Threading a writer through it is the proper fix; repainting
+		// is what keeps the screen honest until then.
 		if msg.err != nil {
 			m.projectFormErr = "install failed: " + sanitizeRemoteText(msg.err.Error())
-			return m, nil
+			return m, tea.ClearScreen
 		}
 		// Provisioned — retry the dial that failed. Retrying rather than
 		// assuming success is the point: the install proves a binary is on
@@ -1539,7 +1544,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// the version gate still has to run.
 		m.projectFormDialing = msg.dest
 		m.projectFormErr = ""
-		return m, m.dialDest(msg.dest)
+		return m, tea.Batch(tea.ClearScreen, m.dialDest(msg.dest))
 
 	case PluginErrorMsg:
 		m.dialog = dialogPluginError

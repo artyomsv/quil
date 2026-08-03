@@ -566,7 +566,12 @@ func launchTUI() {
 	// `quil remote setup` — including the recorded absolute path that makes
 	// attaching work when the non-interactive PATH cannot see it.
 	model.SetInstallFunc(func(dest string) error {
-		return runRemoteSetup(dest, setupOptions{})
+		// Yes is MANDATORY here, not a convenience. confirmRemoteInstall
+		// prints a plan and reads a y/N from stdin — and Bubble Tea owns both
+		// the screen and stdin by now, so the prompt lands on top of the TUI
+		// and can never be answered. The dialog's own offer is the
+		// confirmation; asking twice, once somewhere unreachable, is not.
+		return runRemoteSetup(dest, setupOptions{Yes: true})
 	})
 	// The Model cannot close a connection itself — tui.Client is only
 	// Send/Receive. Without this, the `defer client.Close()` above releases only

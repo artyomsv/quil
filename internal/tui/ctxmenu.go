@@ -360,17 +360,19 @@ func (m *Model) openCtxMenu(pane *PaneModel, anchorX, anchorY int) {
 // Destroy. No availability gates — unlike the pane menu's history/lazygit
 // rows, both actions are always valid for any project the sidebar can show.
 func buildProjectCtxMenuItems(remote bool) []ctxMenuItem {
-	items := []ctxMenuItem{
-		{ctxActRenameProject, "Rename project", true, false},
-		{ctxActDestroyProject, "Destroy project…", true, false},
-	}
-	// Only a remote project has a host to disconnect, and the two actions
-	// answer different questions: Destroy removes a project FROM a daemon —
-	// which cannot leave that daemon empty, so destroying the last one just
-	// bootstraps a fresh "Default" and looks like nothing happened — while
-	// this detaches the machine itself and leaves everything on it running.
+	items := []ctxMenuItem{{ctxActRenameProject, "Rename project", true, false}}
+	// ONE removal action, chosen by what the project is.
+	//
+	// Offering both on a remote read as two ways to do the same thing, and the
+	// one users reached for first was the one that cannot work there: a daemon
+	// may not be left with no project, so destroying the last one on a host
+	// bootstraps a fresh "Default" and looks like the delete was ignored.
+	// Disconnect is what "get this machine out of my sidebar" actually means,
+	// and it leaves everything on the far side running.
 	if remote {
-		items = append(items, ctxMenuItem{ctxActDisconnectHost, "Disconnect host…", true, true})
+		items = append(items, ctxMenuItem{ctxActDisconnectHost, "Disconnect host…", true, false})
+	} else {
+		items = append(items, ctxMenuItem{ctxActDestroyProject, "Destroy project…", true, false})
 	}
 	return items
 }

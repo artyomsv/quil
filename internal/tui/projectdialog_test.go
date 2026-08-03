@@ -98,11 +98,13 @@ func TestBeginProjectRenameDoesNotSubmitStaleRootDir(t *testing.T) {
 	tm, _ := m.beginProjectRename("proj-b")
 	m = tm.(Model)
 
-	// Opening the dialog must clear the stale value SYNCHRONOUSLY, before the
-	// (unresolved, in this test) browse response for B ever lands.
-	if m.cwdBrowseDir != "" {
-		t.Fatalf("cwdBrowseDir = %q immediately after opening rename, want cleared — "+
-			"project A's root must not survive into B's dialog", m.cwdBrowseDir)
+	// Opening the dialog must replace the stale value SYNCHRONOUSLY, before the
+	// (unresolved, in this test) browse response for B ever lands — with B's
+	// own root, not with nothing: empty is not a safe placeholder here, since
+	// UpdateProject has no unchanged-value guard and would erase the field.
+	if m.cwdBrowseDir != "/src/project-b" {
+		t.Fatalf("cwdBrowseDir = %q immediately after opening rename, want proj-b's own "+
+			"root — project A's must not survive into B's dialog", m.cwdBrowseDir)
 	}
 	if !m.browse.pending {
 		t.Fatal("browse.pending = false, want true — the root-dir request for B is in flight")
@@ -111,39 +113,30 @@ func TestBeginProjectRenameDoesNotSubmitStaleRootDir(t *testing.T) {
 	// The natural "open rename, fix the name, press Enter" flow: cursor
 	// starts on the Name field (0), and Enter there submits directly —
 	// before B's browse response has arrived.
-	tm2, submitCmd := m.handleProjectDialogKey(tea.KeyPressMsg{Code: tea.KeyEnter})
-	m2 := tm2.(Model)
+	_, submitCmd := m.handleProjectDialogKey(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if submitCmd != nil {
 		submitCmd()
 	}
 
-	if len(fake.sent) != 0 {
-		t.Fatalf("sent %d messages while the root-dir browse was still pending — "+
-			"a submit must not race an outstanding response", len(fake.sent))
-	}
-	if m2.dialog != dialogProjectRename {
-		t.Fatalf("dialog = %v, want dialogProjectRename — a blocked submit must leave the form open", m2.dialog)
-	}
-
-	// Once B's own browse answer lands, the field holds B's real root and
-	// submitting proceeds normally — the gate is a wait, not a dead end.
-	resp := ipc.BrowseDirRespPayload{
-		Path: "/src/project-b", Resolved: "/src/project-b",
-	}
-	m2.applyBrowseDir(resp, m2.browse.gen)
-
-	_, submitCmd2 := m2.handleProjectDialogKey(tea.KeyPressMsg{Code: tea.KeyEnter})
-	if submitCmd2 != nil {
-		submitCmd2()
-	}
-
+	// The submit is NOT blocked — waiting made renaming a remote project
+	// impossible, because its browse takes seconds and the button did nothing
+	// visible until it answered. What matters is which root dir goes out, and
+	// seeding the field from the project itself is what makes an early submit
+	// correct rather than merely permitted.
 	if len(fake.sent) != 1 {
-		t.Fatalf("sent %d messages after the browse resolved, want 1", len(fake.sent))
+		t.Fatalf("sent %d messages, want 1 — an early submit must go through", len(fake.sent))
 	}
 	var payload ipc.UpdateProjectPayload
 	fake.sent[0].DecodePayload(&payload)
-	if payload.ProjectID != "proj-b" || payload.RootDir != "/src/project-b" {
-		t.Fatalf("payload = %+v, want proj-b's own root, not A's stale one", payload)
+	if payload.ProjectID != "proj-b" {
+		t.Fatalf("payload targets %q, want proj-b", payload.ProjectID)
+	}
+	if payload.RootDir == "/src/project-a" {
+		t.Fatalf("submitted project A's root as B's — the scratch value survived into B's dialog")
+	}
+	if payload.RootDir != "/src/project-b" {
+		t.Fatalf("RootDir = %q, want proj-b's own root: an empty one ERASES it, since "+
+			"UpdateProject has no unchanged-value guard", payload.RootDir)
 	}
 }
 

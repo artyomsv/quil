@@ -3186,7 +3186,13 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// Opens the same confirm the menu does rather than destroying: this
 		// takes every tab and pane under it, so it must never fire straight
 		// off a keypress.
+		// Same choice the context menu makes, for the same reason: on a remote
+		// project Destroy is the action that cannot do what the user means,
+		// because the daemon simply bootstraps a replacement.
 		if p := m.cur(); p != nil {
+			if p.Dest != "" {
+				return m, m.confirmDisconnectHost(p.ID)
+			}
 			return m, m.confirmDestroyProject(p.ID)
 		}
 		return m, nil

@@ -130,6 +130,17 @@ func (m Model) beginProjectRename(id string) (tea.Model, tea.Cmd) {
 	m.projectFormErr = ""
 	m.projectFormDest = p.Dest
 	m.resetProjectBrowseState()
+	// Seed the root-dir field with the project's OWN value, so a submit before
+	// the browse answers sends what the project already has instead of nothing.
+	//
+	// This is what the pending-gate below used to buy, and it buys it without
+	// blocking: the hazard was submitting a root dir left over from a DIFFERENT
+	// dialog session, which the reset above already removes — and against a
+	// remote daemon the browse can take seconds, so the gate made renaming a
+	// remote project impossible in exactly the window the user is looking at
+	// the form (reported 2026-08-03: "changed the name, pressed save, name
+	// stayed Default").
+	m.cwdBrowseDir = p.RootDir
 	return m, m.requestBrowseDirForDest(m.projectFormDest, p.RootDir, "", "")
 }
 
@@ -557,23 +568,20 @@ func (m Model) submitProjectForm() (tea.Model, tea.Cmd) {
 	// project's rename, so an in-flight browse means the value on screen may
 	// still describe the PREVIOUS dialog session.
 	//
-	// For a CREATE with nothing loaded yet, there is nothing to be stale
-	// about, and blocking is what made a remote project impossible to make:
-	// the browse fires at a daemon connected seconds ago, and until it answers
-	// pressing Create did nothing the user noticed — so the only project on
-	// that host stayed the daemon's own bootstrap "Default" (reported twice on
-	// 2026-08-03). An unset root dir is a real answer there: the daemon falls
-	// back to its own default CWD, exactly as it does for a pane.
+	// No wait on the browse. The hazard it guarded — submitting a root dir left
+	// over from a DIFFERENT dialog session — is gone at the source:
+	// resetProjectBrowseState clears the scratch value when either dialog
+	// opens, and beginProjectRename then seeds the field with the project's
+	// OWN root. So whatever cwdBrowseDir holds here is always one of three
+	// safe things: this project's existing value, a directory the user picked
+	// in this session, or empty.
 	//
-	// A RENAME keeps the gate unconditionally. Empty means something else
-	// entirely on that path — UpdateProject has no unchanged-value guard, so
-	// submitting one ERASES the project's stored root rather than defaulting
-	// it, which is the destructive half of the race
-	// TestBeginProjectRenameDoesNotSubmitStaleRootDir exists for.
-	if m.browse.pending && (m.cwdBrowseDir != "" || m.projectFormID != "") {
-		m.projectFormErr = "waiting for the root directory to load…"
-		return m, nil
-	}
+	// Empty is a real answer for a CREATE (the daemon falls back to its own
+	// default CWD, as it does for a pane) and unreachable for a RENAME, which
+	// is what makes dropping the gate safe on both paths. Waiting instead made
+	// remote projects impossible to create and then to rename: the browse
+	// fires at a daemon connected seconds ago, and until it answered the
+	// button did nothing the user could see.
 	rootDir := m.cwdBrowseDir
 	if m.projectFormID == "" {
 		return m, m.submitNewProject(m.projectFormName, rootDir)

@@ -71,3 +71,55 @@ func TestDisconnectDest_RefusesTheLocalDaemon(t *testing.T) {
 		t.Error("the local route must survive")
 	}
 }
+
+// A daemon with no project support accepts every project message and does
+// nothing with it. The client can tell, without a version number: such a
+// daemon reports no projects, so the placeholder standing in for it IS the
+// observation. Reported as "the name I gave was not respected" against a host
+// running a release build while the same actions worked locally.
+func TestDestSupportsProjects(t *testing.T) {
+	m := Model{projects: []*ProjectModel{
+		{ID: "proj-real", Dest: ""},
+		{ID: interimProjectIDFor("old01"), Dest: "old01"},
+		{ID: "proj-real2", Dest: "new01"},
+	}}
+
+	if !m.destSupportsProjects("") {
+		t.Error("a daemon reporting a real project supports projects")
+	}
+	if m.destSupportsProjects("old01") {
+		t.Error("a placeholder means that daemon reported none — it cannot hold a project")
+	}
+	if !m.destSupportsProjects("new01") {
+		t.Error("a remote reporting a real project supports projects")
+	}
+	// Unknown hosts answer true: one still connecting has no projects either,
+	// and refusing there blocks the ordinary case to catch the rare one.
+	if !m.destSupportsProjects("never-seen") {
+		t.Error("an unknown destination must not be assumed incapable")
+	}
+}
+
+// The refusal has to be visible. Closing the dialog on a project that never
+// appears is what made this cost an evening to recognise.
+func TestSubmitNewProject_RefusesAHostThatCannotHoldOne(t *testing.T) {
+	conn := newFakeConn()
+	m := Model{
+		client:          conn,
+		projects:        []*ProjectModel{{ID: interimProjectIDFor("old01"), Dest: "old01"}},
+		projectFormDest: "old01",
+		dialog:          dialogProjectNew,
+	}
+	if cmd := m.submitNewProject("api", "/srv/api"); cmd != nil {
+		cmd()
+	}
+	if len(conn.sent) != 0 {
+		t.Error("a create was sent to a daemon that cannot act on it")
+	}
+	if m.projectFormErr == "" {
+		t.Error("the dialog must say why rather than closing on nothing")
+	}
+	if m.dialog == dialogNone {
+		t.Error("a refused submit must leave the form open")
+	}
+}

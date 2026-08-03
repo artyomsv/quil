@@ -360,12 +360,17 @@ func (m *Model) openCtxMenu(pane *PaneModel, anchorX, anchorY int) {
 // Destroy. No availability gates — unlike the pane menu's history/lazygit
 // rows, both actions are always valid for any project the sidebar can show.
 func buildProjectCtxMenuItems(remote, synthetic bool) []ctxMenuItem {
-	// Rename is greyed for the SYNTHETIC project — the placeholder the client
-	// invents for a daemon that has reported no projects yet. Its ID exists
-	// only here, so MsgUpdateProject names something the daemon has never
-	// heard of and UpdateProject's map lookup misses: the dialog accepted a
-	// new name and nothing changed, which is exactly how it was reported for a
-	// freshly connected host while local renames worked.
+	// Rename AND Destroy are greyed for the SYNTHETIC project — the
+	// placeholder the client invents for a daemon that has reported no
+	// projects. Its ID exists only here, so either message names something the
+	// daemon has never heard of and its map lookup misses: the dialog is
+	// accepted and nothing changes, which is exactly how it was reported for a
+	// remote host while the same actions worked locally.
+	//
+	// Disconnect stays ENABLED on such a host, and is the only thing that can
+	// work there: it is client-side entirely, and detaching the machine is
+	// what a user reaching for "remove this" actually wants when the daemon
+	// cannot hold a project in the first place.
 	items := []ctxMenuItem{{ctxActRenameProject, "Rename project", !synthetic, false}}
 	// ONE removal action, chosen by what the project is.
 	//
@@ -378,7 +383,7 @@ func buildProjectCtxMenuItems(remote, synthetic bool) []ctxMenuItem {
 	if remote {
 		items = append(items, ctxMenuItem{ctxActDisconnectHost, "Disconnect host…", true, false})
 	} else {
-		items = append(items, ctxMenuItem{ctxActDestroyProject, "Destroy project…", true, false})
+		items = append(items, ctxMenuItem{ctxActDestroyProject, "Destroy project…", !synthetic, false})
 	}
 	return items
 }

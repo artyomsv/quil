@@ -354,6 +354,33 @@ The viewer is a read-only `TextEditor` (typing / save / paste / cut all gated). 
 
 ---
 
+## Projects
+
+A project groups tabs, owns a root directory, and belongs to exactly one daemon. The left sidebar (`Alt+Shift+S`) lists every project with a roll-up of its panes — `⚠` needs you, `◐` running, `✓` finished while you were away — so an agent that finished or got stuck in a project you are not looking at is visible from the one place you are.
+
+Under the active project, each tab's panes carry the same glyphs plus the checkout they sit in: branch, `wt` for a linked worktree, and `↑N`/`↓N` against upstream. Git state is refreshed on a background ticker, cached per checkout so N panes in one repository cost one invocation, and marked stale rather than guessed when a probe does not answer.
+
+| Key | Action |
+|---|---|
+| `Alt+Shift+S` | Toggle the sidebar |
+| `Alt+Shift+N` | New project |
+| `Alt+P` | Fuzzy project picker |
+| `Alt+O` | Bounce between the two most recent |
+| `Alt+Shift+←/→` | Cycle projects |
+| `Alt+Shift+A` | Jump to the oldest pane waiting on you, across every project |
+| `Alt+Shift+X` | Remove the active project (destroy locally, disconnect a remote host) |
+
+Right-click a project row for Rename, and either Destroy (local) or Disconnect host (remote).
+
+### Projects on another machine
+
+A project's root directory lives on one machine, so a project belongs to the daemon that holds it. Tick **Remote (ssh)** in the New Project dialog, give a user and host, and press Enter on the Host row: quil dials it, offers to install itself if the host has not got it, and then browses *that* machine's filesystem for the root directory. The host is remembered in `[[destinations]]` and attached at every launch until you disconnect it.
+
+Disconnecting removes the machine from your sidebar and stops nothing on it — the remote daemon keeps every pane alive, and reconnecting restores the same workspace.
+
+---
+
+
 ## Pane notes
 
 `Alt+E` opens a plain-text editor alongside the active pane (split ~60/40). Notes are stored one file per pane at `~/.quil/notes/<pane-id>.md` with atomic temp+rename and symlink rejection. Three save safety nets: 30 s debounce, `Ctrl+S` explicit save, flush on exit. Notes survive pane destruction — orphans are kept.

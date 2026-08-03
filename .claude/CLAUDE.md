@@ -126,6 +126,7 @@ package-specific moved to `.claude/rules/*.md`, each gated by a `paths:` glob so
 | `windows-pty.md` | `internal/pty/`, any `*_windows.go`, `tui/consolefix*.go` | ConPTY + bundled OpenConsole, console-mode restore, window geometry, spawn-size healing |
 | `plugins.md` | `internal/plugin/`, `gitdiscover/`, `kubediscover/`, `defaults/*.toml`, `tui/instances.go`, `overlay.go` | plugin schema + registry, instances, `discover`/`sessions` opt-ins, lazygit/k9s/lazysql |
 | `auto-update.md` | `internal/update/`, `cmd/quil/update_apply.go`, `daemon/update.go`, `tui/update.go` | update check, staging, rename-aside swap + rollback |
+| `projects.md` | `daemon/project.go`, `daemon/gitcache.go`, `internal/gitinfo/`, `tui/project*.go`, `sidebar.go`, `router.go`, `dialdest.go`, `attention.go` | projects above tabs, multi-daemon routing, runtime connect/disconnect, the project form, sidebar layout, git subsystem |
 | `dev-environment.md` | *(always on)* | production-isolation rule — never touch the running production daemon |
 
 **Adding to this file?** Ask: *does this apply when I open a file in a different package?*
@@ -227,5 +228,6 @@ Cached reference repos:
 | M11 | Done | Command palette — Alt+Shift+P, fuzzy find, unified content search |
 | M12 | Done | Notification center — daemon event queue, per-pane mute, sidebar, 3 MCP tools |
 | M13 | Done | Memory reporting — 5s collector, per-pane Go-heap + PTY RSS, dialog + 2 MCP tools |
+| M14 | **In progress** | Projects — grouping above tabs, sidebar with agent+git state, multi-daemon router, runtime host connect/disconnect. Remaining: MCP project scoping, listening ports |
 
 Full detail: `docs/roadmap.md` and `docs/roadmap/*.md`.

@@ -409,3 +409,26 @@ func (m *Model) setActiveTabIdx(i int) { m.interimProject().activeTab = i }
 func isSyntheticProject(id string) bool {
 	return id == interimProjectID || strings.HasPrefix(id, interimProjectID+"@")
 }
+
+// destSupportsProjects reports whether a destination's daemon understands the
+// project messages. False means every create, rename and destroy aimed at it
+// is accepted by this client and then dropped by a daemon with no case for it.
+//
+// The test is BEHAVIOURAL, not a version comparison: a daemon that supports
+// projects always reports at least one, because it bootstraps a Default rather
+// than run with none — so the client synthesising a placeholder for it is
+// exactly the observation "this daemon told us about no projects". A version
+// number would have to be maintained against a release that has not happened
+// yet, and would answer wrongly for any build in between.
+//
+// Unknown destinations answer TRUE. A host still connecting has no projects
+// yet either, and refusing there would block the ordinary case to catch the
+// rare one.
+func (m *Model) destSupportsProjects(dest string) bool {
+	for _, p := range m.projects {
+		if p.Dest == dest && isSyntheticProject(p.ID) {
+			return false
+		}
+	}
+	return true
+}

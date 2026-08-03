@@ -22,6 +22,15 @@ func (m *Model) submitNewProject(name, rootDir string) tea.Cmd {
 	if name == "" {
 		return nil
 	}
+	// A daemon with no project support accepts this message and does nothing
+	// with it, so the dialog would close on a project that never appears —
+	// which is how it was reported: "the name I gave was not respected", the
+	// only project on the host staying the client's own placeholder. Refuse
+	// where the user can see it.
+	if !m.destSupportsProjects(m.projectFormDest) {
+		m.projectFormErr = "that host runs a quil without project support"
+		return nil
+	}
 	msg, err := ipc.NewMessage(ipc.MsgCreateProject, ipc.CreateProjectPayload{
 		Name:    name,
 		RootDir: strings.TrimSpace(rootDir),

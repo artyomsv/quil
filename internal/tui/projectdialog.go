@@ -552,7 +552,25 @@ func (m Model) submitProjectForm() (tea.Model, tea.Cmd) {
 		m.projectFormCursor = 0
 		return m, nil
 	}
-	if m.browse.pending {
+	// The gate exists to stop a STALE root dir being submitted — cwdBrowseDir
+	// is scratch state shared with the pane-setup dialog and every other
+	// project's rename, so an in-flight browse means the value on screen may
+	// still describe the PREVIOUS dialog session.
+	//
+	// For a CREATE with nothing loaded yet, there is nothing to be stale
+	// about, and blocking is what made a remote project impossible to make:
+	// the browse fires at a daemon connected seconds ago, and until it answers
+	// pressing Create did nothing the user noticed — so the only project on
+	// that host stayed the daemon's own bootstrap "Default" (reported twice on
+	// 2026-08-03). An unset root dir is a real answer there: the daemon falls
+	// back to its own default CWD, exactly as it does for a pane.
+	//
+	// A RENAME keeps the gate unconditionally. Empty means something else
+	// entirely on that path — UpdateProject has no unchanged-value guard, so
+	// submitting one ERASES the project's stored root rather than defaulting
+	// it, which is the destructive half of the race
+	// TestBeginProjectRenameDoesNotSubmitStaleRootDir exists for.
+	if m.browse.pending && (m.cwdBrowseDir != "" || m.projectFormID != "") {
 		m.projectFormErr = "waiting for the root directory to load…"
 		return m, nil
 	}

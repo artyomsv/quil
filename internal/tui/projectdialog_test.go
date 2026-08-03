@@ -367,3 +367,76 @@ func TestDestDialed_InstallsAtMostOncePerHost(t *testing.T) {
 		t.Error("the second failure must say something rather than silently retrying")
 	}
 }
+
+// End-to-end through the REAL key handler: name, remote toggle, user, host,
+// connect, then Create. Reported twice as "I gave a name but the project is
+// still called Default" — where Default is the remote daemon's own bootstrap
+// project, i.e. the create never arrived.
+func TestProjectForm_RemoteFlowSendsTheCreate(t *testing.T) {
+	conn := newFakeConn()
+	remote := newFakeConn()
+	m := Model{
+		client:     NewRouter(map[string]Client{"": conn}),
+		projects:   []*ProjectModel{{ID: "p-local", Name: "local"}},
+		dialDestFn: func(string) (Client, error) { return remote, nil },
+	}
+
+	tm, _ := m.openNewProjectDialog()
+	m = tm.(Model)
+	m.projectFormName = "cluster-management"
+
+	// Space on the Remote row.
+	m.projectFormCursor = 1
+	tm, _ = m.handleProjectDialogKey(tea.KeyPressMsg{Code: ' ', Text: " "})
+	m = tm.(Model)
+	if !m.projectFormRemote {
+		t.Fatal("Space on the Remote row did not toggle it")
+	}
+
+	m.projectFormUser, m.projectFormHost = "artyom", "192.168.6.12"
+	// Enter on the Host row connects.
+	m.projectFormCursor = 3
+	tm, cmd := m.handleProjectDialogKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = tm.(Model)
+	if cmd == nil {
+		t.Fatal("Enter on the Host row started no dial")
+	}
+	dialed := cmd()
+	tm, _ = m.Update(dialed)
+	m = tm.(Model)
+	if m.projectFormDest != "artyom@192.168.6.12" {
+		t.Fatalf("projectFormDest = %q after a successful dial", m.projectFormDest)
+	}
+
+	// The browse the dial kicked off resolves, so the submit gate opens.
+	m.applyBrowseDir(ipc.BrowseDirRespPayload{
+		Path: "", Resolved: "/srv/cluster",
+	}, m.browse.gen)
+
+	// Tab to Create and press it.
+	for m.projectFormRowKind() != projectRowSubmit {
+		tm, _ = m.handleProjectDialogKey(tea.KeyPressMsg{Code: tea.KeyTab})
+		m = tm.(Model)
+	}
+	_, submit := m.handleProjectDialogKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if submit != nil {
+		submit()
+	}
+
+	var created *ipc.Message
+	for _, sent := range remote.sent {
+		if sent.Type == ipc.MsgCreateProject {
+			created = sent
+		}
+	}
+	if created == nil {
+		t.Fatalf("no create reached the remote daemon (err=%q) — the project the user "+
+			"named is never made, so the only one they see is the daemon's own Default",
+			m.projectFormErr)
+	}
+	var payload ipc.CreateProjectPayload
+	created.DecodePayload(&payload)
+	if payload.Name != "cluster-management" {
+		t.Errorf("created name = %q, want the name the user typed", payload.Name)
+	}
+}

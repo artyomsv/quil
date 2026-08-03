@@ -724,3 +724,63 @@ func (m *Model) asRemote(dest string) {
 	m.projects = []*ProjectModel{{ID: interimProjectID, Name: interimProjectName, Dest: dest}}
 	m.activeProject = 0
 }
+
+// TestLastDaemon_DecidesFatalVersusSurvivable pins the branch that chooses
+// between tea.Quit and an honest banner when a link dies with no way back.
+//
+// Both wrong answers are silent. Answering true too eagerly tears down a
+// session whose other daemons are still running perfectly well, taking the
+// user's view of live remote work with it. Answering false when the last
+// daemon really has gone leaves a TUI with nothing behind it: every pane it
+// draws is a corpse, and no keypress can reach anything.
+func TestLastDaemon_DecidesFatalVersusSurvivable(t *testing.T) {
+	// A destination is "gone for good" only when its link is DOWN and it has
+	// no dialer. Down is reconnectState.active; the zero value (never dropped)
+	// therefore reads as still up, which is what a healthy sibling looks like.
+	down := func(m *Model, dest string) { m.linkFor(dest).active = true }
+
+	t.Run("single connection is always fatal", func(t *testing.T) {
+		m := &Model{client: newFakeConn()}
+		if !m.lastDaemon("") {
+			t.Fatal("lastDaemon = false for a client holding one daemon by " +
+				"construction; losing it IS losing the session")
+		}
+	})
+
+	t.Run("a healthy sibling keeps the session", func(t *testing.T) {
+		m := &Model{client: NewRouter(map[string]Client{
+			"": newFakeConn(), "gpu01": newFakeConn(),
+		})}
+		down(m, "gpu01")
+		if m.lastDaemon("gpu01") {
+			t.Fatal("lastDaemon = true while the local daemon is still up; " +
+				"quitting would take down the view of work that is still running")
+		}
+	})
+
+	t.Run("a retrying sibling keeps the session", func(t *testing.T) {
+		m := &Model{client: NewRouter(map[string]Client{
+			"": newFakeConn(), "gpu01": newFakeConn(),
+		})}
+		down(m, "")
+		down(m, "gpu01")
+		// Down, but with a dialer, so its ladder is still climbing.
+		m.SetRedialFunc("", func(Client) (Client, error) { return newFakeConn(), nil })
+		if m.lastDaemon("gpu01") {
+			t.Fatal("lastDaemon = true while another destination is still " +
+				"retrying; the session must outlive a reconnect in progress")
+		}
+	})
+
+	t.Run("every sibling down with no dialer is fatal", func(t *testing.T) {
+		m := &Model{client: NewRouter(map[string]Client{
+			"": newFakeConn(), "gpu01": newFakeConn(),
+		})}
+		down(m, "")
+		down(m, "gpu01")
+		if !m.lastDaemon("gpu01") {
+			t.Fatal("lastDaemon = false with nothing left up and nothing " +
+				"retrying; the TUI would keep drawing panes that are all dead")
+		}
+	})
+}

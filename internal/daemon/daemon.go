@@ -1250,11 +1250,20 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 // that depends on wrapping — so a short buffer leaves some blank rows above
 // the new session. Blank scrollback is a cosmetic cost; an under-scroll is the
 // bug returning.
+//
+// The trailing HOME is the other half, and scrolling alone was not enough:
+// blanking the screen leaves the cursor on the BOTTOM row, so the child's
+// prompt is drawn there while the child's own model still has it on row 1 —
+// and the next absolute redraw goes to row 1, so the prompt sits at the bottom
+// of the pane and typing appears at the top. Homing first makes our origin and
+// the child's the same row, which is what the child's absolute positioning has
+// been asserting all along.
 func ghostScrollOut(rows int) []byte {
 	if rows <= 0 {
 		rows = 24 // pane never sized (deferred, no client geometry yet)
 	}
-	return bytes.Repeat([]byte("\r\n"), rows)
+	out := bytes.Repeat([]byte("\r\n"), rows)
+	return append(out, '\x1b', '[', 'H')
 }
 
 // restoresOwnHistory reports whether a plugin's resume strategy hands the

@@ -25,6 +25,13 @@ func TestGhostScrollOut_PushesAFullScreen(t *testing.T) {
 	if !bytes.Equal(got[:2], []byte("\r\n")) {
 		t.Errorf("first sequence = %q, want \"\\r\\n\"", got[:2])
 	}
+	// Scrolling alone leaves the cursor on the BOTTOM row, so the child draws
+	// its prompt there while its own model still has it on row 1 — the prompt
+	// lands at the bottom of the pane and typing appears at the top. Homing
+	// makes our origin and the child's the same row.
+	if !bytes.HasSuffix(got, []byte("\x1b[H")) {
+		t.Errorf("sequence does not end with HOME: %q", got[len(got)-6:])
+	}
 }
 
 // A deferred pane has no client geometry yet, so rows can be zero. Emitting

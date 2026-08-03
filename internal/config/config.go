@@ -286,6 +286,7 @@ type KeybindingsConfig struct {
 	ProjectPrev    string `toml:"project_prev"`
 	AttentionQueue string `toml:"attention_queue"`
 	NewProject     string `toml:"new_project"`
+	DestroyProject string `toml:"destroy_project"`
 }
 
 func Default() Config {
@@ -388,6 +389,7 @@ func Default() Config {
 			ProjectPrev:    "alt+shift+left",
 			AttentionQueue: "alt+shift+a",
 			NewProject:     "alt+shift+n",
+			DestroyProject: "alt+shift+d",
 		},
 	}
 }

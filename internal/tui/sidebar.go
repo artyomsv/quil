@@ -127,6 +127,12 @@ type sidebarRow struct {
 func (m *Model) sidebarRows(w int) []sidebarRow {
 	rows := []sidebarRow{{text: sidebarHeading("PROJECTS", w)}}
 	for i, p := range m.projects {
+		// Same separation the tab groups get, and needed for the same reason
+		// now that a remote project spans two rows: without it a host row and
+		// the next project's name row sit adjacent and read as one entry.
+		if i > 0 {
+			rows = append(rows, sidebarRow{})
+		}
 		working, blocked, done := p.counts()
 		// The NAME alone on the first row. displayName's "name@dest" was
 		// written for the picker, where a dialog is wide enough for it; at the

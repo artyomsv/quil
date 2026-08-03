@@ -3180,6 +3180,16 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.openQuickActionsMenu()
 	case kbMatches(key, kb.NewProject):
 		return m.openNewProjectDialog()
+	case kbMatches(key, kb.DestroyProject):
+		// The ACTIVE project, because that is the only one a keystroke can
+		// name — the sidebar's right-click menu is how another one is reached.
+		// Opens the same confirm the menu does rather than destroying: this
+		// takes every tab and pane under it, so it must never fire straight
+		// off a keypress.
+		if p := m.cur(); p != nil {
+			return m, m.confirmDestroyProject(p.ID)
+		}
+		return m, nil
 	case kbMatches(key, kb.ProjectPicker):
 		return m.openProjectPicker()
 	case kbMatches(key, kb.ProjectNext), kbMatches(key, kb.ProjectPrev):

@@ -156,3 +156,80 @@ func (m *Model) installDest(dest string) tea.Cmd {
 		return destInstalledMsg{dest: dest, err: install(dest)}
 	}
 }
+
+// disconnectDest detaches a host: its projects leave the sidebar, its
+// connection is released, and it stops being dialled at launch.
+//
+// Nothing on the far side is destroyed. The remote daemon keeps running with
+// every pane alive, which is the whole difference from destroying a project —
+// this is "stop showing me that machine", and reconnecting later restores the
+// same workspace. That is also why it does not touch the daemon at all: no
+// message is sent, because there is nothing for it to do.
+//
+// Order matters. The router entry goes first so no in-flight receive can
+// deliver for a destination the Model has already forgotten; the reconnect
+// dialer goes with it, because canReconnect is `redialFns[dest] != nil` and a
+// leftover one would have the ladder redial a host the user just dismissed.
+func (m *Model) disconnectDest(dest string) {
+	if dest == "" {
+		return // the local daemon is not disconnectable; its panes died with it
+	}
+	var conn Client
+	if r, ok := m.client.(*Router); ok {
+		conn = r.Conn(dest)
+		r.Remove(dest)
+	}
+	delete(m.redialFns, dest)
+	delete(m.attached, dest)
+	delete(m.links, dest)
+
+	// Drop its projects, and keep the active index inside the survivors —
+	// removing a project before the active one shifts every later index down.
+	activeID := ""
+	if p := m.cur(); p != nil {
+		activeID = p.ID
+	}
+	kept := make([]*ProjectModel, 0, len(m.projects))
+	for _, p := range m.projects {
+		if p.Dest != dest {
+			kept = append(kept, p)
+		}
+	}
+	m.projects = kept
+	m.activeProject = 0
+	for i, p := range m.projects {
+		if p.ID == activeID {
+			m.activeProject = i
+			break
+		}
+	}
+	m.syncActiveDest()
+
+	// Released last, and through the seam: this package cannot close a Client
+	// (Send/Receive only), and an ssh-backed conn holds a child process that
+	// leaks for the session if nobody reaps it.
+	if conn != nil && m.closeClientFn != nil {
+		m.closeClientFn(conn)
+	}
+	m.forgetDestination(dest)
+}
+
+// forgetDestination drops the host from [[destinations]] so it is not dialled
+// again at launch. Best effort, like persistDestination: a config that cannot
+// be written is a log line, not a failed disconnect — the host is already gone
+// from this session either way.
+func (m *Model) forgetDestination(dest string) {
+	kept := make([]config.Destination, 0, len(m.cfg.Destinations))
+	for _, d := range m.cfg.Destinations {
+		if d.Dest != dest {
+			kept = append(kept, d)
+		}
+	}
+	if len(kept) == len(m.cfg.Destinations) {
+		return
+	}
+	m.cfg.Destinations = kept
+	if err := config.Save(config.ConfigPath(), m.cfg); err != nil {
+		log.Printf("disconnect %s: could not remove it from config: %v", dest, err)
+	}
+}

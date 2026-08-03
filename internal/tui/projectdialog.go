@@ -797,3 +797,24 @@ func splitSSHDest(dest string) (user, host string) {
 	}
 	return "", dest
 }
+
+// confirmKindDisconnectHost is the discriminator for the "disconnect host"
+// confirm. It confirms — even though nothing on the far side is destroyed —
+// because it removes the host from the config as well as the session, so the
+// undo is retyping an ssh destination rather than pressing a key.
+const confirmKindDisconnectHost = "disconnect-host"
+
+// confirmDisconnectHost opens the confirm for a remote project's host. Keyed
+// by the DEST, not the project: disconnecting takes every project on that
+// machine, so the one that happened to be right-clicked is not the target.
+func (m *Model) confirmDisconnectHost(projectID string) tea.Cmd {
+	p := m.projectByID(projectID)
+	if p == nil || p.Dest == "" {
+		return nil
+	}
+	m.dialog = dialogConfirm
+	m.confirmKind = confirmKindDisconnectHost
+	m.confirmID = p.Dest
+	m.confirmName = p.Dest
+	return nil
+}

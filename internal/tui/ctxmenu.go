@@ -29,6 +29,7 @@ const (
 	// openProjectCtxMenu, never mixed into buildCtxMenuItems' pane rows.
 	ctxActRenameProject
 	ctxActDestroyProject
+	ctxActDisconnectHost
 )
 
 // ctxMenuItem is one row of the menu. Disabled rows render greyed, are
@@ -358,11 +359,20 @@ func (m *Model) openCtxMenu(pane *PaneModel, anchorX, anchorY int) {
 // buildProjectCtxMenuItems is the sidebar project row's menu: Rename and
 // Destroy. No availability gates — unlike the pane menu's history/lazygit
 // rows, both actions are always valid for any project the sidebar can show.
-func buildProjectCtxMenuItems() []ctxMenuItem {
-	return []ctxMenuItem{
+func buildProjectCtxMenuItems(remote bool) []ctxMenuItem {
+	items := []ctxMenuItem{
 		{ctxActRenameProject, "Rename project", true, false},
 		{ctxActDestroyProject, "Destroy project…", true, false},
 	}
+	// Only a remote project has a host to disconnect, and the two actions
+	// answer different questions: Destroy removes a project FROM a daemon —
+	// which cannot leave that daemon empty, so destroying the last one just
+	// bootstraps a fresh "Default" and looks like nothing happened — while
+	// this detaches the machine itself and leaves everything on it running.
+	if remote {
+		items = append(items, ctxMenuItem{ctxActDisconnectHost, "Disconnect host…", true, true})
+	}
+	return items
 }
 
 // openProjectCtxMenu opens (or re-targets) the sidebar's project-row menu,
@@ -377,7 +387,7 @@ func (m *Model) openProjectCtxMenu(p *ProjectModel, anchorX, anchorY int) {
 		title:     p.Name,
 		spaced:    false,
 		cursor:    -1,
-		items:     buildProjectCtxMenuItems(),
+		items:     buildProjectCtxMenuItems(p.Dest != ""),
 	}
 	s.cursor = firstEnabled(s.items)
 	w, h := s.boxSize()
@@ -471,6 +481,8 @@ func (m Model) executeCtxMenuItem(item ctxMenuItem) (tea.Model, tea.Cmd) {
 			return m.beginProjectRename(projectID)
 		case ctxActDestroyProject:
 			return m, m.confirmDestroyProject(projectID)
+		case ctxActDisconnectHost:
+			return m, m.confirmDisconnectHost(projectID)
 		}
 		return m, nil
 	}

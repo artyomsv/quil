@@ -713,6 +713,16 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// pruned the project. sendForDest, not a raw Origin assignment — see
 		// its doc comment on why an unstamped local send would be wrong the
 		// moment a remote project is active.
+		if kind == confirmKindDisconnectHost {
+			m.dialog = dialogNone
+			// confirmID carries the DEST here, not a project id: disconnecting
+			// takes every project on that machine, so the one that happened to
+			// be right-clicked is not the target.
+			m.disconnectDest(id)
+			log.Printf("disconnected host %q", id)
+			return m, tea.ClearScreen
+		}
+
 		if kind == confirmKindDestroyProject {
 			m.dialog = dialogNone
 			if m.client != nil {
@@ -1096,6 +1106,15 @@ func (m Model) renderConfirmDialog() string {
 		b.WriteString("  " + dialogNormal.Render(fmt.Sprintf("Destroy project %q?", m.confirmName)))
 		b.WriteString("\n\n")
 		b.WriteString("  " + dialogSubtle.Render("Every tab and pane in this project is destroyed too."))
+	case confirmKindDisconnectHost:
+		b.WriteString("  " + dialogNormal.Render(fmt.Sprintf("Disconnect %q?", sanitizeRemoteText(m.confirmName))))
+		b.WriteString("\n\n")
+		// Says what is NOT destroyed, because that is the question the user is
+		// actually asking after trying Destroy and watching a fresh "Default"
+		// take its place.
+		b.WriteString("  " + dialogSubtle.Render("Its projects leave the sidebar. Nothing on that"))
+		b.WriteString("\n")
+		b.WriteString("  " + dialogSubtle.Render("machine stops — reconnect to get it all back."))
 	default:
 		label := fmt.Sprintf("Close %s %q?", m.confirmKind, m.confirmName)
 		b.WriteString("  " + dialogNormal.Render(label))

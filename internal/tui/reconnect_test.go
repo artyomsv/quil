@@ -1866,7 +1866,7 @@ func TestReconnect_ReattachResetIsScopedToTheDaemonThatReturned(t *testing.T) {
 	for _, p := range []*PaneModel{local, gpu} {
 		p.working = true
 		p.turnActive = true
-		p.subagents = 2
+		p.subagents = map[string]int{"Explore": 2}
 	}
 
 	m.armReattachReset("gpu01")
@@ -1875,13 +1875,13 @@ func TestReconnect_ReattachResetIsScopedToTheDaemonThatReturned(t *testing.T) {
 	if !gpu.reattachReset {
 		t.Error("the reconnected daemon's pane was not armed")
 	}
-	if gpu.working || gpu.subagents != 0 {
+	if gpu.working || gpu.outstandingSubagents() != 0 {
 		t.Error("the reconnected daemon's work state was not reset")
 	}
 	if local.reattachReset {
 		t.Error("a pane on a daemon that never dropped was armed for a replay it will never get")
 	}
-	if !local.working || local.subagents != 2 {
+	if !local.working || local.outstandingSubagents() != 2 {
 		t.Error("a live daemon's work state was zeroed by another daemon's reconnect; its " +
 			"spinner stops until the next hook event")
 	}

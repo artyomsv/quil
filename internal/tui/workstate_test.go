@@ -465,7 +465,7 @@ func TestApplyWorkTransition_SubagentStartWithoutAgentType_IsRefused(t *testing.
 	// would collapse onto the empty key and the phantom would silently drain
 	// real work again, with no test failing to say so.
 	m := modelWithBackgroundTab()
-	pane := m.tabs[1].Root.Leaves()[0]
+	pane := m.curTabs()[1].Root.Leaves()[0]
 
 	m.applyWorkTransition("p2", "hook.claude.SubagentStart", map[string]string{"agent_type": ""})
 	if pane.working {
@@ -488,7 +488,7 @@ func TestApplyWorkTransition_OverCountedStopDrainsWithoutWedging(t *testing.T) {
 	// is the spinner's input, so a negative-valued entry would wedge it ON
 	// until SessionEnd — the mirror of the bug this branch fixes.
 	m := modelWithBackgroundTab()
-	pane := m.tabs[1].Root.Leaves()[0]
+	pane := m.curTabs()[1].Root.Leaves()[0]
 
 	m.applyWorkTransition("p2", "hook.claude.SubagentStart", map[string]string{"agent_type": "A"})
 	m.applyWorkTransition("p2", "hook.claude.SubagentStop", map[string]string{"agent_type": "A", "coalesced": "3"})
@@ -509,7 +509,7 @@ func TestApplyWorkTransition_LedgerIsBounded(t *testing.T) {
 	// ceiling cannot turn the spinner off — `working` derives from len() > 0,
 	// which is already true once the ledger is full.
 	m := modelWithBackgroundTab()
-	pane := m.tabs[1].Root.Leaves()[0]
+	pane := m.curTabs()[1].Root.Leaves()[0]
 
 	for i := 0; i < maxTrackedSubagents*3; i++ {
 		m.applyWorkTransition("p2", "hook.claude.SubagentStart",
@@ -539,7 +539,7 @@ func TestApplyWorkTransition_OverflowedAgentsKeepSpinnerLit(t *testing.T) {
 	// exists to fix. Overflow is therefore sticky until a terminal edge —
 	// wrong-on is the safe direction, wrong-off is the one users report.
 	m := modelWithBackgroundTab()
-	pane := m.tabs[1].Root.Leaves()[0]
+	pane := m.curTabs()[1].Root.Leaves()[0]
 
 	total := maxTrackedSubagents + 5
 	for i := 0; i < total; i++ {
@@ -577,7 +577,7 @@ func TestApplyWorkTransition_PhantomSubagentStop_DoesNotDrainNamedAgent(t *testi
 	m := modelWithBackgroundTab()
 	m.applyWorkTransition("p2", "hook.claude.SubagentStart", map[string]string{"agent_type": "impl-task7"})
 	m.applyWorkTransition("p2", "hook.claude.Stop", nil)
-	pane := m.tabs[1].Root.Leaves()[0]
+	pane := m.curTabs()[1].Root.Leaves()[0]
 	if !pane.working {
 		t.Fatal("precondition: Stop with an outstanding subagent must keep the spinner")
 	}
@@ -609,7 +609,7 @@ func TestApplyWorkTransition_SubagentStopForUnknownAgent_DoesNotDrainAnother(t *
 	m := modelWithBackgroundTab()
 	m.applyWorkTransition("p2", "hook.claude.SubagentStart", map[string]string{"agent_type": "impl-task7"})
 	m.applyWorkTransition("p2", "hook.claude.SubagentStop", map[string]string{"agent_type": "rev-task7"})
-	pane := m.tabs[1].Root.Leaves()[0]
+	pane := m.curTabs()[1].Root.Leaves()[0]
 	if !pane.working {
 		t.Error("a stop naming a different agent drained impl-task7 — stops must be matched by identity")
 	}
@@ -623,7 +623,7 @@ func TestApplyWorkTransition_ConcurrentNamedAgentsDrainIndependently(t *testing.
 	m.applyWorkTransition("p2", "hook.claude.SubagentStart", map[string]string{"agent_type": "impl-task7"})
 	m.applyWorkTransition("p2", "hook.claude.SubagentStart", map[string]string{"agent_type": "rev-task7"})
 	m.applyWorkTransition("p2", "hook.claude.Stop", nil)
-	pane := m.tabs[1].Root.Leaves()[0]
+	pane := m.curTabs()[1].Root.Leaves()[0]
 
 	m.applyWorkTransition("p2", "hook.claude.SubagentStop", map[string]string{"agent_type": "rev-task7"})
 	if !pane.working {
@@ -648,7 +648,7 @@ func TestApplyWorkTransition_ProductionPhantomSequence_KeepsSpinnerLit(t *testin
 	// 27 minutes. Each main turn ends Stop → phantom SubagentStop(""), and one
 	// of those phantoms landed 2 s after impl-task7 spawned.
 	m := modelWithBackgroundTab()
-	pane := m.tabs[1].Root.Leaves()[0]
+	pane := m.curTabs()[1].Root.Leaves()[0]
 	named := func(t string) map[string]string { return map[string]string{"agent_type": t} }
 	phantom := map[string]string{"agent_type": ""}
 

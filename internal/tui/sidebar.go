@@ -374,8 +374,16 @@ func paneRow(pane *PaneModel, focused bool, w int) string {
 		}
 	case pane.working:
 		glyph, style = "◐", sidebarWorkingStyle
-		if pane.subagents > 0 {
-			suffix = fmt.Sprintf(" ⋯%d", pane.subagents)
+		// "+" when the ledger overflowed: a refused start may still be live
+		// with no entry to count, so the number is a floor. Marking it beats
+		// printing a confidently low count — and the badge still appears when
+		// the overflow is the ONLY reason the pane reads as working.
+		if n := pane.outstandingSubagents(); n > 0 || pane.subagentsOverflow {
+			mark := ""
+			if pane.subagentsOverflow {
+				mark = "+"
+			}
+			suffix = fmt.Sprintf(" ⋯%d%s", n, mark)
 		}
 	case pane.unseen:
 		glyph, style = "✓", sidebarUnseenStyle

@@ -372,6 +372,26 @@ func (p *PaneModel) AppendOutput(data []byte) {
 	p.contentGen++
 }
 
+// outstandingSubagents totals the pane's subagent ledger.
+//
+// The ledger is keyed by agent_type so a SubagentStop can only cancel a start
+// it can name — a phantom stop must not drain an unrelated live agent. The
+// sidebar badge is the one consumer for which the identities do not matter,
+// only how many are still running.
+//
+// Reports the TRACKED total, which is a floor rather than the truth when
+// subagentsOverflow is set: a start refused by maxTrackedSubagents may still
+// be alive with no entry to count. Callers that render the number are expected
+// to mark that (see paneRow), because silently reporting a low number is worse
+// than reporting an approximate one.
+func (p *PaneModel) outstandingSubagents() int {
+	n := 0
+	for _, count := range p.subagents {
+		n += count
+	}
+	return n
+}
+
 // ResetVT creates a fresh VT emulator at the current dimensions, clearing
 // ghost buffer state so live output starts with a clean cursor position.
 func (p *PaneModel) ResetVT() {

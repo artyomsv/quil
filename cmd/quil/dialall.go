@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -199,4 +200,33 @@ func gateExtraVersion(d config.Destination, client *ipc.Client, link transport.L
 		return fmt.Errorf("daemon on %s runs %s but this client runs %s; run `quil remote setup %s`",
 			d.Label(), res.DaemonVersion, versionpkg.Current(), d.Dest)
 	}
+}
+
+// setupLogWriter turns the remote installer's narration into log lines while
+// the TUI owns the terminal.
+//
+// Line-framed rather than a raw pass-through to the log writer: the installer
+// writes partial lines and trailing newlines, and handing those straight to
+// log.Printf would produce records that start mid-sentence or carry a blank
+// line — in a file the F1 viewer renders. Quoting each line also keeps a
+// message that came from the REMOTE host (ssh multiplexes its stderr onto its
+// own) from forging something that looks like a real slog record.
+type setupLogWriter struct {
+	dest string
+	buf  []byte
+}
+
+func (w *setupLogWriter) Write(p []byte) (int, error) {
+	w.buf = append(w.buf, p...)
+	for {
+		i := bytes.IndexByte(w.buf, '\n')
+		if i < 0 {
+			break
+		}
+		if line := bytes.TrimSpace(w.buf[:i]); len(line) > 0 {
+			log.Printf("remote setup %s: %q", w.dest, line)
+		}
+		w.buf = w.buf[i+1:]
+	}
+	return len(p), nil
 }

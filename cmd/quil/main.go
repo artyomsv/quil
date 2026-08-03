@@ -571,7 +571,10 @@ func launchTUI() {
 		// the screen and stdin by now, so the prompt lands on top of the TUI
 		// and can never be answered. The dialog's own offer is the
 		// confirmation; asking twice, once somewhere unreachable, is not.
-		return runRemoteSetup(dest, setupOptions{Yes: true})
+		// Out sends the narration to quil.log rather than the terminal, which
+		// the TUI is drawing on. Without it the progress lines land on top of
+		// the dialog that asked for the install.
+		return runRemoteSetup(dest, setupOptions{Yes: true, Out: &setupLogWriter{dest: dest}})
 	})
 	// The Model cannot close a connection itself — tui.Client is only
 	// Send/Receive. Without this, the `defer client.Close()` above releases only

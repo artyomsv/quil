@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net"
 	"slices"
 	"strings"
@@ -285,3 +286,38 @@ func versionResponder(t *testing.T, peer net.Conn, version string) {
 		peer.Write(out)
 	}()
 }
+
+// The remote installer narrates to a writer so the TUI can keep it off the
+// terminal it is drawing on. Line-framing matters: the installer emits partial
+// lines and trailing newlines, and passing those straight to the log produces
+// records that start mid-sentence — in a file the F1 viewer renders.
+func TestSetupLogWriter_FramesLinesAndDropsBlanks(t *testing.T) {
+	var lines []string
+	orig := log.Writer()
+	log.SetOutput(writerFunc(func(p []byte) (int, error) {
+		lines = append(lines, string(p))
+		return len(p), nil
+	}))
+	t.Cleanup(func() { log.SetOutput(orig) })
+
+	w := &setupLogWriter{dest: "gpu01"}
+	// Split mid-line across writes, exactly as an ssh stream arrives.
+	w.Write([]byte("Checking gpu"))
+	w.Write([]byte("01…\n\n"))
+	w.Write([]byte("Installing to /home/a/.local/bin…\n"))
+	w.Write([]byte("no newline yet"))
+
+	if len(lines) != 2 {
+		t.Fatalf("logged %d records, want 2 (the blank is dropped, the unterminated tail waits): %q", len(lines), lines)
+	}
+	if !strings.Contains(lines[0], "Checking gpu01") {
+		t.Errorf("record 0 = %q, want the line reassembled across writes", lines[0])
+	}
+	if !strings.Contains(lines[0], "gpu01") || !strings.Contains(lines[0], "\"") {
+		t.Errorf("record 0 = %q, want the destination named and the text quoted", lines[0])
+	}
+}
+
+type writerFunc func([]byte) (int, error)
+
+func (f writerFunc) Write(p []byte) (int, error) { return f(p) }

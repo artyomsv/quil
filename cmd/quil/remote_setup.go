@@ -92,8 +92,20 @@ type setupOptions struct {
 	// build with an explicit pin).
 	Version string
 
-	// Yes skips the confirmation prompt. For scripted provisioning only.
+	// Yes skips the confirmation prompt. Mandatory for any caller that is not
+	// the CLI: confirmRemoteInstall reads stdin, and under the TUI that is a
+	// prompt nobody can answer.
 	Yes bool
+
+	// Out receives the progress narration. nil means os.Stderr, which is what
+	// the CLI wants and what every existing caller got implicitly.
+	//
+	// It exists because stderr is the TERMINAL, and the TUI is drawing on it.
+	// Reusing this function from a dialog printed "Downloading quil…" over the
+	// dialog — the CLI's two unwritten dependencies are stdout for narration
+	// and stdin for confirmation, and neither appears in the signature. Yes
+	// covers the second; this covers the first.
+	Out io.Writer
 
 	// probe carries a host probe the caller already ran, so the attach path
 	// costs one ssh round trip rather than two. nil means "probe here", which
@@ -108,6 +120,15 @@ type setupOptions struct {
 	// path — so the value that must never be mistaken for an answer is exactly
 	// the one a `setupOptions{}` literal would supply.
 	probe *remoteinstall.Probe
+}
+
+// out resolves the narration sink, defaulting to stderr so a zero
+// setupOptions behaves exactly as it did before the field existed.
+func (o setupOptions) out() io.Writer {
+	if o.Out != nil {
+		return o.Out
+	}
+	return os.Stderr
 }
 
 // sshRunner adapts transport.RunSSH to remoteinstall.Runner.
@@ -160,7 +181,7 @@ func runRemoteSetup(dest string, opts setupOptions) error {
 	if opts.probe != nil {
 		probe = *opts.probe
 	} else {
-		fmt.Fprintf(os.Stderr, "Checking %s…\n", dest)
+		fmt.Fprintf(opts.out(), "Checking %s…\n", dest)
 		var err error
 		probe, err = remoteinstall.RunProbe(ctx, runner)
 		if err != nil {
@@ -195,14 +216,14 @@ func runRemoteSetup(dest string, opts setupOptions) error {
 	// every pane PTY.
 	var stopWarning string
 	if upgrade {
-		fmt.Fprintf(os.Stderr, "Stopping the remote daemon…\n")
+		fmt.Fprintf(opts.out(), "Stopping the remote daemon…\n")
 		stopWarning, err = remoteinstall.StopRemoteDaemon(ctx, runner, probe.ExistingPath)
 		if err != nil {
 			return err
 		}
 	}
 
-	fmt.Fprintf(os.Stderr, "Installing to %s…\n", target.Dir)
+	fmt.Fprintf(opts.out(), "Installing to %s…\n", target.Dir)
 	if err := remoteinstall.Push(ctx, runner, target, src); err != nil {
 		return err
 	}
@@ -211,13 +232,13 @@ func runRemoteSetup(dest string, opts setupOptions) error {
 		// The install succeeded; only the shortcut for next time did not.
 		// Reporting it as a failure would be wrong, and silence would leave a
 		// confusing "not found" on the next launch.
-		fmt.Fprintf(os.Stderr,
+		fmt.Fprintf(opts.out(),
 			"\nInstalled, but could not record the path in your config: %v\n"+
 				"Attaching will still work if %s is on the remote's PATH.\n", err, target.BinaryPath())
 		return nil
 	}
 
-	reportInstalled(dest, target, src, stopWarning)
+	reportInstalled(opts.out(), dest, target, src, stopWarning)
 	return nil
 }
 
@@ -248,14 +269,14 @@ func plannedVersion(opts setupOptions, p remoteinstall.Platform) (string, error)
 // resolveSource produces the bytes to push, after consent has been given.
 func resolveSource(ctx context.Context, opts setupOptions, p remoteinstall.Platform) (remoteinstall.Source, error) {
 	if opts.FromDir != "" {
-		fmt.Fprintf(os.Stderr, "Packing binaries from %s…\n", opts.FromDir)
+		fmt.Fprintf(opts.out(), "Packing binaries from %s…\n", opts.FromDir)
 		return remoteinstall.PackDir(opts.FromDir, p)
 	}
 	version, err := plannedVersion(opts, p)
 	if err != nil {
 		return remoteinstall.Source{}, err
 	}
-	fmt.Fprintf(os.Stderr, "Downloading quil %s for %s…\n", version, p)
+	fmt.Fprintf(opts.out(), "Downloading quil %s for %s…\n", version, p)
 	return remoteinstall.FetchRelease(ctx, version, p)
 }
 
@@ -339,15 +360,15 @@ func clearRemoteBinary(dest string) error {
 	return mutateConfig(func(c *config.Config) { c.ClearRemoteBinary(dest) })
 }
 
-func reportInstalled(dest string, target remoteinstall.Target, src remoteinstall.Source, stopWarning string) {
-	fmt.Fprintf(os.Stderr, "\n  Installed %s on %s.\n\n", displayVersion(src), dest)
-	fmt.Fprintf(os.Stderr, "    %s\n", target.BinaryPath())
+func reportInstalled(out io.Writer, dest string, target remoteinstall.Target, src remoteinstall.Source, stopWarning string) {
+	fmt.Fprintf(out, "\n  Installed %s on %s.\n\n", displayVersion(src), dest)
+	fmt.Fprintf(out, "    %s\n", target.BinaryPath())
 	if stopWarning != "" {
 		// The new binaries are on disk, but a daemon that refused to stop keeps
 		// running the OLD ones — renaming over a running executable leaves the
 		// process on its original inode. Say so, or the next attach reports a
 		// version mismatch the user believes they already fixed.
-		fmt.Fprintf(os.Stderr,
+		fmt.Fprintf(out,
 			"\n  Warning: the remote daemon did not confirm shutdown:\n"+
 				"    %s\n"+
 				"  The new binaries are installed, but a daemon still running keeps\n"+
@@ -359,11 +380,11 @@ func reportInstalled(dest string, target remoteinstall.Target, src remoteinstall
 			remoteinstall.ShellSingleQuote(remoteinstall.DaemonStopCommand(target.BinaryPath())))
 	}
 	if target.Shadowed != "" {
-		fmt.Fprintf(os.Stderr, "\n  %s is still present and is what a bare `ssh %s quil` finds.\n",
+		fmt.Fprintf(out, "\n  %s is still present and is what a bare `ssh %s quil` finds.\n",
 			target.Shadowed, dest)
-		fmt.Fprintf(os.Stderr, "  Quil itself uses the absolute path above, recorded in your config.\n")
+		fmt.Fprintf(out, "  Quil itself uses the absolute path above, recorded in your config.\n")
 	}
-	fmt.Fprintf(os.Stderr, "\n  Attach with:  quil --remote %s\n\n", dest)
+	fmt.Fprintf(out, "\n  Attach with:  quil --remote %s\n\n", dest)
 }
 
 func displayVersion(src remoteinstall.Source) string {

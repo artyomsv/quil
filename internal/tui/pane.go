@@ -43,55 +43,65 @@ const (
 )
 
 type PaneModel struct {
-	ID                 string
-	Type               string // plugin type ("terminal", "claude-code", etc.)
-	WideCanvas         bool   // [display] wide_canvas: VT/PTY stay window-sized; small rects render a wrapped preview
-	MinNativeCols      int    // [display] min_native_cols: inner-width threshold for native (non-canvas) rendering; 0 = default 80
-	Name               string // user-given name (empty if not set)
-	CWD                string // current working directory from daemon
-	Muted              bool   // notification mute (daemon-authoritative; mirrored here for border rendering)
-	Eager              bool   // eager-restore flag (daemon-authoritative; mirrored for the tab marker)
-	vt                 *vt.SafeEmulator
-	vtDrain            *vtDrain       // drain goroutine tracker for p.vt (see closeVT)
-	oscFilter          oscTitleFilter // strips OSC 0/1/2 before the emulator (see oscfilter.go)
-	Width              int
-	Height             int
+	ID            string
+	Type          string // plugin type ("terminal", "claude-code", etc.)
+	WideCanvas    bool   // [display] wide_canvas: VT/PTY stay window-sized; small rects render a wrapped preview
+	MinNativeCols int    // [display] min_native_cols: inner-width threshold for native (non-canvas) rendering; 0 = default 80
+	Name          string // user-given name (empty if not set)
+	CWD           string // current working directory from daemon
+	Muted         bool   // notification mute (daemon-authoritative; mirrored here for border rendering)
+	Eager         bool   // eager-restore flag (daemon-authoritative; mirrored for the tab marker)
+	vt            *vt.SafeEmulator
+	vtDrain       *vtDrain       // drain goroutine tracker for p.vt (see closeVT)
+	oscFilter     oscTitleFilter // strips OSC 0/1/2 before the emulator (see oscfilter.go)
+	Width         int
+	Height        int
 	// NativeW is Width plus whatever the project sidebar reserved — the
 	// width this rect would have with the sidebar closed. It decides the
 	// pane's render mode and nothing else (paneVTSize), so toggling the
 	// sidebar changes how much of a pane you see, never how it renders.
 	// Written by the resize recursion so resizeAllPanes computes the same
 	// wire size the VT already took, rather than re-deriving it and drifting.
-	NativeW            int
-	Active             bool
-	scrollBack         int
-	rawBuf             *ringbuf.RingBuffer // raw PTY bytes for resize replay
-	cursorVisible      bool                // tracks shell's DECTCEM state
-	ghost              bool                // true while showing restored content
-	resuming           bool                // true while waiting for first live output after restore
-	preparing          bool                // true for newly created panes (not restored)
-	Pending            bool                // deferred restore — not yet lazy-spawned (daemon-authoritative)
-	SessionID          string              // tracked session id (daemon-authoritative; restore checklist)
-	HistoryLines       int                 // ghost-buffer line count (daemon-authoritative; restore checklist)
-	Model              string              // model id of the last completed AI turn (daemon-authoritative; status bar)
-	ContextTokens      int64               // context-window tokens of the last completed AI turn (daemon-authoritative; status bar)
-	resumeStart        time.Time           // when resuming/preparing started (minimum display duration)
-	spinnerFrame       int                 // current frame index in spinnerFrames
-	spinnerTickRunning bool                // guards against stacking restore-spinner tick chains (cf. workTickRunning)
-	activeSel          *Selection          // set by Model before View() for selection rendering
-	focusMode          bool                // set by Model before View() when in focus mode
-	mcpHighlight       bool                // set by Model before View() when MCP is interacting
-	liveOutputSeen     bool                // first live (non-ghost) output received — settle repaints scheduled
-	reattachReset      bool                // armed on reattach; consumed by the daemon's next replayed chunk (see armReattachReset)
-	working            bool                // derived spinner state: turnActive || len(subagents) > 0 || subagentsOverflow (hook-driven)
-	turnActive         bool                // main turn in flight (UserPromptSubmit/PostToolUse → Stop/park)
-	subagents          map[string]int      // agent_type → outstanding count (SubagentStart/Stop, burst-aware); a stop only cancels a start it can name
-	subagentsOverflow  bool                // a start was refused by maxTrackedSubagents, so an untracked agent may still be live; sticky until a terminal edge
-	unseen             bool                // work finished/parked while this pane was not focused; cleared on focus
-	pinnedAttention    bool                // context-menu "Mark attention" pin — green border that SURVIVES focus; cleared only by Unmark. TUI-session state, never persisted
-	workFrame          int                 // shared spinner frame index, mirrored here for top-border render
-	blockedSince       time.Time           // set when the agent parks waiting on the user (permission prompt/idle-wait); zero when not blocked. Cleared on workStart/workAbort/workStop/workStopFinal — a completed turn is by definition not blocked
-	blockedReason      string              // optional tool name from the hook's Data["tool"]; genuinely absent for Notification/permission.ask, so left empty rather than invented
+	NativeW       int
+	Active        bool
+	scrollBack    int
+	rawBuf        *ringbuf.RingBuffer // raw PTY bytes for resize replay
+	cursorVisible bool                // tracks shell's DECTCEM state
+	ghost         bool                // true while showing restored content
+	resuming      bool                // true while waiting for first live output after restore
+	preparing     bool                // true for newly created panes (not restored)
+	Pending       bool                // deferred restore — not yet lazy-spawned (daemon-authoritative)
+	SessionID     string              // tracked session id (daemon-authoritative; restore checklist)
+	HistoryLines  int                 // ghost-buffer line count (daemon-authoritative; restore checklist)
+	// Git state of the pane's CWD, daemon-authoritative (see PaneInfo).
+	// GitStale means the last refresh did not complete, so these are the last
+	// values actually observed rather than current ones.
+	GitBranch          string
+	GitDetached        bool
+	GitWorktree        bool
+	GitUpstream        bool
+	GitAhead           int
+	GitBehind          int
+	GitStale           bool
+	Model              string         // model id of the last completed AI turn (daemon-authoritative; status bar)
+	ContextTokens      int64          // context-window tokens of the last completed AI turn (daemon-authoritative; status bar)
+	resumeStart        time.Time      // when resuming/preparing started (minimum display duration)
+	spinnerFrame       int            // current frame index in spinnerFrames
+	spinnerTickRunning bool           // guards against stacking restore-spinner tick chains (cf. workTickRunning)
+	activeSel          *Selection     // set by Model before View() for selection rendering
+	focusMode          bool           // set by Model before View() when in focus mode
+	mcpHighlight       bool           // set by Model before View() when MCP is interacting
+	liveOutputSeen     bool           // first live (non-ghost) output received — settle repaints scheduled
+	reattachReset      bool           // armed on reattach; consumed by the daemon's next replayed chunk (see armReattachReset)
+	working            bool           // derived spinner state: turnActive || len(subagents) > 0 || subagentsOverflow (hook-driven)
+	turnActive         bool           // main turn in flight (UserPromptSubmit/PostToolUse → Stop/park)
+	subagents          map[string]int // agent_type → outstanding count (SubagentStart/Stop, burst-aware); a stop only cancels a start it can name
+	subagentsOverflow  bool           // a start was refused by maxTrackedSubagents, so an untracked agent may still be live; sticky until a terminal edge
+	unseen             bool           // work finished/parked while this pane was not focused; cleared on focus
+	pinnedAttention    bool           // context-menu "Mark attention" pin — green border that SURVIVES focus; cleared only by Unmark. TUI-session state, never persisted
+	workFrame          int            // shared spinner frame index, mirrored here for top-border render
+	blockedSince       time.Time      // set when the agent parks waiting on the user (permission prompt/idle-wait); zero when not blocked. Cleared on workStart/workAbort/workStop/workStopFinal — a completed turn is by definition not blocked
+	blockedReason      string         // optional tool name from the hook's Data["tool"]; genuinely absent for Notification/permission.ask, so left empty rather than invented
 
 	// Mouse-tracking state, updated by the VT EnableMode/DisableMode callbacks
 	// during AppendOutput (same goroutine as Update/View, like cursorVisible —

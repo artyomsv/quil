@@ -159,6 +159,14 @@ func (m *Model) sidebarRows(w int) []sidebarRow {
 				paneID: pane.ID,
 			})
 			ordinal++
+			// Git state gets its own row rather than more suffix: at the
+			// default 22 columns a branch name and a pane name cannot share
+			// one. Non-interactive, like a tab heading — giving it the pane's
+			// ordinal would put two rows on one index and desync every hit
+			// test from the attention queue's numbering.
+			if git := gitRow(pane, w); git != "" {
+				rows = append(rows, sidebarRow{text: git})
+			}
 		}
 	}
 	return rows
@@ -279,14 +287,79 @@ func (m Model) projectSidebarSwallowsMouse(x, y int) bool {
 // blocked-on-user, blue for active work, green for done-unseen, dim grey for
 // idle and section chrome.
 var (
-	sidebarHeadingStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("244"))
-	sidebarDimStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
-	sidebarActiveStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("230"))
-	sidebarProjectStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("250"))
-	sidebarBlockedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
-	sidebarWorkingStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
-	sidebarUnseenStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("28"))
+	sidebarHeadingStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("244"))
+	sidebarDimStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
+	sidebarActiveStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("230"))
+	sidebarProjectStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("250"))
+	sidebarBlockedStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+	sidebarWorkingStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
+	sidebarUnseenStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("28"))
+	sidebarGitStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	sidebarGitStaleStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Italic(true)
 )
+
+// minGitBranchCells is the floor a branch name keeps on its row, for the same
+// reason paneRow has one: the branch is the answer, the divergence counts are
+// detail about it. Subtracting the counts first would leave "fea…" beside a
+// crisp "↑12↓3".
+const minGitBranchCells = 8
+
+// gitRow renders a pane's checkout beneath it: branch, linked-worktree marker,
+// and divergence from upstream. Empty string when there is nothing to say —
+// a pane outside a repository gets no row at all rather than a blank one.
+//
+// The counts are omitted when the branch has no upstream, because "↑0↓0" and
+// "no upstream to compare against" are different facts and only one of them is
+// true. A stale entry is dimmed and marked rather than hidden: the last branch
+// we actually saw is more useful than nothing, as long as it does not claim to
+// be current.
+func gitRow(pane *PaneModel, w int) string {
+	name := pane.GitBranch
+	if name == "" && pane.GitDetached {
+		name = "detached"
+	}
+	if name == "" && !pane.GitWorktree {
+		return ""
+	}
+	name = sanitizeRemoteText(name)
+
+	prefix := "    ⎇ "
+	var suffix string
+	if pane.GitWorktree {
+		suffix += " wt"
+	}
+	if pane.GitUpstream {
+		if pane.GitAhead > 0 {
+			suffix += fmt.Sprintf(" ↑%d", pane.GitAhead)
+		}
+		if pane.GitBehind > 0 {
+			suffix += fmt.Sprintf(" ↓%d", pane.GitBehind)
+		}
+	}
+	if pane.GitStale {
+		suffix += " ~"
+	}
+
+	avail := w - lipgloss.Width(prefix)
+	if avail < 1 {
+		avail = 1
+	}
+	nameW := avail - lipgloss.Width(suffix)
+	if nameW < minGitBranchCells {
+		nameW = minGitBranchCells
+	}
+	if nameW > avail {
+		nameW = avail
+	}
+	name = truncateCells(name, nameW)
+	suffix = truncateCells(suffix, avail-lipgloss.Width(name))
+
+	style := sidebarGitStyle
+	if pane.GitStale {
+		style = sidebarGitStaleStyle
+	}
+	return style.Render(padOrTrunc(prefix+name+suffix, w))
+}
 
 func sidebarHeading(title string, w int) string {
 	return sidebarHeadingStyle.Render(truncateCells(title, w))

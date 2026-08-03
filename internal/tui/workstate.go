@@ -459,4 +459,15 @@ func syncPaneMeta(pane *PaneModel, info *PaneInfo, wideCanvas bool, minNativeCol
 	// keep showing the pre-restart model until the next turn).
 	pane.Model = info.Model
 	pane.ContextTokens = info.ContextTokens
+	// Git state, copied unconditionally for the same reason as Model: an
+	// ABSENT key is meaningful. A pane that leaves a repository, or a daemon
+	// restart that has not re-probed yet, must clear the branch rather than
+	// keep showing the last one it had.
+	pane.GitBranch = info.GitBranch
+	pane.GitDetached = info.GitDetached
+	pane.GitWorktree = info.GitWorktree
+	pane.GitUpstream = info.GitUpstream
+	pane.GitAhead = info.GitAhead
+	pane.GitBehind = info.GitBehind
+	pane.GitStale = info.GitStale
 }

@@ -109,6 +109,18 @@ type PaneInfo struct {
 	// be wrapped in \x1b[200~/\x1b[201~ markers. Mirrored onto PaneModel for
 	// the paste paths.
 	BracketedPaste bool
+	// Git state is daemon-authoritative and broadcast-only: the daemon holds
+	// the disk the repository lives on, which is the whole point when that
+	// daemon is on another machine. GitUpstream distinguishes "in sync" from
+	// "nothing to compare against" — without it, 0/0 would claim the first
+	// when it means the second.
+	GitBranch   string
+	GitDetached bool
+	GitWorktree bool
+	GitUpstream bool
+	GitAhead    int
+	GitBehind   int
+	GitStale    bool
 	// Model/ContextTokens are daemon-authoritative (extracted from hook event
 	// data at turn boundaries): the model id and context-window token count of
 	// the pane's last completed AI turn. Empty/zero for non-AI panes.
@@ -5097,6 +5109,27 @@ func parseWorkspaceState(raw map[string]any) WorkspaceStateMsg {
 				}
 				if ct, ok := pm["context_tokens"].(float64); ok {
 					pi.ContextTokens = int64(ct)
+				}
+				if b, ok := pm["git_branch"].(string); ok {
+					pi.GitBranch = b
+				}
+				if b, ok := pm["git_detached"].(bool); ok {
+					pi.GitDetached = b
+				}
+				if b, ok := pm["git_worktree"].(bool); ok {
+					pi.GitWorktree = b
+				}
+				if b, ok := pm["git_upstream"].(bool); ok {
+					pi.GitUpstream = b
+				}
+				if n, ok := pm["git_ahead"].(float64); ok {
+					pi.GitAhead = int(n)
+				}
+				if n, ok := pm["git_behind"].(float64); ok {
+					pi.GitBehind = int(n)
+				}
+				if b, ok := pm["git_stale"].(bool); ok {
+					pi.GitStale = b
 				}
 				state.Panes = append(state.Panes, pi)
 			}

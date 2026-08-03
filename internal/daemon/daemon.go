@@ -55,6 +55,7 @@ type Daemon struct {
 	snapshotCh   chan struct{} // buffered channel for snapshot requests
 	restored     bool          // true if workspace was loaded from disk
 	events       *eventQueue   // notification center event queue
+	gitCache     *gitCache     // per-checkout branch/worktree/divergence, refreshed on a ticker
 	// clientCWD is the last-known CWD from a TUI client, used as the
 	// default working directory for new panes/tabs. Read by defaultCWD()
 	// from any IPC dispatch goroutine and written by handleAttach on each
@@ -167,6 +168,7 @@ func New(cfg config.Config) *Daemon {
 		shutdown:   make(chan struct{}),
 		snapshotCh: make(chan struct{}, 1),
 		events:     newEventQueue(maxEvents),
+		gitCache:   newGitCache(),
 		snapGens:   make(map[string]uint64),
 	}
 	d.memReport = memreport.NewCollector(d.session, 5*time.Second)
@@ -247,6 +249,7 @@ func (d *Daemon) Start() error {
 	go d.idleChecker()
 	go d.updateChecker()
 	go d.hookEventsWatcher()
+	go d.gitWatcher()
 	// Arm the liveness canary only once a first snapshot is plausible.
 	d.lastSnapshotDone.Store(time.Now().UnixNano())
 	go d.snapshotWatchdog()
@@ -2459,6 +2462,32 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 				if lastModel != "" {
 					paneData["model"] = lastModel
 					paneData["context_tokens"] = lastContextTokens
+				}
+				// Git state is runtime-only for the same reason: a branch name
+				// from a previous daemon run describes a checkout nobody has
+				// re-probed. lookup() never probes, so this cannot slow a
+				// broadcast down whatever the filesystem is doing.
+				if info, ok, stale := d.gitCache.lookup(cwd); ok {
+					if info.Branch != "" {
+						paneData["git_branch"] = info.Branch
+					}
+					if info.Detached {
+						paneData["git_detached"] = true
+					}
+					if info.LinkedWorktree {
+						paneData["git_worktree"] = true
+					}
+					if info.HasUpstream {
+						// Sent even at zero: "0 ahead, 0 behind" means in sync,
+						// which is a different statement from having no
+						// upstream to compare against.
+						paneData["git_upstream"] = true
+						paneData["git_ahead"] = info.Ahead
+						paneData["git_behind"] = info.Behind
+					}
+					if stale {
+						paneData["git_stale"] = true
+					}
 				}
 			}
 			paneData["cwd"] = cwd

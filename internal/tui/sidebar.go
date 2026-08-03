@@ -574,10 +574,15 @@ func elideMiddle(s string, w int) string {
 	if w < minElide {
 		return truncateCells(s, w)
 	}
-	runes := []rune(s)
+	// Both halves are taken by CELL budget, not by rune count. Slicing []rune
+	// with a cell-derived index is the mistake the surrounding truncateCells /
+	// padOrTrunc comments exist to warn about: for wide glyphs a rune is two
+	// cells, so the two halves both overrun and, once the rune count drops
+	// below head+tail, they OVERLAP — the result repeats characters and is
+	// about twice the requested width.
 	head := (w - 1) / 2
 	tail := w - 1 - head
-	return string(runes[:head]) + "…" + string(runes[len(runes)-tail:])
+	return truncateCells(s, head) + "…" + lastCellsToWidth(s, tail)
 }
 
 func truncateCells(s string, w int) string {

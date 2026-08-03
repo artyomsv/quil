@@ -159,3 +159,43 @@ func TestElideMiddle(t *testing.T) {
 		}
 	}
 }
+
+// TestElideMiddle_WideGlyphsRespectTheCellBudget: head and tail are CELL
+// budgets, and the shipped version used them as []rune indices. For wide
+// glyphs a rune is two cells, so both halves overran — and once the rune count
+// fell below head+tail the slices OVERLAPPED, repeating characters and
+// producing a string about twice the width asked for.
+//
+// The sidebar's own padOrTrunc re-clamps the row, so the damage was cosmetic
+// rather than a broken hit test. That is exactly why it needs a test: nothing
+// downstream fails loudly enough to notice.
+func TestElideMiddle_WideGlyphsRespectTheCellBudget(t *testing.T) {
+	// Ten runes, twenty cells. A branch name in CJK, or a worktree named after
+	// one, reaches this.
+	const wide = "項目一覧表示処理担当者"
+	for w := 8; w <= 24; w++ {
+		got := elideMiddle(wide, w)
+		if lipgloss.Width(got) > w {
+			t.Errorf("elideMiddle(%q, %d) = %q (%d cells) — wider than asked",
+				wide, w, got, lipgloss.Width(got))
+		}
+		halves := strings.Split(got, "…")
+		if len(halves) != 2 {
+			continue // fell back to plain truncation, which the loop above covers
+		}
+		if !strings.HasPrefix(wide, halves[0]) {
+			t.Errorf("w=%d: %q does not start with the original's own head", w, got)
+		}
+		if !strings.HasSuffix(wide, halves[1]) {
+			t.Errorf("w=%d: %q does not end with the original's own tail", w, got)
+		}
+		// The halves must not overlap: together they cannot be longer than the
+		// string they were cut from. This is the assertion the rune-indexed
+		// version failed, and it fails as a DUPLICATION, not a truncation —
+		// the row read plausibly while showing characters twice.
+		if len(halves[0])+len(halves[1]) > len(wide) {
+			t.Errorf("w=%d: %q repeats characters — head %q and tail %q overlap "+
+				"in a %d-byte string", w, got, halves[0], halves[1], len(wide))
+		}
+	}
+}

@@ -195,6 +195,13 @@ func (m *Model) disconnectDest(dest string) {
 	delete(m.redialFns, dest)
 	delete(m.attached, dest)
 	delete(m.links, dest)
+	// Every other per-destination table goes with them. These two are read
+	// through the ACTIVE dest today, so a leftover entry is unreachable rather
+	// than wrong — but they are the same class of key as the three above, and
+	// the day something iterates one of these maps instead of indexing it, a
+	// disconnected host reappears in whatever it drives.
+	delete(m.updateInfos, dest)
+	delete(m.installedDests, dest)
 
 	// Drop its projects, and keep the active index inside the survivors —
 	// removing a project before the active one shifts every later index down.

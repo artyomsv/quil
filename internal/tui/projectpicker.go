@@ -27,7 +27,12 @@ type projectPickState struct {
 // a remote project) so a query narrows on either half.
 func (m *Model) filterProjects(query string) []*ProjectModel {
 	if query == "" {
-		return m.projects
+		// A COPY, not m.projects itself. The picker holds this slice across
+		// Update calls while a workspace broadcast can rebuild m.projects
+		// underneath it; aliasing makes "what is on screen" and "what exists"
+		// the same variable in one case and different in every other, which is
+		// the harder bug to reason about of the two.
+		return append([]*ProjectModel(nil), m.projects...)
 	}
 	type scored struct {
 		p     *ProjectModel
@@ -119,7 +124,18 @@ func (m Model) handleProjectPickKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// Resolve by ID rather than closing over the filtered pointer: the
 		// index switchProject wants is into m.projects, not m.projectPick.filtered,
 		// and the two lists diverge as soon as a query is typed.
-		idx := indexOfProject(m.projects, m.projectPick.filtered[c].ID)
+		//
+		// projectByID, NOT indexOfProject, for the reason toggleLastProject
+		// gives: indexOfProject answers 0 for an unknown id, so a row whose
+		// project was destroyed or disconnected while the picker was open would
+		// switch to the FIRST project — a jump the user did not ask for and
+		// cannot undo. Gone means no-op.
+		target := m.projectByID(m.projectPick.filtered[c].ID)
+		if target == nil {
+			m.closeProjectPicker()
+			return m, tea.ClearScreen
+		}
+		idx := indexOfProject(m.projects, target.ID)
 		// Sequenced, not `return m, tea.Batch(tea.ClearScreen, m.switchProject(idx))`:
 		// switchProject mutates m through a pointer receiver, and Go does not
 		// order a plain operand against a call in the same return statement
@@ -162,13 +178,21 @@ func (m Model) handleProjectPickKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // afterPaletteQueryChange.
 func (m Model) afterProjectPickQueryChange() (tea.Model, tea.Cmd) {
 	m.projectPick.filtered = m.filterProjects(m.projectPick.query)
+	m.clampProjectPickCursor()
+	return m, nil
+}
+
+// clampProjectPickCursor keeps the cursor inside the filtered list. Split out
+// of afterProjectPickQueryChange because the list can also shrink without the
+// query changing — a workspace broadcast rebuilding m.projects while the picker
+// is open.
+func (m *Model) clampProjectPickCursor() {
 	if n := len(m.projectPick.filtered); m.projectPick.cursor >= n {
 		m.projectPick.cursor = n - 1
 	}
 	if m.projectPick.cursor < 0 {
 		m.projectPick.cursor = 0
 	}
-	return m, nil
 }
 
 // renderProjectPickDialog returns the picker box CONTENT (renderDialog wraps

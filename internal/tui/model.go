@@ -1593,6 +1593,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		log.Printf("WorkspaceState: %d tabs, %d panes", len(msg.Tabs), len(msg.Panes))
 		newPaneIDs, overlayResizeCmds := m.applyWorkspaceState(msg, msg.Dest)
 		log.Printf("apply: returned, %d new panes", len(newPaneIDs))
+		// An open project picker holds a filtered snapshot taken when it opened.
+		// A project created or destroyed by another client — or a host
+		// disconnected — would otherwise be invisible to it until it closed,
+		// which is exactly when the user is choosing from that list.
+		if m.dialog == dialogProjectPick {
+			m.projectPick.filtered = m.filterProjects(m.projectPick.query)
+			m.clampProjectPickCursor()
+		}
 		m.resizeTabs()
 		log.Printf("apply: resizeTabs done")
 		cmds := []tea.Cmd{m.listenForMessages(), m.resizeAllPanes(), m.sendAllLayouts()}

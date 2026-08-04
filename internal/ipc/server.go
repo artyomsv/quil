@@ -27,6 +27,10 @@ import (
 // milliseconds.
 const sendBufSize = 64
 
+// flushPollInterval is how often Flush re-checks the pending count. Matches
+// SendBlocking's poll interval — same trade between exit latency and spinning.
+const flushPollInterval = 2 * time.Millisecond
+
 // writeDeadline bounds how long a single raw.Write may block inside sendLoop
 // before we give up on the peer. Belt-and-suspenders alongside the critCh
 // overflow detection: under a wedged kernel buffer + a peer that doesn't
@@ -85,6 +89,11 @@ type Conn struct {
 	closed    atomic.Bool
 	overflow  atomic.Bool
 	dropped   atomic.Uint64
+	// pending counts must-deliver frames accepted by Send but not yet written
+	// to the socket. Send is non-blocking — it hands the frame to sendLoop —
+	// so an empty critCh does NOT mean the peer has it. Flush needs to know
+	// the difference; see Flush.
+	pending atomic.Int64
 }
 
 func newConn(raw net.Conn) *Conn {
@@ -162,6 +171,7 @@ func (c *Conn) enqueue(frame []byte, droppable bool) error {
 	}
 	select {
 	case c.critCh <- frame:
+		c.pending.Add(1)
 		return nil
 	default:
 		// Critical buffer full — slow client. CAS the overflow flag so only
@@ -230,7 +240,9 @@ func (c *Conn) sendLoop() {
 		case <-c.done:
 			return
 		case frame := <-c.critCh:
-			if !c.write(frame) {
+			ok := c.write(frame)
+			c.pending.Add(-1)
+			if !ok {
 				return
 			}
 			continue
@@ -240,7 +252,9 @@ func (c *Conn) sendLoop() {
 		case <-c.done:
 			return
 		case frame := <-c.critCh:
-			if !c.write(frame) {
+			ok := c.write(frame)
+			c.pending.Add(-1)
+			if !ok {
 				return
 			}
 		case frame := <-c.outCh:
@@ -275,6 +289,30 @@ func (c *Conn) Receive() (*Message, error) {
 // intentionally discarded: by the time Close is called we are either tearing
 // down an overflowed (already broken) peer or shutting down the server
 // entirely, and in both cases delivery guarantees no longer apply.
+// Flush waits until every must-deliver frame accepted by Send has reached the
+// socket, or until timeout. Call it before Close when the frames still queued
+// matter: Close signals done, and sendLoop returns on done without writing what
+// is left, so closing straight after Send discards frames the caller was told
+// were accepted. The TUI exit path pairs the two — final keystrokes are exactly
+// this case.
+//
+// Droppable output frames are deliberately not counted; they are droppable by
+// design and a busy pane could keep the count above zero indefinitely.
+//
+// Returns true if the queue drained. A closed connection returns immediately:
+// sendLoop is gone, so nothing further will ever be written and waiting could
+// only burn the whole timeout.
+func (c *Conn) Flush(timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for c.pending.Load() > 0 {
+		if c.closed.Load() || time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(flushPollInterval)
+	}
+	return true
+}
+
 func (c *Conn) Close() error {
 	var err error
 	c.closeOnce.Do(func() {

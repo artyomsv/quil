@@ -285,9 +285,31 @@ func (m *Model) SetClientCloser(f func(Client)) { m.closeClientFn = f }
 
 // closeClient releases c, if a closer was installed. Safe with a nil closer
 // (local sessions never install one) and a nil client.
+// clientFlushTimeout bounds how long releasing a connection waits for its
+// already-queued frames to reach the socket. Short: this runs on the exit path,
+// where a wedged peer must not out-wait the user's patience.
+const clientFlushTimeout = 1 * time.Second
+
+// flusher is the optional capability a Client has when its queued frames can be
+// waited on. Narrow and optional so the Client interface stays two-method and
+// every test fake keeps compiling.
+type flusher interface{ Flush(time.Duration) bool }
+
+// closeClient FLUSHES before releasing, and the order is load-bearing. Send is
+// non-blocking: it hands the frame to the connection's send loop, which Close
+// then stops without writing what is left. Closing straight after a send
+// therefore discards frames the caller was told were accepted — for the TUI
+// exit path that is the user's final keystrokes, the same loss the input queue
+// blocks to avoid, one layer further down. Flush is bounded, so an unresponsive
+// peer costs a short wait rather than a hung exit.
 func (m Model) closeClient(c Client) {
 	if m.closeClientFn == nil || c == nil {
 		return
+	}
+	if f, ok := c.(flusher); ok {
+		if !f.Flush(clientFlushTimeout) {
+			log.Printf("close: queued frames did not reach the socket within %s", clientFlushTimeout)
+		}
 	}
 	m.closeClientFn(c)
 }

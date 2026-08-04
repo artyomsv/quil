@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Every project action is in the command palette.** `Alt+Shift+P` now lists
+  the projects you can switch to — matched on the name or the host, so `gpu`
+  finds `build@gpu01` — alongside New project, Rename, Destroy (or Disconnect
+  host on a remote one), Previous project, "Go to the agent waiting longest",
+  and the sidebar toggle. Each row shows its keybinding, so the palette is also
+  the fastest way to learn the project keys.
+
+### Fixed
+- **The Shortcuts list (F1 → Shortcuts) no longer runs off the bottom of the
+  screen.** It drew every row at once, so on an ordinary terminal roughly two
+  thirds of the list — and the footer — were simply off-screen, with no way to
+  reach them. It scrolls now, with arrows, `PgUp`/`PgDn`, `Home`/`End` and
+  `g`/`G`, and the footer shows where you are in the list.
+- **The project keys are listed there too.** Seven of the eight were missing, so
+  the only way to learn them was the online documentation.
+
 ## [1.47.0] - 2026-08-04
 
 ### Added

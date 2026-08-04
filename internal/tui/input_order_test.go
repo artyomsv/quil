@@ -330,6 +330,69 @@ func TestPasteClipboard_ReadsOnCmdButEnqueuesOnUpdate(t *testing.T) {
 	}
 }
 
+// TestPasteClipboard_TargetsThePaneActiveWhenRequested pins the paste target to
+// the pane the user was looking at when they asked to paste, not whichever is
+// active by the time the clipboard read finishes. The read can be slow — the
+// image path decodes a DIB, encodes a PNG and writes it to disk — which is
+// ample time to switch panes, and clipboard contents are the payload you least
+// want delivered somewhere you did not intend.
+//
+// Deliberately NOT parallel: it swaps the package-level clipboard readers.
+func TestPasteClipboard_TargetsThePaneActiveWhenRequested(t *testing.T) {
+	origText, origImg := clipboardReadText, clipboardReadImage
+	t.Cleanup(func() { clipboardReadText, clipboardReadImage = origText, origImg })
+	clipboardReadText = func() (string, error) { return "SECRET", nil }
+	clipboardReadImage = func() ([]byte, error) { return nil, nil }
+
+	// Two panes in one tab; "p1" is active when the paste is requested.
+	p1 := NewPaneModel("p1", 1024)
+	p2 := NewPaneModel("p2", 1024)
+	tab := NewTabModel("tab-1", "t")
+	tab.Root = &LayoutNode{
+		Split: SplitHorizontal,
+		Ratio: 0.5,
+		Left:  NewLeaf(p1),
+		Right: NewLeaf(p2),
+	}
+	tab.ActivePane = "p1"
+	m := &Model{
+		projects: oneProject(tab),
+		client:   &fakeSender{},
+		inputCh:  make(chan paneInput, inputForwardBuffer),
+	}
+
+	cmd := m.pasteClipboard()
+	if cmd == nil {
+		t.Fatal("pasteClipboard returned a nil cmd")
+	}
+
+	// The user switches panes while the clipboard read is in flight.
+	tab.ActivePane = "p2"
+
+	msg := cmd()
+	pasted, ok := msg.(clipboardPastedMsg)
+	if !ok {
+		t.Fatalf("cmd returned %T, want clipboardPastedMsg", msg)
+	}
+	if pasted.paneID != "p1" {
+		t.Errorf("bound paneID = %q, want p1 — the target must be captured when the paste is requested", pasted.paneID)
+	}
+
+	m.Update(pasted)
+
+	select {
+	case in := <-m.inputCh:
+		if in.paneID != "p1" {
+			t.Errorf("paste delivered to pane %q, want p1 — clipboard contents landed in the wrong pane", in.paneID)
+		}
+		if string(in.data) != "SECRET" {
+			t.Errorf("pasted data = %q, want %q", string(in.data), "SECRET")
+		}
+	default:
+		t.Fatal("paste was never enqueued")
+	}
+}
+
 // TestInputForwarder_DrainsQueuedInputOnStop pins the shutdown contract.
 // enqueueInput blocks rather than drops so accepted input is never lost — a
 // forwarder that returned the moment inputDone closed would reintroduce exactly

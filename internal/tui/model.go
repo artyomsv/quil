@@ -187,7 +187,25 @@ type pasteRefreshMsg struct{}
 // producer racing the keystroke path into inputCh (and reads pane/dest state
 // off its owning goroutine). The Cmd therefore does I/O only and returns this;
 // Update does the enqueue. See enqueueInput.
-type clipboardPastedMsg struct{ text string }
+//
+// paneID is the pane that was active when the user ASKED to paste, captured on
+// the Update goroutine at that moment. Resolving the target at completion time
+// instead would deliver into whatever pane happened to be active by then —
+// clipboard contents are exactly the payload you least want landing in the
+// wrong pane, and the image path (DIB decode → PNG encode → disk write) leaves
+// a wide enough window to switch panes in.
+//
+// KNOWN AND DELIBERATE: the paste enters the queue when the READ finishes, so a
+// key typed during a slow read is queued ahead of it. Closing that would mean
+// reserving the paste's slot at request time, which makes a slow clipboard read
+// head-of-line block every keystroke behind it — trading a rare, self-inflicted
+// interleave for a visible freeze of the whole input stream on the image path.
+// The pane binding above is the half that actually matters, because delivering
+// to the wrong pane is silent while a mis-ordered paste is not.
+type clipboardPastedMsg struct {
+	text   string
+	paneID string
+}
 
 // sidebarTickMsg triggers a periodic sidebar re-render to update relative timestamps.
 type sidebarTickMsg struct{}
@@ -1428,8 +1446,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case clipboardPastedMsg:
 		// The clipboard read happened on a tea.Cmd goroutine; the ENQUEUE
 		// happens here, on the Update goroutine, so paste joins the ordered
-		// input queue at a defined point relative to the keys around it.
-		m.sendClipboardToPane(msg.text)
+		// input queue at a defined point relative to the keys around it, and
+		// goes to the pane that was active when the paste was requested.
+		m.sendClipboardToPaneID(msg.paneID, msg.text)
 		// Schedule re-render after PTY echo arrives to update cursor position
 		return m, tea.Tick(100*time.Millisecond, func(_ time.Time) tea.Msg { return pasteRefreshMsg{} })
 
@@ -5614,6 +5633,17 @@ var (
 )
 
 func (m Model) pasteClipboard() tea.Cmd {
+	// Bind the destination pane HERE — this runs on the Update goroutine, at
+	// the moment the user asked to paste. See clipboardPastedMsg.
+	tab := m.activeTabModel()
+	if tab == nil {
+		return nil
+	}
+	pane := tab.ActivePaneModel()
+	if pane == nil {
+		return nil
+	}
+	paneID := pane.ID
 	return func() tea.Msg {
 		logger.Debug("pasteClipboard: invoked")
 		// Try text first. If text is non-empty, paste it as-is. Otherwise
@@ -5641,8 +5671,8 @@ func (m Model) pasteClipboard() tea.Cmd {
 		// Resolving the pane, wrapping the payload and enqueueing all read
 		// Model state and must happen on the Update goroutine — see
 		// clipboardPastedMsg.
-		logger.Debug("pasteClipboard: read %d bytes, handing to Update", len(text))
-		return clipboardPastedMsg{text: text}
+		logger.Debug("pasteClipboard: read %d bytes for pane %s, handing to Update", len(text), paneID)
+		return clipboardPastedMsg{text: text, paneID: paneID}
 	}
 }
 
@@ -6023,6 +6053,27 @@ func (m Model) sendClipboardToPane(text string) {
 		return
 	}
 	m.enqueueInput(pane.ID, pastePayload(pane, text))
+}
+
+// sendClipboardToPaneID pastes into a NAMED pane rather than whichever is
+// active now. It backs the asynchronous clipboard path, where the target was
+// bound when the user asked to paste and the read finished some time later —
+// see clipboardPastedMsg.
+//
+// The lookup spans every project, not just the active one: switching projects
+// during the read must not misdeliver the paste either. A pane that closed
+// while the clipboard was being read simply drops the paste, which is the only
+// honest option — there is no longer anywhere it was meant to go.
+func (m Model) sendClipboardToPaneID(paneID, text string) {
+	if text == "" || paneID == "" {
+		return
+	}
+	pane, _, _ := m.findPaneAndTab(paneID)
+	if pane == nil {
+		logger.Debug("paste: pane %s vanished during the clipboard read — dropping", paneID)
+		return
+	}
+	m.enqueueInput(paneID, pastePayload(pane, text))
 }
 
 func keyToBytes(keyMsg tea.KeyPressMsg) []byte {

@@ -363,9 +363,14 @@ func (m Model) canReconnect(dest string) bool {
 // on — a paste or a stray "y" landing on the wrong question is worse than a
 // visible stall. This is a fail-closed choice.
 //
-// One choke point rather than a guard in each of the six input branches: a
-// future input message type gets frozen by default here, whereas six scattered
-// guards would silently let it through. Same reasoning as clearDragState.
+// One choke point rather than a guard in each of the six input branches: every
+// input decision is made in one place, whereas six scattered guards drift.
+//
+// Note what the choke point does NOT give: it matches on message TYPE, so a new
+// input-bearing message is covered only once it is LISTED here, not by default.
+// clipboardPastedMsg proved that — it was added as the delayed half of a paste
+// and rode straight through the freeze until it was named. Anything added later
+// that can reach a PTY belongs in this function.
 //
 // Ctrl+Q is the single exception. It is the only way out of a host that never
 // comes back, and by definition the reconnect loop cannot end the session
@@ -377,6 +382,19 @@ func (m Model) canReconnect(dest string) bool {
 // dropping must not freeze typing into a local pane. The gate lives here rather
 // than only at the call site so the choke point stays correct standalone.
 func (m Model) freezeInput(msg tea.Msg) (tea.Cmd, bool) {
+	// A delayed paste is gated by ITS OWN destination, ahead of the active-dest
+	// check, because it is the one input bound to a pane rather than to "wherever
+	// the user is typing". The clipboard read can outlive a project switch, so
+	// the two can disagree — and the active-dest gate is wrong in both
+	// directions when they do: it discards a paste headed for a healthy daemon,
+	// and releases one headed for a daemon that is reconnecting.
+	//
+	// destOfPane falls back to the active dest for a pane it cannot find, which
+	// is the right default here: a pane that vanished mid-read has nowhere to
+	// deliver to, and sendClipboardToPaneID drops it on arrival anyway.
+	if p, ok := msg.(clipboardPastedMsg); ok {
+		return nil, m.linkOf(m.destOfPane(p.paneID)).active
+	}
 	if !m.linkOf(m.activeDest()).active {
 		return nil, false
 	}
@@ -389,18 +407,6 @@ func (m Model) freezeInput(msg tea.Msg) (tea.Cmd, bool) {
 	case tea.MouseClickMsg, tea.MouseWheelMsg, tea.MouseMotionMsg, tea.MouseReleaseMsg, tea.PasteMsg:
 		// A wheel notch is forwarded to the PTY on tracking panes, so it is
 		// input by another name and belongs in the freeze with the rest.
-		return nil, true
-	case clipboardPastedMsg:
-		// The DELAYED half of a paste. tea.PasteMsg above covers the paste the
-		// terminal delivers synchronously; this one is a clipboard read that
-		// was already in flight when the link dropped, and it carries the same
-		// payload. Letting it through would deliver clipboard contents into a
-		// session that has moved on — the "paste landing on the wrong question"
-		// this freeze names as its worst case.
-		//
-		// It also shows the limit of the choke point: this switch matches on
-		// TYPE, so a new input-bearing message is frozen only once it is listed
-		// here. Anything added later that reaches a PTY belongs in this switch.
 		return nil, true
 	}
 	return nil, false

@@ -270,6 +270,51 @@ func TestHealthyLinkDoesNotFreezeDelayedClipboardPaste(t *testing.T) {
 	}
 }
 
+// pasteFreezeModel builds two projects on different daemons, each holding one
+// pane, so a delayed paste can be bound to one while the other is active.
+func pasteFreezeModel(t *testing.T, activeProject int) Model {
+	t.Helper()
+	mk := func(id, dest, paneID string) *ProjectModel {
+		pane := NewPaneModel(paneID, 1024)
+		tab := NewTabModel("tab-"+paneID, "t")
+		tab.Root = NewLeaf(pane)
+		tab.ActivePane = paneID
+		return &ProjectModel{ID: id, Dest: dest, tabs: []*TabModel{tab}}
+	}
+	return Model{
+		projects:      []*ProjectModel{mk("proj-local", "", "p-local"), mk("proj-gpu", "gpu01", "p-gpu")},
+		activeProject: activeProject,
+	}
+}
+
+// A paste bound to a HEALTHY daemon must still be delivered even when the
+// project the user switched to is reconnecting. Gating on the active
+// destination would discard data the target could have accepted — and the
+// clipboard read is exactly long enough to switch projects during.
+func TestDelayedClipboardPaste_HealthyTargetNotFrozenByOtherDestOutage(t *testing.T) {
+	m := pasteFreezeModel(t, 1) // active project is the gpu one
+	m.handleLinkLost("gpu01", errors.New("connection reset"))
+
+	msg := clipboardPastedMsg{text: "SECRET", paneID: "p-local"}
+	if _, frozen := m.freezeInput(msg); frozen {
+		t.Fatal("a paste bound to a healthy daemon must not be dropped because a DIFFERENT daemon is reconnecting")
+	}
+}
+
+// The mirror: a paste bound to a RECONNECTING daemon must be dropped even while
+// the user is looking at a healthy project. Releasing it would deliver
+// clipboard contents toward a link that cannot carry them, and after the
+// reattach into a session that has moved on.
+func TestDelayedClipboardPaste_FrozenWhenItsOwnDestIsReconnecting(t *testing.T) {
+	m := pasteFreezeModel(t, 0) // active project is the local, healthy one
+	m.handleLinkLost("gpu01", errors.New("connection reset"))
+
+	msg := clipboardPastedMsg{text: "SECRET", paneID: "p-gpu"}
+	if _, frozen := m.freezeInput(msg); !frozen {
+		t.Fatal("a paste bound to a reconnecting daemon must be dropped even while a healthy project is active")
+	}
+}
+
 // A link-loss report from a previous client must be ignored: the old listen
 // loop is still parked in Receive when the new client is already live.
 func TestUpdate_LinkLost_StaleGeneration_Ignored(t *testing.T) {

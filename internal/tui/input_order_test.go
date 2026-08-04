@@ -279,6 +279,163 @@ func TestSendClipboardToPane_SharesTheKeystrokeQueue(t *testing.T) {
 	}
 }
 
+// TestPasteClipboard_ReadsOnCmdButEnqueuesOnUpdate pins the fourth and last
+// MsgPaneInput producer to the Update goroutine.
+//
+// Reading the clipboard blocks, so it has to happen in a tea.Cmd — but the Cmd
+// must NOT write to the pane. Doing so made paste a second producer racing the
+// keystroke path into inputCh (a key typed while the clipboard read was still
+// running could overtake the paste), and read pane/dest state off its owning
+// goroutine. So the Cmd returns clipboardPastedMsg and enqueues nothing; Update
+// turns that into the ordered enqueue.
+//
+// Deliberately NOT parallel: it swaps the package-level clipboard readers.
+func TestPasteClipboard_ReadsOnCmdButEnqueuesOnUpdate(t *testing.T) {
+	origText, origImg := clipboardReadText, clipboardReadImage
+	t.Cleanup(func() { clipboardReadText, clipboardReadImage = origText, origImg })
+	clipboardReadText = func() (string, error) { return "PASTED", nil }
+	clipboardReadImage = func() ([]byte, error) { return nil, nil }
+
+	m, fake := inputOrderTestModel(t, "p1", true)
+
+	cmd := m.pasteClipboard()
+	if cmd == nil {
+		t.Fatal("pasteClipboard returned a nil cmd; want the clipboard-read command")
+	}
+
+	m.forwardInputBytes([]byte("a"))
+	queued := len(m.inputCh)
+	msg := cmd() // clipboard read only — must not touch the queue
+	if got := len(m.inputCh); got != queued {
+		t.Fatalf("the clipboard tea.Cmd enqueued %d entries itself; the enqueue must happen on the Update goroutine", got-queued)
+	}
+	pasted, ok := msg.(clipboardPastedMsg)
+	if !ok {
+		t.Fatalf("cmd returned %T, want clipboardPastedMsg", msg)
+	}
+	if pasted.text != "PASTED" {
+		t.Errorf("clipboard text = %q, want %q", pasted.text, "PASTED")
+	}
+
+	// Update turns the message into the ordered enqueue, between the keys.
+	updated, _ := m.Update(pasted)
+	m2 := updated.(Model)
+	m2.forwardInputBytes([]byte("b"))
+
+	if got := drainQueued(t, m, 3); got != "aPASTEDb" {
+		t.Errorf("enqueued order = %q, want %q", got, "aPASTEDb")
+	}
+	if len(fake.sent) != 0 {
+		t.Errorf("paste must go through the queue, not straight to the client; got %d direct sends", len(fake.sent))
+	}
+}
+
+// TestInputForwarder_DrainsQueuedInputOnStop pins the shutdown contract.
+// enqueueInput blocks rather than drops so accepted input is never lost — a
+// forwarder that returned the moment inputDone closed would reintroduce exactly
+// that loss at exit, and only sometimes, because a select with two ready cases
+// picks pseudo-randomly.
+func TestInputForwarder_DrainsQueuedInputOnStop(t *testing.T) {
+	t.Parallel()
+	const queued = 8
+	sink := &syncSender{got: make(chan struct{}, queued)}
+	m, _ := inputOrderTestModel(t, "p1", true)
+	m.client = sink
+	m.inputDone = make(chan struct{})
+
+	// Fill the queue BEFORE the forwarder starts, so every entry is already
+	// buffered when the stop signal arrives.
+	for i := 0; i < queued; i++ {
+		m.forwardInputBytes([]byte{byte('0' + i)})
+	}
+	m.StopInputForwarder()
+	go m.inputForwarder()
+
+	deadline := time.After(2 * time.Second)
+	for i := 0; i < queued; i++ {
+		select {
+		case <-sink.got:
+		case <-deadline:
+			sink.mu.Lock()
+			n := len(sink.data)
+			sink.mu.Unlock()
+			t.Fatalf("forwarder stopped with input still queued: delivered %d of %d", n, queued)
+		}
+	}
+
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	got := ""
+	for _, d := range sink.data {
+		got += string(d)
+	}
+	if got != "01234567" {
+		t.Errorf("drained order = %q, want %q", got, "01234567")
+	}
+}
+
+// panicSender panics on its first Send and records every later one. It exists to
+// prove the drainer survives a panic; see TestForwardOne_PanicKeepsDrainerAlive.
+type panicSender struct {
+	mu    sync.Mutex
+	calls int
+	data  [][]byte
+	got   chan struct{}
+}
+
+func (p *panicSender) Send(m *ipc.Message) error {
+	p.mu.Lock()
+	p.calls++
+	first := p.calls == 1
+	if !first {
+		var pl ipc.PaneInputPayload
+		if err := json.Unmarshal(m.Payload, &pl); err == nil {
+			p.data = append(p.data, pl.Data)
+		}
+	}
+	p.mu.Unlock()
+	if first {
+		panic("send exploded")
+	}
+	p.got <- struct{}{}
+	return nil
+}
+
+func (p *panicSender) Receive() (*ipc.Message, error) { return nil, nil }
+
+// TestForwardOne_PanicKeepsDrainerAlive pins the hardening that makes the
+// BLOCKING enqueue safe. enqueueInput parks rather than dropping when the queue
+// fills, which is only acceptable because the drainer cannot die: if a panic
+// killed the sole forwarder goroutine, the 1024 buffer would fill and every
+// later keystroke would block the Update loop — a silent, total input freeze.
+// So a panicking send must be swallowed per entry and the NEXT entry must still
+// be delivered.
+func TestForwardOne_PanicKeepsDrainerAlive(t *testing.T) {
+	t.Parallel()
+	sink := &panicSender{got: make(chan struct{}, 1)}
+	m, _ := inputOrderTestModel(t, "p1", true)
+	m.client = sink
+	m.inputDone = make(chan struct{})
+
+	go m.inputForwarder()
+	t.Cleanup(m.StopInputForwarder)
+
+	m.forwardInputBytes([]byte("a")) // panics inside Send
+	m.forwardInputBytes([]byte("b")) // must still be delivered
+
+	select {
+	case <-sink.got:
+	case <-time.After(2 * time.Second):
+		t.Fatal("drainer died on the panicking entry — a full queue would now deadlock every enqueue")
+	}
+
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	if len(sink.data) != 1 || string(sink.data[0]) != "b" {
+		t.Errorf("delivered after panic = %q, want [\"b\"]", sink.data)
+	}
+}
+
 // TestForwardInputBytes_EmptyData_NoEnqueue: zero-length input is dropped at the
 // entry point — no enqueue, no zero-length frame.
 func TestForwardInputBytes_EmptyData_NoEnqueue(t *testing.T) {

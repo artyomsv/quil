@@ -181,6 +181,14 @@ type paneEventMsg ipc.PaneEventPayload
 // pasteRefreshMsg triggers a re-render after paste so the cursor updates.
 type pasteRefreshMsg struct{}
 
+// clipboardPastedMsg carries text read from the system clipboard back to the
+// Update goroutine. Reading the clipboard blocks, so it must happen in a
+// tea.Cmd — but the resulting PTY write must NOT, or paste becomes a second
+// producer racing the keystroke path into inputCh (and reads pane/dest state
+// off its owning goroutine). The Cmd therefore does I/O only and returns this;
+// Update does the enqueue. See enqueueInput.
+type clipboardPastedMsg struct{ text string }
+
 // sidebarTickMsg triggers a periodic sidebar re-render to update relative timestamps.
 type sidebarTickMsg struct{}
 
@@ -1416,6 +1424,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Schedule re-render after PTY echo arrives to update cursor position
 			return m, tea.Tick(100*time.Millisecond, func(_ time.Time) tea.Msg { return pasteRefreshMsg{} })
 		}
+
+	case clipboardPastedMsg:
+		// The clipboard read happened on a tea.Cmd goroutine; the ENQUEUE
+		// happens here, on the Update goroutine, so paste joins the ordered
+		// input queue at a defined point relative to the keys around it.
+		m.sendClipboardToPane(msg.text)
+		// Schedule re-render after PTY echo arrives to update cursor position
+		return m, tea.Tick(100*time.Millisecond, func(_ time.Time) tea.Msg { return pasteRefreshMsg{} })
 
 	case pasteRefreshMsg:
 		return m, nil // triggers re-render with updated VT emulator cursor
@@ -5537,11 +5553,28 @@ func (m Model) sendPaneInput(dest, paneID string, data []byte) {
 // path go-conventions wants; inputCh itself is never closed (the Update
 // goroutine may still reference it, so closing would risk a send-on-closed
 // panic) — closing inputDone is the clean stop signal instead.
+// On stop it DRAINS what is already queued before returning. A bare return
+// would silently discard input the Update goroutine had already accepted —
+// exactly the loss enqueueInput blocks to avoid, reintroduced at exit. Draining
+// is safe and terminates because StopInputForwarder runs after tea.Program.Run
+// returns, so the Update goroutine is gone and the queue can only shrink; the
+// non-blocking default is what stops a late tea.Cmd from holding shutdown open.
+//
+// The drain is needed even though inputDone is checked in the same select:
+// with both cases ready, Go picks pseudo-randomly, so entries would be dropped
+// only sometimes — the worst kind of loss to diagnose.
 func (m Model) inputForwarder() {
 	for {
 		select {
 		case <-m.inputDone:
-			return
+			for {
+				select {
+				case in := <-m.inputCh:
+					m.forwardOne(in)
+				default:
+					return
+				}
+			}
 		case in := <-m.inputCh:
 			m.forwardOne(in)
 		}
@@ -5604,22 +5637,12 @@ func (m Model) pasteClipboard() tea.Cmd {
 			logger.Debug("pasteClipboard: nothing to paste, returning")
 			return nil
 		}
-		tab := m.activeTabModel()
-		if tab == nil {
-			return nil
-		}
-		pane := tab.ActivePaneModel()
-		if pane == nil {
-			return nil
-		}
-		// Wrap in bracketed paste sequences (when the app enabled the mode) so
-		// the shell treats newlines as literal text, not as Enter presses.
-		data := pastePayload(pane, text)
-		logger.Debug("pasteClipboard: sending %d bytes to pane %s", len(data), pane.ID)
-		m.enqueueInput(pane.ID, data)
-		// Wait for PTY echo to arrive before triggering re-render
-		time.Sleep(100 * time.Millisecond)
-		return pasteRefreshMsg{}
+		// Hand the text back to Update rather than writing to the pane here.
+		// Resolving the pane, wrapping the payload and enqueueing all read
+		// Model state and must happen on the Update goroutine — see
+		// clipboardPastedMsg.
+		logger.Debug("pasteClipboard: read %d bytes, handing to Update", len(text))
+		return clipboardPastedMsg{text: text}
 	}
 }
 

@@ -1,5 +1,11 @@
 # Projects Core — Implementation Plan
 
+> **Status: SHIPPED in v1.47.0 (PR #123), follow-ups in v1.47.1 (PR #124). This is a
+> historical record — do NOT execute it.** The task boxes below were never ticked off
+> in the file; the work landed and the decisions worth keeping live in
+> `.claude/rules/projects.md`. Read this for how the feature was arrived at, not for
+> what to do next.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add an explicit project layer above tabs, a reserved left sidebar showing project and per-pane agent state, and a routing layer that lets one client hold projects from several daemons.

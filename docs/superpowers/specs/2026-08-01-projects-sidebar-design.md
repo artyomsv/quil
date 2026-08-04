@@ -3,7 +3,8 @@
 | Field | Value |
 |---|---|
 | Date | 2026-08-01 |
-| Status | Design approved, plan not yet written |
+| Status | Implemented and shipped in v1.47.0 — historical record |
+| Plan | `docs/superpowers/plans/2026-08-01-projects-core.md` |
 | Supersedes | `docs/roadmap/workspace-files.md` (M9) is folded in as a later layer, not implemented here |
 
 ## Problem

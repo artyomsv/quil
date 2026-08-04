@@ -34,12 +34,16 @@ func uniqueProjectName(taken []string, want string) string {
 	for _, t := range taken {
 		used[norm(t)] = true
 	}
-	if !used[norm(want)] {
-		return want
+	// Trimmed on BOTH paths. Trimming only where a collision happens made the
+	// stored name depend on whether one occurred — "  infra  " kept its padding
+	// alone and lost it as "infra (2)" — and the client trims before sending
+	// anyway, so this only ever differed for another IPC client.
+	base := strings.TrimSpace(want)
+	if !used[norm(base)] {
+		return base
 	}
 	// Bounded by construction: each candidate is distinct and there are
 	// finitely many taken names, so one of the first len(taken)+2 is free.
-	base := strings.TrimSpace(want)
 	for n := 2; ; n++ {
 		candidate := fmt.Sprintf("%s (%d)", base, n)
 		if !used[norm(candidate)] {
@@ -156,11 +160,21 @@ func (sm *SessionManager) DestroyProject(id string) []*Pane {
 	return detached
 }
 
-func (sm *SessionManager) UpdateProject(id, name, rootDir string) bool {
+// requireBootstrap makes the update conditional on the project still being one
+// the daemon invented — the compare-and-swap half of the client's adopt path.
+// See UpdateProjectPayload.AdoptBootstrap.
+func (sm *SessionManager) UpdateProject(id, name, rootDir string, requireBootstrap bool) bool {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	p, ok := sm.projects[id]
 	if !ok {
+		return false
+	}
+	if requireBootstrap && !p.Bootstrap {
+		// Someone named it between this client deciding to adopt and the
+		// message arriving. Refusing is what stops two clients adopting one
+		// host and each silently renaming the other's project; an ordinary
+		// rename does not set the flag and is unaffected.
 		return false
 	}
 	// Naming it is what makes it the user's. A project that stayed Bootstrap

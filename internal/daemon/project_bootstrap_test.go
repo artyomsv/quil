@@ -45,7 +45,7 @@ func TestUpdateProject_ClearsBootstrap(t *testing.T) {
 	projects := sm.Projects()
 	id := projects[0].ID
 
-	if !sm.UpdateProject(id, "cluster-management", "/srv/cluster") {
+	if !sm.UpdateProject(id, "cluster-management", "/srv/cluster", false) {
 		t.Fatal("update failed")
 	}
 
@@ -103,5 +103,45 @@ func TestMigrateToDefaultProject_MarksItBootstrap(t *testing.T) {
 	if b, _ := p["bootstrap"].(bool); !b {
 		t.Error("the migrated project is not marked Bootstrap, so a host upgraded " +
 			"from a pre-projects daemon keeps a Default beside whatever the user names")
+	}
+}
+
+// Adopting is compare-and-swap on the far side.
+//
+// The client decides to adopt from its OWN snapshot, so two clients driving the
+// same host both see the bootstrap project and both send a rename. Without the
+// condition the second silently renames the project the first just named —
+// nobody is told, and the host ends up called whatever arrived last.
+func TestUpdateProject_AdoptRefusesAProjectSomebodyNamedFirst(t *testing.T) {
+	sm := NewSessionManager(100)
+	sm.CreateTab("Shell")
+	id := sm.Projects()[0].ID
+
+	// Client A adopts.
+	if !sm.UpdateProject(id, "cluster-management", "/srv/cluster", true) {
+		t.Fatal("the first adopt was refused")
+	}
+	// Client B adopts the same project, from a snapshot taken before A's.
+	if sm.UpdateProject(id, "infra", "/srv/infra", true) {
+		t.Error("the second adopt applied — it renamed the project the first " +
+			"client had just named, and neither user was told")
+	}
+	if got := sm.Projects()[0].Name; got != "cluster-management" {
+		t.Errorf("name = %q, want the first client's", got)
+	}
+}
+
+// An ordinary rename is unconditional. The guard is for adoption, and applying
+// it to every update would break renaming a project that is — correctly — no
+// longer a bootstrap.
+func TestUpdateProject_PlainRenameIsUnconditional(t *testing.T) {
+	sm := NewSessionManager(100)
+	p := sm.CreateProject("cluster-management", "/srv/cluster")
+
+	if !sm.UpdateProject(p.ID, "infra", "/srv/infra", false) {
+		t.Fatal("a plain rename of a named project was refused")
+	}
+	if got := sm.Projects()[0].Name; got != "infra" {
+		t.Errorf("name = %q, want infra", got)
 	}
 }

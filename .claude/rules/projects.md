@@ -104,6 +104,31 @@ project wins over an unnamed one when both are present — reachable for hosts
 that predate the rule — because adopting there would rename a project the user
 is not looking at.
 
+**"The host has reported no projects" means NOT YET, never NONE.** A daemon
+holds a tab and a tab holds a project, so an empty answer for an attached host
+is a broadcast that has not landed — and `destDialedMsg` batches the attach with
+the root-dir browse, so the listing can paint and invite an Enter before it
+does. Creating there lands beside a bootstrap project the client cannot see, and
+that project is still adoptable, so the NEXT create renames it: two named
+projects from two ordinary keystrokes. `submitNewProject` waits on
+`m.attached[dest]` instead, which is self-clearing where the wrong answer is
+permanent.
+
+**Adopting is compare-and-swap, because the decision is made from a snapshot.**
+Each client checks `Bootstrap` in its OWN copy, so two clients driving one host
+both see the bootstrap project and both send a rename — the second silently
+renaming the first's freshly named project. `UpdateProjectPayload.AdoptBootstrap`
+makes the daemon apply it only while the project is still a bootstrap; a plain
+rename omits the flag and is unconditional. Same ladder as the duplicate name:
+the client refuses when it knows, the daemon guarantees when it could not.
+
+**A form that names a destination must SHOW that destination.**
+`openNewProjectDialog` seeded `projectFormDest` from the active project while
+leaving the ssh fields blank, so with a remote project active the form read
+"this machine" and acted on the far one. Survivable while every submit was a
+create; destructive the moment a submit can rename the host's existing project.
+It seeds Remote/user/host from the dest now, as `beginProjectRename` always did.
+
 **The local daemon is deliberately exempt**, and applying this there would be
 wrong twice over: it would refuse the second project on the machine the user is
 sitting at, and its create would rename the Default holding their existing work

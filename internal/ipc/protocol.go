@@ -267,6 +267,14 @@ type UpdateProjectPayload struct {
 	ProjectID string `json:"project_id"`
 	Name      string `json:"name"`
 	RootDir   string `json:"root_dir"`
+	// AdoptBootstrap makes the update conditional: apply it only while the
+	// project is still one the daemon invented. Set by the client's adopt path,
+	// where naming a project on a host RENAMES the host's unnamed one — two
+	// clients adopting the same host would otherwise each rename the other's
+	// freshly named project, since the Bootstrap check lives in each client's
+	// own snapshot. Omitted (false) means an ordinary rename, which always
+	// applies. omitempty so an older daemon sees the same wire shape it did.
+	AdoptBootstrap bool `json:"adopt_bootstrap,omitempty"`
 }
 
 type SwitchProjectPayload struct {

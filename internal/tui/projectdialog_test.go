@@ -458,6 +458,18 @@ func TestProjectForm_RemoteFlowSendsTheCreate(t *testing.T) {
 		t.Fatalf("projectFormDest = %q after a successful dial", m.projectFormDest)
 	}
 
+	// The daemon reports its workspace, as a real one does on attach: it holds
+	// a tab, so it holds a project, and nobody has named that project yet.
+	// Submitting before this lands is the case the dialog now waits out.
+	tm, _ = m.Update(WorkspaceStateMsg{
+		Dest:          "build@gpu01",
+		ActiveProject: "proj-boot",
+		Projects: []ProjectInfo{
+			{ID: "proj-boot", Name: "Default", Bootstrap: true},
+		},
+	})
+	m = tm.(Model)
+
 	// The browse the dial kicked off resolves, so the submit gate opens.
 	m.applyBrowseDir(ipc.BrowseDirRespPayload{
 		Path: "", Resolved: "/srv/cluster",
@@ -473,20 +485,28 @@ func TestProjectForm_RemoteFlowSendsTheCreate(t *testing.T) {
 		submit()
 	}
 
-	var created *ipc.Message
+	// The MECHANISM is now an adopt rather than a create — a host holds one
+	// project, so the name lands on the one already there. The COMPLAINT this
+	// test was written for is unchanged and is what it still asserts: the name
+	// the user typed has to reach that host, or the only project they see stays
+	// called Default.
+	var named *ipc.Message
 	for _, sent := range remote.sent {
-		if sent.Type == ipc.MsgCreateProject {
-			created = sent
+		if sent.Type == ipc.MsgUpdateProject || sent.Type == ipc.MsgCreateProject {
+			named = sent
 		}
 	}
-	if created == nil {
-		t.Fatalf("no create reached the remote daemon (err=%q) — the project the user "+
-			"named is never made, so the only one they see is the daemon's own Default",
-			m.projectFormErr)
+	if named == nil {
+		t.Fatalf("nothing reached the remote daemon (err=%q) — the project keeps the "+
+			"daemon's own name and the one the user typed is lost", m.projectFormErr)
 	}
-	var payload ipc.CreateProjectPayload
-	created.DecodePayload(&payload)
+	var payload ipc.UpdateProjectPayload
+	named.DecodePayload(&payload)
 	if payload.Name != "cluster-management" {
-		t.Errorf("created name = %q, want the name the user typed", payload.Name)
+		t.Errorf("name = %q, want the name the user typed", payload.Name)
+	}
+	if named.Type == ipc.MsgUpdateProject && payload.ProjectID != "proj-boot" {
+		t.Errorf("renamed %q, want the host's own project so its tabs come with it",
+			payload.ProjectID)
 	}
 }

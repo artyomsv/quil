@@ -1012,8 +1012,22 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 			log.Printf("update project: malformed payload: %v", err)
 			return
 		}
-		d.session.UpdateProject(p.ProjectID, p.Name, p.RootDir)
+		// Logged when it does NOT apply. The two ways that happens — an unknown
+		// ID, and an adopt whose project someone named first — both look
+		// identical from the client: a dialog that accepted a name and closed
+		// on nothing changing. This package has already paid for one silently
+		// ignored project message.
+		if !d.session.UpdateProject(p.ProjectID, p.Name, p.RootDir, p.AdoptBootstrap) {
+			log.Printf("update project %s: not applied (adopt=%v) — unknown id, or already named",
+				p.ProjectID, p.AdoptBootstrap)
+		}
 		d.broadcastState()
+		// Rename now also clears the persisted Bootstrap flag, so leaving this
+		// to the periodic ticker means a daemon killed inside that window comes
+		// back with the project called Default and adoptable again — the user's
+		// rename lost. Create, destroy and switch all snapshot; this was the
+		// one project mutation that did not.
+		d.requestSnapshot()
 
 	case ipc.MsgSwitchProject:
 		var p ipc.SwitchProjectPayload

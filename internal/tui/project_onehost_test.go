@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
+
 	"github.com/artyomsv/quil/internal/ipc"
 )
 
@@ -157,5 +159,165 @@ func TestSubmitNewProject_CreatesOnAHostThatHasReportedNothingYet(t *testing.T) 
 
 	if got := sentOfType(t, remote, ipc.MsgCreateProject); len(got) != 1 {
 		t.Errorf("sent %d creates, want 1", len(got))
+	}
+}
+
+// A host that is attached but has not reported its projects yet must WAIT, not
+// create.
+//
+// This is the hole the one-per-host rule had where the user actually meets it:
+// destDialedMsg batches the attach with the root-dir browse, so the listing can
+// paint — and invite an Enter — before the first workspace_state arrives. The
+// client then sees no projects for the host, creates, and lands beside the
+// bootstrap Default it could not see. Worse, that Default is still adoptable,
+// so the NEXT create renames it and the host ends with two named projects.
+func TestSubmitNewProject_WaitsForAHostThatHasNotReportedYet(t *testing.T) {
+	remote := newFakeConn()
+	m := Model{
+		client:          NewRouter(map[string]Client{"": newFakeConn(), "gpu01": remote}),
+		attached:        map[string]bool{"gpu01": true},
+		projectFormDest: "gpu01",
+		dialog:          dialogProjectNew,
+	}
+
+	m.submitNewProject("cluster-management", "/srv/cluster")
+
+	if len(remote.sent) != 0 {
+		t.Errorf("sent %d messages before the host reported its projects — the "+
+			"daemon already holds a bootstrap project this client cannot see, so "+
+			"this create lands beside it", len(remote.sent))
+	}
+	if m.projectFormMsgKind != projectFormMsgBusy {
+		t.Errorf("kind = %d, want busy — waiting for state is progress, not a "+
+			"failure the user has to act on", m.projectFormMsgKind)
+	}
+	if m.dialog == dialogNone {
+		t.Error("the dialog closed while waiting, so the create is lost")
+	}
+}
+
+// Adopting closes the dialog, exactly as creating does. Asserted because the
+// adopt path reaches the daemon through a different call and its dialog state
+// is otherwise pinned nowhere.
+func TestSubmitNewProject_AdoptClosesTheDialog(t *testing.T) {
+	m := Model{
+		client:          NewRouter(map[string]Client{"": newFakeConn(), "gpu01": newFakeConn()}),
+		projects:        []*ProjectModel{{ID: "proj-boot", Name: "Default", Dest: "gpu01", Bootstrap: true}},
+		projectFormDest: "gpu01",
+		dialog:          dialogProjectNew,
+	}
+
+	m.submitNewProject("cluster-management", "/srv/cluster")
+
+	if m.dialog != dialogNone {
+		t.Errorf("dialog = %v after a successful adopt, want closed", m.dialog)
+	}
+}
+
+// The adopt path marks its update conditional, so the daemon can refuse it when
+// another client named the project first. Without the flag the loser silently
+// renames the winner's project.
+func TestSubmitNewProject_AdoptSendsAConditionalUpdate(t *testing.T) {
+	remote := newFakeConn()
+	m := Model{
+		client:          NewRouter(map[string]Client{"": newFakeConn(), "gpu01": remote}),
+		projects:        []*ProjectModel{{ID: "proj-boot", Name: "Default", Dest: "gpu01", Bootstrap: true}},
+		projectFormDest: "gpu01",
+		dialog:          dialogProjectNew,
+	}
+
+	m.submitNewProject("cluster-management", "/srv/cluster")
+
+	updates := sentOfType(t, remote, ipc.MsgUpdateProject)
+	if len(updates) != 1 {
+		t.Fatalf("sent %d updates, want 1", len(updates))
+	}
+	var p ipc.UpdateProjectPayload
+	if err := updates[0].DecodePayload(&p); err != nil {
+		t.Fatal(err)
+	}
+	if !p.AdoptBootstrap {
+		t.Error("the adopt was sent unconditionally — a second client adopting " +
+			"the same host would rename this project out from under the user")
+	}
+}
+
+// A plain rename must NOT carry the flag: the project it targets is, correctly,
+// no longer a bootstrap, so a conditional update would be refused every time.
+func TestSubmitRenameProject_IsUnconditional(t *testing.T) {
+	remote := newFakeConn()
+	m := Model{
+		client:   NewRouter(map[string]Client{"": newFakeConn(), "gpu01": remote}),
+		projects: []*ProjectModel{{ID: "proj-cluster", Name: "cluster-management", Dest: "gpu01"}},
+	}
+
+	m.submitRenameProject("proj-cluster", "infra", "/srv/infra")
+
+	updates := sentOfType(t, remote, ipc.MsgUpdateProject)
+	if len(updates) != 1 {
+		t.Fatalf("sent %d updates, want 1", len(updates))
+	}
+	var p ipc.UpdateProjectPayload
+	if err := updates[0].DecodePayload(&p); err != nil {
+		t.Fatal(err)
+	}
+	if p.AdoptBootstrap {
+		t.Error("a plain rename was sent conditionally, so the daemon refuses it")
+	}
+}
+
+// The New Project form must not say "this machine" while aimed at a remote
+// host. It seeded projectFormDest from the active project but left the ssh
+// fields blank, so with a remote project active the form contradicted itself —
+// and once naming a project there can RENAME the host's existing one, those
+// keystrokes rename a project on a machine the form said was local.
+func TestOpenNewProjectDialog_SeedsTheHostFieldsFromTheActiveDest(t *testing.T) {
+	m := Model{
+		client:        NewRouter(map[string]Client{"": newFakeConn(), "build@gpu01": newFakeConn()}),
+		projects:      []*ProjectModel{{ID: "proj-remote", Name: "cluster", Dest: "build@gpu01"}},
+		activeProject: 0,
+	}
+
+	next, _ := m.openNewProjectDialog()
+	got := next.(Model)
+
+	if got.projectFormDest != "build@gpu01" {
+		t.Fatalf("projectFormDest = %q, want the active project's host", got.projectFormDest)
+	}
+	if !got.projectFormRemote {
+		t.Error("the Remote toggle is off while the form targets a remote host, so " +
+			"it reads as \"this machine\" and a submit acts on the far one")
+	}
+	if got.projectFormUser != "build" || got.projectFormHost != "gpu01" {
+		t.Errorf("user=%q host=%q, want the dest split into the fields the user reads",
+			got.projectFormUser, got.projectFormHost)
+	}
+}
+
+// The refusal has to survive the REAL key path, not just a direct call. Every
+// other refusal test calls submitNewProject on an addressable Model; the call
+// site returns `m, m.submitNewProject(...)`, where the message is written
+// through the implicit &m while m is also the result.
+func TestProjectForm_RefusalSurvivesTheKeyHandler(t *testing.T) {
+	m := Model{
+		width: 100, height: 30,
+		client:          NewRouter(map[string]Client{"": newFakeConn(), "gpu01": newFakeConn()}),
+		projects:        []*ProjectModel{{ID: "proj-cluster", Name: "cluster-management", Dest: "gpu01"}},
+		projectFormDest: "gpu01",
+		projectFormName: "infra",
+		dialog:          dialogProjectNew,
+	}
+	// Enter on the Name row submits.
+	m.projectFormCursor = 0
+
+	next, _ := m.handleProjectDialogKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	got := next.(Model)
+
+	if got.projectFormErr == "" {
+		t.Fatal("the Model RETURNED by the key handler carries no message, so the " +
+			"refusal is invisible however correct the direct call is")
+	}
+	if got.dialog != dialogProjectNew {
+		t.Errorf("dialog = %v, want it still open on a refusal", got.dialog)
 	}
 }

@@ -1602,7 +1602,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.setFormBusy(note)
 				return m, m.installDest(msg.dest)
 			}
-			m.setFormError("cannot connect: " + sanitizeRemoteText(msg.err.Error()))
+			m.setFormError("cannot connect: " + truncateToWidth(sanitizeRemoteText(msg.err.Error()), formMsgDetailCap))
 			return m, nil
 		}
 		attach := m.adoptDest(msg.dest, msg.client)
@@ -1627,7 +1627,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// result. Threading a writer through it is the proper fix; repainting
 		// is what keeps the screen honest until then.
 		if msg.err != nil {
-			m.setFormError("install failed: " + sanitizeRemoteText(msg.err.Error()))
+			m.setFormError("install failed: " + truncateToWidth(sanitizeRemoteText(msg.err.Error()), formMsgDetailCap))
 			return m, tea.ClearScreen
 		}
 		// Provisioned — retry the dial that failed. Retrying rather than

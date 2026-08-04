@@ -321,3 +321,40 @@ func TestProjectForm_RefusalSurvivesTheKeyHandler(t *testing.T) {
 		t.Errorf("dialog = %v, want it still open on a refusal", got.dialog)
 	}
 }
+
+// Adopting with no root directory keeps the project's own.
+//
+// The regression this pins: submitProjectForm deliberately does not wait for
+// the browse, so on a create the root is "" until a round trip to a host
+// connected seconds ago answers — and Enter on the Name row submits at once.
+// Routing that create into a rename made empty reachable on a path whose
+// documented invariant says it is not, and UpdateProject has no
+// unchanged-value guard, so the adopted project's root was erased.
+func TestSubmitNewProject_AdoptKeepsTheProjectsRootWhenTheBrowseHasNotAnswered(t *testing.T) {
+	remote := newFakeConn()
+	m := Model{
+		client: NewRouter(map[string]Client{"": newFakeConn(), "gpu01": remote}),
+		projects: []*ProjectModel{
+			{ID: "proj-boot", Name: "Default", Dest: "gpu01", Bootstrap: true,
+				RootDir: "/home/build"},
+		},
+		projectFormDest: "gpu01",
+		dialog:          dialogProjectNew,
+	}
+
+	// The browse has not answered, so the form's root is still empty.
+	m.submitNewProject("cluster-management", "")
+
+	updates := sentOfType(t, remote, ipc.MsgUpdateProject)
+	if len(updates) != 1 {
+		t.Fatalf("sent %d updates, want 1", len(updates))
+	}
+	var p ipc.UpdateProjectPayload
+	if err := updates[0].DecodePayload(&p); err != nil {
+		t.Fatal(err)
+	}
+	if p.RootDir != "/home/build" {
+		t.Errorf("RootDir = %q, want the adopted project's own — an empty one "+
+			"ERASES it, and new panes and the git subsystem both read it", p.RootDir)
+	}
+}

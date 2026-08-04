@@ -9,8 +9,17 @@ import (
 
 // projectNames lists every project's name. Caller holds sm.mu.
 func (sm *SessionManager) projectNames() []string {
+	return sm.projectNamesExcept("")
+}
+
+// projectNamesExcept lists every project's name but one — the project being
+// renamed, which must not be told it collides with itself. Caller holds sm.mu.
+func (sm *SessionManager) projectNamesExcept(id string) []string {
 	out := make([]string, 0, len(sm.projects))
-	for _, p := range sm.projects {
+	for pid, p := range sm.projects {
+		if pid == id {
+			continue
+		}
 		out = append(out, p.Name)
 	}
 	return out
@@ -180,7 +189,12 @@ func (sm *SessionManager) UpdateProject(id, name, rootDir string, requireBootstr
 	// Naming it is what makes it the user's. A project that stayed Bootstrap
 	// after a rename would be adopted a second time by the next create, which
 	// would silently rename the work the user had just named.
-	p.Name, p.RootDir, p.Bootstrap = name, rootDir, false
+	// Disambiguated like a create, and for the same reason: a rename can produce
+	// the indistinguishable pair a create is prevented from producing, and the
+	// client's guard is a snapshot check that a second client can race. Its own
+	// name is excluded, so a rename that only moves the root directory keeps it.
+	p.Name = uniqueProjectName(sm.projectNamesExcept(id), name)
+	p.RootDir, p.Bootstrap = rootDir, false
 	return true
 }
 

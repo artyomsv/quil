@@ -308,9 +308,14 @@ func hostLabel(dest string) string {
 // Scoped to ONE destination on purpose: the same project name on a laptop and
 // on a build host is ordinary — the row carries the host, so those two are
 // told apart on sight, which is exactly what two on one host are not.
-func (m *Model) projectNamedOnDest(name, dest string) *ProjectModel {
+// excludeID is the project being renamed, which must not collide with itself —
+// submitting a rename that changes only the root directory is ordinary.
+func (m *Model) projectNamedOnDest(name, dest, excludeID string) *ProjectModel {
 	want := strings.ToLower(strings.TrimSpace(name))
 	for _, p := range m.projects {
+		if p.ID == excludeID {
+			continue
+		}
 		if p.Dest == dest && strings.ToLower(strings.TrimSpace(p.Name)) == want {
 			return p
 		}

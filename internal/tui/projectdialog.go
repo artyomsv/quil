@@ -154,7 +154,7 @@ func (m *Model) submitNewProject(name, rootDir string) tea.Cmd {
 	// nothing else, so a second row with the same name on the same daemon
 	// leaves the user unable to tell which holds their tabs — and removing the
 	// wrong one takes them with it.
-	if existing := m.projectNamedOnDest(name, m.projectFormDest); existing != nil {
+	if existing := m.projectNamedOnDest(name, m.projectFormDest, ""); existing != nil {
 		m.setFormError(sanitizeRemoteText(name) + " already exists on that host")
 		return nil
 	}
@@ -199,6 +199,17 @@ func (m *Model) submitRenameProject(id, name, rootDir string) tea.Cmd {
 func (m *Model) sendUpdateProject(id, name, rootDir string, adoptBootstrap bool) tea.Cmd {
 	name = strings.TrimSpace(name)
 	if name == "" {
+		return nil
+	}
+	// A rename can recreate the pair a create is refused for. "It is deliberate,
+	// so the user knows which is which" does not survive the rename: afterwards
+	// the two rows are as indistinguishable as any other duplicate, and removing
+	// the wrong one still takes its tabs. Excluding the project itself keeps a
+	// rename that only changes the root directory working.
+	dest := m.destOfProject(id)
+	if existing := m.projectNamedOnDest(name, dest, id); existing != nil {
+		m.setFormError(sanitizeRemoteText(name) + " already exists on " +
+			sanitizeRemoteText(hostLabel(dest)))
 		return nil
 	}
 	msg, err := ipc.NewMessage(ipc.MsgUpdateProject, ipc.UpdateProjectPayload{

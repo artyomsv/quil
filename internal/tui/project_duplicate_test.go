@@ -86,3 +86,47 @@ func TestSubmitNewProject_AllowsTheSameNameOnAnotherHost(t *testing.T) {
 		t.Error("no create reached gpu01")
 	}
 }
+
+// The client refuses a rename onto a name the destination already has, the way
+// it refuses a create. Scoped to the local daemon for the same reason: a remote
+// host holds one project, so it has nothing to collide with.
+func TestSubmitRenameProject_RefusesADuplicateName(t *testing.T) {
+	conn := newFakeConn()
+	m := Model{
+		client: NewRouter(map[string]Client{"": conn}),
+		projects: []*ProjectModel{
+			{ID: "proj-cluster", Name: "cluster-management"},
+			{ID: "proj-infra", Name: "infra"},
+		},
+		dialog: dialogProjectRename,
+	}
+
+	m.submitRenameProject("proj-infra", "cluster-management", "/srv/infra")
+
+	if len(conn.sent) != 0 {
+		t.Errorf("sent %d messages for a refused rename", len(conn.sent))
+	}
+	if m.projectFormErr == "" {
+		t.Error("the duplicate rename was accepted silently")
+	}
+	if m.dialog == dialogNone {
+		t.Error("the dialog closed on a rename it refused to send")
+	}
+}
+
+// Renaming a project to the name it already holds is how the form submits a
+// root-directory change. It must not read as a collision with itself.
+func TestSubmitRenameProject_AllowsItsOwnName(t *testing.T) {
+	conn := newFakeConn()
+	m := Model{
+		client:   NewRouter(map[string]Client{"": conn}),
+		projects: []*ProjectModel{{ID: "proj-cluster", Name: "cluster-management"}},
+		dialog:   dialogProjectRename,
+	}
+
+	m.submitRenameProject("proj-cluster", "cluster-management", "/srv/elsewhere")
+
+	if len(sentOfType(t, conn, ipc.MsgUpdateProject)) != 1 {
+		t.Fatalf("the rename was refused: %q", m.projectFormErr)
+	}
+}

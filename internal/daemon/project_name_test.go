@@ -68,3 +68,47 @@ func TestCreateProject_LeavesADistinctNameAlone(t *testing.T) {
 		t.Errorf("name = %q, want it untouched — nothing collided", other.Name)
 	}
 }
+
+// A RENAME can produce the pair a create is prevented from producing. Intent
+// does not make the result distinguishable: afterwards the two rows read the
+// same, and removing the wrong one still takes its tabs.
+func TestUpdateProject_MakesARenameCollisionDistinguishable(t *testing.T) {
+	sm := NewSessionManager(100)
+	first := sm.CreateProject("cluster-management", "/srv/cluster")
+	second := sm.CreateProject("infra", "/srv/infra")
+
+	if !sm.UpdateProject(second.ID, "cluster-management", "/srv/infra", false) {
+		t.Fatal("the rename was refused outright")
+	}
+
+	names := map[string]string{}
+	for _, p := range sm.Projects() {
+		names[p.ID] = p.Name
+	}
+	if names[first.ID] != "cluster-management" {
+		t.Errorf("the untouched project became %q", names[first.ID])
+	}
+	if names[second.ID] == names[first.ID] {
+		t.Errorf("both projects are called %q after the rename", names[second.ID])
+	}
+}
+
+// Renaming a project to the name it already has — which is what submitting the
+// form after changing only the root directory does — must not treat it as
+// colliding with itself.
+func TestUpdateProject_KeepsItsOwnNameWhenOnlyTheRootChanges(t *testing.T) {
+	sm := NewSessionManager(100)
+	p := sm.CreateProject("cluster-management", "/srv/cluster")
+
+	if !sm.UpdateProject(p.ID, "cluster-management", "/srv/elsewhere", false) {
+		t.Fatal("update failed")
+	}
+
+	got := sm.Projects()[0]
+	if got.Name != "cluster-management" {
+		t.Errorf("name = %q — the project collided with itself", got.Name)
+	}
+	if got.RootDir != "/srv/elsewhere" {
+		t.Errorf("root = %q, want the new one", got.RootDir)
+	}
+}

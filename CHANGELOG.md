@@ -19,6 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   projects as you like. Note for hosts you connected before this release: their
   `Default` predates the marker that makes this work, so it is treated as one
   you named — rename it once and the host is settled.
+- **The New Project dialog fills in the host it is aimed at.** Opening it while
+  a remote project is active showed **Remote (ssh)** unticked and an empty Host,
+  while the form was already targeting that machine — so it read "this machine"
+  and acted on the far one. It now shows the host it will use, and waits, saying
+  so, if that host has not yet reported what it holds.
 
 ### Fixed
 - **Connecting a remote host no longer reports its own progress as a failure.**

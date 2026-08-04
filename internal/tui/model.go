@@ -2527,6 +2527,45 @@ func (m Model) beginPaneRename() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// toggleProjectSidebar shows or hides the reserved project column. Extracted
+// from the kb.SidebarToggle case so the command palette dispatches into the
+// same implementation the key does — the palette is a launcher, not a second
+// code path, and this one has enough ordering to it that a copy would drift.
+func (m Model) toggleProjectSidebar() (tea.Model, tea.Cmd) {
+	// Refused below minWidthForSidebar rather than flipped invisibly:
+	// sidebarWidth() returns 0 on a narrow terminal whatever sidebarOpen
+	// says, so the toggle would repaint nothing while still writing
+	// cfg.UI.SidebarOpen to disk — the user's next launch on a wide
+	// terminal would then come up in whichever state the narrow one
+	// happened to leave behind. Flash instead, so the key is not silent.
+	if m.width < minWidthForSidebar {
+		m.setFlash(fmt.Sprintf("terminal too narrow for the project sidebar (needs %d columns)", minWidthForSidebar))
+		return m, m.flashCmd()
+	}
+	// The PROJECT sidebar reserves real layout width (paneAreaWidth), so
+	// unlike the notification overlay this has to resize every pane's PTY —
+	// and ClearScreen, because every column right of the strip shifts by its
+	// width in one frame, which is exactly the kind of shift Bubble Tea's cell
+	// diff mis-tracks.
+	m.sidebarOpen = !m.sidebarOpen
+	// resizeTabs FIRST, and it is not optional: resizeAllPanes does not
+	// compute geometry, it READS pane.Width/Height and tab.CanvasW/H and
+	// ships them. Those are written only by tab.Resize — i.e. by
+	// resizeTabs (every tab of every project) or by View (the active tab
+	// only). The toggle changes paneAreaWidth() for all of them, so
+	// without this every background tab keeps its pre-toggle PTY size
+	// until the next workspace broadcast or real window resize, and even
+	// the active tab is a race between View and this Cmd's goroutine that
+	// the daemon's same-size guard can settle the wrong way. Same
+	// ordering as resizeTickMsg and toggleFocusForActiveTab.
+	m.resizeTabs()
+	// A screen preference, not session state: persisted to config (saved
+	// on exit via ConfigChanged), never to workspace.json.
+	m.cfg.UI.SidebarOpen = m.sidebarOpen
+	m.configChanged = true
+	return m, tea.Batch(tea.ClearScreen, m.resizeAllPanes())
+}
+
 // toggleFocusForActiveTab toggles focus mode on the active tab. Extracted
 // from the kb.FocusPane case; shared with the context menu.
 func (m Model) toggleFocusForActiveTab() (tea.Model, tea.Cmd) {
@@ -3142,38 +3181,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.ClearScreen
 	case kbMatches(key, kb.SidebarToggle):
-		// Refused below minWidthForSidebar rather than flipped invisibly:
-		// sidebarWidth() returns 0 on a narrow terminal whatever sidebarOpen
-		// says, so the toggle would repaint nothing while still writing
-		// cfg.UI.SidebarOpen to disk — the user's next launch on a wide
-		// terminal would then come up in whichever state the narrow one
-		// happened to leave behind. Flash instead, so the key is not silent.
-		if m.width < minWidthForSidebar {
-			m.setFlash(fmt.Sprintf("terminal too narrow for the project sidebar (needs %d columns)", minWidthForSidebar))
-			return m, m.flashCmd()
-		}
-		// The PROJECT sidebar reserves real layout width (paneAreaWidth), so
-		// unlike the notification overlay above this has to resize every
-		// pane's PTY — and ClearScreen, because every column right of the
-		// strip shifts by its width in one frame, which is exactly the kind
-		// of shift Bubble Tea's cell diff mis-tracks.
-		m.sidebarOpen = !m.sidebarOpen
-		// resizeTabs FIRST, and it is not optional: resizeAllPanes does not
-		// compute geometry, it READS pane.Width/Height and tab.CanvasW/H and
-		// ships them. Those are written only by tab.Resize — i.e. by
-		// resizeTabs (every tab of every project) or by View (the active tab
-		// only). The toggle changes paneAreaWidth() for all of them, so
-		// without this every background tab keeps its pre-toggle PTY size
-		// until the next workspace broadcast or real window resize, and even
-		// the active tab is a race between View and this Cmd's goroutine that
-		// the daemon's same-size guard can settle the wrong way. Same
-		// ordering as resizeTickMsg and toggleFocusForActiveTab.
-		m.resizeTabs()
-		// A screen preference, not session state: persisted to config (saved
-		// on exit via ConfigChanged), never to workspace.json.
-		m.cfg.UI.SidebarOpen = m.sidebarOpen
-		m.configChanged = true
-		return m, tea.Batch(tea.ClearScreen, m.resizeAllPanes())
+		return m.toggleProjectSidebar()
 	case kbMatches(key, kb.NotificationFocus):
 		// Ctrl+Alt+N: open (if hidden) and focus sidebar
 		if !m.notifications.visible {

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.47.2] - 2026-08-04
+
 ### Fixed
 - **Typing no longer scrambles under load.** When the machine was busy — a virus
   scan, a heavy build, a compile in another pane — characters could arrive in a

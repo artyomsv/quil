@@ -323,9 +323,13 @@ type Model struct {
 	// inputCh is the ordered PTY-input queue feeding inputForwarder. Wire order
 	// is fixed when bytes are pushed here (synchronously, on the Update
 	// goroutine), NOT when they reach the socket — see forwardInputBytes.
-	// inputDone stops the forwarder on TUI exit (StopInputForwarder).
+	// inputDone stops the forwarder on TUI exit (StopInputForwarder), and
+	// inputIdle is how the forwarder reports that it has finished draining, so
+	// the exit path can wait for the queue to reach the socket before the
+	// connection is closed out from under it.
 	inputCh              chan paneInput
 	inputDone            chan struct{}
+	inputIdle            chan struct{}
 	clientGen            int          // bumped on every client swap; see linkLostMsg for why
 	closeClientFn        func(Client) // releases a connection; see SetClientCloser
 	cfg                  config.Config
@@ -675,6 +679,7 @@ func NewModel(client Client, cfg config.Config, version string, registry *plugin
 		sidebarWidth:     cfg.UI.SidebarWidth,
 		inputCh:          make(chan paneInput, inputForwardBuffer),
 		inputDone:        make(chan struct{}),
+		inputIdle:        make(chan struct{}),
 	}
 	// Migration dialog takes priority over the disclaimer — it blocks
 	// startup until all stale plugins are resolved. Show disclaimer only
@@ -5583,6 +5588,15 @@ func (m Model) sendPaneInput(dest, paneID string, data []byte) {
 // with both cases ready, Go picks pseudo-randomly, so entries would be dropped
 // only sometimes — the worst kind of loss to diagnose.
 func (m Model) inputForwarder() {
+	// Announce that the queue has reached the socket. StopInputForwarder waits
+	// on this before the caller closes the client — signalling the drain
+	// without awaiting it just moves the loss one layer down, from an
+	// undrained channel to frames discarded by a closed connection.
+	defer func() {
+		if m.inputIdle != nil {
+			close(m.inputIdle)
+		}
+	}()
 	for {
 		select {
 		case <-m.inputDone:
@@ -5614,13 +5628,37 @@ func (m Model) forwardOne(in paneInput) {
 	m.sendPaneInput(in.dest, in.paneID, in.data)
 }
 
-// StopInputForwarder signals inputForwarder to exit. Safe to call once, after
-// tea.Program.Run has returned (the Update goroutine is then gone, so no further
-// enqueue can race the close). No-op when the channel was never created (tests
-// that construct Model literally). Wired from main.go's TUI-exit path.
+// inputDrainTimeout bounds how long TUI exit waits for queued input to reach
+// the socket. The drain cannot legitimately take this long — client.Send is
+// non-blocking on every path — so the bound exists only so an unforeseen stall
+// degrades to "exit anyway, having said so" instead of a TUI that will not quit.
+const inputDrainTimeout = 2 * time.Second
+
+// StopInputForwarder stops inputForwarder and WAITS for it to finish draining.
+//
+// The wait is the point. Closing inputDone only asks the forwarder to drain;
+// the caller then closes the IPC client, and a connection closed mid-drain
+// discards whatever had not yet been written — the same lost keystrokes, one
+// layer further down. Blocking here is safe because it runs after
+// tea.Program.Run returns: the Update goroutine is gone, so nothing can add to
+// the queue and the drain is bounded by what is already in it.
+//
+// Safe to call once. No-op when the channels were never created (tests that
+// construct Model literally). Wired from main.go's TUI-exit path, ahead of the
+// client close.
 func (m Model) StopInputForwarder() {
-	if m.inputDone != nil {
-		close(m.inputDone)
+	if m.inputDone == nil {
+		return
+	}
+	close(m.inputDone)
+	if m.inputIdle == nil {
+		return // no forwarder was started; nothing to wait for
+	}
+	select {
+	case <-m.inputIdle:
+	case <-time.After(inputDrainTimeout):
+		log.Printf("inputForwarder: drain did not finish within %s — %d queued entries may not have been sent",
+			inputDrainTimeout, len(m.inputCh))
 	}
 }
 

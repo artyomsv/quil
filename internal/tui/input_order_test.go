@@ -393,6 +393,64 @@ func TestPasteClipboard_TargetsThePaneActiveWhenRequested(t *testing.T) {
 	}
 }
 
+// slowSender makes the drain take measurable time, so a stop that merely
+// SIGNALS the drain is distinguishable from one that waits for it.
+type slowSender struct {
+	mu    sync.Mutex
+	data  [][]byte
+	delay time.Duration
+}
+
+func (s *slowSender) Send(m *ipc.Message) error {
+	time.Sleep(s.delay)
+	var p ipc.PaneInputPayload
+	if err := json.Unmarshal(m.Payload, &p); err == nil {
+		s.mu.Lock()
+		s.data = append(s.data, p.Data)
+		s.mu.Unlock()
+	}
+	return nil
+}
+
+func (s *slowSender) Receive() (*ipc.Message, error) { return nil, nil }
+
+// TestStopInputForwarder_WaitsForTheDrain pins the other half of the shutdown
+// contract. Draining is not enough on its own: the caller closes the IPC client
+// immediately after stopping the forwarder, and a connection closed mid-drain
+// discards whatever had not been written yet — the same lost keystrokes, one
+// layer further down. So the stop must not return until the queue has actually
+// reached the client.
+func TestStopInputForwarder_WaitsForTheDrain(t *testing.T) {
+	t.Parallel()
+	const queued = 5
+	sink := &slowSender{delay: 20 * time.Millisecond}
+	m, _ := inputOrderTestModel(t, "p1", true)
+	m.client = sink
+	m.inputDone = make(chan struct{})
+	m.inputIdle = make(chan struct{})
+
+	go m.inputForwarder()
+	for i := 0; i < queued; i++ {
+		m.forwardInputBytes([]byte{byte('0' + i)})
+	}
+
+	m.StopInputForwarder()
+
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	if len(sink.data) != queued {
+		t.Fatalf("StopInputForwarder returned with %d of %d entries still unsent — "+
+			"the caller closes the client next, so anything unsent is lost", len(sink.data), queued)
+	}
+	got := ""
+	for _, d := range sink.data {
+		got += string(d)
+	}
+	if got != "01234" {
+		t.Errorf("drained order = %q, want %q", got, "01234")
+	}
+}
+
 // TestInputForwarder_DrainsQueuedInputOnStop pins the shutdown contract.
 // enqueueInput blocks rather than drops so accepted input is never lost — a
 // forwarder that returned the moment inputDone closed would reintroduce exactly

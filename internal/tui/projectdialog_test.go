@@ -14,8 +14,13 @@ import (
 func TestSubmitNewProjectSendsCreateToActiveDest(t *testing.T) {
 	fake := newFakeConn()
 	m := Model{
-		client:        fake,
-		projects:      []*ProjectModel{{ID: "proj-a", Dest: "gpu01"}},
+		client: fake,
+		// gpu01 holds NO project yet, which is the only state a create reaches
+		// on a remote host now that one host holds one project: with a project
+		// already there the create either adopts it or is refused. The routing
+		// this test is about — a create belongs to the daemon whose filesystem
+		// holds its root dir — is unchanged either way.
+		projects:      []*ProjectModel{{ID: "proj-local"}},
 		activeProject: 0,
 		// openNewProjectDialog seeds this from the active dest. The form field
 		// is the source of truth rather than activeDest itself, because the

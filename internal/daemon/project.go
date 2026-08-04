@@ -60,6 +60,19 @@ type Project struct {
 	RootDir   string
 	TabIDs    []string
 	ActiveTab string
+
+	// Bootstrap marks a project the DAEMON invented rather than one a user
+	// named: the one createTabLocked makes when a tab needs a home and none
+	// exists, and the one migrateToDefaultProject wraps a pre-projects
+	// workspace in. Both are called "Default", but the name cannot be the
+	// signal — a user is free to name a project Default, and renaming this one
+	// is exactly what stops it being a bootstrap.
+	//
+	// The client uses it to ADOPT: naming a project on a host whose only
+	// project is this one renames it in place, so the host's existing tabs end
+	// up under the name the user chose instead of beside it. Persisted, because
+	// a daemon restart must not turn an un-adopted default into a real project.
+	Bootstrap bool
 }
 
 func (sm *SessionManager) CreateProject(name, rootDir string) *Project {
@@ -150,7 +163,10 @@ func (sm *SessionManager) UpdateProject(id, name, rootDir string) bool {
 	if !ok {
 		return false
 	}
-	p.Name, p.RootDir = name, rootDir
+	// Naming it is what makes it the user's. A project that stayed Bootstrap
+	// after a rename would be adopted a second time by the next create, which
+	// would silently rename the work the user had just named.
+	p.Name, p.RootDir, p.Bootstrap = name, rootDir, false
 	return true
 }
 

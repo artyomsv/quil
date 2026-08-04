@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **A remote host now holds exactly one project, and naming it is how you get
+  it.** A daemon must have at least one tab and a tab must belong to a project,
+  so a host always arrived already holding a `Default` nobody asked for — and
+  creating your project left that `Default` sitting beside it, holding the tabs
+  you actually cared about. Naming a project on such a host now renames that
+  project instead of adding a second, so the host's existing tabs end up under
+  your name. A host whose project you have already named refuses a second one
+  and points you at renaming it. The local daemon is unchanged: it holds as many
+  projects as you like. Note for hosts you connected before this release: their
+  `Default` predates the marker that makes this work, so it is treated as one
+  you named — rename it once and the host is settled.
+
 ### Fixed
 - **Connecting a remote host no longer reports its own progress as a failure.**
   The New Project dialog has one message line and was rendering everything on it

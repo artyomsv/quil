@@ -764,6 +764,7 @@ func parseRestoredProjects(raw any) []*Project {
 			rootDir = cwd
 		}
 		activeTab, _ := pm["active_tab"].(string)
+		bootstrap, _ := pm["bootstrap"].(bool)
 		var tabIDs []string
 		if rawIDs, ok := pm["tab_ids"].([]any); ok {
 			tabIDs = make([]string, 0, len(rawIDs))
@@ -779,6 +780,7 @@ func parseRestoredProjects(raw any) []*Project {
 			RootDir:   rootDir,
 			TabIDs:    tabIDs,
 			ActiveTab: activeTab,
+			Bootstrap: bootstrap,
 		})
 	}
 	return projects
@@ -2555,6 +2557,11 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			"root_dir":   p.RootDir,
 			"tab_ids":    p.TabIDs,
 			"active_tab": p.ActiveTab,
+			// Reaches the client AND the disk snapshot from here, because this
+			// map is both. The client needs it to decide whether naming a
+			// project adopts this one; the snapshot needs it so a restart does
+			// not turn an un-adopted default into a real project.
+			"bootstrap": p.Bootstrap,
 		})
 	}
 

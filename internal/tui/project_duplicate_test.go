@@ -7,23 +7,22 @@ import (
 	"github.com/artyomsv/quil/internal/ipc"
 )
 
-// Creating a project whose name a host already has is refused.
+// Creating a project whose name a daemon already has is refused.
 //
-// Disconnecting a host is client-side only — the remote daemon keeps every
-// project — so its rows leave the sidebar looking deleted and come back on the
-// next connect. Creating "the same project" again then lands a second one, and
-// the sidebar shows name and host and nothing else, so the two are
-// indistinguishable: the user cannot tell which holds their tabs, and removing
-// the wrong one takes them with it. Reported as a project count that grows by
-// one on every visit to the same host.
+// Scoped to the LOCAL daemon, which is the only one that holds several
+// projects: a remote host holds exactly one, so a duplicate name there is
+// refused earlier and for a different reason (see project_onehost_test.go).
+// Locally the hazard is the sidebar — it shows name and host and nothing else,
+// so two rows with one name on one daemon are indistinguishable: nothing says
+// which holds the user's tabs, and removing the wrong one takes them with it.
 func TestSubmitNewProject_RefusesADuplicateNameOnTheSameHost(t *testing.T) {
 	conn := newFakeConn()
 	m := Model{
-		client: NewRouter(map[string]Client{"": conn, "gpu01": newFakeConn()}),
+		client: NewRouter(map[string]Client{"": conn}),
 		projects: []*ProjectModel{
-			{ID: "proj-cluster", Name: "cluster-management", Dest: "gpu01"},
+			{ID: "proj-cluster", Name: "cluster-management"},
 		},
-		projectFormDest: "gpu01",
+		projectFormDest: "",
 		// Open, so "the dialog stays open on a refusal" is a real assertion
 		// rather than one the zero value satisfies for free.
 		dialog: dialogProjectNew,
@@ -53,9 +52,9 @@ func TestSubmitNewProject_RefusesADuplicateNameOnTheSameHost(t *testing.T) {
 // not make the name free either.
 func TestSubmitNewProject_DuplicateCheckIgnoresCaseAndSpace(t *testing.T) {
 	m := Model{
-		client:          NewRouter(map[string]Client{"": newFakeConn(), "gpu01": newFakeConn()}),
-		projects:        []*ProjectModel{{ID: "p1", Name: "Cluster-Management", Dest: "gpu01"}},
-		projectFormDest: "gpu01",
+		client:          NewRouter(map[string]Client{"": newFakeConn()}),
+		projects:        []*ProjectModel{{ID: "p1", Name: "Cluster-Management"}},
+		projectFormDest: "",
 	}
 	if m.submitNewProject("  cluster-management  ", ""); m.projectFormErr == "" {
 		t.Error("a name differing only by case and padding was accepted")

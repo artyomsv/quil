@@ -40,6 +40,11 @@ func migrateToDefaultProject(state map[string]any) {
 	state["projects"] = []any{map[string]any{
 		"id": id, "name": "Default", "root_dir": "",
 		"tab_ids": tabIDs, "active_tab": activeTab,
+		// The user never named this — it is their pre-projects workspace given
+		// a wrapper so its tabs stay reachable. Marking it lets the first
+		// project they name on this daemon adopt it, so those tabs land under
+		// that name rather than sitting beside it as a stray "Default".
+		"bootstrap": true,
 	}}
 	state["active_project"] = id
 }

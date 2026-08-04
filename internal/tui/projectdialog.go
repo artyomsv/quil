@@ -73,13 +73,34 @@ func (m *Model) submitNewProject(name, rootDir string) tea.Cmd {
 		m.setFormError("that host runs a quil without project support")
 		return nil
 	}
-	// Refuse a name that host already has. Disconnecting a host is client-side
-	// only — the remote daemon keeps every project — so reconnecting brings back
-	// projects the sidebar had made look deleted, and creating "the same one"
-	// again lands a second copy. The sidebar shows name and host and nothing
-	// else, so the two rows are then indistinguishable: the user cannot tell
-	// which holds their tabs, and removing the wrong one takes them with it.
-	// Reported as growing duplicates of one project against one host.
+	// A remote host holds exactly ONE project, and naming it is how you get it.
+	//
+	// The daemon does not know it is remote — Project has no Dest field, that is
+	// this client's label for the connection a project arrived on — so this is a
+	// rule about what CREATE does here, not an invariant the daemon can keep.
+	//
+	// Two outcomes, and which one applies is the daemon's Bootstrap flag rather
+	// than the name: adopt the project nobody named, refuse to add a second
+	// beside one somebody did.
+	if m.projectFormDest != "" {
+		switch adoptable, occupied := m.hostProjectState(m.projectFormDest); {
+		case adoptable != nil:
+			// Rename in place. The host's existing tabs are already inside it,
+			// so they end up under the name the user chose instead of beside it
+			// as a "Default" they never asked for — which is the whole point,
+			// and is why this is an update rather than a create plus a move.
+			return m.submitRenameProject(adoptable.ID, name, rootDir)
+		case occupied != nil:
+			m.setFormError(sanitizeRemoteText(hostLabel(m.projectFormDest)) +
+				" already has a project (" + sanitizeRemoteText(occupied.Name) + ") — rename it instead")
+			return nil
+		}
+	}
+	// Local daemons keep many projects, so the only rule there is that two of
+	// them must not be indistinguishable. The sidebar shows name and host and
+	// nothing else, so a second row with the same name on the same daemon
+	// leaves the user unable to tell which holds their tabs — and removing the
+	// wrong one takes them with it.
 	if existing := m.projectNamedOnDest(name, m.projectFormDest); existing != nil {
 		m.setFormError(sanitizeRemoteText(name) + " already exists on that host")
 		return nil

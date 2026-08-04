@@ -79,6 +79,43 @@ depends on stdout for narration and stdin for confirmation, neither visible in
 its signature, and Bubble Tea owns both — the prompt landed on top of the
 dialog and could never be answered.
 
+## One remote host, one project
+
+A daemon must hold at least one tab and a tab must belong to a project, so a
+host ALWAYS presents a project before the user names anything —
+`createTabLocked` bootstraps one on attach, `migrateToDefaultProject` wraps a
+pre-projects workspace in one. Both are called "Default". Creating a project
+beside it left the user with a row they never made, holding the tabs they cared
+about.
+
+**`Project.Bootstrap` is the signal, never the name.** A user may legitimately
+name a project Default, and renaming the bootstrap one is exactly what stops it
+being a bootstrap — so `UpdateProject` clears the flag. It is persisted and
+rides the same `map[string]any` that is both the disk snapshot and the wire
+broadcast, so one write reaches both.
+
+**The rule lives in the CLIENT, and it has to.** The daemon does not know it is
+remote — `Project` has no `Dest` field — so "one project per host" cannot be a
+daemon invariant; it is a rule about what create DOES. `submitNewProject`
+therefore branches on `projectFormDest != ""`: an adoptable project is renamed
+in place (its tabs are already inside it, which is what puts them under the
+chosen name), a host with a user-named project refuses a second. A named
+project wins over an unnamed one when both are present — reachable for hosts
+that predate the rule — because adopting there would rename a project the user
+is not looking at.
+
+**The local daemon is deliberately exempt**, and applying this there would be
+wrong twice over: it would refuse the second project on the machine the user is
+sitting at, and its create would rename the Default holding their existing work
+rather than adding beside it.
+
+**Hosts connected before the flag existed keep an unmarked Default** — the
+migration runs once and does not re-run, so the record has no `bootstrap` key
+and parses as false, i.e. as the user's. That host is then "occupied" and its
+create is refused, which the message answers by pointing at rename. Absence
+MUST mean the user's: the alternative makes every pre-flag project adoptable
+and a create silently renames real work.
+
 **Disconnect is client-side only, and that asymmetry is what generates
 duplicate projects.** The sidebar rows vanish, so the host looks emptied — but
 the remote daemon keeps every project, and the next connect replays them all.

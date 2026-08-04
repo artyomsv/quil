@@ -72,6 +72,11 @@ type ProjectInfo struct {
 	RootDir   string
 	TabIDs    []string
 	ActiveTab string
+	// Bootstrap is the daemon saying it invented this project rather than a
+	// user naming it — see daemon.Project.Bootstrap. It is what makes naming a
+	// project on a fresh host adopt the host's tabs instead of leaving a
+	// "Default" beside them.
+	Bootstrap bool
 }
 
 type TabInfo struct {
@@ -3831,7 +3836,7 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg, dest string) ([]str
 		if !ok {
 			proj = &ProjectModel{ID: info.ID, Dest: dest}
 		}
-		proj.Name, proj.RootDir = info.Name, info.RootDir
+		proj.Name, proj.RootDir, proj.Bootstrap = info.Name, info.RootDir, info.Bootstrap
 		tabs, projPaneIDs, projResizeCmds := m.rebuildTabs(info, state, existingTabs, existingPanes, paneMap, dest)
 		proj.tabs = tabs
 		proj.activeTab = indexOfTab(proj.tabs, info.ActiveTab)
@@ -5223,6 +5228,9 @@ func parseWorkspaceState(raw map[string]any) WorkspaceStateMsg {
 			}
 			if at, ok := pm["active_tab"].(string); ok {
 				pi.ActiveTab = at
+			}
+			if b, ok := pm["bootstrap"].(bool); ok {
+				pi.Bootstrap = b
 			}
 			if ids, ok := pm["tab_ids"].([]any); ok {
 				for _, tid := range ids {

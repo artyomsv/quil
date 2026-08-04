@@ -22,7 +22,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   name and the same host, indistinguishable from each other: there was no way to
   tell which one held your tabs, and removing the wrong one took them with it.
   The same name on a *different* host is still fine — that row carries the host,
-  so the two are told apart on sight.
+  so the two are told apart on sight. If a create slips past that check — the
+  client can only compare against the projects it has been told about, and a
+  submit can beat the first update from a host you just connected — the daemon
+  gives the new project a numbered suffix (`cluster-management (2)`) rather than
+  a second identical name. It disambiguates instead of refusing because a
+  refusal there would be silent, and your create still happens.
 
 ## [1.47.2] - 2026-08-04
 

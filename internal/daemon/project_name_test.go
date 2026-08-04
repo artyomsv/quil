@@ -1,0 +1,70 @@
+package daemon
+
+import (
+	"strings"
+	"testing"
+)
+
+// The client refuses a duplicate project name, but it checks its OWN snapshot —
+// which is empty until the host's workspace_state arrives. Submitting in that
+// window (Enter on the Name row submits immediately, so it is a keystroke away)
+// reaches a daemon that appended whatever it was given, and the sidebar ended up
+// with two rows carrying the same name and the same host. They are then
+// indistinguishable: nothing tells the user which one holds their tabs, and
+// removing the wrong one takes them with it.
+//
+// The daemon is the only place that can decide this without a race, so it is
+// the one that guarantees the names differ.
+func TestCreateProject_MakesADuplicateNameDistinguishable(t *testing.T) {
+	sm := NewSessionManager(100)
+
+	first := sm.CreateProject("cluster-management", "/srv/cluster")
+	second := sm.CreateProject("cluster-management", "/srv/cluster")
+	third := sm.CreateProject("cluster-management", "/srv/other")
+
+	if first.Name != "cluster-management" {
+		t.Errorf("the FIRST project was renamed to %q; only a collision may be "+
+			"disambiguated", first.Name)
+	}
+	if second.Name == first.Name {
+		t.Fatalf("both projects are called %q — this is the pair the user cannot "+
+			"tell apart in the sidebar", second.Name)
+	}
+	if third.Name == first.Name || third.Name == second.Name {
+		t.Errorf("third = %q, want it distinct from %q and %q",
+			third.Name, first.Name, second.Name)
+	}
+	// The user's own words have to survive, or the row stops being findable.
+	for _, p := range []string{second.Name, third.Name} {
+		if !strings.HasPrefix(p, "cluster-management") {
+			t.Errorf("name %q dropped what the user typed", p)
+		}
+	}
+}
+
+// Case and padding do not make two rows distinguishable on screen, so they must
+// not count as a different name here either — the client's guard compares the
+// same way.
+func TestCreateProject_DuplicateCheckIgnoresCaseAndSpace(t *testing.T) {
+	sm := NewSessionManager(100)
+
+	first := sm.CreateProject("Cluster-Management", "")
+	second := sm.CreateProject("  cluster-management  ", "")
+
+	if strings.EqualFold(strings.TrimSpace(second.Name), strings.TrimSpace(first.Name)) {
+		t.Errorf("second = %q reads identically to %q in the sidebar", second.Name, first.Name)
+	}
+}
+
+// Distinct names are left exactly as typed. Without this the disambiguation
+// could rename everything and the tests above would still pass.
+func TestCreateProject_LeavesADistinctNameAlone(t *testing.T) {
+	sm := NewSessionManager(100)
+
+	sm.CreateProject("cluster-management", "")
+	other := sm.CreateProject("infra", "")
+
+	if other.Name != "infra" {
+		t.Errorf("name = %q, want it untouched — nothing collided", other.Name)
+	}
+}

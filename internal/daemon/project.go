@@ -1,6 +1,52 @@
 package daemon
 
-import "github.com/google/uuid"
+import (
+	"fmt"
+	"strings"
+
+	"github.com/google/uuid"
+)
+
+// projectNames lists every project's name. Caller holds sm.mu.
+func (sm *SessionManager) projectNames() []string {
+	out := make([]string, 0, len(sm.projects))
+	for _, p := range sm.projects {
+		out = append(out, p.Name)
+	}
+	return out
+}
+
+// uniqueProjectName returns want, or want with the lowest numeric suffix no
+// existing project carries.
+//
+// It DISAMBIGUATES rather than refusing, because a refusal here would be
+// silent: the daemon has no error channel back to a create, and this package
+// has already learnt what a silently-ignored project message costs — a daemon
+// that accepted create and did nothing read as a broken dialog for an evening.
+// A suffixed name keeps the user's own words, so the row stays findable, and
+// keeps the create they asked for.
+//
+// Compared case-insensitively after trimming: neither case nor padding makes
+// two rows tellable apart on screen, which is the only property that matters.
+func uniqueProjectName(taken []string, want string) string {
+	norm := func(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
+	used := make(map[string]bool, len(taken))
+	for _, t := range taken {
+		used[norm(t)] = true
+	}
+	if !used[norm(want)] {
+		return want
+	}
+	// Bounded by construction: each candidate is distinct and there are
+	// finitely many taken names, so one of the first len(taken)+2 is free.
+	base := strings.TrimSpace(want)
+	for n := 2; ; n++ {
+		candidate := fmt.Sprintf("%s (%d)", base, n)
+		if !used[norm(candidate)] {
+			return candidate
+		}
+	}
+}
 
 // Project groups tabs under one named piece of work rooted at one directory.
 // Daemon-owned and persisted: a client-side-only grouping would be lost on a
@@ -21,8 +67,15 @@ func (sm *SessionManager) CreateProject(name, rootDir string) *Project {
 	defer sm.mu.Unlock()
 
 	p := &Project{
-		ID:      "proj-" + uuid.New().String()[:8],
-		Name:    name,
+		ID: "proj-" + uuid.New().String()[:8],
+		// Disambiguated HERE because here is the only place that can be sure.
+		// The client refuses a duplicate too, but it checks its own snapshot of
+		// this daemon's projects — empty until the first workspace_state
+		// arrives, and Enter on the form's Name row submits immediately, so
+		// that window is one keystroke wide. Two rows with the same name on the
+		// same host are indistinguishable in the sidebar: nothing says which
+		// holds the user's tabs, and removing the wrong one takes them.
+		Name:    uniqueProjectName(sm.projectNames(), name),
 		RootDir: rootDir,
 	}
 	sm.projects[p.ID] = p

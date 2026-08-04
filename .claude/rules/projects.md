@@ -93,6 +93,20 @@ itself does NOT duplicate: `mergeProjects` is keyed by ID and `Router.Add`
 no-ops on a live dest, both pinned by tests (`dialdest_reconnect_test.go`)
 written to disprove exactly that theory before the guard was added.
 
+**That client guard is NOT sufficient on its own, and the reason is a race.**
+It compares against `m.projects`, which is empty for a host until its first
+`workspace_state` lands — and Enter on the form's Name row submits immediately,
+so the window is one keystroke wide. `CreateProject` therefore disambiguates
+daemon-side (`uniqueProjectName`, under `sm.mu`, the only place that can be
+sure). It appends ` (2)` rather than REFUSING because a refusal there would be
+silent: the daemon has no error channel back to a create, and this package has
+already paid for a silently-ignored project message once — a daemon that
+accepted create and did nothing read as a broken dialog for an evening. The
+two layers are a ladder, not a duplicate: the client refuses when it knows, so
+the user picks the name; the daemon guarantees distinguishability when it did
+not. `UpdateProject` (rename) deliberately does NOT do this — a rename is a
+deliberate act on one project the user is looking at.
+
 **The form's one message line needs a SEVERITY, not just text.** Every writer
 assigned `projectFormErr` and the render drew a red ✗, so "installing…" and
 "upgrading…" — progress on a host that had answered — were indistinguishable

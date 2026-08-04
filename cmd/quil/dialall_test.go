@@ -244,6 +244,58 @@ func TestGateExtraVersion_AdmitsAMatchingDaemon(t *testing.T) {
 	}
 }
 
+// A daemon OLDER than this client is a mismatch Quil can fix on its own, and
+// the sentinel is the only thing that says so.
+//
+// It cannot be derived the way "not installed" is: quil RAN over there, so the
+// link delivered bytes and ClassifyExit's established override answers
+// RemedyNone for whatever exit code follows. Without the wrap, connecting a
+// host from the New Project dialog printed the mismatch and a command to run
+// somewhere else — reported as "I expected it to just install it".
+func TestGateExtraVersion_MarksAnOlderDaemonAsUpgradable(t *testing.T) {
+	asReleaseBuild(t, "1.47.0")
+
+	client, peer := clientOverPipe(t)
+	versionResponder(t, peer, "1.46.3")
+
+	err := gateExtraVersion(config.Destination{Dest: "gpu01"}, client, nil)
+	if err == nil {
+		t.Fatal("a daemon running a different version was admitted")
+	}
+	if !errors.Is(err, tui.ErrRemoteVersionMismatch) {
+		t.Errorf("error = %v, want it wrapped in ErrRemoteVersionMismatch — without the "+
+			"sentinel the dialog can only print the failure and name a CLI command", err)
+	}
+	if !strings.Contains(err.Error(), "1.46.3") || !strings.Contains(err.Error(), "1.47.0") {
+		t.Errorf("error = %v, want both versions named", err)
+	}
+}
+
+// A daemon NEWER than this client must NOT be marked upgradable.
+//
+// The install pushes THIS client's build, so acting on the sentinel there
+// downgrades a host other clients may share — and does not fix this session
+// either. The remedy is on this end, and the message has to say so, because it
+// is the only thing the user sees.
+func TestGateExtraVersion_NeverOffersToDowngradeANewerDaemon(t *testing.T) {
+	asReleaseBuild(t, "1.46.3")
+
+	client, peer := clientOverPipe(t)
+	versionResponder(t, peer, "1.47.0")
+
+	err := gateExtraVersion(config.Destination{Dest: "gpu01"}, client, nil)
+	if err == nil {
+		t.Fatal("a daemon running a different version was admitted")
+	}
+	if errors.Is(err, tui.ErrRemoteVersionMismatch) {
+		t.Error("a NEWER remote daemon was marked upgradable; provisioning would push this " +
+			"client's older build over it and respawn every pane there")
+	}
+	if !strings.Contains(err.Error(), releasesURL) {
+		t.Errorf("error = %v, want the client upgrade named — it is the only remedy that works", err)
+	}
+}
+
 // versionResponder answers ONE version handshake with the given version,
 // echoing the request's own ID.
 //

@@ -79,6 +79,24 @@ depends on stdout for narration and stdin for confirmation, neither visible in
 its signature, and Bubble Tea owns both — the prompt landed on top of the
 dialog and could never be answered.
 
+**A version mismatch is NOT derivable from the exit code, which is why it
+needed a sentinel of its own.** `ErrRemoteQuilMissing` is classified from ssh's
+127 — and a mismatch can never produce it, because quil RAN over there: the
+link delivered bytes, so `ClassifyExit`'s `established` override answers
+`RemedyNone` for whatever code follows. `gateExtraVersion` therefore raises
+`ErrRemoteVersionMismatch` from the HANDSHAKE, and only when `res.Cmp > 0` —
+provisioning pushes THIS client's build, so acting on a NEWER remote daemon
+downgrades a machine other clients may share and does not fix this session
+either. Both sentinels share `installOffer`, `installedDests` and the retry
+dial; the once-per-host guard covers the upgrade for its own reason, since a
+daemon still reporting the old version after one did not restart and pushing
+the same archive again cannot change that. The LAUNCH path deliberately does
+not act on the sentinel — a background destination is dropped with a log line,
+because installing software on another machine must not be a side effect of
+opening the client. Shipped as the raw gate message plus `run quil remote
+setup <host>`: the machinery to fix it had existed since the auto-install
+work and was reachable only from `--remote`.
+
 **The RECONNECT ladder has the same config constraint as the dial, and got it
 later.** `SetRedialFactory` captured the value while `SetDialFunc` beside it
 read the pointer, so a host provisioned at runtime attached fine and then, on

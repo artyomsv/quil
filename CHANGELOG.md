@@ -23,6 +23,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `g`/`G`, and the footer shows where you are in the list.
 - **The project keys are listed there too.** Seven of the eight were missing, so
   the only way to learn them was the online documentation.
+- **Connecting a remote host now upgrades an out-of-date daemon instead of
+  refusing.** A host running an older Quil failed the New Project dialog's
+  Host row with `daemon on <host> runs 1.46.3 but this client runs 1.47.0; run
+  quil remote setup <host>` — asking you to leave the session to run a command
+  that does exactly what connecting was already meant to do. It is performed
+  from the dialog now, the same push `quil remote setup` makes: the remote
+  daemon is stopped, a matching build is installed, and the dial is retried.
+  Installing onto a host with no Quil at all already worked; only the
+  out-of-date case was missing, because it cannot be recognised from ssh's
+  exit code the way a missing binary can. A remote daemon **newer** than your
+  client is still refused rather than downgraded, and now names the client
+  upgrade instead of a command that would make it worse.
 
 ## [1.47.0] - 2026-08-04
 

@@ -1509,23 +1509,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.projectFormDialing = ""
 		if msg.err != nil {
-			// The host answered but has no quil. Offer to provision it rather
-			// than making the user leave the dialog for `quil remote setup` —
-			// the machinery is the same, only the entry point differs.
+			// The host answered with something provisioning can fix — no quil
+			// at all, or one too old for this client to attach to. Do it rather
+			// than making the user leave the dialog for `quil remote setup`:
+			// the machinery is the same, only the entry point differs, and a
+			// user who just named a host has already said where they want to
+			// work.
 			// At most ONE install per host per session. A dial that still
 			// reports the binary missing right after a successful install
 			// means something the install cannot fix — it landed somewhere the
 			// non-interactive PATH does not cover, or the recorded path never
 			// reached the dialer — and offering again just spins: install,
 			// retry, 127, install. Observed as a five-second loop. The CLI
-			// path has healRemoteRecord for the same hazard.
-			if errors.Is(msg.err, ErrRemoteQuilMissing) && m.installDestFn != nil && !m.installedDests[msg.dest] {
+			// path has healRemoteRecord for the same hazard. The guard is
+			// shared with the upgrade because the loop is: a daemon that still
+			// reports the old version after an upgrade did not restart, and
+			// pushing the same archive again cannot change that.
+			if note := installOffer(msg.err, msg.dest); note != "" && m.installDestFn != nil && !m.installedDests[msg.dest] {
 				if m.installedDests == nil {
 					m.installedDests = map[string]bool{}
 				}
 				m.installedDests[msg.dest] = true
 				m.projectFormInstalling = msg.dest
-				m.projectFormErr = "quil is not installed on " + sanitizeRemoteText(msg.dest) + " — installing…"
+				m.projectFormErr = note
 				return m, m.installDest(msg.dest)
 			}
 			m.projectFormErr = "cannot connect: " + sanitizeRemoteText(msg.err.Error())

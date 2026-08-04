@@ -284,6 +284,22 @@ A modal, centered, keyboard-first launcher. Entries are grouped under section he
 - **Claude resume-session picker** (v1.42.0) — see M5 below
 - **Committed-value marker** (v1.42.1) — the chosen directory (and kube context) stays visible with a `▸` marker once the cursor moves off it or the field loses focus. Previously the selection highlight was drawn only on the focused field's cursor row, so the answer disappeared from the dialog exactly while you configured the rest of it
 
+### v1.47.0: Projects — [PR #123](https://github.com/artyomsv/quil/pull/123)
+
+> A grouping layer above tabs, and one client holding several daemons at once.
+
+Tabs were a flat list, so six tabs across three repositories were visually indistinguishable, and an agent parked on a permission prompt in a background tab stayed invisible until you happened to look. Separately, `quil --remote <host>` bound a whole TUI process to one daemon. Both were the same missing piece: nowhere to hang "which work is this" or "which machine is this".
+
+- **Projects** — named, rooted at a directory, owning their own tabs and remembering which one you left them on. Daemon-owned and persisted, so a second client sees the same grouping. An existing `workspace.json` migrates into a single `Default` project with tab order preserved; no prompt, no data loss
+- **Reserved left sidebar** (`Alt+Shift+S`) — projects with a roll-up of their agents, then the active project's panes with live state: `◐` working (`⋯N` subagents), `⚠` blocked on you and the tool it is asking about, `○` idle, `✓` finished-unseen. The roll-ups keep updating for **background** projects, which is the point
+- **Blocked is distinct from done** — the hook events always carried the difference (`Notification`, `PermissionRequest`, `permission.ask`); the old classifier collapsed them because the UI only needed "mark unseen"
+- **Attention queue** (`Alt+Shift+A`) — jumps to whichever agent has been blocked longest, anywhere in the workspace, cycling on repeated presses. Oldest-first, deliberately not sidebar order
+- **Per-pane git state** — branch, `wt` for a linked worktree, `↑N`/`↓N` against upstream, on a background ticker and cached per checkout so N panes in one repository cost one invocation. Keyed by the **per-checkout** git dir, not the repository's common dir: linked worktrees share a common dir while sitting on different branches, which is the entire reason anyone creates one. `git status --porcelain` is deliberately excluded — the one call that can take seconds on a large repo without fsmonitor. A probe that does not answer keeps its last value and is marked **stale**
+- **Several daemons at once** — `[[destinations]]` dials extra hosts beside the local daemon; their projects are siblings in the same sidebar, each with its own reconnect state, so one daemon dying no longer ends the session. A `Router` multiplexes them behind the two-method client the TUI already consumed, and messages carry a client-side-only `Origin` (`json:"-"`), so no protocol bump was needed
+- **Runtime connect / disconnect** — tick **Remote (ssh)** in the New Project dialog, give a user and host, press Enter on the Host row: Quil dials, offers to install itself if the host has not got it, then browses *that* machine's filesystem for the root directory. **Disconnect host** removes it from the sidebar and stops nothing on the far end
+
+**Deferred, each to its own plan:** per-project MCP scoping (a breaking change to shipped tools; wants a `scope: "all"` opt-out and its own release note) and listening-port detection (three platform implementations, named the first thing to cut). The sidebar's `✗ exited-nonzero` glyph is unimplemented — `PaneInfo` carries no exit field.
+
 ---
 
 ## In Progress

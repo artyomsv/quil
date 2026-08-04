@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.47.0] - 2026-08-04
+
 ### Added
 - **Projects — tabs now group under the work they belong to.** A project is
   named, rooted at a directory, and owns its own tabs, remembering which one you

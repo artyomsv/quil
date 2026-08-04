@@ -240,6 +240,122 @@ func TestActiveDestDropDoesFreezeInput(t *testing.T) {
 	}
 }
 
+// A clipboard read that was already in flight when the link dropped must be
+// frozen like any other input. It carries the same payload as the tea.PasteMsg
+// the freeze already covers, and delivering it after a reattach puts clipboard
+// contents into a session that has moved on — the freeze's own worst case.
+func TestActiveDestDropFreezesDelayedClipboardPaste(t *testing.T) {
+	m := Model{
+		projects:      []*ProjectModel{{ID: "proj-gpu", Dest: "gpu01"}},
+		activeProject: 0,
+	}
+	m.handleLinkLost("gpu01", errors.New("connection reset"))
+
+	msg := clipboardPastedMsg{text: "SECRET", paneID: "p1"}
+	if _, frozen := m.freezeInput(msg); !frozen {
+		t.Fatal("a clipboard paste completing during a reconnect must be dropped, not delivered")
+	}
+}
+
+// The matching negative: a healthy link must still deliver the paste.
+func TestHealthyLinkDoesNotFreezeDelayedClipboardPaste(t *testing.T) {
+	m := Model{
+		projects:      []*ProjectModel{{ID: "proj-gpu", Dest: "gpu01"}},
+		activeProject: 0,
+	}
+
+	msg := clipboardPastedMsg{text: "SECRET", paneID: "p1"}
+	if _, frozen := m.freezeInput(msg); frozen {
+		t.Fatal("paste must be delivered when the link is healthy")
+	}
+}
+
+// pasteFreezeModel builds two projects on different daemons, each holding one
+// pane, so a delayed paste can be bound to one while the other is active.
+func pasteFreezeModel(t *testing.T, activeProject int) Model {
+	t.Helper()
+	mk := func(id, dest, paneID string) *ProjectModel {
+		pane := NewPaneModel(paneID, 1024)
+		tab := NewTabModel("tab-"+paneID, "t")
+		tab.Root = NewLeaf(pane)
+		tab.ActivePane = paneID
+		return &ProjectModel{ID: id, Dest: dest, tabs: []*TabModel{tab}}
+	}
+	return Model{
+		projects:      []*ProjectModel{mk("proj-local", "", "p-local"), mk("proj-gpu", "gpu01", "p-gpu")},
+		activeProject: activeProject,
+	}
+}
+
+// A paste bound to a HEALTHY daemon must still be delivered even when the
+// project the user switched to is reconnecting. Gating on the active
+// destination would discard data the target could have accepted — and the
+// clipboard read is exactly long enough to switch projects during.
+func TestDelayedClipboardPaste_HealthyTargetNotFrozenByOtherDestOutage(t *testing.T) {
+	m := pasteFreezeModel(t, 1) // active project is the gpu one
+	m.handleLinkLost("gpu01", errors.New("connection reset"))
+
+	msg := clipboardPastedMsg{text: "SECRET", paneID: "p-local"}
+	if _, frozen := m.freezeInput(msg); frozen {
+		t.Fatal("a paste bound to a healthy daemon must not be dropped because a DIFFERENT daemon is reconnecting")
+	}
+}
+
+// The mirror: a paste bound to a RECONNECTING daemon must be dropped even while
+// the user is looking at a healthy project. Releasing it would deliver
+// clipboard contents toward a link that cannot carry them, and after the
+// reattach into a session that has moved on.
+func TestDelayedClipboardPaste_FrozenWhenItsOwnDestIsReconnecting(t *testing.T) {
+	m := pasteFreezeModel(t, 0) // active project is the local, healthy one
+	m.handleLinkLost("gpu01", errors.New("connection reset"))
+
+	msg := clipboardPastedMsg{text: "SECRET", paneID: "p-gpu"}
+	if _, frozen := m.freezeInput(msg); !frozen {
+		t.Fatal("a paste bound to a reconnecting daemon must be dropped even while a healthy project is active")
+	}
+}
+
+// The two tests above call freezeInput directly, which is exactly how the first
+// version of this fix passed while being dead in production: the CALL SITE in
+// Update used to be wrapped in `if activeDest is reconnecting`, so with a
+// healthy project on screen freezeInput was never reached and the
+// per-destination gate inside it could not run. These two drive Update instead,
+// so they exercise the path rather than the function.
+func TestUpdate_DelayedPasteToReconnectingDest_NotEnqueued(t *testing.T) {
+	m := pasteFreezeModel(t, 0) // active project is the local, healthy one
+	m.client = &fakeSender{}
+	m.inputCh = make(chan paneInput, inputForwardBuffer)
+	m.handleLinkLost("gpu01", errors.New("connection reset"))
+
+	m.Update(clipboardPastedMsg{text: "SECRET", paneID: "p-gpu"})
+
+	select {
+	case in := <-m.inputCh:
+		t.Fatalf("paste for a reconnecting daemon was enqueued (%q) while a healthy project was active", string(in.data))
+	default:
+	}
+}
+
+// The matching positive through the same path: a healthy target still gets its
+// paste while a DIFFERENT daemon is reconnecting.
+func TestUpdate_DelayedPasteToHealthyDest_StillEnqueued(t *testing.T) {
+	m := pasteFreezeModel(t, 1) // active project is the gpu one
+	m.client = &fakeSender{}
+	m.inputCh = make(chan paneInput, inputForwardBuffer)
+	m.handleLinkLost("gpu01", errors.New("connection reset"))
+
+	m.Update(clipboardPastedMsg{text: "SECRET", paneID: "p-local"})
+
+	select {
+	case in := <-m.inputCh:
+		if in.paneID != "p-local" {
+			t.Errorf("enqueued for pane %q, want p-local", in.paneID)
+		}
+	default:
+		t.Fatal("paste for a healthy daemon was dropped because a different daemon is reconnecting")
+	}
+}
+
 // A link-loss report from a previous client must be ignored: the old listen
 // loop is still parked in Receive when the new client is already live.
 func TestUpdate_LinkLost_StaleGeneration_Ignored(t *testing.T) {

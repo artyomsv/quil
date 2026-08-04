@@ -35,6 +35,13 @@ func (c *Client) SetReadDeadline(t time.Time) error {
 	return c.conn.raw.SetReadDeadline(t)
 }
 
+// Flush waits for queued must-deliver frames to reach the socket. See
+// (*Conn).Flush — Send is non-blocking, so closing straight after it discards
+// frames the caller was told were accepted.
+func (c *Client) Flush(timeout time.Duration) bool {
+	return c.conn.Flush(timeout)
+}
+
 func (c *Client) Close() error {
 	return c.conn.Close()
 }

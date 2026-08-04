@@ -285,9 +285,31 @@ func (m *Model) SetClientCloser(f func(Client)) { m.closeClientFn = f }
 
 // closeClient releases c, if a closer was installed. Safe with a nil closer
 // (local sessions never install one) and a nil client.
+// clientFlushTimeout bounds how long releasing a connection waits for its
+// already-queued frames to reach the socket. Short: this runs on the exit path,
+// where a wedged peer must not out-wait the user's patience.
+const clientFlushTimeout = 1 * time.Second
+
+// flusher is the optional capability a Client has when its queued frames can be
+// waited on. Narrow and optional so the Client interface stays two-method and
+// every test fake keeps compiling.
+type flusher interface{ Flush(time.Duration) bool }
+
+// closeClient FLUSHES before releasing, and the order is load-bearing. Send is
+// non-blocking: it hands the frame to the connection's send loop, which Close
+// then stops without writing what is left. Closing straight after a send
+// therefore discards frames the caller was told were accepted — for the TUI
+// exit path that is the user's final keystrokes, the same loss the input queue
+// blocks to avoid, one layer further down. Flush is bounded, so an unresponsive
+// peer costs a short wait rather than a hung exit.
 func (m Model) closeClient(c Client) {
 	if m.closeClientFn == nil || c == nil {
 		return
+	}
+	if f, ok := c.(flusher); ok {
+		if !f.Flush(clientFlushTimeout) {
+			log.Printf("close: queued frames did not reach the socket within %s", clientFlushTimeout)
+		}
 	}
 	m.closeClientFn(c)
 }
@@ -341,9 +363,14 @@ func (m Model) canReconnect(dest string) bool {
 // on — a paste or a stray "y" landing on the wrong question is worse than a
 // visible stall. This is a fail-closed choice.
 //
-// One choke point rather than a guard in each of the six input branches: a
-// future input message type gets frozen by default here, whereas six scattered
-// guards would silently let it through. Same reasoning as clearDragState.
+// One choke point rather than a guard in each of the six input branches: every
+// input decision is made in one place, whereas six scattered guards drift.
+//
+// Note what the choke point does NOT give: it matches on message TYPE, so a new
+// input-bearing message is covered only once it is LISTED here, not by default.
+// clipboardPastedMsg proved that — it was added as the delayed half of a paste
+// and rode straight through the freeze until it was named. Anything added later
+// that can reach a PTY belongs in this function.
 //
 // Ctrl+Q is the single exception. It is the only way out of a host that never
 // comes back, and by definition the reconnect loop cannot end the session
@@ -355,6 +382,19 @@ func (m Model) canReconnect(dest string) bool {
 // dropping must not freeze typing into a local pane. The gate lives here rather
 // than only at the call site so the choke point stays correct standalone.
 func (m Model) freezeInput(msg tea.Msg) (tea.Cmd, bool) {
+	// A delayed paste is gated by ITS OWN destination, ahead of the active-dest
+	// check, because it is the one input bound to a pane rather than to "wherever
+	// the user is typing". The clipboard read can outlive a project switch, so
+	// the two can disagree — and the active-dest gate is wrong in both
+	// directions when they do: it discards a paste headed for a healthy daemon,
+	// and releases one headed for a daemon that is reconnecting.
+	//
+	// destOfPane falls back to the active dest for a pane it cannot find, which
+	// is the right default here: a pane that vanished mid-read has nowhere to
+	// deliver to, and sendClipboardToPaneID drops it on arrival anyway.
+	if p, ok := msg.(clipboardPastedMsg); ok {
+		return nil, m.linkOf(m.destOfPane(p.paneID)).active
+	}
 	if !m.linkOf(m.activeDest()).active {
 		return nil, false
 	}

@@ -95,8 +95,14 @@ func TestUpdate_PasteMsgEmptyContent_FallsBackToImagePaste(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("empty PasteMsg returned a nil command; want the image-paste command")
 	}
-	// pasteClipboard sends the input from inside the returned command closure.
-	_ = cmd()
+	// The command performs the clipboard READ only. It hands the text back as a
+	// clipboardPastedMsg and Update does the pane write, so that the enqueue
+	// happens on the Update goroutine and cannot race the keystroke path.
+	msg := cmd()
+	if _, ok := msg.(clipboardPastedMsg); !ok {
+		t.Fatalf("cmd returned %T, want clipboardPastedMsg", msg)
+	}
+	m.Update(msg)
 
 	if len(fake.sent) != 1 {
 		t.Fatalf("want exactly 1 IPC send (the pasted image path), got %d", len(fake.sent))

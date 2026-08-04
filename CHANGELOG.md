@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Typing no longer scrambles under load.** When the machine was busy — a virus
+  scan, a heavy build, a compile in another pane — characters could arrive in a
+  pane out of order: typing `image containers` produced `iamg ecotniaesnr`. Every
+  character was delivered, just not in the order you typed them. Each keystroke
+  was being handed to its own goroutine, and nothing downstream guaranteed those
+  goroutines reached the socket in order; normally the gap is nanoseconds, but
+  under CPU pressure it widened enough for adjacent keys to swap. Input is now
+  queued in the order you type it and forwarded by a single writer, so typed
+  order is delivered order no matter how loaded the machine is. Mouse-wheel
+  scrolling and paste share that queue, so neither can jump ahead of characters
+  still on their way to a pane.
+- **Quitting no longer drops the last thing you typed.** Input accepted just
+  before you closed the TUI could be discarded while it was still on its way to
+  the daemon. It is now flushed to the socket before the connection is released.
+- **Paste goes to the pane you asked from.** Reading the clipboard takes a
+  moment — long enough to switch panes, and much longer when it holds an image —
+  and the paste was delivered to whichever pane was active when the read
+  finished. It now goes to the pane that was active when you pressed the key,
+  and is held back entirely if that pane's daemon is reconnecting.
+
 ## [1.47.1] - 2026-08-04
 
 ### Added

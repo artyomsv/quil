@@ -240,6 +240,36 @@ func TestActiveDestDropDoesFreezeInput(t *testing.T) {
 	}
 }
 
+// A clipboard read that was already in flight when the link dropped must be
+// frozen like any other input. It carries the same payload as the tea.PasteMsg
+// the freeze already covers, and delivering it after a reattach puts clipboard
+// contents into a session that has moved on — the freeze's own worst case.
+func TestActiveDestDropFreezesDelayedClipboardPaste(t *testing.T) {
+	m := Model{
+		projects:      []*ProjectModel{{ID: "proj-gpu", Dest: "gpu01"}},
+		activeProject: 0,
+	}
+	m.handleLinkLost("gpu01", errors.New("connection reset"))
+
+	msg := clipboardPastedMsg{text: "SECRET", paneID: "p1"}
+	if _, frozen := m.freezeInput(msg); !frozen {
+		t.Fatal("a clipboard paste completing during a reconnect must be dropped, not delivered")
+	}
+}
+
+// The matching negative: a healthy link must still deliver the paste.
+func TestHealthyLinkDoesNotFreezeDelayedClipboardPaste(t *testing.T) {
+	m := Model{
+		projects:      []*ProjectModel{{ID: "proj-gpu", Dest: "gpu01"}},
+		activeProject: 0,
+	}
+
+	msg := clipboardPastedMsg{text: "SECRET", paneID: "p1"}
+	if _, frozen := m.freezeInput(msg); frozen {
+		t.Fatal("paste must be delivered when the link is healthy")
+	}
+}
+
 // A link-loss report from a previous client must be ignored: the old listen
 // loop is still parked in Receive when the new client is already live.
 func TestUpdate_LinkLost_StaleGeneration_Ignored(t *testing.T) {

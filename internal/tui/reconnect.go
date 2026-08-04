@@ -390,6 +390,18 @@ func (m Model) freezeInput(msg tea.Msg) (tea.Cmd, bool) {
 		// A wheel notch is forwarded to the PTY on tracking panes, so it is
 		// input by another name and belongs in the freeze with the rest.
 		return nil, true
+	case clipboardPastedMsg:
+		// The DELAYED half of a paste. tea.PasteMsg above covers the paste the
+		// terminal delivers synchronously; this one is a clipboard read that
+		// was already in flight when the link dropped, and it carries the same
+		// payload. Letting it through would deliver clipboard contents into a
+		// session that has moved on — the "paste landing on the wrong question"
+		// this freeze names as its worst case.
+		//
+		// It also shows the limit of the choke point: this switch matches on
+		// TYPE, so a new input-bearing message is frozen only once it is listed
+		// here. Anything added later that reaches a PTY belongs in this switch.
+		return nil, true
 	}
 	return nil, false
 }

@@ -433,7 +433,11 @@ type Model struct {
 	projectFormID     string // "" for New; the project ID being edited for Rename
 	projectFormName   string // Name field's live text
 	projectFormCursor int    // focused row: 0 = name, 1 = root dir, 2 = submit button
-	projectFormErr    string // validation message shown under the form (e.g. "name required")
+	projectFormErr    string // the one message line under the form (e.g. "name required")
+	// projectFormMsgKind colours that line by what it MEANS — a failure, work
+	// under way, or a success. Written only through setFormError/Busy/OK, whose
+	// doc comment says why assigning the string alone is a bug.
+	projectFormMsgKind projectFormMsgKind
 	// projectFormHost is the Host field's live text — an ssh destination, or
 	// empty for the local daemon. projectFormDialing holds the host a dial is
 	// currently in flight for, so a result arriving for a host the user has
@@ -1587,13 +1591,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.installedDests[msg.dest] = true
 				m.projectFormInstalling = msg.dest
-				m.projectFormErr = note
+				// Busy, not an error: the host answered and Quil is working on
+				// it. Rendered as a red ✗ this read as the failure the line
+				// below reports, which is a different outcome entirely.
+				m.setFormBusy(note)
 				return m, m.installDest(msg.dest)
 			}
-			m.projectFormErr = "cannot connect: " + sanitizeRemoteText(msg.err.Error())
+			m.setFormError("cannot connect: " + sanitizeRemoteText(msg.err.Error()))
 			return m, nil
 		}
 		attach := m.adoptDest(msg.dest, msg.client)
+		m.setFormOK("connected to " + sanitizeRemoteText(msg.dest))
 		m.projectFormDest = msg.dest
 		m.projectFormCursor = projectRowRootDir
 		m.resetProjectBrowseState()
@@ -1614,7 +1622,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// result. Threading a writer through it is the proper fix; repainting
 		// is what keeps the screen honest until then.
 		if msg.err != nil {
-			m.projectFormErr = "install failed: " + sanitizeRemoteText(msg.err.Error())
+			m.setFormError("install failed: " + sanitizeRemoteText(msg.err.Error()))
 			return m, tea.ClearScreen
 		}
 		// Provisioned — retry the dial that failed. Retrying rather than
@@ -1622,7 +1630,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// disk, not that this client can attach to the daemon it starts, and
 		// the version gate still has to run.
 		m.projectFormDialing = msg.dest
-		m.projectFormErr = ""
+		// Still busy: the install landed but the dial that proves it has not run
+		// yet, and a blank line here would read as "finished" for the seconds
+		// that retry takes.
+		m.setFormBusy("installed on " + sanitizeRemoteText(msg.dest) + " — reconnecting…")
 		return m, tea.Batch(tea.ClearScreen, m.dialDest(msg.dest))
 
 	case PluginErrorMsg:

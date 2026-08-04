@@ -6,9 +6,51 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/artyomsv/quil/internal/ipc"
 )
+
+// The form's one message line carries three different kinds of news, and
+// rendering all of them as a red ✗ said the wrong thing about two of them:
+// provisioning a host is progress, and a connected host is good news, but both
+// arrived looking like the failure the same line reports when ssh cannot reach
+// the machine at all. Reported as "it was installing fine but the message was
+// red, which seemed strange".
+//
+// The colours are the ones this package already assigns these meanings
+// (styles.go / sidebar.go): 208 for work under way — the accent restore and MCP
+// activity use — and 28 for done, the green a finished pane carries. Amber 214
+// is deliberately NOT reused: here it means blocked-on-user, and nothing during
+// an install is waiting on the user.
+type projectFormMsgKind int
+
+const (
+	// The zero value is the error kind on purpose: a message whose severity was
+	// never stated is a validation failure, which is what every existing caller
+	// of this line reports.
+	projectFormMsgError projectFormMsgKind = iota
+	projectFormMsgBusy
+	projectFormMsgOK
+)
+
+func projectFormMsgStyle(kind projectFormMsgKind) (string, lipgloss.Style) {
+	switch kind {
+	case projectFormMsgBusy:
+		return "⟳", lipgloss.NewStyle().Foreground(lipgloss.Color("208"))
+	case projectFormMsgOK:
+		return "✓", lipgloss.NewStyle().Foreground(lipgloss.Color("28"))
+	default:
+		return "✗", dialogErrorStyle
+	}
+}
+
+// setFormError / setFormBusy / setFormOK are the ONLY ways to put text on that
+// line. Assigning projectFormErr directly is what leaves the previous message's
+// colour behind — a failure rendered in the green of the success before it.
+func (m *Model) setFormError(s string) { m.projectFormErr, m.projectFormMsgKind = s, projectFormMsgError }
+func (m *Model) setFormBusy(s string)  { m.projectFormErr, m.projectFormMsgKind = s, projectFormMsgBusy }
+func (m *Model) setFormOK(s string)    { m.projectFormErr, m.projectFormMsgKind = s, projectFormMsgOK }
 
 // submitNewProject creates a project on the ACTIVE project's daemon. A
 // project is a name plus a root directory, and a root directory lives on
@@ -28,7 +70,18 @@ func (m *Model) submitNewProject(name, rootDir string) tea.Cmd {
 	// only project on the host staying the client's own placeholder. Refuse
 	// where the user can see it.
 	if !m.destSupportsProjects(m.projectFormDest) {
-		m.projectFormErr = "that host runs a quil without project support"
+		m.setFormError("that host runs a quil without project support")
+		return nil
+	}
+	// Refuse a name that host already has. Disconnecting a host is client-side
+	// only — the remote daemon keeps every project — so reconnecting brings back
+	// projects the sidebar had made look deleted, and creating "the same one"
+	// again lands a second copy. The sidebar shows name and host and nothing
+	// else, so the two rows are then indistinguishable: the user cannot tell
+	// which holds their tabs, and removing the wrong one takes them with it.
+	// Reported as growing duplicates of one project against one host.
+	if existing := m.projectNamedOnDest(name, m.projectFormDest); existing != nil {
+		m.setFormError(sanitizeRemoteText(name) + " already exists on that host")
 		return nil
 	}
 	msg, err := ipc.NewMessage(ipc.MsgCreateProject, ipc.CreateProjectPayload{
@@ -410,7 +463,7 @@ func (m Model) handleProjectUserKey(key string) (tea.Model, tea.Cmd) {
 func (m Model) connectProjectHost() (tea.Model, tea.Cmd) {
 	dest := m.projectFormDestFromFields()
 	if m.projectFormRemote && dest == "" {
-		m.projectFormErr = "host required for a remote project"
+		m.setFormError("host required for a remote project")
 		return m, nil
 	}
 	if dest == "" || m.destConnected(dest) {
@@ -423,11 +476,14 @@ func (m Model) connectProjectHost() (tea.Model, tea.Cmd) {
 		return m, m.requestBrowseDirForDest(dest, "", "", "")
 	}
 	if m.dialDestFn == nil {
-		m.projectFormErr = "this build cannot connect new hosts"
+		m.setFormError("this build cannot connect new hosts")
 		return m, nil
 	}
 	m.projectFormDialing = dest
-	m.projectFormErr = ""
+	// Amber from the moment the dial starts. Whether the host answers is not
+	// known yet, so this says "working", and the arms in Update replace it with
+	// the green success or the red failure once it is.
+	m.setFormBusy("connecting to " + sanitizeRemoteText(dest) + "…")
 	return m, m.dialDest(dest)
 }
 
@@ -568,7 +624,7 @@ func (m Model) handleProjectRootDirKey(key string) (tea.Model, tea.Cmd) {
 // timeout, so this is a wait, not a dead end.
 func (m Model) submitProjectForm() (tea.Model, tea.Cmd) {
 	if strings.TrimSpace(m.projectFormName) == "" {
-		m.projectFormErr = "name required"
+		m.setFormError("name required")
 		m.projectFormCursor = 0
 		return m, nil
 	}
@@ -791,7 +847,8 @@ func (m Model) renderProjectDialog() string {
 	b.WriteString("\n")
 
 	if m.projectFormErr != "" {
-		b.WriteString("  " + dialogErrorStyle.Render("✗ "+m.projectFormErr) + "\n\n")
+		glyph, style := projectFormMsgStyle(m.projectFormMsgKind)
+		b.WriteString("  " + style.Render(glyph+" "+m.projectFormErr) + "\n\n")
 	}
 
 	// Submit button.

@@ -79,6 +79,28 @@ depends on stdout for narration and stdin for confirmation, neither visible in
 its signature, and Bubble Tea owns both — the prompt landed on top of the
 dialog and could never be answered.
 
+**Disconnect is client-side only, and that asymmetry is what generates
+duplicate projects.** The sidebar rows vanish, so the host looks emptied — but
+the remote daemon keeps every project, and the next connect replays them all.
+A user who re-creates "the project that disappeared" ends up with two rows
+carrying the SAME name and the SAME host, which the sidebar cannot tell apart
+(it renders name + host and nothing else), so neither can the user: removing
+the wrong one takes its tabs. `submitNewProject` refuses a name already present
+on `projectFormDest` (case- and space-insensitive, since neither makes the rows
+distinguishable). Scoped to ONE dest deliberately — the same name on a laptop
+and a build host is ordinary, because the row carries the host. The client
+itself does NOT duplicate: `mergeProjects` is keyed by ID and `Router.Add`
+no-ops on a live dest, both pinned by tests (`dialdest_reconnect_test.go`)
+written to disprove exactly that theory before the guard was added.
+
+**The form's one message line needs a SEVERITY, not just text.** Every writer
+assigned `projectFormErr` and the render drew a red ✗, so "installing…" and
+"upgrading…" — progress on a host that had answered — were indistinguishable
+from "cannot reach that host". Written only through
+`setFormError`/`setFormBusy`/`setFormOK`; assigning the string alone leaves the
+previous message's colour behind, and the zero kind is ERROR so a writer that
+forgets fails loud rather than green.
+
 **A version mismatch is NOT derivable from the exit code, which is why it
 needed a sentinel of its own.** `ErrRemoteQuilMissing` is classified from ssh's
 127 — and a mismatch can never produce it, because quil RAN over there: the

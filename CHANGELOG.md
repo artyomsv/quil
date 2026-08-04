@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Connecting a remote host no longer reports its own progress as a failure.**
+  The New Project dialog has one message line and was rendering everything on it
+  as a red ✗ — so "installing…" and "upgrading…" looked exactly like "cannot
+  reach that host", while an install was in fact running normally. The line is
+  coloured by what it means now: red for a host that cannot be reached or an
+  install that failed, amber while Quil is connecting or provisioning, green
+  once the host is connected.
+- **Creating a project with a name that host already has is refused.**
+  Disconnecting a host is client-side only — the remote daemon keeps every
+  project — so its rows leave the sidebar looking deleted and return on the next
+  connect. Creating "the same project" again then left two rows showing the same
+  name and the same host, indistinguishable from each other: there was no way to
+  tell which one held your tabs, and removing the wrong one took them with it.
+  The same name on a *different* host is still fine — that row carries the host,
+  so the two are told apart on sight.
+
 ## [1.47.2] - 2026-08-04
 
 ### Fixed

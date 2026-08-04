@@ -235,8 +235,11 @@ editor is open.
 | `↑` / `↓` (or `k` / `j`) | Move cursor |
 | `Enter` | Activate / open child |
 | `Esc` | Back / close |
+| `PgUp` / `PgDn`, `Home` / `End`, `g` / `G` | Scroll the **Shortcuts** list |
 | `y` | Confirm shutdown on **Stop daemon** confirm (deliberately not `Enter`) |
 | `n` / `Esc` | Cancel confirm |
+
+**F1 → Shortcuts** lists every binding, including the project keys, and scrolls: the footer shows your position (`12-30 of 62`) so a clipped list is never mistaken for the whole one.
 
 ## Keys that pass through to the PTY
 

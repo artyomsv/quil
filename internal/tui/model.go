@@ -311,6 +311,8 @@ type Model struct {
 	pendingOverlayShow   map[string]bool        // tabID → show overlay on its first arrival; set by the Alt+G overlay sender (wired in a follow-up commit); reads/deletes are nil-map-safe
 	dialog               dialogScreen           // active dialog screen
 	dialogCursor         int                    // highlighted item in dialog
+	shortcutsCursor      int                    // scroll position in the Shortcuts list
+	shortcutsScroll      int                    // window origin for the Shortcuts list
 	logViewerReturn      dialogScreen           // dialog to return to when the read-only log/text viewer closes (default About)
 	dialogEdit           bool                   // editing a settings value
 	dialogInput          string                 // text input buffer for editing
@@ -1507,23 +1509,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.projectFormDialing = ""
 		if msg.err != nil {
-			// The host answered but has no quil. Offer to provision it rather
-			// than making the user leave the dialog for `quil remote setup` —
-			// the machinery is the same, only the entry point differs.
+			// The host answered with something provisioning can fix — no quil
+			// at all, or one too old for this client to attach to. Do it rather
+			// than making the user leave the dialog for `quil remote setup`:
+			// the machinery is the same, only the entry point differs, and a
+			// user who just named a host has already said where they want to
+			// work.
 			// At most ONE install per host per session. A dial that still
 			// reports the binary missing right after a successful install
 			// means something the install cannot fix — it landed somewhere the
 			// non-interactive PATH does not cover, or the recorded path never
 			// reached the dialer — and offering again just spins: install,
 			// retry, 127, install. Observed as a five-second loop. The CLI
-			// path has healRemoteRecord for the same hazard.
-			if errors.Is(msg.err, ErrRemoteQuilMissing) && m.installDestFn != nil && !m.installedDests[msg.dest] {
+			// path has healRemoteRecord for the same hazard. The guard is
+			// shared with the upgrade because the loop is: a daemon that still
+			// reports the old version after an upgrade did not restart, and
+			// pushing the same archive again cannot change that.
+			if note := installOffer(msg.err, msg.dest); note != "" && m.installDestFn != nil && !m.installedDests[msg.dest] {
 				if m.installedDests == nil {
 					m.installedDests = map[string]bool{}
 				}
 				m.installedDests[msg.dest] = true
 				m.projectFormInstalling = msg.dest
-				m.projectFormErr = "quil is not installed on " + sanitizeRemoteText(msg.dest) + " — installing…"
+				m.projectFormErr = note
 				return m, m.installDest(msg.dest)
 			}
 			m.projectFormErr = "cannot connect: " + sanitizeRemoteText(msg.err.Error())
@@ -2525,6 +2533,45 @@ func (m Model) beginPaneRename() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// toggleProjectSidebar shows or hides the reserved project column. Extracted
+// from the kb.SidebarToggle case so the command palette dispatches into the
+// same implementation the key does — the palette is a launcher, not a second
+// code path, and this one has enough ordering to it that a copy would drift.
+func (m Model) toggleProjectSidebar() (tea.Model, tea.Cmd) {
+	// Refused below minWidthForSidebar rather than flipped invisibly:
+	// sidebarWidth() returns 0 on a narrow terminal whatever sidebarOpen
+	// says, so the toggle would repaint nothing while still writing
+	// cfg.UI.SidebarOpen to disk — the user's next launch on a wide
+	// terminal would then come up in whichever state the narrow one
+	// happened to leave behind. Flash instead, so the key is not silent.
+	if m.width < minWidthForSidebar {
+		m.setFlash(fmt.Sprintf("terminal too narrow for the project sidebar (needs %d columns)", minWidthForSidebar))
+		return m, m.flashCmd()
+	}
+	// The PROJECT sidebar reserves real layout width (paneAreaWidth), so
+	// unlike the notification overlay this has to resize every pane's PTY —
+	// and ClearScreen, because every column right of the strip shifts by its
+	// width in one frame, which is exactly the kind of shift Bubble Tea's cell
+	// diff mis-tracks.
+	m.sidebarOpen = !m.sidebarOpen
+	// resizeTabs FIRST, and it is not optional: resizeAllPanes does not
+	// compute geometry, it READS pane.Width/Height and tab.CanvasW/H and
+	// ships them. Those are written only by tab.Resize — i.e. by
+	// resizeTabs (every tab of every project) or by View (the active tab
+	// only). The toggle changes paneAreaWidth() for all of them, so
+	// without this every background tab keeps its pre-toggle PTY size
+	// until the next workspace broadcast or real window resize, and even
+	// the active tab is a race between View and this Cmd's goroutine that
+	// the daemon's same-size guard can settle the wrong way. Same
+	// ordering as resizeTickMsg and toggleFocusForActiveTab.
+	m.resizeTabs()
+	// A screen preference, not session state: persisted to config (saved
+	// on exit via ConfigChanged), never to workspace.json.
+	m.cfg.UI.SidebarOpen = m.sidebarOpen
+	m.configChanged = true
+	return m, tea.Batch(tea.ClearScreen, m.resizeAllPanes())
+}
+
 // toggleFocusForActiveTab toggles focus mode on the active tab. Extracted
 // from the kb.FocusPane case; shared with the context menu.
 func (m Model) toggleFocusForActiveTab() (tea.Model, tea.Cmd) {
@@ -3140,38 +3187,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.ClearScreen
 	case kbMatches(key, kb.SidebarToggle):
-		// Refused below minWidthForSidebar rather than flipped invisibly:
-		// sidebarWidth() returns 0 on a narrow terminal whatever sidebarOpen
-		// says, so the toggle would repaint nothing while still writing
-		// cfg.UI.SidebarOpen to disk — the user's next launch on a wide
-		// terminal would then come up in whichever state the narrow one
-		// happened to leave behind. Flash instead, so the key is not silent.
-		if m.width < minWidthForSidebar {
-			m.setFlash(fmt.Sprintf("terminal too narrow for the project sidebar (needs %d columns)", minWidthForSidebar))
-			return m, m.flashCmd()
-		}
-		// The PROJECT sidebar reserves real layout width (paneAreaWidth), so
-		// unlike the notification overlay above this has to resize every
-		// pane's PTY — and ClearScreen, because every column right of the
-		// strip shifts by its width in one frame, which is exactly the kind
-		// of shift Bubble Tea's cell diff mis-tracks.
-		m.sidebarOpen = !m.sidebarOpen
-		// resizeTabs FIRST, and it is not optional: resizeAllPanes does not
-		// compute geometry, it READS pane.Width/Height and tab.CanvasW/H and
-		// ships them. Those are written only by tab.Resize — i.e. by
-		// resizeTabs (every tab of every project) or by View (the active tab
-		// only). The toggle changes paneAreaWidth() for all of them, so
-		// without this every background tab keeps its pre-toggle PTY size
-		// until the next workspace broadcast or real window resize, and even
-		// the active tab is a race between View and this Cmd's goroutine that
-		// the daemon's same-size guard can settle the wrong way. Same
-		// ordering as resizeTickMsg and toggleFocusForActiveTab.
-		m.resizeTabs()
-		// A screen preference, not session state: persisted to config (saved
-		// on exit via ConfigChanged), never to workspace.json.
-		m.cfg.UI.SidebarOpen = m.sidebarOpen
-		m.configChanged = true
-		return m, tea.Batch(tea.ClearScreen, m.resizeAllPanes())
+		return m.toggleProjectSidebar()
 	case kbMatches(key, kb.NotificationFocus):
 		// Ctrl+Alt+N: open (if hidden) and focus sidebar
 		if !m.notifications.visible {

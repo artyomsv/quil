@@ -87,6 +87,13 @@ var disclaimerTips = []struct {
 // too wide and reflow wraps each one onto a second line.
 const dialogBoxChrome = 6
 
+// dialogKeyColWidth is the fixed cell budget dialogKeyStyle gives the key half
+// of a key/description row. Named rather than inlined into the style because
+// the shortcuts list sizes its descriptions against what is LEFT of the row
+// after it — two numbers that have to move together, and a description budget
+// computed against a stale one wraps the row it was meant to fit.
+const dialogKeyColWidth = 16
+
 // dialogInnerWidth is the usable content width for a dialog whose box is boxW
 // columns wide in a termW-column terminal. It applies renderDialog's own clamp
 // and then subtracts dialogBoxChrome, so a caller sizing its rows against this
@@ -138,7 +145,7 @@ var (
 
 	dialogKeyStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("63")).
-			Width(16)
+			Width(dialogKeyColWidth)
 
 	dialogValStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("250"))
@@ -331,7 +338,17 @@ func shortcutsList(m *Model) []struct{ key, desc string } {
 		{kbDisplay(kb.ToggleEager), "Toggle eager restore (active pane)"},
 		{kbDisplay(kb.ToggleWrap), "Toggle preview soft-wrap (AI pane)"},
 		{kbDisplay(kb.ToggleLazygit), "Toggle lazygit overlay for current repo"},
+		{"", ""},
+		{"", "── Projects ──"},
 		{kbDisplay(kb.SidebarToggle), "Toggle project sidebar"},
+		{kbDisplay(kb.NewProject), "New project"},
+		{kbDisplay(kb.DestroyProject), "Remove active project (destroy / disconnect)"},
+		{kbDisplay(kb.ProjectPicker), "Project picker (fuzzy-find by name)"},
+		{kbDisplay(kb.ProjectToggle), "Bounce to the previous project"},
+		{kbDisplay(kb.ProjectNext), "Next project"},
+		{kbDisplay(kb.ProjectPrev), "Previous project"},
+		{kbDisplay(kb.AttentionQueue), "Jump to the agent blocked longest"},
+		{"", ""},
 		{kbDisplay(kb.NotificationToggle), "Toggle notification sidebar"},
 		{kbDisplay(kb.NotificationFocus), "Focus notification sidebar"},
 		{kbDisplay(kb.GoBack), "Pane history back"},
@@ -610,10 +627,43 @@ func (m Model) handleSettingsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleShortcutsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	total := len(shortcutsList(&m))
+	page := m.shortcutsVisibleRows()
 	switch msg.String() {
 	case "esc":
 		m.dialog = dialogAbout
 		m.dialogCursor = 0
+		// Reset so re-opening starts at the top rather than wherever the last
+		// visit left off — the list is reference material, not a work queue.
+		m.shortcutsCursor, m.shortcutsScroll = 0, 0
+	case "up", "k", "ctrl+p":
+		if m.shortcutsCursor > 0 {
+			m.shortcutsCursor--
+		}
+		m.syncShortcutsScroll()
+	case "down", "j", "ctrl+n":
+		if m.shortcutsCursor < total-1 {
+			m.shortcutsCursor++
+		}
+		m.syncShortcutsScroll()
+	case "pgup":
+		m.shortcutsCursor -= page
+		if m.shortcutsCursor < 0 {
+			m.shortcutsCursor = 0
+		}
+		m.syncShortcutsScroll()
+	case "pgdown":
+		m.shortcutsCursor += page
+		if m.shortcutsCursor > total-1 {
+			m.shortcutsCursor = total - 1
+		}
+		m.syncShortcutsScroll()
+	case "home", "g":
+		m.shortcutsCursor = 0
+		m.syncShortcutsScroll()
+	case "end", "G":
+		m.shortcutsCursor = total - 1
+		m.syncShortcutsScroll()
 	}
 	return m, nil
 }
@@ -841,6 +891,8 @@ func (m Model) renderDialog() string {
 	width := dialogWidth
 	if m.dialog == dialogTOMLEditor {
 		width = 74
+	} else if m.dialog == dialogShortcuts {
+		width = shortcutsDialogWidth
 	} else if m.selectedPlugin != "" && (m.dialog == dialogInstanceForm || (m.dialog == dialogCreatePane && m.createPaneStep == 2)) {
 		if p := m.pluginRegistry.Get(m.selectedPlugin); p != nil && p.Display.DialogWidth > 0 {
 			width = p.Display.DialogWidth
@@ -1054,20 +1106,116 @@ func (m Model) renderSettingsDialog() string {
 	return b.String()
 }
 
+// shortcutsChromeRows is every row the Shortcuts modal spends outside the list:
+// the rounded border (2), dialogBorder's Padding(1,2) top and bottom (2), the
+// title, the blank row under it, the blank row above the footer, the footer,
+// and one spare so the centered box never sits flush against the terminal edge.
+const shortcutsChromeRows = 8
+
+// shortcutsDialogWidth runs wider than the standard 60. dialogKeyStyle is a
+// fixed 16 cells, so at 60 a description gets 36 — and eight entries already
+// exceeded that, including "Command palette (fuzzy-find any action)" and the
+// Tab → PTY note. Each wrapped onto a second line, which is why counting
+// ENTRIES against the height budget under-counted the box and let it overflow
+// even after a window was added. One entry must be one line for the row
+// arithmetic to mean anything.
+const shortcutsDialogWidth = 74
+
+// shortcutsRowIndent is the two spaces every shortcut row starts with.
+const shortcutsRowIndent = 2
+
+// shortcutsDescWidth is what is left for the description after the box chrome,
+// the row indent and the fixed-width key column — at the width the box ACTUALLY
+// gets, which on a narrow terminal is not the preferred one.
+//
+// It goes through dialogInnerWidth for the reason that helper exists: renderDialog
+// clamps the box to m.width-2, and a budget derived from the preferred 74 keeps
+// truncating to a width the box no longer has. The rows then wrap, and the height
+// arithmetic that counts one line per entry under-counts — which is the overflow
+// the window was added to fix, returning below 76 columns. Measured at 40: nine
+// rows past the bottom edge.
+func (m Model) shortcutsDescWidth() int {
+	if w := dialogInnerWidth(m.width, shortcutsDialogWidth) - shortcutsRowIndent - dialogKeyColWidth; w > 1 {
+		return w
+	}
+	return 1
+}
+
+// shortcutsMinRows is 1 for the reason historyMinRows is: renderDialog's
+// lipgloss.Place does NOT clip, so any floor above the height actually
+// available manufactures the overflow it looks like it prevents.
+const shortcutsMinRows = 1
+
+// shortcutsVisibleRows is how many shortcut lines fit at the current terminal
+// height. The list is the only element that can give, so it absorbs a short
+// terminal rather than pushing the footer off-screen.
+func (m Model) shortcutsVisibleRows() int {
+	if avail := m.height - shortcutsChromeRows; avail > shortcutsMinRows {
+		return avail
+	}
+	return shortcutsMinRows
+}
+
+// syncShortcutsScroll stores the origin shortcutsWindow would pick. Called
+// after every cursor move.
+func (m *Model) syncShortcutsScroll() {
+	m.shortcutsScroll, _ = historyWindow(
+		len(shortcutsList(m)), m.shortcutsCursor, m.shortcutsScroll, m.shortcutsVisibleRows())
+}
+
+// renderShortcutsDialog draws one window of the shortcut list.
+//
+// It used to write every row unconditionally — 60-odd of them once the project
+// bindings were added — and lipgloss.Place does not clip, so on any terminal
+// shorter than the list the box was drawn past the bottom edge. What fell off
+// was the footer and, worse, whichever rows the user opened the dialog to find:
+// the newest entries are appended last, so a shortcut was unreachable in exactly
+// the release that introduced it.
 func (m Model) renderShortcutsDialog() string {
 	var b strings.Builder
+
+	list := shortcutsList(&m)
+	visible := m.shortcutsVisibleRows()
+	// historyWindow rather than a second implementation: it already re-derives
+	// the origin from the cursor and clamps to the end of a shrunken list, in
+	// that order, and render must not depend on Update having run — a
+	// WindowSizeMsg can change the row budget between them.
+	start, end := historyWindow(len(list), m.shortcutsCursor, m.shortcutsScroll, visible)
 
 	b.WriteString(dialogTitle.Render("Shortcuts"))
 	b.WriteString("\n\n")
 
-	for _, s := range shortcutsList(&m) {
-		b.WriteString(fmt.Sprintf("  %s%s\n",
+	desc := m.shortcutsDescWidth()
+	for _, s := range list[start:end] {
+		// At the preferred width this truncation is a guard — every current
+		// description fits — but on a narrower terminal it is the mechanism, and
+		// that is why the budget has to be the box's real one. Either way a row
+		// that wraps breaks the height arithmetic, which counts one line per
+		// entry; that is the failure this dialog already had.
+		b.WriteString(fmt.Sprintf("%s%s%s\n",
+			strings.Repeat(" ", shortcutsRowIndent),
 			dialogKeyStyle.Render(s.key),
-			dialogValStyle.Render(s.desc)))
+			dialogValStyle.Render(truncateToWidth(s.desc, desc))))
 	}
 
 	b.WriteByte('\n')
-	b.WriteString(dialogSubtle.Render("Esc back"))
+	inner := dialogInnerWidth(m.width, shortcutsDialogWidth)
+	footer := "Esc back"
+	// Say so when there is more, and where you are — otherwise a clipped list
+	// is indistinguishable from a complete one, which is the state this dialog
+	// was already in.
+	if len(list) > visible {
+		footer = fmt.Sprintf("↑↓ scroll · %d-%d of %d · Esc back", start+1, end, len(list))
+		if lipgloss.Width(footer) > inner {
+			// A shorter FORM rather than a cut, because the tail is the half
+			// that says how to leave. At minTermWidth the full one is a cell
+			// too wide and reflows onto a second line — which costs a row the
+			// height budget already spent, so the box overflows by exactly the
+			// line that was supposed to report the overflow.
+			footer = fmt.Sprintf("%d-%d/%d · Esc back", start+1, end, len(list))
+		}
+	}
+	b.WriteString(dialogSubtle.Render(truncateToWidth(footer, inner)))
 
 	return b.String()
 }

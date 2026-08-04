@@ -72,6 +72,17 @@ const (
 	palActDaemonLog
 	palActMCPLog
 	palActRedraw
+	// Projects. palActSwitchProject carries a project ID rather than an index
+	// for the reason toggleLastProject documents: an index resolved later can
+	// name a different project, or a destroyed one resolves to 0 and switches
+	// somewhere the user never asked for.
+	palActSwitchProject // arg = projectID
+	palActNewProject
+	palActRenameProject   // arg = projectID
+	palActRemoveProject   // arg = projectID (destroy if local, disconnect if remote)
+	palActProjectSidebar  // toggle the reserved column
+	palActAttentionQueue  // jump to the agent blocked longest
+	palActPrevProject     // bounce to the previous project
 )
 
 // paletteCommand is one row of the palette. Disabled rows render greyed and are
@@ -231,6 +242,17 @@ func tabIndexName(i int, tab *TabModel) string {
 // active project so two tabs both named "Shell" in different projects stay
 // distinguishable, and omit it for the active project's own panes (it would
 // only repeat what's already on screen).
+// sidebarToggleLabel names what the row will DO, not what the state is. The
+// palette's other toggles (mute, eager) read the same way — a row labelled
+// with the current state leaves the user working out which direction Enter
+// moves it.
+func sidebarToggleLabel(open bool) string {
+	if open {
+		return "Hide project sidebar"
+	}
+	return "Show project sidebar"
+}
+
 func formatPaneNav(tabIdx, paneIdx int, p *PaneModel, project string) string {
 	paneType := p.Type
 	if paneType == "" {
@@ -352,6 +374,88 @@ func (m *Model) buildPaletteCommands() []paletteCommand {
 		paletteCommand{action: palActCloseTab, enabled: true, label: "Close tab…", detail: kbDisplay(kb.CloseTab), keywords: []string{"tab", "close"}},
 		paletteCommand{action: palActRenameTab, enabled: true, label: "Rename tab", detail: kbDisplay(kb.RenameTab), keywords: []string{"tab", "rename"}},
 		paletteCommand{action: palActCycleTabColor, enabled: true, label: "Cycle tab color", detail: kbDisplay(kb.CycleTabColor), keywords: []string{"tab", "color"}},
+	)
+
+	// --- Projects ----------------------------------------------------------
+	//
+	// Switch-to rows first, mirroring the Tabs section: jumping somewhere is
+	// the most common reason to open the palette, and with several daemons in
+	// one window the project list is how a user reaches another machine at all.
+	header("Projects")
+	for _, proj := range m.projects {
+		if proj == nil {
+			continue
+		}
+		if proj == m.cur() {
+			continue // already here; the row would be a no-op
+		}
+		// displayName is "Name" locally and "Name@dest" for a remote, so a
+		// query narrows on either half — the same string the picker matches.
+		cmds = append(cmds, paletteCommand{
+			action:   palActSwitchProject,
+			arg:      proj.ID,
+			enabled:  true,
+			label:    "Switch to " + sanitizeRemoteText(proj.displayName()),
+			keywords: []string{"project", "switch", "go to", "goto", proj.Name, proj.Dest},
+		})
+	}
+	active := m.cur()
+	remote := active != nil && active.Dest != ""
+	// Destroy and Disconnect are the same slot, never both — the same choice
+	// the sidebar's context menu and the keybinding make. On a remote project
+	// Destroy cannot do what the user means: the daemon just bootstraps a
+	// replacement, so what they want is to stop showing that machine.
+	removeLabel := "Destroy project…"
+	if remote {
+		removeLabel = "Disconnect host…"
+	}
+	removeArg := ""
+	if active != nil {
+		removeArg = active.ID
+	}
+	cmds = append(cmds,
+		paletteCommand{action: palActNewProject, enabled: true, label: "New project", detail: kbDisplay(kb.NewProject), keywords: []string{"project", "create", "add", "workspace"}},
+		paletteCommand{
+			action: palActRenameProject, arg: removeArg,
+			// Greyed on a daemon that cannot hold a project, for the same
+			// reason the context menu greys it: the message is accepted and
+			// silently does nothing, which reads as a broken dialog.
+			enabled:  active != nil && !isSyntheticProject(active.ID),
+			label:    "Rename project",
+			keywords: []string{"project", "rename"},
+		},
+		paletteCommand{
+			action: palActRemoveProject, arg: removeArg,
+			enabled:  active != nil && (remote || !isSyntheticProject(active.ID)),
+			label:    removeLabel,
+			detail:   kbDisplay(kb.DestroyProject),
+			keywords: []string{"project", "destroy", "delete", "remove", "disconnect", "host"},
+		},
+		paletteCommand{
+			action: palActPrevProject,
+			// prevProject is only written by switchProject, so on a fresh
+			// launch there is genuinely nowhere to bounce back to.
+			enabled:  m.prevProject != "" && m.projectByID(m.prevProject) != nil,
+			label:    "Previous project",
+			detail:   kbDisplay(kb.ProjectToggle),
+			keywords: []string{"project", "back", "bounce", "last", "previous"},
+		},
+		paletteCommand{
+			action:   palActAttentionQueue,
+			enabled:  len(m.blockedPanes()) > 0,
+			label:    "Go to the agent waiting longest",
+			detail:   kbDisplay(kb.AttentionQueue),
+			keywords: []string{"attention", "blocked", "waiting", "permission", "agent", "project"},
+		},
+		paletteCommand{
+			action: palActProjectSidebar,
+			// The toggle refuses below minWidthForSidebar rather than flipping
+			// invisibly, so the row says so up front instead of flashing.
+			enabled:  m.width >= minWidthForSidebar,
+			label:    sidebarToggleLabel(m.sidebarOpen),
+			detail:   kbDisplay(kb.SidebarToggle),
+			keywords: []string{"sidebar", "project", "panel", "column"},
+		},
 	)
 
 	// --- Pane: actions on the active pane ----------------------------------
@@ -842,6 +946,43 @@ func (m Model) executePaletteCommand(c paletteCommand) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
+
+	case palActSwitchProject:
+		// Resolved by ID through projectByID, never indexOfProject: the latter
+		// answers 0 for an unknown id, so a project destroyed between building
+		// the list and pressing Enter would switch to the FIRST one.
+		for i, p := range m.projects {
+			if p != nil && p.ID == c.arg {
+				cmd := m.switchProject(i)
+				return m, cmd
+			}
+		}
+		return m, nil
+
+	// --- Projects ----------------------------------------------------------
+	case palActNewProject:
+		return m.openNewProjectDialog()
+	case palActRenameProject:
+		return m.beginProjectRename(c.arg)
+	case palActRemoveProject:
+		if p := m.projectByID(c.arg); p != nil {
+			if p.Dest != "" {
+				return m, m.confirmDisconnectHost(p.ID)
+			}
+			return m, m.confirmDestroyProject(p.ID)
+		}
+		return m, nil
+	case palActPrevProject:
+		// Sequenced, not returned inline: toggleLastProject mutates m through
+		// a pointer receiver via switchProject, and Go does not order a plain
+		// operand against a call in the same return statement.
+		cmd := m.toggleLastProject()
+		return m, cmd
+	case palActAttentionQueue:
+		cmd := m.jumpToNextBlocked()
+		return m, cmd
+	case palActProjectSidebar:
+		return m.toggleProjectSidebar()
 
 	// --- Layout / pane (active pane) ---------------------------------------
 	case palActSplitH:

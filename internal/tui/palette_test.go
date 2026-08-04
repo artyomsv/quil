@@ -279,7 +279,14 @@ func TestRenderCommandPalette_ShortcutNotWrapped(t *testing.T) {
 	m.width, m.height = 100, 40
 	m.dialog = dialogCommandPalette
 	m.palette.commands = m.buildPaletteCommands()
-	m.palette.filtered = filterPalette("", m.palette.commands)
+	// Filtered to the row under test rather than browsing the whole registry.
+	// The assertion is about WRAPPING — that a full-width row keeps its label
+	// and its right-aligned shortcut on one rendered line — and browse mode
+	// makes reaching the row depend on how many commands happen to precede it.
+	// It did: adding the Projects section pushed Split horizontal past the last
+	// visible line and the test failed for a reason it does not test.
+	m.palette.query = "split horizontal"
+	m.palette.filtered = filterPalette(m.palette.query, m.palette.commands)
 
 	out := m.renderDialog()
 	var row string

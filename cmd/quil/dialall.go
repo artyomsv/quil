@@ -196,9 +196,30 @@ func gateExtraVersion(d config.Destination, client *ipc.Client, link transport.L
 		}
 		return fmt.Errorf("no version response from %s", d.Label())
 
+	case res.Cmp < 0:
+		// The remote daemon is NEWER. Provisioning pushes THIS client's build,
+		// so acting on it would DOWNGRADE a machine other clients may share —
+		// and would not fix this session either, since the far side would then
+		// respawn every pane at a version the user did not ask for. The only
+		// remedy that works is on this end, so name it instead of a command
+		// that would make things worse.
+		return fmt.Errorf("%s runs %s, this client runs %s; upgrade this client from %s",
+			d.Label(), res.DaemonVersion, versionpkg.Current(), releasesURL)
+
 	default:
-		return fmt.Errorf("daemon on %s runs %s but this client runs %s; run `quil remote setup %s`",
-			d.Label(), res.DaemonVersion, versionpkg.Current(), d.Dest)
+		// This client is newer, so the fix is on the far side and Quil can
+		// perform it — the same push `quil remote setup` does, daemon stop
+		// included. The sentinel is the only thing that carries "upgradable"
+		// across the package boundary: internal/tui cannot name a remedy, and
+		// the exit code cannot report one, because quil RAN over there and an
+		// established link makes ClassifyExit answer RemedyNone for every code.
+		//
+		// The command stays in the message for the callers that do not act on
+		// the sentinel: a background destination at launch is dropped with a
+		// log line, deliberately, since installing software on another machine
+		// must not be a side effect of opening the client.
+		return fmt.Errorf("%w: %s runs %s, this client runs %s; run `quil remote setup %s`",
+			tui.ErrRemoteVersionMismatch, d.Label(), res.DaemonVersion, versionpkg.Current(), d.Dest)
 	}
 }
 

@@ -228,6 +228,6 @@ Cached reference repos:
 | M11 | Done | Command palette — Alt+Shift+P, fuzzy find, unified content search |
 | M12 | Done | Notification center — daemon event queue, per-pane mute, sidebar, 3 MCP tools |
 | M13 | Done | Memory reporting — 5s collector, per-pane Go-heap + PTY RSS, dialog + 2 MCP tools |
-| M14 | **In progress** | Projects — grouping above tabs, sidebar with agent+git state, multi-daemon router, runtime host connect/disconnect. Remaining: MCP project scoping, listening ports |
+| M14 | Done (v1.47.0) | Projects — grouping above tabs, sidebar with agent+git state, multi-daemon router, runtime host connect/disconnect. Deferred to their own plans: MCP project scoping, listening ports |
 
 Full detail: `docs/roadmap.md` and `docs/roadmap/*.md`.

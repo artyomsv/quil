@@ -142,6 +142,40 @@ func (m *Model) persistDestination(dest string) {
 // reasons. This package only has to recognise the wrapped sentinel.
 var ErrRemoteQuilMissing = errors.New("quil is not installed on that host")
 
+// ErrRemoteVersionMismatch marks a dial that found a WORKING quil on the host
+// running a version this client refuses to attach to.
+//
+// It cannot be derived from the exit code the way ErrRemoteQuilMissing is, and
+// that is the whole reason it exists: quil ran over there, so the link
+// delivered bytes, so ClassifyExit's established override answers RemedyNone
+// for every code that follows. cmd/quil raises it from the version handshake
+// instead — and ONLY when this client is the newer of the two, because
+// provisioning pushes this client's own build and would otherwise downgrade a
+// daemon other clients may share.
+var ErrRemoteVersionMismatch = errors.New("the daemon on that host runs a different version")
+
+// installOffer decides whether a failed dial is something provisioning can fix,
+// and returns what to tell the user while it runs. "" means it cannot.
+//
+// One function rather than a condition per sentinel because the two failures
+// share every mechanic — the same InstallFunc, the same once-per-host guard,
+// the same retry dial — and differ only in the sentence. Splitting them is how
+// the second one ends up with the first one's guard and reinstalls forever.
+func installOffer(err error, dest string) string {
+	switch {
+	case errors.Is(err, ErrRemoteQuilMissing):
+		return "quil is not installed on " + sanitizeRemoteText(dest) + " — installing…"
+	case errors.Is(err, ErrRemoteVersionMismatch):
+		// Names the daemon restart, because an upgrade is not free the way a
+		// first install is: panes over there respawn from the saved workspace
+		// and whatever was running in their shells is killed. The CLI prompt
+		// says the same thing before asking; here the user has already asked
+		// for the connection, so it is a statement rather than a question.
+		return "upgrading quil on " + sanitizeRemoteText(dest) + " — its daemon restarts…"
+	}
+	return ""
+}
+
 // InstallFunc provisions quil on a host, for the offer raised when a dial
 // comes back ErrRemoteQuilMissing. Supplied by cmd/quil, which owns the
 // release fetch and the ssh push.

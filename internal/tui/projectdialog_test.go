@@ -2,6 +2,8 @@ package tui
 
 import (
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -357,6 +359,56 @@ func TestDestDialed_InstallsAtMostOncePerHost(t *testing.T) {
 		t.Errorf("installs = %d after a second missing-binary dial, want 1 — this is the loop", installs)
 	}
 	if got.projectFormErr == "" {
+		t.Error("the second failure must say something rather than silently retrying")
+	}
+}
+
+// A remote daemon too old for this client to attach to must be UPGRADED from
+// the dialog, not reported with a command to run somewhere else.
+//
+// The mismatch cannot reach here as ErrRemoteQuilMissing: quil ran over there,
+// so the link delivered bytes and no exit code can classify it. Reported as
+// "I expected the install to happen during remote project creation" — the user
+// saw the raw gate message with `quil remote setup` in it.
+func TestDestDialed_UpgradesADaemonThisClientCannotAttachTo(t *testing.T) {
+	installs := 0
+	m := Model{
+		client:             NewRouter(map[string]Client{"": newFakeConn()}),
+		projectFormDialing: "gpu01",
+		installDestFn:      func(string) error { installs++; return nil },
+	}
+	dialErr := fmt.Errorf("%w: gpu01 runs 1.46.3, this client runs 1.47.0", ErrRemoteVersionMismatch)
+
+	next, cmd := m.Update(destDialedMsg{dest: "gpu01", err: dialErr})
+	got := next.(Model)
+	if cmd != nil {
+		cmd()
+	}
+	if installs != 1 {
+		t.Fatalf("installs = %d, want 1 — a version mismatch is exactly what the remote setup fixes", installs)
+	}
+	if got.projectFormInstalling != "gpu01" {
+		t.Errorf("projectFormInstalling = %q, want the host being upgraded", got.projectFormInstalling)
+	}
+	// An upgrade is not free the way a first install is: the daemon over there
+	// stops and whatever was running in its shells dies, so the message owes
+	// more than "installing".
+	if !strings.Contains(got.projectFormErr, "daemon restarts") {
+		t.Errorf("projectFormErr = %q, want the daemon restart named", got.projectFormErr)
+	}
+
+	// The retry reports the same mismatch: the daemon did not restart, and
+	// pushing the same archive again cannot change that. Same guard as the
+	// missing-binary loop, deliberately shared.
+	got.projectFormDialing = "gpu01"
+	next2, cmd2 := got.Update(destDialedMsg{dest: "gpu01", err: dialErr})
+	if cmd2 != nil {
+		cmd2()
+	}
+	if installs != 1 {
+		t.Errorf("installs = %d after a second mismatched dial, want 1 — this is the loop", installs)
+	}
+	if next2.(Model).projectFormErr == "" {
 		t.Error("the second failure must say something rather than silently retrying")
 	}
 }

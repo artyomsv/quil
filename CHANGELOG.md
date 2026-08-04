@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Every project action is in the command palette.** `Alt+Shift+P` now lists
+  the projects you can switch to — matched on the name or the host, so `gpu`
+  finds `build@gpu01` — alongside New project, Rename, Destroy (or Disconnect
+  host on a remote one), Previous project, "Go to the agent waiting longest",
+  and the sidebar toggle. Each row shows its keybinding, so the palette is also
+  the fastest way to learn the project keys.
+
+### Fixed
+- **The Shortcuts list (F1 → Shortcuts) no longer runs off the bottom of the
+  screen.** It drew every row at once, so on an ordinary terminal roughly two
+  thirds of the list — and the footer — were simply off-screen, with no way to
+  reach them. It scrolls now, with arrows, `PgUp`/`PgDn`, `Home`/`End` and
+  `g`/`G`, and the footer shows where you are in the list. It fits a narrow
+  terminal too: rows and the position footer are sized against the width the
+  box actually gets, so below 76 columns they shorten instead of wrapping onto
+  a second line and spending a row the height budget had already counted.
+- **The project keys are listed there too.** Seven of the eight were missing, so
+  the only way to learn them was the online documentation.
+- **Connecting a remote host now upgrades an out-of-date daemon instead of
+  refusing.** A host running an older Quil failed the New Project dialog's
+  Host row with `daemon on <host> runs 1.46.3 but this client runs 1.47.0; run
+  quil remote setup <host>` — asking you to leave the session to run a command
+  that does exactly what connecting was already meant to do. It is performed
+  from the dialog now, the same push `quil remote setup` makes: the remote
+  daemon is stopped, a matching build is installed, and the dial is retried.
+  Installing onto a host with no Quil at all already worked; only the
+  out-of-date case was missing, because it cannot be recognised from ssh's
+  exit code the way a missing binary can. A remote daemon **newer** than your
+  client is still refused rather than downgraded, and now names the client
+  upgrade instead of a command that would make it worse.
+
 ## [1.47.0] - 2026-08-04
 
 ### Added

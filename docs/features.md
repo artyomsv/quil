@@ -130,7 +130,9 @@ Full mouse support — click tabs to switch, click panes to focus, scroll wheel 
 
 Press `Alt+Shift+P` to open a modal, keyboard-first launcher for **everything**: split/close/rename/focus a pane, new/close/rename a tab, jump to any pane or tab across the whole workspace, create a pane, and open Settings, Plugins, Memory, or the log viewers. Type a fragment of the intent (`split`, `restart`, `backend`) and the list filters live by fuzzy score; `↑`/`↓` (or `Ctrl+P`/`Ctrl+N`) move the selection, `Enter` runs it, `Esc` closes.
 
-Entries are grouped under dim section headers — **Go to pane**, **Tabs**, **Pane**, **System** — with navigation first (jumping to a pane or tab is the most common reason to open it), so the organization is obvious at a glance; headers disappear once you start typing. Panes are listed by `tab.pane` index and plugin type so same-name or same-directory panes are easy to tell apart. Every command dispatches into the same handler the keybinding uses — the palette is a launcher, not a second implementation — and each row shows its shortcut, so it teaches the bindings as you go. Rows that don't apply grey out (Input history without `record_history`, Open lazygit without the binary).
+Entries are grouped under dim section headers — **Go to pane**, **Tabs**, **Projects**, **Pane**, **System** — with navigation first (jumping to a pane or tab is the most common reason to open it), so the organization is obvious at a glance; headers disappear once you start typing. Panes are listed by `tab.pane` index and plugin type so same-name or same-directory panes are easy to tell apart. Every command dispatches into the same handler the keybinding uses — the palette is a launcher, not a second implementation — and each row shows its shortcut, so it teaches the bindings as you go. Rows that don't apply grey out (Input history without `record_history`, Open lazygit without the binary).
+
+The **Projects** section covers the whole feature: a *Switch to* row per project (matched on the name or the host, so `gpu` finds `build@gpu01`), New project, Rename, Destroy — or **Disconnect host** on a remote one, never both — Previous project, *Go to the agent waiting longest*, and the sidebar toggle. Since every row carries its binding, this is also the fastest way to learn the project keymap without opening `F1`.
 
 - **Content search** — as you type, the palette also searches every pane's
   scrollback and lists matching panes in a **Found in panes** section beneath the
@@ -374,7 +376,11 @@ Right-click a project row for Rename, and either Destroy (local) or Disconnect h
 
 ### Projects on another machine
 
-A project's root directory lives on one machine, so a project belongs to the daemon that holds it. Tick **Remote (ssh)** in the New Project dialog, give a user and host, and press Enter on the Host row: quil dials it, offers to install itself if the host has not got it, and then browses *that* machine's filesystem for the root directory. The host is remembered in `[[destinations]]` and attached at every launch until you disconnect it.
+A project's root directory lives on one machine, so a project belongs to the daemon that holds it. Tick **Remote (ssh)** in the New Project dialog, give a user and host, and press Enter on the Host row: quil dials it and then browses *that* machine's filesystem for the root directory. The host is remembered in `[[destinations]]` and attached at every launch until you disconnect it.
+
+A host that cannot be attached to is **provisioned from the dialog** rather than sending you to a shell. No Quil there at all installs it; a daemon older than your client is upgraded, which stops that daemon and respawns its panes from the saved workspace — commands running in its shells are killed, and the status line says so while it runs. Both are attempted at most once per host per session: a dial that fails the same way straight after is something the install cannot fix, so it is reported instead of retried.
+
+The one case Quil will not fix for you is a remote daemon **newer** than your client. Provisioning pushes your own build, so acting there would downgrade a machine other people may be sharing — the message names the client upgrade instead.
 
 Disconnecting removes the machine from your sidebar and stops nothing on it — the remote daemon keeps every pane alive, and reconnecting restores the same workspace.
 
@@ -495,6 +501,8 @@ quil remote setup gpu01
 Quil downloads the release for the **remote's** platform onto your machine, verifies its checksum there, and pushes it over the SSH connection. The server needs no route to GitHub — which matters, because cluster nodes frequently have none. The version installed matches your TUI by construction, so the two cannot disagree afterwards.
 
 You rarely need to run it yourself. `quil --remote <host>` on a machine that has no Quil offers to install it, and **attaches once it has** — the command you typed asked to attach, so that is what it finishes doing. A version mismatch offers an upgrade the same way. Nothing is installed without an explicit `y`, and the prompt names the host, the exact path, the version, and — for an upgrade — that the remote daemon will be stopped.
+
+Connecting a host from the New Project dialog does the same work without the prompt: Bubble Tea owns the screen and stdin by then, so a `[y/N]` there would land on top of the dialog with no way to answer it. Naming the host in the form is the consent, and the status line reports what is happening — including the daemon restart on an upgrade. It is skipped entirely on a development build, which has no matching release to install; use `quil remote setup <host> --from-dir <path>` for those.
 
 This also solves a problem that is otherwise easy to hit and hard to diagnose. `ssh host quil --stdio` runs a *non-interactive* shell, and on Debian and Ubuntu `~/.bashrc` returns before it reaches any `PATH` line — so a binary in `~/.local/bin` is invisible, and the failure looks exactly like an unreachable host. Setup records the absolute path per destination and uses it as the remote command, so `PATH` never participates. Installs go to `~/.local/bin` and **never use `sudo`**; an upgrade replaces an existing binary in place only where that directory is already writable.
 

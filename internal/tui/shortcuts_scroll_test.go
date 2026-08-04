@@ -30,6 +30,26 @@ func TestShortcutsDialog_FitsTheTerminal(t *testing.T) {
 	}
 }
 
+// The same overflow returns on a NARROW terminal unless the description budget
+// follows the box the way every other dialog's does.
+//
+// renderDialog clamps the box to m.width-2, but the description width was a
+// constant derived from the PREFERRED 74 — so below that each row was truncated
+// to a budget the box no longer had, lipgloss wrapped it onto a second line, and
+// the arithmetic that counts one line per entry under-counted exactly as it did
+// before the window existed. dialogInnerWidth is the shared helper this must go
+// through; a private copy of the clamp is what drifts.
+func TestShortcutsDialog_FitsANarrowTerminal(t *testing.T) {
+	for _, width := range []int{minTermWidth, 50, 60, 74, 100} {
+		m := Model{width: width, height: 24, dialog: dialogShortcuts}
+		if got := strings.Count(m.renderDialog(), "\n") + 1; got > m.height {
+			t.Errorf("at width %d the Shortcuts dialog renders %d lines against a height "+
+				"of %d — %d rows wrapped and are drawn past the bottom edge",
+				width, got, m.height, got-m.height)
+		}
+	}
+}
+
 // TestShortcutsDialog_ScrollReachesTheEnd: the fix is only worth having if the
 // rows pushed out of the window are reachable. The project bindings are near
 // the end of the list, which is the half a short terminal hides.

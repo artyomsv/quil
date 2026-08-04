@@ -20,7 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   screen.** It drew every row at once, so on an ordinary terminal roughly two
   thirds of the list — and the footer — were simply off-screen, with no way to
   reach them. It scrolls now, with arrows, `PgUp`/`PgDn`, `Home`/`End` and
-  `g`/`G`, and the footer shows where you are in the list.
+  `g`/`G`, and the footer shows where you are in the list. It fits a narrow
+  terminal too: rows and the position footer are sized against the width the
+  box actually gets, so below 76 columns they shorten instead of wrapping onto
+  a second line and spending a row the height budget had already counted.
 - **The project keys are listed there too.** Seven of the eight were missing, so
   the only way to learn them was the online documentation.
 - **Connecting a remote host now upgrades an out-of-date daemon instead of

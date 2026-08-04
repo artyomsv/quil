@@ -800,23 +800,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.closeCtxMenu()
 		}
 	}
-	// The link the user is typing into is down: input is dropped rather than
-	// queued. Placed ahead of the type switch so a future input message type is
-	// frozen by default instead of quietly reaching a live PTY through a branch
-	// nobody updated. Scoped to the ACTIVE destination — a background project's
-	// daemon dropping must not freeze typing into a local pane.
-	if link := m.linkOf(m.activeDest()); link.active {
-		// The resume key is checked BEFORE the freeze, or it would be swallowed
-		// with every other keystroke. It cannot live inside freezeInput: that
-		// has a value receiver and returns (tea.Cmd, bool), so it can neither
-		// clear the parked state nor hand back a mutated Model.
-		if key, ok := msg.(tea.KeyPressMsg); ok && link.parked &&
-			kbMatches(key.String(), reconnectResumeKey) {
+	// The resume key is checked BEFORE the freeze, or it would be swallowed with
+	// every other keystroke. It cannot live inside freezeInput: that has a value
+	// receiver and returns (tea.Cmd, bool), so it can neither clear the parked
+	// state nor hand back a mutated Model. It IS scoped to the active
+	// destination — it is a keypress, and keypresses go wherever the user is
+	// typing.
+	if link := m.linkOf(m.activeDest()); link.active && link.parked {
+		if key, ok := msg.(tea.KeyPressMsg); ok && kbMatches(key.String(), reconnectResumeKey) {
 			return m.resumeReconnect()
 		}
-		if cmd, frozen := m.freezeInput(msg); frozen {
-			return m, cmd
-		}
+	}
+	// A dead link drops input rather than queueing it. Placed ahead of the type
+	// switch so input decisions are made in one place instead of in a branch
+	// nobody updated.
+	//
+	// freezeInput is called UNCONDITIONALLY and owns the whole decision,
+	// including which destination each message is scoped to. It used to sit
+	// behind an active-destination check here, which made it unreachable
+	// whenever the active project was healthy — and that silently disabled the
+	// per-destination gate for a delayed paste, whose target pane can belong to
+	// a different daemon than the one on screen. A gate in two places is a gate
+	// in neither.
+	if cmd, frozen := m.freezeInput(msg); frozen {
+		return m, cmd
 	}
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:

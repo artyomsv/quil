@@ -315,6 +315,47 @@ func TestDelayedClipboardPaste_FrozenWhenItsOwnDestIsReconnecting(t *testing.T) 
 	}
 }
 
+// The two tests above call freezeInput directly, which is exactly how the first
+// version of this fix passed while being dead in production: the CALL SITE in
+// Update used to be wrapped in `if activeDest is reconnecting`, so with a
+// healthy project on screen freezeInput was never reached and the
+// per-destination gate inside it could not run. These two drive Update instead,
+// so they exercise the path rather than the function.
+func TestUpdate_DelayedPasteToReconnectingDest_NotEnqueued(t *testing.T) {
+	m := pasteFreezeModel(t, 0) // active project is the local, healthy one
+	m.client = &fakeSender{}
+	m.inputCh = make(chan paneInput, inputForwardBuffer)
+	m.handleLinkLost("gpu01", errors.New("connection reset"))
+
+	m.Update(clipboardPastedMsg{text: "SECRET", paneID: "p-gpu"})
+
+	select {
+	case in := <-m.inputCh:
+		t.Fatalf("paste for a reconnecting daemon was enqueued (%q) while a healthy project was active", string(in.data))
+	default:
+	}
+}
+
+// The matching positive through the same path: a healthy target still gets its
+// paste while a DIFFERENT daemon is reconnecting.
+func TestUpdate_DelayedPasteToHealthyDest_StillEnqueued(t *testing.T) {
+	m := pasteFreezeModel(t, 1) // active project is the gpu one
+	m.client = &fakeSender{}
+	m.inputCh = make(chan paneInput, inputForwardBuffer)
+	m.handleLinkLost("gpu01", errors.New("connection reset"))
+
+	m.Update(clipboardPastedMsg{text: "SECRET", paneID: "p-local"})
+
+	select {
+	case in := <-m.inputCh:
+		if in.paneID != "p-local" {
+			t.Errorf("enqueued for pane %q, want p-local", in.paneID)
+		}
+	default:
+		t.Fatal("paste for a healthy daemon was dropped because a different daemon is reconnecting")
+	}
+}
+
 // A link-loss report from a previous client must be ignored: the old listen
 // loop is still parked in Receive when the new client is already live.
 func TestUpdate_LinkLost_StaleGeneration_Ignored(t *testing.T) {

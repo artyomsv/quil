@@ -123,7 +123,7 @@ func (m Model) requestHistory(paneID string) tea.Cmd {
 			return nil
 		}
 		msg.ID = fmt.Sprintf("hist-%d", time.Now().UnixNano())
-		if err := m.client.Send(msg); err != nil {
+		if err := m.sendForPane(paneID, msg); err != nil {
 			log.Printf("requestHistory: send: %v", err)
 		}
 		return nil
@@ -158,7 +158,7 @@ func (m Model) requestHistoryEntry(paneID string, tsMs int64) tea.Cmd {
 			return nil
 		}
 		msg.ID = fmt.Sprintf("histentry-%d", time.Now().UnixNano())
-		if err := m.client.Send(msg); err != nil {
+		if err := m.sendForPane(paneID, msg); err != nil {
 			log.Printf("requestHistoryEntry: send: %v", err)
 		}
 		return nil

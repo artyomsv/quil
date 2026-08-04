@@ -3,6 +3,8 @@ package tui
 import (
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
+
 	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/plugin"
 )
@@ -54,7 +56,7 @@ func TestRequestPluginList_LocalModeAsksNothing(t *testing.T) {
 
 func TestRequestPluginList_RemoteModeAsks(t *testing.T) {
 	m := pluginClientModel(t)
-	m.SetRemoteDest("gpu01")
+	m.asRemote("gpu01")
 	cmd := m.requestPluginList()
 	if cmd == nil {
 		t.Fatal("requestPluginList returned no command in remote mode")
@@ -78,34 +80,39 @@ func TestApplyPluginList_NilRegistryDoesNotPanic(t *testing.T) {
 	}
 }
 
-// attachToDaemon is requestPluginList's only call site; nothing else fails
-// if that batching gets dropped, so pin it directly rather than relying on
-// requestPluginList's own tests to stand in for it.
-func TestAttachToDaemon_RemoteModeAlsoAsksForPluginList(t *testing.T) {
-	m := Model{client: &fakeSender{}, pluginRegistry: plugin.NewRegistry()}
-	m.SetRemoteDest("gpu01")
+// Attach is requestPluginList's only call site; nothing else fails if that
+// batching gets dropped, so pin it directly rather than relying on
+// requestPluginList's own tests to stand in for it. Both attach owners are
+// covered — the startup sweep and the post-redial reattach — because each
+// builds its own batch.
+func TestAttach_RemoteModeAlsoAsksForPluginList(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		run  func(m *Model) tea.Cmd
+	}{
+		{"startup sweep", func(m *Model) tea.Cmd { return m.attachAllDests() }},
+		{"post-redial reattach", func(m *Model) tea.Cmd { return m.attachToDest("gpu01") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gpu := newFakeConn()
+			m := Model{client: NewRouter(map[string]Client{"gpu01": gpu}), pluginRegistry: plugin.NewRegistry()}
+			m.asRemote("gpu01")
 
-	cmd := m.attachToDaemon()
-	if cmd == nil {
-		t.Fatal("attachToDaemon returned no command")
-	}
-	runCmd(cmd)
+			cmd := tc.run(&m)
+			if cmd == nil {
+				t.Fatal("attach returned no command")
+			}
+			runCmd(cmd)
 
-	sent := m.client.(*fakeSender).sent
-	var sawAttach, sawPluginList bool
-	for _, msg := range sent {
-		switch msg.Type {
-		case ipc.MsgAttach:
-			sawAttach = true
-		case ipc.MsgPluginListReq:
-			sawPluginList = true
-		}
-	}
-	if !sawAttach {
-		t.Error("attachToDaemon did not send MsgAttach")
-	}
-	if !sawPluginList {
-		t.Error("attachToDaemon did not also ask for the plugin list in remote mode — every .Available consumer would describe the wrong machine until the next reload")
+			sent := sentTypes(gpu)
+			sawAttach, sawPluginList := sent[ipc.MsgAttach], sent[ipc.MsgPluginListReq]
+			if !sawAttach {
+				t.Error("attach did not send MsgAttach")
+			}
+			if !sawPluginList {
+				t.Error("attach did not also ask for the plugin list in remote mode — every .Available consumer would describe the wrong machine until the next reload")
+			}
+		})
 	}
 }
 

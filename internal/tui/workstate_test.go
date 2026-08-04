@@ -25,11 +25,11 @@ func TestWorkEventKind(t *testing.T) {
 		{"hook.opencode.session.idle", workStop},
 		{"hook.opencode.session.error", workStop},
 		{"process_exit", workAbort},
-		// Park-for-input edges: the agent is waiting on the user, so the turn
-		// is effectively done until they respond → stop spinner + unseen mark.
-		{"hook.claude.Notification", workStop},
-		{"hook.claude.PermissionRequest", workStop},
-		{"hook.opencode.permission.ask", workStop},
+		// Park-for-input edges: the agent is waiting on the user — distinct
+		// from a completed turn, though both stop the spinner + mark unseen.
+		{"hook.claude.Notification", workPark},
+		{"hook.claude.PermissionRequest", workPark},
+		{"hook.opencode.permission.ask", workPark},
 		// Subagent lifecycle: background subagents outlive the main turn's
 		// Stop (Claude Code runs them detached by default), so they get their
 		// own edges instead of riding Start/Stop.
@@ -61,8 +61,7 @@ func modelForWorkTest() Model {
 	tab.ActivePane = "p1"
 	return Model{
 		client:        &fakeSender{},
-		tabs:          []*TabModel{tab},
-		activeTab:     0,
+		projects:      oneProject(tab),
 		notifications: NewNotificationCenter(cfg.Notification.SidebarWidth, cfg.Notification.MaxEvents),
 	}
 }
@@ -75,8 +74,8 @@ func modelWithBackgroundTab() Model {
 	tab2 := NewTabModel("tab-2", "background")
 	tab2.Root = NewLeaf(NewPaneModel("p2", 1024))
 	tab2.ActivePane = "p2"
-	m.tabs = append(m.tabs, tab2)
-	m.activeTab = 0
+	m.appendTab(tab2)
+	m.setActiveTabIdx(0)
 	return m
 }
 
@@ -85,13 +84,13 @@ func modelWithBackgroundTab() Model {
 // transitions on "p1b" exercise the unfocused-sibling marking rules.
 func modelWithSplitActiveTab() Model {
 	m := modelForWorkTest()
-	m.tabs[0].Root = &LayoutNode{
+	m.curTabs()[0].Root = &LayoutNode{
 		Split: SplitHorizontal,
 		Ratio: 0.5,
-		Left:  m.tabs[0].Root,
+		Left:  m.curTabs()[0].Root,
 		Right: NewLeaf(NewPaneModel("p1b", 1024)),
 	}
-	m.tabs[0].invalidateLeaves()
+	m.curTabs()[0].invalidateLeaves()
 	return m
 }
 
@@ -99,7 +98,7 @@ func TestApplyWorkTransition_StartSetsWorking(t *testing.T) {
 	t.Parallel()
 	m := modelForWorkTest()
 	m.applyWorkTransition("p1", "hook.claude.UserPromptSubmit", nil)
-	if !m.tabs[0].Root.Leaves()[0].working {
+	if !m.curTabs()[0].Root.Leaves()[0].working {
 		t.Fatal("expected pane.working = true after start event")
 	}
 	if !m.anyPaneWorking() {
@@ -115,10 +114,10 @@ func TestApplyWorkTransition_StopOnBackgroundTab_SetsUnseen(t *testing.T) {
 	m := modelWithBackgroundTab()
 	m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit", nil)
 	m.applyWorkTransition("p2", "hook.claude.Stop", nil)
-	if m.tabs[1].Root.Leaves()[0].working {
+	if m.curTabs()[1].Root.Leaves()[0].working {
 		t.Error("pane.working should be false after stop")
 	}
-	if !m.tabs[1].Root.Leaves()[0].unseen {
+	if !m.curTabs()[1].Root.Leaves()[0].unseen {
 		t.Error("background-tab pane should be marked unseen after a genuine stop")
 	}
 	if !m.tabUnseen(1) {
@@ -132,10 +131,10 @@ func TestApplyWorkTransition_StopOnFocusedPane_NoMark(t *testing.T) {
 	m := modelForWorkTest()
 	m.applyWorkTransition("p1", "hook.claude.UserPromptSubmit", nil)
 	m.applyWorkTransition("p1", "hook.claude.Stop", nil)
-	if m.tabs[0].Root.Leaves()[0].working {
+	if m.curTabs()[0].Root.Leaves()[0].working {
 		t.Error("pane.working should be false after stop")
 	}
-	if m.tabs[0].Root.Leaves()[0].unseen {
+	if m.curTabs()[0].Root.Leaves()[0].unseen {
 		t.Error("the focused pane of the active tab must never be marked unseen")
 	}
 }
@@ -148,7 +147,7 @@ func TestApplyWorkTransition_StopOnUnfocusedSibling_MarksPaneOnly(t *testing.T) 
 	m := modelWithSplitActiveTab()
 	m.applyWorkTransition("p1b", "hook.claude.UserPromptSubmit", nil)
 	m.applyWorkTransition("p1b", "hook.claude.Stop", nil)
-	if !m.tabs[0].Root.Right.Pane.unseen {
+	if !m.curTabs()[0].Root.Right.Pane.unseen {
 		t.Error("unfocused sibling pane should be marked unseen")
 	}
 	if m.tabUnseen(0) {
@@ -171,13 +170,95 @@ func TestApplyWorkTransition_ParkForInput_MarksBackgroundPane(t *testing.T) {
 			m := modelWithBackgroundTab()
 			m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit", nil)
 			m.applyWorkTransition("p2", evt, nil)
-			if m.tabs[1].Root.Leaves()[0].working {
+			if m.curTabs()[1].Root.Leaves()[0].working {
 				t.Errorf("%s: pane.working should be false after a park-for-input edge", evt)
 			}
-			if !m.tabs[1].Root.Leaves()[0].unseen {
+			if !m.curTabs()[1].Root.Leaves()[0].unseen {
 				t.Errorf("%s: pane should be marked unseen when the agent parks", evt)
 			}
 		})
+	}
+}
+
+func TestApplyWorkTransition_ParkSetsBlockedFields(t *testing.T) {
+	t.Parallel()
+	// A park edge must stamp blockedSince and carry the tool name when the
+	// hook supplies one (PermissionRequest), and leave blockedReason empty
+	// rather than inventing one when it doesn't (Notification).
+	m := modelForWorkTest()
+	m.applyWorkTransition("p1", "hook.claude.UserPromptSubmit", nil)
+	m.applyWorkTransition("p1", "hook.claude.PermissionRequest", map[string]string{"tool": "Bash"})
+	pane := m.curTabs()[0].Root.Leaves()[0]
+	if pane.blockedSince.IsZero() {
+		t.Fatal("a park edge must set blockedSince")
+	}
+	if pane.blockedReason != "Bash" {
+		t.Errorf("blockedReason = %q, want %q", pane.blockedReason, "Bash")
+	}
+
+	m2 := modelForWorkTest()
+	m2.applyWorkTransition("p1", "hook.claude.UserPromptSubmit", nil)
+	m2.applyWorkTransition("p1", "hook.claude.Notification", nil)
+	pane2 := m2.curTabs()[0].Root.Leaves()[0]
+	if pane2.blockedSince.IsZero() {
+		t.Fatal("a park edge must set blockedSince even without a tool")
+	}
+	if pane2.blockedReason != "" {
+		t.Errorf("blockedReason = %q, want empty — Notification carries no tool", pane2.blockedReason)
+	}
+}
+
+func TestApplyWorkTransition_StartAndAbortClearBlockedFields(t *testing.T) {
+	t.Parallel()
+	// A fresh turn and a process exit must both clear a lingering blocked
+	// mark from a prior park, same as they clear the unseen mark.
+	m := modelForWorkTest()
+	m.applyWorkTransition("p1", "hook.claude.UserPromptSubmit", nil)
+	m.applyWorkTransition("p1", "hook.claude.PermissionRequest", map[string]string{"tool": "Bash"})
+	pane := m.curTabs()[0].Root.Leaves()[0]
+	if pane.blockedSince.IsZero() {
+		t.Fatal("precondition: pane should be blocked after the park")
+	}
+
+	m.applyWorkTransition("p1", "hook.claude.UserPromptSubmit", nil)
+	if !pane.blockedSince.IsZero() || pane.blockedReason != "" {
+		t.Error("a new turn (UserPromptSubmit) must clear the blocked fields")
+	}
+
+	m2 := modelForWorkTest()
+	m2.applyWorkTransition("p1", "hook.claude.UserPromptSubmit", nil)
+	m2.applyWorkTransition("p1", "hook.claude.PermissionRequest", map[string]string{"tool": "Bash"})
+	pane2 := m2.curTabs()[0].Root.Leaves()[0]
+	m2.applyWorkTransition("p1", "process_exit", nil)
+	if !pane2.blockedSince.IsZero() || pane2.blockedReason != "" {
+		t.Error("process_exit must clear the blocked fields")
+	}
+}
+
+// TestTurnCompletionClearsTheBlockedMark guards the non-obvious clearing
+// edge: approving a permission prompt fires no hook of its own, so the
+// pane's next event is the turn's Stop. If a plain workStop did not clear
+// the blocked fields, the sidebar would keep showing the ⚠ marker on a pane
+// that has already finished its turn, until the user submits another
+// prompt — a completed turn is by definition not blocked.
+func TestTurnCompletionClearsTheBlockedMark(t *testing.T) {
+	t.Parallel()
+	pane := &PaneModel{ID: "pane-1"}
+	tab := NewTabModel("tab-1", "AI")
+	tab.Root = NewLeaf(pane)
+	m := Model{projects: []*ProjectModel{{ID: "proj-a", tabs: []*TabModel{tab}}}}
+
+	m.applyWorkTransition("pane-1", "hook.claude.PermissionRequest", map[string]string{"tool": "Bash"})
+	if pane.blockedSince.IsZero() {
+		t.Fatal("a permission request must mark the pane blocked")
+	}
+
+	// Approving fires no hook; the next event is the turn completing.
+	m.applyWorkTransition("pane-1", "hook.claude.Stop", nil)
+
+	if !pane.blockedSince.IsZero() {
+		t.Fatal("a completed turn must clear the blocked mark — otherwise ⚠ " +
+			"sticks on a pane that is done")
 	}
 }
 
@@ -188,7 +269,7 @@ func TestApplyWorkTransition_ResumeAfterParkClearsUnseenAndReArms(t *testing.T) 
 	m := modelWithBackgroundTab()
 	m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit", nil)
 	m.applyWorkTransition("p2", "hook.claude.PermissionRequest", nil) // park
-	pane := m.tabs[1].Root.Leaves()[0]
+	pane := m.curTabs()[1].Root.Leaves()[0]
 	if pane.working {
 		t.Fatal("precondition: pane should be parked (not working) before resume")
 	}
@@ -210,9 +291,9 @@ func TestApplyWorkTransition_StartClearsStaleUnseen(t *testing.T) {
 	// A fresh turn must clear a lingering mark from the previous turn — the
 	// spinner supersedes the green "finished" cue.
 	m := modelWithBackgroundTab()
-	m.tabs[1].Root.Leaves()[0].unseen = true
+	m.curTabs()[1].Root.Leaves()[0].unseen = true
 	m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit", nil)
-	if m.tabs[1].Root.Leaves()[0].unseen {
+	if m.curTabs()[1].Root.Leaves()[0].unseen {
 		t.Error("a new turn (UserPromptSubmit) should clear a stale unseen mark")
 	}
 }
@@ -222,18 +303,18 @@ func TestApplyWorkTransition_AbortClearsWorkingWithoutMarking(t *testing.T) {
 	m := modelWithBackgroundTab()
 	m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit", nil)
 	m.applyWorkTransition("p2", "process_exit", nil)
-	if m.tabs[1].Root.Leaves()[0].working {
+	if m.curTabs()[1].Root.Leaves()[0].working {
 		t.Error("pane.working should be false after process_exit")
 	}
-	if m.tabs[1].Root.Leaves()[0].unseen {
+	if m.curTabs()[1].Root.Leaves()[0].unseen {
 		t.Error("process_exit must NOT mark the pane unseen (a crash is not a completed turn)")
 	}
 
 	// An existing mark from an earlier completion survives an abort.
 	m2 := modelWithBackgroundTab()
-	m2.tabs[1].Root.Leaves()[0].unseen = true
+	m2.curTabs()[1].Root.Leaves()[0].unseen = true
 	m2.applyWorkTransition("p2", "process_exit", nil)
-	if !m2.tabs[1].Root.Leaves()[0].unseen {
+	if !m2.curTabs()[1].Root.Leaves()[0].unseen {
 		t.Error("abort must not clear an existing unseen mark")
 	}
 }
@@ -243,7 +324,7 @@ func TestApplyWorkTransition_StopWithoutPriorStart_NoMark(t *testing.T) {
 	// A Stop with no in-progress turn (pane was already idle) must not mark.
 	m := modelWithBackgroundTab()
 	m.applyWorkTransition("p2", "hook.claude.Stop", nil)
-	if m.tabs[1].Root.Leaves()[0].unseen {
+	if m.curTabs()[1].Root.Leaves()[0].unseen {
 		t.Error("stop on an already-idle pane must not mark the pane unseen")
 	}
 }
@@ -261,7 +342,7 @@ func TestApplyWorkTransition_StopWithOutstandingSubagents_KeepsSpinner(t *testin
 			m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit", nil)
 			m.applyWorkTransition("p2", "hook.claude.SubagentStart", map[string]string{"agent_type": "Explore"})
 			m.applyWorkTransition("p2", stopEdge, nil)
-			pane := m.tabs[1].Root.Leaves()[0]
+			pane := m.curTabs()[1].Root.Leaves()[0]
 			if !pane.working {
 				t.Errorf("%s with an outstanding subagent must keep the spinner", stopEdge)
 			}
@@ -289,7 +370,7 @@ func TestApplyWorkTransition_SubagentStopBeforeStop_TurnKeepsSpinner(t *testing.
 	m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit", nil)
 	m.applyWorkTransition("p2", "hook.claude.SubagentStart", map[string]string{"agent_type": "Explore"})
 	m.applyWorkTransition("p2", "hook.claude.SubagentStop", map[string]string{"agent_type": "Explore"})
-	pane := m.tabs[1].Root.Leaves()[0]
+	pane := m.curTabs()[1].Root.Leaves()[0]
 	if !pane.working {
 		t.Error("subagent drain during an active turn must keep the spinner")
 	}
@@ -316,7 +397,7 @@ func TestApplyWorkTransition_CoalescedSubagentBursts(t *testing.T) {
 	m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit", nil)
 	m.applyWorkTransition("p2", "hook.claude.SubagentStart", map[string]string{"agent_type": "Explore", "coalesced": "3"})
 	m.applyWorkTransition("p2", "hook.claude.Stop", nil)
-	pane := m.tabs[1].Root.Leaves()[0]
+	pane := m.curTabs()[1].Root.Leaves()[0]
 
 	m.applyWorkTransition("p2", "hook.claude.SubagentStop", map[string]string{"agent_type": "Explore", "coalesced": "2"})
 	if !pane.working {
@@ -337,7 +418,7 @@ func TestApplyWorkTransition_OrphanSubagentStop_NoUnderflow(t *testing.T) {
 	// must be a no-op — and must NOT push the counter negative, which would
 	// make the next SubagentStart+SubagentStop pair fail to balance.
 	m := modelWithBackgroundTab()
-	pane := m.tabs[1].Root.Leaves()[0]
+	pane := m.curTabs()[1].Root.Leaves()[0]
 	m.applyWorkTransition("p2", "hook.claude.SubagentStop", map[string]string{"agent_type": "Explore"}) // orphan
 	if pane.working {
 		t.Fatal("orphan SubagentStop on an idle pane must not start the spinner")
@@ -365,7 +446,7 @@ func TestApplyWorkTransition_SessionEndClearsOutstandingSubagents(t *testing.T) 
 	m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit", nil)
 	m.applyWorkTransition("p2", "hook.claude.SubagentStart", map[string]string{"agent_type": "Explore"})
 	m.applyWorkTransition("p2", "hook.claude.SessionEnd", nil)
-	pane := m.tabs[1].Root.Leaves()[0]
+	pane := m.curTabs()[1].Root.Leaves()[0]
 	if pane.working {
 		t.Error("SessionEnd must stop the spinner even with an outstanding subagent count")
 	}
@@ -384,7 +465,7 @@ func TestApplyWorkTransition_SubagentStartWithoutAgentType_IsRefused(t *testing.
 	// would collapse onto the empty key and the phantom would silently drain
 	// real work again, with no test failing to say so.
 	m := modelWithBackgroundTab()
-	pane := m.tabs[1].Root.Leaves()[0]
+	pane := m.curTabs()[1].Root.Leaves()[0]
 
 	m.applyWorkTransition("p2", "hook.claude.SubagentStart", map[string]string{"agent_type": ""})
 	if pane.working {
@@ -407,7 +488,7 @@ func TestApplyWorkTransition_OverCountedStopDrainsWithoutWedging(t *testing.T) {
 	// is the spinner's input, so a negative-valued entry would wedge it ON
 	// until SessionEnd — the mirror of the bug this branch fixes.
 	m := modelWithBackgroundTab()
-	pane := m.tabs[1].Root.Leaves()[0]
+	pane := m.curTabs()[1].Root.Leaves()[0]
 
 	m.applyWorkTransition("p2", "hook.claude.SubagentStart", map[string]string{"agent_type": "A"})
 	m.applyWorkTransition("p2", "hook.claude.SubagentStop", map[string]string{"agent_type": "A", "coalesced": "3"})
@@ -428,7 +509,7 @@ func TestApplyWorkTransition_LedgerIsBounded(t *testing.T) {
 	// ceiling cannot turn the spinner off — `working` derives from len() > 0,
 	// which is already true once the ledger is full.
 	m := modelWithBackgroundTab()
-	pane := m.tabs[1].Root.Leaves()[0]
+	pane := m.curTabs()[1].Root.Leaves()[0]
 
 	for i := 0; i < maxTrackedSubagents*3; i++ {
 		m.applyWorkTransition("p2", "hook.claude.SubagentStart",
@@ -458,7 +539,7 @@ func TestApplyWorkTransition_OverflowedAgentsKeepSpinnerLit(t *testing.T) {
 	// exists to fix. Overflow is therefore sticky until a terminal edge —
 	// wrong-on is the safe direction, wrong-off is the one users report.
 	m := modelWithBackgroundTab()
-	pane := m.tabs[1].Root.Leaves()[0]
+	pane := m.curTabs()[1].Root.Leaves()[0]
 
 	total := maxTrackedSubagents + 5
 	for i := 0; i < total; i++ {
@@ -496,7 +577,7 @@ func TestApplyWorkTransition_PhantomSubagentStop_DoesNotDrainNamedAgent(t *testi
 	m := modelWithBackgroundTab()
 	m.applyWorkTransition("p2", "hook.claude.SubagentStart", map[string]string{"agent_type": "impl-task7"})
 	m.applyWorkTransition("p2", "hook.claude.Stop", nil)
-	pane := m.tabs[1].Root.Leaves()[0]
+	pane := m.curTabs()[1].Root.Leaves()[0]
 	if !pane.working {
 		t.Fatal("precondition: Stop with an outstanding subagent must keep the spinner")
 	}
@@ -528,7 +609,7 @@ func TestApplyWorkTransition_SubagentStopForUnknownAgent_DoesNotDrainAnother(t *
 	m := modelWithBackgroundTab()
 	m.applyWorkTransition("p2", "hook.claude.SubagentStart", map[string]string{"agent_type": "impl-task7"})
 	m.applyWorkTransition("p2", "hook.claude.SubagentStop", map[string]string{"agent_type": "rev-task7"})
-	pane := m.tabs[1].Root.Leaves()[0]
+	pane := m.curTabs()[1].Root.Leaves()[0]
 	if !pane.working {
 		t.Error("a stop naming a different agent drained impl-task7 — stops must be matched by identity")
 	}
@@ -542,7 +623,7 @@ func TestApplyWorkTransition_ConcurrentNamedAgentsDrainIndependently(t *testing.
 	m.applyWorkTransition("p2", "hook.claude.SubagentStart", map[string]string{"agent_type": "impl-task7"})
 	m.applyWorkTransition("p2", "hook.claude.SubagentStart", map[string]string{"agent_type": "rev-task7"})
 	m.applyWorkTransition("p2", "hook.claude.Stop", nil)
-	pane := m.tabs[1].Root.Leaves()[0]
+	pane := m.curTabs()[1].Root.Leaves()[0]
 
 	m.applyWorkTransition("p2", "hook.claude.SubagentStop", map[string]string{"agent_type": "rev-task7"})
 	if !pane.working {
@@ -567,7 +648,7 @@ func TestApplyWorkTransition_ProductionPhantomSequence_KeepsSpinnerLit(t *testin
 	// 27 minutes. Each main turn ends Stop → phantom SubagentStop(""), and one
 	// of those phantoms landed 2 s after impl-task7 spawned.
 	m := modelWithBackgroundTab()
-	pane := m.tabs[1].Root.Leaves()[0]
+	pane := m.curTabs()[1].Root.Leaves()[0]
 	named := func(t string) map[string]string { return map[string]string{"agent_type": t} }
 	phantom := map[string]string{"agent_type": ""}
 
@@ -597,7 +678,7 @@ func TestApplyWorkTransition_ProcessExitClearsOutstandingSubagents(t *testing.T)
 	m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit", nil)
 	m.applyWorkTransition("p2", "hook.claude.SubagentStart", map[string]string{"agent_type": "Explore"})
 	m.applyWorkTransition("p2", "process_exit", nil)
-	pane := m.tabs[1].Root.Leaves()[0]
+	pane := m.curTabs()[1].Root.Leaves()[0]
 	if len(pane.subagents) != 0 {
 		t.Fatalf("process_exit must clear the subagent ledger; got %v", pane.subagents)
 	}
@@ -623,7 +704,7 @@ func TestApplyWorkTransition_SubagentStartFromIdle_SetsWorkingAndClearsUnseen(t 
 	// subagent can spawn (or an event replay can start mid-cycle): the spawn
 	// alone must light the spinner and supersede a stale unseen mark.
 	m := modelWithBackgroundTab()
-	pane := m.tabs[1].Root.Leaves()[0]
+	pane := m.curTabs()[1].Root.Leaves()[0]
 	pane.unseen = true
 	m.applyWorkTransition("p2", "hook.claude.SubagentStart", map[string]string{"agent_type": "Explore"})
 	if !pane.working {
@@ -675,13 +756,13 @@ func TestTabUnseen_DerivedAndBounds(t *testing.T) {
 	if m.tabUnseen(1) {
 		t.Error("background tab with no unseen pane must report false")
 	}
-	m.tabs[1].Root.Leaves()[0].unseen = true
+	m.curTabs()[1].Root.Leaves()[0].unseen = true
 	if !m.tabUnseen(1) {
 		t.Error("background tab with an unseen pane must report true")
 	}
 	// The same tab reports false the moment it is active — the label cue is
 	// suppressed while the user is on the tab (the pane border takes over).
-	m.activeTab = 1
+	m.setActiveTabIdx(1)
 	if m.tabUnseen(1) {
 		t.Error("the active tab must never report unseen")
 	}
@@ -695,13 +776,13 @@ func TestTabStyle_UnseenOverridesInactive(t *testing.T) {
 	// rendered 256-color background SGR: unseen=48;5;28, active=48;5;57.
 
 	// Background tab with an unseen pane → green label.
-	m.tabs[1].Root.Leaves()[0].unseen = true
+	m.curTabs()[1].Root.Leaves()[0].unseen = true
 	if !strings.Contains(m.tabStyle(1).Render("x"), "48;5;28") {
 		t.Error("unseen background tab should render with green background (48;5;28)")
 	}
 
 	// Active tab never renders the green label, even with an unseen pane.
-	m.tabs[0].Root.Leaves()[0].unseen = true
+	m.curTabs()[0].Root.Leaves()[0].unseen = true
 	if strings.Contains(m.tabStyle(0).Render("x"), "48;5;28") {
 		t.Error("active tab must never use the green unseen background")
 	}
@@ -716,14 +797,14 @@ func TestUpdate_PaneEvent_MutedPaneTracksWorkingWithoutCard(t *testing.T) {
 	// daemon.emitEvent) so `working` stays accurate across mute/unmute — but
 	// muting must still suppress the visible sidebar card.
 	m := modelForWorkTest()
-	m.tabs[0].Root.Leaves()[0].Muted = true
+	m.curTabs()[0].Root.Leaves()[0].Muted = true
 
 	start := paneEventMsg(ipc.PaneEventPayload{
 		ID: "e1", PaneID: "p1", Type: "hook.claude.UserPromptSubmit", Title: "Working on: x",
 	})
 	next, _ := m.Update(start)
 	nm := next.(Model)
-	if !nm.tabs[0].Root.Leaves()[0].working {
+	if !nm.curTabs()[0].Root.Leaves()[0].working {
 		t.Fatal("muted pane should still track working=true from a live work-state event")
 	}
 	if nm.notifications.Count() != 0 {
@@ -735,7 +816,7 @@ func TestUpdate_PaneEvent_MutedPaneTracksWorkingWithoutCard(t *testing.T) {
 	})
 	next2, _ := nm.Update(stop)
 	nm2 := next2.(Model)
-	if nm2.tabs[0].Root.Leaves()[0].working {
+	if nm2.curTabs()[0].Root.Leaves()[0].working {
 		t.Error("muted pane should still clear working=false from a live Stop event")
 	}
 	if nm2.notifications.Count() != 0 {
@@ -766,15 +847,15 @@ func TestUpdate_WorkSpinnerTick_AdvancesAndStops(t *testing.T) {
 	t.Parallel()
 	m := modelForWorkTest()
 	// Pane working → tick should advance the frame and keep running.
-	m.tabs[0].Root.Leaves()[0].working = true
+	m.curTabs()[0].Root.Leaves()[0].working = true
 	m.workTickRunning = true
 	next, cmd := m.Update(workSpinnerTickMsg{})
 	nm := next.(Model)
 	if nm.workSpinnerFrame != 1 {
 		t.Errorf("frame = %d, want 1", nm.workSpinnerFrame)
 	}
-	if nm.tabs[0].Root.Leaves()[0].workFrame != 1 {
-		t.Errorf("pane.workFrame = %d, want 1 (mirrored)", nm.tabs[0].Root.Leaves()[0].workFrame)
+	if nm.curTabs()[0].Root.Leaves()[0].workFrame != 1 {
+		t.Errorf("pane.workFrame = %d, want 1 (mirrored)", nm.curTabs()[0].Root.Leaves()[0].workFrame)
 	}
 	if cmd == nil {
 		t.Error("tick should reschedule while a pane is working")
@@ -795,7 +876,7 @@ func TestUpdate_WorkSpinnerTick_AdvancesAndStops(t *testing.T) {
 func TestTabLabel_ShowsSpinnerWhenWorking(t *testing.T) {
 	t.Parallel()
 	m := modelForWorkTest()
-	m.tabs[0].Name = "Build"
+	m.curTabs()[0].Name = "Build"
 	m.workSpinnerFrame = 0 // spinnerFrames[0] == "⠋"
 
 	// Not working: no spinner glyph.
@@ -804,7 +885,7 @@ func TestTabLabel_ShowsSpinnerWhenWorking(t *testing.T) {
 	}
 
 	// Working: leading spinner frame present.
-	m.tabs[0].Root.Leaves()[0].working = true
+	m.curTabs()[0].Root.Leaves()[0].working = true
 	got := m.tabLabel(0)
 	if !strings.Contains(got, "⠋") {
 		t.Errorf("working tab label %q should contain frame ⠋", got)
@@ -852,8 +933,8 @@ func TestSyncPaneMeta_MuteDoesNotDisturbWorking(t *testing.T) {
 func TestAckFocusedPane_ClearsOnlyFocusedPane(t *testing.T) {
 	t.Parallel()
 	m := modelWithSplitActiveTab()
-	focused := m.tabs[0].Root.Left.Pane  // "p1" — tab.ActivePane
-	sibling := m.tabs[0].Root.Right.Pane // "p1b" — unfocused
+	focused := m.curTabs()[0].Root.Left.Pane  // "p1" — tab.ActivePane
+	sibling := m.curTabs()[0].Root.Right.Pane // "p1b" — unfocused
 	focused.unseen = true
 	sibling.unseen = true
 	m.ackFocusedPane()
@@ -868,7 +949,7 @@ func TestAckFocusedPane_ClearsOnlyFocusedPane(t *testing.T) {
 func TestAckFocusedPane_BackgroundTabUntouched(t *testing.T) {
 	t.Parallel()
 	m := modelWithBackgroundTab()
-	bg := m.tabs[1].Root.Leaves()[0] // "p2" is tab-2's ActivePane, but tab-2 is background
+	bg := m.curTabs()[1].Root.Leaves()[0] // "p2" is tab-2's ActivePane, but tab-2 is background
 	bg.unseen = true
 	m.ackFocusedPane()
 	if !bg.unseen {
@@ -917,9 +998,10 @@ func TestUpdate_AcksFocusedPaneAtEntry(t *testing.T) {
 	// active tab on every message — focusing is the acknowledgement (see
 	// ackFocusedPane; a focused pane never renders the mark anyway).
 	m := modelForWorkTest()
-	m.tabs[0].Root.Leaves()[0].unseen = true
+	m.curTabs()[0].Root.Leaves()[0].unseen = true
 	next, _ := m.Update(workSpinnerTickMsg{})
-	if next.(Model).tabs[0].Root.Leaves()[0].unseen {
+	nextM := next.(Model)
+	if nextM.curTabs()[0].Root.Leaves()[0].unseen {
 		t.Error("Update entry must acknowledge the focused pane of the active tab")
 	}
 }
@@ -927,7 +1009,7 @@ func TestUpdate_AcksFocusedPaneAtEntry(t *testing.T) {
 func TestWorkSpinnerTick_FrameWraparoundMirrors(t *testing.T) {
 	t.Parallel()
 	m := modelForWorkTest()
-	m.tabs[0].Root.Leaves()[0].working = true
+	m.curTabs()[0].Root.Leaves()[0].working = true
 	m.workTickRunning = true
 	// Push the frame to the last index so the next tick crosses the modulo
 	// boundary — the raw frame keeps incrementing and the pane mirror must
@@ -938,10 +1020,241 @@ func TestWorkSpinnerTick_FrameWraparoundMirrors(t *testing.T) {
 	if nm.workSpinnerFrame != len(spinnerFrames) {
 		t.Fatalf("frame = %d, want %d", nm.workSpinnerFrame, len(spinnerFrames))
 	}
-	if nm.tabs[0].Root.Leaves()[0].workFrame != len(spinnerFrames) {
+	if nm.curTabs()[0].Root.Leaves()[0].workFrame != len(spinnerFrames) {
 		t.Errorf("pane.workFrame = %d, want %d (mirrors raw frame)",
-			nm.tabs[0].Root.Leaves()[0].workFrame, len(spinnerFrames))
+			nm.curTabs()[0].Root.Leaves()[0].workFrame, len(spinnerFrames))
 	}
 	// Rendering at the wrapped frame must not panic (modulo guards the index).
 	_ = nm.tabLabel(0)
+}
+
+// Task 6: cross-project resolution. Tasks 1-4 built the daemon-side project
+// layer; Task 5 scoped most client reads to the active project. These sites
+// are the minority that must span every project instead.
+
+// A hook event for a pane in a BACKGROUND project must still update that
+// pane's working state — that is the whole point of the sidebar: an agent
+// working in a project the user isn't currently looking at still needs its
+// spinner and unseen mark tracked.
+func TestPaneEventFromBackgroundProjectUpdatesState(t *testing.T) {
+	bgPane := &PaneModel{ID: "pane-bg"}
+	bg := NewTabModel("tab-bg", "Agent")
+	bg.Root = NewLeaf(bgPane)
+
+	m := Model{
+		projects: []*ProjectModel{
+			{ID: "proj-fg", tabs: []*TabModel{NewTabModel("tab-fg", "Shell")}},
+			{ID: "proj-bg", tabs: []*TabModel{bg}},
+		},
+		activeProject: 0, // the event's pane is NOT in the active project
+	}
+
+	m.applyWorkTransition("pane-bg", "hook.claude.UserPromptSubmit", nil)
+
+	if !bgPane.working {
+		t.Fatal("a pane event for a background project must still update it — " +
+			"this is the whole point of the sidebar")
+	}
+}
+
+func TestFindPaneAndTabReportsOwningProject(t *testing.T) {
+	tab := NewTabModel("tab-bg", "Agent")
+	tab.Root = NewLeaf(&PaneModel{ID: "pane-bg"})
+	m := Model{projects: []*ProjectModel{
+		{ID: "proj-fg", tabs: []*TabModel{NewTabModel("tab-fg", "Shell")}},
+		{ID: "proj-bg", tabs: []*TabModel{tab}},
+	}}
+
+	pane, proj, idx := m.findPaneAndTab("pane-bg")
+	if pane == nil || proj == nil || proj.ID != "proj-bg" || idx != 0 {
+		t.Fatalf("findPaneAndTab = (%v, %v, %d), want proj-bg tab 0", pane, proj, idx)
+	}
+}
+
+// twoProjectModel builds a Model with two projects: "proj-fg" (active,
+// holding pane "p-fg") and "proj-bg" (background, holding pane "p-bg").
+func twoProjectModel() Model {
+	fgTab := NewTabModel("tab-fg", "Shell")
+	fgTab.Root = NewLeaf(NewPaneModel("p-fg", 1024))
+	fgTab.ActivePane = "p-fg"
+	fg := &ProjectModel{ID: "proj-fg", Name: "Foreground", tabs: []*TabModel{fgTab}}
+
+	bgTab := NewTabModel("tab-bg", "Agent")
+	bgTab.Root = NewLeaf(NewPaneModel("p-bg", 1024))
+	bgTab.ActivePane = "p-bg"
+	bg := &ProjectModel{ID: "proj-bg", Name: "Background", tabs: []*TabModel{bgTab}}
+
+	return Model{projects: []*ProjectModel{fg, bg}, activeProject: 0}
+}
+
+func TestJumpToPane_SwitchesProjectAndTab(t *testing.T) {
+	t.Parallel()
+	m := twoProjectModel()
+	if !m.jumpToPane("p-bg") {
+		t.Fatal("jumpToPane should report success for an existing pane")
+	}
+	if m.activeProject != 1 {
+		t.Fatalf("activeProject = %d, want 1 (proj-bg)", m.activeProject)
+	}
+	if got := m.activeTabModel(); got == nil || got.ID != "tab-bg" {
+		t.Fatalf("activeTabModel = %v, want tab-bg", got)
+	}
+	if m.activeTabModel().ActivePane != "p-bg" {
+		t.Fatalf("ActivePane = %q, want p-bg", m.activeTabModel().ActivePane)
+	}
+}
+
+// TestJumpToPane_TellsTheOwningDaemonAboutTheTab: jumpToPane writes
+// proj.activeTab directly rather than going through switchTab, so nothing told
+// the daemon. After a lazy restore that matters — the daemon spawns a tab's
+// deferred panes on the switch, so a jump into a background tab landed the user
+// on panes that were still Pending, with no process behind them.
+func TestJumpToPane_TellsTheOwningDaemonAboutTheTab(t *testing.T) {
+	t.Parallel()
+	fake := newFakeConn()
+	m := twoProjectModel()
+	m.client = fake
+	m.projects[1].Dest = "gpu01"
+	m.projects[1].tabs[0].Dest = "gpu01"
+
+	if !m.jumpToPane("p-bg") {
+		t.Fatal("jumpToPane should report success for an existing pane")
+	}
+
+	var switched *ipc.Message
+	for _, msg := range fake.sent {
+		if msg.Type == ipc.MsgSwitchTab {
+			switched = msg
+		}
+	}
+	if switched == nil {
+		t.Fatal("jumpToPane sent no MsgSwitchTab — the target tab's panes stay Pending")
+	}
+	var payload ipc.SwitchTabPayload
+	if err := switched.DecodePayload(&payload); err != nil {
+		t.Fatalf("decode switch payload: %v", err)
+	}
+	if payload.TabID != "tab-bg" {
+		t.Errorf("MsgSwitchTab TabID = %q, want tab-bg", payload.TabID)
+	}
+	// Stamped for the tab's OWN daemon: an unstamped send resolves to whatever
+	// the router's current dest is, which is the wrong machine as often as not.
+	if switched.Origin != "gpu01" {
+		t.Errorf("MsgSwitchTab Origin = %q, want gpu01", switched.Origin)
+	}
+}
+
+func TestJumpToPane_MissingPaneReturnsFalseWithoutMutating(t *testing.T) {
+	t.Parallel()
+	m := twoProjectModel()
+	if m.jumpToPane("does-not-exist") {
+		t.Fatal("jumpToPane should report failure for a pane that does not exist")
+	}
+	if m.activeProject != 0 {
+		t.Fatalf("activeProject changed to %d on a failed jump", m.activeProject)
+	}
+}
+
+// MCP set_active_pane must reach a pane in a background project instead of
+// silently no-oping, which is what curTabs()-scoped resolution used to do.
+func TestUpdate_SetActivePaneMsg_CrossProject(t *testing.T) {
+	t.Parallel()
+	m := twoProjectModel()
+	next, _ := m.Update(setActivePaneMsg{PaneID: "p-bg"})
+	got := next.(Model)
+	if got.activeProject != 1 {
+		t.Fatalf("activeProject = %d, want 1 (proj-bg)", got.activeProject)
+	}
+	if got.activeTabModel() == nil || got.activeTabModel().ActivePane != "p-bg" {
+		t.Fatal("set_active_pane did not focus the background project's pane")
+	}
+}
+
+func TestUpdate_SetActivePaneMsg_MissingPaneNoOps(t *testing.T) {
+	t.Parallel()
+	m := twoProjectModel()
+	next, _ := m.Update(setActivePaneMsg{PaneID: "does-not-exist"})
+	got := next.(Model)
+	if got.activeProject != 0 {
+		t.Fatalf("activeProject changed to %d for a pane that does not exist", got.activeProject)
+	}
+}
+
+// Sidebar notification navigation must jump across projects, and must not
+// grow pane-navigation history for a jump that never happened (the pane
+// named by the event no longer exists).
+func TestHandleNotificationKey_Navigate_CrossProject(t *testing.T) {
+	t.Parallel()
+	m := twoProjectModel()
+	m.notifications = NewNotificationCenter(30, 50)
+	m.notifications.AddEvent(ipc.PaneEventPayload{ID: "e1", PaneID: "p-bg"})
+
+	next, _ := m.handleNotificationKey("enter")
+	got := next.(Model)
+	if got.activeProject != 1 {
+		t.Fatalf("activeProject = %d, want 1 (proj-bg)", got.activeProject)
+	}
+	if len(got.paneHistory) != 1 || got.paneHistory[0].ProjectID != "proj-fg" || got.paneHistory[0].PaneID != "p-fg" {
+		t.Fatalf("paneHistory = %+v, want one entry recording proj-fg/p-fg", got.paneHistory)
+	}
+}
+
+func TestHandleNotificationKey_Navigate_FailedJumpDoesNotGrowHistory(t *testing.T) {
+	t.Parallel()
+	m := twoProjectModel()
+	m.notifications = NewNotificationCenter(30, 50)
+	m.notifications.AddEvent(ipc.PaneEventPayload{ID: "e1", PaneID: "does-not-exist"})
+
+	next, _ := m.handleNotificationKey("enter")
+	got := next.(Model)
+	if got.activeProject != 0 {
+		t.Fatalf("activeProject changed to %d for a jump that should have failed", got.activeProject)
+	}
+	if len(got.paneHistory) != 0 {
+		t.Fatalf("paneHistory grew to %d entries for a jump that never happened", len(got.paneHistory))
+	}
+}
+
+// TestApplyWorkTransition_ReplayOrderDecidesTheFinalState pins the contract the
+// daemon's attach replay has to satisfy. applyWorkTransition is an ordered
+// state machine, so the sequence it is fed IS the answer — feeding a pane's
+// history backwards reports the state implied by its oldest event.
+//
+// The sequence below is the one logged for pane-fa75ba78 on 2026-08-03: a turn
+// resumed, replied, then parked waiting for the user. Played forwards the pane
+// is blocked, which is where it really was. Played backwards it is working,
+// which is what the user saw after restarting the TUI — a spinner with nothing
+// behind it.
+func TestApplyWorkTransition_ReplayOrderDecidesTheFinalState(t *testing.T) {
+	t.Parallel()
+	history := []string{
+		"hook.claude.PostToolUse",   // resumed after AskUserQuestion
+		"hook.claude.Stop",          // reply ready
+		"hook.claude.Notification",  // parked: waiting for input
+	}
+
+	forwards := modelForWorkTest()
+	for _, evt := range history {
+		forwards.applyWorkTransition("p1", evt, nil)
+	}
+	pane := forwards.curTabs()[0].Root.Leaves()[0]
+	if pane.working {
+		t.Error("chronological replay left the pane working; its last event was a park")
+	}
+	if pane.blockedSince.IsZero() {
+		t.Error("chronological replay did not mark the pane blocked")
+	}
+
+	// The failing direction, asserted so the daemon-side ordering fix has a
+	// stated reason to exist rather than looking like a cosmetic reversal.
+	backwards := modelForWorkTest()
+	for i := len(history) - 1; i >= 0; i-- {
+		backwards.applyWorkTransition("p1", history[i], nil)
+	}
+	if got := backwards.curTabs()[0].Root.Leaves()[0]; !got.working || !got.blockedSince.IsZero() {
+		t.Errorf("reverse replay produced working=%v blocked=%v; the bug this "+
+			"pins is that it reports working with no park — if this changed, the "+
+			"daemon's replay order may no longer be load-bearing",
+			got.working, !got.blockedSince.IsZero())
+	}
 }

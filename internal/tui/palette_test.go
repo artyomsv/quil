@@ -127,6 +127,41 @@ func TestBuildPaletteCommands_NavigationAndGates(t *testing.T) {
 	}
 }
 
+// "Go to pane" must reach a pane in a BACKGROUND project too — a background
+// agent that needs attention should not be invisible just because its
+// project isn't the one on screen — and its label must carry the project
+// name (two tabs both named "Shell" in different projects would otherwise be
+// indistinguishable). The active project's own entries must NOT carry a
+// project name — it would only repeat what's already on screen.
+func TestBuildPaletteCommands_CrossProjectGoToPane(t *testing.T) {
+	t.Parallel()
+	m := twoProjectModel()
+	cmds := m.buildPaletteCommands()
+
+	var fg, bg *paletteCommand
+	for i := range cmds {
+		c := &cmds[i]
+		if c.action != palActGoToPane {
+			continue
+		}
+		switch c.arg {
+		case "p-fg":
+			fg = c
+		case "p-bg":
+			bg = c
+		}
+	}
+	if fg == nil || bg == nil {
+		t.Fatalf("both the active and background project's panes must have Go-to commands (fg=%v bg=%v)", fg, bg)
+	}
+	if strings.Contains(fg.label, "Foreground") {
+		t.Errorf("the active project's own entry should not carry a project name: %q", fg.label)
+	}
+	if !strings.Contains(bg.label, "Background") {
+		t.Errorf("the background project's entry must carry its project name: %q", bg.label)
+	}
+}
+
 func TestRenderCommandPalette_WidthAndCursor(t *testing.T) {
 	t.Parallel()
 	m := newSplitDragTestModel(t)

@@ -1,12 +1,14 @@
 package tui
 
 import (
+	"log"
 	"strconv"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/artyomsv/quil/internal/hookevents"
+	"github.com/artyomsv/quil/internal/ipc"
 )
 
 // workSpinnerInterval is the animation cadence for the work-in-progress
@@ -29,11 +31,12 @@ type workTransition = hookevents.WorkEventKind
 const (
 	workNone          = hookevents.WorkEventNone          // no effect
 	workStart         = hookevents.WorkEventStart         // a turn began
-	workStop          = hookevents.WorkEventStop          // turn completed OR parked for user input → mark pane unseen
+	workStop          = hookevents.WorkEventStop          // turn completed → mark pane unseen
 	workAbort         = hookevents.WorkEventAbort         // process exited → clear working, no mark
 	workSubagentStart = hookevents.WorkEventSubagentStart // subagent spawned → spinner on
 	workSubagentStop  = hookevents.WorkEventSubagentStop  // subagent finished → spinner off once drained AND turn over
 	workStopFinal     = hookevents.WorkEventStopFinal     // terminal stop → also clears the outstanding count
+	workPark          = hookevents.WorkEventPark          // agent blocked on the user (permission/idle) → same spinner/unseen handling as workStop, plus blockedSince/blockedReason
 )
 
 // workEventKind maps a PaneEvent Type (the daemon encodes hook events as
@@ -42,18 +45,93 @@ func workEventKind(eventType string) workTransition {
 	return hookevents.ClassifyWorkEvent(eventType)
 }
 
-// findPaneAndTab locates a pane by ID and the index of its containing tab.
-// Returns (nil, -1) if not found.
-func (m *Model) findPaneAndTab(paneID string) (*PaneModel, int) {
-	for i, tab := range m.tabs {
-		if tab.Root == nil {
-			continue
-		}
-		if leaf := tab.Root.FindLeaf(paneID); leaf != nil {
-			return leaf.Pane, i
+// findPaneAndTab locates a pane by ID across EVERY project and reports the
+// owning project and the tab's index within it.
+//
+// Cross-project is a correctness requirement, not a convenience: agents in
+// background projects keep firing hook events, and scoping this to the
+// active project would leave a blocked background agent invisible. Returns
+// (nil, nil, -1) if not found.
+func (m *Model) findPaneAndTab(paneID string) (*PaneModel, *ProjectModel, int) {
+	for _, proj := range m.projects {
+		for i, tab := range proj.tabs {
+			if tab.Root == nil {
+				continue
+			}
+			if leaf := tab.Root.FindLeaf(paneID); leaf != nil {
+				return leaf.Pane, proj, i
+			}
 		}
 	}
-	return nil, -1
+	return nil, nil, -1
+}
+
+// jumpToPane moves the active project, active tab, and focused pane to reach
+// paneID anywhere in the workspace. Returns false when the pane no longer
+// exists, so callers can skip recording navigation history for a jump that
+// did not happen. Shared by every navigation path that needs to cross a
+// project boundary (MCP set_active_pane, sidebar notification navigate,
+// pane-history back-navigation, the command palette's goToPane) — one
+// implementation instead of four hand-rolled copies of the same sequence.
+func (m *Model) jumpToPane(paneID string) bool {
+	pane, proj, tabIdx := m.findPaneAndTab(paneID)
+	if pane == nil {
+		return false
+	}
+	// Notes mode is torn down BEFORE the tab moves, which is the contract
+	// exitNotesModeInPlace states: it reverts focus mode on the tab that is
+	// active when it runs, so calling it afterwards reverts the wrong one.
+	//
+	// This is the choke point for every cross-tab jump that is not switchTab —
+	// MCP set_active_pane, the notification sidebar, pane-history back, the
+	// palette and the attention queue all arrive here. They each moved the
+	// active tab with the editor still open, bound to a pane in the tab being
+	// left, still claiming its share of the width. notesKeyExempt does not
+	// cover it: that branch only runs while the EDITOR has focus, and notes
+	// open beside a working agent normally has the PANE focused.
+	if m.notesMode {
+		m.exitNotesModeInPlace()
+	}
+	for i, p := range m.projects {
+		if p == proj {
+			m.activeProject = i
+			break
+		}
+	}
+	proj.activeTab = tabIdx
+	proj.tabs[tabIdx].ActivePane = paneID
+	// The jump may have crossed a project — and therefore a daemon — boundary,
+	// so every later unstamped send has a new right answer.
+	m.syncActiveDest()
+	m.notifyTabSwitch(proj.tabs[tabIdx])
+	return true
+}
+
+// notifyTabSwitch tells a tab's OWNING daemon that this tab is now active.
+//
+// Not bookkeeping: the daemon spawns a tab's lazily-restored panes on the
+// switch, so an activeTab write that skips it lands the user on panes that are
+// still Pending — the restore indicator with no process behind it, which no
+// resize can rescue because there is no PTY to resize. It also keeps
+// Project.ActiveTab in step, which is what the next restore warms up.
+//
+// Sent synchronously rather than as a tea.Cmd, like switchProject's own
+// MsgSwitchProject: the dest is resolved here, on the Update goroutine, rather
+// than inside a closure racing a workspace rebuild of m.projects.
+func (m *Model) notifyTabSwitch(tab *TabModel) {
+	// The nil client is the ~46 Models tests build directly, and the window
+	// before a connection exists; sendForDest dereferences it unconditionally.
+	if tab == nil || m.client == nil {
+		return
+	}
+	msg, err := ipc.NewMessage(ipc.MsgSwitchTab, ipc.SwitchTabPayload{TabID: tab.ID})
+	if err != nil {
+		log.Printf("switch tab %s: encode: %v", tab.ID, err)
+		return
+	}
+	if err := m.sendForDest(tab.Dest, msg); err != nil {
+		log.Printf("switch tab %s: send: %v", tab.ID, err)
+	}
 }
 
 // applyWorkTransition updates the working state of the pane identified by
@@ -102,7 +180,7 @@ func (m *Model) applyWorkTransition(paneID, eventType string, data map[string]st
 	if kind == workNone {
 		return
 	}
-	pane, tabIdx := m.findPaneAndTab(paneID)
+	pane, proj, tabIdx := m.findPaneAndTab(paneID)
 	if pane == nil {
 		return
 	}
@@ -111,6 +189,8 @@ func (m *Model) applyWorkTransition(paneID, eventType string, data map[string]st
 	switch kind {
 	case workStart:
 		pane.turnActive = true
+		pane.blockedSince = time.Time{}
+		pane.blockedReason = ""
 	case workSubagentStart:
 		agentType := data["agent_type"]
 		if agentType == "" {
@@ -185,6 +265,12 @@ func (m *Model) applyWorkTransition(paneID, eventType string, data map[string]st
 		}
 	case workStop, workStopFinal:
 		pane.turnActive = false
+		// A completed turn is by definition not blocked — clears on a PLAIN
+		// workStop too, not just workStopFinal. Approving a permission
+		// prompt fires no hook of its own: the pane's next event is the
+		// turn's Stop, so this is the only edge that un-blocks it.
+		pane.blockedSince = time.Time{}
+		pane.blockedReason = ""
 		if kind == workStopFinal {
 			// Terminal stop (session end): no subagent of the session can
 			// still be alive — drop the ledger so a lost SubagentStop can't
@@ -193,10 +279,23 @@ func (m *Model) applyWorkTransition(paneID, eventType string, data map[string]st
 			clear(pane.subagents)
 			pane.subagentsOverflow = false
 		}
+	case workPark:
+		// Blocked waiting on the user — handled exactly like workStop for
+		// the derived `working` recomputation and the unseen mark below;
+		// only the blocked fields differ.
+		pane.turnActive = false
+		pane.blockedSince = time.Now()
+		// Data["tool"] is set by the claude hook only for PermissionRequest
+		// and PostToolUse. Notification and opencode's permission.ask may
+		// carry no tool, so the reason is genuinely optional — render a bare
+		// marker rather than inventing one.
+		pane.blockedReason = data["tool"]
 	case workAbort:
 		pane.turnActive = false
 		clear(pane.subagents)
 		pane.subagentsOverflow = false
+		pane.blockedSince = time.Time{}
+		pane.blockedReason = ""
 		abort = true
 	}
 
@@ -221,7 +320,7 @@ func (m *Model) applyWorkTransition(paneID, eventType string, data map[string]st
 		// IS marked — its green border is the cue. An abort (process exit)
 		// clears the spinner without marking: a crash is not a completed
 		// turn.
-		focused := tabIdx == m.activeTab && m.tabs[tabIdx].ActivePane == paneID
+		focused := proj == m.cur() && tabIdx == proj.activeTab && proj.tabs[tabIdx].ActivePane == paneID
 		if !focused {
 			pane.unseen = true
 		}
@@ -249,10 +348,7 @@ func coalescedCount(data map[string]string) int {
 // a newly focused pane is acknowledged on the next message (the 1 s size
 // poll bounds the wait). Unfocused panes keep their mark until focused.
 func (m *Model) ackFocusedPane() {
-	if m.activeTab < 0 || m.activeTab >= len(m.tabs) {
-		return
-	}
-	tab := m.tabs[m.activeTab]
+	tab := m.activeTabModel()
 	if tab == nil || tab.Root == nil || tab.ActivePane == "" {
 		return
 	}
@@ -268,7 +364,7 @@ func (m *Model) ackFocusedPane() {
 
 // anyPaneWorking reports whether any pane in any tab is mid-turn.
 func (m Model) anyPaneWorking() bool {
-	for _, tab := range m.tabs {
+	for _, tab := range m.allTabs() {
 		if tab.Root == nil {
 			continue
 		}
@@ -283,10 +379,11 @@ func (m Model) anyPaneWorking() bool {
 
 // tabHasWorkingPane reports whether the tab at idx has at least one mid-turn pane.
 func (m Model) tabHasWorkingPane(idx int) bool {
-	if idx < 0 || idx >= len(m.tabs) || m.tabs[idx].Root == nil {
+	tabs := m.curTabs()
+	if idx < 0 || idx >= len(tabs) || tabs[idx].Root == nil {
 		return false
 	}
-	for _, p := range m.tabs[idx].Leaves() {
+	for _, p := range tabs[idx].Leaves() {
 		if p != nil && p.working {
 			return true
 		}
@@ -299,10 +396,11 @@ func (m Model) tabHasWorkingPane(idx int) bool {
 // state — the active tab always reports false (the user is on it; the pane
 // border carries the cue there).
 func (m Model) tabUnseen(idx int) bool {
-	if idx < 0 || idx >= len(m.tabs) || idx == m.activeTab || m.tabs[idx].Root == nil {
+	tabs := m.curTabs()
+	if idx < 0 || idx >= len(tabs) || idx == m.activeTabIdx() || tabs[idx].Root == nil {
 		return false
 	}
-	for _, p := range m.tabs[idx].Leaves() {
+	for _, p := range tabs[idx].Leaves() {
 		if p != nil && p.unseen {
 			return true
 		}
@@ -316,14 +414,15 @@ func (m Model) tabUnseen(idx int) bool {
 // seen/unseen state — except when the pinned pane is the focused pane of
 // the active tab (the user is looking straight at it).
 func (m Model) tabPinnedAttention(idx int) bool {
-	if idx < 0 || idx >= len(m.tabs) || m.tabs[idx].Root == nil {
+	tabs := m.curTabs()
+	if idx < 0 || idx >= len(tabs) || tabs[idx].Root == nil {
 		return false
 	}
-	for _, p := range m.tabs[idx].Leaves() {
+	for _, p := range tabs[idx].Leaves() {
 		if p == nil || !p.pinnedAttention {
 			continue
 		}
-		if idx == m.activeTab && p.ID == m.tabs[idx].ActivePane {
+		if idx == m.activeTabIdx() && p.ID == tabs[idx].ActivePane {
 			continue
 		}
 		return true
@@ -374,4 +473,15 @@ func syncPaneMeta(pane *PaneModel, info *PaneInfo, wideCanvas bool, minNativeCol
 	// keep showing the pre-restart model until the next turn).
 	pane.Model = info.Model
 	pane.ContextTokens = info.ContextTokens
+	// Git state, copied unconditionally for the same reason as Model: an
+	// ABSENT key is meaningful. A pane that leaves a repository, or a daemon
+	// restart that has not re-probed yet, must clear the branch rather than
+	// keep showing the last one it had.
+	pane.GitBranch = info.GitBranch
+	pane.GitDetached = info.GitDetached
+	pane.GitWorktree = info.GitWorktree
+	pane.GitUpstream = info.GitUpstream
+	pane.GitAhead = info.GitAhead
+	pane.GitBehind = info.GitBehind
+	pane.GitStale = info.GitStale
 }

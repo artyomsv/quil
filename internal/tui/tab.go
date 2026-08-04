@@ -2,8 +2,12 @@ package tui
 
 // TabModel represents a single tab containing a tree of panes.
 type TabModel struct {
-	ID         string
-	Name       string
+	ID   string
+	Name string
+	// Dest is the destination the tab's project arrived on — client-side
+	// only, empty for the local daemon. Carried on the tab so a pane event
+	// can be routed without walking back up to the project.
+	Dest       string
 	Color      string
 	Root       *LayoutNode // binary split tree (nil = empty tab)
 	ActivePane string      // pane ID of the active pane
@@ -11,8 +15,15 @@ type TabModel struct {
 	Height     int
 	// CanvasW/CanvasH: full tab-area dimensions for wide-canvas panes
 	// (set via SetCanvas before Resize; independent of notes squeeze).
-	CanvasW   int
-	CanvasH   int
+	CanvasW int
+	CanvasH int
+	// ChromeW: columns the project sidebar reserved out of this tab's
+	// width. Resize adds it back to derive each pane's sidebar-free width,
+	// which decides render mode only (see resizeNode/paneVTSize). The notes
+	// squeeze is deliberately NOT counted here — notes is a per-pane editor
+	// the user opened against this pane, so shrinking it is the point;
+	// the sidebar is session chrome and must not re-mode anything.
+	ChromeW   int
 	focusMode bool // true = active pane fills entire tab
 
 	// overlayPane is the tab's lazygit overlay (never part of the layout
@@ -308,9 +319,11 @@ func (t *TabModel) activeIndex(leaves []*PaneModel) int {
 // canvas via paneVTSize — for them focus mode is a pure viewport change,
 // never a PTY/emulator resize.
 func sizePaneFull(t *TabModel, p *PaneModel, w, h int) {
+	nativeW := w + t.ChromeW
 	p.Width = w
 	p.Height = h
-	p.ResizeVT(paneVTSize(p.WideCanvas, p.MinNativeCols, w, h, t.CanvasW, t.CanvasH))
+	p.NativeW = nativeW
+	p.ResizeVT(paneVTSize(p.WideCanvas, p.MinNativeCols, w, h, nativeW, t.CanvasW, t.CanvasH))
 }
 
 // Resize recomputes dimensions for the entire layout tree.
@@ -337,7 +350,7 @@ func (t *TabModel) Resize(w, h int) {
 		return
 	}
 	if t.Root != nil {
-		resizeNode(t.Root, w, h, t.CanvasW, t.CanvasH)
+		resizeNode(t.Root, w, h, w+t.ChromeW, t.CanvasW, t.CanvasH)
 	}
 }
 
@@ -346,6 +359,12 @@ func (t *TabModel) Resize(w, h int) {
 // independent of the notes-panel squeeze: canvas = (window width, tab
 // height). A zero canvas makes paneVTSize fall back to rect sizing.
 func (t *TabModel) SetCanvas(w, h int) { t.CanvasW, t.CanvasH = w, h }
+
+// SetChrome records how many columns the project sidebar took out of the
+// width that follows in Resize. Set beside SetCanvas, and zero is the right
+// answer everywhere else (tests, the overlay's own full-tab sizing) — it
+// means "this width already is the sidebar-free one".
+func (t *TabModel) SetChrome(w int) { t.ChromeW = w }
 
 // View renders the entire pane layout.
 func (t *TabModel) View() string {

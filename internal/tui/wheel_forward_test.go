@@ -26,8 +26,7 @@ func TestUpdate_MouseWheel_ForwardsToMouseTrackingPane(t *testing.T) {
 	m := Model{
 		cfg:           cfg,
 		client:        fake,
-		tabs:          []*TabModel{tab},
-		activeTab:     0,
+		projects:      oneProject(tab),
 		width:         80,
 		height:        24,
 		notifications: NewNotificationCenter(cfg.Notification.SidebarWidth, cfg.Notification.MaxEvents),
@@ -78,8 +77,7 @@ func TestUpdate_MouseWheel_NonTrackingPaneScrollsLocally(t *testing.T) {
 	m := Model{
 		cfg:           cfg,
 		client:        fake,
-		tabs:          []*TabModel{tab},
-		activeTab:     0,
+		projects:      oneProject(tab),
 		width:         80,
 		height:        24,
 		notifications: NewNotificationCenter(cfg.Notification.SidebarWidth, cfg.Notification.MaxEvents),
@@ -131,8 +129,7 @@ func TestUpdate_MouseWheel_ForwardsViaDaemonFlagOnReattach(t *testing.T) {
 	m := Model{
 		cfg:           cfg,
 		client:        fake,
-		tabs:          []*TabModel{tab},
-		activeTab:     0,
+		projects:      oneProject(tab),
 		width:         80,
 		height:        24,
 		notifications: NewNotificationCenter(cfg.Notification.SidebarWidth, cfg.Notification.MaxEvents),

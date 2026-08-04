@@ -11,23 +11,31 @@ import (
 
 func TestPaneVTSize(t *testing.T) {
 	cases := []struct {
-		name                     string
-		wide                     bool
-		minNativeCols            int
-		rectW, rectH, canW, canH int
-		wantCols, wantRows       int
+		name                              string
+		wide                              bool
+		minNativeCols                     int
+		rectW, rectH, nativeW, canW, canH int
+		wantCols, wantRows                int
 	}{
-		{"normal pane uses rect", false, 80, 60, 20, 200, 50, 58, 18},
-		{"wide narrow pane uses canvas", true, 80, 60, 20, 200, 50, 198, 48},
-		{"wide pane at threshold goes native", true, 80, 120, 20, 200, 50, 118, 18},
-		{"minNativeCols<=0 defaults to 80", true, 0, 60, 20, 200, 50, 198, 48},
-		{"wide canvas degenerate clamps", true, 80, 60, 20, 1, 1, 1, 1},
-		{"normal degenerate clamps", false, 80, 2, 2, 200, 50, 1, 1},
-		{"zero canvas falls back to rect", true, 80, 60, 20, 0, 0, 58, 18},
+		{"normal pane uses rect", false, 80, 60, 20, 0, 200, 50, 58, 18},
+		{"wide narrow pane uses canvas", true, 80, 60, 20, 0, 200, 50, 198, 48},
+		{"wide pane at threshold goes native", true, 80, 120, 20, 0, 200, 50, 118, 18},
+		{"minNativeCols<=0 defaults to 80", true, 0, 60, 20, 0, 200, 50, 198, 48},
+		{"wide canvas degenerate clamps", true, 80, 60, 20, 0, 1, 1, 1, 1},
+		{"normal degenerate clamps", false, 80, 2, 2, 0, 200, 50, 1, 1},
+		{"zero canvas falls back to rect", true, 80, 60, 20, 0, 0, 0, 58, 18},
+		// The sidebar cases: a pane the sidebar pushed under the threshold
+		// keeps rendering natively AT ITS OWN RECT — mode from nativeW, size
+		// from rectW. Without the split, 81-2=79 flipped it to the canvas.
+		{"sidebar-narrowed pane stays native", true, 80, 81, 54, 92, 163, 52, 79, 52},
+		{"its sibling agrees", true, 80, 82, 54, 93, 163, 52, 80, 52},
+		// A pane genuinely that narrow — no sidebar to discount — still gets
+		// the canvas. The threshold is not disabled, only made chrome-blind.
+		{"genuinely narrow pane still uses canvas", true, 80, 81, 54, 81, 163, 52, 161, 50},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			c, r := paneVTSize(tc.wide, tc.minNativeCols, tc.rectW, tc.rectH, tc.canW, tc.canH)
+			c, r := paneVTSize(tc.wide, tc.minNativeCols, tc.rectW, tc.rectH, tc.nativeW, tc.canW, tc.canH)
 			if c != tc.wantCols || r != tc.wantRows {
 				t.Errorf("got %dx%d, want %dx%d", c, r, tc.wantCols, tc.wantRows)
 			}
@@ -105,7 +113,7 @@ wide_canvas = true
 		notifications:  NewNotificationCenter(30, 50),
 		pluginRegistry: reg,
 		mcpHighlights:  make(map[string]bool),
-		attached:       true,
+		sized:          true,
 		width:          209,
 		height:         58,
 	}
@@ -121,10 +129,10 @@ wide_canvas = true
 			{ID: "pane-c2", TabID: "t1", Type: "claude-code"},
 		},
 	}
-	m.applyWorkspaceState(state)
+	m.applyWorkspaceState(state, "")
 	m.resizeTabs()
 
-	tab := m.tabs[0]
+	tab := m.curTabs()[0]
 	leaves := tab.Leaves()
 	if len(leaves) != 2 {
 		t.Fatalf("leaves = %d, want 2", len(leaves))
@@ -175,7 +183,7 @@ func TestApplyWorkspaceState_RestorePath_CanvasFlag(t *testing.T) {
 		notifications:  NewNotificationCenter(30, 50),
 		pluginRegistry: flaggedCanvasRegistry(t),
 		mcpHighlights:  make(map[string]bool),
-		attached:       true,
+		sized:          true,
 		width:          209,
 		height:         58,
 	}
@@ -190,10 +198,10 @@ func TestApplyWorkspaceState_RestorePath_CanvasFlag(t *testing.T) {
 		Tabs:      []TabInfo{{ID: "t1", Name: "AI", Panes: []string{"pane-r1"}, Layout: layout}},
 		Panes:     []PaneInfo{{ID: "pane-r1", TabID: "t1", Type: "claude-code"}},
 	}
-	m.applyWorkspaceState(state)
+	m.applyWorkspaceState(state, "")
 	m.resizeTabs()
 
-	leaves := m.tabs[0].Leaves()
+	leaves := m.curTabs()[0].Leaves()
 	if len(leaves) != 1 {
 		t.Fatalf("leaves = %d, want 1", len(leaves))
 	}
@@ -215,7 +223,7 @@ func TestApplyWorkspaceState_MidSessionFlip_CanvasFlag(t *testing.T) {
 		notifications:  NewNotificationCenter(30, 50),
 		pluginRegistry: plugin.NewRegistry(), // no wide_canvas yet (pre-migration)
 		mcpHighlights:  make(map[string]bool),
-		attached:       true,
+		sized:          true,
 		width:          209,
 		height:         58,
 	}
@@ -224,18 +232,18 @@ func TestApplyWorkspaceState_MidSessionFlip_CanvasFlag(t *testing.T) {
 		Tabs:      []TabInfo{{ID: "t1", Name: "AI", Panes: []string{"pane-m1"}}},
 		Panes:     []PaneInfo{{ID: "pane-m1", TabID: "t1", Type: "claude-code"}},
 	}
-	m.applyWorkspaceState(state)
-	if m.tabs[0].Leaves()[0].WideCanvas {
+	m.applyWorkspaceState(state, "")
+	if m.curTabs()[0].Leaves()[0].WideCanvas {
 		t.Fatal("setup: pane must start non-canvas before migration")
 	}
 
 	// Migration reloads the registry with wide_canvas = true, then the next
 	// broadcast re-reconciles the same tab/pane (resync-in-tree branch).
 	m.pluginRegistry = flaggedCanvasRegistry(t)
-	m.applyWorkspaceState(state)
+	m.applyWorkspaceState(state, "")
 	m.resizeTabs()
 
-	pane := m.tabs[0].Leaves()[0]
+	pane := m.curTabs()[0].Leaves()[0]
 	if !pane.WideCanvas {
 		t.Error("resync-in-tree branch did not pick up the post-migration flag flip")
 	}
@@ -280,7 +288,7 @@ func TestSyncPaneMeta_SetsMinNativeCols(t *testing.T) {
 		notifications:  NewNotificationCenter(30, 50),
 		pluginRegistry: reg,
 		mcpHighlights:  make(map[string]bool),
-		attached:       true,
+		sized:          true,
 		width:          209,
 		height:         58,
 	}
@@ -289,8 +297,8 @@ func TestSyncPaneMeta_SetsMinNativeCols(t *testing.T) {
 		Tabs:      []TabInfo{{ID: "t1", Name: "AI", Panes: []string{"p1"}}},
 		Panes:     []PaneInfo{{ID: "p1", TabID: "t1", Type: "claude-code"}},
 	}
-	m.applyWorkspaceState(state)
-	if got := m.tabs[0].Leaves()[0].MinNativeCols; got != 100 {
+	m.applyWorkspaceState(state, "")
+	if got := m.curTabs()[0].Leaves()[0].MinNativeCols; got != 100 {
 		t.Errorf("pane MinNativeCols = %d, want 100", got)
 	}
 }
@@ -327,7 +335,7 @@ func TestApplyWorkspaceState_ThresholdSelectsNativeOrCanvas(t *testing.T) {
 			notifications:  NewNotificationCenter(30, 50),
 			pluginRegistry: flaggedCanvasRegistry(t),
 			mcpHighlights:  make(map[string]bool),
-			attached:       true,
+			sized:          true,
 			width:          w,
 			height:         h,
 		}
@@ -339,7 +347,7 @@ func TestApplyWorkspaceState_ThresholdSelectsNativeOrCanvas(t *testing.T) {
 				{ID: "p2", TabID: "t1", Type: "claude-code"},
 			},
 		}
-		m.applyWorkspaceState(state)
+		m.applyWorkspaceState(state, "")
 		m.resizeTabs()
 		return m
 	}
@@ -347,7 +355,7 @@ func TestApplyWorkspaceState_ThresholdSelectsNativeOrCanvas(t *testing.T) {
 	// 209-wide window, horizontal split → each rect ≈104-105 inner cols
 	// (rect-2 ≥ 80) → native (previewMode false).
 	wide := newModel(209, 58)
-	for _, p := range wide.tabs[0].Leaves() {
+	for _, p := range wide.curTabs()[0].Leaves() {
 		if p.previewMode() {
 			t.Errorf("wide window: pane %s in preview, want native (rect %d)", p.ID, p.Width-2)
 		}
@@ -357,7 +365,7 @@ func TestApplyWorkspaceState_ThresholdSelectsNativeOrCanvas(t *testing.T) {
 	// → canvas (previewMode true, since the 120-wide canvas is wider than
 	// the 60-wide rect).
 	narrow := newModel(120, 40)
-	for _, p := range narrow.tabs[0].Leaves() {
+	for _, p := range narrow.curTabs()[0].Leaves() {
 		if !p.previewMode() {
 			t.Errorf("narrow window: pane %s native, want preview (rect %d < threshold)", p.ID, p.Width-2)
 		}

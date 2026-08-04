@@ -69,7 +69,7 @@ func aboutUpdateLabel(info *ipc.UpdateInfo, current string) string {
 // state); unwritable → flash pointing at the release page; staged → apply
 // confirm; otherwise → on-demand stage request to the daemon.
 func (m Model) handleUpdateAction() (tea.Model, tea.Cmd) {
-	info := m.updateInfo
+	info := m.activeUpdateInfo()
 	m.dialog = dialogNone
 	if !version.UpdatesEnabled() {
 		m.setFlash("updates are disabled in dev builds")
@@ -100,7 +100,7 @@ func (m Model) handleUpdateAction() (tea.Model, tea.Cmd) {
 	}
 	// Nothing staged yet ([update] auto = false, or the daily tick hasn't
 	// run): ask the daemon to stage now. Response lands as
-	// stageUpdateRespMsg; the refreshed broadcast updates m.updateInfo.
+	// stageUpdateRespMsg; the refreshed broadcast updates m.updateInfos.
 	m.setFlash("downloading update v" + info.LatestVersion + "…")
 	m.sendStageUpdateReq()
 	return m, tea.Batch(tea.ClearScreen, m.flashCmd())
@@ -123,46 +123,72 @@ func (m Model) sendStageUpdateReq() {
 	}
 }
 
+// updateInfoFor returns the release dest's daemon announced, or nil.
+func (m *Model) updateInfoFor(dest string) *ipc.UpdateInfo { return m.updateInfos[dest] }
+
+// activeUpdateInfo returns the announcement of the daemon behind the project
+// the user is looking at — the only one whose version describes the panes on
+// screen, and the one the status bar and About row must answer for.
+func (m *Model) activeUpdateInfo() *ipc.UpdateInfo { return m.updateInfoFor(m.activeDest()) }
+
 // noteWorkspaceState is the WorkspaceStateMsg entry point for update state:
-// it records the daemon's announced info and, ONLY on the first broadcast
-// after attach (see Model.sawFirstState), offers the once-per-version
-// startup notice. Every later broadcast in the session (switch tab, create
-// pane, ...) also carries the update key on WorkspaceStateMsg, and without
-// this gate would reopen the notice mid-session — the status-bar segment
-// and About row already cover discovery after startup.
-func (m *Model) noteWorkspaceState(update *ipc.UpdateInfo) {
-	m.updateInfo = update
+// it records the announcement under the destination it arrived on and, ONLY on
+// the first LOCAL broadcast after attach (see Model.sawFirstState), offers the
+// once-per-version startup notice. Every later broadcast in the session (switch
+// tab, create pane, ...) also carries the update key on WorkspaceStateMsg, and
+// without this gate would reopen the notice mid-session — the status-bar
+// segment and About row already cover discovery after startup.
+//
+// dest is the WHOLE answer to "may this announcement open the notice", and it
+// has to be, because the notice applies a LOCAL staged update: asking
+// RemoteMode() instead reads the ACTIVE PROJECT, which on the first broadcast
+// of a `--remote` session is still nil — activeDest() answers "" and the guard
+// is dead exactly once, at the only moment it is needed.
+//
+// A remote announcement also may not CONSUME the once-per-launch gate. It
+// returns before sawFirstState is set, so whichever daemon happens to broadcast
+// first cannot cost the local one its notice.
+func (m *Model) noteWorkspaceState(update *ipc.UpdateInfo, dest string) {
+	if m.updateInfos == nil {
+		m.updateInfos = make(map[string]*ipc.UpdateInfo, 1)
+	}
+	m.updateInfos[dest] = update
+	if m.remoteModeFor(dest) {
+		return
+	}
 	if !m.sawFirstState {
-		m.maybeShowUpdateNotice()
+		m.maybeShowUpdateNotice(dest)
 		m.sawFirstState = true
 	}
 }
 
-// maybeShowUpdateNotice opens the once-per-version startup dialog.
-// Priority: the migration dialog (blocking) and any interactive dialog win;
-// only the informational disclaimer yields (spec: migration > update notice
-// > disclaimer — the disclaimer reappears next launch).
-func (m *Model) maybeShowUpdateNotice() {
-	// Never in remote mode: m.updateInfo comes from the REMOTE daemon, while
-	// accepting the notice applies a LOCAL staged update. Beyond offering the
-	// wrong action, showing it would also write the remote's LatestVersion
-	// into this machine's notified-version marker and suppress the genuine
-	// local notice for that version.
-	if m.RemoteMode() {
+// maybeShowUpdateNotice opens the once-per-version startup dialog for the
+// daemon at dest. Priority: the migration dialog (blocking) and any
+// interactive dialog win; only the informational disclaimer yields (spec:
+// migration > update notice > disclaimer — the disclaimer reappears next
+// launch).
+func (m *Model) maybeShowUpdateNotice(dest string) {
+	// Never for a remote daemon: its announcement describes ITS staging dir,
+	// while accepting the notice applies a LOCAL staged update. Beyond
+	// offering the wrong action, showing it would also write the remote's
+	// LatestVersion into this machine's notified-version marker and suppress
+	// the genuine local notice for that version.
+	if m.remoteModeFor(dest) {
 		return
 	}
-	if !updateAvailable(m.updateInfo, m.version) {
+	info := m.updateInfoFor(dest)
+	if !updateAvailable(info, m.version) {
 		return
 	}
 	if m.dialog != dialogNone && m.dialog != dialogDisclaimer {
 		return
 	}
-	if update.LoadNotifiedVersion(config.UpdateNotifiedPath()) == m.updateInfo.LatestVersion {
+	if update.LoadNotifiedVersion(config.UpdateNotifiedPath()) == info.LatestVersion {
 		return
 	}
 	m.dialog = dialogUpdateNotice
 	m.dialogCursor = 0
-	if err := update.SaveNotifiedVersion(config.UpdateNotifiedPath(), m.updateInfo.LatestVersion); err != nil {
+	if err := update.SaveNotifiedVersion(config.UpdateNotifiedPath(), info.LatestVersion); err != nil {
 		log.Printf("save update notified marker: %v", err)
 	}
 }
@@ -191,7 +217,7 @@ func (m Model) handleUpdateNoticeKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 // renderUpdateNoticeDialog renders the once-per-version startup notice.
 func (m Model) renderUpdateNoticeDialog() string {
-	info := m.updateInfo
+	info := m.activeUpdateInfo()
 	if info == nil {
 		return ""
 	}

@@ -73,8 +73,8 @@ func TestWorkspaceState_BroadcastsSessionIDAndHistoryLines(t *testing.T) {
 		t.Errorf("broadcast history_lines = %v, want 3", bc["history_lines"])
 	}
 
-	active, tabs, byTab := d.session.SnapshotState()
-	disk := paneMapByID(t, d.workspaceStateFromSnapshot(active, tabs, byTab, false))["pane-aa"]
+	active, tabs, byTab, projects, activeProject := d.session.SnapshotState()
+	disk := paneMapByID(t, d.workspaceStateFromSnapshot(active, tabs, byTab, projects, activeProject, false))["pane-aa"]
 	if _, ok := disk["session_id"]; ok {
 		t.Error("disk snapshot must not contain session_id")
 	}

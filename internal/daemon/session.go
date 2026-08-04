@@ -3,6 +3,7 @@ package daemon
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
@@ -14,11 +15,12 @@ import (
 )
 
 type Tab struct {
-	ID     string
-	Name   string
-	Color  string
-	Panes  []string        // Pane IDs in order
-	Layout json.RawMessage // Opaque layout tree from TUI
+	ID        string
+	Name      string
+	Color     string
+	Panes     []string        // Pane IDs in order
+	Layout    json.RawMessage // Opaque layout tree from TUI
+	ProjectID string          // Project this tab belongs to (see project.go)
 }
 
 type Pane struct {
@@ -30,6 +32,14 @@ type Pane struct {
 	OutputBuf    *ringbuf.RingBuffer // Captures PTY output for replay on reconnect
 	GhostSnap    []byte              // Pure disk-loaded ghost buffer, cleared after first client replay
 	HistoryLines int                 // Ghost-buffer line count, snapshotted at restore (immutable after; broadcast-only restore-checklist hint)
+	// ghostSeeded marks an OutputBuf that still holds the PREVIOUS session's
+	// bytes rather than this child's. Restore seeds it so a pane the user
+	// never opens still has history to persist and to replay on reconnect;
+	// the first byte the respawned child writes hands the buffer over (see
+	// flushPaneOutput). Without the handover the two sessions concatenate and
+	// the saved buffer grows by a screenful on every restart.
+	// PluginMu-protected.
+	ghostSeeded bool
 	Type         string              // Plugin name (default: "terminal")
 	PluginState  map[string]string   // Scraped values (e.g., "session_id": "abc123")
 	// PluginMu protects every mutable field that can be read or written
@@ -156,6 +166,12 @@ type SessionManager struct {
 	activeTab string
 	bufSize   int // ring buffer capacity per pane (bytes)
 	mu        sync.RWMutex
+
+	// projects/projectOrder/activeProject: see project.go. Guarded by mu,
+	// same as tabs/tabOrder/activeTab above.
+	projects      map[string]*Project
+	projectOrder  []string
+	activeProject string
 }
 
 // inputQueueSize bounds the per-pane stdin queue. Generous for interactive
@@ -240,15 +256,50 @@ func releasePanes(panes []*Pane) {
 
 func NewSessionManager(bufSize int) *SessionManager {
 	return &SessionManager{
-		tabs:    make(map[string]*Tab),
-		panes:   make(map[string]*Pane),
-		bufSize: bufSize,
+		tabs:     make(map[string]*Tab),
+		panes:    make(map[string]*Pane),
+		bufSize:  bufSize,
+		projects: make(map[string]*Project),
 	}
 }
 
 func (sm *SessionManager) CreateTab(name string) *Tab {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
+	return sm.createTabLocked(sm.activeProject, name)
+}
+
+// createTabLocked builds a tab and registers it with its project. Caller holds
+// sm.mu — sm.mu is not reentrant, so this must never take it.
+//
+// An empty OR unknown projectID resolves to: the active project if it still
+// exists, else the first remaining project, else a bootstrapped "Default"
+// project. Empty is the fresh-install case — no snapshot to migrate, nobody
+// has called CreateProject, so handleAttach (daemon.go:988) creates the
+// default Shell tab with activeProject still "". Unknown is a race: a client
+// can call CreateTabInProject with a projectID that another connection's
+// DestroyProject removed in between. Either way, a tab must always end up in
+// a project that exists — one registered to no project is invisible to the
+// client, which builds tabs only from project TabIDs.
+func (sm *SessionManager) createTabLocked(projectID, name string) *Tab {
+	if _, ok := sm.projects[projectID]; projectID == "" || !ok {
+		if _, ok := sm.projects[sm.activeProject]; ok {
+			projectID = sm.activeProject
+		} else if len(sm.projectOrder) > 0 {
+			projectID = sm.projectOrder[0]
+		} else {
+			cwd, _ := os.Getwd()
+			p := &Project{
+				ID:      "proj-" + uuid.New().String()[:8],
+				Name:    "Default",
+				RootDir: cwd,
+			}
+			sm.projects[p.ID] = p
+			sm.projectOrder = append(sm.projectOrder, p.ID)
+			projectID = p.ID
+		}
+		sm.activeProject = projectID
+	}
 
 	id := "tab-" + uuid.New().String()[:8]
 	tab := &Tab{ID: id, Name: name}
@@ -257,6 +308,14 @@ func (sm *SessionManager) CreateTab(name string) *Tab {
 
 	if sm.activeTab == "" {
 		sm.activeTab = id
+	}
+
+	tab.ProjectID = projectID
+	if p, ok := sm.projects[projectID]; ok {
+		p.TabIDs = append(p.TabIDs, tab.ID)
+		if p.ActiveTab == "" {
+			p.ActiveTab = tab.ID
+		}
 	}
 	return tab
 }
@@ -280,6 +339,35 @@ func (sm *SessionManager) DestroyTab(tabID string) error {
 		}
 	}
 
+	// De-register from the owning project before removing the tab. A
+	// dangling ID in TabIDs gets persisted and broadcast, and the client
+	// then looks up a TabInfo that does not exist.
+	//
+	// The successor is picked from the OWNING PROJECT's tabs, never from the
+	// workspace-wide tabOrder — the same rule DestroyProject states and for the
+	// same reason: a global answer hands back a tab belonging to a different
+	// project than the one still active, and the client scopes its tab list to
+	// the active project's TabIDs alone. Closing project B's active tab would
+	// promote project A's, leaving a highlighted tab that is not in the list.
+	// Its INDEX is the neighbour that slid into the closed tab's slot, which is
+	// how closing a tab behaves everywhere else.
+	successor := ""
+	if p, ok := sm.projects[tab.ProjectID]; ok {
+		idx := indexOfString(p.TabIDs, tabID)
+		p.TabIDs = removeString(p.TabIDs, tabID)
+		if len(p.TabIDs) > 0 {
+			if idx < 0 || idx >= len(p.TabIDs) {
+				idx = len(p.TabIDs) - 1
+			}
+			successor = p.TabIDs[idx]
+		}
+		if p.ActiveTab == tabID {
+			// Empty here is what made the client fall back to the project's
+			// FIRST tab rather than a neighbour of the one just closed.
+			p.ActiveTab = successor
+		}
+	}
+
 	delete(sm.tabs, tabID)
 	for i, id := range sm.tabOrder {
 		if id == tabID {
@@ -289,10 +377,14 @@ func (sm *SessionManager) DestroyTab(tabID string) error {
 	}
 
 	if sm.activeTab == tabID {
-		if len(sm.tabOrder) > 0 {
+		sm.activeTab = successor
+		// Only when the project has no tabs LEFT is there no in-project answer
+		// to give, and then any answer is cross-project. recoverEmptyProject
+		// runs straight after this and bootstraps the project a tab, so the
+		// global fallback is what keeps the daemon from sitting with no active
+		// tab at all in the gap.
+		if sm.activeTab == "" && len(sm.tabOrder) > 0 {
 			sm.activeTab = sm.tabOrder[0]
-		} else {
-			sm.activeTab = ""
 		}
 	}
 	sm.mu.Unlock()
@@ -436,52 +528,56 @@ func (sm *SessionManager) ActiveTabID() string {
 func (sm *SessionManager) SwitchTab(tabID string) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-	if _, ok := sm.tabs[tabID]; ok {
-		sm.activeTab = tabID
+	tab, ok := sm.tabs[tabID]
+	if !ok {
+		return
+	}
+	sm.activeTab = tabID
+	// Without this the client re-derives activeTab from an always-empty
+	// Project.ActiveTab on every broadcast and snaps back to tab 1.
+	if p, ok := sm.projects[tab.ProjectID]; ok {
+		p.ActiveTab = tabID
 	}
 }
 
-// ReorderTab moves the tab with tabID to the given ordinal newIdx in the
-// session's tabOrder. newIdx is clamped to [0, len(tabOrder)-1]; out-of-
-// range values silently snap to the nearest valid slot rather than
-// erroring, so a stale TUI doesn't have to race the daemon for an
-// authoritative tab count.
+// ReorderTab moves the tab with tabID to ordinal newIdx within its OWN
+// project. The tab bar renders one project's tabs and nothing else, so a drag
+// can only ever reorder within a project and newIdx is a PROJECT-relative
+// ordinal. newIdx is clamped to that project's bounds; out-of-range values
+// silently snap to the nearest valid slot rather than erroring, so a stale TUI
+// doesn't have to race the daemon for an authoritative tab count.
+//
+// Project.TabIDs is the half that must move. The client rebuilds each
+// project's tab list from it, so a slide that touched only sm.tabOrder was
+// undone by the very broadcast it triggered — the drag snapped back, and
+// nothing was persisted either, since the snapshot writes tab_ids too.
+//
+// sm.tabOrder is RE-ANCHORED rather than slid by the same index: it is the
+// global list, in which a project-relative ordinal means nothing. Reinserting
+// the tab beside its new project neighbour leaves every other project's tabs
+// exactly where they were and keeps daemon-side iteration (Tabs(), list_tabs,
+// the snapshot's tabs array) agreeing with what the user sees.
+//
+// A tab whose project is unknown — or whose project does not list it — falls
+// back to the pre-project behaviour and slides the global order directly.
 //
 // Returns true when the order actually changed (caller decides whether to
 // snapshot/broadcast).
 func (sm *SessionManager) ReorderTab(tabID string, newIdx int) bool {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-	if _, ok := sm.tabs[tabID]; !ok {
+	tab, ok := sm.tabs[tabID]
+	if !ok {
 		return false
 	}
-	from := -1
-	for i, id := range sm.tabOrder {
-		if id == tabID {
-			from = i
-			break
-		}
+	p, ok := sm.projects[tab.ProjectID]
+	if !ok || indexOfString(p.TabIDs, tabID) < 0 {
+		return slideString(sm.tabOrder, tabID, newIdx)
 	}
-	if from < 0 {
+	if !slideString(p.TabIDs, tabID, newIdx) {
 		return false
 	}
-	if newIdx < 0 {
-		newIdx = 0
-	}
-	if newIdx >= len(sm.tabOrder) {
-		newIdx = len(sm.tabOrder) - 1
-	}
-	if from == newIdx {
-		return false
-	}
-	// Slide the slice without allocating: pull tabID out, shift the gap
-	// across the affected range, drop tabID into newIdx.
-	if from < newIdx {
-		copy(sm.tabOrder[from:newIdx], sm.tabOrder[from+1:newIdx+1])
-	} else {
-		copy(sm.tabOrder[newIdx+1:from+1], sm.tabOrder[newIdx:from])
-	}
-	sm.tabOrder[newIdx] = tabID
+	sm.tabOrder = reanchorTab(sm.tabOrder, p.TabIDs, tabID)
 	return true
 }
 
@@ -500,10 +596,33 @@ func (sm *SessionManager) RestoreTab(tab *Tab, panes []*Pane) {
 	}
 }
 
+// RestoreProjects installs a pre-built project set loaded from disk (or
+// synthesized by migrateToDefaultProject), mirroring RestoreTab. Order in
+// projects becomes projectOrder. activeProject is adopted only when
+// non-empty, so a caller that has nothing to restore (fresh workspace)
+// cannot clobber a project already created earlier in startup.
+func (sm *SessionManager) RestoreProjects(projects []*Project, activeProject string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	for _, p := range projects {
+		sm.projects[p.ID] = p
+		sm.projectOrder = append(sm.projectOrder, p.ID)
+	}
+	if activeProject != "" {
+		sm.activeProject = activeProject
+	}
+}
+
 // SnapshotState returns a consistent view of the entire session state under
 // a single RLock hold. This prevents torn reads when tabs/panes are
 // created or destroyed concurrently.
-func (sm *SessionManager) SnapshotState() (activeTab string, tabs []*Tab, panesByTab map[string][]*Pane) {
+//
+// projects/activeProject ride this SAME lock hold rather than a second call
+// to Projects()/ActiveProject() — a nested RLock on this goroutine could
+// deadlock behind a writer parked between the two acquisitions (the
+// oscillation hazard noted at daemon.go's snapshot()).
+func (sm *SessionManager) SnapshotState() (activeTab string, tabs []*Tab, panesByTab map[string][]*Pane, projects []Project, activeProject string) {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 
@@ -523,6 +642,20 @@ func (sm *SessionManager) SnapshotState() (activeTab string, tabs []*Tab, panesB
 		}
 		panesByTab[id] = tabPanes
 	}
+
+	// Same COPY discipline as Projects(): a caller holding this slice past
+	// the unlock must not be able to race UpdateProject mutating Name/RootDir.
+	projects = make([]Project, 0, len(sm.projectOrder))
+	for _, id := range sm.projectOrder {
+		p, ok := sm.projects[id]
+		if !ok {
+			continue
+		}
+		cp := *p
+		cp.TabIDs = append([]string(nil), p.TabIDs...)
+		projects = append(projects, cp)
+	}
+	activeProject = sm.activeProject
 	return
 }
 

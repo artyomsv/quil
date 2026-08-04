@@ -10,10 +10,10 @@ import (
 func TestPinnedAttention_SurvivesAckFocusedPane(t *testing.T) {
 	t.Parallel()
 	m := newSplitDragTestModel(t)
-	p1 := m.tabs[0].Root.Left.Pane
+	p1 := m.curTabs()[0].Root.Left.Pane
 	p1.pinnedAttention = true
 	p1.unseen = true
-	m.tabs[0].ActivePane = "p1"
+	m.curTabs()[0].ActivePane = "p1"
 	m.ackFocusedPane()
 	if p1.unseen {
 		t.Error("unseen should be cleared on focus")
@@ -28,7 +28,7 @@ func TestPinnedAttention_SurvivesAckFocusedPane(t *testing.T) {
 func TestTabPinnedAttention(t *testing.T) {
 	t.Parallel()
 	m := newSplitDragTestModel(t) // tab 0 active, panes p1 (focused) | p2
-	p2 := m.tabs[0].Root.Right.Pane
+	p2 := m.curTabs()[0].Root.Right.Pane
 
 	if m.tabPinnedAttention(0) {
 		t.Error("no pins: want false")
@@ -38,7 +38,7 @@ func TestTabPinnedAttention(t *testing.T) {
 		t.Error("pinned unfocused pane on active tab: want true")
 	}
 	// Focus the pinned pane: the user is looking at it — no label cue.
-	m.tabs[0].ActivePane = "p2"
+	m.curTabs()[0].ActivePane = "p2"
 	if m.tabPinnedAttention(0) {
 		t.Error("pinned focused pane: want false")
 	}
@@ -72,7 +72,7 @@ func TestRenderKey_IncludesPinnedAndCtxHighlight(t *testing.T) {
 func TestView_PinnedGreenBorder_CtxHighlightBlue(t *testing.T) {
 	t.Parallel()
 	m := newSplitDragTestModel(t)
-	p := m.tabs[0].Root.Left.Pane
+	p := m.curTabs()[0].Root.Left.Pane
 	p.Active = false // active purple (57) outranks green — test the idle pane look
 	p.pinnedAttention = true
 	if !strings.Contains(p.View(), "38;5;28") {

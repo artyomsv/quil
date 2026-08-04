@@ -290,6 +290,11 @@ func statIsDirWithin(path string, d time.Duration) (isDir, answered bool) {
 // longer buys nothing while the caller may be the pre-listen restore loop.
 const transcriptProbeTimeout = 2 * time.Second
 
+// spawnDirProbeTimeout bounds resolving a pane's spawn directory. Short, because
+// the caller has a usable fallback and the alternative to answering fast is
+// holding the dispatch goroutine that serves every other pane.
+const spawnDirProbeTimeout = 2 * time.Second
+
 // statExistsWithinBudget reports whether path exists, and whether the stat
 // answered at all.
 //
@@ -319,6 +324,52 @@ func statExistsWithinBudget(path string) (exists, answered bool) {
 		return r, true
 	case <-timer.C:
 		return false, false
+	}
+}
+
+// resolveSpawnDirWithin returns path's symlink-resolved form when it names a
+// directory, and "" otherwise — including when the answer did not arrive in
+// time. A caller that gets "" must fall back, never conclude "absent".
+//
+// It exists because the two spawn-CWD resolvers ran an unbounded os.Stat plus
+// EvalSymlinks straight on the IPC dispatch goroutine. A project root on a dead
+// NFS or SMB mount parks that goroutine in an uninterruptible syscall, and with
+// it every pane on the daemon — the wedge class the input-writer queues and the
+// browse budgets both exist to prevent. A project's RootDir is the worse of the
+// two: it is typed once in a dialog, persisted, and re-read on every new tab,
+// where the client CWD is at least refreshed on each attach.
+//
+// ONE deadline covers both calls, as in classifyEntries: EvalSymlinks follows
+// the link and so parks exactly as the stat does, and a budget covering only
+// the stat moves the wedge one syscall later rather than removing it.
+func resolveSpawnDirWithin(path string, d time.Duration) string {
+	if path == "" || d <= 0 || !claimBlockingFSCall() {
+		return ""
+	}
+	ch := make(chan string, 1)
+	go func() {
+		defer releaseBlockingFSCall()
+		info, err := statPath(path)
+		if err != nil || !info.IsDir() {
+			ch <- ""
+			return
+		}
+		// A path that stats as a directory but will not resolve is still
+		// usable as a spawn CWD; the resolution is a nicety, not a gate.
+		if resolved, err := filepath.EvalSymlinks(path); err == nil {
+			ch <- resolved
+			return
+		}
+		ch <- path
+	}()
+
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case r := <-ch:
+		return r
+	case <-timer.C:
+		return ""
 	}
 }
 

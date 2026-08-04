@@ -12,6 +12,7 @@ Quil reads `~/.quil/config.toml` (or `$QUIL_HOME/config.toml` when `QUIL_HOME` i
 - [`[mcp]`](#mcp)
 - [`[notification]`](#notification)
 - [`[update]`](#update)
+- [`[[destinations]]`](#destinations)
 - [`[keybindings]`](#keybindings)
 - [Per-plugin instances](#per-plugin-instances)
 - [How edits get persisted](#how-edits-get-persisted)
@@ -48,12 +49,14 @@ mouse_scroll_lines = 3
 page_scroll_lines = 0           # 0 = half-page (dynamic) — terminal pane scrollback
 log_viewer_page_lines = 40      # Alt+Up/Alt+Down jump in F1 → log viewer
 show_disclaimer = true          # beta disclaimer on startup
+sidebar_open = false            # project sidebar starts collapsed
+sidebar_width = 22              # project sidebar width — reserves layout width; NOT [notification]'s
 
 [mcp]
 highlight_duration = "10s"      # border flash duration when AI touches a pane
 
 [notification]
-sidebar_width = 30              # width of the notification sidebar overlay
+sidebar_width = 30              # notification OVERLAY width (draws over panes) — not [ui]'s
 max_events = 200                # ring-buffer cap (per daemon, both sidebar and MCP)
 
 [notification.hooks]
@@ -63,6 +66,12 @@ opencode = "default"            # same
 [update]
 check = true                    # Daily check for new releases
 auto = true                     # Download and stage in background
+
+# Extra daemons to attach beside the local one. Optional and omitted by
+# default; one table per host. See [[destinations]] below.
+# [[destinations]]
+# name = "gpu box"
+# dest = "gpu01"
 
 [keybindings]
 quit = "ctrl+q"
@@ -94,6 +103,11 @@ notes_toggle = "alt+e"          # toggle pane notes editor
 toggle_lazygit = "alt+g"        # toggle lazygit overlay for the repo at the active pane's CWD
 toggle_wrap = "alt+shift+w"     # AI-pane preview: switch left-edge crop (default) <-> soft-wrap
 redraw = "alt+shift+l"          # force full screen repaint (clears rendering artifacts)
+new_project = "alt+shift+n"
+project_picker = "alt+p"        # fuzzy-find and switch project
+project_toggle = "alt+o"        # bounce between the two most recent projects
+attention_queue = "alt+shift+a" # oldest pane waiting on you, across every project
+sidebar_toggle = "alt+shift+s"  # collapse/expand the PROJECT sidebar (not the notification one)
 ```
 
 ## `[daemon]`
@@ -132,6 +146,14 @@ The "ghost buffer" is the rendered preview Quil shows immediately on reconnect, 
 | `page_scroll_lines` | int | `0` | Lines per `Alt+PgUp` / `Alt+PgDown`. `0` = half the pane height (dynamic). |
 | `log_viewer_page_lines` | int | `40` | `Alt+Up` / `Alt+Down` jump distance in the F1 log viewer. |
 | `show_disclaimer` | bool | `true` | Display the beta disclaimer on startup. The `Don't show again` button flips this to `false`. |
+| `sidebar_open` | bool | `false` | Whether the **project** sidebar starts expanded. Closed by default so existing installs keep their pane geometry unchanged. `Alt+Shift+S` flips it, and the setting persists. |
+| `sidebar_width` | int | `22` | Width of the **project** sidebar. Unlike the notification sidebar this reserves real layout width — panes are narrower by exactly this many columns while it is open, and toggling it resizes every pane's PTY. Clamped against the terminal width, so an oversized value cannot push the pane area off screen. |
+
+> **Two different `sidebar_width` keys.** This one (`[ui]`, default `22`) is the
+> project sidebar on the **left**, which reserves layout width. The one in
+> [`[notification]`](#notification) (default `30`) is the notification overlay on
+> the **right**, which draws over the pane area and resizes nothing. They are
+> independent settings in different sections.
 
 ## `[mcp]`
 
@@ -143,7 +165,7 @@ The "ghost buffer" is the rendered preview Quil shows immediately on reconnect, 
 
 | Key | Type | Default | What it does |
 |---|---|---|---|
-| `sidebar_width` | int | `30` | Width of the notification sidebar overlay (`Alt+N`). The sidebar draws over the right edge of the pane area — panes keep their size (no PTY resize) and the covered columns reappear when it closes. Values below ~25 truncate event titles and excerpts heavily. |
+| `sidebar_width` | int | `30` | Width of the notification sidebar overlay (`Alt+N`). Distinct from [`[ui] sidebar_width`](#ui), which sizes the project sidebar on the left. The sidebar draws over the right edge of the pane area — panes keep their size (no PTY resize) and the covered columns reappear when it closes. Values below ~25 truncate event titles and excerpts heavily. |
 | `max_events` | int | `200` | Ring-buffer cap for the daemon's notification queue. The sidebar and MCP `get_notifications` both read from this queue. Each event is bounded to ≤ 4 KiB `Message` + ≤ 1 KiB per `Data` value (`_quil_truncated` flag set when truncated). |
 
 ### `[notification.hooks]`
@@ -173,6 +195,45 @@ flag, since a self-update would strip the dev/debug ldflags baked into those
 binaries) — see `./scripts/dev.sh build`. Installs in non-writable locations
 (package managers) also never self-update; those show the release page URL
 instead.
+
+## `[[destinations]]`
+
+Extra daemons to attach at launch, alongside the local one. Each destination's
+projects appear in the same sidebar as the local ones, and each keeps its own
+tabs, panes and agent state.
+
+```toml
+[[destinations]]
+name = "gpu box"
+dest = "gpu01"
+
+[[destinations]]
+name = "prod"
+dest = "prod-jump"        # an ~/.ssh/config Host alias works too
+```
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `dest` | — | Required. Passed to `ssh` **verbatim**, so an `~/.ssh/config` `Host` alias keeps its `HostName`, `Port`, `User` and `ProxyJump`. This is also the routing key Quil uses internally, so it must be unique. |
+| `name` | the `dest` | Label shown in launch warnings and in the reconnect banner. Useful when `dest` is a bare IP. |
+
+Each host needs `quil` installed and reachable over ssh — run
+`quil remote setup <dest>` once per host; it records the absolute path under
+`[remote.hosts.<dest>]` so attaching works even when the non-interactive `PATH`
+cannot see the install directory.
+
+Notes:
+
+- Hosts are dialled **in parallel and non-interactively**, so a host that is
+  switched off delays startup by one connect timeout at most and never blocks on
+  an ssh prompt. Accept a new host's key with one manual `ssh <dest>` (or
+  `quil remote setup <dest>`) before adding it here.
+- A host that is unreachable at launch is reported on stderr and skipped —
+  the client still starts with everything else. Relaunch once the host is back.
+- A host whose daemon version does not match this client is skipped with an
+  explanation in `quil.log`; run `quil remote setup <dest>` to upgrade it.
+- `quil --remote <host>` **ignores this list**. That mode means "drive that one
+  machine", so it attaches to that host alone and to no local daemon.
 
 ## `[keybindings]`
 
@@ -215,6 +276,11 @@ Multiple modifiers stack with `+` (no spaces). Mouse buttons are not bindable he
 | `toggle_lazygit` | `alt+g` | Toggle lazygit overlay for the git repo resolved from the active pane's current directory. Only shown when the `lazygit` binary is installed. |
 | `toggle_wrap` | `alt+shift+w` | Switch the active AI pane's preview between left-edge crop (default) and soft-wrap. Only meaningful for `wide_canvas` panes rendered smaller than the window; per-pane, not persisted. |
 | `redraw` | `alt+shift+l` | Force a full screen repaint — clears rendering artifacts (scrambled or misplaced characters) without restarting the TUI |
+| `new_project` | `alt+shift+n` | Open the create-project dialog |
+| `project_picker` | `alt+p` | Fuzzy-find and switch project |
+| `project_toggle` | `alt+o` | Bounce between the two most recent projects |
+| `attention_queue` | `alt+shift+a` | Jump to the oldest pane waiting on you, across every project |
+| `sidebar_toggle` | `alt+shift+s` | Collapse / expand the **project** sidebar. Not the notification overlay — that is `notification_toggle`. This one reserves real layout width, so toggling it resizes every pane's PTY. |
 
 ## Per-plugin instances
 

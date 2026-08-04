@@ -5,7 +5,40 @@ set -euo pipefail
 
 GO_IMAGE="golang:1.25-alpine"
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd -W 2>/dev/null || pwd)"
-DOCKER_RUN="docker run --rm -v ${PROJECT_DIR}:/src -v quil-gomod:/go/pkg/mod -w //src ${GO_IMAGE}"
+# quil-gomod persists downloaded modules; quil-gocache persists COMPILED
+# packages. The build cache is the load-bearing one: without it every
+# `docker run --rm` starts with an empty /root/.cache/go-build and recompiles
+# the whole dependency tree, so a one-line edit costs a full-tree build. With
+# it, a repeat run only recompiles what changed. Race builds keep their own
+# entries in the same cache, so test-race benefits too.
+DOCKER_RUN="docker run --rm -v ${PROJECT_DIR}:/src -v quil-gomod:/go/pkg/mod -v quil-gocache:/root/.cache/go-build -w //src ${GO_IMAGE}"
+
+# RACE_IMAGE is GO_IMAGE plus the C toolchain the race detector needs. Built
+# once and reused, because `apk add gcc musl-dev` inside every test-race run
+# is a network fetch and install paid before compilation even starts.
+RACE_IMAGE="quil-race:$(printf '%s' "$GO_IMAGE" | tr ':/' '--')"
+DOCKER_RUN_RACE="docker run --rm -v ${PROJECT_DIR}:/src -v quil-gomod:/go/pkg/mod -v quil-gocache:/root/.cache/go-build -w //src ${RACE_IMAGE}"
+
+ensure_race_image() {
+  if ! docker image inspect "$RACE_IMAGE" >/dev/null 2>&1; then
+    echo "building $RACE_IMAGE (one-off; cached for later runs)" >&2
+    printf 'FROM %s\nRUN apk add --no-cache gcc musl-dev\n' "$GO_IMAGE" \
+      | docker build -q -t "$RACE_IMAGE" - >/dev/null
+  fi
+}
+
+# pkg_target turns an optional package argument into a go pattern.
+#   dev.sh test                 -> ./...
+#   dev.sh test internal/tui    -> ./internal/tui/...
+# Narrowing to the package you actually changed is the difference between
+# recompiling 26 packages and recompiling one.
+pkg_target() {
+  if [ -z "${1:-}" ]; then
+    echo "./..."
+  else
+    echo "./${1#./}/..." | sed 's|//*\.\.\.$|/...|'
+  fi
+}
 
 # BUILT_BINARIES are every file `build` writes and `clean` removes, in this
 # project directory. Production installs live elsewhere and are never touched.
@@ -91,16 +124,17 @@ case "${1:-help}" in
     ;;
 
   test)
-    $DOCKER_RUN go test ./...
+    $DOCKER_RUN go test "$(pkg_target "${2:-}")"
     ;;
 
   test-race)
-    $DOCKER_RUN sh -c \
-      "apk add --no-cache gcc musl-dev && CGO_ENABLED=1 go test -race ./..."
+    ensure_race_image
+    $DOCKER_RUN_RACE sh -c \
+      "CGO_ENABLED=1 go test -race $(pkg_target "${2:-}")"
     ;;
 
   vet)
-    $DOCKER_RUN go vet ./...
+    $DOCKER_RUN go vet "$(pkg_target "${2:-}")"
     ;;
 
   cross)
@@ -151,9 +185,9 @@ case "${1:-help}" in
     echo ""
     echo "Commands:"
     echo "  build          Build all variants: prod, dev, debug (6 binaries)"
-    echo "  test           Run all tests"
-    echo "  test-race      Run tests with race detector"
-    echo "  vet            Run go vet"
+    echo "  test [pkg]     Run tests (all, or just ./<pkg>/...)"
+    echo "  test-race [pkg]  Run tests with race detector"
+    echo "  vet [pkg]      Run go vet"
     echo "  cross          Cross-compile for all platforms"
     echo "  image          Build Docker image (scratch-based)"
     echo "  clean          Remove built binaries"

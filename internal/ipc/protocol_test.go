@@ -2,6 +2,7 @@ package ipc_test
 
 import (
 	"bytes"
+	"encoding/json"
 	"testing"
 
 	"github.com/artyomsv/quil/internal/ipc"
@@ -354,5 +355,29 @@ func TestPaneSearchPayload_RoundTrip(t *testing.T) {
 	}
 	if gotResp.Truncated != resp.Truncated {
 		t.Errorf("Truncated = %v, want %v", gotResp.Truncated, resp.Truncated)
+	}
+}
+
+func TestMessageOriginIsNeverSerialized(t *testing.T) {
+	msg, err := ipc.NewMessage(ipc.MsgResizePane, ipc.ResizePanePayload{PaneID: "pane-abc", Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("NewMessage: %v", err)
+	}
+	msg.Origin = "gpu01"
+
+	data, err := json.Marshal(msg)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if bytes.Contains(data, []byte("gpu01")) {
+		t.Fatalf("Origin leaked onto the wire: %s", data)
+	}
+
+	var back ipc.Message
+	if err := json.Unmarshal(data, &back); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if back.Origin != "" {
+		t.Fatalf("Origin survived a round trip: %q", back.Origin)
 	}
 }

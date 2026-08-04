@@ -448,7 +448,7 @@ func TestHandlePluginsKey_ReloadButton_RemoteModeKeepsAdoptedAvailability(t *tes
 		pluginRegistry: reg,
 		dialog:         dialogPlugins,
 	}
-	m.SetRemoteDest("gpu01")
+	m.asRemote("gpu01")
 	m.dialogCursor = len(m.sortedPlugins()) // "Reload Plugins" button (btnIdx 0)
 
 	out, cmd := m.handlePluginsKey(tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -514,7 +514,7 @@ func TestHandleTOMLEditorKey_Saved_RemoteModeKeepsAdoptedAvailability(t *testing
 		dialog:         dialogTOMLEditor,
 		tomlEditor:     NewTextEditor(content, fp, 80, 24),
 	}
-	m.SetRemoteDest("gpu01")
+	m.asRemote("gpu01")
 
 	out, cmd := m.handleTOMLEditorKey(tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
 	got := out.(Model)

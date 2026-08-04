@@ -283,6 +283,13 @@ const confirmKindRestartPane = "restart-pane"
 // cmd/quil/main.go runs the swap after tea.Program exits.
 const confirmKindApplyUpdate = "apply-update"
 
+// confirmKindDestroyProject is the discriminator on confirmKind for the
+// "destroy project" confirm (sidebar context menu → Destroy project…).
+// Destroying a project takes every tab and pane under it, so — unlike a
+// single pane/tab close — it never fires straight off a keystroke; see
+// confirmDestroyProject in projectdialog.go.
+const confirmKindDestroyProject = "destroy-project"
+
 func shortcutsList(m *Model) []struct{ key, desc string } {
 	kb := m.cfg.Keybindings
 	// kbDisplay renders comma-separated multi-bindings as "a / b" so the
@@ -324,6 +331,7 @@ func shortcutsList(m *Model) []struct{ key, desc string } {
 		{kbDisplay(kb.ToggleEager), "Toggle eager restore (active pane)"},
 		{kbDisplay(kb.ToggleWrap), "Toggle preview soft-wrap (AI pane)"},
 		{kbDisplay(kb.ToggleLazygit), "Toggle lazygit overlay for current repo"},
+		{kbDisplay(kb.SidebarToggle), "Toggle project sidebar"},
 		{kbDisplay(kb.NotificationToggle), "Toggle notification sidebar"},
 		{kbDisplay(kb.NotificationFocus), "Focus notification sidebar"},
 		{kbDisplay(kb.GoBack), "Pane history back"},
@@ -393,6 +401,10 @@ func (m Model) handleDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.handleUpdateNoticeKey(msg)
 	case dialogCommandPalette:
 		return m.handleCommandPaletteKey(msg)
+	case dialogProjectNew, dialogProjectRename:
+		return m.handleProjectDialogKey(msg)
+	case dialogProjectPick:
+		return m.handleProjectPickKey(msg)
 	}
 	return m, nil
 }
@@ -678,7 +690,7 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 					log.Printf("restart pane %s: marshal: %v", id, reqErr)
 					return m, nil
 				}
-				if sendErr := m.client.Send(req); sendErr != nil {
+				if sendErr := m.sendForPane(id, req); sendErr != nil {
 					log.Printf("restart pane %s: send: %v", id, sendErr)
 				}
 			}
@@ -692,6 +704,46 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.dialog = dialogNone
 			m.applyUpdateOnExit = true
 			return m, tea.Quit
+		}
+
+		// Destroy-project: fires MsgDestroyProject at the OWNING daemon —
+		// resolved here, not inside confirmDestroyProject, for the same
+		// reason the pane/tab dest is resolved below rather than closed over:
+		// a broadcast between opening the confirm and accepting it could have
+		// pruned the project. sendForDest, not a raw Origin assignment — see
+		// its doc comment on why an unstamped local send would be wrong the
+		// moment a remote project is active.
+		if kind == confirmKindDisconnectHost {
+			m.dialog = dialogNone
+			// confirmID carries the DEST here, not a project id: disconnecting
+			// takes every project on that machine, so the one that happened to
+			// be right-clicked is not the target.
+			m.disconnectDest(id)
+			log.Printf("disconnected host %q", id)
+			return m, tea.ClearScreen
+		}
+
+		if kind == confirmKindDestroyProject {
+			m.dialog = dialogNone
+			if m.client != nil {
+				req, reqErr := ipc.NewMessage(ipc.MsgDestroyProject, ipc.DestroyProjectPayload{ProjectID: id})
+				if reqErr != nil {
+					log.Printf("destroy project %s: marshal: %v", id, reqErr)
+					return m, nil
+				}
+				dest := m.destOfProject(id)
+				// Logged on success too. A destroy that appears not to happen
+				// is ambiguous from outside — the daemon cannot be left with
+				// no project, so destroying the last one on a host bootstraps
+				// a fresh "Default" that looks exactly like a delete which did
+				// nothing. This line is what separates the two afterwards.
+				if sendErr := m.sendForDest(dest, req); sendErr != nil {
+					log.Printf("destroy project %s on dest %q: send: %v", id, dest, sendErr)
+				} else {
+					log.Printf("destroy project %s on dest %q: sent", id, dest)
+				}
+			}
+			return m, nil
 		}
 
 		// Handle instance deletion locally (no IPC needed)
@@ -714,19 +766,28 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 
 		m.dialog = dialogNone
-		client := m.client
+		// The dest is resolved HERE, on the Update goroutine, rather than
+		// inside the command: the confirm is what named the target, and by the
+		// time the command runs a broadcast may already have pruned it.
+		var dest string
+		switch kind {
+		case "pane":
+			dest = m.destOfPane(id)
+		case "tab":
+			dest = m.destOfTab(id)
+		}
 		return m, func() tea.Msg {
 			switch kind {
 			case "pane":
 				req, _ := ipc.NewMessage(ipc.MsgDestroyPane, ipc.DestroyPanePayload{
 					PaneID: id,
 				})
-				client.Send(req)
+				m.sendForDest(dest, req)
 			case "tab":
 				req, _ := ipc.NewMessage(ipc.MsgDestroyTab, ipc.DestroyTabPayload{
 					TabID: id,
 				})
-				client.Send(req)
+				m.sendForDest(dest, req)
 			}
 			return nil
 		}
@@ -834,6 +895,11 @@ func (m Model) renderDialog() string {
 	case dialogCommandPalette:
 		width = paletteWidth
 		content = renderCommandPalette(m)
+	case dialogProjectNew, dialogProjectRename:
+		content = m.renderProjectDialog()
+	case dialogProjectPick:
+		width = projectPickWidth
+		content = m.renderProjectPickDialog()
 	}
 
 	// Never render wider than the terminal (border adds +2 outside Width).
@@ -876,7 +942,7 @@ func (m Model) renderAboutDialog() string {
 		"View client log",
 		"View daemon log",
 		"View MCP logs",
-		aboutUpdateLabel(m.updateInfo, m.version),
+		aboutUpdateLabel(m.activeUpdateInfo(), m.version),
 		"Stop daemon",
 	}
 	for i, item := range items {
@@ -1036,6 +1102,19 @@ func (m Model) renderConfirmDialog() string {
 		b.WriteString("  " + dialogSubtle.Render("The TUI restarts and the daemon respawns all panes."))
 		b.WriteString("\n")
 		b.WriteString("  " + dialogSubtle.Render("Claude sessions resume; running shell commands are killed."))
+	case confirmKindDestroyProject:
+		b.WriteString("  " + dialogNormal.Render(fmt.Sprintf("Destroy project %q?", sanitizeRemoteText(m.confirmName))))
+		b.WriteString("\n\n")
+		b.WriteString("  " + dialogSubtle.Render("Every tab and pane in this project is destroyed too."))
+	case confirmKindDisconnectHost:
+		b.WriteString("  " + dialogNormal.Render(fmt.Sprintf("Disconnect %q?", sanitizeRemoteText(m.confirmName))))
+		b.WriteString("\n\n")
+		// Says what is NOT destroyed, because that is the question the user is
+		// actually asking after trying Destroy and watching a fresh "Default"
+		// take its place.
+		b.WriteString("  " + dialogSubtle.Render("Its projects leave the sidebar. Nothing on that"))
+		b.WriteString("\n")
+		b.WriteString("  " + dialogSubtle.Render("machine stops — reconnect to get it all back."))
 	default:
 		label := fmt.Sprintf("Close %s %q?", m.confirmKind, m.confirmName)
 		b.WriteString("  " + dialogNormal.Render(label))
@@ -1364,7 +1443,10 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 	if cwd != "" {
 		m.lastSelectedCWD = cwd
 		m.recentCWDs = pushRecentCWD(m.recentCWDs, cwd, recentCWDMax)
-		if err := SaveRecentCWDs(config.RecentCWDsPath(m.remoteDest), m.recentCWDs); err != nil {
+		// Scoped to the ACTIVE project's daemon: the directory was picked on
+		// that machine's disk, so filing it under another host's recent list
+		// would offer a path that does not exist there.
+		if err := SaveRecentCWDs(config.RecentCWDsPath(m.activeDest()), m.recentCWDs); err != nil {
 			log.Printf("create pane: save recent cwds: %v", err)
 		}
 	}
@@ -1389,8 +1471,10 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	tabID := tab.ID
-	client := m.client
+	// The new pane belongs to the tab it is being created in, so the tab's own
+	// dest is the routing answer — not the active project's, which a background
+	// tab does not share.
+	tabID, tabDest := tab.ID, tab.Dest
 
 	logger.Debug("create pane: sending IPC with cwd=%q type=%s instance=%s", cwd, pluginName, instanceName)
 
@@ -1427,7 +1511,7 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 				ReplacePaneID:   oldPaneID,
 				ResumeSessionID: resumeSessionID,
 			})
-			client.Send(msg)
+			m.sendForDest(tabDest, msg)
 			return nil
 		}
 	}
@@ -1459,7 +1543,7 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 			InstanceArgs:    instanceArgs,
 			ResumeSessionID: resumeSessionID,
 		})
-		client.Send(msg)
+		m.sendForDest(tabDest, msg)
 		return nil
 	}
 }
@@ -1860,7 +1944,11 @@ func (m Model) handlePluginsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// discard whatever availability answer the daemon already supplied
 		// with a detection pass over the wrong machine. reloadPluginsThenAskCmd
 		// below re-asks the daemon instead, once its own reload has finished.
-		if !m.RemoteMode() {
+		//
+		// remoteModeFor(activeDest()), not RemoteMode(): the daemon this
+		// dialog reloads is the ACTIVE one, and this is the daemon-scoped
+		// counterpart to the same guard elsewhere.
+		if !m.remoteModeFor(m.activeDest()) {
 			m.pluginRegistry.DetectAvailability()
 		}
 		m.dialog = dialogNone
@@ -1947,7 +2035,7 @@ func (m Model) handleTOMLEditorKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		// Local detection only in local mode — see the identical guard on the
 		// Plugins dialog's Reload/Restore buttons above.
-		if !m.RemoteMode() {
+		if !m.remoteModeFor(m.activeDest()) {
 			m.pluginRegistry.DetectAvailability()
 		}
 		m.tomlEditor = nil

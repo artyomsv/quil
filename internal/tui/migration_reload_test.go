@@ -107,7 +107,7 @@ func TestSaveMigrationAndAdvance_RemoteModeKeepsAdoptedAvailability(t *testing.T
 		}},
 		migrationLeft: NewTextEditor(content, fp, 80, 24),
 	}
-	m.SetRemoteDest("gpu01")
+	m.asRemote("gpu01")
 
 	out, cmd := m.saveMigrationAndAdvance()
 	got := out.(Model)

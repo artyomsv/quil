@@ -25,6 +25,11 @@ const (
 	ctxActAttention
 	ctxActRestart
 	ctxActClose
+	// Project-row actions (Task 13) — only ever set on a menu opened via
+	// openProjectCtxMenu, never mixed into buildCtxMenuItems' pane rows.
+	ctxActRenameProject
+	ctxActDestroyProject
+	ctxActDisconnectHost
 )
 
 // ctxMenuItem is one row of the menu. Disabled rows render greyed, are
@@ -41,11 +46,20 @@ type ctxMenuItem struct {
 // ctxMenuState is the live state of the pane context menu — a compositor
 // overlay (overlayAt), NOT a dialogScreen: dialogs are modal and centered,
 // this popup is positional and dismiss-on-outside-click. Zero value = closed.
+//
+// projectID (Task 13) is the sidebar's project-row menu sharing this same
+// state/render/hit-test machinery: paneID and projectID are mutually
+// exclusive target discriminators, never both set. A second dedicated struct
+// was considered and rejected — none of the geometry/render/hit-test helpers
+// below (innerWidth, boxSize, ctxMenuPos, ctxMenuHitRow, renderCtxMenu,
+// nextEnabled…) touch paneID at all, so duplicating them for two rows would
+// only buy an unused field.
 type ctxMenuState struct {
-	paneID string // target pane; "" = closed
-	title  string // pane display name shown as the header row
-	x, y   int    // clamped top-left of the rendered box (screen coords)
-	cursor int    // index into items; always on an enabled item (or -1)
+	paneID    string // target pane; "" when the target is a project (or closed)
+	projectID string // target project; "" when the target is a pane (or closed)
+	title     string // pane/project display name shown as the header row
+	x, y      int    // clamped top-left of the rendered box (screen coords)
+	cursor    int    // index into items; always on an enabled item (or -1)
 	// spaced honors the items' gapAfter group separators (a blank row
 	// between action groups — near-misses at group edges land on an inert
 	// spacer, and the destructive group stays visually isolated).
@@ -55,7 +69,7 @@ type ctxMenuState struct {
 	items  []ctxMenuItem
 }
 
-func (s ctxMenuState) open() bool { return s.paneID != "" }
+func (s ctxMenuState) open() bool { return s.paneID != "" || s.projectID != "" }
 
 // ctxMenuTitleCap bounds how far the header (pane display name — often a
 // CWD) may widen the box beyond the widest item label. Longer titles are
@@ -273,7 +287,15 @@ func renderCtxMenu(s ctxMenuState) string {
 	blank := strings.Repeat(" ", innerW)
 	rows := make([]string, 0, s.contentRows())
 
-	title := s.title
+	// Sanitize BEFORE measuring. Both titles this menu carries name something a
+	// daemon told us about — a pane's name or a project's — and a daemon may be
+	// on a host the user does not control. Truncation is not a substitute:
+	// lipgloss.Width measures an escape sequence as zero cells, so a title that
+	// is nothing but escapes passes the width check untouched and reaches the
+	// terminal intact. Doing it here rather than at the two assignment sites
+	// keeps the raw value in state (the codebase's render-only rule) and covers
+	// any third title added later by construction.
+	title := sanitizeRemoteText(s.title)
 	if lipgloss.Width(title) > innerW-2 {
 		title = ansi.Truncate(title, innerW-3, "…")
 	}
@@ -342,11 +364,69 @@ func (m *Model) openCtxMenu(pane *PaneModel, anchorX, anchorY int) {
 	pane.ctxTargetHighlight = true
 }
 
+// buildProjectCtxMenuItems is the sidebar project row's menu: Rename and
+// Destroy. No availability gates — unlike the pane menu's history/lazygit
+// rows, both actions are always valid for any project the sidebar can show.
+func buildProjectCtxMenuItems(remote, synthetic bool) []ctxMenuItem {
+	// Rename AND Destroy are greyed for the SYNTHETIC project — the
+	// placeholder the client invents for a daemon that has reported no
+	// projects. Its ID exists only here, so either message names something the
+	// daemon has never heard of and its map lookup misses: the dialog is
+	// accepted and nothing changes, which is exactly how it was reported for a
+	// remote host while the same actions worked locally.
+	//
+	// Disconnect stays ENABLED on such a host, and is the only thing that can
+	// work there: it is client-side entirely, and detaching the machine is
+	// what a user reaching for "remove this" actually wants when the daemon
+	// cannot hold a project in the first place.
+	items := []ctxMenuItem{{ctxActRenameProject, "Rename project", !synthetic, false}}
+	// ONE removal action, chosen by what the project is.
+	//
+	// Offering both on a remote read as two ways to do the same thing, and the
+	// one users reached for first was the one that cannot work there: a daemon
+	// may not be left with no project, so destroying the last one on a host
+	// bootstraps a fresh "Default" and looks like the delete was ignored.
+	// Disconnect is what "get this machine out of my sidebar" actually means,
+	// and it leaves everything on the far side running.
+	if remote {
+		items = append(items, ctxMenuItem{ctxActDisconnectHost, "Disconnect host…", true, false})
+	} else {
+		items = append(items, ctxMenuItem{ctxActDestroyProject, "Destroy project…", !synthetic, false})
+	}
+	return items
+}
+
+// openProjectCtxMenu opens (or re-targets) the sidebar's project-row menu,
+// mirroring openCtxMenu but keyed by projectID instead of paneID — see
+// ctxMenuState's doc comment for why the two share one type. No
+// ctxTargetHighlight equivalent: that field lives on PaneModel and marks the
+// pane border, which has no project analogue (the active-project marker in
+// the sidebar already shows which row is selected).
+func (m *Model) openProjectCtxMenu(p *ProjectModel, anchorX, anchorY int) {
+	s := ctxMenuState{
+		projectID: p.ID,
+		title:     p.Name,
+		spaced:    false,
+		cursor:    -1,
+		items:     buildProjectCtxMenuItems(p.Dest != "", isSyntheticProject(p.ID)),
+	}
+	s.cursor = firstEnabled(s.items)
+	w, h := s.boxSize()
+	if w > m.width || h > m.height-2 {
+		return
+	}
+	m.closeCtxMenu()
+	m.clearDragState()
+	m.selection = nil
+	s.x, s.y = ctxMenuPos(anchorX, anchorY, w, h, m.width, m.height)
+	m.ctxMenu = s
+}
+
 // closeCtxMenu closes the menu and clears the target-pane highlight. Safe to
 // call when already closed; nil-safe when the target pane has vanished.
 func (m *Model) closeCtxMenu() {
 	if m.ctxMenu.paneID != "" {
-		if pane, _ := m.findPaneAndTab(m.ctxMenu.paneID); pane != nil {
+		if pane, _, _ := m.findPaneAndTab(m.ctxMenu.paneID); pane != nil {
 			pane.ctxTargetHighlight = false
 		}
 	}
@@ -365,6 +445,12 @@ func (m Model) openQuickActionsMenu() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if rect := m.activePaneRect(); rect != nil && rect.Pane != nil {
+		// rect.OX is screen-absolute — every rect walk in model.go seeds its
+		// recursion with projectSidebarWidth() (see the PaneRect origin
+		// contract above activePaneRectFocus), so it already counts the
+		// columns View() gives the sidebar before compositing the menu over
+		// the joined frame. Adding the sidebar width here as well double-
+		// counted it and drove the anchor a second sidebar-width to the right.
 		m.openCtxMenu(rect.Pane, rect.OX+1, rect.OY+1)
 	}
 	return m, nil
@@ -402,6 +488,26 @@ func (m Model) handleCtxMenuKey(key string) (tea.Model, tea.Cmd) {
 // handler logic the keybinding cases use. Destructive items keep their
 // confirm dialogs.
 func (m Model) executeCtxMenuItem(item ctxMenuItem) (tea.Model, tea.Cmd) {
+	// Project row (Task 13): branches out before any of the pane-focus
+	// bookkeeping below, which assumes a pane target throughout (tab lookup,
+	// ActivePane sync). Both project actions keep the destructive one behind
+	// the shared confirm dialog, same as ctxActClose/ctxActRestart.
+	if projectID := m.ctxMenu.projectID; projectID != "" {
+		m.closeCtxMenu()
+		if !item.enabled {
+			return m, nil
+		}
+		switch item.id {
+		case ctxActRenameProject:
+			return m.beginProjectRename(projectID)
+		case ctxActDestroyProject:
+			return m, m.confirmDestroyProject(projectID)
+		case ctxActDisconnectHost:
+			return m, m.confirmDisconnectHost(projectID)
+		}
+		return m, nil
+	}
+
 	paneID := m.ctxMenu.paneID
 	m.closeCtxMenu()
 	if !item.enabled || paneID == "" {
@@ -420,7 +526,7 @@ func (m Model) executeCtxMenuItem(item ctxMenuItem) (tea.Model, tea.Cmd) {
 		old.Active = false
 	}
 	tab.ActivePane = paneID
-	if pane, _ := m.findPaneAndTab(paneID); pane != nil {
+	if pane, _, _ := m.findPaneAndTab(paneID); pane != nil {
 		pane.Active = true
 	}
 
@@ -438,7 +544,7 @@ func (m Model) executeCtxMenuItem(item ctxMenuItem) (tea.Model, tea.Cmd) {
 	case ctxActMute:
 		return m, m.toggleActivePaneMute()
 	case ctxActAttention:
-		if pane, _ := m.findPaneAndTab(paneID); pane != nil {
+		if pane, _, _ := m.findPaneAndTab(paneID); pane != nil {
 			pane.pinnedAttention = !pane.pinnedAttention
 		}
 		return m, nil

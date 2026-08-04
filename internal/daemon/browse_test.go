@@ -973,3 +973,59 @@ func TestBeginDirsCheck_RejectsWhileHeld(t *testing.T) {
 		t.Errorf("rejection carries Paths = %v, want none", rejection.Paths)
 	}
 }
+
+// TestProjectCWD_DoesNotWedgeOnAnUnreachableRoot: a project's RootDir becomes a
+// pane's spawn CWD, and resolving it used to be an unbounded os.Stat plus
+// EvalSymlinks run straight on the IPC dispatch goroutine. A root on a dead NFS
+// or SMB mount parks that goroutine in an uninterruptible syscall — and with it
+// every pane on the daemon, since that is the goroutine serving them all.
+//
+// Worse than the client-CWD case it was copied from: a RootDir is typed once in
+// a dialog, persisted, and re-read on every new tab, so the wedge survives
+// restarts and re-arms rather than being refreshed on each attach.
+//
+// Driven through the statPath seam for the reason classifyEntries' test gives —
+// no real filesystem provides a path that never answers on demand.
+func TestProjectCWD_DoesNotWedgeOnAnUnreachableRoot(t *testing.T) {
+	d := newTestDaemon(t)
+	p := d.session.CreateProject("stuck", "/mnt/dead-share/work")
+
+	block := make(chan struct{})
+	var calls atomic.Int64
+	orig := statPath
+	statPath = func(string) (os.FileInfo, error) {
+		calls.Add(1)
+		<-block
+		return nil, os.ErrNotExist
+	}
+	t.Cleanup(func() { restoreSeam(t, block, func() { statPath = orig }) })
+
+	done := make(chan string, 1)
+	go func() { done <- d.projectCWD(p.ID) }()
+
+	select {
+	case got := <-done:
+		// The fallback, not the unreachable root: a spawn there would inherit
+		// the same hang in the child.
+		if got == "/mnt/dead-share/work" {
+			t.Errorf("projectCWD returned the unreachable root %q; it must fall "+
+				"back when the probe cannot answer", got)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("projectCWD never returned — the dispatch goroutine is parked in " +
+			"the stat, and every pane on this daemon is parked behind it")
+	}
+
+	// This assertion is the load-bearing one, and without it the test passes
+	// against the very code it exists to reject. An unbounded os.Stat does not
+	// go through this seam at all, so it answers ENOENT from the real
+	// filesystem in microseconds and the timing check above never fires. What
+	// distinguishes the two implementations is not how long the call takes on a
+	// path that happens not to exist — it is whether the probe is bounded, and
+	// going through the seam is what bounded means here.
+	if calls.Load() == 0 {
+		t.Error("projectCWD resolved its root without going through statPath, " +
+			"so the probe is unbounded: on a dead mount it parks the IPC " +
+			"dispatch goroutine and every pane behind it")
+	}
+}

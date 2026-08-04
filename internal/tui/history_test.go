@@ -587,3 +587,75 @@ func TestOpenLogViewer_KeepsTruncationAndTail(t *testing.T) {
 		t.Errorf("want the cursor at the last line, got %d of %d", e.CursorRow, len(e.Lines))
 	}
 }
+
+// Without a recorded ProjectID, a history entry pushed under a background
+// project used to be re-interpreted against whichever project is active at
+// pop time — unreachable cross-project back-navigation. popPaneHistory must
+// resolve the project FIRST.
+func TestPopPaneHistory_RestoresBackgroundProject(t *testing.T) {
+	t.Parallel()
+	m := twoProjectModel()
+	// Simulate having navigated away from p-bg (in proj-bg) to land on p-fg
+	// (in proj-fg, the active project): the entry records where we came from.
+	m.paneHistory = []PaneRef{{ProjectID: "proj-bg", TabIndex: 0, PaneID: "p-bg"}}
+
+	next, _ := m.popPaneHistory()
+	got := next.(Model)
+
+	if got.activeProject != 1 {
+		t.Fatalf("activeProject = %d, want 1 (proj-bg restored)", got.activeProject)
+	}
+	if got.activeTabModel() == nil || got.activeTabModel().ActivePane != "p-bg" {
+		t.Fatal("popPaneHistory did not focus the recorded background pane")
+	}
+	if len(got.paneHistory) != 0 {
+		t.Errorf("paneHistory = %d entries, want 0 (consumed)", len(got.paneHistory))
+	}
+}
+
+// A stale entry — its project has since closed, or its pane has since been
+// destroyed — must be skipped rather than misapplied against whatever
+// project/tab happens to occupy that slot now (pop-and-skip degrades safely).
+func TestPopPaneHistory_SkipsStaleEntries(t *testing.T) {
+	t.Parallel()
+	m := twoProjectModel()
+	m.paneHistory = []PaneRef{
+		// A live entry buried under two stale ones — must still be reached.
+		{ProjectID: "proj-fg", TabIndex: 0, PaneID: "p-fg"},
+		// Project closed since the entry was pushed.
+		{ProjectID: "proj-gone", TabIndex: 0, PaneID: "p-gone"},
+		// Pane destroyed since the entry was pushed (project still exists).
+		{ProjectID: "proj-bg", TabIndex: 0, PaneID: "p-destroyed"},
+	}
+
+	next, _ := m.popPaneHistory()
+	got := next.(Model)
+
+	if got.activeProject != 0 {
+		t.Fatalf("activeProject = %d, want 0 (proj-fg, the surviving entry)", got.activeProject)
+	}
+	if got.activeTabModel() == nil || got.activeTabModel().ActivePane != "p-fg" {
+		t.Fatal("popPaneHistory did not skip past the stale entries to the live one")
+	}
+	if len(got.paneHistory) != 0 {
+		t.Errorf("paneHistory = %d entries, want 0 (stale entries discarded too)", len(got.paneHistory))
+	}
+}
+
+// An entirely stale stack (every entry invalid) must not panic and must
+// leave the model untouched — popPaneHistory degrades to a no-op.
+func TestPopPaneHistory_AllStaleIsNoOp(t *testing.T) {
+	t.Parallel()
+	m := twoProjectModel()
+	m.paneHistory = []PaneRef{{ProjectID: "proj-gone", TabIndex: 0, PaneID: "p-gone"}}
+
+	next, _ := m.popPaneHistory()
+	got := next.(Model)
+
+	if got.activeProject != 0 {
+		t.Fatalf("activeProject changed to %d on an all-stale history stack", got.activeProject)
+	}
+	if len(got.paneHistory) != 0 {
+		t.Errorf("paneHistory = %d entries, want 0 (the stale entry was consumed)", len(got.paneHistory))
+	}
+}

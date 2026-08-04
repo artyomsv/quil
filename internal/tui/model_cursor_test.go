@@ -23,8 +23,7 @@ func cursorTestModel(paneType string) (Model, *PaneModel) {
 	tab.ActivePane = "p1"
 	m := Model{
 		cfg:           config.Default(),
-		tabs:          []*TabModel{tab},
-		activeTab:     0,
+		projects:      oneProject(tab),
 		width:         80,
 		height:        24,
 		notifications: NewNotificationCenter(30, 50),

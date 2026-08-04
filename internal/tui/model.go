@@ -16,6 +16,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
+
 	"github.com/artyomsv/quil/internal/claudesessions"
 	"github.com/artyomsv/quil/internal/clipboard"
 	"github.com/artyomsv/quil/internal/config"
@@ -46,16 +48,43 @@ type WorkspaceStateMsg struct {
 	ActiveTab string
 	Tabs      []TabInfo
 	Panes     []PaneInfo
+	// Projects is the sending daemon's project grouping, in its own order;
+	// ActiveProject is the project that daemon considers current. A broadcast
+	// is the FULL state of ONE daemon, so both describe that daemon only.
+	Projects      []ProjectInfo
+	ActiveProject string
+	// Dest is the destination this broadcast arrived on — client-side only,
+	// empty for the local daemon. It has to ride the message because
+	// listenForMessages returns the parsed state directly as the tea.Msg, so
+	// Update, not the parse site, is where applyWorkspaceState is called.
+	Dest string
 	// Update is the daemon's announced newer release (nil when up to date).
 	Update *ipc.UpdateInfo
 }
 
+// ProjectInfo is one daemon-side project as broadcast. TabIDs carries the
+// project's own tab ORDER — the tab bar renders it verbatim — and ActiveTab is
+// the tab that project was last left on (the daemon keeps it in sync with the
+// global active tab for the active project, so it needs no special casing).
+type ProjectInfo struct {
+	ID        string
+	Name      string
+	RootDir   string
+	TabIDs    []string
+	ActiveTab string
+}
+
 type TabInfo struct {
-	ID     string
-	Name   string
-	Color  string
-	Panes  []string
-	Layout json.RawMessage
+	ID   string
+	Name string
+	// ProjectID is the owning project as the TAB records it. Project.TabIDs is
+	// what a rebuild iterates; this is the tab's own answer to the same
+	// question, used to reject a stale TabIDs entry that would otherwise build
+	// one TabModel into two projects at once.
+	ProjectID string
+	Color     string
+	Panes     []string
+	Layout    json.RawMessage
 }
 
 type PaneInfo struct {
@@ -80,6 +109,18 @@ type PaneInfo struct {
 	// be wrapped in \x1b[200~/\x1b[201~ markers. Mirrored onto PaneModel for
 	// the paste paths.
 	BracketedPaste bool
+	// Git state is daemon-authoritative and broadcast-only: the daemon holds
+	// the disk the repository lives on, which is the whole point when that
+	// daemon is on another machine. GitUpstream distinguishes "in sync" from
+	// "nothing to compare against" — without it, 0/0 would claim the first
+	// when it means the second.
+	GitBranch   string
+	GitDetached bool
+	GitWorktree bool
+	GitUpstream bool
+	GitAhead    int
+	GitBehind   int
+	GitStale    bool
 	// Model/ContextTokens are daemon-authoritative (extracted from hook event
 	// data at turn boundaries): the model id and context-window token count of
 	// the pane's last completed AI turn. Empty/zero for non-AI panes.
@@ -143,10 +184,15 @@ type pasteRefreshMsg struct{}
 // sidebarTickMsg triggers a periodic sidebar re-render to update relative timestamps.
 type sidebarTickMsg struct{}
 
-// PaneRef stores a pane location for navigation history.
+// PaneRef stores a pane location for navigation history. ProjectID names the
+// project the location was recorded under — a bare TabIndex is only
+// meaningful relative to ITS OWN project's tab list, so restoring one
+// without first resolving the project it belongs to can reinterpret it
+// against whichever project happens to be active at pop time.
 type PaneRef struct {
-	TabIndex int
-	PaneID   string
+	ProjectID string
+	TabIndex  int
+	PaneID    string
 }
 
 // highlightPaneMsg triggers an orange border highlight on a pane for MCP interactions.
@@ -206,6 +252,9 @@ const (
 	dialogCommandHistory
 	dialogUpdateNotice
 	dialogCommandPalette
+	dialogProjectNew    // Alt+Shift+N: create a project (Task 13)
+	dialogProjectRename // sidebar context menu: rename a project (Task 13)
+	dialogProjectPick   // Alt+P: fuzzy project picker (Task 14)
 )
 
 // tuiClient is the subset of *ipc.Client the TUI uses on the Model. Defined
@@ -227,18 +276,30 @@ type tuiClient interface {
 type Client = tuiClient
 
 type Model struct {
-	tabs                 []*TabModel
-	activeTab            int
+	// projects owns every tab. There is no flat tab list: activeProject
+	// selects the project, and that project's own activeTab selects the tab
+	// within it, so switching projects restores the tab each was left on.
+	projects      []*ProjectModel
+	activeProject int
+	// prevProject is the ID of the project switchProject moved AWAY from —
+	// the bounce target for the last-project toggle.
+	//
+	// An ID, not an index. m.projects is rebuilt on every broadcast and can
+	// legitimately grow, shrink or (for a brand-new project) gain an entry at
+	// the end, so an index survives as a NUMBER while silently coming to mean
+	// a different project — and Alt+O would then move the user to another
+	// daemon's work without touching a key that says so. An ID that no longer
+	// resolves is a visible no-op, which is the honest failure.
+	prevProject          string
 	width                int
 	height               int
 	client               tuiClient
-	clientGen            int            // bumped on every client swap; see linkLostMsg for why
-	reconnect            reconnectState // zero value = not reconnecting
-	redialFn             RedialFunc     // nil in local mode: a dead local daemon is fatal
-	closeClientFn        func(Client)   // releases a connection; see SetClientCloser
+	clientGen            int          // bumped on every client swap; see linkLostMsg for why
+	closeClientFn        func(Client) // releases a connection; see SetClientCloser
 	cfg                  config.Config
 	version              string
-	attached             bool
+	sized                bool            // the terminal has reported its geometry at least once
+	attached             map[string]bool // destinations already attached — see attachAllDests
 	renaming             bool
 	renameInput          string
 	renamingPane         bool
@@ -257,7 +318,6 @@ type Model struct {
 	confirmID            string                 // ID of pane/tab to delete
 	confirmName          string                 // display name for confirmation
 	devMode              bool                   // true when QUIL_HOME is set
-	remoteDest           string                 // non-empty when attached to a daemon on another host
 	pluginRegistry       *plugin.Registry       // plugin registry (shared with daemon)
 	lastWidth            int                    // last known window width (for persistence)
 	lastHeight           int                    // last known window height (for persistence)
@@ -304,8 +364,8 @@ type Model struct {
 	// Held separately from cwdBrowseTruncated because the two describe different
 	// listings and only one of them is on screen at a time: this one applies once
 	// showRootsList promotes the roots to BE the listing.
-	cwdBrowseRootsTruncated bool // the daemon gave up part-way through enumerating roots
-	browseCandidates   []string // remaining pre-fill candidates for the setup browser's start-up chain
+	cwdBrowseRootsTruncated bool     // the daemon gave up part-way through enumerating roots
+	browseCandidates        []string // remaining pre-fill candidates for the setup browser's start-up chain
 	// Session-picker state (plugins with [command] sessions = "claude"). Rows
 	// are scoped to sessionScanCWD; when the browser moves to a different
 	// directory the rows AND selectedSessionID are discarded, since a session
@@ -324,28 +384,81 @@ type Model struct {
 	sessionTruncated  bool                    // daemon capped the listing
 	selectedSessionID string                  // committed resume target (empty = fresh session)
 	sessionDetail     sessionDetailPanel      // the picker's "i" panel (zero value = closed)
-	tomlEditor        *TextEditor             // active TOML editor (nil when not editing)
-	selection         *Selection              // active text selection (nil when none)
-	mouseDown         bool                    // true while left mouse button is held
-	mouseStartX       int                     // screen X of mouse press
-	mouseStartY       int                     // screen Y of mouse press
-	configChanged     bool                    // true when config needs saving on exit
-	disclaimerTipIdx  int                     // random tip index for disclaimer dialog
-	mcpHighlights     map[string]bool         // pane IDs with active MCP highlight
-	mcpHighlightSeq   map[string]int          // sequence number for highlight timer reset
-	notifications     *NotificationCenter     // notification sidebar
-	paneHistory       []PaneRef               // navigation history (bounded, 20 max)
-	sidebarFocused    bool                    // true when notification sidebar has keyboard focus
-	notesMode         bool                    // true when pane notes editor is open for the active pane
-	notesEditor       *NotesEditor            // active notes editor (nil when notesMode is false)
-	notesPaneFocused  bool                    // true when keyboard input goes to the bound pane (PTY) instead of the notes editor
-	notesEnteredFocus bool                    // true when toggleNotesMode was the one that turned the tab's focus mode on (so exit reverts)
-	notesMouseDown    bool                    // true while a left-button drag is in progress inside the notes editor
-	notesAnchorRow    int                     // document row where a notes-editor drag began (resolved once on click)
-	notesAnchorCol    int                     // document col where a notes-editor drag began (resolved once on click)
-	viewerMouseDown   bool                    // true while a left-button drag is in progress inside the read-only full-screen viewer
-	viewerAnchorRow   int                     // document row where a viewer drag began (resolved once on click)
-	viewerAnchorCol   int                     // document col where a viewer drag began (resolved once on click)
+
+	// Project New/Rename dialog state (Task 13). Shared by both dialogs —
+	// m.dialog tells them apart, and Rename pre-fills projectFormID/Name from
+	// the target project. The root-dir field reuses the SAME cwdBrowse* /
+	// browse fields the pane-setup dialog's CWD field uses (they hold
+	// whatever the currently open dialog put there — see projectdialog.go):
+	// its committed value at submit time is simply m.cwdBrowseDir, exactly
+	// like submitSetupDialog's selectedCWD capture.
+	projectFormID     string // "" for New; the project ID being edited for Rename
+	projectFormName   string // Name field's live text
+	projectFormCursor int    // focused row: 0 = name, 1 = root dir, 2 = submit button
+	projectFormErr    string // validation message shown under the form (e.g. "name required")
+	// projectFormHost is the Host field's live text — an ssh destination, or
+	// empty for the local daemon. projectFormDialing holds the host a dial is
+	// currently in flight for, so a result arriving for a host the user has
+	// since retyped is discarded rather than applied to the wrong form.
+	projectFormHost    string
+	projectFormUser    string
+	projectFormDialing string
+	// projectFormInstalling holds the host a remote install is running for,
+	// so its result is matched the same way a dial's is.
+	projectFormInstalling string
+	// installedDests records hosts this session has already provisioned, so a
+	// dial that still reports the binary missing afterwards reports instead of
+	// installing again.
+	installedDests map[string]bool
+	// projectFormRemote gates the ssh rows. A local project is the common
+	// case, so User/Host are hidden until this is on — and turning it off
+	// clears them, because a hidden field that still decided where the project
+	// landed would be the worst of both.
+	projectFormRemote bool
+	// projectFormDest is the daemon the root-dir browser asks — the OWNING
+	// project's dest for Rename (which may not be the active project; the
+	// sidebar context menu can target a background one), the active dest for
+	// New. Unlike the pane-setup dialog's CWD field, this can't rely on
+	// requestBrowseDir's unstamped-resolves-to-active-dest fallback.
+	projectFormDest string
+
+	// projectPick is the fuzzy project picker's (Alt+P) query buffer, result
+	// list, and cursor — same shape as paletteState (zero value = empty,
+	// m.dialog is the sole open/closed authority). See projectpicker.go.
+	projectPick projectPickState
+
+	tomlEditor       *TextEditor         // active TOML editor (nil when not editing)
+	selection        *Selection          // active text selection (nil when none)
+	mouseDown        bool                // true while left mouse button is held
+	mouseStartX      int                 // screen X of mouse press
+	mouseStartY      int                 // screen Y of mouse press
+	configChanged    bool                // true when config needs saving on exit
+	disclaimerTipIdx int                 // random tip index for disclaimer dialog
+	mcpHighlights    map[string]bool     // pane IDs with active MCP highlight
+	mcpHighlightSeq  map[string]int      // sequence number for highlight timer reset
+	notifications    *NotificationCenter // notification sidebar
+	paneHistory      []PaneRef           // navigation history (bounded, 20 max)
+	sidebarFocused   bool                // true when notification sidebar has keyboard focus
+	// sidebarOpen/sidebarWidth control the PROJECT sidebar (internal/tui/sidebar.go)
+	// — not to be confused with the notification sidebar above. Unlike that one
+	// (a compositor overlay, zero layout width), the project sidebar is a real
+	// reserved left column: its width is subtracted in the layout path
+	// (paneAreaWidth/resizeTabs) so pane rects and PTY sizes always agree with
+	// what gets painted. A screen property, not a session one — loaded from
+	// UIConfig at startup (NewModel), never workspace.json, so a workspace saved
+	// with it open can't fight a narrower terminal on restore.
+	sidebarOpen       bool
+	sidebarWidth      int
+	notesMode         bool         // true when pane notes editor is open for the active pane
+	notesEditor       *NotesEditor // active notes editor (nil when notesMode is false)
+	notesPaneFocused  bool         // true when keyboard input goes to the bound pane (PTY) instead of the notes editor
+	notesEnteredFocus bool         // true when toggleNotesMode was the one that turned the tab's focus mode on (so exit reverts)
+	notesMouseDown    bool         // true while a left-button drag is in progress inside the notes editor
+	notesAnchorRow    int          // document row where a notes-editor drag began (resolved once on click)
+	notesAnchorCol    int          // document col where a notes-editor drag began (resolved once on click)
+	viewerMouseDown   bool         // true while a left-button drag is in progress inside the read-only full-screen viewer
+	viewerAnchorRow   int          // document row where a viewer drag began (resolved once on click)
+	viewerAnchorCol   int          // document col where a viewer drag began (resolved once on click)
 
 	// Scrollbar click-and-drag. Set on a left-click that hits a pane's
 	// rightmost content column (the scrollbar track). While
@@ -421,9 +534,14 @@ type Model struct {
 	flashText  string
 	flashUntil time.Time
 
-	// updateInfo mirrors the daemon's announced newer release; drives the
-	// status-bar segment, the About row, and the startup notice.
-	updateInfo *ipc.UpdateInfo
+	// updateInfos maps a destination to the newer release ITS daemon
+	// announced; drives the status-bar segment, the About row, and the
+	// startup notice. Keyed rather than a single field because a client can
+	// hold several daemons and each announces its own version — one field is
+	// whatever broadcast last, so the status bar could describe a remote host
+	// while a LOCAL project is on screen. Read through updateInfoFor /
+	// activeUpdateInfo, never indexed directly at a call site.
+	updateInfos map[string]*ipc.UpdateInfo
 
 	// sawFirstState gates the once-per-launch update notice to the FIRST
 	// WorkspaceStateMsg after attach — every broadcast thereafter (switch
@@ -437,18 +555,54 @@ type Model struct {
 	// applyUpdateOnExit signals cmd/quil/main.go to run the staged-update
 	// swap after tea.Program returns (set by the apply confirm).
 	applyUpdateOnExit bool
+
+	// links holds ONE reconnectState per destination, keyed the way everything
+	// else in this client is keyed: "" is the daemon a single connection routes
+	// to, a host name is one of several. Absent means "never dropped" — linkOf
+	// reads that as the zero value, so a session that never loses a link
+	// allocates nothing. A map rather than a field is the whole point: one
+	// daemon reconnecting leaves every other entry, and every other project's
+	// input, untouched.
+	//
+	// redialFns is the matching dialer table. A destination with no dialer never
+	// reconnects, which is what local sessions get and what keeps a dead local
+	// daemon fatal — its panes died with it, so retrying would hide the loss.
+	links     map[string]*reconnectState
+	redialFns map[string]RedialFunc
+	// dialDestFn connects a destination that is not in the table yet, and
+	// redialDestFn builds the reconnect ladder for one once it is. Both are
+	// supplied by cmd/quil (the ssh transport lives there); a Model without
+	// them keeps working with the destinations it was constructed with, which
+	// is every test Model.
+	dialDestFn    DialFunc
+	installDestFn InstallFunc
+	redialDestFn func(dest string) RedialFunc
 }
 
-// SetRemoteDest marks this session as attached to a daemon on another host and
-// names it. Empty (the default) means a local session.
+// RemoteMode reports whether the daemon behind the ACTIVE project lives on
+// another host.
 //
-// A setter rather than a NewModel parameter: it is display-and-gating state
-// that every existing caller and test can keep ignoring, and NewModel already
-// takes five arguments.
-func (m *Model) SetRemoteDest(dest string) { m.remoteDest = dest }
+// The active project's Dest is now the WHOLE answer. It used to be the union of
+// that and a session-wide remoteDest field, because `quil --remote <host>`
+// routed everything unstamped and stamped no project — so activeDest() read ""
+// for a session that was entirely remote. That union had a known expiry, and
+// this is it: once a client can hold a local daemon beside a remote one, a live
+// session-wide flag answers "remote" for a LOCAL project the user is looking
+// at, which is the wrong answer for every caller — the update controls it
+// suppresses are wired to local disk, and the plugin availability it swaps out
+// describes the wrong machine. --remote now keys its own connection by host, so
+// its project carries a Dest like any other and nothing is lost.
+func (m *Model) RemoteMode() bool { return m.remoteModeFor(m.activeDest()) }
 
-// RemoteMode reports whether the daemon this TUI drives lives on another host.
-func (m *Model) RemoteMode() bool { return m.remoteDest != "" }
+// remoteModeFor reports whether dest names a daemon on another host — the
+// per-destination counterpart to RemoteMode, for a call site that already knows
+// which daemon it is asking about rather than defaulting to the active one.
+//
+// Trivial by construction, and kept as a named function anyway: "" means the
+// local daemon EVERYWHERE in this client (a project's Dest, a tab's, the
+// router's key, the Origin a local pump stamps), and this is where that
+// convention is written down rather than re-derived at each call site.
+func (m *Model) remoteModeFor(dest string) bool { return dest != "" }
 
 // SetRecentCWDs replaces the remembered working-directory list.
 //
@@ -460,7 +614,15 @@ func (m *Model) RemoteMode() bool { return m.remoteDest != "" }
 // developer's real ~/.quil.
 func (m *Model) SetRecentCWDs(list []string) { m.recentCWDs = list }
 
-func NewModel(client *ipc.Client, cfg config.Config, version string, registry *plugin.Registry, stalePlugins []plugin.StalePlugin) Model {
+// NewModel builds the client.
+//
+// The first parameter is the Client INTERFACE rather than *ipc.Client so a
+// *Router can be passed — the router is what multiplexes several daemons behind
+// the single client the Model consumes, and it must be constructed before the
+// Model rather than installed afterwards: tea.NewProgram takes the Model BY
+// VALUE, so anything that reads back through a closure over main's copy would be
+// frozen at startup.
+func NewModel(client Client, cfg config.Config, version string, registry *plugin.Registry, stalePlugins []plugin.StalePlugin) Model {
 	m := Model{
 		client:           client,
 		cfg:              cfg,
@@ -475,6 +637,8 @@ func NewModel(client *ipc.Client, cfg config.Config, version string, registry *p
 		migrationPlugins: stalePlugins,
 		perfStats:        newEventLoopStats(),
 		tabDragFromIdx:   -1,
+		sidebarOpen:      cfg.UI.SidebarOpen,
+		sidebarWidth:     cfg.UI.SidebarWidth,
 	}
 	// Migration dialog takes priority over the disclaimer — it blocks
 	// startup until all stale plugins are resolved. Show disclaimer only
@@ -574,23 +738,37 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Acknowledge the focused pane of the active tab before processing the
 	// message — focusing is the acknowledgement; see ackFocusedPane.
 	m.ackFocusedPane()
-	// A context menu whose target pane vanished (daemon reconciliation,
-	// pane destroy) closes itself. Single choke point — no need to audit
-	// every pruning path. findPaneAndTab is nil-safe.
+	// A context menu whose target vanished (daemon reconciliation, pane
+	// destroy, MsgDestroyProject from another client) closes itself. Single
+	// choke point — no need to audit every pruning path.
+	//
+	// The two menu kinds are checked against their OWN target: a project menu
+	// has no paneID at all, so testing whether paneID resolves closed it on
+	// the very next message — any spinner tick, PTY chunk or resize — which is
+	// what the user saw as "the project menu flashes and vanishes". projectID
+	// and paneID are mutually exclusive discriminators (see ctxMenuState), so
+	// the else arm is exactly the original pane case. Both lookups are
+	// nil-safe.
 	if m.ctxMenu.open() {
-		if pane, _ := m.findPaneAndTab(m.ctxMenu.paneID); pane == nil {
+		if projectID := m.ctxMenu.projectID; projectID != "" {
+			if m.projectByID(projectID) == nil {
+				m.closeCtxMenu()
+			}
+		} else if pane, _, _ := m.findPaneAndTab(m.ctxMenu.paneID); pane == nil {
 			m.closeCtxMenu()
 		}
 	}
-	// The link is down: user input is dropped rather than queued. Placed ahead
-	// of the type switch so a future input message type is frozen by default
-	// instead of quietly reaching a live PTY through a branch nobody updated.
-	if m.reconnect.active {
+	// The link the user is typing into is down: input is dropped rather than
+	// queued. Placed ahead of the type switch so a future input message type is
+	// frozen by default instead of quietly reaching a live PTY through a branch
+	// nobody updated. Scoped to the ACTIVE destination — a background project's
+	// daemon dropping must not freeze typing into a local pane.
+	if link := m.linkOf(m.activeDest()); link.active {
 		// The resume key is checked BEFORE the freeze, or it would be swallowed
 		// with every other keystroke. It cannot live inside freezeInput: that
 		// has a value receiver and returns (tea.Cmd, bool), so it can neither
 		// clear the parked state nor hand back a mutated Model.
-		if key, ok := msg.(tea.KeyPressMsg); ok && m.reconnect.parked &&
+		if key, ok := msg.(tea.KeyPressMsg); ok && link.parked &&
 			kbMatches(key.String(), reconnectResumeKey) {
 			return m.resumeReconnect()
 		}
@@ -602,7 +780,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		// Poll echo: size matches both the applied and any pending value —
 		// nothing to do. Keeps the 1s size poll free when idle.
-		if m.attached && msg.Width == m.width && msg.Height == m.height &&
+		//
+		// Gated on `sized`, not on the attach ledger. Those are two different
+		// questions now — has the terminal reported a geometry, versus which
+		// daemons have been attached — and only the first belongs here. A
+		// destination left unattached by a failed send is one whose connection
+		// is broken, so its pump reports the loss and finishReconnect attaches
+		// it; making the 1 s size poll a second retry path would only race that.
+		if m.sized && msg.Width == m.width && msg.Height == m.height &&
 			msg.Width == m.pendingWidth && msg.Height == m.pendingHeight {
 			return m, nil
 		}
@@ -614,14 +799,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.resizeSeq++
 
 		// First resize: apply immediately for initial attach
-		if !m.attached {
-			m.attached = true
+		if !m.sized {
+			m.sized = true
 			m.width = msg.Width
 			m.height = msg.Height
 			m.resizeTabs()
-			log.Print("first WindowSizeMsg — attaching to daemon")
-			return m, tea.Batch(m.resizeAllPanes(), m.attachToDaemon())
+			log.Print("first WindowSizeMsg — attaching to every daemon")
+			// Sequenced, not `return m, tea.Batch(…, m.attachAllDests())`. Go
+			// orders function CALLS within a statement left to right, but says
+			// nothing about a plain operand like `m` against them — and
+			// attachAllDests has a pointer receiver that lazily allocates the
+			// attach ledger. Copy `m` into the return slot first and the ledger
+			// is lost, so the next real resize attaches every destination a
+			// SECOND time and replays every ghost buffer twice. gc happens to
+			// evaluate the calls first today; nothing requires it to.
+			resize, attach := m.resizeAllPanes(), m.attachAllDests()
+			return m, tea.Batch(resize, attach)
 		}
+
+		// A destination can join the router after the first resize (a host that
+		// was unreachable at launch, brought back by its reconnect ladder), and
+		// a send that failed leaves its dest unattached on purpose. Retrying
+		// here is what picks both up — the 1 s size poll makes it a bounded
+		// wait rather than a wedge. Batched into the returns below rather than
+		// returned on its own: a resize that ALSO needs an attach still has to
+		// be debounced like any other.
+		attach := m.attachAllDests()
 
 		// Full-screen dialogs (migration, disclaimer) have no panes to
 		// resize via IPC, so apply immediately — debouncing would leave
@@ -630,44 +833,79 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.dialog == dialogPluginMigration || m.dialog == dialogDisclaimer {
 			m.width = msg.Width
 			m.height = msg.Height
-			return m, nil
+			return m, attach
 		}
 
 		// Debounce subsequent resizes
 		seq := m.resizeSeq
-		return m, tea.Tick(150*time.Millisecond, func(t time.Time) tea.Msg {
+		return m, tea.Batch(attach, tea.Tick(150*time.Millisecond, func(t time.Time) tea.Msg {
 			return resizeTickMsg{seq: seq}
-		})
+		}))
 
 	case linkLostMsg:
-		// A report from a superseded client: its replacement is already live,
-		// so there is nothing to reconnect.
-		if msg.gen != m.clientGen {
+		// The generation check retires a report from a SUPERSEDED client, and it
+		// applies to the single-connection path ONLY. There finishReconnect
+		// swaps m.client wholesale, so a loop still parked in the dead client's
+		// Receive will report a death that stopped mattering. A router is never
+		// swapped: its r.in is one channel for the life of the session and the
+		// drop arrives as data on it, so there is nothing for a session
+		// generation to identify — and checking one here was a live bug, since
+		// any OTHER destination's reconnect bumped clientGen and this drop was
+		// then discarded with no ladder ever started.
+		if !m.isRouter() && msg.gen != m.clientGen {
 			log.Printf("ignoring link loss from gen %d (current %d)", msg.gen, m.clientGen)
 			return m, nil
 		}
-		if !m.canReconnect() {
-			return m, tea.Quit
+		// The listen loop stopped when it returned this message, and with a
+		// router that loop is the ONLY reader of every other daemon's messages —
+		// leaving it unarmed parks a healthy daemon's output behind a dead one's
+		// reconnect ladder, for as long as the ladder climbs. Re-armed only for
+		// a router: on the single-connection path the client itself is dead, so
+		// a fresh Receive fails instantly and re-arming is a hot loop.
+		// finishReconnect owns the re-arm there instead.
+		var relisten tea.Cmd
+		if m.isRouter() {
+			relisten = m.listenForMessages()
 		}
-		return m.beginReconnect(msg.err)
+		if !m.canReconnect(msg.dest) {
+			// Quitting is right for a session whose ONLY daemon just died: its
+			// panes died with it and there is nothing left to show. It is wrong
+			// for one of several — a local daemon crashing would take down the
+			// view of remote work that is still running perfectly well. The
+			// surviving daemons keep the session; the dead one gets an honest
+			// banner instead of a countdown that will never fire.
+			if m.lastDaemon(msg.dest) {
+				return m, tea.Quit
+			}
+			log.Printf("link to %s lost with no way to reconnect it; other daemons keep the session: %v",
+				m.linkHost(msg.dest), msg.err)
+			m.handleLinkLost(msg.dest, msg.err)
+			m.linkFor(msg.dest).parked = true
+			return m, relisten
+		}
+		mdl, cmd := m.beginReconnect(msg.dest, msg.err)
+		return mdl, tea.Batch(relisten, cmd)
 
 	case redialTickMsg:
 		// msg.attempt is checked, not just carried. It makes a second concurrent
 		// dial impossible by construction rather than by argument: only the tick
 		// for the attempt currently armed can start one, so the "slow attempt
 		// completing after a fast one" case the result branch guards against has
-		// no way to arise in the first place.
-		if msg.gen != m.clientGen || !m.reconnect.active || msg.attempt != m.reconnect.attempt {
+		// no way to arise in the first place. Per destination, since two ladders
+		// can be climbing at once and their attempt numbers are unrelated — and
+		// so is the generation, for the same reason.
+		link := m.linkOf(msg.dest)
+		if msg.gen != link.gen || !link.active || msg.attempt != link.attempt {
 			return m, nil
 		}
-		return m, m.redialCmd()
+		return m, m.redialCmd(msg.dest)
 
 	case redialResultMsg:
 		// Dropped for a superseded generation even when it carries a LIVE
 		// client: a slow attempt completing after a fast one would otherwise
 		// replace a working connection with a second one, leaving the first
 		// with a listen loop nobody reads.
-		if msg.gen != m.clientGen || !m.reconnect.active {
+		if msg.gen != m.linkOf(msg.dest).gen || !m.linkOf(msg.dest).active {
 			// The !active half mirrors the tick branch above. Without it a
 			// failure result arriving with active already false would call
 			// scheduleRedial, incrementing attempt and arming a tick that the
@@ -690,20 +928,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.err == nil {
 				msg.err = errors.New("dialer returned no connection")
 			}
-			m.reconnect.lastErr = msg.err
+			link := m.linkFor(msg.dest)
+			link.lastErr = msg.err
 			if errors.Is(msg.err, ErrLinkPermanent) {
 				// Every reconnect is a full authentication, so retrying a
 				// rejected key produces a steady stream of failed auths from the
 				// operator's own address — which a default fail2ban sshd jail
 				// bans, locking them out of a host that was never unreachable.
 				// The banner stays up: the session is paused, not over.
-				m.reconnect.parked = true
-				log.Printf("remote: parking reconnect after a permanent failure: %v", msg.err)
+				link.parked = true
+				log.Printf("remote: parking reconnect to %s after a permanent failure: %v",
+					m.linkHost(msg.dest), msg.err)
 				return m, nil
 			}
-			return m.scheduleRedial()
+			return m.scheduleRedial(msg.dest)
 		}
-		return m.finishReconnect(msg.client)
+		return m.finishReconnect(msg.dest, msg.client)
 
 	case sizePollMsg:
 		return m, tea.Batch(sizePollProbe, sizePollTick())
@@ -784,6 +1024,36 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// drag survives the swallowed press.
 		if m.sidebarSwallowsMouse(msg.X, msg.Y) {
 			m.clearDragState()
+			return m, nil
+		}
+		// Project sidebar: a RESERVED left column, so the press belongs to
+		// it and never to a pane — the pane area starts at its right edge.
+		// Ordered after the context menu and the notification overlay (both
+		// paint on top of it) and before the pane region (which it
+		// displaces), so input priority matches paint priority. The whole
+		// strip is swallowed, not just its actionable rows: letting a click
+		// on a heading fall through would arm a drag-selection at a column
+		// the user never clicked on.
+		//
+		// It must also stay ahead of the Y==0 tab-bar branch below, which
+		// is a bare row test: the tab bar starts at the sidebar's right
+		// edge, so at row 0 the sidebar's own PROJECTS heading is what the
+		// user clicked, and the strip claims it here.
+		if m.projectSidebarSwallowsMouse(msg.X, msg.Y) {
+			m.clearDragState()
+			switch msg.Button {
+			case tea.MouseLeft:
+				if kind, idx := m.sidebarHit(msg.X, msg.Y); kind != "" {
+					return m.activateSidebarRow(kind, idx)
+				}
+			case tea.MouseRight:
+				// Rename/Destroy for a project row (Task 13) — the pane
+				// context menu below never reaches here, the sidebar swallow
+				// returns first, so a project needs its own open call.
+				if kind, idx := m.sidebarHit(msg.X, msg.Y); kind == sidebarRowProject && idx >= 0 && idx < len(m.projects) {
+					m.openProjectCtxMenu(m.projects[idx], msg.X, msg.Y)
+				}
+			}
 			return m, nil
 		}
 		// Right-click: copy the active selection to the clipboard. While
@@ -927,8 +1197,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// without releasing.
 		if m.tabDragFromIdx >= 0 && msg.Y == 0 {
 			target := m.hitTestTab(msg.X)
-			if target >= 0 && target != m.tabDragFromIdx && m.tabDragFromIdx < len(m.tabs) {
-				tabID := m.tabs[m.tabDragFromIdx].ID
+			if target >= 0 && target != m.tabDragFromIdx && m.tabDragFromIdx < len(m.curTabs()) {
+				tabID := m.curTabs()[m.tabDragFromIdx].ID
 				if m.moveTab(m.tabDragFromIdx, target) {
 					m.tabDragFromIdx = target
 					return m, m.sendReorderTab(tabID, target)
@@ -1010,7 +1280,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				tab := m.activeTabModel()
 				if tab != nil && tab.Root != nil && !tab.FocusMode() && !m.notesMode {
 					tabH := m.height - chromeHeight
-					if pane := tab.Root.FindPaneAt(m.mouseStartX, m.mouseStartY, 0, 1, m.paneAreaWidth(), tabH); pane != nil {
+					if pane := tab.Root.FindPaneAt(m.mouseStartX, m.mouseStartY, m.projectSidebarWidth(), 1, m.paneAreaWidth(), tabH); pane != nil {
 						if old := tab.ActivePaneModel(); old != nil {
 							old.Active = false
 						}
@@ -1047,6 +1317,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Wheel over the sidebar overlay must not scroll the pane beneath.
 		if m.sidebarSwallowsMouse(msg.X, msg.Y) {
+			return m, nil
+		}
+		// Same for the project sidebar's reserved column — the pane it
+		// would scroll is not the one under the cursor.
+		if m.projectSidebarSwallowsMouse(msg.X, msg.Y) {
 			return m, nil
 		}
 		lines := m.cfg.UI.MouseScrollLines
@@ -1175,7 +1450,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// tick chain per pane: spinnerTickRunning (set at the start site) is
 		// cleared here when the chain stops, so a re-arm can start a fresh one
 		// without ever stacking two chains (which would double the frame rate).
-		for _, tab := range m.tabs {
+		for _, tab := range m.allTabs() {
 			if tab.Root == nil {
 				continue
 			}
@@ -1210,7 +1485,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.workSpinnerFrame++
 		// Mirror the shared frame onto every working pane so the top-border
 		// spinner (rendered inside PaneModel.View) stays in sync with the tab.
-		for _, tab := range m.tabs {
+		for _, tab := range m.allTabs() {
 			if tab.Root == nil {
 				continue
 			}
@@ -1222,6 +1497,70 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.workSpinnerTick()
 
+	case destDialedMsg:
+		// Discard an answer for a host the user has since retyped: the dial is
+		// slow enough that editing the field during one is ordinary, and
+		// applying a stale result would point the form at a machine the user
+		// has already moved on from.
+		if msg.dest != m.projectFormDialing {
+			return m, nil
+		}
+		m.projectFormDialing = ""
+		if msg.err != nil {
+			// The host answered but has no quil. Offer to provision it rather
+			// than making the user leave the dialog for `quil remote setup` —
+			// the machinery is the same, only the entry point differs.
+			// At most ONE install per host per session. A dial that still
+			// reports the binary missing right after a successful install
+			// means something the install cannot fix — it landed somewhere the
+			// non-interactive PATH does not cover, or the recorded path never
+			// reached the dialer — and offering again just spins: install,
+			// retry, 127, install. Observed as a five-second loop. The CLI
+			// path has healRemoteRecord for the same hazard.
+			if errors.Is(msg.err, ErrRemoteQuilMissing) && m.installDestFn != nil && !m.installedDests[msg.dest] {
+				if m.installedDests == nil {
+					m.installedDests = map[string]bool{}
+				}
+				m.installedDests[msg.dest] = true
+				m.projectFormInstalling = msg.dest
+				m.projectFormErr = "quil is not installed on " + sanitizeRemoteText(msg.dest) + " — installing…"
+				return m, m.installDest(msg.dest)
+			}
+			m.projectFormErr = "cannot connect: " + sanitizeRemoteText(msg.err.Error())
+			return m, nil
+		}
+		attach := m.adoptDest(msg.dest, msg.client)
+		m.projectFormDest = msg.dest
+		m.projectFormCursor = projectRowRootDir
+		m.resetProjectBrowseState()
+		// Sequenced, not batched with the browse: adoptDest writes the attach
+		// ledger onto this Model, and the browse must be requested against the
+		// destination it just installed.
+		browse := m.requestBrowseDirForDest(msg.dest, "", "", "")
+		return m, tea.Batch(attach, browse)
+
+	case destInstalledMsg:
+		if msg.dest != m.projectFormInstalling {
+			return m, nil // the user moved on, same as a stale dial
+		}
+		m.projectFormInstalling = ""
+		// ClearScreen on BOTH arms: runRemoteSetup still narrates its progress
+		// to stderr, which is the real terminal underneath this dialog, so
+		// whatever it printed has to be painted over before the user reads the
+		// result. Threading a writer through it is the proper fix; repainting
+		// is what keeps the screen honest until then.
+		if msg.err != nil {
+			m.projectFormErr = "install failed: " + sanitizeRemoteText(msg.err.Error())
+			return m, tea.ClearScreen
+		}
+		// Provisioned — retry the dial that failed. Retrying rather than
+		// assuming success is the point: the install proves a binary is on
+		// disk, not that this client can attach to the daemon it starts, and
+		// the version gate still has to run.
+		m.projectFormDialing = msg.dest
+		m.projectFormErr = ""
+		return m, tea.Batch(tea.ClearScreen, m.dialDest(msg.dest))
+
 	case PluginErrorMsg:
 		m.dialog = dialogPluginError
 		m.pluginErrorTitle = msg.Title
@@ -1229,7 +1568,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(tea.ClearScreen, m.listenForMessages())
 
 	case WorkspaceStateMsg:
-		m.noteWorkspaceState(msg.Update)
+		// Refuse state from a destination the Model has forgotten. Router.Remove
+		// closes the pump's stop channel and every publish point checks it, but
+		// that only covers a pump PARKED in Receive — a broadcast already in the
+		// buffer is still delivered, and one that passed the check just before
+		// Remove wins the select about half the time. applyWorkspaceState treats
+		// a broadcast as authoritative for its dest, so a late one re-appends
+		// the projects the user just dismissed, and they come back unusable:
+		// knownDests no longer lists the dest, so nothing re-attaches it and
+		// every send for its panes is dropped. Dropping the state here rather
+		// than trying to purge the channel keeps the fix at the one boundary
+		// that knows what the Model currently holds.
+		if !m.destConnected(msg.Dest) {
+			log.Printf("ignoring workspace state from %s: disconnected", msg.Dest)
+			return m, m.listenForMessages()
+		}
+		m.noteWorkspaceState(msg.Update, msg.Dest)
 		// TODO(freeze-diagnostic): the 8 "apply: ..." breadcrumbs in this case
 		// and inside applyWorkspaceState were added to pinpoint a TUI Update
 		// wedge during claude-code pane creation (2026-04-22). The root cause
@@ -1237,8 +1591,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// in the same PR. Keep the breadcrumbs for ~2 weeks of watchdog-clean
 		// runs, then either delete or demote them to logger.Debug.
 		log.Printf("WorkspaceState: %d tabs, %d panes", len(msg.Tabs), len(msg.Panes))
-		newPaneIDs, overlayResizeCmds := m.applyWorkspaceState(msg)
+		newPaneIDs, overlayResizeCmds := m.applyWorkspaceState(msg, msg.Dest)
 		log.Printf("apply: returned, %d new panes", len(newPaneIDs))
+		// An open project picker holds a filtered snapshot taken when it opened.
+		// A project created or destroyed by another client — or a host
+		// disconnected — would otherwise be invisible to it until it closed,
+		// which is exactly when the user is choosing from that list.
+		if m.dialog == dialogProjectPick {
+			m.projectPick.filtered = m.filterProjects(m.projectPick.query)
+			m.clampProjectPickCursor()
+		}
 		m.resizeTabs()
 		log.Printf("apply: resizeTabs done")
 		cmds := []tea.Cmd{m.listenForMessages(), m.resizeAllPanes(), m.sendAllLayouts()}
@@ -1272,16 +1634,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 
 	case setActivePaneMsg:
-		// Find which tab contains this pane and switch to it
-		for i, tab := range m.tabs {
-			if tab.Root != nil && tab.Root.PaneIDs()[msg.PaneID] {
-				m.activeTab = i
-				tab.ActivePane = msg.PaneID
-				log.Printf("set_active_pane: switched to tab %d pane %s", i, msg.PaneID)
-				return m, m.listenForMessages()
-			}
+		// MCP set_active_pane targets any pane daemon-wide, including one in
+		// a background project — jumpToPane spans every project so the
+		// request cannot silently no-op just because the target isn't in the
+		// project currently on screen.
+		if m.jumpToPane(msg.PaneID) {
+			log.Printf("set_active_pane: switched to pane %s", msg.PaneID)
+		} else {
+			log.Printf("set_active_pane: pane %s not found", msg.PaneID)
 		}
-		log.Printf("set_active_pane: pane %s not found", msg.PaneID)
 		return m, m.listenForMessages()
 
 	case highlightPaneMsg:
@@ -1323,7 +1684,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// (see emitEvent) so `working` tracks reality across mute/unmute —
 		// but muting must still mean "no visible notification", so suppress
 		// the sidebar card for any event sourced from a muted pane.
-		eventPane, _ := m.findPaneAndTab(msg.PaneID)
+		eventPane, _, _ := m.findPaneAndTab(msg.PaneID)
 		muted := eventPane != nil && eventPane.Muted
 		workStateOnly := msg.Type == "hook.claude.PostToolUse"
 		if !muted && !workStateOnly && !(msg.Type == "output_idle" && m.isActivePane(msg.PaneID)) {
@@ -1534,19 +1895,21 @@ func (m Model) handleNotificationKey(key string) (tea.Model, tea.Cmd) {
 	action, eventID, paneID := m.notifications.HandleKey(key)
 	switch action {
 	case "navigate":
-		// Push current location to history, then jump to event's pane in focus mode
-		m.pushPaneHistory()
-		for i, tab := range m.tabs {
-			if tab.Root != nil && tab.Root.PaneIDs()[paneID] {
-				m.activeTab = i
-				tab.ActivePane = paneID
-				if !tab.FocusMode() {
-					tab.ToggleFocus()
-				}
-				m.sidebarFocused = false
-				break
-			}
+		// The sidebar carries events from every pane in every project, so the
+		// jump must be able to cross a project boundary. History has to be
+		// pushed BEFORE the jump (it records the location being left) but
+		// only once the jump is known to land — checked first so a pane that
+		// vanished between the event firing and the user pressing Enter
+		// doesn't grow history for a jump that never happened.
+		if pane, _, _ := m.findPaneAndTab(paneID); pane == nil {
+			return m, nil
 		}
+		m.pushPaneHistory()
+		m.jumpToPane(paneID)
+		if tab := m.activeTabModel(); tab != nil && !tab.FocusMode() {
+			tab.ToggleFocus()
+		}
+		m.sidebarFocused = false
 		return m, nil
 	case "dismiss":
 		if eventID != "" {
@@ -1572,8 +1935,12 @@ func (m Model) handleNotificationKey(key string) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) pushPaneHistory() {
+	proj := m.cur()
+	if proj == nil {
+		return
+	}
 	if tab := m.activeTabModel(); tab != nil && tab.ActivePane != "" {
-		ref := PaneRef{TabIndex: m.activeTab, PaneID: tab.ActivePane}
+		ref := PaneRef{ProjectID: proj.ID, TabIndex: m.activeTabIdx(), PaneID: tab.ActivePane}
 		m.paneHistory = append(m.paneHistory, ref)
 		if len(m.paneHistory) > 20 {
 			m.paneHistory = m.paneHistory[len(m.paneHistory)-20:]
@@ -1581,17 +1948,32 @@ func (m *Model) pushPaneHistory() {
 	}
 }
 
+// popPaneHistory restores the most recent history entry that is still valid,
+// pop-and-skip past any entry whose project has since closed or whose pane
+// has since been destroyed (degrades safely rather than jumping somewhere
+// wrong). ProjectID is resolved to a project FIRST — a TabIndex recorded
+// under a background project is meaningless against whichever project
+// happens to be active now, which is exactly what made cross-project
+// back-navigation unreachable before ProjectID existed. Once the recorded
+// (project, tab, pane) triple is confirmed to still hold, the actual
+// project/tab/pane move is delegated to jumpToPane so there is one
+// implementation of that sequence.
 func (m Model) popPaneHistory() (tea.Model, tea.Cmd) {
 	for len(m.paneHistory) > 0 {
 		ref := m.paneHistory[len(m.paneHistory)-1]
 		m.paneHistory = m.paneHistory[:len(m.paneHistory)-1]
-		if ref.TabIndex < len(m.tabs) {
-			tab := m.tabs[ref.TabIndex]
-			if tab.Root != nil && tab.Root.PaneIDs()[ref.PaneID] {
-				m.activeTab = ref.TabIndex
-				tab.ActivePane = ref.PaneID
-				return m, nil
+		for _, proj := range m.projects {
+			if proj.ID != ref.ProjectID {
+				continue
 			}
+			if ref.TabIndex < len(proj.tabs) {
+				tab := proj.tabs[ref.TabIndex]
+				if tab.Root != nil && tab.Root.PaneIDs()[ref.PaneID] {
+					m.jumpToPane(ref.PaneID)
+					return m, nil
+				}
+			}
+			break
 		}
 	}
 	return m, nil
@@ -1602,8 +1984,33 @@ func (m Model) popPaneHistory() (tea.Model, tea.Cmd) {
 // NOT reserve layout width, so panes never resize when it toggles. This
 // constant width is what kills the sidebar-driven resize churn that made
 // background claude panes repaint and garble their scrollback.
+//
+// The PROJECT sidebar is the opposite: it is a real reserved left column,
+// so its width IS subtracted here — this is the single source of truth
+// resizeTabs()/View() read, which is what keeps painted pane rects and PTY
+// sizes in agreement when the sidebar toggles.
 func (m Model) paneAreaWidth() int {
-	return m.width
+	return m.width - m.projectSidebarWidth()
+}
+
+// projectSidebarWidth returns the layout width reserved for the project
+// sidebar: 0 when closed or the terminal is too narrow to spare it.
+func (m Model) projectSidebarWidth() int {
+	return sidebarWidth(m.width, m.sidebarOpen, m.sidebarWidth)
+}
+
+// sidebarContentHeight is how many screen rows the project sidebar spans:
+// everything except the status bar. The TAB BAR row is included — the sidebar
+// is a full-height left column and the tab bar sits inside the pane column
+// beside it, so sidebar row k is screen row k (chromeHeight, which excludes
+// both, is the PANE area's height and is the wrong budget here).
+//
+// renderSidebar, sidebarRowAt and activateSidebarRow all read this one
+// value: sidebarVisibleRows caps against it and sidebarRowAt indexes the
+// capped slice, so a height that differs between paint and hit test resolves
+// clicks to a row the user never saw.
+func (m Model) sidebarContentHeight() int {
+	return m.height - 1
 }
 
 // pluginWideCanvas resolves the wide-canvas flag for a pane type via the
@@ -1640,7 +2047,13 @@ func (m Model) sidebarOverlayWidth() int {
 	if !m.notifications.visible || m.dialog != dialogNone {
 		return 0
 	}
-	if m.width-m.notifications.width < minTermWidth {
+	// Against paneAreaWidth(), not m.width — the overlay is composited onto
+	// tabContent, which the project sidebar has already taken its columns
+	// out of (same correction notesPanelWidth carries). Measured against the
+	// full terminal, a wide sidebar_width leaves this reporting a strip that
+	// overlayRight then declines to paint (its overlayW >= totalW bail),
+	// while sidebarSwallowsMouse goes on eating clicks in those columns.
+	if m.paneAreaWidth()-m.notifications.width < minTermWidth {
 		return 0
 	}
 	return m.notifications.width
@@ -1664,11 +2077,25 @@ func (m Model) sidebarSwallowsMouse(x, y int) bool {
 // longer selectable by clicking — drag selection still covers them.
 const scrollbarHitPadding = 1
 
+// PaneRect ORIGIN CONTRACT (this block and every function below it):
+// rects are SCREEN-ABSOLUTE. Their OX is seeded with projectSidebarWidth()
+// rather than 0, because View() joins the project sidebar onto the LEFT of
+// tabContent — with the sidebar open the pane area genuinely begins at
+// screen column projectSidebarWidth(), not 0. Seeding the recursion is what
+// makes every consumer correct for free: mouse coordinates arrive
+// screen-absolute, so hit tests compare like with like, and a rect handed
+// to the compositor (the context menu's anchor) is already in the frame's
+// coordinate space. Only tab-INTERNAL walks stay 0-seeded — TabModel.View
+// renders into a canvas whose own column 0 is the pane area's left edge,
+// and NavigateDirection compares rects only against each other.
+//
 // activePaneRectFocus returns the rendered rect of the active pane when the
 // active tab is in focus mode (notes mode implies focus mode), or nil when the
 // tab is not in focus mode. The geometry mirrors View(): the active pane fills
 // the area below the tab bar and left of the notes panel + notification
-// sidebar (both reserve 0 width in plain focus mode, so the pane is full-width).
+// sidebar (both reserve 0 width in plain focus mode, so the pane is
+// full-width) — and right of the project sidebar, which DOES reserve width
+// whenever it's open (paneAreaWidth), focus mode or not.
 func (m *Model) activePaneRectFocus() *PaneRect {
 	tab := m.activeTabModel()
 	if tab == nil || !tab.FocusMode() {
@@ -1679,13 +2106,14 @@ func (m *Model) activePaneRectFocus() *PaneRect {
 		return nil
 	}
 	// The notification sidebar is an overlay (reserves 0 layout width); only
-	// the notes panel narrows the pane area.
+	// the notes panel narrows the pane area further, on top of the project
+	// sidebar's own reservation.
 	notesW := m.notesPanelWidth()
 	return &PaneRect{
 		Pane: pane,
-		OX:   0,
+		OX:   m.projectSidebarWidth(),
 		OY:   1, // tab bar occupies row 0
-		W:    m.width - notesW,
+		W:    m.paneAreaWidth() - notesW,
 		H:    m.height - chromeHeight,
 	}
 }
@@ -1703,7 +2131,7 @@ func (m *Model) activePaneRect() *PaneRect {
 	tabH := m.height - chromeHeight
 	notesW := m.notesPanelWidth()
 	var rects []PaneRect
-	tab.Root.CollectRects(0, 1, m.width-notesW, tabH, &rects)
+	tab.Root.CollectRects(m.projectSidebarWidth(), 1, m.paneAreaWidth()-notesW, tabH, &rects)
 	for i := range rects {
 		if rects[i].Pane != nil && rects[i].Pane.ID == tab.ActivePane {
 			return &rects[i]
@@ -1730,7 +2158,7 @@ func (m *Model) paneRectAt(x, y int) *PaneRect {
 	tabH := m.height - chromeHeight
 	notesW := m.notesPanelWidth()
 	var rects []PaneRect
-	tab.Root.CollectRects(0, 1, m.width-notesW, tabH, &rects)
+	tab.Root.CollectRects(m.projectSidebarWidth(), 1, m.paneAreaWidth()-notesW, tabH, &rects)
 	for i := range rects {
 		r := &rects[i]
 		if r.Pane != nil && x >= r.OX && x < r.OX+r.W && y >= r.OY && y < r.OY+r.H {
@@ -1762,7 +2190,7 @@ func (m *Model) hitTestScrollbar(x, y int) *PaneRect {
 	} else if tab.Root != nil {
 		tabH := m.height - chromeHeight
 		notesW := m.notesPanelWidth()
-		rect = tab.Root.FindPaneRectAt(x, y, 0, 1, m.width-notesW, tabH)
+		rect = tab.Root.FindPaneRectAt(x, y, m.projectSidebarWidth(), 1, m.paneAreaWidth()-notesW, tabH)
 	}
 	if rect == nil {
 		return nil
@@ -1819,7 +2247,7 @@ func (m *Model) hitTestSplitBorder(x, y int) *BorderHit {
 	}
 	tabH := m.height - chromeHeight
 	var borders []BorderHit
-	tab.Root.CollectBorders(0, 1, m.paneAreaWidth(), tabH, &borders)
+	tab.Root.CollectBorders(m.projectSidebarWidth(), 1, m.paneAreaWidth(), tabH, &borders)
 	for i := len(borders) - 1; i >= 0; i-- {
 		if borders[i].Contains(x, y) {
 			return &borders[i]
@@ -1920,7 +2348,8 @@ func (m *Model) finishSplitDrag() tea.Cmd {
 	return tea.Batch(m.resizeAllPanes(), m.sendAllLayouts())
 }
 
-// moveTab repositions m.tabs[from] to ordinal `to`, sliding the tabs
+// moveTab repositions the active project's tab at `from` to ordinal `to`,
+// sliding the tabs
 // between them by one position. Other multiplexers and every browser tab
 // strip use this UX — a swap would teleport the displaced tab to the
 // dragged tab's old slot, which feels wrong when dragging across several
@@ -1928,19 +2357,20 @@ func (m *Model) finishSplitDrag() tea.Cmd {
 //
 // Returns true when the order actually changed.
 func (m *Model) moveTab(from, to int) bool {
-	if from == to || from < 0 || to < 0 || from >= len(m.tabs) || to >= len(m.tabs) {
+	tabs := m.curTabs()
+	if from == to || from < 0 || to < 0 || from >= len(tabs) || to >= len(tabs) {
 		return false
 	}
-	tab := m.tabs[from]
+	tab := tabs[from]
 	if from < to {
-		copy(m.tabs[from:to], m.tabs[from+1:to+1])
+		copy(tabs[from:to], tabs[from+1:to+1])
 	} else {
-		copy(m.tabs[to+1:from+1], m.tabs[to:from])
+		copy(tabs[to+1:from+1], tabs[to:from])
 	}
-	m.tabs[to] = tab
+	tabs[to] = tab
 	// activeTab tracks position, not identity — adjust to the dragged
 	// tab's new ordinal so the visual selection follows it.
-	m.activeTab = to
+	m.setActiveTabIdx(to)
 	return true
 }
 
@@ -1966,7 +2396,7 @@ func (m *Model) activePaneByID(id string) *PaneModel {
 // only — overlay panes live outside the tree). Used to guard spinner-tick
 // chains against stacking.
 func (m *Model) leafByID(id string) *LayoutNode {
-	for _, tab := range m.tabs {
+	for _, tab := range m.allTabs() {
 		if tab.Root == nil {
 			continue
 		}
@@ -2166,9 +2596,9 @@ func (m Model) openCreatePaneDialog() (tea.Model, tea.Cmd) {
 // forceRedraw is the full-repaint recovery hatch: drop every pane's render
 // cache and every tab's leaves cache, then ClearScreen + re-probe the terminal
 // size. Extracted verbatim from the kb.Redraw case; shared with the command
-// palette. It mutates m.tabs, so it cannot be a bare func() tea.Cmd.
+// palette. It mutates tab state, so it cannot be a bare func() tea.Cmd.
 func (m Model) forceRedraw() (tea.Model, tea.Cmd) {
-	for _, tab := range m.tabs {
+	for _, tab := range m.allTabs() {
 		tab.invalidateLeaves()
 		if tab.Root != nil {
 			for _, pane := range tab.Leaves() {
@@ -2195,15 +2625,27 @@ const (
 // narrow to render the editor. The notification sidebar is an overlay and
 // no longer reserves width here. Single source of truth for the layout
 // math used by both View() and notesEditorBox.
+//
+// The fraction (and its collapse guard) is taken of paneAreaWidth(), not raw
+// m.width: the project sidebar has already claimed its columns by the time
+// notes squeezes further, so basing the split on the full terminal width
+// hands the notes panel a share of space the panes never actually had.
+// Concretely, at total=100/sidebar=22 (paneAreaWidth=78), a raw-m.width split
+// gave notes 40 and panes 38 — BELOW minTermWidth=40, undetected because the
+// guard also checked against raw m.width (100-40=60, comfortably clear) — so
+// the one guard whose entire job is preventing an unusably narrow pane region
+// missed it. Splitting paneAreaWidth() gives notes 31 and panes 47, and the
+// guard now protects the width panes actually get.
 func (m Model) notesPanelWidth() int {
 	if !m.notesMode || m.notesEditor == nil {
 		return 0
 	}
-	notesW := m.width * notesPanelWidthNumerator / notesPanelWidthDenominator
+	avail := m.paneAreaWidth()
+	notesW := avail * notesPanelWidthNumerator / notesPanelWidthDenominator
 	if notesW < notesPanelMinWidth {
 		notesW = notesPanelMinWidth
 	}
-	if m.width-notesW < minTermWidth {
+	if avail-notesW < minTermWidth {
 		return 0
 	}
 	return notesW
@@ -2213,13 +2655,19 @@ func (m Model) notesPanelWidth() int {
 // exclusive) of the notes editor. Returns ok=false when notes mode is
 // inactive or the terminal is too narrow to render the editor.
 func (m Model) notesEditorBox() (boxX0, boxY0, boxX1, boxY1 int, ok bool) {
-	if !m.notesMode || m.notesEditor == nil || m.activeTab >= len(m.tabs) {
+	if !m.notesMode || m.notesEditor == nil || m.activeTabModel() == nil {
 		return 0, 0, 0, 0, false
 	}
 	notesW := m.notesPanelWidth()
 	if notesW == 0 {
 		return 0, 0, 0, 0, false
 	}
+	// m.width - notesW is still the right edge-anchored formula even with the
+	// project sidebar open: View() joins [sidebar][panes][notes] left to
+	// right, panes get exactly paneAreaWidth()-notesW, and
+	// projectSidebarWidth()+paneAreaWidth() == m.width by construction — so
+	// the notes box's screen-absolute left edge reduces to m.width-notesW
+	// regardless of how much the sidebar reserved.
 	boxX0 = m.width - notesW
 	boxY0 = 1 // y=0 is the tab bar
 	boxX1 = m.width
@@ -2369,13 +2817,29 @@ func (m Model) notesKeyExempt(key string) bool {
 		kb.Redraw,
 		// Notification center.
 		kb.NotificationToggle, kb.NotificationFocus, kb.GoBack, kb.MutePane, kb.ToggleEager,
+		// Project sidebar — view-level, and resizeAllPanes covers the notes
+		// layout's own dependency on paneAreaWidth().
+		kb.SidebarToggle,
 		// Preview wrap toggle — pane-level view state, harmless in notes mode.
 		kb.ToggleWrap,
 		// Pane process restart — opens a confirm dialog, never types into
 		// the notes editor.
 		kb.RestartPane,
 		// Tools and dialogs.
-		kb.JSONTransform, kb.QuickActions, kb.CommandHistory,
+		kb.JSONTransform, kb.QuickActions, kb.CommandHistory, kb.NewProject,
+		// Project navigation — switchProject (reached by both) already calls
+		// exitNotesModeInPlace itself, so exempting these just lets the key
+		// reach it instead of being swallowed as editor text.
+		kb.ProjectPicker, kb.ProjectToggle, kb.ProjectNext, kb.ProjectPrev,
+		// Attention queue — notes are exactly the sort of thing left open
+		// while an agent grinds in another pane, so "notes are focused" is a
+		// likely state at the moment the queue is needed, arguably more so
+		// than for the project picker above. handleKey's editor-focused
+		// exempt branch calls exitNotesModeInPlace BEFORE falling through to
+		// jumpToNextBlocked, so the teardown always lands on the OLD tab
+		// whether the jump crosses a project boundary or only moves the
+		// active tab within the current one.
+		kb.AttentionQueue,
 	}
 	for _, b := range exempt {
 		if kbMatches(key, b) {
@@ -2404,8 +2868,8 @@ func (m Model) notesKeyExempt(key string) bool {
 // reconciliation, switchTab) delegate to this function so the teardown is
 // guaranteed consistent.
 //
-// IMPORTANT: this function operates on the tab referenced by m.activeTab
-// at the time of the call. Callers that are about to change m.activeTab
+// IMPORTANT: this function operates on the active project's active tab
+// at the time of the call. Callers that are about to change that tab
 // (e.g. switchTab) must invoke this FIRST so focus reverts on the old tab.
 func (m *Model) exitNotesModeInPlace() {
 	if m.notesEditor != nil {
@@ -2459,22 +2923,30 @@ func (m Model) View() tea.View {
 	} else {
 		var sections []string
 
-		// Tab bar (1 line)
-		sections = append(sections, m.renderTabBar())
-
 		// Active tab content + optional notes editor; the notification
 		// sidebar is composited OVER the right edge afterwards
 		// (overlayRight) — it takes no layout width, so panes never
 		// resize when it toggles. Layout math single source of truth:
 		// notesPanelWidth / sidebarOverlayWidth (notesEditorBox and the
-		// mouse handlers stay in lockstep with this renderer).
+		// mouse handlers stay in lockstep with this renderer). The project
+		// sidebar is different — it DOES reserve layout width
+		// (paneAreaWidth), so it is joined on the LEFT before any of the
+		// above rather than composited over anything.
 		tabH := m.height - chromeHeight
 		notesW := m.notesPanelWidth()
-		if m.activeTab < len(m.tabs) {
-			tab := m.tabs[m.activeTab]
-
-			tab.SetCanvas(m.width, tabH)
-			tab.Resize(m.width-notesW, tabH)
+		projSidebarW := m.projectSidebarWidth()
+		// tabContent is assembled whether or not there is an active tab. An
+		// active project with NO tabs used to skip this whole section — the
+		// project sidebar with it — so the user got an empty screen and lost
+		// the navigation needed to leave it (Alt+P/Alt+O still worked; the
+		// mouse did not). Two shipped paths reach that state, both now also
+		// repaired daemon-side, but the client must not depend on a daemon's
+		// repair to keep its own navigation painted.
+		var tabContent string
+		if tab := m.activeTabModel(); tab != nil {
+			tab.SetCanvas(m.paneAreaWidth(), tabH)
+			tab.SetChrome(m.projectSidebarWidth())
+			tab.Resize(m.paneAreaWidth()-notesW, tabH)
 			// Pass per-frame state to panes for rendering
 			if tab.Root != nil {
 				for _, pane := range tab.Leaves() {
@@ -2483,22 +2955,44 @@ func (m Model) View() tea.View {
 					pane.mcpHighlight = m.mcpHighlights[pane.ID]
 				}
 			}
-			tabContent := tab.View()
+			tabContent = tab.View()
 			if notesW > 0 {
 				editorFocused := !m.notesPaneFocused
 				tabContent = lipgloss.JoinHorizontal(lipgloss.Top, tabContent, m.notesEditor.View(notesW, tabH, editorFocused))
 			}
-			if sw := m.sidebarOverlayWidth(); sw > 0 {
-				m.notifications.focused = m.sidebarFocused
-				tabContent = overlayRight(tabContent, m.notifications.View(tabH), m.width, sw)
-			}
-			if m.ctxMenu.open() {
-				// ctxMenu coords are screen rows; tabContent starts at
-				// screen row 1 (tab bar above), so shift by -1.
-				tabContent = overlayAt(tabContent, renderCtxMenu(m.ctxMenu), m.ctxMenu.x, m.ctxMenu.y-1, m.width)
-			}
-			sections = append(sections, tabContent)
+		} else {
+			tabContent = m.renderEmptyTabArea(m.paneAreaWidth(), tabH)
 		}
+		if sw := m.sidebarOverlayWidth(); sw > 0 {
+			m.notifications.focused = m.sidebarFocused
+			// totalW is the PANE AREA, not the terminal: at this point
+			// tabContent is only paneAreaWidth wide and the project
+			// sidebar has not been joined on yet. Passing m.width made
+			// overlayRight pad every line out to the full terminal width,
+			// so the JoinHorizontal below produced a frame
+			// projectSidebarWidth() columns WIDER than the terminal. The
+			// strip's screen columns are unchanged — after the left join
+			// the pane area's right edge is still the screen's.
+			tabContent = overlayRight(tabContent, m.notifications.View(tabH), m.paneAreaWidth(), sw)
+		}
+		// The tab bar labels the PANE column, so it is joined above the panes
+		// and INSIDE that column — one line of paneAreaWidth() starting at
+		// screen column projectSidebarWidth(). Joining it as its own
+		// full-width section above everything instead put row 0 over the
+		// project sidebar too, so the tabs sat flush against the sidebar's
+		// left edge rather than above the panes they name. The sidebar is a
+		// full-height left column beside the pair, which is what puts its
+		// PROJECTS heading on the same screen row as the tab names.
+		paneArea := lipgloss.JoinVertical(lipgloss.Left, m.renderTabBar(), tabContent)
+		if projSidebarW > 0 {
+			paneArea = lipgloss.JoinHorizontal(lipgloss.Top, m.renderSidebar(m.sidebarContentHeight()), paneArea)
+		}
+		if m.ctxMenu.open() {
+			// ctxMenu coords are screen rows and paneArea's first line IS
+			// screen row 0 (the tab bar), so no shift.
+			paneArea = overlayAt(paneArea, renderCtxMenu(m.ctxMenu), m.ctxMenu.x, m.ctxMenu.y, m.width)
+		}
+		sections = append(sections, paneArea)
 
 		// Status bar
 		sections = append(sections, m.renderStatusBar())
@@ -2510,7 +3004,11 @@ func (m Model) View() tea.View {
 	// layout height and appearing or clearing it never resizes a pane. The tab
 	// bar is the right thing to cover — tab switching is frozen anyway, and
 	// obscuring pane content would hide the state the user is waiting on.
-	if m.reconnect.active {
+	//
+	// Only for the ACTIVE project's daemon: it is one row, the user is looking at
+	// one project, and a banner naming a host whose panes are not on screen would
+	// read as an outage of the ones that are.
+	if m.linkOf(m.activeDest()).active {
 		content = overlayAt(content, m.renderReconnectBanner(m.width), 0, 0, m.width)
 	}
 
@@ -2641,6 +3139,39 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(tea.ClearScreen, m.startSidebarTick())
 		}
 		return m, tea.ClearScreen
+	case kbMatches(key, kb.SidebarToggle):
+		// Refused below minWidthForSidebar rather than flipped invisibly:
+		// sidebarWidth() returns 0 on a narrow terminal whatever sidebarOpen
+		// says, so the toggle would repaint nothing while still writing
+		// cfg.UI.SidebarOpen to disk — the user's next launch on a wide
+		// terminal would then come up in whichever state the narrow one
+		// happened to leave behind. Flash instead, so the key is not silent.
+		if m.width < minWidthForSidebar {
+			m.setFlash(fmt.Sprintf("terminal too narrow for the project sidebar (needs %d columns)", minWidthForSidebar))
+			return m, m.flashCmd()
+		}
+		// The PROJECT sidebar reserves real layout width (paneAreaWidth), so
+		// unlike the notification overlay above this has to resize every
+		// pane's PTY — and ClearScreen, because every column right of the
+		// strip shifts by its width in one frame, which is exactly the kind
+		// of shift Bubble Tea's cell diff mis-tracks.
+		m.sidebarOpen = !m.sidebarOpen
+		// resizeTabs FIRST, and it is not optional: resizeAllPanes does not
+		// compute geometry, it READS pane.Width/Height and tab.CanvasW/H and
+		// ships them. Those are written only by tab.Resize — i.e. by
+		// resizeTabs (every tab of every project) or by View (the active tab
+		// only). The toggle changes paneAreaWidth() for all of them, so
+		// without this every background tab keeps its pre-toggle PTY size
+		// until the next workspace broadcast or real window resize, and even
+		// the active tab is a race between View and this Cmd's goroutine that
+		// the daemon's same-size guard can settle the wrong way. Same
+		// ordering as resizeTickMsg and toggleFocusForActiveTab.
+		m.resizeTabs()
+		// A screen preference, not session state: persisted to config (saved
+		// on exit via ConfigChanged), never to workspace.json.
+		m.cfg.UI.SidebarOpen = m.sidebarOpen
+		m.configChanged = true
+		return m, tea.Batch(tea.ClearScreen, m.resizeAllPanes())
 	case kbMatches(key, kb.NotificationFocus):
 		// Ctrl+Alt+N: open (if hidden) and focus sidebar
 		if !m.notifications.visible {
@@ -2670,6 +3201,80 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.openHistoryForActivePane()
 	case kbMatches(key, kb.QuickActions):
 		return m.openQuickActionsMenu()
+	case kbMatches(key, kb.NewProject):
+		return m.openNewProjectDialog()
+	case kbMatches(key, kb.DestroyProject):
+		// The ACTIVE project, because that is the only one a keystroke can
+		// name — the sidebar's right-click menu is how another one is reached.
+		// Opens the same confirm the menu does rather than destroying: this
+		// takes every tab and pane under it, so it must never fire straight
+		// off a keypress.
+		// Same choice the context menu makes, for the same reason: on a remote
+		// project Destroy is the action that cannot do what the user means,
+		// because the daemon simply bootstraps a replacement.
+		if p := m.cur(); p != nil {
+			if p.Dest != "" {
+				return m, m.confirmDisconnectHost(p.ID)
+			}
+			return m, m.confirmDestroyProject(p.ID)
+		}
+		return m, nil
+	case kbMatches(key, kb.ProjectPicker):
+		return m.openProjectPicker()
+	case kbMatches(key, kb.ProjectNext), kbMatches(key, kb.ProjectPrev):
+		// A single project flashes rather than no-opping silently, for the
+		// same reason the empty attention queue and the narrow-terminal
+		// sidebar refusal do — and this is the ordinary state until the user
+		// creates a second project, so it is the FIRST thing they would press
+		// it in.
+		if len(m.projects) < 2 {
+			m.setFlash("only one project")
+			return m, m.flashCmd()
+		}
+		delta := 1
+		if kbMatches(key, kb.ProjectPrev) {
+			delta = -1
+		}
+		// Sequenced for the same reason as ProjectToggle below: cycleProject
+		// mutates m through a pointer receiver via switchProject.
+		cmd := m.cycleProject(delta)
+		return m, cmd
+	case kbMatches(key, kb.ProjectToggle):
+		// No bounce target flashes rather than doing nothing, for the same
+		// reason the AttentionQueue empty case below does. This is the
+		// ORDINARY state on a fresh launch: prevProject is only written by
+		// switchProject, so until the user has switched once there is
+		// genuinely nowhere to bounce back to — and a silent key there reads
+		// as broken rather than as "not yet". It also covers a prevProject
+		// whose project has since been destroyed. The check lives here, not
+		// in toggleLastProject, which keeps its nil-means-nowhere-to-go
+		// contract (and its own guard, which this must not duplicate the
+		// meaning of).
+		if m.prevProject == "" || m.projectByID(m.prevProject) == nil {
+			m.setFlash("no previous project to switch back to")
+			return m, m.flashCmd()
+		}
+		// Sequenced, not `return m, m.toggleLastProject()`: toggleLastProject
+		// mutates m through a pointer receiver (via switchProject), and Go
+		// does not order a plain operand against a call in the same return
+		// statement (see activateSidebarRow's identical note in project.go).
+		cmd := m.toggleLastProject()
+		return m, cmd
+	case kbMatches(key, kb.AttentionQueue):
+		// An empty queue flashes rather than doing nothing, for the same
+		// reason the SidebarToggle refusal above does: a key that no-ops
+		// silently is indistinguishable from a broken one, and "nothing is
+		// waiting" is the ordinary state for anyone whose agents never stop
+		// for a permission prompt. The check lives here, not in
+		// jumpToNextBlocked, which keeps its nil-means-nowhere-to-go contract.
+		if len(m.blockedPanes()) == 0 {
+			m.setFlash("no agent is waiting on you")
+			return m, m.flashCmd()
+		}
+		// Sequenced for the same reason as ProjectToggle above:
+		// jumpToNextBlocked mutates m through a pointer receiver.
+		cmd := m.jumpToNextBlocked()
+		return m, cmd
 	}
 
 	// Sidebar focused: route keys to notification center
@@ -2971,7 +3576,7 @@ func (m Model) handlePaneRenameKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 func (m *Model) handlePaneOutput(msg PaneOutputMsg) tea.Cmd {
 	// Overlay panes live outside the layout tree — check them first.
-	for _, tab := range m.tabs {
+	for _, tab := range m.allTabs() {
 		if tab.overlayPane != nil && tab.overlayPane.ID == msg.PaneID {
 			tab.overlayPane.preparing = false
 			// Same armed-reset consume as the layout-tree branch below. This
@@ -2988,7 +3593,7 @@ func (m *Model) handlePaneOutput(msg PaneOutputMsg) tea.Cmd {
 			return nil
 		}
 	}
-	for _, tab := range m.tabs {
+	for _, tab := range m.allTabs() {
 		if tab.Root == nil {
 			continue
 		}
@@ -3075,22 +3680,28 @@ func (m *Model) handlePaneOutput(msg PaneOutputMsg) tea.Cmd {
 	return nil
 }
 
-// applyWorkspaceState rebuilds the TUI state from daemon data.
-// Returns IDs of newly created panes (for spinner activation).
-// applyWorkspaceState rebuilds the TUI state from daemon data. Returns:
+// applyWorkspaceState rebuilds the TUI state from one daemon's broadcast.
+// dest names the destination that broadcast arrived on (empty = the local
+// daemon) and scopes the merge: a broadcast is the FULL state of ONE daemon,
+// so it may only replace THAT daemon's projects. Returns:
 //   - newPaneIDs: IDs of PaneModels created during this reconciliation (for
 //     spinner setup in the caller).
 //   - overlayResizeCmds: resize commands that must be batched by the caller
 //     for overlay panes that just became visible on initial creation (fixing
 //     the 80×24 boot size they would otherwise keep until a window resize).
-func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) ([]string, []tea.Cmd) {
+func (m *Model) applyWorkspaceState(state WorkspaceStateMsg, dest string) ([]string, []tea.Cmd) {
 	var newPaneIDs []string
 	var overlayResizeCmds []tea.Cmd
 
-	// Index existing tabs and panes for preservation.
+	// Index existing tabs and panes for preservation. Both maps span EVERY
+	// project, not just the ones this broadcast rebuilds: reuse is keyed by ID
+	// alone, so a tab or pane the daemon moved between projects keeps its
+	// layout tree / VT emulator / scrollback instead of being rebuilt at its
+	// new home while the original lives on in the old one. The dispose sweep
+	// below can also only visit what is indexed here.
 	existingTabs := make(map[string]*TabModel)
 	existingPanes := make(map[string]*PaneModel)
-	for _, tab := range m.tabs {
+	for _, tab := range m.allTabs() {
 		existingTabs[tab.ID] = tab
 		if tab.Root != nil {
 			for _, pane := range tab.Leaves() {
@@ -3107,8 +3718,148 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) ([]string, []tea.Cm
 		paneMap[state.Panes[i].ID] = &state.Panes[i]
 	}
 
-	m.tabs = nil
-	for _, tabInfo := range state.Tabs {
+	// Index this dest's existing projects for reuse, so a project the daemon
+	// still has keeps its identity (and its ProjectModel pointer) across the
+	// rebuild. Projects from OTHER dests are preserved by mergeProjects below
+	// — clearing all of them lets two daemons clobber each other on every tick.
+	existingProjects := make(map[string]*ProjectModel, len(m.projects))
+	for _, p := range m.projects {
+		if p.Dest == dest {
+			existingProjects[p.ID] = p
+		}
+	}
+
+	// Which project is active is the CLIENT's state: a broadcast from one
+	// daemon must never pull focus off another's project. state.ActiveProject
+	// is adopted only when there is no active project yet — startup, before
+	// any broadcast has been applied.
+	activeID := ""
+	if p := m.cur(); p != nil {
+		activeID = p.ID
+	}
+	if activeID == "" {
+		activeID = state.ActiveProject
+	}
+
+	infos := broadcastProjects(state, dest)
+	rebuilt := make([]*ProjectModel, 0, len(infos))
+	for _, info := range infos {
+		proj, ok := existingProjects[info.ID]
+		if !ok {
+			proj = &ProjectModel{ID: info.ID, Dest: dest}
+		}
+		proj.Name, proj.RootDir = info.Name, info.RootDir
+		tabs, projPaneIDs, projResizeCmds := m.rebuildTabs(info, state, existingTabs, existingPanes, paneMap, dest)
+		proj.tabs = tabs
+		proj.activeTab = indexOfTab(proj.tabs, info.ActiveTab)
+		newPaneIDs = append(newPaneIDs, projPaneIDs...)
+		overlayResizeCmds = append(overlayResizeCmds, projResizeCmds...)
+		rebuilt = append(rebuilt, proj)
+	}
+
+	m.projects = mergeProjects(m.projects, rebuilt, dest)
+	m.activeProject = indexOfProject(m.projects, activeID)
+	// Both halves of the router's default just changed — the project list and
+	// which of them is active — so push the answer immediately rather than at
+	// the end of the function, where a later early return could skip it.
+	m.syncActiveDest()
+
+	// Dispose panes that did not survive reconciliation — both panes pruned
+	// from surviving tabs and every pane of tabs the daemon dropped. Without
+	// this, each removed pane leaks its VT emulator (drain goroutine +
+	// scrollback grid) for the TUI session's lifetime. The sweep spans every
+	// project for the same reason the index does: a pane this broadcast did
+	// not mention is still live if some other dest's project holds it.
+	surviving := make(map[string]bool)
+	for _, tab := range m.allTabs() {
+		if tab.Root != nil {
+			for id := range tab.Root.PaneIDs() {
+				surviving[id] = true
+			}
+		}
+		if tab.overlayPane != nil {
+			surviving[tab.overlayPane.ID] = true
+		}
+	}
+	for id, pane := range existingPanes {
+		if !surviving[id] {
+			pane.Dispose()
+		}
+	}
+
+	log.Printf("apply: active project = %d, active tab = %d", m.activeProject, m.activeTabIdx())
+
+	// Reconcile notes mode after daemon state sync:
+	//   (a) If the bound pane no longer exists in any tab, tear down
+	//       notes mode — the notes file is orphaned and the editor would
+	//       otherwise keep writing to a dead pane ID.
+	//   (b) If the bound pane still exists but the containing tab's
+	//       ActivePane is now something else (e.g., a split created a new
+	//       pane and the daemon promoted it), force ActivePane back to the
+	//       bound pane so the focus-mode render shows the right pane next
+	//       to the editor. Without this, the editor would silently sit
+	//       next to an unrelated pane while still writing to the bound
+	//       pane's notes file.
+	log.Printf("apply: notes reconciliation start (mode=%v)", m.notesMode)
+	if m.notesMode && m.notesEditor != nil {
+		bound := m.notesEditor.PaneID()
+		var boundTab *TabModel
+		for _, tab := range m.allTabs() {
+			if tab.Root != nil && tab.Root.PaneIDs()[bound] {
+				boundTab = tab
+				break
+			}
+		}
+		if boundTab == nil {
+			log.Printf("notes: bound pane %s pruned — exiting notes mode", bound)
+			m.exitNotesModeInPlace()
+		} else if boundTab.ActivePane != bound {
+			log.Printf("notes: bound pane %s is no longer active (active=%s) — re-syncing", bound, boundTab.ActivePane)
+			for _, p := range boundTab.Leaves() {
+				p.Active = (p.ID == bound)
+			}
+			boundTab.ActivePane = bound
+		}
+	}
+	log.Printf("apply: notes reconciliation done")
+
+	return newPaneIDs, overlayResizeCmds
+}
+
+// rebuildTabs reconciles ONE project's tab list against the broadcast — the
+// per-tab reuse-or-restore loop applyWorkspaceState used to run over every tab
+// in the message, now scoped to info.TabIDs so a project can only ever rebuild
+// its own tabs.
+//
+// The order is info.TabIDs' order: the project owns its tab order, and the tab
+// bar renders the result verbatim. A TabID the broadcast does not describe is
+// skipped rather than materialised as an empty tab.
+//
+// Returns the project's tabs, the pane IDs it created (the caller arms a
+// spinner per ID) and the overlay resize commands the caller must batch.
+func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingTabs map[string]*TabModel, existingPanes map[string]*PaneModel, paneMap map[string]*PaneInfo, dest string) ([]*TabModel, []string, []tea.Cmd) {
+	var newPaneIDs []string
+	var overlayResizeCmds []tea.Cmd
+
+	tabByID := make(map[string]TabInfo, len(state.Tabs))
+	for _, t := range state.Tabs {
+		tabByID[t.ID] = t
+	}
+
+	out := make([]*TabModel, 0, len(info.TabIDs))
+	for _, tabID := range info.TabIDs {
+		tabInfo, ok := tabByID[tabID]
+		if !ok {
+			// The project claims a tab this broadcast does not describe.
+			continue
+		}
+		// The tab's own project_id disagrees with the list that named it:
+		// building it here would put ONE TabModel in two projects at once
+		// (the tab bar would then render it twice and both copies would
+		// fight over the same layout tree). The tab's own answer wins.
+		if tabInfo.ProjectID != "" && tabInfo.ProjectID != info.ID {
+			continue
+		}
 		// Reuse existing tab if possible (preserves layout tree).
 		tab, exists := existingTabs[tabInfo.ID]
 		if !exists {
@@ -3117,6 +3868,7 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) ([]string, []tea.Cm
 			// New tab that doesn't exist locally — try to restore layout from daemon.
 			if len(tabInfo.Layout) > 0 {
 				tab = m.restoreTabLayout(tab, tabInfo, paneMap, existingPanes)
+				tab.Dest = dest
 				// All non-overlay panes in a restored tab are new.
 				for _, pid := range tabInfo.Panes {
 					if isOverlayPane(paneMap, pid) {
@@ -3129,10 +3881,11 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) ([]string, []tea.Cm
 				if shown {
 					overlayResizeCmds = append(overlayResizeCmds, m.overlayResizeCmd(tab))
 				}
-				m.tabs = append(m.tabs, tab)
+				out = append(out, tab)
 				continue
 			}
 		}
+		tab.Dest = dest
 		tab.Name = tabInfo.Name
 		tab.Color = tabInfo.Color
 
@@ -3264,76 +4017,10 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg) ([]string, []tea.Cm
 
 		m.finalizeTabPanes(tab)
 		log.Printf("apply: tab %s finalized", tab.ID)
-		m.tabs = append(m.tabs, tab)
+		out = append(out, tab)
 	}
 
-	// Dispose panes that did not survive reconciliation — both panes pruned
-	// from surviving tabs and every pane of tabs the daemon dropped. Without
-	// this, each removed pane leaks its VT emulator (drain goroutine +
-	// scrollback grid) for the TUI session's lifetime.
-	surviving := make(map[string]bool)
-	for _, tab := range m.tabs {
-		if tab.Root != nil {
-			for id := range tab.Root.PaneIDs() {
-				surviving[id] = true
-			}
-		}
-		if tab.overlayPane != nil {
-			surviving[tab.overlayPane.ID] = true
-		}
-	}
-	for id, pane := range existingPanes {
-		if !surviving[id] {
-			pane.Dispose()
-		}
-	}
-
-	for i, tab := range m.tabs {
-		if tab.ID == state.ActiveTab {
-			m.activeTab = i
-			break
-		}
-	}
-	if m.activeTab >= len(m.tabs) {
-		m.activeTab = max(0, len(m.tabs)-1)
-	}
-	log.Printf("apply: active tab = %d", m.activeTab)
-
-	// Reconcile notes mode after daemon state sync:
-	//   (a) If the bound pane no longer exists in any tab, tear down
-	//       notes mode — the notes file is orphaned and the editor would
-	//       otherwise keep writing to a dead pane ID.
-	//   (b) If the bound pane still exists but the containing tab's
-	//       ActivePane is now something else (e.g., a split created a new
-	//       pane and the daemon promoted it), force ActivePane back to the
-	//       bound pane so the focus-mode render shows the right pane next
-	//       to the editor. Without this, the editor would silently sit
-	//       next to an unrelated pane while still writing to the bound
-	//       pane's notes file.
-	log.Printf("apply: notes reconciliation start (mode=%v)", m.notesMode)
-	if m.notesMode && m.notesEditor != nil {
-		bound := m.notesEditor.PaneID()
-		var boundTab *TabModel
-		for _, tab := range m.tabs {
-			if tab.Root != nil && tab.Root.PaneIDs()[bound] {
-				boundTab = tab
-				break
-			}
-		}
-		if boundTab == nil {
-			log.Printf("notes: bound pane %s pruned — exiting notes mode", bound)
-			m.exitNotesModeInPlace()
-		} else if boundTab.ActivePane != bound {
-			log.Printf("notes: bound pane %s is no longer active (active=%s) — re-syncing", bound, boundTab.ActivePane)
-			for _, p := range boundTab.Leaves() {
-				p.Active = (p.ID == bound)
-			}
-			boundTab.ActivePane = bound
-		}
-	}
-	log.Printf("apply: notes reconciliation done")
-
-	return newPaneIDs, overlayResizeCmds
+	return out, newPaneIDs, overlayResizeCmds
 }
 
 // restoreTabLayout rebuilds a tab's layout tree from serialized daemon state.
@@ -3504,19 +4191,15 @@ func (m *Model) replayBufSize() int {
 
 func (m *Model) resizeTabs() {
 	tabH := m.height - chromeHeight
-	for _, tab := range m.tabs {
-		// Canvas = full window area, independent of notes squeeze, so
-		// wide-canvas panes only ever resize on a real window resize.
-		tab.SetCanvas(m.width, tabH)
+	for _, tab := range m.allTabs() {
+		// Canvas is independent of the notes squeeze (a compositor crop) but
+		// NOT of the project sidebar — the sidebar is a real reservation of
+		// screen estate, so from a wide-canvas pane's perspective toggling it
+		// is indistinguishable from a real window resize.
+		tab.SetCanvas(m.paneAreaWidth(), tabH)
+		tab.SetChrome(m.projectSidebarWidth())
 		tab.Resize(m.paneAreaWidth(), tabH)
 	}
-}
-
-func (m Model) activeTabModel() *TabModel {
-	if m.activeTab < len(m.tabs) {
-		return m.tabs[m.activeTab]
-	}
-	return nil
 }
 
 // isActivePane reports whether paneID is the pane the user is currently
@@ -3537,22 +4220,23 @@ func (m Model) isActivePane(paneID string) bool {
 // switchTab sets the active tab locally and notifies the daemon so its
 // active_tab stays in sync (prevents stale overwrites on broadcastState).
 func (m *Model) switchTab(idx int) tea.Cmd {
-	if idx < 0 || idx >= len(m.tabs) {
+	if idx < 0 || idx >= len(m.curTabs()) {
 		return nil
 	}
 	// Switching tabs leaves the notes-bound pane behind. Flush and exit
-	// notes mode BEFORE m.activeTab changes so exitNotesModeInPlace
+	// notes mode BEFORE the active tab changes so exitNotesModeInPlace
 	// reverts focus mode on the OLD tab.
 	if m.notesMode && m.notesEditor != nil {
 		m.exitNotesModeInPlace()
 	}
-	m.activeTab = idx
-	tabID := m.tabs[idx].ID
+	target := m.curTabs()[idx]
+	tabID, dest := target.ID, target.Dest
+	m.setActiveTabIdx(idx)
 	return func() tea.Msg {
 		msg, _ := ipc.NewMessage(ipc.MsgSwitchTab, ipc.SwitchTabPayload{
 			TabID: tabID,
 		})
-		m.client.Send(msg)
+		m.sendForDest(dest, msg)
 		return nil
 	}
 }
@@ -3564,10 +4248,11 @@ const eagerTabMarker = "●"
 
 // tabHasEagerPane reports whether any pane in the tab at idx has Eager set.
 func (m Model) tabHasEagerPane(idx int) bool {
-	if m.tabs[idx].Root == nil {
+	tabs := m.curTabs()
+	if idx < 0 || idx >= len(tabs) || tabs[idx].Root == nil {
 		return false
 	}
-	for _, p := range m.tabs[idx].Leaves() {
+	for _, p := range tabs[idx].Leaves() {
 		if p != nil && p.Eager {
 			return true
 		}
@@ -3581,17 +4266,17 @@ func (m Model) tabHasEagerPane(idx int) bool {
 // `hitTestTab` MUST go through this helper so click coordinates stay aligned
 // with the rendered widths.
 func (m Model) tabLabel(idx int) string {
-	if m.renaming && idx == m.activeTab {
+	if m.renaming && idx == m.activeTabIdx() {
 		return "* " + m.renameInput + "▎"
 	}
-	name := fmt.Sprintf("%d:%s", idx+1, m.tabs[idx].Name)
+	name := fmt.Sprintf("%d:%s", idx+1, m.curTabs()[idx].Name)
 	if m.tabHasEagerPane(idx) {
 		name = eagerTabMarker + name
 	}
 	if m.tabHasWorkingPane(idx) {
 		name = spinnerFrames[m.workSpinnerFrame%len(spinnerFrames)] + " " + name
 	}
-	if idx == m.activeTab {
+	if idx == m.activeTabIdx() {
 		return "* " + name
 	}
 	return name
@@ -3603,8 +4288,8 @@ func (m Model) tabLabel(idx int) string {
 // color > active/inactive default. Shared by renderTabBar and hitTestTab so
 // rendered widths and click hit-testing never diverge.
 func (m Model) tabStyle(idx int) lipgloss.Style {
-	tab := m.tabs[idx]
-	active := idx == m.activeTab
+	tab := m.curTabs()[idx]
+	active := idx == m.activeTabIdx()
 	// tabUnseen self-excludes the active tab; tabPinnedAttention deliberately
 	// does not (a pin colors the active tab's label unless the pinned pane is
 	// the one in focus).
@@ -3624,9 +4309,52 @@ func (m Model) tabStyle(idx int) lipgloss.Style {
 	return inactiveTabStyle
 }
 
+// fitTabBar clamps an assembled tab bar to at most barW CELLS, so the bar is
+// always exactly one painted line.
+//
+// lipgloss's .Width() WRAPS an over-wide line onto a new one rather than
+// truncating it — the same behaviour that forced the sidebar's rows onto cell
+// measurement (see truncateCells). A wrapped tab bar is the worse version of
+// that bug: row 0 becomes two lines, so the WHOLE frame shifts down one row
+// while sidebarRowAt, the pane rects and every hit test still compute against
+// the unshifted layout, and the status bar is pushed off the bottom. Every
+// click in the UI lands one row out.
+//
+// The overflow path can produce it: the active tab is included
+// unconditionally, before any budget check, so a single label wider than the
+// whole bar survives. That was reachable when the bar spanned m.width and is
+// projectSidebarWidth() columns more reachable now that it spends
+// paneAreaWidth() — a tab named after a long branch or directory reaches it.
+//
+// ansi.Truncate measures CELLS and drops a straddling wide glyph whole rather
+// than emitting half of one; the reset closes any SGR the cut left open, so
+// the spaces .Width() pads with cannot inherit a tab's background colour.
+// An in-budget bar is returned byte-for-byte untouched.
+//
+// hitTestTab needs no mirror of this: truncation only ever removes the TAIL,
+// and the loop that fills the bar admits a second tab only while the running
+// total stays inside barW — so an over-wide active tab is alone on the bar and
+// still owns every column the hit test can be asked about.
+func fitTabBar(bar string, barW int) string {
+	if barW <= 0 || lipgloss.Width(bar) <= barW {
+		return bar
+	}
+	return ansi.Truncate(bar, barW, "") + "\x1b[0m"
+}
+
+// renderTabBar renders the tab strip that sits directly above the panes.
+//
+// It is sized to paneAreaWidth(), NOT the terminal: View() joins it into the
+// pane COLUMN (above tabContent, right of the project sidebar), so its first
+// painted cell is screen column projectSidebarWidth() and it has exactly the
+// panes' width to spend. Sizing it to m.width instead made the bar overhang
+// the sidebar by that many columns. hitTestTab mirrors this budget — which
+// tabs overflow depends on it, so the two must read the same width.
 func (m Model) renderTabBar() string {
-	if len(m.tabs) == 0 {
-		return lipgloss.NewStyle().Width(m.width).Render("")
+	barW := m.paneAreaWidth()
+	tabs := m.curTabs()
+	if len(tabs) == 0 {
+		return lipgloss.NewStyle().Width(barW).Render("")
 	}
 
 	type renderedTab struct {
@@ -3635,8 +4363,8 @@ func (m Model) renderTabBar() string {
 	}
 
 	// Pre-render all tabs
-	all := make([]renderedTab, len(m.tabs))
-	for i := range m.tabs {
+	all := make([]renderedTab, len(tabs))
+	for i := range tabs {
 		name := m.tabLabel(i)
 		style := m.tabStyle(i)
 		rendered := style.Render(name)
@@ -3652,31 +4380,32 @@ func (m Model) renderTabBar() string {
 		}
 	}
 
-	if totalW <= m.width {
+	if totalW <= barW {
 		// Everything fits
 		tabs := make([]string, len(all))
 		for i, rt := range all {
 			tabs[i] = rt.text
 		}
 		bar := strings.Join(tabs, " ")
-		return lipgloss.NewStyle().Width(m.width).Render(bar)
+		return lipgloss.NewStyle().Width(barW).Render(fitTabBar(bar, barW))
 	}
 
 	// Overflow: include active tab, expand outward, show indicator for hidden
-	included := make([]bool, len(m.tabs))
-	included[m.activeTab] = true
-	usedW := all[m.activeTab].width
+	included := make([]bool, len(tabs))
+	activeIdx := m.activeTabIdx()
+	included[activeIdx] = true
+	usedW := all[activeIdx].width
 
 	// Reserve space for overflow indicator (e.g. " «3 more»")
 	indicatorReserve := 12
 
 	// Expand left, then right from active tab
-	left := m.activeTab - 1
-	right := m.activeTab + 1
-	for left >= 0 || right < len(m.tabs) {
+	left := activeIdx - 1
+	right := activeIdx + 1
+	for left >= 0 || right < len(tabs) {
 		if left >= 0 {
 			need := all[left].width + 1 // +1 for separator
-			if usedW+need+indicatorReserve <= m.width {
+			if usedW+need+indicatorReserve <= barW {
 				included[left] = true
 				usedW += need
 				left--
@@ -3684,14 +4413,14 @@ func (m Model) renderTabBar() string {
 				left = -1 // stop expanding left
 			}
 		}
-		if right < len(m.tabs) {
+		if right < len(tabs) {
 			need := all[right].width + 1
-			if usedW+need+indicatorReserve <= m.width {
+			if usedW+need+indicatorReserve <= barW {
 				included[right] = true
 				usedW += need
 				right++
 			} else {
-				right = len(m.tabs) // stop expanding right
+				right = len(tabs) // stop expanding right
 			}
 		}
 	}
@@ -3716,13 +4445,27 @@ func (m Model) renderTabBar() string {
 		bar += lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Render(indicator)
 	}
 
-	return lipgloss.NewStyle().Width(m.width).Render(bar)
+	return lipgloss.NewStyle().Width(barW).Render(fitTabBar(bar, barW))
 }
 
 // hitTestTab returns the tab index at screen X coordinate, or -1 if none.
 // Mirrors renderTabBar() width/overflow logic exactly.
+//
+// x arrives SCREEN-absolute, and the bar's first cell is screen column
+// projectSidebarWidth() (View() joins it into the pane column, right of the
+// project sidebar) — so the offset comes off first and everything below runs
+// in bar-local columns against the same paneAreaWidth() budget renderTabBar
+// spends. Columns inside the sidebar answer -1: the sidebar swallows them
+// before Update ever reaches the tab-bar branch, and answering with a tab
+// would make a click on the PROJECTS heading switch tabs.
 func (m *Model) hitTestTab(x int) int {
-	if len(m.tabs) == 0 {
+	barW := m.paneAreaWidth()
+	x -= m.projectSidebarWidth()
+	if x < 0 {
+		return -1
+	}
+	tabs := m.curTabs()
+	if len(tabs) == 0 {
 		return -1
 	}
 
@@ -3732,8 +4475,8 @@ func (m *Model) hitTestTab(x int) int {
 	}
 
 	// Pre-render tab widths using the same styling as renderTabBar.
-	all := make([]renderedTab, len(m.tabs))
-	for i := range m.tabs {
+	all := make([]renderedTab, len(tabs))
+	for i := range tabs {
 		name := m.tabLabel(i)
 		style := m.tabStyle(i)
 		rendered := style.Render(name)
@@ -3749,22 +4492,23 @@ func (m *Model) hitTestTab(x int) int {
 		}
 	}
 
-	included := make([]bool, len(m.tabs))
-	if totalW <= m.width {
+	included := make([]bool, len(tabs))
+	if totalW <= barW {
 		for i := range included {
 			included[i] = true
 		}
 	} else {
-		included[m.activeTab] = true
-		usedW := all[m.activeTab].width
+		activeIdx := m.activeTabIdx()
+		included[activeIdx] = true
+		usedW := all[activeIdx].width
 		indicatorReserve := 12
 
-		left := m.activeTab - 1
-		right := m.activeTab + 1
-		for left >= 0 || right < len(m.tabs) {
+		left := activeIdx - 1
+		right := activeIdx + 1
+		for left >= 0 || right < len(tabs) {
 			if left >= 0 {
 				need := all[left].width + 1
-				if usedW+need+indicatorReserve <= m.width {
+				if usedW+need+indicatorReserve <= barW {
 					included[left] = true
 					usedW += need
 					left--
@@ -3772,14 +4516,14 @@ func (m *Model) hitTestTab(x int) int {
 					left = -1
 				}
 			}
-			if right < len(m.tabs) {
+			if right < len(tabs) {
 				need := all[right].width + 1
-				if usedW+need+indicatorReserve <= m.width {
+				if usedW+need+indicatorReserve <= barW {
 					included[right] = true
 					usedW += need
 					right++
 				} else {
-					right = len(m.tabs)
+					right = len(tabs)
 				}
 			}
 		}
@@ -3874,7 +4618,7 @@ func (m Model) renderStatusBar() string {
 		if tab.Root != nil {
 			paneCount = len(tab.Leaves())
 		}
-		paneInfo := fmt.Sprintf("tab %d/%d  panes:%d", m.activeTab+1, len(m.tabs), paneCount)
+		paneInfo := fmt.Sprintf("tab %d/%d  panes:%d", m.activeTabIdx()+1, len(m.curTabs()), paneCount)
 
 		if pane := tab.ActivePaneModel(); pane != nil {
 			displayPath := pane.CWD
@@ -3920,14 +4664,17 @@ func (m Model) renderStatusBar() string {
 		total := m.lastMemResp.Total + m.tuiLocalMemTotal()
 		right = "mem " + memreport.HumanBytes(total) + " | " + right
 	}
-	// Suppressed in remote mode: m.updateInfo is broadcast by the REMOTE
-	// daemon and describes its staging dir, but every apply path reads the
-	// LOCAL config.UpdateDir(). Offering "↑ v1.43.0 [ready]" here would either
-	// fail ("staged files missing") or, worse, silently install whatever
-	// different version this machine happens to have staged. Showing nothing
-	// is better than showing a control wired to the wrong host.
+	// Suppressed in remote mode: the announcement describes the REMOTE
+	// daemon's staging dir, but every apply path reads the LOCAL
+	// config.UpdateDir(). Offering "↑ v1.43.0 [ready]" here would either fail
+	// ("staged files missing") or, worse, silently install whatever different
+	// version this machine happens to have staged. Showing nothing is better
+	// than showing a control wired to the wrong host. activeUpdateInfo (not a
+	// single last-broadcast field) is the other half: a mixed session would
+	// otherwise pass this gate with a LOCAL project active and then render the
+	// REMOTE daemon's version.
 	if !m.RemoteMode() {
-		if seg := updateStatusSegment(m.updateInfo, m.version); seg != "" {
+		if seg := updateStatusSegment(m.activeUpdateInfo(), m.version); seg != "" {
 			right = seg + " | " + right
 		}
 	}
@@ -3940,8 +4687,12 @@ func (m Model) renderStatusBar() string {
 	// are on this laptop or a cluster node, which is what makes any
 	// wrong-host bug silent — and these panes routinely run AI agents with
 	// permission prompts disabled.
-	if m.remoteDest != "" {
-		right = "[remote " + m.remoteDest + "] " + right
+	//
+	// Gated on the DEST, not on the rendered host name: linkHost answers "the
+	// local daemon" for "", so testing its output for emptiness would put a
+	// "[remote …]" badge on every local session.
+	if dest := m.activeDest(); dest != "" {
+		right = "[remote " + m.linkHost(dest) + "] " + right
 	}
 	if count := m.notifications.Count(); count > 0 && !m.notifications.visible {
 		right = fmt.Sprintf("[%d events] ", count) + right
@@ -3999,47 +4750,131 @@ func (m *Model) nextReqGen() string {
 // attachCWD returns the working directory to advertise to the daemon so it can
 // spawn new panes where the client is.
 //
-// Empty in remote mode: os.Getwd() names a directory on the laptop, and the
-// daemon would test it against the SERVER's disk. defaultCWD() validates and
-// falls back, so this was safe — but only by coincidence, and a path that
+// Empty for a remote destination: os.Getwd() names a directory on the laptop,
+// and the daemon would test it against the SERVER's disk. defaultCWD() validates
+// and falls back, so this was safe — but only by coincidence, and a path that
 // happens to exist on both machines is exactly where the coincidence stops. An
 // empty value makes the daemon use its own working directory, which is a real
 // directory on the machine that will hold the pane.
-func attachCWD(remoteDest, localCWD string) string {
-	if remoteDest != "" {
+//
+// Keyed on the destination being attached, not on a session-wide flag: a mixed
+// session attaches a local daemon and a remote one from the same client, and
+// only the local one may be told where this process is standing.
+func attachCWD(dest, localCWD string) string {
+	if dest != "" {
 		return ""
 	}
 	return localCWD
 }
 
-func (m Model) attachToDaemon() tea.Cmd {
-	attachCmd := func() tea.Msg {
-		// Subtract chrome (tab bar + status bar), then pane border (2)
-		tabH := m.height - chromeHeight
-		cols := m.width - 2
-		rows := tabH - 2
-		if cols < 1 {
-			cols = 1
-		}
-		if rows < 1 {
-			rows = 1
-		}
-		// Best-effort; if Getwd fails the daemon falls back to its own CWD.
-		localCWD, _ := os.Getwd()
-		msg, _ := ipc.NewMessage(ipc.MsgAttach, ipc.AttachPayload{
-			Cols: cols,
-			Rows: rows,
-			CWD:  attachCWD(m.remoteDest, localCWD),
-		})
-		m.client.Send(msg)
+// knownDests lists every destination this client can talk to.
+//
+// A router answers with its whole routing table; anything else is a single
+// connection, whose destination is "" — the key its projects, its link loss and
+// its reconnect state all already use.
+func (m Model) knownDests() []string {
+	if r, ok := m.client.(*Router); ok {
+		return r.Dests()
+	}
+	return []string{""}
+}
+
+// attachAllDests attaches every destination that is not attached yet, using the
+// geometry the terminal has reported. Returns nil when there is nothing to do.
+//
+// The attached map is what keeps this idempotent, and idempotence is the whole
+// requirement: handleAttach replays the ENTIRE ghost buffer on every attach, so
+// a second one doubles a pane's scrollback and re-counts the work-state events
+// in the replay (resetWorkStateForReattach exists for the same hazard). That is
+// also why attach could not simply move to dial time in cmd/quil — attach
+// already has two owners, this one and the post-redial reattach, and a third
+// would attach every conn twice.
+//
+// Nor can it move to dial time for a second, independent reason: AttachPayload
+// carries Cols/Rows and the daemon sizes the first PTY from them, while at dial
+// time Bubble Tea has not reported a window size yet — a fresh daemon would
+// spawn its default Shell pane at 0×0.
+//
+// A send that fails leaves the destination unattached deliberately, so the next
+// WindowSizeMsg retries it.
+func (m *Model) attachAllDests() tea.Cmd {
+	// Sends run HERE rather than inside the returned command, because the ledger
+	// entry has to land on a Model that Update returns — a command holds a copy
+	// and could not write one back. That makes a client-less Model reachable in
+	// a way the old command-wrapped attach never was: dozens of tests drive
+	// Update on a Model they never gave a connection to.
+	if m.client == nil {
 		return nil
 	}
-	// requestPluginList is batched here rather than at Ctrl+N: .Available is
-	// also read by the context menu, the palette and the Alt+G overlay, so
-	// asking only on dialog open would leave those describing the wrong
-	// machine. Attach also covers reconnect, which is where a daemon that
-	// restarted (and therefore re-detected) shows up. No-op in local mode.
-	return tea.Batch(attachCmd, m.requestPluginList())
+	if m.attached == nil {
+		m.attached = map[string]bool{}
+	}
+	var cmds []tea.Cmd
+	for _, dest := range m.knownDests() {
+		if m.attached[dest] {
+			continue
+		}
+		if err := m.sendForDest(dest, m.attachMessage(dest)); err != nil {
+			log.Printf("attach to %q failed, retrying on the next resize: %v", dest, err)
+			continue
+		}
+		m.attached[dest] = true
+		// Batched per destination so each daemon is asked about its OWN
+		// registry; see requestPluginListFor.
+		if cmd := m.requestPluginListFor(dest); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+	if len(cmds) == 0 {
+		return nil
+	}
+	return tea.Batch(cmds...)
+}
+
+// attachMessage builds the MsgAttach describing this client's geometry for one
+// destination.
+func (m Model) attachMessage(dest string) *ipc.Message {
+	// Subtract chrome (tab bar + status bar), the project sidebar (if open),
+	// then pane border (2) — the same reservation resizeTabs applies, so the
+	// very first spawned pane isn't sized wider than what's about to be
+	// painted for it.
+	tabH := m.height - chromeHeight
+	cols := m.paneAreaWidth() - 2
+	rows := tabH - 2
+	if cols < 1 {
+		cols = 1
+	}
+	if rows < 1 {
+		rows = 1
+	}
+	// Best-effort; if Getwd fails the daemon falls back to its own CWD.
+	localCWD, _ := os.Getwd()
+	msg, _ := ipc.NewMessage(ipc.MsgAttach, ipc.AttachPayload{
+		Cols: cols,
+		Rows: rows,
+		CWD:  attachCWD(dest, localCWD),
+	})
+	return msg
+}
+
+// attachToDest re-attaches to ONE daemon after its link came back.
+//
+// Stamped, because by now the client knows which destination it is talking to
+// and an unstamped attach resolves to whatever project is ACTIVE: a background
+// daemon reconnecting would make the foreground one replay its whole output
+// buffer, doubling every pane's scrollback on the machine that never dropped.
+// Harmless on the single-connection path — Origin never reaches the wire.
+//
+// requestPluginListFor rides along rather than being asked at Ctrl+N: .Available
+// is also read by the context menu, the palette and the Alt+G overlay, so asking
+// only on dialog open would leave those describing the wrong machine. Reconnect
+// is where a daemon that restarted — and therefore re-detected — shows up.
+func (m Model) attachToDest(dest string) tea.Cmd {
+	attachCmd := func() tea.Msg {
+		m.sendForDest(dest, m.attachMessage(dest))
+		return nil
+	}
+	return tea.Batch(attachCmd, m.requestPluginListFor(dest))
 }
 
 // listenContinueMsg signals the TUI to keep listening for daemon messages.
@@ -4072,6 +4907,28 @@ func (m Model) listenForMessages() tea.Cmd {
 		}
 
 		switch msg.Type {
+		case ipc.MsgLinkLost:
+			// Synthesised by the Router when one of its connections died — it
+			// never reaches a socket. Receive itself cannot report that error,
+			// because the other daemons are still up, so the loss arrives as
+			// data naming the dest that died.
+			//
+			// Honoured ONLY from a router, because nothing stops a daemon from
+			// putting this type on the wire: acting on it would let the peer
+			// quit the TUI in local mode, or start reconnect churn in remote
+			// mode — where the daemon is on a host the user may not control.
+			// Origin is json:"-", so a wire-borne one would also arrive naming
+			// the local daemon whatever its true source.
+			if _, isRouter := m.client.(destRouter); !isRouter {
+				log.Printf("ipc recv: ignoring wire-borne link_lost")
+				return listenContinueMsg{}
+			}
+			// The generation is the CURRENT one: a router's pumps are not
+			// superseded the way a whole client swap is, and a zero here would
+			// be discarded as stale.
+			log.Printf("ipc recv: link_lost from %q", msg.Origin)
+			return linkLostMsg{gen: m.clientGen, dest: msg.Origin, err: errLinkLost}
+
 		case ipc.MsgPaneOutput:
 			var payload ipc.PaneOutputPayload
 			msg.DecodePayload(&payload)
@@ -4081,7 +4938,12 @@ func (m Model) listenForMessages() tea.Cmd {
 			log.Print("ipc recv: workspace_state")
 			var raw map[string]any
 			msg.DecodePayload(&raw)
-			return parseWorkspaceState(raw)
+			state := parseWorkspaceState(raw)
+			// Origin is client-side routing state, never on the wire, so it
+			// cannot come out of the payload — stamp it here, where the message
+			// still exists. Empty means the local daemon.
+			state.Dest = msg.Origin
+			return state
 
 		case ipc.MsgPluginError:
 			log.Printf("ipc recv: plugin_error")
@@ -4257,6 +5119,42 @@ func parseWorkspaceState(raw map[string]any) WorkspaceStateMsg {
 			state.Update = info
 		}
 	}
+	if ap, ok := raw["active_project"].(string); ok {
+		state.ActiveProject = ap
+	}
+	if projects, ok := raw["projects"].([]any); ok {
+		for _, p := range projects {
+			pm, ok := p.(map[string]any)
+			if !ok {
+				continue
+			}
+			pi := ProjectInfo{}
+			if id, ok := pm["id"].(string); ok {
+				pi.ID = id
+			}
+			if name, ok := pm["name"].(string); ok {
+				pi.Name = name
+			}
+			if root, ok := pm["root_dir"].(string); ok {
+				pi.RootDir = root
+			}
+			if at, ok := pm["active_tab"].(string); ok {
+				pi.ActiveTab = at
+			}
+			if ids, ok := pm["tab_ids"].([]any); ok {
+				for _, tid := range ids {
+					if s, ok := tid.(string); ok {
+						pi.TabIDs = append(pi.TabIDs, s)
+					}
+				}
+			}
+			// A project with no ID cannot be matched against the client's own
+			// list, so every broadcast would rebuild it from scratch.
+			if pi.ID != "" {
+				state.Projects = append(state.Projects, pi)
+			}
+		}
+	}
 	if tabs, ok := raw["tabs"].([]any); ok {
 		for _, t := range tabs {
 			if tm, ok := t.(map[string]any); ok {
@@ -4266,6 +5164,9 @@ func parseWorkspaceState(raw map[string]any) WorkspaceStateMsg {
 				}
 				if name, ok := tm["name"].(string); ok {
 					ti.Name = name
+				}
+				if pid, ok := tm["project_id"].(string); ok {
+					ti.ProjectID = pid
 				}
 				if color, ok := tm["color"].(string); ok {
 					ti.Color = color
@@ -4339,6 +5240,27 @@ func parseWorkspaceState(raw map[string]any) WorkspaceStateMsg {
 				if ct, ok := pm["context_tokens"].(float64); ok {
 					pi.ContextTokens = int64(ct)
 				}
+				if b, ok := pm["git_branch"].(string); ok {
+					pi.GitBranch = b
+				}
+				if b, ok := pm["git_detached"].(bool); ok {
+					pi.GitDetached = b
+				}
+				if b, ok := pm["git_worktree"].(bool); ok {
+					pi.GitWorktree = b
+				}
+				if b, ok := pm["git_upstream"].(bool); ok {
+					pi.GitUpstream = b
+				}
+				if n, ok := pm["git_ahead"].(float64); ok {
+					pi.GitAhead = int(n)
+				}
+				if n, ok := pm["git_behind"].(float64); ok {
+					pi.GitBehind = int(n)
+				}
+				if b, ok := pm["git_stale"].(bool); ok {
+					pi.GitStale = b
+				}
 				state.Panes = append(state.Panes, pi)
 			}
 		}
@@ -4378,17 +5300,18 @@ func (m *Model) splitPane(dir SplitDir) tea.Cmd {
 	}
 	m.pendingSplit[tab.ID] = placeholder
 
-	tabID := tab.ID
+	tabID, dest := tab.ID, tab.Dest
 	return func() tea.Msg {
 		msg, _ := ipc.NewMessage(ipc.MsgCreatePane, ipc.CreatePanePayload{
 			TabID: tabID,
 		})
-		m.client.Send(msg)
+		m.sendForDest(dest, msg)
 		return nil
 	}
 }
 
 func (m Model) updateTab(tabID, name, color string) tea.Cmd {
+	dest := m.destOfTab(tabID)
 	return func() tea.Msg {
 		msg, _ := ipc.NewMessage(ipc.MsgUpdateTab, ipc.UpdateTabPayload{
 			TabID: tabID,
@@ -4399,7 +5322,7 @@ func (m Model) updateTab(tabID, name, color string) tea.Cmd {
 			// to end up colorless, so the flag is safe to derive.
 			ClearColor: color == "",
 		})
-		m.client.Send(msg)
+		m.sendForDest(dest, msg)
 		return nil
 	}
 }
@@ -4408,13 +5331,14 @@ func (m Model) updateTab(tabID, name, color string) tea.Cmd {
 // The daemon snapshots + broadcasts; the next workspace_state arriving at
 // the TUI just confirms what we already rearranged locally.
 func (m Model) sendReorderTab(tabID string, newIdx int) tea.Cmd {
+	dest := m.destOfTab(tabID)
 	return func() tea.Msg {
 		msg, _ := ipc.NewMessage(ipc.MsgReorderTab, ipc.ReorderTabPayload{
 			TabID:    tabID,
 			NewIndex: newIdx,
 		})
 		if m.client != nil {
-			_ = m.client.Send(msg)
+			_ = m.sendForDest(dest, msg)
 		}
 		return nil
 	}
@@ -4494,7 +5418,7 @@ func (m Model) forwardInputBytes(data []byte) tea.Cmd {
 			PaneID: pane.ID,
 			Data:   data,
 		})
-		m.client.Send(msg)
+		m.sendForPane(pane.ID, msg)
 		return nil
 	}
 }
@@ -4547,7 +5471,7 @@ func (m Model) pasteClipboard() tea.Cmd {
 			PaneID: pane.ID,
 			Data:   data,
 		})
-		m.client.Send(msg)
+		m.sendForPane(pane.ID, msg)
 		// Wait for PTY echo to arrive before triggering re-render
 		time.Sleep(100 * time.Millisecond)
 		return pasteRefreshMsg{}
@@ -4635,15 +5559,19 @@ func (m *Model) updateMouseSelection(tab *TabModel, curX, curY, tabH int) {
 	var ox, oy int
 
 	if tab.FocusMode() {
-		// Focus mode: active pane fills entire tab, tree splits don't apply
+		// Focus mode: active pane fills entire tab, tree splits don't apply.
+		// ox is the pane's screen-absolute left edge, which is where the
+		// project sidebar ends (see the PaneRect origin contract above
+		// activePaneRectFocus) — mouseStartX/curX below are screen columns,
+		// so a 0 here would shear every selection right by the sidebar width.
 		pane = tab.ActivePaneModel()
 		if pane == nil {
 			return
 		}
-		ox = 0
+		ox = m.projectSidebarWidth()
 		oy = 1 // tab bar
 	} else {
-		startRect := tab.Root.FindPaneRectAt(m.mouseStartX, m.mouseStartY, 0, 1, m.paneAreaWidth(), tabH)
+		startRect := tab.Root.FindPaneRectAt(m.mouseStartX, m.mouseStartY, m.projectSidebarWidth(), 1, m.paneAreaWidth(), tabH)
 		if startRect == nil {
 			return
 		}
@@ -4911,7 +5839,7 @@ func (m Model) sendInputToPane(paneID string, data []byte) {
 		PaneID: paneID,
 		Data:   data,
 	})
-	_ = m.client.Send(msg)
+	_ = m.sendForPane(paneID, msg)
 }
 
 // sendClipboardToPane sends pasted text to the active pane as PTY input,
@@ -4937,7 +5865,7 @@ func (m Model) sendClipboardToPane(text string) {
 		PaneID: pane.ID,
 		Data:   pastePayload(pane, text),
 	})
-	m.client.Send(msg)
+	m.sendForPane(pane.ID, msg)
 }
 
 func keyToBytes(keyMsg tea.KeyPressMsg) []byte {
@@ -5047,23 +5975,31 @@ func keyToBytes(keyMsg tea.KeyPressMsg) []byte {
 	return nil
 }
 
+// resizeAllPanes walks the projects rather than allTabs() so each pane's
+// message can carry its own daemon: this is a broadcast over EVERY project, so
+// the active dest would be the right answer for at most one of them.
 func (m Model) resizeAllPanes() tea.Cmd {
 	return func() tea.Msg {
-		for _, tab := range m.tabs {
-			if tab.Root == nil {
-				continue
-			}
-			for _, pane := range tab.Leaves() {
-				// paneVTSize keeps the PTY in lockstep with the VT: rect
-				// size for normal panes, tab canvas for wide-canvas panes.
-				// The daemon drops exact duplicates (same-size guard).
-				cols, rows := paneVTSize(pane.WideCanvas, pane.MinNativeCols, pane.Width, pane.Height, tab.CanvasW, tab.CanvasH)
-				msg, _ := ipc.NewMessage(ipc.MsgResizePane, ipc.ResizePanePayload{
-					PaneID: pane.ID,
-					Cols:   uint16(cols),
-					Rows:   uint16(rows),
-				})
-				m.client.Send(msg)
+		for _, proj := range m.projects {
+			for _, tab := range proj.tabs {
+				if tab.Root == nil {
+					continue
+				}
+				for _, pane := range tab.Leaves() {
+					// paneVTSize keeps the PTY in lockstep with the VT: rect
+					// size for normal panes, tab canvas for wide-canvas panes.
+					// The daemon drops exact duplicates (same-size guard).
+					// pane.NativeW comes from the same resize pass that sized
+					// the VT, so the mode this reproduces cannot disagree with
+					// the one already applied.
+					cols, rows := paneVTSize(pane.WideCanvas, pane.MinNativeCols, pane.Width, pane.Height, pane.NativeW, tab.CanvasW, tab.CanvasH)
+					msg, _ := ipc.NewMessage(ipc.MsgResizePane, ipc.ResizePanePayload{
+						PaneID: pane.ID,
+						Cols:   uint16(cols),
+						Rows:   uint16(rows),
+					})
+					m.sendForDest(proj.Dest, msg)
+				}
 			}
 		}
 		return nil
@@ -5076,7 +6012,7 @@ func (m Model) updatePane(paneID, name string) tea.Cmd {
 			PaneID: paneID,
 			Name:   name,
 		})
-		m.client.Send(msg)
+		m.sendForPane(paneID, msg)
 		return nil
 	}
 }
@@ -5087,7 +6023,7 @@ func (m Model) updatePaneCWD(paneID, cwd string) tea.Cmd {
 			PaneID: paneID,
 			CWD:    cwd,
 		})
-		m.client.Send(msg)
+		m.sendForPane(paneID, msg)
 		return nil
 	}
 }
@@ -5116,7 +6052,7 @@ func (m Model) toggleActivePaneMute() tea.Cmd {
 			log.Printf("toggleActivePaneMute build msg: %v", err)
 			return nil
 		}
-		if err := m.client.Send(msg); err != nil {
+		if err := m.sendForPane(paneID, msg); err != nil {
 			log.Printf("toggleActivePaneMute send: %v", err)
 		}
 		return nil
@@ -5146,28 +6082,32 @@ func (m Model) toggleActivePaneEager() tea.Cmd {
 			log.Printf("toggleActivePaneEager build msg: %v", err)
 			return nil
 		}
-		if err := m.client.Send(msg); err != nil {
+		if err := m.sendForPane(paneID, msg); err != nil {
 			log.Printf("toggleActivePaneEager send: %v", err)
 		}
 		return nil
 	}
 }
 
+// sendAllLayouts walks the projects for the same reason resizeAllPanes does —
+// every tab's layout has to reach the daemon that owns that tab.
 func (m Model) sendAllLayouts() tea.Cmd {
 	return func() tea.Msg {
-		for _, tab := range m.tabs {
-			if tab.Root == nil {
-				continue
+		for _, proj := range m.projects {
+			for _, tab := range proj.tabs {
+				if tab.Root == nil {
+					continue
+				}
+				data, err := MarshalLayout(tab.Root)
+				if err != nil {
+					continue
+				}
+				msg, _ := ipc.NewMessage(ipc.MsgUpdateLayout, ipc.UpdateLayoutPayload{
+					TabID:  tab.ID,
+					Layout: data,
+				})
+				m.sendForDest(proj.Dest, msg)
 			}
-			data, err := MarshalLayout(tab.Root)
-			if err != nil {
-				continue
-			}
-			msg, _ := ipc.NewMessage(ipc.MsgUpdateLayout, ipc.UpdateLayoutPayload{
-				TabID:  tab.ID,
-				Layout: data,
-			})
-			m.client.Send(msg)
 		}
 		return nil
 	}

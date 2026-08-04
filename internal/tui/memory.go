@@ -239,9 +239,10 @@ func (m Model) applyMemoryReport(resp ipc.MemoryReportRespPayload) Model {
 // tabOrderAndNames extracts the current tab order and name map from the
 // Model so the tree builder can render tab headers.
 func (m Model) tabOrderAndNames() ([]string, map[string]string) {
-	order := make([]string, 0, len(m.tabs))
-	names := make(map[string]string, len(m.tabs))
-	for _, t := range m.tabs {
+	tabs := m.allTabs()
+	order := make([]string, 0, len(tabs))
+	names := make(map[string]string, len(tabs))
+	for _, t := range tabs {
 		if t == nil {
 			continue
 		}

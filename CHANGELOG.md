@@ -7,6 +7,131 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Projects — tabs now group under the work they belong to.** A project is
+  named, rooted at a directory, and owns its own tabs, remembering which one you
+  left it on. `Alt+Shift+N` creates one, `Alt+P` fuzzy-finds, `Alt+O` bounces
+  between the last two, and `Alt+Shift+←/→` cycles. Six tabs spread across three
+  repositories used to be six indistinguishable labels; `Ctrl+T` now files a new
+  tab into whichever project you are on, and switching project switches the
+  whole tab bar. Your existing workspace migrates on first load into a single
+  project named Default with tab order preserved — no prompt, nothing to opt
+  into, no data loss.
+
+- **A sidebar that watches every project, not just the one you are looking at.**
+  `Alt+Shift+S` toggles a reserved left column listing your projects, each with
+  a roll-up of its agents — `◐N` working, `⚠N` blocked waiting on you. Those
+  counts keep updating for projects in the **background**, which is the whole
+  point: an agent that finished or got stuck somewhere you are not looking is
+  now visible from where you already are. Under the active project every pane
+  gets its own mark — `◐` working (with `⋯N` outstanding subagents), `⚠` blocked
+  and the tool it is asking about, `○` idle, `✓` finished while you were away —
+  and clicking any row jumps there.
+
+- **Blocked is no longer the same as done.** An agent parked on a permission
+  prompt and an agent that finished its turn were shown identically. The
+  distinction was always present in the agents' own hook events; the old display
+  only needed "mark this unseen", so the two were collapsed. They are separate
+  states now, because they want different things from you.
+
+- **`Alt+Shift+A` jumps to whoever has been waiting longest.** Anywhere in the
+  workspace, across project boundaries, cycling on repeated presses. Oldest
+  first rather than sidebar order — with several agents running, the one that
+  has been blocked longest is the one costing you time.
+
+- **Each pane shows the checkout it is sitting in.** Branch name, `wt` when it
+  is a linked worktree, and `↑N`/`↓N` against upstream. Refreshed on a
+  background ticker and cached per checkout, so ten panes in one repository cost
+  one git invocation rather than ten. `git status --porcelain` is deliberately
+  not among the calls — it is the one that can take seconds on a large
+  repository. A probe that does not answer keeps its last value and is marked
+  stale rather than blanked or guessed at.
+
+- **Several machines in one window.** A project belongs to the daemon that holds
+  its files, so projects from your laptop and from a build host now sit side by
+  side in the same sidebar, in one TUI process — where `quil --remote <host>`
+  binds an entire session to a single daemon. Add a host without relaunching:
+  tick **Remote (ssh)** in the New Project dialog, give a user and host, and
+  press Enter on the Host row. Quil dials it, offers to install itself if the
+  host has not got it, and then browses *that* machine's filesystem for the root
+  directory. The host is remembered under `[[destinations]]` and attached at
+  every launch; **Disconnect host** in the sidebar's right-click menu removes it
+  from your window and stops nothing on the far end. Each destination keeps its
+  own reconnect state, so one daemon dying no longer ends the session.
+
+  Beta limits, worth reading before relying on it: a destination unreachable at
+  *launch* never starts a reconnect ladder (relaunch to pick it up), background
+  destinations dial non-interactively so a first-time host key must be accepted
+  once with `ssh <dest>` or `quil remote setup <dest>`, plugin availability is a
+  single registry fed by whichever daemon answered last, and the
+  recent-directories list is per client rather than per host.
+
+### Fixed
+- **A restored AI pane no longer comes back with its conversation printed
+  twice.** When a pane resumes a session, the agent paints its own transcript
+  back from the top — and Quil was replaying its saved copy as well. The two did
+  not merely stack up: the agent started writing wherever the replay had left
+  the cursor, so its banner landed in the middle of a saved prompt line. Quil
+  now recognises which panes restore their own history and leaves those alone.
+
+- **A restored terminal no longer starts typing at the top of the pane.** The
+  saved screen is now scrolled into scrollback where you can still reach it,
+  rather than left on screen for the fresh shell to paint through — and the
+  cursor is returned to the top afterwards, so the prompt appears where the
+  shell believes it is. Without that last step the prompt sat at the bottom of
+  the pane while typing appeared at the top.
+
+- **A restored pane's saved history no longer grows on every restart.** The
+  restored bytes and the new process's output were being written back together,
+  so the file on disk got a little longer each time. A pane you open now stores
+  that session alone; one you never open keeps the history it was restored with.
+
+- **Panes that ignore terminal resizes repaint again after one.** Claude Code
+  redraws on input rather than on a resize signal, so a pane could sit with a
+  stale, mis-wrapped screen after the window changed size until you typed
+  something.
+
+- **Opening the sidebar no longer reformats one pane of a pair.** Reserving the
+  column could push two evenly-split AI panes across the width threshold that
+  decides how they render, flipping exactly one of them.
+
+- **Queued notifications replay in the order they happened.** After a
+  disconnect, events arrived newest-first on reattach, so a pane that had
+  started and then finished work was left showing "working".
+
+- **Installing Quil on a host no longer offers to install it again.** Recording
+  the new host in your config wrote back a copy of the file made at launch,
+  which reverted the binary path the install had just recorded — the one that
+  makes attaching work when the remote's non-interactive PATH cannot see the
+  install directory. Each install ended by erasing its own result. The
+  reconnect ladder had the matching fault: a host added mid-session attached,
+  then on its first dropped link retried forever without ever reconnecting.
+
+- **Disconnecting a host makes it stay gone.** A status update already in
+  flight could put its projects back in the sidebar, where they were
+  unreachable — nothing re-attaches a host the client has forgotten.
+
+- **Closing a tab keeps you in the project you were in.** Closing the active
+  tab could jump you to a tab in a different project, and left the project you
+  were in pointing at its first tab rather than a neighbour of the one closed.
+
+- **Project names from another machine can no longer act on your terminal.**
+  Names shown in the right-click menu, the rename form and the command palette
+  are stripped of terminal escapes and text-direction overrides, as the sidebar
+  already did.
+
+- **A project root on an unreachable network share no longer freezes the
+  daemon.** Resolving it was unbounded, so a dead mount could park every pane
+  behind it; it now gives up and falls back to the default directory.
+
+- **Notes close properly when you jump to a pane in another tab.** Jumping from
+  the palette, the notification sidebar, the attention queue or an AI agent left
+  the notes editor open and bound to a pane you were no longer looking at.
+
+- **Destroying a project cleans up after its panes.** Their hook and session
+  files were left behind, and the daemon kept re-reading dead ones until it
+  restarted.
+
 ## [1.46.3] - 2026-08-01
 
 ### Fixed

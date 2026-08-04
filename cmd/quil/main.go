@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"sync/atomic"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -370,7 +371,7 @@ func launchTUI() {
 		// the remote one. Batch=false so this first dial can prompt for a
 		// host-key fingerprint or key passphrase — it runs before tea.NewProgram
 		// takes the terminal.
-		client, err = dialRemote(cfg)
+		client, err = dialRemote(cfg, remoteDest)
 		if err != nil {
 			log.Printf("cannot connect to remote daemon %s: %v", remoteDest, err)
 			fmt.Fprintf(os.Stderr, "cannot connect to %s: %v\n"+
@@ -434,7 +435,7 @@ func launchTUI() {
 		}
 		log.Printf("remote: the launch blocker is resolved, re-dialing %s", remoteDest)
 		fmt.Fprintf(os.Stderr, "  Attaching…\n\n")
-		client, err = dialRemote(cfg)
+		client, err = dialRemote(cfg, remoteDest)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "cannot connect to %s: %v\n", remoteDest, err)
 			os.Exit(1)
@@ -484,30 +485,148 @@ func launchTUI() {
 	// Restore window size from previous session
 	restoreWindowSize()
 
-	model := tui.NewModel(client, cfg, version, reg, stalePlugins)
-	// Drives the [remote <host>] status-bar indicator and suppresses the
-	// update controls, which are wired to local disk and would target the
-	// wrong machine. Empty for a local session.
-	model.SetRemoteDest(remoteDest)
+	// The routing key of the connection dialled above. "" is the local daemon;
+	// under --remote it is the ssh destination, which is what makes that
+	// session's projects carry a Dest and its reconnect state key by host —
+	// the same keying a multi-daemon session uses, so there is only one.
+	primaryDest := remoteDest
+
+	// The primary connection is already open and version-gated, so its "dial"
+	// simply hands it over. Routing it through dialAllWith anyway keeps ONE
+	// path that builds the connection table, rather than a special case that
+	// only the extras exercise.
+	dials := map[string]func() (tui.Client, error){
+		primaryDest: func() (tui.Client, error) { return client, nil },
+	}
+	for _, d := range extraDestinations(cfg, primaryDest) {
+		log.Printf("remote: dialing configured destination %s (%s)", d.Label(), d.Dest)
+		dials[d.Dest] = dialExtra(cfg, d)
+	}
+	conns := dialAllWith(dials)
+	for _, d := range extraDestinations(cfg, primaryDest) {
+		if _, ok := conns[d.Dest]; !ok {
+			// Named on stderr as well as in the log: this happens before the
+			// TUI takes the screen, and a destination silently missing from the
+			// sidebar is the failure mode the whole message exists to prevent.
+			//
+			// It says RELAUNCH, and that word is load-bearing. Reconnect is
+			// driven by a pump reporting its connection's death, and a
+			// destination that never connected has no conn and therefore no
+			// pump — so nothing will ever start a ladder for it. Telling the
+			// user it "keeps trying" leaves them waiting for something that
+			// cannot happen.
+			fmt.Fprintf(os.Stderr, "warning: %s is unreachable — its projects will not appear. "+
+				"Relaunch quil once the host is back (see the log for why).\n", d.Label())
+		}
+	}
+
+	// The router is constructed BEFORE the Model and passed in, never installed
+	// afterwards: tea.NewProgram takes the Model by value, so a closure reading
+	// back through main's copy would be frozen at startup and would route every
+	// unstamped send to whichever daemon happened to be active at launch.
+	router := tui.NewRouter(conns)
+	model := tui.NewModel(router, cfg, version, reg, stalePlugins)
+	// No session-wide "this is remote" flag any more: the router keys --remote's
+	// connection by host, so its projects arrive stamped with that destination
+	// and every remote-aware decision reads it from the project on screen.
 	if remoteDest != "" {
 		model.SetRecentCWDs(tui.LoadRecentCWDs(config.RecentCWDsPath(remoteDest)))
 	}
 
-	// Only remote sessions reconnect. A local daemon that dies takes its panes
-	// with it, so there is nothing to reattach to and retrying would hide the
-	// loss; leaving redialFn nil is what makes that path stay fatal.
-	if remoteMode() {
-		model.SetRedialFunc(redialRemote(cfg))
-		// The Model cannot close a connection itself — tui.Client is only
-		// Send/Receive. Without this, the `defer client.Close()` above releases
-		// the STARTUP client, which after a reconnect is already dead, while the
-		// live ssh child is only reachable through the Model and outlives us.
-		model.SetClientCloser(func(c tui.Client) {
-			if ic, ok := c.(*ipc.Client); ok && ic != nil {
-				ic.Close()
-			}
-		})
+	// Only REMOTE destinations reconnect. A local daemon that dies takes its
+	// panes with it, so there is nothing to reattach to and retrying would hide
+	// the loss; leaving its redial func nil is what keeps that fatal — and, in a
+	// mixed session, what makes the client keep the remote daemons rather than
+	// quitting over the local one.
+	//
+	// Installed per destination that actually connected. A host unreachable at
+	// launch has no conn and therefore no pump, so nothing would ever report a
+	// loss for it and the ladder could not start; that gap is a known limitation
+	// rather than something a dialer here would fix.
+	//
+	// liveCfg is declared here rather than beside the dial funcs below because
+	// these launch-time ladders need it too: a host configured at launch can
+	// still be installed to mid-session (its dial fails ErrRemoteQuilMissing,
+	// the dialog offers), and a redial holding the pre-install value would
+	// never reconnect afterwards.
+	liveCfg := &atomic.Pointer[config.Config]{}
+	liveCfg.Store(&cfg)
+	for dest := range conns {
+		if dest == "" {
+			continue
+		}
+		model.SetRedialFunc(dest, redialRemote(liveCfg.Load, dest))
 	}
+	// Connecting a host the user names at runtime, from the New Project
+	// dialog's Host field — the same dial the launch path uses, so a
+	// destination added mid-session is indistinguishable from a configured one
+	// afterwards: same hardening, same version gate, same reconnect ladder.
+	// Batch mode because Bubble Tea holds the terminal by now and ssh has
+	// nowhere to prompt.
+	// The dial reads the config through a pointer rather than closing over the
+	// launch-time VALUE, because a remote install rewrites it. runRemoteSetup
+	// records the absolute path it installed to, and remoteSSHOptions turns
+	// that into the ssh RemoteCommand — so a closure holding the old value
+	// keeps dialling bare `quil` on the non-interactive PATH, gets 127 again,
+	// and offers the install it just completed. Observed as a five-second
+	// install loop.
+	model.SetDialFunc(func(dest string) (tui.Client, error) {
+		return dialExtra(*liveCfg.Load(), config.Destination{Dest: dest})()
+	})
+	// The reconnect ladder reads the config through the same pointer, and for
+	// the same reason — it is not enough for the FIRST dial to see the recorded
+	// binary path. A host provisioned at runtime attaches fine on the value
+	// captured here, then on its first link drop every redial goes back to bare
+	// `quil`, gets 127, and — since nothing marks that permanent — retries
+	// forever without ever reconnecting.
+	model.SetRedialFactory(func(dest string) tui.RedialFunc {
+		return redialRemote(liveCfg.Load, dest)
+	})
+	// Provisioning a host from the dialog, for the dial that comes back
+	// ErrRemoteQuilMissing. The same runRemoteSetup the CLI subcommand uses,
+	// so a host provisioned from the TUI is byte-identical to one set up with
+	// `quil remote setup` — including the recorded absolute path that makes
+	// attaching work when the non-interactive PATH cannot see it.
+	model.SetInstallFunc(func(dest string) error {
+		// Yes is MANDATORY here, not a convenience. confirmRemoteInstall
+		// prints a plan and reads a y/N from stdin — and Bubble Tea owns both
+		// the screen and stdin by now, so the prompt lands on top of the TUI
+		// and can never be answered. The dialog's own offer is the
+		// confirmation; asking twice, once somewhere unreachable, is not.
+		// Out sends the narration to quil.log rather than the terminal, which
+		// the TUI is drawing on. Without it the progress lines land on top of
+		// the dialog that asked for the install.
+		if err := runRemoteSetup(dest, setupOptions{Yes: true, Out: &setupLogWriter{dest: dest}}); err != nil {
+			return err
+		}
+		// Re-read what runRemoteSetup just wrote. The recorded binary path is
+		// the entire point of the install for a host whose non-interactive
+		// PATH cannot see ~/.local/bin, and the retry dial is the next thing
+		// to run — so publishing it here is what turns the retry into a
+		// success instead of another 127.
+		reloaded, loadErr := config.Load(config.ConfigPath())
+		if loadErr != nil {
+			// Not fatal: the install succeeded, and the retry may still work
+			// if the binary landed somewhere the PATH covers. Logged because
+			// this is the difference between one retry and a loop.
+			log.Printf("remote setup %s: installed, but re-reading config failed: %v", dest, loadErr)
+			return nil
+		}
+		liveCfg.Store(&reloaded)
+		return nil
+	})
+	// The Model cannot close a connection itself — tui.Client is only
+	// Send/Receive. Without this, the `defer client.Close()` above releases only
+	// the STARTUP connection of ONE destination, which after a reconnect is
+	// already dead, while every live ssh child is reachable only through the
+	// Model and outlives us. Installed unconditionally now that the Model always
+	// holds a router: a local session's conn closing twice is harmless, a remote
+	// session's leaking is not.
+	model.SetClientCloser(func(c tui.Client) {
+		if ic, ok := c.(*ipc.Client); ok && ic != nil {
+			ic.Close()
+		}
+	})
 
 	// ssh keeps its stderr for the whole session and multiplexes the remote
 	// command's fd 2 onto it, so from here on a diagnostic would land mid-render
@@ -541,7 +660,16 @@ func launchTUI() {
 		m.CloseClient()
 		saveWindowSize(m)
 		if m.ConfigChanged() {
-			if err := config.Save(config.ConfigPath(), m.Config()); err != nil {
+			// Read-modify-write, preserving the one section the Model does not
+			// own. A remote install records [remote.hosts.<dest>] behind the
+			// TUI's back, so writing the Model's launch-time copy whole would
+			// erase the binary path that makes the next attach work — and this
+			// runs on EVERY exit once any setting has been touched.
+			if err := config.Mutate(config.ConfigPath(), func(c *config.Config) {
+				remote := c.Remote
+				*c = m.Config()
+				c.Remote = remote
+			}); err != nil {
 				log.Printf("save config: %v", err)
 			} else {
 				log.Print("config saved (disclaimer preference updated)")

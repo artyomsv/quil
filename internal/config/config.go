@@ -25,6 +25,38 @@ type Config struct {
 	Notification NotificationConfig `toml:"notification"`
 	Update       UpdateConfig       `toml:"update"`
 	Remote       RemoteConfig       `toml:"remote"`
+	// Destinations are the ADDITIONAL daemons this client attaches to beside
+	// the local one, each contributing its projects to the same sidebar. A
+	// slice rather than a map because order is meaningful — it is the order the
+	// projects appear in — and TOML spells a list of tables as [[destinations]].
+	//
+	// `quil --remote <host>` ignores this list entirely: that mode is "drive
+	// THAT machine", and quietly attaching the configured extras to it would
+	// make one flag mean two different things.
+	Destinations []Destination `toml:"destinations"`
+}
+
+// Destination names one remote daemon to attach at launch.
+type Destination struct {
+	// Name labels the host in launch diagnostics. Optional; Dest is used when
+	// it is empty. It exists because Dest is an ssh destination — often
+	// `user@10.0.0.4` or an ssh_config alias — and the message a user reads
+	// when a host is unreachable at launch should be able to say "gpu box".
+	Name string `toml:"name"`
+	// Dest is passed to ssh VERBATIM, exactly like --remote: an ssh_config Host
+	// alias keeps its HostName/Port/User/ProxyJump, which is the whole reason
+	// the transport does not parse it. It is also the routing key — the key a
+	// project's Dest, its reconnect state and its link banner all carry.
+	Dest string `toml:"dest"`
+}
+
+// Label returns the name to show for a destination, falling back to the ssh
+// destination itself.
+func (d Destination) Label() string {
+	if d.Name != "" {
+		return d.Name
+	}
+	return d.Dest
 }
 
 // RemoteConfig holds per-destination settings for `quil --remote`, keyed by the
@@ -144,6 +176,13 @@ type UIConfig struct {
 	// Alt+Down inside the F1 → log viewer. 0 falls back to the default 40.
 	LogViewerPageLines int  `toml:"log_viewer_page_lines"`
 	ShowDisclaimer     bool `toml:"show_disclaimer"`
+	// SidebarOpen/SidebarWidth control the project sidebar (a reserved left
+	// column listing projects and the active project's panes). These are
+	// screen properties, not session ones — client config, never
+	// workspace.json — so a workspace saved with the sidebar open doesn't
+	// fight a narrower terminal on restore.
+	SidebarOpen  bool `toml:"sidebar_open"`
+	SidebarWidth int  `toml:"sidebar_width"`
 }
 
 type KeybindingsConfig struct {
@@ -220,6 +259,34 @@ type KeybindingsConfig struct {
 	// deliberately NOT a default. Add it back in config.toml if your terminal
 	// leaves it free (e.g. `command_palette = "ctrl+shift+p,alt+shift+p"`).
 	CommandPalette string `toml:"command_palette"`
+	// SidebarToggle collapses / expands the PROJECT sidebar (the reserved
+	// left column, not the notification overlay on the right — that one is
+	// NotificationToggle). Unlike the overlay this reserves real layout
+	// width, so toggling it resizes every pane's PTY.
+	SidebarToggle string `toml:"sidebar_toggle"`
+	// ProjectPicker opens the fuzzy project picker, ProjectToggle bounces
+	// between the two most recent projects, AttentionQueue opens the
+	// cross-project list of panes blocked on the user, and NewProject opens
+	// the create-project dialog.
+	//
+	// The whole group deliberately avoids alt+w / alt+a / alt+shift+p
+	// (CloseTab, QuickActions, CommandPalette). alt+p and alt+o are plain
+	// Alt-letter keys because no AI tool binds them; the rest take the
+	// Alt+Shift layer for the same reason the split keys do.
+	ProjectPicker string `toml:"project_picker"`
+	ProjectToggle string `toml:"project_toggle"`
+	// ProjectNext/ProjectPrev cycle through the project list in order, where
+	// ProjectToggle bounces between the last two. Bound to alt+shift+arrows
+	// so they read as the project-level echo of alt+arrows' pane navigation.
+	// Deliberately NOT alt+[ / alt+] : those send ESC [ and ESC ], and ESC [
+	// is the CSI introducer, so the terminal cannot tell the keypress from
+	// the start of an escape sequence. Same reason alt+O (SS3) is avoided,
+	// and alt+b/f/d are left to readline's word operations.
+	ProjectNext    string `toml:"project_next"`
+	ProjectPrev    string `toml:"project_prev"`
+	AttentionQueue string `toml:"attention_queue"`
+	NewProject     string `toml:"new_project"`
+	DestroyProject string `toml:"destroy_project"`
 }
 
 func Default() Config {
@@ -248,6 +315,8 @@ func Default() Config {
 			PageScrollLines:    0,  // 0 = half-page (dynamic) — used by terminal pane scrollback
 			LogViewerPageLines: 40, // Alt+Up / Alt+Down jump in F1 → log viewer
 			ShowDisclaimer:     true,
+			SidebarOpen:        false, // closed by default — existing installs keep their pane geometry unchanged
+			SidebarWidth:       22,    // internal/tui.defaultSidebarWidth — config can't import tui, kept in sync by TestUIDefault_SidebarWidthMatchesTUIDefault
 		},
 		MCP: MCPConfig{
 			HighlightDuration: "10s",
@@ -313,6 +382,14 @@ func Default() Config {
 			// alt+shift+p only: ctrl+shift+p is grabbed by many terminals' own
 			// command palette before Quil sees it (Windows Terminal, VS Code).
 			CommandPalette: "alt+shift+p",
+			SidebarToggle:  "alt+shift+s",
+			ProjectPicker:  "alt+p",
+			ProjectToggle:  "alt+o",
+			ProjectNext:    "alt+shift+right",
+			ProjectPrev:    "alt+shift+left",
+			AttentionQueue: "alt+shift+a",
+			NewProject:     "alt+shift+n",
+			DestroyProject: "alt+shift+x",
 		},
 	}
 }
@@ -347,6 +424,28 @@ func Load(path string) (Config, error) {
 }
 
 // Save writes the config to disk atomically (write .tmp then rename).
+// Mutate applies fn to the config ON DISK — load, change, save — and is the
+// only correct way to write one section of a config another writer also owns.
+//
+// Save serialises the WHOLE struct, so saving a Config that was loaded at
+// launch silently reverts every key written since. That is not hypothetical
+// here: a remote install records the absolute path it installed to under
+// [remote.hosts.<dest>], and the very next thing the TUI does is record the new
+// destination — which, done from the launch-time snapshot, erased the path that
+// makes attaching work at all. The symptom was a host that installed
+// successfully and then offered to install again on the next launch, forever.
+//
+// A missing file is not an error: Load returns the defaults for one, which is
+// exactly what a first write should be based on.
+func Mutate(path string, fn func(*Config)) error {
+	cfg, err := Load(path)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("load config: %w", err)
+	}
+	fn(&cfg)
+	return Save(path, cfg)
+}
+
 func Save(path string, cfg Config) error {
 	var buf bytes.Buffer
 	if err := toml.NewEncoder(&buf).Encode(cfg); err != nil {

@@ -74,7 +74,7 @@ func TestApplyGitRepos_VanishedTabDropsTheIntent(t *testing.T) {
 	t.Parallel()
 	m, fake, tab := overlayTestModel(t, "/a")
 	m.repoScan = repoScanState{cwd: "/a", tabID: tab.ID, gen: "g1"}
-	m.tabs = nil // the tab went away while the request was in flight
+	m.setTabs(nil) // the tab went away while the request was in flight
 
 	runCmd(m.applyGitRepos(ipc.GitReposRespPayload{CWD: "/a", Repos: []string{"/a"}}, "g1"))
 

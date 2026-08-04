@@ -55,6 +55,7 @@ type Daemon struct {
 	snapshotCh   chan struct{} // buffered channel for snapshot requests
 	restored     bool          // true if workspace was loaded from disk
 	events       *eventQueue   // notification center event queue
+	gitCache     *gitCache     // per-checkout branch/worktree/divergence, refreshed on a ticker
 	// clientCWD is the last-known CWD from a TUI client, used as the
 	// default working directory for new panes/tabs. Read by defaultCWD()
 	// from any IPC dispatch goroutine and written by handleAttach on each
@@ -167,6 +168,7 @@ func New(cfg config.Config) *Daemon {
 		shutdown:   make(chan struct{}),
 		snapshotCh: make(chan struct{}, 1),
 		events:     newEventQueue(maxEvents),
+		gitCache:   newGitCache(),
 		snapGens:   make(map[string]uint64),
 	}
 	d.memReport = memreport.NewCollector(d.session, 5*time.Second)
@@ -247,6 +249,7 @@ func (d *Daemon) Start() error {
 	go d.idleChecker()
 	go d.updateChecker()
 	go d.hookEventsWatcher()
+	go d.gitWatcher()
 	// Arm the liveness canary only once a first snapshot is plausible.
 	d.lastSnapshotDone.Store(time.Now().UnixNano())
 	go d.snapshotWatchdog()
@@ -440,8 +443,8 @@ func (d *Daemon) snapshot() {
 	// allowed a pane create/destroy between the two calls to slip through
 	// — the workspace.json said N panes while the buffer flush iterated
 	// N±1, surfacing as the "snapshot pane count oscillation" bug.
-	activeTab, tabs, panesByTab := d.session.SnapshotState()
-	state := d.workspaceStateFromSnapshot(activeTab, tabs, panesByTab, false)
+	activeTab, tabs, panesByTab, projects, activeProject := d.session.SnapshotState()
+	state := d.workspaceStateFromSnapshot(activeTab, tabs, panesByTab, projects, activeProject, false)
 
 	if err := persist.Save(config.WorkspacePath(), state); err != nil {
 		log.Printf("snapshot workspace: %v", err)
@@ -560,11 +563,22 @@ func (d *Daemon) restoreWorkspace() error {
 		return nil // Fresh workspace
 	}
 
+	// A workspace snapshot written before projects existed has no "projects"
+	// key (or an empty one — a snapshot built entirely from RestoreTab, which
+	// never touches sm.projects, produces the same shape). Migrating in place
+	// here means every tab's "project_id" is stamped by the time the restore
+	// loop below reads it, exactly as a post-migration snapshot would have
+	// written it directly.
+	migrateToDefaultProject(state)
+
 	log.Println("restoring workspace from disk...")
 
 	activeTab, _ := state["active_tab"].(string)
 	tabs, _ := state["tabs"].([]any)
 	panes, _ := state["panes"].([]any)
+	activeProject, _ := state["active_project"].(string)
+
+	d.session.RestoreProjects(parseRestoredProjects(state["projects"]), activeProject)
 
 	// Build pane lookup
 	panesByID := make(map[string]map[string]any, len(panes))
@@ -601,6 +615,12 @@ func (d *Daemon) restoreWorkspace() error {
 			Name:  tabName,
 			Color: tabColor,
 		}
+		// A rebuilt *Tab with an empty ProjectID makes DestroyTab's project
+		// de-registration a silent no-op, leaving a dangling ID in
+		// Project.TabIDs that only surfaces after this restart, when someone
+		// closes the tab. migrateToDefaultProject above guarantees every tab
+		// map carries "project_id" by the time this loop runs.
+		tab.ProjectID, _ = tabMap["project_id"].(string)
 
 		// Restore layout
 		if layoutRaw, ok := tabMap["layout"]; ok {
@@ -682,6 +702,7 @@ func (d *Daemon) restoreWorkspace() error {
 				// Load ghost buffer from disk
 				if bufData, err := persist.LoadBuffer(bufDir, paneID); err == nil && len(bufData) > 0 {
 					pane.OutputBuf.Write(bufData)
+					pane.ghostSeeded = true
 					pane.GhostSnap = make([]byte, len(bufData))
 					copy(pane.GhostSnap, bufData)
 					pane.HistoryLines = bytes.Count(bufData, []byte{'\n'})
@@ -706,6 +727,61 @@ func (d *Daemon) restoreWorkspace() error {
 	d.restored = true
 	log.Printf("restored %d tabs, %d panes from disk", len(tabs), restoredPanes)
 	return nil
+}
+
+// parseRestoredProjects turns the disk-loaded "projects" list (already
+// present pre-migration, or synthesized in place by migrateToDefaultProject)
+// back into typed *Project values for SessionManager.RestoreProjects.
+//
+// An empty RootDir is filled from the daemon's own os.Getwd() — resolved at
+// most once for the whole call, not per project — because
+// migrateToDefaultProject deliberately leaves RootDir blank rather than
+// guessing it (see that function's doc comment).
+func parseRestoredProjects(raw any) []*Project {
+	rawList, ok := raw.([]any)
+	if !ok {
+		return nil
+	}
+	var cwd string
+	var cwdResolved bool
+	projects := make([]*Project, 0, len(rawList))
+	for _, rp := range rawList {
+		pm, ok := rp.(map[string]any)
+		if !ok {
+			continue
+		}
+		id, _ := pm["id"].(string)
+		if id == "" {
+			continue
+		}
+		name, _ := pm["name"].(string)
+		rootDir, _ := pm["root_dir"].(string)
+		if rootDir == "" {
+			if !cwdResolved {
+				cwd, _ = os.Getwd()
+				cwdResolved = true
+			}
+			rootDir = cwd
+		}
+		activeTab, _ := pm["active_tab"].(string)
+		var tabIDs []string
+		if rawIDs, ok := pm["tab_ids"].([]any); ok {
+			tabIDs = make([]string, 0, len(rawIDs))
+			for _, rid := range rawIDs {
+				if s, ok := rid.(string); ok {
+					tabIDs = append(tabIDs, s)
+				}
+			}
+		}
+		projects = append(projects, &Project{
+			ID:        id,
+			Name:      name,
+			RootDir:   rootDir,
+			TabIDs:    tabIDs,
+			ActiveTab: activeTab,
+		})
+	}
+	return projects
 }
 
 // isValidHexID checks that an ID matches the format prefix + 8 hex chars (e.g. "pane-a1b2c3d4").
@@ -886,6 +962,83 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 	case ipc.MsgShutdown:
 		d.shutdownOnce.Do(func() { close(d.shutdown) })
 
+	// Project lifecycle
+	case ipc.MsgCreateProject:
+		var p ipc.CreateProjectPayload
+		// Checked, unlike the four handlers below where a zero payload is a
+		// harmless no-op: a decode failure here would create a NAMELESS project
+		// rooted nowhere, ship it a shell, broadcast it and snapshot it — a
+		// malformed frame turning into persistent workspace state.
+		if err := msg.DecodePayload(&p); err != nil {
+			log.Printf("create project: malformed payload: %v", err)
+			return
+		}
+		proj := d.session.CreateProject(p.Name, p.RootDir)
+		// A project ships with a shell, exactly like a fresh workspace. An
+		// empty one renders as a blank screen the moment the user switches to
+		// it, and there is no in-band way out: Ctrl+T files its tab against
+		// the daemon's ACTIVE project, which a just-created one is not.
+		d.recoverEmptyProject(proj.ID)
+		d.broadcastState()
+		d.requestSnapshot()
+
+	case ipc.MsgDestroyProject:
+		var p ipc.DestroyProjectPayload
+		if err := msg.DecodePayload(&p); err != nil {
+			log.Printf("destroy project: malformed payload: %v", err)
+			return
+		}
+		detached := d.session.DestroyProject(p.ProjectID)
+		// Destroying a project destroys every pane under it, so this is a
+		// pane-destruction path and owes the same cleanup as destroy-pane and
+		// destroy-tab: closing the PTY leaves the hook spool, the ingester's
+		// coalescers and the session-id files behind, and the spool is
+		// re-polled every 200 ms until the daemon restarts.
+		for _, pane := range detached {
+			d.cleanupPaneArtifacts(pane.ID)
+		}
+		releasePanes(detached)
+		// Destroying the last project leaves nothing to render, and destroying
+		// the active one can promote a project that is itself empty.
+		d.recoverEmptyProject(d.session.ActiveProject())
+		d.broadcastState()
+		d.requestSnapshot()
+
+	case ipc.MsgUpdateProject:
+		var p ipc.UpdateProjectPayload
+		if err := msg.DecodePayload(&p); err != nil {
+			log.Printf("update project: malformed payload: %v", err)
+			return
+		}
+		d.session.UpdateProject(p.ProjectID, p.Name, p.RootDir)
+		d.broadcastState()
+
+	case ipc.MsgSwitchProject:
+		var p ipc.SwitchProjectPayload
+		if err := msg.DecodePayload(&p); err != nil {
+			log.Printf("switch project: malformed payload: %v", err)
+			return
+		}
+		// ensureTabSpawned is the whole point of the returned tab: after a
+		// lazy restore only sm.activeTab's panes are running, so a background
+		// project's panes are Pending until something switches to their tab —
+		// and switching PROJECT never did, so they showed the restore
+		// indicator with no process behind them, indefinitely.
+		if tabID, ok := d.session.SwitchProject(p.ProjectID); ok && tabID != "" {
+			d.ensureTabSpawned(tabID)
+		}
+		d.broadcastState()
+		d.requestSnapshot()
+
+	case ipc.MsgReorderProject:
+		var p ipc.ReorderProjectPayload
+		if err := msg.DecodePayload(&p); err != nil {
+			log.Printf("reorder project: malformed payload: %v", err)
+			return
+		}
+		d.session.ReorderProject(p.ProjectID, p.NewIndex)
+		d.broadcastState()
+
 	// MCP request-response
 	case ipc.MsgListPanesReq:
 		d.handleListPanesReq(conn, msg)
@@ -1028,6 +1181,24 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 				if ghost == nil {
 					ghost = pane.OutputBuf.Bytes() // reconnect — use full buffer
 					source = "outputbuf"
+				} else if restoresOwnHistory(d.registry.Get(typ)) {
+					// GhostSnap non-nil means this is the first attach after a
+					// daemon restore, so this pane's child is being respawned
+					// rather than reattached — and a session-resume strategy
+					// hands that child its own transcript, which it repaints
+					// from the top. Replaying our copy as well puts the same
+					// conversation in the grid twice, with the join corrupted:
+					// the child's first rows land wherever the replay left the
+					// cursor, so its banner overwrites the middle of the saved
+					// prompt line (reported 2026-08-02 and 2026-08-03).
+					//
+					// Scoped to GhostSnap deliberately. The OutputBuf path is a
+					// reattach to a LIVE child that will not repaint anything,
+					// where the replay is the only history there is — that is
+					// the case ghost_buffer = true was measured against and it
+					// is unchanged.
+					ghost = nil
+					source = "skipped-child-repaints"
 				}
 				pane.GhostSnap = nil // take-and-clear under the lock
 			}
@@ -1038,6 +1209,10 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 			kickRunning := pane.PTY != nil && pane.ExitCode == nil
 			pane.PluginMu.Unlock()
 			if !ghostEnabled || len(ghost) == 0 {
+				if source == "skipped-child-repaints" {
+					log.Printf("attach: skipped ghost replay pane %s (type=%s, child restores its own history)",
+						pane.ID, typ)
+				}
 				// Nothing was replayed, so this pane's rectangle is blank on the
 				// client that just attached — even though the process behind it
 				// is alive and mid-conversation. Ask the child to repaint.
@@ -1049,13 +1224,27 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 			log.Printf("attach: ghost replay pane %s (type=%s, source=%s, bytes=%d)",
 				pane.ID, typ, source, len(ghost))
 			sendGhostChunked(conn, pane.ID, ghost, d.shutdown)
+			if source == "ghostsnap" {
+				// A DIFFERENT session's screen was just drawn, and the child
+				// about to paint over it positions absolutely against a screen
+				// it believes is its own. Push the replay into scrollback so
+				// the two never share a row. Only on this path: the outputbuf
+				// replay is this child's own byte stream, so it reproduces the
+				// screen the child already thinks it has.
+				_, rows := paneSize(pane)
+				sendGhostChunked(conn, pane.ID, ghostScrollOut(rows), d.shutdown)
+			}
 		}
 	}
 
-	// Replay pending notification events. Blocking send for the same reason
-	// as ghost replay: up to MaxEvents (200) critical frames in a burst would
-	// overflow the 64-slot critical queue and force-close a busy client.
-	for _, e := range d.events.Events() {
+	// Replay pending notification events, OLDEST FIRST — this is a replay of
+	// state transitions, not a listing. The TUI rebuilds each pane's work
+	// state by applying these in order, so the newest-first storage order has
+	// to be reversed or the reconstruction ends on the oldest event's state.
+	// Blocking send for the same reason as ghost replay: up to MaxEvents (200)
+	// critical frames in a burst would overflow the 64-slot critical queue and
+	// force-close a busy client.
+	for _, e := range d.events.EventsOldestFirst() {
 		payload := toPaneEventPayload(e)
 		evtMsg, _ := ipc.NewMessage(ipc.MsgPaneEvent, payload)
 		if err := conn.SendBlocking(evtMsg, d.shutdown); err != nil {
@@ -1071,6 +1260,62 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 // in streamPTYOutput, so ghost replay feels identical to fast live output.
 // The done channel allows early abort if the daemon is shutting down or the
 // client disconnects mid-replay.
+// ghostScrollOut is the byte sequence that pushes a replayed session off the
+// VISIBLE screen and into the emulator's scrollback, leaving blank rows for
+// the respawned child to paint on.
+//
+// This is what makes a restored terminal coherent at all. The child paints
+// with ABSOLUTE cursor positioning against a screen it believes it owns —
+// PSReadLine redrawing an input line emits `CSI 1;30H`, row 1, column 30, one
+// past a 29-character prompt — so a replayed screen underneath it does not
+// merely look stale, it gets painted through: the fresh prompt appears at the
+// top of the pane while the previous session's rows sit below it (reported
+// 2026-08-03). No amount of repair at the join fixes that, because the child's
+// row 1 and ours are different screens.
+//
+// Scrolling rather than clearing is the point: LF at the bottom row moves a
+// line into scrollback, where the user can still reach it, while `CSI 2J`
+// would erase it. A full `rows` of them is deliberate over-scroll — the daemon
+// cannot know how many rows the replay actually occupied on the client, since
+// that depends on wrapping — so a short buffer leaves some blank rows above
+// the new session. Blank scrollback is a cosmetic cost; an under-scroll is the
+// bug returning.
+//
+// The trailing HOME is the other half, and scrolling alone was not enough:
+// blanking the screen leaves the cursor on the BOTTOM row, so the child's
+// prompt is drawn there while the child's own model still has it on row 1 —
+// and the next absolute redraw goes to row 1, so the prompt sits at the bottom
+// of the pane and typing appears at the top. Homing first makes our origin and
+// the child's the same row, which is what the child's absolute positioning has
+// been asserting all along.
+func ghostScrollOut(rows int) []byte {
+	if rows <= 0 {
+		rows = 24 // pane never sized (deferred, no client geometry yet)
+	}
+	out := bytes.Repeat([]byte("\r\n"), rows)
+	return append(out, '\x1b', '[', 'H')
+}
+
+// restoresOwnHistory reports whether a plugin's resume strategy hands the
+// respawned child a session id, so the child paints its own transcript back
+// instead of depending on Quil's replay.
+//
+// This is the resume-strategy question, not a plugin-name list: the two
+// strategies below are exactly the ones resolveSpawnArgs expands into
+// `--resume <id>` / `--session <id>`. `rerun` re-runs a command that starts
+// from nothing, `cwd_only` respawns a shell that will not reprint a word of
+// its scrollback, and both of those need the replay.
+func restoresOwnHistory(p *plugin.PanePlugin) bool {
+	if p == nil {
+		return false
+	}
+	switch p.Persistence.Strategy {
+	case "preassign_id", "session_scrape":
+		return true
+	}
+	return false
+}
+
 func sendGhostChunked(conn *ipc.Conn, paneID string, data []byte, done <-chan struct{}) {
 	const chunkSize = 8 * 1024 // 8 KB — typical PTY read size
 	const chunkDelay = 2 * time.Millisecond
@@ -1113,8 +1358,9 @@ func (d *Daemon) handleCreateTab(conn *ipc.Conn, msg *ipc.Message) {
 	d.session.SwitchTab(tab.ID)
 	log.Printf("tab created: %s %q", tab.ID, tab.Name)
 
-	// Every tab needs a default pane with a shell
-	pane, _ := d.session.CreatePane(tab.ID, d.defaultCWD())
+	// Every tab needs a default pane with a shell, rooted at the OWNING
+	// project's directory (see projectCWD).
+	pane, _ := d.session.CreatePane(tab.ID, d.projectCWD(tab.ProjectID))
 	pane.Type = "terminal"
 
 	ptySession := apty.New()
@@ -1132,6 +1378,13 @@ func (d *Daemon) handleDestroyTab(msg *ipc.Message) {
 		return
 	}
 	log.Printf("tab destroy: %s", payload.TabID)
+	// The owning project has to be read BEFORE the destroy: DestroyTab
+	// de-registers the tab from it, so afterwards there is nothing left to
+	// ask which project just lost a tab.
+	projectID := ""
+	if tab := d.session.Tab(payload.TabID); tab != nil {
+		projectID = tab.ProjectID
+	}
 	// Capture the pane list before DestroyTab removes them from the session
 	// maps, so we can clean up their artifacts after the tab is gone.
 	panes := d.session.Panes(payload.TabID)
@@ -1140,19 +1393,95 @@ func (d *Daemon) handleDestroyTab(msg *ipc.Message) {
 		d.cleanupPaneArtifacts(p.ID)
 	}
 
-	// Auto-create replacement if last tab was destroyed
-	if len(d.session.Tabs()) == 0 {
-		tab := d.session.CreateTab("Shell")
-		pane, _ := d.session.CreatePane(tab.ID, d.defaultCWD())
-		pane.Type = "terminal"
-		ptySession := apty.NewWithSize(80, 24)
-		if err := d.spawnPane(pane, ptySession, false); err != nil {
-			log.Printf("failed to start replacement shell: %v", err)
-		}
-	}
+	d.recoverEmptyProject(projectID)
 
 	d.broadcastState()
 	d.requestSnapshot()
+}
+
+// recoverEmptyProject re-creates a shell tab for a project that has no tabs
+// left, and returns without doing anything when it still has some.
+//
+// The guard is PER PROJECT, not per workspace. A workspace-wide
+// `len(Tabs()) == 0` test leaves project A empty whenever project B still has
+// tabs, and an empty ACTIVE project renders as a blank screen with no tab bar:
+// there is nothing to click and nothing to close. "Deleting the last tab
+// auto-creates a new Shell tab" is an always-on invariant of this codebase, and
+// projects made it an invariant per project.
+//
+// projectID may be empty or unknown — a tab from a pre-project snapshot, or one
+// whose project a racing DestroyProject removed. projectIsEmpty falls back to
+// the workspace-wide test there, and createTabLocked resolves the empty ID to
+// the active project or bootstraps one, so the workspace still recovers.
+func (d *Daemon) recoverEmptyProject(projectID string) {
+	if !d.projectIsEmpty(projectID) {
+		return
+	}
+	tab := d.session.CreateTabInProject(projectID, "Shell")
+	pane, err := d.session.CreatePane(tab.ID, d.projectCWD(tab.ProjectID))
+	if err != nil {
+		log.Printf("recover empty project %q: create pane: %v", projectID, err)
+		return
+	}
+	pane.Type = "terminal"
+	// Through newSessionFn rather than apty.NewWithSize directly: same 80×24
+	// default in production, and the seam is what lets a test assert the
+	// replacement shell's CWD without launching a child.
+	if err := d.spawnPane(pane, newSessionFn(80, 24), false); err != nil {
+		log.Printf("failed to start replacement shell: %v", err)
+	}
+	// DestroyTab moves the GLOBAL active tab to tabOrder[0], which can belong
+	// to a different project. If the project we just repaired is the one the
+	// user is looking at, the replacement is the tab they should land on.
+	if tab.ProjectID == d.session.ActiveProject() {
+		d.session.SwitchTab(tab.ID)
+	}
+}
+
+// projectIsEmpty reports whether projectID names a project with no tabs left.
+// An empty or unknown ID falls back to the workspace-wide test — the
+// pre-project behaviour, and still the right answer for a tab that belongs to
+// no project the daemon knows about.
+func (d *Daemon) projectIsEmpty(projectID string) bool {
+	if projectID != "" {
+		for _, p := range d.session.Projects() {
+			if p.ID == projectID {
+				return len(p.TabIDs) == 0
+			}
+		}
+	}
+	return len(d.session.Tabs()) == 0
+}
+
+// projectCWD is the directory a new tab in projectID starts its shell in: the
+// project's own RootDir when it names a real directory on THIS machine, else
+// the daemon's default.
+//
+// Without this the root directory a user picks in the New Project dialog is
+// collected, validated, persisted and editable while never being used for
+// anything — every tab in every project opens in the daemon's own CWD. A stale
+// value falls back rather than failing the spawn: a snapshot can outlive the
+// directory it names, and can be restored on a machine where that path never
+// existed.
+func (d *Daemon) projectCWD(projectID string) string {
+	if projectID == "" {
+		return d.defaultCWD()
+	}
+	for _, p := range d.session.Projects() {
+		if p.ID != projectID {
+			continue
+		}
+		// Bounded: this runs on the conn's dispatch goroutine, and a root on a
+		// dead mount would park every pane on the daemon behind it. A refused
+		// permit or a timeout falls through to the default exactly as a stale
+		// path does — the function already treats "cannot use this" as a
+		// fallback case, so no new semantics.
+		if dir := resolveSpawnDirWithin(p.RootDir, spawnDirProbeTimeout); dir != "" {
+			return dir
+		}
+		break
+	}
+	return d.defaultCWD()
 }
 
 func (d *Daemon) handleSwitchTab(msg *ipc.Message) {
@@ -1484,6 +1813,7 @@ func (d *Daemon) handleResizePane(msg *ipc.Message) {
 	// runs outside the lock.
 	pane.PluginMu.Lock()
 	pty := pane.PTY
+	typ := pane.Type
 	same := pane.appliedCols == int(payload.Cols) && pane.appliedRows == int(payload.Rows)
 	pane.PluginMu.Unlock()
 	if pty == nil || same {
@@ -1509,6 +1839,44 @@ func (d *Daemon) handleResizePane(msg *ipc.Message) {
 	pane.Cols = int(payload.Cols)
 	pane.Rows = int(payload.Rows)
 	pane.PluginMu.Unlock()
+
+	d.repaintAfterResize(pane, typ)
+}
+
+// repaintAfterResize nudges a pane that has just been resized into repainting,
+// for the plugins that will not do it on their own.
+//
+// A declared redraw_key MEANS "this program ignores SIGWINCH" — that is the
+// contract redrawKick already relies on, and it is measured rather than
+// assumed: claude-code re-lays-out on a resize but paints only on its own
+// render tick, which INPUT drives, so the resize alone leaves the previous
+// paint on screen at the previous width. The result is not a pane that looks
+// stale for a moment; it is one whose old content stays wrapped at the old
+// width underneath everything drawn afterwards, which is what produced the
+// overlapping banner reported on 2026-08-02 (restored panes spawn at the
+// persisted size, then the first client resize moves them).
+//
+// This is deliberately NOT the jiggle half of redrawKick: the caller has just
+// performed a real resize, so a program that repaints on SIGWINCH has already
+// been told everything a jiggle would tell it. Only the panes that declared
+// they need input get input, which keeps the opt-in property intact — a plain
+// terminal at a password prompt must never be sent a keystroke it would read
+// as data.
+// The registry nil-check is not defensive padding: handleResizePane is reached
+// by tests that build a Daemon with only a session, and Registry.Get takes a
+// mutex on the receiver, so a nil one panics rather than answering "no plugin".
+func (d *Daemon) repaintAfterResize(pane *Pane, typ string) {
+	if d.registry == nil {
+		return
+	}
+	p := d.registry.Get(typ)
+	if p == nil || p.Persistence.RedrawKey == "" {
+		return
+	}
+	// EnqueueInput, never pane.PTY.Write: a child that has stopped reading
+	// stdin blocks the writer forever, and this runs on the resizing conn's
+	// dispatch goroutine.
+	pane.EnqueueInput([]byte(p.Persistence.RedrawKey))
 }
 
 func (d *Daemon) handleUpdatePane(msg *ipc.Message) {
@@ -1797,6 +2165,19 @@ func (d *Daemon) flushPaneOutput(paneID string, data []byte) {
 		return
 	}
 	if pane.OutputBuf != nil {
+		// Hand the buffer over from the restored session to this child on its
+		// first byte. Until now OutputBuf held the PREVIOUS session's bytes so
+		// a pane the user never opened still had history to persist and to
+		// replay on reconnect; from here it is this child's stream, which is
+		// what makes a reconnect replay reproduce the child's screen exactly
+		// instead of laying it over a different session's.
+		pane.PluginMu.Lock()
+		seeded := pane.ghostSeeded
+		pane.ghostSeeded = false
+		pane.PluginMu.Unlock()
+		if seeded {
+			pane.OutputBuf.Reset()
+		}
 		pane.OutputBuf.Write(data)
 	}
 
@@ -1958,8 +2339,8 @@ func (d *Daemon) broadcastState() {
 }
 
 func (d *Daemon) buildWorkspaceState() map[string]any {
-	activeTab, tabs, panesByTab := d.session.SnapshotState()
-	state := d.workspaceStateFromSnapshot(activeTab, tabs, panesByTab, true)
+	activeTab, tabs, panesByTab, projects, activeProject := d.session.SnapshotState()
+	state := d.workspaceStateFromSnapshot(activeTab, tabs, panesByTab, projects, activeProject, true)
 	// Broadcast-only (never persisted): announced newer release, if any.
 	if info := d.currentUpdateInfo(); info != nil {
 		state["update"] = info
@@ -1975,7 +2356,13 @@ func (d *Daemon) buildWorkspaceState() map[string]any {
 // includeOverlays controls whether ephemeral overlay panes are present in the
 // output. Pass true for live broadcasts (TUI needs them for routing) and false
 // for disk snapshots (overlays are intentionally ephemeral — gone on restart).
-func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panesByTab map[string][]*Pane, includeOverlays bool) map[string]any {
+//
+// projects/activeProject come from the SAME SnapshotState call as tabs/
+// panesByTab — see SnapshotState's doc comment. They ride both the disk
+// snapshot and the live broadcast because this function is shared by both
+// (buildWorkspaceState and snapshot()); writing them only at the persist.Save
+// call site would leave every broadcast project-less.
+func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panesByTab map[string][]*Pane, projects []Project, activeProject string, includeOverlays bool) map[string]any {
 	tabList := make([]map[string]any, 0, len(tabs))
 	paneList := make([]map[string]any, 0)
 
@@ -2001,10 +2388,11 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			paneIDs = append(paneIDs, pid)
 		}
 		tabData := map[string]any{
-			"id":    tab.ID,
-			"name":  tab.Name,
-			"color": tab.Color,
-			"panes": paneIDs,
+			"id":         tab.ID,
+			"name":       tab.Name,
+			"color":      tab.Color,
+			"panes":      paneIDs,
+			"project_id": tab.ProjectID,
 		}
 		if len(tab.Layout) > 0 {
 			tabData["layout"] = tab.Layout
@@ -2102,6 +2490,32 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 					paneData["model"] = lastModel
 					paneData["context_tokens"] = lastContextTokens
 				}
+				// Git state is runtime-only for the same reason: a branch name
+				// from a previous daemon run describes a checkout nobody has
+				// re-probed. lookup() never probes, so this cannot slow a
+				// broadcast down whatever the filesystem is doing.
+				if info, ok, stale := d.gitCache.lookup(cwd); ok {
+					if info.Branch != "" {
+						paneData["git_branch"] = info.Branch
+					}
+					if info.Detached {
+						paneData["git_detached"] = true
+					}
+					if info.LinkedWorktree {
+						paneData["git_worktree"] = true
+					}
+					if info.HasUpstream {
+						// Sent even at zero: "0 ahead, 0 behind" means in sync,
+						// which is a different statement from having no
+						// upstream to compare against.
+						paneData["git_upstream"] = true
+						paneData["git_ahead"] = info.Ahead
+						paneData["git_behind"] = info.Behind
+					}
+					if stale {
+						paneData["git_stale"] = true
+					}
+				}
 			}
 			paneData["cwd"] = cwd
 			if typ != "" && typ != "terminal" {
@@ -2128,10 +2542,28 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 		}
 	}
 
+	// []any (not []map[string]any, unlike tabList/paneList above): in-process
+	// callers (buildWorkspaceState's own tests, e.g.) read this key with a
+	// plain `.([]any)` assertion, matching what a JSON-decoded array becomes
+	// on the wire — so the Go-side value already carries that shape rather
+	// than the tabs/panes convention.
+	projectList := make([]any, 0, len(projects))
+	for _, p := range projects {
+		projectList = append(projectList, map[string]any{
+			"id":         p.ID,
+			"name":       p.Name,
+			"root_dir":   p.RootDir,
+			"tab_ids":    p.TabIDs,
+			"active_tab": p.ActiveTab,
+		})
+	}
+
 	return map[string]any{
-		"active_tab": activeTab,
-		"tabs":       tabList,
-		"panes":      paneList,
+		"active_tab":     activeTab,
+		"tabs":           tabList,
+		"panes":          paneList,
+		"projects":       projectList,
+		"active_project": activeProject,
 	}
 }
 
@@ -2609,13 +3041,10 @@ func resolveSpawnArgs(p *plugin.PanePlugin, pane *Pane, restoring bool, resumeID
 // directory. Symlinks are resolved so all callers see the canonical path.
 func (d *Daemon) defaultCWD() string {
 	if p := d.clientCWD.Load(); p != nil && *p != "" {
-		if info, err := os.Stat(*p); err == nil && info.IsDir() {
-			if resolved, err := filepath.EvalSymlinks(*p); err == nil {
-				return resolved
-			}
-			return *p
+		if dir := resolveSpawnDirWithin(*p, spawnDirProbeTimeout); dir != "" {
+			return dir
 		}
-		// stale (directory removed since attach) — fall through
+		// stale (directory removed since attach), or unreachable — fall through
 	}
 	// Best-effort; if Getwd fails we return "" and the spawn will fail
 	// with a clear error from os/exec rather than silently land somewhere.
@@ -3363,7 +3792,7 @@ func withExcerpt(e PaneEvent, excerpt string) PaneEvent {
 // a pane could in principle flip Pending→spawned between the two reads, but the
 // list is informational and the worst case is a momentarily stale flag.
 func (d *Daemon) buildPaneInfos() []ipc.PaneInfo {
-	_, tabs, panesByTab := d.session.SnapshotState()
+	_, tabs, panesByTab, _, _ := d.session.SnapshotState()
 
 	var panes []ipc.PaneInfo
 	for _, tab := range tabs {
@@ -3753,7 +4182,7 @@ func (d *Daemon) handleSwitchTabReq(conn *ipc.Conn, msg *ipc.Message) {
 }
 
 func (d *Daemon) handleListTabsReq(conn *ipc.Conn, msg *ipc.Message) {
-	activeTab, tabs, panesByTab := d.session.SnapshotState()
+	activeTab, tabs, panesByTab, _, _ := d.session.SnapshotState()
 
 	var tabInfos []ipc.TabInfo
 	for _, tab := range tabs {
@@ -3960,7 +4389,7 @@ func (d *Daemon) handleMemoryReportReq(conn *ipc.Conn, msg *ipc.Message) {
 	}
 	// Embed the current tab list so MCP callers don't need a second
 	// MsgListTabsReq round-trip just to map tab IDs to human names.
-	activeTab, tabs, panesByTab := d.session.SnapshotState()
+	activeTab, tabs, panesByTab, _, _ := d.session.SnapshotState()
 	resp.Tabs = make([]ipc.TabInfo, 0, len(tabs))
 	for _, tab := range tabs {
 		resp.Tabs = append(resp.Tabs, ipc.TabInfo{

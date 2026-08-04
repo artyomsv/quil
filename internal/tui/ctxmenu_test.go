@@ -122,7 +122,7 @@ func TestNextEnabled_SkipsDisabledAndWraps(t *testing.T) {
 func TestBuildCtxMenuItems_LabelsAndGates(t *testing.T) {
 	t.Parallel()
 	m := newSplitDragTestModel(t)
-	pane := m.tabs[0].Root.Left.Pane
+	pane := m.curTabs()[0].Root.Left.Pane
 	pane.Muted = true
 	pane.pinnedAttention = true
 
@@ -154,7 +154,7 @@ func TestBuildCtxMenuItems_LabelsAndGates(t *testing.T) {
 	if byID[ctxActFocus].label != "Enter focus mode" {
 		t.Errorf("focus label = %q, want Enter focus mode", byID[ctxActFocus].label)
 	}
-	m.tabs[0].ToggleFocus()
+	m.curTabs()[0].ToggleFocus()
 	items = m.buildCtxMenuItems(pane)
 	for _, it := range items {
 		if it.id == ctxActFocus && it.label != "Exit focus mode" {

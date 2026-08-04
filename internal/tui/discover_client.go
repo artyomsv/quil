@@ -162,7 +162,7 @@ func (m *Model) applyGitRepos(resp ipc.GitReposRespPayload, gen string) tea.Cmd 
 // tabByID finds a tab by id, or nil. Alt+G resolves its target twice — once to
 // ask, once to act — because a round trip sits between the two.
 func (m *Model) tabByID(id string) *TabModel {
-	for _, t := range m.tabs {
+	for _, t := range m.allTabs() {
 		if t != nil && t.ID == id {
 			return t
 		}

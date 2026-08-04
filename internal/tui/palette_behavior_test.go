@@ -173,13 +173,13 @@ func TestPalette_GoToPaneFocusesTarget(t *testing.T) {
 	if got.dialog != dialogNone {
 		t.Error("palette should close on execute")
 	}
-	if got.tabs[0].ActivePane != "p2" {
-		t.Errorf("ActivePane = %q, want p2", got.tabs[0].ActivePane)
+	if got.curTabs()[0].ActivePane != "p2" {
+		t.Errorf("ActivePane = %q, want p2", got.curTabs()[0].ActivePane)
 	}
-	if !got.tabs[0].Root.Right.Pane.Active {
+	if !got.curTabs()[0].Root.Right.Pane.Active {
 		t.Error("target pane should be marked active")
 	}
-	if got.tabs[0].Root.Left.Pane.Active {
+	if got.curTabs()[0].Root.Left.Pane.Active {
 		t.Error("previously-active pane should be cleared")
 	}
 }
@@ -299,29 +299,55 @@ func TestPalette_GoToPaneCrossTab(t *testing.T) {
 	m.notifications = NewNotificationCenter(30, 200)
 	p1 := NewPaneModel("p1", 1024)
 	p1.Active = true
-	m.tabs[0].Root = NewLeaf(p1)
-	m.tabs[0].ActivePane = "p1"
+	m.curTabs()[0].Root = NewLeaf(p1)
+	m.curTabs()[0].ActivePane = "p1"
 	p3 := NewPaneModel("p3", 1024)
-	m.tabs[1].Root = NewLeaf(p3)
-	m.tabs[1].ActivePane = "p3"
+	m.curTabs()[1].Root = NewLeaf(p3)
+	m.curTabs()[1].ActivePane = "p3"
 	m.width, m.height = 100, 40
-	m.tabs[0].Resize(100, 38)
-	m.tabs[1].Resize(100, 38)
+	m.curTabs()[0].Resize(100, 38)
+	m.curTabs()[1].Resize(100, 38)
 	m.dialog = dialogCommandPalette
 
 	updated, _ := m.executePaletteCommand(paletteCommand{action: palActGoToPane, arg: "p3", enabled: true})
 	got := updated.(Model)
-	if got.activeTab != 1 {
-		t.Errorf("activeTab = %d, want 1 (target tab)", got.activeTab)
+	if got.activeTabIdx() != 1 {
+		t.Errorf("activeTab = %d, want 1 (target tab)", got.activeTabIdx())
 	}
-	if got.tabs[1].ActivePane != "p3" {
-		t.Errorf("target tab ActivePane = %q, want p3", got.tabs[1].ActivePane)
+	if got.curTabs()[1].ActivePane != "p3" {
+		t.Errorf("target tab ActivePane = %q, want p3", got.curTabs()[1].ActivePane)
 	}
 	if !p3.Active {
 		t.Error("target pane should be marked active")
 	}
 	if p1.Active {
 		t.Error("previously-active pane on the old tab should be cleared")
+	}
+}
+
+// TestPalette_GoToPaneCrossProject verifies goToPane reaches a pane in a
+// BACKGROUND project — the same jumpToPane path setActivePaneMsg and
+// notification navigate now share — switching the active project as well as
+// the active tab, not just the tab within whatever project was active.
+func TestPalette_GoToPaneCrossProject(t *testing.T) {
+	t.Parallel()
+	m := twoProjectModel()
+	m.notifications = NewNotificationCenter(30, 200)
+	m.dialog = dialogCommandPalette
+	fgPane := m.curTabs()[0].Root.Pane
+	fgPane.Active = true
+
+	updated, _ := m.executePaletteCommand(paletteCommand{action: palActGoToPane, arg: "p-bg", enabled: true})
+	got := updated.(Model)
+
+	if got.activeProject != 1 {
+		t.Fatalf("activeProject = %d, want 1 (proj-bg)", got.activeProject)
+	}
+	if got.activeTabModel() == nil || got.activeTabModel().ActivePane != "p-bg" {
+		t.Fatal("target pane in the background project was not focused")
+	}
+	if fgPane.Active {
+		t.Error("previously-active pane in the OLD project should be cleared")
 	}
 }
 
@@ -342,7 +368,7 @@ func TestPalette_SwitchTabExecutes(t *testing.T) {
 	t.Parallel()
 	m := newSplitDragTestModel(t)
 	m.dialog = dialogCommandPalette
-	tabID := m.tabs[0].ID
+	tabID := m.curTabs()[0].ID
 	updated, _ := m.executePaletteCommand(paletteCommand{action: palActSwitchTab, arg: tabID, enabled: true})
 	if updated.(Model).dialog != dialogNone {
 		t.Error("palette should close after switch-tab")

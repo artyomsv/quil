@@ -195,6 +195,25 @@ unusable, since `knownDests` no longer lists the dest. `Update`'s
 `WorkspaceStateMsg` arm drops state from a dest `destConnected` rejects; that
 boundary is the only place that knows what the Model currently holds.
 
+**Sanitising is not bounding, and the form's message line needs both.** A
+remote daemon chooses its project names, and `sanitizeRemoteText` removes
+escapes without shortening anything — a megabyte of ordinary printable text
+survives it whole. That line is the one value-bearing row in the dialog with no
+truncation of its own and lipgloss WRAPS at the box width, so an unbounded name
+becomes thousands of rendered lines in every frame. The interpolated name is
+capped at `formMsgNameCap`; the render sanitises as well as the eight set
+sites, because the render is the one place guaranteed to run for every message
+and the ninth set site is the one somebody forgets.
+
+**The adopt path made an "unreachable" case reachable.** `submitProjectForm`
+drops its browse-pending gate on the stated grounds that an empty root dir is
+"a real answer for a CREATE and unreachable for a RENAME" — and adopting routes
+a create into `submitRenameProject`. `UpdateProject` has no unchanged-value
+guard, so an Enter pressed before the browse lands would have ERASED the
+adopted project's root. It substitutes the project's own root instead. Worth
+generalising: a comment that says a state is unreachable is a claim about every
+caller, so adding a caller means rechecking it.
+
 **Sanitize at RENDER, and before any width measurement.** A remote daemon names
 its own projects. `lipgloss.Width` measures an escape sequence as ZERO cells, so
 a truncation neither counts nor cuts it — a width check is not a sanitiser, and

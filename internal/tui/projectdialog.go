@@ -45,6 +45,11 @@ func projectFormMsgStyle(kind projectFormMsgKind) (string, lipgloss.Style) {
 	}
 }
 
+// formMsgNameCap bounds a remote-chosen project name interpolated into the
+// message line. Wide enough to identify the project the user must rename,
+// short enough that the line cannot wrap the box whatever the daemon sends.
+const formMsgNameCap = 32
+
 // setFormError / setFormBusy / setFormOK are the ONLY ways to put text on that
 // line. Assigning projectFormErr directly is what leaves the previous message's
 // colour behind — a failure rendered in the green of the success before it.
@@ -89,10 +94,29 @@ func (m *Model) submitNewProject(name, rootDir string) tea.Cmd {
 			// so they end up under the name the user chose instead of beside it
 			// as a "Default" they never asked for — which is the whole point,
 			// and is why this is an update rather than a create plus a move.
+			//
+			// An empty root keeps the project's OWN, rather than being passed
+			// through. submitProjectForm drops the browse-pending gate on the
+			// stated grounds that an empty root is "a real answer for a CREATE
+			// and unreachable for a RENAME" — routing a create into a rename is
+			// exactly what makes it reachable, and UpdateProject has no
+			// unchanged-value guard, so the adopted project's root would be
+			// ERASED by an Enter pressed before the browse lands.
+			if rootDir == "" {
+				rootDir = adoptable.RootDir
+			}
 			return m.submitRenameProject(adoptable.ID, name, rootDir)
 		case occupied != nil:
+			// The name is bounded as well as sanitised, and the two are
+			// different jobs: sanitising removes escapes, and a remote daemon
+			// can still choose a megabyte of ordinary printable text. This is
+			// the one value-bearing line in the dialog with no truncation of
+			// its own, and lipgloss WRAPS at the box width — so an unbounded
+			// name here becomes thousands of rendered lines in every frame.
 			m.setFormError(sanitizeRemoteText(hostLabel(m.projectFormDest)) +
-				" already has a project (" + sanitizeRemoteText(occupied.Name) + ") — rename it instead")
+				" already has a project (" +
+				truncateToWidth(sanitizeRemoteText(occupied.Name), formMsgNameCap) +
+				") — rename it instead")
 			return nil
 		}
 	}
@@ -664,7 +688,13 @@ func (m Model) submitProjectForm() (tea.Model, tea.Cmd) {
 	//
 	// Empty is a real answer for a CREATE (the daemon falls back to its own
 	// default CWD, as it does for a pane) and unreachable for a RENAME, which
-	// is what makes dropping the gate safe on both paths. Waiting instead made
+	// is what makes dropping the gate safe on both paths.
+	//
+	// The adopt path routes a CREATE into submitRenameProject, which would make
+	// empty reachable on a rename for the first time — so it substitutes the
+	// adopted project's own root rather than passing this value through.
+	// UpdateProject has no unchanged-value guard, so without that the project's
+	// root would be erased by an Enter pressed before the browse lands. Waiting instead made
 	// remote projects impossible to create and then to rename: the browse
 	// fires at a daemon connected seconds ago, and until it answered the
 	// button did nothing the user could see.
@@ -869,7 +899,13 @@ func (m Model) renderProjectDialog() string {
 
 	if m.projectFormErr != "" {
 		glyph, style := projectFormMsgStyle(m.projectFormMsgKind)
-		b.WriteString("  " + style.Render(glyph+" "+m.projectFormErr) + "\n\n")
+		// Sanitised HERE as well as at every set site, which is not redundant
+		// but the rule the package states: sanitise at RENDER, because this is
+		// the one place guaranteed to run for every message, while a set site
+		// is one of eight and the ninth is easy to add and easy to forget. It
+		// costs nothing when there is nothing to strip — sanitizeRemoteText
+		// returns the input unchanged without allocating.
+		b.WriteString("  " + style.Render(glyph+" "+sanitizeRemoteText(m.projectFormErr)) + "\n\n")
 	}
 
 	// Submit button.

@@ -443,7 +443,7 @@ func TestProjectForm_RemoteFlowSendsTheCreate(t *testing.T) {
 		t.Fatal("Space on the Remote row did not toggle it")
 	}
 
-	m.projectFormUser, m.projectFormHost = "artyom", "192.168.6.12"
+	m.projectFormUser, m.projectFormHost = "build", "gpu01"
 	// Enter on the Host row connects.
 	m.projectFormCursor = 3
 	tm, cmd := m.handleProjectDialogKey(tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -454,7 +454,7 @@ func TestProjectForm_RemoteFlowSendsTheCreate(t *testing.T) {
 	dialed := cmd()
 	tm, _ = m.Update(dialed)
 	m = tm.(Model)
-	if m.projectFormDest != "artyom@192.168.6.12" {
+	if m.projectFormDest != "build@gpu01" {
 		t.Fatalf("projectFormDest = %q after a successful dial", m.projectFormDest)
 	}
 

@@ -67,6 +67,70 @@ func TestRemoteProjectNameIsNeutralisedOnEveryRenderPath(t *testing.T) {
 		p.Type = "terminal"
 		assertNeutralised(t, "the palette pane label", formatPaneNav(0, 0, p, hostileName))
 	})
+
+	// The fifth path this test was written to expect: the form's message line
+	// names the project already on a host, and a remote daemon chose that name.
+	t.Run("form message line", func(t *testing.T) {
+		m := &Model{
+			width: 100, height: 30, dialog: dialogProjectNew,
+			client:          NewRouter(map[string]Client{"": newFakeConn(), "gpu01": newFakeConn()}),
+			projects:        []*ProjectModel{{ID: "proj-1", Name: hostileName, Dest: "gpu01"}},
+			projectFormDest: "gpu01",
+		}
+		// Drive the real refusal rather than assigning the field, so the test
+		// covers the path a user reaches instead of one the test invents.
+		m.submitNewProject("infra", "/srv/infra")
+		if m.projectFormErr == "" {
+			t.Fatal("the create was not refused, so the message under test never rendered")
+		}
+		assertNeutralised(t, "the project form's message line", m.renderProjectDialog())
+	})
+}
+
+// The render site sanitises too, and this is what pins it.
+//
+// Every writer of the message line sanitises today, so a test driving a real
+// refusal passes whether or not the render site does — the redundancy is
+// invisible to it. This assigns the field DIRECTLY, which is precisely the
+// ninth set site somebody adds later without the call: the render is the one
+// place guaranteed to run for every message, so it is the one that must not
+// trust its input.
+func TestProjectFormMessage_RenderSanitisesUnconditionally(t *testing.T) {
+	m := &Model{width: 100, height: 30, dialog: dialogProjectNew}
+	m.projectFormErr = hostileName // a set site that forgot
+
+	assertNeutralised(t, "the project form's message line", m.renderProjectDialog())
+}
+
+// A remote daemon can choose a project name of any length, and sanitising does
+// not bound one — a megabyte of ordinary printable text survives it intact.
+// The message line is the one value-bearing row in the dialog with no
+// truncation of its own, and lipgloss WRAPS at the box width, so an unbounded
+// name becomes thousands of rendered lines in every frame until the client is
+// unusable.
+func TestProjectFormMessage_BoundsARemoteName(t *testing.T) {
+	m := &Model{
+		width: 100, height: 30, dialog: dialogProjectNew,
+		client: NewRouter(map[string]Client{"": newFakeConn(), "gpu01": newFakeConn()}),
+		projects: []*ProjectModel{
+			{ID: "proj-1", Name: strings.Repeat("A", 100_000), Dest: "gpu01"},
+		},
+		projectFormDest: "gpu01",
+	}
+
+	m.submitNewProject("infra", "/srv/infra")
+
+	if m.projectFormErr == "" {
+		t.Fatal("the create was not refused, so nothing was rendered")
+	}
+	if n := len(m.projectFormErr); n > 200 {
+		t.Errorf("the message is %d bytes — the remote name was interpolated "+
+			"unbounded, and lipgloss will wrap it across the whole frame", n)
+	}
+	if lines := strings.Count(m.renderProjectDialog(), "\n"); lines > 100 {
+		t.Errorf("the dialog rendered %d lines; a remote project name should not "+
+			"be able to grow the frame", lines)
+	}
 }
 
 // TestRenameKeepsTheRawNameInState: sanitizing must happen at render only. The

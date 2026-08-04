@@ -290,10 +290,16 @@ type Model struct {
 	// a different project — and Alt+O would then move the user to another
 	// daemon's work without touching a key that says so. An ID that no longer
 	// resolves is a visible no-op, which is the honest failure.
-	prevProject          string
-	width                int
-	height               int
-	client               tuiClient
+	prevProject string
+	width       int
+	height      int
+	client      tuiClient
+	// inputCh is the ordered PTY-input queue feeding inputForwarder. Wire order
+	// is fixed when bytes are pushed here (synchronously, on the Update
+	// goroutine), NOT when they reach the socket — see forwardInputBytes.
+	// inputDone stops the forwarder on TUI exit (StopInputForwarder).
+	inputCh              chan paneInput
+	inputDone            chan struct{}
 	clientGen            int          // bumped on every client swap; see linkLostMsg for why
 	closeClientFn        func(Client) // releases a connection; see SetClientCloser
 	cfg                  config.Config
@@ -578,7 +584,7 @@ type Model struct {
 	// is every test Model.
 	dialDestFn    DialFunc
 	installDestFn InstallFunc
-	redialDestFn func(dest string) RedialFunc
+	redialDestFn  func(dest string) RedialFunc
 }
 
 // RemoteMode reports whether the daemon behind the ACTIVE project lives on
@@ -641,6 +647,8 @@ func NewModel(client Client, cfg config.Config, version string, registry *plugin
 		tabDragFromIdx:   -1,
 		sidebarOpen:      cfg.UI.SidebarOpen,
 		sidebarWidth:     cfg.UI.SidebarWidth,
+		inputCh:          make(chan paneInput, inputForwardBuffer),
+		inputDone:        make(chan struct{}),
 	}
 	// Migration dialog takes priority over the disclaimer — it blocks
 	// startup until all stale plugins are resolved. Show disclaimer only
@@ -684,6 +692,7 @@ func (m Model) ApplyUpdateRequested() bool { return m.applyUpdateOnExit }
 func (m Model) Init() tea.Cmd {
 	log.Print("TUI Init — starting listener")
 	startUpdateWatchdog(defaultWatchdogConfig())
+	go m.inputForwarder()
 	return tea.Batch(m.listenForMessages(), memoryTickCmd(), sizePollTick())
 }
 
@@ -5419,23 +5428,147 @@ func (m Model) tryPluginRawKey(key string, keyMsg tea.KeyPressMsg) []byte {
 	return nil
 }
 
-func (m Model) forwardInputBytes(data []byte) tea.Cmd {
-	return func() tea.Msg {
-		tab := m.activeTabModel()
-		if tab == nil {
-			return nil
-		}
-		pane := tab.ActivePaneModel()
-		if pane == nil {
-			return nil
-		}
+// paneInput is one ordered chunk of PTY-bound input for a pane. Both the pane
+// and its OWNING DAEMON are resolved synchronously on the Update goroutine at
+// enqueue time. The pane, so a later active-pane change cannot misroute
+// already-typed bytes; the dest, because destOfPane walks m.projects, which the
+// Update goroutine rebuilds on every workspace broadcast — resolving it on the
+// forwarder goroutine would be a data race, and a stale answer would type into
+// another machine's pane.
+type paneInput struct {
+	dest   string
+	paneID string
+	data   []byte
+}
 
-		msg, _ := ipc.NewMessage(ipc.MsgPaneInput, ipc.PaneInputPayload{
-			PaneID: pane.ID,
-			Data:   data,
-		})
-		m.sendForPane(pane.ID, msg)
+// inputForwardBuffer bounds the ordered input queue between the Update loop and
+// inputForwarder. Generous because client.Send is non-blocking (it queues onto
+// the conn's own send buffer), so the forwarder drains far faster than a human
+// types — the buffer only absorbs brief bursts (e.g. a fast key-repeat).
+const inputForwardBuffer = 1024
+
+// forwardInputBytes queues keystroke bytes for the active pane's PTY.
+//
+// It returns a nil tea.Cmd on purpose, and that is the whole fix. This used to
+// return a Cmd that did the send inside it; Bubble Tea runs every Cmd on its own
+// goroutine with no inter-Cmd ordering (tea.go handleCommands: go func(){
+// p.Send(cmd()) }), so one goroutine per keystroke raced to the socket. The
+// window is normally nanoseconds, but under scheduler starvation it widens to
+// milliseconds and adjacent keys swap — typing "image containers" arrives as
+// "iamg ecotniaesnr", the same characters in the wrong order. A Cmd buys nothing
+// here (client.Send is already non-blocking) and costs ordering.
+func (m Model) forwardInputBytes(data []byte) tea.Cmd {
+	if len(data) == 0 {
+		// Bare modifiers and unencodable keys produce no PTY bytes — skip the
+		// enqueue and the useless zero-length frame. (Live callers already
+		// pre-filter nil, but this keeps the entry point self-defending.)
 		return nil
+	}
+	tab := m.activeTabModel()
+	if tab == nil {
+		return nil
+	}
+	pane := tab.ActivePaneModel()
+	if pane == nil {
+		return nil
+	}
+	m.enqueueInput(pane.ID, data)
+	return nil
+}
+
+// enqueueInput hands ordered PTY-input bytes to inputForwarder. EVERY producer
+// of MsgPaneInput goes through here — keystrokes, wheel notches and paste all
+// land on the same PTY stdin, so a direct send from any one of them could
+// overtake bytes still queued from another.
+//
+// When the forwarder channel is absent — unit tests construct Model literally,
+// and there is a brief pre-Init window — it falls back to a direct synchronous
+// send, which also preserves order because the caller is single-threaded. Both
+// paths fix wire order on the calling goroutine.
+//
+// The channel send blocks if the 1024-deep buffer ever fills. That is by design:
+// dropping a keystroke silently corrupts the very input stream this whole change
+// exists to keep correct, so we prefer momentary backpressure over loss. A full
+// buffer is only reachable if inputForwarder stops draining, which it cannot —
+// client.Send is non-blocking and forwardOne recovers from any panic, so the
+// drainer is immortal and drains far faster than a human types.
+//
+// CONTRACT: data must not be mutated after the call. Every producer allocates a
+// fresh slice (keyToBytes, wheelForwardSeq, pastePayload), and the forwarder
+// marshals it on its own goroutine.
+func (m Model) enqueueInput(paneID string, data []byte) {
+	if len(data) == 0 || paneID == "" {
+		return
+	}
+	dest := m.destOfPane(paneID)
+	if m.inputCh == nil {
+		m.sendPaneInput(dest, paneID, data)
+		return
+	}
+	m.inputCh <- paneInput{dest: dest, paneID: paneID, data: data}
+}
+
+// sendPaneInput marshals and sends one MsgPaneInput frame to an ALREADY-RESOLVED
+// destination. It deliberately takes dest rather than calling sendForPane: the
+// forwarder goroutine must not walk m.projects (see paneInput). client.Send is
+// non-blocking (the frame is queued on the conn's own send buffer), so this
+// never stalls its caller.
+func (m Model) sendPaneInput(dest, paneID string, data []byte) {
+	msg, err := ipc.NewMessage(ipc.MsgPaneInput, ipc.PaneInputPayload{
+		PaneID: paneID,
+		Data:   data,
+	})
+	if err != nil {
+		log.Printf("pane input encode: %v", err)
+		return
+	}
+	if err := m.sendForDest(dest, msg); err != nil {
+		log.Printf("pane input send: %v", err)
+	}
+}
+
+// inputForwarder drains the ordered input queue and forwards each entry in FIFO
+// order. A single goroutine draining one channel means typed order is wire order.
+//
+// Lifecycle: started once in Init, stopped via StopInputForwarder on TUI exit
+// (after tea.Program.Run returns, when the Update goroutine is gone). This
+// matches the codebase's other connection-lifetime goroutines (idleChecker,
+// hookEventsWatcher). The select over inputDone gives it the explicit shutdown
+// path go-conventions wants; inputCh itself is never closed (the Update
+// goroutine may still reference it, so closing would risk a send-on-closed
+// panic) — closing inputDone is the clean stop signal instead.
+func (m Model) inputForwarder() {
+	for {
+		select {
+		case <-m.inputDone:
+			return
+		case in := <-m.inputCh:
+			m.forwardOne(in)
+		}
+	}
+}
+
+// forwardOne sends a single queued entry, isolating each send in its own recover
+// scope. Without this, a panic anywhere under sendPaneInput would kill the sole
+// drainer; the 1024 buffer would then fill and every subsequent keystroke would
+// deadlock the blocking enqueue in Update — a silent, total input freeze.
+// Recovering per-entry keeps the drainer immortal.
+func (m Model) forwardOne(in paneInput) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("inputForwarder: recovered forwarding to pane %s: %v", in.paneID, r)
+		}
+	}()
+	m.sendPaneInput(in.dest, in.paneID, in.data)
+}
+
+// StopInputForwarder signals inputForwarder to exit. Safe to call once, after
+// tea.Program.Run has returned (the Update goroutine is then gone, so no further
+// enqueue can race the close). No-op when the channel was never created (tests
+// that construct Model literally). Wired from main.go's TUI-exit path.
+func (m Model) StopInputForwarder() {
+	if m.inputDone != nil {
+		close(m.inputDone)
 	}
 }
 
@@ -5483,11 +5616,7 @@ func (m Model) pasteClipboard() tea.Cmd {
 		// the shell treats newlines as literal text, not as Enter presses.
 		data := pastePayload(pane, text)
 		logger.Debug("pasteClipboard: sending %d bytes to pane %s", len(data), pane.ID)
-		msg, _ := ipc.NewMessage(ipc.MsgPaneInput, ipc.PaneInputPayload{
-			PaneID: pane.ID,
-			Data:   data,
-		})
-		m.sendForPane(pane.ID, msg)
+		m.enqueueInput(pane.ID, data)
 		// Wait for PTY echo to arrive before triggering re-render
 		time.Sleep(100 * time.Millisecond)
 		return pasteRefreshMsg{}
@@ -5845,17 +5974,10 @@ func pastePayload(pane *PaneModel, text string) []byte {
 // sendInputToPane writes raw bytes to a specific pane's PTY stdin via IPC.
 // Used to forward encoded mouse-wheel events to mouse-tracking apps.
 func (m Model) sendInputToPane(paneID string, data []byte) {
-	if len(data) == 0 || paneID == "" {
-		return
-	}
-	// NewMessage only fails if the fixed PaneInputPayload struct can't marshal
-	// (it always can); Send errors are transient and non-actionable here — a
-	// dropped wheel notch is cosmetic, matching the other m.client.Send sites.
-	msg, _ := ipc.NewMessage(ipc.MsgPaneInput, ipc.PaneInputPayload{
-		PaneID: paneID,
-		Data:   data,
-	})
-	_ = m.sendForPane(paneID, msg)
+	// A wheel notch is PTY input like any other — a tracking app reads it off
+	// the same stdin as typed keys — so it rides the ordered queue rather than
+	// going straight to the client, where it could overtake queued keystrokes.
+	m.enqueueInput(paneID, data)
 }
 
 // sendClipboardToPane sends pasted text to the active pane as PTY input,
@@ -5877,11 +5999,7 @@ func (m Model) sendClipboardToPane(text string) {
 	if pane == nil {
 		return
 	}
-	msg, _ := ipc.NewMessage(ipc.MsgPaneInput, ipc.PaneInputPayload{
-		PaneID: pane.ID,
-		Data:   pastePayload(pane, text),
-	})
-	m.sendForPane(pane.ID, msg)
+	m.enqueueInput(pane.ID, pastePayload(pane, text))
 }
 
 func keyToBytes(keyMsg tea.KeyPressMsg) []byte {

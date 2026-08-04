@@ -653,6 +653,7 @@ func launchTUI() {
 	// Save window size and config changes for next launch
 	if m, ok := finalModel.(tui.Model); ok {
 		m.FlushNotes()
+		m.StopInputForwarder()
 		// Release the connection the Model actually holds. The deferred
 		// client.Close() above only knows about the startup client, so after a
 		// reconnect it closes a corpse and leaves the live ssh child running.

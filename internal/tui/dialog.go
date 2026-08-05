@@ -2989,7 +2989,8 @@ func enforceToggleGroups(toggles []plugin.Toggle, states []bool, winner int) {
 
 // setupFieldCount returns the number of focusable fields in the setup dialog:
 // CWD (if PromptsCWD) + kube context (if discover="kube") + one per toggle +
-// session picker (if sessions="claude") + 1 for the Continue button.
+// worktree picker (if PromptsCWD) + session picker (if sessions="claude") + 1
+// for the Continue button.
 func (m Model) setupFieldCount(p *plugin.PanePlugin) int {
 	n := len(p.Command.Toggles) + 1 // +1 for Continue
 	if p.Command.PromptsCWD {
@@ -2998,6 +2999,9 @@ func (m Model) setupFieldCount(p *plugin.PanePlugin) int {
 	if p.Command.Discover == "kube" {
 		n++
 	}
+	if p.Command.PromptsCWD {
+		n++ // the worktree field, scoped to the CWD above it
+	}
 	if p.Command.Sessions == "claude" {
 		n++
 	}
@@ -3005,13 +3009,15 @@ func (m Model) setupFieldCount(p *plugin.PanePlugin) int {
 }
 
 // setupFieldKind reports what field is at the given cursor index in the setup
-// dialog. Returns "cwd", "kube", "toggle" (with toggleIdx), "session", or
-// "continue".
+// dialog. Returns "cwd", "kube", "toggle" (with toggleIdx), "worktree",
+// "session", or "continue".
 //
-// Order is CWD → kube → toggles → session → Continue. The session picker stays
-// downstream of the CWD field because its contents are scoped to that directory,
-// and sits last because it is the only field that expands: keeping it below the
-// fixed-height rows means focusing it does not shift them.
+// Order is CWD → kube → toggles → worktree → session → Continue. The worktree
+// picker stays downstream of CWD because its contents are scoped to that
+// directory, and upstream of the session picker because the session listing is
+// scoped to whichever directory the worktree choice settles on. The session
+// picker sits last because it is the only field that expands: keeping it below
+// the fixed-height rows means focusing it does not shift them.
 func (m Model) setupFieldKind(p *plugin.PanePlugin, cursor int) (kind string, toggleIdx int) {
 	i := cursor
 	if p.Command.PromptsCWD {
@@ -3030,6 +3036,12 @@ func (m Model) setupFieldKind(p *plugin.PanePlugin, cursor int) (kind string, to
 		return "toggle", i
 	}
 	i -= len(p.Command.Toggles)
+	if p.Command.PromptsCWD {
+		if i == 0 {
+			return "worktree", -1
+		}
+		i--
+	}
 	if p.Command.Sessions == "claude" {
 		if i == 0 {
 			return "session", -1
@@ -3582,6 +3594,134 @@ func (m Model) renderSetupSessionField(focused bool) string {
 	return b.String()
 }
 
+// renderSetupWorktreeField draws the worktree picker.
+//
+// Collapsed to one summary line while unfocused, for the reason the session
+// field is: a dialog already carrying a directory browser must not grow a
+// second full-height list for a field most panes never touch.
+//
+// Four states render DIFFERENTLY on purpose. A scan still in flight showing
+// "no worktrees" is a confidently wrong answer, and "this is not a
+// repository" is a different fact from "the scan failed" — only one of them
+// justifies telling the user there is nothing here.
+func (m Model) renderSetupWorktreeField(focused bool) string {
+	var b strings.Builder
+	label := "  Worktree"
+	if focused {
+		label = "> Worktree"
+	}
+
+	switch {
+	case m.worktrees.pending:
+		b.WriteString(dialogNormal.Render(label + "    scanning…"))
+		return b.String()
+	case !m.worktrees.loaded:
+		b.WriteString(dialogSubtle.Render(label + "    —"))
+		return b.String()
+	case m.worktrees.err != "":
+		b.WriteString(dialogNormal.Render(label + "    "))
+		b.WriteString(dialogSubtle.Render(truncateToWidth(
+			sanitizeRemoteText(m.worktrees.err), m.setupTextWidth()-12)))
+		return b.String()
+	case !m.worktrees.repo:
+		b.WriteString(dialogSubtle.Render(label + "    not a git repository"))
+		return b.String()
+	}
+
+	if !focused {
+		summary := "off"
+		if m.selectedWorktree != "" {
+			summary = sanitizeRemoteText(worktreeLabel(m.worktrees.list, m.selectedWorktree))
+		}
+		b.WriteString(dialogNormal.Render(label + "    " + truncateToWidth(summary, m.setupTextWidth()-12)))
+		return b.String()
+	}
+
+	b.WriteString(dialogNormal.Render(label))
+	b.WriteString("\n")
+	rows := m.worktreeRows()
+	visible := m.worktreeVisibleRows()
+	start := m.worktreeScroll
+	end := start + visible
+	if end > len(rows) {
+		end = len(rows)
+	}
+	for i := start; i < end; i++ {
+		mark := "    "
+		if i == m.worktreeCursor {
+			mark = "  > "
+		} else if rows[i].path == m.selectedWorktree {
+			mark = setupRowIdleMark
+		}
+		text := sanitizeRemoteText(rows[i].label)
+		if rows[i].disabled {
+			b.WriteString(dialogSubtle.Render(mark + truncateToWidth(text, m.setupTextWidth()-4)))
+		} else {
+			b.WriteString(dialogNormal.Render(mark + truncateToWidth(text, m.setupTextWidth()-4)))
+		}
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// worktreeRow is one selectable line: row 0 is always "off".
+type worktreeRow struct {
+	label    string
+	path     string // "" for the off row
+	disabled bool
+}
+
+// worktreeRows builds the field's rows. The MAIN checkout is excluded: it is
+// not a worktree to attach to, it is the directory the CWD field already
+// chose. Locked and prunable entries are shown but refused, so the user learns
+// why a row is unavailable rather than wondering where it went.
+func (m Model) worktreeRows() []worktreeRow {
+	rows := []worktreeRow{{label: "off — use the directory above", path: ""}}
+	for _, w := range m.worktrees.list {
+		if w.Main {
+			continue
+		}
+		name := w.Branch
+		if name == "" {
+			name = "(detached)"
+		}
+		row := worktreeRow{label: name + "  " + w.Path, path: w.Path}
+		switch {
+		case w.Prunable:
+			row.label, row.disabled = name+"  (directory is gone)", true
+		case w.Locked:
+			row.label, row.disabled = name+"  (locked)", true
+		}
+		rows = append(rows, row)
+	}
+	return rows
+}
+
+// worktreeLabel resolves a stored path back to its display name for the
+// collapsed summary.
+func worktreeLabel(list []ipc.WorktreeInfo, path string) string {
+	for _, w := range list {
+		if w.Path == path {
+			if w.Branch != "" {
+				return w.Branch
+			}
+			return w.Path
+		}
+	}
+	return path
+}
+
+// worktreeVisibleRows caps the worktree list. Task 5 replaces this body with
+// the version that shares one height budget with the session field.
+func (m Model) worktreeVisibleRows() int {
+	return worktreeListVisibleRows
+}
+
+const (
+	worktreeListVisibleRows = 6
+	worktreeListMinRows     = 1
+)
+
 // renderSessionDetail draws the info panel that replaces the list while it is
 // open. Sized against the same row budget the list uses, so opening it does not
 // change the dialog's height.
@@ -4117,6 +4257,15 @@ func (m Model) renderCreatePaneSetupDialog() string {
 			lineStyle = dialogSelected
 		}
 		b.WriteString(prefix + lineStyle.Render(box+" "+t.Label) + "\n")
+		fieldIdx++
+	}
+
+	// Downstream of the toggles and upstream of the session field: the
+	// worktree choice scopes what directory the session listing (if any) is
+	// read from.
+	if p.Command.PromptsCWD {
+		b.WriteByte('\n')
+		b.WriteString(m.renderSetupWorktreeField(cursor == fieldIdx))
 		fieldIdx++
 	}
 

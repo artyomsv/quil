@@ -421,6 +421,9 @@ type Model struct {
 	repoScan          repoScanState           // in-flight git discovery — Alt+G overlay or setup-dialog pick list (zero value = none)
 	browse            browseState             // in-flight directory-browser request (zero value = none)
 	worktrees         worktreeState           // create-pane dialog's worktree listing
+	selectedWorktree  string                  // chosen worktree PATH; "" = off (spawn in the CWD field's directory)
+	worktreeCursor    int                     // row cursor in the worktree field's expanded list; row 0 = "off"
+	worktreeScroll    int                     // scroll offset for the visible window of the expanded worktree list
 	reqGen            int                     // monotonic instance id source for repoScan/browse/worktrees; see nextReqGen
 	sessionScanCWD    string                  // directory sessionRows belong to
 	sessionState      sessionScanState        // request lifecycle for the session field

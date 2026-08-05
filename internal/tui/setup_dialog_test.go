@@ -49,7 +49,7 @@ func TestSetupFieldKind_AndCount(t *testing.T) {
 			p: &plugin.PanePlugin{Command: plugin.CommandConfig{
 				PromptsCWD: true,
 			}},
-			want: want{count: 2, kinds: []string{"cwd", "continue"}},
+			want: want{count: 3, kinds: []string{"cwd", "worktree", "continue"}},
 		},
 		{
 			name: "one toggle only",
@@ -64,7 +64,7 @@ func TestSetupFieldKind_AndCount(t *testing.T) {
 				PromptsCWD: true,
 				Toggles:    []plugin.Toggle{{Name: "a"}, {Name: "b"}},
 			}},
-			want: want{count: 4, kinds: []string{"cwd", "toggle", "toggle", "continue"}},
+			want: want{count: 5, kinds: []string{"cwd", "toggle", "toggle", "worktree", "continue"}},
 		},
 	}
 
@@ -81,6 +81,46 @@ func TestSetupFieldKind_AndCount(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// The field is ALWAYS present for a prompts_cwd plugin, never conditionally
+// inserted. setupFieldCount/setupFieldKind are pure functions of the plugin;
+// making the row count depend on whether the browsed directory is a repository
+// changes it WHILE the dialog is open, stranding the cursor on a field that no
+// longer exists.
+func TestSetupFieldCount_WorktreeRowAlwaysPresent(t *testing.T) {
+	m := Model{}
+	p := &plugin.PanePlugin{}
+	p.Command.PromptsCWD = true
+
+	// cwd + worktree + continue
+	if got := m.setupFieldCount(p); got != 3 {
+		t.Fatalf("setupFieldCount = %d, want 3", got)
+	}
+	if kind, _ := m.setupFieldKind(p, 1); kind != "worktree" {
+		t.Errorf("field 1 = %q, want worktree", kind)
+	}
+	if kind, _ := m.setupFieldKind(p, 2); kind != "continue" {
+		t.Errorf("field 2 = %q, want continue", kind)
+	}
+}
+
+// Order is CWD -> kube -> toggles -> worktree -> session -> Continue. The
+// worktree field is downstream of CWD because its contents are scoped to that
+// directory, and upstream of session because the session listing is scoped to
+// whichever directory the worktree choice settles on.
+func TestSetupFieldKind_WorktreeSitsBetweenTogglesAndSession(t *testing.T) {
+	m := Model{}
+	p := &plugin.PanePlugin{}
+	p.Command.PromptsCWD = true
+	p.Command.Sessions = "claude"
+
+	if kind, _ := m.setupFieldKind(p, 1); kind != "worktree" {
+		t.Errorf("field 1 = %q, want worktree", kind)
+	}
+	if kind, _ := m.setupFieldKind(p, 2); kind != "session" {
+		t.Errorf("field 2 = %q, want session", kind)
 	}
 }
 
@@ -861,7 +901,7 @@ default = false
 		}
 	}
 
-	t.Run("tab advances field cursor across CWD → toggle → Continue", func(t *testing.T) {
+	t.Run("tab advances field cursor across CWD → toggle → worktree → Continue", func(t *testing.T) {
 		m := freshModel()
 		// CWD → toggle
 		next, _ := m.handleCreatePaneSetupKey(tea.KeyPressMsg{Code: tea.KeyTab})
@@ -870,12 +910,19 @@ default = false
 		if kind != "toggle" {
 			t.Errorf("after tab from cwd: kind = %q, want toggle", kind)
 		}
-		// toggle → Continue
+		// toggle → worktree
+		next, _ = m.handleCreatePaneSetupKey(tea.KeyPressMsg{Code: tea.KeyTab})
+		m = next.(Model)
+		kind, _ = m.setupFieldKind(r.Get("claude-code"), m.setupFieldCursor)
+		if kind != "worktree" {
+			t.Errorf("after tab from toggle: kind = %q, want worktree", kind)
+		}
+		// worktree → Continue
 		next, _ = m.handleCreatePaneSetupKey(tea.KeyPressMsg{Code: tea.KeyTab})
 		m = next.(Model)
 		kind, _ = m.setupFieldKind(r.Get("claude-code"), m.setupFieldCursor)
 		if kind != "continue" {
-			t.Errorf("after tab from toggle: kind = %q, want continue", kind)
+			t.Errorf("after tab from worktree: kind = %q, want continue", kind)
 		}
 		// Continue → wrap to CWD
 		next, _ = m.handleCreatePaneSetupKey(tea.KeyPressMsg{Code: tea.KeyTab})
@@ -931,7 +978,7 @@ default = false
 
 	t.Run("enter on Continue submits", func(t *testing.T) {
 		m := freshModel()
-		m.setupFieldCursor = 2 // Continue button
+		m.setupFieldCursor = 3 // Continue button (cwd, toggle, worktree, continue)
 		next, _ := m.handleCreatePaneSetupKey(tea.KeyPressMsg{Code: tea.KeyEnter})
 		m = next.(Model)
 		if m.dialog != dialogCreatePane {

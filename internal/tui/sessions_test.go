@@ -35,10 +35,10 @@ func TestSetupFieldKind_SessionAfterCWDAndToggles(t *testing.T) {
 	m := Model{}
 	p := claudeLikePlugin()
 
-	if got, want := m.setupFieldCount(p), 5; got != want {
-		t.Fatalf("setupFieldCount = %d, want %d (cwd, 2 toggles, session, continue)", got, want)
+	if got, want := m.setupFieldCount(p), 6; got != want {
+		t.Fatalf("setupFieldCount = %d, want %d (cwd, 2 toggles, worktree, session, continue)", got, want)
 	}
-	wantKinds := []string{"cwd", "toggle", "toggle", "session", "continue"}
+	wantKinds := []string{"cwd", "toggle", "toggle", "worktree", "session", "continue"}
 	for i, want := range wantKinds {
 		if kind, _ := m.setupFieldKind(p, i); kind != want {
 			t.Errorf("kind at index %d = %q, want %q", i, kind, want)
@@ -56,10 +56,10 @@ func TestSetupFieldKind_NoSessionFieldWhenNotDeclared(t *testing.T) {
 	m := Model{}
 	p := &plugin.PanePlugin{Command: plugin.CommandConfig{PromptsCWD: true}}
 
-	if got, want := m.setupFieldCount(p), 2; got != want {
+	if got, want := m.setupFieldCount(p), 3; got != want {
 		t.Fatalf("setupFieldCount = %d, want %d", got, want)
 	}
-	for i, want := range []string{"cwd", "continue"} {
+	for i, want := range []string{"cwd", "worktree", "continue"} {
 		if kind, _ := m.setupFieldKind(p, i); kind != want {
 			t.Errorf("kind at index %d = %q, want %q", i, kind, want)
 		}
@@ -325,7 +325,7 @@ func TestHandleCreatePaneSetupKey_TabToSessionFieldScans(t *testing.T) {
 	m := renderableSessionModel(t)
 	m.sessionScanCWD = "" // nothing scanned yet
 	m.sessionState = sessionScanIdle
-	m.setupFieldCursor = 0 // on the CWD field
+	m.setupFieldCursor = 1 // on the worktree field, one Tab from session (cwd, worktree, session, continue)
 
 	next, cmd := m.handleCreatePaneSetupKey(tea.KeyPressMsg{Code: tea.KeyTab})
 	got := next.(Model)
@@ -350,7 +350,7 @@ func sessionKeyModel(t *testing.T, rows ...ipc.ClaudeSessionInfo) (Model, *plugi
 	t.Helper()
 	m := renderableSessionModel(t, rows...)
 	p := m.pluginRegistry.Get("ai")
-	m.setupFieldCursor = 1 // cwd = 0, session = 1
+	m.setupFieldCursor = 2 // cwd = 0, worktree = 1, session = 2
 	if kind, _ := m.setupFieldKind(p, m.setupFieldCursor); kind != "session" {
 		t.Fatalf("cursor is on %q, want the session field", kind)
 	}
@@ -652,7 +652,7 @@ func longTitleSessionModel(t *testing.T) Model {
 		sessionRow("s3", "test me ai project, ingestion mailbox scheduled processing rewrite", ""),
 	)
 	m.createPaneStep = 2
-	m.setupFieldCursor = 1 // the session field (0 is the CWD browser)
+	m.setupFieldCursor = 2 // the session field (0 = CWD browser, 1 = worktree)
 	m.height = 60
 	return m
 }

@@ -81,8 +81,15 @@ body::after {
   z-index: 2;
 }
 
-/* Keep content above the scanline / vignette overlays */
-main, header.site-header, footer.site-footer {
+/* Keep content above the scanline / vignette overlays.
+   The header is deliberately NOT in this list: it carries its own
+   `position: sticky; z-index: 40` below, and `header.site-header` here
+   would outrank that (0,1,1 vs 0,1,0) whatever the source order —
+   demoting the header to a z-index 3 tie with `main`. `main` then paints
+   last and swallows clicks on the compare dropdown, which hangs out of
+   the header into main's box and so stays visible while going dead.
+   Guarded by scripts/check-header-stacking.mjs. */
+main, footer.site-footer {
   position: relative;
   z-index: 3;
 }

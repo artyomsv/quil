@@ -287,11 +287,18 @@ type UpdateProjectPayload struct {
 // the one-project-per-host rule is the CLIENT's (Project has no Dest field), so
 // a daemon-side "fold everything" would be wrong on the local machine, where
 // several projects are expected.
+//
+// There is deliberately NO RootDir. A fold renames and absorbs; it does not
+// relocate. The survivor already has a root somebody chose, while the form field
+// that would supply one holds — in the ordinary case — whatever the dialog's own
+// opening browse resolved, since that request carries an empty path and the
+// daemon answers with its default CWD. Carrying it would overwrite a deliberate
+// value with an artifact on nearly every fold. Changing a project's root is what
+// MsgUpdateProject is for, from a dialog seeded with the project's own.
 type MergeProjectsPayload struct {
 	ProjectID string   `json:"project_id"`
 	Absorb    []string `json:"absorb"`
 	Name      string   `json:"name"`
-	RootDir   string   `json:"root_dir"`
 }
 
 type SwitchProjectPayload struct {

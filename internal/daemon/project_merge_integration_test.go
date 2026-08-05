@@ -37,7 +37,6 @@ func TestMergeProjects_SurvivesTheWireAndARestart(t *testing.T) {
 		ProjectID: keep.ID,
 		Absorb:    []string{dupA.ID, dupB.ID},
 		Name:      "cluster-management",
-		RootDir:   "/home/a/homelab",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -56,8 +55,11 @@ func TestMergeProjects_SurvivesTheWireAndARestart(t *testing.T) {
 	if len(projects[0].TabIDs) != 3 {
 		t.Errorf("survivor holds %d tabs, want all 3", len(projects[0].TabIDs))
 	}
-	if projects[0].RootDir != "/home/a/homelab" {
-		t.Errorf("RootDir = %q, want the value the payload carried", projects[0].RootDir)
+	// Untouched: the payload carries no root, so a fold cannot relocate a
+	// project. Asserted through the REAL wire because the field's absence is the
+	// guarantee — a payload that regrew one would be applied here.
+	if projects[0].RootDir != "/home/a/.quil" {
+		t.Errorf("RootDir = %q, want the survivor's own, unchanged", projects[0].RootDir)
 	}
 
 	// The handler must SCHEDULE the write, not merely leave the state right in

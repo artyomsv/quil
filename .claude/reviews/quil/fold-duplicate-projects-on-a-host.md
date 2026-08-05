@@ -1,7 +1,21 @@
 # Code Review State: quil / fold-duplicate-projects-on-a-host
 
 Last reviewed: 2026-08-05
-Rounds completed: 1 (4 agents + Greptile)
+Rounds completed: 2 (4 agents + Greptile ×2)
+
+## Round 2 — Greptile re-review
+
+- [greptile/P1-root, RE-RAISED] The root-directory finding was re-raised against the disclosure fix, and re-raising it was RIGHT. Naming the change in the message is the weaker answer: the browse fires on every dialog open and lands within a second, so "the root field holds an artifact rather than a choice" is the ORDINARY state, not an edge case — disclosure made the common case dangerous and the rare case convenient. The fold now carries no root at all; `MergeProjectsPayload` has no `RootDir` field, so the guarantee is structural rather than a branch someone can drop. Relocating is `MsgUpdateProject`, from a dialog seeded with the project's own root. `survivorRoot`, `formMsgPathCap` and the root clause in `message()` are gone with it — resolved
+- [greptile/P1-toctou] `destReachable` followed by `sendForDest` is a TOCTOU window. NOT reachable today — both run synchronously on the Update goroutine and `Router.Remove` is only called from it — but that is a property of the current call sites rather than of the router. `sendForDestStrict` checks and sends in one place, so a future off-goroutine remover cannot open the window. The early guard is KEPT beside it for a different reason: a disconnect also changes which BRANCH runs, and only the early guard can give the right message for that — resolved
+- [qa/1, superseded] The "`dst.RootDir` asserted nowhere" gap is closed by removal rather than by assertion: there is no RootDir on the fold to get wrong. Both the unit and integration tests now assert the survivor's root is UNCHANGED, and the TUI test asserts the wire form carries no `root_dir` key at all — resolved
+
+**Note on `sendForDestStrict`'s coverage.** Its error arm is unreachable from
+`submitNewProject`, which checks reachability first — so mutating the call site
+back to `sendForDest` is not caught by any end-to-end test, only by the two
+contract tests written for it (`TestSendForDestStrict_ReportsAnUnreachableDest`,
+`TestSendMergeProjects_ReportsAnUnreachableDest`). That is the honest shape for a
+guard against a race the current architecture cannot produce; recorded so a later
+round does not read the direct-call tests as a lapse.
 
 ## Resolved (fixed in code; do not re-raise)
 

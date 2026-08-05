@@ -66,13 +66,6 @@ const formMsgNameCap = 32
 // quil.log either way.
 const formMsgDetailCap = 160
 
-// formMsgPathCap bounds a remote-chosen ROOT DIRECTORY on the same line. Longer
-// than formMsgNameCap because a path carries its meaning at both ends and a
-// project name does not, and shorter than formMsgDetailCap because the full
-// value is already on the Root directory row above — this mention exists to say
-// that it MOVES, not to be the place it is read.
-const formMsgPathCap = 60
-
 // setFormError / setFormBusy / setFormOK are the ONLY ways to put text on that
 // line. Assigning projectFormErr directly is what leaves the previous message's
 // colour behind — a failure rendered in the green of the success before it.
@@ -92,17 +85,26 @@ func (m *Model) setFormWarn(s string)  { m.projectFormErr, m.projectFormMsgKind 
 // arm-then-invalidate scheme has to be right in every edit handler, while
 // recompute-and-compare is right by construction and re-arms with the new text
 // instead of silently executing the old plan.
+//
+// There is deliberately no root directory here. A fold renames and absorbs; it
+// does not relocate — see MergeProjectsPayload. Carrying the form's value made
+// the ordinary case dangerous rather than the rare one convenient: the dialog's
+// opening browse requests an EMPTY path, the daemon answers with its default
+// CWD, and applyBrowseListing writes that into cwdBrowseDir within a second of
+// every open. So the field almost always holds an artifact rather than a choice,
+// and writing it over a root somebody picked is a change nobody asked for.
+//
+// Naming the change in the message was tried first and is the weaker fix: the
+// right answer to "we might do something the user did not ask for" is not to do
+// it. Relocating a project is what the Rename dialog is for, and it seeds the
+// field with that project's own root.
 type projectMergePlan struct {
 	dest     string
 	into     string   // survivor: keeps its ID, its tabs and its position
 	survivor string   // survivor's CURRENT name, quoted in the message
 	absorb   []string // projects whose tabs move into the survivor
 	name     string
-	rootDir  string
-	// survivorRoot is the root the survivor holds NOW. Carried so the message
-	// can say whether the fold moves it — see message().
-	survivorRoot string
-	tabs         int // tabs that MOVE — the survivor's own do not
+	tabs     int // tabs that MOVE — the survivor's own do not
 }
 
 func (p *projectMergePlan) sameAs(q *projectMergePlan) bool {
@@ -110,8 +112,7 @@ func (p *projectMergePlan) sameAs(q *projectMergePlan) bool {
 		return false
 	}
 	if p.dest != q.dest || p.into != q.into || p.survivor != q.survivor ||
-		p.name != q.name || p.rootDir != q.rootDir || p.tabs != q.tabs ||
-		p.survivorRoot != q.survivorRoot || len(p.absorb) != len(q.absorb) {
+		p.name != q.name || p.tabs != q.tabs || len(p.absorb) != len(q.absorb) {
 		return false
 	}
 	for i := range p.absorb {
@@ -151,17 +152,17 @@ func (m *Model) foldIsConfirmed(plan *projectMergePlan) bool {
 // planProjectMerge describes folding every project on a host into one of them.
 //
 // The survivor is the first project NOBODY invented — the first non-Bootstrap —
-// falling back to the first of all. Which one survives decides two things, and
-// neither is the name (that is overwritten either way): the root directory
-// inherited when the browse has not answered, and the order tabs end up in. A
+// falling back to the first of all. It does not decide the name, which is
+// overwritten either way, nor the root directory, which the fold does not touch.
+// What it decides is which root SURVIVES and the order tabs end up in: a
 // bootstrap project's root is whatever CWD the daemon happened to start in,
-// while a named project's is one the user chose, so preferring the named one
-// keeps the answer that means something. Among equals the first wins, which
-// keeps the host's oldest tabs at the front of the tab bar rather than behind
-// whichever duplicate was created last.
+// while a named project's is one somebody chose, so keeping the named one keeps
+// the answer that means something. Among equals the first wins, which leaves the
+// host's oldest tabs at the front of the tab bar rather than behind whichever
+// duplicate was created last.
 //
 // onHost must be non-empty; the caller has already branched on its length.
-func (m *Model) planProjectMerge(dest, name, rootDir string, onHost []*ProjectModel) *projectMergePlan {
+func (m *Model) planProjectMerge(dest, name string, onHost []*ProjectModel) *projectMergePlan {
 	survivor := onHost[0]
 	for _, p := range onHost {
 		if !p.Bootstrap {
@@ -170,20 +171,11 @@ func (m *Model) planProjectMerge(dest, name, rootDir string, onHost []*ProjectMo
 		}
 	}
 	plan := &projectMergePlan{
-		dest:         dest,
-		into:         survivor.ID,
-		survivor:     survivor.Name,
-		survivorRoot: survivor.RootDir,
-		name:         name,
-		rootDir:      rootDir,
-		tabs:         0,
-	}
-	// An empty root keeps the survivor's OWN, for the reason the adopt path
-	// substitutes one: this is a rename on the far side, MergeProjects has no
-	// unchanged-value guard any more than UpdateProject does, and submitting
-	// before the browse lands would ERASE the root the project already had.
-	if plan.rootDir == "" {
-		plan.rootDir = survivor.RootDir
+		dest:     dest,
+		into:     survivor.ID,
+		survivor: survivor.Name,
+		name:     name,
+		tabs:     0,
 	}
 	for _, p := range onHost {
 		if p.ID == survivor.ID {
@@ -200,16 +192,12 @@ func (m *Model) planProjectMerge(dest, name, rootDir string, onHost []*ProjectMo
 // many tabs move, and — because this is the question a fold actually raises —
 // that nothing is closed.
 //
-// It MUST name everything the plan can change, or the recompute-and-compare
-// guard is silently defeated. The root directory is the case that proved it:
-// the dialog's own opening browse resolves an EMPTY path, so the daemon answers
-// with its default CWD and applyBrowseListing writes that into cwdBrowseDir —
-// a directory nobody picked. A plan armed before that lands carries the
-// survivor's own root and one armed after carries the daemon's default, so the
-// second Enter correctly re-armed rather than acting… behind a message whose
-// text had not changed by one character. Three Enters, two identical sentences,
-// and a real project's root replaced. It is mentioned ONLY when it moves,
-// because the value itself is already on the Root directory row above.
+// It must name everything the plan can change, or the recompute-and-compare
+// guard is silently defeated — a plan that re-arms behind identical text is a
+// confirmation of something the user was never shown. That constraint is why the
+// fold carries no root directory at all: naming a root that moved was the first
+// attempt, and removing the move was the better one, so the sentence and the
+// plan now hold exactly the same three things.
 //
 // Every interpolated value is bounded as well as sanitised. They are chosen by
 // a remote daemon, this is the one value-bearing row with no truncation of its
@@ -232,11 +220,7 @@ func (p *projectMergePlan) message() string {
 		head = fmt.Sprintf("%s already has %d projects — Enter folds them into one named %s: %s, nothing closes",
 			host, len(p.absorb)+1, want, tabs)
 	}
-	if p.rootDir == p.survivorRoot {
-		return head
-	}
-	return head + fmt.Sprintf("; its root directory becomes %s",
-		truncateToWidth(sanitizeRemoteText(p.rootDir), formMsgPathCap))
+	return head
 }
 
 // submitNewProject creates a project on the ACTIVE project's daemon. A
@@ -328,7 +312,7 @@ func (m *Model) submitNewProject(name, rootDir string) tea.Cmd {
 			// project records on a machine the user is not looking at. The
 			// first Enter arms and describes; the second carries out exactly
 			// what was described, or re-arms if the description has moved on.
-			plan := m.planProjectMerge(m.projectFormDest, name, rootDir, onHost)
+			plan := m.planProjectMerge(m.projectFormDest, name, onHost)
 			if !m.foldIsConfirmed(plan) {
 				m.projectFormMerge = plan
 				m.setFormWarn(plan.message())
@@ -415,7 +399,6 @@ func (m *Model) sendMergeProjects(plan *projectMergePlan) tea.Cmd {
 		ProjectID: plan.into,
 		Absorb:    plan.absorb,
 		Name:      plan.name,
-		RootDir:   strings.TrimSpace(plan.rootDir),
 	})
 	if err != nil {
 		log.Printf("merge projects into %q: encode: %v", plan.into, err)
@@ -436,7 +419,7 @@ func (m *Model) sendMergeProjects(plan *projectMergePlan) tea.Cmd {
 	// work that touches another machine. The message must therefore not promise
 	// a retry on the very next keystroke; an earlier draft said "Enter retries"
 	// and was wrong by one Enter.
-	if sendErr := m.sendForDest(plan.dest, msg); sendErr != nil {
+	if sendErr := m.sendForDestStrict(plan.dest, msg); sendErr != nil {
 		log.Printf("merge %d projects into %q on dest %q: send: %v",
 			len(plan.absorb), plan.into, plan.dest, sendErr)
 		m.setFormError("could not reach " + sanitizeRemoteText(hostLabel(plan.dest)) +

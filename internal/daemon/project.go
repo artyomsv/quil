@@ -220,7 +220,9 @@ func (sm *SessionManager) UpdateProject(id, name, rootDir string, requireBootstr
 // machine the user is sitting at. Unknown IDs and into itself are skipped: a
 // client acting on a stale snapshot folds what it can see and leaves the rest
 // for the next create to offer again, rather than failing whole.
-func (sm *SessionManager) MergeProjects(into string, absorb []string, name, rootDir string) bool {
+// The survivor's RootDir is deliberately NOT a parameter — see
+// MergeProjectsPayload. A fold renames and absorbs; relocating is UpdateProject.
+func (sm *SessionManager) MergeProjects(into string, absorb []string, name string) bool {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
@@ -281,7 +283,8 @@ func (sm *SessionManager) MergeProjects(into string, absorb []string, name, root
 	dst.Name = uniqueProjectName(sm.projectNamesExcept(into), name)
 	// Naming it makes it the user's, exactly as in UpdateProject: a project
 	// left Bootstrap would be adopted by the next create and silently renamed.
-	dst.RootDir, dst.Bootstrap = rootDir, false
+	// RootDir is untouched, deliberately — see the doc comment.
+	dst.Bootstrap = false
 
 	// The absorbed project may have been the active one, and its remembered tab
 	// belongs to dst now. Leaving dst.ActiveTab on dst's OWN original tab makes

@@ -136,16 +136,25 @@ checks the RENDERED line as well, which also covers the Host/User rows and a dia
 whose "connecting to …" replaces the warning while `projectFormDest` still names
 the old host.
 
-**`message()` must name everything the plan can change, for the same reason.**
-The root directory proved it: the dialog's own opening browse resolves an EMPTY
+**`message()` must name everything the plan can change, and the root directory
+is how that was learnt.** The dialog's own opening browse resolves an EMPTY
 path, so the daemon answers with its default CWD and `applyBrowseListing` writes
-that into `cwdBrowseDir` — a directory nobody picked. A plan armed before that
-lands carries the survivor's root and one armed after carries the daemon's
-default, so the second Enter re-armed *correctly* behind text that had not
-changed by one character. Three Enters, two identical sentences, and a real
-project's root replaced. It invalidated `submitProjectForm`'s standing claim that
-`cwdBrowseDir` "is always one of three safe things" — there is a fourth. The root
-is mentioned only when it MOVES, because the value itself is on the row above.
+that into `cwdBrowseDir` — within a second of every open, so the field almost
+always holds an artifact rather than a choice. A plan armed before that landed
+carried the survivor's root and one armed after carried the daemon's default, so
+the second Enter re-armed *correctly* behind text that had not changed by one
+character: three Enters, two identical sentences, and a real project's root
+replaced. It also invalidated `submitProjectForm`'s standing claim that
+`cwdBrowseDir` is "always one of three safe things" — there is a fourth.
+
+**The fix is that the fold carries NO root directory at all.** Naming the change
+in the message was tried first and is the weaker answer: the right response to
+"we might do something the user did not ask for" is not to do it. A fold renames
+and absorbs; relocating is `MsgUpdateProject`, from a dialog seeded with the
+project's own root. `MergeProjectsPayload` has no `RootDir` field, so the
+guarantee is structural rather than a branch someone can drop — and the adopt
+path keeps taking the form value, correctly, because there the project is
+unnamed and its root IS the daemon's default, so writing it back is a no-op.
 
 **Reachability is checked in the client, because the send cannot report it.**
 `Router.Send` DROPS a message aimed at a dest it has no conn for, logs, and

@@ -121,6 +121,55 @@ func (c *failingConn) Send(*ipc.Message) error { return errSendRefused }
 
 var errSendRefused = errors.New("send refused")
 
+// sendForDestStrict must REPORT a destination the router has no conn for, where
+// sendForDest deliberately drops and returns nil.
+//
+// A contract test rather than a path test, and deliberately so: submitNewProject
+// checks reachability before it gets here, so from that call site the error arm
+// is reachable only through the race the strict variant exists to close — a conn
+// removed between the check and the send. Nothing removes one off the Update
+// goroutine today, which makes that a property of the current call sites rather
+// than of the router, so the guarantee is pinned where it lives.
+func TestSendForDestStrict_ReportsAnUnreachableDest(t *testing.T) {
+	m := Model{client: NewRouter(map[string]Client{"": newFakeConn()})}
+	msg, err := ipc.NewMessage(ipc.MsgMergeProjects, ipc.MergeProjectsPayload{ProjectID: "p"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if sendErr := m.sendForDestStrict("gpu01", msg); !errors.Is(sendErr, ErrDestUnreachable) {
+		t.Errorf("err = %v, want ErrDestUnreachable — Router.Send drops the frame "+
+			"and returns nil, so a caller that trusts it reports an undelivered "+
+			"action as done", sendErr)
+	}
+	// The forgiving variant still answers nil for the same send: bulk iterators
+	// depend on it, which is why the strict one had to be added beside it rather
+	// than changing Router.Send.
+	if sendErr := m.sendForDest("gpu01", msg); sendErr != nil {
+		t.Errorf("sendForDest err = %v, want nil — resizeAllPanes and sendAllLayouts "+
+			"must not break mid-iteration", sendErr)
+	}
+}
+
+// And the fold reports it rather than closing, which is the behaviour that
+// matters to the user on the far side of the race.
+func TestSendMergeProjects_ReportsAnUnreachableDest(t *testing.T) {
+	m := mergeFormModel(newFakeConn())
+	m.client = NewRouter(map[string]Client{"": newFakeConn()})
+
+	m.sendMergeProjects(&projectMergePlan{
+		dest: "gpu01", into: "proj-keep", survivor: "Default1",
+		absorb: []string{"proj-dup-a"}, name: "cluster-management", tabs: 1,
+	})
+
+	if m.dialog == dialogNone {
+		t.Error("the dialog closed on a fold that was never delivered")
+	}
+	if m.projectFormMsgKind != projectFormMsgError {
+		t.Errorf("kind = %d, want error", m.projectFormMsgKind)
+	}
+}
+
 // The second Enter is the one that acts, and it must send exactly the fold the
 // message described.
 func TestSubmitNewProject_ConfirmingSendsTheFold(t *testing.T) {
@@ -145,8 +194,8 @@ func TestSubmitNewProject_ConfirmingSendsTheFold(t *testing.T) {
 		t.Errorf("absorb = %v, want both duplicates — folding one of three still "+
 			"leaves the pair the user cannot tell apart", p.Absorb)
 	}
-	if p.Name != "cluster-management" || p.RootDir != "/home/a/homelab" {
-		t.Errorf("name=%q root=%q, want both from the form", p.Name, p.RootDir)
+	if p.Name != "cluster-management" {
+		t.Errorf("name = %q, want the one from the form", p.Name)
 	}
 	if m.dialog != dialogNone {
 		t.Error("the dialog stayed open after the fold was sent")
@@ -273,28 +322,33 @@ func TestSubmitNewProject_AHostThatChangedUnderTheUserReArms(t *testing.T) {
 	}
 }
 
-// An empty root directory keeps the survivor's own. submitProjectForm does not
-// wait for the browse, and Enter on the Name row submits at once, so empty is
-// reachable — and the fold ends in a rename with no unchanged-value guard on the
-// far side, exactly as the adopt path does.
-func TestSubmitNewProject_FoldKeepsTheSurvivorsRootWhenTheBrowseHasNotAnswered(t *testing.T) {
+// The fold does not relocate, so the root-dir field cannot reach the wire and
+// cannot make two plans differ.
+//
+// The dialog's opening browse requests an EMPTY path, the daemon answers with
+// its default CWD, and applyBrowseListing writes that into cwdBrowseDir within a
+// second of every open — so the field almost always holds an artifact rather
+// than a choice. Carrying it overwrote a root somebody picked on nearly every
+// fold; naming the change in the message was tried first and was the weaker fix.
+// Two submits with DIFFERENT roots must therefore fold on the second Enter
+// rather than re-arm, which is what proves the value is not in the plan.
+func TestSubmitNewProject_FoldIgnoresTheRootDirectoryField(t *testing.T) {
 	remote := newFakeConn()
 	m := mergeFormModel(remote)
 
-	m.submitNewProject("cluster-management", "")
-	m.submitNewProject("cluster-management", "")
+	m.submitNewProject("cluster-management", "") // armed before the browse landed
+	m.submitNewProject("cluster-management", "/home/build")
 
 	sent := sentOfType(t, remote, ipc.MsgMergeProjects)
 	if len(sent) != 1 {
-		t.Fatalf("sent %d merges, want 1", len(sent))
+		t.Fatalf("sent %d merges, want 1 — the browse landing between the two "+
+			"Enters must not change the plan, because it cannot change the fold", len(sent))
 	}
-	var p ipc.MergeProjectsPayload
-	if err := sent[0].DecodePayload(&p); err != nil {
-		t.Fatal(err)
-	}
-	if p.RootDir != "/home/a/.quil" {
-		t.Errorf("RootDir = %q, want the survivor's own — an empty one ERASES it, "+
-			"and new panes and the git subsystem both read it", p.RootDir)
+	// The payload has no root field at all; assert on the raw wire form so a
+	// regrown one fails here rather than silently relocating a project.
+	if strings.Contains(string(sent[0].Payload), "root_dir") {
+		t.Errorf("payload = %s, want no root directory — a fold renames and "+
+			"absorbs, it does not relocate", sent[0].Payload)
 	}
 }
 
@@ -313,43 +367,6 @@ func TestProjectMergePlan_MessageStatesTheConsequence(t *testing.T) {
 	}
 }
 
-// The message must name EVERYTHING the plan can change, or recompute-and-compare
-// is defeated by a silent field.
-//
-// The root directory is the case that proved it. The dialog's own opening browse
-// resolves an EMPTY path, so the daemon answers with its default CWD and
-// applyBrowseListing writes that into cwdBrowseDir — a directory nobody picked.
-// A plan armed before that lands carries the survivor's root and one armed after
-// carries the daemon's default, so the second Enter re-armed correctly behind a
-// message whose text had not changed by one character: three Enters, two
-// identical sentences, and a real project's root replaced.
-func TestProjectMergePlan_MessageNamesARootThatMoves(t *testing.T) {
-	t.Run("silent when the root stays put", func(t *testing.T) {
-		m := mergeFormModel(newFakeConn())
-
-		// Empty root falls back to the survivor's own, so nothing moves.
-		m.submitNewProject("cluster-management", "")
-
-		if strings.Contains(m.projectFormErr, "root directory") {
-			t.Errorf("message = %q, want no mention of a root that is not moving — "+
-				"the value is already on the Root directory row above", m.projectFormErr)
-		}
-	})
-
-	t.Run("named when the browse lands on the daemon's default", func(t *testing.T) {
-		m := mergeFormModel(newFakeConn())
-
-		// What the opening browse delivers: a resolved path nobody chose.
-		m.submitNewProject("cluster-management", "/home/build")
-
-		if !strings.Contains(m.projectFormErr, "/home/build") {
-			t.Errorf("message = %q, want it to say the root becomes /home/build — "+
-				"otherwise the re-armed sentence is identical to the one before it "+
-				"and the user confirms a change they were never shown",
-				m.projectFormErr)
-		}
-	})
-}
 
 // A remote daemon chooses its own project names, and this is the one
 // value-bearing row in the dialog with no truncation of its own — lipgloss WRAPS
@@ -363,12 +380,12 @@ func TestProjectMergePlan_MessageNamesARootThatMoves(t *testing.T) {
 // the one that never touches it, and passed with the cap removed.
 func TestProjectMergePlan_BoundsEveryInterpolatedName(t *testing.T) {
 	long := strings.Repeat("x", 4000)
-	// The message adds fixed prose around the names and may name a moving root;
-	// this much slack covers all of it without admitting an uncapped 4000-char
-	// value. The host is deliberately NOT bounded and cannot be: Message.Origin
-	// is json:"-" and Router stamps ProjectModel.Dest from its own map key, so a
-	// dest is always the user's own ssh destination, never remote-supplied.
-	limit := 2*formMsgNameCap + formMsgPathCap + formMsgDetailCap
+	// The message adds fixed prose around the names; this much slack covers it
+	// without admitting an uncapped 4000-char value. The host is deliberately NOT
+	// bounded and cannot be: Message.Origin is json:"-" and Router stamps
+	// ProjectModel.Dest from its own map key, so a dest is always the user's own
+	// ssh destination, never remote-supplied.
+	limit := 2*formMsgNameCap + formMsgDetailCap
 
 	t.Run("the survivor's name, chosen by the remote daemon", func(t *testing.T) {
 		m := Model{

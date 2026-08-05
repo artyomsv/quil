@@ -1038,7 +1038,7 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		// Logged when it does NOT apply, for the reason MsgUpdateProject is:
 		// the one failure — an unknown survivor ID — looks from the client like
 		// a dialog that accepted a name and closed on nothing changing.
-		if !d.session.MergeProjects(p.ProjectID, p.Absorb, p.Name, p.RootDir) {
+		if !d.session.MergeProjects(p.ProjectID, p.Absorb, p.Name) {
 			log.Printf("merge %d projects into %q: not applied — unknown id",
 				len(p.Absorb), p.ProjectID)
 		} else {

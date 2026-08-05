@@ -37,7 +37,7 @@ func mergeFixture(t *testing.T) (*SessionManager, string, string, string) {
 func TestMergeProjects_MovesTabsAndDropsTheAbsorbedProjects(t *testing.T) {
 	sm, keep, dupA, dupB := mergeFixture(t)
 
-	if !sm.MergeProjects(keep, []string{dupA, dupB}, "cluster-management", "/home/build/homelab") {
+	if !sm.MergeProjects(keep, []string{dupA, dupB}, "cluster-management") {
 		t.Fatal("merge refused")
 	}
 
@@ -61,12 +61,13 @@ func TestMergeProjects_MovesTabsAndDropsTheAbsorbedProjects(t *testing.T) {
 	if got := len(sm.panes); got != 4 {
 		t.Errorf("panes = %d, want all 4 — the fold must move tabs, not destroy them", got)
 	}
-	// The root directory is applied, not merely carried on the wire. Dropping
-	// this half of the assignment left every other test in the package green
-	// while the "renamed" project silently kept its old root — which is what new
-	// panes spawn in and what the git subsystem probes.
-	if got := projects[0].RootDir; got != "/home/build/homelab" {
-		t.Errorf("RootDir = %q, want the value the fold carried", got)
+	// The survivor's root is UNTOUCHED. A fold renames and absorbs; it does not
+	// relocate — the field that would have supplied a new one holds, in the
+	// ordinary case, whatever the dialog's opening browse resolved rather than
+	// anything a user picked. This is what new panes spawn in and what the git
+	// subsystem probes, so overwriting it is a change nobody asked for.
+	if got := projects[0].RootDir; got != "/home/build/.quil" {
+		t.Errorf("RootDir = %q, want the survivor's own, unchanged", got)
 	}
 	// The absorbed IDs must leave projectOrder too. Projects() and the snapshot
 	// both skip map-missing IDs defensively, so a stale entry is invisible until
@@ -88,7 +89,7 @@ func TestMergeProjects_AllBootstrapHostsKeepTheFirst(t *testing.T) {
 	second := sm.CreateProject("Default", "/srv")
 	second.Bootstrap = true
 
-	sm.MergeProjects(first, []string{second.ID}, "infra", "/srv")
+	sm.MergeProjects(first, []string{second.ID}, "infra")
 
 	if got := sm.Projects()[0].ID; got != first {
 		t.Errorf("survivor = %q, want the first %q", got, first)
@@ -103,7 +104,7 @@ func TestMergeProjects_AllBootstrapHostsKeepTheFirst(t *testing.T) {
 func TestMergeProjects_FreesTheAbsorbedNamesBeforeRenaming(t *testing.T) {
 	sm, keep, dupA, dupB := mergeFixture(t)
 
-	sm.MergeProjects(keep, []string{dupA, dupB}, "cluster-management", "/home/build/homelab")
+	sm.MergeProjects(keep, []string{dupA, dupB}, "cluster-management")
 
 	if got := sm.Projects()[0].Name; got != "cluster-management" {
 		t.Errorf("name = %q, want %q — the absorbed projects still held the name "+
@@ -117,7 +118,7 @@ func TestMergeProjects_FreesTheAbsorbedNamesBeforeRenaming(t *testing.T) {
 func TestMergeProjects_SkipsItselfInAbsorb(t *testing.T) {
 	sm, keep, dupA, _ := mergeFixture(t)
 
-	sm.MergeProjects(keep, []string{keep, dupA}, "infra", "/srv")
+	sm.MergeProjects(keep, []string{keep, dupA}, "infra")
 
 	// Resolved BY ID rather than taken as Projects()[0]: absorbing the survivor
 	// also deletes its record, so an index-based lookup silently reads whichever
@@ -148,7 +149,7 @@ func TestMergeProjects_SkipsItselfInAbsorb(t *testing.T) {
 func TestMergeProjects_SkipsUnknownAbsorbIDs(t *testing.T) {
 	sm, keep, dupA, _ := mergeFixture(t)
 
-	if !sm.MergeProjects(keep, []string{dupA, "proj-gone"}, "infra", "/srv") {
+	if !sm.MergeProjects(keep, []string{dupA, "proj-gone"}, "infra") {
 		t.Fatal("merge refused because one absorb ID was stale")
 	}
 
@@ -164,7 +165,7 @@ func TestMergeProjects_SkipsUnknownAbsorbIDs(t *testing.T) {
 func TestMergeProjects_UnknownSurvivorIsRefused(t *testing.T) {
 	sm, _, dupA, _ := mergeFixture(t)
 
-	if sm.MergeProjects("proj-gone", []string{dupA}, "infra", "/srv") {
+	if sm.MergeProjects("proj-gone", []string{dupA}, "infra") {
 		t.Error("merge into an unknown project reported success")
 	}
 	if got := len(sm.Projects()); got != 3 {
@@ -180,7 +181,7 @@ func TestMergeProjects_ClearsBootstrapOnTheSurvivor(t *testing.T) {
 	boot := sm.Projects()[0].ID
 	stray := sm.CreateProject("stray", "/srv")
 
-	sm.MergeProjects(boot, []string{stray.ID}, "cluster-management", "/srv")
+	sm.MergeProjects(boot, []string{stray.ID}, "cluster-management")
 
 	if sm.Projects()[0].Bootstrap {
 		t.Error("survivor is still Bootstrap, so the next create on this host would " +
@@ -201,7 +202,7 @@ func TestMergeProjects_PromotesTheActiveProjectAndItsTab(t *testing.T) {
 		t.Fatalf("switch to %s returned %q, %v", dupA, activeTab, ok)
 	}
 
-	sm.MergeProjects(keep, []string{dupA, dupB}, "cluster-management", "/srv")
+	sm.MergeProjects(keep, []string{dupA, dupB}, "cluster-management")
 
 	if got := sm.ActiveProject(); got != keep {
 		t.Errorf("activeProject = %q, want the survivor %q — it named a project that "+
@@ -226,7 +227,7 @@ func TestMergeProjects_RefusesToListOneTabTwice(t *testing.T) {
 	shared := sm.projects[keep].TabIDs[0]
 	sm.projects[dupA].TabIDs = append(sm.projects[dupA].TabIDs, shared)
 
-	sm.MergeProjects(keep, []string{dupA}, "infra", "/srv")
+	sm.MergeProjects(keep, []string{dupA}, "infra")
 
 	seen := map[string]bool{}
 	for _, tabID := range sm.Projects()[0].TabIDs {
@@ -250,7 +251,7 @@ func TestMergeProjects_ReDerivesAStrandedActiveTab(t *testing.T) {
 	sm.activeTab = "tab-gone"
 	sm.projects[dupA].ActiveTab = "tab-gone"
 
-	sm.MergeProjects(keep, []string{dupA, dupB}, "infra", "/srv")
+	sm.MergeProjects(keep, []string{dupA, dupB}, "infra")
 
 	survivor := sm.Projects()[0]
 	if indexOfString(survivor.TabIDs, sm.activeTab) < 0 {
@@ -271,7 +272,7 @@ func TestMergeProjects_ReDerivesAStrandedActiveTab(t *testing.T) {
 func TestMergeProjects_ReanchorsTheGlobalTabOrder(t *testing.T) {
 	sm, keep, dupA, dupB := mergeFixture(t)
 
-	sm.MergeProjects(keep, []string{dupA, dupB}, "cluster-management", "/srv")
+	sm.MergeProjects(keep, []string{dupA, dupB}, "cluster-management")
 
 	tabIDs := sm.Projects()[0].TabIDs
 	if len(sm.tabOrder) != len(tabIDs) {

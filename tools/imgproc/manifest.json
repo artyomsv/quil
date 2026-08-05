@@ -25,6 +25,10 @@
     { "src": "command-palette-1.png",          "type": "dialog",  "profiles": ["hero", "card"] },
     { "src": "command-palette-2.png",          "type": "dialog",  "profiles": ["hero", "card"] },
     { "src": "command-palette-search-1.png",   "type": "dialog",  "profiles": ["hero", "card"] },
-    { "src": "command-palette-search-2.png",   "type": "dialog",  "profiles": ["hero", "card"] }
+    { "src": "command-palette-search-2.png",   "type": "dialog",  "profiles": ["hero", "card"] },
+    { "src": "projects_1_main.png",            "type": "content", "profiles": ["full", "hero", "card"] },
+    { "src": "projects_2_with_remote.png",     "type": "content", "profiles": ["full", "hero", "card"] },
+    { "src": "projects_3_add_remote_1.png",    "type": "dialog",  "profiles": ["hero", "card"] },
+    { "src": "projects_4_add_remote_2.png",    "type": "dialog",  "profiles": ["hero", "card"] }
   ]
 }

@@ -181,6 +181,7 @@ export const features: Feature[] = [
   {
     slug: "projects",
     icon: "layout-panel-left",
+    image: "https://cdn.stukans.com/quil/screenshots/projects_1_main-800.webp",
     title: "Projects, and a sidebar that watches all of them",
     blurb:
       "Group tabs into named projects with their own root directory. The left sidebar shows every project's agents at once — so one that finished or got stuck while you were elsewhere is visible from where you already are.",
@@ -481,6 +482,7 @@ export const features: Feature[] = [
 
   {
     slug: "multi-daemon",
+    image: "https://cdn.stukans.com/quil/screenshots/projects_2_with_remote-800.webp",
     icon: "key-round",
     title: "Several machines in one window",
     badge: "beta",
@@ -491,6 +493,7 @@ export const features: Feature[] = [
       "`quil --remote <host>` binds a whole TUI to one daemon. This does not: the client holds connections to the local daemon and any number of remote ones at once, and their projects appear as siblings in the same sidebar. Working against a laptop and a GPU box is no longer two terminals.",
       "Add a host without relaunching. Tick Remote (ssh) in the New Project dialog, give a user and host, and press Enter on the Host row — Quil dials it and then browses *that* machine's filesystem for the root directory. A root directory lives on exactly one machine, so connecting before submitting is the order that makes sense.",
       "A host you can't attach to is provisioned from that dialog rather than from a shell: no Quil there installs it, and a daemon older than your client is upgraded — which stops that daemon and respawns its panes from the saved workspace, so the status line says so while it runs. Each is attempted once per host per session. The one case it won't fix is a remote daemon *newer* than your client: pushing your own build would downgrade a machine other people may share, so it names the client upgrade instead.",
+      "The dialog's one message line is coloured by what it means, not by the fact that something was reported: red only when the host cannot be reached at all, amber while a dial or an install is under way, green once the link is up. Provisioning a machine used to arrive in the same red as a failure, which read as an error that then somehow succeeded.",
       "One host holds one project. A daemon must have at least one tab and a tab must belong to a project, so a host always arrives already holding one — naming a project there renames that one rather than adding a second, and whatever was already running on the machine ends up under the name you chose. The local daemon is unaffected: it holds as many projects as you like.",
       "A host that already has several folds them into the one you name. Press Enter and the form states what it will do — how many projects the host has, what the result is called, how many tabs move, and that nothing is closed — and a second Enter does it; editing the name in between re-describes instead of acting on what you moved away from. Every tab moves onto the surviving project and the emptied records are dropped, so no pane or running command is touched. That is the way to tidy a host connected before this rule existed, where reconnecting and re-creating the project that seemed to vanish left another row behind each time.",
       "The fold leaves the surviving project's root directory alone. The dialog fills that field in by itself as soon as the directory listing arrives, so it usually holds wherever the daemon happens to start rather than anywhere you chose — writing that over a root you had picked would be a change nobody asked for. Rename moves one, and it opens with the project's own root already in the field.",

@@ -3723,9 +3723,14 @@ const setupChromeRows = 26
 // height actually available manufactures the overflow it looks like it
 // prevents — the same reasoning as historyMinRows.
 func (m Model) worktreeVisibleRows() int {
-	// One more than the session field's chrome: the collapsed worktree row
-	// itself is always drawn, whether or not the list below it is.
-	const surroundingRows = setupChromeRows + 1
+	// One more than the session field's chrome (the collapsed worktree row
+	// itself is always drawn, whether or not the list below it is), PLUS the
+	// session list's own floor, reserved up front: sessionListMinRows never
+	// shrinks, so a worktree list that claims rows greedily up to its own
+	// cap can take rows the session floor is going to demand anyway — the
+	// exact shared-budget overflow this task exists to prevent, in the band
+	// where the worktree list has room to grow but hasn't hit its cap yet.
+	const surroundingRows = setupChromeRows + 1 + sessionListMinRows
 	avail := m.height - surroundingRows
 	switch {
 	case avail >= worktreeListVisibleRows:

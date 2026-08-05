@@ -2172,8 +2172,19 @@ func TestRenderSetup_KubeFocused_NoIdleMark(t *testing.T) {
 // rather than going vacuous. Adding the worktree list raised that minimum by
 // exactly one row (30 -> 31) — the cost of the second list, quantified
 // rather than hidden.
+//
+// Swept CONTIGUOUSLY across the whole transition band (26..45) rather than
+// sampled at scattered points: a first version of this test sampled
+// {12,16,24,40} and missed a real bug, because worktreeVisibleRows claimed
+// rows greedily up to its own cap without reserving anything for the session
+// list's floor, and the resulting overflow only showed up on the seven
+// consecutive heights 29..35 that none of the four sample points touched
+// (worst case h=33, 3 rows over budget — exactly the [Continue] pushed off
+// the terminal failure mode this task exists to prevent). A band that
+// changes behaviour at several consecutive integers cannot be trusted to
+// arbitrary sample points; only a contiguous sweep proves there is no gap.
 func TestSetupDialog_TwoListsShareOneHeightBudget(t *testing.T) {
-	for _, h := range []int{12, 16, 24, 40} {
+	for h := 26; h <= 45; h++ {
 		m := Model{width: 100, height: h}
 		total := m.worktreeVisibleRows() + m.sessionVisibleRows()
 		want := h - setupChromeRows

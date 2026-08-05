@@ -142,6 +142,56 @@ func TestPaneRow_MeasuresExactlyItsWidth(t *testing.T) {
 	}
 }
 
+// A long run of printable ZERO-WIDTH codepoints never advances the width
+// budget, so neither cutter can exit its loop early on one — it walks the whole
+// string. The first fix for the variation-selector overflow re-measured a
+// growing prefix (and a growing suffix) on every step, which turned that walk
+// quadratic: on a render path, over text supplied by another machine, with
+// sanitizeRemoteText deliberately preserving printable non-ASCII. Segmenting
+// into grapheme clusters and measuring each once makes it linear.
+//
+// U+200B ZERO WIDTH SPACE is the input because it is printable — a control
+// filter does not touch it — and measures zero. The visible tail is what makes
+// the string exceed the budget, so the early return is not taken and the loop
+// really runs.
+//
+// Asserted as completion inside a generous bound rather than as a timing
+// measurement. The gap is orders of magnitude — microseconds against minutes —
+// so a coarse deadline is not flaky, and a regression fails here rather than
+// hanging until the whole test binary times out.
+func TestCellCutters_SurviveAZeroWidthFlood(t *testing.T) {
+	t.Parallel()
+	const w = 5
+	flood := strings.Repeat("​", 50000) + "visible text"
+
+	type result struct{ trunc, last string }
+	done := make(chan result, 1)
+	go func() {
+		done <- result{
+			trunc: truncateCells(flood, w),
+			last:  lastCellsToWidth(flood, w),
+		}
+	}()
+
+	select {
+	case got := <-done:
+		if n := lipgloss.Width(got.trunc); n > w {
+			t.Errorf("truncateCells returned %d cells, over the %d budget", n, w)
+		}
+		if n := lipgloss.Width(got.last); n > w {
+			t.Errorf("lastCellsToWidth returned %d cells, over the %d budget", n, w)
+		}
+		// The tail is what is visible, so the backward cut must reach it
+		// rather than stopping in the zero-width run.
+		if !strings.Contains(got.last, "text") {
+			t.Errorf("lastCellsToWidth = %q, want it to reach the visible tail", got.last)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("cell cutters did not finish on a zero-width flood in 15s — " +
+			"the per-step re-measurement is back and the cost is quadratic in len(s)")
+	}
+}
+
 // truncateCells and lastCellsToWidth are the two ends of the same cut, and
 // both summed runes INDEPENDENTLY. A variation selector measures 0 alone while
 // making the pair it follows measure 2, so both returned strings WIDER than

@@ -10,6 +10,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/rivo/uniseg"
 
 	"github.com/artyomsv/quil/internal/config"
 )
@@ -889,21 +890,46 @@ func lastCellsToWidth(s string, w int) string {
 	if lipgloss.Width(s) <= w {
 		return s
 	}
-	// The candidate suffix is measured WHOLE on every step, never as a running
-	// sum of independently-measured runes. A rune can change the width of the
-	// one before it — a variation selector measures 0 alone while making the
-	// pair 2 — so a per-rune sum returns a suffix WIDER than w, which is the
-	// same overflow truncateCells documents at the other end of the string.
-	// Remote-sourced names reach both.
-	runes := []rune(s)
-	i := len(runes)
+	// Segment into GRAPHEME CLUSTERS, then take them from the end.
+	//
+	// A rune is not the unit of width: a variation selector measures 0 alone
+	// while making the pair before it 2, so summing independently-measured
+	// runes returns a suffix WIDER than w — the same overflow truncateCells
+	// documents at the other end of the string, and remote-sourced names reach
+	// both.
+	//
+	// One forward segmentation pass, then a backward walk over the collected
+	// clusters. Re-measuring a growing suffix each step instead is quadratic:
+	// it reallocates the candidate every iteration, and a zero-width cluster
+	// never advances the total, so the loop cannot exit early on a long run of
+	// them. lipgloss does the measuring so this cannot disagree with the width
+	// the caller padded to.
+	type cluster struct {
+		text  string
+		cells int
+	}
+	var clusters []cluster
+	state, rest := -1, s
+	for len(rest) > 0 {
+		var c string
+		c, rest, _, state = uniseg.FirstGraphemeClusterInString(rest, state)
+		clusters = append(clusters, cluster{text: c, cells: lipgloss.Width(c)})
+	}
+
+	total, i := 0, len(clusters)
 	for i > 0 {
-		if lipgloss.Width(string(runes[i-1:])) > w {
+		if total+clusters[i-1].cells > w {
 			break
 		}
+		total += clusters[i-1].cells
 		i--
 	}
-	return string(runes[i:])
+
+	var b strings.Builder
+	for _, c := range clusters[i:] {
+		b.WriteString(c.text)
+	}
+	return b.String()
 }
 
 // goToPane switches to the tab containing paneID and makes it the active

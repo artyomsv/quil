@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
+	"github.com/rivo/uniseg"
 )
 
 // minWidthForSidebar auto-collapses the project sidebar rather than
@@ -621,14 +622,16 @@ func truncateCells(s string, w int) string {
 	if lipgloss.Width(s) <= w {
 		return s
 	}
-	// Each candidate is measured as the ACCUMULATED string, never as the rune
-	// alone, because a rune can change the width of the one before it. A
-	// variation selector is the case that reaches here: U+FE0F measures 0 on
-	// its own and U+26A0 measures 1, but the PAIR measures 2 — so a per-rune
-	// sum admits a glyph that then overflows, and this function returned a
-	// string WIDER than the budget it was handed (truncateCells("x⚠️", 2) was
-	// three cells). renderSidebar's closing .Width(w) WRAPS that excess onto a
-	// new painted line rather than cutting it, shifting every row below while
+	// Cut on GRAPHEME CLUSTER boundaries, measuring each cluster whole.
+	//
+	// A rune is not the unit of width, because a rune can change the width of
+	// the one before it. A variation selector is the case that reaches here:
+	// U+FE0F measures 0 alone and U+26A0 measures 1, but the PAIR measures 2 —
+	// so summing independently-measured runes admits a glyph that then
+	// overflows, and this function used to return a string WIDER than the
+	// budget it was handed (truncateCells("x⚠️", 2) was three cells).
+	// renderSidebar's closing .Width(w) WRAPS that excess onto a new painted
+	// line rather than cutting it, shifting every row below while
 	// sidebarRowAt still maps screen row y to rows[y-1] — the user clicks
 	// project 3 and selects project 2.
 	//
@@ -637,15 +640,27 @@ func truncateCells(s string, w int) string {
 	// control-character filter, not a bounding pass), so any project name,
 	// pane name, branch or blocked-reason from a remote daemon can carry one.
 	//
-	// Re-measuring a growing prefix is O(w²), which is nothing at a sidebar's
-	// width and is bounded by w rather than by len(s) — the loop stops as soon
-	// as the budget is full, so a very long name costs no more than a short one.
+	// Clusters rather than a re-measured growing prefix, and that is a
+	// performance property rather than a stylistic one: measuring
+	// prefix+rune each step allocates a copy of the prefix, and a
+	// ZERO-WIDTH cluster never advances the budget, so the loop cannot exit
+	// early on one. A remote-supplied name that is a long run of printable
+	// zero-width codepoints therefore walked the whole string reallocating
+	// it — quadratic in len(s), on a render path, driven by another machine's
+	// data. Per-cluster measurement is linear, and lipgloss stays the single
+	// measurement authority so this can never disagree with the .Width(w)
+	// that ultimately paints the row.
 	var b strings.Builder
-	for _, r := range s {
-		if lipgloss.Width(b.String()+string(r)) > w {
+	used, state, rest := 0, -1, s
+	for len(rest) > 0 {
+		var cluster string
+		cluster, rest, _, state = uniseg.FirstGraphemeClusterInString(rest, state)
+		cw := lipgloss.Width(cluster)
+		if used+cw > w {
 			break
 		}
-		b.WriteRune(r)
+		b.WriteString(cluster)
+		used += cw
 	}
 	return b.String()
 }

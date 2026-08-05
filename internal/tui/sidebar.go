@@ -130,7 +130,7 @@ func (m *Model) sidebarRows(w int) []sidebarRow {
 		working, blocked, done := p.counts()
 		// The NAME alone on the first row. displayName's "name@dest" was
 		// written for the picker, where a dialog is wide enough for it; at the
-		// sidebar's 22 columns "Default@artyom@192.168.6.12" leaves nothing of
+		// sidebar's 22 columns "Default@build@gpu01" leaves nothing of
 		// either half, and the badges that say whether the project needs you
 		// are what gets truncated away first.
 		rows = append(rows, sidebarRow{

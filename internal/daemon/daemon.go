@@ -764,6 +764,7 @@ func parseRestoredProjects(raw any) []*Project {
 			rootDir = cwd
 		}
 		activeTab, _ := pm["active_tab"].(string)
+		bootstrap, _ := pm["bootstrap"].(bool)
 		var tabIDs []string
 		if rawIDs, ok := pm["tab_ids"].([]any); ok {
 			tabIDs = make([]string, 0, len(rawIDs))
@@ -779,6 +780,7 @@ func parseRestoredProjects(raw any) []*Project {
 			RootDir:   rootDir,
 			TabIDs:    tabIDs,
 			ActiveTab: activeTab,
+			Bootstrap: bootstrap,
 		})
 	}
 	return projects
@@ -1010,8 +1012,22 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 			log.Printf("update project: malformed payload: %v", err)
 			return
 		}
-		d.session.UpdateProject(p.ProjectID, p.Name, p.RootDir)
+		// Logged when it does NOT apply. The two ways that happens — an unknown
+		// ID, and an adopt whose project someone named first — both look
+		// identical from the client: a dialog that accepted a name and closed
+		// on nothing changing. This package has already paid for one silently
+		// ignored project message.
+		if !d.session.UpdateProject(p.ProjectID, p.Name, p.RootDir, p.AdoptBootstrap) {
+			log.Printf("update project %s: not applied (adopt=%v) — unknown id, or already named",
+				p.ProjectID, p.AdoptBootstrap)
+		}
 		d.broadcastState()
+		// Rename now also clears the persisted Bootstrap flag, so leaving this
+		// to the periodic ticker means a daemon killed inside that window comes
+		// back with the project called Default and adoptable again — the user's
+		// rename lost. Create, destroy and switch all snapshot; this was the
+		// one project mutation that did not.
+		d.requestSnapshot()
 
 	case ipc.MsgSwitchProject:
 		var p ipc.SwitchProjectPayload
@@ -2555,6 +2571,11 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			"root_dir":   p.RootDir,
 			"tab_ids":    p.TabIDs,
 			"active_tab": p.ActiveTab,
+			// Reaches the client AND the disk snapshot from here, because this
+			// map is both. The client needs it to decide whether naming a
+			// project adopts this one; the snapshot needs it so a restart does
+			// not turn an un-adopted default into a real project.
+			"bootstrap": p.Bootstrap,
 		})
 	}
 

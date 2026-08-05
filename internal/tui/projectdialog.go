@@ -6,9 +6,64 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/artyomsv/quil/internal/ipc"
 )
+
+// The form's one message line carries three different kinds of news, and
+// rendering all of them as a red ✗ said the wrong thing about two of them:
+// provisioning a host is progress, and a connected host is good news, but both
+// arrived looking like the failure the same line reports when ssh cannot reach
+// the machine at all. Reported as "it was installing fine but the message was
+// red, which seemed strange".
+//
+// The colours are the ones this package already assigns these meanings
+// (styles.go / sidebar.go): 208 for work under way — the accent restore and MCP
+// activity use — and 28 for done, the green a finished pane carries. Amber 214
+// is deliberately NOT reused: here it means blocked-on-user, and nothing during
+// an install is waiting on the user.
+type projectFormMsgKind int
+
+const (
+	// The zero value is the error kind on purpose: a message whose severity was
+	// never stated is a validation failure, which is what every existing caller
+	// of this line reports.
+	projectFormMsgError projectFormMsgKind = iota
+	projectFormMsgBusy
+	projectFormMsgOK
+)
+
+func projectFormMsgStyle(kind projectFormMsgKind) (string, lipgloss.Style) {
+	switch kind {
+	case projectFormMsgBusy:
+		return "⟳", lipgloss.NewStyle().Foreground(lipgloss.Color("208"))
+	case projectFormMsgOK:
+		return "✓", lipgloss.NewStyle().Foreground(lipgloss.Color("28"))
+	default:
+		return "✗", dialogErrorStyle
+	}
+}
+
+// formMsgNameCap bounds a remote-chosen project name interpolated into the
+// message line. Wide enough to identify the project the user must rename,
+// short enough that the line cannot wrap the box whatever the daemon sends.
+const formMsgNameCap = 32
+
+// formMsgDetailCap bounds remote-supplied DIAGNOSTIC text on the same line —
+// ssh's own words, which the transport already caps at 2000 bytes. That is
+// small enough not to be an attack and far too large for this row: at the
+// dialog's width it wraps to some forty lines and pushes the box past the
+// terminal. Three lines' worth keeps the reason readable; the full text is in
+// quil.log either way.
+const formMsgDetailCap = 160
+
+// setFormError / setFormBusy / setFormOK are the ONLY ways to put text on that
+// line. Assigning projectFormErr directly is what leaves the previous message's
+// colour behind — a failure rendered in the green of the success before it.
+func (m *Model) setFormError(s string) { m.projectFormErr, m.projectFormMsgKind = s, projectFormMsgError }
+func (m *Model) setFormBusy(s string)  { m.projectFormErr, m.projectFormMsgKind = s, projectFormMsgBusy }
+func (m *Model) setFormOK(s string)    { m.projectFormErr, m.projectFormMsgKind = s, projectFormMsgOK }
 
 // submitNewProject creates a project on the ACTIVE project's daemon. A
 // project is a name plus a root directory, and a root directory lives on
@@ -28,7 +83,79 @@ func (m *Model) submitNewProject(name, rootDir string) tea.Cmd {
 	// only project on the host staying the client's own placeholder. Refuse
 	// where the user can see it.
 	if !m.destSupportsProjects(m.projectFormDest) {
-		m.projectFormErr = "that host runs a quil without project support"
+		m.setFormError("that host runs a quil without project support")
+		return nil
+	}
+	// A remote host holds exactly ONE project, and naming it is how you get it.
+	//
+	// The daemon does not know it is remote — Project has no Dest field, that is
+	// this client's label for the connection a project arrived on — so this is a
+	// rule about what CREATE does here, not an invariant the daemon can keep.
+	//
+	// Two outcomes, and which one applies is the daemon's Bootstrap flag rather
+	// than the name: adopt the project nobody named, refuse to add a second
+	// beside one somebody did.
+	if m.projectFormDest != "" {
+		switch adoptable, occupied := m.hostProjectState(m.projectFormDest); {
+		case adoptable != nil:
+			// Rename in place. The host's existing tabs are already inside it,
+			// so they end up under the name the user chose instead of beside it
+			// as a "Default" they never asked for — which is the whole point,
+			// and is why this is an update rather than a create plus a move.
+			//
+			// An empty root keeps the project's OWN, rather than being passed
+			// through. submitProjectForm drops the browse-pending gate on the
+			// stated grounds that an empty root is "a real answer for a CREATE
+			// and unreachable for a RENAME" — routing a create into a rename is
+			// exactly what makes it reachable, and UpdateProject has no
+			// unchanged-value guard, so the adopted project's root would be
+			// ERASED by an Enter pressed before the browse lands.
+			if rootDir == "" {
+				rootDir = adoptable.RootDir
+			}
+			// Conditional on the far side: this client decided to adopt from
+			// its own snapshot, and a second client driving the same host can
+			// name that project in between. The daemon refuses the update if it
+			// is no longer a bootstrap, so the loser reports rather than
+			// silently renaming the winner's project.
+			return m.sendUpdateProject(adoptable.ID, name, rootDir, true)
+		case occupied != nil:
+			// The name is bounded as well as sanitised, and the two are
+			// different jobs: sanitising removes escapes, and a remote daemon
+			// can still choose a megabyte of ordinary printable text. This is
+			// the one value-bearing line in the dialog with no truncation of
+			// its own, and lipgloss WRAPS at the box width — so an unbounded
+			// name here becomes thousands of rendered lines in every frame.
+			m.setFormError(sanitizeRemoteText(hostLabel(m.projectFormDest)) +
+				" already has a project (" +
+				truncateToWidth(sanitizeRemoteText(occupied.Name), formMsgNameCap) +
+				") — rename it instead")
+			return nil
+
+		case m.attached[m.projectFormDest]:
+			// Attached and still silent: this host WILL report a project — a
+			// daemon must hold a tab and a tab must hold a project — so the
+			// empty answer is "not yet", not "none". Creating here is how the
+			// duplicate comes back: the daemon already holds a bootstrap
+			// Default this client cannot see, so the create lands beside it,
+			// and the NEXT create adopts that Default and renames it. The wait
+			// is self-clearing, the wrong answer is not.
+			//
+			// Reachable without a race: destDialedMsg batches the attach with
+			// the root-dir browse, so the listing can paint — and invite an
+			// Enter — before the daemon's first workspace_state arrives.
+			m.setFormBusy("waiting for " + sanitizeRemoteText(hostLabel(m.projectFormDest)) +
+				" to report its projects…")
+			return nil
+		}
+	}
+	// Local daemons keep many projects, so the only rule there is that two of
+	// them must not be indistinguishable. The sidebar shows name and host and
+	// nothing else, so a second row with the same name on the same daemon
+	// leaves the user unable to tell which holds their tabs — and removing the
+	// wrong one takes them with it.
+	if existing := m.projectNamedOnDest(name, m.projectFormDest, ""); existing != nil {
+		m.setFormError(sanitizeRemoteText(name) + " already exists on that host")
 		return nil
 	}
 	msg, err := ipc.NewMessage(ipc.MsgCreateProject, ipc.CreateProjectPayload{
@@ -63,14 +190,33 @@ func (m *Model) submitNewProject(name, rootDir string) tea.Cmd {
 // opened on a background project via the sidebar context menu without first
 // switching to it.
 func (m *Model) submitRenameProject(id, name, rootDir string) tea.Cmd {
+	return m.sendUpdateProject(id, name, rootDir, false)
+}
+
+// sendUpdateProject is the one sender for MsgUpdateProject. adoptBootstrap
+// makes the daemon apply it only while the project is still one it invented —
+// see UpdateProjectPayload.AdoptBootstrap. A plain rename passes false.
+func (m *Model) sendUpdateProject(id, name, rootDir string, adoptBootstrap bool) tea.Cmd {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return nil
 	}
+	// A rename can recreate the pair a create is refused for. "It is deliberate,
+	// so the user knows which is which" does not survive the rename: afterwards
+	// the two rows are as indistinguishable as any other duplicate, and removing
+	// the wrong one still takes its tabs. Excluding the project itself keeps a
+	// rename that only changes the root directory working.
+	dest := m.destOfProject(id)
+	if existing := m.projectNamedOnDest(name, dest, id); existing != nil {
+		m.setFormError(sanitizeRemoteText(name) + " already exists on " +
+			sanitizeRemoteText(hostLabel(dest)))
+		return nil
+	}
 	msg, err := ipc.NewMessage(ipc.MsgUpdateProject, ipc.UpdateProjectPayload{
-		ProjectID: id,
-		Name:      name,
-		RootDir:   strings.TrimSpace(rootDir),
+		ProjectID:      id,
+		Name:           name,
+		RootDir:        strings.TrimSpace(rootDir),
+		AdoptBootstrap: adoptBootstrap,
 	})
 	if err != nil {
 		log.Printf("rename project %s: encode: %v", id, err)
@@ -110,13 +256,18 @@ func (m Model) openNewProjectDialog() (tea.Model, tea.Cmd) {
 	m.dialog = dialogProjectNew
 	m.projectFormID = ""
 	m.projectFormName = ""
-	m.projectFormHost = ""
-	m.projectFormUser = ""
-	m.projectFormRemote = false
 	m.projectFormDialing = ""
 	m.projectFormCursor = 0
 	m.projectFormErr = ""
 	m.projectFormDest = m.activeDest()
+	// The ssh fields describe the dest, rather than starting blank beside it.
+	// They used to say "this machine" while projectFormDest already named the
+	// active project's REMOTE host, so the form contradicted itself — harmless
+	// while every submit was a create on a host the user had at least typed,
+	// and not harmless once naming a project there can RENAME the host's
+	// existing one. Same seeding beginProjectRename does, for the same reason.
+	m.projectFormRemote = m.projectFormDest != ""
+	m.projectFormUser, m.projectFormHost = splitSSHDest(m.projectFormDest)
 	m.resetProjectBrowseState()
 	return m, m.requestBrowseDirForDest(m.projectFormDest, "", "", "")
 }
@@ -410,7 +561,7 @@ func (m Model) handleProjectUserKey(key string) (tea.Model, tea.Cmd) {
 func (m Model) connectProjectHost() (tea.Model, tea.Cmd) {
 	dest := m.projectFormDestFromFields()
 	if m.projectFormRemote && dest == "" {
-		m.projectFormErr = "host required for a remote project"
+		m.setFormError("host required for a remote project")
 		return m, nil
 	}
 	if dest == "" || m.destConnected(dest) {
@@ -423,11 +574,14 @@ func (m Model) connectProjectHost() (tea.Model, tea.Cmd) {
 		return m, m.requestBrowseDirForDest(dest, "", "", "")
 	}
 	if m.dialDestFn == nil {
-		m.projectFormErr = "this build cannot connect new hosts"
+		m.setFormError("this build cannot connect new hosts")
 		return m, nil
 	}
 	m.projectFormDialing = dest
-	m.projectFormErr = ""
+	// Amber from the moment the dial starts. Whether the host answers is not
+	// known yet, so this says "working", and the arms in Update replace it with
+	// the green success or the red failure once it is.
+	m.setFormBusy("connecting to " + sanitizeRemoteText(dest) + "…")
 	return m, m.dialDest(dest)
 }
 
@@ -568,7 +722,7 @@ func (m Model) handleProjectRootDirKey(key string) (tea.Model, tea.Cmd) {
 // timeout, so this is a wait, not a dead end.
 func (m Model) submitProjectForm() (tea.Model, tea.Cmd) {
 	if strings.TrimSpace(m.projectFormName) == "" {
-		m.projectFormErr = "name required"
+		m.setFormError("name required")
 		m.projectFormCursor = 0
 		return m, nil
 	}
@@ -587,7 +741,13 @@ func (m Model) submitProjectForm() (tea.Model, tea.Cmd) {
 	//
 	// Empty is a real answer for a CREATE (the daemon falls back to its own
 	// default CWD, as it does for a pane) and unreachable for a RENAME, which
-	// is what makes dropping the gate safe on both paths. Waiting instead made
+	// is what makes dropping the gate safe on both paths.
+	//
+	// The adopt path routes a CREATE into submitRenameProject, which would make
+	// empty reachable on a rename for the first time — so it substitutes the
+	// adopted project's own root rather than passing this value through.
+	// UpdateProject has no unchanged-value guard, so without that the project's
+	// root would be erased by an Enter pressed before the browse lands. Waiting instead made
 	// remote projects impossible to create and then to rename: the browse
 	// fires at a daemon connected seconds ago, and until it answered the
 	// button did nothing the user could see.
@@ -791,7 +951,14 @@ func (m Model) renderProjectDialog() string {
 	b.WriteString("\n")
 
 	if m.projectFormErr != "" {
-		b.WriteString("  " + dialogErrorStyle.Render("✗ "+m.projectFormErr) + "\n\n")
+		glyph, style := projectFormMsgStyle(m.projectFormMsgKind)
+		// Sanitised HERE as well as at every set site, which is not redundant
+		// but the rule the package states: sanitise at RENDER, because this is
+		// the one place guaranteed to run for every message, while a set site
+		// is one of eight and the ninth is easy to add and easy to forget. It
+		// costs nothing when there is nothing to strip — sanitizeRemoteText
+		// returns the input unchanged without allocating.
+		b.WriteString("  " + style.Render(glyph+" "+sanitizeRemoteText(m.projectFormErr)) + "\n\n")
 	}
 
 	// Submit button.

@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **A remote host now holds exactly one project, and naming it is how you get
+  it.** A daemon must have at least one tab and a tab must belong to a project,
+  so a host always arrived already holding a `Default` nobody asked for — and
+  creating your project left that `Default` sitting beside it, holding the tabs
+  you actually cared about. Naming a project on such a host now renames that
+  project instead of adding a second, so the host's existing tabs end up under
+  your name. A host whose project you have already named refuses a second one
+  and points you at renaming it. The local daemon is unchanged: it holds as many
+  projects as you like. Note for hosts you connected before this release: their
+  `Default` predates the marker that makes this work, so it is treated as one
+  you named — rename it once and the host is settled.
+- **The New Project dialog fills in the host it is aimed at.** Opening it while
+  a remote project is active showed **Remote (ssh)** unticked and an empty Host,
+  while the form was already targeting that machine — so it read "this machine"
+  and acted on the far one. It now shows the host it will use, and waits, saying
+  so, if that host has not yet reported what it holds.
+
+### Fixed
+- **Connecting a remote host no longer reports its own progress as a failure.**
+  The New Project dialog has one message line and was rendering everything on it
+  as a red ✗ — so "installing…" and "upgrading…" looked exactly like "cannot
+  reach that host", while an install was in fact running normally. The line is
+  coloured by what it means now: red for a host that cannot be reached or an
+  install that failed, amber while Quil is connecting or provisioning, green
+  once the host is connected.
+- **Creating a project with a name that host already has is refused.**
+  Disconnecting a host is client-side only — the remote daemon keeps every
+  project — so its rows leave the sidebar looking deleted and return on the next
+  connect. Creating "the same project" again then left two rows showing the same
+  name and the same host, indistinguishable from each other: there was no way to
+  tell which one held your tabs, and removing the wrong one took them with it.
+  The same name on a *different* host is still fine — that row carries the host,
+  so the two are told apart on sight. If a create slips past that check — the
+  client can only compare against the projects it has been told about, and a
+  submit can beat the first update from a host you just connected — the daemon
+  gives the new project a numbered suffix (`cluster-management (2)`) rather than
+  a second identical name. It disambiguates instead of refusing because a
+  refusal there would be silent, and your create still happens.
+
 ## [1.47.2] - 2026-08-04
 
 ### Fixed

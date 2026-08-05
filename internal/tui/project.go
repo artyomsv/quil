@@ -38,6 +38,10 @@ type ProjectModel struct {
 	Name    string
 	RootDir string
 	Dest    string
+	// Bootstrap mirrors the daemon's flag: this project exists because a tab
+	// needed a home, not because anyone named it. Naming a project on a host
+	// whose only project is this one renames it in place.
+	Bootstrap bool
 
 	tabs      []*TabModel
 	activeTab int
@@ -256,6 +260,67 @@ func mergeProjects(current, rebuilt []*ProjectModel, dest string) []*ProjectMode
 		}
 	}
 	return out
+}
+
+// hostProjectState answers the two questions a create on a remote host asks:
+// is there a project nobody named that this create should adopt, and is there
+// one somebody DID name that makes this create a second project on a host that
+// may hold only one.
+//
+// Both are returned rather than one verdict because the caller does different
+// things with them, and a host can present neither (no projects yet — a dial
+// whose first workspace_state has not landed, where a create is the right
+// answer) but never both: a named project makes the host occupied whatever
+// else it holds, so it is checked first.
+func (m *Model) hostProjectState(dest string) (adoptable, occupied *ProjectModel) {
+	for _, p := range m.projects {
+		if p.Dest != dest {
+			continue
+		}
+		if p.Bootstrap {
+			if adoptable == nil {
+				adoptable = p
+			}
+			continue
+		}
+		// Named by a user. One is enough to answer, and returning the first
+		// keeps the message naming a stable project rather than whichever the
+		// broadcast happened to order last.
+		return nil, p
+	}
+	return adoptable, nil
+}
+
+// hostLabel renders a destination for a message. Empty means the local daemon,
+// which has no host to name.
+func hostLabel(dest string) string {
+	if dest == "" {
+		return "this machine"
+	}
+	return dest
+}
+
+// projectNamedOnDest finds a project with this name on this destination, or
+// nil. Names are compared case-insensitively after trimming, because the
+// sidebar renders them as typed and "Cluster" beside "cluster" is the same
+// indistinguishable pair as two exact duplicates.
+//
+// Scoped to ONE destination on purpose: the same project name on a laptop and
+// on a build host is ordinary — the row carries the host, so those two are
+// told apart on sight, which is exactly what two on one host are not.
+// excludeID is the project being renamed, which must not collide with itself —
+// submitting a rename that changes only the root directory is ordinary.
+func (m *Model) projectNamedOnDest(name, dest, excludeID string) *ProjectModel {
+	want := strings.ToLower(strings.TrimSpace(name))
+	for _, p := range m.projects {
+		if p.ID == excludeID {
+			continue
+		}
+		if p.Dest == dest && strings.ToLower(strings.TrimSpace(p.Name)) == want {
+			return p
+		}
+	}
+	return nil
 }
 
 // projectOf returns the project owning the tab with the given ID, or nil.

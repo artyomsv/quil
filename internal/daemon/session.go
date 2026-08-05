@@ -293,6 +293,11 @@ func (sm *SessionManager) createTabLocked(projectID, name string) *Tab {
 				ID:      "proj-" + uuid.New().String()[:8],
 				Name:    "Default",
 				RootDir: cwd,
+				// Nobody asked for this one — it exists because a tab must
+				// belong to a project. Marked so the first project the user
+				// names on this daemon can adopt it instead of appearing
+				// beside a "Default" they never created.
+				Bootstrap: true,
 			}
 			sm.projects[p.ID] = p
 			sm.projectOrder = append(sm.projectOrder, p.ID)

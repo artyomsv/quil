@@ -1,6 +1,65 @@
 package daemon
 
-import "github.com/google/uuid"
+import (
+	"fmt"
+	"strings"
+
+	"github.com/google/uuid"
+)
+
+// projectNames lists every project's name. Caller holds sm.mu.
+func (sm *SessionManager) projectNames() []string {
+	return sm.projectNamesExcept("")
+}
+
+// projectNamesExcept lists every project's name but one — the project being
+// renamed, which must not be told it collides with itself. Caller holds sm.mu.
+func (sm *SessionManager) projectNamesExcept(id string) []string {
+	out := make([]string, 0, len(sm.projects))
+	for pid, p := range sm.projects {
+		if pid == id {
+			continue
+		}
+		out = append(out, p.Name)
+	}
+	return out
+}
+
+// uniqueProjectName returns want, or want with the lowest numeric suffix no
+// existing project carries.
+//
+// It DISAMBIGUATES rather than refusing, because a refusal here would be
+// silent: the daemon has no error channel back to a create, and this package
+// has already learnt what a silently-ignored project message costs — a daemon
+// that accepted create and did nothing read as a broken dialog for an evening.
+// A suffixed name keeps the user's own words, so the row stays findable, and
+// keeps the create they asked for.
+//
+// Compared case-insensitively after trimming: neither case nor padding makes
+// two rows tellable apart on screen, which is the only property that matters.
+func uniqueProjectName(taken []string, want string) string {
+	norm := func(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
+	used := make(map[string]bool, len(taken))
+	for _, t := range taken {
+		used[norm(t)] = true
+	}
+	// Trimmed on BOTH paths. Trimming only where a collision happens made the
+	// stored name depend on whether one occurred — "  infra  " kept its padding
+	// alone and lost it as "infra (2)" — and the client trims before sending
+	// anyway, so this only ever differed for another IPC client.
+	base := strings.TrimSpace(want)
+	if !used[norm(base)] {
+		return base
+	}
+	// Bounded by construction: each candidate is distinct and there are
+	// finitely many taken names, so one of the first len(taken)+2 is free.
+	for n := 2; ; n++ {
+		candidate := fmt.Sprintf("%s (%d)", base, n)
+		if !used[norm(candidate)] {
+			return candidate
+		}
+	}
+}
 
 // Project groups tabs under one named piece of work rooted at one directory.
 // Daemon-owned and persisted: a client-side-only grouping would be lost on a
@@ -14,6 +73,19 @@ type Project struct {
 	RootDir   string
 	TabIDs    []string
 	ActiveTab string
+
+	// Bootstrap marks a project the DAEMON invented rather than one a user
+	// named: the one createTabLocked makes when a tab needs a home and none
+	// exists, and the one migrateToDefaultProject wraps a pre-projects
+	// workspace in. Both are called "Default", but the name cannot be the
+	// signal — a user is free to name a project Default, and renaming this one
+	// is exactly what stops it being a bootstrap.
+	//
+	// The client uses it to ADOPT: naming a project on a host whose only
+	// project is this one renames it in place, so the host's existing tabs end
+	// up under the name the user chose instead of beside it. Persisted, because
+	// a daemon restart must not turn an un-adopted default into a real project.
+	Bootstrap bool
 }
 
 func (sm *SessionManager) CreateProject(name, rootDir string) *Project {
@@ -21,8 +93,15 @@ func (sm *SessionManager) CreateProject(name, rootDir string) *Project {
 	defer sm.mu.Unlock()
 
 	p := &Project{
-		ID:      "proj-" + uuid.New().String()[:8],
-		Name:    name,
+		ID: "proj-" + uuid.New().String()[:8],
+		// Disambiguated HERE because here is the only place that can be sure.
+		// The client refuses a duplicate too, but it checks its own snapshot of
+		// this daemon's projects — empty until the first workspace_state
+		// arrives, and Enter on the form's Name row submits immediately, so
+		// that window is one keystroke wide. Two rows with the same name on the
+		// same host are indistinguishable in the sidebar: nothing says which
+		// holds the user's tabs, and removing the wrong one takes them.
+		Name:    uniqueProjectName(sm.projectNames(), name),
 		RootDir: rootDir,
 	}
 	sm.projects[p.ID] = p
@@ -90,14 +169,32 @@ func (sm *SessionManager) DestroyProject(id string) []*Pane {
 	return detached
 }
 
-func (sm *SessionManager) UpdateProject(id, name, rootDir string) bool {
+// requireBootstrap makes the update conditional on the project still being one
+// the daemon invented — the compare-and-swap half of the client's adopt path.
+// See UpdateProjectPayload.AdoptBootstrap.
+func (sm *SessionManager) UpdateProject(id, name, rootDir string, requireBootstrap bool) bool {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	p, ok := sm.projects[id]
 	if !ok {
 		return false
 	}
-	p.Name, p.RootDir = name, rootDir
+	if requireBootstrap && !p.Bootstrap {
+		// Someone named it between this client deciding to adopt and the
+		// message arriving. Refusing is what stops two clients adopting one
+		// host and each silently renaming the other's project; an ordinary
+		// rename does not set the flag and is unaffected.
+		return false
+	}
+	// Naming it is what makes it the user's. A project that stayed Bootstrap
+	// after a rename would be adopted a second time by the next create, which
+	// would silently rename the work the user had just named.
+	// Disambiguated like a create, and for the same reason: a rename can produce
+	// the indistinguishable pair a create is prevented from producing, and the
+	// client's guard is a snapshot check that a second client can race. Its own
+	// name is excluded, so a rename that only moves the root directory keeps it.
+	p.Name = uniqueProjectName(sm.projectNamesExcept(id), name)
+	p.RootDir, p.Bootstrap = rootDir, false
 	return true
 }
 

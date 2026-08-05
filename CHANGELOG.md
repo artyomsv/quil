@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.50.0] - 2026-08-05
+
 ### Added
 - **The pane right-click menu can now clear a stuck attention mark.** The amber
   "needs you" mark beside a pane is switched on and off by the agent's own hook

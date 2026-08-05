@@ -127,8 +127,8 @@ func TestBuildCtxMenuItems_LabelsAndGates(t *testing.T) {
 	pane.pinnedAttention = true
 
 	items := m.buildCtxMenuItems(pane)
-	if len(items) != 9 {
-		t.Fatalf("item count = %d, want 9", len(items))
+	if len(items) != 10 {
+		t.Fatalf("item count = %d, want 10", len(items))
 	}
 	byID := map[ctxMenuAction]ctxMenuItem{}
 	for _, it := range items {

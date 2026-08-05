@@ -150,6 +150,65 @@ jobs:
             exit 0
           fi
 
+          # Nothing that reaches the binary => nothing to release.
+          #
+          # This gate exists because ci.yml and this workflow used to answer
+          # "is this user-facing?" DIFFERENTLY. ci.yml's changelog job decides
+          # by changed FILES and exempts site-only PRs; this step decided by
+          # commit TYPE alone. So `fix(site):` passed PR review with no
+          # changelog entry, then bumped a patch here and died on the
+          # [Unreleased] gate below — green PR, red master, every time. That
+          # is what happened to #130 (1.49.0 -> 1.49.1).
+          #
+          # Cutting the release anyway would be worse than failing: it
+          # publishes five platform binaries byte-identical to the previous
+          # tag, so users get an update notification for a CSS change.
+          #
+          # Expressed as a DENYLIST of things that provably do not ship,
+          # not an allowlist of things that do. An allowlist fails toward
+          # silently NOT releasing, which is the worst outcome available
+          # here: a user-facing fix that never reaches anyone and produces
+          # no signal that it didn't. Review caught exactly that — the
+          # first version listed cmd/ internal/ go.mod go.sum and so missed
+          # every Windows build input. .goreleaser.yml's before.hooks are
+          # the proof: `sh scripts/fetch-conpty.sh` fetches the conpty.dll
+          # and OpenConsole.exe that the Windows build go:embeds, and
+          # `go-winres make --in winres/winres.json` links .syso icon and
+          # version resources into both binaries. A winres-only or
+          # fetch-conpty-only fix is a real shipped change. Inverting it
+          # means a build input added LATER counts by default.
+          #
+          # Non-obvious members, all verified rather than assumed:
+          # internal/plugin/defaults/*.toml and internal/shellinit/*.sh are
+          # go:embed'ed (v1.28.0 shipped lazysql.toml and nothing else);
+          # go.mod alone changes the binary (v0.10.2); .goreleaser.yml
+          # controls ldflags and platforms.
+          #
+          # Deliberately a RANGE-level check, not a per-commit one. Pairing
+          # "changed code" with "declares a type" assumes both live on the
+          # same commit; that holds for squash-merged PRs but not for a
+          # trigger commit. v1.33.1 is the counter-example — #84 carried 15
+          # Go files under a non-conventional subject and #85 (`fix: publish
+          # merged...`) carried the type with no code. Per-commit pairing
+          # never cuts that release at all.
+          #
+          # Backtested over all 109 tag boundaries: 17 differ, and every one
+          # changed nothing outside the denied paths.
+          #
+          # Keep this list in sync with ci.yml's `changelog` job.
+          if git rev-parse "$LAST_TAG" >/dev/null 2>&1; then
+            PAYLOAD=$(git diff --name-only "${LAST_TAG}..HEAD" \
+              | grep -vE '^(site|docs|tools|techdebt|marketing|\.github|\.claude)/' \
+              | grep -vE '^[^/]+\.md$' \
+              | grep -vE '^(VERSION|LICENSE|Makefile|package-lock\.json|\.gitignore|\.gitattributes|\.editorconfig|\.dockerignore)$' \
+              | grep -v '_test\.go$' || true)
+            if [ -z "$PAYLOAD" ]; then
+              echo "::notice::No changes reach the binary since ${LAST_TAG} (docs/site/workflow only) — skipping release"
+              echo "skip=true" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+          fi
+
           # Determine bump type from conventional commits.
           # - `-i` for case-insensitivity: GitHub's squash-merge auto-capitalizes
           #   branch-name-derived subjects (`feat/x` -> `Feat/x`).

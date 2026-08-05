@@ -89,12 +89,35 @@ jobs:
           echo "$CHANGED"
           echo "---"
 
-          # Production Go code only. Test-only, docs-only, site-only, workflow-
-          # only, and plugin-TOML-only PRs are exempt — they can't change what a
-          # user sees in the binary.
-          CODE=$(echo "$CHANGED" | grep -E '^(cmd|internal)/.*\.go$' | grep -v '_test\.go$' || true)
+          # Anything that reaches the binary. Test-only, docs-only, site-only
+          # and workflow-only PRs are exempt — they can't change what a user
+          # sees in the binary.
+          #
+          # This list MUST match release.yml's payload gate. The two used to
+          # disagree: this job asked "which files changed?" while release.yml
+          # asked "what type is the commit?", so a `fix(site):` PR was exempted
+          # here and then bumped a version there, dying on the [Unreleased]
+          # gate — a green PR that reliably turned master red (#130).
+          # release-worthy and changelog-required have to be the SAME
+          # question, or every divergence is another red master.
+          #
+          # A DENYLIST of what provably does not ship, not an allowlist of
+          # what does — see release.yml for the full reasoning. Briefly: an
+          # allowlist silently omits build inputs added later, and the first
+          # version of this pair missed every Windows one (winres/ and
+          # scripts/fetch-conpty.sh both feed .goreleaser.yml's before.hooks
+          # and land in the shipped binaries).
+          #
+          # Non-obvious members: internal/plugin/defaults/*.toml and
+          # internal/shellinit/*.sh are go:embed'ed, so a TOML-only change
+          # really does change the binary — v1.28.0 shipped exactly that.
+          CODE=$(echo "$CHANGED" \
+            | grep -vE '^(site|docs|tools|techdebt|marketing|\.github|\.claude)/' \
+            | grep -vE '^[^/]+\.md$' \
+            | grep -vE '^(VERSION|LICENSE|Makefile|package-lock\.json|\.gitignore|\.gitattributes|\.editorconfig|\.dockerignore)$' \
+            | grep -v '_test\.go$' || true)
           if [ -z "$CODE" ]; then
-            echo "::notice::No production Go changes — changelog entry not required"
+            echo "::notice::No changes reach the binary — changelog entry not required"
             exit 0
           fi
 

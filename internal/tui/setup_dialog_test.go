@@ -2173,18 +2173,21 @@ func TestRenderSetup_KubeFocused_NoIdleMark(t *testing.T) {
 // exactly one row (30 -> 31) — the cost of the second list, quantified
 // rather than hidden.
 //
-// Swept CONTIGUOUSLY across the whole transition band (26..45) rather than
-// sampled at scattered points: a first version of this test sampled
-// {12,16,24,40} and missed a real bug, because worktreeVisibleRows claimed
-// rows greedily up to its own cap without reserving anything for the session
-// list's floor, and the resulting overflow only showed up on the seven
-// consecutive heights 29..35 that none of the four sample points touched
-// (worst case h=33, 3 rows over budget — exactly the [Continue] pushed off
-// the terminal failure mode this task exists to prevent). A band that
-// changes behaviour at several consecutive integers cannot be trusted to
-// arbitrary sample points; only a contiguous sweep proves there is no gap.
+// Swept CONTIGUOUSLY across the whole transition band and past it (26..48)
+// rather than sampled at scattered points: a first version of this test
+// sampled {12,16,24,40} and missed a real bug, because worktreeVisibleRows
+// claimed rows greedily up to its own cap without reserving anything for
+// the session list's floor, and the resulting overflow only showed up on
+// the seven consecutive heights 29..35 that none of the four sample points
+// touched (worst case h=33, 3 rows over budget — exactly the [Continue]
+// pushed off the terminal failure mode this task exists to prevent). A band
+// that changes behaviour at several consecutive integers cannot be trusted
+// to arbitrary sample points; only a contiguous sweep proves there is no
+// gap. The upper bound (48) runs a few rows past the point where both
+// lists reach their own caps, so the fully-capped regime is covered with
+// margin rather than landing exactly on its boundary.
 func TestSetupDialog_TwoListsShareOneHeightBudget(t *testing.T) {
-	for h := 26; h <= 45; h++ {
+	for h := 26; h <= 48; h++ {
 		m := Model{width: 100, height: h}
 		total := m.worktreeVisibleRows() + m.sessionVisibleRows()
 		want := h - setupChromeRows
@@ -2198,5 +2201,59 @@ func TestSetupDialog_TwoListsShareOneHeightBudget(t *testing.T) {
 		if m.worktreeVisibleRows() < 1 {
 			t.Errorf("height %d: worktree list must keep at least one row", h)
 		}
+	}
+}
+
+// TestWorktreeVisibleRows_ShrinksOnShortTerminal pins worktreeVisibleRows in
+// isolation from the combined-budget test above — mirroring the purpose of
+// TestSessionVisibleRows_ShrinksOnShortTerminal (that its own floor / ramp /
+// cap regions behave), but as a sweep rather than a table of named points.
+// This arithmetic has now produced two independent wrong answers in this
+// task (a stub that ignored height entirely, then a version that ignored
+// the session floor) and was, until now, only ever exercised indirectly
+// through the combined-budget test above. A regression confined to this
+// function's OWN clamp — e.g. someone changes worktreeListVisibleRows and
+// the switch's case order stops matching it — would not necessarily show up
+// there, since that test only bounds the SUM.
+//
+// Enumerative, not closed-form: the sweep does not encode where the floor,
+// ramp, and cap regions START (no 31/32/37 literals). It only asserts
+// properties that must hold at EVERY height regardless of where the
+// breakpoints fall — the result stays within [floor, cap], and it can
+// change by at most 1 row per 1-row change in terminal height, since avail
+// is m.height minus a constant and the clamp can only pass a step through
+// unchanged or absorb it — plus that the floor and cap are each actually
+// reached, at heights far enough into each extreme that no plausible
+// breakpoint could land wrong. Baking the exact breakpoints into the test
+// would move the same fragile derivation that produced two wrong answers
+// into the test itself; the sweep's whole value is that it does not need to
+// know where they are.
+func TestWorktreeVisibleRows_ShrinksOnShortTerminal(t *testing.T) {
+	const (
+		veryShort = 0   // deep in the floor region under any plausible formula
+		veryTall  = 200 // deep in the capped region under any plausible formula
+	)
+
+	if got := (Model{height: veryShort}).worktreeVisibleRows(); got != worktreeListMinRows {
+		t.Errorf("height %d: worktreeVisibleRows = %d, want the floor %d", veryShort, got, worktreeListMinRows)
+	}
+
+	prev := (Model{height: veryShort}).worktreeVisibleRows()
+	for h := veryShort + 1; h <= veryTall; h++ {
+		got := (Model{height: h}).worktreeVisibleRows()
+		if got < worktreeListMinRows || got > worktreeListVisibleRows {
+			t.Fatalf("height %d: worktreeVisibleRows = %d, want it within [%d, %d]",
+				h, got, worktreeListMinRows, worktreeListVisibleRows)
+		}
+		if delta := got - prev; delta < 0 || delta > 1 {
+			t.Fatalf("height %d: worktreeVisibleRows = %d, changed by %d rows from height %d's %d — "+
+				"a 1-row increase in terminal height can grow the list by at most 1 row",
+				h, got, delta, h-1, prev)
+		}
+		prev = got
+	}
+
+	if got := (Model{height: veryTall}).worktreeVisibleRows(); got != worktreeListVisibleRows {
+		t.Errorf("height %d: worktreeVisibleRows = %d, want the cap %d", veryTall, got, worktreeListVisibleRows)
 	}
 }

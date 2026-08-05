@@ -3730,6 +3730,20 @@ func (m Model) worktreeVisibleRows() int {
 	// cap can take rows the session floor is going to demand anyway — the
 	// exact shared-budget overflow this task exists to prevent, in the band
 	// where the worktree list has room to grow but hasn't hit its cap yet.
+	//
+	// The reservation makes the combined budget exact, not merely
+	// sufficient: while this list is still ramping (this function's own
+	// "default: return avail" branch — below its cap, above its floor),
+	// worktreeVisibleRows(h) == h - surroundingRows, so sessionVisibleRows'
+	// own avail (m.height - setupChromeRows - worktreeVisibleRows()) has
+	// m.height cancel out of the subtraction entirely, leaving the CONSTANT
+	// surroundingRows - setupChromeRows = 1 + sessionListMinRows. That
+	// constant sits one row ABOVE the session floor — session is not
+	// clamped there, it returns that value via its own default branch — so
+	// worktree(h) + session(h) reduces to (h - surroundingRows) + (1 +
+	// sessionListMinRows) = h - setupChromeRows, i.e. exactly the combined
+	// budget, for every height in the ramp. Zero slack, not "enough
+	// headroom".
 	const surroundingRows = setupChromeRows + 1 + sessionListMinRows
 	avail := m.height - surroundingRows
 	switch {

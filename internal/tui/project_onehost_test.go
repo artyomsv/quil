@@ -144,10 +144,20 @@ func TestSubmitNewProject_LocalDaemonStillTakesManyProjects(t *testing.T) {
 	}
 }
 
-// A host whose first workspace_state has not landed presents no projects at
-// all. A create is the right answer there — refusing would make the dialog
-// depend on a broadcast the user cannot see.
-func TestSubmitNewProject_CreatesOnAHostThatHasReportedNothingYet(t *testing.T) {
+// The escape hatch: a named destination this client has never attached.
+//
+// Read the fixture carefully — `attached` is empty. That is what separates this
+// from TestSubmitNewProject_WaitsForAHostThatHasNotReportedYet, which is the
+// case the user actually reaches: attached, and its state still in flight.
+//
+// Whether an UNATTACHED non-empty dest is reachable through the UI is NOT
+// established. `adoptDest` sets the ledger entry before `destDialedMsg` assigns
+// projectFormDest, and a project only exists for a dest whose state has
+// arrived, so both routes into the form look attached — but every entry point
+// has not been traced, and a create is the safer answer for a destination the
+// client knows nothing about than a wait that nothing will ever end. This pins
+// the fallback; it does not claim a user can get here.
+func TestSubmitNewProject_CreatesOnAHostThisClientNeverAttached(t *testing.T) {
 	remote := newFakeConn()
 	m := Model{
 		client:          NewRouter(map[string]Client{"": newFakeConn(), "gpu01": remote}),

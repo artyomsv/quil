@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -158,4 +159,37 @@ func rowTexts(rows []sidebarRow) []string {
 		out = append(out, r.text)
 	}
 	return out
+}
+
+// The other bound on the same line: ssh's own words.
+//
+// The transport caps its stderr at 2000 bytes, which is small enough not to be
+// an attack and far too large for this row — at the dialog's width it wraps to
+// some forty lines and pushes the box past the terminal. Asserted because the
+// sibling bound on the project name has a test and this one did not, so
+// dropping either truncateToWidth wrapper would have failed nothing.
+func TestProjectFormMessage_BoundsARemoteDiagnostic(t *testing.T) {
+	m := Model{
+		width: 100, height: 30, dialog: dialogProjectNew,
+		client:             NewRouter(map[string]Client{"": newFakeConn()}),
+		projectFormDialing: "gpu01",
+		attached:           map[string]bool{},
+	}
+
+	next, _ := m.Update(destDialedMsg{
+		dest: "gpu01",
+		err:  errors.New("ssh: " + strings.Repeat("banner ", 400)),
+	})
+	got := next.(Model)
+
+	if got.projectFormErr == "" {
+		t.Fatal("the failure was not reported, so nothing was bounded")
+	}
+	if n := len(got.projectFormErr); n > 300 {
+		t.Errorf("the message is %d bytes — ssh's stderr reaches this row whole "+
+			"and wraps the dialog past the bottom of the terminal", n)
+	}
+	if lines := strings.Count(got.renderProjectDialog(), "\n"); lines > 100 {
+		t.Errorf("the dialog rendered %d lines for one connection failure", lines)
+	}
 }

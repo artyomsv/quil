@@ -112,3 +112,21 @@ func TestUpdateProject_KeepsItsOwnNameWhenOnlyTheRootChanges(t *testing.T) {
 		t.Errorf("root = %q, want the new one", got.RootDir)
 	}
 }
+
+// A name that collides with nothing is stored trimmed, like one that does.
+//
+// The trim used to live on the collision path only, so "  infra  " kept its
+// padding when it was the first of its name and lost it when it was the
+// second — the stored value depended on whether a collision happened. The
+// case-and-space test above cannot catch a regression here: it collides, so it
+// goes through the disambiguation branch, which always trimmed.
+func TestCreateProject_TrimsANameThatCollidesWithNothing(t *testing.T) {
+	sm := NewSessionManager(100)
+
+	p := sm.CreateProject("  infra  ", "")
+
+	if p.Name != "infra" {
+		t.Errorf("name = %q, want it trimmed — otherwise whether the padding "+
+			"survives depends on whether some other project happens to share the name", p.Name)
+	}
+}

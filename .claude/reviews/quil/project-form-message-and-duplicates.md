@@ -25,3 +25,9 @@ Rounds completed: 1
 - [quality/J] `hostLabel("")` → "this machine" is currently dead, since its only caller sits inside the `projectFormDest != ""` branch. Kept deliberately: it is correct for a local caller, and removing it would make a future one silently name nothing (round 1)
 - [rules/1] Commit bodies run 73–80 chars against the 72-char guideline. The repo's whole history reads this way, so this PR is consistent with existing practice rather than deviating; a change here is repo-wide, not PR-scoped (round 1)
 - [rules/2] Commit `85650de` bundles the message-severity change with the duplicate-name guard. The repo squash-merges, so the final history is one commit either way (round 1)
+
+## Round 2 — QA delta pass (2026-08-05)
+
+- [qa/delta-1] `uniqueProjectName`'s trim on the NO-collision path had no test — the case/space test only exercises the collision branch, which always trimmed, so reverting the reorder passed the whole suite. `TestCreateProject_TrimsANameThatCollidesWithNothing`, mutation-verified — resolved
+- [qa/delta-2] `formMsgDetailCap` was unasserted while its sibling `formMsgNameCap` had a test. `TestProjectFormMessage_BoundsARemoteDiagnostic`, mutation-verified — resolved
+- [qa/delta-3] `TestSubmitNewProject_CreatesOnAHostThatHasReportedNothingYet` claimed to cover "the host has not reported yet", which the new wait test now covers properly; its own fixture leaves `attached` empty, a state QA could not find a UI route to. Renamed to `..._CreatesOnAHostThisClientNeverAttached` and its comment now states what it pins and that reachability is NOT established. The branch is kept: a create is a safer answer for a destination the client knows nothing about than a wait nothing will end — resolved

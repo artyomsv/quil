@@ -93,6 +93,9 @@ let Cloudflare hold it.
 | /docs quick-start | `welcome-page-800.webp`, `f1-settings-page-800.webp` | first-launch walkthrough |
 | README "See it" row 3 | `pane-resize-800.webp`, `mouse-right-click-menu-800.webp` | drag-resize + context-menu cards |
 | /features cards | `pane-resize-800.webp` (mouse-pane-resize), `mouse-right-click-menu-800.webp` (pane-context-menu) | per-feature |
+| README "See it" row 6 | `projects_1_main-800.webp`, `projects_2_with_remote-800.webp` | sidebar + a remote project |
+| README "Run the work somewhere else" | `projects_3_add_remote_1-800.webp`, `projects_4_add_remote_2-800.webp` | the two-step connect flow |
+| /features cards | `projects_1_main-800.webp` (projects), `projects_2_with_remote-800.webp` (multi-daemon) | per-feature |
 
 Reference webp with a png fallback where you want belt-and-suspenders:
 

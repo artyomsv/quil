@@ -36,6 +36,9 @@ Type `quil` after a reboot — every tab, pane, working directory, layout split,
 | **…and search inside every pane** | **Jump to the match** |
 | <img src="https://cdn.stukans.com/quil/screenshots/command-palette-search-1-800.webp" alt="Command palette with a query showing matching commands and a Found in panes section listing panes whose scrollback contains the text" width="420"> | <img src="https://cdn.stukans.com/quil/screenshots/command-palette-search-2-800.webp" alt="Found in panes results with per-pane match counts and a preview line of the most recent match" width="420"> |
 | Start typing and the palette also searches every loaded pane's scrollback — match counts + a preview under **Found in panes**. | `Enter` on a pane match jumps straight to it. Searches loaded panes; lazily-restored panes appear once you open them. |
+| **Every project in one sidebar** | **…including ones on other machines** |
+| <img src="https://cdn.stukans.com/quil/screenshots/projects_1_main-800.webp" alt="Quil sidebar listing a dozen projects with per-pane agent state and git branch under the active one" width="420"> | <img src="https://cdn.stukans.com/quil/screenshots/projects_2_with_remote-800.webp" alt="A remote project in the sidebar labelled with its ssh host, its terminal, lazygit and Claude Code panes all running on that machine" width="420"> |
+| Projects group tabs and roll up their agents — `⚠` needs you, `◐` working, `✓` finished while you were elsewhere. Per-pane git branch underneath. | A remote host is a sibling row with its host under the name. Its panes run over there; the sidebar reports them exactly like local ones. |
 
 ## Install
 
@@ -76,6 +79,36 @@ That's enough to start. See [docs/quick-start.md](docs/quick-start.md) for the f
 
 If anything ever hangs: `quil restart` recovers the daemon (escalating stop → fresh start → tabs restored from the last snapshot), and `Alt+R` restarts a single stuck pane in place with its AI session resumed.
 
+## One window, every project
+
+A **project** groups tabs, owns a root directory, and belongs to one daemon.
+`Alt+Shift+S` opens a sidebar listing all of them at once, and that is the point:
+an agent that finished — or got stuck asking you something — in a project you are
+*not* looking at is visible from the one you are.
+
+Each project row rolls up its panes: `⚠` blocked on you, `◐` working, `✓` finished
+while you were elsewhere. **Blocked and finished are different states**, because
+they need different things from you. `Alt+Shift+A` jumps to whichever agent has
+been waiting longest anywhere in the workspace — oldest first rather than sidebar
+order, since that is the one costing you time.
+
+Under the active project each pane also shows the checkout it sits in — branch,
+`wt` for a linked worktree, `↑N`/`↓N` against upstream. Cached per checkout, so
+ten panes in one repository cost one `git` invocation, and a probe that does not
+answer keeps its last value marked stale rather than guessing.
+
+| Key | Action |
+|---|---|
+| `Alt+Shift+S` | Toggle the sidebar |
+| `Alt+Shift+N` | New project |
+| `Alt+P` | Fuzzy project picker |
+| `Alt+O` | Bounce between the two most recent |
+| `Alt+Shift+A` | Jump to the agent waiting longest, across every project |
+
+Existing workspaces migrate on first load into a single project named `Default`,
+tab order preserved — no prompt, nothing to opt into. Full detail in
+[docs/features.md](docs/features.md#projects).
+
 ## Run the work somewhere else
 
 ```bash
@@ -113,6 +146,16 @@ working: `Host` aliases, jump hosts, per-host keys, hardware tokens, certificate
 and it offers to install one, then attaches. Your laptop downloads the release
 for the *remote's* platform and pushes it over the connection you already have,
 so a node with no route to GitHub provisions as easily as one with.
+
+**Or add the host without leaving the TUI.** Tick **Remote (ssh)** in the New
+Project dialog and press Enter on the Host row — Quil dials it, installs or
+upgrades Quil there if it needs to, then browses *that machine's* filesystem for
+the root directory:
+
+| Dialling, and provisioning what it finds | Connected — now browsing the remote disk |
+|:---:|:---:|
+| <img src="https://cdn.stukans.com/quil/screenshots/projects_3_add_remote_1-800.webp" alt="New Project dialog with Remote ticked, reporting the host is not connected and then that it is upgrading Quil on it" width="400"> | <img src="https://cdn.stukans.com/quil/screenshots/projects_4_add_remote_2-800.webp" alt="The same dialog connected to the host, listing directories from the remote machine's filesystem to pick a root directory" width="400"> |
+| The one message line is coloured by what it *means* — red only when the host cannot be reached at all, amber while work is under way. | Green once the link is up. The directory list comes from the server, so `~`, relative paths and drive roots all describe the right machine. |
 
 **A dropped link is a pause, not an ending.** Close the lid, lose wifi, change
 network — an amber bar names the host, counts the attempts, and shows what `ssh`

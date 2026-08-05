@@ -414,6 +414,35 @@ the rune count drops below head+tail the two slices OVERLAP — the row repeats
 characters at roughly twice the width asked for, and `padOrTrunc` re-clamps it
 so nothing downstream complains.
 
+**No sidebar state glyph may be an EMOJI-CAPABLE codepoint** (`glyphBlocked` /
+`glyphWorking` / `glyphDone` / `glyphIdle`, pinned by
+`TestSidebarGlyphs_OneCellAndNotEmojiCapable`). A font is free to answer such a
+codepoint with a colour emoji face, which is drawn about two cells wide while
+advancing ONE — so it paints over whatever follows it. In the project badge
+what follows is the count, which is how `⚠1 ◐2` rendered as a warning sign with
+its number underneath it. Where the terminal instead ADVANCES two cells the
+damage is quieter: `lipgloss.Width` measures U+26A0 as one (measured — U+26A1
+`⚡` measures two, which is why `truncateCells` names that one), so the row is
+painted a cell wider than every helper believes and `.Width(w)` wraps the
+excess. Forcing text presentation with U+FE0E was tried and rejected: it
+depends on the terminal honouring a variation selector, and the emoji-side
+alternative U+FE0F walks into the cutter rule below. A codepoint that was never
+emoji needs neither.
+
+**`truncateCells` and `lastCellsToWidth` cut on GRAPHEME CLUSTERS, and both
+halves of that are load-bearing.** A rune is not the unit of width — U+FE0F
+measures 0 alone and makes the pair before it 2 — so summing independently
+measured runes returns a string WIDER than the budget it was handed, which
+`renderSidebar`'s closing `.Width(w)` wraps rather than cuts, shifting every row
+below while `sidebarRowAt` still maps screen row y to `rows[y-1]`. Re-measuring
+an accumulated prefix instead is correct but QUADRATIC: it reallocates the
+prefix each step, and a zero-width cluster never advances the budget, so the
+loop cannot exit early on a long run of them. Both failures are reachable from
+ordinary remote text, because `sanitizeRemoteText` is a control-character
+filter and preserves printable non-ASCII byte-identically — it is not a
+bounding pass. `lipgloss` must remain the sole measurer (uniseg segments,
+lipgloss measures), or the cut can disagree with the `.Width` that paints.
+
 **The sidebar is a real reserved column**, unlike the notification sidebar's
 overlay — but it must not re-mode a pane. `paneVTSize` takes SIZE from the rect
 and MODE from `nativeW` (the width the rect would have with the sidebar

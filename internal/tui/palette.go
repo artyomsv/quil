@@ -889,15 +889,18 @@ func lastCellsToWidth(s string, w int) string {
 	if lipgloss.Width(s) <= w {
 		return s
 	}
+	// The candidate suffix is measured WHOLE on every step, never as a running
+	// sum of independently-measured runes. A rune can change the width of the
+	// one before it — a variation selector measures 0 alone while making the
+	// pair 2 — so a per-rune sum returns a suffix WIDER than w, which is the
+	// same overflow truncateCells documents at the other end of the string.
+	// Remote-sourced names reach both.
 	runes := []rune(s)
-	width := 0
 	i := len(runes)
 	for i > 0 {
-		rw := lipgloss.Width(string(runes[i-1]))
-		if width+rw > w {
+		if lipgloss.Width(string(runes[i-1:])) > w {
 			break
 		}
-		width += rw
 		i--
 	}
 	return string(runes[i:])

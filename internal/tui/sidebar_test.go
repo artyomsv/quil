@@ -1030,8 +1030,12 @@ func TestProjectBadgeCountsFinishedPanes(t *testing.T) {
 			"a parked pane must count once, as blocked", working, blocked, finished)
 	}
 
+	// Built from the glyph constants rather than literals: the badge's job is
+	// to carry a COUNT per state, and pinning the codepoints here would make a
+	// deliberate glyph change (see TestSidebarGlyphs_OneCellAndNotEmojiCapable
+	// for why one was needed) look like a counting regression.
 	row := projectRow("alpha", working, blocked, finished, "", false, 30)
-	for _, want := range []string{"⚠1", "◐1", "✓1"} {
+	for _, want := range []string{glyphBlocked + "1", glyphWorking + "1", glyphDone + "1"} {
 		if !strings.Contains(row, want) {
 			t.Errorf("project row %q is missing the %s badge", row, want)
 		}

@@ -506,6 +506,12 @@ func TestAdjustSessionScroll(t *testing.T) {
 // the toggles and the [Continue] button off-screen. The list is the only part
 // that can give, so it shrinks — down to a floor, below which the picker stops
 // being usable at all.
+//
+// The session field now shares its budget with the worktree list (Task 5), so
+// "exactly enough" and "short terminal shrinks" also have to clear the
+// worktree list's own maxed-out share (worktreeListVisibleRows, 6 rows) before
+// the session list sees any room to grow past ITS floor — not just
+// setupChromeRows on its own.
 func TestSessionVisibleRows_ShrinksOnShortTerminal(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -513,8 +519,8 @@ func TestSessionVisibleRows_ShrinksOnShortTerminal(t *testing.T) {
 		want   int
 	}{
 		{"tall terminal keeps the full window", 60, sessionListVisibleRows},
-		{"exactly enough keeps the full window", 26 + sessionListVisibleRows, sessionListVisibleRows},
-		{"short terminal shrinks", 34, 8},
+		{"exactly enough keeps the full window", setupChromeRows + worktreeListVisibleRows + sessionListVisibleRows, sessionListVisibleRows},
+		{"short terminal shrinks", setupChromeRows + worktreeListVisibleRows + 8, 8},
 		{"very short clamps to the floor", 20, sessionListMinRows},
 		{"unset height clamps to the floor", 0, sessionListMinRows},
 	}

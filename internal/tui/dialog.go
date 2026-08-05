@@ -3711,10 +3711,30 @@ func worktreeLabel(list []ipc.WorktreeInfo, path string) string {
 	return path
 }
 
-// worktreeVisibleRows caps the worktree list. Task 5 replaces this body with
-// the version that shares one height budget with the session field.
+// setupChromeRows is the fixed chrome the setup dialog spends on everything
+// that is NOT one of the two expanding lists — title, CWD browser + hint,
+// toggles, the Continue button, borders and padding — measured against the
+// shipped claude-code layout. Both worktreeVisibleRows and sessionVisibleRows
+// derive from this ONE constant so the two lists' budgets cannot drift apart.
+const setupChromeRows = 26
+
+// worktreeVisibleRows caps the worktree list. The floor is 1, never a
+// friendlier number: lipgloss.Place does not clip, so any floor above the
+// height actually available manufactures the overflow it looks like it
+// prevents — the same reasoning as historyMinRows.
 func (m Model) worktreeVisibleRows() int {
-	return worktreeListVisibleRows
+	// One more than the session field's chrome: the collapsed worktree row
+	// itself is always drawn, whether or not the list below it is.
+	const surroundingRows = setupChromeRows + 1
+	avail := m.height - surroundingRows
+	switch {
+	case avail >= worktreeListVisibleRows:
+		return worktreeListVisibleRows
+	case avail < worktreeListMinRows:
+		return worktreeListMinRows
+	default:
+		return avail
+	}
 }
 
 const (

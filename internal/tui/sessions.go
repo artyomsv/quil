@@ -35,11 +35,11 @@ const sessionListMinRows = 4
 // off-screen entirely. Shrink the list instead; it is the only element here
 // that can give.
 func (m Model) sessionVisibleRows() int {
-	// Rows the rest of the dialog needs around this field, measured against the
-	// shipped claude-code layout (title, CWD browser + hint, toggles, button,
-	// borders and padding).
-	const surroundingRows = 26
-	avail := m.height - surroundingRows
+	// The worktree list is drawn in the same content area. Two lists that
+	// each fit while their SUM does not is precisely the overflow this
+	// function exists to prevent, so it claims what setupChromeRows leaves
+	// after the worktree field's own share.
+	avail := m.height - setupChromeRows - m.worktreeVisibleRows()
 	switch {
 	case avail >= sessionListVisibleRows:
 		return sessionListVisibleRows

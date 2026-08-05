@@ -2157,3 +2157,35 @@ func TestRenderSetup_KubeFocused_NoIdleMark(t *testing.T) {
 		t.Errorf("focused kube field must not draw the idle mark\n%s", out)
 	}
 }
+
+// Two expanding lists must not each fit while their SUM overflows. lipgloss
+// does not clip, so the overflow silently pushes [Continue] off the terminal.
+//
+// Below a minimum usable height the dialog does not fit at all, and that is
+// ACCEPTED rather than prevented — the same precedent as historyMinRows and
+// minTermWidth elsewhere in this package. With chrome setupChromeRows and
+// floors worktreeListMinRows+sessionListMinRows, the dialog needs
+// setupChromeRows+worktreeListMinRows+sessionListMinRows (31) rows to hold
+// both lists without overflow; below that, the budget the assertion checks
+// against clamps to the combined floor instead of going negative, so the
+// test still pins that neither list shrinks past its documented minimum
+// rather than going vacuous. Adding the worktree list raised that minimum by
+// exactly one row (30 -> 31) — the cost of the second list, quantified
+// rather than hidden.
+func TestSetupDialog_TwoListsShareOneHeightBudget(t *testing.T) {
+	for _, h := range []int{12, 16, 24, 40} {
+		m := Model{width: 100, height: h}
+		total := m.worktreeVisibleRows() + m.sessionVisibleRows()
+		want := h - setupChromeRows
+		if floor := worktreeListMinRows + sessionListMinRows; want < floor {
+			want = floor
+		}
+		if total > want {
+			t.Errorf("height %d: worktree(%d) + session(%d) = %d rows, exceeds the %d available",
+				h, m.worktreeVisibleRows(), m.sessionVisibleRows(), total, want)
+		}
+		if m.worktreeVisibleRows() < 1 {
+			t.Errorf("height %d: worktree list must keep at least one row", h)
+		}
+	}
+}

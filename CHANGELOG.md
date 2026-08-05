@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.48.0] - 2026-08-05
+
 ### Changed
 - **A remote host now holds exactly one project, and naming it is how you get
   it.** A daemon must have at least one tab and a tab must belong to a project,

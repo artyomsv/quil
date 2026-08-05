@@ -164,12 +164,25 @@ jobs:
           # publishes five platform binaries byte-identical to the previous
           # tag, so users get an update notification for a CSS change.
           #
-          # The path list is deliberately BROADER than ci.yml's `*.go` — it
-          # covers anything compiled or go:embed'ed into the binary. Both
-          # rescues are real and backtested: v1.28.0 shipped only
-          # internal/plugin/defaults/lazysql.toml (embedded — the binary
-          # really did gain a plugin) and v0.10.2 shipped only go.mod. A
-          # .go-only filter would have silently suppressed both.
+          # Expressed as a DENYLIST of things that provably do not ship,
+          # not an allowlist of things that do. An allowlist fails toward
+          # silently NOT releasing, which is the worst outcome available
+          # here: a user-facing fix that never reaches anyone and produces
+          # no signal that it didn't. Review caught exactly that — the
+          # first version listed cmd/ internal/ go.mod go.sum and so missed
+          # every Windows build input. .goreleaser.yml's before.hooks are
+          # the proof: `sh scripts/fetch-conpty.sh` fetches the conpty.dll
+          # and OpenConsole.exe that the Windows build go:embeds, and
+          # `go-winres make --in winres/winres.json` links .syso icon and
+          # version resources into both binaries. A winres-only or
+          # fetch-conpty-only fix is a real shipped change. Inverting it
+          # means a build input added LATER counts by default.
+          #
+          # Non-obvious members, all verified rather than assumed:
+          # internal/plugin/defaults/*.toml and internal/shellinit/*.sh are
+          # go:embed'ed (v1.28.0 shipped lazysql.toml and nothing else);
+          # go.mod alone changes the binary (v0.10.2); .goreleaser.yml
+          # controls ldflags and platforms.
           #
           # Deliberately a RANGE-level check, not a per-commit one. Pairing
           # "changed code" with "declares a type" assumes both live on the
@@ -177,16 +190,17 @@ jobs:
           # trigger commit. v1.33.1 is the counter-example — #84 carried 15
           # Go files under a non-conventional subject and #85 (`fix: publish
           # merged...`) carried the type with no code. Per-commit pairing
-          # never cuts that release at all, and a release that silently does
-          # not happen is worse than one that fails loudly.
+          # never cuts that release at all.
           #
-          # Backtested over all 109 tag boundaries: 18 differ, and every one
-          # changed nothing under these paths.
+          # Backtested over all 109 tag boundaries: 17 differ, and every one
+          # changed nothing outside the denied paths.
           #
-          # Keep the path list in sync with ci.yml's `changelog` job.
+          # Keep this list in sync with ci.yml's `changelog` job.
           if git rev-parse "$LAST_TAG" >/dev/null 2>&1; then
             PAYLOAD=$(git diff --name-only "${LAST_TAG}..HEAD" \
-              | grep -E '^(cmd/|internal/|go\.mod$|go\.sum$)' \
+              | grep -vE '^(site|docs|tools|techdebt|marketing|\.github|\.claude)/' \
+              | grep -vE '^[^/]+\.md$' \
+              | grep -vE '^(VERSION|LICENSE|Makefile|package-lock\.json|\.gitignore|\.gitattributes|\.editorconfig|\.dockerignore)$' \
               | grep -v '_test\.go$' || true)
             if [ -z "$PAYLOAD" ]; then
               echo "::notice::No changes reach the binary since ${LAST_TAG} (docs/site/workflow only) — skipping release"

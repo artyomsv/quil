@@ -101,12 +101,21 @@ jobs:
           # release-worthy and changelog-required have to be the SAME
           # question, or every divergence is another red master.
           #
-          # Note this is broader than the `*.go` filter it replaced: embedded
-          # assets count. internal/plugin/defaults/*.toml and
-          # internal/shellinit/*.sh are go:embed'ed, so changing one really
-          # does change the binary — v1.28.0 shipped exactly that (lazysql.toml
-          # and nothing else), as did v0.10.2 (go.mod alone).
-          CODE=$(echo "$CHANGED" | grep -E '^(cmd/|internal/|go\.mod$|go\.sum$)' | grep -v '_test\.go$' || true)
+          # A DENYLIST of what provably does not ship, not an allowlist of
+          # what does — see release.yml for the full reasoning. Briefly: an
+          # allowlist silently omits build inputs added later, and the first
+          # version of this pair missed every Windows one (winres/ and
+          # scripts/fetch-conpty.sh both feed .goreleaser.yml's before.hooks
+          # and land in the shipped binaries).
+          #
+          # Non-obvious members: internal/plugin/defaults/*.toml and
+          # internal/shellinit/*.sh are go:embed'ed, so a TOML-only change
+          # really does change the binary — v1.28.0 shipped exactly that.
+          CODE=$(echo "$CHANGED" \
+            | grep -vE '^(site|docs|tools|techdebt|marketing|\.github|\.claude)/' \
+            | grep -vE '^[^/]+\.md$' \
+            | grep -vE '^(VERSION|LICENSE|Makefile|package-lock\.json|\.gitignore|\.gitattributes|\.editorconfig|\.dockerignore)$' \
+            | grep -v '_test\.go$' || true)
           if [ -z "$CODE" ]; then
             echo "::notice::No changes reach the binary — changelog entry not required"
             exit 0

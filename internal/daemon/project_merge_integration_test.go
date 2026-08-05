@@ -56,6 +56,20 @@ func TestMergeProjects_SurvivesTheWireAndARestart(t *testing.T) {
 	if len(projects[0].TabIDs) != 3 {
 		t.Errorf("survivor holds %d tabs, want all 3", len(projects[0].TabIDs))
 	}
+	if projects[0].RootDir != "/home/a/homelab" {
+		t.Errorf("RootDir = %q, want the value the payload carried", projects[0].RootDir)
+	}
+
+	// The handler must SCHEDULE the write, not merely leave the state right in
+	// memory. snapshotCh is buffered to 1 and requestSnapshot is a non-blocking
+	// send, so a pending request is exactly one queued item. Asserted because
+	// calling d.snapshot() below bypasses the trigger entirely: without this,
+	// deleting the handler's requestSnapshot() left this test green while a fold
+	// survived only until the daemon was killed inside the 30 s ticker window.
+	if len(d.snapshotCh) != 1 {
+		t.Error("the merge handler scheduled no snapshot, so the fold lives only " +
+			"in memory until the periodic ticker happens to fire")
+	}
 
 	d.snapshot()
 	state, err := persist.Load(config.WorkspacePath())

@@ -143,8 +143,9 @@ func TestSubmitNewProject_OffersToFoldAHostHoldingSeveral(t *testing.T) {
 }
 
 // The LOCAL daemon keeps many projects. The one-per-host rule is about remote
-// hosts, and applying it locally would refuse the second project on the machine
-// the user is sitting at.
+// hosts, and applying it locally would FOLD every project on the machine the
+// user is sitting at into one — the exact operation the rule now performs on a
+// remote host, and the exact wrong answer here.
 func TestSubmitNewProject_LocalDaemonStillTakesManyProjects(t *testing.T) {
 	local := newFakeConn()
 	m := Model{

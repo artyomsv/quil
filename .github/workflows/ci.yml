@@ -50,6 +50,12 @@ jobs:
       # makes a deadlocked test fail fast WITH a full goroutine dump naming the
       # culprit, instead of hanging until the job timeout.
       - run: go test -race -timeout 300s ./...
+      # The build tag keeps these out of the run above — and out of compilation
+      # entirely, so without this step they are not even type-checked. They cover
+      # what unit tests structurally cannot: that a handler is wired into the
+      # dispatch at all, and that state survives snapshot → restore. Deleting a
+      # `case ipc.Msg…:` arm left the whole suite green before this existed.
+      - run: go test -tags=integration -race -timeout 300s ./...
       - run: go build ./cmd/quil && go build ./cmd/quild
 
       - name: shellcheck

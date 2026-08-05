@@ -124,6 +124,42 @@ clear it explicitly is dialog OPEN: reopening against the same host and typing
 the same name reproduces an identical plan, so a plan outliving its form would
 fire on the first Enter of the next session having shown nobody anything.
 
+**Comparing plans is NOT the property required, and that gap shipped inside this
+feature.** What is needed is "the user pressed Enter while the sentence this plan
+produced was on screen"; the armed plan and the displayed message are
+INDEPENDENT fields, so they come apart. Typing into the Name row clears
+`projectFormErr` and leaves `projectFormMerge`; backspace restores neither. Two
+keystrokes therefore returned the form to a state where the plan matched,
+nothing `sameAs` compares had changed, and the warning line was blank — and the
+next Enter folded a host with no confirmation anywhere on screen. `foldIsConfirmed`
+checks the RENDERED line as well, which also covers the Host/User rows and a dial
+whose "connecting to …" replaces the warning while `projectFormDest` still names
+the old host.
+
+**`message()` must name everything the plan can change, for the same reason.**
+The root directory proved it: the dialog's own opening browse resolves an EMPTY
+path, so the daemon answers with its default CWD and `applyBrowseListing` writes
+that into `cwdBrowseDir` — a directory nobody picked. A plan armed before that
+lands carries the survivor's root and one armed after carries the daemon's
+default, so the second Enter re-armed *correctly* behind text that had not
+changed by one character. Three Enters, two identical sentences, and a real
+project's root replaced. It invalidated `submitProjectForm`'s standing claim that
+`cwdBrowseDir` "is always one of three safe things" — there is a fourth. The root
+is mentioned only when it MOVES, because the value itself is on the row above.
+
+**Reachability is checked in the client, because the send cannot report it.**
+`Router.Send` DROPS a message aimed at a dest it has no conn for, logs, and
+returns nil — deliberately, so `resizeAllPanes`/`sendAllLayouts` cannot break
+mid-iteration. Every `if err := send(…)` in the dialog is therefore blind to the
+likeliest failure of all. `destReachable` guards the whole `projectFormDest != ""`
+branch rather than the fold alone, because a host that disconnects between the
+two Enters also changes WHICH branch runs: its projects are dropped client-side,
+so the recompute finds none and falls through to the generic create — the user
+confirms a fold and the client attempts a create, then closes as though the fold
+had happened. It is not `destConnected`: that answers "should this be dialled",
+and for a non-Router client it answers from `knownDests()`'s `[""]`, which would
+report unreachable down the one path guaranteed to deliver.
+
 **`absorb` is an explicit ID list, never "every other project".** The local
 daemon is deliberately exempt from one-per-host, so a payload meaning "fold
 everything" would let one mis-aimed local send collapse the projects on the
@@ -176,9 +212,9 @@ create; destructive the moment a submit can rename the host's existing project.
 It seeds Remote/user/host from the dest now, as `beginProjectRename` always did.
 
 **The local daemon is deliberately exempt**, and applying this there would be
-wrong twice over: it would refuse the second project on the machine the user is
-sitting at, and its create would rename the Default holding their existing work
-rather than adding beside it.
+wrong twice over: it would FOLD every project on the machine the user is sitting
+at into one — the local daemon is expected to hold many — and its create would
+rename the Default holding their existing work rather than adding beside it.
 
 **Hosts connected before the flag existed keep an unmarked Default** — the
 migration runs once and does not re-run, so the record has no `bootstrap` key
@@ -198,8 +234,9 @@ the wrong one takes its tabs. `submitNewProject` refuses a name already present
 on `projectFormDest` (case- and space-insensitive, since neither makes the rows
 distinguishable) — reachable only on the LOCAL path now, since a remote host
 with any project at all folds before it gets here, and the fold is what clears
-duplicates a pre-rule client already left. Scoped to ONE dest deliberately — the same name on a laptop
-and a build host is ordinary, because the row carries the host. The client
+duplicates a pre-rule client already left. Scoped to ONE dest deliberately —
+the same name on a laptop and a build host is ordinary, because the row carries
+the host. The client
 itself does NOT duplicate: `mergeProjects` is keyed by ID and `Router.Add`
 no-ops on a live dest, both pinned by tests (`dialdest_reconnect_test.go`)
 written to disprove exactly that theory before the guard was added.

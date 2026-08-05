@@ -16,7 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now describes exactly what it will do — how many projects there are, what the
   result will be called, how many tabs move, and that **nothing is closed** —
   and a second Enter carries it out. Editing the name in between re-describes
-  rather than acting on the sentence you moved away from.
+  rather than acting on the sentence you moved away from, and if the root
+  directory would move, the message says so — the browser fills that field in
+  by itself once it finishes listing, so it can change without you touching it.
+  A host that has gone away is reported instead of the fold appearing to work.
 
 ### Fixed
 - **A host carrying duplicate projects can now be consolidated without losing

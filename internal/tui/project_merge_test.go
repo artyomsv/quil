@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -26,6 +27,99 @@ func mergeFormModel(remote *fakeConn) Model {
 		dialog:          dialogProjectNew,
 	}
 }
+
+// The confirmation gate is about what is ON SCREEN, not only about the plan.
+//
+// The armed plan and the displayed message are independent fields, and the Name
+// row clears the message on a keystroke without clearing the plan while
+// backspace restores neither. Two keystrokes therefore returned the form to a
+// state where the plan matched, nothing sameAs compares had changed, and the
+// warning line was blank — and the next Enter folded the host with no
+// confirmation anywhere on screen.
+func TestSubmitNewProject_DoesNotFoldWhileTheWarningIsOffScreen(t *testing.T) {
+	remote := newFakeConn()
+	m := mergeFormModel(remote)
+
+	m.submitNewProject("cluster-management", "/srv") // arms and describes
+	// Type a character and delete it again: the form is byte-for-byte back where
+	// it was, except that the message line is now empty.
+	m.projectFormName = "cluster-managementx"
+	m.projectFormErr = ""
+	m.projectFormName = "cluster-management"
+
+	m.submitNewProject("cluster-management", "/srv")
+
+	if got := len(sentOfType(t, remote, ipc.MsgMergeProjects)); got != 0 {
+		t.Errorf("sent %d merges with a blank message line — the two-Enter design "+
+			"exists to make the user read the consequence, and this fold was "+
+			"confirmed against nothing", got)
+	}
+	if m.projectFormErr == "" {
+		t.Error("re-arming did not put the warning back, so the next Enter has " +
+			"nothing to confirm either")
+	}
+}
+
+// Same hole reached without touching the fold's own fields: a dial started after
+// arming replaces the warning with "connecting to …" while projectFormDest still
+// names the OLD host, so every field sameAs compares is unchanged.
+func TestSubmitNewProject_DoesNotFoldWhileAnotherMessageIsShowing(t *testing.T) {
+	remote := newFakeConn()
+	m := mergeFormModel(remote)
+
+	m.submitNewProject("cluster-management", "/srv")
+	m.setFormBusy("connecting to buildbox…")
+
+	m.submitNewProject("cluster-management", "/srv")
+
+	if got := len(sentOfType(t, remote, ipc.MsgMergeProjects)); got != 0 {
+		t.Errorf("sent %d merges while the screen read \"connecting to buildbox…\" — "+
+			"the user confirmed a sentence describing different work", got)
+	}
+}
+
+// A conn that is PRESENT but refuses the write must not close the dialog
+// either. Distinct from the host having gone away entirely, which the
+// reachability guard catches earlier: here the router has the dest, the send is
+// attempted, and ipc.Conn.Send returns an error — a queue overflow, or a conn
+// closed under us.
+func TestSubmitNewProject_AFailedSendKeepsTheDialogAndReports(t *testing.T) {
+	failing := &failingConn{fakeConn: newFakeConn()}
+	m := mergeFormModel(newFakeConn())
+	m.client = NewRouter(map[string]Client{"": newFakeConn(), "gpu01": failing})
+
+	m.submitNewProject("cluster-management", "/srv")
+	m.submitNewProject("cluster-management", "/srv")
+
+	if m.dialog == dialogNone {
+		t.Error("the dialog closed on a fold whose write was refused, so the host " +
+			"is presented as tidied while its duplicates are all still there")
+	}
+	if m.projectFormMsgKind != projectFormMsgError {
+		t.Errorf("kind = %d, want error — the fold did not happen", m.projectFormMsgKind)
+	}
+	// The next Enter RE-ARMS rather than retrying: setFormError replaced the
+	// warning, so foldIsConfirmed refuses until the consequence is back on
+	// screen. Pinned because the message used to promise "Enter retries", which
+	// was wrong by exactly one Enter.
+	m.submitNewProject("cluster-management", "/srv")
+	if m.projectFormMsgKind != projectFormMsgWarn {
+		t.Errorf("kind = %d after the next Enter, want the warning back", m.projectFormMsgKind)
+	}
+	if strings.Contains(m.projectFormErr, "retries") {
+		t.Errorf("message = %q promises a retry the next keystroke does not perform",
+			m.projectFormErr)
+	}
+}
+
+// failingConn is a conn the router HAS but which refuses every write.
+type failingConn struct {
+	*fakeConn
+}
+
+func (c *failingConn) Send(*ipc.Message) error { return errSendRefused }
+
+var errSendRefused = errors.New("send refused")
 
 // The second Enter is the one that acts, and it must send exactly the fold the
 // message described.
@@ -97,6 +191,70 @@ func TestSubmitNewProject_ChangingTheNameReArmsInsteadOfFolding(t *testing.T) {
 	}
 }
 
+// A host whose SET of duplicates changed — one destroyed, another appearing,
+// counts coincidentally equal — must re-arm on membership alone.
+//
+// This is the only thing pinning sameAs's per-element comparison; every other
+// test differs in length, so dropping the loop passed the whole package. It is
+// also the case with no visual signal whatsoever: the several-projects message
+// names only counts, so a correct re-arm renders byte-identically and the user
+// cannot tell the difference. The comparison is the entire defence.
+func TestSubmitNewProject_ReArmsWhenTheSameNumberOfDifferentProjectsIsThere(t *testing.T) {
+	remote := newFakeConn()
+	m := mergeFormModel(remote)
+
+	m.submitNewProject("cluster-management", "/srv")
+	// One stray destroyed, a different one created: still three projects.
+	m.projects[2] = &ProjectModel{
+		ID: "proj-dup-c", Name: "cluster-management", Dest: "gpu01",
+		tabs: []*TabModel{{ID: "tab-9"}},
+	}
+	m.submitNewProject("cluster-management", "/srv")
+
+	sent := sentOfType(t, remote, ipc.MsgMergeProjects)
+	if len(sent) != 0 {
+		t.Fatalf("sent %d merges against a different set of projects than the one "+
+			"the armed plan described", len(sent))
+	}
+	if m.projectFormMerge == nil || m.projectFormMerge.absorb[1] != "proj-dup-c" {
+		t.Errorf("plan = %+v, want it re-armed on the projects now present",
+			m.projectFormMerge)
+	}
+}
+
+// A host that disconnects while the dialog is open must not have the fold turn
+// into something else.
+//
+// Disconnect drops the host's projects client-side, so the recompute finds none
+// and falls through to the generic create at the bottom of submitNewProject —
+// the user confirms a FOLD and the client attempts a CREATE, which Router.Send
+// then drops silently for a dest it no longer has a conn for, closing the dialog
+// as though the fold had happened.
+func TestSubmitNewProject_RefusesWhenTheHostWentAwayMidConfirmation(t *testing.T) {
+	remote := newFakeConn()
+	m := mergeFormModel(remote)
+	m.submitNewProject("cluster-management", "/srv") // arm
+
+	// The host goes: its conn is gone and its projects with it.
+	m.client = NewRouter(map[string]Client{"": newFakeConn()})
+	m.projects = nil
+
+	m.submitNewProject("cluster-management", "/srv")
+
+	if got := len(remote.sent); got != 0 {
+		t.Errorf("sent %d messages to a host that is no longer connected", got)
+	}
+	if m.dialog == dialogNone {
+		t.Error("the dialog closed, presenting the fold as done")
+	}
+	if m.projectFormMsgKind != projectFormMsgError {
+		t.Errorf("kind = %d, want error — the host is unreachable", m.projectFormMsgKind)
+	}
+	if m.projectFormMerge != nil {
+		t.Error("the plan is still armed for a host that is gone")
+	}
+}
+
 // A host whose projects changed under the user — another client renamed one,
 // or a broadcast added one — must re-arm too. The plan carries the survivor's
 // name for exactly this reason: it appears in the message.
@@ -155,6 +313,44 @@ func TestProjectMergePlan_MessageStatesTheConsequence(t *testing.T) {
 	}
 }
 
+// The message must name EVERYTHING the plan can change, or recompute-and-compare
+// is defeated by a silent field.
+//
+// The root directory is the case that proved it. The dialog's own opening browse
+// resolves an EMPTY path, so the daemon answers with its default CWD and
+// applyBrowseListing writes that into cwdBrowseDir — a directory nobody picked.
+// A plan armed before that lands carries the survivor's root and one armed after
+// carries the daemon's default, so the second Enter re-armed correctly behind a
+// message whose text had not changed by one character: three Enters, two
+// identical sentences, and a real project's root replaced.
+func TestProjectMergePlan_MessageNamesARootThatMoves(t *testing.T) {
+	t.Run("silent when the root stays put", func(t *testing.T) {
+		m := mergeFormModel(newFakeConn())
+
+		// Empty root falls back to the survivor's own, so nothing moves.
+		m.submitNewProject("cluster-management", "")
+
+		if strings.Contains(m.projectFormErr, "root directory") {
+			t.Errorf("message = %q, want no mention of a root that is not moving — "+
+				"the value is already on the Root directory row above", m.projectFormErr)
+		}
+	})
+
+	t.Run("named when the browse lands on the daemon's default", func(t *testing.T) {
+		m := mergeFormModel(newFakeConn())
+
+		// What the opening browse delivers: a resolved path nobody chose.
+		m.submitNewProject("cluster-management", "/home/build")
+
+		if !strings.Contains(m.projectFormErr, "/home/build") {
+			t.Errorf("message = %q, want it to say the root becomes /home/build — "+
+				"otherwise the re-armed sentence is identical to the one before it "+
+				"and the user confirms a change they were never shown",
+				m.projectFormErr)
+		}
+	})
+}
+
 // A remote daemon chooses its own project names, and this is the one
 // value-bearing row in the dialog with no truncation of its own — lipgloss WRAPS
 // at the box width, so an unbounded name becomes thousands of rendered lines in
@@ -167,9 +363,12 @@ func TestProjectMergePlan_MessageStatesTheConsequence(t *testing.T) {
 // the one that never touches it, and passed with the cap removed.
 func TestProjectMergePlan_BoundsEveryInterpolatedName(t *testing.T) {
 	long := strings.Repeat("x", 4000)
-	// The message adds fixed prose around the names; two caps' worth of slack
-	// covers it without admitting an uncapped 4000-char name.
-	limit := 2*formMsgNameCap + formMsgDetailCap
+	// The message adds fixed prose around the names and may name a moving root;
+	// this much slack covers all of it without admitting an uncapped 4000-char
+	// value. The host is deliberately NOT bounded and cannot be: Message.Origin
+	// is json:"-" and Router stamps ProjectModel.Dest from its own map key, so a
+	// dest is always the user's own ssh destination, never remote-supplied.
+	limit := 2*formMsgNameCap + formMsgPathCap + formMsgDetailCap
 
 	t.Run("the survivor's name, chosen by the remote daemon", func(t *testing.T) {
 		m := Model{

@@ -1039,11 +1039,16 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		// the one failure — an unknown survivor ID — looks from the client like
 		// a dialog that accepted a name and closed on nothing changing.
 		if !d.session.MergeProjects(p.ProjectID, p.Absorb, p.Name, p.RootDir) {
-			log.Printf("merge %d projects into %s: not applied — unknown id",
+			log.Printf("merge %d projects into %q: not applied — unknown id",
 				len(p.Absorb), p.ProjectID)
 		} else {
-			log.Printf("merged %d projects into %s (%q)", len(p.Absorb), p.ProjectID, p.Name)
+			log.Printf("merged %d projects into %q (%q)", len(p.Absorb), p.ProjectID, p.Name)
 		}
+		// Folding projects that all hold zero tabs leaves the survivor empty,
+		// which is a blank screen with no in-band way out — Ctrl+T files against
+		// the ACTIVE project, and that is the empty one. Create and destroy both
+		// recover here for the same reason.
+		d.recoverEmptyProject(p.ProjectID)
 		d.broadcastState()
 		// Reassigns tabs and DROPS project records, so a daemon killed inside
 		// the 30 s ticker window comes back holding the duplicates the user

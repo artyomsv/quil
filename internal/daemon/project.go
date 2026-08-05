@@ -251,6 +251,16 @@ func (sm *SessionManager) MergeProjects(into string, absorb []string, name, root
 			// landing in two projects) — so moving one side alone makes the
 			// tab vanish from the sidebar while still existing in the daemon.
 			tab.ProjectID = into
+			// A tab already in the survivor's list must not be appended again.
+			// The `id == into` guard above covers only the self-merge shape of
+			// this; a snapshot listing one tab under two projects reaches the
+			// identical state, and restoreProjects copies `tab_ids` verbatim
+			// with no uniqueness or cross-project check. The consequence is the
+			// same either way — the client builds one TabModel twice and both
+			// copies fight over a single layout tree.
+			if indexOfString(dst.TabIDs, tabID) >= 0 {
+				continue
+			}
 			dst.TabIDs = append(dst.TabIDs, tabID)
 			// Keeps the global order consistent with the project-relative one:
 			// the invariant ReorderTab maintains, through the same helper.
@@ -277,8 +287,21 @@ func (sm *SessionManager) MergeProjects(into string, absorb []string, name, root
 	// belongs to dst now. Leaving dst.ActiveTab on dst's OWN original tab makes
 	// the next switch-away-and-back land somewhere the user never was, because
 	// SwitchProject reads exactly this field.
-	if sm.activeProject == into && indexOfString(dst.TabIDs, sm.activeTab) >= 0 {
-		dst.ActiveTab = sm.activeTab
+	//
+	// The else-branch is the same re-derivation DestroyProject performs, and is
+	// owed here for the same reason: an absorbed project whose activeTab was
+	// empty or named a tab no longer in sm.tabs promotes into with sm.activeTab
+	// pointing outside its TabIDs — which the client renders as a highlighted
+	// tab absent from the visible list, since it scopes that list to the active
+	// project's tabs alone.
+	if sm.activeProject == into {
+		if indexOfString(dst.TabIDs, sm.activeTab) >= 0 {
+			dst.ActiveTab = sm.activeTab
+		} else if dst.ActiveTab != "" && indexOfString(dst.TabIDs, dst.ActiveTab) >= 0 {
+			sm.activeTab = dst.ActiveTab
+		} else if len(dst.TabIDs) > 0 {
+			sm.activeTab, dst.ActiveTab = dst.TabIDs[0], dst.TabIDs[0]
+		}
 	}
 	return true
 }

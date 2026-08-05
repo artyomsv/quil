@@ -13,13 +13,13 @@ func mergeFixture(t *testing.T) (*SessionManager, string, string, string) {
 	tab := func(projectID, name string) {
 		t.Helper()
 		created := sm.CreateTabInProject(projectID, name)
-		if _, err := sm.CreatePane(created.ID, "/home/artyom"); err != nil {
+		if _, err := sm.CreatePane(created.ID, "/home/build"); err != nil {
 			t.Fatalf("create pane in %s: %v", name, err)
 		}
 	}
-	keep := sm.CreateProject("Default1", "/home/artyom/.quil")
-	dupA := sm.CreateProject("cluster-management", "/home/artyom/homelab")
-	dupB := sm.CreateProject("cluster-management", "/home/artyom/homelab")
+	keep := sm.CreateProject("Default1", "/home/build/.quil")
+	dupA := sm.CreateProject("cluster-management", "/home/build/homelab")
+	dupB := sm.CreateProject("cluster-management", "/home/build/homelab")
 	// INTERLEAVED deliberately. The global tab order is creation order, so
 	// building each project's tabs in a block makes it already equal to the
 	// merged project's list and every ordering assertion below passes whether
@@ -37,7 +37,7 @@ func mergeFixture(t *testing.T) (*SessionManager, string, string, string) {
 func TestMergeProjects_MovesTabsAndDropsTheAbsorbedProjects(t *testing.T) {
 	sm, keep, dupA, dupB := mergeFixture(t)
 
-	if !sm.MergeProjects(keep, []string{dupA, dupB}, "cluster-management", "/home/artyom/homelab") {
+	if !sm.MergeProjects(keep, []string{dupA, dupB}, "cluster-management", "/home/build/homelab") {
 		t.Fatal("merge refused")
 	}
 
@@ -61,6 +61,38 @@ func TestMergeProjects_MovesTabsAndDropsTheAbsorbedProjects(t *testing.T) {
 	if got := len(sm.panes); got != 4 {
 		t.Errorf("panes = %d, want all 4 — the fold must move tabs, not destroy them", got)
 	}
+	// The root directory is applied, not merely carried on the wire. Dropping
+	// this half of the assignment left every other test in the package green
+	// while the "renamed" project silently kept its old root — which is what new
+	// panes spawn in and what the git subsystem probes.
+	if got := projects[0].RootDir; got != "/home/build/homelab" {
+		t.Errorf("RootDir = %q, want the value the fold carried", got)
+	}
+	// The absorbed IDs must leave projectOrder too. Projects() and the snapshot
+	// both skip map-missing IDs defensively, so a stale entry is invisible until
+	// DestroyProject's fallback — which has NO such check — promotes it into
+	// activeProject and lands the client on a project that does not exist.
+	for _, id := range []string{dupA, dupB} {
+		if indexOfString(sm.projectOrder, id) >= 0 {
+			t.Errorf("absorbed project %s is still in projectOrder %v", id, sm.projectOrder)
+		}
+	}
+}
+
+// Among projects nobody named, the FIRST wins — the fallback arm of the survivor
+// choice, which no fixture with a named project can reach.
+func TestMergeProjects_AllBootstrapHostsKeepTheFirst(t *testing.T) {
+	sm := NewSessionManager(100)
+	sm.CreateTab("Shell") // bootstraps one
+	first := sm.Projects()[0].ID
+	second := sm.CreateProject("Default", "/srv")
+	second.Bootstrap = true
+
+	sm.MergeProjects(first, []string{second.ID}, "infra", "/srv")
+
+	if got := sm.Projects()[0].ID; got != first {
+		t.Errorf("survivor = %q, want the first %q", got, first)
+	}
 }
 
 // The rename must happen AFTER the absorbed records are gone, so their names are
@@ -71,7 +103,7 @@ func TestMergeProjects_MovesTabsAndDropsTheAbsorbedProjects(t *testing.T) {
 func TestMergeProjects_FreesTheAbsorbedNamesBeforeRenaming(t *testing.T) {
 	sm, keep, dupA, dupB := mergeFixture(t)
 
-	sm.MergeProjects(keep, []string{dupA, dupB}, "cluster-management", "/home/artyom/homelab")
+	sm.MergeProjects(keep, []string{dupA, dupB}, "cluster-management", "/home/build/homelab")
 
 	if got := sm.Projects()[0].Name; got != "cluster-management" {
 		t.Errorf("name = %q, want %q — the absorbed projects still held the name "+
@@ -177,6 +209,57 @@ func TestMergeProjects_PromotesTheActiveProjectAndItsTab(t *testing.T) {
 	}
 	if got := sm.Projects()[0].ActiveTab; got != activeTab {
 		t.Errorf("survivor's ActiveTab = %q, want the tab that was active %q", got, activeTab)
+	}
+}
+
+// A tab already in the survivor's list must not be appended a second time.
+//
+// The self-merge guard covers only one shape of this. restoreProjects copies
+// `tab_ids` verbatim from workspace.json with no uniqueness or cross-project
+// check, so a snapshot listing one tab under two projects reaches the identical
+// state — and the client then builds one TabModel twice, both copies fighting
+// over a single layout tree.
+func TestMergeProjects_RefusesToListOneTabTwice(t *testing.T) {
+	sm, keep, dupA, _ := mergeFixture(t)
+	// The shape a corrupted snapshot restores: the stray claims a tab that
+	// already belongs to the survivor.
+	shared := sm.projects[keep].TabIDs[0]
+	sm.projects[dupA].TabIDs = append(sm.projects[dupA].TabIDs, shared)
+
+	sm.MergeProjects(keep, []string{dupA}, "infra", "/srv")
+
+	seen := map[string]bool{}
+	for _, tabID := range sm.Projects()[0].TabIDs {
+		if seen[tabID] {
+			t.Fatalf("tab %s is listed twice in the survivor", tabID)
+		}
+		seen[tabID] = true
+	}
+}
+
+// An absorbed project whose remembered tab is gone must not leave activeTab
+// pointing outside the survivor. The client scopes the visible tab list to the
+// active project's own tabs, so that renders as a highlighted tab absent from
+// the list — the state DestroyProject re-derives against for the same reason.
+func TestMergeProjects_ReDerivesAStrandedActiveTab(t *testing.T) {
+	sm, keep, dupA, dupB := mergeFixture(t)
+	if _, ok := sm.SwitchProject(dupA); !ok {
+		t.Fatal("switch failed")
+	}
+	// The remembered tab vanished — a destroy that raced the fold.
+	sm.activeTab = "tab-gone"
+	sm.projects[dupA].ActiveTab = "tab-gone"
+
+	sm.MergeProjects(keep, []string{dupA, dupB}, "infra", "/srv")
+
+	survivor := sm.Projects()[0]
+	if indexOfString(survivor.TabIDs, sm.activeTab) < 0 {
+		t.Errorf("activeTab = %q names no tab in the survivor %v — the client "+
+			"highlights a tab that is not in the list it renders",
+			sm.activeTab, survivor.TabIDs)
+	}
+	if indexOfString(survivor.TabIDs, survivor.ActiveTab) < 0 {
+		t.Errorf("survivor ActiveTab = %q names no tab it holds", survivor.ActiveTab)
 	}
 }
 

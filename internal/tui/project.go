@@ -262,33 +262,22 @@ func mergeProjects(current, rebuilt []*ProjectModel, dest string) []*ProjectMode
 	return out
 }
 
-// hostProjectState answers the two questions a create on a remote host asks:
-// is there a project nobody named that this create should adopt, and is there
-// one somebody DID name that makes this create a second project on a host that
-// may hold only one.
+// projectsOnDest lists every project this client currently holds for dest, in
+// sidebar order.
 //
-// Both are returned rather than one verdict because the caller does different
-// things with them, and a host can present neither (no projects yet — a dial
-// whose first workspace_state has not landed, where a create is the right
-// answer) but never both: a named project makes the host occupied whatever
-// else it holds, so it is checked first.
-func (m *Model) hostProjectState(dest string) (adoptable, occupied *ProjectModel) {
+// It replaced a hostProjectState helper that answered "is there one to adopt,
+// is there one that blocks" — two booleans that could describe a host holding
+// three projects no better than a host holding one, which is exactly the state
+// the create-time guard leaves behind once a host predates it. The COUNT is
+// what the caller needs, so the count is what this returns.
+func (m *Model) projectsOnDest(dest string) []*ProjectModel {
+	var out []*ProjectModel
 	for _, p := range m.projects {
-		if p.Dest != dest {
-			continue
+		if p.Dest == dest {
+			out = append(out, p)
 		}
-		if p.Bootstrap {
-			if adoptable == nil {
-				adoptable = p
-			}
-			continue
-		}
-		// Named by a user. One is enough to answer, and returning the first
-		// keeps the message naming a stable project rather than whichever the
-		// broadcast happened to order last.
-		return nil, p
 	}
-	return adoptable, nil
+	return out
 }
 
 // hostLabel renders a destination for a message. Empty means the local daemon,

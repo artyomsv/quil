@@ -33,6 +33,7 @@ const (
 	MsgCreateProject  = "create_project"
 	MsgDestroyProject = "destroy_project"
 	MsgUpdateProject  = "update_project"
+	MsgMergeProjects  = "merge_projects"
 	MsgSwitchProject  = "switch_project"
 	MsgReorderProject = "reorder_project"
 
@@ -275,6 +276,22 @@ type UpdateProjectPayload struct {
 	// own snapshot. Omitted (false) means an ordinary rename, which always
 	// applies. omitempty so an older daemon sees the same wire shape it did.
 	AdoptBootstrap bool `json:"adopt_bootstrap,omitempty"`
+}
+
+// MergeProjectsPayload folds the Absorb projects' tabs into ProjectID and
+// drops the emptied records, then renames the survivor to Name. Tabs and panes
+// are never destroyed — that is the whole difference from DestroyProject, and
+// the reason a user could not consolidate a host by hand.
+//
+// Absorb is an explicit list rather than "every other project on that daemon":
+// the one-project-per-host rule is the CLIENT's (Project has no Dest field), so
+// a daemon-side "fold everything" would be wrong on the local machine, where
+// several projects are expected.
+type MergeProjectsPayload struct {
+	ProjectID string   `json:"project_id"`
+	Absorb    []string `json:"absorb"`
+	Name      string   `json:"name"`
+	RootDir   string   `json:"root_dir"`
 }
 
 type SwitchProjectPayload struct {

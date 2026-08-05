@@ -1029,6 +1029,28 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		// one project mutation that did not.
 		d.requestSnapshot()
 
+	case ipc.MsgMergeProjects:
+		var p ipc.MergeProjectsPayload
+		if err := msg.DecodePayload(&p); err != nil {
+			log.Printf("merge projects: malformed payload: %v", err)
+			return
+		}
+		// Logged when it does NOT apply, for the reason MsgUpdateProject is:
+		// the one failure — an unknown survivor ID — looks from the client like
+		// a dialog that accepted a name and closed on nothing changing.
+		if !d.session.MergeProjects(p.ProjectID, p.Absorb, p.Name, p.RootDir) {
+			log.Printf("merge %d projects into %s: not applied — unknown id",
+				len(p.Absorb), p.ProjectID)
+		} else {
+			log.Printf("merged %d projects into %s (%q)", len(p.Absorb), p.ProjectID, p.Name)
+		}
+		d.broadcastState()
+		// Reassigns tabs and DROPS project records, so a daemon killed inside
+		// the 30 s ticker window comes back holding the duplicates the user
+		// just folded away — with the tabs pointing at projects that no longer
+		// match the snapshot they were reassigned in.
+		d.requestSnapshot()
+
 	case ipc.MsgSwitchProject:
 		var p ipc.SwitchProjectPayload
 		if err := msg.DecodePayload(&p); err != nil {

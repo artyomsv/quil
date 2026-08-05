@@ -440,9 +440,15 @@ type Model struct {
 	projectFormCursor int    // focused row: 0 = name, 1 = root dir, 2 = submit button
 	projectFormErr    string // the one message line under the form (e.g. "name required")
 	// projectFormMsgKind colours that line by what it MEANS — a failure, work
-	// under way, or a success. Written only through setFormError/Busy/OK, whose
-	// doc comment says why assigning the string alone is a bug.
+	// under way, a success, or a consequence awaiting confirmation. Written only
+	// through setFormError/Busy/OK/Warn, whose doc comment says why assigning
+	// the string alone is a bug.
 	projectFormMsgKind projectFormMsgKind
+	// projectFormMerge is the fold the NEXT Enter performs on a host that
+	// already holds projects — nil when nothing is armed. It stores the plan it
+	// described so the second Enter can verify the description still holds
+	// rather than trusting that every edit path remembered to disarm it.
+	projectFormMerge *projectMergePlan
 	// projectFormHost is the Host field's live text — an ssh destination, or
 	// empty for the local daemon. projectFormDialing holds the host a dial is
 	// currently in flight for, so a result arriving for a host the user has

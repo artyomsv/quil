@@ -125,6 +125,11 @@ const (
 	MsgGitReposReq  = "git_repos_req"
 	MsgGitReposResp = "git_repos_resp"
 
+	// Git worktree discovery (pane setup dialog with a repository path).
+	// Asks the daemon for the list of worktrees in the repository containing Path.
+	MsgWorktreeListReq  = "worktree_list_req"
+	MsgWorktreeListResp = "worktree_list_resp"
+
 	// Recent-directory existence check (pane setup dialog's quick pick). The
 	// list was filtered with a local os.Stat, so against a remote host every
 	// server path failed the test and the pick list rendered silently empty —
@@ -756,6 +761,51 @@ type GitReposRespPayload struct {
 	CWD   string   `json:"cwd"`
 	Repos []string `json:"repos,omitempty"`
 	Error string   `json:"error,omitempty"`
+}
+
+// WorktreeListReqPayload asks which git worktrees belong to the repository
+// containing Path. An empty Path means the daemon's default directory.
+type WorktreeListReqPayload struct {
+	Path string `json:"path"`
+}
+
+// WorktreeInfo is one entry of the repository's worktree list, as the daemon
+// sees it. A mirror of gitworktree.Worktree rather than a reuse of it: this is
+// a wire type, and the internal one is free to change shape.
+type WorktreeInfo struct {
+	Path     string `json:"path"`
+	Branch   string `json:"branch,omitempty"`
+	Detached bool   `json:"detached,omitempty"`
+	Main     bool   `json:"main,omitempty"`
+	Locked   bool   `json:"locked,omitempty"`
+	Prunable bool   `json:"prunable,omitempty"`
+	Bare     bool   `json:"bare,omitempty"`
+}
+
+// WorktreeListRespPayload carries the repository's worktrees, main checkout
+// first.
+//
+// CONTRACT: Path echoes the request VERBATIM on every path, including the
+// error and single-flight-rejection ones. It is the client's staleness key,
+// not a statement about what was read — normalising it daemon-side would make
+// a live request look permanently stale.
+//
+// Repo false with an empty Error is a real answer ("this is not a repository")
+// and must stay distinguishable from a failure: only one of the two justifies
+// telling the user there is no repository here.
+//
+// WorktreeRoot is the directory NEW worktrees would go in, already joined by
+// the daemon with the daemon's own separators. The client must never compute
+// it: doing so means running filepath.Dir/Join with the CLIENT's separators
+// over a path that lives on the daemon's machine. Unused by stage A beyond
+// display, and present now so the contract does not change under stage B.
+type WorktreeListRespPayload struct {
+	Path         string         `json:"path"`
+	Repo         bool           `json:"repo,omitempty"`
+	Root         string         `json:"root,omitempty"`
+	WorktreeRoot string         `json:"worktree_root,omitempty"`
+	Worktrees    []WorktreeInfo `json:"worktrees,omitempty"`
+	Error        string         `json:"error,omitempty"`
 }
 
 // ClaudeSessionDetailReqPayload asks for the deep read of ONE session — the

@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"errors"
+	"fmt"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -423,6 +425,32 @@ func (m *Model) sendForPane(paneID string, msg *ipc.Message) error {
 func (m *Model) sendForDest(dest string, msg *ipc.Message) error {
 	stampDest(msg, dest)
 	return m.client.Send(msg)
+}
+
+// ErrDestUnreachable is what a one-shot send reports when the router holds no
+// connection for the destination. Send itself never reports it — see
+// sendForDestStrict.
+var ErrDestUnreachable = errors.New("no connection for that destination")
+
+// sendForDestStrict is sendForDest for a ONE-SHOT, user-initiated send that has
+// to be able to say it failed.
+//
+// Router.Send DROPS a message for a dest it has no conn for, logs, and returns
+// nil. That is right for the bulk iterators it was written for — resizeAllPanes
+// and sendAllLayouts must not break mid-iteration and leave other daemons
+// unsynced — and wrong for an action a user confirmed, which would otherwise be
+// reported as done.
+//
+// It checks the router rather than relying on a caller's earlier check because
+// the two must not be separated: a pre-flight test followed by a send is a
+// TOCTOU window, and while nothing removes a conn off the Update goroutine
+// today, that is an invariant of the current call sites rather than of the
+// router. Doing both here means a future remover cannot open the window.
+func (m *Model) sendForDestStrict(dest string, msg *ipc.Message) error {
+	if r, routed := m.client.(*Router); routed && r.Conn(dest) == nil {
+		return fmt.Errorf("%w: %q", ErrDestUnreachable, dest)
+	}
+	return m.sendForDest(dest, msg)
 }
 
 // destOfTab resolves which daemon owns a tab, for the call sites that hold

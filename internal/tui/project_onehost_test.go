@@ -65,8 +65,14 @@ func TestSubmitNewProject_AdoptsTheHostsUnnamedProject(t *testing.T) {
 	}
 }
 
-// Once a host's project has a name, that host is taken: it may hold only one.
-func TestSubmitNewProject_RefusesASecondProjectOnAHost(t *testing.T) {
+// Once a host's project has a name, naming a second OFFERS to rename the first
+// rather than refusing.
+//
+// The refusal this replaced was a dead end: "rename it instead" named a remedy
+// the dialog had no route to, and the user had to leave, find the row in the
+// sidebar and use its context menu. Nothing is sent on the first Enter — the
+// offer has to be read before it is taken.
+func TestSubmitNewProject_OffersToRenameALoneNamedProject(t *testing.T) {
 	remote := newFakeConn()
 	m := Model{
 		client: NewRouter(map[string]Client{"": newFakeConn(), "gpu01": remote}),
@@ -80,23 +86,31 @@ func TestSubmitNewProject_RefusesASecondProjectOnAHost(t *testing.T) {
 	m.submitNewProject("infra", "/srv/infra")
 
 	if len(remote.sent) != 0 {
-		t.Errorf("sent %d messages for a refused create", len(remote.sent))
+		t.Errorf("sent %d messages before the user confirmed", len(remote.sent))
 	}
 	if !strings.Contains(m.projectFormErr, "gpu01") ||
 		!strings.Contains(m.projectFormErr, "cluster-management") {
 		t.Errorf("message = %q, want it to name the host AND the project already "+
-			"there — otherwise the user cannot tell what to rename", m.projectFormErr)
+			"there — otherwise the user cannot tell what is about to be renamed",
+			m.projectFormErr)
+	}
+	if m.projectFormMsgKind != projectFormMsgWarn {
+		t.Errorf("kind = %d, want warn — a consequence awaiting confirmation is not "+
+			"the failure red says it is", m.projectFormMsgKind)
 	}
 	if m.dialog == dialogNone {
-		t.Error("the dialog closed on a create it refused to send")
+		t.Error("the dialog closed before the user could confirm")
+	}
+	if m.projectFormMerge == nil || len(m.projectFormMerge.absorb) != 0 {
+		t.Errorf("plan = %+v, want one that absorbs nothing — there is only one "+
+			"project on this host, so the fold degenerates to a rename", m.projectFormMerge)
 	}
 }
 
-// A named project makes the host taken even when an unnamed one is also
-// present, which is reachable: a project created before this rule existed sits
-// beside the bootstrap one. Adopting there would rename a project the user is
-// not looking at.
-func TestSubmitNewProject_NamedProjectWinsOverAnUnnamedOne(t *testing.T) {
+// A host holding several folds them into one. This is the state the create-time
+// guard leaves behind on a host that predates it: renaming one of three still
+// leaves three, so the old refusal described work that could not fix it.
+func TestSubmitNewProject_OffersToFoldAHostHoldingSeveral(t *testing.T) {
 	remote := newFakeConn()
 	m := Model{
 		client: NewRouter(map[string]Client{"": newFakeConn(), "gpu01": remote}),
@@ -111,16 +125,27 @@ func TestSubmitNewProject_NamedProjectWinsOverAnUnnamedOne(t *testing.T) {
 	m.submitNewProject("infra", "")
 
 	if len(remote.sent) != 0 {
-		t.Errorf("sent %d messages, want none — the host already has a named project", len(remote.sent))
+		t.Errorf("sent %d messages before the user confirmed", len(remote.sent))
 	}
-	if m.projectFormErr == "" {
-		t.Error("adopted or created silently instead of refusing")
+	plan := m.projectFormMerge
+	if plan == nil {
+		t.Fatal("no fold was planned for a host holding two projects")
+	}
+	// The NAMED project survives, not the first in order. Its root directory is
+	// one the user chose; a bootstrap project's is whatever CWD the daemon
+	// started in, and an empty form root falls back to the survivor's.
+	if plan.into != "proj-cluster" {
+		t.Errorf("survivor = %q, want the project the user named", plan.into)
+	}
+	if len(plan.absorb) != 1 || plan.absorb[0] != "proj-boot" {
+		t.Errorf("absorb = %v, want the unnamed project", plan.absorb)
 	}
 }
 
 // The LOCAL daemon keeps many projects. The one-per-host rule is about remote
-// hosts, and applying it locally would refuse the second project on the machine
-// the user is sitting at.
+// hosts, and applying it locally would FOLD every project on the machine the
+// user is sitting at into one — the exact operation the rule now performs on a
+// remote host, and the exact wrong answer here.
 func TestSubmitNewProject_LocalDaemonStillTakesManyProjects(t *testing.T) {
 	local := newFakeConn()
 	m := Model{
@@ -304,11 +329,11 @@ func TestOpenNewProjectDialog_SeedsTheHostFieldsFromTheActiveDest(t *testing.T) 
 	}
 }
 
-// The refusal has to survive the REAL key path, not just a direct call. Every
-// other refusal test calls submitNewProject on an addressable Model; the call
+// The offer has to survive the REAL key path, not just a direct call. Every
+// other test here calls submitNewProject on an addressable Model; the call
 // site returns `m, m.submitNewProject(...)`, where the message is written
 // through the implicit &m while m is also the result.
-func TestProjectForm_RefusalSurvivesTheKeyHandler(t *testing.T) {
+func TestProjectForm_OfferSurvivesTheKeyHandler(t *testing.T) {
 	m := Model{
 		width: 100, height: 30,
 		client:          NewRouter(map[string]Client{"": newFakeConn(), "gpu01": newFakeConn()}),
@@ -325,10 +350,14 @@ func TestProjectForm_RefusalSurvivesTheKeyHandler(t *testing.T) {
 
 	if got.projectFormErr == "" {
 		t.Fatal("the Model RETURNED by the key handler carries no message, so the " +
-			"refusal is invisible however correct the direct call is")
+			"offer is invisible however correct the direct call is")
+	}
+	if got.projectFormMerge == nil {
+		t.Error("the returned Model carries no armed plan, so the confirming Enter " +
+			"recomputes from nothing and only ever re-arms — the fold is unreachable")
 	}
 	if got.dialog != dialogProjectNew {
-		t.Errorf("dialog = %v, want it still open on a refusal", got.dialog)
+		t.Errorf("dialog = %v, want it still open until the user confirms", got.dialog)
 	}
 }
 

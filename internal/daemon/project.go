@@ -198,6 +198,117 @@ func (sm *SessionManager) UpdateProject(id, name, rootDir string, requireBootstr
 	return true
 }
 
+// MergeProjects folds every project named in absorb into the one named by
+// into: each absorbed project's tabs are REASSIGNED, never closed, and the
+// emptied project record is dropped. into is then renamed to name and rooted
+// at rootDir.
+//
+// It exists because "one remote host holds one project" shipped as a
+// CREATE-TIME GUARD. That can refuse to make a host worse; it cannot repair
+// one already carrying duplicates from before the rule, and every remedy the
+// client had was 1:1 on a project — rename, destroy — while DestroyProject
+// takes the tabs and panes with it. A user consolidating by hand therefore had
+// to lose the work that made them care which project survived.
+//
+// The rename is part of the SAME operation rather than a MsgUpdateProject
+// behind it: two messages leave the host observably holding one project under
+// the name the fold was replacing, and cost two snapshots.
+//
+// absorb is EXPLICIT rather than "every other project". The local daemon is
+// deliberately exempt from the one-project rule, so a payload meaning "fold
+// everything" would let one mis-aimed local send collapse the projects on the
+// machine the user is sitting at. Unknown IDs and into itself are skipped: a
+// client acting on a stale snapshot folds what it can see and leaves the rest
+// for the next create to offer again, rather than failing whole.
+// The survivor's RootDir is deliberately NOT a parameter — see
+// MergeProjectsPayload. A fold renames and absorbs; relocating is UpdateProject.
+func (sm *SessionManager) MergeProjects(into string, absorb []string, name string) bool {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	dst, ok := sm.projects[into]
+	if !ok {
+		return false
+	}
+
+	for _, id := range absorb {
+		// Self-merge would append dst's own tabs to dst, giving each of them
+		// TWO entries in TabIDs — which the client renders as the same tab
+		// twice, both copies fighting over one layout tree.
+		if id == into {
+			continue
+		}
+		src, ok := sm.projects[id]
+		if !ok {
+			continue
+		}
+		for _, tabID := range src.TabIDs {
+			tab, ok := sm.tabs[tabID]
+			if !ok {
+				continue
+			}
+			// BOTH sides of the link. The client rebuilds a project from its
+			// TabIDs but SKIPS any tab whose own ProjectID names a different
+			// project (applyWorkspaceState, guarding against one TabModel
+			// landing in two projects) — so moving one side alone makes the
+			// tab vanish from the sidebar while still existing in the daemon.
+			tab.ProjectID = into
+			// A tab already in the survivor's list must not be appended again.
+			// The `id == into` guard above covers only the self-merge shape of
+			// this; a snapshot listing one tab under two projects reaches the
+			// identical state, and restoreProjects copies `tab_ids` verbatim
+			// with no uniqueness or cross-project check. The consequence is the
+			// same either way — the client builds one TabModel twice and both
+			// copies fight over a single layout tree.
+			if indexOfString(dst.TabIDs, tabID) >= 0 {
+				continue
+			}
+			dst.TabIDs = append(dst.TabIDs, tabID)
+			// Keeps the global order consistent with the project-relative one:
+			// the invariant ReorderTab maintains, through the same helper.
+			sm.tabOrder = reanchorTab(sm.tabOrder, dst.TabIDs, tabID)
+		}
+		delete(sm.projects, id)
+		sm.projectOrder = removeString(sm.projectOrder, id)
+		if sm.activeProject == id {
+			sm.activeProject = into
+		}
+	}
+
+	// AFTER the deletions, so the absorbed projects' names are free. Typing the
+	// name one of them already holds is the ORDINARY case here — it is how a
+	// user names the host after the duplicate they are folding away — and
+	// computing this first hands them "cluster-management (2)", the very shape
+	// the fold exists to remove.
+	dst.Name = uniqueProjectName(sm.projectNamesExcept(into), name)
+	// Naming it makes it the user's, exactly as in UpdateProject: a project
+	// left Bootstrap would be adopted by the next create and silently renamed.
+	// RootDir is untouched, deliberately — see the doc comment.
+	dst.Bootstrap = false
+
+	// The absorbed project may have been the active one, and its remembered tab
+	// belongs to dst now. Leaving dst.ActiveTab on dst's OWN original tab makes
+	// the next switch-away-and-back land somewhere the user never was, because
+	// SwitchProject reads exactly this field.
+	//
+	// The else-branch is the same re-derivation DestroyProject performs, and is
+	// owed here for the same reason: an absorbed project whose activeTab was
+	// empty or named a tab no longer in sm.tabs promotes into with sm.activeTab
+	// pointing outside its TabIDs — which the client renders as a highlighted
+	// tab absent from the visible list, since it scopes that list to the active
+	// project's tabs alone.
+	if sm.activeProject == into {
+		if indexOfString(dst.TabIDs, sm.activeTab) >= 0 {
+			dst.ActiveTab = sm.activeTab
+		} else if dst.ActiveTab != "" && indexOfString(dst.TabIDs, dst.ActiveTab) >= 0 {
+			sm.activeTab = dst.ActiveTab
+		} else if len(dst.TabIDs) > 0 {
+			sm.activeTab, dst.ActiveTab = dst.TabIDs[0], dst.TabIDs[0]
+		}
+	}
+	return true
+}
+
 // SwitchProject makes id the active project and moves the global active tab
 // onto that project's OWN remembered tab. It returns that tab's ID (empty for
 // a project with no tabs) and whether the project existed.

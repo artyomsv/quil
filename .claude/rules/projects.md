@@ -97,12 +97,103 @@ broadcast, so one write reaches both.
 **The rule lives in the CLIENT, and it has to.** The daemon does not know it is
 remote — `Project` has no `Dest` field — so "one project per host" cannot be a
 daemon invariant; it is a rule about what create DOES. `submitNewProject`
-therefore branches on `projectFormDest != ""`: an adoptable project is renamed
-in place (its tabs are already inside it, which is what puts them under the
-chosen name), a host with a user-named project refuses a second. A named
-project wins over an unnamed one when both are present — reachable for hosts
-that predate the rule — because adopting there would rename a project the user
-is not looking at.
+therefore branches on `projectFormDest != ""`, and on how many projects
+`projectsOnDest` reports: a lone bootstrap project is renamed in place (its tabs
+are already inside it, which is what puts them under the chosen name), anything
+else is FOLDED into one.
+
+**A create-time guard cannot repair the state it prevents, and shipping only
+half of that was the bug.** The rule stopped new duplicates and left every
+existing one in place — so a host connected before it kept the rows each
+disconnect-and-recreate cycle had produced, and the refusal that met the next
+create ("already has a project (X) — rename it instead") named a remedy the
+dialog had no route to AND one that could not work: renaming one of three
+leaves three. Every operation the client owned was 1:1 on a project, and the
+only removal, `DestroyProject`, takes the tabs and panes with it — so
+consolidating by hand cost the user the work that made them care which project
+survived. `MergeProjects` is the missing N:1: tabs are REASSIGNED, the emptied
+records dropped, nothing closed.
+
+**The fold is confirmed by RECOMPUTING the plan, not by clearing a flag.** The
+first Enter arms `projectFormMerge` and states the consequence; the second
+re-derives the plan and acts only if it is identical (`sameAs`). An
+arm-then-invalidate scheme has to be right in every edit handler, while this is
+right by construction — an edited name re-arms with the new sentence instead of
+carrying out the one the user moved away from. The one place that must still
+clear it explicitly is dialog OPEN: reopening against the same host and typing
+the same name reproduces an identical plan, so a plan outliving its form would
+fire on the first Enter of the next session having shown nobody anything.
+
+**Comparing plans is NOT the property required, and that gap shipped inside this
+feature.** What is needed is "the user pressed Enter while the sentence this plan
+produced was on screen"; the armed plan and the displayed message are
+INDEPENDENT fields, so they come apart. Typing into the Name row clears
+`projectFormErr` and leaves `projectFormMerge`; backspace restores neither. Two
+keystrokes therefore returned the form to a state where the plan matched,
+nothing `sameAs` compares had changed, and the warning line was blank — and the
+next Enter folded a host with no confirmation anywhere on screen. `foldIsConfirmed`
+checks the RENDERED line as well, which also covers the Host/User rows and a dial
+whose "connecting to …" replaces the warning while `projectFormDest` still names
+the old host.
+
+**`message()` must name everything the plan can change, and the root directory
+is how that was learnt.** The dialog's own opening browse resolves an EMPTY
+path, so the daemon answers with its default CWD and `applyBrowseListing` writes
+that into `cwdBrowseDir` — within a second of every open, so the field almost
+always holds an artifact rather than a choice. A plan armed before that landed
+carried the survivor's root and one armed after carried the daemon's default, so
+the second Enter re-armed *correctly* behind text that had not changed by one
+character: three Enters, two identical sentences, and a real project's root
+replaced. It also invalidated `submitProjectForm`'s standing claim that
+`cwdBrowseDir` is "always one of three safe things" — there is a fourth.
+
+**The fix is that the fold carries NO root directory at all.** Naming the change
+in the message was tried first and is the weaker answer: the right response to
+"we might do something the user did not ask for" is not to do it. A fold renames
+and absorbs; relocating is `MsgUpdateProject`, from a dialog seeded with the
+project's own root. `MergeProjectsPayload` has no `RootDir` field, so the
+guarantee is structural rather than a branch someone can drop — and the adopt
+path keeps taking the form value, correctly, because there the project is
+unnamed and its root IS the daemon's default, so writing it back is a no-op.
+
+**Reachability is checked in the client, because the send cannot report it.**
+`Router.Send` DROPS a message aimed at a dest it has no conn for, logs, and
+returns nil — deliberately, so `resizeAllPanes`/`sendAllLayouts` cannot break
+mid-iteration. Every `if err := send(…)` in the dialog is therefore blind to the
+likeliest failure of all. `destReachable` guards the whole `projectFormDest != ""`
+branch rather than the fold alone, because a host that disconnects between the
+two Enters also changes WHICH branch runs: its projects are dropped client-side,
+so the recompute finds none and falls through to the generic create — the user
+confirms a fold and the client attempts a create, then closes as though the fold
+had happened. It is not `destConnected`: that answers "should this be dialled",
+and for a non-Router client it answers from `knownDests()`'s `[""]`, which would
+report unreachable down the one path guaranteed to deliver.
+
+**`absorb` is an explicit ID list, never "every other project".** The local
+daemon is deliberately exempt from one-per-host, so a payload meaning "fold
+everything" would let one mis-aimed local send collapse the projects on the
+machine the user is sitting at. Unknown IDs and the survivor itself are skipped,
+which also makes two clients folding one host converge rather than corrupt: the
+loser's absorb IDs no longer resolve, so its message degenerates to a rename.
+
+**The survivor is the first NON-bootstrap project**, falling back to the first.
+Which one survives does not decide the name — that is overwritten either way —
+it decides the root directory inherited when the browse has not answered, and
+the order tabs land in. A bootstrap project's root is whatever CWD the daemon
+started in; a named project's is one the user chose.
+
+**`MergeProjects` renames AFTER the deletions**, so the absorbed names are free.
+Naming the host after the duplicate being folded away is the ORDINARY case —
+that is what the strays are called — and disambiguating first hands back
+`cluster-management (2)`, the exact shape the fold exists to remove. For the
+same reason `sendMergeProjects` does NOT reuse `sendUpdateProject`'s duplicate
+guard: every project it would find on that host is one the message absorbs.
+
+**A daemon too old to understand `merge_projects` cannot receive one**, which is
+why no capability probe was needed (contrast `destSupportsProjects`).
+`gateExtraVersion` REFUSES the connection on any version difference, and the
+runtime-connect path answers the mismatch with the upgrade — so client and
+daemon always speak the same protocol or are not talking at all.
 
 **"The host has reported no projects" means NOT YET, never NONE.** A daemon
 holds a tab and a tab holds a project, so an empty answer for an attached host
@@ -130,16 +221,17 @@ create; destructive the moment a submit can rename the host's existing project.
 It seeds Remote/user/host from the dest now, as `beginProjectRename` always did.
 
 **The local daemon is deliberately exempt**, and applying this there would be
-wrong twice over: it would refuse the second project on the machine the user is
-sitting at, and its create would rename the Default holding their existing work
-rather than adding beside it.
+wrong twice over: it would FOLD every project on the machine the user is sitting
+at into one — the local daemon is expected to hold many — and its create would
+rename the Default holding their existing work rather than adding beside it.
 
 **Hosts connected before the flag existed keep an unmarked Default** — the
 migration runs once and does not re-run, so the record has no `bootstrap` key
-and parses as false, i.e. as the user's. That host is then "occupied" and its
-create is refused, which the message answers by pointing at rename. Absence
-MUST mean the user's: the alternative makes every pre-flag project adoptable
-and a create silently renames real work.
+and parses as false, i.e. as the user's. That host therefore takes the FOLD path
+rather than the adopt one, which is the right answer for it: the rename is
+offered and confirmed rather than applied silently to a project the user may
+still be using. Absence MUST mean the user's: the alternative makes every
+pre-flag project adoptable and a create silently renames real work.
 
 **Disconnect is client-side only, and that asymmetry is what generates
 duplicate projects.** The sidebar rows vanish, so the host looks emptied — but
@@ -149,8 +241,11 @@ carrying the SAME name and the SAME host, which the sidebar cannot tell apart
 (it renders name + host and nothing else), so neither can the user: removing
 the wrong one takes its tabs. `submitNewProject` refuses a name already present
 on `projectFormDest` (case- and space-insensitive, since neither makes the rows
-distinguishable). Scoped to ONE dest deliberately — the same name on a laptop
-and a build host is ordinary, because the row carries the host. The client
+distinguishable) — reachable only on the LOCAL path now, since a remote host
+with any project at all folds before it gets here, and the fold is what clears
+duplicates a pre-rule client already left. Scoped to ONE dest deliberately —
+the same name on a laptop and a build host is ordinary, because the row carries
+the host. The client
 itself does NOT duplicate: `mergeProjects` is keyed by ID and `Router.Add`
 no-ops on a live dest, both pinned by tests (`dialdest_reconnect_test.go`)
 written to disprove exactly that theory before the guard was added.

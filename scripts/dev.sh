@@ -127,6 +127,15 @@ case "${1:-help}" in
     $DOCKER_RUN go test "$(pkg_target "${2:-}")"
     ;;
 
+  # Integration-tagged tests are invisible to `test` and to CI's `go test ./...`
+  # — the build tag excludes them from compilation, so they are not even
+  # type-checked. Every one of them exists to cover what a unit test structurally
+  # cannot (a handler being WIRED UP, a snapshot reaching disk and coming back),
+  # which is exactly the class of failure that then ships unnoticed.
+  test-integration)
+    $DOCKER_RUN go test -tags=integration "$(pkg_target "${2:-}")"
+    ;;
+
   test-race)
     ensure_race_image
     $DOCKER_RUN_RACE sh -c \

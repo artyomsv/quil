@@ -33,6 +33,7 @@ const (
 	MsgCreateProject  = "create_project"
 	MsgDestroyProject = "destroy_project"
 	MsgUpdateProject  = "update_project"
+	MsgMergeProjects  = "merge_projects"
 	MsgSwitchProject  = "switch_project"
 	MsgReorderProject = "reorder_project"
 
@@ -275,6 +276,29 @@ type UpdateProjectPayload struct {
 	// own snapshot. Omitted (false) means an ordinary rename, which always
 	// applies. omitempty so an older daemon sees the same wire shape it did.
 	AdoptBootstrap bool `json:"adopt_bootstrap,omitempty"`
+}
+
+// MergeProjectsPayload folds the Absorb projects' tabs into ProjectID and
+// drops the emptied records, then renames the survivor to Name. Tabs and panes
+// are never destroyed — that is the whole difference from DestroyProject, and
+// the reason a user could not consolidate a host by hand.
+//
+// Absorb is an explicit list rather than "every other project on that daemon":
+// the one-project-per-host rule is the CLIENT's (Project has no Dest field), so
+// a daemon-side "fold everything" would be wrong on the local machine, where
+// several projects are expected.
+//
+// There is deliberately NO RootDir. A fold renames and absorbs; it does not
+// relocate. The survivor already has a root somebody chose, while the form field
+// that would supply one holds — in the ordinary case — whatever the dialog's own
+// opening browse resolved, since that request carries an empty path and the
+// daemon answers with its default CWD. Carrying it would overwrite a deliberate
+// value with an artifact on nearly every fold. Changing a project's root is what
+// MsgUpdateProject is for, from a dialog seeded with the project's own.
+type MergeProjectsPayload struct {
+	ProjectID string   `json:"project_id"`
+	Absorb    []string `json:"absorb"`
+	Name      string   `json:"name"`
 }
 
 type SwitchProjectPayload struct {

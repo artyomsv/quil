@@ -61,6 +61,25 @@ func (m *Model) dialDest(dest string) tea.Cmd {
 	}
 }
 
+// destReachable reports whether a message aimed at dest can actually be
+// delivered, which is a DIFFERENT question from destConnected's.
+//
+// destConnected answers "should this host be dialled", and for a client that is
+// not a Router it answers from knownDests()'s `[""]` — correct for dialling,
+// wrong here: a lone connection receives everything sent through it, which is
+// the shape Router.Send's own sole-conn fallback models and the shape some four
+// dozen tests build directly. Refusing there would report a host unreachable
+// down the one path guaranteed to reach it.
+//
+// The distinction matters because Router.Send DROPS a message for a dest it has
+// no conn for and returns nil, so no caller can learn about it from the send.
+func (m *Model) destReachable(dest string) bool {
+	if _, routed := m.client.(*Router); !routed {
+		return true
+	}
+	return m.destConnected(dest)
+}
+
 // destConnected reports whether a destination already has a connection, so a
 // host that is merely being re-selected is not dialled a second time.
 func (m *Model) destConnected(dest string) bool {

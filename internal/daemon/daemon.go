@@ -1029,6 +1029,33 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		// one project mutation that did not.
 		d.requestSnapshot()
 
+	case ipc.MsgMergeProjects:
+		var p ipc.MergeProjectsPayload
+		if err := msg.DecodePayload(&p); err != nil {
+			log.Printf("merge projects: malformed payload: %v", err)
+			return
+		}
+		// Logged when it does NOT apply, for the reason MsgUpdateProject is:
+		// the one failure — an unknown survivor ID — looks from the client like
+		// a dialog that accepted a name and closed on nothing changing.
+		if !d.session.MergeProjects(p.ProjectID, p.Absorb, p.Name) {
+			log.Printf("merge %d projects into %q: not applied — unknown id",
+				len(p.Absorb), p.ProjectID)
+		} else {
+			log.Printf("merged %d projects into %q (%q)", len(p.Absorb), p.ProjectID, p.Name)
+		}
+		// Folding projects that all hold zero tabs leaves the survivor empty,
+		// which is a blank screen with no in-band way out — Ctrl+T files against
+		// the ACTIVE project, and that is the empty one. Create and destroy both
+		// recover here for the same reason.
+		d.recoverEmptyProject(p.ProjectID)
+		d.broadcastState()
+		// Reassigns tabs and DROPS project records, so a daemon killed inside
+		// the 30 s ticker window comes back holding the duplicates the user
+		// just folded away — with the tabs pointing at projects that no longer
+		// match the snapshot they were reassigned in.
+		d.requestSnapshot()
+
 	case ipc.MsgSwitchProject:
 		var p ipc.SwitchProjectPayload
 		if err := msg.DecodePayload(&p); err != nil {

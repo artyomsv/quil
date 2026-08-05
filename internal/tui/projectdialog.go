@@ -32,6 +32,12 @@ const (
 	projectFormMsgError projectFormMsgKind = iota
 	projectFormMsgBusy
 	projectFormMsgOK
+	// projectFormMsgWarn is a consequence the next Enter will carry out — the
+	// blocked-on-user state the header above reserves amber 214 for, and the
+	// first message on this line to actually be one. Busy's 208 would be the
+	// contradiction that comment warns against: it means the machine is working
+	// and nothing is waiting on the user, which is the opposite of this.
+	projectFormMsgWarn
 )
 
 func projectFormMsgStyle(kind projectFormMsgKind) (string, lipgloss.Style) {
@@ -40,6 +46,8 @@ func projectFormMsgStyle(kind projectFormMsgKind) (string, lipgloss.Style) {
 		return "⟳", lipgloss.NewStyle().Foreground(lipgloss.Color("208"))
 	case projectFormMsgOK:
 		return "✓", lipgloss.NewStyle().Foreground(lipgloss.Color("28"))
+	case projectFormMsgWarn:
+		return "⚠", lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
 	default:
 		return "✗", dialogErrorStyle
 	}
@@ -64,6 +72,156 @@ const formMsgDetailCap = 160
 func (m *Model) setFormError(s string) { m.projectFormErr, m.projectFormMsgKind = s, projectFormMsgError }
 func (m *Model) setFormBusy(s string)  { m.projectFormErr, m.projectFormMsgKind = s, projectFormMsgBusy }
 func (m *Model) setFormOK(s string)    { m.projectFormErr, m.projectFormMsgKind = s, projectFormMsgOK }
+func (m *Model) setFormWarn(s string)  { m.projectFormErr, m.projectFormMsgKind = s, projectFormMsgWarn }
+
+// projectMergePlan is the fold a SECOND Enter carries out. Naming a project on
+// a host that already holds one used to dead-end in "rename it instead" — a
+// remedy the dialog offered no route to, and one that does not even work on a
+// host holding three, where renaming one still leaves three.
+//
+// The plan is recomputed and COMPARED on every submit rather than cleared by
+// each editing path. The message quotes a name and a tab count, so the property
+// that matters is that the user confirms the sentence they are looking at; an
+// arm-then-invalidate scheme has to be right in every edit handler, while
+// recompute-and-compare is right by construction and re-arms with the new text
+// instead of silently executing the old plan.
+//
+// There is deliberately no root directory here. A fold renames and absorbs; it
+// does not relocate — see MergeProjectsPayload. Carrying the form's value made
+// the ordinary case dangerous rather than the rare one convenient: the dialog's
+// opening browse requests an EMPTY path, the daemon answers with its default
+// CWD, and applyBrowseListing writes that into cwdBrowseDir within a second of
+// every open. So the field almost always holds an artifact rather than a choice,
+// and writing it over a root somebody picked is a change nobody asked for.
+//
+// Naming the change in the message was tried first and is the weaker fix: the
+// right answer to "we might do something the user did not ask for" is not to do
+// it. Relocating a project is what the Rename dialog is for, and it seeds the
+// field with that project's own root.
+type projectMergePlan struct {
+	dest     string
+	into     string   // survivor: keeps its ID, its tabs and its position
+	survivor string   // survivor's CURRENT name, quoted in the message
+	absorb   []string // projects whose tabs move into the survivor
+	name     string
+	tabs     int // tabs that MOVE — the survivor's own do not
+}
+
+func (p *projectMergePlan) sameAs(q *projectMergePlan) bool {
+	if p == nil || q == nil {
+		return false
+	}
+	if p.dest != q.dest || p.into != q.into || p.survivor != q.survivor ||
+		p.name != q.name || p.tabs != q.tabs || len(p.absorb) != len(q.absorb) {
+		return false
+	}
+	for i := range p.absorb {
+		if p.absorb[i] != q.absorb[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// foldIsConfirmed reports whether this Enter may CARRY OUT plan, rather than
+// arm it.
+//
+// The property required is "the user pressed Enter while the sentence this plan
+// produced was on screen". Comparing plans alone checks something weaker —
+// "the recomputed plan equals the armed one" — and the two come apart because
+// the armed plan and the displayed message are INDEPENDENT fields. Typing a
+// character into the Name row clears `projectFormErr` and leaves
+// `projectFormMerge` alone; backspacing restores the name without restoring the
+// message. Two keystrokes therefore returned the form to a state where the plan
+// matched, nothing `sameAs` compares had changed, and the warning line was
+// blank — so the next Enter folded a host with no confirmation anywhere on
+// screen. The Host and User rows reach the same state, and a dial started after
+// arming replaces the warning with "connecting to …" while leaving
+// `projectFormDest` on the OLD host until Enter.
+//
+// Checking the rendered line closes all of them at once, and keeps closing them
+// for any future handler that clears the message — the same argument the plan
+// comparison makes for recompute-over-invalidate, applied to the half that was
+// missing it.
+func (m *Model) foldIsConfirmed(plan *projectMergePlan) bool {
+	return plan.sameAs(m.projectFormMerge) &&
+		m.projectFormMsgKind == projectFormMsgWarn &&
+		m.projectFormErr == plan.message()
+}
+
+// planProjectMerge describes folding every project on a host into one of them.
+//
+// The survivor is the first project NOBODY invented — the first non-Bootstrap —
+// falling back to the first of all. It does not decide the name, which is
+// overwritten either way, nor the root directory, which the fold does not touch.
+// What it decides is which root SURVIVES and the order tabs end up in: a
+// bootstrap project's root is whatever CWD the daemon happened to start in,
+// while a named project's is one somebody chose, so keeping the named one keeps
+// the answer that means something. Among equals the first wins, which leaves the
+// host's oldest tabs at the front of the tab bar rather than behind whichever
+// duplicate was created last.
+//
+// onHost must be non-empty; the caller has already branched on its length.
+func (m *Model) planProjectMerge(dest, name string, onHost []*ProjectModel) *projectMergePlan {
+	survivor := onHost[0]
+	for _, p := range onHost {
+		if !p.Bootstrap {
+			survivor = p
+			break
+		}
+	}
+	plan := &projectMergePlan{
+		dest:     dest,
+		into:     survivor.ID,
+		survivor: survivor.Name,
+		name:     name,
+		tabs:     0,
+	}
+	for _, p := range onHost {
+		if p.ID == survivor.ID {
+			continue
+		}
+		plan.absorb = append(plan.absorb, p.ID)
+		plan.tabs += len(p.tabs)
+	}
+	return plan
+}
+
+// message is what the user reads before pressing Enter a second time, and it
+// states the consequence rather than the rule: what will be called what, how
+// many tabs move, and — because this is the question a fold actually raises —
+// that nothing is closed.
+//
+// It must name everything the plan can change, or the recompute-and-compare
+// guard is silently defeated — a plan that re-arms behind identical text is a
+// confirmation of something the user was never shown. That constraint is why the
+// fold carries no root directory at all: naming a root that moved was the first
+// attempt, and removing the move was the better one, so the sentence and the
+// plan now hold exactly the same three things.
+//
+// Every interpolated value is bounded as well as sanitised. They are chosen by
+// a remote daemon, this is the one value-bearing row with no truncation of its
+// own, and lipgloss WRAPS at the box width.
+func (p *projectMergePlan) message() string {
+	host := sanitizeRemoteText(hostLabel(p.dest))
+	want := truncateToWidth(sanitizeRemoteText(p.name), formMsgNameCap)
+
+	var head string
+	if len(p.absorb) == 0 {
+		head = fmt.Sprintf("%s already has %s — Enter renames it to %s, keeping its tabs",
+			host, truncateToWidth(sanitizeRemoteText(p.survivor), formMsgNameCap), want)
+	} else {
+		// Pluralised because this is the one sentence the user is required to
+		// read before confirming, and "1 tabs move" undermines it.
+		tabs := fmt.Sprintf("%d tabs move", p.tabs)
+		if p.tabs == 1 {
+			tabs = "1 tab moves"
+		}
+		head = fmt.Sprintf("%s already has %d projects — Enter folds them into one named %s: %s, nothing closes",
+			host, len(p.absorb)+1, want, tabs)
+	}
+	return head
+}
 
 // submitNewProject creates a project on the ACTIVE project's daemon. A
 // project is a name plus a root directory, and a root directory lives on
@@ -86,18 +244,38 @@ func (m *Model) submitNewProject(name, rootDir string) tea.Cmd {
 		m.setFormError("that host runs a quil without project support")
 		return nil
 	}
+	// Reachability is checked HERE because the send cannot report it. Router.Send
+	// drops a message aimed at a dest it has no connection for, logs, and returns
+	// NIL — deliberately, so resizeAllPanes and sendAllLayouts cannot break
+	// mid-iteration and leave other daemons unsynced. Every `if err := send(…)`
+	// below is therefore blind to the likeliest failure of all: the host going
+	// away while this dialog is open.
+	//
+	// It guards the whole branch rather than the fold alone, because a host that
+	// disconnects between the two Enters ALSO changes which branch runs. Its
+	// projects are dropped client-side on disconnect, so the recompute finds none
+	// and falls through to the generic create at the bottom — the user confirms a
+	// FOLD and the client attempts a create, then closes the dialog as though the
+	// fold had happened.
+	if !m.destReachable(m.projectFormDest) {
+		m.projectFormMerge = nil
+		m.setFormError("not connected to " + sanitizeRemoteText(hostLabel(m.projectFormDest)) +
+			" — nothing was changed")
+		return nil
+	}
 	// A remote host holds exactly ONE project, and naming it is how you get it.
 	//
 	// The daemon does not know it is remote — Project has no Dest field, that is
 	// this client's label for the connection a project arrived on — so this is a
 	// rule about what CREATE does here, not an invariant the daemon can keep.
 	//
-	// Two outcomes, and which one applies is the daemon's Bootstrap flag rather
-	// than the name: adopt the project nobody named, refuse to add a second
-	// beside one somebody did.
+	// Three outcomes, decided by how many projects the host presents and — for
+	// the single one — the daemon's Bootstrap flag rather than the name.
 	if m.projectFormDest != "" {
-		switch adoptable, occupied := m.hostProjectState(m.projectFormDest); {
-		case adoptable != nil:
+		onHost := m.projectsOnDest(m.projectFormDest)
+		switch {
+		case len(onHost) == 1 && onHost[0].Bootstrap:
+			adoptable := onHost[0]
 			// Rename in place. The host's existing tabs are already inside it,
 			// so they end up under the name the user chose instead of beside it
 			// as a "Default" they never asked for — which is the whole point,
@@ -119,18 +297,28 @@ func (m *Model) submitNewProject(name, rootDir string) tea.Cmd {
 			// is no longer a bootstrap, so the loser reports rather than
 			// silently renaming the winner's project.
 			return m.sendUpdateProject(adoptable.ID, name, rootDir, true)
-		case occupied != nil:
-			// The name is bounded as well as sanitised, and the two are
-			// different jobs: sanitising removes escapes, and a remote daemon
-			// can still choose a megabyte of ordinary printable text. This is
-			// the one value-bearing line in the dialog with no truncation of
-			// its own, and lipgloss WRAPS at the box width — so an unbounded
-			// name here becomes thousands of rendered lines in every frame.
-			m.setFormError(sanitizeRemoteText(hostLabel(m.projectFormDest)) +
-				" already has a project (" +
-				truncateToWidth(sanitizeRemoteText(occupied.Name), formMsgNameCap) +
-				") — rename it instead")
-			return nil
+		case len(onHost) > 0:
+			// Everything else the host can present — one project somebody
+			// named, or the several a pre-rule client left behind — resolves
+			// the SAME way: fold them into one carrying the name just typed.
+			//
+			// Refusing here was the shipped behaviour, and it was a dead end
+			// twice over. The remedy it named ("rename it instead") had no
+			// route from this dialog, and on a host holding three projects
+			// renaming one still leaves three — so the message described work
+			// that could not fix the state it was complaining about.
+			//
+			// Confirmed rather than done, because it reassigns tabs and drops
+			// project records on a machine the user is not looking at. The
+			// first Enter arms and describes; the second carries out exactly
+			// what was described, or re-arms if the description has moved on.
+			plan := m.planProjectMerge(m.projectFormDest, name, onHost)
+			if !m.foldIsConfirmed(plan) {
+				m.projectFormMerge = plan
+				m.setFormWarn(plan.message())
+				return nil
+			}
+			return m.sendMergeProjects(plan)
 
 		case m.attached[m.projectFormDest]:
 			// Attached and still silent: this host WILL report a project — a
@@ -191,6 +379,89 @@ func (m *Model) submitNewProject(name, rootDir string) tea.Cmd {
 // switching to it.
 func (m *Model) submitRenameProject(id, name, rootDir string) tea.Cmd {
 	return m.sendUpdateProject(id, name, rootDir, false)
+}
+
+// sendMergeProjects carries out a confirmed plan and closes the dialog.
+//
+// Deliberately NOT routed through sendUpdateProject's duplicate-name guard,
+// even though the fold ends in a rename: every project that guard would find on
+// this host is one this message is about to ABSORB, so it would refuse exactly
+// the case it exists to prevent — naming a host after the duplicate being
+// folded away is the ordinary way out of this state. The daemon still
+// disambiguates against whatever survives, after the deletions.
+//
+// Two clients folding one host concurrently converge rather than corrupt: the
+// loser's absorb IDs no longer resolve and are skipped, leaving its message a
+// plain rename of the survivor. Last name wins, exactly as two concurrent
+// renames already do.
+func (m *Model) sendMergeProjects(plan *projectMergePlan) tea.Cmd {
+	msg, err := ipc.NewMessage(ipc.MsgMergeProjects, ipc.MergeProjectsPayload{
+		ProjectID: plan.into,
+		Absorb:    plan.absorb,
+		Name:      plan.name,
+	})
+	if err != nil {
+		log.Printf("merge projects into %q: encode: %v", plan.into, err)
+		m.setFormError("could not encode the fold — nothing was changed")
+		return nil
+	}
+	// A failed send KEEPS the dialog open. The create and rename beside this one
+	// close regardless, and that is defensible for them: a project that never
+	// appears, or a row whose name did not change, is its own report. A fold is
+	// different on both counts — the user confirmed a described consequence, and
+	// the "nothing happened" state is a sidebar still showing the duplicates,
+	// which is exactly what it showed before. Closing on a dropped message
+	// presents the host as tidied while the ssh link is down and it is not.
+	//
+	// The next Enter RE-ARMS rather than retrying, and that is correct rather
+	// than a shortfall: setFormError replaces the warning, so foldIsConfirmed
+	// refuses — the user reads the consequence again before a second attempt at
+	// work that touches another machine. The message must therefore not promise
+	// a retry on the very next keystroke; an earlier draft said "Enter retries"
+	// and was wrong by one Enter.
+	if sendErr := m.sendForDestStrict(plan.dest, msg); sendErr != nil {
+		log.Printf("merge %d projects into %q on dest %q: send: %v",
+			len(plan.absorb), plan.into, plan.dest, sendErr)
+		m.setFormError("could not reach " + sanitizeRemoteText(hostLabel(plan.dest)) +
+			" — nothing was changed")
+		return nil
+	}
+	// Logged on success too, like the create beside it: a fold that silently
+	// does not arrive is indistinguishable from one never sent, and this is the
+	// only record afterwards of what left and which daemon it was aimed at.
+	log.Printf("merge %d projects into %q on dest %q: sent",
+		len(plan.absorb), plan.into, plan.dest)
+	// Point the active project at the SURVIVOR when the fold absorbs the one the
+	// user is on. applyWorkspaceState resolves the active project by ID through
+	// indexOfProject, which returns 0 for an ID that no longer exists — so the
+	// next broadcast would land the user on m.projects[0], quite possibly a
+	// project on a DIFFERENT machine, and syncActiveDest would re-point the
+	// router's default there with it.
+	//
+	// Not an edge case: openNewProjectDialog seeds projectFormDest from
+	// activeDest(), so the user folding a host is usually sitting on one of the
+	// projects being absorbed.
+	if cur := m.activeProjectModel(); cur != nil {
+		for _, id := range plan.absorb {
+			if cur.ID == id {
+				m.activeProject = indexOfProject(m.projects, plan.into)
+				break
+			}
+		}
+	}
+	m.projectFormMerge = nil
+	m.dialog = dialogNone
+	return nil
+}
+
+// activeProjectModel is the project the client is currently on, or nil when the
+// index does not name one — a Model built directly by a test, or a client
+// before its first broadcast.
+func (m *Model) activeProjectModel() *ProjectModel {
+	if m.activeProject < 0 || m.activeProject >= len(m.projects) {
+		return nil
+	}
+	return m.projects[m.activeProject]
 }
 
 // sendUpdateProject is the one sender for MsgUpdateProject. adoptBootstrap
@@ -259,6 +530,12 @@ func (m Model) openNewProjectDialog() (tea.Model, tea.Cmd) {
 	m.projectFormDialing = ""
 	m.projectFormCursor = 0
 	m.projectFormErr = ""
+	// Load-bearing, not tidiness: the fold's second Enter fires when the
+	// recomputed plan MATCHES the armed one, and reopening this form against the
+	// same host and typing the same name reproduces an identical plan. A plan
+	// surviving the close would then execute on the first Enter of the new
+	// session, having never shown the user the sentence it was confirming.
+	m.projectFormMerge = nil
 	m.projectFormDest = m.activeDest()
 	// The ssh fields describe the dest, rather than starting blank beside it.
 	// They used to say "this machine" while projectFormDest already named the
@@ -288,6 +565,9 @@ func (m Model) beginProjectRename(id string) (tea.Model, tea.Cmd) {
 	m.projectFormDialing = ""
 	m.projectFormCursor = 0
 	m.projectFormErr = ""
+	// See openNewProjectDialog: an armed plan must not outlive the form that
+	// described it.
+	m.projectFormMerge = nil
 	m.projectFormDest = p.Dest
 	m.resetProjectBrowseState()
 	// Seed the root-dir field with the project's OWN value, so a submit before

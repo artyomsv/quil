@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Naming a project on a host that already has one now offers to fix it,
+  instead of telling you to go and fix it yourself.** The old message —
+  *"already has a project (Default1) — rename it instead"* — named a remedy the
+  dialog had no route to, and one that does not even work on a host holding
+  several: renaming one of three still leaves three. Press Enter and the form
+  now describes exactly what it will do — how many projects there are, what the
+  result will be called, how many tabs move, and that **nothing is closed** —
+  and a second Enter carries it out. Editing the name in between re-describes
+  rather than acting on the sentence you moved away from. A host that has gone
+  away is reported instead of the fold appearing to have worked.
+- **Folding leaves the surviving project's root directory alone.** The dialog
+  fills that field in by itself as soon as the directory listing arrives, so it
+  usually holds wherever the daemon happens to start rather than anywhere you
+  chose — writing that over a root you had picked was a change nobody asked
+  for. Use **Rename**, which opens with the project's own root already in the
+  field, to move one.
+
+### Fixed
+- **A host carrying duplicate projects can now be consolidated without losing
+  tabs.** One host holding one project shipped as a rule about what *creating*
+  does, so it stopped new duplicates but could not repair a host that already
+  had them — and the only tool for the job, *Destroy project*, takes that
+  project's tabs and panes with it. Confirming the fold above moves every tab
+  onto the surviving project and drops the emptied records; no tab, pane or
+  running command is closed. This is what to use on a host connected before
+  v1.48.0, where each reconnect-and-recreate cycle left another row behind.
+
 ## [1.48.0] - 2026-08-05
 
 ### Changed

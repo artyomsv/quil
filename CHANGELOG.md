@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **The pane right-click menu can now clear a stuck attention mark.** The amber
+  "needs you" mark beside a pane is switched on and off by the agent's own hook
+  events, so when the event that would clear it never arrives — the hook stream
+  stopped, the session ended without one, the prompt was answered somewhere the
+  hooks cannot see — the pane stayed flagged for as long as the client was
+  running, and the project row summarising it stayed flagged too. There was no
+  way to dismiss it short of restarting. **Clear attention** drops the blocked
+  mark, the green finished-while-you-were-away mark and the pin together, and
+  greys out when the pane is carrying none of them. It changes what is shown
+  and nothing else: the pane's next hook event works out the truth again, so a
+  pane that really is still waiting will flag itself straight back.
+
+### Fixed
+- **The project row's warning icon no longer paints over its own count.** A
+  project with panes waiting on you showed the warning sign with the number of
+  them hidden underneath it. The icon was the one symbol in the sidebar that
+  fonts are free to swap for a colour emoji, which is drawn about twice as wide
+  as the space reserved for it — so it covered the character that followed. It
+  is now a symbol with no emoji form, and every state symbol in the sidebar is
+  checked against that property so the problem cannot come back through a
+  different icon.
+- **Sidebar rows containing emoji no longer shift the rows beneath them.** Text
+  arriving from a remote daemon — a project name, a pane name, a branch — is
+  passed through untouched apart from control characters, and the two helpers
+  that cut a row to its column width measured such text one character at a time.
+  That undercounts an emoji written with an explicit presentation mark, so the
+  cut returned a row wider than the column, which wrapped onto the next line and
+  pushed everything below it down by one. Clicking a project then selected its
+  neighbour.
+
 ## [1.49.0] - 2026-08-05
 
 ### Changed

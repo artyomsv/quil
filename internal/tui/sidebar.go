@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
+	"github.com/rivo/uniseg"
 )
 
 // minWidthForSidebar auto-collapses the project sidebar rather than
@@ -308,6 +309,35 @@ func (m Model) projectSidebarSwallowsMouse(x, y int) bool {
 	return w > 0 && x >= 0 && x < w && y >= 0 && y < m.height-1
 }
 
+// The sidebar's state vocabulary, shared by the per-pane rows and the project
+// row that rolls them up — one notation, so the summary reads as a roll-up
+// rather than a second convention.
+//
+// Every one of these is a single rune with NO emoji presentation available
+// (Emoji=No), and that is a hard requirement rather than a preference. An
+// emoji-CAPABLE codepoint is subject to font fallback: the terminal picks a
+// colour emoji face, draws it about two cells wide, and advances one — so it
+// overpaints whatever follows. In the project badge what follows is the count,
+// which is how "⚠1 ◐2" rendered as a warning sign with its number hidden
+// underneath it. Where the terminal instead ADVANCES two cells the damage is
+// worse and quieter: lipgloss measures U+26A0 as one (measured — U+26A1 ⚡
+// measures two, which is why the truncateCells comment names that one), so the
+// row is painted one cell wider than every helper here believes, and
+// renderSidebar's closing .Width(w) wraps the excess onto a new line.
+//
+// U+26A0 WARNING SIGN was the single emoji-capable glyph in this set, and the
+// only one that misbehaved. Forcing text presentation with U+FE0E was tried and
+// rejected: it depends on the terminal honouring a variation selector, and the
+// emoji-presentation alternative (U+FE0F, which lipgloss does measure as two)
+// walks straight into the per-rune truncation overflow documented on
+// truncateCells. A codepoint that was never emoji needs neither.
+const (
+	glyphBlocked = "▲" // parked waiting on the user — needs you
+	glyphWorking = "◐" // turn in flight
+	glyphDone    = "✓" // finished while you were away
+	glyphIdle    = "○" // nothing happening
+)
+
 // sidebarHeadingStyle / sidebarDimStyle / the state-glyph styles mirror the
 // palette already used for tab/pane state elsewhere (styles.go): amber for
 // blocked-on-user, blue for active work, green for done-unseen, dim grey for
@@ -430,16 +460,16 @@ func projectRow(name string, working, blocked, done int, link string, active boo
 	}
 	// Badge order is urgency order, and it is the same glyph vocabulary the
 	// pane rows use so the summary reads as a roll-up rather than a second
-	// notation: ⚠ needs you, ◐ still running, ✓ finished while you were away.
+	// notation: needs you, still running, finished while you were away.
 	badge := ""
 	if blocked > 0 {
-		badge += fmt.Sprintf(" ⚠%d", blocked)
+		badge += fmt.Sprintf(" %s%d", glyphBlocked, blocked)
 	}
 	if working > 0 {
-		badge += fmt.Sprintf(" ◐%d", working)
+		badge += fmt.Sprintf(" %s%d", glyphWorking, working)
 	}
 	if done > 0 {
-		badge += fmt.Sprintf(" ✓%d", done)
+		badge += fmt.Sprintf(" %s%d", glyphDone, done)
 	}
 	if link != "" {
 		badge += " " + link
@@ -465,7 +495,7 @@ func projectRow(name string, working, blocked, done int, link string, active boo
 }
 
 // paneRow renders one pane's agent state: ◐ working (with ⋯N outstanding
-// subagents when any are running), ⚠ blocked-on-user (with the hook-reported
+// subagents when any are running), ▲ blocked-on-user (with the hook-reported
 // tool name when present — never invented when blockedReason is empty), ✓
 // done and unseen, ○ idle. Every remote-sourced string (the pane's name/ID,
 // the blocked reason) is sanitized here since this is a render path a
@@ -481,12 +511,12 @@ func paneRow(pane *PaneModel, focused bool, w int) string {
 	var suffix string
 	switch {
 	case !pane.blockedSince.IsZero():
-		glyph, style = "⚠", sidebarBlockedStyle
+		glyph, style = glyphBlocked, sidebarBlockedStyle
 		if pane.blockedReason != "" {
 			suffix = " " + sanitizeRemoteText(pane.blockedReason)
 		}
 	case pane.working:
-		glyph, style = "◐", sidebarWorkingStyle
+		glyph, style = glyphWorking, sidebarWorkingStyle
 		// "+" when the ledger overflowed: a refused start may still be live
 		// with no entry to count, so the number is a floor. Marking it beats
 		// printing a confidently low count — and the badge still appears when
@@ -499,9 +529,9 @@ func paneRow(pane *PaneModel, focused bool, w int) string {
 			suffix = fmt.Sprintf(" ⋯%d%s", n, mark)
 		}
 	case pane.unseen:
-		glyph, style = "✓", sidebarUnseenStyle
+		glyph, style = glyphDone, sidebarUnseenStyle
 	default:
-		glyph, style = "○", sidebarDimStyle
+		glyph, style = glyphIdle, sidebarDimStyle
 	}
 
 	label := pane.Name
@@ -522,7 +552,7 @@ func paneRow(pane *PaneModel, focused bool, w int) string {
 	// The label says WHICH pane; the suffix is secondary detail (the tool a
 	// pane is blocked on, its subagent count). Subtracting the suffix first
 	// inverts that: a long tool name like "AskUserQuestion" leaves two cells
-	// for the name, so the row reads "⚠ cl AskUserQuestion" and no longer
+	// for the name, so the row reads "▲ cl AskUserQuestion" and no longer
 	// identifies the pane at all. Give the label a floor and truncate the
 	// suffix into whatever is left instead.
 	labelW := avail - lipgloss.Width(suffix)
@@ -541,7 +571,7 @@ func paneRow(pane *PaneModel, focused bool, w int) string {
 // truncateCells cuts s to at most w CELLS, not runes.
 //
 // A rune count is not a width, and the difference is not theoretical here:
-// linkGlyph's ⚡ (U+26A1) is one rune and two cells, ⚠ and the CJK or emoji
+// linkGlyph's ⚡ (U+26A1) is one rune and two cells, and the CJK or emoji
 // characters that reach these rows through project names, pane names and
 // blockedReason are the same — all remote-sourced text that
 // sanitizeRemoteText deliberately preserves non-ASCII in. Rune-counted
@@ -592,15 +622,45 @@ func truncateCells(s string, w int) string {
 	if lipgloss.Width(s) <= w {
 		return s
 	}
+	// Cut on GRAPHEME CLUSTER boundaries, measuring each cluster whole.
+	//
+	// A rune is not the unit of width, because a rune can change the width of
+	// the one before it. A variation selector is the case that reaches here:
+	// U+FE0F measures 0 alone and U+26A0 measures 1, but the PAIR measures 2 —
+	// so summing independently-measured runes admits a glyph that then
+	// overflows, and this function used to return a string WIDER than the
+	// budget it was handed (truncateCells("x⚠️", 2) was three cells).
+	// renderSidebar's closing .Width(w) WRAPS that excess onto a new painted
+	// line rather than cutting it, shifting every row below while
+	// sidebarRowAt still maps screen row y to rows[y-1] — the user clicks
+	// project 3 and selects project 2.
+	//
+	// Reachable without any emoji in quil's own strings: sanitizeRemoteText
+	// preserves printable non-ASCII byte-identically (deliberately — it is a
+	// control-character filter, not a bounding pass), so any project name,
+	// pane name, branch or blocked-reason from a remote daemon can carry one.
+	//
+	// Clusters rather than a re-measured growing prefix, and that is a
+	// performance property rather than a stylistic one: measuring
+	// prefix+rune each step allocates a copy of the prefix, and a
+	// ZERO-WIDTH cluster never advances the budget, so the loop cannot exit
+	// early on one. A remote-supplied name that is a long run of printable
+	// zero-width codepoints therefore walked the whole string reallocating
+	// it — quadratic in len(s), on a render path, driven by another machine's
+	// data. Per-cluster measurement is linear, and lipgloss stays the single
+	// measurement authority so this can never disagree with the .Width(w)
+	// that ultimately paints the row.
 	var b strings.Builder
-	used := 0
-	for _, r := range s {
-		rw := lipgloss.Width(string(r))
-		if used+rw > w {
+	used, state, rest := 0, -1, s
+	for len(rest) > 0 {
+		var cluster string
+		cluster, rest, _, state = uniseg.FirstGraphemeClusterInString(rest, state)
+		cw := lipgloss.Width(cluster)
+		if used+cw > w {
 			break
 		}
-		b.WriteRune(r)
-		used += rw
+		b.WriteString(cluster)
+		used += cw
 	}
 	return b.String()
 }

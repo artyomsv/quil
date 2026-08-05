@@ -14,6 +14,7 @@ Quil is a persistent workflow orchestrator / terminal multiplexer for AI-native 
 - **PTY (Windows):** `charmbracelet/x/conpty` v0.2.0
 - **Config:** TOML via `BurntSushi/toml`
 - **IDs:** `google/uuid`
+- **Grapheme segmentation:** `rivo/uniseg` v0.4.7 — direct since the sidebar cell-cutters needed cluster boundaries. It SEGMENTS only; `lipgloss` remains the sole width authority, or a cut can disagree with the `.Width` that paints the row
 
 ## Architecture
 

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -23,6 +24,7 @@ const (
 	ctxActRename
 	ctxActMute
 	ctxActAttention
+	ctxActClearAttention
 	ctxActRestart
 	ctxActClose
 	// Project-row actions (Task 13) — only ever set on a menu opened via
@@ -84,7 +86,7 @@ var (
 	ctxMenuDisabledStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240")) // same grey as uninstalled plugins in Ctrl+N
 )
 
-// buildCtxMenuItems resolves the 9 menu rows for a target pane. Labels are
+// buildCtxMenuItems resolves the 10 menu rows for a target pane. Labels are
 // state-dependent (mute/attention toggles); gates mirror the keybinding
 // handlers exactly: history needs the plugin's record_history opt-in (the
 // kb.CommandHistory probe), lazygit needs an installed binary (the
@@ -108,6 +110,24 @@ func (m *Model) buildCtxMenuItems(pane *PaneModel) []ctxMenuItem {
 	if pane.pinnedAttention {
 		attnLabel = "Unmark attention"
 	}
+	// "Clear attention" is the inverse of the whole state block, not the
+	// inverse of the pin above it: it drops the BLOCKED mark, which is the one
+	// the user cannot otherwise get rid of.
+	//
+	// blockedSince is set by a hook edge and cleared only by another hook edge
+	// (workStart / workAbort / workStop / workStopFinal, workstate.go). Every
+	// route to a clear therefore runs through the agent — so when the clearing
+	// event never arrives (the hook stream stopped, the session ended in a way
+	// that emitted nothing, the prompt was answered somewhere the hooks do not
+	// observe) the pane stays marked for the life of the TUI process, and the
+	// project row it rolls up into stays marked with it. A lying indicator in
+	// the one place the user looks to decide where to go next is worse than no
+	// indicator, and there was no way to dismiss it short of restarting.
+	//
+	// Disabled when there is nothing to clear, so the row also ANSWERS the
+	// question "is this pane actually still flagged" rather than silently
+	// doing nothing.
+	clearable := !pane.blockedSince.IsZero() || pane.unseen || pane.pinnedAttention
 	// The focus item toggles tab-level focus mode, so its label reflects the
 	// ACTIVE TAB's current state (the menu always targets a pane on the
 	// active tab; in focus mode the only clickable pane IS the focused one).
@@ -123,7 +143,8 @@ func (m *Model) buildCtxMenuItems(pane *PaneModel) []ctxMenuItem {
 		{ctxActLazygit, "Open lazygit", lazygitOK, true},
 		{ctxActRename, "Rename pane", true, false},
 		{ctxActMute, muteLabel, true, false},
-		{ctxActAttention, attnLabel, true, true},
+		{ctxActAttention, attnLabel, true, false},
+		{ctxActClearAttention, "Clear attention", clearable, true},
 		{ctxActRestart, "Restart pane…", true, false},
 		{ctxActClose, "Close pane…", true, false},
 	}
@@ -546,6 +567,25 @@ func (m Model) executeCtxMenuItem(item ctxMenuItem) (tea.Model, tea.Cmd) {
 	case ctxActAttention:
 		if pane, _, _ := m.findPaneAndTab(paneID); pane != nil {
 			pane.pinnedAttention = !pane.pinnedAttention
+		}
+		return m, nil
+	case ctxActClearAttention:
+		if pane, _, _ := m.findPaneAndTab(paneID); pane != nil {
+			// All three marks, because the row promises one thing. Clearing
+			// only blockedSince leaves the pane green instead of amber and the
+			// project row still counting it, which reads as the action having
+			// half-worked.
+			//
+			// This is a display state the user is dismissing, not a fact about
+			// the agent: nothing is sent to the daemon, and the next hook edge
+			// re-derives whatever is actually true (workstate.go owns every
+			// write to these fields but this one). So a pane that really IS
+			// still parked marks itself again on its next event rather than
+			// staying silently clear.
+			pane.blockedSince = time.Time{}
+			pane.blockedReason = ""
+			pane.unseen = false
+			pane.pinnedAttention = false
 		}
 		return m, nil
 	case ctxActRestart:

@@ -84,6 +84,30 @@ func TestCtxMenu_ClearAttentionDisabledOnACleanPane(t *testing.T) {
 		}
 	}
 
+	// The row's label and its group separator are both unverified elsewhere.
+	// gapAfter moved from ctxActAttention to this row so the blank line still
+	// falls between the pane-settings group and the destructive one — a wrong
+	// position is invisible to every other assertion, because nothing else
+	// depends on where the separator sits.
+	var idx = -1
+	for i, it := range items {
+		if it.id == ctxActClearAttention {
+			idx = i
+		}
+	}
+	if idx < 0 {
+		t.Fatal("no Clear attention row")
+	}
+	if items[idx].label != "Clear attention" {
+		t.Errorf("label = %q, want %q", items[idx].label, "Clear attention")
+	}
+	if !items[idx].gapAfter {
+		t.Error("Clear attention must carry gapAfter — it is the last row of the pane-settings group")
+	}
+	if items[idx-1].id != ctxActAttention || items[idx-1].gapAfter {
+		t.Error("the separator must have MOVED off ctxActAttention, not been added beside it")
+	}
+
 	// Each mark independently enables it — a pane can be unseen without ever
 	// having been blocked, and pinned without either.
 	for name, set := range map[string]func(){

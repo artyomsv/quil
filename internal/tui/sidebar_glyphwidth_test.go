@@ -24,14 +24,14 @@ func TestSidebarGlyphs_OneCellAndNotEmojiCapable(t *testing.T) {
 	// Not exhaustive — it names the ones a state vocabulary would plausibly
 	// reach for, so a future edit that reintroduces one fails here.
 	emojiCapable := map[rune]string{
-		0x26A0: "U+26A0 WARNING SIGN",
-		0x26A1: "U+26A1 HIGH VOLTAGE",
-		0x2757: "U+2757 EXCLAMATION MARK",
-		0x2753: "U+2753 QUESTION MARK",
-		0x2B55: "U+2B55 HEAVY LARGE CIRCLE",
-		0x274C: "U+274C CROSS MARK",
-		0x2705: "U+2705 WHITE HEAVY CHECK MARK",
-		0x23F3: "U+23F3 HOURGLASS",
+		0x26A0:  "U+26A0 WARNING SIGN",
+		0x26A1:  "U+26A1 HIGH VOLTAGE",
+		0x2757:  "U+2757 EXCLAMATION MARK",
+		0x2753:  "U+2753 QUESTION MARK",
+		0x2B55:  "U+2B55 HEAVY LARGE CIRCLE",
+		0x274C:  "U+274C CROSS MARK",
+		0x2705:  "U+2705 WHITE HEAVY CHECK MARK",
+		0x23F3:  "U+23F3 HOURGLASS",
 		0x1F534: "U+1F534 RED CIRCLE",
 	}
 	for name, g := range map[string]string{
@@ -67,11 +67,11 @@ var remoteTextSamples = []string{
 	"quil",
 	"",
 	"a-very-long-project-name-that-will-certainly-truncate",
-	"构建服务",              // wide CJK
-	"⚠️",           // the exact pair that made truncateCells overflow
-	"a️b",          // a variation selector after a narrow ASCII rune
-	"️",            // a bare variation selector
-	"🔥️",           // emoji plus an explicit presentation request
+	"构建服务",    // wide CJK
+	"⚠️",      // the exact pair that made truncateCells overflow
+	"a️b",     // a variation selector after a narrow ASCII rune
+	"️",       // a bare variation selector
+	"🔥️",      // emoji plus an explicit presentation request
 	"feat/中文", // mixed-width branch name
 	strings.Repeat("⚡", 30),
 }
@@ -164,12 +164,18 @@ func TestCellCutters_SurviveAZeroWidthFlood(t *testing.T) {
 	const w = 5
 	flood := strings.Repeat("​", 50000) + "visible text"
 
-	type result struct{ trunc, last string }
+	// elideMiddle is included rather than assumed. It delegates its head and
+	// tail to the other two, so today it inherits their cost by composition —
+	// but that is an inference about the current body, not a property anyone
+	// enforces, and an edit that measures something over s before delegating
+	// would reintroduce the blowup here alone.
+	type result struct{ trunc, last, elide string }
 	done := make(chan result, 1)
 	go func() {
 		done <- result{
 			trunc: truncateCells(flood, w),
 			last:  lastCellsToWidth(flood, w),
+			elide: elideMiddle(flood, w),
 		}
 	}()
 
@@ -180,6 +186,9 @@ func TestCellCutters_SurviveAZeroWidthFlood(t *testing.T) {
 		}
 		if n := lipgloss.Width(got.last); n > w {
 			t.Errorf("lastCellsToWidth returned %d cells, over the %d budget", n, w)
+		}
+		if n := lipgloss.Width(got.elide); n > w {
+			t.Errorf("elideMiddle returned %d cells, over the %d budget", n, w)
 		}
 		// The tail is what is visible, so the backward cut must reach it
 		// rather than stopping in the zero-width run.

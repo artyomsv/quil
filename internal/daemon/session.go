@@ -40,7 +40,13 @@ type Pane struct {
 	// the saved buffer grows by a screenful on every restart.
 	// PluginMu-protected.
 	ghostSeeded bool
-	Type         string              // Plugin name (default: "terminal")
+	// WorktreeOwned marks a pane created into a linked worktree Quil made for
+	// it. PERSISTED, and it is the only thing that lets restore tell a missing
+	// WORKTREE from a missing browsed directory — the snapshot stores just CWD
+	// otherwise, so the two are indistinguishable and the wrong recovery
+	// applies to one of them. PluginMu-protected, like Type and CWD beside it.
+	WorktreeOwned bool
+	Type          string             // Plugin name (default: "terminal")
 	PluginState  map[string]string   // Scraped values (e.g., "session_id": "abc123")
 	// PluginMu protects every mutable field that can be read or written
 	// concurrently with the daemon's PTY-output goroutine: PluginState,

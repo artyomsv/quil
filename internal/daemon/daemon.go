@@ -142,6 +142,12 @@ type Daemon struct {
 	// handleWorktreeListReq for why it is not browseScanning's.
 	worktreeScanning atomic.Bool
 
+	// worktreeAdding serialises worktree CREATION. Its own slot — see
+	// beginWorktreeAdd for why it is not worktreeScanning — and it doubles as
+	// the permit budget for that path: one add at a time daemon-wide means at
+	// most one blocking-FS permit held for worktreeAddTimeout.
+	worktreeAdding atomic.Bool
+
 	// resumeClaimMu serializes the claim of a Claude session by a new pane.
 	// The occupancy test and the write that acts on it must be one atomic
 	// step: handleCreatePane runs on the requesting conn's dispatch
@@ -952,7 +958,7 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 	case ipc.MsgReorderTab:
 		d.handleReorderTab(msg)
 	case ipc.MsgCreatePane:
-		d.handleCreatePane(msg)
+		d.handleCreatePane(conn, msg)
 	case ipc.MsgDestroyPane:
 		d.handleDestroyPane(msg)
 	case ipc.MsgUpdatePane:
@@ -1584,9 +1590,27 @@ func (d *Daemon) handleReorderTab(msg *ipc.Message) {
 	d.requestSnapshot()
 }
 
-func (d *Daemon) handleCreatePane(msg *ipc.Message) {
+func (d *Daemon) handleCreatePane(conn *ipc.Conn, msg *ipc.Message) {
 	var payload ipc.CreatePanePayload
 	if err := msg.DecodePayload(&payload); err != nil {
+		return
+	}
+
+	// A create carrying a worktree spec goes to a WORKER goroutine and answers
+	// the requester directly. `git worktree add` checks out a tree — seconds on
+	// a large repository — and this function runs on the requesting conn's
+	// dispatch goroutine, where that blocks every message from that client,
+	// input included. Same hazard that moved browse, discover and
+	// claudesessions onto workers.
+	//
+	// The response is a request-response pair rather than a broadcast: the
+	// requester holds a layout placeholder armed before the send, and a
+	// broadcast would put one client's failure in front of every other client
+	// while giving the requester nothing correlatable to unwind with.
+	if payload.Worktree != nil {
+		go func() {
+			respondTo(conn, msg.ID, ipc.MsgCreatePaneResp, d.worktreeAddAndCreate(payload))
+		}()
 		return
 	}
 
@@ -1627,10 +1651,28 @@ func (d *Daemon) handleCreatePane(msg *ipc.Message) {
 		return
 	}
 
+	if _, err := d.createPaneAt(payload, cwd, paneType); err != nil {
+		log.Printf("%v", err)
+		return
+	}
+}
+
+// createPaneAt is the pane construction every create path shares: allocate,
+// apply the payload's plugin fields, claim a resume session, spawn, publish.
+//
+// Extracted rather than copied because the worktree path needs all of it and
+// none of handleCreatePane's cwd fallback — see createPaneInWorktree, where
+// substituting the daemon's directory for a missing worktree would defeat the
+// isolation the pane exists for.
+//
+// A spawn failure returns the pane alongside the error, so a caller that must
+// leave nothing behind can destroy it. handleCreatePane deliberately does not:
+// its historical behaviour is to leave the PTY-less pane in place and log,
+// and the next workspace broadcast shows it as exited.
+func (d *Daemon) createPaneAt(payload ipc.CreatePanePayload, cwd, paneType string) (*Pane, error) {
 	pane, err := d.session.CreatePane(payload.TabID, cwd)
 	if err != nil {
-		log.Printf("create pane error: %v", err)
-		return
+		return nil, fmt.Errorf("create pane error: %w", err)
 	}
 
 	pane.Type = paneType
@@ -1652,11 +1694,11 @@ func (d *Daemon) handleCreatePane(msg *ipc.Message) {
 
 	ptySession := apty.New()
 	if err := d.spawnPane(pane, ptySession, false); err != nil {
-		log.Printf("start PTY error: %v", err)
-		return
+		return pane, fmt.Errorf("start PTY error: %w", err)
 	}
 	d.broadcastState()
 	d.requestSnapshot()
+	return pane, nil
 }
 
 func (d *Daemon) handleReplacePane(payload ipc.CreatePanePayload, cwd, paneType string) {

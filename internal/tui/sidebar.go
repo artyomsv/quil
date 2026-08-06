@@ -316,6 +316,35 @@ func (m Model) projectSidebarSwallowsMouse(x, y int) bool {
 	return w > 0 && x >= 0 && x < w && y >= 0 && y < m.height-1
 }
 
+// sidebarDragRule is the glyph painted down the pending edge while the sidebar
+// is being dragged, in the same bright blue a split-border drag highlights
+// with (pane.go's splitDragHighlight) so the two drags read as one gesture
+// vocabulary rather than two conventions.
+//
+// A box-drawing vertical rather than a block, so it reads as a boundary rather
+// than as content — and, like every sidebar glyph, a single cell with no emoji
+// presentation available: an emoji-capable codepoint can be drawn two cells
+// wide while advancing one, painting over its neighbour.
+const sidebarDragRule = "│"
+
+var sidebarDragRuleStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
+
+// sidebarDragRuleBlock builds the one-column, rows-tall block the drag preview
+// composites onto the frame.
+//
+// Returned as a BOX for overlayAt rather than cut in by hand: that function
+// already solves the ANSI boundary problem — a truncate that lands mid-glyph,
+// an SGR left open at the cut, a wide glyph straddling the seam — and a second
+// cutter written here would have to solve all three again to be correct at one
+// column.
+func sidebarDragRuleBlock(rows int) string {
+	if rows <= 0 {
+		return ""
+	}
+	line := sidebarDragRuleStyle.Render(sidebarDragRule)
+	return strings.Repeat(line+"\n", rows-1) + line
+}
+
 // sidebarEdgeHitPadding widens the drag zone to the sidebar's own last column
 // as well as the first pane column, mirroring the split border's "both drawn
 // glyphs grab the line" rule. A one-column target on a boundary the user aims

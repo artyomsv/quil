@@ -3,6 +3,9 @@ package tui
 import (
 	"testing"
 
+	"strings"
+
+	"charm.land/lipgloss/v2"
 	tea "charm.land/bubbletea/v2"
 )
 
@@ -252,5 +255,74 @@ func TestSidebarDrag_RightClickDoesNotArm(t *testing.T) {
 	updated, _ := m.Update(tea.MouseClickMsg{X: 21, Y: 2, Button: tea.MouseRight})
 	if updated.(Model).sidebarDragging {
 		t.Error("a right-click on the edge armed a drag")
+	}
+}
+
+// The preview must be a RULE, not a moved sidebar: the rendered strip keeps
+// its committed width mid-drag (see TestSidebarDrag_DoesNotResizeMidDrag), so
+// the only thing that may follow the cursor is the indicator.
+func TestSidebarDragPreview_DrawsARuleWithoutMovingTheStrip(t *testing.T) {
+	m := newSplitDragTestModel(t)
+	m.sidebarOpen = true
+	m.sidebarWidth = 22
+
+	before := stripANSI(m.View().Content)
+	m.beginSidebarDrag()
+	m.trackSidebarDrag(40)
+	after := stripANSI(m.View().Content)
+
+	lines := strings.Split(after, "\n")
+	if len(lines) < 3 {
+		t.Fatalf("View produced %d lines, want a full frame", len(lines))
+	}
+	row := []rune(lines[1])
+	col := m.sidebarDragW - 1
+	if len(row) <= col {
+		t.Fatalf("row 1 is %d cells, too short to hold the rule at %d", len(row), col)
+	}
+	if string(row[col]) != sidebarDragRule {
+		t.Errorf("column %d = %q, want the drag rule %q", col, string(row[col]), sidebarDragRule)
+	}
+	// The strip has NOT moved: its own columns are unchanged from the
+	// undragged frame.
+	beforeRow := []rune(strings.Split(before, "\n")[1])
+	if len(beforeRow) > 21 && len(row) > 21 && string(beforeRow[:21]) != string(row[:21]) {
+		t.Errorf("the sidebar's own columns moved mid-drag:\n before %q\n after  %q",
+			string(beforeRow[:21]), string(row[:21]))
+	}
+}
+
+// With no drag in flight the frame must carry no residue of one.
+func TestSidebarDragPreview_AbsentWhenNotDragging(t *testing.T) {
+	m := newSplitDragTestModel(t)
+	m.sidebarOpen = true
+	m.sidebarWidth = 22
+	before := m.View().Content
+
+	m.beginSidebarDrag()
+	m.trackSidebarDrag(40)
+	m.finishSidebarDrag()
+	// Undo the commit; only the preview is under test here.
+	m.sidebarWidth = 22
+	m.cfg.UI.SidebarWidth = 22
+
+	if got := m.View().Content; got != before {
+		t.Error("a finished drag left a preview residue in the frame")
+	}
+}
+
+// The frame must not grow: overlayAt replaces a cell rather than inserting
+// one, and a frame one column wider than the terminal wraps every row.
+func TestSidebarDragPreview_DoesNotWidenTheFrame(t *testing.T) {
+	m := newSplitDragTestModel(t)
+	m.sidebarOpen = true
+	m.sidebarWidth = 22
+	m.beginSidebarDrag()
+	m.trackSidebarDrag(40)
+
+	for i, line := range strings.Split(stripANSI(m.View().Content), "\n") {
+		if w := lipgloss.Width(line); w > m.width {
+			t.Errorf("line %d is %d cells, wider than the terminal's %d", i, w, m.width)
+		}
 	}
 }

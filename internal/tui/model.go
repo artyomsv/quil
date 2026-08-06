@@ -3217,6 +3217,14 @@ func (m Model) View() tea.View {
 		if projSidebarW > 0 {
 			paneArea = lipgloss.JoinHorizontal(lipgloss.Top, m.renderSidebar(m.sidebarContentHeight()), paneArea)
 		}
+		// Drag preview: a rule at the PENDING edge. The strip itself must not
+		// move mid-drag — see the sidebarDragging field comment — so the
+		// indicator is the only thing that follows the cursor. Composited like
+		// the context menu, on paneArea, whose first line IS screen row 0.
+		if m.sidebarDragging && m.sidebarDragW > 0 {
+			rows := strings.Count(paneArea, "\n") + 1
+			paneArea = overlayAt(paneArea, sidebarDragRuleBlock(rows), m.sidebarDragW-1, 0, m.width)
+		}
 		if m.ctxMenu.open() {
 			// ctxMenu coords are screen rows and paneArea's first line IS
 			// screen row 0 (the tab bar), so no shift.

@@ -3215,6 +3215,13 @@ func (m *Model) onSetupFieldFocused(p *plugin.PanePlugin) tea.Cmd {
 	case "session":
 		return m.ensureSessionScan()
 	case "worktree":
+		if m.cwdBrowseDir == "" {
+			// Nothing browsed yet — or the Windows roots list, where every
+			// row IS a root rather than a child of some directory. Asking
+			// here would have the daemon answer from ITS OWN default CWD,
+			// listing worktrees of a repository nothing on screen names.
+			return nil
+		}
 		if m.worktrees.pending {
 			return nil
 		}
@@ -3726,7 +3733,7 @@ func (m Model) renderSetupWorktreeField(focused bool) string {
 	case m.worktrees.err != "":
 		b.WriteString(dialogNormal.Render(label + "    "))
 		b.WriteString(dialogSubtle.Render(truncateToWidth(
-			sanitizeRemoteText(m.worktrees.err), m.setupTextWidth()-12)))
+			sanitizeRemoteText(m.worktrees.err), m.setupTextWidth()-lipgloss.Width(label)-4)))
 		return b.String()
 	case !m.worktrees.repo:
 		b.WriteString(dialogSubtle.Render(label + "    not a git repository"))
@@ -3738,7 +3745,7 @@ func (m Model) renderSetupWorktreeField(focused bool) string {
 		if m.selectedWorktree != "" {
 			summary = sanitizeRemoteText(worktreeLabel(m.worktrees.list, m.selectedWorktree))
 		}
-		b.WriteString(dialogNormal.Render(label + "    " + truncateToWidth(summary, m.setupTextWidth()-12)))
+		b.WriteString(dialogNormal.Render(label + "    " + truncateToWidth(summary, m.setupTextWidth()-lipgloss.Width(label)-4)))
 		return b.String()
 	}
 
@@ -3760,9 +3767,9 @@ func (m Model) renderSetupWorktreeField(focused bool) string {
 		}
 		text := sanitizeRemoteText(rows[i].label)
 		if rows[i].disabled {
-			b.WriteString(dialogSubtle.Render(mark + truncateToWidth(text, m.setupTextWidth()-4)))
+			b.WriteString(dialogSubtle.Render(mark + truncateToWidth(text, m.setupTextWidth()-setupRowIndent)))
 		} else {
-			b.WriteString(dialogNormal.Render(mark + truncateToWidth(text, m.setupTextWidth()-4)))
+			b.WriteString(dialogNormal.Render(mark + truncateToWidth(text, m.setupTextWidth()-setupRowIndent)))
 		}
 		b.WriteString("\n")
 	}
@@ -3864,17 +3871,25 @@ const setupChromeRows = 26
 // height actually available manufactures the overflow it looks like it
 // prevents — the same reasoning as historyMinRows.
 func (m Model) worktreeVisibleRows() int {
-	// One more than the session field's chrome (the collapsed worktree row
-	// itself is always drawn, whether or not the list below it is), PLUS the
-	// session list's own floor, reserved up front: sessionListMinRows never
-	// shrinks, so a worktree list that claims rows greedily up to its own
-	// cap can take rows the session floor is going to demand anyway — the
-	// exact shared-budget overflow this task exists to prevent, in the band
-	// where the worktree list has room to grow but hasn't hit its cap yet.
+	// The worktree and session lists never render expanded at the same
+	// time: only one setup-dialog field is focused at once (cursor ==
+	// fieldIdx, a single int), and a field's list collapses to a one-line
+	// summary while it is not the focused one. So the constraint the
+	// terminal actually imposes is the MAX of the two lists' heights, not
+	// their sum.
 	//
-	// The reservation makes the combined budget exact, not merely
-	// sufficient: while this list is still ramping (this function's own
-	// "default: return avail" branch — below its cap, above its floor),
+	// The reservation below is SUM-based anyway: this list claims one row
+	// more than the session field's own chrome (the collapsed worktree row
+	// is always drawn, whether or not its list is), PLUS the session list's
+	// floor, up front — regardless of whether the session field is even
+	// focused right now. That is more conservative than the true
+	// mutually-exclusive bound requires, but it is kept because it is
+	// simple, safe for every terminal height, and pinned by tests —
+	// master's looser bound overflowed by 3 rows across h=30..39.
+	//
+	// The reservation makes the combined SUM exact, not merely sufficient:
+	// while this list is still ramping (this function's own "default:
+	// return avail" branch — below its cap, above its floor),
 	// worktreeVisibleRows(h) == h - surroundingRows, so sessionVisibleRows'
 	// own avail (m.height - setupChromeRows - worktreeVisibleRows()) has
 	// m.height cancel out of the subtraction entirely, leaving the CONSTANT
@@ -3882,9 +3897,9 @@ func (m Model) worktreeVisibleRows() int {
 	// constant sits one row ABOVE the session floor — session is not
 	// clamped there, it returns that value via its own default branch — so
 	// worktree(h) + session(h) reduces to (h - surroundingRows) + (1 +
-	// sessionListMinRows) = h - setupChromeRows, i.e. exactly the combined
-	// budget, for every height in the ramp. Zero slack, not "enough
-	// headroom".
+	// sessionListMinRows) = h - setupChromeRows: the arithmetic reserves
+	// exactly the combined SUM for every height in the ramp — a safe
+	// over-reservation, since the two lists are never both on screen.
 	const surroundingRows = setupChromeRows + 1 + sessionListMinRows
 	avail := m.height - surroundingRows
 	switch {

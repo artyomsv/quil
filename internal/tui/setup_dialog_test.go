@@ -1753,7 +1753,7 @@ default = false
 func TestRenderSetup_PickBlurred_MarksCommittedRow(t *testing.T) {
 	const picked, other = "/tmp/alpha", "/tmp/beta"
 	m := recentPickModel(t, []string{picked, other})
-	m.setupFieldCursor = 1 // Continue — the CWD field is blurred
+	m.setupFieldCursor = 1 // worktree field — the CWD field is blurred
 
 	out := stripANSI(m.renderCreatePaneSetupDialog())
 	if !strings.Contains(out, setupRowIdleMark+picked) {
@@ -2405,6 +2405,100 @@ func TestHandleSetupWorktreeKey_EnterOnDisabledRowRefused(t *testing.T) {
 	got := updated.(Model)
 	if got.selectedWorktree != "" {
 		t.Errorf("selectedWorktree = %q, want unchanged — Enter on a disabled row must be refused", got.selectedWorktree)
+	}
+}
+
+// worktreePickModel builds a setup-dialog Model with the worktree field
+// focused (field 1 for the "ai" plugin: CWD is 0, worktree is 1 — see
+// setupFieldKind) and its listing already settled, so render reaches the
+// expanded row list without a round trip.
+func worktreePickModel(t *testing.T, list []ipc.WorktreeInfo) Model {
+	t.Helper()
+	return Model{
+		dialog:           dialogCreatePaneSetup,
+		pluginRegistry:   registryWithAICWD(t),
+		selectedPlugin:   "ai",
+		setupFieldCursor: 1,
+		worktrees:        worktreeState{loaded: true, repo: true, list: list},
+		width:            100,
+		// Tall enough that worktreeVisibleRows() returns its full cap (6)
+		// rather than the 1-row floor a zero height would clamp to — the
+		// row under test must actually be inside the rendered window.
+		height: 40,
+	}
+}
+
+// The worktree field's four request-lifecycle states must render
+// DIFFERENTLY: a scan still in flight showing as "no worktrees" is a
+// confidently wrong answer, and "this is not a repository" is a different
+// fact from "the scan failed" — only one of them justifies telling the user
+// there is nothing here. Mirrors TestRenderSetup_PendingAndErrorAreNotEmptyDirectory.
+func TestRenderSetup_WorktreeFieldStatesAreDistinguishable(t *testing.T) {
+	base := func() Model {
+		return Model{
+			dialog:         dialogCreatePaneSetup,
+			pluginRegistry: registryWithAICWD(t),
+			selectedPlugin: "ai",
+			width:          100,
+		}
+	}
+
+	scanning := base()
+	scanning.worktrees = worktreeState{pending: true}
+	scanningOut := stripANSI(scanning.renderCreatePaneSetupDialog())
+
+	neverAsked := base() // zero-value worktreeState: never requested yet
+	neverAskedOut := stripANSI(neverAsked.renderCreatePaneSetupDialog())
+
+	failed := base()
+	failed.worktrees = worktreeState{loaded: true, err: "git: command not found"}
+	failedOut := stripANSI(failed.renderCreatePaneSetupDialog())
+
+	notRepo := base()
+	notRepo.worktrees = worktreeState{loaded: true}
+	notRepoOut := stripANSI(notRepo.renderCreatePaneSetupDialog())
+
+	if !strings.Contains(scanningOut, "Worktree    scanning…") {
+		t.Errorf("scanning state did not render its marker\n%s", scanningOut)
+	}
+	if strings.Contains(scanningOut, "not a git repository") {
+		t.Errorf("a scan in flight must not read as a settled answer\n%s", scanningOut)
+	}
+
+	if !strings.Contains(neverAskedOut, "Worktree    —") {
+		t.Errorf("never-asked state did not render its placeholder\n%s", neverAskedOut)
+	}
+	if strings.Contains(neverAskedOut, "scanning…") || strings.Contains(neverAskedOut, "not a git repository") {
+		t.Errorf("never-asked state must not read as scanning or as a settled answer\n%s", neverAskedOut)
+	}
+
+	if !strings.Contains(failedOut, "git: command not found") {
+		t.Errorf("failed scan did not show its error\n%s", failedOut)
+	}
+	if strings.Contains(failedOut, "not a git repository") {
+		t.Errorf("a scan failure must not read as \"not a repository\"\n%s", failedOut)
+	}
+
+	if !strings.Contains(notRepoOut, "Worktree    not a git repository") {
+		t.Errorf("a non-repository directory did not say so\n%s", notRepoOut)
+	}
+	if strings.Contains(notRepoOut, "scanning…") {
+		t.Errorf("a settled non-repository answer must not read as still scanning\n%s", notRepoOut)
+	}
+}
+
+// Worktree branch names now come from a host the user may not control. ESC is
+// a C0 control that sanitizeRemoteText strips before a rendered row reaches
+// the screen — mirrors TestRenderSetup_KubeRowsSanitizeRemoteText, which pins
+// the same call site's twin (kube context names).
+func TestRenderSetup_WorktreeRowsSanitizeRemoteText(t *testing.T) {
+	m := worktreePickModel(t, []ipc.WorktreeInfo{
+		{Path: "/repo", Main: true, Branch: "master"},
+		{Path: "/repo-worktrees/evil", Branch: "feat\x1b[31m;rm -rf"},
+	})
+	out := m.renderCreatePaneSetupDialog()
+	if strings.Contains(out, "\x1b[31m") {
+		t.Error("rendered output carries a raw CSI sequence from a remote branch name")
 	}
 }
 

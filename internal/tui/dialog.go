@@ -2867,6 +2867,17 @@ func (m *Model) showRootsList() {
 	// couple of unresponsive drives, and a drive missing for that reason is
 	// indistinguishable from one that was never mapped.
 	m.cwdBrowseTruncated = m.cwdBrowseRootsTruncated
+
+	// The root list IS a new browsed "directory" (cwdBrowseDir just changed to
+	// "" above), reached by ordinary "up" navigation from a filesystem root —
+	// browseUp calls this directly, without a round trip, so the reset belongs
+	// here rather than only in applyBrowseResponse. Gated like that site: this
+	// function is ALSO called from the project dialog's browseUp
+	// (projectdialog.go), which has no worktree field to go stale, and must
+	// stay untouched by setup-dialog policy.
+	if m.dialog == dialogCreatePaneSetup {
+		m.onSetupCWDChanged(m.pluginRegistry.Get(m.selectedPlugin), "")
+	}
 }
 
 // applyBrowseListing fills the directory browser from an already-resolved

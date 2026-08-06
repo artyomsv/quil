@@ -2468,3 +2468,62 @@ func TestApplyBrowseResponse_ClearsWorktreeOnRealNavigation(t *testing.T) {
 		t.Errorf("cwdBrowseDir = %q, want /repo-b", m.cwdBrowseDir)
 	}
 }
+
+// Ascending to the drive-roots list is ordinary "up" navigation on Windows —
+// browseUp calls showRootsList directly, with no daemon round trip, so a
+// worktree chosen before reaching the root list must not survive into it.
+// Driven through browseUp/showRootsList's real call path (cwdBrowseParent ==
+// "" with roots on hand) rather than by calling showRootsList directly, so a
+// regression that stops browseUp reaching it would fail this test too.
+func TestBrowseUp_ToRootsList_ClearsStaleWorktree(t *testing.T) {
+	m, _ := browserModel(t, "/repo-a", "", []string{"work"}) // parent == "": at a root
+	m.cwdBrowseRoots = []string{`C:\`, `D:\`}
+	m.selectedWorktree = "/repo-a-worktrees/feat-x"
+	m.worktreeCursor = 1
+	m.worktreeScroll = 1
+	m.worktrees = worktreeState{path: "/repo-a", loaded: true, repo: true}
+
+	m.browseUp()
+
+	if got := m.setupSpawnDir(); got != "" {
+		t.Errorf("setupSpawnDir() = %q, want \"\" — the stale worktree must not survive reaching the roots list", got)
+	}
+	if m.selectedWorktree != "" {
+		t.Errorf("selectedWorktree = %q, want cleared", m.selectedWorktree)
+	}
+	if m.worktreeCursor != 0 || m.worktreeScroll != 0 {
+		t.Errorf("cursor/scroll = %d/%d, want both reset to 0", m.worktreeCursor, m.worktreeScroll)
+	}
+	if m.worktrees.loaded {
+		t.Error("worktrees listing must be dropped, not carried into the roots list")
+	}
+	if m.cwdBrowseDir != "" {
+		t.Errorf("cwdBrowseDir = %q, want \"\" (showing the roots list)", m.cwdBrowseDir)
+	}
+}
+
+// showRootsList is shared with the project dialog's browseUp
+// (projectBrowseUp), which has no worktree field — the setup-dialog-only
+// reset must stay inert there rather than touching state a different dialog
+// owns.
+func TestShowRootsList_ProjectDialog_LeavesWorktreeStateUntouched(t *testing.T) {
+	m, _ := browserModel(t, "/repo-a", "", []string{"work"})
+	m.dialog = dialogProjectNew
+	m.cwdBrowseRoots = []string{`C:\`, `D:\`}
+	m.selectedWorktree = "/repo-a-worktrees/feat-x"
+	m.worktreeCursor = 1
+	m.worktreeScroll = 1
+	m.worktrees = worktreeState{path: "/repo-a", loaded: true, repo: true}
+
+	m.showRootsList()
+
+	if m.selectedWorktree != "/repo-a-worktrees/feat-x" {
+		t.Errorf("selectedWorktree = %q, want unchanged — the project dialog has no worktree field", m.selectedWorktree)
+	}
+	if m.worktreeCursor != 1 || m.worktreeScroll != 1 {
+		t.Errorf("cursor/scroll = %d/%d, want unchanged", m.worktreeCursor, m.worktreeScroll)
+	}
+	if !m.worktrees.loaded {
+		t.Error("worktrees listing must survive — the project dialog's browse must not touch it")
+	}
+}

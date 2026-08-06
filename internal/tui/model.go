@@ -119,10 +119,18 @@ type PaneInfo struct {
 	// daemon is on another machine. GitUpstream distinguishes "in sync" from
 	// "nothing to compare against" — without it, 0/0 would claim the first
 	// when it means the second.
+	// SpawnError explains why a pane has no process — today, a worktree-owned
+	// pane whose directory is gone. Daemon-authoritative and runtime-only.
+	SpawnError  string
 	GitBranch   string
 	GitDetached bool
 	GitWorktree bool
-	GitUpstream bool
+	// GitWorktreeName names the linked worktree the pane's CWD is in. Derived
+	// daemon-side: path separators belong to the machine holding the disk, so
+	// a Windows daemon's path split by a Linux client's filepath.Base returns
+	// the whole string.
+	GitWorktreeName string
+	GitUpstream     bool
 	GitAhead    int
 	GitBehind   int
 	GitStale    bool
@@ -422,6 +430,26 @@ type Model struct {
 	browse            browseState             // in-flight directory-browser request (zero value = none)
 	worktrees         worktreeState           // create-pane dialog's worktree listing
 	selectedWorktree  string                  // chosen worktree PATH; "" = off (spawn in the CWD field's directory)
+	// worktreeNewBranch is the branch a NEW worktree will be created on.
+	// Non-empty and selectedWorktree empty means "create"; the two are
+	// mutually exclusive, and both handlers clear the other.
+	worktreeNewBranch string
+	// worktreeNaming is true while the name is being typed. It swallows the
+	// list's j/k, which are letters a branch name may contain.
+	worktreeNaming bool
+	// worktreeErr is the validation message shown beside the name field.
+	worktreeErr string
+	// worktreeCreates holds the tabs with a worktree create in flight, each
+	// holding a layout placeholder only the response can retire.
+	//
+	// A MAP, not a scalar: the setup dialog closes on submit, so a second
+	// Ctrl+N create can start while the first is still checking out — and the
+	// daemon's single-flight rejects the second IMMEDIATELY, so its response
+	// routinely arrives BEFORE the first's. A single slot is overwritten by
+	// the second and then cleared, stranding the first tab's placeholder
+	// permanently: every later pane created in that tab is swallowed by the
+	// dead leaf, with no error anywhere.
+	worktreeCreates map[string]bool
 	worktreeCursor    int                     // row cursor in the worktree field's expanded list; row 0 = "off"
 	worktreeScroll    int                     // scroll offset for the visible window of the expanded worktree list
 	reqGen            int                     // monotonic instance id source for repoScan/browse/worktrees; see nextReqGen
@@ -543,6 +571,19 @@ type Model struct {
 	// (finishSplitDrag) — mid-drag only the local tree and VT change.
 	splitDragNode *LayoutNode
 	splitDragRect BorderHit
+
+	// Project-sidebar edge drag. sidebarDragging is set while a drag is in
+	// flight; sidebarDragW is the PENDING width, painted as a preview rule and
+	// committed to sidebarWidth only on release.
+	//
+	// The split is not cosmetic. View() calls tab.Resize on every frame, and
+	// ResizeVT's contract pairs every emulator resize with a PTY redraw — so
+	// moving the real width per motion event replays the 2026-07-15 corruption
+	// bug, where unpaired intermediate-width rewraps permanently garble
+	// content at the narrowest width crossed. Same deferral, same reason, as
+	// finishSplitDrag.
+	sidebarDragging bool
+	sidebarDragW    int
 
 	// ctxMenu is the pane context menu overlay (right-click / quick_actions).
 	// Zero value = closed. Not a dialogScreen — see ctxmenu.go.
@@ -1107,6 +1148,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// is a bare row test: the tab bar starts at the sidebar's right
 		// edge, so at row 0 the sidebar's own PROJECTS heading is what the
 		// user clicked, and the strip claims it here.
+		// Checked BEFORE projectSidebarSwallowsMouse: the zone's left column
+		// is the sidebar's OWN last column, which that branch would otherwise
+		// swallow as a row click — so the edge would be ungrabbable from the
+		// side the user aims at it from.
+		if msg.Button == tea.MouseLeft && m.hitTestSidebarEdge(msg.X, msg.Y) {
+			m.beginSidebarDrag()
+			return m, nil
+		}
 		if m.projectSidebarSwallowsMouse(msg.X, msg.Y) {
 			m.clearDragState()
 			switch msg.Button {
@@ -1285,6 +1334,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.dragSplitBorder(msg.X, msg.Y)
 			return m, nil
 		}
+		if m.sidebarDragging {
+			m.trackSidebarDrag(msg.X)
+			return m, nil
+		}
 		if m.notesMouseDown && m.notesMode && m.notesEditor != nil {
 			row, col, ok := m.notesEditorPosAt(msg.X, msg.Y)
 			if !ok {
@@ -1327,6 +1380,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// plus the persisted layout ratio (finishSplitDrag), highlight off.
 		if m.splitDragNode != nil {
 			return m, m.finishSplitDrag()
+		}
+		// The sidebar edge commits on release for the same reason the split
+		// border does: one PTY resize per pane, once, rather than per motion
+		// event.
+		if m.sidebarDragging {
+			return m, m.finishSidebarDrag()
 		}
 		// A tab drag or scrollbar drag terminates here with no further
 		// processing — they don't share the click-vs-drag pane-focus
@@ -1875,6 +1934,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.applyWorktreeList(msg)
 		return m, m.listenForMessages()
 
+	case createPaneRespMsg:
+		// Same rule: an IPC response arm that returns a bare nil ends the
+		// listen loop for the session.
+		m.applyCreatePaneResp(msg.Resp)
+		return m, m.listenForMessages()
+
+	case createPaneTimeoutMsg:
+		// Local timer, so deliberately NO re-arm — the same distinction
+		// worktreeTimeoutMsg below makes.
+		m.applyCreatePaneTimeout(msg.tabID)
+		return m, nil
+
 	case worktreeTimeoutMsg:
 		// Local timer, so deliberately no re-arm.
 		m.applyWorktreeTimeout(msg)
@@ -2333,6 +2404,65 @@ func (m *Model) clearDragState() {
 	m.viewerMouseDown = false
 	m.splitDragNode = nil
 	m.splitDragRect = BorderHit{}
+	m.sidebarDragging = false
+	m.sidebarDragW = 0
+}
+
+// beginSidebarDrag arms an edge drag, seeding the pending width from the
+// current one so a click with no motion commits no change.
+func (m *Model) beginSidebarDrag() {
+	m.clearDragState()
+	m.sidebarDragging = true
+	m.sidebarDragW = m.projectSidebarWidth()
+	m.selection = nil
+}
+
+// trackSidebarDrag moves the pending width to follow the cursor. Column x
+// becomes the sidebar's LAST column, so the width is x+1.
+//
+// Clamped through sidebarWidth() rather than a second min/max pair: that
+// function is the single source of truth for how much screen the strip may
+// take, and a private clamp here could land on a width the renderer would
+// silently correct — the sidebar would then not stop where the user let go.
+// The minSidebarWidth floor is applied FIRST so it is what sidebarWidth sees;
+// applying it after would let the clamp's own result fall back below it.
+func (m *Model) trackSidebarDrag(x int) {
+	if !m.sidebarDragging {
+		return
+	}
+	w := x + 1
+	if w < minSidebarWidth {
+		w = minSidebarWidth
+	}
+	m.sidebarDragW = sidebarWidth(m.width, m.sidebarOpen, w)
+}
+
+// finishSidebarDrag commits the pending width. This is the single point at
+// which the layout actually moves.
+//
+// The sequence matches toggleProjectSidebar and is not optional: resizeTabs
+// runs FIRST because it is what WRITES pane.Width/Height and tab.CanvasW/H —
+// resizeAllPanes only reads and ships them, so without it every background tab
+// keeps its pre-drag PTY size. ClearScreen because every column right of the
+// strip shifts in one frame, which is the shift Bubble Tea's cell diff
+// mis-tracks.
+func (m *Model) finishSidebarDrag() tea.Cmd {
+	if !m.sidebarDragging {
+		return nil
+	}
+	w := m.sidebarDragW
+	m.sidebarDragging = false
+	m.sidebarDragW = 0
+	if w <= 0 || w == m.sidebarWidth {
+		return nil
+	}
+	m.sidebarWidth = w
+	// A screen preference, not session state: persisted to config (saved on
+	// exit via ConfigChanged), never to workspace.json.
+	m.cfg.UI.SidebarWidth = w
+	m.configChanged = true
+	m.resizeTabs()
+	return tea.Batch(tea.ClearScreen, m.resizeAllPanes())
 }
 
 // hitTestSplitBorder returns the deepest split line containing (x, y), or
@@ -3126,6 +3256,14 @@ func (m Model) View() tea.View {
 		paneArea := lipgloss.JoinVertical(lipgloss.Left, m.renderTabBar(), tabContent)
 		if projSidebarW > 0 {
 			paneArea = lipgloss.JoinHorizontal(lipgloss.Top, m.renderSidebar(m.sidebarContentHeight()), paneArea)
+		}
+		// Drag preview: a rule at the PENDING edge. The strip itself must not
+		// move mid-drag — see the sidebarDragging field comment — so the
+		// indicator is the only thing that follows the cursor. Composited like
+		// the context menu, on paneArea, whose first line IS screen row 0.
+		if m.sidebarDragging && m.sidebarDragW > 0 {
+			rows := strings.Count(paneArea, "\n") + 1
+			paneArea = overlayAt(paneArea, sidebarDragRuleBlock(rows), m.sidebarDragW-1, 0, m.width)
 		}
 		if m.ctxMenu.open() {
 			// ctxMenu coords are screen rows and paneArea's first line IS
@@ -4108,7 +4246,21 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 		}
 
 		// Clean up any unfilled placeholders (e.g., rapid double-splits).
-		if tab.Root != nil {
+		//
+		// EXCEPT while a worktree create is in flight for this tab. For an
+		// ordinary create the placeholder is unfilled for microseconds, so no
+		// broadcast lands inside that window; a `git worktree add` holds it
+		// for SECONDS, and spontaneous broadcasts land there routinely (a
+		// child toggling mouse modes, a pane exiting, a git-fingerprint
+		// change, another client). Pruning then detaches the node while
+		// pendingSplit still points at it, so the pane that finally arrives is
+		// assigned to an unreachable leaf and appears NOWHERE until a later
+		// broadcast heals it through the root-insert fallback.
+		//
+		// The create's own response is what retires this placeholder — on
+		// failure, or on timeout. Both delete the map entry, so the exemption
+		// cannot outlive the request that armed it.
+		if tab.Root != nil && !m.worktreeCreates[tab.ID] {
 			tab.Root.PrunePlaceholders()
 			tab.invalidateLeaves()
 		}
@@ -5153,6 +5305,14 @@ func (m Model) listenForMessages() tea.Cmd {
 			}
 			return worktreeListMsg{Resp: resp, Gen: msg.ID}
 
+		case ipc.MsgCreatePaneResp:
+			var resp ipc.CreatePaneRespPayload
+			if err := msg.DecodePayload(&resp); err != nil {
+				log.Printf("create pane resp: decode: %v", err)
+				return listenContinueMsg{}
+			}
+			return createPaneRespMsg{Resp: resp}
+
 		case ipc.MsgDirsExistResp:
 			var payload ipc.DirsExistRespPayload
 			if err := msg.DecodePayload(&payload); err != nil {
@@ -5360,6 +5520,9 @@ func parseWorkspaceState(raw map[string]any) WorkspaceStateMsg {
 				if ct, ok := pm["context_tokens"].(float64); ok {
 					pi.ContextTokens = int64(ct)
 				}
+				if s, ok := pm["spawn_error"].(string); ok {
+					pi.SpawnError = s
+				}
 				if b, ok := pm["git_branch"].(string); ok {
 					pi.GitBranch = b
 				}
@@ -5368,6 +5531,9 @@ func parseWorkspaceState(raw map[string]any) WorkspaceStateMsg {
 				}
 				if b, ok := pm["git_worktree"].(bool); ok {
 					pi.GitWorktree = b
+				}
+				if s, ok := pm["git_worktree_name"].(string); ok {
+					pi.GitWorktreeName = s
 				}
 				if b, ok := pm["git_upstream"].(bool); ok {
 					pi.GitUpstream = b

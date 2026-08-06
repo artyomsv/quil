@@ -2317,32 +2317,32 @@ func TestSubmitSetupDialog_WorktreeChangeDropsAStaleSession(t *testing.T) {
 func TestHandleSetupWorktreeKey_UpDownMoveCursor(t *testing.T) {
 	m := Model{}
 	p := &plugin.PanePlugin{}
+	m.worktrees.loaded, m.worktrees.repo = true, true
 	m.worktrees.list = []ipc.WorktreeInfo{
 		{Path: "/repo-worktrees/a", Branch: "feat-a"},
 		{Path: "/repo-worktrees/b", Branch: "feat-b"},
 	}
-	// rows: off, feat-a, feat-b
+	// rows: off, feat-a, feat-b, "+ new branch…" — stage B appended the last,
+	// deliberately at the END so every existing row kept its index.
+	last := len(m.worktreeRows()) - 1
 
-	updated, _ := m.handleSetupWorktreeKey(p, "down")
-	m = updated.(Model)
-	if m.worktreeCursor != 1 {
-		t.Fatalf("cursor = %d, want 1", m.worktreeCursor)
-	}
-	updated, _ = m.handleSetupWorktreeKey(p, "down")
-	m = updated.(Model)
-	if m.worktreeCursor != 2 {
-		t.Fatalf("cursor = %d, want 2", m.worktreeCursor)
+	for want := 1; want <= last; want++ {
+		updated, _ := m.handleSetupWorktreeKey(p, "down")
+		m = updated.(Model)
+		if m.worktreeCursor != want {
+			t.Fatalf("cursor = %d, want %d", m.worktreeCursor, want)
+		}
 	}
 	// Clamped at the bottom row, not wrapped.
-	updated, _ = m.handleSetupWorktreeKey(p, "down")
+	updated, _ := m.handleSetupWorktreeKey(p, "down")
 	m = updated.(Model)
-	if m.worktreeCursor != 2 {
-		t.Errorf("cursor = %d, want clamped at 2", m.worktreeCursor)
+	if m.worktreeCursor != last {
+		t.Errorf("cursor = %d, want clamped at %d", m.worktreeCursor, last)
 	}
 	updated, _ = m.handleSetupWorktreeKey(p, "up")
 	m = updated.(Model)
-	if m.worktreeCursor != 1 {
-		t.Errorf("cursor = %d, want 1 after up", m.worktreeCursor)
+	if m.worktreeCursor != last-1 {
+		t.Errorf("cursor = %d, want %d after up", m.worktreeCursor, last-1)
 	}
 }
 
@@ -2353,6 +2353,7 @@ func TestHandleSetupWorktreeKey_UpDownMoveCursor(t *testing.T) {
 func TestHandleSetupWorktreeKey_EnterCommitsChoiceAndDropsSession(t *testing.T) {
 	m := Model{}
 	p := &plugin.PanePlugin{}
+	m.worktrees.loaded, m.worktrees.repo = true, true
 	m.worktrees.list = []ipc.WorktreeInfo{{Path: "/repo-worktrees/feat-x", Branch: "feat-x"}}
 	m.worktreeCursor = 1 // row 0 is "off"
 	m.selectedSessionID = "sess-1"
@@ -2374,6 +2375,7 @@ func TestHandleSetupWorktreeKey_EnterCommitsChoiceAndDropsSession(t *testing.T) 
 func TestHandleSetupWorktreeKey_EnterOnOffRowTurnsSelectionOff(t *testing.T) {
 	m := Model{}
 	p := &plugin.PanePlugin{}
+	m.worktrees.loaded, m.worktrees.repo = true, true
 	m.worktrees.list = []ipc.WorktreeInfo{{Path: "/repo-worktrees/feat-x", Branch: "feat-x"}}
 	m.selectedWorktree = "/repo-worktrees/feat-x"
 	m.worktreeCursor = 0 // row 0 is "off"
@@ -2391,6 +2393,7 @@ func TestHandleSetupWorktreeKey_EnterOnOffRowTurnsSelectionOff(t *testing.T) {
 func TestHandleSetupWorktreeKey_EnterOnDisabledRowRefused(t *testing.T) {
 	m := Model{}
 	p := &plugin.PanePlugin{}
+	m.worktrees.loaded, m.worktrees.repo = true, true
 	m.worktrees.list = []ipc.WorktreeInfo{
 		{Path: "/repo-worktrees/locked", Branch: "wip", Locked: true},
 	}

@@ -27,6 +27,7 @@ func TestSettingsFields_LabelsAndInitialValues(t *testing.T) {
 		"Ghost buffer lines",
 		"Mouse scroll lines",
 		"Page scroll lines",
+		"Sidebar width",
 		"Log level",
 		"Show disclaimer",
 		"Update check",

@@ -477,9 +477,14 @@ func syncPaneMeta(pane *PaneModel, info *PaneInfo, wideCanvas bool, minNativeCol
 	// ABSENT key is meaningful. A pane that leaves a repository, or a daemon
 	// restart that has not re-probed yet, must clear the branch rather than
 	// keep showing the last one it had.
+	// Unconditional, like the git fields below: an ABSENT key is meaningful.
+	// A pane whose worktree comes back must lose its complaint, and the daemon
+	// clears the field on every successful spawn.
+	pane.SpawnError = info.SpawnError
 	pane.GitBranch = info.GitBranch
 	pane.GitDetached = info.GitDetached
 	pane.GitWorktree = info.GitWorktree
+	pane.GitWorktreeName = info.GitWorktreeName
 	pane.GitUpstream = info.GitUpstream
 	pane.GitAhead = info.GitAhead
 	pane.GitBehind = info.GitBehind

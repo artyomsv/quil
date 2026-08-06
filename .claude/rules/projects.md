@@ -4,6 +4,10 @@ paths:
   - "**/internal/daemon/project.go"
   - "**/internal/daemon/gitcache.go"
   - "**/internal/gitinfo/**"
+  - "**/internal/gitworktree/**"
+  - "**/internal/daemon/worktree.go"
+  - "**/internal/daemon/worktree_add.go"
+  - "**/internal/tui/worktree_client.go"
   - "**/internal/tui/project.go"
   - "**/internal/tui/projectdialog.go"
   - "**/internal/tui/projectpicker.go"
@@ -450,6 +454,28 @@ closed), because a 22-column sidebar moved an even split from 92/93 to 81/82,
 straddling `min_native_cols` and flipping ONE of two identical siblings to a
 161-column cropped canvas.
 
+**The edge drag must NEVER move `m.sidebarWidth` mid-drag.** `View()` calls
+`tab.Resize(m.paneAreaWidth()…)` on every frame and `ResizeVT` pairs every
+emulator resize with a PTY redraw, so a strip that follows the cursor replays
+the 2026-07-15 unpaired-rewrap corruption once per motion event. `sidebarDragW`
+holds the pending value, a one-column rule is composited at it, and
+`finishSidebarDrag` is the single commit point — the same deferral
+`finishSplitDrag` makes, for the same reason. Clamping goes through
+`sidebarWidth()` and nowhere else, so the edge stops where the user let go
+rather than at a value the renderer silently corrects, and `minSidebarWidth`
+keeps a drag from collapsing the strip it would then have no edge to grab back
+by (collapsing is `Alt+Shift+S`'s job).
+
+**The press is hit-tested BEFORE `projectSidebarSwallowsMouse`, and that order
+is load-bearing rather than stylistic.** The zone's left column is the
+sidebar's OWN last column, and the swallow branch *always* returns — so with
+the checks the other way round the edge is ungrabbable from the side the user
+aims at it from, while still looking implemented. The preview composites
+through `overlayAt` rather than a one-column cutter of its own: that function
+already solves the truncate-lands-mid-glyph, SGR-left-open and
+wide-glyph-straddling-the-seam problems, all three of which a second cutter
+would have to solve again to be correct at one column.
+
 ## Git subsystem (`gitinfo` + `gitcache.go`)
 
 Three plumbing calls per checkout: branch, linked worktree, ahead/behind.
@@ -460,6 +486,22 @@ seconds on a large repository without fsmonitor.
 OSC 7 rewrites a pane's CWD on every `cd`, so without it one shell roaming a
 monorepo adds a map entry per directory it visits and `byDir` keeps every
 checkout ever seen — against a daemon that runs for weeks.
+
+**The worktree's NAME costs nothing, and where it comes from is the reason.**
+git spells a linked checkout's per-checkout git dir `<common>/worktrees/<name>`,
+so `filepath.Base(gitDir)` IS the name at the exact line that already computes
+`LinkedWorktree` — no fourth plumbing call. It is set in **both**
+`gitinfo.Probe` and the `gitcache` placeholder entry, and neither is redundant:
+`gitcache` assigns `e.info = info` wholesale, so a field only the placeholder
+sets is dropped on the first successful probe, while a field only `Probe` sets
+is missing for the tick between resolving a CWD and that probe landing — which
+is the tick right after a pane is created in a worktree, i.e. the one the user
+is looking at. Derived daemon-side because separators belong to the machine
+holding the disk; a Windows daemon's path split by a Linux client's
+`filepath.Base` returns the whole string. `gitRow` SUPPRESSES it when it is
+just the branch with `/`→`-` (the near-universal convention), because
+restating the branch costs eight cells of a 22-cell row — but never for a
+detached checkout, which has no branch to restate.
 
 **Keyed by the PER-CHECKOUT git dir, not the common dir** as the design spec
 called for: linked worktrees share a common dir while sitting on different
@@ -485,3 +527,92 @@ is there is nothing to compare against.
 console-less parent gets a brand new console allocated — a real window. A probe
 per checkout every few seconds is a stream of them. `hideWindow` is a no-op on
 Unix; the build tags keep the difference in one pair of files.
+
+## Creating worktrees (stage B)
+
+**A create carrying `CreatePanePayload.Worktree` goes to a WORKER goroutine and
+answers the requester** (`worktreeAddAndCreate`, `daemon/worktree_add.go`).
+`handleCreatePane` runs on the requesting conn's dispatch goroutine, so a
+checkout there blocks that client's input for as long as it takes — the hazard
+that moved browse, discover and claudesessions onto workers. The answer is a
+request-response pair over the existing `create_pane_resp`, never a broadcast:
+the requester holds a layout placeholder armed before the send, and a broadcast
+would show one client's failure to every other while giving the requester
+nothing to unwind with.
+
+**A worktree CWD is exempt from `handleCreatePane`'s fallback, and the
+exemption has to be explicit.** That function substitutes `d.defaultCWD()` for
+any CWD that fails its stat — right for a browsed directory, catastrophic here,
+where the directory IS the isolation: the pane would come up on `master` while
+the user believes it is isolated. `createPaneInWorktree` therefore stats and
+FAILS, and destroys the pane if the spawn then fails, so the guarantee is "a
+failure produces no pane" rather than "usually no pane".
+
+**`worktreeAdding` is its own single-flight slot, and it doubles as the permit
+budget.** The dialog LISTS a directory's worktrees and then CREATES one, so
+sharing `worktreeScanning` would reject each step exactly when it followed the
+other (same reason `dirsChecking` is not `browseScanning`). One add at a time
+daemon-wide is what makes a 120 s `claimBlockingFSCall` safe: at most one
+permit is ever held long, however many clients ask.
+
+**`Pane.WorktreeOwned` is PERSISTED; `Pane.SpawnError` is NOT.** Ownership is
+the only thing that lets `spawnRestoredPane` tell a missing WORKTREE from a
+missing browsed directory — the snapshot stores only CWD otherwise — and a
+worktree-owned pane whose directory is gone comes up unspawned with the reason
+on screen instead of relocating (for a claude pane the relocation is worse than
+a wrong directory: it still resumes its recorded session, continuing against
+the wrong tree). Ordinary panes keep the blank-and-fall-back behaviour; their
+loss is a convenience, not the isolation. The error is runtime-only because a
+fresh daemon re-stats, and a stored one would resurrect a complaint about a
+worktree since restored. The pane offers `Alt+R` and nothing more specific:
+Quil records the worktree path, not the repository it branched from.
+
+**Replace mode is refused, in the CLIENT at the split step and in the daemon.**
+The field cannot gate itself — the user picks replace *after* the worktree
+field — so `handleCreatePaneSplit` refuses before it does anything destructive.
+That path sets `leaf.Pane = nil` and calls `old.Dispose()` BEFORE the send, and
+unlike a dangling placeholder a `Dispose()` is not something
+`PrunePlaceholders` can undo, so a failed add there costs a LIVE pane.
+
+**`handleCreatePaneSplit` tears the setup dialog down before it builds the
+payload.** The branch name is captured with the other choices at the top;
+reading it at the payload yields `""` and every "new branch" silently becomes
+an ordinary pane in the repository root — the exact relocation the feature
+exists to prevent. The teardown also clears the worktree state, or the next
+Ctrl+N inherits a branch name and a repository the dialog no longer shows.
+
+**`applyWorkspaceState` DOES prune unfilled placeholders — on every broadcast,
+for every tab — and that is exactly the hazard here.** For an ordinary create a
+placeholder is unfilled for microseconds, so no broadcast lands inside the
+window; a `git worktree add` holds it for SECONDS, and spontaneous broadcasts
+land there routinely (a child toggling mouse modes, a pane exiting, a
+git-fingerprint change, another client). Pruning then DETACHES the node while
+`pendingSplit` still points at it, so the pane that finally arrives is assigned
+to an unreachable leaf and shows up nowhere until a later broadcast heals it
+through the root-insert fallback. `rebuildTabs` therefore skips the prune for a
+tab in `m.worktreeCreates`, and `applyCreatePaneResp` / `applyCreatePaneTimeout`
+are then the ONLY things that can retire it — both delete the map entry, so the
+exemption cannot outlive the request that armed it. Success deliberately
+retires nothing: the pane is about to land in that slot. `createPaneTimeout`
+exceeds the daemon's `worktreeAddTimeout` — asserted, not left as two drifting
+numbers — so the client can never prune a placeholder the daemon is about to
+fill.
+
+**`worktreeCreates` is a MAP keyed by tab, never a scalar "the create I last
+started".** The setup dialog closes on submit, so a second Ctrl+N create can
+begin while the first is still checking out — and the daemon's single-flight
+rejects the second IMMEDIATELY, so its response routinely arrives BEFORE the
+first's. A single slot is overwritten by the second and then cleared, stranding
+the first tab's placeholder permanently (every later pane in that tab is
+swallowed, silently) or unwinding the second's live one. The handler keys on
+what the daemon ECHOED (`p.TabID`, plus a non-nil `p.Worktree` so the MCP
+bridge's own `create_pane_resp` is ignored), which is what `protocol.go` calls
+the client's staleness key.
+
+**A test walking the layout tree for placeholders must not use `IsLeaf()`.** It
+is `Pane != nil`, so a placeholder is not a leaf by that definition and an
+`IsLeaf`-gated walk recurses into its two nil children and returns 0 for every
+tree — silently making every placeholder assertion vacuous. Match `Left == nil
+&& Right == nil && Pane == nil`, the same shape `PrunePlaceholders` itself
+uses.
+

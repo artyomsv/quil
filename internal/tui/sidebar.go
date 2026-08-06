@@ -13,6 +13,13 @@ import (
 const (
 	minWidthForSidebar  = 100
 	defaultSidebarWidth = 22
+	// minSidebarWidth is the narrowest an edge DRAG may take the strip. Below
+	// this the rows carry no information — minPaneLabelCells alone is 8, and
+	// the two-cell markers and the state glyph sit beside it — while the edge
+	// stays grabbable, so a user who drags too far can drag back. Zero is
+	// deliberately unreachable by drag: collapsing is what the toggle is for,
+	// and a sidebar dragged to nothing leaves no edge to grab it back by.
+	minSidebarWidth = 12
 	// minPaneLabelCells is the floor a pane's own name keeps in its row, so a
 	// long blocked-reason cannot crowd out the thing that identifies which
 	// pane the row is about. Eight cells is enough for the id suffix quil
@@ -309,6 +316,73 @@ func (m Model) projectSidebarSwallowsMouse(x, y int) bool {
 	return w > 0 && x >= 0 && x < w && y >= 0 && y < m.height-1
 }
 
+// sidebarDragRule is the glyph painted down the pending edge while the sidebar
+// is being dragged, in the same bright blue a split-border drag highlights
+// with (pane.go's splitDragHighlight) so the two drags read as one gesture
+// vocabulary rather than two conventions.
+//
+// A box-drawing vertical rather than a block, so it reads as a boundary rather
+// than as content — and, like every sidebar glyph, a single cell with no emoji
+// presentation available: an emoji-capable codepoint can be drawn two cells
+// wide while advancing one, painting over its neighbour.
+const sidebarDragRule = "│"
+
+var sidebarDragRuleStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
+
+// sidebarDragRuleBlock builds the one-column, rows-tall block the drag preview
+// composites onto the frame.
+//
+// Returned as a BOX for overlayAt rather than cut in by hand: that function
+// already solves the ANSI boundary problem — a truncate that lands mid-glyph,
+// an SGR left open at the cut, a wide glyph straddling the seam — and a second
+// cutter written here would have to solve all three again to be correct at one
+// column.
+func sidebarDragRuleBlock(rows int) string {
+	if rows <= 0 {
+		return ""
+	}
+	line := sidebarDragRuleStyle.Render(sidebarDragRule)
+	return strings.Repeat(line+"\n", rows-1) + line
+}
+
+// sidebarEdgeHitPadding widens the drag zone to the sidebar's own last column
+// as well as the first pane column, mirroring the split border's "both drawn
+// glyphs grab the line" rule. A one-column target on a boundary the user aims
+// at with a mouse is needlessly precise, and neither column is claimed by
+// anything else: there is no split at the sidebar boundary, so
+// hitTestSplitBorder never returns it.
+const sidebarEdgeHitPadding = 1
+
+// hitTestSidebarEdge reports whether (x, y) lands on the project sidebar's
+// draggable right edge.
+//
+// Width 0 — a closed sidebar, or a terminal below minWidthForSidebar — offers
+// NO edge. Both states arrive through projectSidebarWidth() as 0, and
+// answering true there would arm a drag against a strip that is not painted.
+// Reading the accessor rather than m.sidebarWidth is also what keeps the zone
+// on the RENDERED edge: sidebarWidth() clamps, so a configured value the
+// terminal cannot afford is drawn narrower than it is stored.
+//
+// Row 0 is included and the last row excluded, matching
+// projectSidebarSwallowsMouse: the sidebar's own first row occupies row 0 in
+// these columns, while the status bar is still drawn full width beneath it.
+// Row 0 takes the sidebar's OWN column only. The tab bar starts at screen
+// column projectSidebarWidth() (hitTestTab documents this), so extending the
+// pane-side padding column into row 0 would swallow the first cell of tab 1 —
+// a click there would arm a sidebar drag and, released without motion, do
+// nothing at all. The sidebar's own last column is still grabbable on every
+// row including this one.
+func (m Model) hitTestSidebarEdge(x, y int) bool {
+	w := m.projectSidebarWidth()
+	if w <= 0 || y < 0 || y >= m.height-1 {
+		return false
+	}
+	if y == 0 {
+		return x == w-1
+	}
+	return x >= w-sidebarEdgeHitPadding && x <= w
+}
+
 // The sidebar's state vocabulary, shared by the per-pane rows and the project
 // row that rolls them up — one notation, so the summary reads as a roll-up
 // rather than a second convention.
@@ -383,6 +457,30 @@ const minGitBranchCells = 8
 // true. A stale entry is dimmed and marked rather than hidden: the last branch
 // we actually saw is more useful than nothing, as long as it does not claim to
 // be current.
+// worktreeNameIsRedundant reports whether naming the worktree would merely
+// restate the branch already on the row.
+//
+// The near-universal convention is a worktree named after its branch with the
+// path separators swapped for hyphens (feat/x → feat-x), and this row is 22
+// cells by default: spending eight of them on a restatement pushes the branch
+// into middle-elision for no information. Where the two genuinely differ — an
+// agent creating "wt-1" on branch "feat/refactor-sidebar" — the name is what
+// the branch cannot tell the user, so it is shown.
+//
+// An EMPTY name is redundant by definition (there is nothing to show, and the
+// bare marker still has to say the pane is in a worktree). An empty BRANCH is
+// not: a detached checkout has no branch to restate, so any name it has is the
+// only thing the row can offer.
+func worktreeNameIsRedundant(name, branch string) bool {
+	if name == "" {
+		return true
+	}
+	if branch == "" {
+		return false
+	}
+	return name == strings.ReplaceAll(branch, "/", "-")
+}
+
 func gitRow(pane *PaneModel, w int) string {
 	name := pane.GitBranch
 	if name == "" && pane.GitDetached {
@@ -396,7 +494,17 @@ func gitRow(pane *PaneModel, w int) string {
 	prefix := "  ⎇ "
 	var suffix string
 	if pane.GitWorktree {
-		suffix += " wt"
+		// Sanitized HERE, before the width math below measures it: the name
+		// comes from a daemon the user may not control under --remote, and
+		// lipgloss measures an escape as zero cells, so a truncation is not a
+		// sanitiser. `name` is already sanitized above, so the comparison is
+		// between two sanitized values.
+		wtName := sanitizeRemoteText(pane.GitWorktreeName)
+		if worktreeNameIsRedundant(wtName, name) {
+			suffix += " wt"
+		} else {
+			suffix += " " + wtName
+		}
 	}
 	if pane.GitUpstream {
 		if pane.GitAhead > 0 {

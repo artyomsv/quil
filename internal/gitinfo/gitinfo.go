@@ -36,6 +36,19 @@ type Info struct {
 	// the per-worktree git dir differs from the repository's common dir.
 	LinkedWorktree bool
 
+	// WorktreeName names that linked worktree; empty on the main checkout.
+	//
+	// Taken from the per-checkout git dir's basename, which git spells
+	// <common>/worktrees/<name> — so it costs no command of its own, which is
+	// what lets the sidebar show it without widening this package's fixed
+	// three-calls-per-checkout budget.
+	//
+	// It is git's own identifier for the worktree rather than the checkout
+	// DIRECTORY's basename, and the two can differ when git disambiguates a
+	// name collision. The identifier is the more useful of the pair: it is
+	// what `git worktree list` prints and what `git worktree remove` accepts.
+	WorktreeName string
+
 	// Ahead/Behind count commits relative to the tracking branch. Meaningful
 	// only when HasUpstream; a branch with no upstream is not "0 ahead, 0
 	// behind", it is unmeasured.
@@ -121,6 +134,14 @@ func Probe(ctx context.Context, dir string) (Info, bool) {
 		return Info{}, false
 	}
 	info := Info{LinkedWorktree: gitDir != commonDir}
+	if info.LinkedWorktree {
+		// Derived HERE and not only where a caller notices the flag: gitcache
+		// replaces the whole Info struct with this function's result, so a
+		// field a caller seeds and Probe does not reproduce is dropped on the
+		// first successful probe. Same reason LinkedWorktree itself is
+		// recomputed from this function's own Dirs call.
+		info.WorktreeName = filepath.Base(gitDir)
+	}
 
 	if out, err := runGit(ctx, dir, "rev-parse", "--abbrev-ref", "HEAD"); err == nil {
 		if name := firstLine(out); name == "HEAD" {

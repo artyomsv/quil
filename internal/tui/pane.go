@@ -30,6 +30,10 @@ var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "�
 var (
 	restoreAccentStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("208"))
 	restoreDimStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
+	// spawnErrorStyle marks a pane that has no process and is not getting one.
+	// Red rather than the restore palette's dim grey: this is a terminal state
+	// the user has to act on, not a step in progress.
+	spawnErrorStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Bold(true)
 	restoreDoneStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("28"))
 )
 
@@ -76,9 +80,13 @@ type PaneModel struct {
 	// Git state of the pane's CWD, daemon-authoritative (see PaneInfo).
 	// GitStale means the last refresh did not complete, so these are the last
 	// values actually observed rather than current ones.
+	// SpawnError explains why this pane has no process; empty when it has one.
+	// Rendered in the pane's own rectangle in place of VT content.
+	SpawnError         string
 	GitBranch          string
 	GitDetached        bool
 	GitWorktree        bool
+	GitWorktreeName    string
 	GitUpstream        bool
 	GitAhead           int
 	GitBehind          int
@@ -811,6 +819,40 @@ func (p *PaneModel) renderRestoreIndicator(innerW, innerH int) string {
 	return lipgloss.Place(innerW, innerH, lipgloss.Center, lipgloss.Center, block)
 }
 
+// renderSpawnError fills the pane with the reason it has no process, plus the
+// key that retries.
+//
+// sanitizeRemoteText because the message interpolates a PATH from a daemon the
+// user may not control under --remote, and this text is drawn straight into the
+// frame rather than through the VT emulator that makes pane output safe.
+//
+// It offers Alt+R and nothing more specific. Quil records the worktree's path,
+// not the repository it branched from, so "respawn in the repo" is an offer it
+// could not honour — and inventing a destination is the same class of
+// confidently-wrong answer the whole no-relocation rule exists to remove.
+func (p *PaneModel) renderSpawnError(innerW, innerH int) string {
+	// BOUNDED as well as sanitized, and the two are different jobs:
+	// sanitizeRemoteText removes escapes without shortening anything, while
+	// lipgloss.Place pads but never CLIPS — so an over-wide block is returned
+	// whole and the pane body grows past its rect, shifting the whole tab's
+	// JoinHorizontal. The message interpolates a full path, and a pane is at
+	// its narrowest exactly when this fires: spawnRestoredPane sets the error
+	// during restore, before the pane's first size message.
+	//
+	// Elided in the MIDDLE because the informative half of a worktree path is
+	// its tail — the branch name — and cutting the end leaves every message
+	// reading "worktree is gone: E:\Projects\Stuka…".
+	msg := elideMiddle(sanitizeRemoteText(p.SpawnError), innerW)
+	rows := []string{spawnErrorStyle.Render(msg)}
+	// The hint costs two rows. Dropped rather than overflowing on a pane too
+	// short for it: the reason is what the user needs, the key is in the docs.
+	if innerH >= 3 {
+		rows = append(rows, "", restoreDimStyle.Render(truncateToWidth("Alt+R to retry", innerW)))
+	}
+	return lipgloss.Place(innerW, innerH, lipgloss.Center, lipgloss.Center,
+		lipgloss.JoinVertical(lipgloss.Center, rows...))
+}
+
 // renderRestoreIndicatorCompact is the small single-line indicator used when the
 // pane is too small for the full checklist.
 func (p *PaneModel) renderRestoreIndicatorCompact(innerW, innerH int) string {
@@ -865,6 +907,16 @@ func (p *PaneModel) View() string {
 	content := p.renderContent(p.activeSel)
 	if p.showRestoreIndicator() {
 		content = p.renderRestoreIndicator(innerW, innerH)
+	}
+	// A pane with no process says WHY, in its own rectangle. Checked after the
+	// restore indicator and last, because it is a terminal state: the pane is
+	// not coming up, so a spinner claiming otherwise would be the wrong answer.
+	//
+	// Not a modal: this fires during restore, potentially for several panes at
+	// once, and a modal each would be unusable. Not a log line either — a
+	// failure nobody sees is the silent relocation this replaces.
+	if p.SpawnError != "" {
+		content = p.renderSpawnError(innerW, innerH)
 	}
 
 	// Render content with left, right, bottom borders (no top).

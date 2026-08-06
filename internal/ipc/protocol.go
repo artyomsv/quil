@@ -207,6 +207,37 @@ type CreatePanePayload struct {
 	// back to a fresh session rather than failing the spawn. The MCP bridge
 	// deliberately does not expose this field.
 	ResumeSessionID string `json:"resume_session_id,omitempty"`
+	// Worktree asks the daemon to CREATE a linked worktree and spawn the pane
+	// inside it, ignoring CWD. Nil (the default) is the ordinary synchronous
+	// create every existing client makes.
+	//
+	// A POINTER rather than a value: nil is what keeps every other create —
+	// MCP create_pane, the plugin dialog, restore — on the unchanged path with
+	// no branch anywhere in the daemon, and it says "this create is different"
+	// structurally rather than by a zero-value convention someone can forget.
+	//
+	// Trust: like Overlay and ResumeSessionID, any IPC client can set this.
+	// The daemon validates the branch name against both the ref and the path
+	// grammar before it reaches argv, and never passes --force. The MCP bridge
+	// deliberately does not expose this field.
+	Worktree *WorktreeSpec `json:"worktree,omitempty"`
+}
+
+// WorktreeSpec asks the daemon to create a linked worktree for a new pane.
+// Create-time only — an instruction, not stored pane state; what persists is
+// the resulting CWD, plus a flag saying the pane owns a worktree.
+type WorktreeSpec struct {
+	// RepoRoot is the repository the worktree branches from, as the DAEMON's
+	// filesystem spells it. The client sends back the directory the daemon's
+	// own browse answered with, so no path built on the client is involved.
+	RepoRoot string `json:"repo_root"`
+	// Branch is the NEW branch, off the repository's current HEAD.
+	//
+	// Existing branches are deliberately not offered: one already checked out
+	// in another worktree fails at the git level and needs its own error path,
+	// and attaching to that worktree — which stage A ships — covers the real
+	// case anyway.
+	Branch string `json:"branch"`
 }
 
 type DestroyPanePayload struct {
@@ -392,6 +423,19 @@ type CreatePaneReqPayload struct {
 type CreatePaneRespPayload struct {
 	PaneID string `json:"pane_id"`
 	TabID  string `json:"tab_id"`
+	// Error explains a create that produced NO pane. Only a create carrying a
+	// WorktreeSpec can fail this way — an ordinary create is synchronous and
+	// its result arrives in the next workspace broadcast, as it always has.
+	//
+	// It carries git's own stderr where there is any: "already used by
+	// worktree '/x/feat-y'" names the pane to go look at, and no message Quil
+	// could invent would.
+	Error string `json:"error,omitempty"`
+	// Worktree echoes the request's spec VERBATIM on every path, including the
+	// error one. It is the client's staleness key, not a statement about what
+	// was created — the client armed a layout placeholder before the send and
+	// nothing else will unwind it.
+	Worktree *WorktreeSpec `json:"worktree,omitempty"`
 }
 
 // Phase B MCP payloads

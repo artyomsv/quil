@@ -253,3 +253,50 @@ func TestGitCache_SweepsCWDsNoPaneIsInAnyMore(t *testing.T) {
 			"gone is kept forever", len(c.byDir))
 	}
 }
+
+// The PLACEHOLDER entry — what the cache holds between resolving a CWD and the
+// first probe answering — must name the worktree too. Without it the sidebar
+// shows a nameless worktree for one tick on every new pane, which is precisely
+// the tick the user is looking at just after creating one.
+func TestGitCache_PlaceholderNamesTheWorktree(t *testing.T) {
+	f := &fakeGitProbes{
+		dirs: map[string][2]string{
+			"/wt/feat-x": {"/repo/.git/worktrees/feat-x", "/repo/.git"},
+		},
+		// No infos entry: the probe never answers, so the placeholder stands.
+		infos: map[string]gitinfo.Info{},
+	}
+	installFakeGit(t, f)
+
+	c := newGitCache()
+	c.refresh(context.Background(), []string{"/wt/feat-x"})
+
+	info, ok, _ := c.lookup("/wt/feat-x")
+	if !ok {
+		t.Fatal("no cache entry for the worktree cwd")
+	}
+	if !info.LinkedWorktree {
+		t.Fatal("the placeholder did not flag a linked worktree")
+	}
+	if info.WorktreeName != "feat-x" {
+		t.Errorf("WorktreeName = %q, want \"feat-x\"", info.WorktreeName)
+	}
+}
+
+// The main checkout's placeholder names nothing, so an ordinary pane never
+// carries a directory name it did not earn.
+func TestGitCache_PlaceholderNamesNothingForTheMainCheckout(t *testing.T) {
+	f := &fakeGitProbes{
+		dirs:  map[string][2]string{"/repo": {"/repo/.git", "/repo/.git"}},
+		infos: map[string]gitinfo.Info{},
+	}
+	installFakeGit(t, f)
+
+	c := newGitCache()
+	c.refresh(context.Background(), []string{"/repo"})
+
+	info, _, _ := c.lookup("/repo")
+	if info.WorktreeName != "" {
+		t.Errorf("WorktreeName = %q for the main checkout, want empty", info.WorktreeName)
+	}
+}

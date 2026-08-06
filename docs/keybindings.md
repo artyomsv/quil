@@ -49,6 +49,7 @@ project, so `Ctrl+T` files the new tab into whichever project you are on.
 | `Alt+Shift+A` | Attention queue — jump to the oldest pane waiting on you, across every project |
 | `Alt+Shift+S` | Collapse / expand the project sidebar |
 | Mouse click a sidebar row | Switch to that project, or raise that pane |
+| Click + drag the sidebar's right edge | Resize the sidebar (12-column minimum; a rule previews the new edge, panes resize on release, width persists to `[ui] sidebar_width`) |
 
 The sidebar is the reserved left column listing projects and the active
 project's panes. Each project row carries a badge counting its agents: `◐N`

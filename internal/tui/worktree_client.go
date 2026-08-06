@@ -106,3 +106,102 @@ func (m *Model) applyWorktreeTimeout(msg worktreeTimeoutMsg) {
 	// repository has one worktree" must not render identically.
 	m.worktrees.err = "worktree scan timed out"
 }
+
+// createPaneTimeoutMsg fires when a worktree create has not answered. tabID
+// scopes it to the create that armed it, so a late tick cannot unwind a
+// placeholder a LATER create is legitimately holding.
+type createPaneTimeoutMsg struct{ tabID string }
+
+// createPaneRespMsg carries the daemon's answer to a create that asked for a
+// new worktree. Only such creates get one — an ordinary create is synchronous
+// and its result arrives in the next workspace broadcast.
+type createPaneRespMsg struct {
+	Resp ipc.CreatePaneRespPayload
+}
+
+// createPaneTimeout bounds the wait for that answer.
+//
+// Deliberately LONGER than the daemon's worktreeAddTimeout: giving up first
+// would prune a placeholder the daemon is about to fill, so the pane would
+// arrive with nowhere to go. The two are tied together here rather than being
+// two independent numbers that can drift apart silently.
+// A var, not a const, so the test binary can shorten it — the same reason
+// worktreeScanTimeout is one. A test that drives the real send executes the
+// tick alongside it, and at the production value that is a two-and-a-half
+// minute unit test.
+var createPaneTimeout = worktreeAddTimeout + 30*time.Second
+
+// worktreeAddTimeout mirrors the daemon constant of the same name. Duplicated
+// rather than imported because internal/daemon is not an import this package
+// takes — but the RELATIONSHIP is what matters and is asserted by
+// TestCreatePaneTimeout_ExceedsTheDaemonAddTimeout.
+const worktreeAddTimeout = 120 * time.Second
+
+// applyCreatePaneResp settles a worktree-backed create.
+//
+// SUCCESS needs nothing here: the pane arrives in the next workspace broadcast
+// and fills the placeholder exactly as an ordinary create does.
+//
+// FAILURE has to unwind by hand. applyWorkspaceState DOES prune unfilled
+// placeholders on every broadcast — but it is deliberately suppressed for a
+// tab with a create in flight (see the exemption there), precisely because a
+// worktree add holds its placeholder for SECONDS rather than the microseconds
+// an ordinary create takes, and pruning mid-flight detaches the node that
+// pendingSplit still points at. So while the exemption holds, this handler and
+// the timeout beside it are the ONLY things that can retire the placeholder,
+// and pendingSplit is never cleaned up by the broadcast path at all.
+//
+// Without this the tab keeps a dead placeholder leaf and the next pane created
+// anywhere in that tab is swallowed by it.
+func (m *Model) applyCreatePaneResp(p ipc.CreatePaneRespPayload) {
+	// Keyed on what the DAEMON echoed, never on client-side "the last create
+	// I started". protocol.go calls the echoed spec the client's staleness
+	// key for exactly this reason: two creates can be in flight and their
+	// responses can arrive in either order, so a scalar cursor unwinds the
+	// wrong tab — or, worse, the wrong tab's LIVE placeholder.
+	//
+	// A nil spec means this is somebody else's create_pane_resp (the MCP
+	// bridge uses the same message with no worktree), which owns no
+	// placeholder of ours.
+	if p.Worktree == nil {
+		return
+	}
+	tabID := p.TabID
+	if !m.worktreeCreates[tabID] {
+		return // not ours, or already settled
+	}
+	delete(m.worktreeCreates, tabID)
+	if p.Error == "" {
+		return
+	}
+	if tab := m.tabByID(tabID); tab != nil && tab.Root != nil {
+		tab.Root.PrunePlaceholders()
+		tab.invalidateLeaves()
+	}
+	delete(m.pendingSplit, tabID)
+	// git's own stderr, bounded then sanitized. Bounding is separate from
+	// sanitizing and both are needed: sanitizeRemoteText removes escapes
+	// without shortening anything, and the status bar drops its whole right
+	// half rather than wrapping when a flash outgrows it.
+	m.setFlash("worktree not created: " + truncateToWidth(sanitizeRemoteText(p.Error), createErrFlashCap))
+}
+
+// createErrFlashCap bounds git's stderr in the status-bar flash. A remote
+// daemon chooses this text, and the same "sanitising is not bounding" rule the
+// project form documents applies here.
+const createErrFlashCap = 160
+
+// applyCreatePaneTimeout unwinds a create that never answered, so a wedged or
+// restarted daemon cannot leave the tab holding a placeholder forever.
+func (m *Model) applyCreatePaneTimeout(tabID string) {
+	if !m.worktreeCreates[tabID] {
+		return // already settled by a response
+	}
+	delete(m.worktreeCreates, tabID)
+	if tab := m.tabByID(tabID); tab != nil && tab.Root != nil {
+		tab.Root.PrunePlaceholders()
+		tab.invalidateLeaves()
+	}
+	delete(m.pendingSplit, tabID)
+	m.setFlash("worktree not created: timed out waiting for the worktree to be created")
+}

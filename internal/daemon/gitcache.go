@@ -160,7 +160,17 @@ func (c *gitCache) refresh(ctx context.Context, cwds []string) {
 		c.cwdToDir[cwd] = gitDir
 		if _, seen := c.byDir[gitDir]; !seen {
 			c.byDir[gitDir] = &gitEntry{
-				info:     gitinfo.Info{LinkedWorktree: gitDir != commonDir},
+				info: gitinfo.Info{
+					LinkedWorktree: gitDir != commonDir,
+					// Named here as well as in gitinfo.Probe, and neither is
+					// redundant: this entry is what lookup() answers with
+					// between resolving the CWD and the first probe landing —
+					// the tick right after a pane is created in a worktree,
+					// i.e. exactly when the user is looking at the row. Probe
+					// covers every tick after that, because it replaces this
+					// whole struct.
+					WorktreeName: worktreeName(gitDir, commonDir),
+				},
 				repo:     true,
 				probeDir: cwd,
 			}
@@ -277,6 +287,21 @@ func (c *gitCache) markStale(dir string) {
 	if e := c.byDir[dir]; e != nil {
 		e.stale = true
 	}
+}
+
+// worktreeName derives a linked worktree's name from its per-checkout git
+// dir, which git spells <common>/worktrees/<name>.
+//
+// The same derivation gitinfo.Probe makes, duplicated for the placeholder
+// entry rather than shared through an exported function: it is one
+// filepath.Base behind a comparison, and exporting it from gitinfo would
+// invite a caller to derive a name from a path that did not come from Dirs —
+// where the relationship this depends on does not hold.
+func worktreeName(gitDir, commonDir string) string {
+	if gitDir == commonDir {
+		return ""
+	}
+	return filepath.Base(gitDir)
 }
 
 // headMtime reads the checkout's HEAD timestamp. Zero on any error, which

@@ -2552,6 +2552,12 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 					}
 					if info.LinkedWorktree {
 						paneData["git_worktree"] = true
+						// Conditional like git_branch: an absent key decodes
+						// to the zero value on the client, where the copy is
+						// unconditional and therefore clears it.
+						if info.WorktreeName != "" {
+							paneData["git_worktree_name"] = info.WorktreeName
+						}
 					}
 					if info.HasUpstream {
 						// Sent even at zero: "0 ahead, 0 behind" means in sync,

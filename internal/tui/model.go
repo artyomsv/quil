@@ -122,7 +122,12 @@ type PaneInfo struct {
 	GitBranch   string
 	GitDetached bool
 	GitWorktree bool
-	GitUpstream bool
+	// GitWorktreeName names the linked worktree the pane's CWD is in. Derived
+	// daemon-side: path separators belong to the machine holding the disk, so
+	// a Windows daemon's path split by a Linux client's filepath.Base returns
+	// the whole string.
+	GitWorktreeName string
+	GitUpstream     bool
 	GitAhead    int
 	GitBehind   int
 	GitStale    bool
@@ -5466,6 +5471,9 @@ func parseWorkspaceState(raw map[string]any) WorkspaceStateMsg {
 				}
 				if b, ok := pm["git_worktree"].(bool); ok {
 					pi.GitWorktree = b
+				}
+				if s, ok := pm["git_worktree_name"].(string); ok {
+					pi.GitWorktreeName = s
 				}
 				if b, ok := pm["git_upstream"].(bool); ok {
 					pi.GitUpstream = b

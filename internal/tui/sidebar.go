@@ -448,6 +448,30 @@ const minGitBranchCells = 8
 // true. A stale entry is dimmed and marked rather than hidden: the last branch
 // we actually saw is more useful than nothing, as long as it does not claim to
 // be current.
+// worktreeNameIsRedundant reports whether naming the worktree would merely
+// restate the branch already on the row.
+//
+// The near-universal convention is a worktree named after its branch with the
+// path separators swapped for hyphens (feat/x → feat-x), and this row is 22
+// cells by default: spending eight of them on a restatement pushes the branch
+// into middle-elision for no information. Where the two genuinely differ — an
+// agent creating "wt-1" on branch "feat/refactor-sidebar" — the name is what
+// the branch cannot tell the user, so it is shown.
+//
+// An EMPTY name is redundant by definition (there is nothing to show, and the
+// bare marker still has to say the pane is in a worktree). An empty BRANCH is
+// not: a detached checkout has no branch to restate, so any name it has is the
+// only thing the row can offer.
+func worktreeNameIsRedundant(name, branch string) bool {
+	if name == "" {
+		return true
+	}
+	if branch == "" {
+		return false
+	}
+	return name == strings.ReplaceAll(branch, "/", "-")
+}
+
 func gitRow(pane *PaneModel, w int) string {
 	name := pane.GitBranch
 	if name == "" && pane.GitDetached {
@@ -461,7 +485,17 @@ func gitRow(pane *PaneModel, w int) string {
 	prefix := "  ⎇ "
 	var suffix string
 	if pane.GitWorktree {
-		suffix += " wt"
+		// Sanitized HERE, before the width math below measures it: the name
+		// comes from a daemon the user may not control under --remote, and
+		// lipgloss measures an escape as zero cells, so a truncation is not a
+		// sanitiser. `name` is already sanitized above, so the comparison is
+		// between two sanitized values.
+		wtName := sanitizeRemoteText(pane.GitWorktreeName)
+		if worktreeNameIsRedundant(wtName, name) {
+			suffix += " wt"
+		} else {
+			suffix += " " + wtName
+		}
 	}
 	if pane.GitUpstream {
 		if pane.GitAhead > 0 {

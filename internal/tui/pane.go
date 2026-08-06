@@ -79,6 +79,7 @@ type PaneModel struct {
 	GitBranch          string
 	GitDetached        bool
 	GitWorktree        bool
+	GitWorktreeName    string
 	GitUpstream        bool
 	GitAhead           int
 	GitBehind          int

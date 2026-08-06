@@ -480,6 +480,7 @@ func syncPaneMeta(pane *PaneModel, info *PaneInfo, wideCanvas bool, minNativeCol
 	pane.GitBranch = info.GitBranch
 	pane.GitDetached = info.GitDetached
 	pane.GitWorktree = info.GitWorktree
+	pane.GitWorktreeName = info.GitWorktreeName
 	pane.GitUpstream = info.GitUpstream
 	pane.GitAhead = info.GitAhead
 	pane.GitBehind = info.GitBehind

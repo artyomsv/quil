@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **A new pane can now be opened directly in one of the repository's git
+  worktrees.** The create-pane dialog lists them under the directory you pick,
+  so an agent, a shell and lazygit can each sit in the same worktree and the
+  sidebar shows each pane's real branch instead of repeating the main
+  checkout's. Quil does not create worktrees yet — it offers the ones you
+  already have.
+
 ## [1.50.0] - 2026-08-05
 
 ### Added
@@ -40,6 +48,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pushed everything below it down by one. Clicking a project then selected its
   neighbour.
 
+||||||| parent of 6e6d633 (docs: describe the setup dialog's worktree field)
 ## [1.49.0] - 2026-08-05
 
 ### Changed

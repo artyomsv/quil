@@ -2527,3 +2527,47 @@ func TestShowRootsList_ProjectDialog_LeavesWorktreeStateUntouched(t *testing.T) 
 		t.Error("worktrees listing must survive — the project dialog's browse must not touch it")
 	}
 }
+
+// The critical gap fix round 2 closed: re-entering the setup dialog for a
+// DIFFERENT plugin/instance must not carry a worktree chosen for the
+// previous one. enterSetupOrSplit is the sole entry point into the setup
+// dialog (all three plugin/instance pick sites funnel through it), so the
+// reset is exercised by calling IT again — not by clearing fields directly —
+// or a regression that stopped enterSetupOrSplit reaching the reset would
+// pass this test anyway. The reachable flow needs no in-dialog navigation at
+// all: Ctrl+N, pick a worktree, Continue, Ctrl+N again, a different
+// directory pre-fills through the pick list (as git-discovery or
+// recent-locations ordinarily would), Continue — all without ever focusing
+// the worktree field a second time.
+func TestEnterSetupOrSplit_ReEntry_ClearsThePriorPluginsWorktree(t *testing.T) {
+	t.Parallel()
+	m, _, _ := overlayTestModel(t, "")
+	p := &plugin.PanePlugin{Name: "ai", Command: plugin.CommandConfig{PromptsCWD: true}}
+	m.selectedPlugin = "ai"
+
+	// First dialog session: the user reaches repo A and picks a worktree.
+	runCmd(m.enterSetupOrSplit(p))
+	m.cwdBrowseDir = "/repo-a"
+	m.selectedWorktree = "/repo-a-worktrees/feat-x"
+	m.worktreeCursor = 1
+	m.worktreeScroll = 1
+	m.worktrees = worktreeState{path: "/repo-a", loaded: true, repo: true}
+
+	// Re-entry — the sole entry point, called exactly as the plugin/instance
+	// pick sites call it.
+	runCmd(m.enterSetupOrSplit(p))
+
+	// A different directory pre-fills through the pick list, without the user
+	// ever focusing the worktree field again.
+	runCmd(m.applyGitReposPickList([]string{"/repo-b"}))
+
+	if got := m.setupSpawnDir(); got != "/repo-b" {
+		t.Errorf("setupSpawnDir() = %q, want /repo-b — repo A's worktree must not survive re-entry", got)
+	}
+	if m.selectedWorktree != "" {
+		t.Errorf("selectedWorktree = %q, want cleared by re-entry alone", m.selectedWorktree)
+	}
+	if m.worktrees.loaded {
+		t.Error("worktrees listing must be dropped on re-entry")
+	}
+}

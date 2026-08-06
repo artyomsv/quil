@@ -2518,7 +2518,14 @@ func (m *Model) enterSetupOrSplit(p *plugin.PanePlugin) tea.Cmd {
 	m.cwdInputError = ""
 	m.toggleStates = nil
 	m.setupFieldCursor = 0
-	m.cwdBrowseDir = ""
+	// Routes through onSetupCWDChanged rather than a bare assignment: a prior
+	// plugin's chosen worktree (selectedWorktree, its cursor/scroll, and the
+	// cached listing) is otherwise still sitting in Model when this dialog
+	// session opens, and none of the resets below touch it. Re-entering
+	// Ctrl+N after picking a worktree in repo A, then having repo B pre-fill
+	// through the pick list without ever focusing the worktree field, would
+	// submit repo A's worktree path for repo B.
+	m.onSetupCWDChanged(p, "")
 	m.cwdBrowseEntries = nil
 	m.cwdBrowseCursor = 0
 	m.cwdBrowseScroll = 0
@@ -2722,8 +2729,15 @@ func (m *Model) applyBrowseResponse(resp ipc.BrowseDirRespPayload, gen string) t
 		// like applyGitReposPickList: this same client machinery answers the
 		// project dialog's browser too, which has no worktree field to go
 		// stale.
+		//
+		// p is nil here rather than a m.pluginRegistry.Get(m.selectedPlugin)
+		// lookup: onSetupCWDChanged never reads it, and a response-handler
+		// call site is reachable with no registry at all (recentClientModel
+		// and its siblings build a Model scoped to exactly the IPC-response
+		// logic under test) — a lookup would risk a nil *Registry panic for
+		// a value nothing uses.
 		if m.dialog == dialogCreatePaneSetup {
-			return m.onSetupCWDChanged(m.pluginRegistry.Get(m.selectedPlugin), m.cwdBrowseDir)
+			return m.onSetupCWDChanged(nil, m.cwdBrowseDir)
 		}
 	}
 	return nil
@@ -2774,8 +2788,15 @@ func (m *Model) applyGitReposPickList(repos []string) tea.Cmd {
 	if len(m.repoCandidates) == 0 {
 		return m.fallbackToRecentOrBrowser()
 	}
-	// Pre-select the first git candidate so Enter-through submits it.
-	m.cwdBrowseDir = m.repoCandidates[0]
+	// Pre-select the first git candidate so Enter-through submits it. Routed
+	// through onSetupCWDChanged like every other site that commits a browsed
+	// directory — reachable on dialog RE-ENTRY (a prior plugin's worktree
+	// choice is otherwise still sitting in m.selectedWorktree here) even
+	// though enterSetupOrSplit already clears it on ordinary entry; one call
+	// site cannot get this wrong twice. p is nil — onSetupCWDChanged never
+	// reads it, and a registry lookup here would risk a nil *Registry panic
+	// in a response-handler test scoped to exactly this logic.
+	m.onSetupCWDChanged(nil, m.repoCandidates[0])
 	m.cwdBrowseCursor = 0
 	return nil
 }
@@ -2874,9 +2895,11 @@ func (m *Model) showRootsList() {
 	// here rather than only in applyBrowseResponse. Gated like that site: this
 	// function is ALSO called from the project dialog's browseUp
 	// (projectdialog.go), which has no worktree field to go stale, and must
-	// stay untouched by setup-dialog policy.
+	// stay untouched by setup-dialog policy. p is nil — onSetupCWDChanged
+	// never reads it, and showRootsList's own tests build a Model with no
+	// registry.
 	if m.dialog == dialogCreatePaneSetup {
-		m.onSetupCWDChanged(m.pluginRegistry.Get(m.selectedPlugin), "")
+		m.onSetupCWDChanged(nil, "")
 	}
 }
 
@@ -3406,7 +3429,8 @@ func (m Model) activeCWDPick() (pick []string, isRecent bool) {
 // mode — either discover="git" repo candidates or recent locations. Rows are
 // the candidates plus one trailing "Browse…" escape hatch. cwdBrowseCursor is
 // the row cursor and cwdBrowseDir mirrors the highlighted candidate so
-// submitSetupDialog's selectedCWD = cwdBrowseDir capture works unchanged.
+// submitSetupDialog's selectedCWD = setupSpawnDir() capture sees it (via
+// cwdBrowseDir, unless a worktree is also chosen — see setupSpawnDir).
 func (m Model) handleSetupPickKey(p *plugin.PanePlugin, key string) (tea.Model, tea.Cmd) {
 	pick, _ := m.activeCWDPick()
 	rows := len(pick) + 1 // +1 for Browse…
@@ -4147,8 +4171,11 @@ func (m Model) renderCreatePaneSetupDialog() string {
 		// visually with the list — skip it and let the highlight do the work.
 		if len(pick) == 0 {
 			// Resolved is the daemon's answer (BrowseDirRespPayload.Resolved) and
-			// may be remote — sanitize before it reaches a rendered row. The
-			// raw value stays in m.cwdBrowseDir for the actual spawn CWD.
+			// may be remote — sanitize before it reaches a rendered row. The raw
+			// value stays in m.cwdBrowseDir; this is what the CWD field itself
+			// browsed to, not necessarily the actual spawn CWD (setupSpawnDir()
+			// prefers a chosen worktree, rendered separately by the worktree
+			// field below).
 			path, prefix := sanitizeRemoteText(m.cwdBrowseDir), "    "
 			switch {
 			// No runtime.GOOS check: the roots come from the daemon, and only a
@@ -4197,20 +4224,22 @@ func (m Model) renderCreatePaneSetupDialog() string {
 				case focused && i == m.cwdBrowseCursor:
 					b.WriteString("  > " + dialogSelected.Render(displayName) + "\n")
 				case i < len(pick) && pick[i] == m.cwdBrowseDir:
-					// The directory the pane will actually spawn in, marked
-					// whenever the caret above is not already on it: the field
-					// is blurred, OR it is focused with the cursor parked on
-					// the trailing "Browse…" row, which syncSelection
-					// deliberately never commits. Both states otherwise read as
-					// "nothing chosen" — the same hole, one just happens to be
-					// reachable without leaving the field.
+					// The directory this field has committed, marked whenever
+					// the caret above is not already on it: the field is
+					// blurred, OR it is focused with the cursor parked on the
+					// trailing "Browse…" row, which syncSelection deliberately
+					// never commits. Both states otherwise read as "nothing
+					// chosen" — the same hole, one just happens to be reachable
+					// without leaving the field. (What the pane will actually
+					// spawn in is setupSpawnDir(), which prefers a chosen
+					// worktree over this value — that choice is marked
+					// separately, on the worktree field below.)
 					//
-					// Matched on cwdBrowseDir (the value submitSetupDialog
-					// reads) rather than on the cursor, which is what makes the
-					// Browse… case work at all. In pick mode cwdBrowseDir is
-					// only ever assigned by copying an element out of this same
-					// slice, so == is exact by construction and never depends on
-					// pathEqual's case folding.
+					// Matched on cwdBrowseDir rather than on the cursor, which
+					// is what makes the Browse… case work at all. In pick mode
+					// cwdBrowseDir is only ever assigned by copying an element
+					// out of this same slice, so == is exact by construction
+					// and never depends on pathEqual's case folding.
 					//
 					// Same 4-cell prefix width as the other rows, so
 					// leftTruncPath's budget is unchanged.

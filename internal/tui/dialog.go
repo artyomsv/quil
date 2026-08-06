@@ -172,6 +172,12 @@ type settingsField struct {
 	get    func(m *Model) string
 	set    func(m *Model, val string)
 	isBool bool
+	// relayout marks a row whose value changes the pane geometry, so
+	// handleSettingsKey follows the set with resizeTabs + resizeAllPanes +
+	// ClearScreen. A flag rather than a label comparison at the call site:
+	// the row that needs it is the row that declares it, and renaming a
+	// label cannot silently drop the resize.
+	relayout bool
 }
 
 // settingsFields returns the editable Settings rows. Every setter that
@@ -230,6 +236,32 @@ func settingsFields() []settingsField {
 					m.configChanged = true
 				}
 			},
+		},
+		{
+			// The one Settings row that applies LIVE. The comment on
+			// settingsFields says changes take effect on the next launch,
+			// which is right for the log level — its file handle lives in
+			// main.go and is not re-plumbed into the Model — and wrong here:
+			// the sidebar width is read from m.sidebarWidth on every render,
+			// so a visible layout control that did nothing until relaunch
+			// would read as a broken dialog. handleSettingsKey follows the
+			// set with the resize sequence toggleProjectSidebar documents.
+			label: "Sidebar width",
+			get:   func(m *Model) string { return strconv.Itoa(m.cfg.UI.SidebarWidth) },
+			set: func(m *Model, v string) {
+				n, err := strconv.Atoi(v)
+				// Refused rather than written-and-corrected: sidebarWidth()
+				// clamps at render, so a stored 0 would display as 0 while
+				// the layout used defaultSidebarWidth. The dialog must never
+				// show a number the layout is not using.
+				if err != nil || n <= 0 || n == m.cfg.UI.SidebarWidth {
+					return
+				}
+				m.cfg.UI.SidebarWidth = n
+				m.sidebarWidth = n
+				m.configChanged = true
+			},
+			relayout: true,
 		},
 		{
 			label: "Log level",
@@ -585,9 +617,21 @@ func (m Model) handleSettingsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.dialogEdit = false
 			m.dialogInput = ""
 		case key == "enter":
-			fields[m.dialogCursor].set(&m, m.dialogInput)
+			field := fields[m.dialogCursor]
+			field.set(&m, m.dialogInput)
 			m.dialogEdit = false
 			m.dialogInput = ""
+			if field.relayout {
+				// Same sequence, and same ordering, as toggleProjectSidebar:
+				// resizeTabs FIRST because it is what WRITES pane.Width and
+				// tab.CanvasW — resizeAllPanes only reads and ships them, so
+				// without it every background tab keeps its pre-edit PTY
+				// size. ClearScreen because every column right of the strip
+				// shifts in one frame, which is the shift Bubble Tea's cell
+				// diff mis-tracks.
+				m.resizeTabs()
+				return m, tea.Batch(tea.ClearScreen, m.resizeAllPanes())
+			}
 		case key == "backspace":
 			if len(m.dialogInput) > 0 {
 				m.dialogInput = m.dialogInput[:len(m.dialogInput)-1]

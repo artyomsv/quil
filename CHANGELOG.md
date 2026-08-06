@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Quil can now create the worktree for you.** The create-pane dialog's
+  Worktree field gained a `+ new branch…` row: name a branch and the pane opens
+  in a fresh worktree beside the repository, at
+  `<parent>/<repo>-worktrees/<branch>`. Nothing is nested inside your checkout,
+  so tools that walk the tree never see two of it.
+
+### Changed
+- **A worktree pane that cannot open says so instead of moving.** If the add
+  fails, no pane is created and git's own message is shown — Quil never falls
+  back to the repository root, where an agent would run on `master` while you
+  believed it was isolated. The same applies on restart: a pane whose worktree
+  has been removed comes back unspawned, naming the missing directory, with
+  `Alt+R` to retry.
+
 ## [1.51.0] - 2026-08-06
 
 ### Added

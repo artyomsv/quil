@@ -523,3 +523,64 @@ is there is nothing to compare against.
 console-less parent gets a brand new console allocated — a real window. A probe
 per checkout every few seconds is a stream of them. `hideWindow` is a no-op on
 Unix; the build tags keep the difference in one pair of files.
+
+## Creating worktrees (stage B)
+
+**A create carrying `CreatePanePayload.Worktree` goes to a WORKER goroutine and
+answers the requester** (`worktreeAddAndCreate`, `daemon/worktree_add.go`).
+`handleCreatePane` runs on the requesting conn's dispatch goroutine, so a
+checkout there blocks that client's input for as long as it takes — the hazard
+that moved browse, discover and claudesessions onto workers. The answer is a
+request-response pair over the existing `create_pane_resp`, never a broadcast:
+the requester holds a layout placeholder armed before the send, and a broadcast
+would show one client's failure to every other while giving the requester
+nothing to unwind with.
+
+**A worktree CWD is exempt from `handleCreatePane`'s fallback, and the
+exemption has to be explicit.** That function substitutes `d.defaultCWD()` for
+any CWD that fails its stat — right for a browsed directory, catastrophic here,
+where the directory IS the isolation: the pane would come up on `master` while
+the user believes it is isolated. `createPaneInWorktree` therefore stats and
+FAILS, and destroys the pane if the spawn then fails, so the guarantee is "a
+failure produces no pane" rather than "usually no pane".
+
+**`worktreeAdding` is its own single-flight slot, and it doubles as the permit
+budget.** The dialog LISTS a directory's worktrees and then CREATES one, so
+sharing `worktreeScanning` would reject each step exactly when it followed the
+other (same reason `dirsChecking` is not `browseScanning`). One add at a time
+daemon-wide is what makes a 120 s `claimBlockingFSCall` safe: at most one
+permit is ever held long, however many clients ask.
+
+**`Pane.WorktreeOwned` is PERSISTED; `Pane.SpawnError` is NOT.** Ownership is
+the only thing that lets `spawnRestoredPane` tell a missing WORKTREE from a
+missing browsed directory — the snapshot stores only CWD otherwise — and a
+worktree-owned pane whose directory is gone comes up unspawned with the reason
+on screen instead of relocating (for a claude pane the relocation is worse than
+a wrong directory: it still resumes its recorded session, continuing against
+the wrong tree). Ordinary panes keep the blank-and-fall-back behaviour; their
+loss is a convenience, not the isolation. The error is runtime-only because a
+fresh daemon re-stats, and a stored one would resurrect a complaint about a
+worktree since restored. The pane offers `Alt+R` and nothing more specific:
+Quil records the worktree path, not the repository it branched from.
+
+**Replace mode is refused, in the CLIENT at the split step and in the daemon.**
+The field cannot gate itself — the user picks replace *after* the worktree
+field — so `handleCreatePaneSplit` refuses before it does anything destructive.
+That path sets `leaf.Pane = nil` and calls `old.Dispose()` BEFORE the send, and
+unlike a dangling placeholder a `Dispose()` is not something
+`PrunePlaceholders` can undo, so a failed add there costs a LIVE pane.
+
+**`handleCreatePaneSplit` tears the setup dialog down before it builds the
+payload.** The branch name is captured with the other choices at the top;
+reading it at the payload yields `""` and every "new branch" silently becomes
+an ordinary pane in the repository root — the exact relocation the feature
+exists to prevent. The teardown also clears the worktree state, or the next
+Ctrl+N inherits a branch name and a repository the dialog no longer shows.
+
+**Only the client can retire a placeholder whose pane never arrives.**
+`applyWorkspaceState` FILLS placeholders and never removes one, so
+`applyCreatePaneResp` prunes on failure and deliberately does nothing on
+success (the pane is about to land in that slot). `createPaneTimeout` exceeds
+the daemon's `worktreeAddTimeout` — asserted, not left as two drifting numbers
+— so the client can never prune a placeholder the daemon is about to fill.
+

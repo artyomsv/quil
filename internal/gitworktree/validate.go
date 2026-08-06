@@ -80,6 +80,9 @@ func ValidateBranch(name string) error {
 		if strings.HasSuffix(part, ".lock") {
 			return fmt.Errorf("no part of a branch name may end in %q", ".lock")
 		}
+		if isReservedName(part) {
+			return fmt.Errorf("%q is a reserved device name on Windows", part)
+		}
 	}
 	// filepath.IsAbs is platform-dependent, so the colon is checked outright
 	// as well: a Linux daemon must still reject "C:/evil", which IsAbs there
@@ -94,6 +97,33 @@ func ValidateBranch(name string) error {
 		}
 	}
 	return nil
+}
+
+// windowsReserved are the DOS device names Windows resolves before any path
+// lookup, in any directory. Go's filepath.IsAbs does not treat them specially
+// — measured: IsAbs("NUL") is false — so they reach DerivePath and produce a
+// worktree path git cannot create, with an opaque error.
+//
+// Checked on every platform, not just Windows: the daemon may run on Windows
+// while the client does not, and a branch name refused on one machine and
+// accepted on another is worse than one refused everywhere. internal/persist
+// validates the same set for the same reason.
+var windowsReserved = map[string]bool{
+	"con": true, "prn": true, "aux": true, "nul": true,
+	"com1": true, "com2": true, "com3": true, "com4": true, "com5": true,
+	"com6": true, "com7": true, "com8": true, "com9": true,
+	"lpt1": true, "lpt2": true, "lpt3": true, "lpt4": true, "lpt5": true,
+	"lpt6": true, "lpt7": true, "lpt8": true, "lpt9": true,
+}
+
+// isReservedName reports whether a path component is a DOS device name. The
+// extension is stripped first: Windows resolves "NUL.txt" to the device too.
+func isReservedName(part string) bool {
+	base := part
+	if i := strings.IndexByte(base, '.'); i >= 0 {
+		base = base[:i]
+	}
+	return windowsReserved[strings.ToLower(base)]
 }
 
 // DerivePath returns where a worktree for branch belongs: a SIBLING of the

@@ -142,8 +142,13 @@ func TestCreatePaneResp_ReArmsTheListener(t *testing.T) {
 func TestCreatePaneResp_TwoCreatesUnwindTheirOwnTabs(t *testing.T) {
 	m, tabA := armedWorktreeCreate(t)
 
-	// A second create, on a different tab, in flight alongside the first.
+	// A second create, on a REAL second tab, in flight alongside the first.
+	// It has to be a real tab: the handler checks the response's destination
+	// against the tab it names, so a fabricated id is rejected before it can
+	// unwind anything.
 	tabB := "tab-second"
+	p := m.cur()
+	p.tabs = append(p.tabs, &TabModel{ID: tabB, Name: "B"})
 	m.worktreeCreates[tabB] = true
 	m.pendingSplit[tabB] = &LayoutNode{}
 
@@ -228,20 +233,71 @@ func TestCreatePane_TimeoutUnwindsThePlaceholder(t *testing.T) {
 	}
 }
 
-// A tick belonging to a create that already answered must be inert.
-func TestCreatePane_StaleTimeoutIsInert(t *testing.T) {
+// A tick is inert once the PANE HAS LANDED — not merely once the daemon said
+// it would. Success deliberately retires nothing, so a daemon that answers
+// "ok" and never creates a pane still has its timeout fire; only the pane
+// arriving in a broadcast clears the record.
+func TestCreatePane_TimeoutIsInertOnceThePaneLands(t *testing.T) {
+	m, tabID := armedWorktreeCreate(t)
+	paneID := "pane-landed"
+
+	updated, _ := m.Update(wtResp(tabID, ""))
+	got := updated.(Model)
+
+	// The pane arrives and fills the placeholder.
+	got.applyWorkspaceState(WorkspaceStateMsg{
+		ActiveTab: tabID,
+		Tabs:      []TabInfo{{ID: tabID, Name: "T", Panes: []string{paneID}}},
+		Panes:     []PaneInfo{{ID: paneID, TabID: tabID, Type: "terminal"}},
+	}, "")
+	if got.worktreeCreates[tabID] {
+		t.Fatal("the landed pane did not retire the create record")
+	}
+
+	updated, _ = got.Update(createPaneTimeoutMsg{tabID: tabID})
+	if updated.(Model).flashText != "" {
+		t.Errorf("a tick after the pane landed flashed %q", updated.(Model).flashText)
+	}
+}
+
+// The mirror: a daemon that answers "ok" and never creates a pane must still
+// have its placeholder retired by the timeout, or the tab keeps a dead leaf.
+func TestCreatePane_TimeoutStillFiresAfterAnEmptySuccess(t *testing.T) {
 	m, tabID := armedWorktreeCreate(t)
 
 	updated, _ := m.Update(wtResp(tabID, ""))
 	got := updated.(Model)
+	if !got.worktreeCreates[tabID] {
+		t.Fatal("success retired the create record before any pane arrived")
+	}
+
 	updated, _ = got.Update(createPaneTimeoutMsg{tabID: tabID})
 	got = updated.(Model)
+	if _, ok := got.pendingSplit[tabID]; ok {
+		t.Error("a success with no pane left the placeholder armed forever")
+	}
+}
+
+// A response naming a tab on a DIFFERENT destination is refused: tabByID walks
+// every project on every destination, so without this a compromised remote
+// daemon could prune a local tab's live placeholder.
+func TestCreatePaneResp_WrongDestinationIsRefused(t *testing.T) {
+	m, tabID := armedWorktreeCreate(t)
+
+	updated, _ := m.Update(createPaneRespMsg{
+		Resp: ipc.CreatePaneRespPayload{
+			TabID: tabID, Error: "boom",
+			Worktree: &ipc.WorktreeSpec{RepoRoot: "/repo", Branch: "feat/x"},
+		},
+		Dest: "someone-elses-host",
+	})
+	got := updated.(Model)
 
 	if _, ok := got.pendingSplit[tabID]; !ok {
-		t.Error("a late tick unwound a placeholder the answered create still owns")
+		t.Error("a response from another destination unwound this tab's placeholder")
 	}
 	if got.flashText != "" {
-		t.Errorf("a stale timeout flashed %q", got.flashText)
+		t.Errorf("a cross-destination response flashed %q", got.flashText)
 	}
 }
 

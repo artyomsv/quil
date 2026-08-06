@@ -1937,7 +1937,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case createPaneRespMsg:
 		// Same rule: an IPC response arm that returns a bare nil ends the
 		// listen loop for the session.
-		m.applyCreatePaneResp(msg.Resp)
+		m.applyCreatePaneResp(msg.Resp, msg.Dest)
 		return m, m.listenForMessages()
 
 	case createPaneTimeoutMsg:
@@ -4227,6 +4227,16 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 					placeholder.Pane = pane
 					tab.invalidateLeaves()
 					delete(m.pendingSplit, tab.ID)
+					// The pane LANDING is what retires a worktree create's
+					// prune exemption — not the daemon saying it succeeded.
+					// Dropping it on the success response instead would trust
+					// the daemon's send ordering: a daemon that answers "ok"
+					// and never creates a pane would have the exemption
+					// retired, the next broadcast prune the placeholder, and
+					// the node detach while pendingSplit still pointed at it.
+					// The next pane created in that tab then lands on an
+					// unreachable leaf — a live PTY with no visible pane.
+					delete(m.worktreeCreates, tab.ID)
 					// Focus the new pane (it replaced the previously active one)
 					tab.ActivePane = pane.ID
 					continue
@@ -5311,7 +5321,7 @@ func (m Model) listenForMessages() tea.Cmd {
 				log.Printf("create pane resp: decode: %v", err)
 				return listenContinueMsg{}
 			}
-			return createPaneRespMsg{Resp: resp}
+			return createPaneRespMsg{Resp: resp, Dest: msg.Origin}
 
 		case ipc.MsgDirsExistResp:
 			var payload ipc.DirsExistRespPayload

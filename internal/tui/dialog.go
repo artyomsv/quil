@@ -272,7 +272,18 @@ func settingsFields() []settingsField {
 				// setting silently could not be changed — while the value is
 				// still perfectly legal for the wider terminal the user will
 				// resize to.
-				if m.width >= minWidthForSidebar && n > m.width-minTermWidth {
+				// Measured at a width the sidebar can actually occupy.
+				// Comparing against m.width alone made the row inert below
+				// minWidthForSidebar (sidebarWidth returns 0 there whatever is
+				// asked, so every value mismatched); skipping the check there
+				// instead let 100000 be stored and shown while the layout used
+				// width-minTermWidth. Both violate the setter's own rule that
+				// the dialog never displays a number the layout is not using.
+				usable := m.width
+				if usable < minWidthForSidebar {
+					usable = minWidthForSidebar
+				}
+				if n > usable-minTermWidth {
 					return
 				}
 				m.cfg.UI.SidebarWidth = n

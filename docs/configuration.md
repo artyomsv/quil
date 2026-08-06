@@ -147,7 +147,7 @@ The "ghost buffer" is the rendered preview Quil shows immediately on reconnect, 
 | `log_viewer_page_lines` | int | `40` | `Alt+Up` / `Alt+Down` jump distance in the F1 log viewer. |
 | `show_disclaimer` | bool | `true` | Display the beta disclaimer on startup. The `Don't show again` button flips this to `false`. |
 | `sidebar_open` | bool | `false` | Whether the **project** sidebar starts expanded. Closed by default so existing installs keep their pane geometry unchanged. `Alt+Shift+S` flips it, and the setting persists. |
-| `sidebar_width` | int | `22` | Width of the **project** sidebar. Unlike the notification sidebar this reserves real layout width — panes are narrower by exactly this many columns while it is open, and toggling it resizes every pane's PTY. Clamped against the terminal width, so an oversized value cannot push the pane area off screen. |
+| `sidebar_width` | int | `22` | Width of the **project** sidebar. Unlike the notification sidebar this reserves real layout width — panes are narrower by exactly this many columns while it is open, and toggling it resizes every pane's PTY. Clamped against the terminal width, so an oversized value cannot push the pane area off screen. Editable without touching this file: **F1 → Settings → Sidebar width** (the one Settings row that applies immediately rather than on next launch), or **drag the sidebar's right edge** with the mouse. Both persist here. A drag will not take the strip below 12 columns — collapsing it entirely is what `Alt+Shift+S` is for, and a strip dragged to nothing would leave no edge to grab it back by. |
 
 > **Two different `sidebar_width` keys.** This one (`[ui]`, default `22`) is the
 > project sidebar on the **left**, which reserves layout width. The one in

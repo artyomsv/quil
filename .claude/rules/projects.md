@@ -450,6 +450,28 @@ closed), because a 22-column sidebar moved an even split from 92/93 to 81/82,
 straddling `min_native_cols` and flipping ONE of two identical siblings to a
 161-column cropped canvas.
 
+**The edge drag must NEVER move `m.sidebarWidth` mid-drag.** `View()` calls
+`tab.Resize(m.paneAreaWidth()…)` on every frame and `ResizeVT` pairs every
+emulator resize with a PTY redraw, so a strip that follows the cursor replays
+the 2026-07-15 unpaired-rewrap corruption once per motion event. `sidebarDragW`
+holds the pending value, a one-column rule is composited at it, and
+`finishSidebarDrag` is the single commit point — the same deferral
+`finishSplitDrag` makes, for the same reason. Clamping goes through
+`sidebarWidth()` and nowhere else, so the edge stops where the user let go
+rather than at a value the renderer silently corrects, and `minSidebarWidth`
+keeps a drag from collapsing the strip it would then have no edge to grab back
+by (collapsing is `Alt+Shift+S`'s job).
+
+**The press is hit-tested BEFORE `projectSidebarSwallowsMouse`, and that order
+is load-bearing rather than stylistic.** The zone's left column is the
+sidebar's OWN last column, and the swallow branch *always* returns — so with
+the checks the other way round the edge is ungrabbable from the side the user
+aims at it from, while still looking implemented. The preview composites
+through `overlayAt` rather than a one-column cutter of its own: that function
+already solves the truncate-lands-mid-glyph, SGR-left-open and
+wide-glyph-straddling-the-seam problems, all three of which a second cutter
+would have to solve again to be correct at one column.
+
 ## Git subsystem (`gitinfo` + `gitcache.go`)
 
 Three plumbing calls per checkout: branch, linked worktree, ahead/behind.

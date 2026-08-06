@@ -18,6 +18,7 @@ package gitworktree
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -89,9 +90,20 @@ const gitWaitDelay = 2 * time.Second
 // treating that as a failure would put an error on screen for the ordinary
 // case. It returns no entries, which is the same shape the caller renders for
 // a repository with nothing to attach to.
+//
+// That collapse is deliberately narrow: a plain non-zero exit from `git
+// worktree list` — the shape "not a repository" actually takes — is the only
+// case folded into (nil, nil). A missing git binary (exec.ErrNotFound) and a
+// call that ran out of time (ctx.Err() != nil) are returned as errors
+// instead, or a missing binary, a corrupt repository and a permissions error
+// would all render the same confidently-wrong "not a git repository" the
+// caller shows for the genuine case.
 func List(ctx context.Context, dir string) ([]Worktree, error) {
 	out, err := runGit(ctx, dir, "worktree", "list", "--porcelain")
 	if err != nil {
+		if errors.Is(err, exec.ErrNotFound) || ctx.Err() != nil {
+			return nil, err
+		}
 		return nil, nil
 	}
 	return parsePorcelain(out), nil

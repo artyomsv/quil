@@ -3,9 +3,11 @@ package gitworktree
 import (
 	"context"
 	"errors"
+	"os/exec"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 // stubGit installs a runGit that returns canned output for the test's duration.
@@ -146,6 +148,53 @@ func TestList_OutsideARepositoryReturnsNoEntriesAndNoError(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Errorf("got %d entries, want none", len(got))
+	}
+}
+
+// List's "not a repository" collapse is deliberately narrow: it applies only
+// to a plain non-zero exit, which is the shape that answer actually takes. A
+// missing git binary and a call that ran out of time both mean "the answer is
+// unknown", not "there is no repository here" — folding either into the same
+// silent (nil, nil) would render a confidently wrong "not a git repository"
+// for a directory that IS one, just unreachable right now.
+func TestList_ClassifiesGitFailures(t *testing.T) {
+	tests := []struct {
+		name    string
+		err     error
+		ctx     func() context.Context
+		wantErr bool
+	}{
+		{
+			name:    "plain exit error is not a repository, not an error",
+			err:     errors.New("exit status 128"),
+			ctx:     context.Background,
+			wantErr: false,
+		},
+		{
+			name:    "missing git binary is an error",
+			err:     exec.ErrNotFound,
+			ctx:     context.Background,
+			wantErr: true,
+		},
+		{
+			name: "context deadline exceeded is an error",
+			err:  errors.New("signal: killed"),
+			ctx: func() context.Context {
+				ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+				cancel()
+				return ctx
+			},
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stubGit(t, "", tt.err)
+			_, err := List(tt.ctx(), "/repo")
+			if (err != nil) != tt.wantErr {
+				t.Errorf("List() err = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
 	}
 }
 

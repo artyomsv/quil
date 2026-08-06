@@ -264,7 +264,15 @@ func settingsFields() []settingsField {
 				if err != nil || n < minSidebarWidth || n == m.cfg.UI.SidebarWidth {
 					return
 				}
-				if m.width > 0 && n != sidebarWidth(m.width, true, n) {
+				// Bounded against the CAP only, and measured at a width the
+				// sidebar can actually occupy. Comparing against
+				// sidebarWidth(m.width, …) directly made the row inert on any
+				// terminal under minWidthForSidebar: it returns 0 there
+				// whatever is asked, so every value mismatched and the
+				// setting silently could not be changed — while the value is
+				// still perfectly legal for the wider terminal the user will
+				// resize to.
+				if m.width >= minWidthForSidebar && n > m.width-minTermWidth {
 					return
 				}
 				m.cfg.UI.SidebarWidth = n
@@ -1708,6 +1716,19 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 
 	logger.Debug("create pane: sending IPC with cwd=%q type=%s instance=%s", cwd, pluginName, instanceName)
 
+	// Refused BEFORE anything destructive or stateful happens — before the
+	// replace path disposes a pane, and before the split path arms a
+	// placeholder. Refusing after the split would leave pendingSplit armed
+	// with nothing to retire it (no send, so no response and no timeout),
+	// which is the stranded-placeholder bug this feature already had once.
+	if newBranch != "" && newBranchRepo == "" {
+		// The listing never answered, so the repository root is unknown.
+		// Refused rather than falling back to the browsed directory: that
+		// fallback is exactly the nested-worktree bug.
+		m.setFlash("worktree not created: the repository root is not known yet")
+		return m, m.flashCmd()
+	}
+
 	// Option 2: Replace current pane
 	if m.dialogCursor == 2 {
 		// Refused, and refused HERE because this is the first moment the
@@ -1783,13 +1804,8 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 	// the far one and the worktree cannot land inside the repository.
 	var spec *ipc.WorktreeSpec
 	if newBranch != "" {
-		if newBranchRepo == "" {
-			// The listing never answered, so the repository root is unknown.
-			// Refused rather than falling back to the browsed directory: that
-			// fallback is exactly the nested-worktree bug.
-			m.setFlash("worktree not created: the repository root is not known yet")
-			return m, m.flashCmd()
-		}
+		// newBranchRepo is non-empty here: the unknown-root case was refused
+		// above, before the split armed a placeholder.
 		spec = &ipc.WorktreeSpec{RepoRoot: newBranchRepo, Branch: newBranch}
 		// Keyed by TAB, not a single slot: two worktree creates can be in
 		// flight at once (the dialog closes on submit, so a second Ctrl+N is

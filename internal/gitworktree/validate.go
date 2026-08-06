@@ -61,6 +61,13 @@ func ValidateBranch(name string) error {
 	if strings.HasSuffix(name, ".") {
 		return fmt.Errorf("branch name may not end with %q", ".")
 	}
+	// Bounded BEFORE the split below: the justification for this check is that
+	// the IPC frame allows megabytes, so splitting a megabyte string and then
+	// rejecting it for length would allocate exactly what the bound exists to
+	// avoid.
+	if len(name) > maxBranchLen {
+		return fmt.Errorf("branch name is longer than %d characters", maxBranchLen)
+	}
 	// PER COMPONENT, not just on the whole name: git applies these rules to
 	// every slash-separated part, so "feat/.hidden" and "feat/x.lock" are both
 	// refused by git. Checking only the whole name let them through to cost a
@@ -73,12 +80,6 @@ func ValidateBranch(name string) error {
 		if strings.HasSuffix(part, ".lock") {
 			return fmt.Errorf("no part of a branch name may end in %q", ".lock")
 		}
-	}
-	// Bounded. The name becomes a path segment, and most filesystems refuse a
-	// component past 255 bytes — but the IPC frame allows megabytes, so
-	// without this a huge name is derived into a huge path and handed to git.
-	if len(name) > maxBranchLen {
-		return fmt.Errorf("branch name is longer than %d characters", maxBranchLen)
 	}
 	// filepath.IsAbs is platform-dependent, so the colon is checked outright
 	// as well: a Linux daemon must still reject "C:/evil", which IsAbs there

@@ -378,7 +378,7 @@ func (m Model) hitTestSidebarEdge(x, y int) bool {
 		return false
 	}
 	if y == 0 {
-		return x == w-sidebarEdgeHitPadding
+		return x == w-1
 	}
 	return x >= w-sidebarEdgeHitPadding && x <= w
 }

@@ -9,13 +9,19 @@ import (
 	"github.com/artyomsv/quil/internal/ipc"
 )
 
-// countPlaceholders walks the tree for leaves with no pane — what a pending
-// split leaves behind until the created pane arrives.
+// countPlaceholders walks the tree for childless nodes with no pane — what a
+// pending split leaves behind until the created pane arrives.
+//
+// It deliberately does NOT use IsLeaf(), which is `Pane != nil`: by that
+// definition a placeholder is not a leaf, so an IsLeaf-gated walk recurses
+// into its two nil children and returns 0 for every tree. This function
+// counted nothing at all until that was noticed, which made every assertion
+// built on it vacuous.
 func countPlaceholders(n *LayoutNode) int {
 	if n == nil {
 		return 0
 	}
-	if n.IsLeaf() {
+	if n.Left == nil && n.Right == nil {
 		if n.Pane == nil {
 			return 1
 		}
@@ -244,5 +250,67 @@ func TestCreatePane_StaleTimeoutIsInert(t *testing.T) {
 func TestCreatePaneTimeout_ExceedsTheDaemonAddTimeout(t *testing.T) {
 	if createPaneTimeout <= worktreeAddTimeout {
 		t.Errorf("createPaneTimeout (%v) must exceed worktreeAddTimeout (%v)", createPaneTimeout, worktreeAddTimeout)
+	}
+}
+
+// applyWorkspaceState prunes unfilled placeholders on EVERY broadcast. For an
+// ordinary create the placeholder is unfilled for microseconds, so no
+// broadcast lands inside that window; a `git worktree add` holds it for
+// SECONDS, and spontaneous broadcasts land there routinely — a child toggling
+// mouse modes, a pane exiting, a git-fingerprint change, another client.
+//
+// Pruning then detaches the node while pendingSplit still points at it, so the
+// pane that finally arrives is assigned to an unreachable leaf and appears
+// NOWHERE until a later broadcast heals it through the root-insert fallback.
+func TestApplyWorkspaceState_KeepsThePlaceholderWhileACreateIsInFlight(t *testing.T) {
+	m := newBranchModel(t)
+	tabID := m.curTabs()[0].ID
+	paneID := m.curTabs()[0].Root.Left.Pane.ID
+
+	// Arm exactly what handleCreatePaneSplit leaves behind.
+	placeholder := m.curTabs()[0].SplitAtPane(paneID, SplitHorizontal)
+	if placeholder == nil {
+		t.Fatal("could not split to create a placeholder")
+	}
+	m.pendingSplit = map[string]*LayoutNode{tabID: placeholder}
+	m.worktreeCreates = map[string]bool{tabID: true}
+	before := countPlaceholders(m.curTabs()[0].Root)
+	if before == 0 {
+		t.Fatal("fixture armed no placeholder")
+	}
+
+	// A broadcast arrives mid-add, carrying only the panes that already exist.
+	m.applyWorkspaceState(WorkspaceStateMsg{
+		ActiveTab: tabID,
+		Tabs:      []TabInfo{{ID: tabID, Name: "T", Panes: []string{paneID}}},
+		Panes:     []PaneInfo{{ID: paneID, TabID: tabID, Type: "terminal"}},
+	}, "")
+
+	if got := countPlaceholders(m.curTabs()[0].Root); got != before {
+		t.Errorf("placeholders = %d after a mid-flight broadcast, want %d — the create's slot was pruned and its pane will land nowhere",
+			got, before)
+	}
+}
+
+// The exemption is scoped to tabs with a create in flight: without one, an
+// unfilled placeholder is still ordinary debris and must be cleaned up.
+func TestApplyWorkspaceState_PrunesThePlaceholderWithNoCreateInFlight(t *testing.T) {
+	m := newBranchModel(t)
+	tabID := m.curTabs()[0].ID
+	paneID := m.curTabs()[0].Root.Left.Pane.ID
+
+	if m.curTabs()[0].SplitAtPane(paneID, SplitHorizontal) == nil {
+		t.Fatal("could not split to create a placeholder")
+	}
+	m.worktreeCreates = nil // no create in flight
+
+	m.applyWorkspaceState(WorkspaceStateMsg{
+		ActiveTab: tabID,
+		Tabs:      []TabInfo{{ID: tabID, Name: "T", Panes: []string{paneID}}},
+		Panes:     []PaneInfo{{ID: paneID, TabID: tabID, Type: "terminal"}},
+	}, "")
+
+	if got := countPlaceholders(m.curTabs()[0].Root); got != 0 {
+		t.Errorf("placeholders = %d with no create in flight, want them pruned", got)
 	}
 }

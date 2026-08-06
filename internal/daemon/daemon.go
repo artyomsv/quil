@@ -841,9 +841,6 @@ func (d *Daemon) respawnPanes() {
 	}
 }
 
-// spawnRestoredPane spawns a single restored pane, applying the saved-cwd
-// sanity check and the fallback-to-terminal recovery. Extracted from
-// respawnPanes so the lazy-spawn path (ensurePaneSpawned) reuses it verbatim.
 // refuseMissingWorktree reports whether a worktree-owned pane's directory is
 // gone, and if so records why instead of spawning.
 //
@@ -880,12 +877,21 @@ func (d *Daemon) refuseMissingWorktree(pane *Pane) bool {
 	return true
 }
 
+// spawnRestoredPane spawns a single restored pane, applying the saved-cwd
+// sanity check and the fallback-to-terminal recovery. Extracted from
+// respawnPanes so the lazy-spawn path (ensurePaneSpawned) reuses it verbatim.
 func (d *Daemon) spawnRestoredPane(pane *Pane) {
 	ptySession := newRestoredPTY(paneSize(pane))
 	if d.refuseMissingWorktree(pane) {
 		return
 	}
-	if pane.CWD != "" {
+	// !WorktreeOwned as well as the early return above, so the no-relocation
+	// invariant is enforced AT the site that relocates. The two stats are
+	// separate calls and can disagree — a race, or a transient error on a
+	// network mount — and without this a worktree-owned pane could still be
+	// blanked into d.defaultCWD(), the one outcome this path exists to
+	// prevent.
+	if pane.CWD != "" && !pane.WorktreeOwned {
 		if info, err := os.Stat(pane.CWD); err != nil || !info.IsDir() {
 			log.Printf("pane %s: saved cwd %q gone, using default", pane.ID, pane.CWD)
 			// PluginMu-protected: snapshot()/buildPaneInfos/handlePaneStatusReq
@@ -4243,8 +4249,10 @@ func (d *Daemon) handleRestartPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 	// Alt+R on a pane whose worktree is still missing must reach the same
 	// verdict restore does — spawning here would put a shell in the daemon's
 	// default directory, the relocation the SpawnError path exists to prevent.
-	// spawnPane clears SpawnError on success, so a retry that finds the
-	// worktree back recovers with no extra bookkeeping.
+	// spawnPane clears SpawnError as it STARTS — not on success — so a retry
+	// that finds the worktree back recovers with no extra bookkeeping, and a
+	// retry that fails for some other reason reports Success:false with the
+	// stale worktree complaint correctly gone.
 	if d.refuseMissingWorktree(pane) {
 		success = false
 	} else {

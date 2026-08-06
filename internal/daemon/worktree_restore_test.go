@@ -175,9 +175,10 @@ func TestRefuseMissingWorktree(t *testing.T) {
 	}
 }
 
-// Cleared in spawnPane rather than at each caller, because the field means
-// "this pane has no process" and spawnPane is the one function that gives it
-// one. handleRestartPaneReq does NOT go through spawnRestoredPane, so clearing
+// Cleared as spawnPane STARTS, rather than at each caller, because the field
+// means "this pane has no process" and spawnPane is the one function that
+// gives it one. Unconditional, so a spawn that then fails for some other
+// reason does not carry a stale worktree complaint. handleRestartPaneReq does NOT go through spawnRestoredPane, so clearing
 // it only there left Alt+R reviving the pane while the stale error stayed
 // painted over it — the user typing blind into a live shell.
 func TestSpawnPane_ClearsAStaleSpawnError(t *testing.T) {

@@ -581,10 +581,38 @@ an ordinary pane in the repository root — the exact relocation the feature
 exists to prevent. The teardown also clears the worktree state, or the next
 Ctrl+N inherits a branch name and a repository the dialog no longer shows.
 
-**Only the client can retire a placeholder whose pane never arrives.**
-`applyWorkspaceState` FILLS placeholders and never removes one, so
-`applyCreatePaneResp` prunes on failure and deliberately does nothing on
-success (the pane is about to land in that slot). `createPaneTimeout` exceeds
-the daemon's `worktreeAddTimeout` — asserted, not left as two drifting numbers
-— so the client can never prune a placeholder the daemon is about to fill.
+**`applyWorkspaceState` DOES prune unfilled placeholders — on every broadcast,
+for every tab — and that is exactly the hazard here.** For an ordinary create a
+placeholder is unfilled for microseconds, so no broadcast lands inside the
+window; a `git worktree add` holds it for SECONDS, and spontaneous broadcasts
+land there routinely (a child toggling mouse modes, a pane exiting, a
+git-fingerprint change, another client). Pruning then DETACHES the node while
+`pendingSplit` still points at it, so the pane that finally arrives is assigned
+to an unreachable leaf and shows up nowhere until a later broadcast heals it
+through the root-insert fallback. `rebuildTabs` therefore skips the prune for a
+tab in `m.worktreeCreates`, and `applyCreatePaneResp` / `applyCreatePaneTimeout`
+are then the ONLY things that can retire it — both delete the map entry, so the
+exemption cannot outlive the request that armed it. Success deliberately
+retires nothing: the pane is about to land in that slot. `createPaneTimeout`
+exceeds the daemon's `worktreeAddTimeout` — asserted, not left as two drifting
+numbers — so the client can never prune a placeholder the daemon is about to
+fill.
+
+**`worktreeCreates` is a MAP keyed by tab, never a scalar "the create I last
+started".** The setup dialog closes on submit, so a second Ctrl+N create can
+begin while the first is still checking out — and the daemon's single-flight
+rejects the second IMMEDIATELY, so its response routinely arrives BEFORE the
+first's. A single slot is overwritten by the second and then cleared, stranding
+the first tab's placeholder permanently (every later pane in that tab is
+swallowed, silently) or unwinding the second's live one. The handler keys on
+what the daemon ECHOED (`p.TabID`, plus a non-nil `p.Worktree` so the MCP
+bridge's own `create_pane_resp` is ignored), which is what `protocol.go` calls
+the client's staleness key.
+
+**A test walking the layout tree for placeholders must not use `IsLeaf()`.** It
+is `Pane != nil`, so a placeholder is not a leaf by that definition and an
+`IsLeaf`-gated walk recurses into its two nil children and returns 0 for every
+tree — silently making every placeholder assertion vacuous. Match `Left == nil
+&& Right == nil && Pane == nil`, the same shape `PrunePlaceholders` itself
+uses.
 

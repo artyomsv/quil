@@ -2284,12 +2284,10 @@ func TestSubmitSetupDialog_WorktreeBecomesTheCWD(t *testing.T) {
 // pane into a worktree of a repository the user navigated away from.
 func TestSetupDialog_ChangingTheDirectoryClearsTheWorktree(t *testing.T) {
 	m := Model{}
-	p := &plugin.PanePlugin{}
-	p.Command.PromptsCWD = true
 	m.cwdBrowseDir = "/repo"
 	m.selectedWorktree = "/repo-worktrees/feat-x"
 
-	m.onSetupCWDChanged(p, "/other")
+	m.onSetupCWDChanged("/other")
 	if m.selectedWorktree != "" {
 		t.Errorf("selectedWorktree = %q, want cleared", m.selectedWorktree)
 	}

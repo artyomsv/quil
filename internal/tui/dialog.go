@@ -2525,7 +2525,7 @@ func (m *Model) enterSetupOrSplit(p *plugin.PanePlugin) tea.Cmd {
 	// Ctrl+N after picking a worktree in repo A, then having repo B pre-fill
 	// through the pick list without ever focusing the worktree field, would
 	// submit repo A's worktree path for repo B.
-	m.onSetupCWDChanged(p, "")
+	m.onSetupCWDChanged("")
 	m.cwdBrowseEntries = nil
 	m.cwdBrowseCursor = 0
 	m.cwdBrowseScroll = 0
@@ -2729,15 +2729,8 @@ func (m *Model) applyBrowseResponse(resp ipc.BrowseDirRespPayload, gen string) t
 		// like applyGitReposPickList: this same client machinery answers the
 		// project dialog's browser too, which has no worktree field to go
 		// stale.
-		//
-		// p is nil here rather than a m.pluginRegistry.Get(m.selectedPlugin)
-		// lookup: onSetupCWDChanged never reads it, and a response-handler
-		// call site is reachable with no registry at all (recentClientModel
-		// and its siblings build a Model scoped to exactly the IPC-response
-		// logic under test) — a lookup would risk a nil *Registry panic for
-		// a value nothing uses.
 		if m.dialog == dialogCreatePaneSetup {
-			return m.onSetupCWDChanged(nil, m.cwdBrowseDir)
+			return m.onSetupCWDChanged(m.cwdBrowseDir)
 		}
 	}
 	return nil
@@ -2793,10 +2786,8 @@ func (m *Model) applyGitReposPickList(repos []string) tea.Cmd {
 	// directory — reachable on dialog RE-ENTRY (a prior plugin's worktree
 	// choice is otherwise still sitting in m.selectedWorktree here) even
 	// though enterSetupOrSplit already clears it on ordinary entry; one call
-	// site cannot get this wrong twice. p is nil — onSetupCWDChanged never
-	// reads it, and a registry lookup here would risk a nil *Registry panic
-	// in a response-handler test scoped to exactly this logic.
-	m.onSetupCWDChanged(nil, m.repoCandidates[0])
+	// site cannot get this wrong twice.
+	m.onSetupCWDChanged(m.repoCandidates[0])
 	m.cwdBrowseCursor = 0
 	return nil
 }
@@ -2895,11 +2886,9 @@ func (m *Model) showRootsList() {
 	// here rather than only in applyBrowseResponse. Gated like that site: this
 	// function is ALSO called from the project dialog's browseUp
 	// (projectdialog.go), which has no worktree field to go stale, and must
-	// stay untouched by setup-dialog policy. p is nil — onSetupCWDChanged
-	// never reads it, and showRootsList's own tests build a Model with no
-	// registry.
+	// stay untouched by setup-dialog policy.
 	if m.dialog == dialogCreatePaneSetup {
-		m.onSetupCWDChanged(nil, "")
+		m.onSetupCWDChanged("")
 	}
 }
 
@@ -3442,7 +3431,7 @@ func (m Model) handleSetupPickKey(p *plugin.PanePlugin, key string) (tea.Model, 
 	// chosen for the PREVIOUS highlight must not survive onto this one.
 	syncSelection := func() {
 		if m.cwdBrowseCursor < len(pick) {
-			m.onSetupCWDChanged(p, pick[m.cwdBrowseCursor])
+			m.onSetupCWDChanged(pick[m.cwdBrowseCursor])
 		}
 	}
 
@@ -3467,14 +3456,14 @@ func (m Model) handleSetupPickKey(p *plugin.PanePlugin, key string) (tea.Model, 
 			// with its normal pre-fill chain.
 			m.repoCandidates = nil
 			m.recentCandidates = nil
-			m.onSetupCWDChanged(p, "")
+			m.onSetupCWDChanged("")
 			m.cwdBrowseCursor = 0
 			return m, m.initSetupBrowser()
 		}
 		// Selecting a candidate submits the dialog (the folder IS the answer
 		// to the CWD question; toggles keep their defaults unless the user
 		// tabbed to them first).
-		m.onSetupCWDChanged(p, pick[m.cwdBrowseCursor])
+		m.onSetupCWDChanged(pick[m.cwdBrowseCursor])
 		return m.submitSetupDialog(p)
 	}
 	return m, nil
@@ -3847,7 +3836,14 @@ func (m Model) setupSpawnDir() string {
 // browser's own Enter/Backspace navigation actually lands (asynchronously,
 // after the daemon round trip — handleSetupCWDKey itself only issues the
 // request).
-func (m *Model) onSetupCWDChanged(p *plugin.PanePlugin, dir string) tea.Cmd {
+//
+// Takes no plugin argument: an earlier version did, unused, and half its call
+// sites had to pass nil for it anyway — a response-handler call site (like
+// applyExistingDirs) is exercised by tests that build a Model with no
+// pluginRegistry at all, so resolving a plugin just to hand it to a function
+// that never reads it was a nil-pointer panic waiting for the day someone
+// reached for it inside here.
+func (m *Model) onSetupCWDChanged(dir string) tea.Cmd {
 	m.cwdBrowseDir = dir
 	m.selectedWorktree = ""
 	m.worktreeCursor = 0

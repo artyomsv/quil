@@ -134,12 +134,8 @@ func (m *Model) applyExistingDirs(resp ipc.DirsExistRespPayload, gen string) tea
 	// Routed through onSetupCWDChanged like every other site that commits a
 	// browsed directory — reachable on dialog re-entry, where a prior
 	// plugin's worktree choice would otherwise still be sitting in
-	// m.selectedWorktree when this candidate list lands. p is nil —
-	// onSetupCWDChanged never reads it, and a m.pluginRegistry.Get lookup
-	// here panics on the nil registry recentClientModel (and this file's
-	// other tests) deliberately build, since they exercise this
-	// response-handling logic in isolation from the rest of the dialog.
-	m.onSetupCWDChanged(nil, paths[0])
+	// m.selectedWorktree when this candidate list lands.
+	m.onSetupCWDChanged(paths[0])
 	m.cwdBrowseCursor = 0
 	return nil
 }

@@ -420,7 +420,11 @@ type Model struct {
 	sessionScroll     int                     // scroll offset for the visible window of the expanded list
 	repoScan          repoScanState           // in-flight git discovery — Alt+G overlay or setup-dialog pick list (zero value = none)
 	browse            browseState             // in-flight directory-browser request (zero value = none)
-	reqGen            int                     // monotonic instance id source for repoScan/browse; see nextReqGen
+	worktrees         worktreeState           // create-pane dialog's worktree listing
+	selectedWorktree  string                  // chosen worktree PATH; "" = off (spawn in the CWD field's directory)
+	worktreeCursor    int                     // row cursor in the worktree field's expanded list; row 0 = "off"
+	worktreeScroll    int                     // scroll offset for the visible window of the expanded worktree list
+	reqGen            int                     // monotonic instance id source for repoScan/browse/worktrees; see nextReqGen
 	sessionScanCWD    string                  // directory sessionRows belong to
 	sessionState      sessionScanState        // request lifecycle for the session field
 	sessionError      string                  // daemon-reported error (sessionScanFailed)
@@ -1864,6 +1868,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case gitScanTimeoutMsg:
 		// Local timer, so deliberately no re-arm.
 		return m, m.applyGitScanTimeout(msg.cwd, msg.gen)
+
+	case worktreeListMsg:
+		// MUST re-arm the listen loop, like every other IPC response branch —
+		// omitting it kills IPC for the session, a bug this package has shipped.
+		m.applyWorktreeList(msg)
+		return m, m.listenForMessages()
+
+	case worktreeTimeoutMsg:
+		// Local timer, so deliberately no re-arm.
+		m.applyWorktreeTimeout(msg)
+		return m, nil
 
 	case kubeCtxMsg:
 		// MUST re-arm the listen loop, like every other IPC response branch —
@@ -4827,7 +4842,7 @@ func (m *Model) setFlash(text string) {
 
 // nextReqGen returns a fresh instance id for a one-shot request whose content
 // key (a CWD, or a (path, child) pair) can repeat across genuinely different
-// requests — repoScanState and browseState both use it, mirroring clientGen's
+// requests — repoScanState, browseState, and worktreeState all use it, mirroring clientGen's
 // role for the reconnect dial: without it, a slot that matches on content
 // alone cannot tell "this is the answer to the request I just asked" from
 // "this is a late answer to a PREVIOUS request that happened to ask about the
@@ -5129,6 +5144,14 @@ func (m Model) listenForMessages() tea.Cmd {
 			}
 			// Same correlator as MsgGitReposResp above; see kubeScanState.gen.
 			return kubeCtxMsg{Resp: payload, Gen: msg.ID}
+
+		case ipc.MsgWorktreeListResp:
+			var resp ipc.WorktreeListRespPayload
+			if err := msg.DecodePayload(&resp); err != nil {
+				log.Printf("worktree list: decode: %v", err)
+				return listenContinueMsg{}
+			}
+			return worktreeListMsg{Resp: resp, Gen: msg.ID}
 
 		case ipc.MsgDirsExistResp:
 			var payload ipc.DirsExistRespPayload

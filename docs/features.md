@@ -25,6 +25,7 @@ A capability-by-capability tour of what Quil does. For configuration knobs, see 
 - [Typed panes & plugins](#typed-panes--plugins)
   - [Built-in plugins](#built-in-plugins)
   - [Pane setup dialog](#pane-setup-dialog)
+  - [Spawn a pane in a worktree](#spawn-a-pane-in-a-worktree)
   - [Resume a past session at pane creation](#resume-a-past-session-at-pane-creation)
   - [Custom plugins via TOML](#custom-plugins-via-toml)
   - [Lazygit integration](#lazygit-integration)
@@ -215,6 +216,14 @@ Plugins that opt in via `prompts_cwd = true` or `[[command.toggles]]` get a setu
 - One **checkbox per runtime toggle** declared in the plugin TOML. Toggle args are appended to `InstanceArgs`, persist across daemon restarts, and are off by default. Toggles with the same `group` value behave as mutually-exclusive radio buttons.
 
 The shipped `claude-code` plugin uses both: it asks for the working directory (preserving project-specific `.claude/` context that Claude Code ties to the directory) and offers radio-button toggles for permission mode (`--dangerously-skip-permissions` vs `--enable-auto-mode` vs neither).
+
+### Spawn a pane in a worktree
+
+Any plugin that asks for a directory (`prompts_cwd = true`) also gets a **Worktree** field in the setup dialog, scoped to whichever directory you've picked above it. It lists the git worktrees belonging to that directory's repository; picking one spawns the pane there instead of in the directory field's own checkout. This is how an agent, a shell, and lazygit end up parked in the same worktree — and how the sidebar's git row (see [Projects](#projects)) shows that pane's real branch instead of repeating the main checkout's for every pane in the tab.
+
+**Quil does not create worktrees yet.** The field offers only the ones `git worktree list` already reports for that repository — there's no "new branch" flow in this release.
+
+The main checkout never appears as a row: it's the directory the field above already selected, not a worktree to attach *to*. Locked worktrees, and ones whose directory is gone from disk while git still tracks them (labeled `(directory is gone)`), are shown rather than hidden — the cursor can still reach them and the row explains why picking it is refused, instead of a worktree quietly vanishing from the list. Point the directory field at something that isn't a git repository at all, and the Worktree field goes inert — `not a git repository` — rather than disappearing, so a missing field is never mistaken for a bug.
 
 ### Resume a past session at pane creation
 

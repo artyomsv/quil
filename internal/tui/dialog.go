@@ -2518,7 +2518,14 @@ func (m *Model) enterSetupOrSplit(p *plugin.PanePlugin) tea.Cmd {
 	m.cwdInputError = ""
 	m.toggleStates = nil
 	m.setupFieldCursor = 0
-	m.cwdBrowseDir = ""
+	// Routes through onSetupCWDChanged rather than a bare assignment: a prior
+	// plugin's chosen worktree (selectedWorktree, its cursor/scroll, and the
+	// cached listing) is otherwise still sitting in Model when this dialog
+	// session opens, and none of the resets below touch it. Re-entering
+	// Ctrl+N after picking a worktree in repo A, then having repo B pre-fill
+	// through the pick list without ever focusing the worktree field, would
+	// submit repo A's worktree path for repo B.
+	m.onSetupCWDChanged("")
 	m.cwdBrowseEntries = nil
 	m.cwdBrowseCursor = 0
 	m.cwdBrowseScroll = 0
@@ -2712,6 +2719,19 @@ func (m *Model) applyBrowseResponse(resp ipc.BrowseDirRespPayload, gen string) t
 		return m.advanceBrowseCandidates(resp.Path)
 	case browseFilled:
 		m.browseCandidates = nil // a candidate answered; the chain is done
+		// The worktree field's choice and listing are scoped to whichever
+		// directory this response just landed on. This is the directory
+		// browser's actual commit point for Enter/Backspace navigation —
+		// handleSetupCWDKey only issues the request, the answer lands here,
+		// asynchronously — so it is where a worktree chosen for the
+		// directory just left must be cleared, or submitSetupDialog would
+		// read a stale worktree path against the new cwdBrowseDir. Gated
+		// like applyGitReposPickList: this same client machinery answers the
+		// project dialog's browser too, which has no worktree field to go
+		// stale.
+		if m.dialog == dialogCreatePaneSetup {
+			return m.onSetupCWDChanged(m.cwdBrowseDir)
+		}
 	}
 	return nil
 }
@@ -2761,8 +2781,13 @@ func (m *Model) applyGitReposPickList(repos []string) tea.Cmd {
 	if len(m.repoCandidates) == 0 {
 		return m.fallbackToRecentOrBrowser()
 	}
-	// Pre-select the first git candidate so Enter-through submits it.
-	m.cwdBrowseDir = m.repoCandidates[0]
+	// Pre-select the first git candidate so Enter-through submits it. Routed
+	// through onSetupCWDChanged like every other site that commits a browsed
+	// directory — reachable on dialog RE-ENTRY (a prior plugin's worktree
+	// choice is otherwise still sitting in m.selectedWorktree here) even
+	// though enterSetupOrSplit already clears it on ordinary entry; one call
+	// site cannot get this wrong twice.
+	m.onSetupCWDChanged(m.repoCandidates[0])
 	m.cwdBrowseCursor = 0
 	return nil
 }
@@ -2854,6 +2879,17 @@ func (m *Model) showRootsList() {
 	// couple of unresponsive drives, and a drive missing for that reason is
 	// indistinguishable from one that was never mapped.
 	m.cwdBrowseTruncated = m.cwdBrowseRootsTruncated
+
+	// The root list IS a new browsed "directory" (cwdBrowseDir just changed to
+	// "" above), reached by ordinary "up" navigation from a filesystem root —
+	// browseUp calls this directly, without a round trip, so the reset belongs
+	// here rather than only in applyBrowseResponse. Gated like that site: this
+	// function is ALSO called from the project dialog's browseUp
+	// (projectdialog.go), which has no worktree field to go stale, and must
+	// stay untouched by setup-dialog policy.
+	if m.dialog == dialogCreatePaneSetup {
+		m.onSetupCWDChanged("")
+	}
 }
 
 // applyBrowseListing fills the directory browser from an already-resolved
@@ -2989,7 +3025,8 @@ func enforceToggleGroups(toggles []plugin.Toggle, states []bool, winner int) {
 
 // setupFieldCount returns the number of focusable fields in the setup dialog:
 // CWD (if PromptsCWD) + kube context (if discover="kube") + one per toggle +
-// session picker (if sessions="claude") + 1 for the Continue button.
+// worktree picker (if PromptsCWD) + session picker (if sessions="claude") + 1
+// for the Continue button.
 func (m Model) setupFieldCount(p *plugin.PanePlugin) int {
 	n := len(p.Command.Toggles) + 1 // +1 for Continue
 	if p.Command.PromptsCWD {
@@ -2998,6 +3035,9 @@ func (m Model) setupFieldCount(p *plugin.PanePlugin) int {
 	if p.Command.Discover == "kube" {
 		n++
 	}
+	if p.Command.PromptsCWD {
+		n++ // the worktree field, scoped to the CWD above it
+	}
 	if p.Command.Sessions == "claude" {
 		n++
 	}
@@ -3005,13 +3045,15 @@ func (m Model) setupFieldCount(p *plugin.PanePlugin) int {
 }
 
 // setupFieldKind reports what field is at the given cursor index in the setup
-// dialog. Returns "cwd", "kube", "toggle" (with toggleIdx), "session", or
-// "continue".
+// dialog. Returns "cwd", "kube", "toggle" (with toggleIdx), "worktree",
+// "session", or "continue".
 //
-// Order is CWD → kube → toggles → session → Continue. The session picker stays
-// downstream of the CWD field because its contents are scoped to that directory,
-// and sits last because it is the only field that expands: keeping it below the
-// fixed-height rows means focusing it does not shift them.
+// Order is CWD → kube → toggles → worktree → session → Continue. The worktree
+// picker stays downstream of CWD because its contents are scoped to that
+// directory, and upstream of the session picker because the session listing is
+// scoped to whichever directory the worktree choice settles on. The session
+// picker sits last because it is the only field that expands: keeping it below
+// the fixed-height rows means focusing it does not shift them.
 func (m Model) setupFieldKind(p *plugin.PanePlugin, cursor int) (kind string, toggleIdx int) {
 	i := cursor
 	if p.Command.PromptsCWD {
@@ -3030,6 +3072,12 @@ func (m Model) setupFieldKind(p *plugin.PanePlugin, cursor int) (kind string, to
 		return "toggle", i
 	}
 	i -= len(p.Command.Toggles)
+	if p.Command.PromptsCWD {
+		if i == 0 {
+			return "worktree", -1
+		}
+		i--
+	}
 	if p.Command.Sessions == "claude" {
 		if i == 0 {
 			return "session", -1
@@ -3116,6 +3164,9 @@ func (m Model) handleCreatePaneSetupKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd
 		}
 		return m, nil
 
+	case "worktree":
+		return m.handleSetupWorktreeKey(p, key)
+
 	case "session":
 		return m.handleSetupSessionKey(p, key)
 
@@ -3155,13 +3206,29 @@ func (m Model) moveSetupCursor(p *plugin.PanePlugin, delta int) (tea.Model, tea.
 	return m, cmd
 }
 
-// onSetupFieldFocused runs the side effect the now-focused field needs. Only
-// the session picker has one: its listing is fetched on first focus rather than
-// when the dialog opens, so creating a pane with a fresh session — the common
-// case — performs no session I/O at all.
+// onSetupFieldFocused runs the side effect the now-focused field needs. Two
+// fields fetch lazily, on first focus, rather than when the dialog opens: a
+// fresh pane with no worktree and no resumed session — the common case —
+// performs no extra I/O at all.
 func (m *Model) onSetupFieldFocused(p *plugin.PanePlugin) tea.Cmd {
-	if kind, _ := m.setupFieldKind(p, m.setupFieldCursor); kind == "session" {
+	switch kind, _ := m.setupFieldKind(p, m.setupFieldCursor); kind {
+	case "session":
 		return m.ensureSessionScan()
+	case "worktree":
+		if m.cwdBrowseDir == "" {
+			// Nothing browsed yet — or the Windows roots list, where every
+			// row IS a root rather than a child of some directory. Asking
+			// here would have the daemon answer from ITS OWN default CWD,
+			// listing worktrees of a repository nothing on screen names.
+			return nil
+		}
+		if m.worktrees.pending {
+			return nil
+		}
+		if m.worktrees.loaded && m.worktrees.err == "" && m.worktrees.path == m.cwdBrowseDir {
+			return nil
+		}
+		return m.requestWorktrees(m.cwdBrowseDir)
 	}
 	return nil
 }
@@ -3358,16 +3425,20 @@ func (m Model) activeCWDPick() (pick []string, isRecent bool) {
 // mode — either discover="git" repo candidates or recent locations. Rows are
 // the candidates plus one trailing "Browse…" escape hatch. cwdBrowseCursor is
 // the row cursor and cwdBrowseDir mirrors the highlighted candidate so
-// submitSetupDialog's selectedCWD = cwdBrowseDir capture works unchanged.
+// submitSetupDialog's selectedCWD = setupSpawnDir() capture sees it (via
+// cwdBrowseDir, unless a worktree is also chosen — see setupSpawnDir).
 func (m Model) handleSetupPickKey(p *plugin.PanePlugin, key string) (tea.Model, tea.Cmd) {
 	pick, _ := m.activeCWDPick()
 	rows := len(pick) + 1 // +1 for Browse…
 
 	// syncSelection keeps cwdBrowseDir aligned with the highlighted candidate
-	// row. Not called when the cursor is on the "Browse…" row.
+	// row. Not called when the cursor is on the "Browse…" row. Routed through
+	// onSetupCWDChanged, not a bare assignment: previewing a different
+	// candidate is exactly "the browsed directory moved", and a worktree
+	// chosen for the PREVIOUS highlight must not survive onto this one.
 	syncSelection := func() {
 		if m.cwdBrowseCursor < len(pick) {
-			m.cwdBrowseDir = pick[m.cwdBrowseCursor]
+			m.onSetupCWDChanged(pick[m.cwdBrowseCursor])
 		}
 	}
 
@@ -3392,14 +3463,14 @@ func (m Model) handleSetupPickKey(p *plugin.PanePlugin, key string) (tea.Model, 
 			// with its normal pre-fill chain.
 			m.repoCandidates = nil
 			m.recentCandidates = nil
-			m.cwdBrowseDir = ""
+			m.onSetupCWDChanged("")
 			m.cwdBrowseCursor = 0
 			return m, m.initSetupBrowser()
 		}
 		// Selecting a candidate submits the dialog (the folder IS the answer
 		// to the CWD question; toggles keep their defaults unless the user
 		// tabbed to them first).
-		m.cwdBrowseDir = pick[m.cwdBrowseCursor]
+		m.onSetupCWDChanged(pick[m.cwdBrowseCursor])
 		return m.submitSetupDialog(p)
 	}
 	return m, nil
@@ -3431,22 +3502,75 @@ func (m Model) handleSetupKubeKey(p *plugin.PanePlugin, key string) (tea.Model, 
 	return m, nil
 }
 
+// handleSetupWorktreeKey moves the cursor within the worktree list and commits
+// a choice.
+//
+// A disabled row still ACCEPTS the cursor and refuses Enter, rather than being
+// skipped: the row exists to explain why that worktree is unavailable, and a
+// row the cursor cannot reach explains nothing. Same choice the resume picker
+// makes for an in-use session.
+//
+// Enter here only COMMITS the choice — unlike the kube/session/pick fields it
+// does not submit the dialog, since a chosen worktree is still one of several
+// fields the user may want to adjust (toggles, session) before Continue.
+func (m Model) handleSetupWorktreeKey(p *plugin.PanePlugin, key string) (tea.Model, tea.Cmd) {
+	rows := m.worktreeRows()
+	if len(rows) == 0 {
+		return m, nil
+	}
+	switch key {
+	case "up", "k":
+		if m.worktreeCursor > 0 {
+			m.worktreeCursor--
+		}
+	case "down", "j":
+		if m.worktreeCursor < len(rows)-1 {
+			m.worktreeCursor++
+		}
+	case "enter":
+		row := rows[m.worktreeCursor]
+		if row.disabled {
+			return m, nil
+		}
+		m.selectedWorktree = row.path
+		// The session listing is scoped to the directory the pane will spawn
+		// in, which this just changed. Clearing here is the responsive half;
+		// submitSetupDialog's guard is the load-bearing one, since the user
+		// can reach Continue without re-focusing the session field.
+		m.selectedSessionID = ""
+		return m, nil
+	default:
+		return m, nil
+	}
+	// Reuses historyWindow rather than a second, near-identical
+	// implementation: same shape — re-derive the scroll origin from the
+	// cursor, don't trust a stored one, because render must not depend on
+	// Update having run (a WindowSizeMsg can shrink worktreeVisibleRows()
+	// between the two).
+	m.worktreeScroll, _ = historyWindow(len(rows), m.worktreeCursor, m.worktreeScroll, m.worktreeVisibleRows())
+	return m, nil
+}
+
 // submitSetupDialog commits the browser-selected directory and toggle states,
 // then advances the create-pane flow to the split-direction step.
 func (m Model) submitSetupDialog(p *plugin.PanePlugin) (tea.Model, tea.Cmd) {
 	if p.Command.PromptsCWD {
-		m.selectedCWD = m.cwdBrowseDir
+		m.selectedCWD = m.setupSpawnDir()
 		logger.Debug("setup dialog: captured cwd=%q from browser (plugin=%s)", m.selectedCWD, p.Name)
 	}
 	m.cwdInputError = ""
 
 	// A resume target is only valid for the directory it was listed under. The
 	// user can pick a session, Shift+Tab back to the browser, move to another
-	// project, and press Continue without ever re-focusing the session field —
-	// so the authoritative check belongs here, at the moment the choice is
-	// committed, not only on the field's own focus path.
-	if m.selectedSessionID != "" && m.sessionScanCWD != m.cwdBrowseDir {
-		logger.Debug("setup dialog: dropping resume session (listed for %q, submitting %q)", m.sessionScanCWD, m.cwdBrowseDir)
+	// project — or change the worktree choice — and press Continue without
+	// ever re-focusing the session field, so the authoritative check belongs
+	// here, at the moment the choice is committed, not only on the field's own
+	// focus path. Compared against setupSpawnDir(), not cwdBrowseDir: a
+	// session listed for a worktree the user has since deselected (or
+	// changed) is exactly as stale as one listed for a directory browsed away
+	// from.
+	if m.selectedSessionID != "" && m.sessionScanCWD != m.setupSpawnDir() {
+		logger.Debug("setup dialog: dropping resume session (listed for %q, submitting %q)", m.sessionScanCWD, m.setupSpawnDir())
 		m.selectedSessionID = ""
 	}
 
@@ -3581,6 +3705,217 @@ func (m Model) renderSetupSessionField(focused bool) string {
 	b.WriteString("\n")
 	return b.String()
 }
+
+// renderSetupWorktreeField draws the worktree picker.
+//
+// Collapsed to one summary line while unfocused, for the reason the session
+// field is: a dialog already carrying a directory browser must not grow a
+// second full-height list for a field most panes never touch.
+//
+// Four states render DIFFERENTLY on purpose. A scan still in flight showing
+// "no worktrees" is a confidently wrong answer, and "this is not a
+// repository" is a different fact from "the scan failed" — only one of them
+// justifies telling the user there is nothing here.
+func (m Model) renderSetupWorktreeField(focused bool) string {
+	var b strings.Builder
+	label := "  Worktree"
+	if focused {
+		label = "> Worktree"
+	}
+
+	switch {
+	case m.worktrees.pending:
+		b.WriteString(dialogNormal.Render(label + "    scanning…"))
+		return b.String()
+	case !m.worktrees.loaded:
+		b.WriteString(dialogSubtle.Render(label + "    —"))
+		return b.String()
+	case m.worktrees.err != "":
+		b.WriteString(dialogNormal.Render(label + "    "))
+		b.WriteString(dialogSubtle.Render(truncateToWidth(
+			sanitizeRemoteText(m.worktrees.err), m.setupTextWidth()-lipgloss.Width(label)-4)))
+		return b.String()
+	case !m.worktrees.repo:
+		b.WriteString(dialogSubtle.Render(label + "    not a git repository"))
+		return b.String()
+	}
+
+	if !focused {
+		summary := "off"
+		if m.selectedWorktree != "" {
+			summary = sanitizeRemoteText(worktreeLabel(m.worktrees.list, m.selectedWorktree))
+		}
+		b.WriteString(dialogNormal.Render(label + "    " + truncateToWidth(summary, m.setupTextWidth()-lipgloss.Width(label)-4)))
+		return b.String()
+	}
+
+	b.WriteString(dialogNormal.Render(label))
+	b.WriteString("\n")
+	rows := m.worktreeRows()
+	visible := m.worktreeVisibleRows()
+	// Re-derives the window from the cursor rather than trusting the stored
+	// scroll, like renderCommandHistory: render must not depend on Update
+	// having run first, since a WindowSizeMsg can shrink worktreeVisibleRows()
+	// between the key handler that set worktreeScroll and this render.
+	start, end := historyWindow(len(rows), m.worktreeCursor, m.worktreeScroll, visible)
+	for i := start; i < end; i++ {
+		mark := "    "
+		if i == m.worktreeCursor {
+			mark = "  > "
+		} else if rows[i].path == m.selectedWorktree {
+			mark = setupRowIdleMark
+		}
+		text := sanitizeRemoteText(rows[i].label)
+		if rows[i].disabled {
+			b.WriteString(dialogSubtle.Render(mark + truncateToWidth(text, m.setupTextWidth()-setupRowIndent)))
+		} else {
+			b.WriteString(dialogNormal.Render(mark + truncateToWidth(text, m.setupTextWidth()-setupRowIndent)))
+		}
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// worktreeRow is one selectable line: row 0 is always "off".
+type worktreeRow struct {
+	label    string
+	path     string // "" for the off row
+	disabled bool
+}
+
+// worktreeRows builds the field's rows. The MAIN checkout is excluded: it is
+// not a worktree to attach to, it is the directory the CWD field already
+// chose. Locked and prunable entries are shown but refused, so the user learns
+// why a row is unavailable rather than wondering where it went.
+func (m Model) worktreeRows() []worktreeRow {
+	rows := []worktreeRow{{label: "off — use the directory above", path: ""}}
+	for _, w := range m.worktrees.list {
+		if w.Main {
+			continue
+		}
+		name := w.Branch
+		if name == "" {
+			name = "(detached)"
+		}
+		row := worktreeRow{label: name + "  " + w.Path, path: w.Path}
+		switch {
+		case w.Prunable:
+			row.label, row.disabled = name+"  (directory is gone)", true
+		case w.Locked:
+			row.label, row.disabled = name+"  (locked)", true
+		}
+		rows = append(rows, row)
+	}
+	return rows
+}
+
+// worktreeLabel resolves a stored path back to its display name for the
+// collapsed summary.
+func worktreeLabel(list []ipc.WorktreeInfo, path string) string {
+	for _, w := range list {
+		if w.Path == path {
+			if w.Branch != "" {
+				return w.Branch
+			}
+			return w.Path
+		}
+	}
+	return path
+}
+
+// setupSpawnDir is the directory the pane will actually start in: the chosen
+// worktree when there is one, else the browsed directory. Every consumer of
+// "where will this pane spawn" reads THIS, not cwdBrowseDir directly — the
+// submitted CWD (submitSetupDialog) and the session-listing scope
+// (ensureSessionScan) are the two that matter.
+func (m Model) setupSpawnDir() string {
+	if m.selectedWorktree != "" {
+		return m.selectedWorktree
+	}
+	return m.cwdBrowseDir
+}
+
+// onSetupCWDChanged reacts to the browsed directory moving: the worktree
+// choice and its listing both belong to the repository just left. Called from
+// every site that commits a NEW browsed directory while the setup dialog is
+// open — the pick-list field's cursor moves and selections, and
+// applyBrowseResponse's browseFilled case, which is where the directory
+// browser's own Enter/Backspace navigation actually lands (asynchronously,
+// after the daemon round trip — handleSetupCWDKey itself only issues the
+// request).
+//
+// Takes no plugin argument: an earlier version did, unused, and half its call
+// sites had to pass nil for it anyway — a response-handler call site (like
+// applyExistingDirs) is exercised by tests that build a Model with no
+// pluginRegistry at all, so resolving a plugin just to hand it to a function
+// that never reads it was a nil-pointer panic waiting for the day someone
+// reached for it inside here.
+func (m *Model) onSetupCWDChanged(dir string) tea.Cmd {
+	m.cwdBrowseDir = dir
+	m.selectedWorktree = ""
+	m.worktreeCursor = 0
+	m.worktreeScroll = 0
+	m.worktrees = worktreeState{}
+	return nil
+}
+
+// setupChromeRows is the fixed chrome the setup dialog spends on everything
+// that is NOT one of the two expanding lists — title, CWD browser + hint,
+// toggles, the Continue button, borders and padding — measured against the
+// shipped claude-code layout. Both worktreeVisibleRows and sessionVisibleRows
+// derive from this ONE constant so the two lists' budgets cannot drift apart.
+const setupChromeRows = 26
+
+// worktreeVisibleRows caps the worktree list. The floor is 1, never a
+// friendlier number: lipgloss.Place does not clip, so any floor above the
+// height actually available manufactures the overflow it looks like it
+// prevents — the same reasoning as historyMinRows.
+func (m Model) worktreeVisibleRows() int {
+	// The worktree and session lists never render expanded at the same
+	// time: only one setup-dialog field is focused at once (cursor ==
+	// fieldIdx, a single int), and a field's list collapses to a one-line
+	// summary while it is not the focused one. So the constraint the
+	// terminal actually imposes is the MAX of the two lists' heights, not
+	// their sum.
+	//
+	// The reservation below is SUM-based anyway: this list claims one row
+	// more than the session field's own chrome (the collapsed worktree row
+	// is always drawn, whether or not its list is), PLUS the session list's
+	// floor, up front — regardless of whether the session field is even
+	// focused right now. That is more conservative than the true
+	// mutually-exclusive bound requires, but it is kept because it is
+	// simple, safe for every terminal height, and pinned by tests —
+	// master's looser bound overflowed by 3 rows across h=30..39.
+	//
+	// The reservation makes the combined SUM exact, not merely sufficient:
+	// while this list is still ramping (this function's own "default:
+	// return avail" branch — below its cap, above its floor),
+	// worktreeVisibleRows(h) == h - surroundingRows, so sessionVisibleRows'
+	// own avail (m.height - setupChromeRows - worktreeVisibleRows()) has
+	// m.height cancel out of the subtraction entirely, leaving the CONSTANT
+	// surroundingRows - setupChromeRows = 1 + sessionListMinRows. That
+	// constant sits one row ABOVE the session floor — session is not
+	// clamped there, it returns that value via its own default branch — so
+	// worktree(h) + session(h) reduces to (h - surroundingRows) + (1 +
+	// sessionListMinRows) = h - setupChromeRows: the arithmetic reserves
+	// exactly the combined SUM for every height in the ramp — a safe
+	// over-reservation, since the two lists are never both on screen.
+	const surroundingRows = setupChromeRows + 1 + sessionListMinRows
+	avail := m.height - surroundingRows
+	switch {
+	case avail >= worktreeListVisibleRows:
+		return worktreeListVisibleRows
+	case avail < worktreeListMinRows:
+		return worktreeListMinRows
+	default:
+		return avail
+	}
+}
+
+const (
+	worktreeListVisibleRows = 6
+	worktreeListMinRows     = 1
+)
 
 // renderSessionDetail draws the info panel that replaces the list while it is
 // open. Sized against the same row budget the list uses, so opening it does not
@@ -3847,8 +4182,11 @@ func (m Model) renderCreatePaneSetupDialog() string {
 		// visually with the list — skip it and let the highlight do the work.
 		if len(pick) == 0 {
 			// Resolved is the daemon's answer (BrowseDirRespPayload.Resolved) and
-			// may be remote — sanitize before it reaches a rendered row. The
-			// raw value stays in m.cwdBrowseDir for the actual spawn CWD.
+			// may be remote — sanitize before it reaches a rendered row. The raw
+			// value stays in m.cwdBrowseDir; this is what the CWD field itself
+			// browsed to, not necessarily the actual spawn CWD (setupSpawnDir()
+			// prefers a chosen worktree, rendered separately by the worktree
+			// field below).
 			path, prefix := sanitizeRemoteText(m.cwdBrowseDir), "    "
 			switch {
 			// No runtime.GOOS check: the roots come from the daemon, and only a
@@ -3897,20 +4235,22 @@ func (m Model) renderCreatePaneSetupDialog() string {
 				case focused && i == m.cwdBrowseCursor:
 					b.WriteString("  > " + dialogSelected.Render(displayName) + "\n")
 				case i < len(pick) && pick[i] == m.cwdBrowseDir:
-					// The directory the pane will actually spawn in, marked
-					// whenever the caret above is not already on it: the field
-					// is blurred, OR it is focused with the cursor parked on
-					// the trailing "Browse…" row, which syncSelection
-					// deliberately never commits. Both states otherwise read as
-					// "nothing chosen" — the same hole, one just happens to be
-					// reachable without leaving the field.
+					// The directory this field has committed, marked whenever
+					// the caret above is not already on it: the field is
+					// blurred, OR it is focused with the cursor parked on the
+					// trailing "Browse…" row, which syncSelection deliberately
+					// never commits. Both states otherwise read as "nothing
+					// chosen" — the same hole, one just happens to be reachable
+					// without leaving the field. (What the pane will actually
+					// spawn in is setupSpawnDir(), which prefers a chosen
+					// worktree over this value — that choice is marked
+					// separately, on the worktree field below.)
 					//
-					// Matched on cwdBrowseDir (the value submitSetupDialog
-					// reads) rather than on the cursor, which is what makes the
-					// Browse… case work at all. In pick mode cwdBrowseDir is
-					// only ever assigned by copying an element out of this same
-					// slice, so == is exact by construction and never depends on
-					// pathEqual's case folding.
+					// Matched on cwdBrowseDir rather than on the cursor, which
+					// is what makes the Browse… case work at all. In pick mode
+					// cwdBrowseDir is only ever assigned by copying an element
+					// out of this same slice, so == is exact by construction
+					// and never depends on pathEqual's case folding.
 					//
 					// Same 4-cell prefix width as the other rows, so
 					// leftTruncPath's budget is unchanged.
@@ -4117,6 +4457,15 @@ func (m Model) renderCreatePaneSetupDialog() string {
 			lineStyle = dialogSelected
 		}
 		b.WriteString(prefix + lineStyle.Render(box+" "+t.Label) + "\n")
+		fieldIdx++
+	}
+
+	// Downstream of the toggles and upstream of the session field: the
+	// worktree choice scopes what directory the session listing (if any) is
+	// read from.
+	if p.Command.PromptsCWD {
+		b.WriteByte('\n')
+		b.WriteString(m.renderSetupWorktreeField(cursor == fieldIdx))
 		fieldIdx++
 	}
 

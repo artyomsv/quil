@@ -138,6 +138,10 @@ type Daemon struct {
 	// the bound exists for.
 	dirsChecking atomic.Bool
 
+	// worktreeScanning single-flights MsgWorktreeListReq. Its own slot — see
+	// handleWorktreeListReq for why it is not browseScanning's.
+	worktreeScanning atomic.Bool
+
 	// resumeClaimMu serializes the claim of a Claude session by a new pane.
 	// The occupancy test and the write that acts on it must be one atomic
 	// step: handleCreatePane runs on the requesting conn's dispatch
@@ -1099,6 +1103,8 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		d.handleDirsExistReq(conn, msg)
 	case ipc.MsgGitReposReq:
 		d.handleGitReposReq(conn, msg)
+	case ipc.MsgWorktreeListReq:
+		d.handleWorktreeListReq(conn, msg)
 	case ipc.MsgKubeCtxReq:
 		d.handleKubeCtxReq(conn, msg)
 	case ipc.MsgPluginListReq:

@@ -49,7 +49,7 @@ func TestSetupFieldKind_AndCount(t *testing.T) {
 			p: &plugin.PanePlugin{Command: plugin.CommandConfig{
 				PromptsCWD: true,
 			}},
-			want: want{count: 2, kinds: []string{"cwd", "continue"}},
+			want: want{count: 3, kinds: []string{"cwd", "worktree", "continue"}},
 		},
 		{
 			name: "one toggle only",
@@ -64,7 +64,7 @@ func TestSetupFieldKind_AndCount(t *testing.T) {
 				PromptsCWD: true,
 				Toggles:    []plugin.Toggle{{Name: "a"}, {Name: "b"}},
 			}},
-			want: want{count: 4, kinds: []string{"cwd", "toggle", "toggle", "continue"}},
+			want: want{count: 5, kinds: []string{"cwd", "toggle", "toggle", "worktree", "continue"}},
 		},
 	}
 
@@ -81,6 +81,46 @@ func TestSetupFieldKind_AndCount(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// The field is ALWAYS present for a prompts_cwd plugin, never conditionally
+// inserted. setupFieldCount/setupFieldKind are pure functions of the plugin;
+// making the row count depend on whether the browsed directory is a repository
+// changes it WHILE the dialog is open, stranding the cursor on a field that no
+// longer exists.
+func TestSetupFieldCount_WorktreeRowAlwaysPresent(t *testing.T) {
+	m := Model{}
+	p := &plugin.PanePlugin{}
+	p.Command.PromptsCWD = true
+
+	// cwd + worktree + continue
+	if got := m.setupFieldCount(p); got != 3 {
+		t.Fatalf("setupFieldCount = %d, want 3", got)
+	}
+	if kind, _ := m.setupFieldKind(p, 1); kind != "worktree" {
+		t.Errorf("field 1 = %q, want worktree", kind)
+	}
+	if kind, _ := m.setupFieldKind(p, 2); kind != "continue" {
+		t.Errorf("field 2 = %q, want continue", kind)
+	}
+}
+
+// Order is CWD -> kube -> toggles -> worktree -> session -> Continue. The
+// worktree field is downstream of CWD because its contents are scoped to that
+// directory, and upstream of session because the session listing is scoped to
+// whichever directory the worktree choice settles on.
+func TestSetupFieldKind_WorktreeSitsBetweenTogglesAndSession(t *testing.T) {
+	m := Model{}
+	p := &plugin.PanePlugin{}
+	p.Command.PromptsCWD = true
+	p.Command.Sessions = "claude"
+
+	if kind, _ := m.setupFieldKind(p, 1); kind != "worktree" {
+		t.Errorf("field 1 = %q, want worktree", kind)
+	}
+	if kind, _ := m.setupFieldKind(p, 2); kind != "session" {
+		t.Errorf("field 2 = %q, want session", kind)
 	}
 }
 
@@ -861,7 +901,7 @@ default = false
 		}
 	}
 
-	t.Run("tab advances field cursor across CWD → toggle → Continue", func(t *testing.T) {
+	t.Run("tab advances field cursor across CWD → toggle → worktree → Continue", func(t *testing.T) {
 		m := freshModel()
 		// CWD → toggle
 		next, _ := m.handleCreatePaneSetupKey(tea.KeyPressMsg{Code: tea.KeyTab})
@@ -870,12 +910,19 @@ default = false
 		if kind != "toggle" {
 			t.Errorf("after tab from cwd: kind = %q, want toggle", kind)
 		}
-		// toggle → Continue
+		// toggle → worktree
+		next, _ = m.handleCreatePaneSetupKey(tea.KeyPressMsg{Code: tea.KeyTab})
+		m = next.(Model)
+		kind, _ = m.setupFieldKind(r.Get("claude-code"), m.setupFieldCursor)
+		if kind != "worktree" {
+			t.Errorf("after tab from toggle: kind = %q, want worktree", kind)
+		}
+		// worktree → Continue
 		next, _ = m.handleCreatePaneSetupKey(tea.KeyPressMsg{Code: tea.KeyTab})
 		m = next.(Model)
 		kind, _ = m.setupFieldKind(r.Get("claude-code"), m.setupFieldCursor)
 		if kind != "continue" {
-			t.Errorf("after tab from toggle: kind = %q, want continue", kind)
+			t.Errorf("after tab from worktree: kind = %q, want continue", kind)
 		}
 		// Continue → wrap to CWD
 		next, _ = m.handleCreatePaneSetupKey(tea.KeyPressMsg{Code: tea.KeyTab})
@@ -931,7 +978,7 @@ default = false
 
 	t.Run("enter on Continue submits", func(t *testing.T) {
 		m := freshModel()
-		m.setupFieldCursor = 2 // Continue button
+		m.setupFieldCursor = 3 // Continue button (cwd, toggle, worktree, continue)
 		next, _ := m.handleCreatePaneSetupKey(tea.KeyPressMsg{Code: tea.KeyEnter})
 		m = next.(Model)
 		if m.dialog != dialogCreatePane {
@@ -1706,7 +1753,7 @@ default = false
 func TestRenderSetup_PickBlurred_MarksCommittedRow(t *testing.T) {
 	const picked, other = "/tmp/alpha", "/tmp/beta"
 	m := recentPickModel(t, []string{picked, other})
-	m.setupFieldCursor = 1 // Continue — the CWD field is blurred
+	m.setupFieldCursor = 1 // worktree field — the CWD field is blurred
 
 	out := stripANSI(m.renderCreatePaneSetupDialog())
 	if !strings.Contains(out, setupRowIdleMark+picked) {
@@ -2108,5 +2155,511 @@ func TestRenderSetup_KubeFocused_NoIdleMark(t *testing.T) {
 	}
 	if strings.Contains(out, setupRowIdleMark) {
 		t.Errorf("focused kube field must not draw the idle mark\n%s", out)
+	}
+}
+
+// Two expanding lists must not each fit while their SUM overflows. lipgloss
+// does not clip, so the overflow silently pushes [Continue] off the terminal.
+//
+// Below a minimum usable height the dialog does not fit at all, and that is
+// ACCEPTED rather than prevented — the same precedent as historyMinRows and
+// minTermWidth elsewhere in this package. With chrome setupChromeRows and
+// floors worktreeListMinRows+sessionListMinRows, the dialog needs
+// setupChromeRows+worktreeListMinRows+sessionListMinRows (31) rows to hold
+// both lists without overflow; below that, the budget the assertion checks
+// against clamps to the combined floor instead of going negative, so the
+// test still pins that neither list shrinks past its documented minimum
+// rather than going vacuous. Adding the worktree list raised that minimum by
+// exactly one row (30 -> 31) — the cost of the second list, quantified
+// rather than hidden.
+//
+// Swept CONTIGUOUSLY across the whole transition band and past it (26..48)
+// rather than sampled at scattered points: a first version of this test
+// sampled {12,16,24,40} and missed a real bug, because worktreeVisibleRows
+// claimed rows greedily up to its own cap without reserving anything for
+// the session list's floor, and the resulting overflow only showed up on
+// the seven consecutive heights 29..35 that none of the four sample points
+// touched (worst case h=33, 3 rows over budget — exactly the [Continue]
+// pushed off the terminal failure mode this task exists to prevent). A band
+// that changes behaviour at several consecutive integers cannot be trusted
+// to arbitrary sample points; only a contiguous sweep proves there is no
+// gap. The upper bound (48) runs a few rows past the point where both
+// lists reach their own caps, so the fully-capped regime is covered with
+// margin rather than landing exactly on its boundary.
+func TestSetupDialog_TwoListsShareOneHeightBudget(t *testing.T) {
+	for h := 26; h <= 48; h++ {
+		m := Model{width: 100, height: h}
+		total := m.worktreeVisibleRows() + m.sessionVisibleRows()
+		want := h - setupChromeRows
+		if floor := worktreeListMinRows + sessionListMinRows; want < floor {
+			want = floor
+		}
+		if total > want {
+			t.Errorf("height %d: worktree(%d) + session(%d) = %d rows, exceeds the %d available",
+				h, m.worktreeVisibleRows(), m.sessionVisibleRows(), total, want)
+		}
+		if m.worktreeVisibleRows() < 1 {
+			t.Errorf("height %d: worktree list must keep at least one row", h)
+		}
+	}
+}
+
+// TestWorktreeVisibleRows_ShrinksOnShortTerminal pins worktreeVisibleRows in
+// isolation from the combined-budget test above — mirroring the purpose of
+// TestSessionVisibleRows_ShrinksOnShortTerminal (that its own floor / ramp /
+// cap regions behave), but as a sweep rather than a table of named points.
+// This arithmetic has now produced two independent wrong answers in this
+// task (a stub that ignored height entirely, then a version that ignored
+// the session floor) and was, until now, only ever exercised indirectly
+// through the combined-budget test above. A regression confined to this
+// function's OWN clamp — e.g. someone changes worktreeListVisibleRows and
+// the switch's case order stops matching it — would not necessarily show up
+// there, since that test only bounds the SUM.
+//
+// Enumerative, not closed-form: the sweep does not encode where the floor,
+// ramp, and cap regions START (no 31/32/37 literals). It only asserts
+// properties that must hold at EVERY height regardless of where the
+// breakpoints fall — the result stays within [floor, cap], and it can
+// change by at most 1 row per 1-row change in terminal height, since avail
+// is m.height minus a constant and the clamp can only pass a step through
+// unchanged or absorb it — plus that the floor and cap are each actually
+// reached, at heights far enough into each extreme that no plausible
+// breakpoint could land wrong. Baking the exact breakpoints into the test
+// would move the same fragile derivation that produced two wrong answers
+// into the test itself; the sweep's whole value is that it does not need to
+// know where they are.
+func TestWorktreeVisibleRows_ShrinksOnShortTerminal(t *testing.T) {
+	const (
+		veryShort = 0   // deep in the floor region under any plausible formula
+		veryTall  = 200 // deep in the capped region under any plausible formula
+	)
+
+	if got := (Model{height: veryShort}).worktreeVisibleRows(); got != worktreeListMinRows {
+		t.Errorf("height %d: worktreeVisibleRows = %d, want the floor %d", veryShort, got, worktreeListMinRows)
+	}
+
+	prev := (Model{height: veryShort}).worktreeVisibleRows()
+	for h := veryShort + 1; h <= veryTall; h++ {
+		got := (Model{height: h}).worktreeVisibleRows()
+		if got < worktreeListMinRows || got > worktreeListVisibleRows {
+			t.Fatalf("height %d: worktreeVisibleRows = %d, want it within [%d, %d]",
+				h, got, worktreeListMinRows, worktreeListVisibleRows)
+		}
+		if delta := got - prev; delta < 0 || delta > 1 {
+			t.Fatalf("height %d: worktreeVisibleRows = %d, changed by %d rows from height %d's %d — "+
+				"a 1-row increase in terminal height can grow the list by at most 1 row",
+				h, got, delta, h-1, prev)
+		}
+		prev = got
+	}
+
+	if got := (Model{height: veryTall}).worktreeVisibleRows(); got != worktreeListVisibleRows {
+		t.Errorf("height %d: worktreeVisibleRows = %d, want the cap %d", veryTall, got, worktreeListVisibleRows)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Worktree field: key handling, submit, and CWD-change reset
+// ---------------------------------------------------------------------------
+
+// The chosen worktree becomes the pane's spawn CWD. This is the whole of
+// "attach" — CWD is an ordinary CreatePanePayload field, so no create-path
+// change is needed.
+func TestSubmitSetupDialog_WorktreeBecomesTheCWD(t *testing.T) {
+	m := Model{}
+	p := &plugin.PanePlugin{}
+	p.Command.PromptsCWD = true
+	m.cwdBrowseDir = "/repo"
+	m.selectedWorktree = "/repo-worktrees/feat-x"
+
+	updated, _ := m.submitSetupDialog(p)
+	got := updated.(Model)
+	if got.selectedCWD != "/repo-worktrees/feat-x" {
+		t.Errorf("selectedCWD = %q, want the worktree path", got.selectedCWD)
+	}
+}
+
+// Every value in the field is scoped to ONE repository: a listed worktree
+// belongs to it. Carrying a choice across a directory change would submit a
+// pane into a worktree of a repository the user navigated away from.
+func TestSetupDialog_ChangingTheDirectoryClearsTheWorktree(t *testing.T) {
+	m := Model{}
+	m.cwdBrowseDir = "/repo"
+	m.selectedWorktree = "/repo-worktrees/feat-x"
+
+	m.onSetupCWDChanged("/other")
+	if m.selectedWorktree != "" {
+		t.Errorf("selectedWorktree = %q, want cleared", m.selectedWorktree)
+	}
+}
+
+// The session listing is scoped to the directory the pane will actually spawn
+// in. submit is the load-bearing check: the user can pick a session, change
+// the worktree, and press Continue without ever re-focusing the session field.
+func TestSubmitSetupDialog_WorktreeChangeDropsAStaleSession(t *testing.T) {
+	m := Model{}
+	p := &plugin.PanePlugin{}
+	p.Command.PromptsCWD = true
+	p.Command.Sessions = "claude"
+	m.cwdBrowseDir = "/repo"
+	m.sessionScanCWD = "/repo"
+	m.selectedSessionID = "11111111-1111-1111-1111-111111111111"
+	m.selectedWorktree = "/repo-worktrees/feat-x"
+
+	updated, _ := m.submitSetupDialog(p)
+	if got := updated.(Model); got.selectedSessionID != "" {
+		t.Errorf("selectedSessionID = %q, want dropped — it was listed for a different directory", got.selectedSessionID)
+	}
+}
+
+// Arrow keys move the cursor across every row, including "off" (row 0) and
+// clamp at both ends rather than wrapping.
+func TestHandleSetupWorktreeKey_UpDownMoveCursor(t *testing.T) {
+	m := Model{}
+	p := &plugin.PanePlugin{}
+	m.worktrees.list = []ipc.WorktreeInfo{
+		{Path: "/repo-worktrees/a", Branch: "feat-a"},
+		{Path: "/repo-worktrees/b", Branch: "feat-b"},
+	}
+	// rows: off, feat-a, feat-b
+
+	updated, _ := m.handleSetupWorktreeKey(p, "down")
+	m = updated.(Model)
+	if m.worktreeCursor != 1 {
+		t.Fatalf("cursor = %d, want 1", m.worktreeCursor)
+	}
+	updated, _ = m.handleSetupWorktreeKey(p, "down")
+	m = updated.(Model)
+	if m.worktreeCursor != 2 {
+		t.Fatalf("cursor = %d, want 2", m.worktreeCursor)
+	}
+	// Clamped at the bottom row, not wrapped.
+	updated, _ = m.handleSetupWorktreeKey(p, "down")
+	m = updated.(Model)
+	if m.worktreeCursor != 2 {
+		t.Errorf("cursor = %d, want clamped at 2", m.worktreeCursor)
+	}
+	updated, _ = m.handleSetupWorktreeKey(p, "up")
+	m = updated.(Model)
+	if m.worktreeCursor != 1 {
+		t.Errorf("cursor = %d, want 1 after up", m.worktreeCursor)
+	}
+}
+
+// Enter on a selectable row commits the choice and drops any resume session
+// already picked — it was listed for the directory this selection just
+// changed, and submitSetupDialog's own guard is the load-bearing net for the
+// case where the user never revisits the session field at all.
+func TestHandleSetupWorktreeKey_EnterCommitsChoiceAndDropsSession(t *testing.T) {
+	m := Model{}
+	p := &plugin.PanePlugin{}
+	m.worktrees.list = []ipc.WorktreeInfo{{Path: "/repo-worktrees/feat-x", Branch: "feat-x"}}
+	m.worktreeCursor = 1 // row 0 is "off"
+	m.selectedSessionID = "sess-1"
+
+	updated, _ := m.handleSetupWorktreeKey(p, "enter")
+	got := updated.(Model)
+	if got.selectedWorktree != "/repo-worktrees/feat-x" {
+		t.Errorf("selectedWorktree = %q, want /repo-worktrees/feat-x", got.selectedWorktree)
+	}
+	if got.selectedSessionID != "" {
+		t.Errorf("selectedSessionID = %q, want cleared", got.selectedSessionID)
+	}
+}
+
+// Row 0 ("off") is always selectable and turns a previous choice back off —
+// distinct from onSetupCWDChanged's reset: the worktree LISTING is still
+// valid (it is scoped to cwdBrowseDir, which has not moved), only the
+// selection changes.
+func TestHandleSetupWorktreeKey_EnterOnOffRowTurnsSelectionOff(t *testing.T) {
+	m := Model{}
+	p := &plugin.PanePlugin{}
+	m.worktrees.list = []ipc.WorktreeInfo{{Path: "/repo-worktrees/feat-x", Branch: "feat-x"}}
+	m.selectedWorktree = "/repo-worktrees/feat-x"
+	m.worktreeCursor = 0 // row 0 is "off"
+
+	updated, _ := m.handleSetupWorktreeKey(p, "enter")
+	got := updated.(Model)
+	if got.selectedWorktree != "" {
+		t.Errorf("selectedWorktree = %q, want cleared by selecting the off row", got.selectedWorktree)
+	}
+}
+
+// A disabled row still ACCEPTS the cursor — it is not skipped — but Enter on
+// it is refused: the row exists to explain why that worktree is unavailable,
+// and a row the cursor cannot reach explains nothing.
+func TestHandleSetupWorktreeKey_EnterOnDisabledRowRefused(t *testing.T) {
+	m := Model{}
+	p := &plugin.PanePlugin{}
+	m.worktrees.list = []ipc.WorktreeInfo{
+		{Path: "/repo-worktrees/locked", Branch: "wip", Locked: true},
+	}
+
+	updated, _ := m.handleSetupWorktreeKey(p, "down")
+	m = updated.(Model)
+	if m.worktreeCursor != 1 {
+		t.Fatalf("cursor = %d, want 1 — a disabled row must still accept the cursor", m.worktreeCursor)
+	}
+
+	updated, _ = m.handleSetupWorktreeKey(p, "enter")
+	got := updated.(Model)
+	if got.selectedWorktree != "" {
+		t.Errorf("selectedWorktree = %q, want unchanged — Enter on a disabled row must be refused", got.selectedWorktree)
+	}
+}
+
+// worktreePickModel builds a setup-dialog Model with the worktree field
+// focused (field 1 for the "ai" plugin: CWD is 0, worktree is 1 — see
+// setupFieldKind) and its listing already settled, so render reaches the
+// expanded row list without a round trip.
+func worktreePickModel(t *testing.T, list []ipc.WorktreeInfo) Model {
+	t.Helper()
+	return Model{
+		dialog:           dialogCreatePaneSetup,
+		pluginRegistry:   registryWithAICWD(t),
+		selectedPlugin:   "ai",
+		setupFieldCursor: 1,
+		worktrees:        worktreeState{loaded: true, repo: true, list: list},
+		width:            100,
+		// Tall enough that worktreeVisibleRows() returns its full cap (6)
+		// rather than the 1-row floor a zero height would clamp to — the
+		// row under test must actually be inside the rendered window.
+		height: 40,
+	}
+}
+
+// The worktree field's four request-lifecycle states must render
+// DIFFERENTLY: a scan still in flight showing as "no worktrees" is a
+// confidently wrong answer, and "this is not a repository" is a different
+// fact from "the scan failed" — only one of them justifies telling the user
+// there is nothing here. Mirrors TestRenderSetup_PendingAndErrorAreNotEmptyDirectory.
+func TestRenderSetup_WorktreeFieldStatesAreDistinguishable(t *testing.T) {
+	base := func() Model {
+		return Model{
+			dialog:         dialogCreatePaneSetup,
+			pluginRegistry: registryWithAICWD(t),
+			selectedPlugin: "ai",
+			width:          100,
+		}
+	}
+
+	scanning := base()
+	scanning.worktrees = worktreeState{pending: true}
+	scanningOut := stripANSI(scanning.renderCreatePaneSetupDialog())
+
+	neverAsked := base() // zero-value worktreeState: never requested yet
+	neverAskedOut := stripANSI(neverAsked.renderCreatePaneSetupDialog())
+
+	failed := base()
+	failed.worktrees = worktreeState{loaded: true, err: "git: command not found"}
+	failedOut := stripANSI(failed.renderCreatePaneSetupDialog())
+
+	notRepo := base()
+	notRepo.worktrees = worktreeState{loaded: true}
+	notRepoOut := stripANSI(notRepo.renderCreatePaneSetupDialog())
+
+	if !strings.Contains(scanningOut, "Worktree    scanning…") {
+		t.Errorf("scanning state did not render its marker\n%s", scanningOut)
+	}
+	if strings.Contains(scanningOut, "not a git repository") {
+		t.Errorf("a scan in flight must not read as a settled answer\n%s", scanningOut)
+	}
+
+	if !strings.Contains(neverAskedOut, "Worktree    —") {
+		t.Errorf("never-asked state did not render its placeholder\n%s", neverAskedOut)
+	}
+	if strings.Contains(neverAskedOut, "scanning…") || strings.Contains(neverAskedOut, "not a git repository") {
+		t.Errorf("never-asked state must not read as scanning or as a settled answer\n%s", neverAskedOut)
+	}
+
+	if !strings.Contains(failedOut, "git: command not found") {
+		t.Errorf("failed scan did not show its error\n%s", failedOut)
+	}
+	if strings.Contains(failedOut, "not a git repository") {
+		t.Errorf("a scan failure must not read as \"not a repository\"\n%s", failedOut)
+	}
+
+	if !strings.Contains(notRepoOut, "Worktree    not a git repository") {
+		t.Errorf("a non-repository directory did not say so\n%s", notRepoOut)
+	}
+	if strings.Contains(notRepoOut, "scanning…") {
+		t.Errorf("a settled non-repository answer must not read as still scanning\n%s", notRepoOut)
+	}
+}
+
+// Worktree branch names now come from a host the user may not control. ESC is
+// a C0 control that sanitizeRemoteText strips before a rendered row reaches
+// the screen — mirrors TestRenderSetup_KubeRowsSanitizeRemoteText, which pins
+// the same call site's twin (kube context names).
+func TestRenderSetup_WorktreeRowsSanitizeRemoteText(t *testing.T) {
+	m := worktreePickModel(t, []ipc.WorktreeInfo{
+		{Path: "/repo", Main: true, Branch: "master"},
+		{Path: "/repo-worktrees/evil", Branch: "feat\x1b[31m;rm -rf"},
+	})
+	out := m.renderCreatePaneSetupDialog()
+	if strings.Contains(out, "\x1b[31m") {
+		t.Error("rendered output carries a raw CSI sequence from a remote branch name")
+	}
+}
+
+// The session listing is scoped to wherever the pane will actually spawn —
+// once a worktree is chosen, that is the worktree, not the browsed directory
+// above it. Mirrors TestEnsureSessionScan_RescanClearsSelection but keys off
+// setupSpawnDir() rather than cwdBrowseDir.
+func TestEnsureSessionScan_ScopesToTheChosenWorktree(t *testing.T) {
+	m := modelWithSessions(sessionRow("s1", "x", ""))
+	m.selectedSessionID = "s1"
+	m.selectedWorktree = "/repo-worktrees/feat-x" // cwdBrowseDir is still "/proj"
+
+	cmd := m.ensureSessionScan()
+
+	if cmd == nil {
+		t.Fatal("a chosen worktree must scope the listing to it, triggering a rescan")
+	}
+	if m.selectedSessionID != "" {
+		t.Errorf("selectedSessionID = %q, want cleared — it was listed for the pre-worktree directory", m.selectedSessionID)
+	}
+	if m.sessionScanCWD != "/repo-worktrees/feat-x" {
+		t.Errorf("sessionScanCWD = %q, want the worktree path", m.sessionScanCWD)
+	}
+}
+
+// The directory browser's Enter/Backspace navigation reaches a new
+// cwdBrowseDir only through this async round trip, not synchronously inside
+// handleSetupCWDKey — so a worktree chosen before browsing to a different
+// repository must be cleared here, or submitSetupDialog would submit a stale
+// worktree path from the repository the user just left.
+func TestApplyBrowseResponse_ClearsWorktreeOnRealNavigation(t *testing.T) {
+	t.Parallel()
+	m, _ := browserModel(t, "/repo-a", "/", []string{"work"})
+	m.selectedWorktree = "/repo-a-worktrees/feat-x"
+	m.worktreeCursor = 2
+	m.worktreeScroll = 1
+	m.worktrees = worktreeState{path: "/repo-a", loaded: true, repo: true}
+
+	runCmd(m.browseTo("/repo-b", "", ""))
+	if !m.browse.pending {
+		t.Fatal("expected a browse request in flight")
+	}
+	m.applyBrowseResponse(ipc.BrowseDirRespPayload{
+		Path:     m.browse.path,
+		Child:    m.browse.child,
+		Resolved: "/repo-b",
+	}, m.browse.gen)
+
+	if m.selectedWorktree != "" {
+		t.Errorf("selectedWorktree = %q, want cleared after navigating to a different directory", m.selectedWorktree)
+	}
+	if m.worktreeCursor != 0 || m.worktreeScroll != 0 {
+		t.Errorf("cursor/scroll = %d/%d, want both reset to 0", m.worktreeCursor, m.worktreeScroll)
+	}
+	if m.worktrees.loaded {
+		t.Error("worktrees listing must be dropped, not carried into the new directory")
+	}
+	if m.cwdBrowseDir != "/repo-b" {
+		t.Errorf("cwdBrowseDir = %q, want /repo-b", m.cwdBrowseDir)
+	}
+}
+
+// Ascending to the drive-roots list is ordinary "up" navigation on Windows —
+// browseUp calls showRootsList directly, with no daemon round trip, so a
+// worktree chosen before reaching the root list must not survive into it.
+// Driven through browseUp/showRootsList's real call path (cwdBrowseParent ==
+// "" with roots on hand) rather than by calling showRootsList directly, so a
+// regression that stops browseUp reaching it would fail this test too.
+func TestBrowseUp_ToRootsList_ClearsStaleWorktree(t *testing.T) {
+	m, _ := browserModel(t, "/repo-a", "", []string{"work"}) // parent == "": at a root
+	m.cwdBrowseRoots = []string{`C:\`, `D:\`}
+	m.selectedWorktree = "/repo-a-worktrees/feat-x"
+	m.worktreeCursor = 1
+	m.worktreeScroll = 1
+	m.worktrees = worktreeState{path: "/repo-a", loaded: true, repo: true}
+
+	m.browseUp()
+
+	if got := m.setupSpawnDir(); got != "" {
+		t.Errorf("setupSpawnDir() = %q, want \"\" — the stale worktree must not survive reaching the roots list", got)
+	}
+	if m.selectedWorktree != "" {
+		t.Errorf("selectedWorktree = %q, want cleared", m.selectedWorktree)
+	}
+	if m.worktreeCursor != 0 || m.worktreeScroll != 0 {
+		t.Errorf("cursor/scroll = %d/%d, want both reset to 0", m.worktreeCursor, m.worktreeScroll)
+	}
+	if m.worktrees.loaded {
+		t.Error("worktrees listing must be dropped, not carried into the roots list")
+	}
+	if m.cwdBrowseDir != "" {
+		t.Errorf("cwdBrowseDir = %q, want \"\" (showing the roots list)", m.cwdBrowseDir)
+	}
+}
+
+// showRootsList is shared with the project dialog's browseUp
+// (projectBrowseUp), which has no worktree field — the setup-dialog-only
+// reset must stay inert there rather than touching state a different dialog
+// owns.
+func TestShowRootsList_ProjectDialog_LeavesWorktreeStateUntouched(t *testing.T) {
+	m, _ := browserModel(t, "/repo-a", "", []string{"work"})
+	m.dialog = dialogProjectNew
+	m.cwdBrowseRoots = []string{`C:\`, `D:\`}
+	m.selectedWorktree = "/repo-a-worktrees/feat-x"
+	m.worktreeCursor = 1
+	m.worktreeScroll = 1
+	m.worktrees = worktreeState{path: "/repo-a", loaded: true, repo: true}
+
+	m.showRootsList()
+
+	if m.selectedWorktree != "/repo-a-worktrees/feat-x" {
+		t.Errorf("selectedWorktree = %q, want unchanged — the project dialog has no worktree field", m.selectedWorktree)
+	}
+	if m.worktreeCursor != 1 || m.worktreeScroll != 1 {
+		t.Errorf("cursor/scroll = %d/%d, want unchanged", m.worktreeCursor, m.worktreeScroll)
+	}
+	if !m.worktrees.loaded {
+		t.Error("worktrees listing must survive — the project dialog's browse must not touch it")
+	}
+}
+
+// The critical gap fix round 2 closed: re-entering the setup dialog for a
+// DIFFERENT plugin/instance must not carry a worktree chosen for the
+// previous one. enterSetupOrSplit is the sole entry point into the setup
+// dialog (all three plugin/instance pick sites funnel through it), so the
+// reset is exercised by calling IT again — not by clearing fields directly —
+// or a regression that stopped enterSetupOrSplit reaching the reset would
+// pass this test anyway. The reachable flow needs no in-dialog navigation at
+// all: Ctrl+N, pick a worktree, Continue, Ctrl+N again, a different
+// directory pre-fills through the pick list (as git-discovery or
+// recent-locations ordinarily would), Continue — all without ever focusing
+// the worktree field a second time.
+func TestEnterSetupOrSplit_ReEntry_ClearsThePriorPluginsWorktree(t *testing.T) {
+	t.Parallel()
+	m, _, _ := overlayTestModel(t, "")
+	p := &plugin.PanePlugin{Name: "ai", Command: plugin.CommandConfig{PromptsCWD: true}}
+	m.selectedPlugin = "ai"
+
+	// First dialog session: the user reaches repo A and picks a worktree.
+	runCmd(m.enterSetupOrSplit(p))
+	m.cwdBrowseDir = "/repo-a"
+	m.selectedWorktree = "/repo-a-worktrees/feat-x"
+	m.worktreeCursor = 1
+	m.worktreeScroll = 1
+	m.worktrees = worktreeState{path: "/repo-a", loaded: true, repo: true}
+
+	// Re-entry — the sole entry point, called exactly as the plugin/instance
+	// pick sites call it.
+	runCmd(m.enterSetupOrSplit(p))
+
+	// A different directory pre-fills through the pick list, without the user
+	// ever focusing the worktree field again.
+	runCmd(m.applyGitReposPickList([]string{"/repo-b"}))
+
+	if got := m.setupSpawnDir(); got != "/repo-b" {
+		t.Errorf("setupSpawnDir() = %q, want /repo-b — repo A's worktree must not survive re-entry", got)
+	}
+	if m.selectedWorktree != "" {
+		t.Errorf("selectedWorktree = %q, want cleared by re-entry alone", m.selectedWorktree)
+	}
+	if m.worktrees.loaded {
+		t.Error("worktrees listing must be dropped on re-entry")
 	}
 }

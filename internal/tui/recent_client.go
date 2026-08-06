@@ -131,7 +131,11 @@ func (m *Model) applyExistingDirs(resp ipc.DirsExistRespPayload, gen string) tea
 		return m.initSetupBrowser()
 	}
 	m.recentCandidates = paths
-	m.cwdBrowseDir = paths[0]
+	// Routed through onSetupCWDChanged like every other site that commits a
+	// browsed directory — reachable on dialog re-entry, where a prior
+	// plugin's worktree choice would otherwise still be sitting in
+	// m.selectedWorktree when this candidate list lands.
+	m.onSetupCWDChanged(paths[0])
 	m.cwdBrowseCursor = 0
 	return nil
 }

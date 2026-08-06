@@ -11,12 +11,14 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/google/uuid"
 
 	"github.com/artyomsv/quil/internal/config"
+	"github.com/artyomsv/quil/internal/gitworktree"
 	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/logger"
 	"github.com/artyomsv/quil/internal/plugin"
@@ -1632,6 +1634,12 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 	instanceArgs := m.selectedInstanceArgs
 	resumeSessionID := m.selectedSessionID
 	cwd := m.selectedCWD
+	// Captured with the other choices, BEFORE the teardown below clears them.
+	// Reading these after that reset yields the zero value, so the spec would
+	// silently never be sent and every "new branch" would spawn an ordinary
+	// pane in the repository root — the exact silent relocation this feature
+	// exists to prevent.
+	newBranch, newBranchRepo := m.worktreeNewBranch, m.cwdBrowseDir
 	if cwd != "" {
 		m.lastSelectedCWD = cwd
 		m.recentCWDs = pushRecentCWD(m.recentCWDs, cwd, recentCWDMax)
@@ -1652,6 +1660,18 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 	m.cwdBrowseEntries = nil
 	m.cwdBrowseCursor = 0
 	m.cwdBrowseScroll = 0
+	// The worktree field's state joins the teardown for the same reason the
+	// rest of it does: without this the NEXT Ctrl+N inherits the branch name
+	// and the chosen worktree from the pane just created, and spawns in a
+	// repository the dialog is no longer showing. Third recurrence of this
+	// class in one feature.
+	m.selectedWorktree = ""
+	m.worktreeNewBranch = ""
+	m.worktreeNaming = false
+	m.worktreeErr = ""
+	m.worktreeCursor = 0
+	m.worktreeScroll = 0
+	m.worktrees = worktreeState{}
 	m.resetSessionSelection()
 
 	tab := m.activeTabModel()
@@ -1672,6 +1692,20 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 
 	// Option 2: Replace current pane
 	if m.dialogCursor == 2 {
+		// Refused, and refused HERE because this is the first moment the
+		// combination is known: the worktree field runs before this step, so
+		// it cannot gate itself on a choice the user has not made yet.
+		//
+		// The replace path below sets leaf.Pane = nil and calls old.Dispose()
+		// BEFORE the send, so a worktree add that then fails costs a LIVE
+		// pane — and unlike a dangling placeholder, Dispose() is not something
+		// PrunePlaceholders can undo. Refusing before any of that is
+		// destructive is the honest answer; the daemon refuses the pair too,
+		// because any IPC client can send it.
+		if newBranch != "" {
+			m.setFlash("a pane cannot be replaced with one in a new worktree — split instead")
+			return m, m.flashCmd()
+		}
 		oldPaneID := pane.ID
 
 		if leaf := tab.Root.FindLeaf(oldPaneID); leaf != nil {
@@ -1726,6 +1760,15 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 	}
 	m.pendingSplit[tab.ID] = placeholder
 
+	// The spec, when the user asked for a new branch. RepoRoot is the browsed
+	// directory — the one the DAEMON's browse answered with, so no path built
+	// on this machine reaches the far one.
+	var spec *ipc.WorktreeSpec
+	if newBranch != "" {
+		spec = &ipc.WorktreeSpec{RepoRoot: newBranchRepo, Branch: newBranch}
+		m.worktreeCreateTab = tab.ID
+	}
+
 	return m, func() tea.Msg {
 		msg, _ := ipc.NewMessage(ipc.MsgCreatePane, ipc.CreatePanePayload{
 			TabID:           tabID,
@@ -1734,6 +1777,7 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 			InstanceName:    instanceName,
 			InstanceArgs:    instanceArgs,
 			ResumeSessionID: resumeSessionID,
+			Worktree:        spec,
 		})
 		m.sendForDest(tabDest, msg)
 		return nil
@@ -3562,6 +3606,12 @@ func (m Model) handleSetupWorktreeKey(p *plugin.PanePlugin, key string) (tea.Mod
 	if len(rows) == 0 {
 		return m, nil
 	}
+	// Naming a new branch swallows the list keys: j/k are letters a branch name
+	// may legitimately contain, so cursor movement and typing cannot share the
+	// same handler state.
+	if m.worktreeNaming {
+		return m.handleWorktreeNameKey(key)
+	}
 	switch key {
 	case "up", "k":
 		if m.worktreeCursor > 0 {
@@ -3576,6 +3626,17 @@ func (m Model) handleSetupWorktreeKey(p *plugin.PanePlugin, key string) (tea.Mod
 		if row.disabled {
 			return m, nil
 		}
+		if row.path == worktreeNewRowPath {
+			// Enter opens the name field rather than committing: the branch
+			// IS the identity of the work, so it has to be typed before this
+			// row means anything.
+			m.worktreeNaming = true
+			m.selectedWorktree = ""
+			m.selectedSessionID = ""
+			return m, nil
+		}
+		m.worktreeNaming = false
+		m.worktreeNewBranch = ""
 		m.selectedWorktree = row.path
 		// The session listing is scoped to the directory the pane will spawn
 		// in, which this just changed. Clearing here is the responsive half;
@@ -3595,11 +3656,72 @@ func (m Model) handleSetupWorktreeKey(p *plugin.PanePlugin, key string) (tea.Mod
 	return m, nil
 }
 
+// handleWorktreeNameKey edits the new branch's name.
+//
+// Validated on Enter with gitworktree.ValidateBranch — the same function the
+// daemon runs. The daemon is the authority (any IPC client can send anything),
+// but a round trip to learn about a typo is a bad dialog, and here the message
+// lands beside the field the user typed into.
+//
+// Esc abandons the new-branch row entirely rather than merely closing the
+// input: a half-typed name left behind would be committed by the next Enter on
+// Continue, spawning a pane on a branch the user backed out of.
+func (m Model) handleWorktreeNameKey(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "esc":
+		m.worktreeNaming = false
+		m.worktreeNewBranch = ""
+		m.worktreeErr = ""
+		return m, nil
+	case "enter":
+		if err := gitworktree.ValidateBranch(m.worktreeNewBranch); err != nil {
+			m.worktreeErr = err.Error()
+			return m, nil
+		}
+		m.worktreeErr = ""
+		m.worktreeNaming = false
+		return m, nil
+	case "backspace":
+		if n := len(m.worktreeNewBranch); n > 0 {
+			// Rune-safe: a branch name may carry non-ASCII, and lopping a byte
+			// off a multi-byte rune leaves invalid UTF-8 for lipgloss to
+			// measure.
+			_, size := utf8.DecodeLastRuneInString(m.worktreeNewBranch)
+			m.worktreeNewBranch = m.worktreeNewBranch[:n-size]
+		}
+		m.worktreeErr = ""
+		return m, nil
+	default:
+		if len(key) == 1 || utf8.RuneCountInString(key) == 1 {
+			m.worktreeNewBranch += key
+			m.worktreeErr = ""
+		}
+		return m, nil
+	}
+}
+
 // submitSetupDialog commits the browser-selected directory and toggle states,
 // then advances the create-pane flow to the split-direction step.
 func (m Model) submitSetupDialog(p *plugin.PanePlugin) (tea.Model, tea.Cmd) {
 	if p.Command.PromptsCWD {
 		m.selectedCWD = m.setupSpawnDir()
+		// A name still being typed is not a choice. Committing it here would
+		// spawn on a branch the user was mid-way through naming — and Esc on
+		// the name field clears it, so reaching Continue with worktreeNaming
+		// still set means they tabbed away rather than accepted.
+		if m.worktreeNaming {
+			m.worktreeNaming = false
+			m.worktreeNewBranch = ""
+		}
+		// Validated again at submit, not only on the name field's Enter: the
+		// user can change the browsed directory afterwards, and this is the
+		// last point before the pane is created.
+		if m.worktreeNewBranch != "" {
+			if err := gitworktree.ValidateBranch(m.worktreeNewBranch); err != nil {
+				m.worktreeErr = err.Error()
+				return m, nil
+			}
+		}
 		logger.Debug("setup dialog: captured cwd=%q from browser (plugin=%s)", m.selectedCWD, p.Name)
 	}
 	m.cwdInputError = ""
@@ -3786,7 +3908,10 @@ func (m Model) renderSetupWorktreeField(focused bool) string {
 
 	if !focused {
 		summary := "off"
-		if m.selectedWorktree != "" {
+		switch {
+		case m.worktreeNewBranch != "":
+			summary = "new branch " + sanitizeRemoteText(m.worktreeNewBranch)
+		case m.selectedWorktree != "":
 			summary = sanitizeRemoteText(worktreeLabel(m.worktrees.list, m.selectedWorktree))
 		}
 		b.WriteString(dialogNormal.Render(label + "    " + truncateToWidth(summary, m.setupTextWidth()-lipgloss.Width(label)-4)))
@@ -3795,6 +3920,31 @@ func (m Model) renderSetupWorktreeField(focused bool) string {
 
 	b.WriteString(dialogNormal.Render(label))
 	b.WriteString("\n")
+	// Naming REPLACES the list rather than sitting under it, so focusing the
+	// field cannot grow the dialog — the same constraint worktreeVisibleRows
+	// exists for, and the pattern the session detail panel already follows.
+	if m.worktreeNaming {
+		// Budgeted against the LIST's own row count, not written out in full.
+		// worktreeVisibleRows floors at 1, so on a short terminal the list is
+		// two lines (label + one row) and an unconditional three-line block
+		// here would be taller than the field it replaced — pushing
+		// [Continue] off screen, which lipgloss.Place does not clip.
+		budget := m.worktreeVisibleRows()
+		b.WriteString(dialogNormal.Render("    new branch: "))
+		b.WriteString(dialogEditStyle.Render(sanitizeRemoteText(m.worktreeNewBranch) + "│"))
+		// The error outranks the hint: it says why Enter did nothing, where
+		// the hint only repeats keys the footer already carries.
+		if m.worktreeErr != "" && budget >= 2 {
+			b.WriteString("\n")
+			b.WriteString(dialogErrorStyle.Render("    " + truncateToWidth(m.worktreeErr, m.setupTextWidth()-setupRowIndent)))
+			budget--
+		}
+		if budget >= 2 {
+			b.WriteString("\n")
+			b.WriteString(dialogSubtle.Render("    Enter accept   Esc cancel"))
+		}
+		return b.String()
+	}
 	rows := m.worktreeRows()
 	visible := m.worktreeVisibleRows()
 	// Re-derives the window from the cursor rather than trusting the stored
@@ -3831,6 +3981,15 @@ type worktreeRow struct {
 // not a worktree to attach to, it is the directory the CWD field already
 // chose. Locked and prunable entries are shown but refused, so the user learns
 // why a row is unavailable rather than wondering where it went.
+// worktreeNewRowPath is the sentinel path of the "+ new branch…" row. A
+// sentinel rather than a bool on worktreeRow so the row list stays one flat
+// slice the cursor walks — the same reason the sidebar builds paint order and
+// hit-testing from a single slice.
+//
+// It cannot collide with a real worktree path: git reports absolute paths, and
+// this is not one.
+const worktreeNewRowPath = "\x00new"
+
 func (m Model) worktreeRows() []worktreeRow {
 	rows := []worktreeRow{{label: "off — use the directory above", path: ""}}
 	for _, w := range m.worktrees.list {
@@ -3850,6 +4009,12 @@ func (m Model) worktreeRows() []worktreeRow {
 		}
 		rows = append(rows, row)
 	}
+	// LAST, so every existing worktree keeps the index it had before this row
+	// existed and stage A's row fixtures shift rather than needing a rewrite.
+	// Only for a real repository — the four early-return states above never
+	// reach here, and offering to branch from a non-repository would be a row
+	// that cannot complete.
+	rows = append(rows, worktreeRow{label: "+ new branch…", path: worktreeNewRowPath})
 	return rows
 }
 
@@ -3897,6 +4062,13 @@ func (m Model) setupSpawnDir() string {
 func (m *Model) onSetupCWDChanged(dir string) tea.Cmd {
 	m.cwdBrowseDir = dir
 	m.selectedWorktree = ""
+	// The new-branch state belongs to the repository that was on screen when
+	// it was typed. Leaving it behind is the same class of bug the rest of
+	// this reset exists for — the pane would branch from a repository the
+	// dialog is no longer showing.
+	m.worktreeNewBranch = ""
+	m.worktreeNaming = false
+	m.worktreeErr = ""
 	m.worktreeCursor = 0
 	m.worktreeScroll = 0
 	m.worktrees = worktreeState{}

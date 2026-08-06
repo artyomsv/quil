@@ -2321,28 +2321,27 @@ func TestHandleSetupWorktreeKey_UpDownMoveCursor(t *testing.T) {
 		{Path: "/repo-worktrees/a", Branch: "feat-a"},
 		{Path: "/repo-worktrees/b", Branch: "feat-b"},
 	}
-	// rows: off, feat-a, feat-b
+	// rows: off, feat-a, feat-b, "+ new branch…" — stage B appended the last,
+	// deliberately at the END so every existing row kept its index.
+	last := len(m.worktreeRows()) - 1
 
-	updated, _ := m.handleSetupWorktreeKey(p, "down")
-	m = updated.(Model)
-	if m.worktreeCursor != 1 {
-		t.Fatalf("cursor = %d, want 1", m.worktreeCursor)
-	}
-	updated, _ = m.handleSetupWorktreeKey(p, "down")
-	m = updated.(Model)
-	if m.worktreeCursor != 2 {
-		t.Fatalf("cursor = %d, want 2", m.worktreeCursor)
+	for want := 1; want <= last; want++ {
+		updated, _ := m.handleSetupWorktreeKey(p, "down")
+		m = updated.(Model)
+		if m.worktreeCursor != want {
+			t.Fatalf("cursor = %d, want %d", m.worktreeCursor, want)
+		}
 	}
 	// Clamped at the bottom row, not wrapped.
-	updated, _ = m.handleSetupWorktreeKey(p, "down")
+	updated, _ := m.handleSetupWorktreeKey(p, "down")
 	m = updated.(Model)
-	if m.worktreeCursor != 2 {
-		t.Errorf("cursor = %d, want clamped at 2", m.worktreeCursor)
+	if m.worktreeCursor != last {
+		t.Errorf("cursor = %d, want clamped at %d", m.worktreeCursor, last)
 	}
 	updated, _ = m.handleSetupWorktreeKey(p, "up")
 	m = updated.(Model)
-	if m.worktreeCursor != 1 {
-		t.Errorf("cursor = %d, want 1 after up", m.worktreeCursor)
+	if m.worktreeCursor != last-1 {
+		t.Errorf("cursor = %d, want %d after up", m.worktreeCursor, last-1)
 	}
 }
 

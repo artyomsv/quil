@@ -430,6 +430,19 @@ type Model struct {
 	browse            browseState             // in-flight directory-browser request (zero value = none)
 	worktrees         worktreeState           // create-pane dialog's worktree listing
 	selectedWorktree  string                  // chosen worktree PATH; "" = off (spawn in the CWD field's directory)
+	// worktreeNewBranch is the branch a NEW worktree will be created on.
+	// Non-empty and selectedWorktree empty means "create"; the two are
+	// mutually exclusive, and both handlers clear the other.
+	worktreeNewBranch string
+	// worktreeNaming is true while the name is being typed. It swallows the
+	// list's j/k, which are letters a branch name may contain.
+	worktreeNaming bool
+	// worktreeErr is the validation message shown beside the name field.
+	worktreeErr string
+	// worktreeCreateTab is the tab holding the layout placeholder a worktree
+	// create armed. Kept so the response unwinds exactly that one: an add
+	// takes seconds, and the active tab may have moved by the time it answers.
+	worktreeCreateTab string
 	worktreeCursor    int                     // row cursor in the worktree field's expanded list; row 0 = "off"
 	worktreeScroll    int                     // scroll offset for the visible window of the expanded worktree list
 	reqGen            int                     // monotonic instance id source for repoScan/browse/worktrees; see nextReqGen

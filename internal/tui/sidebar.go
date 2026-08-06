@@ -309,6 +309,35 @@ func (m Model) projectSidebarSwallowsMouse(x, y int) bool {
 	return w > 0 && x >= 0 && x < w && y >= 0 && y < m.height-1
 }
 
+// sidebarEdgeHitPadding widens the drag zone to the sidebar's own last column
+// as well as the first pane column, mirroring the split border's "both drawn
+// glyphs grab the line" rule. A one-column target on a boundary the user aims
+// at with a mouse is needlessly precise, and neither column is claimed by
+// anything else: there is no split at the sidebar boundary, so
+// hitTestSplitBorder never returns it.
+const sidebarEdgeHitPadding = 1
+
+// hitTestSidebarEdge reports whether (x, y) lands on the project sidebar's
+// draggable right edge.
+//
+// Width 0 — a closed sidebar, or a terminal below minWidthForSidebar — offers
+// NO edge. Both states arrive through projectSidebarWidth() as 0, and
+// answering true there would arm a drag against a strip that is not painted.
+// Reading the accessor rather than m.sidebarWidth is also what keeps the zone
+// on the RENDERED edge: sidebarWidth() clamps, so a configured value the
+// terminal cannot afford is drawn narrower than it is stored.
+//
+// Row 0 is included and the last row excluded, matching
+// projectSidebarSwallowsMouse: the sidebar's own first row occupies row 0 in
+// these columns, while the status bar is still drawn full width beneath it.
+func (m Model) hitTestSidebarEdge(x, y int) bool {
+	w := m.projectSidebarWidth()
+	if w <= 0 || y < 0 || y >= m.height-1 {
+		return false
+	}
+	return x >= w-sidebarEdgeHitPadding && x <= w
+}
+
 // The sidebar's state vocabulary, shared by the per-pane rows and the project
 // row that rolls them up — one notation, so the summary reads as a roll-up
 // rather than a second convention.

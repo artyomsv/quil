@@ -831,13 +831,26 @@ func (p *PaneModel) renderRestoreIndicator(innerW, innerH int) string {
 // could not honour — and inventing a destination is the same class of
 // confidently-wrong answer the whole no-relocation rule exists to remove.
 func (p *PaneModel) renderSpawnError(innerW, innerH int) string {
-	msg := sanitizeRemoteText(p.SpawnError)
-	block := lipgloss.JoinVertical(lipgloss.Center,
-		spawnErrorStyle.Render(msg),
-		"",
-		restoreDimStyle.Render("Alt+R to retry"),
-	)
-	return lipgloss.Place(innerW, innerH, lipgloss.Center, lipgloss.Center, block)
+	// BOUNDED as well as sanitized, and the two are different jobs:
+	// sanitizeRemoteText removes escapes without shortening anything, while
+	// lipgloss.Place pads but never CLIPS — so an over-wide block is returned
+	// whole and the pane body grows past its rect, shifting the whole tab's
+	// JoinHorizontal. The message interpolates a full path, and a pane is at
+	// its narrowest exactly when this fires: spawnRestoredPane sets the error
+	// during restore, before the pane's first size message.
+	//
+	// Elided in the MIDDLE because the informative half of a worktree path is
+	// its tail — the branch name — and cutting the end leaves every message
+	// reading "worktree is gone: E:\Projects\Stuka…".
+	msg := elideMiddle(sanitizeRemoteText(p.SpawnError), innerW)
+	rows := []string{spawnErrorStyle.Render(msg)}
+	// The hint costs two rows. Dropped rather than overflowing on a pane too
+	// short for it: the reason is what the user needs, the key is in the docs.
+	if innerH >= 3 {
+		rows = append(rows, "", restoreDimStyle.Render(truncateToWidth("Alt+R to retry", innerW)))
+	}
+	return lipgloss.Place(innerW, innerH, lipgloss.Center, lipgloss.Center,
+		lipgloss.JoinVertical(lipgloss.Center, rows...))
 }
 
 // renderRestoreIndicatorCompact is the small single-line indicator used when the

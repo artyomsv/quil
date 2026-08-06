@@ -844,29 +844,49 @@ func (d *Daemon) respawnPanes() {
 // spawnRestoredPane spawns a single restored pane, applying the saved-cwd
 // sanity check and the fallback-to-terminal recovery. Extracted from
 // respawnPanes so the lazy-spawn path (ensurePaneSpawned) reuses it verbatim.
+// refuseMissingWorktree reports whether a worktree-owned pane's directory is
+// gone, and if so records why instead of spawning.
+//
+// A worktree-owned pane does NOT relocate. Blanking the CWD reaches
+// d.defaultCWD(), so the pane would return in the main checkout on whatever
+// branch that is — and for a claude pane that is worse than a wrong directory,
+// because it still resumes its recorded session, continuing the conversation
+// against the wrong tree. It comes up visibly broken instead: the pane exists,
+// its CWD stands, and the failure is on screen rather than in a log nobody
+// reads.
+//
+// Ordinary panes keep the blank-and-fall-back recovery. The losses are not the
+// same: a stale browsed path costs a convenience, a missing worktree costs the
+// isolation the pane exists for.
+//
+// Shared by restore AND restart deliberately. Alt+R is the remedy the error
+// screen advertises, so it has to reach the same verdict — otherwise a retry
+// while the worktree is still missing spawns a shell in the main checkout,
+// which is the relocation this whole path exists to prevent.
+func (d *Daemon) refuseMissingWorktree(pane *Pane) bool {
+	pane.PluginMu.Lock()
+	cwd, owned := pane.CWD, pane.WorktreeOwned
+	pane.PluginMu.Unlock()
+	if !owned || cwd == "" {
+		return false
+	}
+	if info, err := os.Stat(cwd); err == nil && info.IsDir() {
+		return false
+	}
+	log.Printf("pane %s: worktree %q gone, leaving the pane unspawned", pane.ID, cwd)
+	pane.PluginMu.Lock()
+	pane.SpawnError = fmt.Sprintf("worktree is gone: %s", cwd)
+	pane.PluginMu.Unlock()
+	return true
+}
+
 func (d *Daemon) spawnRestoredPane(pane *Pane) {
 	ptySession := newRestoredPTY(paneSize(pane))
+	if d.refuseMissingWorktree(pane) {
+		return
+	}
 	if pane.CWD != "" {
 		if info, err := os.Stat(pane.CWD); err != nil || !info.IsDir() {
-			if pane.WorktreeOwned {
-				// A worktree-owned pane does NOT relocate. Blanking the CWD
-				// reaches d.defaultCWD(), so the pane would return in the main
-				// checkout on whatever branch that is — and for a claude pane
-				// that is worse than a wrong directory, because it still
-				// resumes its recorded session, continuing the conversation
-				// against the wrong tree. Come up visibly broken instead: the
-				// pane exists, its CWD stands, and the failure is on screen
-				// rather than in a log nobody reads.
-				//
-				// Ordinary panes keep the fallback below. The losses are not
-				// the same: a stale browsed path costs a convenience, a
-				// missing worktree costs the isolation the pane exists for.
-				log.Printf("pane %s: worktree %q gone, leaving the pane unspawned", pane.ID, pane.CWD)
-				pane.PluginMu.Lock()
-				pane.SpawnError = fmt.Sprintf("worktree is gone: %s", pane.CWD)
-				pane.PluginMu.Unlock()
-				return
-			}
 			log.Printf("pane %s: saved cwd %q gone, using default", pane.ID, pane.CWD)
 			// PluginMu-protected: snapshot()/buildPaneInfos/handlePaneStatusReq
 			// read pane.CWD concurrently while the server is live (lazy spawn).
@@ -877,12 +897,6 @@ func (d *Daemon) spawnRestoredPane(pane *Pane) {
 			pane.PluginMu.Unlock()
 		}
 	}
-	// Cleared on every path that goes on to spawn, so a pane that recovers —
-	// a retry, or a restore once the worktree is back — does not keep its
-	// complaint. Deliberately after the early return above.
-	pane.PluginMu.Lock()
-	pane.SpawnError = ""
-	pane.PluginMu.Unlock()
 	if err := d.spawnPane(pane, ptySession, true); err != nil {
 		log.Printf("respawn pane %s (type=%s): %v — falling back to terminal", pane.ID, pane.Type, err)
 		// PluginMu-protected: same concurrent readers as pane.CWD above.
@@ -3213,6 +3227,14 @@ func (d *Daemon) spawnPane(pane *Pane, ptySession apty.Session, restoring bool) 
 	if pane.Type == "" {
 		pane.Type = "terminal"
 	}
+	// Cleared HERE rather than at each caller, because the field means "this
+	// pane has no process" and this is the one function that gives it one.
+	// The restart path (handleRestartPaneReq → spawnPane) does NOT go through
+	// spawnRestoredPane, so clearing it there alone left Alt+R — the remedy
+	// the error screen itself advertises — reviving the pane while the stale
+	// error stayed painted over it, and the user typing blind into a live
+	// shell they could not see.
+	pane.SpawnError = ""
 	typ := pane.Type
 	pane.PluginMu.Unlock()
 
@@ -4217,11 +4239,20 @@ func (d *Daemon) handleRestartPaneReq(conn *ipc.Conn, msg *ipc.Message) {
 	if rows <= 0 {
 		rows = 24
 	}
-	ptySession := apty.NewWithSize(cols, rows)
 	success := true
-	if err := d.spawnPane(pane, ptySession, false); err != nil {
-		log.Printf("handleRestartPaneReq: spawn: %v", err)
+	// Alt+R on a pane whose worktree is still missing must reach the same
+	// verdict restore does — spawning here would put a shell in the daemon's
+	// default directory, the relocation the SpawnError path exists to prevent.
+	// spawnPane clears SpawnError on success, so a retry that finds the
+	// worktree back recovers with no extra bookkeeping.
+	if d.refuseMissingWorktree(pane) {
 		success = false
+	} else {
+		ptySession := apty.NewWithSize(cols, rows)
+		if err := d.spawnPane(pane, ptySession, false); err != nil {
+			log.Printf("handleRestartPaneReq: spawn: %v", err)
+			success = false
+		}
 	}
 
 	d.broadcastState()

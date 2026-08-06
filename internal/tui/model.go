@@ -439,10 +439,17 @@ type Model struct {
 	worktreeNaming bool
 	// worktreeErr is the validation message shown beside the name field.
 	worktreeErr string
-	// worktreeCreateTab is the tab holding the layout placeholder a worktree
-	// create armed. Kept so the response unwinds exactly that one: an add
-	// takes seconds, and the active tab may have moved by the time it answers.
-	worktreeCreateTab string
+	// worktreeCreates holds the tabs with a worktree create in flight, each
+	// holding a layout placeholder only the response can retire.
+	//
+	// A MAP, not a scalar: the setup dialog closes on submit, so a second
+	// Ctrl+N create can start while the first is still checking out — and the
+	// daemon's single-flight rejects the second IMMEDIATELY, so its response
+	// routinely arrives BEFORE the first's. A single slot is overwritten by
+	// the second and then cleared, stranding the first tab's placeholder
+	// permanently: every later pane created in that tab is swallowed by the
+	// dead leaf, with no error anywhere.
+	worktreeCreates map[string]bool
 	worktreeCursor    int                     // row cursor in the worktree field's expanded list; row 0 = "off"
 	worktreeScroll    int                     // scroll offset for the visible window of the expanded worktree list
 	reqGen            int                     // monotonic instance id source for repoScan/browse/worktrees; see nextReqGen
@@ -4239,7 +4246,21 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 		}
 
 		// Clean up any unfilled placeholders (e.g., rapid double-splits).
-		if tab.Root != nil {
+		//
+		// EXCEPT while a worktree create is in flight for this tab. For an
+		// ordinary create the placeholder is unfilled for microseconds, so no
+		// broadcast lands inside that window; a `git worktree add` holds it
+		// for SECONDS, and spontaneous broadcasts land there routinely (a
+		// child toggling mouse modes, a pane exiting, a git-fingerprint
+		// change, another client). Pruning then detaches the node while
+		// pendingSplit still points at it, so the pane that finally arrives is
+		// assigned to an unreachable leaf and appears NOWHERE until a later
+		// broadcast heals it through the root-insert fallback.
+		//
+		// The create's own response is what retires this placeholder — on
+		// failure, or on timeout. Both delete the map entry, so the exemption
+		// cannot outlive the request that armed it.
+		if tab.Root != nil && !m.worktreeCreates[tab.ID] {
 			tab.Root.PrunePlaceholders()
 			tab.invalidateLeaves()
 		}

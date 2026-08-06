@@ -28,10 +28,16 @@ func newBranchModel(t *testing.T) Model {
 	// labels; an empty one answers nil and takes the floor, which is what
 	// every fixture here wants.
 	m.pluginRegistry = plugin.NewRegistry()
-	m.cwdBrowseDir = "/repo"
+	// The browsed directory is a SUBDIRECTORY of the repository, which is the
+	// ordinary case (the CWD browser starts from the active pane's cwd) and
+	// the one that distinguishes the two values. `git worktree list` succeeds
+	// from any subdirectory, so the field is offered here — and deriving the
+	// worktree path from this would nest a second checkout inside the repo.
+	m.cwdBrowseDir = "/repo/internal/tui"
 	m.worktrees = worktreeState{
 		loaded: true,
 		repo:   true,
+		root:   "/repo",
 		list: []ipc.WorktreeInfo{
 			{Path: "/repo", Branch: "master", Main: true},
 			{Path: "/repo-worktrees/feat-a", Branch: "feat-a"},
@@ -342,6 +348,69 @@ func TestHandleCreatePaneSplit_RefusesReplaceWithANewBranch(t *testing.T) {
 
 	if len(fake.sent) != 0 {
 		t.Errorf("a replace-with-new-worktree was sent: %+v", fake.sent)
+	}
+	if got.flashText == "" {
+		t.Error("the refusal was silent")
+	}
+}
+
+// The spec must carry the REPOSITORY ROOT the daemon reported, never the
+// browsed directory. `git worktree list` succeeds from any subdirectory, so
+// the field is offered while browsing <repo>/internal/tui — and deriving from
+// that puts a full second checkout at <repo>/internal/tui-worktrees/<branch>,
+// NESTED inside the first. A `git clean -xfd` in the main checkout then
+// deletes another pane's live work, and every tree-walking tool traverses it.
+//
+// protocol.go states the contract: the client must never compute this value.
+func TestHandleCreatePaneSplit_SendsTheRepoRootNotTheBrowsedDir(t *testing.T) {
+	m := newBranchModel(t)
+	fake := &fakeSender{}
+	m.client = fake
+	m.selectedPlugin = "terminal"
+	m.selectedCWD = m.cwdBrowseDir
+	m.worktreeNewBranch = "feat/x"
+	m.dialogCursor = 0
+
+	_, cmd := m.handleCreatePaneSplit()
+	runCmd(cmd)
+
+	if len(fake.sent) != 1 {
+		t.Fatalf("sent %d messages, want 1", len(fake.sent))
+	}
+	var p ipc.CreatePanePayload
+	if err := fake.sent[0].DecodePayload(&p); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if p.Worktree == nil {
+		t.Fatal("no worktree spec sent")
+	}
+	if p.Worktree.RepoRoot != "/repo" {
+		t.Errorf("RepoRoot = %q, want the repository root %q — the browsed dir would nest the worktree",
+			p.Worktree.RepoRoot, "/repo")
+	}
+}
+
+// With no listing answered yet the repository root is unknown, and falling
+// back to the browsed directory is exactly the nesting bug. Refuse instead.
+func TestHandleCreatePaneSplit_RefusesWhenTheRepoRootIsUnknown(t *testing.T) {
+	m := newBranchModel(t)
+	fake := &fakeSender{}
+	m.client = fake
+	m.selectedPlugin = "terminal"
+	m.selectedCWD = "/repo/internal/tui"
+	m.worktreeNewBranch = "feat/x"
+	m.worktrees.root = "" // listing never answered
+	m.dialogCursor = 0
+
+	updated, cmd := m.handleCreatePaneSplit()
+	runCmd(cmd)
+	got := updated.(Model)
+
+	for _, sent := range fake.sent {
+		var p ipc.CreatePanePayload
+		if err := sent.DecodePayload(&p); err == nil && p.Worktree != nil {
+			t.Errorf("a create was sent with an unknown repo root: %+v", p.Worktree)
+		}
 	}
 	if got.flashText == "" {
 		t.Error("the refusal was silent")

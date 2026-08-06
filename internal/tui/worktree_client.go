@@ -142,17 +142,35 @@ const worktreeAddTimeout = 120 * time.Second
 // SUCCESS needs nothing here: the pane arrives in the next workspace broadcast
 // and fills the placeholder exactly as an ordinary create does.
 //
-// FAILURE has to unwind by hand, and nothing else will. handleCreatePaneSplit
-// splits the layout tree and arms pendingSplit BEFORE the send, and
-// applyWorkspaceState only FILLS placeholders — it never retires one whose
-// pane never arrives. Without this the tab keeps a dead placeholder leaf and
-// the next pane created anywhere in that tab is swallowed by it.
+// FAILURE has to unwind by hand. applyWorkspaceState DOES prune unfilled
+// placeholders on every broadcast — but it is deliberately suppressed for a
+// tab with a create in flight (see the exemption there), precisely because a
+// worktree add holds its placeholder for SECONDS rather than the microseconds
+// an ordinary create takes, and pruning mid-flight detaches the node that
+// pendingSplit still points at. So while the exemption holds, this handler and
+// the timeout beside it are the ONLY things that can retire the placeholder,
+// and pendingSplit is never cleaned up by the broadcast path at all.
 //
-// That window is a microsecond for an ordinary create. A worktree add stretches
-// it to seconds, which is what makes the failure reachable at all.
+// Without this the tab keeps a dead placeholder leaf and the next pane created
+// anywhere in that tab is swallowed by it.
 func (m *Model) applyCreatePaneResp(p ipc.CreatePaneRespPayload) {
-	tabID := m.worktreeCreateTab
-	m.worktreeCreateTab = ""
+	// Keyed on what the DAEMON echoed, never on client-side "the last create
+	// I started". protocol.go calls the echoed spec the client's staleness
+	// key for exactly this reason: two creates can be in flight and their
+	// responses can arrive in either order, so a scalar cursor unwinds the
+	// wrong tab — or, worse, the wrong tab's LIVE placeholder.
+	//
+	// A nil spec means this is somebody else's create_pane_resp (the MCP
+	// bridge uses the same message with no worktree), which owns no
+	// placeholder of ours.
+	if p.Worktree == nil {
+		return
+	}
+	tabID := p.TabID
+	if !m.worktreeCreates[tabID] {
+		return // not ours, or already settled
+	}
+	delete(m.worktreeCreates, tabID)
 	if p.Error == "" {
 		return
 	}
@@ -161,18 +179,29 @@ func (m *Model) applyCreatePaneResp(p ipc.CreatePaneRespPayload) {
 		tab.invalidateLeaves()
 	}
 	delete(m.pendingSplit, tabID)
-	// git's own stderr, sanitized at render like every daemon-sourced string:
-	// under --remote this text comes from a host the user may not control.
-	m.setFlash("worktree not created: " + sanitizeRemoteText(p.Error))
+	// git's own stderr, bounded then sanitized. Bounding is separate from
+	// sanitizing and both are needed: sanitizeRemoteText removes escapes
+	// without shortening anything, and the status bar drops its whole right
+	// half rather than wrapping when a flash outgrows it.
+	m.setFlash("worktree not created: " + truncateToWidth(sanitizeRemoteText(p.Error), createErrFlashCap))
 }
+
+// createErrFlashCap bounds git's stderr in the status-bar flash. A remote
+// daemon chooses this text, and the same "sanitising is not bounding" rule the
+// project form documents applies here.
+const createErrFlashCap = 160
 
 // applyCreatePaneTimeout unwinds a create that never answered, so a wedged or
 // restarted daemon cannot leave the tab holding a placeholder forever.
 func (m *Model) applyCreatePaneTimeout(tabID string) {
-	if m.worktreeCreateTab != tabID {
+	if !m.worktreeCreates[tabID] {
 		return // already settled by a response
 	}
-	m.applyCreatePaneResp(ipc.CreatePaneRespPayload{
-		Error: "timed out waiting for the worktree to be created",
-	})
+	delete(m.worktreeCreates, tabID)
+	if tab := m.tabByID(tabID); tab != nil && tab.Root != nil {
+		tab.Root.PrunePlaceholders()
+		tab.invalidateLeaves()
+	}
+	delete(m.pendingSplit, tabID)
+	m.setFlash("worktree not created: timed out waiting for the worktree to be created")
 }

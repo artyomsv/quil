@@ -139,3 +139,60 @@ func TestSnapshot_DoesNotPersistSpawnError(t *testing.T) {
 		t.Error("SpawnError was persisted — a restored worktree would carry a stale complaint")
 	}
 }
+
+// The shared decision both restore and RESTART make. Extracted into one
+// helper precisely so the remedy path cannot drift from the restore path:
+// Alt+R is what the error screen advertises, so spawning there while the
+// worktree is still missing would put a shell in the daemon's default
+// directory — the relocation this whole path exists to prevent.
+func TestRefuseMissingWorktree(t *testing.T) {
+	d := newTestDaemon(t)
+	present := t.TempDir()
+	missing := filepath.Join(t.TempDir(), "vanished")
+
+	tests := []struct {
+		name string
+		pane *Pane
+		want bool
+	}{
+		{"worktree-owned and gone", &Pane{ID: "p1", CWD: missing, WorktreeOwned: true}, true},
+		{"worktree-owned and present", &Pane{ID: "p2", CWD: present, WorktreeOwned: true}, false},
+		{"ordinary pane, gone cwd", &Pane{ID: "p3", CWD: missing}, false},
+		{"worktree-owned, no cwd", &Pane{ID: "p4", WorktreeOwned: true}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := d.refuseMissingWorktree(tt.pane); got != tt.want {
+				t.Errorf("refuseMissingWorktree = %v, want %v", got, tt.want)
+			}
+			if tt.want && tt.pane.SpawnError == "" {
+				t.Error("refused without recording a reason")
+			}
+			if !tt.want && tt.pane.SpawnError != "" {
+				t.Errorf("recorded %q for a pane it did not refuse", tt.pane.SpawnError)
+			}
+		})
+	}
+}
+
+// Cleared in spawnPane rather than at each caller, because the field means
+// "this pane has no process" and spawnPane is the one function that gives it
+// one. handleRestartPaneReq does NOT go through spawnRestoredPane, so clearing
+// it only there left Alt+R reviving the pane while the stale error stayed
+// painted over it — the user typing blind into a live shell.
+func TestSpawnPane_ClearsAStaleSpawnError(t *testing.T) {
+	d := newTestDaemon(t)
+	dir := t.TempDir()
+	pane := &Pane{ID: "pane-0000000e", CWD: dir, Type: "terminal", SpawnError: "worktree is gone: somewhere"}
+
+	if err := d.spawnPane(pane, newRestoredPTY(paneSize(pane)), false); err != nil {
+		t.Fatalf("spawnPane: %v", err)
+	}
+	pane.PluginMu.Lock()
+	got := pane.SpawnError
+	pane.PluginMu.Unlock()
+
+	if got != "" {
+		t.Errorf("SpawnError = %q after a successful spawn, want it cleared", got)
+	}
+}

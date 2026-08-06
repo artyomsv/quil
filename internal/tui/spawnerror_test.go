@@ -3,6 +3,8 @@ package tui
 import (
 	"strings"
 	"testing"
+
+	"charm.land/lipgloss/v2"
 )
 
 // The message is rendered in the pane's OWN rect, not as a modal: restore can
@@ -64,4 +66,43 @@ func TestSyncPaneMeta_CarriesTheSpawnError(t *testing.T) {
 	if pane.SpawnError != "worktree is gone: /wt/feat-x" {
 		t.Errorf("SpawnError = %q, want the daemon's message", pane.SpawnError)
 	}
+}
+
+// lipgloss.Place pads but never CLIPS, so an over-wide block is returned whole
+// and the pane body grows past its rect, shifting the whole tab's layout.
+// Reachable without an attacker: spawnRestoredPane sets the error during
+// restore, BEFORE the pane's first size message, so Width/Height can still be
+// zero — and the message interpolates a full worktree path.
+func TestPaneView_SpawnErrorNeverOutgrowsThePane(t *testing.T) {
+	long := "worktree is gone: " + strings.Repeat("/home/u/projects/quil-worktrees/feat-x", 6)
+	for _, size := range []struct{ w, h int }{
+		{0, 0}, {1, 1}, {3, 2}, {5, 3}, {10, 5}, {24, 8}, {80, 24},
+	} {
+		p := NewPaneModel("p1", 1024)
+		p.SpawnError = long
+		p.Width, p.Height = size.w, size.h
+
+		// Compared against the SAME pane with no error rather than against
+		// size.w: a pane has an inherent floor (two borders plus a one-cell
+		// content minimum), so the honest invariant is that the message does
+		// not make the pane any wider than it would otherwise be.
+		clean := NewPaneModel("p1", 1024)
+		clean.Width, clean.Height = size.w, size.h
+		want := widestLine(stripANSI(clean.View()))
+
+		if got := widestLine(stripANSI(p.View())); got > want {
+			t.Errorf("%dx%d: pane is %d cells with a spawn error, %d without — the message overflows its rect",
+				size.w, size.h, got, want)
+		}
+	}
+}
+
+func widestLine(s string) int {
+	widest := 0
+	for _, line := range strings.Split(s, "\n") {
+		if w := lipgloss.Width(line); w > widest {
+			widest = w
+		}
+	}
+	return widest
 }

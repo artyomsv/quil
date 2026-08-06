@@ -14,6 +14,12 @@ const branchRejected = " ~^:?*[\\\x7f"
 // worktreesSuffix names the sibling directory linked worktrees live in.
 const worktreesSuffix = "-worktrees"
 
+// maxBranchLen bounds the name. It becomes a path SEGMENT, and most
+// filesystems refuse a component past 255 bytes — while the IPC frame allows
+// megabytes, so without this a huge name is derived into a huge path and
+// handed to git.
+const maxBranchLen = 255
+
 // ValidateBranch rejects a name that cannot safely be BOTH a git ref and a
 // path segment.
 //
@@ -40,9 +46,6 @@ func ValidateBranch(name string) error {
 	if strings.HasPrefix(name, "/") || strings.HasSuffix(name, "/") {
 		return fmt.Errorf("branch name may not start or end with %q", "/")
 	}
-	if strings.HasPrefix(name, ".") {
-		return fmt.Errorf("branch name may not start with %q", ".")
-	}
 	if strings.Contains(name, "//") {
 		return fmt.Errorf("branch name may not contain %q", "//")
 	}
@@ -52,8 +55,30 @@ func ValidateBranch(name string) error {
 	if strings.Contains(name, "@{") {
 		return fmt.Errorf("branch name may not contain %q", "@{")
 	}
-	if strings.HasSuffix(name, ".lock") {
-		return fmt.Errorf("branch name may not end in %q", ".lock")
+	if name == "@" {
+		return fmt.Errorf("branch name may not be %q", "@")
+	}
+	if strings.HasSuffix(name, ".") {
+		return fmt.Errorf("branch name may not end with %q", ".")
+	}
+	// PER COMPONENT, not just on the whole name: git applies these rules to
+	// every slash-separated part, so "feat/.hidden" and "feat/x.lock" are both
+	// refused by git. Checking only the whole name let them through to cost a
+	// permit, a single-flight slot and a subprocess before failing — which is
+	// exactly the fail-fast property this function exists to provide.
+	for _, part := range strings.Split(name, "/") {
+		if strings.HasPrefix(part, ".") {
+			return fmt.Errorf("no part of a branch name may start with %q", ".")
+		}
+		if strings.HasSuffix(part, ".lock") {
+			return fmt.Errorf("no part of a branch name may end in %q", ".lock")
+		}
+	}
+	// Bounded. The name becomes a path segment, and most filesystems refuse a
+	// component past 255 bytes — but the IPC frame allows megabytes, so
+	// without this a huge name is derived into a huge path and handed to git.
+	if len(name) > maxBranchLen {
+		return fmt.Errorf("branch name is longer than %d characters", maxBranchLen)
 	}
 	// filepath.IsAbs is platform-dependent, so the colon is checked outright
 	// as well: a Linux daemon must still reject "C:/evil", which IsAbs there

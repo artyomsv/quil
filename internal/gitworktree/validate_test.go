@@ -113,3 +113,29 @@ func TestDerivePath_FlatteningCanCollide(t *testing.T) {
 		t.Skip("flattening no longer collides; the Add error path covers this instead")
 	}
 }
+
+// git applies its ref rules to every slash-separated COMPONENT, not just the
+// whole name. Checking only the whole name let these through to cost a permit,
+// a single-flight slot and a subprocess before git refused them — defeating
+// the fail-fast property this function exists for.
+func TestValidateBranch_PerComponentRules(t *testing.T) {
+	for _, branch := range []string{
+		"feat/.hidden",  // component starts with a dot
+		"feat/x.lock",   // component ends in .lock
+		"a/b/.c",        // deeper component
+		"feat.",         // trailing dot
+		"@",             // the lone @ ref
+		strings.Repeat("x", maxBranchLen+1), // unbounded name
+	} {
+		if err := ValidateBranch(branch); err == nil {
+			t.Errorf("ValidateBranch(%.40q) accepted a name git refuses", branch)
+		}
+	}
+}
+
+// The bound is on the whole name and must not reject ordinary ones.
+func TestValidateBranch_AcceptsAtTheLengthLimit(t *testing.T) {
+	if err := ValidateBranch(strings.Repeat("x", maxBranchLen)); err != nil {
+		t.Errorf("a %d-character name was refused: %v", maxBranchLen, err)
+	}
+}

@@ -2317,6 +2317,7 @@ func TestSubmitSetupDialog_WorktreeChangeDropsAStaleSession(t *testing.T) {
 func TestHandleSetupWorktreeKey_UpDownMoveCursor(t *testing.T) {
 	m := Model{}
 	p := &plugin.PanePlugin{}
+	m.worktrees.loaded, m.worktrees.repo = true, true
 	m.worktrees.list = []ipc.WorktreeInfo{
 		{Path: "/repo-worktrees/a", Branch: "feat-a"},
 		{Path: "/repo-worktrees/b", Branch: "feat-b"},
@@ -2352,6 +2353,7 @@ func TestHandleSetupWorktreeKey_UpDownMoveCursor(t *testing.T) {
 func TestHandleSetupWorktreeKey_EnterCommitsChoiceAndDropsSession(t *testing.T) {
 	m := Model{}
 	p := &plugin.PanePlugin{}
+	m.worktrees.loaded, m.worktrees.repo = true, true
 	m.worktrees.list = []ipc.WorktreeInfo{{Path: "/repo-worktrees/feat-x", Branch: "feat-x"}}
 	m.worktreeCursor = 1 // row 0 is "off"
 	m.selectedSessionID = "sess-1"
@@ -2373,6 +2375,7 @@ func TestHandleSetupWorktreeKey_EnterCommitsChoiceAndDropsSession(t *testing.T) 
 func TestHandleSetupWorktreeKey_EnterOnOffRowTurnsSelectionOff(t *testing.T) {
 	m := Model{}
 	p := &plugin.PanePlugin{}
+	m.worktrees.loaded, m.worktrees.repo = true, true
 	m.worktrees.list = []ipc.WorktreeInfo{{Path: "/repo-worktrees/feat-x", Branch: "feat-x"}}
 	m.selectedWorktree = "/repo-worktrees/feat-x"
 	m.worktreeCursor = 0 // row 0 is "off"
@@ -2390,6 +2393,7 @@ func TestHandleSetupWorktreeKey_EnterOnOffRowTurnsSelectionOff(t *testing.T) {
 func TestHandleSetupWorktreeKey_EnterOnDisabledRowRefused(t *testing.T) {
 	m := Model{}
 	p := &plugin.PanePlugin{}
+	m.worktrees.loaded, m.worktrees.repo = true, true
 	m.worktrees.list = []ipc.WorktreeInfo{
 		{Path: "/repo-worktrees/locked", Branch: "wip", Locked: true},
 	}

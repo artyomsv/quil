@@ -366,10 +366,19 @@ const sidebarEdgeHitPadding = 1
 // Row 0 is included and the last row excluded, matching
 // projectSidebarSwallowsMouse: the sidebar's own first row occupies row 0 in
 // these columns, while the status bar is still drawn full width beneath it.
+// Row 0 takes the sidebar's OWN column only. The tab bar starts at screen
+// column projectSidebarWidth() (hitTestTab documents this), so extending the
+// pane-side padding column into row 0 would swallow the first cell of tab 1 —
+// a click there would arm a sidebar drag and, released without motion, do
+// nothing at all. The sidebar's own last column is still grabbable on every
+// row including this one.
 func (m Model) hitTestSidebarEdge(x, y int) bool {
 	w := m.projectSidebarWidth()
 	if w <= 0 || y < 0 || y >= m.height-1 {
 		return false
+	}
+	if y == 0 {
+		return x == w-sidebarEdgeHitPadding
 	}
 	return x >= w-sidebarEdgeHitPadding && x <= w
 }

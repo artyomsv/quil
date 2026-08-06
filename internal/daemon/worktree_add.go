@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/artyomsv/quil/internal/gitworktree"
@@ -79,6 +80,22 @@ func (d *Daemon) worktreeAddAndCreate(p ipc.CreatePanePayload) ipc.CreatePaneRes
 		// Would otherwise reach DerivePath and resolve against the daemon's
 		// own working directory, putting a checkout somewhere nobody named.
 		return fail("no repository given for the worktree")
+	}
+	// ABSOLUTE, or the derived path is relative and its two consumers resolve
+	// it against different bases: gitworktree.Add runs with cmd.Dir = RepoRoot
+	// so git creates the tree under the repository, while the os.Stat in
+	// createPaneInWorktree resolves against the DAEMON's working directory.
+	// The stat then fails, the create is reported as failed, and the checkout
+	// git just made is orphaned on disk with a branch pointing at it.
+	if !filepath.IsAbs(spec.RepoRoot) {
+		return fail("the repository path must be absolute")
+	}
+	// Checked BEFORE the expensive work, as well as after it. The post-add
+	// re-check exists because the tab can close DURING a checkout; this one
+	// exists so a client sending a bogus tab id cannot spend a full checkout
+	// (and leave it behind) per request.
+	if d.session.Tab(p.TabID) == nil {
+		return fail("no such tab")
 	}
 
 	if !d.beginWorktreeAdd() {

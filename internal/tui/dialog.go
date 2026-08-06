@@ -253,10 +253,18 @@ func settingsFields() []settingsField {
 			set: func(m *Model, v string) {
 				n, err := strconv.Atoi(v)
 				// Refused rather than written-and-corrected: sidebarWidth()
-				// clamps at render, so a stored 0 would display as 0 while
-				// the layout used defaultSidebarWidth. The dialog must never
-				// show a number the layout is not using.
-				if err != nil || n <= 0 || n == m.cfg.UI.SidebarWidth {
+				// clamps at render, so a stored value outside the usable range
+				// would be displayed while the layout used something else. The
+				// dialog must never show a number the layout is not using.
+				//
+				// Bounded by the SAME limits the edge drag enforces —
+				// minSidebarWidth below, and sidebarWidth's own
+				// total-minTermWidth clamp above — so the two entry points
+				// cannot disagree about what is settable.
+				if err != nil || n < minSidebarWidth || n == m.cfg.UI.SidebarWidth {
+					return
+				}
+				if m.width > 0 && n != sidebarWidth(m.width, true, n) {
 					return
 				}
 				m.cfg.UI.SidebarWidth = n
@@ -1639,7 +1647,17 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 	// silently never be sent and every "new branch" would spawn an ordinary
 	// pane in the repository root — the exact silent relocation this feature
 	// exists to prevent.
-	newBranch, newBranchRepo := m.worktreeNewBranch, m.cwdBrowseDir
+	//
+	// The repo root is the DAEMON's answer (worktreeState.root, the main
+	// checkout it reported), never the browsed directory. `git worktree list`
+	// succeeds from any subdirectory, so the field is offered while browsing
+	// e.g. <repo>/internal/tui — and DerivePath would then put a full second
+	// checkout at <repo>/internal/tui-worktrees/<branch>, NESTED inside the
+	// first. That is precisely what the sibling layout exists to prevent: a
+	// `git clean -xfd` in the main checkout deletes another pane's live work,
+	// and every tree-walking tool traverses it. protocol.go says outright that
+	// the client must never compute this value.
+	newBranch, newBranchRepo := m.worktreeNewBranch, m.worktrees.root
 	if cwd != "" {
 		m.lastSelectedCWD = cwd
 		m.recentCWDs = pushRecentCWD(m.recentCWDs, cwd, recentCWDMax)
@@ -1760,13 +1778,29 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 	}
 	m.pendingSplit[tab.ID] = placeholder
 
-	// The spec, when the user asked for a new branch. RepoRoot is the browsed
-	// directory — the one the DAEMON's browse answered with, so no path built
-	// on this machine reaches the far one.
+	// The spec, when the user asked for a new branch. RepoRoot is the main
+	// checkout the DAEMON reported, so no path built on this machine reaches
+	// the far one and the worktree cannot land inside the repository.
 	var spec *ipc.WorktreeSpec
 	if newBranch != "" {
+		if newBranchRepo == "" {
+			// The listing never answered, so the repository root is unknown.
+			// Refused rather than falling back to the browsed directory: that
+			// fallback is exactly the nested-worktree bug.
+			m.setFlash("worktree not created: the repository root is not known yet")
+			return m, m.flashCmd()
+		}
 		spec = &ipc.WorktreeSpec{RepoRoot: newBranchRepo, Branch: newBranch}
-		m.worktreeCreateTab = tab.ID
+		// Keyed by TAB, not a single slot: two worktree creates can be in
+		// flight at once (the dialog closes on submit, so a second Ctrl+N is
+		// immediate), and the daemon's single-flight rejects the second
+		// INSTANTLY while the first is still checking out — so responses
+		// routinely arrive out of order. A scalar would be overwritten by the
+		// second create and leave the first's placeholder stranded forever.
+		if m.worktreeCreates == nil {
+			m.worktreeCreates = make(map[string]bool)
+		}
+		m.worktreeCreates[tab.ID] = true
 	}
 
 	send := func() tea.Msg {
@@ -3613,6 +3647,9 @@ func (m Model) handleSetupKubeKey(p *plugin.PanePlugin, key string) (tea.Model, 
 // fields the user may want to adjust (toggles, session) before Continue.
 func (m Model) handleSetupWorktreeKey(p *plugin.PanePlugin, key string) (tea.Model, tea.Cmd) {
 	rows := m.worktreeRows()
+	// Empty means the field is in one of its four one-line states — the same
+	// gate the renderer applies. Inert rather than silently accumulating
+	// keystrokes into a name nothing is displaying.
 	if len(rows) == 0 {
 		return m, nil
 	}
@@ -3964,9 +4001,18 @@ func (m Model) renderSetupWorktreeField(focused bool) string {
 	start, end := historyWindow(len(rows), m.worktreeCursor, m.worktreeScroll, visible)
 	for i := start; i < end; i++ {
 		mark := "    "
-		if i == m.worktreeCursor {
+		switch {
+		case i == m.worktreeCursor:
 			mark = "  > "
-		} else if rows[i].path == m.selectedWorktree {
+		case m.worktreeNewBranch != "":
+			// With a new branch pending, the committed choice is the
+			// "+ new branch…" row — NOT the off row. Matching on
+			// selectedWorktree alone marked "off" (both are ""), so the
+			// expanded list contradicted the collapsed summary.
+			if rows[i].path == worktreeNewRowPath {
+				mark = setupRowIdleMark
+			}
+		case rows[i].path == m.selectedWorktree:
 			mark = setupRowIdleMark
 		}
 		text := sanitizeRemoteText(rows[i].label)
@@ -4000,7 +4046,22 @@ type worktreeRow struct {
 // this is not one.
 const worktreeNewRowPath = "\x00new"
 
+// worktreeFieldInteractive reports whether the field is showing a LIST the
+// cursor can walk, as opposed to one of the four one-line states
+// (scanning / never asked / errored / not a repository).
+//
+// The renderer early-returns on those; the key handler must agree, or Down
+// then Enter while the field reads "scanning…" arms naming mode with no UI at
+// all and every later keystroke is silently appended to a branch name the user
+// cannot see.
+func (m Model) worktreeFieldInteractive() bool {
+	return !m.worktrees.pending && m.worktrees.loaded && m.worktrees.err == "" && m.worktrees.repo
+}
+
 func (m Model) worktreeRows() []worktreeRow {
+	if !m.worktreeFieldInteractive() {
+		return nil
+	}
 	rows := []worktreeRow{{label: "off — use the directory above", path: ""}}
 	for _, w := range m.worktrees.list {
 		if w.Main {

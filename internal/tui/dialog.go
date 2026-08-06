@@ -1769,7 +1769,7 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 		m.worktreeCreateTab = tab.ID
 	}
 
-	return m, func() tea.Msg {
+	send := func() tea.Msg {
 		msg, _ := ipc.NewMessage(ipc.MsgCreatePane, ipc.CreatePanePayload{
 			TabID:           tabID,
 			CWD:             cwd,
@@ -1782,6 +1782,16 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 		m.sendForDest(tabDest, msg)
 		return nil
 	}
+	if spec == nil {
+		return m, send
+	}
+	// Only a worktree create is armed with a give-up: an ordinary create is
+	// answered by the next workspace broadcast and holds its placeholder for
+	// microseconds, so a timer there would be a timer that never usefully
+	// fires.
+	return m, tea.Batch(send, tea.Tick(createPaneTimeout, func(time.Time) tea.Msg {
+		return createPaneTimeoutMsg{tabID: tabID}
+	}))
 }
 
 func (m Model) renderCreatePaneDialog() string {

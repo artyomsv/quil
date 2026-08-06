@@ -3,6 +3,7 @@ package tui
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/plugin"
@@ -14,6 +15,13 @@ func newBranchModel(t *testing.T) Model {
 	// real active pane to split: a tab with none returns nil before it ever
 	// reaches the payload, so a bare model would make every wire assertion
 	// below vacuously "pass" by never running.
+	// A worktree create arms a give-up tick alongside its send, and runCmd
+	// executes the whole batch — so at the production value every wire test
+	// here would block for two and a half minutes.
+	prevTimeout := createPaneTimeout
+	createPaneTimeout = time.Millisecond
+	t.Cleanup(func() { createPaneTimeout = prevTimeout })
+
 	m := *newSplitDragTestModel(t)
 	m.width, m.height = 120, 44
 	// setupDialogWidth reads the registry to size the box against toggle
@@ -251,7 +259,7 @@ func TestHandleCreatePaneSplit_SendsTheWorktreeSpec(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("no command returned — nothing was sent")
 	}
-	cmd()
+	runCmd(cmd)
 
 	if len(fake.sent) != 1 {
 		t.Fatalf("sent %d messages, want 1", len(fake.sent))
@@ -285,7 +293,7 @@ func TestHandleCreatePaneSplit_NoSpecWithoutANewBranch(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("no command returned")
 	}
-	cmd()
+	runCmd(cmd)
 
 	var p ipc.CreatePanePayload
 	if err := fake.sent[0].DecodePayload(&p); err != nil {

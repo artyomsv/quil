@@ -1927,6 +1927,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.applyWorktreeList(msg)
 		return m, m.listenForMessages()
 
+	case createPaneRespMsg:
+		// Same rule: an IPC response arm that returns a bare nil ends the
+		// listen loop for the session.
+		m.applyCreatePaneResp(msg.Resp)
+		return m, m.listenForMessages()
+
+	case createPaneTimeoutMsg:
+		// Local timer, so deliberately NO re-arm — the same distinction
+		// worktreeTimeoutMsg below makes.
+		m.applyCreatePaneTimeout(msg.tabID)
+		return m, nil
+
 	case worktreeTimeoutMsg:
 		// Local timer, so deliberately no re-arm.
 		m.applyWorktreeTimeout(msg)
@@ -5271,6 +5283,14 @@ func (m Model) listenForMessages() tea.Cmd {
 				return listenContinueMsg{}
 			}
 			return worktreeListMsg{Resp: resp, Gen: msg.ID}
+
+		case ipc.MsgCreatePaneResp:
+			var resp ipc.CreatePaneRespPayload
+			if err := msg.DecodePayload(&resp); err != nil {
+				log.Printf("create pane resp: decode: %v", err)
+				return listenContinueMsg{}
+			}
+			return createPaneRespMsg{Resp: resp}
 
 		case ipc.MsgDirsExistResp:
 			var payload ipc.DirsExistRespPayload

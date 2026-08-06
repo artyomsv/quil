@@ -106,3 +106,73 @@ func (m *Model) applyWorktreeTimeout(msg worktreeTimeoutMsg) {
 	// repository has one worktree" must not render identically.
 	m.worktrees.err = "worktree scan timed out"
 }
+
+// createPaneTimeoutMsg fires when a worktree create has not answered. tabID
+// scopes it to the create that armed it, so a late tick cannot unwind a
+// placeholder a LATER create is legitimately holding.
+type createPaneTimeoutMsg struct{ tabID string }
+
+// createPaneRespMsg carries the daemon's answer to a create that asked for a
+// new worktree. Only such creates get one — an ordinary create is synchronous
+// and its result arrives in the next workspace broadcast.
+type createPaneRespMsg struct {
+	Resp ipc.CreatePaneRespPayload
+}
+
+// createPaneTimeout bounds the wait for that answer.
+//
+// Deliberately LONGER than the daemon's worktreeAddTimeout: giving up first
+// would prune a placeholder the daemon is about to fill, so the pane would
+// arrive with nowhere to go. The two are tied together here rather than being
+// two independent numbers that can drift apart silently.
+// A var, not a const, so the test binary can shorten it — the same reason
+// worktreeScanTimeout is one. A test that drives the real send executes the
+// tick alongside it, and at the production value that is a two-and-a-half
+// minute unit test.
+var createPaneTimeout = worktreeAddTimeout + 30*time.Second
+
+// worktreeAddTimeout mirrors the daemon constant of the same name. Duplicated
+// rather than imported because internal/daemon is not an import this package
+// takes — but the RELATIONSHIP is what matters and is asserted by
+// TestCreatePaneTimeout_ExceedsTheDaemonAddTimeout.
+const worktreeAddTimeout = 120 * time.Second
+
+// applyCreatePaneResp settles a worktree-backed create.
+//
+// SUCCESS needs nothing here: the pane arrives in the next workspace broadcast
+// and fills the placeholder exactly as an ordinary create does.
+//
+// FAILURE has to unwind by hand, and nothing else will. handleCreatePaneSplit
+// splits the layout tree and arms pendingSplit BEFORE the send, and
+// applyWorkspaceState only FILLS placeholders — it never retires one whose
+// pane never arrives. Without this the tab keeps a dead placeholder leaf and
+// the next pane created anywhere in that tab is swallowed by it.
+//
+// That window is a microsecond for an ordinary create. A worktree add stretches
+// it to seconds, which is what makes the failure reachable at all.
+func (m *Model) applyCreatePaneResp(p ipc.CreatePaneRespPayload) {
+	tabID := m.worktreeCreateTab
+	m.worktreeCreateTab = ""
+	if p.Error == "" {
+		return
+	}
+	if tab := m.tabByID(tabID); tab != nil && tab.Root != nil {
+		tab.Root.PrunePlaceholders()
+		tab.invalidateLeaves()
+	}
+	delete(m.pendingSplit, tabID)
+	// git's own stderr, sanitized at render like every daemon-sourced string:
+	// under --remote this text comes from a host the user may not control.
+	m.setFlash("worktree not created: " + sanitizeRemoteText(p.Error))
+}
+
+// applyCreatePaneTimeout unwinds a create that never answered, so a wedged or
+// restarted daemon cannot leave the tab holding a placeholder forever.
+func (m *Model) applyCreatePaneTimeout(tabID string) {
+	if m.worktreeCreateTab != tabID {
+		return // already settled by a response
+	}
+	m.applyCreatePaneResp(ipc.CreatePaneRespPayload{
+		Error: "timed out waiting for the worktree to be created",
+	})
+}

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.51.0] - 2026-08-06
+
 ### Added
 - **A new pane can now be opened directly in one of the repository's git
   worktrees.** The create-pane dialog lists them under the directory you pick,

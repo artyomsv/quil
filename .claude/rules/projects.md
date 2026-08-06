@@ -483,6 +483,22 @@ OSC 7 rewrites a pane's CWD on every `cd`, so without it one shell roaming a
 monorepo adds a map entry per directory it visits and `byDir` keeps every
 checkout ever seen — against a daemon that runs for weeks.
 
+**The worktree's NAME costs nothing, and where it comes from is the reason.**
+git spells a linked checkout's per-checkout git dir `<common>/worktrees/<name>`,
+so `filepath.Base(gitDir)` IS the name at the exact line that already computes
+`LinkedWorktree` — no fourth plumbing call. It is set in **both**
+`gitinfo.Probe` and the `gitcache` placeholder entry, and neither is redundant:
+`gitcache` assigns `e.info = info` wholesale, so a field only the placeholder
+sets is dropped on the first successful probe, while a field only `Probe` sets
+is missing for the tick between resolving a CWD and that probe landing — which
+is the tick right after a pane is created in a worktree, i.e. the one the user
+is looking at. Derived daemon-side because separators belong to the machine
+holding the disk; a Windows daemon's path split by a Linux client's
+`filepath.Base` returns the whole string. `gitRow` SUPPRESSES it when it is
+just the branch with `/`→`-` (the near-universal convention), because
+restating the branch costs eight cells of a 22-cell row — but never for a
+detached checkout, which has no branch to restate.
+
 **Keyed by the PER-CHECKOUT git dir, not the common dir** as the design spec
 called for: linked worktrees share a common dir while sitting on different
 branches, which is the entire reason anyone creates one, so a common-dir key

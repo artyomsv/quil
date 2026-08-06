@@ -2257,3 +2257,214 @@ func TestWorktreeVisibleRows_ShrinksOnShortTerminal(t *testing.T) {
 		t.Errorf("height %d: worktreeVisibleRows = %d, want the cap %d", veryTall, got, worktreeListVisibleRows)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Worktree field: key handling, submit, and CWD-change reset
+// ---------------------------------------------------------------------------
+
+// The chosen worktree becomes the pane's spawn CWD. This is the whole of
+// "attach" — CWD is an ordinary CreatePanePayload field, so no create-path
+// change is needed.
+func TestSubmitSetupDialog_WorktreeBecomesTheCWD(t *testing.T) {
+	m := Model{}
+	p := &plugin.PanePlugin{}
+	p.Command.PromptsCWD = true
+	m.cwdBrowseDir = "/repo"
+	m.selectedWorktree = "/repo-worktrees/feat-x"
+
+	updated, _ := m.submitSetupDialog(p)
+	got := updated.(Model)
+	if got.selectedCWD != "/repo-worktrees/feat-x" {
+		t.Errorf("selectedCWD = %q, want the worktree path", got.selectedCWD)
+	}
+}
+
+// Every value in the field is scoped to ONE repository: a listed worktree
+// belongs to it. Carrying a choice across a directory change would submit a
+// pane into a worktree of a repository the user navigated away from.
+func TestSetupDialog_ChangingTheDirectoryClearsTheWorktree(t *testing.T) {
+	m := Model{}
+	p := &plugin.PanePlugin{}
+	p.Command.PromptsCWD = true
+	m.cwdBrowseDir = "/repo"
+	m.selectedWorktree = "/repo-worktrees/feat-x"
+
+	m.onSetupCWDChanged(p, "/other")
+	if m.selectedWorktree != "" {
+		t.Errorf("selectedWorktree = %q, want cleared", m.selectedWorktree)
+	}
+}
+
+// The session listing is scoped to the directory the pane will actually spawn
+// in. submit is the load-bearing check: the user can pick a session, change
+// the worktree, and press Continue without ever re-focusing the session field.
+func TestSubmitSetupDialog_WorktreeChangeDropsAStaleSession(t *testing.T) {
+	m := Model{}
+	p := &plugin.PanePlugin{}
+	p.Command.PromptsCWD = true
+	p.Command.Sessions = "claude"
+	m.cwdBrowseDir = "/repo"
+	m.sessionScanCWD = "/repo"
+	m.selectedSessionID = "11111111-1111-1111-1111-111111111111"
+	m.selectedWorktree = "/repo-worktrees/feat-x"
+
+	updated, _ := m.submitSetupDialog(p)
+	if got := updated.(Model); got.selectedSessionID != "" {
+		t.Errorf("selectedSessionID = %q, want dropped — it was listed for a different directory", got.selectedSessionID)
+	}
+}
+
+// Arrow keys move the cursor across every row, including "off" (row 0) and
+// clamp at both ends rather than wrapping.
+func TestHandleSetupWorktreeKey_UpDownMoveCursor(t *testing.T) {
+	m := Model{}
+	p := &plugin.PanePlugin{}
+	m.worktrees.list = []ipc.WorktreeInfo{
+		{Path: "/repo-worktrees/a", Branch: "feat-a"},
+		{Path: "/repo-worktrees/b", Branch: "feat-b"},
+	}
+	// rows: off, feat-a, feat-b
+
+	updated, _ := m.handleSetupWorktreeKey(p, "down")
+	m = updated.(Model)
+	if m.worktreeCursor != 1 {
+		t.Fatalf("cursor = %d, want 1", m.worktreeCursor)
+	}
+	updated, _ = m.handleSetupWorktreeKey(p, "down")
+	m = updated.(Model)
+	if m.worktreeCursor != 2 {
+		t.Fatalf("cursor = %d, want 2", m.worktreeCursor)
+	}
+	// Clamped at the bottom row, not wrapped.
+	updated, _ = m.handleSetupWorktreeKey(p, "down")
+	m = updated.(Model)
+	if m.worktreeCursor != 2 {
+		t.Errorf("cursor = %d, want clamped at 2", m.worktreeCursor)
+	}
+	updated, _ = m.handleSetupWorktreeKey(p, "up")
+	m = updated.(Model)
+	if m.worktreeCursor != 1 {
+		t.Errorf("cursor = %d, want 1 after up", m.worktreeCursor)
+	}
+}
+
+// Enter on a selectable row commits the choice and drops any resume session
+// already picked — it was listed for the directory this selection just
+// changed, and submitSetupDialog's own guard is the load-bearing net for the
+// case where the user never revisits the session field at all.
+func TestHandleSetupWorktreeKey_EnterCommitsChoiceAndDropsSession(t *testing.T) {
+	m := Model{}
+	p := &plugin.PanePlugin{}
+	m.worktrees.list = []ipc.WorktreeInfo{{Path: "/repo-worktrees/feat-x", Branch: "feat-x"}}
+	m.worktreeCursor = 1 // row 0 is "off"
+	m.selectedSessionID = "sess-1"
+
+	updated, _ := m.handleSetupWorktreeKey(p, "enter")
+	got := updated.(Model)
+	if got.selectedWorktree != "/repo-worktrees/feat-x" {
+		t.Errorf("selectedWorktree = %q, want /repo-worktrees/feat-x", got.selectedWorktree)
+	}
+	if got.selectedSessionID != "" {
+		t.Errorf("selectedSessionID = %q, want cleared", got.selectedSessionID)
+	}
+}
+
+// Row 0 ("off") is always selectable and turns a previous choice back off —
+// distinct from onSetupCWDChanged's reset: the worktree LISTING is still
+// valid (it is scoped to cwdBrowseDir, which has not moved), only the
+// selection changes.
+func TestHandleSetupWorktreeKey_EnterOnOffRowTurnsSelectionOff(t *testing.T) {
+	m := Model{}
+	p := &plugin.PanePlugin{}
+	m.worktrees.list = []ipc.WorktreeInfo{{Path: "/repo-worktrees/feat-x", Branch: "feat-x"}}
+	m.selectedWorktree = "/repo-worktrees/feat-x"
+	m.worktreeCursor = 0 // row 0 is "off"
+
+	updated, _ := m.handleSetupWorktreeKey(p, "enter")
+	got := updated.(Model)
+	if got.selectedWorktree != "" {
+		t.Errorf("selectedWorktree = %q, want cleared by selecting the off row", got.selectedWorktree)
+	}
+}
+
+// A disabled row still ACCEPTS the cursor — it is not skipped — but Enter on
+// it is refused: the row exists to explain why that worktree is unavailable,
+// and a row the cursor cannot reach explains nothing.
+func TestHandleSetupWorktreeKey_EnterOnDisabledRowRefused(t *testing.T) {
+	m := Model{}
+	p := &plugin.PanePlugin{}
+	m.worktrees.list = []ipc.WorktreeInfo{
+		{Path: "/repo-worktrees/locked", Branch: "wip", Locked: true},
+	}
+
+	updated, _ := m.handleSetupWorktreeKey(p, "down")
+	m = updated.(Model)
+	if m.worktreeCursor != 1 {
+		t.Fatalf("cursor = %d, want 1 — a disabled row must still accept the cursor", m.worktreeCursor)
+	}
+
+	updated, _ = m.handleSetupWorktreeKey(p, "enter")
+	got := updated.(Model)
+	if got.selectedWorktree != "" {
+		t.Errorf("selectedWorktree = %q, want unchanged — Enter on a disabled row must be refused", got.selectedWorktree)
+	}
+}
+
+// The session listing is scoped to wherever the pane will actually spawn —
+// once a worktree is chosen, that is the worktree, not the browsed directory
+// above it. Mirrors TestEnsureSessionScan_RescanClearsSelection but keys off
+// setupSpawnDir() rather than cwdBrowseDir.
+func TestEnsureSessionScan_ScopesToTheChosenWorktree(t *testing.T) {
+	m := modelWithSessions(sessionRow("s1", "x", ""))
+	m.selectedSessionID = "s1"
+	m.selectedWorktree = "/repo-worktrees/feat-x" // cwdBrowseDir is still "/proj"
+
+	cmd := m.ensureSessionScan()
+
+	if cmd == nil {
+		t.Fatal("a chosen worktree must scope the listing to it, triggering a rescan")
+	}
+	if m.selectedSessionID != "" {
+		t.Errorf("selectedSessionID = %q, want cleared — it was listed for the pre-worktree directory", m.selectedSessionID)
+	}
+	if m.sessionScanCWD != "/repo-worktrees/feat-x" {
+		t.Errorf("sessionScanCWD = %q, want the worktree path", m.sessionScanCWD)
+	}
+}
+
+// The directory browser's Enter/Backspace navigation reaches a new
+// cwdBrowseDir only through this async round trip, not synchronously inside
+// handleSetupCWDKey — so a worktree chosen before browsing to a different
+// repository must be cleared here, or submitSetupDialog would submit a stale
+// worktree path from the repository the user just left.
+func TestApplyBrowseResponse_ClearsWorktreeOnRealNavigation(t *testing.T) {
+	t.Parallel()
+	m, _ := browserModel(t, "/repo-a", "/", []string{"work"})
+	m.selectedWorktree = "/repo-a-worktrees/feat-x"
+	m.worktreeCursor = 2
+	m.worktreeScroll = 1
+	m.worktrees = worktreeState{path: "/repo-a", loaded: true, repo: true}
+
+	runCmd(m.browseTo("/repo-b", "", ""))
+	if !m.browse.pending {
+		t.Fatal("expected a browse request in flight")
+	}
+	m.applyBrowseResponse(ipc.BrowseDirRespPayload{
+		Path:     m.browse.path,
+		Child:    m.browse.child,
+		Resolved: "/repo-b",
+	}, m.browse.gen)
+
+	if m.selectedWorktree != "" {
+		t.Errorf("selectedWorktree = %q, want cleared after navigating to a different directory", m.selectedWorktree)
+	}
+	if m.worktreeCursor != 0 || m.worktreeScroll != 0 {
+		t.Errorf("cursor/scroll = %d/%d, want both reset to 0", m.worktreeCursor, m.worktreeScroll)
+	}
+	if m.worktrees.loaded {
+		t.Error("worktrees listing must be dropped, not carried into the new directory")
+	}
+	if m.cwdBrowseDir != "/repo-b" {
+		t.Errorf("cwdBrowseDir = %q, want /repo-b", m.cwdBrowseDir)
+	}
+}

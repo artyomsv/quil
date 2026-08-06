@@ -99,15 +99,17 @@ func sessionScanTimeoutCmd(cwd string) tea.Cmd {
 	})
 }
 
-// ensureSessionScan issues a session listing for the currently highlighted
-// directory if the rows on hand do not already belong to it. Returns nil when
-// the existing rows are still valid, so re-focusing the field costs nothing.
+// ensureSessionScan issues a session listing for wherever the pane will
+// actually spawn (setupSpawnDir — the chosen worktree if any, else the
+// browsed directory) if the rows on hand do not already belong to it. Returns
+// nil when the existing rows are still valid, so re-focusing the field costs
+// nothing.
 //
 // Called when the session field gains focus rather than when the dialog opens:
 // creating a pane with a fresh session — the overwhelmingly common case — then
 // performs no session I/O at all.
 func (m *Model) ensureSessionScan() tea.Cmd {
-	cwd := m.cwdBrowseDir
+	cwd := m.setupSpawnDir()
 	if cwd == "" {
 		// No directory resolved yet (browser failed to load, or the plugin does
 		// not prompt for one). Nothing to scan against.

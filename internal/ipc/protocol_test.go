@@ -381,3 +381,60 @@ func TestMessageOriginIsNeverSerialized(t *testing.T) {
 		t.Fatalf("Origin survived a round trip: %q", back.Origin)
 	}
 }
+
+// A create with no worktree spec must stay wire-identical to today's, or every
+// existing client — MCP create_pane, the plugin dialog, restore — silently
+// changes shape.
+func TestCreatePanePayload_NoWorktreeIsWireIdentical(t *testing.T) {
+	got, err := json.Marshal(ipc.CreatePanePayload{TabID: "t1", Type: "terminal", CWD: "/x"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if bytes.Contains(got, []byte("worktree")) {
+		t.Errorf("payload carries a worktree key with no spec set: %s", got)
+	}
+}
+
+// The response echoes the spec VERBATIM on the ERROR path too: it is the
+// client's staleness key, and the client holds a layout placeholder armed
+// against it that nothing else will unwind.
+func TestCreatePaneResp_EchoesTheSpecOnFailure(t *testing.T) {
+	spec := &ipc.WorktreeSpec{RepoRoot: "/repo", Branch: "feat/x"}
+	raw, err := json.Marshal(ipc.CreatePaneRespPayload{Error: "already exists", Worktree: spec})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var back ipc.CreatePaneRespPayload
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if back.Worktree == nil || back.Worktree.Branch != "feat/x" || back.Worktree.RepoRoot != "/repo" {
+		t.Errorf("spec not echoed verbatim: %+v", back.Worktree)
+	}
+	if back.PaneID != "" {
+		t.Error("a failed create must carry no pane id")
+	}
+}
+
+// A create WITH a spec round-trips it unchanged — the daemon derives the
+// worktree path from these two fields, so a dropped one lands a pane
+// somewhere else entirely.
+func TestCreatePanePayload_WorktreeRoundTrips(t *testing.T) {
+	raw, err := json.Marshal(ipc.CreatePanePayload{
+		TabID:    "t1",
+		Worktree: &ipc.WorktreeSpec{RepoRoot: "/repo", Branch: "feat/x"},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var back ipc.CreatePanePayload
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if back.Worktree == nil {
+		t.Fatal("worktree spec lost in the round trip")
+	}
+	if back.Worktree.RepoRoot != "/repo" || back.Worktree.Branch != "feat/x" {
+		t.Errorf("spec = %+v, want {/repo feat/x}", back.Worktree)
+	}
+}

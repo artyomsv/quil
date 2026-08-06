@@ -212,3 +212,47 @@ func TestInfo_Empty(t *testing.T) {
 		t.Error("counts with no branch must not read as renderable")
 	}
 }
+
+// git spells a linked checkout's git dir <common>/worktrees/<name>, so the
+// worktree's NAME is already in hand at the line that decides LinkedWorktree.
+// This is the entire reason the sidebar can name it without a command of its
+// own — the three plumbing calls per checkout stay three.
+func TestProbe_NamesTheLinkedWorktree(t *testing.T) {
+	calls := fakeGit(t, map[string]string{
+		argCommonDir:  "/repo/.git/worktrees/feat-x\n/repo/.git\n",
+		argBranch:     "feat/x\n",
+		argDivergence: "0\t0\n",
+	}, nil)
+
+	got, ok := Probe(context.Background(), "/wt/feat-x")
+	if !ok {
+		t.Fatal("Probe reported not-a-repository")
+	}
+	if got.WorktreeName != "feat-x" {
+		t.Errorf("WorktreeName = %q, want \"feat-x\"", got.WorktreeName)
+	}
+	// The name must cost nothing: exactly the three plumbing calls this
+	// package has always made.
+	if len(*calls) != 3 {
+		t.Errorf("git ran %d times (%v), want the same 3 calls as before", len(*calls), *calls)
+	}
+}
+
+// The MAIN checkout has no worktree name. Reporting one would put a directory
+// name on every ordinary pane's row — noise on exactly the rows the feature is
+// not about.
+func TestProbe_MainCheckoutHasNoWorktreeName(t *testing.T) {
+	fakeGit(t, map[string]string{
+		argCommonDir:  "/repo/.git\n/repo/.git\n",
+		argBranch:     "master\n",
+		argDivergence: "0\t0\n",
+	}, nil)
+
+	got, ok := Probe(context.Background(), "/repo")
+	if !ok {
+		t.Fatal("Probe reported not-a-repository")
+	}
+	if got.WorktreeName != "" {
+		t.Errorf("WorktreeName = %q for the main checkout, want empty", got.WorktreeName)
+	}
+}

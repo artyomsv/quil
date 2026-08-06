@@ -13,6 +13,13 @@ import (
 const (
 	minWidthForSidebar  = 100
 	defaultSidebarWidth = 22
+	// minSidebarWidth is the narrowest an edge DRAG may take the strip. Below
+	// this the rows carry no information — minPaneLabelCells alone is 8, and
+	// the two-cell markers and the state glyph sit beside it — while the edge
+	// stays grabbable, so a user who drags too far can drag back. Zero is
+	// deliberately unreachable by drag: collapsing is what the toggle is for,
+	// and a sidebar dragged to nothing leaves no edge to grab it back by.
+	minSidebarWidth = 12
 	// minPaneLabelCells is the floor a pane's own name keeps in its row, so a
 	// long blocked-reason cannot crowd out the thing that identifies which
 	// pane the row is about. Eight cells is enough for the id suffix quil

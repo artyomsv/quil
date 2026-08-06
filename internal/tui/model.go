@@ -544,6 +544,19 @@ type Model struct {
 	splitDragNode *LayoutNode
 	splitDragRect BorderHit
 
+	// Project-sidebar edge drag. sidebarDragging is set while a drag is in
+	// flight; sidebarDragW is the PENDING width, painted as a preview rule and
+	// committed to sidebarWidth only on release.
+	//
+	// The split is not cosmetic. View() calls tab.Resize on every frame, and
+	// ResizeVT's contract pairs every emulator resize with a PTY redraw — so
+	// moving the real width per motion event replays the 2026-07-15 corruption
+	// bug, where unpaired intermediate-width rewraps permanently garble
+	// content at the narrowest width crossed. Same deferral, same reason, as
+	// finishSplitDrag.
+	sidebarDragging bool
+	sidebarDragW    int
+
 	// ctxMenu is the pane context menu overlay (right-click / quick_actions).
 	// Zero value = closed. Not a dialogScreen — see ctxmenu.go.
 	ctxMenu ctxMenuState
@@ -1107,6 +1120,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// is a bare row test: the tab bar starts at the sidebar's right
 		// edge, so at row 0 the sidebar's own PROJECTS heading is what the
 		// user clicked, and the strip claims it here.
+		// Checked BEFORE projectSidebarSwallowsMouse: the zone's left column
+		// is the sidebar's OWN last column, which that branch would otherwise
+		// swallow as a row click — so the edge would be ungrabbable from the
+		// side the user aims at it from.
+		if msg.Button == tea.MouseLeft && m.hitTestSidebarEdge(msg.X, msg.Y) {
+			m.beginSidebarDrag()
+			return m, nil
+		}
 		if m.projectSidebarSwallowsMouse(msg.X, msg.Y) {
 			m.clearDragState()
 			switch msg.Button {
@@ -1285,6 +1306,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.dragSplitBorder(msg.X, msg.Y)
 			return m, nil
 		}
+		if m.sidebarDragging {
+			m.trackSidebarDrag(msg.X)
+			return m, nil
+		}
 		if m.notesMouseDown && m.notesMode && m.notesEditor != nil {
 			row, col, ok := m.notesEditorPosAt(msg.X, msg.Y)
 			if !ok {
@@ -1327,6 +1352,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// plus the persisted layout ratio (finishSplitDrag), highlight off.
 		if m.splitDragNode != nil {
 			return m, m.finishSplitDrag()
+		}
+		// The sidebar edge commits on release for the same reason the split
+		// border does: one PTY resize per pane, once, rather than per motion
+		// event.
+		if m.sidebarDragging {
+			return m, m.finishSidebarDrag()
 		}
 		// A tab drag or scrollbar drag terminates here with no further
 		// processing — they don't share the click-vs-drag pane-focus
@@ -2333,6 +2364,65 @@ func (m *Model) clearDragState() {
 	m.viewerMouseDown = false
 	m.splitDragNode = nil
 	m.splitDragRect = BorderHit{}
+	m.sidebarDragging = false
+	m.sidebarDragW = 0
+}
+
+// beginSidebarDrag arms an edge drag, seeding the pending width from the
+// current one so a click with no motion commits no change.
+func (m *Model) beginSidebarDrag() {
+	m.clearDragState()
+	m.sidebarDragging = true
+	m.sidebarDragW = m.projectSidebarWidth()
+	m.selection = nil
+}
+
+// trackSidebarDrag moves the pending width to follow the cursor. Column x
+// becomes the sidebar's LAST column, so the width is x+1.
+//
+// Clamped through sidebarWidth() rather than a second min/max pair: that
+// function is the single source of truth for how much screen the strip may
+// take, and a private clamp here could land on a width the renderer would
+// silently correct — the sidebar would then not stop where the user let go.
+// The minSidebarWidth floor is applied FIRST so it is what sidebarWidth sees;
+// applying it after would let the clamp's own result fall back below it.
+func (m *Model) trackSidebarDrag(x int) {
+	if !m.sidebarDragging {
+		return
+	}
+	w := x + 1
+	if w < minSidebarWidth {
+		w = minSidebarWidth
+	}
+	m.sidebarDragW = sidebarWidth(m.width, m.sidebarOpen, w)
+}
+
+// finishSidebarDrag commits the pending width. This is the single point at
+// which the layout actually moves.
+//
+// The sequence matches toggleProjectSidebar and is not optional: resizeTabs
+// runs FIRST because it is what WRITES pane.Width/Height and tab.CanvasW/H —
+// resizeAllPanes only reads and ships them, so without it every background tab
+// keeps its pre-drag PTY size. ClearScreen because every column right of the
+// strip shifts in one frame, which is the shift Bubble Tea's cell diff
+// mis-tracks.
+func (m *Model) finishSidebarDrag() tea.Cmd {
+	if !m.sidebarDragging {
+		return nil
+	}
+	w := m.sidebarDragW
+	m.sidebarDragging = false
+	m.sidebarDragW = 0
+	if w <= 0 || w == m.sidebarWidth {
+		return nil
+	}
+	m.sidebarWidth = w
+	// A screen preference, not session state: persisted to config (saved on
+	// exit via ConfigChanged), never to workspace.json.
+	m.cfg.UI.SidebarWidth = w
+	m.configChanged = true
+	m.resizeTabs()
+	return tea.Batch(tea.ClearScreen, m.resizeAllPanes())
 }
 
 // hitTestSplitBorder returns the deepest split line containing (x, y), or

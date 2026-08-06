@@ -119,6 +119,9 @@ type PaneInfo struct {
 	// daemon is on another machine. GitUpstream distinguishes "in sync" from
 	// "nothing to compare against" — without it, 0/0 would claim the first
 	// when it means the second.
+	// SpawnError explains why a pane has no process — today, a worktree-owned
+	// pane whose directory is gone. Daemon-authoritative and runtime-only.
+	SpawnError  string
 	GitBranch   string
 	GitDetached bool
 	GitWorktree bool
@@ -5462,6 +5465,9 @@ func parseWorkspaceState(raw map[string]any) WorkspaceStateMsg {
 				}
 				if ct, ok := pm["context_tokens"].(float64); ok {
 					pi.ContextTokens = int64(ct)
+				}
+				if s, ok := pm["spawn_error"].(string); ok {
+					pi.SpawnError = s
 				}
 				if b, ok := pm["git_branch"].(string); ok {
 					pi.GitBranch = b

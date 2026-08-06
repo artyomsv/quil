@@ -692,6 +692,7 @@ func (d *Daemon) restoreWorkspace() error {
 				rows, _ := paneData["rows"].(float64)
 				muted, _ := paneData["muted"].(bool)
 				eager, _ := paneData["eager"].(bool)
+				worktreeOwned, _ := paneData["worktree_owned"].(bool)
 
 				pane := &Pane{
 					ID:           paneID,
@@ -707,6 +708,10 @@ func (d *Daemon) restoreWorkspace() error {
 					OutputBuf:    ringbuf.NewRingBuffer(d.session.bufSize),
 					Muted:        muted,
 					Eager:        eager,
+					// Absent on pre-worktree snapshots → false, which is the
+					// right default: a pane nobody recorded as owning a
+					// worktree keeps the ordinary CWD fallback.
+					WorktreeOwned: worktreeOwned,
 				}
 
 				// Load ghost buffer from disk
@@ -843,6 +848,25 @@ func (d *Daemon) spawnRestoredPane(pane *Pane) {
 	ptySession := newRestoredPTY(paneSize(pane))
 	if pane.CWD != "" {
 		if info, err := os.Stat(pane.CWD); err != nil || !info.IsDir() {
+			if pane.WorktreeOwned {
+				// A worktree-owned pane does NOT relocate. Blanking the CWD
+				// reaches d.defaultCWD(), so the pane would return in the main
+				// checkout on whatever branch that is — and for a claude pane
+				// that is worse than a wrong directory, because it still
+				// resumes its recorded session, continuing the conversation
+				// against the wrong tree. Come up visibly broken instead: the
+				// pane exists, its CWD stands, and the failure is on screen
+				// rather than in a log nobody reads.
+				//
+				// Ordinary panes keep the fallback below. The losses are not
+				// the same: a stale browsed path costs a convenience, a
+				// missing worktree costs the isolation the pane exists for.
+				log.Printf("pane %s: worktree %q gone, leaving the pane unspawned", pane.ID, pane.CWD)
+				pane.PluginMu.Lock()
+				pane.SpawnError = fmt.Sprintf("worktree is gone: %s", pane.CWD)
+				pane.PluginMu.Unlock()
+				return
+			}
 			log.Printf("pane %s: saved cwd %q gone, using default", pane.ID, pane.CWD)
 			// PluginMu-protected: snapshot()/buildPaneInfos/handlePaneStatusReq
 			// read pane.CWD concurrently while the server is live (lazy spawn).
@@ -853,6 +877,12 @@ func (d *Daemon) spawnRestoredPane(pane *Pane) {
 			pane.PluginMu.Unlock()
 		}
 	}
+	// Cleared on every path that goes on to spawn, so a pane that recovers —
+	// a retry, or a restore once the worktree is back — does not keep its
+	// complaint. Deliberately after the early return above.
+	pane.PluginMu.Lock()
+	pane.SpawnError = ""
+	pane.PluginMu.Unlock()
 	if err := d.spawnPane(pane, ptySession, true); err != nil {
 		log.Printf("respawn pane %s (type=%s): %v — falling back to terminal", pane.ID, pane.Type, err)
 		// PluginMu-protected: same concurrent readers as pane.CWD above.
@@ -2533,6 +2563,15 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			if pane.Eager {
 				paneData["eager"] = true
 			}
+			// PERSISTED, unlike SpawnError beside it: this is how restore tells
+			// a missing worktree from a stale browsed directory, and without it
+			// the snapshot carries only CWD, which cannot distinguish them.
+			if pane.WorktreeOwned {
+				paneData["worktree_owned"] = true
+			}
+			// SpawnError is captured for the BROADCAST only — see
+			// includeOverlays below. It is never written to paneData.
+			spawnErr := pane.SpawnError
 			// Captured here rather than read below: this runs on the snapshot
 			// goroutine while handleResizePane writes them from a conn dispatch
 			// goroutine.
@@ -2572,6 +2611,14 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 				}
 				if bracketedPaste {
 					paneData["bracketed_paste"] = true
+				}
+				// Why the pane has no process, runtime-only: a fresh daemon
+				// re-stats and re-derives it, and persisting it would
+				// resurrect a complaint about a worktree the user has since
+				// restored. Broadcast rather than logged because a relocation
+				// nobody sees is the failure mode this replaces.
+				if spawnErr != "" {
+					paneData["spawn_error"] = spawnErr
 				}
 				// Model/context usage of the last completed AI turn is
 				// runtime-only (broadcast, never persisted): a stale token

@@ -204,26 +204,21 @@ func (m *Model) applyCreatePaneResp(p ipc.CreatePaneRespPayload, dest string) {
 		return
 	}
 	delete(m.worktreeCreates, tabID)
+	// A failed REPLACE normally puts the pane back rather than pruning its
+	// leaf: the worktree is created BEFORE the swap, so an add git refused
+	// leaves the pane alive on both sides, and pruning would cost the user a
+	// live pane over a branch name.
+	//
+	// Swapped is the exception, and it cannot be inferred from Error. The swap
+	// happens before the new pane's PTY spawns, so a spawn failure reports an
+	// error with the old pane ALREADY DESTROYED daemon-side. Restoring there
+	// would put a pane the daemon no longer has back into the layout, and every
+	// keystroke aimed at it would be dropped until the next broadcast pruned
+	// the leaf. The daemon says which happened; this does not guess.
+	m.settleReplacedPane(tabID, tab, !p.Swapped)
 	if tab != nil && tab.Root != nil {
-		// A failed REPLACE puts the pane back rather than pruning its leaf: it
-		// was never destroyed daemon-side (the add failed before the swap), so
-		// pruning would drop a live pane out of the layout and leave the user
-		// looking at one fewer pane than they started with — a worse outcome
-		// than the failure they asked about.
-		if old := m.worktreeReplaced[tabID]; old != nil {
-			if leaf := m.pendingSplit[tabID]; leaf != nil && leaf.Pane == nil {
-				leaf.Pane = old
-			} else {
-				old.Dispose()
-			}
-			delete(m.worktreeReplaced, tabID)
-		}
 		tab.Root.PrunePlaceholders()
 		tab.invalidateLeaves()
-	} else if old := m.worktreeReplaced[tabID]; old != nil {
-		// The tab is gone, so there is nowhere to put it back.
-		old.Dispose()
-		delete(m.worktreeReplaced, tabID)
 	}
 	delete(m.pendingSplit, tabID)
 	// git's own stderr, bounded then sanitized. Bounding is separate from
@@ -238,6 +233,35 @@ func (m *Model) applyCreatePaneResp(p ipc.CreatePaneRespPayload, dest string) {
 // project form documents applies here.
 const createErrFlashCap = 160
 
+// settleReplacedPane retires the pane a worktree REPLACE detached, putting it
+// back when restore is true and disposing it otherwise.
+//
+// One function because the three settling paths got this subtly different when
+// they were written out separately: the timeout mutated the leaf BEFORE its
+// `tab.Root != nil` guard, so a nil root left the leaf changed and the leaves
+// cache stale. Restoring and invalidating belong in the same place, always in
+// the same order.
+//
+// A no-op when nothing is held, so callers need no guard of their own.
+func (m *Model) settleReplacedPane(tabID string, tab *TabModel, restore bool) {
+	old := m.worktreeReplaced[tabID]
+	if old == nil {
+		return
+	}
+	delete(m.worktreeReplaced, tabID)
+	// Restorable only if the leaf reserved for it is still there and still
+	// empty. A tab closed mid-flight, or a leaf already refilled, leaves
+	// nowhere to put it — and a model with no home is a leaked emulator.
+	if restore && tab != nil && tab.Root != nil {
+		if leaf := m.pendingSplit[tabID]; leaf != nil && leaf.Pane == nil {
+			leaf.Pane = old
+			tab.invalidateLeaves()
+			return
+		}
+	}
+	old.Dispose()
+}
+
 // applyCreatePaneTimeout unwinds a create that never answered, so a wedged or
 // restarted daemon cannot leave the tab holding a placeholder forever.
 func (m *Model) applyCreatePaneTimeout(tabID string) {
@@ -246,19 +270,12 @@ func (m *Model) applyCreatePaneTimeout(tabID string) {
 	}
 	delete(m.worktreeCreates, tabID)
 	tab := m.tabByID(tabID)
-	// Same restore as the failure path: a create that never answered did not
-	// necessarily fail, but the pane we detached is still ours and still alive,
-	// and putting it back is recoverable where losing it is not. A create that
-	// SUCCEEDED already disposed and cleared this entry, so a late timeout
-	// cannot resurrect a replaced pane.
-	if old := m.worktreeReplaced[tabID]; old != nil {
-		if leaf := m.pendingSplit[tabID]; leaf != nil && leaf.Pane == nil && tab != nil {
-			leaf.Pane = old
-		} else {
-			old.Dispose()
-		}
-		delete(m.worktreeReplaced, tabID)
-	}
+	// Restored, like the failure path: nothing proved the swap happened, the
+	// pane we detached is still ours, and putting it back is recoverable where
+	// losing it is not. A create the daemon CONFIRMED already disposed and
+	// cleared this entry — on the broadcast that filled the leaf — so a late
+	// timeout cannot resurrect a replaced pane.
+	m.settleReplacedPane(tabID, tab, true)
 	if tab != nil && tab.Root != nil {
 		tab.Root.PrunePlaceholders()
 		tab.invalidateLeaves()

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"encoding/json"
+	"strings"
 
 	"charm.land/lipgloss/v2"
 )
@@ -782,24 +783,41 @@ func renderPendingPane(branch string, w, h int) string {
 	if w <= 0 || h <= 0 {
 		return ""
 	}
-	msg := "Creating worktree…"
-	if branch != "" {
-		// The branch is the user's own text, but it round-trips through a
-		// remote daemon's listing on the way here, so it is sanitized like any
-		// other rendered remote value — and bounded, because sanitizing does
-		// not shorten and this box has a fixed width.
-		msg = "Creating worktree " + truncateCells(sanitizeRemoteText(branch), w-4)
+	// An ORDINARY split arms a placeholder too, and it has no branch. Saying
+	// "Creating worktree…" there is a confidently wrong answer about what the
+	// pane is waiting for — transient locally, but a create over ssh is not
+	// microseconds. A blank rect is what that placeholder rendered before this
+	// function existed, and it stays that way.
+	if branch == "" {
+		return lipgloss.NewStyle().Width(w).Height(h).Render("")
 	}
-	body := msg
+	// The branch is the user's own text, but it is rendered, so it takes the
+	// same treatment as any other rendered value: sanitized, then bounded.
+	// Sanitizing does not shorten.
+	//
+	// The WHOLE line is budgeted, not just the branch. Granting the branch w-4
+	// while prepending an 18-cell literal produces a line up to w+14 wide, and
+	// lipgloss WRAPS rather than truncates — so the box grew a row for every
+	// wrapped line and, being taller than the rect resizeNode recorded, pushed
+	// every sibling below it down. Measured before the fix: a 10x4 leaf (the
+	// documented minimum) rendered 10x5, and 1x4 rendered 1x18.
+	lines := []string{truncateCells("Creating worktree "+sanitizeRemoteText(branch), w)}
 	// The second line explains the wait rather than leaving the user to guess
 	// whether it has hung: a checkout of a large repository legitimately takes
-	// tens of seconds, which is exactly when it reads as broken.
+	// tens of seconds, which is exactly when it reads as broken. It needs three
+	// rows of its own (message, blank, hint), so it is gated on the height that
+	// actually fits it.
 	if h >= 4 {
-		body += "\n\n" + restoreDimStyle.Render(truncateCells("checking out — this can take a while on a large repository", w-4))
+		lines = append(lines, "", restoreDimStyle.Render(truncateCells("checking out — this can take a while on a large repository", w)))
 	}
+	// MaxWidth/MaxHeight CLAMP where Width/Height only pad: the pair is what
+	// makes the box fit its rect exactly rather than at least. Without them a
+	// one-cell-wide leaf still wrapped the first line into eighteen rows.
 	return lipgloss.NewStyle().
 		Width(w).
 		Height(h).
+		MaxWidth(w).
+		MaxHeight(h).
 		Align(lipgloss.Center, lipgloss.Center).
-		Render(body)
+		Render(strings.Join(lines, "\n"))
 }

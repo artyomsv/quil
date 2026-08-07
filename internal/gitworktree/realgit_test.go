@@ -164,3 +164,67 @@ func TestAdd_RealGit_KeepsTheSlashInTheBranchName(t *testing.T) {
 		}
 	}
 }
+
+// Remove is new production code and uses --force plus a branch delete, so it
+// gets real-git coverage rather than a stub: the ordering (worktree first, then
+// branch) is a git constraint, not a preference, and a stub cannot show it.
+func TestRemove_RealGit_UndoesAnAddCompletely(t *testing.T) {
+	repo := realGitRepo(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	path := DerivePath(repo, "feat/undo")
+	if err := Add(ctx, repo, path, "feat/undo"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := Remove(ctx, repo, path, "feat/undo"); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("the worktree directory survived Remove: %v", err)
+	}
+	list, err := List(ctx, repo)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	for _, w := range list {
+		if filepath.Clean(w.Path) == filepath.Clean(path) {
+			t.Errorf("git still lists the removed worktree: %+v", w)
+		}
+	}
+	// The branch must go too, or the whole point is lost: the next attempt at
+	// the same name would fail with "already exists" against a branch the user
+	// never made.
+	if err := Add(ctx, repo, DerivePath(repo, "feat/undo"), "feat/undo"); err != nil {
+		t.Errorf("the branch outlived Remove, so the name cannot be reused: %v", err)
+	}
+}
+
+// A dirty worktree must still be removable. It was created by the daemon
+// seconds ago and never handed to anyone, so there is no user work to protect —
+// and git refuses a plain remove on a checkout it considers dirty, which a
+// fresh one can be on a repository with line-ending differences.
+func TestRemove_RealGit_RemovesADirtyWorktree(t *testing.T) {
+	repo := realGitRepo(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	path := DerivePath(repo, "feat/dirty")
+	if err := Add(ctx, repo, path, "feat/dirty"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "f.txt"), []byte("modified\n"), 0o644); err != nil {
+		t.Fatalf("dirty the worktree: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "untracked.txt"), []byte("new\n"), 0o644); err != nil {
+		t.Fatalf("add an untracked file: %v", err)
+	}
+
+	if err := Remove(ctx, repo, path, "feat/dirty"); err != nil {
+		t.Fatalf("Remove refused a dirty worktree: %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("the dirty worktree survived Remove: %v", err)
+	}
+}

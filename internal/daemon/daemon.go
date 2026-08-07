@@ -1763,7 +1763,7 @@ func (d *Daemon) createPaneAt(payload ipc.CreatePanePayload, cwd, paneType strin
 // the result — while the worktree path, which must ANSWER its requester, uses
 // replacePaneAt directly.
 func (d *Daemon) handleReplacePane(payload ipc.CreatePanePayload, cwd, paneType string) {
-	if _, err := d.replacePaneAt(payload, cwd, paneType); err != nil {
+	if _, _, err := d.replacePaneAt(payload, cwd, paneType); err != nil {
 		log.Printf("replace pane: %v", err)
 	}
 }
@@ -1776,7 +1776,13 @@ func (d *Daemon) handleReplacePane(payload ipc.CreatePanePayload, cwd, paneType 
 // git has succeeded, so the pane being replaced is never destroyed on behalf of
 // a worktree that does not exist — which was the whole reason the combination
 // used to be refused.
-func (d *Daemon) replacePaneAt(payload ipc.CreatePanePayload, cwd, paneType string) (*Pane, error) {
+//
+// The second return says whether the OLD pane was actually removed. It is not
+// derivable from the error: the swap happens before the new pane's PTY spawns,
+// so a spawn failure returns an error with the old pane already gone. The
+// worktree path forwards it to the client as CreatePaneRespPayload.Swapped,
+// which is what stops the client restoring a pane the daemon has destroyed.
+func (d *Daemon) replacePaneAt(payload ipc.CreatePanePayload, cwd, paneType string) (*Pane, bool, error) {
 	newPane := d.session.NewPane(cwd)
 	newPane.Type = paneType
 	newPane.InstanceName = payload.InstanceName
@@ -1785,8 +1791,9 @@ func (d *Daemon) replacePaneAt(payload ipc.CreatePanePayload, cwd, paneType stri
 
 	// Atomically swap old → new in the tab's pane list
 	if err := d.session.ReplacePane(payload.ReplacePaneID, newPane); err != nil {
-		return nil, fmt.Errorf("swap error: %w", err)
+		return nil, false, fmt.Errorf("swap error: %w", err)
 	}
+	// From here on the old pane is GONE, whatever else fails.
 	// The old pane is no longer reachable via the session — clean up its
 	// hook artifacts so the spool watcher stops re-polling a dead file.
 	d.cleanupPaneArtifacts(payload.ReplacePaneID)
@@ -1801,11 +1808,13 @@ func (d *Daemon) replacePaneAt(payload ipc.CreatePanePayload, cwd, paneType stri
 		d.session.DestroyPane(newPane.ID)
 		d.broadcastState()
 		d.requestSnapshot()
-		return nil, fmt.Errorf("start PTY error: %w, removed dead pane", err)
+		// swapped=true: the old pane went with the swap above and is not coming
+		// back, even though this is an error.
+		return nil, true, fmt.Errorf("start PTY (dead pane removed): %w", err)
 	}
 	d.broadcastState()
 	d.requestSnapshot()
-	return newPane, nil
+	return newPane, true, nil
 }
 
 // cleanupPaneArtifacts tears down everything keyed by paneID outside the

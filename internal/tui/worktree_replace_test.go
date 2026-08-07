@@ -174,6 +174,10 @@ func TestReplace_WithoutAWorktreeStillDisposesImmediately(t *testing.T) {
 	m.dialogCursor = 2
 
 	tab := m.curTabs()[0]
+	old := tab.ActivePaneModel()
+	if old == nil || old.vt == nil {
+		t.Fatal("fixture: the pane to replace has no VT to observe")
+	}
 	updated, _ := m.handleCreatePaneSplit()
 	got := updated.(Model)
 
@@ -182,6 +186,13 @@ func TestReplace_WithoutAWorktreeStillDisposesImmediately(t *testing.T) {
 	}
 	if got.worktreeCreates[tab.ID] != "" {
 		t.Error("an ordinary replace armed the worktree bookkeeping")
+	}
+	// The DISPOSE itself, not just the bookkeeping around it. Asserting only
+	// the two maps above left this test green with old.Dispose() deleted — the
+	// name promised the dispose and nothing checked it. p.vt is nilled by
+	// closeVT, which is also what stops the drain goroutine.
+	if old.vt != nil {
+		t.Error("an ordinary replace did not Dispose() the pane it detached — its emulator and drain goroutine leak")
 	}
 }
 

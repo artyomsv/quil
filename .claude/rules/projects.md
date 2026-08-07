@@ -580,11 +580,59 @@ Daemon: `worktreeAddAndCreate` creates the worktree FIRST and only then calls
 `replacePaneAt` (extracted from `handleReplacePane` so the worktree path can
 report failure instead of logging it), so every failure path returns before the
 pane being replaced is touched. Client: a worktree replace holds the detached
-pane in `Model.worktreeReplaced` instead of disposing it — `applyCreatePaneResp`
-disposes it on success (the swap really happened, so the model describes a pane
-that no longer exists) and puts it back in its leaf on failure or timeout. An
-ordinary replace still disposes at send time, because there the daemon destroys
-the pane the moment it handles the message and there is nothing to go back to.
+pane in `Model.worktreeReplaced` instead of disposing it. An ordinary replace
+still disposes at send time, because there the daemon destroys the pane the
+moment it handles the message and there is nothing to go back to.
+
+**The SUCCESS dispose lives in `rebuildTabs`, not in `applyCreatePaneResp`, and
+putting it in the handler was a leak on every successful replace.** The daemon
+calls `broadcastState()` and THEN `respondTo`, both must-deliver on one serial
+reader — so the broadcast that fills the reserved leaf is processed first and
+clears `worktreeCreates`, after which the response handler bails on its own
+`worktreeCreates[tabID] == ""` guard and never reaches its dispose. A pane
+really landing in the leaf is the only proof of the swap that arrives reliably.
+
+**`rebuildTabs` must SKIP the held pane, or a routine broadcast dismantles the
+whole request.** While the add runs the daemon has not swapped yet, so it keeps
+reporting the OLD pane id — which is absent from the tree because the client
+detached it, and `existingPanes` is built from `tab.Leaves()`. Without the skip
+that reads as a new pane: an empty `PaneModel` is built for a live one, the
+reserved leaf is consumed, and `worktreeCreates` is cleared, after which nothing
+can settle the held model. The trigger is ordinary — the git ticker alone
+broadcasts every 5 s against a window that is seconds to minutes wide.
+
+**`CreatePaneRespPayload.Swapped` is a statement about what HAPPENED, and it is
+not derivable from `Error`.** The swap precedes the new pane's PTY spawn, so a
+spawn failure is an error with the old pane already destroyed; a client that
+inferred "error means untouched" restored a pane the daemon no longer had.
+`settleReplacedPane` is the single restore/dispose choke point — the three
+settling paths had this subtly different when they were written out separately,
+including a timeout that mutated the leaf before its own nil-root guard.
+
+**One worktree create per tab, refused in `handleCreatePaneSplit`.**
+`worktreeCreates`, `worktreeReplaced` and `pendingSplit` are all keyed by tab,
+so a second create overwrites all three — leaking the first held pane and
+pointing the first's response at the second's leaf. Reachable from the keyboard
+because the dialog closes on submit and `ActivePaneModel` adopts another leaf
+once the first replace detaches its pane. The daemon's `worktreeAdding`
+single-flight would refuse it anyway; this just says so when the user asks.
+
+**Every abandonment after a successful add REMOVES the worktree**
+(`removeWorktreeFn`, paired with `addWorktreeFn` so a stub can observe the
+undo). The tab or the replace target can be closed inside the checkout window;
+returning without cleanup strands a full checkout plus a branch pointing at it,
+and the next attempt at that name fails with "already exists" against a
+directory the user never made. `gitworktree.Remove` is the one place `--force`
+is right — the tree was created by this daemon seconds ago and handed to nobody
+— and it removes the worktree BEFORE the branch, because git refuses to delete a
+branch a worktree still has checked out.
+
+**The replace target is validated against `p.TabID`, before AND after the add.**
+`ReplacePane` resolves the pane id globally and swaps it inside its OWN tab, so
+a payload pairing tab A with a pane in tab B destroys B's pane while the
+response echoes A — and the client arms and unwinds its placeholder on the
+echoed tab. Any IPC client can send the pair; the pre-existing `p.TabID`
+existence checks read as tab scoping and were not.
 
 **A placeholder leaf RENDERS, and it did not used to.** `renderNode`'s
 `IsLeaf()` is `Pane != nil`, so a placeholder fell through to the split arm and
@@ -599,6 +647,29 @@ cannot paint over a sibling in a split. `worktreeCreates` is
 is pushed from the SAME read that decides the prune exemption, so the
 placeholder and the message standing in it cannot disagree about whether a
 create is in flight.
+
+**The WHOLE line is budgeted, not just the branch, and the box is CLAMPED.**
+lipgloss `Width`/`Height` pad but never truncate, so granting the branch `w-4`
+while prepending an 18-cell literal produced a line up to `w+14` wide that
+wrapped into extra rows — and a box taller than the rect `resizeNode` recorded
+pushes every sibling below it down. Measured before the fix: a 10×4 leaf (the
+documented minimum) rendered 10×5, and 1×4 rendered 1×18. `MaxWidth`/`MaxHeight`
+are the clamp; the whole-line `truncateCells` is the budget; either alone
+happens to hold today, which is why the test asserts the PROPERTY (fits its
+rect) rather than one mechanism.
+
+**An empty branch renders BLANK, deliberately.** `renderNode` reaches this for
+any childless nil-`Pane` node, including an ordinary split's placeholder, which
+has no worktree at all — and an ordinary create over ssh is not microseconds.
+Claiming "Creating worktree…" there is the same class of confidently-wrong
+answer the rest of this feature exists to remove.
+
+**`PrunePlaceholders` cannot repair a ROOT placeholder** — it only inspects a
+split node's CHILDREN — and a replace on a single-pane tab creates exactly that.
+`rebuildTabs`' root-insert fallback therefore checks `len(tab.Leaves()) == 0`
+before indexing `[0]`. Latent until the held-pane skip above landed: the
+broadcast used to refill the root in the same pass that consumed the leaf, which
+masked the panic.
 
 **`handleCreatePaneSplit` tears the setup dialog down before it builds the
 payload.** The branch name is captured with the other choices at the top;

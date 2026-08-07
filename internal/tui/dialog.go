@@ -1750,6 +1750,25 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 		return m, m.flashCmd()
 	}
 
+	// ONE worktree create per tab at a time. worktreeCreates, worktreeReplaced
+	// and pendingSplit are all keyed by TAB, so a second create on the same tab
+	// overwrites all three: the first create's held pane is never disposed and
+	// never restored, and its reserved leaf is replaced by the second's — so
+	// the first's response restores a pane into the wrong slot.
+	//
+	// Widening the maps to hold both was the alternative and is the wrong
+	// trade: the daemon's worktreeAdding single-flight already refuses a
+	// concurrent add, so the second create could not have succeeded anyway.
+	// Refusing here just says so at the moment the user asks, instead of
+	// seconds later and less legibly. Reachable from the keyboard because the
+	// dialog closes on submit and ActivePaneModel falls back to another leaf
+	// once the first replace detaches its pane.
+	if inflight := m.worktreeCreates[tab.ID]; inflight != "" {
+		logger.Debug("create pane: REFUSED, tab %s already has a worktree create in flight (branch %q)", tab.ID, inflight)
+		m.setFlash("still creating the worktree for " + truncateCells(sanitizeRemoteText(inflight), createErrFlashCap) + " — wait for it to finish")
+		return m, m.flashCmd()
+	}
+
 	// Option 2: Replace current pane
 	if m.dialogCursor == 2 {
 		oldPaneID := pane.ID

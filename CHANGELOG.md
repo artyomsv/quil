@@ -31,6 +31,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A create that refuses to run now says why.** Three paths could close the
   dialog and create nothing — one of them with no message at all — while the log
   recorded that a request had been sent. Each reports its own reason now.
+- **A worktree that could not be handed to a pane is cleaned up.** If the
+  checkout succeeded but the pane could not be created — the tab or the pane
+  being replaced was closed while git was working — the worktree and its branch
+  were left behind, and the next attempt at the same name failed against a
+  directory nobody made.
+- **A second worktree pane can no longer be started in a tab that is already
+  making one.** It replaced the first one's bookkeeping, so the first pane could
+  end up neither restored nor closed.
+- **A pane being replaced is no longer restored after the swap has happened.**
+  If the worktree was created and the pane then failed to start, the old pane
+  was already gone; Quil put a dead one back in its place and typing into it did
+  nothing.
+- **An ordinary split no longer says a worktree is being created** while it
+  waits, and the waiting message can no longer overflow into the pane beside it.
 
 ### Changed
 - **`+ new branch…` moved to the top of the Worktree field**, directly under

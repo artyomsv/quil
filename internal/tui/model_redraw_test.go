@@ -18,6 +18,7 @@ func TestHandleKey_Redraw_EmitsClearScreen(t *testing.T) {
 		notifications: NewNotificationCenter(30, 50),
 	}
 	m.cfg.Keybindings.Redraw = "f9"
+	m.initKeymap() // handleKey dispatches through the keymap; NewModel builds it
 
 	_, cmd := m.handleKey(tea.KeyPressMsg{Code: tea.KeyF9})
 	if cmd == nil {

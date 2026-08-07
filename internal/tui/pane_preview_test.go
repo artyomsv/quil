@@ -352,6 +352,7 @@ func TestHandleKey_ToggleWrap(t *testing.T) {
 		projects:      oneProject(tab),
 		notifications: NewNotificationCenter(30, 50),
 	}
+	m.initKeymap() // handleKey dispatches through the keymap; NewModel builds it
 
 	if canvas.previewWrap {
 		t.Fatal("setup: previewWrap must start false")

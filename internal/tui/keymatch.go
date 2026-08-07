@@ -2,6 +2,10 @@ package tui
 
 import "strings"
 
+// DEPRECATED for dispatch: handleKey resolves actions through Model.keymap.
+// What is left are the notes-mode key split and notesKeyExempt, which Stage 2
+// replaces with the prefix state machine. Do not add new call sites.
+//
 // kbMatches reports whether key matches configured, where configured is
 // either a single binding ("alt+f2") or a comma-separated list of
 // alternatives ("alt+f2,alt+shift+r"). Whitespace around each entry is

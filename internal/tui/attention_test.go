@@ -210,7 +210,7 @@ func TestJumpToNextBlockedCyclesOldestFirstAcrossProjects(t *testing.T) {
 // flash is shown.
 func TestAttentionQueueKeyEmptyQueueFlashes(t *testing.T) {
 	newModel := func(panes ...*PaneModel) Model {
-		return Model{
+		m := Model{
 			client:        newFakeConn(),
 			cfg:           config.Default(),
 			width:         100,
@@ -223,6 +223,8 @@ func TestAttentionQueueKeyEmptyQueueFlashes(t *testing.T) {
 			},
 			activeProject: 0,
 		}
+		m.initKeymap() // handleKey dispatches through the keymap; NewModel builds it
+		return m
 	}
 	press := tea.KeyPressMsg{Mod: tea.ModAlt | tea.ModShift, Code: 'a'}
 
@@ -281,6 +283,8 @@ func TestAttentionQueueKeyFiresWhileNotesEditorFocused(t *testing.T) {
 		},
 		activeProject: 0,
 	}
+
+	m.initKeymap() // handleKey dispatches through the keymap; NewModel builds it
 
 	if m.cfg.Keybindings.AttentionQueue != "alt+shift+a" {
 		t.Fatalf("default attention_queue = %q, want alt+shift+a", m.cfg.Keybindings.AttentionQueue)

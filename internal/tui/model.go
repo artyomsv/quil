@@ -449,7 +449,22 @@ type Model struct {
 	// the second and then cleared, stranding the first tab's placeholder
 	// permanently: every later pane created in that tab is swallowed by the
 	// dead leaf, with no error anywhere.
-	worktreeCreates map[string]bool
+	worktreeCreates map[string]string
+	// worktreeReplaced holds, per tab, the pane a worktree-backed REPLACE
+	// detached but has not destroyed yet.
+	//
+	// An ordinary replace disposes the old pane at send time: the daemon
+	// destroys it the moment it handles the message, so there is nothing to go
+	// back to. A worktree replace is ANSWERED, and the answer can be a failure
+	// seconds later — the daemon creates the worktree BEFORE it touches the
+	// pane, so on failure the old pane is still alive on both sides. Holding
+	// the model here is what lets applyCreatePaneResp put it back rather than
+	// costing the user a live pane over a branch name git refused.
+	//
+	// Cleared on every settling path — success disposes it (the swap really
+	// happened), failure and timeout restore it — so an entry can never outlive
+	// the request that armed it.
+	worktreeReplaced map[string]*PaneModel
 	worktreeCursor    int                     // row cursor in the worktree field's expanded list; row 0 = "off"
 	worktreeScroll    int                     // scroll offset for the visible window of the expanded worktree list
 	reqGen            int                     // monotonic instance id source for repoScan/browse/worktrees; see nextReqGen
@@ -4270,7 +4285,11 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 		// The create's own response is what retires this placeholder — on
 		// failure, or on timeout. Both delete the map entry, so the exemption
 		// cannot outlive the request that armed it.
-		if tab.Root != nil && !m.worktreeCreates[tab.ID] {
+		// Pushed from the SAME read that decides the exemption, so the
+		// placeholder and the message standing in it can never disagree about
+		// whether a create is in flight.
+		tab.CreatingBranch = m.worktreeCreates[tab.ID]
+		if tab.Root != nil && tab.CreatingBranch == "" {
 			tab.Root.PrunePlaceholders()
 			tab.invalidateLeaves()
 		}

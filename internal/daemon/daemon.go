@@ -1757,7 +1757,26 @@ func (d *Daemon) createPaneAt(payload ipc.CreatePanePayload, cwd, paneType strin
 	return pane, nil
 }
 
+// handleReplacePane is the fire-and-forget entry point: it logs what
+// replacePaneAt reports and returns. Kept so the ordinary replace path behaves
+// exactly as it always has — errors are logged and the next broadcast shows
+// the result — while the worktree path, which must ANSWER its requester, uses
+// replacePaneAt directly.
 func (d *Daemon) handleReplacePane(payload ipc.CreatePanePayload, cwd, paneType string) {
+	if _, err := d.replacePaneAt(payload, cwd, paneType); err != nil {
+		log.Printf("replace pane: %v", err)
+	}
+}
+
+// replacePaneAt is the replace counterpart of createPaneAt: swap the old pane
+// for a new one at cwd, and report what happened.
+//
+// Returning the error rather than logging it is what lets the worktree path
+// reuse this. That path creates the worktree FIRST and only reaches here once
+// git has succeeded, so the pane being replaced is never destroyed on behalf of
+// a worktree that does not exist — which was the whole reason the combination
+// used to be refused.
+func (d *Daemon) replacePaneAt(payload ipc.CreatePanePayload, cwd, paneType string) (*Pane, error) {
 	newPane := d.session.NewPane(cwd)
 	newPane.Type = paneType
 	newPane.InstanceName = payload.InstanceName
@@ -1766,8 +1785,7 @@ func (d *Daemon) handleReplacePane(payload ipc.CreatePanePayload, cwd, paneType 
 
 	// Atomically swap old → new in the tab's pane list
 	if err := d.session.ReplacePane(payload.ReplacePaneID, newPane); err != nil {
-		log.Printf("replace pane: swap error: %v", err)
-		return
+		return nil, fmt.Errorf("swap error: %w", err)
 	}
 	// The old pane is no longer reachable via the session — clean up its
 	// hook artifacts so the spool watcher stops re-polling a dead file.
@@ -1780,14 +1798,14 @@ func (d *Daemon) handleReplacePane(payload ipc.CreatePanePayload, cwd, paneType 
 
 	ptySession := apty.New()
 	if err := d.spawnPane(newPane, ptySession, false); err != nil {
-		log.Printf("replace pane: start PTY error: %v, removing dead pane", err)
 		d.session.DestroyPane(newPane.ID)
 		d.broadcastState()
 		d.requestSnapshot()
-		return
+		return nil, fmt.Errorf("start PTY error: %w, removed dead pane", err)
 	}
 	d.broadcastState()
 	d.requestSnapshot()
+	return newPane, nil
 }
 
 // cleanupPaneArtifacts tears down everything keyed by paneID outside the

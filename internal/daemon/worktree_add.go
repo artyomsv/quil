@@ -63,14 +63,15 @@ func (d *Daemon) worktreeAddAndCreate(p ipc.CreatePanePayload) ipc.CreatePaneRes
 	if spec == nil {
 		return fail("no worktree spec")
 	}
-	// Refused rather than supported. The client-side replace path sets
-	// leaf.Pane = nil and calls old.Dispose() BEFORE the send, so a failed add
-	// there costs a LIVE pane — and unlike a dangling placeholder, Dispose() is
-	// not something PrunePlaceholders can undo. The dialog omits the field;
-	// this is the other half, because any IPC client can send the pair.
-	if p.ReplacePaneID != "" {
-		return fail("a pane cannot be replaced with one in a new worktree")
-	}
+	// Replace mode is SUPPORTED, and the ordering below is what makes it safe:
+	// the worktree is created first, and the pane being replaced is not touched
+	// until git has succeeded. Every failure path above and at the add itself
+	// returns before replacePaneAt runs, so a failed add costs nothing.
+	//
+	// This was refused at first, on the grounds that the client detached and
+	// Disposed the old pane BEFORE the send — but that was a bug in the send
+	// ordering, not a reason the operation cannot exist. Replacing a scratch
+	// shell with an agent in a fresh worktree is an ordinary thing to want.
 	// Validated BEFORE any repository write, so a bad name costs no git
 	// invocation, no permit and no slot — and never reaches argv.
 	if err := gitworktree.ValidateBranch(spec.Branch); err != nil {
@@ -153,7 +154,17 @@ func (d *Daemon) createPaneInWorktree(p ipc.CreatePanePayload, path string) (*Pa
 	if paneType == "" {
 		paneType = "terminal"
 	}
-	pane, err := d.createPaneAt(p, path, paneType)
+	// Replace and create differ only in how the pane joins the tab; both land
+	// in the worktree, and both are reached only after git has succeeded.
+	// replacePaneAt already destroys its new pane on a spawn failure, so the
+	// "a failure leaves no pane" guarantee holds down either branch.
+	var pane *Pane
+	var err error
+	if p.ReplacePaneID != "" {
+		pane, err = d.replacePaneAt(p, path, paneType)
+	} else {
+		pane, err = d.createPaneAt(p, path, paneType)
+	}
 	if err != nil {
 		if pane != nil {
 			d.session.DestroyPane(pane.ID)

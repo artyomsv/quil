@@ -148,20 +148,89 @@ func TestWorktreeAdd_RefusesAVanishedTab(t *testing.T) {
 // live pane — and unlike a dangling placeholder, PrunePlaceholders cannot undo
 // a Dispose(). The dialog omits the field; this is the daemon half of that,
 // because any IPC client can send the pair.
-func TestWorktreeAdd_RefusesReplaceMode(t *testing.T) {
+// Replacing a pane with one in a NEW worktree is supported: swapping a scratch
+// shell for an agent in a fresh branch is an ordinary thing to want. It was
+// refused at first because the client destroyed the old pane before the send,
+// which is a property of WHEN the client disposed rather than of the operation.
+func TestWorktreeAdd_ReplaceModeIsAccepted(t *testing.T) {
 	d := newTestDaemon(t)
 	tab := d.session.CreateTab("t")
-	calls := stubAdd(t, func(context.Context, string, string, string) error { return nil })
+	// A real repo root under TempDir, because createPaneInWorktree STATS the
+	// derived path — the pane must land in a directory that exists, which is
+	// the guarantee it enforces. The stub stands in for git by creating it.
+	repo := filepath.Join(t.TempDir(), "proj", "repo")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatalf("mkdir repo: %v", err)
+	}
+	old, err := d.session.CreatePane(tab.ID, repo)
+	if err != nil {
+		t.Fatalf("seed pane: %v", err)
+	}
+	calls := stubAdd(t, func(_ context.Context, _, path, _ string) error {
+		return os.MkdirAll(path, 0o755)
+	})
 
-	p := worktreeCreate(tab.ID, "/repo", "feat/x")
-	p.ReplacePaneID = "pane-0000000a"
+	p := worktreeCreate(tab.ID, repo, "feat/x")
+	p.ReplacePaneID = old.ID
+	resp := d.worktreeAddAndCreate(p)
+
+	if resp.Error != "" {
+		t.Fatalf("a worktree replace was refused: %s", resp.Error)
+	}
+	if len(*calls) != 1 {
+		t.Fatalf("git ran %d times, want 1", len(*calls))
+	}
+	if resp.PaneID == "" {
+		t.Fatal("no pane was reported")
+	}
+	if resp.PaneID == old.ID {
+		t.Error("the reported pane is the one being replaced")
+	}
+	if d.session.Pane(old.ID) != nil {
+		t.Error("the replaced pane is still in the session")
+	}
+	if got := d.session.Pane(resp.PaneID); got == nil {
+		t.Error("the new pane is not in the session")
+	} else if !got.WorktreeOwned {
+		t.Error("the new pane is not marked WorktreeOwned")
+	}
+}
+
+// The ordering that makes the above safe: git runs BEFORE the pane is touched,
+// so an add that fails must leave the pane being replaced exactly where it was.
+// This is the property the original refusal was protecting, kept as a test now
+// that the operation is allowed.
+func TestWorktreeAdd_ReplaceFailureLeavesTheOldPaneAlone(t *testing.T) {
+	d := newTestDaemon(t)
+	tab := d.session.CreateTab("t")
+	repo := filepath.Join(t.TempDir(), "proj", "repo")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatalf("mkdir repo: %v", err)
+	}
+	old, err := d.session.CreatePane(tab.ID, repo)
+	if err != nil {
+		t.Fatalf("seed pane: %v", err)
+	}
+	before := len(d.session.Panes(tab.ID))
+	stubAdd(t, func(context.Context, string, string, string) error {
+		return errors.New("fatal: a branch named 'feat/x' already exists")
+	})
+
+	p := worktreeCreate(tab.ID, repo, "feat/x")
+	p.ReplacePaneID = old.ID
 	resp := d.worktreeAddAndCreate(p)
 
 	if resp.Error == "" {
-		t.Error("a worktree create was accepted on the replace path")
+		t.Fatal("a failed add reported success")
 	}
-	if len(*calls) != 0 {
-		t.Errorf("git ran %d times for a refused replace", len(*calls))
+	if resp.PaneID != "" {
+		t.Errorf("a failed add created pane %q", resp.PaneID)
+	}
+	if d.session.Pane(old.ID) == nil {
+		t.Error("a failed worktree add DESTROYED the pane it was going to replace")
+	}
+	if got := len(d.session.Panes(tab.ID)); got != before {
+		t.Errorf("pane count %d, want %d", got, before)
 	}
 }
 

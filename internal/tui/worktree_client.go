@@ -171,7 +171,7 @@ func (m *Model) applyCreatePaneResp(p ipc.CreatePaneRespPayload, dest string) {
 		return
 	}
 	tabID := p.TabID
-	if !m.worktreeCreates[tabID] {
+	if m.worktreeCreates[tabID] == "" {
 		return // not ours, or already settled
 	}
 	// The response must describe a tab on the daemon it came FROM. tabByID
@@ -193,12 +193,37 @@ func (m *Model) applyCreatePaneResp(p ipc.CreatePaneRespPayload, dest string) {
 	// without creating a pane cannot get the placeholder pruned out from
 	// under the create. The timeout is the backstop if no pane ever arrives.
 	if p.Error == "" {
+		// The one thing success DOES retire: a replaced pane held back in case
+		// the add failed. The daemon has swapped it out, so the model describes
+		// a pane that no longer exists — keeping it would leak its emulator,
+		// and restoring it later would paint a dead pane.
+		if old := m.worktreeReplaced[tabID]; old != nil {
+			old.Dispose()
+			delete(m.worktreeReplaced, tabID)
+		}
 		return
 	}
 	delete(m.worktreeCreates, tabID)
 	if tab != nil && tab.Root != nil {
+		// A failed REPLACE puts the pane back rather than pruning its leaf: it
+		// was never destroyed daemon-side (the add failed before the swap), so
+		// pruning would drop a live pane out of the layout and leave the user
+		// looking at one fewer pane than they started with — a worse outcome
+		// than the failure they asked about.
+		if old := m.worktreeReplaced[tabID]; old != nil {
+			if leaf := m.pendingSplit[tabID]; leaf != nil && leaf.Pane == nil {
+				leaf.Pane = old
+			} else {
+				old.Dispose()
+			}
+			delete(m.worktreeReplaced, tabID)
+		}
 		tab.Root.PrunePlaceholders()
 		tab.invalidateLeaves()
+	} else if old := m.worktreeReplaced[tabID]; old != nil {
+		// The tab is gone, so there is nowhere to put it back.
+		old.Dispose()
+		delete(m.worktreeReplaced, tabID)
 	}
 	delete(m.pendingSplit, tabID)
 	// git's own stderr, bounded then sanitized. Bounding is separate from
@@ -216,11 +241,25 @@ const createErrFlashCap = 160
 // applyCreatePaneTimeout unwinds a create that never answered, so a wedged or
 // restarted daemon cannot leave the tab holding a placeholder forever.
 func (m *Model) applyCreatePaneTimeout(tabID string) {
-	if !m.worktreeCreates[tabID] {
+	if m.worktreeCreates[tabID] == "" {
 		return // already settled by a response
 	}
 	delete(m.worktreeCreates, tabID)
-	if tab := m.tabByID(tabID); tab != nil && tab.Root != nil {
+	tab := m.tabByID(tabID)
+	// Same restore as the failure path: a create that never answered did not
+	// necessarily fail, but the pane we detached is still ours and still alive,
+	// and putting it back is recoverable where losing it is not. A create that
+	// SUCCEEDED already disposed and cleared this entry, so a late timeout
+	// cannot resurrect a replaced pane.
+	if old := m.worktreeReplaced[tabID]; old != nil {
+		if leaf := m.pendingSplit[tabID]; leaf != nil && leaf.Pane == nil && tab != nil {
+			leaf.Pane = old
+		} else {
+			old.Dispose()
+		}
+		delete(m.worktreeReplaced, tabID)
+	}
+	if tab != nil && tab.Root != nil {
 		tab.Root.PrunePlaceholders()
 		tab.invalidateLeaves()
 	}

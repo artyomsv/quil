@@ -567,12 +567,38 @@ fresh daemon re-stats, and a stored one would resurrect a complaint about a
 worktree since restored. The pane offers `Alt+R` and nothing more specific:
 Quil records the worktree path, not the repository it branched from.
 
-**Replace mode is refused, in the CLIENT at the split step and in the daemon.**
-The field cannot gate itself — the user picks replace *after* the worktree
-field — so `handleCreatePaneSplit` refuses before it does anything destructive.
-That path sets `leaf.Pane = nil` and calls `old.Dispose()` BEFORE the send, and
-unlike a dangling placeholder a `Dispose()` is not something
-`PrunePlaceholders` can undo, so a failed add there costs a LIVE pane.
+**Replace mode is SUPPORTED, and what makes it safe is ordering rather than a
+guard.** It was refused at first, on both sides, because the client set
+`leaf.Pane = nil` and called `old.Dispose()` BEFORE the send — so a failed add
+cost a LIVE pane, and unlike a dangling placeholder a `Dispose()` is not
+something `PrunePlaceholders` can undo. That is a statement about WHEN the
+client disposes, not about the operation: replacing a scratch shell with an
+agent on a fresh branch is an ordinary thing to want, and the refusal was
+overruled by the project owner on exactly those grounds.
+
+Daemon: `worktreeAddAndCreate` creates the worktree FIRST and only then calls
+`replacePaneAt` (extracted from `handleReplacePane` so the worktree path can
+report failure instead of logging it), so every failure path returns before the
+pane being replaced is touched. Client: a worktree replace holds the detached
+pane in `Model.worktreeReplaced` instead of disposing it — `applyCreatePaneResp`
+disposes it on success (the swap really happened, so the model describes a pane
+that no longer exists) and puts it back in its leaf on failure or timeout. An
+ordinary replace still disposes at send time, because there the daemon destroys
+the pane the moment it handles the message and there is nothing to go back to.
+
+**A placeholder leaf RENDERS, and it did not used to.** `renderNode`'s
+`IsLeaf()` is `Pane != nil`, so a placeholder fell through to the split arm and
+joined two empty children — the empty string. Invisible while a create took
+microseconds; a black rectangle for the ~16 s a `git worktree add` takes against
+a large repository, and on the replace path the whole tab, because the pane it
+stands in for has already gone. `resizeNode` records the placeholder's rect
+(`phW`/`phH`, runtime-only — persistence goes through `SerializedNode`) and
+`renderPendingPane` draws a box naming the branch, sized from that rect so it
+cannot paint over a sibling in a split. `worktreeCreates` is
+`map[string]string` (tab → branch) rather than a bool set, and `TabModel.CreatingBranch`
+is pushed from the SAME read that decides the prune exemption, so the
+placeholder and the message standing in it cannot disagree about whether a
+create is in flight.
 
 **`handleCreatePaneSplit` tears the setup dialog down before it builds the
 payload.** The branch name is captured with the other choices at the top;

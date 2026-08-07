@@ -46,23 +46,45 @@ func newBranchModel(t *testing.T) Model {
 	return m
 }
 
-// The row is LAST so every existing worktree keeps the index it had before
-// this feature, and stage A's fixtures shift rather than needing a rewrite.
-func TestWorktreeRows_NewBranchIsLast(t *testing.T) {
+// worktreeRowIndex finds a row by PATH rather than by position.
+//
+// Every fixture below used a literal index, so moving one row broke eight
+// unrelated tests at once — and the row moved because it was placed last to
+// spare those fixtures in the first place, which is the tail wagging the dog.
+// Looking the row up means the order is free to change and only the test that
+// asserts the order has to care.
+func worktreeRowIndex(t *testing.T, m Model, path string) int {
+	t.Helper()
+	for i, r := range m.worktreeRows() {
+		if r.path == path {
+			return i
+		}
+	}
+	t.Fatalf("no worktree row with path %q", path)
+	return -1
+}
+
+// "+ new branch…" is the FIRST actionable row, directly under "off". A
+// repository with a dozen worktrees would otherwise bury the row reached for
+// most; "off" stays above it because it is the default rather than a choice.
+func TestWorktreeRows_NewBranchIsFirstAction(t *testing.T) {
 	m := newBranchModel(t)
 	rows := m.worktreeRows()
-	if len(rows) == 0 {
+	if len(rows) < 2 {
 		t.Fatal("no worktree rows")
-	}
-	last := rows[len(rows)-1]
-	if !strings.Contains(last.label, "new branch") {
-		t.Errorf("last row is %q, want the new-branch row", last.label)
-	}
-	if last.path != worktreeNewRowPath {
-		t.Errorf("last row path = %q, want the sentinel", last.path)
 	}
 	if rows[0].path != "" {
 		t.Error("the off row is no longer first")
+	}
+	if !strings.Contains(rows[1].label, "new branch") {
+		t.Errorf("row 1 is %q, want the new-branch row", rows[1].label)
+	}
+	if rows[1].path != worktreeNewRowPath {
+		t.Errorf("row 1 path = %q, want the sentinel", rows[1].path)
+	}
+	// The existing worktrees follow it, in listing order.
+	if rows[2].path != "/repo-worktrees/feat-a" {
+		t.Errorf("row 2 = %q, want the first existing worktree", rows[2].path)
 	}
 }
 
@@ -71,7 +93,7 @@ func TestWorktreeRows_NewBranchIsLast(t *testing.T) {
 func TestWorktreeNewBranch_EnterOpensTheNameField(t *testing.T) {
 	m := newBranchModel(t)
 	p := &plugin.PanePlugin{Name: "terminal"}
-	m.worktreeCursor = len(m.worktreeRows()) - 1
+	m.worktreeCursor = worktreeRowIndex(t, m, worktreeNewRowPath)
 
 	updated, _ := m.handleSetupWorktreeKey(p, "enter")
 	got := updated.(Model)
@@ -166,7 +188,7 @@ func TestWorktreeNewBranch_ChoosingAnExistingWorktreeClearsIt(t *testing.T) {
 	m := newBranchModel(t)
 	p := &plugin.PanePlugin{Name: "terminal"}
 	m.worktreeNewBranch = "feat/x"
-	m.worktreeCursor = 1 // the feat-a row
+	m.worktreeCursor = worktreeRowIndex(t, m, "/repo-worktrees/feat-a")
 
 	updated, _ := m.handleSetupWorktreeKey(p, "enter")
 	got := updated.(Model)
@@ -330,29 +352,12 @@ func TestHandleCreatePaneSplit_ClearsTheWorktreeStateAfterwards(t *testing.T) {
 	}
 }
 
-// Replace mode is refused HERE because this is the first moment the
-// combination is known — the worktree field runs before this step, so it
-// cannot gate itself on a choice the user has not made yet. The replace path
-// disposes the old pane before the send, so a later failure costs a live one.
-func TestHandleCreatePaneSplit_RefusesReplaceWithANewBranch(t *testing.T) {
-	m := newBranchModel(t)
-	fake := &fakeSender{}
-	m.client = fake
-	m.selectedPlugin = "terminal"
-	m.selectedCWD = "/repo"
-	m.worktreeNewBranch = "feat/x"
-	m.dialogCursor = 2 // replace
-
-	updated, _ := m.handleCreatePaneSplit()
-	got := updated.(Model)
-
-	if len(fake.sent) != 0 {
-		t.Errorf("a replace-with-new-worktree was sent: %+v", fake.sent)
-	}
-	if got.flashText == "" {
-		t.Error("the refusal was silent")
-	}
-}
+// Replace mode with a new worktree used to be refused here. It is supported
+// now — swapping a scratch shell for an agent in a fresh branch is an ordinary
+// thing to want, and the hazard the refusal named (a failed add costing a live
+// pane) was about WHEN the client disposed the old pane, not about the
+// operation. See worktree_replace_test.go, which pins the send, the restore on
+// failure and on timeout, and the dispose on success.
 
 // The spec must carry the REPOSITORY ROOT the daemon reported, never the
 // browsed directory. `git worktree list` succeeds from any subdirectory, so

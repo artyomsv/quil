@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **A pane can now be replaced with one in a new worktree.** Swapping a scratch
+  shell for an agent on a fresh branch is an ordinary thing to want, and the
+  dialog refused it. The worktree is created before the pane you are replacing
+  is touched, so a branch git rejects leaves that pane exactly where it was.
+- **Creating a worktree now says so while it works.** A checkout of a large
+  repository takes tens of seconds, and the space the new pane will occupy was
+  blank for all of it — on the replace path the tab was blank entirely, because
+  the pane being replaced had already gone. It now names the branch it is
+  checking out.
+
+### Fixed
+- **A branch typed for a new worktree was discarded if you pressed Tab.** Tab
+  moves between fields without closing the name box, so the dialog went on
+  showing `new branch <name>` while Continue silently dropped it — and the pane
+  opened in the repository root with no worktree and no error, which is the
+  relocation the feature exists to prevent. What the dialog shows is what it now
+  does; an incomplete name is refused with a reason instead.
+- **Esc in the branch-name box no longer abandons the whole dialog.** It was
+  documented as backing out of just the name, but the dialog took Esc first, so
+  that never happened.
+- **A create that refuses to run now says why.** Three paths could close the
+  dialog and create nothing — one of them with no message at all — while the log
+  recorded that a request had been sent. Each reports its own reason now.
+- **A worktree that could not be handed to a pane is cleaned up.** If the
+  checkout succeeded but the pane could not be created — the tab or the pane
+  being replaced was closed while git was working — the worktree and its branch
+  were left behind, and the next attempt at the same name failed against a
+  directory nobody made.
+- **A second worktree pane can no longer be started in a tab that is already
+  making one.** It replaced the first one's bookkeeping, so the first pane could
+  end up neither restored nor closed.
+- **A pane being replaced is no longer restored after the swap has happened.**
+  If the worktree was created and the pane then failed to start, the old pane
+  was already gone; Quil put a dead one back in its place and typing into it did
+  nothing.
+- **An ordinary split no longer says a worktree is being created** while it
+  waits, and the waiting message can no longer overflow into the pane beside it.
+
+### Changed
+- **`+ new branch…` moved to the top of the Worktree field**, directly under
+  `off`. In a repository with a dozen worktrees it was buried at the bottom.
+
 ## [1.52.1] - 2026-08-07
 
 ### Fixed
@@ -85,7 +128,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pushed everything below it down by one. Clicking a project then selected its
   neighbour.
 
-||||||| parent of 6e6d633 (docs: describe the setup dialog's worktree field)
 ## [1.49.0] - 2026-08-05
 
 ### Changed

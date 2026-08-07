@@ -1725,7 +1725,15 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 	// tab does not share.
 	tabID, tabDest := tab.ID, tab.Dest
 
-	logger.Debug("create pane: sending IPC with cwd=%q type=%s instance=%s", cwd, pluginName, instanceName)
+	// "submitting", NOT "sending IPC". Three paths below return without ever
+	// sending, so a line claiming the send has happened is a lie the log tells
+	// on exactly the runs somebody is reading the log to explain. It cost a
+	// full investigation once: the daemon had no create_pane, the client
+	// insisted it had sent one, and the truth was a silent refusal underneath.
+	// Each of those paths now logs its own reason, so the next occurrence is
+	// one grep rather than a bisect of the handler.
+	logger.Debug("create pane: submitting cwd=%q type=%s instance=%s branch=%q repo=%q split=%d",
+		cwd, pluginName, instanceName, newBranch, newBranchRepo, m.dialogCursor)
 
 	// Refused BEFORE anything destructive or stateful happens — before the
 	// replace path disposes a pane, and before the split path arms a
@@ -1736,40 +1744,72 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 		// The listing never answered, so the repository root is unknown.
 		// Refused rather than falling back to the browsed directory: that
 		// fallback is exactly the nested-worktree bug.
+		logger.Debug("create pane: REFUSED, branch %q has no known repository root (worktrees loaded=%v pending=%v repo=%v path=%q)",
+			newBranch, m.worktrees.loaded, m.worktrees.pending, m.worktrees.repo, m.worktrees.path)
 		m.setFlash("worktree not created: the repository root is not known yet")
+		return m, m.flashCmd()
+	}
+
+	// ONE worktree create per tab at a time. worktreeCreates, worktreeReplaced
+	// and pendingSplit are all keyed by TAB, so a second create on the same tab
+	// overwrites all three: the first create's held pane is never disposed and
+	// never restored, and its reserved leaf is replaced by the second's — so
+	// the first's response restores a pane into the wrong slot.
+	//
+	// Widening the maps to hold both was the alternative and is the wrong
+	// trade: the daemon's worktreeAdding single-flight already refuses a
+	// concurrent add, so the second create could not have succeeded anyway.
+	// Refusing here just says so at the moment the user asks, instead of
+	// seconds later and less legibly. Reachable from the keyboard because the
+	// dialog closes on submit and ActivePaneModel falls back to another leaf
+	// once the first replace detaches its pane.
+	if inflight := m.worktreeCreates[tab.ID]; inflight != "" {
+		logger.Debug("create pane: REFUSED, tab %s already has a worktree create in flight (branch %q)", tab.ID, inflight)
+		m.setFlash("still creating the worktree for " + truncateCells(sanitizeRemoteText(inflight), createErrFlashCap) + " — wait for it to finish")
 		return m, m.flashCmd()
 	}
 
 	// Option 2: Replace current pane
 	if m.dialogCursor == 2 {
-		// Refused, and refused HERE because this is the first moment the
-		// combination is known: the worktree field runs before this step, so
-		// it cannot gate itself on a choice the user has not made yet.
-		//
-		// The replace path below sets leaf.Pane = nil and calls old.Dispose()
-		// BEFORE the send, so a worktree add that then fails costs a LIVE
-		// pane — and unlike a dangling placeholder, Dispose() is not something
-		// PrunePlaceholders can undo. Refusing before any of that is
-		// destructive is the honest answer; the daemon refuses the pair too,
-		// because any IPC client can send it.
-		if newBranch != "" {
-			m.setFlash("a pane cannot be replaced with one in a new worktree — split instead")
-			return m, m.flashCmd()
-		}
 		oldPaneID := pane.ID
+		// The spec, when the user asked for a new branch — replace carries one
+		// exactly as split does. The daemon creates the worktree BEFORE it
+		// touches the pane being replaced, so a failed add costs nothing there.
+		var spec *ipc.WorktreeSpec
+		if newBranch != "" {
+			spec = &ipc.WorktreeSpec{RepoRoot: newBranchRepo, Branch: newBranch}
+		}
 
 		if leaf := tab.Root.FindLeaf(oldPaneID); leaf != nil {
-			// Detach + dispose immediately: the daemon destroys the old pane
-			// server-side and this PaneModel is never rendered again (output
-			// and rendering resolve panes via FindLeaf, which skips nil-Pane
-			// leaves). Disposing here — not via the reconciliation sweep —
-			// keeps the leaves cache honest: a stale cache was previously
-			// what fed the detached pane into the sweep's existingPanes.
+			// Detach immediately either way: the leaf must be reserved so the
+			// arriving pane lands WHERE THE OLD ONE WAS rather than through the
+			// root-insert fallback, and rendering resolves panes via FindLeaf,
+			// which skips nil-Pane leaves.
 			old := leaf.Pane
 			leaf.Pane = nil
 			tab.invalidateLeaves()
-			if old != nil {
-				old.Dispose()
+			if spec == nil {
+				// Ordinary replace: the daemon destroys the old pane the moment
+				// it handles this message, so the model is never rendered again.
+				// Disposing here — not via the reconciliation sweep — keeps the
+				// leaves cache honest: a stale cache was previously what fed the
+				// detached pane into the sweep's existingPanes.
+				if old != nil {
+					old.Dispose()
+				}
+			} else if old != nil {
+				// A worktree replace is ANSWERED, not fire-and-forget, and the
+				// answer can be a failure seconds later. Disposing now would
+				// make a failed `git worktree add` cost a live pane — the exact
+				// hazard this combination used to be refused over, which is a
+				// property of WHEN we dispose rather than of the operation. The
+				// model is held until the daemon says the swap really happened;
+				// applyCreatePaneResp disposes it on success and puts it back on
+				// failure.
+				if m.worktreeReplaced == nil {
+					m.worktreeReplaced = make(map[string]*PaneModel)
+				}
+				m.worktreeReplaced[tab.ID] = old
 			}
 			if m.pendingSplit == nil {
 				m.pendingSplit = make(map[string]*LayoutNode)
@@ -1777,7 +1817,17 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 			m.pendingSplit[tab.ID] = leaf
 		}
 
-		return m, func() tea.Msg {
+		if spec != nil {
+			// Same bookkeeping the split path arms: keyed by tab, because two
+			// creates can be in flight and their responses can arrive in either
+			// order.
+			if m.worktreeCreates == nil {
+				m.worktreeCreates = make(map[string]string)
+			}
+			m.worktreeCreates[tab.ID] = newBranch
+		}
+
+		send := func() tea.Msg {
 			msg, _ := ipc.NewMessage(ipc.MsgCreatePane, ipc.CreatePanePayload{
 				TabID:           tabID,
 				CWD:             cwd,
@@ -1786,10 +1836,17 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 				InstanceArgs:    instanceArgs,
 				ReplacePaneID:   oldPaneID,
 				ResumeSessionID: resumeSessionID,
+				Worktree:        spec,
 			})
 			m.sendForDest(tabDest, msg)
 			return nil
 		}
+		if spec == nil {
+			return m, send
+		}
+		return m, tea.Batch(send, tea.Tick(createPaneTimeout, func(time.Time) tea.Msg {
+			return createPaneTimeoutMsg{tabID: tabID}
+		}))
 	}
 
 	// Options 0/1: Split horizontal or vertical
@@ -1802,7 +1859,14 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 
 	placeholder := tab.SplitAtPane(pane.ID, dir)
 	if placeholder == nil {
-		return m, nil
+		// The only one of these paths that used to surface NOTHING — no send,
+		// no flash, no log. The dialog closed on submit, so the user saw it
+		// vanish and no pane appear, which is indistinguishable from the pane
+		// having been created somewhere they cannot see. It means the active
+		// pane is not in its own tab's layout tree, so say so.
+		logger.Debug("create pane: REFUSED, SplitAtPane found no leaf for pane %s in tab %s", pane.ID, tabID)
+		m.setFlash("pane not created: the active pane is not in this tab's layout")
+		return m, m.flashCmd()
 	}
 
 	if m.pendingSplit == nil {
@@ -1825,9 +1889,9 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 		// routinely arrive out of order. A scalar would be overwritten by the
 		// second create and leave the first's placeholder stranded forever.
 		if m.worktreeCreates == nil {
-			m.worktreeCreates = make(map[string]bool)
+			m.worktreeCreates = make(map[string]string)
 		}
-		m.worktreeCreates[tab.ID] = true
+		m.worktreeCreates[tab.ID] = newBranch
 	}
 
 	send := func() tea.Msg {
@@ -3267,6 +3331,19 @@ func (m Model) handleCreatePaneSetupKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd
 		return m, nil
 	}
 
+	// The open name field takes Esc for the same reason, and needs it for a
+	// sharper one: handleWorktreeNameKey documents Esc as abandoning the
+	// new-branch row, but the shared branch below returns unconditionally, so
+	// that case was unreachable from the keyboard — Esc backed out of pane
+	// creation entirely and the typed branch was never abandoned at all. It is
+	// the only way to undo a name now that tabbing away commits one; backspace
+	// to empty was otherwise the whole vocabulary. Routed INTO the field
+	// handler rather than clearing here, so "abandon" has one definition and
+	// the field handler's own coverage describes something reachable.
+	if kind == "worktree" && m.worktreeNaming && key == "esc" {
+		return m.handleWorktreeNameKey(key)
+	}
+
 	// Esc and Tab/Shift+Tab work the same regardless of which field is focused.
 	switch key {
 	case "esc":
@@ -3779,14 +3856,24 @@ func (m Model) handleWorktreeNameKey(key string) (tea.Model, tea.Cmd) {
 func (m Model) submitSetupDialog(p *plugin.PanePlugin) (tea.Model, tea.Cmd) {
 	if p.Command.PromptsCWD {
 		m.selectedCWD = m.setupSpawnDir()
-		// A name still being typed is not a choice. Committing it here would
-		// spawn on a branch the user was mid-way through naming — and Esc on
-		// the name field clears it, so reaching Continue with worktreeNaming
-		// still set means they tabbed away rather than accepted.
-		if m.worktreeNaming {
-			m.worktreeNaming = false
-			m.worktreeNewBranch = ""
-		}
+		// Tab and Shift+Tab are handled by handleCreatePaneSetupKey BEFORE the
+		// field dispatch, so they never reach handleWorktreeNameKey — the name
+		// field cannot swallow them. Tabbing away therefore arrives here with
+		// worktreeNaming still set and the branch intact, and the field goes on
+		// RENDERING it: any non-empty name draws the "new branch <name>"
+		// summary once the field is blurred.
+		//
+		// This used to clear the name on that basis ("still being typed is not
+		// a choice"), which contradicted what was on screen — the create fell
+		// through to an ordinary one and the pane spawned in the REPOSITORY
+		// ROOT, with no worktree, no git invocation and no error. That is the
+		// silent relocation the whole feature exists to prevent, reached by
+		// nothing more exotic than Tab.
+		//
+		// Closing the mode is still right; keeping the name is what makes the
+		// dialog do what it shows. A genuinely incomplete name is caught by the
+		// validation below, which refuses the submit and says why.
+		m.worktreeNaming = false
 		// Validated again at submit, not only on the name field's Enter: the
 		// user can change the browsed directory afterwards, and this is the
 		// last point before the pane is created.
@@ -4090,6 +4177,14 @@ func (m Model) worktreeRows() []worktreeRow {
 		return nil
 	}
 	rows := []worktreeRow{{label: "off — use the directory above", path: ""}}
+	// FIRST of the actionable rows, directly under the neutral default.
+	//
+	// It shipped last, to spare stage A's row fixtures an index shift — a
+	// reason about the tests rather than about the dialog, and the wrong trade:
+	// a repository with a dozen worktrees buries the row you reach for most,
+	// and "off" is the only row that earns its place above it by being the
+	// default rather than a choice. The fixtures moved instead.
+	rows = append(rows, worktreeRow{label: "+ new branch…", path: worktreeNewRowPath})
 	for _, w := range m.worktrees.list {
 		if w.Main {
 			continue
@@ -4107,12 +4202,6 @@ func (m Model) worktreeRows() []worktreeRow {
 		}
 		rows = append(rows, row)
 	}
-	// LAST, so every existing worktree keeps the index it had before this row
-	// existed and stage A's row fixtures shift rather than needing a rewrite.
-	// Only for a real repository — the four early-return states above never
-	// reach here, and offering to branch from a non-repository would be a row
-	// that cannot complete.
-	rows = append(rows, worktreeRow{label: "+ new branch…", path: worktreeNewRowPath})
 	return rows
 }
 

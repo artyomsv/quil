@@ -2355,7 +2355,10 @@ func TestHandleSetupWorktreeKey_EnterCommitsChoiceAndDropsSession(t *testing.T) 
 	p := &plugin.PanePlugin{}
 	m.worktrees.loaded, m.worktrees.repo = true, true
 	m.worktrees.list = []ipc.WorktreeInfo{{Path: "/repo-worktrees/feat-x", Branch: "feat-x"}}
-	m.worktreeCursor = 1 // row 0 is "off"
+	// Row 0 is "off" and row 1 is "+ new branch…", so the first EXISTING
+	// worktree is row 2. Looked up rather than counted, so the next reorder
+	// touches only the test that asserts the order.
+	m.worktreeCursor = worktreeRowIndex(t, m, "/repo-worktrees/feat-x")
 	m.selectedSessionID = "sess-1"
 
 	updated, _ := m.handleSetupWorktreeKey(p, "enter")

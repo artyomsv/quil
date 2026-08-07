@@ -2,6 +2,7 @@ package tui
 
 import (
 	"encoding/json"
+	"strings"
 
 	"charm.land/lipgloss/v2"
 )
@@ -28,6 +29,16 @@ type LayoutNode struct {
 	Ratio float64    // fraction allocated to Left child (0.0–1.0)
 	Left  *LayoutNode
 	Right *LayoutNode
+
+	// phW/phH are the cells a PLACEHOLDER leaf occupies, recorded by
+	// resizeNode. A placeholder has no Pane to carry its own size, and
+	// renderNode needs one to draw anything at all — without it a pending
+	// create is a black rectangle, which is what a 16 s `git worktree add`
+	// looked like for its entire duration.
+	//
+	// Runtime-only, and safe to add here because persistence goes through
+	// SerializedNode rather than this struct.
+	phW, phH int
 }
 
 // NewLeaf creates a leaf node wrapping a pane.
@@ -541,8 +552,10 @@ func resizeNode(n *LayoutNode, w, h, fullW, canvasW, canvasH int) {
 	if n == nil {
 		return
 	}
-	// Placeholder node (nil Pane, no children) — skip until filled.
+	// Placeholder node (nil Pane, no children) — nothing to resize, but record
+	// the rect so renderNode can draw the pending-create box at the right size.
 	if n.Pane == nil && n.Left == nil && n.Right == nil {
+		n.phW, n.phH = w, h
 		return
 	}
 	if n.IsLeaf() {
@@ -729,16 +742,28 @@ func UnmarshalLayout(data json.RawMessage) (*SerializedNode, error) {
 }
 
 // renderNode recursively produces the visual output for the layout tree.
-func renderNode(n *LayoutNode) string {
+//
+// creating names the branch of a worktree create in flight for this tab, or is
+// empty. It reaches a PLACEHOLDER leaf, which otherwise renders as nothing:
+// IsLeaf() is `Pane != nil`, so a placeholder falls through to the split arm
+// and joins two empty strings. That was invisible while a create took
+// microseconds and became a black rectangle for 16 seconds once a create could
+// mean `git worktree add` against a large repository — and on the replace path
+// the pane it is standing in for has already gone, so the whole tab is blank
+// with no indication anything is happening.
+func renderNode(n *LayoutNode, creating string) string {
 	if n == nil {
 		return ""
 	}
 	if n.IsLeaf() {
 		return n.Pane.View()
 	}
+	if n.Left == nil && n.Right == nil {
+		return renderPendingPane(creating, n.phW, n.phH)
+	}
 
-	leftView := renderNode(n.Left)
-	rightView := renderNode(n.Right)
+	leftView := renderNode(n.Left, creating)
+	rightView := renderNode(n.Right, creating)
 
 	switch n.Split {
 	case SplitVertical:
@@ -746,4 +771,53 @@ func renderNode(n *LayoutNode) string {
 	default: // SplitHorizontal
 		return lipgloss.JoinHorizontal(lipgloss.Top, leftView, rightView)
 	}
+}
+
+// renderPendingPane draws the box that stands in for a pane being created.
+//
+// Sized from the recorded rect rather than lipgloss.Place against the tab: the
+// placeholder may be one half of a split, and a full-tab box would paint over
+// its sibling. A zero rect (no resize has run yet) renders nothing, which is
+// the pre-existing behaviour and strictly better than a 0-width box.
+func renderPendingPane(branch string, w, h int) string {
+	if w <= 0 || h <= 0 {
+		return ""
+	}
+	// An ORDINARY split arms a placeholder too, and it has no branch. Saying
+	// "Creating worktree…" there is a confidently wrong answer about what the
+	// pane is waiting for — transient locally, but a create over ssh is not
+	// microseconds. A blank rect is what that placeholder rendered before this
+	// function existed, and it stays that way.
+	if branch == "" {
+		return lipgloss.NewStyle().Width(w).Height(h).Render("")
+	}
+	// The branch is the user's own text, but it is rendered, so it takes the
+	// same treatment as any other rendered value: sanitized, then bounded.
+	// Sanitizing does not shorten.
+	//
+	// The WHOLE line is budgeted, not just the branch. Granting the branch w-4
+	// while prepending an 18-cell literal produces a line up to w+14 wide, and
+	// lipgloss WRAPS rather than truncates — so the box grew a row for every
+	// wrapped line and, being taller than the rect resizeNode recorded, pushed
+	// every sibling below it down. Measured before the fix: a 10x4 leaf (the
+	// documented minimum) rendered 10x5, and 1x4 rendered 1x18.
+	lines := []string{truncateCells("Creating worktree "+sanitizeRemoteText(branch), w)}
+	// The second line explains the wait rather than leaving the user to guess
+	// whether it has hung: a checkout of a large repository legitimately takes
+	// tens of seconds, which is exactly when it reads as broken. It needs three
+	// rows of its own (message, blank, hint), so it is gated on the height that
+	// actually fits it.
+	if h >= 4 {
+		lines = append(lines, "", restoreDimStyle.Render(truncateCells("checking out — this can take a while on a large repository", w)))
+	}
+	// MaxWidth/MaxHeight CLAMP where Width/Height only pad: the pair is what
+	// makes the box fit its rect exactly rather than at least. Without them a
+	// one-cell-wide leaf still wrapped the first line into eighteen rows.
+	return lipgloss.NewStyle().
+		Width(w).
+		Height(h).
+		MaxWidth(w).
+		MaxHeight(h).
+		Align(lipgloss.Center, lipgloss.Center).
+		Render(strings.Join(lines, "\n"))
 }

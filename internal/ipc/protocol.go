@@ -431,6 +431,21 @@ type CreatePaneRespPayload struct {
 	// worktree '/x/feat-y'" names the pane to go look at, and no message Quil
 	// could invent would.
 	Error string `json:"error,omitempty"`
+	// Swapped reports whether a REPLACE actually removed the pane named by
+	// ReplacePaneID. It is a statement about what happened, unlike Worktree
+	// below, and it exists because the two are not implied by Error.
+	//
+	// A worktree-backed replace creates the worktree BEFORE the swap, so an add
+	// that fails leaves the pane alive and the client must put it back. But the
+	// swap itself happens before the new pane's PTY is spawned — so a spawn
+	// failure reports an error with the old pane already destroyed, and a
+	// client that inferred "error means untouched" would restore a pane the
+	// daemon no longer has. Keystrokes then route to a pane id that does not
+	// exist until the next broadcast prunes the leaf.
+	//
+	// omitempty: absent means false, which is the correct reading for every
+	// non-replace response and for an older daemon that does not send it.
+	Swapped bool `json:"swapped,omitempty"`
 	// Worktree echoes the request's spec VERBATIM on every path, including the
 	// error one. It is the client's staleness key, not a statement about what
 	// was created — the client armed a layout placeholder before the send and

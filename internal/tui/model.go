@@ -449,7 +449,22 @@ type Model struct {
 	// the second and then cleared, stranding the first tab's placeholder
 	// permanently: every later pane created in that tab is swallowed by the
 	// dead leaf, with no error anywhere.
-	worktreeCreates map[string]bool
+	worktreeCreates map[string]string
+	// worktreeReplaced holds, per tab, the pane a worktree-backed REPLACE
+	// detached but has not destroyed yet.
+	//
+	// An ordinary replace disposes the old pane at send time: the daemon
+	// destroys it the moment it handles the message, so there is nothing to go
+	// back to. A worktree replace is ANSWERED, and the answer can be a failure
+	// seconds later — the daemon creates the worktree BEFORE it touches the
+	// pane, so on failure the old pane is still alive on both sides. Holding
+	// the model here is what lets applyCreatePaneResp put it back rather than
+	// costing the user a live pane over a branch name git refused.
+	//
+	// Cleared on every settling path — success disposes it (the swap really
+	// happened), failure and timeout restore it — so an entry can never outlive
+	// the request that armed it.
+	worktreeReplaced map[string]*PaneModel
 	worktreeCursor    int                     // row cursor in the worktree field's expanded list; row 0 = "off"
 	worktreeScroll    int                     // scroll offset for the visible window of the expanded worktree list
 	reqGen            int                     // monotonic instance id source for repoScan/browse/worktrees; see nextReqGen
@@ -4193,6 +4208,23 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 				continue
 			}
 
+			// The pane a worktree REPLACE detached is not new — it is live on
+			// both sides and deliberately absent from the tree while the add
+			// runs, held in worktreeReplaced so a failure can put it back.
+			//
+			// Without this it takes the branch below: existingPanes is built
+			// from tab.Leaves(), which skips the nil-Pane leaf it used to
+			// occupy, so a broadcast landing mid-checkout builds an EMPTY
+			// PaneModel for a live pane, consumes the reserved leaf, and clears
+			// worktreeCreates — after which both settling paths bail on
+			// `worktreeCreates[tabID] == ""` and the held model is leaked for
+			// the session. A `git worktree add` is seconds to minutes wide and
+			// the git-fingerprint ticker alone broadcasts every 5 s, so the
+			// window is not a corner case.
+			if held := m.worktreeReplaced[tab.ID]; held != nil && held.ID == paneID {
+				continue
+			}
+
 			// New pane — reuse model if it existed elsewhere, otherwise create.
 			pane, ok := existingPanes[paneID]
 			info := paneMap[paneID]
@@ -4237,6 +4269,20 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 					// The next pane created in that tab then lands on an
 					// unreachable leaf — a live PTY with no visible pane.
 					delete(m.worktreeCreates, tab.ID)
+					// A pane really landing in the reserved leaf is what proves
+					// a REPLACE went through, and it is the only proof that
+					// arrives reliably: the daemon broadcasts state BEFORE it
+					// answers the request, so this runs BEFORE
+					// applyCreatePaneResp — which then bails on the
+					// already-cleared worktreeCreates and never reaches its own
+					// dispose. Leaving it to that handler leaked the model on
+					// every SUCCESSFUL replace, and left a stale entry that a
+					// later failure in the same tab would restore into the
+					// layout as a pane the daemon destroyed long ago.
+					if held := m.worktreeReplaced[tab.ID]; held != nil {
+						held.Dispose()
+						delete(m.worktreeReplaced, tab.ID)
+					}
 					// Focus the new pane (it replaced the previously active one)
 					tab.ActivePane = pane.ID
 					continue
@@ -4247,9 +4293,22 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 			if tab.Root == nil {
 				tab.Root = NewLeaf(pane)
 				tab.invalidateLeaves()
+			} else if leaves := tab.Leaves(); len(leaves) == 0 {
+				// The root is a bare placeholder, which PrunePlaceholders
+				// cannot repair — it only inspects a split node's CHILDREN, so
+				// a placeholder that IS the root is invisible to it. A replace
+				// on a single-pane tab produces exactly that (leaf.Pane = nil
+				// on the root leaf), and `tab.Leaves()[0]` below then panicked
+				// with index out of range.
+				//
+				// Latent until now: the broadcast that consumed the reserved
+				// leaf also refilled the root in the same pass, which masked
+				// it. Skipping the held pane above removes that mask.
+				tab.Root = NewLeaf(pane)
+				tab.invalidateLeaves()
 			} else {
 				// Split the root vertically (stacked) to accommodate the new pane.
-				tab.Root.SplitLeaf(tab.Leaves()[0].ID, SplitVertical)
+				tab.Root.SplitLeaf(leaves[0].ID, SplitVertical)
 				tab.Root.FillPlaceholder(pane)
 				tab.invalidateLeaves()
 			}
@@ -4270,7 +4329,11 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 		// The create's own response is what retires this placeholder — on
 		// failure, or on timeout. Both delete the map entry, so the exemption
 		// cannot outlive the request that armed it.
-		if tab.Root != nil && !m.worktreeCreates[tab.ID] {
+		// Pushed from the SAME read that decides the exemption, so the
+		// placeholder and the message standing in it can never disagree about
+		// whether a create is in flight.
+		tab.CreatingBranch = m.worktreeCreates[tab.ID]
+		if tab.Root != nil && tab.CreatingBranch == "" {
 			tab.Root.PrunePlaceholders()
 			tab.invalidateLeaves()
 		}

@@ -45,7 +45,7 @@ func armedWorktreeCreate(t *testing.T) (Model, string) {
 
 	updated, _ := m.handleCreatePaneSplit()
 	got := updated.(Model)
-	if !got.worktreeCreates[tabID] {
+	if got.worktreeCreates[tabID] == "" {
 		t.Fatal("the create did not record its tab — nothing could unwind it")
 	}
 	if len(got.pendingSplit) == 0 {
@@ -149,7 +149,7 @@ func TestCreatePaneResp_TwoCreatesUnwindTheirOwnTabs(t *testing.T) {
 	tabB := "tab-second"
 	p := m.cur()
 	p.tabs = append(p.tabs, &TabModel{ID: tabB, Name: "B"})
-	m.worktreeCreates[tabB] = true
+	m.worktreeCreates[tabB] = "feat/b"
 	m.pendingSplit[tabB] = &LayoutNode{}
 
 	// B is rejected immediately and answers FIRST.
@@ -250,7 +250,7 @@ func TestCreatePane_TimeoutIsInertOnceThePaneLands(t *testing.T) {
 		Tabs:      []TabInfo{{ID: tabID, Name: "T", Panes: []string{paneID}}},
 		Panes:     []PaneInfo{{ID: paneID, TabID: tabID, Type: "terminal"}},
 	}, "")
-	if got.worktreeCreates[tabID] {
+	if got.worktreeCreates[tabID] != "" {
 		t.Fatal("the landed pane did not retire the create record")
 	}
 
@@ -267,7 +267,7 @@ func TestCreatePane_TimeoutStillFiresAfterAnEmptySuccess(t *testing.T) {
 
 	updated, _ := m.Update(wtResp(tabID, ""))
 	got := updated.(Model)
-	if !got.worktreeCreates[tabID] {
+	if got.worktreeCreates[tabID] == "" {
 		t.Fatal("success retired the create record before any pane arrived")
 	}
 
@@ -329,7 +329,7 @@ func TestApplyWorkspaceState_KeepsThePlaceholderWhileACreateIsInFlight(t *testin
 		t.Fatal("could not split to create a placeholder")
 	}
 	m.pendingSplit = map[string]*LayoutNode{tabID: placeholder}
-	m.worktreeCreates = map[string]bool{tabID: true}
+	m.worktreeCreates = map[string]string{tabID: "feat/x"}
 	before := countPlaceholders(m.curTabs()[0].Root)
 	if before == 0 {
 		t.Fatal("fixture armed no placeholder")

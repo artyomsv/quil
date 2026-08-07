@@ -26,6 +26,14 @@ type TabModel struct {
 	ChromeW   int
 	focusMode bool // true = active pane fills entire tab
 
+	// CreatingBranch names the branch of a worktree create in flight for this
+	// tab, and is what the placeholder leaf renders while it waits. Pushed by
+	// the Model each frame from worktreeCreates rather than stored here as the
+	// source of truth: the map is what the response handlers settle, and two
+	// copies of "is a create in flight" is how a placeholder outlives its
+	// request.
+	CreatingBranch string
+
 	// overlayPane is the tab's lazygit overlay (never part of the layout
 	// tree). overlayVisible controls rendering; the pane's PTY keeps
 	// running while hidden so re-show is instant with UI state intact.
@@ -379,7 +387,7 @@ func (t *TabModel) View() string {
 			return pane.View()
 		}
 	}
-	return renderNode(t.Root)
+	return renderNode(t.Root, t.CreatingBranch)
 }
 
 // ToggleFocus toggles pane focus mode on/off.

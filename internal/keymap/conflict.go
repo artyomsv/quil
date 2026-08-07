@@ -61,12 +61,20 @@ func (c Conflict) String() string {
 }
 
 // hardcodedKeys are intercepted by handleKey outside the registry:
-// f1 and ctrl+n, alt+1..alt+9 tab switching, and the ctrl+alt+v / f8 paste
-// aliases. See internal/tui/model.go, handleKey.
+// f1 and ctrl+n, alt+1..alt+9 tab switching, the ctrl+alt+v / f8 paste
+// aliases, and the shift-arrow selection-extend chords. See
+// internal/tui/model.go, handleKey and isSelectionExtendKey.
 var hardcodedKeys = func() map[string]bool {
 	m := map[string]bool{"f1": true, "ctrl+n": true, "ctrl+alt+v": true, "f8": true}
 	for _, d := range []string{"1", "2", "3", "4", "5", "6", "7", "8", "9"} {
 		m["alt+"+d] = true
+	}
+	for _, dir := range []string{"left", "right", "up", "down"} {
+		m["shift+"+dir] = true
+	}
+	for _, dir := range []string{"left", "right"} {
+		m["ctrl+shift+"+dir] = true
+		m["ctrl+alt+shift+"+dir] = true
 	}
 	return m
 }()

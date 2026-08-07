@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `paste` is configured with multiple keys (e.g. `paste = "ctrl+v,f8"`). Those
   two dialogs compared the whole configured string against a single key, so any
   multi-key paste binding was silently dead there.
+- Binding an action to `shift+left`/`right`/`up`/`down`, `ctrl+shift+left`/
+  `right`, or `ctrl+alt+shift+left`/`right` now reports a warning in F1 →
+  Shortcuts. Those eight chords are claimed by keyboard text selection ahead
+  of the action registry, so a binding there was silently dead with no
+  diagnostic.
 
 ## [1.52.2] - 2026-08-07
 

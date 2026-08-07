@@ -27,7 +27,16 @@ func TestBuild_CrossTierIsReported(t *testing.T) {
 func TestBuild_HardcodedCollision(t *testing.T) {
 	// f8 and ctrl+alt+v are included: they are paste aliases handled outside
 	// the registry, so binding another action to them silently loses.
-	for _, key := range []string{"f1", "ctrl+n", "alt+1", "alt+9", "f8", "ctrl+alt+v"} {
+	// shift+left/right/up/down, ctrl+shift+left/right, and
+	// ctrl+alt+shift+left/right are the selection-extend chords claimed by
+	// isSelectionExtendKey (internal/tui/model.go), unguarded ahead of the
+	// late-tier lookup.
+	for _, key := range []string{
+		"f1", "ctrl+n", "alt+1", "alt+9", "f8", "ctrl+alt+v",
+		"shift+left", "shift+right", "shift+up", "shift+down",
+		"ctrl+shift+left", "ctrl+shift+right",
+		"ctrl+alt+shift+left", "ctrl+alt+shift+right",
+	} {
 		t.Run(key, func(t *testing.T) {
 			_, conflicts := Build(map[ActionID]string{"pane.close": key})
 			var found bool

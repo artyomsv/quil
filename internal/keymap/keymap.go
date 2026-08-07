@@ -29,15 +29,24 @@ func Build(specs map[ActionID]string) (*Keymap, []Conflict) {
 	// Resolve in registry Order so the duplicate tie-break reproduces today's
 	// case order. Map iteration is randomized and an ID sort flips real pairs.
 	resolved := make([]Action, 0, len(specs))
+	var unknown []ActionID
 	for id := range specs {
 		a, ok := Lookup(id)
 		if !ok {
-			conflicts = append(conflicts, Conflict{Kind: ConflictUnknownAction, Loser: id})
+			unknown = append(unknown, id)
 			continue
 		}
 		resolved = append(resolved, a)
 	}
 	sort.Slice(resolved, func(i, j int) bool { return resolved[i].Order < resolved[j].Order })
+
+	// Unknown IDs have no Order to sort by — an ID sort is the deterministic
+	// fallback. Map iteration is randomized, and this slice feeds the same F1
+	// renderer detectShadowing's sort exists for.
+	sort.Slice(unknown, func(i, j int) bool { return unknown[i] < unknown[j] })
+	for _, id := range unknown {
+		conflicts = append(conflicts, Conflict{Kind: ConflictUnknownAction, Loser: id})
+	}
 
 	for _, a := range resolved {
 		seqs, err := ParseSpec(specs[a.ID])

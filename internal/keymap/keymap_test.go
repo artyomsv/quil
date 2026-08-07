@@ -122,3 +122,21 @@ func TestBuild_UnknownActionIDIsIgnoredWithAConflict(t *testing.T) {
 		t.Errorf("conflicts = %+v, want one ConflictUnknownAction", conflicts)
 	}
 }
+
+func TestBuild_UnknownActionConflictsAreSortedByID(t *testing.T) {
+	// Two or more unregistered IDs must come back in a deterministic order —
+	// not merely "two conflicts exist" — or the list reshuffles between
+	// process launches, since map iteration is randomized.
+	_, conflicts := Build(map[ActionID]string{
+		"zzz.unknown": "ctrl+z", "aaa.unknown": "ctrl+a", "mmm.unknown": "ctrl+m",
+	})
+	if len(conflicts) != 3 {
+		t.Fatalf("conflicts = %+v, want 3", conflicts)
+	}
+	want := []ActionID{"aaa.unknown", "mmm.unknown", "zzz.unknown"}
+	for i, id := range want {
+		if conflicts[i].Kind != ConflictUnknownAction || conflicts[i].Loser != id {
+			t.Errorf("conflicts[%d] = %+v, want Loser %q", i, conflicts[i], id)
+		}
+	}
+}

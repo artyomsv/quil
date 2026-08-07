@@ -70,3 +70,57 @@ func TestConflict_StringIsActionable(t *testing.T) {
 		}
 	}
 }
+
+// TestConflict_StringIncludesKindLabel pins that every branch of
+// Conflict.String() actually renders the ConflictKind label, not just the
+// key/action names the format string supplies on its own. Those names come
+// from the format string regardless of what ConflictKind.String() returns,
+// so a prior version of this suite would pass even if ConflictKind.String()
+// returned "" for every case — this test asserts the label text itself.
+func TestConflict_StringIncludesKindLabel(t *testing.T) {
+	tests := []struct {
+		name string
+		c    Conflict
+		want string
+	}{
+		{"duplicate", Conflict{Kind: ConflictDuplicate, Key: "ctrl+w", Winner: "pane.close", Loser: "tab.close"}, "duplicate binding"},
+		{"cross-tier", Conflict{Kind: ConflictCrossTier, Key: "alt+z", Winner: "pane.mute", Loser: "pane.close"}, "cross-tier shadowing"},
+		{"hardcoded", Conflict{Kind: ConflictHardcoded, Key: "f1", Loser: "pane.close"}, "collides with a built-in key"},
+		{"malformed", Conflict{Kind: ConflictMalformed, Key: "ctrl+w", Loser: "pane.close", Detail: "bad spec"}, "unreadable binding"},
+		{"unknown-action", Conflict{Kind: ConflictUnknownAction, Loser: "made.up"}, "unknown action"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.c.String()
+			if !strings.Contains(got, tt.want) {
+				t.Errorf("Conflict.String() = %q, missing kind label %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestBuild_ShadowingOrderIsDeterministic pins detectShadowing's full sort
+// (Key, then Kind, then Loser). Binding an early- and a late-tier action to
+// the same hardcoded key produces three conflicts sharing one Key, forcing
+// both the Kind leg (cross-tier sorts before hardcoded) and the Loser leg
+// (the two hardcoded entries differ only there) — not just the Key leg every
+// other test in this file exercises.
+func TestBuild_ShadowingOrderIsDeterministic(t *testing.T) {
+	_, conflicts := Build(map[ActionID]string{
+		"pane.mute":  "f1", // early
+		"pane.close": "f1", // late; f1 is also hardcoded (F1 -> Shortcuts)
+	})
+	want := []Conflict{
+		{Kind: ConflictCrossTier, Key: "f1", Winner: "pane.mute", Loser: "pane.close"},
+		{Kind: ConflictHardcoded, Key: "f1", Loser: "pane.close"},
+		{Kind: ConflictHardcoded, Key: "f1", Loser: "pane.mute"},
+	}
+	if len(conflicts) != len(want) {
+		t.Fatalf("got %d conflicts, want %d: %+v", len(conflicts), len(want), conflicts)
+	}
+	for i, w := range want {
+		if conflicts[i] != w {
+			t.Errorf("conflicts[%d] = %+v, want %+v", i, conflicts[i], w)
+		}
+	}
+}

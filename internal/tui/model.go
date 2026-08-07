@@ -22,6 +22,7 @@ import (
 	"github.com/artyomsv/quil/internal/clipboard"
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
+	"github.com/artyomsv/quil/internal/keymap"
 	"github.com/artyomsv/quil/internal/kubediscover"
 	"github.com/artyomsv/quil/internal/logger"
 	"github.com/artyomsv/quil/internal/memreport"
@@ -340,12 +341,16 @@ type Model struct {
 	// inputIdle is how the forwarder reports that it has finished draining, so
 	// the exit path can wait for the queue to reach the socket before the
 	// connection is closed out from under it.
-	inputCh              chan paneInput
-	inputDone            chan struct{}
-	inputIdle            chan struct{}
-	clientGen            int          // bumped on every client swap; see linkLostMsg for why
-	closeClientFn        func(Client) // releases a connection; see SetClientCloser
-	cfg                  config.Config
+	inputCh       chan paneInput
+	inputDone     chan struct{}
+	inputIdle     chan struct{}
+	clientGen     int          // bumped on every client swap; see linkLostMsg for why
+	closeClientFn func(Client) // releases a connection; see SetClientCloser
+	cfg           config.Config
+	// keymap resolves key presses to registry actions; keyConflicts is
+	// surfaced in F1 -> Shortcuts.
+	keymap               *keymap.Keymap
+	keyConflicts         []keymap.Conflict
 	version              string
 	sized                bool            // the terminal has reported its geometry at least once
 	attached             map[string]bool // destinations already attached — see attachAllDests
@@ -763,7 +768,14 @@ func NewModel(client Client, cfg config.Config, version string, registry *plugin
 		m.dialog = dialogDisclaimer
 		m.disclaimerTipIdx = rand.Intn(len(disclaimerTips))
 	}
+	m.initKeymap()
 	return m
+}
+
+// initKeymap resolves the configured bindings into the dispatch keymap. Safe
+// to call repeatedly; the last call wins.
+func (m *Model) initKeymap() {
+	m.keymap, m.keyConflicts = buildKeymap(m.cfg.Keybindings)
 }
 
 // WindowSize returns the last known window dimensions for persistence.

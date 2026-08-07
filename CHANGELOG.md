@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.52.1] - 2026-08-07
+
 ### Fixed
 - **A worktree pane could end up running where you cannot see it.** If a daemon
   reported a worktree create as successful without actually creating the pane,

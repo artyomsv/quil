@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.52.2] - 2026-08-07
+
 ### Added
 - **A pane can now be replaced with one in a new worktree.** Swapping a scratch
   shell for an agent on a fresh branch is an ordinary thing to want, and the

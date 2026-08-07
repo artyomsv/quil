@@ -20,6 +20,7 @@ import (
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/gitworktree"
 	"github.com/artyomsv/quil/internal/ipc"
+	"github.com/artyomsv/quil/internal/keymap"
 	"github.com/artyomsv/quil/internal/logger"
 	"github.com/artyomsv/quil/internal/plugin"
 )
@@ -94,7 +95,16 @@ const dialogBoxChrome = 6
 // the shortcuts list sizes its descriptions against what is LEFT of the row
 // after it — two numbers that have to move together, and a description budget
 // computed against a stale one wraps the row it was meant to fit.
-const dialogKeyColWidth = 16
+//
+// 22, not 16: "pane.rename" is the one action with two default bindings
+// (the macOS-friendly Alt+Shift+R fallback beside Alt+F2), and
+// Keymap.Display joins them as "alt+f2 / alt+shift+r" — 20 cells. At 16 that
+// wrapped onto a second line, which is the same row-count-vs-line-count
+// mismatch shortcutsDescWidth's own doc warns about, just in the other
+// column. 22 leaves 2 cells of headroom on the key side and still leaves the
+// longest description ("Remove active project (destroy / disconnect)", 44
+// cells) 2 cells of room on its side too.
+const dialogKeyColWidth = 22
 
 // dialogInnerWidth is the usable content width for a dialog whose box is boxW
 // columns wide in a termW-column terminal. It applies renderDialog's own clamp
@@ -358,83 +368,86 @@ const confirmKindApplyUpdate = "apply-update"
 // confirmDestroyProject in projectdialog.go.
 const confirmKindDestroyProject = "destroy-project"
 
+// shortcutsList derives the F1 -> Shortcuts rows from the action registry, so
+// the dialog cannot drift from what the keys actually do (it used to be a
+// hand-maintained line per action — TestShortcutsList_CoversEveryProjectBinding
+// existed because seven of eight project bindings were added to the config
+// but never copied into this function).
 func shortcutsList(m *Model) []struct{ key, desc string } {
+	type row = struct{ key, desc string }
+	var list []row
+
+	// Conflicts first: a dropped binding is the one thing a user cannot
+	// discover any other way, so it has to be the first thing they see, not
+	// buried under 40-odd rows of bindings that DO work.
+	for _, c := range m.keyConflicts {
+		list = append(list, row{"!", c.String()})
+	}
+
 	// m.keymap.Display renders every binding on an action joined with " / "
 	// so the help text stays readable when an action has multiple bindings
-	// (e.g. the macOS-friendly fallback on Rename pane).
-	list := []struct{ key, desc string }{
-		{m.keymap.Display("app.quit"), "Quit"},
-		{m.keymap.Display("app.command_palette"), "Command palette (fuzzy-find any action)"},
-		{m.keymap.Display("tab.new"), "New tab"},
-		{m.keymap.Display("pane.close"), "Close pane"},
-		{m.keymap.Display("pane.quick_actions"), "Pane context menu (also mouse right-click)"},
-		{m.keymap.Display("tab.close"), "Close tab"},
-		{m.keymap.Display("pane.split_h"), "Split side-by-side"},
-		{m.keymap.Display("pane.split_v"), "Split top/bottom"},
-		{m.keymap.Display("pane.left"), "Focus pane left"},
-		{m.keymap.Display("pane.right"), "Focus pane right"},
-		{m.keymap.Display("pane.up"), "Focus pane up"},
-		{m.keymap.Display("pane.down"), "Focus pane down"},
+	// (e.g. the macOS-friendly fallback on Rename pane), and canonically
+	// ("ctrl+v", not "Ctrl+V") because that is the chord form Display parses
+	// to and reports.
+	//
+	// Display returns the binding an action REQUESTED, not whether it WON
+	// dispatch — an action that lost a duplicate-binding conflict still
+	// shows the chord it asked for, one that will never fire because the
+	// conflict winner owns it at runtime. That is deliberate: the conflict
+	// row above already carries the truth for that chord, and showing the
+	// requested binding next to a "! duplicate binding" warning is more
+	// useful than blanking the row, which would read as "unbound" rather
+	// than "misconfigured" — the two are different problems with different
+	// fixes.
+	groups, byGroup := keymap.ActionsByGroup()
+	for _, g := range groups {
+		var bucket []row
+		for _, a := range byGroup[g] {
+			if a.Hidden {
+				continue // e.g. json.transform: registered, no dispatch site
+			}
+			if keys := m.keymap.Display(a.ID); keys != "" {
+				bucket = append(bucket, row{keys, a.Label})
+			}
+		}
+		if len(bucket) == 0 {
+			continue // never render an empty heading
+		}
+		list = append(list, row{"", g})
+		list = append(list, bucket...)
 	}
-	// Legacy linear pane cycling (unbound by default — hide when empty).
-	if d := m.keymap.Display("pane.next"); d != "" {
-		list = append(list, struct{ key, desc string }{d, "Next pane"})
-	}
-	if d := m.keymap.Display("pane.prev"); d != "" {
-		list = append(list, struct{ key, desc string }{d, "Previous pane"})
-	}
-	list = append(list, []struct{ key, desc string }{
-		{m.keymap.Display("tab.rename"), "Rename tab"},
-		{m.keymap.Display("pane.rename"), "Rename pane"},
-		{m.keymap.Display("tab.cycle_color"), "Cycle tab color"},
-		{m.keymap.Display("pane.scroll_page_up"), "Scroll page up"},
-		{m.keymap.Display("pane.scroll_page_down"), "Scroll page down"},
-		{m.keymap.Display("pane.paste"), "Paste clipboard"},
-		{m.keymap.Display("pane.focus_toggle"), "Toggle focus mode"},
-		{m.keymap.Display("pane.notes_toggle"), "Toggle pane notes"},
-		{m.keymap.Display("app.redraw"), "Force screen redraw"},
-		{m.keymap.Display("pane.mute"), "Mute / unmute pane notifications"},
-		{m.keymap.Display("pane.restart"), "Restart pane process (sessions resume)"},
-		{m.keymap.Display("pane.toggle_eager"), "Toggle eager restore (active pane)"},
-		{m.keymap.Display("pane.toggle_wrap"), "Toggle preview soft-wrap (AI pane)"},
-		{m.keymap.Display("pane.toggle_lazygit"), "Toggle lazygit overlay for current repo"},
-		{"", ""},
-		{"", "── Projects ──"},
-		{m.keymap.Display("sidebar.toggle"), "Toggle project sidebar"},
-		{m.keymap.Display("project.new"), "New project"},
-		{m.keymap.Display("project.destroy"), "Remove active project (destroy / disconnect)"},
-		{m.keymap.Display("project.picker"), "Project picker (fuzzy-find by name)"},
-		{m.keymap.Display("project.toggle"), "Bounce to the previous project"},
-		{m.keymap.Display("project.next"), "Next project"},
-		{m.keymap.Display("project.prev"), "Previous project"},
-		{m.keymap.Display("project.attention_queue"), "Jump to the agent blocked longest"},
-		{"", ""},
-		{m.keymap.Display("notification.toggle"), "Toggle notification sidebar"},
-		{m.keymap.Display("notification.focus"), "Focus notification sidebar"},
-		{m.keymap.Display("pane.go_back"), "Pane history back"},
-		{"Ctrl+N", "New typed pane"},
-		{"Alt+1..9", "Switch to tab N"},
-		{"F1", "Help / About"},
-		{"Tab / Shift+Tab", "→ PTY (shell completion, Claude Code modes)"},
-		{"Shift+Arrows", "Select text"},
-		{"Ctrl+Shift+←→", "Select word"},
-		{"Ctrl+Alt+Shift+←→", "Select 3 words"},
-		{"Ctrl+←→", "Jump word"},
-		{"Ctrl+Alt+←→", "Jump 3 words"},
-		{"Enter", "Copy selection"},
-		{"Right-click", "Copy selection"},
-		{"Esc", "Clear selection"},
-		{"", ""},
-		{"", "── Editor ──"},
-		{"Shift+Arrows", "Select text (editor)"},
-		{"Ctrl+Shift+←→", "Select word (editor)"},
-		{"Ctrl+Alt+Shift+←→", "Select 3 words (editor)"},
-		{"Enter", "Copy selection (editor)"},
-		{"Ctrl+X", "Cut selection (editor)"},
-		{"Ctrl+V", "Paste (editor)"},
-		{"Ctrl+A", "Select all (editor)"},
-		{"Ctrl+S", "Save (editor)"},
-	}...)
+
+	// Non-action rows: behaviour with no registry action behind it —
+	// handleKey intercepts these outside the two dispatch tiers (Ctrl+N,
+	// Alt+1..9, F1 itself), or they belong to terminal/editor selection,
+	// which the registry does not model. Carried verbatim from the
+	// pre-registry list.
+	list = append(list,
+		row{"", ""},
+		row{"", "── Built-in keys ──"},
+		row{"Ctrl+N", "New typed pane"},
+		row{"Alt+1..9", "Switch to tab N"},
+		row{"F1", "Help / About"},
+		row{"Tab / Shift+Tab", "→ PTY (shell completion, Claude Code modes)"},
+		row{"Shift+Arrows", "Select text"},
+		row{"Ctrl+Shift+←→", "Select word"},
+		row{"Ctrl+Alt+Shift+←→", "Select 3 words"},
+		row{"Ctrl+←→", "Jump word"},
+		row{"Ctrl+Alt+←→", "Jump 3 words"},
+		row{"Enter", "Copy selection"},
+		row{"Right-click", "Copy selection"},
+		row{"Esc", "Clear selection"},
+		row{"", ""},
+		row{"", "── Editor ──"},
+		row{"Shift+Arrows", "Select text (editor)"},
+		row{"Ctrl+Shift+←→", "Select word (editor)"},
+		row{"Ctrl+Alt+Shift+←→", "Select 3 words (editor)"},
+		row{"Enter", "Copy selection (editor)"},
+		row{"Ctrl+X", "Cut selection (editor)"},
+		row{"Ctrl+V", "Paste (editor)"},
+		row{"Ctrl+A", "Select all (editor)"},
+		row{"Ctrl+S", "Save (editor)"},
+	)
 	return list
 }
 

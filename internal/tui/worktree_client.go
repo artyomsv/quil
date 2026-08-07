@@ -117,6 +117,10 @@ type createPaneTimeoutMsg struct{ tabID string }
 // and its result arrives in the next workspace broadcast.
 type createPaneRespMsg struct {
 	Resp ipc.CreatePaneRespPayload
+	// Dest is the destination the response arrived FROM (Message.Origin,
+	// stamped by the router). Checked against the tab it names, so one daemon
+	// cannot act on another daemon's tab.
+	Dest string
 }
 
 // createPaneTimeout bounds the wait for that answer.
@@ -153,7 +157,7 @@ const worktreeAddTimeout = 120 * time.Second
 //
 // Without this the tab keeps a dead placeholder leaf and the next pane created
 // anywhere in that tab is swallowed by it.
-func (m *Model) applyCreatePaneResp(p ipc.CreatePaneRespPayload) {
+func (m *Model) applyCreatePaneResp(p ipc.CreatePaneRespPayload, dest string) {
 	// Keyed on what the DAEMON echoed, never on client-side "the last create
 	// I started". protocol.go calls the echoed spec the client's staleness
 	// key for exactly this reason: two creates can be in flight and their
@@ -170,11 +174,29 @@ func (m *Model) applyCreatePaneResp(p ipc.CreatePaneRespPayload) {
 	if !m.worktreeCreates[tabID] {
 		return // not ours, or already settled
 	}
-	delete(m.worktreeCreates, tabID)
+	// The response must describe a tab on the daemon it came FROM. tabByID
+	// walks every project on every destination, so without this a compromised
+	// remote daemon could name a LOCAL tab — one this client really did arm —
+	// and prune its live placeholder. The workspace_state arm already
+	// dest-filters for the same reason; this handler mutates the layout tree,
+	// so it needs it more.
+	//
+	// A tab that no longer exists is not a rejection: it was ours (the
+	// worktreeCreates check above proves it), it was closed while the add ran,
+	// and there is nothing left to prune — only the map entries to release.
+	tab := m.tabByID(tabID)
+	if tab != nil && tab.Dest != dest {
+		return
+	}
+	// SUCCESS retires nothing — not even the exemption. The pane landing is
+	// what does that (see applyWorkspaceState), so a daemon that answers "ok"
+	// without creating a pane cannot get the placeholder pruned out from
+	// under the create. The timeout is the backstop if no pane ever arrives.
 	if p.Error == "" {
 		return
 	}
-	if tab := m.tabByID(tabID); tab != nil && tab.Root != nil {
+	delete(m.worktreeCreates, tabID)
+	if tab != nil && tab.Root != nil {
 		tab.Root.PrunePlaceholders()
 		tab.invalidateLeaves()
 	}
@@ -183,7 +205,7 @@ func (m *Model) applyCreatePaneResp(p ipc.CreatePaneRespPayload) {
 	// sanitizing and both are needed: sanitizeRemoteText removes escapes
 	// without shortening anything, and the status bar drops its whole right
 	// half rather than wrapping when a flash outgrows it.
-	m.setFlash("worktree not created: " + truncateToWidth(sanitizeRemoteText(p.Error), createErrFlashCap))
+	m.setFlash("worktree not created: " + truncateCells(sanitizeRemoteText(p.Error), createErrFlashCap))
 }
 
 // createErrFlashCap bounds git's stderr in the status-bar flash. A remote

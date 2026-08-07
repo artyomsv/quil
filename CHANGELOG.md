@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **A worktree pane could end up running where you cannot see it.** If a daemon
+  reported a worktree create as successful without actually creating the pane,
+  the split it was going to fill was cleaned up underneath it, and the next pane
+  opened in that tab took its place invisibly — leaving a live process, possibly
+  a running agent, with no window. The split is now kept until the pane really
+  arrives.
+- **A remote daemon could disturb a local tab's layout.** Replies about pane
+  creation were matched by tab alone, so a reply from one machine could act on a
+  tab belonging to another. They are now matched to the machine they came from.
+- **The sidebar width setting accepted values it could not use.** On a terminal
+  narrower than 100 columns it stored anything, so the dialog could show a width
+  the layout was ignoring.
+- Branch names for a new worktree now reject Windows device names (`CON`, `NUL`,
+  `COM1`, …), which git could never create a worktree for.
+
 ## [1.52.0] - 2026-08-07
 
 ### Added

@@ -891,9 +891,15 @@ func (d *Daemon) spawnRestoredPane(pane *Pane) {
 	// network mount — and without this a worktree-owned pane could still be
 	// blanked into d.defaultCWD(), the one outcome this path exists to
 	// prevent.
-	if pane.CWD != "" && !pane.WorktreeOwned {
-		if info, err := os.Stat(pane.CWD); err != nil || !info.IsDir() {
-			log.Printf("pane %s: saved cwd %q gone, using default", pane.ID, pane.CWD)
+	// Both fields read under PluginMu: every writer holds it, and this runs
+	// with the IPC server live via ensurePaneSpawned, so an unlocked read
+	// races snapshot()/buildPaneInfos.
+	pane.PluginMu.Lock()
+	cwd, worktreeOwned := pane.CWD, pane.WorktreeOwned
+	pane.PluginMu.Unlock()
+	if cwd != "" && !worktreeOwned {
+		if info, err := os.Stat(cwd); err != nil || !info.IsDir() {
+			log.Printf("pane %s: saved cwd %q gone, using default", pane.ID, cwd)
 			// PluginMu-protected: snapshot()/buildPaneInfos/handlePaneStatusReq
 			// read pane.CWD concurrently while the server is live (lazy spawn).
 			// Single-field critical section — never nested with spawnPane (which

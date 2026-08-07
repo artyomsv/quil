@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.52.0] - 2026-08-07
+
 ### Added
 - **Quil can now create the worktree for you.** The create-pane dialog's
   Worktree field gained a `+ new branch…` row: name a branch and the pane opens

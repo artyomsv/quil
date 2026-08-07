@@ -80,6 +80,7 @@ func TestShortcutsDialog_ScrollReachesTheEnd(t *testing.T) {
 func TestShortcutsList_CoversEveryProjectBinding(t *testing.T) {
 	m := Model{width: 100, height: 200}
 	m.cfg = config.Default()
+	m.initKeymap() // shortcutsList reads m.keymap now; NewModel builds it
 
 	var keys []string
 	for _, s := range shortcutsList(&m) {

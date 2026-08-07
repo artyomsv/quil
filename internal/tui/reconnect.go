@@ -400,7 +400,7 @@ func (m Model) freezeInput(msg tea.Msg) (tea.Cmd, bool) {
 	}
 	switch msg := msg.(type) {
 	case tea.KeyPressMsg:
-		if isFreezeEscape(msg.String(), m.cfg.Keybindings.Quit) {
+		if isFreezeEscape(msg.String(), m.keymap.Keys("app.quit")) {
 			return tea.Quit, true
 		}
 		return nil, true
@@ -414,13 +414,14 @@ func (m Model) freezeInput(msg tea.Msg) (tea.Cmd, bool) {
 
 // freezeEscapeKeys are always honoured during a freeze, whatever the config says.
 //
-// The configured quit binding is checked first and normally does the work. These
-// exist because kbMatches returns false for an EMPTY configured string, so a
-// config with `quit = ""` would leave a frozen session with no key out at all:
-// every other binding is swallowed, and Bubble Tea v2 delivers ctrl+c as an
-// ordinary KeyPressMsg, so that is swallowed too. The only recourse would be
-// killing the process from another terminal — an unrecoverable UI reached by
-// editing one config value, which is too sharp an edge to leave in place.
+// The configured quit bindings are checked first and normally do the work.
+// These exist because an unbound quit action yields an EMPTY slice from
+// Keymap.Keys, so a config with `quit = ""` would leave a frozen session with
+// no key out at all: every other binding is swallowed, and Bubble Tea v2
+// delivers ctrl+c as an ordinary KeyPressMsg, so that is swallowed too. The
+// only recourse would be killing the process from another terminal — an
+// unrecoverable UI reached by editing one config value, which is too sharp an
+// edge to leave in place.
 var freezeEscapeKeys = []string{"ctrl+q", "ctrl+c"}
 
 // ErrLinkPermanent marks a dial failure that an identical retry cannot fix — a
@@ -462,9 +463,11 @@ func (m Model) resumeReconnect() (tea.Model, tea.Cmd) {
 }
 
 // isFreezeEscape reports whether a key should end a frozen session.
-func isFreezeEscape(key, configuredQuit string) bool {
-	if kbMatches(key, configuredQuit) {
-		return true
+func isFreezeEscape(key string, configuredQuit []string) bool {
+	for _, q := range configuredQuit {
+		if key == q {
+			return true
+		}
 	}
 	for _, k := range freezeEscapeKeys {
 		if key == k {

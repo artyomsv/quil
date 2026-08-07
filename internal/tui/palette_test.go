@@ -276,6 +276,7 @@ func TestRenderCommandPalette_NarrowTerminalNoOverflow(t *testing.T) {
 func TestRenderCommandPalette_ShortcutNotWrapped(t *testing.T) {
 	t.Parallel()
 	m := newSplitDragTestModel(t)
+	m.initKeymap() // buildPaletteCommands dispatches through the keymap; NewModel builds it
 	m.width, m.height = 100, 40
 	m.dialog = dialogCommandPalette
 	m.palette.commands = m.buildPaletteCommands()

@@ -2,9 +2,16 @@ package tui
 
 import "strings"
 
-// DEPRECATED for dispatch: handleKey resolves actions through Model.keymap.
-// What is left are the notes-mode key split and notesKeyExempt, which Stage 2
-// replaces with the prefix state machine. Do not add new call sites.
+// DEPRECATED for dispatch: handleKey resolves actions through Model.keymap,
+// and every modal surface outside handleKey (dialogs, context menu, lazygit
+// overlay, palette, reconnect screen) resolves through Model.isAction now
+// too. Three call sites remain, and only the first two are Stage 2's to
+// remove: notesKeyExempt and the notes-mode key split inside handleKey (both
+// still fed by the raw config keybindings the notes block reads directly —
+// Stage 2 replaces this with the prefix state machine). The third, Update's
+// reconnect resume-key check, matches against the hardcoded
+// reconnectResumeKey constant rather than a config value and stays even
+// after Stage 2. Do not add new call sites.
 //
 // kbMatches reports whether key matches configured, where configured is
 // either a single binding ("alt+f2") or a comma-separated list of
@@ -26,8 +33,14 @@ func kbMatches(key, configured string) bool {
 }
 
 // kbBindings returns the individual bindings parsed out of a configured
-// spec. Used by the shortcuts help dialog to render every binding for an
-// action ("alt+f2 / alt+shift+r"). Whitespace-only entries are dropped.
+// spec ("alt+f2 / alt+shift+r"). Whitespace-only entries are dropped.
+//
+// No production caller — the shortcuts dialog and the palette now render
+// through Keymap.Display. Kept as the test-side oracle those two migrations
+// are checked against (TestShortcutsList_CoversEveryProjectBinding,
+// TestPalette_ProjectRowsCarryTheirShortcuts): kbDisplay parses the same
+// raw config string Keymap.Display resolves through the registry, so the two
+// must keep agreeing.
 func kbBindings(configured string) []string {
 	if configured == "" {
 		return nil

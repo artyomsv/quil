@@ -353,6 +353,7 @@ func TestHandleToggleLazygit_TwoCandidates_OpensPicker(t *testing.T) {
 func TestHandleOverlayKey_ToggleKey_Hides(t *testing.T) {
 	t.Parallel()
 	m, _, tab := overlayTestModel(t, "")
+	m.initKeymap() // handleOverlayKey dispatches through the keymap; NewModel builds it
 	overlay := NewPaneModel("pane-o", 1024)
 	tab.overlayPane = overlay
 	tab.overlayVisible = true
@@ -633,6 +634,7 @@ func TestGitRepoPick_UpDownClamp(t *testing.T) {
 func TestHandleOverlayKey_Quit_ReturnsQuit(t *testing.T) {
 	t.Parallel()
 	m, _, tab := overlayTestModel(t, "")
+	m.initKeymap() // handleOverlayKey dispatches through the keymap; NewModel builds it
 	overlay := NewPaneModel("pane-o", 1024)
 	tab.overlayPane = overlay
 	tab.overlayVisible = true
@@ -658,6 +660,7 @@ func TestHandleOverlayKey_Quit_ReturnsQuit(t *testing.T) {
 func TestHandleOverlayKey_Redraw_InvalidatesCaches(t *testing.T) {
 	t.Parallel()
 	m, fake, tab := overlayTestModel(t, "")
+	m.initKeymap() // handleOverlayKey dispatches through the keymap; NewModel builds it
 
 	// Give the tab a two-pane split so the cache-invalidation loop has real
 	// panes to walk.

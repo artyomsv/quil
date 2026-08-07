@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Paste now works in the Settings field editor and the instance form when
+  `paste` is configured with multiple keys (e.g. `paste = "ctrl+v,f8"`). Those
+  two dialogs compared the whole configured string against a single key, so any
+  multi-key paste binding was silently dead there.
+
 ## [1.52.2] - 2026-08-07
 
 ### Added

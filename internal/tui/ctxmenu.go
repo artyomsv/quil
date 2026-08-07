@@ -481,7 +481,6 @@ func (m Model) openQuickActionsMenu() (tea.Model, tea.Cmd) {
 // the only global that passes through — everything else is either menu
 // navigation or swallowed (the menu is short-lived; no exempt list).
 func (m Model) handleCtxMenuKey(key string) (tea.Model, tea.Cmd) {
-	kb := m.cfg.Keybindings
 	switch {
 	case key == "esc":
 		m.closeCtxMenu()
@@ -497,7 +496,7 @@ func (m Model) handleCtxMenuKey(key string) (tea.Model, tea.Cmd) {
 			return m.executeCtxMenuItem(m.ctxMenu.items[c])
 		}
 		return m, nil
-	case kbMatches(key, kb.Quit):
+	case m.isAction(key, "app.quit"):
 		m.closeCtxMenu()
 		return m, tea.Quit
 	}

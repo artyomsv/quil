@@ -248,22 +248,21 @@ func (m *Model) overlayResizeCmd(tab *TabModel) tea.Cmd {
 // default forwarding branch.
 func (m *Model) handleOverlayKey(msg tea.KeyPressMsg, tab *TabModel) tea.Cmd {
 	key := msg.String()
-	kb := m.cfg.Keybindings
 
 	logger.Debug("handleOverlayKey: key=%q", key)
 
 	// Toggle → hide.
-	if kbMatches(key, kb.ToggleLazygit) {
+	if m.isAction(key, "pane.toggle_lazygit") {
 		return m.handleToggleLazygit()
 	}
 
 	// Quit.
-	if kbMatches(key, kb.Quit) {
+	if m.isAction(key, "app.quit") {
 		return tea.Quit
 	}
 
 	// Redraw — mirrors the Redraw case in handleKey exactly.
-	if kbMatches(key, kb.Redraw) {
+	if m.isAction(key, "app.redraw") {
 		for _, t := range m.allTabs() {
 			t.invalidateLeaves()
 			if t.Root != nil {

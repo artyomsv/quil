@@ -359,60 +359,59 @@ const confirmKindApplyUpdate = "apply-update"
 const confirmKindDestroyProject = "destroy-project"
 
 func shortcutsList(m *Model) []struct{ key, desc string } {
-	kb := m.cfg.Keybindings
-	// kbDisplay renders comma-separated multi-bindings as "a / b" so the
-	// help text stays readable when an action has multiple bindings (e.g.
-	// the macOS-friendly fallback on Rename pane).
+	// m.keymap.Display renders every binding on an action joined with " / "
+	// so the help text stays readable when an action has multiple bindings
+	// (e.g. the macOS-friendly fallback on Rename pane).
 	list := []struct{ key, desc string }{
-		{kbDisplay(kb.Quit), "Quit"},
-		{kbDisplay(kb.CommandPalette), "Command palette (fuzzy-find any action)"},
-		{kbDisplay(kb.NewTab), "New tab"},
-		{kbDisplay(kb.ClosePane), "Close pane"},
-		{kbDisplay(kb.QuickActions), "Pane context menu (also mouse right-click)"},
-		{kbDisplay(kb.CloseTab), "Close tab"},
-		{kbDisplay(kb.SplitHorizontal), "Split side-by-side"},
-		{kbDisplay(kb.SplitVertical), "Split top/bottom"},
-		{kbDisplay(kb.PaneLeft), "Focus pane left"},
-		{kbDisplay(kb.PaneRight), "Focus pane right"},
-		{kbDisplay(kb.PaneUp), "Focus pane up"},
-		{kbDisplay(kb.PaneDown), "Focus pane down"},
+		{m.keymap.Display("app.quit"), "Quit"},
+		{m.keymap.Display("app.command_palette"), "Command palette (fuzzy-find any action)"},
+		{m.keymap.Display("tab.new"), "New tab"},
+		{m.keymap.Display("pane.close"), "Close pane"},
+		{m.keymap.Display("pane.quick_actions"), "Pane context menu (also mouse right-click)"},
+		{m.keymap.Display("tab.close"), "Close tab"},
+		{m.keymap.Display("pane.split_h"), "Split side-by-side"},
+		{m.keymap.Display("pane.split_v"), "Split top/bottom"},
+		{m.keymap.Display("pane.left"), "Focus pane left"},
+		{m.keymap.Display("pane.right"), "Focus pane right"},
+		{m.keymap.Display("pane.up"), "Focus pane up"},
+		{m.keymap.Display("pane.down"), "Focus pane down"},
 	}
 	// Legacy linear pane cycling (unbound by default — hide when empty).
-	if kb.NextPane != "" {
-		list = append(list, struct{ key, desc string }{kbDisplay(kb.NextPane), "Next pane"})
+	if d := m.keymap.Display("pane.next"); d != "" {
+		list = append(list, struct{ key, desc string }{d, "Next pane"})
 	}
-	if kb.PrevPane != "" {
-		list = append(list, struct{ key, desc string }{kbDisplay(kb.PrevPane), "Previous pane"})
+	if d := m.keymap.Display("pane.prev"); d != "" {
+		list = append(list, struct{ key, desc string }{d, "Previous pane"})
 	}
 	list = append(list, []struct{ key, desc string }{
-		{kbDisplay(kb.RenameTab), "Rename tab"},
-		{kbDisplay(kb.RenamePane), "Rename pane"},
-		{kbDisplay(kb.CycleTabColor), "Cycle tab color"},
-		{kbDisplay(kb.ScrollPageUp), "Scroll page up"},
-		{kbDisplay(kb.ScrollPageDown), "Scroll page down"},
-		{kbDisplay(kb.Paste), "Paste clipboard"},
-		{kbDisplay(kb.FocusPane), "Toggle focus mode"},
-		{kbDisplay(kb.NotesToggle), "Toggle pane notes"},
-		{kbDisplay(kb.Redraw), "Force screen redraw"},
-		{kbDisplay(kb.MutePane), "Mute / unmute pane notifications"},
-		{kbDisplay(kb.RestartPane), "Restart pane process (sessions resume)"},
-		{kbDisplay(kb.ToggleEager), "Toggle eager restore (active pane)"},
-		{kbDisplay(kb.ToggleWrap), "Toggle preview soft-wrap (AI pane)"},
-		{kbDisplay(kb.ToggleLazygit), "Toggle lazygit overlay for current repo"},
+		{m.keymap.Display("tab.rename"), "Rename tab"},
+		{m.keymap.Display("pane.rename"), "Rename pane"},
+		{m.keymap.Display("tab.cycle_color"), "Cycle tab color"},
+		{m.keymap.Display("pane.scroll_page_up"), "Scroll page up"},
+		{m.keymap.Display("pane.scroll_page_down"), "Scroll page down"},
+		{m.keymap.Display("pane.paste"), "Paste clipboard"},
+		{m.keymap.Display("pane.focus_toggle"), "Toggle focus mode"},
+		{m.keymap.Display("pane.notes_toggle"), "Toggle pane notes"},
+		{m.keymap.Display("app.redraw"), "Force screen redraw"},
+		{m.keymap.Display("pane.mute"), "Mute / unmute pane notifications"},
+		{m.keymap.Display("pane.restart"), "Restart pane process (sessions resume)"},
+		{m.keymap.Display("pane.toggle_eager"), "Toggle eager restore (active pane)"},
+		{m.keymap.Display("pane.toggle_wrap"), "Toggle preview soft-wrap (AI pane)"},
+		{m.keymap.Display("pane.toggle_lazygit"), "Toggle lazygit overlay for current repo"},
 		{"", ""},
 		{"", "── Projects ──"},
-		{kbDisplay(kb.SidebarToggle), "Toggle project sidebar"},
-		{kbDisplay(kb.NewProject), "New project"},
-		{kbDisplay(kb.DestroyProject), "Remove active project (destroy / disconnect)"},
-		{kbDisplay(kb.ProjectPicker), "Project picker (fuzzy-find by name)"},
-		{kbDisplay(kb.ProjectToggle), "Bounce to the previous project"},
-		{kbDisplay(kb.ProjectNext), "Next project"},
-		{kbDisplay(kb.ProjectPrev), "Previous project"},
-		{kbDisplay(kb.AttentionQueue), "Jump to the agent blocked longest"},
+		{m.keymap.Display("sidebar.toggle"), "Toggle project sidebar"},
+		{m.keymap.Display("project.new"), "New project"},
+		{m.keymap.Display("project.destroy"), "Remove active project (destroy / disconnect)"},
+		{m.keymap.Display("project.picker"), "Project picker (fuzzy-find by name)"},
+		{m.keymap.Display("project.toggle"), "Bounce to the previous project"},
+		{m.keymap.Display("project.next"), "Next project"},
+		{m.keymap.Display("project.prev"), "Previous project"},
+		{m.keymap.Display("project.attention_queue"), "Jump to the agent blocked longest"},
 		{"", ""},
-		{kbDisplay(kb.NotificationToggle), "Toggle notification sidebar"},
-		{kbDisplay(kb.NotificationFocus), "Focus notification sidebar"},
-		{kbDisplay(kb.GoBack), "Pane history back"},
+		{m.keymap.Display("notification.toggle"), "Toggle notification sidebar"},
+		{m.keymap.Display("notification.focus"), "Focus notification sidebar"},
+		{m.keymap.Display("pane.go_back"), "Pane history back"},
 		{"Ctrl+N", "New typed pane"},
 		{"Alt+1..9", "Switch to tab N"},
 		{"F1", "Help / About"},
@@ -665,7 +664,7 @@ func (m Model) handleSettingsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			if len(m.dialogInput) > 0 {
 				m.dialogInput = m.dialogInput[:len(m.dialogInput)-1]
 			}
-		case key == m.cfg.Keybindings.Paste:
+		case m.isAction(key, "pane.paste"):
 			return m, m.pasteToDialog()
 		default:
 			if len(key) == 1 {
@@ -2094,7 +2093,7 @@ func (m Model) handleInstanceFormKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			if m.instanceFormCursor < totalItems-1 {
 				m.instanceFormCursor++
 			}
-		case key == m.cfg.Keybindings.Paste:
+		case m.isAction(key, "pane.paste"):
 			return m, m.pasteToDialog()
 		default:
 			if len(key) == 1 {

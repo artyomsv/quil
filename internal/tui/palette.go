@@ -283,7 +283,6 @@ func formatPaneNav(tabIdx, paneIdx int, p *PaneModel, project string) string {
 // most common reason to open the palette), then pane actions, then system.
 // Headers are shown only while browsing (empty query) and skipped by the cursor.
 func (m *Model) buildPaletteCommands() []paletteCommand {
-	kb := m.cfg.Keybindings
 	home, _ := os.UserHomeDir()
 	var cmds []paletteCommand
 	header := func(label string) { cmds = append(cmds, paletteCommand{header: true, label: label}) }
@@ -371,10 +370,10 @@ func (m *Model) buildPaletteCommands() []paletteCommand {
 		})
 	}
 	cmds = append(cmds,
-		paletteCommand{action: palActNewTab, enabled: true, label: "New tab", detail: kbDisplay(kb.NewTab), keywords: []string{"tab", "create"}},
-		paletteCommand{action: palActCloseTab, enabled: true, label: "Close tab…", detail: kbDisplay(kb.CloseTab), keywords: []string{"tab", "close"}},
-		paletteCommand{action: palActRenameTab, enabled: true, label: "Rename tab", detail: kbDisplay(kb.RenameTab), keywords: []string{"tab", "rename"}},
-		paletteCommand{action: palActCycleTabColor, enabled: true, label: "Cycle tab color", detail: kbDisplay(kb.CycleTabColor), keywords: []string{"tab", "color"}},
+		paletteCommand{action: palActNewTab, enabled: true, label: "New tab", detail: m.keymap.Display("tab.new"), keywords: []string{"tab", "create"}},
+		paletteCommand{action: palActCloseTab, enabled: true, label: "Close tab…", detail: m.keymap.Display("tab.close"), keywords: []string{"tab", "close"}},
+		paletteCommand{action: palActRenameTab, enabled: true, label: "Rename tab", detail: m.keymap.Display("tab.rename"), keywords: []string{"tab", "rename"}},
+		paletteCommand{action: palActCycleTabColor, enabled: true, label: "Cycle tab color", detail: m.keymap.Display("tab.cycle_color"), keywords: []string{"tab", "color"}},
 	)
 
 	// --- Projects ----------------------------------------------------------
@@ -415,7 +414,7 @@ func (m *Model) buildPaletteCommands() []paletteCommand {
 		removeArg = active.ID
 	}
 	cmds = append(cmds,
-		paletteCommand{action: palActNewProject, enabled: true, label: "New project", detail: kbDisplay(kb.NewProject), keywords: []string{"project", "create", "add", "workspace"}},
+		paletteCommand{action: palActNewProject, enabled: true, label: "New project", detail: m.keymap.Display("project.new"), keywords: []string{"project", "create", "add", "workspace"}},
 		paletteCommand{
 			action: palActRenameProject, arg: removeArg,
 			// Greyed on a daemon that cannot hold a project, for the same
@@ -429,7 +428,7 @@ func (m *Model) buildPaletteCommands() []paletteCommand {
 			action: palActRemoveProject, arg: removeArg,
 			enabled:  active != nil && (remote || !isSyntheticProject(active.ID)),
 			label:    removeLabel,
-			detail:   kbDisplay(kb.DestroyProject),
+			detail:   m.keymap.Display("project.destroy"),
 			keywords: []string{"project", "destroy", "delete", "remove", "disconnect", "host"},
 		},
 		paletteCommand{
@@ -438,14 +437,14 @@ func (m *Model) buildPaletteCommands() []paletteCommand {
 			// launch there is genuinely nowhere to bounce back to.
 			enabled:  m.prevProject != "" && m.projectByID(m.prevProject) != nil,
 			label:    "Previous project",
-			detail:   kbDisplay(kb.ProjectToggle),
+			detail:   m.keymap.Display("project.toggle"),
 			keywords: []string{"project", "back", "bounce", "last", "previous"},
 		},
 		paletteCommand{
 			action:   palActAttentionQueue,
 			enabled:  len(m.blockedPanes()) > 0,
 			label:    "Go to the agent waiting longest",
-			detail:   kbDisplay(kb.AttentionQueue),
+			detail:   m.keymap.Display("project.attention_queue"),
 			keywords: []string{"attention", "blocked", "waiting", "permission", "agent", "project"},
 		},
 		paletteCommand{
@@ -454,7 +453,7 @@ func (m *Model) buildPaletteCommands() []paletteCommand {
 			// invisibly, so the row says so up front instead of flashing.
 			enabled:  m.width >= minWidthForSidebar,
 			label:    sidebarToggleLabel(m.sidebarOpen),
-			detail:   kbDisplay(kb.SidebarToggle),
+			detail:   m.keymap.Display("sidebar.toggle"),
 			keywords: []string{"sidebar", "project", "panel", "column"},
 		},
 	)
@@ -462,18 +461,18 @@ func (m *Model) buildPaletteCommands() []paletteCommand {
 	// --- Pane: actions on the active pane ----------------------------------
 	header("Pane")
 	cmds = append(cmds,
-		paletteCommand{action: palActSplitH, enabled: true, label: "Split horizontal", detail: kbDisplay(kb.SplitHorizontal), keywords: []string{"hsplit", "horizontal"}},
-		paletteCommand{action: palActSplitV, enabled: true, label: "Split vertical", detail: kbDisplay(kb.SplitVertical), keywords: []string{"vsplit", "vertical"}},
-		paletteCommand{action: palActFocus, enabled: true, label: "Toggle focus mode", detail: kbDisplay(kb.FocusPane), keywords: []string{"fullscreen", "zoom", "maximize"}},
-		paletteCommand{action: palActNotes, enabled: true, label: "Toggle notes", detail: kbDisplay(kb.NotesToggle), keywords: []string{"note", "editor"}},
-		paletteCommand{action: palActRenamePane, enabled: true, label: "Rename pane", detail: kbDisplay(kb.RenamePane)},
-		paletteCommand{action: palActMute, enabled: true, label: muteLabel, detail: kbDisplay(kb.MutePane), keywords: []string{"mute", "silence", "notification"}},
-		paletteCommand{action: palActEager, enabled: true, label: eagerLabel, detail: kbDisplay(kb.ToggleEager), keywords: []string{"eager", "restore", "restart"}},
-		paletteCommand{action: palActHistory, enabled: historyOK, label: "Input history", detail: kbDisplay(kb.CommandHistory), keywords: []string{"history", "prompts"}},
-		paletteCommand{action: palActLazygit, enabled: lazygitOK, label: "Open lazygit", detail: kbDisplay(kb.ToggleLazygit), keywords: []string{"git", "lazygit"}},
+		paletteCommand{action: palActSplitH, enabled: true, label: "Split horizontal", detail: m.keymap.Display("pane.split_h"), keywords: []string{"hsplit", "horizontal"}},
+		paletteCommand{action: palActSplitV, enabled: true, label: "Split vertical", detail: m.keymap.Display("pane.split_v"), keywords: []string{"vsplit", "vertical"}},
+		paletteCommand{action: palActFocus, enabled: true, label: "Toggle focus mode", detail: m.keymap.Display("pane.focus_toggle"), keywords: []string{"fullscreen", "zoom", "maximize"}},
+		paletteCommand{action: palActNotes, enabled: true, label: "Toggle notes", detail: m.keymap.Display("pane.notes_toggle"), keywords: []string{"note", "editor"}},
+		paletteCommand{action: palActRenamePane, enabled: true, label: "Rename pane", detail: m.keymap.Display("pane.rename")},
+		paletteCommand{action: palActMute, enabled: true, label: muteLabel, detail: m.keymap.Display("pane.mute"), keywords: []string{"mute", "silence", "notification"}},
+		paletteCommand{action: palActEager, enabled: true, label: eagerLabel, detail: m.keymap.Display("pane.toggle_eager"), keywords: []string{"eager", "restore", "restart"}},
+		paletteCommand{action: palActHistory, enabled: historyOK, label: "Input history", detail: m.keymap.Display("pane.command_history"), keywords: []string{"history", "prompts"}},
+		paletteCommand{action: palActLazygit, enabled: lazygitOK, label: "Open lazygit", detail: m.keymap.Display("pane.toggle_lazygit"), keywords: []string{"git", "lazygit"}},
 		paletteCommand{action: palActNewPane, enabled: true, label: "New pane…", detail: "ctrl+n", keywords: []string{"create", "plugin", "claude", "terminal"}},
-		paletteCommand{action: palActRestartPane, enabled: true, label: "Restart pane…", detail: kbDisplay(kb.RestartPane), keywords: []string{"restart", "respawn"}},
-		paletteCommand{action: palActClosePane, enabled: true, label: "Close pane…", detail: kbDisplay(kb.ClosePane), keywords: []string{"close", "kill"}},
+		paletteCommand{action: palActRestartPane, enabled: true, label: "Restart pane…", detail: m.keymap.Display("pane.restart"), keywords: []string{"restart", "respawn"}},
+		paletteCommand{action: palActClosePane, enabled: true, label: "Close pane…", detail: m.keymap.Display("pane.close"), keywords: []string{"close", "kill"}},
 	)
 
 	// --- System ------------------------------------------------------------
@@ -487,7 +486,7 @@ func (m *Model) buildPaletteCommands() []paletteCommand {
 		paletteCommand{action: palActClientLog, enabled: true, label: "View client log", keywords: []string{"log", "client"}},
 		paletteCommand{action: palActDaemonLog, enabled: true, label: "View daemon log", keywords: []string{"log", "daemon"}},
 		paletteCommand{action: palActMCPLog, enabled: true, label: "View MCP logs", keywords: []string{"log", "mcp"}},
-		paletteCommand{action: palActRedraw, enabled: true, label: "Force redraw", detail: kbDisplay(kb.Redraw), keywords: []string{"redraw", "repaint", "refresh"}},
+		paletteCommand{action: palActRedraw, enabled: true, label: "Force redraw", detail: m.keymap.Display("app.redraw"), keywords: []string{"redraw", "repaint", "refresh"}},
 	)
 
 	return cmds

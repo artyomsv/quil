@@ -132,7 +132,10 @@ type sidebarRow struct {
 // project with its aggregate working/blocked counts and link health (active
 // project marked), then the active project's tabs and panes with per-pane
 // agent-state glyphs.
-func (m *Model) sidebarRows(w int) []sidebarRow {
+//
+// The second return value is the index of the first row after the PANES
+// heading — where the pinned block ends and the scrollable body begins.
+func (m *Model) sidebarRows(w int) ([]sidebarRow, int) {
 	rows := []sidebarRow{{text: sidebarHeading("PROJECTS", w)}}
 	for i, p := range m.projects {
 		working, blocked, done := p.counts()
@@ -162,6 +165,10 @@ func (m *Model) sidebarRows(w int) []sidebarRow {
 	}
 
 	rows = append(rows, sidebarRow{}, sidebarRow{text: sidebarHeading("PANES", w)})
+	// Everything from here on is the scrollable body. The builder is the only
+	// thing that knows where the section starts; deriving it later by matching
+	// the heading text would be a second source of truth for one boundary.
+	panesStart := len(rows)
 	// The active tab and the pane inside it that holds focus are marked the
 	// same way the active project is, so one glance answers "where am I"
 	// at all three levels. Only the ACTIVE tab's focused pane is marked:
@@ -203,7 +210,7 @@ func (m *Model) sidebarRows(w int) []sidebarRow {
 			}
 		}
 	}
-	return rows
+	return rows, panesStart
 }
 
 // renderSidebar renders the project sidebar. height is the number of screen
@@ -240,6 +247,38 @@ func (m *Model) renderSidebar(height int) string {
 	return lipgloss.NewStyle().Width(w).Height(height).Render(content)
 }
 
+// minPaneRows is the floor of PANES rows sidebarVisibleRows will leave. When
+// the pinned PROJECTS block alone would push the body below it, the whole strip
+// reverts to the pre-scroll tail cap: a strip showing eight projects and no
+// panes is worse than one showing a truncated list of both.
+const minPaneRows = 3
+
+// maxSidebarScrollFor is the largest offset that still paints content. One row
+// of the window goes to the "N above" marker as soon as the body is scrolled at
+// all, so the last page holds bodyH-1 rows.
+func maxSidebarScrollFor(bodyLen, bodyH int) int {
+	if bodyH <= 1 || bodyLen <= bodyH {
+		return 0
+	}
+	if max := bodyLen - (bodyH - 1); max > 0 {
+		return max
+	}
+	return 0
+}
+
+// clampSidebarScroll bounds an offset into a body of bodyLen rows shown through
+// a bodyH-row window. Pure — callers that own the stored offset write it back
+// themselves.
+func clampSidebarScroll(off, bodyLen, bodyH int) int {
+	if off < 0 {
+		return 0
+	}
+	if max := maxSidebarScrollFor(bodyLen, bodyH); off > max {
+		return max
+	}
+	return off
+}
+
 // sidebarVisibleRows caps sidebarRows to the rows that actually fit in
 // height. lipgloss's .Height PADS but never CLIPS, so an uncapped list
 // (1 + projects + 2 + Σ(1 + panes) rows, all unbounded) grows the composited
@@ -248,21 +287,68 @@ func (m *Model) renderSidebar(height int) string {
 // NotificationCenter.View computes its own maxVisible rather than trusting
 // .Height. minWidthForSidebar gates columns only.
 //
-// The TAIL is what gets dropped, and the last visible row becomes an
-// explicit overflow marker rather than silently ending: the PROJECTS block
-// is the navigation the sidebar exists for, and trimming from the top would
-// shift every remaining row while sidebarRowAt still indexes rows[y-1].
+// The PROJECTS block is PINNED and the PANES body windows at m.sidebarScroll:
+// that block is the navigation the sidebar exists for, and scrolling it away
+// would leave a user with many panes unable to reach another project at all.
+// Overflow on either side of the window is marked, so a body that continues
+// past the strip never just stops.
 //
-// Both the paint and the hit test call this, with the same height — a cap
-// applied in only one of them is the row-drift bug in another form.
+// The offset is clamped from a LOCAL copy and nothing here writes model state.
+// This runs on the render path, and a render that mutates is how a paint and a
+// hit test come to disagree; scrollSidebar owns the stored value.
+//
+// Both the paint and the hit test call this, with the same height — a cap or an
+// offset applied in only one of them is the row-drift bug in another form.
 func (m *Model) sidebarVisibleRows(w, height int) []sidebarRow {
-	rows := m.sidebarRows(w)
+	rows, panesStart := m.sidebarRows(w)
 	if height <= 0 || len(rows) <= height {
 		return rows
 	}
-	rows = rows[:height]
-	rows[height-1] = sidebarRow{text: sidebarDimStyle.Render(padOrTrunc(" …", w))}
-	return rows
+	head, body := rows[:panesStart], rows[panesStart:]
+
+	// Degenerate strip: the pinned head alone would starve the body. Fall back
+	// to the pre-scroll behaviour for the WHOLE list — the tail is dropped and
+	// the last row says so.
+	if panesStart > height-minPaneRows {
+		out := append([]sidebarRow(nil), rows[:height]...)
+		out[height-1] = sidebarRow{text: sidebarDimStyle.Render(padOrTrunc(" …", w))}
+		return out
+	}
+
+	bodyH := height - len(head)
+	off := clampSidebarScroll(m.sidebarScroll, len(body), bodyH)
+
+	// Markers cost a row each and appear only on the side that has more. They
+	// carry no kind, so sidebarHit treats them as inert chrome.
+	avail := bodyH
+	top := off > 0
+	if top {
+		avail--
+	}
+	bottom := off+avail < len(body)
+	if bottom {
+		avail--
+	}
+	if avail < 0 {
+		avail = 0
+	}
+	end := off + avail
+	if end > len(body) {
+		end = len(body)
+	}
+
+	out := make([]sidebarRow, 0, height)
+	out = append(out, head...)
+	if top {
+		out = append(out, sidebarRow{text: sidebarDimStyle.Render(
+			padOrTrunc(fmt.Sprintf(" %s %d above", glyphMore, off), w))})
+	}
+	out = append(out, body[off:end]...)
+	if bottom {
+		out = append(out, sidebarRow{text: sidebarDimStyle.Render(
+			padOrTrunc(fmt.Sprintf(" %s %d below", glyphMore, len(body)-end), w))})
+	}
+	return out
 }
 
 // sidebarRowAt resolves the project-sidebar row under a SCREEN coordinate.
@@ -411,6 +497,12 @@ const (
 	glyphDone    = "✓" // finished while you were away
 	glyphIdle    = "○" // nothing happening
 	glyphPinned  = "◆" // attention pinned by hand — never auto-cleared
+	// glyphMore marks rows the PANES window is hiding above or below itself.
+	// U+22EF is already what paneRow uses for the subagent count, so it is
+	// proven against the rule this block states. Deliberately NOT ▲/▼: ▲ is
+	// glyphBlocked, and a scroll marker wearing the blocked glyph is exactly
+	// the state-vocabulary confusion the rest of this file exists to remove.
+	glyphMore = "⋯" // more rows in this direction (U+22EF)
 )
 
 // sidebarHeadingStyle / sidebarDimStyle / the state-glyph styles mirror the
@@ -559,6 +651,15 @@ func sidebarHeading(title string, w int) string {
 // The 1-based ordinal matches the tab bar's "%d:%s" and the Alt+1..9 keys, and
 // is placed before the name so a narrow strip elides the name and keeps the
 // number.
+//
+// That promise is kept by the BUDGET ORDER rather than by the layout order.
+// Summing marker + ordinal + name and letting one closing truncateCells
+// arbitrate cut the ORDINAL instead, because the name's floor could push the
+// line past w: a double-digit index spends three cells, so at w=4 "  10:name"
+// came out "  10" — the colon gone, and at w=3 a digit with it. The ordinal is
+// budgeted first, the marker takes what is left (levels cannot line up at a
+// width where nothing else fits either), and the name — the one part a user can
+// re-read from the tab bar — gives way first.
 func sidebarTabHeading(name string, idx int, active bool, color string, w int) string {
 	marker := "  "
 	style := sidebarTabNameStyle
@@ -572,12 +673,14 @@ func sidebarTabHeading(name string, idx int, active bool, color string, w int) s
 			style = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(color))
 		}
 	}
-	ordinal := fmt.Sprintf("%d:", idx+1)
+	ordinal := truncateCells(fmt.Sprintf("%d:", idx+1), w)
+	marker = truncateCells(marker, w-lipgloss.Width(ordinal))
 	avail := w - lipgloss.Width(marker) - lipgloss.Width(ordinal)
-	if avail < 1 {
-		avail = 1
-	}
-	return style.Render(truncateCells(marker+ordinal+elideMiddle(name, avail), w))
+	// padOrTrunc, not truncateCells: every row this file hands the paint is
+	// exactly w cells, and a heading that stopped short left the closing
+	// .Width(w) to pad it — one more thing that pass has to get right on a row
+	// whose arithmetic already has to be exact.
+	return style.Render(padOrTrunc(marker+ordinal+elideMiddle(name, avail), w))
 }
 
 // projectRow renders one project's summary line: an active-project marker,

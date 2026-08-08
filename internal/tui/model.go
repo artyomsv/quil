@@ -547,8 +547,14 @@ type Model struct {
 	// what gets painted. A screen property, not a session one — loaded from
 	// UIConfig at startup (NewModel), never workspace.json, so a workspace saved
 	// with it open can't fight a narrower terminal on restore.
-	sidebarOpen       bool
-	sidebarWidth      int
+	sidebarOpen  bool
+	sidebarWidth int
+	// sidebarScroll is the PANES section's scroll offset in rows. The PROJECTS
+	// block is pinned and never scrolls. Written only by scrollSidebar /
+	// scrollSidebarToPane; sidebarVisibleRows clamps a local copy, because it
+	// runs on the render path and a render that writes model state is how a
+	// paint and a hit test come to disagree.
+	sidebarScroll     int
 	notesMode         bool         // true when pane notes editor is open for the active pane
 	notesEditor       *NotesEditor // active notes editor (nil when notesMode is false)
 	notesPaneFocused  bool         // true when keyboard input goes to the bound pane (PTY) instead of the notes editor

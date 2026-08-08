@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -40,6 +41,11 @@ func TestSidebarGlyphs_OneCellAndNotEmojiCapable(t *testing.T) {
 		"glyphDone":    glyphDone,
 		"glyphIdle":    glyphIdle,
 		"glyphPinned":  glyphPinned,
+		// Not a state glyph, but it sits in the same const block and is
+		// budgeted the same way: the scroll markers pad to an exact column
+		// count around it, and paneRow already spends it on the subagent
+		// count, so a font drawing it wide would overpaint there too.
+		"glyphMore": glyphMore,
 	} {
 		if got := lipgloss.Width(g); got != 1 {
 			t.Errorf("%s (%q) measures %d cells, want exactly 1 — "+
@@ -145,6 +151,43 @@ func TestPaneRow_MeasuresExactlyItsWidth(t *testing.T) {
 							t.Errorf("paneRow(state=%s label=%q reason=%q focused=%v, w=%d) "+
 								"measures %d cells, want exactly %d",
 								state, label, reason, focused, w, n, w)
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// sidebarTabHeading's own sweep. It does its own budget arithmetic over a
+// remote-sourced tab name — three independent pieces (marker, ordinal, elided
+// name) summed and handed to one closing cut — and it was the only row builder
+// in this file without one.
+//
+// The indices sweep past 9 deliberately: the ordinal is "%d:", so it is two
+// cells for a single-digit tab and three from the tenth on, and the extra cell
+// comes out of the same budget the marker and the name are already sharing.
+func TestSidebarTabHeading_MeasuresExactlyItsWidth(t *testing.T) {
+	t.Parallel()
+	for _, w := range []int{4, 8, 12, defaultSidebarWidth, 40} {
+		for _, name := range remoteTextSamples {
+			for _, idx := range []int{0, 8, 9, 11, 98, 998} {
+				for _, active := range []bool{true, false} {
+					for _, color := range []string{"", "205"} {
+						got := sidebarTabHeading(name, idx, active, color, w)
+						if n := lipgloss.Width(got); n != w {
+							t.Errorf("sidebarTabHeading(%q, idx=%d, active=%v, color=%q, w=%d) "+
+								"measures %d cells, want exactly %d",
+								name, idx, active, color, w, n, w)
+						}
+						// The ordinal is the row's one actionable piece of
+						// information — it is what maps the tab to Alt+1..9 —
+						// so the name gives way to it, never the reverse.
+						if ord := fmt.Sprintf("%d:", idx+1); lipgloss.Width(ord) <= w &&
+							!strings.Contains(got, ord) {
+							t.Errorf("sidebarTabHeading(%q, idx=%d, active=%v, color=%q, w=%d) = %q, "+
+								"want it to keep the ordinal %q",
+								name, idx, active, color, w, got, ord)
 						}
 					}
 				}

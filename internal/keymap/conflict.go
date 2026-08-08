@@ -92,7 +92,12 @@ func (c Conflict) hardcodedString() string {
 		return fmt.Sprintf("%s: %q is bound to %s", c.Kind, c.Key, c.Loser)
 	}
 	if hk.pos == afterBothTiers || tierOf(c.Loser) == TierEarly {
-		return fmt.Sprintf("%s: %q → %s wins, built-in %s is lost", c.Kind, c.Key, c.Loser, hk.label)
+		// "is lost", not "never fires": what stops happening here is Quil's
+		// own behaviour, and the label is not an action ID. The kind label
+		// has already said the other side is built-in, so it is not repeated
+		// — those nine cells are the difference between this line landing
+		// whole in the dialog and losing its last clause.
+		return fmt.Sprintf("%s: %q → %s wins, %s is lost", c.Kind, c.Key, c.Loser, hk.label)
 	}
 	return fmt.Sprintf("%s: %q → %s wins, %s never fires", c.Kind, c.Key, hk.label, c.Loser)
 }

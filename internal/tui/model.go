@@ -1173,6 +1173,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.projectSidebarSwallowsMouse(msg.X, msg.Y) {
 			m.clearDragState()
+			var cmd tea.Cmd
 			switch msg.Button {
 			case tea.MouseLeft:
 				if kind, idx := m.sidebarHit(msg.X, msg.Y); kind != "" {
@@ -1189,11 +1190,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.openProjectCtxMenu(m.projects[idx], msg.X, msg.Y)
 					}
 				case sidebarRowPane:
-					// Deliberately does NOT focus the pane first. Mirroring
-					// left-click would also fix the background-tab problem
-					// below, but a right-click that silently switches tabs is
-					// a surprise; executeCtxMenuItem resolves the owning tab
-					// instead.
+					// Right-click FOCUSES the pane first, exactly like
+					// left-click (activateSidebarRow → focusSidebarPane) —
+					// reversing an earlier "does not move focus" decision.
+					// Required, not cosmetic: eight of the ten dispatched
+					// menu items (Rename, Restart, Close, Mute, Notes, Focus,
+					// Lazygit, History) are shared with the keybinding and
+					// command-palette paths and resolve their target through
+					// the ACTIVE tab's ACTIVE pane internally. Widening all
+					// eight handlers to accept an explicit target pane was
+					// the larger risk (it would touch every other caller
+					// too); focusing first satisfies their existing contract
+					// instead. The updated Model — and its switchTab IPC
+					// cmd, when the pane's tab was not already active — must
+					// carry forward, or the daemon never learns the tab
+					// changed.
+					updated, focusCmd := m.activateSidebarRow(sidebarRowPane, idx)
+					m = updated.(Model)
+					cmd = focusCmd
 					if row, ok := m.sidebarRowAt(msg.X, msg.Y); ok && row.paneID != "" {
 						if pane, _, _ := m.findPaneAndTab(row.paneID); pane != nil {
 							m.openCtxMenu(pane, msg.X, msg.Y)
@@ -1201,7 +1215,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 			}
-			return m, nil
+			return m, cmd
 		}
 		// Right-click: copy the active selection to the clipboard. While
 		// notes mode is on, the editor's selection takes priority.

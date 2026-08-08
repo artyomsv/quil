@@ -674,25 +674,49 @@ func TestSidebarRightClick_OpensPaneCtxMenu(t *testing.T) {
 	}
 }
 
-// TestSidebarRightClick_BackgroundTabPaneMenuActs pins the wrinkle. Opening the
-// menu is not enough: executeCtxMenuItem resolved its target with
-// activeTabModel(), so a pane living in a BACKGROUND tab produced a menu whose
-// every item silently did nothing.
+// TestSidebarRightClick_BackgroundTabPaneMenuActs pins the round-1 fix: a
+// right-click on a sidebar pane row FOCUSES the pane first, exactly like
+// left-click — reversing the earlier "does not move focus" decision. Opening
+// the menu was not enough on its own: eight of the ten dispatched items
+// (Rename among them) resolve their target through the ACTIVE tab's ACTIVE
+// pane internally (shared with the keybinding and command-palette paths), so
+// without focus-first a menu opened on a BACKGROUND-tab pane would act on
+// whatever pane was on screen instead of the one the menu was titled after.
 func TestSidebarRightClick_BackgroundTabPaneMenuActs(t *testing.T) {
 	t.Parallel()
 	m := newTestModelWithSidebar(t)
-	// A pane row belonging to a tab that is not the active one.
+	// A pane row belonging to a tab that is not the active one. Given a
+	// name distinct from the active tab's pane so Rename's seeded value
+	// below proves WHICH pane it read, not just that it read something.
 	pane, _, tabIdx := m.findPaneAndTab(backgroundTabPaneID(t, &m))
 	if pane == nil || tabIdx == m.activeTabIdx() {
 		t.Fatal("fixture must provide a pane on a background tab")
 	}
-	m.openCtxMenu(pane, 0, 0)
+	pane.Name = "wt-build"
+	x, y := sidebarPaneRowCoords(t, &m, 1) // ordinal 1: the background pane
 
-	updated, _ := m.executeCtxMenuItem(ctxMenuItem{id: ctxActAttention, enabled: true})
+	updated, cmd := m.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseRight})
 	got := updated.(Model)
 
-	target, _, _ := got.findPaneAndTab(pane.ID)
-	if target == nil || !target.pinnedAttention {
-		t.Error("a menu opened on a background-tab pane must act on that pane")
+	if !got.ctxMenu.open() || got.ctxMenu.paneID != pane.ID {
+		t.Fatalf("right-click should open the menu on the clicked pane: open=%v paneID=%q, want %q",
+			got.ctxMenu.open(), got.ctxMenu.paneID, pane.ID)
+	}
+	if got.activeTabIdx() != tabIdx {
+		t.Errorf("right-click should focus the clicked pane's tab: activeTabIdx=%d, want %d", got.activeTabIdx(), tabIdx)
+	}
+	if !pane.Active {
+		t.Error("right-click should focus the clicked pane")
+	}
+	if cmd == nil {
+		t.Error("focusing a pane on a different tab must return switchTab's IPC cmd, not drop it")
+	}
+
+	updated2, _ := got.executeCtxMenuItem(ctxMenuItem{id: ctxActRename, enabled: true})
+	got2 := updated2.(Model)
+
+	if !got2.renamingPane || got2.paneRenameInput != "wt-build" {
+		t.Errorf("Rename should act on the clicked pane: renamingPane=%v paneRenameInput=%q, want %q",
+			got2.renamingPane, got2.paneRenameInput, "wt-build")
 	}
 }

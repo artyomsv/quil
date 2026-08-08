@@ -94,6 +94,16 @@ func (m *Model) jumpToPane(paneID string) bool {
 	}
 	for i, p := range m.projects {
 		if p == proj {
+			// Mirrors switchProject's own guard: the sidebar scroll offset is
+			// a property of "what am I looking at", so a jump that crosses a
+			// project boundary starts the incoming project's PANES body at
+			// the top — but a same-project jump (e.g. pane-history back
+			// within the project the user is already viewing) must not
+			// throw away where they had scrolled to for no reason tied to
+			// the jump itself.
+			if i != m.activeProject {
+				m.sidebarScroll = 0
+			}
 			m.activeProject = i
 			break
 		}

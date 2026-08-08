@@ -1251,6 +1251,50 @@ func TestJumpToPane_TellsTheOwningDaemonAboutTheTab(t *testing.T) {
 	}
 }
 
+// TestJumpToPane_ResetsSidebarScrollOnProjectChange pins the same UX choice
+// switchProject makes, for the OTHER path that can move m.activeProject:
+// jumpToPane is the documented choke point for MCP set_active_pane, the
+// notification sidebar's "navigate", pane-history back-navigation, and the
+// command palette's goToPane — none of which went through switchProject, so
+// none of them reset the offset before this fix.
+func TestJumpToPane_ResetsSidebarScrollOnProjectChange(t *testing.T) {
+	t.Parallel()
+	m := twoProjectModel()
+	m.sidebarScroll = 12
+	if !m.jumpToPane("p-bg") {
+		t.Fatal("jumpToPane should report success for an existing pane")
+	}
+	if m.activeProject != 1 {
+		t.Fatalf("activeProject = %d, want 1 (proj-bg) — jump did not cross projects", m.activeProject)
+	}
+	if m.sidebarScroll != 0 {
+		t.Errorf("sidebarScroll = %d after a cross-project jump, want 0", m.sidebarScroll)
+	}
+}
+
+// TestJumpToPane_KeepsSidebarScrollOnSameProjectJump: a jump that stays inside
+// the project already active (e.g. pane-history back into a different tab of
+// the SAME project) must not disturb the user's scroll position — there is no
+// project-boundary crossing here for the reset to be "arriving somewhere new"
+// about.
+func TestJumpToPane_KeepsSidebarScrollOnSameProjectJump(t *testing.T) {
+	t.Parallel()
+	tabA := tabWith(&PaneModel{ID: "p-a"})
+	tabB := tabWith(&PaneModel{ID: "p-b"})
+	proj := &ProjectModel{ID: "proj-solo", Name: "Solo", tabs: []*TabModel{tabA, tabB}}
+	m := Model{projects: []*ProjectModel{proj}, activeProject: 0, sidebarScroll: 12}
+
+	if !m.jumpToPane("p-b") {
+		t.Fatal("jumpToPane should report success for an existing pane")
+	}
+	if m.activeProject != 0 {
+		t.Fatalf("activeProject = %d, want 0 — jump should have stayed in proj-solo", m.activeProject)
+	}
+	if m.sidebarScroll != 12 {
+		t.Errorf("sidebarScroll = %d after a same-project jump, want unchanged 12", m.sidebarScroll)
+	}
+}
+
 func TestJumpToPane_MissingPaneReturnsFalseWithoutMutating(t *testing.T) {
 	t.Parallel()
 	m := twoProjectModel()

@@ -1102,6 +1102,34 @@ func TestPaneRow_RendersPinnedAttention(t *testing.T) {
 	}
 }
 
+// TestSidebarTabHeading_OrdinalAndColor pins item 2. The heading and the idle
+// pane rows beneath it both painted with sidebarDimStyle (color 243), so the
+// grouping the PANES section exists to show was invisible.
+func TestSidebarTabHeading_OrdinalAndColor(t *testing.T) {
+	t.Parallel()
+	got := sidebarTabHeading("build", 1, false, "", 22)
+	if !strings.Contains(got, "2:build") {
+		t.Errorf("heading = %q, want the 1-based ordinal %q", got, "2:build")
+	}
+	if strings.Contains(got, "243") {
+		t.Errorf("inactive heading still uses the dim colour shared with idle pane rows: %q", got)
+	}
+}
+
+// TestSidebarTabHeading_ElidesNameKeepsOrdinal pins that the ordinal survives a
+// narrow strip — it is the part that maps the row to Alt+1..9, so truncating it
+// away would cost the row its only navigational value.
+func TestSidebarTabHeading_ElidesNameKeepsOrdinal(t *testing.T) {
+	t.Parallel()
+	got := sidebarTabHeading("a-very-long-tab-name-indeed", 0, false, "", 14)
+	if !strings.Contains(got, "1:") {
+		t.Errorf("heading = %q, want it to keep the %q prefix", got, "1:")
+	}
+	if w := lipgloss.Width(got); w > 14 {
+		t.Errorf("heading width = %d, want <= 14", w)
+	}
+}
+
 // TestSidebarDoesNotRemodeAWideCanvasPane is the 2026-08-02 report: opening
 // the sidebar on a 185-column terminal moved an even two-pane split from
 // 92/93 to 81/82, straddling min_native_cols (80). One of two identical

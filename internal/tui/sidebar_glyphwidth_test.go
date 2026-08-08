@@ -117,7 +117,7 @@ func TestPaneRow_MeasuresExactlyItsWidth(t *testing.T) {
 	for _, w := range []int{4, 8, 12, defaultSidebarWidth, 40} {
 		for _, label := range remoteTextSamples {
 			for _, reason := range remoteTextSamples {
-				for _, state := range []string{"blocked", "working", "unseen", "idle"} {
+				for _, state := range []string{"blocked", "working", "unseen", "idle", "pinned", "pinned+blocked", "pinned+working"} {
 					pane := &PaneModel{Name: label, ID: "pane-b16e3850"}
 					switch state {
 					case "blocked":
@@ -128,6 +128,16 @@ func TestPaneRow_MeasuresExactlyItsWidth(t *testing.T) {
 						pane.subagents = map[string]int{"impl": 3}
 					case "unseen":
 						pane.unseen = true
+					case "pinned":
+						pane.pinnedAttention = true
+					case "pinned+blocked":
+						pane.pinnedAttention = true
+						pane.blockedSince = time.Now()
+						pane.blockedReason = reason
+					case "pinned+working":
+						pane.pinnedAttention = true
+						pane.working = true
+						pane.subagents = map[string]int{"impl": 3}
 					}
 					for _, focused := range []bool{true, false} {
 						got := paneRow(pane, focused, w)

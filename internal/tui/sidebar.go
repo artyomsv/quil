@@ -183,7 +183,7 @@ func (m *Model) sidebarRows(w int) []sidebarRow {
 		if ti > 0 {
 			rows = append(rows, sidebarRow{})
 		}
-		rows = append(rows, sidebarRow{text: sidebarTabHeading(sanitizeRemoteText(tab.Name), onTab, w)})
+		rows = append(rows, sidebarRow{text: sidebarTabHeading(sanitizeRemoteText(tab.Name), ti, onTab, tab.Color, w)})
 		for _, pane := range tab.Leaves() {
 			rows = append(rows, sidebarRow{
 				text:   paneRow(pane, onTab && pane.ID == tab.ActivePane, w),
@@ -420,6 +420,7 @@ const (
 var (
 	sidebarHeadingStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("244"))
 	sidebarDimStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
+	sidebarTabNameStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("255"))
 	sidebarActiveStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("230"))
 	sidebarProjectStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("250"))
 	sidebarBlockedStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
@@ -548,14 +549,35 @@ func sidebarHeading(title string, w int) string {
 // sidebarTabHeading renders one tab's name above its panes. The active tab
 // carries the same ▸ marker as the active project, in the same column, so the
 // two read as one vocabulary rather than two conventions.
-func sidebarTabHeading(name string, active bool, w int) string {
+//
+// White by default rather than dim: the heading shared sidebarDimStyle with an
+// idle pane row, which made a tab heading indistinguishable from the panes
+// under it. A user-chosen tab colour is applied as the FOREGROUND here — the
+// tab bar uses the same value as a background, but a 22-column strip painting
+// full-width colour blocks reads as noise rather than grouping.
+//
+// The 1-based ordinal matches the tab bar's "%d:%s" and the Alt+1..9 keys, and
+// is placed before the name so a narrow strip elides the name and keeps the
+// number.
+func sidebarTabHeading(name string, idx int, active bool, color string, w int) string {
 	marker := "  "
-	style := sidebarDimStyle
+	style := sidebarTabNameStyle
+	if color != "" {
+		style = lipgloss.NewStyle().Foreground(lipgloss.Color(color))
+	}
 	if active {
 		marker = "▸ "
 		style = sidebarActiveStyle
+		if color != "" {
+			style = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(color))
+		}
 	}
-	return style.Render(truncateCells(marker+name, w))
+	ordinal := fmt.Sprintf("%d:", idx+1)
+	avail := w - lipgloss.Width(marker) - lipgloss.Width(ordinal)
+	if avail < 1 {
+		avail = 1
+	}
+	return style.Render(truncateCells(marker+ordinal+elideMiddle(name, avail), w))
 }
 
 // projectRow renders one project's summary line: an active-project marker,
@@ -606,15 +628,18 @@ func projectRow(name string, working, blocked, done int, link string, active boo
 
 // paneRow renders one pane's agent state: ◐ working (with ⋯N outstanding
 // subagents when any are running), ▲ blocked-on-user (with the hook-reported
-// tool name when present — never invented when blockedReason is empty), ✓
-// done and unseen, ○ idle. Every remote-sourced string (the pane's name/ID,
-// the blocked reason) is sanitized here since this is a render path a
+// tool name when present — never invented when blockedReason is empty), ◆
+// pinned attention (outranked only by blocked/working, which then keep it as a
+// trailing ◆ suffix so a pin never goes dark under a transient state), ✓ done
+// and unseen, ○ idle. Every remote-sourced string (the pane's name/ID, the
+// blocked reason) is sanitized here since this is a render path a
 // remote-attached daemon's data reaches directly.
-// paneRow renders one pane's agent state. `focused` marks the pane the user
-// is actually typing into — with the ▸ marker rather than a colour, because
-// the row's colour already carries the pane's STATE (blocked, working, unseen)
-// and that is the more urgent signal of the two. A blocked pane must stay
-// visibly blocked whether or not it happens to be focused.
+//
+// `focused` marks the pane the user is actually typing into — with the ▸
+// marker rather than a colour, because the row's colour already carries the
+// pane's STATE (blocked, working, unseen, pinned) and that is the more urgent
+// signal of the two. A blocked pane must stay visibly blocked whether or not
+// it happens to be focused.
 func paneRow(pane *PaneModel, focused bool, w int) string {
 	var glyph string
 	var style lipgloss.Style

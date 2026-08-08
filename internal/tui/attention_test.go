@@ -6,6 +6,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
@@ -421,5 +422,42 @@ func TestTabStyle_BlockedOutranksUnseen(t *testing.T) {
 	if got := m.tabStyle(1); got.GetBackground() != blockedTabStyle.GetBackground() {
 		t.Errorf("tabStyle background = %v, want blockedTabStyle %v",
 			got.GetBackground(), blockedTabStyle.GetBackground())
+	}
+}
+
+// TestTabStyle_BlockedActiveIsDistinctAtTheSameWidth pins both halves of the
+// active-blocked variant. Amber replaces the BACKGROUND, which is the only
+// thing activeTabStyle and inactiveTabStyle differ by, so with two agents
+// parked — the ordinary case tabBlocked exists for — the bar had nothing left
+// saying which tab the user is on. And renderTabBar measures style.Render(name)
+// to build its click zones, so the fix must not cost a single cell: a variant
+// that widened the active tab would silently shift every hit zone after it.
+func TestTabStyle_BlockedActiveIsDistinctAtTheSameWidth(t *testing.T) {
+	t.Parallel()
+	m := newTestModelWithTabs(t, 2, 1)
+	for ti := 0; ti < 2; ti++ {
+		m.curTabs()[ti].Leaves()[0].blockedSince = time.Now()
+	}
+	if !m.tabBlocked(0) || !m.tabBlocked(1) {
+		t.Fatal("fixture: both tabs must be blocked")
+	}
+	if m.activeTabIdx() != 0 {
+		t.Fatalf("fixture: activeTabIdx = %d, want 0", m.activeTabIdx())
+	}
+
+	active, background := m.tabStyle(0), m.tabStyle(1)
+	if active.GetBackground() != blockedTabStyle.GetBackground() {
+		t.Errorf("active blocked tab lost the amber background: %v, want %v",
+			active.GetBackground(), blockedTabStyle.GetBackground())
+	}
+
+	const name = "1:agent"
+	if active.Render(name) == background.Render(name) {
+		t.Error("blocked active and blocked background tabs render identically — " +
+			"with two parked agents the bar cannot say which tab you are on")
+	}
+	if aw, bw := lipgloss.Width(active.Render(name)), lipgloss.Width(background.Render(name)); aw != bw {
+		t.Errorf("rendered width %d vs %d — renderTabBar measures style.Render(name) "+
+			"for hit-testing, so the active variant must not change width", aw, bw)
 	}
 }

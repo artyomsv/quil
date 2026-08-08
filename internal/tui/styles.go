@@ -34,6 +34,21 @@ var (
 		Background(lipgloss.Color("214")).
 		Padding(0, 1)
 
+	// blockedActiveTabStyle is the ACTIVE tab's blocked variant. Active and
+	// inactive differ by BACKGROUND alone (57 vs 238) and blockedTabStyle
+	// replaces the background wholesale, so with two or more agents parked —
+	// the ordinary case this feature exists for — the amber tabs carried no
+	// which-one-am-I-on signal beyond tabLabel's "* " prefix.
+	//
+	// Underline is the second channel, deliberately: renderTabBar MEASURES
+	// style.Render(name) for hit-testing, so the variant must render at exactly
+	// the width blockedTabStyle does. An SGR attribute costs no cells, where
+	// extra Padding would shift every tab after it. A different Foreground
+	// would be width-safe too, but the 232-on-214 pair is already chosen for
+	// contrast — changing it trades legibility for the signal instead of
+	// adding one.
+	blockedActiveTabStyle = blockedTabStyle.Underline(true)
+
 	activePaneBorder = lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color("57"))

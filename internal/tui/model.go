@@ -4704,7 +4704,14 @@ func (m Model) tabStyle(idx int) lipgloss.Style {
 	active := idx == m.activeTabIdx()
 	// Blocked first: a parked agent is a question waiting on the user, and it
 	// includes the ACTIVE tab because the pane may be in an unfocused split.
+	// Amber replaces the background outright, which is the ONE thing active and
+	// inactive differ by — so the active tab needs its own variant, or two
+	// parked tabs (the case this exists for) leave the bar unable to say which
+	// one you are on. Same width by construction; see blockedActiveTabStyle.
 	if m.tabBlocked(idx) {
+		if active {
+			return blockedActiveTabStyle
+		}
 		return blockedTabStyle
 	}
 	// tabUnseen self-excludes the active tab; tabPinnedAttention deliberately

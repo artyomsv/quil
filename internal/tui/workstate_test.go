@@ -295,7 +295,7 @@ func TestWorkPark_PermissionPromptKeepsTurnActive(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			m := newTestModelWithTabs(t, 1)
+			m := newTestModelWithTabs(t, 1, 1)
 			pane := m.curTabs()[0].Leaves()[0]
 			for _, ev := range tt.events {
 				m.applyWorkTransition(pane.ID, ev, nil)
@@ -312,7 +312,7 @@ func TestWorkPark_PermissionPromptKeepsTurnActive(t *testing.T) {
 // and the new tabBlocked both read.
 func TestWorkPark_SetsBlockedRegardlessOfTurnState(t *testing.T) {
 	t.Parallel()
-	m := newTestModelWithTabs(t, 1)
+	m := newTestModelWithTabs(t, 1, 1)
 	pane := m.curTabs()[0].Leaves()[0]
 	m.applyWorkTransition(pane.ID, "hook.claude.UserPromptSubmit", nil)
 	m.applyWorkTransition(pane.ID, "hook.claude.PermissionRequest",
@@ -353,6 +353,14 @@ func TestApplyWorkTransition_ResumeAfterParkKeepsWorkingThroughout(t *testing.T)
 	}
 	if pane.unseen {
 		t.Error("resume must leave the pane unmarked — it was never marked in the first place")
+	}
+	// The thing a resume actually DOES to a parked pane: it answers the
+	// question, so the pane is no longer waiting on the user.
+	if !pane.blockedSince.IsZero() {
+		t.Error("resume (PostToolUse) should clear blockedSince")
+	}
+	if pane.blockedReason != "" {
+		t.Errorf("resume (PostToolUse) should clear blockedReason, got %q", pane.blockedReason)
 	}
 }
 

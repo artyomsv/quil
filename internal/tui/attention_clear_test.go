@@ -69,6 +69,65 @@ func TestCtxMenu_ClearAttentionDropsAStuckBlockedMark(t *testing.T) {
 	}
 }
 
+// TestAckFocusedPane_ClearsBlocked pins item 6.2. Focusing the pane is the
+// acknowledgement — you are looking straight at the prompt. pinnedAttention
+// deliberately SURVIVES: it is the explicit "don't let me forget" mark, and
+// auto-clearing it would leave no way to express that.
+func TestAckFocusedPane_ClearsBlocked(t *testing.T) {
+	t.Parallel()
+	m := newTestModelWithTabs(t, 1, 1)
+	tab := m.curTabs()[0]
+	pane := tab.Leaves()[0]
+	tab.ActivePane = pane.ID
+	pane.unseen = true
+	pane.blockedSince = time.Now()
+	pane.blockedReason = "Bash"
+	pane.pinnedAttention = true
+
+	m.ackFocusedPane()
+
+	if pane.unseen {
+		t.Error("unseen should be cleared")
+	}
+	if !pane.blockedSince.IsZero() {
+		t.Error("blockedSince should be cleared by focus")
+	}
+	if pane.blockedReason != "" {
+		t.Errorf("blockedReason = %q, want empty", pane.blockedReason)
+	}
+	if !pane.pinnedAttention {
+		t.Error("pinnedAttention must survive focus")
+	}
+}
+
+// TestAckFocusedPane_TabMarkSurvivesOtherBlockedPane pins the level rule the
+// user asked for: visiting one pane clears that pane, and clears the TAB only
+// when no sibling still holds a mark.
+func TestAckFocusedPane_TabMarkSurvivesOtherBlockedPane(t *testing.T) {
+	t.Parallel()
+	m := newTestModelWithTabs(t, 1, 2)
+	tab := m.curTabs()[0]
+	panes := tab.Leaves()
+	if len(panes) < 2 {
+		t.Skip("fixture needs a two-pane tab")
+	}
+	tab.ActivePane = panes[0].ID
+	panes[0].blockedSince = time.Now()
+	panes[1].blockedSince = time.Now()
+
+	m.ackFocusedPane()
+
+	if !panes[0].blockedSince.IsZero() {
+		t.Error("focused pane should be cleared")
+	}
+	if panes[1].blockedSince.IsZero() {
+		t.Error("unfocused sibling must keep its mark")
+	}
+	if !m.tabBlocked(0) {
+		t.Error("tab must stay marked while a sibling is still blocked")
+	}
+}
+
 // The row answers "is this pane actually still flagged" as well as clearing
 // it, so on a pane with nothing to clear it must be inert rather than a no-op
 // that looks like it did something.

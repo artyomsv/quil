@@ -12,15 +12,20 @@ import (
 )
 
 // newTestModelWithTabs builds a Model with a single project holding n tabs,
-// each with one pane ("pane-<i>"). Tab 0 is the project's active tab. The
-// package's other fixtures (tabWith, Model{...} literals) build a specific
-// tab/pane graph by hand; tests that assert against a tab INDEX rather than
-// a specific pane want a fixture that hands back N of them directly.
-func newTestModelWithTabs(t *testing.T, n int) Model {
+// each with panesPerTab panes ("pane-<tab>-<pane>") split left-to-right via
+// tabWith. Tab 0 is the project's active tab. The package's other fixtures
+// (tabWith, Model{...} literals) build a specific tab/pane graph by hand;
+// tests that assert against a tab INDEX rather than a specific pane want a
+// fixture that hands back N of them directly.
+func newTestModelWithTabs(t *testing.T, n, panesPerTab int) Model {
 	t.Helper()
 	tabs := make([]*TabModel, n)
 	for i := 0; i < n; i++ {
-		tabs[i] = tabWith(&PaneModel{ID: fmt.Sprintf("pane-%d", i)})
+		panes := make([]*PaneModel, panesPerTab)
+		for j := 0; j < panesPerTab; j++ {
+			panes[j] = &PaneModel{ID: fmt.Sprintf("pane-%d-%d", i, j)}
+		}
+		tabs[i] = tabWith(panes...)
 	}
 	return Model{
 		projects:      []*ProjectModel{{ID: "proj-a", tabs: tabs}},
@@ -339,7 +344,7 @@ func TestTabBlocked_ReportsParkedPaneOnBackgroundTab(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			m := newTestModelWithTabs(t, 2)
+			m := newTestModelWithTabs(t, 2, 1)
 			ti := 1
 			if tt.activeTab {
 				ti = 0
@@ -364,7 +369,7 @@ func TestTabBlocked_ReportsParkedPaneOnBackgroundTab(t *testing.T) {
 // the two, and it is the one the user can act on.
 func TestTabStyle_BlockedOutranksUnseen(t *testing.T) {
 	t.Parallel()
-	m := newTestModelWithTabs(t, 2)
+	m := newTestModelWithTabs(t, 2, 1)
 	pane := m.curTabs()[1].Leaves()[0]
 	pane.unseen = true
 	pane.blockedSince = time.Now()

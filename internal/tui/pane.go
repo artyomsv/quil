@@ -102,13 +102,13 @@ type PaneModel struct {
 	liveOutputSeen     bool           // first live (non-ghost) output received — settle repaints scheduled
 	reattachReset      bool           // armed on reattach; consumed by the daemon's next replayed chunk (see armReattachReset)
 	working            bool           // derived spinner state: turnActive || len(subagents) > 0 || subagentsOverflow (hook-driven)
-	turnActive         bool           // main turn in flight (UserPromptSubmit/PostToolUse → Stop/park)
+	turnActive         bool           // main turn in flight (UserPromptSubmit/PostToolUse → Stop); a park does NOT clear this — see the workPark case
 	subagents          map[string]int // agent_type → outstanding count (SubagentStart/Stop, burst-aware); a stop only cancels a start it can name
 	subagentsOverflow  bool           // a start was refused by maxTrackedSubagents, so an untracked agent may still be live; sticky until a terminal edge
-	unseen             bool           // work finished/parked while this pane was not focused; cleared on focus
+	unseen             bool           // work finished while this pane was not focused (a park no longer sets this — see workPark); cleared on focus
 	pinnedAttention    bool           // context-menu "Mark attention" pin — green border that SURVIVES focus; cleared only by Unmark. TUI-session state, never persisted
 	workFrame          int            // shared spinner frame index, mirrored here for top-border render
-	blockedSince       time.Time      // set when the agent parks waiting on the user (permission prompt/idle-wait); zero when not blocked. Cleared on workStart/workAbort/workStop/workStopFinal — a completed turn is by definition not blocked
+	blockedSince       time.Time      // set when the agent parks waiting on the user (permission prompt/idle-wait); zero when not blocked. Cleared on workStart/workAbort/workStop/workStopFinal (a completed turn is by definition not blocked) and by ackFocusedPane (focusing the pane answers the question)
 	blockedReason      string         // optional tool name from the hook's Data["tool"]; genuinely absent for Notification/permission.ask, so left empty rather than invented
 
 	// Mouse-tracking state, updated by the VT EnableMode/DisableMode callbacks

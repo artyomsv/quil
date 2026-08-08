@@ -346,15 +346,16 @@ func coalescedCount(data map[string]string) int {
 	return n
 }
 
-// ackFocusedPane clears the unseen mark on the focused pane of the active
-// tab, called once at the top of Update. Correctness does not depend on a
-// render having happened between messages (the renderer coalesces frames):
-// a focused pane never renders the mark anyway — tabUnseen excludes the
-// active tab and the pane border gives the active style precedence — and
-// focusing the pane is itself the acknowledgement. This single choke point
-// replaces auditing every ActivePane/activeTab assignment (13 call sites);
-// a newly focused pane is acknowledged on the next message (the 1 s size
-// poll bounds the wait). Unfocused panes keep their mark until focused.
+// ackFocusedPane clears the unseen mark and the blocked mark on the focused
+// pane of the active tab, called once at the top of Update. Correctness does
+// not depend on a render having happened between messages (the renderer
+// coalesces frames): a focused pane never renders either mark anyway —
+// tabUnseen excludes the active tab and the pane border gives the active
+// style precedence — and focusing the pane is itself the acknowledgement.
+// This single choke point replaces auditing every ActivePane/activeTab
+// assignment (13 call sites); a newly focused pane is acknowledged on the
+// next message (the 1 s size poll bounds the wait). Unfocused panes keep
+// their marks until focused.
 func (m *Model) ackFocusedPane() {
 	tab := m.activeTabModel()
 	if tab == nil || tab.Root == nil || tab.ActivePane == "" {
@@ -365,6 +366,13 @@ func (m *Model) ackFocusedPane() {
 	for _, p := range tab.Leaves() {
 		if p != nil && p.ID == tab.ActivePane {
 			p.unseen = false
+			// Focus also answers the blocked mark: you are looking at the
+			// prompt. With workPark no longer clearing turnActive the spinner
+			// keeps running, so a pane cleared here still reads as working
+			// rather than idle. pinnedAttention is deliberately untouched —
+			// only ctxActAttention / ctxActClearAttention own that flag.
+			p.blockedSince = time.Time{}
+			p.blockedReason = ""
 			return
 		}
 	}

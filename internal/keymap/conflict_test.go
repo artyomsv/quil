@@ -108,6 +108,75 @@ func TestConflict_StringIncludesKindLabel(t *testing.T) {
 	}
 }
 
+// TestConflict_HardcodedNamesTheRealWinner is the regression for a message
+// that was backwards for 13 of the 21 hardcoded keys: it said "Quil intercepts
+// it first" for every one of them, while f1, ctrl+n, alt+1..9 and the f8 /
+// ctrl+alt+v paste aliases are checked only once BOTH tier switches have
+// declined the key — there the bound action wins and the built-in dies.
+// internal/tui's TestHandleKey_PasteAliasesLoseToLateActions pins that
+// dispatch order from the other side.
+//
+// Each case asserts the winner is named as winning AND that the loser is not,
+// because a message that mentions both names passes a substring check in
+// either direction.
+func TestConflict_HardcodedNamesTheRealWinner(t *testing.T) {
+	tests := []struct {
+		name   string
+		action ActionID
+		key    string
+		winner string
+		loser  string
+	}{
+		// After both tier switches: the action wins whichever tier it is on.
+		{"late action on a paste alias", "pane.restart", "f8", "pane.restart", "paste"},
+		{"early action on f1", "pane.mute", "f1", "pane.mute", "help"},
+		{"late action on alt+1", "pane.close", "alt+1", "pane.close", "tab 1"},
+		{"early action on ctrl+n", "pane.mute", "ctrl+n", "pane.mute", "new pane"},
+		// Between the tiers: isSelectionExtendKey runs after the early switch
+		// and before the late one, so the tier decides.
+		{"early action on a selection chord", "pane.mute", "shift+left", "pane.mute", "text selection"},
+		{"late action on a selection chord", "pane.close", "ctrl+shift+right", "text selection", "pane.close"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, conflicts := Build(map[ActionID]string{tt.action: tt.key})
+			var got string
+			for _, c := range conflicts {
+				if c.Kind == ConflictHardcoded && c.Key == tt.key {
+					got = c.String()
+				}
+			}
+			if got == "" {
+				t.Fatalf("no hardcoded conflict for %q: %+v", tt.key, conflicts)
+			}
+			if !strings.Contains(got, tt.winner+" wins") {
+				t.Errorf("Conflict.String() = %q, does not say %q wins", got, tt.winner)
+			}
+			if strings.Contains(got, tt.loser+" wins") {
+				t.Errorf("Conflict.String() = %q, says the losing side %q wins", got, tt.loser)
+			}
+			if !strings.Contains(got, tt.loser) {
+				t.Errorf("Conflict.String() = %q, never names the losing side %q", got, tt.loser)
+			}
+		})
+	}
+}
+
+// TestConflict_HardcodedUnknownKeyClaimsNoWinner: a Conflict built outside
+// detectShadowing has no dispatch position to derive from, so the message must
+// stop at what it knows rather than guess a direction.
+func TestConflict_HardcodedUnknownKeyClaimsNoWinner(t *testing.T) {
+	got := Conflict{Kind: ConflictHardcoded, Key: "ctrl+alt+z", Loser: "pane.close"}.String()
+	if strings.Contains(got, "wins") || strings.Contains(got, "never fires") {
+		t.Errorf("Conflict.String() = %q, asserts an outcome it cannot know", got)
+	}
+	for _, want := range []string{"ctrl+alt+z", "pane.close"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("Conflict.String() = %q, missing %q", got, want)
+		}
+	}
+}
+
 // TestBuild_ShadowingOrderIsDeterministic pins detectShadowing's full sort
 // (Key, then Kind, then Loser). Binding an early- and a late-tier action to
 // the same hardcoded key produces three conflicts sharing one Key, forcing

@@ -89,7 +89,7 @@ func (k *Keymap) detectShadowing() []Conflict {
 	}
 	for _, tier := range []Tier{TierEarly, TierLate} {
 		for key, id := range k.chords[tier] {
-			if hardcodedKeys[key] {
+			if _, ok := hardcodedKeys[key]; ok {
 				out = append(out, Conflict{Kind: ConflictHardcoded, Key: key, Loser: id})
 			}
 		}

@@ -720,3 +720,80 @@ func TestSidebarRightClick_BackgroundTabPaneMenuActs(t *testing.T) {
 			got2.renamingPane, got2.paneRenameInput, "wt-build")
 	}
 }
+
+// TestCtxMenu_ExecuteRefusesWhenTheActiveTabMovedAway pins the execute-time half
+// of the property the focus-first entry points only establish at OPEN time.
+//
+// Eight of the ten items resolve their target through
+// activeTabModel().ActivePaneModel(), so they are correct only while the menu's
+// target sits in the ACTIVE tab. Every entry point focuses first, which makes
+// that true when the menu opens — and nothing keeps it true afterwards: MCP
+// set_active_pane (setActivePaneMsg → jumpToPane) moves the active project AND
+// tab, and the Update-entry guard only closes a menu whose target has VANISHED.
+// Keyboard and mouse cannot reach this; MCP is the one producer that can.
+//
+// Before the guard, Rename seeded the ON-SCREEN pane's name, Mute toggled the
+// on-screen pane, and Restart/Close armed a confirm for it — each of them acting
+// on a pane the menu was not titled after. The refusal is uniform across all ten
+// items, INCLUDING the two attention rows that resolve paneID directly and could
+// still have acted correctly: one rule for one surface, it matches what the code
+// did before this branch, and the remedy is a second right-click.
+func TestCtxMenu_ExecuteRefusesWhenTheActiveTabMovedAway(t *testing.T) {
+	t.Parallel()
+	m := newTestModelWithSidebar(t)
+	m.client = newFakeConn()
+
+	target, _, targetTabIdx := m.findPaneAndTab(backgroundTabPaneID(t, &m))
+	if target == nil || targetTabIdx == m.activeTabIdx() {
+		t.Fatal("fixture must provide a pane on a background tab")
+	}
+	target.Name = "wt-build"
+	onScreen := m.curTabs()[m.activeTabIdx()].Leaves()[0]
+	onScreen.Name = "on-screen"
+
+	// Right-click the background pane's sidebar row: this focuses it, so its
+	// tab becomes active and the menu's assumption holds at open time.
+	x, y := sidebarPaneRowCoords(t, &m, 1)
+	updated, _ := m.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseRight})
+	got := updated.(Model)
+	if !got.ctxMenu.open() || got.ctxMenu.paneID != target.ID {
+		t.Fatalf("right-click should open the menu on %q: open=%v paneID=%q",
+			target.ID, got.ctxMenu.open(), got.ctxMenu.paneID)
+	}
+
+	// MCP set_active_pane moves the active tab out from under the open menu.
+	updated, _ = got.Update(setActivePaneMsg{PaneID: onScreen.ID})
+	got = updated.(Model)
+	if !got.ctxMenu.open() {
+		t.Fatal("precondition: the vanished-target guard must NOT close this menu — " +
+			"the target pane still exists, only the active tab moved")
+	}
+	if got.activeTabIdx() == targetTabIdx {
+		t.Fatal("fixture: set_active_pane did not move the active tab, so this test cannot fail")
+	}
+
+	// Rename resolves through the ACTIVE tab, so acting would seed "on-screen".
+	updated, _ = got.executeCtxMenuItem(ctxMenuItem{id: ctxActRename, enabled: true})
+	if r := updated.(Model); r.renamingPane {
+		t.Errorf("Rename acted with paneRenameInput=%q — the menu targets %q, which the "+
+			"active-tab dispatch cannot reach; the item must refuse", r.paneRenameInput, target.Name)
+	}
+
+	// Close arms a confirm dialog for whatever the active-tab dispatch resolves.
+	updated, _ = got.executeCtxMenuItem(ctxMenuItem{id: ctxActClose, enabled: true})
+	if c := updated.(Model); c.dialog == dialogConfirm {
+		t.Errorf("Close armed a confirm for %q — the menu targets %q", c.confirmID, target.ID)
+	}
+
+	// The two paneID-direct attention items refuse under the same rule.
+	updated, _ = got.executeCtxMenuItem(ctxMenuItem{id: ctxActAttention, enabled: true})
+	a := updated.(Model)
+	if target.pinnedAttention || onScreen.pinnedAttention {
+		t.Errorf("Mark attention pinned a pane (target=%v on-screen=%v) — the menu refuses "+
+			"as a whole once its target is off the active tab",
+			target.pinnedAttention, onScreen.pinnedAttention)
+	}
+	if a.ctxMenu.open() {
+		t.Error("a refused item must still close the menu")
+	}
+}

@@ -541,27 +541,42 @@ func (m Model) executeCtxMenuItem(item ctxMenuItem) (tea.Model, tea.Cmd) {
 	if !item.enabled || paneID == "" {
 		return m, nil
 	}
-	// The sidebar right-click entry point (model.go) FOCUSES the pane before
-	// opening this menu, so on every reachable path the owning tab is already
-	// the active tab. This findPaneAndTab resolution is kept as
-	// belt-and-braces, not as the thing that makes a background-tab menu
-	// work: it only covers the two items that resolve paneID directly
-	// (ctxActAttention/ctxActClearAttention). The other eight below resolve
-	// through activeTabModel().ActivePaneModel(), which this block cannot
-	// redirect — so any FUTURE entry point that opens this menu on a pane
-	// outside the active tab must focus it first, or those eight will act on
-	// whatever pane happens to be on screen instead of the intended target.
-	//
-	// The tab comes from the project findPaneAndTab returned, NOT curTabs():
-	// that helper spans every project while curTabs() is the active project's
-	// slice alone, so indexing curTabs() with a foreign tabIdx would act on an
-	// unrelated tab — or panic.
+	// The target is resolved across EVERY project, not through curTabs():
+	// that helper is the active project's slice alone, so indexing it with a
+	// foreign tabIdx would act on an unrelated tab — or panic.
 	pane, proj, tabIdx := m.findPaneAndTab(paneID)
 	if pane == nil || proj == nil || tabIdx < 0 || tabIdx >= len(proj.tabs) {
 		return m, nil // target vanished between open and execute
 	}
 	tab := proj.tabs[tabIdx]
 	if tab == nil || tab.Root == nil || tab.Root.FindLeaf(paneID) == nil {
+		return m, nil
+	}
+	// Eight of the ten items below resolve their target through
+	// activeTabModel().ActivePaneModel() — they are shared with the keybinding
+	// and command-palette paths, and this block cannot redirect them. So they
+	// are correct only while the target sits in the ACTIVE tab.
+	//
+	// Every entry point focuses the pane before opening the menu, which
+	// establishes that at OPEN time and does not keep it true afterwards: MCP
+	// set_active_pane (setActivePaneMsg → jumpToPane) moves the active project
+	// AND tab, and the Update-entry guard only closes a menu whose target has
+	// VANISHED, not one whose active tab moved. Keyboard and mouse cannot reach
+	// that state; MCP is the one producer that can. Acting anyway had Rename
+	// seed the on-screen pane's name and Restart/Close arm a confirm for it.
+	//
+	// The refusal is UNIFORM, including the two items that resolve paneID
+	// directly (ctxActAttention/ctxActClearAttention) and could still have acted
+	// correctly: one menu is one surface, and "two of ten rows work after the
+	// tab moved" is a rule nobody can hold. The remedy is a second right-click.
+	// It is checked BEFORE the focus sync below, so a refused execute leaves no
+	// half-applied focus on a background tab either.
+	//
+	// A FUTURE entry point that opens this menu on a pane outside the active tab
+	// without focusing it first will find every row inert here. That is the
+	// intended failure — the fix is to focus first, as the sidebar right-click
+	// and quick_actions paths do, not to loosen this.
+	if proj != m.cur() || tabIdx != m.activeTabIdx() {
 		return m, nil
 	}
 	// Sync the Active bool alongside ActivePane — mirrors the mouse-release

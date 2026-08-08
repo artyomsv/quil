@@ -1070,6 +1070,38 @@ func TestPaneRowKeepsTheNameWhenTheReasonIsLong(t *testing.T) {
 	}
 }
 
+// TestPaneRow_RendersPinnedAttention pins item 6.3. pinnedAttention already
+// drove the pane border and the tab label; the sidebar row — the one place
+// that lists every pane at once — never showed it.
+func TestPaneRow_RendersPinnedAttention(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		setup   func(p *PaneModel)
+		wantSub string
+	}{
+		{"pinned alone", func(p *PaneModel) { p.pinnedAttention = true }, glyphPinned},
+		{"pinned and blocked keeps the blocked glyph", func(p *PaneModel) {
+			p.pinnedAttention = true
+			p.blockedSince = time.Now()
+		}, glyphBlocked},
+		{"pinned and blocked still shows the pin", func(p *PaneModel) {
+			p.pinnedAttention = true
+			p.blockedSince = time.Now()
+		}, glyphPinned},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pane := &PaneModel{ID: "p1", Name: "agent"}
+			tt.setup(pane)
+			got := paneRow(pane, false, 30)
+			if !strings.Contains(got, tt.wantSub) {
+				t.Errorf("paneRow = %q, want it to contain %q", got, tt.wantSub)
+			}
+		})
+	}
+}
+
 // TestSidebarDoesNotRemodeAWideCanvasPane is the 2026-08-02 report: opening
 // the sidebar on a 185-column terminal moved an even two-pane split from
 // 92/93 to 81/82, straddling min_native_cols (80). One of two identical

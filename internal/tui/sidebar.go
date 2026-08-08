@@ -410,6 +410,7 @@ const (
 	glyphWorking = "◐" // turn in flight
 	glyphDone    = "✓" // finished while you were away
 	glyphIdle    = "○" // nothing happening
+	glyphPinned  = "◆" // attention pinned by hand — never auto-cleared
 )
 
 // sidebarHeadingStyle / sidebarDimStyle / the state-glyph styles mirror the
@@ -424,6 +425,7 @@ var (
 	sidebarBlockedStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
 	sidebarWorkingStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
 	sidebarUnseenStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("28"))
+	sidebarPinnedStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("141"))
 	sidebarGitStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
 	sidebarGitStaleStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Italic(true)
 )
@@ -636,10 +638,19 @@ func paneRow(pane *PaneModel, focused bool, w int) string {
 			}
 			suffix = fmt.Sprintf(" ⋯%d%s", n, mark)
 		}
+	case pane.pinnedAttention:
+		glyph, style = glyphPinned, sidebarPinnedStyle
 	case pane.unseen:
 		glyph, style = glyphDone, sidebarUnseenStyle
 	default:
 		glyph, style = glyphIdle, sidebarDimStyle
+	}
+
+	// A pin outranked by a live state must still be visible — it is the mark
+	// that deliberately survives focus, so losing it to a transient blocked or
+	// working state would make "don't let me forget" forgettable.
+	if pane.pinnedAttention && glyph != glyphPinned {
+		suffix += " " + glyphPinned
 	}
 
 	label := pane.Name

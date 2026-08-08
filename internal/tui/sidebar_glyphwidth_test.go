@@ -39,6 +39,7 @@ func TestSidebarGlyphs_OneCellAndNotEmojiCapable(t *testing.T) {
 		"glyphWorking": glyphWorking,
 		"glyphDone":    glyphDone,
 		"glyphIdle":    glyphIdle,
+		"glyphPinned":  glyphPinned,
 	} {
 		if got := lipgloss.Width(g); got != 1 {
 			t.Errorf("%s (%q) measures %d cells, want exactly 1 — "+

@@ -430,6 +430,26 @@ func (m Model) tabPinnedAttention(idx int) bool {
 	return false
 }
 
+// tabBlocked reports whether the tab at idx holds a pane parked on the user.
+// Unlike tabUnseen the ACTIVE tab also reports true: a permission prompt is
+// not a seen/unseen state, it is an outstanding question, and the tab bar is
+// the only place a user scanning several projects will notice it. It stays
+// true for the focused pane too — ackFocusedPane is what clears the pane's
+// blockedSince, and deriving the tab mark from that one flag keeps the two
+// levels from disagreeing.
+func (m Model) tabBlocked(idx int) bool {
+	tabs := m.curTabs()
+	if idx < 0 || idx >= len(tabs) || tabs[idx].Root == nil {
+		return false
+	}
+	for _, p := range tabs[idx].Leaves() {
+		if p != nil && !p.blockedSince.IsZero() {
+			return true
+		}
+	}
+	return false
+}
+
 // workSpinnerTick schedules the next shared work-spinner frame.
 func (m Model) workSpinnerTick() tea.Cmd {
 	return tea.Tick(workSpinnerInterval, func(time.Time) tea.Msg { return workSpinnerTickMsg{} })

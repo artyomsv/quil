@@ -4616,14 +4616,20 @@ func (m Model) tabLabel(idx int) string {
 	return name
 }
 
-// tabStyle returns the lipgloss style for the tab at idx. Precedence: green
-// unseen mark (background tab with an unfocused finished pane, OR a tab
-// containing a pane pinned for attention via the context menu) > custom tab
-// color > active/inactive default. Shared by renderTabBar and hitTestTab so
-// rendered widths and click hit-testing never diverge.
+// tabStyle returns the lipgloss style for the tab at idx. Precedence: amber
+// blocked mark (a pane parked on the user) > green unseen mark (background tab
+// with an unfocused finished pane, OR a tab containing a pane pinned for
+// attention via the context menu) > custom tab color > active/inactive default.
+// Shared by renderTabBar and hitTestTab so rendered widths and click
+// hit-testing never diverge.
 func (m Model) tabStyle(idx int) lipgloss.Style {
 	tab := m.curTabs()[idx]
 	active := idx == m.activeTabIdx()
+	// Blocked first: a parked agent is a question waiting on the user, and it
+	// includes the ACTIVE tab because the pane may be in an unfocused split.
+	if m.tabBlocked(idx) {
+		return blockedTabStyle
+	}
 	// tabUnseen self-excludes the active tab; tabPinnedAttention deliberately
 	// does not (a pin colors the active tab's label unless the pinned pane is
 	// the one in focus).

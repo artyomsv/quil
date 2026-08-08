@@ -15,12 +15,23 @@ var (
 		Padding(0, 1)
 
 	// unseenTabStyle highlights a background tab containing a pane that
-	// finished a turn (or parked for user input) and hasn't been focused
-	// since. Green background, bright text; clears when the pane is focused.
+	// finished a turn and hasn't been focused since. Green background,
+	// bright text; clears when the pane is focused.
 	unseenTabStyle = lipgloss.NewStyle().
 		Bold(true).
 		Foreground(lipgloss.Color("231")).
 		Background(lipgloss.Color("28")).
+		Padding(0, 1)
+
+	// blockedTabStyle marks a tab holding a pane parked on the user
+	// (permission prompt / option select). Amber, matching the sidebar's
+	// sidebarBlockedStyle so the tab bar and the strip use one vocabulary.
+	// Outranks unseenTabStyle: "needs you" beats "finished while you were
+	// away", and unlike unseen it names something you can act on.
+	blockedTabStyle = lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("232")).
+		Background(lipgloss.Color("214")).
 		Padding(0, 1)
 
 	activePaneBorder = lipgloss.NewStyle().

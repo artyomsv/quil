@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -9,6 +10,23 @@ import (
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
 )
+
+// newTestModelWithTabs builds a Model with a single project holding n tabs,
+// each with one pane ("pane-<i>"). Tab 0 is the project's active tab. The
+// package's other fixtures (tabWith, Model{...} literals) build a specific
+// tab/pane graph by hand; tests that assert against a tab INDEX rather than
+// a specific pane want a fixture that hands back N of them directly.
+func newTestModelWithTabs(t *testing.T, n int) Model {
+	t.Helper()
+	tabs := make([]*TabModel, n)
+	for i := 0; i < n; i++ {
+		tabs[i] = tabWith(&PaneModel{ID: fmt.Sprintf("pane-%d", i)})
+	}
+	return Model{
+		projects:      []*ProjectModel{{ID: "proj-a", tabs: tabs}},
+		activeProject: 0,
+	}
+}
 
 func TestBlockedPanesOrderedOldestFirstAcrossProjects(t *testing.T) {
 	now := time.Now()
@@ -299,5 +317,59 @@ func TestAttentionQueueKeyFiresWhileNotesEditorFocused(t *testing.T) {
 	}
 	if got := got.projects[1].tabs[0].ActivePane; got != "pane-blocked" {
 		t.Fatalf("ActivePane = %s, want pane-blocked", got)
+	}
+}
+
+// TestTabBlocked_ReportsParkedPaneOnBackgroundTab pins the tab-level blocked
+// mark. Before this existed a parked pane showed ▲ in the sidebar while its
+// tab showed nothing at all — the defect in item 6.1.
+func TestTabBlocked_ReportsParkedPaneOnBackgroundTab(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		blocked     bool
+		activeTab   bool
+		focusedPane bool
+		want        bool
+	}{
+		{"parked pane on background tab", true, false, false, true},
+		{"parked pane on active tab", true, true, false, true},
+		{"parked pane is the focused pane", true, true, true, true},
+		{"no parked pane", false, false, false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := newTestModelWithTabs(t, 2)
+			ti := 1
+			if tt.activeTab {
+				ti = 0
+			}
+			tab := m.curTabs()[ti]
+			pane := tab.Leaves()[0]
+			if tt.blocked {
+				pane.blockedSince = time.Now()
+			}
+			if tt.focusedPane {
+				tab.ActivePane = pane.ID
+			}
+			if got := m.tabBlocked(ti); got != tt.want {
+				t.Errorf("tabBlocked(%d) = %v, want %v", ti, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestTabStyle_BlockedOutranksUnseen pins the precedence. A pane that is
+// blocked AND unseen must read as blocked: "needs you" is the more urgent of
+// the two, and it is the one the user can act on.
+func TestTabStyle_BlockedOutranksUnseen(t *testing.T) {
+	t.Parallel()
+	m := newTestModelWithTabs(t, 2)
+	pane := m.curTabs()[1].Leaves()[0]
+	pane.unseen = true
+	pane.blockedSince = time.Now()
+	if got := m.tabStyle(1); got.GetBackground() != blockedTabStyle.GetBackground() {
+		t.Errorf("tabStyle background = %v, want blockedTabStyle %v",
+			got.GetBackground(), blockedTabStyle.GetBackground())
 	}
 }

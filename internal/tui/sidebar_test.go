@@ -248,6 +248,31 @@ func TestSwitchProjectIgnoresOutOfRangeAndNoOp(t *testing.T) {
 	}
 }
 
+// TestSwitchProjectResetsSidebarScroll pins the deliberate UX choice: a
+// project switch always shows the incoming project's PANES body from the top,
+// rather than carrying over an offset scrolled deep into the outgoing
+// project's (possibly much longer) pane list.
+func TestSwitchProjectResetsSidebarScroll(t *testing.T) {
+	fake := newFakeConn()
+	m := Model{
+		client: fake,
+		projects: []*ProjectModel{
+			{ID: "proj-a"},
+			{ID: "proj-b"},
+		},
+		activeProject: 0,
+		sidebarScroll: 12,
+	}
+
+	if cmd := m.switchProject(1); cmd != nil {
+		cmd()
+	}
+
+	if m.sidebarScroll != 0 {
+		t.Errorf("sidebarScroll = %d after switching projects, want 0", m.sidebarScroll)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Mouse dispatch
 // ---------------------------------------------------------------------------
@@ -1263,6 +1288,12 @@ func newTestModelManyPanes(t *testing.T, projects, panes int) Model {
 		sidebarWidth:  defaultSidebarWidth,
 		width:         120,
 		height:        40,
+		// Update's MouseWheelMsg branch checks the notification sidebar
+		// overlay before the project sidebar swallow — sidebarOverlayWidth
+		// dereferences this unconditionally, so routing a wheel event through
+		// Update() (rather than calling sidebarVisibleRows directly, as every
+		// prior fixture use did) panics on a nil *NotificationCenter.
+		notifications: NewNotificationCenter(30, 50),
 	}
 }
 
@@ -1379,6 +1410,16 @@ func TestSidebarScrollClamp(t *testing.T) {
 	}
 }
 
+// isSidebarScrollMarker identifies a "N above"/"N below" overflow marker row
+// by kind AND direction word, not by glyphMore alone: paneRow also spends
+// glyphMore on a pane's subagent count, so a substring-only check would flag
+// (or miscount) that row too and fail for a reason unrelated to scrolling the
+// moment the fixture gains a pane with subagents.
+func isSidebarScrollMarker(r sidebarRow) bool {
+	return r.kind == "" && strings.Contains(r.text, glyphMore) &&
+		(strings.Contains(r.text, "above") || strings.Contains(r.text, "below"))
+}
+
 // TestSidebarVisibleRows_WindowIsExactAtEveryOffset sweeps the offset past both
 // ends. Two things have to hold at every one of them, and both are how the
 // paint and the hit test stay in step: the strip is exactly `height` rows (the
@@ -1403,11 +1444,6 @@ func TestSidebarVisibleRows_WindowIsExactAtEveryOffset(t *testing.T) {
 	body := all[panesStart:]
 	bodyH := height - panesStart
 
-	isMarker := func(r sidebarRow) bool {
-		return r.kind == "" && strings.Contains(r.text, glyphMore) &&
-			(strings.Contains(r.text, "above") || strings.Contains(r.text, "below"))
-	}
-
 	for off := -2; off <= len(body)+2; off++ {
 		m.sidebarScroll = off
 		out := m.sidebarVisibleRows(w, height)
@@ -1422,7 +1458,7 @@ func TestSidebarVisibleRows_WindowIsExactAtEveryOffset(t *testing.T) {
 
 		var vis []sidebarRow
 		for _, r := range out[panesStart:] {
-			if isMarker(r) {
+			if isSidebarScrollMarker(r) {
 				continue
 			}
 			vis = append(vis, r)
@@ -1481,7 +1517,7 @@ func TestSidebarVisibleRows_ScrollMarkersAreInert(t *testing.T) {
 	rows := m.sidebarVisibleRows(m.projectSidebarWidth(), m.sidebarContentHeight())
 	var markers int
 	for y, row := range rows {
-		if !strings.Contains(row.text, glyphMore) {
+		if !isSidebarScrollMarker(row) {
 			continue
 		}
 		markers++
@@ -1497,5 +1533,53 @@ func TestSidebarVisibleRows_ScrollMarkersAreInert(t *testing.T) {
 	if markers != 2 {
 		t.Fatalf("found %d scroll markers, want 2 (above and below) — "+
 			"the fixture no longer scrolls with rows on both sides", markers)
+	}
+}
+
+// TestSidebarWheel_ScrollsPanesSection pins that a wheel notch over the strip
+// moves the PANES body. The swallow at model.go:1466 already stopped the wheel
+// reaching the pane beneath — it just did nothing with it.
+func TestSidebarWheel_ScrollsPanesSection(t *testing.T) {
+	t.Parallel()
+	m := newTestModelManyPanes(t, 3, 8)
+	m.width, m.height = 100, 13
+
+	updated, _ := m.Update(tea.MouseWheelMsg{X: 5, Y: 5, Button: tea.MouseWheelDown})
+	down := updated.(Model)
+	if down.sidebarScroll == 0 {
+		t.Fatal("wheel down over the sidebar should scroll the PANES section")
+	}
+
+	updated, _ = down.Update(tea.MouseWheelMsg{X: 5, Y: 5, Button: tea.MouseWheelUp})
+	up := updated.(Model)
+	if up.sidebarScroll != 0 {
+		t.Errorf("sidebarScroll = %d after scrolling back up, want 0", up.sidebarScroll)
+	}
+}
+
+// TestSidebarWheel_ClampsAtBothEnds pins that the offset cannot run past the
+// content in either direction — an unclamped offset paints an empty strip that
+// still hit-tests to rows nobody can see.
+func TestSidebarWheel_ClampsAtBothEnds(t *testing.T) {
+	t.Parallel()
+	m := newTestModelManyPanes(t, 3, 8)
+	m.width, m.height = 100, 13
+
+	for i := 0; i < 50; i++ {
+		updated, _ := m.Update(tea.MouseWheelMsg{X: 5, Y: 5, Button: tea.MouseWheelDown})
+		m = updated.(Model)
+	}
+	rows, panesStart := m.sidebarRows(m.projectSidebarWidth())
+	want := maxSidebarScrollFor(len(rows)-panesStart, m.sidebarContentHeight()-panesStart)
+	if m.sidebarScroll != want {
+		t.Errorf("sidebarScroll = %d after over-scrolling, want the max %d", m.sidebarScroll, want)
+	}
+
+	for i := 0; i < 50; i++ {
+		updated, _ := m.Update(tea.MouseWheelMsg{X: 5, Y: 5, Button: tea.MouseWheelUp})
+		m = updated.(Model)
+	}
+	if m.sidebarScroll != 0 {
+		t.Errorf("sidebarScroll = %d after over-scrolling up, want 0", m.sidebarScroll)
 	}
 }

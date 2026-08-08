@@ -81,6 +81,15 @@ func (m *Model) switchProject(i int) tea.Cmd {
 		m.prevProject = p.ID
 	}
 	m.activeProject = i
+	// The PANES body's scroll offset is a property of "what am I looking at",
+	// not of the strip itself — switching projects changes the panes under it
+	// without touching m.sidebarWidth or m.sidebarOpen, so nothing else resets
+	// it. Left alone, an offset scrolled deep into a many-pane project quietly
+	// carries into whatever project is switched to next, showing its PANES
+	// body mid-scroll on first paint. sidebarVisibleRows re-clamps every
+	// render regardless, so this is a UX choice (start at the top on arrival)
+	// rather than a safety fix.
+	m.sidebarScroll = 0
 	// Before the send: syncActiveDest is what makes an UNSTAMPED message
 	// resolve to the incoming project's daemon rather than the outgoing
 	// one's, and resizeAllPanes below is about to fan out across all of them.

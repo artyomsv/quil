@@ -260,10 +260,26 @@ func maxSidebarScrollFor(bodyLen, bodyH int) int {
 	if bodyH <= 1 || bodyLen <= bodyH {
 		return 0
 	}
-	if max := bodyLen - (bodyH - 1); max > 0 {
-		return max
+	// Provably positive here: the guard above already rules out bodyLen <=
+	// bodyH, so bodyLen-(bodyH-1) is at least 2. Kept rather than inlined so
+	// the property stays checked if the guard above is ever loosened.
+	if limit := bodyLen - (bodyH - 1); limit > 0 {
+		return limit
 	}
 	return 0
+}
+
+// sidebarBodyGeometry derives the scrollable PANES body's length and window
+// height from an already-built row list, its panesStart boundary, and the
+// render height — the one place that arithmetic is written. sidebarVisibleRows
+// and scrollSidebar both call it with the SAME (rows, panesStart) pair their
+// own m.sidebarRows(w) call already produced, so a second, hand-derived copy
+// (as scrollSidebar's first draft had) can never drift from the one the paint
+// windows against — that drift would clamp a wheel notch against a bound the
+// user cannot see, a dead-feeling scroll plateau rather than row drift, since
+// the paint still re-clamps every render.
+func sidebarBodyGeometry(rows []sidebarRow, panesStart, height int) (bodyLen, bodyH int) {
+	return len(rows) - panesStart, height - panesStart
 }
 
 // clampSidebarScroll bounds an offset into a body of bodyLen rows shown through
@@ -315,7 +331,7 @@ func (m *Model) sidebarVisibleRows(w, height int) []sidebarRow {
 		return out
 	}
 
-	bodyH := height - len(head)
+	_, bodyH := sidebarBodyGeometry(rows, panesStart, height)
 	off := clampSidebarScroll(m.sidebarScroll, len(body), bodyH)
 
 	// Markers cost a row each and appear only on the side that has more. They
@@ -329,10 +345,19 @@ func (m *Model) sidebarVisibleRows(w, height int) []sidebarRow {
 	if bottom {
 		avail--
 	}
+	// Provably unreachable, like maxSidebarScrollFor's own limit>0 above: the
+	// branch above this point only runs when panesStart <= height-minPaneRows,
+	// so bodyH >= minPaneRows (3) and at most two of those rows go to markers
+	// — avail cannot fall below 1. Kept as an explicit totality check rather
+	// than trusted-by-construction, for the same reason the other two are.
 	if avail < 0 {
 		avail = 0
 	}
 	end := off + avail
+	// Also provably unreachable: off is clamped to maxSidebarScrollFor(len(body),
+	// bodyH), and avail is derived so off+avail never outruns len(body) — the
+	// "bottom" test above IS that derivation. A third totality guard on the
+	// same property, not a second independent bound.
 	if end > len(body) {
 		end = len(body)
 	}
@@ -349,6 +374,35 @@ func (m *Model) sidebarVisibleRows(w, height int) []sidebarRow {
 			padOrTrunc(fmt.Sprintf(" %s %d below", glyphMore, len(body)-end), w))})
 	}
 	return out
+}
+
+// scrollSidebar moves the PANES section by one wheel notch. It owns the write
+// to m.sidebarScroll — sidebarVisibleRows only ever clamps a local copy — and
+// re-derives the body geometry from the same sidebarRows/height pair the paint
+// uses via sidebarBodyGeometry, so the bound the user hits is the bound they
+// can see.
+func (m *Model) scrollSidebar(up bool) {
+	w := m.projectSidebarWidth()
+	if w <= 0 {
+		return
+	}
+	height := m.sidebarContentHeight()
+	rows, panesStart := m.sidebarRows(w)
+	// Nothing to scroll, or the degenerate short strip that reverts to the
+	// tail cap: in both cases the only correct offset is zero.
+	if height <= 0 || len(rows) <= height || panesStart > height-minPaneRows {
+		m.sidebarScroll = 0
+		return
+	}
+	lines := m.cfg.UI.MouseScrollLines
+	if lines < 1 {
+		lines = 3
+	}
+	if up {
+		lines = -lines
+	}
+	bodyLen, bodyH := sidebarBodyGeometry(rows, panesStart, height)
+	m.sidebarScroll = clampSidebarScroll(m.sidebarScroll+lines, bodyLen, bodyH)
 }
 
 // sidebarRowAt resolves the project-sidebar row under a SCREEN coordinate.

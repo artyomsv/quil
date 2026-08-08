@@ -1496,9 +1496,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.sidebarSwallowsMouse(msg.X, msg.Y) {
 			return m, nil
 		}
-		// Same for the project sidebar's reserved column — the pane it
-		// would scroll is not the one under the cursor.
+		// The project sidebar's reserved column scrolls its own PANES section;
+		// the pane the wheel would otherwise scroll is not the one under the
+		// cursor.
 		if m.projectSidebarSwallowsMouse(msg.X, msg.Y) {
+			m.scrollSidebar(msg.Button == tea.MouseWheelUp)
 			return m, nil
 		}
 		lines := m.cfg.UI.MouseScrollLines

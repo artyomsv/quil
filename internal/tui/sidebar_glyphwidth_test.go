@@ -169,7 +169,10 @@ func TestPaneRow_MeasuresExactlyItsWidth(t *testing.T) {
 // comes out of the same budget the marker and the name are already sharing.
 func TestSidebarTabHeading_MeasuresExactlyItsWidth(t *testing.T) {
 	t.Parallel()
-	for _, w := range []int{4, 8, 12, defaultSidebarWidth, 40} {
+	// 1, 2, 3 are exactly where the ordinal stops fitting — the same
+	// hand-edited-sidebar_width reachability argument as the wider values, and
+	// where the second assertion below self-skips rather than failing.
+	for _, w := range []int{1, 2, 3, 4, 8, 12, defaultSidebarWidth, 40} {
 		for _, name := range remoteTextSamples {
 			for _, idx := range []int{0, 8, 9, 11, 98, 998} {
 				for _, active := range []bool{true, false} {

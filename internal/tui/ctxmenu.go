@@ -534,9 +534,16 @@ func (m Model) executeCtxMenuItem(item ctxMenuItem) (tea.Model, tea.Cmd) {
 	if !item.enabled || paneID == "" {
 		return m, nil
 	}
-	// The menu may have been opened from the SIDEBAR on a pane in a background
-	// tab, so the active tab is not necessarily the owner. Resolving by pane id
-	// is what stops such a menu from rendering fully and then doing nothing.
+	// The sidebar right-click entry point (model.go) FOCUSES the pane before
+	// opening this menu, so on every reachable path the owning tab is already
+	// the active tab. This findPaneAndTab resolution is kept as
+	// belt-and-braces, not as the thing that makes a background-tab menu
+	// work: it only covers the two items that resolve paneID directly
+	// (ctxActAttention/ctxActClearAttention). The other eight below resolve
+	// through activeTabModel().ActivePaneModel(), which this block cannot
+	// redirect — so any FUTURE entry point that opens this menu on a pane
+	// outside the active tab must focus it first, or those eight will act on
+	// whatever pane happens to be on screen instead of the intended target.
 	//
 	// The tab comes from the project findPaneAndTab returned, NOT curTabs():
 	// that helper spans every project while curTabs() is the active project's

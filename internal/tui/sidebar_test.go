@@ -842,9 +842,17 @@ func wideGlyphSidebarModel(t *testing.T) Model {
 	// word-wraps, so a row whose excess is a run of SPACES is collapsed back
 	// inside the budget and hides the bug. Only solid content forces the
 	// wrap that shifts the rows below.
+	//
+	// The blocked pane must NOT be the focused one, and an idle sibling put
+	// ahead of it is what keeps it unfocused (tabWith focuses panes[0]).
+	// paneRow suppresses the blocked presentation for the focused pane, so
+	// with one pane in the tab the CJK blockedReason never reaches the row and
+	// this fixture stops exercising a wide-glyph SUFFIX at all — silently, with
+	// both tests below still green on the project name alone.
+	idle := &PaneModel{ID: "pane-idle", Name: "shell"}
 	m := Model{
 		projects: []*ProjectModel{
-			{ID: "proj-a", Name: "数据库迁移服务集群控制台", Dest: "gpu01", tabs: []*TabModel{tabWith(blocked)}},
+			{ID: "proj-a", Name: "数据库迁移服务集群控制台", Dest: "gpu01", tabs: []*TabModel{tabWith(idle, blocked)}},
 			{ID: "proj-b", Name: "beta"},
 		},
 		sidebarOpen:  true,
@@ -860,7 +868,26 @@ func wideGlyphSidebarModel(t *testing.T) Model {
 		t.Fatalf("fixture glyphs are not wide (⚡=%d 构=%d) — this test cannot fail",
 			lipgloss.Width("⚡"), lipgloss.Width("构"))
 	}
+	// Second control: the wide-glyph blocked reason must actually reach a row.
+	// It does so only while the blocked pane is unfocused, which is a property
+	// of the fixture's pane ORDER — nothing else here would notice it changing.
+	var sawReason bool
+	for _, r := range rowsOf(&m, 22) {
+		if strings.Contains(r.text, "编辑") {
+			sawReason = true
+		}
+	}
+	if !sawReason {
+		t.Fatal("no row carries the wide-glyph blocked reason — the fixture no longer " +
+			"exercises a wide suffix (is the blocked pane focused?)")
+	}
 	return m
+}
+
+// rowsOf is the row list alone, for fixtures that only assert over the rows.
+func rowsOf(m *Model, w int) []sidebarRow {
+	rows, _ := m.sidebarRows(w)
+	return rows
 }
 
 // No row may exceed its column budget. Asserted on sidebarRows, BEFORE
@@ -1131,6 +1158,120 @@ func TestPaneRow_RendersPinnedAttention(t *testing.T) {
 				t.Errorf("paneRow = %q, want it to contain %q", got, tt.wantSub)
 			}
 		})
+	}
+}
+
+// TestPaneRow_BlockedFocusedSuppressesTheGlyph pins the render half of the
+// revised item 6.2. The blocked STATE is kept when the user focuses the pane
+// (ackFocusedPane no longer clears it — see TestAckFocusedPane_KeepsTheBlockedMark
+// for why a spinner tick must not count as an answer); the PRESENTATION is what
+// gives way, so "you are looking straight at the prompt" costs a glyph rather
+// than a fact. The row must then read exactly as it would with no blocked mark
+// at all, which is the fall-through this table walks: working still wins, then
+// the pin, then unseen, then idle.
+//
+// Unfocused is the control row of every case — that is the state the whole
+// feature exists to show, and a suppression that leaked into it would be the
+// original defect (▲ never observable) in a new place.
+func TestPaneRow_BlockedFocusedSuppressesTheGlyph(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name          string
+		setup         func(p *PaneModel)
+		wantFocused   string // the glyph the row shows while focused
+		unwantFocused string // and the one it must NOT show
+	}{
+		{"blocked alone falls through to idle",
+			func(p *PaneModel) {}, glyphIdle, glyphBlocked},
+		{"blocked and working falls through to working",
+			func(p *PaneModel) { p.working = true }, glyphWorking, glyphBlocked},
+		{"blocked and pinned falls through to the pin",
+			func(p *PaneModel) { p.pinnedAttention = true }, glyphPinned, glyphBlocked},
+		{"blocked and unseen falls through to done",
+			func(p *PaneModel) { p.unseen = true }, glyphDone, glyphBlocked},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pane := &PaneModel{ID: "p1", Name: "agent"}
+			pane.blockedSince = time.Now()
+			pane.blockedReason = "Bash"
+			tt.setup(pane)
+
+			focused := paneRow(pane, true, 30)
+			if !strings.Contains(focused, tt.wantFocused) {
+				t.Errorf("focused row = %q, want the %q glyph", focused, tt.wantFocused)
+			}
+			if strings.Contains(focused, tt.unwantFocused) {
+				t.Errorf("focused row = %q, must not show %q", focused, tt.unwantFocused)
+			}
+			// The reason is the blocked presentation's other half; leaving it
+			// behind would name the tool on a row carrying no blocked glyph.
+			if strings.Contains(focused, "Bash") {
+				t.Errorf("focused row = %q, must not carry the blocked reason", focused)
+			}
+			// Nothing about the suppression may change the row's width — it is
+			// the one property every helper in this file has to agree on.
+			if w := lipgloss.Width(focused); w != 30 {
+				t.Errorf("focused row measures %d cells, want exactly 30", w)
+			}
+
+			unfocused := paneRow(pane, false, 30)
+			if !strings.Contains(unfocused, glyphBlocked) {
+				t.Errorf("unfocused row = %q, want the %q glyph", unfocused, glyphBlocked)
+			}
+			if !strings.Contains(unfocused, "Bash") {
+				t.Errorf("unfocused row = %q, want the blocked reason", unfocused)
+			}
+		})
+	}
+}
+
+// TestSidebarRows_SuppressesTheBlockedGlyphOnlyForTheFocusedPane drives the
+// suppression through its real call site rather than paneRow's parameter. The
+// `focused` argument is computed there as `onTab && pane.ID == tab.ActivePane`,
+// which is exactly ackFocusedPane's own scope (the focused pane of the ACTIVE
+// tab of the active project) — the two must not come apart, or a pane would
+// either keep a mark nothing renders or lose one nothing cleared.
+func TestSidebarRows_SuppressesTheBlockedGlyphOnlyForTheFocusedPane(t *testing.T) {
+	t.Parallel()
+	// Tab 0 is active: pane-0-0 is focused, pane-0-1 is its split sibling.
+	// Tab 1 is a background tab holding a third blocked pane.
+	m := newTestModelWithTabs(t, 2, 2)
+	m.sidebarOpen, m.sidebarWidth = true, defaultSidebarWidth
+	m.width, m.height = 120, 40
+	for _, tab := range m.curTabs() {
+		for _, p := range tab.Leaves() {
+			p.blockedSince = time.Now()
+		}
+	}
+	focusedID := m.curTabs()[0].ActivePane
+	if focusedID == "" {
+		t.Fatal("fixture must focus a pane on the active tab")
+	}
+
+	rows, _ := m.sidebarRows(defaultSidebarWidth)
+	var seen int
+	for _, r := range rows {
+		if r.kind != sidebarRowPane {
+			continue
+		}
+		seen++
+		blocked := strings.Contains(r.text, glyphBlocked)
+		if want := r.paneID != focusedID; blocked != want {
+			t.Errorf("pane %q (focused=%v): row shows %s = %v, want %v — %q",
+				r.paneID, r.paneID == focusedID, glyphBlocked, blocked, want, r.text)
+		}
+	}
+	if seen != 4 {
+		t.Fatalf("walked %d pane rows, want 4 — the fixture no longer covers both tabs", seen)
+	}
+	// The suppression is presentation only: every level above the row still
+	// counts all four, including the focused one.
+	if !m.tabBlocked(0) || !m.tabBlocked(1) {
+		t.Error("both tabs must still read as blocked")
+	}
+	if _, blocked, _ := m.projects[0].counts(); blocked != 4 {
+		t.Errorf("project badge counts %d blocked, want 4", blocked)
 	}
 }
 

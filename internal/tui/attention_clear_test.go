@@ -69,11 +69,26 @@ func TestCtxMenu_ClearAttentionDropsAStuckBlockedMark(t *testing.T) {
 	}
 }
 
-// TestAckFocusedPane_ClearsBlocked pins item 6.2. Focusing the pane is the
-// acknowledgement — you are looking straight at the prompt. pinnedAttention
-// deliberately SURVIVES: it is the explicit "don't let me forget" mark, and
-// auto-clearing it would leave no way to express that.
-func TestAckFocusedPane_ClearsBlocked(t *testing.T) {
+// TestAckFocusedPane_KeepsTheBlockedMark pins the REVISED item 6.2. The
+// original rule had focus clear blockedSince alongside unseen; that was
+// reversed after review, because ackFocusedPane runs at the top of EVERY
+// Update — including the shared 100 ms workSpinnerTickMsg, which is guaranteed
+// to be ticking while a pane is working. So a pane that is the focused pane of
+// the active tab when it parks had its mark set and cleared ~100 ms later, and
+// the ▲ was never observable at all in the commonest park of all (the agent
+// asks for permission while you are sitting in its pane).
+//
+// unseen is a "you missed something" flag genuinely answered by looking.
+// blockedSince is a fact about the AGENT, so clearing it on a spinner tick
+// destroys information rather than acknowledging a notification. The glyph is
+// suppressed at render for the focused pane instead — see
+// TestPaneRow_BlockedFocusedSuppressesTheGlyph — which keeps counts(),
+// tabBlocked and the attention queue truthful and restores every signal the
+// moment the user leaves the pane, with no hook edge required.
+//
+// pinnedAttention still deliberately SURVIVES: it is the explicit "don't let me
+// forget" mark, and auto-clearing it would leave no way to express that.
+func TestAckFocusedPane_KeepsTheBlockedMark(t *testing.T) {
 	t.Parallel()
 	m := newTestModelWithTabs(t, 1, 1)
 	tab := m.curTabs()[0]
@@ -89,21 +104,24 @@ func TestAckFocusedPane_ClearsBlocked(t *testing.T) {
 	if pane.unseen {
 		t.Error("unseen should be cleared")
 	}
-	if !pane.blockedSince.IsZero() {
-		t.Error("blockedSince should be cleared by focus")
+	if pane.blockedSince.IsZero() {
+		t.Error("blockedSince must SURVIVE focus — a spinner tick is not an answer")
 	}
-	if pane.blockedReason != "" {
-		t.Errorf("blockedReason = %q, want empty", pane.blockedReason)
+	if pane.blockedReason != "Bash" {
+		t.Errorf("blockedReason = %q, want %q — it must survive with the mark", pane.blockedReason, "Bash")
 	}
 	if !pane.pinnedAttention {
 		t.Error("pinnedAttention must survive focus")
 	}
 }
 
-// TestAckFocusedPane_TabMarkSurvivesOtherBlockedPane pins the level rule the
-// user asked for: visiting one pane clears that pane, and clears the TAB only
-// when no sibling still holds a mark.
-func TestAckFocusedPane_TabMarkSurvivesOtherBlockedPane(t *testing.T) {
+// TestAckFocusedPane_KeepsEveryDerivedBlockedSignal is the half of the ruling
+// that a per-pane assertion cannot see: the state is kept precisely so the
+// levels ABOVE the pane row stay truthful while the user sits in the pane
+// without answering. The tab mark, the project badge's blocked count and the
+// attention queue all derive from blockedSince, and before the revision each of
+// them went dark within one spinner tick of the park.
+func TestAckFocusedPane_KeepsEveryDerivedBlockedSignal(t *testing.T) {
 	t.Parallel()
 	m := newTestModelWithTabs(t, 1, 2)
 	tab := m.curTabs()[0]
@@ -117,14 +135,50 @@ func TestAckFocusedPane_TabMarkSurvivesOtherBlockedPane(t *testing.T) {
 
 	m.ackFocusedPane()
 
-	if !panes[0].blockedSince.IsZero() {
-		t.Error("focused pane should be cleared")
+	if panes[0].blockedSince.IsZero() {
+		t.Error("the focused pane's mark must survive")
 	}
 	if panes[1].blockedSince.IsZero() {
 		t.Error("unfocused sibling must keep its mark")
 	}
 	if !m.tabBlocked(0) {
-		t.Error("tab must stay marked while a sibling is still blocked")
+		t.Error("tab must stay marked")
+	}
+	if _, blocked, _ := m.projects[0].counts(); blocked != 2 {
+		t.Errorf("project badge counts %d blocked, want 2 — focus must not shrink the roll-up", blocked)
+	}
+	if got := len(m.blockedPanes()); got != 2 {
+		t.Errorf("attention queue holds %d panes, want 2 — a focused pane must not drain out of it", got)
+	}
+}
+
+// TestAckFocusedPane_ClearsOnlyTheUnseenMark bounds the ack to the one flag it
+// still owns, at the level the ruling is stated: everything else on the focused
+// pane is left exactly as it was found.
+func TestAckFocusedPane_ClearsOnlyTheUnseenMark(t *testing.T) {
+	t.Parallel()
+	m := newTestModelWithTabs(t, 1, 1)
+	tab := m.curTabs()[0]
+	pane := tab.Leaves()[0]
+	tab.ActivePane = pane.ID
+
+	since := time.Now().Add(-time.Hour)
+	pane.blockedSince = since
+	pane.blockedReason = "AskUserQuestion"
+	pane.unseen = true
+	pane.working = true
+	pane.turnActive = true
+
+	m.ackFocusedPane()
+
+	if pane.unseen {
+		t.Error("unseen should be cleared")
+	}
+	if !pane.blockedSince.Equal(since) {
+		t.Errorf("blockedSince = %v, want it untouched at %v", pane.blockedSince, since)
+	}
+	if !pane.working || !pane.turnActive {
+		t.Error("the ack must not touch the working state")
 	}
 }
 

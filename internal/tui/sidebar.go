@@ -850,15 +850,26 @@ func projectRow(name string, working, blocked, done int, link string, active boo
 //
 // `focused` marks the pane the user is actually typing into — with the ▸
 // marker rather than a colour, because the row's colour already carries the
-// pane's STATE (blocked, working, unseen, pinned) and that is the more urgent
-// signal of the two. A blocked pane must stay visibly blocked whether or not
-// it happens to be focused.
+// pane's STATE (working, unseen, pinned) and that is the more urgent signal of
+// the two.
+//
+// `focused` ALSO suppresses the blocked presentation, and that is the one place
+// this row does more than report state. The blocked mark is deliberately NOT
+// cleared when the user focuses the pane (ackFocusedPane, workstate.go, states
+// why: it runs on every message including a spinner tick, so clearing there
+// destroyed the mark before it could ever be seen). Keeping the state and
+// dropping the glyph is what "you are looking straight at the prompt" costs —
+// while tabBlocked, counts() and the attention queue keep reading the same
+// blockedSince, so the tab stays amber, the project badge keeps counting it and
+// the queue keeps offering it. Leaving the pane restores the ▲ by itself. An
+// UNFOCUSED pane is blocked-visible always: that is the signal the whole
+// feature exists for.
 func paneRow(pane *PaneModel, focused bool, w int) string {
 	var glyph string
 	var style lipgloss.Style
 	var suffix string
 	switch {
-	case !pane.blockedSince.IsZero():
+	case !pane.blockedSince.IsZero() && !focused:
 		glyph, style = glyphBlocked, sidebarBlockedStyle
 		if pane.blockedReason != "" {
 			suffix = " " + sanitizeRemoteText(pane.blockedReason)

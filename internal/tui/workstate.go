@@ -360,16 +360,32 @@ func coalescedCount(data map[string]string) int {
 	return n
 }
 
-// ackFocusedPane clears the unseen mark and the blocked mark on the focused
-// pane of the active tab, called once at the top of Update. Correctness does
-// not depend on a render having happened between messages (the renderer
-// coalesces frames): a focused pane never renders either mark anyway —
-// tabUnseen excludes the active tab and the pane border gives the active
-// style precedence — and focusing the pane is itself the acknowledgement.
-// This single choke point replaces auditing every ActivePane/activeTab
-// assignment (13 call sites); a newly focused pane is acknowledged on the
-// next message (the 1 s size poll bounds the wait). Unfocused panes keep
-// their marks until focused.
+// ackFocusedPane clears the unseen mark on the focused pane of the active tab,
+// called once at the top of Update. Correctness does not depend on a render
+// having happened between messages (the renderer coalesces frames): a focused
+// pane never renders the mark anyway — tabUnseen excludes the active tab and
+// the pane border gives the active style precedence — and focusing the pane is
+// itself the acknowledgement. This single choke point replaces auditing every
+// ActivePane/activeTab assignment (13 call sites); a newly focused pane is
+// acknowledged on the next message (the 1 s size poll bounds the wait).
+// Unfocused panes keep their mark until focused.
+//
+// `unseen` is the ONLY mark this clears, and the two it leaves alone are left
+// alone for the same reason. blockedSince/blockedReason are a fact about the
+// AGENT — it is still waiting whether or not anyone is looking — while `unseen`
+// is a "you missed something" flag that looking genuinely answers. Clearing the
+// blocked mark here was tried and reversed: this runs for EVERY message,
+// including the shared 100 ms workSpinnerTickMsg that is guaranteed to be
+// ticking because the pane is working, so a pane parked while it held focus had
+// its mark set and dropped ~100 ms later — the ▲, the amber tab, the project
+// badge's blocked count and the attention-queue entry were none of them ever
+// observable, in the commonest park there is (the agent asks for permission
+// while you are sitting in its pane), and with workPark keeping turnActive the
+// pane went on claiming to be working the whole time it waited. paneRow
+// suppresses the blocked PRESENTATION for the focused pane instead, so leaving
+// the pane restores every signal with no hook edge required. pinnedAttention is
+// untouched for its own reason — only ctxActAttention / ctxActClearAttention own
+// that flag.
 func (m *Model) ackFocusedPane() {
 	tab := m.activeTabModel()
 	if tab == nil || tab.Root == nil || tab.ActivePane == "" {
@@ -380,13 +396,6 @@ func (m *Model) ackFocusedPane() {
 	for _, p := range tab.Leaves() {
 		if p != nil && p.ID == tab.ActivePane {
 			p.unseen = false
-			// Focus also answers the blocked mark: you are looking at the
-			// prompt. With workPark no longer clearing turnActive the spinner
-			// keeps running, so a pane cleared here still reads as working
-			// rather than idle. pinnedAttention is deliberately untouched —
-			// only ctxActAttention / ctxActClearAttention own that flag.
-			p.blockedSince = time.Time{}
-			p.blockedReason = ""
 			return
 		}
 	}

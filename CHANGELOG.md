@@ -31,6 +31,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   possibly leaving it below the fold.
 - After the terminal is resized, the first wheel notch over the sidebar moves
   the pane list again — several notches could previously do nothing.
+- A horizontal wheel over the sidebar — a trackpad swipe, or shift-scroll — no
+  longer scrolls the pane list downwards. It is ignored, and still does not
+  reach the pane underneath.
+- The tab you are on stays distinguishable when two or more tabs are amber: an
+  active tab parked on a prompt is now underlined, since the amber replaces the
+  background that otherwise marks it.
+- A pane's context menu no longer acts on whichever pane is on screen when the
+  active tab moves out from under the open menu (MCP `set_active_pane` can do
+  this). The menu refuses instead of renaming, muting or closing the wrong pane.
 
 ## [1.52.2] - 2026-08-07
 

@@ -1725,6 +1725,69 @@ func TestSidebarWheel_ClampsAtBothEnds(t *testing.T) {
 	}
 }
 
+// TestSidebarWheel_ReclampsAStaleOffsetBeforeAddingTheNotch pins the one route
+// into the dead scroll plateau sidebarBodyGeometry's comment names but does not
+// close. m.sidebarScroll is only ever clamped when the wheel moves it, so ANY
+// geometry change between two notches leaves the stored value legitimately past
+// the new maximum — sidebarContentHeight() is m.height-1, so a vertical resize
+// moves bodyH, and closing panes moves bodyLen. The paint is unaffected
+// (sidebarVisibleRows clamps its own local copy, which is the purity rule), so
+// the symptom is not row drift: the next several wheel-up notches subtract from
+// the stale value, clamp straight back to the same visible maximum, and the
+// strip does not move.
+//
+// Adding to a re-clamped offset makes the FIRST notch move the strip, which is
+// what "the bound the user hits is the bound they can see" has to mean.
+func TestSidebarWheel_ReclampsAStaleOffsetBeforeAddingTheNotch(t *testing.T) {
+	t.Parallel()
+	m := newTestModelManyPanes(t, 3, 30)
+	m.width, m.height = 100, 20
+
+	w := m.projectSidebarWidth()
+	rows, panesStart := m.sidebarRows(w)
+	bodyLen, bodyH := sidebarBodyGeometry(rows, panesStart, m.sidebarContentHeight())
+	tallMax := maxSidebarScrollFor(bodyLen, bodyH)
+	if tallMax == 0 {
+		t.Fatal("fixture must overflow the short strip")
+	}
+
+	// Park at the bottom of the SHORT strip.
+	for i := 0; i < 20; i++ {
+		updated, _ := m.Update(tea.MouseWheelMsg{X: 5, Y: 5, Button: tea.MouseWheelDown})
+		m = updated.(Model)
+	}
+	if m.sidebarScroll != tallMax {
+		t.Fatalf("sidebarScroll = %d after scrolling to the bottom, want %d", m.sidebarScroll, tallMax)
+	}
+
+	// Grow the terminal: the window gets taller, so the maximum offset SHRINKS
+	// and the stored value is now stale-high. Nothing re-clamps it.
+	m.height = 30
+	_, shortBodyH := sidebarBodyGeometry(rows, panesStart, m.sidebarContentHeight())
+	shortMax := maxSidebarScrollFor(bodyLen, shortBodyH)
+	if shortMax >= tallMax {
+		t.Fatalf("fixture does not shrink the maximum (%d → %d) — this test cannot fail",
+			tallMax, shortMax)
+	}
+
+	lines := m.cfg.UI.MouseScrollLines
+	if lines < 1 {
+		lines = 3
+	}
+	want := shortMax - lines
+	if want < 0 {
+		want = 0
+	}
+
+	updated, _ := m.Update(tea.MouseWheelMsg{X: 5, Y: 5, Button: tea.MouseWheelUp})
+	m = updated.(Model)
+	if m.sidebarScroll != want {
+		t.Errorf("sidebarScroll = %d after one wheel-up notch at the new geometry, want %d "+
+			"(stale offset %d was clamped to %d and the notch subtracted from the stale value)",
+			m.sidebarScroll, want, tallMax, shortMax)
+	}
+}
+
 // TestScrollSidebarToPane_BringsOffscreenPaneIntoView pins that a pane reached
 // from the palette, a hook jump or pane-history is not left below the cut.
 func TestScrollSidebarToPane_BringsOffscreenPaneIntoView(t *testing.T) {

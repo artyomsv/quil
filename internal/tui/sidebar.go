@@ -402,7 +402,17 @@ func (m *Model) scrollSidebar(up bool) {
 		lines = -lines
 	}
 	bodyLen, bodyH := sidebarBodyGeometry(rows, panesStart, height)
-	m.sidebarScroll = clampSidebarScroll(m.sidebarScroll+lines, bodyLen, bodyH)
+	// The STORED offset is re-clamped before the notch is added to it, not just
+	// after. Nothing clamps it when the geometry changes underneath — the paint
+	// clamps a local copy, deliberately — so a vertical resize (bodyH moves with
+	// sidebarContentHeight) or a closed pane (bodyLen) legitimately leaves it
+	// past the current maximum. Adding to the stale value there clamps straight
+	// back to the same visible maximum for as many notches as it is stale by:
+	// the wheel does nothing while the strip is already showing the bound it is
+	// being pushed against. That is the dead scroll plateau sidebarBodyGeometry
+	// exists to prevent, reached by a route the shared geometry cannot cover.
+	off := clampSidebarScroll(m.sidebarScroll, bodyLen, bodyH)
+	m.sidebarScroll = clampSidebarScroll(off+lines, bodyLen, bodyH)
 }
 
 // scrollSidebarToPane moves the PANES section the minimum distance that brings

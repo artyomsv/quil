@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -1722,6 +1723,126 @@ func TestSidebarWheel_ClampsAtBothEnds(t *testing.T) {
 	}
 	if m.sidebarScroll != 0 {
 		t.Errorf("sidebarScroll = %d after over-scrolling up, want 0", m.sidebarScroll)
+	}
+}
+
+// TestSidebarWheel_HorizontalDoesNotMoveTheBody pins the button match. A
+// trackpad (or shift-scroll) emits tea.MouseWheelLeft / tea.MouseWheelRight, and
+// the handler used to pass `msg.Button == tea.MouseWheelUp` as a BOOL — so both
+// horizontal buttons read as "not up" and scrolled the PANES body DOWN by
+// MouseScrollLines. Every other wheel consumer in this package matches the two
+// vertical buttons explicitly and ignores the rest.
+func TestSidebarWheel_HorizontalDoesNotMoveTheBody(t *testing.T) {
+	t.Parallel()
+	for _, btn := range []tea.MouseButton{tea.MouseWheelLeft, tea.MouseWheelRight} {
+		m := newTestModelManyPanes(t, 3, 8)
+		m.width, m.height = 100, 13
+
+		// Park mid-body first: an assertion from offset 0 would also hold for a
+		// handler that scrolled UP on every horizontal notch.
+		updated, _ := m.Update(tea.MouseWheelMsg{X: 5, Y: 5, Button: tea.MouseWheelDown})
+		m = updated.(Model)
+		before := m.sidebarScroll
+		if before == 0 {
+			t.Fatal("fixture must scroll on a vertical notch, or this test cannot fail")
+		}
+
+		updated, _ = m.Update(tea.MouseWheelMsg{X: 5, Y: 5, Button: btn})
+		if after := updated.(Model).sidebarScroll; after != before {
+			t.Errorf("%v over the strip: sidebarScroll %d → %d, want unchanged", btn, before, after)
+		}
+	}
+}
+
+// TestSidebarWheel_HorizontalIsStillSwallowed is the other half of the same
+// branch: refusing to scroll must not let the event fall THROUGH to the pane
+// area, because the pane under the cursor is the sidebar, not a pane. A tracking
+// app would otherwise receive a wheel escape for a notch aimed at the strip.
+//
+// The control fires the same button at a PANE coordinate — only the coordinate
+// differs between the two halves, so the assertion is about the swallow rather
+// than about horizontal buttons being inert everywhere.
+func TestSidebarWheel_HorizontalIsStillSwallowed(t *testing.T) {
+	t.Parallel()
+	fake := newFakeConn()
+	m := newSplitDragTestModel(t)
+	m.client = fake
+	m.sidebarOpen = true
+	m.sidebarWidth = 22
+	m.curTabs()[0].ActivePaneModel().daemonMouseTracking = true
+
+	updated, _ := m.Update(tea.MouseWheelMsg{X: 40, Y: 10, Button: tea.MouseWheelLeft})
+	got := updated.(Model)
+	if fake.sentCount() == 0 {
+		t.Fatal("control: a wheel over the PANE must forward to a tracking app — " +
+			"without it the swallow assertion below is vacuous")
+	}
+	sentBefore := fake.sentCount()
+
+	updated, _ = got.Update(tea.MouseWheelMsg{X: 5, Y: 5, Button: tea.MouseWheelLeft})
+	if after := fake.sentCount(); after != sentBefore {
+		t.Errorf("horizontal wheel over the strip forwarded %d message(s) to the pane beneath",
+			after-sentBefore)
+	}
+}
+
+// TestSidebarWheel_PathologicalScrollLinesCannotJumpToTheTop pins the cap on
+// cfg.UI.MouseScrollLines. The value is a hand-editable config int that nothing
+// downstream bounded, and off+lines OVERFLOWS at the top of the int range —
+// signed overflow WRAPS in Go, so the sum went negative and clamped to 0.
+//
+// It takes two notches, which is why the floor alone never caught it: from
+// offset 0 the sum is exactly MaxInt and clamps to the bottom correctly. The
+// SECOND notch is the one that adds to a non-zero offset, wraps, and throws the
+// strip back to the top — a wheel-DOWN moving the list up. bodyH is the ceiling,
+// since one notch should never move further than its own window.
+func TestSidebarWheel_PathologicalScrollLinesCannotJumpToTheTop(t *testing.T) {
+	t.Parallel()
+	m := newTestModelManyPanes(t, 3, 30)
+	m.width, m.height = 100, 20
+	m.cfg.UI.MouseScrollLines = math.MaxInt
+
+	rows, panesStart := m.sidebarRows(m.projectSidebarWidth())
+	bodyLen, bodyH := sidebarBodyGeometry(rows, panesStart, m.sidebarContentHeight())
+	want := maxSidebarScrollFor(bodyLen, bodyH)
+	if want == 0 {
+		t.Fatal("fixture must overflow the strip")
+	}
+
+	for i := 0; i < 2; i++ {
+		updated, _ := m.Update(tea.MouseWheelMsg{X: 5, Y: 5, Button: tea.MouseWheelDown})
+		m = updated.(Model)
+	}
+	if m.sidebarScroll != want {
+		t.Errorf("sidebarScroll = %d after two wheel-DOWN notches with MouseScrollLines=MaxInt, "+
+			"want the bottom %d (0 means off+lines wrapped negative and clamped to the top)",
+			m.sidebarScroll, want)
+	}
+}
+
+// TestSidebarWheel_ShortStripZeroesTheOffset drives scrollSidebar's degenerate
+// early return through Update's wheel path. When the pinned PROJECTS block alone
+// would leave fewer than minPaneRows for the body, sidebarVisibleRows reverts the
+// WHOLE strip to the old tail cap — there is no window to offset into, so the
+// only correct stored offset is zero. The paint-side fallback is pinned by
+// TestSidebarVisibleRows_ShortStripFallsBackToTailTruncation; this is the writer
+// half, which nothing reached through the real dispatch.
+func TestSidebarWheel_ShortStripZeroesTheOffset(t *testing.T) {
+	t.Parallel()
+	m := newTestModelManyPanes(t, 8, 4)
+	m.width, m.height = 100, 7 // sidebarContentHeight() == 6
+
+	w := m.projectSidebarWidth()
+	rows, panesStart := m.sidebarRows(w)
+	if panesStart <= m.sidebarContentHeight()-minPaneRows || len(rows) <= m.sidebarContentHeight() {
+		t.Fatalf("fixture is not the degenerate strip: panesStart=%d rows=%d height=%d",
+			panesStart, len(rows), m.sidebarContentHeight())
+	}
+
+	m.sidebarScroll = 5 // stale, from a taller terminal
+	updated, _ := m.Update(tea.MouseWheelMsg{X: 5, Y: 3, Button: tea.MouseWheelDown})
+	if got := updated.(Model).sidebarScroll; got != 0 {
+		t.Errorf("sidebarScroll = %d after a notch on the degenerate strip, want 0", got)
 	}
 }
 

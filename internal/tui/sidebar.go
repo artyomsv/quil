@@ -282,6 +282,19 @@ func sidebarBodyGeometry(rows []sidebarRow, panesStart, height int) (bodyLen, bo
 	return len(rows) - panesStart, height - panesStart
 }
 
+// sidebarBodyWindowed reports whether the PANES body is windowed at this
+// height — i.e. whether an offset means anything at all. It is false both when
+// the whole list fits and when the pinned PROJECTS head would leave the body
+// below minPaneRows, because the degenerate strip reverts to the old tail cap
+// and has no window to offset into.
+//
+// One definition for the same reason sidebarBodyGeometry has one: the paint and
+// both writers ask this question, and a copy that drifts is invisible — the
+// paint stays correct while the writers clamp against a different regime.
+func sidebarBodyWindowed(rows []sidebarRow, panesStart, height int) bool {
+	return height > 0 && len(rows) > height && panesStart <= height-minPaneRows
+}
+
 // clampSidebarScroll bounds an offset into a body of bodyLen rows shown through
 // a bodyH-row window. Pure — callers that own the stored offset write it back
 // themselves.
@@ -324,8 +337,9 @@ func (m *Model) sidebarVisibleRows(w, height int) []sidebarRow {
 
 	// Degenerate strip: the pinned head alone would starve the body. Fall back
 	// to the pre-scroll behaviour for the WHOLE list — the tail is dropped and
-	// the last row says so.
-	if panesStart > height-minPaneRows {
+	// the last row says so. Asked through the same helper the two writers use;
+	// the height and length halves of it are already known true here.
+	if !sidebarBodyWindowed(rows, panesStart, height) {
 		out := append([]sidebarRow(nil), rows[:height]...)
 		out[height-1] = sidebarRow{text: sidebarDimStyle.Render(padOrTrunc(" …", w))}
 		return out
@@ -390,18 +404,26 @@ func (m *Model) scrollSidebar(up bool) {
 	rows, panesStart := m.sidebarRows(w)
 	// Nothing to scroll, or the degenerate short strip that reverts to the
 	// tail cap: in both cases the only correct offset is zero.
-	if height <= 0 || len(rows) <= height || panesStart > height-minPaneRows {
+	if !sidebarBodyWindowed(rows, panesStart, height) {
 		m.sidebarScroll = 0
 		return
 	}
+	bodyLen, bodyH := sidebarBodyGeometry(rows, panesStart, height)
 	lines := m.cfg.UI.MouseScrollLines
+	// Floored AND capped. The value is a hand-editable config int, and nothing
+	// downstream bounds it: off+lines overflows at the top of the int range, and
+	// the negative sum then clamps to 0 — a wheel-DOWN notch that jumps the
+	// strip to the top. bodyH is the natural ceiling anyway, since one notch
+	// should never move further than the window it moves within (and bodyH >=
+	// minPaneRows here, so a sane config is untouched).
 	if lines < 1 {
 		lines = 3
+	} else if lines > bodyH {
+		lines = bodyH
 	}
 	if up {
 		lines = -lines
 	}
-	bodyLen, bodyH := sidebarBodyGeometry(rows, panesStart, height)
 	// The STORED offset is re-clamped before the notch is added to it, not just
 	// after. Nothing clamps it when the geometry changes underneath — the paint
 	// clamps a local copy, deliberately — so a vertical resize (bodyH moves with
@@ -430,7 +452,7 @@ func (m *Model) scrollSidebarToPane(paneID string) {
 	}
 	height := m.sidebarContentHeight()
 	rows, panesStart := m.sidebarRows(w)
-	if height <= 0 || len(rows) <= height || panesStart > height-minPaneRows {
+	if !sidebarBodyWindowed(rows, panesStart, height) {
 		m.sidebarScroll = 0
 		return
 	}
@@ -461,7 +483,16 @@ func (m *Model) scrollSidebarToPane(paneID string) {
 	if visible < 1 {
 		visible = 1
 	}
-	off := m.sidebarScroll
+	// Re-clamped before the arithmetic, exactly as scrollSidebar does and for
+	// the reason its comment gives: nothing bounds the stored value when the
+	// geometry moves underneath, so it can legitimately be past the current
+	// maximum. Today the two branches below happen to be safe against a
+	// stale-high offset — the idx >= off+visible branch is unreachable and the
+	// other assigns before clamping — but that is a proof standing next to a
+	// function whose comment says not to rely on one, and the early
+	// already-visible check above already runs against the CLAMPED painted
+	// window. Same input, same reading.
+	off := clampSidebarScroll(m.sidebarScroll, bodyLen, bodyH)
 	switch {
 	case idx < off:
 		off = idx

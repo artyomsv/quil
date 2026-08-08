@@ -1223,7 +1223,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					// it names. Reading it once removes the question.
 					row, rowOK := m.sidebarRowAt(msg.X, msg.Y)
 					updated, focusCmd := m.activateSidebarRow(sidebarRowPane, idx)
-					m = updated.(Model)
+					// Comma-ok, not a bare assertion: activateSidebarRow is
+					// typed tea.Model, which is the signature that invites
+					// someone to return something else — and a failed assertion
+					// here PANICS inside the Update loop. Degrading to "no focus
+					// change" keeps the menu open on the row that was clicked.
+					if next, ok := updated.(Model); ok {
+						m = next
+					}
 					cmd = focusCmd
 					// findPaneAndTab spans every project and PaneModel is
 					// a pointer, so a pre-focus id resolves to the same
@@ -1514,7 +1521,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// the pane the wheel would otherwise scroll is not the one under the
 		// cursor.
 		if m.projectSidebarSwallowsMouse(msg.X, msg.Y) {
-			m.scrollSidebar(msg.Button == tea.MouseWheelUp)
+			// The two vertical buttons are matched EXPLICITLY, as every other
+			// wheel consumer in this package does. tea.MouseWheelMsg also
+			// carries MouseWheelLeft/Right (a trackpad or shift-scroll emits
+			// them), and collapsing the button to `== MouseWheelUp` made both
+			// of those read as "not up" and scrolled the body DOWN. The swallow
+			// stays OUTSIDE the switch: a horizontal notch aimed at the strip
+			// must not fall through to the pane area either.
+			switch msg.Button {
+			case tea.MouseWheelUp:
+				m.scrollSidebar(true)
+			case tea.MouseWheelDown:
+				m.scrollSidebar(false)
+			}
 			return m, nil
 		}
 		lines := m.cfg.UI.MouseScrollLines

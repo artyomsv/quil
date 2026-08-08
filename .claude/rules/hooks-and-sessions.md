@@ -78,10 +78,29 @@ however long the agent was already back at work.
 
 Because `working` no longer falls on a park, the falling edge no longer sets
 `unseen`. `tabBlocked` (`workstate.go`) + `blockedTabStyle` carry a parked
-background pane to the tab bar instead, and `ackFocusedPane` clears
-`blockedSince`/`blockedReason` alongside `unseen`. The two must not be
-separated — clearing one without the other leaves the pane and the tab bar
-disagreeing about whether it is still blocked.
+background pane to the tab bar instead.
+
+**`ackFocusedPane` clears `unseen` ONLY — focus is not an answer to a park.**
+It was written to clear `blockedSince`/`blockedReason` alongside `unseen`
+("you are looking straight at the prompt") and that was reversed. The function
+runs at the top of EVERY `Update`, including the shared 100 ms
+`workSpinnerTickMsg` that is guaranteed to be ticking because the pane is
+working — so a pane parked while it held focus had the mark set and cleared
+about 100 ms later, and the sidebar `▲`, the amber tab, the project badge's
+blocked count and the attention-queue entry were **none of them ever
+observable**. That is not an edge: the agent asking for permission while the
+user sits in its pane is the commonest park there is, and with `turnActive`
+kept the pane went on claiming to be *working* the whole time it waited.
+
+The distinction the two flags need: `unseen` is a "you missed something" flag
+that looking genuinely answers, while `blockedSince` is a fact about the
+**agent**, so clearing it on a spinner tick destroys information rather than
+acknowledging a notification. `paneRow` (`sidebar.go`) therefore suppresses the
+blocked **presentation** for the focused pane — glyph and reason both — while
+`tabBlocked`, `ProjectModel.counts()` and `blockedPanes()` all keep reading the
+same live `blockedSince`. Leaving the pane restores every signal with no hook
+edge required. The only non-agent route to a clear is the context menu's
+**Clear attention** row, which is what that row exists for.
 
 ### Model/context status-bar segment
 

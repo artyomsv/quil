@@ -503,6 +503,28 @@ load-bearing: the falling edge no longer fires, so a park does not set
 bar. The two must not be separated. See `hooks-and-sessions.md`'s Work state
 section for the hook side of this.
 
+**`paneRow` suppresses the blocked glyph for the FOCUSED pane, and that is the
+only place a sidebar row does more than report state.** `blockedSince` is not
+cleared by focus (`ackFocusedPane` clears `unseen` alone — it runs on every
+message including the 100 ms spinner tick, so a clear there destroyed the mark
+before it could ever be seen). Keeping the state and dropping the glyph is what
+"you are looking straight at the prompt" costs: `tabBlocked`,
+`ProjectModel.counts()` and `blockedPanes()` all keep reading the same live
+flag, so the tab stays amber, the badge keeps counting and the attention queue
+keeps offering it, and leaving the pane restores the `▲` with no hook edge
+required. An UNFOCUSED pane is blocked-visible always — that is the signal the
+feature exists for, and a suppression that leaked into it would be the original
+"the mark is never observable" defect in a new place.
+
+**The wheel re-clamps the STORED offset before adding its notch.** Nothing
+clamps `m.sidebarScroll` when the geometry moves underneath — the paint clamps
+a local copy, deliberately — so a vertical resize (`sidebarContentHeight()` is
+`m.height-1`) or a closed pane legitimately leaves it past the current maximum.
+Adding to the stale value there clamps straight back to the same visible
+maximum for as many notches as it is stale by: not row drift, but a wheel that
+does nothing while the strip already shows the bound it is being pushed
+against.
+
 ## Git subsystem (`gitinfo` + `gitcache.go`)
 
 Three plumbing calls per checkout: branch, linked worktree, ahead/behind.

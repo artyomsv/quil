@@ -115,14 +115,21 @@ func (m *Model) buildCtxMenuItems(pane *PaneModel) []ctxMenuItem {
 	// the user cannot otherwise get rid of.
 	//
 	// blockedSince is set by a hook edge and cleared only by another hook edge
-	// (workStart / workAbort / workStop / workStopFinal, workstate.go). Every
-	// route to a clear therefore runs through the agent — so when the clearing
+	// (workStart / workAbort / workStop / workStopFinal, workstate.go) — this
+	// row is the sole exception, which is what it exists to be. Every other
+	// route to a clear therefore runs through the agent, so when the clearing
 	// event never arrives (the hook stream stopped, the session ended in a way
 	// that emitted nothing, the prompt was answered somewhere the hooks do not
 	// observe) the pane stays marked for the life of the TUI process, and the
 	// project row it rolls up into stays marked with it. A lying indicator in
 	// the one place the user looks to decide where to go next is worse than no
 	// indicator, and there was no way to dismiss it short of restarting.
+	//
+	// FOCUS is not a route to a clear, deliberately (ackFocusedPane, which runs
+	// on every message including a spinner tick, records why). The ▲ does
+	// vanish from the focused pane's own sidebar row — paneRow suppresses the
+	// glyph — but the mark itself survives, so this row stays the only way to
+	// dismiss a stuck one, on a pane the user is NOT going to sit in.
 	//
 	// Disabled when there is nothing to clear, so the row also ANSWERS the
 	// question "is this pane actually still flagged" rather than silently

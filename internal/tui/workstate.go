@@ -149,10 +149,17 @@ func (m *Model) notifyTabSwitch(tab *TabModel) {
 }
 
 // applyWorkTransition updates the working state of the pane identified by
-// paneID based on the event type. On a normal completion or park, any pane
-// that is not the focused pane of the active tab gets a persistent unseen
-// mark — green border + derived green tab label — cleared when the user
-// focuses the pane (ackFocusedPane at Update entry). There is no timer.
+// paneID based on the event type. On a normal completion, any pane that is not
+// the focused pane of the active tab gets a persistent unseen mark — green
+// border + derived green tab label — cleared when the user focuses the pane
+// (ackFocusedPane at Update entry). There is no timer.
+//
+// A PARK is deliberately not one of those completions. workPark keeps
+// turnActive, so `working` does not fall and the falling edge below never
+// fires — no unseen mark is set for a parked pane, whether it is focused or
+// not. tabBlocked (read by tabStyle, model.go) is what carries a parked
+// BACKGROUND pane to the tab bar instead, deriving from blockedSince rather
+// than from unseen; the two must not be separated.
 //
 // `working` is DERIVED — recomputed at a single point below as
 // turnActive || len(subagents) > 0 || subagentsOverflow — never assigned by
@@ -472,10 +479,15 @@ func (m Model) tabPinnedAttention(idx int) bool {
 // tabBlocked reports whether the tab at idx holds a pane parked on the user.
 // Unlike tabUnseen the ACTIVE tab also reports true: a permission prompt is
 // not a seen/unseen state, it is an outstanding question, and the tab bar is
-// the only place a user scanning several projects will notice it. It stays
-// true for the focused pane too — ackFocusedPane is what clears the pane's
-// blockedSince, and deriving the tab mark from that one flag keeps the two
-// levels from disagreeing.
+// the only place a user scanning several projects will notice it.
+//
+// It stays true for the FOCUSED pane too, and that is the point rather than an
+// edge: nothing clears blockedSince but the agent (or the context menu's Clear
+// attention row), so a pane the user is sitting in without answering keeps
+// marking its tab. paneRow suppresses the pane row's own glyph while it is
+// focused — the level the user is looking straight at — and every derived
+// level reads this same flag, so they cannot disagree about whether the agent
+// is still waiting.
 func (m Model) tabBlocked(idx int) bool {
 	tabs := m.curTabs()
 	if idx < 0 || idx >= len(tabs) || tabs[idx].Root == nil {

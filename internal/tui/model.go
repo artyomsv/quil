@@ -1211,10 +1211,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					// cmd, when the pane's tab was not already active — must
 					// carry forward, or the daemon never learns the tab
 					// changed.
+					//
+					// The row is resolved BEFORE the focus, from the model
+					// the click was hit-tested against. Resolving it after
+					// was correct too — sidebarRows' order, index and
+					// tabIdx are all independent of which tab is active,
+					// and focusSidebarPane's scroll is a no-op for a row
+					// that is on screen by definition — but that is two
+					// separate arguments about a strip that moves, both
+					// load-bearing for a menu that then acts on the pane
+					// it names. Reading it once removes the question.
+					row, rowOK := m.sidebarRowAt(msg.X, msg.Y)
 					updated, focusCmd := m.activateSidebarRow(sidebarRowPane, idx)
 					m = updated.(Model)
 					cmd = focusCmd
-					if row, ok := m.sidebarRowAt(msg.X, msg.Y); ok && row.paneID != "" {
+					// findPaneAndTab spans every project and PaneModel is
+					// a pointer, so a pre-focus id resolves to the same
+					// pane on the updated model.
+					if rowOK && row.paneID != "" {
 						if pane, _, _ := m.findPaneAndTab(row.paneID); pane != nil {
 							m.openCtxMenu(pane, msg.X, msg.Y)
 						}

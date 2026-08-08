@@ -1179,11 +1179,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m.activateSidebarRow(kind, idx)
 				}
 			case tea.MouseRight:
-				// Rename/Destroy for a project row (Task 13) — the pane
-				// context menu below never reaches here, the sidebar swallow
-				// returns first, so a project needs its own open call.
-				if kind, idx := m.sidebarHit(msg.X, msg.Y); kind == sidebarRowProject && idx >= 0 && idx < len(m.projects) {
-					m.openProjectCtxMenu(m.projects[idx], msg.X, msg.Y)
+				// Rename/Destroy for a project row, and the pane menu for a
+				// pane row. The pane context menu further down never reaches
+				// here — the sidebar swallow returns first — so both kinds
+				// need their own open call.
+				switch kind, idx := m.sidebarHit(msg.X, msg.Y); kind {
+				case sidebarRowProject:
+					if idx >= 0 && idx < len(m.projects) {
+						m.openProjectCtxMenu(m.projects[idx], msg.X, msg.Y)
+					}
+				case sidebarRowPane:
+					// Deliberately does NOT focus the pane first. Mirroring
+					// left-click would also fix the background-tab problem
+					// below, but a right-click that silently switches tabs is
+					// a surprise; executeCtxMenuItem resolves the owning tab
+					// instead.
+					if row, ok := m.sidebarRowAt(msg.X, msg.Y); ok && row.paneID != "" {
+						if pane, _, _ := m.findPaneAndTab(row.paneID); pane != nil {
+							m.openCtxMenu(pane, msg.X, msg.Y)
+						}
+					}
 				}
 			}
 			return m, nil

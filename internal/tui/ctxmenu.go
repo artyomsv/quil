@@ -534,9 +534,21 @@ func (m Model) executeCtxMenuItem(item ctxMenuItem) (tea.Model, tea.Cmd) {
 	if !item.enabled || paneID == "" {
 		return m, nil
 	}
-	tab := m.activeTabModel()
-	if tab == nil || tab.Root == nil || tab.Root.FindLeaf(paneID) == nil {
+	// The menu may have been opened from the SIDEBAR on a pane in a background
+	// tab, so the active tab is not necessarily the owner. Resolving by pane id
+	// is what stops such a menu from rendering fully and then doing nothing.
+	//
+	// The tab comes from the project findPaneAndTab returned, NOT curTabs():
+	// that helper spans every project while curTabs() is the active project's
+	// slice alone, so indexing curTabs() with a foreign tabIdx would act on an
+	// unrelated tab — or panic.
+	pane, proj, tabIdx := m.findPaneAndTab(paneID)
+	if pane == nil || proj == nil || tabIdx < 0 || tabIdx >= len(proj.tabs) {
 		return m, nil // target vanished between open and execute
+	}
+	tab := proj.tabs[tabIdx]
+	if tab == nil || tab.Root == nil || tab.Root.FindLeaf(paneID) == nil {
+		return m, nil
 	}
 	// Sync the Active bool alongside ActivePane — mirrors the mouse-release
 	// pane-focus path (model.go) and NavigateDirection (tab.go). Leaving
@@ -547,9 +559,7 @@ func (m Model) executeCtxMenuItem(item ctxMenuItem) (tea.Model, tea.Cmd) {
 		old.Active = false
 	}
 	tab.ActivePane = paneID
-	if pane, _, _ := m.findPaneAndTab(paneID); pane != nil {
-		pane.Active = true
-	}
+	pane.Active = true
 
 	switch item.id {
 	case ctxActHistory:

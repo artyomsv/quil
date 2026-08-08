@@ -594,3 +594,105 @@ func TestCtxMenu_CompactFallbackOnShortTerminal(t *testing.T) {
 		t.Errorf("compact box h=%d still exceeds content area %d", h, m.height-2)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Sidebar pane row right-click (item 4)
+// ---------------------------------------------------------------------------
+
+// newTestModelWithSidebar builds a Model with the project sidebar open and
+// one project holding two tabs: tab 0 (active, pane-1) and tab 1
+// (background, pane-2) — so a sidebar right-click has a background-tab pane
+// available to target. Dimensions match newSplitDragTestModel's so the
+// pane context menu box has room to open.
+func newTestModelWithSidebar(t *testing.T) Model {
+	t.Helper()
+	tab0 := tabWithPane("tab-0", "pane-1")
+	tab1 := tabWithPane("tab-1", "pane-2")
+	proj := &ProjectModel{ID: "proj-a", Name: "alpha", tabs: []*TabModel{tab0, tab1}}
+	return Model{
+		cfg:           config.Default(),
+		width:         100,
+		height:        40,
+		sidebarOpen:   true,
+		sidebarWidth:  22,
+		notifications: NewNotificationCenter(40, 200),
+		projects:      []*ProjectModel{proj},
+		activeProject: 0,
+	}
+}
+
+// sidebarPaneRowCoords resolves the screen coordinate of the sidebar pane
+// row at flat ordinal `ordinal` (numbered across the active project's tabs,
+// as sidebarHit numbers them) by scanning the same row list sidebarRowAt
+// indexes — mirroring activateSidebarRow rather than hardcoding row
+// geometry that shifts whenever sidebar_test.go's fixtures gain a row.
+func sidebarPaneRowCoords(t *testing.T, m *Model, ordinal int) (int, int) {
+	t.Helper()
+	for y, row := range m.sidebarVisibleRows(m.projectSidebarWidth(), m.sidebarContentHeight()) {
+		if row.kind == sidebarRowPane && row.index == ordinal {
+			return 3, y // column 3: same arbitrary in-strip column sidebar_test.go uses
+		}
+	}
+	t.Fatalf("no sidebar pane row for ordinal %d", ordinal)
+	return 0, 0
+}
+
+// backgroundTabPaneID returns the id of a pane belonging to a tab other than
+// the active one, for tests exercising executeCtxMenuItem's background-tab
+// resolution.
+func backgroundTabPaneID(t *testing.T, m *Model) string {
+	t.Helper()
+	activeIdx := m.activeTabIdx()
+	for ti, tab := range m.curTabs() {
+		if ti == activeIdx {
+			continue
+		}
+		for _, pane := range tab.Leaves() {
+			return pane.ID
+		}
+	}
+	t.Fatal("fixture has no pane on a background tab")
+	return ""
+}
+
+// TestSidebarRightClick_OpensPaneCtxMenu pins item 4. The MouseRight branch
+// inside the sidebar swallow tested only sidebarRowProject, so a right-click on
+// a pane row fell through to `return m, nil` — no menu, no feedback.
+//
+// Driven through Update, not by calling the handler: the bug IS a branch the
+// call site never enters, and a direct-call test would pass against it.
+func TestSidebarRightClick_OpensPaneCtxMenu(t *testing.T) {
+	t.Parallel()
+	m := newTestModelWithSidebar(t)
+	x, y := sidebarPaneRowCoords(t, &m, 0)
+
+	updated, _ := m.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseRight})
+	got := updated.(Model)
+
+	if !got.ctxMenu.open() {
+		t.Fatal("right-click on a sidebar pane row should open the pane context menu")
+	}
+}
+
+// TestSidebarRightClick_BackgroundTabPaneMenuActs pins the wrinkle. Opening the
+// menu is not enough: executeCtxMenuItem resolved its target with
+// activeTabModel(), so a pane living in a BACKGROUND tab produced a menu whose
+// every item silently did nothing.
+func TestSidebarRightClick_BackgroundTabPaneMenuActs(t *testing.T) {
+	t.Parallel()
+	m := newTestModelWithSidebar(t)
+	// A pane row belonging to a tab that is not the active one.
+	pane, _, tabIdx := m.findPaneAndTab(backgroundTabPaneID(t, &m))
+	if pane == nil || tabIdx == m.activeTabIdx() {
+		t.Fatal("fixture must provide a pane on a background tab")
+	}
+	m.openCtxMenu(pane, 0, 0)
+
+	updated, _ := m.executeCtxMenuItem(ctxMenuItem{id: ctxActAttention, enabled: true})
+	got := updated.(Model)
+
+	target, _, _ := got.findPaneAndTab(pane.ID)
+	if target == nil || !target.pinnedAttention {
+		t.Error("a menu opened on a background-tab pane must act on that pane")
+	}
+}

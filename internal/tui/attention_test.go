@@ -274,6 +274,51 @@ func TestAttentionQueueKeyEmptyQueueFlashes(t *testing.T) {
 	}
 }
 
+// TestJumpToNextBlocked_ScrollsTheTargetIntoSidebarView closes the gap between
+// "the queue takes me there" and "the sidebar shows me where I am".
+// jumpToNextBlocked sets activeTab / ActivePane directly rather than routing
+// through jumpToPane, so it never reached scrollSidebarToPane and could land on
+// a pane below the fold — on the ONE navigation most tied to this feature set,
+// and the one whose whole premise is that the sidebar is where you look next.
+//
+// Same-project is the case that needs it: a cross-project jump resets the offset
+// to 0 via switchProject, which is not the same as bringing the target into
+// view, and within one project nothing moves the strip at all.
+func TestJumpToNextBlocked_ScrollsTheTargetIntoSidebarView(t *testing.T) {
+	t.Parallel()
+	m := newTestModelManyPanes(t, 3, 30)
+	m.width, m.height = 100, 20
+
+	tab := m.curTabs()[0]
+	panes := tab.Leaves()
+	target := panes[len(panes)-1]
+	target.blockedSince = time.Now()
+
+	w, height := m.projectSidebarWidth(), m.sidebarContentHeight()
+	visible := func() bool {
+		for _, r := range m.sidebarVisibleRows(w, height) {
+			if r.kind == sidebarRowPane && r.paneID == target.ID {
+				return true
+			}
+		}
+		return false
+	}
+
+	m.sidebarScroll = 0
+	if visible() {
+		t.Fatal("fixture must start with the target below the fold — this test cannot fail")
+	}
+
+	m.jumpToNextBlocked()
+
+	if got := tab.ActivePane; got != target.ID {
+		t.Fatalf("ActivePane = %q, want %q — the jump itself did not land", got, target.ID)
+	}
+	if !visible() {
+		t.Errorf("pane %q is focused but still off-screen at sidebarScroll %d", target.ID, m.sidebarScroll)
+	}
+}
+
 // TestAttentionQueueKeyFiresWhileNotesEditorFocused pins the notesKeyExempt
 // entry for kb.AttentionQueue: Alt+Shift+A must reach jumpToNextBlocked (and
 // tear down notes mode first, on the OLD tab) rather than being consumed as

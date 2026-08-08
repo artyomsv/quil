@@ -66,8 +66,11 @@ func buildKeymap(kb config.KeybindingsConfig) (*keymap.Keymap, []keymap.Conflict
 }
 
 // isAction reports whether key is bound to the given action, searching both
-// tiers. Used by the modal surfaces (dialogs, context menu, lazygit overlay,
-// reconnect screen) that sit outside handleKey's tier split.
+// tiers. Used by the modal surfaces that sit outside handleKey's tier split
+// and still need to recognise one specific action: the paste branches in
+// dialog.go, the context menu, and the lazygit overlay. The reconnect screen
+// is NOT one of them — it needs the bindings themselves, and reads them with
+// Keymap.Keys.
 func (m *Model) isAction(key string, id keymap.ActionID) bool {
 	for _, tier := range []keymap.Tier{keymap.TierEarly, keymap.TierLate} {
 		if got, ok := m.keymap.MatchTier(tier, key); ok && got == id {

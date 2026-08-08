@@ -1,5 +1,5 @@
 ---
-description: Pane rendering, tab bar, mouse handling, selection, scrollback, and keybinding matching. Load when touching pane/tab rendering, mouse routing, or the selection layer.
+description: Pane rendering, tab bar, mouse handling, selection, scrollback, and the keybinding action registry. Load when touching pane/tab rendering, mouse routing, the selection layer, or internal/keymap.
 paths:
   - "**/internal/tui/pane*.go"
   - "**/internal/tui/tab.go"
@@ -8,6 +8,8 @@ paths:
   - "**/internal/tui/compose.go"
   - "**/internal/tui/selection.go"
   - "**/internal/tui/keymatch.go"
+  - "**/internal/tui/keyspecs.go"
+  - "**/internal/keymap/**"
   - "**/internal/tui/oscfilter.go"
   - "**/internal/tui/splitdrag*.go"
   - "**/internal/clipboard/**"
@@ -23,9 +25,17 @@ Extracted verbatim from `.claude/CLAUDE.md`. Loaded only when the files above ar
 
 tabs show 1-based index prefix (`1:Shell`, `2:Build`) matching Alt+1-9 shortcuts. Index hidden during rename editing. The active tab is also prefixed with `* ` (rendered through the `tabLabel(idx)` helper shared by `renderTabBar` and `hitTestTab` so click coords align with the rendered widths). Live rename emits `tea.ClearScreen` on every keypress so width changes don't leave stale glyphs from the previous-shorter render (Bubble Tea v2 cell-diff occasionally misses width shifts mid-bar — same "width changes — force full redraw" pattern used in dialogs). Mouse: click-and-drag a tab reorders it (slide semantics — intermediate tabs shift one slot at a time, dragged tab follows the cursor). The drag tracker (`Model.tabDragFromIdx`, init `-1`) is primed on click and consumed on motion at Y=0; each slot crossing fires `MsgReorderTab{TabID, NewIndex}` so the daemon's `SessionManager.tabOrder` stays authoritative and the next `workspace_state` broadcast is a no-op reconciliation. `SessionManager.ReorderTab` clamps NewIndex to bounds, so a stale TUI never has to race for an accurate tab count
 
-### Multi-binding keybindings
+### The action registry (`internal/keymap`)
 
-any `[keybindings]` field accepts comma-separated alternatives in the same string, e.g. `rename_pane = "alt+f2,alt+shift+r"`. `internal/tui/keymatch.go` exposes `kbMatches(key, configured)` (used at every switch case + the notes-mode delegation + `notesKeyExempt`), `kbBindings(configured)` for tests/iteration, and `kbDisplay(configured)` for the shortcuts help dialog (renders multi-binding as `"a / b"`). Default `RenamePane` ships with `alt+f2,alt+shift+r` — F2 is eaten by macOS unless "Use F1, F2, etc. keys as standard function keys" is enabled, and Option-as-Meta is terminal-specific, so the second binding is the reliable fallback. `notesKeyExempt` flattens each `kb.X` through `kbBindings()` so every individual binding is checked at match time
+keys resolve to ACTIONS, not to config strings. `internal/keymap` (stdlib-only, so it is testable without a `Model` or a `QUIL_HOME`) owns: `ParseChord`/`ParseSpec` (canonical chords, `,`-separated alternatives, space-separated multi-step sequences), the `registry` of `Action{ID, Label, Group, Tier, Order, Default, Hidden}` in `action.go`, and `Build(specs)` → `(*Keymap, []Conflict)`. `internal/tui/keyspecs.go` is the ONE place legacy `[keybindings]` field names map onto action IDs (`keySpecsFromConfig`); Stage 3 replaces its body with a `bindings.toml` read and nothing else in the TUI changes.
+
+**`Tier` is not cosmetic.** `handleKey` (`internal/tui/model.go`) does an early-tier lookup, then `tryPluginRawKey`, then `isSelectionExtendKey`, then a late-tier lookup, then the `ctrl+alt+v`/`f8` paste aliases, then the reserved `ctrl+n`/`f1`/`alt+1..9` switch. So an early action beats a plugin's `raw_keys` claim and a late one loses to it; moving an action between tiers silently changes that. `TestActions_TierSplitMatchesLegacySwitches` pins the split against the pre-registry switch order.
+
+**`Build` never fails.** A malformed spec falls back to that action's shipped `Default` and reports a `ConflictMalformed`; an unknown ID is ignored with a `ConflictUnknownAction`; one bad config line must not cost the user their other 40 bindings. `Conflict.String()` is both the log line (`buildKeymap` warns each one) and the F1 → Shortcuts row, so it front-loads key → winner → loser and puts the consequence clause last, where truncation eats it first. `ConflictHardcoded` DERIVES its direction rather than storing one: `hardcodedKeys` records where `handleKey` checks each built-in key, and the 13 checked after BOTH tier lookups (`f1`, `ctrl+n`, `alt+1..9`, `f8`, `ctrl+alt+v`) are ones the bound ACTION wins — the shipped message claimed the opposite for all 21.
+
+**Readers, by shape**: `Model.isAction(key, id)` for a modal surface that must recognise one action (dialog paste branches, `ctxmenu.go`, `overlay.go` — six call sites); `Keymap.Display(id)` for a help row (`" / "`-joined, canonical `ctrl+v` spelling); `Keymap.Keys(id)` when the individual chords are needed (the reconnect screen's freeze-escape check). F1 → Shortcuts is DERIVED from `ActionsByGroup()`, so a bound action cannot be missing from it — the hand-maintained list had lost seven of eight project bindings.
+
+`internal/tui/keymatch.go`'s `kbMatches`/`kbBindings`/`kbDisplay` are the pre-registry string comparison and are DEPRECATED for dispatch: three call sites remain (`notesKeyExempt`, the notes-mode key split, the hardcoded reconnect resume key), all Stage 2's to remove. Do not add more. Multi-binding config strings still work (`rename_pane = "alt+f2,alt+shift+r"` — F2 is eaten by macOS unless "Use F1, F2, etc. keys as standard function keys" is enabled, and Option-as-Meta is terminal-specific, so the second binding is the reliable fallback); `ParseSpec` reads the same syntax `kbBindings` did
 
 ## Mouse
 

@@ -2,10 +2,15 @@ package tui
 
 import "strings"
 
-// DEPRECATED for dispatch: handleKey resolves actions through Model.keymap,
-// and every modal surface outside handleKey (dialogs, context menu, lazygit
-// overlay, palette, reconnect screen) resolves through Model.isAction now
-// too. Three call sites remain, and only the first two are Stage 2's to
+// DEPRECATED for dispatch: handleKey resolves actions through Model.keymap.
+// The modal surfaces that compare a key against a specific action — the paste
+// branches in dialog.go, the context menu, the lazygit overlay — go through
+// Model.isAction (keyspecs.go); those are its only six call sites. The other
+// two registry readers do not compare at all: the palette renders each row's
+// shortcut with Keymap.Display, and the reconnect screen asks Keymap.Keys for
+// the quit bindings and hands them to isFreezeEscape.
+//
+// Three kbMatches call sites remain, and only the first two are Stage 2's to
 // remove: notesKeyExempt and the notes-mode key split inside handleKey (both
 // still fed by the raw config keybindings the notes block reads directly —
 // Stage 2 replaces this with the prefix state machine). The third, Update's
@@ -36,11 +41,15 @@ func kbMatches(key, configured string) bool {
 // spec ("alt+f2 / alt+shift+r"). Whitespace-only entries are dropped.
 //
 // No production caller — the shortcuts dialog and the palette now render
-// through Keymap.Display. Kept as the test-side oracle those two migrations
-// are checked against (TestShortcutsList_CoversEveryProjectBinding,
-// TestPalette_ProjectRowsCarryTheirShortcuts): kbDisplay parses the same
-// raw config string Keymap.Display resolves through the registry, so the two
-// must keep agreeing.
+// through Keymap.Display. Both survive as test-side oracles over the raw
+// config string, which the registry answers about independently:
+// TestPalette_ProjectRowsCarryTheirShortcuts compares every project row's
+// detail against kbDisplay of the same config field, and
+// TestModel_NotesKeyExempt_AllowsGlobalShortcuts expands each multi-binding
+// field with kbBindings so it can press the alternatives one at a time.
+// (TestShortcutsList_CoversEveryProjectBinding was the third; it was replaced
+// by TestShortcutsList_CoversEveryBoundVisibleAction, which asks the registry
+// rather than the config and so needs no oracle.)
 func kbBindings(configured string) []string {
 	if configured == "" {
 		return nil

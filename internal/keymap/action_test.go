@@ -28,10 +28,11 @@ func TestActions_RegistryIntegrity(t *testing.T) {
 }
 
 func TestActions_TierSplitMatchesLegacySwitches(t *testing.T) {
-	// Pinned against handleKey before the rewrite: the early switch
-	// (model.go:3410-3525) ran before tryPluginRawKey (3562), the late switch
-	// (3581-3734) after. Moving an action between tiers changes whether a
-	// plugin's raw_keys entry beats it.
+	// Pinned against handleKey before the rewrite: its first switch ran before
+	// tryPluginRawKey and its second after, and each action kept the side it
+	// was on. Moving one between tiers changes whether a plugin's raw_keys
+	// entry beats it. Cited by symbol, never by line: the two switches have
+	// moved twice already, and a stale line number reads as a fact.
 	early := map[ActionID]bool{
 		"notification.toggle": true, "notification.focus": true,
 		"sidebar.toggle": true, "pane.go_back": true, "pane.mute": true,

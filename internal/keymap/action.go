@@ -28,7 +28,7 @@ type Action struct {
 }
 
 var registry = []Action{
-	// --- Early tier: model.go:3410-3525, before tryPluginRawKey ---
+	// --- Early tier: handleKey's first switch, before tryPluginRawKey ---
 	{ID: "notification.toggle", Label: "Toggle notification sidebar", Group: "Notifications", Tier: TierEarly, Order: 100, Default: "alt+n"},
 	{ID: "sidebar.toggle", Label: "Toggle project sidebar", Group: "Projects", Tier: TierEarly, Order: 200, Default: "alt+shift+s"},
 	{ID: "notification.focus", Label: "Focus notification sidebar", Group: "Notifications", Tier: TierEarly, Order: 300, Default: "f3"},
@@ -47,7 +47,7 @@ var registry = []Action{
 	{ID: "project.toggle", Label: "Bounce to the previous project", Group: "Projects", Tier: TierEarly, Order: 1600, Default: "alt+o"},
 	{ID: "project.attention_queue", Label: "Jump to the agent blocked longest", Group: "Projects", Tier: TierEarly, Order: 1700, Default: "alt+shift+a"},
 
-	// --- Late tier: model.go:3581-3734, after tryPluginRawKey ---
+	// --- Late tier: handleKey's second switch, after tryPluginRawKey ---
 	{ID: "app.quit", Label: "Quit", Group: "System", Tier: TierLate, Order: 2000, Default: "ctrl+q"},
 	{ID: "tab.new", Label: "New tab", Group: "Tabs", Tier: TierLate, Order: 2100, Default: "ctrl+t"},
 	{ID: "pane.close", Label: "Close pane", Group: "Panes", Tier: TierLate, Order: 2200, Default: "ctrl+w"},

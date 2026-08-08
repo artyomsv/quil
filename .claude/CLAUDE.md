@@ -29,6 +29,7 @@ Client-daemon model:
 - `internal/plugin/` — Pane plugin system (registry, built-ins, TOML loading, scraper)
 - `internal/gitworktree/` — git worktree listing + creation (the repository WRITES; kept apart from the read-only `gitinfo`, which a ticker runs)
 - `internal/clipboard/` — Platform-native clipboard read/write (Win32 API, pbpaste/pbcopy, xclip/xsel)
+- `internal/keymap/` — Keybinding action registry: canonical chords, the action table with its dispatch `Tier`, and `Build` (config specs → lookup + conflict list). Stdlib only
 - `internal/tui/` — Bubble Tea model, tabs, panes, layout tree, styles, text selection, notification sidebar
 
 Deep package notes — `internal/transport/`, `internal/pty/`, `internal/ipc/`, `internal/claudehook/`,
@@ -122,7 +123,7 @@ package-specific moved to `.claude/rules/*.md`, each gated by a `paths:` glob so
 | `remote-transport.md` | `internal/transport/`, `internal/remoteinstall/`, `cmd/quil/remote*.go`, `stdio.go`, `version_gate.go`, `tui/reconnect.go` | ssh dialer + `stdioConn`, remote-mode guards, reconnect/backoff/parking, `quil remote setup` |
 | `remote-dialogs.md` | `daemon/browse*.go`, `daemon/discover.go`, `tui/browse_client.go`, `tui/discover_client.go`, `tui/remotetext.go` | daemon-side filesystem dialogs, single-flight slots, blocking-FS-call budget, remote-text sanitizing |
 | `tui-dialogs.md` | `tui/dialog*.go`, `palette*.go`, `sessions.go`, `history.go`, `ctxmenu.go`, `editor*.go`, `notes.go`, `internal/panehistory/` | dialog system, command palette, context menu, resume picker, input history, editors/notes |
-| `tui-rendering.md` | `tui/pane*.go`, `tab.go`, `layout.go`, `model.go`, `compose.go`, `selection.go`, `keymatch.go`, `oscfilter.go`, `internal/clipboard/` | tab bar, mouse routing, split-border drag, wheel forwarding, OSC filtering, cursor model, selection |
+| `tui-rendering.md` | `tui/pane*.go`, `tab.go`, `layout.go`, `model.go`, `compose.go`, `selection.go`, `keymatch.go`, `keyspecs.go`, `oscfilter.go`, `internal/keymap/`, `internal/clipboard/` | tab bar, mouse routing, split-border drag, wheel forwarding, OSC filtering, cursor model, selection, action registry + dispatch tiers |
 | `daemon-lifecycle.md` | `internal/daemon/`, `internal/ipc/`, `internal/persist/`, `internal/ringbuf/`, `cmd/quild/` | IPC queues, startup guards, readiness wait, restart/shutdown, restore, snapshots, ghost buffers, logging |
 | `hooks-and-sessions.md` | `internal/claudehook/`, `opencodehook/`, `hookevents/`, `claudesessions/`, `tui/workstate.go`, `modelinfo.go` | hook producers, session-id rotation, hook-events pipeline, work-in-progress indicators |
 | `windows-pty.md` | `internal/pty/`, any `*_windows.go`, `tui/consolefix*.go` | ConPTY + bundled OpenConsole, console-mode restore, window geometry, spawn-size healing |

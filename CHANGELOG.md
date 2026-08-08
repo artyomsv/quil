@@ -18,9 +18,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - A pane stayed marked "blocked on you" for the whole time an agent was working
   after a Bash/Edit/Write permission prompt was approved.
-- Focusing a pane now clears its blocked mark, not just the unseen one.
+- The "needs you" marker is hidden on the pane you are currently in — you are
+  looking straight at the prompt — while the tab, the project roll-up and
+  Alt+Shift+A keep showing it. Leaving the pane without answering brings the
+  marker back.
 - Right-clicking a pane row in the sidebar opens its context menu; the menu now
   acts on panes in background tabs instead of silently doing nothing.
+- Alt+Shift+A scrolls the pane it jumps to into sidebar view instead of
+  possibly leaving it below the fold.
+- After the terminal is resized, the first wheel notch over the sidebar moves
+  the pane list again — several notches could previously do nothing.
 
 ## [1.52.2] - 2026-08-07
 

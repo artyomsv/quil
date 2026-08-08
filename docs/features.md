@@ -377,9 +377,13 @@ The viewer is a read-only `TextEditor` (typing / save / paste / cut all gated). 
 
 ## Projects
 
-A project groups tabs, owns a root directory, and belongs to exactly one daemon. The left sidebar (`Alt+Shift+S`) lists every project with a roll-up of its panes — `▲` needs you, `◐` running, `✓` finished while you were away — so an agent that finished or got stuck in a project you are not looking at is visible from the one place you are.
+A project groups tabs, owns a root directory, and belongs to exactly one daemon. The left sidebar (`Alt+Shift+S`) lists every project with a roll-up of its panes — `▲` needs you, `◐` running, `✓` finished while you were away — so an agent that finished or got stuck in a project you are not looking at is visible from the one place you are. A tab holding a pane parked on you turns amber in the tab bar, including the tab you are on: the pane waiting may be the one you are not looking at in a split.
 
-Under the active project, each tab's panes carry the same glyphs plus the checkout they sit in: branch, the linked worktree's name, and `↑N`/`↓N` against upstream. Git state is refreshed on a background ticker, cached per checkout so N panes in one repository cost one invocation, and marked stale rather than guessed when a probe does not answer.
+Under the active project, each tab gets a numbered heading (`1:name`, matching `Alt+1..9`) and its panes carry the same glyphs plus the checkout they sit in: branch, the linked worktree's name, and `↑N`/`↓N` against upstream. A pane you have pinned with **Mark attention** shows `◆`, which stays until you unmark it — if a more urgent state is showing, the pin moves to the end of the row rather than disappearing. Git state is refreshed on a background ticker, cached per checkout so N panes in one repository cost one invocation, and marked stale rather than guessed when a probe does not answer.
+
+The `▲` is hidden on the pane you are currently in — you are looking straight at the prompt — while the tab, the project roll-up and `Alt+Shift+A` all keep counting it. Leave the pane without answering and the marker comes back.
+
+The PANES section scrolls when there are more panes than rows: the wheel moves it, the project list above stays pinned, and `⋯ N above` / `⋯ N below` mark what is off-screen. Reaching a pane by clicking it in the sidebar, by `Alt+Shift+A`, or from the command palette scrolls it into view.
 
 A worktree named after its branch — `feat-x` for `feat/x`, the usual convention — is shown as a plain `wt` marker instead, since repeating the branch would cost most of the row. You see the name when it differs from the branch, which is exactly when it tells you something: an agent working in `wt-1` on branch `feat/refactor-sidebar`. Naming the worktree costs no extra git call — git already stores a linked checkout's metadata under that name.
 
@@ -393,7 +397,7 @@ A worktree named after its branch — `feat-x` for `feat/x`, the usual conventio
 | `Alt+Shift+A` | Jump to the oldest pane waiting on you, across every project |
 | `Alt+Shift+X` | Remove the active project (destroy locally, disconnect a remote host) |
 
-Right-click a project row for Rename, and either Destroy (local) or Disconnect host (remote).
+Right-click a project row for Rename, and either Destroy (local) or Disconnect host (remote). Right-click a **pane** row for the same menu you get on the pane itself (see [Mouse: pane context menu](keybindings.md#mouse-pane-context-menu)) — note that this focuses the pane first, switching tabs if it lives on another one, so the menu's actions all land on the pane you clicked.
 
 ### Projects on another machine
 

@@ -114,6 +114,10 @@ func (m *Model) jumpToPane(paneID string) bool {
 	// so every later unstamped send has a new right answer.
 	m.syncActiveDest()
 	m.notifyTabSwitch(proj.tabs[tabIdx])
+	// Runs AFTER the project-boundary reset above: that reset zeroes
+	// sidebarScroll outright, so computing the target offset before it would
+	// have this call's work thrown away on every cross-project jump.
+	m.scrollSidebarToPane(paneID)
 	return true
 }
 

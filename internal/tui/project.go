@@ -155,6 +155,10 @@ func (m Model) focusSidebarPane(tabIdx int, paneID string) (tea.Model, tea.Cmd) 
 		}
 		pane.Active = true
 		tab.ActivePane = pane.ID
+		// The row just clicked is by definition already on screen, so this
+		// is a no-op here — it exists for scrollSidebarToPane's other
+		// callers (jumpToPane) that raise a pane the user did NOT click.
+		m.scrollSidebarToPane(pane.ID)
 		break
 	}
 	return m, cmd

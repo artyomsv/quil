@@ -1583,3 +1583,75 @@ func TestSidebarWheel_ClampsAtBothEnds(t *testing.T) {
 		t.Errorf("sidebarScroll = %d after over-scrolling up, want 0", m.sidebarScroll)
 	}
 }
+
+// TestScrollSidebarToPane_BringsOffscreenPaneIntoView pins that a pane reached
+// from the palette, a hook jump or pane-history is not left below the cut.
+func TestScrollSidebarToPane_BringsOffscreenPaneIntoView(t *testing.T) {
+	t.Parallel()
+	m := newTestModelManyPanes(t, 3, 12)
+	m.width, m.height = 100, 13
+	w := m.projectSidebarWidth()
+
+	all, panesStart := m.sidebarRows(w)
+	var last string
+	for i := panesStart; i < len(all); i++ {
+		if all[i].kind == sidebarRowPane {
+			last = all[i].paneID
+		}
+	}
+	if last == "" {
+		t.Fatal("fixture must contain pane rows")
+	}
+
+	m.sidebarScroll = 0
+	m.scrollSidebarToPane(last)
+
+	rows := m.sidebarVisibleRows(w, m.sidebarContentHeight())
+	found := false
+	for _, r := range rows {
+		if r.kind == sidebarRowPane && r.paneID == last {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("pane %q still off-screen at offset %d", last, m.sidebarScroll)
+	}
+}
+
+// TestScrollSidebarToPane_AlreadyVisibleIsANoOp pins the guarantee
+// focusSidebarPane depends on: scrolling to a pane the sidebar already shows
+// must not move the strip out from under a click on it.
+//
+// The boundary matters here, not just "some visible pane": at sidebarScroll
+// == 0 only the "N below" marker can show, so the REAL window is bodyH-1 rows
+// — one wider than the bodyH-2 span scrollSidebarToPane uses to pick a NEW
+// offset when a scroll is actually needed. Asserting against the LAST row
+// sidebarVisibleRows actually paints (rather than an arbitrary early one)
+// exercises exactly the row a naive reuse of that conservative span would
+// wrongly judge off-screen.
+func TestScrollSidebarToPane_AlreadyVisibleIsANoOp(t *testing.T) {
+	t.Parallel()
+	m := newTestModelManyPanes(t, 3, 12)
+	m.width, m.height = 100, 13
+	w := m.projectSidebarWidth()
+	height := m.sidebarContentHeight()
+
+	m.sidebarScroll = 0
+	visible := m.sidebarVisibleRows(w, height)
+	var lastVisiblePane string
+	for _, r := range visible {
+		if r.kind == sidebarRowPane {
+			lastVisiblePane = r.paneID
+		}
+	}
+	if lastVisiblePane == "" {
+		t.Fatal("fixture must paint at least one pane row at offset 0")
+	}
+
+	m.scrollSidebarToPane(lastVisiblePane)
+
+	if m.sidebarScroll != 0 {
+		t.Errorf("sidebarScroll = %d after scrolling to already-visible pane %q, want 0 (no-op)",
+			m.sidebarScroll, lastVisiblePane)
+	}
+}

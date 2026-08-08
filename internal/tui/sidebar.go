@@ -405,6 +405,62 @@ func (m *Model) scrollSidebar(up bool) {
 	m.sidebarScroll = clampSidebarScroll(m.sidebarScroll+lines, bodyLen, bodyH)
 }
 
+// scrollSidebarToPane moves the PANES section the minimum distance that brings
+// paneID's row into the visible window, and does nothing when it is already
+// there. The visible span used to pick a NEW offset is computed as bodyH-2 —
+// the worst case, both markers present — so the target can never land
+// underneath one.
+func (m *Model) scrollSidebarToPane(paneID string) {
+	if paneID == "" {
+		return
+	}
+	w := m.projectSidebarWidth()
+	if w <= 0 {
+		return
+	}
+	height := m.sidebarContentHeight()
+	rows, panesStart := m.sidebarRows(w)
+	if height <= 0 || len(rows) <= height || panesStart > height-minPaneRows {
+		m.sidebarScroll = 0
+		return
+	}
+	// Already on screen under the CURRENT offset: nothing to do, checked
+	// against the REAL painted window rather than the conservative one below.
+	// The two differ by a row exactly when only one marker is showing (real
+	// avail is bodyH-1, one more than bodyH-2) — a caller whose paneID is the
+	// last visible row in that state would otherwise be scrolled off a click
+	// on a row the paint already shows. sidebarVisibleRows is pure, so this
+	// costs a second row-list build and writes nothing.
+	for _, r := range m.sidebarVisibleRows(w, height) {
+		if r.kind == sidebarRowPane && r.paneID == paneID {
+			return
+		}
+	}
+	idx := -1
+	for i := panesStart; i < len(rows); i++ {
+		if rows[i].kind == sidebarRowPane && rows[i].paneID == paneID {
+			idx = i - panesStart
+			break
+		}
+	}
+	if idx < 0 {
+		return
+	}
+	bodyLen, bodyH := sidebarBodyGeometry(rows, panesStart, height)
+	visible := bodyH - 2
+	if visible < 1 {
+		visible = 1
+	}
+	off := m.sidebarScroll
+	switch {
+	case idx < off:
+		off = idx
+	case idx >= off+visible:
+		off = idx - visible + 1
+	}
+	m.sidebarScroll = clampSidebarScroll(off, bodyLen, bodyH)
+}
+
 // sidebarRowAt resolves the project-sidebar row under a SCREEN coordinate.
 // View() joins the sidebar to the LEFT of the pane column — tab bar included
 // — so the strip starts at screen row 0 and ends before the status bar, and

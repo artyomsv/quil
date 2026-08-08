@@ -36,7 +36,7 @@ const (
 	workSubagentStart = hookevents.WorkEventSubagentStart // subagent spawned → spinner on
 	workSubagentStop  = hookevents.WorkEventSubagentStop  // subagent finished → spinner off once drained AND turn over
 	workStopFinal     = hookevents.WorkEventStopFinal     // terminal stop → also clears the outstanding count
-	workPark          = hookevents.WorkEventPark          // agent blocked on the user (permission/idle) → same spinner/unseen handling as workStop, plus blockedSince/blockedReason
+	workPark          = hookevents.WorkEventPark          // agent blocked on the user (permission/idle) → stamps blockedSince/blockedReason; does NOT clear turnActive (see the workPark case)
 )
 
 // workEventKind maps a PaneEvent Type (the daemon encodes hook events as
@@ -280,10 +280,18 @@ func (m *Model) applyWorkTransition(paneID, eventType string, data map[string]st
 			pane.subagentsOverflow = false
 		}
 	case workPark:
-		// Blocked waiting on the user — handled exactly like workStop for
-		// the derived `working` recomputation and the unseen mark below;
-		// only the blocked fields differ.
-		pane.turnActive = false
+		// Blocked waiting on the user. This deliberately does NOT clear
+		// turnActive. Notification covers two situations: a permission prompt
+		// (turn still running) and an idle-wait nudge (Stop already cleared
+		// turnActive), so clearing it here was a no-op exactly when it was
+		// right and wrong exactly when it was not — approving a Bash/Edit/Write
+		// prompt fires no hook of its own, so the pane read as blocked-not-
+		// working until the turn's Stop, sometimes for minutes.
+		//
+		// Consequence: `working` no longer falls here, so the falling edge
+		// below does not set `unseen`. tabBlocked (model.go tabStyle) is what
+		// carries a parked background pane to the tab bar instead — the two
+		// must not be separated.
 		pane.blockedSince = time.Now()
 		// Data["tool"] is set by the claude hook only for PermissionRequest
 		// and PostToolUse. Notification and opencode's permission.ask may

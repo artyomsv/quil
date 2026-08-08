@@ -17,11 +17,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - A pane stayed marked "blocked on you" for the whole time an agent was working
-  after a Bash/Edit/Write permission prompt was approved.
+  after a Bash/Edit/Write permission prompt was approved. Approving fires no
+  hook of its own, so answering the prompt — typing or pasting into the pane —
+  is now what clears the mark.
 - The "needs you" marker is hidden on the pane you are currently in — you are
   looking straight at the prompt — while the tab, the project roll-up and
-  Alt+Shift+A keep showing it. Leaving the pane without answering brings the
-  marker back.
+  Alt+Shift+A keep showing it until you answer. Looking at a pane, scrolling it
+  or dragging a selection across it is not an answer: switch away without
+  replying and the marker is still there.
 - Right-clicking a pane row in the sidebar opens its context menu; the menu now
   acts on panes in background tabs instead of silently doing nothing.
 - Alt+Shift+A scrolls the pane it jumps to into sidebar view instead of

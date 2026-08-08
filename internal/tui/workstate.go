@@ -408,6 +408,36 @@ func (m *Model) ackFocusedPane() {
 	}
 }
 
+// answerBlockedByInput clears a pane's parked-on-the-user mark because real
+// user input just reached it. A glance is not an answer; a keystroke is.
+//
+// This is the other half of ackFocusedPane's rule, and it exists because
+// approving a Bash/Edit/Write permission prompt fires NO hook of its own — the
+// pane's next event is the turn's Stop, which can be minutes away. With focus
+// deliberately not clearing the mark, an ANSWERED prompt would otherwise keep
+// its tab amber, keep counting as blocked rather than working in the project
+// badge, keep being offered by Alt+Shift+A, and put the ▲ back the moment the
+// user switched away. Input reaching the pane is the one signal that separates
+// answering the prompt from looking at it.
+//
+// Callers are the producers that represent a HUMAN acting on the pane: the two
+// handleKey forward paths and both paste paths. Deliberately NOT enqueueInput,
+// which is the ordering choke point for every producer including forwarded
+// wheel notches, and NOT forwardInputBytes, which the selection handler also
+// uses to walk the shell cursor during a mouse DRAG — those emit arrow-key
+// escapes a permission prompt would consume as a choice. Scrolling or dragging
+// across a parked pane is a glance with a mouse.
+//
+// It lives here rather than beside its callers so workstate.go remains the
+// owner of every write to these fields but the context menu's explicit one.
+func (p *PaneModel) answerBlockedByInput() {
+	if p == nil {
+		return
+	}
+	p.blockedSince = time.Time{}
+	p.blockedReason = ""
+}
+
 // anyPaneWorking reports whether any pane in any tab is mid-turn.
 func (m Model) anyPaneWorking() bool {
 	for _, tab := range m.allTabs() {

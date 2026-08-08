@@ -3630,6 +3630,9 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if tab := m.activeTabModel(); tab != nil {
 			if pane := tab.ActivePaneModel(); pane != nil {
 				pane.ResetScroll()
+				// A typed key is the answer a parked pane was waiting for;
+				// approving a permission prompt fires no hook of its own.
+				pane.answerBlockedByInput()
 			}
 		}
 		return m, m.forwardInputBytes(data)
@@ -3794,6 +3797,10 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if tab := m.activeTabModel(); tab != nil {
 			if pane := tab.ActivePaneModel(); pane != nil {
 				pane.ResetScroll()
+				// Same trigger as the scroll reset above — the user acted on
+				// this pane — and the answer a parked pane never otherwise
+				// hears, since approving a prompt emits no hook.
+				pane.answerBlockedByInput()
 			}
 		}
 		return m, m.forwardInputBytes(data)
@@ -6441,6 +6448,9 @@ func (m Model) sendClipboardToPane(text string) {
 	if pane == nil {
 		return
 	}
+	// Pasted text is the user acting on the pane, so it answers a parked one
+	// exactly as a typed key does.
+	pane.answerBlockedByInput()
 	m.enqueueInput(pane.ID, pastePayload(pane, text))
 }
 
@@ -6462,6 +6472,10 @@ func (m Model) sendClipboardToPaneID(paneID, text string) {
 		logger.Debug("paste: pane %s vanished during the clipboard read — dropping", paneID)
 		return
 	}
+	// The target was bound when the user asked to paste, so it need not be the
+	// active pane any more — which is exactly why the answer is keyed to input
+	// reaching a pane rather than to which pane holds focus.
+	pane.answerBlockedByInput()
 	m.enqueueInput(paneID, pastePayload(pane, text))
 }
 

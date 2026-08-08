@@ -381,7 +381,7 @@ A project groups tabs, owns a root directory, and belongs to exactly one daemon.
 
 Under the active project, each tab gets a numbered heading (`1:name`, matching `Alt+1..9`) and its panes carry the same glyphs plus the checkout they sit in: branch, the linked worktree's name, and `↑N`/`↓N` against upstream. A pane you have pinned with **Mark attention** shows `◆`, which stays until you unmark it — if a more urgent state is showing, the pin moves to the end of the row rather than disappearing. Git state is refreshed on a background ticker, cached per checkout so N panes in one repository cost one invocation, and marked stale rather than guessed when a probe does not answer.
 
-The `▲` is hidden on the pane you are currently in — you are looking straight at the prompt — while the tab, the project roll-up and `Alt+Shift+A` all keep counting it. Leave the pane without answering and the marker comes back.
+The `▲` is hidden on the pane you are currently in — you are looking straight at the prompt — while the tab, the project roll-up and `Alt+Shift+A` all keep counting it. **Answering** the prompt is what drops it everywhere: typing or pasting into the pane clears the mark, because approving a permission prompt tells quil nothing by itself. A glance is not an answer, and neither is a mouse gesture — scroll the pane or drag a selection across it and the mark stays. Switch away without replying and the `▲` is back on the row.
 
 The PANES section scrolls when there are more panes than rows: the wheel moves it, the project list above stays pinned, and `⋯ N above` / `⋯ N below` mark what is off-screen. Reaching a pane by clicking it in the sidebar, by `Alt+Shift+A`, or from the command palette scrolls it into view.
 

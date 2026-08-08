@@ -99,8 +99,28 @@ acknowledging a notification. `paneRow` (`sidebar.go`) therefore suppresses the
 blocked **presentation** for the focused pane — glyph and reason both — while
 `tabBlocked`, `ProjectModel.counts()` and `blockedPanes()` all keep reading the
 same live `blockedSince`. Leaving the pane restores every signal with no hook
-edge required. The only non-agent route to a clear is the context menu's
-**Clear attention** row, which is what that row exists for.
+edge required.
+
+**A glance is not an answer, but a keystroke is: real user input to a pane
+clears its mark** (`PaneModel.answerBlockedByInput`, workstate.go). This is the
+other half of the same rule and it is required, not a convenience: approving a
+Bash/Edit/Write prompt fires **no hook at all** — `promptToolMatcher` is
+`AskUserQuestion|ExitPlanMode`, so `PostToolUse` does not cover it — and the
+pane's next event is the turn's `Stop`, minutes away. Without it an ANSWERED
+prompt kept its tab amber, kept counting as blocked rather than working, kept
+being offered by `Alt+Shift+A`, and put the `▲` back the moment the user
+switched away.
+
+The clear is wired at the producers that represent a HUMAN acting on the pane —
+the two `handleKey` forward paths and both paste paths — and deliberately **not**
+at `enqueueInput`, the ordering choke point every producer shares including
+forwarded wheel notches, nor at `forwardInputBytes`, which the selection handler
+also uses to walk the shell cursor during a mouse DRAG (arrow-key escapes a
+permission prompt would consume as a choice). Scrolling or dragging across a
+parked pane is a glance with a mouse. It is keyed to input REACHING a pane
+rather than to focus, so the asynchronous paste path answers a pane that is no
+longer the active one. The only other non-agent route to a clear is the context
+menu's **Clear attention** row, which is what that row exists for.
 
 ### Model/context status-bar segment
 

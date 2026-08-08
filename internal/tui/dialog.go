@@ -101,9 +101,15 @@ const dialogBoxChrome = 6
 // Keymap.Display joins them as "alt+f2 / alt+shift+r" — 20 cells. At 16 that
 // wrapped onto a second line, which is the same row-count-vs-line-count
 // mismatch shortcutsDescWidth's own doc warns about, just in the other
-// column. 22 leaves 2 cells of headroom on the key side and still leaves the
-// longest description ("Remove active project (destroy / disconnect)", 44
-// cells) 2 cells of room on its side too.
+// column. 22 leaves 2 cells of headroom on the key side.
+//
+// The description side is where this comment used to claim 2 cells of headroom
+// that were not there: the row also pays shortcutsRowIndent, so at the old
+// 74-cell box the budget was 74 - dialogBoxChrome - 2 - 22 = 44, against a
+// longest description ("Remove active project (destroy / disconnect)") of
+// exactly 44 — zero margin, and the next label one cell longer would have
+// wrapped. The headroom comes from shortcutsDialogWidth, which the conflict
+// rows widened anyway; see its own comment.
 const dialogKeyColWidth = 22
 
 // dialogInnerWidth is the usable content width for a dialog whose box is boxW
@@ -368,20 +374,33 @@ const confirmKindApplyUpdate = "apply-update"
 // confirmDestroyProject in projectdialog.go.
 const confirmKindDestroyProject = "destroy-project"
 
+// shortcutRow is one line of the F1 -> Shortcuts list: a chord and what it
+// does, or — when full is set — one sentence that takes the whole inner width
+// because it has no key half worth a fixed column.
+type shortcutRow struct {
+	key  string
+	desc string
+	full bool
+}
+
+// srow is an ordinary two-column row. Only conflicts set full, and they build
+// their row explicitly, so every other call site says so by using this.
+func srow(key, desc string) shortcutRow { return shortcutRow{key: key, desc: desc} }
+
 // shortcutsList derives the F1 -> Shortcuts rows from the action registry, so
 // the dialog cannot drift from what the keys actually do (it used to be a
 // hand-maintained line per action — TestShortcutsList_CoversEveryProjectBinding
 // existed because seven of eight project bindings were added to the config
 // but never copied into this function).
-func shortcutsList(m *Model) []struct{ key, desc string } {
-	type row = struct{ key, desc string }
-	var list []row
+func shortcutsList(m *Model) []shortcutRow {
+	var list []shortcutRow
 
 	// Conflicts first: a dropped binding is the one thing a user cannot
 	// discover any other way, so it has to be the first thing they see, not
-	// buried under 40-odd rows of bindings that DO work.
+	// buried under 40-odd rows of bindings that DO work. full: the message is
+	// a sentence and needs the cells the key column would take.
 	for _, c := range m.keyConflicts {
-		list = append(list, row{"!", c.String()})
+		list = append(list, shortcutRow{key: "!", desc: c.String(), full: true})
 	}
 
 	// m.keymap.Display renders every binding on an action joined with " / "
@@ -401,19 +420,19 @@ func shortcutsList(m *Model) []struct{ key, desc string } {
 	// fixes.
 	groups, byGroup := keymap.ActionsByGroup()
 	for _, g := range groups {
-		var bucket []row
+		var bucket []shortcutRow
 		for _, a := range byGroup[g] {
 			if a.Hidden {
 				continue // e.g. json.transform: registered, no dispatch site
 			}
 			if keys := m.keymap.Display(a.ID); keys != "" {
-				bucket = append(bucket, row{keys, a.Label})
+				bucket = append(bucket, srow(keys, a.Label))
 			}
 		}
 		if len(bucket) == 0 {
 			continue // never render an empty heading
 		}
-		list = append(list, row{"", g})
+		list = append(list, srow("", g))
 		list = append(list, bucket...)
 	}
 
@@ -423,30 +442,30 @@ func shortcutsList(m *Model) []struct{ key, desc string } {
 	// which the registry does not model. Carried verbatim from the
 	// pre-registry list.
 	list = append(list,
-		row{"", ""},
-		row{"", "── Built-in keys ──"},
-		row{"Ctrl+N", "New typed pane"},
-		row{"Alt+1..9", "Switch to tab N"},
-		row{"F1", "Help / About"},
-		row{"Tab / Shift+Tab", "→ PTY (shell completion, Claude Code modes)"},
-		row{"Shift+Arrows", "Select text"},
-		row{"Ctrl+Shift+←→", "Select word"},
-		row{"Ctrl+Alt+Shift+←→", "Select 3 words"},
-		row{"Ctrl+←→", "Jump word"},
-		row{"Ctrl+Alt+←→", "Jump 3 words"},
-		row{"Enter", "Copy selection"},
-		row{"Right-click", "Copy selection"},
-		row{"Esc", "Clear selection"},
-		row{"", ""},
-		row{"", "── Editor ──"},
-		row{"Shift+Arrows", "Select text (editor)"},
-		row{"Ctrl+Shift+←→", "Select word (editor)"},
-		row{"Ctrl+Alt+Shift+←→", "Select 3 words (editor)"},
-		row{"Enter", "Copy selection (editor)"},
-		row{"Ctrl+X", "Cut selection (editor)"},
-		row{"Ctrl+V", "Paste (editor)"},
-		row{"Ctrl+A", "Select all (editor)"},
-		row{"Ctrl+S", "Save (editor)"},
+		srow("", ""),
+		srow("", "── Built-in keys ──"),
+		srow("Ctrl+N", "New typed pane"),
+		srow("Alt+1..9", "Switch to tab N"),
+		srow("F1", "Help / About"),
+		srow("Tab / Shift+Tab", "→ PTY (shell completion, Claude Code modes)"),
+		srow("Shift+Arrows", "Select text"),
+		srow("Ctrl+Shift+←→", "Select word"),
+		srow("Ctrl+Alt+Shift+←→", "Select 3 words"),
+		srow("Ctrl+←→", "Jump word"),
+		srow("Ctrl+Alt+←→", "Jump 3 words"),
+		srow("Enter", "Copy selection"),
+		srow("Right-click", "Copy selection"),
+		srow("Esc", "Clear selection"),
+		srow("", ""),
+		srow("", "── Editor ──"),
+		srow("Shift+Arrows", "Select text (editor)"),
+		srow("Ctrl+Shift+←→", "Select word (editor)"),
+		srow("Ctrl+Alt+Shift+←→", "Select 3 words (editor)"),
+		srow("Enter", "Copy selection (editor)"),
+		srow("Ctrl+X", "Cut selection (editor)"),
+		srow("Ctrl+V", "Paste (editor)"),
+		srow("Ctrl+A", "Select all (editor)"),
+		srow("Ctrl+S", "Save (editor)"),
 	)
 	return list
 }
@@ -1198,13 +1217,23 @@ func (m Model) renderSettingsDialog() string {
 const shortcutsChromeRows = 8
 
 // shortcutsDialogWidth runs wider than the standard 60. dialogKeyStyle is a
-// fixed 16 cells, so at 60 a description gets 36 — and eight entries already
-// exceeded that, including "Command palette (fuzzy-find any action)" and the
-// Tab → PTY note. Each wrapped onto a second line, which is why counting
-// ENTRIES against the height budget under-counted the box and let it overflow
-// even after a window was added. One entry must be one line for the row
-// arithmetic to mean anything.
-const shortcutsDialogWidth = 74
+// fixed dialogKeyColWidth cells, so at 60 a description gets 32 — and eight
+// entries already exceeded that, including "Command palette (fuzzy-find any
+// action)" and the Tab → PTY note. Each wrapped onto a second line, which is
+// why counting ENTRIES against the height budget under-counted the box and let
+// it overflow even after a window was added. One entry must be one line for
+// the row arithmetic to mean anything.
+//
+// 100, not the 74 that was enough for the bindings alone: the conflict rows
+// carry a sentence, not a label — kind, chord, winner, loser and consequence —
+// and 74 cut every one of them mid-clause ("duplicate binding: \"ctrl+w\"
+// resolves to pan…"), which is the half of the message that says what to do.
+// The longest one the registry can produce runs ~88 cells; a conflict row
+// spends nothing on the key column (shortcutsFullRowWidth), so at 100 it gets
+// 90 and that sentence lands whole. It also takes the ordinary description
+// budget from 44 — exactly the longest label, i.e. no headroom at all — to 70.
+// 100 is the width historyDialogWidth already uses for the same reason.
+const shortcutsDialogWidth = 100
 
 // shortcutsRowIndent is the two spaces every shortcut row starts with.
 const shortcutsRowIndent = 2
@@ -1221,6 +1250,19 @@ const shortcutsRowIndent = 2
 // rows past the bottom edge.
 func (m Model) shortcutsDescWidth() int {
 	if w := dialogInnerWidth(m.width, shortcutsDialogWidth) - shortcutsRowIndent - dialogKeyColWidth; w > 1 {
+		return w
+	}
+	return 1
+}
+
+// shortcutsFullRowWidth is the budget for a row that has no key half — the
+// conflict warnings, whose "key" is a bare "!". Spending dialogKeyColWidth on
+// one exclamation mark cost those rows 22 of the cells their message needed,
+// and they are the only rows in this dialog whose text a user cannot get any
+// other way: a binding row that truncates still shows its chord and its label,
+// a truncated conflict shows neither the winner nor the consequence.
+func (m Model) shortcutsFullRowWidth() int {
+	if w := dialogInnerWidth(m.width, shortcutsDialogWidth) - shortcutsRowIndent; w > 1 {
 		return w
 	}
 	return 1
@@ -1271,14 +1313,25 @@ func (m Model) renderShortcutsDialog() string {
 	b.WriteString("\n\n")
 
 	desc := m.shortcutsDescWidth()
+	full := m.shortcutsFullRowWidth()
+	indent := strings.Repeat(" ", shortcutsRowIndent)
 	for _, s := range list[start:end] {
+		// A conflict row is one sentence, not a key/label pair — it takes the
+		// whole inner width, marker included, and is red because it reports
+		// something the user has to go and fix.
+		if s.full {
+			b.WriteString(indent)
+			b.WriteString(dialogErrorStyle.Render(truncateToWidth(s.key+" "+s.desc, full)))
+			b.WriteByte('\n')
+			continue
+		}
 		// At the preferred width this truncation is a guard — every current
 		// description fits — but on a narrower terminal it is the mechanism, and
 		// that is why the budget has to be the box's real one. Either way a row
 		// that wraps breaks the height arithmetic, which counts one line per
 		// entry; that is the failure this dialog already had.
 		b.WriteString(fmt.Sprintf("%s%s%s\n",
-			strings.Repeat(" ", shortcutsRowIndent),
+			indent,
 			dialogKeyStyle.Render(s.key),
 			dialogValStyle.Render(truncateToWidth(s.desc, desc))))
 	}

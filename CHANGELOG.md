@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **F1 → Shortcuts is now derived from the keybinding table itself.** The list
+  used to be maintained by hand beside the bindings, and had drifted: seven of
+  the eight project shortcuts were missing from it. Rows are regrouped under
+  new headings, and each shortcut is spelled the way the key is actually
+  matched (`ctrl+v`, not `Ctrl+V`). The pane input-history shortcut appears for
+  the first time; `json_transform` no longer does, because nothing has ever
+  handled it.
+- **A keybinding that cannot work now says so, at the top of that dialog.**
+  Two actions on one chord, a chord Quil reserves for itself, a spec that does
+  not parse, or a name that is not an action: each is listed with which side
+  wins and which binding will never fire, rather than being dropped in silence.
+
 ### Fixed
 
 - Paste now works in the Settings field editor and the instance form when
@@ -15,9 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   multi-key paste binding was silently dead there.
 - Binding an action to `shift+left`/`right`/`up`/`down`, `ctrl+shift+left`/
   `right`, or `ctrl+alt+shift+left`/`right` now reports a warning in F1 →
-  Shortcuts. Those eight chords are claimed by keyboard text selection ahead
-  of the action registry, so a binding there was silently dead with no
-  diagnostic.
+  Shortcuts. Keyboard text selection claims those eight chords midway through
+  dispatch, so which side wins depends on the action: the warning names it.
 
 ## [1.52.2] - 2026-08-07
 

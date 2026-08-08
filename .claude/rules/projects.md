@@ -412,6 +412,14 @@ so the levels line up; and middle-elision for branch names and ssh
 destinations, since cutting either end of `feat/…` or `user@…` leaves a column
 where every row looks the same.
 
+**That "levels line up" claim has an unstated exception below ~5 cells.**
+`sidebarTabHeading` budgets ordinal → marker → name, so a narrow tab row gives
+up its `▸ ` marker first, to keep the ordinal — the part that maps the row to
+`Alt+1..9`. `projectRow`'s own marker is unchanged; only the tab row's gives
+way. Unreachable through the UI (`minSidebarWidth` is 12); reachable only via a
+hand-edited `sidebar_width`, since `sidebarWidth()` only falls back on
+`configured <= 0`.
+
 `elideMiddle` takes both halves by CELL budget. Deriving head/tail from cells
 and slicing `[]rune` with them makes each half overrun on wide glyphs, and once
 the rune count drops below head+tail the two slices OVERLAP — the row repeats
@@ -438,7 +446,7 @@ halves of that are load-bearing.** A rune is not the unit of width — U+FE0F
 measures 0 alone and makes the pair before it 2 — so summing independently
 measured runes returns a string WIDER than the budget it was handed, which
 `renderSidebar`'s closing `.Width(w)` wraps rather than cuts, shifting every row
-below while `sidebarRowAt` still maps screen row y to `rows[y-1]`. Re-measuring
+below while `sidebarRowAt` still maps screen row y to `rows[y]`. Re-measuring
 an accumulated prefix instead is correct but QUADRATIC: it reallocates the
 prefix each step, and a zero-width cluster never advances the budget, so the
 loop cannot exit early on a long run of them. Both failures are reachable from
@@ -475,6 +483,25 @@ through `overlayAt` rather than a one-column cutter of its own: that function
 already solves the truncate-lands-mid-glyph, SGR-left-open and
 wide-glyph-straddling-the-seam problems, all three of which a second cutter
 would have to solve again to be correct at one column.
+
+**The PANES section scrolls; PROJECTS is pinned.** `sidebarRows` returns the
+section boundary as a second value rather than having anyone re-derive it from
+the heading text, and the offset is applied INSIDE `sidebarVisibleRows` — the
+same reason the cap is: paint and hit test share that one function, and a
+window applied at the render site is the row-drift bug in another form.
+`sidebarVisibleRows` stays PURE and clamps a local copy; `scrollSidebar` and
+`scrollSidebarToPane` own the write to `m.sidebarScroll`. When the pinned head
+would leave fewer than `minPaneRows` for the body the whole strip reverts to
+the old tail cap — a strip showing every project and no panes is worse than a
+truncated list of both.
+
+**A park no longer clears `turnActive`.** `Notification` covers a permission
+prompt (turn running) and an idle-wait nudge (`Stop` already fired), so
+clearing it was a no-op exactly when it was right. The consequence is
+load-bearing: the falling edge no longer fires, so a park does not set
+`unseen`, and `tabBlocked` is what carries a parked background pane to the tab
+bar. The two must not be separated. See `hooks-and-sessions.md`'s Work state
+section for the hook side of this.
 
 ## Git subsystem (`gitinfo` + `gitcache.go`)
 

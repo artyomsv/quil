@@ -377,7 +377,7 @@ The viewer is a read-only `TextEditor` (typing / save / paste / cut all gated). 
 
 ## Projects
 
-A project groups tabs, owns a root directory, and belongs to exactly one daemon. The left sidebar (`Alt+Shift+S`) lists every project with a roll-up of its panes — `⚠` needs you, `◐` running, `✓` finished while you were away — so an agent that finished or got stuck in a project you are not looking at is visible from the one place you are.
+A project groups tabs, owns a root directory, and belongs to exactly one daemon. The left sidebar (`Alt+Shift+S`) lists every project with a roll-up of its panes — `▲` needs you, `◐` running, `✓` finished while you were away — so an agent that finished or got stuck in a project you are not looking at is visible from the one place you are.
 
 Under the active project, each tab's panes carry the same glyphs plus the checkout they sit in: branch, the linked worktree's name, and `↑N`/`↓N` against upstream. Git state is refreshed on a background ticker, cached per checkout so N panes in one repository cost one invocation, and marked stale rather than guessed when a probe does not answer.
 

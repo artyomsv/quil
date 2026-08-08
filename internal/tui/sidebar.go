@@ -243,7 +243,7 @@ func (m *Model) renderSidebar(height int) string {
 	// padded to exactly w CELLS (padOrTrunc). It must never have anything
 	// left to do horizontally: .Width WRAPS an over-wide line onto a new
 	// one rather than truncating it, which would shift every row below it
-	// while sidebarRowAt still maps screen row y to rows[y-1].
+	// while sidebarRowAt still maps screen row y to rows[y].
 	return lipgloss.NewStyle().Width(w).Height(height).Render(content)
 }
 
@@ -935,7 +935,7 @@ func paneRow(pane *PaneModel, focused bool, w int) string {
 // padding therefore produced rows of w runes and MORE than w cells, and
 // renderSidebar's closing .Width(w) WRAPS the excess onto a new painted
 // line instead of truncating it. That shifts every row below it down by one
-// while sidebarRowAt still maps screen row y to rows[y-1] — the user clicks
+// while sidebarRowAt still maps screen row y to rows[y] — the user clicks
 // project 3 and selects project 2.
 //
 // A wide glyph that would straddle the boundary is dropped whole (padOrTrunc
@@ -989,7 +989,7 @@ func truncateCells(s string, w int) string {
 	// budget it was handed (truncateCells("x⚠️", 2) was three cells).
 	// renderSidebar's closing .Width(w) WRAPS that excess onto a new painted
 	// line rather than cutting it, shifting every row below while
-	// sidebarRowAt still maps screen row y to rows[y-1] — the user clicks
+	// sidebarRowAt still maps screen row y to rows[y] — the user clicks
 	// project 3 and selects project 2.
 	//
 	// Reachable without any emoji in quil's own strings: sanitizeRemoteText

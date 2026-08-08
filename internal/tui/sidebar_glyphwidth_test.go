@@ -86,7 +86,7 @@ var remoteTextSamples = []string{
 // Every sidebar row is padded to an exact cell count, because renderSidebar's
 // closing .Width(w) WRAPS an over-wide line onto a new one rather than cutting
 // it — which shifts every row below while sidebarRowAt still maps screen row y
-// to rows[y-1], so the user clicks one project and selects its neighbour.
+// to rows[y], so the user clicks one project and selects its neighbour.
 //
 // The widths swept include ones far below the default: sidebarWidth() clamps a
 // configured value against the terminal, so a narrow terminal genuinely

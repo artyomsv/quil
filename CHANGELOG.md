@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Sidebar PANES section scrolls with the mouse wheel, with markers showing how
+  many rows are hidden above and below. The PROJECTS list stays pinned.
+- Sidebar tab headings show their 1-based number (matching Alt+1-9) and the
+  tab's custom colour.
+- Pinned attention is now visible on sidebar pane rows.
+- Tabs holding a pane parked on a permission prompt are marked amber.
+
+### Fixed
+- A pane stayed marked "blocked on you" for the whole time an agent was working
+  after a Bash/Edit/Write permission prompt was approved.
+- Focusing a pane now clears its blocked mark, not just the unseen one.
+- Right-clicking a pane row in the sidebar opens its context menu; the menu now
+  acts on panes in background tabs instead of silently doing nothing.
+
 ## [1.52.2] - 2026-08-07
 
 ### Added

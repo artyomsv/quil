@@ -455,6 +455,52 @@ filter and preserves printable non-ASCII byte-identically — it is not a
 bounding pass. `lipgloss` must remain the sole measurer (uniseg segments,
 lipgloss measures), or the cut can disagree with the `.Width` that paints.
 
+**A row that mixes COLOURS goes through `renderStyledSegments`, never one
+`style.Render`.** Every `Render` emits its own reset, so wrapping a line that
+already carries SGR closes the outer colour at the first inner segment and
+leaves the rest of the row unpainted — which is why `projectRow`'s ▲/◐/✓ badge
+was flat grey while the pane rows it rolls up were amber, blue and green. The
+helper spends the width budget on PLAIN text segment by segment and styles only
+the piece that survived the cut, because `truncateCells` segments on grapheme
+clusters and `lipgloss.Width` measures an escape as zero cells: a single pass
+over already-styled text both mis-measures the row and can cut through the
+middle of an SGR sequence, emitting `38;5;214m` as literal text. `padOrTrunc`
+stays right for `paneRow` / `gitRow` / `sidebarTabHeading`, which each have ONE
+style for the whole line.
+
+**Its segments must each begin on a GRAPHEME CLUSTER boundary, and that is a
+caller requirement the helper cannot repair.** A segment starting with a
+combining mark joins the previous segment's last cluster, so the
+independently-measured sum understates the row — the U+FE0F trap above, one
+level up. The reason no measurement strategy fixes it: whether the two runes
+really join depends on the STYLES rather than the text. An SGR emitted between
+them separates them and the sum is honest; two property-free styles emit
+nothing and it is not (measured, `{"⚠", "️"}` at w=3: 3 cells coloured, 4 plain).
+`projectRow` satisfies it by construction — every badge segment starts with a
+space, and its head ends wherever `truncateCells` cut, which is a boundary by
+definition. Segments are also spent IN ORDER and a segment that cannot start
+ENDS the row: yielding its place to the next one would put one state's glyph in
+another state's position.
+
+**`linkGlyphStyles` is a swept MAP rather than a switch**, because
+`linkGlyphStyle`'s fallback has to be some style and every candidate lies about
+a state it was not written for. A third link state added to `linkGlyph` without
+an entry would render in the fallback's colour and read as a state that has
+one; enumerating lets `TestLinkGlyph_EveryStateHasItsOwnColour` drive `linkGlyph`
+over every `reconnectState` combination and assert each glyph it can produce is
+paired, which a switch cannot express. The colours come from OUTSIDE the
+pane-state palette deliberately — link health describes the destination, not any
+pane — so parked takes `spawnErrorStyle`'s red and retrying takes
+`projectFormMsgBusy`'s orange, never the 214 amber reserved for
+blocked-on-user, which a self-healing link is the opposite of.
+
+**⚡ (U+26A1) is the one deliberate exemption from the no-emoji-capable rule**,
+and it lives outside that const block rather than inside it — the block's own
+test lists U+26A1 as exactly the kind of codepoint to refuse, so adding it there
+would fail, correctly. It is safe only where it is: `lipgloss` already measures
+it as two cells, so the arithmetic accounts for its real width, and it is the
+LAST thing on the row, so a font drawing it wider has only padding to paint over.
+
 **The sidebar is a real reserved column**, unlike the notification sidebar's
 overlay — but it must not re-mode a pane. `paneVTSize` takes SIZE from the rect
 and MODE from `nativeW` (the width the rect would have with the sidebar

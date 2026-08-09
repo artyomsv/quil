@@ -1117,6 +1117,193 @@ func styleSGR(t *testing.T, s lipgloss.Style) string {
 	return out[:i]
 }
 
+// TestRenderStyledSegments drives the segment renderer DIRECTLY rather than
+// only through projectRow, which is the one caller today.
+//
+// projectRow pre-sizes its head so the badge segments almost always land exactly
+// on budget, so the helper's interesting branches — a segment cut mid-text, a
+// segment whose first cluster does not fit at all, an empty segment, a
+// degenerate width — are barely reachable through it. The helper states an
+// unconditional contract ("returns exactly w cells", "segments are spent in
+// order"), and a contract only pinned for the shapes one caller happens to emit
+// is the next caller's bug.
+func TestRenderStyledSegments(t *testing.T) {
+	t.Parallel()
+	a, b := sidebarBlockedStyle, sidebarWorkingStyle
+	tests := []struct {
+		name      string
+		segs      []styledSegment
+		w         int
+		wantPlain string // the visible text, ANSI stripped
+	}{
+		{"nil segments pad to the full width", nil, 4, "    "},
+		{"empty slice pads to the full width", []styledSegment{}, 3, "   "},
+		{"zero width renders nothing", []styledSegment{{"abc", a}}, 0, ""},
+		{"negative width renders nothing", []styledSegment{{"abc", a}}, -3, ""},
+		{"segments concatenate in order", []styledSegment{{"ab", a}, {"cd", b}}, 4, "abcd"},
+		{"a short row is padded, not stretched", []styledSegment{{"ab", a}}, 5, "ab   "},
+		{
+			// An empty segment contributes nothing and must NOT be read as a
+			// segment that failed to fit — the two share a t == "" test if
+			// anyone collapses the branches, and collapsing them ends the row
+			// early on a caller that emits a conditional segment as "".
+			"an empty segment does not end the row",
+			[]styledSegment{{"", a}, {"ab", b}}, 4, "ab  ",
+		},
+		{"a later segment is truncated into what is left", []styledSegment{{"ab", a}, {"cdef", b}}, 4, "abcd"},
+		{"an earlier segment is never sacrificed for a later one", []styledSegment{{"abcd", a}, {"ef", b}}, 4, "abcd"},
+		{
+			// The straddle: a 2-cell glyph with 1 cell left is dropped whole
+			// rather than half-emitted, and the pad backfills the odd cell.
+			"a wide glyph straddling the boundary is dropped and backfilled",
+			[]styledSegment{{"abc", a}, {"⚡", b}}, 4, "abc ",
+		},
+		{
+			// The ordering promise's second half. With one cell left, "⚡"
+			// cannot start — and the row must END there rather than letting the
+			// next segment render in its place, which would silently put one
+			// state's glyph in another state's position.
+			"a segment that cannot start ends the row",
+			[]styledSegment{{"abc", a}, {"⚡", b}, {"!", a}}, 4, "abc ",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := renderStyledSegments(tt.segs, tt.w)
+			// Segment TEXTS, never the segments themselves: lipgloss.Style is
+			// 648 bytes of mostly-zero fields, so %v over a []styledSegment
+			// buries the one thing a failure needs to show under three screens
+			// of struct dump.
+			in := make([]string, len(tt.segs))
+			for i := range tt.segs {
+				in[i] = tt.segs[i].text
+			}
+			if plain := stripSGR(got); plain != tt.wantPlain {
+				t.Errorf("renderStyledSegments(%q, %d) plain text = %q, want %q",
+					in, tt.w, plain, tt.wantPlain)
+			}
+			// The invariant every sidebar row depends on: renderSidebar's
+			// closing .Width(w) WRAPS an over-wide line rather than cutting it,
+			// which shifts every row below while sidebarRowAt still maps screen
+			// row y to rows[y].
+			want := tt.w
+			if want < 0 {
+				want = 0
+			}
+			if n := lipgloss.Width(got); n != want {
+				t.Errorf("renderStyledSegments(%q, %d) measures %d cells, want exactly %d",
+					in, tt.w, n, want)
+			}
+		})
+	}
+}
+
+// stripSGR removes ANSI SGR sequences so a test can assert on the text a
+// segmented row actually shows. Deliberately minimal — the rows under test are
+// built from foreground-only styles, so \x1b[...m is the only form that occurs.
+func stripSGR(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		if s[i] == 0x1b && i+1 < len(s) && s[i+1] == '[' {
+			j := i + 2
+			for j < len(s) && s[j] != 'm' {
+				j++
+			}
+			i = j + 1
+			continue
+		}
+		b.WriteByte(s[i])
+		i++
+	}
+	return b.String()
+}
+
+// TestRenderStyledSegments_SegmentsMustStartOnAClusterBoundary documents the
+// helper's one precondition that a caller can violate silently, by showing what
+// it costs.
+//
+// A rune can change the width of the one before it — U+FE0F measures 0 alone
+// and makes the pair before it measure 2 — so a segment STARTING with a
+// combining mark joins the previous segment's last cluster and the independent
+// per-segment sum understates the row. The non-obvious part, and why no
+// measurement strategy inside the helper can fix it: whether the two runes
+// really join depends on the STYLES, not on the text. An SGR sequence emitted
+// between them separates them and the row measures as summed; two property-free
+// styles emit nothing between them and it does not.
+//
+// Asserted as the divergence rather than as a bug to be fixed, so that anyone
+// who later "corrects" the measurement finds the reason it is a caller
+// requirement instead. projectRow satisfies it by construction: every badge
+// segment begins with a space.
+func TestRenderStyledSegments_SegmentsMustStartOnAClusterBoundary(t *testing.T) {
+	t.Parallel()
+	const w = 3
+	split := []styledSegment{{"⚠", sidebarDimStyle}, {"️", sidebarBlockedStyle}}
+	if lipgloss.Width("⚠")+lipgloss.Width("️") == lipgloss.Width("⚠️") {
+		t.Skip("lipgloss no longer measures the pair wider than its parts — the precondition is moot")
+	}
+	// Coloured styles put an SGR between the runes, which keeps them apart and
+	// keeps the sum honest. This is the case every caller in this file is in.
+	if n := lipgloss.Width(renderStyledSegments(split, w)); n != w {
+		t.Errorf("with SGR between the segments the row measures %d cells, want %d", n, w)
+	}
+	// Property-free styles emit nothing between them, the runes rejoin, and the
+	// row overruns. Not a defect to fix here — it is the precondition being
+	// violated, and renderSidebar's .Width(w) would wrap the excess.
+	plain := []styledSegment{{"⚠", lipgloss.NewStyle()}, {"️", lipgloss.NewStyle()}}
+	if n := lipgloss.Width(renderStyledSegments(plain, w)); n == w {
+		t.Errorf("a segment starting mid-cluster measured exactly %d cells — this test no longer "+
+			"demonstrates why the cluster-boundary precondition exists", w)
+	}
+}
+
+// TestLinkGlyph_EveryStateHasItsOwnColour closes the gap a switch statement
+// cannot express: linkGlyphStyle's fallback has to be SOME style, so a third
+// link state added to linkGlyph without a matching entry renders in the
+// fallback's colour and reads as a state it is not. Driving linkGlyph over
+// every reconnectState combination is what makes this fail on the addition
+// rather than on someone remembering to extend a hand-written list.
+func TestLinkGlyph_EveryStateHasItsOwnColour(t *testing.T) {
+	t.Parallel()
+	m := &Model{links: map[string]*reconnectState{}}
+	seen := map[string]bool{}
+	for _, parked := range []bool{true, false} {
+		for _, active := range []bool{true, false} {
+			m.links["d"] = &reconnectState{parked: parked, active: active}
+			if g := m.linkGlyph("d"); g != "" {
+				seen[g] = true
+			}
+		}
+	}
+	if len(seen) == 0 {
+		t.Fatal("linkGlyph produced no glyphs — this test cannot discriminate")
+	}
+	for glyph := range seen {
+		if _, ok := linkGlyphStyles[glyph]; !ok {
+			t.Errorf("linkGlyph can return %q but linkGlyphStyles has no entry for it — "+
+				"it would render in the idle fallback colour", glyph)
+		}
+	}
+	// Distinct colours, or the row says the same thing about two different
+	// states. Skips rather than fails when colour is stripped entirely.
+	if styleSGR(t, sidebarLinkParkedStyle) == "" {
+		return
+	}
+	used := map[string]string{}
+	for glyph := range seen {
+		sgr := styleSGR(t, linkGlyphStyles[glyph])
+		if prev, clash := used[sgr]; clash {
+			t.Errorf("%q and %q are painted the same colour", prev, glyph)
+		}
+		used[sgr] = glyph
+	}
+	// The fallback must not be mistakable for a real state.
+	if _, clash := used[styleSGR(t, sidebarDimStyle)]; clash {
+		t.Error("a link state is painted in the same colour as linkGlyphStyle's idle fallback")
+	}
+}
+
 // TestProjectRow_BadgesCarryTheirStateColour: the project badge is a ROLL-UP of
 // the pane rows beneath it, and it read as one — same glyphs, same order — while
 // being painted in a single flat colour. The whole line went through one
@@ -1140,6 +1327,18 @@ func TestProjectRow_BadgesCarryTheirStateColour(t *testing.T) {
 		{"blocked", sidebarBlockedStyle, glyphBlocked + "1"},
 		{"working", sidebarWorkingStyle, glyphWorking + "2"},
 		{"done", sidebarUnseenStyle, glyphDone + "3"},
+	}
+	// The three styles must be mutually distinct, or the assertions below keep
+	// passing (the glyph and the count still differ) while no longer testing
+	// colour at all. The link test has the same guard for the same reason.
+	seen := map[string]string{}
+	for _, tt := range tests {
+		sgr := styleSGR(t, tt.style)
+		if prev, clash := seen[sgr]; clash {
+			t.Fatalf("the %s and %s badge styles are identical — this test cannot discriminate",
+				prev, tt.name)
+		}
+		seen[sgr] = tt.name
 	}
 	// active=true as well: the active row's own style is the BOLD one, and a
 	// badge that inherits it is exactly the bug — being the active project does

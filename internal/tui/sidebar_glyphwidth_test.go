@@ -99,12 +99,20 @@ func TestSidebarRows_MeasureExactlyTheirWidth(t *testing.T) {
 	for _, w := range widths {
 		for _, name := range remoteTextSamples {
 			for _, c := range counts {
-				for _, link := range []string{"", "⚡", "⟳"} {
-					got := projectRow(name, c[0], c[1], c[2], link, true, w)
-					if n := lipgloss.Width(got); n != w {
-						t.Errorf("projectRow(%q, working=%d blocked=%d done=%d, link=%q, w=%d) "+
-							"measures %d cells, want exactly %d",
-							name, c[0], c[1], c[2], link, w, n, w)
+				for _, link := range []string{"", glyphLinkParked, glyphLinkRetry} {
+					// Both arms of `active`. It was worth little when it chose
+					// only between two one-cell markers; it now also chooses the
+					// STYLE that paints the head segment, and the row is built by
+					// concatenating independently styled runs — so the two arms
+					// are different renders, not the same render with a different
+					// first character.
+					for _, active := range []bool{true, false} {
+						got := projectRow(name, c[0], c[1], c[2], link, active, w)
+						if n := lipgloss.Width(got); n != w {
+							t.Errorf("projectRow(%q, working=%d blocked=%d done=%d, link=%q, active=%v, w=%d) "+
+								"measures %d cells, want exactly %d",
+								name, c[0], c[1], c[2], link, active, w, n, w)
+						}
 					}
 				}
 			}

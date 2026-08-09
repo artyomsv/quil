@@ -34,3 +34,19 @@ sanitiser, because an escape sequence measures zero cells.
 Confirmed gaps at review of `feat/projects-sidebar` (2026-08-03, round 1):
 project ctx-menu title, the Rename form's Name field, and the command
 palette's project-qualified pane labels. The sidebar itself was correct.
+
+**The sidebar cutters bound CELLS, never BYTES — and a width sweep cannot see
+the difference.** `truncateCells` (`internal/tui/sidebar.go`) opens with
+`if lipgloss.Width(s) <= w { return s }`, so a name made of printable
+ZERO-WIDTH codepoints (U+200B et al., which `sanitizeRemoteText` preserves by
+design) measures 0 and is returned **whole**, however many megabytes it is.
+Every row then measures exactly `w` cells, so `TestSidebarRows_MeasureExactlyTheirWidth`,
+`renderSidebar`'s closing `.Width(w)` and every cell-budget assertion all pass
+while the frame carries the flood. The 2026-07 fix made the cutters LINEAR
+(no more quadratic re-measurement); it did not make them BOUNDING.
+`formMsgNameCap` (`internal/tui/projectdialog.go`) is the only surface that
+bounds length, and it covers the project form's message line alone.
+
+**How to apply:** when reviewing a TUI render path, "it is truncated" and "it
+is bounded" are separate questions — ask the second one explicitly. A
+cell-width test is not evidence of the second.

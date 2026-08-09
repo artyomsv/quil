@@ -23,6 +23,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`Option+Shift+<letter>` reaches the shell again on macOS.** Chord parsing
+  lowercased the key, and the same parser reads the incoming key press — so on
+  Terminal.app with "Use Option as Meta key", where the shifted form arrives as
+  `alt+M` rather than `alt+shift+m`, ten letters were swallowed by the binding
+  on their lowercase twin (mute, restart pane, close tab, lazygit, the project
+  picker and others). `alt+M` and `alt+m` are now distinct chords; modifier
+  names and named keys such as `Escape` or `PgUp` still ignore case.
+- A binding whose key is not a key name — anything carrying a control or
+  text-direction character — is now refused and reported in F1 → Shortcuts
+  instead of being drawn into the dialog as written.
+- A long list of keys on one action no longer wraps its row in F1 → Shortcuts.
+  Four bindings on `rename_pane` pushed the dialog past the bottom of a 40-row
+  terminal.
+- A multi-step binding such as `new_tab = "ctrl+b c"` is now listed in F1 →
+  Shortcuts as not yet supported. It parsed and appeared in the list like any
+  working shortcut, while nothing dispatched it.
 - Paste now works in the Settings field editor and the instance form when
   `paste` is configured with multiple keys (e.g. `paste = "ctrl+v,f8"`). Those
   two dialogs compared the whole configured string against a single key, so any

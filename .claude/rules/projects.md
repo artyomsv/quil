@@ -503,6 +503,16 @@ load-bearing: the falling edge no longer fires, so a park does not set
 bar. The two must not be separated. See `hooks-and-sessions.md`'s Work state
 section for the hook side of this.
 
+**`Notification` no longer parks unconditionally, so the paragraph above
+describes the `PermissionRequest` path exactly and the `Notification` path only
+in part.** `Notification` is its own kind now (`hookevents.WorkEventNotify` /
+`workNotify`): the claude hook marks the idle nudge it can recognise from the
+message text, and the consumer parks on everything else — so an idle nudge
+arriving after `Stop` sets nothing at all, and a still-working pane keeps its
+`◐ ⋯N` instead of being outranked by a stale `▲`. Every sidebar reader here is
+unchanged; there is simply one fewer event that sets `blockedSince`. See
+`hooks-and-sessions.md`'s Work state section for the split.
+
 **`paneRow` suppresses the blocked glyph for the FOCUSED pane, and that is the
 only place a sidebar row does more than report state.** `blockedSince` is not
 cleared by focus (`ackFocusedPane` clears `unseen` alone — it runs on every

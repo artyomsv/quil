@@ -338,6 +338,20 @@ func TestRunHook_AllSpoolBranches(t *testing.T) {
 			hookEvt: "Notification", wantTit: "Claude is waiting", wantSev: "warning",
 		},
 		{
+			// The idle nudge is marked so the TUI can leave a still-working
+			// pane alone; every other Notification stays unmarked and parks.
+			name:    "Notification idle nudge is marked",
+			stdin:   `{"hook_event_name":"Notification","message":"Claude is waiting for your input"}`,
+			hookEvt: "Notification", wantTit: "Claude is waiting for your input", wantSev: "warning",
+			dataKey: "notify_kind", dataWant: "idle",
+		},
+		{
+			name:    "Notification permission prompt is not marked",
+			stdin:   `{"hook_event_name":"Notification","message":"Claude needs your permission to use Bash"}`,
+			hookEvt: "Notification", wantTit: "Claude needs your permission to use Bash", wantSev: "warning",
+			dataKey: "notify_kind", dataWant: "",
+		},
+		{
 			name:    "PermissionRequest",
 			stdin:   `{"hook_event_name":"PermissionRequest","tool_name":"Bash"}`,
 			hookEvt: "PermissionRequest", wantTit: "Needs approval: Bash", wantSev: "warning",
@@ -416,6 +430,47 @@ func TestRunHook_AllSpoolBranches(t *testing.T) {
 			}
 			if tt.dataKey != "" && p.Data[tt.dataKey] != tt.dataWant {
 				t.Errorf("data[%q] = %q, want %q", tt.dataKey, p.Data[tt.dataKey], tt.dataWant)
+			}
+		})
+	}
+}
+
+// TestNotifyKindData_MarksTheIdleNudgeOnly pins the producer half of the
+// Notification split. The match is deliberately one-directional: the idle
+// phrase is recognised positively, and EVERYTHING else — a permission prompt,
+// a future rewording, an empty message — is left unmarked so the consumer
+// parks it. A false "idle" is a permission prompt that never surfaces; a false
+// park is an amber tab the next Stop clears.
+func TestNotifyKindData_MarksTheIdleNudgeOnly(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		message string
+		want    string // "" means "not marked"
+	}{
+		{"observed idle nudge", "Claude is waiting for your input", hookevents.NotifyKindIdle},
+		{"idle nudge, upstream case change", "CLAUDE IS WAITING FOR YOUR INPUT", hookevents.NotifyKindIdle},
+		{"permission prompt", "Claude needs your permission to use Bash", ""},
+		{"unknown future message", "Claude has something else to say", ""},
+		{"empty message", "", ""},
+		// The permission message embeds a tool name, and an MCP server names
+		// its own tools — the idle phrase must not be reachable that way.
+		{"permission prompt for a tool named after the phrase",
+			"Claude needs your permission to use waiting for your input", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := notifyKindData(tt.message)
+			if tt.want == "" {
+				if got != nil {
+					t.Errorf("notifyKindData(%q) = %v, want nil — only the idle nudge is marked", tt.message, got)
+				}
+				return
+			}
+			if got[hookevents.DataNotifyKind] != tt.want {
+				t.Errorf("notifyKindData(%q)[%q] = %q, want %q",
+					tt.message, hookevents.DataNotifyKind, got[hookevents.DataNotifyKind], tt.want)
 			}
 		})
 	}

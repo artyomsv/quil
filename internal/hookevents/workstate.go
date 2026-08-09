@@ -31,14 +31,50 @@ const (
 	WorkEventSubagentStart // a subagent spawned → spinner on
 	WorkEventSubagentStop  // a subagent finished → spinner off once drained AND turn over
 	WorkEventStopFinal     // terminal stop (session end) → also clears the outstanding count
-	// WorkEventPark: the agent is blocked waiting on the USER — a permission
-	// prompt or an idle wait. Distinct from WorkEventStop, which means the turn
+	// WorkEventPark: the agent is blocked waiting on the USER, UNAMBIGUOUSLY —
+	// a permission prompt (hook.claude.PermissionRequest) or opencode's
+	// permission.ask. Distinct from WorkEventStop, which means the turn
 	// finished. Unlike Stop, this does NOT clear the spinner: the consumer
 	// (internal/tui/workstate.go) sets blockedSince without touching
 	// turnActive, because a permission prompt arrives mid-turn and approving
 	// it fires no hook of its own. Park means "this needs you", which is what
 	// the sidebar's ▲ renders.
 	WorkEventPark
+	// WorkEventNotify: the agent MAY be blocked waiting on the user. Claude
+	// reuses hook.claude.Notification for a permission prompt (mid-turn,
+	// while turnActive is still true — behaviourally identical to
+	// WorkEventPark) AND for its own idle nudge, "Claude is waiting for your
+	// input" (fired AFTER the turn's own Stop already cleared turnActive,
+	// often while background subagents are still draining). Collapsing both
+	// into WorkEventPark painted a tab's amber "blocked on you" marker while
+	// its agent was demonstrably still working (production sequence: Stop,
+	// then Notification, with 3 SubagentStops still to come).
+	//
+	// ClassifyWorkEvent cannot tell them apart — it is handed the event TYPE
+	// and nothing else — so the split is resolved by the two ends instead:
+	// the PRODUCER recognises the idle nudge from the hook's message text and
+	// says so in Data[DataNotifyKind], and the consumer parks unless it was
+	// told this is the idle case AND the turn is already over. See
+	// DataNotifyKind for why the mark is positive rather than negative.
+	WorkEventNotify
+)
+
+// DataNotifyKind is the Payload Data key a Notification producer uses to say
+// WHICH of Claude's two notifications a spool line carries, and NotifyKindIdle
+// is the only value it ever holds: the idle "waiting for your input" nudge.
+// Producer: internal/claudehook (notifyKindData). Consumer:
+// internal/tui/workstate.go's workNotify case.
+//
+// The mark is POSITIVE — "this one is the idle nudge" — and its absence means
+// "park", deliberately. Recognising upstream English prose is fragile, so the
+// direction of the match decides which way a reworded, unknown, or unmarked
+// message fails: toward the amber tab the next Stop clears (visible, and what
+// shipped for months), never toward a permission prompt that never surfaces at
+// all. It also makes an OLD hook binary beside a new TUI safe by construction —
+// it marks nothing, so every Notification parks, exactly as it used to.
+const (
+	DataNotifyKind = "notify_kind"
+	NotifyKindIdle = "idle"
 )
 
 // ClassifyWorkEvent maps a composed PaneEvent Type to a work-state transition.
@@ -70,23 +106,30 @@ func ClassifyWorkEvent(eventType string) WorkEventKind {
 	case "hook.claude.SubagentStop":
 		return WorkEventSubagentStop
 	// Park-for-input edges: the agent is blocked waiting on the user (permission
-	// prompt, option select, idle-input nudge). The classification here is
-	// unchanged — what changed is the consumer: internal/tui/workstate.go's
+	// prompt, option select, idle-input nudge). internal/tui/workstate.go's
 	// workPark case sets blockedSince WITHOUT clearing turnActive, so a
 	// permission prompt that arrives mid-turn keeps the spinner running across
 	// it (approving a Bash/Edit/Write prompt fires no hook of its own, so the
 	// pane used to read as blocked-not-working until the eventual Stop).
-	// Notification covers both that mid-turn prompt and an idle-wait nudge
-	// (Stop already cleared turnActive by then), which is why one edge handles
-	// both. Tagged distinctly from WorkEventStop so the sidebar can tell
-	// "blocked on you" apart from "turn finished" — a park no longer sets
-	// unseen; tabBlocked + blockedTabStyle carry it to the tab bar instead.
-	// Both Claude (Notification fires for permission + idle-wait;
-	// PermissionRequest when available) and opencode (permission.ask) are
-	// covered.
-	case "hook.claude.Notification", "hook.claude.PermissionRequest",
-		"hook.opencode.permission.ask":
+	// PermissionRequest (Claude, when available) and permission.ask (opencode)
+	// are unambiguous — always a real block — and stay WorkEventPark.
+	//
+	// hook.claude.Notification is NOT unambiguous: Claude reuses it for both
+	// that mid-turn permission prompt AND an idle-wait nudge fired once the
+	// turn is already over. THIS function cannot tell them apart — it is
+	// handed the event type and nothing else, neither the hook's message text
+	// (which the producer reads) nor turnActive (which the consumer holds).
+	// So it reports the ambiguity as its own kind, WorkEventNotify, and the
+	// two ends resolve it: the producer marks the idle nudge in
+	// Data[DataNotifyKind], the consumer parks whenever that mark is absent.
+	// Tagged distinctly from WorkEventStop either way, so the
+	// sidebar can tell "blocked on you" apart from "turn finished" — a
+	// genuine park no longer sets unseen; tabBlocked + blockedTabStyle carry
+	// it to the tab bar instead.
+	case "hook.claude.PermissionRequest", "hook.opencode.permission.ask":
 		return WorkEventPark
+	case "hook.claude.Notification":
+		return WorkEventNotify
 	case "process_exit":
 		return WorkEventAbort
 	}

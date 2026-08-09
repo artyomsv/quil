@@ -17,9 +17,13 @@ func stubAdd(t *testing.T, fn func(ctx context.Context, repo, path, branch strin
 	t.Helper()
 	var calls [][]string
 	prev := addWorktreeFn
-	addWorktreeFn = func(ctx context.Context, repo, path, branch string) error {
+	// The seam reports the base it resolved as well as the error. These stubs
+	// are about the arguments and the success/failure branch, so they report an
+	// empty base ("git used HEAD") and every caller keeps its error-only
+	// function literal.
+	addWorktreeFn = func(ctx context.Context, repo, path, branch string) (string, error) {
 		calls = append(calls, []string{repo, path, branch})
-		return fn(ctx, repo, path, branch)
+		return "", fn(ctx, repo, path, branch)
 	}
 	t.Cleanup(func() { addWorktreeFn = prev })
 	return &calls

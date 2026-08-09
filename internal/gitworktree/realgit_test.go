@@ -73,7 +73,7 @@ func TestAdd_RealGit_CreatesASiblingWorktreeOnTheBranch(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	if err := Add(ctx, repo, path, "feat/login"); err != nil {
+	if _, err := Add(ctx, repo, path, "feat/login"); err != nil {
 		t.Fatalf("Add against real git: %v", err)
 	}
 
@@ -127,13 +127,13 @@ func TestAdd_RealGit_RefusesAnExistingBranch(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	if err := Add(ctx, repo, DerivePath(repo, "dup"), "dup"); err != nil {
+	if _, err := Add(ctx, repo, DerivePath(repo, "dup"), "dup"); err != nil {
 		t.Fatalf("first Add: %v", err)
 	}
 	// A different path, the same branch — the shape a user retrying a name
 	// produces.
 	second := DerivePath(repo, "dup") + "-2"
-	err := Add(ctx, repo, second, "dup")
+	_, err := Add(ctx, repo, second, "dup")
 	if err == nil {
 		t.Fatal("Add reused an existing branch instead of failing")
 	}
@@ -155,7 +155,7 @@ func TestAdd_RealGit_KeepsTheSlashInTheBranchName(t *testing.T) {
 	defer cancel()
 
 	path := DerivePath(repo, "feat/nested/deep")
-	if err := Add(ctx, repo, path, "feat/nested/deep"); err != nil {
+	if _, err := Add(ctx, repo, path, "feat/nested/deep"); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
 	if base := filepath.Base(path); strings.ContainsAny(base, `/\`) {
@@ -181,7 +181,7 @@ func TestRemove_RealGit_UndoesAnAddCompletely(t *testing.T) {
 	defer cancel()
 
 	path := DerivePath(repo, "feat/undo")
-	if err := Add(ctx, repo, path, "feat/undo"); err != nil {
+	if _, err := Add(ctx, repo, path, "feat/undo"); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
 	if err := Remove(ctx, repo, path, "feat/undo"); err != nil {
@@ -203,7 +203,7 @@ func TestRemove_RealGit_UndoesAnAddCompletely(t *testing.T) {
 	// The branch must go too, or the whole point is lost: the next attempt at
 	// the same name would fail with "already exists" against a branch the user
 	// never made.
-	if err := Add(ctx, repo, DerivePath(repo, "feat/undo"), "feat/undo"); err != nil {
+	if _, err := Add(ctx, repo, DerivePath(repo, "feat/undo"), "feat/undo"); err != nil {
 		t.Errorf("the branch outlived Remove, so the name cannot be reused: %v", err)
 	}
 }
@@ -218,7 +218,7 @@ func TestRemove_RealGit_RemovesADirtyWorktree(t *testing.T) {
 	defer cancel()
 
 	path := DerivePath(repo, "feat/dirty")
-	if err := Add(ctx, repo, path, "feat/dirty"); err != nil {
+	if _, err := Add(ctx, repo, path, "feat/dirty"); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(path, "f.txt"), []byte("modified\n"), 0o644); err != nil {
@@ -266,7 +266,7 @@ func TestAdd_RealGit_BranchesFromTheDefaultBranchNotCurrentHEAD(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	path := DerivePath(repo, "fix/thing")
-	if err := Add(ctx, repo, path, "fix/thing"); err != nil {
+	if _, err := Add(ctx, repo, path, "fix/thing"); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
 
@@ -294,7 +294,7 @@ func TestAdd_RealGit_BranchesFromDefaultWhenHEADAlreadyIsIt(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	path := DerivePath(repo, "feat/ordinary")
-	if err := Add(ctx, repo, path, "feat/ordinary"); err != nil {
+	if _, err := Add(ctx, repo, path, "feat/ordinary"); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
 	if got := runGitIn(t, repo, "rev-parse", "feat/ordinary"); got != masterTip {
@@ -314,10 +314,129 @@ func TestAdd_RealGit_FallsBackToHEADWhenThereIsNoDefaultBranch(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	path := DerivePath(repo, "feat/x")
-	if err := Add(ctx, repo, path, "feat/x"); err != nil {
+	if _, err := Add(ctx, repo, path, "feat/x"); err != nil {
 		t.Fatalf("Add on a repository with no conventional default branch: %v", err)
 	}
 	if got := runGitIn(t, repo, "rev-parse", "feat/x"); got != trunkTip {
 		t.Errorf("feat/x = %s, want HEAD %s", got, trunkTip)
+	}
+}
+
+// realGitClone builds an origin repository and a clone of it, returning the
+// clone. A clone is the ONLY way to get a real refs/remotes/origin/HEAD — git
+// writes that symref from the server's advertised HEAD at clone time and never
+// again — and origin/HEAD is the branch defaultBranch tries FIRST for every
+// real user, so the tests that build a remote-less repo exercise everything
+// except the common path.
+func realGitClone(t *testing.T) string {
+	t.Helper()
+	origin := realGitRepo(t)
+	parent := filepath.Join(t.TempDir(), "cloned")
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	runGitIn(t, parent, "clone", "--quiet", origin, "repo")
+	return filepath.Join(parent, "repo")
+}
+
+// runGitAllowFail runs git and reports the exit status instead of failing the
+// test, for the assertions whose POINT is that a command fails — asking for a
+// branch's upstream when it must not have one.
+func runGitAllowFail(t *testing.T, dir string, args ...string) (string, bool) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(),
+		"GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_SYSTEM="+os.DevNull,
+		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
+		"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t",
+	)
+	out, err := cmd.CombinedOutput()
+	return strings.TrimSpace(string(out)), err == nil
+}
+
+// A DANGLING origin/HEAD must not break worktree creation.
+//
+// `git symbolic-ref` reads the symref without resolving its target, so it exits
+// 0 and prints a ref that no longer exists — the ordinary state of any clone
+// made before its remote renamed the default branch, because a later `fetch
+// --prune` removes the branch and leaves the symref pointing at it. Adopting
+// that answer unverified hands `worktree add` a reference it refuses, and since
+// the daemon creates NO pane on failure, worktree-backed panes stop working in
+// that repository permanently — for a branch name the user never typed.
+//
+// git itself treats this state as "no answer" ("warning: ignoring dangling
+// symref"), which is what defaultBranch has to mirror.
+func TestAdd_RealGit_FallsThroughWhenOriginHEADIsDangling(t *testing.T) {
+	repo := realGitClone(t)
+	if _, ok := runGitAllowFail(t, repo, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"); !ok {
+		t.Skip("this git did not record origin/HEAD on clone; nothing to dangle")
+	}
+	// Strand the symref exactly as `fetch --prune` does after an upstream
+	// rename: the branch goes, the symref naming it stays.
+	runGitIn(t, repo, "update-ref", "-d", "refs/remotes/origin/master")
+	if _, ok := runGitAllowFail(t, repo, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/master^{commit}"); ok {
+		t.Fatal("setup failed: refs/remotes/origin/master still resolves, so origin/HEAD is not dangling")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	path := DerivePath(repo, "fix/dangling")
+	if _, err := Add(ctx, repo, path, "fix/dangling"); err != nil {
+		t.Fatalf("Add failed on a repository with a dangling origin/HEAD: %v", err)
+	}
+	// It must land on the local master that clone created, not nowhere.
+	want := runGitIn(t, repo, "rev-parse", "refs/heads/master")
+	if got := runGitIn(t, repo, "rev-parse", "fix/dangling"); got != want {
+		t.Errorf("fix/dangling = %s, want local master %s", got, want)
+	}
+}
+
+// The new branch must have NO upstream.
+//
+// A remote-tracking start-point silently configures tracking (branch.autoSetupMerge
+// defaults to true), and the consequences are all bad here: `git push` in the
+// new worktree fails, and the remedy git prints — `git push origin HEAD:master`
+// — pushes the feature work straight onto the default branch if it is pasted.
+// `git pull` merges the base into the feature branch. And the sidebar's git row
+// starts rendering ahead/behind counts against the base on a branch whose push
+// does not work.
+//
+// Branching off HEAD never set an upstream, so tracking would be a behaviour
+// change smuggled in by the base-selection fix rather than anything asked for.
+func TestAdd_RealGit_DoesNotSetUpstreamOnTheNewBranch(t *testing.T) {
+	repo := realGitClone(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if _, err := Add(ctx, repo, DerivePath(repo, "feat/untracked"), "feat/untracked"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if out, ok := runGitAllowFail(t, repo, "config", "--get", "branch.feat/untracked.merge"); ok {
+		t.Errorf("the new branch tracks %q; it must have no upstream", out)
+	}
+	if out, ok := runGitAllowFail(t, repo, "config", "--get", "branch.feat/untracked.remote"); ok {
+		t.Errorf("the new branch has remote %q configured; it must have none", out)
+	}
+}
+
+// The clone case, asserted end to end: origin/HEAD is what a real repository
+// answers with, and every other real-git test here builds a repo that has none.
+func TestAdd_RealGit_UsesOriginHEADOnAClone(t *testing.T) {
+	repo := realGitClone(t)
+	runGitIn(t, repo, "checkout", "-q", "-b", "feat/unrelated")
+	if err := os.WriteFile(filepath.Join(repo, "g.txt"), []byte("unrelated\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	runGitIn(t, repo, "add", "g.txt")
+	runGitIn(t, repo, "commit", "-qm", "unrelated work")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if _, err := Add(ctx, repo, DerivePath(repo, "fix/from-origin"), "fix/from-origin"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	want := runGitIn(t, repo, "rev-parse", "refs/remotes/origin/master")
+	if got := runGitIn(t, repo, "rev-parse", "fix/from-origin"); got != want {
+		t.Errorf("fix/from-origin = %s, want origin/master %s", got, want)
 	}
 }

@@ -17,7 +17,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `origin/HEAD` where it is set, otherwise `origin/main`, `origin/master`,
   `main` or `master`, preferring the remote ref over a local one that may be
   stale. A repository with none of those (`git init -b trunk`) still works and
-  falls back to HEAD as before.
+  falls back to HEAD as before, as does one whose recorded default branch no
+  longer exists — common in clones made before their remote renamed `master`
+  to `main`, where the recorded answer outlives the branch it names.
+- The new branch is created with no upstream, matching what Quil did before.
+  Branching from a remote-tracking ref would otherwise configure one, and `git
+  push` in the new worktree would fail with advice that pushes the work onto
+  the default branch.
 
 ## [1.53.1] - 2026-08-09
 

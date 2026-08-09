@@ -203,7 +203,7 @@ func TestList_ClassifiesGitFailures(t *testing.T) {
 // past it is how a pane lands on top of another pane's checkout.
 func TestAdd_NeverForces(t *testing.T) {
 	calls := stubGit(t, "", nil)
-	if err := Add(context.Background(), "/repo", "/repo-worktrees/feat-x", "feat/x"); err != nil {
+	if _, err := Add(context.Background(), "/repo", "/repo-worktrees/feat-x", "feat/x"); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
 	call := addCall(t, *calls)
@@ -261,15 +261,103 @@ func stubGitScript(t *testing.T, fn func(args []string) (string, error)) *[][]st
 func TestDefaultBranch_PrefersOriginHEAD(t *testing.T) {
 	calls := stubGitScript(t, func(args []string) (string, error) {
 		if args[0] == "symbolic-ref" {
-			return "origin/develop\n", nil
+			return "refs/remotes/origin/develop\n", nil
 		}
-		return "", errors.New("should not be reached")
+		if args[len(args)-1] == "refs/remotes/origin/develop^{commit}" {
+			return "cafebabe\n", nil
+		}
+		return "", errors.New("no conventional candidate should be probed")
 	})
-	if got := defaultBranch(context.Background(), "/repo"); got != "origin/develop" {
-		t.Errorf("defaultBranch = %q, want %q", got, "origin/develop")
+	if got := defaultBranch(context.Background(), "/repo"); got != "refs/remotes/origin/develop" {
+		t.Errorf("defaultBranch = %q, want %q", got, "refs/remotes/origin/develop")
 	}
-	if len(*calls) != 1 {
+	// Two calls: read the symref, then verify it. Anything more means the
+	// conventional loop ran anyway and the answer happened to come out right.
+	if len(*calls) != 2 {
 		t.Errorf("origin/HEAD answered, but %d git calls ran: %v", len(*calls), *calls)
+	}
+}
+
+// A DANGLING origin/HEAD must fall through, not be adopted. `git symbolic-ref`
+// reads the symref without resolving its target, so it exits 0 naming a ref
+// that no longer exists — the ordinary state of a clone whose remote renamed
+// its default branch. Adopting it hands `worktree add` a reference git refuses,
+// which fails the whole create for a branch the user never typed.
+func TestDefaultBranch_FallsThroughWhenOriginHEADDoesNotResolve(t *testing.T) {
+	stubGitScript(t, func(args []string) (string, error) {
+		if args[0] == "symbolic-ref" {
+			return "refs/remotes/origin/gone\n", nil
+		}
+		if args[len(args)-1] == "refs/remotes/origin/master^{commit}" {
+			return "cafebabe\n", nil
+		}
+		return "", errors.New("exit status 128")
+	})
+	if got := defaultBranch(context.Background(), "/repo"); got != "refs/remotes/origin/master" {
+		t.Errorf("defaultBranch = %q, want the fallback %q", got, "refs/remotes/origin/master")
+	}
+}
+
+// symbolic-ref answering empty-with-no-error must also fall through. Every
+// other test here has it return an ERROR, so without this case a mutation that
+// drops the emptiness check and returns the trimmed value unconditionally still
+// passes — it would return "" where a real repository has an answer.
+func TestDefaultBranch_FallsThroughWhenOriginHEADIsEmpty(t *testing.T) {
+	stubGitScript(t, func(args []string) (string, error) {
+		if args[0] == "symbolic-ref" {
+			return "", nil
+		}
+		if args[len(args)-1] == "refs/heads/master^{commit}" {
+			return "cafebabe\n", nil
+		}
+		return "", errors.New("exit status 128")
+	})
+	if got := defaultBranch(context.Background(), "/repo"); got != "refs/heads/master" {
+		t.Errorf("defaultBranch = %q, want %q", got, "refs/heads/master")
+	}
+}
+
+// Every probe must be FULLY QUALIFIED. `rev-parse` applies ref_rev_parse_rules,
+// which tries refs/heads/%s before refs/remotes/%s — so a short "origin/main"
+// resolves a local branch literally named `refs/heads/origin/main` in
+// preference to the remote-tracking ref, inverting the documented ordering.
+// Asserted as a property over the argv rather than by listing the candidates,
+// so adding one cannot quietly reintroduce a short name.
+func TestDefaultBranch_ProbesOnlyFullyQualifiedRefs(t *testing.T) {
+	calls := stubGitScript(t, func(args []string) (string, error) {
+		return "", errors.New("exit status 128")
+	})
+	defaultBranch(context.Background(), "/repo")
+	for _, c := range *calls {
+		last := c[len(c)-1]
+		switch c[1] {
+		case "symbolic-ref":
+			if !strings.HasPrefix(last, "refs/") {
+				t.Errorf("symbolic-ref asked for %q, want a fully-qualified ref", last)
+			}
+		case "rev-parse":
+			if !strings.HasPrefix(last, "refs/") {
+				t.Errorf("rev-parse probed %q, want a fully-qualified ref", last)
+			}
+		}
+	}
+}
+
+// The one case that actually decides main-vs-master. The table below never has
+// both present at once, so reversing the whole candidate order passes it.
+func TestDefaultBranch_PrefersMainOverMasterWhenBothExist(t *testing.T) {
+	stubGitScript(t, func(args []string) (string, error) {
+		if args[0] == "symbolic-ref" {
+			return "", errors.New("exit status 1")
+		}
+		switch args[len(args)-1] {
+		case "refs/remotes/origin/main^{commit}", "refs/remotes/origin/master^{commit}":
+			return "cafebabe\n", nil
+		}
+		return "", errors.New("exit status 128")
+	})
+	if got := defaultBranch(context.Background(), "/repo"); got != "refs/remotes/origin/main" {
+		t.Errorf("defaultBranch = %q, want %q", got, "refs/remotes/origin/main")
 	}
 }
 
@@ -282,17 +370,17 @@ func TestDefaultBranch_FallsBackToTheFirstConventionalRefThatExists(t *testing.T
 		exist map[string]bool
 		want  string
 	}{
-		{"remote master", map[string]bool{"origin/master^{commit}": true}, "origin/master"},
-		{"remote main", map[string]bool{"origin/main^{commit}": true}, "origin/main"},
+		{"remote master", map[string]bool{"refs/remotes/origin/master^{commit}": true}, "refs/remotes/origin/master"},
+		{"remote main", map[string]bool{"refs/remotes/origin/main^{commit}": true}, "refs/remotes/origin/main"},
 		{
 			// A remote ref is the shared truth; a local branch of the same name
 			// can be behind it, and branching a fix off a stale local master is
 			// the near-miss version of the bug this resolution exists to fix.
 			"remote wins over local",
-			map[string]bool{"origin/master^{commit}": true, "master^{commit}": true},
-			"origin/master",
+			map[string]bool{"refs/remotes/origin/master^{commit}": true, "refs/heads/master^{commit}": true},
+			"refs/remotes/origin/master",
 		},
-		{"local only", map[string]bool{"master^{commit}": true}, "master"},
+		{"local only", map[string]bool{"refs/heads/master^{commit}": true}, "refs/heads/master"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -340,26 +428,35 @@ func TestDefaultBranch_ReturnsEmptyWhenNothingResolves(t *testing.T) {
 // The start-point is the whole fix: without it git branches from the HEAD of
 // whatever the main checkout is on, which is ambient state the user did not
 // choose in this dialog.
-func TestAdd_PassesTheDefaultBranchAsStartPoint(t *testing.T) {
+// --no-track is asserted with the start-point rather than in a test of its own,
+// because the two are one decision: a remote-tracking start-point configures an
+// upstream (branch.autoSetupMerge defaults to true), and then `git push` in the
+// new worktree fails with a remedy that pushes the work onto the default
+// branch. Branching off HEAD set no upstream, so passing the base without
+// --no-track changes behaviour the base fix never intended to touch.
+func TestAdd_PassesTheDefaultBranchAsStartPointWithoutTracking(t *testing.T) {
 	calls := stubGitScript(t, func(args []string) (string, error) {
 		if args[0] == "symbolic-ref" {
-			return "origin/master\n", nil
+			return "refs/remotes/origin/master\n", nil
 		}
-		return "", nil
+		return "cafebabe\n", nil
 	})
-	if err := Add(context.Background(), "/repo", "/repo-worktrees/feat-x", "feat/x"); err != nil {
+	if _, err := Add(context.Background(), "/repo", "/repo-worktrees/feat-x", "feat/x"); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
-	wantArgs := []string{"worktree", "add", "-b", "feat/x", "/repo-worktrees/feat-x", "origin/master"}
+	wantArgs := []string{"worktree", "add", "--no-track", "-b", "feat/x", "/repo-worktrees/feat-x", "refs/remotes/origin/master"}
 	if got := addCall(t, *calls)[1:]; !reflect.DeepEqual(got, wantArgs) {
 		t.Errorf("args = %v, want %v", got, wantArgs)
 	}
 }
 
-// A resolved value that could be read as a flag must never reach argv. Git's
-// own ref grammar forbids a leading dash, so this cannot happen through git —
-// which is exactly why it is worth a guard rather than a comment: the check
-// costs nothing and the failure it prevents is an injected git option.
+// A resolved value that could be read as a flag must never reach argv, and git
+// does NOT prevent this on its own: `git update-ref refs/heads/-evil HEAD`
+// succeeds, and git permutes option parsing past positional arguments, so a
+// dash-prefixed start-point is parsed as an option — `--force` as a trailing
+// positional is accepted as the flag (both measured, git 2.53). Fully-qualified
+// candidates cannot begin with a dash, so today this only fires on a symref
+// pointing outside refs/, but the guard has to outlive that.
 func TestAdd_RefusesAStartPointThatLooksLikeAFlag(t *testing.T) {
 	calls := stubGitScript(t, func(args []string) (string, error) {
 		if args[0] == "symbolic-ref" {
@@ -367,8 +464,13 @@ func TestAdd_RefusesAStartPointThatLooksLikeAFlag(t *testing.T) {
 		}
 		return "", nil
 	})
-	if err := Add(context.Background(), "/repo", "/repo-worktrees/feat-x", "feat/x"); err != nil {
+	if _, err := Add(context.Background(), "/repo", "/repo-worktrees/feat-x", "feat/x"); err != nil {
 		t.Fatalf("Add: %v", err)
+	}
+	for _, arg := range addCall(t, *calls) {
+		if strings.HasPrefix(arg, "--upstream") {
+			t.Fatalf("a dash-prefixed start-point reached argv: %v", *calls)
+		}
 	}
 	wantArgs := []string{"worktree", "add", "-b", "feat/x", "/repo-worktrees/feat-x"}
 	if got := addCall(t, *calls)[1:]; !reflect.DeepEqual(got, wantArgs) {
@@ -381,7 +483,7 @@ func TestAdd_RefusesAStartPointThatLooksLikeAFlag(t *testing.T) {
 // design is that a pane never lands somewhere other than where the user asked.
 func TestAdd_PropagatesFailure(t *testing.T) {
 	stubGit(t, "", errors.New("exit status 128"))
-	if err := Add(context.Background(), "/repo", "/occupied", "feat/x"); err == nil {
+	if _, err := Add(context.Background(), "/repo", "/occupied", "feat/x"); err == nil {
 		t.Fatal("Add should return an error when git fails")
 	}
 }

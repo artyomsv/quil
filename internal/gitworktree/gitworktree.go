@@ -179,29 +179,77 @@ func parsePorcelain(out string) []Worktree {
 // a local branch of that name can be behind it, which is the quieter version of
 // the same bug — a fix branched off a master that is three weeks stale.
 //
+// Every candidate is FULLY QUALIFIED, and short names were a bug. `rev-parse`
+// applies ref_rev_parse_rules, which tries refs/heads/%s BEFORE refs/remotes/%s
+// — so probing "origin/main" finds a local branch literally named
+// `refs/heads/origin/main` in preference to the remote-tracking ref, inverting
+// the ordering this comment promises (measured, git 2.53). Fully-qualified refs
+// also make the ^{commit} peel unambiguous: it does NOT reject a tag as an
+// earlier version of this comment claimed — it PEELS one, so an annotated tag
+// named `master` answers for `master^{commit}` and the worktree branches off
+// the tag.
+//
 // Returning "" is a real answer, not a failure. `git init -b trunk` makes a
 // repository with no `main`, no `master` and no remote, and refusing to create
 // a worktree there would trade one wrong behaviour for a broken one; the caller
 // falls back to git's own HEAD default, which is correct for exactly that repo.
 func defaultBranch(ctx context.Context, repo string) string {
-	if out, err := runGit(ctx, repo, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"); err == nil {
-		if ref := strings.TrimSpace(out); ref != "" {
+	// NOT --short: the fully-qualified form is what usableStartPoint can probe
+	// unambiguously, and it cannot begin with a dash by construction.
+	if out, err := runGit(ctx, repo, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"); err == nil {
+		// VERIFIED like every other candidate, and falling through when it does
+		// not resolve. `git symbolic-ref` reads the symref without resolving its
+		// target, so it exits 0 on a DANGLING origin/HEAD — the ordinary state
+		// of any clone made before its remote renamed the default branch, since
+		// a later `fetch --prune` drops the branch and leaves the symref naming
+		// it. Adopting that answer hands `worktree add` a reference it refuses
+		// ("fatal: invalid reference: origin/master"), and because the daemon
+		// creates NO pane on failure, worktree-backed panes stop working in that
+		// repository entirely — naming a branch the user never typed. git itself
+		// reports this state as "warning: ignoring dangling symref", i.e. as no
+		// answer, which is what this mirrors.
+		if ref := strings.TrimSpace(out); usableStartPoint(ctx, repo, ref) {
 			return ref
 		}
 	}
-	for _, ref := range []string{"origin/main", "origin/master", "main", "master"} {
-		// ^{commit} rejects a tag or a tree wearing the name, so the value
-		// handed to `worktree add` is always something it can branch from.
-		//
-		// The output is checked as well as the error: --verify --quiet prints
-		// the sha on success, so empty-with-no-error means something other than
-		// git answered, and adopting "" would put an empty argument where a
-		// commit-ish belongs.
-		if out, err := runGit(ctx, repo, "rev-parse", "--verify", "--quiet", ref+"^{commit}"); err == nil && strings.TrimSpace(out) != "" {
+	for _, ref := range []string{
+		"refs/remotes/origin/main",
+		"refs/remotes/origin/master",
+		"refs/heads/main",
+		"refs/heads/master",
+	} {
+		if usableStartPoint(ctx, repo, ref) {
 			return ref
 		}
 	}
 	return ""
+}
+
+// usableStartPoint reports whether ref can be handed to `git worktree add` as
+// the commit-ish to branch from. One check for both resolution paths, because
+// the primary one skipping it is what shipped the dangling-symref failure.
+//
+// The dash guard is LOAD-BEARING, not a formality — the opposite of what an
+// earlier comment here asserted. git's ref grammar does NOT forbid a leading
+// dash: `git update-ref refs/heads/-evil HEAD` succeeds, and git permutes
+// option parsing past positional arguments, so a start-point of `-evil` reaches
+// `worktree add` as an option ("error: unknown switch `e'") and `--force` as a
+// trailing positional is ACCEPTED as the flag (both measured, git 2.53). A
+// fully-qualified ref cannot start with a dash, so this is belt-and-braces
+// today — but the guard must outlive any change back to short names, and an
+// unusable value now falls THROUGH to the next candidate rather than silently
+// reverting Add to the ambient-HEAD behaviour this package exists to remove.
+//
+// Output is checked as well as the error: `rev-parse --verify --quiet` prints
+// the sha on success, so empty-with-no-error means something other than git
+// answered, and adopting "" would put an empty argument where a commit-ish
+// belongs.
+func usableStartPoint(ctx context.Context, repo, ref string) bool {
+	if ref == "" || strings.HasPrefix(ref, "-") {
+		return false
+	}
+	out, err := runGit(ctx, repo, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
+	return err == nil && strings.TrimSpace(out) != ""
 }
 
 // Add creates a linked worktree at path, checking out a NEW branch off the
@@ -217,19 +265,37 @@ func defaultBranch(ctx context.Context, repo string) string {
 // with git's own stderr attached, because "already used by worktree
 // '/x/feat-y'" tells the user which pane to go look at and no message this
 // package could invent would.
-func Add(ctx context.Context, repo, path, branch string) error {
-	args := []string{"worktree", "add", "-b", branch, path}
-	// A leading dash can never come out of defaultBranch — git's ref grammar
-	// forbids one — which is precisely why the guard is cheap enough to keep:
-	// the check costs one comparison and the failure it forecloses is an
-	// injected git option rather than a bad branch.
-	if start := defaultBranch(ctx, repo); start != "" && !strings.HasPrefix(start, "-") {
+// The resolved start-point is RETURNED rather than kept private, and empty
+// means "git's own HEAD default". A wrong base is invisible at create time by
+// construction — that is the whole premise of this function — and surfaces days
+// later as a PR whose diff is somebody else's work, so the caller logging what
+// was actually used is the only place anyone can ever confirm it.
+func Add(ctx context.Context, repo, path, branch string) (string, error) {
+	start := defaultBranch(ctx, repo)
+	args := []string{"worktree", "add"}
+	if start != "" {
+		// --no-track, because a remote-tracking start-point would otherwise
+		// configure an upstream (branch.autoSetupMerge defaults to true) and
+		// every consequence of that is wrong here. `git push` in the new
+		// worktree fails, and the remedy git prints — `git push origin
+		// HEAD:master` — pushes the feature work straight onto the default
+		// branch if it is pasted. `git pull` merges the base INTO the feature
+		// branch. And gitinfo starts rendering ahead/behind counts against the
+		// base for that pane, on a branch whose push does not work.
+		//
+		// Branching off HEAD never set an upstream, so tracking would be a
+		// behaviour change smuggled in by a base-selection fix. Only meaningful
+		// alongside a start-point, hence the shared condition.
+		args = append(args, "--no-track")
+	}
+	args = append(args, "-b", branch, path)
+	if start != "" {
 		args = append(args, start)
 	}
 	if _, err := runGit(ctx, repo, args...); err != nil {
-		return fmt.Errorf("git worktree add %s (branch %s): %w", path, branch, err)
+		return start, fmt.Errorf("git worktree add %s (branch %s): %w", path, branch, err)
 	}
-	return nil
+	return start, nil
 }
 
 // Remove undoes an Add whose pane could not be created, and deletes the branch

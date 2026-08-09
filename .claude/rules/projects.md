@@ -602,7 +602,48 @@ first (the repository's own recorded answer — a repo whose default is `develop
 must not be branched off a `master` that merely exists beside it), then
 `origin/main`, `origin/master`, `main`, `master`, remote before local at the
 same name because a local branch can be behind the remote and a base three
-weeks stale is the quiet version of the same bug. Resolution is DAEMON-side and
+weeks stale is the quiet version of the same bug.
+
+**Every candidate goes through `usableStartPoint`, and the primary path
+skipping that check shipped a hard regression.** `git symbolic-ref` READS the
+symref without resolving its target, so it exits 0 on a DANGLING `origin/HEAD` —
+the ordinary state of any clone made before its remote renamed the default
+branch, since a later `fetch --prune` drops the branch and leaves the symref
+naming it. Adopting that answer hands `worktree add` a reference git refuses
+(`fatal: invalid reference: origin/master`), and because the daemon creates NO
+pane on failure, worktree-backed panes stopped working in that repository
+entirely, naming a branch the user never typed. git itself reports the state as
+`warning: ignoring dangling symref`, i.e. as no answer; an unusable candidate
+now falls THROUGH rather than being adopted or silently reverting `Add` to the
+ambient-HEAD behaviour. **Candidates are FULLY QUALIFIED for a second reason**:
+`rev-parse` applies `ref_rev_parse_rules`, which tries `refs/heads/%s` BEFORE
+`refs/remotes/%s`, so probing the short `origin/main` finds a local branch
+literally named `refs/heads/origin/main` in preference to the remote-tracking
+ref — inverting the ordering the paragraph above promises. It also disambiguates
+the `^{commit}` peel, which does NOT reject a tag as an earlier comment here
+claimed: it PEELS one, so an annotated tag named `master` answers for
+`master^{commit}`. **The dash guard is load-bearing rather than a formality** —
+git's ref grammar permits `refs/heads/-evil`, and git permutes option parsing
+past positional arguments, so a dash-prefixed start-point reaches `worktree
+add` as an option (measured: `--force` as a trailing positional is accepted as
+the flag).
+
+**`--no-track` accompanies every start-point, and the two are one decision.** A
+remote-tracking start-point configures an upstream (`branch.autoSetupMerge`
+defaults to true), after which `git push` in the new worktree FAILS and the
+remedy git prints — `git push origin HEAD:master` — pushes the feature work
+straight onto the default branch if it is pasted; `git pull` merges the base
+into the feature branch; and `gitRow` starts rendering ahead/behind counts
+against the base for that pane, on a branch whose push does not work. Branching
+off HEAD never set an upstream, so tracking would be a behaviour change
+smuggled in by a base-selection fix.
+
+**`Add` RETURNS the base it used and the daemon logs it on success.** A wrong
+base is invisible at create time by construction — that is the premise of the
+whole mechanism — and surfaces days later as a PR whose diff is somebody else's
+work, so the log line is the only place anyone can ever confirm which base was
+taken. An empty return means no default branch resolved and git used HEAD,
+which is logged as that rather than as a blank. Resolution is DAEMON-side and
 absent from the wire: `WorktreeSpec` carries no base, so nothing on the client
 infers anything about a repository living on the daemon's disk. **An empty
 resolution is a real answer** — `git init -b trunk` is a legitimate repository —

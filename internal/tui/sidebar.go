@@ -86,6 +86,18 @@ func (p *ProjectModel) counts() (working, blocked, done int) {
 	return working, blocked, done
 }
 
+// The link-health glyphs. Deliberately NOT in the state-glyph const block
+// below and deliberately exempt from its no-emoji-capable rule: ⚡ is U+26A1,
+// which that block names as a codepoint to avoid. It is safe HERE and only
+// here because lipgloss measures it as two cells — it is the one wide glyph in
+// the sidebar, which is why truncateCells' comment names it — so the budget
+// arithmetic already accounts for its real width rather than being surprised
+// by it. Nothing follows it on the row for a wide draw to overpaint.
+const (
+	glyphLinkParked = "⚡" // the reconnect ladder gave up; nothing happens until the user acts
+	glyphLinkRetry  = "⟳" // reconnecting on its own
+)
+
 // linkGlyph reports the connection health of a destination: ⟳ reconnecting,
 // ⚡ parked, empty when healthy. Reads through linkOf, never linkFor — linkFor
 // has a pointer receiver and CREATES a map entry on first use, and this runs
@@ -97,11 +109,28 @@ func (m *Model) linkGlyph(dest string) string {
 	ls := m.linkOf(dest)
 	switch {
 	case ls.parked:
-		return "⚡"
+		return glyphLinkParked
 	case ls.active:
-		return "⟳"
+		return glyphLinkRetry
 	default:
 		return ""
+	}
+}
+
+// linkGlyphStyle paints a link glyph by what it MEANS, keyed off the glyph
+// rather than off reconnectState. projectRow is a pure function of already
+// resolved strings — that is what lets the width sweep drive it directly with a
+// literal link — so threading the style through as a second parameter would put
+// the row builder's signature at the mercy of a state type it never sees. The
+// vocabulary is two closed values that linkGlyph is the sole producer of.
+func linkGlyphStyle(glyph string) lipgloss.Style {
+	switch glyph {
+	case glyphLinkParked:
+		return sidebarLinkParkedStyle
+	case glyphLinkRetry:
+		return sidebarLinkRetryStyle
+	default:
+		return sidebarDimStyle
 	}
 }
 
@@ -672,7 +701,65 @@ var (
 	sidebarPinnedStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("141"))
 	sidebarGitStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
 	sidebarGitStaleStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Italic(true)
+	// Link health is about the DESTINATION, not about any pane, so it takes
+	// colours from outside the pane-state palette above rather than reusing one
+	// and saying something false with it. Parked is the red spawnErrorStyle
+	// already spends on a pane that failed to start — the link is dead and stays
+	// dead until the user acts. Retrying is the 208 orange projectFormMsgBusy
+	// uses for "the machine is working": amber 214 is reserved for
+	// blocked-on-user, and a link healing itself is the opposite of that.
+	sidebarLinkParkedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
+	sidebarLinkRetryStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("208"))
 )
+
+// styledSegment is one run of a row's PLAIN text paired with the style that
+// paints it. Rows that mix states (the project badge rolls up three at once)
+// cannot be built as a single styled string: every style.Render emits its own
+// reset, so wrapping an already-styled line closes the outer colour at the
+// first inner segment and leaves the rest of the row unpainted.
+type styledSegment struct {
+	text  string
+	style lipgloss.Style
+}
+
+// renderStyledSegments paints each segment with its own style and returns
+// exactly w cells.
+//
+// The budget is spent on PLAIN text, segment by segment, and styling is applied
+// only to the piece that survived the cut. That ordering is the whole point:
+// truncateCells segments on grapheme clusters and lipgloss.Width measures an
+// escape sequence as ZERO cells, so a single pass over an already-styled string
+// would both mis-measure the row and cut through the middle of an SGR sequence
+// — emitting a fragment like "38;5;214m" as literal text. Every other row
+// builder in this file gets to use padOrTrunc directly because it has one style
+// for the whole line; this is that same guarantee for rows that do not.
+//
+// Segments are spent in order, so an earlier one is never truncated to make
+// room for a later one — projectRow relies on that to give its name the
+// leftover cells before the badge takes the tail.
+func renderStyledSegments(segs []styledSegment, w int) string {
+	var b strings.Builder
+	used := 0
+	for _, s := range segs {
+		if used >= w {
+			break
+		}
+		t := truncateCells(s.text, w-used)
+		if t == "" {
+			continue
+		}
+		used += lipgloss.Width(t)
+		b.WriteString(s.style.Render(t))
+	}
+	// The same backstop padOrTrunc gives every other row: renderSidebar's
+	// closing .Width(w) WRAPS a short line's neighbour rather than padding
+	// predictably, and a row that stopped short would leave that pass work to do
+	// on a strip whose y->row mapping depends on it having none.
+	if pad := w - used; pad > 0 {
+		b.WriteString(strings.Repeat(" ", pad))
+	}
+	return b.String()
+}
 
 // projectDestRow renders a remote project's host under its name. Indented and
 // dimmed so the column still reads as a list of projects rather than eight
@@ -839,45 +926,59 @@ func sidebarTabHeading(name string, idx int, active bool, color string, w int) s
 // working/blocked counts plus link health. name is expected pre-sanitized —
 // every call site in renderSidebar routes the raw daemon-sourced value
 // through sanitizeRemoteText before reaching here.
+// The badge segments are painted in the PANE rows' state colours rather than
+// inheriting the row's own, and that is what makes it a roll-up rather than
+// three numbers. The whole line used to go through one style.Render, so ▲/◐/✓
+// came out in the project row's grey while the panes they summarise were amber,
+// blue and green two sections below — the glyph vocabulary matched and the
+// colour vocabulary did not, which is the half a user reads first at 22
+// columns. Same styles as paneRow, not copies of their values: a palette change
+// has to move both sections together.
 func projectRow(name string, working, blocked, done int, link string, active bool, w int) string {
 	marker := "  "
 	if active {
 		marker = "▸ "
 	}
+	style := sidebarProjectStyle
+	if active {
+		style = sidebarActiveStyle
+	}
 	// Badge order is urgency order, and it is the same glyph vocabulary the
 	// pane rows use so the summary reads as a roll-up rather than a second
 	// notation: needs you, still running, finished while you were away.
-	badge := ""
+	var badge []styledSegment
 	if blocked > 0 {
-		badge += fmt.Sprintf(" %s%d", glyphBlocked, blocked)
+		badge = append(badge, styledSegment{fmt.Sprintf(" %s%d", glyphBlocked, blocked), sidebarBlockedStyle})
 	}
 	if working > 0 {
-		badge += fmt.Sprintf(" %s%d", glyphWorking, working)
+		badge = append(badge, styledSegment{fmt.Sprintf(" %s%d", glyphWorking, working), sidebarWorkingStyle})
 	}
 	if done > 0 {
-		badge += fmt.Sprintf(" %s%d", glyphDone, done)
+		badge = append(badge, styledSegment{fmt.Sprintf(" %s%d", glyphDone, done), sidebarUnseenStyle})
 	}
 	if link != "" {
-		badge += " " + link
+		badge = append(badge, styledSegment{" " + link, linkGlyphStyle(link)})
+	}
+	badgeW := 0
+	for _, s := range badge {
+		badgeW += lipgloss.Width(s.text)
 	}
 
-	avail := w - lipgloss.Width(marker) - lipgloss.Width(badge)
+	avail := w - lipgloss.Width(marker) - badgeW
 	if avail < 1 {
 		avail = 1
 	}
 	name = truncateCells(name, avail)
 
-	line := marker + name
-	if gap := w - lipgloss.Width(line) - lipgloss.Width(badge); gap > 0 {
-		line += strings.Repeat(" ", gap)
+	// The gap belongs to the HEAD segment, so the badge stays flush right and
+	// renderStyledSegments' own trailing pad is only ever the backstop it is
+	// described as — reached when the badge was cut away entirely at a width
+	// that could not afford it.
+	head := marker + name
+	if gap := w - lipgloss.Width(head) - badgeW; gap > 0 {
+		head += strings.Repeat(" ", gap)
 	}
-	line += badge
-
-	style := sidebarProjectStyle
-	if active {
-		style = sidebarActiveStyle
-	}
-	return style.Render(padOrTrunc(line, w))
+	return renderStyledSegments(append([]styledSegment{{head, style}}, badge...), w)
 }
 
 // paneRow renders one pane's agent state: ◐ working (with ⋯N outstanding

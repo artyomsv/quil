@@ -1102,6 +1102,125 @@ func TestProjectBadgeCountsFinishedPanes(t *testing.T) {
 	}
 }
 
+// styleSGR returns the ANSI prefix a style emits before its content, or "" when
+// the active colour profile strips colour entirely. The colour assertions below
+// are meaningless in that case, so they skip rather than pass silently — a
+// vacuous green test is the failure mode a colour assertion is most prone to.
+func styleSGR(t *testing.T, s lipgloss.Style) string {
+	t.Helper()
+	const probe = "x"
+	out := s.Render(probe)
+	i := strings.Index(out, probe)
+	if i <= 0 {
+		return ""
+	}
+	return out[:i]
+}
+
+// TestProjectRow_BadgesCarryTheirStateColour: the project badge is a ROLL-UP of
+// the pane rows beneath it, and it read as one — same glyphs, same order — while
+// being painted in a single flat colour. The whole line went through one
+// style.Render, so ▲/◐/✓ inherited the row's grey and the summary said "three
+// numbers" where the pane section says "one needs you, one is running, one is
+// ready". Colour is most of what makes a badge scannable at 22 columns.
+//
+// Asserted against the SAME style values paneRow uses, not against literal SGR
+// codes: the requirement is that the two sections agree, so a deliberate palette
+// change must move both together rather than failing here.
+func TestProjectRow_BadgesCarryTheirStateColour(t *testing.T) {
+	t.Parallel()
+	if styleSGR(t, sidebarBlockedStyle) == "" {
+		t.Skip("lipgloss renders without colour here — these assertions cannot discriminate")
+	}
+	tests := []struct {
+		name  string
+		style lipgloss.Style
+		badge string
+	}{
+		{"blocked", sidebarBlockedStyle, glyphBlocked + "1"},
+		{"working", sidebarWorkingStyle, glyphWorking + "2"},
+		{"done", sidebarUnseenStyle, glyphDone + "3"},
+	}
+	// active=true as well: the active row's own style is the BOLD one, and a
+	// badge that inherits it is exactly the bug — being the active project does
+	// not change what its panes are doing.
+	for _, active := range []bool{false, true} {
+		row := projectRow("alpha", 2, 1, 3, "", active, 30)
+		for _, tt := range tests {
+			want := styleSGR(t, tt.style) + " " + tt.badge
+			if !strings.Contains(row, want) {
+				t.Errorf("active=%v: projectRow = %q, want the %s badge painted with its own style (%q)",
+					active, row, tt.name, want)
+			}
+		}
+	}
+}
+
+// TestProjectRow_LinkGlyphCarriesItsOwnColour: the link glyph reports the
+// DESTINATION's health rather than any pane's, so it is the one badge segment
+// with no counterpart in the pane rows — and it was the easiest to lose in the
+// flat grey, being a lone symbol with no count beside it.
+//
+// ⚡ (parked: the ladder gave up, nothing will happen until the user acts) takes
+// the red spawnErrorStyle already uses for a dead pane; ⟳ (retrying: the machine
+// is working, nothing is waiting on the user) takes the 208 orange the project
+// form's busy line uses. Painting both amber would say "needs you" about the one
+// state that does not.
+func TestProjectRow_LinkGlyphCarriesItsOwnColour(t *testing.T) {
+	t.Parallel()
+	if styleSGR(t, sidebarLinkParkedStyle) == "" {
+		t.Skip("lipgloss renders without colour here — these assertions cannot discriminate")
+	}
+	if styleSGR(t, sidebarLinkParkedStyle) == styleSGR(t, sidebarLinkRetryStyle) {
+		t.Fatal("the parked and retrying link styles are identical — this test cannot discriminate")
+	}
+	for _, tt := range []struct {
+		glyph string
+		style lipgloss.Style
+	}{
+		{glyphLinkParked, sidebarLinkParkedStyle},
+		{glyphLinkRetry, sidebarLinkRetryStyle},
+	} {
+		row := projectRow("alpha", 0, 0, 0, tt.glyph, false, 30)
+		want := styleSGR(t, tt.style) + " " + tt.glyph
+		if !strings.Contains(row, want) {
+			t.Errorf("projectRow(link=%q) = %q, want the glyph painted with its own style (%q)",
+				tt.glyph, row, want)
+		}
+	}
+}
+
+// TestProjectRow_NameKeepsTheRowStyle guards the other half of the split: the
+// badge segments must not bleed their colour back over the name, and the name
+// must not lose the active row's emphasis to them. Both are the failure mode of
+// concatenating styled runs — an SGR left open, or a reset that closes the run
+// it was supposed to end.
+func TestProjectRow_NameKeepsTheRowStyle(t *testing.T) {
+	t.Parallel()
+	if styleSGR(t, sidebarProjectStyle) == "" {
+		t.Skip("lipgloss renders without colour here — these assertions cannot discriminate")
+	}
+	for _, tt := range []struct {
+		name  string
+		style lipgloss.Style
+		activ bool
+	}{
+		{"inactive", sidebarProjectStyle, false},
+		{"active", sidebarActiveStyle, true},
+	} {
+		row := projectRow("alpha", 1, 1, 1, glyphLinkParked, tt.activ, 30)
+		if want := styleSGR(t, tt.style); !strings.Contains(row, want) {
+			t.Errorf("%s: projectRow = %q, want the name painted with the row style (%q)",
+				tt.name, row, want)
+		}
+		// The badge is the LAST thing on the row, so an unterminated segment
+		// leaks past the row into whatever the frame joins beside it.
+		if !strings.HasSuffix(row, "\x1b[0m") && !strings.HasSuffix(row, "\x1b[m") {
+			t.Errorf("%s: projectRow = %q, want it to end with an SGR reset", tt.name, row)
+		}
+	}
+}
+
 // TestPaneRowKeepsTheNameWhenTheReasonIsLong: the blocked reason is secondary
 // detail; the label is what says WHICH pane. Subtracting the suffix from the
 // budget first inverted that — at the default 22-column width a reason like

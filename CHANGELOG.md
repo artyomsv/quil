@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- The project sidebar's state badges were all painted the same grey as the
+  project name. The counts use the same glyphs as the pane rows below them —
+  ▲ needs you, ◐ still running, ✓ finished while you were away — so the badge
+  is meant to read as a roll-up of those panes, but with every state in one
+  flat colour it read as three anonymous numbers instead. Each count now
+  carries the same colour its pane rows do: amber for blocked, blue for
+  working, green for finished.
+- A remote project's connection glyph was grey for the same reason, so a
+  destination that had given up reconnecting (⚡) looked identical to one that
+  was still retrying on its own (⟳). Parked is now red and retrying orange —
+  deliberately not the amber the sidebar reserves for "waiting on you", which
+  a link healing itself is the opposite of.
+
 ## [1.53.3] - 2026-08-09
 
 ### Fixed

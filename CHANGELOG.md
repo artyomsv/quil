@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.54.0] - 2026-08-09
+
 ### Added
 - **Mark attention now survives a restart.** The pin was TUI-session state, so
   every mark you set was gone the next time you opened Quil — which is most of

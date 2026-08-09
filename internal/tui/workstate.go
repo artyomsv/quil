@@ -163,15 +163,16 @@ func (m *Model) notifyTabSwitch(tab *TabModel) {
 // than from unseen; the two must not be separated.
 //
 // workNotify is the ambiguous twin (see hookevents.WorkEventNotify): Claude's
-// Notification fires for a mid-turn permission prompt (turnActive true —
-// parks exactly like workPark above) AND for its own idle nudge once the
-// turn is already over (turnActive false — Stop already ran its own falling
-// edge, if any). The idle-nudge case changes NOTHING here: no blockedSince,
-// no touch to turnActive, so `working` recomputes to the same value it
-// already had and neither edge below fires. Collapsing the two into workPark
-// painted a tab amber and hid a still-working pane's ◐/⋯N behind ▲ while its
-// background subagents were still draining (production sequence: Stop, then
-// Notification, with 3 SubagentStops still to come).
+// Notification fires for a mid-turn permission prompt AND for its own idle
+// nudge once the turn is already over. Only ONE case is exempted from the
+// park — the nudge the producer positively recognised (Data[DataNotifyKind])
+// arriving with the turn already closed — and it changes NOTHING here: no
+// blockedSince, no touch to turnActive, so `working` recomputes to the same
+// value it already had and neither edge below fires. Everything else parks,
+// including an unmarked Notification from an older hook binary. Parking the
+// idle nudge too painted a tab amber and hid a still-working pane's ◐/⋯N
+// behind ▲ while its background subagents were still draining (production
+// sequence: Stop, then Notification, with 3 SubagentStops still to come).
 //
 // `working` is DERIVED — recomputed at a single point below as
 // turnActive || len(subagents) > 0 || subagentsOverflow — never assigned by
@@ -196,9 +197,14 @@ func (m *Model) notifyTabSwitch(tab *TabModel) {
 //
 // Replay safety: the daemon replays the queued event history on attach, and
 // the ordered replay reconstructs the live state PROVIDED the ledger starts
-// empty. The ring's oldest-first eviction can only ever orphan a
-// SubagentStop (never strand a start behind its stop), and a stop naming no
-// live agent is ignored below.
+// empty. Oldest-first eviction drops START edges, never the stops that follow
+// them, so for the ledger it can only ever orphan a SubagentStop — and a stop
+// naming no live agent is ignored below. The turn has the same exposure with
+// a different owner: an evicted UserPromptSubmit leaves turnActive false under
+// events that assumed it true, which is why workNotify may not rest on
+// turnActive alone. It parks on an ABSENT idle mark whatever the turn state
+// says, so a truncated replay can cost a spinner frame but never a permission
+// prompt.
 //
 // That zero-start premise used to be free: attach happened exactly once per
 // TUI process, guarded by Model.attached. Remote reconnect (RD-011) broke
@@ -329,22 +335,40 @@ func (m *Model) applyWorkTransition(paneID, eventType string, data map[string]st
 		// Data["tool"] is set by the claude hook only for PermissionRequest
 		// and PostToolUse. Notification and opencode's permission.ask may
 		// carry no tool, so the reason is genuinely optional — render a bare
-		// marker rather than inventing one.
-		pane.blockedReason = data["tool"]
+		// marker rather than inventing one. Guarded rather than assigned:
+		// a second park for the SAME prompt that carries no tool must not
+		// erase the name the first one gave the sidebar (▲ Bash → bare ▲).
+		if tool := data["tool"]; tool != "" {
+			pane.blockedReason = tool
+		}
 	case workNotify:
 		// Notification is Claude's idle nudge as well as its permission
-		// prompt, and nothing in the payload tells them apart — only
-		// turnActive can. turnActive true: the turn is still open, so this
-		// IS a permission prompt; treat exactly like workPark above
-		// (blockedSince/blockedReason, spinner and turnActive untouched).
-		// turnActive false: Stop already ended the turn, so this is the idle
-		// nudge alone — leave every field exactly as Stop left it (unseen if
-		// nothing was outstanding, still working if subagents are). Setting
-		// blockedSince unconditionally here was the bug: it painted a tab
-		// amber and hid the ◐ ⋯N a pane with live subagents should show.
-		if pane.turnActive {
+		// prompt. The classifier is handed the event type alone, so the
+		// PRODUCER (internal/claudehook) marks the idle case it can recognise
+		// from the message text, and this is where the two facts meet:
+		//
+		//   - not marked idle → park. An unrecognised, reworded or unmarked
+		//     message (an older hook binary marks nothing) may be a permission
+		//     prompt, and turnActive is a LOSSY discriminator for that — it is
+		//     false for a background subagent's prompt after the main turn's
+		//     Stop, after a reattach zeroed it, and after a replay truncated
+		//     past its UserPromptSubmit. Wrong-on is an amber tab the next
+		//     Stop clears; wrong-off is a prompt that never surfaces and no
+		//     later hook recovers, since a parked agent emits nothing.
+		//   - marked idle AND turnActive → park anyway. Only Stop-then-nudge
+		//     is unambiguous, and keeping the gate is what makes the
+		//     production sequence resolve correctly against a hook binary
+		//     that predates the mark.
+		//   - marked idle, turn already over → change NOTHING. Leave every
+		//     field as Stop left it (unseen if nothing was outstanding, still
+		//     working if subagents are). Stamping blockedSince here was the
+		//     bug: it painted a tab amber and hid the ◐ ⋯N a pane with live
+		//     subagents should show.
+		if data[hookevents.DataNotifyKind] != hookevents.NotifyKindIdle || pane.turnActive {
 			pane.blockedSince = time.Now()
-			pane.blockedReason = data["tool"]
+			if tool := data["tool"]; tool != "" {
+				pane.blockedReason = tool
+			}
 		}
 	case workAbort:
 		pane.turnActive = false

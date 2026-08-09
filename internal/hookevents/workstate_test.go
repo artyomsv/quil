@@ -63,10 +63,10 @@ func TestParkEventsAreDistinctFromStop(t *testing.T) {
 
 	// Notification is ambiguous — Claude fires it for both a permission
 	// prompt (mid-turn) and an idle nudge (after Stop) — so it gets its own
-	// kind rather than collapsing into the unambiguous Park signal. The
-	// consumer (tui.applyWorkTransition) tells the two apart using
-	// turnActive; this classifier only records that the signal is distinct
-	// from both Park and Stop.
+	// kind rather than collapsing into the unambiguous Park signal. This
+	// classifier only records that the signal is distinct from both Park and
+	// Stop; the producer marks the idle nudge it recognises (DataNotifyKind)
+	// and tui.applyWorkTransition parks everything else.
 	if got := ClassifyWorkEvent("hook.claude.Notification"); got != WorkEventNotify {
 		t.Errorf("Notification must classify as WorkEventNotify, got %v", got)
 	}

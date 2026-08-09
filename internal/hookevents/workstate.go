@@ -40,20 +40,41 @@ const (
 	// it fires no hook of its own. Park means "this needs you", which is what
 	// the sidebar's ▲ renders.
 	WorkEventPark
-	// WorkEventNotify: the agent MAY be blocked waiting on the user — the
-	// classifier cannot tell, because Claude reuses hook.claude.Notification
-	// for two different situations and only the consumer's turn state
-	// distinguishes them. It fires for a permission prompt (mid-turn, while
-	// turnActive is still true — behaviourally identical to WorkEventPark)
-	// AND for Claude's own idle nudge, "Claude is waiting for your input"
-	// (fired AFTER the turn's own Stop already cleared turnActive, often
-	// while background subagents are still draining). Collapsing both into
-	// WorkEventPark painted a tab's amber "blocked on you" marker while its
-	// agent was demonstrably still working (production sequence: Stop, then
-	// Notification, with 3 SubagentStops still to come). The consumer gates
-	// on turnActive: true behaves exactly like WorkEventPark; false leaves
-	// the pane's state exactly as Stop left it.
+	// WorkEventNotify: the agent MAY be blocked waiting on the user. Claude
+	// reuses hook.claude.Notification for a permission prompt (mid-turn,
+	// while turnActive is still true — behaviourally identical to
+	// WorkEventPark) AND for its own idle nudge, "Claude is waiting for your
+	// input" (fired AFTER the turn's own Stop already cleared turnActive,
+	// often while background subagents are still draining). Collapsing both
+	// into WorkEventPark painted a tab's amber "blocked on you" marker while
+	// its agent was demonstrably still working (production sequence: Stop,
+	// then Notification, with 3 SubagentStops still to come).
+	//
+	// ClassifyWorkEvent cannot tell them apart — it is handed the event TYPE
+	// and nothing else — so the split is resolved by the two ends instead:
+	// the PRODUCER recognises the idle nudge from the hook's message text and
+	// says so in Data[DataNotifyKind], and the consumer parks unless it was
+	// told this is the idle case AND the turn is already over. See
+	// DataNotifyKind for why the mark is positive rather than negative.
 	WorkEventNotify
+)
+
+// DataNotifyKind is the Payload Data key a Notification producer uses to say
+// WHICH of Claude's two notifications a spool line carries, and NotifyKindIdle
+// is the only value it ever holds: the idle "waiting for your input" nudge.
+// Producer: internal/claudehook (notifyKindData). Consumer:
+// internal/tui/workstate.go's workNotify case.
+//
+// The mark is POSITIVE — "this one is the idle nudge" — and its absence means
+// "park", deliberately. Recognising upstream English prose is fragile, so the
+// direction of the match decides which way a reworded, unknown, or unmarked
+// message fails: toward the amber tab the next Stop clears (visible, and what
+// shipped for months), never toward a permission prompt that never surfaces at
+// all. It also makes an OLD hook binary beside a new TUI safe by construction —
+// it marks nothing, so every Notification parks, exactly as it used to.
+const (
+	DataNotifyKind = "notify_kind"
+	NotifyKindIdle = "idle"
 )
 
 // ClassifyWorkEvent maps a composed PaneEvent Type to a work-state transition.
@@ -95,11 +116,13 @@ func ClassifyWorkEvent(eventType string) WorkEventKind {
 	//
 	// hook.claude.Notification is NOT unambiguous: Claude reuses it for both
 	// that mid-turn permission prompt AND an idle-wait nudge fired once the
-	// turn is already over, and nothing in the payload tells them apart — only
-	// turnActive does, which is TUI-side state the classifier here does not
-	// have. It gets its own kind, WorkEventNotify, so the consumer can make
-	// that call instead of the classifier guessing wrong in one direction or
-	// the other. Tagged distinctly from WorkEventStop either way, so the
+	// turn is already over. THIS function cannot tell them apart — it is
+	// handed the event type and nothing else, neither the hook's message text
+	// (which the producer reads) nor turnActive (which the consumer holds).
+	// So it reports the ambiguity as its own kind, WorkEventNotify, and the
+	// two ends resolve it: the producer marks the idle nudge in
+	// Data[DataNotifyKind], the consumer parks whenever that mark is absent.
+	// Tagged distinctly from WorkEventStop either way, so the
 	// sidebar can tell "blocked on you" apart from "turn finished" — a
 	// genuine park no longer sets unseen; tabBlocked + blockedTabStyle carry
 	// it to the tab bar instead.

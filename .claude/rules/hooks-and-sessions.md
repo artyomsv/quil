@@ -77,27 +77,58 @@ for however long the agent was already back at work.
 **`hook.claude.Notification` is a DIFFERENT `WorkEventKind` (`WorkEventNotify`
 / `workNotify`), not a synonym for `PermissionRequest` — because it is
 AMBIGUOUS in a way `PermissionRequest` is not.** Claude reuses the same hook
-event for two situations with nothing in the payload to tell them apart: a
-permission prompt (arrives mid-turn, `turnActive` still true) and Claude's own
-idle nudge, "Claude is waiting for your input" (arrives AFTER the turn's own
-`Stop` already cleared `turnActive`, often while background subagents are
-still draining). The classifier (`hookevents.ClassifyWorkEvent`) cannot
-resolve the ambiguity — it has no access to `turnActive` — so it hands the
-consumer a distinct kind instead of guessing. `tui.applyWorkTransition`'s
-`workNotify` case is where the guess is made, and it is the only place that
-CAN make it: `turnActive` true → behaves exactly like `workPark`
-(`blockedSince`/`blockedReason` stamped, spinner untouched); `turnActive` false
-→ changes nothing at all, leaving the pane exactly as `Stop` left it (`unseen`
-if nothing was outstanding, still `working` if subagents are). Collapsing both
-into one `WorkEventPark` was the bug: a production pane ran
-`UserPromptSubmit` → 4×`SubagentStart` → `Stop` → `Notification`, and the
-unconditional park painted its tab amber and hid the `◐ ⋯3` a still-working
-pane should show, because `paneRow`'s blocked-outranks-working precedence
-picked the stale `▲` over the live subagent count. The split does not touch
+event for a permission prompt (arrives mid-turn, `turnActive` still true) and
+for its own idle nudge, "Claude is waiting for your input" (arrives AFTER the
+turn's own `Stop` already cleared `turnActive`, often while background
+subagents are still draining). Collapsing both into one `WorkEventPark` was
+the bug: a production pane ran `UserPromptSubmit` → 4×`SubagentStart` →
+`Stop` → `Notification` → `SubagentStop` → `Stop` → `Stop` → `Notification`,
+and the unconditional park painted its tab amber and hid the `◐ ⋯3` a
+still-working pane should show, because `paneRow`'s blocked-outranks-working
+precedence picked the stale `▲` over the live subagent count.
+
+**The ambiguity is resolved at the two ENDS, not by the classifier, and the
+match runs in ONE direction on purpose.** `hookevents.ClassifyWorkEvent` is
+handed the event type and nothing else — neither the hook's `message` text nor
+`turnActive` — so it reports the ambiguity as its own kind. The PRODUCER
+(`internal/claudehook`'s `notifyKindData`) is the one place holding the message
+and marks the idle nudge it recognises as
+`data["notify_kind"]="idle"` (`hookevents.DataNotifyKind`/`NotifyKindIdle`,
+declared next to the kind so the two halves cannot drift apart quietly).
+`tui.applyWorkTransition`'s `workNotify` case then parks **unless** the event
+is marked idle AND `turnActive` is false. Matched positively — idle recognised,
+everything else parked — because upstream English prose is not ours to depend
+on, and the direction decides which way a reworded, unknown, or unmarked
+message fails.
+
+**`turnActive` alone is a LOSSY discriminator, which is why it is the second
+condition and not the only one.** It is false in several states where a
+permission prompt is genuinely outstanding: a background subagent asking for
+permission after the main turn's `Stop` (the subagent ledger exists precisely
+because subagents outlive it), a TUI restart or remote reattach
+(`resetWorkStateForReattach` zeroes it on every pane of a destination), and a
+replay truncated past its `UserPromptSubmit`. `PermissionRequest` is
+documented as "when available" — on the Claude version that produced the trace
+above it never fired at all, so `Notification` was the ONLY permission signal
+and this gate the only guard on it. The failure modes are not symmetric: a
+wrong park is a visible amber tab that the next `Stop` or a keystroke
+(`answerBlockedByInput`) clears, while a missed park is silent and terminal —
+`tabBlocked` false, uncounted in `counts()`, not offered by `Alt+Shift+A`, and
+a parked agent emits no further hook to recover it. So the unmarked case parks,
+which is also what makes an OLD hook binary beside a new TUI safe: it marks
+nothing, and every `Notification` behaves exactly as it did before the split.
+
+Once the mark says idle and the turn is over, the case changes NOTHING —
+leaving the pane exactly as `Stop` left it (`unseen` if nothing was
+outstanding, still `working` if subagents are). Marked idle but mid-turn parks
+anyway; only `Stop`-then-nudge is unambiguous. The split does not touch
 `PermissionRequest`/`permission.ask`, which stay unconditional — they are
 never ambiguous, so gating them on `turnActive` would be a regression, not a
 fix (a permission prompt firing after a pane's own `Stop`, from a hook whose
-event name says exactly what it is, must still block).
+event name says exactly what it is, must still block). Both park arms write
+`blockedReason` only when `data["tool"]` is non-empty: `Notification` carries
+no tool, and an unguarded assignment would erase the `▲ Bash` a
+`PermissionRequest` for the same prompt had just given the sidebar.
 
 Because `working` no longer falls on a park, the falling edge no longer sets
 `unseen`. `tabBlocked` (`workstate.go`) + `blockedTabStyle` carry a parked

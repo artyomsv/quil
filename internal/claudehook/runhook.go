@@ -121,8 +121,14 @@ func dispatchHookEvent(env HookEnv, in claudeStdin, nowMs int64) error {
 			truncate("Working on: "+preview, hookevents.MaxTitleBytes), hookevents.SeverityInfo,
 			map[string]string{"prompt_preview": preview})
 	case "Notification":
+		// Claude fires this for a permission prompt AND for its own idle
+		// nudge; only the message text tells them apart, and this is the only
+		// place that text is in hand. notifyKindData marks the idle case so
+		// the TUI can leave a still-working pane alone — see its comment for
+		// why the mark is positive.
 		return spoolEvent(env, nowMs, "Notification", in.SessionID,
-			truncate(in.Message, hookevents.MaxTitleBytes), hookevents.SeverityWarning, nil)
+			truncate(in.Message, hookevents.MaxTitleBytes), hookevents.SeverityWarning,
+			notifyKindData(in.Message))
 	case "PermissionRequest":
 		return spoolEvent(env, nowMs, "PermissionRequest", in.SessionID,
 			truncate("Needs approval: "+in.ToolName, hookevents.MaxTitleBytes), hookevents.SeverityWarning,
@@ -238,6 +244,34 @@ func modelUsageData(env HookEnv, transcriptPath string) map[string]string {
 		"model":          truncate(model, hookevents.MaxDataValueBytes),
 		"context_tokens": strconv.FormatInt(tokens, 10),
 	}
+}
+
+// idleNudgePhrase identifies Claude's idle notification, observed verbatim as
+// "Claude is waiting for your input". Matched as a substring, case-folded,
+// because the sentence around it is not ours to depend on.
+const idleNudgePhrase = "waiting for your input"
+
+// notifyKindData marks a Notification the TUI may safely ignore on a pane
+// whose turn is already over: Claude's idle nudge, which fires once the user
+// has been idle at the prompt and reports nothing the agent is waiting for.
+// Every other message — a permission prompt, a rewording, anything new
+// upstream adds — returns nil and is parked by the consumer.
+//
+// Only the idle case is matched, and that direction is the whole point.
+// Recognising upstream English prose is fragile, so the unrecognised message
+// must fall toward the visible amber tab the next Stop clears, never toward a
+// permission prompt that never surfaces at all (a parked agent emits no
+// further hook to recover it). The "permission" exclusion covers the one
+// overlap that is not upstream's wording: the permission message embeds a TOOL
+// NAME, and an MCP server may call its tool anything it likes.
+//
+// Runs in the per-event hook process, so it stays two substring scans.
+func notifyKindData(message string) map[string]string {
+	lower := strings.ToLower(message)
+	if !strings.Contains(lower, idleNudgePhrase) || strings.Contains(lower, "permission") {
+		return nil
+	}
+	return map[string]string{hookevents.DataNotifyKind: hookevents.NotifyKindIdle}
 }
 
 // isPromptTool reports whether tool is an interactive-prompt tool whose

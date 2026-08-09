@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.53.3] - 2026-08-09
+
 ### Fixed
 - The TUI quit itself, reporting a clean exit, on workspaces with many tabs.
   Every workspace update made the client re-send the layout of every tab and

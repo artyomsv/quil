@@ -32,3 +32,22 @@ Rounds completed: 1
 ## Notes
 - Security agent never reported. The four probes it was given (blocking Send DoS/deadlock, peerLabel log injection, hostile daemon suppressing sends via cols/rows, sizedOnce growth) remain formally unanswered, though 2, 3 and 4 were covered incidentally by the code-quality pass.
 - Deferred to its own change: throttling broadcastState(). ~28 immediate call sites; the safe form needs a synchronous flush before respondTo, which is a package-level function called 39 times in daemon.go with no daemon receiver, and the worktree-create path depends on broadcast-before-response ordering.
+
+## Round 1 addendum — security agent (report arrived late, after the first three were closed out)
+
+Verdict: approve, 1 MEDIUM, 6 LOW, no blockers. Two of its findings had already
+been fixed independently (the `t.Parallel` race; the growth half of the MEDIUM).
+
+- [security/M1a] sizedOnce unbounded growth — already fixed by the disposal-sweep prune
+- [security/M1b] sizedOnce keyed by pane id alone while every sibling structure is dest-scoped; one dest could consume another's first-resize kick — now keyed by sizedKey(dest, paneID)
+- [security/L1] Post-overflow sends returned ErrConnClosed while the timing-out caller got ErrSendOverflow, contradicting ErrSendOverflow's documented contract — normalised
+- [security/L2] Client give-up path set the overflow flag and closed the conn with no log line, i.e. the client-side overflow (the 2026-08-09 shape) took the silent path — now logs peer + depth
+- [security/L4] peerLabel unbounded and unsanitized into a log the F1 viewer renders — capped at 120 and C0/DEL replaced
+- [security/L5] Implementation-dependent uint16 conversion on daemon-supplied cols/rows — range-checked
+- [security/L6] clientSendTimeout package-var race under t.Parallel — already fixed
+
+Dismissed:
+- [security/L3] Residual ~5 s Update stall via enqueueInput against a repeatedly-wedging remote daemon. Deliberate and documented; strictly better than the pre-branch behaviour (which ended the session). Recorded so the ceiling is on record.
+
+Filed as tech debt rather than fixed here:
+- Conn.write's 30 s deadline does nothing over ssh (stdioConn.SetWriteDeadline returns ErrNoDeadline; the error is discarded) and sendLoop returns without closing on write failure. No longer reachable from the client send path, since clientSendTimeout fires on its own timer. See techdebt/3-2-conn-write-deadline-absent-over-ssh.md

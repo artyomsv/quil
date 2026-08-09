@@ -6,8 +6,6 @@ import (
 	"strings"
 	"testing"
 
-	tea "charm.land/bubbletea/v2"
-
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
 )
@@ -117,7 +115,7 @@ func TestLayoutAgrees_MalformedStoredLayoutResends(t *testing.T) {
 	fs := &echoRecorder{}
 	m.client = fs
 	_, cmd := m.Update(echo)
-	runBatch(cmd)
+	runCmd(cmd)
 
 	layouts, _ := sentCounts(fs)
 	if layouts != 1 {
@@ -212,20 +210,6 @@ func sentCounts(fs *echoRecorder) (layouts, resizes int) {
 	return layouts, resizes
 }
 
-// runBatch executes a (possibly batched) command and every command it fans out
-// to, so the sends that ride tea.Cmd goroutines in production land in the fake.
-func runBatch(cmd tea.Cmd) {
-	if cmd == nil {
-		return
-	}
-	msg := cmd()
-	if batch, ok := msg.(tea.BatchMsg); ok {
-		for _, c := range batch {
-			runBatch(c)
-		}
-	}
-}
-
 func TestWorkspaceState_UnchangedSplitLayout_SendsNoLayoutUpdate(t *testing.T) {
 	t.Parallel()
 	m, echo := echoModel(t)
@@ -234,7 +218,7 @@ func TestWorkspaceState_UnchangedSplitLayout_SendsNoLayoutUpdate(t *testing.T) {
 
 	next, cmd := m.Update(echo)
 	_ = next
-	runBatch(cmd)
+	runCmd(cmd)
 
 	layouts, _ := sentCounts(fs)
 	if layouts != 0 {
@@ -278,7 +262,7 @@ func TestWorkspaceState_FirstResizeAfterAttach_IsAlwaysSent(t *testing.T) {
 
 	next, cmd := m.Update(echo)
 	_ = next
-	runBatch(cmd)
+	runCmd(cmd)
 
 	_, resizes := sentCounts(fs)
 	if resizes != 3 {
@@ -299,14 +283,14 @@ func TestWorkspaceState_UnchangedSizes_SendNoResizeOnRepeat(t *testing.T) {
 	// First broadcast: sends the sizes, satisfying the post-attach kick.
 	m.client = &echoRecorder{}
 	first, cmd := m.Update(echo)
-	runBatch(cmd)
+	runCmd(cmd)
 	m = first.(Model)
 
 	// Second, identical broadcast — the drag-storm case.
 	fs := &echoRecorder{}
 	m.client = fs
 	_, cmd = m.Update(echo)
-	runBatch(cmd)
+	runCmd(cmd)
 
 	_, resizes := sentCounts(fs)
 	if resizes != 0 {
@@ -361,20 +345,168 @@ func TestWorkspaceState_ReportedCrashConfiguration_SettlesToSilence(t *testing.T
 
 	m.client = &echoRecorder{}
 	next, cmd := m.Update(echo)
-	runBatch(cmd)
+	runCmd(cmd)
 	m = next.(Model)
 
 	// Round two: identical state, the shape a reorder storm repeats 12 times.
 	fs := &echoRecorder{}
 	m.client = fs
 	_, cmd = m.Update(echo)
-	runBatch(cmd)
+	runCmd(cmd)
 
 	layouts, resizes := sentCounts(fs)
 	if layouts+resizes != 0 {
 		t.Errorf("a repeat broadcast at 33 tabs/36 panes produced %d layout + %d "+
 			"resize frames, want 0 — 69 of these on a %d-slot must-deliver queue "+
 			"is what closed the connection", layouts, resizes, 64)
+	}
+}
+
+// The same scale under LAZY RESTORE, which is what a 33-tab workspace actually
+// looks like after a daemon restart: most panes are deferred, so the daemon has
+// no PTY for them, reports whatever size came off disk, and records nothing
+// when we send one.
+//
+// The sibling test above fabricates a daemon that accepted all 36 resizes,
+// which that configuration cannot produce — so it cannot see a pane class that
+// re-sends on every broadcast forever.
+func TestWorkspaceState_LazyRestoreAtScale_SettlesToSilence(t *testing.T) {
+	t.Parallel()
+	const tabs = 33
+
+	m := Model{
+		cfg:            config.Default(),
+		notifications:  NewNotificationCenter(30, 200),
+		mcpHighlights:  make(map[string]bool),
+		tabDragFromIdx: -1,
+		sized:          true,
+		width:          209,
+		height:         58,
+	}
+	state := WorkspaceStateMsg{ActiveTab: "tab-0"}
+	for i := 0; i < tabs; i++ {
+		tabID := "tab-" + strconv.Itoa(i)
+		paneID := "pane-" + strconv.Itoa(i)
+		state.Tabs = append(state.Tabs, TabInfo{ID: tabID, Name: tabID, Panes: []string{paneID}})
+		pi := PaneInfo{ID: paneID, TabID: tabID}
+		// Every tab but the active one is deferred, carrying a persisted size
+		// from a differently-sized terminal.
+		if i > 0 {
+			pi.Pending = true
+			pi.Cols, pi.Rows = 80, 24
+		}
+		state.Panes = append(state.Panes, pi)
+	}
+
+	m.applyWorkspaceState(state, "")
+	m.resizeTabs()
+
+	echo := state
+	for i := range echo.Tabs {
+		echo.Tabs[i].Layout = broadcastLayout(t, m.curTabs()[i].Root)
+	}
+	// Only the spawned pane gets a size the daemon actually accepted.
+	for i := range echo.Panes {
+		if echo.Panes[i].Pending {
+			continue
+		}
+		for _, pane := range m.curTabs()[0].Leaves() {
+			if pane.ID != echo.Panes[i].ID {
+				continue
+			}
+			cols, rows := paneVTSize(pane.WideCanvas, pane.MinNativeCols,
+				pane.Width, pane.Height, pane.NativeW,
+				m.curTabs()[0].CanvasW, m.curTabs()[0].CanvasH)
+			echo.Panes[i].Cols = uint16(cols)
+			echo.Panes[i].Rows = uint16(rows)
+		}
+	}
+
+	m.client = &echoRecorder{}
+	next, cmd := m.Update(echo)
+	runCmd(cmd)
+	m = next.(Model)
+
+	fs := &echoRecorder{}
+	m.client = fs
+	_, cmd = m.Update(echo)
+	runCmd(cmd)
+
+	layouts, resizes := sentCounts(fs)
+	if layouts+resizes != 0 {
+		t.Errorf("a repeat broadcast over a lazily-restored 33-tab workspace "+
+			"produced %d layout + %d resize frames, want 0 — deferred panes "+
+			"never record a size, so diffing against one re-sends them every "+
+			"single broadcast", layouts, resizes)
+	}
+}
+
+// A deferred (lazy-restore) pane has no PTY, and handleResizePane returns early
+// when PTY is nil WITHOUT recording the size — so the daemon's reported
+// cols/rows stay at whatever came off disk however many resizes we send. Diffing
+// against them therefore never agrees, and the pane is re-sent on every single
+// broadcast: the exact per-broadcast frame this change exists to remove, and
+// under lazy restore it is most of the workspace.
+//
+// Skipping them loses nothing. The daemon ignores the frame today, and the pane
+// is deliberately left unmarked, so the broadcast that reports it spawned sends
+// its size then — later than before, but for the first time to a PTY that can
+// receive it.
+func TestWorkspaceState_PendingPane_IsNotResized(t *testing.T) {
+	t.Parallel()
+	m, echo := echoModel(t)
+	echo = withSizes(m, echo)
+
+	// The daemon reports a stale on-disk size for a pane it has not spawned.
+	echo.Panes[2].Pending = true
+	echo.Panes[2].Cols = 1
+	echo.Panes[2].Rows = 1
+
+	fs := &echoRecorder{}
+	m.client = fs
+	next, cmd := m.Update(echo)
+	runCmd(cmd)
+
+	for _, msg := range fs.sent {
+		if msg.Type != ipc.MsgResizePane {
+			continue
+		}
+		var p ipc.ResizePanePayload
+		if err := json.Unmarshal(msg.Payload, &p); err != nil {
+			t.Fatalf("decode resize payload: %v", err)
+		}
+		if p.PaneID == echo.Panes[2].ID {
+			t.Errorf("resized deferred pane %s — the daemon drops it (nil PTY) "+
+				"and never records the size, so this repeats every broadcast "+
+				"forever", p.PaneID)
+		}
+	}
+
+	// And once it spawns, it must get its size: skipping must not have marked
+	// it as already sized.
+	m = next.(Model)
+	echo.Panes[2].Pending = false
+	fs2 := &echoRecorder{}
+	m.client = fs2
+	_, cmd = m.Update(echo)
+	runCmd(cmd)
+
+	var sawSpawned bool
+	for _, msg := range fs2.sent {
+		if msg.Type != ipc.MsgResizePane {
+			continue
+		}
+		var p ipc.ResizePanePayload
+		if err := json.Unmarshal(msg.Payload, &p); err != nil {
+			t.Fatalf("decode resize payload: %v", err)
+		}
+		if p.PaneID == echo.Panes[2].ID {
+			sawSpawned = true
+		}
+	}
+	if !sawSpawned {
+		t.Error("a pane that just stopped being deferred was never sized — " +
+			"skipping it while pending must not mark it as already sized")
 	}
 }
 
@@ -388,7 +520,7 @@ func TestReattach_ReArmsTheFirstResizeKick(t *testing.T) {
 
 	m.client = &echoRecorder{}
 	first, cmd := m.Update(echo)
-	runBatch(cmd)
+	runCmd(cmd)
 	m = first.(Model)
 
 	m.armReattachReset("")
@@ -396,7 +528,7 @@ func TestReattach_ReArmsTheFirstResizeKick(t *testing.T) {
 	fs := &echoRecorder{}
 	m.client = fs
 	_, cmd = m.Update(echo)
-	runBatch(cmd)
+	runCmd(cmd)
 
 	_, resizes := sentCounts(fs)
 	if resizes != 3 {
@@ -426,7 +558,7 @@ func TestWorkspaceState_DoesNotResendAnotherDaemonsTabs(t *testing.T) {
 
 	// echo carries Dest "" — the local daemon.
 	next, cmd := m.Update(echo)
-	runBatch(cmd)
+	runCmd(cmd)
 
 	// Guard the premise. If the local broadcast's reconciliation dropped the
 	// remote project, no send for it is possible and the assertion below would
@@ -461,12 +593,12 @@ func TestWorkspaceState_DoesNotResendAnotherDaemonsTabs(t *testing.T) {
 		remoteIDs = append(remoteIDs, pane.ID)
 	}
 	for _, msg := range fs.sent {
-		body := msg.Type + " " + string(msg.Payload)
+		detail := msg.Type + " " + string(msg.Payload)
 		for _, id := range remoteIDs {
 			if strings.Contains(string(msg.Payload), id) {
 				t.Errorf("a local-daemon broadcast produced %q, which names the "+
 					"remote daemon's %q — the broadcast contains nothing to diff "+
-					"that against, so everything it owns looks changed", body, id)
+					"that against, so everything it owns looks changed", detail, id)
 			}
 		}
 	}
@@ -484,7 +616,7 @@ func TestWorkspaceState_AbsentLayout_StillSends(t *testing.T) {
 	m.client = fs
 
 	_, cmd := m.Update(echo)
-	runBatch(cmd)
+	runCmd(cmd)
 
 	layouts, _ := sentCounts(fs)
 	if layouts != 1 {
@@ -508,7 +640,7 @@ func TestWorkspaceState_ChangedLayout_SendsOnlyThatTab(t *testing.T) {
 	m.client = fs
 
 	_, cmd := m.Update(echo)
-	runBatch(cmd)
+	runCmd(cmd)
 
 	var gotTabs []string
 	for _, msg := range fs.sent {

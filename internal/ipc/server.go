@@ -235,6 +235,11 @@ func (c *Conn) SendBlocking(msg *Message, cancel <-chan struct{}) error {
 		if len(c.critCh) < sendHeadroom {
 			select {
 			case c.critCh <- frame:
+				// Counted like enqueue's critical path: sendLoop decrements
+				// per frame written, so an enqueue that skips this drives
+				// pending negative and makes Flush's `pending > 0` loop exit
+				// immediately — reporting delivery it never waited for.
+				c.pending.Add(1)
 				return nil
 			default:
 				// Lost a race with concurrent broadcast enqueues — wait.

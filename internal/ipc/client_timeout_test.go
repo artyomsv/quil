@@ -17,8 +17,13 @@ import (
 // grace period long enough to absorb a momentarily busy daemon (which drains 64
 // frames in microseconds) and short enough that a genuinely wedged one is
 // reported rather than rendered as a freeze.
+// Deliberately NOT t.Parallel: this test rebinds the package-level
+// clientSendTimeout, which Client.Send reads. A parallel sibling calling Send
+// — TestClientSend_BlocksInsteadOfSelfClosingWhenThePeerLags does, in a loop —
+// races the write, and would additionally inherit the 150 ms bound and fail
+// with a maximally misleading "the client hung up on itself". Running in the
+// sequential phase keeps the rebind exclusive.
 func TestClientSend_WedgedPeerFailsWithinTheBound(t *testing.T) {
-	t.Parallel()
 	prev := clientSendTimeout
 	clientSendTimeout = 150 * time.Millisecond
 	t.Cleanup(func() { clientSendTimeout = prev })
@@ -62,8 +67,23 @@ func TestClientSend_WedgedPeerFailsWithinTheBound(t *testing.T) {
 	// A must-deliver frame that could not be delivered must not be reported as
 	// accepted: giving up has to take the connection down so the loss surfaces
 	// as a link error rather than vanishing.
-	if !cl.conn.closed.Load() && !cl.conn.overflow.Load() {
-		t.Error("Send gave up but left the connection open — the undelivered " +
-			"must-deliver frame would be silently lost")
+	//
+	// Asserting on the overflow flag alone would be circular — Send sets it by
+	// CAS two lines before returning, so re-reading it cannot fail once the
+	// error above is non-nil. The Close it triggers runs on its own goroutine,
+	// so wait for the consequence instead.
+	deadline := time.Now().Add(2 * time.Second)
+	for !cl.conn.closed.Load() {
+		if time.Now().After(deadline) {
+			t.Fatal("Send gave up but the connection never closed — the " +
+				"undelivered must-deliver frame is silently lost and the " +
+				"session carries on believing it was sent")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// The consequence a caller actually observes: the link is gone.
+	if _, err := cl.Receive(); err == nil {
+		t.Error("Receive succeeded on a connection Send had given up on")
 	}
 }

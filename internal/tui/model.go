@@ -363,8 +363,9 @@ type Model struct {
 	// reported size already matches, but the FIRST one is always sent: the
 	// daemon's duplicate guard is appliedCols/appliedRows, which it zeroes on
 	// every PTY install, and repaintAfterResize's redraw kick for a restored
-	// pane rides that first client resize. Cleared by resetForReattach, since
-	// a reattach is exactly when the daemon's guard may have been zeroed.
+	// pane rides that first client resize. Cleared by armReattachReset, since
+	// a reattach is exactly when the daemon's guard may have been zeroed, and
+	// pruned by applyWorkspaceState when a pane stops existing.
 	sizedOnce            map[string]bool
 	renaming             bool
 	renameInput          string
@@ -4152,6 +4153,16 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg, dest string) ([]str
 			pane.Dispose()
 		}
 	}
+	// sizedOnce is the other per-pane map keyed by an id that can stop
+	// existing. It is one bool per pane so nothing here is urgent, but the
+	// sweep that answers "is this pane still real?" is already built, and a
+	// map with no disposal path is the kind of thing that gets explained
+	// rather than fixed.
+	for id := range m.sizedOnce {
+		if !surviving[id] {
+			delete(m.sizedOnce, id)
+		}
+	}
 
 	log.Printf("apply: active project = %d, active tab = %d", m.activeProject, m.activeTabIdx())
 
@@ -6833,6 +6844,17 @@ func (m *Model) diffLayouts(state WorkspaceStateMsg) []layoutSend {
 	for _, ti := range state.Tabs {
 		stored[ti.ID] = ti.Layout
 	}
+	// A broadcast whose dest matches no project means every layout and every
+	// resize below is silently skipped, and the failure has no other symptom:
+	// splits revert on restart, panes keep a stale PTY width, and nothing logs.
+	// The invariant holds structurally today — ProjectModel.Dest is only ever
+	// assigned from a broadcast's own dest — so this line exists to make a
+	// future break greppable rather than a multi-hour hunt.
+	if len(m.projects) > 0 && !m.hasProjectForDest(state.Dest) {
+		log.Printf("apply: broadcast dest %q matches no project — no layout or "+
+			"resize will be sent for it", state.Dest)
+	}
+
 	var out []layoutSend
 	for _, proj := range m.projects {
 		if proj.Dest != state.Dest {
@@ -6852,13 +6874,26 @@ func (m *Model) diffLayouts(state WorkspaceStateMsg) []layoutSend {
 	return out
 }
 
+// hasProjectForDest reports whether any project belongs to dest.
+func (m *Model) hasProjectForDest(dest string) bool {
+	for _, proj := range m.projects {
+		if proj.Dest == dest {
+			return true
+		}
+	}
+	return false
+}
+
 // diffResizes decides which panes need a resize pushed after a broadcast.
 // See Model.sizedOnce for why the first send per pane is never suppressed.
 func (m *Model) diffResizes(state WorkspaceStateMsg) []resizeSend {
-	type size struct{ cols, rows uint16 }
+	type size struct {
+		cols, rows uint16
+		pending    bool
+	}
 	stored := make(map[string]size, len(state.Panes))
 	for _, pi := range state.Panes {
-		stored[pi.ID] = size{pi.Cols, pi.Rows}
+		stored[pi.ID] = size{cols: pi.Cols, rows: pi.Rows, pending: pi.Pending}
 	}
 	if m.sizedOnce == nil {
 		m.sizedOnce = make(map[string]bool)
@@ -6873,14 +6908,31 @@ func (m *Model) diffResizes(state WorkspaceStateMsg) []resizeSend {
 				continue
 			}
 			for _, pane := range tab.Leaves() {
+				known := stored[pane.ID]
+				// A deferred pane has no PTY, and handleResizePane returns
+				// early on a nil one WITHOUT recording the size — so the
+				// daemon's reported cols/rows never move however many resizes
+				// we send, the diff never agrees, and the pane is re-sent on
+				// every broadcast. Under lazy restore that is most of the
+				// workspace. Left unmarked deliberately: the broadcast that
+				// reports it spawned is the first one that can size it.
+				if known.pending {
+					continue
+				}
 				c, r := paneVTSize(pane.WideCanvas, pane.MinNativeCols,
 					pane.Width, pane.Height, pane.NativeW, tab.CanvasW, tab.CanvasH)
 				cols, rows := uint16(c), uint16(r)
-				known := stored[pane.ID]
-				// known.cols == 0 means the daemon has never applied a size.
-				if m.sizedOnce[pane.ID] && known.cols == cols && known.rows == rows && cols > 0 {
+				// A daemon that has never applied a size reports 0, which no
+				// computed size can equal — paneVTSize floors both dimensions
+				// at 1 — so that case needs no separate term.
+				if m.sizedOnce[pane.ID] && known.cols == cols && known.rows == rows {
 					continue
 				}
+				// Marked before the send rather than after it: the send rides a
+				// tea.Cmd and reports nothing back. A frame dropped for an
+				// unreachable dest therefore costs this pane its first-resize
+				// kick until the next reattach — acceptable because the daemon
+				// fires its own resizeKick on the pane's first PTY output.
 				m.sizedOnce[pane.ID] = true
 				out = append(out, resizeSend{dest: proj.Dest, paneID: pane.ID, cols: cols, rows: rows})
 			}

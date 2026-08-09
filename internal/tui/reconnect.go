@@ -759,7 +759,11 @@ func (m *Model) armReattachReset(dest string) {
 //   - unseen and pinnedAttention. Both are user-facing marks about work the
 //     user has not looked at, not in-flight execution. unseen is the only
 //     signal that a background pane finished something while the link was
-//     down, which is often exactly why the user is reconnecting.
+//     down, which is often exactly why the user is reconnecting. Preserving
+//     pinnedAttention is belt-and-braces now that it is daemon-owned — the
+//     first broadcast after reattach re-delivers it either way — but clearing
+//     it here would blank every ◆ for the width of the outage, on the marks
+//     the user is least willing to lose.
 //   - m.workTickRunning. The spinner loop is self-stopping: the tick already
 //     in flight observes !anyPaneWorking() and clears the flag itself.
 //     Clearing it here while that tick is still scheduled would let the next

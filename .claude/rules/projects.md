@@ -455,6 +455,116 @@ filter and preserves printable non-ASCII byte-identically — it is not a
 bounding pass. `lipgloss` must remain the sole measurer (uniseg segments,
 lipgloss measures), or the cut can disagree with the `.Width` that paints.
 
+**A row that mixes COLOURS goes through `renderStyledSegments`, never one
+`style.Render`.** Every `Render` emits its own reset, so wrapping a line that
+already carries SGR closes the outer colour at the first inner segment and
+leaves the rest of the row unpainted — which is why `projectRow`'s ▲/◐/✓ badge
+was flat grey while the pane rows it rolls up were amber, blue and green. The
+helper spends the width budget on PLAIN text segment by segment and styles only
+the piece that survived the cut, because `truncateCells` segments on grapheme
+clusters and `lipgloss.Width` measures an escape as zero cells: a single pass
+over already-styled text both mis-measures the row and can cut through the
+middle of an SGR sequence, emitting `38;5;214m` as literal text. `padOrTrunc`
+stays right for `paneRow` / `gitRow` / `sidebarTabHeading`, which each have ONE
+style for the whole line.
+
+**Its segments must each begin on a GRAPHEME CLUSTER boundary, and that is a
+caller requirement the helper cannot repair.** A segment starting with a
+combining mark joins the previous segment's last cluster, so the
+independently-measured sum understates the row — the U+FE0F trap above, one
+level up. The reason no measurement strategy fixes it: whether the two runes
+really join depends on the STYLES rather than the text. An SGR emitted between
+them separates them and the sum is honest; two property-free styles emit
+nothing and it is not (measured, `{"⚠", "️"}` at w=3: 3 cells coloured, 4 plain).
+`projectRow` satisfies it by construction — every badge segment starts with a
+space, and its head ends wherever `truncateCells` cut, which is a boundary by
+definition. Segments are also spent IN ORDER and a segment that cannot start
+ENDS the row: yielding its place to the next one would put one state's glyph in
+another state's position.
+
+**The attention pin is DAEMON-owned, and the client is not allowed to write
+it.** `Pane.PinnedAttention` rides `MsgUpdatePane`'s `*bool` alongside `Muted`,
+persists through `workspaceStateFromSnapshot`'s non-overlay block (one line
+serving both the disk snapshot and the broadcast) and comes back on every
+`workspace_state`. `syncPaneMeta` copies it UNCONDITIONALLY, which is what makes
+an unmark performed in another client reach this one — and it is also why the
+context menu SENDS rather than flipping the local bool: a local write is
+reverted by the next broadcast, and the git ticker alone delivers one every 5 s,
+so the mark would visibly undo itself. `Clear attention` is the one place that
+does both, and deliberately: the local clear is what stops the row painting ◆ on
+THIS frame, the send is what stops the daemon putting it back. The `*bool` is
+load-bearing exactly as it is for `Muted` — `handleUpdatePane` is a PARTIAL
+update handler, and a plain bool would clear the pin on every rename and every
+OSC 7 CWD change.
+
+**`Clear attention` sends the pin UNCONDITIONALLY, never gated on the local
+value, and gating it was a real bug.** `pane.pinnedAttention` reports what the
+last broadcast said, never what the daemon holds — and Mark deliberately does
+not write locally, so Mark followed by Clear inside the round trip read the pin
+as false, sent nothing, and then let the Mark's own broadcast restore the ◆
+*after* the user had cleared it, persisted. Two right-clicks, and over ssh the
+window is hundreds of milliseconds. For the same reason Clear does not clear it
+locally either: a broadcast already in flight re-sets it and the next one clears
+it (the ◆ blinks off/on/off), and with the link parked `Router.Send` drops the
+message and returns nil, so nothing ever arrives to revert a local clear and the
+mark stays gone until reconnect. The send is `sendForDestStrict` and the
+destination is resolved on the Update goroutine — this is a one-shot the user
+asked for, not one of the bulk iterators the loose `Send` was written for.
+
+**"The user's own mark" is a statement about a daemon the user CONTROLS.**
+`syncPaneMeta`'s unconditional copy is what makes a cross-client unmark work,
+and it is also what removes the client's ability to refuse: a hostile remote
+daemon can assert `pinned_attention` on every pane and re-assert it within 5 s
+of any Unmark. The blast radius is display only — nothing outside rendering
+reads the flag, the attention queue keys on `blockedSince` — and such a daemon
+already drives `blockedSince`/`unseen` through hook events, so this widens an
+existing capability rather than opening a new one. Accepted deliberately; if it
+ever needs closing, the shape is a per-pane client dismissal epoch that
+suppresses a re-assert until the user re-pins.
+
+**`counts().pinned` is a SECOND AXIS, not a fourth rank.** The other three are
+one ordered classification — a pane parked for input has also finished its turn,
+"needs you" outranks "is ready", so a pane contributes to exactly one — and the
+pin is orthogonal, since a pinned pane is usually also working or blocked.
+Folding it into the switch would make a mark that exists to be un-loseable
+disappear the moment the pane got busy, which is when it is most wanted.
+`paneRow` states the same thing differently: ◆ stays as a SUFFIX when a live
+state outranks it, painted in `sidebarPinnedStyle` rather than the outranking
+state's colour, and its width is RESERVED before the label floor applies so a
+long blocked-reason cannot eat it.
+
+**Manual and automatic marks must not share a colour, and for a while they
+did.** `unseenTabStyle`'s green and the pane border's 28 covered both `unseen`
+and `pinnedAttention` — but only `unseen` clears itself on focus, so the shared
+colour left the user waiting on a green that never went. Pinned now takes purple
+141 everywhere (`sidebarPinnedStyle`, `pinnedTabStyle`, the border), matching the
+foreground/background relationship `blockedTabStyle`'s 214 has to
+`sidebarBlockedStyle`. `pinnedActiveTabStyle` is underlined for the reason
+`blockedActiveTabStyle` is — the background is the only thing active and inactive
+differ by, and an SGR attribute costs no cells where padding would desync
+`hitTestTab`. **`tabLabel`'s ◆ is deliberately OUTSIDE `tabStyle`'s precedence**:
+blocked outranks pinned for the colour, so on a tab that is both, the glyph is
+the only channel left to say the pin is there.
+
+**`linkGlyphStyles` is a swept MAP rather than a switch**, because
+`linkGlyphStyle`'s fallback has to be some style and every candidate lies about
+a state it was not written for. A third link state added to `linkGlyph` without
+an entry would render in the fallback's colour and read as a state that has
+one; enumerating lets `TestLinkGlyph_EveryStateHasItsOwnColour` drive `linkGlyph`
+over every `reconnectState` combination and assert each glyph it can produce is
+paired, which a switch cannot express. The colours come from OUTSIDE the
+pane-state palette deliberately — link health describes the destination, not any
+pane — so parked takes `spawnErrorStyle`'s red and retrying takes
+`projectFormMsgBusy`'s orange, never the 214 amber reserved for
+blocked-on-user, which a self-healing link is the opposite of.
+
+**⚡ (U+26A1) is the one deliberate exemption from the no-emoji-capable rule**,
+and it lives outside that const block rather than inside it — the block's own
+test lists U+26A1 as exactly the kind of codepoint to refuse, so adding it there
+would fail, correctly. It is safe only where it is: `lipgloss` already measures
+it as two cells, so the arithmetic accounts for its real width, and it is the
+LAST thing on the row, so a font drawing it wider has only padding to paint over.
+
 **The sidebar is a real reserved column**, unlike the notification sidebar's
 overlay — but it must not re-mode a pane. `paneVTSize` takes SIZE from the rect
 and MODE from `nativeW` (the width the rect would have with the sidebar

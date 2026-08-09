@@ -366,6 +366,12 @@ type UpdatePanePayload struct {
 	Muted *bool `json:"muted,omitempty"`
 	// Eager is a pointer for the same nil-vs-false tri-state reason as Muted.
 	Eager *bool `json:"eager,omitempty"`
+	// PinnedAttention is a pointer for the same reason, and here the tri-state
+	// is what makes UNPINNING expressible at all: the pin is a toggle whose
+	// off-state is the one the user asks for explicitly, so a plain bool would
+	// make "unmark attention" indistinguishable from "rename this pane" and
+	// every OSC 7 CWD update would silently clear the mark.
+	PinnedAttention *bool `json:"pinned_attention,omitempty"`
 }
 
 type UpdateLayoutPayload struct {

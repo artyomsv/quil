@@ -112,7 +112,9 @@ func (m *Model) buildCtxMenuItems(pane *PaneModel) []ctxMenuItem {
 	}
 	// "Clear attention" is the inverse of the whole state block, not the
 	// inverse of the pin above it: it drops the BLOCKED mark, which is the one
-	// the user cannot otherwise get rid of.
+	// the user cannot otherwise get rid of. Three of the four marks it clears
+	// are client-owned display state and nothing is sent for them; the pin is
+	// daemon-owned and IS sent (see the handler).
 	//
 	// blockedSince is set by a hook edge and cleared only by another hook edge
 	// (workStart / workAbort / workStop / workStopFinal, workstate.go) — this
@@ -605,26 +607,54 @@ func (m Model) executeCtxMenuItem(item ctxMenuItem) (tea.Model, tea.Cmd) {
 		return m, m.toggleActivePaneMute()
 	case ctxActAttention:
 		if pane, _, _ := m.findPaneAndTab(paneID); pane != nil {
-			pane.pinnedAttention = !pane.pinnedAttention
+			// Sent, not written. The pin is daemon-owned now, and
+			// syncPaneMeta copies it back on every broadcast — so a local flip
+			// would be reverted by the next workspace_state (the git ticker
+			// alone delivers one every 5 s) and the mark would visibly undo
+			// itself. The mute toggle has taken this route since it was
+			// written; this is the same shape.
+			return m, m.sendPinnedAttention(paneID, !pane.pinnedAttention)
 		}
 		return m, nil
 	case ctxActClearAttention:
 		if pane, _, _ := m.findPaneAndTab(paneID); pane != nil {
-			// All three marks, because the row promises one thing. Clearing
+			// All four marks, because the row promises one thing. Clearing
 			// only blockedSince leaves the pane green instead of amber and the
 			// project row still counting it, which reads as the action having
 			// half-worked.
 			//
-			// This is a display state the user is dismissing, not a fact about
-			// the agent: nothing is sent to the daemon, and the next hook edge
-			// re-derives whatever is actually true (workstate.go owns every
-			// write to these fields but this one). So a pane that really IS
-			// still parked marks itself again on its next event rather than
-			// staying silently clear.
+			// The first three are display state the user is dismissing, not
+			// facts about the agent: nothing about THEM is sent to the daemon,
+			// and the next hook edge re-derives whatever is actually true
+			// (workstate.go owns every write to these fields but this one). So
+			// a pane that really IS still parked marks itself again on its next
+			// event rather than staying silently clear.
 			pane.blockedSince = time.Time{}
 			pane.blockedReason = ""
 			pane.unseen = false
-			pane.pinnedAttention = false
+			// The pin is the exception: it lives on the daemon, so it is SENT
+			// and not written here — the same route ctxActAttention takes, for
+			// the same reason. Two things were wrong with doing both.
+			//
+			// The send was gated on the local value, and that value now says
+			// only "what the last broadcast reported", never "what the daemon
+			// holds". Mark deliberately does not write locally, so Mark
+			// followed by Clear before the broadcast returns read the pin as
+			// false, sent NOTHING, and then let the Mark's own broadcast put
+			// the ◆ back after the user had cleared it — persisted. Two
+			// right-clicks, and over ssh the window is hundreds of
+			// milliseconds. It is sent unconditionally now: one idempotent
+			// message on a user-initiated action buys a guarantee that does not
+			// depend on what has arrived yet.
+			//
+			// The local write was also a lie in the two states that matter. A
+			// broadcast already in flight re-sets the pin and the next one
+			// clears it, so the ◆ blinks off, on, off; and with the link parked
+			// Router.Send drops the message and returns nil, so nothing ever
+			// arrives to revert the local clear and the mark stays gone until a
+			// reconnect brings it back minutes later. One broadcast of latency
+			// is the price the mute toggle already pays for its chip.
+			return m, m.sendPinnedAttention(paneID, false)
 		}
 		return m, nil
 	case ctxActRestart:

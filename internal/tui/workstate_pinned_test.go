@@ -65,19 +65,39 @@ func TestRenderKey_IncludesPinnedAndCtxHighlight(t *testing.T) {
 	}
 }
 
-// Border colors: pinned renders the same green as unseen; the menu-target
-// highlight renders the split-drag blue (39). Uses the split fixture's panes
-// because they have a live VT emulator and real dimensions (View() needs
-// both; a bare NewPaneModel does not get them until a layout Resize).
-func TestView_PinnedGreenBorder_CtxHighlightBlue(t *testing.T) {
+// Border colors: pinned renders PURPLE (141) and unseen renders green (28) —
+// they used to share the green, which made the mark the user set by hand
+// indistinguishable from the one the agent caused. Only one of the two clears
+// itself on focus, so the shared colour meant waiting on a green that never
+// went away. The menu-target highlight renders the split-drag blue (39).
+//
+// Uses the split fixture's panes because they have a live VT emulator and real
+// dimensions (View() needs both; a bare NewPaneModel does not get them until a
+// layout Resize).
+func TestView_PinnedPurpleBorder_UnseenGreen_CtxHighlightBlue(t *testing.T) {
 	t.Parallel()
 	m := newSplitDragTestModel(t)
 	p := m.curTabs()[0].Root.Left.Pane
-	p.Active = false // active purple (57) outranks green — test the idle pane look
-	p.pinnedAttention = true
+	p.Active = false // active purple (57) outranks both — test the idle pane look
+
+	p.unseen = true
 	if !strings.Contains(p.View(), "38;5;28") {
-		t.Error("pinned pane should render green (28) border")
+		t.Error("an unseen pane should render the green (28) border")
 	}
+
+	// Pinned wins over unseen on a pane that is both, deliberately: unseen
+	// clears itself the moment the pane is focused, the pin does not.
+	p.pinnedAttention = true
+	view := p.View()
+	if !strings.Contains(view, "38;5;141") {
+		t.Error("a pinned pane should render the purple (141) border")
+	}
+	if strings.Contains(view, "38;5;28") {
+		t.Error("a pinned pane still rendered the unseen green — the two colours " +
+			"must be distinguishable, which is the whole point of the split")
+	}
+
+	p.unseen = false
 	p.ctxTargetHighlight = true
 	if !strings.Contains(p.View(), "38;5;39") {
 		t.Error("ctx-target pane should render blue (39) border")

@@ -49,6 +49,33 @@ var (
 	// adding one.
 	blockedActiveTabStyle = blockedTabStyle.Underline(true)
 
+	// pinnedTabStyle marks a tab holding a pane the USER pinned by hand.
+	// Purple, matching the sidebar's sidebarPinnedStyle so the tab bar and the
+	// strip use one vocabulary — the same relationship blockedTabStyle's 214
+	// has to sidebarBlockedStyle, background here and foreground there.
+	//
+	// It exists because a pin and an unseen mark shared unseenTabStyle's green,
+	// so the one thing the user set by hand was indistinguishable from the one
+	// the agent caused — and the pin is the one that does not clear itself, so
+	// confusing the two means waiting for a green that never goes away.
+	// Outranked by blocked (a parked agent is a question costing you time,
+	// where a pin is a note to self) and outranks unseen. The ◆ in tabLabel is
+	// deliberately NOT gated on this precedence: a pinned-and-blocked tab is
+	// amber AND carries the ◆, because those are two facts and a colour can
+	// only carry one.
+	pinnedTabStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("232")).
+			Background(lipgloss.Color("141")).
+			Padding(0, 1)
+
+	// pinnedActiveTabStyle is the ACTIVE tab's pinned variant, underlined for
+	// exactly the reason blockedActiveTabStyle is: the background is replaced
+	// wholesale, which is the only thing active and inactive differ by, and an
+	// SGR attribute costs no cells where extra padding would shift every tab
+	// after it and desync hitTestTab.
+	pinnedActiveTabStyle = pinnedTabStyle.Underline(true)
+
 	activePaneBorder = lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color("57"))

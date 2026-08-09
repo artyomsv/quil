@@ -442,8 +442,10 @@ func coalescedCount(data map[string]string) int {
 // pane went on claiming to be working the whole time it waited. paneRow
 // suppresses the blocked PRESENTATION for the focused pane instead, so leaving
 // the pane restores every signal with no hook edge required. pinnedAttention is
-// untouched for its own reason — only ctxActAttention / ctxActClearAttention own
-// that flag.
+// untouched for a stronger reason than the others: it is DAEMON-owned, and
+// syncPaneMeta (this file) is the only thing in the client that writes it. The
+// context menu's two attention rows send MsgUpdatePane; focus is not a route to
+// a clear at all.
 func (m *Model) ackFocusedPane() {
 	tab := m.activeTabModel()
 	if tab == nil || tab.Root == nil || tab.ActivePane == "" {
@@ -611,6 +613,13 @@ func syncPaneMeta(pane *PaneModel, info *PaneInfo, wideCanvas bool, minNativeCol
 	pane.MinNativeCols = minNativeCols
 	pane.Muted = info.Muted
 	pane.Eager = info.Eager
+	// Unconditional, which makes the DAEMON the sole writer of this mark. The
+	// context menu used to flip the local bool in place; it sends
+	// MsgUpdatePane now and lets the answer come back here, exactly as the mute
+	// toggle does. A surviving local write would fight this copy on the next
+	// broadcast — and broadcasts are frequent (the git ticker alone fires every
+	// 5 s), so the mark would appear to set and then undo itself.
+	pane.pinnedAttention = info.PinnedAttention
 	pane.Pending = info.Pending
 	pane.SessionID = info.SessionID
 	pane.HistoryLines = info.HistoryLines

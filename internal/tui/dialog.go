@@ -849,6 +849,10 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if kind == confirmKindDestroyProject {
 			m.dialog = dialogNone
 			if m.client != nil {
+				if !m.projectActionable(m.projectByID(id)) {
+					log.Printf("destroy project %s: refused, its host is offline", id)
+					return m, nil
+				}
 				req, reqErr := ipc.NewMessage(ipc.MsgDestroyProject, ipc.DestroyProjectPayload{ProjectID: id})
 				if reqErr != nil {
 					log.Printf("destroy project %s: marshal: %v", id, reqErr)

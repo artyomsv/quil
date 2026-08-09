@@ -589,6 +589,19 @@ func destFileKey(dest string) string {
 	return b.String() + "-" + hex.EncodeToString(sum[:4])
 }
 
+// RemoteProjectsPath is where the client remembers one destination's project
+// list, so a host unreachable at launch can still be shown by name.
+//
+// Keyed like RecentCWDsPath, and for the same two reasons: the destination is
+// user input that reaches a filename, and two destinations that collapse to the
+// same readable component must not share a file.
+func RemoteProjectsPath(dest string) string {
+	if dest == "" {
+		return filepath.Join(QuilDir(), "remote-projects.json")
+	}
+	return filepath.Join(QuilDir(), "remote-projects-"+destFileKey(dest)+".json")
+}
+
 func MCPLogDir(cfg MCPConfig) string {
 	if cfg.LogDir != "" {
 		return cfg.LogDir

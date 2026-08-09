@@ -74,10 +74,14 @@ var livenessSSHOptions = []string{
 	"ServerAliveCountMax=3",
 }
 
-// defaultConnectTimeout bounds the TCP handshake. Generous for a handshake
+// DefaultConnectTimeout bounds the TCP handshake. Generous for a handshake
 // (which is one round trip on any working link) while still failing fast enough
 // that a wrong hostname is reported in seconds rather than minutes.
-const defaultConnectTimeout = 15 * time.Second
+//
+// Exported because cmd/quil derives extraDialTimeout from it — the whole point
+// is that the far side's readiness budget and the ssh connect budget cannot
+// drift apart the way two hand-written numbers already did once.
+const DefaultConnectTimeout = 15 * time.Second
 
 // waitDelay bounds how long Wait may block on a stderr pipe that a surviving
 // grandchild still holds open, after the child itself has been killed. Long
@@ -97,7 +101,7 @@ type SSHOptions struct {
 	RemoteCommand string
 
 	// ConnectTimeout bounds the TCP handshake. Zero means
-	// defaultConnectTimeout. Values below one second are rounded up to one:
+	// DefaultConnectTimeout. Values below one second are rounded up to one:
 	// ssh's ConnectTimeout is expressed in whole seconds, and a sub-second
 	// value would truncate to 0, which OpenSSH reads as "no timeout" — the
 	// exact opposite of what a caller passing a small value intends.
@@ -125,7 +129,7 @@ type SSHOptions struct {
 // never returning 0 for a non-zero request — see SSHOptions.ConnectTimeout.
 func connectTimeoutSecs(d time.Duration) int {
 	if d <= 0 {
-		d = defaultConnectTimeout
+		d = DefaultConnectTimeout
 	}
 	secs := int(d / time.Second)
 	if secs < 1 {

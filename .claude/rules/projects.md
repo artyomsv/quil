@@ -83,6 +83,78 @@ depends on stdout for narration and stdin for confirmation, neither visible in
 its signature, and Bubble Tea owns both — the prompt landed on top of the
 dialog and could never be answered.
 
+## Offline destinations
+
+A destination unreachable at launch keeps its sidebar rows instead of vanishing
+(`internal/tui/offline.go`, `SeedOfflineDest`). See `remote-transport.md`'s
+"Several daemons from one client" section for the router-level gap this closes
+— a destination with no conn had no pump, so nothing ever published a loss for
+it and its reconnect ladder never started.
+
+**The offline row is a real `ProjectModel`, never a parallel list.**
+`sidebarRows` builds paint order and `sidebarRowAt` indexes the SAME slice — see
+the Sidebar section above — so a second collection for offline destinations
+would need its own hit-test, and the two are exactly the kind of pair that
+drifts the moment a row is added. `SeedOfflineDest` instead appends ordinary
+`*ProjectModel` values carrying `Offline *OfflineState`, so every existing
+reader (paint, hit-test, the palette, `lastDaemon`) sees them without a special
+case, and only the few call sites that must refuse an action on one
+(`projectActionable`, Task 10) need to know the field exists at all.
+
+**The row's ID is the CACHED DAEMON project ID, and that is the whole
+mechanism that avoids duplication.** `CachedProject.ID` is the daemon's own
+project id, persisted the last time that destination broadcast state
+(`internal/tui/remoteprojects.go`). `applyWorkspaceState` indexes
+`existingProjects` by `p.ID` for the reconnecting destination and looks up
+`existingProjects[info.ID]` for each project the broadcast names
+(`internal/tui/model.go`) — an offline row seeded with the daemon's real ID
+IS a hit in that map, so the first broadcast after reconnect fills it in place
+rather than appending a second row beside it. `SeedOfflineDest` skips a
+synthetic ID (`isSyntheticProject`) for the same reason in reverse: replaying
+one would collide with the placeholder a projects-unaware daemon gets synthesised
+fresh, and would make `destSupportsProjects` answer from a stale observation.
+
+**`Offline` is cleared ONLY by the broadcast fill, and that single clear point
+is deliberate.** `applyWorkspaceState` sets `proj.Offline = nil` right where it
+fills `Name`/`RootDir`/`Bootstrap` from the broadcast — not in `finishReconnect`
+— because that is the one place guaranteed to run for BOTH ways a destination
+comes back: the reconnect ladder, and `adoptDest` from the New Project dialog,
+which attaches a host directly and never touches the reconnect path at all. A
+clear in `finishReconnect` would leave a dialog-adopted host's rows permanently
+marked offline.
+
+**`offlineDestMsg` is its own message type, not a synthesised `linkLostMsg`,
+because of what each arm does to the listen loop.** The `linkLostMsg` arm
+re-arms `listenForMessages` for a router, because a REAL link loss is produced
+BY that loop stopping to deliver it — re-arming replaces the reader that just
+exited. A destination seeded offline at launch never had a loop running for it
+in the first place, so synthesising a `linkLostMsg` for it would re-arm a
+listener that already exists, installing a SECOND permanent reader of the
+router's `r.in` channel — and two readers reorder pane output and
+`workspace_state` with no error anywhere. `offlineDestMsg`'s own arm
+deliberately does not relisten.
+
+**A redial against a destination that was NEVER attached version-gates; a
+mid-session redial deliberately does not.** `verifyRemoteLinkGated`'s `gate`
+parameter is `old == nil` in `redialRemote` (`cmd/quil/remote.go`) — a nil
+previous client means this destination has never passed `gateExtraVersion` or
+the primary version check, so nothing has ever confirmed the two daemons speak
+the same protocol. Refusing there is safe: the destination is already offline,
+so refusing changes nothing the user can see. Gating a MID-session reconnect
+would end a session whose panes are healthy over a mismatch that can only mean
+the remote was upgraded out from under a still-running client — logged as a
+warning instead, because there is no good recovery once Bubble Tea owns the
+terminal.
+
+**`lastDaemon` must count offline destinations, because `knownDests` is the
+CONNECTION table, not the destination list.** A destination that never
+connected has no entry in `knownDests` — that is exactly the state an offline
+row describes — so `lastDaemon` also walks `m.projects` for any dest with
+`Offline != nil` and a live dialer (`canReconnect`). Without that second walk,
+losing the local daemon while a configured remote is still laddering in the
+background reads as "the last daemon died" and quits the client, taking the
+ladder and the still-recoverable remote down with it.
+
 ## One remote host, one project
 
 A daemon must hold at least one tab and a tab must belong to a project, so a

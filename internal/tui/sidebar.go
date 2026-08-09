@@ -169,13 +169,25 @@ var linkGlyphStyles = map[string]lipgloss.Style{
 // mutation anyway).
 //
 // Every non-empty value it can return needs an entry in linkGlyphStyles.
-func (m *Model) linkGlyph(dest string) string {
+//
+// It takes the offline state as well as the destination because the two carry
+// different halves of the answer: the ladder's own ⟳/⚡ come from reconnectState,
+// but a destination that needs an install or an upgrade never enters the ladder,
+// so its state stays zero and a link-only reading would render nothing at all
+// for exactly the two cases the user has to act on.
+func (m *Model) linkGlyph(dest string, off *OfflineState) string {
 	ls := m.linkOf(dest)
 	switch {
 	case ls.parked:
 		return glyphLinkParked
 	case ls.active:
 		return glyphLinkRetry
+	case off != nil && (off.Kind == offlineNeedsInstall || off.Kind == offlineNeedsUpgrade):
+		// glyphLinkParked rather than a bare "⚡": every glyph this returns
+		// needs an entry in linkGlyphStyles, and a host waiting on an install
+		// or an upgrade IS what that constant names — the ladder will not act
+		// on its own, so nothing happens until the user does.
+		return glyphLinkParked
 	default:
 		return ""
 	}
@@ -238,7 +250,7 @@ func (m *Model) sidebarRows(w int) ([]sidebarRow, int) {
 		// are what gets truncated away first.
 		rows = append(rows, sidebarRow{
 			text: projectRow(sanitizeRemoteText(p.Name),
-				p.counts(), m.linkGlyph(p.Dest), i == m.activeProject, w),
+				p.counts(), m.linkGlyph(p.Dest, p.Offline), i == m.activeProject, w, p.Offline),
 			kind:  sidebarRowProject,
 			index: i,
 		})
@@ -753,12 +765,17 @@ const (
 // blocked-on-user, blue for active work, green for done-unseen, dim grey for
 // idle and section chrome.
 var (
-	sidebarHeadingStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("244"))
-	sidebarDimStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
-	sidebarTabNameStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("255"))
-	sidebarActiveStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("230"))
-	sidebarProjectStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("250"))
-	sidebarBlockedStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+	sidebarHeadingStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("244"))
+	sidebarDimStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
+	sidebarTabNameStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("255"))
+	sidebarActiveStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("230"))
+	sidebarProjectStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("250"))
+	sidebarBlockedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+	// 208, not the 214 sidebarBlockedStyle spends on the ▲ badge: a project can
+	// be offline AND holding a blocked agent at the same time, and one colour
+	// for both makes "this host is gone" and "an agent wants you" the same
+	// signal.
+	sidebarOfflineStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("208"))
 	sidebarWorkingStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
 	sidebarUnseenStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("28"))
 	sidebarPinnedStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("141"))
@@ -1039,14 +1056,21 @@ func sidebarTabHeading(name string, idx int, active bool, color string, w int) s
 // Every badge segment begins with a SPACE, which is what satisfies
 // renderStyledSegments' cluster-boundary precondition — see there for what
 // breaks without it.
-func projectRow(name string, c paneStateCounts, link string, active bool, w int) string {
+//
+// The active project keeps sidebarActiveStyle even when offline: "where am I"
+// outranks "what is wrong with it", and the link glyph beside the name says
+// the rest.
+func projectRow(name string, c paneStateCounts, link string, active bool, w int, offline *OfflineState) string {
 	marker := "  "
 	if active {
 		marker = "▸ "
 	}
 	style := sidebarProjectStyle
-	if active {
+	switch {
+	case active:
 		style = sidebarActiveStyle
+	case offline != nil:
+		style = sidebarOfflineStyle
 	}
 	// One allocation for the whole row, with slot 0 reserved for the head and
 	// filled in below once its padding is known. lipgloss.Style is 648 bytes, so

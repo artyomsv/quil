@@ -363,6 +363,13 @@ type Model struct {
 	version       string
 	sized         bool            // the terminal has reported its geometry at least once
 	attached      map[string]bool // destinations already attached — see attachAllDests
+	// offlineWoken records which offline destinations have had their ladder
+	// started, so the wake-up fires once rather than on every resize.
+	offlineWoken map[string]bool
+	// listenCountFn is a test seam: production leaves it nil. It exists because
+	// the failure it guards — a SECOND reader of the router's channel — has no
+	// error to assert on, only reordering.
+	listenCountFn func()
 	// sizedOnce records panes this connection has sent at least one
 	// MsgResizePane for. A broadcast-driven resize is suppressed when the
 	// reported size already matches, but the FIRST one is always sent: the
@@ -717,6 +724,12 @@ type Model struct {
 	// daemon fatal — its panes died with it, so retrying would hide the loss.
 	links     map[string]*reconnectState
 	redialFns map[string]RedialFunc
+	// cachedRemote is the last project set WRITTEN for each destination, so a
+	// broadcast that changed nothing costs no disk write. In memory only.
+	cachedRemote map[string][]CachedProject
+	// saveRemoteProjectsFn is the cache writer, a seam so a test can count
+	// writes without a temp dir per case. nil means SaveRemoteProjects.
+	saveRemoteProjectsFn func(path string, list []CachedProject) error
 	// dialDestFn connects a destination that is not in the table yet, and
 	// redialDestFn builds the reconnect ladder for one once it is. Both are
 	// supplied by cmd/quil (the ssh transport lives there); a Model without
@@ -972,8 +985,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// is lost, so the next real resize attaches every destination a
 			// SECOND time and replays every ghost buffer twice. gc happens to
 			// evaluate the calls first today; nothing requires it to.
-			resize, attach := m.resizeAllPanes(), m.attachAllDests()
-			return m, tea.Batch(resize, attach)
+			//
+			// wakeOfflineDests rides the same statement for the same reason, and
+			// belongs on THIS branch specifically rather than the "subsequent
+			// resize" code below: an unresized session hits the poll-echo guard
+			// above on every later tick and never reaches that code at all, so
+			// wiring the wake-up there would mean a host merely switched off at
+			// launch never redials until the user actually resizes the window.
+			// This branch runs exactly once, unconditionally, which is what a
+			// launch-time wake-up needs.
+			resize, attach, wake := m.resizeAllPanes(), m.attachAllDests(), m.wakeOfflineDests()
+			return m, tea.Batch(resize, attach, wake)
 		}
 
 		// A destination can join the router after the first resize (a host that
@@ -1000,6 +1022,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(attach, tea.Tick(150*time.Millisecond, func(t time.Time) tea.Msg {
 			return resizeTickMsg{seq: seq}
 		}))
+
+	case offlineDestMsg:
+		// No relisten, deliberately — see offlineDestMsg's doc comment.
+		if !m.canReconnect(msg.dest) {
+			log.Printf("offline destination %s has no dialer; leaving it parked", msg.dest)
+			m.linkFor(msg.dest).parked = true
+			return m, nil
+		}
+		p := m.projectForDest(msg.dest)
+		if p == nil || p.Offline == nil || !p.Offline.Kind.laddered() {
+			return m, nil
+		}
+		return m.beginReconnect(msg.dest, errors.New("unreachable at launch"))
 
 	case linkLostMsg:
 		// The generation check retires a report from a SUPERSEDED client, and it
@@ -1078,6 +1113,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				log.Printf("releasing late reconnect from gen %d (current %d)", msg.gen, m.clientGen)
 				m.closeClient(msg.client)
 			}
+			return m, nil
+		}
+		if msg.err != nil && errors.Is(msg.err, ErrRemoteVersionMismatch) {
+			// The ladder cannot fix this: every further attempt re-authenticates
+			// and re-fails until the far side is upgraded. Stop it and let the
+			// sidebar offer the upgrade instead.
+			if p := m.projectForDest(msg.dest); p != nil && p.Offline != nil {
+				p.Offline.Kind = offlineNeedsUpgrade
+				p.Offline.Detail = msg.err.Error()
+			}
+			ls := m.linkFor(msg.dest)
+			ls.active, ls.parked = false, false
 			return m, nil
 		}
 		// msg.client == nil with no error is not a success. A dialer returning
@@ -3710,6 +3757,35 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 
 	case kbMatches(key, kb.NewTab):
+		// Flashes rather than no-opping silently, for the same reason the
+		// single-project/no-bounce-target/empty-queue refusals above do: a
+		// key that appears to do nothing is indistinguishable from a broken
+		// one. It fires only when there IS an active project and it is
+		// unreachable — createTab's send is unstamped and Router.Send would
+		// drop it silently, so the user would believe a tab was created that
+		// never was.
+		//
+		// A NIL m.cur() is deliberately NOT refused: m.projects is nil from
+		// NewModel until the first workspace_state broadcast, which is a real
+		// window every session passes through, not an unreachable one — during
+		// it createTab's unstamped send resolves through Router.Send's
+		// sole-conn startup fallback (routeDest's currentDest() is "" before any
+		// project is known, which is exactly the key the local daemon's own
+		// connection is registered under). Refusing here would make Ctrl+T do
+		// nothing for the first moment of every session, on a machine that is
+		// reachable.
+		// onlyOfflineProjects is the same carve-out as the nil case just above:
+		// every row seeded before the first broadcast is an offline stand-in for
+		// SOME OTHER destination, so m.cur() names a host that is unreachable
+		// while the LOCAL daemon — where createTab's unstamped send actually
+		// resolves via Router.Send's sole-conn fallback — is fine. Without it,
+		// seeding turned the never-reached-daemon window this comment already
+		// describes into "flashes cannot reach <host>" about a machine that was
+		// never the problem.
+		if p := m.cur(); p != nil && !m.projectActionable(p) && !m.onlyOfflineProjects() {
+			m.setFlash("cannot reach " + hostLabel(p.Dest) + " — new tab not created")
+			return m, m.flashCmd()
+		}
 		return m, m.createTab()
 
 	case kbMatches(key, kb.ClosePane):
@@ -4112,7 +4188,7 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg, dest string) ([]str
 	// is adopted only when there is no active project yet — startup, before
 	// any broadcast has been applied.
 	activeID := ""
-	if p := m.cur(); p != nil {
+	if p := m.cur(); p != nil && !m.onlyOfflineProjects() {
 		activeID = p.ID
 	}
 	if activeID == "" {
@@ -4127,6 +4203,12 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg, dest string) ([]str
 			proj = &ProjectModel{ID: info.ID, Dest: dest}
 		}
 		proj.Name, proj.RootDir, proj.Bootstrap = info.Name, info.RootDir, info.Bootstrap
+		// The daemon answered, so whatever this row was standing in for is over.
+		// This is the ONLY clear point, and it is here rather than in
+		// finishReconnect because it also covers a host brought back through
+		// adoptDest from the New Project dialog, which never passes through the
+		// reconnect path at all.
+		proj.Offline = nil
 		tabs, projPaneIDs, projResizeCmds := m.rebuildTabs(info, state, existingTabs, existingPanes, paneMap, dest)
 		proj.tabs = tabs
 		proj.activeTab = indexOfTab(proj.tabs, info.ActiveTab)
@@ -4136,11 +4218,17 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg, dest string) ([]str
 	}
 
 	m.projects = mergeProjects(m.projects, rebuilt, dest)
-	m.activeProject = indexOfProject(m.projects, activeID)
+	m.activeProject = resolveActiveProjectIndex(m.projects, activeID)
 	// Both halves of the router's default just changed — the project list and
 	// which of them is active — so push the answer immediately rather than at
 	// the end of the function, where a later early return could skip it.
 	m.syncActiveDest()
+
+	// Record what this destination holds, so a launch that cannot reach it can
+	// still show these projects by name instead of dropping them. Placed after
+	// the merge because that is where m.projects becomes authoritative for this
+	// destination, and it self-skips when nothing changed.
+	m.cacheRemoteProjects(dest)
 
 	// Dispose panes that did not survive reconciliation — both panes pruned
 	// from surviving tabs and every pane of tabs the daemon dropped. Without
@@ -5408,6 +5496,9 @@ func paneDisplayName(pane *PaneModel) string {
 }
 
 func (m Model) listenForMessages() tea.Cmd {
+	if m.listenCountFn != nil {
+		m.listenCountFn()
+	}
 	return func() tea.Msg {
 		msg, err := m.client.Receive()
 		if err != nil {

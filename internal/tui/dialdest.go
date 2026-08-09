@@ -3,6 +3,7 @@ package tui
 import (
 	"errors"
 	"log"
+	"os"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -255,6 +256,22 @@ func (m *Model) disconnectDest(dest string) {
 	// disconnected host reappears in whatever it drives.
 	delete(m.updateInfos, dest)
 	delete(m.installedDests, dest)
+	// Same class of key as the four above: read through the active dest today,
+	// so a leftover entry is unreachable rather than wrong — but a leftover
+	// offlineWoken would skip re-arming this destination's ladder if it is ever
+	// re-added, and a leftover cachedRemote would answer a future SeedOfflineDest
+	// with a list belonging to the host the user just told this client to forget.
+	delete(m.offlineWoken, dest)
+	delete(m.cachedRemote, dest)
+	// The on-disk half of cachedRemote. "Forget this host" should leave nothing
+	// behind — a stale cache file would outlive the in-memory map and reappear
+	// as offline rows naming this host the next time it is added back. Best
+	// effort like the rest of this function: a file that cannot be removed
+	// (already gone, permissions) does not block a disconnect the user asked
+	// for.
+	if err := os.Remove(config.RemoteProjectsPath(dest)); err != nil && !os.IsNotExist(err) {
+		log.Printf("remote projects cache for %s: %v", dest, err)
+	}
 
 	// Drop its projects, and keep the active index inside the survivors —
 	// removing a project before the active one shifts every later index down.

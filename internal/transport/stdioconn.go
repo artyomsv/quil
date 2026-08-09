@@ -549,6 +549,56 @@ func sanitizeForTerminal(s string) string {
 	}, s)
 }
 
+// SanitizeForTerminalMessage prepares remote-influenced text for an error
+// message printed directly to the operator's own terminal.
+//
+// It exists because sanitizeForTerminal + truncateForMessage were, until a
+// round-2 review of the offline-projects work, applied only inside LinkErr —
+// covering ssh's own captured stderr. That review traced a SECOND path to the
+// same terminal: a background destination's dial failure can carry a
+// daemon-reported version string (gateExtraVersion, cmd/quil/dialall.go),
+// and internal/version.Parsed strips everything after the first '-' or '+'
+// before validating the numeric components, so a prerelease/build suffix is
+// an arbitrary, unvalidated byte channel a misbehaving or hostile daemon
+// fully controls — unlike ssh's stderr, nothing between the daemon and that
+// call site inspects it. `o.err` in dialAllWith's caller already has three
+// producers and is expected to grow more, so this sanitizes at the PRINT,
+// the one place guaranteed to see all of them, rather than at each source.
+//
+// Combines sanitizeForTerminal (drops C0 controls, DEL, and C1 including the
+// single-byte 0x9b CSI introducer) with a strip of the Unicode bidi
+// embedding/override (U+202A-U+202E) and isolate (U+2066-U+2069) controls —
+// printable runes that pass sanitizeForTerminal's byte-range check untouched
+// but can still reorder how the surrounding line is DISPLAYED, the same
+// hazard internal/tui's sanitizeRemoteText polices on the dialog render
+// path — then truncateForMessage's length cap, so no producer can grow an
+// error line without bound.
+//
+// Every call site printing text whose origin is a remote daemon or ssh child
+// straight to a terminal (as opposed to a log file, which terminalSanitizer
+// already covers) should route through this rather than sanitizeForTerminal
+// alone.
+func SanitizeForTerminalMessage(s string) string {
+	return truncateForMessage(stripBidiControls(sanitizeForTerminal(s)))
+}
+
+// stripBidiControls drops the bidi embedding/override/isolate ranges
+// internal/tui's sanitizeRemoteText strips on its render path. Kept separate
+// from sanitizeForTerminal itself rather than folded in: that function is
+// documented and tested against ssh's own captured stderr, a corpus that has
+// never needed this, and widening its contract for every existing caller is
+// a different decision from adding it at this one new call site.
+func stripBidiControls(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r >= 0x202a && r <= 0x202e, r >= 0x2066 && r <= 0x2069:
+			return -1
+		default:
+			return r
+		}
+	}, s)
+}
+
 // compile-time proof the adapter satisfies the interface ipc.DialFunc returns,
 // and that a caller can interrogate a dead link.
 var (

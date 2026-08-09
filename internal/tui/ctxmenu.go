@@ -397,19 +397,21 @@ func (m *Model) openCtxMenu(pane *PaneModel, anchorX, anchorY int) {
 // buildProjectCtxMenuItems is the sidebar project row's menu: Rename and
 // Destroy. No availability gates — unlike the pane menu's history/lazygit
 // rows, both actions are always valid for any project the sidebar can show.
-func buildProjectCtxMenuItems(remote, synthetic bool) []ctxMenuItem {
-	// Rename AND Destroy are greyed for the SYNTHETIC project — the
-	// placeholder the client invents for a daemon that has reported no
-	// projects. Its ID exists only here, so either message names something the
-	// daemon has never heard of and its map lookup misses: the dialog is
+func buildProjectCtxMenuItems(remote, unreachable bool) []ctxMenuItem {
+	// Rename AND Destroy are greyed for an UNREACHABLE project — either the
+	// SYNTHETIC placeholder the client invents for a daemon that has reported
+	// no projects (its ID exists only here, so either message names something
+	// the daemon has never heard of and its map lookup misses: the dialog is
 	// accepted and nothing changes, which is exactly how it was reported for a
-	// remote host while the same actions worked locally.
+	// remote host while the same actions worked locally), or a real project
+	// whose destination has no connection — Router.Send drops a message aimed
+	// at it and returns nil, so the dialog would look just as silently accepted.
 	//
-	// Disconnect stays ENABLED on such a host, and is the only thing that can
+	// Disconnect stays ENABLED in both cases, and is the only thing that can
 	// work there: it is client-side entirely, and detaching the machine is
 	// what a user reaching for "remove this" actually wants when the daemon
-	// cannot hold a project in the first place.
-	items := []ctxMenuItem{{ctxActRenameProject, "Rename project", !synthetic, false}}
+	// cannot hold a project in the first place (or cannot be reached at all).
+	items := []ctxMenuItem{{ctxActRenameProject, "Rename project", !unreachable, false}}
 	// ONE removal action, chosen by what the project is.
 	//
 	// Offering both on a remote read as two ways to do the same thing, and the
@@ -421,7 +423,7 @@ func buildProjectCtxMenuItems(remote, synthetic bool) []ctxMenuItem {
 	if remote {
 		items = append(items, ctxMenuItem{ctxActDisconnectHost, "Disconnect host…", true, false})
 	} else {
-		items = append(items, ctxMenuItem{ctxActDestroyProject, "Destroy project…", !synthetic, false})
+		items = append(items, ctxMenuItem{ctxActDestroyProject, "Destroy project…", !unreachable, false})
 	}
 	return items
 }
@@ -438,7 +440,7 @@ func (m *Model) openProjectCtxMenu(p *ProjectModel, anchorX, anchorY int) {
 		title:     p.Name,
 		spaced:    false,
 		cursor:    -1,
-		items:     buildProjectCtxMenuItems(p.Dest != "", isSyntheticProject(p.ID)),
+		items:     buildProjectCtxMenuItems(p.Dest != "", !m.projectActionable(p)),
 	}
 	s.cursor = firstEnabled(s.items)
 	w, h := s.boxSize()

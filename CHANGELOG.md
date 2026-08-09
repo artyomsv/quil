@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- A tab was marked amber ("blocked on you") while its agent was still
+  demonstrably working with background subagents running. Claude reuses the
+  same notification for a permission prompt and for its own idle nudge, and
+  the idle nudge — arriving after the turn already finished — was
+  misclassified as a fresh block, hiding the pane's working indicator behind
+  the "needs you" marker.
+
 ## [1.53.0] - 2026-08-09
 
 ### Added

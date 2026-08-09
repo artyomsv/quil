@@ -36,7 +36,8 @@ const (
 	workSubagentStart = hookevents.WorkEventSubagentStart // subagent spawned → spinner on
 	workSubagentStop  = hookevents.WorkEventSubagentStop  // subagent finished → spinner off once drained AND turn over
 	workStopFinal     = hookevents.WorkEventStopFinal     // terminal stop → also clears the outstanding count
-	workPark          = hookevents.WorkEventPark          // agent blocked on the user (permission/idle) → stamps blockedSince/blockedReason; does NOT clear turnActive (see the workPark case)
+	workPark          = hookevents.WorkEventPark          // agent blocked on the user, UNAMBIGUOUSLY (PermissionRequest/permission.ask) → stamps blockedSince/blockedReason; does NOT clear turnActive (see the workPark case)
+	workNotify        = hookevents.WorkEventNotify        // agent blocked on the user, AMBIGUOUSLY (Notification: permission prompt mid-turn OR idle nudge after Stop) → stamps blockedSince only while turnActive is true (see the workNotify case)
 )
 
 // workEventKind maps a PaneEvent Type (the daemon encodes hook events as
@@ -160,6 +161,17 @@ func (m *Model) notifyTabSwitch(tab *TabModel) {
 // not. tabBlocked (read by tabStyle, model.go) is what carries a parked
 // BACKGROUND pane to the tab bar instead, deriving from blockedSince rather
 // than from unseen; the two must not be separated.
+//
+// workNotify is the ambiguous twin (see hookevents.WorkEventNotify): Claude's
+// Notification fires for a mid-turn permission prompt (turnActive true —
+// parks exactly like workPark above) AND for its own idle nudge once the
+// turn is already over (turnActive false — Stop already ran its own falling
+// edge, if any). The idle-nudge case changes NOTHING here: no blockedSince,
+// no touch to turnActive, so `working` recomputes to the same value it
+// already had and neither edge below fires. Collapsing the two into workPark
+// painted a tab amber and hid a still-working pane's ◐/⋯N behind ▲ while its
+// background subagents were still draining (production sequence: Stop, then
+// Notification, with 3 SubagentStops still to come).
 //
 // `working` is DERIVED — recomputed at a single point below as
 // turnActive || len(subagents) > 0 || subagentsOverflow — never assigned by
@@ -319,6 +331,21 @@ func (m *Model) applyWorkTransition(paneID, eventType string, data map[string]st
 		// carry no tool, so the reason is genuinely optional — render a bare
 		// marker rather than inventing one.
 		pane.blockedReason = data["tool"]
+	case workNotify:
+		// Notification is Claude's idle nudge as well as its permission
+		// prompt, and nothing in the payload tells them apart — only
+		// turnActive can. turnActive true: the turn is still open, so this
+		// IS a permission prompt; treat exactly like workPark above
+		// (blockedSince/blockedReason, spinner and turnActive untouched).
+		// turnActive false: Stop already ended the turn, so this is the idle
+		// nudge alone — leave every field exactly as Stop left it (unseen if
+		// nothing was outstanding, still working if subagents are). Setting
+		// blockedSince unconditionally here was the bug: it painted a tab
+		// amber and hid the ◐ ⋯N a pane with live subagents should show.
+		if pane.turnActive {
+			pane.blockedSince = time.Now()
+			pane.blockedReason = data["tool"]
+		}
 	case workAbort:
 		pane.turnActive = false
 		clear(pane.subagents)

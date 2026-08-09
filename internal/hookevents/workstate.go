@@ -31,14 +31,29 @@ const (
 	WorkEventSubagentStart // a subagent spawned → spinner on
 	WorkEventSubagentStop  // a subagent finished → spinner off once drained AND turn over
 	WorkEventStopFinal     // terminal stop (session end) → also clears the outstanding count
-	// WorkEventPark: the agent is blocked waiting on the USER — a permission
-	// prompt or an idle wait. Distinct from WorkEventStop, which means the turn
+	// WorkEventPark: the agent is blocked waiting on the USER, UNAMBIGUOUSLY —
+	// a permission prompt (hook.claude.PermissionRequest) or opencode's
+	// permission.ask. Distinct from WorkEventStop, which means the turn
 	// finished. Unlike Stop, this does NOT clear the spinner: the consumer
 	// (internal/tui/workstate.go) sets blockedSince without touching
 	// turnActive, because a permission prompt arrives mid-turn and approving
 	// it fires no hook of its own. Park means "this needs you", which is what
 	// the sidebar's ▲ renders.
 	WorkEventPark
+	// WorkEventNotify: the agent MAY be blocked waiting on the user — the
+	// classifier cannot tell, because Claude reuses hook.claude.Notification
+	// for two different situations and only the consumer's turn state
+	// distinguishes them. It fires for a permission prompt (mid-turn, while
+	// turnActive is still true — behaviourally identical to WorkEventPark)
+	// AND for Claude's own idle nudge, "Claude is waiting for your input"
+	// (fired AFTER the turn's own Stop already cleared turnActive, often
+	// while background subagents are still draining). Collapsing both into
+	// WorkEventPark painted a tab's amber "blocked on you" marker while its
+	// agent was demonstrably still working (production sequence: Stop, then
+	// Notification, with 3 SubagentStops still to come). The consumer gates
+	// on turnActive: true behaves exactly like WorkEventPark; false leaves
+	// the pane's state exactly as Stop left it.
+	WorkEventNotify
 )
 
 // ClassifyWorkEvent maps a composed PaneEvent Type to a work-state transition.
@@ -70,23 +85,28 @@ func ClassifyWorkEvent(eventType string) WorkEventKind {
 	case "hook.claude.SubagentStop":
 		return WorkEventSubagentStop
 	// Park-for-input edges: the agent is blocked waiting on the user (permission
-	// prompt, option select, idle-input nudge). The classification here is
-	// unchanged — what changed is the consumer: internal/tui/workstate.go's
+	// prompt, option select, idle-input nudge). internal/tui/workstate.go's
 	// workPark case sets blockedSince WITHOUT clearing turnActive, so a
 	// permission prompt that arrives mid-turn keeps the spinner running across
 	// it (approving a Bash/Edit/Write prompt fires no hook of its own, so the
 	// pane used to read as blocked-not-working until the eventual Stop).
-	// Notification covers both that mid-turn prompt and an idle-wait nudge
-	// (Stop already cleared turnActive by then), which is why one edge handles
-	// both. Tagged distinctly from WorkEventStop so the sidebar can tell
-	// "blocked on you" apart from "turn finished" — a park no longer sets
-	// unseen; tabBlocked + blockedTabStyle carry it to the tab bar instead.
-	// Both Claude (Notification fires for permission + idle-wait;
-	// PermissionRequest when available) and opencode (permission.ask) are
-	// covered.
-	case "hook.claude.Notification", "hook.claude.PermissionRequest",
-		"hook.opencode.permission.ask":
+	// PermissionRequest (Claude, when available) and permission.ask (opencode)
+	// are unambiguous — always a real block — and stay WorkEventPark.
+	//
+	// hook.claude.Notification is NOT unambiguous: Claude reuses it for both
+	// that mid-turn permission prompt AND an idle-wait nudge fired once the
+	// turn is already over, and nothing in the payload tells them apart — only
+	// turnActive does, which is TUI-side state the classifier here does not
+	// have. It gets its own kind, WorkEventNotify, so the consumer can make
+	// that call instead of the classifier guessing wrong in one direction or
+	// the other. Tagged distinctly from WorkEventStop either way, so the
+	// sidebar can tell "blocked on you" apart from "turn finished" — a
+	// genuine park no longer sets unseen; tabBlocked + blockedTabStyle carry
+	// it to the tab bar instead.
+	case "hook.claude.PermissionRequest", "hook.opencode.permission.ask":
 		return WorkEventPark
+	case "hook.claude.Notification":
+		return WorkEventNotify
 	case "process_exit":
 		return WorkEventAbort
 	}

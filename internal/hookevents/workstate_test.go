@@ -19,7 +19,7 @@ func TestClassifyWorkEvent(t *testing.T) {
 		{"hook.claude.SessionEnd", WorkEventStopFinal},
 		{"hook.opencode.session.idle", WorkEventStop},
 		{"hook.opencode.session.error", WorkEventStop},
-		{"hook.claude.Notification", WorkEventPark},
+		{"hook.claude.Notification", WorkEventNotify},
 		{"hook.claude.PermissionRequest", WorkEventPark},
 		{"hook.opencode.permission.ask", WorkEventPark},
 		{"hook.claude.SubagentStart", WorkEventSubagentStart},
@@ -50,7 +50,6 @@ func TestClassifyWorkEvent(t *testing.T) {
 func TestParkEventsAreDistinctFromStop(t *testing.T) {
 	t.Parallel()
 	for _, evt := range []string{
-		"hook.claude.Notification",
 		"hook.claude.PermissionRequest",
 		"hook.opencode.permission.ask",
 	} {
@@ -60,5 +59,15 @@ func TestParkEventsAreDistinctFromStop(t *testing.T) {
 	}
 	if got := ClassifyWorkEvent("hook.claude.Stop"); got != WorkEventStop {
 		t.Errorf("a turn completing is Stop, not Park: got %v", got)
+	}
+
+	// Notification is ambiguous — Claude fires it for both a permission
+	// prompt (mid-turn) and an idle nudge (after Stop) — so it gets its own
+	// kind rather than collapsing into the unambiguous Park signal. The
+	// consumer (tui.applyWorkTransition) tells the two apart using
+	// turnActive; this classifier only records that the signal is distinct
+	// from both Park and Stop.
+	if got := ClassifyWorkEvent("hook.claude.Notification"); got != WorkEventNotify {
+		t.Errorf("Notification must classify as WorkEventNotify, got %v", got)
 	}
 }

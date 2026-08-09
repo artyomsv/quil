@@ -67,14 +67,37 @@ Subagent edges: `hook.claude.SubagentStart` adds to the ledger (spinner on), `ho
 
 **`agent_type` is part of the ingester's coalesce key for exactly this reason** (`internal/hookevents/ingest.go` — `coalesceKey(paneID, hook_event, agent_type)`, appended only when non-empty so every other event keys as before). Coalescing is last-wins, so merging two DIFFERENT agents' starts would erase the loser's identity: its own stop would then match nothing while the winner's count never drained, wedging the spinner until `SessionEnd` — the ledger's identity guarantee only holds because the wire preserves it. A burst of the SAME agent still collapses to one emit with the burst count, which is what the count exists for. **The key's two free-form components are escaped** (`keyFieldEscaper`): `paneID` is NUL-free by `safePaneID` and stays first (so `Cancel`'s prefix match is unaffected), but `hook_event` and `agent_type` are arbitrary payload strings and JSON admits U+0000 in either — two variable fields joined by a separator either may contain is not injective, and `("SubagentStart", "\x00X")` would otherwise key identically to `("SubagentStart\x00", "X")`, coalescing them last-wins and erasing an identity. The escape is identity for every value a real producer emits. Claude Code runs subagents detached by default, so the main turn's `Stop` routinely fires while they still run: stop edges only end the spinner once the counter is drained, and the unseen mark is deferred to the drain edge (the LAST `SubagentStop` becomes the completion edge). Stop edges (→ persistent green unseen mark on the pane): `hook.claude.Stop`, `hook.opencode.session.idle`/`session.error`. `hook.claude.SessionEnd` is a *terminal* stop (`WorkEventStopFinal`): it also clears the subagent ledger (no subagent outlives its session — a lost SubagentStop must not wedge the spinner). `TaskCreated`/`TaskCompleted` are deliberately unmapped (task-list bookkeeping, not execution). Resume edge: `hook.claude.PostToolUse` (registered with a tool-name matcher `AskUserQuestion|ExitPlanMode` in `internal/claudehook` so it fires only for interactive-prompt tools — the user just answered → re-arm spinner; `workStart` clears the pane's unseen mark; suppressed from the notification sidebar as work-state-only). `process_exit` clears `working` AND the subagent ledger WITHOUT marking unseen (a crash is not a completed turn). A single shared 100 ms `workSpinnerTickMsg` animates the braille `spinnerFrames` on both the tab label (`tabLabel` prefix when `tabHasWorkingPane`) and each working pane's top-left border (left segment of `buildTopBorder`, reserved so the CWD truncation never eats the glyph); the loop self-stops via `workTickRunning` when no pane is working. `unseen` lives on `PaneModel` (set on workStop unless the pane is the focused pane of the active tab; cleared by `ackFocusedPane` at the single `Update` entry choke point — focusing the pane is the acknowledgement, no timer). Marked panes render a green border (precedence below active/ghost/MCP-highlight); background tabs derive a green label via `tabUnseen` + `unseenTabStyle` — `tabStyle(idx)` precedence is `blockedTabStyle` (amber, includes the active tab: the parked pane may be in an unfocused split) > `unseenTabStyle` (green, covers `tabUnseen` and a pinned-for-attention pane alike) > custom tab color > active/inactive default, and is shared by `renderTabBar` + `hitTestTab` so rendered widths and click hit-testing never diverge. The active tab label never shows green (you're already looking at it); an unfocused split sibling still shows its green border. OpenCode's start edge is produced by the `chat.message` handler in `internal/opencodehook/scripts/quil-session-tracker.js`; Claude needs no producer change (both edges already arrive). State is not persisted — panes start idle on restart and the next hook event corrects them.
 
-Park-for-input edges (`hook.claude.Notification` / `PermissionRequest`,
+Park-for-input edges (`hook.claude.PermissionRequest`,
 `hook.opencode.permission.ask`) set `blockedSince` and do **NOT** clear
-`turnActive`. `Notification` covers two situations — a permission prompt
-(arrives mid-turn) and an idle-wait nudge (arrives after `Stop` already cleared
-`turnActive`) — so clearing it was a no-op exactly when it was right and wrong
-exactly when it was not: approving a Bash/Edit/Write prompt fires no hook of
-its own, so the pane read as blocked-not-working until the turn's `Stop`, for
-however long the agent was already back at work.
+`turnActive` — a permission prompt arrives mid-turn, and approving a
+Bash/Edit/Write prompt fires no hook of its own, so clearing `turnActive` on
+the park left the pane reading blocked-not-working until the turn's `Stop`,
+for however long the agent was already back at work.
+
+**`hook.claude.Notification` is a DIFFERENT `WorkEventKind` (`WorkEventNotify`
+/ `workNotify`), not a synonym for `PermissionRequest` — because it is
+AMBIGUOUS in a way `PermissionRequest` is not.** Claude reuses the same hook
+event for two situations with nothing in the payload to tell them apart: a
+permission prompt (arrives mid-turn, `turnActive` still true) and Claude's own
+idle nudge, "Claude is waiting for your input" (arrives AFTER the turn's own
+`Stop` already cleared `turnActive`, often while background subagents are
+still draining). The classifier (`hookevents.ClassifyWorkEvent`) cannot
+resolve the ambiguity — it has no access to `turnActive` — so it hands the
+consumer a distinct kind instead of guessing. `tui.applyWorkTransition`'s
+`workNotify` case is where the guess is made, and it is the only place that
+CAN make it: `turnActive` true → behaves exactly like `workPark`
+(`blockedSince`/`blockedReason` stamped, spinner untouched); `turnActive` false
+→ changes nothing at all, leaving the pane exactly as `Stop` left it (`unseen`
+if nothing was outstanding, still `working` if subagents are). Collapsing both
+into one `WorkEventPark` was the bug: a production pane ran
+`UserPromptSubmit` → 4×`SubagentStart` → `Stop` → `Notification`, and the
+unconditional park painted its tab amber and hid the `◐ ⋯3` a still-working
+pane should show, because `paneRow`'s blocked-outranks-working precedence
+picked the stale `▲` over the live subagent count. The split does not touch
+`PermissionRequest`/`permission.ask`, which stay unconditional — they are
+never ambiguous, so gating them on `turnActive` would be a regression, not a
+fix (a permission prompt firing after a pane's own `Stop`, from a hook whose
+event name says exactly what it is, must still block).
 
 Because `working` no longer falls on a park, the falling edge no longer sets
 `unseen`. `tabBlocked` (`workstate.go`) + `blockedTabStyle` carry a parked

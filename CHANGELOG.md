@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- The TUI quit itself, reporting a clean exit, on workspaces with many tabs.
+  Every workspace update made the client re-send the layout of every tab and
+  the size of every pane whether or not anything had changed — one guaranteed
+  delivery each, against a 64-slot outbound queue. Past roughly 64 tabs plus
+  panes a single update could overflow that queue, and the client's own
+  transport treats a full queue as proof the other end is dead, so it closed
+  the connection and the session ended with no error anywhere. Reordering tabs
+  by dragging made it far more likely by producing an update per slot crossed,
+  but the trigger was only ever the tab count: it first fired seven seconds
+  after a 33rd tab was created, on an update no drag was involved in. The
+  client now sends only what actually differs from the state the daemon just
+  reported, and only for the daemon that reported it.
+- A client whose outbound queue fills now waits a few seconds for it to drain
+  instead of disconnecting immediately. That rule exists so a daemon can drop
+  one unresponsive client rather than stall the others; applied to a client's
+  own connection it had nothing to protect and merely ended the session. A
+  daemon that stays unresponsive past the grace period is still reported as a
+  lost connection, so nothing you typed is silently discarded.
+- Restored panes still receive the first resize after attaching or
+  reconnecting, which is what prompts them to repaint. Only repeats of a size
+  the daemon already has are suppressed.
+- The "dropping slow client" warning now identifies the connection, its queue
+  depth, and the limit. It is emitted by code shared between the daemon and
+  every client, so on its own it named neither.
+
 ## [1.53.2] - 2026-08-09
 
 ### Fixed

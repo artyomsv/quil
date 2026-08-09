@@ -1,0 +1,720 @@
+package tui
+
+import (
+	"encoding/json"
+	"strconv"
+	"strings"
+	"testing"
+
+	"github.com/artyomsv/quil/internal/config"
+	"github.com/artyomsv/quil/internal/ipc"
+)
+
+// Every workspace_state broadcast used to make the TUI re-send one
+// MsgUpdateLayout per tab and one MsgResizePane per pane, unconditionally.
+// Both are must-deliver frames on a 64-slot queue, so at 33 tabs + 36 panes a
+// single broadcast enqueued 69 criticals, overflowed, and the client's own IPC
+// layer closed the connection — which local mode reports as a clean quit
+// ("TUI exited normally", 2026-08-09).
+//
+// These tests pin the echo away: a broadcast that already agrees with what the
+// TUI holds must produce no traffic at all.
+
+// broadcastLayout renders a layout tree the way a REAL broadcast carries it.
+//
+// This round trip is the whole point of the helper. The daemon stores
+// MarshalLayout's bytes, but parseWorkspaceState decodes the entire state into
+// map[string]any and re-marshals the layout sub-map. Go marshals a map with
+// keys sorted ALPHABETICALLY and a struct in DECLARATION order, so for any node
+// with more than one key the bytes that reach the client differ from
+// MarshalLayout's for the identical tree.
+//
+// A test that skips the round trip compares struct-ordered bytes with
+// struct-ordered bytes, and therefore passes against a naive byte-diff
+// implementation that is wrong for every split tab in existence.
+func broadcastLayout(t *testing.T, root *LayoutNode) json.RawMessage {
+	t.Helper()
+	raw, err := MarshalLayout(root)
+	if err != nil {
+		t.Fatalf("MarshalLayout: %v", err)
+	}
+	var generic any
+	if err := json.Unmarshal(raw, &generic); err != nil {
+		t.Fatalf("decode to generic: %v", err)
+	}
+	out, err := json.Marshal(generic)
+	if err != nil {
+		t.Fatalf("re-marshal generic: %v", err)
+	}
+	return out
+}
+
+// TestBroadcastLayoutBytesDifferForASplit pins the PREMISE of the tests below.
+// If a struct-field reorder or a stdlib change ever made these two encodings
+// agree, the unchanged-layout tests would still pass while having stopped
+// testing anything — they would be comparing identical bytes.
+func TestBroadcastLayoutBytesDifferForASplit(t *testing.T) {
+	t.Parallel()
+	root := NewLeaf(NewPaneModel("p1", 1024))
+	root.SplitLeaf("p1", SplitHorizontal)
+	root.Right.Pane = NewPaneModel("p2", 1024)
+
+	direct, err := MarshalLayout(root)
+	if err != nil {
+		t.Fatalf("MarshalLayout: %v", err)
+	}
+	viaBroadcast := broadcastLayout(t, root)
+
+	if string(direct) == string(viaBroadcast) {
+		t.Fatalf("struct-ordered and map-ordered encodings agree (%s) — the "+
+			"unchanged-layout tests would be comparing identical bytes and "+
+			"would no longer catch a byte-diff implementation", direct)
+	}
+}
+
+func TestLayoutAgrees(t *testing.T) {
+	t.Parallel()
+	leaf := NewLeaf(NewPaneModel("p1", 1024))
+	split := NewLeaf(NewPaneModel("p1", 1024))
+	split.SplitLeaf("p1", SplitHorizontal)
+	split.Right.Pane = NewPaneModel("p2", 1024)
+
+	tests := []struct {
+		name   string
+		stored json.RawMessage
+		root   *LayoutNode
+		want   bool
+	}{
+		{"empty stored means the daemon holds nothing", nil, leaf, false},
+		{"zero-length stored", json.RawMessage{}, leaf, false},
+		{"malformed stored", json.RawMessage(`{"split":`), leaf, false},
+		{"matching leaf", broadcastLayout(t, leaf), leaf, true},
+		{"matching split", broadcastLayout(t, split), split, true},
+		{"leaf stored against a split tree", broadcastLayout(t, leaf), split, false},
+		{"split stored against a leaf tree", broadcastLayout(t, split), leaf, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := layoutAgrees(tt.stored, tt.root); got != tt.want {
+				t.Errorf("layoutAgrees = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// A layout the daemon stores but the client cannot parse must be re-sent, not
+// treated as agreeing — otherwise a corrupt stored tree is never corrected. It
+// costs one frame per broadcast for that tab until the daemon accepts the
+// replacement, which is bounded by the tab count and self-healing.
+func TestLayoutAgrees_MalformedStoredLayoutResends(t *testing.T) {
+	t.Parallel()
+	m, echo := echoModel(t)
+	echo.Tabs[0].Layout = json.RawMessage(`{"split": "not-a-direction"`)
+
+	fs := &echoRecorder{}
+	m.client = fs
+	_, cmd := m.Update(echo)
+	runCmd(cmd)
+
+	layouts, _ := sentCounts(fs)
+	if layouts != 1 {
+		t.Errorf("MsgUpdateLayout count = %d, want 1 — an unparseable stored "+
+			"layout must be replaced, not accepted", layouts)
+	}
+}
+
+// echoModel builds a Model holding one SPLIT tab and one single-pane tab, then
+// returns a broadcast that agrees with it exactly.
+//
+// The split tab is load-bearing. Production at the time of the crash had 33
+// tabs and every one of them was single-leaf, so a byte-diff fix would have
+// suppressed all 33 sends, passed the real-world reproduction, and still been
+// wrong for anyone with a split.
+func echoModel(t *testing.T) (Model, WorkspaceStateMsg) {
+	t.Helper()
+	m := Model{
+		cfg:            config.Default(),
+		notifications:  NewNotificationCenter(30, 50),
+		mcpHighlights:  make(map[string]bool),
+		tabDragFromIdx: -1,
+		sized:          true,
+		width:          100,
+		height:         40,
+	}
+	initial := WorkspaceStateMsg{
+		ActiveTab: "t-split",
+		Tabs: []TabInfo{
+			{ID: "t-split", Name: "Split", Panes: []string{"p1", "p2"}},
+			{ID: "t-solo", Name: "Solo", Panes: []string{"p3"}},
+		},
+		Panes: []PaneInfo{
+			{ID: "p1", TabID: "t-split"},
+			{ID: "p2", TabID: "t-split"},
+			{ID: "p3", TabID: "t-solo"},
+		},
+	}
+	m.applyWorkspaceState(initial, "")
+	m.resizeTabs()
+
+	if len(m.curTabs()) != 2 {
+		t.Fatalf("setup: tabs = %d, want 2", len(m.curTabs()))
+	}
+	if got := len(m.curTabs()[0].Leaves()); got != 2 {
+		t.Fatalf("setup: split tab has %d leaves, want 2 — this test is "+
+			"meaningless without a split", got)
+	}
+
+	// The echo: same tabs and panes, now carrying the layout the daemon would
+	// have stored and broadcast back.
+	echo := initial
+	echo.Tabs = []TabInfo{
+		{ID: "t-split", Name: "Split", Panes: []string{"p1", "p2"},
+			Layout: broadcastLayout(t, m.curTabs()[0].Root)},
+		{ID: "t-solo", Name: "Solo", Panes: []string{"p3"},
+			Layout: broadcastLayout(t, m.curTabs()[1].Root)},
+	}
+	return m, echo
+}
+
+// echoRecorder records sends and keeps listenForMessages harmless.
+//
+// listenForMessages rides the SAME batch as the sends under test (model.go's
+// WorkspaceStateMsg arm), so executing that batch executes it too. fakeSender's
+// Receive returns (nil, nil), which nil-derefs on msg.Type; returning an error
+// instead would synthesise a link loss and quit the model mid-assertion. An
+// inert message is the only option that leaves the batch's other commands
+// behaving exactly as they do in production.
+type echoRecorder struct {
+	sent []*ipc.Message
+}
+
+func (e *echoRecorder) Send(msg *ipc.Message) error {
+	e.sent = append(e.sent, msg)
+	return nil
+}
+
+func (e *echoRecorder) Receive() (*ipc.Message, error) {
+	return &ipc.Message{Type: "test-inert"}, nil
+}
+
+func sentCounts(fs *echoRecorder) (layouts, resizes int) {
+	for _, msg := range fs.sent {
+		switch msg.Type {
+		case ipc.MsgUpdateLayout:
+			layouts++
+		case ipc.MsgResizePane:
+			resizes++
+		}
+	}
+	return layouts, resizes
+}
+
+func TestWorkspaceState_UnchangedSplitLayout_SendsNoLayoutUpdate(t *testing.T) {
+	t.Parallel()
+	m, echo := echoModel(t)
+	fs := &echoRecorder{}
+	m.client = fs
+
+	next, cmd := m.Update(echo)
+	_ = next
+	runCmd(cmd)
+
+	layouts, _ := sentCounts(fs)
+	if layouts != 0 {
+		t.Errorf("MsgUpdateLayout count = %d, want 0 — the broadcast already "+
+			"carried these layouts, so echoing them back is pure queue "+
+			"pressure on a 64-slot must-deliver channel", layouts)
+	}
+}
+
+// withSizes teaches the echo the sizes the TUI would compute, the same way the
+// daemon learns them: they are the payload of the last resize it accepted.
+func withSizes(m Model, echo WorkspaceStateMsg) WorkspaceStateMsg {
+	for i := range echo.Panes {
+		for _, tab := range m.curTabs() {
+			for _, pane := range tab.Leaves() {
+				if pane.ID != echo.Panes[i].ID {
+					continue
+				}
+				cols, rows := paneVTSize(pane.WideCanvas, pane.MinNativeCols,
+					pane.Width, pane.Height, pane.NativeW, tab.CanvasW, tab.CanvasH)
+				echo.Panes[i].Cols = uint16(cols)
+				echo.Panes[i].Rows = uint16(rows)
+			}
+		}
+	}
+	return echo
+}
+
+// The FIRST resize after attach is never suppressed, even when the reported
+// size already matches. The daemon's real duplicate guard is appliedCols/Rows,
+// which it ZEROES on every PTY install — a restored pane's repaint kick
+// (repaintAfterResize) depends on that first client resize arriving. Diffing it
+// away would leave restored panes blank until the user typed.
+func TestWorkspaceState_FirstResizeAfterAttach_IsAlwaysSent(t *testing.T) {
+	t.Parallel()
+	m, echo := echoModel(t)
+	echo = withSizes(m, echo)
+
+	fs := &echoRecorder{}
+	m.client = fs
+
+	next, cmd := m.Update(echo)
+	_ = next
+	runCmd(cmd)
+
+	_, resizes := sentCounts(fs)
+	if resizes != 3 {
+		t.Errorf("MsgResizePane count = %d, want 3 (one per pane) — the daemon "+
+			"zeroes its applied-size guard on PTY install and needs the first "+
+			"client resize to kick a repaint", resizes)
+	}
+}
+
+// The crash shape is REPEATED broadcasts, not the first one: 12 reorders in
+// 553 ms meant 12 rounds of tabs+panes frames. Once a pane has been sized, a
+// broadcast reporting that same size must produce nothing.
+func TestWorkspaceState_UnchangedSizes_SendNoResizeOnRepeat(t *testing.T) {
+	t.Parallel()
+	m, echo := echoModel(t)
+	echo = withSizes(m, echo)
+
+	// First broadcast: sends the sizes, satisfying the post-attach kick.
+	m.client = &echoRecorder{}
+	first, cmd := m.Update(echo)
+	runCmd(cmd)
+	m = first.(Model)
+
+	// Second, identical broadcast — the drag-storm case.
+	fs := &echoRecorder{}
+	m.client = fs
+	_, cmd = m.Update(echo)
+	runCmd(cmd)
+
+	_, resizes := sentCounts(fs)
+	if resizes != 0 {
+		t.Errorf("MsgResizePane count = %d, want 0 on a repeat broadcast — "+
+			"every pane already has the size the broadcast reports", resizes)
+	}
+}
+
+// The reported configuration, at scale: 33 tabs and 36 panes, which made one
+// broadcast enqueue 69 must-deliver frames onto a 64-slot queue. The count is
+// what matters here — the queue does not care which tab a frame describes.
+func TestWorkspaceState_ReportedCrashConfiguration_SettlesToSilence(t *testing.T) {
+	t.Parallel()
+	const tabs, splits = 33, 3 // 30 single-leaf + 3 two-pane = 36 panes
+
+	m := Model{
+		cfg:            config.Default(),
+		notifications:  NewNotificationCenter(30, 200),
+		mcpHighlights:  make(map[string]bool),
+		tabDragFromIdx: -1,
+		sized:          true,
+		width:          209,
+		height:         58,
+	}
+	state := WorkspaceStateMsg{ActiveTab: "tab-0"}
+	for i := 0; i < tabs; i++ {
+		tabID := "tab-" + strconv.Itoa(i)
+		paneIDs := []string{"pane-" + strconv.Itoa(i) + "a"}
+		if i < splits {
+			paneIDs = append(paneIDs, "pane-"+strconv.Itoa(i)+"b")
+		}
+		state.Tabs = append(state.Tabs, TabInfo{ID: tabID, Name: tabID, Panes: paneIDs})
+		for _, pid := range paneIDs {
+			state.Panes = append(state.Panes, PaneInfo{ID: pid, TabID: tabID})
+		}
+	}
+	if len(state.Panes) != 36 {
+		t.Fatalf("setup: panes = %d, want 36", len(state.Panes))
+	}
+
+	m.applyWorkspaceState(state, "")
+	m.resizeTabs()
+
+	// Round one: the daemon knows no layouts and no sizes yet, so this is the
+	// legitimate expensive broadcast. It is bounded by backpressure, not by
+	// suppression — see the ipc client-side SendBlocking test.
+	echo := state
+	for i := range echo.Tabs {
+		echo.Tabs[i].Layout = broadcastLayout(t, m.curTabs()[i].Root)
+	}
+	echo = withSizes(m, echo)
+
+	m.client = &echoRecorder{}
+	next, cmd := m.Update(echo)
+	runCmd(cmd)
+	m = next.(Model)
+
+	// Round two: identical state, the shape a reorder storm repeats 12 times.
+	fs := &echoRecorder{}
+	m.client = fs
+	_, cmd = m.Update(echo)
+	runCmd(cmd)
+
+	layouts, resizes := sentCounts(fs)
+	if layouts+resizes != 0 {
+		t.Errorf("a repeat broadcast at 33 tabs/36 panes produced %d layout + %d "+
+			"resize frames, want 0 — 69 of these on a %d-slot must-deliver queue "+
+			"is what closed the connection", layouts, resizes, 64)
+	}
+}
+
+// The same scale under LAZY RESTORE, which is what a 33-tab workspace actually
+// looks like after a daemon restart: most panes are deferred, so the daemon has
+// no PTY for them, reports whatever size came off disk, and records nothing
+// when we send one.
+//
+// The sibling test above fabricates a daemon that accepted all 36 resizes,
+// which that configuration cannot produce — so it cannot see a pane class that
+// re-sends on every broadcast forever.
+func TestWorkspaceState_LazyRestoreAtScale_SettlesToSilence(t *testing.T) {
+	t.Parallel()
+	const tabs = 33
+
+	m := Model{
+		cfg:            config.Default(),
+		notifications:  NewNotificationCenter(30, 200),
+		mcpHighlights:  make(map[string]bool),
+		tabDragFromIdx: -1,
+		sized:          true,
+		width:          209,
+		height:         58,
+	}
+	state := WorkspaceStateMsg{ActiveTab: "tab-0"}
+	for i := 0; i < tabs; i++ {
+		tabID := "tab-" + strconv.Itoa(i)
+		paneID := "pane-" + strconv.Itoa(i)
+		state.Tabs = append(state.Tabs, TabInfo{ID: tabID, Name: tabID, Panes: []string{paneID}})
+		pi := PaneInfo{ID: paneID, TabID: tabID}
+		// Every tab but the active one is deferred, carrying a persisted size
+		// from a differently-sized terminal.
+		if i > 0 {
+			pi.Pending = true
+			pi.Cols, pi.Rows = 80, 24
+		}
+		state.Panes = append(state.Panes, pi)
+	}
+
+	m.applyWorkspaceState(state, "")
+	m.resizeTabs()
+
+	echo := state
+	for i := range echo.Tabs {
+		echo.Tabs[i].Layout = broadcastLayout(t, m.curTabs()[i].Root)
+	}
+	// Only the spawned pane gets a size the daemon actually accepted.
+	for i := range echo.Panes {
+		if echo.Panes[i].Pending {
+			continue
+		}
+		for _, pane := range m.curTabs()[0].Leaves() {
+			if pane.ID != echo.Panes[i].ID {
+				continue
+			}
+			cols, rows := paneVTSize(pane.WideCanvas, pane.MinNativeCols,
+				pane.Width, pane.Height, pane.NativeW,
+				m.curTabs()[0].CanvasW, m.curTabs()[0].CanvasH)
+			echo.Panes[i].Cols = uint16(cols)
+			echo.Panes[i].Rows = uint16(rows)
+		}
+	}
+
+	m.client = &echoRecorder{}
+	next, cmd := m.Update(echo)
+	runCmd(cmd)
+	m = next.(Model)
+
+	fs := &echoRecorder{}
+	m.client = fs
+	_, cmd = m.Update(echo)
+	runCmd(cmd)
+
+	layouts, resizes := sentCounts(fs)
+	if layouts+resizes != 0 {
+		t.Errorf("a repeat broadcast over a lazily-restored 33-tab workspace "+
+			"produced %d layout + %d resize frames, want 0 — deferred panes "+
+			"never record a size, so diffing against one re-sends them every "+
+			"single broadcast", layouts, resizes)
+	}
+}
+
+// A deferred (lazy-restore) pane has no PTY, and handleResizePane returns early
+// when PTY is nil WITHOUT recording the size — so the daemon's reported
+// cols/rows stay at whatever came off disk however many resizes we send. Diffing
+// against them therefore never agrees, and the pane is re-sent on every single
+// broadcast: the exact per-broadcast frame this change exists to remove, and
+// under lazy restore it is most of the workspace.
+//
+// Skipping them loses nothing. The daemon ignores the frame today, and the pane
+// is deliberately left unmarked, so the broadcast that reports it spawned sends
+// its size then — later than before, but for the first time to a PTY that can
+// receive it.
+func TestWorkspaceState_PendingPane_IsNotResized(t *testing.T) {
+	t.Parallel()
+	m, echo := echoModel(t)
+	echo = withSizes(m, echo)
+
+	// The daemon reports a stale on-disk size for a pane it has not spawned.
+	echo.Panes[2].Pending = true
+	echo.Panes[2].Cols = 1
+	echo.Panes[2].Rows = 1
+
+	fs := &echoRecorder{}
+	m.client = fs
+	next, cmd := m.Update(echo)
+	runCmd(cmd)
+
+	for _, msg := range fs.sent {
+		if msg.Type != ipc.MsgResizePane {
+			continue
+		}
+		var p ipc.ResizePanePayload
+		if err := json.Unmarshal(msg.Payload, &p); err != nil {
+			t.Fatalf("decode resize payload: %v", err)
+		}
+		if p.PaneID == echo.Panes[2].ID {
+			t.Errorf("resized deferred pane %s — the daemon drops it (nil PTY) "+
+				"and never records the size, so this repeats every broadcast "+
+				"forever", p.PaneID)
+		}
+	}
+
+	// And once it spawns, it must get its size: skipping must not have marked
+	// it as already sized.
+	m = next.(Model)
+	echo.Panes[2].Pending = false
+	fs2 := &echoRecorder{}
+	m.client = fs2
+	_, cmd = m.Update(echo)
+	runCmd(cmd)
+
+	var sawSpawned bool
+	for _, msg := range fs2.sent {
+		if msg.Type != ipc.MsgResizePane {
+			continue
+		}
+		var p ipc.ResizePanePayload
+		if err := json.Unmarshal(msg.Payload, &p); err != nil {
+			t.Fatalf("decode resize payload: %v", err)
+		}
+		if p.PaneID == echo.Panes[2].ID {
+			sawSpawned = true
+		}
+	}
+	if !sawSpawned {
+		t.Error("a pane that just stopped being deferred was never sized — " +
+			"skipping it while pending must not mark it as already sized")
+	}
+}
+
+// sizedOnce is keyed by destination as well as pane id. Every sibling per-pane
+// structure in the Model is dest-scoped, and this one governs whether a pane's
+// FIRST resize ships — so a shared key means one daemon's pane can suppress
+// another daemon's, and armReattachReset for one dest can clear the other's
+// flag. Two daemons minting the same UUID is not a realistic accident; keying
+// it correctly costs nothing and makes the invariant explicit rather than
+// dependent on that luck.
+func TestDiffResizes_SamePaneIDOnTwoDestsAreIndependent(t *testing.T) {
+	t.Parallel()
+	const shared = "pane-shared"
+
+	build := func(dest string) *ProjectModel {
+		tab := NewTabModel("tab-"+dest, "T")
+		tab.Root = NewLeaf(NewPaneModel(shared, 1024))
+		tab.Resize(80, 24)
+		return &ProjectModel{ID: "proj-" + dest, Name: dest, Dest: dest,
+			tabs: []*TabModel{tab}}
+	}
+
+	m := Model{
+		cfg:            config.Default(),
+		tabDragFromIdx: -1,
+		sized:          true,
+		width:          100,
+		height:         40,
+		projects:       []*ProjectModel{build(""), build("gpu01")},
+	}
+
+	// The size the daemon would report once it accepted our resize; without it
+	// the diff legitimately re-sends and the test proves nothing.
+	sized := func(dest string) WorkspaceStateMsg {
+		tab := m.projects[0].tabs[0]
+		if dest != "" {
+			tab = m.projects[1].tabs[0]
+		}
+		pane := tab.Leaves()[0]
+		cols, rows := paneVTSize(pane.WideCanvas, pane.MinNativeCols,
+			pane.Width, pane.Height, pane.NativeW, tab.CanvasW, tab.CanvasH)
+		return WorkspaceStateMsg{Dest: dest, Panes: []PaneInfo{
+			{ID: shared, Cols: uint16(cols), Rows: uint16(rows)},
+		}}
+	}
+
+	local := sized("")
+	if got := m.diffResizes(local); len(got) != 1 {
+		t.Fatalf("local first resize = %d sends, want 1", len(got))
+	}
+	// Same again: now suppressed for the local dest.
+	if got := m.diffResizes(local); len(got) != 0 {
+		t.Fatalf("local repeat = %d sends, want 0 — setup is wrong if the "+
+			"first send did not register", len(got))
+	}
+
+	remote := sized("gpu01")
+	if got := m.diffResizes(remote); len(got) != 1 {
+		t.Errorf("remote first resize = %d sends, want 1 — sizing this pane on "+
+			"the local daemon must not consume the remote daemon's "+
+			"first-resize kick for a pane that merely shares its id", len(got))
+	}
+}
+
+// A reconnect reinstalls the daemon's PTYs, which zeroes its applied-size
+// guard — so the first-resize kick has to be re-armed or a restored pane comes
+// back blank and stays blank.
+func TestReattach_ReArmsTheFirstResizeKick(t *testing.T) {
+	t.Parallel()
+	m, echo := echoModel(t)
+	echo = withSizes(m, echo)
+
+	m.client = &echoRecorder{}
+	first, cmd := m.Update(echo)
+	runCmd(cmd)
+	m = first.(Model)
+
+	m.armReattachReset("")
+
+	fs := &echoRecorder{}
+	m.client = fs
+	_, cmd = m.Update(echo)
+	runCmd(cmd)
+
+	_, resizes := sentCounts(fs)
+	if resizes != 3 {
+		t.Errorf("MsgResizePane count = %d after reattach, want 3 — the daemon "+
+			"zeroed its guard on PTY install, so the suppression state from "+
+			"before the outage describes a daemon that no longer exists", resizes)
+	}
+}
+
+// A broadcast is the full state of ONE daemon. It says nothing about another
+// daemon's tabs, so it must not trigger sends for them — diffing them against
+// it would find "no stored layout" and re-send every one. Before scoping, any
+// daemon's broadcast re-sent every daemon's layouts.
+func TestWorkspaceState_DoesNotResendAnotherDaemonsTabs(t *testing.T) {
+	t.Parallel()
+	m, echo := echoModel(t)
+
+	remote := NewTabModel("t-remote", "Remote")
+	remote.Root = NewLeaf(NewPaneModel("p-remote", 1024))
+	m.projects = append(m.projects, &ProjectModel{
+		ID: "proj-gpu", Name: "remote", Dest: "gpu01",
+		tabs: []*TabModel{remote},
+	})
+
+	fs := &echoRecorder{}
+	m.client = fs
+
+	// echo carries Dest "" — the local daemon.
+	next, cmd := m.Update(echo)
+	runCmd(cmd)
+
+	// Guard the premise. If the local broadcast's reconciliation dropped the
+	// remote project, no send for it is possible and the assertion below would
+	// hold for a reason that has nothing to do with scoping — this test passed
+	// with the scoping deleted before this guard existed.
+	// The TAB, not just the project: an earlier version of this guard checked
+	// only that the project survived, and the reconciliation had emptied its
+	// tab list — leaving nothing for the diff to walk, so the test passed with
+	// the scoping deleted.
+	var remoteTabs int
+	for _, proj := range next.(Model).projects {
+		if proj.Dest != "gpu01" {
+			continue
+		}
+		for _, tab := range proj.tabs {
+			if tab.Root != nil {
+				remoteTabs++
+			}
+		}
+	}
+	if remoteTabs == 0 {
+		t.Fatal("setup: no remote tab with a layout survived the local " +
+			"broadcast, so this test cannot observe whether one was re-sent")
+	}
+
+	// Matched by SUBSTRING against every payload rather than by decoding a
+	// specific field: the leak this guards against showed up first as a resize
+	// and then as a layout under a tab id the assertion was not looking at, so
+	// the check must not depend on knowing which field carries the identifier.
+	remoteIDs := []string{remote.ID}
+	for _, pane := range remote.Leaves() {
+		remoteIDs = append(remoteIDs, pane.ID)
+	}
+	for _, msg := range fs.sent {
+		detail := msg.Type + " " + string(msg.Payload)
+		for _, id := range remoteIDs {
+			if strings.Contains(string(msg.Payload), id) {
+				t.Errorf("a local-daemon broadcast produced %q, which names the "+
+					"remote daemon's %q — the broadcast contains nothing to diff "+
+					"that against, so everything it owns looks changed", detail, id)
+			}
+		}
+	}
+}
+
+// A daemon that holds no layout for a tab (freshly created, or restored before
+// any client described it) MUST still be told. Suppressing this send would lose
+// the user's arrangement on disk, silently and permanently.
+func TestWorkspaceState_AbsentLayout_StillSends(t *testing.T) {
+	t.Parallel()
+	m, echo := echoModel(t)
+	echo.Tabs[0].Layout = nil
+
+	fs := &echoRecorder{}
+	m.client = fs
+
+	_, cmd := m.Update(echo)
+	runCmd(cmd)
+
+	layouts, _ := sentCounts(fs)
+	if layouts != 1 {
+		t.Errorf("MsgUpdateLayout count = %d, want 1 — a tab the daemon has no "+
+			"layout for must be sent, or the arrangement is never persisted",
+			layouts)
+	}
+}
+
+// The mirror of the suppression test: a real divergence must still reach the
+// daemon, and only for the tab that diverged.
+func TestWorkspaceState_ChangedLayout_SendsOnlyThatTab(t *testing.T) {
+	t.Parallel()
+	m, echo := echoModel(t)
+
+	// The daemon's copy of the split tab is a stale single leaf.
+	stale := NewLeaf(NewPaneModel("p1", 1024))
+	echo.Tabs[0].Layout = broadcastLayout(t, stale)
+
+	fs := &echoRecorder{}
+	m.client = fs
+
+	_, cmd := m.Update(echo)
+	runCmd(cmd)
+
+	var gotTabs []string
+	for _, msg := range fs.sent {
+		if msg.Type != ipc.MsgUpdateLayout {
+			continue
+		}
+		var p ipc.UpdateLayoutPayload
+		if err := json.Unmarshal(msg.Payload, &p); err != nil {
+			t.Fatalf("decode layout payload: %v", err)
+		}
+		gotTabs = append(gotTabs, p.TabID)
+	}
+	if len(gotTabs) != 1 || gotTabs[0] != "t-split" {
+		t.Errorf("layout sends = %v, want exactly [t-split]", gotTabs)
+	}
+}

@@ -1330,9 +1330,18 @@ func (m Model) renderShortcutsDialog() string {
 		// that is why the budget has to be the box's real one. Either way a row
 		// that wraps breaks the height arithmetic, which counts one line per
 		// entry; that is the failure this dialog already had.
+		// The key half is truncated too, and lipgloss.Width is why: dialogKeyStyle
+		// is Width(dialogKeyColWidth), which PADS a short value and does nothing
+		// at all to a long one. A legal chord list overflows it by honest typo —
+		// `rename_pane = "alt+f2,alt+shift+r,alt+shift+q,ctrl+alt+shift+f4"`
+		// renders 42 lines against a height of 40 at 100x40, wrapping one entry
+		// across three and breaking the one-row-one-line arithmetic this whole
+		// dialog is built on. (Escapes are handled at the parser — see
+		// keymap.ParseChord — because truncateToWidth is ANSI-aware and would
+		// carry one through intact.)
 		b.WriteString(fmt.Sprintf("%s%s%s\n",
 			indent,
-			dialogKeyStyle.Render(s.key),
+			dialogKeyStyle.Render(truncateToWidth(s.key, dialogKeyColWidth)),
 			dialogValStyle.Render(truncateToWidth(s.desc, desc))))
 	}
 

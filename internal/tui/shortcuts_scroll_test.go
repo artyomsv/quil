@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/keymap"
@@ -50,6 +51,45 @@ func TestShortcutsDialog_FitsANarrowTerminal(t *testing.T) {
 				"of %d — %d rows wrapped and are drawn past the bottom edge",
 				width, got, m.height, got-m.height)
 		}
+	}
+}
+
+// TestShortcutsDialog_LongKeyColumnDoesNotWrap: the KEY half has to be
+// truncated too, and lipgloss is why — dialogKeyStyle is Width(dialogKeyColWidth),
+// which pads a short value and does nothing whatever to a long one. Only the
+// description went through truncateToWidth, so an over-long key column reflowed
+// and one entry became three lines, breaking the one-row-one-line arithmetic
+// every height calculation in this dialog depends on.
+//
+// The fixture is a LEGAL chord list reachable by honest typo, not an attack:
+// pane.rename already ships two bindings, and a user adding two more of their
+// own gets a 49-cell key column against a 22-cell budget. (Escapes are refused
+// at keymap.ParseChord — truncateToWidth is ANSI-aware and would carry one
+// through at zero measured width, so truncation is the layout fix and the
+// parser is the safety fix.)
+func TestShortcutsDialog_LongKeyColumnDoesNotWrap(t *testing.T) {
+	cfg := config.Default()
+	cfg.Keybindings.RenamePane = "alt+f2,alt+shift+r,alt+shift+q,ctrl+alt+shift+f4"
+	m := Model{width: 100, height: 40, dialog: dialogShortcuts, cfg: cfg}
+	(&m).initKeymap()
+
+	// The fixture must actually overflow the column, or the test passes without
+	// exercising anything.
+	keys := m.keymap.Display("pane.rename")
+	if got := lipgloss.Width(keys); got <= dialogKeyColWidth {
+		t.Fatalf("fixture key column is %d cells against a budget of %d — it fits, "+
+			"so the test cannot fail; add another binding", got, dialogKeyColWidth)
+	}
+	// And it must be a legal config: a spec that failed to parse would fall back
+	// to the default and never reach the renderer at all.
+	for _, c := range m.keyConflicts {
+		t.Fatalf("fixture produced a conflict (%s) — the binding never reached the row", c)
+	}
+
+	if got := strings.Count(m.renderDialog(), "\n") + 1; got > m.height {
+		t.Errorf("a %d-cell key column made the dialog render %d lines against a height of %d — "+
+			"%d rows wrapped and are drawn past the bottom edge",
+			lipgloss.Width(keys), got, m.height, got-m.height)
 	}
 }
 

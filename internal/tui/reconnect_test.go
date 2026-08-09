@@ -240,6 +240,57 @@ func TestActiveDestDropDoesFreezeInput(t *testing.T) {
 	}
 }
 
+// TestFreezeInput_HonoursTheConfiguredQuitBinding pins the registry wiring the
+// refactor introduced, which nothing in this file was testing.
+//
+// isFreezeEscape moved from m.cfg.Keybindings.Quit to m.keymap.Keys("app.quit"),
+// but no test here calls initKeymap — so m.keymap is nil, Keys returns nil, and
+// every one of them falls through to freezeEscapeKeys, the hardcoded
+// ["ctrl+q","ctrl+c"] emergency list that contains the very key they press.
+// Mutating the action ID to "app.qut" left the whole suite green. Those tests
+// prove the fallback works, which is worth having; this one proves the configured
+// binding is consulted at all.
+//
+// A NON-DEFAULT quit binding is the whole point: ctrl+q would pass on the
+// fallback alone.
+func TestFreezeInput_HonoursTheConfiguredQuitBinding(t *testing.T) {
+	cfg := config.Default()
+	cfg.Keybindings.Quit = "alt+shift+q" // not in freezeEscapeKeys
+	m := Model{
+		projects:      []*ProjectModel{{ID: "proj-gpu", Dest: testDest}},
+		activeProject: 0,
+		cfg:           cfg,
+	}
+	m.initKeymap()
+	m.handleLinkLost(testDest, errors.New("connection reset"))
+
+	quit := tea.KeyPressMsg{Code: 'q', Mod: tea.ModAlt | tea.ModShift}
+	if got := quit.String(); got != "alt+shift+q" {
+		t.Fatalf("fixture renders as %q, want %q — the assertion would be about the wrong key", got, "alt+shift+q")
+	}
+
+	cmd, frozen := m.freezeInput(quit)
+	if !frozen {
+		t.Fatal("the quit key must still be consumed by the freeze — it ends the session, it does not reach a pane")
+	}
+	if cmd == nil {
+		t.Fatal("the configured quit binding did not escape the freeze; only the hardcoded " +
+			"ctrl+q/ctrl+c fallback is being consulted, so the registry wiring is untested")
+	}
+	if !isQuit(cmd()) {
+		t.Errorf("the configured quit binding returned %T, want tea.QuitMsg", cmd())
+	}
+
+	// The control: with that config, the DEFAULT quit chord is no longer a
+	// configured binding. It still escapes — via freezeEscapeKeys — which is
+	// what makes the assertion above specific to the registry path rather than
+	// to "some key escapes".
+	other := tea.KeyPressMsg{Code: 'a', Text: "a"}
+	if cmd, frozen := m.freezeInput(other); !frozen || cmd != nil {
+		t.Errorf("an ordinary key gave (cmd!=nil)=%v frozen=%v, want (false, true)", cmd != nil, frozen)
+	}
+}
+
 // A clipboard read that was already in flight when the link dropped must be
 // frozen like any other input. It carries the same payload as the tea.PasteMsg
 // the freeze already covers, and delivering it after a reattach puts clipboard

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -55,6 +56,65 @@ func keyPress(t *testing.T, chord string) tea.KeyPressMsg {
 		t.Fatalf("keyPress(%q) built a message that renders as %q", chord, got)
 	}
 	return msg
+}
+
+// TestUpdate_ShiftedMetaLetterReachesThePTY is the dispatch-level guard for the
+// case-folding bug: ParseChord lowercased the base key, and MatchTier runs the
+// INCOMING press through the same parser, so alt+M resolved to alt+m's action.
+//
+// {Code:'M', Mod:ModAlt} with no ModShift is exactly what bubbletea's legacy
+// ESC-prefix Meta decoding produces — its ESC default arm re-decodes the
+// following byte, clears Text, ORs in ModAlt and preserves case — so on macOS
+// Terminal.app with "Use Option as Meta key" this IS Option+Shift+M. With the
+// fold in place, ten shifted Meta letters fired mute / restart-pane / close-tab
+// / lazygit / the project picker and so on instead of reaching the shell.
+//
+// Driven through Update rather than MatchTier because the parser is not where
+// the damage was: a parser-only assertion passes just as happily with the key
+// swallowed by an action arm.
+func TestUpdate_ShiftedMetaLetterReachesThePTY(t *testing.T) {
+	// alt+m is pane.mute (early) and alt+r is pane.restart (late), so the pair
+	// covers both tier lookups. alt+w is tab.close, whose confirm dialog is a
+	// visible second signal that no action ran.
+	for _, letter := range []string{"M", "R", "W"} {
+		t.Run(letter, func(t *testing.T) {
+			m, _ := inputOrderTestModel(t, "pane-1", true)
+			m.cfg = config.Default()
+			m.initKeymap()
+
+			msg := tea.KeyPressMsg{Code: rune(letter[0]), Mod: tea.ModAlt}
+			if got := msg.String(); got != "alt+"+letter {
+				t.Fatalf("fixture renders as %q, want %q — the assertion would be about the wrong key", got, "alt+"+letter)
+			}
+			// The lowercase chord IS bound: without this the test would pass on
+			// a keymap that resolved nothing at all.
+			if !m.isAction(strings.ToLower(msg.String()), keymap.ActionID(map[string]string{
+				"M": "pane.mute", "R": "pane.restart", "W": "tab.close",
+			}[letter])) {
+				t.Fatalf("alt+%s is not bound to the action this test is about", strings.ToLower(letter))
+			}
+
+			updated, _ := m.Update(msg)
+
+			var forwarded []byte
+			select {
+			case in := <-m.inputCh:
+				forwarded = in.data
+			default:
+			}
+			if len(forwarded) == 0 {
+				t.Errorf("alt+%s was swallowed by an action instead of reaching the PTY — "+
+					"a shifted Meta letter must not dispatch the lowercase chord's binding", letter)
+			}
+			out, ok := updated.(Model)
+			if !ok {
+				t.Fatalf("Update returned %T, want Model", updated)
+			}
+			if out.dialog != dialogNone {
+				t.Errorf("alt+%s opened dialog %v; no action should have fired", letter, out.dialog)
+			}
+		})
+	}
 }
 
 // rawKeysPaneType is the plugin name the raw-keys fixture registers. It is not
@@ -215,8 +275,88 @@ func TestHandleKey_PasteAliasesStillPaste(t *testing.T) {
 	}
 }
 
+// TestHandleKey_ReservedKeysDispatch covers the block handleKey checks last:
+// ctrl+n, f1 and alt+1..9 are never registry actions, so the tier-lookup tests
+// above say nothing about them and deleting either case arm left the whole
+// package green. This PR relocated that block, which is exactly when a silent
+// drop happens.
+func TestHandleKey_ReservedKeysDispatch(t *testing.T) {
+	t.Run("ctrl+n opens the create-pane dialog", func(t *testing.T) {
+		m, _ := inputOrderTestModel(t, "pane-1", true)
+		m.cfg = config.Default()
+		m.initKeymap()
+
+		msg := tea.KeyPressMsg{Code: 'n', Mod: tea.ModCtrl}
+		if got := msg.String(); got != "ctrl+n" {
+			t.Fatalf("fixture renders as %q, want ctrl+n", got)
+		}
+		updated, _ := m.Update(msg)
+
+		out, ok := updated.(Model)
+		if !ok {
+			t.Fatalf("Update returned %T, want Model", updated)
+		}
+		if out.dialog != dialogCreatePane {
+			t.Errorf("ctrl+n left dialog = %v, want dialogCreatePane", out.dialog)
+		}
+		select {
+		case in := <-m.inputCh:
+			t.Errorf("ctrl+n also reached the PTY as %q — the reserved key must be consumed", string(in.data))
+		default:
+		}
+	})
+
+	t.Run("alt+N switches to tab N", func(t *testing.T) {
+		// Three tabs so the assertion distinguishes "switched" from "switched to
+		// whatever was already active": alt+3 must land on the third.
+		var tabs []*TabModel
+		for i, name := range []string{"one", "two", "three"} {
+			pane := NewPaneModel(fmt.Sprintf("pane-%d", i), 1024)
+			tab := NewTabModel(fmt.Sprintf("tab-%d", i), name)
+			tab.Root = NewLeaf(pane)
+			tab.ActivePane = pane.ID
+			tabs = append(tabs, tab)
+		}
+		for _, tt := range []struct {
+			key  string
+			code rune
+			want int
+		}{{"alt+3", '3', 2}, {"alt+1", '1', 0}, {"alt+2", '2', 1}} {
+			t.Run(tt.key, func(t *testing.T) {
+				m := &Model{
+					projects: oneProject(tabs...),
+					client:   &fakeSender{},
+					inputCh:  make(chan paneInput, inputForwardBuffer),
+					cfg:      config.Default(),
+				}
+				m.initKeymap()
+
+				msg := tea.KeyPressMsg{Code: tt.code, Mod: tea.ModAlt}
+				if got := msg.String(); got != tt.key {
+					t.Fatalf("fixture renders as %q, want %q", got, tt.key)
+				}
+				updated, _ := m.Update(msg)
+
+				out, ok := updated.(Model)
+				if !ok {
+					t.Fatalf("Update returned %T, want Model", updated)
+				}
+				if got := out.activeTabIdx(); got != tt.want {
+					t.Errorf("%s left the active tab at index %d, want %d", tt.key, got, tt.want)
+				}
+				select {
+				case in := <-m.inputCh:
+					t.Errorf("%s also reached the PTY as %q — the reserved key must be consumed", tt.key, string(in.data))
+				default:
+				}
+			})
+		}
+	})
+}
+
 // TestHandleKey_EveryDispatchedActionHasACaseArm reads handleKey's source and
-// checks that each registered action appears as a case label.
+// checks that each registered action appears as a case label IN THE SWITCH ITS
+// TIER DISPATCHES FROM.
 //
 // It is a STATIC check and says nothing about what a body does. It exists
 // because the failure it catches is otherwise silent: an action whose arm was
@@ -224,6 +364,13 @@ func TestHandleKey_PasteAliasesStillPaste(t *testing.T) {
 // so the key types an escape sequence into the shell instead of erroring. Every
 // arm's behaviour is covered by the pre-existing keybinding tests in this
 // package, which the refactor left untouched.
+//
+// The tier half was missing and is what makes it a real check: an arm moved
+// between the two switches still satisfies "has a case arm", while silently
+// changing whether a plugin's raw_keys claim beats it (tryPluginRawKey sits
+// between them). Moving project.new's arm to the late switch left the suite
+// green. The boundary is the late-tier lookup itself — no marker comment to
+// drift out of sync with the code it marks.
 //
 // json.transform must have NO arm: it is Hidden precisely because M5 never
 // built a handler, and adding one would be new behaviour.
@@ -234,19 +381,41 @@ func TestHandleKey_EveryDispatchedActionHasACaseArm(t *testing.T) {
 	}
 	body := handleKeySource(t, string(src))
 
+	const lateLookup = "MatchTier(keymap.TierLate, key)"
+	boundary := strings.Index(body, lateLookup)
+	if boundary < 0 {
+		t.Fatalf("could not find %q in handleKey — this test needs updating", lateLookup)
+	}
+
 	var checked int
 	for _, a := range keymap.Actions() {
-		label := "case \"" + string(a.ID) + "\""
-		has := strings.Contains(body, label) ||
-			strings.Contains(body, ", \""+string(a.ID)+"\":") // shared arm
+		// The two forms an arm can take: its own case, or a label shared with
+		// the arm above it (project.next / project.prev).
+		at := strings.Index(body, "case \""+string(a.ID)+"\"")
+		if at < 0 {
+			at = strings.Index(body, ", \""+string(a.ID)+"\":")
+		}
 		if a.ID == "json.transform" {
-			if has {
+			if at >= 0 {
 				t.Error("json.transform grew a dispatch arm; it has no handler by design")
 			}
 			continue
 		}
-		if !has {
+		if at < 0 {
 			t.Errorf("action %q has no case arm in handleKey — its key falls through to the PTY", a.ID)
+			continue
+		}
+		switch a.Tier {
+		case keymap.TierEarly:
+			if at > boundary {
+				t.Errorf("action %q is TierEarly but its case arm sits in the LATE switch — "+
+					"a plugin's raw_keys claim now beats it, because tryPluginRawKey runs between the two", a.ID)
+			}
+		case keymap.TierLate:
+			if at < boundary {
+				t.Errorf("action %q is TierLate but its case arm sits in the EARLY switch — "+
+					"it now beats a plugin's raw_keys claim it used to lose to", a.ID)
+			}
 		}
 		checked++
 	}

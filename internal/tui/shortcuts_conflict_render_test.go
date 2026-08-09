@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"charm.land/lipgloss/v2"
+
 	"github.com/artyomsv/quil/internal/config"
 )
 
@@ -105,16 +107,90 @@ func TestShortcutsDialog_ConflictRowsRenderWhole(t *testing.T) {
 }
 
 // TestShortcutsDialog_ConflictRowSpansTheKeyColumn pins the mechanism rather
-// than the outcome: a conflict row must be wider than an ordinary row's
-// description budget, which is what it was limited to before. Without this,
-// the test above could be satisfied again by a message short enough to fit in
-// 44 cells — and the next message that is not would break silently.
+// than the outcome: a conflict row must be drawn against the FULL inner width,
+// recovering the key column it does not use. The message it uses is chosen to
+// straddle the two budgets — longer than a description row gets, shorter than a
+// conflict row gets — so the assertion can only pass if the wider budget is the
+// one in force.
+//
+// The previous version asserted shortcutsFullRowWidth() != shortcutsDescWidth()
+// + dialogKeyColWidth, which is those two functions' definitions restated: an
+// identity above the floor, true whatever renderShortcutsDialog does with them.
+// Reverting the render to the narrow budget — the exact bug the name describes —
+// left it green. This one renders.
 func TestShortcutsDialog_ConflictRowSpansTheKeyColumn(t *testing.T) {
-	m := Model{width: 120, height: 60, dialog: dialogShortcuts, cfg: config.Default()}
-	if full, desc := m.shortcutsFullRowWidth(), m.shortcutsDescWidth(); full != desc+dialogKeyColWidth {
-		t.Errorf("conflict row width %d, ordinary description width %d — a conflict row "+
-			"should recover exactly the %d cells of key column it does not use",
-			full, desc, dialogKeyColWidth)
+	cfg := config.Default()
+	// isSelectionExtendKey runs between the tiers, so a late action bound to a
+	// selection chord produces the longest shape the registry can make: kind,
+	// chord, the built-in that wins, and the action that dies.
+	cfg.Keybindings.ClosePane = "shift+left"
+	m := Model{width: 120, height: 60, dialog: dialogShortcuts, cfg: cfg}
+	(&m).initKeymap()
+	if len(m.keyConflicts) != 1 {
+		t.Fatalf("fixture produced %d conflicts, want exactly 1", len(m.keyConflicts))
+	}
+
+	// The row's content is `key + " " + desc` — "! " plus the message — measured
+	// against the budget before the indent. If it stops straddling, this test
+	// stops testing what it names, so that is checked rather than assumed.
+	content := lipgloss.Width("! " + m.keyConflicts[0].String())
+	desc, full := m.shortcutsDescWidth(), m.shortcutsFullRowWidth()
+	if content <= desc {
+		t.Fatalf("fixture message is %d cells against a description budget of %d — it fits "+
+			"either way, so the test cannot fail; pick a longer conflict", content, desc)
+	}
+	if content > full {
+		t.Fatalf("fixture message is %d cells against a conflict-row budget of %d — it truncates "+
+			"either way, so the test cannot pass; widen the box or pick a shorter conflict", content, full)
+	}
+
+	if row := conflictRow(t, m); strings.Contains(row, "…") {
+		t.Errorf("conflict row was truncated: %q\n  it measures %d cells and the conflict-row "+
+			"budget is %d, so it was drawn against the %d-cell description budget instead — "+
+			"the key column it does not use has to come back to it", row, content, full, desc)
+	}
+}
+
+// TestShortcutsDialog_EscapeInABindingNeverReachesTheTerminal is the end-to-end
+// half of the parser's base-key check, asserted where the damage would happen.
+//
+// A chord's key is drawn raw by the key column, and truncateToWidth is
+// ANSI-aware — an escape measures zero cells, so it passes every width budget
+// untouched and is written straight to the terminal. `quit = "<ESC>]52;c;…"`
+// therefore set the system clipboard the moment the user pressed F1.
+//
+// Asserted on the RAW frame, not the ANSI-stripped one: stripping is what a
+// smuggled sequence would hide behind. lipgloss emits only CSI (ESC + "["), so
+// an OSC introducer or a C1 byte anywhere in the frame can only have come from
+// the config.
+func TestShortcutsDialog_EscapeInABindingNeverReachesTheTerminal(t *testing.T) {
+	cfg := config.Default()
+	cfg.Keybindings.Quit = "\x1b]52;c;aGk=\a" // OSC 52: set the system clipboard
+	m := Model{width: 120, height: 60, dialog: dialogShortcuts, cfg: cfg}
+	(&m).initKeymap()
+
+	frame := m.renderShortcutsDialog()
+	for _, bad := range []struct{ seq, what string }{
+		{"\x1b]", "an OSC introducer"},
+		{"\x1b_", "an APC introducer"},
+		{"\x1bP", "a DCS introducer"},
+		{"\x9b", "a C1 CSI byte"},
+		{"\x9d", "a C1 OSC byte"},
+	} {
+		if strings.Contains(frame, bad.seq) {
+			t.Errorf("the rendered dialog carries %s from a configured binding — "+
+				"the key column draws Chord.Key raw and ANSI-aware truncation preserves it", bad.what)
+		}
+	}
+
+	// The spec is rejected rather than dropped: app.quit falls back to its
+	// shipped default and the dialog says why. Without this, a renderer that
+	// simply blanked every key would also pass the assertion above.
+	if got := m.keymap.Display("app.quit"); got != "ctrl+q" {
+		t.Errorf("app.quit = %q, want the shipped default — a rejected spec must fall back, not unbind", got)
+	}
+	if row := conflictRow(t, m); !strings.Contains(row, "app.quit") {
+		t.Errorf("conflict row = %q, does not name the action whose binding was refused", row)
 	}
 }
 

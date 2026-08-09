@@ -80,7 +80,7 @@ func TestGitRow_WorktreeName(t *testing.T) {
 
 // The row must measure EXACTLY its budget at every width. renderSidebar's
 // closing .Width(w) WRAPS rather than cuts, and sidebarRowAt maps screen row y
-// to rows[y-1] — so one cell of overflow shifts every row below it and the hit
+// to rows[y] — so one cell of overflow shifts every row below it and the hit
 // test starts resolving to the neighbour.
 func TestGitRow_WithAWorktreeNameMeasuresExactly(t *testing.T) {
 	pane := PaneModel{

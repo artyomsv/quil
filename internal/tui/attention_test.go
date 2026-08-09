@@ -1,14 +1,38 @@
 package tui
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
 )
+
+// newTestModelWithTabs builds a Model with a single project holding n tabs,
+// each with panesPerTab panes ("pane-<tab>-<pane>") split left-to-right via
+// tabWith. Tab 0 is the project's active tab. The package's other fixtures
+// (tabWith, Model{...} literals) build a specific tab/pane graph by hand;
+// tests that assert against a tab INDEX rather than a specific pane want a
+// fixture that hands back N of them directly.
+func newTestModelWithTabs(t *testing.T, n, panesPerTab int) Model {
+	t.Helper()
+	tabs := make([]*TabModel, n)
+	for i := 0; i < n; i++ {
+		panes := make([]*PaneModel, panesPerTab)
+		for j := 0; j < panesPerTab; j++ {
+			panes[j] = &PaneModel{ID: fmt.Sprintf("pane-%d-%d", i, j)}
+		}
+		tabs[i] = tabWith(panes...)
+	}
+	return Model{
+		projects:      []*ProjectModel{{ID: "proj-a", tabs: tabs}},
+		activeProject: 0,
+	}
+}
 
 func TestBlockedPanesOrderedOldestFirstAcrossProjects(t *testing.T) {
 	now := time.Now()
@@ -253,6 +277,51 @@ func TestAttentionQueueKeyEmptyQueueFlashes(t *testing.T) {
 	}
 }
 
+// TestJumpToNextBlocked_ScrollsTheTargetIntoSidebarView closes the gap between
+// "the queue takes me there" and "the sidebar shows me where I am".
+// jumpToNextBlocked sets activeTab / ActivePane directly rather than routing
+// through jumpToPane, so it never reached scrollSidebarToPane and could land on
+// a pane below the fold — on the ONE navigation most tied to this feature set,
+// and the one whose whole premise is that the sidebar is where you look next.
+//
+// Same-project is the case that needs it: a cross-project jump resets the offset
+// to 0 via switchProject, which is not the same as bringing the target into
+// view, and within one project nothing moves the strip at all.
+func TestJumpToNextBlocked_ScrollsTheTargetIntoSidebarView(t *testing.T) {
+	t.Parallel()
+	m := newTestModelManyPanes(t, 3, 30)
+	m.width, m.height = 100, 20
+
+	tab := m.curTabs()[0]
+	panes := tab.Leaves()
+	target := panes[len(panes)-1]
+	target.blockedSince = time.Now()
+
+	w, height := m.projectSidebarWidth(), m.sidebarContentHeight()
+	visible := func() bool {
+		for _, r := range m.sidebarVisibleRows(w, height) {
+			if r.kind == sidebarRowPane && r.paneID == target.ID {
+				return true
+			}
+		}
+		return false
+	}
+
+	m.sidebarScroll = 0
+	if visible() {
+		t.Fatal("fixture must start with the target below the fold — this test cannot fail")
+	}
+
+	m.jumpToNextBlocked()
+
+	if got := tab.ActivePane; got != target.ID {
+		t.Fatalf("ActivePane = %q, want %q — the jump itself did not land", got, target.ID)
+	}
+	if !visible() {
+		t.Errorf("pane %q is focused but still off-screen at sidebarScroll %d", target.ID, m.sidebarScroll)
+	}
+}
+
 // TestAttentionQueueKeyFiresWhileNotesEditorFocused pins the notesKeyExempt
 // entry for kb.AttentionQueue: Alt+Shift+A must reach jumpToNextBlocked (and
 // tear down notes mode first, on the OLD tab) rather than being consumed as
@@ -303,5 +372,96 @@ func TestAttentionQueueKeyFiresWhileNotesEditorFocused(t *testing.T) {
 	}
 	if got := got.projects[1].tabs[0].ActivePane; got != "pane-blocked" {
 		t.Fatalf("ActivePane = %s, want pane-blocked", got)
+	}
+}
+
+// TestTabBlocked_ReportsParkedPaneOnBackgroundTab pins the tab-level blocked
+// mark. Before this existed a parked pane showed ▲ in the sidebar while its
+// tab showed nothing at all — the defect in item 6.1.
+func TestTabBlocked_ReportsParkedPaneOnBackgroundTab(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		blocked     bool
+		activeTab   bool
+		focusedPane bool
+		want        bool
+	}{
+		{"parked pane on background tab", true, false, false, true},
+		{"parked pane on active tab", true, true, false, true},
+		{"parked pane is the focused pane", true, true, true, true},
+		{"no parked pane", false, false, false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := newTestModelWithTabs(t, 2, 1)
+			ti := 1
+			if tt.activeTab {
+				ti = 0
+			}
+			tab := m.curTabs()[ti]
+			pane := tab.Leaves()[0]
+			if tt.blocked {
+				pane.blockedSince = time.Now()
+			}
+			if tt.focusedPane {
+				tab.ActivePane = pane.ID
+			}
+			if got := m.tabBlocked(ti); got != tt.want {
+				t.Errorf("tabBlocked(%d) = %v, want %v", ti, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestTabStyle_BlockedOutranksUnseen pins the precedence. A pane that is
+// blocked AND unseen must read as blocked: "needs you" is the more urgent of
+// the two, and it is the one the user can act on.
+func TestTabStyle_BlockedOutranksUnseen(t *testing.T) {
+	t.Parallel()
+	m := newTestModelWithTabs(t, 2, 1)
+	pane := m.curTabs()[1].Leaves()[0]
+	pane.unseen = true
+	pane.blockedSince = time.Now()
+	if got := m.tabStyle(1); got.GetBackground() != blockedTabStyle.GetBackground() {
+		t.Errorf("tabStyle background = %v, want blockedTabStyle %v",
+			got.GetBackground(), blockedTabStyle.GetBackground())
+	}
+}
+
+// TestTabStyle_BlockedActiveIsDistinctAtTheSameWidth pins both halves of the
+// active-blocked variant. Amber replaces the BACKGROUND, which is the only
+// thing activeTabStyle and inactiveTabStyle differ by, so with two agents
+// parked — the ordinary case tabBlocked exists for — the bar had nothing left
+// saying which tab the user is on. And renderTabBar measures style.Render(name)
+// to build its click zones, so the fix must not cost a single cell: a variant
+// that widened the active tab would silently shift every hit zone after it.
+func TestTabStyle_BlockedActiveIsDistinctAtTheSameWidth(t *testing.T) {
+	t.Parallel()
+	m := newTestModelWithTabs(t, 2, 1)
+	for ti := 0; ti < 2; ti++ {
+		m.curTabs()[ti].Leaves()[0].blockedSince = time.Now()
+	}
+	if !m.tabBlocked(0) || !m.tabBlocked(1) {
+		t.Fatal("fixture: both tabs must be blocked")
+	}
+	if m.activeTabIdx() != 0 {
+		t.Fatalf("fixture: activeTabIdx = %d, want 0", m.activeTabIdx())
+	}
+
+	active, background := m.tabStyle(0), m.tabStyle(1)
+	if active.GetBackground() != blockedTabStyle.GetBackground() {
+		t.Errorf("active blocked tab lost the amber background: %v, want %v",
+			active.GetBackground(), blockedTabStyle.GetBackground())
+	}
+
+	const name = "1:agent"
+	if active.Render(name) == background.Render(name) {
+		t.Error("blocked active and blocked background tabs render identically — " +
+			"with two parked agents the bar cannot say which tab you are on")
+	}
+	if aw, bw := lipgloss.Width(active.Render(name)), lipgloss.Width(background.Render(name)); aw != bw {
+		t.Errorf("rendered width %d vs %d — renderTabBar measures style.Render(name) "+
+			"for hit-testing, so the active variant must not change width", aw, bw)
 	}
 }

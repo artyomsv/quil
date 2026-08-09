@@ -113,6 +113,8 @@ The active tab is prefixed with `* ` in the tab bar so it's visible even when [t
 
 Right-click on a pane — with a text selection active, it copies the selection to the clipboard (unchanged); with no selection, it opens the pane context menu for the pane under the cursor. `↑`/`↓` (or `k`/`j`) navigate, `Enter` or a left-click executes the highlighted item, `Esc` or a click outside the menu closes it, and right-clicking another pane re-targets the menu to it. `Ctrl+Q` still quits while the menu is open.
 
+Right-clicking a **pane row in the project sidebar** opens the same menu. It focuses that pane first — switching tabs if the pane lives on another one, exactly as a left-click on the row does — so every action in the menu applies to the pane you clicked.
+
 ## Pane navigation
 
 | Key | Action |

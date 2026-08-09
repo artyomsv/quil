@@ -89,6 +89,14 @@ func (m *Model) jumpToNextBlocked() tea.Cmd {
 			// still Pending after a lazy restore. Without this the queue lands
 			// the user on a restore indicator with no process behind it.
 			m.notifyTabSwitch(target.Project.tabs[target.TabIndex])
+			// AFTER switchProject, for the reason jumpToPane records: a
+			// cross-project switch zeroes sidebarScroll outright, so an offset
+			// computed before it is thrown away. This function sets activeTab
+			// and ActivePane by hand rather than routing through jumpToPane, so
+			// it is the one navigation that would otherwise never reach here —
+			// on the queue, whose whole premise is that the sidebar is where
+			// you look to see where you landed.
+			m.scrollSidebarToPane(target.Pane.ID)
 			return cmd
 		}
 	}

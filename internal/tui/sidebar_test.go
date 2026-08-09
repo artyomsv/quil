@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -245,6 +246,31 @@ func TestSwitchProjectIgnoresOutOfRangeAndNoOp(t *testing.T) {
 	}
 	if len(fake.sent) != 0 {
 		t.Errorf("no-op switches must send nothing, got %d messages", len(fake.sent))
+	}
+}
+
+// TestSwitchProjectResetsSidebarScroll pins the deliberate UX choice: a
+// project switch always shows the incoming project's PANES body from the top,
+// rather than carrying over an offset scrolled deep into the outgoing
+// project's (possibly much longer) pane list.
+func TestSwitchProjectResetsSidebarScroll(t *testing.T) {
+	fake := newFakeConn()
+	m := Model{
+		client: fake,
+		projects: []*ProjectModel{
+			{ID: "proj-a"},
+			{ID: "proj-b"},
+		},
+		activeProject: 0,
+		sidebarScroll: 12,
+	}
+
+	if cmd := m.switchProject(1); cmd != nil {
+		cmd()
+	}
+
+	if m.sidebarScroll != 0 {
+		t.Errorf("sidebarScroll = %d after switching projects, want 0", m.sidebarScroll)
 	}
 }
 
@@ -778,17 +804,22 @@ func TestSidebarCapsRowsToTheAvailableHeight(t *testing.T) {
 		sidebarWidth: 22, width: 200, height: 40,
 	}
 	h := m.sidebarContentHeight()
-	if len(m.sidebarRows(22)) <= h {
+	if all, _ := m.sidebarRows(22); len(all) <= h {
 		t.Fatal("fixture does not overflow — the cap would not be exercised")
 	}
 	lines := strings.Split(m.renderSidebar(h), "\n")
 	if len(lines) != h {
 		t.Fatalf("renderSidebar emitted %d lines for a %d-row area", len(lines), h)
 	}
-	// The tail is dropped and marked, so the PROJECTS block — the navigation
-	// the sidebar exists for — always survives.
-	if !strings.Contains(lines[len(lines)-1], "…") {
-		t.Errorf("last row = %q, want an overflow marker", lines[len(lines)-1])
+	// The overflow is marked rather than silently ending, so the PROJECTS block
+	// — the navigation the sidebar exists for — always survives above it. The
+	// marker names a COUNT now that the body scrolls: the rows below are
+	// reachable, so "there is more" is no longer the whole story.
+	// TestSidebarVisibleRows_ShortStripFallsBackToTailTruncation keeps the
+	// bare-" …" tail cap, which is still what a strip too short to scroll gets.
+	if last := lines[len(lines)-1]; !strings.Contains(last, glyphMore) ||
+		!strings.Contains(last, "below") {
+		t.Errorf("last row = %q, want an overflow marker naming the rows below it", last)
 	}
 	if !strings.Contains(lines[1], "alpha") {
 		t.Errorf("row 1 = %q, want the first project", lines[1])
@@ -814,9 +845,17 @@ func wideGlyphSidebarModel(t *testing.T) Model {
 	// word-wraps, so a row whose excess is a run of SPACES is collapsed back
 	// inside the budget and hides the bug. Only solid content forces the
 	// wrap that shifts the rows below.
+	//
+	// The blocked pane must NOT be the focused one, and an idle sibling put
+	// ahead of it is what keeps it unfocused (tabWith focuses panes[0]).
+	// paneRow suppresses the blocked presentation for the focused pane, so
+	// with one pane in the tab the CJK blockedReason never reaches the row and
+	// this fixture stops exercising a wide-glyph SUFFIX at all — silently, with
+	// both tests below still green on the project name alone.
+	idle := &PaneModel{ID: "pane-idle", Name: "shell"}
 	m := Model{
 		projects: []*ProjectModel{
-			{ID: "proj-a", Name: "数据库迁移服务集群控制台", Dest: "gpu01", tabs: []*TabModel{tabWith(blocked)}},
+			{ID: "proj-a", Name: "数据库迁移服务集群控制台", Dest: "gpu01", tabs: []*TabModel{tabWith(idle, blocked)}},
 			{ID: "proj-b", Name: "beta"},
 		},
 		sidebarOpen:  true,
@@ -832,7 +871,26 @@ func wideGlyphSidebarModel(t *testing.T) Model {
 		t.Fatalf("fixture glyphs are not wide (⚡=%d 构=%d) — this test cannot fail",
 			lipgloss.Width("⚡"), lipgloss.Width("构"))
 	}
+	// Second control: the wide-glyph blocked reason must actually reach a row.
+	// It does so only while the blocked pane is unfocused, which is a property
+	// of the fixture's pane ORDER — nothing else here would notice it changing.
+	var sawReason bool
+	for _, r := range rowsOf(&m, 22) {
+		if strings.Contains(r.text, "编辑") {
+			sawReason = true
+		}
+	}
+	if !sawReason {
+		t.Fatal("no row carries the wide-glyph blocked reason — the fixture no longer " +
+			"exercises a wide suffix (is the blocked pane focused?)")
+	}
 	return m
+}
+
+// rowsOf is the row list alone, for fixtures that only assert over the rows.
+func rowsOf(m *Model, w int) []sidebarRow {
+	rows, _ := m.sidebarRows(w)
+	return rows
 }
 
 // No row may exceed its column budget. Asserted on sidebarRows, BEFORE
@@ -841,7 +899,8 @@ func wideGlyphSidebarModel(t *testing.T) Model {
 // output would see every line within budget and miss this entirely.
 func TestSidebarRowsNeverExceedTheirColumnBudget(t *testing.T) {
 	m := wideGlyphSidebarModel(t)
-	for i, row := range m.sidebarRows(22) {
+	rows, _ := m.sidebarRows(22)
+	for i, row := range rows {
 		w := lipgloss.Width(row.text)
 		if w > 22 {
 			t.Errorf("row %d is %d cells wide against a 22-cell budget — .Width(22) will wrap it: %q",
@@ -967,8 +1026,9 @@ func TestSidebarMarksTheActiveTabAndFocusedPane(t *testing.T) {
 		}},
 	}
 
+	allRows, _ := m.sidebarRows(m.sidebarWidth)
 	var tabRows, paneRows []string
-	for _, r := range m.sidebarRows(m.sidebarWidth) {
+	for _, r := range allRows {
 		switch {
 		case strings.Contains(r.text, "first"), strings.Contains(r.text, "second"):
 			tabRows = append(tabRows, r.text)
@@ -998,7 +1058,7 @@ func TestSidebarMarksTheActiveTabAndFocusedPane(t *testing.T) {
 	// Every row still fills exactly the sidebar's column budget — the marker
 	// replaces padding rather than widening the row, which is what keeps the
 	// hit test's y->row mapping aligned with what is painted.
-	for _, r := range m.sidebarRows(m.sidebarWidth) {
+	for _, r := range allRows {
 		if r.text == "" {
 			continue
 		}
@@ -1069,6 +1129,180 @@ func TestPaneRowKeepsTheNameWhenTheReasonIsLong(t *testing.T) {
 	short.blockedReason = "Bash"
 	if row := paneRow(short, false, defaultSidebarWidth); !strings.Contains(row, "Bash") {
 		t.Errorf("row %q dropped a reason that had room", row)
+	}
+}
+
+// TestPaneRow_RendersPinnedAttention pins item 6.3. pinnedAttention already
+// drove the pane border and the tab label; the sidebar row — the one place
+// that lists every pane at once — never showed it.
+func TestPaneRow_RendersPinnedAttention(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		setup   func(p *PaneModel)
+		wantSub string
+	}{
+		{"pinned alone", func(p *PaneModel) { p.pinnedAttention = true }, glyphPinned},
+		{"pinned and blocked keeps the blocked glyph", func(p *PaneModel) {
+			p.pinnedAttention = true
+			p.blockedSince = time.Now()
+		}, glyphBlocked},
+		{"pinned and blocked still shows the pin", func(p *PaneModel) {
+			p.pinnedAttention = true
+			p.blockedSince = time.Now()
+		}, glyphPinned},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pane := &PaneModel{ID: "p1", Name: "agent"}
+			tt.setup(pane)
+			got := paneRow(pane, false, 30)
+			if !strings.Contains(got, tt.wantSub) {
+				t.Errorf("paneRow = %q, want it to contain %q", got, tt.wantSub)
+			}
+		})
+	}
+}
+
+// TestPaneRow_BlockedFocusedSuppressesTheGlyph pins the render half of the
+// revised item 6.2. The blocked STATE is kept when the user focuses the pane
+// (ackFocusedPane no longer clears it — see TestAckFocusedPane_KeepsTheBlockedMark
+// for why a spinner tick must not count as an answer); the PRESENTATION is what
+// gives way, so "you are looking straight at the prompt" costs a glyph rather
+// than a fact. The row must then read exactly as it would with no blocked mark
+// at all, which is the fall-through this table walks: working still wins, then
+// the pin, then unseen, then idle.
+//
+// Unfocused is the control row of every case — that is the state the whole
+// feature exists to show, and a suppression that leaked into it would be the
+// original defect (▲ never observable) in a new place.
+func TestPaneRow_BlockedFocusedSuppressesTheGlyph(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name          string
+		setup         func(p *PaneModel)
+		wantFocused   string // the glyph the row shows while focused
+		unwantFocused string // and the one it must NOT show
+	}{
+		{"blocked alone falls through to idle",
+			func(p *PaneModel) {}, glyphIdle, glyphBlocked},
+		{"blocked and working falls through to working",
+			func(p *PaneModel) { p.working = true }, glyphWorking, glyphBlocked},
+		{"blocked and pinned falls through to the pin",
+			func(p *PaneModel) { p.pinnedAttention = true }, glyphPinned, glyphBlocked},
+		{"blocked and unseen falls through to done",
+			func(p *PaneModel) { p.unseen = true }, glyphDone, glyphBlocked},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pane := &PaneModel{ID: "p1", Name: "agent"}
+			pane.blockedSince = time.Now()
+			pane.blockedReason = "Bash"
+			tt.setup(pane)
+
+			focused := paneRow(pane, true, 30)
+			if !strings.Contains(focused, tt.wantFocused) {
+				t.Errorf("focused row = %q, want the %q glyph", focused, tt.wantFocused)
+			}
+			if strings.Contains(focused, tt.unwantFocused) {
+				t.Errorf("focused row = %q, must not show %q", focused, tt.unwantFocused)
+			}
+			// The reason is the blocked presentation's other half; leaving it
+			// behind would name the tool on a row carrying no blocked glyph.
+			if strings.Contains(focused, "Bash") {
+				t.Errorf("focused row = %q, must not carry the blocked reason", focused)
+			}
+			// Nothing about the suppression may change the row's width — it is
+			// the one property every helper in this file has to agree on.
+			if w := lipgloss.Width(focused); w != 30 {
+				t.Errorf("focused row measures %d cells, want exactly 30", w)
+			}
+
+			unfocused := paneRow(pane, false, 30)
+			if !strings.Contains(unfocused, glyphBlocked) {
+				t.Errorf("unfocused row = %q, want the %q glyph", unfocused, glyphBlocked)
+			}
+			if !strings.Contains(unfocused, "Bash") {
+				t.Errorf("unfocused row = %q, want the blocked reason", unfocused)
+			}
+		})
+	}
+}
+
+// TestSidebarRows_SuppressesTheBlockedGlyphOnlyForTheFocusedPane drives the
+// suppression through its real call site rather than paneRow's parameter. The
+// `focused` argument is computed there as `onTab && pane.ID == tab.ActivePane`,
+// which is exactly ackFocusedPane's own scope (the focused pane of the ACTIVE
+// tab of the active project) — the two must not come apart, or a pane would
+// either keep a mark nothing renders or lose one nothing cleared.
+func TestSidebarRows_SuppressesTheBlockedGlyphOnlyForTheFocusedPane(t *testing.T) {
+	t.Parallel()
+	// Tab 0 is active: pane-0-0 is focused, pane-0-1 is its split sibling.
+	// Tab 1 is a background tab holding a third blocked pane.
+	m := newTestModelWithTabs(t, 2, 2)
+	m.sidebarOpen, m.sidebarWidth = true, defaultSidebarWidth
+	m.width, m.height = 120, 40
+	for _, tab := range m.curTabs() {
+		for _, p := range tab.Leaves() {
+			p.blockedSince = time.Now()
+		}
+	}
+	focusedID := m.curTabs()[0].ActivePane
+	if focusedID == "" {
+		t.Fatal("fixture must focus a pane on the active tab")
+	}
+
+	rows, _ := m.sidebarRows(defaultSidebarWidth)
+	var seen int
+	for _, r := range rows {
+		if r.kind != sidebarRowPane {
+			continue
+		}
+		seen++
+		blocked := strings.Contains(r.text, glyphBlocked)
+		if want := r.paneID != focusedID; blocked != want {
+			t.Errorf("pane %q (focused=%v): row shows %s = %v, want %v — %q",
+				r.paneID, r.paneID == focusedID, glyphBlocked, blocked, want, r.text)
+		}
+	}
+	if seen != 4 {
+		t.Fatalf("walked %d pane rows, want 4 — the fixture no longer covers both tabs", seen)
+	}
+	// The suppression is presentation only: every level above the row still
+	// counts all four, including the focused one.
+	if !m.tabBlocked(0) || !m.tabBlocked(1) {
+		t.Error("both tabs must still read as blocked")
+	}
+	if _, blocked, _ := m.projects[0].counts(); blocked != 4 {
+		t.Errorf("project badge counts %d blocked, want 4", blocked)
+	}
+}
+
+// TestSidebarTabHeading_OrdinalAndColor pins item 2. The heading and the idle
+// pane rows beneath it both painted with sidebarDimStyle (color 243), so the
+// grouping the PANES section exists to show was invisible.
+func TestSidebarTabHeading_OrdinalAndColor(t *testing.T) {
+	t.Parallel()
+	got := sidebarTabHeading("build", 1, false, "", 22)
+	if !strings.Contains(got, "2:build") {
+		t.Errorf("heading = %q, want the 1-based ordinal %q", got, "2:build")
+	}
+	if strings.Contains(got, "243") {
+		t.Errorf("inactive heading still uses the dim colour shared with idle pane rows: %q", got)
+	}
+}
+
+// TestSidebarTabHeading_ElidesNameKeepsOrdinal pins that the ordinal survives a
+// narrow strip — it is the part that maps the row to Alt+1..9, so truncating it
+// away would cost the row its only navigational value.
+func TestSidebarTabHeading_ElidesNameKeepsOrdinal(t *testing.T) {
+	t.Parallel()
+	got := sidebarTabHeading("a-very-long-tab-name-indeed", 0, false, "", 14)
+	if !strings.Contains(got, "1:") {
+		t.Errorf("heading = %q, want it to keep the %q prefix", got, "1:")
+	}
+	if w := lipgloss.Width(got); w > 14 {
+		t.Errorf("heading width = %d, want <= 14", w)
 	}
 }
 
@@ -1166,5 +1400,585 @@ func TestSidebarDoesNotRemodeAWideCanvasPane(t *testing.T) {
 			t.Errorf("pane %s native at a 120-col terminal (rect %d, native %d), want canvas",
 				p.ID, p.Width, p.NativeW)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// PANES-section scrolling
+// ---------------------------------------------------------------------------
+
+// newTestModelManyPanes builds a Model whose sidebar overflows any reasonable
+// strip: `projects` projects, with `panes` panes on the active one, all in a
+// single tab. The sidebar fields are set because the scroll assertions resolve
+// their own width and height through projectSidebarWidth() /
+// sidebarContentHeight(), which answer 0 on a zero-valued Model.
+func newTestModelManyPanes(t *testing.T, projects, panes int) Model {
+	t.Helper()
+	ps := make([]*ProjectModel, projects)
+	for i := range ps {
+		ps[i] = &ProjectModel{ID: fmt.Sprintf("proj-%d", i), Name: fmt.Sprintf("project-%d", i)}
+	}
+	leaves := make([]*PaneModel, panes)
+	for j := range leaves {
+		leaves[j] = &PaneModel{ID: fmt.Sprintf("pane-%d", j)}
+	}
+	tab := tabWith(leaves...)
+	tab.Name = "work"
+	ps[0].tabs = []*TabModel{tab}
+	return Model{
+		projects:      ps,
+		activeProject: 0,
+		sidebarOpen:   true,
+		sidebarWidth:  defaultSidebarWidth,
+		width:         120,
+		height:        40,
+		// Update's MouseWheelMsg branch checks the notification sidebar
+		// overlay before the project sidebar swallow — sidebarOverlayWidth
+		// dereferences this unconditionally, so routing a wheel event through
+		// Update() (rather than calling sidebarVisibleRows directly, as every
+		// prior fixture use did) panics on a nil *NotificationCenter.
+		notifications: NewNotificationCenter(30, 50),
+	}
+}
+
+// TestSidebarVisibleRows_PanesScrollProjectsPinned pins item 5. Paint and hit
+// test both call sidebarVisibleRows with the same height, deliberately — so the
+// offset must live INSIDE it. A cap or an offset applied at the render site is
+// the row-drift bug ("click project 3, select project 2") in another form.
+func TestSidebarVisibleRows_PanesScrollProjectsPinned(t *testing.T) {
+	t.Parallel()
+	m := newTestModelManyPanes(t, 3, 8) // 3 projects, 8 panes on the active one
+	w, height := 22, 12
+
+	all, panesStart := m.sidebarRows(w)
+	if len(all) <= height {
+		t.Fatal("fixture must overflow the strip")
+	}
+
+	m.sidebarScroll = 0
+	first := m.sidebarVisibleRows(w, height)
+	if len(first) != height {
+		t.Errorf("visible rows = %d, want exactly %d", len(first), height)
+	}
+	for i := 0; i < panesStart; i++ {
+		if first[i].text != all[i].text {
+			t.Errorf("row %d: PROJECTS block must be pinned, got %q want %q",
+				i, first[i].text, all[i].text)
+		}
+	}
+
+	m.sidebarScroll = 2
+	scrolled := m.sidebarVisibleRows(w, height)
+	for i := 0; i < panesStart; i++ {
+		if scrolled[i].text != all[i].text {
+			t.Errorf("row %d changed while scrolled — PROJECTS is not pinned", i)
+		}
+	}
+	if scrolled[panesStart].text == first[panesStart].text {
+		t.Error("the PANES body did not move when sidebarScroll changed")
+	}
+}
+
+// TestSidebarVisibleRows_HitTestMatchesPaint is the assertion that matters:
+// window the rows, then resolve a click at a screen row and check it lands on
+// the pane actually painted there. Testing either alone cannot catch drift.
+func TestSidebarVisibleRows_HitTestMatchesPaint(t *testing.T) {
+	t.Parallel()
+	m := newTestModelManyPanes(t, 3, 8)
+	m.width, m.height = 100, 13 // sidebarContentHeight() == 12
+	m.sidebarScroll = 3
+
+	w := m.projectSidebarWidth()
+	rows := m.sidebarVisibleRows(w, m.sidebarContentHeight())
+	for y, row := range rows {
+		if row.kind != sidebarRowPane {
+			continue
+		}
+		gotRow, ok := m.sidebarRowAt(1, y)
+		if !ok || gotRow.paneID != row.paneID {
+			t.Fatalf("screen row %d paints pane %q but hit-tests to %q",
+				y, row.paneID, gotRow.paneID)
+		}
+	}
+}
+
+// TestSidebarVisibleRows_ShortStripFallsBackToTailTruncation pins the
+// degenerate case: when the pinned PROJECTS block alone would leave fewer than
+// minPaneRows for the body, the whole strip reverts to the pre-scroll tail cap
+// rather than hiding the PANES section outright.
+func TestSidebarVisibleRows_ShortStripFallsBackToTailTruncation(t *testing.T) {
+	t.Parallel()
+	m := newTestModelManyPanes(t, 8, 4)
+	rows := m.sidebarVisibleRows(22, 6)
+	if len(rows) != 6 {
+		t.Fatalf("visible rows = %d, want 6", len(rows))
+	}
+	if !strings.Contains(rows[5].text, "…") {
+		t.Errorf("last row = %q, want the overflow marker", rows[5].text)
+	}
+}
+
+// TestSidebarScrollClamp pins the two helpers the wheel handler drives the
+// offset with. The window gives up a row to the "N above" marker the moment it
+// scrolls at all, so the last page holds bodyH-1 rows and the largest useful
+// offset is bodyLen-(bodyH-1). One off by one there and the last page is drawn
+// short — every row after it shifts, and the hit test shifts with it.
+func TestSidebarScrollClamp(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name             string
+		bodyLen, bodyH   int
+		wantMax          int
+		off, wantClamped int
+	}{
+		{"body fits", 5, 8, 0, 3, 0},
+		{"body exactly fills the window", 8, 8, 0, 1, 0},
+		{"one row over", 9, 8, 2, 1, 1},
+		{"far past the end", 20, 5, 16, 100, 16},
+		{"negative offset", 20, 5, 16, -3, 0},
+		{"in range", 20, 5, 16, 7, 7},
+		{"single-row window", 10, 1, 0, 4, 0},
+		{"no window at all", 10, 0, 0, 4, 0},
+		{"empty body", 0, 5, 0, 2, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := maxSidebarScrollFor(tc.bodyLen, tc.bodyH); got != tc.wantMax {
+				t.Errorf("maxSidebarScrollFor(%d, %d) = %d, want %d",
+					tc.bodyLen, tc.bodyH, got, tc.wantMax)
+			}
+			if got := clampSidebarScroll(tc.off, tc.bodyLen, tc.bodyH); got != tc.wantClamped {
+				t.Errorf("clampSidebarScroll(%d, %d, %d) = %d, want %d",
+					tc.off, tc.bodyLen, tc.bodyH, got, tc.wantClamped)
+			}
+		})
+	}
+}
+
+// isSidebarScrollMarker identifies a "N above"/"N below" overflow marker row
+// by kind AND direction word, not by glyphMore alone: paneRow also spends
+// glyphMore on a pane's subagent count, so a substring-only check would flag
+// (or miscount) that row too and fail for a reason unrelated to scrolling the
+// moment the fixture gains a pane with subagents.
+func isSidebarScrollMarker(r sidebarRow) bool {
+	return r.kind == "" && strings.Contains(r.text, glyphMore) &&
+		(strings.Contains(r.text, "above") || strings.Contains(r.text, "below"))
+}
+
+// TestSidebarVisibleRows_WindowIsExactAtEveryOffset sweeps the offset past both
+// ends. Two things have to hold at every one of them, and both are how the
+// paint and the hit test stay in step: the strip is exactly `height` rows (the
+// markers cost a row each and only on the side that has more, so the count is
+// the fiddly part), and the body rows painted are a CONTIGUOUS run of the real
+// list starting at the clamped offset — a window that skipped or repeated a row
+// would still measure the right height.
+//
+// The last body row must be reachable at exactly the clamped maximum: earlier
+// means the max is too large and the final page is drawn short, later means it
+// is too small and the tail is unreachable — which is the defect this whole
+// task exists to fix.
+func TestSidebarVisibleRows_WindowIsExactAtEveryOffset(t *testing.T) {
+	t.Parallel()
+	m := newTestModelManyPanes(t, 3, 8)
+	const w, height = 22, 12
+
+	all, panesStart := m.sidebarRows(w)
+	if len(all) <= height {
+		t.Fatal("fixture must overflow the strip")
+	}
+	body := all[panesStart:]
+	bodyH := height - panesStart
+
+	for off := -2; off <= len(body)+2; off++ {
+		m.sidebarScroll = off
+		out := m.sidebarVisibleRows(w, height)
+		if len(out) != height {
+			t.Fatalf("offset %d: %d rows, want exactly %d", off, len(out), height)
+		}
+		for i := 0; i < panesStart; i++ {
+			if out[i].text != all[i].text {
+				t.Fatalf("offset %d row %d: the pinned PROJECTS block moved", off, i)
+			}
+		}
+
+		var vis []sidebarRow
+		for _, r := range out[panesStart:] {
+			if isSidebarScrollMarker(r) {
+				continue
+			}
+			vis = append(vis, r)
+		}
+		if len(vis) == 0 {
+			t.Fatalf("offset %d painted no PANES rows at all", off)
+		}
+		c := clampSidebarScroll(off, len(body), bodyH)
+		if c+len(vis) > len(body) {
+			t.Fatalf("offset %d (clamped %d): window of %d runs past the %d-row body",
+				off, c, len(vis), len(body))
+		}
+		for i, r := range vis {
+			if r.text != body[c+i].text {
+				t.Fatalf("offset %d (clamped %d): visible row %d = %q, want body row %d = %q",
+					off, c, i, r.text, c+i, body[c+i].text)
+			}
+		}
+		atMax := c == maxSidebarScrollFor(len(body), bodyH)
+		if showsLast := c+len(vis) == len(body); showsLast != atMax {
+			t.Errorf("offset %d (clamped %d): shows the last body row = %v, is at the max offset = %v",
+				off, c, showsLast, atMax)
+		}
+	}
+}
+
+// TestSidebarVisibleRows_LeavesTheStoredOffsetAlone pins the purity rule.
+// sidebarVisibleRows runs on the render path, and View has a VALUE receiver —
+// so a clamp written back from there is discarded, while the same write from
+// the hit test (reached through Update, on the pointer) sticks. The two paths
+// would then hold different offsets and resolve a click to a row nobody
+// painted. Clamping a local copy has neither half of that problem.
+func TestSidebarVisibleRows_LeavesTheStoredOffsetAlone(t *testing.T) {
+	t.Parallel()
+	m := newTestModelManyPanes(t, 3, 8)
+	for _, off := range []int{-5, 0, 3, 999} {
+		m.sidebarScroll = off
+		_ = m.sidebarVisibleRows(22, 12)
+		if m.sidebarScroll != off {
+			t.Errorf("sidebarScroll = %d after rendering at offset %d — "+
+				"the render path must not write model state", m.sidebarScroll, off)
+		}
+	}
+}
+
+// TestSidebarVisibleRows_ScrollMarkersAreInert: the markers sit inside the
+// strip, so a click on one has to be swallowed rather than fall through to the
+// pane the sidebar displaced — but it must not select anything either. They
+// carry no kind, which is what sidebarHit reads.
+func TestSidebarVisibleRows_ScrollMarkersAreInert(t *testing.T) {
+	t.Parallel()
+	m := newTestModelManyPanes(t, 3, 8)
+	m.width, m.height = 100, 13 // sidebarContentHeight() == 12
+	m.sidebarScroll = 2         // mid-body: both markers are on screen
+
+	rows := m.sidebarVisibleRows(m.projectSidebarWidth(), m.sidebarContentHeight())
+	var markers int
+	for y, row := range rows {
+		if !isSidebarScrollMarker(row) {
+			continue
+		}
+		markers++
+		if row.kind != "" || row.paneID != "" {
+			t.Errorf("screen row %d is a scroll marker but carries kind %q / pane %q",
+				y, row.kind, row.paneID)
+		}
+		if kind, idx := m.sidebarHit(1, y); kind != "" || idx != -1 {
+			t.Errorf("clicking the scroll marker at row %d resolved to (%q, %d), want no action",
+				y, kind, idx)
+		}
+	}
+	if markers != 2 {
+		t.Fatalf("found %d scroll markers, want 2 (above and below) — "+
+			"the fixture no longer scrolls with rows on both sides", markers)
+	}
+}
+
+// TestSidebarWheel_ScrollsPanesSection pins that a wheel notch over the strip
+// moves the PANES body. The swallow at model.go:1466 already stopped the wheel
+// reaching the pane beneath — it just did nothing with it.
+func TestSidebarWheel_ScrollsPanesSection(t *testing.T) {
+	t.Parallel()
+	m := newTestModelManyPanes(t, 3, 8)
+	m.width, m.height = 100, 13
+
+	updated, _ := m.Update(tea.MouseWheelMsg{X: 5, Y: 5, Button: tea.MouseWheelDown})
+	down := updated.(Model)
+	if down.sidebarScroll == 0 {
+		t.Fatal("wheel down over the sidebar should scroll the PANES section")
+	}
+
+	updated, _ = down.Update(tea.MouseWheelMsg{X: 5, Y: 5, Button: tea.MouseWheelUp})
+	up := updated.(Model)
+	if up.sidebarScroll != 0 {
+		t.Errorf("sidebarScroll = %d after scrolling back up, want 0", up.sidebarScroll)
+	}
+}
+
+// TestSidebarWheel_ClampsAtBothEnds pins that the offset cannot run past the
+// content in either direction — an unclamped offset paints an empty strip that
+// still hit-tests to rows nobody can see.
+func TestSidebarWheel_ClampsAtBothEnds(t *testing.T) {
+	t.Parallel()
+	m := newTestModelManyPanes(t, 3, 8)
+	m.width, m.height = 100, 13
+
+	for i := 0; i < 50; i++ {
+		updated, _ := m.Update(tea.MouseWheelMsg{X: 5, Y: 5, Button: tea.MouseWheelDown})
+		m = updated.(Model)
+	}
+	rows, panesStart := m.sidebarRows(m.projectSidebarWidth())
+	want := maxSidebarScrollFor(len(rows)-panesStart, m.sidebarContentHeight()-panesStart)
+	if m.sidebarScroll != want {
+		t.Errorf("sidebarScroll = %d after over-scrolling, want the max %d", m.sidebarScroll, want)
+	}
+
+	for i := 0; i < 50; i++ {
+		updated, _ := m.Update(tea.MouseWheelMsg{X: 5, Y: 5, Button: tea.MouseWheelUp})
+		m = updated.(Model)
+	}
+	if m.sidebarScroll != 0 {
+		t.Errorf("sidebarScroll = %d after over-scrolling up, want 0", m.sidebarScroll)
+	}
+}
+
+// TestSidebarWheel_HorizontalDoesNotMoveTheBody pins the button match. A
+// trackpad (or shift-scroll) emits tea.MouseWheelLeft / tea.MouseWheelRight, and
+// the handler used to pass `msg.Button == tea.MouseWheelUp` as a BOOL — so both
+// horizontal buttons read as "not up" and scrolled the PANES body DOWN by
+// MouseScrollLines. Every other wheel consumer in this package matches the two
+// vertical buttons explicitly and ignores the rest.
+func TestSidebarWheel_HorizontalDoesNotMoveTheBody(t *testing.T) {
+	t.Parallel()
+	for _, btn := range []tea.MouseButton{tea.MouseWheelLeft, tea.MouseWheelRight} {
+		m := newTestModelManyPanes(t, 3, 8)
+		m.width, m.height = 100, 13
+
+		// Park mid-body first: an assertion from offset 0 would also hold for a
+		// handler that scrolled UP on every horizontal notch.
+		updated, _ := m.Update(tea.MouseWheelMsg{X: 5, Y: 5, Button: tea.MouseWheelDown})
+		m = updated.(Model)
+		before := m.sidebarScroll
+		if before == 0 {
+			t.Fatal("fixture must scroll on a vertical notch, or this test cannot fail")
+		}
+
+		updated, _ = m.Update(tea.MouseWheelMsg{X: 5, Y: 5, Button: btn})
+		if after := updated.(Model).sidebarScroll; after != before {
+			t.Errorf("%v over the strip: sidebarScroll %d → %d, want unchanged", btn, before, after)
+		}
+	}
+}
+
+// TestSidebarWheel_HorizontalIsStillSwallowed is the other half of the same
+// branch: refusing to scroll must not let the event fall THROUGH to the pane
+// area, because the pane under the cursor is the sidebar, not a pane. A tracking
+// app would otherwise receive a wheel escape for a notch aimed at the strip.
+//
+// The control fires the same button at a PANE coordinate — only the coordinate
+// differs between the two halves, so the assertion is about the swallow rather
+// than about horizontal buttons being inert everywhere.
+func TestSidebarWheel_HorizontalIsStillSwallowed(t *testing.T) {
+	t.Parallel()
+	fake := newFakeConn()
+	m := newSplitDragTestModel(t)
+	m.client = fake
+	m.sidebarOpen = true
+	m.sidebarWidth = 22
+	m.curTabs()[0].ActivePaneModel().daemonMouseTracking = true
+
+	updated, _ := m.Update(tea.MouseWheelMsg{X: 40, Y: 10, Button: tea.MouseWheelLeft})
+	got := updated.(Model)
+	if fake.sentCount() == 0 {
+		t.Fatal("control: a wheel over the PANE must forward to a tracking app — " +
+			"without it the swallow assertion below is vacuous")
+	}
+	sentBefore := fake.sentCount()
+
+	updated, _ = got.Update(tea.MouseWheelMsg{X: 5, Y: 5, Button: tea.MouseWheelLeft})
+	if after := fake.sentCount(); after != sentBefore {
+		t.Errorf("horizontal wheel over the strip forwarded %d message(s) to the pane beneath",
+			after-sentBefore)
+	}
+}
+
+// TestSidebarWheel_PathologicalScrollLinesCannotJumpToTheTop pins the cap on
+// cfg.UI.MouseScrollLines. The value is a hand-editable config int that nothing
+// downstream bounded, and off+lines OVERFLOWS at the top of the int range —
+// signed overflow WRAPS in Go, so the sum went negative and clamped to 0.
+//
+// It takes two notches, which is why the floor alone never caught it: from
+// offset 0 the sum is exactly MaxInt and clamps to the bottom correctly. The
+// SECOND notch is the one that adds to a non-zero offset, wraps, and throws the
+// strip back to the top — a wheel-DOWN moving the list up. bodyH is the ceiling,
+// since one notch should never move further than its own window.
+func TestSidebarWheel_PathologicalScrollLinesCannotJumpToTheTop(t *testing.T) {
+	t.Parallel()
+	m := newTestModelManyPanes(t, 3, 30)
+	m.width, m.height = 100, 20
+	m.cfg.UI.MouseScrollLines = math.MaxInt
+
+	rows, panesStart := m.sidebarRows(m.projectSidebarWidth())
+	bodyLen, bodyH := sidebarBodyGeometry(rows, panesStart, m.sidebarContentHeight())
+	want := maxSidebarScrollFor(bodyLen, bodyH)
+	if want == 0 {
+		t.Fatal("fixture must overflow the strip")
+	}
+
+	for i := 0; i < 2; i++ {
+		updated, _ := m.Update(tea.MouseWheelMsg{X: 5, Y: 5, Button: tea.MouseWheelDown})
+		m = updated.(Model)
+	}
+	if m.sidebarScroll != want {
+		t.Errorf("sidebarScroll = %d after two wheel-DOWN notches with MouseScrollLines=MaxInt, "+
+			"want the bottom %d (0 means off+lines wrapped negative and clamped to the top)",
+			m.sidebarScroll, want)
+	}
+}
+
+// TestSidebarWheel_ShortStripZeroesTheOffset drives scrollSidebar's degenerate
+// early return through Update's wheel path. When the pinned PROJECTS block alone
+// would leave fewer than minPaneRows for the body, sidebarVisibleRows reverts the
+// WHOLE strip to the old tail cap — there is no window to offset into, so the
+// only correct stored offset is zero. The paint-side fallback is pinned by
+// TestSidebarVisibleRows_ShortStripFallsBackToTailTruncation; this is the writer
+// half, which nothing reached through the real dispatch.
+func TestSidebarWheel_ShortStripZeroesTheOffset(t *testing.T) {
+	t.Parallel()
+	m := newTestModelManyPanes(t, 8, 4)
+	m.width, m.height = 100, 7 // sidebarContentHeight() == 6
+
+	w := m.projectSidebarWidth()
+	rows, panesStart := m.sidebarRows(w)
+	if panesStart <= m.sidebarContentHeight()-minPaneRows || len(rows) <= m.sidebarContentHeight() {
+		t.Fatalf("fixture is not the degenerate strip: panesStart=%d rows=%d height=%d",
+			panesStart, len(rows), m.sidebarContentHeight())
+	}
+
+	m.sidebarScroll = 5 // stale, from a taller terminal
+	updated, _ := m.Update(tea.MouseWheelMsg{X: 5, Y: 3, Button: tea.MouseWheelDown})
+	if got := updated.(Model).sidebarScroll; got != 0 {
+		t.Errorf("sidebarScroll = %d after a notch on the degenerate strip, want 0", got)
+	}
+}
+
+// TestSidebarWheel_ReclampsAStaleOffsetBeforeAddingTheNotch pins the one route
+// into the dead scroll plateau sidebarBodyGeometry's comment names but does not
+// close. m.sidebarScroll is only ever clamped when the wheel moves it, so ANY
+// geometry change between two notches leaves the stored value legitimately past
+// the new maximum — sidebarContentHeight() is m.height-1, so a vertical resize
+// moves bodyH, and closing panes moves bodyLen. The paint is unaffected
+// (sidebarVisibleRows clamps its own local copy, which is the purity rule), so
+// the symptom is not row drift: the next several wheel-up notches subtract from
+// the stale value, clamp straight back to the same visible maximum, and the
+// strip does not move.
+//
+// Adding to a re-clamped offset makes the FIRST notch move the strip, which is
+// what "the bound the user hits is the bound they can see" has to mean.
+func TestSidebarWheel_ReclampsAStaleOffsetBeforeAddingTheNotch(t *testing.T) {
+	t.Parallel()
+	m := newTestModelManyPanes(t, 3, 30)
+	m.width, m.height = 100, 20
+
+	w := m.projectSidebarWidth()
+	rows, panesStart := m.sidebarRows(w)
+	bodyLen, bodyH := sidebarBodyGeometry(rows, panesStart, m.sidebarContentHeight())
+	tallMax := maxSidebarScrollFor(bodyLen, bodyH)
+	if tallMax == 0 {
+		t.Fatal("fixture must overflow the short strip")
+	}
+
+	// Park at the bottom of the SHORT strip.
+	for i := 0; i < 20; i++ {
+		updated, _ := m.Update(tea.MouseWheelMsg{X: 5, Y: 5, Button: tea.MouseWheelDown})
+		m = updated.(Model)
+	}
+	if m.sidebarScroll != tallMax {
+		t.Fatalf("sidebarScroll = %d after scrolling to the bottom, want %d", m.sidebarScroll, tallMax)
+	}
+
+	// Grow the terminal: the window gets taller, so the maximum offset SHRINKS
+	// and the stored value is now stale-high. Nothing re-clamps it.
+	m.height = 30
+	_, shortBodyH := sidebarBodyGeometry(rows, panesStart, m.sidebarContentHeight())
+	shortMax := maxSidebarScrollFor(bodyLen, shortBodyH)
+	if shortMax >= tallMax {
+		t.Fatalf("fixture does not shrink the maximum (%d → %d) — this test cannot fail",
+			tallMax, shortMax)
+	}
+
+	lines := m.cfg.UI.MouseScrollLines
+	if lines < 1 {
+		lines = 3
+	}
+	want := shortMax - lines
+	if want < 0 {
+		want = 0
+	}
+
+	updated, _ := m.Update(tea.MouseWheelMsg{X: 5, Y: 5, Button: tea.MouseWheelUp})
+	m = updated.(Model)
+	if m.sidebarScroll != want {
+		t.Errorf("sidebarScroll = %d after one wheel-up notch at the new geometry, want %d "+
+			"(stale offset %d was clamped to %d and the notch subtracted from the stale value)",
+			m.sidebarScroll, want, tallMax, shortMax)
+	}
+}
+
+// TestScrollSidebarToPane_BringsOffscreenPaneIntoView pins that a pane reached
+// from the palette, a hook jump or pane-history is not left below the cut.
+func TestScrollSidebarToPane_BringsOffscreenPaneIntoView(t *testing.T) {
+	t.Parallel()
+	m := newTestModelManyPanes(t, 3, 12)
+	m.width, m.height = 100, 13
+	w := m.projectSidebarWidth()
+
+	all, panesStart := m.sidebarRows(w)
+	var last string
+	for i := panesStart; i < len(all); i++ {
+		if all[i].kind == sidebarRowPane {
+			last = all[i].paneID
+		}
+	}
+	if last == "" {
+		t.Fatal("fixture must contain pane rows")
+	}
+
+	m.sidebarScroll = 0
+	m.scrollSidebarToPane(last)
+
+	rows := m.sidebarVisibleRows(w, m.sidebarContentHeight())
+	found := false
+	for _, r := range rows {
+		if r.kind == sidebarRowPane && r.paneID == last {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("pane %q still off-screen at offset %d", last, m.sidebarScroll)
+	}
+}
+
+// TestScrollSidebarToPane_AlreadyVisibleIsANoOp pins the guarantee
+// focusSidebarPane depends on: scrolling to a pane the sidebar already shows
+// must not move the strip out from under a click on it.
+//
+// The boundary matters here, not just "some visible pane": at sidebarScroll
+// == 0 only the "N below" marker can show, so the REAL window is bodyH-1 rows
+// — one wider than the bodyH-2 span scrollSidebarToPane uses to pick a NEW
+// offset when a scroll is actually needed. Asserting against the LAST row
+// sidebarVisibleRows actually paints (rather than an arbitrary early one)
+// exercises exactly the row a naive reuse of that conservative span would
+// wrongly judge off-screen.
+func TestScrollSidebarToPane_AlreadyVisibleIsANoOp(t *testing.T) {
+	t.Parallel()
+	m := newTestModelManyPanes(t, 3, 12)
+	m.width, m.height = 100, 13
+	w := m.projectSidebarWidth()
+	height := m.sidebarContentHeight()
+
+	m.sidebarScroll = 0
+	visible := m.sidebarVisibleRows(w, height)
+	var lastVisiblePane string
+	for _, r := range visible {
+		if r.kind == sidebarRowPane {
+			lastVisiblePane = r.paneID
+		}
+	}
+	if lastVisiblePane == "" {
+		t.Fatal("fixture must paint at least one pane row at offset 0")
+	}
+
+	m.scrollSidebarToPane(lastVisiblePane)
+
+	if m.sidebarScroll != 0 {
+		t.Errorf("sidebarScroll = %d after scrolling to already-visible pane %q, want 0 (no-op)",
+			m.sidebarScroll, lastVisiblePane)
 	}
 }

@@ -33,8 +33,11 @@ const (
 	WorkEventStopFinal     // terminal stop (session end) → also clears the outstanding count
 	// WorkEventPark: the agent is blocked waiting on the USER — a permission
 	// prompt or an idle wait. Distinct from WorkEventStop, which means the turn
-	// finished. Both clear the spinner and mark the pane unseen; only Park means
-	// "this needs you", which is what the sidebar's ⚠ renders.
+	// finished. Unlike Stop, this does NOT clear the spinner: the consumer
+	// (internal/tui/workstate.go) sets blockedSince without touching
+	// turnActive, because a permission prompt arrives mid-turn and approving
+	// it fires no hook of its own. Park means "this needs you", which is what
+	// the sidebar's ▲ renders.
 	WorkEventPark
 )
 
@@ -67,13 +70,20 @@ func ClassifyWorkEvent(eventType string) WorkEventKind {
 	case "hook.claude.SubagentStop":
 		return WorkEventSubagentStop
 	// Park-for-input edges: the agent is blocked waiting on the user (permission
-	// prompt, option select, idle-input nudge). There is no "resumed after
-	// approval" hook, so we treat the park as a turn boundary — stop the spinner
-	// and mark the pane unseen to pull attention, same as WorkEventStop, but
-	// tagged distinctly so the sidebar can tell "blocked on you" apart from
-	// "turn finished". Both Claude (Notification fires for permission +
-	// idle-wait; PermissionRequest when available) and opencode (permission.ask)
-	// are covered.
+	// prompt, option select, idle-input nudge). The classification here is
+	// unchanged — what changed is the consumer: internal/tui/workstate.go's
+	// workPark case sets blockedSince WITHOUT clearing turnActive, so a
+	// permission prompt that arrives mid-turn keeps the spinner running across
+	// it (approving a Bash/Edit/Write prompt fires no hook of its own, so the
+	// pane used to read as blocked-not-working until the eventual Stop).
+	// Notification covers both that mid-turn prompt and an idle-wait nudge
+	// (Stop already cleared turnActive by then), which is why one edge handles
+	// both. Tagged distinctly from WorkEventStop so the sidebar can tell
+	// "blocked on you" apart from "turn finished" — a park no longer sets
+	// unseen; tabBlocked + blockedTabStyle carry it to the tab bar instead.
+	// Both Claude (Notification fires for permission + idle-wait;
+	// PermissionRequest when available) and opencode (permission.ask) are
+	// covered.
 	case "hook.claude.Notification", "hook.claude.PermissionRequest",
 		"hook.opencode.permission.ask":
 		return WorkEventPark

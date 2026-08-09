@@ -132,7 +132,10 @@ type sidebarRow struct {
 // project with its aggregate working/blocked counts and link health (active
 // project marked), then the active project's tabs and panes with per-pane
 // agent-state glyphs.
-func (m *Model) sidebarRows(w int) []sidebarRow {
+//
+// The second return value is the index of the first row after the PANES
+// heading — where the pinned block ends and the scrollable body begins.
+func (m *Model) sidebarRows(w int) ([]sidebarRow, int) {
 	rows := []sidebarRow{{text: sidebarHeading("PROJECTS", w)}}
 	for i, p := range m.projects {
 		working, blocked, done := p.counts()
@@ -162,6 +165,10 @@ func (m *Model) sidebarRows(w int) []sidebarRow {
 	}
 
 	rows = append(rows, sidebarRow{}, sidebarRow{text: sidebarHeading("PANES", w)})
+	// Everything from here on is the scrollable body. The builder is the only
+	// thing that knows where the section starts; deriving it later by matching
+	// the heading text would be a second source of truth for one boundary.
+	panesStart := len(rows)
 	// The active tab and the pane inside it that holds focus are marked the
 	// same way the active project is, so one glance answers "where am I"
 	// at all three levels. Only the ACTIVE tab's focused pane is marked:
@@ -183,7 +190,7 @@ func (m *Model) sidebarRows(w int) []sidebarRow {
 		if ti > 0 {
 			rows = append(rows, sidebarRow{})
 		}
-		rows = append(rows, sidebarRow{text: sidebarTabHeading(sanitizeRemoteText(tab.Name), onTab, w)})
+		rows = append(rows, sidebarRow{text: sidebarTabHeading(sanitizeRemoteText(tab.Name), ti, onTab, tab.Color, w)})
 		for _, pane := range tab.Leaves() {
 			rows = append(rows, sidebarRow{
 				text:   paneRow(pane, onTab && pane.ID == tab.ActivePane, w),
@@ -203,7 +210,7 @@ func (m *Model) sidebarRows(w int) []sidebarRow {
 			}
 		}
 	}
-	return rows
+	return rows, panesStart
 }
 
 // renderSidebar renders the project sidebar. height is the number of screen
@@ -236,8 +243,69 @@ func (m *Model) renderSidebar(height int) string {
 	// padded to exactly w CELLS (padOrTrunc). It must never have anything
 	// left to do horizontally: .Width WRAPS an over-wide line onto a new
 	// one rather than truncating it, which would shift every row below it
-	// while sidebarRowAt still maps screen row y to rows[y-1].
+	// while sidebarRowAt still maps screen row y to rows[y].
 	return lipgloss.NewStyle().Width(w).Height(height).Render(content)
+}
+
+// minPaneRows is the floor of PANES rows sidebarVisibleRows will leave. When
+// the pinned PROJECTS block alone would push the body below it, the whole strip
+// reverts to the pre-scroll tail cap: a strip showing eight projects and no
+// panes is worse than one showing a truncated list of both.
+const minPaneRows = 3
+
+// maxSidebarScrollFor is the largest offset that still paints content. One row
+// of the window goes to the "N above" marker as soon as the body is scrolled at
+// all, so the last page holds bodyH-1 rows.
+func maxSidebarScrollFor(bodyLen, bodyH int) int {
+	if bodyH <= 1 || bodyLen <= bodyH {
+		return 0
+	}
+	// Provably positive here: the guard above already rules out bodyLen <=
+	// bodyH, so bodyLen-(bodyH-1) is at least 2. Kept rather than inlined so
+	// the property stays checked if the guard above is ever loosened.
+	if limit := bodyLen - (bodyH - 1); limit > 0 {
+		return limit
+	}
+	return 0
+}
+
+// sidebarBodyGeometry derives the scrollable PANES body's length and window
+// height from an already-built row list, its panesStart boundary, and the
+// render height — the one place that arithmetic is written. sidebarVisibleRows
+// and scrollSidebar both call it with the SAME (rows, panesStart) pair their
+// own m.sidebarRows(w) call already produced, so a second, hand-derived copy
+// (as scrollSidebar's first draft had) can never drift from the one the paint
+// windows against — that drift would clamp a wheel notch against a bound the
+// user cannot see, a dead-feeling scroll plateau rather than row drift, since
+// the paint still re-clamps every render.
+func sidebarBodyGeometry(rows []sidebarRow, panesStart, height int) (bodyLen, bodyH int) {
+	return len(rows) - panesStart, height - panesStart
+}
+
+// sidebarBodyWindowed reports whether the PANES body is windowed at this
+// height — i.e. whether an offset means anything at all. It is false both when
+// the whole list fits and when the pinned PROJECTS head would leave the body
+// below minPaneRows, because the degenerate strip reverts to the old tail cap
+// and has no window to offset into.
+//
+// One definition for the same reason sidebarBodyGeometry has one: the paint and
+// both writers ask this question, and a copy that drifts is invisible — the
+// paint stays correct while the writers clamp against a different regime.
+func sidebarBodyWindowed(rows []sidebarRow, panesStart, height int) bool {
+	return height > 0 && len(rows) > height && panesStart <= height-minPaneRows
+}
+
+// clampSidebarScroll bounds an offset into a body of bodyLen rows shown through
+// a bodyH-row window. Pure — callers that own the stored offset write it back
+// themselves.
+func clampSidebarScroll(off, bodyLen, bodyH int) int {
+	if off < 0 {
+		return 0
+	}
+	if max := maxSidebarScrollFor(bodyLen, bodyH); off > max {
+		return max
+	}
+	return off
 }
 
 // sidebarVisibleRows caps sidebarRows to the rows that actually fit in
@@ -248,21 +316,190 @@ func (m *Model) renderSidebar(height int) string {
 // NotificationCenter.View computes its own maxVisible rather than trusting
 // .Height. minWidthForSidebar gates columns only.
 //
-// The TAIL is what gets dropped, and the last visible row becomes an
-// explicit overflow marker rather than silently ending: the PROJECTS block
-// is the navigation the sidebar exists for, and trimming from the top would
-// shift every remaining row while sidebarRowAt still indexes rows[y-1].
+// The PROJECTS block is PINNED and the PANES body windows at m.sidebarScroll:
+// that block is the navigation the sidebar exists for, and scrolling it away
+// would leave a user with many panes unable to reach another project at all.
+// Overflow on either side of the window is marked, so a body that continues
+// past the strip never just stops.
 //
-// Both the paint and the hit test call this, with the same height — a cap
-// applied in only one of them is the row-drift bug in another form.
+// The offset is clamped from a LOCAL copy and nothing here writes model state.
+// This runs on the render path, and a render that mutates is how a paint and a
+// hit test come to disagree; scrollSidebar owns the stored value.
+//
+// Both the paint and the hit test call this, with the same height — a cap or an
+// offset applied in only one of them is the row-drift bug in another form.
 func (m *Model) sidebarVisibleRows(w, height int) []sidebarRow {
-	rows := m.sidebarRows(w)
+	rows, panesStart := m.sidebarRows(w)
 	if height <= 0 || len(rows) <= height {
 		return rows
 	}
-	rows = rows[:height]
-	rows[height-1] = sidebarRow{text: sidebarDimStyle.Render(padOrTrunc(" …", w))}
-	return rows
+	head, body := rows[:panesStart], rows[panesStart:]
+
+	// Degenerate strip: the pinned head alone would starve the body. Fall back
+	// to the pre-scroll behaviour for the WHOLE list — the tail is dropped and
+	// the last row says so. Asked through the same helper the two writers use;
+	// the height and length halves of it are already known true here.
+	if !sidebarBodyWindowed(rows, panesStart, height) {
+		out := append([]sidebarRow(nil), rows[:height]...)
+		out[height-1] = sidebarRow{text: sidebarDimStyle.Render(padOrTrunc(" …", w))}
+		return out
+	}
+
+	_, bodyH := sidebarBodyGeometry(rows, panesStart, height)
+	off := clampSidebarScroll(m.sidebarScroll, len(body), bodyH)
+
+	// Markers cost a row each and appear only on the side that has more. They
+	// carry no kind, so sidebarHit treats them as inert chrome.
+	avail := bodyH
+	top := off > 0
+	if top {
+		avail--
+	}
+	bottom := off+avail < len(body)
+	if bottom {
+		avail--
+	}
+	// Provably unreachable, like maxSidebarScrollFor's own limit>0 above: the
+	// branch above this point only runs when panesStart <= height-minPaneRows,
+	// so bodyH >= minPaneRows (3) and at most two of those rows go to markers
+	// — avail cannot fall below 1. Kept as an explicit totality check rather
+	// than trusted-by-construction, for the same reason the other two are.
+	if avail < 0 {
+		avail = 0
+	}
+	end := off + avail
+	// Also provably unreachable: off is clamped to maxSidebarScrollFor(len(body),
+	// bodyH), and avail is derived so off+avail never outruns len(body) — the
+	// "bottom" test above IS that derivation. A third totality guard on the
+	// same property, not a second independent bound.
+	if end > len(body) {
+		end = len(body)
+	}
+
+	out := make([]sidebarRow, 0, height)
+	out = append(out, head...)
+	if top {
+		out = append(out, sidebarRow{text: sidebarDimStyle.Render(
+			padOrTrunc(fmt.Sprintf(" %s %d above", glyphMore, off), w))})
+	}
+	out = append(out, body[off:end]...)
+	if bottom {
+		out = append(out, sidebarRow{text: sidebarDimStyle.Render(
+			padOrTrunc(fmt.Sprintf(" %s %d below", glyphMore, len(body)-end), w))})
+	}
+	return out
+}
+
+// scrollSidebar moves the PANES section by one wheel notch. It owns the write
+// to m.sidebarScroll — sidebarVisibleRows only ever clamps a local copy — and
+// re-derives the body geometry from the same sidebarRows/height pair the paint
+// uses via sidebarBodyGeometry, so the bound the user hits is the bound they
+// can see.
+func (m *Model) scrollSidebar(up bool) {
+	w := m.projectSidebarWidth()
+	if w <= 0 {
+		return
+	}
+	height := m.sidebarContentHeight()
+	rows, panesStart := m.sidebarRows(w)
+	// Nothing to scroll, or the degenerate short strip that reverts to the
+	// tail cap: in both cases the only correct offset is zero.
+	if !sidebarBodyWindowed(rows, panesStart, height) {
+		m.sidebarScroll = 0
+		return
+	}
+	bodyLen, bodyH := sidebarBodyGeometry(rows, panesStart, height)
+	lines := m.cfg.UI.MouseScrollLines
+	// Floored AND capped. The value is a hand-editable config int, and nothing
+	// downstream bounds it: off+lines overflows at the top of the int range, and
+	// the negative sum then clamps to 0 — a wheel-DOWN notch that jumps the
+	// strip to the top. bodyH is the natural ceiling anyway, since one notch
+	// should never move further than the window it moves within (and bodyH >=
+	// minPaneRows here, so a sane config is untouched).
+	if lines < 1 {
+		lines = 3
+	} else if lines > bodyH {
+		lines = bodyH
+	}
+	if up {
+		lines = -lines
+	}
+	// The STORED offset is re-clamped before the notch is added to it, not just
+	// after. Nothing clamps it when the geometry changes underneath — the paint
+	// clamps a local copy, deliberately — so a vertical resize (bodyH moves with
+	// sidebarContentHeight) or a closed pane (bodyLen) legitimately leaves it
+	// past the current maximum. Adding to the stale value there clamps straight
+	// back to the same visible maximum for as many notches as it is stale by:
+	// the wheel does nothing while the strip is already showing the bound it is
+	// being pushed against. That is the dead scroll plateau sidebarBodyGeometry
+	// exists to prevent, reached by a route the shared geometry cannot cover.
+	off := clampSidebarScroll(m.sidebarScroll, bodyLen, bodyH)
+	m.sidebarScroll = clampSidebarScroll(off+lines, bodyLen, bodyH)
+}
+
+// scrollSidebarToPane moves the PANES section the minimum distance that brings
+// paneID's row into the visible window, and does nothing when it is already
+// there. The visible span used to pick a NEW offset is computed as bodyH-2 —
+// the worst case, both markers present — so the target can never land
+// underneath one.
+func (m *Model) scrollSidebarToPane(paneID string) {
+	if paneID == "" {
+		return
+	}
+	w := m.projectSidebarWidth()
+	if w <= 0 {
+		return
+	}
+	height := m.sidebarContentHeight()
+	rows, panesStart := m.sidebarRows(w)
+	if !sidebarBodyWindowed(rows, panesStart, height) {
+		m.sidebarScroll = 0
+		return
+	}
+	// Already on screen under the CURRENT offset: nothing to do, checked
+	// against the REAL painted window rather than the conservative one below.
+	// The two differ by a row exactly when only one marker is showing (real
+	// avail is bodyH-1, one more than bodyH-2) — a caller whose paneID is the
+	// last visible row in that state would otherwise be scrolled off a click
+	// on a row the paint already shows. sidebarVisibleRows is pure, so this
+	// costs a second row-list build and writes nothing.
+	for _, r := range m.sidebarVisibleRows(w, height) {
+		if r.kind == sidebarRowPane && r.paneID == paneID {
+			return
+		}
+	}
+	idx := -1
+	for i := panesStart; i < len(rows); i++ {
+		if rows[i].kind == sidebarRowPane && rows[i].paneID == paneID {
+			idx = i - panesStart
+			break
+		}
+	}
+	if idx < 0 {
+		return
+	}
+	bodyLen, bodyH := sidebarBodyGeometry(rows, panesStart, height)
+	visible := bodyH - 2
+	if visible < 1 {
+		visible = 1
+	}
+	// Re-clamped before the arithmetic, exactly as scrollSidebar does and for
+	// the reason its comment gives: nothing bounds the stored value when the
+	// geometry moves underneath, so it can legitimately be past the current
+	// maximum. Today the two branches below happen to be safe against a
+	// stale-high offset — the idx >= off+visible branch is unreachable and the
+	// other assigns before clamping — but that is a proof standing next to a
+	// function whose comment says not to rely on one, and the early
+	// already-visible check above already runs against the CLAMPED painted
+	// window. Same input, same reading.
+	off := clampSidebarScroll(m.sidebarScroll, bodyLen, bodyH)
+	switch {
+	case idx < off:
+		off = idx
+	case idx >= off+visible:
+		off = idx - visible + 1
+	}
+	m.sidebarScroll = clampSidebarScroll(off, bodyLen, bodyH)
 }
 
 // sidebarRowAt resolves the project-sidebar row under a SCREEN coordinate.
@@ -410,6 +647,13 @@ const (
 	glyphWorking = "◐" // turn in flight
 	glyphDone    = "✓" // finished while you were away
 	glyphIdle    = "○" // nothing happening
+	glyphPinned  = "◆" // attention pinned by hand — never auto-cleared
+	// glyphMore marks rows the PANES window is hiding above or below itself.
+	// U+22EF is already what paneRow uses for the subagent count, so it is
+	// proven against the rule this block states. Deliberately NOT ▲/▼: ▲ is
+	// glyphBlocked, and a scroll marker wearing the blocked glyph is exactly
+	// the state-vocabulary confusion the rest of this file exists to remove.
+	glyphMore = "⋯" // more rows in this direction (U+22EF)
 )
 
 // sidebarHeadingStyle / sidebarDimStyle / the state-glyph styles mirror the
@@ -419,11 +663,13 @@ const (
 var (
 	sidebarHeadingStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("244"))
 	sidebarDimStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
+	sidebarTabNameStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("255"))
 	sidebarActiveStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("230"))
 	sidebarProjectStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("250"))
 	sidebarBlockedStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
 	sidebarWorkingStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
 	sidebarUnseenStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("28"))
+	sidebarPinnedStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("141"))
 	sidebarGitStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
 	sidebarGitStaleStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Italic(true)
 )
@@ -546,14 +792,46 @@ func sidebarHeading(title string, w int) string {
 // sidebarTabHeading renders one tab's name above its panes. The active tab
 // carries the same ▸ marker as the active project, in the same column, so the
 // two read as one vocabulary rather than two conventions.
-func sidebarTabHeading(name string, active bool, w int) string {
+//
+// White by default rather than dim: the heading shared sidebarDimStyle with an
+// idle pane row, which made a tab heading indistinguishable from the panes
+// under it. A user-chosen tab colour is applied as the FOREGROUND here — the
+// tab bar uses the same value as a background, but a 22-column strip painting
+// full-width colour blocks reads as noise rather than grouping.
+//
+// The 1-based ordinal matches the tab bar's "%d:%s" and the Alt+1..9 keys, and
+// is placed before the name so a narrow strip elides the name and keeps the
+// number.
+//
+// That promise is kept by the BUDGET ORDER rather than by the layout order.
+// Summing marker + ordinal + name and letting one closing truncateCells
+// arbitrate cut the ORDINAL instead, because the name's floor could push the
+// line past w: a double-digit index spends three cells, so at w=4 "  10:name"
+// came out "  10" — the colon gone, and at w=3 a digit with it. The ordinal is
+// budgeted first, the marker takes what is left (levels cannot line up at a
+// width where nothing else fits either), and the name — the one part a user can
+// re-read from the tab bar — gives way first.
+func sidebarTabHeading(name string, idx int, active bool, color string, w int) string {
 	marker := "  "
-	style := sidebarDimStyle
+	style := sidebarTabNameStyle
+	if color != "" {
+		style = lipgloss.NewStyle().Foreground(lipgloss.Color(color))
+	}
 	if active {
 		marker = "▸ "
 		style = sidebarActiveStyle
+		if color != "" {
+			style = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(color))
+		}
 	}
-	return style.Render(truncateCells(marker+name, w))
+	ordinal := truncateCells(fmt.Sprintf("%d:", idx+1), w)
+	marker = truncateCells(marker, w-lipgloss.Width(ordinal))
+	avail := w - lipgloss.Width(marker) - lipgloss.Width(ordinal)
+	// padOrTrunc, not truncateCells: every row this file hands the paint is
+	// exactly w cells, and a heading that stopped short left the closing
+	// .Width(w) to pad it — one more thing that pass has to get right on a row
+	// whose arithmetic already has to be exact.
+	return style.Render(padOrTrunc(marker+ordinal+elideMiddle(name, avail), w))
 }
 
 // projectRow renders one project's summary line: an active-project marker,
@@ -604,21 +882,35 @@ func projectRow(name string, working, blocked, done int, link string, active boo
 
 // paneRow renders one pane's agent state: ◐ working (with ⋯N outstanding
 // subagents when any are running), ▲ blocked-on-user (with the hook-reported
-// tool name when present — never invented when blockedReason is empty), ✓
-// done and unseen, ○ idle. Every remote-sourced string (the pane's name/ID,
-// the blocked reason) is sanitized here since this is a render path a
+// tool name when present — never invented when blockedReason is empty), ◆
+// pinned attention (outranked only by blocked/working, which then keep it as a
+// trailing ◆ suffix so a pin never goes dark under a transient state), ✓ done
+// and unseen, ○ idle. Every remote-sourced string (the pane's name/ID, the
+// blocked reason) is sanitized here since this is a render path a
 // remote-attached daemon's data reaches directly.
-// paneRow renders one pane's agent state. `focused` marks the pane the user
-// is actually typing into — with the ▸ marker rather than a colour, because
-// the row's colour already carries the pane's STATE (blocked, working, unseen)
-// and that is the more urgent signal of the two. A blocked pane must stay
-// visibly blocked whether or not it happens to be focused.
+//
+// `focused` marks the pane the user is actually typing into — with the ▸
+// marker rather than a colour, because the row's colour already carries the
+// pane's STATE (working, unseen, pinned) and that is the more urgent signal of
+// the two.
+//
+// `focused` ALSO suppresses the blocked presentation, and that is the one place
+// this row does more than report state. The blocked mark is deliberately NOT
+// cleared when the user focuses the pane (ackFocusedPane, workstate.go, states
+// why: it runs on every message including a spinner tick, so clearing there
+// destroyed the mark before it could ever be seen). Keeping the state and
+// dropping the glyph is what "you are looking straight at the prompt" costs —
+// while tabBlocked, counts() and the attention queue keep reading the same
+// blockedSince, so the tab stays amber, the project badge keeps counting it and
+// the queue keeps offering it. Leaving the pane restores the ▲ by itself. An
+// UNFOCUSED pane is blocked-visible always: that is the signal the whole
+// feature exists for.
 func paneRow(pane *PaneModel, focused bool, w int) string {
 	var glyph string
 	var style lipgloss.Style
 	var suffix string
 	switch {
-	case !pane.blockedSince.IsZero():
+	case !pane.blockedSince.IsZero() && !focused:
 		glyph, style = glyphBlocked, sidebarBlockedStyle
 		if pane.blockedReason != "" {
 			suffix = " " + sanitizeRemoteText(pane.blockedReason)
@@ -636,10 +928,19 @@ func paneRow(pane *PaneModel, focused bool, w int) string {
 			}
 			suffix = fmt.Sprintf(" ⋯%d%s", n, mark)
 		}
+	case pane.pinnedAttention:
+		glyph, style = glyphPinned, sidebarPinnedStyle
 	case pane.unseen:
 		glyph, style = glyphDone, sidebarUnseenStyle
 	default:
 		glyph, style = glyphIdle, sidebarDimStyle
+	}
+
+	// A pin outranked by a live state must still be visible — it is the mark
+	// that deliberately survives focus, so losing it to a transient blocked or
+	// working state would make "don't let me forget" forgettable.
+	if pane.pinnedAttention && glyph != glyphPinned {
+		suffix += " " + glyphPinned
 	}
 
 	label := pane.Name
@@ -686,7 +987,7 @@ func paneRow(pane *PaneModel, focused bool, w int) string {
 // padding therefore produced rows of w runes and MORE than w cells, and
 // renderSidebar's closing .Width(w) WRAPS the excess onto a new painted
 // line instead of truncating it. That shifts every row below it down by one
-// while sidebarRowAt still maps screen row y to rows[y-1] — the user clicks
+// while sidebarRowAt still maps screen row y to rows[y] — the user clicks
 // project 3 and selects project 2.
 //
 // A wide glyph that would straddle the boundary is dropped whole (padOrTrunc
@@ -740,7 +1041,7 @@ func truncateCells(s string, w int) string {
 	// budget it was handed (truncateCells("x⚠️", 2) was three cells).
 	// renderSidebar's closing .Width(w) WRAPS that excess onto a new painted
 	// line rather than cutting it, shifting every row below while
-	// sidebarRowAt still maps screen row y to rows[y-1] — the user clicks
+	// sidebarRowAt still maps screen row y to rows[y] — the user clicks
 	// project 3 and selects project 2.
 	//
 	// Reachable without any emoji in quil's own strings: sanitizeRemoteText

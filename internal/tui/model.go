@@ -552,8 +552,14 @@ type Model struct {
 	// what gets painted. A screen property, not a session one — loaded from
 	// UIConfig at startup (NewModel), never workspace.json, so a workspace saved
 	// with it open can't fight a narrower terminal on restore.
-	sidebarOpen       bool
-	sidebarWidth      int
+	sidebarOpen  bool
+	sidebarWidth int
+	// sidebarScroll is the PANES section's scroll offset in rows. The PROJECTS
+	// block is pinned and never scrolls. Written only by scrollSidebar /
+	// scrollSidebarToPane; sidebarVisibleRows clamps a local copy, because it
+	// runs on the render path and a render that writes model state is how a
+	// paint and a hit test come to disagree.
+	sidebarScroll     int
 	notesMode         bool         // true when pane notes editor is open for the active pane
 	notesEditor       *NotesEditor // active notes editor (nil when notesMode is false)
 	notesPaneFocused  bool         // true when keyboard input goes to the bound pane (PTY) instead of the notes editor
@@ -1185,20 +1191,70 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.projectSidebarSwallowsMouse(msg.X, msg.Y) {
 			m.clearDragState()
+			var cmd tea.Cmd
 			switch msg.Button {
 			case tea.MouseLeft:
 				if kind, idx := m.sidebarHit(msg.X, msg.Y); kind != "" {
 					return m.activateSidebarRow(kind, idx)
 				}
 			case tea.MouseRight:
-				// Rename/Destroy for a project row (Task 13) — the pane
-				// context menu below never reaches here, the sidebar swallow
-				// returns first, so a project needs its own open call.
-				if kind, idx := m.sidebarHit(msg.X, msg.Y); kind == sidebarRowProject && idx >= 0 && idx < len(m.projects) {
-					m.openProjectCtxMenu(m.projects[idx], msg.X, msg.Y)
+				// Rename/Destroy for a project row, and the pane menu for a
+				// pane row. The pane context menu further down never reaches
+				// here — the sidebar swallow returns first — so both kinds
+				// need their own open call.
+				switch kind, idx := m.sidebarHit(msg.X, msg.Y); kind {
+				case sidebarRowProject:
+					if idx >= 0 && idx < len(m.projects) {
+						m.openProjectCtxMenu(m.projects[idx], msg.X, msg.Y)
+					}
+				case sidebarRowPane:
+					// Right-click FOCUSES the pane first, exactly like
+					// left-click (activateSidebarRow → focusSidebarPane) —
+					// reversing an earlier "does not move focus" decision.
+					// Required, not cosmetic: eight of the ten dispatched
+					// menu items (Rename, Restart, Close, Mute, Notes, Focus,
+					// Lazygit, History) are shared with the keybinding and
+					// command-palette paths and resolve their target through
+					// the ACTIVE tab's ACTIVE pane internally. Widening all
+					// eight handlers to accept an explicit target pane was
+					// the larger risk (it would touch every other caller
+					// too); focusing first satisfies their existing contract
+					// instead. The updated Model — and its switchTab IPC
+					// cmd, when the pane's tab was not already active — must
+					// carry forward, or the daemon never learns the tab
+					// changed.
+					//
+					// The row is resolved BEFORE the focus, from the model
+					// the click was hit-tested against. Resolving it after
+					// was correct too — sidebarRows' order, index and
+					// tabIdx are all independent of which tab is active,
+					// and focusSidebarPane's scroll is a no-op for a row
+					// that is on screen by definition — but that is two
+					// separate arguments about a strip that moves, both
+					// load-bearing for a menu that then acts on the pane
+					// it names. Reading it once removes the question.
+					row, rowOK := m.sidebarRowAt(msg.X, msg.Y)
+					updated, focusCmd := m.activateSidebarRow(sidebarRowPane, idx)
+					// Comma-ok, not a bare assertion: activateSidebarRow is
+					// typed tea.Model, which is the signature that invites
+					// someone to return something else — and a failed assertion
+					// here PANICS inside the Update loop. Degrading to "no focus
+					// change" keeps the menu open on the row that was clicked.
+					if next, ok := updated.(Model); ok {
+						m = next
+					}
+					cmd = focusCmd
+					// findPaneAndTab spans every project and PaneModel is
+					// a pointer, so a pre-focus id resolves to the same
+					// pane on the updated model.
+					if rowOK && row.paneID != "" {
+						if pane, _, _ := m.findPaneAndTab(row.paneID); pane != nil {
+							m.openCtxMenu(pane, msg.X, msg.Y)
+						}
+					}
 				}
 			}
-			return m, nil
+			return m, cmd
 		}
 		// Right-click: copy the active selection to the clipboard. While
 		// notes mode is on, the editor's selection takes priority.
@@ -1473,9 +1529,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.sidebarSwallowsMouse(msg.X, msg.Y) {
 			return m, nil
 		}
-		// Same for the project sidebar's reserved column — the pane it
-		// would scroll is not the one under the cursor.
+		// The project sidebar's reserved column scrolls its own PANES section;
+		// the pane the wheel would otherwise scroll is not the one under the
+		// cursor.
 		if m.projectSidebarSwallowsMouse(msg.X, msg.Y) {
+			// The two vertical buttons are matched EXPLICITLY, as every other
+			// wheel consumer in this package does. tea.MouseWheelMsg also
+			// carries MouseWheelLeft/Right (a trackpad or shift-scroll emits
+			// them), and collapsing the button to `== MouseWheelUp` made both
+			// of those read as "not up" and scrolled the body DOWN. The swallow
+			// stays OUTSIDE the switch: a horizontal notch aimed at the strip
+			// must not fall through to the pane area either.
+			switch msg.Button {
+			case tea.MouseWheelUp:
+				m.scrollSidebar(true)
+			case tea.MouseWheelDown:
+				m.scrollSidebar(false)
+			}
 			return m, nil
 		}
 		lines := m.cfg.UI.MouseScrollLines
@@ -3601,6 +3671,9 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if tab := m.activeTabModel(); tab != nil {
 			if pane := tab.ActivePaneModel(); pane != nil {
 				pane.ResetScroll()
+				// A typed key is the answer a parked pane was waiting for;
+				// approving a permission prompt fires no hook of its own.
+				pane.answerBlockedByInput()
 			}
 		}
 		return m, m.forwardInputBytes(data)
@@ -3787,6 +3860,10 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if tab := m.activeTabModel(); tab != nil {
 			if pane := tab.ActivePaneModel(); pane != nil {
 				pane.ResetScroll()
+				// Same trigger as the scroll reset above — the user acted on
+				// this pane — and the answer a parked pane never otherwise
+				// hears, since approving a prompt emits no hook.
+				pane.answerBlockedByInput()
 			}
 		}
 		return m, m.forwardInputBytes(data)
@@ -4660,14 +4737,27 @@ func (m Model) tabLabel(idx int) string {
 	return name
 }
 
-// tabStyle returns the lipgloss style for the tab at idx. Precedence: green
-// unseen mark (background tab with an unfocused finished pane, OR a tab
-// containing a pane pinned for attention via the context menu) > custom tab
-// color > active/inactive default. Shared by renderTabBar and hitTestTab so
-// rendered widths and click hit-testing never diverge.
+// tabStyle returns the lipgloss style for the tab at idx. Precedence: amber
+// blocked mark (a pane parked on the user) > green unseen mark (background tab
+// with an unfocused finished pane, OR a tab containing a pane pinned for
+// attention via the context menu) > custom tab color > active/inactive default.
+// Shared by renderTabBar and hitTestTab so rendered widths and click
+// hit-testing never diverge.
 func (m Model) tabStyle(idx int) lipgloss.Style {
 	tab := m.curTabs()[idx]
 	active := idx == m.activeTabIdx()
+	// Blocked first: a parked agent is a question waiting on the user, and it
+	// includes the ACTIVE tab because the pane may be in an unfocused split.
+	// Amber replaces the background outright, which is the ONE thing active and
+	// inactive differ by — so the active tab needs its own variant, or two
+	// parked tabs (the case this exists for) leave the bar unable to say which
+	// one you are on. Same width by construction; see blockedActiveTabStyle.
+	if m.tabBlocked(idx) {
+		if active {
+			return blockedActiveTabStyle
+		}
+		return blockedTabStyle
+	}
 	// tabUnseen self-excludes the active tab; tabPinnedAttention deliberately
 	// does not (a pin colors the active tab's label unless the pinned pane is
 	// the one in focus).
@@ -6428,6 +6518,9 @@ func (m Model) sendClipboardToPane(text string) {
 	if pane == nil {
 		return
 	}
+	// Pasted text is the user acting on the pane, so it answers a parked one
+	// exactly as a typed key does.
+	pane.answerBlockedByInput()
 	m.enqueueInput(pane.ID, pastePayload(pane, text))
 }
 
@@ -6449,6 +6542,10 @@ func (m Model) sendClipboardToPaneID(paneID, text string) {
 		logger.Debug("paste: pane %s vanished during the clipboard read — dropping", paneID)
 		return
 	}
+	// The target was bound when the user asked to paste, so it need not be the
+	// active pane any more — which is exactly why the answer is keyed to input
+	// reaching a pane rather than to which pane holds focus.
+	pane.answerBlockedByInput()
 	m.enqueueInput(paneID, pastePayload(pane, text))
 }
 

@@ -36,7 +36,7 @@ const (
 	workSubagentStart = hookevents.WorkEventSubagentStart // subagent spawned → spinner on
 	workSubagentStop  = hookevents.WorkEventSubagentStop  // subagent finished → spinner off once drained AND turn over
 	workStopFinal     = hookevents.WorkEventStopFinal     // terminal stop → also clears the outstanding count
-	workPark          = hookevents.WorkEventPark          // agent blocked on the user (permission/idle) → same spinner/unseen handling as workStop, plus blockedSince/blockedReason
+	workPark          = hookevents.WorkEventPark          // agent blocked on the user (permission/idle) → stamps blockedSince/blockedReason; does NOT clear turnActive (see the workPark case)
 )
 
 // workEventKind maps a PaneEvent Type (the daemon encodes hook events as
@@ -94,6 +94,16 @@ func (m *Model) jumpToPane(paneID string) bool {
 	}
 	for i, p := range m.projects {
 		if p == proj {
+			// Mirrors switchProject's own guard: the sidebar scroll offset is
+			// a property of "what am I looking at", so a jump that crosses a
+			// project boundary starts the incoming project's PANES body at
+			// the top — but a same-project jump (e.g. pane-history back
+			// within the project the user is already viewing) must not
+			// throw away where they had scrolled to for no reason tied to
+			// the jump itself.
+			if i != m.activeProject {
+				m.sidebarScroll = 0
+			}
 			m.activeProject = i
 			break
 		}
@@ -104,6 +114,10 @@ func (m *Model) jumpToPane(paneID string) bool {
 	// so every later unstamped send has a new right answer.
 	m.syncActiveDest()
 	m.notifyTabSwitch(proj.tabs[tabIdx])
+	// Runs AFTER the project-boundary reset above: that reset zeroes
+	// sidebarScroll outright, so computing the target offset before it would
+	// have this call's work thrown away on every cross-project jump.
+	m.scrollSidebarToPane(paneID)
 	return true
 }
 
@@ -135,10 +149,17 @@ func (m *Model) notifyTabSwitch(tab *TabModel) {
 }
 
 // applyWorkTransition updates the working state of the pane identified by
-// paneID based on the event type. On a normal completion or park, any pane
-// that is not the focused pane of the active tab gets a persistent unseen
-// mark — green border + derived green tab label — cleared when the user
-// focuses the pane (ackFocusedPane at Update entry). There is no timer.
+// paneID based on the event type. On a normal completion, any pane that is not
+// the focused pane of the active tab gets a persistent unseen mark — green
+// border + derived green tab label — cleared when the user focuses the pane
+// (ackFocusedPane at Update entry). There is no timer.
+//
+// A PARK is deliberately not one of those completions. workPark keeps
+// turnActive, so `working` does not fall and the falling edge below never
+// fires — no unseen mark is set for a parked pane, whether it is focused or
+// not. tabBlocked (read by tabStyle, model.go) is what carries a parked
+// BACKGROUND pane to the tab bar instead, deriving from blockedSince rather
+// than from unseen; the two must not be separated.
 //
 // `working` is DERIVED — recomputed at a single point below as
 // turnActive || len(subagents) > 0 || subagentsOverflow — never assigned by
@@ -280,10 +301,18 @@ func (m *Model) applyWorkTransition(paneID, eventType string, data map[string]st
 			pane.subagentsOverflow = false
 		}
 	case workPark:
-		// Blocked waiting on the user — handled exactly like workStop for
-		// the derived `working` recomputation and the unseen mark below;
-		// only the blocked fields differ.
-		pane.turnActive = false
+		// Blocked waiting on the user. This deliberately does NOT clear
+		// turnActive. Notification covers two situations: a permission prompt
+		// (turn still running) and an idle-wait nudge (Stop already cleared
+		// turnActive), so clearing it here was a no-op exactly when it was
+		// right and wrong exactly when it was not — approving a Bash/Edit/Write
+		// prompt fires no hook of its own, so the pane read as blocked-not-
+		// working until the turn's Stop, sometimes for minutes.
+		//
+		// Consequence: `working` no longer falls here, so the falling edge
+		// below does not set `unseen`. tabBlocked (model.go tabStyle) is what
+		// carries a parked background pane to the tab bar instead — the two
+		// must not be separated.
 		pane.blockedSince = time.Now()
 		// Data["tool"] is set by the claude hook only for PermissionRequest
 		// and PostToolUse. Notification and opencode's permission.ask may
@@ -338,15 +367,32 @@ func coalescedCount(data map[string]string) int {
 	return n
 }
 
-// ackFocusedPane clears the unseen mark on the focused pane of the active
-// tab, called once at the top of Update. Correctness does not depend on a
-// render having happened between messages (the renderer coalesces frames):
-// a focused pane never renders the mark anyway — tabUnseen excludes the
-// active tab and the pane border gives the active style precedence — and
-// focusing the pane is itself the acknowledgement. This single choke point
-// replaces auditing every ActivePane/activeTab assignment (13 call sites);
-// a newly focused pane is acknowledged on the next message (the 1 s size
-// poll bounds the wait). Unfocused panes keep their mark until focused.
+// ackFocusedPane clears the unseen mark on the focused pane of the active tab,
+// called once at the top of Update. Correctness does not depend on a render
+// having happened between messages (the renderer coalesces frames): a focused
+// pane never renders the mark anyway — tabUnseen excludes the active tab and
+// the pane border gives the active style precedence — and focusing the pane is
+// itself the acknowledgement. This single choke point replaces auditing every
+// ActivePane/activeTab assignment (13 call sites); a newly focused pane is
+// acknowledged on the next message (the 1 s size poll bounds the wait).
+// Unfocused panes keep their mark until focused.
+//
+// `unseen` is the ONLY mark this clears, and the two it leaves alone are left
+// alone for the same reason. blockedSince/blockedReason are a fact about the
+// AGENT — it is still waiting whether or not anyone is looking — while `unseen`
+// is a "you missed something" flag that looking genuinely answers. Clearing the
+// blocked mark here was tried and reversed: this runs for EVERY message,
+// including the shared 100 ms workSpinnerTickMsg that is guaranteed to be
+// ticking because the pane is working, so a pane parked while it held focus had
+// its mark set and dropped ~100 ms later — the ▲, the amber tab, the project
+// badge's blocked count and the attention-queue entry were none of them ever
+// observable, in the commonest park there is (the agent asks for permission
+// while you are sitting in its pane), and with workPark keeping turnActive the
+// pane went on claiming to be working the whole time it waited. paneRow
+// suppresses the blocked PRESENTATION for the focused pane instead, so leaving
+// the pane restores every signal with no hook edge required. pinnedAttention is
+// untouched for its own reason — only ctxActAttention / ctxActClearAttention own
+// that flag.
 func (m *Model) ackFocusedPane() {
 	tab := m.activeTabModel()
 	if tab == nil || tab.Root == nil || tab.ActivePane == "" {
@@ -360,6 +406,36 @@ func (m *Model) ackFocusedPane() {
 			return
 		}
 	}
+}
+
+// answerBlockedByInput clears a pane's parked-on-the-user mark because real
+// user input just reached it. A glance is not an answer; a keystroke is.
+//
+// This is the other half of ackFocusedPane's rule, and it exists because
+// approving a Bash/Edit/Write permission prompt fires NO hook of its own — the
+// pane's next event is the turn's Stop, which can be minutes away. With focus
+// deliberately not clearing the mark, an ANSWERED prompt would otherwise keep
+// its tab amber, keep counting as blocked rather than working in the project
+// badge, keep being offered by Alt+Shift+A, and put the ▲ back the moment the
+// user switched away. Input reaching the pane is the one signal that separates
+// answering the prompt from looking at it.
+//
+// Callers are the producers that represent a HUMAN acting on the pane: the two
+// handleKey forward paths and both paste paths. Deliberately NOT enqueueInput,
+// which is the ordering choke point for every producer including forwarded
+// wheel notches, and NOT forwardInputBytes, which the selection handler also
+// uses to walk the shell cursor during a mouse DRAG — those emit arrow-key
+// escapes a permission prompt would consume as a choice. Scrolling or dragging
+// across a parked pane is a glance with a mouse.
+//
+// It lives here rather than beside its callers so workstate.go remains the
+// owner of every write to these fields but the context menu's explicit one.
+func (p *PaneModel) answerBlockedByInput() {
+	if p == nil {
+		return
+	}
+	p.blockedSince = time.Time{}
+	p.blockedReason = ""
 }
 
 // anyPaneWorking reports whether any pane in any tab is mid-turn.
@@ -426,6 +502,31 @@ func (m Model) tabPinnedAttention(idx int) bool {
 			continue
 		}
 		return true
+	}
+	return false
+}
+
+// tabBlocked reports whether the tab at idx holds a pane parked on the user.
+// Unlike tabUnseen the ACTIVE tab also reports true: a permission prompt is
+// not a seen/unseen state, it is an outstanding question, and the tab bar is
+// the only place a user scanning several projects will notice it.
+//
+// It stays true for the FOCUSED pane too, and that is the point rather than an
+// edge: nothing clears blockedSince but the agent (or the context menu's Clear
+// attention row), so a pane the user is sitting in without answering keeps
+// marking its tab. paneRow suppresses the pane row's own glyph while it is
+// focused — the level the user is looking straight at — and every derived
+// level reads this same flag, so they cannot disagree about whether the agent
+// is still waiting.
+func (m Model) tabBlocked(idx int) bool {
+	tabs := m.curTabs()
+	if idx < 0 || idx >= len(tabs) || tabs[idx].Root == nil {
+		return false
+	}
+	for _, p := range tabs[idx].Leaves() {
+		if p != nil && !p.blockedSince.IsZero() {
+			return true
+		}
 	}
 	return false
 }

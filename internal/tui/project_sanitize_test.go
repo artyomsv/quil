@@ -48,7 +48,8 @@ func TestRemoteProjectNameIsNeutralisedOnEveryRenderPath(t *testing.T) {
 			width: 100, height: 30, sidebarOpen: true, sidebarWidth: 22,
 			projects: []*ProjectModel{{ID: "proj-1", Name: hostileName, Dest: "gpu01"}},
 		}
-		assertNeutralised(t, "the sidebar", strings.Join(rowTexts(m.sidebarRows(22)), "\n"))
+		rows, _ := m.sidebarRows(22)
+		assertNeutralised(t, "the sidebar", strings.Join(rowTexts(rows), "\n"))
 	})
 
 	t.Run("right-click menu", func(t *testing.T) {

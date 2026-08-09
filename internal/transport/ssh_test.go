@@ -256,8 +256,8 @@ func TestConnectTimeoutSecs(t *testing.T) {
 		in   time.Duration
 		want int
 	}{
-		{"zero uses the default", 0, int(defaultConnectTimeout / time.Second)},
-		{"negative uses the default", -5 * time.Second, int(defaultConnectTimeout / time.Second)},
+		{"zero uses the default", 0, int(DefaultConnectTimeout / time.Second)},
+		{"negative uses the default", -5 * time.Second, int(DefaultConnectTimeout / time.Second)},
 		{"whole seconds pass through", 30 * time.Second, 30},
 		{"truncates to whole seconds", 2500 * time.Millisecond, 2},
 		// A sub-second request must never become 0 — OpenSSH reads

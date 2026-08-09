@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -33,32 +34,98 @@ func (s *stubClient) Receive() (*ipc.Message, error) { select {} }
 
 // An unreachable host must not stop the client starting. Its projects are only
 // part of the workspace, and a laptop whose work VM is powered off still has to
-// open — with the local daemon connected.
+// open — with the local daemon connected. The failing destination still reports
+// an outcome: an absent entry is what the old code did and is what made a host
+// vanish from the sidebar.
 func TestDialAllKeepsGoingWhenOneDestFails(t *testing.T) {
 	dials := map[string]func() (tui.Client, error){
 		"":      func() (tui.Client, error) { return &stubClient{}, nil },
 		"gpu01": func() (tui.Client, error) { return nil, errors.New("ssh: connection refused") },
 	}
 
-	conns := dialAllWith(dials)
+	out := dialAllWith(dials)
 
-	if len(conns) != 1 {
-		t.Fatalf("conns = %d, want 1 — an unreachable host must not block startup", len(conns))
+	if len(out) != 2 {
+		t.Fatalf("outcomes = %d, want 2 — a failed dial still reports", len(out))
 	}
-	if _, ok := conns[""]; !ok {
-		t.Fatal("the local daemon should still be connected")
+	if out[""].client == nil || out[""].err != nil {
+		t.Fatalf("local = %+v, want the local daemon still connected with no error", out[""])
+	}
+	if out["gpu01"].client != nil {
+		t.Errorf("gpu01 = %+v, want no client for an unreachable host", out["gpu01"])
+	}
+	if out["gpu01"].err == nil {
+		t.Error("gpu01 err = nil, want the dial failure reported")
 	}
 }
 
-// A dialer that reports success with no connection must be dropped rather than
-// registered. Go's typed-nil trap makes it reachable: a nil *ipc.Client returned
-// into the interface is not == nil, and the router's pump would dereference it.
+// A dialer that reports success with no connection must be reported as a
+// FAILURE rather than registered as a client. Go's typed-nil trap makes it
+// reachable: a nil *ipc.Client returned into the interface is not == nil, and
+// the router's pump would dereference it. The entry must still exist — a
+// silently dropped entry is indistinguishable from a host nobody tried.
 func TestDialAllDropsANilConnection(t *testing.T) {
-	conns := dialAllWith(map[string]func() (tui.Client, error){
+	out := dialAllWith(map[string]func() (tui.Client, error){
 		"gpu01": func() (tui.Client, error) { return nil, nil },
 	})
-	if len(conns) != 0 {
-		t.Fatalf("conns = %v, want none — a nil connection was registered", conns)
+	if out["gpu01"].client != nil {
+		t.Errorf("gpu01 client = %v, want nil — a nil connection was registered as live", out["gpu01"].client)
+	}
+	if out["gpu01"].err == nil {
+		t.Error("gpu01 err = nil, want a (nil, nil) dial reported as a failure")
+	}
+}
+
+// The error is the whole point of the change: without it the caller cannot
+// tell a host that is off from one that needs upgrading.
+func TestDialAllWith_ReportsTheFailureNotJustTheAbsence(t *testing.T) {
+	boom := errors.New("ssh: connect: no route to host")
+	out := dialAllWith(map[string]func() (tui.Client, error){
+		"up":   func() (tui.Client, error) { return &stubClient{}, nil },
+		"down": func() (tui.Client, error) { return nil, boom },
+	})
+
+	if len(out) != 2 {
+		t.Fatalf("outcomes = %d, want 2 — a failed dial still reports", len(out))
+	}
+	if out["up"].client == nil || out["up"].err != nil {
+		t.Errorf("up = %+v, want a client and no error", out["up"])
+	}
+	if out["down"].client != nil {
+		t.Error("down returned a client")
+	}
+	if !errors.Is(out["down"].err, boom) {
+		t.Errorf("down err = %v, want %v", out["down"].err, boom)
+	}
+}
+
+// A dialer returning (nil, nil) must not read as success: Receive would panic.
+func TestDialAllWith_NilClientIsAFailure(t *testing.T) {
+	out := dialAllWith(map[string]func() (tui.Client, error){
+		"weird": func() (tui.Client, error) { return nil, nil },
+	})
+	if out["weird"].err == nil {
+		t.Error("a nil client with no error was reported as a success")
+	}
+}
+
+func TestClassifyOfflineKind(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want tui.OfflineKind
+	}{
+		{"missing binary", fmt.Errorf("%w: exit 127", tui.ErrRemoteQuilMissing), tui.OfflineNeedsInstall},
+		{"version drift", fmt.Errorf("%w: runs 1.53.0", tui.ErrRemoteVersionMismatch), tui.OfflineNeedsUpgrade},
+		{"host off", errors.New("ssh: connect: no route to host"), tui.OfflineRetrying},
+		{"no version response", errors.New("no version response from gpu01"), tui.OfflineRetrying},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := classifyOfflineKind(tt.err); got != tt.want {
+				t.Errorf("classifyOfflineKind(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
 	}
 }
 

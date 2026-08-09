@@ -426,6 +426,8 @@ The one case Quil will not fix for you is a remote daemon **newer** than your cl
 
 Disconnecting removes the machine from your sidebar and stops nothing on it — the remote daemon keeps every pane alive, and reconnecting restores the same workspace.
 
+A configured remote host that's unreachable when you launch no longer drops out of the sidebar: its projects stay in place, shown in orange, while Quil retries the connection in the background. If the host needs a fresh install or an upgrade rather than a retry, `quil remote setup <host>` repairs it from a terminal — no need to wait for the next launch. There's also an in-session route: open the New Project dialog and enter the same host — it dials in, detects the version mismatch, upgrades the remote daemon, reconnects, and the offline row goes live again with no relaunch or separate terminal needed.
+
 ---
 
 

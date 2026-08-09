@@ -20,16 +20,38 @@ import (
 // extraDialTimeout bounds one background destination's whole dial: ssh's own
 // connect, the daemon's readiness, and the version handshake.
 //
-// It exists because a configured host that is simply switched off must not
-// become a tax on every launch. The transport's ConnectTimeout already bounds
-// the TCP half at 15 s, but a host that accepts the connection and then never
-// answers is bounded by nothing.
-const extraDialTimeout = 25 * time.Second
+// It must EXCEED what the far side is allowed to spend, or a cold remote daemon
+// is abandoned while it is still legitimately starting — `quil --stdio` waits
+// daemonReadyTimeout for its own daemon, and that daemon respawns the active
+// tab's panes plus every eager pane SERIALLY before it listens. At 25 s, below
+// the 30 s the far side may take, a rebooted host lost its projects on every
+// launch. Derived rather than written as a number so the two cannot drift apart
+// again; TestExtraDialTimeout_ExceedsTheRemotesOwnReadinessBudget pins it.
+const extraDialTimeout = daemonReadyTimeout + transport.DefaultConnectTimeout + 15*time.Second
 
-// dialAllWith dials every destination and keeps whatever succeeds. A
-// destination unreachable at launch is left out rather than being allowed to
-// stop the client starting: its projects are only part of the workspace, and a
-// laptop whose work VM is powered off must still open.
+// remoteHandshakeTimeout is handshakeTimeout for an ssh-backed connection.
+//
+// The 2 s local value is sized for a Unix socket, where a daemon that does not
+// answer is a daemon too old to know the message. Over ssh the same silence is
+// ordinary latency against a daemon finishing a restore, and reading it as
+// "pre-versioning" drops the destination.
+const remoteHandshakeTimeout = 10 * time.Second
+
+// dialOutcome is one destination's dial result. The error is kept rather than
+// discarded because it is what decides whether the client offers to install,
+// offers to upgrade, or simply keeps retrying — three different rows in the
+// sidebar, indistinguishable from an absent map entry.
+type dialOutcome struct {
+	client tui.Client
+	err    error
+}
+
+// dialAllWith dials every destination and reports what happened to each.
+//
+// A destination unreachable at launch no longer vanishes: it comes back as an
+// outcome carrying its failure, and the caller seeds an offline row from it. A
+// failure still never stops the client starting — a laptop whose work VM is
+// powered off must open.
 //
 // It does NOT attach. Attach is the Model's job, on the first WindowSizeMsg,
 // for two independent reasons: AttachPayload carries Cols/Rows and the daemon
@@ -44,32 +66,54 @@ const extraDialTimeout = 25 * time.Second
 // past the primary one runs ssh in batch mode and therefore cannot prompt —
 // concurrent interactive dials would interleave host-key prompts on one
 // terminal.
-func dialAllWith(dials map[string]func() (tui.Client, error)) map[string]tui.Client {
+func dialAllWith(dials map[string]func() (tui.Client, error)) map[string]dialOutcome {
 	var (
 		mu  sync.Mutex
 		wg  sync.WaitGroup
-		out = make(map[string]tui.Client, len(dials))
+		out = make(map[string]dialOutcome, len(dials))
 	)
 	for dest, dial := range dials {
 		wg.Add(1)
 		go func(dest string, dial func() (tui.Client, error)) {
 			defer wg.Done()
 			c, err := dial()
+			if err == nil && c == nil {
+				// A nil *ipc.Client returned into the interface is NOT == nil,
+				// so this is the last place a no-connection success can be
+				// caught before Receive panics on it.
+				err = errors.New("dial returned no connection")
+			}
 			if err != nil {
 				log.Printf("remote: %s unreachable at launch: %v", dest, err)
-				return
-			}
-			if c == nil {
-				log.Printf("remote: %s returned no connection at launch", dest)
-				return
+				c = nil
 			}
 			mu.Lock()
-			out[dest] = c
+			out[dest] = dialOutcome{client: c, err: err}
 			mu.Unlock()
 		}(dest, dial)
 	}
 	wg.Wait()
 	return out
+}
+
+// classifyOfflineKind turns a dial failure into what the sidebar should offer.
+//
+// Only the two sentinels are recognised here. Everything else is retryable,
+// deliberately: a permanent link failure (a passphrase-only key that cannot
+// authenticate in batch mode, say) is classified by ClassifyLinkFailure inside
+// redialRemote's verify-failure branch, so the ladder parks itself on its first
+// attempt roughly 500 ms later. Reproducing that decision here would mean
+// plumbing LinkStatus out of dialExtra for a state the ladder reaches on its
+// own.
+func classifyOfflineKind(err error) tui.OfflineKind {
+	switch {
+	case errors.Is(err, tui.ErrRemoteQuilMissing):
+		return tui.OfflineNeedsInstall
+	case errors.Is(err, tui.ErrRemoteVersionMismatch):
+		return tui.OfflineNeedsUpgrade
+	default:
+		return tui.OfflineRetrying
+	}
 }
 
 // extraDestinations lists the [[destinations]] entries to dial beside the
@@ -174,7 +218,7 @@ func classifyDialFailure(link transport.LinkStatus, err error) error {
 // the client's point of view an unusable daemon and an absent one are the same
 // thing.
 func gateExtraVersion(d config.Destination, client *ipc.Client, link transport.LinkStatus) error {
-	res := versionHandshake(client)
+	res := versionHandshakeWithin(client, remoteHandshakeTimeout)
 	switch {
 	case res.ClientSkipped, res.Matched:
 		return nil

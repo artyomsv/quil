@@ -419,7 +419,7 @@ const redialTimeout = 30 * time.Second
 // "unreachable" while ssh was still legitimately connecting over a slow link.
 const linkVerifyTimeout = 20 * time.Second
 
-// verifyRemoteLink proves the far side is a live daemon speaking the Quil
+// verifyRemoteLinkGated proves the far side is a live daemon speaking the Quil
 // protocol, and is what makes a reconnect attempt honest.
 //
 // Without it, an attempt "succeeds" the moment ssh's BINARY starts. exec.Cmd
@@ -436,11 +436,14 @@ const linkVerifyTimeout = 20 * time.Second
 // yet, so there is no state to lose: a broadcast that arrives in this window is
 // superseded by the full state the attach itself triggers.
 //
-// The daemon's version is logged rather than compared. A mid-session upgrade of
-// the remote is the only way it can differ, and there is no good recovery for
-// that here — the terminal belongs to Bubble Tea, so nothing can be prompted —
-// but it must at least be diagnosable from the log.
-func verifyRemoteLink(client *ipc.Client, timeout time.Duration) error {
+// gate decides what a version mismatch means. When set, it refuses the link —
+// see the doc below for why that is safe only for a destination that has never
+// been version-checked. When clear (every mid-session reconnect), the mismatch
+// is logged rather than compared: a mid-session upgrade of the remote is the
+// only way it can differ, and there is no good recovery for that here — the
+// terminal belongs to Bubble Tea, so nothing can be prompted — but it must at
+// least be diagnosable from the log.
+func verifyRemoteLinkGated(client *ipc.Client, timeout time.Duration, gate bool) error {
 	req, err := ipc.NewMessage(ipc.MsgVersionReq, struct{}{})
 	if err != nil {
 		return fmt.Errorf("build version probe: %w", err)
@@ -490,14 +493,21 @@ func verifyRemoteLink(client *ipc.Client, timeout time.Duration) error {
 			log.Printf("remote: link verified, version payload undecodable: %v", err)
 			return nil
 		}
-		// A mismatch can only mean the remote was upgraded mid-session, since
-		// gateVersionCheck matched the versions at launch. There is no good
-		// recovery from here — Bubble Tea owns the terminal, so nothing can be
-		// prompted, and refusing would end a session whose panes are healthy —
-		// but it must be loud enough to find afterwards, because a protocol the
-		// local TUI does not fully speak fails SILENTLY: an unhandled message
-		// type is dropped with no error anywhere.
+		// A mismatch can only mean the remote was upgraded mid-session or this
+		// destination was never gated at all — gateVersionCheck matched the
+		// versions at launch for a host that answered then, and never ran at all
+		// for one that didn't.
 		if cur := versionpkg.Current(); resp.Version != "" && resp.Version != cur {
+			if gate {
+				return fmt.Errorf("%w: daemon runs %s, this client runs %s",
+					tui.ErrRemoteVersionMismatch, resp.Version, cur)
+			}
+			// Ungated: there is no good recovery from here — Bubble Tea owns the
+			// terminal, so nothing can be prompted, and refusing would end a
+			// session whose panes are healthy — but it must be loud enough to
+			// find afterwards, because a protocol the local TUI does not fully
+			// speak fails SILENTLY: an unhandled message type is dropped with no
+			// error anywhere.
 			log.Printf("remote: WARNING link verified but daemon version %q != this TUI %q "+
 				"— the remote was upgraded mid-session; restart the TUI to re-gate",
 				resp.Version, cur)
@@ -506,6 +516,13 @@ func verifyRemoteLink(client *ipc.Client, timeout time.Duration) error {
 		}
 		return nil
 	}
+}
+
+// verifyRemoteLink is the liveness-only probe every mid-session reconnect
+// uses. It never gates on a version mismatch — see verifyRemoteLinkGated's doc
+// for why refusing there would end a session whose panes are healthy.
+func verifyRemoteLink(client *ipc.Client, timeout time.Duration) error {
+	return verifyRemoteLinkGated(client, timeout, false)
 }
 
 // probeRequestID correlates the liveness probe with its response. A literal
@@ -574,8 +591,11 @@ func redialRemote(cfgOf func() *config.Config, dest string) tui.RedialFunc {
 		}
 
 		// The dial proves only that ssh started. Confirm a daemon actually
-		// answers before reporting the link restored — see verifyRemoteLink.
-		if verr := verifyRemoteLink(client, linkVerifyTimeout); verr != nil {
+		// answers before reporting the link restored — see verifyRemoteLinkGated.
+		//
+		// A nil previous conn means this destination has never been attached, so
+		// no version comparison has ever happened for it — gate this verify.
+		if verr := verifyRemoteLinkGated(client, linkVerifyTimeout, old == nil); verr != nil {
 			// LinkErr is read BEFORE Close, matching the ordering the version
 			// gate documents and pins. Close unblocks the transport's pump via
 			// <-done, and that return path can complete WITHOUT ever setting

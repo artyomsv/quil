@@ -354,6 +354,19 @@ func (m Model) lastDaemon(dest string) bool {
 			return false
 		}
 	}
+	// knownDests is the CONN table, so a destination that never connected is
+	// absent from it — and that is exactly the state an offline row describes.
+	// Without this, losing the local daemon while an offline remote is still
+	// laddering reads as "the last daemon died" and quits the client, taking
+	// the ladder and the repair panel with it.
+	for _, p := range m.projects {
+		if p.Dest == "" || p.Dest == dest || p.Offline == nil {
+			continue
+		}
+		if m.canReconnect(p.Dest) {
+			return false
+		}
+	}
 	return true
 }
 

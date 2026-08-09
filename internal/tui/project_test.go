@@ -138,6 +138,7 @@ func TestParseWorkspaceStateReadsProjects(t *testing.T) {
 }
 
 func TestApplyWorkspaceStateReplacesOnlyItsOwnDest(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir()) // cacheRemoteProjects writes here, never production
 	// The BROADCASTING dest's project is first on purpose: with it last, an
 	// append-based merge reproduces the original order by luck and the order
 	// assertion below passes against the very bug it exists for.
@@ -187,6 +188,7 @@ func TestApplyWorkspaceStateReplacesOnlyItsOwnDest(t *testing.T) {
 // two dests contiguous, an append-based merge reproduces the original order for
 // one of the two broadcasts by luck and the test passes half the time.
 func TestApplyWorkspaceStateKeepsProjectOrderAcrossAlternatingBroadcasts(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir()) // cacheRemoteProjects writes here, never production
 	m := Model{projects: []*ProjectModel{
 		{ID: "proj-l1", Dest: "", tabs: []*TabModel{NewTabModel("tab-1", "One")}},
 		{ID: "proj-r1", Dest: "gpu01", tabs: []*TabModel{NewTabModel("tab-2", "Two")}},
@@ -357,6 +359,70 @@ func TestBroadcastProjectsQualifiesTheSyntheticIDPerDest(t *testing.T) {
 	}
 }
 
+// resolveActiveProjectIndex must behave exactly like indexOfProject on a
+// genuine match, offline or not — landing on an offline row by NAME is how
+// the repair panel is reached, and this must not get in the way of that.
+func TestResolveActiveProjectIndex_GenuineMatchWinsEvenIfOffline(t *testing.T) {
+	projects := []*ProjectModel{
+		{ID: "proj-live"},
+		{ID: "proj-offline", Offline: &OfflineState{}},
+	}
+	if got := resolveActiveProjectIndex(projects, "proj-offline"); got != 1 {
+		t.Errorf("index = %d, want 1 — a requested offline project must still resolve", got)
+	}
+}
+
+// The miss case is the fix: index 0 is exactly where a seeded offline row
+// parks (SeedOfflineDest runs before any broadcast, so it occupies the low
+// indices), so falling back to indexOfProject's plain 0-on-a-miss silently
+// lands an unresolved active id on a project with no tabs and no panes.
+func TestResolveActiveProjectIndex_MissPrefersLiveOverOffline(t *testing.T) {
+	projects := []*ProjectModel{
+		{ID: "proj-offline", Offline: &OfflineState{}},
+		{ID: "proj-live"},
+	}
+	if got := resolveActiveProjectIndex(projects, "does-not-exist"); got != 1 {
+		t.Errorf("index = %d, want 1 (the live project), not the offline stand-in at 0", got)
+	}
+}
+
+// When every project really is offline there is no live one to prefer, so
+// this must degrade to the same always-somewhere-valid fallback as
+// indexOfProject rather than panicking or returning an out-of-range index.
+func TestResolveActiveProjectIndex_EveryProjectOfflineFallsBackToZero(t *testing.T) {
+	projects := []*ProjectModel{
+		{ID: "proj-a", Offline: &OfflineState{}},
+		{ID: "proj-b", Offline: &OfflineState{}},
+	}
+	if got := resolveActiveProjectIndex(projects, "missing"); got != 0 {
+		t.Errorf("index = %d, want 0", got)
+	}
+}
+
+// TestApplyWorkspaceState_MissedActiveIDPrefersLiveOverOfflineProject is the
+// end-to-end version of TestResolveActiveProjectIndex_MissPrefersLiveOverOffline:
+// a launch that seeded an offline row for an unreachable remote host, followed
+// by the local daemon's first broadcast (which the daemon has never recorded an
+// active project for). Before the fix this landed m.activeProject on the
+// offline stand-in — combined with freezeInput's per-project gate, selecting it
+// was how the whole session could read as input-frozen.
+func TestApplyWorkspaceState_MissedActiveIDPrefersLiveOverOfflineProject(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir()) // cacheRemoteProjects writes here, never production
+	m := Model{projects: []*ProjectModel{
+		{ID: "proj-offline@gpu01", Dest: "gpu01", Offline: &OfflineState{Kind: offlineRetrying}},
+	}}
+
+	m.applyWorkspaceState(WorkspaceStateMsg{
+		Dest:     "",
+		Projects: []ProjectInfo{{ID: "proj-local", TabIDs: []string{"tab-1"}, ActiveTab: "tab-1"}},
+		Tabs:     []TabInfo{{ID: "tab-1", Name: "One", ProjectID: "proj-local"}},
+	}, "")
+
+	if got := m.cur(); got == nil || got.ID != "proj-local" {
+		t.Fatalf("active project = %+v, want proj-local", got)
+	}
+}
+
 // The dispose sweep must run AFTER m.projects is rebuilt, and must span every
 // project. Both halves are asserted here because each fails a different way
 // and neither is visible elsewhere in the suite:
@@ -368,6 +434,7 @@ func TestBroadcastProjectsQualifiesTheSyntheticIDPerDest(t *testing.T) {
 //     so the old slice already reflects the new tabs.)
 //   - Sweeping only the rebuilt projects disposes another dest's live panes.
 func TestApplyWorkspaceStateDisposesOnlyTheDroppedProjectsPanes(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir()) // cacheRemoteProjects writes here, never production
 	livePane := NewPaneModel("pane-local", 4096)
 	liveTab := NewTabModel("tab-1", "One")
 	liveTab.Root = NewLeaf(livePane)
@@ -421,6 +488,7 @@ func TestApplyWorkspaceStateSkipsTabClaimedByAnotherProject(t *testing.T) {
 }
 
 func TestApplyWorkspaceStateDropsProjectsRemovedOnThatDest(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir()) // cacheRemoteProjects writes here, never production
 	m := Model{projects: []*ProjectModel{
 		{ID: "proj-a", Dest: "gpu01", tabs: []*TabModel{NewTabModel("tab-1", "One")}},
 		{ID: "proj-b", Dest: "gpu01", tabs: []*TabModel{NewTabModel("tab-2", "Two")}},

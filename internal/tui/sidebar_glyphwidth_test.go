@@ -121,7 +121,7 @@ func TestSidebarRows_MeasureExactlyTheirWidth(t *testing.T) {
 					// are different renders, not the same render with a different
 					// first character.
 					for _, active := range []bool{true, false} {
-						got := projectRow(name, c, link, active, w)
+						got := projectRow(name, c, link, active, w, nil)
 						if n := lipgloss.Width(got); n != w {
 							t.Errorf("projectRow(%q, %+v, link=%q, active=%v, w=%d) "+
 								"measures %d cells, want exactly %d",

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"os"
 	"testing"
 
 	"github.com/artyomsv/quil/internal/config"
@@ -52,6 +53,41 @@ func TestDisconnectDest_RemovesTheHostAndItsProjects(t *testing.T) {
 	// disturbing the other entry.
 	if len(m.cfg.Destinations) != 1 || m.cfg.Destinations[0].Dest != "other" {
 		t.Errorf("destinations = %v, want only \"other\"", m.cfg.Destinations)
+	}
+}
+
+// disconnectDest must clear the two per-destination memories the offline
+// feature added, and the on-disk half of one of them, or "forget this host"
+// leaves three things behind that resurrect it: a leftover offlineWoken skips
+// re-arming the ladder if the host is ever added back, a leftover cachedRemote
+// answers a future SeedOfflineDest with a list belonging to the forgotten
+// host, and a leftover cache FILE brings both back the moment the process
+// restarts.
+func TestDisconnectDest_ClearsOfflineWokenAndCachedRemoteAndTheirCacheFile(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	local, gpu := newFakeConn(), newFakeConn()
+	cachePath := config.RemoteProjectsPath("gpu01")
+	if err := SaveRemoteProjects(cachePath, []CachedProject{{ID: "p-gpu", Name: "remote"}}); err != nil {
+		t.Fatalf("seed cache file: %v", err)
+	}
+	m := Model{
+		client:        NewRouter(map[string]Client{"": local, "gpu01": gpu}),
+		projects:      []*ProjectModel{{ID: "p-local", Name: "local"}, {ID: "p-gpu", Name: "remote", Dest: "gpu01"}},
+		activeProject: 0,
+		offlineWoken:  map[string]bool{"gpu01": true},
+		cachedRemote:  map[string][]CachedProject{"gpu01": {{ID: "p-gpu", Name: "remote"}}},
+	}
+
+	m.disconnectDest("gpu01")
+
+	if m.offlineWoken["gpu01"] {
+		t.Error("offlineWoken not cleared — a re-added host would never re-arm its reconnect ladder")
+	}
+	if _, ok := m.cachedRemote["gpu01"]; ok {
+		t.Error("cachedRemote not cleared — a future SeedOfflineDest would answer with the forgotten host's stale list")
+	}
+	if _, err := os.Stat(cachePath); !os.IsNotExist(err) {
+		t.Errorf("cache file still exists after disconnect (err = %v), want removed", err)
 	}
 }
 

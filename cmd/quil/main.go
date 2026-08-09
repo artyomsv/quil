@@ -502,22 +502,24 @@ func launchTUI() {
 		log.Printf("remote: dialing configured destination %s (%s)", d.Label(), d.Dest)
 		dials[d.Dest] = dialExtra(cfg, d)
 	}
-	conns := dialAllWith(dials)
-	for _, d := range extraDestinations(cfg, primaryDest) {
-		if _, ok := conns[d.Dest]; !ok {
-			// Named on stderr as well as in the log: this happens before the
-			// TUI takes the screen, and a destination silently missing from the
-			// sidebar is the failure mode the whole message exists to prevent.
-			//
-			// It says RELAUNCH, and that word is load-bearing. Reconnect is
-			// driven by a pump reporting its connection's death, and a
-			// destination that never connected has no conn and therefore no
-			// pump — so nothing will ever start a ladder for it. Telling the
-			// user it "keeps trying" leaves them waiting for something that
-			// cannot happen.
-			fmt.Fprintf(os.Stderr, "warning: %s is unreachable — its projects will not appear. "+
-				"Relaunch quil once the host is back (see the log for why).\n", d.Label())
+	outcomes := dialAllWith(dials)
+	conns := make(map[string]tui.Client, len(outcomes))
+	for dest, o := range outcomes {
+		if o.client != nil {
+			conns[dest] = o.client
 		}
+	}
+	for _, d := range extraDestinations(cfg, primaryDest) {
+		o, ok := outcomes[d.Dest]
+		if !ok || o.client != nil {
+			continue
+		}
+		// Still named on stderr. It is no longer the only notice — the sidebar
+		// keeps a row for this host now — but a launch diagnostic that only
+		// exists inside the TUI is invisible to anyone reading a terminal
+		// scrollback afterwards.
+		fmt.Fprintf(os.Stderr, "warning: %s is unreachable — its projects are shown offline. %v\n",
+			d.Label(), o.err)
 	}
 
 	// The router is constructed BEFORE the Model and passed in, never installed
@@ -526,6 +528,23 @@ func launchTUI() {
 	// unstamped send to whichever daemon happened to be active at launch.
 	router := tui.NewRouter(conns)
 	model := tui.NewModel(router, cfg, version, reg, stalePlugins)
+	// Seed a row for every configured destination that did not connect. Without
+	// this the host simply vanishes from the sidebar, which reads as Quil having
+	// deleted the user's projects — and after a client auto-update it happens on
+	// every launch, because gateExtraVersion refuses any version difference.
+	for _, d := range extraDestinations(cfg, primaryDest) {
+		o, ok := outcomes[d.Dest]
+		if !ok || o.client != nil {
+			continue
+		}
+		model.SeedOfflineDest(
+			d.Dest,
+			d.Label(),
+			classifyOfflineKind(o.err),
+			o.err.Error(),
+			tui.LoadRemoteProjects(config.RemoteProjectsPath(d.Dest)),
+		)
+	}
 	// No session-wide "this is remote" flag any more: the router keys --remote's
 	// connection by host, so its projects arrive stamped with that destination
 	// and every remote-aware decision reads it from the project on screen.
@@ -539,11 +558,6 @@ func launchTUI() {
 	// mixed session, what makes the client keep the remote daemons rather than
 	// quitting over the local one.
 	//
-	// Installed per destination that actually connected. A host unreachable at
-	// launch has no conn and therefore no pump, so nothing would ever report a
-	// loss for it and the ladder could not start; that gap is a known limitation
-	// rather than something a dialer here would fix.
-	//
 	// liveCfg is declared here rather than beside the dial funcs below because
 	// these launch-time ladders need it too: a host configured at launch can
 	// still be installed to mid-session (its dial fails ErrRemoteQuilMissing,
@@ -556,6 +570,18 @@ func launchTUI() {
 			continue
 		}
 		model.SetRedialFunc(dest, redialRemote(liveCfg.Load, dest))
+	}
+	// Installed for every CONFIGURED destination, not only the connected ones.
+	// A host unreachable at launch used to get no dialer, so canReconnect —
+	// literally redialFns[dest] != nil — was false and no ladder could ever
+	// start for it; that was the gap that made a failed launch dial permanent.
+	// The local daemon is still deliberately excluded: its panes died with it,
+	// so retrying would hide the loss.
+	for _, d := range extraDestinations(cfg, primaryDest) {
+		if _, connected := conns[d.Dest]; connected {
+			continue
+		}
+		model.SetRedialFunc(d.Dest, redialRemote(liveCfg.Load, d.Dest))
 	}
 	// Connecting a host the user names at runtime, from the New Project
 	// dialog's Host field — the same dial the launch path uses, so a

@@ -42,6 +42,14 @@ type ProjectModel struct {
 	// needed a home, not because anyone named it. Naming a project on a host
 	// whose only project is this one renames it in place.
 	Bootstrap bool
+	// Offline marks a row the client is showing on a destination's behalf while
+	// that destination has no connection. Nil for every live project.
+	//
+	// The row carries the daemon's OWN project ID when the cache had one, so the
+	// first real broadcast fills this same struct in place through
+	// applyWorkspaceState's existingProjects lookup — same sidebar slot, same
+	// active-project pointer. Nothing else clears it; see applyWorkspaceState.
+	Offline *OfflineState
 
 	tabs      []*TabModel
 	activeTab int
@@ -96,12 +104,17 @@ func (m *Model) switchProject(i int) tea.Cmd {
 	m.syncActiveDest()
 
 	p := m.projects[i]
-	msg, _ := ipc.NewMessage(ipc.MsgSwitchProject, ipc.SwitchProjectPayload{ProjectID: p.ID})
-	// Through sendForDest, not a raw Origin assignment: a LOCAL project's
-	// Dest is "", which routeDest reads as UNSTAMPED — so a hand-stamped
-	// local switch would be re-aimed at whatever the router's current dest
-	// happens to be. stampDest maps "" to the explicit destLocal sentinel.
-	m.sendForDest(p.Dest, msg)
+	// The switch itself always happens — reaching an offline project is how the
+	// repair panel is opened. Only the daemon notification is skipped, because
+	// Router.Send would drop it and log it as delivered.
+	if m.projectActionable(p) {
+		msg, _ := ipc.NewMessage(ipc.MsgSwitchProject, ipc.SwitchProjectPayload{ProjectID: p.ID})
+		// Through sendForDest, not a raw Origin assignment: a LOCAL project's
+		// Dest is "", which routeDest reads as UNSTAMPED — so a hand-stamped
+		// local switch would be re-aimed at whatever the router's current dest
+		// happens to be. stampDest maps "" to the explicit destLocal sentinel.
+		m.sendForDest(p.Dest, msg)
+	}
 
 	return m.resizeAllPanes()
 }
@@ -430,6 +443,31 @@ func indexOfProject(projects []*ProjectModel, id string) int {
 	return 0
 }
 
+// resolveActiveProjectIndex is indexOfProject's fallback made offline-aware,
+// for applyWorkspaceState's active-project resolution alone.
+//
+// A genuine match is returned exactly like indexOfProject, offline or not —
+// landing on an offline row by NAME is how the repair panel is reached. The
+// difference is the MISS: indexOfProject falls back to index 0, and a seeded
+// launch keeps its offline stand-ins at the low indices, so an unresolved ID
+// (state.ActiveProject empty, or naming a project this destination no longer
+// has) would silently land the client on a row with no tabs and no panes. A
+// live project is preferred instead; only when every project is offline does
+// this degrade to the same index-0 fallback.
+func resolveActiveProjectIndex(projects []*ProjectModel, id string) int {
+	for i, p := range projects {
+		if p.ID == id {
+			return i
+		}
+	}
+	for i, p := range projects {
+		if p.Offline == nil {
+			return i
+		}
+	}
+	return 0
+}
+
 // interimProject returns the project the tab WRITERS below target: the active
 // project when there is one, otherwise a freshly created synthetic one. It
 // also normalises activeProject, so a Model built directly by a test (or a
@@ -467,6 +505,20 @@ func (m *Model) appendTab(tabs ...*TabModel) {
 
 // setActiveTabIdx moves the active project's tab ordinal.
 func (m *Model) setActiveTabIdx(i int) { m.interimProject().activeTab = i }
+
+// projectActionable reports whether a daemon-bound action aimed at this project
+// can actually reach a daemon.
+//
+// TWO conditions, and neither implies the other. A synthetic ID exists only in
+// this process, so a daemon that receives one silently misses on its map lookup.
+// An offline project's ID is real, but its destination has no connection —
+// Router.Send DROPS a message for a dest it has no conn for and returns nil
+// (router.go), deliberately, so no caller can learn about it from the send.
+// Both failures are silent, which is why the refusal has to happen here rather
+// than at the send.
+func (m Model) projectActionable(p *ProjectModel) bool {
+	return p != nil && !isSyntheticProject(p.ID) && p.Offline == nil
+}
 
 // isSyntheticProject reports the placeholder the client invents for a daemon
 // that has reported no projects yet (interimProjectIDFor). Its ID exists only

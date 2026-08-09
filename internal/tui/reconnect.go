@@ -398,6 +398,15 @@ func (m Model) freezeInput(msg tea.Msg) (tea.Cmd, bool) {
 	if p, ok := msg.(clipboardPastedMsg); ok {
 		return nil, m.linkOf(m.destOfPane(p.paneID)).active
 	}
+	// An OFFLINE project is a client-side stand-in: it has no tabs and no panes,
+	// so no keystroke here can reach a PTY, and freezing would trap the user on
+	// a row whose whole purpose is to be navigated away from — the ladder holds
+	// `active` for as long as it climbs, and the switch-away key is frozen with
+	// everything else. A destination that dropped MID-session has Offline == nil
+	// and keeps the freeze, which is what it is for.
+	if p := m.cur(); p != nil && p.Offline != nil {
+		return nil, false
+	}
 	if !m.linkOf(m.activeDest()).active {
 		return nil, false
 	}

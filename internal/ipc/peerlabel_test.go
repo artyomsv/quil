@@ -77,6 +77,16 @@ func TestPeerLabel(t *testing.T) {
 			conn: stubConn{},
 			want: "unknown",
 		},
+		{
+			// The label reaches quil.log, which the F1 viewer renders. A dest
+			// comes from the user's own config so this is self-inflicted
+			// rather than an attack, but this repo already routes ssh stderr
+			// through a sanitizer for exactly this reason.
+			name: "control bytes are stripped",
+			conn: stubConn{remote: stubAddr{"ssh", "host\r\n\x1b[2Jevil"}},
+			// CR, LF and ESC are three control bytes, so three replacements.
+			want: "ssh:host???[2Jevil",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -85,6 +95,17 @@ func TestPeerLabel(t *testing.T) {
 				t.Errorf("peerLabel = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestPeerLabel_IsBounded(t *testing.T) {
+	t.Parallel()
+	long := strings.Repeat("a", 4096)
+	got := peerLabel(stubConn{remote: stubAddr{"ssh", long}})
+	if len(got) > peerLabelMax {
+		t.Errorf("peerLabel length = %d, want <= %d — the label lands in a "+
+			"rotating log whose archive count is fixed, so an unbounded one "+
+			"evicts other records", len(got), peerLabelMax)
 	}
 }
 

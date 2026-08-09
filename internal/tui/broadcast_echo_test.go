@@ -510,6 +510,67 @@ func TestWorkspaceState_PendingPane_IsNotResized(t *testing.T) {
 	}
 }
 
+// sizedOnce is keyed by destination as well as pane id. Every sibling per-pane
+// structure in the Model is dest-scoped, and this one governs whether a pane's
+// FIRST resize ships — so a shared key means one daemon's pane can suppress
+// another daemon's, and armReattachReset for one dest can clear the other's
+// flag. Two daemons minting the same UUID is not a realistic accident; keying
+// it correctly costs nothing and makes the invariant explicit rather than
+// dependent on that luck.
+func TestDiffResizes_SamePaneIDOnTwoDestsAreIndependent(t *testing.T) {
+	t.Parallel()
+	const shared = "pane-shared"
+
+	build := func(dest string) *ProjectModel {
+		tab := NewTabModel("tab-"+dest, "T")
+		tab.Root = NewLeaf(NewPaneModel(shared, 1024))
+		tab.Resize(80, 24)
+		return &ProjectModel{ID: "proj-" + dest, Name: dest, Dest: dest,
+			tabs: []*TabModel{tab}}
+	}
+
+	m := Model{
+		cfg:            config.Default(),
+		tabDragFromIdx: -1,
+		sized:          true,
+		width:          100,
+		height:         40,
+		projects:       []*ProjectModel{build(""), build("gpu01")},
+	}
+
+	// The size the daemon would report once it accepted our resize; without it
+	// the diff legitimately re-sends and the test proves nothing.
+	sized := func(dest string) WorkspaceStateMsg {
+		tab := m.projects[0].tabs[0]
+		if dest != "" {
+			tab = m.projects[1].tabs[0]
+		}
+		pane := tab.Leaves()[0]
+		cols, rows := paneVTSize(pane.WideCanvas, pane.MinNativeCols,
+			pane.Width, pane.Height, pane.NativeW, tab.CanvasW, tab.CanvasH)
+		return WorkspaceStateMsg{Dest: dest, Panes: []PaneInfo{
+			{ID: shared, Cols: uint16(cols), Rows: uint16(rows)},
+		}}
+	}
+
+	local := sized("")
+	if got := m.diffResizes(local); len(got) != 1 {
+		t.Fatalf("local first resize = %d sends, want 1", len(got))
+	}
+	// Same again: now suppressed for the local dest.
+	if got := m.diffResizes(local); len(got) != 0 {
+		t.Fatalf("local repeat = %d sends, want 0 — setup is wrong if the "+
+			"first send did not register", len(got))
+	}
+
+	remote := sized("gpu01")
+	if got := m.diffResizes(remote); len(got) != 1 {
+		t.Errorf("remote first resize = %d sends, want 1 — sizing this pane on "+
+			"the local daemon must not consume the remote daemon's "+
+			"first-resize kick for a pane that merely shares its id", len(got))
+	}
+}
+
 // A reconnect reinstalls the daemon's PTYs, which zeroes its applied-size
 // guard — so the first-resize kick has to be re-armed or a restored pane comes
 // back blank and stays blank.

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -142,21 +143,50 @@ func (c *Conn) sendFrame(frame []byte) error {
 	return c.enqueue(frame, false)
 }
 
+// peerLabelMax caps the rendered label. quil.log rotates with a fixed archive
+// count, so an unbounded label evicts unrelated records.
+const peerLabelMax = 120
+
 // peerLabel describes the far end of a connection for a log line. A Unix socket
 // reports an empty remote address, so fall back to the local one and always
 // name the network — "unix" versus "pipe" already separates a real daemon
 // connection from an in-process test.
+//
+// The value is sanitized and capped even though no remote peer supplies it
+// today: the daemon only listens on a Unix socket (empty RemoteAddr, so this
+// falls to the local end), and a client's address is the ssh destination from
+// the user's own config. It is written into a log the F1 viewer RENDERS, which
+// is the same reason ssh stderr already passes through terminalSanitizer, and
+// the cost of not having to re-derive that argument later is one function.
 func peerLabel(raw net.Conn) string {
 	if raw == nil {
 		return "unknown"
 	}
 	if addr := raw.RemoteAddr(); addr != nil && addr.String() != "" {
-		return addr.Network() + ":" + addr.String()
+		return clampLabel(addr.Network() + ":" + addr.String())
 	}
 	if addr := raw.LocalAddr(); addr != nil {
-		return addr.Network() + ":" + addr.String() + " (local end)"
+		return clampLabel(addr.Network()+":"+addr.String()) + " (local end)"
 	}
 	return "unknown"
+}
+
+// clampLabel replaces C0/DEL with '?' and truncates. '?' rather than deletion
+// so a label that was tampered with still looks wrong instead of merely short.
+func clampLabel(s string) string {
+	if len(s) > peerLabelMax {
+		s = s[:peerLabelMax]
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			b.WriteByte('?')
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // enqueue queues a pre-encoded frame. The frame []byte is read-only — both

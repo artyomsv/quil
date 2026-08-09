@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -366,6 +367,12 @@ type Model struct {
 	// pane rides that first client resize. Cleared by armReattachReset, since
 	// a reattach is exactly when the daemon's guard may have been zeroed, and
 	// pruned by applyWorkspaceState when a pane stops existing.
+	//
+	// Keyed by sizedKey(dest, paneID), not by pane id alone: this decides
+	// whether a pane's FIRST resize ships, so a shared key would let one
+	// daemon's pane consume another's kick and let armReattachReset for one
+	// dest clear the other's flag. Two daemons minting the same UUID is not a
+	// realistic accident, but the invariant should not rest on that.
 	sizedOnce            map[string]bool
 	renaming             bool
 	renameInput          string
@@ -4158,9 +4165,26 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg, dest string) ([]str
 	// sweep that answers "is this pane still real?" is already built, and a
 	// map with no disposal path is the kind of thing that gets explained
 	// rather than fixed.
-	for id := range m.sizedOnce {
-		if !surviving[id] {
-			delete(m.sizedOnce, id)
+	//
+	// Its keys are dest-scoped, so the survivor set has to be too — a plain
+	// pane-id set would drop every entry on the first sweep and hand each pane
+	// a fresh first-resize kick on every broadcast.
+	survivingKeys := make(map[string]bool, len(surviving))
+	for _, proj := range m.projects {
+		for _, tab := range proj.tabs {
+			if tab.Root != nil {
+				for id := range tab.Root.PaneIDs() {
+					survivingKeys[sizedKey(proj.Dest, id)] = true
+				}
+			}
+			if tab.overlayPane != nil {
+				survivingKeys[sizedKey(proj.Dest, tab.overlayPane.ID)] = true
+			}
+		}
+	}
+	for key := range m.sizedOnce {
+		if !survivingKeys[key] {
+			delete(m.sizedOnce, key)
 		}
 	}
 
@@ -5748,10 +5772,17 @@ func parseWorkspaceState(raw map[string]any) WorkspaceStateMsg {
 				if b, ok := pm["git_stale"].(bool); ok {
 					pi.GitStale = b
 				}
-				if n, ok := pm["cols"].(float64); ok {
+				// Range-checked: Go leaves an out-of-range float→integer
+				// conversion implementation-dependent, so a daemon reporting
+				// 1e300, -1 or NaN would yield an unspecified uint16 rather
+				// than an obviously wrong one. Out-of-range is left at 0,
+				// which reads as "never sized" and re-sends — the safe
+				// direction, since the alternative is suppressing a resize
+				// against a garbage comparison.
+				if n, ok := pm["cols"].(float64); ok && n >= 0 && n <= math.MaxUint16 {
 					pi.Cols = uint16(n)
 				}
-				if n, ok := pm["rows"].(float64); ok {
+				if n, ok := pm["rows"].(float64); ok && n >= 0 && n <= math.MaxUint16 {
 					pi.Rows = uint16(n)
 				}
 				state.Panes = append(state.Panes, pi)
@@ -6874,6 +6905,11 @@ func (m *Model) diffLayouts(state WorkspaceStateMsg) []layoutSend {
 	return out
 }
 
+// sizedKey scopes a sizedOnce entry to its owning destination. NUL separates
+// the halves because it cannot occur in either a dest or a pane id, so no pair
+// of distinct inputs can collide on one key.
+func sizedKey(dest, paneID string) string { return dest + "\x00" + paneID }
+
 // hasProjectForDest reports whether any project belongs to dest.
 func (m *Model) hasProjectForDest(dest string) bool {
 	for _, proj := range m.projects {
@@ -6925,7 +6961,7 @@ func (m *Model) diffResizes(state WorkspaceStateMsg) []resizeSend {
 				// A daemon that has never applied a size reports 0, which no
 				// computed size can equal — paneVTSize floors both dimensions
 				// at 1 — so that case needs no separate term.
-				if m.sizedOnce[pane.ID] && known.cols == cols && known.rows == rows {
+				if m.sizedOnce[sizedKey(proj.Dest, pane.ID)] && known.cols == cols && known.rows == rows {
 					continue
 				}
 				// Marked before the send rather than after it: the send rides a
@@ -6933,7 +6969,7 @@ func (m *Model) diffResizes(state WorkspaceStateMsg) []resizeSend {
 				// unreachable dest therefore costs this pane its first-resize
 				// kick until the next reattach — acceptable because the daemon
 				// fires its own resizeKick on the pane's first PTY output.
-				m.sizedOnce[pane.ID] = true
+				m.sizedOnce[sizedKey(proj.Dest, pane.ID)] = true
 				out = append(out, resizeSend{dest: proj.Dest, paneID: pane.ID, cols: cols, rows: rows})
 			}
 		}

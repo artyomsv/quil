@@ -5,6 +5,8 @@ import (
 	"errors"
 	"net"
 	"time"
+
+	"github.com/artyomsv/quil/internal/logger"
 )
 
 // Client connects to the daemon over a Unix socket.
@@ -64,9 +66,25 @@ func (c *Client) Send(msg *Message) error {
 		// later Send short-circuits at once, close on its own goroutine because
 		// Close waits on sendLoop and the caller here may be the Update
 		// goroutine. The CAS keeps one Close per connection.
+		//
+		// Logged with the same detail as the daemon-side branch. This is the
+		// CLIENT-side overflow — the 2026-08-09 shape — so a silent give-up
+		// here would leave exactly the incident this code exists for with no
+		// line naming the peer or the depth.
 		if c.conn.overflow.CompareAndSwap(false, true) {
+			logger.Warn("ipc: giving up on a wedged peer after %s (peer=%s queued=%d cap=%d)",
+				clientSendTimeout, peerLabel(c.conn.raw), len(c.conn.critCh), sendBufSize)
 			go c.conn.Close()
 		}
+		return ErrSendOverflow
+	}
+	// A caller that lost the race to the CAS is reporting the SAME event as the
+	// one that timed out, so it must report the same cause. SendBlocking's own
+	// guard answers ErrConnClosed for an overflowed conn, which would otherwise
+	// split one overflow across two sentinels depending on scheduling —
+	// contradicting ErrSendOverflow's documented "future Sends short-circuit
+	// with the same error".
+	if c.conn.overflow.Load() && errors.Is(err, ErrConnClosed) {
 		return ErrSendOverflow
 	}
 	return err

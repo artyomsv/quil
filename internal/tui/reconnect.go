@@ -730,7 +730,7 @@ func (m *Model) armReattachReset(dest string) {
 		// reinstall zeroes, so carrying it across an outage would withhold the
 		// one resize repaintAfterResize needs to bring a restored pane back.
 		// delete on a nil map is a no-op.
-		delete(m.sizedOnce, p.ID)
+		delete(m.sizedOnce, sizedKey(dest, p.ID))
 	})
 	// Selection is Model-level and anchors to row/column coordinates that any
 	// replay invalidates. Dropped now rather than armed: there is no per-pane

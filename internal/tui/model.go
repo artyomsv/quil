@@ -132,9 +132,9 @@ type PaneInfo struct {
 	// the whole string.
 	GitWorktreeName string
 	GitUpstream     bool
-	GitAhead    int
-	GitBehind   int
-	GitStale    bool
+	GitAhead        int
+	GitBehind       int
+	GitStale        bool
 	// Model/ContextTokens are daemon-authoritative (extracted from hook event
 	// data at turn boundaries): the model id and context-window token count of
 	// the pane's last completed AI turn. Empty/zero for non-AI panes.
@@ -349,15 +349,15 @@ type Model struct {
 	// inputIdle is how the forwarder reports that it has finished draining, so
 	// the exit path can wait for the queue to reach the socket before the
 	// connection is closed out from under it.
-	inputCh              chan paneInput
-	inputDone            chan struct{}
-	inputIdle            chan struct{}
-	clientGen            int          // bumped on every client swap; see linkLostMsg for why
-	closeClientFn        func(Client) // releases a connection; see SetClientCloser
-	cfg                  config.Config
-	version              string
-	sized                bool            // the terminal has reported its geometry at least once
-	attached             map[string]bool // destinations already attached — see attachAllDests
+	inputCh       chan paneInput
+	inputDone     chan struct{}
+	inputIdle     chan struct{}
+	clientGen     int          // bumped on every client swap; see linkLostMsg for why
+	closeClientFn func(Client) // releases a connection; see SetClientCloser
+	cfg           config.Config
+	version       string
+	sized         bool            // the terminal has reported its geometry at least once
+	attached      map[string]bool // destinations already attached — see attachAllDests
 	// sizedOnce records panes this connection has sent at least one
 	// MsgResizePane for. A broadcast-driven resize is suppressed when the
 	// reported size already matches, but the FIRST one is always sent: the
@@ -365,7 +365,7 @@ type Model struct {
 	// every PTY install, and repaintAfterResize's redraw kick for a restored
 	// pane rides that first client resize. Cleared by resetForReattach, since
 	// a reattach is exactly when the daemon's guard may have been zeroed.
-	sizedOnce map[string]bool
+	sizedOnce            map[string]bool
 	renaming             bool
 	renameInput          string
 	renamingPane         bool
@@ -440,13 +440,13 @@ type Model struct {
 	// recorded under another project is not a meaningful resume target.
 	// selectedSessionID is what handleCreatePaneSplit reads for
 	// CreatePanePayload.ResumeSessionID; empty means "start a fresh session".
-	sessionRows       []ipc.ClaudeSessionInfo // listing for sessionScanCWD, newest first
-	sessionCursor     int                     // row cursor: 0 = "New session", 1.. = sessionRows
-	sessionScroll     int                     // scroll offset for the visible window of the expanded list
-	repoScan          repoScanState           // in-flight git discovery — Alt+G overlay or setup-dialog pick list (zero value = none)
-	browse            browseState             // in-flight directory-browser request (zero value = none)
-	worktrees         worktreeState           // create-pane dialog's worktree listing
-	selectedWorktree  string                  // chosen worktree PATH; "" = off (spawn in the CWD field's directory)
+	sessionRows      []ipc.ClaudeSessionInfo // listing for sessionScanCWD, newest first
+	sessionCursor    int                     // row cursor: 0 = "New session", 1.. = sessionRows
+	sessionScroll    int                     // scroll offset for the visible window of the expanded list
+	repoScan         repoScanState           // in-flight git discovery — Alt+G overlay or setup-dialog pick list (zero value = none)
+	browse           browseState             // in-flight directory-browser request (zero value = none)
+	worktrees        worktreeState           // create-pane dialog's worktree listing
+	selectedWorktree string                  // chosen worktree PATH; "" = off (spawn in the CWD field's directory)
 	// worktreeNewBranch is the branch a NEW worktree will be created on.
 	// Non-empty and selectedWorktree empty means "create"; the two are
 	// mutually exclusive, and both handlers clear the other.
@@ -481,16 +481,16 @@ type Model struct {
 	// Cleared on every settling path — success disposes it (the swap really
 	// happened), failure and timeout restore it — so an entry can never outlive
 	// the request that armed it.
-	worktreeReplaced map[string]*PaneModel
-	worktreeCursor    int                     // row cursor in the worktree field's expanded list; row 0 = "off"
-	worktreeScroll    int                     // scroll offset for the visible window of the expanded worktree list
-	reqGen            int                     // monotonic instance id source for repoScan/browse/worktrees; see nextReqGen
-	sessionScanCWD    string                  // directory sessionRows belong to
-	sessionState      sessionScanState        // request lifecycle for the session field
-	sessionError      string                  // daemon-reported error (sessionScanFailed)
-	sessionTruncated  bool                    // daemon capped the listing
-	selectedSessionID string                  // committed resume target (empty = fresh session)
-	sessionDetail     sessionDetailPanel      // the picker's "i" panel (zero value = closed)
+	worktreeReplaced  map[string]*PaneModel
+	worktreeCursor    int                // row cursor in the worktree field's expanded list; row 0 = "off"
+	worktreeScroll    int                // scroll offset for the visible window of the expanded worktree list
+	reqGen            int                // monotonic instance id source for repoScan/browse/worktrees; see nextReqGen
+	sessionScanCWD    string             // directory sessionRows belong to
+	sessionState      sessionScanState   // request lifecycle for the session field
+	sessionError      string             // daemon-reported error (sessionScanFailed)
+	sessionTruncated  bool               // daemon capped the listing
+	selectedSessionID string             // committed resume target (empty = fresh session)
+	sessionDetail     sessionDetailPanel // the picker's "i" panel (zero value = closed)
 
 	// Project New/Rename dialog state (Task 13). Shared by both dialogs —
 	// m.dialog tells them apart, and Rename pre-fills projectFormID/Name from
@@ -5899,9 +5899,14 @@ type paneInput struct {
 }
 
 // inputForwardBuffer bounds the ordered input queue between the Update loop and
-// inputForwarder. Generous because client.Send is non-blocking (it queues onto
-// the conn's own send buffer), so the forwarder drains far faster than a human
-// types — the buffer only absorbs brief bursts (e.g. a fast key-repeat).
+// inputForwarder. Generous because the forwarder normally drains far faster
+// than a human types — the buffer only absorbs brief bursts (e.g. a fast
+// key-repeat).
+//
+// client.Send is no longer strictly non-blocking: it waits up to
+// ipc.clientSendTimeout for room on the conn's critical queue before declaring
+// the peer wedged. That wait is what sizes this buffer's worst case — see
+// enqueueInput, which blocks when the buffer is full.
 const inputForwardBuffer = 1024
 
 // forwardInputBytes queues keystroke bytes for the active pane's PTY.
@@ -5913,7 +5918,8 @@ const inputForwardBuffer = 1024
 // window is normally nanoseconds, but under scheduler starvation it widens to
 // milliseconds and adjacent keys swap — typing "image containers" arrives as
 // "iamg ecotniaesnr", the same characters in the wrong order. A Cmd buys nothing
-// here (client.Send is already non-blocking) and costs ordering.
+// here — the enqueue below is a channel send, and the one goroutine draining it
+// is where any waiting belongs — and it costs ordering.
 func (m Model) forwardInputBytes(data []byte) tea.Cmd {
 	if len(data) == 0 {
 		// Bare modifiers and unencodable keys produce no PTY bytes — skip the
@@ -5945,10 +5951,17 @@ func (m Model) forwardInputBytes(data []byte) tea.Cmd {
 //
 // The channel send blocks if the 1024-deep buffer ever fills. That is by design:
 // dropping a keystroke silently corrupts the very input stream this whole change
-// exists to keep correct, so we prefer momentary backpressure over loss. A full
-// buffer is only reachable if inputForwarder stops draining, which it cannot —
-// client.Send is non-blocking and forwardOne recovers from any panic, so the
-// drainer is immortal and drains far faster than a human types.
+// exists to keep correct, so we prefer momentary backpressure over loss.
+//
+// The drainer cannot die — forwardOne recovers from any panic — but it CAN
+// park: client.Send waits up to ipc.clientSendTimeout for room on the conn's
+// critical queue before it gives up and closes the link. So a full buffer is
+// reachable in one case, a peer wedged for that long while 1024 further inputs
+// arrive, and the cost is that this call blocks the Update goroutine until the
+// timeout fires. That bound is the reason the timeout exists and is measured in
+// seconds rather than deferred to sendLoop's 30 s write deadline: past the
+// timeout the conn closes, every queued send fails instantly, and the drain
+// completes.
 //
 // CONTRACT: data must not be mutated after the call. Every producer allocates a
 // fresh slice (keyToBytes, wheelForwardSeq, pastePayload), and the forwarder
@@ -6046,9 +6059,15 @@ func (m Model) forwardOne(in paneInput) {
 }
 
 // inputDrainTimeout bounds how long TUI exit waits for queued input to reach
-// the socket. The drain cannot legitimately take this long — client.Send is
-// non-blocking on every path — so the bound exists only so an unforeseen stall
-// degrades to "exit anyway, having said so" instead of a TUI that will not quit.
+// the socket, so a stalled drain degrades to "exit anyway, having said so"
+// instead of a TUI that will not quit.
+//
+// It is deliberately SHORTER than ipc.clientSendTimeout, so a peer wedged at
+// exit is a bounded wait here rather than a bounded wait there: one parked
+// client.Send can now exceed this on its own, and the log line that follows is
+// then accurate rather than alarming. Exit is the one path where out-waiting
+// the user is worse than losing the tail of a queue nobody will type into
+// again.
 const inputDrainTimeout = 2 * time.Second
 
 // StopInputForwarder stops inputForwarder and WAITS for it to finish draining.

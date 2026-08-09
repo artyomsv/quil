@@ -20,10 +20,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   after a 33rd tab was created, on an update no drag was involved in. The
   client now sends only what actually differs from the state the daemon just
   reported, and only for the daemon that reported it.
-- A client whose outbound queue fills now waits for it to drain instead of
-  disconnecting. That rule exists so a daemon can drop one unresponsive client
-  rather than stall the others; applied to a client's own connection it had
-  nothing to protect and merely ended the session.
+- A client whose outbound queue fills now waits a few seconds for it to drain
+  instead of disconnecting immediately. That rule exists so a daemon can drop
+  one unresponsive client rather than stall the others; applied to a client's
+  own connection it had nothing to protect and merely ended the session. A
+  daemon that stays unresponsive past the grace period is still reported as a
+  lost connection, so nothing you typed is silently discarded.
 - Restored panes still receive the first resize after attaching or
   reconnecting, which is what prompts them to repaint. Only repeats of a size
   the daemon already has are suppressed.

@@ -74,6 +74,58 @@ func TestBroadcastLayoutBytesDifferForASplit(t *testing.T) {
 	}
 }
 
+func TestLayoutAgrees(t *testing.T) {
+	t.Parallel()
+	leaf := NewLeaf(NewPaneModel("p1", 1024))
+	split := NewLeaf(NewPaneModel("p1", 1024))
+	split.SplitLeaf("p1", SplitHorizontal)
+	split.Right.Pane = NewPaneModel("p2", 1024)
+
+	tests := []struct {
+		name   string
+		stored json.RawMessage
+		root   *LayoutNode
+		want   bool
+	}{
+		{"empty stored means the daemon holds nothing", nil, leaf, false},
+		{"zero-length stored", json.RawMessage{}, leaf, false},
+		{"malformed stored", json.RawMessage(`{"split":`), leaf, false},
+		{"matching leaf", broadcastLayout(t, leaf), leaf, true},
+		{"matching split", broadcastLayout(t, split), split, true},
+		{"leaf stored against a split tree", broadcastLayout(t, leaf), split, false},
+		{"split stored against a leaf tree", broadcastLayout(t, split), leaf, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := layoutAgrees(tt.stored, tt.root); got != tt.want {
+				t.Errorf("layoutAgrees = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// A layout the daemon stores but the client cannot parse must be re-sent, not
+// treated as agreeing — otherwise a corrupt stored tree is never corrected. It
+// costs one frame per broadcast for that tab until the daemon accepts the
+// replacement, which is bounded by the tab count and self-healing.
+func TestLayoutAgrees_MalformedStoredLayoutResends(t *testing.T) {
+	t.Parallel()
+	m, echo := echoModel(t)
+	echo.Tabs[0].Layout = json.RawMessage(`{"split": "not-a-direction"`)
+
+	fs := &echoRecorder{}
+	m.client = fs
+	_, cmd := m.Update(echo)
+	runBatch(cmd)
+
+	layouts, _ := sentCounts(fs)
+	if layouts != 1 {
+		t.Errorf("MsgUpdateLayout count = %d, want 1 — an unparseable stored "+
+			"layout must be replaced, not accepted", layouts)
+	}
+}
+
 // echoModel builds a Model holding one SPLIT tab and one single-pane tab, then
 // returns a broadcast that agrees with it exactly.
 //

@@ -295,9 +295,12 @@ const clientFlushTimeout = 1 * time.Second
 // every test fake keeps compiling.
 type flusher interface{ Flush(time.Duration) bool }
 
-// closeClient FLUSHES before releasing, and the order is load-bearing. Send is
-// non-blocking: it hands the frame to the connection's send loop, which Close
-// then stops without writing what is left. Closing straight after a send
+// closeClient FLUSHES before releasing, and the order is load-bearing. Send
+// returns once the frame is on the connection's send queue, not once it is
+// written: it hands the frame to the send loop, which Close then stops without
+// writing what is left. (Send waits for ROOM on that queue when it is full, up
+// to ipc.clientSendTimeout — that bounds admission, not delivery, so it does
+// not make this flush unnecessary.) Closing straight after a send
 // therefore discards frames the caller was told were accepted — for the TUI
 // exit path that is the user's final keystrokes, the same loss the input queue
 // blocks to avoid, one layer further down. Flush is bounded, so an unresponsive

@@ -28,32 +28,39 @@ func realGitRepo(t *testing.T) string {
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	run := func(args ...string) {
-		t.Helper()
-		cmd := exec.Command("git", args...)
-		cmd.Dir = root
-		// A worktree add reads user.name/user.email when it creates the
-		// branch's first ref; a container with no global config fails without
-		// these, which would look like a bug in Add.
-		// os.DevNull, not "/dev/null": these run natively on Windows, where the
-		// build container has no git at all and the separator handling in
-		// DerivePath differs from the Linux CI leg.
-		cmd.Env = append(os.Environ(),
-			"GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_SYSTEM="+os.DevNull,
-			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
-			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t",
-		)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
-		}
-	}
-	run("init", "-b", "master")
+	runGitIn(t, root, "init", "-b", "master")
 	if err := os.WriteFile(filepath.Join(root, "f.txt"), []byte("x\n"), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	run("add", "f.txt")
-	run("commit", "-m", "init")
+	runGitIn(t, root, "add", "f.txt")
+	runGitIn(t, root, "commit", "-m", "init")
 	return root
+}
+
+// runGitIn runs one git command in dir and fails the test if it does not
+// succeed. Extracted from realGitRepo's closure so a test can drive the
+// repository further — putting HEAD on a branch other than the default one is
+// the whole setup for the base-branch tests below.
+func runGitIn(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	// A worktree add reads user.name/user.email when it creates the
+	// branch's first ref; a container with no global config fails without
+	// these, which would look like a bug in Add.
+	// os.DevNull, not "/dev/null": these run natively on Windows, where the
+	// build container has no git at all and the separator handling in
+	// DerivePath differs from the Linux CI leg.
+	cmd.Env = append(os.Environ(),
+		"GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_SYSTEM="+os.DevNull,
+		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
+		"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t",
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+	}
+	return strings.TrimSpace(string(out))
 }
 
 // The headline guarantee: the new checkout is a SIBLING of the repository, not
@@ -226,5 +233,91 @@ func TestRemove_RealGit_RemovesADirtyWorktree(t *testing.T) {
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Errorf("the dirty worktree survived Remove: %v", err)
+	}
+}
+
+// The bug this pair of tests exists for: a worktree created while the main
+// checkout sat on a feature branch was branched off THAT branch, so a "fix"
+// worktree carried an unmerged feature's commits and its PR diff was the
+// feature. `git worktree add -b <new> <path>` with no start-point branches from
+// the HEAD of the repository the command runs in, and the main checkout's HEAD
+// is whatever the user last worked on — ambient state the operation must not
+// read.
+//
+// Real git rather than a stub, because the defect is entirely in what git does
+// with an argv the stub tests already agreed was correct.
+func TestAdd_RealGit_BranchesFromTheDefaultBranchNotCurrentHEAD(t *testing.T) {
+	repo := realGitRepo(t)
+	// Put HEAD somewhere other than master, with a commit master does not
+	// have. This is the ordinary state of a checkout someone is working in.
+	runGitIn(t, repo, "checkout", "-b", "feat/unrelated")
+	if err := os.WriteFile(filepath.Join(repo, "g.txt"), []byte("unrelated\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	runGitIn(t, repo, "add", "g.txt")
+	runGitIn(t, repo, "commit", "-m", "unrelated work")
+
+	masterTip := runGitIn(t, repo, "rev-parse", "master")
+	headTip := runGitIn(t, repo, "rev-parse", "HEAD")
+	if masterTip == headTip {
+		t.Fatal("setup failed: HEAD and master are the same commit, so the test cannot tell them apart")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	path := DerivePath(repo, "fix/thing")
+	if err := Add(ctx, repo, path, "fix/thing"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	got := runGitIn(t, repo, "rev-parse", "fix/thing")
+	if got == headTip {
+		t.Errorf("the new branch was created off the current HEAD (%s), want the default branch master (%s)", headTip, masterTip)
+	}
+	if got != masterTip {
+		t.Errorf("fix/thing = %s, want master's tip %s", got, masterTip)
+	}
+	// The checkout must match the branch, or the pane comes up on the right
+	// ref with the wrong files on disk.
+	if _, err := os.Stat(filepath.Join(path, "g.txt")); !os.IsNotExist(err) {
+		t.Errorf("the worktree contains g.txt, a file that exists only on feat/unrelated: %v", err)
+	}
+}
+
+// A repository whose HEAD IS the default branch must be unaffected — this is
+// the common case, and it is the one that made the defect invisible until the
+// main checkout happened to be parked on a feature branch.
+func TestAdd_RealGit_BranchesFromDefaultWhenHEADAlreadyIsIt(t *testing.T) {
+	repo := realGitRepo(t)
+	masterTip := runGitIn(t, repo, "rev-parse", "master")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	path := DerivePath(repo, "feat/ordinary")
+	if err := Add(ctx, repo, path, "feat/ordinary"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if got := runGitIn(t, repo, "rev-parse", "feat/ordinary"); got != masterTip {
+		t.Errorf("feat/ordinary = %s, want master's tip %s", got, masterTip)
+	}
+}
+
+// A repository with no branch named main or master and no origin/HEAD still has
+// to work: git init -b trunk is a legitimate repository, and refusing to create
+// a worktree there would be a regression in service of a convention that repo
+// does not follow. Falling back to HEAD is git's own behaviour.
+func TestAdd_RealGit_FallsBackToHEADWhenThereIsNoDefaultBranch(t *testing.T) {
+	repo := realGitRepo(t)
+	runGitIn(t, repo, "branch", "-m", "master", "trunk")
+	trunkTip := runGitIn(t, repo, "rev-parse", "HEAD")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	path := DerivePath(repo, "feat/x")
+	if err := Add(ctx, repo, path, "feat/x"); err != nil {
+		t.Fatalf("Add on a repository with no conventional default branch: %v", err)
+	}
+	if got := runGitIn(t, repo, "rev-parse", "feat/x"); got != trunkTip {
+		t.Errorf("feat/x = %s, want HEAD %s", got, trunkTip)
 	}
 }

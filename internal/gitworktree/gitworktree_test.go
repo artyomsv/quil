@@ -206,10 +206,7 @@ func TestAdd_NeverForces(t *testing.T) {
 	if err := Add(context.Background(), "/repo", "/repo-worktrees/feat-x", "feat/x"); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
-	if len(*calls) != 1 {
-		t.Fatalf("got %d git invocations, want 1", len(*calls))
-	}
-	call := (*calls)[0]
+	call := addCall(t, *calls)
 	if call[0] != "/repo" {
 		t.Errorf("ran in %q, want the repository directory", call[0])
 	}
@@ -218,9 +215,164 @@ func TestAdd_NeverForces(t *testing.T) {
 			t.Fatalf("Add passed a force flag: %v", call)
 		}
 	}
+	// No start-point: the stub answers every resolution probe with empty
+	// output, which is what a repository with no default branch looks like,
+	// and git's own HEAD default is the right answer there.
 	wantArgs := []string{"worktree", "add", "-b", "feat/x", "/repo-worktrees/feat-x"}
 	if !reflect.DeepEqual(call[1:], wantArgs) {
 		t.Errorf("args = %v, want %v", call[1:], wantArgs)
+	}
+}
+
+// addCall picks the `worktree add` invocation out of the calls a single Add
+// makes. Add resolves the base branch first, so the write is no longer the only
+// git command it runs and an index into the slice would pin the number of
+// resolution probes — a detail no caller depends on.
+func addCall(t *testing.T, calls [][]string) []string {
+	t.Helper()
+	for _, c := range calls {
+		if len(c) >= 3 && c[1] == "worktree" && c[2] == "add" {
+			return c
+		}
+	}
+	t.Fatalf("no `git worktree add` among %v", calls)
+	return nil
+}
+
+// stubGitScript answers each invocation from fn, which sees the args and
+// returns git's output and error. The canned-response stubGit cannot express
+// the resolution order — every probe would answer identically, so a test could
+// not tell "asked origin/HEAD first" from "asked everything and took the last".
+func stubGitScript(t *testing.T, fn func(args []string) (string, error)) *[][]string {
+	t.Helper()
+	var calls [][]string
+	prev := runGit
+	runGit = func(ctx context.Context, dir string, args ...string) (string, error) {
+		calls = append(calls, append([]string{dir}, args...))
+		return fn(args)
+	}
+	t.Cleanup(func() { runGit = prev })
+	return &calls
+}
+
+// origin/HEAD is the repository's own recorded answer to "what is the default
+// branch", so it outranks every convention — a repo whose default is `develop`
+// must not be branched off a `master` that happens to exist beside it.
+func TestDefaultBranch_PrefersOriginHEAD(t *testing.T) {
+	calls := stubGitScript(t, func(args []string) (string, error) {
+		if args[0] == "symbolic-ref" {
+			return "origin/develop\n", nil
+		}
+		return "", errors.New("should not be reached")
+	})
+	if got := defaultBranch(context.Background(), "/repo"); got != "origin/develop" {
+		t.Errorf("defaultBranch = %q, want %q", got, "origin/develop")
+	}
+	if len(*calls) != 1 {
+		t.Errorf("origin/HEAD answered, but %d git calls ran: %v", len(*calls), *calls)
+	}
+}
+
+// Most clones never get origin/HEAD set — git only writes it on clone, and a
+// repository created with `git init` plus a remote has none — so the
+// conventional names are the common path, not an exotic fallback.
+func TestDefaultBranch_FallsBackToTheFirstConventionalRefThatExists(t *testing.T) {
+	tests := []struct {
+		name  string
+		exist map[string]bool
+		want  string
+	}{
+		{"remote master", map[string]bool{"origin/master^{commit}": true}, "origin/master"},
+		{"remote main", map[string]bool{"origin/main^{commit}": true}, "origin/main"},
+		{
+			// A remote ref is the shared truth; a local branch of the same name
+			// can be behind it, and branching a fix off a stale local master is
+			// the near-miss version of the bug this resolution exists to fix.
+			"remote wins over local",
+			map[string]bool{"origin/master^{commit}": true, "master^{commit}": true},
+			"origin/master",
+		},
+		{"local only", map[string]bool{"master^{commit}": true}, "master"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stubGitScript(t, func(args []string) (string, error) {
+				if args[0] == "symbolic-ref" {
+					return "", errors.New("exit status 1")
+				}
+				ref := args[len(args)-1]
+				if tt.exist[ref] {
+					return "cafebabe\n", nil
+				}
+				return "", errors.New("exit status 128")
+			})
+			if got := defaultBranch(context.Background(), "/repo"); got != tt.want {
+				t.Errorf("defaultBranch = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// An empty answer must NOT count as a resolved ref. `rev-parse --verify
+// --quiet` prints the sha on success, so empty-with-no-error is a stub, a
+// wrapper or a future git speaking a shape this code did not expect — and
+// adopting it puts an empty string into argv where a commit-ish belongs, which
+// git reads as the path argument.
+func TestDefaultBranch_TreatsEmptyOutputAsUnresolved(t *testing.T) {
+	stubGitScript(t, func(args []string) (string, error) { return "", nil })
+	if got := defaultBranch(context.Background(), "/repo"); got != "" {
+		t.Errorf("defaultBranch = %q, want %q", got, "")
+	}
+}
+
+// A repository with no default branch is a real repository — `git init -b
+// trunk` makes one — so this must be a clean "no answer" the caller can fall
+// back to HEAD on, not an error that refuses to create the worktree.
+func TestDefaultBranch_ReturnsEmptyWhenNothingResolves(t *testing.T) {
+	stubGitScript(t, func(args []string) (string, error) {
+		return "", errors.New("exit status 128")
+	})
+	if got := defaultBranch(context.Background(), "/repo"); got != "" {
+		t.Errorf("defaultBranch = %q, want %q", got, "")
+	}
+}
+
+// The start-point is the whole fix: without it git branches from the HEAD of
+// whatever the main checkout is on, which is ambient state the user did not
+// choose in this dialog.
+func TestAdd_PassesTheDefaultBranchAsStartPoint(t *testing.T) {
+	calls := stubGitScript(t, func(args []string) (string, error) {
+		if args[0] == "symbolic-ref" {
+			return "origin/master\n", nil
+		}
+		return "", nil
+	})
+	if err := Add(context.Background(), "/repo", "/repo-worktrees/feat-x", "feat/x"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	wantArgs := []string{"worktree", "add", "-b", "feat/x", "/repo-worktrees/feat-x", "origin/master"}
+	if got := addCall(t, *calls)[1:]; !reflect.DeepEqual(got, wantArgs) {
+		t.Errorf("args = %v, want %v", got, wantArgs)
+	}
+}
+
+// A resolved value that could be read as a flag must never reach argv. Git's
+// own ref grammar forbids a leading dash, so this cannot happen through git —
+// which is exactly why it is worth a guard rather than a comment: the check
+// costs nothing and the failure it prevents is an injected git option.
+func TestAdd_RefusesAStartPointThatLooksLikeAFlag(t *testing.T) {
+	calls := stubGitScript(t, func(args []string) (string, error) {
+		if args[0] == "symbolic-ref" {
+			return "--upstream\n", nil
+		}
+		return "", nil
+	})
+	if err := Add(context.Background(), "/repo", "/repo-worktrees/feat-x", "feat/x"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	wantArgs := []string{"worktree", "add", "-b", "feat/x", "/repo-worktrees/feat-x"}
+	if got := addCall(t, *calls)[1:]; !reflect.DeepEqual(got, wantArgs) {
+		t.Errorf("args = %v, want %v", got, wantArgs)
 	}
 }
 

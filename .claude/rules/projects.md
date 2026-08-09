@@ -589,6 +589,31 @@ Unix; the build tags keep the difference in one pair of files.
 
 ## Creating worktrees (stage B)
 
+**The new branch starts at the repository's DEFAULT branch, and the whole point
+is that it is not HEAD.** `git worktree add -b <new> <path>` with no start-point
+branches from the HEAD of the repository the command runs in — `cmd.Dir =
+spec.RepoRoot`, the MAIN checkout — so the base was whatever the user last left
+that checkout on. A fix worktree created while it sat on a feature branch came
+up carrying that feature's unmerged commits: isolated in its DIRECTORY, which is
+what the feature advertises, and not in its HISTORY, which is what the user
+assumed. The failure is invisible at create time and surfaces as a PR whose diff
+is somebody else's work. `gitworktree.defaultBranch` resolves `origin/HEAD`
+first (the repository's own recorded answer — a repo whose default is `develop`
+must not be branched off a `master` that merely exists beside it), then
+`origin/main`, `origin/master`, `main`, `master`, remote before local at the
+same name because a local branch can be behind the remote and a base three
+weeks stale is the quiet version of the same bug. Resolution is DAEMON-side and
+absent from the wire: `WorktreeSpec` carries no base, so nothing on the client
+infers anything about a repository living on the daemon's disk. **An empty
+resolution is a real answer** — `git init -b trunk` is a legitimate repository —
+and the caller falls back to git's HEAD default rather than refusing to create
+the worktree, which would trade one wrong behaviour for a broken one. The
+load-bearing tests are the real-git ones (`realgit_test.go`): the defect lived
+entirely in what git DOES with an argv every stub test already agreed was
+correct, so no stub could have caught it, and the reproduction puts HEAD on a
+feature branch with a commit master lacks and asserts the new branch's tip
+against master's.
+
 **A create carrying `CreatePanePayload.Worktree` goes to a WORKER goroutine and
 answers the requester** (`worktreeAddAndCreate`, `daemon/worktree_add.go`).
 `handleCreatePane` runs on the requesting conn's dispatch goroutine, so a

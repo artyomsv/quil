@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- A pane created with a new git worktree branched off whatever the main
+  checkout was currently on, rather than off the repository's default branch.
+  Creating a fix worktree while the main checkout sat on a feature branch
+  produced a branch carrying that feature's unmerged commits, so the pane was
+  isolated in its directory but not in its history and its diff against master
+  was the feature. The base is now the repository's own default branch —
+  `origin/HEAD` where it is set, otherwise `origin/main`, `origin/master`,
+  `main` or `master`, preferring the remote ref over a local one that may be
+  stale. A repository with none of those (`git init -b trunk`) still works and
+  falls back to HEAD as before.
+
 ## [1.53.1] - 2026-08-09
 
 ### Fixed

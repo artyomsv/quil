@@ -158,8 +158,56 @@ func parsePorcelain(out string) []Worktree {
 	return list
 }
 
+// defaultBranch reports the ref a new worktree should branch from, or "" when
+// the repository has no discoverable default branch.
+//
+// This exists because `git worktree add -b <new> <path>` with no start-point
+// branches from the HEAD of the repository the command runs in — the MAIN
+// checkout's current branch, i.e. whatever the user last worked on there. That
+// is ambient state nobody chose in the dialog: a fix worktree created while the
+// main checkout sat on a feature branch carried that feature's unmerged
+// commits, so its diff against master was the feature rather than the fix.
+//
+// origin/HEAD FIRST, because it is the repository's own recorded answer and
+// outranks any convention — a repo whose default is `develop` must not be
+// branched off a `master` that merely exists beside it. It is unset more often
+// than not (git writes it on clone; `git init` plus a remote never gets one),
+// which is why the conventional names are a normal path rather than an exotic
+// fallback.
+//
+// Remote before local at the same name: the remote ref is the shared truth and
+// a local branch of that name can be behind it, which is the quieter version of
+// the same bug — a fix branched off a master that is three weeks stale.
+//
+// Returning "" is a real answer, not a failure. `git init -b trunk` makes a
+// repository with no `main`, no `master` and no remote, and refusing to create
+// a worktree there would trade one wrong behaviour for a broken one; the caller
+// falls back to git's own HEAD default, which is correct for exactly that repo.
+func defaultBranch(ctx context.Context, repo string) string {
+	if out, err := runGit(ctx, repo, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"); err == nil {
+		if ref := strings.TrimSpace(out); ref != "" {
+			return ref
+		}
+	}
+	for _, ref := range []string{"origin/main", "origin/master", "main", "master"} {
+		// ^{commit} rejects a tag or a tree wearing the name, so the value
+		// handed to `worktree add` is always something it can branch from.
+		//
+		// The output is checked as well as the error: --verify --quiet prints
+		// the sha on success, so empty-with-no-error means something other than
+		// git answered, and adopting "" would put an empty argument where a
+		// commit-ish belongs.
+		if out, err := runGit(ctx, repo, "rev-parse", "--verify", "--quiet", ref+"^{commit}"); err == nil && strings.TrimSpace(out) != "" {
+			return ref
+		}
+	}
+	return ""
+}
+
 // Add creates a linked worktree at path, checking out a NEW branch off the
-// repository's current HEAD. repo is the directory the command runs in.
+// repository's default branch — see defaultBranch, and note that this is NOT
+// the repository's current HEAD, which is what git would use if the start-point
+// were omitted. repo is the directory the command runs in.
 //
 // There is deliberately no force option and no --force in the argv. Every
 // refusal git can raise here is a fact the user needs — the path is occupied,
@@ -170,7 +218,15 @@ func parsePorcelain(out string) []Worktree {
 // '/x/feat-y'" tells the user which pane to go look at and no message this
 // package could invent would.
 func Add(ctx context.Context, repo, path, branch string) error {
-	if _, err := runGit(ctx, repo, "worktree", "add", "-b", branch, path); err != nil {
+	args := []string{"worktree", "add", "-b", branch, path}
+	// A leading dash can never come out of defaultBranch — git's ref grammar
+	// forbids one — which is precisely why the guard is cheap enough to keep:
+	// the check costs one comparison and the failure it forecloses is an
+	// injected git option rather than a bad branch.
+	if start := defaultBranch(ctx, repo); start != "" && !strings.HasPrefix(start, "-") {
+		args = append(args, start)
+	}
+	if _, err := runGit(ctx, repo, args...); err != nil {
 		return fmt.Errorf("git worktree add %s (branch %s): %w", path, branch, err)
 	}
 	return nil

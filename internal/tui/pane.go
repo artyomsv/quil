@@ -102,13 +102,13 @@ type PaneModel struct {
 	liveOutputSeen     bool           // first live (non-ghost) output received — settle repaints scheduled
 	reattachReset      bool           // armed on reattach; consumed by the daemon's next replayed chunk (see armReattachReset)
 	working            bool           // derived spinner state: turnActive || len(subagents) > 0 || subagentsOverflow (hook-driven)
-	turnActive         bool           // main turn in flight (UserPromptSubmit/PostToolUse → Stop/park)
+	turnActive         bool           // main turn in flight (UserPromptSubmit/PostToolUse → Stop); a park does NOT clear this — see the workPark case
 	subagents          map[string]int // agent_type → outstanding count (SubagentStart/Stop, burst-aware); a stop only cancels a start it can name
 	subagentsOverflow  bool           // a start was refused by maxTrackedSubagents, so an untracked agent may still be live; sticky until a terminal edge
-	unseen             bool           // work finished/parked while this pane was not focused; cleared on focus
+	unseen             bool           // work finished while this pane was not focused (a park no longer sets this — see workPark); cleared on focus
 	pinnedAttention    bool           // context-menu "Mark attention" pin — green border that SURVIVES focus; cleared only by Unmark. TUI-session state, never persisted
 	workFrame          int            // shared spinner frame index, mirrored here for top-border render
-	blockedSince       time.Time      // set when the agent parks waiting on the user (permission prompt/idle-wait); zero when not blocked. Cleared on workStart/workAbort/workStop/workStopFinal — a completed turn is by definition not blocked
+	blockedSince       time.Time      // set when the agent parks waiting on the user (permission prompt/idle-wait); zero when not blocked. Cleared on workStart/workAbort/workStop/workStopFinal (a completed turn is by definition not blocked) — focus does NOT clear it (see ackFocusedPane); paneRow suppresses the glyph for the focused pane instead
 	blockedReason      string         // optional tool name from the hook's Data["tool"]; genuinely absent for Notification/permission.ask, so left empty rather than invented
 
 	// Mouse-tracking state, updated by the VT EnableMode/DisableMode callbacks
@@ -877,7 +877,12 @@ func (p *PaneModel) View() string {
 
 	borderColor := lipgloss.Color("238")
 	if p.unseen || p.pinnedAttention {
-		borderColor = lipgloss.Color("28") // green — finished/parked/pinned, awaiting attention
+		// Green — finished-while-unfocused, or pinned by hand. A PARK is no
+		// longer one of the reasons: workPark keeps turnActive, so `working`
+		// does not fall and no unseen mark is set. A parked pane is carried by
+		// the sidebar's ▲ and by tabBlocked (which deliberately includes the
+		// active tab, citing the unfocused-split case) rather than here.
+		borderColor = lipgloss.Color("28")
 	}
 	if p.Active {
 		borderColor = lipgloss.Color("57")

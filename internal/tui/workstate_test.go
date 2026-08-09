@@ -26,7 +26,9 @@ func TestWorkEventKind(t *testing.T) {
 		{"hook.opencode.session.error", workStop},
 		{"process_exit", workAbort},
 		// Park-for-input edges: the agent is waiting on the user — distinct
-		// from a completed turn, though both stop the spinner + mark unseen.
+		// from a completed turn. Unlike workStop, this does NOT by itself stop
+		// the spinner: a permission prompt commonly arrives mid-turn, and the
+		// pane keeps working until the turn's own Stop (see TestWorkPark_*).
 		{"hook.claude.Notification", workPark},
 		{"hook.claude.PermissionRequest", workPark},
 		{"hook.opencode.permission.ask", workPark},
@@ -155,11 +157,16 @@ func TestApplyWorkTransition_StopOnUnfocusedSibling_MarksPaneOnly(t *testing.T) 
 	}
 }
 
-func TestApplyWorkTransition_ParkForInput_MarksBackgroundPane(t *testing.T) {
+// TestApplyWorkTransition_ParkForInput_KeepsWorkingMidTurn was
+// TestApplyWorkTransition_ParkForInput_MarksBackgroundPane before item 1: it
+// asserted that a park always stopped the spinner and marked the pane
+// unseen, which was the bug — approving a Bash/Edit/Write prompt fires no
+// hook of its own, so a park that cleared turnActive left the pane reading
+// "blocked" for the rest of the turn. A park arriving mid-turn (no Stop yet)
+// must now leave turnActive, and therefore working, untouched, and since
+// there is no falling edge the pane must not be marked unseen either.
+func TestApplyWorkTransition_ParkForInput_KeepsWorkingMidTurn(t *testing.T) {
 	t.Parallel()
-	// When the agent parks for user input (permission prompt / option select)
-	// the spinner must stop and the pane must be marked unseen — the mark
-	// persists until the user focuses the pane.
 	for _, evt := range []string{
 		"hook.claude.Notification",
 		"hook.claude.PermissionRequest",
@@ -170,11 +177,11 @@ func TestApplyWorkTransition_ParkForInput_MarksBackgroundPane(t *testing.T) {
 			m := modelWithBackgroundTab()
 			m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit", nil)
 			m.applyWorkTransition("p2", evt, nil)
-			if m.curTabs()[1].Root.Leaves()[0].working {
-				t.Errorf("%s: pane.working should be false after a park-for-input edge", evt)
+			if !m.curTabs()[1].Root.Leaves()[0].working {
+				t.Errorf("%s: pane.working should stay true — the turn hasn't reached its own Stop", evt)
 			}
-			if !m.curTabs()[1].Root.Leaves()[0].unseen {
-				t.Errorf("%s: pane should be marked unseen when the agent parks", evt)
+			if m.curTabs()[1].Root.Leaves()[0].unseen {
+				t.Errorf("%s: pane must not be marked unseen — no falling edge fired", evt)
 			}
 		})
 	}
@@ -262,27 +269,98 @@ func TestTurnCompletionClearsTheBlockedMark(t *testing.T) {
 	}
 }
 
-func TestApplyWorkTransition_ResumeAfterParkClearsUnseenAndReArms(t *testing.T) {
+// TestWorkPark_PermissionPromptKeepsTurnActive pins item 1. Claude fires no
+// hook when the user APPROVES a Bash/Edit/Write prompt — the pane's next
+// event is the turn's Stop — so a park that cleared turnActive left the pane
+// reading "blocked" for the entire time the agent was actually working.
+//
+// Notification covers two situations and the distinction is the whole fix:
+// a permission prompt arrives mid-turn (turnActive true), an idle-wait nudge
+// arrives after Stop already cleared it (turnActive false).
+func TestWorkPark_PermissionPromptKeepsTurnActive(t *testing.T) {
 	t.Parallel()
-	// Full prompt cycle on a background pane: start → park (spinner off +
-	// unseen) → user answers (PostToolUse) → spinner back on, mark cleared.
+	const (
+		start = "hook.claude.UserPromptSubmit"
+		park  = "hook.claude.Notification"
+		stop  = "hook.claude.Stop"
+	)
+	tests := []struct {
+		name        string
+		events      []string
+		wantWorking bool
+	}{
+		{"permission park mid-turn", []string{start, park}, true},
+		{"idle-wait park after stop", []string{start, stop, park}, false},
+		{"stop after a park ends the turn", []string{start, park, stop}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := newTestModelWithTabs(t, 1, 1)
+			pane := m.curTabs()[0].Leaves()[0]
+			for _, ev := range tt.events {
+				m.applyWorkTransition(pane.ID, ev, nil)
+			}
+			if pane.working != tt.wantWorking {
+				t.Errorf("working = %v, want %v", pane.working, tt.wantWorking)
+			}
+		})
+	}
+}
+
+// TestWorkPark_SetsBlockedRegardlessOfTurnState pins that preserving
+// turnActive did not cost the blocked mark — that mark is what the sidebar ▲
+// and the new tabBlocked both read.
+func TestWorkPark_SetsBlockedRegardlessOfTurnState(t *testing.T) {
+	t.Parallel()
+	m := newTestModelWithTabs(t, 1, 1)
+	pane := m.curTabs()[0].Leaves()[0]
+	m.applyWorkTransition(pane.ID, "hook.claude.UserPromptSubmit", nil)
+	m.applyWorkTransition(pane.ID, "hook.claude.PermissionRequest",
+		map[string]string{"tool": "Bash"})
+	if pane.blockedSince.IsZero() {
+		t.Error("blockedSince should be set by a park")
+	}
+	if pane.blockedReason != "Bash" {
+		t.Errorf("blockedReason = %q, want %q", pane.blockedReason, "Bash")
+	}
+	if !pane.working {
+		t.Error("a permission park must not stop the spinner")
+	}
+}
+
+// TestApplyWorkTransition_ResumeAfterParkKeepsWorkingThroughout was
+// TestApplyWorkTransition_ResumeAfterParkClearsUnseenAndReArms before item 1.
+// It used to pin an off-then-on spinner cycle across a mid-turn park — that
+// was the bug (see TestWorkPark_PermissionPromptKeepsTurnActive): turnActive
+// now survives the park, so the spinner never drops and the pane never gets
+// marked unseen across the whole park → resume cycle.
+func TestApplyWorkTransition_ResumeAfterParkKeepsWorkingThroughout(t *testing.T) {
+	t.Parallel()
 	m := modelWithBackgroundTab()
 	m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit", nil)
 	m.applyWorkTransition("p2", "hook.claude.PermissionRequest", nil) // park
 	pane := m.curTabs()[1].Root.Leaves()[0]
-	if pane.working {
-		t.Fatal("precondition: pane should be parked (not working) before resume")
+	if !pane.working {
+		t.Fatal("precondition: a mid-turn park must not stop the spinner")
 	}
-	if !pane.unseen {
-		t.Fatal("precondition: pane should be unseen after the park")
+	if pane.unseen {
+		t.Fatal("precondition: a mid-turn park must not mark the pane — no falling edge fired")
 	}
 
 	m.applyWorkTransition("p2", "hook.claude.PostToolUse", nil) // resume
 	if !pane.working {
-		t.Error("pane.working should be true again after the answer (PostToolUse)")
+		t.Error("pane.working should still be true after the answer (PostToolUse)")
 	}
 	if pane.unseen {
-		t.Error("resume must clear the unseen mark — work is no longer parked")
+		t.Error("resume must leave the pane unmarked — it was never marked in the first place")
+	}
+	// The thing a resume actually DOES to a parked pane: it answers the
+	// question, so the pane is no longer waiting on the user.
+	if !pane.blockedSince.IsZero() {
+		t.Error("resume (PostToolUse) should clear blockedSince")
+	}
+	if pane.blockedReason != "" {
+		t.Errorf("resume (PostToolUse) should clear blockedReason, got %q", pane.blockedReason)
 	}
 }
 
@@ -332,33 +410,62 @@ func TestApplyWorkTransition_StopWithoutPriorStart_NoMark(t *testing.T) {
 func TestApplyWorkTransition_StopWithOutstandingSubagents_KeepsSpinner(t *testing.T) {
 	t.Parallel()
 	// Claude Code runs subagents in the background by default: the main
-	// turn's Stop (or a park-for-input edge) fires while they are still
-	// working. The spinner must survive the edge and the unseen mark must be
-	// deferred until the work has actually drained.
-	for _, stopEdge := range []string{"hook.claude.Stop", "hook.claude.Notification"} {
-		t.Run(stopEdge, func(t *testing.T) {
-			t.Parallel()
-			m := modelWithBackgroundTab()
-			m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit", nil)
-			m.applyWorkTransition("p2", "hook.claude.SubagentStart", map[string]string{"agent_type": "Explore"})
-			m.applyWorkTransition("p2", stopEdge, nil)
-			pane := m.curTabs()[1].Root.Leaves()[0]
-			if !pane.working {
-				t.Errorf("%s with an outstanding subagent must keep the spinner", stopEdge)
-			}
-			if pane.unseen {
-				t.Errorf("%s with an outstanding subagent must defer the unseen mark", stopEdge)
-			}
+	// turn's Stop fires while they are still working. The spinner must
+	// survive the edge and the unseen mark must be deferred until the work
+	// has actually drained.
+	m := modelWithBackgroundTab()
+	m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit", nil)
+	m.applyWorkTransition("p2", "hook.claude.SubagentStart", map[string]string{"agent_type": "Explore"})
+	m.applyWorkTransition("p2", "hook.claude.Stop", nil)
+	pane := m.curTabs()[1].Root.Leaves()[0]
+	if !pane.working {
+		t.Error("Stop with an outstanding subagent must keep the spinner")
+	}
+	if pane.unseen {
+		t.Error("Stop with an outstanding subagent must defer the unseen mark")
+	}
 
-			// The last subagent finishing IS the completion edge now.
-			m.applyWorkTransition("p2", "hook.claude.SubagentStop", map[string]string{"agent_type": "Explore"})
-			if pane.working {
-				t.Error("draining the last subagent after the turn ended must stop the spinner")
-			}
-			if !pane.unseen {
-				t.Error("draining the last subagent after the turn ended must mark the background pane unseen")
-			}
-		})
+	// The last subagent finishing IS the completion edge now.
+	m.applyWorkTransition("p2", "hook.claude.SubagentStop", map[string]string{"agent_type": "Explore"})
+	if pane.working {
+		t.Error("draining the last subagent after the turn ended must stop the spinner")
+	}
+	if !pane.unseen {
+		t.Error("draining the last subagent after the turn ended must mark the background pane unseen")
+	}
+}
+
+// TestApplyWorkTransition_ParkWithOutstandingSubagent_WaitsForRealStop was
+// folded into the Stop case above before item 1, on the premise that a park
+// and a real Stop had identical effects on turnActive. They no longer do: a
+// mid-turn park leaves turnActive alone, so draining the subagent afterward
+// must NOT stop the spinner — the main turn is still open and only its own
+// Stop can end it.
+func TestApplyWorkTransition_ParkWithOutstandingSubagent_WaitsForRealStop(t *testing.T) {
+	t.Parallel()
+	m := modelWithBackgroundTab()
+	m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit", nil)
+	m.applyWorkTransition("p2", "hook.claude.SubagentStart", map[string]string{"agent_type": "Explore"})
+	m.applyWorkTransition("p2", "hook.claude.Notification", nil)
+	pane := m.curTabs()[1].Root.Leaves()[0]
+	if !pane.working {
+		t.Fatal("a mid-turn park with an outstanding subagent must keep the spinner")
+	}
+
+	m.applyWorkTransition("p2", "hook.claude.SubagentStop", map[string]string{"agent_type": "Explore"})
+	if !pane.working {
+		t.Error("draining the subagent must not stop the spinner — turnActive is still true, waiting on the real Stop")
+	}
+	if pane.unseen {
+		t.Error("no falling edge fired yet, so the pane must not be marked unseen")
+	}
+
+	m.applyWorkTransition("p2", "hook.claude.Stop", nil)
+	if pane.working {
+		t.Error("the turn's real Stop must finally clear the spinner")
+	}
+	if !pane.unseen {
+		t.Error("the real Stop is the completion edge and must mark the pane unseen")
 	}
 }
 
@@ -1141,6 +1248,50 @@ func TestJumpToPane_TellsTheOwningDaemonAboutTheTab(t *testing.T) {
 	// the router's current dest is, which is the wrong machine as often as not.
 	if switched.Origin != "gpu01" {
 		t.Errorf("MsgSwitchTab Origin = %q, want gpu01", switched.Origin)
+	}
+}
+
+// TestJumpToPane_ResetsSidebarScrollOnProjectChange pins the same UX choice
+// switchProject makes, for the OTHER path that can move m.activeProject:
+// jumpToPane is the documented choke point for MCP set_active_pane, the
+// notification sidebar's "navigate", pane-history back-navigation, and the
+// command palette's goToPane — none of which went through switchProject, so
+// none of them reset the offset before this fix.
+func TestJumpToPane_ResetsSidebarScrollOnProjectChange(t *testing.T) {
+	t.Parallel()
+	m := twoProjectModel()
+	m.sidebarScroll = 12
+	if !m.jumpToPane("p-bg") {
+		t.Fatal("jumpToPane should report success for an existing pane")
+	}
+	if m.activeProject != 1 {
+		t.Fatalf("activeProject = %d, want 1 (proj-bg) — jump did not cross projects", m.activeProject)
+	}
+	if m.sidebarScroll != 0 {
+		t.Errorf("sidebarScroll = %d after a cross-project jump, want 0", m.sidebarScroll)
+	}
+}
+
+// TestJumpToPane_KeepsSidebarScrollOnSameProjectJump: a jump that stays inside
+// the project already active (e.g. pane-history back into a different tab of
+// the SAME project) must not disturb the user's scroll position — there is no
+// project-boundary crossing here for the reset to be "arriving somewhere new"
+// about.
+func TestJumpToPane_KeepsSidebarScrollOnSameProjectJump(t *testing.T) {
+	t.Parallel()
+	tabA := tabWith(&PaneModel{ID: "p-a"})
+	tabB := tabWith(&PaneModel{ID: "p-b"})
+	proj := &ProjectModel{ID: "proj-solo", Name: "Solo", tabs: []*TabModel{tabA, tabB}}
+	m := Model{projects: []*ProjectModel{proj}, activeProject: 0, sidebarScroll: 12}
+
+	if !m.jumpToPane("p-b") {
+		t.Fatal("jumpToPane should report success for an existing pane")
+	}
+	if m.activeProject != 0 {
+		t.Fatalf("activeProject = %d, want 0 — jump should have stayed in proj-solo", m.activeProject)
+	}
+	if m.sidebarScroll != 12 {
+		t.Errorf("sidebarScroll = %d after a same-project jump, want unchanged 12", m.sidebarScroll)
 	}
 }
 

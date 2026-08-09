@@ -594,3 +594,206 @@ func TestCtxMenu_CompactFallbackOnShortTerminal(t *testing.T) {
 		t.Errorf("compact box h=%d still exceeds content area %d", h, m.height-2)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Sidebar pane row right-click (item 4)
+// ---------------------------------------------------------------------------
+
+// newTestModelWithSidebar builds a Model with the project sidebar open and
+// one project holding two tabs: tab 0 (active, pane-1) and tab 1
+// (background, pane-2) — so a sidebar right-click has a background-tab pane
+// available to target. Dimensions match newSplitDragTestModel's so the
+// pane context menu box has room to open.
+func newTestModelWithSidebar(t *testing.T) Model {
+	t.Helper()
+	tab0 := tabWithPane("tab-0", "pane-1")
+	tab1 := tabWithPane("tab-1", "pane-2")
+	proj := &ProjectModel{ID: "proj-a", Name: "alpha", tabs: []*TabModel{tab0, tab1}}
+	return Model{
+		cfg:           config.Default(),
+		width:         100,
+		height:        40,
+		sidebarOpen:   true,
+		sidebarWidth:  22,
+		notifications: NewNotificationCenter(40, 200),
+		projects:      []*ProjectModel{proj},
+		activeProject: 0,
+	}
+}
+
+// sidebarPaneRowCoords resolves the screen coordinate of the sidebar pane
+// row at flat ordinal `ordinal` (numbered across the active project's tabs,
+// as sidebarHit numbers them) by scanning the same row list sidebarRowAt
+// indexes — mirroring activateSidebarRow rather than hardcoding row
+// geometry that shifts whenever sidebar_test.go's fixtures gain a row.
+func sidebarPaneRowCoords(t *testing.T, m *Model, ordinal int) (int, int) {
+	t.Helper()
+	for y, row := range m.sidebarVisibleRows(m.projectSidebarWidth(), m.sidebarContentHeight()) {
+		if row.kind == sidebarRowPane && row.index == ordinal {
+			return 3, y // column 3: same arbitrary in-strip column sidebar_test.go uses
+		}
+	}
+	t.Fatalf("no sidebar pane row for ordinal %d", ordinal)
+	return 0, 0
+}
+
+// backgroundTabPaneID returns the id of a pane belonging to a tab other than
+// the active one, for tests exercising executeCtxMenuItem's background-tab
+// resolution.
+func backgroundTabPaneID(t *testing.T, m *Model) string {
+	t.Helper()
+	activeIdx := m.activeTabIdx()
+	for ti, tab := range m.curTabs() {
+		if ti == activeIdx {
+			continue
+		}
+		for _, pane := range tab.Leaves() {
+			return pane.ID
+		}
+	}
+	t.Fatal("fixture has no pane on a background tab")
+	return ""
+}
+
+// TestSidebarRightClick_OpensPaneCtxMenu pins item 4. The MouseRight branch
+// inside the sidebar swallow tested only sidebarRowProject, so a right-click on
+// a pane row fell through to `return m, nil` — no menu, no feedback.
+//
+// Driven through Update, not by calling the handler: the bug IS a branch the
+// call site never enters, and a direct-call test would pass against it.
+func TestSidebarRightClick_OpensPaneCtxMenu(t *testing.T) {
+	t.Parallel()
+	m := newTestModelWithSidebar(t)
+	x, y := sidebarPaneRowCoords(t, &m, 0)
+
+	updated, _ := m.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseRight})
+	got := updated.(Model)
+
+	if !got.ctxMenu.open() {
+		t.Fatal("right-click on a sidebar pane row should open the pane context menu")
+	}
+}
+
+// TestSidebarRightClick_BackgroundTabPaneMenuActs pins the round-1 fix: a
+// right-click on a sidebar pane row FOCUSES the pane first, exactly like
+// left-click — reversing the earlier "does not move focus" decision. Opening
+// the menu was not enough on its own: eight of the ten dispatched items
+// (Rename among them) resolve their target through the ACTIVE tab's ACTIVE
+// pane internally (shared with the keybinding and command-palette paths), so
+// without focus-first a menu opened on a BACKGROUND-tab pane would act on
+// whatever pane was on screen instead of the one the menu was titled after.
+func TestSidebarRightClick_BackgroundTabPaneMenuActs(t *testing.T) {
+	t.Parallel()
+	m := newTestModelWithSidebar(t)
+	// A pane row belonging to a tab that is not the active one. Given a
+	// name distinct from the active tab's pane so Rename's seeded value
+	// below proves WHICH pane it read, not just that it read something.
+	pane, _, tabIdx := m.findPaneAndTab(backgroundTabPaneID(t, &m))
+	if pane == nil || tabIdx == m.activeTabIdx() {
+		t.Fatal("fixture must provide a pane on a background tab")
+	}
+	pane.Name = "wt-build"
+	x, y := sidebarPaneRowCoords(t, &m, 1) // ordinal 1: the background pane
+
+	updated, cmd := m.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseRight})
+	got := updated.(Model)
+
+	if !got.ctxMenu.open() || got.ctxMenu.paneID != pane.ID {
+		t.Fatalf("right-click should open the menu on the clicked pane: open=%v paneID=%q, want %q",
+			got.ctxMenu.open(), got.ctxMenu.paneID, pane.ID)
+	}
+	if got.activeTabIdx() != tabIdx {
+		t.Errorf("right-click should focus the clicked pane's tab: activeTabIdx=%d, want %d", got.activeTabIdx(), tabIdx)
+	}
+	if !pane.Active {
+		t.Error("right-click should focus the clicked pane")
+	}
+	if cmd == nil {
+		t.Error("focusing a pane on a different tab must return switchTab's IPC cmd, not drop it")
+	}
+
+	updated2, _ := got.executeCtxMenuItem(ctxMenuItem{id: ctxActRename, enabled: true})
+	got2 := updated2.(Model)
+
+	if !got2.renamingPane || got2.paneRenameInput != "wt-build" {
+		t.Errorf("Rename should act on the clicked pane: renamingPane=%v paneRenameInput=%q, want %q",
+			got2.renamingPane, got2.paneRenameInput, "wt-build")
+	}
+}
+
+// TestCtxMenu_ExecuteRefusesWhenTheActiveTabMovedAway pins the execute-time half
+// of the property the focus-first entry points only establish at OPEN time.
+//
+// Eight of the ten items resolve their target through
+// activeTabModel().ActivePaneModel(), so they are correct only while the menu's
+// target sits in the ACTIVE tab. Every entry point focuses first, which makes
+// that true when the menu opens — and nothing keeps it true afterwards: MCP
+// set_active_pane (setActivePaneMsg → jumpToPane) moves the active project AND
+// tab, and the Update-entry guard only closes a menu whose target has VANISHED.
+// Keyboard and mouse cannot reach this; MCP is the one producer that can.
+//
+// Before the guard, Rename seeded the ON-SCREEN pane's name, Mute toggled the
+// on-screen pane, and Restart/Close armed a confirm for it — each of them acting
+// on a pane the menu was not titled after. The refusal is uniform across all ten
+// items, INCLUDING the two attention rows that resolve paneID directly and could
+// still have acted correctly: one rule for one surface, it matches what the code
+// did before this branch, and the remedy is a second right-click.
+func TestCtxMenu_ExecuteRefusesWhenTheActiveTabMovedAway(t *testing.T) {
+	t.Parallel()
+	m := newTestModelWithSidebar(t)
+	m.client = newFakeConn()
+
+	target, _, targetTabIdx := m.findPaneAndTab(backgroundTabPaneID(t, &m))
+	if target == nil || targetTabIdx == m.activeTabIdx() {
+		t.Fatal("fixture must provide a pane on a background tab")
+	}
+	target.Name = "wt-build"
+	onScreen := m.curTabs()[m.activeTabIdx()].Leaves()[0]
+	onScreen.Name = "on-screen"
+
+	// Right-click the background pane's sidebar row: this focuses it, so its
+	// tab becomes active and the menu's assumption holds at open time.
+	x, y := sidebarPaneRowCoords(t, &m, 1)
+	updated, _ := m.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseRight})
+	got := updated.(Model)
+	if !got.ctxMenu.open() || got.ctxMenu.paneID != target.ID {
+		t.Fatalf("right-click should open the menu on %q: open=%v paneID=%q",
+			target.ID, got.ctxMenu.open(), got.ctxMenu.paneID)
+	}
+
+	// MCP set_active_pane moves the active tab out from under the open menu.
+	updated, _ = got.Update(setActivePaneMsg{PaneID: onScreen.ID})
+	got = updated.(Model)
+	if !got.ctxMenu.open() {
+		t.Fatal("precondition: the vanished-target guard must NOT close this menu — " +
+			"the target pane still exists, only the active tab moved")
+	}
+	if got.activeTabIdx() == targetTabIdx {
+		t.Fatal("fixture: set_active_pane did not move the active tab, so this test cannot fail")
+	}
+
+	// Rename resolves through the ACTIVE tab, so acting would seed "on-screen".
+	updated, _ = got.executeCtxMenuItem(ctxMenuItem{id: ctxActRename, enabled: true})
+	if r := updated.(Model); r.renamingPane {
+		t.Errorf("Rename acted with paneRenameInput=%q — the menu targets %q, which the "+
+			"active-tab dispatch cannot reach; the item must refuse", r.paneRenameInput, target.Name)
+	}
+
+	// Close arms a confirm dialog for whatever the active-tab dispatch resolves.
+	updated, _ = got.executeCtxMenuItem(ctxMenuItem{id: ctxActClose, enabled: true})
+	if c := updated.(Model); c.dialog == dialogConfirm {
+		t.Errorf("Close armed a confirm for %q — the menu targets %q", c.confirmID, target.ID)
+	}
+
+	// The two paneID-direct attention items refuse under the same rule.
+	updated, _ = got.executeCtxMenuItem(ctxMenuItem{id: ctxActAttention, enabled: true})
+	a := updated.(Model)
+	if target.pinnedAttention || onScreen.pinnedAttention {
+		t.Errorf("Mark attention pinned a pane (target=%v on-screen=%v) — the menu refuses "+
+			"as a whole once its target is off the active tab",
+			target.pinnedAttention, onScreen.pinnedAttention)
+	}
+	if a.ctxMenu.open() {
+		t.Error("a refused item must still close the menu")
+	}
+}

@@ -115,14 +115,21 @@ func (m *Model) buildCtxMenuItems(pane *PaneModel) []ctxMenuItem {
 	// the user cannot otherwise get rid of.
 	//
 	// blockedSince is set by a hook edge and cleared only by another hook edge
-	// (workStart / workAbort / workStop / workStopFinal, workstate.go). Every
-	// route to a clear therefore runs through the agent — so when the clearing
+	// (workStart / workAbort / workStop / workStopFinal, workstate.go) — this
+	// row is the sole exception, which is what it exists to be. Every other
+	// route to a clear therefore runs through the agent, so when the clearing
 	// event never arrives (the hook stream stopped, the session ended in a way
 	// that emitted nothing, the prompt was answered somewhere the hooks do not
 	// observe) the pane stays marked for the life of the TUI process, and the
 	// project row it rolls up into stays marked with it. A lying indicator in
 	// the one place the user looks to decide where to go next is worse than no
 	// indicator, and there was no way to dismiss it short of restarting.
+	//
+	// FOCUS is not a route to a clear, deliberately (ackFocusedPane, which runs
+	// on every message including a spinner tick, records why). The ▲ does
+	// vanish from the focused pane's own sidebar row — paneRow suppresses the
+	// glyph — but the mark itself survives, so this row stays the only way to
+	// dismiss a stuck one, on a pane the user is NOT going to sit in.
 	//
 	// Disabled when there is nothing to clear, so the row also ANSWERS the
 	// question "is this pane actually still flagged" rather than silently
@@ -534,9 +541,43 @@ func (m Model) executeCtxMenuItem(item ctxMenuItem) (tea.Model, tea.Cmd) {
 	if !item.enabled || paneID == "" {
 		return m, nil
 	}
-	tab := m.activeTabModel()
-	if tab == nil || tab.Root == nil || tab.Root.FindLeaf(paneID) == nil {
+	// The target is resolved across EVERY project, not through curTabs():
+	// that helper is the active project's slice alone, so indexing it with a
+	// foreign tabIdx would act on an unrelated tab — or panic.
+	pane, proj, tabIdx := m.findPaneAndTab(paneID)
+	if pane == nil || proj == nil || tabIdx < 0 || tabIdx >= len(proj.tabs) {
 		return m, nil // target vanished between open and execute
+	}
+	tab := proj.tabs[tabIdx]
+	if tab == nil || tab.Root == nil || tab.Root.FindLeaf(paneID) == nil {
+		return m, nil
+	}
+	// Eight of the ten items below resolve their target through
+	// activeTabModel().ActivePaneModel() — they are shared with the keybinding
+	// and command-palette paths, and this block cannot redirect them. So they
+	// are correct only while the target sits in the ACTIVE tab.
+	//
+	// Every entry point focuses the pane before opening the menu, which
+	// establishes that at OPEN time and does not keep it true afterwards: MCP
+	// set_active_pane (setActivePaneMsg → jumpToPane) moves the active project
+	// AND tab, and the Update-entry guard only closes a menu whose target has
+	// VANISHED, not one whose active tab moved. Keyboard and mouse cannot reach
+	// that state; MCP is the one producer that can. Acting anyway had Rename
+	// seed the on-screen pane's name and Restart/Close arm a confirm for it.
+	//
+	// The refusal is UNIFORM, including the two items that resolve paneID
+	// directly (ctxActAttention/ctxActClearAttention) and could still have acted
+	// correctly: one menu is one surface, and "two of ten rows work after the
+	// tab moved" is a rule nobody can hold. The remedy is a second right-click.
+	// It is checked BEFORE the focus sync below, so a refused execute leaves no
+	// half-applied focus on a background tab either.
+	//
+	// A FUTURE entry point that opens this menu on a pane outside the active tab
+	// without focusing it first will find every row inert here. That is the
+	// intended failure — the fix is to focus first, as the sidebar right-click
+	// and quick_actions paths do, not to loosen this.
+	if proj != m.cur() || tabIdx != m.activeTabIdx() {
+		return m, nil
 	}
 	// Sync the Active bool alongside ActivePane — mirrors the mouse-release
 	// pane-focus path (model.go) and NavigateDirection (tab.go). Leaving
@@ -547,9 +588,7 @@ func (m Model) executeCtxMenuItem(item ctxMenuItem) (tea.Model, tea.Cmd) {
 		old.Active = false
 	}
 	tab.ActivePane = paneID
-	if pane, _, _ := m.findPaneAndTab(paneID); pane != nil {
-		pane.Active = true
-	}
+	pane.Active = true
 
 	switch item.id {
 	case ctxActHistory:

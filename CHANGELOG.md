@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.53.0] - 2026-08-09
+
 ### Added
 - Sidebar PANES section scrolls with the mouse wheel, with markers showing how
   many rows are hidden above and below. The PROJECTS list stays pinned.

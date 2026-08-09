@@ -1,6 +1,9 @@
 package keymap
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestBuild_MatchesByTier(t *testing.T) {
 	km, conflicts := Build(map[ActionID]string{
@@ -44,6 +47,51 @@ func TestBuild_MultiStepSequenceNeverMatchesItsFirstChord(t *testing.T) {
 	km, _ := Build(map[ActionID]string{"tab.new": "ctrl+b c"})
 	if _, ok := km.MatchTier(TierLate, "ctrl+b"); ok {
 		t.Error("a multi-step sequence matched on its first chord")
+	}
+}
+
+// TestBuild_MultiStepSequenceIsReportedAsUnsupported is the other half of the
+// test above, and the reason it exists is that the two together are the whole
+// contract: the sequence must not dispatch AND must not be advertised as
+// working. It stays in bindings, so Display renders "ctrl+b c" in F1 exactly
+// like a binding that fires — the conflict row is the only thing that says
+// otherwise, and this file's governing principle is that a silently dropped
+// binding is worse than a loud one.
+func TestBuild_MultiStepSequenceIsReportedAsUnsupported(t *testing.T) {
+	km, conflicts := Build(map[ActionID]string{"tab.new": "ctrl+b c"})
+	if len(conflicts) != 1 || conflicts[0].Kind != ConflictUnsupportedSequence {
+		t.Fatalf("conflicts = %+v, want one ConflictUnsupportedSequence", conflicts)
+	}
+	if got := conflicts[0].Key; got != "ctrl+b c" {
+		t.Errorf("conflict Key = %q, want the whole sequence", got)
+	}
+	if got := conflicts[0].Loser; got != "tab.new" {
+		t.Errorf("conflict Loser = %q, want tab.new", got)
+	}
+	// The user sees the message, not the struct: it has to name the sequence
+	// and the action, or the F1 row says a key is broken without saying which.
+	msg := conflicts[0].String()
+	for _, want := range []string{"sequence not supported yet", `"ctrl+b c"`, "tab.new", "never fires"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("Conflict.String() = %q, missing %q", msg, want)
+		}
+	}
+	// And Display still offers it — which is exactly why the conflict is
+	// needed. If this ever stops being true the conflict can go with it.
+	if got := km.Display("tab.new"); got != "ctrl+b c" {
+		t.Errorf("Display = %q, want the sequence still advertised", got)
+	}
+}
+
+// TestBuild_SingleChordSpecsProduceNoSequenceConflict is the control: the
+// unsupported-sequence report must fire on multi-step specs only. Without it a
+// `continue` that reported every binding would still pass the test above.
+func TestBuild_SingleChordSpecsProduceNoSequenceConflict(t *testing.T) {
+	_, conflicts := Build(map[ActionID]string{"pane.rename": "alt+f2,alt+shift+r"})
+	for _, c := range conflicts {
+		if c.Kind == ConflictUnsupportedSequence {
+			t.Errorf("a comma-separated alternative was reported as a sequence: %+v", c)
+		}
 	}
 }
 
@@ -119,7 +167,17 @@ func TestDisplayAndKeys(t *testing.T) {
 func TestBuild_UnknownActionIDIsIgnoredWithAConflict(t *testing.T) {
 	_, conflicts := Build(map[ActionID]string{"nope.nope": "ctrl+z"})
 	if len(conflicts) != 1 || conflicts[0].Kind != ConflictUnknownAction {
-		t.Errorf("conflicts = %+v, want one ConflictUnknownAction", conflicts)
+		t.Fatalf("conflicts = %+v, want one ConflictUnknownAction", conflicts)
+	}
+	// The chord rides along so the message can point at a line. Unreachable
+	// while keySpecsFromConfig emits 41 literal IDs; Stage 3's bindings.toml
+	// makes a typo'd ID the most common failure there is, and an ID alone does
+	// not say which line of the file to look at.
+	if got := conflicts[0].Key; got != "ctrl+z" {
+		t.Errorf("conflict Key = %q, want the offending spec %q", got, "ctrl+z")
+	}
+	if msg := conflicts[0].String(); !strings.Contains(msg, "ctrl+z") {
+		t.Errorf("Conflict.String() = %q, never names the chord", msg)
 	}
 }
 

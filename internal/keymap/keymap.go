@@ -45,7 +45,9 @@ func Build(specs map[ActionID]string) (*Keymap, []Conflict) {
 	// renderer detectShadowing's sort exists for.
 	sort.Slice(unknown, func(i, j int) bool { return unknown[i] < unknown[j] })
 	for _, id := range unknown {
-		conflicts = append(conflicts, Conflict{Kind: ConflictUnknownAction, Loser: id})
+		// Key carries the SPEC, so the message can name the chord the user
+		// wrote next to the ID they misspelled.
+		conflicts = append(conflicts, Conflict{Kind: ConflictUnknownAction, Key: specs[id], Loser: id})
 	}
 
 	for _, a := range resolved {
@@ -62,9 +64,24 @@ func Build(specs map[ActionID]string) (*Keymap, []Conflict) {
 		km.bindings[a.ID] = seqs
 		for _, seq := range seqs {
 			if len(seq) != 1 {
-				continue // multi-step: Stage 2 owns these
+				// Multi-step: Stage 2's prefix machine owns these. The
+				// sequence stays in bindings — Display renders it in F1 like
+				// any other binding — so it has to be REPORTED, or the dialog
+				// advertises a chord that does nothing. Stage 2 deletes this
+				// branch along with the conflict.
+				conflicts = append(conflicts, Conflict{
+					Kind: ConflictUnsupportedSequence, Key: seq.String(), Loser: a.ID,
+				})
+				continue
 			}
 			key := seq[0].String()
+			// Lazy tier map rather than a fixed seed: km.chords was built with
+			// entries for exactly TierEarly and TierLate, so adding a third
+			// tier would panic on a nil-map write before the TUI drew a frame.
+			// A test pinned that; nothing in the code did.
+			if km.chords[a.Tier] == nil {
+				km.chords[a.Tier] = map[string]ActionID{}
+			}
 			if prev, taken := km.chords[a.Tier][key]; taken {
 				conflicts = append(conflicts, Conflict{
 					Kind: ConflictDuplicate, Key: key, Winner: prev, Loser: a.ID,
@@ -125,6 +142,13 @@ func (k *Keymap) MatchTier(t Tier, key string) (ActionID, bool) {
 }
 
 // Bindings returns the sequences bound to an action, or nil.
+//
+// Stage 2's prefix state machine is the caller this exists for: it needs the
+// unflattened Sequence — how many chords, and which — where every Stage 1
+// reader wants a display string (Display) or the canonical chords (Keys).
+// Deliberately kept rather than deleted: the multi-step specs it will consume
+// already parse and are already stored, and ConflictUnsupportedSequence is what
+// tells the user they are not dispatched yet.
 func (k *Keymap) Bindings(id ActionID) []Sequence {
 	if k == nil {
 		return nil

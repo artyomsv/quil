@@ -96,7 +96,8 @@ func TestConflict_StringIncludesKindLabel(t *testing.T) {
 		{"cross-tier", Conflict{Kind: ConflictCrossTier, Key: "alt+z", Winner: "pane.mute", Loser: "pane.close"}, "cross-tier shadowing"},
 		{"hardcoded", Conflict{Kind: ConflictHardcoded, Key: "f1", Loser: "pane.close"}, "collides with a built-in key"},
 		{"malformed", Conflict{Kind: ConflictMalformed, Key: "ctrl+w", Loser: "pane.close", Detail: "bad spec"}, "unreadable binding"},
-		{"unknown-action", Conflict{Kind: ConflictUnknownAction, Loser: "made.up"}, "unknown action"},
+		{"unknown-action", Conflict{Kind: ConflictUnknownAction, Key: "ctrl+z", Loser: "made.up"}, "unknown action"},
+		{"unsupported-sequence", Conflict{Kind: ConflictUnsupportedSequence, Key: "ctrl+b c", Loser: "tab.new"}, "sequence not supported yet"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -21,6 +21,12 @@ const (
 	ConflictMalformed
 	// ConflictUnknownAction: a spec named an ID that is not registered.
 	ConflictUnknownAction
+	// ConflictUnsupportedSequence: a multi-step sequence ("ctrl+b c"). It
+	// parses, and Build keeps it in bindings so Stage 2's prefix machine can
+	// pick it up, but nothing dispatches it today. Reported because Display
+	// renders it in F1 exactly like a working binding — accepting the syntax
+	// ahead of the state machine is fine, advertising it as working is not.
+	ConflictUnsupportedSequence
 )
 
 func (k ConflictKind) String() string {
@@ -35,6 +41,8 @@ func (k ConflictKind) String() string {
 		return "unreadable binding"
 	case ConflictUnknownAction:
 		return "unknown action"
+	case ConflictUnsupportedSequence:
+		return "sequence not supported yet"
 	}
 	return "unknown conflict"
 }
@@ -70,7 +78,14 @@ func (c Conflict) String() string {
 		// can reconstruct from their own config.toml. Truncation eats it first.
 		return fmt.Sprintf("%s: %s → default %q; %s", c.Kind, c.Loser, c.Key, c.Detail)
 	case ConflictUnknownAction:
-		return fmt.Sprintf("%s: %s is not a known action; ignored", c.Kind, c.Loser)
+		// Names the CHORD as well as the ID, and quotes both like every other
+		// branch. Unreachable while keySpecsFromConfig emits 41 literal IDs,
+		// but Stage 3's bindings.toml makes a typo'd action name the most
+		// common failure there is — and "made.up is not a known action" does
+		// not say which line of the file to go and look at.
+		return fmt.Sprintf("%s: %q → %q is not a known action; ignored", c.Kind, c.Key, c.Loser)
+	case ConflictUnsupportedSequence:
+		return fmt.Sprintf("%s: %q → %s never fires", c.Kind, c.Key, c.Loser)
 	}
 	return fmt.Sprintf("%s: %q → %s wins, %s never fires", c.Kind, c.Key, c.Winner, c.Loser)
 }

@@ -8,7 +8,17 @@ import (
 
 // keySpecsFromConfig is the ONE place legacy KeybindingsConfig field names
 // correspond to registry action IDs. Stage 3 replaces this body with a
-// bindings.toml read; no other TUI code changes when it does.
+// bindings.toml read.
+//
+// STAGE 2 IS A HARD PREREQUISITE FOR THAT, and this comment used to say the
+// opposite ("no other TUI code changes"). The notes-mode key split still reads
+// m.cfg.Keybindings directly through kbMatches — see handleKey's notesMode
+// block and notesKeyExempt — so a Stage 3 that empties the legacy table while
+// those readers remain leaves them comparing against empty strings: Alt+E
+// stops exiting notes mode, and every structural key stops flushing the editor
+// before it fires. Stage 2's job is retiring those three kbMatches call sites;
+// only then is this function the last thing standing between config and
+// dispatch.
 func keySpecsFromConfig(kb config.KeybindingsConfig) map[keymap.ActionID]string {
 	return map[keymap.ActionID]string{
 		"app.quit":                kb.Quit,
@@ -71,6 +81,14 @@ func buildKeymap(kb config.KeybindingsConfig) (*keymap.Keymap, []keymap.Conflict
 // dialog.go, the context menu, and the lazygit overlay. The reconnect screen
 // is NOT one of them — it needs the bindings themselves, and reads them with
 // Keymap.Keys.
+//
+// Searching BOTH tiers is deliberate and is why this is not a dispatch
+// primitive: these surfaces run before handleKey's tier split, so "is this key
+// bound to X" is the only question they can ask. The cost is that a modal can
+// recognise an action whose handleKey arm the corresponding tier would never
+// reach — harmless for the six call sites, since each asks about one action it
+// then handles itself, but a caller using this to decide what handleKey WILL do
+// would get the wrong answer for a chord claimed in the other tier.
 func (m *Model) isAction(key string, id keymap.ActionID) bool {
 	for _, tier := range []keymap.Tier{keymap.TierEarly, keymap.TierLate} {
 		if got, ok := m.keymap.MatchTier(tier, key); ok && got == id {

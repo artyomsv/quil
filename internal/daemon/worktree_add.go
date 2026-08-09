@@ -23,6 +23,14 @@ import (
 // hazard sweepRoots documents — but the worktreeAdding single-flight IS the
 // budget here: at most one add runs daemon-wide, so at most one permit is ever
 // held long, however many clients ask and however often.
+//
+// The checkout does not get this budget to itself: gitworktree.Add spends part
+// of it resolving the base branch first (up to five short plumbing calls). On a
+// stalled repository those can consume the whole thing, leaving `git worktree
+// add` to start on an expired context and fail immediately. That degrades to
+// "fails fast", never to "branches off the wrong base", and the permit hold is
+// still capped at this value — which is why one shared deadline is right here,
+// unlike the per-probe sub-budgets sweepRoots needs.
 const worktreeAddTimeout = 120 * time.Second
 
 // addWorktreeFn is the seam tests replace. A package var rather than a Daemon
@@ -132,9 +140,23 @@ func (d *Daemon) worktreeAddAndCreate(p ipc.CreatePanePayload) ipc.CreatePaneRes
 	}
 	path := gitworktree.DerivePath(spec.RepoRoot, spec.Branch)
 	ctx, cancel := context.WithTimeout(context.Background(), worktreeAddTimeout)
-	err := addWorktreeFn(ctx, spec.RepoRoot, path, spec.Branch)
+	base, err := addWorktreeFn(ctx, spec.RepoRoot, path, spec.Branch)
 	cancel()
 	releaseBlockingFSCall()
+	// Logged on SUCCESS, which is the only place the chosen base is ever
+	// observable. A worktree on the wrong base looks exactly like one on the
+	// right base until somebody opens a PR days later and finds a stranger's
+	// commits in the diff — so without this line there is nothing to check
+	// afterwards, and that is precisely how the ambient-HEAD defect survived.
+	// An empty base means gitworktree found no default branch and left git to
+	// use HEAD, which is worth naming rather than printing as a blank.
+	if err == nil {
+		from := base
+		if from == "" {
+			from = "HEAD (no default branch resolved)"
+		}
+		log.Printf("worktree create: %s on %s from %s", path, spec.Branch, from)
+	}
 	if err != nil {
 		// gitworktree.Add attaches git's own stderr — "already used by
 		// worktree '/x/feat-y'" names the pane to go look at.

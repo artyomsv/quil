@@ -12,6 +12,7 @@ import (
 // machine bootstraps a fresh "Default" and looks like nothing happened; this
 // removes the MACHINE and leaves everything on it running.
 func TestDisconnectDest_RemovesTheHostAndItsProjects(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
 	local, gpu := newFakeConn(), newFakeConn()
 	var closed []Client
 	m := Model{

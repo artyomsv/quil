@@ -290,6 +290,10 @@ Quil persists plugin "instance" presets (saved hostnames for SSH, named claude-c
 
 When a pane plugin asks for a working directory (`prompts_cwd`, e.g. Claude Code), the setup dialog offers your **last 5 used folders** as a one-keystroke quick pick, so switching between projects doesn't mean re-navigating the directory tree each time. Select a recent folder and press Enter to open there, or choose **Browse…** to open the full directory browser. Folders that no longer exist are skipped automatically. The list is stored in `~/.quil/recent-cwds.json` (managed by Quil — no hand-editing) and survives daemon/TUI restart. Git-repo discovery (`discover = "git"`, e.g. lazygit) takes priority over the recent list when it finds repos near the active pane.
 
+## Remote project cache
+
+Quil records the last project list seen on each remote destination in `~/.quil/remote-projects-<host>.json` (plus a bare `remote-projects.json` for the local daemon), so a host that is unreachable at launch can still be shown by name in the sidebar instead of vanishing. This file is managed by Quil — no hand-editing. A stale copy is harmless: it self-heals on the next successful broadcast from that host, and is removed automatically when the host is disconnected.
+
 ## How edits get persisted
 
 - **Edits via the F1 → Settings dialog** auto-save on TUI exit. The setter for each row flips `m.configChanged = true`; `main.go` writes the file atomically via temp + rename.

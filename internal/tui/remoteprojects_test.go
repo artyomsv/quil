@@ -60,3 +60,34 @@ func TestLoadRemoteProjects_CorruptReturnsNil(t *testing.T) {
 		t.Errorf("got %+v, want nil for corrupt JSON", got)
 	}
 }
+
+// The cache's content traces back to a remote daemon's broadcast, so a load
+// must bound both the entry count and each entry's field length rather than
+// hand back whatever a malformed or oversized file contains.
+func TestLoadRemoteProjects_BoundsCountAndFieldLength(t *testing.T) {
+	list := make([]CachedProject, maxCachedProjects+50)
+	longName := make([]byte, maxCachedFieldLen+100)
+	for i := range longName {
+		longName[i] = 'x'
+	}
+	for i := range list {
+		list[i] = CachedProject{ID: "proj-over", Name: string(longName), RootDir: string(longName)}
+	}
+	path := filepath.Join(t.TempDir(), "oversized.json")
+	if err := SaveRemoteProjects(path, list); err != nil {
+		t.Fatalf("SaveRemoteProjects: %v", err)
+	}
+
+	got := LoadRemoteProjects(path)
+	if len(got) != maxCachedProjects {
+		t.Fatalf("loaded %d projects, want capped at %d", len(got), maxCachedProjects)
+	}
+	for i, p := range got {
+		if len(p.Name) > maxCachedFieldLen {
+			t.Errorf("entry %d: Name length = %d, want <= %d", i, len(p.Name), maxCachedFieldLen)
+		}
+		if len(p.RootDir) > maxCachedFieldLen {
+			t.Errorf("entry %d: RootDir length = %d, want <= %d", i, len(p.RootDir), maxCachedFieldLen)
+		}
+	}
+}

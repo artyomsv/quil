@@ -5,9 +5,38 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"unicode/utf8"
 
 	"github.com/artyomsv/quil/internal/config"
 )
+
+// maxCachedProjects and maxCachedFieldLen bound what a cache file can hand
+// back to the rest of the client. The values in it are not typed by hand —
+// cacheRemoteProjects writes through whatever RootDir/Name a remote daemon
+// last broadcast, with no cap of its own — so a destination that reports an
+// unreasonable count, or a single unreasonably long name, grows this file
+// into a shape nothing downstream expects. Rendering already bounds width
+// (truncateCells), so this is defence in depth for the load path rather than
+// a live exploit: a malformed cache must degrade to a smaller one, never to a
+// failed launch.
+const (
+	maxCachedProjects = 200
+	maxCachedFieldLen = 4096
+)
+
+// truncateBytes cuts s to at most max bytes, backing off to the nearest rune
+// boundary so the cut cannot split a multi-byte UTF-8 sequence — a plain
+// byte-index slice can, and the corrupted tail survives silently through the
+// JSON round-trip this value came from.
+func truncateBytes(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	for max > 0 && !utf8.RuneStart(s[max]) {
+		max--
+	}
+	return s[:max]
+}
 
 // CachedProject is the client's memory of one project on a remote daemon.
 //
@@ -23,6 +52,12 @@ type CachedProject struct {
 // LoadRemoteProjects reads one destination's cached project list. Every failure
 // answers nil: a cache that cannot be read must degrade to label-named rows,
 // never to no rows, because the row is what says the host is configured.
+//
+// The result is capped at maxCachedProjects entries, each with Name/RootDir
+// capped at maxCachedFieldLen: the content traces back to a remote daemon's
+// broadcast, so an oversized or overlong cache is a class of hazard this repo
+// already treats as real (see formMsgNameCap), and the cap here is silent —
+// a cache is a convenience, and a malformed one must shrink, not fail a launch.
 func LoadRemoteProjects(path string) []CachedProject {
 	// Symlink refusal matches LoadRecentCWDs and persist/notes.go.
 	if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSymlink != 0 {
@@ -35,6 +70,13 @@ func LoadRemoteProjects(path string) []CachedProject {
 	var list []CachedProject
 	if err := json.Unmarshal(data, &list); err != nil {
 		return nil
+	}
+	if len(list) > maxCachedProjects {
+		list = list[:maxCachedProjects]
+	}
+	for i := range list {
+		list[i].Name = truncateBytes(list[i].Name, maxCachedFieldLen)
+		list[i].RootDir = truncateBytes(list[i].RootDir, maxCachedFieldLen)
 	}
 	return list
 }

@@ -19,6 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   existing needs-you / running / finished counts — independent of them, since a
   pinned pane is usually also doing something. The tab bar puts a `◆` before the
   label.
+- An out-of-date remote daemon can be repaired without leaving the TUI: open
+  the New Project dialog and enter the same host, and Quil upgrades it and
+  reconnects. `quil remote setup <host>` still works as before.
 
 ### Changed
 - Manual and automatic attention marks no longer share a colour. A pane you
@@ -44,6 +47,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   was still retrying on its own (⟳). Parked is now red and retrying orange —
   deliberately not the amber the sidebar reserves for "waiting on you", which
   a link healing itself is the opposite of.
+- A remote host that was unreachable when Quil started lost its projects from
+  the sidebar entirely, with no way to get them back. Because updating Quil
+  leaves the remote daemon on the older version, this happened after every
+  update until the host was upgraded by hand — so the projects looked deleted
+  rather than disconnected. Those rows now stay in the sidebar, their names
+  marked offline, and come back on their own once the host is reachable again.
+- Quil gave up on a remote host after 25 seconds, which is less than the 30
+  seconds the daemon on that host is allowed for its own startup — so a host
+  that had just rebooted was abandoned while it was still starting normally.
+- Diagnostics reported by a remote host are sanitized before being printed, so
+  a compromised or misbehaving host cannot write escape sequences to your
+  terminal at launch.
 
 ## [1.53.3] - 2026-08-09
 

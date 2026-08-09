@@ -1,6 +1,10 @@
 package tui
 
-import "testing"
+import (
+	"testing"
+
+	tea "charm.land/bubbletea/v2"
+)
 
 // A ladder against a version-drifted daemon re-authenticates and re-fails
 // forever: it cannot succeed until the user upgrades the far side.
@@ -68,4 +72,45 @@ func TestWakeOfflineDests_OneCmdPerLadderedDest(t *testing.T) {
 		t.Error("a second call produced more commands; the wake-up must fire once")
 	}
 	_ = cmd
+}
+
+// Production calls wakeOfflineDests from exactly one place: the !m.sized
+// branch of Update's tea.WindowSizeMsg arm, on a statement whose own comment
+// warns that a value-receiver copy taken before the pointer-receiver calls
+// makes the next resize repeat the work (`resize, attach, wake :=
+// m.resizeAllPanes(), m.attachAllDests(), m.wakeOfflineDests()` BEFORE
+// `return m, ...`, not `return m, tea.Batch(m.wakeOfflineDests(), ...)`,
+// which would copy `m` for the first return value before the pointer
+// receivers ever ran). A test calling wakeOfflineDests directly cannot catch
+// a regression that moves or reorders that call — nothing drives
+// Update(tea.WindowSizeMsg{...}) at all in that case, so the call site that
+// makes the decision unreachable would still pass every test in this file.
+func TestUpdate_WindowSizeMsg_WakesOfflineDestOnlyOnFirstResize(t *testing.T) {
+	m := Model{client: NewRouter(map[string]Client{})}
+	m.SeedOfflineDest("gpu01", "gpu01", offlineRetrying, "", nil)
+
+	next, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m1, ok := next.(Model)
+	if !ok {
+		t.Fatalf("Update returned %T, want Model", next)
+	}
+	if !m1.sized {
+		t.Fatal("the first WindowSizeMsg did not mark the model sized")
+	}
+	if !m1.offlineWoken["gpu01"] {
+		t.Fatal("the first WindowSizeMsg did not wake the offline destination")
+	}
+
+	// A second resize must not re-enter the !m.sized branch — wakeOfflineDests
+	// is not called from anywhere else — so the only way this survives is if
+	// the first call's write to offlineWoken made it into the Model Update
+	// actually returned.
+	next2, _ := m1.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m2, ok := next2.(Model)
+	if !ok {
+		t.Fatalf("second Update returned %T, want Model", next2)
+	}
+	if !m2.offlineWoken["gpu01"] {
+		t.Error("offlineWoken did not survive to the second resize's returned Model")
+	}
 }

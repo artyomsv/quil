@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -77,11 +78,14 @@ func (m *Model) SeedOfflineDest(dest, label string, kind OfflineKind, detail str
 
 	rows := make([]*ProjectModel, 0, len(cached))
 	for _, c := range cached {
-		// A synthetic ID exists only in the process that invented it. Replaying
-		// one would collide with the placeholder the client synthesises afresh
-		// for a projects-unaware daemon, and would make destSupportsProjects
-		// answer from a stale observation.
-		if c.ID == "" || isSyntheticProject(c.ID) {
+		// Both families below are IDs this client invented itself, never one a
+		// daemon reported: a synthetic ID would collide with the placeholder
+		// synthesised afresh for a projects-unaware daemon (destSupportsProjects
+		// would then answer from a stale observation), and an offline-row ID
+		// would collide with another destination's own stand-in row — a daemon's
+		// cache is keyed by ITS OWN id, with no guarantee it avoids the
+		// "proj-offline@<dest>" shape another host's stand-in happens to use.
+		if c.ID == "" || isClientInventedProjectID(c.ID) {
 			continue
 		}
 		rows = append(rows, &ProjectModel{
@@ -123,11 +127,33 @@ func (m Model) onlyOfflineProjects() bool {
 	return true
 }
 
+// offlineProjectIDPrefix marks an ID this client invented for a destination
+// with no cached projects, never one a daemon reported. Shared with
+// isClientInventedProjectID so the two cannot drift apart.
+const offlineProjectIDPrefix = "proj-offline@"
+
 // offlineProjectIDFor names the row invented for a destination with no cached
 // projects. Qualified by destination for the reason interimProjectIDFor is:
 // indexOfProject resolves by ID alone, so two unnamed rows sharing an ID would
 // hand focus back and forth.
-func offlineProjectIDFor(dest string) string { return "proj-offline@" + dest }
+func offlineProjectIDFor(dest string) string { return offlineProjectIDPrefix + dest }
+
+// isClientInventedProjectID reports whether id was minted by THIS client
+// rather than reported by any daemon — either the interim placeholder
+// (isSyntheticProject, for a projects-unaware daemon) or an offline stand-in
+// row's own ID (offlineProjectIDFor). Both families exist only in this
+// process's memory, so a value replayed from a CACHE — which is keyed by
+// whatever ID the reporting daemon used — can collide with either one:
+// offlineProjectIDFor is qualified by destination, but nothing stops a
+// daemon on host A from having, at some point, reported a real project ID
+// that happens to take the "proj-offline@<dest>" shape host B's own stand-in
+// row uses. indexOfProject and resolveActiveProjectIndex both resolve the
+// FIRST match for an ID, so a collision reads as focus landing on the wrong
+// host's row rather than a crash — quiet enough that grouping both checks
+// under one predicate is what keeps a future caller from checking only one.
+func isClientInventedProjectID(id string) bool {
+	return isSyntheticProject(id) || strings.HasPrefix(id, offlineProjectIDPrefix)
+}
 
 // projectForDest returns any project belonging to dest, for the arms that need
 // to read a destination's offline state rather than one project's.

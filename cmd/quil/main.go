@@ -18,6 +18,7 @@ import (
 	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/logger"
 	"github.com/artyomsv/quil/internal/plugin"
+	"github.com/artyomsv/quil/internal/transport"
 	"github.com/artyomsv/quil/internal/tui"
 	versionpkg "github.com/artyomsv/quil/internal/version"
 )
@@ -518,8 +519,14 @@ func launchTUI() {
 		// keeps a row for this host now — but a launch diagnostic that only
 		// exists inside the TUI is invisible to anyone reading a terminal
 		// scrollback afterwards.
-		fmt.Fprintf(os.Stderr, "warning: %s is unreachable — its projects are shown offline. %v\n",
-			d.Label(), o.err)
+		//
+		// Sanitized rather than printed with %v: o.err can carry a daemon-
+		// reported version string (gateExtraVersion), and unlike ssh's own
+		// stderr nothing upstream of this print inspects those bytes — see
+		// transport.SanitizeForTerminalMessage's doc comment for the full
+		// taint path.
+		fmt.Fprintf(os.Stderr, "warning: %s is unreachable — its projects are shown offline. %s\n",
+			d.Label(), transport.SanitizeForTerminalMessage(o.err.Error()))
 	}
 
 	// The router is constructed BEFORE the Model and passed in, never installed

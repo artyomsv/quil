@@ -3,7 +3,9 @@ package tui
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestRemoteProjects_RoundTrip(t *testing.T) {
@@ -89,5 +91,65 @@ func TestLoadRemoteProjects_BoundsCountAndFieldLength(t *testing.T) {
 		if len(p.RootDir) > maxCachedFieldLen {
 			t.Errorf("entry %d: RootDir length = %d, want <= %d", i, len(p.RootDir), maxCachedFieldLen)
 		}
+	}
+}
+
+// A file bigger than LoadRemoteProjects will ever need must not be fully
+// materialized in memory before the count/length caps get a chance to run —
+// that is the whole point of bounding the read with io.LimitReader rather
+// than a bare os.ReadFile. A file this large is invalid JSON by construction
+// (its close bracket falls outside the read window), so the assertion is
+// simply that loading it degrades to nil rather than allocating the whole
+// thing.
+func TestLoadRemoteProjects_BoundsFileReadItself(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "huge.json")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString("["); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	// One entry well past maxCacheFileBytes, so the limited read truncates
+	// mid-content and the JSON never closes.
+	entry := `{"id":"proj-x","name":"` + strings.Repeat("x", maxCacheFileBytes) + `"},`
+	if _, err := f.WriteString(entry); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := f.WriteString(`{"id":"proj-y","name":"y"}]`); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	if got := LoadRemoteProjects(path); got != nil {
+		t.Errorf("got %+v, want nil for a file the read cap truncates mid-content", got)
+	}
+}
+
+// TestTruncateBytes_BacksOffToARuneBoundary is the property truncateBytes
+// exists for. The only other test reaching this function
+// (TestLoadRemoteProjects_BoundsCountAndFieldLength) fills its oversized
+// field with ASCII 'x', so it passes unchanged even with the rune-boundary
+// backoff loop deleted outright — this is the one that actually exercises it.
+func TestTruncateBytes_BacksOffToARuneBoundary(t *testing.T) {
+	// "ab" (ASCII, 2 bytes) + five 4-byte emoji (20 bytes) = 22 bytes total.
+	// max=20 lands two bytes into the FIFTH emoji's 4-byte sequence, forcing
+	// the backoff loop to step back twice before it finds a rune boundary — a
+	// 2-byte rune ("é") would only exercise a single step.
+	s := "ab" + strings.Repeat("\U0001F600", 5)
+	const max = 20
+
+	got := truncateBytes(s, max)
+
+	if !utf8.ValidString(got) {
+		t.Fatalf("truncateBytes(%q, %d) = %q, not valid UTF-8", s, max, got)
+	}
+	if !strings.HasPrefix(s, got) {
+		t.Fatalf("truncateBytes(%q, %d) = %q, not a prefix of the input", s, max, got)
+	}
+	// "ab" + 4 complete emoji = 2 + 16 = 18 bytes; the incomplete fifth is cut
+	// away entirely rather than left dangling mid-sequence.
+	if want := 18; len(got) != want {
+		t.Errorf("truncateBytes(%q, %d) = %d bytes, want %d", s, max, len(got), want)
 	}
 }

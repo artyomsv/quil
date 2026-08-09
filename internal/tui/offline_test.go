@@ -77,3 +77,22 @@ func TestSeedOfflineDest_SkipsSyntheticCachedProjects(t *testing.T) {
 		t.Errorf("Name = %q, want the label — the synthetic cache entry must be ignored", got)
 	}
 }
+
+// A cached entry carrying another destination's OWN offline-row ID must never
+// be resurrected either: offlineProjectIDFor is qualified by destination, but
+// nothing stops a cache keyed by a DIFFERENT host's real reported ID from
+// taking that exact "proj-offline@<dest>" shape — and indexOfProject resolves
+// by ID alone, so a collision would hand launch focus to the wrong host's row.
+func TestSeedOfflineDest_SkipsOfflineRowIDCachedProjects(t *testing.T) {
+	m := Model{}
+	m.SeedOfflineDest("gpu01", "gpu01", offlineRetrying, "", []CachedProject{
+		{ID: offlineProjectIDFor("build02"), Name: "collides-with-another-hosts-stand-in"},
+	})
+
+	if len(m.projects) != 1 {
+		t.Fatalf("projects = %d, want 1", len(m.projects))
+	}
+	if got := m.projects[0].Name; got != "gpu01" {
+		t.Errorf("Name = %q, want the label — the offline-row-shaped cache entry must be ignored", got)
+	}
+}

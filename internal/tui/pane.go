@@ -108,7 +108,7 @@ type PaneModel struct {
 	unseen             bool           // work finished while this pane was not focused (a park no longer sets this — see workPark); cleared on focus
 	pinnedAttention    bool           // context-menu "Mark attention" pin — green border that SURVIVES focus; cleared only by Unmark. TUI-session state, never persisted
 	workFrame          int            // shared spinner frame index, mirrored here for top-border render
-	blockedSince       time.Time      // set when the agent parks waiting on the user (permission prompt/idle-wait); zero when not blocked. Cleared on workStart/workAbort/workStop/workStopFinal (a completed turn is by definition not blocked) — focus does NOT clear it (see ackFocusedPane); paneRow suppresses the glyph for the focused pane instead
+	blockedSince       time.Time      // set when the agent parks waiting on the user — workPark always, workNotify unless the producer marked the event as Claude's idle nudge AND the turn is already over; zero when not blocked. Cleared on workStart/workAbort/workStop/workStopFinal (a completed turn is by definition not blocked) — focus does NOT clear it (see ackFocusedPane); paneRow suppresses the glyph for the focused pane instead
 	blockedReason      string         // optional tool name from the hook's Data["tool"]; genuinely absent for Notification/permission.ask, so left empty rather than invented
 
 	// Mouse-tracking state, updated by the VT EnableMode/DisableMode callbacks

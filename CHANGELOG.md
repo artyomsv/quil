@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.53.1] - 2026-08-09
+
 ### Fixed
 - A tab was marked amber ("blocked on you") while its agent was still
   demonstrably working with background subagents running. Claude reuses the

@@ -720,7 +720,15 @@ func (m *Model) eachClientPane(dest string, fn func(*PaneModel)) {
 // a `redraw_key` kick instead, and repaints over its existing grid exactly as it
 // did before reconnect existed.
 func (m *Model) armReattachReset(dest string) {
-	m.eachClientPane(dest, func(p *PaneModel) { p.reattachReset = true })
+	m.eachClientPane(dest, func(p *PaneModel) {
+		p.reattachReset = true
+		// Forget that this pane has been sized. The suppression in diffResizes
+		// describes a daemon-side guard (appliedCols/appliedRows) that a PTY
+		// reinstall zeroes, so carrying it across an outage would withhold the
+		// one resize repaintAfterResize needs to bring a restored pane back.
+		// delete on a nil map is a no-op.
+		delete(m.sizedOnce, p.ID)
+	})
 	// Selection is Model-level and anchors to row/column coordinates that any
 	// replay invalidates. Dropped now rather than armed: there is no per-pane
 	// chunk to hang it off, and a selection surviving an outage is worth nothing.

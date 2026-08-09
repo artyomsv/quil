@@ -10,6 +10,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -139,6 +140,14 @@ type PaneInfo struct {
 	// the pane's last completed AI turn. Empty/zero for non-AI panes.
 	Model         string
 	ContextTokens int64
+	// Cols/Rows are the last resize payload the daemon ACCEPTED for this pane
+	// (daemon.Pane.Cols/Rows, written only by handleResizePane). They are the
+	// same quantity resizeAllPanes computes, which is what lets the broadcast
+	// stand in for a client-side "what did I last send" cache: a pane whose
+	// reported size already equals the one we would send needs no frame.
+	// Zero means the daemon has never applied a size — always send then.
+	Cols uint16
+	Rows uint16
 }
 
 // paneSettleRepaintMsg fires shortly after a pane's first live output and
@@ -349,6 +358,14 @@ type Model struct {
 	version              string
 	sized                bool            // the terminal has reported its geometry at least once
 	attached             map[string]bool // destinations already attached — see attachAllDests
+	// sizedOnce records panes this connection has sent at least one
+	// MsgResizePane for. A broadcast-driven resize is suppressed when the
+	// reported size already matches, but the FIRST one is always sent: the
+	// daemon's duplicate guard is appliedCols/appliedRows, which it zeroes on
+	// every PTY install, and repaintAfterResize's redraw kick for a restored
+	// pane rides that first client resize. Cleared by resetForReattach, since
+	// a reattach is exactly when the daemon's guard may have been zeroed.
+	sizedOnce map[string]bool
 	renaming             bool
 	renameInput          string
 	renamingPane         bool
@@ -1837,7 +1854,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.resizeTabs()
 		log.Printf("apply: resizeTabs done")
-		cmds := []tea.Cmd{m.listenForMessages(), m.resizeAllPanes(), m.sendAllLayouts()}
+		// Diffed, not swept. A broadcast that agrees with what we already hold
+		// used to cost one must-deliver frame per tab PLUS one per pane — 69
+		// frames on a 64-slot queue at 33 tabs/36 panes, which overflowed and
+		// made the client's own IPC layer close the connection (2026-08-09).
+		// Both diffs run here, on the Update goroutine, because they read
+		// m.projects, which applyWorkspaceState has just rebuilt.
+		cmds := []tea.Cmd{
+			m.listenForMessages(),
+			m.sendDiffedResizes(m.diffResizes(msg)),
+			m.sendDiffedLayouts(m.diffLayouts(msg)),
+		}
 		// Resize overlay PTYs that just became visible on initial creation.
 		// resizeAllPanes only walks tab.Leaves() (the layout tree), so overlay
 		// panes are skipped there; these cmds are the only resize they receive.
@@ -5710,6 +5737,12 @@ func parseWorkspaceState(raw map[string]any) WorkspaceStateMsg {
 				if b, ok := pm["git_stale"].(bool); ok {
 					pi.GitStale = b
 				}
+				if n, ok := pm["cols"].(float64); ok {
+					pi.Cols = uint16(n)
+				}
+				if n, ok := pm["rows"].(float64); ok {
+					pi.Rows = uint16(n)
+				}
 				state.Panes = append(state.Panes, pi)
 			}
 		}
@@ -6721,6 +6754,158 @@ func (m Model) toggleActivePaneEager() tea.Cmd {
 		}
 		if err := m.sendForPane(paneID, msg); err != nil {
 			log.Printf("toggleActivePaneEager send: %v", err)
+		}
+		return nil
+	}
+}
+
+// layoutSend and resizeSend are one decided frame each. The diff that produces
+// them runs on the Update goroutine and the command only ships the result —
+// the walk reads m.projects, which Update rebuilds on every broadcast, so
+// deciding inside the command would read a list that is being replaced.
+type layoutSend struct {
+	dest  string
+	tabID string
+	data  json.RawMessage
+}
+
+type resizeSend struct {
+	dest   string
+	paneID string
+	cols   uint16
+	rows   uint16
+}
+
+// layoutAgrees reports whether the daemon's stored layout for a tab already
+// describes the tree we hold.
+//
+// The comparison is STRUCTURAL, and that is not a style preference. The daemon
+// stores MarshalLayout's bytes — a struct, so Go emits its fields in
+// declaration order — but parseWorkspaceState decodes the whole broadcast into
+// map[string]any and re-marshals the layout sub-map, and Go sorts map keys
+// alphabetically. For any node with more than one key the two encodings differ
+// for the identical tree, so a byte comparison reports "changed" forever on
+// every tab containing a split, while still matching single-leaf tabs. That
+// asymmetry is invisible in a workspace of single-pane tabs, which is exactly
+// what the crash was reported from.
+//
+// Empty means the daemon holds nothing for this tab (fresh, or restored before
+// any client described it) — the caller must send, or the arrangement is never
+// persisted.
+func layoutAgrees(stored json.RawMessage, root *LayoutNode) bool {
+	if len(stored) == 0 {
+		return false
+	}
+	theirs, err := UnmarshalLayout(stored)
+	if err != nil {
+		return false
+	}
+	return reflect.DeepEqual(theirs, SerializeLayout(root))
+}
+
+// diffLayouts decides which tabs need their layout pushed after a broadcast.
+//
+// Scoped to the broadcast's OWN destination: a broadcast is the full state of
+// one daemon, so it says nothing about another daemon's tabs and cannot be
+// diffed against them. Before this scoping, any daemon's broadcast re-sent
+// every daemon's layouts.
+func (m *Model) diffLayouts(state WorkspaceStateMsg) []layoutSend {
+	stored := make(map[string]json.RawMessage, len(state.Tabs))
+	for _, ti := range state.Tabs {
+		stored[ti.ID] = ti.Layout
+	}
+	var out []layoutSend
+	for _, proj := range m.projects {
+		if proj.Dest != state.Dest {
+			continue
+		}
+		for _, tab := range proj.tabs {
+			if tab.Root == nil || layoutAgrees(stored[tab.ID], tab.Root) {
+				continue
+			}
+			data, err := MarshalLayout(tab.Root)
+			if err != nil {
+				continue
+			}
+			out = append(out, layoutSend{dest: proj.Dest, tabID: tab.ID, data: data})
+		}
+	}
+	return out
+}
+
+// diffResizes decides which panes need a resize pushed after a broadcast.
+// See Model.sizedOnce for why the first send per pane is never suppressed.
+func (m *Model) diffResizes(state WorkspaceStateMsg) []resizeSend {
+	type size struct{ cols, rows uint16 }
+	stored := make(map[string]size, len(state.Panes))
+	for _, pi := range state.Panes {
+		stored[pi.ID] = size{pi.Cols, pi.Rows}
+	}
+	if m.sizedOnce == nil {
+		m.sizedOnce = make(map[string]bool)
+	}
+	var out []resizeSend
+	for _, proj := range m.projects {
+		if proj.Dest != state.Dest {
+			continue
+		}
+		for _, tab := range proj.tabs {
+			if tab.Root == nil {
+				continue
+			}
+			for _, pane := range tab.Leaves() {
+				c, r := paneVTSize(pane.WideCanvas, pane.MinNativeCols,
+					pane.Width, pane.Height, pane.NativeW, tab.CanvasW, tab.CanvasH)
+				cols, rows := uint16(c), uint16(r)
+				known := stored[pane.ID]
+				// known.cols == 0 means the daemon has never applied a size.
+				if m.sizedOnce[pane.ID] && known.cols == cols && known.rows == rows && cols > 0 {
+					continue
+				}
+				m.sizedOnce[pane.ID] = true
+				out = append(out, resizeSend{dest: proj.Dest, paneID: pane.ID, cols: cols, rows: rows})
+			}
+		}
+	}
+	return out
+}
+
+// sendDiffedLayouts ships an already-decided layout list.
+func (m Model) sendDiffedLayouts(items []layoutSend) tea.Cmd {
+	if len(items) == 0 {
+		return nil
+	}
+	return func() tea.Msg {
+		for _, it := range items {
+			msg, err := ipc.NewMessage(ipc.MsgUpdateLayout, ipc.UpdateLayoutPayload{
+				TabID:  it.tabID,
+				Layout: it.data,
+			})
+			if err != nil {
+				continue
+			}
+			m.sendForDest(it.dest, msg)
+		}
+		return nil
+	}
+}
+
+// sendDiffedResizes ships an already-decided resize list.
+func (m Model) sendDiffedResizes(items []resizeSend) tea.Cmd {
+	if len(items) == 0 {
+		return nil
+	}
+	return func() tea.Msg {
+		for _, it := range items {
+			msg, err := ipc.NewMessage(ipc.MsgResizePane, ipc.ResizePanePayload{
+				PaneID: it.paneID,
+				Cols:   it.cols,
+				Rows:   it.rows,
+			})
+			if err != nil {
+				continue
+			}
+			m.sendForDest(it.dest, msg)
 		}
 		return nil
 	}

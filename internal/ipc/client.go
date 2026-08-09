@@ -19,8 +19,23 @@ func NewClient(socketPath string) (*Client, error) {
 	return &Client{conn: newConn(raw)}, nil
 }
 
+// Send queues a must-deliver frame, WAITING for room rather than tripping the
+// slow-peer overflow.
+//
+// Conn's overflow→Close policy is a server defense: a daemon fanning out to
+// many clients has to be able to drop one wedged peer instead of letting it
+// block the rest. A client has no fan-out to protect, so applying that policy
+// to its own send path means a backed-up outbound queue terminates the session
+// — which is how a TUI holding 33 tabs and 36 panes killed itself three times
+// in 70 seconds on 2026-08-09: one broadcast made it enqueue 69 must-deliver
+// frames onto a 64-slot queue.
+//
+// Blocking is bounded, not indefinite: a genuinely wedged daemon still trips
+// sendLoop's 30 s writeDeadline, which closes the conn, which makes this return
+// ErrConnClosed and surfaces as a link loss. Callers are tea.Cmd goroutines and
+// the input forwarder, where a brief park is strictly better than a disconnect.
 func (c *Client) Send(msg *Message) error {
-	return c.conn.Send(msg)
+	return c.conn.SendBlocking(msg, nil)
 }
 
 func (c *Client) Receive() (*Message, error) {

@@ -142,6 +142,23 @@ func (c *Conn) sendFrame(frame []byte) error {
 	return c.enqueue(frame, false)
 }
 
+// peerLabel describes the far end of a connection for a log line. A Unix socket
+// reports an empty remote address, so fall back to the local one and always
+// name the network — "unix" versus "pipe" already separates a real daemon
+// connection from an in-process test.
+func peerLabel(raw net.Conn) string {
+	if raw == nil {
+		return "unknown"
+	}
+	if addr := raw.RemoteAddr(); addr != nil && addr.String() != "" {
+		return addr.Network() + ":" + addr.String()
+	}
+	if addr := raw.LocalAddr(); addr != nil {
+		return addr.Network() + ":" + addr.String() + " (local end)"
+	}
+	return "unknown"
+}
+
 // enqueue queues a pre-encoded frame. The frame []byte is read-only — both
 // enqueue and sendLoop only read it, never mutate it.
 //
@@ -181,7 +198,13 @@ func (c *Conn) enqueue(frame []byte, droppable bool) error {
 		// spawn N redundant Close goroutines (each no-ops via closeOnce but
 		// still pays goroutine spawn cost).
 		if c.overflow.CompareAndSwap(false, true) {
-			logger.Warn("ipc: dropping slow client (critical send buffer overflow)")
+			// Identify the peer. This line is emitted by code shared between
+			// the daemon and every client, so on its own it names neither —
+			// attributing the 2026-08-09 occurrence took reasoning about which
+			// binaries call logger.Init, because the only signal was which log
+			// file it had landed in.
+			logger.Warn("ipc: dropping slow client (critical send buffer overflow; peer=%s queued=%d cap=%d)",
+				peerLabel(c.raw), len(c.critCh), sendBufSize)
 			go c.Close()
 		}
 		return ErrSendOverflow

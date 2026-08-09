@@ -605,7 +605,13 @@ func (m Model) executeCtxMenuItem(item ctxMenuItem) (tea.Model, tea.Cmd) {
 		return m, m.toggleActivePaneMute()
 	case ctxActAttention:
 		if pane, _, _ := m.findPaneAndTab(paneID); pane != nil {
-			pane.pinnedAttention = !pane.pinnedAttention
+			// Sent, not written. The pin is daemon-owned now, and
+			// syncPaneMeta copies it back on every broadcast — so a local flip
+			// would be reverted by the next workspace_state (the git ticker
+			// alone delivers one every 5 s) and the mark would visibly undo
+			// itself. The mute toggle has taken this route since it was
+			// written; this is the same shape.
+			return m, m.sendPinnedAttention(paneID, !pane.pinnedAttention)
 		}
 		return m, nil
 	case ctxActClearAttention:
@@ -624,7 +630,17 @@ func (m Model) executeCtxMenuItem(item ctxMenuItem) (tea.Model, tea.Cmd) {
 			pane.blockedSince = time.Time{}
 			pane.blockedReason = ""
 			pane.unseen = false
+			// The pin is the ONE of the four that is not a display state the
+			// client owns — it lives on the daemon, so clearing it here alone
+			// would be undone by the next broadcast. The local write stays as
+			// well as the send: it is what makes the row stop showing ◆ on this
+			// frame rather than on the one after the round trip, and the
+			// broadcast then confirms the same value.
+			pinned := pane.pinnedAttention
 			pane.pinnedAttention = false
+			if pinned {
+				return m, m.sendPinnedAttention(paneID, false)
+			}
 		}
 		return m, nil
 	case ctxActRestart:

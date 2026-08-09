@@ -110,6 +110,17 @@ type Pane struct {
 	// MsgUpdatePane{Eager: true} (default keybinding Alt+Shift+E), persisted in
 	// the workspace snapshot, and marked on the tab label. Read under PluginMu.
 	Eager bool
+	// PinnedAttention is the user's own "don't let me forget this pane" mark,
+	// set from the context menu's Mark attention and cleared only by Unmark or
+	// Clear attention. Persisted in the workspace snapshot so the mark survives
+	// a restart, which is most of the point: a pin the user set on Friday is
+	// worth nothing if it is gone on Monday. Read under PluginMu.
+	//
+	// The daemon does not act on it — nothing here schedules, spawns or emits
+	// differently for a pinned pane. It lives on this side because it must
+	// OUTLIVE the TUI process and be the same answer for every client attached
+	// to this daemon, which is exactly what Muted needed and got.
+	PinnedAttention bool
 	// Overlay marks an ephemeral TUI overlay pane (lazygit toggle view).
 	// Guarded by PluginMu like Muted (set in handleCreatePane after the
 	// pane is already published to the session maps; concurrent snapshots

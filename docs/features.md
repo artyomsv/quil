@@ -152,9 +152,22 @@ Right-click a pane (with no text selection active — a selection still copies, 
 
 Three rows grey out when unavailable: **Input history** unless the pane's plugin sets `record_history` (Claude Code), **Open lazygit** when the `lazygit` binary isn't installed, and **Clear attention** when the pane carries no mark to clear.
 
-**Mark attention** pins a green border on the pane — the same colour as the "work finished, unseen" mark, but it survives focusing the pane and clears only via **Unmark attention**. It's session-only (not persisted across daemon restarts) and also colours the tab label, including on the active tab when the pinned pane isn't the one currently focused.
+**Mark attention** pins a purple `◆` on the pane — deliberately not the green of the automatic "work finished, unseen" mark, because only one of the two clears itself. The pin survives focusing the pane and goes away only via **Unmark attention** or **Clear attention**.
 
-**Clear attention** drops every mark the pane carries — the amber "needs you" mark in the sidebar, the green unseen mark, and the pin. The blocked mark is set and cleared by the agent's own hook events, so when a clearing event never arrives (the hook stream stopped, or the prompt was answered somewhere the hooks don't observe) the pane stays flagged, and the project row summarising it stays flagged too. This is the way to dismiss that. It changes display state only — nothing is sent to the daemon, and the pane's next hook event re-derives whatever is actually true, so a pane that really is still parked will mark itself again.
+It is **persisted**: the mark lives on the daemon alongside the pane's mute setting, so it survives a TUI restart, a daemon restart and a reboot, and reads the same in every client attached to that daemon. A pin you set on Friday is still there on Monday.
+
+It shows in four places at once, all using the same `◆` and the same purple:
+
+| Where | What you see |
+|---|---|
+| Pane border | Purple instead of the unseen green |
+| Tab bar | `◆` before the label, purple background |
+| Sidebar pane row | `◆` as the row's glyph, or as a suffix when a more urgent state outranks it |
+| Sidebar project row | `◆N` counting the pinned panes in that project |
+
+A pinned tab keeps the `◆` even when something more urgent has claimed its colour — a tab that is both blocked and pinned is amber *and* marked, because those are two facts and a colour can only carry one. In the project row the count is independent of the working / blocked / finished counts beside it, since a pinned pane is usually also doing something.
+
+**Clear attention** drops every mark the pane carries — the amber "needs you" mark in the sidebar, the green unseen mark, and the pin. The blocked mark is set and cleared by the agent's own hook events, so when a clearing event never arrives (the hook stream stopped, or the prompt was answered somewhere the hooks don't observe) the pane stays flagged, and the project row summarising it stays flagged too. This is the way to dismiss that. The first two are display state only — nothing about them is sent to the daemon, and the pane's next hook event re-derives whatever is actually true, so a pane that really is still parked will mark itself again. The pin is the exception: it is stored on the daemon, so clearing it is sent there too and stays cleared.
 
 ### Text selection & clipboard
 
@@ -377,9 +390,9 @@ The viewer is a read-only `TextEditor` (typing / save / paste / cut all gated). 
 
 ## Projects
 
-A project groups tabs, owns a root directory, and belongs to exactly one daemon. The left sidebar (`Alt+Shift+S`) lists every project with a roll-up of its panes — `▲` needs you, `◐` running, `✓` finished while you were away — so an agent that finished or got stuck in a project you are not looking at is visible from the one place you are. A tab holding a pane parked on you turns amber in the tab bar, including the tab you are on: the pane waiting may be the one you are not looking at in a split.
+A project groups tabs, owns a root directory, and belongs to exactly one daemon. The left sidebar (`Alt+Shift+S`) lists every project with a roll-up of its panes — `▲` needs you, `◐` running, `✓` finished while you were away, `◆` pinned by hand — so an agent that finished or got stuck in a project you are not looking at is visible from the one place you are. Each count is painted in the same colour its pane rows use, so the roll-up reads as a summary of them rather than as a second notation. The first three rank against each other (a pane parked for input has also finished its turn, and "needs you" outranks "is ready", so it counts once); `◆` is independent, because a pinned pane is usually also doing something. A tab holding a pane parked on you turns amber in the tab bar, including the tab you are on: the pane waiting may be the one you are not looking at in a split.
 
-Under the active project, each tab gets a numbered heading (`1:name`, matching `Alt+1..9`) and its panes carry the same glyphs plus the checkout they sit in: branch, the linked worktree's name, and `↑N`/`↓N` against upstream. A pane you have pinned with **Mark attention** shows `◆`, which stays until you unmark it — if a more urgent state is showing, the pin moves to the end of the row rather than disappearing. Git state is refreshed on a background ticker, cached per checkout so N panes in one repository cost one invocation, and marked stale rather than guessed when a probe does not answer.
+Under the active project, each tab gets a numbered heading (`1:name`, matching `Alt+1..9`) and its panes carry the same glyphs plus the checkout they sit in: branch, the linked worktree's name, and `↑N`/`↓N` against upstream. A pane you have pinned with **Mark attention** shows `◆` in purple, which stays until you unmark it and survives a restart — if a more urgent state is showing, the pin moves to the end of the row rather than disappearing, and keeps its own colour there so it never reads as part of the state that outranked it. Git state is refreshed on a background ticker, cached per checkout so N panes in one repository cost one invocation, and marked stale rather than guessed when a probe does not answer.
 
 The `▲` is hidden on the pane you are currently in — you are looking straight at the prompt — while the tab, the project roll-up and `Alt+Shift+A` all keep counting it. **Answering** the prompt is what drops it everywhere: typing or pasting into the pane clears the mark, because approving a permission prompt tells quil nothing by itself. A glance is not an answer, and neither is a mouse gesture — scroll the pane or drag a selection across it and the mark stays. Switch away without replying and the `▲` is back on the row.
 

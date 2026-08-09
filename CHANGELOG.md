@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Mark attention now survives a restart.** The pin was TUI-session state, so
+  every mark you set was gone the next time you opened Quil — which is most of
+  what a mark that never auto-clears is for. It lives on the daemon now,
+  alongside the pane's mute setting, so it survives a TUI restart, a daemon
+  restart and a reboot, and reads the same in every client attached to that
+  daemon.
+- A pinned pane is now visible in the two places that never showed it. The
+  project sidebar row carries a `◆N` count of its pinned panes, beside the
+  existing needs-you / running / finished counts — independent of them, since a
+  pinned pane is usually also doing something. The tab bar puts a `◆` before the
+  label.
+
+### Changed
+- Manual and automatic attention marks no longer share a colour. A pane you
+  pinned by hand and a pane that finished a turn while you were away were both
+  green, on the pane border and in the tab bar, so the one that clears itself
+  when you look at it was indistinguishable from the one that waits for an
+  explicit Unmark. Pinned is now purple everywhere — border, tab, sidebar glyph
+  and project count — and green means only "finished while you were away".
+- A pinned tab keeps its `◆` even when a more urgent state has claimed its
+  colour, so a tab that is both blocked and pinned shows both facts rather than
+  only the amber.
+
 ### Fixed
 - The project sidebar's state badges were all painted the same grey as the
   project name. The counts use the same glyphs as the pane rows below them —

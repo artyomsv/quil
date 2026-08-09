@@ -102,7 +102,11 @@ type PaneInfo struct {
 	Type         string
 	Muted        bool
 	Eager        bool
-	Overlay      bool
+	// PinnedAttention is the user's "don't let me forget" mark. Daemon-owned
+	// like Muted, so it survives a TUI restart and reads the same on every
+	// client attached to that daemon.
+	PinnedAttention bool
+	Overlay         bool
 	Pending      bool // deferred restore — not yet lazy-spawned
 	SessionID    string
 	HistoryLines int
@@ -4746,6 +4750,16 @@ func (m Model) tabLabel(idx int) string {
 	if m.tabHasEagerPane(idx) {
 		name = eagerTabMarker + name
 	}
+	// Outside tabStyle's precedence on purpose. The colour can carry only one
+	// fact, and blocked outranks pinned there — so on a tab that is both, the
+	// glyph is the only thing left to say the pin exists. glyphPinned rather
+	// than a marker of its own: the sidebar already spends ◆ on this, and a
+	// second symbol for one state is the vocabulary confusion this change is
+	// removing. One cell, like eagerTabMarker, and prefixed the same way so the
+	// two read as one row of marks rather than two conventions.
+	if m.tabPinnedAttention(idx) {
+		name = glyphPinned + name
+	}
 	if m.tabHasWorkingPane(idx) {
 		name = spinnerFrames[m.workSpinnerFrame%len(spinnerFrames)] + " " + name
 	}
@@ -4756,11 +4770,16 @@ func (m Model) tabLabel(idx int) string {
 }
 
 // tabStyle returns the lipgloss style for the tab at idx. Precedence: amber
-// blocked mark (a pane parked on the user) > green unseen mark (background tab
-// with an unfocused finished pane, OR a tab containing a pane pinned for
-// attention via the context menu) > custom tab color > active/inactive default.
-// Shared by renderTabBar and hitTestTab so rendered widths and click
+// blocked mark (a pane parked on the user) > purple pinned mark (a pane the
+// user marked by hand from the context menu) > green unseen mark (background
+// tab with an unfocused finished pane) > custom tab color > active/inactive
+// default. Shared by renderTabBar and hitTestTab so rendered widths and click
 // hit-testing never diverge.
+//
+// Pinned and unseen used to SHARE the green, which made the mark the user set
+// indistinguishable from the one the agent caused — and only one of the two
+// ever clears itself. The ◆ prefix tabLabel adds is independent of this
+// precedence, so a tab that is both blocked and pinned still says so.
 func (m Model) tabStyle(idx int) lipgloss.Style {
 	tab := m.curTabs()[idx]
 	active := idx == m.activeTabIdx()
@@ -4776,10 +4795,17 @@ func (m Model) tabStyle(idx int) lipgloss.Style {
 		}
 		return blockedTabStyle
 	}
+	// Pinned before unseen, and in its own colour rather than sharing green.
 	// tabUnseen self-excludes the active tab; tabPinnedAttention deliberately
 	// does not (a pin colors the active tab's label unless the pinned pane is
 	// the one in focus).
-	if m.tabUnseen(idx) || m.tabPinnedAttention(idx) {
+	if m.tabPinnedAttention(idx) {
+		if active {
+			return pinnedActiveTabStyle
+		}
+		return pinnedTabStyle
+	}
+	if m.tabUnseen(idx) {
 		return unseenTabStyle
 	}
 	if tab.Color != "" {
@@ -5717,6 +5743,9 @@ func parseWorkspaceState(raw map[string]any) WorkspaceStateMsg {
 				}
 				if eager, ok := pm["eager"].(bool); ok {
 					pi.Eager = eager
+				}
+				if pinned, ok := pm["pinned_attention"].(bool); ok {
+					pi.PinnedAttention = pinned
 				}
 				if overlay, ok := pm["overlay"].(bool); ok {
 					pi.Overlay = overlay
@@ -6785,6 +6814,35 @@ func (m Model) toggleActivePaneMute() tea.Cmd {
 		}
 		if err := m.sendForPane(paneID, msg); err != nil {
 			log.Printf("toggleActivePaneMute send: %v", err)
+		}
+		return nil
+	}
+}
+
+// sendPinnedAttention makes the daemon the authority on a pane's attention
+// pin. Takes the target value rather than toggling, because both callers
+// already know it: the context menu's Mark/Unmark row flips, and Clear
+// attention only ever clears.
+//
+// paneID rather than *PaneModel, and sendForPane rather than a bare send: the
+// menu can target a pane in any project, and each project belongs to exactly
+// one daemon — aiming this at the active destination would set the mark on
+// whichever machine the user happens to be looking at.
+func (m Model) sendPinnedAttention(paneID string, pinned bool) tea.Cmd {
+	if paneID == "" {
+		return nil
+	}
+	return func() tea.Msg {
+		msg, err := ipc.NewMessage(ipc.MsgUpdatePane, ipc.UpdatePanePayload{
+			PaneID:          paneID,
+			PinnedAttention: &pinned,
+		})
+		if err != nil {
+			log.Printf("sendPinnedAttention build msg: %v", err)
+			return nil
+		}
+		if err := m.sendForPane(paneID, msg); err != nil {
+			log.Printf("sendPinnedAttention send: %v", err)
 		}
 		return nil
 	}

@@ -611,6 +611,13 @@ func syncPaneMeta(pane *PaneModel, info *PaneInfo, wideCanvas bool, minNativeCol
 	pane.MinNativeCols = minNativeCols
 	pane.Muted = info.Muted
 	pane.Eager = info.Eager
+	// Unconditional, which makes the DAEMON the sole writer of this mark. The
+	// context menu used to flip the local bool in place; it sends
+	// MsgUpdatePane now and lets the answer come back here, exactly as the mute
+	// toggle does. A surviving local write would fight this copy on the next
+	// broadcast — and broadcasts are frequent (the git ticker alone fires every
+	// 5 s), so the mark would appear to set and then undo itself.
+	pane.pinnedAttention = info.PinnedAttention
 	pane.Pending = info.Pending
 	pane.SessionID = info.SessionID
 	pane.HistoryLines = info.HistoryLines

@@ -144,7 +144,7 @@ func TestAckFocusedPane_KeepsEveryDerivedBlockedSignal(t *testing.T) {
 	if !m.tabBlocked(0) {
 		t.Error("tab must stay marked")
 	}
-	if _, blocked, _ := m.projects[0].counts(); blocked != 2 {
+	if blocked := m.projects[0].counts().blocked; blocked != 2 {
 		t.Errorf("project badge counts %d blocked, want 2 — focus must not shrink the roll-up", blocked)
 	}
 	if got := len(m.blockedPanes()); got != 2 {
@@ -232,7 +232,7 @@ func TestUserInput_ClearsTheParkedMark(t *testing.T) {
 	if m.tabBlocked(0) {
 		t.Error("the tab must stop reading blocked once the pane was answered")
 	}
-	if _, blocked, _ := m.projects[0].counts(); blocked != 0 {
+	if blocked := m.projects[0].counts().blocked; blocked != 0 {
 		t.Errorf("project badge counts %d blocked, want 0", blocked)
 	}
 	if got := len(m.blockedPanes()); got != 0 {

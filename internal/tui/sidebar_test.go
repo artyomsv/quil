@@ -1084,21 +1084,79 @@ func TestProjectBadgeCountsFinishedPanes(t *testing.T) {
 	parked.blockedSince = time.Now()
 
 	p := &ProjectModel{tabs: []*TabModel{tabWith(done, busy, parked)}}
-	working, blocked, finished := p.counts()
-	if working != 1 || blocked != 1 || finished != 1 {
-		t.Fatalf("counts() = (working %d, blocked %d, done %d), want (1, 1, 1) — "+
-			"a parked pane must count once, as blocked", working, blocked, finished)
+	c := p.counts()
+	if c.working != 1 || c.blocked != 1 || c.done != 1 {
+		t.Fatalf("counts() = %+v, want working 1, blocked 1, done 1 — "+
+			"a parked pane must count once, as blocked", c)
 	}
 
 	// Built from the glyph constants rather than literals: the badge's job is
 	// to carry a COUNT per state, and pinning the codepoints here would make a
 	// deliberate glyph change (see TestSidebarGlyphs_OneCellAndNotEmojiCapable
 	// for why one was needed) look like a counting regression.
-	row := projectRow("alpha", working, blocked, finished, "", false, 30)
+	row := projectRow("alpha", c, "", false, 30)
 	for _, want := range []string{glyphBlocked + "1", glyphWorking + "1", glyphDone + "1"} {
 		if !strings.Contains(row, want) {
 			t.Errorf("project row %q is missing the %s badge", row, want)
 		}
+	}
+}
+
+// TestProjectCounts_PinnedIsIndependentOfTheStateRanking is the property that
+// separates the pin from the other three counts. Those are one ORDERED
+// classification — a pane parked for input has also finished its turn, and
+// "needs you" outranks "is ready", so it contributes to exactly one. The pin
+// is a second axis: a pinned pane is usually ALSO working or blocked, and
+// folding it into the ranking would make a mark that exists to be un-loseable
+// vanish the moment the pane got busy, which is when the user most needs to
+// find it again.
+func TestProjectCounts_PinnedIsIndependentOfTheStateRanking(t *testing.T) {
+	t.Parallel()
+	pinnedBusy := &PaneModel{ID: "pane-busy"}
+	pinnedBusy.working = true
+	pinnedBusy.pinnedAttention = true
+
+	pinnedBlocked := &PaneModel{ID: "pane-parked"}
+	pinnedBlocked.blockedSince = time.Now()
+	pinnedBlocked.pinnedAttention = true
+
+	pinnedIdle := &PaneModel{ID: "pane-idle"}
+	pinnedIdle.pinnedAttention = true
+
+	plain := &PaneModel{ID: "pane-plain"}
+
+	p := &ProjectModel{tabs: []*TabModel{tabWith(pinnedBusy, pinnedBlocked, pinnedIdle, plain)}}
+	c := p.counts()
+	if c.pinned != 3 {
+		t.Errorf("counts().pinned = %d, want 3 — a pin must count even when a "+
+			"live state outranks it in the switch", c.pinned)
+	}
+	// The other three are unchanged by the pins: the ranking still puts each
+	// pane in exactly one bucket, and an idle pinned pane is in none of them.
+	if c.working != 1 || c.blocked != 1 || c.done != 0 {
+		t.Errorf("counts() = %+v, want working 1, blocked 1, done 0 — pinning "+
+			"must not move a pane between the ranked buckets", c)
+	}
+}
+
+// TestProjectRow_ShowsThePinnedCount: the project row is the one place that
+// lists every project at once, and it counted only what the AGENTS were doing.
+// A pane the user marked by hand was invisible there — so the row the user
+// scans to decide where to go next could not answer "where did I leave that
+// mark", which is the whole job of a mark that never auto-clears.
+func TestProjectRow_ShowsThePinnedCount(t *testing.T) {
+	t.Parallel()
+	row := projectRow("alpha", paneStateCounts{pinned: 2}, "", false, 30)
+	if want := glyphPinned + "2"; !strings.Contains(row, want) {
+		t.Errorf("project row %q is missing the %s badge", row, want)
+	}
+	if sgr := styleSGR(t, sidebarPinnedStyle); sgr != "" && !strings.Contains(row, sgr+" "+glyphPinned+"2") {
+		t.Errorf("project row %q does not paint the pin badge in the pin colour", row)
+	}
+	// Absent when there is nothing to report — the badge is a list of what is
+	// true, not a fixed set of columns with zeroes in them.
+	if plain := projectRow("alpha", paneStateCounts{}, "", false, 30); strings.Contains(plain, glyphPinned) {
+		t.Errorf("project row %q shows a pin badge with no pinned panes", plain)
 	}
 }
 
@@ -1344,7 +1402,7 @@ func TestProjectRow_BadgesCarryTheirStateColour(t *testing.T) {
 	// badge that inherits it is exactly the bug — being the active project does
 	// not change what its panes are doing.
 	for _, active := range []bool{false, true} {
-		row := projectRow("alpha", 2, 1, 3, "", active, 30)
+		row := projectRow("alpha", paneStateCounts{working: 2, blocked: 1, done: 3}, "", active, 30)
 		for _, tt := range tests {
 			want := styleSGR(t, tt.style) + " " + tt.badge
 			if !strings.Contains(row, want) {
@@ -1380,7 +1438,7 @@ func TestProjectRow_LinkGlyphCarriesItsOwnColour(t *testing.T) {
 		{glyphLinkParked, sidebarLinkParkedStyle},
 		{glyphLinkRetry, sidebarLinkRetryStyle},
 	} {
-		row := projectRow("alpha", 0, 0, 0, tt.glyph, false, 30)
+		row := projectRow("alpha", paneStateCounts{}, tt.glyph, false, 30)
 		want := styleSGR(t, tt.style) + " " + tt.glyph
 		if !strings.Contains(row, want) {
 			t.Errorf("projectRow(link=%q) = %q, want the glyph painted with its own style (%q)",
@@ -1407,7 +1465,7 @@ func TestProjectRow_NameKeepsTheRowStyle(t *testing.T) {
 		{"inactive", sidebarProjectStyle, false},
 		{"active", sidebarActiveStyle, true},
 	} {
-		row := projectRow("alpha", 1, 1, 1, glyphLinkParked, tt.activ, 30)
+		row := projectRow("alpha", paneStateCounts{working: 1, blocked: 1, done: 1}, glyphLinkParked, tt.activ, 30)
 		if want := styleSGR(t, tt.style); !strings.Contains(row, want) {
 			t.Errorf("%s: projectRow = %q, want the name painted with the row style (%q)",
 				tt.name, row, want)
@@ -1589,7 +1647,7 @@ func TestSidebarRows_SuppressesTheBlockedGlyphOnlyForTheFocusedPane(t *testing.T
 	if !m.tabBlocked(0) || !m.tabBlocked(1) {
 		t.Error("both tabs must still read as blocked")
 	}
-	if _, blocked, _ := m.projects[0].counts(); blocked != 4 {
+	if blocked := m.projects[0].counts().blocked; blocked != 4 {
 		t.Errorf("project badge counts %d blocked, want 4", blocked)
 	}
 }

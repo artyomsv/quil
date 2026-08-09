@@ -58,14 +58,36 @@ func (p *ProjectModel) displayName() string {
 	return p.Name + "@" + p.Dest
 }
 
-// counts reports panes working and panes blocked on the user, for the
-// project's summary row.
+// paneStateCounts is what one project's panes add up to, for its summary row.
+//
+// A struct rather than four returns: the first three are one ORDERED
+// classification and `pinned` is a second, independent axis, so a bare
+// (working, blocked, done, pinned) tuple invites a caller to read them as four
+// of a kind. It also keeps projectRow's parameter list from growing to eight.
+type paneStateCounts struct {
+	working int
+	blocked int
+	done    int
+	// pinned counts panes the USER marked by hand. Independent of the three
+	// above, deliberately — see counts().
+	pinned int
+}
+
 // counts aggregates the pane states a project row summarises. `done` counts
 // panes that finished while unfocused: without it a turn completing in a
 // BACKGROUND project is invisible at the project level, so the one place the
 // user is looking when they are not in that project never tells them the work
 // is ready — which is most of the reason to group panes by project at all.
-func (p *ProjectModel) counts() (working, blocked, done int) {
+//
+// `pinned` is counted OUTSIDE the switch, and that is the whole difference
+// between it and the other three. Those are one state a pane is in, ranked, so
+// a pane contributes to exactly one; the pin is orthogonal — a pinned pane is
+// usually also working or blocked, and folding it into the ranking would make
+// a mark that exists to be un-loseable disappear the moment the pane got busy.
+// paneRow makes the same distinction by keeping ◆ as a suffix when a live
+// state outranks it.
+func (p *ProjectModel) counts() paneStateCounts {
+	var c paneStateCounts
 	for _, tab := range p.tabs {
 		if tab.Root == nil {
 			continue
@@ -75,15 +97,18 @@ func (p *ProjectModel) counts() (working, blocked, done int) {
 			// Ordered, not independent: a pane parked for input has also
 			// finished its turn, and "needs you" outranks "is ready".
 			case !pane.blockedSince.IsZero():
-				blocked++
+				c.blocked++
 			case pane.working:
-				working++
+				c.working++
 			case pane.unseen:
-				done++
+				c.done++
+			}
+			if pane.pinnedAttention {
+				c.pinned++
 			}
 		}
 	}
-	return working, blocked, done
+	return c
 }
 
 // The link-health glyphs, deliberately kept OUT of the state-glyph const block
@@ -197,7 +222,6 @@ type sidebarRow struct {
 func (m *Model) sidebarRows(w int) ([]sidebarRow, int) {
 	rows := []sidebarRow{{text: sidebarHeading("PROJECTS", w)}}
 	for i, p := range m.projects {
-		working, blocked, done := p.counts()
 		// The NAME alone on the first row. displayName's "name@dest" was
 		// written for the picker, where a dialog is wide enough for it; at the
 		// sidebar's 22 columns "Default@build@gpu01" leaves nothing of
@@ -205,7 +229,7 @@ func (m *Model) sidebarRows(w int) ([]sidebarRow, int) {
 		// are what gets truncated away first.
 		rows = append(rows, sidebarRow{
 			text: projectRow(sanitizeRemoteText(p.Name),
-				working, blocked, done, m.linkGlyph(p.Dest), i == m.activeProject, w),
+				p.counts(), m.linkGlyph(p.Dest), i == m.activeProject, w),
 			kind:  sidebarRowProject,
 			index: i,
 		})
@@ -1006,7 +1030,7 @@ func sidebarTabHeading(name string, idx int, active bool, color string, w int) s
 // Every badge segment begins with a SPACE, which is what satisfies
 // renderStyledSegments' cluster-boundary precondition — see there for what
 // breaks without it.
-func projectRow(name string, working, blocked, done int, link string, active bool, w int) string {
+func projectRow(name string, c paneStateCounts, link string, active bool, w int) string {
 	marker := "  "
 	if active {
 		marker = "▸ "
@@ -1021,18 +1045,27 @@ func projectRow(name string, working, blocked, done int, link string, active boo
 	// copying it into a fifth to prepend the head is some 8 KB of churn per
 	// project per frame, on a strip repainted on every message including the
 	// 100 ms spinner tick.
-	segs := make([]styledSegment, 1, 5)
+	segs := make([]styledSegment, 1, 6)
 	// Badge order is urgency order, and it is the same glyph vocabulary the
 	// pane rows use so the summary reads as a roll-up rather than a second
 	// notation: needs you, still running, finished while you were away.
-	if blocked > 0 {
-		segs = append(segs, styledSegment{fmt.Sprintf(" %s%d", glyphBlocked, blocked), sidebarBlockedStyle})
+	if c.blocked > 0 {
+		segs = append(segs, styledSegment{fmt.Sprintf(" %s%d", glyphBlocked, c.blocked), sidebarBlockedStyle})
 	}
-	if working > 0 {
-		segs = append(segs, styledSegment{fmt.Sprintf(" %s%d", glyphWorking, working), sidebarWorkingStyle})
+	if c.working > 0 {
+		segs = append(segs, styledSegment{fmt.Sprintf(" %s%d", glyphWorking, c.working), sidebarWorkingStyle})
 	}
-	if done > 0 {
-		segs = append(segs, styledSegment{fmt.Sprintf(" %s%d", glyphDone, done), sidebarUnseenStyle})
+	if c.done > 0 {
+		segs = append(segs, styledSegment{fmt.Sprintf(" %s%d", glyphDone, c.done), sidebarUnseenStyle})
+	}
+	// The pin comes AFTER the three automatic states and before the link,
+	// which is not urgency order and is not meant to be: those three rank
+	// against each other because they describe what the agents are doing, and
+	// this one is the user's own mark. Putting it last of the four keeps their
+	// ranking readable as a sequence, and it is also the one the user already
+	// knows about — it is here to be found again, not to be noticed first.
+	if c.pinned > 0 {
+		segs = append(segs, styledSegment{fmt.Sprintf(" %s%d", glyphPinned, c.pinned), sidebarPinnedStyle})
 	}
 	if link != "" {
 		segs = append(segs, styledSegment{" " + link, linkGlyphStyle(link)})
@@ -1120,8 +1153,18 @@ func paneRow(pane *PaneModel, focused bool, w int) string {
 	// A pin outranked by a live state must still be visible — it is the mark
 	// that deliberately survives focus, so losing it to a transient blocked or
 	// working state would make "don't let me forget" forgettable.
+	//
+	// Kept as its OWN segment rather than appended to suffix, for two reasons.
+	// It is painted in the pin's colour instead of inheriting the outranking
+	// state's, which is the whole distinction between a mark the user set and
+	// one the agent caused — a purple ◆ drawn amber reads as part of the
+	// blocked state. And its width is RESERVED below, so a long blocked-reason
+	// truncates into the label's budget rather than eating the pin: appending
+	// it left it last in one string that gets cut from the end, so the mark
+	// vanished exactly when the pane was busiest, which is when it matters.
+	pinSuffix := ""
 	if pane.pinnedAttention && glyph != glyphPinned {
-		suffix += " " + glyphPinned
+		pinSuffix = " " + glyphPinned
 	}
 
 	label := pane.Name
@@ -1135,7 +1178,7 @@ func paneRow(pane *PaneModel, focused bool, w int) string {
 		marker = "▸ "
 	}
 	prefix := marker + glyph + " "
-	avail := w - lipgloss.Width(prefix)
+	avail := w - lipgloss.Width(prefix) - lipgloss.Width(pinSuffix)
 	if avail < 1 {
 		avail = 1
 	}
@@ -1155,7 +1198,14 @@ func paneRow(pane *PaneModel, focused bool, w int) string {
 	label = truncateCells(label, labelW)
 	suffix = truncateCells(suffix, avail-lipgloss.Width(label))
 
-	return style.Render(padOrTrunc(prefix+label+suffix, w))
+	// Both suffixes begin with a space, and prefix+label ends wherever
+	// truncateCells cut — so every segment starts on a grapheme-cluster
+	// boundary, which is what renderStyledSegments requires of its callers.
+	return renderStyledSegments([]styledSegment{
+		{prefix + label, style},
+		{suffix, style},
+		{pinSuffix, sidebarPinnedStyle},
+	}, w)
 }
 
 // truncateCells cuts s to at most w CELLS, not runes.

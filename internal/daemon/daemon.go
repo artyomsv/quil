@@ -692,6 +692,7 @@ func (d *Daemon) restoreWorkspace() error {
 				rows, _ := paneData["rows"].(float64)
 				muted, _ := paneData["muted"].(bool)
 				eager, _ := paneData["eager"].(bool)
+				pinnedAttention, _ := paneData["pinned_attention"].(bool)
 				worktreeOwned, _ := paneData["worktree_owned"].(bool)
 
 				pane := &Pane{
@@ -708,6 +709,12 @@ func (d *Daemon) restoreWorkspace() error {
 					OutputBuf:    ringbuf.NewRingBuffer(d.session.bufSize),
 					Muted:        muted,
 					Eager:        eager,
+					// Absent on pre-pin snapshots → false, which is the only
+					// safe default: inventing a mark the user never set would
+					// put a "look here" on a pane with nothing to look at, and
+					// the mark is deliberately un-clearable by anything but the
+					// user.
+					PinnedAttention: pinnedAttention,
 					// Absent on pre-worktree snapshots → false, which is the
 					// right default: a pane nobody recorded as owning a
 					// worktree keeps the ordinary CWD fallback.
@@ -2091,6 +2098,12 @@ func (d *Daemon) handleUpdatePane(msg *ipc.Message) {
 		pane.PluginMu.Unlock()
 		log.Printf("pane %s: eager=%v", pane.ID, *payload.Eager)
 	}
+	if payload.PinnedAttention != nil {
+		pane.PluginMu.Lock()
+		pane.PinnedAttention = *payload.PinnedAttention
+		pane.PluginMu.Unlock()
+		log.Printf("pane %s: pinned_attention=%v", pane.ID, *payload.PinnedAttention)
+	}
 	d.broadcastState()
 	d.requestSnapshot()
 }
@@ -2615,6 +2628,14 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			}
 			if pane.Eager {
 				paneData["eager"] = true
+			}
+			// PERSISTED for the reason the field exists: the mark is the user's
+			// own, nothing re-derives it, and a hook edge that would set it
+			// again is never coming. Written here rather than in the
+			// includeOverlays block so ONE line serves both the disk snapshot
+			// and the broadcast — the same arrangement muted has.
+			if pane.PinnedAttention {
+				paneData["pinned_attention"] = true
 			}
 			// PERSISTED, unlike SpawnError beside it: this is how restore tells
 			// a missing worktree from a stale browsed directory, and without it

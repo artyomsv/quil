@@ -121,6 +121,41 @@ func TestSnapshot_PinnedAttentionSurvivesTheRoundTrip(t *testing.T) {
 	}
 }
 
+// TestWorkspaceState_PinnedAttentionFlip_NoRace mirrors
+// TestWorkspaceState_OverlayFlip_NoRace for the new field.
+//
+// The read at the `pinned_attention` write sits inside the same PluginMu span
+// that already guards Overlay, so the Overlay test incidentally exercises a
+// concurrent READ of this field today — but nothing concurrently WRITES it the
+// way handleUpdatePane does. That is the absence of a bug the existing tests
+// happen to be positioned to catch rather than coverage of this field, and a
+// future edit that moves the write out of the lock (or the read out of the
+// span) would leave every current test green.
+func TestWorkspaceState_PinnedAttentionFlip_NoRace(t *testing.T) {
+	d := New(config.Default())
+
+	tab := &Tab{ID: "tab-pinpin", Name: "pin", Panes: []string{"pane-beefbeef"}}
+	pane := &Pane{ID: "pane-beefbeef", TabID: "tab-pinpin", CWD: "/tmp"}
+	tabs := []*Tab{tab}
+	panesByTab := map[string][]*Pane{tab.ID: {pane}}
+
+	const iters = 100
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < iters; i++ {
+			pane.PluginMu.Lock()
+			pane.PinnedAttention = i%2 == 0
+			pane.PluginMu.Unlock()
+		}
+	}()
+
+	for i := 0; i < iters; i++ {
+		_ = d.workspaceStateFromSnapshot(tab.ID, tabs, panesByTab, nil, "", true)
+	}
+	<-done
+}
+
 // TestSnapshot_PinnedAttentionUsesTheWireKey pins the DAEMON half of the wire
 // contract. The round-trip above proves this package's writer and reader agree
 // with each other — they are the same file — but the same map is also the

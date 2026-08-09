@@ -237,14 +237,62 @@ func TestCtxMenu_ExecuteClearAttention_SendsThePinClear(t *testing.T) {
 	if pane.unseen {
 		t.Error("Clear attention left the unseen mark")
 	}
-	// Cleared locally too, so the row stops showing ◆ on THIS frame rather than
-	// on the one after the round trip; the broadcast then confirms the same
-	// value.
-	if pane.pinnedAttention {
-		t.Error("Clear attention left the pin set locally")
-	}
+	// The pin is NOT cleared locally — it is daemon-owned, and the broadcast
+	// this send provokes is what clears it. Writing it here as well would blink
+	// the ◆ off/on/off against a broadcast already in flight, and would leave a
+	// visible lie when the link is parked and the send is dropped.
 	if len(fake.sent) == 0 {
 		t.Fatal("Clear attention sent nothing — the pin would come back on the next broadcast")
+	}
+	var payload ipc.UpdatePanePayload
+	if err := fake.sent[len(fake.sent)-1].DecodePayload(&payload); err != nil {
+		t.Fatalf("DecodePayload: %v", err)
+	}
+	if payload.PinnedAttention == nil || *payload.PinnedAttention {
+		t.Error("Clear attention did not send an explicit pin clear")
+	}
+}
+
+// TestCtxMenu_ClearAttention_SendsBeforeTheMarkBroadcastLands is the regression
+// test for a real bug: the send used to be gated on `pane.pinnedAttention`.
+//
+// That field is written ONLY by a broadcast now, so it answers "what did the
+// last workspace_state say", never "what does the daemon hold". Mark
+// deliberately does not write locally, so the two menu actions in sequence —
+// which is two right-clicks, and over ssh a window hundreds of milliseconds
+// wide — read the pin as false, sent NOTHING, and then let the Mark's own
+// broadcast restore the ◆ after the user had cleared it. Persisted, on the one
+// action documented as the only non-agent route to a clear.
+//
+// Driven with NO intervening syncPaneMeta, which is exactly the state the bug
+// needed.
+func TestCtxMenu_ClearAttention_SendsBeforeTheMarkBroadcastLands(t *testing.T) {
+	t.Parallel()
+	fake := &fakeSender{}
+	m := newSplitDragTestModel(t)
+	m.client = fake
+	// A reason for the row to be enabled that is NOT the pin, since the pin is
+	// invisible to this client until its broadcast returns.
+	m.curTabs()[0].Root.Right.Pane.unseen = true
+
+	updated, _ := m.Update(tea.MouseClickMsg{X: 70, Y: 10, Button: tea.MouseRight})
+	got := updated.(Model)
+	updated, cmd := got.executeCtxMenuItem(ctxMenuItem{id: ctxActAttention, label: "Mark attention", enabled: true})
+	got = updated.(Model)
+	runCmd(cmd)
+	if got.curTabs()[0].Root.Right.Pane.pinnedAttention {
+		t.Fatal("Mark wrote the pin locally — this test no longer reproduces the window it exists for")
+	}
+
+	before := len(fake.sent)
+	updated, _ = got.Update(tea.MouseClickMsg{X: 70, Y: 10, Button: tea.MouseRight})
+	got = updated.(Model)
+	_, cmd = got.executeCtxMenuItem(ctxMenuItem{id: ctxActClearAttention, label: "Clear attention", enabled: true})
+	runCmd(cmd)
+
+	if len(fake.sent) == before {
+		t.Fatal("Clear attention sent nothing while a Mark was still in flight — " +
+			"the Mark's broadcast will put the ◆ back after the user cleared it")
 	}
 	var payload ipc.UpdatePanePayload
 	if err := fake.sent[len(fake.sent)-1].DecodePayload(&payload); err != nil {

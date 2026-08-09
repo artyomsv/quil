@@ -497,6 +497,31 @@ load-bearing exactly as it is for `Muted` — `handleUpdatePane` is a PARTIAL
 update handler, and a plain bool would clear the pin on every rename and every
 OSC 7 CWD change.
 
+**`Clear attention` sends the pin UNCONDITIONALLY, never gated on the local
+value, and gating it was a real bug.** `pane.pinnedAttention` reports what the
+last broadcast said, never what the daemon holds — and Mark deliberately does
+not write locally, so Mark followed by Clear inside the round trip read the pin
+as false, sent nothing, and then let the Mark's own broadcast restore the ◆
+*after* the user had cleared it, persisted. Two right-clicks, and over ssh the
+window is hundreds of milliseconds. For the same reason Clear does not clear it
+locally either: a broadcast already in flight re-sets it and the next one clears
+it (the ◆ blinks off/on/off), and with the link parked `Router.Send` drops the
+message and returns nil, so nothing ever arrives to revert a local clear and the
+mark stays gone until reconnect. The send is `sendForDestStrict` and the
+destination is resolved on the Update goroutine — this is a one-shot the user
+asked for, not one of the bulk iterators the loose `Send` was written for.
+
+**"The user's own mark" is a statement about a daemon the user CONTROLS.**
+`syncPaneMeta`'s unconditional copy is what makes a cross-client unmark work,
+and it is also what removes the client's ability to refuse: a hostile remote
+daemon can assert `pinned_attention` on every pane and re-assert it within 5 s
+of any Unmark. The blast radius is display only — nothing outside rendering
+reads the flag, the attention queue keys on `blockedSince` — and such a daemon
+already drives `blockedSince`/`unseen` through hook events, so this widens an
+existing capability rather than opening a new one. Accepted deliberately; if it
+ever needs closing, the shape is a per-pane client dismissal epoch that
+suppresses a re-assert until the user re-pins.
+
 **`counts().pinned` is a SECOND AXIS, not a fourth rank.** The other three are
 one ordered classification — a pane parked for input has also finished its turn,
 "needs you" outranks "is ready", so a pane contributes to exactly one — and the

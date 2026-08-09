@@ -442,8 +442,10 @@ func coalescedCount(data map[string]string) int {
 // pane went on claiming to be working the whole time it waited. paneRow
 // suppresses the blocked PRESENTATION for the focused pane instead, so leaving
 // the pane restores every signal with no hook edge required. pinnedAttention is
-// untouched for its own reason — only ctxActAttention / ctxActClearAttention own
-// that flag.
+// untouched for a stronger reason than the others: it is DAEMON-owned, and
+// syncPaneMeta (this file) is the only thing in the client that writes it. The
+// context menu's two attention rows send MsgUpdatePane; focus is not a route to
+// a clear at all.
 func (m *Model) ackFocusedPane() {
 	tab := m.activeTabModel()
 	if tab == nil || tab.Root == nil || tab.ActivePane == "" {

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -171,6 +172,148 @@ func TestPaneRow_PinSurvivesALongBlockedReason(t *testing.T) {
 	}
 	if n := lipgloss.Width(row); n != defaultSidebarWidth {
 		t.Errorf("row measures %d cells, want exactly %d", n, defaultSidebarWidth)
+	}
+}
+
+// TestHitTestTab_PinnedTabShiftsLaterTabsByExactlyOneCell.
+//
+// The ◆ prefix makes a pinned tab one cell wider, and renderTabBar paints while
+// hitTestTab decides what a click hit. They share tabLabel + tabStyle, so they
+// cannot disagree by construction — but "cannot disagree" is a claim about the
+// current code, and a click landing one tab off is the exact failure the
+// sidebar's own row machinery has a paragraph of comments about. Driven through
+// the REAL hitTestTab across every column of the rendered bar, with the pinned
+// tab in the MIDDLE so the shift has somewhere to propagate to.
+func TestHitTestTab_PinnedTabShiftsLaterTabsByExactlyOneCell(t *testing.T) {
+	t.Parallel()
+	// Two identical models; the only difference is the pin on tab 1.
+	build := func(pin bool) Model {
+		m := newTestModelWithTabs(t, 3, 1)
+		m.width, m.height = 120, 40
+		if pin {
+			m.curTabs()[1].Leaves()[0].pinnedAttention = true
+			// Not the focused pane of the active tab, or tabPinnedAttention
+			// excludes it and the fixture stops discriminating.
+			m.curTabs()[1].ActivePane = "not-this-one"
+		}
+		return m
+	}
+	plain, pinned := build(false), build(true)
+
+	if !pinned.tabPinnedAttention(1) {
+		t.Fatal("fixture did not produce a pinned tab — this test cannot discriminate")
+	}
+	if w, pw := lipgloss.Width(plain.tabLabel(1)), lipgloss.Width(pinned.tabLabel(1)); pw != w+1 {
+		t.Fatalf("pinned tab label measures %d cells against %d — the ◆ should cost exactly one", pw, w)
+	}
+
+	// Every column of the bar resolves to SOME tab or to -1, and the mapping
+	// must be monotonic: walking left to right, the index never goes backwards.
+	// That is what a desync breaks.
+	prev := -1
+	sawEachTab := map[int]bool{}
+	for x := 0; x < 120; x++ {
+		got := pinned.hitTestTab(x)
+		if got == -1 {
+			continue
+		}
+		if got < prev {
+			t.Fatalf("x=%d resolved to tab %d after tab %d — the hit map is not monotonic", x, got, prev)
+		}
+		prev = got
+		sawEachTab[got] = true
+	}
+	for i := 0; i < 3; i++ {
+		if !sawEachTab[i] {
+			t.Errorf("tab %d is unreachable by any click column with a pinned tab beside it", i)
+		}
+	}
+
+	// The concrete shift: every tab AFTER the pinned one starts one column later
+	// than it would have unpinned, and no earlier tab moves.
+	firstCol := func(m Model, idx int) int {
+		for x := 0; x < 120; x++ {
+			if m.hitTestTab(x) == idx {
+				return x
+			}
+		}
+		return -1
+	}
+	if a, b := firstCol(plain, 0), firstCol(pinned, 0); a != b {
+		t.Errorf("tab 0 moved from column %d to %d — a pin on tab 1 must not shift it", a, b)
+	}
+	if a, b := firstCol(plain, 2), firstCol(pinned, 2); b != a+1 {
+		t.Errorf("tab 2 starts at column %d, want %d (one past its unpinned %d)", b, a+1, a)
+	}
+}
+
+// TestSidebarRows_CountsThePinInANonActiveProject. The roll-up is per project,
+// and every existing pin test calls counts()/projectRow directly. This drives
+// the real sidebarRows over a model holding two projects with the pin in the
+// one that is NOT active — the case the feature exists for, since a mark you
+// can see without leaving the project is the one you least need help finding.
+func TestSidebarRows_CountsThePinInANonActiveProject(t *testing.T) {
+	t.Parallel()
+	pinned := newTestPane("pane-pinned")
+	pinned.pinnedAttention = true
+	plain := newTestPane("pane-plain")
+
+	m := Model{
+		projects: []*ProjectModel{
+			{ID: "p0", Name: "active", tabs: []*TabModel{{ID: "t0", Name: "a", Root: &LayoutNode{Pane: plain}}}},
+			{ID: "p1", Name: "background", tabs: []*TabModel{{ID: "t1", Name: "b", Root: &LayoutNode{Pane: pinned}}}},
+		},
+		activeProject: 0,
+		sidebarOpen:   true,
+		sidebarWidth:  defaultSidebarWidth, width: 200, height: 40,
+	}
+
+	rows, _ := m.sidebarRows(defaultSidebarWidth)
+	var activeRow, backgroundRow string
+	for _, r := range rows {
+		if r.kind != sidebarRowProject {
+			continue
+		}
+		switch r.index {
+		case 0:
+			activeRow = r.text
+		case 1:
+			backgroundRow = r.text
+		}
+	}
+	if backgroundRow == "" {
+		t.Fatal("the background project has no row")
+	}
+	if want := glyphPinned + "1"; !strings.Contains(backgroundRow, want) {
+		t.Errorf("background project row %q is missing the %s badge", backgroundRow, want)
+	}
+	if strings.Contains(activeRow, glyphPinned) {
+		t.Errorf("active project row %q shows a pin badge for another project's pane", activeRow)
+	}
+}
+
+// TestSendPinnedAttention_DegenerateInputs covers the two paths the happy-path
+// tests cannot reach: an empty pane id (no Cmd at all) and a send that fails.
+// Neither has a user-visible fallback by design — there is no dialog to surface
+// it in from a context menu — so what is pinned here is that the failure is
+// survived rather than panicking, and that nothing is sent for an empty id.
+func TestSendPinnedAttention_DegenerateInputs(t *testing.T) {
+	t.Parallel()
+	m := newSplitDragTestModel(t)
+	fake := &fakeSender{sendErr: errors.New("socket closed")}
+	m.client = fake
+
+	if cmd := m.sendPinnedAttention("", true); cmd != nil {
+		t.Error("an empty pane id should produce no command at all")
+	}
+	if len(fake.sent) != 0 {
+		t.Error("an empty pane id sent a message")
+	}
+
+	// A refused send is logged and swallowed — the Cmd must still complete.
+	runCmd(m.sendPinnedAttention("p2", true))
+	if len(fake.sent) != 1 {
+		t.Errorf("sent %d messages, want 1 — the send is attempted even when it will fail", len(fake.sent))
 	}
 }
 

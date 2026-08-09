@@ -24,6 +24,18 @@ see [[hookevents-taint-boundary]] and [[osc7-cwd-taint]]). Reachable by anyone
 who can write that host's `~/.quil/workspace.json` or speak to its unix socket
 — not only by a full host compromise.
 
+**Non-string display state is in scope too, and `pinned_attention` is the
+example to reason from** (added c26bf1a, PR #146). It used to be TUI-session
+state a daemon could not touch; it is now daemon-declared, `syncPaneMeta`
+copies it UNCONDITIONALLY, and the client's own "Unmark"/"Clear attention"
+only SEND — so a daemon that ignores the send re-asserts the mark on the next
+broadcast (the git ticker guarantees one every 5 s) and the pin is unclearable
+from the client by design. Impact is display-only (nothing outside rendering
+reads it; `attention.go`'s queue keys on `blockedSince`). **How to apply:**
+when a client-owned flag moves daemon-side, ask whether any client action is
+still able to win against a peer that ignores it — "the user's own mark" is a
+claim about a daemon the user controls.
+
 **How to apply:** when reviewing any TUI render path, ask whether the string
 came from `applyWorkspaceState` or an IPC response. Note that `fmt.Sprintf`
 with `%q` incidentally neutralises this (strconv.Quote escapes non-`IsPrint`

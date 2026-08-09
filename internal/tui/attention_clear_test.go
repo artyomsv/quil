@@ -56,14 +56,17 @@ func TestCtxMenu_ClearAttentionDropsAStuckBlockedMark(t *testing.T) {
 	if target.blockedReason != "" {
 		t.Errorf("blockedReason = %q, want empty", target.blockedReason)
 	}
-	// All three marks, or the row half-works: clearing only the blocked mark
+	// All four marks, or the row half-works: clearing only the blocked mark
 	// leaves the pane rendering green and the project row still counting it.
 	if target.unseen {
 		t.Error("unseen should be cleared too")
 	}
-	if target.pinnedAttention {
-		t.Error("pinnedAttention should be cleared too")
-	}
+	// The PIN is the exception, and not clearing it here is the point: it is
+	// daemon-owned, so the row SENDS the clear and the broadcast that answers is
+	// what drops the ◆. Asserting a local clear here would be asserting the bug
+	// — a local write blinks against a broadcast already in flight, and leaves a
+	// visible lie when the link is parked and the send is dropped. The send
+	// itself is pinned by TestCtxMenu_ExecuteClearAttention_SendsThePinClear.
 	if got.ctxMenu.open() {
 		t.Error("menu should close after the action runs")
 	}

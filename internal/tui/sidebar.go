@@ -86,6 +86,15 @@ type paneStateCounts struct {
 // a mark that exists to be un-loseable disappear the moment the pane got busy.
 // paneRow makes the same distinction by keeping ◆ as a suffix when a live
 // state outranks it.
+//
+// It also counts a pin on the FOCUSED pane, where tabPinnedAttention
+// (workstate.go) deliberately does not — so focusing your only pinned pane
+// drops the tab's ◆ while this row still reads ◆1. That is two functions
+// answering two questions rather than a disagreement: the tab bar says "which
+// tab should I go to", and the tab you are already on is not an answer, while
+// this row says "how many marks does this project hold", which does not change
+// with where you are looking. paneRow agrees with THIS one — it shows ◆ for a
+// focused pinned pane — because the sidebar's pane list is an inventory too.
 func (p *ProjectModel) counts() paneStateCounts {
 	var c paneStateCounts
 	for _, tab := range p.tabs {
@@ -1013,8 +1022,8 @@ func sidebarTabHeading(name string, idx int, active bool, color string, w int) s
 }
 
 // projectRow renders one project's summary line: an active-project marker,
-// its (already sanitized, dest-qualified) name, and a trailing badge of
-// working/blocked counts plus link health. name is expected pre-sanitized —
+// its (already sanitized, dest-qualified) name, and a trailing badge of the
+// four pane counts plus link health. name is expected pre-sanitized —
 // every call site in renderSidebar routes the raw daemon-sourced value
 // through sanitizeRemoteText before reaching here.
 //
@@ -1084,8 +1093,9 @@ func projectRow(name string, c paneStateCounts, link string, active bool, w int)
 	// The gap belongs to the HEAD segment, so the badge stays flush right rather
 	// than sitting behind unstyled cells. renderStyledSegments' own trailing pad
 	// is then reached only when the LAST segment gives up a cell it could not
-	// use — a wide glyph straddling the boundary, as in projectRow("a", 0, 0, 0,
-	// "⚡", false, 5), where " ⚡" cuts to " " and leaves one cell to backfill.
+	// use — a wide glyph straddling the boundary, as in
+	// projectRow("a", paneStateCounts{}, glyphLinkParked, false, 5), where " ⚡"
+	// cuts to " " and leaves one cell to backfill.
 	head := marker + name
 	if gap := w - lipgloss.Width(head) - badgeW; gap > 0 {
 		head += strings.Repeat(" ", gap)
@@ -1198,12 +1208,22 @@ func paneRow(pane *PaneModel, focused bool, w int) string {
 	label = truncateCells(label, labelW)
 	suffix = truncateCells(suffix, avail-lipgloss.Width(label))
 
-	// Both suffixes begin with a space, and prefix+label ends wherever
-	// truncateCells cut — so every segment starts on a grapheme-cluster
-	// boundary, which is what renderStyledSegments requires of its callers.
+	// TWO segments, not three: prefix+label and suffix carry the SAME style, so
+	// splitting them emitted a second identical SGR pair on every pane row of
+	// every frame — on a strip that repaints on the 100 ms spinner tick. Only
+	// the pin genuinely differs, and merging also drops one of the caller
+	// obligations renderStyledSegments states.
+	//
+	// pinSuffix begins with a SPACE, which is what satisfies that function's
+	// cluster-boundary precondition. Precisely: a space cannot change the width
+	// of the cluster before it, whichever way uniseg segments the join — the
+	// inflation the precondition guards against needs an Extend/ZWJ/emoji
+	// codepoint, which measures 0 alone and ≥1 joined, where a space measures 1
+	// either way. So the independently-measured sum stays exact even though a
+	// preceding Prepend character (UAX #29 GB9b) would technically pull the
+	// space into its cluster.
 	return renderStyledSegments([]styledSegment{
-		{prefix + label, style},
-		{suffix, style},
+		{prefix + label + suffix, style},
 		{pinSuffix, sidebarPinnedStyle},
 	}, w)
 }

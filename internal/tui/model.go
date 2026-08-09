@@ -95,21 +95,21 @@ type TabInfo struct {
 }
 
 type PaneInfo struct {
-	ID           string
-	TabID        string
-	CWD          string
-	Name         string
-	Type         string
-	Muted        bool
-	Eager        bool
+	ID    string
+	TabID string
+	CWD   string
+	Name  string
+	Type  string
+	Muted bool
+	Eager bool
 	// PinnedAttention is the user's "don't let me forget" mark. Daemon-owned
 	// like Muted, so it survives a TUI restart and reads the same on every
 	// client attached to that daemon.
 	PinnedAttention bool
 	Overlay         bool
-	Pending      bool // deferred restore — not yet lazy-spawned
-	SessionID    string
-	HistoryLines int
+	Pending         bool // deferred restore — not yet lazy-spawned
+	SessionID       string
+	HistoryLines    int
 	// MouseTracking/MouseSGR are daemon-authoritative (scanned from the PTY
 	// stream): the child app has enabled mouse tracking, so wheel events
 	// should be forwarded to it. Mirrored onto PaneModel for the wheel handler.
@@ -6824,14 +6824,26 @@ func (m Model) toggleActivePaneMute() tea.Cmd {
 // already know it: the context menu's Mark/Unmark row flips, and Clear
 // attention only ever clears.
 //
-// paneID rather than *PaneModel, and sendForPane rather than a bare send: the
-// menu can target a pane in any project, and each project belongs to exactly
-// one daemon — aiming this at the active destination would set the mark on
-// whichever machine the user happens to be looking at.
+// The destination is resolved HERE, on the Update goroutine, and the closure
+// gets a plain string. Its siblings all call sendForPane inside the Cmd, which
+// walks m.projects → tabs → the layout tree off-goroutine while rebuildTabs
+// mutates the same pointers on every workspace_state — the hazard the pane-input
+// pipeline invariant in .claude/CLAUDE.md names ("resolving it off-goroutine is
+// a race AND a stale answer"). Resolving it first costs nothing and is the only
+// difference from toggleActivePaneMute worth having.
+//
+// Strict, unlike those siblings: Router.Send DROPS a message for a dest it has
+// no conn for and returns nil, which is right for the bulk iterators it was
+// written for and wrong here. This is a one-shot the user asked for, and the
+// pin is the one flag whose entire selling point is that it survives — a mark
+// that silently did not take is invisible until the user goes looking for it
+// next week. There is no dialog to surface it in from a context menu, so the
+// failure is named in the log rather than swallowed as success.
 func (m Model) sendPinnedAttention(paneID string, pinned bool) tea.Cmd {
 	if paneID == "" {
 		return nil
 	}
+	dest := m.destOfPane(paneID)
 	return func() tea.Msg {
 		msg, err := ipc.NewMessage(ipc.MsgUpdatePane, ipc.UpdatePanePayload{
 			PaneID:          paneID,
@@ -6841,8 +6853,9 @@ func (m Model) sendPinnedAttention(paneID string, pinned bool) tea.Cmd {
 			log.Printf("sendPinnedAttention build msg: %v", err)
 			return nil
 		}
-		if err := m.sendForPane(paneID, msg); err != nil {
-			log.Printf("sendPinnedAttention send: %v", err)
+		if err := m.sendForDestStrict(dest, msg); err != nil {
+			log.Printf("sendPinnedAttention: pin=%v for pane %s did not reach dest %q: %v",
+				pinned, paneID, dest, err)
 		}
 		return nil
 	}

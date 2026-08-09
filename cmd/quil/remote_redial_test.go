@@ -293,3 +293,57 @@ func TestRedialRemote_DialsTheDestinationItWasBuiltFor(t *testing.T) {
 			"to another, and they share a byte budget", logger.dest, "gpu01")
 	}
 }
+
+// TestRedialRemote_GateSelection pins the line in redialRemote that CHOOSES
+// the gate passed to verifyRemoteLinkGated: `old == nil`.
+//
+// verifyRemoteLinkGated itself is well tested for gate=true and gate=false in
+// remote_gate_test.go — but every OTHER redialRemote test in this file calls
+// redialRemote(...)(nil) and fails on a stubbed dial error before ever
+// reaching the version-comparison branch, so none of them exercises the
+// SELECTION. Flipping `old == nil` to `old != nil` in production would still
+// pass every one of them: this is the "unit test bypassing the call site"
+// trap applied to the most consequential decision in this file — whether a
+// reconnect attaches to a daemon running a different Quil version. This test
+// drives redialRemote itself, through a stubbed dial that hands back a fake
+// daemon answering every version probe with a mismatched version, and checks
+// both directions of the gate.
+func TestRedialRemote_GateSelection(t *testing.T) {
+	t.Run("a never-attached destination refuses a version mismatch", func(t *testing.T) {
+		withRemote(t, "gpu01")
+		client := fakeDaemonAnswering(t, "1.53.0") // deliberately not this test binary's version
+		stubDial(t, func(context.Context, config.Config, string, bool, io.Writer) (*ipc.Client, transport.LinkStatus, error) {
+			return client, nil, nil
+		})
+
+		got, err := redialRemote(func() *config.Config { return &config.Config{} }, "gpu01")(nil)
+		if err == nil {
+			t.Fatal("a never-attached destination accepted a version mismatch")
+		}
+		if !errors.Is(err, tui.ErrRemoteVersionMismatch) {
+			t.Errorf("err = %v, want it to wrap ErrRemoteVersionMismatch so the row can flip "+
+				"to needsUpgrade", err)
+		}
+		if got != nil {
+			t.Errorf("got a client (%v) alongside an error, want nil", got)
+		}
+	})
+
+	t.Run("a mid-session reconnect accepts the same version mismatch", func(t *testing.T) {
+		withRemote(t, "gpu01")
+		client := fakeDaemonAnswering(t, "1.53.0")
+		stubDial(t, func(context.Context, config.Config, string, bool, io.Writer) (*ipc.Client, transport.LinkStatus, error) {
+			return client, nil, nil
+		})
+
+		got, err := redialRemote(func() *config.Config { return &config.Config{} }, "gpu01")(&stubClient{})
+		if err != nil {
+			t.Fatalf("mid-session reconnect refused a version mismatch: %v — refusing here "+
+				"would end a session whose panes are healthy over a mismatch that can only "+
+				"mean the remote was upgraded out from under a still-running client", err)
+		}
+		if got != client {
+			t.Errorf("got %v, want the dialled client back", got)
+		}
+	})
+}

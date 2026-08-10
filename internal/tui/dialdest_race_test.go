@@ -21,6 +21,7 @@ import (
 // every send for its panes is dropped. The zombie sits in the sidebar for the
 // rest of the session.
 func TestDisconnectedDestCannotResurrectItsProjects(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
 	r := NewRouter(map[string]Client{"": newFakeConn(), "gpu01": newFakeConn()})
 	m := Model{
 		width: 100, height: 30,

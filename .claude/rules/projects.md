@@ -83,6 +83,78 @@ depends on stdout for narration and stdin for confirmation, neither visible in
 its signature, and Bubble Tea owns both — the prompt landed on top of the
 dialog and could never be answered.
 
+## Offline destinations
+
+A destination unreachable at launch keeps its sidebar rows instead of vanishing
+(`internal/tui/offline.go`, `SeedOfflineDest`). See `remote-transport.md`'s
+"Several daemons from one client" section for the router-level gap this closes
+— a destination with no conn had no pump, so nothing ever published a loss for
+it and its reconnect ladder never started.
+
+**The offline row is a real `ProjectModel`, never a parallel list.**
+`sidebarRows` builds paint order and `sidebarRowAt` indexes the SAME slice — see
+the Sidebar section above — so a second collection for offline destinations
+would need its own hit-test, and the two are exactly the kind of pair that
+drifts the moment a row is added. `SeedOfflineDest` instead appends ordinary
+`*ProjectModel` values carrying `Offline *OfflineState`, so every existing
+reader (paint, hit-test, the palette, `lastDaemon`) sees them without a special
+case, and only the few call sites that must refuse an action on one
+(`projectActionable`, Task 10) need to know the field exists at all.
+
+**The row's ID is the CACHED DAEMON project ID, and that is the whole
+mechanism that avoids duplication.** `CachedProject.ID` is the daemon's own
+project id, persisted the last time that destination broadcast state
+(`internal/tui/remoteprojects.go`). `applyWorkspaceState` indexes
+`existingProjects` by `p.ID` for the reconnecting destination and looks up
+`existingProjects[info.ID]` for each project the broadcast names
+(`internal/tui/model.go`) — an offline row seeded with the daemon's real ID
+IS a hit in that map, so the first broadcast after reconnect fills it in place
+rather than appending a second row beside it. `SeedOfflineDest` skips a
+synthetic ID (`isSyntheticProject`) for the same reason in reverse: replaying
+one would collide with the placeholder a projects-unaware daemon gets synthesised
+fresh, and would make `destSupportsProjects` answer from a stale observation.
+
+**`Offline` is cleared ONLY by the broadcast fill, and that single clear point
+is deliberate.** `applyWorkspaceState` sets `proj.Offline = nil` right where it
+fills `Name`/`RootDir`/`Bootstrap` from the broadcast — not in `finishReconnect`
+— because that is the one place guaranteed to run for BOTH ways a destination
+comes back: the reconnect ladder, and `adoptDest` from the New Project dialog,
+which attaches a host directly and never touches the reconnect path at all. A
+clear in `finishReconnect` would leave a dialog-adopted host's rows permanently
+marked offline.
+
+**`offlineDestMsg` is its own message type, not a synthesised `linkLostMsg`,
+because of what each arm does to the listen loop.** The `linkLostMsg` arm
+re-arms `listenForMessages` for a router, because a REAL link loss is produced
+BY that loop stopping to deliver it — re-arming replaces the reader that just
+exited. A destination seeded offline at launch never had a loop running for it
+in the first place, so synthesising a `linkLostMsg` for it would re-arm a
+listener that already exists, installing a SECOND permanent reader of the
+router's `r.in` channel — and two readers reorder pane output and
+`workspace_state` with no error anywhere. `offlineDestMsg`'s own arm
+deliberately does not relisten.
+
+**A redial against a destination that was NEVER attached version-gates; a
+mid-session redial deliberately does not.** `verifyRemoteLinkGated`'s `gate`
+parameter is `old == nil` in `redialRemote` (`cmd/quil/remote.go`) — a nil
+previous client means this destination has never passed `gateExtraVersion` or
+the primary version check, so nothing has ever confirmed the two daemons speak
+the same protocol. Refusing there is safe: the destination is already offline,
+so refusing changes nothing the user can see. Gating a MID-session reconnect
+would end a session whose panes are healthy over a mismatch that can only mean
+the remote was upgraded out from under a still-running client — logged as a
+warning instead, because there is no good recovery once Bubble Tea owns the
+terminal.
+
+**`lastDaemon` must count offline destinations, because `knownDests` is the
+CONNECTION table, not the destination list.** A destination that never
+connected has no entry in `knownDests` — that is exactly the state an offline
+row describes — so `lastDaemon` also walks `m.projects` for any dest with
+`Offline != nil` and a live dialer (`canReconnect`). Without that second walk,
+losing the local daemon while a configured remote is still laddering in the
+background reads as "the last daemon died" and quits the client, taking the
+ladder and the still-recoverable remote down with it.
+
 ## One remote host, one project
 
 A daemon must hold at least one tab and a tab must belong to a project, so a
@@ -455,6 +527,116 @@ filter and preserves printable non-ASCII byte-identically — it is not a
 bounding pass. `lipgloss` must remain the sole measurer (uniseg segments,
 lipgloss measures), or the cut can disagree with the `.Width` that paints.
 
+**A row that mixes COLOURS goes through `renderStyledSegments`, never one
+`style.Render`.** Every `Render` emits its own reset, so wrapping a line that
+already carries SGR closes the outer colour at the first inner segment and
+leaves the rest of the row unpainted — which is why `projectRow`'s ▲/◐/✓ badge
+was flat grey while the pane rows it rolls up were amber, blue and green. The
+helper spends the width budget on PLAIN text segment by segment and styles only
+the piece that survived the cut, because `truncateCells` segments on grapheme
+clusters and `lipgloss.Width` measures an escape as zero cells: a single pass
+over already-styled text both mis-measures the row and can cut through the
+middle of an SGR sequence, emitting `38;5;214m` as literal text. `padOrTrunc`
+stays right for `paneRow` / `gitRow` / `sidebarTabHeading`, which each have ONE
+style for the whole line.
+
+**Its segments must each begin on a GRAPHEME CLUSTER boundary, and that is a
+caller requirement the helper cannot repair.** A segment starting with a
+combining mark joins the previous segment's last cluster, so the
+independently-measured sum understates the row — the U+FE0F trap above, one
+level up. The reason no measurement strategy fixes it: whether the two runes
+really join depends on the STYLES rather than the text. An SGR emitted between
+them separates them and the sum is honest; two property-free styles emit
+nothing and it is not (measured, `{"⚠", "️"}` at w=3: 3 cells coloured, 4 plain).
+`projectRow` satisfies it by construction — every badge segment starts with a
+space, and its head ends wherever `truncateCells` cut, which is a boundary by
+definition. Segments are also spent IN ORDER and a segment that cannot start
+ENDS the row: yielding its place to the next one would put one state's glyph in
+another state's position.
+
+**The attention pin is DAEMON-owned, and the client is not allowed to write
+it.** `Pane.PinnedAttention` rides `MsgUpdatePane`'s `*bool` alongside `Muted`,
+persists through `workspaceStateFromSnapshot`'s non-overlay block (one line
+serving both the disk snapshot and the broadcast) and comes back on every
+`workspace_state`. `syncPaneMeta` copies it UNCONDITIONALLY, which is what makes
+an unmark performed in another client reach this one — and it is also why the
+context menu SENDS rather than flipping the local bool: a local write is
+reverted by the next broadcast, and the git ticker alone delivers one every 5 s,
+so the mark would visibly undo itself. `Clear attention` is the one place that
+does both, and deliberately: the local clear is what stops the row painting ◆ on
+THIS frame, the send is what stops the daemon putting it back. The `*bool` is
+load-bearing exactly as it is for `Muted` — `handleUpdatePane` is a PARTIAL
+update handler, and a plain bool would clear the pin on every rename and every
+OSC 7 CWD change.
+
+**`Clear attention` sends the pin UNCONDITIONALLY, never gated on the local
+value, and gating it was a real bug.** `pane.pinnedAttention` reports what the
+last broadcast said, never what the daemon holds — and Mark deliberately does
+not write locally, so Mark followed by Clear inside the round trip read the pin
+as false, sent nothing, and then let the Mark's own broadcast restore the ◆
+*after* the user had cleared it, persisted. Two right-clicks, and over ssh the
+window is hundreds of milliseconds. For the same reason Clear does not clear it
+locally either: a broadcast already in flight re-sets it and the next one clears
+it (the ◆ blinks off/on/off), and with the link parked `Router.Send` drops the
+message and returns nil, so nothing ever arrives to revert a local clear and the
+mark stays gone until reconnect. The send is `sendForDestStrict` and the
+destination is resolved on the Update goroutine — this is a one-shot the user
+asked for, not one of the bulk iterators the loose `Send` was written for.
+
+**"The user's own mark" is a statement about a daemon the user CONTROLS.**
+`syncPaneMeta`'s unconditional copy is what makes a cross-client unmark work,
+and it is also what removes the client's ability to refuse: a hostile remote
+daemon can assert `pinned_attention` on every pane and re-assert it within 5 s
+of any Unmark. The blast radius is display only — nothing outside rendering
+reads the flag, the attention queue keys on `blockedSince` — and such a daemon
+already drives `blockedSince`/`unseen` through hook events, so this widens an
+existing capability rather than opening a new one. Accepted deliberately; if it
+ever needs closing, the shape is a per-pane client dismissal epoch that
+suppresses a re-assert until the user re-pins.
+
+**`counts().pinned` is a SECOND AXIS, not a fourth rank.** The other three are
+one ordered classification — a pane parked for input has also finished its turn,
+"needs you" outranks "is ready", so a pane contributes to exactly one — and the
+pin is orthogonal, since a pinned pane is usually also working or blocked.
+Folding it into the switch would make a mark that exists to be un-loseable
+disappear the moment the pane got busy, which is when it is most wanted.
+`paneRow` states the same thing differently: ◆ stays as a SUFFIX when a live
+state outranks it, painted in `sidebarPinnedStyle` rather than the outranking
+state's colour, and its width is RESERVED before the label floor applies so a
+long blocked-reason cannot eat it.
+
+**Manual and automatic marks must not share a colour, and for a while they
+did.** `unseenTabStyle`'s green and the pane border's 28 covered both `unseen`
+and `pinnedAttention` — but only `unseen` clears itself on focus, so the shared
+colour left the user waiting on a green that never went. Pinned now takes purple
+141 everywhere (`sidebarPinnedStyle`, `pinnedTabStyle`, the border), matching the
+foreground/background relationship `blockedTabStyle`'s 214 has to
+`sidebarBlockedStyle`. `pinnedActiveTabStyle` is underlined for the reason
+`blockedActiveTabStyle` is — the background is the only thing active and inactive
+differ by, and an SGR attribute costs no cells where padding would desync
+`hitTestTab`. **`tabLabel`'s ◆ is deliberately OUTSIDE `tabStyle`'s precedence**:
+blocked outranks pinned for the colour, so on a tab that is both, the glyph is
+the only channel left to say the pin is there.
+
+**`linkGlyphStyles` is a swept MAP rather than a switch**, because
+`linkGlyphStyle`'s fallback has to be some style and every candidate lies about
+a state it was not written for. A third link state added to `linkGlyph` without
+an entry would render in the fallback's colour and read as a state that has
+one; enumerating lets `TestLinkGlyph_EveryStateHasItsOwnColour` drive `linkGlyph`
+over every `reconnectState` combination and assert each glyph it can produce is
+paired, which a switch cannot express. The colours come from OUTSIDE the
+pane-state palette deliberately — link health describes the destination, not any
+pane — so parked takes `spawnErrorStyle`'s red and retrying takes
+`projectFormMsgBusy`'s orange, never the 214 amber reserved for
+blocked-on-user, which a self-healing link is the opposite of.
+
+**⚡ (U+26A1) is the one deliberate exemption from the no-emoji-capable rule**,
+and it lives outside that const block rather than inside it — the block's own
+test lists U+26A1 as exactly the kind of codepoint to refuse, so adding it there
+would fail, correctly. It is safe only where it is: `lipgloss` already measures
+it as two cells, so the arithmetic accounts for its real width, and it is the
+LAST thing on the row, so a font drawing it wider has only padding to paint over.
+
 **The sidebar is a real reserved column**, unlike the notification sidebar's
 overlay — but it must not re-mode a pane. `paneVTSize` takes SIZE from the rect
 and MODE from `nativeW` (the width the rect would have with the sidebar
@@ -502,6 +684,16 @@ load-bearing: the falling edge no longer fires, so a park does not set
 `unseen`, and `tabBlocked` is what carries a parked background pane to the tab
 bar. The two must not be separated. See `hooks-and-sessions.md`'s Work state
 section for the hook side of this.
+
+**`Notification` no longer parks unconditionally, so the paragraph above
+describes the `PermissionRequest` path exactly and the `Notification` path only
+in part.** `Notification` is its own kind now (`hookevents.WorkEventNotify` /
+`workNotify`): the claude hook marks the idle nudge it can recognise from the
+message text, and the consumer parks on everything else — so an idle nudge
+arriving after `Stop` sets nothing at all, and a still-working pane keeps its
+`◐ ⋯N` instead of being outranked by a stale `▲`. Every sidebar reader here is
+unchanged; there is simply one fewer event that sets `blockedSince`. See
+`hooks-and-sessions.md`'s Work state section for the split.
 
 **`paneRow` suppresses the blocked glyph for the FOCUSED pane, and that is the
 only place a sidebar row does more than report state.** `blockedSince` is not
@@ -578,6 +770,72 @@ per checkout every few seconds is a stream of them. `hideWindow` is a no-op on
 Unix; the build tags keep the difference in one pair of files.
 
 ## Creating worktrees (stage B)
+
+**The new branch starts at the repository's DEFAULT branch, and the whole point
+is that it is not HEAD.** `git worktree add -b <new> <path>` with no start-point
+branches from the HEAD of the repository the command runs in — `cmd.Dir =
+spec.RepoRoot`, the MAIN checkout — so the base was whatever the user last left
+that checkout on. A fix worktree created while it sat on a feature branch came
+up carrying that feature's unmerged commits: isolated in its DIRECTORY, which is
+what the feature advertises, and not in its HISTORY, which is what the user
+assumed. The failure is invisible at create time and surfaces as a PR whose diff
+is somebody else's work. `gitworktree.defaultBranch` resolves `origin/HEAD`
+first (the repository's own recorded answer — a repo whose default is `develop`
+must not be branched off a `master` that merely exists beside it), then
+`origin/main`, `origin/master`, `main`, `master`, remote before local at the
+same name because a local branch can be behind the remote and a base three
+weeks stale is the quiet version of the same bug.
+
+**Every candidate goes through `usableStartPoint`, and the primary path
+skipping that check shipped a hard regression.** `git symbolic-ref` READS the
+symref without resolving its target, so it exits 0 on a DANGLING `origin/HEAD` —
+the ordinary state of any clone made before its remote renamed the default
+branch, since a later `fetch --prune` drops the branch and leaves the symref
+naming it. Adopting that answer hands `worktree add` a reference git refuses
+(`fatal: invalid reference: origin/master`), and because the daemon creates NO
+pane on failure, worktree-backed panes stopped working in that repository
+entirely, naming a branch the user never typed. git itself reports the state as
+`warning: ignoring dangling symref`, i.e. as no answer; an unusable candidate
+now falls THROUGH rather than being adopted or silently reverting `Add` to the
+ambient-HEAD behaviour. **Candidates are FULLY QUALIFIED for a second reason**:
+`rev-parse` applies `ref_rev_parse_rules`, which tries `refs/heads/%s` BEFORE
+`refs/remotes/%s`, so probing the short `origin/main` finds a local branch
+literally named `refs/heads/origin/main` in preference to the remote-tracking
+ref — inverting the ordering the paragraph above promises. It also disambiguates
+the `^{commit}` peel, which does NOT reject a tag as an earlier comment here
+claimed: it PEELS one, so an annotated tag named `master` answers for
+`master^{commit}`. **The dash guard is load-bearing rather than a formality** —
+git's ref grammar permits `refs/heads/-evil`, and git permutes option parsing
+past positional arguments, so a dash-prefixed start-point reaches `worktree
+add` as an option (measured: `--force` as a trailing positional is accepted as
+the flag).
+
+**`--no-track` accompanies every start-point, and the two are one decision.** A
+remote-tracking start-point configures an upstream (`branch.autoSetupMerge`
+defaults to true), after which `git push` in the new worktree FAILS and the
+remedy git prints — `git push origin HEAD:master` — pushes the feature work
+straight onto the default branch if it is pasted; `git pull` merges the base
+into the feature branch; and `gitRow` starts rendering ahead/behind counts
+against the base for that pane, on a branch whose push does not work. Branching
+off HEAD never set an upstream, so tracking would be a behaviour change
+smuggled in by a base-selection fix.
+
+**`Add` RETURNS the base it used and the daemon logs it on success.** A wrong
+base is invisible at create time by construction — that is the premise of the
+whole mechanism — and surfaces days later as a PR whose diff is somebody else's
+work, so the log line is the only place anyone can ever confirm which base was
+taken. An empty return means no default branch resolved and git used HEAD,
+which is logged as that rather than as a blank. Resolution is DAEMON-side and
+absent from the wire: `WorktreeSpec` carries no base, so nothing on the client
+infers anything about a repository living on the daemon's disk. **An empty
+resolution is a real answer** — `git init -b trunk` is a legitimate repository —
+and the caller falls back to git's HEAD default rather than refusing to create
+the worktree, which would trade one wrong behaviour for a broken one. The
+load-bearing tests are the real-git ones (`realgit_test.go`): the defect lived
+entirely in what git DOES with an argv every stub test already agreed was
+correct, so no stub could have caught it, and the reproduction puts HEAD on a
+feature branch with a commit master lacks and asserts the new branch's tip
+against master's.
 
 **A create carrying `CreatePanePayload.Worktree` goes to a WORKER goroutine and
 answers the requester** (`worktreeAddAndCreate`, `daemon/worktree_add.go`).

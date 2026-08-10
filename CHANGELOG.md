@@ -48,6 +48,121 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Shortcuts. Keyboard text selection claims those eight chords midway through
   dispatch, so which side wins depends on the action: the warning names it.
 
+## [1.54.0] - 2026-08-09
+
+### Added
+- **Mark attention now survives a restart.** The pin was TUI-session state, so
+  every mark you set was gone the next time you opened Quil — which is most of
+  what a mark that never auto-clears is for. It lives on the daemon now,
+  alongside the pane's mute setting, so it survives a TUI restart, a daemon
+  restart and a reboot, and reads the same in every client attached to that
+  daemon.
+- A pinned pane is now visible in the two places that never showed it. The
+  project sidebar row carries a `◆N` count of its pinned panes, beside the
+  existing needs-you / running / finished counts — independent of them, since a
+  pinned pane is usually also doing something. The tab bar puts a `◆` before the
+  label.
+- An out-of-date remote daemon can be repaired without leaving the TUI: open
+  the New Project dialog and enter the same host, and Quil upgrades it and
+  reconnects. `quil remote setup <host>` still works as before.
+
+### Changed
+- Manual and automatic attention marks no longer share a colour. A pane you
+  pinned by hand and a pane that finished a turn while you were away were both
+  green, on the pane border and in the tab bar, so the one that clears itself
+  when you look at it was indistinguishable from the one that waits for an
+  explicit Unmark. Pinned is now purple everywhere — border, tab, sidebar glyph
+  and project count — and green means only "finished while you were away".
+- A pinned tab keeps its `◆` even when a more urgent state has claimed its
+  colour, so a tab that is both blocked and pinned shows both facts rather than
+  only the amber.
+
+### Fixed
+- The project sidebar's state badges were all painted the same grey as the
+  project name. The counts use the same glyphs as the pane rows below them —
+  ▲ needs you, ◐ still running, ✓ finished while you were away — so the badge
+  is meant to read as a roll-up of those panes, but with every state in one
+  flat colour it read as three anonymous numbers instead. Each count now
+  carries the same colour its pane rows do: amber for blocked, blue for
+  working, green for finished.
+- A remote project's connection glyph was grey for the same reason, so a
+  destination that had given up reconnecting (⚡) looked identical to one that
+  was still retrying on its own (⟳). Parked is now red and retrying orange —
+  deliberately not the amber the sidebar reserves for "waiting on you", which
+  a link healing itself is the opposite of.
+- A remote host that was unreachable when Quil started lost its projects from
+  the sidebar entirely, with no way to get them back. Because updating Quil
+  leaves the remote daemon on the older version, this happened after every
+  update until the host was upgraded by hand — so the projects looked deleted
+  rather than disconnected. Those rows now stay in the sidebar, their names
+  marked offline, and come back on their own once the host is reachable again.
+- Quil gave up on a remote host after 25 seconds, which is less than the 30
+  seconds the daemon on that host is allowed for its own startup — so a host
+  that had just rebooted was abandoned while it was still starting normally.
+- Diagnostics reported by a remote host are sanitized before being printed, so
+  a compromised or misbehaving host cannot write escape sequences to your
+  terminal at launch.
+
+## [1.53.3] - 2026-08-09
+
+### Fixed
+- The TUI quit itself, reporting a clean exit, on workspaces with many tabs.
+  Every workspace update made the client re-send the layout of every tab and
+  the size of every pane whether or not anything had changed — one guaranteed
+  delivery each, against a 64-slot outbound queue. Past roughly 64 tabs plus
+  panes a single update could overflow that queue, and the client's own
+  transport treats a full queue as proof the other end is dead, so it closed
+  the connection and the session ended with no error anywhere. Reordering tabs
+  by dragging made it far more likely by producing an update per slot crossed,
+  but the trigger was only ever the tab count: it first fired seven seconds
+  after a 33rd tab was created, on an update no drag was involved in. The
+  client now sends only what actually differs from the state the daemon just
+  reported, and only for the daemon that reported it.
+- A client whose outbound queue fills now waits a few seconds for it to drain
+  instead of disconnecting immediately. That rule exists so a daemon can drop
+  one unresponsive client rather than stall the others; applied to a client's
+  own connection it had nothing to protect and merely ended the session. A
+  daemon that stays unresponsive past the grace period is still reported as a
+  lost connection, so nothing you typed is silently discarded.
+- Restored panes still receive the first resize after attaching or
+  reconnecting, which is what prompts them to repaint. Only repeats of a size
+  the daemon already has are suppressed.
+- The "dropping slow client" warning now identifies the connection, its queue
+  depth, and the limit. It is emitted by code shared between the daemon and
+  every client, so on its own it named neither.
+
+## [1.53.2] - 2026-08-09
+
+### Fixed
+- A pane created with a new git worktree branched off whatever the main
+  checkout was currently on, rather than off the repository's default branch.
+  Creating a fix worktree while the main checkout sat on a feature branch
+  produced a branch carrying that feature's unmerged commits, so the pane was
+  isolated in its directory but not in its history and its diff against master
+  was the feature. The base is now the repository's own default branch —
+  `origin/HEAD` where it is set, otherwise `origin/main`, `origin/master`,
+  `main` or `master`, preferring the remote ref over a local one that may be
+  stale. A repository with none of those (`git init -b trunk`) still works and
+  falls back to HEAD as before, as does one whose recorded default branch no
+  longer exists — common in clones made before their remote renamed `master`
+  to `main`, where the recorded answer outlives the branch it names.
+- The new branch is created with no upstream, matching what Quil did before.
+  Branching from a remote-tracking ref would otherwise configure one, and `git
+  push` in the new worktree would fail with advice that pushes the work onto
+  the default branch.
+
+## [1.53.1] - 2026-08-09
+
+### Fixed
+- A tab was marked amber ("blocked on you") while its agent was still
+  demonstrably working with background subagents running. Claude reuses the
+  same notification for a permission prompt and for its own idle nudge, and
+  the idle nudge — arriving after the turn already finished — was
+  misclassified as a fresh block, hiding the pane's working indicator behind
+  the "needs you" marker. Only Claude's idle nudge is exempted, and only once
+  the turn has ended: any other notification still marks the tab, so a
+  permission prompt is never swallowed.
+
 ## [1.53.0] - 2026-08-09
 
 ### Added

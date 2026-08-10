@@ -94,17 +94,39 @@ var remoteTextSamples = []string{
 func TestSidebarRows_MeasureExactlyTheirWidth(t *testing.T) {
 	t.Parallel()
 	widths := []int{4, 8, 12, defaultSidebarWidth, 40}
-	counts := [][3]int{{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1}, {1, 2, 3}, {12, 345, 6}}
+	// Four axes now: the pin is a badge segment of its own, and it is the one
+	// that stacks ON TOP of the others rather than competing with them (a
+	// pinned pane is usually also working or blocked), so the all-four case is
+	// the widest badge the row can be asked to fit and is not reachable by
+	// varying the first three.
+	counts := []paneStateCounts{
+		{},
+		{working: 1},
+		{blocked: 1},
+		{done: 1},
+		{pinned: 1},
+		{working: 1, blocked: 2, done: 3},
+		{working: 1, blocked: 2, done: 3, pinned: 4},
+		{working: 12, blocked: 345, done: 6, pinned: 7890},
+	}
 
 	for _, w := range widths {
 		for _, name := range remoteTextSamples {
 			for _, c := range counts {
-				for _, link := range []string{"", "⚡", "⟳"} {
-					got := projectRow(name, c[0], c[1], c[2], link, true, w)
-					if n := lipgloss.Width(got); n != w {
-						t.Errorf("projectRow(%q, working=%d blocked=%d done=%d, link=%q, w=%d) "+
-							"measures %d cells, want exactly %d",
-							name, c[0], c[1], c[2], link, w, n, w)
+				for _, link := range []string{"", glyphLinkParked, glyphLinkRetry} {
+					// Both arms of `active`. It was worth little when it chose
+					// only between two one-cell markers; it now also chooses the
+					// STYLE that paints the head segment, and the row is built by
+					// concatenating independently styled runs — so the two arms
+					// are different renders, not the same render with a different
+					// first character.
+					for _, active := range []bool{true, false} {
+						got := projectRow(name, c, link, active, w, nil)
+						if n := lipgloss.Width(got); n != w {
+							t.Errorf("projectRow(%q, %+v, link=%q, active=%v, w=%d) "+
+								"measures %d cells, want exactly %d",
+								name, c, link, active, w, n, w)
+						}
 					}
 				}
 			}
@@ -123,9 +145,17 @@ func TestPaneRow_MeasuresExactlyItsWidth(t *testing.T) {
 	for _, w := range []int{4, 8, 12, defaultSidebarWidth, 40} {
 		for _, label := range remoteTextSamples {
 			for _, reason := range remoteTextSamples {
-				for _, state := range []string{"blocked", "working", "unseen", "idle", "pinned", "pinned+blocked", "pinned+working"} {
+				// The "pinned+X" cases are the ones that grew teeth: the ◆ is a
+				// segment of its own now, and its width is RESERVED out of the
+				// budget BEFORE the label floor applies — so the pin
+				// participates in the label/suffix arithmetic instead of being
+				// appended to the end of a string that is then cut.
+				for _, state := range []string{"blocked", "working", "unseen", "idle", "pinned", "pinned+blocked", "pinned+working", "pinned+unseen"} {
 					pane := &PaneModel{Name: label, ID: "pane-b16e3850"}
 					switch state {
+					case "pinned+unseen":
+						pane.pinnedAttention = true
+						pane.unseen = true
 					case "blocked":
 						pane.blockedSince = time.Now()
 						pane.blockedReason = reason

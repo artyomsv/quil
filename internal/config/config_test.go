@@ -296,3 +296,26 @@ func TestRecentCWDsPath_CollapsedDestinationsStayDistinct(t *testing.T) {
 		t.Error("two destinations that sanitize alike share one file")
 	}
 }
+
+// The cache is per destination for the same reason recent-cwds is: one file
+// shared by two hosts would show one host's projects under the other's name.
+func TestRemoteProjectsPath_DistinctPerDest(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	a := config.RemoteProjectsPath("user@a")
+	b := config.RemoteProjectsPath("user@b")
+	if a == b {
+		t.Fatalf("both destinations resolve to %q", a)
+	}
+	if config.RemoteProjectsPath("") == a {
+		t.Error("the empty dest must not share a file with a real one")
+	}
+}
+
+// "a/b" and "a-b" collapse to the same readable component; the digest is what
+// keeps them apart.
+func TestRemoteProjectsPath_CollapsedDestinationsStayDistinct(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	if config.RemoteProjectsPath("a/b") == config.RemoteProjectsPath("a-b") {
+		t.Error("collapsed destinations share a cache file")
+	}
+}

@@ -369,8 +369,28 @@ func (m *Model) buildPaletteCommands() []paletteCommand {
 			keywords: []string{"tab", "go to", "goto", "switch"},
 		})
 	}
+	// Greyed while there IS an active project and it is unreachable: CreateTab
+	// would be accepted here and dropped by Router.Send on its way to a
+	// daemon with no connection, which reads as a broken keybinding. A NIL
+	// active project (before the first workspace_state broadcast) is NOT the
+	// same thing — createTab's unstamped send still resolves through
+	// Router.Send's sole-conn startup fallback, so it must stay enabled. See
+	// the matching comment on the "tab.new" case in model.go.
+	newTabEnabled := true
+	if p := m.cur(); p != nil {
+		// onlyOfflineProjects mirrors the "tab.new" guard in model.go: every
+		// row seeded before the first broadcast stands in for a destination
+		// that is not the one createTab's unstamped send actually resolves to.
+		newTabEnabled = m.projectActionable(p) || m.onlyOfflineProjects()
+	}
 	cmds = append(cmds,
-		paletteCommand{action: palActNewTab, enabled: true, label: "New tab", detail: m.keymap.Display("tab.new"), keywords: []string{"tab", "create"}},
+		paletteCommand{
+			action:   palActNewTab,
+			enabled:  newTabEnabled,
+			label:    "New tab",
+			detail:   m.keymap.Display("tab.new"),
+			keywords: []string{"tab", "create"},
+		},
 		paletteCommand{action: palActCloseTab, enabled: true, label: "Close tab…", detail: m.keymap.Display("tab.close"), keywords: []string{"tab", "close"}},
 		paletteCommand{action: palActRenameTab, enabled: true, label: "Rename tab", detail: m.keymap.Display("tab.rename"), keywords: []string{"tab", "rename"}},
 		paletteCommand{action: palActCycleTabColor, enabled: true, label: "Cycle tab color", detail: m.keymap.Display("tab.cycle_color"), keywords: []string{"tab", "color"}},
@@ -417,16 +437,18 @@ func (m *Model) buildPaletteCommands() []paletteCommand {
 		paletteCommand{action: palActNewProject, enabled: true, label: "New project", detail: m.keymap.Display("project.new"), keywords: []string{"project", "create", "add", "workspace"}},
 		paletteCommand{
 			action: palActRenameProject, arg: removeArg,
-			// Greyed on a daemon that cannot hold a project, for the same
-			// reason the context menu greys it: the message is accepted and
-			// silently does nothing, which reads as a broken dialog.
-			enabled:  active != nil && !isSyntheticProject(active.ID),
+			// Greyed on a daemon that cannot hold a project, or one this
+			// client cannot currently reach, for the same reason the context
+			// menu greys it: the message is accepted and silently does
+			// nothing (or is silently dropped by the router), which reads as
+			// a broken dialog either way.
+			enabled:  m.projectActionable(active),
 			label:    "Rename project",
 			keywords: []string{"project", "rename"},
 		},
 		paletteCommand{
 			action: palActRemoveProject, arg: removeArg,
-			enabled:  active != nil && (remote || !isSyntheticProject(active.ID)),
+			enabled:  active != nil && (remote || m.projectActionable(active)),
 			label:    removeLabel,
 			detail:   m.keymap.Display("project.destroy"),
 			keywords: []string{"project", "destroy", "delete", "remove", "disconnect", "host"},

@@ -468,6 +468,10 @@ func (m *Model) activeProjectModel() *ProjectModel {
 // makes the daemon apply it only while the project is still one it invented —
 // see UpdateProjectPayload.AdoptBootstrap. A plain rename passes false.
 func (m *Model) sendUpdateProject(id, name, rootDir string, adoptBootstrap bool) tea.Cmd {
+	if !m.projectActionable(m.projectByID(id)) {
+		log.Printf("rename project %s: refused, its host is offline", id)
+		return nil
+	}
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return nil

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -142,6 +143,52 @@ func (c *Conn) sendFrame(frame []byte) error {
 	return c.enqueue(frame, false)
 }
 
+// peerLabelMax caps the rendered label. quil.log rotates with a fixed archive
+// count, so an unbounded label evicts unrelated records.
+const peerLabelMax = 120
+
+// peerLabel describes the far end of a connection for a log line. A Unix socket
+// reports an empty remote address, so fall back to the local one and always
+// name the network — "unix" versus "pipe" already separates a real daemon
+// connection from an in-process test.
+//
+// The value is sanitized and capped even though no remote peer supplies it
+// today: the daemon only listens on a Unix socket (empty RemoteAddr, so this
+// falls to the local end), and a client's address is the ssh destination from
+// the user's own config. It is written into a log the F1 viewer RENDERS, which
+// is the same reason ssh stderr already passes through terminalSanitizer, and
+// the cost of not having to re-derive that argument later is one function.
+func peerLabel(raw net.Conn) string {
+	if raw == nil {
+		return "unknown"
+	}
+	if addr := raw.RemoteAddr(); addr != nil && addr.String() != "" {
+		return clampLabel(addr.Network() + ":" + addr.String())
+	}
+	if addr := raw.LocalAddr(); addr != nil {
+		return clampLabel(addr.Network()+":"+addr.String()) + " (local end)"
+	}
+	return "unknown"
+}
+
+// clampLabel replaces C0/DEL with '?' and truncates. '?' rather than deletion
+// so a label that was tampered with still looks wrong instead of merely short.
+func clampLabel(s string) string {
+	if len(s) > peerLabelMax {
+		s = s[:peerLabelMax]
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			b.WriteByte('?')
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
 // enqueue queues a pre-encoded frame. The frame []byte is read-only — both
 // enqueue and sendLoop only read it, never mutate it.
 //
@@ -181,7 +228,13 @@ func (c *Conn) enqueue(frame []byte, droppable bool) error {
 		// spawn N redundant Close goroutines (each no-ops via closeOnce but
 		// still pays goroutine spawn cost).
 		if c.overflow.CompareAndSwap(false, true) {
-			logger.Warn("ipc: dropping slow client (critical send buffer overflow)")
+			// Identify the peer. This line is emitted by code shared between
+			// the daemon and every client, so on its own it names neither —
+			// attributing the 2026-08-09 occurrence took reasoning about which
+			// binaries call logger.Init, because the only signal was which log
+			// file it had landed in.
+			logger.Warn("ipc: dropping slow client (critical send buffer overflow; peer=%s queued=%d cap=%d)",
+				peerLabel(c.raw), len(c.critCh), sendBufSize)
 			go c.Close()
 		}
 		return ErrSendOverflow
@@ -212,6 +265,11 @@ func (c *Conn) SendBlocking(msg *Message, cancel <-chan struct{}) error {
 		if len(c.critCh) < sendHeadroom {
 			select {
 			case c.critCh <- frame:
+				// Counted like enqueue's critical path: sendLoop decrements
+				// per frame written, so an enqueue that skips this drives
+				// pending negative and makes Flush's `pending > 0` loop exit
+				// immediately — reporting delivery it never waited for.
+				c.pending.Add(1)
 				return nil
 			default:
 				// Lost a race with concurrent broadcast enqueues — wait.

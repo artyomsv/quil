@@ -65,16 +65,70 @@ Subagent edges: `hook.claude.SubagentStart` adds to the ledger (spinner on), `ho
 
 **The phantom is also dropped at the PRODUCER** (`internal/claudehook/runhook.go`, `SubagentStop` with empty `agent_type` → no spool line). It names no agent and reports nothing actionable, but spooled it became a sidebar card titled literally `" done"` once per turn on every AI pane, which the queue's `(PaneID, Title)` aggregation collapsed to `" done" ×N` and re-promoted to the top on each occurrence. The TUI-side match-by-name guard stays as defence in depth — the producer drop removes the noise, the ledger rule is what keeps the indicator correct.
 
-**`agent_type` is part of the ingester's coalesce key for exactly this reason** (`internal/hookevents/ingest.go` — `coalesceKey(paneID, hook_event, agent_type)`, appended only when non-empty so every other event keys as before). Coalescing is last-wins, so merging two DIFFERENT agents' starts would erase the loser's identity: its own stop would then match nothing while the winner's count never drained, wedging the spinner until `SessionEnd` — the ledger's identity guarantee only holds because the wire preserves it. A burst of the SAME agent still collapses to one emit with the burst count, which is what the count exists for. **The key's two free-form components are escaped** (`keyFieldEscaper`): `paneID` is NUL-free by `safePaneID` and stays first (so `Cancel`'s prefix match is unaffected), but `hook_event` and `agent_type` are arbitrary payload strings and JSON admits U+0000 in either — two variable fields joined by a separator either may contain is not injective, and `("SubagentStart", "\x00X")` would otherwise key identically to `("SubagentStart\x00", "X")`, coalescing them last-wins and erasing an identity. The escape is identity for every value a real producer emits. Claude Code runs subagents detached by default, so the main turn's `Stop` routinely fires while they still run: stop edges only end the spinner once the counter is drained, and the unseen mark is deferred to the drain edge (the LAST `SubagentStop` becomes the completion edge). Stop edges (→ persistent green unseen mark on the pane): `hook.claude.Stop`, `hook.opencode.session.idle`/`session.error`. `hook.claude.SessionEnd` is a *terminal* stop (`WorkEventStopFinal`): it also clears the subagent ledger (no subagent outlives its session — a lost SubagentStop must not wedge the spinner). `TaskCreated`/`TaskCompleted` are deliberately unmapped (task-list bookkeeping, not execution). Resume edge: `hook.claude.PostToolUse` (registered with a tool-name matcher `AskUserQuestion|ExitPlanMode` in `internal/claudehook` so it fires only for interactive-prompt tools — the user just answered → re-arm spinner; `workStart` clears the pane's unseen mark; suppressed from the notification sidebar as work-state-only). `process_exit` clears `working` AND the subagent ledger WITHOUT marking unseen (a crash is not a completed turn). A single shared 100 ms `workSpinnerTickMsg` animates the braille `spinnerFrames` on both the tab label (`tabLabel` prefix when `tabHasWorkingPane`) and each working pane's top-left border (left segment of `buildTopBorder`, reserved so the CWD truncation never eats the glyph); the loop self-stops via `workTickRunning` when no pane is working. `unseen` lives on `PaneModel` (set on workStop unless the pane is the focused pane of the active tab; cleared by `ackFocusedPane` at the single `Update` entry choke point — focusing the pane is the acknowledgement, no timer). Marked panes render a green border (precedence below active/ghost/MCP-highlight); background tabs derive a green label via `tabUnseen` + `unseenTabStyle` — `tabStyle(idx)` precedence is `blockedTabStyle` (amber, includes the active tab: the parked pane may be in an unfocused split) > `unseenTabStyle` (green, covers `tabUnseen` and a pinned-for-attention pane alike) > custom tab color > active/inactive default, and is shared by `renderTabBar` + `hitTestTab` so rendered widths and click hit-testing never diverge. The active tab label never shows green (you're already looking at it); an unfocused split sibling still shows its green border. OpenCode's start edge is produced by the `chat.message` handler in `internal/opencodehook/scripts/quil-session-tracker.js`; Claude needs no producer change (both edges already arrive). State is not persisted — panes start idle on restart and the next hook event corrects them.
+**`agent_type` is part of the ingester's coalesce key for exactly this reason** (`internal/hookevents/ingest.go` — `coalesceKey(paneID, hook_event, agent_type)`, appended only when non-empty so every other event keys as before). Coalescing is last-wins, so merging two DIFFERENT agents' starts would erase the loser's identity: its own stop would then match nothing while the winner's count never drained, wedging the spinner until `SessionEnd` — the ledger's identity guarantee only holds because the wire preserves it. A burst of the SAME agent still collapses to one emit with the burst count, which is what the count exists for. **The key's two free-form components are escaped** (`keyFieldEscaper`): `paneID` is NUL-free by `safePaneID` and stays first (so `Cancel`'s prefix match is unaffected), but `hook_event` and `agent_type` are arbitrary payload strings and JSON admits U+0000 in either — two variable fields joined by a separator either may contain is not injective, and `("SubagentStart", "\x00X")` would otherwise key identically to `("SubagentStart\x00", "X")`, coalescing them last-wins and erasing an identity. The escape is identity for every value a real producer emits. Claude Code runs subagents detached by default, so the main turn's `Stop` routinely fires while they still run: stop edges only end the spinner once the counter is drained, and the unseen mark is deferred to the drain edge (the LAST `SubagentStop` becomes the completion edge). Stop edges (→ persistent green unseen mark on the pane): `hook.claude.Stop`, `hook.opencode.session.idle`/`session.error`. `hook.claude.SessionEnd` is a *terminal* stop (`WorkEventStopFinal`): it also clears the subagent ledger (no subagent outlives its session — a lost SubagentStop must not wedge the spinner). `TaskCreated`/`TaskCompleted` are deliberately unmapped (task-list bookkeeping, not execution). Resume edge: `hook.claude.PostToolUse` (registered with a tool-name matcher `AskUserQuestion|ExitPlanMode` in `internal/claudehook` so it fires only for interactive-prompt tools — the user just answered → re-arm spinner; `workStart` clears the pane's unseen mark; suppressed from the notification sidebar as work-state-only). `process_exit` clears `working` AND the subagent ledger WITHOUT marking unseen (a crash is not a completed turn). A single shared 100 ms `workSpinnerTickMsg` animates the braille `spinnerFrames` on both the tab label (`tabLabel` prefix when `tabHasWorkingPane`) and each working pane's top-left border (left segment of `buildTopBorder`, reserved so the CWD truncation never eats the glyph); the loop self-stops via `workTickRunning` when no pane is working. `unseen` lives on `PaneModel` (set on workStop unless the pane is the focused pane of the active tab; cleared by `ackFocusedPane` at the single `Update` entry choke point — focusing the pane is the acknowledgement, no timer). Marked panes render a green border (precedence below active/ghost/MCP-highlight); background tabs derive a green label via `tabUnseen` + `unseenTabStyle` — `tabStyle(idx)` precedence is `blockedTabStyle` (amber, includes the active tab: the parked pane may be in an unfocused split) > `pinnedTabStyle` (purple 141, a pane pinned by hand — it had shared `unseenTabStyle`'s green, which made the mark the user set indistinguishable from the one the agent caused, and only the latter clears itself on focus) > `unseenTabStyle` (green, `tabUnseen` alone now) > custom tab color > active/inactive default, and is shared by `renderTabBar` + `hitTestTab` so rendered widths and click hit-testing never diverge. The active tab label never shows green (you're already looking at it); an unfocused split sibling still shows its green border. OpenCode's start edge is produced by the `chat.message` handler in `internal/opencodehook/scripts/quil-session-tracker.js`; Claude needs no producer change (both edges already arrive). State is not persisted — panes start idle on restart and the next hook event corrects them.
 
-Park-for-input edges (`hook.claude.Notification` / `PermissionRequest`,
+Park-for-input edges (`hook.claude.PermissionRequest`,
 `hook.opencode.permission.ask`) set `blockedSince` and do **NOT** clear
-`turnActive`. `Notification` covers two situations — a permission prompt
-(arrives mid-turn) and an idle-wait nudge (arrives after `Stop` already cleared
-`turnActive`) — so clearing it was a no-op exactly when it was right and wrong
-exactly when it was not: approving a Bash/Edit/Write prompt fires no hook of
-its own, so the pane read as blocked-not-working until the turn's `Stop`, for
-however long the agent was already back at work.
+`turnActive` — a permission prompt arrives mid-turn, and approving a
+Bash/Edit/Write prompt fires no hook of its own, so clearing `turnActive` on
+the park left the pane reading blocked-not-working until the turn's `Stop`,
+for however long the agent was already back at work.
+
+**`hook.claude.Notification` is a DIFFERENT `WorkEventKind` (`WorkEventNotify`
+/ `workNotify`), not a synonym for `PermissionRequest` — because it is
+AMBIGUOUS in a way `PermissionRequest` is not.** Claude reuses the same hook
+event for a permission prompt (arrives mid-turn, `turnActive` still true) and
+for its own idle nudge, "Claude is waiting for your input" (arrives AFTER the
+turn's own `Stop` already cleared `turnActive`, often while background
+subagents are still draining). Collapsing both into one `WorkEventPark` was
+the bug: a production pane ran `UserPromptSubmit` → 4×`SubagentStart` →
+`Stop` → `Notification` → `SubagentStop` → `Stop` → `Stop` → `Notification`,
+and the unconditional park painted its tab amber and hid the `◐ ⋯3` a
+still-working pane should show, because `paneRow`'s blocked-outranks-working
+precedence picked the stale `▲` over the live subagent count.
+
+**The ambiguity is resolved at the two ENDS, not by the classifier, and the
+match runs in ONE direction on purpose.** `hookevents.ClassifyWorkEvent` is
+handed the event type and nothing else — neither the hook's `message` text nor
+`turnActive` — so it reports the ambiguity as its own kind. The PRODUCER
+(`internal/claudehook`'s `notifyKindData`) is the one place holding the message
+and marks the idle nudge it recognises as
+`data["notify_kind"]="idle"` (`hookevents.DataNotifyKind`/`NotifyKindIdle`,
+declared next to the kind so the two halves cannot drift apart quietly).
+`tui.applyWorkTransition`'s `workNotify` case then parks **unless** the event
+is marked idle AND `turnActive` is false. Matched positively — idle recognised,
+everything else parked — because upstream English prose is not ours to depend
+on, and the direction decides which way a reworded, unknown, or unmarked
+message fails.
+
+**`turnActive` alone is a LOSSY discriminator, which is why it is the second
+condition and not the only one.** It is false in several states where a
+permission prompt is genuinely outstanding: a background subagent asking for
+permission after the main turn's `Stop` (the subagent ledger exists precisely
+because subagents outlive it), a TUI restart or remote reattach
+(`resetWorkStateForReattach` zeroes it on every pane of a destination), and a
+replay truncated past its `UserPromptSubmit`. `PermissionRequest` is
+documented as "when available" — on the Claude version that produced the trace
+above it never fired at all, so `Notification` was the ONLY permission signal
+and this gate the only guard on it. The failure modes are not symmetric: a
+wrong park is a visible amber tab that the next `Stop` or a keystroke
+(`answerBlockedByInput`) clears, while a missed park is silent and terminal —
+`tabBlocked` false, uncounted in `counts()`, not offered by `Alt+Shift+A`, and
+a parked agent emits no further hook to recover it. So the unmarked case parks,
+which is also what makes an OLD hook binary beside a new TUI safe: it marks
+nothing, and every `Notification` behaves exactly as it did before the split.
+
+Once the mark says idle and the turn is over, the case changes NOTHING —
+leaving the pane exactly as `Stop` left it (`unseen` if nothing was
+outstanding, still `working` if subagents are). Marked idle but mid-turn parks
+anyway; only `Stop`-then-nudge is unambiguous. The split does not touch
+`PermissionRequest`/`permission.ask`, which stay unconditional — they are
+never ambiguous, so gating them on `turnActive` would be a regression, not a
+fix (a permission prompt firing after a pane's own `Stop`, from a hook whose
+event name says exactly what it is, must still block). Both park arms write
+`blockedReason` only when `data["tool"]` is non-empty: `Notification` carries
+no tool, and an unguarded assignment would erase the `▲ Bash` a
+`PermissionRequest` for the same prompt had just given the sidebar.
 
 Because `working` no longer falls on a park, the falling edge no longer sets
 `unseen`. `tabBlocked` (`workstate.go`) + `blockedTabStyle` carry a parked

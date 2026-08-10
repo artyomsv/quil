@@ -6,8 +6,18 @@ import (
 	"testing"
 
 	"github.com/artyomsv/quil/internal/config"
+	"github.com/artyomsv/quil/internal/hookevents"
 	"github.com/artyomsv/quil/internal/ipc"
 )
+
+// idleNudge is the Data map the claude hook attaches to Claude's idle
+// "waiting for your input" notification, and only to that one. Every test that
+// replays a real idle nudge uses it, because it is the shape the producer
+// emits — a Notification WITHOUT it is a message the producer did not
+// recognise, which the consumer must treat as a park.
+func idleNudge() map[string]string {
+	return map[string]string{hookevents.DataNotifyKind: hookevents.NotifyKindIdle}
+}
 
 func TestWorkEventKind(t *testing.T) {
 	t.Parallel()
@@ -29,7 +39,10 @@ func TestWorkEventKind(t *testing.T) {
 		// from a completed turn. Unlike workStop, this does NOT by itself stop
 		// the spinner: a permission prompt commonly arrives mid-turn, and the
 		// pane keeps working until the turn's own Stop (see TestWorkPark_*).
-		{"hook.claude.Notification", workPark},
+		// Notification is the ambiguous twin of Park (see TestWorkNotify_*):
+		// Claude reuses it for both a mid-turn prompt and an idle nudge fired
+		// after the turn already ended, so it gets its own kind.
+		{"hook.claude.Notification", workNotify},
 		{"hook.claude.PermissionRequest", workPark},
 		{"hook.opencode.permission.ask", workPark},
 		// Subagent lifecycle: background subagents outlive the main turn's
@@ -215,6 +228,189 @@ func TestApplyWorkTransition_ParkSetsBlockedFields(t *testing.T) {
 	}
 }
 
+// TestApplyWorkTransition_IdleNudgeAfterStopWithSubagents_ProductionSequence
+// replays the incident event-for-event: UserPromptSubmit, 4×SubagentStart,
+// Stop, Notification, one SubagentStop, two further Stops, a second
+// Notification. Both Notifications are Claude's idle nudge, arriving after the
+// turn's own Stop already cleared turnActive, and one subagent has drained by
+// the end — so the pane the user was actually looking at should have shown
+// ◐ ⋯3 and instead showed the amber "blocked on you" marker, because the
+// unconditional park outranks a live subagent count in paneRow.
+func TestApplyWorkTransition_IdleNudgeAfterStopWithSubagents_ProductionSequence(t *testing.T) {
+	t.Parallel()
+	m := modelForWorkTest()
+	m.applyWorkTransition("p1", "hook.claude.UserPromptSubmit", nil)
+	for _, agent := range []string{"agent-a", "agent-b", "agent-c", "agent-d"} {
+		m.applyWorkTransition("p1", "hook.claude.SubagentStart", map[string]string{"agent_type": agent})
+	}
+	m.applyWorkTransition("p1", "hook.claude.Stop", nil)
+	m.applyWorkTransition("p1", "hook.claude.Notification", idleNudge())
+	m.applyWorkTransition("p1", "hook.claude.SubagentStop", map[string]string{"agent_type": "agent-a"})
+	m.applyWorkTransition("p1", "hook.claude.Stop", nil)
+	m.applyWorkTransition("p1", "hook.claude.Stop", nil)
+	m.applyWorkTransition("p1", "hook.claude.Notification", idleNudge())
+
+	pane := m.curTabs()[0].Root.Leaves()[0]
+	if !pane.blockedSince.IsZero() {
+		t.Error("an idle nudge after Stop, with subagents outstanding, must not set blockedSince")
+	}
+	if !pane.working {
+		t.Error("pane should still read as working — 3 subagents are outstanding")
+	}
+	if n := pane.outstandingSubagents(); n != 3 {
+		t.Errorf("outstandingSubagents() = %d, want 3 — 4 spawned, 1 drained", n)
+	}
+	if m.tabBlocked(0) {
+		t.Error("tab must not read as blocked — the pane is genuinely working, not parked")
+	}
+}
+
+// TestApplyWorkTransition_NotificationMidTurn_StillBlocks is the case that
+// must NOT regress: a Notification arriving mid-turn (turnActive true, no
+// Stop yet) is a genuine permission prompt and must still block.
+func TestApplyWorkTransition_NotificationMidTurn_StillBlocks(t *testing.T) {
+	t.Parallel()
+	m := modelForWorkTest()
+	m.applyWorkTransition("p1", "hook.claude.UserPromptSubmit", nil)
+	m.applyWorkTransition("p1", "hook.claude.Notification", nil)
+
+	pane := m.curTabs()[0].Root.Leaves()[0]
+	if pane.blockedSince.IsZero() {
+		t.Fatal("a Notification arriving mid-turn (turnActive true) must set blockedSince")
+	}
+}
+
+// TestApplyWorkTransition_PermissionRequestAfterStop_StillBlocks pins that
+// only the AMBIGUOUS Notification signal is gated on turnActive.
+// PermissionRequest is unambiguous and must set blockedSince regardless of
+// turn state.
+func TestApplyWorkTransition_PermissionRequestAfterStop_StillBlocks(t *testing.T) {
+	t.Parallel()
+	m := modelForWorkTest()
+	m.applyWorkTransition("p1", "hook.claude.UserPromptSubmit", nil)
+	m.applyWorkTransition("p1", "hook.claude.Stop", nil)
+	m.applyWorkTransition("p1", "hook.claude.PermissionRequest", map[string]string{"tool": "Bash"})
+
+	pane := m.curTabs()[0].Root.Leaves()[0]
+	if pane.blockedSince.IsZero() {
+		t.Fatal("PermissionRequest must set blockedSince even after turnActive is false — it is not gated")
+	}
+}
+
+// TestApplyWorkTransition_UnmarkedNotificationAfterStop_StillBlocks is the case
+// a bare turnActive gate drops SILENTLY, which is why the producer's idle mark
+// exists. turnActive is false in several states where a permission prompt is
+// genuinely outstanding — a background subagent asking for permission after the
+// main turn's Stop, a reattach that zeroed the flag (resetWorkStateForReattach),
+// a replay truncated past its UserPromptSubmit — and on the Claude version that
+// produced this bug's trace, Notification is the ONLY permission signal that
+// fires at all. A Notification the producer did not positively identify as the
+// idle nudge must therefore park regardless of turn state: wrong-on is an amber
+// tab the next Stop clears, wrong-off is a prompt that never surfaces and no
+// later hook recovers, because a parked agent emits nothing.
+func TestApplyWorkTransition_UnmarkedNotificationAfterStop_StillBlocks(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		data       map[string]string
+		wantReason string
+	}{
+		// An older hook binary beside a newer TUI marks nothing at all — it
+		// must keep the behaviour it shipped with rather than lose the park.
+		{"old hook binary sends no data", nil, ""},
+		{"producer recognised nothing", map[string]string{}, ""},
+		{"notify_kind names something else", map[string]string{hookevents.DataNotifyKind: "permission"}, ""},
+		{"carries a tool name", map[string]string{"tool": "Bash"}, "Bash"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			m := modelForWorkTest()
+			m.applyWorkTransition("p1", "hook.claude.UserPromptSubmit", nil)
+			m.applyWorkTransition("p1", "hook.claude.Stop", nil)
+			m.applyWorkTransition("p1", "hook.claude.Notification", tt.data)
+
+			pane := m.curTabs()[0].Root.Leaves()[0]
+			if pane.blockedSince.IsZero() {
+				t.Fatal("a Notification not marked as the idle nudge must block even after Stop")
+			}
+			if pane.blockedReason != tt.wantReason {
+				t.Errorf("blockedReason = %q, want %q", pane.blockedReason, tt.wantReason)
+			}
+			if !m.tabBlocked(0) {
+				t.Error("the tab must read as blocked — the pane may be waiting on a permission prompt")
+			}
+		})
+	}
+}
+
+// TestApplyWorkTransition_IdleMarkedNotificationMidTurn_StillBlocks keeps
+// turnActive as the second condition. The mark alone must not be enough to
+// skip the park while a turn is open: only the sequence Stop-then-Notification
+// makes the nudge unambiguous, and keeping the gate is also what makes the
+// production sequence resolve correctly against a hook binary that predates
+// the mark.
+func TestApplyWorkTransition_IdleMarkedNotificationMidTurn_StillBlocks(t *testing.T) {
+	t.Parallel()
+	m := modelForWorkTest()
+	m.applyWorkTransition("p1", "hook.claude.UserPromptSubmit", nil)
+	m.applyWorkTransition("p1", "hook.claude.Notification", idleNudge())
+
+	pane := m.curTabs()[0].Root.Leaves()[0]
+	if pane.blockedSince.IsZero() {
+		t.Fatal("a Notification arriving mid-turn must block whatever the producer called it")
+	}
+}
+
+// TestApplyWorkTransition_ParkKeepsAToolNameALaterEventLacks guards both park
+// arms against overwriting blockedReason with an empty string. Claude's
+// Notification carries no tool, so a Notification for the same prompt a
+// PermissionRequest already named would otherwise cost the sidebar its
+// "▲ Bash" and leave a bare "▲".
+func TestApplyWorkTransition_ParkKeepsAToolNameALaterEventLacks(t *testing.T) {
+	t.Parallel()
+	m := modelForWorkTest()
+	m.applyWorkTransition("p1", "hook.claude.UserPromptSubmit", nil)
+	m.applyWorkTransition("p1", "hook.claude.PermissionRequest", map[string]string{"tool": "Bash"})
+	pane := m.curTabs()[0].Root.Leaves()[0]
+
+	// The ambiguous arm: same prompt, Claude's Notification, no tool field.
+	m.applyWorkTransition("p1", "hook.claude.Notification", nil)
+	if pane.blockedReason != "Bash" {
+		t.Errorf("after a toolless Notification blockedReason = %q, want %q", pane.blockedReason, "Bash")
+	}
+	// The unambiguous arm carries the same guard.
+	m.applyWorkTransition("p1", "hook.claude.PermissionRequest", nil)
+	if pane.blockedReason != "Bash" {
+		t.Errorf("after a toolless park blockedReason = %q, want %q", pane.blockedReason, "Bash")
+	}
+}
+
+// TestApplyWorkTransition_IdleNudgeAfterStopNoSubagents_LeavesUnseenMark
+// covers the idle nudge with nothing outstanding: the pane must stay exactly
+// as Stop left it (unseen, not blocked, not working).
+func TestApplyWorkTransition_IdleNudgeAfterStopNoSubagents_LeavesUnseenMark(t *testing.T) {
+	t.Parallel()
+	m := modelWithBackgroundTab()
+	m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit", nil)
+	m.applyWorkTransition("p2", "hook.claude.Stop", nil)
+	pane := m.curTabs()[1].Root.Leaves()[0]
+	if !pane.unseen {
+		t.Fatal("precondition: Stop with nothing outstanding should mark the background pane unseen")
+	}
+
+	m.applyWorkTransition("p2", "hook.claude.Notification", idleNudge())
+	if !pane.blockedSince.IsZero() {
+		t.Error("an idle nudge after Stop with nothing outstanding must not set blockedSince")
+	}
+	if !pane.unseen {
+		t.Error("the unseen mark Stop set must survive the trailing idle nudge")
+	}
+	if pane.working {
+		t.Error("pane must not read as working")
+	}
+}
+
 func TestApplyWorkTransition_StartAndAbortClearBlockedFields(t *testing.T) {
 	t.Parallel()
 	// A fresh turn and a process exit must both clear a lingering blocked
@@ -269,36 +465,45 @@ func TestTurnCompletionClearsTheBlockedMark(t *testing.T) {
 	}
 }
 
-// TestWorkPark_PermissionPromptKeepsTurnActive pins item 1. Claude fires no
+// TestWorkNotify_PermissionPromptKeepsTurnActive pins item 1. Claude fires no
 // hook when the user APPROVES a Bash/Edit/Write prompt — the pane's next
 // event is the turn's Stop — so a park that cleared turnActive left the pane
 // reading "blocked" for the entire time the agent was actually working.
 //
+// It is named for workNotify, not workPark: the event it drives is
+// Notification, which is workNotify's job now. (workPark's own coverage is
+// TestWorkPark_SetsBlockedRegardlessOfTurnState and
+// TestApplyWorkTransition_PermissionRequestAfterStop_StillBlocks.)
 // Notification covers two situations and the distinction is the whole fix:
-// a permission prompt arrives mid-turn (turnActive true), an idle-wait nudge
-// arrives after Stop already cleared it (turnActive false).
-func TestWorkPark_PermissionPromptKeepsTurnActive(t *testing.T) {
+// a permission prompt arrives mid-turn (turnActive true), an idle nudge
+// arrives after Stop already cleared it, carrying the producer's idle mark.
+func TestWorkNotify_PermissionPromptKeepsTurnActive(t *testing.T) {
 	t.Parallel()
 	const (
-		start = "hook.claude.UserPromptSubmit"
-		park  = "hook.claude.Notification"
-		stop  = "hook.claude.Stop"
+		start  = "hook.claude.UserPromptSubmit"
+		notify = "hook.claude.Notification"
+		stop   = "hook.claude.Stop"
 	)
 	tests := []struct {
 		name        string
 		events      []string
+		notifyData  map[string]string // Data on the notify event only
 		wantWorking bool
 	}{
-		{"permission park mid-turn", []string{start, park}, true},
-		{"idle-wait park after stop", []string{start, stop, park}, false},
-		{"stop after a park ends the turn", []string{start, park, stop}, false},
+		{"permission prompt mid-turn", []string{start, notify}, nil, true},
+		{"idle nudge after stop", []string{start, stop, notify}, idleNudge(), false},
+		{"stop after a park ends the turn", []string{start, notify, stop}, nil, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			m := newTestModelWithTabs(t, 1, 1)
 			pane := m.curTabs()[0].Leaves()[0]
 			for _, ev := range tt.events {
-				m.applyWorkTransition(pane.ID, ev, nil)
+				var data map[string]string
+				if ev == notify {
+					data = tt.notifyData
+				}
+				m.applyWorkTransition(pane.ID, ev, data)
 			}
 			if pane.working != tt.wantWorking {
 				t.Errorf("working = %v, want %v", pane.working, tt.wantWorking)
@@ -765,13 +970,13 @@ func TestApplyWorkTransition_ProductionPhantomSequence_KeepsSpinnerLit(t *testin
 	m.applyWorkTransition("p2", "hook.claude.SubagentStop", phantom)
 	m.applyWorkTransition("p2", "hook.claude.Stop", nil)
 	m.applyWorkTransition("p2", "hook.claude.SubagentStop", phantom)
-	m.applyWorkTransition("p2", "hook.claude.Notification", nil)
+	m.applyWorkTransition("p2", "hook.claude.Notification", idleNudge())
 	// Several further turns run to completion while impl-task7 keeps working.
 	for i := 0; i < 3; i++ {
 		m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit", nil)
 		m.applyWorkTransition("p2", "hook.claude.Stop", nil)
 		m.applyWorkTransition("p2", "hook.claude.SubagentStop", phantom)
-		m.applyWorkTransition("p2", "hook.claude.Notification", nil)
+		m.applyWorkTransition("p2", "hook.claude.Notification", idleNudge())
 	}
 
 	if !pane.working {
@@ -1372,40 +1577,50 @@ func TestHandleNotificationKey_Navigate_FailedJumpDoesNotGrowHistory(t *testing.
 // history backwards reports the state implied by its oldest event.
 //
 // The sequence below is the one logged for pane-fa75ba78 on 2026-08-03: a turn
-// resumed, replied, then parked waiting for the user. Played forwards the pane
-// is blocked, which is where it really was. Played backwards it is working,
-// which is what the user saw after restarting the TUI — a spinner with nothing
-// behind it.
+// resumed, replied, then a Notification fired. It was originally read as "then
+// parked waiting for the user" — but under the Notification/Park split (this
+// package's workNotify, see hookevents.WorkEventNotify) that reading was
+// exactly the bug the split exists to fix: the turn's own Stop had already run
+// (turnActive false) before Notification arrived, so this is Claude's idle
+// nudge, not a fresh park, and chronological replay now correctly leaves the
+// pane unblocked — the same state Stop alone left it in. Reversed, PostToolUse
+// lands LAST and opens a turn nothing after it closes, which is still the
+// wrong answer: order remains load-bearing, it now just decides `working`
+// rather than `blockedSince` for this particular history.
 func TestApplyWorkTransition_ReplayOrderDecidesTheFinalState(t *testing.T) {
 	t.Parallel()
-	history := []string{
-		"hook.claude.PostToolUse",   // resumed after AskUserQuestion
-		"hook.claude.Stop",          // reply ready
-		"hook.claude.Notification",  // parked: waiting for input
+	history := []struct {
+		evt  string
+		data map[string]string
+	}{
+		{evt: "hook.claude.PostToolUse"},                     // resumed after AskUserQuestion
+		{evt: "hook.claude.Stop"},                            // reply ready
+		{evt: "hook.claude.Notification", data: idleNudge()}, // idle nudge — turnActive already false
 	}
 
 	forwards := modelForWorkTest()
-	for _, evt := range history {
-		forwards.applyWorkTransition("p1", evt, nil)
+	for _, e := range history {
+		forwards.applyWorkTransition("p1", e.evt, e.data)
 	}
 	pane := forwards.curTabs()[0].Root.Leaves()[0]
 	if pane.working {
-		t.Error("chronological replay left the pane working; its last event was a park")
+		t.Error("chronological replay left the pane working; its last event was a completed turn")
 	}
-	if pane.blockedSince.IsZero() {
-		t.Error("chronological replay did not mark the pane blocked")
+	if !pane.blockedSince.IsZero() {
+		t.Error("chronological replay marked the pane blocked; the turn had already ended when Notification fired")
 	}
 
 	// The failing direction, asserted so the daemon-side ordering fix has a
 	// stated reason to exist rather than looking like a cosmetic reversal.
+	// `working` is the discriminating field here — blockedSince is zero in
+	// both directions now that the idle nudge parks nothing.
 	backwards := modelForWorkTest()
 	for i := len(history) - 1; i >= 0; i-- {
-		backwards.applyWorkTransition("p1", history[i], nil)
+		backwards.applyWorkTransition("p1", history[i].evt, history[i].data)
 	}
-	if got := backwards.curTabs()[0].Root.Leaves()[0]; !got.working || !got.blockedSince.IsZero() {
-		t.Errorf("reverse replay produced working=%v blocked=%v; the bug this "+
-			"pins is that it reports working with no park — if this changed, the "+
-			"daemon's replay order may no longer be load-bearing",
-			got.working, !got.blockedSince.IsZero())
+	if got := backwards.curTabs()[0].Root.Leaves()[0]; !got.working {
+		t.Errorf("reverse replay produced working=%v; the bug this pins is that it "+
+			"reports working with nothing to justify it — if this changed, the "+
+			"daemon's replay order may no longer be load-bearing", got.working)
 	}
 }

@@ -112,7 +112,9 @@ func (m *Model) buildCtxMenuItems(pane *PaneModel) []ctxMenuItem {
 	}
 	// "Clear attention" is the inverse of the whole state block, not the
 	// inverse of the pin above it: it drops the BLOCKED mark, which is the one
-	// the user cannot otherwise get rid of.
+	// the user cannot otherwise get rid of. Three of the four marks it clears
+	// are client-owned display state and nothing is sent for them; the pin is
+	// daemon-owned and IS sent (see the handler).
 	//
 	// blockedSince is set by a hook edge and cleared only by another hook edge
 	// (workStart / workAbort / workStop / workStopFinal, workstate.go) — this
@@ -395,19 +397,21 @@ func (m *Model) openCtxMenu(pane *PaneModel, anchorX, anchorY int) {
 // buildProjectCtxMenuItems is the sidebar project row's menu: Rename and
 // Destroy. No availability gates — unlike the pane menu's history/lazygit
 // rows, both actions are always valid for any project the sidebar can show.
-func buildProjectCtxMenuItems(remote, synthetic bool) []ctxMenuItem {
-	// Rename AND Destroy are greyed for the SYNTHETIC project — the
-	// placeholder the client invents for a daemon that has reported no
-	// projects. Its ID exists only here, so either message names something the
-	// daemon has never heard of and its map lookup misses: the dialog is
+func buildProjectCtxMenuItems(remote, unreachable bool) []ctxMenuItem {
+	// Rename AND Destroy are greyed for an UNREACHABLE project — either the
+	// SYNTHETIC placeholder the client invents for a daemon that has reported
+	// no projects (its ID exists only here, so either message names something
+	// the daemon has never heard of and its map lookup misses: the dialog is
 	// accepted and nothing changes, which is exactly how it was reported for a
-	// remote host while the same actions worked locally.
+	// remote host while the same actions worked locally), or a real project
+	// whose destination has no connection — Router.Send drops a message aimed
+	// at it and returns nil, so the dialog would look just as silently accepted.
 	//
-	// Disconnect stays ENABLED on such a host, and is the only thing that can
+	// Disconnect stays ENABLED in both cases, and is the only thing that can
 	// work there: it is client-side entirely, and detaching the machine is
 	// what a user reaching for "remove this" actually wants when the daemon
-	// cannot hold a project in the first place.
-	items := []ctxMenuItem{{ctxActRenameProject, "Rename project", !synthetic, false}}
+	// cannot hold a project in the first place (or cannot be reached at all).
+	items := []ctxMenuItem{{ctxActRenameProject, "Rename project", !unreachable, false}}
 	// ONE removal action, chosen by what the project is.
 	//
 	// Offering both on a remote read as two ways to do the same thing, and the
@@ -419,7 +423,7 @@ func buildProjectCtxMenuItems(remote, synthetic bool) []ctxMenuItem {
 	if remote {
 		items = append(items, ctxMenuItem{ctxActDisconnectHost, "Disconnect host…", true, false})
 	} else {
-		items = append(items, ctxMenuItem{ctxActDestroyProject, "Destroy project…", !synthetic, false})
+		items = append(items, ctxMenuItem{ctxActDestroyProject, "Destroy project…", !unreachable, false})
 	}
 	return items
 }
@@ -436,7 +440,7 @@ func (m *Model) openProjectCtxMenu(p *ProjectModel, anchorX, anchorY int) {
 		title:     p.Name,
 		spaced:    false,
 		cursor:    -1,
-		items:     buildProjectCtxMenuItems(p.Dest != "", isSyntheticProject(p.ID)),
+		items:     buildProjectCtxMenuItems(p.Dest != "", !m.projectActionable(p)),
 	}
 	s.cursor = firstEnabled(s.items)
 	w, h := s.boxSize()
@@ -604,26 +608,54 @@ func (m Model) executeCtxMenuItem(item ctxMenuItem) (tea.Model, tea.Cmd) {
 		return m, m.toggleActivePaneMute()
 	case ctxActAttention:
 		if pane, _, _ := m.findPaneAndTab(paneID); pane != nil {
-			pane.pinnedAttention = !pane.pinnedAttention
+			// Sent, not written. The pin is daemon-owned now, and
+			// syncPaneMeta copies it back on every broadcast — so a local flip
+			// would be reverted by the next workspace_state (the git ticker
+			// alone delivers one every 5 s) and the mark would visibly undo
+			// itself. The mute toggle has taken this route since it was
+			// written; this is the same shape.
+			return m, m.sendPinnedAttention(paneID, !pane.pinnedAttention)
 		}
 		return m, nil
 	case ctxActClearAttention:
 		if pane, _, _ := m.findPaneAndTab(paneID); pane != nil {
-			// All three marks, because the row promises one thing. Clearing
+			// All four marks, because the row promises one thing. Clearing
 			// only blockedSince leaves the pane green instead of amber and the
 			// project row still counting it, which reads as the action having
 			// half-worked.
 			//
-			// This is a display state the user is dismissing, not a fact about
-			// the agent: nothing is sent to the daemon, and the next hook edge
-			// re-derives whatever is actually true (workstate.go owns every
-			// write to these fields but this one). So a pane that really IS
-			// still parked marks itself again on its next event rather than
-			// staying silently clear.
+			// The first three are display state the user is dismissing, not
+			// facts about the agent: nothing about THEM is sent to the daemon,
+			// and the next hook edge re-derives whatever is actually true
+			// (workstate.go owns every write to these fields but this one). So
+			// a pane that really IS still parked marks itself again on its next
+			// event rather than staying silently clear.
 			pane.blockedSince = time.Time{}
 			pane.blockedReason = ""
 			pane.unseen = false
-			pane.pinnedAttention = false
+			// The pin is the exception: it lives on the daemon, so it is SENT
+			// and not written here — the same route ctxActAttention takes, for
+			// the same reason. Two things were wrong with doing both.
+			//
+			// The send was gated on the local value, and that value now says
+			// only "what the last broadcast reported", never "what the daemon
+			// holds". Mark deliberately does not write locally, so Mark
+			// followed by Clear before the broadcast returns read the pin as
+			// false, sent NOTHING, and then let the Mark's own broadcast put
+			// the ◆ back after the user had cleared it — persisted. Two
+			// right-clicks, and over ssh the window is hundreds of
+			// milliseconds. It is sent unconditionally now: one idempotent
+			// message on a user-initiated action buys a guarantee that does not
+			// depend on what has arrived yet.
+			//
+			// The local write was also a lie in the two states that matter. A
+			// broadcast already in flight re-sets the pin and the next one
+			// clears it, so the ◆ blinks off, on, off; and with the link parked
+			// Router.Send drops the message and returns nil, so nothing ever
+			// arrives to revert the local clear and the mark stays gone until a
+			// reconnect brings it back minutes later. One broadcast of latency
+			// is the price the mute toggle already pays for its chip.
+			return m, m.sendPinnedAttention(paneID, false)
 		}
 		return m, nil
 	case ctxActRestart:

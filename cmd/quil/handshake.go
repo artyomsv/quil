@@ -40,17 +40,28 @@ type handshakeResult struct {
 	ClientSkipped bool
 }
 
-// versionHandshake sends MsgVersionReq to the daemon and interprets the
-// response. Callers use the returned handshakeResult to decide whether
-// to attach normally, open the upgrade-client dialog, or enter the
-// daemon-restart confirmation flow.
+// versionHandshake asks a LOCAL daemon its version. The 2 s budget is how a
+// pre-versioning daemon is detected: it drops the request silently, so only the
+// timeout distinguishes it.
+func versionHandshake(client *ipc.Client) handshakeResult {
+	return versionHandshakeWithin(client, handshakeTimeout)
+}
+
+// versionHandshakeWithin sends MsgVersionReq to the daemon and interprets the
+// response, waiting up to timeout. Callers use the returned handshakeResult to
+// decide whether to attach normally, open the upgrade-client dialog, or enter
+// the daemon-restart confirmation flow.
 //
 // The function is defensive: any transport error, parse error, or
 // timeout becomes DaemonUnknown = true rather than an error return.
 // Propagating errors here would force every caller to branch the same
 // way twice (error vs match vs mismatch); encoding the "unknown" state
 // in the result keeps the call site simple.
-func versionHandshake(client *ipc.Client) handshakeResult {
+//
+// timeout is a parameter, not the handshakeTimeout constant, because a
+// background destination reached over ssh needs a longer budget than a Unix
+// socket: see remoteHandshakeTimeout in dialall.go.
+func versionHandshakeWithin(client *ipc.Client, timeout time.Duration) handshakeResult {
 	tuiVer := versionpkg.Current()
 
 	// Skip the handshake entirely for non-release builds. A `dev` TUI
@@ -78,7 +89,7 @@ func versionHandshake(client *ipc.Client) handshakeResult {
 
 	// Install a read deadline so a pre-versioning daemon (which drops
 	// the request silently) doesn't block us forever.
-	deadline := time.Now().Add(handshakeTimeout)
+	deadline := time.Now().Add(timeout)
 	if err := client.SetReadDeadline(deadline); err != nil {
 		log.Printf("handshake: set read deadline: %v", err)
 		return handshakeResult{DaemonUnknown: true}

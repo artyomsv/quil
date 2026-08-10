@@ -136,6 +136,42 @@ func TestSanitizeForTerminal_DefangsRawC1Byte(t *testing.T) {
 	}
 }
 
+// TestSanitizeForTerminalMessage_StripsEscapesAndBidiOverrides pins the round-2
+// finding this function exists to close: a daemon-reported version string
+// threaded through gateExtraVersion's error messages is an unvalidated,
+// arbitrary-byte channel — internal/version.Parsed strips everything after
+// the first '-' or '+' before validating the numeric components, so a
+// prerelease/build suffix survives untouched — and it reaches the operator's
+// own terminal via main.go's dial warning. Both an ESC-introduced escape
+// sequence AND a Unicode bidi override (printable, so sanitizeForTerminal
+// alone would not catch it) must be gone from the formatted output.
+func TestSanitizeForTerminalMessage_StripsEscapesAndBidiOverrides(t *testing.T) {
+	in := "gpu01 runs 0.0.1-\x1b]52;c;cGF5bG9hZA==\x07\u202eevil, this client runs 1.53.2"
+
+	got := SanitizeForTerminalMessage(in)
+
+	for _, forbidden := range []string{"\x1b", "\x07", "\u202e"} {
+		if strings.Contains(got, forbidden) {
+			t.Errorf("SanitizeForTerminalMessage(%q) = %q, still contains %q", in, got, forbidden)
+		}
+	}
+	if !strings.Contains(got, "gpu01 runs 0.0.1-") || !strings.Contains(got, "this client runs 1.53.2") {
+		t.Errorf("SanitizeForTerminalMessage(%q) = %q, dropped readable text", in, got)
+	}
+}
+
+// TestSanitizeForTerminalMessage_BoundsLength pins that the exported wrapper
+// still applies truncateForMessage's cap — sanitizing alone does not shorten
+// anything, and this is the new call site with no length bound of its own
+// otherwise.
+func TestSanitizeForTerminalMessage_BoundsLength(t *testing.T) {
+	long := strings.Repeat("A", maxStderrInMessage*3)
+	got := SanitizeForTerminalMessage(long)
+	if len(got) > maxStderrInMessage+len("…[truncated]") {
+		t.Errorf("SanitizeForTerminalMessage did not bound length: got %d bytes", len(got))
+	}
+}
+
 func TestStdioConn_LinkErr_SanitizesRemoteControlledStderr(t *testing.T) {
 	c, feed, _ := pipePair(t)
 

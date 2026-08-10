@@ -231,7 +231,17 @@ type WorktreeSpec struct {
 	// filesystem spells it. The client sends back the directory the daemon's
 	// own browse answered with, so no path built on the client is involved.
 	RepoRoot string `json:"repo_root"`
-	// Branch is the NEW branch, off the repository's current HEAD.
+	// Branch is the NEW branch, off the repository's DEFAULT branch —
+	// origin/HEAD where it is set, else the conventional names, else HEAD.
+	// Deliberately not the repository's current HEAD, which is whatever the
+	// main checkout was last left on: a worktree created while it sat on a
+	// feature branch inherited that feature's unmerged commits, so the pane
+	// was isolated in its directory and not in its history.
+	//
+	// The base is resolved DAEMON-side (gitworktree.defaultBranch) and is not
+	// on the wire. Nothing chooses it yet — when something does, it belongs
+	// here as a field, not as a second thing the client infers about a
+	// repository living on the daemon's disk.
 	//
 	// Existing branches are deliberately not offered: one already checked out
 	// in another worktree fails at the git level and needs its own error path,
@@ -356,6 +366,12 @@ type UpdatePanePayload struct {
 	Muted *bool `json:"muted,omitempty"`
 	// Eager is a pointer for the same nil-vs-false tri-state reason as Muted.
 	Eager *bool `json:"eager,omitempty"`
+	// PinnedAttention is a pointer for the same reason, and here the tri-state
+	// is what makes UNPINNING expressible at all: the pin is a toggle whose
+	// off-state is the one the user asks for explicitly, so a plain bool would
+	// make "unmark attention" indistinguishable from "rename this pane" and
+	// every OSC 7 CWD update would silently clear the mark.
+	PinnedAttention *bool `json:"pinned_attention,omitempty"`
 }
 
 type UpdateLayoutPayload struct {

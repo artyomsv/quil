@@ -295,9 +295,12 @@ const clientFlushTimeout = 1 * time.Second
 // every test fake keeps compiling.
 type flusher interface{ Flush(time.Duration) bool }
 
-// closeClient FLUSHES before releasing, and the order is load-bearing. Send is
-// non-blocking: it hands the frame to the connection's send loop, which Close
-// then stops without writing what is left. Closing straight after a send
+// closeClient FLUSHES before releasing, and the order is load-bearing. Send
+// returns once the frame is on the connection's send queue, not once it is
+// written: it hands the frame to the send loop, which Close then stops without
+// writing what is left. (Send waits for ROOM on that queue when it is full, up
+// to ipc.clientSendTimeout — that bounds admission, not delivery, so it does
+// not make this flush unnecessary.) Closing straight after a send
 // therefore discards frames the caller was told were accepted — for the TUI
 // exit path that is the user's final keystrokes, the same loss the input queue
 // blocks to avoid, one layer further down. Flush is bounded, so an unresponsive
@@ -394,6 +397,15 @@ func (m Model) freezeInput(msg tea.Msg) (tea.Cmd, bool) {
 	// deliver to, and sendClipboardToPaneID drops it on arrival anyway.
 	if p, ok := msg.(clipboardPastedMsg); ok {
 		return nil, m.linkOf(m.destOfPane(p.paneID)).active
+	}
+	// An OFFLINE project is a client-side stand-in: it has no tabs and no panes,
+	// so no keystroke here can reach a PTY, and freezing would trap the user on
+	// a row whose whole purpose is to be navigated away from — the ladder holds
+	// `active` for as long as it climbs, and the switch-away key is frozen with
+	// everything else. A destination that dropped MID-session has Offline == nil
+	// and keeps the freeze, which is what it is for.
+	if p := m.cur(); p != nil && p.Offline != nil {
+		return nil, false
 	}
 	if !m.linkOf(m.activeDest()).active {
 		return nil, false
@@ -723,7 +735,15 @@ func (m *Model) eachClientPane(dest string, fn func(*PaneModel)) {
 // a `redraw_key` kick instead, and repaints over its existing grid exactly as it
 // did before reconnect existed.
 func (m *Model) armReattachReset(dest string) {
-	m.eachClientPane(dest, func(p *PaneModel) { p.reattachReset = true })
+	m.eachClientPane(dest, func(p *PaneModel) {
+		p.reattachReset = true
+		// Forget that this pane has been sized. The suppression in diffResizes
+		// describes a daemon-side guard (appliedCols/appliedRows) that a PTY
+		// reinstall zeroes, so carrying it across an outage would withhold the
+		// one resize repaintAfterResize needs to bring a restored pane back.
+		// delete on a nil map is a no-op.
+		delete(m.sizedOnce, sizedKey(dest, p.ID))
+	})
 	// Selection is Model-level and anchors to row/column coordinates that any
 	// replay invalidates. Dropped now rather than armed: there is no per-pane
 	// chunk to hang it off, and a selection surviving an outage is worth nothing.
@@ -751,7 +771,11 @@ func (m *Model) armReattachReset(dest string) {
 //   - unseen and pinnedAttention. Both are user-facing marks about work the
 //     user has not looked at, not in-flight execution. unseen is the only
 //     signal that a background pane finished something while the link was
-//     down, which is often exactly why the user is reconnecting.
+//     down, which is often exactly why the user is reconnecting. Preserving
+//     pinnedAttention is belt-and-braces now that it is daemon-owned — the
+//     first broadcast after reattach re-delivers it either way — but clearing
+//     it here would blank every ◆ for the width of the outage, on the marks
+//     the user is least willing to lose.
 //   - m.workTickRunning. The spinner loop is self-stopping: the tick already
 //     in flight observes !anyPaneWorking() and clears the flag itself.
 //     Clearing it here while that tick is still scheduled would let the next

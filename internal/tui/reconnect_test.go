@@ -291,6 +291,49 @@ func TestFreezeInput_HonoursTheConfiguredQuitBinding(t *testing.T) {
 	}
 }
 
+// An OFFLINE project's own reconnect ladder must never freeze the keyboard.
+// It has no tabs and no panes, so no keystroke here can reach a PTY, and the
+// ladder holds `active` for as long as it climbs — before the offline
+// carve-out in freezeInput, selecting this exact row (click, project picker,
+// or palette) trapped the user behind a frozen keyboard with only Ctrl+Q to
+// escape, because it is the only project on screen and its own link is
+// "active" by definition.
+func TestFreezeInput_OfflineProjectWithActiveLadder_NotFrozen(t *testing.T) {
+	m := Model{
+		projects: []*ProjectModel{
+			{ID: "proj-offline@gpu01", Dest: "gpu01", Offline: &OfflineState{Kind: offlineRetrying}},
+		},
+		activeProject: 0,
+	}
+	m.handleLinkLost("gpu01", errors.New("connection reset"))
+
+	if !m.linkOf("gpu01").active {
+		t.Fatal("setup: the ladder must be active for this test to mean anything")
+	}
+
+	key := tea.KeyPressMsg{Code: 'a', Text: "a"}
+	if _, frozen := m.freezeInput(key); frozen {
+		t.Fatal("an offline project's own reconnect ladder must not freeze input — a stand-in row exists to be navigated away from")
+	}
+}
+
+// The contrast: a project that dropped MID-SESSION (Offline == nil, unlike an
+// offline stand-in) has real tabs and panes, and must keep the freeze — that
+// link can carry input to a live PTY the instant it heals, so a keystroke
+// delivered late lands in a session that has moved on.
+func TestFreezeInput_MidSessionDropWithNoOfflineState_StillFrozen(t *testing.T) {
+	m := Model{
+		projects:      []*ProjectModel{{ID: "proj-gpu", Dest: "gpu01"}},
+		activeProject: 0,
+	}
+	m.handleLinkLost("gpu01", errors.New("connection reset"))
+
+	key := tea.KeyPressMsg{Code: 'a', Text: "a"}
+	if _, frozen := m.freezeInput(key); !frozen {
+		t.Fatal("a project that dropped mid-session (Offline == nil) must still freeze input while its ladder is active")
+	}
+}
+
 // A clipboard read that was already in flight when the link dropped must be
 // frozen like any other input. It carries the same payload as the tea.PasteMsg
 // the freeze already covers, and delivering it after a reattach puts clipboard
@@ -2320,6 +2363,30 @@ func TestReconnect_OneDestCompletingDoesNotKillAnothersLadder(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("prod's armed tick was discarded because gpu01 reconnected; prod is now " +
 			"stuck showing a banner with no timer behind it")
+	}
+}
+
+// A gated verify refuses a destination that was never version-checked (see
+// cmd/quil's verifyRemoteLinkGated), and the ladder must stop rather than
+// spend every future attempt re-authenticating against a daemon it can never
+// speak to.
+func TestRedialResult_VersionMismatchStopsTheLadder(t *testing.T) {
+	m := Model{client: NewRouter(map[string]Client{})}
+	m.SeedOfflineDest("gpu01", "gpu01", offlineRetrying, "", nil)
+	m.SetRedialFunc("gpu01", func(Client) (Client, error) { return nil, nil })
+	m.linkFor("gpu01").active = true
+
+	next, _ := m.Update(redialResultMsg{
+		dest: "gpu01",
+		err:  fmt.Errorf("%w: daemon runs 1.53.0", ErrRemoteVersionMismatch),
+	})
+	got := next.(Model)
+
+	if got.linkOf("gpu01").active {
+		t.Error("ladder still active after a version mismatch; it can never succeed")
+	}
+	if k := got.projectForDest("gpu01").Offline.Kind; k != offlineNeedsUpgrade {
+		t.Errorf("kind = %v, want offlineNeedsUpgrade", k)
 	}
 }
 

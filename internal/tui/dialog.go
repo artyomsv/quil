@@ -358,6 +358,19 @@ const confirmKindApplyUpdate = "apply-update"
 // confirmDestroyProject in projectdialog.go.
 const confirmKindDestroyProject = "destroy-project"
 
+// confirmKindUpgradeDest is the discriminator on confirmKind for the
+// "this host runs an older quil" prompt. confirmID carries the DEST.
+//
+// The offer itself is not new — installOffer and installDest have handled both
+// ErrRemoteQuilMissing and ErrRemoteVersionMismatch since the runtime-connect
+// work. What was missing is an entry point for the two paths a RESTART goes
+// through: the launch dial and the reconnect ladder both classified the
+// mismatch, seeded an offline row, and stopped. The launch path is right not to
+// install unprompted — that would make provisioning another machine a side
+// effect of opening the client — but a prompt is not a side effect, and without
+// one the user got a parked row and no way to act on it inside the tool.
+const confirmKindUpgradeDest = "upgrade-dest"
+
 func shortcutsList(m *Model) []struct{ key, desc string } {
 	kb := m.cfg.Keybindings
 	// kbDisplay renders comma-separated multi-bindings as "a / b" so the
@@ -765,6 +778,15 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.dialog = dialogNone
+		if m.confirmKind == confirmKindUpgradeDest {
+			// Declining leaves the host parked — the row keeps saying what is
+			// wrong — and does NOT mark it installed, so a later reconnect may
+			// ask again. What it must not do is swallow the rest of the queue:
+			// a client update leaves every configured host stale at once, and
+			// dismissing the first would otherwise hide the others entirely.
+			m.confirmDetail = ""
+			m.promptNextUpgrade()
+		}
 		return m, nil
 	case "enter", "y":
 		kind := m.confirmKind
@@ -777,6 +799,34 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// keystroke a user does not press accidentally.
 		if kind == confirmKindShutdown && msg.String() != "y" {
 			return m, nil
+		}
+
+		// Upgrade a host: the same push `quil remote setup` performs, run from
+		// inside the tool so the user never leaves it for a shell.
+		//
+		// Requires explicit `y` for the reason shutdown does, and more so here:
+		// this dialog opens BY ITSELF at launch, so it can be on screen when
+		// the user's hands are already moving. Enter is the universal commit
+		// key, and accepting it would let one reflex restart a remote daemon and
+		// kill whatever was running in its panes.
+		if kind == confirmKindUpgradeDest {
+			if msg.String() != "y" {
+				return m, nil
+			}
+			m.dialog = dialogNone
+			m.confirmDetail = ""
+			// The once-per-host guard is shared with the New Project dialog's
+			// offer: a daemon still reporting the old version after an upgrade
+			// did not restart, and pushing the same archive again cannot change
+			// that — install, retry, same error, install.
+			if m.installedDests == nil {
+				m.installedDests = map[string]bool{}
+			}
+			m.installedDests[id] = true
+			if p := m.projectForDest(id); p != nil && p.Offline != nil {
+				p.Offline.Detail = "upgrading — the daemon on that host restarts…"
+			}
+			return m, m.installDest(id)
 		}
 
 		// Stop-daemon: fire MsgShutdown and quit the TUI. The daemon's
@@ -1331,6 +1381,28 @@ func (m Model) renderConfirmDialog() string {
 		b.WriteString("  " + dialogNormal.Render(fmt.Sprintf("Destroy project %q?", sanitizeRemoteText(m.confirmName))))
 		b.WriteString("\n\n")
 		b.WriteString("  " + dialogSubtle.Render("Every tab and pane in this project is destroyed too."))
+	case confirmKindUpgradeDest:
+		b.WriteString("  " + dialogNormal.Render(fmt.Sprintf("Upgrade quil on %s?", sanitizeRemoteText(m.confirmName))))
+		b.WriteString("\n\n")
+		// The version pair comes from the daemon's own handshake and is the
+		// answer to "why can I not reach it" — the reason the row parked. It is
+		// remote-influenced text, so it is sanitized AND bounded at render like
+		// every other value from a host the user may not control.
+		if d := m.confirmDetail; d != "" {
+			b.WriteString("  " + dialogSubtle.Render(truncateToWidth(sanitizeRemoteText(d), confirmDetailCap)))
+			b.WriteString("\n\n")
+		}
+		b.WriteString("  " + dialogSubtle.Render("Quil pushes this build over ssh."))
+		b.WriteString("\n")
+		// Named explicitly because an upgrade is not free the way a first
+		// install is: the push stops the remote daemon, so panes over there
+		// respawn and whatever was running in their shells is killed. The CLI
+		// says the same before asking; this is the same warning in the place
+		// the user is actually being asked.
+		b.WriteString("  " + dialogSubtle.Render("Its daemon RESTARTS: panes there respawn and"))
+		b.WriteString("\n")
+		b.WriteString("  " + dialogSubtle.Render("anything running in their shells is killed."))
+		footer = "y upgrade    Esc not now"
 	case confirmKindDisconnectHost:
 		b.WriteString("  " + dialogNormal.Render(fmt.Sprintf("Disconnect %q?", sanitizeRemoteText(m.confirmName))))
 		b.WriteString("\n\n")

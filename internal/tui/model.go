@@ -404,6 +404,8 @@ type Model struct {
 	confirmKind          string                 // "pane" or "tab"
 	confirmID            string                 // ID of pane/tab to delete
 	confirmName          string                 // display name for confirmation
+	confirmDetail        string                 // extra remote-sourced line (upgrade confirm); sanitized+bounded at render
+	upgradeQueue         []upgradePrompt        // hosts waiting to be ASKED about provisioning; see enqueueUpgradePrompt
 	devMode              bool                   // true when QUIL_HOME is set
 	pluginRegistry       *plugin.Registry       // plugin registry (shared with daemon)
 	lastWidth            int                    // last known window width (for persistence)
@@ -994,6 +996,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// launch never redials until the user actually resizes the window.
 			// This branch runs exactly once, unconditionally, which is what a
 			// launch-time wake-up needs.
+			// The launch drain, on THIS branch for the same reason
+			// wakeOfflineDests is here: it runs exactly once, unconditionally,
+			// and an unresized session never reaches the subsequent-resize code
+			// below — so a host stale at launch would never be offered.
+			//
+			// A STATEMENT, not an operand of the return: promptNextUpgrade has
+			// a pointer receiver and mutates dialog state, and Go says nothing
+			// about the order of a plain `m` against calls in the same
+			// statement. The same hazard the ledger comment above documents.
+			m.promptNextUpgrade()
 			resize, attach, wake := m.resizeAllPanes(), m.attachAllDests(), m.wakeOfflineDests()
 			return m, tea.Batch(resize, attach, wake)
 		}
@@ -1016,6 +1028,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.height = msg.Height
 			return m, attach
 		}
+		// The launch path's drain point. SeedOfflineDest runs before the
+		// program starts, so the queue it fills has to be opened from inside
+		// Update — and a WindowSizeMsg always arrives, which makes this the one
+		// arm guaranteed to run on every startup. A no-op once the queue is
+		// empty, and gated on dialogNone so it never displaces a dialog the
+		// user is already answering.
+		m.promptNextUpgrade()
 
 		// Debounce subsequent resizes
 		seq := m.resizeSeq
@@ -1125,6 +1144,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			ls := m.linkFor(msg.dest)
 			ls.active, ls.parked = false, false
+			// The offer this comment used to promise. Until now "let the
+			// sidebar offer the upgrade instead" described nothing: the sidebar
+			// had no such affordance, so a link that drifted out of version
+			// mid-session went quiet with no way to act on it in the tool.
+			m.enqueueUpgradePrompt(msg.dest, msg.err.Error())
+			m.promptNextUpgrade()
 			return m, nil
 		}
 		// msg.client == nil with no error is not a success. A dialer returning

@@ -52,6 +52,66 @@ type OfflineState struct {
 // ceremony; production never reassigns it.
 var offlineNow = time.Now
 
+// confirmDetailCap bounds the version pair on the upgrade confirm. The string
+// is built from what the far side reported, and sanitizing does not shorten —
+// the same pairing every other remote-influenced render in this package makes.
+const confirmDetailCap = 60
+
+// enqueueUpgradePrompt records a destination whose only remedy is provisioning,
+// so the user can be ASKED rather than left with a parked row.
+//
+// A queue rather than a flag: several configured hosts can be stale at once
+// after a client update, and one confirm dialog is on screen at a time. Deduped
+// because both the launch dial and the reconnect ladder can classify the same
+// destination, and asking twice about one host reads as the first answer having
+// been ignored.
+//
+// installedDests is consulted here as well as at the point of action: a host
+// already provisioned this session that STILL reports a mismatch did not
+// restart its daemon, and pushing the same archive again cannot change that —
+// the loop that guard exists to break is install, retry, same error, install.
+func (m *Model) enqueueUpgradePrompt(dest, detail string) {
+	if dest == "" || m.installDestFn == nil || m.installedDests[dest] {
+		return
+	}
+	for _, q := range m.upgradeQueue {
+		if q.dest == dest {
+			return
+		}
+	}
+	m.upgradeQueue = append(m.upgradeQueue, upgradePrompt{dest: dest, detail: detail})
+}
+
+// upgradePrompt is one queued ask: which host, and the version pair to show.
+type upgradePrompt struct{ dest, detail string }
+
+// promptNextUpgrade opens the confirm for the next queued host, if the screen
+// is free to show it.
+//
+// Gated on dialogNone so it cannot displace the disclaimer or the plugin
+// migration at startup — both of which the user is already answering, and the
+// migration deliberately blocks until resolved. Every dialog dismissal calls
+// this again, so a deferred prompt arrives as soon as the screen is free
+// rather than being dropped.
+func (m *Model) promptNextUpgrade() {
+	if m.dialog != dialogNone || len(m.upgradeQueue) == 0 {
+		return
+	}
+	next := m.upgradeQueue[0]
+	m.upgradeQueue = m.upgradeQueue[1:]
+	// The destination may have been disconnected, or provisioned through the
+	// New Project dialog, between queueing and now.
+	if m.installedDests[next.dest] || m.projectForDest(next.dest) == nil {
+		m.promptNextUpgrade()
+		return
+	}
+	m.dialog = dialogConfirm
+	m.confirmKind = confirmKindUpgradeDest
+	m.confirmID = next.dest
+	m.confirmName = next.dest
+	m.confirmDetail = next.detail
+}
+
 // SeedOfflineDest installs (or replaces) the stand-in rows for one destination.
 //
 // Called from the launch path for a destination whose dial failed, and again
@@ -75,6 +135,14 @@ func (m *Model) SeedOfflineDest(dest, label string, kind OfflineKind, detail str
 	}
 
 	state := &OfflineState{Kind: kind, Detail: detail, Since: offlineNow()}
+
+	// Queue the ask for a host whose only remedy is provisioning. Queued rather
+	// than opened here because SeedOfflineDest runs BEFORE tea.Program starts —
+	// and because the disclaimer or the plugin migration may own the screen at
+	// that point. promptNextUpgrade drains it once the screen is free.
+	if kind == offlineNeedsInstall || kind == offlineNeedsUpgrade {
+		m.enqueueUpgradePrompt(dest, detail)
+	}
 
 	rows := make([]*ProjectModel, 0, len(cached))
 	for _, c := range cached {

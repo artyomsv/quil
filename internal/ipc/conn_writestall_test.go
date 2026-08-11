@@ -5,7 +5,9 @@ import (
 	"errors"
 	"io"
 	"net"
+	"os"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -34,6 +36,97 @@ func waitClosed(c *Conn, timeout time.Duration) bool {
 		time.Sleep(2 * time.Millisecond)
 	}
 	return c.closed.Load()
+}
+
+// TestNewConn_UsesTheProductionWriteWindow pins the wiring, which every other
+// test in this file bypasses.
+//
+// They all construct conns through newConnWithWriteWindow so they can exercise
+// a stall in milliseconds — which means none of them would notice if newConn
+// stopped passing writeDeadline. Verified by mutation: pointing newConn at a
+// 1 s window leaves the whole package green. A seam introduced for testability
+// that nothing checks is how the production value silently drifts.
+func TestNewConn_UsesTheProductionWriteWindow(t *testing.T) {
+	local, remote := net.Pipe()
+	defer remote.Close()
+
+	c := newConn(local)
+	defer c.Close()
+
+	if c.writeWindow != writeDeadline {
+		t.Errorf("newConn window = %v, want %v — the production path must use the documented deadline, "+
+			"not whatever a test seam happens to pass", c.writeWindow, writeDeadline)
+	}
+}
+
+// noWriteDeadlineConn refuses write deadlines exactly as the ssh transport
+// does: internal/transport/stdioConn returns os.ErrNoDeadline because Windows
+// non-overlapped pipe handles cannot carry one.
+type noWriteDeadlineConn struct {
+	net.Conn
+	attempts atomic.Int64
+}
+
+func (c *noWriteDeadlineConn) SetWriteDeadline(time.Time) error {
+	c.attempts.Add(1)
+	return os.ErrNoDeadline
+}
+
+// TestWrite_TransportWithoutWriteDeadlinesStillDeliversAndStillRetires covers
+// the transport the deadline logic CANNOT protect.
+//
+// Over ssh there is no write deadline at all, so the whole progress-window
+// mechanism is inert and the enqueue-side overflow close is the only bound.
+// Two things still have to hold there, and neither is implied by the Unix-socket
+// tests: an ordinary frame must go out (the refused deadline must not be
+// treated as a write failure), and a hard write error must still retire the
+// conn rather than leaving the silent zombie this change exists to remove.
+func TestWrite_TransportWithoutWriteDeadlinesStillDeliversAndStillRetires(t *testing.T) {
+	local, remote := net.Pipe()
+	raw := &noWriteDeadlineConn{Conn: local}
+
+	c := newConnWithWriteWindow(raw, 50*time.Millisecond)
+	defer c.Close()
+
+	frame := []byte{0, 0, 0, 1, byte('x')}
+	got := make([]byte, len(frame))
+	read := make(chan error, 1)
+	go func() {
+		_, err := io.ReadFull(remote, got)
+		read <- err
+	}()
+
+	if err := c.sendFrame(frame); err != nil {
+		t.Fatalf("sendFrame should queue: %v", err)
+	}
+	select {
+	case err := <-read:
+		if err != nil {
+			t.Fatalf("read frame: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("frame never arrived on a transport that refuses write deadlines — " +
+			"ErrNoDeadline is being treated as a write failure")
+	}
+	if !bytes.Equal(got, frame) {
+		t.Errorf("frame = %v, want %v", got, frame)
+	}
+	if raw.attempts.Load() == 0 {
+		t.Error("SetWriteDeadline was never called; this test would pass against code that stopped trying")
+	}
+	if c.closed.Load() {
+		t.Fatal("conn retired after a successful write on a deadline-less transport")
+	}
+
+	// Now the hard-error half: the peer goes away, so the next write fails with
+	// something that is not a deadline, and the conn must be retired.
+	remote.Close()
+	if err := c.sendFrame(frame); err != nil {
+		t.Fatalf("sendFrame should queue: %v", err)
+	}
+	if !waitClosed(c, 5*time.Second) {
+		t.Error("conn still live after a hard write error on a deadline-less transport")
+	}
 }
 
 // TestWrite_ClosesConnWhenThePeerNeverDrains is the core regression. A peer

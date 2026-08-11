@@ -104,6 +104,8 @@ type Conn struct {
 	closed    atomic.Bool
 	overflow  atomic.Bool
 	dropped   atomic.Uint64
+	// deadlineRefused gates reportDeadlineRefused to one line per conn.
+	deadlineRefused atomic.Bool
 	// pending counts must-deliver frames accepted by Send but not yet written
 	// to the socket. Send is non-blocking — it hands the frame to sendLoop —
 	// so an empty critCh does NOT mean the peer has it. Flush needs to know
@@ -386,14 +388,19 @@ func (c *Conn) sendLoop() {
 // giving up, so re-sending the whole frame would duplicate that prefix and
 // desynchronise a length-prefixed stream — corruption instead of a drop.
 //
-// The SetWriteDeadline error is discarded deliberately: the ssh transport
-// (transport.stdioConn) reports os.ErrNoDeadline per frame because Windows
-// non-overlapped pipe handles cannot carry one. Remote conns therefore run with
-// no deadline at all and the overflow close is their only bound, which is
-// unchanged by this and is why the error is not fatal here.
+// A refused write deadline is NOT fatal, but it is no longer silent. The ssh
+// transport (transport.stdioConn) answers os.ErrNoDeadline for every frame,
+// because Windows non-overlapped pipe handles cannot carry one — so remote
+// conns run with no deadline at all and the enqueue-side overflow close is
+// their only bound. That is a real gap in the ceiling this function otherwise
+// provides, and discarding the error left it discoverable only by reading the
+// transport (techdebt 3-2-conn-write-deadline-absent-over-ssh). It is reported
+// once per conn instead.
 func (c *Conn) write(frame []byte) bool {
 	for {
-		_ = c.raw.SetWriteDeadline(time.Now().Add(c.writeWindow))
+		if derr := c.raw.SetWriteDeadline(time.Now().Add(c.writeWindow)); derr != nil {
+			c.reportDeadlineRefused(derr)
+		}
 		n, err := c.raw.Write(frame)
 		if err == nil {
 			return true
@@ -412,6 +419,31 @@ func (c *Conn) write(frame []byte) bool {
 		c.markDead()
 		return false
 	}
+}
+
+// reportDeadlineRefused says once, per conn, that this transport will not carry
+// a write deadline — so the missing ceiling is visible in the log rather than
+// inferred from reading the transport.
+//
+// Once per conn, not once per frame: sendLoop calls SetWriteDeadline before
+// EVERY write, and on ssh every one of them fails, so an unguarded line would
+// be one log record per frame for the life of the session.
+//
+// os.ErrNoDeadline is DEBUG because it is a documented property of a supported
+// transport rather than a fault — an operator reading a remote session's log at
+// info level does not need it, and a warning per remote conn would train them
+// to ignore the level. Anything else is a Unix socket refusing something it
+// should support, which is genuinely unexpected.
+func (c *Conn) reportDeadlineRefused(err error) {
+	if !c.deadlineRefused.CompareAndSwap(false, true) {
+		return
+	}
+	if errors.Is(err, os.ErrNoDeadline) {
+		logger.Debug("ipc: transport carries no write deadline (peer=%s); the critical-queue "+
+			"overflow close is the only bound on a wedged write here", peerLabel(c.raw))
+		return
+	}
+	logger.Warn("ipc: write deadline not installed (peer=%s): %v", peerLabel(c.raw), err)
 }
 
 // Receive reads the next message from the connection. Callers must ensure a
@@ -474,11 +506,20 @@ func (c *Conn) Close() error {
 // noticed. TestRedialRemote_ReadsLinkErrBeforeCloseAndExitCodeAfter caught it.
 //
 // Unparking a parked Receive is a READ DEADLINE, not a socket close, for the
-// same reason — and it works precisely where it must: stdioConn implements read
-// deadlines in its own adapter (a pump goroutine feeding readCh) while honestly
-// refusing WRITE deadlines. The daemon's handleConn then errors out of Receive
-// and runs its own defer, which is where the real Close, removeConn and
-// onDisconnect belong.
+// same reason. The daemon's handleConn then errors out of Receive and runs its
+// own defer, which is where the real Close, removeConn and onDisconnect belong.
+//
+// That unpark is load-bearing on the DAEMON side and best-effort elsewhere, and
+// the distinction is worth stating rather than implying. The daemon serves Unix
+// sockets, where the poller applies a deadline to a read that is already
+// blocked — which is the case this whole change is about. stdioConn (ssh) also
+// implements read deadlines, but its Read builds its timer from the deadline it
+// observes ON ENTRY, so one installed while a read is already parked is not
+// seen until the next call. Nothing is lost there: a write failing on that
+// transport means the pipe to ssh is broken, so the pump's own read is about to
+// fail anyway, and the client additionally bounds itself with
+// clientSendTimeout. Retiring the conn is still correct and immediate — only
+// the unpark is deferred to whatever ends that read.
 //
 // The deadline error is IGNORED rather than escalated to a close. Every
 // transport here implements read deadlines on a live connection, so the error

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.55.0] - 2026-08-11
+
 ### Added
 - **A remote host running an older Quil now offers to upgrade itself.** After
   updating this client, a configured host still on the previous version cannot

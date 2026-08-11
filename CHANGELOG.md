@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.54.1] - 2026-08-11
+
 ### Fixed
 - **"The local daemon is gone — its panes are lost" could appear over a daemon
   that was perfectly healthy.** If a write to a client stalled for 30 seconds —

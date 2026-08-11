@@ -65,11 +65,20 @@ func TestSendLoop_ExitsOnWriteError(t *testing.T) {
 		t.Fatalf("sendFrame should queue even before the write fails; got %v", err)
 	}
 
-	// The queued frame's Write fails and sendLoop must exit on its own —
-	// before Close is ever called. This is a stronger assertion than the
-	// original (which only checked the count after Close).
+	// The queued frame's Write fails and sendLoop must exit on its own, without
+	// an external Close to prompt it.
 	if got := waitSendLoopCount(baseline, 5*time.Second); got != baseline {
 		t.Errorf("goroutine leak after sendLoop write-error exit: sendLoop count=%d, want %d", got, baseline)
+	}
+
+	// ...and it must take the CONN down with it. This assertion is the whole
+	// correction to this test: it previously asserted the exit happened
+	// "before Close is ever called" and treated that as the stronger property,
+	// which pinned the 2026-08-11 incident as intended behaviour — sendLoop is
+	// the only drainer of critCh, so a conn that survives it can never send
+	// again and nothing but the enqueue-side overflow will ever notice.
+	if !c.closed.Load() {
+		t.Error("sendLoop exited on a write error but left the conn open — readable, un-writable, and silent")
 	}
 
 	_ = c.Close()

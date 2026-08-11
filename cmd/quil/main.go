@@ -559,11 +559,17 @@ func launchTUI() {
 		model.SetRecentCWDs(tui.LoadRecentCWDs(config.RecentCWDsPath(remoteDest)))
 	}
 
-	// Only REMOTE destinations reconnect. A local daemon that dies takes its
-	// panes with it, so there is nothing to reattach to and retrying would hide
-	// the loss; leaving its redial func nil is what keeps that fatal — and, in a
-	// mixed session, what makes the client keep the remote daemons rather than
-	// quitting over the local one.
+	// EVERY destination reconnects, the local daemon included — see redialFor,
+	// which picks the socket dialer for "" and ssh for the rest.
+	//
+	// The local one was excluded on the grounds that "a local daemon that dies
+	// takes its panes with it, so retrying would hide the loss". That is true of
+	// a dead daemon and false of a dropped SOCKET: on 2026-08-11 a write-side
+	// failure retired a healthy daemon's connection, and with no dialer the
+	// client had no way back to panes that were all still running. redialLocal
+	// tells the two apart by what actually happens — a daemon that is gone fails
+	// the dial immediately and parks the ladder within a few seconds, so the
+	// loss is still reported, just not assumed.
 	//
 	// liveCfg is declared here rather than beside the dial funcs below because
 	// these launch-time ladders need it too: a host configured at launch can
@@ -573,22 +579,17 @@ func launchTUI() {
 	liveCfg := &atomic.Pointer[config.Config]{}
 	liveCfg.Store(&cfg)
 	for dest := range conns {
-		if dest == "" {
-			continue
-		}
-		model.SetRedialFunc(dest, redialRemote(liveCfg.Load, dest))
+		model.SetRedialFunc(dest, redialFor(dest, liveCfg.Load))
 	}
 	// Installed for every CONFIGURED destination, not only the connected ones.
 	// A host unreachable at launch used to get no dialer, so canReconnect —
 	// literally redialFns[dest] != nil — was false and no ladder could ever
 	// start for it; that was the gap that made a failed launch dial permanent.
-	// The local daemon is still deliberately excluded: its panes died with it,
-	// so retrying would hide the loss.
 	for _, d := range extraDestinations(cfg, primaryDest) {
 		if _, connected := conns[d.Dest]; connected {
 			continue
 		}
-		model.SetRedialFunc(d.Dest, redialRemote(liveCfg.Load, d.Dest))
+		model.SetRedialFunc(d.Dest, redialFor(d.Dest, liveCfg.Load))
 	}
 	// Connecting a host the user names at runtime, from the New Project
 	// dialog's Host field — the same dial the launch path uses, so a

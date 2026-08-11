@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **A remote host running an older Quil now offers to upgrade itself.** After
+  updating this client, a configured host still on the previous version cannot
+  be attached to — client and daemon must match. Quil showed that as a parked
+  row with a lightning bolt and nothing else, and the only way forward was
+  `quil remote setup <host>` in a shell. It now asks, at startup and whenever a
+  live link drifts out of version, and performs the same push itself when you
+  press `y`. It says which versions are involved and that the remote daemon
+  restarts, since panes there respawn.
+
 ## [1.54.1] - 2026-08-11
 
 ### Fixed

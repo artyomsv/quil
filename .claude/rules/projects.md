@@ -359,12 +359,31 @@ downgrades a machine other clients may share and does not fix this session
 either. Both sentinels share `installOffer`, `installedDests` and the retry
 dial; the once-per-host guard covers the upgrade for its own reason, since a
 daemon still reporting the old version after one did not restart and pushing
-the same archive again cannot change that. The LAUNCH path deliberately does
-not act on the sentinel — a background destination is dropped with a log line,
-because installing software on another machine must not be a side effect of
-opening the client. Shipped as the raw gate message plus `run quil remote
-setup <host>`: the machinery to fix it had existed since the auto-install
-work and was reachable only from `--remote`.
+the same archive again cannot change that.
+
+**The launch and reconnect paths ASK; only the New Project dialog acts without
+asking.** "Installing software on another machine must not be a side effect of
+opening the client" is the right rule and it was read one step too far: it
+argues against provisioning unprompted, not against offering. So for a year the
+two paths a RESTART goes through — the launch dial and the reconnect ladder —
+each classified the mismatch, seeded a parked row, and stopped. The user got ⚡
+and a `Detail` string nothing rendered, and the remedy lived in a shell command
+the tool already knew how to run. The reconnect arm even carried the comment
+"let the sidebar offer the upgrade instead", describing an affordance that was
+never built.
+
+`enqueueUpgradePrompt`/`promptNextUpgrade` (`offline.go`) close it with a
+`confirmKindUpgradeDest` dialog. A QUEUE, because a client update leaves every
+configured host stale at once and one dialog shows at a time; deduped, because
+the launch dial and the ladder can classify the same host. It drains from the
+FIRST-`WindowSizeMsg` branch — that arm returns early, so the later drain never
+runs on an unresized session, the same trap `wakeOfflineDests` documents — and
+again whenever a dialog closes, so an offer deferred behind the disclaimer or
+the plugin migration arrives rather than being dropped. `y` is required, not
+Enter: this dialog opens BY ITSELF, so a reflexive Enter would restart a remote
+daemon and kill what its panes were running. Declining does NOT arm
+`installedDests` — "not now" is not "never" — while accepting does, sharing the
+dialog's guard against the install/retry/same-error loop.
 
 **The RECONNECT ladder has the same config constraint as the dial, and got it
 later.** `SetRedialFactory` captured the value while `SetDialFunc` beside it

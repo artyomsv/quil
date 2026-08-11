@@ -340,8 +340,13 @@ func (m Model) isRouter() bool {
 //
 // A single-connection client answers true unconditionally, which keeps the
 // existing behaviour exactly: it holds one daemon by construction, so losing it
-// IS losing the session — a dead local daemon stays fatal, and so does a
-// --remote host with no dialer behind it.
+// IS losing the session — a --remote host with no dialer behind it stays fatal.
+//
+// The LOCAL daemon no longer reaches that branch in production: cmd/quil
+// installs a dialer for "" as well, so canReconnect answers true and a dropped
+// local link enters the ladder instead of ending the client. What ends it is
+// the ladder giving up (see redialLocal's park policy) — a decision made from
+// dials that actually failed rather than from the absence of a map entry.
 func (m Model) lastDaemon(dest string) bool {
 	if !m.isRouter() {
 		return true

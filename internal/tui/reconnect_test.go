@@ -157,9 +157,13 @@ func TestUpdate_LinkLost_RemoteWithoutDialer_Quits(t *testing.T) {
 // ACTIVE PROJECT. Those are different questions the moment a client holds more
 // than one daemon: a background remote host dropping while a LOCAL project is on
 // screen would read RemoteMode() == false and turn a perfectly reconnectable
-// drop fatal. redialFns[dest] != nil is sufficient alone — a local destination
-// never gets a dialer installed in the first place, which is what keeps a dead
-// local daemon fatal.
+// drop fatal. redialFns[dest] != nil is sufficient alone.
+//
+// The "" case below is about the ABSENCE of an entry, not about locality: a
+// destination nothing installed a dialer for cannot reconnect, whichever
+// machine it names. Production does install one for the local daemon
+// (cmd/quil's redialFor), so this Model is the one tests build by hand rather
+// than the shape a running client has.
 func TestCanReconnect_DoesNotRequireRemoteMode(t *testing.T) {
 	m := Model{}
 	m.SetRedialFunc(testDest, func(Client) (Client, error) { return nil, errors.New("unused") })
@@ -171,7 +175,7 @@ func TestCanReconnect_DoesNotRequireRemoteMode(t *testing.T) {
 		t.Fatalf("canReconnect(%q) = false — a dialer is installed; what is ACTIVE must not gate it", testDest)
 	}
 	if m.canReconnect("") {
-		t.Fatal(`canReconnect("") = true for the local daemon; a dead local daemon must stay fatal`)
+		t.Fatal(`canReconnect("") = true with no dialer installed for it; the map entry is the whole test`)
 	}
 }
 

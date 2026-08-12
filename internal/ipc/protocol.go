@@ -55,6 +55,13 @@ const (
 	// Plugin management (Client -> Daemon)
 	MsgReloadPlugins = "reload_plugins"
 
+	// Overlay lifecycle (Client -> Daemon)
+	// MsgOverlayPolicy pushes the client's overlay retention settings. The
+	// daemon starts from its own config, but F1 → Settings edits only reach
+	// disk on TUI exit, so without this a setting would not apply until the
+	// next daemon start. Last writer wins across clients.
+	MsgOverlayPolicy = "overlay_policy"
+
 	// MCP request-response (Client -> Daemon -> Client)
 	MsgListPanesReq       = "list_panes_req"
 	MsgListPanesResp      = "list_panes_resp"
@@ -372,6 +379,13 @@ type UpdatePanePayload struct {
 	// make "unmark attention" indistinguishable from "rename this pane" and
 	// every OSC 7 CWD update would silently clear the mark.
 	PinnedAttention *bool `json:"pinned_attention,omitempty"`
+	// OverlayVisible reports whether the TUI is currently SHOWING this overlay
+	// pane. Pointer for the same tri-state reason as Muted: this is a partial
+	// update handler, so a plain bool would report every rename and every OSC 7
+	// CWD change as "hidden" and hand the idle sweep a pane the user is looking
+	// at. Visibility is client state the daemon cannot observe, and the daemon
+	// needs it because an idle lazygit emits nothing whether shown or not.
+	OverlayVisible *bool `json:"overlay_visible,omitempty"`
 }
 
 type UpdateLayoutPayload struct {
@@ -383,6 +397,13 @@ type PluginErrorPayload struct {
 	PaneID  string `json:"pane_id"`
 	Title   string `json:"title"`
 	Message string `json:"message"`
+}
+
+// OverlayPolicyPayload carries the overlay retention settings. Both fields use
+// 0 for "disabled", matching config.OverlayConfig.
+type OverlayPolicyPayload struct {
+	IdleTimeoutMinutes int `json:"idle_timeout_minutes"`
+	MaxLive            int `json:"max_live"`
 }
 
 // MCP request-response payloads

@@ -438,3 +438,45 @@ func TestCreatePanePayload_WorktreeRoundTrips(t *testing.T) {
 		t.Errorf("spec = %+v, want {/repo feat/x}", back.Worktree)
 	}
 }
+
+// The tri-state matters for the same reason it does for Muted: handleUpdatePane
+// is a PARTIAL update handler, so a plain bool would mark an overlay hidden on
+// every rename and every OSC 7 CWD change.
+func TestUpdatePanePayload_OverlayVisibleOmittedWhenNil(t *testing.T) {
+	b, err := json.Marshal(ipc.UpdatePanePayload{PaneID: "pane-1", Name: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(b, []byte("overlay_visible")) {
+		t.Errorf("nil OverlayVisible must not appear on the wire: %s", b)
+	}
+}
+
+func TestUpdatePanePayload_OverlayVisibleRoundTripsFalse(t *testing.T) {
+	no := false
+	b, err := json.Marshal(ipc.UpdatePanePayload{PaneID: "pane-1", OverlayVisible: &no})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out ipc.UpdatePanePayload
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.OverlayVisible == nil || *out.OverlayVisible {
+		t.Errorf("OverlayVisible = %v, want an explicit false", out.OverlayVisible)
+	}
+}
+
+func TestOverlayPolicyPayload_RoundTrip(t *testing.T) {
+	msg, err := ipc.NewMessage(ipc.MsgOverlayPolicy, ipc.OverlayPolicyPayload{IdleTimeoutMinutes: 7, MaxLive: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out ipc.OverlayPolicyPayload
+	if err := msg.DecodePayload(&out); err != nil {
+		t.Fatal(err)
+	}
+	if out.IdleTimeoutMinutes != 7 || out.MaxLive != 3 {
+		t.Errorf("payload = %+v, want {7 3}", out)
+	}
+}

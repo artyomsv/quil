@@ -158,6 +158,45 @@ func (m *Model) overlayVisibilityCmd(tab *TabModel, visible bool) tea.Cmd {
 	}
 }
 
+// overlayPolicyCmd pushes the client's overlay retention settings (idle
+// timeout + live cap) to every daemon.
+//
+// Needed because every Settings setter only flips m.configChanged, and
+// cmd/quil/main.go writes config.toml only on TUI exit — the daemon reads
+// that file at startup, so without an explicit push a settings change would
+// not reach an already-running daemon until its next start. Sent once after
+// attach (attachAllDests) and again on every Settings commit that touches
+// these two rows (handleSettingsKey).
+//
+// Guarded on m.client like attachAllDests: a Model built directly by a test,
+// with no connection, must produce no command rather than one that panics
+// when invoked.
+func (m *Model) overlayPolicyCmd() tea.Cmd {
+	if m.client == nil {
+		return nil
+	}
+	p := ipc.OverlayPolicyPayload{
+		IdleTimeoutMinutes: m.cfg.Overlay.IdleTimeoutMinutes,
+		MaxLive:            m.cfg.Overlay.MaxLive,
+	}
+	dests := m.knownDests()
+	return func() tea.Msg {
+		// A fresh Message per destination — sendForDest stamps Origin, so a
+		// message shared across destinations would be re-stamped mid-flight.
+		for _, dest := range dests {
+			msg, err := ipc.NewMessage(ipc.MsgOverlayPolicy, p)
+			if err != nil {
+				log.Printf("overlay policy: encode: %v", err)
+				return nil
+			}
+			if err := m.sendForDest(dest, msg); err != nil {
+				log.Printf("overlay policy: send to %q: %v", dest, err)
+			}
+		}
+		return nil
+	}
+}
+
 // createOverlay destroys any existing overlay pane, initialises
 // pendingOverlayShow, and sends MsgCreatePane to the daemon.
 //

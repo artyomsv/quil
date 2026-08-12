@@ -293,6 +293,40 @@ func settingsFields() []settingsField {
 			relayout: true,
 		},
 		{
+			// Overlay retention (idle timeout + live cap) is pushed to the
+			// daemon LIVE via overlayPolicyCmd — see handleSettingsKey and
+			// attachAllDests — unlike the rest of this table, which the
+			// settingsFields doc comment says takes effect on the next
+			// launch. The stored value here is still the persisted one; the
+			// push is what makes an already-running daemon honour it now.
+			label: "Overlay idle timeout (min)",
+			get:   func(m *Model) string { return strconv.Itoa(m.cfg.Overlay.IdleTimeoutMinutes) },
+			set: func(m *Model, v string) {
+				// Refused rather than clamped, like Sidebar width: a stored
+				// value the daemon would not honour must never be displayed.
+				// 0 is legal and means "never evict".
+				n, err := strconv.Atoi(v)
+				if err != nil || n < 0 || n == m.cfg.Overlay.IdleTimeoutMinutes {
+					return
+				}
+				m.cfg.Overlay.IdleTimeoutMinutes = n
+				m.configChanged = true
+			},
+		},
+		{
+			label: "Max live overlays",
+			get:   func(m *Model) string { return strconv.Itoa(m.cfg.Overlay.MaxLive) },
+			set: func(m *Model, v string) {
+				// 0 is legal and means "no cap".
+				n, err := strconv.Atoi(v)
+				if err != nil || n < 0 || n == m.cfg.Overlay.MaxLive {
+					return
+				}
+				m.cfg.Overlay.MaxLive = n
+				m.configChanged = true
+			},
+		},
+		{
 			label: "Log level",
 			get:   func(m *Model) string { return m.cfg.Logging.Level },
 			set: func(m *Model, v string) {
@@ -663,6 +697,12 @@ func (m Model) handleSettingsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			field.set(&m, m.dialogInput)
 			m.dialogEdit = false
 			m.dialogInput = ""
+			// Pushed after ANY settings commit, not just the two overlay
+			// rows: the payload is two ints, so singling out which row was
+			// edited buys nothing and risks missing a future row that also
+			// wants live application. overlayPolicyCmd is nil when there is
+			// no connection (tests), so this never adds a spurious command.
+			policyCmd := m.overlayPolicyCmd()
 			if field.relayout {
 				// Same sequence, and same ordering, as toggleProjectSidebar:
 				// resizeTabs FIRST because it is what WRITES pane.Width and
@@ -672,8 +712,9 @@ func (m Model) handleSettingsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				// shifts in one frame, which is the shift Bubble Tea's cell
 				// diff mis-tracks.
 				m.resizeTabs()
-				return m, tea.Batch(tea.ClearScreen, m.resizeAllPanes())
+				return m, tea.Batch(tea.ClearScreen, m.resizeAllPanes(), policyCmd)
 			}
+			return m, policyCmd
 		case key == "backspace":
 			if len(m.dialogInput) > 0 {
 				m.dialogInput = m.dialogInput[:len(m.dialogInput)-1]

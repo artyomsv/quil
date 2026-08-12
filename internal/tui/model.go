@@ -5446,6 +5446,7 @@ func (m *Model) attachAllDests() tea.Cmd {
 		m.attached = map[string]bool{}
 	}
 	var cmds []tea.Cmd
+	attachedAny := false
 	for _, dest := range m.knownDests() {
 		if m.attached[dest] {
 			continue
@@ -5455,9 +5456,22 @@ func (m *Model) attachAllDests() tea.Cmd {
 			continue
 		}
 		m.attached[dest] = true
+		attachedAny = true
 		// Batched per destination so each daemon is asked about its OWN
 		// registry; see requestPluginListFor.
 		if cmd := m.requestPluginListFor(dest); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+	// Batched ONCE per round, not per destination like requestPluginListFor:
+	// overlayPolicyCmd already loops over every known dest itself, so
+	// calling it inside the loop above would resend the same two ints once
+	// per newly-attached destination. Gated on attachedAny because this
+	// function reruns on every WindowSizeMsg (see the comment on the
+	// unattached-retry above) — an unconditional push would resend the
+	// current policy on every resize, not just after a fresh attach.
+	if attachedAny {
+		if cmd := m.overlayPolicyCmd(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
 	}

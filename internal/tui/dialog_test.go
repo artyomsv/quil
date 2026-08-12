@@ -28,6 +28,8 @@ func TestSettingsFields_LabelsAndInitialValues(t *testing.T) {
 		"Mouse scroll lines",
 		"Page scroll lines",
 		"Sidebar width",
+		"Overlay idle timeout (min)",
+		"Max live overlays",
 		"Log level",
 		"Show disclaimer",
 		"Update check",

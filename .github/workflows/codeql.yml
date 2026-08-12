@@ -1,0 +1,116 @@
+name: CodeQL
+
+# Advanced setup, deliberately — this file replaces GitHub's "default setup"
+# (the dynamic `github-code-scanning/codeql` workflow), which is turned off in
+# repo settings as part of the same change. The two cannot coexist: with
+# default setup enabled, `analyze` fails the SARIF upload with "CodeQL analyses
+# from advanced configurations cannot be processed when the default setup is
+# enabled". Default setup goes off FIRST, then this merges.
+#
+# The reason is forks. Default setup's workflow is injected by GitHub rather
+# than committed here, and it is never dispatched for a pull request opened
+# from a fork. Every same-repo PR got a `PR #<n>` run on `refs/pull/<n>/head`
+# (#126, #138, #149, #150 — #126 was docs-only, so the trigger is the fork, not
+# the payload). Both fork PRs this project has ever received (#116, #151) got
+# nothing. That is not cosmetic: the `protect-default` ruleset carries a
+# `code_scanning` rule requiring CodeQL results before merge, so a fork PR was
+# blocked forever on an analysis that was never going to run — #151 sat on
+# "Code scanning is waiting for results from CodeQL" and had to be merged with
+# a rules bypass. A committed workflow is dispatched for fork PRs exactly the
+# way ci.yml already is.
+#
+# The asymmetry is a credential decision on GitHub's side, not a bug: the
+# injected workflow would run with a token able to write code-scanning results
+# for the base repo, so GitHub declines to run it against untrusted fork code.
+# A committed workflow gets the restricted fork-PR `GITHUB_TOKEN` instead, and
+# code scanning accepts its SARIF anyway — verified against a public repo that
+# does exactly this (golangci/golangci-lint reports `CodeQL` +
+# `Analyze (go)` on cross-repository PRs).
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  # Default setup ran weekly; keep that cadence so newly published queries are
+  # applied to master without waiting for the next PR.
+  schedule:
+    - cron: '0 3 * * 1'
+  workflow_dispatch:
+
+# NO `paths` / `paths-ignore` FILTER ON THE TRIGGERS ABOVE — this is load
+# bearing, not an omission. A path-filtered workflow does not produce a
+# "skipped" result that the `code_scanning` ruleset rule can accept; it
+# produces NO result, which is indistinguishable from "still running". Adding
+# `paths-ignore: '**/*.md'` here would reintroduce exactly the permanent block
+# this workflow exists to remove, on every docs-only PR. If analysis scope
+# needs narrowing, do it with a CodeQL config `paths-ignore` (which narrows
+# what is analyzed while still reporting), never with a trigger filter.
+
+concurrency:
+  group: codeql-${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    # Least privilege, workflow-wide default is inherited otherwise. Scoped to
+    # the job rather than the file so a future job added here has to state its
+    # own needs.
+    permissions:
+      # `analyze` uploads the SARIF through this scope. Everything else the
+      # analysis does is read-only.
+      security-events: write
+      # `actions/checkout` fetches the tree.
+      contents: read
+      # `init` reads workflow run metadata to attribute the analysis.
+      actions: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Matches what default setup resolved for this repo, so the alert
+          # history carries over instead of restarting: /language:go,
+          # /language:javascript-typescript, /language:actions.
+          - language: go
+            build-mode: autobuild
+          # site/ is an Astro app. Its node_modules and dist are untracked, so
+          # the checkout contains sources only and needs no exclusion config.
+          - language: javascript-typescript
+            build-mode: none
+          # Analyzes the workflow files themselves — worth keeping given how
+          # much logic ci.yml and release.yml carry.
+          - language: actions
+            build-mode: none
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          # The analysis never pushes. Leaving the token in .git/config would
+          # expose it to anything autobuild executes.
+          persist-credentials: false
+
+      # Before init, so autobuild compiles against the version go.mod declares
+      # (1.25.0). The runner's preinstalled Go trails the current release, and
+      # a failed autobuild is not a soft failure here — it produces no SARIF,
+      # which the ruleset reads as "waiting for results" and blocks the merge.
+      # Same pin as ci.yml; they must move together.
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5
+        if: matrix.language == 'go'
+        with:
+          go-version: '1.25'
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@5595ccaf912efad79be6eef63a5619ff05969be3  # v4.37.6
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@5595ccaf912efad79be6eef63a5619ff05969be3  # v4.37.6
+        with:
+          category: /language:${{ matrix.language }}

@@ -1,5 +1,3 @@
-
-
 # Quil
 
 **The persistent workflow orchestrator for AI-native development.**

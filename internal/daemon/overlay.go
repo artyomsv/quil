@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"log"
+	"sort"
 	"sync"
 	"time"
 
@@ -70,6 +71,62 @@ func (d *Daemon) sweepIdleOverlays(now time.Time) []string {
 		d.destroyOverlay(id)
 	}
 	return expired
+}
+
+// enforceOverlayCap evicts least-recently-shown overlays until at most
+// MaxLive-1 remain among the panes other than exclude — the caller reserves
+// that last slot for exclude itself, whether exclude names a real overlay
+// about to be admitted or is empty. Returns the ids it evicted.
+//
+// Enforced at CREATION (from createPaneAt) rather than in the idle sweep so
+// opening one past the cap is instant and deterministic instead of
+// "eventually". The cap is global rather than per tab: it exists to bound
+// total process count.
+//
+// Eviction order is LEAST RECENTLY SHOWN (OverlayShownAt), not oldest-created
+// — a FIFO policy would evict the overlay the user opens constantly simply
+// because they opened it first.
+func (d *Daemon) enforceOverlayCap(exclude string) []string {
+	max := d.overlayPolicy().MaxLive
+	if max <= 0 {
+		return nil
+	}
+
+	type entry struct {
+		id    string
+		shown time.Time
+	}
+	var live []entry
+	for _, p := range d.session.AllPanes() {
+		if p.ID == exclude {
+			continue
+		}
+		p.PluginMu.Lock()
+		isOverlay, shown := p.Overlay, p.OverlayShownAt
+		p.PluginMu.Unlock()
+		if isOverlay {
+			live = append(live, entry{id: p.ID, shown: shown})
+		}
+	}
+
+	// exclude occupies the slot it is about to fill (or, if empty, the slot is
+	// simply reserved) — so every OTHER overlay is capped at max-1.
+	keep := max - 1
+	if len(live) <= keep {
+		return nil
+	}
+
+	// Least recently shown first. A zero OverlayShownAt sorts oldest, which is
+	// right: it has never been shown at all.
+	sort.Slice(live, func(i, j int) bool { return live[i].shown.Before(live[j].shown) })
+
+	var evicted []string
+	for i := 0; i < len(live)-keep; i++ {
+		log.Printf("overlay evict: %s (cap %d reached, least recently shown)", live[i].id, max)
+		d.destroyOverlay(live[i].id)
+		evicted = append(evicted, live[i].id)
+	}
+	return evicted
 }
 
 // destroyOverlay removes one overlay through the ordinary pane-destroy path so

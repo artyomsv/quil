@@ -151,3 +151,67 @@ func TestSweepIdleOverlays_ZeroTimeoutDisablesEviction(t *testing.T) {
 		t.Fatalf("evicted %v with the timeout disabled", got)
 	}
 }
+
+// LRU, not FIFO: the overlay you keep using must survive even when it was
+// created first. This test fails against a FIFO implementation.
+func TestEnforceOverlayCap_EvictsLeastRecentlyShownNotOldest(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	cfg := config.Default()
+	cfg.Overlay.MaxLive = 2
+	d := New(cfg)
+	tab := d.session.CreateTab("t")
+
+	oldestButActive := overlayPane(t, d, tab.ID)
+	stale := overlayPane(t, d, tab.ID)
+
+	// The oldest one was shown a second ago; the newer one has not been looked
+	// at in an hour.
+	oldestButActive.PluginMu.Lock()
+	oldestButActive.OverlayShownAt = time.Now().Add(-time.Second)
+	oldestButActive.PluginMu.Unlock()
+	stale.PluginMu.Lock()
+	stale.OverlayShownAt = time.Now().Add(-time.Hour)
+	stale.PluginMu.Unlock()
+
+	got := d.enforceOverlayCap("")
+	if len(got) != 1 || got[0] != stale.ID {
+		t.Fatalf("evicted %v, want [%s] (the least recently SHOWN)", got, stale.ID)
+	}
+	if d.session.Pane(oldestButActive.ID) == nil {
+		t.Error("the oldest-created overlay was evicted; the policy is LRU, not FIFO")
+	}
+}
+
+func TestEnforceOverlayCap_ZeroDisablesTheCap(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	cfg := config.Default()
+	cfg.Overlay.MaxLive = 0
+	d := New(cfg)
+	tab := d.session.CreateTab("t")
+	for i := 0; i < 8; i++ {
+		overlayPane(t, d, tab.ID)
+	}
+	if got := d.enforceOverlayCap(""); len(got) != 0 {
+		t.Fatalf("evicted %v with the cap disabled", got)
+	}
+}
+
+// The pane being admitted must never evict itself.
+func TestEnforceOverlayCap_ExcludesTheNewOverlay(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	cfg := config.Default()
+	cfg.Overlay.MaxLive = 1
+	d := New(cfg)
+	tab := d.session.CreateTab("t")
+	fresh := overlayPane(t, d, tab.ID)
+
+	got := d.enforceOverlayCap(fresh.ID)
+	for _, id := range got {
+		if id == fresh.ID {
+			t.Fatal("the overlay being admitted evicted itself")
+		}
+	}
+	if d.session.Pane(fresh.ID) == nil {
+		t.Error("the new overlay was destroyed by its own cap check")
+	}
+}

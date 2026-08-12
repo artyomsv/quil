@@ -1761,6 +1761,7 @@ func (d *Daemon) createPaneAt(payload ipc.CreatePanePayload, cwd, paneType strin
 		// refreshing must not ping the notification sidebar.
 		pane.Muted = true
 		pane.PluginMu.Unlock()
+		d.enforceOverlayCap(pane.ID)
 	}
 	d.applyResumeSessionID(pane, payload.ResumeSessionID)
 	log.Printf("pane created: %s (type=%s, tab=%s, overlay=%v)", pane.ID, paneType, payload.TabID, payload.Overlay)

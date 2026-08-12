@@ -4820,6 +4820,14 @@ func (m Model) isActivePane(paneID string) bool {
 
 // switchTab sets the active tab locally and notifies the daemon so its
 // active_tab stays in sync (prevents stale overwrites on broadcastState).
+//
+// It also reports both tabs' overlay visibility, because only the active tab
+// renders: leaving a tab takes its overlay off screen without touching
+// overlayVisible (which survives the switch by design), and entering one with
+// the flag still set puts its overlay straight back on screen. Neither
+// transition flips a flag, so without these two reports the daemon's copy is
+// wrong for as long as the user stays away — and a "visible" overlay is exempt
+// from the idle sweep forever.
 func (m *Model) switchTab(idx int) tea.Cmd {
 	if idx < 0 || idx >= len(m.curTabs()) {
 		return nil
@@ -4831,15 +4839,31 @@ func (m *Model) switchTab(idx int) tea.Cmd {
 		m.exitNotesModeInPlace()
 	}
 	target := m.curTabs()[idx]
+	from := m.activeTabModel()
 	tabID, dest := target.ID, target.Dest
 	m.setActiveTabIdx(idx)
-	return func() tea.Msg {
+	cmds := []tea.Cmd{func() tea.Msg {
 		msg, _ := ipc.NewMessage(ipc.MsgSwitchTab, ipc.SwitchTabPayload{
 			TabID: tabID,
 		})
 		m.sendForDest(dest, msg)
 		return nil
+	}}
+	// Built AFTER setActiveTabIdx so both answers describe the new state, and
+	// idempotent daemon-side in both directions (a repeat hide does not push
+	// the deadline out; a show just re-stamps OverlayShownAt).
+	if from != nil && from != target {
+		if cmd := m.overlayTruthCmd(from); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 	}
+	if cmd := m.overlayTruthCmd(target); cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+	if len(cmds) == 1 {
+		return cmds[0]
+	}
+	return tea.Batch(cmds...)
 }
 
 // eagerTabMarker is a single-width BMP glyph (deliberately not an emoji — wide
@@ -5472,6 +5496,17 @@ func (m *Model) attachAllDests() tea.Cmd {
 	// current policy on every resize, not just after a fresh attach.
 	if attachedAny {
 		if cmd := m.overlayPolicyCmd(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+		// Rides the same post-attach path as the policy, and for the same
+		// reason: this is the only moment the daemon's copy of overlay
+		// visibility can be stale, in either direction. A TUI that exited with
+		// an overlay on screen left it marked visible (never swept); a
+		// transient last-client disconnect stamped every overlay hidden, and a
+		// client that reconnects with one still on screen would otherwise
+		// watch the sweep destroy it five minutes later. Last attacher wins,
+		// the same trade MsgOverlayPolicy already documents.
+		if cmd := m.overlayTruthAllCmd(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
 	}

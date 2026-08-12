@@ -158,6 +158,66 @@ func (m *Model) overlayVisibilityCmd(tab *TabModel, visible bool) tea.Cmd {
 	}
 }
 
+// overlayOnScreen reports whether this tab's overlay is actually being
+// rendered.
+//
+// tab.overlayVisible is not the whole answer: it survives a tab switch by
+// design (handleOverlayKey's alt+1..9 arm), while only the active tab of a
+// project paints — so for every background tab the flag overstates visibility,
+// and an overstated one is exempt from the idle sweep forever.
+//
+// Scoped to the tab's own project, NOT to the active project, and the asymmetry
+// is deliberate: switching projects moves no tab's activeTab, so this answer
+// cannot go stale behind a project switch. A stricter rule would report a
+// background project's overlay hidden with nothing to re-report true when the
+// user switches back — and the sweep would then destroy an overlay they are
+// looking at, which is the one wrong-destroy this feature must not have.
+func (m *Model) overlayOnScreen(tab *TabModel) bool {
+	if tab == nil || !tab.overlayVisible {
+		return false
+	}
+	for _, p := range m.projects {
+		for i, t := range p.tabs {
+			if t == tab {
+				return i == p.activeTab
+			}
+		}
+	}
+	return false
+}
+
+// overlayTruthCmd reports this tab's CURRENT visibility, whatever it is.
+//
+// The five sites that flip tab.overlayVisible are not the only moments the
+// truth changes, and the daemon has no other source for it: a tab switch
+// changes which overlay paints without touching any flag, and an attach meets a
+// daemon whose copy may be stale in either direction (a TUI that exited with an
+// overlay on screen left it marked visible; a transient last-client disconnect
+// stamped every overlay hidden). Both paths go through this one helper so they
+// cannot drift apart.
+func (m *Model) overlayTruthCmd(tab *TabModel) tea.Cmd {
+	if tab == nil || tab.overlayPane == nil {
+		return nil
+	}
+	return m.overlayVisibilityCmd(tab, m.overlayOnScreen(tab))
+}
+
+// overlayTruthAllCmd reports the current truth for every tab that owns an
+// overlay pane — one fresh message per tab, each aimed at that tab's OWN
+// destination, since overlayVisibilityCmd builds its message inside the send.
+func (m *Model) overlayTruthAllCmd() tea.Cmd {
+	var cmds []tea.Cmd
+	for _, tab := range m.allTabs() {
+		if cmd := m.overlayTruthCmd(tab); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+	if len(cmds) == 0 {
+		return nil
+	}
+	return tea.Batch(cmds...)
+}
+
 // overlayPolicyCmd pushes the client's overlay retention settings (idle
 // timeout + live cap) to every daemon.
 //

@@ -195,6 +195,8 @@ Bounds the Alt+G lazygit overlay pane. `Alt+G` again (or switching away and back
 
 Both keys are also editable at **F1 → Settings**, which pushes the change to the running daemon immediately — no restart needed.
 
+The daemon seeds both values from its **own** config at startup, so a daemon with no client attached still reclaims overlays on its own terms. A connected client then pushes its values to every daemon it is attached to, which overrides that daemon's `[overlay]` section for as long as the client is attached — so against a remote daemon it is the client's settings that govern, and if several clients disagree the last one to push wins.
+
 ## `[update]`
 
 Automatic update checking and staging.

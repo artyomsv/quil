@@ -128,9 +128,13 @@ type Pane struct {
 	Overlay bool
 	// OverlayHiddenAt is when the TUI last hid this overlay; zero means it is
 	// on screen. OverlayShownAt is when it was last shown, and orders the LRU
-	// eviction. Both are PluginMu-protected like Overlay itself, and both are
-	// runtime-only — a restored overlay starts hidden, which is correct: no
-	// client is showing it yet.
+	// eviction. Both are PluginMu-protected like Overlay itself.
+	//
+	// Both are runtime-only, and there is no restore case to reason about:
+	// the disk snapshot passes includeOverlays=false
+	// (workspaceStateFromSnapshot, called from snapshot()), so no overlay is
+	// ever written to workspace.json and none is ever restored. A fresh
+	// daemon's overlays are only ever ones a live client created.
 	OverlayHiddenAt time.Time
 	OverlayShownAt  time.Time
 	// MouseModes mirrors the child app's DEC mouse-mode state, scanned from the

@@ -155,6 +155,11 @@ type Daemon struct {
 	// otherwise both observe it free and both spawn `claude --resume` on one
 	// transcript — the corruption this feature exists to prevent.
 	resumeClaimMu sync.Mutex
+
+	// overlayPolicyState holds the live overlay retention settings (idle
+	// timeout, max live). Seeded from config at construction; F1 → Settings
+	// pushes runtime updates via MsgOverlayPolicy without a daemon restart.
+	overlayPolicyState overlayPolicyState
 }
 
 func New(cfg config.Config) *Daemon {
@@ -182,6 +187,10 @@ func New(cfg config.Config) *Daemon {
 		snapGens:   make(map[string]uint64),
 	}
 	d.memReport = memreport.NewCollector(d.session, 5*time.Second)
+	d.overlayPolicyState.set(ipc.OverlayPolicyPayload{
+		IdleTimeoutMinutes: cfg.Overlay.IdleTimeoutMinutes,
+		MaxLive:            cfg.Overlay.MaxLive,
+	})
 	return d
 }
 
@@ -3678,6 +3687,7 @@ func (d *Daemon) idleChecker() {
 			return
 		case <-ticker.C:
 			d.checkIdlePanes()
+			d.sweepIdleOverlays(time.Now())
 		}
 	}
 }

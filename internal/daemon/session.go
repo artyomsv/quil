@@ -553,6 +553,22 @@ func (sm *SessionManager) Pane(id string) *Pane {
 	return sm.panes[id]
 }
 
+// AllPanes returns every pane across every tab, in no particular order. For
+// a single tab's panes in tab order, use Panes(tabID) instead — this exists
+// for daemon-wide sweeps (idle overlay eviction) that have no tab to scope
+// to. Copies the map into a slice under RLock; the map itself is never
+// exposed.
+func (sm *SessionManager) AllPanes() []*Pane {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	panes := make([]*Pane, 0, len(sm.panes))
+	for _, p := range sm.panes {
+		panes = append(panes, p)
+	}
+	return panes
+}
+
 func (sm *SessionManager) ActiveTabID() string {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()

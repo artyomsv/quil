@@ -163,15 +163,19 @@ func TestEnforceOverlayCap_EvictsLeastRecentlyShownNotOldest(t *testing.T) {
 
 	oldestButActive := overlayPane(t, d, tab.ID)
 	stale := overlayPane(t, d, tab.ID)
+	recent := overlayPane(t, d, tab.ID)
 
-	// The oldest one was shown a second ago; the newer one has not been looked
-	// at in an hour.
-	oldestButActive.PluginMu.Lock()
-	oldestButActive.OverlayShownAt = time.Now().Add(-time.Second)
-	oldestButActive.PluginMu.Unlock()
-	stale.PluginMu.Lock()
-	stale.OverlayShownAt = time.Now().Add(-time.Hour)
-	stale.PluginMu.Unlock()
+	// The oldest-created one was shown a second ago; the middle one has not
+	// been looked at in an hour; the newest was just shown. FIFO would evict
+	// oldestButActive; LRU must evict stale.
+	setShown := func(p *Pane, at time.Time) {
+		p.PluginMu.Lock()
+		p.OverlayShownAt = at
+		p.PluginMu.Unlock()
+	}
+	setShown(oldestButActive, time.Now().Add(-time.Second))
+	setShown(stale, time.Now().Add(-time.Hour))
+	setShown(recent, time.Now())
 
 	got := d.enforceOverlayCap("")
 	if len(got) != 1 || got[0] != stale.ID {
@@ -179,6 +183,30 @@ func TestEnforceOverlayCap_EvictsLeastRecentlyShownNotOldest(t *testing.T) {
 	}
 	if d.session.Pane(oldestButActive.ID) == nil {
 		t.Error("the oldest-created overlay was evicted; the policy is LRU, not FIFO")
+	}
+	if d.session.Pane(recent.ID) == nil {
+		t.Error("the most recently shown overlay was evicted")
+	}
+}
+
+// At the cap with nothing being admitted, nothing is evicted: MaxLive is "at
+// most N live", not "fewer than N". The distinction only shows up through a
+// caller that passes no exclude — createPaneAt always passes one, which is why
+// the off-by-one hid.
+func TestEnforceOverlayCap_AtCapWithNoAdmissionEvictsNothing(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	cfg := config.Default()
+	cfg.Overlay.MaxLive = 2
+	d := New(cfg)
+	tab := d.session.CreateTab("t")
+	a := overlayPane(t, d, tab.ID)
+	b := overlayPane(t, d, tab.ID)
+
+	if got := d.enforceOverlayCap(""); len(got) != 0 {
+		t.Fatalf("evicted %v at exactly the cap with no admission", got)
+	}
+	if d.session.Pane(a.ID) == nil || d.session.Pane(b.ID) == nil {
+		t.Error("an overlay was destroyed while the session was exactly at the cap")
 	}
 }
 

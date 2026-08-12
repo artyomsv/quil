@@ -74,9 +74,11 @@ func (d *Daemon) sweepIdleOverlays(now time.Time) []string {
 }
 
 // enforceOverlayCap evicts least-recently-shown overlays until at most
-// MaxLive-1 remain among the panes other than exclude — the caller reserves
-// that last slot for exclude itself, whether exclude names a real overlay
-// about to be admitted or is empty. Returns the ids it evicted.
+// MaxLive remain live, skipping exclude (the overlay currently being
+// admitted, which must never evict itself). Returns the ids it evicted.
+//
+// MaxLive means "at most N live", not "fewer than N" — sitting exactly at the
+// cap with no admission in progress evicts nothing.
 //
 // Enforced at CREATION (from createPaneAt) rather than in the idle sweep so
 // opening one past the cap is instant and deterministic instead of
@@ -109,9 +111,13 @@ func (d *Daemon) enforceOverlayCap(exclude string) []string {
 		}
 	}
 
-	// exclude occupies the slot it is about to fill (or, if empty, the slot is
-	// simply reserved) — so every OTHER overlay is capped at max-1.
-	keep := max - 1
+	// A pane being ADMITTED occupies the slot the caller is about to fill, so
+	// every other overlay is capped at max-1. With no admission the cap is
+	// simply max.
+	keep := max
+	if exclude != "" {
+		keep = max - 1
+	}
 	if len(live) <= keep {
 		return nil
 	}

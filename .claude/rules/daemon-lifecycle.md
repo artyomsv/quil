@@ -80,7 +80,7 @@ centralized event queue via `snapshotCh` channel — `requestSnapshot()` sends n
 
 ### Smart idle analysis
 
-`idleChecker()` goroutine ticks 1s, `checkIdlePanes()` reads last 4KB of ring buffer at idle (5s no output), strips ANSI, matches against plugin `[[idle_handlers]]` patterns. 30s cooldown per pane via `LastIdleEventAt`. Single `PluginMu` lock span for read+conditional write (race fix)
+`idleChecker()` goroutine ticks 1s, `checkIdlePanes()` reads last 4KB of ring buffer at idle (5s no output), strips ANSI, matches against plugin `[[idle_handlers]]` patterns. 30s cooldown per pane via `LastIdleEventAt`. Single `PluginMu` lock span for read+conditional write (race fix). The same tick also runs `sweepIdleOverlays` (`internal/daemon/overlay.go`), which destroys lazygit overlay panes hidden past `[overlay] idle_timeout_minutes` — an unrelated policy riding the existing 1 s cadence rather than a second ticker
 
 ## Logging
 

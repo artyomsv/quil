@@ -135,6 +135,29 @@ func (d *Daemon) enforceOverlayCap(exclude string) []string {
 	return evicted
 }
 
+// markOverlaysHidden stamps every overlay that has no hidden timestamp,
+// returning how many it stamped.
+//
+// Called when the LAST client disconnects: nothing can be showing an overlay
+// with nothing attached, and this is what makes the idle timer fire while the
+// user is away — which is the case the whole feature exists for, since a TUI
+// exit used to leave every overlay running indefinitely.
+//
+// An overlay that is ALREADY hidden keeps its original timestamp; re-stamping
+// would push the deadline out on every disconnect.
+func (d *Daemon) markOverlaysHidden(now time.Time) int {
+	var n int
+	for _, p := range d.session.AllPanes() {
+		p.PluginMu.Lock()
+		if p.Overlay && p.OverlayHiddenAt.IsZero() {
+			p.OverlayHiddenAt = now
+			n++
+		}
+		p.PluginMu.Unlock()
+	}
+	return n
+}
+
 // destroyOverlay removes one overlay through the ordinary pane-destroy path so
 // it emits the same broadcast, snapshot and artifact cleanup as any other
 // destroy — the TUI then reconciles it with machinery that already exists.

@@ -259,6 +259,14 @@ func (d *Daemon) Start() error {
 	d.server = ipc.NewServer(sockPath, d.handleMessage, func(conn *ipc.Conn) {
 		d.requestSnapshot()
 		d.events.RemoveWatchersByConn(conn)
+		// handleConn's defer removes the disconnecting conn (removeConn) before
+		// invoking this callback, so a zero count here means this was the last
+		// client — verified against ipc.Server.handleConn's defer order.
+		if d.server != nil && d.server.ConnCount() == 0 {
+			if n := d.markOverlaysHidden(time.Now()); n > 0 {
+				log.Printf("overlay: %d marked hidden (no clients attached)", n)
+			}
+		}
 	})
 
 	if err := d.server.Start(); err != nil {

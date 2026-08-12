@@ -243,3 +243,38 @@ func TestEnforceOverlayCap_ExcludesTheNewOverlay(t *testing.T) {
 		t.Error("the new overlay was destroyed by its own cap check")
 	}
 }
+
+// Nothing can be displaying an overlay when no client is attached. Without this
+// an overlay hidden by a TUI that then exited would keep a zero
+// OverlayHiddenAt forever and never become eligible — the case where reclaiming
+// matters most, since the user is away.
+func TestMarkOverlaysHidden_StampsOverlaysThatLackATimestamp(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	d := New(config.Default())
+	tab := d.session.CreateTab("t")
+	visible := overlayPane(t, d, tab.ID)
+	already := overlayPane(t, d, tab.ID)
+
+	earlier := time.Now().Add(-time.Hour)
+	already.PluginMu.Lock()
+	already.OverlayHiddenAt = earlier
+	already.PluginMu.Unlock()
+
+	if n := d.markOverlaysHidden(time.Now()); n != 1 {
+		t.Errorf("stamped %d overlays, want 1", n)
+	}
+
+	visible.PluginMu.Lock()
+	got := visible.OverlayHiddenAt
+	visible.PluginMu.Unlock()
+	if got.IsZero() {
+		t.Error("a visible overlay was not marked hidden on last disconnect")
+	}
+
+	already.PluginMu.Lock()
+	got = already.OverlayHiddenAt
+	already.PluginMu.Unlock()
+	if !got.Equal(earlier) {
+		t.Error("an already-hidden overlay had its deadline pushed out")
+	}
+}

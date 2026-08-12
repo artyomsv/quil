@@ -23,6 +23,7 @@ type Config struct {
 	Keybindings  KeybindingsConfig  `toml:"keybindings"`
 	MCP          MCPConfig          `toml:"mcp"`
 	Notification NotificationConfig `toml:"notification"`
+	Overlay      OverlayConfig      `toml:"overlay"`
 	Update       UpdateConfig       `toml:"update"`
 	Remote       RemoteConfig       `toml:"remote"`
 	// Destinations are the ADDITIONAL daemons this client attaches to beside
@@ -111,6 +112,22 @@ type NotificationConfig struct {
 	SidebarWidth int                     `toml:"sidebar_width"` // default 30
 	MaxEvents    int                     `toml:"max_events"`    // default 200
 	Hooks        HookNotificationsConfig `toml:"hooks"`
+}
+
+// OverlayConfig bounds how long an overlay pane (the Alt+G lazygit pane) may
+// stay alive while hidden, and how many may live at once.
+//
+// An overlay is only HIDDEN when its tab is closed out of, never destroyed, so
+// before these bounds existed one lazygit process survived per tab that had
+// ever opened one — measured at 116 MB each, and they outlived every TUI
+// restart because the daemon keeps them.
+type OverlayConfig struct {
+	// IdleTimeoutMinutes destroys an overlay hidden for at least this long.
+	// 0 disables idle eviction.
+	IdleTimeoutMinutes int `toml:"idle_timeout_minutes"`
+	// MaxLive caps live overlays across ALL tabs; opening one past the cap
+	// evicts the least recently shown. 0 disables the cap.
+	MaxLive int `toml:"max_live"`
 }
 
 // UpdateConfig controls the auto-update pipeline. Check gates the daily
@@ -328,6 +345,10 @@ func Default() Config {
 				Claude:   "default",
 				OpenCode: "default",
 			},
+		},
+		Overlay: OverlayConfig{
+			IdleTimeoutMinutes: 5,
+			MaxLive:            5,
 		},
 		Update: UpdateConfig{
 			Check: true,

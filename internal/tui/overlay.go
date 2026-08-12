@@ -37,7 +37,7 @@ func (m *Model) handleToggleLazygit() tea.Cmd {
 	// Step 1: visible overlay → hide.
 	if tab.overlayVisible {
 		tab.overlayVisible = false
-		return tea.ClearScreen
+		return tea.Batch(tea.ClearScreen, m.overlayVisibilityCmd(tab, false))
 	}
 
 	// Step 2: resolve candidates from the active NORMAL pane's CWD.
@@ -128,7 +128,34 @@ func (m *Model) showOverlay(tab *TabModel) tea.Cmd {
 	// overlays are lazygit/non-canvas, so this is robustness, not a live bug).
 	tab.SetCanvas(tab.Width, tab.Height)
 	tab.Resize(tab.Width, tab.Height) // re-sync overlay pane dims
-	return tea.Batch(tea.ClearScreen, m.overlayResizeCmd(tab))
+	return tea.Batch(tea.ClearScreen, m.overlayResizeCmd(tab), m.overlayVisibilityCmd(tab, true))
+}
+
+// overlayVisibilityCmd tells the daemon whether this tab's overlay is on
+// screen, so its idle timer measures HIDDEN time rather than quiet time.
+//
+// Sent for the TAB's destination, like every other overlay message: Alt+G is
+// reachable from a background project's tab.
+func (m *Model) overlayVisibilityCmd(tab *TabModel, visible bool) tea.Cmd {
+	if tab == nil || tab.overlayPane == nil {
+		return nil
+	}
+	paneID, dest := tab.overlayPane.ID, tab.Dest
+	v := visible
+	return func() tea.Msg {
+		msg, err := ipc.NewMessage(ipc.MsgUpdatePane, ipc.UpdatePanePayload{
+			PaneID:         paneID,
+			OverlayVisible: &v,
+		})
+		if err != nil {
+			log.Printf("overlay: visibility encode: %v", err)
+			return nil
+		}
+		if err := m.sendForDest(dest, msg); err != nil {
+			log.Printf("overlay: visibility send: %v", err)
+		}
+		return nil
+	}
 }
 
 // createOverlay destroys any existing overlay pane, initialises
@@ -154,10 +181,13 @@ func (m *Model) createOverlay(tab *TabModel, repo string) tea.Cmd {
 	// Destroy the old overlay if one exists (different repo).
 	if tab.overlayPane != nil {
 		oldID := tab.overlayPane.ID
+		// Captured before the slot is cleared: overlayVisibilityCmd reads
+		// tab.overlayPane, which is nil by the time this batches below.
+		visCmd := m.overlayVisibilityCmd(tab, false)
 		tab.overlayPane.Dispose()
 		tab.overlayPane = nil
 		tab.overlayVisible = false
-		cmds = append(cmds, func() tea.Msg {
+		cmds = append(cmds, visCmd, func() tea.Msg {
 			msg, err := ipc.NewMessage(ipc.MsgDestroyPane, ipc.DestroyPanePayload{PaneID: oldID})
 			if err != nil {
 				log.Printf("overlay: destroy pane encode: %v", err)

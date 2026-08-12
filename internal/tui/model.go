@@ -4395,7 +4395,9 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 					newPaneIDs = append(newPaneIDs, pid)
 				}
 				var shown bool
-				newPaneIDs, shown = m.reconcileOverlayPane(tab, tabInfo, paneMap, existingPanes, newPaneIDs)
+				var visCmd tea.Cmd
+				newPaneIDs, shown, visCmd = m.reconcileOverlayPane(tab, tabInfo, paneMap, existingPanes, newPaneIDs)
+				overlayResizeCmds = append(overlayResizeCmds, visCmd)
 				if shown {
 					overlayResizeCmds = append(overlayResizeCmds, m.overlayResizeCmd(tab))
 				}
@@ -4600,7 +4602,9 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 		}
 
 		var shown bool
-		newPaneIDs, shown = m.reconcileOverlayPane(tab, tabInfo, paneMap, existingPanes, newPaneIDs)
+		var visCmd tea.Cmd
+		newPaneIDs, shown, visCmd = m.reconcileOverlayPane(tab, tabInfo, paneMap, existingPanes, newPaneIDs)
+		overlayResizeCmds = append(overlayResizeCmds, visCmd)
 		if shown {
 			overlayResizeCmds = append(overlayResizeCmds, m.overlayResizeCmd(tab))
 		}
@@ -4687,10 +4691,12 @@ func isOverlayPane(paneMap map[string]*PaneInfo, id string) bool {
 // reconcileOverlayPane adopts the overlay pane reported by the daemon into
 // tab.overlayPane, or clears the slot when the daemon no longer reports one.
 // The overlay is never part of the layout tree. Returns newPaneIDs extended
-// with the overlay pane ID when a new PaneModel was created for it, and
+// with the overlay pane ID when a new PaneModel was created for it,
 // overlayShown=true when the overlay just flipped from hidden to visible due
 // to a pendingOverlayShow entry (the caller should issue an overlayResizeCmd
-// so the daemon PTY gets the correct dimensions immediately on creation).
+// so the daemon PTY gets the correct dimensions immediately on creation), and
+// a visibility command the caller must batch whenever overlayVisible flips
+// here — the daemon's hidden-overlay timer has no other way to learn it.
 //
 // Disposal ownership: this function never calls Dispose. Every pre-existing
 // overlay PaneModel was indexed into existingPanes by the caller, so a pane
@@ -4702,7 +4708,7 @@ func (m *Model) reconcileOverlayPane(
 	paneMap map[string]*PaneInfo,
 	existingPanes map[string]*PaneModel,
 	newPaneIDs []string,
-) ([]string, bool) {
+) ([]string, bool, tea.Cmd) {
 	// Find the overlay pane for this tab in the daemon broadcast, if any.
 	var overlayInfo *PaneInfo
 	for _, pid := range tabInfo.Panes {
@@ -4717,8 +4723,12 @@ func (m *Model) reconcileOverlayPane(
 		// Daemon has no overlay for this tab (exited or destroyed).
 		// The dropped PaneModel is disposed by the caller's sweep.
 		if tab.overlayPane != nil {
+			// Captured before the slot is cleared: overlayVisibilityCmd reads
+			// tab.overlayPane, which is nil immediately below.
+			visCmd := m.overlayVisibilityCmd(tab, false)
 			tab.overlayPane = nil
 			tab.overlayVisible = false
+			return newPaneIDs, false, visCmd
 		}
 	case tab.overlayPane == nil || tab.overlayPane.ID != overlayInfo.ID:
 		// New overlay arrived (or replaced an old one — the replaced
@@ -4735,14 +4745,15 @@ func (m *Model) reconcileOverlayPane(
 		if m.pendingOverlayShow[tab.ID] {
 			delete(m.pendingOverlayShow, tab.ID)
 			tab.overlayVisible = true
-			return newPaneIDs, true // newly visible — caller must resize
+			// newly visible — caller must resize
+			return newPaneIDs, true, m.overlayVisibilityCmd(tab, true)
 		}
 	default:
 		// Same overlay pane — refresh metadata only.
 		syncPaneMeta(tab.overlayPane, overlayInfo, m.pluginWideCanvas(overlayInfo.Type), m.pluginMinNativeCols(overlayInfo.Type))
 	}
 
-	return newPaneIDs, false
+	return newPaneIDs, false, nil
 }
 
 // finalizeTabPanes ensures the active pane is valid and focus flags are set.

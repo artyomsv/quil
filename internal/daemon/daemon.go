@@ -1747,6 +1747,7 @@ func (d *Daemon) createPaneAt(payload ipc.CreatePanePayload, cwd, paneType strin
 		// writes go under PluginMu (same discipline as Muted).
 		pane.PluginMu.Lock()
 		pane.Overlay = true
+		pane.OverlayShownAt = time.Now()
 		// Overlay panes are muted at the source: a hidden lazygit
 		// refreshing must not ping the notification sidebar.
 		pane.Muted = true
@@ -2103,6 +2104,18 @@ func (d *Daemon) handleUpdatePane(msg *ipc.Message) {
 		pane.PinnedAttention = *payload.PinnedAttention
 		pane.PluginMu.Unlock()
 		log.Printf("pane %s: pinned_attention=%v", pane.ID, *payload.PinnedAttention)
+	}
+	if payload.OverlayVisible != nil {
+		pane.PluginMu.Lock()
+		if *payload.OverlayVisible {
+			pane.OverlayHiddenAt = time.Time{}
+			pane.OverlayShownAt = time.Now()
+		} else if pane.OverlayHiddenAt.IsZero() {
+			// Only the FIRST hide stamps: a client re-sending hidden must not
+			// keep pushing the eviction deadline out.
+			pane.OverlayHiddenAt = time.Now()
+		}
+		pane.PluginMu.Unlock()
 	}
 	d.broadcastState()
 	d.requestSnapshot()

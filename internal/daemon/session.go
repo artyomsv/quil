@@ -126,6 +126,13 @@ type Pane struct {
 	// pane is already published to the session maps; concurrent snapshots
 	// may read it). Excluded from disk snapshots.
 	Overlay bool
+	// OverlayHiddenAt is when the TUI last hid this overlay; zero means it is
+	// on screen. OverlayShownAt is when it was last shown, and orders the LRU
+	// eviction. Both are PluginMu-protected like Overlay itself, and both are
+	// runtime-only — a restored overlay starts hidden, which is correct: no
+	// client is showing it yet.
+	OverlayHiddenAt time.Time
+	OverlayShownAt  time.Time
 	// MouseModes mirrors the child app's DEC mouse-mode state, scanned from the
 	// PTY output stream (scanMouseModes) in flushPaneOutput. The daemon is the
 	// only component that sees the one-time mouse-enable burst on every attach,

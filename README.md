@@ -226,6 +226,8 @@ Define your own pane types in TOML — see the [plugin reference](docs/plugin-re
 | **Troubleshooting** | [troubleshooting.md](docs/troubleshooting.md) |
 | **Architecture (24 ADRs)** | [architecture.md](docs/architecture.md) |
 | **Roadmap** | [roadmap.md](docs/roadmap.md) |
+| **Vision** | [vision.md](docs/vision.md) |
+| **Original PRD** | [prd.md](docs/prd.md) |
 
 The full doc index lives at [docs/README.md](docs/README.md).
 

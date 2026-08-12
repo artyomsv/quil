@@ -160,6 +160,15 @@ type Daemon struct {
 	// timeout, max live). Seeded from config at construction; F1 → Settings
 	// pushes runtime updates via MsgOverlayPolicy without a daemon restart.
 	overlayPolicyState overlayPolicyState
+
+	// attachedConns is the set of conns that have sent MsgAttach — the
+	// clients, as distinct from every conn (see markClientAttached). Written
+	// from each conn's own dispatch goroutine and from the disconnect
+	// callback, so it carries its own mutex: sm.mu is the wrong lock here,
+	// since a reader parked behind an RWMutex writer is the failure mode this
+	// package keeps being bitten by.
+	attachedMu    sync.Mutex
+	attachedConns map[*ipc.Conn]bool
 }
 
 func New(cfg config.Config) *Daemon {
@@ -256,18 +265,7 @@ func (d *Daemon) Start() error {
 	}
 
 	sockPath := config.SocketPath()
-	d.server = ipc.NewServer(sockPath, d.handleMessage, func(conn *ipc.Conn) {
-		d.requestSnapshot()
-		d.events.RemoveWatchersByConn(conn)
-		// handleConn's defer removes the disconnecting conn (removeConn) before
-		// invoking this callback, so a zero count here means this was the last
-		// client — verified against ipc.Server.handleConn's defer order.
-		if d.server != nil && d.server.ConnCount() == 0 {
-			if n := d.markOverlaysHidden(time.Now()); n > 0 {
-				log.Printf("overlay: %d marked hidden (no clients attached)", n)
-			}
-		}
-	})
+	d.server = ipc.NewServer(sockPath, d.handleMessage, d.onClientDisconnect)
 
 	if err := d.server.Start(); err != nil {
 		return fmt.Errorf("start IPC server: %w", err)
@@ -449,6 +447,60 @@ func (d *Daemon) Stop() {
 			}
 		}
 	})
+}
+
+// markClientAttached records a connection that has sent MsgAttach.
+//
+// ATTACHMENT, not connection, is what "a client is here" means, and the
+// difference is not academic: every live MCP bridge holds an IPC conn for its
+// whole lifetime (cmd/quil/mcp.go dials once and closes on exit), and a bridge
+// is a child of the claude process in a PANE — so bridges routinely outlive the
+// TUI. Counting raw conns therefore answered "is anything connected", which in
+// any session with a claude pane wired to `quil mcp` is permanently yes (21
+// conns in the session that reported 7 live overlays), and the detached-session
+// stamp below never fired in exactly the configuration it was designed for.
+func (d *Daemon) markClientAttached(conn *ipc.Conn) {
+	if conn == nil {
+		return
+	}
+	d.attachedMu.Lock()
+	if d.attachedConns == nil {
+		d.attachedConns = make(map[*ipc.Conn]bool)
+	}
+	d.attachedConns[conn] = true
+	d.attachedMu.Unlock()
+}
+
+// forgetAttachedClient drops a disconnecting conn from the attached set and
+// returns how many attached clients remain. A conn that never attached is not
+// in the set, so dropping it cannot change the count.
+func (d *Daemon) forgetAttachedClient(conn *ipc.Conn) int {
+	d.attachedMu.Lock()
+	defer d.attachedMu.Unlock()
+	delete(d.attachedConns, conn)
+	return len(d.attachedConns)
+}
+
+// attachedClientCount reports how many clients are currently attached.
+func (d *Daemon) attachedClientCount() int {
+	d.attachedMu.Lock()
+	defer d.attachedMu.Unlock()
+	return len(d.attachedConns)
+}
+
+// onClientDisconnect is ipc.Server's disconnect callback.
+//
+// handleConn's defer removes the disconnecting conn (removeConn) before
+// invoking this, and the attached set is keyed on that same conn — so the count
+// here is already exclusive of the client that just left.
+func (d *Daemon) onClientDisconnect(conn *ipc.Conn) {
+	d.requestSnapshot()
+	d.events.RemoveWatchersByConn(conn)
+	if d.forgetAttachedClient(conn) == 0 {
+		if n := d.markOverlaysHidden(time.Now()); n > 0 {
+			log.Printf("overlay: %d marked hidden (no clients attached)", n)
+		}
+	}
 }
 
 // requestSnapshot sends a non-blocking snapshot request to the event loop.
@@ -1261,6 +1313,11 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 		log.Printf("handleAttach: decode: %v", err)
 		return
 	}
+
+	// This is what makes the conn a CLIENT rather than just a connection — the
+	// distinction the detached-session overlay stamp turns on. Recorded before
+	// any of the work below, which has early returns of its own.
+	d.markClientAttached(conn)
 
 	cols, rows := attach.Cols, attach.Rows
 	if cols <= 0 {

@@ -107,6 +107,38 @@ func TestAttachAllDests_ReportsCurrentOverlayVisibility(t *testing.T) {
 	}
 }
 
+// There are TWO attach owners, and the reconnect one (finishReconnect →
+// attachToDest) is the path the dangerous half of the staleness runs on: the
+// drop is itself what made the daemon stamp every overlay hidden, so a client
+// that comes back with one still on screen and never re-reports watches the
+// sweep destroy it. attachAllDests never runs for that flow (finishReconnect
+// SETS m.attached[dest]), so reporting from it alone would miss exactly the
+// case the report exists for.
+func TestAttachToDest_ReportsCurrentOverlayVisibility(t *testing.T) {
+	t.Parallel()
+	conn := newFakeConn()
+	tab := NewTabModel("tab-1", "one")
+	tab.overlayPane = &PaneModel{ID: "ov"}
+	tab.overlayVisible = true
+	// A tab on a daemon that never dropped: reporting it would re-stamp an
+	// OverlayShownAt this reconnect knows nothing about.
+	elsewhere := NewTabModel("tab-2", "two")
+	elsewhere.Dest = "user@host"
+	elsewhere.overlayPane = &PaneModel{ID: "ov-other-daemon"}
+	elsewhere.overlayVisible = true
+	m := &Model{cfg: config.Default(), client: conn, projects: oneProject(tab, elsewhere)}
+
+	runCmd(m.attachToDest(""))
+
+	got := overlayReports(t, conn)
+	if v, ok := got["ov"]; !ok || !v {
+		t.Errorf("reconnect attach reported visible=%v (reported=%v); want an explicit true", v, ok)
+	}
+	if _, ok := got["ov-other-daemon"]; ok {
+		t.Error("a reconnect to one destination reported an overlay owned by another")
+	}
+}
+
 // attachAllDests reruns on every WindowSizeMsg; only a round that attached
 // something may re-assert this client's view.
 func TestAttachAllDests_AlreadyAttachedReportsNothing(t *testing.T) {

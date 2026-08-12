@@ -206,8 +206,24 @@ func (m *Model) overlayTruthCmd(tab *TabModel) tea.Cmd {
 // overlay pane — one fresh message per tab, each aimed at that tab's OWN
 // destination, since overlayVisibilityCmd builds its message inside the send.
 func (m *Model) overlayTruthAllCmd() tea.Cmd {
+	return m.overlayTruthCmds(func(*TabModel) bool { return true })
+}
+
+// overlayTruthDestCmd is overlayTruthAllCmd scoped to ONE destination — what a
+// reconnect wants, because only that daemon lost its client and only its copy
+// of visibility can have gone stale. Re-reporting a daemon that never dropped
+// would re-stamp its overlays' OverlayShownAt and perturb an LRU order nobody
+// asked about.
+func (m *Model) overlayTruthDestCmd(dest string) tea.Cmd {
+	return m.overlayTruthCmds(func(t *TabModel) bool { return t.Dest == dest })
+}
+
+func (m *Model) overlayTruthCmds(want func(*TabModel) bool) tea.Cmd {
 	var cmds []tea.Cmd
 	for _, tab := range m.allTabs() {
+		if !want(tab) {
+			continue
+		}
 		if cmd := m.overlayTruthCmd(tab); cmd != nil {
 			cmds = append(cmds, cmd)
 		}

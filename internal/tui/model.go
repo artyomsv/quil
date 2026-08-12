@@ -5554,12 +5554,19 @@ func (m Model) attachMessage(dest string) *ipc.Message {
 // is also read by the context menu, the palette and the Alt+G overlay, so asking
 // only on dialog open would leave those describing the wrong machine. Reconnect
 // is where a daemon that restarted — and therefore re-detected — shows up.
+//
+// The overlay-visibility report rides along for a sharper reason: the drop this
+// function recovers from is ITSELF what made the daemon stamp every overlay
+// hidden (the last attached client went away), so without re-asserting the
+// truth here the sweep destroys an overlay the user is looking at five minutes
+// after a link blip. attachAllDests never runs for this flow — finishReconnect
+// sets m.attached[dest] — so its copy of this report does not cover it.
 func (m Model) attachToDest(dest string) tea.Cmd {
 	attachCmd := func() tea.Msg {
 		m.sendForDest(dest, m.attachMessage(dest))
 		return nil
 	}
-	return tea.Batch(attachCmd, m.requestPluginListFor(dest))
+	return tea.Batch(attachCmd, m.requestPluginListFor(dest), m.overlayTruthDestCmd(dest))
 }
 
 // listenContinueMsg signals the TUI to keep listening for daemon messages.

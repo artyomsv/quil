@@ -1051,6 +1051,16 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		d.handleResizePane(msg)
 	case ipc.MsgReloadPlugins:
 		d.handleReloadPlugins()
+	case ipc.MsgOverlayPolicy:
+		var p ipc.OverlayPolicyPayload
+		// Checked, not best-effort: both fields use 0 for "disabled", so a
+		// malformed frame decoded into a zero struct would silently turn off
+		// both retention policies.
+		if err := msg.DecodePayload(&p); err != nil {
+			log.Printf("overlay policy: malformed payload: %v", err)
+			return
+		}
+		d.setOverlayPolicy(p)
 	case ipc.MsgShutdown:
 		d.shutdownOnce.Do(func() { close(d.shutdown) })
 

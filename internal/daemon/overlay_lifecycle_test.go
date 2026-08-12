@@ -278,3 +278,33 @@ func TestMarkOverlaysHidden_StampsOverlaysThatLackATimestamp(t *testing.T) {
 		t.Error("an already-hidden overlay had its deadline pushed out")
 	}
 }
+
+func TestHandleMessage_OverlayPolicyAppliesImmediately(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	d := New(config.Default())
+
+	msg, err := ipc.NewMessage(ipc.MsgOverlayPolicy, ipc.OverlayPolicyPayload{IdleTimeoutMinutes: 1, MaxLive: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.handleMessage(nil, msg)
+
+	if got := d.overlayPolicy(); got.IdleTimeoutMinutes != 1 || got.MaxLive != 2 {
+		t.Fatalf("policy = %+v, want {1 2}", got)
+	}
+}
+
+// A malformed frame must not silently zero the policy — zero means "disabled"
+// for both knobs, so a decode failure would turn the feature off.
+func TestHandleMessage_MalformedOverlayPolicyIsIgnored(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	d := New(config.Default())
+	before := d.overlayPolicy()
+
+	msg := &ipc.Message{Type: ipc.MsgOverlayPolicy, Payload: []byte(`"not an object"`)}
+	d.handleMessage(nil, msg)
+
+	if got := d.overlayPolicy(); got != before {
+		t.Fatalf("policy = %+v, want it unchanged at %+v", got, before)
+	}
+}

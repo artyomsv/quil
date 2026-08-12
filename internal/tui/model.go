@@ -1983,12 +1983,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// a background project — jumpToPane spans every project so the
 		// request cannot silently no-op just because the target isn't in the
 		// project currently on screen.
-		if m.jumpToPane(msg.PaneID) {
+		ok, overlayCmd := m.jumpToPane(msg.PaneID)
+		if ok {
 			log.Printf("set_active_pane: switched to pane %s", msg.PaneID)
 		} else {
 			log.Printf("set_active_pane: pane %s not found", msg.PaneID)
 		}
-		return m, m.listenForMessages()
+		return m, tea.Batch(overlayCmd, m.listenForMessages())
 
 	case highlightPaneMsg:
 		m.mcpHighlights[msg.PaneID] = true
@@ -2273,12 +2274,12 @@ func (m Model) handleNotificationKey(key string) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.pushPaneHistory()
-		m.jumpToPane(paneID)
+		_, overlayCmd := m.jumpToPane(paneID)
 		if tab := m.activeTabModel(); tab != nil && !tab.FocusMode() {
 			tab.ToggleFocus()
 		}
 		m.sidebarFocused = false
-		return m, nil
+		return m, overlayCmd
 	case "dismiss":
 		if eventID != "" {
 			if msg, err := ipc.NewMessage(ipc.MsgDismissEvent, ipc.DismissEventPayload{EventID: eventID}); err == nil {
@@ -2337,8 +2338,8 @@ func (m Model) popPaneHistory() (tea.Model, tea.Cmd) {
 			if ref.TabIndex < len(proj.tabs) {
 				tab := proj.tabs[ref.TabIndex]
 				if tab.Root != nil && tab.Root.PaneIDs()[ref.PaneID] {
-					m.jumpToPane(ref.PaneID)
-					return m, nil
+					_, overlayCmd := m.jumpToPane(ref.PaneID)
+					return m, overlayCmd
 				}
 			}
 			break
@@ -4852,12 +4853,7 @@ func (m *Model) switchTab(idx int) tea.Cmd {
 	// Built AFTER setActiveTabIdx so both answers describe the new state, and
 	// idempotent daemon-side in both directions (a repeat hide does not push
 	// the deadline out; a show just re-stamps OverlayShownAt).
-	if from != nil && from != target {
-		if cmd := m.overlayTruthCmd(from); cmd != nil {
-			cmds = append(cmds, cmd)
-		}
-	}
-	if cmd := m.overlayTruthCmd(target); cmd != nil {
+	if cmd := m.overlayTruthTransitionCmd(from, target); cmd != nil {
 		cmds = append(cmds, cmd)
 	}
 	if len(cmds) == 1 {
@@ -5470,7 +5466,10 @@ func (m *Model) attachAllDests() tea.Cmd {
 		m.attached = map[string]bool{}
 	}
 	var cmds []tea.Cmd
-	attachedAny := false
+	// Set, not a bool: the overlay-truth report below must be scoped to
+	// exactly these destinations, not to "at least one attached this round"
+	// (see the comment on that report).
+	newlyAttached := map[string]bool{}
 	for _, dest := range m.knownDests() {
 		if m.attached[dest] {
 			continue
@@ -5480,7 +5479,7 @@ func (m *Model) attachAllDests() tea.Cmd {
 			continue
 		}
 		m.attached[dest] = true
-		attachedAny = true
+		newlyAttached[dest] = true
 		// Batched per destination so each daemon is asked about its OWN
 		// registry; see requestPluginListFor.
 		if cmd := m.requestPluginListFor(dest); cmd != nil {
@@ -5490,11 +5489,11 @@ func (m *Model) attachAllDests() tea.Cmd {
 	// Batched ONCE per round, not per destination like requestPluginListFor:
 	// overlayPolicyCmd already loops over every known dest itself, so
 	// calling it inside the loop above would resend the same two ints once
-	// per newly-attached destination. Gated on attachedAny because this
-	// function reruns on every WindowSizeMsg (see the comment on the
+	// per newly-attached destination. Gated on len(newlyAttached) because
+	// this function reruns on every WindowSizeMsg (see the comment on the
 	// unattached-retry above) — an unconditional push would resend the
 	// current policy on every resize, not just after a fresh attach.
-	if attachedAny {
+	if len(newlyAttached) > 0 {
 		if cmd := m.overlayPolicyCmd(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
@@ -5506,7 +5505,17 @@ func (m *Model) attachAllDests() tea.Cmd {
 		// client that reconnects with one still on screen would otherwise
 		// watch the sweep destroy it five minutes later. Last attacher wins,
 		// the same trade MsgOverlayPolicy already documents.
-		if cmd := m.overlayTruthAllCmd(); cmd != nil {
+		//
+		// Scoped to the destinations that JUST attached, never to every
+		// destination this client knows about: a destination that was
+		// already attached did not just drop, so its overlays' visibility
+		// cannot have gone stale, and re-reporting it anyway would re-stamp
+		// their OverlayShownAt on every unrelated attach round — perturbing
+		// enforceOverlayCap's LRU order for an overlay that had nothing to do
+		// with this one. overlayTruthDestCmd already makes exactly this
+		// trade for the reconnect path; this is that same scoping applied to
+		// a round that can attach more than one destination at once.
+		if cmd := m.overlayTruthCmds(func(t *TabModel) bool { return newlyAttached[t.Dest] }); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
 	}

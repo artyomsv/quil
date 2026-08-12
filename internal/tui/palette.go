@@ -967,7 +967,8 @@ func (m Model) goToPane(paneID string) (tea.Model, tea.Cmd) {
 			old.Active = false
 		}
 	}
-	if !m.jumpToPane(paneID) {
+	ok, overlayCmd := m.jumpToPane(paneID)
+	if !ok {
 		return m, nil
 	}
 	if tab := m.activeTabModel(); tab != nil {
@@ -975,7 +976,7 @@ func (m Model) goToPane(paneID string) (tea.Model, tea.Cmd) {
 			pane.Active = true
 		}
 	}
-	return m, m.switchTab(m.activeTabIdx())
+	return m, tea.Batch(overlayCmd, m.switchTab(m.activeTabIdx()))
 }
 
 // executePaletteCommand closes the palette and dispatches into the SAME handler

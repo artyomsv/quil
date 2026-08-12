@@ -1402,7 +1402,7 @@ func twoProjectModel() Model {
 func TestJumpToPane_SwitchesProjectAndTab(t *testing.T) {
 	t.Parallel()
 	m := twoProjectModel()
-	if !m.jumpToPane("p-bg") {
+	if ok, _ := m.jumpToPane("p-bg"); !ok {
 		t.Fatal("jumpToPane should report success for an existing pane")
 	}
 	if m.activeProject != 1 {
@@ -1429,7 +1429,7 @@ func TestJumpToPane_TellsTheOwningDaemonAboutTheTab(t *testing.T) {
 	m.projects[1].Dest = "gpu01"
 	m.projects[1].tabs[0].Dest = "gpu01"
 
-	if !m.jumpToPane("p-bg") {
+	if ok, _ := m.jumpToPane("p-bg"); !ok {
 		t.Fatal("jumpToPane should report success for an existing pane")
 	}
 
@@ -1466,7 +1466,7 @@ func TestJumpToPane_ResetsSidebarScrollOnProjectChange(t *testing.T) {
 	t.Parallel()
 	m := twoProjectModel()
 	m.sidebarScroll = 12
-	if !m.jumpToPane("p-bg") {
+	if ok, _ := m.jumpToPane("p-bg"); !ok {
 		t.Fatal("jumpToPane should report success for an existing pane")
 	}
 	if m.activeProject != 1 {
@@ -1489,7 +1489,7 @@ func TestJumpToPane_KeepsSidebarScrollOnSameProjectJump(t *testing.T) {
 	proj := &ProjectModel{ID: "proj-solo", Name: "Solo", tabs: []*TabModel{tabA, tabB}}
 	m := Model{projects: []*ProjectModel{proj}, activeProject: 0, sidebarScroll: 12}
 
-	if !m.jumpToPane("p-b") {
+	if ok, _ := m.jumpToPane("p-b"); !ok {
 		t.Fatal("jumpToPane should report success for an existing pane")
 	}
 	if m.activeProject != 0 {
@@ -1503,7 +1503,7 @@ func TestJumpToPane_KeepsSidebarScrollOnSameProjectJump(t *testing.T) {
 func TestJumpToPane_MissingPaneReturnsFalseWithoutMutating(t *testing.T) {
 	t.Parallel()
 	m := twoProjectModel()
-	if m.jumpToPane("does-not-exist") {
+	if ok, _ := m.jumpToPane("does-not-exist"); ok {
 		t.Fatal("jumpToPane should report failure for a pane that does not exist")
 	}
 	if m.activeProject != 0 {

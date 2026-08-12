@@ -202,22 +202,61 @@ func (m *Model) overlayTruthCmd(tab *TabModel) tea.Cmd {
 	return m.overlayVisibilityCmd(tab, m.overlayOnScreen(tab))
 }
 
-// overlayTruthAllCmd reports the current truth for every tab that owns an
-// overlay pane — one fresh message per tab, each aimed at that tab's OWN
-// destination, since overlayVisibilityCmd builds its message inside the send.
-func (m *Model) overlayTruthAllCmd() tea.Cmd {
-	return m.overlayTruthCmds(func(*TabModel) bool { return true })
+// overlayTruthTransitionCmd reports overlay truth for both halves of an
+// active-tab change: the tab being LEFT (whose overlay, if any, just went off
+// screen) and the tab being ENTERED (whose overlay, if any, just came on
+// screen). Neither transition flips tab.overlayVisible, so without this pair
+// the daemon's copy is wrong for as long as the user stays away — and a
+// "visible" overlay left behind is exempt from the idle sweep forever, while
+// an overlay entered while still stamped hidden is one sweep away from being
+// destroyed out from under the user.
+//
+// Shared by every path that changes which tab is active within a project —
+// switchTab (Alt+1..9), jumpToPane (MCP set_active_pane, the notification
+// sidebar's navigate, pane-history back-navigation, the palette's goToPane)
+// and jumpToNextBlocked (Alt+Shift+A, the palette's blocked-queue jump) — so
+// the two-report rule has one implementation rather than three copies that
+// can drift apart.
+//
+// from may be nil (no tab was active yet) or equal to target (a same-tab
+// call, e.g. goToPane's own switchTab on the tab jumpToPane already moved
+// to): both report only the target's current truth, exactly like
+// overlayTruthCmd's nil-tab handling.
+func (m *Model) overlayTruthTransitionCmd(from, target *TabModel) tea.Cmd {
+	var cmds []tea.Cmd
+	if from != nil && from != target {
+		if cmd := m.overlayTruthCmd(from); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+	if cmd := m.overlayTruthCmd(target); cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+	if len(cmds) == 0 {
+		return nil
+	}
+	if len(cmds) == 1 {
+		return cmds[0]
+	}
+	return tea.Batch(cmds...)
 }
 
-// overlayTruthDestCmd is overlayTruthAllCmd scoped to ONE destination — what a
-// reconnect wants, because only that daemon lost its client and only its copy
-// of visibility can have gone stale. Re-reporting a daemon that never dropped
-// would re-stamp its overlays' OverlayShownAt and perturb an LRU order nobody
-// asked about.
+// overlayTruthDestCmd reports the current truth for every tab that owns an
+// overlay pane and belongs to ONE destination — what a reconnect wants,
+// because only that daemon lost its client and only its copy of visibility
+// can have gone stale. Re-reporting a daemon that never dropped would
+// re-stamp its overlays' OverlayShownAt and perturb an LRU order nobody asked
+// about — the same reason attachAllDests scopes its own post-attach report to
+// just the destinations that attached in that round, rather than every
+// destination this client knows about.
 func (m *Model) overlayTruthDestCmd(dest string) tea.Cmd {
 	return m.overlayTruthCmds(func(t *TabModel) bool { return t.Dest == dest })
 }
 
+// overlayTruthCmds reports the current truth for every tab that owns an
+// overlay pane and satisfies want — one fresh message per tab, each aimed at
+// that tab's OWN destination, since overlayVisibilityCmd builds its message
+// inside the send.
 func (m *Model) overlayTruthCmds(want func(*TabModel) bool) tea.Cmd {
 	var cmds []tea.Cmd
 	for _, tab := range m.allTabs() {

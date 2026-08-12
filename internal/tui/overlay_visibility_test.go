@@ -2,6 +2,7 @@ package tui
 
 import (
 	"testing"
+	"time"
 
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
@@ -158,5 +159,126 @@ func TestAttachAllDests_AlreadyAttachedReportsNothing(t *testing.T) {
 
 	if len(overlayReports(t, conn)) != 0 {
 		t.Errorf("a no-op attach round re-reported visibility: %v", overlayReports(t, conn))
+	}
+}
+
+// jumpToPane is the same active-tab-changing choke point switchTab is — the
+// destination for MCP set_active_pane, the notification sidebar's navigate,
+// pane-history back-navigation, and the command palette's goToPane — and was
+// missing this report entirely: a tab left through this path kept its
+// overlay marked visible forever (never swept), and a tab entered through it
+// could still be stamped hidden from an earlier hide, one sweep away from
+// being destroyed while the user is looking at it.
+func TestJumpToPane_ReportsOverlayVisibilityForBothTabs(t *testing.T) {
+	t.Parallel()
+	conn := newFakeConn()
+	from := NewTabModel("tab-1", "one")
+	from.overlayPane = &PaneModel{ID: "ov-left"}
+	from.overlayVisible = true
+	to := tabWithPane("tab-2", "pane-in-to")
+	// overlayVisible survives a tab switch by design, so a tab entered with
+	// this set is showing its overlay again the moment it becomes active.
+	to.overlayPane = &PaneModel{ID: "ov-entered"}
+	to.overlayVisible = true
+
+	m := &Model{cfg: config.Default(), client: conn, projects: oneProject(from, to)}
+
+	ok, cmd := m.jumpToPane("pane-in-to")
+	if !ok {
+		t.Fatal("jumpToPane reported failure for a pane that exists")
+	}
+	runCmd(cmd)
+
+	got := overlayReports(t, conn)
+	if v, ok := got["ov-left"]; !ok || v {
+		t.Errorf("tab being left reported visible=%v (reported=%v); want an explicit false", v, ok)
+	}
+	if v, ok := got["ov-entered"]; !ok || !v {
+		t.Errorf("tab being entered reported visible=%v (reported=%v); want an explicit true", v, ok)
+	}
+}
+
+// jumpToNextBlocked (Alt+Shift+A, the palette's blocked-queue jump) is the
+// third active-tab-changing choke point, and must report both halves exactly
+// like switchTab and jumpToPane.
+//
+// Same project, two tabs — deliberately not a cross-project jump: the
+// comments inside jumpToNextBlocked itself say the queue "routinely lands on
+// another tab of the SAME project", and overlayOnScreen's own contract is
+// scoped to a tab's own project ("switching projects moves no tab's
+// activeTab" — see overlay.go), so a same-project jump is the case where the
+// active-tab field this bug is about actually changes.
+func TestJumpToNextBlocked_ReportsOverlayVisibilityForBothTabs(t *testing.T) {
+	t.Parallel()
+	conn := newFakeConn()
+
+	from := NewTabModel("tab-from", "from")
+	from.overlayPane = &PaneModel{ID: "ov-left"}
+	from.overlayVisible = true
+
+	blocked := &PaneModel{ID: "pane-blocked"}
+	blocked.blockedSince = time.Now()
+	to := tabWith(blocked)
+	// overlayVisible survives a tab switch by design, so a tab entered with
+	// this set is showing its overlay again the moment it becomes active.
+	to.overlayPane = &PaneModel{ID: "ov-entered"}
+	to.overlayVisible = true
+
+	m := &Model{cfg: config.Default(), client: conn, projects: oneProject(from, to)}
+
+	runCmd(m.jumpToNextBlocked())
+
+	got := overlayReports(t, conn)
+	if v, ok := got["ov-left"]; !ok || v {
+		t.Errorf("tab being left reported visible=%v (reported=%v); want an explicit false", v, ok)
+	}
+	if v, ok := got["ov-entered"]; !ok || !v {
+		t.Errorf("tab being entered reported visible=%v (reported=%v); want an explicit true", v, ok)
+	}
+}
+
+// attachAllDests's post-attach overlay report must be scoped to the
+// destination(s) that actually attached THIS round, never to every
+// destination this client knows about. handleUpdatePane re-stamps
+// OverlayShownAt on every visible=true report, even a repeat one, so
+// re-reporting a destination that was already attached perturbs
+// enforceOverlayCap's LRU eviction order for an overlay that had nothing to
+// do with this round — the ordinary trigger being a local dest attaching
+// instantly while a remote one is still mid-handshake and finishes later.
+func TestAttachAllDests_ScopesOverlayReportToDestinationsThatJustAttached(t *testing.T) {
+	t.Parallel()
+	local := newFakeConn()
+	gpu := newFakeConn()
+	r := NewRouter(map[string]Client{"": local, "gpu01": gpu})
+
+	localTab := NewTabModel("tab-local", "local")
+	localTab.overlayPane = &PaneModel{ID: "ov-local"}
+	localTab.overlayVisible = true
+
+	gpuTab := NewTabModel("tab-gpu", "gpu")
+	gpuTab.Dest = "gpu01"
+	gpuTab.overlayPane = &PaneModel{ID: "ov-gpu"}
+	gpuTab.overlayVisible = true
+
+	m := &Model{
+		cfg:    config.Default(),
+		client: r,
+		projects: []*ProjectModel{
+			{ID: "proj-local", Dest: "", tabs: []*TabModel{localTab}},
+			{ID: "proj-gpu", Dest: "gpu01", tabs: []*TabModel{gpuTab}},
+		},
+		// The local destination already attached in an earlier round; only
+		// gpu01 is new this round.
+		attached: map[string]bool{"": true},
+	}
+
+	runCmd(m.attachAllDests())
+
+	if got := overlayReports(t, local); len(got) != 0 {
+		t.Errorf("an already-attached destination's overlay was re-reported: %v", got)
+	}
+	got := overlayReports(t, gpu)
+	if v, ok := got["ov-gpu"]; !ok || !v {
+		t.Errorf("the newly-attached destination's overlay reported visible=%v (reported=%v); want an explicit true", v, ok)
 	}
 }

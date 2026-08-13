@@ -162,24 +162,26 @@ func (m *Model) overlayVisibilityCmd(tab *TabModel, visible bool) tea.Cmd {
 // rendered.
 //
 // tab.overlayVisible is not the whole answer: it survives a tab switch by
-// design (handleOverlayKey's alt+1..9 arm), while only the active tab of a
-// project paints — so for every background tab the flag overstates visibility,
-// and an overstated one is exempt from the idle sweep forever.
+// design (handleOverlayKey's alt+1..9 arm), while only the active tab of the
+// ACTIVE PROJECT paints — so for every background tab the flag overstates
+// visibility, and an overstated one is exempt from the idle sweep forever.
 //
-// Scoped to the tab's own project, NOT to the active project, and the asymmetry
-// is deliberate: switching projects moves no tab's activeTab, so this answer
-// cannot go stale behind a project switch. A stricter rule would report a
-// background project's overlay hidden with nothing to re-report true when the
-// user switches back — and the sweep would then destroy an overlay they are
-// looking at, which is the one wrong-destroy this feature must not have.
+// Both levels are required, and the project one was added late. Scoping to the
+// tab's own project alone was defended on the grounds that a stricter rule
+// "would report a background project's overlay hidden with nothing to re-report
+// true when the user switches back". That was true before the truth protocol
+// existed; switchProject reports the transition now, exactly as switchTab does
+// one level down, so the tighter rule is safe — and without it a background
+// project's overlay stayed marked visible for the life of the daemon, defeating
+// idle eviction for the multi-project case entirely.
 func (m *Model) overlayOnScreen(tab *TabModel) bool {
 	if tab == nil || !tab.overlayVisible {
 		return false
 	}
-	for _, p := range m.projects {
+	for pi, p := range m.projects {
 		for i, t := range p.tabs {
 			if t == tab {
-				return i == p.activeTab
+				return i == p.activeTab && pi == m.activeProject
 			}
 		}
 	}
@@ -211,12 +213,14 @@ func (m *Model) overlayTruthCmd(tab *TabModel) tea.Cmd {
 // an overlay entered while still stamped hidden is one sweep away from being
 // destroyed out from under the user.
 //
-// Shared by every path that changes which tab is active within a project —
-// switchTab (Alt+1..9), jumpToPane (MCP set_active_pane, the notification
-// sidebar's navigate, pane-history back-navigation, the palette's goToPane)
-// and jumpToNextBlocked (Alt+Shift+A, the palette's blocked-queue jump) — so
-// the two-report rule has one implementation rather than three copies that
-// can drift apart.
+// Shared by every path that changes which tab is on screen — switchTab
+// (Alt+1..9), jumpToPane (MCP set_active_pane, the notification sidebar's
+// navigate, pane-history back-navigation, the palette's goToPane),
+// jumpToNextBlocked (Alt+Shift+A, the palette's blocked-queue jump),
+// switchProject (Alt+P, the sidebar's project rows, the last-project bounce)
+// and applyWorkspaceState's adoption of a daemon-side active-tab change — so
+// the two-report rule has one implementation rather than five copies that can
+// drift apart.
 //
 // from may be nil (no tab was active yet) or equal to target (a same-tab
 // call, e.g. goToPane's own switchTab on the tab jumpToPane already moved

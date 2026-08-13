@@ -4221,12 +4221,36 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg, dest string) ([]str
 		activeID = state.ActiveProject
 	}
 
+	// Active-tab moves the DAEMON made, collected here and reported after the
+	// merge below. Every path where the CLIENT changes the active tab reports
+	// overlay truth (switchTab, jumpToPane, jumpToNextBlocked); this arm adopts
+	// info.ActiveTab unconditionally, and at least four producers reach it —
+	// MCP switch_tab, a new tab, a tab destroy, and a second client. Both drift
+	// directions are the ones the feature exists to prevent: a tab left behind
+	// keeps its overlay marked visible (exempt from the sweep forever), and a
+	// tab entered while still stamped hidden is one sweep from having its
+	// lazygit destroyed on screen.
+	//
+	// Deferred rather than built in the loop because overlayOnScreen answers for
+	// the ACTIVE PROJECT, and which project that is only settles at
+	// resolveActiveProjectIndex below.
+	type activeTabMove struct{ from, target *TabModel }
+	var tabMoves []activeTabMove
+
 	infos := broadcastProjects(state, dest)
 	rebuilt := make([]*ProjectModel, 0, len(infos))
 	for _, info := range infos {
 		proj, ok := existingProjects[info.ID]
 		if !ok {
 			proj = &ProjectModel{ID: info.ID, Dest: dest}
+		}
+		// The tab this project had active BEFORE the rebuild. Tabs are reused by
+		// ID, so an unchanged active tab yields the same pointer and the
+		// comparison below is a no-op — which is what keeps an ordinary
+		// broadcast (the git ticker alone sends one every 5 s) off the wire.
+		var fromTab *TabModel
+		if ok && proj.activeTab >= 0 && proj.activeTab < len(proj.tabs) {
+			fromTab = proj.tabs[proj.activeTab]
 		}
 		proj.Name, proj.RootDir, proj.Bootstrap = info.Name, info.RootDir, info.Bootstrap
 		// The daemon answered, so whatever this row was standing in for is over.
@@ -4238,6 +4262,9 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg, dest string) ([]str
 		tabs, projPaneIDs, projResizeCmds := m.rebuildTabs(info, state, existingTabs, existingPanes, paneMap, dest)
 		proj.tabs = tabs
 		proj.activeTab = indexOfTab(proj.tabs, info.ActiveTab)
+		if targetTab := tabAt(proj.tabs, proj.activeTab); fromTab != targetTab {
+			tabMoves = append(tabMoves, activeTabMove{from: fromTab, target: targetTab})
+		}
 		newPaneIDs = append(newPaneIDs, projPaneIDs...)
 		overlayResizeCmds = append(overlayResizeCmds, projResizeCmds...)
 		rebuilt = append(rebuilt, proj)
@@ -4249,6 +4276,14 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg, dest string) ([]str
 	// which of them is active — so push the answer immediately rather than at
 	// the end of the function, where a later early return could skip it.
 	m.syncActiveDest()
+
+	// Now that the active project has settled, overlayOnScreen can answer for
+	// the tabs the daemon moved between.
+	for _, mv := range tabMoves {
+		if cmd := m.overlayTruthTransitionCmd(mv.from, mv.target); cmd != nil {
+			overlayResizeCmds = append(overlayResizeCmds, cmd)
+		}
+	}
 
 	// Record what this destination holds, so a launch that cannot reach it can
 	// still show these projects by name instead of dropping them. Placed after

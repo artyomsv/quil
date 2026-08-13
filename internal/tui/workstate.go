@@ -77,7 +77,11 @@ func (m *Model) findPaneAndTab(paneID string) (*PaneModel, *ProjectModel, int) {
 //
 // The returned tea.Cmd reports overlay visibility for both the tab being
 // left and the tab being entered, exactly like switchTab — see
-// overlayTruthTransitionCmd. This is the same active-tab-changing choke
+// overlayTruthTransitionCmd. It is built AFTER m.activeProject moves, which is
+// what makes the answer right for a CROSS-PROJECT jump: overlayOnScreen asks
+// about the active project, so a `from` tab left behind in another project
+// reports hidden rather than re-stamping its OverlayShownAt.
+// This is the same active-tab-changing choke
 // point switchTab is, and was missing this report for a while: a tab left
 // via this path kept an overlay marked visible forever (never swept), and a
 // tab entered here could still be stamped hidden from an earlier hide,

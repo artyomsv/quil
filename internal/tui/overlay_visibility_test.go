@@ -4,9 +4,16 @@ import (
 	"testing"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
+
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
 )
+
+// runCmds executes every command a multi-return path handed back. Written out
+// rather than looping runCmd so a caller cannot silently drop one — the whole
+// point of these assertions is that the report reaches the wire.
+func runCmds(cmds []tea.Cmd) { runCmd(tea.Batch(cmds...)) }
 
 // overlayReports collects every OverlayVisible value that reached the wire,
 // keyed by pane id (last report wins, like the daemon).
@@ -237,6 +244,175 @@ func TestJumpToNextBlocked_ReportsOverlayVisibilityForBothTabs(t *testing.T) {
 	}
 }
 
+// Switching PROJECTS takes the outgoing project's overlay off screen just as
+// surely as a tab switch does, and reports nothing on its own — so a background
+// project's overlay stayed marked visible for the life of the daemon and idle
+// eviction, the mechanism the feature is named after, never applied to it.
+func TestSwitchProject_ReportsOverlayVisibilityForBothProjects(t *testing.T) {
+	t.Parallel()
+	conn := newFakeConn()
+	leaving := NewTabModel("tab-a", "a")
+	leaving.overlayPane = &PaneModel{ID: "ov-leaving"}
+	leaving.overlayVisible = true
+	entering := NewTabModel("tab-b", "b")
+	entering.overlayPane = &PaneModel{ID: "ov-entering"}
+	entering.overlayVisible = true
+
+	m := &Model{cfg: config.Default(), client: conn, projects: []*ProjectModel{
+		{ID: "proj-a", tabs: []*TabModel{leaving}},
+		{ID: "proj-b", tabs: []*TabModel{entering}},
+	}}
+
+	runCmd(m.switchProject(1))
+
+	got := overlayReports(t, conn)
+	if v, ok := got["ov-leaving"]; !ok || v {
+		t.Errorf("the outgoing project's overlay reported visible=%v (reported=%v); want an explicit false", v, ok)
+	}
+	if v, ok := got["ov-entering"]; !ok || !v {
+		t.Errorf("the incoming project's overlay reported visible=%v (reported=%v); want an explicit true", v, ok)
+	}
+}
+
+// A CROSS-PROJECT jump used to report the tab it left as visible=TRUE: `from`
+// is still its own project's active tab, so a tab-scoped overlayOnScreen
+// answered "on screen" for a tab the user had just navigated away from —
+// re-stamping OverlayShownAt to now and making it the LAST candidate for cap
+// eviction, the exact LRU perturbation attachAllDests' scoping avoids.
+func TestJumpToPane_CrossProjectReportsTheTabLeftAsHidden(t *testing.T) {
+	t.Parallel()
+	conn := newFakeConn()
+	leaving := NewTabModel("tab-a", "a")
+	leaving.overlayPane = &PaneModel{ID: "ov-leaving"}
+	leaving.overlayVisible = true
+	entering := tabWithPane("tab-b", "pane-in-b")
+	entering.overlayPane = &PaneModel{ID: "ov-entering"}
+	entering.overlayVisible = true
+
+	m := &Model{cfg: config.Default(), client: conn, projects: []*ProjectModel{
+		{ID: "proj-a", tabs: []*TabModel{leaving}},
+		{ID: "proj-b", tabs: []*TabModel{entering}},
+	}}
+
+	ok, cmd := m.jumpToPane("pane-in-b")
+	if !ok {
+		t.Fatal("jumpToPane reported failure for a pane that exists")
+	}
+	runCmd(cmd)
+
+	got := overlayReports(t, conn)
+	if v, ok := got["ov-leaving"]; !ok || v {
+		t.Errorf("the tab left in another project reported visible=%v (reported=%v); want an explicit false", v, ok)
+	}
+	if v, ok := got["ov-entering"]; !ok || !v {
+		t.Errorf("the tab jumped to reported visible=%v (reported=%v); want an explicit true", v, ok)
+	}
+}
+
+// The other half of the same rule: a tab is only on screen when its project is
+// the active one, so an overlay in a BACKGROUND project must report hidden
+// wherever truth is reported — here, the post-attach sweep.
+func TestAttachAllDests_BackgroundProjectsOverlayReportsHidden(t *testing.T) {
+	t.Parallel()
+	conn := newFakeConn()
+	foreground := NewTabModel("tab-a", "a")
+	foreground.overlayPane = &PaneModel{ID: "ov-foreground"}
+	foreground.overlayVisible = true
+	background := NewTabModel("tab-b", "b")
+	background.overlayPane = &PaneModel{ID: "ov-background"}
+	background.overlayVisible = true
+
+	m := &Model{cfg: config.Default(), client: conn, projects: []*ProjectModel{
+		{ID: "proj-a", tabs: []*TabModel{foreground}},
+		{ID: "proj-b", tabs: []*TabModel{background}},
+	}}
+
+	runCmd(m.attachAllDests())
+
+	got := overlayReports(t, conn)
+	if v, ok := got["ov-foreground"]; !ok || !v {
+		t.Errorf("the active project's overlay reported visible=%v (reported=%v); want an explicit true", v, ok)
+	}
+	if v, ok := got["ov-background"]; !ok || v {
+		t.Errorf("a background PROJECT's overlay reported visible=%v (reported=%v); want an explicit false — "+
+			"only the active project paints, so it is off screen and must idle-expire", v, ok)
+	}
+}
+
+// The daemon can move a project's active tab behind the client's back — MCP
+// switch_tab, a new tab, a tab destroy, or a second client — and the broadcast
+// arm adopts it silently. Both drift directions are the ones this feature
+// exists to prevent: the tab left behind keeps an overlay marked visible (never
+// swept), and the tab entered can still be stamped hidden (one sweep from being
+// destroyed while on screen).
+func TestApplyWorkspaceState_DaemonSideActiveTabChangeReportsOverlayTruth(t *testing.T) {
+	t.Parallel()
+	conn := newFakeConn()
+	m := &Model{cfg: config.Default(), client: conn}
+	state := func(active string) WorkspaceStateMsg {
+		return WorkspaceStateMsg{
+			ActiveTab: active,
+			Tabs: []TabInfo{
+				{ID: "tab-1", Name: "one", Panes: []string{"p-1", "ov-1"}},
+				{ID: "tab-2", Name: "two", Panes: []string{"p-2", "ov-2"}},
+			},
+			Panes: []PaneInfo{
+				{ID: "p-1", TabID: "tab-1", Type: "terminal"},
+				{ID: "ov-1", TabID: "tab-1", Type: "lazygit", Overlay: true},
+				{ID: "p-2", TabID: "tab-2", Type: "terminal"},
+				{ID: "ov-2", TabID: "tab-2", Type: "lazygit", Overlay: true},
+			},
+		}
+	}
+
+	m.applyWorkspaceState(state("tab-1"), "")
+	// Both tabs have an overlay open (Alt+G on each); only the active tab paints.
+	for _, tab := range m.curTabs() {
+		tab.overlayVisible = true
+	}
+	conn.sent = nil
+
+	_, cmds := m.applyWorkspaceState(state("tab-2"), "")
+	runCmds(cmds)
+
+	got := overlayReports(t, conn)
+	if v, ok := got["ov-1"]; !ok || v {
+		t.Errorf("the tab the daemon left reported visible=%v (reported=%v); want an explicit false", v, ok)
+	}
+	if v, ok := got["ov-2"]; !ok || !v {
+		t.Errorf("the tab the daemon entered reported visible=%v (reported=%v); want an explicit true", v, ok)
+	}
+}
+
+// A broadcast that changes nothing about which tab is active must stay off the
+// wire: broadcasts are frequent (the git ticker alone delivers one every 5 s),
+// and every report is a must-deliver frame the daemon answers with another
+// broadcast.
+func TestApplyWorkspaceState_UnchangedActiveTabReportsNothing(t *testing.T) {
+	t.Parallel()
+	conn := newFakeConn()
+	m := &Model{cfg: config.Default(), client: conn}
+	state := WorkspaceStateMsg{
+		ActiveTab: "tab-1",
+		Tabs:      []TabInfo{{ID: "tab-1", Name: "one", Panes: []string{"p-1", "ov-1"}}},
+		Panes: []PaneInfo{
+			{ID: "p-1", TabID: "tab-1", Type: "terminal"},
+			{ID: "ov-1", TabID: "tab-1", Type: "lazygit", Overlay: true},
+		},
+	}
+
+	m.applyWorkspaceState(state, "")
+	m.curTabs()[0].overlayVisible = true
+	conn.sent = nil
+
+	_, cmds := m.applyWorkspaceState(state, "")
+	runCmds(cmds)
+
+	if got := overlayReports(t, conn); len(got) != 0 {
+		t.Errorf("a broadcast that moved no active tab reported visibility: %v", got)
+	}
+}
+
 // attachAllDests's post-attach overlay report must be scoped to the
 // destination(s) that actually attached THIS round, never to every
 // destination this client knows about. handleUpdatePane re-stamps
@@ -270,6 +446,11 @@ func TestAttachAllDests_ScopesOverlayReportToDestinationsThatJustAttached(t *tes
 		// The local destination already attached in an earlier round; only
 		// gpu01 is new this round.
 		attached: map[string]bool{"": true},
+		// gpu01's project is the one ON SCREEN. overlayOnScreen answers for the
+		// ACTIVE project, so a background project's overlay is off screen
+		// whatever its flag says — and this test is about DESTINATION scoping,
+		// so the visibility value must not be what makes it pass or fail.
+		activeProject: 1,
 	}
 
 	runCmd(m.attachAllDests())

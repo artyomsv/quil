@@ -305,8 +305,12 @@ func (m *Model) overlayPolicyCmd() tea.Cmd {
 		for _, dest := range dests {
 			msg, err := ipc.NewMessage(ipc.MsgOverlayPolicy, p)
 			if err != nil {
-				log.Printf("overlay policy: encode: %v", err)
-				return nil
+				// continue, not return: the loop is per-destination and one
+				// failure must not silently leave 2..N on a stale policy. The
+				// payload is two ints, so this is unreachable today — the point
+				// is that the loop reads as tolerant and was not.
+				log.Printf("overlay policy: encode for %q: %v", dest, err)
+				continue
 			}
 			if err := m.sendForDest(dest, msg); err != nil {
 				log.Printf("overlay policy: send to %q: %v", dest, err)

@@ -77,8 +77,10 @@ func (d *Daemon) setOverlayPolicy(p ipc.OverlayPolicyPayload) {
 // reported by the client rather than inferred here.
 //
 // The snapshot-then-destroy shape is the lock discipline this package
-// documents: collecting under the read lock and destroying after it means
-// DestroyPane (which closes a PTY via releasePanes) never runs under sm.mu.
+// documents: AllPanes takes sm.mu.RLock, copies and RELEASES, so the filter
+// below and the destroy after it both run lock-free — which is what keeps
+// DestroyPane (it closes a PTY via releasePanes) off sm.mu. Per-pane state is
+// read under that pane's own PluginMu.
 func (d *Daemon) sweepIdleOverlays(now time.Time) []string {
 	timeout := time.Duration(d.overlayPolicy().IdleTimeoutMinutes) * time.Minute
 	if timeout <= 0 {

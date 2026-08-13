@@ -12,10 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   finishes a turn while you were away, Windows raises a toast — and clicking it
   puts Quil on that exact project, tab and pane. It fires on the same two
   states the project sidebar already marks (▲ and ✓) and no others, only while
-  the terminal is unfocused, and at most once per pane per 30 seconds; six
-  agents finishing together give six separately clickable toasts rather than a
-  storm. Answering a prompt withdraws its toast, so Action Center never goes on
-  claiming attention you have already given.
+  you are not looking at that pane — another tab, another project or another
+  application all count. Six agents finishing together give six separately
+  clickable toasts rather than a storm. Answering a prompt withdraws its toast,
+  so Action Center never goes on claiming attention you have already given.
 
   Registration is explicit and reversible: `quil notify setup` writes a Start
   Menu shortcut and a `quil://` handler, prints exactly what it wrote, and

@@ -379,7 +379,7 @@ It fires on the same two states the project sidebar already marks, and no others
 Behaviour worth knowing:
 
 - **Only for a pane you are not looking at.** Another tab, another project, or another application all count. The single pane that never toasts is the one on screen — the active pane of the active tab of the active project while the terminal has focus. That is the same test the sidebar uses to decide whether a finished turn counts as unseen, so the two never disagree.
-- **One toast per pane**, rate-limited to one per 30 s per pane and shared across both kinds. Six agents finishing at once give six independently clickable toasts, not a storm of duplicates; Windows collapses the overflow into Action Center on its own.
+- **One toast per pane**, with a short per-pane floor (5 s) against a runaway agent. Six agents finishing at once give six independently clickable toasts, not a storm of duplicates; Windows collapses the overflow into Action Center on its own.
 - **Clicking routes precisely** — project, tab and pane, the same jump `Alt+Shift+A` performs.
 - **Answering withdraws the toast.** Typing your answer clears it from Action Center, so the surface never keeps claiming attention you already gave. That covers approving a Bash/Edit/Write prompt, which fires no hook at all.
 - **Muted panes stay muted.** `Alt+M` suppresses toasts as well as sidebar rows.

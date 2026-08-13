@@ -132,9 +132,19 @@ type DesktopConfig struct {
 	Blocked bool `toml:"blocked"` // a pane parked waiting on the user
 	Done    bool `toml:"done"`    // a turn finished while the user was away
 
-	// Cooldown is per PANE and shared by both kinds. Shared deliberately: a
-	// pane that blocks and then completes five seconds later should produce
-	// one toast, not two.
+	// Cooldown is per PANE and shared by both kinds — a floor against a
+	// pathological loop, NOT a batching window.
+	//
+	// It was 30 s and that was wrong. Three mechanisms already prevent
+	// duplicates: a toast only fires on a state CHANGE, a pane that already has
+	// a toast showing cannot get a second one, and the pane you are looking at
+	// never toasts at all. So the only thing a long cooldown suppresses is a
+	// genuinely new event after you have already dealt with the previous one.
+	//
+	// Measured in real use: four completed turns 12-23 s apart produced one
+	// toast, because every later turn landed inside the window. That reads as
+	// the feature being unreliable, which is worse than the duplication it was
+	// guarding against.
 	Cooldown string `toml:"cooldown"`
 
 	// There is deliberately NO require_blur key.
@@ -156,9 +166,9 @@ type DesktopConfig struct {
 	// loads cleanly and the value simply stops meaning anything.
 }
 
-// DefaultDesktopCooldown matches the per-pane bell/idle convention the daemon
-// already uses (Pane.LastBellEventAt).
-const DefaultDesktopCooldown = 30 * time.Second
+// DefaultDesktopCooldown is deliberately SHORT: it exists only to stop a
+// runaway agent from storming, not to batch notifications. See Cooldown.
+const DefaultDesktopCooldown = 5 * time.Second
 
 // CooldownDuration parses Cooldown, falling back to the default for an empty,
 // malformed or non-positive value. A garbage value must not disable the rate
@@ -402,7 +412,7 @@ func Default() Config {
 				Enabled:  true,
 				Blocked:  true,
 				Done:     true,
-				Cooldown: "30s",
+				Cooldown: "5s",
 			},
 			Hooks: HookNotificationsConfig{
 				Claude:   "default",

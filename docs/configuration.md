@@ -68,7 +68,7 @@ opencode = "default"            # same
 enabled = true                  # OS toasts; Windows only, needs `quil notify setup`
 blocked = true                  # toast when a pane parks waiting on you
 done = true                     # toast when a turn finishes while you are away
-cooldown = "30s"                # per pane, shared by both kinds
+cooldown = "5s"                 # per-pane floor against a runaway loop
 
 [overlay]
 idle_timeout_minutes = 5        # destroy a hidden lazygit overlay after this long; 0 disables
@@ -199,7 +199,7 @@ Operating-system toasts raised from the same attention states the project sideba
 | `enabled` | bool | `true` | Master switch. Defaults **on**, and that does not make registration implicit: a toast still needs the Start Menu shortcut and `quil://` handler that `quil notify setup` writes. The flag says "I want these"; setup is the gate. |
 | `blocked` | bool | `true` | Toast when a pane parks waiting on you — the ▲ state in the project sidebar. |
 | `done` | bool | `true` | Toast when a turn finishes while you were away — the ✓ state. Never fires for the pane you are looking at. |
-| `cooldown` | duration | `"30s"` | Rate limit, **per pane and shared by both kinds**: a pane that parks and then finishes five seconds later produces one toast, not two. A malformed or non-positive value falls back to 30 s rather than disabling the limit. |
+| `cooldown` | duration | `"5s"` | Per-pane floor against a runaway agent, NOT a batching window. Duplicates are already prevented three other ways — a toast fires only on a state change, a pane showing a toast cannot get a second, and the pane on screen never toasts — so a long cooldown only suppresses genuinely new events you have already dealt with. A malformed or non-positive value falls back to the default rather than disabling the limit. |
 
 **When a toast fires:** whenever the pane needing attention is one you are *not* looking at. The only pane that never toasts is the active pane of the active tab of the active project while the terminal has focus. Another tab, another project, or another application all qualify — which is the point, since Quil exists to run agents in workspaces you are not currently watching.
 

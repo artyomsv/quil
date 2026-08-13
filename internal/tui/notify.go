@@ -154,6 +154,7 @@ func (m *Model) raiseAttentionToast(pane *PaneModel, proj *ProjectModel, wasBloc
 		return
 	}
 	if m.suppressedByAttention(pane.ID) {
+		logger.Debug("notify: suppressed for pane %s: it is the pane on screen", pane.ID)
 		return
 	}
 
@@ -272,6 +273,11 @@ func (m *Model) raiseDeferredToasts() {
 // disagree about muting, the cooldown, sanitising, or what gets recorded for
 // withdrawal. It does NOT check termFocused: the edge path checks it before
 // deciding, and the blur path is by definition unfocused.
+// Every suppression path logs its reason at debug. That is not noise: a
+// suppressed toast produces no error, no event and no visible effect, so
+// "nothing happened" was previously indistinguishable from a bug — diagnosing
+// it meant correlating daemon hook timestamps by hand. One line per decision
+// turns the next report into a log grep.
 func (m *Model) emitToast(pane *PaneModel, proj *ProjectModel, kind toastKind) {
 	if m.notifier == nil || pane == nil || proj == nil {
 		return
@@ -279,6 +285,7 @@ func (m *Model) emitToast(pane *PaneModel, proj *ProjectModel, kind toastKind) {
 	// A muted pane is muted everywhere. The sidebar already honours this and a
 	// toast is louder than a sidebar row.
 	if pane.Muted {
+		logger.Debug("notify: suppressed for pane %s: muted", pane.ID)
 		return
 	}
 
@@ -289,7 +296,9 @@ func (m *Model) emitToast(pane *PaneModel, proj *ProjectModel, kind toastKind) {
 
 	now := time.Now()
 	cfg := m.cfg.Notification.Desktop
-	if !pane.lastToastAt.IsZero() && now.Sub(pane.lastToastAt) < cfg.CooldownDuration() {
+	if since := now.Sub(pane.lastToastAt); !pane.lastToastAt.IsZero() && since < cfg.CooldownDuration() {
+		logger.Debug("notify: suppressed for pane %s: cooldown (%v since last, need %v)",
+			pane.ID, since.Truncate(time.Millisecond), cfg.CooldownDuration())
 		return
 	}
 	pane.lastToastAt = now
@@ -333,6 +342,7 @@ func (m *Model) emitToast(pane *PaneModel, proj *ProjectModel, kind toastKind) {
 		m.outstandingToasts = make(map[string]toastKind, 1)
 	}
 	m.outstandingToasts[pane.ID] = kind
+	logger.Debug("notify: raised for pane %s (%s): %q", pane.ID, headline, title)
 }
 
 // sweepOutstandingToasts withdraws toasts whose pane no longer needs attention.

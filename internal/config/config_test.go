@@ -378,8 +378,8 @@ func TestDesktopNotificationDefaults(t *testing.T) {
 	if !d.Blocked || !d.Done {
 		t.Errorf("both kinds default on: blocked=%v done=%v", d.Blocked, d.Done)
 	}
-	if got := d.CooldownDuration(); got != 30*time.Second {
-		t.Errorf("CooldownDuration() = %v, want 30s", got)
+	if got := d.CooldownDuration(); got != 5*time.Second {
+		t.Errorf("CooldownDuration() = %v, want 5s", got)
 	}
 }
 
@@ -392,10 +392,10 @@ func TestDesktopCooldownDuration_FallsBackOnGarbage(t *testing.T) {
 	}{
 		{"30s", 30 * time.Second},
 		{"2m", 2 * time.Minute},
-		{"", 30 * time.Second},
-		{"nonsense", 30 * time.Second},
-		{"-5s", 30 * time.Second},
-		{"0s", 30 * time.Second},
+		{"", 5 * time.Second},
+		{"nonsense", 5 * time.Second},
+		{"-5s", 5 * time.Second},
+		{"0s", 5 * time.Second},
 	}
 	for _, tt := range tests {
 		d := config.DesktopConfig{Cooldown: tt.in}

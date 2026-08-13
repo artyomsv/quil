@@ -71,14 +71,60 @@ func runNotifySetup(opts notify.Options) {
 	for _, w := range written {
 		fmt.Printf("  %s\n", w)
 	}
+
+	// Show and immediately withdraw a toast IN THIS PROCESS, before claiming
+	// success.
+	//
+	// This does NOT make the registration take effect — that was tried and
+	// disproven: creating the shortcut and toasting in one process fails for a
+	// new AUMID exactly as two separate invocations do. It is here because
+	// setup that reports success without having displayed anything cannot tell
+	// the user whether it worked, and on this platform that is a real and
+	// common outcome rather than a corner case.
+	//
+	// Measured on Windows 10 19045: a newly registered AUMID can stay
+	// unrecognised for hours, surviving a WpnUserService restart, an
+	// AppUserModelId registry entry and a Notifications\Settings entry, while
+	// an identifier already known to the platform works instantly with a
+	// shortcut created seconds earlier. Nothing in this process controls that;
+	// a sign-out or reboot is the remedy.
+	verified := verifySetup(opts)
 	fmt.Printf("\nEnabled by default in config.toml:\n\n")
 	fmt.Printf("  [notification.desktop]\n  enabled = true\n\n")
-	// Not a caveat we can engineer away: Windows indexes a new Start Menu
-	// shortcut on its own schedule, and until it does, the notification
-	// platform does not recognise the AUMID.
-	fmt.Printf("Windows may take a few minutes to index the shortcut; toasts before\n")
-	fmt.Printf("then are silently dropped. Check with:  quil notify status\n\n")
+	if verified {
+		fmt.Printf("Verified: a test toast was displayed and withdrawn.\n\n")
+	} else {
+		fmt.Printf("NOTE: the verification toast could not be displayed yet. Windows\n")
+		fmt.Printf("sometimes needs a sign-out or reboot before it honours a newly\n")
+		fmt.Printf("registered app. Re-check with:  quil notify test\n\n")
+	}
 	fmt.Printf("Undo with:  quil notify setup --remove\n")
+}
+
+// verifySetup shows and withdraws a canary toast in the setup process itself.
+// Returns whether it displayed. Never fatal — a failure is reported, not an
+// error, because the artifacts are written either way.
+func verifySetup(opts notify.Options) bool {
+	n, err := notify.New(opts)
+	if err != nil {
+		return false
+	}
+	defer n.Close()
+	sync, ok := n.(notify.SyncNotifier)
+	if !ok {
+		return false
+	}
+	const tag = "pane-00000000"
+	if err := sync.NotifySync(notify.Notification{
+		Title:  "Quil",
+		Body:   "TEST-CANARY — desktop notifications registered",
+		Tag:    tag,
+		Launch: notify.BuildActivateURI(opts.Scheme, os.Getpid(), tag),
+	}); err != nil {
+		return false
+	}
+	_ = sync.WithdrawSync(tag)
+	return true
 }
 
 func runNotifyRemove(opts notify.Options) {

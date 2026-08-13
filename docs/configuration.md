@@ -214,7 +214,9 @@ Also editable at **F1 → Settings** ("Desktop notifications"), which applies im
 
 Dev builds use a separate namespace throughout (`quil-dev://`, AUMID `artyomsv.quil.dev`, `Quil (dev).lnk`) so a dev instance can never overwrite a production registration — these artifacts live outside `QUIL_HOME` and are the one thing dev isolation does not get for free.
 
-> **Windows may not honour a freshly registered app immediately.** Windows indexes the new Start Menu shortcut on its own schedule; until it does, toasts are silently dropped and `quil notify test` reports `0x80070490`. Signing out and back in forces it. Nothing in Quil can accelerate this.
+> **Windows may not honour a freshly registered app until you sign out and back in.** Until it does, toasts are silently dropped and `quil notify test` reports `0x80070490`. `quil notify setup` displays a verification toast and reports whether the registration is actually live, so you are not left guessing.
+>
+> This can be a long wait, not a brief one — measured at hours on Windows 10 19045, surviving a `WpnUserService` restart and every documented registry registration. A sign-out or reboot is the remedy; nothing inside Quil controls it.
 
 **Clicking a toast can only move your cursor.** The `quil://` handler parses the URI, validates the pane id, and writes it to a per-PID named pipe that the running TUI reads — there is deliberately no path from a registered URI to spawning a pane, sending input, or running a command, because a registered scheme is invokable by any local process. Inline toast action buttons are refused for that reason rather than merely deferred.
 

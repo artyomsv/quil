@@ -211,7 +211,9 @@ quil notify setup
 
 **2. Send a canary.** `quil notify test` shows one self-labelled toast from the real binary. This is the only way to exercise the whole path — a `go test` binary cannot, because Windows resolves an unpackaged app's identity by matching the running process to a Start Menu shortcut that points at it.
 
-**3. `0x80070490` from `quil notify test`.** Windows has not indexed the shortcut yet. It does this on its own schedule and nothing in Quil can accelerate it; signing out and back in forces it. Until then, toasts are silently dropped.
+**3. `0x80070490` from `quil notify test`.** Windows does not recognise the app identity yet. **Sign out and back in, or reboot** — then run `quil notify setup` again; it displays a verification toast and tells you whether the registration is live.
+
+This is not a short wait. Measured on Windows 10 19045, a newly registered identifier stayed unrecognised for hours while an identifier the platform already knew worked instantly with a shortcut created seconds earlier. None of the following made any difference, so do not spend time on them: restarting `WpnUserService`, adding an `AppUserModelId` registry entry, adding a `Notifications\Settings` entry, recreating the shortcut, or changing its filename. Nothing inside Quil controls it.
 
 **4. Focus reporting.** Toasts only fire while the terminal is unfocused, which Quil learns from terminal focus reporting (DEC 1004). A terminal that does not implement it never reports losing focus, so the gate suppresses everything forever. Windows Terminal supports it. To bypass the gate:
 

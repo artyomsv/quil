@@ -153,7 +153,7 @@ func (m *Model) raiseAttentionToast(pane *PaneModel, proj *ProjectModel, wasBloc
 	if pane.Muted {
 		return
 	}
-	if m.suppressedByAttention(pane.ID) {
+	if m.userIsWatching(pane.ID) {
 		logger.Debug("notify: suppressed for pane %s: it is the pane on screen", pane.ID)
 		return
 	}
@@ -171,24 +171,38 @@ func (m *Model) raiseAttentionToast(pane *PaneModel, proj *ProjectModel, wasBloc
 	m.emitToast(pane, proj, kind)
 }
 
-// suppressedByAttention reports whether the user is demonstrably already
-// looking at this pane, in which case a toast tells them nothing.
+// userIsWatching reports whether the user is demonstrably looking at this pane
+// right now. It is the single definition of "you saw it" for the whole client:
+// the toast suppression, the `unseen` mark set on a completed turn
+// (applyWorkTransition) and the acknowledgement that clears it (ackFocusedPane)
+// all read it, so they cannot disagree about what the user witnessed.
 //
-// "Looking at it" means the terminal has focus AND the pane is the active pane
-// of the active tab of the active project. Anything else — another tab,
-// another project, another application — is a pane the user cannot see, and
-// those are exactly the ones worth a toast. Quil's whole premise is agents
+// Watching means BOTH halves: the terminal window has focus AND the pane is the
+// active pane of the active tab of the active project. Anything else — another
+// tab, another project, another application — is a pane the user cannot see,
+// and those are exactly the ones worth a toast. Quil's whole premise is agents
 // running in projects you are not currently looking at.
 //
-// An earlier version gated on the terminal being unfocused alone, which made
-// the feature useless for its main case: an agent parking in project B while
-// you work in project A produced nothing at all. That was wrong, and it was
-// wrong in the direction that quietly removes most of the value.
+// The two halves were separated once and it broke the feature in the case that
+// matters most. `unseen` was computed from the on-screen test ALONE, so a turn
+// finishing while the terminal sat behind a browser counted as seen — and since
+// the Done toast fires on the RISING edge of `unseen`, the commonest sequence
+// there is (ask the agent something, alt-tab away, wait) produced no toast at
+// all. It only ever worked if the user also happened to switch pane first.
+// Reported twice from real use before the cause was found; the tests missed it
+// because every one of them moved ActivePane away, which is the case that
+// already worked. Anything deciding whether the user saw something must call
+// THIS, never one half of it.
+//
+// An earlier version of the toast gate went the other way and keyed on the
+// terminal being unfocused alone, which made an agent parking in project B
+// while you work in project A produce nothing. Both failures are the same
+// mistake: one signal standing in for a two-part question.
 //
 // There is no config knob to widen this back to "the whole terminal must be
 // unfocused" — see the note where require_blur used to live in
 // config.DesktopConfig for why that key was removed rather than re-defaulted.
-func (m *Model) suppressedByAttention(paneID string) bool {
+func (m *Model) userIsWatching(paneID string) bool {
 	if !m.termFocused {
 		return false // the whole app is in the background
 	}
@@ -253,7 +267,7 @@ func (m *Model) raiseDeferredToasts() {
 				if _, showing := m.outstandingToasts[pane.ID]; showing {
 					continue
 				}
-				if m.suppressedByAttention(pane.ID) {
+				if m.userIsWatching(pane.ID) {
 					continue
 				}
 				switch {

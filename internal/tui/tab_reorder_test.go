@@ -17,6 +17,9 @@ func newModelForTest(names []string, activeIdx int) Model {
 	m := Model{
 		cfg:            config.Default(),
 		tabDragFromIdx: -1,
+		// See modelForWorkTest: NewModel starts focused, and the zero value
+		// would claim the terminal is in the background.
+		termFocused: true,
 	}
 	for _, n := range names {
 		m.appendTab(NewTabModel(n, n))

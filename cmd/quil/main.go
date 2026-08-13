@@ -612,6 +612,12 @@ func launchTUI() {
 			logger.Debug("desktop notifications unavailable: %v", err)
 		} else {
 			notifier = n
+			// The success case is logged too, and not as symmetry for its own
+			// sake: diagnosing a missing toast starts by asking whether this
+			// process has a notifier at all, and with only the failure logged
+			// "no line" meant either "installed fine" or "the config disabled
+			// it" — two different bugs sharing one silence.
+			logger.Debug("notify: desktop notifications active for %s", notifyOpts.AUMID)
 			defer func() {
 				if err := notifier.Close(); err != nil {
 					logger.Debug("notify: close: %v", err)

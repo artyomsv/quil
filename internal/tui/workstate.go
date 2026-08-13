@@ -235,7 +235,10 @@ func (m *Model) applyWorkTransition(paneID, eventType string, data map[string]st
 	if kind == workNone {
 		return
 	}
-	pane, proj, tabIdx := m.findPaneAndTab(paneID)
+	// The tab index is deliberately dropped: deciding whether the user saw this
+	// completion is userIsWatching's job alone, and re-deriving half of it here
+	// from a local is how the two definitions drifted apart in the first place.
+	pane, proj, _ := m.findPaneAndTab(paneID)
 	if pane == nil {
 		return
 	}
@@ -422,8 +425,17 @@ func (m *Model) applyWorkTransition(paneID, eventType string, data map[string]st
 		// IS marked — its green border is the cue. An abort (process exit)
 		// clears the spinner without marking: a crash is not a completed
 		// turn.
-		focused := proj == m.cur() && tabIdx == proj.activeTab && proj.tabs[tabIdx].ActivePane == paneID
-		if !focused {
+		//
+		// userIsWatching, not the three-part on-screen test this line used to
+		// inline: a pane on screen in a terminal that is BEHIND ANOTHER WINDOW
+		// was being counted as seen, which is the state a user is in every time
+		// they ask an agent something and alt-tab away. See the comment there —
+		// it also cost the desktop toast, which fires on this mark's rising
+		// edge. Nothing changes visually for a pane marked this way: tabUnseen
+		// excludes the active tab and the active pane border outranks the green
+		// one, so the mark is invisible until it matters and is cleared by
+		// ackFocusedPane the moment the user comes back.
+		if !m.userIsWatching(paneID) {
 			pane.unseen = true
 		}
 	}
@@ -476,6 +488,17 @@ func coalescedCount(data map[string]string) int {
 // context menu's two attention rows send MsgUpdatePane; focus is not a route to
 // a clear at all.
 func (m *Model) ackFocusedPane() {
+	// A window the user is not looking at cannot acknowledge anything, and this
+	// half was missing: with it absent the mark set by a turn that finished
+	// while the terminal was in the background was cleared again on the very
+	// next message — the 1 s size poll guarantees one — so the desktop toast
+	// raised on that mark's rising edge was withdrawn by the sweep before the
+	// user could act on it. Same shape as the blockedSince clear this function
+	// used to do and no longer does: a signal removed ~one tick after it was
+	// set is indistinguishable from one that was never set at all.
+	if !m.termFocused {
+		return
+	}
 	tab := m.activeTabModel()
 	if tab == nil || tab.Root == nil || tab.ActivePane == "" {
 		return

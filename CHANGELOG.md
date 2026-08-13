@@ -30,6 +30,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sending input or running a command. Windows only: no transport on macOS or
   Linux can carry a click back to a specific pane.
 
+### Fixed
+- **A turn that finished while Quil was behind another window no longer counts
+  as seen.** Whether you saw a completed turn was decided from the pane's
+  position on screen alone, so a pane you left on screen when you switched to
+  your browser was treated as watched — it kept no unseen mark, and the desktop
+  toast that fires when that mark is set never fired either. Asking an agent
+  something and switching away, the commonest sequence there is, was exactly the
+  case that produced nothing. Being seen now requires the window to have focus
+  as well, and returning to it still acknowledges the pane you land on.
+
 ## [1.55.1] - 2026-08-13
 
 ### Fixed

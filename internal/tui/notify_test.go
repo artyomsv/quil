@@ -638,6 +638,115 @@ func TestUpdate_FinishedTurnRaisesToast(t *testing.T) {
 	}
 }
 
+// The commonest sequence there is, and the one every other test in this file
+// stepped around: ask the agent something, then leave the terminal WITHOUT
+// switching pane first. The pane stays the active pane of the active tab, so
+// the only thing separating "seen" from "missed" is that the window is behind
+// Chrome.
+//
+// Reported from real use twice ("asked a question to ai pane and switched to
+// another window", "tab is marked as finished but I got no toast"). It failed
+// because `unseen` — which the Done toast is derived from — was computed from
+// the three-part on-screen test ALONE, so a backgrounded terminal still counted
+// as the user watching. TestUpdate_FinishedTurnRaisesToast passes only because
+// it moves ActivePane away first, which is exactly the case that already worked.
+func TestUpdate_FinishedTurnWhileTerminalBlurredRaisesToast(t *testing.T) {
+	m, f, pane := wiredToastModel(t)
+	m.termFocused = true // the user is in Quil, in this very pane
+
+	updated, _ := m.Update(paneEventMsg{PaneID: pane.ID, Type: "hook.claude.UserPromptSubmit"})
+	m = updated.(Model)
+	// They alt-tab away. The pane is still ActivePane — nothing moved.
+	updated, _ = m.Update(tea.BlurMsg{})
+	m = updated.(Model)
+	updated, _ = m.Update(paneEventMsg{PaneID: pane.ID, Type: "hook.claude.Stop"})
+	got := updated.(Model)
+
+	if len(f.sent) != 1 {
+		t.Fatalf("sent %d toasts for a turn that finished while the terminal was in the background, want 1", len(f.sent))
+	}
+	if !strings.Contains(f.sent[0].Body, "finished") {
+		t.Errorf("Body = %q, want the finished-turn headline", f.sent[0].Body)
+	}
+	if !pane.unseen {
+		t.Error("the pane must carry the unseen mark: the user was not looking at the screen")
+	}
+	if _, ok := got.outstandingToasts[pane.ID]; !ok {
+		t.Error("a raised toast must be recorded for the sweep to withdraw later")
+	}
+}
+
+// Raising the toast is only half the job: it has to still be there a moment
+// later. The sweep withdraws any toast whose pane no longer needs attention, so
+// an acknowledgement that fires while the user is away would pull the toast
+// back out of Action Center within one tick of raising it — and "toast appeared
+// and vanished before I could click it" is reported as "no toast".
+//
+// This is the interaction between the two halves of the fix, which neither
+// single-site test can see: the raise is synchronous inside the Stop, the
+// withdrawal happens on the NEXT message, and the 1 s size poll guarantees one.
+func TestUpdate_ToastSurvivesLaterUpdatesWhileTheUserIsAway(t *testing.T) {
+	m, f, pane := wiredToastModel(t)
+	m.termFocused = true
+
+	updated, _ := m.Update(paneEventMsg{PaneID: pane.ID, Type: "hook.claude.UserPromptSubmit"})
+	m = updated.(Model)
+	updated, _ = m.Update(tea.BlurMsg{})
+	m = updated.(Model)
+	updated, _ = m.Update(paneEventMsg{PaneID: pane.ID, Type: "hook.claude.Stop"})
+	m = updated.(Model)
+	if len(f.sent) != 1 {
+		t.Fatalf("setup: sent %d toasts, want 1", len(f.sent))
+	}
+
+	// Time passes while the user reads the news. Every one of these reaches
+	// ackFocusedPane and then sweepOutstandingToasts.
+	for i := 0; i < 5; i++ {
+		updated, _ = m.Update(workSpinnerTickMsg{})
+		m = updated.(Model)
+	}
+
+	if len(f.withdrawn) != 0 {
+		t.Errorf("withdrew %v while the user was still away — the toast must stand until they act", f.withdrawn)
+	}
+
+	// Returning to the terminal IS the acknowledgement, and now it must go.
+	updated, _ = m.Update(tea.FocusMsg{})
+	m = updated.(Model)
+	updated, _ = m.Update(workSpinnerTickMsg{})
+	m = updated.(Model)
+
+	if len(f.withdrawn) != 1 {
+		t.Fatalf("withdrew %d toasts after the user came back, want 1", len(f.withdrawn))
+	}
+	if _, still := m.outstandingToasts[pane.ID]; still {
+		t.Error("a withdrawn toast must not stay on the outstanding list")
+	}
+}
+
+// The other half of the same rule. ackFocusedPane runs at the top of EVERY
+// Update, so if it acknowledges while the terminal is in the background it
+// clears the mark within one tick — the toast is raised and then swept away
+// before the user can see it, which looks identical to no toast at all.
+func TestAckFocusedPane_DoesNotAcknowledgeWhileTerminalIsBlurred(t *testing.T) {
+	m, _, pane := wiredToastModel(t)
+	m.termFocused = false
+	pane.unseen = true
+
+	m.ackFocusedPane()
+
+	if !pane.unseen {
+		t.Error("a pane cannot be acknowledged by a window the user is not looking at")
+	}
+
+	// Coming back IS the acknowledgement.
+	m.termFocused = true
+	m.ackFocusedPane()
+	if pane.unseen {
+		t.Error("returning to the terminal must acknowledge the focused pane")
+	}
+}
+
 // The sweep must run from Update, not only when a test calls it. Deleting the
 // call at the top of Update fails exactly here.
 func TestUpdate_SweepWithdrawsAfterTheUserAnswers(t *testing.T) {

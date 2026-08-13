@@ -2210,9 +2210,32 @@ func (d *Daemon) handleUpdatePane(conn *ipc.Conn, msg *ipc.Message) {
 	}
 	if payload.OverlayVisible != nil {
 		d.applyOverlayVisibility(conn, pane, *payload.OverlayVisible)
+		if !updateTouchesBroadcastState(payload) {
+			// Nothing a client can observe changed: neither OverlayHiddenAt nor
+			// OverlayShownAt is on the wire or on disk (the snapshot passes
+			// includeOverlays=false). Broadcasting the complete workspace state
+			// here is a must-deliver frame carrying zero changed state, and this
+			// branch fires on every tab switch and once per overlay-bearing tab
+			// on every attach round — landing exactly when the 64-slot critical
+			// queue is most loaded. The snapshot request is skipped for the same
+			// reason: it would schedule a write of data the snapshot excludes.
+			return
+		}
 	}
 	d.broadcastState()
 	d.requestSnapshot()
+}
+
+// updateTouchesBroadcastState reports whether a partial pane update carried any
+// field a client or the disk snapshot can see. Enumerated rather than inferred
+// from "OverlayVisible is the only non-nil field", so a new field added to
+// UpdatePanePayload without a line here keeps broadcasting — the safe direction.
+func updateTouchesBroadcastState(p ipc.UpdatePanePayload) bool {
+	return p.Name != "" ||
+		p.CWD != "" ||
+		p.Muted != nil ||
+		p.Eager != nil ||
+		p.PinnedAttention != nil
 }
 
 func (d *Daemon) handleReloadPlugins() {

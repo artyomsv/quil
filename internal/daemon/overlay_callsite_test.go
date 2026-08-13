@@ -263,6 +263,56 @@ func TestSweepIdleOverlays_EvictionIsQuietAndBroadcastsOnce(t *testing.T) {
 	}
 }
 
+// A visibility-only update carries nothing any client can observe: neither
+// OverlayHiddenAt nor OverlayShownAt is on the wire or on disk. Broadcasting the
+// complete workspace state after one was therefore a must-deliver frame
+// conveying zero changed state — and this branch made that happen on every tab
+// switch, and N times per attach round. Same critical-queue pressure as the
+// per-pane eviction broadcast, on a far hotter path.
+//
+// Drives the real dispatch (handleMessage → handleUpdatePane) over a real conn,
+// which is also the only way the overlay field's routing is exercised at all.
+func TestHandleUpdatePane_VisibilityOnlyUpdateDoesNotBroadcast(t *testing.T) {
+	d, sock := overlayServerDaemonWithConfig(t, config.Default())
+	tab := d.session.CreateTab("t")
+	p := overlayPane(t, d, tab.ID)
+
+	client := attachTestClient(t, sock)
+	defer client.Close()
+	frames := countWorkspaceFrames(client)
+	waitUntil(t, "the attach broadcast to land", func() bool { return frames.Count() > 0 })
+	frames.Reset()
+
+	reportOverlayVisible(t, client, p.ID, false)
+	waitUntil(t, "the visibility report to be applied", func() bool {
+		return !overlayHiddenAt(p).IsZero()
+	})
+	time.Sleep(100 * time.Millisecond)
+
+	if n := frames.Count(); n != 0 {
+		t.Errorf("a visibility-only update broadcast %d workspace_state frames, want 0", n)
+	}
+
+	// Any other field in the same message still broadcasts — the skip is about
+	// the overlay field being unobservable, not about this handler going quiet.
+	visible := true
+	msg, err := ipc.NewMessage(ipc.MsgUpdatePane, ipc.UpdatePanePayload{
+		PaneID:         p.ID,
+		Name:           "renamed",
+		OverlayVisible: &visible,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Send(msg); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	waitUntil(t, "the rename to broadcast", func() bool { return frames.Count() == 1 })
+	if p.Name != "renamed" {
+		t.Errorf("pane name = %q, want the rename applied alongside the visibility field", p.Name)
+	}
+}
+
 // The narrow order this DOES leave: a child that exits on its own while the
 // sweep is holding its snapshot, so the eviction destroys the pane first and
 // the exit callback arrives second. "Not found" is then the ordinary outcome,

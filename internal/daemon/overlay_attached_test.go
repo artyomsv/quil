@@ -167,12 +167,22 @@ func TestHandleUpdatePane_AnUnattachedConnCannotClaimAnOverlay(t *testing.T) {
 	tab := d.session.CreateTab("t")
 	p := overlayPane(t, d, tab.ID)
 
+	p.PluginMu.Lock()
+	p.OverlayHiddenAt = time.Now()
+	p.PluginMu.Unlock()
+
 	raw, err := ipc.NewClient(sock) // dials, never attaches
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
 	defer raw.Close()
 	reportOverlayVisible(t, raw, p.ID, true)
+	// The timestamps still move for an unattached conn — that is unchanged
+	// partial-update behaviour — and waiting on it is what proves the report
+	// was processed before the disconnect below.
+	waitUntil(t, "the unattached conn's report to be applied", func() bool {
+		return overlayHiddenAt(p).IsZero()
+	})
 
 	other := attachTestClient(t, sock)
 	waitUntil(t, "both conns to be accepted", func() bool { return d.server.ConnCount() == 2 })

@@ -137,10 +137,18 @@ type DesktopConfig struct {
 	// one toast, not two.
 	Cooldown string `toml:"cooldown"`
 
-	// RequireBlur suppresses toasts while the terminal has focus. Turning it
-	// off is the escape hatch for a terminal that does not implement focus
-	// reporting (DEC 1004), where no focus event ever arrives and the gate
-	// would otherwise suppress everything forever.
+	// RequireBlur, when true, suppresses toasts while the terminal has focus AT
+	// ALL — even for a pane in another project or tab that you cannot see.
+	//
+	// Defaults FALSE, because the default rule is "you are not looking at that
+	// pane": another tab, another project or another application all qualify.
+	// Requiring the whole terminal to be unfocused was the original behaviour
+	// and it removed most of the feature's value — an agent parking in project
+	// B while you work in project A is the case Quil exists for, and it
+	// produced nothing.
+	//
+	// Turn it on if cross-tab toasts feel noisy and you only want to be told
+	// once you have left the terminal entirely.
 	RequireBlur bool `toml:"require_blur"`
 }
 
@@ -391,7 +399,7 @@ func Default() Config {
 				Blocked:     true,
 				Done:        true,
 				Cooldown:    "30s",
-				RequireBlur: true,
+				RequireBlur: false,
 			},
 			Hooks: HookNotificationsConfig{
 				Claude:   "default",

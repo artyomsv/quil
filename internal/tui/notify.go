@@ -153,9 +153,7 @@ func (m *Model) raiseAttentionToast(pane *PaneModel, proj *ProjectModel, wasBloc
 	if pane.Muted {
 		return
 	}
-	// The whole premise is "you are not looking at Quil". RequireBlur is the
-	// escape hatch for a terminal that never reports focus at all.
-	if cfg.RequireBlur && m.termFocused {
+	if m.suppressedByAttention(pane.ID) {
 		return
 	}
 
@@ -172,8 +170,66 @@ func (m *Model) raiseAttentionToast(pane *PaneModel, proj *ProjectModel, wasBloc
 	m.emitToast(pane, proj, kind)
 }
 
+// suppressedByAttention reports whether the user is demonstrably already
+// looking at this pane, in which case a toast tells them nothing.
+//
+// "Looking at it" means the terminal has focus AND the pane is the active pane
+// of the active tab of the active project. Anything else — another tab,
+// another project, another application — is a pane the user cannot see, and
+// those are exactly the ones worth a toast. Quil's whole premise is agents
+// running in projects you are not currently looking at.
+//
+// An earlier version gated on the terminal being unfocused alone, which made
+// the feature useless for its main case: an agent parking in project B while
+// you work in project A produced nothing at all. That was wrong, and it was
+// wrong in the direction that quietly removes most of the value.
+//
+// RequireBlur remains as an opt-in for the stricter behaviour — never toast
+// while the terminal has focus at all — for anyone who finds cross-tab toasts
+// noisy. It now defaults false, so the default matches what the sidebar
+// already does.
+func (m *Model) suppressedByAttention(paneID string) bool {
+	if !m.termFocused {
+		return false // the whole app is in the background
+	}
+	if m.cfg.Notification.Desktop.RequireBlur {
+		return true // opt-in: focused terminal suppresses everything
+	}
+	return m.paneOnScreenFocused(paneID)
+}
+
+// paneOnScreenFocused reports whether this pane is the one the user is
+// actually looking at right now.
+//
+// Same three-part test applyWorkTransition uses to decide whether a completed
+// turn counts as `unseen`, so the toast and the sidebar cannot disagree about
+// what "you saw it" means.
+func (m *Model) paneOnScreenFocused(paneID string) bool {
+	pane, proj, tabIdx := m.findPaneAndTab(paneID)
+	if pane == nil || proj == nil || proj != m.cur() {
+		return false
+	}
+	if tabIdx != proj.activeTab || tabIdx >= len(proj.tabs) {
+		return false
+	}
+	return proj.tabs[tabIdx].ActivePane == paneID
+}
+
+// focusedPaneID is the pane the user is looking at, or "" when the terminal is
+// in the background. Used only to notice that it changed.
+func (m *Model) focusedPaneID() string {
+	if !m.termFocused {
+		return ""
+	}
+	tab := m.activeTabModel()
+	if tab == nil {
+		return ""
+	}
+	return tab.ActivePane
+}
+
 // raiseDeferredToasts fires for panes that ALREADY need attention, at the
-// moment the terminal loses focus.
+// moment the user stops looking at them.
 //
 // Without this the feature only works when the user happens to be away at the
 // exact instant an agent parks. The common real sequence is the opposite: you
@@ -198,6 +254,9 @@ func (m *Model) raiseDeferredToasts() {
 			}
 			for _, pane := range tab.Leaves() {
 				if _, showing := m.outstandingToasts[pane.ID]; showing {
+					continue
+				}
+				if m.suppressedByAttention(pane.ID) {
 					continue
 				}
 				switch {

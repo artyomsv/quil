@@ -58,7 +58,7 @@ func toastModel(t *testing.T) (*Model, *fakeNotifier, *PaneModel) {
 	// copy on the Model for a Settings toggle to fall out of step with.
 	m.cfg.Notification.Desktop = config.DesktopConfig{
 		Enabled: true, Blocked: true, Done: true,
-		Cooldown: "30s", RequireBlur: true,
+		Cooldown: "30s", RequireBlur: false,
 	}
 	m.termFocused = false
 	return &m, f, pane
@@ -122,10 +122,12 @@ func TestRaiseAttentionToast_Gates(t *testing.T) {
 		setup func(m *Model, p *PaneModel)
 		want  int
 	}{
-		{"terminal focused", func(m *Model, p *PaneModel) { m.termFocused = true }, 0},
-		{"focused but require_blur off", func(m *Model, p *PaneModel) {
+		// The fixture's pane IS the active pane of the active tab, so a focused
+		// terminal means the user is looking straight at it.
+		{"looking at this very pane", func(m *Model, p *PaneModel) { m.termFocused = true }, 0},
+		{"focused, but this pane is not the active one", func(m *Model, p *PaneModel) {
 			m.termFocused = true
-			m.cfg.Notification.Desktop.RequireBlur = false
+			m.projects[0].tabs[0].ActivePane = "pane-99999999"
 		}, 1},
 		{"feature disabled", func(m *Model, p *PaneModel) {
 			m.cfg.Notification.Desktop.Enabled = false
@@ -256,6 +258,127 @@ func TestRaiseAttentionToast_IncludesBlockedReasonWhenPresent(t *testing.T) {
 	}
 }
 
+// --------------------------------------------------------- the attention gate
+
+// The rule is "you are not looking at THAT PANE" — not "you have left the
+// terminal". An agent parking in another project while you work in this one is
+// the case Quil exists for, and the original terminal-blur-only gate produced
+// nothing for it.
+func TestSuppression_OnlyForThePaneOnScreen(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+
+	watched := &PaneModel{ID: toastPaneID, Name: "watched"}
+	background := &PaneModel{ID: toastPaneID2, Name: "background"}
+	projA := &ProjectModel{ID: "proj-a", Name: "a", tabs: []*TabModel{tabWith(watched)}}
+	projB := &ProjectModel{ID: "proj-b", Name: "b", tabs: []*TabModel{tabWith(background)}}
+
+	m := Model{projects: []*ProjectModel{projA, projB}, activeProject: 0}
+	f := &fakeNotifier{}
+	m.SetDesktopNotifier(f, notify.Variant(false), 1)
+	m.cfg.Notification.Desktop = config.DesktopConfig{
+		Enabled: true, Blocked: true, Done: true, Cooldown: "30s",
+	}
+	m.termFocused = true // user is IN Quil, looking at project A
+	projA.tabs[0].ActivePane = watched.ID
+
+	// The pane on screen: suppressed, the user can see it.
+	watched.blockedSince = time.Now()
+	m.raiseAttentionToast(watched, projA, false, false)
+	if len(f.sent) != 0 {
+		t.Errorf("toasted for the pane the user is looking at (%d sent)", len(f.sent))
+	}
+
+	// A pane in ANOTHER project: must toast — this is the whole feature.
+	background.blockedSince = time.Now()
+	m.raiseAttentionToast(background, projB, false, false)
+	if len(f.sent) != 1 {
+		t.Fatalf("sent %d toasts for a pane in another project, want 1", len(f.sent))
+	}
+	if !strings.Contains(f.sent[0].Title, "background") {
+		t.Errorf("Title = %q, want the background pane", f.sent[0].Title)
+	}
+}
+
+// A pane in another TAB of the same project is equally invisible.
+func TestSuppression_OtherTabStillToasts(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+
+	front := &PaneModel{ID: toastPaneID}
+	back := &PaneModel{ID: toastPaneID2}
+	proj := &ProjectModel{ID: "p", Name: "p", tabs: []*TabModel{tabWith(front), tabWith(back)}}
+	proj.activeTab = 0
+	proj.tabs[0].ActivePane = front.ID
+
+	m := Model{projects: []*ProjectModel{proj}, activeProject: 0}
+	f := &fakeNotifier{}
+	m.SetDesktopNotifier(f, notify.Variant(false), 1)
+	m.cfg.Notification.Desktop = config.DesktopConfig{Enabled: true, Blocked: true, Done: true, Cooldown: "30s"}
+	m.termFocused = true
+
+	back.blockedSince = time.Now()
+	m.raiseAttentionToast(back, proj, false, false)
+
+	if len(f.sent) != 1 {
+		t.Errorf("sent %d toasts for a pane in a background tab, want 1", len(f.sent))
+	}
+}
+
+// require_blur is the opt-in stricter mode for anyone who finds cross-tab
+// toasts noisy.
+func TestSuppression_RequireBlurSuppressesEverythingWhileFocused(t *testing.T) {
+	m, f, pane := toastModel(t)
+	m.cfg.Notification.Desktop.RequireBlur = true
+	m.termFocused = true
+	pane.blockedSince = time.Now()
+
+	m.raiseAttentionToast(pane, m.projects[0], false, false)
+
+	if len(f.sent) != 0 {
+		t.Errorf("sent %d toasts with require_blur while focused, want 0", len(f.sent))
+	}
+}
+
+// Switching tab or project away from a waiting pane must surface it, exactly
+// like leaving the app does.
+func TestUpdate_SwitchingAwayRaisesDeferredToast(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+
+	a := &PaneModel{ID: toastPaneID}
+	b := &PaneModel{ID: toastPaneID2}
+	proj := &ProjectModel{ID: "p", Name: "p", tabs: []*TabModel{tabWith(a), tabWith(b)}}
+	proj.activeTab = 0
+	proj.tabs[0].ActivePane = a.ID
+	proj.tabs[1].ActivePane = b.ID
+
+	m := Model{
+		client:        newFakeConn(),
+		projects:      []*ProjectModel{proj},
+		activeProject: 0,
+		notifications: NewNotificationCenter(30, 200),
+	}
+	f := &fakeNotifier{}
+	m.SetDesktopNotifier(f, notify.Variant(false), 1)
+	m.cfg.Notification.Desktop = config.DesktopConfig{Enabled: true, Blocked: true, Done: true, Cooldown: "30s"}
+	m.termFocused = true
+	m.lastFocusedPaneID = a.ID
+
+	// Pane A parks while the user is looking straight at it: correctly silent.
+	updated, _ := m.Update(paneEventMsg{PaneID: a.ID, Type: "hook.claude.PermissionRequest"})
+	m = updated.(Model)
+	if len(f.sent) != 0 {
+		t.Fatalf("sent %d toasts for the focused pane, want 0", len(f.sent))
+	}
+
+	// User switches to the other tab — pane A is now out of sight.
+	proj.activeTab = 1
+	updated, _ = m.Update(workSpinnerTickMsg{})
+	_ = updated
+
+	if len(f.sent) != 1 {
+		t.Errorf("sent %d toasts after switching away, want 1", len(f.sent))
+	}
+}
+
 // ------------------------------------------------------- deferred (on blur)
 
 // The sequence a real user produced, from the daemon log: the agent finished
@@ -327,7 +450,7 @@ func TestUpdate_BlurWithNothingWaitingIsSilent(t *testing.T) {
 // if it actually left an unseen mark.
 func TestBlur_RaisesForUnseenPane(t *testing.T) {
 	m, f, pane := toastModel(t)
-	m.termFocused = true
+	m.termFocused = false // the user has left the terminal
 	pane.unseen = true
 
 	m.raiseDeferredToasts()
@@ -481,7 +604,7 @@ func wiredToastModel(t *testing.T) (Model, *fakeNotifier, *PaneModel) {
 	m.SetDesktopNotifier(f, notify.Variant(false), 4321)
 	m.cfg.Notification.Desktop = config.DesktopConfig{
 		Enabled: true, Blocked: true, Done: true,
-		Cooldown: "30s", RequireBlur: true,
+		Cooldown: "30s", RequireBlur: false,
 	}
 	m.termFocused = false
 	return m, f, pane

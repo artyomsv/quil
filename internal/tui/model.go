@@ -615,6 +615,10 @@ type Model struct {
 	// The kind is load-bearing, not bookkeeping — see toastKind.
 	outstandingToasts map[string]toastKind
 
+	// lastFocusedPaneID is the previous value of focusedPaneID(), so Update can
+	// notice the user moved away from a pane without walking the workspace.
+	lastFocusedPaneID string
+
 	mcpHighlights   map[string]bool     // pane IDs with active MCP highlight
 	mcpHighlightSeq map[string]int      // sequence number for highlight timer reset
 	notifications   *NotificationCenter // notification sidebar
@@ -955,6 +959,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// passes through, and the sweep's own emptiness check makes it free in the
 	// common case. It must not be an edge hook — see sweepOutstandingToasts.
 	m.sweepOutstandingToasts()
+	// Moving away from a pane is a trigger, exactly like leaving the app: a
+	// pane that parked while you were looking at it was correctly suppressed,
+	// and switching tab or project is the moment it becomes something you
+	// cannot see. Keyed on the focused pane CHANGING so this costs one string
+	// compare per message rather than a workspace walk.
+	if cur := m.focusedPaneID(); cur != m.lastFocusedPaneID {
+		m.lastFocusedPaneID = cur
+		m.raiseDeferredToasts()
+	}
 	// A context menu whose target vanished (daemon reconciliation, pane
 	// destroy, MsgDestroyProject from another client) closes itself. Single
 	// choke point — no need to audit every pruning path.

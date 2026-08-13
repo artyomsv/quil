@@ -261,5 +261,17 @@ func handleActivate() {
 	}
 	// A TUI that exited between the toast and the click leaves no listener.
 	// Exit 0 silently: a stale toast must never pop an error window.
-	_ = notify.SendActivate(pid, paneID)
+	if err := notify.SendActivate(pid, paneID); err != nil {
+		return
+	}
+
+	// Then bring the terminal forward. Routing without raising means the user
+	// clicks a toast, nothing appears to happen, and they alt-tab to discover
+	// Quil moved — which reads as the click not working.
+	//
+	// AFTER SendActivate, not before: the jump should already be applied by the
+	// time the window appears, so the user sees the right pane rather than
+	// watching it switch. Best-effort — a failure leaves them exactly where
+	// they were.
+	notify.RaiseWindowFor(pid)
 }

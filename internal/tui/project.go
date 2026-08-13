@@ -82,6 +82,12 @@ func (m *Model) switchProject(i int) tea.Cmd {
 	if m.notesMode && m.notesEditor != nil {
 		m.exitNotesModeInPlace()
 	}
+	// Captured before any mutation below: this is the tab actually on screen
+	// right now, whose overlay (if any) is about to go off screen. Same pair
+	// switchTab reports one level down — overlayOnScreen answers for the ACTIVE
+	// PROJECT's active tab, so a project switch changes what it reports for two
+	// tabs without touching either tab's overlayVisible flag.
+	fromTab := m.activeTabModel()
 	// Recorded by ID: the bounce target has to survive a workspace
 	// reconciliation that reorders the list, and an index does not.
 	m.prevProject = ""
@@ -116,6 +122,12 @@ func (m *Model) switchProject(i int) tea.Cmd {
 		m.sendForDest(p.Dest, msg)
 	}
 
+	// Built AFTER m.activeProject moved so both answers describe the new state.
+	// Reuses the helper switchTab, jumpToPane and jumpToNextBlocked share, so
+	// the two-report rule still has one implementation.
+	if cmd := m.overlayTruthTransitionCmd(fromTab, m.activeTabModel()); cmd != nil {
+		return tea.Batch(m.resizeAllPanes(), cmd)
+	}
 	return m.resizeAllPanes()
 }
 
@@ -415,6 +427,16 @@ func indexOfTab(tabs []*TabModel, id string) int {
 		}
 	}
 	return 0
+}
+
+// tabAt returns the tab at i, or nil when i is out of range. indexOfTab's
+// fallback lands on 0, which is out of range for an EMPTY project — the state a
+// destination is in between being seeded and its first broadcast.
+func tabAt(tabs []*TabModel, i int) *TabModel {
+	if i < 0 || i >= len(tabs) {
+		return nil
+	}
+	return tabs[i]
 }
 
 // projectByID returns the project with the given ID, or nil. Unlike

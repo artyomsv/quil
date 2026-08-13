@@ -24,7 +24,7 @@ func callUpdatePaneEager(t *testing.T, d *Daemon, paneID string, eager bool) {
 	if err != nil {
 		t.Fatalf("build msg: %v", err)
 	}
-	d.handleUpdatePane(msg)
+	d.handleUpdatePane(nil, msg)
 }
 
 func TestHandleUpdatePane_EagerFieldToggle(t *testing.T) {

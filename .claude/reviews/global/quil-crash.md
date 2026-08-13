@@ -51,3 +51,4 @@ Dismissed:
 
 Filed as tech debt rather than fixed here:
 - Conn.write's 30 s deadline does nothing over ssh (stdioConn.SetWriteDeadline returns ErrNoDeadline; the error is discarded) and sendLoop returns without closing on write failure. No longer reachable from the client send path, since clientSendTimeout fires on its own timer. See techdebt/3-2-conn-write-deadline-absent-over-ssh.md
+  - RESOLVED 2026-08-11 on branch fix/ipc-write-teardown, after the "not currently a bug" half of that assessment turned out to be wrong: the DAEMON side reached it on a Unix socket, where the deadline does fire, and the missing close produced a four-minute silent outage. All three of the debt file's fix steps are now done (report the refused deadline once per conn, retire the conn on write failure, document which transports honour it), so the file was removed.

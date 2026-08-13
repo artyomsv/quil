@@ -74,10 +74,22 @@ func (m *Model) findPaneAndTab(paneID string) (*PaneModel, *ProjectModel, int) {
 // project boundary (MCP set_active_pane, sidebar notification navigate,
 // pane-history back-navigation, the command palette's goToPane) — one
 // implementation instead of four hand-rolled copies of the same sequence.
-func (m *Model) jumpToPane(paneID string) bool {
+//
+// The returned tea.Cmd reports overlay visibility for both the tab being
+// left and the tab being entered, exactly like switchTab — see
+// overlayTruthTransitionCmd. It is built AFTER m.activeProject moves, which is
+// what makes the answer right for a CROSS-PROJECT jump: overlayOnScreen asks
+// about the active project, so a `from` tab left behind in another project
+// reports hidden rather than re-stamping its OverlayShownAt.
+// This is the same active-tab-changing choke
+// point switchTab is, and was missing this report for a while: a tab left
+// via this path kept an overlay marked visible forever (never swept), and a
+// tab entered here could still be stamped hidden from an earlier hide,
+// leaving its overlay one sweep away from being destroyed while on screen.
+func (m *Model) jumpToPane(paneID string) (bool, tea.Cmd) {
 	pane, proj, tabIdx := m.findPaneAndTab(paneID)
 	if pane == nil {
-		return false
+		return false, nil
 	}
 	// Notes mode is torn down BEFORE the tab moves, which is the contract
 	// exitNotesModeInPlace states: it reverts focus mode on the tab that is
@@ -93,6 +105,9 @@ func (m *Model) jumpToPane(paneID string) bool {
 	if m.notesMode {
 		m.exitNotesModeInPlace()
 	}
+	// Captured before any mutation below: this is the tab actually on screen
+	// right now, whose overlay (if any) is about to go off screen.
+	from := m.activeTabModel()
 	for i, p := range m.projects {
 		if p == proj {
 			// Mirrors switchProject's own guard: the sidebar scroll offset is
@@ -110,16 +125,17 @@ func (m *Model) jumpToPane(paneID string) bool {
 		}
 	}
 	proj.activeTab = tabIdx
-	proj.tabs[tabIdx].ActivePane = paneID
+	target := proj.tabs[tabIdx]
+	target.ActivePane = paneID
 	// The jump may have crossed a project — and therefore a daemon — boundary,
 	// so every later unstamped send has a new right answer.
 	m.syncActiveDest()
-	m.notifyTabSwitch(proj.tabs[tabIdx])
+	m.notifyTabSwitch(target)
 	// Runs AFTER the project-boundary reset above: that reset zeroes
 	// sidebarScroll outright, so computing the target offset before it would
 	// have this call's work thrown away on every cross-project jump.
 	m.scrollSidebarToPane(paneID)
-	return true
+	return true, m.overlayTruthTransitionCmd(from, target)
 }
 
 // notifyTabSwitch tells a tab's OWNING daemon that this tab is now active.

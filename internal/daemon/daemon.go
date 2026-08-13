@@ -155,6 +155,31 @@ type Daemon struct {
 	// otherwise both observe it free and both spawn `claude --resume` on one
 	// transcript — the corruption this feature exists to prevent.
 	resumeClaimMu sync.Mutex
+
+	// overlayPolicyState holds the live overlay retention settings (idle
+	// timeout, max live). Seeded from config at construction; F1 → Settings
+	// pushes runtime updates via MsgOverlayPolicy without a daemon restart.
+	overlayPolicyState overlayPolicyState
+
+	// attachedConns maps each conn that has sent MsgAttach — the clients, as
+	// distinct from every conn (see markClientAttached) — to the set of overlay
+	// panes that client currently has ON SCREEN.
+	//
+	// Visibility is per client rather than one daemon-wide field because
+	// otherwise whichever conn spoke last defines it: with two TUIs attached,
+	// the second one merely switching tabs reports an overlay hidden while the
+	// first has it on screen, and the sweep destroys a lazygit the user is
+	// looking at five minutes later. An overlay is hidden only when NO client
+	// claims it, which is also what makes a detached session fall out for free
+	// — no clients, no claims, everything hidden.
+	//
+	// Written from each conn's own dispatch goroutine and from the disconnect
+	// callback, so it carries its own mutex: sm.mu is the wrong lock here,
+	// since a reader parked behind an RWMutex writer is the failure mode this
+	// package keeps being bitten by. Nothing that takes PluginMu may be called
+	// while it is held.
+	attachedMu    sync.Mutex
+	attachedConns map[*ipc.Conn]map[string]bool
 }
 
 func New(cfg config.Config) *Daemon {
@@ -182,6 +207,12 @@ func New(cfg config.Config) *Daemon {
 		snapGens:   make(map[string]uint64),
 	}
 	d.memReport = memreport.NewCollector(d.session, 5*time.Second)
+	// Clamped like a pushed policy: config.toml is hand-edited, so it can carry
+	// exactly the values the IPC path is bounded against.
+	d.overlayPolicyState.set(clampOverlayPolicy(ipc.OverlayPolicyPayload{
+		IdleTimeoutMinutes: cfg.Overlay.IdleTimeoutMinutes,
+		MaxLive:            cfg.Overlay.MaxLive,
+	}))
 	return d
 }
 
@@ -247,10 +278,7 @@ func (d *Daemon) Start() error {
 	}
 
 	sockPath := config.SocketPath()
-	d.server = ipc.NewServer(sockPath, d.handleMessage, func(conn *ipc.Conn) {
-		d.requestSnapshot()
-		d.events.RemoveWatchersByConn(conn)
-	})
+	d.server = ipc.NewServer(sockPath, d.handleMessage, d.onClientDisconnect)
 
 	if err := d.server.Start(); err != nil {
 		return fmt.Errorf("start IPC server: %w", err)
@@ -432,6 +460,55 @@ func (d *Daemon) Stop() {
 			}
 		}
 	})
+}
+
+// markClientAttached records a connection that has sent MsgAttach.
+//
+// ATTACHMENT, not connection, is what "a client is here" means, and the
+// difference is not academic: every live MCP bridge holds an IPC conn for its
+// whole lifetime (cmd/quil/mcp.go dials once and closes on exit), and a bridge
+// is a child of the claude process in a PANE — so bridges routinely outlive the
+// TUI. Counting raw conns therefore answered "is anything connected", which in
+// any session with a claude pane wired to `quil mcp` is permanently yes (21
+// conns in the session that reported 7 live overlays), and the detached-session
+// stamp below never fired in exactly the configuration it was designed for.
+// Re-attaching on the same conn keeps that client's existing overlay claims:
+// the entry is created only when absent.
+func (d *Daemon) markClientAttached(conn *ipc.Conn) {
+	if conn == nil {
+		return
+	}
+	d.attachedMu.Lock()
+	if d.attachedConns == nil {
+		d.attachedConns = make(map[*ipc.Conn]map[string]bool)
+	}
+	if _, ok := d.attachedConns[conn]; !ok {
+		d.attachedConns[conn] = map[string]bool{}
+	}
+	d.attachedMu.Unlock()
+}
+
+// forgetAttachedClient drops a disconnecting conn, and with it every overlay
+// that client claimed visible. A conn that never attached is not in the set, so
+// dropping it changes nothing.
+func (d *Daemon) forgetAttachedClient(conn *ipc.Conn) {
+	d.attachedMu.Lock()
+	delete(d.attachedConns, conn)
+	d.attachedMu.Unlock()
+}
+
+// onClientDisconnect is ipc.Server's disconnect callback.
+//
+// handleConn's defer removes the disconnecting conn (removeConn) before
+// invoking this, and the attached set is keyed on that same conn — so the state
+// here is already exclusive of the client that just left.
+func (d *Daemon) onClientDisconnect(conn *ipc.Conn) {
+	d.requestSnapshot()
+	d.events.RemoveWatchersByConn(conn)
+	d.forgetAttachedClient(conn)
+	if n := d.hideUnclaimedOverlays(time.Now()); n > 0 {
+		log.Printf("overlay: %d marked hidden (no client has them on screen)", n)
+	}
 }
 
 // requestSnapshot sends a non-blocking snapshot request to the event loop.
@@ -1025,7 +1102,7 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 	case ipc.MsgDestroyPane:
 		d.handleDestroyPane(msg)
 	case ipc.MsgUpdatePane:
-		d.handleUpdatePane(msg)
+		d.handleUpdatePane(conn, msg)
 	case ipc.MsgUpdateLayout:
 		d.handleUpdateLayout(msg)
 	case ipc.MsgPaneInput:
@@ -1034,6 +1111,16 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		d.handleResizePane(msg)
 	case ipc.MsgReloadPlugins:
 		d.handleReloadPlugins()
+	case ipc.MsgOverlayPolicy:
+		var p ipc.OverlayPolicyPayload
+		// Checked, not best-effort: both fields use 0 for "disabled", so a
+		// malformed frame decoded into a zero struct would silently turn off
+		// both retention policies.
+		if err := msg.DecodePayload(&p); err != nil {
+			log.Printf("overlay policy: malformed payload: %v", err)
+			return
+		}
+		d.setOverlayPolicy(p)
 	case ipc.MsgShutdown:
 		d.shutdownOnce.Do(func() { close(d.shutdown) })
 
@@ -1234,6 +1321,11 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 		log.Printf("handleAttach: decode: %v", err)
 		return
 	}
+
+	// This is what makes the conn a CLIENT rather than just a connection — the
+	// distinction the detached-session overlay stamp turns on. Recorded before
+	// any of the work below, which has early returns of its own.
+	d.markClientAttached(conn)
 
 	cols, rows := attach.Cols, attach.Rows
 	if cols <= 0 {
@@ -1747,15 +1839,22 @@ func (d *Daemon) createPaneAt(payload ipc.CreatePanePayload, cwd, paneType strin
 		// writes go under PluginMu (same discipline as Muted).
 		pane.PluginMu.Lock()
 		pane.Overlay = true
+		pane.OverlayShownAt = time.Now()
 		// Overlay panes are muted at the source: a hidden lazygit
 		// refreshing must not ping the notification sidebar.
 		pane.Muted = true
 		pane.PluginMu.Unlock()
+		d.enforceOverlayCap(pane.ID)
 	}
 	d.applyResumeSessionID(pane, payload.ResumeSessionID)
 	log.Printf("pane created: %s (type=%s, tab=%s, overlay=%v)", pane.ID, paneType, payload.TabID, payload.Overlay)
 
-	ptySession := apty.New()
+	// Through newSessionFn rather than apty.New() — identical in production
+	// (the seam's zero pair IS apty.New()) and the smallest change that makes
+	// this function drivable from a test. It is the ONLY production call site
+	// of enforceOverlayCap, and a direct-call test of that function passes just
+	// as happily against a createPaneAt that no longer calls it.
+	ptySession := newSessionFn(0, 0)
 	if err := d.spawnPane(pane, ptySession, false); err != nil {
 		return pane, fmt.Errorf("start PTY error: %w", err)
 	}
@@ -1838,6 +1937,10 @@ func (d *Daemon) replacePaneAt(payload ipc.CreatePanePayload, cwd, paneType stri
 // truncates stale spools). Call it before or after the session delete,
 // whichever reads better at the call site.
 func (d *Daemon) cleanupPaneArtifacts(paneID string) {
+	// Overlay visibility claims are keyed by pane id, so a destroyed overlay
+	// would otherwise leave its id in every live client's claim set — in a
+	// daemon that runs for weeks, one entry per overlay ever opened.
+	d.forgetOverlayClaimsFor(paneID)
 	if d.hookSpool != nil {
 		d.hookSpool.Cleanup(paneID)
 	}
@@ -2060,7 +2163,10 @@ func (d *Daemon) repaintAfterResize(pane *Pane, typ string) {
 	pane.EnqueueInput([]byte(p.Persistence.RedrawKey))
 }
 
-func (d *Daemon) handleUpdatePane(msg *ipc.Message) {
+// handleUpdatePane applies a PARTIAL pane update. conn identifies the client
+// that sent it, which only the overlay-visibility field needs: that field is a
+// claim about one client's screen, not a daemon-wide fact.
+func (d *Daemon) handleUpdatePane(conn *ipc.Conn, msg *ipc.Message) {
 	var payload ipc.UpdatePanePayload
 	if err := msg.DecodePayload(&payload); err != nil {
 		return
@@ -2104,8 +2210,34 @@ func (d *Daemon) handleUpdatePane(msg *ipc.Message) {
 		pane.PluginMu.Unlock()
 		log.Printf("pane %s: pinned_attention=%v", pane.ID, *payload.PinnedAttention)
 	}
+	if payload.OverlayVisible != nil {
+		d.applyOverlayVisibility(conn, pane, *payload.OverlayVisible)
+		if !updateTouchesBroadcastState(payload) {
+			// Nothing a client can observe changed: neither OverlayHiddenAt nor
+			// OverlayShownAt is on the wire or on disk (the snapshot passes
+			// includeOverlays=false). Broadcasting the complete workspace state
+			// here is a must-deliver frame carrying zero changed state, and this
+			// branch fires on every tab switch and once per overlay-bearing tab
+			// on every attach round — landing exactly when the 64-slot critical
+			// queue is most loaded. The snapshot request is skipped for the same
+			// reason: it would schedule a write of data the snapshot excludes.
+			return
+		}
+	}
 	d.broadcastState()
 	d.requestSnapshot()
+}
+
+// updateTouchesBroadcastState reports whether a partial pane update carried any
+// field a client or the disk snapshot can see. Enumerated rather than inferred
+// from "OverlayVisible is the only non-nil field", so a new field added to
+// UpdatePanePayload without a line here keeps broadcasting — the safe direction.
+func updateTouchesBroadcastState(p ipc.UpdatePanePayload) bool {
+	return p.Name != "" ||
+		p.CWD != "" ||
+		p.Muted != nil ||
+		p.Eager != nil ||
+		p.PinnedAttention != nil
 }
 
 func (d *Daemon) handleReloadPlugins() {
@@ -2322,12 +2454,21 @@ func (d *Daemon) onPaneExit(pane *Pane, code int) {
 	// reconciliation clears the slot and the next Alt+G creates fresh.
 	// Normal panes survive as exited husks (existing behavior unchanged).
 	if isOverlay {
-		log.Printf("pane exit: auto-destroying overlay %s", pane.ID)
 		tabID := pane.TabID
-		d.cleanupPaneArtifacts(pane.ID)
 		if err := d.session.DestroyPane(pane.ID); err != nil {
-			log.Printf("onPaneExit: destroy overlay %s: %v", pane.ID, err)
+			// A retention eviction destroys the pane and the child exits
+			// afterwards, so "not found" here means the pane was already
+			// reaped — an ordinary outcome, and the pass that reclaimed it has
+			// already cleaned up and broadcast. Reporting it as a failure would
+			// put an error line and a redundant workspace-state frame on a
+			// success path, in a daemon that runs for weeks.
+			if !errors.Is(err, ErrPaneNotFound) {
+				log.Printf("onPaneExit: destroy overlay %s: %v", pane.ID, err)
+			}
+			return
 		}
+		log.Printf("pane exit: auto-destroying overlay %s", pane.ID)
+		d.cleanupPaneArtifacts(pane.ID)
 		// ensureTabNotEmpty is a cheap no-op when normal panes remain (the
 		// common case). It guards the degenerate case where an overlay was
 		// somehow the tab's only pane — shouldn't happen because
@@ -3665,6 +3806,7 @@ func (d *Daemon) idleChecker() {
 			return
 		case <-ticker.C:
 			d.checkIdlePanes()
+			d.sweepIdleOverlays(time.Now())
 		}
 	}
 }

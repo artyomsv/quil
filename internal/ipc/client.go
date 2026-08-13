@@ -63,9 +63,12 @@ func (c *Client) Send(msg *Message) error {
 	err := c.conn.SendBlocking(msg, cancel)
 	if errors.Is(err, ErrSendCanceled) {
 		// Same shape as enqueue's overflow branch: flag synchronously so every
-		// later Send short-circuits at once, close on its own goroutine because
-		// Close waits on sendLoop and the caller here may be the Update
-		// goroutine. The CAS keeps one Close per connection.
+		// later Send short-circuits at once, and close off the caller's
+		// goroutine — the caller here may be the Update goroutine, and Close
+		// closes the socket, which unparks whatever is in flight on it. (It
+		// does NOT wait on sendLoop, as this comment used to claim; Close only
+		// stores the flag, closes done, and closes raw.) The CAS keeps one
+		// Close per connection.
 		//
 		// Logged with the same detail as the daemon-side branch. This is the
 		// CLIENT-side overflow — the 2026-08-09 shape — so a silent give-up

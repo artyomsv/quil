@@ -120,7 +120,9 @@ func toggleWithDiscovery(m *Model, tab *TabModel, cwd string) tea.Cmd {
 // ---------------------------------------------------------------------------
 
 // TestHandleToggleLazygit_VisibleOverlay_Hides: when the overlay is already
-// visible, Alt+G hides it without sending any IPC.
+// visible, Alt+G hides it and reports the flip to the daemon (Task 8) — the
+// daemon's hidden-overlay timer has no other way to learn the overlay went
+// out of view, so that report is the only IPC a hide sends.
 func TestHandleToggleLazygit_VisibleOverlay_Hides(t *testing.T) {
 	t.Parallel()
 	m, fake, tab := overlayTestModel(t, "")
@@ -135,8 +137,19 @@ func TestHandleToggleLazygit_VisibleOverlay_Hides(t *testing.T) {
 	if tab.overlayVisible {
 		t.Error("overlayVisible must be false after hiding")
 	}
-	if len(fake.sent) != 0 {
-		t.Errorf("expected no IPC sends on hide, got %d", len(fake.sent))
+	if len(fake.sent) != 1 {
+		t.Fatalf("expected exactly 1 IPC send (visibility) on hide, got %d: %v", len(fake.sent), debugSentTypes(fake))
+	}
+	if decodeSentType(t, fake, 0) != ipc.MsgUpdatePane {
+		t.Errorf("sent type = %q, want %q", decodeSentType(t, fake, 0), ipc.MsgUpdatePane)
+	}
+	var p ipc.UpdatePanePayload
+	decodeSentPayload(t, fake, 0, &p)
+	if p.PaneID != "pane-o" {
+		t.Errorf("PaneID = %q, want pane-o", p.PaneID)
+	}
+	if p.OverlayVisible == nil || *p.OverlayVisible {
+		t.Errorf("OverlayVisible = %v, want explicit false", p.OverlayVisible)
 	}
 }
 
@@ -288,6 +301,15 @@ func TestHandleToggleLazygit_DifferentRepo_DestroysAndCreates(t *testing.T) {
 	// Overlay slot must be cleared (nil) — the new one arrives from the daemon.
 	if tab.overlayPane != nil {
 		t.Error("overlay slot must be cleared after destroy+create")
+	}
+	// …and the OLD pane must be reported hidden on the wire. The local flag
+	// alone is not the behaviour that matters: the pane is being destroyed on a
+	// daemon that keeps its own visibility state, and a replace that never says
+	// the old overlay went hidden leaves OverlayHiddenAt zero. Counting the
+	// destroy/create pair cannot catch that — the report rides the same batch
+	// and was droppable with every assertion above still green.
+	if v, ok := overlayReportsIn(t, fake.sent)["pane-old"]; !ok || v {
+		t.Errorf("the replaced overlay reported visible=%v (reported=%v); want an explicit false", v, ok)
 	}
 }
 
@@ -726,5 +748,71 @@ func TestCreateOverlay_DefenseInDepth_UnavailableFlashes(t *testing.T) {
 	if len(fake.sent) != 0 {
 		t.Errorf("createOverlay defense-in-depth: expected zero IPC sends, got %d: %v",
 			len(fake.sent), debugSentTypes(fake))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// overlayVisibilityCmd tests
+//
+// The daemon cannot see overlayVisible, so a hide that does not report itself
+// leaves the overlay alive forever. Assert on what reaches the wire, not on
+// the local flag — the flag flipping is not the behaviour that matters.
+// ---------------------------------------------------------------------------
+
+func TestOverlayVisibility_HideReportsFalseToTheDaemon(t *testing.T) {
+	conn := newFakeConn()
+	m := Model{client: conn}
+	tab := &TabModel{overlayPane: &PaneModel{ID: "pane-ov"}, overlayVisible: true}
+
+	cmd := m.overlayVisibilityCmd(tab, false)
+	if cmd == nil {
+		t.Fatal("no command produced for a hide")
+	}
+	cmd()
+
+	var got *ipc.UpdatePanePayload
+	for _, sent := range conn.sent {
+		if sent.Type == ipc.MsgUpdatePane {
+			var p ipc.UpdatePanePayload
+			if err := sent.DecodePayload(&p); err == nil && p.PaneID == "pane-ov" {
+				got = &p
+			}
+		}
+	}
+	if got == nil {
+		t.Fatal("no update_pane sent for the overlay")
+	}
+	if got.OverlayVisible == nil || *got.OverlayVisible {
+		t.Errorf("OverlayVisible = %v, want explicit false", got.OverlayVisible)
+	}
+}
+
+func TestOverlayVisibility_ShowReportsTrue(t *testing.T) {
+	conn := newFakeConn()
+	m := Model{client: conn}
+	tab := &TabModel{overlayPane: &PaneModel{ID: "pane-ov"}}
+
+	if cmd := m.overlayVisibilityCmd(tab, true); cmd != nil {
+		cmd()
+	}
+	for _, sent := range conn.sent {
+		if sent.Type != ipc.MsgUpdatePane {
+			continue
+		}
+		var p ipc.UpdatePanePayload
+		if err := sent.DecodePayload(&p); err == nil && p.PaneID == "pane-ov" {
+			if p.OverlayVisible == nil || !*p.OverlayVisible {
+				t.Errorf("OverlayVisible = %v, want explicit true", p.OverlayVisible)
+			}
+			return
+		}
+	}
+	t.Fatal("no update_pane sent for the overlay")
+}
+
+func TestOverlayVisibility_NoOverlayProducesNoCommand(t *testing.T) {
+	m := Model{client: newFakeConn()}
+	if cmd := m.overlayVisibilityCmd(&TabModel{}, false); cmd != nil {
+		t.Error("a tab with no overlay must not send anything")
 	}
 }

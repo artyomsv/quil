@@ -1,6 +1,7 @@
 # QA Agent Memory Index
 
 ## Project
+- [project_ipc_write_window_wiring_gap.md](project_ipc_write_window_wiring_gap.md) — newConn → writeDeadline wiring is pinned by TestNewConn_UsesTheProductionWriteWindow; found by mutation, was uncovered
 - [project_test_tooling.md](project_test_tooling.md) — Docker test runner, no local Go, worktree isolation recipe, mutation-testing gate booleans/dispose calls, concurrent agents' stray zz_probe test files
 
 ## Feedback

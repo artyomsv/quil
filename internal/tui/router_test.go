@@ -569,7 +569,7 @@ func TestJumpToPaneSyncsTheActiveDest(t *testing.T) {
 		},
 		activeProject: 0,
 	}
-	if !m.jumpToPane("pane-gpu") {
+	if ok, _ := m.jumpToPane("pane-gpu"); !ok {
 		t.Fatal("jumpToPane could not reach the remote pane")
 	}
 

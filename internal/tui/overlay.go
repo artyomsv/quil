@@ -37,7 +37,7 @@ func (m *Model) handleToggleLazygit() tea.Cmd {
 	// Step 1: visible overlay → hide.
 	if tab.overlayVisible {
 		tab.overlayVisible = false
-		return tea.ClearScreen
+		return tea.Batch(tea.ClearScreen, m.overlayVisibilityCmd(tab, false))
 	}
 
 	// Step 2: resolve candidates from the active NORMAL pane's CWD.
@@ -128,7 +128,196 @@ func (m *Model) showOverlay(tab *TabModel) tea.Cmd {
 	// overlays are lazygit/non-canvas, so this is robustness, not a live bug).
 	tab.SetCanvas(tab.Width, tab.Height)
 	tab.Resize(tab.Width, tab.Height) // re-sync overlay pane dims
-	return tea.Batch(tea.ClearScreen, m.overlayResizeCmd(tab))
+	return tea.Batch(tea.ClearScreen, m.overlayResizeCmd(tab), m.overlayVisibilityCmd(tab, true))
+}
+
+// overlayVisibilityCmd tells the daemon whether this tab's overlay is on
+// screen, so its idle timer measures HIDDEN time rather than quiet time.
+//
+// Sent for the TAB's destination, like every other overlay message: Alt+G is
+// reachable from a background project's tab.
+func (m *Model) overlayVisibilityCmd(tab *TabModel, visible bool) tea.Cmd {
+	if tab == nil || tab.overlayPane == nil {
+		return nil
+	}
+	paneID, dest := tab.overlayPane.ID, tab.Dest
+	v := visible
+	return func() tea.Msg {
+		msg, err := ipc.NewMessage(ipc.MsgUpdatePane, ipc.UpdatePanePayload{
+			PaneID:         paneID,
+			OverlayVisible: &v,
+		})
+		if err != nil {
+			log.Printf("overlay: visibility encode: %v", err)
+			return nil
+		}
+		if err := m.sendForDest(dest, msg); err != nil {
+			log.Printf("overlay: visibility send: %v", err)
+		}
+		return nil
+	}
+}
+
+// overlayOnScreen reports whether this tab's overlay is actually being
+// rendered.
+//
+// tab.overlayVisible is not the whole answer: it survives a tab switch by
+// design (handleOverlayKey's alt+1..9 arm), while only the active tab of the
+// ACTIVE PROJECT paints — so for every background tab the flag overstates
+// visibility, and an overstated one is exempt from the idle sweep forever.
+//
+// Both levels are required, and the project one was added late. Scoping to the
+// tab's own project alone was defended on the grounds that a stricter rule
+// "would report a background project's overlay hidden with nothing to re-report
+// true when the user switches back". That was true before the truth protocol
+// existed; switchProject reports the transition now, exactly as switchTab does
+// one level down, so the tighter rule is safe — and without it a background
+// project's overlay stayed marked visible for the life of the daemon, defeating
+// idle eviction for the multi-project case entirely.
+func (m *Model) overlayOnScreen(tab *TabModel) bool {
+	if tab == nil || !tab.overlayVisible {
+		return false
+	}
+	for pi, p := range m.projects {
+		for i, t := range p.tabs {
+			if t == tab {
+				return i == p.activeTab && pi == m.activeProject
+			}
+		}
+	}
+	return false
+}
+
+// overlayTruthCmd reports this tab's CURRENT visibility, whatever it is.
+//
+// The five sites that flip tab.overlayVisible are not the only moments the
+// truth changes, and the daemon has no other source for it: a tab switch
+// changes which overlay paints without touching any flag, and an attach meets a
+// daemon whose copy may be stale in either direction (a TUI that exited with an
+// overlay on screen left it marked visible; a transient last-client disconnect
+// stamped every overlay hidden). Both paths go through this one helper so they
+// cannot drift apart.
+func (m *Model) overlayTruthCmd(tab *TabModel) tea.Cmd {
+	if tab == nil || tab.overlayPane == nil {
+		return nil
+	}
+	return m.overlayVisibilityCmd(tab, m.overlayOnScreen(tab))
+}
+
+// overlayTruthTransitionCmd reports overlay truth for both halves of an
+// active-tab change: the tab being LEFT (whose overlay, if any, just went off
+// screen) and the tab being ENTERED (whose overlay, if any, just came on
+// screen). Neither transition flips tab.overlayVisible, so without this pair
+// the daemon's copy is wrong for as long as the user stays away — and a
+// "visible" overlay left behind is exempt from the idle sweep forever, while
+// an overlay entered while still stamped hidden is one sweep away from being
+// destroyed out from under the user.
+//
+// Shared by every path that changes which tab is on screen — switchTab
+// (Alt+1..9), jumpToPane (MCP set_active_pane, the notification sidebar's
+// navigate, pane-history back-navigation, the palette's goToPane),
+// jumpToNextBlocked (Alt+Shift+A, the palette's blocked-queue jump),
+// switchProject (Alt+P, the sidebar's project rows, the last-project bounce)
+// and applyWorkspaceState's adoption of a daemon-side active-tab change — so
+// the two-report rule has one implementation rather than five copies that can
+// drift apart.
+//
+// from may be nil (no tab was active yet) or equal to target (a same-tab
+// call, e.g. goToPane's own switchTab on the tab jumpToPane already moved
+// to): both report only the target's current truth, exactly like
+// overlayTruthCmd's nil-tab handling.
+func (m *Model) overlayTruthTransitionCmd(from, target *TabModel) tea.Cmd {
+	var cmds []tea.Cmd
+	if from != nil && from != target {
+		if cmd := m.overlayTruthCmd(from); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+	if cmd := m.overlayTruthCmd(target); cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+	if len(cmds) == 0 {
+		return nil
+	}
+	if len(cmds) == 1 {
+		return cmds[0]
+	}
+	return tea.Batch(cmds...)
+}
+
+// overlayTruthDestCmd reports the current truth for every tab that owns an
+// overlay pane and belongs to ONE destination — what a reconnect wants,
+// because only that daemon lost its client and only its copy of visibility
+// can have gone stale. Re-reporting a daemon that never dropped would
+// re-stamp its overlays' OverlayShownAt and perturb an LRU order nobody asked
+// about — the same reason attachAllDests scopes its own post-attach report to
+// just the destinations that attached in that round, rather than every
+// destination this client knows about.
+func (m *Model) overlayTruthDestCmd(dest string) tea.Cmd {
+	return m.overlayTruthCmds(func(t *TabModel) bool { return t.Dest == dest })
+}
+
+// overlayTruthCmds reports the current truth for every tab that owns an
+// overlay pane and satisfies want — one fresh message per tab, each aimed at
+// that tab's OWN destination, since overlayVisibilityCmd builds its message
+// inside the send.
+func (m *Model) overlayTruthCmds(want func(*TabModel) bool) tea.Cmd {
+	var cmds []tea.Cmd
+	for _, tab := range m.allTabs() {
+		if !want(tab) {
+			continue
+		}
+		if cmd := m.overlayTruthCmd(tab); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+	if len(cmds) == 0 {
+		return nil
+	}
+	return tea.Batch(cmds...)
+}
+
+// overlayPolicyCmd pushes the client's overlay retention settings (idle
+// timeout + live cap) to every daemon.
+//
+// Needed because every Settings setter only flips m.configChanged, and
+// cmd/quil/main.go writes config.toml only on TUI exit — the daemon reads
+// that file at startup, so without an explicit push a settings change would
+// not reach an already-running daemon until its next start. Sent once after
+// attach (attachAllDests) and again on every Settings commit that touches
+// these two rows (handleSettingsKey).
+//
+// Guarded on m.client like attachAllDests: a Model built directly by a test,
+// with no connection, must produce no command rather than one that panics
+// when invoked.
+func (m *Model) overlayPolicyCmd() tea.Cmd {
+	if m.client == nil {
+		return nil
+	}
+	p := ipc.OverlayPolicyPayload{
+		IdleTimeoutMinutes: m.cfg.Overlay.IdleTimeoutMinutes,
+		MaxLive:            m.cfg.Overlay.MaxLive,
+	}
+	dests := m.knownDests()
+	return func() tea.Msg {
+		// A fresh Message per destination — sendForDest stamps Origin, so a
+		// message shared across destinations would be re-stamped mid-flight.
+		for _, dest := range dests {
+			msg, err := ipc.NewMessage(ipc.MsgOverlayPolicy, p)
+			if err != nil {
+				// continue, not return: the loop is per-destination and one
+				// failure must not silently leave 2..N on a stale policy. The
+				// payload is two ints, so this is unreachable today — the point
+				// is that the loop reads as tolerant and was not.
+				log.Printf("overlay policy: encode for %q: %v", dest, err)
+				continue
+			}
+			if err := m.sendForDest(dest, msg); err != nil {
+				log.Printf("overlay policy: send to %q: %v", dest, err)
+			}
+		}
+		return nil
+	}
 }
 
 // createOverlay destroys any existing overlay pane, initialises
@@ -154,10 +343,13 @@ func (m *Model) createOverlay(tab *TabModel, repo string) tea.Cmd {
 	// Destroy the old overlay if one exists (different repo).
 	if tab.overlayPane != nil {
 		oldID := tab.overlayPane.ID
+		// Captured before the slot is cleared: overlayVisibilityCmd reads
+		// tab.overlayPane, which is nil by the time this batches below.
+		visCmd := m.overlayVisibilityCmd(tab, false)
 		tab.overlayPane.Dispose()
 		tab.overlayPane = nil
 		tab.overlayVisible = false
-		cmds = append(cmds, func() tea.Msg {
+		cmds = append(cmds, visCmd, func() tea.Msg {
 			msg, err := ipc.NewMessage(ipc.MsgDestroyPane, ipc.DestroyPanePayload{PaneID: oldID})
 			if err != nil {
 				log.Printf("overlay: destroy pane encode: %v", err)

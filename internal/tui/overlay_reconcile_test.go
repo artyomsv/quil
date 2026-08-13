@@ -2,7 +2,74 @@ package tui
 
 import (
 	"testing"
+
+	"github.com/artyomsv/quil/internal/config"
 )
+
+// The three flip sites below set tab.overlayVisible AND return a command that
+// reports it. Every test in this file used to assert only the local flag and
+// discard applyWorkspaceState's []tea.Cmd, so the report could be deleted at any
+// of them with the package green (mutation-verified in the QA review). The
+// consequence of losing one is a silent leak: an overlay that ends or is
+// replaced without telling the daemon keeps OverlayHiddenAt zero and is exempt
+// from the sweep forever — exactly what this feature exists to close.
+
+// overlayStateWith builds a one-tab broadcast, optionally carrying an overlay.
+func overlayStateWith(overlay bool) WorkspaceStateMsg {
+	tab := TabInfo{ID: "tab-1", Name: "t", Panes: []string{"pane-n"}}
+	panes := []PaneInfo{{ID: "pane-n", TabID: "tab-1", Type: "terminal"}}
+	if overlay {
+		tab.Panes = append(tab.Panes, "pane-o")
+		panes = append(panes, PaneInfo{ID: "pane-o", TabID: "tab-1", Type: "lazygit", Overlay: true})
+	}
+	return WorkspaceStateMsg{ActiveTab: "tab-1", Tabs: []TabInfo{tab}, Panes: panes}
+}
+
+// An overlay ending (lazygit's `q`, a reattach that no longer has it) must tell
+// the daemon it went hidden. Nothing else will: the pane is about to be gone
+// from the client's model entirely.
+func TestApplyWorkspaceState_OverlayGone_ReportsHiddenOnTheWire(t *testing.T) {
+	t.Parallel()
+	conn := newFakeConn()
+	m := &Model{cfg: config.Default(), client: conn}
+
+	m.applyWorkspaceState(overlayStateWith(true), "")
+	m.curTabs()[0].overlayVisible = true
+	conn.sent = nil
+
+	_, cmds := m.applyWorkspaceState(overlayStateWith(false), "")
+	runCmds(cmds)
+
+	got := overlayReports(t, conn)
+	if v, ok := got["pane-o"]; !ok || v {
+		t.Errorf("an overlay that disappeared reported visible=%v (reported=%v); want an explicit false", v, ok)
+	}
+}
+
+// The arrival half: this TUI's own Alt+G created the overlay, so it comes on
+// screen the moment the daemon reports it — and the daemon must be told, or the
+// pane it just created still carries whatever hidden stamp it had.
+//
+// The overlay-less apply first is deliberate: it settles the project and its
+// active tab, so the only thing that can produce a report on the second apply is
+// this flip site (a project's FIRST broadcast reports its own truth too).
+func TestApplyWorkspaceState_PendingOverlayShow_ReportsVisibleOnTheWire(t *testing.T) {
+	t.Parallel()
+	conn := newFakeConn()
+	m := &Model{cfg: config.Default(), client: conn}
+
+	m.applyWorkspaceState(overlayStateWith(false), "")
+	m.pendingOverlayShow = map[string]bool{"tab-1": true}
+	conn.sent = nil
+
+	_, cmds := m.applyWorkspaceState(overlayStateWith(true), "")
+	runCmds(cmds)
+
+	got := overlayReports(t, conn)
+	if v, ok := got["pane-o"]; !ok || !v {
+		t.Errorf("an overlay shown on arrival reported visible=%v (reported=%v); want an explicit true", v, ok)
+	}
+}
 
 func TestApplyWorkspaceState_OverlayPane_NotInLayoutTree(t *testing.T) {
 	t.Parallel()

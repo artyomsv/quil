@@ -340,9 +340,17 @@ func (m Model) CloseClient() {
 // than being fatal.
 //
 // redialFns[dest] != nil is the WHOLE test, deliberately with no RemoteMode
-// conjunct. A local destination never gets a dialer installed, so the nil check
-// alone already keeps a dead local daemon fatal — retrying would spin against
-// something that is not coming back while hiding the loss.
+// conjunct.
+//
+// The local destination now gets a dialer too (cmd/quil's redialLocal), so this
+// no longer doubles as "local links are fatal". It used to: the nil entry was
+// what made a lost local link end the session, on the grounds that a dead
+// daemon's panes died with it. That reasoning covered a dead DAEMON and not a
+// dropped SOCKET — the 2026-08-11 incident was the second, where every pane was
+// alive behind a connection the daemon had retired — so the distinction moved
+// to where it can actually be observed: the local dialer parks its own ladder
+// after a few failed dials, which is what a daemon that is really gone looks
+// like from here.
 //
 // The conjunct is not merely redundant, it is wrong, and the multi-daemon
 // router is what made it so: RemoteMode() answers for the ACTIVE PROJECT, which

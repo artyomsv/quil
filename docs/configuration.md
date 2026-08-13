@@ -11,6 +11,7 @@ Quil reads `~/.quil/config.toml` (or `$QUIL_HOME/config.toml` when `QUIL_HOME` i
 - [`[ui]`](#ui)
 - [`[mcp]`](#mcp)
 - [`[notification]`](#notification)
+- [`[overlay]`](#overlay)
 - [`[update]`](#update)
 - [`[[destinations]]`](#destinations)
 - [`[keybindings]`](#keybindings)
@@ -62,6 +63,10 @@ max_events = 200                # ring-buffer cap (per daemon, both sidebar and 
 [notification.hooks]
 claude = "default"              # "default" | "verbose" | "off"
 opencode = "default"            # same
+
+[overlay]
+idle_timeout_minutes = 5        # destroy a hidden lazygit overlay after this long; 0 disables
+max_live = 5                    # cap live overlays across all tabs; 0 disables
 
 [update]
 check = true                    # Daily check for new releases
@@ -178,6 +183,21 @@ Hook-driven notifications surface structured events from Claude Code and OpenCod
 | `opencode` | string | `"default"` | Tier for OpenCode panes. `"default"` forwards session.idle/error/compacted, session.status retry only, file.edited batched 1 s, permission.ask, experimental.session.compacting. `"verbose"` adds tool.execute.before/after. `"off"` disables hook event forwarding. |
 
 The hook events flow through a JSONL spool (`~/.quil/events/<paneID>.jsonl`) that the daemon polls every 200 ms. Truncated on daemon start (no replay of stale events); deleted on pane destroy.
+
+## `[overlay]`
+
+Bounds the Alt+G lazygit overlay pane. `Alt+G` again (or switching away and back) only *hides* it — the process keeps running; only quitting lazygit itself (`q`) or one of these two limits reclaims it.
+
+| Key | Type | Default | What it does |
+|---|---|---|---|
+| `idle_timeout_minutes` | int | `5` | Destroy an overlay that has been hidden for at least this long. `0` disables idle eviction — a hidden overlay then runs until lazygit quits on its own or its tab is destroyed. Clamped to at most `525600` (one year); a negative value reads as `0`. |
+| `max_live` | int | `5` | Cap on overlays live across all tabs at once. Opening one past the cap evicts the least recently **shown** overlay (not the oldest one created) to make room. `0` disables the cap. |
+
+Both keys are also editable at **F1 → Settings**, which pushes the change to the running daemon immediately — no restart needed.
+
+"Hidden" means no attached client has the overlay on screen. With two clients on one daemon, an overlay one of them is displaying is not reclaimed because the other switched tabs.
+
+The daemon seeds both values from its **own** config at startup, so a daemon with no client attached still reclaims overlays on its own terms. A connected client then pushes its values to every daemon it is attached to, which overrides that daemon's `[overlay]` section for as long as the client is attached — so against a remote daemon it is the client's settings that govern, and if several clients disagree the last one to push wins.
 
 ## `[update]`
 

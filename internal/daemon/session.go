@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"sync"
@@ -126,6 +127,17 @@ type Pane struct {
 	// pane is already published to the session maps; concurrent snapshots
 	// may read it). Excluded from disk snapshots.
 	Overlay bool
+	// OverlayHiddenAt is when the TUI last hid this overlay; zero means it is
+	// on screen. OverlayShownAt is when it was last shown, and orders the LRU
+	// eviction. Both are PluginMu-protected like Overlay itself.
+	//
+	// Both are runtime-only, and there is no restore case to reason about:
+	// the disk snapshot passes includeOverlays=false
+	// (workspaceStateFromSnapshot, called from snapshot()), so no overlay is
+	// ever written to workspace.json and none is ever restored. A fresh
+	// daemon's overlays are only ever ones a live client created.
+	OverlayHiddenAt time.Time
+	OverlayShownAt  time.Time
 	// MouseModes mirrors the child app's DEC mouse-mode state, scanned from the
 	// PTY output stream (scanMouseModes) in flushPaneOutput. The daemon is the
 	// only component that sees the one-time mouse-enable burst on every attach,
@@ -481,13 +493,20 @@ func (sm *SessionManager) ReplacePane(oldPaneID string, newPane *Pane) error {
 	return nil
 }
 
+// ErrPaneNotFound is returned by DestroyPane for a pane the session no longer
+// holds. A sentinel rather than a bare message because for an OVERLAY that is a
+// normal outcome, not a failure: the retention sweep destroys the pane and the
+// child's exit callback arrives afterwards, and reporting it as an error puts a
+// failure line on a success path in a log triage starts from.
+var ErrPaneNotFound = errors.New("pane not found")
+
 func (sm *SessionManager) DestroyPane(paneID string) error {
 	sm.mu.Lock()
 
 	pane, ok := sm.panes[paneID]
 	if !ok {
 		sm.mu.Unlock()
-		return fmt.Errorf("pane not found: %s", paneID)
+		return fmt.Errorf("%w: %s", ErrPaneNotFound, paneID)
 	}
 
 	if tab, ok := sm.tabs[pane.TabID]; ok {
@@ -544,6 +563,22 @@ func (sm *SessionManager) Pane(id string) *Pane {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 	return sm.panes[id]
+}
+
+// AllPanes returns every pane across every tab, in no particular order. For
+// a single tab's panes in tab order, use Panes(tabID) instead — this exists
+// for daemon-wide sweeps (idle overlay eviction) that have no tab to scope
+// to. Copies the map into a slice under RLock; the map itself is never
+// exposed.
+func (sm *SessionManager) AllPanes() []*Pane {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	panes := make([]*Pane, 0, len(sm.panes))
+	for _, p := range sm.panes {
+		panes = append(panes, p)
+	}
+	return panes
 }
 
 func (sm *SessionManager) ActiveTabID() string {

@@ -48,6 +48,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Shortcuts. Keyboard text selection claims those eight chords midway through
   dispatch, so which side wins depends on the action: the warning names it.
 
+## [1.55.1] - 2026-08-13
+
+### Fixed
+- **Closing the lazygit overlay now reclaims it.** `Alt+G` only hid the overlay
+  — the lazygit process kept running for the life of the tab, so a session that
+  had opened it in several tabs carried one live process per tab indefinitely
+  (measured at ~116 MB each). Hidden overlays are now closed after five minutes,
+  and at most five are kept alive at once, the least recently shown being
+  dropped first. Both limits are configurable in F1 → Settings and under
+  `[overlay]` in `config.toml`; `0` turns either off.
+
+## [1.55.0] - 2026-08-11
+
+### Added
+- **A remote host running an older Quil now offers to upgrade itself.** After
+  updating this client, a configured host still on the previous version cannot
+  be attached to — client and daemon must match. Quil showed that as a parked
+  row with a lightning bolt and nothing else, and the only way forward was
+  `quil remote setup <host>` in a shell. It now asks, at startup and whenever a
+  live link drifts out of version, and performs the same push itself when you
+  press `y`. It says which versions are involved and that the remote daemon
+  restarts, since panes there respawn.
+
+## [1.54.1] - 2026-08-11
+
+### Fixed
+- **"The local daemon is gone — its panes are lost" could appear over a daemon
+  that was perfectly healthy.** If a write to a client stalled for 30 seconds —
+  reachable on a busy workspace, where a single frame can outlast the window
+  while the client is repainting — the daemon stopped being able to send to that
+  client but went on reading from it, silently. Nothing noticed until its
+  send queue filled several minutes later, by which point the TUI had been
+  starved of updates the whole time and then told the daemon was gone. A stalled
+  write is now retried while the client is still draining, and a client that
+  accepts nothing at all is disconnected promptly and visibly instead of four
+  minutes later. The same fault on the client side is what left a TUI logging a
+  send failure every five seconds for hours after a drop.
+- **Losing the connection to the local daemon is no longer the end of the
+  session.** It used to be treated as fatal on the assumption that a local
+  daemon only ever disappears by dying, taking its panes with it — so a dropped
+  connection to a daemon that was still running left the client with no way
+  back, and `ctrl+q` as the only option. Quil now reconnects to it the same way
+  it reconnects to a remote host, with a few seconds' grace so a `quil restart`
+  reattaches by itself. A daemon that really is gone still says so, and now
+  offers `r` to retry once you have started it again.
+
 ## [1.54.0] - 2026-08-09
 
 ### Added

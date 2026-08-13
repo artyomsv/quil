@@ -33,13 +33,26 @@ const sendBufSize = 64
 const flushPollInterval = 2 * time.Millisecond
 
 // writeDeadline bounds how long a single raw.Write may block inside sendLoop
-// before we give up on the peer. Belt-and-suspenders alongside the critCh
+// before we re-examine the peer. Belt-and-suspenders alongside the critCh
 // overflow detection: under a wedged kernel buffer + a peer that doesn't
 // error on TCP RST, the overflow path is still triggered (critCh fills →
 // next critical send trips overflow → close), but the deadline guarantees a
 // deterministic cleanup ceiling instead of an indefinite block. Overflow-close
 // applies only to the critical queue; droppable output (outCh) is shed when
 // full and never triggers a close.
+//
+// It is a PROGRESS window, not a patience limit, and reading it as the latter
+// is what shipped the 2026-08-11 incident: expiry closes the conn only when the
+// peer moved zero bytes in the whole window (see write). A peer draining
+// steadily keeps its conn however many windows the frame takes, so this value
+// governs how fast a genuinely wedged peer is detected and nothing else — which
+// is why 30 s stays comfortable rather than needing to cover the worst frame a
+// slow client might take.
+// Tests shrink it per CONN (newConnWithWriteWindow), never by reassigning this
+// — 30 s is unwaitable in a test, but a mutable package var is read by the
+// sendLoop of every conn alive in the process, including ones outliving the
+// parallel test that made them, which is a data race the race detector catches
+// only sometimes. A per-conn value set at construction has no window at all.
 const writeDeadline = 30 * time.Second
 
 // ErrSendOverflow is returned by Conn.Send when the per-conn send buffer is
@@ -87,23 +100,37 @@ type Conn struct {
 	outCh     chan []byte   // droppable: live PaneOutput broadcast frames
 	done      chan struct{}
 	closeOnce sync.Once
+	deadOnce  sync.Once
 	closed    atomic.Bool
 	overflow  atomic.Bool
 	dropped   atomic.Uint64
+	// deadlineRefused gates reportDeadlineRefused to one line per conn.
+	deadlineRefused atomic.Bool
 	// pending counts must-deliver frames accepted by Send but not yet written
 	// to the socket. Send is non-blocking — it hands the frame to sendLoop —
 	// so an empty critCh does NOT mean the peer has it. Flush needs to know
 	// the difference; see Flush.
 	pending atomic.Int64
+	// writeWindow is this conn's progress window (see writeDeadline). Fixed at
+	// construction and never written again, so sendLoop reads it without
+	// synchronisation.
+	writeWindow time.Duration
 }
 
-func newConn(raw net.Conn) *Conn {
+func newConn(raw net.Conn) *Conn { return newConnWithWriteWindow(raw, writeDeadline) }
+
+// newConnWithWriteWindow is newConn with an explicit progress window, so a test
+// can exercise a stall without waiting out the production one. The window is
+// passed at construction rather than set afterwards because sendLoop starts
+// here and would race any later write to the field.
+func newConnWithWriteWindow(raw net.Conn, window time.Duration) *Conn {
 	c := &Conn{
-		raw:    raw,
-		br:     bufio.NewReader(raw),
-		critCh: make(chan []byte, sendBufSize),
-		outCh:  make(chan []byte, sendBufSize),
-		done:   make(chan struct{}),
+		raw:         raw,
+		br:          bufio.NewReader(raw),
+		critCh:      make(chan []byte, sendBufSize),
+		outCh:       make(chan []byte, sendBufSize),
+		done:        make(chan struct{}),
+		writeWindow: window,
 	}
 	go c.sendLoop()
 	return c
@@ -291,7 +318,16 @@ func (c *Conn) Dropped() uint64 { return c.dropped.Load() }
 
 // sendLoop drains the two queues, draining critical first so an output flood
 // can never starve state/responses.
+//
+// The deferred markDead makes the invariant structural rather than a property
+// of each return path: this goroutine is the ONLY thing that ever drains
+// critCh, so a conn that outlives it is one whose must-deliver queue can never
+// move again — readable, un-writable, and silent about it. write() already
+// retires the conn on the failures it owns; this covers every other way out,
+// including ones added later. Idempotent, so the ordinary done path (where
+// Close has already run) costs nothing.
 func (c *Conn) sendLoop() {
+	defer c.markDead()
 	for {
 		// Priority: take any pending critical frame before considering output.
 		select {
@@ -323,15 +359,91 @@ func (c *Conn) sendLoop() {
 	}
 }
 
-// write applies the per-frame write deadline and writes. Returns false on any
-// error so sendLoop exits (the read side detects the matching error + runs
-// handleConn's defer cleanup). Bounding each Write to writeDeadline prevents a
-// peer with a wedged kernel buffer or stalled connection from blocking this
-// goroutine indefinitely.
+// write applies the per-frame write deadline and writes, CLOSING the conn on
+// any failure it does not retry. Returns false once the conn is dead.
+//
+// The close is the load-bearing half, and its absence was a production
+// incident (2026-08-11). This used to return false and let sendLoop exit on
+// the theory that "the read side detects the matching error + runs handleConn's
+// defer cleanup" — true for a peer disconnect, FALSE for a deadline, which is a
+// local timeout on a live socket the reader sees nothing wrong with. The result
+// was a conn that read forever and could never write again: the daemon went on
+// accepting requests and queueing must-deliver answers for four minutes until
+// critCh hit 64/64 and the overflow path closed it, while the TUI sat starved
+// behind a banner claiming the daemon was gone. Two documented contracts
+// depended on the close that never happened — SendBlocking's ("deadline trips →
+// conn closes → done fires → this returns", which instead spun on its 2 ms poll
+// until daemon shutdown) and Flush's, since pending stops decrementing the
+// moment sendLoop is gone.
+//
+// A deadline expiry WITH PROGRESS is not a failure and must not close. The
+// deadline bounds one Write call, not the peer's health: a large state frame
+// into a nearly-full kernel buffer can legitimately outlast the window while
+// the peer drains continuously — which is exactly the slow-but-alive TUI the
+// incident dropped. Zero bytes moved in a whole window is the wedge; anything
+// else is backpressure, and the enqueue-side overflow close remains the bound
+// on a peer that is merely too slow to keep up.
+//
+// The retry MUST resume at frame[n:]. Write reports how much it placed before
+// giving up, so re-sending the whole frame would duplicate that prefix and
+// desynchronise a length-prefixed stream — corruption instead of a drop.
+//
+// A refused write deadline is NOT fatal, but it is no longer silent. The ssh
+// transport (transport.stdioConn) answers os.ErrNoDeadline for every frame,
+// because Windows non-overlapped pipe handles cannot carry one — so remote
+// conns run with no deadline at all and the enqueue-side overflow close is
+// their only bound. That is a real gap in the ceiling this function otherwise
+// provides, and discarding the error left it discoverable only by reading the
+// transport (techdebt 3-2-conn-write-deadline-absent-over-ssh). It is reported
+// once per conn instead.
 func (c *Conn) write(frame []byte) bool {
-	_ = c.raw.SetWriteDeadline(time.Now().Add(writeDeadline))
-	_, err := c.raw.Write(frame)
-	return err == nil
+	for {
+		if derr := c.raw.SetWriteDeadline(time.Now().Add(c.writeWindow)); derr != nil {
+			c.reportDeadlineRefused(derr)
+		}
+		n, err := c.raw.Write(frame)
+		if err == nil {
+			return true
+		}
+		frame = frame[n:]
+		if errors.Is(err, os.ErrDeadlineExceeded) && n > 0 {
+			continue // draining, just slower than one window — not wedged
+		}
+		logger.Warn("ipc: write failed, retiring conn (peer=%s undelivered=%dB): %v",
+			peerLabel(c.raw), len(frame), err)
+		// SYNCHRONOUS, never handed to another goroutine: closed must be true
+		// before sendLoop exits. Retiring asynchronously leaves a window where
+		// the drain goroutine is already gone while SendBlocking's closed guard
+		// still passes — the window the client-side half of the incident lived
+		// in, where every send paid the full clientSendTimeout for five hours.
+		c.markDead()
+		return false
+	}
+}
+
+// reportDeadlineRefused says once, per conn, that this transport will not carry
+// a write deadline — so the missing ceiling is visible in the log rather than
+// inferred from reading the transport.
+//
+// Once per conn, not once per frame: sendLoop calls SetWriteDeadline before
+// EVERY write, and on ssh every one of them fails, so an unguarded line would
+// be one log record per frame for the life of the session.
+//
+// os.ErrNoDeadline is DEBUG because it is a documented property of a supported
+// transport rather than a fault — an operator reading a remote session's log at
+// info level does not need it, and a warning per remote conn would train them
+// to ignore the level. Anything else is a Unix socket refusing something it
+// should support, which is genuinely unexpected.
+func (c *Conn) reportDeadlineRefused(err error) {
+	if !c.deadlineRefused.CompareAndSwap(false, true) {
+		return
+	}
+	if errors.Is(err, os.ErrNoDeadline) {
+		logger.Debug("ipc: transport carries no write deadline (peer=%s); the critical-queue "+
+			"overflow close is the only bound on a wedged write here", peerLabel(c.raw))
+		return
+	}
+	logger.Warn("ipc: write deadline not installed (peer=%s): %v", peerLabel(c.raw), err)
 }
 
 // Receive reads the next message from the connection. Callers must ensure a
@@ -374,11 +486,54 @@ func (c *Conn) Flush(timeout time.Duration) bool {
 func (c *Conn) Close() error {
 	var err error
 	c.closeOnce.Do(func() {
-		c.closed.Store(true)
-		close(c.done)
+		c.markDead()
 		err = c.raw.Close()
 	})
 	return err
+}
+
+// markDead retires the conn WITHOUT releasing the underlying transport.
+//
+// This is the half of teardown the IPC layer owns: stop accepting sends, unpark
+// everyone waiting, and make every guard report the conn as gone. Releasing the
+// transport is the OWNER's half, and the two must stay apart — on ssh,
+// raw.Close() kills and reaps the child, and cmd/quil's redial path has to read
+// LinkErr BEFORE that (Close can clear pumpErr) and ExitCode AFTER (Close is
+// what makes the status final). A first attempt at this fix closed raw straight
+// from write(), which put the IPC layer ahead of that sequence: the ssh stderr
+// was cleared before anyone read it, so ClassifyLinkFailure saw empty text,
+// never parked, and a permanently-rejected key would retry until fail2ban
+// noticed. TestRedialRemote_ReadsLinkErrBeforeCloseAndExitCodeAfter caught it.
+//
+// Unparking a parked Receive is a READ DEADLINE, not a socket close, for the
+// same reason. The daemon's handleConn then errors out of Receive and runs its
+// own defer, which is where the real Close, removeConn and onDisconnect belong.
+//
+// That unpark is load-bearing on the DAEMON side and best-effort elsewhere, and
+// the distinction is worth stating rather than implying. The daemon serves Unix
+// sockets, where the poller applies a deadline to a read that is already
+// blocked — which is the case this whole change is about. stdioConn (ssh) also
+// implements read deadlines, but its Read builds its timer from the deadline it
+// observes ON ENTRY, so one installed while a read is already parked is not
+// seen until the next call. Nothing is lost there: a write failing on that
+// transport means the pipe to ssh is broken, so the pump's own read is about to
+// fail anyway, and the client additionally bounds itself with
+// clientSendTimeout. Retiring the conn is still correct and immediate — only
+// the unpark is deferred to whatever ends that read.
+//
+// The deadline error is IGNORED rather than escalated to a close. Every
+// transport here implements read deadlines on a live connection, so the error
+// means the fd is already gone — a reader on it is already unparked or about to
+// be, and closing again would only re-introduce the ordering violation above.
+// (Closing on the error was tried: net.Pipe reports io.ErrClosedPipe once
+// either end is done, so the fallback fired on exactly the dead-transport case
+// the ordering tests exercise.)
+func (c *Conn) markDead() {
+	c.deadOnce.Do(func() {
+		c.closed.Store(true)
+		close(c.done)
+		_ = c.raw.SetReadDeadline(time.Now())
+	})
 }
 
 // Server listens for client connections over a Unix socket.

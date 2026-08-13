@@ -66,11 +66,8 @@ const syncCallTimeout = 30 * time.Second
 // than letting every Notify fail invisibly later: Show returns S_OK for an
 // unregistered AUMID and simply displays nothing.
 //
-// NOTE: passing this check does not mean a toast will appear. Windows indexes a
-// new Start Menu shortcut on its own schedule — measured well beyond a minute
-// on 19045 — and until it does, get_Setting answers ERROR_NOT_FOUND. Nothing
-// here can force it; `quil notify setup` says so, and `quil notify test` is how
-// a user finds out where they stand.
+// The shortcut is the real precondition; see notifyLocked for why get_Setting
+// is NOT one, despite looking like the obvious gate.
 func New(opts Options) (Notifier, error) {
 	ok, err := Registered(opts)
 	if err != nil {
@@ -259,20 +256,31 @@ func (w *winNotifier) notifyLocked(n Notification) error {
 	}
 	defer release(notifier)
 
-	// Show returns S_OK whether or not anything is displayed, so the setting is
-	// the only way to distinguish "shown" from "accepted and silently dropped".
-	// Reported as an error rather than logged: a toast that cannot appear is a
-	// failure the caller should hear about once, not a success.
+	// get_Setting is ADVISORY. It is not a precondition for Show, and treating
+	// it as one was a real bug that made this feature look broken for a day.
+	//
+	// For an unpackaged app it answers ERROR_NOT_FOUND until Windows has an
+	// entry for the AUMID in its notification settings database — something
+	// that happens on Windows' own schedule and cannot be forced (a reboot, a
+	// WpnUserService restart, and hand-writing both the AppUserModelId and
+	// Notifications\Settings keys all failed to produce one). Meanwhile Show
+	// displays the toast perfectly. Measured on 19045: with this call gating
+	// the path, a correct registration reported failure for hours; with it
+	// advisory, the same registration toasts immediately.
+	//
+	// A value that DOES come back is still worth acting on — DisabledForUser
+	// or DisabledByGroupPolicy means the user or their admin turned this off,
+	// and Show would be a silent no-op — so that case is still an error. Only
+	// the "no entry yet" case is ignored.
 	var setting uint32
 	if err := hrErr("get_Setting", call(notifier, idxToastNotifierSetting, uintptr(unsafe.Pointer(&setting)))); err != nil {
-		return err
-	}
-	if setting != settingEnabled {
+		logger.Debug("notify: get_Setting unavailable for %s (%v); showing anyway", w.opts.AUMID, err)
+	} else if setting != settingEnabled {
 		name := settingNames[setting]
 		if name == "" {
 			name = "unknown"
 		}
-		return fmt.Errorf("notify: notifications unavailable for %s: %s", w.opts.AUMID, name)
+		return fmt.Errorf("notify: notifications are turned off for %s: %s", w.opts.AUMID, name)
 	}
 
 	return hrErr("IToastNotifier::Show", call(notifier, idxToastNotifierShow, toast))

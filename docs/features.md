@@ -395,7 +395,7 @@ quil notify setup --remove  # a true inverse
 
 Toggle it live at **F1 → Settings → Desktop notifications**, or via [`[notification.desktop]`](configuration.md#notificationdesktop). The Settings row reports registration *state* rather than the flag — it reads `on (run notify setup)` when the flag is on but nothing is registered, which is the default on a fresh install.
 
-> Windows indexes the new Start Menu shortcut on its own schedule. Until it does, toasts are silently dropped and `quil notify test` reports `0x80070490`; signing out and back in forces it.
+`quil notify setup` shows a verification toast and reports whether it actually appeared, so you find out immediately rather than the next time an agent blocks.
 
 Clicking a toast can only move your cursor. The `quil://` handler validates a pane id and forwards it to the running TUI over a per-PID named pipe — there is deliberately no path from a registered URI to spawning a pane, sending input, or running a command, since a registered scheme is invokable by any local process. Inline toast buttons ("Approve" / "Deny") are refused on that basis rather than merely deferred.
 

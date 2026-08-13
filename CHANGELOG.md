@@ -28,9 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Clicking a toast can only move your cursor — the handler validates a pane id
   and forwards it over a per-PID named pipe, with no path to spawning a pane,
   sending input or running a command. Windows only: no transport on macOS or
-  Linux can carry a click back to a specific pane. Note that Windows indexes a
-  new Start Menu shortcut on its own schedule, so toasts may be dropped for a
-  while after setup — `quil notify test` tells you when it is live.
+  Linux can carry a click back to a specific pane.
 
 ## [1.55.1] - 2026-08-13
 

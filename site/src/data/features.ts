@@ -389,9 +389,8 @@ export const features: Feature[] = [
     blurb:
       "When an agent parks for input while you are in another window, Windows raises a toast. Click it and Quil is already on that project, tab and pane.",
     category: "observability",
-    // Windows-only today, and Windows decides when it will honour a freshly
-    // registered app — both are real limits a user should read before relying
-    // on this, which is what the badge is for.
+    // Windows-only today — a real limit worth reading before relying on this,
+    // which is what the badge is for.
     badge: "beta",
     detail: [
       "Fires on the same two states the project sidebar already marks: a pane parked waiting on you (▲) and a turn that finished while you were away (✓). Not on every event — the notification sidebar remains the full log.",

@@ -73,30 +73,16 @@ func runNotifySetup(opts notify.Options) {
 	}
 
 	// Show and immediately withdraw a toast IN THIS PROCESS, before claiming
-	// success.
-	//
-	// This does NOT make the registration take effect — that was tried and
-	// disproven: creating the shortcut and toasting in one process fails for a
-	// new AUMID exactly as two separate invocations do. It is here because
-	// setup that reports success without having displayed anything cannot tell
-	// the user whether it worked, and on this platform that is a real and
-	// common outcome rather than a corner case.
-	//
-	// Measured on Windows 10 19045: a newly registered AUMID can stay
-	// unrecognised for hours, surviving a WpnUserService restart, an
-	// AppUserModelId registry entry and a Notifications\Settings entry, while
-	// an identifier already known to the platform works instantly with a
-	// shortcut created seconds earlier. Nothing in this process controls that;
-	// a sign-out or reboot is the remedy.
+	// success. Setup that reports success without having displayed anything
+	// cannot tell the user whether it worked.
 	verified := verifySetup(opts)
 	fmt.Printf("\nEnabled by default in config.toml:\n\n")
 	fmt.Printf("  [notification.desktop]\n  enabled = true\n\n")
 	if verified {
 		fmt.Printf("Verified: a test toast was displayed and withdrawn.\n\n")
 	} else {
-		fmt.Printf("NOTE: the verification toast could not be displayed yet. Windows\n")
-		fmt.Printf("sometimes needs a sign-out or reboot before it honours a newly\n")
-		fmt.Printf("registered app. Re-check with:  quil notify test\n\n")
+		fmt.Printf("WARNING: the verification toast could not be displayed. Check\n")
+		fmt.Printf("Settings > System > Notifications, then:  quil notify test\n\n")
 	}
 	fmt.Printf("Undo with:  quil notify setup --remove\n")
 }
@@ -246,9 +232,8 @@ func runNotifyTest(opts notify.Options) {
 		Launch: notify.BuildActivateURI(opts.Scheme, os.Getpid(), tag),
 	}); err != nil {
 		fmt.Fprintf(os.Stderr, "test toast failed: %v\n", err)
-		fmt.Fprintln(os.Stderr, "\nIf this says 0x80070490, Windows has not indexed the Start Menu")
-		fmt.Fprintln(os.Stderr, "shortcut yet. That can take several minutes after 'quil notify setup';")
-		fmt.Fprintln(os.Stderr, "signing out and back in forces it.")
+		fmt.Fprintln(os.Stderr, "\nCheck Settings > System > Notifications — notifications may be")
+		fmt.Fprintln(os.Stderr, "turned off for this app, for your account, or by group policy.")
 		os.Exit(1)
 	}
 	fmt.Println("Sent a test toast. It should be visible now, and in Action Center.")

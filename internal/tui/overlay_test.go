@@ -302,6 +302,15 @@ func TestHandleToggleLazygit_DifferentRepo_DestroysAndCreates(t *testing.T) {
 	if tab.overlayPane != nil {
 		t.Error("overlay slot must be cleared after destroy+create")
 	}
+	// …and the OLD pane must be reported hidden on the wire. The local flag
+	// alone is not the behaviour that matters: the pane is being destroyed on a
+	// daemon that keeps its own visibility state, and a replace that never says
+	// the old overlay went hidden leaves OverlayHiddenAt zero. Counting the
+	// destroy/create pair cannot catch that — the report rides the same batch
+	// and was droppable with every assertion above still green.
+	if v, ok := overlayReportsIn(t, fake.sent)["pane-old"]; !ok || v {
+		t.Errorf("the replaced overlay reported visible=%v (reported=%v); want an explicit false", v, ok)
+	}
 }
 
 // TestHandleToggleLazygit_LazygitUnavailable_Flashes: when the lazygit

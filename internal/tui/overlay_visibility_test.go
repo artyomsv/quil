@@ -23,8 +23,15 @@ func runCmds(cmds []tea.Cmd) { runCmd(tea.Batch(cmds...)) }
 // a flag that is right locally and never sent is exactly the bug.
 func overlayReports(t *testing.T, conn *fakeConn) map[string]bool {
 	t.Helper()
+	return overlayReportsIn(t, conn.sent)
+}
+
+// overlayReportsIn is the same over a raw send log, for the tests built on
+// fakeSender rather than fakeConn.
+func overlayReportsIn(t *testing.T, sent []*ipc.Message) map[string]bool {
+	t.Helper()
 	out := map[string]bool{}
-	for _, sent := range conn.sent {
+	for _, sent := range sent {
 		if sent.Type != ipc.MsgUpdatePane {
 			continue
 		}
@@ -271,6 +278,75 @@ func TestSwitchProject_ReportsOverlayVisibilityForBothProjects(t *testing.T) {
 	}
 	if v, ok := got["ov-entering"]; !ok || !v {
 		t.Errorf("the incoming project's overlay reported visible=%v (reported=%v); want an explicit true", v, ok)
+	}
+}
+
+// twoProjectOverlayModel is twoProjectModel with an overlay on each project's
+// tab and a recording connection — the shape every jumpToPane caller must
+// produce two reports from.
+func twoProjectOverlayModel(conn *fakeConn) Model {
+	m := twoProjectModel()
+	m.cfg = config.Default()
+	m.client = conn
+	m.projects[0].tabs[0].overlayPane = &PaneModel{ID: "ov-fg"}
+	m.projects[0].tabs[0].overlayVisible = true
+	m.projects[1].tabs[0].overlayPane = &PaneModel{ID: "ov-bg"}
+	m.projects[1].tabs[0].overlayVisible = true
+	return m
+}
+
+// jumpToPane returns a tea.Cmd its callers must PROPAGATE, and nothing pinned
+// that. Every existing test at those call sites discards the command
+// (`next, _ := ...`), so dropping it at any one of the four is invisible — and
+// the consequence is silent: the tab left behind keeps its overlay marked
+// visible, which exempts it from the idle sweep for the life of the daemon.
+func TestJumpToPaneCallers_PropagateTheOverlayReport(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		run  func(m *Model) tea.Cmd
+	}{
+		{"MCP set_active_pane", func(m *Model) tea.Cmd {
+			_, cmd := m.Update(setActivePaneMsg{PaneID: "p-bg"})
+			return cmd
+		}},
+		{"notification sidebar navigate", func(m *Model) tea.Cmd {
+			m.notifications = NewNotificationCenter(30, 50)
+			m.notifications.AddEvent(ipc.PaneEventPayload{ID: "e1", PaneID: "p-bg"})
+			_, cmd := m.handleNotificationKey("enter")
+			return cmd
+		}},
+		{"pane-history back", func(m *Model) tea.Cmd {
+			m.paneHistory = []PaneRef{{ProjectID: "proj-bg", TabIndex: 0, PaneID: "p-bg"}}
+			_, cmd := m.popPaneHistory()
+			return cmd
+		}},
+		{"palette go to pane", func(m *Model) tea.Cmd {
+			_, cmd := m.goToPane("p-bg")
+			return cmd
+		}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			conn := newFakeConn()
+			// listenForMessages rides the same batch on one of these paths, and
+			// runCmd walks a batch on this goroutine — a live recv channel would
+			// park the test in Receive forever.
+			close(conn.recv)
+			m := twoProjectOverlayModel(conn)
+
+			runCmd(tc.run(&m))
+
+			got := overlayReports(t, conn)
+			if v, ok := got["ov-fg"]; !ok || v {
+				t.Errorf("the tab left reported visible=%v (reported=%v); want an explicit false — the caller dropped the cmd", v, ok)
+			}
+			if v, ok := got["ov-bg"]; !ok || !v {
+				t.Errorf("the tab entered reported visible=%v (reported=%v); want an explicit true — the caller dropped the cmd", v, ok)
+			}
+		})
 	}
 }
 

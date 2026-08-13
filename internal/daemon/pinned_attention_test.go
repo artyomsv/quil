@@ -18,7 +18,7 @@ func callUpdatePanePinned(t *testing.T, d *Daemon, paneID string, pinned bool) {
 	if err != nil {
 		t.Fatalf("NewMessage: %v", err)
 	}
-	d.handleUpdatePane(msg)
+	d.handleUpdatePane(nil, msg)
 }
 
 // TestUpdatePane_SetsAndClearsPinnedAttention pins the toggle in both
@@ -66,7 +66,7 @@ func TestUpdatePane_PartialUpdateLeavesThePinAlone(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewMessage: %v", err)
 			}
-			d.handleUpdatePane(msg)
+			d.handleUpdatePane(nil, msg)
 			if got := d.session.Pane("pane-1"); got == nil || !got.PinnedAttention {
 				t.Errorf("a %s cleared PinnedAttention", tt.name)
 			}

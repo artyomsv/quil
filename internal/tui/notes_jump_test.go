@@ -38,7 +38,7 @@ func TestJumpToPane_TearsDownNotesMode(t *testing.T) {
 	m.notesMode = true
 	m.notesPaneFocused = true // the ordinary state notesKeyExempt does not cover
 
-	if !m.jumpToPane("pane-2") {
+	if ok, _ := m.jumpToPane("pane-2"); !ok {
 		t.Fatal("jumpToPane = false for a pane that exists")
 	}
 

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Closing the lazygit overlay now reclaims it.** `Alt+G` only hid the overlay
+  — the lazygit process kept running for the life of the tab, so a session that
+  had opened it in several tabs carried one live process per tab indefinitely
+  (measured at ~116 MB each). Hidden overlays are now closed after five minutes,
+  and at most five are kept alive at once, the least recently shown being
+  dropped first. Both limits are configurable in F1 → Settings and under
+  `[overlay]` in `config.toml`; `0` turns either off.
+
 ## [1.55.0] - 2026-08-11
 
 ### Added

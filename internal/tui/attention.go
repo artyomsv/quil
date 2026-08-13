@@ -63,6 +63,12 @@ func (m *Model) jumpToNextBlocked() tea.Cmd {
 
 	for i, p := range m.projects {
 		if p == target.Project {
+			// Captured before switchProject/the tab-index write below: this
+			// is the tab actually on screen right now, whose overlay (if
+			// any) is about to go off screen. Same active-tab-changing choke
+			// point as switchTab and jumpToPane — see
+			// overlayTruthTransitionCmd.
+			from := m.activeTabModel()
 			// Sequenced, not `return m.switchProject(i)` followed by the two
 			// field writes: switchProject mutates m through a pointer
 			// receiver, and Go does not order a plain operand against a call
@@ -83,12 +89,13 @@ func (m *Model) jumpToNextBlocked() tea.Cmd {
 			// TabModel.ActivePane is the pane-ID field; ActivePaneModel()
 			// repairs a stale value on next read, so assigning it is the
 			// whole focus change.
-			target.Project.tabs[target.TabIndex].ActivePane = target.Pane.ID
+			targetTab := target.Project.tabs[target.TabIndex]
+			targetTab.ActivePane = target.Pane.ID
 			// MsgSwitchProject only reaches the project's REMEMBERED tab; the
 			// blocked pane is routinely in a different one, whose panes are
 			// still Pending after a lazy restore. Without this the queue lands
 			// the user on a restore indicator with no process behind it.
-			m.notifyTabSwitch(target.Project.tabs[target.TabIndex])
+			m.notifyTabSwitch(targetTab)
 			// AFTER switchProject, for the reason jumpToPane records: a
 			// cross-project switch zeroes sidebarScroll outright, so an offset
 			// computed before it is thrown away. This function sets activeTab
@@ -97,7 +104,7 @@ func (m *Model) jumpToNextBlocked() tea.Cmd {
 			// on the queue, whose whole premise is that the sidebar is where
 			// you look to see where you landed.
 			m.scrollSidebarToPane(target.Pane.ID)
-			return cmd
+			return tea.Batch(cmd, m.overlayTruthTransitionCmd(from, targetTab))
 		}
 	}
 	return nil

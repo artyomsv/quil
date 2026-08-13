@@ -17,7 +17,7 @@ func callUpdatePaneMute(d *Daemon, paneID string, muted bool) error {
 	if err != nil {
 		return err
 	}
-	d.handleUpdatePane(msg)
+	d.handleUpdatePane(nil, msg)
 	return nil
 }
 

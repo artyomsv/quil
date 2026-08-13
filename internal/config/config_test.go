@@ -319,3 +319,49 @@ func TestRemoteProjectsPath_CollapsedDestinationsStayDistinct(t *testing.T) {
 		t.Error("collapsed destinations share a cache file")
 	}
 }
+
+func TestDefault_OverlayPolicy(t *testing.T) {
+	c := config.Default()
+	if c.Overlay.IdleTimeoutMinutes != 5 {
+		t.Errorf("IdleTimeoutMinutes = %d, want 5", c.Overlay.IdleTimeoutMinutes)
+	}
+	if c.Overlay.MaxLive != 5 {
+		t.Errorf("MaxLive = %d, want 5", c.Overlay.MaxLive)
+	}
+}
+
+// An absent [overlay] section must load the DEFAULTS, not zeros — zero means
+// "disabled" for both knobs, so a config written before this feature existed
+// would silently opt out of it.
+func TestLoad_AbsentOverlaySection_KeepsDefaults(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(path, []byte("[ui]\ntheme = \"dark\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.Overlay.IdleTimeoutMinutes != 5 || c.Overlay.MaxLive != 5 {
+		t.Errorf("Overlay = %+v, want the defaults (5, 5)", c.Overlay)
+	}
+}
+
+func TestOverlayConfig_TOMLRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	in := config.Default()
+	in.Overlay.IdleTimeoutMinutes = 11
+	in.Overlay.MaxLive = 2
+	if err := config.Save(path, in); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	out, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if out.Overlay != in.Overlay {
+		t.Errorf("round trip = %+v, want %+v", out.Overlay, in.Overlay)
+	}
+}

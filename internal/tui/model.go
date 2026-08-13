@@ -1983,12 +1983,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// a background project — jumpToPane spans every project so the
 		// request cannot silently no-op just because the target isn't in the
 		// project currently on screen.
-		if m.jumpToPane(msg.PaneID) {
+		ok, overlayCmd := m.jumpToPane(msg.PaneID)
+		if ok {
 			log.Printf("set_active_pane: switched to pane %s", msg.PaneID)
 		} else {
 			log.Printf("set_active_pane: pane %s not found", msg.PaneID)
 		}
-		return m, m.listenForMessages()
+		return m, tea.Batch(overlayCmd, m.listenForMessages())
 
 	case highlightPaneMsg:
 		m.mcpHighlights[msg.PaneID] = true
@@ -2273,12 +2274,12 @@ func (m Model) handleNotificationKey(key string) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.pushPaneHistory()
-		m.jumpToPane(paneID)
+		_, overlayCmd := m.jumpToPane(paneID)
 		if tab := m.activeTabModel(); tab != nil && !tab.FocusMode() {
 			tab.ToggleFocus()
 		}
 		m.sidebarFocused = false
-		return m, nil
+		return m, overlayCmd
 	case "dismiss":
 		if eventID != "" {
 			if msg, err := ipc.NewMessage(ipc.MsgDismissEvent, ipc.DismissEventPayload{EventID: eventID}); err == nil {
@@ -2337,8 +2338,8 @@ func (m Model) popPaneHistory() (tea.Model, tea.Cmd) {
 			if ref.TabIndex < len(proj.tabs) {
 				tab := proj.tabs[ref.TabIndex]
 				if tab.Root != nil && tab.Root.PaneIDs()[ref.PaneID] {
-					m.jumpToPane(ref.PaneID)
-					return m, nil
+					_, overlayCmd := m.jumpToPane(ref.PaneID)
+					return m, overlayCmd
 				}
 			}
 			break
@@ -4220,12 +4221,36 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg, dest string) ([]str
 		activeID = state.ActiveProject
 	}
 
+	// Active-tab moves the DAEMON made, collected here and reported after the
+	// merge below. Every path where the CLIENT changes the active tab reports
+	// overlay truth (switchTab, jumpToPane, jumpToNextBlocked); this arm adopts
+	// info.ActiveTab unconditionally, and at least four producers reach it —
+	// MCP switch_tab, a new tab, a tab destroy, and a second client. Both drift
+	// directions are the ones the feature exists to prevent: a tab left behind
+	// keeps its overlay marked visible (exempt from the sweep forever), and a
+	// tab entered while still stamped hidden is one sweep from having its
+	// lazygit destroyed on screen.
+	//
+	// Deferred rather than built in the loop because overlayOnScreen answers for
+	// the ACTIVE PROJECT, and which project that is only settles at
+	// resolveActiveProjectIndex below.
+	type activeTabMove struct{ from, target *TabModel }
+	var tabMoves []activeTabMove
+
 	infos := broadcastProjects(state, dest)
 	rebuilt := make([]*ProjectModel, 0, len(infos))
 	for _, info := range infos {
 		proj, ok := existingProjects[info.ID]
 		if !ok {
 			proj = &ProjectModel{ID: info.ID, Dest: dest}
+		}
+		// The tab this project had active BEFORE the rebuild. Tabs are reused by
+		// ID, so an unchanged active tab yields the same pointer and the
+		// comparison below is a no-op — which is what keeps an ordinary
+		// broadcast (the git ticker alone sends one every 5 s) off the wire.
+		var fromTab *TabModel
+		if ok && proj.activeTab >= 0 && proj.activeTab < len(proj.tabs) {
+			fromTab = proj.tabs[proj.activeTab]
 		}
 		proj.Name, proj.RootDir, proj.Bootstrap = info.Name, info.RootDir, info.Bootstrap
 		// The daemon answered, so whatever this row was standing in for is over.
@@ -4237,6 +4262,9 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg, dest string) ([]str
 		tabs, projPaneIDs, projResizeCmds := m.rebuildTabs(info, state, existingTabs, existingPanes, paneMap, dest)
 		proj.tabs = tabs
 		proj.activeTab = indexOfTab(proj.tabs, info.ActiveTab)
+		if targetTab := tabAt(proj.tabs, proj.activeTab); fromTab != targetTab {
+			tabMoves = append(tabMoves, activeTabMove{from: fromTab, target: targetTab})
+		}
 		newPaneIDs = append(newPaneIDs, projPaneIDs...)
 		overlayResizeCmds = append(overlayResizeCmds, projResizeCmds...)
 		rebuilt = append(rebuilt, proj)
@@ -4248,6 +4276,14 @@ func (m *Model) applyWorkspaceState(state WorkspaceStateMsg, dest string) ([]str
 	// which of them is active — so push the answer immediately rather than at
 	// the end of the function, where a later early return could skip it.
 	m.syncActiveDest()
+
+	// Now that the active project has settled, overlayOnScreen can answer for
+	// the tabs the daemon moved between.
+	for _, mv := range tabMoves {
+		if cmd := m.overlayTruthTransitionCmd(mv.from, mv.target); cmd != nil {
+			overlayResizeCmds = append(overlayResizeCmds, cmd)
+		}
+	}
 
 	// Record what this destination holds, so a launch that cannot reach it can
 	// still show these projects by name instead of dropping them. Placed after
@@ -4395,7 +4431,9 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 					newPaneIDs = append(newPaneIDs, pid)
 				}
 				var shown bool
-				newPaneIDs, shown = m.reconcileOverlayPane(tab, tabInfo, paneMap, existingPanes, newPaneIDs)
+				var visCmd tea.Cmd
+				newPaneIDs, shown, visCmd = m.reconcileOverlayPane(tab, tabInfo, paneMap, existingPanes, newPaneIDs)
+				overlayResizeCmds = append(overlayResizeCmds, visCmd)
 				if shown {
 					overlayResizeCmds = append(overlayResizeCmds, m.overlayResizeCmd(tab))
 				}
@@ -4600,7 +4638,9 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 		}
 
 		var shown bool
-		newPaneIDs, shown = m.reconcileOverlayPane(tab, tabInfo, paneMap, existingPanes, newPaneIDs)
+		var visCmd tea.Cmd
+		newPaneIDs, shown, visCmd = m.reconcileOverlayPane(tab, tabInfo, paneMap, existingPanes, newPaneIDs)
+		overlayResizeCmds = append(overlayResizeCmds, visCmd)
 		if shown {
 			overlayResizeCmds = append(overlayResizeCmds, m.overlayResizeCmd(tab))
 		}
@@ -4687,10 +4727,12 @@ func isOverlayPane(paneMap map[string]*PaneInfo, id string) bool {
 // reconcileOverlayPane adopts the overlay pane reported by the daemon into
 // tab.overlayPane, or clears the slot when the daemon no longer reports one.
 // The overlay is never part of the layout tree. Returns newPaneIDs extended
-// with the overlay pane ID when a new PaneModel was created for it, and
+// with the overlay pane ID when a new PaneModel was created for it,
 // overlayShown=true when the overlay just flipped from hidden to visible due
 // to a pendingOverlayShow entry (the caller should issue an overlayResizeCmd
-// so the daemon PTY gets the correct dimensions immediately on creation).
+// so the daemon PTY gets the correct dimensions immediately on creation), and
+// a visibility command the caller must batch whenever overlayVisible flips
+// here — the daemon's hidden-overlay timer has no other way to learn it.
 //
 // Disposal ownership: this function never calls Dispose. Every pre-existing
 // overlay PaneModel was indexed into existingPanes by the caller, so a pane
@@ -4702,7 +4744,7 @@ func (m *Model) reconcileOverlayPane(
 	paneMap map[string]*PaneInfo,
 	existingPanes map[string]*PaneModel,
 	newPaneIDs []string,
-) ([]string, bool) {
+) ([]string, bool, tea.Cmd) {
 	// Find the overlay pane for this tab in the daemon broadcast, if any.
 	var overlayInfo *PaneInfo
 	for _, pid := range tabInfo.Panes {
@@ -4717,8 +4759,12 @@ func (m *Model) reconcileOverlayPane(
 		// Daemon has no overlay for this tab (exited or destroyed).
 		// The dropped PaneModel is disposed by the caller's sweep.
 		if tab.overlayPane != nil {
+			// Captured before the slot is cleared: overlayVisibilityCmd reads
+			// tab.overlayPane, which is nil immediately below.
+			visCmd := m.overlayVisibilityCmd(tab, false)
 			tab.overlayPane = nil
 			tab.overlayVisible = false
+			return newPaneIDs, false, visCmd
 		}
 	case tab.overlayPane == nil || tab.overlayPane.ID != overlayInfo.ID:
 		// New overlay arrived (or replaced an old one — the replaced
@@ -4735,14 +4781,15 @@ func (m *Model) reconcileOverlayPane(
 		if m.pendingOverlayShow[tab.ID] {
 			delete(m.pendingOverlayShow, tab.ID)
 			tab.overlayVisible = true
-			return newPaneIDs, true // newly visible — caller must resize
+			// newly visible — caller must resize
+			return newPaneIDs, true, m.overlayVisibilityCmd(tab, true)
 		}
 	default:
 		// Same overlay pane — refresh metadata only.
 		syncPaneMeta(tab.overlayPane, overlayInfo, m.pluginWideCanvas(overlayInfo.Type), m.pluginMinNativeCols(overlayInfo.Type))
 	}
 
-	return newPaneIDs, false
+	return newPaneIDs, false, nil
 }
 
 // finalizeTabPanes ensures the active pane is valid and focus flags are set.
@@ -4809,6 +4856,14 @@ func (m Model) isActivePane(paneID string) bool {
 
 // switchTab sets the active tab locally and notifies the daemon so its
 // active_tab stays in sync (prevents stale overwrites on broadcastState).
+//
+// It also reports both tabs' overlay visibility, because only the active tab
+// renders: leaving a tab takes its overlay off screen without touching
+// overlayVisible (which survives the switch by design), and entering one with
+// the flag still set puts its overlay straight back on screen. Neither
+// transition flips a flag, so without these two reports the daemon's copy is
+// wrong for as long as the user stays away — and a "visible" overlay is exempt
+// from the idle sweep forever.
 func (m *Model) switchTab(idx int) tea.Cmd {
 	if idx < 0 || idx >= len(m.curTabs()) {
 		return nil
@@ -4820,15 +4875,26 @@ func (m *Model) switchTab(idx int) tea.Cmd {
 		m.exitNotesModeInPlace()
 	}
 	target := m.curTabs()[idx]
+	from := m.activeTabModel()
 	tabID, dest := target.ID, target.Dest
 	m.setActiveTabIdx(idx)
-	return func() tea.Msg {
+	cmds := []tea.Cmd{func() tea.Msg {
 		msg, _ := ipc.NewMessage(ipc.MsgSwitchTab, ipc.SwitchTabPayload{
 			TabID: tabID,
 		})
 		m.sendForDest(dest, msg)
 		return nil
+	}}
+	// Built AFTER setActiveTabIdx so both answers describe the new state, and
+	// idempotent daemon-side in both directions (a repeat hide does not push
+	// the deadline out; a show just re-stamps OverlayShownAt).
+	if cmd := m.overlayTruthTransitionCmd(from, target); cmd != nil {
+		cmds = append(cmds, cmd)
 	}
+	if len(cmds) == 1 {
+		return cmds[0]
+	}
+	return tea.Batch(cmds...)
 }
 
 // eagerTabMarker is a single-width BMP glyph (deliberately not an emoji — wide
@@ -5435,6 +5501,10 @@ func (m *Model) attachAllDests() tea.Cmd {
 		m.attached = map[string]bool{}
 	}
 	var cmds []tea.Cmd
+	// Set, not a bool: the overlay-truth report below must be scoped to
+	// exactly these destinations, not to "at least one attached this round"
+	// (see the comment on that report).
+	newlyAttached := map[string]bool{}
 	for _, dest := range m.knownDests() {
 		if m.attached[dest] {
 			continue
@@ -5444,9 +5514,43 @@ func (m *Model) attachAllDests() tea.Cmd {
 			continue
 		}
 		m.attached[dest] = true
+		newlyAttached[dest] = true
 		// Batched per destination so each daemon is asked about its OWN
 		// registry; see requestPluginListFor.
 		if cmd := m.requestPluginListFor(dest); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+	// Batched ONCE per round, not per destination like requestPluginListFor:
+	// overlayPolicyCmd already loops over every known dest itself, so
+	// calling it inside the loop above would resend the same two ints once
+	// per newly-attached destination. Gated on len(newlyAttached) because
+	// this function reruns on every WindowSizeMsg (see the comment on the
+	// unattached-retry above) — an unconditional push would resend the
+	// current policy on every resize, not just after a fresh attach.
+	if len(newlyAttached) > 0 {
+		if cmd := m.overlayPolicyCmd(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+		// Rides the same post-attach path as the policy, and for the same
+		// reason: this is the only moment the daemon's copy of overlay
+		// visibility can be stale, in either direction. A TUI that exited with
+		// an overlay on screen left it marked visible (never swept); a
+		// transient last-client disconnect stamped every overlay hidden, and a
+		// client that reconnects with one still on screen would otherwise
+		// watch the sweep destroy it five minutes later. Last attacher wins,
+		// the same trade MsgOverlayPolicy already documents.
+		//
+		// Scoped to the destinations that JUST attached, never to every
+		// destination this client knows about: a destination that was
+		// already attached did not just drop, so its overlays' visibility
+		// cannot have gone stale, and re-reporting it anyway would re-stamp
+		// their OverlayShownAt on every unrelated attach round — perturbing
+		// enforceOverlayCap's LRU order for an overlay that had nothing to do
+		// with this one. overlayTruthDestCmd already makes exactly this
+		// trade for the reconnect path; this is that same scoping applied to
+		// a round that can attach more than one destination at once.
+		if cmd := m.overlayTruthCmds(func(t *TabModel) bool { return newlyAttached[t.Dest] }); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
 	}
@@ -5494,12 +5598,19 @@ func (m Model) attachMessage(dest string) *ipc.Message {
 // is also read by the context menu, the palette and the Alt+G overlay, so asking
 // only on dialog open would leave those describing the wrong machine. Reconnect
 // is where a daemon that restarted — and therefore re-detected — shows up.
+//
+// The overlay-visibility report rides along for a sharper reason: the drop this
+// function recovers from is ITSELF what made the daemon stamp every overlay
+// hidden (the last attached client went away), so without re-asserting the
+// truth here the sweep destroys an overlay the user is looking at five minutes
+// after a link blip. attachAllDests never runs for this flow — finishReconnect
+// sets m.attached[dest] — so its copy of this report does not cover it.
 func (m Model) attachToDest(dest string) tea.Cmd {
 	attachCmd := func() tea.Msg {
 		m.sendForDest(dest, m.attachMessage(dest))
 		return nil
 	}
-	return tea.Batch(attachCmd, m.requestPluginListFor(dest))
+	return tea.Batch(attachCmd, m.requestPluginListFor(dest), m.overlayTruthDestCmd(dest))
 }
 
 // listenContinueMsg signals the TUI to keep listening for daemon messages.

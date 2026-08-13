@@ -140,6 +140,23 @@ Key capabilities:
 - **Two MCP tools** — `get_memory_report` (per-tab totals + grand total) and `get_pane_memory` (single-pane detail). Spec: `docs/superpowers/specs/2026-04-20-memory-reporting-design.md`, plan: `docs/superpowers/plans/2026-04-20-memory-reporting.md`
 - **VT grid TUI memory deferred** — no stable public emulator accessor in `charmbracelet/x/vt` yet
 
+### Overlay Retention — idle eviction and a live cap
+> Closing the `Alt+G` lazygit overlay reclaims it, instead of leaking one process per tab.
+
+`Alt+G` only ever HID the overlay. The pane and its lazygit process kept running for the life of the tab, because every existing destroy path was conditioned on something else happening — opening a different repo, the process exiting, or the tab losing its last normal pane. Measured in a real session: **7 live lazygit processes, ~116 MB each**, with a ceiling near 3.8 GB across 33 tabs. It surfaced as a memory report showing more panes in a tab than were open.
+
+Two independent bounds, both daemon-side, both configurable in `[overlay]` and F1 → Settings, `0` disabling either:
+- **Idle eviction** — an overlay hidden past `idle_timeout_minutes` (default 5) is destroyed, swept from the existing 1 s `idleChecker` tick
+- **Live cap** — at most `max_live` (default 5), enforced at CREATION so the sixth is instant and deterministic, evicting **least recently shown** rather than oldest-created
+
+Key decisions:
+- **Visibility is reported, never inferred** — an idle lazygit emits nothing whether on screen or not, so an activity-based rule would kill the pane being read. The TUI reports it through `UpdatePanePayload.OverlayVisible *bool`, and `overlayOnScreen` (active tab of the active project) is the single definition of "on screen" shared by all five reporting paths
+- **A report is one client's CLAIM, not a global fact** — two TUIs share a daemon, so a single flag let the second client's tab switch destroy an overlay the first had open, mid-rebase. Claims are per connection; an overlay is hidden only when no attached client claims it
+- **ATTACHED clients, not connections** — every MCP bridge holds an IPC conn for its lifetime, so `ConnCount() == 0` essentially never happens; the first version was inert in exactly the case it was written for
+- **Verified at runtime** — eviction fired within one tick of the 5-minute deadline, the cap evicted least-recently-shown where FIFO would have chosen differently, and five idle overlays reclaimed 191 MB → 0
+
+Spec: `docs/superpowers/specs/2026-08-12-overlay-lifecycle-design.md`, plan: `docs/superpowers/plans/2026-08-12-overlay-lifecycle.md`. Three deferred findings are tracked in `techdebt/`.
+
 ### v1.8.0: Client/Daemon Version Handshake
 > Eliminates the manual "stop daemon → replace both binaries → restart" upgrade dance.
 

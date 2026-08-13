@@ -190,10 +190,12 @@ Bounds the Alt+G lazygit overlay pane. `Alt+G` again (or switching away and back
 
 | Key | Type | Default | What it does |
 |---|---|---|---|
-| `idle_timeout_minutes` | int | `5` | Destroy an overlay that has been hidden for at least this long. `0` disables idle eviction — a hidden overlay then runs until lazygit quits on its own or its tab is destroyed. |
+| `idle_timeout_minutes` | int | `5` | Destroy an overlay that has been hidden for at least this long. `0` disables idle eviction — a hidden overlay then runs until lazygit quits on its own or its tab is destroyed. Clamped to at most `525600` (one year); a negative value reads as `0`. |
 | `max_live` | int | `5` | Cap on overlays live across all tabs at once. Opening one past the cap evicts the least recently **shown** overlay (not the oldest one created) to make room. `0` disables the cap. |
 
 Both keys are also editable at **F1 → Settings**, which pushes the change to the running daemon immediately — no restart needed.
+
+"Hidden" means no attached client has the overlay on screen. With two clients on one daemon, an overlay one of them is displaying is not reclaimed because the other switched tabs.
 
 The daemon seeds both values from its **own** config at startup, so a daemon with no client attached still reclaims overlays on its own terms. A connected client then pushes its values to every daemon it is attached to, which overrides that daemon's `[overlay]` section for as long as the client is attached — so against a remote daemon it is the client's settings that govern, and if several clients disagree the last one to push wins.
 

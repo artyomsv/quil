@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/artyomsv/quil/internal/config"
 )
@@ -363,5 +364,66 @@ func TestOverlayConfig_TOMLRoundTrip(t *testing.T) {
 	}
 	if out.Overlay != in.Overlay {
 		t.Errorf("round trip = %+v, want %+v", out.Overlay, in.Overlay)
+	}
+}
+
+func TestDesktopNotificationDefaults(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	cfg := config.Default()
+	d := cfg.Notification.Desktop
+
+	if !d.Enabled {
+		t.Error("desktop notifications must default to ON — the flag expresses intent; registration is the gate")
+	}
+	if !d.Blocked || !d.Done {
+		t.Errorf("both kinds default on: blocked=%v done=%v", d.Blocked, d.Done)
+	}
+	if !d.RequireBlur {
+		t.Error("require_blur must default true")
+	}
+	if got := d.CooldownDuration(); got != 30*time.Second {
+		t.Errorf("CooldownDuration() = %v, want 30s", got)
+	}
+}
+
+// A garbage value must not disable the rate limit — that would turn a typo
+// into a toast storm.
+func TestDesktopCooldownDuration_FallsBackOnGarbage(t *testing.T) {
+	tests := []struct {
+		in   string
+		want time.Duration
+	}{
+		{"30s", 30 * time.Second},
+		{"2m", 2 * time.Minute},
+		{"", 30 * time.Second},
+		{"nonsense", 30 * time.Second},
+		{"-5s", 30 * time.Second},
+		{"0s", 30 * time.Second},
+	}
+	for _, tt := range tests {
+		d := config.DesktopConfig{Cooldown: tt.in}
+		if got := d.CooldownDuration(); got != tt.want {
+			t.Errorf("Cooldown %q → %v, want %v", tt.in, got, tt.want)
+		}
+	}
+}
+
+// The desktop block must survive a save/load round trip, or a Settings toggle
+// silently reverts on the next launch.
+func TestDesktopConfig_RoundTrips(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	in := config.Default()
+	in.Notification.Desktop.Enabled = false
+	in.Notification.Desktop.Done = false
+	in.Notification.Desktop.Cooldown = "90s"
+	if err := config.Save(path, in); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	out, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if out.Notification.Desktop != in.Notification.Desktop {
+		t.Errorf("round trip = %+v, want %+v", out.Notification.Desktop, in.Notification.Desktop)
 	}
 }

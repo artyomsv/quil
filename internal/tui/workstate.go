@@ -240,6 +240,12 @@ func (m *Model) applyWorkTransition(paneID, eventType string, data map[string]st
 		return
 	}
 	wasWorking := pane.working
+	// Captured beside wasWorking for the same reason: the edge actions below
+	// key off a before/after pair so they fire exactly once per transition.
+	// blockedSince is written at two points in the switch and unseen at one, so
+	// hooking each write would silently miss a fourth added later.
+	wasBlocked := !pane.blockedSince.IsZero()
+	wasUnseen := pane.unseen
 	abort := false
 	switch kind {
 	case workStart:
@@ -421,6 +427,13 @@ func (m *Model) applyWorkTransition(paneID, eventType string, data map[string]st
 			pane.unseen = true
 		}
 	}
+
+	// Desktop toast on the RISING edge of either attention state. One call
+	// site, deriving both from the pair captured at the top — see
+	// raiseAttentionToast. Withdrawal is NOT here: the falling edge has no
+	// choke point (the user typing an answer clears blockedSince without any
+	// hook firing at all), so it is a sweep in Update instead.
+	m.raiseAttentionToast(pane, proj, wasBlocked, wasUnseen)
 }
 
 // coalescedCount extracts the ingester's burst count from an event's Data

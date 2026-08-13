@@ -546,9 +546,19 @@ review the diff.
 
 13. **Sound notifications** — audible cue when an agent needs you (both rivals).
     Extends [notification-center](roadmap/notification-center.md).
-14. **OS / desktop notifications** — OSC / `notify-send` / `terminal-notifier` so
-    alerts leave the TUI and work over SSH. Extends
-    [notification-center](roadmap/notification-center.md).
+14. ~~**OS / desktop notifications**~~ — **shipped for Windows.** Toasts fire on
+    the sidebar's own attention states (parked ▲ / finished ✓) while the
+    terminal is unfocused, and clicking one routes to that exact project, tab
+    and pane through a registered `quil://` handler. Opt-in via
+    `quil notify setup`; see
+    [Features → Desktop notifications](features.md#desktop-notifications).
+    **Still open:** macOS and Linux. The original sketch here named OSC /
+    `notify-send` / `terminal-notifier` — none of those can carry a click back
+    to a specific pane, so they would be a different, lesser feature rather
+    than the same one ported, and shipping them under the same name would
+    overstate what they do. Raising the terminal window on click is also still
+    open: `GetConsoleWindow` returns a ConPTY ghost under Windows Terminal, and
+    WT exposes no way to select a tab within a window.
 15. **Themes + light/dark auto-switch** — multiple presets that follow the host's
     OSC 10/11 colors (herdr ships 18, AoE 8). Quil's theming is minimal today.
 16. **Session lifecycle management** — auto-stop idle sessions plus
@@ -598,7 +608,7 @@ section above.
 | 4 | **[gap]** Git worktree-per-session + diff viewer (M15) | Medium | Very High | Core |
 | 5 | Project workspace files (`.quil.toml`) + repo hooks **[gap #19]** | Medium | Very High | Core |
 | ~~6~~ | ~~Command palette (`Alt+Shift+P`)~~ | ~~Medium~~ | ~~High~~ | ~~Done (v1)~~ |
-| 7 | **[gap]** Sound + OS/desktop notifications (M17) | Small | High | Polish |
+| 7 | **[gap]** Sound notifications (M17) — desktop toasts shipped for Windows; sound, macOS and Linux remain | Small | Medium | Polish |
 | 8 | **[gap]** General shell CLI to script panes | Medium | High | Core |
 | 9 | Community plugin registry + executable plugins **[gap]** | Medium | High | Growth |
 | 10 | Smart health monitoring + auto-restart (feeds M14 detection) | Medium | High | Advanced |

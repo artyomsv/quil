@@ -15,6 +15,7 @@ When things go sideways, this is the first place to look.
 - [Extra space / garbled text when typing on Windows 10](#extra-space--garbled-text-when-typing-on-windows-10)
 - [Pane shows ghost (dimmed border) and never goes live](#pane-shows-ghost-dimmed-border-and-never-goes-live)
 - [Claude Code session doesn't resume](#claude-code-session-doesnt-resume)
+- [No desktop notifications (Windows)](#no-desktop-notifications-windows)
 - [Log files — where to look](#log-files--where-to-look)
 - [Enable debug logging](#enable-debug-logging)
 - [Force-stop the daemon](#force-stop-the-daemon)
@@ -196,6 +197,42 @@ Quil tracks Claude session-id rotation via a `SessionStart` hook. If the hook di
 3. **`QUIL_HOME` characters.** The hook installer rejects shell-unsafe characters in `$QUIL_HOME`. If you set `QUIL_HOME=/path/with"quote/` the daemon refuses to install the hook (see warning in daemon log).
 
 For OpenCode the equivalent files are under `~/.quil/opencodehook/` and `~/.quil/sessions/opencode-<pane-id>.id` — see [Features → OpenCode session-id tracking](features.md#opencode-session-id-tracking).
+
+## No desktop notifications (Windows)
+
+Check in this order — the first item is the usual cause, because the config flag is already on by default and registration is the remaining gate.
+
+**1. Register.** Desktop toasts need a Start Menu shortcut and a `quil://` handler, and nothing writes them as a side effect of the config flag:
+
+```bash
+quil notify status     # says "Registered: NO" until you do this
+quil notify setup
+```
+
+**2. Send a canary.** `quil notify test` shows one self-labelled toast from the real binary. This is the only way to exercise the whole path — a `go test` binary cannot, because Windows resolves an unpackaged app's identity by matching the running process to a Start Menu shortcut that points at it.
+
+**3. `0x80070490` from `quil notify test`.** Windows has not indexed the shortcut yet. It does this on its own schedule and nothing in Quil can accelerate it; signing out and back in forces it. Until then, toasts are silently dropped.
+
+**4. Focus reporting.** Toasts only fire while the terminal is unfocused, which Quil learns from terminal focus reporting (DEC 1004). A terminal that does not implement it never reports losing focus, so the gate suppresses everything forever. Windows Terminal supports it. To bypass the gate:
+
+```toml
+[notification.desktop]
+require_blur = false
+```
+
+**5. The pane is muted.** `Alt+M` suppresses toasts as well as sidebar rows.
+
+**6. The cooldown.** One toast per pane per 30 s, shared across both kinds — a pane that parks and then finishes shortly after produces one toast, not two. Tune with `cooldown` in `[notification.desktop]`.
+
+**7. Check the Settings row.** `F1 → Settings → Desktop notifications` reports state, not the flag: `on` means registered and working, `on (run notify setup)` means the flag is on but nothing is registered, `unsupported` means you are not on Windows.
+
+To undo everything Quil wrote:
+
+```bash
+quil notify setup --remove
+```
+
+Dev builds register separately (`quil-dev://`, `Quil (dev).lnk`), so `quil-dev.exe notify setup --remove` will not touch a production registration.
 
 ## Log files — where to look
 

@@ -383,6 +383,28 @@ export const features: Feature[] = [
     ],
   },
   {
+    slug: "desktop-notifications",
+    icon: "bell",
+    title: "Desktop notifications",
+    blurb:
+      "When an agent parks for input while you are in another window, Windows raises a toast. Click it and Quil is already on that project, tab and pane.",
+    category: "observability",
+    // Windows-only today, and Windows decides when it will honour a freshly
+    // registered app — both are real limits a user should read before relying
+    // on this, which is what the badge is for.
+    badge: "beta",
+    detail: [
+      "Fires on the same two states the project sidebar already marks: a pane parked waiting on you (▲) and a turn that finished while you were away (✓). Not on every event — the notification sidebar remains the full log.",
+      "Only while the terminal is unfocused. Quil reads terminal focus reporting (DEC 1004), so a toast never interrupts you while you are looking at the pane it is about.",
+      "Clicking the toast routes to the exact pane via a registered `quil://` handler — the same jump the attention queue (Alt+Shift+A) performs, including switching project and tab.",
+      "One toast per pane, rate-limited to one per 30 s per pane, so six agents finishing at once give you six independently clickable toasts rather than a storm of duplicates.",
+      "Answering a prompt withdraws its toast from Action Center, so the notification surface never keeps claiming attention you have already given.",
+      "Opt-in registration: `quil notify setup` writes a Start Menu shortcut and a `quil://` handler, prints exactly what it wrote, and `quil notify setup --remove` is a true inverse. Nothing is written as a side effect of a config flag.",
+      "Toggle live from F1 → Settings or `[notification.desktop]` in config.toml. The Settings row reports whether registration is actually in place rather than just echoing the flag.",
+      "Windows only. macOS and Linux have no transport that supports click-to-route, so they are deliberately not faked.",
+    ],
+  },
+  {
     slug: "memory-reporting",
     icon: "book-open",
     title: "Memory reporting",

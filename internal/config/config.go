@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/BurntSushi/toml"
 )
@@ -112,6 +113,50 @@ type NotificationConfig struct {
 	SidebarWidth int                     `toml:"sidebar_width"` // default 30
 	MaxEvents    int                     `toml:"max_events"`    // default 200
 	Hooks        HookNotificationsConfig `toml:"hooks"`
+	Desktop      DesktopConfig           `toml:"desktop"`
+}
+
+// DesktopConfig controls operating-system toasts raised from the project
+// sidebar's attention model.
+//
+// Enabled defaults TRUE, and that does not make registration implicit: Windows
+// toasts need a Start Menu shortcut and an HKCU class key, both outside
+// QUIL_HOME, and nothing writes them as a side effect of a config flag. The
+// flag says "I want these"; `quil notify setup` is still the gate.
+//
+// The consequence is that enabled-but-unregistered is the DEFAULT state on a
+// fresh Windows install rather than an edge case, which is why the Settings
+// row reports registration state instead of this bool.
+type DesktopConfig struct {
+	Enabled bool `toml:"enabled"`
+	Blocked bool `toml:"blocked"` // a pane parked waiting on the user
+	Done    bool `toml:"done"`    // a turn finished while the user was away
+
+	// Cooldown is per PANE and shared by both kinds. Shared deliberately: a
+	// pane that blocks and then completes five seconds later should produce
+	// one toast, not two.
+	Cooldown string `toml:"cooldown"`
+
+	// RequireBlur suppresses toasts while the terminal has focus. Turning it
+	// off is the escape hatch for a terminal that does not implement focus
+	// reporting (DEC 1004), where no focus event ever arrives and the gate
+	// would otherwise suppress everything forever.
+	RequireBlur bool `toml:"require_blur"`
+}
+
+// DefaultDesktopCooldown matches the per-pane bell/idle convention the daemon
+// already uses (Pane.LastBellEventAt).
+const DefaultDesktopCooldown = 30 * time.Second
+
+// CooldownDuration parses Cooldown, falling back to the default for an empty,
+// malformed or non-positive value. A garbage value must not disable the rate
+// limit — that would turn a typo into a toast storm.
+func (d DesktopConfig) CooldownDuration() time.Duration {
+	v, err := time.ParseDuration(d.Cooldown)
+	if err != nil || v <= 0 {
+		return DefaultDesktopCooldown
+	}
+	return v
 }
 
 // OverlayConfig bounds how long an overlay pane (the Alt+G lazygit pane) may
@@ -341,6 +386,13 @@ func Default() Config {
 		Notification: NotificationConfig{
 			SidebarWidth: 30,
 			MaxEvents:    200,
+			Desktop: DesktopConfig{
+				Enabled:     true,
+				Blocked:     true,
+				Done:        true,
+				Cooldown:    "30s",
+				RequireBlur: true,
+			},
 			Hooks: HookNotificationsConfig{
 				Claude:   "default",
 				OpenCode: "default",

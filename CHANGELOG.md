@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Desktop notifications on Windows.** When an agent parks waiting on you, or
+  finishes a turn while you were away, Windows raises a toast — and clicking it
+  puts Quil on that exact project, tab and pane. It fires on the same two
+  states the project sidebar already marks (▲ and ✓) and no others, only while
+  the terminal is unfocused, and at most once per pane per 30 seconds; six
+  agents finishing together give six separately clickable toasts rather than a
+  storm. Answering a prompt withdraws its toast, so Action Center never goes on
+  claiming attention you have already given.
+
+  Registration is explicit and reversible: `quil notify setup` writes a Start
+  Menu shortcut and a `quil://` handler, prints exactly what it wrote, and
+  `quil notify setup --remove` undoes both. Nothing is written as a side effect
+  of a config flag. `quil notify status` reports where you stand and
+  `quil notify test` sends one labelled canary. Toggle it live at F1 → Settings
+  or under `[notification.desktop]`; the Settings row reports whether
+  registration is actually in place rather than echoing the flag.
+
+  Clicking a toast can only move your cursor — the handler validates a pane id
+  and forwards it over a per-PID named pipe, with no path to spawning a pane,
+  sending input or running a command. Windows only: no transport on macOS or
+  Linux can carry a click back to a specific pane. Note that Windows indexes a
+  new Start Menu shortcut on its own schedule, so toasts may be dropped for a
+  while after setup — `quil notify test` tells you when it is live.
+
 ## [1.55.1] - 2026-08-13
 
 ### Fixed

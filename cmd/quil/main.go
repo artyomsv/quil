@@ -17,6 +17,7 @@ import (
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/logger"
+	"github.com/artyomsv/quil/internal/notify"
 	"github.com/artyomsv/quil/internal/plugin"
 	"github.com/artyomsv/quil/internal/transport"
 	"github.com/artyomsv/quil/internal/tui"
@@ -90,6 +91,23 @@ func main() {
 		}
 	}
 
+	// The quil:// protocol handler runs FIRST, before any argument
+	// preprocessing.
+	//
+	// Ordering is a security property here, not style. This entry point is
+	// reachable by any local process — and, behind a browser confirmation, by a
+	// web page — so its blast radius must not depend on what the flag
+	// preprocessing below happens to do today. Dispatching after it made the
+	// ceiling rest on an unasserted invariant: that neither --dev nor --remote
+	// has a side effect that matters here. True today; the day someone adds a
+	// pre-switch --config or a log-path override, it silently becomes
+	// web-page-reachable. Handled here, extra argv is unreachable by
+	// construction.
+	if len(os.Args) > 1 && os.Args[1] == "activate" {
+		handleActivate()
+		return
+	}
+
 	// Record the console mode before anything we spawn can disturb it. A
 	// non-batch ssh dial reconfigures it and is killed rather than allowed to
 	// restore it, which leaves every later diagnostic staircasing down the
@@ -114,6 +132,10 @@ func main() {
 		case "mcp":
 			runMCP()
 			return
+		case "notify":
+			handleNotify()
+			return
+		// "activate" is dispatched above, before flag preprocessing.
 		case "version":
 			fmt.Println("quil v" + version)
 			return
@@ -559,6 +581,50 @@ func launchTUI() {
 		model.SetRecentCWDs(tui.LoadRecentCWDs(config.RecentCWDsPath(remoteDest)))
 	}
 
+	// Desktop toasts. Installed on the CLIENT rather than the daemon because
+	// the trigger state (blockedSince/unseen) is client-side and because the
+	// toast belongs on the machine with the screen — which under --remote is
+	// this one, not the daemon's.
+	//
+	// A nil notifier is the normal case (every non-Windows platform, and
+	// Windows before `quil notify setup`), so the Model checks one field rather
+	// than branching on platform anywhere.
+	// Gated on the config: turning a feature off should remove its machinery,
+	// not just silence it. Without this, a user who disabled toasts still got a
+	// locked-OS-thread goroutine, COM initialisation, a process-wide
+	// SetCurrentProcessExplicitAppUserModelID call (which changes taskbar
+	// grouping identity), and — below — a bound named pipe that any same-user
+	// process could use to move their active pane.
+	//
+	// The cost is that the Settings toggle cannot install a notifier
+	// mid-session; enabling it takes effect on the next launch, which the
+	// Settings row reports honestly as "on (run notify setup)".
+	notifyOpts := notifyVariant()
+	var notifier notify.Notifier
+	if cfg.Notification.Desktop.Enabled {
+		n, err := notify.New(notifyOpts)
+		if err != nil {
+			// Not fatal, and deliberately not a dialog: a dialog about
+			// notifications is the wrong medicine, and the sidebar keeps
+			// working. With `enabled` defaulting true this is the ordinary
+			// state of a machine that never ran setup, so it is logged at
+			// debug rather than warned.
+			logger.Debug("desktop notifications unavailable: %v", err)
+		} else {
+			notifier = n
+			defer func() {
+				if err := notifier.Close(); err != nil {
+					logger.Debug("notify: close: %v", err)
+				}
+			}()
+		}
+	}
+	// Called UNCONDITIONALLY, including with a nil notifier: the Settings row
+	// needs the variant to report "on (run notify setup)", and it can only get
+	// that from here — internal/tui must not re-derive a build variant, and
+	// m.devMode is QUIL_HOME-based, which is a different question.
+	model.SetDesktopNotifier(notifier, notifyOpts, os.Getpid())
+
 	// EVERY destination reconnects, the local daemon included — see redialFor,
 	// which picks the socket dialer for "" and ssh for the rest.
 	//
@@ -677,6 +743,33 @@ func launchTUI() {
 	}
 
 	p := tea.NewProgram(model)
+
+	// The activation listener needs the Program handle, which does not exist
+	// until here — that ordering is why it is not installed beside the
+	// notifier above.
+	//
+	// A failure to bind is logged and the feature keeps running: the primary
+	// value of a toast is "an agent needs you", and routing is the bonus.
+	// Disabling toasts entirely over a pipe error would be the larger silent
+	// loss.
+	// Only when a toast can actually exist to be clicked. A pipe opened for a
+	// disabled or unregistered feature is a control surface with no purpose —
+	// any same-user process could use it to move the active pane, and turning
+	// a feature off should remove its attack surface rather than merely
+	// silence its output.
+	if notifier != nil {
+		if lis, err := notify.Listen(os.Getpid(), func(paneID string) {
+			p.Send(tui.ActivatePaneMsg{PaneID: paneID})
+		}); err != nil {
+			// Logged, not fatal: the primary value of a toast is "an agent
+			// needs you", and routing is the bonus. Disabling toasts entirely
+			// over a pipe failure would be the larger silent loss.
+			logger.Debug("toast activation listener unavailable: %v", err)
+		} else if lis != nil {
+			defer lis.Close()
+		}
+	}
+
 	finalModel, err := p.Run()
 	if err != nil {
 		log.Printf("TUI error: %v", err)

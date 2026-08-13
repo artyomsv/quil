@@ -29,6 +29,7 @@ Client-daemon model:
 - `internal/plugin/` — Pane plugin system (registry, built-ins, TOML loading, scraper)
 - `internal/gitworktree/` — git worktree listing + creation (the repository WRITES; kept apart from the read-only `gitinfo`, which a ticker runs)
 - `internal/clipboard/` — Platform-native clipboard read/write (Win32 API, pbpaste/pbcopy, xclip/xsel)
+- `internal/notify/` — Windows desktop toasts + `quil://` click-to-route activation. Split so every file with logic is platform-neutral (URI codec, toast XML, variant selection) and the `//go:build windows` files hold syscalls only — CI is Linux, so anything behind that tag is never compiled by `dev.sh test`. Raw COM/WinRT interop (no CGo, no new dependency), following `internal/clipboard`'s `NewProc` idiom
 - `internal/tui/` — Bubble Tea model, tabs, panes, layout tree, styles, text selection, notification sidebar
 
 Deep package notes — `internal/transport/`, `internal/pty/`, `internal/ipc/`, `internal/claudehook/`,
@@ -232,5 +233,6 @@ Cached reference repos:
 | M12 | Done | Notification center — daemon event queue, per-pane mute, sidebar, 3 MCP tools |
 | M13 | Done | Memory reporting — 5s collector, per-pane Go-heap + PTY RSS, dialog + 2 MCP tools |
 | M14 | Done (v1.47.0) | Projects — grouping above tabs, sidebar with agent+git state, multi-daemon router, runtime host connect/disconnect. Deferred to their own plans: MCP project scoping, listening ports |
+| M17 | Partial | Desktop notifications — Windows toasts on the sidebar's attention states, `quil://` click-to-route, `quil notify setup/status/test/--remove`, F1 → Settings toggle. Still open in M17: sound, macOS/Linux (no transport there carries a click back to a pane), raising the terminal window on click |
 
 Full detail: `docs/roadmap.md` and `docs/roadmap/*.md`.

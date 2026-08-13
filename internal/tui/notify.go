@@ -161,17 +161,79 @@ func (m *Model) raiseAttentionToast(pane *PaneModel, proj *ProjectModel, wasBloc
 
 	nowBlocked := !pane.blockedSince.IsZero()
 	var kind toastKind
-	var headline string
 	switch {
 	case cfg.Blocked && nowBlocked && !wasBlocked:
-		kind, headline = toastBlocked, glyphBlocked+" Waiting for your input"
+		kind = toastBlocked
 	case cfg.Done && pane.unseen && !wasUnseen:
-		kind, headline = toastDone, glyphDone+" Turn finished"
+		kind = toastDone
 	default:
 		return
 	}
+	m.emitToast(pane, proj, kind)
+}
+
+// raiseDeferredToasts fires for panes that ALREADY need attention, at the
+// moment the terminal loses focus.
+//
+// Without this the feature only works when the user happens to be away at the
+// exact instant an agent parks. The common real sequence is the opposite: you
+// watch the agent finish, then leave — and because the rising edge fired while
+// you were focused, it was suppressed and never comes back. Observed directly:
+// Stop at 21:32:54 while the pane was focused, user leaves, agent idle-waiting
+// at 21:33:54, no toast ever. "Notify me when I'm away" has to mean when I
+// LEAVE, not only if I was already gone.
+//
+// Deliberately state-based rather than edge-based: it asks what needs attention
+// NOW. outstandingToasts skips anything already showing, and the per-pane
+// cooldown stops alt-tabbing from producing a burst per switch.
+func (m *Model) raiseDeferredToasts() {
+	cfg := m.cfg.Notification.Desktop
+	if m.notifier == nil || !cfg.Enabled {
+		return
+	}
+	for _, proj := range m.projects {
+		for _, tab := range proj.tabs {
+			if tab.Root == nil {
+				continue
+			}
+			for _, pane := range tab.Leaves() {
+				if _, showing := m.outstandingToasts[pane.ID]; showing {
+					continue
+				}
+				switch {
+				case cfg.Blocked && !pane.blockedSince.IsZero():
+					m.emitToast(pane, proj, toastBlocked)
+				case cfg.Done && pane.unseen:
+					m.emitToast(pane, proj, toastDone)
+				}
+			}
+		}
+	}
+}
+
+// emitToast is the single place a toast is built, rate-limited and sent.
+//
+// Shared by the rising-edge path and the on-blur sweep so the two cannot
+// disagree about muting, the cooldown, sanitising, or what gets recorded for
+// withdrawal. It does NOT check termFocused: the edge path checks it before
+// deciding, and the blur path is by definition unfocused.
+func (m *Model) emitToast(pane *PaneModel, proj *ProjectModel, kind toastKind) {
+	if m.notifier == nil || pane == nil || proj == nil {
+		return
+	}
+	// A muted pane is muted everywhere. The sidebar already honours this and a
+	// toast is louder than a sidebar row.
+	if pane.Muted {
+		return
+	}
+
+	headline := glyphDone + " Turn finished"
+	if kind == toastBlocked {
+		headline = glyphBlocked + " Waiting for your input"
+	}
 
 	now := time.Now()
+	cfg := m.cfg.Notification.Desktop
 	if !pane.lastToastAt.IsZero() && now.Sub(pane.lastToastAt) < cfg.CooldownDuration() {
 		return
 	}
@@ -188,7 +250,7 @@ func (m *Model) raiseAttentionToast(pane *PaneModel, proj *ProjectModel, wasBloc
 		title += " · " + sanitizeRemoteText(pane.Name)
 	}
 	body := headline
-	if nowBlocked && pane.blockedReason != "" {
+	if kind == toastBlocked && pane.blockedReason != "" {
 		body = headline + " (" + sanitizeRemoteText(pane.blockedReason) + ")"
 	}
 

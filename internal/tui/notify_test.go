@@ -1,6 +1,7 @@
 package tui
 
 import (
+	tea "charm.land/bubbletea/v2"
 	"errors"
 	"strings"
 	"testing"
@@ -253,6 +254,111 @@ func TestRaiseAttentionToast_IncludesBlockedReasonWhenPresent(t *testing.T) {
 	if !strings.Contains(f.sent[0].Body, "Bash") {
 		t.Errorf("Body = %q, want it to carry the blocked reason", f.sent[0].Body)
 	}
+}
+
+// ------------------------------------------------------- deferred (on blur)
+
+// The sequence a real user produced, from the daemon log: the agent finished
+// while the pane was FOCUSED (so no unseen mark, correctly), the user then
+// alt-tabbed away, and the agent sat waiting. Before this, no toast ever fired
+// — the rising edge had already been suppressed and nothing brought it back.
+func TestUpdate_BlurRaisesToastForAlreadyWaitingPane(t *testing.T) {
+	m, f, pane := wiredToastModel(t)
+	m.termFocused = true // user is looking at Quil
+
+	// Agent parks while the user watches: edge fires, gate suppresses it.
+	updated, _ := m.Update(paneEventMsg{PaneID: pane.ID, Type: "hook.claude.PermissionRequest"})
+	m = updated.(Model)
+	if len(f.sent) != 0 {
+		t.Fatalf("sent %d toasts while focused, want 0", len(f.sent))
+	}
+	if pane.blockedSince.IsZero() {
+		t.Fatal("setup assumption broken: the pane should be blocked")
+	}
+
+	// User leaves.
+	updated, _ = m.Update(tea.BlurMsg{})
+	got := updated.(Model)
+
+	if len(f.sent) != 1 {
+		t.Fatalf("sent %d toasts on blur, want 1 — leaving must surface a pane already waiting", len(f.sent))
+	}
+	if !strings.Contains(f.sent[0].Body, "Waiting") {
+		t.Errorf("Body = %q, want the blocked headline", f.sent[0].Body)
+	}
+	if _, ok := got.outstandingToasts[pane.ID]; !ok {
+		t.Error("the deferred toast must be recorded so the sweep can withdraw it")
+	}
+}
+
+// Alt-tabbing repeatedly must not produce a toast per switch.
+func TestUpdate_BlurDoesNotRetoastWhileOneIsShowing(t *testing.T) {
+	m, f, pane := wiredToastModel(t)
+	m.termFocused = true
+	updated, _ := m.Update(paneEventMsg{PaneID: pane.ID, Type: "hook.claude.PermissionRequest"})
+	m = updated.(Model)
+
+	for i := 0; i < 3; i++ {
+		updated, _ = m.Update(tea.BlurMsg{})
+		m = updated.(Model)
+		updated, _ = m.Update(tea.FocusMsg{})
+		m = updated.(Model)
+	}
+
+	if len(f.sent) != 1 {
+		t.Errorf("sent %d toasts across three blur/focus cycles, want 1", len(f.sent))
+	}
+}
+
+// Nothing needing attention means nothing to say.
+func TestUpdate_BlurWithNothingWaitingIsSilent(t *testing.T) {
+	m, f, _ := wiredToastModel(t)
+	m.termFocused = true
+
+	updated, _ := m.Update(tea.BlurMsg{})
+	_ = updated
+
+	if len(f.sent) != 0 {
+		t.Errorf("sent %d toasts on blur with no pane waiting, want 0", len(f.sent))
+	}
+}
+
+// A finished turn the user watched should also surface on leaving — but only
+// if it actually left an unseen mark.
+func TestBlur_RaisesForUnseenPane(t *testing.T) {
+	m, f, pane := toastModel(t)
+	m.termFocused = true
+	pane.unseen = true
+
+	m.raiseDeferredToasts()
+
+	if len(f.sent) != 1 {
+		t.Fatalf("sent %d toasts, want 1 for an unseen pane", len(f.sent))
+	}
+	if !strings.Contains(f.sent[0].Body, "finished") {
+		t.Errorf("Body = %q, want the finished headline", f.sent[0].Body)
+	}
+}
+
+func TestBlur_RespectsMuteAndDisabled(t *testing.T) {
+	t.Run("muted pane", func(t *testing.T) {
+		m, f, pane := toastModel(t)
+		pane.blockedSince = time.Now()
+		pane.Muted = true
+		m.raiseDeferredToasts()
+		if len(f.sent) != 0 {
+			t.Errorf("sent %d toasts for a muted pane, want 0", len(f.sent))
+		}
+	})
+	t.Run("feature disabled", func(t *testing.T) {
+		m, f, pane := toastModel(t)
+		pane.blockedSince = time.Now()
+		m.cfg.Notification.Desktop.Enabled = false
+		m.raiseDeferredToasts()
+		if len(f.sent) != 0 {
+			t.Errorf("sent %d toasts while disabled, want 0", len(f.sent))
+		}
+	})
 }
 
 // ---------------------------------------------------------------- withdrawal

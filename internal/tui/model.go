@@ -1022,6 +1022,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.BlurMsg:
 		m.termFocused = false
 		m.focusEverReported = true
+		// Leaving is itself the trigger. An agent that parked or finished while
+		// you were watching produced a rising edge that was correctly
+		// suppressed — without this, walking away never surfaces it.
+		m.raiseDeferredToasts()
 		return m, nil
 
 	case tea.WindowSizeMsg:

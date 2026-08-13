@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.55.1] - 2026-08-13
+
 ### Fixed
 - **Closing the lazygit overlay now reclaims it.** `Alt+G` only hid the overlay
   — the lazygit process kept running for the life of the tab, so a session that

@@ -2,3 +2,4 @@
 - [hookevents taint boundary](project_hookevents_taint.md) — spool payloads are pane-controlled; the real bounds are ~50 events/s/pane and 1 KiB per data value (not the 128-byte producer cap)
 - [remote daemon string taint](project_remote_daemon_taint.md) — every workspace_state string is attacker-controlled when the daemon is remote; sanitizeRemoteText is opt-in per render site; width checks are neither sanitisers nor length bounds
 - [Semgrep in a git worktree](project_semgrep_worktree_scan.md) — scans 0 files and still reports success; copy changed files to a scratch dir, run from PowerShell, check paths.scanned
+- [project_uintptrescapes_com_helper.md](project_uintptrescapes_com_helper.md) — a hand-rolled COM vtable call helper needs //go:uintptrescapes; x/sys's own Call has it, yours does not

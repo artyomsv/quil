@@ -1841,7 +1841,12 @@ func (d *Daemon) createPaneAt(payload ipc.CreatePanePayload, cwd, paneType strin
 	d.applyResumeSessionID(pane, payload.ResumeSessionID)
 	log.Printf("pane created: %s (type=%s, tab=%s, overlay=%v)", pane.ID, paneType, payload.TabID, payload.Overlay)
 
-	ptySession := apty.New()
+	// Through newSessionFn rather than apty.New() — identical in production
+	// (the seam's zero pair IS apty.New()) and the smallest change that makes
+	// this function drivable from a test. It is the ONLY production call site
+	// of enforceOverlayCap, and a direct-call test of that function passes just
+	// as happily against a createPaneAt that no longer calls it.
+	ptySession := newSessionFn(0, 0)
 	if err := d.spawnPane(pane, ptySession, false); err != nil {
 		return pane, fmt.Errorf("start PTY error: %w", err)
 	}

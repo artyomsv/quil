@@ -1,7 +1,11 @@
 package daemon
 
 import (
+	"bytes"
 	"io"
+	"log"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -66,6 +70,48 @@ func overlayTestDaemon(t *testing.T, cfg config.Config) *Daemon {
 	return New(cfg)
 }
 
+// overlayServerDaemonWithConfig is overlayServerDaemon with a policy and the
+// fake spawn path, for the tests that need a real IPC server AND real panes.
+func overlayServerDaemonWithConfig(t *testing.T, cfg config.Config) (*Daemon, string) {
+	t.Helper()
+	d := overlayTestDaemon(t, cfg)
+	sock := filepath.Join(config.QuilDir(), "s.sock")
+	d.server = ipc.NewServer(sock, d.handleMessage, d.onClientDisconnect)
+	if err := d.server.Start(); err != nil {
+		t.Fatalf("start IPC server: %v", err)
+	}
+	t.Cleanup(func() { d.server.Stop() })
+	return d, sock
+}
+
+// safeBuffer is an io.Writer the log package can be pointed at from the daemon's
+// many goroutines while the test goroutine reads it.
+type safeBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *safeBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *safeBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// captureLog redirects the standard logger and returns its restore func. The
+// daemon log is the surface half of this fix — a failure line on the success
+// path is what triage reads first — so it is asserted on directly.
+func captureLog(w *safeBuffer) func() {
+	prev := log.Writer()
+	log.SetOutput(w)
+	return func() { log.SetOutput(prev) }
+}
+
 func setOverlayShown(p *Pane, at time.Time) {
 	p.PluginMu.Lock()
 	p.OverlayShownAt = at
@@ -126,6 +172,127 @@ func TestCreatePaneAt_NormalPaneAtTheCapEvictsNothing(t *testing.T) {
 
 	if d.session.Pane(existing.ID) == nil {
 		t.Error("creating an ORDINARY pane evicted an overlay")
+	}
+}
+
+// countWorkspaceFrames reads a client's inbound stream in the background and
+// reports how many workspace_state frames have arrived. Reset() drops what has
+// been seen so far, so a test can measure ONE action.
+type frameCounter struct {
+	mu sync.Mutex
+	n  int
+}
+
+func (f *frameCounter) Reset()     { f.mu.Lock(); f.n = 0; f.mu.Unlock() }
+func (f *frameCounter) Count() int { f.mu.Lock(); defer f.mu.Unlock(); return f.n }
+
+func countWorkspaceFrames(c *ipc.Client) *frameCounter {
+	f := &frameCounter{}
+	go func() {
+		for {
+			msg, err := c.Receive()
+			if err != nil {
+				return
+			}
+			if msg.Type == ipc.MsgWorkspaceState {
+				f.mu.Lock()
+				f.n++
+				f.mu.Unlock()
+			}
+		}
+	}()
+	return f
+}
+
+// An eviction PASS emits one broadcast, not one per pane.
+//
+// destroyOverlay used to broadcast and request a snapshot itself, so a sweep
+// reclaiming N overlays put N full workspace-state frames back to back onto a
+// 64-slot must-deliver queue — the 2026-08-09 force-disconnect shape, landing
+// on every attached client at once.
+//
+// Measured while writing this: the second broadcast a review attributed to
+// onPaneExit is NOT reachable here. streamPTYOutput only calls onPaneExit while
+// the pane is still in the session, and DestroyPane removes it before closing
+// the PTY, so an evicted overlay's exit callback never runs (probe: 2 frames,
+// 0 exit callbacks, 0 pane-not-found lines for a two-overlay sweep). The log
+// assertion below is kept as the guard for the reverse order — a child that
+// exits on its own inside the sweep's window.
+func TestSweepIdleOverlays_EvictionIsQuietAndBroadcastsOnce(t *testing.T) {
+	var logs safeBuffer
+	restoreLog := captureLog(&logs)
+	defer restoreLog()
+
+	cfg := config.Default()
+	cfg.Overlay.MaxLive = 0 // creation must not evict; the sweep is under test
+	d, sock := overlayServerDaemonWithConfig(t, cfg)
+	tab := d.session.CreateTab("t")
+
+	var ids []string
+	for i := 0; i < 2; i++ {
+		p, err := d.createPaneAt(ipc.CreatePanePayload{TabID: tab.ID, Overlay: true}, "", "terminal")
+		if err != nil {
+			t.Fatalf("createPaneAt: %v", err)
+		}
+		p.PluginMu.Lock()
+		p.OverlayHiddenAt = time.Now().Add(-6 * time.Minute)
+		p.PluginMu.Unlock()
+		ids = append(ids, p.ID)
+	}
+
+	client := attachTestClient(t, sock)
+	defer client.Close()
+	frames := countWorkspaceFrames(client)
+	waitUntil(t, "the attach broadcast to land", func() bool { return frames.Count() > 0 })
+	frames.Reset()
+
+	if got := d.sweepIdleOverlays(time.Now()); len(got) != 2 {
+		t.Fatalf("evicted %v, want both overlays", got)
+	}
+
+	// The PTY close and anything it wakes are asynchronous.
+	time.Sleep(300 * time.Millisecond)
+
+	if n := frames.Count(); n != 1 {
+		t.Errorf("a sweep evicting 2 overlays broadcast %d workspace_state frames, want exactly 1", n)
+	}
+	for _, id := range ids {
+		if strings.Contains(logs.String(), "pane not found: "+id) {
+			t.Errorf("a successful eviction of %s logged a pane-not-found failure", id)
+		}
+	}
+}
+
+// The narrow order this DOES leave: a child that exits on its own while the
+// sweep is holding its snapshot, so the eviction destroys the pane first and
+// the exit callback arrives second. "Not found" is then the ordinary outcome,
+// not a failure — and the pass that evicted it has already broadcast.
+func TestOnPaneExit_AlreadyEvictedOverlayIsQuietAndSendsNothing(t *testing.T) {
+	var logs safeBuffer
+	restoreLog := captureLog(&logs)
+	defer restoreLog()
+
+	d, sock := overlayServerDaemonWithConfig(t, config.Default())
+	tab := d.session.CreateTab("t")
+	p := overlayPane(t, d, tab.ID)
+
+	client := attachTestClient(t, sock)
+	defer client.Close()
+	frames := countWorkspaceFrames(client)
+	waitUntil(t, "the attach broadcast to land", func() bool { return frames.Count() > 0 })
+	frames.Reset()
+
+	if err := d.session.DestroyPane(p.ID); err != nil { // the eviction got there first
+		t.Fatalf("DestroyPane: %v", err)
+	}
+	d.onPaneExit(p, 0)
+	time.Sleep(100 * time.Millisecond)
+
+	if strings.Contains(logs.String(), "destroy overlay") {
+		t.Errorf("an already-evicted overlay logged a destroy failure:\n%s", logs.String())
+	}
+	if n := frames.Count(); n != 0 {
+		t.Errorf("an already-evicted overlay's exit broadcast %d workspace_state frames, want 0", n)
 	}
 }
 

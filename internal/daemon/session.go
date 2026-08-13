@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"sync"
@@ -492,13 +493,20 @@ func (sm *SessionManager) ReplacePane(oldPaneID string, newPane *Pane) error {
 	return nil
 }
 
+// ErrPaneNotFound is returned by DestroyPane for a pane the session no longer
+// holds. A sentinel rather than a bare message because for an OVERLAY that is a
+// normal outcome, not a failure: the retention sweep destroys the pane and the
+// child's exit callback arrives afterwards, and reporting it as an error puts a
+// failure line on a success path in a log triage starts from.
+var ErrPaneNotFound = errors.New("pane not found")
+
 func (sm *SessionManager) DestroyPane(paneID string) error {
 	sm.mu.Lock()
 
 	pane, ok := sm.panes[paneID]
 	if !ok {
 		sm.mu.Unlock()
-		return fmt.Errorf("pane not found: %s", paneID)
+		return fmt.Errorf("%w: %s", ErrPaneNotFound, paneID)
 	}
 
 	if tab, ok := sm.tabs[pane.TabID]; ok {

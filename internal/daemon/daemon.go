@@ -2429,12 +2429,21 @@ func (d *Daemon) onPaneExit(pane *Pane, code int) {
 	// reconciliation clears the slot and the next Alt+G creates fresh.
 	// Normal panes survive as exited husks (existing behavior unchanged).
 	if isOverlay {
-		log.Printf("pane exit: auto-destroying overlay %s", pane.ID)
 		tabID := pane.TabID
-		d.cleanupPaneArtifacts(pane.ID)
 		if err := d.session.DestroyPane(pane.ID); err != nil {
-			log.Printf("onPaneExit: destroy overlay %s: %v", pane.ID, err)
+			// A retention eviction destroys the pane and the child exits
+			// afterwards, so "not found" here means the pane was already
+			// reaped — an ordinary outcome, and the pass that reclaimed it has
+			// already cleaned up and broadcast. Reporting it as a failure would
+			// put an error line and a redundant workspace-state frame on a
+			// success path, in a daemon that runs for weeks.
+			if !errors.Is(err, ErrPaneNotFound) {
+				log.Printf("onPaneExit: destroy overlay %s: %v", pane.ID, err)
+			}
+			return
 		}
+		log.Printf("pane exit: auto-destroying overlay %s", pane.ID)
+		d.cleanupPaneArtifacts(pane.ID)
 		// ensureTabNotEmpty is a cheap no-op when normal panes remain (the
 		// common case). It guards the degenerate case where an overlay was
 		// somehow the tab's only pane — shouldn't happen because

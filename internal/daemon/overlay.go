@@ -66,11 +66,16 @@ func (d *Daemon) sweepIdleOverlays(now time.Time) []string {
 		}
 	}
 
+	var evicted []string
 	for _, id := range expired {
+		if !d.destroyOverlay(id) {
+			continue
+		}
 		log.Printf("overlay evict: %s idle for %s", id, timeout)
-		d.destroyOverlay(id)
+		evicted = append(evicted, id)
 	}
-	return expired
+	d.publishOverlayEvictions(evicted)
+	return evicted
 }
 
 // enforceOverlayCap evicts least-recently-shown overlays until at most
@@ -128,10 +133,13 @@ func (d *Daemon) enforceOverlayCap(exclude string) []string {
 
 	var evicted []string
 	for i := 0; i < len(live)-keep; i++ {
+		if !d.destroyOverlay(live[i].id) {
+			continue
+		}
 		log.Printf("overlay evict: %s (cap %d reached, least recently shown)", live[i].id, max)
-		d.destroyOverlay(live[i].id)
 		evicted = append(evicted, live[i].id)
 	}
+	d.publishOverlayEvictions(evicted)
 	return evicted
 }
 
@@ -251,14 +259,32 @@ func (d *Daemon) hideUnclaimedOverlays(now time.Time) int {
 }
 
 // destroyOverlay removes one overlay through the ordinary pane-destroy path so
-// it emits the same broadcast, snapshot and artifact cleanup as any other
-// destroy — the TUI then reconciles it with machinery that already exists.
-func (d *Daemon) destroyOverlay(paneID string) {
+// it gets the same artifact cleanup as any other destroy — the TUI then
+// reconciles it with machinery that already exists. Reports whether the pane
+// was actually there to destroy.
+//
+// It does NOT broadcast. An eviction PASS emits exactly one broadcast for
+// however many overlays it reclaimed (publishOverlayEvictions): a broadcast per
+// pane put N back-to-back full workspace-state frames onto a 64-slot
+// must-deliver queue, which is the 2026-08-09 force-disconnect shape, and every
+// one of them drives a full applyWorkspaceState reconciliation on every
+// attached client.
+func (d *Daemon) destroyOverlay(paneID string) bool {
 	if err := d.session.DestroyPane(paneID); err != nil {
 		log.Printf("overlay evict %s: %v", paneID, err)
-		return
+		return false
 	}
 	d.cleanupPaneArtifacts(paneID)
+	return true
+}
+
+// publishOverlayEvictions announces one eviction pass. Silent when the pass
+// reclaimed nothing — the sweep runs at 1 Hz for the life of the daemon and
+// almost always evicts nothing at all.
+func (d *Daemon) publishOverlayEvictions(evicted []string) {
+	if len(evicted) == 0 {
+		return
+	}
 	d.broadcastState()
 	d.requestSnapshot()
 }

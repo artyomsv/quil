@@ -58,7 +58,7 @@ func toastModel(t *testing.T) (*Model, *fakeNotifier, *PaneModel) {
 	// copy on the Model for a Settings toggle to fall out of step with.
 	m.cfg.Notification.Desktop = config.DesktopConfig{
 		Enabled: true, Blocked: true, Done: true,
-		Cooldown: "30s", RequireBlur: false,
+		Cooldown: "30s",
 	}
 	m.termFocused = false
 	return &m, f, pane
@@ -320,21 +320,6 @@ func TestSuppression_OtherTabStillToasts(t *testing.T) {
 
 	if len(f.sent) != 1 {
 		t.Errorf("sent %d toasts for a pane in a background tab, want 1", len(f.sent))
-	}
-}
-
-// require_blur is the opt-in stricter mode for anyone who finds cross-tab
-// toasts noisy.
-func TestSuppression_RequireBlurSuppressesEverythingWhileFocused(t *testing.T) {
-	m, f, pane := toastModel(t)
-	m.cfg.Notification.Desktop.RequireBlur = true
-	m.termFocused = true
-	pane.blockedSince = time.Now()
-
-	m.raiseAttentionToast(pane, m.projects[0], false, false)
-
-	if len(f.sent) != 0 {
-		t.Errorf("sent %d toasts with require_blur while focused, want 0", len(f.sent))
 	}
 }
 
@@ -604,7 +589,7 @@ func wiredToastModel(t *testing.T) (Model, *fakeNotifier, *PaneModel) {
 	m.SetDesktopNotifier(f, notify.Variant(false), 4321)
 	m.cfg.Notification.Desktop = config.DesktopConfig{
 		Enabled: true, Blocked: true, Done: true,
-		Cooldown: "30s", RequireBlur: false,
+		Cooldown: "30s",
 	}
 	m.termFocused = false
 	return m, f, pane

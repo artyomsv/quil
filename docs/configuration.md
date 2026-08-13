@@ -69,7 +69,6 @@ enabled = true                  # OS toasts; Windows only, needs `quil notify se
 blocked = true                  # toast when a pane parks waiting on you
 done = true                     # toast when a turn finishes while you are away
 cooldown = "30s"                # per pane, shared by both kinds
-require_blur = true             # only toast while the terminal is unfocused
 
 [overlay]
 idle_timeout_minutes = 5        # destroy a hidden lazygit overlay after this long; 0 disables
@@ -201,7 +200,10 @@ Operating-system toasts raised from the same attention states the project sideba
 | `blocked` | bool | `true` | Toast when a pane parks waiting on you — the ▲ state in the project sidebar. |
 | `done` | bool | `true` | Toast when a turn finishes while you were away — the ✓ state. Never fires for the pane you are looking at. |
 | `cooldown` | duration | `"30s"` | Rate limit, **per pane and shared by both kinds**: a pane that parks and then finishes five seconds later produces one toast, not two. A malformed or non-positive value falls back to 30 s rather than disabling the limit. |
-| `require_blur` | bool | `true` | Suppress toasts while the terminal has focus. Set `false` if your terminal does not implement focus reporting (DEC 1004) — without it Quil never learns the window lost focus and the gate suppresses everything. |
+
+**When a toast fires:** whenever the pane needing attention is one you are *not* looking at. The only pane that never toasts is the active pane of the active tab of the active project while the terminal has focus. Another tab, another project, or another application all qualify — which is the point, since Quil exists to run agents in workspaces you are not currently watching.
+
+There is no `require_blur` key. An earlier build had one gating toasts on the whole terminal being unfocused; it made the feature silent for exactly its main case, and because `config.Save` writes the whole struct it persisted to disk where it disabled toasts with no error and no log. If your `config.toml` still carries the line it is now ignored and can be deleted.
 
 Also editable at **F1 → Settings** ("Desktop notifications"), which applies immediately — no restart. That row reports registration *state* rather than the flag, so it reads `on (run notify setup)` on a machine where the flag is on but nothing is registered.
 

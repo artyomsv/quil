@@ -137,19 +137,23 @@ type DesktopConfig struct {
 	// one toast, not two.
 	Cooldown string `toml:"cooldown"`
 
-	// RequireBlur, when true, suppresses toasts while the terminal has focus AT
-	// ALL — even for a pane in another project or tab that you cannot see.
+	// There is deliberately NO require_blur key.
 	//
-	// Defaults FALSE, because the default rule is "you are not looking at that
-	// pane": another tab, another project or another application all qualify.
-	// Requiring the whole terminal to be unfocused was the original behaviour
-	// and it removed most of the feature's value — an agent parking in project
-	// B while you work in project A is the case Quil exists for, and it
-	// produced nothing.
+	// An earlier version had one, gating toasts on the whole terminal being
+	// unfocused. It was removed rather than re-defaulted because it was a
+	// silent footgun: config.Save writes the entire struct, so anyone who ran
+	// that build has `require_blur = true` on disk, and Load would keep
+	// honouring it — disabling the feature completely with no error, no log
+	// and no clue. A key whose wrong value is invisible is worse than no key.
 	//
-	// Turn it on if cross-tab toasts feel noisy and you only want to be told
-	// once you have left the terminal entirely.
-	RequireBlur bool `toml:"require_blur"`
+	// Its original purpose is also gone. It existed as a fallback for
+	// terminals with no focus reporting (DEC 1004), where termFocused would
+	// stay true forever and suppress everything. Under the per-pane rule that
+	// case is already fine: only the pane you are actually looking at is
+	// suppressed, so such a terminal still toasts for every other pane.
+	//
+	// BurntSushi/toml ignores unknown keys, so a config carrying the old line
+	// loads cleanly and the value simply stops meaning anything.
 }
 
 // DefaultDesktopCooldown matches the per-pane bell/idle convention the daemon
@@ -395,11 +399,10 @@ func Default() Config {
 			SidebarWidth: 30,
 			MaxEvents:    200,
 			Desktop: DesktopConfig{
-				Enabled:     true,
-				Blocked:     true,
-				Done:        true,
-				Cooldown:    "30s",
-				RequireBlur: false,
+				Enabled:  true,
+				Blocked:  true,
+				Done:     true,
+				Cooldown: "30s",
 			},
 			Hooks: HookNotificationsConfig{
 				Claude:   "default",

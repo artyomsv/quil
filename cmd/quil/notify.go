@@ -165,13 +165,9 @@ func runNotifyStatus(opts notify.Options) {
 	fmt.Printf("  blocked:    %v\n", d.Blocked)
 	fmt.Printf("  done:       %v\n", d.Done)
 	fmt.Printf("  cooldown:   %s\n", d.CooldownDuration())
-	fmt.Printf("  require_blur: %v\n", d.RequireBlur)
 
-	if d.RequireBlur {
-		fmt.Printf("\nToasts fire only while the terminal is unfocused. If your terminal does\n")
-		fmt.Printf("not support focus reporting (DEC 1004) none will ever fire; set\n")
-		fmt.Printf("require_blur = false to bypass that gate.\n")
-	}
+	fmt.Printf("\nToasts fire for any pane you are not looking at — another tab, another\n")
+	fmt.Printf("project, or another application. The pane on screen never toasts.\n")
 }
 
 // runNotifyTest sends one canary toast.

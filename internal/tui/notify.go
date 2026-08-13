@@ -184,16 +184,12 @@ func (m *Model) raiseAttentionToast(pane *PaneModel, proj *ProjectModel, wasBloc
 // you work in project A produced nothing at all. That was wrong, and it was
 // wrong in the direction that quietly removes most of the value.
 //
-// RequireBlur remains as an opt-in for the stricter behaviour — never toast
-// while the terminal has focus at all — for anyone who finds cross-tab toasts
-// noisy. It now defaults false, so the default matches what the sidebar
-// already does.
+// There is no config knob to widen this back to "the whole terminal must be
+// unfocused" — see the note where require_blur used to live in
+// config.DesktopConfig for why that key was removed rather than re-defaulted.
 func (m *Model) suppressedByAttention(paneID string) bool {
 	if !m.termFocused {
 		return false // the whole app is in the background
-	}
-	if m.cfg.Notification.Desktop.RequireBlur {
-		return true // opt-in: focused terminal suppresses everything
 	}
 	return m.paneOnScreenFocused(paneID)
 }

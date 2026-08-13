@@ -213,18 +213,15 @@ quil notify setup
 
 **3. `quil notify test` reports notifications are turned off.** Open Settings → System → Notifications and check that notifications are enabled for your account and not blocked by group policy. This is the one case Quil refuses to toast, because Windows would silently discard it anyway.
 
-**4. Focus reporting.** Toasts only fire while the terminal is unfocused, which Quil learns from terminal focus reporting (DEC 1004). A terminal that does not implement it never reports losing focus, so the gate suppresses everything forever. Windows Terminal supports it. To bypass the gate:
+**4. A stale `require_blur = true` in your config.** An earlier build wrote this key, and because `config.Save` persists the whole struct it survives on disk. It gated toasts on the *whole terminal* being unfocused, so nothing fired while you were anywhere inside Quil. The key no longer exists and is ignored, but if you are on an older build, delete the line — this was the single most common cause of "no toasts at all".
 
-```toml
-[notification.desktop]
-require_blur = false
-```
+**5. You are looking at that pane.** The active pane of the active tab of the active project never toasts while the terminal has focus — you can already see it. Switch to another tab and it fires; that switch is itself a trigger.
 
-**5. The pane is muted.** `Alt+M` suppresses toasts as well as sidebar rows.
+**6. The pane is muted.** `Alt+M` suppresses toasts as well as sidebar rows.
 
-**6. The cooldown.** One toast per pane per 30 s, shared across both kinds — a pane that parks and then finishes shortly after produces one toast, not two. Tune with `cooldown` in `[notification.desktop]`.
+**7. The cooldown.** One toast per pane per 30 s, shared across both kinds — a pane that parks and then finishes shortly after produces one toast, not two. Tune with `cooldown` in `[notification.desktop]`.
 
-**7. Check the Settings row.** `F1 → Settings → Desktop notifications` reports state, not the flag: `on` means registered and working, `on (run notify setup)` means the flag is on but nothing is registered, `unsupported` means you are not on Windows.
+**8. Check the Settings row.** `F1 → Settings → Desktop notifications` reports state, not the flag: `on` means registered and working, `on (run notify setup)` means the flag is on but nothing is registered, `unsupported` means you are not on Windows.
 
 To undo everything Quil wrote:
 

@@ -378,9 +378,6 @@ func TestDesktopNotificationDefaults(t *testing.T) {
 	if !d.Blocked || !d.Done {
 		t.Errorf("both kinds default on: blocked=%v done=%v", d.Blocked, d.Done)
 	}
-	if d.RequireBlur {
-		t.Error("require_blur must default false")
-	}
 	if got := d.CooldownDuration(); got != 30*time.Second {
 		t.Errorf("CooldownDuration() = %v, want 30s", got)
 	}

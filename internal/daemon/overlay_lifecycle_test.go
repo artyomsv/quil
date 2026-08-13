@@ -33,7 +33,7 @@ func TestHandleUpdatePane_OverlayVisibilityStampsHiddenAndShown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d.handleUpdatePane(msg)
+	d.handleUpdatePane(nil, msg)
 
 	p.PluginMu.Lock()
 	hidden := p.OverlayHiddenAt
@@ -47,7 +47,7 @@ func TestHandleUpdatePane_OverlayVisibilityStampsHiddenAndShown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d.handleUpdatePane(msg)
+	d.handleUpdatePane(nil, msg)
 
 	p.PluginMu.Lock()
 	hidden, shown := p.OverlayHiddenAt, p.OverlayShownAt
@@ -72,7 +72,7 @@ func TestHandleUpdatePane_RenameLeavesOverlayVisibilityAlone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d.handleUpdatePane(msg)
+	d.handleUpdatePane(nil, msg)
 
 	p.PluginMu.Lock()
 	hidden := p.OverlayHiddenAt
@@ -244,11 +244,11 @@ func TestEnforceOverlayCap_ExcludesTheNewOverlay(t *testing.T) {
 	}
 }
 
-// Nothing can be displaying an overlay when no client is attached. Without this
-// an overlay hidden by a TUI that then exited would keep a zero
-// OverlayHiddenAt forever and never become eligible — the case where reclaiming
-// matters most, since the user is away.
-func TestMarkOverlaysHidden_StampsOverlaysThatLackATimestamp(t *testing.T) {
+// Nothing can be displaying an overlay no client claims. Without this an
+// overlay hidden by a TUI that then exited would keep a zero OverlayHiddenAt
+// forever and never become eligible — the case where reclaiming matters most,
+// since the user is away.
+func TestHideUnclaimedOverlays_StampsOverlaysThatLackATimestamp(t *testing.T) {
 	t.Setenv("QUIL_HOME", t.TempDir())
 	d := New(config.Default())
 	tab := d.session.CreateTab("t")
@@ -260,7 +260,7 @@ func TestMarkOverlaysHidden_StampsOverlaysThatLackATimestamp(t *testing.T) {
 	already.OverlayHiddenAt = earlier
 	already.PluginMu.Unlock()
 
-	if n := d.markOverlaysHidden(time.Now()); n != 1 {
+	if n := d.hideUnclaimedOverlays(time.Now()); n != 1 {
 		t.Errorf("stamped %d overlays, want 1", n)
 	}
 

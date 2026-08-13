@@ -135,21 +135,113 @@ func (d *Daemon) enforceOverlayCap(exclude string) []string {
 	return evicted
 }
 
-// markOverlaysHidden stamps every overlay that has no hidden timestamp,
-// returning how many it stamped.
+// setOverlayClaim records (or withdraws) ONE client's assertion that it has an
+// overlay on screen.
 //
-// Called when the LAST client disconnects: nothing can be showing an overlay
-// with nothing attached, and this is what makes the idle timer fire while the
-// user is away — which is the case the whole feature exists for, since a TUI
-// exit used to leave every overlay running indefinitely.
+// Only an ATTACHED conn can hold a claim. A conn that never sent MsgAttach is
+// not a client — an MCP bridge holds one for its whole lifetime — so letting it
+// register a durable claim would let a socket client pin an overlay forever
+// while never displaying anything. Its report still moves the timestamps (that
+// is unchanged partial-update behaviour); it simply does not survive as a claim.
+func (d *Daemon) setOverlayClaim(conn *ipc.Conn, paneID string, visible bool) {
+	if conn == nil {
+		return
+	}
+	d.attachedMu.Lock()
+	defer d.attachedMu.Unlock()
+	claims, ok := d.attachedConns[conn]
+	if !ok {
+		return
+	}
+	if visible {
+		claims[paneID] = true
+		return
+	}
+	delete(claims, paneID)
+}
+
+// overlayClaimed reports whether ANY attached client currently has this overlay
+// on screen. The attached set holds one entry per client (one, occasionally
+// two), so the walk is trivially cheap.
+func (d *Daemon) overlayClaimed(paneID string) bool {
+	d.attachedMu.Lock()
+	defer d.attachedMu.Unlock()
+	for _, claims := range d.attachedConns {
+		if claims[paneID] {
+			return true
+		}
+	}
+	return false
+}
+
+// forgetOverlayClaimsFor drops every client's claim on one pane. Called from
+// cleanupPaneArtifacts, the choke point every pane-destruction path already
+// owes, so a destroyed overlay cannot leave its id in a live client's claim set
+// for the life of a daemon that runs for weeks.
+func (d *Daemon) forgetOverlayClaimsFor(paneID string) {
+	d.attachedMu.Lock()
+	defer d.attachedMu.Unlock()
+	for _, claims := range d.attachedConns {
+		delete(claims, paneID)
+	}
+}
+
+// applyOverlayVisibility folds one client's report into the pane's retention
+// timestamps, returning nothing because the timestamps are never on the wire.
+//
+// A hidden report from a client that is not the one displaying the overlay
+// changes nothing: with the claim withdrawn, the pane is hidden only if no
+// OTHER client still has it on screen. That is the whole of the per-client
+// model — two TUIs used to mean the second one's tab switch started a
+// five-minute countdown on the first one's visible lazygit.
+//
+// The claim is resolved BEFORE PluginMu is taken. attachedMu must never nest
+// inside a pane lock.
+func (d *Daemon) applyOverlayVisibility(conn *ipc.Conn, pane *Pane, visible bool) {
+	d.setOverlayClaim(conn, pane.ID, visible)
+	claimed := d.overlayClaimed(pane.ID)
+
+	pane.PluginMu.Lock()
+	defer pane.PluginMu.Unlock()
+	switch {
+	case visible:
+		pane.OverlayHiddenAt = time.Time{}
+		pane.OverlayShownAt = time.Now()
+	case claimed:
+		// Someone else still has it on screen.
+	case pane.OverlayHiddenAt.IsZero():
+		// Only the FIRST hide stamps: a client re-sending hidden must not keep
+		// pushing the eviction deadline out.
+		pane.OverlayHiddenAt = time.Now()
+	}
+}
+
+// hideUnclaimedOverlays stamps every overlay that no client has on screen and
+// that has no hidden timestamp yet, returning how many it stamped.
+//
+// Run on every client disconnect. This is what makes the idle timer run down
+// while the user is away — the case the whole feature exists for, since a TUI
+// exit used to leave every overlay running indefinitely — and it needs no
+// last-client special case: a departed client's claims went with it, so "no
+// clients attached" is just the strongest form of "nothing claims this".
+//
+// It also covers an overlay no client ever reported on (one created straight
+// over the socket, say): unclaimed means no TUI has it on screen, because a
+// TUI that does have one reports it.
 //
 // An overlay that is ALREADY hidden keeps its original timestamp; re-stamping
 // would push the deadline out on every disconnect.
-func (d *Daemon) markOverlaysHidden(now time.Time) int {
+func (d *Daemon) hideUnclaimedOverlays(now time.Time) int {
 	var n int
 	for _, p := range d.session.AllPanes() {
 		p.PluginMu.Lock()
-		if p.Overlay && p.OverlayHiddenAt.IsZero() {
+		isOverlay, unstamped := p.Overlay, p.OverlayHiddenAt.IsZero()
+		p.PluginMu.Unlock()
+		if !isOverlay || !unstamped || d.overlayClaimed(p.ID) {
+			continue
+		}
+		p.PluginMu.Lock()
+		if p.OverlayHiddenAt.IsZero() {
 			p.OverlayHiddenAt = now
 			n++
 		}

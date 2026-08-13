@@ -161,14 +161,25 @@ type Daemon struct {
 	// pushes runtime updates via MsgOverlayPolicy without a daemon restart.
 	overlayPolicyState overlayPolicyState
 
-	// attachedConns is the set of conns that have sent MsgAttach — the
-	// clients, as distinct from every conn (see markClientAttached). Written
-	// from each conn's own dispatch goroutine and from the disconnect
+	// attachedConns maps each conn that has sent MsgAttach — the clients, as
+	// distinct from every conn (see markClientAttached) — to the set of overlay
+	// panes that client currently has ON SCREEN.
+	//
+	// Visibility is per client rather than one daemon-wide field because
+	// otherwise whichever conn spoke last defines it: with two TUIs attached,
+	// the second one merely switching tabs reports an overlay hidden while the
+	// first has it on screen, and the sweep destroys a lazygit the user is
+	// looking at five minutes later. An overlay is hidden only when NO client
+	// claims it, which is also what makes a detached session fall out for free
+	// — no clients, no claims, everything hidden.
+	//
+	// Written from each conn's own dispatch goroutine and from the disconnect
 	// callback, so it carries its own mutex: sm.mu is the wrong lock here,
 	// since a reader parked behind an RWMutex writer is the failure mode this
-	// package keeps being bitten by.
+	// package keeps being bitten by. Nothing that takes PluginMu may be called
+	// while it is held.
 	attachedMu    sync.Mutex
-	attachedConns map[*ipc.Conn]bool
+	attachedConns map[*ipc.Conn]map[string]bool
 }
 
 func New(cfg config.Config) *Daemon {
@@ -459,47 +470,42 @@ func (d *Daemon) Stop() {
 // any session with a claude pane wired to `quil mcp` is permanently yes (21
 // conns in the session that reported 7 live overlays), and the detached-session
 // stamp below never fired in exactly the configuration it was designed for.
+// Re-attaching on the same conn keeps that client's existing overlay claims:
+// the entry is created only when absent.
 func (d *Daemon) markClientAttached(conn *ipc.Conn) {
 	if conn == nil {
 		return
 	}
 	d.attachedMu.Lock()
 	if d.attachedConns == nil {
-		d.attachedConns = make(map[*ipc.Conn]bool)
+		d.attachedConns = make(map[*ipc.Conn]map[string]bool)
 	}
-	d.attachedConns[conn] = true
+	if _, ok := d.attachedConns[conn]; !ok {
+		d.attachedConns[conn] = map[string]bool{}
+	}
 	d.attachedMu.Unlock()
 }
 
-// forgetAttachedClient drops a disconnecting conn from the attached set and
-// returns how many attached clients remain. A conn that never attached is not
-// in the set, so dropping it cannot change the count.
-func (d *Daemon) forgetAttachedClient(conn *ipc.Conn) int {
+// forgetAttachedClient drops a disconnecting conn, and with it every overlay
+// that client claimed visible. A conn that never attached is not in the set, so
+// dropping it changes nothing.
+func (d *Daemon) forgetAttachedClient(conn *ipc.Conn) {
 	d.attachedMu.Lock()
-	defer d.attachedMu.Unlock()
 	delete(d.attachedConns, conn)
-	return len(d.attachedConns)
-}
-
-// attachedClientCount reports how many clients are currently attached.
-func (d *Daemon) attachedClientCount() int {
-	d.attachedMu.Lock()
-	defer d.attachedMu.Unlock()
-	return len(d.attachedConns)
+	d.attachedMu.Unlock()
 }
 
 // onClientDisconnect is ipc.Server's disconnect callback.
 //
 // handleConn's defer removes the disconnecting conn (removeConn) before
-// invoking this, and the attached set is keyed on that same conn — so the count
+// invoking this, and the attached set is keyed on that same conn — so the state
 // here is already exclusive of the client that just left.
 func (d *Daemon) onClientDisconnect(conn *ipc.Conn) {
 	d.requestSnapshot()
 	d.events.RemoveWatchersByConn(conn)
-	if d.forgetAttachedClient(conn) == 0 {
-		if n := d.markOverlaysHidden(time.Now()); n > 0 {
-			log.Printf("overlay: %d marked hidden (no clients attached)", n)
-		}
+	d.forgetAttachedClient(conn)
+	if n := d.hideUnclaimedOverlays(time.Now()); n > 0 {
+		log.Printf("overlay: %d marked hidden (no client has them on screen)", n)
 	}
 }
 
@@ -1094,7 +1100,7 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 	case ipc.MsgDestroyPane:
 		d.handleDestroyPane(msg)
 	case ipc.MsgUpdatePane:
-		d.handleUpdatePane(msg)
+		d.handleUpdatePane(conn, msg)
 	case ipc.MsgUpdateLayout:
 		d.handleUpdateLayout(msg)
 	case ipc.MsgPaneInput:
@@ -1929,6 +1935,10 @@ func (d *Daemon) replacePaneAt(payload ipc.CreatePanePayload, cwd, paneType stri
 // truncates stale spools). Call it before or after the session delete,
 // whichever reads better at the call site.
 func (d *Daemon) cleanupPaneArtifacts(paneID string) {
+	// Overlay visibility claims are keyed by pane id, so a destroyed overlay
+	// would otherwise leave its id in every live client's claim set — in a
+	// daemon that runs for weeks, one entry per overlay ever opened.
+	d.forgetOverlayClaimsFor(paneID)
 	if d.hookSpool != nil {
 		d.hookSpool.Cleanup(paneID)
 	}
@@ -2151,7 +2161,10 @@ func (d *Daemon) repaintAfterResize(pane *Pane, typ string) {
 	pane.EnqueueInput([]byte(p.Persistence.RedrawKey))
 }
 
-func (d *Daemon) handleUpdatePane(msg *ipc.Message) {
+// handleUpdatePane applies a PARTIAL pane update. conn identifies the client
+// that sent it, which only the overlay-visibility field needs: that field is a
+// claim about one client's screen, not a daemon-wide fact.
+func (d *Daemon) handleUpdatePane(conn *ipc.Conn, msg *ipc.Message) {
 	var payload ipc.UpdatePanePayload
 	if err := msg.DecodePayload(&payload); err != nil {
 		return
@@ -2196,16 +2209,7 @@ func (d *Daemon) handleUpdatePane(msg *ipc.Message) {
 		log.Printf("pane %s: pinned_attention=%v", pane.ID, *payload.PinnedAttention)
 	}
 	if payload.OverlayVisible != nil {
-		pane.PluginMu.Lock()
-		if *payload.OverlayVisible {
-			pane.OverlayHiddenAt = time.Time{}
-			pane.OverlayShownAt = time.Now()
-		} else if pane.OverlayHiddenAt.IsZero() {
-			// Only the FIRST hide stamps: a client re-sending hidden must not
-			// keep pushing the eviction deadline out.
-			pane.OverlayHiddenAt = time.Now()
-		}
-		pane.PluginMu.Unlock()
+		d.applyOverlayVisibility(conn, pane, *payload.OverlayVisible)
 	}
 	d.broadcastState()
 	d.requestSnapshot()

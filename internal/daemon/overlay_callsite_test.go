@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"io"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,18 +19,50 @@ import (
 // red test. These two tests drive the real entry points instead: the create
 // path for the cap, and the running ticker goroutine for the sweep.
 
-// overlayTestDaemon builds a daemon whose spawn path uses a fakeSession, so the
-// REAL create-pane entry point can be driven without launching /bin/sh. Mirrors
-// newTestDaemon (lazy_restore_test.go) but takes a config, because the policy
-// under test lives in it.
+// liveFakeSession is a fakeSession whose child stays alive until the PTY is
+// closed. The plain fakeSession answers Read with an error and WaitExit with 0
+// immediately, so its pane is reaped the instant it is spawned and onPaneExit
+// auto-destroys the overlay — which is the very thing these assertions measure,
+// and it raced them into passing for the wrong reason.
+type liveFakeSession struct {
+	fakeSession
+	done chan struct{}
+	once sync.Once
+}
+
+func newLiveFakeSession() *liveFakeSession { return &liveFakeSession{done: make(chan struct{})} }
+
+func (f *liveFakeSession) Read(buf []byte) (int, error) { <-f.done; return 0, io.EOF }
+func (f *liveFakeSession) WaitExit() int                { <-f.done; return 0 }
+func (f *liveFakeSession) Close() error                 { f.once.Do(func() { close(f.done) }); return nil }
+
+// overlayTestDaemon builds a daemon whose spawn path uses a liveFakeSession, so
+// the REAL create-pane entry point can be driven without launching /bin/sh.
+// Mirrors newTestDaemon (lazy_restore_test.go) but takes a config, because the
+// policy under test lives in it.
 //
 // Mutates the package-level newSessionFn, so no caller may use t.Parallel().
 func overlayTestDaemon(t *testing.T, cfg config.Config) *Daemon {
 	t.Helper()
 	t.Setenv("QUIL_HOME", t.TempDir())
+	var mu sync.Mutex
+	var spawned []*liveFakeSession
 	prev := newSessionFn
-	newSessionFn = func(cols, rows int) apty.Session { return &fakeSession{} }
-	t.Cleanup(func() { newSessionFn = prev })
+	newSessionFn = func(cols, rows int) apty.Session {
+		s := newLiveFakeSession()
+		mu.Lock()
+		spawned = append(spawned, s)
+		mu.Unlock()
+		return s
+	}
+	t.Cleanup(func() {
+		newSessionFn = prev
+		mu.Lock()
+		defer mu.Unlock()
+		for _, s := range spawned {
+			s.Close() // release the exit watchers still parked on WaitExit
+		}
+	})
 	return New(cfg)
 }
 

@@ -207,10 +207,12 @@ func New(cfg config.Config) *Daemon {
 		snapGens:   make(map[string]uint64),
 	}
 	d.memReport = memreport.NewCollector(d.session, 5*time.Second)
-	d.overlayPolicyState.set(ipc.OverlayPolicyPayload{
+	// Clamped like a pushed policy: config.toml is hand-edited, so it can carry
+	// exactly the values the IPC path is bounded against.
+	d.overlayPolicyState.set(clampOverlayPolicy(ipc.OverlayPolicyPayload{
 		IdleTimeoutMinutes: cfg.Overlay.IdleTimeoutMinutes,
 		MaxLive:            cfg.Overlay.MaxLive,
-	})
+	}))
 	return d
 }
 

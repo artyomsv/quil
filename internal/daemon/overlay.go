@@ -29,11 +29,43 @@ func (s *overlayPolicyState) set(p ipc.OverlayPolicyPayload) {
 	s.mu.Unlock()
 }
 
+// maxOverlayIdleMinutes is one year, the upper end of "a retention timeout a
+// person could mean". The bound is not cosmetic: time.Minute is 6e10 ns, so
+// `time.Duration(n) * time.Minute` wraps int64 above ~307,445,734 minutes, and
+// 307445735 — an "effectively never" value someone might plausibly type — wraps
+// to about 26 SECONDS. The setting inverts silently: ask for never-evict, get
+// near-immediate eviction on a pane the user is not looking at.
+const maxOverlayIdleMinutes = 365 * 24 * 60
+
 func (d *Daemon) overlayPolicy() ipc.OverlayPolicyPayload { return d.overlayPolicyState.get() }
 
+// clampOverlayPolicy folds a policy into the range the retention code can
+// actually express. Negative means DISABLED for both knobs, matching the
+// documented meaning of 0, never an already-expired deadline.
+//
+// Applied at both entry points — the config seed in New and the IPC push — so a
+// hand-edited config.toml is bounded exactly like a pushed one.
+func clampOverlayPolicy(p ipc.OverlayPolicyPayload) ipc.OverlayPolicyPayload {
+	if p.IdleTimeoutMinutes < 0 {
+		p.IdleTimeoutMinutes = 0
+	}
+	if p.IdleTimeoutMinutes > maxOverlayIdleMinutes {
+		p.IdleTimeoutMinutes = maxOverlayIdleMinutes
+	}
+	if p.MaxLive < 0 {
+		p.MaxLive = 0
+	}
+	return p
+}
+
 func (d *Daemon) setOverlayPolicy(p ipc.OverlayPolicyPayload) {
-	d.overlayPolicyState.set(p)
-	log.Printf("overlay policy: idle_timeout=%dm max_live=%d", p.IdleTimeoutMinutes, p.MaxLive)
+	clamped := clampOverlayPolicy(p)
+	if clamped != p {
+		log.Printf("overlay policy: clamped {idle_timeout=%dm max_live=%d} to {idle_timeout=%dm max_live=%d}",
+			p.IdleTimeoutMinutes, p.MaxLive, clamped.IdleTimeoutMinutes, clamped.MaxLive)
+	}
+	d.overlayPolicyState.set(clamped)
+	log.Printf("overlay policy: idle_timeout=%dm max_live=%d", clamped.IdleTimeoutMinutes, clamped.MaxLive)
 }
 
 // sweepIdleOverlays destroys every overlay hidden for longer than the policy

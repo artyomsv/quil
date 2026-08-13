@@ -279,6 +279,46 @@ func TestHideUnclaimedOverlays_StampsOverlaysThatLackATimestamp(t *testing.T) {
 	}
 }
 
+// time.Minute is 6e10 ns, so the product wraps int64 above ~307,445,734
+// minutes. 307445735 — an "effectively never" value a user might plausibly type
+// — wraps to about 26 SECONDS, inverting the setting silently: ask for
+// never-evict, get near-immediate eviction.
+func TestSweepIdleOverlays_AnAbsurdTimeoutDoesNotWrapIntoInstantEviction(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	d := New(config.Default())
+	d.setOverlayPolicy(ipc.OverlayPolicyPayload{IdleTimeoutMinutes: 307445735, MaxLive: 5})
+
+	tab := d.session.CreateTab("t")
+	p := overlayPane(t, d, tab.ID)
+	p.PluginMu.Lock()
+	p.OverlayHiddenAt = time.Now().Add(-time.Minute)
+	p.PluginMu.Unlock()
+
+	if got := d.sweepIdleOverlays(time.Now()); len(got) != 0 {
+		t.Fatalf("evicted %v after one minute under a 585-year timeout", got)
+	}
+}
+
+// Negative must mean DISABLED, never an instantly-expired deadline — and it must
+// mean that for the config seed as well as the IPC push, since a hand-edited
+// config.toml reaches the daemon by a different route.
+func TestOverlayPolicy_NegativeValuesFoldToDisabled(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	cfg := config.Default()
+	cfg.Overlay.IdleTimeoutMinutes = -1
+	cfg.Overlay.MaxLive = -1
+	d := New(cfg)
+
+	if got := d.overlayPolicy(); got.IdleTimeoutMinutes != 0 || got.MaxLive != 0 {
+		t.Errorf("seeded policy = %+v, want both folded to 0 (disabled)", got)
+	}
+
+	d.setOverlayPolicy(ipc.OverlayPolicyPayload{IdleTimeoutMinutes: -60, MaxLive: -3})
+	if got := d.overlayPolicy(); got.IdleTimeoutMinutes != 0 || got.MaxLive != 0 {
+		t.Errorf("pushed policy = %+v, want both folded to 0 (disabled)", got)
+	}
+}
+
 func TestHandleMessage_OverlayPolicyAppliesImmediately(t *testing.T) {
 	t.Setenv("QUIL_HOME", t.TempDir())
 	d := New(config.Default())

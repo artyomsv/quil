@@ -80,6 +80,20 @@ archives:
       # tarballs are unchanged. Naming it here is what puts it in the Windows
       # zip BESIDE quil.exe, which is where `quil notify setup` looks for it.
       - quil-activate
+    # Required BECAUSE of the line above, and releases were broken for two
+    # versions without it. quil-activate is windows/amd64 only, so this archive
+    # holds three binaries on Windows and two everywhere else — and goreleaser
+    # treats an uneven count as a mistake by default ("may cause your users
+    # confusion") and refuses to build ANY archive, failing the whole release
+    # at the archives step, after the binaries have already cross-compiled.
+    #
+    # The failure is invisible from the release job: the bump/tag half runs
+    # first and succeeds, so master gets a version bump, a CHANGELOG section
+    # and a tag, and only the publish half dies. v1.56.0 and v1.57.0 are both
+    # tagged with no GitHub Release behind them, which is why `quil update` and
+    # scripts/install.sh — which read the releases API, not tags — kept
+    # offering v1.55.2.
+    allow_different_binary_count: true
     name_template: "quil_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     formats:
       - tar.gz

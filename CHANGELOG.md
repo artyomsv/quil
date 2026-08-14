@@ -9,8 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **Desktop notifications on Windows.** When an agent parks waiting on you, or
-  finishes a turn while you were away, Windows raises a toast — and clicking it
-  puts Quil on that exact project, tab and pane. It fires on the same two
+  finishes a turn while you were away, Windows raises a toast naming the
+  project, tab and pane — and clicking it puts Quil on that exact pane, focused
+  and ready to type. It fires on the same two
   states the project sidebar already marks (▲ and ✓) and no others, only while
   you are not looking at that pane — another tab, another project or another
   application all count. Six agents finishing together give six separately
@@ -39,6 +40,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   something and switching away, the commonest sequence there is, was exactly the
   case that produced nothing. Being seen now requires the window to have focus
   as well, and returning to it still acknowledges the pane you land on.
+- **A pane raised from outside the pane area now takes focus properly.** Jumping
+  to a pane set it as active for keyboard input but never set its focus flag, so
+  it arrived with no cursor drawn and the pane you came from still wearing the
+  focused border — it looked like you had to click the pane to "really" get
+  there. Affected every jump that crosses tabs: MCP `set_active_pane`, clicking
+  a notification in the sidebar, pane-history back-navigation, and clicking a
+  desktop toast.
 
 ## [1.55.1] - 2026-08-13
 

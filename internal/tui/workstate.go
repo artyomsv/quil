@@ -127,6 +127,28 @@ func (m *Model) jumpToPane(paneID string) (bool, tea.Cmd) {
 	proj.activeTab = tabIdx
 	target := proj.tabs[tabIdx]
 	target.ActivePane = paneID
+	// The Active FLAG is set here, not left to the caller. ActivePane alone
+	// routes keystrokes, but Active is what draws the pane's cursor
+	// (renderPane) and its focused border — so a pane raised without it looks
+	// dead: no cursor anywhere, the pane the user left still wearing the active
+	// border. Reported against the desktop toast ("that pane is shown, but
+	// focus is not on that pane so I cannot start input"), and every other
+	// caller of this choke point had it too — MCP set_active_pane, the
+	// notification sidebar and pane-history back. Only the palette's goToPane
+	// escaped, by doing the flag dance itself around the call.
+	//
+	// ActivePaneModel() cannot cover this: it heals a stale ID, never a stale
+	// flag, which is the same note ctxmenu.go carries. The outgoing tab is
+	// cleared through treeActivePaneModel (no side effects — it must not adopt
+	// a leaf in a tab being left), and finalizeTabPanes then sets the flag on
+	// the arriving pane and clears every sibling, which also covers a jump
+	// WITHIN one tab where `from` and `target` are the same.
+	if from != nil && from != target {
+		if old := from.treeActivePaneModel(); old != nil {
+			old.Active = false
+		}
+	}
+	m.finalizeTabPanes(target)
 	// The jump may have crossed a project — and therefore a daemon — boundary,
 	// so every later unstamped send has a new right answer.
 	m.syncActiveDest()

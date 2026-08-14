@@ -317,16 +317,7 @@ func (m *Model) emitToast(pane *PaneModel, proj *ProjectModel, kind toastKind) {
 	}
 	pane.lastToastAt = now
 
-	// Sanitised HERE rather than inside internal/notify, because this package's
-	// standing rule is that remote text is cleaned at RENDER and never in
-	// state — a project name round-trips back to the daemon on rename, so
-	// stripping it in state would rewrite a name the user never edited. The
-	// toast is one more render surface. internal/notify still escapes and
-	// bounds what it is handed; the two passes cover different threats.
-	title := sanitizeRemoteText(proj.Name)
-	if pane.Name != "" {
-		title += " · " + sanitizeRemoteText(pane.Name)
-	}
+	title := m.toastTitle(pane, proj)
 	body := headline
 	if kind == toastBlocked && pane.blockedReason != "" {
 		body = headline + " (" + sanitizeRemoteText(pane.blockedReason) + ")"
@@ -357,6 +348,65 @@ func (m *Model) emitToast(pane *PaneModel, proj *ProjectModel, kind toastKind) {
 	}
 	m.outstandingToasts[pane.ID] = kind
 	logger.Debug("notify: raised for pane %s (%s): %q", pane.ID, headline, title)
+}
+
+// toastTitle names WHERE the pane is, in the order the user navigates: project,
+// then tab, then pane.
+//
+// The tab was missing at first and asked for immediately, which makes sense
+// once you look at what the title is FOR — the toast's job is to tell you where
+// to go, and with several tabs per project "quil · claude-code" names a
+// destination the user still has to hunt for. It is also the segment most
+// likely to be the distinguishing one: panes in different tabs routinely share
+// a name, because the name comes from the plugin.
+//
+// Adjacent duplicates collapse rather than repeat. A tab holding one pane very
+// often takes that pane's name, and "quil · ai-pane · ai-pane" reads as a bug.
+// Empty segments drop out for the same reason — an unnamed pane must not leave
+// a trailing separator.
+//
+// Sanitised HERE rather than inside internal/notify, because this package's
+// standing rule is that remote text is cleaned at RENDER and never in state — a
+// project name round-trips back to the daemon on rename, so stripping it in
+// state would rewrite a name the user never edited. The toast is one more
+// render surface. internal/notify still escapes and bounds what it is handed;
+// the two passes cover different threats.
+func (m *Model) toastTitle(pane *PaneModel, proj *ProjectModel) string {
+	// The owning project is re-resolved rather than trusting the caller's, so
+	// the tab index and the tabs it indexes come from the same walk. Indexing
+	// the passed project with an index found in another would be a silent
+	// mismatch rather than an error.
+	var tabName string
+	if owner, idx := m.ownerTabOfPane(pane.ID); owner != nil {
+		tabName = owner.tabs[idx].Name
+	}
+
+	var out string
+	var last string
+	for _, seg := range []string{proj.Name, tabName, pane.Name} {
+		seg = sanitizeRemoteText(seg)
+		if seg == "" || seg == last {
+			continue
+		}
+		if out != "" {
+			out += " · "
+		}
+		out += seg
+		last = seg
+	}
+	return out
+}
+
+// ownerTabOfPane returns the project owning a pane and the index of the tab
+// holding it, or (nil, -1). A thin wrapper over findPaneAndTab that drops the
+// pane, so a caller wanting only the location cannot accidentally index one
+// project's tabs with another's index.
+func (m *Model) ownerTabOfPane(paneID string) (*ProjectModel, int) {
+	_, proj, idx := m.findPaneAndTab(paneID)
+	if proj == nil || idx < 0 || idx >= len(proj.tabs) {
+		return nil, -1
+	}
+	return proj, idx
 }
 
 // sweepOutstandingToasts withdraws toasts whose pane no longer needs attention.

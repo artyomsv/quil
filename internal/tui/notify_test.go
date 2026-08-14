@@ -676,6 +676,83 @@ func TestUpdate_FinishedTurnWhileTerminalBlurredRaisesToast(t *testing.T) {
 	}
 }
 
+// The toast's job is to tell the user where to go, so it names the tab as well
+// as the project and the pane. Panes in different tabs routinely share a name —
+// it comes from the plugin — so the tab is often the segment that distinguishes
+// one toast from another.
+func TestToastTitle_NamesProjectTabAndPane(t *testing.T) {
+	m, f, pane := toastModel(t)
+	m.projects[0].tabs[0].Name = "backend"
+	pane.unseen = true
+
+	m.raiseAttentionToast(pane, m.projects[0], false, false)
+
+	if len(f.sent) != 1 {
+		t.Fatalf("sent %d toasts, want 1", len(f.sent))
+	}
+	if got, want := f.sent[0].Title, "quil · backend · claude-code"; got != want {
+		t.Errorf("Title = %q, want %q", got, want)
+	}
+}
+
+// A tab holding one pane very often carries that pane's name, and repeating it
+// reads as a bug rather than as information.
+func TestToastTitle_CollapsesRepeatedAndEmptyNames(t *testing.T) {
+	tests := []struct {
+		name              string
+		tabName, paneName string
+		want              string
+	}{
+		{"tab named after its only pane", "ai-pane", "ai-pane", "quil · ai-pane"},
+		{"unnamed pane leaves no trailing separator", "backend", "", "quil · backend"},
+		{"unnamed tab drops out of the middle", "", "claude-code", "quil · claude-code"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m, f, pane := toastModel(t)
+			m.projects[0].tabs[0].Name = tt.tabName
+			pane.Name = tt.paneName
+			pane.unseen = true
+
+			m.raiseAttentionToast(pane, m.projects[0], false, false)
+
+			if len(f.sent) != 1 {
+				t.Fatalf("sent %d toasts, want 1", len(f.sent))
+			}
+			if got := f.sent[0].Title; got != tt.want {
+				t.Errorf("Title = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// Clicking a toast must leave the pane genuinely focused, not merely on screen.
+// ActivePane alone routes keystrokes; the Active FLAG is what draws the cursor
+// and the focused border, so without it the pane looks dead and the user clicks
+// again to "really" focus it — which is exactly what was reported.
+func TestUpdate_ActivatePaneFocusesThePaneItRaises(t *testing.T) {
+	m, _, pane := wiredToastModel(t)
+	// A second tab, active, so the activation crosses a tab boundary the way a
+	// real toast click does.
+	other := &PaneModel{ID: toastPaneID2, Name: "shell"}
+	other.Active = true
+	m.projects[0].tabs = append(m.projects[0].tabs, tabWith(other))
+	m.projects[0].activeTab = 1
+
+	updated, _ := m.Update(ActivatePaneMsg{PaneID: pane.ID})
+	got := updated.(Model)
+
+	if got.projects[0].activeTab != 0 {
+		t.Fatalf("activeTab = %d, want 0 — the jump did not happen", got.projects[0].activeTab)
+	}
+	if !pane.Active {
+		t.Error("the raised pane must carry the Active flag, or it renders with no cursor")
+	}
+	if other.Active {
+		t.Error("the pane left behind must lose the flag, or two panes render as focused")
+	}
+}
+
 // Raising the toast is only half the job: it has to still be there a moment
 // later. The sweep withdraws any toast whose pane no longer needs attention, so
 // an acknowledgement that fires while the user is away would pull the toast

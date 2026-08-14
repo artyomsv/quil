@@ -1070,6 +1070,39 @@ delete that is a claim about somebody else's directory. `collectConfirmWorktrees
 is DELETED; the duplication is deliberate, because only the second one is
 authoritative and only the first one is visible.
 
+**Ownership says WHETHER; `Pane.WorktreePath` says WHICH — and keying the
+removal on `Pane.CWD` instead was a force-delete of somebody else's checkout.**
+`WorktreeOwned` is written once, at creation. `CWD` is a live cursor that OSC 7
+rewrites on every `cd` (`handleUpdatePane` is the writer, and `gitcache.go`'s
+`referencedDirs` exists because of it), so a pane created in `feat-a` whose
+shell walks into `feat-b` carries ownership pointing at a worktree this daemon
+never made — and `git worktree remove` accepts it, taking the uncommitted work
+with it. A pane's own child reaches this with one escape sequence, so it needs
+no privileged position, and the ordinary version is a developer who `cd`s
+between sibling worktrees. It also broke the dialog's whole safety story: the
+client priced one directory with `git status` while the daemon deleted another
+(the count and the deletion were two independent reads of a mutable field).
+`WorktreePath` is captured at creation, PERSISTED beside the ownership bit, and
+read by both sides — so what the dialog prices is what the close removes.
+
+**An owned pane with NO recorded path is refused on both sides rather than
+falling back to CWD.** That is the state of every pane restored from a snapshot
+written before the field existed. The fallback is precisely the bug, so the
+degradation is deliberate: an old pane loses the offer, which costs a
+convenience, where the fallback costs a checkout.
+
+**`paneInWorktree` checks the recorded path AND the CWD**, because either alone
+misses a real resident: a pane that merely sits there (a shell the user cd'd in)
+is only visible via CWD, and a pane CREATED there whose shell has since walked
+out — a build still running in the checkout — is only visible via the recorded
+path.
+
+**`ownedWorktreePaths` takes `PluginMu` for both reads.** It runs on a conn's
+dispatch goroutine, concurrent with the snapshot goroutine and with
+`spawnRestoredPane`'s own writes to those fields; `session.go` declares them
+PluginMu-protected and an unsynchronised string read can tear, which here means
+a truncated path handed to a force-delete.
+
 **The wire carries a BOOL, never a path** (`DestroyPanePayload.RemoveWorktree`,
 `DestroyTabPayload.RemoveWorktree`). The daemon re-derives the directory from
 its own ownership record, so the only directories this message can reach are

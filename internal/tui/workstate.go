@@ -724,6 +724,7 @@ func syncPaneMeta(pane *PaneModel, info *PaneInfo, wideCanvas bool, minNativeCol
 	// a restore that could not confirm it, a daemon that dropped the record —
 	// must stop being offered for deletion, and the absent key is what says so.
 	pane.WorktreeOwned = info.WorktreeOwned
+	pane.WorktreePath = info.WorktreePath
 	pane.GitUpstream = info.GitUpstream
 	pane.GitAhead = info.GitAhead
 	pane.GitBehind = info.GitBehind

@@ -92,8 +92,11 @@ type PaneModel struct {
 	GitWorktree     bool
 	GitWorktreeName string
 	// WorktreeOwned is daemon-authoritative: this pane's worktree was created
-	// by Quil, so the close dialog may offer to delete it. See PaneInfo.
+	// by Quil, so the close dialog may offer to delete it. WorktreePath is the
+	// directory that was created — the close dialog prices THAT, never CWD,
+	// which drifts with every `cd` the shell makes. See PaneInfo.
 	WorktreeOwned      bool
+	WorktreePath       string
 	GitUpstream        bool
 	GitAhead           int
 	GitBehind          int

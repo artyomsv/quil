@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"log"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -50,11 +51,20 @@ var removeWorktreeKeepBranchFn = gitworktree.RemoveWorktree
 // ownedWorktreePaths reports the worktree directories the given panes own, with
 // duplicates collapsed.
 //
-// WorktreeOwned is the ONLY gate, and it is what makes this safe to run from a
-// close dialog: it is set exactly where this daemon ran `git worktree add`
-// (createPaneInWorktree), so a pane that merely SITS in a linked worktree — one
-// the user made by hand, or attached to through the setup dialog — is never
-// reported here. Quil deletes what Quil created.
+// TWO fields, answering two different questions, and conflating them is a
+// force-delete of somebody else's checkout. WorktreeOwned says WHETHER a
+// directory may be removed — it is set exactly where this daemon ran `git
+// worktree add` (createPaneInWorktree), so a pane that merely SITS in a linked
+// worktree is never reported here. WorktreePath says WHICH directory, and it
+// has to be the recorded one: CWD is a live cursor OSC 7 rewrites on every
+// `cd`, so a pane created in feat-a whose shell walked into feat-b would
+// otherwise have its close delete feat-b — a worktree Quil never made, with
+// whatever uncommitted work was in it. A pane's own child can move that value
+// with one escape sequence.
+//
+// A pane with ownership and NO recorded path (restored from a snapshot written
+// before the field existed) is skipped rather than falling back to CWD. Losing
+// the offer on an old pane costs a convenience; the fallback costs a checkout.
 //
 // Deduplicated because splitting a worktree pane gives two panes one directory:
 // the second removal would fail against a tree the first already took, and be
@@ -63,14 +73,20 @@ func ownedWorktreePaths(panes []*Pane) []string {
 	var out []string
 	seen := map[string]bool{}
 	for _, p := range panes {
-		if p == nil || !p.WorktreeOwned || p.CWD == "" {
+		if p == nil {
 			continue
 		}
-		if seen[p.CWD] {
+		// PluginMu-protected, both of them (session.go). This runs on a conn's
+		// dispatch goroutine, concurrent with the snapshot goroutine and with
+		// spawnRestoredPane's own writes.
+		p.PluginMu.Lock()
+		owned, path := p.WorktreeOwned, p.WorktreePath
+		p.PluginMu.Unlock()
+		if !owned || path == "" || seen[path] {
 			continue
 		}
-		seen[p.CWD] = true
-		out = append(out, p.CWD)
+		seen[path] = true
+		out = append(out, path)
 	}
 	return out
 }
@@ -140,6 +156,21 @@ func (d *Daemon) removeOneWorktree(path string) {
 			log.Printf("worktree remove: %s removed (its branch was kept)", path)
 			return
 		}
+		// A FAILED attempt is not necessarily a whole failed removal. Measured
+		// on Windows: git deletes the tree and the admin entry, then fails on
+		// the now-empty directory because the pane's shell still has it as its
+		// working directory — so it exits non-zero having already deregistered
+		// the worktree. Every later attempt then answers "is not a working
+		// tree", and the removal is reported as failed while an orphaned
+		// directory `git worktree list` no longer mentions is left on disk.
+		//
+		// Asked of the LISTING rather than of the error text: the text is git's
+		// to reword and locale-dependent, while "does git still own this path"
+		// is the question that actually decides who finishes the job.
+		if !worktreeRegistered(ctx, repo, path) {
+			finishRemovedWorktree(path)
+			return
+		}
 		if attempt == worktreeRemoveAttempts {
 			break
 		}
@@ -155,13 +186,93 @@ func (d *Daemon) removeOneWorktree(path string) {
 	log.Printf("worktree remove: %s failed after %d attempts: %v", path, worktreeRemoveAttempts, err)
 }
 
-// paneInWorktree reports the id of a live pane whose working directory is the
-// worktree or below it, or "" when none is.
+// worktreeRegistered reports whether git still knows path as a worktree of
+// repo.
+//
+// An unreadable listing answers TRUE — "still git's" — deliberately: this
+// decides whether Quil may delete a directory itself, and an unknown answer
+// must never be the one that authorises that.
+func worktreeRegistered(ctx context.Context, repo, path string) bool {
+	list, err := worktreeListFn(ctx, repo)
+	if err != nil {
+		return true
+	}
+	for _, w := range list {
+		if sameWorktreePath(w.Path, path) {
+			return true
+		}
+	}
+	return false
+}
+
+// finishRemovedWorktree deletes the directory git left behind after it
+// deregistered the worktree but could not remove the folder itself.
+//
+// It RETRIES on the same budget the git call does, and shipping it without one
+// left an empty directory behind on every real close: by the time git has
+// deregistered the worktree and handed the folder back to us, the pane's shell
+// is still holding it — DestroyPane closes the PTY asynchronously, so the child
+// outlives the request by a second or two. Measured against a live daemon; one
+// attempt fails for exactly the reason git's did.
+func finishRemovedWorktree(path string) {
+	var err error
+	for attempt := 1; attempt <= worktreeRemoveAttempts; attempt++ {
+		err = removeDirFn(path)
+		if err == nil || os.IsNotExist(err) {
+			// Not-there is the SUCCESS case: git managed the whole removal and
+			// only its exit code misled us.
+			log.Printf("worktree remove: %s removed (its branch was kept)", path)
+			return
+		}
+		if attempt == worktreeRemoveAttempts {
+			break
+		}
+		time.Sleep(worktreeRemoveBackoff * time.Duration(attempt))
+	}
+	log.Printf("worktree remove: %s was deregistered by git but the directory remains: %v", path, err)
+}
+
+// removeDirFn is the seam for the leftover-directory delete.
+//
+// os.Remove, NOT os.RemoveAll: it succeeds only on an EMPTY directory, which is
+// exactly the residue this case produces (--force already deleted the tracked
+// and untracked files). That bound is the point — Quil is finishing git's
+// operation here, not performing a recursive delete of its own, and a non-empty
+// directory means something happened that this code did not predict and must
+// not act on.
+var removeDirFn = os.Remove
+
+// sameWorktreePath reports whether two paths name the same directory, with the
+// same normalisation pathWithin uses. Named apart from the real-git tests' own
+// samePath helper, which additionally resolves symlinks and folds case on every
+// platform — appropriate for comparing what git printed against a built path in
+// a test, and wrong for a decision that authorises a delete.
+func sameWorktreePath(a, b string) bool {
+	x, y := filepath.Clean(a), filepath.Clean(b)
+	if runtime.GOOS == "windows" {
+		x, y = strings.ToLower(x), strings.ToLower(y)
+	}
+	return x == y
+}
+
+// paneInWorktree reports the id of a live pane that lives in the worktree, or
+// "" when none does.
+//
+// TWO tests, because either alone misses a real resident. A pane whose CWD is
+// the directory or below it is obviously in it — a shell the user cd'd there, a
+// split made in the same place. But a pane CREATED there whose shell has since
+// walked out still lives there: a build running in the checkout, an agent that
+// cd'd into a subrepo. Asking only where the shell last said it was would
+// delete the tree out from under it, which is the same CWD-is-a-cursor mistake
+// ownedWorktreePaths documents, one step later.
 func (d *Daemon) paneInWorktree(path string) string {
 	for _, p := range d.session.AllPanes() {
 		p.PluginMu.Lock()
-		cwd := p.CWD
+		cwd, home := p.CWD, p.WorktreePath
 		p.PluginMu.Unlock()
+		if home != "" && pathWithin(path, home) {
+			return p.ID
+		}
 		if cwd != "" && pathWithin(path, cwd) {
 			return p.ID
 		}

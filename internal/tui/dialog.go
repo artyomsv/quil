@@ -1557,7 +1557,16 @@ func (m Model) renderConfirmWorktrees() string {
 
 	var b strings.Builder
 	b.WriteString("  " + style.Render(head))
-	for _, w := range m.confirmWorktrees {
+	// CAPPED, because lipgloss pads but never clips and renderDialog's
+	// lipgloss.Place does not either: two lines per worktree grows the box past
+	// the terminal and pushes the footer — and the Enter it documents — off
+	// screen. The cap is a DISPLAY bound only; the header counts every worktree
+	// and the toggle still covers all of them.
+	shown := m.confirmWorktrees
+	if len(shown) > confirmWorktreeMaxRows {
+		shown = shown[:confirmWorktreeMaxRows]
+	}
+	for _, w := range shown {
 		b.WriteString("\n")
 		// The label is a BRANCH NAME, which a remote daemon chooses and a user
 		// can type an escape into: sanitized and bounded at render, like every
@@ -1569,6 +1578,10 @@ func (m Model) renderConfirmWorktrees() string {
 		b.WriteString("\n")
 		b.WriteString("      " + m.renderWorktreeChanges(w))
 	}
+	if rest := len(m.confirmWorktrees) - len(shown); rest > 0 {
+		b.WriteString("\n")
+		b.WriteString("      " + dialogSubtle.Render(fmt.Sprintf("…and %d more", rest)))
+	}
 	// Said once, under the list, because it is a property of the operation
 	// rather than of any one worktree — and said whether or not the check
 	// answered, since it is true either way.
@@ -1576,6 +1589,10 @@ func (m Model) renderConfirmWorktrees() string {
 	b.WriteString("  " + dialogSubtle.Render("The branch is kept. Uncommitted work is not."))
 	return b.String()
 }
+
+// confirmWorktreeMaxRows bounds the rendered list. A tab can legitimately hold
+// more worktree panes than a dialog has room for, and the box does not clip.
+const confirmWorktreeMaxRows = 6
 
 // renderWorktreeChanges is the one line that says what the removal would cost.
 //

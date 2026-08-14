@@ -147,6 +147,13 @@ type PaneInfo struct {
 	// this field alone, because the offer is a claim that the checkout is
 	// Quil's to remove.
 	WorktreeOwned bool
+	// WorktreePath is the directory git created for this pane, as the daemon
+	// recorded it at creation. The close dialog prices and names THIS, never
+	// CWD: CWD is rewritten by OSC 7 on every `cd`, so pricing it would show
+	// the user one worktree's dirty count while the daemon deleted another.
+	// Empty for a pane restored from a snapshot older than the field, which is
+	// what makes such a pane un-offerable on both sides.
+	WorktreePath string
 	// Model/ContextTokens are daemon-authoritative (extracted from hook event
 	// data at turn boundaries): the model id and context-window token count of
 	// the pane's last completed AI turn. Empty/zero for non-AI panes.
@@ -6295,6 +6302,9 @@ func parseWorkspaceState(raw map[string]any) WorkspaceStateMsg {
 				}
 				if b, ok := pm["worktree_owned"].(bool); ok {
 					pi.WorktreeOwned = b
+				}
+				if s, ok := pm["worktree_path"].(string); ok {
+					pi.WorktreePath = s
 				}
 				if b, ok := pm["git_upstream"].(bool); ok {
 					pi.GitUpstream = b

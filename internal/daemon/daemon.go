@@ -775,6 +775,7 @@ func (d *Daemon) restoreWorkspace() error {
 				eager, _ := paneData["eager"].(bool)
 				pinnedAttention, _ := paneData["pinned_attention"].(bool)
 				worktreeOwned, _ := paneData["worktree_owned"].(bool)
+				worktreePath, _ := paneData["worktree_path"].(string)
 
 				pane := &Pane{
 					ID:           paneID,
@@ -800,6 +801,13 @@ func (d *Daemon) restoreWorkspace() error {
 					// right default: a pane nobody recorded as owning a
 					// worktree keeps the ordinary CWD fallback.
 					WorktreeOwned: worktreeOwned,
+					// Absent on any snapshot written before the path was
+					// recorded → empty, and an owned pane with no path is never
+					// offered for close-time removal. That degradation is
+					// deliberate: the only directory such a pane can name is its
+					// CWD, which is the value that cannot be trusted for a
+					// force-delete.
+					WorktreePath: worktreePath,
 				}
 
 				// Load ghost buffer from disk
@@ -2956,6 +2964,12 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			// the snapshot carries only CWD, which cannot distinguish them.
 			if pane.WorktreeOwned {
 				paneData["worktree_owned"] = true
+			}
+			// Persisted for the same reason, and it is the half that says WHICH
+			// directory. Without it a restored pane can only name its CWD, which
+			// the shell has been rewriting all along — see Pane.WorktreePath.
+			if pane.WorktreePath != "" {
+				paneData["worktree_path"] = pane.WorktreePath
 			}
 			// SpawnError is captured for the BROADCAST only — see
 			// includeOverlays below. It is never written to paneData.

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -9,10 +10,14 @@ import (
 	"github.com/artyomsv/quil/internal/ipc"
 )
 
-// worktreePane builds a pane the daemon reported as owning a worktree.
+// worktreePane builds a pane the daemon reported as owning a worktree, sitting
+// in it — the ordinary case, where the recorded creation path and the shell's
+// CWD still agree. Tests about them DISAGREEING override WorktreePath.
 func worktreePane(id, cwd, branch string) *PaneModel {
-	p := &PaneModel{ID: id, CWD: cwd, WorktreeOwned: true, GitBranch: branch, GitWorktree: true}
-	return p
+	return &PaneModel{
+		ID: id, CWD: cwd, WorktreeOwned: true, WorktreePath: cwd,
+		GitBranch: branch, GitWorktree: true,
+	}
 }
 
 // The gate the daemon enforces, mirrored client-side so the row is only ever
@@ -288,6 +293,11 @@ func modelWithWorktreePane() Model {
 	return modelWithPanes(worktreePane("pane-a", "/w/feat-a", "feat/a"))
 }
 
+// The status request leaves inside a tea.Batch (alongside ClearScreen), and
+// calling a batched cmd does NOT run its children — it returns a BatchMsg the
+// runtime dispatches. runCmd (overlay_test.go) unwraps that; calling the outer
+// cmd alone observes no sends at all.
+
 // applyModel runs the (tea.Model, tea.Cmd) pair every handler here returns and
 // gives back the concrete Model. The Cmd is deliberately dropped: these tests
 // assert on state, and the send paths take a fakeSender where they matter.
@@ -310,4 +320,147 @@ func decodeSent(t *testing.T, fake *fakeSender, msgType string, out any) bool {
 		return true
 	}
 	return false
+}
+
+// The client has to price the SAME directory the daemon will delete, and a
+// pane's CWD is not that directory: OSC 7 rewrites it on every `cd`, so a pane
+// created in feat-a whose shell walked into feat-b would have the dialog name
+// feat-b's branch, run `git status` against feat-b, and arm a toggle the daemon
+// answers by deleting feat-a. Both sides read the recorded creation path.
+func TestCollectConfirmWorktrees_UsesTheRecordedPathNotTheShellsCWD(t *testing.T) {
+	p := worktreePane("pane-a", "/w/feat-b", "feat/b") // the shell wandered
+	p.WorktreePath = "/w/feat-a"
+
+	got := collectConfirmWorktrees([]*PaneModel{p})
+
+	if len(got) != 1 {
+		t.Fatalf("collectConfirmWorktrees = %+v, want one entry", got)
+	}
+	if got[0].path != "/w/feat-a" {
+		t.Errorf("path = %q, want the recorded /w/feat-a", got[0].path)
+	}
+}
+
+// A pane restored from a snapshot written before the path was recorded carries
+// ownership and no path. It is not offered — the daemon will refuse it anyway,
+// and a row that cannot be honoured is worse than no row.
+func TestCollectConfirmWorktrees_SkipsAPaneWithNoRecordedPath(t *testing.T) {
+	p := worktreePane("pane-a", "/w/feat-a", "feat/a")
+	p.WorktreePath = ""
+
+	if got := collectConfirmWorktrees([]*PaneModel{p}); len(got) != 0 {
+		t.Errorf("collectConfirmWorktrees = %+v, want none without a recorded path", got)
+	}
+}
+
+// The dialog box does not clip and lipgloss WRAPS, so an unbounded row list
+// grows the box past the terminal and pushes the footer — and the Enter it
+// documents — off screen. A tab can legitimately hold many worktree panes.
+func TestRenderConfirmDialog_CapsTheWorktreeRowList(t *testing.T) {
+	var panes []*PaneModel
+	for i := range 40 {
+		id := fmt.Sprintf("pane-%02d", i)
+		p := worktreePane(id, fmt.Sprintf("/w/feat-%02d", i), fmt.Sprintf("feat/%02d", i))
+		p.WorktreePath = p.CWD
+		panes = append(panes, p)
+	}
+	m := modelWithPanes(panes...)
+	m = applyModel(m.openCloseTabConfirm())
+
+	out := stripANSI(m.renderConfirmDialog())
+
+	if lines := strings.Count(out, "\n") + 1; lines > confirmWorktreeMaxRows*2+12 {
+		t.Errorf("the dialog rendered %d lines for 40 worktrees; the row list is not capped:\n%s", lines, out)
+	}
+	if !strings.Contains(out, "more") {
+		t.Errorf("the capped rows are not accounted for in the dialog:\n%s", out)
+	}
+	// The COUNT still describes every worktree — the cap is a display bound,
+	// not a change to what the toggle does.
+	if !strings.Contains(out, "40 worktrees") {
+		t.Errorf("the header does not name all 40 worktrees:\n%s", out)
+	}
+}
+
+// The label has four tiers and only the first was exercised. The row is how the
+// user recognises WHICH piece of work they are deleting the checkout of, so a
+// tier that silently produced an empty string would leave them confirming a
+// blank line.
+func TestConfirmWorktreeLabel_FallsBackThroughItsTiers(t *testing.T) {
+	tests := []struct {
+		name string
+		pane *PaneModel
+		want string
+	}{
+		{
+			"the branch, when the pane is still in its own worktree",
+			&PaneModel{CWD: "/w/feat-a", WorktreePath: "/w/feat-a", GitBranch: "feat/a", GitWorktreeName: "feat-a"},
+			"feat/a",
+		},
+		{
+			"the worktree name when git reports no branch (detached HEAD)",
+			&PaneModel{CWD: "/w/feat-a", WorktreePath: "/w/feat-a", GitWorktreeName: "feat-a"},
+			"feat-a",
+		},
+		{
+			"the path when git has reported nothing yet",
+			&PaneModel{CWD: "/w/feat-a", WorktreePath: "/w/feat-a"},
+			"/w/feat-a",
+		},
+		{
+			// The git fields describe wherever the shell went, so once they
+			// disagree with the recorded path they name the WRONG worktree —
+			// the row must not label this "feat/b" while the close deletes
+			// feat-a.
+			"the recorded path outright once the shell has wandered",
+			&PaneModel{CWD: "/w/feat-b", WorktreePath: "/w/feat-a", GitBranch: "feat/b"},
+			"/w/feat-a",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := confirmWorktreeLabel(tt.pane); got != tt.want {
+				t.Errorf("confirmWorktreeLabel = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// The REQUEST itself, not just the state it leaves behind. Every other test
+// here asserts on m.confirmWorktrees and never runs the returned command, so a
+// regression that asked the daemon about the wrong directories — every pane's
+// CWD rather than the owned worktrees — would pass all of them, and the
+// daemon-side dispatch test assumes a well-formed request it never sees built.
+func TestOpenClosePaneConfirm_AsksTheDaemonAboutTheRecordedWorktree(t *testing.T) {
+	p := worktreePane("pane-a", "/w/feat-b", "feat/b") // the shell wandered
+	p.WorktreePath = "/w/feat-a"
+	m := modelWithPanes(p)
+	fake := &fakeSender{}
+	m.client = fake
+
+	mdl, cmd := m.openClosePaneConfirm()
+	got := applyModel(mdl, cmd)
+	if cmd == nil {
+		t.Fatal("no command returned, so no status request was ever sent")
+	}
+	runCmd(cmd)
+
+	var req ipc.WorktreeStatusReqPayload
+	if !decodeSent(t, fake, ipc.MsgWorktreeStatusReq, &req) {
+		t.Fatal("no worktree_status_req was sent")
+	}
+	if len(req.Paths) != 1 || req.Paths[0] != "/w/feat-a" {
+		t.Errorf("Paths = %v, want the recorded worktree /w/feat-a", req.Paths)
+	}
+	// The generation is what applyWorktreeStatus matches the answer on; a
+	// request that carries a different one can never be landed.
+	var stamped string
+	for _, msg := range fake.sent {
+		if msg.Type == ipc.MsgWorktreeStatusReq {
+			stamped = msg.ID
+		}
+	}
+	if stamped == "" || stamped != got.confirmWorktreeGen {
+		t.Errorf("request ID = %q, want the dialog's generation %q", stamped, got.confirmWorktreeGen)
+	}
 }

@@ -47,13 +47,30 @@ type Pane struct {
 	// otherwise, so the two are indistinguishable and the wrong recovery
 	// applies to one of them. PluginMu-protected, like Type and CWD beside it.
 	WorktreeOwned bool
+	// WorktreePath is the directory `git worktree add` actually created for this
+	// pane. PERSISTED, PluginMu-protected, and written exactly once — at
+	// creation, beside WorktreeOwned.
+	//
+	// It exists because CWD CANNOT stand in for it. CWD is a live cursor that
+	// OSC 7 rewrites on every `cd` (handleUpdatePane is what writes it), so a
+	// pane created in feat-a whose shell walks into feat-b carries
+	// WorktreeOwned=true with CWD naming a checkout this daemon never made.
+	// Close-time removal keyed on CWD would then force-delete that checkout,
+	// uncommitted work and all — and a pane's own child can move it with one
+	// escape sequence, so this is reachable without any privileged position.
+	// Ownership says WHETHER a directory may be removed; this says WHICH.
+	//
+	// Empty on a pane restored from a snapshot written before this field
+	// existed. That pane is not offered for removal at all: the only directory
+	// it can name is the one that cannot be trusted for this.
+	WorktreePath string
 	// SpawnError explains why this pane has no process. Runtime-only and
 	// deliberately NOT persisted: a fresh daemon re-stats and re-derives it,
 	// while a stored one resurrects a complaint about a worktree the user has
 	// since restored. Cleared on every successful spawn. PluginMu-protected.
-	SpawnError string
-	Type       string              // Plugin name (default: "terminal")
-	PluginState  map[string]string   // Scraped values (e.g., "session_id": "abc123")
+	SpawnError  string
+	Type        string            // Plugin name (default: "terminal")
+	PluginState map[string]string // Scraped values (e.g., "session_id": "abc123")
 	// PluginMu protects every mutable field that can be read or written
 	// concurrently with the daemon's PTY-output goroutine: PluginState,
 	// GhostSnap, PTY (the pointer itself + Pid lookups), ExitCode, and

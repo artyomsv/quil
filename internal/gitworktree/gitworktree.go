@@ -338,8 +338,13 @@ func Remove(ctx context.Context, repo, path string, branch string) error {
 // --force is deliberate and is what the caller asked for: uncommitted and
 // untracked files under the worktree go with it. The dialog counts them (see
 // Status) and says so before the toggle can be armed.
+// The `--` is the same belt-and-braces the dash guard in usableStartPoint is:
+// the path reaches git in option position, and while current git rejects a
+// dash-prefixed one on its own (`worktree remove` exposes only -f), that is a
+// property of today's git rather than of this call. Terminating option parsing
+// makes it a property of the call.
 func RemoveWorktree(ctx context.Context, repo, path string) error {
-	if _, err := runGit(ctx, repo, "worktree", "remove", "--force", path); err != nil {
+	if _, err := runGit(ctx, repo, "worktree", "remove", "--force", "--", path); err != nil {
 		return fmt.Errorf("git worktree remove %s: %w", path, err)
 	}
 	return nil

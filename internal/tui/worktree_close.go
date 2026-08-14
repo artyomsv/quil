@@ -35,17 +35,27 @@ type confirmWorktree struct {
 // would be a claim about someone else's directory even if the daemon then
 // refused it.
 //
+// The path is the RECORDED creation directory, never the pane's CWD, and the
+// client needs that as much as the daemon does: CWD drifts with every `cd`, so
+// pricing it would run `git status` against one worktree and show its count
+// beside a toggle the daemon answers by deleting another. Both sides read the
+// same recorded value, so what the dialog prices is what the close removes.
+//
+// A pane with ownership and no recorded path (restored from an older snapshot)
+// is not offered — the daemon would refuse it anyway, and a row that cannot be
+// honoured is worse than no row.
+//
 // Deduplicated by path: two panes split inside one worktree describe one
 // directory, and listing it twice would tell the user a tab holds two.
 func collectConfirmWorktrees(panes []*PaneModel) []confirmWorktree {
 	var out []confirmWorktree
 	seen := map[string]bool{}
 	for _, p := range panes {
-		if p == nil || !p.WorktreeOwned || p.CWD == "" || seen[p.CWD] {
+		if p == nil || !p.WorktreeOwned || p.WorktreePath == "" || seen[p.WorktreePath] {
 			continue
 		}
-		seen[p.CWD] = true
-		out = append(out, confirmWorktree{path: p.CWD, label: confirmWorktreeLabel(p)})
+		seen[p.WorktreePath] = true
+		out = append(out, confirmWorktree{path: p.WorktreePath, label: confirmWorktreeLabel(p)})
 	}
 	return out
 }
@@ -58,13 +68,21 @@ func collectConfirmWorktrees(panes []*PaneModel) []confirmWorktree {
 // job is to let them recognise which piece of work they are about to delete the
 // checkout of.
 func confirmWorktreeLabel(p *PaneModel) string {
+	// The git fields describe the pane's CURRENT directory, so they are the
+	// right label only while the shell is still in its own worktree — which is
+	// the ordinary case, and the case the user recognises the row by. Once they
+	// disagree, the recorded path is the only value that names what will
+	// actually be deleted, so it wins outright rather than being a fallback.
+	if p.WorktreePath != "" && p.CWD != p.WorktreePath {
+		return p.WorktreePath
+	}
 	if p.GitBranch != "" {
 		return p.GitBranch
 	}
 	if p.GitWorktreeName != "" {
 		return p.GitWorktreeName
 	}
-	return p.CWD
+	return p.WorktreePath
 }
 
 // worktreeStatusMsg carries one status response. Gen echoes the requesting

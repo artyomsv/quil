@@ -35,9 +35,8 @@ func TestSidebarGlyphs_OneCellAndNotEmojiCapable(t *testing.T) {
 		0x23F3:  "U+23F3 HOURGLASS",
 		0x1F534: "U+1F534 RED CIRCLE",
 	}
-	for name, g := range map[string]string{
+	glyphs := map[string]string{
 		"glyphBlocked": glyphBlocked,
-		"glyphWorking": glyphWorking,
 		"glyphDone":    glyphDone,
 		"glyphIdle":    glyphIdle,
 		"glyphPinned":  glyphPinned,
@@ -46,7 +45,17 @@ func TestSidebarGlyphs_OneCellAndNotEmojiCapable(t *testing.T) {
 		// count around it, and paneRow already spends it on the subagent
 		// count, so a font drawing it wide would overpaint there too.
 		"glyphMore": glyphMore,
-	} {
+	}
+	// The WORKING state animates (workingGlyph), so it is a SET of glyphs where
+	// the others are one — and the row arithmetic budgets whichever frame is
+	// current as a single cell. Every frame is swept rather than the one a
+	// constant would have pinned: a sequence is exactly the place a wide or
+	// emoji-capable codepoint slips in unnoticed, since it only paints for a
+	// tenth of each second.
+	for i, frame := range spinnerFrames {
+		glyphs[fmt.Sprintf("spinnerFrames[%d]", i)] = frame
+	}
+	for name, g := range glyphs {
 		if got := lipgloss.Width(g); got != 1 {
 			t.Errorf("%s (%q) measures %d cells, want exactly 1 — "+
 				"every row builder budgets it as one", name, g, got)
@@ -121,7 +130,12 @@ func TestSidebarRows_MeasureExactlyTheirWidth(t *testing.T) {
 					// are different renders, not the same render with a different
 					// first character.
 					for _, active := range []bool{true, false} {
-						got := projectRow(name, c, link, active, w, nil)
+						// One mid-sequence frame rather than a sweep of all ten:
+						// the frame changes only WHICH working glyph is drawn,
+						// and every frame measuring one cell is what the test
+						// above pins — so sweeping here would multiply an
+						// already four-deep loop to re-assert that.
+						got := projectRow(name, c, 7 /*workFrame*/, link, active, w, nil)
 						if n := lipgloss.Width(got); n != w {
 							t.Errorf("projectRow(%q, %+v, link=%q, active=%v, w=%d) "+
 								"measures %d cells, want exactly %d",
@@ -161,6 +175,9 @@ func TestPaneRow_MeasuresExactlyItsWidth(t *testing.T) {
 						pane.blockedReason = reason
 					case "working":
 						pane.working = true
+						// Mid-sequence, so the sweep runs against an animated
+						// frame rather than only spinnerFrames[0].
+						pane.workFrame = 7
 						pane.subagents = map[string]int{"impl": 3}
 					case "unseen":
 						pane.unseen = true
@@ -173,6 +190,7 @@ func TestPaneRow_MeasuresExactlyItsWidth(t *testing.T) {
 					case "pinned+working":
 						pane.pinnedAttention = true
 						pane.working = true
+						pane.workFrame = 7
 						pane.subagents = map[string]int{"impl": 3}
 					}
 					for _, focused := range []bool{true, false} {

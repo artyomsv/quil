@@ -518,8 +518,8 @@ characters at roughly twice the width asked for, and `padOrTrunc` re-clamps it
 so nothing downstream complains.
 
 **No sidebar state glyph may be an EMOJI-CAPABLE codepoint** (`glyphBlocked` /
-`glyphWorking` / `glyphDone` / `glyphIdle`, pinned by
-`TestSidebarGlyphs_OneCellAndNotEmojiCapable`). A font is free to answer such a
+`glyphDone` / `glyphIdle` / `glyphPinned`, plus every frame `workingGlyph` can
+return, pinned by `TestSidebarGlyphs_OneCellAndNotEmojiCapable`). A font is free to answer such a
 codepoint with a colour emoji face, which is drawn about two cells wide while
 advancing ONE — so it paints over whatever follows it. In the project badge
 what follows is the count, which is how `⚠1 ◐2` rendered as a warning sign with
@@ -531,6 +531,21 @@ excess. Forcing text presentation with U+FE0E was tried and rejected: it
 depends on the terminal honouring a variation selector, and the emoji-side
 alternative U+FE0F walks into the cutter rule below. A codepoint that was never
 emoji needs neither.
+
+**The WORKING state is the one glyph that is not a constant: it ANIMATES**
+(`workingGlyph`, sidebar.go), cycling the same `spinnerFrames` the tab label and
+the pane's top border already run. It shipped as a static `◐` while those two
+spun, so one fact wore two notations across three levels of the same screen —
+and the sidebar, the level that lists every pane at once, was the one telling
+the quieter story. Motion is also what separates working from the rest of the
+vocabulary: `▲`/`✓`/`◆`/`○` all describe something that has STOPPED. The frame is
+a parameter rather than a read of the Model, because the two callers hold
+different copies of one counter — `paneRow` passes the pane's mirrored
+`workFrame` (what `buildTopBorder` renders, so a row and its own pane border
+cannot disagree) and `projectRow` the shared `workSpinnerFrame` the tick derives
+it from. `TestSidebar_WorkingIndicatorAnimatesWithTheTabSpinner` drives it
+through `Update`, not through the row builders: a unit call handed a frame by
+hand agrees with itself whichever counter the real call site reads.
 
 **`truncateCells` and `lastCellsToWidth` cut on GRAPHEME CLUSTERS, and both
 halves of that are load-bearing.** A rune is not the unit of width — U+FE0F
@@ -710,7 +725,7 @@ in part.** `Notification` is its own kind now (`hookevents.WorkEventNotify` /
 `workNotify`): the claude hook marks the idle nudge it can recognise from the
 message text, and the consumer parks on everything else — so an idle nudge
 arriving after `Stop` sets nothing at all, and a still-working pane keeps its
-`◐ ⋯N` instead of being outranked by a stale `▲`. Every sidebar reader here is
+spinner and `⋯N` instead of being outranked by a stale `▲`. Every sidebar reader here is
 unchanged; there is simply one fewer event that sets `blockedSince`. See
 `hooks-and-sessions.md`'s Work state section for the split.
 

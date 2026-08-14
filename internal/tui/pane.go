@@ -21,7 +21,11 @@ import (
 	"github.com/artyomsv/quil/internal/ringbuf"
 )
 
-// spinnerFrames are braille characters cycled for the resuming indicator.
+// spinnerFrames are braille characters cycled for every animated indicator: the
+// per-pane resuming/preparing spinner, the tab label's work spinner, the pane's
+// top-border one, and the sidebar's working glyph (workingGlyph, sidebar.go).
+// ONE sequence deliberately — a second set of frames would make the same fact
+// look different depending on which part of the screen reported it.
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 // restoreAccentStyle / restoreDimStyle / restoreDoneStyle color the centered
@@ -1005,7 +1009,7 @@ func buildTopBorder(width int, cwd, name string, color color.Color, ghost, resum
 	spin := ""
 	spinLen := 0
 	if working {
-		spin = " " + spinnerFrames[workFrame%len(spinnerFrames)]
+		spin = " " + workingGlyph(workFrame)
 		spinLen = 2 // leading space + single-width braille glyph
 	}
 

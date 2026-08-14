@@ -5,6 +5,7 @@ package notify
 import (
 	"fmt"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 	"unsafe"
@@ -15,23 +16,24 @@ import (
 var (
 	user32 = windows.NewLazySystemDLL("user32.dll")
 
-	procEnumWindows            = user32.NewProc("EnumWindows")
-	procGetWindowThreadProcID  = user32.NewProc("GetWindowThreadProcessId")
-	procIsWindowVisible        = user32.NewProc("IsWindowVisible")
-	procSetForegroundWindow    = user32.NewProc("SetForegroundWindow")
-	procShowWindow             = user32.NewProc("ShowWindow")
-	procIsIconic               = user32.NewProc("IsIconic")
-	procAllowSetForegroundWin  = user32.NewProc("AllowSetForegroundWindow")
-	procGetWindowTextLengthW   = user32.NewProc("GetWindowTextLengthW")
-	procAttachThreadInput      = user32.NewProc("AttachThreadInput")
-	procGetForegroundWindow    = user32.NewProc("GetForegroundWindow")
-	procSetActiveWindow        = user32.NewProc("SetActiveWindow")
-	procSwitchToThisWindow     = user32.NewProc("SwitchToThisWindow")
-	procSystemParametersInfo   = user32.NewProc("SystemParametersInfoW")
-	procRegisterHotKey         = user32.NewProc("RegisterHotKey")
-	procUnregisterHotKey       = user32.NewProc("UnregisterHotKey")
-	procSendInput              = user32.NewProc("SendInput")
-	procPeekMessageW           = user32.NewProc("PeekMessageW")
+	procEnumWindows           = user32.NewProc("EnumWindows")
+	procGetWindowThreadProcID = user32.NewProc("GetWindowThreadProcessId")
+	procIsWindowVisible       = user32.NewProc("IsWindowVisible")
+	procSetForegroundWindow   = user32.NewProc("SetForegroundWindow")
+	procShowWindow            = user32.NewProc("ShowWindow")
+	procIsIconic              = user32.NewProc("IsIconic")
+	procAllowSetForegroundWin = user32.NewProc("AllowSetForegroundWindow")
+	procGetWindowTextLengthW  = user32.NewProc("GetWindowTextLengthW")
+	procAttachThreadInput     = user32.NewProc("AttachThreadInput")
+	procGetForegroundWindow   = user32.NewProc("GetForegroundWindow")
+	procSetActiveWindow       = user32.NewProc("SetActiveWindow")
+	procSwitchToThisWindow    = user32.NewProc("SwitchToThisWindow")
+	procSystemParametersInfo  = user32.NewProc("SystemParametersInfoW")
+	procRegisterHotKey        = user32.NewProc("RegisterHotKey")
+	procUnregisterHotKey      = user32.NewProc("UnregisterHotKey")
+	procSendInput             = user32.NewProc("SendInput")
+	procPeekMessageW          = user32.NewProc("PeekMessageW")
+	procGetClassNameW         = user32.NewProc("GetClassNameW")
 
 	kernel32                   = windows.NewLazySystemDLL("kernel32.dll")
 	procGetCurrentThreadIdUser = kernel32.NewProc("GetCurrentThreadId")
@@ -128,9 +130,27 @@ var _ = [1]struct{}{}[unsafe.Sizeof(msgW{})-48]
 // Every rung is VERIFIED against GetForegroundWindow, which is what makes
 // adding rungs safe: a technique that does nothing costs a call and reports
 // failure, rather than being believed because it returned a non-zero value.
+// try reports success AND why not, because the four ways this can fail need
+// four different fixes and are indistinguishable from the outside. A single
+// "refused" is what turned each of the last several diagnoses into guesswork.
 type raiseAttempt struct {
 	name string
-	try  func(hwnd uintptr) bool
+	try  func(hwnd uintptr) (bool, string)
+}
+
+// describeWindow names a window well enough to identify who is holding the
+// foreground when a click is delivered — the one fact that is invisible from
+// inside a process being refused, and the one that says whether the refusal is
+// coming from the shell, from the terminal itself, or from something else.
+func describeWindow(hwnd uintptr) string {
+	if hwnd == 0 {
+		return "none"
+	}
+	var pid uint32
+	procGetWindowThreadProcID.Call(hwnd, uintptr(unsafe.Pointer(&pid)))
+	buf := make([]uint16, 128)
+	procGetClassNameW.Call(hwnd, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
+	return fmt.Sprintf("hwnd=%d pid=%d class=%q", hwnd, pid, windows.UTF16ToString(buf))
 }
 
 // foregroundViaHotkey satisfies both groups at once by generating real input.
@@ -158,11 +178,9 @@ type raiseAttempt struct {
 //
 // Must run on the locked OS thread RaiseWindowFor pins — RegisterHotKey and the
 // message queue both belong to the calling thread.
-func foregroundViaHotkey(hwnd uintptr) bool {
-	if ok, _, _ := procRegisterHotKey.Call(0, hotkeyID, 0, vkF22); ok == 0 {
-		// Already taken by another process. Not an error worth reporting: the
-		// remaining rungs still run.
-		return false
+func foregroundViaHotkey(hwnd uintptr) (bool, string) {
+	if ok, _, err := procRegisterHotKey.Call(0, hotkeyID, 0, vkF22); ok == 0 {
+		return false, fmt.Sprintf("RegisterHotKey failed (%v)", err)
 	}
 	defer procUnregisterHotKey.Call(0, hotkeyID)
 
@@ -170,8 +188,12 @@ func foregroundViaHotkey(hwnd uintptr) bool {
 		{typ: inputKeyboard, wVk: vkF22},
 		{typ: inputKeyboard, wVk: vkF22, dwFlags: keyEventKeyUp},
 	}
-	if sent, _, _ := procSendInput.Call(2, uintptr(unsafe.Pointer(&inputs[0])), unsafe.Sizeof(inputs[0])); sent != 2 {
-		return false
+	// A blocked injection is the one failure that says the technique itself is
+	// unavailable rather than merely unlucky: SendInput refuses when the
+	// foreground window belongs to a process at a higher integrity level.
+	sent, _, err := procSendInput.Call(2, uintptr(unsafe.Pointer(&inputs[0])), unsafe.Sizeof(inputs[0]))
+	if sent != 2 {
+		return false, fmt.Sprintf("SendInput sent %d of 2 (%v)", sent, err)
 	}
 
 	// PeekMessage on a deadline rather than a blocking GetMessage: this runs in
@@ -181,15 +203,22 @@ func foregroundViaHotkey(hwnd uintptr) bool {
 	for time.Now().Before(deadline) {
 		var m msgW
 		if got, _, _ := procPeekMessageW.Call(uintptr(unsafe.Pointer(&m)), 0, 0, 0, pmRemove); got != 0 {
-			if m.message == wmHotkey {
-				procSetForegroundWindow.Call(hwnd)
-				return isForeground(hwnd)
+			if m.message != wmHotkey {
+				continue
 			}
-			continue
+			// The injection landed. Whether the raise is now PERMITTED is the
+			// separate question, and distinguishing the two is the whole point
+			// of reporting this far.
+			r, _, sfwErr := procSetForegroundWindow.Call(hwnd)
+			if isForeground(hwnd) {
+				return true, ""
+			}
+			return false, fmt.Sprintf("hotkey delivered but SetForegroundWindow returned %d (%v), foreground is %s",
+				r, sfwErr, describeWindow(currentForeground()))
 		}
 		time.Sleep(hotkeyPoll)
 	}
-	return false
+	return false, fmt.Sprintf("injected F22 never came back within %s", hotkeyWait)
 }
 
 // raiseLadder is ordered least- to most-intrusive. Nothing below the first rung
@@ -199,9 +228,12 @@ func raiseLadder() []raiseAttempt {
 		// The ordinary activation. When the caller holds foreground rights this
 		// is all that is needed, and it is the only rung that lets the window
 		// manager run its normal path end to end.
-		{"plain", func(hwnd uintptr) bool {
-			procSetForegroundWindow.Call(hwnd)
-			return isForeground(hwnd)
+		{"plain", func(hwnd uintptr) (bool, string) {
+			r, _, err := procSetForegroundWindow.Call(hwnd)
+			if isForeground(hwnd) {
+				return true, ""
+			}
+			return false, fmt.Sprintf("returned %d (%v), foreground is %s", r, err, describeWindow(currentForeground()))
 		}},
 		// Generate real input so the foreground lock is released and this thread
 		// owns the last input event. The rung that actually works at toast-click
@@ -213,9 +245,12 @@ func raiseLadder() []raiseAttempt {
 		// What Alt+Tab uses. Undocumented but exported and stable since XP, and
 		// it takes a different path through the window manager than
 		// SetForegroundWindow — which is the only reason it is worth a rung.
-		{"switch", func(hwnd uintptr) bool {
+		{"switch", func(hwnd uintptr) (bool, string) {
 			procSwitchToThisWindow.Call(hwnd, 1)
-			return isForeground(hwnd)
+			if isForeground(hwnd) {
+				return true, ""
+			}
+			return false, "refused"
 		}},
 		// A synthetic ALT tap was tried here and REMOVED. The theory was sound —
 		// one documented condition for setting the foreground window is having
@@ -267,23 +302,30 @@ const (
 // The round count is reported when more than one was needed, because "worked
 // immediately" and "worked on the third round" are different findings about
 // what the shell is doing after a click.
-func raiseWithSettle(hwnd uintptr) string {
+func raiseWithSettle(hwnd uintptr) (string, string) {
 	start := time.Now()
+	// Notes from the FIRST round only. Later rounds repeat the same rungs
+	// against the same state, so keeping them all would bury the answer in
+	// duplicates.
+	var notes []string
 	for round := 1; round <= raiseRounds; round++ {
 		for _, attempt := range raiseLadder() {
-			if !attempt.try(hwnd) {
-				continue
+			ok, why := attempt.try(hwnd)
+			if ok {
+				if round == 1 {
+					return attempt.name, ""
+				}
+				return fmt.Sprintf("%s (round %d, %s)", attempt.name, round, time.Since(start).Truncate(time.Millisecond)), ""
 			}
 			if round == 1 {
-				return attempt.name
+				notes = append(notes, attempt.name+": "+why)
 			}
-			return fmt.Sprintf("%s (round %d, %s)", attempt.name, round, time.Since(start).Truncate(time.Millisecond))
 		}
 		if round < raiseRounds {
 			time.Sleep(raiseRetryInterval)
 		}
 	}
-	return ""
+	return "", strings.Join(notes, "; ")
 }
 
 // RaiseWindowFor brings the terminal window hosting pid to the foreground and
@@ -318,6 +360,7 @@ func RaiseWindowFor(pid int) (string, error) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
+	entryForeground := currentForeground()
 	var firstErr error
 	for _, cand := range ancestorPIDs(uint32(pid)) {
 		hwnd := visibleTopLevelWindow(cand)
@@ -332,7 +375,8 @@ func RaiseWindowFor(pid int) (string, error) {
 		if iconic, _, _ := procIsIconic.Call(hwnd); iconic != 0 {
 			procShowWindow.Call(hwnd, swRestore)
 		}
-		if how := raiseWithSettle(hwnd); how != "" {
+		how, why := raiseWithSettle(hwnd)
+		if how != "" {
 			return how, nil
 		}
 		// Keep walking rather than giving up here. In practice the first
@@ -340,7 +384,11 @@ func RaiseWindowFor(pid int) (string, error) {
 		// makes that a finding rather than an assumption, and the failure is
 		// reported against the whole chain.
 		if firstErr == nil {
-			firstErr = fmt.Errorf("every rung refused for owner pid %d", cand)
+			// The foreground at ENTRY is recorded because it names who is
+			// refusing. Every previous round of this diagnosis was spent
+			// guessing at that from the outside.
+			firstErr = fmt.Errorf("owner pid %d, foreground on entry was %s — %s",
+				cand, describeWindow(entryForeground), why)
 		}
 	}
 	if firstErr != nil {
@@ -505,7 +553,7 @@ func visibleTopLevelWindow(pid uint32) uintptr {
 // The result is VERIFIED against the system rather than read from a return
 // value, and the attachments are undone before asking, so the answer describes
 // the state the user is left in.
-func forceForeground(hwnd uintptr) bool {
+func forceForeground(hwnd uintptr) (bool, string) {
 	self, _, _ := procGetCurrentThreadIdUser.Call()
 
 	fg, _, _ := procGetForegroundWindow.Call()
@@ -535,7 +583,17 @@ func forceForeground(hwnd uintptr) bool {
 	// a borrowed state that ends a microsecond later, not the one the user gets.
 	detachTarget()
 	detachFg()
-	return isForeground(hwnd)
+	if isForeground(hwnd) {
+		return true, ""
+	}
+	return false, fmt.Sprintf("refused with queues attached (fgThread=%d targetThread=%d)", fgThread, targetThread)
+}
+
+// currentForeground is GetForegroundWindow, named so the call sites read as
+// questions about state rather than as raw syscalls.
+func currentForeground() uintptr {
+	fg, _, _ := procGetForegroundWindow.Call()
+	return fg
 }
 
 // attachInput joins self to other's input queue and returns the undo, which is

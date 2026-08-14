@@ -123,7 +123,6 @@ func Remove(opts Options) ([]string, error) {
 	return removed, nil
 }
 
-
 // writeProtocolKey registers the quil:// (or quil-dev://) handler.
 //
 // The command is the ONLY thing a click can reach — see RunActivation for why

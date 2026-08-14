@@ -720,6 +720,11 @@ func syncPaneMeta(pane *PaneModel, info *PaneInfo, wideCanvas bool, minNativeCol
 	pane.GitDetached = info.GitDetached
 	pane.GitWorktree = info.GitWorktree
 	pane.GitWorktreeName = info.GitWorktreeName
+	// Unconditional like the rest: a pane whose worktree Quil no longer owns —
+	// a restore that could not confirm it, a daemon that dropped the record —
+	// must stop being offered for deletion, and the absent key is what says so.
+	pane.WorktreeOwned = info.WorktreeOwned
+	pane.WorktreePath = info.WorktreePath
 	pane.GitUpstream = info.GitUpstream
 	pane.GitAhead = info.GitAhead
 	pane.GitBehind = info.GitBehind

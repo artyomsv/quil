@@ -145,6 +145,14 @@ var (
 	dialogNormal = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("250"))
 
+	// dialogWarn marks the one thing in a dialog that destroys data — today,
+	// the close confirm's worktree row and the uncommitted-change count under
+	// it. 214 is the amber this codebase already reserves for "this needs your
+	// attention" (blockedTabStyle, sidebarBlockedStyle) rather than the red it
+	// uses for a failure, because an armed toggle is a choice, not an error.
+	dialogWarn = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("214"))
+
 	dialogKeyStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("63")).
 			Width(dialogKeyColWidth)
@@ -671,6 +679,7 @@ func (m Model) handleAboutKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			// MsgShutdown (see handleConfirmKey).
 			m.dialog = dialogConfirm
 			m.confirmKind = confirmKindShutdown
+			m.resetConfirmWorktrees()
 			m.confirmID = ""
 			m.confirmName = ""
 			m.dialogCursor = 0
@@ -822,7 +831,28 @@ func (m Model) handleShortcutsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
+	case " ", "space", "w":
+		// Both spellings, because Bubble Tea v2 reports the space key as
+		// "space" while a pasted or synthesised one can arrive as " " — the
+		// same pair the settings dialog matches.
+		//
+		// Toggles the "also delete the worktree" row. A no-op when the dialog
+		// offers none, so the other confirm kinds are unaffected — and space
+		// rather than a letter because it is what a checkbox answers to, with
+		// `w` as the discoverable alias the footer names.
+		//
+		// Deliberately NOT a second key that also confirms: arming and
+		// confirming must stay two separate keystrokes, or the toggle is no
+		// safer than a plain destructive default.
+		if len(m.confirmWorktrees) > 0 {
+			m.confirmRemoveWorktree = !m.confirmRemoveWorktree
+		}
+		return m, nil
 	case "esc", "n":
+		// Cleared on EVERY route out, including the branches below that return
+		// early to another dialog. These fields outlive the dialog, and an
+		// inherited arm is a deletion the next close never offered.
+		m.resetConfirmWorktrees()
 		// Return to appropriate dialog based on confirm kind
 		if m.confirmKind == "instance" {
 			m.dialog = dialogCreatePane
@@ -857,6 +887,10 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "enter", "y":
 		kind := m.confirmKind
 		id := m.confirmID
+		// Read BEFORE the reset below, like every other value this branch
+		// carries into its command.
+		removeWorktree := m.confirmRemoveWorktree
+		m.resetConfirmWorktrees()
 
 		// Stop-daemon requires explicit `y` — Enter is the universal
 		// select/commit key across every menu and toggle, so accepting it
@@ -1024,11 +1058,16 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			case "pane":
 				req, _ := ipc.NewMessage(ipc.MsgDestroyPane, ipc.DestroyPanePayload{
 					PaneID: id,
+					// The only field on this wire that deletes a directory. It
+					// is a bool: the daemon re-derives WHICH worktree from its
+					// own ownership record, so nothing here names a path.
+					RemoveWorktree: removeWorktree,
 				})
 				m.sendForDest(dest, req)
 			case "tab":
 				req, _ := ipc.NewMessage(ipc.MsgDestroyTab, ipc.DestroyTabPayload{
-					TabID: id,
+					TabID:          id,
+					RemoveWorktree: removeWorktree,
 				})
 				m.sendForDest(dest, req)
 			}
@@ -1485,13 +1524,138 @@ func (m Model) renderConfirmDialog() string {
 	default:
 		label := fmt.Sprintf("Close %s %q?", m.confirmKind, m.confirmName)
 		b.WriteString("  " + dialogNormal.Render(label))
+		if rows := m.renderConfirmWorktrees(); rows != "" {
+			b.WriteString("\n\n")
+			b.WriteString(rows)
+			// "space also delete worktree …" is 57 cells, 59 with the indent,
+			// against a 54-cell budget — lipgloss wraps rather than clips, so it
+			// stranded `Esc cancel` on a row the box never budgeted, stacked on
+			// top of the worktree list. dialogBoxChrome documents this exact
+			// hazard; this footer is the one that walked into it.
+			// "toggle" rather than "worktree": a footer lists key → ACTION, and
+			// there is exactly one checkbox on screen for it to refer to.
+			footer = "space toggle    Enter confirm    Esc cancel"
+		}
 	}
 	b.WriteString("\n\n")
 
-	b.WriteString("  " + dialogSubtle.Render(footer))
+	// Truncated like every other value-bearing row in this package's dialogs:
+	// the box pads but never clips, so a footer that outgrows the budget wraps
+	// and adds a row nothing accounted for.
+	b.WriteString("  " + dialogSubtle.Render(truncateToWidth(footer, dialogWidth-dialogBoxChrome-confirmRowIndent)))
 
 	return b.String()
 }
+
+// confirmRowIndent is the two-space gutter every confirm row is written with.
+// Counted against the width budget because it is part of the rendered line.
+const confirmRowIndent = 2
+
+// renderConfirmWorktrees draws the "also delete the worktree" checkbox and one
+// line per worktree, or "" when the close would delete none.
+//
+// Returning "" for the ordinary case is the point: every close that touches no
+// worktree renders exactly the dialog it always has, down to the footer.
+func (m Model) renderConfirmWorktrees() string {
+	if len(m.confirmWorktrees) == 0 {
+		return ""
+	}
+	box := "[ ]"
+	if m.confirmRemoveWorktree {
+		box = "[x]"
+	}
+	head := fmt.Sprintf("%s Also delete %s", box, pluralWorktrees(len(m.confirmWorktrees)))
+	style := dialogNormal
+	if m.confirmRemoveWorktree {
+		style = dialogWarn
+	}
+
+	var b strings.Builder
+	b.WriteString("  " + style.Render(head))
+	// CAPPED, because lipgloss pads but never clips and renderDialog's
+	// lipgloss.Place does not either: two lines per worktree grows the box past
+	// the terminal and pushes the footer — and the Enter it documents — off
+	// screen. The cap is a DISPLAY bound only; the header counts every worktree
+	// and the toggle still covers all of them.
+	shown := m.confirmWorktrees
+	if len(shown) > confirmWorktreeMaxRows {
+		shown = shown[:confirmWorktreeMaxRows]
+	}
+	for _, w := range shown {
+		b.WriteString("\n")
+		// The label is daemon-chosen text — a branch name, or a path when the
+		// pane's shell has drifted — so it is sanitized AND bounded at render,
+		// like every other value from a machine the user may not control.
+		// Bounding is a separate job from sanitizing: sanitizeRemoteText
+		// removes escapes without shortening anything.
+		//
+		// Elided in the MIDDLE, because the identifying half of a path is its
+		// TAIL: truncateCells cuts the end, so every worktree under one parent
+		// would render as the same `E:\Projects\…\quil-worktrees\…` prefix. The
+		// pane's own spawn-error line elides for exactly this reason.
+		b.WriteString("      " + dialogSubtle.Render(
+			elideMiddle(sanitizeRemoteText(w.label), confirmWorktreeLabelCap)))
+		b.WriteString("\n")
+		b.WriteString("      " + m.renderWorktreeChanges(w))
+	}
+	if rest := len(m.confirmWorktrees) - len(shown); rest > 0 {
+		b.WriteString("\n")
+		b.WriteString("      " + dialogSubtle.Render(fmt.Sprintf("…and %d more", rest)))
+	}
+	// Said once, under the list, because it is a property of the operation
+	// rather than of any one worktree — and said whether or not the check
+	// answered, since it is true either way. "everything else here" is deliberate
+	// and covers the case a count alone hides: ignored files, a .env among them,
+	// which exist in no branch and cannot be recovered from one.
+	//
+	// Separated by a BLANK line: butted against the last row it reads as that
+	// worktree's own status line rather than as a statement about the operation.
+	b.WriteString("\n\n")
+	b.WriteString("  " + dialogSubtle.Render("The branch is kept; everything else here goes."))
+	return b.String()
+}
+
+// confirmWorktreeMaxRows bounds the rendered list. A tab can legitimately hold
+// more worktree panes than a dialog has room for, and the box does not clip.
+const confirmWorktreeMaxRows = 6
+
+// renderWorktreeChanges is the one line that says what the removal would cost.
+//
+// Four states, all rendered apart, because collapsing any two of them tells the
+// user something that is not true: still checking, could not check, clean, and
+// a count. "Could not check" must never look like "clean" — clean is the one
+// answer that invites the toggle.
+func (m Model) renderWorktreeChanges(w confirmWorktree) string {
+	switch {
+	case !w.loaded:
+		return dialogSubtle.Render("checking for uncommitted work…")
+	case w.err != "":
+		return dialogWarn.Render("⚠ " + truncateCells(sanitizeRemoteText(w.err), confirmWorktreeLabelCap))
+	case w.changes == 0:
+		return dialogSubtle.Render("clean")
+	case w.changes == 1:
+		return dialogWarn.Render("⚠ 1 uncommitted or ignored file will be lost")
+	default:
+		// "or ignored" is not padding: the count includes ignored entries
+		// (gitworktree.Status), and those are the ones with no branch to
+		// recover them from. Saying only "uncommitted" would have the number
+		// describe something narrower than what the removal takes.
+		return dialogWarn.Render(fmt.Sprintf("⚠ %d uncommitted or ignored files will be lost", w.changes))
+	}
+}
+
+func pluralWorktrees(n int) string {
+	if n == 1 {
+		return "its worktree"
+	}
+	return fmt.Sprintf("%d worktrees", n)
+}
+
+// confirmWorktreeLabelCap bounds a branch name and a daemon-supplied error in
+// the dialog. The confirm box does not truncate on its own and lipgloss WRAPS,
+// so an unbounded value becomes many rendered lines — the same reason the
+// project form caps its message line.
+const confirmWorktreeLabelCap = 46
 
 func (m Model) renderGitRepoPickDialog() string {
 	var b strings.Builder
@@ -1683,6 +1847,7 @@ func (m Model) handleCreatePaneKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			idx := m.dialogCursor - 1
 			if idx < len(instances) {
 				m.confirmKind = "instance"
+				m.resetConfirmWorktrees()
 				m.confirmID = instances[idx].ID
 				m.confirmName = instances[idx].Name
 				m.dialog = dialogConfirm

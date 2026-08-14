@@ -27,7 +27,7 @@ Client-daemon model:
 - `internal/persist/` — Atomic workspace/buffer persistence (JSON snapshots, binary ghost buffers)
 - `internal/shellinit/` — Automatic OSC 7 + OSC 133 shell integration (embedded init scripts, `//go:embed`)
 - `internal/plugin/` — Pane plugin system (registry, built-ins, TOML loading, scraper)
-- `internal/gitworktree/` — git worktree listing + creation (the repository WRITES; kept apart from the read-only `gitinfo`, which a ticker runs)
+- `internal/gitworktree/` — git worktree listing, creation + removal, and the on-demand `git status` count the close dialog warns with (the repository WRITES; kept apart from the read-only `gitinfo`, which a ticker runs)
 - `internal/clipboard/` — Platform-native clipboard read/write (Win32 API, pbpaste/pbcopy, xclip/xsel)
 - `internal/notify/` — Windows desktop toasts + `quil://` click-to-route activation. Split so every file with logic is platform-neutral (URI codec, toast XML, variant selection) and the `//go:build windows` files hold syscalls only — CI is Linux, so anything behind that tag is never compiled by `dev.sh test`. Raw COM/WinRT interop (no CGo, no new dependency), following `internal/clipboard`'s `NewProc` idiom
 - `internal/tui/` — Bubble Tea model, tabs, panes, layout tree, styles, text selection, notification sidebar
@@ -131,7 +131,7 @@ package-specific moved to `.claude/rules/*.md`, each gated by a `paths:` glob so
 | `windows-pty.md` | `internal/pty/`, any `*_windows.go`, `tui/consolefix*.go` | ConPTY + bundled OpenConsole, console-mode restore, window geometry, spawn-size healing |
 | `plugins.md` | `internal/plugin/`, `gitdiscover/`, `kubediscover/`, `defaults/*.toml`, `tui/instances.go`, `overlay.go` | plugin schema + registry, instances, `discover`/`sessions` opt-ins, the shared overlay slot, lazygit/hunk/k9s/lazysql |
 | `auto-update.md` | `internal/update/`, `cmd/quil/update_apply.go`, `daemon/update.go`, `tui/update.go` | update check, staging, rename-aside swap + rollback |
-| `projects.md` | `daemon/project.go`, `daemon/gitcache.go`, `daemon/worktree*.go`, `internal/gitinfo/`, `internal/gitworktree/`, `tui/project*.go`, `tui/worktree_client.go`, `sidebar.go`, `router.go`, `dialdest.go`, `attention.go` | projects above tabs, multi-daemon routing, runtime connect/disconnect, the project form, sidebar layout, git subsystem, worktree creation |
+| `projects.md` | `daemon/project.go`, `daemon/gitcache.go`, `daemon/worktree*.go`, `internal/gitinfo/`, `internal/gitworktree/`, `tui/project*.go`, `tui/worktree_*.go`, `sidebar.go`, `router.go`, `dialdest.go`, `attention.go` | projects above tabs, multi-daemon routing, runtime connect/disconnect, the project form, sidebar layout, git subsystem, worktree creation + close-time removal |
 | `dev-environment.md` | *(always on)* | production-isolation rule — never touch the running production daemon |
 
 **Adding to this file?** Ask: *does this apply when I open a file in a different package?*

@@ -101,7 +101,7 @@ The active tab is prefixed with `* ` in the tab bar so it's visible even when [t
 | Key | Action |
 |---|---|
 | `Ctrl+N` | New typed pane (plugin picker dialog) |
-| `Ctrl+W` | Close active pane (with confirm) |
+| `Ctrl+W` | Close active pane (with confirm). If Quil created a worktree for the pane, the confirm offers to delete it too — `space` arms the row, and it is off every time the dialog opens. The branch is kept; uncommitted work in the worktree is not. |
 | `Alt+R` | Restart active pane's process in place (with confirm). The process is killed and respawned with the plugin's resume strategy, so AI panes (Claude Code, OpenCode) resume their recorded session. Use this when a pane shows the "Pane not accepting input" warning. |
 | `Alt+Shift+H` | Split side-by-side |
 | `Alt+Shift+V` | Split top/bottom |

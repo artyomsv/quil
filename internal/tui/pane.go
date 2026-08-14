@@ -86,11 +86,17 @@ type PaneModel struct {
 	// values actually observed rather than current ones.
 	// SpawnError explains why this pane has no process; empty when it has one.
 	// Rendered in the pane's own rectangle in place of VT content.
-	SpawnError         string
-	GitBranch          string
-	GitDetached        bool
-	GitWorktree        bool
-	GitWorktreeName    string
+	SpawnError      string
+	GitBranch       string
+	GitDetached     bool
+	GitWorktree     bool
+	GitWorktreeName string
+	// WorktreeOwned is daemon-authoritative: this pane's worktree was created
+	// by Quil, so the close dialog may offer to delete it. WorktreePath is the
+	// directory that was created — the close dialog prices THAT, never CWD,
+	// which drifts with every `cd` the shell makes. See PaneInfo.
+	WorktreeOwned      bool
+	WorktreePath       string
 	GitUpstream        bool
 	GitAhead           int
 	GitBehind          int

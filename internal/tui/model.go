@@ -141,6 +141,19 @@ type PaneInfo struct {
 	GitAhead        int
 	GitBehind       int
 	GitStale        bool
+	// WorktreeOwned marks a pane this daemon created a linked worktree for.
+	// GitWorktree beside it says only that the CWD is IN one, which a pane the
+	// user made by hand also satisfies — the close dialog offers deletion on
+	// this field alone, because the offer is a claim that the checkout is
+	// Quil's to remove.
+	WorktreeOwned bool
+	// WorktreePath is the directory git created for this pane, as the daemon
+	// recorded it at creation. The close dialog prices and names THIS, never
+	// CWD: CWD is rewritten by OSC 7 on every `cd`, so pricing it would show
+	// the user one worktree's dirty count while the daemon deleted another.
+	// Empty for a pane restored from a snapshot older than the field, which is
+	// what makes such a pane un-offerable on both sides.
+	WorktreePath string
 	// Model/ContextTokens are daemon-authoritative (extracted from hook event
 	// data at turn boundaries): the model id and context-window token count of
 	// the pane's last completed AI turn. Empty/zero for non-AI panes.
@@ -406,13 +419,23 @@ type Model struct {
 	confirmID          string                 // ID of pane/tab to delete
 	confirmName        string                 // display name for confirmation
 	confirmDetail      string                 // extra remote-sourced line (upgrade confirm); sanitized+bounded at render
-	upgradeQueue       []upgradePrompt        // hosts waiting to be ASKED about provisioning; see enqueueUpgradePrompt
-	devMode            bool                   // true when QUIL_HOME is set
-	pluginRegistry     *plugin.Registry       // plugin registry (shared with daemon)
-	lastWidth          int                    // last known window width (for persistence)
-	lastHeight         int                    // last known window height (for persistence)
-	createPaneStep     int                    // 0=category, 1=plugin, 2=instance form, 3=split direction
-	createPaneTarget   paneTarget             // where the pane goes: into this tab (Ctrl+N) or a new one (Ctrl+T)
+	// confirmWorktrees holds the worktrees this close would delete, empty for
+	// every close that would delete none — which is what keeps an ordinary
+	// close dialog byte-identical to what it has always been.
+	//
+	// confirmRemoveWorktree is the toggle and is ALWAYS false on open: the
+	// destructive half must be something the user reached for. All three are
+	// cleared by resetConfirmWorktrees on every route out of the dialog.
+	confirmWorktrees      []confirmWorktree
+	confirmRemoveWorktree bool
+	confirmWorktreeGen    string           // in-flight status request; "" = none
+	upgradeQueue          []upgradePrompt  // hosts waiting to be ASKED about provisioning; see enqueueUpgradePrompt
+	devMode               bool             // true when QUIL_HOME is set
+	pluginRegistry        *plugin.Registry // plugin registry (shared with daemon)
+	lastWidth             int              // last known window width (for persistence)
+	lastHeight            int              // last known window height (for persistence)
+	createPaneStep        int              // 0=category, 1=plugin, 2=instance form, 3=split direction
+	createPaneTarget      paneTarget       // where the pane goes: into this tab (Ctrl+N) or a new one (Ctrl+T)
 	// createPaneDest pins the destination the dialog was OPENED against.
 	//
 	// Resolving it at submit instead would read whichever project is active by
@@ -2238,6 +2261,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.applyWorktreeList(msg)
 		return m, m.listenForMessages()
 
+	case worktreeStatusMsg:
+		// Same rule: an IPC response arm that does not re-arm ends the loop.
+		m.applyWorktreeStatus(msg)
+		return m, m.listenForMessages()
+
+	case worktreeStatusTimeoutMsg:
+		// Local timer, so deliberately NO re-arm — the distinction
+		// worktreeTimeoutMsg below makes.
+		m.applyWorktreeStatusTimeout(msg)
+		return m, nil
+
 	case createPaneRespMsg:
 		// Same rule: an IPC response arm that returns a bare nil ends the
 		// listen loop for the session.
@@ -3037,6 +3071,14 @@ func (m Model) openClosePaneConfirm() (tea.Model, tea.Cmd) {
 			m.confirmKind = "pane"
 			m.confirmID = pane.ID
 			m.confirmName = paneDisplayName(pane)
+			// Re-collected on every open rather than carried, and the toggle is
+			// re-cleared: the previous dialog's answer describes a different
+			// pane, and an inherited arm is a deletion nobody was offered.
+			m.resetConfirmWorktrees()
+			m.confirmWorktrees = collectConfirmWorktrees([]*PaneModel{pane})
+			if cmd := m.requestWorktreeStatus(m.destOfPane(pane.ID)); cmd != nil {
+				return m, tea.Batch(tea.ClearScreen, cmd)
+			}
 		}
 	}
 	return m, tea.ClearScreen
@@ -3051,6 +3093,14 @@ func (m Model) openRestartPaneConfirm() (tea.Model, tea.Cmd) {
 			m.confirmKind = confirmKindRestartPane
 			m.confirmID = pane.ID
 			m.confirmName = paneDisplayName(pane)
+			// Cleared HERE as well as on every exit. The exits do cover it
+			// today — both terminal branches of handleConfirmKey reset — but
+			// that makes the invariant global, and "instance" already renders
+			// through renderConfirmDialog's default arm, so one future exit
+			// that skips the reset would paint worktree rows on a confirm that
+			// has nothing to do with worktrees. Clearing at each opener makes
+			// it local.
+			m.resetConfirmWorktrees()
 		}
 	}
 	return m, tea.ClearScreen
@@ -3151,6 +3201,13 @@ func (m Model) openCloseTabConfirm() (tea.Model, tea.Cmd) {
 		m.confirmKind = "tab"
 		m.confirmID = tab.ID
 		m.confirmName = tab.Name
+		// EVERY owned worktree in the tab, not the active pane's: a tab closes
+		// as a unit, and one toggle covers the set it takes with it.
+		m.resetConfirmWorktrees()
+		m.confirmWorktrees = collectConfirmWorktrees(tab.Leaves())
+		if cmd := m.requestWorktreeStatus(m.destOfTab(tab.ID)); cmd != nil {
+			return m, tea.Batch(tea.ClearScreen, cmd)
+		}
 	}
 	return m, tea.ClearScreen
 }
@@ -6010,6 +6067,14 @@ func (m Model) listenForMessages() tea.Cmd {
 			}
 			return worktreeListMsg{Resp: resp, Gen: msg.ID}
 
+		case ipc.MsgWorktreeStatusResp:
+			var resp ipc.WorktreeStatusRespPayload
+			if err := msg.DecodePayload(&resp); err != nil {
+				log.Printf("worktree status: decode: %v", err)
+				return listenContinueMsg{}
+			}
+			return worktreeStatusMsg{Resp: resp, Gen: msg.ID}
+
 		case ipc.MsgCreatePaneResp:
 			var resp ipc.CreatePaneRespPayload
 			if err := msg.DecodePayload(&resp); err != nil {
@@ -6242,6 +6307,12 @@ func parseWorkspaceState(raw map[string]any) WorkspaceStateMsg {
 				}
 				if s, ok := pm["git_worktree_name"].(string); ok {
 					pi.GitWorktreeName = s
+				}
+				if b, ok := pm["worktree_owned"].(bool); ok {
+					pi.WorktreeOwned = b
+				}
+				if s, ok := pm["worktree_path"].(string); ok {
+					pi.WorktreePath = s
 				}
 				if b, ok := pm["git_upstream"].(bool); ok {
 					pi.GitUpstream = b

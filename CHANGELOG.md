@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Closing a pane or tab can now delete the worktree Quil made for it.**
+  Worktrees are never removed automatically — that remains the right default —
+  but once a branch is merged the checkout sits on disk with no route to remove
+  it from inside Quil. The close confirm (`Ctrl+W` for a pane, `Alt+W` for a
+  tab) now carries an unticked `Also delete its worktree` row: `space` arms it,
+  and it is off every time the dialog opens, so the destructive half is always
+  something you reached for. Closing a tab lists every worktree it holds under
+  one toggle, since a tab closes as a unit.
+
+  Only a worktree **Quil created** is ever offered, and the offer names the
+  directory Quil created rather than wherever the pane's shell has since
+  wandered — `cd` a worktree pane into a sibling checkout and its own worktree
+  is still what the row describes. A pane you opened in a worktree you made by
+  hand is not Quil's to delete. While the dialog is open it
+  asks what each worktree holds and shows `clean` or
+  `⚠ 3 uncommitted or ignored files will be lost`, so the toggle is armed
+  against a number rather than a guess; if it cannot check, it says so instead
+  of reporting `clean`. **Ignored files are counted** — a `.env` or a `build/`
+  is exactly what a forced removal destroys with nothing to recover it from, so
+  a worktree holding one never reads as clean. All of that goes with the
+  directory — but **the branch is kept**, along with every commit on it, so
+  nothing you committed is lost and `git branch` still lists it. A worktree
+  that still holds a pane in another tab is left where it is.
+
 ## [1.58.0] - 2026-08-14
 
 ### Added

@@ -358,3 +358,33 @@ func TestWorktreeAdd_SuccessPutsThePaneInTheWorktree(t *testing.T) {
 		t.Error("the pane is not marked WorktreeOwned — restore could not tell a missing worktree from a stale cwd")
 	}
 }
+
+// The pane records WHERE its worktree was created, not just that it owns one.
+//
+// Ownership alone is not enough to delete safely later: Pane.CWD is a live
+// cursor that OSC 7 rewrites on every `cd`, so by close time it can name a
+// checkout this daemon never made. The recorded path is what the close-time
+// removal targets, and this is the one place it can be captured.
+func TestWorktreeAdd_RecordsTheWorktreePathOnThePane(t *testing.T) {
+	d := newTestDaemon(t)
+	tab := d.session.CreateTab("t")
+	repo := filepath.Join(t.TempDir(), "repo")
+	stubAdd(t, func(_ context.Context, _, path, _ string) error {
+		return os.MkdirAll(path, 0o755)
+	})
+
+	resp := d.worktreeAddAndCreate(worktreeCreate(tab.ID, repo, "feat/x"))
+	if resp.Error != "" {
+		t.Fatalf("create failed: %s", resp.Error)
+	}
+	pane := d.session.Pane(resp.PaneID)
+	if pane == nil {
+		t.Fatal("no pane")
+	}
+	if pane.WorktreePath == "" {
+		t.Fatal("the pane records no worktree path, so close-time removal has only the drifting CWD to go on")
+	}
+	if pane.WorktreePath != pane.CWD {
+		t.Errorf("WorktreePath = %q, want the spawn CWD %q", pane.WorktreePath, pane.CWD)
+	}
+}

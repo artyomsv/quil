@@ -103,7 +103,14 @@ func runNotifySetup(opts notify.Options) {
 // error, because the artifacts are written either way.
 func verifySetup(opts notify.Options) bool {
 	n, err := notify.New(opts)
-	if err != nil {
+	// n == nil is checked HERE and not left to the caller, even though the
+	// caller currently makes it unreachable: notify.Setup returns
+	// ErrUnsupported off Windows, so control never arrives. That is a guard
+	// living in a different function. The day Setup grows a macOS or Linux arm
+	// — still open under M17 — this would panic on a nil interface with no
+	// other change made and no test touching it. Its sibling in main.go did
+	// exactly that on every non-Windows session.
+	if err != nil || n == nil {
 		return false
 	}
 	defer n.Close()

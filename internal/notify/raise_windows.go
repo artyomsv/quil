@@ -91,6 +91,72 @@ func raiseLadder() []raiseAttempt {
 	}
 }
 
+const (
+	// raiseSettleWindow is how long the plain activation keeps being retried
+	// before the escalating rungs are tried. Sized to outlast a toast
+	// dismissal, not to be patient in general: this process exists only to
+	// deliver one click and exits immediately afterwards.
+	raiseSettleWindow = 1200 * time.Millisecond
+
+	// raiseRetryInterval spaces the retries. Short enough that a user who
+	// clicked cannot perceive the delay, long enough that a full window of
+	// them is a handful of calls rather than a spin.
+	raiseRetryInterval = 120 * time.Millisecond
+)
+
+// raiseWithSettle activates hwnd, RETRYING the plain call across the moment the
+// toast is going away, and escalating only if that whole window fails. It
+// returns the rung that worked, or "".
+//
+// The retry is the fix for a race, and the race was found by elimination rather
+// than by guessing. Every static explanation was tested and ruled out on the
+// reporting machine: the ladder targets the right window (one candidate, class
+// ConsoleWindowClass), the foreground lock was set to 0, the target and the
+// caller run at the same integrity level — and with all of that true, the very
+// same SetForegroundWindow call on the very same handle SUCCEEDS from an
+// ordinary background process at a calm moment, while ours was refused at click
+// time.
+//
+// What differs is only WHEN. Clicking a toast dismisses the notification UI,
+// and the shell restores the foreground to the application the user was in.
+// Our activation lands inside that transition and is immediately overridden,
+// and the verification a microsecond later measures the transition rather than
+// the outcome. Retrying past it lets the last word be ours.
+//
+// The plain rung is the one that repeats, because it is inert when refused. The
+// escalating rungs run once each at the end: attaching input queues and
+// SwitchToThisWindow are cheap but not free of side effects, and a technique
+// worth doing once is not automatically worth doing ten times.
+func raiseWithSettle(hwnd uintptr) string {
+	ladder := raiseLadder()
+	plain := ladder[0]
+
+	// The attempt count is reported, not just the rung. "worked on the first
+	// try" and "worked on the fifth" are different findings about the machine —
+	// the second confirms the transition this loop exists to outlast, and the
+	// first would mean the race theory is wrong and something else changed.
+	start := time.Now()
+	deadline := start.Add(raiseSettleWindow)
+	for n := 1; ; n++ {
+		if plain.try(hwnd) {
+			if n == 1 {
+				return plain.name
+			}
+			return fmt.Sprintf("%s (attempt %d, %s)", plain.name, n, time.Since(start).Truncate(time.Millisecond))
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(raiseRetryInterval)
+	}
+	for _, attempt := range ladder[1:] {
+		if attempt.try(hwnd) {
+			return attempt.name
+		}
+	}
+	return ""
+}
+
 // RaiseWindowFor brings the terminal window hosting pid to the foreground and
 // reports which rung of the ladder managed it.
 //
@@ -137,10 +203,8 @@ func RaiseWindowFor(pid int) (string, error) {
 		if iconic, _, _ := procIsIconic.Call(hwnd); iconic != 0 {
 			procShowWindow.Call(hwnd, swRestore)
 		}
-		for _, attempt := range raiseLadder() {
-			if attempt.try(hwnd) {
-				return attempt.name, nil
-			}
+		if how := raiseWithSettle(hwnd); how != "" {
+			return how, nil
 		}
 		// Keep walking rather than giving up here. In practice the first
 		// ancestor owning a titled window IS the terminal, but the walk is what

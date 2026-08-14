@@ -29,6 +29,7 @@ Client-daemon model:
 - `internal/plugin/` — Pane plugin system (registry, built-ins, TOML loading, scraper)
 - `internal/gitworktree/` — git worktree listing + creation (the repository WRITES; kept apart from the read-only `gitinfo`, which a ticker runs)
 - `internal/clipboard/` — Platform-native clipboard read/write (Win32 API, pbpaste/pbcopy, xclip/xsel)
+- `internal/notify/` — Windows desktop toasts + `quil://` click-to-route activation. Split so every file with logic is platform-neutral (URI codec, toast XML, variant selection) and the `//go:build windows` files hold syscalls only — CI is Linux, so anything behind that tag is never compiled by `dev.sh test`. Raw COM/WinRT interop (no CGo, no new dependency), following `internal/clipboard`'s `NewProc` idiom
 - `internal/tui/` — Bubble Tea model, tabs, panes, layout tree, styles, text selection, notification sidebar
 
 Deep package notes — `internal/transport/`, `internal/pty/`, `internal/ipc/`, `internal/claudehook/`,
@@ -41,7 +42,7 @@ packages, so they cost nothing on unrelated work.
 Go and make are NOT installed locally. Use `scripts/dev.sh` (Docker-based):
 
 ```bash
-./scripts/dev.sh build          # Build all variants: prod, dev, debug (6 binaries)
+./scripts/dev.sh build          # Build all variants: prod, dev, debug (6 binaries) + quil-activate.exe
 ./scripts/dev.sh test           # Run tests
 ./scripts/dev.sh test-race      # Tests with race detector (CGo — handled automatically)
 ./scripts/dev.sh vet            # Lint
@@ -68,6 +69,8 @@ There is deliberately no override flag, for the same reason `refuse_if_binaries_
 | **debug** | `quil-debug.exe` | `quild-debug.exe` | Debug logging, connects to production `~/.quil/`, finds `quild-debug` |
 
 Ldflags: `buildDevMode` (auto-sets `QUIL_HOME`), `buildLogLevel` (overrides config log level), `daemonBinary` (daemon binary name for `findDaemonBinary`). Dev variant is self-contained — just run `./quil-dev.exe`, no flags needed.
+
+**`quil-activate.exe` is a seventh binary and deliberately variant-agnostic** — one copy serves prod, dev and debug, because the two things it cannot derive (the URI scheme and `QUIL_HOME`) are written INTO the registry command by `quil notify setup`. It is linked `-H windowsgui`: Windows gives a console binary a console WINDOW for every toast click, which appears in front of the user, takes the foreground, and is destroyed when the handler exits — leaving focus on a window that no longer exists. `FreeConsole` is not sufficient, because the console is created during process startup before any Go code runs. `quil notify setup` registers this binary when it is present beside the quil binary and falls back to `quil activate` when it is absent, so an in-place upgrade cannot leave the registry naming a file that does not exist.
 
 Go module cache is persisted in a Docker volume (`quil-gomod`) for fast repeated builds.
 
@@ -232,5 +235,6 @@ Cached reference repos:
 | M12 | Done | Notification center — daemon event queue, per-pane mute, sidebar, 3 MCP tools |
 | M13 | Done | Memory reporting — 5s collector, per-pane Go-heap + PTY RSS, dialog + 2 MCP tools |
 | M14 | Done (v1.47.0) | Projects — grouping above tabs, sidebar with agent+git state, multi-daemon router, runtime host connect/disconnect. Deferred to their own plans: MCP project scoping, listening ports |
+| M17 | Partial | Desktop notifications — Windows toasts on the sidebar's attention states, `quil://` click-to-route via the windowless `quil-activate.exe`, `quil notify setup/status/test/--remove`, F1 → Settings toggle. Still open in M17: sound, macOS/Linux (no transport there carries a click back to a pane). **Raising the terminal window on click was built and REMOVED** — clicking a notification hands the foreground to the shell's notification host, which holds it (measured: 5.5 s for one click, >10 s for the next, released on user input rather than on a timer) and refuses every documented way of taking it back. Windows highlights the taskbar button instead. Do not rebuild this without new evidence: `SetForegroundWindow`, `AttachThreadInput` queue borrowing, `SwitchToThisWindow` and Chromium's F22 hotkey injection were each implemented and each verified refused |
 
 Full detail: `docs/roadmap.md` and `docs/roadmap/*.md`.

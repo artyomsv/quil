@@ -314,6 +314,30 @@ func settingsFields() []settingsField {
 			},
 		},
 		{
+			// Reports STATE, not the flag. With Enabled defaulting true,
+			// enabled-but-unregistered is the default on a fresh Windows
+			// install — a bare "on" there would claim toasts are working when
+			// no toast can be displayed at all. Same rule the Sidebar width
+			// setter states: never show a value the system is not using.
+			//
+			// The row deliberately does NOT perform registration. Writing a
+			// Start Menu shortcut and an HKCU key as a side effect of a config
+			// toggle is exactly the auto-register behaviour this design
+			// rejected; it names the command instead.
+			//
+			// Applies LIVE, unlike most rows here: raiseAttentionToast reads
+			// m.cfg.Notification.Desktop on every edge, so there is no apply
+			// step. An on/off switch that did nothing until relaunch would read
+			// as a broken dialog — the same reason Sidebar width is live.
+			label: "Desktop notifications",
+			get:   func(m *Model) string { return m.desktopState().label() },
+			set: func(m *Model, _ string) {
+				m.cfg.Notification.Desktop.Enabled = !m.cfg.Notification.Desktop.Enabled
+				m.configChanged = true
+			},
+			isBool: true,
+		},
+		{
 			label: "Max live overlays",
 			get:   func(m *Model) string { return strconv.Itoa(m.cfg.Overlay.MaxLive) },
 			set: func(m *Model, v string) {

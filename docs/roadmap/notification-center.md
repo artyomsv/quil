@@ -379,6 +379,23 @@ AI: [reads test output, fixes the code, reruns tests]
 - Multiple `watch_notifications` calls can be active simultaneously (different panes)
 - When the MCP bridge disconnects, all its watchers are automatically cleaned up
 
+## Follow-on: desktop notifications (2026-08-13)
+
+This PRD's scope was always the in-app centre, and it remains Done as such. The
+gap it left is that nothing ever reached the user when Quil was not on screen —
+the daemon even *consumes* the terminal bell, turning `\x07` into an in-app
+event that nothing re-emits.
+
+Desktop toasts close that gap for Windows, and deliberately do **not** reuse
+this feature's event stream. They fire on the project sidebar's attention
+states (parked ▲ / finished ✓) rather than on the notification queue, because
+that queue carries every event kind at every severity — it is a log, and a log
+is the wrong input for an alert. Clicking a toast routes to the exact pane via
+a registered `quil://` handler.
+
+See [`docs/superpowers/specs/2026-08-13-desktop-notifications-design.md`](../superpowers/specs/2026-08-13-desktop-notifications-design.md)
+and [Features → Desktop notifications](../features.md#desktop-notifications).
+
 ## Implementation Outcome
 
 Implemented in v0.12.0. Key differences from the original PRD:

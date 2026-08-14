@@ -64,6 +64,12 @@ max_events = 200                # ring-buffer cap (per daemon, both sidebar and 
 claude = "default"              # "default" | "verbose" | "off"
 opencode = "default"            # same
 
+[notification.desktop]
+enabled = true                  # OS toasts; Windows only, needs `quil notify setup`
+blocked = true                  # toast when a pane parks waiting on you
+done = true                     # toast when a turn finishes while you are away
+cooldown = "5s"                 # per-pane floor against a runaway loop
+
 [overlay]
 idle_timeout_minutes = 5        # destroy a hidden lazygit overlay after this long; 0 disables
 max_live = 5                    # cap live overlays across all tabs; 0 disables
@@ -183,6 +189,36 @@ Hook-driven notifications surface structured events from Claude Code and OpenCod
 | `opencode` | string | `"default"` | Tier for OpenCode panes. `"default"` forwards session.idle/error/compacted, session.status retry only, file.edited batched 1 s, permission.ask, experimental.session.compacting. `"verbose"` adds tool.execute.before/after. `"off"` disables hook event forwarding. |
 
 The hook events flow through a JSONL spool (`~/.quil/events/<paneID>.jsonl`) that the daemon polls every 200 ms. Truncated on daemon start (no replay of stale events); deleted on pane destroy.
+
+### `[notification.desktop]`
+
+Operating-system toasts raised from the same attention states the project sidebar marks. **Windows only** — macOS and Linux have no transport that supports click-to-route, so nothing is faked there and the Settings row reads `unsupported`.
+
+| Key | Type | Default | What it does |
+|---|---|---|---|
+| `enabled` | bool | `true` | Master switch. Defaults **on**, and that does not make registration implicit: a toast still needs the Start Menu shortcut and `quil://` handler that `quil notify setup` writes. The flag says "I want these"; setup is the gate. |
+| `blocked` | bool | `true` | Toast when a pane parks waiting on you — the ▲ state in the project sidebar. |
+| `done` | bool | `true` | Toast when a turn finishes while you were away — the ✓ state. Never fires for the pane you are looking at. |
+| `cooldown` | duration | `"5s"` | Per-pane floor against a runaway agent, NOT a batching window. Duplicates are already prevented three other ways — a toast fires only on a state change, a pane showing a toast cannot get a second, and the pane on screen never toasts — so a long cooldown only suppresses genuinely new events you have already dealt with. A malformed or non-positive value falls back to the default rather than disabling the limit. |
+
+**When a toast fires:** whenever the pane needing attention is one you are *not* looking at. The only pane that never toasts is the active pane of the active tab of the active project while the terminal has focus. Another tab, another project, or another application all qualify — which is the point, since Quil exists to run agents in workspaces you are not currently watching.
+
+There is no `require_blur` key. An earlier build had one gating toasts on the whole terminal being unfocused; it made the feature silent for exactly its main case, and because `config.Save` writes the whole struct it persisted to disk where it disabled toasts with no error and no log. If your `config.toml` still carries the line it is now ignored and can be deleted.
+
+Also editable at **F1 → Settings** ("Desktop notifications"), which applies immediately — no restart. That row reports registration *state* rather than the flag, so it reads `on (run notify setup)` on a machine where the flag is on but nothing is registered.
+
+**Setup is explicit and reversible.** `quil notify setup` writes exactly two things, both user-scope with no admin rights, and prints them:
+
+- `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Quil.lnk` — carries the AppUserModelID Windows requires before it will display a toast from an unpackaged executable, and supplies the toast's name and icon.
+- `HKCU\Software\Classes\quil` — the `quil://` protocol handler that makes a toast clickable.
+
+`quil notify setup --remove` deletes both. `quil notify status` reports what is registered and what the config says; `quil notify test` sends one self-labelled canary toast.
+
+Dev builds use a separate namespace throughout (`quil-dev://`, AUMID `artyomsv.quil.dev`, `Quil (dev).lnk`) so a dev instance can never overwrite a production registration — these artifacts live outside `QUIL_HOME` and are the one thing dev isolation does not get for free.
+
+`quil notify setup` displays a verification toast and reports whether it actually appeared, so success is observed rather than assumed.
+
+**Clicking a toast can only move your cursor.** The `quil://` handler parses the URI, validates the pane id, and writes it to a per-PID named pipe that the running TUI reads — there is deliberately no path from a registered URI to spawning a pane, sending input, or running a command, because a registered scheme is invokable by any local process. Inline toast action buttons are refused for that reason rather than merely deferred.
 
 ## `[overlay]`
 

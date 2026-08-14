@@ -6,3 +6,4 @@
 - [quil CHANGELOG.md is CI-gated, not auto-generated](quil-changelog-ci-gate.md) — any PR touching non-test cmd/ or internal/ .go files must also touch CHANGELOG.md or ci.yml's changelog job fails; ignore generic claims that it's fully auto-generated.
 - [quil techdebt convention confirmed](quil-techdebt-convention.md) — no /techdebt-add command, no techdebt/README.md → flat file convention under techdebt/ applies (one pty/ subfolder precedent).
 - [gofmt/CRLF check methodology](gofmt-crlf-methodology.md) — worktree is CRLF so raw `gofmt -l` flags everything; strip \r, diff parent vs. new, only flag NEW drift. model.go's PaneInfo/Model structs are the recurring drift site.
+- [notify-feature-blocking-com-calls.md](notify-feature-blocking-com-calls.md) — internal/notify had unbounded COM calls on the Update goroutine; RESOLVED via bounded enqueue + SyncNotifier

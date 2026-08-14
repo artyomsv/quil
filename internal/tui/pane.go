@@ -37,8 +37,8 @@ var (
 	// spawnErrorStyle marks a pane that has no process and is not getting one.
 	// Red rather than the restore palette's dim grey: this is a terminal state
 	// the user has to act on, not a step in progress.
-	spawnErrorStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Bold(true)
-	restoreDoneStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("28"))
+	spawnErrorStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Bold(true)
+	restoreDoneStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("28"))
 )
 
 // Restore-indicator timing: the spinner shows for at least restoreMinDisplay
@@ -114,6 +114,11 @@ type PaneModel struct {
 	workFrame          int            // shared spinner frame index, mirrored here for top-border render
 	blockedSince       time.Time      // set when the agent parks waiting on the user — workPark always, workNotify unless the producer marked the event as Claude's idle nudge AND the turn is already over; zero when not blocked. Cleared on workStart/workAbort/workStop/workStopFinal (a completed turn is by definition not blocked) — focus does NOT clear it (see ackFocusedPane); paneRow suppresses the glyph for the focused pane instead
 	blockedReason      string         // optional tool name from the hook's Data["tool"]; genuinely absent for Notification/permission.ask, so left empty rather than invented
+	// lastToastAt rate-limits desktop notifications for this pane. Per pane and
+	// SHARED by both event kinds, matching the daemon's own per-pane bell
+	// cooldown (Pane.LastBellEventAt): a pane that blocks and then completes
+	// five seconds later is one event to a human, not two.
+	lastToastAt time.Time
 
 	// Mouse-tracking state, updated by the VT EnableMode/DisableMode callbacks
 	// during AppendOutput (same goroutine as Update/View, like cursorVisible —

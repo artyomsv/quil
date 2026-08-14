@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/BurntSushi/toml"
 )
@@ -112,6 +113,72 @@ type NotificationConfig struct {
 	SidebarWidth int                     `toml:"sidebar_width"` // default 30
 	MaxEvents    int                     `toml:"max_events"`    // default 200
 	Hooks        HookNotificationsConfig `toml:"hooks"`
+	Desktop      DesktopConfig           `toml:"desktop"`
+}
+
+// DesktopConfig controls operating-system toasts raised from the project
+// sidebar's attention model.
+//
+// Enabled defaults TRUE, and that does not make registration implicit: Windows
+// toasts need a Start Menu shortcut and an HKCU class key, both outside
+// QUIL_HOME, and nothing writes them as a side effect of a config flag. The
+// flag says "I want these"; `quil notify setup` is still the gate.
+//
+// The consequence is that enabled-but-unregistered is the DEFAULT state on a
+// fresh Windows install rather than an edge case, which is why the Settings
+// row reports registration state instead of this bool.
+type DesktopConfig struct {
+	Enabled bool `toml:"enabled"`
+	Blocked bool `toml:"blocked"` // a pane parked waiting on the user
+	Done    bool `toml:"done"`    // a turn finished while the user was away
+
+	// Cooldown is per PANE and shared by both kinds — a floor against a
+	// pathological loop, NOT a batching window.
+	//
+	// It was 30 s and that was wrong. Three mechanisms already prevent
+	// duplicates: a toast only fires on a state CHANGE, a pane that already has
+	// a toast showing cannot get a second one, and the pane you are looking at
+	// never toasts at all. So the only thing a long cooldown suppresses is a
+	// genuinely new event after you have already dealt with the previous one.
+	//
+	// Measured in real use: four completed turns 12-23 s apart produced one
+	// toast, because every later turn landed inside the window. That reads as
+	// the feature being unreliable, which is worse than the duplication it was
+	// guarding against.
+	Cooldown string `toml:"cooldown"`
+
+	// There is deliberately NO require_blur key.
+	//
+	// An earlier version had one, gating toasts on the whole terminal being
+	// unfocused. It was removed rather than re-defaulted because it was a
+	// silent footgun: config.Save writes the entire struct, so anyone who ran
+	// that build has `require_blur = true` on disk, and Load would keep
+	// honouring it — disabling the feature completely with no error, no log
+	// and no clue. A key whose wrong value is invisible is worse than no key.
+	//
+	// Its original purpose is also gone. It existed as a fallback for
+	// terminals with no focus reporting (DEC 1004), where termFocused would
+	// stay true forever and suppress everything. Under the per-pane rule that
+	// case is already fine: only the pane you are actually looking at is
+	// suppressed, so such a terminal still toasts for every other pane.
+	//
+	// BurntSushi/toml ignores unknown keys, so a config carrying the old line
+	// loads cleanly and the value simply stops meaning anything.
+}
+
+// DefaultDesktopCooldown is deliberately SHORT: it exists only to stop a
+// runaway agent from storming, not to batch notifications. See Cooldown.
+const DefaultDesktopCooldown = 5 * time.Second
+
+// CooldownDuration parses Cooldown, falling back to the default for an empty,
+// malformed or non-positive value. A garbage value must not disable the rate
+// limit — that would turn a typo into a toast storm.
+func (d DesktopConfig) CooldownDuration() time.Duration {
+	v, err := time.ParseDuration(d.Cooldown)
+	if err != nil || v <= 0 {
+		return DefaultDesktopCooldown
+	}
+	return v
 }
 
 // OverlayConfig bounds how long an overlay pane (the Alt+G lazygit pane) may
@@ -341,6 +408,12 @@ func Default() Config {
 		Notification: NotificationConfig{
 			SidebarWidth: 30,
 			MaxEvents:    200,
+			Desktop: DesktopConfig{
+				Enabled:  true,
+				Blocked:  true,
+				Done:     true,
+				Cooldown: "5s",
+			},
 			Hooks: HookNotificationsConfig{
 				Claude:   "default",
 				OpenCode: "default",

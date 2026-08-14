@@ -33,6 +33,7 @@ A capability-by-capability tour of what Quil does. For configuration knobs, see 
   - [lazysql integration](#lazysql-integration)
 - [Observability](#observability)
   - [Notification center](#notification-center)
+  - [Desktop notifications](#desktop-notifications)
   - [Memory reporting](#memory-reporting)
   - [Leveled logger + log viewer](#leveled-logger--log-viewer)
 - [Pane notes](#pane-notes)
@@ -361,6 +362,42 @@ Tier values (per source — Claude and OpenCode are configured independently):
 | Mute / unmute active pane | `Alt+M` |
 
 External AI agents can subscribe via MCP — `get_notifications` (non-blocking), `watch_notifications` (blocking, up to 5 min) and `dismiss_notifications` (ack from agent side) replace polling. See [MCP](mcp.md#event-observation).
+
+### Desktop notifications
+
+**Windows only.** The sidebar above is a log; this is the alert. When an agent needs you and you are in another window, Windows raises a toast — and clicking it puts Quil on that exact pane.
+
+It fires on the same two states the project sidebar already marks, and no others:
+
+| State | Sidebar | Toast |
+|---|---|---|
+| Parked waiting on you | `▲` | "▲ Waiting for your input", with the tool name when the hook reported one |
+| Turn finished while you were away | `✓` | "✓ Turn finished" |
+| Turn in progress | `◐` | — (noise) |
+| Attention pinned by hand | `◆` | — (you set it while looking at the screen) |
+
+Behaviour worth knowing:
+
+- **Only for a pane you are not looking at.** Another tab, another project, or another application all count. The single pane that never toasts is the one on screen — the active pane of the active tab of the active project while the terminal has focus. That is the same test the sidebar uses to decide whether a finished turn counts as unseen, so the two never disagree.
+- **One toast per pane**, with a short per-pane floor (5 s) against a runaway agent. Six agents finishing at once give six independently clickable toasts, not a storm of duplicates; Windows collapses the overflow into Action Center on its own.
+- **Clicking routes precisely** — project, tab and pane, the same jump `Alt+Shift+A` performs.
+- **Answering withdraws the toast.** Typing your answer clears it from Action Center, so the surface never keeps claiming attention you already gave. That covers approving a Bash/Edit/Write prompt, which fires no hook at all.
+- **Muted panes stay muted.** `Alt+M` suppresses toasts as well as sidebar rows.
+
+Setup is explicit and reversible — nothing is written as a side effect of enabling the config flag:
+
+```bash
+quil notify setup           # writes a Start Menu shortcut + a quil:// handler, and prints both
+quil notify status          # what is registered, and what the config says
+quil notify test            # send one self-labelled canary toast
+quil notify setup --remove  # a true inverse
+```
+
+Toggle it live at **F1 → Settings → Desktop notifications**, or via [`[notification.desktop]`](configuration.md#notificationdesktop). The Settings row reports registration *state* rather than the flag — it reads `on (run notify setup)` when the flag is on but nothing is registered, which is the default on a fresh install.
+
+`quil notify setup` shows a verification toast and reports whether it actually appeared, so you find out immediately rather than the next time an agent blocks.
+
+Clicking a toast can only move your cursor. The `quil://` handler validates a pane id and forwards it to the running TUI over a per-PID named pipe — there is deliberately no path from a registered URI to spawning a pane, sending input, or running a command, since a registered scheme is invokable by any local process. Inline toast buttons ("Approve" / "Deny") are refused on that basis rather than merely deferred.
 
 ### Memory reporting
 

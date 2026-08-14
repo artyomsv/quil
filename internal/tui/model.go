@@ -27,6 +27,7 @@ import (
 	"github.com/artyomsv/quil/internal/kubediscover"
 	"github.com/artyomsv/quil/internal/logger"
 	"github.com/artyomsv/quil/internal/memreport"
+	"github.com/artyomsv/quil/internal/notify"
 	"github.com/artyomsv/quil/internal/plugin"
 )
 
@@ -565,18 +566,64 @@ type Model struct {
 	// m.dialog is the sole open/closed authority). See projectpicker.go.
 	projectPick projectPickState
 
-	tomlEditor       *TextEditor         // active TOML editor (nil when not editing)
-	selection        *Selection          // active text selection (nil when none)
-	mouseDown        bool                // true while left mouse button is held
-	mouseStartX      int                 // screen X of mouse press
-	mouseStartY      int                 // screen Y of mouse press
-	configChanged    bool                // true when config needs saving on exit
-	disclaimerTipIdx int                 // random tip index for disclaimer dialog
-	mcpHighlights    map[string]bool     // pane IDs with active MCP highlight
-	mcpHighlightSeq  map[string]int      // sequence number for highlight timer reset
-	notifications    *NotificationCenter // notification sidebar
-	paneHistory      []PaneRef           // navigation history (bounded, 20 max)
-	sidebarFocused   bool                // true when notification sidebar has keyboard focus
+	tomlEditor       *TextEditor // active TOML editor (nil when not editing)
+	selection        *Selection  // active text selection (nil when none)
+	mouseDown        bool        // true while left mouse button is held
+	mouseStartX      int         // screen X of mouse press
+	mouseStartY      int         // screen Y of mouse press
+	configChanged    bool        // true when config needs saving on exit
+	disclaimerTipIdx int         // random tip index for disclaimer dialog
+
+	// termFocused tracks whether the terminal window has focus, from
+	// tea.FocusMsg/BlurMsg (DEC 1004).
+	//
+	// Initialised TRUE. A terminal that does not implement focus reporting
+	// sends neither message, so this keeps its initial value for the life of
+	// the process — and the two possible defaults fail in opposite directions.
+	// True means desktop toasts silently never fire there; false means they
+	// fire constantly while the user is looking straight at the screen.
+	// Quiet-and-diagnosable beats loud-and-wrong, so this starts true and
+	// focusEverReported exists to explain the silence.
+	termFocused bool
+
+	// focusEverReported records that at least one focus event arrived, i.e.
+	// that the terminal really does implement DEC 1004. Without it, "no toasts
+	// ever appear" has no distinguishable cause.
+	focusEverReported bool
+
+	// notifier raises desktop toasts. Nil on every platform but Windows, and
+	// nil on Windows until the user has run `quil notify setup` — so every
+	// call site is a single nil check rather than a platform branch.
+	//
+	// notifyOpts is stored rather than re-derived from m.devMode: that field is
+	// QUIL_HOME != "", which is also true for a PROD binary run against a
+	// custom QUIL_HOME, and would then read the dev AUMID that `quil notify
+	// setup` never wrote. The variant is a property of the BUILD, resolved by
+	// cmd/quil and passed in.
+	//
+	// There is deliberately NO cached DesktopConfig here. raiseAttentionToast
+	// reads m.cfg.Notification.Desktop directly — the same field the Settings
+	// row's setter writes — so the toggle applies live by construction rather
+	// than by remembering to sync two copies. Two copies of one value with
+	// independent writers is the shape behind both the applyBrowseDir
+	// staleness bug and the PinnedAttention local-write bug.
+	notifier   desktopNotifier
+	notifyOpts notify.Options
+	notifyPID  int
+
+	// outstandingToasts maps a pane id to the KIND of live toast it has.
+	// The kind is load-bearing, not bookkeeping — see toastKind.
+	outstandingToasts map[string]toastKind
+
+	// lastFocusedPaneID is the previous value of focusedPaneID(), so Update can
+	// notice the user moved away from a pane without walking the workspace.
+	lastFocusedPaneID string
+
+	mcpHighlights   map[string]bool     // pane IDs with active MCP highlight
+	mcpHighlightSeq map[string]int      // sequence number for highlight timer reset
+	notifications   *NotificationCenter // notification sidebar
+	paneHistory     []PaneRef           // navigation history (bounded, 20 max)
+	sidebarFocused  bool                // true when notification sidebar has keyboard focus
 	// sidebarOpen/sidebarWidth control the PROJECT sidebar (internal/tui/sidebar.go)
 	// — not to be confused with the notification sidebar above. Unlike that one
 	// (a compositor overlay, zero layout width), the project sidebar is a real
@@ -787,10 +834,13 @@ func (m *Model) SetRecentCWDs(list []string) { m.recentCWDs = list }
 // frozen at startup.
 func NewModel(client Client, cfg config.Config, version string, registry *plugin.Registry, stalePlugins []plugin.StalePlugin) Model {
 	m := Model{
-		client:           client,
-		cfg:              cfg,
-		version:          version,
-		devMode:          os.Getenv("QUIL_HOME") != "",
+		client:  client,
+		cfg:     cfg,
+		version: version,
+		devMode: os.Getenv("QUIL_HOME") != "",
+		// See the field comment: a terminal with no focus reporting never
+		// corrects this, and assuming focused is the quiet failure.
+		termFocused:      true,
 		pluginRegistry:   registry,
 		instanceStore:    LoadInstances(config.InstancesPath()),
 		recentCWDs:       LoadRecentCWDs(config.RecentCWDsPath("")),
@@ -905,6 +955,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Acknowledge the focused pane of the active tab before processing the
 	// message — focusing is the acknowledgement; see ackFocusedPane.
 	m.ackFocusedPane()
+	// Beside ackFocusedPane deliberately: this is the one point every message
+	// passes through, and the sweep's own emptiness check makes it free in the
+	// common case. It must not be an edge hook — see sweepOutstandingToasts.
+	m.sweepOutstandingToasts()
+	// Moving away from a pane is a trigger, exactly like leaving the app: a
+	// pane that parked while you were looking at it was correctly suppressed,
+	// and switching tab or project is the moment it becomes something you
+	// cannot see. Keyed on the focused pane CHANGING so this costs one string
+	// compare per message rather than a workspace walk.
+	if cur := m.focusedPaneID(); cur != m.lastFocusedPaneID {
+		m.lastFocusedPaneID = cur
+		m.raiseDeferredToasts()
+	}
 	// A context menu whose target vanished (daemon reconciliation, pane
 	// destroy, MsgDestroyProject from another client) closes itself. Single
 	// choke point — no need to audit every pruning path.
@@ -951,6 +1014,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 	switch msg := msg.(type) {
+	case ActivatePaneMsg:
+		// Validated a third time. The value has already passed
+		// ParseActivateURI and the pipe listener, but this is the boundary that
+		// actually moves the user's focus, and jumpToPane is reached from five
+		// other callers that owe it nothing.
+		if !notify.ValidPaneID(msg.PaneID) {
+			return m, nil
+		}
+		_, cmd := m.jumpToPane(msg.PaneID)
+		return m, cmd
+
+	case tea.FocusMsg:
+		// DEC 1004. Arriving at all is the proof that this terminal reports
+		// focus — see the focusEverReported field comment.
+		m.termFocused = true
+		m.focusEverReported = true
+		return m, nil
+
+	case tea.BlurMsg:
+		m.termFocused = false
+		m.focusEverReported = true
+		// Leaving is itself the trigger. An agent that parked or finished while
+		// you were watching produced a rising edge that was correctly
+		// suppressed — without this, walking away never surfaces it.
+		m.raiseDeferredToasts()
+		return m, nil
+
 	case tea.WindowSizeMsg:
 		// Poll echo: size matches both the applied and any pending value —
 		// nothing to do. Keeps the 1s size poll free when idle.
@@ -3489,6 +3579,11 @@ func (m Model) View() tea.View {
 
 	v := tea.NewView(content)
 	v.AltScreen = true
+	// Desktop toasts suppress only for the pane the user is DEMONSTRABLY watching
+	// — which needs window focus as well as on-screen position — and this is the
+	// only thing that makes window focus knowable. Harmless where unsupported: the
+	// terminal ignores the sequence and simply never reports.
+	v.ReportFocus = true
 	v.MouseMode = tea.MouseModeCellMotion
 	if m.ctxMenu.open() {
 		// Cell-motion only reports motion while a button is held, so the

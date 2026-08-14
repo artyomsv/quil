@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Desktop notifications on Windows.** When an agent parks waiting on you, or
+  finishes a turn while you were away, Windows raises a toast naming the
+  project, tab and pane — and clicking it switches Quil to that exact pane and
+  focuses it, so switching to the terminal lands you where the toast was sending
+  you. (The terminal window is not raised for you: Windows does not let an
+  application take the foreground from a notification click, and highlights the
+  taskbar button instead.) It fires on the same two
+  states the project sidebar already marks (▲ and ✓) and no others, only while
+  you are not looking at that pane — another tab, another project or another
+  application all count. Six agents finishing together give six separately
+  clickable toasts rather than a storm. Answering a prompt withdraws its toast,
+  so Action Center never goes on claiming attention you have already given.
+
+  Registration is explicit and reversible: `quil notify setup` writes a Start
+  Menu shortcut and a `quil://` handler, prints exactly what it wrote, and
+  `quil notify setup --remove` undoes both. Nothing is written as a side effect
+  of a config flag. `quil notify status` reports where you stand and
+  `quil notify test` sends one labelled canary. Toggle it live at F1 → Settings
+  or under `[notification.desktop]`; the Settings row reports whether
+  registration is actually in place rather than echoing the flag.
+
+  Clicking a toast can only move your cursor — the handler validates a pane id
+  and forwards it over a per-PID named pipe, with no path to spawning a pane,
+  sending input or running a command. Windows only: no transport on macOS or
+  Linux can carry a click back to a specific pane.
+
+### Fixed
+- **A turn that finished while Quil was behind another window no longer counts
+  as seen.** Whether you saw a completed turn was decided from the pane's
+  position on screen alone, so a pane you left on screen when you switched to
+  your browser was treated as watched — it kept no unseen mark, and the desktop
+  toast that fires when that mark is set never fired either. Asking an agent
+  something and switching away, the commonest sequence there is, was exactly the
+  case that produced nothing. Being seen now requires the window to have focus
+  as well, and returning to it still acknowledges the pane you land on.
+- **A pane raised from outside the pane area now takes focus properly.** Jumping
+  to a pane set it as active for keyboard input but never set its focus flag, so
+  it arrived with no cursor drawn and the pane you came from still wearing the
+  focused border — it looked like you had to click the pane to "really" get
+  there. Affected every jump that crosses tabs: MCP `set_active_pane`, clicking
+  a notification in the sidebar, pane-history back-navigation, and clicking a
+  desktop toast.
+
 ## [1.55.2] - 2026-08-14
 
 ### Changed

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.56.0] - 2026-08-14
+
 ### Added
 - **Desktop notifications on Windows.** When an agent parks waiting on you, or
   finishes a turn while you were away, Windows raises a toast naming the

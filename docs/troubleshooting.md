@@ -16,6 +16,7 @@ When things go sideways, this is the first place to look.
 - [Pane shows ghost (dimmed border) and never goes live](#pane-shows-ghost-dimmed-border-and-never-goes-live)
 - [Claude Code session doesn't resume](#claude-code-session-doesnt-resume)
 - [No desktop notifications (Windows)](#no-desktop-notifications-windows)
+- [Clicking a toast switches panes but does not bring the window forward](#clicking-a-toast-switches-panes-but-does-not-bring-the-window-forward)
 - [Log files — where to look](#log-files--where-to-look)
 - [Enable debug logging](#enable-debug-logging)
 - [Force-stop the daemon](#force-stop-the-daemon)
@@ -223,6 +224,28 @@ quil notify setup
 
 **8. Check the Settings row.** `F1 → Settings → Desktop notifications` reports state, not the flag: `on` means registered and working, `on (run notify setup)` means the flag is on but nothing is registered, `unsupported` means you are not on Windows.
 
+## Clicking a toast switches panes but does not bring the window forward
+
+This is Windows working as designed, and on a default install it is what you
+should expect.
+
+Windows refuses to let an application take focus for a period after you interact
+with a *different* one — the foreground lock, `ForegroundLockTimeout`, which
+defaults to **200000 ms (3m20s)**. A toast fires exactly when you are working
+somewhere else, so that window is always open, and every documented way of
+asking is refused. `quil notify status` prints the value in force on your
+machine.
+
+The routing half is unaffected: clicking the toast still moves Quil to the right
+project, tab and pane, and focuses that pane. You alt-tab to the terminal and
+you are already where you needed to be.
+
+If you would rather Windows allowed it, set
+`HKCU\Control Panel\Desktop\ForegroundLockTimeout` to `0` and sign out and back
+in. That is a **system-wide** change affecting every application, which is why
+Quil reports the setting and never writes it — `quil notify setup` deliberately
+writes nothing you did not ask for.
+
 To undo everything Quil wrote:
 
 ```bash
@@ -241,6 +264,7 @@ Dev builds register separately (`quil-dev://`, `Quil (dev).lnk`), so `quil-dev.e
 | `~/.quil/claudehook/hook.log` | Errors from the Claude Code SessionStart hook |
 | `~/.quil/opencodehook/hook.log` | Errors / breadcrumbs from the OpenCode JS plugin |
 | `~/.quil/quild.stderr.log` | Daemon panics and SIGQUIT goroutine dumps (anything the Go runtime writes to stderr) |
+| `~/.quil/notify-activate.log` | One line per desktop-toast click: which pane it routed to and whether the window could be raised. Written by the short-lived process Windows spawns for the click, which has no other way to report — truncated at 64 KiB |
 
 From inside the TUI: `F1 → View client log` / `View daemon log` / `View MCP logs` opens a read-only viewer with `Alt+Up` / `Alt+Down` for paged navigation.
 

@@ -25,12 +25,19 @@ var (
 	procAttachThreadInput      = user32.NewProc("AttachThreadInput")
 	procGetForegroundWindow    = user32.NewProc("GetForegroundWindow")
 	procSetActiveWindow        = user32.NewProc("SetActiveWindow")
-	procBringWindowToTop       = user32.NewProc("BringWindowToTop")
+	procSwitchToThisWindow     = user32.NewProc("SwitchToThisWindow")
+	procKeybdEvent             = user32.NewProc("keybd_event")
 	procGetCurrentThreadIdUser = windows.NewLazySystemDLL("kernel32.dll").NewProc("GetCurrentThreadId")
 )
 
 const (
 	swRestore = 9
+
+	// VK_MENU is ALT. See the "inputtap" rung for why it is the only safe key
+	// to synthesise into whatever the user is looking at.
+	vkMenu           = 0x12
+	keyEventExtended = 0x0001
+	keyEventKeyUp    = 0x0002
 )
 
 // RaiseWindowFor brings the terminal window hosting pid to the foreground.
@@ -51,7 +58,62 @@ const (
 // Known ceiling: Windows Terminal hosts many tabs in one window and exposes no
 // way to select one, so this raises the WINDOW. If quil shares a WT window with
 // other tabs, the user may still land on a different tab.
-func RaiseWindowFor(pid int) error {
+// raiseAttempt is one way of asking Windows to foreground a window, paired with
+// the name that goes in the log when it is the one that worked.
+//
+// A LADDER rather than a single call, because "may this process set the
+// foreground window" is a policy decision Windows makes from state we cannot
+// see — whether the click's foreground rights reached us, what the foreground
+// lock timeout is, which process owns the desktop right now. Measured on the
+// reporting machine: a toast launched through protocol activation arrives with
+// NO foreground rights, so the two documented approaches were both refused.
+//
+// Every rung is VERIFIED against GetForegroundWindow, which is what makes
+// adding rungs safe: a technique that does nothing costs a call and reports
+// failure, rather than being believed because it returned a non-zero value.
+type raiseAttempt struct {
+	name string
+	try  func(hwnd uintptr) bool
+}
+
+// raiseLadder is ordered least- to most-intrusive. Nothing below the first rung
+// runs unless the one above it was refused.
+func raiseLadder() []raiseAttempt {
+	return []raiseAttempt{
+		// The ordinary activation. When the caller holds foreground rights this
+		// is all that is needed, and it is the only rung that lets the window
+		// manager run its normal path end to end.
+		{"plain", func(hwnd uintptr) bool {
+			procSetForegroundWindow.Call(hwnd)
+			return isForeground(hwnd)
+		}},
+		// Borrow the input queues. Enough to be PERMITTED where the refusal is
+		// about queue ownership rather than rights.
+		{"attached", forceForeground},
+		// What Alt+Tab uses. Undocumented but exported and stable since XP, and
+		// it takes a different path through the window manager than
+		// SetForegroundWindow — which is the only reason it is worth a rung.
+		{"switch", func(hwnd uintptr) bool {
+			procSwitchToThisWindow.Call(hwnd, 1)
+			return isForeground(hwnd)
+		}},
+		// Last resort. One of the documented conditions for setting the
+		// foreground window is having received the last input event, so a
+		// synthetic key tap satisfies it where nothing else did.
+		//
+		// ALT is deliberate: it is the only key that is a no-op on its own in
+		// essentially every application — a bare press-and-release focuses a
+		// menu bar at most, and the window it lands on is the one about to lose
+		// focus anyway. A printable key would be TYPED into the user's document.
+		{"inputtap", func(hwnd uintptr) bool {
+			procKeybdEvent.Call(vkMenu, 0, keyEventExtended, 0)
+			procKeybdEvent.Call(vkMenu, 0, keyEventExtended|keyEventKeyUp, 0)
+			return forceForeground(hwnd)
+		}},
+	}
+}
+
+func RaiseWindowFor(pid int) (string, error) {
 	// EVERY call below is per-OS-THREAD: AttachThreadInput binds a specific
 	// thread's input queue, GetCurrentThreadId reports the thread it runs on,
 	// and the detach must name the same pair the attach did. A goroutine may be
@@ -78,31 +140,23 @@ func RaiseWindowFor(pid int) error {
 		if iconic, _, _ := procIsIconic.Call(hwnd); iconic != 0 {
 			procShowWindow.Call(hwnd, swRestore)
 		}
-		// The plain call FIRST and unattached, because it is the ordinary
-		// activation: the window manager runs its normal path and the owning
-		// application gets to place keyboard focus inside itself, which is the
-		// part that was going missing.
-		procSetForegroundWindow.Call(hwnd)
-		if isForeground(hwnd) {
-			return nil
-		}
-		// Refused — the caller has lost foreground rights (a slow click, a
-		// stolen focus). Borrowing the input queues is the documented way back.
-		if forceForeground(hwnd) {
-			return nil
+		for _, attempt := range raiseLadder() {
+			if attempt.try(hwnd) {
+				return attempt.name, nil
+			}
 		}
 		// Keep walking rather than giving up here. In practice the first
 		// ancestor owning a titled window IS the terminal, but the walk is what
 		// makes that a finding rather than an assumption, and the failure is
 		// reported against the whole chain.
 		if firstErr == nil {
-			firstErr = fmt.Errorf("could not foreground window of owner pid %d", cand)
+			firstErr = fmt.Errorf("every rung refused for owner pid %d", cand)
 		}
 	}
 	if firstErr != nil {
-		return fmt.Errorf("notify: raising for pid %d: %w", pid, firstErr)
+		return "", fmt.Errorf("notify: raising for pid %d: %w", pid, firstErr)
 	}
-	return fmt.Errorf("notify: no visible window found for pid %d or its ancestors", pid)
+	return "", fmt.Errorf("notify: no visible window found for pid %d or its ancestors", pid)
 }
 
 // isForeground asks the SYSTEM whether the raise landed, rather than trusting
@@ -219,7 +273,12 @@ func forceForeground(hwnd uintptr) bool {
 	detachTarget := attachInput(self, targetThread)
 	defer detachTarget()
 
-	procBringWindowToTop.Call(hwnd)
+	// Deliberately NO BringWindowToTop. It changes z-order WITHOUT activating,
+	// so when the foreground call that follows is refused the window is left on
+	// top of everything with the keyboard still elsewhere — which is precisely
+	// the state reported as "I see the pane, I type, nothing happens anywhere".
+	// A raise either takes focus or leaves the desktop as it found it; a
+	// half-raise is worse than none, because it looks like it worked.
 	procSetForegroundWindow.Call(hwnd)
 	procSetActiveWindow.Call(hwnd)
 

@@ -271,11 +271,15 @@ func handleActivate() {
 	// time the window appears, so the user sees the right pane rather than
 	// watching it switch. Best-effort — a failure leaves them exactly where
 	// they were.
-	if err := notify.RaiseWindowFor(pid); err != nil {
+	how, err := notify.RaiseWindowFor(pid)
+	if err != nil {
 		logActivate("raise failed for pane %s: %v", paneID, err)
 		return
 	}
-	logActivate("raised pid %d for pane %s", pid, paneID)
+	// WHICH rung won is the useful half. The ladder exists because Windows
+	// decides this from state we cannot see, so the only way to learn what
+	// actually works on a given machine is to record it.
+	logActivate("raised pid %d for pane %s via %s", pid, paneID, how)
 }
 
 // maxActivateLogBytes caps the activation log. It is a diagnostic buffer, not a

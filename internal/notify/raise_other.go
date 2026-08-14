@@ -7,4 +7,4 @@ package notify
 // rather than an "unsupported" error — no caller off Windows ever reaches it
 // (activation arrives over a Windows-only pipe), and a stub that manufactures
 // a failure would put a wrong line in a log on the platform CI runs.
-func RaiseWindowFor(pid int) error { return nil }
+func RaiseWindowFor(pid int) (string, error) { return "noop", nil }

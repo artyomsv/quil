@@ -137,6 +137,18 @@ const (
 	MsgWorktreeListReq  = "worktree_list_req"
 	MsgWorktreeListResp = "worktree_list_resp"
 
+	// Worktree change count (close confirm dialog). Asks the daemon how much
+	// uncommitted work a worktree holds, so the dialog can say what the force
+	// removal it is offering would destroy.
+	//
+	// On demand rather than on the git ticker, and that is a cost decision:
+	// `git status` is the one plumbing call gitinfo deliberately never makes,
+	// because it can take seconds on a large repository without fsmonitor.
+	// Once per dialog against one worktree is affordable; every five seconds
+	// against every pane's checkout is not.
+	MsgWorktreeStatusReq  = "worktree_status_req"
+	MsgWorktreeStatusResp = "worktree_status_resp"
+
 	// Recent-directory existence check (pane setup dialog's quick pick). The
 	// list was filtered with a local os.Stat, so against a remote host every
 	// server path failed the test and the pick list rendered silently empty —
@@ -259,6 +271,19 @@ type WorktreeSpec struct {
 
 type DestroyPanePayload struct {
 	PaneID string `json:"pane_id"`
+	// RemoveWorktree asks the daemon to delete the linked worktree this pane
+	// was created into, once the pane itself is gone.
+	//
+	// A BOOL, never a path, and that is the security boundary rather than a
+	// convenience: the daemon re-derives which directory may go from its own
+	// Pane.WorktreeOwned record, so the only directories reachable through this
+	// field are ones this daemon created itself. A path on the wire would be a
+	// recursive-delete primitive any IPC client could aim anywhere.
+	//
+	// Absent means false means today's behaviour, which is what keeps every
+	// existing producer — the MCP destroy_pane tool, the overlay teardown, an
+	// older client — non-destructive without knowing this field exists.
+	RemoveWorktree bool `json:"remove_worktree,omitempty"`
 }
 
 type ResizePanePayload struct {
@@ -315,6 +340,11 @@ type FirstPaneSpec struct {
 
 type DestroyTabPayload struct {
 	TabID string `json:"tab_id"`
+	// RemoveWorktree deletes the linked worktrees of every pane in the tab that
+	// owns one. A tab is closed as a unit, so its worktrees are too — see
+	// DestroyPanePayload.RemoveWorktree for why this is a bool rather than a
+	// list of paths.
+	RemoveWorktree bool `json:"remove_worktree,omitempty"`
 }
 
 type SwitchTabPayload struct {
@@ -933,6 +963,45 @@ type WorktreeListRespPayload struct {
 	WorktreeRoot string         `json:"worktree_root,omitempty"`
 	Worktrees    []WorktreeInfo `json:"worktrees,omitempty"`
 	Error        string         `json:"error,omitempty"`
+}
+
+// WorktreeStatusReqPayload asks how much uncommitted work each of these
+// worktrees holds. The close confirm dialog sends one request covering every
+// worktree the close would delete, so a tab with several is one round trip.
+type WorktreeStatusReqPayload struct {
+	Paths []string `json:"paths"`
+}
+
+// WorktreeStatus is one worktree's answer.
+//
+// Changes counts what `git status --porcelain` reports — modified tracked files
+// and untracked entries alike, because a force removal destroys both. An
+// untracked DIRECTORY counts once rather than once per file, which is why the
+// dialog says "uncommitted changes" rather than naming a file count.
+//
+// Changes == 0 with an empty Error is the only thing that means CLEAN. A path
+// that could not be read carries Error and must never be rendered as clean: a
+// zero there would invite the toggle on the strength of a number nobody
+// obtained.
+type WorktreeStatus struct {
+	Path    string `json:"path"`
+	Changes int    `json:"changes,omitempty"`
+	Error   string `json:"error,omitempty"`
+}
+
+// WorktreeStatusRespPayload answers a status request.
+//
+// CONTRACT: Paths echoes the request VERBATIM on every path, including the
+// error and single-flight-rejection ones — the client's staleness key, matching
+// WorktreeListRespPayload.Path and every other pair in this protocol.
+//
+// Error is the whole-request failure (an oversized request); a per-worktree
+// failure rides its own WorktreeStatus, because one unreadable checkout must
+// not take the other rows' answers with it.
+type WorktreeStatusRespPayload struct {
+	Paths    []string         `json:"paths"`
+	Statuses []WorktreeStatus `json:"statuses,omitempty"`
+	Error    string           `json:"error,omitempty"`
 }
 
 // ClaudeSessionDetailReqPayload asks for the deep read of ONE session — the

@@ -259,7 +259,11 @@ Only new branches are offered. Checking out a branch that's already live in anot
 
 If the add fails — the branch exists, the path is occupied, the repo has no commits — **no pane is created**, and git's own message is shown. Quil never falls back to the repository root: a pane on `master` that you believe is isolated is worse than no pane. For the same reason the field is refused when you choose **Replace** rather than a split, since that path closes the old pane before the new one is known to be possible.
 
-Worktrees are never removed automatically. Closing a pane leaves its worktree — and any uncommitted work in it — exactly where it was.
+**Removing one when you close the pane.** Worktrees are never removed automatically — closing a pane leaves its worktree, and any uncommitted work in it, exactly where it was. The close confirm (`Ctrl+W` for a pane, `Alt+W` for a tab) *offers* to delete it: an unticked `[ ] Also delete its worktree` row, armed with `space`, off every time the dialog opens. Closing a tab lists every worktree in it under one toggle, since a tab closes as a unit.
+
+The row appears only for a worktree **Quil created**. A pane you opened in a worktree you made by hand never gets the offer — Quil deletes what Quil created.
+
+While the dialog is open it asks the daemon what the worktree holds and shows `clean` or `⚠ 3 uncommitted changes will be lost` under each row. The removal is a forced one, so uncommitted and untracked files go with the directory; **the branch stays**, along with any commits on it, so nothing you committed is lost and `git branch` still lists it. A worktree that still hosts a pane in another tab is kept and the reason logged — closing one pane never pulls the directory out from under another. If the check can't answer, the row says so rather than reporting `clean`.
 
 **If a worktree goes missing** (you ran `git worktree remove`, or its drive is unmounted), the pane restores *unspawned*, showing which worktree is gone, with `Alt+R` to retry. It does not quietly reopen in the main checkout — for an AI pane that would resume the recorded conversation against the wrong tree.
 

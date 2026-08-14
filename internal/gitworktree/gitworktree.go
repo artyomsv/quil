@@ -313,8 +313,8 @@ func Add(ctx context.Context, repo, path, branch string) (string, error) {
 // Best-effort by contract: the caller is already reporting a failure and this
 // is cleanup, so the error is for the log, not for the user.
 func Remove(ctx context.Context, repo, path string, branch string) error {
-	if _, err := runGit(ctx, repo, "worktree", "remove", "--force", path); err != nil {
-		return fmt.Errorf("git worktree remove %s: %w", path, err)
+	if err := RemoveWorktree(ctx, repo, path); err != nil {
+		return err
 	}
 	// Only after the worktree is gone: git refuses to delete a branch that a
 	// worktree still has checked out, so the order is load-bearing.
@@ -322,4 +322,60 @@ func Remove(ctx context.Context, repo, path string, branch string) error {
 		return fmt.Errorf("git branch -D %s: %w", branch, err)
 	}
 	return nil
+}
+
+// RemoveWorktree deletes a linked worktree's directory and git registration,
+// and LEAVES ITS BRANCH ALONE. repo is the directory the command runs in.
+//
+// The branch is the entire difference from Remove, and it is not a detail. The
+// two callers are describing different situations: Remove undoes an Add whose
+// pane could not be created — a checkout seconds old that nobody has touched,
+// whose branch is empty and whose name must be free for the retry. This one
+// runs when the user closes a pane they have been working in, so its branch can
+// hold commits that exist nowhere else. Deleting it would destroy them with no
+// warning and no undo, in a dialog whose stated subject is a directory.
+//
+// --force is deliberate and is what the caller asked for: uncommitted and
+// untracked files under the worktree go with it. The dialog counts them (see
+// Status) and says so before the toggle can be armed.
+func RemoveWorktree(ctx context.Context, repo, path string) error {
+	if _, err := runGit(ctx, repo, "worktree", "remove", "--force", path); err != nil {
+		return fmt.Errorf("git worktree remove %s: %w", path, err)
+	}
+	return nil
+}
+
+// Status counts the entries `git status --porcelain` reports for the worktree
+// at path — modified tracked files and untracked ones alike, because --force
+// destroys both and a count covering only the tracked half would report a
+// worktree holding a whole unversioned build as clean.
+//
+// An untracked DIRECTORY is one entry rather than one per file (git's default
+// -unormal). That is why the caller says "uncommitted changes" rather than
+// naming a file count: the cheap answer is honest about there being work, and
+// -uall walks every untracked file in the tree, which on a checkout carrying a
+// node_modules or a build directory is the slow call this package otherwise
+// avoids.
+//
+// A non-repository is an ERROR, unlike List, which folds that case into an
+// empty answer. There it means "nothing to attach to" and is a real answer; here
+// a 0 would mean "nothing to lose", which is a guess — and the dialog renders
+// "clean" and "could not check" apart precisely so the guess is never made.
+//
+// This is the one call gitinfo's ticker deliberately does not make: `git status`
+// is the plumbing that can take seconds on a large repository without fsmonitor.
+// It is affordable here because it runs ONCE, when the user opens a confirm
+// dialog, against one worktree.
+func Status(ctx context.Context, path string) (int, error) {
+	out, err := runGit(ctx, path, "status", "--porcelain")
+	if err != nil {
+		return 0, fmt.Errorf("git status %s: %w", path, err)
+	}
+	var n int
+	for _, line := range strings.Split(strings.ReplaceAll(out, "\r\n", "\n"), "\n") {
+		if strings.TrimSpace(line) != "" {
+			n++
+		}
+	}
+	return n, nil
 }

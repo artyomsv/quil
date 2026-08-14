@@ -142,6 +142,10 @@ type Daemon struct {
 	// handleWorktreeListReq for why it is not browseScanning's.
 	worktreeScanning atomic.Bool
 
+	// worktreeStatusing single-flights MsgWorktreeStatusReq. Its own slot — see
+	// beginWorktreeStatus for why it is not worktreeScanning's.
+	worktreeStatusing atomic.Bool
+
 	// worktreeAdding serialises worktree CREATION. Its own slot — see
 	// beginWorktreeAdd for why it is not worktreeScanning — and it doubles as
 	// the permit budget for that path: one add at a time daemon-wide means at
@@ -1261,6 +1265,9 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		d.handleGitReposReq(conn, msg)
 	case ipc.MsgWorktreeListReq:
 		d.handleWorktreeListReq(conn, msg)
+
+	case ipc.MsgWorktreeStatusReq:
+		d.handleWorktreeStatusReq(conn, msg)
 	case ipc.MsgKubeCtxReq:
 		d.handleKubeCtxReq(conn, msg)
 	case ipc.MsgPluginListReq:
@@ -1687,6 +1694,12 @@ func (d *Daemon) handleDestroyTab(msg *ipc.Message) {
 	// Capture the pane list before DestroyTab removes them from the session
 	// maps, so we can clean up their artifacts after the tab is gone.
 	panes := d.session.Panes(payload.TabID)
+	// Read from the SAME pre-destroy capture, for the same reason: after
+	// DestroyTab there is nothing left to ask which worktrees the tab owned.
+	var worktrees []string
+	if payload.RemoveWorktree {
+		worktrees = ownedWorktreePaths(panes)
+	}
 	d.session.DestroyTab(payload.TabID)
 	for _, p := range panes {
 		d.cleanupPaneArtifacts(p.ID)
@@ -1696,6 +1709,14 @@ func (d *Daemon) handleDestroyTab(msg *ipc.Message) {
 
 	d.broadcastState()
 	d.requestSnapshot()
+
+	// LAST, and on a worker: a removal shells out to git against a directory
+	// that may be on a network mount, and this is the requesting client's
+	// dispatch goroutine. Running it before the broadcast would also leave the
+	// tab on screen for the length of the checkout deletion.
+	if len(worktrees) > 0 {
+		go d.removeOwnedWorktrees(worktrees)
+	}
 }
 
 // recoverEmptyProject re-creates a shell tab for a project that has no tabs
@@ -2110,8 +2131,15 @@ func (d *Daemon) handleDestroyPane(msg *ipc.Message) {
 
 	// Capture tab ID before destroying the pane
 	var tabID string
+	var worktrees []string
 	if pane := d.session.Pane(payload.PaneID); pane != nil {
 		tabID = pane.TabID
+		// Captured here for the reason the tab id is: DestroyPane removes the
+		// pane from the session maps, and its CWD is the only record of which
+		// worktree it owned.
+		if payload.RemoveWorktree {
+			worktrees = ownedWorktreePaths([]*Pane{pane})
+		}
 	}
 	log.Printf("pane destroy: %s (tab=%s)", payload.PaneID, tabID)
 
@@ -2131,6 +2159,15 @@ func (d *Daemon) handleDestroyPane(msg *ipc.Message) {
 
 	d.broadcastState()
 	d.requestSnapshot()
+
+	// LAST, and after ensureTabNotEmpty: its replacement shell spawns in
+	// d.defaultCWD(), never in the closing pane's directory, so the two cannot
+	// race for the worktree — but a hidden overlay pane in the same tab CAN be
+	// sitting in it, and ensureTabNotEmpty is what destroys those. Removing
+	// before it ran would find the overlay still live and keep the worktree.
+	if len(worktrees) > 0 {
+		go d.removeOwnedWorktrees(worktrees)
+	}
 }
 
 // ensureTabNotEmpty destroys orphaned overlay panes and spawns a fresh

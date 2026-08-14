@@ -440,3 +440,125 @@ func TestAdd_RealGit_UsesOriginHEADOnAClone(t *testing.T) {
 		t.Errorf("fix/from-origin = %s, want origin/master %s", got, want)
 	}
 }
+
+// The close-time deletion differs from Remove in exactly one way, and it is the
+// whole reason it exists: the branch STAYS. Remove undoes an Add whose pane
+// never existed — seconds old, empty, nobody's work — while this runs on a
+// worktree the user has been living in, whose branch may carry commits that
+// exist nowhere else. Reusing Remove there would delete them silently, and the
+// only place that difference is observable is against real git.
+func TestRemoveWorktree_RealGit_RemovesTheTreeAndKeepsTheBranch(t *testing.T) {
+	repo := realGitRepo(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	path := DerivePath(repo, "feat/keep")
+	if _, err := Add(ctx, repo, path, "feat/keep"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	// A commit that exists ONLY on this branch: what the user would lose if the
+	// branch went with the directory.
+	if err := os.WriteFile(filepath.Join(path, "work.txt"), []byte("real work\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	runGitIn(t, path, "add", "work.txt")
+	runGitIn(t, path, "commit", "-qm", "work only on this branch")
+	want := runGitIn(t, path, "rev-parse", "HEAD")
+
+	if err := RemoveWorktree(ctx, repo, path); err != nil {
+		t.Fatalf("RemoveWorktree: %v", err)
+	}
+
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("the worktree directory survived RemoveWorktree: %v", err)
+	}
+	list, err := List(ctx, repo)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	for _, w := range list {
+		if filepath.Clean(w.Path) == filepath.Clean(path) {
+			t.Errorf("git still lists the removed worktree: %+v", w)
+		}
+	}
+	// The branch, and the commit it points at, are still there.
+	if got := runGitIn(t, repo, "rev-parse", "feat/keep"); got != want {
+		t.Errorf("feat/keep = %q, want %q — the branch or its commit did not survive", got, want)
+	}
+}
+
+// Force is what the user asked for, so uncommitted and untracked work goes with
+// the directory. The dialog says so before the toggle is armed; this pins that
+// git does not refuse the removal.
+func TestRemoveWorktree_RealGit_RemovesADirtyWorktree(t *testing.T) {
+	repo := realGitRepo(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	path := DerivePath(repo, "feat/dirty-close")
+	if _, err := Add(ctx, repo, path, "feat/dirty-close"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "f.txt"), []byte("modified\n"), 0o644); err != nil {
+		t.Fatalf("dirty the worktree: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "untracked.txt"), []byte("new\n"), 0o644); err != nil {
+		t.Fatalf("add an untracked file: %v", err)
+	}
+
+	if err := RemoveWorktree(ctx, repo, path); err != nil {
+		t.Fatalf("RemoveWorktree refused a dirty worktree: %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("the dirty worktree survived RemoveWorktree: %v", err)
+	}
+}
+
+// Status is what puts a number in front of the user BEFORE they arm the toggle,
+// so it has to count what --force would actually destroy: modified tracked
+// files AND untracked ones. Counting only the tracked half would report "clean"
+// for a worktree holding a whole unversioned build the removal is about to take.
+func TestStatus_RealGit_CountsModifiedAndUntrackedFiles(t *testing.T) {
+	repo := realGitRepo(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	path := DerivePath(repo, "feat/status")
+	if _, err := Add(ctx, repo, path, "feat/status"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	if got, err := Status(ctx, path); err != nil || got != 0 {
+		t.Fatalf("Status on a fresh worktree = %d, %v; want 0, nil", got, err)
+	}
+
+	if err := os.WriteFile(filepath.Join(path, "f.txt"), []byte("modified\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "untracked.txt"), []byte("new\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got, err := Status(ctx, path)
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if got != 2 {
+		t.Errorf("Status = %d, want 2 (one modified + one untracked)", got)
+	}
+}
+
+// A directory that is not a repository at all must be an ERROR rather than a
+// confident 0. The dialog renders those apart: "clean" invites the toggle,
+// "could not check" says the number is missing. List collapses the same case to
+// an empty answer deliberately — there it means "nothing to attach to", here it
+// would mean "nothing to lose", which is a guess.
+func TestStatus_RealGit_ReportsANonRepositoryAsAnError(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not on PATH")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if _, err := Status(ctx, t.TempDir()); err == nil {
+		t.Error("Status reported no error for a directory outside any repository")
+	}
+}

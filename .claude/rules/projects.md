@@ -7,7 +7,10 @@ paths:
   - "**/internal/gitworktree/**"
   - "**/internal/daemon/worktree.go"
   - "**/internal/daemon/worktree_add.go"
+  - "**/internal/daemon/worktree_remove.go"
+  - "**/internal/daemon/worktree_status.go"
   - "**/internal/tui/worktree_client.go"
+  - "**/internal/tui/worktree_close.go"
   - "**/internal/tui/project.go"
   - "**/internal/tui/projectdialog.go"
   - "**/internal/tui/projectpicker.go"
@@ -1054,3 +1057,94 @@ tree — silently making every placeholder assertion vacuous. Match `Left == nil
 && Right == nil && Pane == nil`, the same shape `PrunePlaceholders` itself
 uses.
 
+
+## Removing worktrees on close (stage C)
+
+**`Pane.WorktreeOwned` is the ONLY gate, on BOTH sides of the socket, and it is
+what makes a delete offer legitimate at all.** It is set exactly where this
+daemon ran `git worktree add` (`createPaneInWorktree`), so `GitWorktree` — which
+says only that a CWD sits inside a linked checkout — is the wrong test: a pane
+the user opened in a worktree they made by hand satisfies it, and offering to
+delete that is a claim about somebody else's directory. `collectConfirmWorktrees`
+(client) decides what is OFFERED and `ownedWorktreePaths` (daemon) decides what
+is DELETED; the duplication is deliberate, because only the second one is
+authoritative and only the first one is visible.
+
+**The wire carries a BOOL, never a path** (`DestroyPanePayload.RemoveWorktree`,
+`DestroyTabPayload.RemoveWorktree`). The daemon re-derives the directory from
+its own ownership record, so the only directories this message can reach are
+ones this daemon created. A path on the wire would be a recursive-delete
+primitive any IPC client could aim anywhere, and the TUI is not the only IPC
+client. `omitempty` + absent-means-false is what keeps every existing producer —
+the MCP `destroy_pane` tool, the overlay teardown, an older client —
+non-destructive without knowing the field exists.
+
+**`gitworktree.RemoveWorktree` is NOT `Remove`, and the difference is the
+BRANCH.** `Remove` undoes an `Add` whose pane could not be created: seconds old,
+empty, handed to nobody, and its name must be free for the retry — so it deletes
+the branch too. This runs on a checkout the user has been living in, whose
+branch can hold commits that exist nowhere else. Reusing `Remove` there destroys
+them silently, in a dialog whose stated subject is a directory. The two are one
+keystroke apart in a diff, which is why the seam is named
+`removeWorktreeKeepBranchFn` rather than sharing `removeWorktreeFn`'s name, and
+why the load-bearing test is a REAL-GIT one: no stub can observe a branch
+surviving.
+
+**The removal runs LAST, on a worker, and after `ensureTabNotEmpty`.** Off the
+dispatch goroutine for the reason the add is (that goroutine carries the
+client's input, and a checkout deletion can be seconds on a network mount);
+after the broadcast so the pane leaves the screen immediately; and after
+`ensureTabNotEmpty` specifically, because that is what destroys a tab's hidden
+OVERLAY panes — a lazygit overlay sitting in the same worktree would otherwise
+still be live when the in-use check runs, and the worktree would be kept for a
+pane the user cannot see. Its replacement shell is not a hazard: it spawns in
+`d.defaultCWD()`, never in the closing pane's directory.
+
+**A worktree still hosting a LIVE pane is skipped and logged** (`paneInWorktree`
+over `AllPanes`, `pathWithin` for the containment). Panes in other tabs can share
+one worktree — a second agent on the same branch, a split made in the same
+directory — and removing it deletes the working directory out from under running
+processes. `pathWithin` compares on a SEPARATOR boundary rather than a bare
+prefix, or `/w/feat-a2` counts as inside `/w/feat-a` and closing one pane deletes
+a sibling's checkout; it folds case on Windows because a pane's CWD is rewritten
+from whatever case OSC 7 reports while the worktree path is the one git created.
+
+**The removal RETRIES, because the pane's own child is reaped
+asynchronously.** `DestroyPane` detaches the pane and closes its PTY off-lock
+(`releasePanes`) — that is required, since `PTY.Close` blocks until the child is
+reaped and doing it under `sm.mu` starves every reader — so the removal
+routinely starts while the shell is still exiting, and neither platform releases
+a directory a process still holds. Three attempts with a widening backoff:
+something that is not exiting (an editor, a file watcher, a shell outside Quil)
+will not release it however long anyone waits, and the log line naming it is
+worth more than a minute of silence. Every outcome is logged INCLUDING success —
+the pane is gone and so is the dialog, so that line is the only record that a
+directory was deleted.
+
+**`MsgWorktreeStatusReq` exists because `git status` is the one call the git
+ticker deliberately never makes.** `gitinfo` excludes `--porcelain` precisely
+because it can take seconds on a large repository, so the change count cannot
+ride the 5 s broadcast; it is fetched ON DEMAND when the confirm opens, once,
+against the worktrees that dialog would delete. Its own single-flight slot
+(`worktreeStatusing`) rather than `worktreeScanning`'s, for the reason
+`dirsChecking` is not `browseScanning`: the setup dialog can be listing
+worktrees while the close dialog asks about them. ONE shared deadline across the
+request's paths, like `dirsExistResponse` — every path blocks on the same thing,
+and a per-path budget lets a tab full of worktrees hold the slot N times as long.
+
+**The answer is ADVISORY, and the client timeout is set from that.** The toggle
+works whether or not the count arrives, so `worktreeStatusTimeout` (6 s) gives up
+well inside the daemon's own 10 s bound: an early give-up costs a number, never a
+decision, while a dialog stuck on `checking…` in front of someone trying to close
+a pane reads as wedged. A row that could not be read renders its REASON, never a
+zero — `clean` is the one answer that invites the toggle, so a count nobody
+obtained must not look like one. Matched on the request GENERATION rather than
+the paths: closing one pane and opening the confirm for another within the round
+trip produces two wire-indistinguishable requests about the same worktree.
+
+**The toggle is re-cleared on every open and on every route OUT**
+(`resetConfirmWorktrees`). `confirmWorktrees` / `confirmRemoveWorktree` /
+`confirmWorktreeGen` are Model state that outlives the dialog, so an armed
+toggle inherited by the next close is a deletion nobody was offered — the same
+shape as the project form's armed merge plan, and the reason that one re-derives
+its plan on open rather than trusting a flag.

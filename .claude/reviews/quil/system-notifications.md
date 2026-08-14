@@ -5,6 +5,7 @@ Rounds completed: 1
 
 ## Resolved (fixed in code; do not re-raise)
 - [code-quality/CRITICAL] nil Notifier dereferenced in a defer — notify.New returns (nil, nil) off Windows, panicking every Linux/macOS session at exit — round 1
+- [code-quality/CRITICAL-sibling] verifySetup had the same nil deref, unreachable only via a guard in another function — round 1
 - [security/H-1] named-pipe client dialled without SECURITY_SQOS_PRESENT, allowing a squatting server to impersonate the user — round 1
 - [security/M-2] %1 substitution injected argv into quil-activate; parseArgs kept scanning past the URI and honoured an injected --home — round 1
 - [security/M-3] remote-controlled pane.ID reached put_Tag unvalidated; one malformed id silently disabled all toasts — round 1

@@ -1532,7 +1532,9 @@ func (m Model) renderConfirmDialog() string {
 			// stranded `Esc cancel` on a row the box never budgeted, stacked on
 			// top of the worktree list. dialogBoxChrome documents this exact
 			// hazard; this footer is the one that walked into it.
-			footer = "space worktree    Enter confirm    Esc cancel"
+			// "toggle" rather than "worktree": a footer lists key → ACTION, and
+			// there is exactly one checkbox on screen for it to refer to.
+			footer = "space toggle    Enter confirm    Esc cancel"
 		}
 	}
 	b.WriteString("\n\n")
@@ -1605,7 +1607,10 @@ func (m Model) renderConfirmWorktrees() string {
 	// answered, since it is true either way. "everything else here" is deliberate
 	// and covers the case a count alone hides: ignored files, a .env among them,
 	// which exist in no branch and cannot be recovered from one.
-	b.WriteString("\n")
+	//
+	// Separated by a BLANK line: butted against the last row it reads as that
+	// worktree's own status line rather than as a statement about the operation.
+	b.WriteString("\n\n")
 	b.WriteString("  " + dialogSubtle.Render("The branch is kept; everything else here goes."))
 	return b.String()
 }

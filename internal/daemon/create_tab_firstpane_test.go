@@ -122,6 +122,33 @@ func settled(t *testing.T, d *Daemon, wantTabs int) {
 	})
 }
 
+// quiesce waits until the daemon has stopped broadcasting, then clears the
+// counter — so a frame-count assertion measures only the action under test.
+//
+// Waiting for the FIRST attach frame and resetting is not enough, and CI is
+// where that showed: attaching to a daemon with no tabs bootstraps a default
+// workspace, and the frames that produces are not all delivered by the time the
+// first one arrives. Under -race on a loaded runner the straggler landed after
+// the reset and was counted against the create — a green local run and a red CI
+// one, for a reason that has nothing to do with the code under test. Same
+// family as settled(): the first observable event is not the end of the work.
+func quiesce(t *testing.T, frames *frameCounter) {
+	t.Helper()
+	const still = 250 * time.Millisecond
+	deadline := time.Now().Add(5 * time.Second)
+	last := -1
+	for time.Now().Before(deadline) {
+		n := frames.Count()
+		if n == last {
+			frames.Reset()
+			return
+		}
+		last = n
+		time.Sleep(still)
+	}
+	t.Fatal("the daemon never stopped broadcasting; a frame-count assertion cannot be trusted here")
+}
+
 // sameDir compares through EvalSymlinks because the daemon resolves the
 // directory before it spawns, and t.TempDir() hands back a path that is a
 // symlink on macOS (/tmp → /private/tmp). A raw string compare is green on
@@ -205,8 +232,7 @@ func TestHandleCreateTab_FirstPaneBroadcastsExactlyOnce(t *testing.T) {
 	client := attachTestClient(t, sock)
 	defer client.Close()
 	frames := countWorkspaceFrames(client)
-	waitUntil(t, "the attach broadcast to land", func() bool { return frames.Count() > 0 })
-	frames.Reset()
+	quiesce(t, frames)
 
 	d.handleCreateTab(nil, createTabMsg(t, &ipc.FirstPaneSpec{Type: "terminal-wide"}))
 

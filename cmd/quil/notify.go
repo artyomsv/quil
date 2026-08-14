@@ -267,6 +267,16 @@ func runNotifyTest(opts notify.Options) {
 // moves to a pane the user already owns", and that ceiling is a design
 // constraint rather than an implementation detail.
 func handleActivate() {
+	// FIRST, before argument checking and before anything can take time: this
+	// process was launched by a click, and Windows gave it a console WINDOW
+	// that appears in front of the user and takes the foreground. Every moment
+	// it exists is a moment the handler is competing with itself for the focus
+	// it is trying to hand to the terminal.
+	//
+	// Ahead of the usage check deliberately — a malformed URI must not leave a
+	// window on screen either, and os.Exit(1) below would strand it.
+	notify.DetachOwnConsole()
+
 	if len(os.Args) < 3 {
 		os.Exit(1)
 	}

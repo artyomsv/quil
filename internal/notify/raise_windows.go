@@ -28,11 +28,16 @@ var (
 	procSetActiveWindow        = user32.NewProc("SetActiveWindow")
 	procSwitchToThisWindow     = user32.NewProc("SwitchToThisWindow")
 	procSystemParametersInfo   = user32.NewProc("SystemParametersInfoW")
-	procGetCurrentThreadIdUser = windows.NewLazySystemDLL("kernel32.dll").NewProc("GetCurrentThreadId")
+
+	kernel32                   = windows.NewLazySystemDLL("kernel32.dll")
+	procGetCurrentThreadIdUser = kernel32.NewProc("GetCurrentThreadId")
+	procGetConsoleWindow       = kernel32.NewProc("GetConsoleWindow")
+	procFreeConsole            = kernel32.NewProc("FreeConsole")
 )
 
 const (
 	swRestore = 9
+	swHide    = 0
 
 	// SPI_GETFOREGROUNDLOCKTIMEOUT. See ForegroundLockTimeout.
 	spiGetForegroundLockTimeout = 0x2000
@@ -218,6 +223,33 @@ func RaiseWindowFor(pid int) (string, error) {
 		return "", fmt.Errorf("notify: raising for pid %d: %w", pid, firstErr)
 	}
 	return "", fmt.Errorf("notify: no visible window found for pid %d or its ancestors", pid)
+}
+
+// DetachOwnConsole hides and releases the console window Windows allocates to
+// this process, and must be the FIRST thing the activation handler does.
+//
+// `quil activate` is a console binary, so launching it for a toast click
+// allocates it a console WINDOW — a real, visible, focusable window that
+// appears in front of the user and takes the foreground. The handler was then
+// competing with itself: it asked for the terminal to be raised, its own
+// console took the foreground back, the verification read that as a refusal,
+// and when the process exited the console vanished and left focus nowhere. That
+// is the "I clicked the toast and my typing went to neither window" report, and
+// it is also why every technique in the ladder looked refused.
+//
+// Invisible for its whole life is the only correct behaviour for a process
+// spawned by a click: it has no output, no prompt and nothing to show. Hidden
+// BEFORE being freed so the window cannot flash — freeing alone destroys it,
+// but not before it has been painted.
+//
+// After this the process has no stdout or stderr. Nothing in the activation
+// path prints; it reports through notify-activate.log precisely because it has
+// no terminal to report to.
+func DetachOwnConsole() {
+	if hwnd, _, _ := procGetConsoleWindow.Call(); hwnd != 0 {
+		procShowWindow.Call(hwnd, swHide)
+	}
+	procFreeConsole.Call()
 }
 
 // ForegroundLockTimeout reports how long after user input Windows refuses to

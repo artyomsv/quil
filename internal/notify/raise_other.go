@@ -14,6 +14,10 @@ import (
 // a failure would put a wrong line in a log on the platform CI runs.
 func RaiseWindowFor(pid int) (string, error) { return "noop", nil }
 
+// DetachOwnConsole is a no-op off Windows: nothing here allocates a console
+// window to a process that was launched without a terminal.
+func DetachOwnConsole() {}
+
 // ForegroundLockTimeout has no meaning off Windows — the foreground lock is a
 // Win32 policy. Reported as an error rather than zero, because zero is a real
 // value there ("apps may take focus") and would be a lie here.

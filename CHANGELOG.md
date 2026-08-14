@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.57.0] - 2026-08-14
+
 ### Added
 - **hunk, a review-first diff viewer, is now a built-in tool.** Reading what an
   agent just wrote is most of what a Quil workspace produces, and

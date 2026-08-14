@@ -385,42 +385,53 @@ type Model struct {
 	// daemon's pane consume another's kick and let armReattachReset for one
 	// dest clear the other's flag. Two daemons minting the same UUID is not a
 	// realistic accident, but the invariant should not rest on that.
-	sizedOnce            map[string]bool
-	renaming             bool
-	renameInput          string
-	renamingPane         bool
-	paneRenameInput      string
-	pendingWidth         int
-	pendingHeight        int
-	resizeSeq            int
-	pendingSplit         map[string]*LayoutNode // tabID → placeholder node awaiting pane from daemon
-	pendingOverlayShow   map[string]bool        // tabID → show overlay on its first arrival; set by the Alt+G overlay sender (wired in a follow-up commit); reads/deletes are nil-map-safe
-	dialog               dialogScreen           // active dialog screen
-	dialogCursor         int                    // highlighted item in dialog
-	shortcutsCursor      int                    // scroll position in the Shortcuts list
-	shortcutsScroll      int                    // window origin for the Shortcuts list
-	logViewerReturn      dialogScreen           // dialog to return to when the read-only log/text viewer closes (default About)
-	dialogEdit           bool                   // editing a settings value
-	dialogInput          string                 // text input buffer for editing
-	confirmKind          string                 // "pane" or "tab"
-	confirmID            string                 // ID of pane/tab to delete
-	confirmName          string                 // display name for confirmation
-	confirmDetail        string                 // extra remote-sourced line (upgrade confirm); sanitized+bounded at render
-	upgradeQueue         []upgradePrompt        // hosts waiting to be ASKED about provisioning; see enqueueUpgradePrompt
-	devMode              bool                   // true when QUIL_HOME is set
-	pluginRegistry       *plugin.Registry       // plugin registry (shared with daemon)
-	lastWidth            int                    // last known window width (for persistence)
-	lastHeight           int                    // last known window height (for persistence)
-	createPaneStep       int                    // 0=category, 1=plugin, 2=instance form, 3=split direction
-	selectedCategory     int                    // selected category index in create pane dialog
-	selectedPlugin       string                 // selected plugin name in create pane dialog
-	pluginErrorTitle     string                 // title for plugin error dialog
-	pluginErrorMessage   string                 // message for plugin error dialog
-	instanceStore        InstanceStore          // saved plugin instances (loaded from instances.json)
-	instanceFormValues   []string               // form field values (indexed by FormField position)
-	instanceFormCursor   int                    // active field in instance form
-	selectedInstanceArgs []string               // args from selected instance (for IPC); toggles are appended here
-	selectedInstanceName string                 // name from selected instance (for IPC)
+	sizedOnce          map[string]bool
+	renaming           bool
+	renameInput        string
+	renamingPane       bool
+	paneRenameInput    string
+	pendingWidth       int
+	pendingHeight      int
+	resizeSeq          int
+	pendingSplit       map[string]*LayoutNode // tabID → placeholder node awaiting pane from daemon
+	pendingOverlayShow map[string]bool        // tabID → show overlay on its first arrival; set by the Alt+G overlay sender (wired in a follow-up commit); reads/deletes are nil-map-safe
+	dialog             dialogScreen           // active dialog screen
+	dialogCursor       int                    // highlighted item in dialog
+	shortcutsCursor    int                    // scroll position in the Shortcuts list
+	shortcutsScroll    int                    // window origin for the Shortcuts list
+	logViewerReturn    dialogScreen           // dialog to return to when the read-only log/text viewer closes (default About)
+	dialogEdit         bool                   // editing a settings value
+	dialogInput        string                 // text input buffer for editing
+	confirmKind        string                 // "pane" or "tab"
+	confirmID          string                 // ID of pane/tab to delete
+	confirmName        string                 // display name for confirmation
+	confirmDetail      string                 // extra remote-sourced line (upgrade confirm); sanitized+bounded at render
+	upgradeQueue       []upgradePrompt        // hosts waiting to be ASKED about provisioning; see enqueueUpgradePrompt
+	devMode            bool                   // true when QUIL_HOME is set
+	pluginRegistry     *plugin.Registry       // plugin registry (shared with daemon)
+	lastWidth          int                    // last known window width (for persistence)
+	lastHeight         int                    // last known window height (for persistence)
+	createPaneStep     int                    // 0=category, 1=plugin, 2=instance form, 3=split direction
+	createPaneTarget   paneTarget             // where the pane goes: into this tab (Ctrl+N) or a new one (Ctrl+T)
+	// createPaneDest pins the destination the dialog was OPENED against.
+	//
+	// Resolving it at submit instead would read whichever project is active by
+	// then, and this dialog stays open for as long as the user takes — MCP
+	// set_active_pane moves the active project with no keyboard involved. Every
+	// value in the form describes the open-time daemon's disk (the browse and
+	// git-discovery listings were answered by it), so submitting against a
+	// different one hands, at worst, a WorktreeSpec.RepoRoot describing machine
+	// A to machine B's `git worktree add`.
+	createPaneDest       string
+	selectedCategory     int           // selected category index in create pane dialog
+	selectedPlugin       string        // selected plugin name in create pane dialog
+	pluginErrorTitle     string        // title for plugin error dialog
+	pluginErrorMessage   string        // message for plugin error dialog
+	instanceStore        InstanceStore // saved plugin instances (loaded from instances.json)
+	instanceFormValues   []string      // form field values (indexed by FormField position)
+	instanceFormCursor   int           // active field in instance form
+	selectedInstanceArgs []string      // args from selected instance (for IPC); toggles are appended here
+	selectedInstanceName string        // name from selected instance (for IPC)
 	// Setup-dialog state. selectedCWD is the value committed at submit time
 	// (a snapshot of cwdBrowseDir) and is what handleCreatePaneSplit reads
 	// for CreatePanePayload.CWD. The two fields exist separately so that the
@@ -2234,6 +2245,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.applyCreatePaneTimeout(msg.tabID)
 		return m, nil
 
+	case createTabFailedMsg:
+		// Not an IPC response — it is the send reporting that it never left, so
+		// no re-arm (the listen loop was never involved). Router.Send would have
+		// dropped this silently and returned nil, which is why the send is
+		// strict: a tab the user asked for and did not get has to say so.
+		m.setFlash("cannot reach " + hostLabel(msg.dest) + " — new tab not created")
+		return m, m.flashCmd()
+
 	case worktreeTimeoutMsg:
 		// Local timer, so deliberately no re-arm.
 		m.applyWorktreeTimeout(msg)
@@ -3141,15 +3160,106 @@ func (m Model) beginTabRename() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// paneTarget says where the pane the create-pane dialog is building will go.
+//
+// The dialog's first three steps (category → plugin → instance → setup) are
+// identical either way; only the last step and the message sent differ. The
+// zero value is the Ctrl+N behaviour that predates the new-tab flow, so any
+// path that forgets to set this splits the current tab rather than creating a
+// tab nobody asked for.
+type paneTarget int
+
+const (
+	paneTargetSplit  paneTarget = iota // Ctrl+N: into the active tab
+	paneTargetNewTab                   // Ctrl+T: as the first pane of a new tab
+)
+
 // openCreatePaneDialog opens the create-pane dialog at step 0 (the Ctrl+N flow).
 // Extracted from the `key == "ctrl+n"` case; shared with the command palette.
 func (m Model) openCreatePaneDialog() (tea.Model, tea.Cmd) {
+	return m.openCreatePaneDialogFor(paneTargetSplit)
+}
+
+// openCreatePaneDialogFor is the shared opener for both targets.
+//
+// createPaneTarget is reset HERE rather than on each close path, and that is
+// load-bearing: the step-0 escape, the instance-delete detour into the confirm
+// dialog, and handleCreatePaneSplit's three early refusals all leave the dialog
+// without reaching its teardown block. A target that outlived any one of those
+// would make the next plain Ctrl+N create a TAB instead of a split — the fourth
+// recurrence of the stale-dialog-state class this file already documents three
+// of, and the reason this is a parameter rather than a field somebody sets
+// afterwards.
+func (m Model) openCreatePaneDialogFor(target paneTarget) (tea.Model, tea.Cmd) {
 	m.dialog = dialogCreatePane
 	m.dialogCursor = 0
 	m.createPaneStep = 0
 	m.selectedCategory = 0
+	m.createPaneTarget = target
+	m.createPaneDest = m.activeDest()
 	return m, tea.ClearScreen
 }
+
+// handleNewTab opens the create-pane dialog to choose the new tab's first pane.
+//
+// Ctrl+T used to send create_tab immediately, which always produced a shell.
+// The daemon still does exactly that for a create carrying no spec, so the
+// escape path and every other client keep the old behaviour.
+//
+// The reachability refusal moved here from the keypress: the send is what
+// Router.Send drops silently, and letting the user fill in a directory, a
+// branch and a session first — then dropping it — is worse than refusing the
+// keystroke. Both carve-outs come with it, and both encode shipped bugs: a NIL
+// m.cur() is the pre-first-broadcast window every session passes through (the
+// unstamped send resolves through Router.Send's sole-conn fallback there), and
+// onlyOfflineProjects is the same window once offline rows have been seeded for
+// some OTHER destination while the local daemon is fine.
+func (m Model) handleNewTab() (tea.Model, tea.Cmd) {
+	if p := m.cur(); p != nil && !m.projectActionable(p) && !m.onlyOfflineProjects() {
+		m.setFlash("cannot reach " + hostLabel(p.Dest) + " — new tab not created")
+		return m, m.flashCmd()
+	}
+	return m.openCreatePaneDialogFor(paneTargetNewTab)
+}
+
+// createTerminalTab sends the bare create_tab every producer sent before the
+// first-pane spec existed: no FirstPane, so the daemon spawns its terminal.
+//
+// This is the Esc fallback, and it is why cancelling the picker still leaves a
+// usable tab rather than nothing at all.
+func (m Model) createTerminalTab() tea.Cmd {
+	return m.sendCreateTab(nil)
+}
+
+// sendCreateTab is the ONE create_tab producer.
+//
+// Aimed at createPaneDest via sendForDestStrict rather than the unstamped
+// m.client.Send the old createTab used. That send was safe only because the
+// keypress and the send were the same instant; with a dialog in between, the
+// destination can move under it — see createPaneDest. Strict because
+// Router.Send drops an unroutable message and returns nil, so the loose form
+// cannot tell the user their tab was never created.
+func (m Model) sendCreateTab(spec *ipc.FirstPaneSpec) tea.Cmd {
+	dest := m.createPaneDest
+	return func() tea.Msg {
+		msg, err := ipc.NewMessage(ipc.MsgCreateTab, ipc.CreateTabPayload{
+			Name:      "New Tab",
+			FirstPane: spec,
+		})
+		if err != nil {
+			log.Printf("create tab: build message: %v", err)
+			return nil
+		}
+		if err := m.sendForDestStrict(dest, msg); err != nil {
+			return createTabFailedMsg{dest: dest}
+		}
+		return nil
+	}
+}
+
+// createTabFailedMsg reports a create_tab that never reached its daemon. The
+// send happens off the Update goroutine, so the flash cannot be set there.
+type createTabFailedMsg struct{ dest string }
 
 // forceRedraw is the full-repaint recovery hatch: drop every pane's render
 // cache and every tab's leaves cache, then ClearScreen + re-probe the terminal
@@ -3882,36 +3992,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 
 	case kbMatches(key, kb.NewTab):
-		// Flashes rather than no-opping silently, for the same reason the
-		// single-project/no-bounce-target/empty-queue refusals above do: a
-		// key that appears to do nothing is indistinguishable from a broken
-		// one. It fires only when there IS an active project and it is
-		// unreachable — createTab's send is unstamped and Router.Send would
-		// drop it silently, so the user would believe a tab was created that
-		// never was.
-		//
-		// A NIL m.cur() is deliberately NOT refused: m.projects is nil from
-		// NewModel until the first workspace_state broadcast, which is a real
-		// window every session passes through, not an unreachable one — during
-		// it createTab's unstamped send resolves through Router.Send's
-		// sole-conn startup fallback (routeDest's currentDest() is "" before any
-		// project is known, which is exactly the key the local daemon's own
-		// connection is registered under). Refusing here would make Ctrl+T do
-		// nothing for the first moment of every session, on a machine that is
-		// reachable.
-		// onlyOfflineProjects is the same carve-out as the nil case just above:
-		// every row seeded before the first broadcast is an offline stand-in for
-		// SOME OTHER destination, so m.cur() names a host that is unreachable
-		// while the LOCAL daemon — where createTab's unstamped send actually
-		// resolves via Router.Send's sole-conn fallback — is fine. Without it,
-		// seeding turned the never-reached-daemon window this comment already
-		// describes into "flashes cannot reach <host>" about a machine that was
-		// never the problem.
-		if p := m.cur(); p != nil && !m.projectActionable(p) && !m.onlyOfflineProjects() {
-			m.setFlash("cannot reach " + hostLabel(p.Dest) + " — new tab not created")
-			return m, m.flashCmd()
-		}
-		return m, m.createTab()
+		return m.handleNewTab()
 
 	case kbMatches(key, kb.ClosePane):
 		return m.openClosePaneConfirm()
@@ -6145,16 +6226,6 @@ func parseWorkspaceState(raw map[string]any) WorkspaceStateMsg {
 		}
 	}
 	return state
-}
-
-func (m Model) createTab() tea.Cmd {
-	return func() tea.Msg {
-		msg, _ := ipc.NewMessage(ipc.MsgCreateTab, ipc.CreateTabPayload{
-			Name: "New Tab",
-		})
-		m.client.Send(msg)
-		return nil
-	}
 }
 
 func (m *Model) splitPane(dir SplitDir) tea.Cmd {

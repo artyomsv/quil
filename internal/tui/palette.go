@@ -376,18 +376,18 @@ func (m *Model) buildPaletteCommands() []paletteCommand {
 			keywords: []string{"tab", "go to", "goto", "switch"},
 		})
 	}
-	// Greyed while there IS an active project and it is unreachable: CreateTab
-	// would be accepted here and dropped by Router.Send on its way to a
-	// daemon with no connection, which reads as a broken keybinding. A NIL
-	// active project (before the first workspace_state broadcast) is NOT the
-	// same thing — createTab's unstamped send still resolves through
-	// Router.Send's sole-conn startup fallback, so it must stay enabled. See
-	// the matching comment on the kb.NewTab case in model.go.
+	// Greyed while there IS an active project and it is unreachable: the create
+	// would be accepted here and dropped by Router.Send on its way to a daemon
+	// with no connection, which reads as a broken keybinding. A NIL active
+	// project (before the first workspace_state broadcast) is NOT the same
+	// thing — the send still resolves through Router.Send's sole-conn startup
+	// fallback, so it must stay enabled. Mirrors handleNewTab's own refusal in
+	// model.go; this row is the greyed-out form of the same rule.
 	newTabEnabled := true
 	if p := m.cur(); p != nil {
-		// onlyOfflineProjects mirrors the kb.NewTab guard in model.go: every
+		// onlyOfflineProjects mirrors handleNewTab's guard in model.go: every
 		// row seeded before the first broadcast stands in for a destination
-		// that is not the one createTab's unstamped send actually resolves to.
+		// that is not the one the send actually resolves to.
 		newTabEnabled = m.projectActionable(p) || m.onlyOfflineProjects()
 	}
 	cmds = append(cmds,
@@ -1077,7 +1077,7 @@ func (m Model) executePaletteCommand(c paletteCommand) (tea.Model, tea.Cmd) {
 
 	// --- Tab ---------------------------------------------------------------
 	case palActNewTab:
-		return m, m.createTab()
+		return m.handleNewTab()
 	case palActCloseTab:
 		return m.openCloseTabConfirm()
 	case palActRenameTab:

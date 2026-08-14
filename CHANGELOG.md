@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`Ctrl+T` asks what the new tab should open with.** A new tab always came up
+  holding a shell, so opening one for an agent meant creating the tab, then
+  replacing its pane — every time. It now opens the same picker as `Ctrl+N`,
+  including the setup step, so a new tab can start as Claude Code in a chosen
+  directory, on a chosen kube context, resuming a chosen session, or on a fresh
+  worktree branch. `Esc` on the first screen still gives you a plain terminal
+  tab, so `Ctrl+T` `Esc` is the old behaviour in two keystrokes.
+
+  The tab and its pane are created in one step, so no tab flickers through a
+  shell nobody asked for. A new branch is the exception and deliberately so: the
+  tab opens with a terminal while `git worktree add` runs and the chosen pane
+  replaces it on success, because an agent must not spend those seconds in the
+  main checkout.
+
 ## [1.57.1] - 2026-08-14
 
 ### Fixed

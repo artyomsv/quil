@@ -197,16 +197,19 @@ func TestHandleKey_NewTab_OfflineProjectRefusesWithFlash(t *testing.T) {
 	}
 }
 
-// TestHandleKey_NewTab_NoProjectsYetStillCreatesTab pins the fix for a review
+// TestHandleKey_NewTab_NoProjectsYetOpensThePicker pins the fix for a review
 // regression: m.projects is nil from NewModel until the first workspace_state
 // broadcast, which is a real window every session passes through — NOT the
-// same thing as "unreachable". createTab's unstamped send already resolves
-// correctly in this window via Router.Send's sole-conn startup fallback
-// (routeDest's currentDest() is "" before any project is known, which is the
-// key the local daemon's own connection is registered under). Ctrl+T must not
-// flash a refusal here, and its returned command must still be the one that
-// sends MsgCreateTab.
-func TestHandleKey_NewTab_NoProjectsYetStillCreatesTab(t *testing.T) {
+// same thing as "unreachable". The create's send resolves correctly in this
+// window via Router.Send's sole-conn startup fallback (routeDest's
+// currentDest() is "" before any project is known, which is the key the local
+// daemon's own connection is registered under). Ctrl+T must not flash a
+// refusal here.
+//
+// What the carve-out gates is now the DIALOG rather than the send — Ctrl+T
+// asks which pane the tab should open with — so that is what is asserted. The
+// property is unchanged: this window must not be treated as unreachable.
+func TestHandleKey_NewTab_NoProjectsYetOpensThePicker(t *testing.T) {
 	t.Parallel()
 	sent := 0
 	m := Model{
@@ -219,31 +222,33 @@ func TestHandleKey_NewTab_NoProjectsYetStillCreatesTab(t *testing.T) {
 		// projects is deliberately nil — the pre-first-broadcast state.
 	}
 
-	updated, cmd := m.handleKey(tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
+	updated, _ := m.handleKey(tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
 	got := updated.(Model)
 
 	if got.flashText != "" {
 		t.Errorf("flashText = %q, want empty — no project known yet is not the same as unreachable", got.flashText)
 	}
-	if cmd == nil {
-		t.Fatal("cmd is nil — Ctrl+T with no projects yet must still attempt createTab")
+	if got.dialog != dialogCreatePane {
+		t.Errorf("dialog = %v, want the first-pane picker open", got.dialog)
 	}
-	cmd()
-	if sent != 1 {
-		t.Errorf("sent %d messages, want 1 — createTab's own command must have run", sent)
+	if got.createPaneTarget != paneTargetNewTab {
+		t.Errorf("target = %v, want paneTargetNewTab", got.createPaneTarget)
+	}
+	if sent != 0 {
+		t.Errorf("sent %d messages, want 0 — nothing is created until the user picks", sent)
 	}
 }
 
-// TestHandleKey_NewTab_OnlyOfflineProjectsStillCreatesTab pins the review fix
+// TestHandleKey_NewTab_OnlyOfflineProjectsOpensThePicker pins the review fix
 // this carve-out exists for: at launch, before the local daemon's first
 // broadcast, m.projects can hold ONLY seeded offline stand-ins for remote
 // hosts that failed to dial — a state m.cur() cannot tell apart from
-// "genuinely offline forever". Ctrl+T there must still reach createTab,
-// because its unstamped send resolves to the LOCAL daemon via Router.Send's
-// sole-conn startup fallback — a machine this state says nothing bad about.
-// Without onlyOfflineProjects(), this flashed "cannot reach gpu01" about a
-// host that had nothing to do with the tab being created.
-func TestHandleKey_NewTab_OnlyOfflineProjectsStillCreatesTab(t *testing.T) {
+// "genuinely offline forever". Ctrl+T there must still open the picker,
+// because the send resolves to the LOCAL daemon via Router.Send's sole-conn
+// startup fallback — a machine this state says nothing bad about. Without
+// onlyOfflineProjects(), this flashed "cannot reach gpu01" about a host that
+// had nothing to do with the tab being created.
+func TestHandleKey_NewTab_OnlyOfflineProjectsOpensThePicker(t *testing.T) {
 	t.Parallel()
 	sent := 0
 	m := Model{
@@ -259,18 +264,17 @@ func TestHandleKey_NewTab_OnlyOfflineProjectsStillCreatesTab(t *testing.T) {
 		activeProject: 0,
 	}
 
-	updated, cmd := m.handleKey(tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
+	updated, _ := m.handleKey(tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
 	got := updated.(Model)
 
 	if got.flashText != "" {
 		t.Errorf("flashText = %q, want empty — every known project being an offline stand-in says nothing about the local daemon", got.flashText)
 	}
-	if cmd == nil {
-		t.Fatal("cmd is nil — Ctrl+T with only offline projects seeded must still attempt createTab")
+	if got.dialog != dialogCreatePane {
+		t.Errorf("dialog = %v, want the first-pane picker open", got.dialog)
 	}
-	cmd()
-	if sent != 1 {
-		t.Errorf("sent %d messages, want 1 — createTab's own command must have run", sent)
+	if sent != 0 {
+		t.Errorf("sent %d messages, want 0 — nothing is created until the user picks", sent)
 	}
 }
 

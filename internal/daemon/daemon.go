@@ -1568,18 +1568,96 @@ func (d *Daemon) handleCreateTab(conn *ipc.Conn, msg *ipc.Message) {
 	d.session.SwitchTab(tab.ID)
 	log.Printf("tab created: %s %q", tab.ID, tab.Name)
 
-	// Every tab needs a default pane with a shell, rooted at the OWNING
-	// project's directory (see projectCWD).
-	pane, _ := d.session.CreatePane(tab.ID, d.projectCWD(tab.ProjectID))
-	pane.Type = "terminal"
+	// Every tab needs a pane, rooted at the OWNING project's directory (see
+	// projectCWD) unless the client named one.
+	//
+	// The spec is a REQUEST, never the pane construction itself: TabID is the id
+	// this daemon just minted, and the fields a first pane must not carry
+	// (ReplacePaneID, Overlay) are absent from FirstPaneSpec by construction
+	// rather than dropped here.
+	spec := payload.FirstPane
+	if spec == nil {
+		spec = &ipc.FirstPaneSpec{}
+	}
+	paneType := firstPaneType(*spec)
+	create := ipc.CreatePanePayload{
+		TabID:           tab.ID,
+		CWD:             spec.CWD,
+		Type:            paneType,
+		InstanceName:    spec.InstanceName,
+		InstanceArgs:    spec.InstanceArgs,
+		ResumeSessionID: spec.ResumeSessionID,
+	}
+	cwd := d.resolveRequestedCWD(spec.CWD, d.projectCWD(tab.ProjectID))
 
-	ptySession := apty.New()
-	if err := d.spawnPane(pane, ptySession, false); err != nil {
-		log.Printf("failed to start PTY for new tab: %v", err)
+	// constructPaneAt, not createPaneAt: the tab and its pane are one change and
+	// must reach clients as ONE frame. See the note on that split.
+	pane, err := d.constructPaneAt(create, cwd, paneType)
+	if err != nil {
+		log.Printf("new tab %s: %v", tab.ID, err)
 	}
 
 	d.broadcastState()
 	d.requestSnapshot()
+
+	// LAST, and only once the placeholder is on screen and broadcast.
+	if pane != nil && spec.Worktree != nil {
+		d.createFirstPaneWorktree(conn, msg.ID, tab.ID, pane.ID, *spec)
+	}
+}
+
+// firstPaneType is the type a new tab's first pane OPENS as, which is not
+// always the type that was asked for.
+//
+// A worktree request opens as a terminal whatever it named. git has not made
+// the directory yet — an add checks out a tree, seconds on a large repository —
+// so the requested pane would spend that window in the project root. For an
+// agent that IS the isolation failure the worktree exists to prevent: isolated
+// in its directory and not in its history, invisible until somebody reads the
+// diff days later. A shell sitting there for a few seconds costs nothing.
+func firstPaneType(spec ipc.FirstPaneSpec) string {
+	if spec.Worktree != nil || spec.Type == "" {
+		return "terminal"
+	}
+	return spec.Type
+}
+
+// createFirstPaneWorktree swaps a new tab's placeholder terminal for the pane
+// that was actually requested, inside a worktree it creates first.
+//
+// It REPLAYS the ordinary worktree replace rather than adding a second
+// create-in-a-worktree path: worktreeAddAndCreate already owns branch
+// validation, the daemon-wide single-flight slot, the blocking-FS permit, the
+// re-checks that cover a tab or target closed mid-checkout, and the cleanup
+// that removes a checkout no pane ended up using.
+//
+// Creating the tab and then adding the worktree BEFORE any pane is the shape
+// that looks simpler and is not: the tab would sit pane-less for the whole
+// checkout — up to worktreeAddTimeout — broadcast to every client as a blank
+// active tab with no placeholder to render, and PERSISTED that way by any
+// snapshot landing inside the window. Nothing recovers it: ensureTabNotEmpty
+// runs on destroy paths only, so a daemon crash mid-checkout restores a
+// permanently empty tab. Replacing a pane that is already on screen has none of
+// those properties — the placeholder is live throughout, a failure leaves it
+// exactly where it is, and the swap arrives through ordinary broadcast
+// reconciliation with no client-side placeholder bookkeeping.
+//
+// On a worker goroutine for the reason handleCreatePane's worktree branch is:
+// this runs on the requesting conn's dispatch goroutine, where a checkout would
+// block every message from that client, input included.
+func (d *Daemon) createFirstPaneWorktree(conn *ipc.Conn, reqID, tabID, placeholderID string, spec ipc.FirstPaneSpec) {
+	p := ipc.CreatePanePayload{
+		TabID:           tabID,
+		Type:            spec.Type,
+		InstanceName:    spec.InstanceName,
+		InstanceArgs:    spec.InstanceArgs,
+		ResumeSessionID: spec.ResumeSessionID,
+		ReplacePaneID:   placeholderID,
+		Worktree:        spec.Worktree,
+	}
+	go func() {
+		respondTo(conn, reqID, ipc.MsgCreatePaneResp, d.worktreeAddAndCreate(p))
+	}()
 }
 
 func (d *Daemon) handleDestroyTab(msg *ipc.Message) {
@@ -1769,30 +1847,8 @@ func (d *Daemon) handleCreatePane(conn *ipc.Conn, msg *ipc.Message) {
 		return
 	}
 
-	cwd := payload.CWD
-	logger.Debug("create pane: received payload cwd=%q type=%s", cwd, payload.Type)
-	// Validate the CWD before trusting it. The TUI dialog already validates
-	// what it sends, but the IPC socket is reachable by other clients (the
-	// MCP bridge, future tooling), and the daemon should be authoritative.
-	// On any failure (gone / not a directory / stat error) we fall back to
-	// the daemon's own working directory rather than aborting the spawn.
-	//
-	// Re-resolve symlinks here too: the TUI calls EvalSymlinks before sending
-	// but a symlink swap between the TUI's Stat and the daemon's spawn would
-	// otherwise redirect the child process to a different directory. Doing
-	// the resolve once more on the daemon side closes that TOCTOU window for
-	// every IPC client (TUI, MCP, future tooling).
-	if cwd != "" {
-		if info, err := os.Stat(cwd); err != nil || !info.IsDir() {
-			log.Printf("create pane: rejecting cwd %q (err=%v); using daemon default", cwd, err)
-			cwd = ""
-		} else if resolved, evalErr := filepath.EvalSymlinks(cwd); evalErr == nil {
-			cwd = resolved
-		}
-	}
-	if cwd == "" {
-		cwd = d.defaultCWD()
-	}
+	logger.Debug("create pane: received payload cwd=%q type=%s", payload.CWD, payload.Type)
+	cwd := d.resolveRequestedCWD(payload.CWD, d.defaultCWD())
 
 	// Determine pane type
 	paneType := payload.Type
@@ -1812,6 +1868,40 @@ func (d *Daemon) handleCreatePane(conn *ipc.Conn, msg *ipc.Message) {
 	}
 }
 
+// resolveRequestedCWD validates a client-supplied directory and answers the
+// fallback when it cannot be used.
+//
+// The TUI dialog already validates what it sends, but the IPC socket is
+// reachable by other clients (the MCP bridge, future tooling), and the daemon
+// should be authoritative. On any failure (gone / not a directory / stat error)
+// the fallback is used rather than aborting the spawn.
+//
+// Symlinks are re-resolved here too: the TUI calls EvalSymlinks before sending,
+// but a symlink swap between the TUI's Stat and the daemon's spawn would
+// otherwise redirect the child process to a different directory. Doing the
+// resolve once more daemon-side closes that TOCTOU window for every IPC client.
+//
+// The FALLBACK is a parameter rather than d.defaultCWD() baked in, because the
+// two call sites disagree about it and the disagreement is load-bearing: a pane
+// created into an existing tab belongs to the client's directory, while a new
+// TAB is rooted at its project (see projectCWD). Hardcoding the pane answer
+// here would silently stop new tabs opening in the project root — a regression
+// in the projects feature, caused from inside the pane feature.
+func (d *Daemon) resolveRequestedCWD(cwd, fallback string) string {
+	if cwd != "" {
+		if info, err := os.Stat(cwd); err != nil || !info.IsDir() {
+			log.Printf("create pane: rejecting cwd %q (err=%v); using %q", cwd, err, fallback)
+			cwd = ""
+		} else if resolved, evalErr := filepath.EvalSymlinks(cwd); evalErr == nil {
+			cwd = resolved
+		}
+	}
+	if cwd == "" {
+		return fallback
+	}
+	return cwd
+}
+
 // createPaneAt is the pane construction every create path shares: allocate,
 // apply the payload's plugin fields, claim a resume session, spawn, publish.
 //
@@ -1825,14 +1915,44 @@ func (d *Daemon) handleCreatePane(conn *ipc.Conn, msg *ipc.Message) {
 // its historical behaviour is to leave the PTY-less pane in place and log,
 // and the next workspace broadcast shows it as exited.
 func (d *Daemon) createPaneAt(payload ipc.CreatePanePayload, cwd, paneType string) (*Pane, error) {
+	pane, err := d.constructPaneAt(payload, cwd, paneType)
+	if err != nil {
+		return pane, err
+	}
+	d.broadcastState()
+	d.requestSnapshot()
+	return pane, nil
+}
+
+// constructPaneAt is createPaneAt without the publish — allocate, apply the
+// payload's plugin fields, claim a resume session, spawn.
+//
+// Split out for handleCreateTab, which creates a tab AND its first pane and
+// must emit ONE workspace-state frame for the pair. Calling createPaneAt there
+// would put two full frames back to back on the 64-slot must-deliver queue for
+// every new tab — the 2026-08-09 force-disconnect shape — and each frame also
+// drives a full applyWorkspaceState reconciliation on every attached client.
+//
+// A spawn failure returns the pane alongside the error, so a caller that must
+// leave nothing behind can destroy it.
+func (d *Daemon) constructPaneAt(payload ipc.CreatePanePayload, cwd, paneType string) (*Pane, error) {
 	pane, err := d.session.CreatePane(payload.TabID, cwd)
 	if err != nil {
 		return nil, fmt.Errorf("create pane error: %w", err)
 	}
 
+	// Under PluginMu for the same reason the Overlay block below states:
+	// CreatePane has already PUBLISHED the pane into the session maps, so a
+	// snapshot or broadcast goroutine can be reading these fields already, and
+	// Type/CWD are on the documented PluginMu-protected set. These three writes
+	// were unlocked — pre-existing, and reachable: the race detector reports
+	// them against any concurrent reader of Type the moment a create runs on a
+	// conn goroutine rather than the test's own.
+	pane.PluginMu.Lock()
 	pane.Type = paneType
 	pane.InstanceName = payload.InstanceName
 	pane.InstanceArgs = payload.InstanceArgs
+	pane.PluginMu.Unlock()
 	if payload.Overlay {
 		// CreatePane already PUBLISHED the pane into the session maps, so a
 		// concurrent snapshot/broadcast goroutine may be reading it — both
@@ -1858,8 +1978,6 @@ func (d *Daemon) createPaneAt(payload ipc.CreatePanePayload, cwd, paneType strin
 	if err := d.spawnPane(pane, ptySession, false); err != nil {
 		return pane, fmt.Errorf("start PTY error: %w", err)
 	}
-	d.broadcastState()
-	d.requestSnapshot()
 	return pane, nil
 }
 

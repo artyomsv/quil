@@ -1651,6 +1651,13 @@ func (m Model) handleCreatePaneKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		m.dialog = dialogNone
 		m.createPaneStep = 0
+		if m.createPaneTarget == paneTargetNewTab {
+			// Cancelling the PICKER is not cancelling the tab: Ctrl+T Esc stays
+			// the two-keystroke path to the shell tab this key produced before
+			// the picker existed. The bare create carries no spec, so the daemon
+			// takes exactly the path every other producer takes.
+			return m, m.createTerminalTab()
+		}
 		return m, nil
 
 	case "up", "k":
@@ -1699,6 +1706,12 @@ func (m *Model) createPaneItemCount() int {
 	case 2: // instance list
 		return 1 + len(m.instanceStore[m.selectedPlugin]) // "+ New" + saved
 	case 3: // split direction
+		if m.createPaneTarget == paneTargetNewTab {
+			// Unreachable through advanceFromPluginChoice, which submits rather
+			// than landing here — answered anyway so a future path that does
+			// reach it renders no rows instead of three that cannot act.
+			return 0
+		}
 		return 3 // Horizontal, Vertical, Replace
 	}
 	return 0
@@ -1787,15 +1800,60 @@ func (m Model) handleCreatePaneSelect() (tea.Model, tea.Cmd) {
 		// Mirror the same routing as the no-form-fields branch above and the
 		// instance form submit path; otherwise saved instances would silently
 		// skip the setup dialog while "+ New" wouldn't.
-		if cmd := m.enterSetupOrSplit(p); cmd != nil {
-			return m, cmd
-		}
-		m.createPaneStep = 3
-		return m, nil
+		// enterSetupOrSplit routes to the setup dialog, the placement step or a
+		// new-tab submit — no step assignment belongs here.
+		return m, m.enterSetupOrSplit(p)
 	}
 
 	// Step 3: selected placement (split direction)
 	return m.handleCreatePaneSplit()
+}
+
+// setupDiscoveryBase is the directory the setup dialog starts looking from.
+//
+// For a SPLIT it is the active pane's OSC 7 CWD: the pane being split is the
+// context, and that is where the user already is. Deliberately not
+// lastSelectedCWD — that memory belongs to the generic browser, and a stale
+// last-choice from another project seeds candidates for the wrong repository.
+//
+// For a NEW TAB the context is the PROJECT. A new tab is not "beside this
+// pane", and the daemon roots one at projectCWD for exactly the same reason, so
+// discovering from wherever the last shell happened to cd to would put the two
+// halves of one create on different directories. The active pane is still the
+// fallback, for a project with no root recorded.
+func (m Model) setupDiscoveryBase() string {
+	if m.createPaneTarget == paneTargetNewTab {
+		if p := m.cur(); p != nil && p.RootDir != "" {
+			return p.RootDir
+		}
+	}
+	if tab := m.activeTabModel(); tab != nil {
+		if pane := tab.ActivePaneModel(); pane != nil {
+			return pane.CWD
+		}
+	}
+	return ""
+}
+
+// advanceFromPluginChoice runs once the plugin, its instance and its setup
+// answers have all been collected — the one place that decides what "done
+// choosing" means for each target.
+//
+// For a split there is a step left: WHERE the pane goes relative to the active
+// one. A new tab has no pane to be relative to, so those three rows cannot mean
+// anything and the choice is complete — it submits instead. Routing both
+// through one function is what stops the four call sites that used to assign
+// createPaneStep = 3 from having to agree about it.
+func (m *Model) advanceFromPluginChoice() tea.Cmd {
+	if m.createPaneTarget == paneTargetNewTab {
+		out, cmd := m.handleCreatePaneSplit()
+		*m = out.(Model)
+		return cmd
+	}
+	m.dialog = dialogCreatePane
+	m.createPaneStep = 3
+	m.dialogCursor = 0
+	return nil
 }
 
 // openInstanceForm initializes the instance form dialog with default values.
@@ -1812,6 +1870,7 @@ func (m *Model) openInstanceForm(p *plugin.PanePlugin) {
 
 // handleCreatePaneSplit handles the final split direction selection (step 3).
 func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
+	target := m.createPaneTarget
 	pluginName := m.selectedPlugin
 	instanceName := m.selectedInstanceName
 	instanceArgs := m.selectedInstanceArgs
@@ -1866,6 +1925,45 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 	m.worktreeScroll = 0
 	m.worktrees = worktreeState{}
 	m.resetSessionSelection()
+
+	// The new-tab branch returns HERE — after the teardown, before everything
+	// below it — and both halves of that position are load-bearing.
+	//
+	// After the teardown, so a new-tab create leaves exactly as little behind as
+	// a split does. Before the rest, because none of it applies: m.dialogCursor
+	// is read below to pick horizontal/vertical/replace and holds whatever the
+	// last list left there (the placement step never ran), the active-tab and
+	// active-pane requirements describe a pane to split FROM — which is also
+	// what keeps this working during the startup window, when there is no tab
+	// yet — and every piece of bookkeeping past this point (pendingSplit,
+	// worktreeCreates, worktreeReplaced, the give-up tick) is keyed by a tab id
+	// that will not exist until the daemon answers. Nothing is detached and no
+	// leaf is reserved, so there is nothing to unwind and nothing to time out:
+	// the tab arrives whole on the next broadcast.
+	if target == paneTargetNewTab {
+		var spec *ipc.WorktreeSpec
+		if newBranch != "" {
+			if newBranchRepo == "" {
+				// Same refusal the split path makes just below, for the same
+				// reason: falling back to the browsed directory is the nested-
+				// worktree bug.
+				logger.Debug("create tab: REFUSED, branch %q has no known repository root", newBranch)
+				m.setFlash("worktree not created: the repository root is not known yet")
+				return m, m.flashCmd()
+			}
+			spec = &ipc.WorktreeSpec{RepoRoot: newBranchRepo, Branch: newBranch}
+		}
+		logger.Debug("create tab: submitting cwd=%q type=%s instance=%s branch=%q repo=%q",
+			cwd, pluginName, instanceName, newBranch, newBranchRepo)
+		return m, m.sendCreateTab(&ipc.FirstPaneSpec{
+			Type:            pluginName,
+			CWD:             cwd,
+			InstanceName:    instanceName,
+			InstanceArgs:    instanceArgs,
+			ResumeSessionID: resumeSessionID,
+			Worktree:        spec,
+		})
+	}
 
 	tab := m.activeTabModel()
 	if tab == nil {
@@ -2346,14 +2444,8 @@ func (m Model) submitInstanceForm(p *plugin.PanePlugin) (tea.Model, tea.Cmd) {
 	m.selectedInstanceArgs = BuildArgs(p.Command.ArgTemplate, fieldMap)
 	m.selectedInstanceName = name
 
-	// Either show setup dialog (CWD/toggles) or proceed to split direction.
-	if cmd := m.enterSetupOrSplit(p); cmd != nil {
-		return m, cmd
-	}
-	m.dialog = dialogCreatePane
-	m.createPaneStep = 3
-	m.dialogCursor = 0
-	return m, nil
+	// Either show setup dialog (CWD/toggles) or finish choosing.
+	return m, m.enterSetupOrSplit(p)
 }
 
 func (m Model) renderInstanceFormDialog() string {
@@ -2938,8 +3030,7 @@ func (m *Model) enterSetupOrSplit(p *plugin.PanePlugin) tea.Cmd {
 	needsSetup := p != nil && (p.Command.PromptsCWD || len(p.Command.Toggles) > 0 ||
 		p.Command.Discover == "kube" || p.Command.Sessions == "claude")
 	if !needsSetup {
-		m.createPaneStep = 3
-		return nil
+		return m.advanceFromPluginChoice()
 	}
 
 	// The browser's pre-fill now costs a round trip, so the dialog opens first
@@ -2948,16 +3039,7 @@ func (m *Model) enterSetupOrSplit(p *plugin.PanePlugin) tea.Cmd {
 
 	if p.Command.PromptsCWD {
 		if p.Command.Discover == "git" {
-			// Discovery base is the active pane's OSC7 CWD directly — not
-			// lastSelectedCWD (that memory belongs to the generic browser; a
-			// stale last-choice from another project would seed wrong
-			// candidates).
-			var base string
-			if tab := m.activeTabModel(); tab != nil {
-				if pane := tab.ActivePaneModel(); pane != nil {
-					base = pane.CWD
-				}
-			}
+			base := m.setupDiscoveryBase()
 			// Asked of the DAEMON, never resolved here — gitdiscover run in this
 			// process stats the machine drawing the UI, which is the wrong disk
 			// whenever the daemon is remote (RD-021). Whether there turn out to
@@ -4080,11 +4162,9 @@ func (m Model) submitSetupDialog(p *plugin.PanePlugin) (tea.Model, tea.Cmd) {
 		m.selectedInstanceArgs = merged
 	}
 
-	m.dialog = dialogCreatePane
-	m.createPaneStep = 3
-	m.dialogCursor = 0
 	m.dialogEdit = false
-	return m, tea.ClearScreen
+	cmd := m.advanceFromPluginChoice()
+	return m, tea.Batch(tea.ClearScreen, cmd)
 }
 
 // renderSetupSessionField draws the resume-session picker.

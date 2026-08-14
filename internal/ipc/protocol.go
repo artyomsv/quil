@@ -280,6 +280,37 @@ type PaneOutputPayload struct {
 
 type CreateTabPayload struct {
 	Name string `json:"name"`
+	// FirstPane names the pane the new tab opens with. Nil (the default) keeps
+	// the historical behavior — a `terminal` pane rooted at the owning project's
+	// directory — which is what every non-interactive producer of this message
+	// needs: an older client, the attach bootstrap's shape, and any future
+	// caller with no opinion. The TUI sets it from the create-pane dialog so a
+	// tab and its first pane are ONE atomic step, with no create-then-replace
+	// and no window where the wrong pane type is on screen.
+	FirstPane *FirstPaneSpec `json:"first_pane,omitempty"`
+}
+
+// FirstPaneSpec is the subset of a pane request that makes sense for a tab that
+// does not exist yet.
+//
+// Deliberately NOT a *CreatePanePayload, though it carries a subset of the same
+// fields. That type also has TabID (meaningless — the daemon owns the id it is
+// about to mint), ReplacePaneID (there is nothing to replace, and honoring one
+// would destroy an arbitrary pane as a side effect of "create tab") and Overlay
+// (a tab whose only pane is a muted overlay is a state ensureTabNotEmpty reads
+// as empty and no create path repairs). Any IPC client can set these fields, so
+// the guarantee is structural rather than a sanitizing branch someone can drop
+// later — the same reason MergeProjectsPayload has no RootDir.
+type FirstPaneSpec struct {
+	Type         string   `json:"type,omitempty"`
+	CWD          string   `json:"cwd,omitempty"`
+	InstanceName string   `json:"instance_name,omitempty"`
+	InstanceArgs []string `json:"instance_args,omitempty"`
+	// ResumeSessionID and Worktree carry the same meaning, and the same trust
+	// model, as their CreatePanePayload counterparts — the daemon validates both
+	// before either reaches argv.
+	ResumeSessionID string        `json:"resume_session_id,omitempty"`
+	Worktree        *WorktreeSpec `json:"worktree,omitempty"`
 }
 
 type DestroyTabPayload struct {

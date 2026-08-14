@@ -112,12 +112,29 @@ The CWD also feeds the new-pane setup dialog (pre-filled from the active pane's 
 
 | Action | Binding |
 |---|---|
-| New tab | `Ctrl+T` |
+| New tab | `Ctrl+T` — see below |
 | Rename tab | `F2` |
 | Rename pane | `Alt+F2` |
 | Close tab | `Alt+W` |
 | Cycle tab color | `Alt+C` (8 colours) |
 | Switch to tab N | `Alt+1` .. `Alt+9` |
+
+### New tab, with the pane you actually want
+
+`Ctrl+T` opens the same picker as `Ctrl+N` and creates the tab around whatever
+you choose — Claude Code, OpenCode, lazysql, a terminal — including its setup
+step, so a new tab can start in a chosen directory, on a chosen kube context, or
+resuming a Claude session. If the plugin offers worktrees, a new tab can open
+straight onto a fresh branch.
+
+`Esc` on the first screen closes the picker and gives you a plain terminal tab,
+so `Ctrl+T` `Esc` is the two-keystroke path to the old behaviour.
+
+The tab and its pane are created together, so a tab never flickers through a
+shell you did not ask for. The one exception is a new branch: the tab opens with
+a terminal while `git worktree add` runs, and the pane you asked for replaces it
+when the checkout finishes — an agent must never spend those seconds in the main
+checkout.
 
 ---
 

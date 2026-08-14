@@ -427,7 +427,8 @@ type Model struct {
 	// browser can navigate freely without dirtying the "to be sent" value
 	// until the user actually presses Continue.
 	repoCandidates     []string               // git repos offered by the setup dialog (discover="git"); nil = plain browser
-	repoPickCandidates []string               // candidates for dialogGitRepoPick (Alt+G, multiple repos)
+	repoPickCandidates []string               // candidates for dialogGitRepoPick (Alt+G / Alt+H, multiple repos)
+	repoPickPlugin     string                 // overlay tool the picker will spawn on Enter (lazygit / hunk)
 	kubeContexts       []kubediscover.Context // contexts offered by the setup dialog (discover="kube"); nil = none
 	kubeCursor         int                    // row cursor in the kube field: 0 = Default context, 1.. = kubeContexts
 	kubeScan           kubeScanState          // in-flight kube-context request (zero value = none); see kubeScanState.gen
@@ -3342,9 +3343,9 @@ func (m Model) logViewerPosAt(screenX, screenY int) (row, col int, ok bool) {
 // as a hard-coded case in the caller (not driven by kb.NextPane, which is
 // now unbound by default since spatial navigation moved to Alt+Arrow).
 //
-// Note: ToggleLazygit (Alt+G) is deliberately NOT in this list — notes mode
-// binds the editor to a pane, and popping a full-screen overlay over it
-// mid-edit conflicts with the notes layout. Alt+G in notes mode falls through
+// Note: ToggleLazygit (Alt+G) and ToggleHunk (Alt+H) are deliberately NOT in
+// this list — notes mode binds the editor to a pane, and popping a full-screen
+// overlay over it mid-edit conflicts with the notes layout. Both fall through
 // to the editor harmlessly as plain text input.
 func (m Model) notesKeyExempt(key string) bool {
 	if key == "" {
@@ -3691,9 +3692,10 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	// Overlay visible: intercept keys before global shortcuts reach pane-level
 	// handlers (ClosePane, RenamePane, notes toggle, split, etc.). The sidebar-
-	// focused branch below must NOT steal keys while lazygit is on screen.
-	// The kb.ToggleLazygit case in the main switch is still reachable when the
-	// overlay is hidden (this block only fires when overlayVisible is true).
+	// focused branch below must NOT steal keys while an overlay tool is on
+	// screen. The kb.ToggleLazygit / kb.ToggleHunk cases in the main switch are
+	// still reachable when the overlay is hidden (this block only fires when
+	// overlayVisible is true).
 	if tab := m.activeTabModel(); tab != nil && tab.overlayVisible && tab.overlayPane != nil && m.dialog == dialogNone && !m.renaming && !m.renamingPane {
 		return m, m.handleOverlayKey(msg, tab)
 	}
@@ -3736,6 +3738,8 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case kbMatches(key, kb.ToggleLazygit):
 		return m, m.handleToggleLazygit()
+	case kbMatches(key, kb.ToggleHunk):
+		return m, m.handleToggleHunk()
 	case kbMatches(key, kb.CommandHistory):
 		return m.openHistoryForActivePane()
 	case kbMatches(key, kb.QuickActions):

@@ -720,7 +720,7 @@ func TestCtxMenu_TitleShowsPaneDisplayName(t *testing.T) {
 func TestCtxMenu_CompactFallbackOnShortTerminal(t *testing.T) {
 	t.Parallel()
 	m := newSplitDragTestModel(t)
-	m.height = 16 // content area 14: spaced box (15) can't fit, compact (13) can
+	m.height = 17 // content area 15: spaced box (17) can't fit, compact (15) can
 	updated, _ := m.Update(tea.MouseClickMsg{X: 20, Y: 10, Button: tea.MouseRight})
 	got := updated.(Model)
 	if !got.ctxMenu.open() {
@@ -873,7 +873,7 @@ func TestSidebarRightClick_BackgroundTabPaneMenuActs(t *testing.T) {
 //
 // Before the guard, Rename seeded the ON-SCREEN pane's name, Mute toggled the
 // on-screen pane, and Restart/Close armed a confirm for it — each of them acting
-// on a pane the menu was not titled after. The refusal is uniform across all ten
+// on a pane the menu was not titled after. The refusal is uniform across all eleven
 // items, INCLUDING the two attention rows that resolve paneID directly and could
 // still have acted correctly: one rule for one surface, it matches what the code
 // did before this branch, and the remedy is a second right-click.

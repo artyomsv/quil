@@ -29,7 +29,7 @@ func overlayTestModel(t *testing.T, paneCWD string) (*Model, *fakeSender, *TabMo
 		cfg:            config.Default(),
 		projects:       oneProject(tab),
 		client:         fake,
-		pluginRegistry: registryWithLazygit(t),
+		pluginRegistry: registryWithOverlayTools(t),
 	}
 	return m, fake, tab
 }
@@ -113,7 +113,7 @@ func sentTypesFiltered(fake *fakeSender, include ...string) []string {
 // picker, create — so they resolve candidates the same way the daemon does and
 // drive that half directly.
 func toggleWithDiscovery(m *Model, tab *TabModel, cwd string) tea.Cmd {
-	return m.resolveLazygitOverlay(tab, gitdiscover.Candidates(context.Background(), cwd))
+	return m.resolveOverlay(tab, gitdiscover.Candidates(context.Background(), cwd), overlayPluginLazygit)
 }
 
 // handleToggleLazygit tests
@@ -128,6 +128,7 @@ func TestHandleToggleLazygit_VisibleOverlay_Hides(t *testing.T) {
 	m, fake, tab := overlayTestModel(t, "")
 	// Pre-condition: overlay exists and is visible.
 	overlay := NewPaneModel("pane-o", 1024)
+	overlay.Type = overlayPluginLazygit
 	tab.overlayPane = overlay
 	tab.overlayVisible = true
 
@@ -184,6 +185,7 @@ func TestHandleToggleLazygit_NoRepo_ExistingOverlay_Shows(t *testing.T) {
 	}
 	m, _, tab := overlayTestModel(t, plain)
 	overlay := NewPaneModel("pane-o", 1024)
+	overlay.Type = overlayPluginLazygit
 	tab.overlayPane = overlay
 	tab.overlayVisible = false
 
@@ -204,6 +206,7 @@ func TestHandleToggleLazygit_MatchingRepo_ShowsNoCreate(t *testing.T) {
 	m, fake, tab := overlayTestModel(t, repo)
 
 	overlay := NewPaneModel("pane-o", 1024)
+	overlay.Type = overlayPluginLazygit
 	overlay.CWD = repo
 	tab.overlayPane = overlay
 	tab.overlayVisible = false
@@ -283,6 +286,7 @@ func TestHandleToggleLazygit_DifferentRepo_DestroysAndCreates(t *testing.T) {
 
 	// Pre-existing overlay for a different repo.
 	old := NewPaneModel("pane-old", 1024)
+	old.Type = overlayPluginLazygit
 	old.CWD = "/some/other/repo"
 	tab.overlayPane = old
 	tab.overlayVisible = false
@@ -376,6 +380,7 @@ func TestHandleOverlayKey_ToggleKey_Hides(t *testing.T) {
 	t.Parallel()
 	m, _, tab := overlayTestModel(t, "")
 	overlay := NewPaneModel("pane-o", 1024)
+	overlay.Type = overlayPluginLazygit
 	tab.overlayPane = overlay
 	tab.overlayVisible = true
 
@@ -398,6 +403,7 @@ func TestHandleOverlayKey_AltNum_SwitchesTab(t *testing.T) {
 	// Add a second and third tab so alt+2 and alt+3 are valid.
 	m.appendTab(NewTabModel("tab-2", "b"), NewTabModel("tab-3", "c"))
 	overlay := NewPaneModel("pane-o", 1024)
+	overlay.Type = overlayPluginLazygit
 	tab.overlayPane = overlay
 	tab.overlayVisible = true
 
@@ -425,6 +431,7 @@ func TestHandleOverlayKey_PlainRune_ForwardsToOverlay(t *testing.T) {
 	t.Parallel()
 	m, fake, tab := overlayTestModel(t, "")
 	overlay := NewPaneModel("pane-o", 1024)
+	overlay.Type = overlayPluginLazygit
 	overlay.ID = "pane-overlay"
 	tab.overlayPane = overlay
 	tab.overlayVisible = true
@@ -538,6 +545,9 @@ func TestGitRepoPick_EnterCreatesOverlayForChosenRepo(t *testing.T) {
 	m, fake, tab := overlayTestModel(t, "")
 	m.dialog = dialogGitRepoPick
 	m.repoPickCandidates = []string{repoA, repoB}
+	// Seeded exactly as resolveOverlay leaves it: the picker outlives the
+	// keypress, so which tool to spawn is remembered alongside the candidates.
+	m.repoPickPlugin = overlayPluginLazygit
 	m.dialogCursor = 1 // repoB
 
 	out, cmd := m.handleGitRepoPickKey(tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -656,6 +666,7 @@ func TestHandleOverlayKey_Quit_ReturnsQuit(t *testing.T) {
 	t.Parallel()
 	m, _, tab := overlayTestModel(t, "")
 	overlay := NewPaneModel("pane-o", 1024)
+	overlay.Type = overlayPluginLazygit
 	tab.overlayPane = overlay
 	tab.overlayVisible = true
 
@@ -694,6 +705,7 @@ func TestHandleOverlayKey_Redraw_InvalidatesCaches(t *testing.T) {
 	_ = tab.Leaves() // prime the cache so invalidation has something to clear
 
 	overlay := NewPaneModel("pane-o", 1024)
+	overlay.Type = overlayPluginLazygit
 	tab.overlayPane = overlay
 	tab.overlayVisible = true
 
@@ -733,7 +745,7 @@ func TestCreateOverlay_DefenseInDepth_UnavailableFlashes(t *testing.T) {
 	m.pluginRegistry.Get("lazygit").Available = false
 
 	// Call createOverlay directly, bypassing handleToggleLazygit.
-	cmd := m.createOverlay(tab, repo)
+	cmd := m.createOverlay(tab, repo, overlayPluginLazygit)
 	runCmd(cmd)
 
 	if m.flashText == "" {

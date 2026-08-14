@@ -21,6 +21,7 @@ const (
 	ctxActFocus
 	ctxActNotes
 	ctxActLazygit
+	ctxActHunk
 	ctxActRename
 	ctxActMute
 	ctxActAttention
@@ -86,20 +87,26 @@ var (
 	ctxMenuDisabledStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240")) // same grey as uninstalled plugins in Ctrl+N
 )
 
-// buildCtxMenuItems resolves the 10 menu rows for a target pane. Labels are
+// buildCtxMenuItems resolves the 11 menu rows for a target pane. Labels are
 // state-dependent (mute/attention toggles); gates mirror the keybinding
 // handlers exactly: history needs the plugin's record_history opt-in (the
-// kb.CommandHistory probe), lazygit needs an installed binary (the
-// handleToggleLazygit availability gate).
+// kb.CommandHistory probe), each overlay tool needs its own installed binary
+// (the handleToggleOverlay availability gate).
 func (m *Model) buildCtxMenuItems(pane *PaneModel) []ctxMenuItem {
 	historyOK := false
 	lazygitOK := false
+	hunkOK := false
 	if m.pluginRegistry != nil {
 		if p := m.pluginRegistry.Get(pane.Type); p != nil {
 			historyOK = p.Command.RecordHistory
 		}
-		if p := m.pluginRegistry.Get("lazygit"); p != nil {
+		// Each overlay tool is gated on its OWN binary: they share a slot, not
+		// an installation.
+		if p := m.pluginRegistry.Get(overlayPluginLazygit); p != nil {
 			lazygitOK = p.Available
+		}
+		if p := m.pluginRegistry.Get(overlayPluginHunk); p != nil {
+			hunkOK = p.Available
 		}
 	}
 	muteLabel := "Mute notifications"
@@ -149,7 +156,8 @@ func (m *Model) buildCtxMenuItems(pane *PaneModel) []ctxMenuItem {
 		{ctxActHistory, "Input history", historyOK, false},
 		{ctxActFocus, focusLabel, true, false},
 		{ctxActNotes, "Open notes", true, false},
-		{ctxActLazygit, "Open lazygit", lazygitOK, true},
+		{ctxActLazygit, "Open lazygit", lazygitOK, false},
+		{ctxActHunk, "Open hunk", hunkOK, true},
 		{ctxActRename, "Rename pane", true, false},
 		{ctxActMute, muteLabel, true, false},
 		{ctxActAttention, attnLabel, true, false},
@@ -571,7 +579,7 @@ func (m Model) executeCtxMenuItem(item ctxMenuItem) (tea.Model, tea.Cmd) {
 	//
 	// The refusal is UNIFORM, including the two items that resolve paneID
 	// directly (ctxActAttention/ctxActClearAttention) and could still have acted
-	// correctly: one menu is one surface, and "two of ten rows work after the
+	// correctly: one menu is one surface, and "two of eleven rows work after the
 	// tab moved" is a rule nobody can hold. The remedy is a second right-click.
 	// It is checked BEFORE the focus sync below, so a refused execute leaves no
 	// half-applied focus on a background tab either.
@@ -603,6 +611,8 @@ func (m Model) executeCtxMenuItem(item ctxMenuItem) (tea.Model, tea.Cmd) {
 		return m.toggleNotesMode()
 	case ctxActLazygit:
 		return m, m.handleToggleLazygit()
+	case ctxActHunk:
+		return m, m.handleToggleHunk()
 	case ctxActRename:
 		return m.beginPaneRename()
 	case ctxActMute:

@@ -228,3 +228,62 @@ func TestEnsureDefaultPlugins_WritesLazysql(t *testing.T) {
 		t.Errorf("read_only ArgsWhenOn = %v, want [--read-only]", tog.ArgsWhenOn)
 	}
 }
+
+// TestDefaultHunk_SpawnsTheDiffSubcommand pins the two properties that make
+// the bundled hunk plugin actually run a diff viewer.
+//
+// `hunk` on its own prints help — the subcommand is what makes it a TUI, and
+// it lives in the plugin's BASE args. resolveSpawnArgs REPLACES those base args
+// with InstanceArgs whenever a pane has any (daemon.go), and the setup dialog
+// builds InstanceArgs out of enabled `[[command.toggles]]`. So a toggle added
+// to this plugin would spawn `hunk --whatever`, silently dropping `diff` and
+// leaving the pane on a help screen. Both halves are asserted together because
+// either one alone is satisfiable while the pane stays broken.
+func TestDefaultHunk_SpawnsTheDiffSubcommand(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := EnsureDefaultPlugins(dir); err != nil {
+		t.Fatalf("EnsureDefaultPlugins: %v", err)
+	}
+	r := NewRegistry()
+	if err := r.LoadFromDir(dir); err != nil {
+		t.Fatalf("LoadFromDir: %v", err)
+	}
+	p := r.Get("hunk")
+	if p == nil {
+		t.Fatal("hunk plugin missing from the embedded defaults")
+	}
+	if p.Command.Cmd != "hunk" {
+		t.Errorf("Cmd = %q, want hunk", p.Command.Cmd)
+	}
+	if len(p.Command.Args) != 1 || p.Command.Args[0] != "diff" {
+		t.Errorf("Args = %v, want [diff]", p.Command.Args)
+	}
+	if len(p.Command.Toggles) != 0 {
+		t.Errorf("Toggles = %v; a toggle's args replace the base args, dropping the diff subcommand", p.Command.Toggles)
+	}
+}
+
+// TestDefaultHunk_ResolvesRepoFromTheWorkingDirectory: hunk has no --path/-C
+// flag, so the repository it reviews comes from the spawn CWD alone. That makes
+// prompts_cwd + discover="git" load-bearing rather than cosmetic: without them
+// the pane opens wherever the daemon happens to be.
+func TestDefaultHunk_ResolvesRepoFromTheWorkingDirectory(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := EnsureDefaultPlugins(dir); err != nil {
+		t.Fatalf("EnsureDefaultPlugins: %v", err)
+	}
+	r := NewRegistry()
+	if err := r.LoadFromDir(dir); err != nil {
+		t.Fatalf("LoadFromDir: %v", err)
+	}
+	p := r.Get("hunk")
+	if p == nil {
+		t.Fatal("hunk plugin missing from the embedded defaults")
+	}
+	if !p.Command.PromptsCWD {
+		t.Error("PromptsCWD = false; the CWD is the only thing that scopes hunk to a repo")
+	}
+	if p.Command.Discover != "git" {
+		t.Errorf("Discover = %q, want git", p.Command.Discover)
+	}
+}

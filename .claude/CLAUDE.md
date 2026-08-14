@@ -129,7 +129,7 @@ package-specific moved to `.claude/rules/*.md`, each gated by a `paths:` glob so
 | `daemon-lifecycle.md` | `internal/daemon/`, `internal/ipc/`, `internal/persist/`, `internal/ringbuf/`, `cmd/quild/` | IPC queues, startup guards, readiness wait, restart/shutdown, restore, snapshots, ghost buffers, logging |
 | `hooks-and-sessions.md` | `internal/claudehook/`, `opencodehook/`, `hookevents/`, `claudesessions/`, `tui/workstate.go`, `modelinfo.go` | hook producers, session-id rotation, hook-events pipeline, work-in-progress indicators |
 | `windows-pty.md` | `internal/pty/`, any `*_windows.go`, `tui/consolefix*.go` | ConPTY + bundled OpenConsole, console-mode restore, window geometry, spawn-size healing |
-| `plugins.md` | `internal/plugin/`, `gitdiscover/`, `kubediscover/`, `defaults/*.toml`, `tui/instances.go`, `overlay.go` | plugin schema + registry, instances, `discover`/`sessions` opt-ins, lazygit/k9s/lazysql |
+| `plugins.md` | `internal/plugin/`, `gitdiscover/`, `kubediscover/`, `defaults/*.toml`, `tui/instances.go`, `overlay.go` | plugin schema + registry, instances, `discover`/`sessions` opt-ins, the shared overlay slot, lazygit/hunk/k9s/lazysql |
 | `auto-update.md` | `internal/update/`, `cmd/quil/update_apply.go`, `daemon/update.go`, `tui/update.go` | update check, staging, rename-aside swap + rollback |
 | `projects.md` | `daemon/project.go`, `daemon/gitcache.go`, `daemon/worktree*.go`, `internal/gitinfo/`, `internal/gitworktree/`, `tui/project*.go`, `tui/worktree_client.go`, `sidebar.go`, `router.go`, `dialdest.go`, `attention.go` | projects above tabs, multi-daemon routing, runtime connect/disconnect, the project form, sidebar layout, git subsystem, worktree creation |
 | `dev-environment.md` | *(always on)* | production-isolation rule — never touch the running production daemon |
@@ -225,7 +225,7 @@ Cached reference repos:
 | M1 | Done | Foundation — daemon, TUI, IPC, PTY, tabs, splits, shell integration, mouse, scrollback, lifecycle |
 | M2 | Done | Persistence — workspace snapshots, ghost buffers, shell respawn, reboot-proof sessions |
 | M3 | Done | Resume engine — `preassign_id`, `session_scrape`, `rerun` strategies |
-| M4 | Done | Plugin system — typed panes, TOML plugins, registry, error handlers, Ctrl+N dialog, 8 built-ins |
+| M4 | Done | Plugin system — typed panes, TOML plugins, registry, error handlers, Ctrl+N dialog, 9 built-ins |
 | M5 | **In progress** | Polish — setup dialog, spatial nav, clipboard image paste, leveled logger, log rotation, lazy restore, IPC backpressure, lazygit, split drag-resize, resume picker. Remaining: JSON transformer, encrypted tokens, OS service install |
 | M6 | Done | Pane focus — Ctrl+E full-screen active pane |
 | M7 | Done | Pane notes — Alt+E editor bound per pane, three save safety nets |

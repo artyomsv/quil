@@ -183,6 +183,23 @@ func TestDefault_ToggleLazygitBinding(t *testing.T) {
 	}
 }
 
+// TestDefault_ToggleHunkBinding pins alt+d rather than the more obvious alt+h.
+//
+// Alt+H is a documented deliberate PTY passthrough (see the PaneLeft comment in
+// config.go and .claude/rules/tui-rendering.md): it is left unbound at the
+// global level so it reaches the child process, alongside Alt+V, which
+// claude-code uses for image paste. Binding it here would take that away
+// silently from every pane.
+func TestDefault_ToggleHunkBinding(t *testing.T) {
+	cfg := config.Default()
+	if cfg.Keybindings.ToggleHunk != "alt+d" {
+		t.Errorf("ToggleHunk = %q, want alt+d", cfg.Keybindings.ToggleHunk)
+	}
+	if cfg.Keybindings.ToggleHunk == "alt+h" {
+		t.Error("alt+h is reserved for the PTY passthrough — see tui-rendering.md")
+	}
+}
+
 func TestDefaultKeybindings_CommandHistory(t *testing.T) {
 	cfg := config.Default()
 	if cfg.Keybindings.CommandHistory != "alt+shift+i" {

@@ -29,6 +29,7 @@ A capability-by-capability tour of what Quil does. For configuration knobs, see 
   - [Resume a past session at pane creation](#resume-a-past-session-at-pane-creation)
   - [Custom plugins via TOML](#custom-plugins-via-toml)
   - [Lazygit integration](#lazygit-integration)
+  - [Hunk integration](#hunk-integration)
   - [k9s integration](#k9s-integration)
   - [lazysql integration](#lazysql-integration)
 - [Observability](#observability)
@@ -149,9 +150,9 @@ The default is `Alt+Shift+P` because `Ctrl+Shift+P` (the VS Code key) is interce
 
 ### Pane context menu
 
-Right-click a pane (with no text selection active — a selection still copies, unchanged) or press `Alt+A` (`quick_actions`, active pane) to open a popup with 10 actions: Input history, Enter/Exit focus mode, Open notes, Open lazygit, Rename pane, Mute/Unmute notifications, Mark/Unmark attention, Clear attention, Restart pane… (confirm), Close pane… (confirm). The menu shows the target pane's name as a header, and the target pane gets a blue highlight border while the menu is open. Hovering the mouse highlights the row under the cursor; `↑`/`↓`/`k`/`j` also navigate (disabled rows are skipped), `Enter` or a click executes, `Esc` or a click outside closes, and right-clicking another pane re-targets the menu. Action groups (view actions / pane settings / destructive) are separated by a blank line, keeping Restart/Close visually isolated (the menu falls back to a compact layout on short terminals).
+Right-click a pane (with no text selection active — a selection still copies, unchanged) or press `Alt+A` (`quick_actions`, active pane) to open a popup with 11 actions: Input history, Enter/Exit focus mode, Open notes, Open lazygit, Open hunk, Rename pane, Mute/Unmute notifications, Mark/Unmark attention, Clear attention, Restart pane… (confirm), Close pane… (confirm). The menu shows the target pane's name as a header, and the target pane gets a blue highlight border while the menu is open. Hovering the mouse highlights the row under the cursor; `↑`/`↓`/`k`/`j` also navigate (disabled rows are skipped), `Enter` or a click executes, `Esc` or a click outside closes, and right-clicking another pane re-targets the menu. Action groups (view actions / pane settings / destructive) are separated by a blank line, keeping Restart/Close visually isolated (the menu falls back to a compact layout on short terminals).
 
-Three rows grey out when unavailable: **Input history** unless the pane's plugin sets `record_history` (Claude Code), **Open lazygit** when the `lazygit` binary isn't installed, and **Clear attention** when the pane carries no mark to clear.
+Four rows grey out when unavailable: **Input history** unless the pane's plugin sets `record_history` (Claude Code), **Open lazygit** and **Open hunk** when their binaries aren't installed (each gated on its own), and **Clear attention** when the pane carries no mark to clear.
 
 **Mark attention** pins a purple `◆` on the pane — deliberately not the green of the automatic "work finished, unseen" mark, because only one of the two clears itself. The pin survives focusing the pane and goes away only via **Unmark attention** or **Clear attention**.
 
@@ -288,6 +289,29 @@ See the full [plugin reference](plugin-reference.md) for every field.
   Overlays are ephemeral: they don't survive a daemon restart (one keypress
   recreates them). Quit lazygit (`q`) and the overlay pane is destroyed
   automatically; the next Alt+G starts fresh.
+
+### Hunk integration
+
+[hunk](https://github.com/modem-dev/hunk) is a review-first diff viewer — built
+for reading changes an agent just wrote, which is most of what a Quil workspace
+produces.
+
+- **Hunk plugin** (Ctrl+N → Tools → Hunk): opens `hunk diff` as a regular pane,
+  with the same git-repo directory step lazygit uses. Only offered when the
+  `hunk` binary is installed (`npm i -g hunkdiff`, `brew install hunk`, or
+  `mise use -g hunk`).
+- **Overlay (Alt+D)**: toggles a full-tab review of the working tree for the
+  repo resolved from the active pane's directory — same lifecycle as the
+  lazygit overlay above.
+
+**Alt+G and Alt+D share one overlay slot per tab.** Pressing the other tool's
+key while an overlay is on screen *swaps* tools rather than opening a second
+one, so the outgoing tool's process ends and its UI state is lost. Each key
+still hides its own overlay, and each is offered only when its own binary is
+installed.
+
+Hunk takes no repository flag — it reviews whatever repository its working
+directory sits in — so the directory the pane spawns in is what scopes it.
 
 ### k9s integration
 

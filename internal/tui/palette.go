@@ -57,6 +57,7 @@ const (
 	palActEager
 	palActHistory
 	palActLazygit
+	palActHunk
 	palActRestartPane
 	palActClosePane
 	palActNewTab
@@ -289,7 +290,7 @@ func (m *Model) buildPaletteCommands() []paletteCommand {
 	header := func(label string) { cmds = append(cmds, paletteCommand{header: true, label: label}) }
 
 	// Per-active-pane gates + toggle labels.
-	historyOK, lazygitOK := false, false
+	historyOK, lazygitOK, hunkOK := false, false, false
 	muteLabel, eagerLabel := "Mute notifications", "Enable eager restore"
 	if tab := m.activeTabModel(); tab != nil {
 		if p := tab.ActivePaneModel(); p != nil {
@@ -306,9 +307,14 @@ func (m *Model) buildPaletteCommands() []paletteCommand {
 			}
 		}
 	}
+	// Each overlay tool is gated on its OWN binary: they share a tab's overlay
+	// slot, not an installation.
 	if m.pluginRegistry != nil {
-		if pl := m.pluginRegistry.Get("lazygit"); pl != nil {
+		if pl := m.pluginRegistry.Get(overlayPluginLazygit); pl != nil {
 			lazygitOK = pl.Available
+		}
+		if pl := m.pluginRegistry.Get(overlayPluginHunk); pl != nil {
+			hunkOK = pl.Available
 		}
 	}
 
@@ -493,6 +499,7 @@ func (m *Model) buildPaletteCommands() []paletteCommand {
 		paletteCommand{action: palActEager, enabled: true, label: eagerLabel, detail: kbDisplay(kb.ToggleEager), keywords: []string{"eager", "restore", "restart"}},
 		paletteCommand{action: palActHistory, enabled: historyOK, label: "Input history", detail: kbDisplay(kb.CommandHistory), keywords: []string{"history", "prompts"}},
 		paletteCommand{action: palActLazygit, enabled: lazygitOK, label: "Open lazygit", detail: kbDisplay(kb.ToggleLazygit), keywords: []string{"git", "lazygit"}},
+		paletteCommand{action: palActHunk, enabled: hunkOK, label: "Open hunk", detail: kbDisplay(kb.ToggleHunk), keywords: []string{"git", "hunk", "diff", "review"}},
 		paletteCommand{action: palActNewPane, enabled: true, label: "New pane…", detail: "ctrl+n", keywords: []string{"create", "plugin", "claude", "terminal"}},
 		paletteCommand{action: palActRestartPane, enabled: true, label: "Restart pane…", detail: kbDisplay(kb.RestartPane), keywords: []string{"restart", "respawn"}},
 		paletteCommand{action: palActClosePane, enabled: true, label: "Close pane…", detail: kbDisplay(kb.ClosePane), keywords: []string{"close", "kill"}},
@@ -1061,6 +1068,8 @@ func (m Model) executePaletteCommand(c paletteCommand) (tea.Model, tea.Cmd) {
 		return m.openHistoryForActivePane()
 	case palActLazygit:
 		return m, m.handleToggleLazygit()
+	case palActHunk:
+		return m, m.handleToggleHunk()
 	case palActRestartPane:
 		return m.openRestartPaneConfirm()
 	case palActClosePane:

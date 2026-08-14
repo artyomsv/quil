@@ -44,6 +44,7 @@ run (user copies override them):
 | **SSH** | POC | `rerun` — reconnect with same args | M4 |
 | **Stripe** | POC | `rerun` — re-listen with same webhook URL | M4 |
 | **lazygit** | Tool | `rerun` — plus per-tab `Alt+G` overlay | v1.22.0 |
+| **hunk** | Tool | `rerun` — plus per-tab `Alt+D` overlay, sharing lazygit's slot | Unreleased |
 | **k9s** | Tool | `rerun` — kube-context pick via `discover = "kube"` | v1.27.0 |
 | **lazysql** | Tool | `rerun` — connections stay in lazysql's manager | v1.28.0 |
 

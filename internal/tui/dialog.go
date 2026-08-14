@@ -470,6 +470,7 @@ func shortcutsList(m *Model) []struct{ key, desc string } {
 		{kbDisplay(kb.ToggleEager), "Toggle eager restore (active pane)"},
 		{kbDisplay(kb.ToggleWrap), "Toggle preview soft-wrap (AI pane)"},
 		{kbDisplay(kb.ToggleLazygit), "Toggle lazygit overlay for current repo"},
+		{kbDisplay(kb.ToggleHunk), "Toggle hunk diff overlay for current repo"},
 		{"", ""},
 		{"", "── Projects ──"},
 		{kbDisplay(kb.SidebarToggle), "Toggle project sidebar"},
@@ -1037,15 +1038,17 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleGitRepoPickKey drives the Alt+G multi-repo picker: a plain list of
-// git repos found near the active pane's CWD. Enter opens the lazygit
-// overlay for the highlighted repo; Esc cancels.
+// handleGitRepoPickKey drives the Alt+G / Alt+H multi-repo picker: a plain
+// list of git repos found near the active pane's CWD. Enter opens the overlay
+// for the highlighted repo, running whichever tool opened the picker
+// (m.repoPickPlugin); Esc cancels.
 func (m Model) handleGitRepoPickKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 	switch key {
 	case "esc":
 		m.dialog = dialogNone
 		m.repoPickCandidates = nil
+		m.repoPickPlugin = ""
 		return m, tea.ClearScreen
 	case "up", "k":
 		if m.dialogCursor > 0 {
@@ -1062,8 +1065,10 @@ func (m Model) handleGitRepoPickKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		repo := m.repoPickCandidates[m.dialogCursor]
+		pick := m.repoPickPlugin
 		m.dialog = dialogNone
 		m.repoPickCandidates = nil
+		m.repoPickPlugin = ""
 		tab := m.activeTabModel()
 		if tab == nil {
 			return m, tea.ClearScreen
@@ -1071,7 +1076,7 @@ func (m Model) handleGitRepoPickKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// createOverlay uses a pointer receiver so it mutates m directly
 		// (Go takes &m on a value-receiver local variable). The returned m
 		// reflects all mutations including pendingOverlayShow.
-		return m, tea.Batch(tea.ClearScreen, m.createOverlay(tab, repo))
+		return m, tea.Batch(tea.ClearScreen, m.createOverlay(tab, repo, pick))
 	}
 	return m, nil
 }
@@ -1491,7 +1496,14 @@ func (m Model) renderConfirmDialog() string {
 func (m Model) renderGitRepoPickDialog() string {
 	var b strings.Builder
 
-	b.WriteString(dialogTitle.Render("Open lazygit for which repo?"))
+	// Names the tool the picker will actually spawn: Alt+G and Alt+H share this
+	// dialog, and a title that always said "lazygit" would be a lie half the
+	// time — on the one screen where the user commits to a repository.
+	tool := m.repoPickPlugin
+	if tool == "" {
+		tool = overlayPluginLazygit
+	}
+	b.WriteString(dialogTitle.Render("Open " + tool + " for which repo?"))
 	b.WriteString("\n\n")
 
 	// gitRepoPickWidth - 4: 2 for cursor marker, 2 for dialog border padding.
@@ -2949,7 +2961,7 @@ func (m *Model) enterSetupOrSplit(p *plugin.PanePlugin) tea.Cmd {
 			// be any candidates isn't known until the answer lands, so the
 			// recent-locations/browser fallback that used to run right below
 			// this branch now runs in applyGitReposPickList instead.
-			browseCmd = m.requestGitRepos(base, "", repoScanPickList)
+			browseCmd = m.requestGitRepos(base, "", repoScanPickList, "")
 		} else {
 			browseCmd = m.fallbackToRecentOrBrowser()
 		}

@@ -41,36 +41,3 @@ func main() {
 	}
 	notify.RunActivation(scheme, raw, notify.ActivationLogger(home))
 }
-
-// parseArgs reads the three values `quil notify setup` writes into the registry
-// command: the scheme to validate against, the QUIL_HOME to log into, and the
-// URI Windows substitutes for %1.
-//
-// Hand-parsed rather than through the flag package, which prints usage to a
-// stderr that does not exist here and calls os.Exit(2) on anything unexpected —
-// producing, from a URI handler, exactly the silent failure this whole file is
-// about. Unknown flags are ignored for the same reason: an older registry entry
-// written by a future version must degrade, not die.
-func parseArgs(args []string) (scheme, home, raw string) {
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--scheme":
-			if i+1 < len(args) {
-				i++
-				scheme = args[i]
-			}
-		case "--home":
-			if i+1 < len(args) {
-				i++
-				home = args[i]
-			}
-		default:
-			// The first bare argument is the URI. Later ones are ignored: a
-			// click delivers exactly one.
-			if raw == "" {
-				raw = args[i]
-			}
-		}
-	}
-	return scheme, home, raw
-}

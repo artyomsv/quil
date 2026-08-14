@@ -20,7 +20,13 @@ tell is `Targets scanned: 0` in the JSON `paths.scanned`.
 **How to apply:** copy the changed files into a non-git scratch dir preserving
 their relative paths, mount THAT as `/src`, and always assert
 `paths.scanned.Count` matches the file count before trusting a zero-finding
-result. Relates to [[project_remote_daemon_taint]] only in that both are about
+result. Capture the JSON with `--json-output=/src/out.json` and read that file —
+piping stdout through `Select-Object -Last N` truncates the single-line JSON to
+semgrep's trailing banner, which then parses as "0 scanned, 0 findings" and
+looks exactly like the worktree no-op. Go needs `--config p/golang`
+(`p/java|python|typescript` match nothing); expect a `Timeout` entry in
+`errors[]` for `math-random-used` on large files — that rule did not run.
+Relates to [[project_remote_daemon_taint]] only in that both are about
 not trusting a confident-looking empty answer.
 
 Two things that make `paths.scanned` read short WITHOUT the worktree bug being

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.58.0] - 2026-08-14
+
 ### Added
 - **`Ctrl+T` asks what the new tab should open with.** A new tab always came up
   holding a shell, so opening one for an agent meant creating the tab, then

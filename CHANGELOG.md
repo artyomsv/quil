@@ -10,8 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **Desktop notifications on Windows.** When an agent parks waiting on you, or
   finishes a turn while you were away, Windows raises a toast naming the
-  project, tab and pane — and clicking it brings the terminal forward on that
-  exact pane, focused and ready to type. It fires on the same two
+  project, tab and pane — and clicking it switches Quil to that exact pane and
+  focuses it, so switching to the terminal lands you where the toast was sending
+  you. (The terminal window is not raised for you: Windows does not let an
+  application take the foreground from a notification click, and highlights the
+  taskbar button instead.) It fires on the same two
   states the project sidebar already marks (▲ and ✓) and no others, only while
   you are not looking at that pane — another tab, another project or another
   application all count. Six agents finishing together give six separately
@@ -32,15 +35,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Linux can carry a click back to a specific pane.
 
 ### Fixed
-- **Clicking a toast no longer flashes a window and drops your keyboard.** The
-  click handler was a console program, so Windows gave it a console *window*
-  that appeared in front of you, took the foreground, and vanished when the
-  handler exited — leaving focus on a window that no longer existed, which is
-  why typing straight after a click reached neither the raised pane nor the app
-  you came from. Clicks are now handled by `quil-activate.exe`, linked as a GUI
-  binary so no console is ever created for it. **Upgrading from an earlier
-  build: re-run `quil notify setup`** — the handler is registered by path, so an
-  existing registration keeps pointing at the old one.
 - **A turn that finished while Quil was behind another window no longer counts
   as seen.** Whether you saw a completed turn was decided from the pane's
   position on screen alone, so a pane you left on screen when you switched to
@@ -49,16 +43,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   something and switching away, the commonest sequence there is, was exactly the
   case that produced nothing. Being seen now requires the window to have focus
   as well, and returning to it still acknowledges the pane you land on.
-- **Clicking a toast no longer leaves the keyboard in limbo.** The window came
-  forward with the right pane selected, but nothing held keyboard focus —
-  typing reached neither the raised pane nor the app you had been in, so you had
-  to click the pane before you could type. Raising a window uses per-thread
-  Windows calls, and they were being made from a goroutine that can move
-  between OS threads mid-sequence, so the activation was never completed. The
-  raise now runs pinned to one thread, completes the activation in the target
-  window's own input queue, and verifies the window really ended up in the
-  foreground instead of trusting the call that asked. A raise that fails is
-  recorded in `notify-activate.log` beside the other logs.
 - **A pane raised from outside the pane area now takes focus properly.** Jumping
   to a pane set it as active for keyboard input but never set its focus flag, so
   it arrived with no cursor drawn and the pane you came from still wearing the

@@ -169,26 +169,11 @@ func runNotifyStatus(opts notify.Options) {
 	fmt.Printf("  done:       %v\n", d.Done)
 	fmt.Printf("  cooldown:   %s\n", d.CooldownDuration())
 
-	// Reported here because it decides whether clicking a toast can bring the
-	// terminal forward, and nothing else the user can run will tell them.
-	if lock, err := notify.ForegroundLockTimeout(); err == nil {
-		fmt.Printf("\nForeground lock: %s\n", lock)
-		if lock > 0 {
-			fmt.Printf(`
-  Windows will not let an application take focus for this long after you
-  interact with a different one, so clicking a toast can switch Quil to the
-  right pane without bringing its window forward. Quil does not change this
-  setting: it is system-wide, other applications rely on it, and rewriting it
-  to suit one feature is not Quil's call.
-
-  To allow it, set HKCU\Control Panel\Desktop\ForegroundLockTimeout to 0 and
-  sign out and back in. The toast will still route correctly either way.
-`)
-		}
-	}
-
 	fmt.Printf("\nToasts fire for any pane you are not looking at — another tab, another\n")
 	fmt.Printf("project, or another application. The pane on screen never toasts.\n")
+	fmt.Printf("Clicking one switches Quil to that pane; bring the terminal forward\n")
+	fmt.Printf("yourself — Windows does not let an application take focus from a\n")
+	fmt.Printf("notification click.\n")
 }
 
 // runNotifyTest sends one canary toast.
@@ -283,4 +268,3 @@ func handleActivate() {
 	}
 	notify.RunActivation(notifyVariant().Scheme, os.Args[2], notify.ActivationLogger(config.QuilDir()))
 }
-

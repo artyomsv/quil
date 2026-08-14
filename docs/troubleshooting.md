@@ -226,46 +226,36 @@ quil notify setup
 
 ## Clicking a toast switches panes but does not bring the window forward
 
-**First, if you upgraded from a build before `quil-activate.exe` existed:
-re-run `quil notify setup`.** The click handler is registered in the registry
-by path, so an existing registration keeps pointing at the old console-based
-handler until setup rewrites it. `quil notify status` shows what is registered.
+That is the intended behaviour, and it is a limit of Windows rather than a
+setting you are missing.
 
-That handler is a console program, so Windows gave it a console *window* — one
-that appears in front of you, takes the foreground, and then disappears when the
-handler exits, leaving focus nowhere. `quil-activate.exe` is linked as a GUI
-binary purely so no console is ever created for it.
+Clicking a notification hands the foreground to the shell's notification host,
+and it keeps it — measured on one machine at 5.5 seconds for one click and more
+than 10 for the next, released when the user next does something rather than on
+any timer. For as long as it holds the foreground, every documented way of
+taking it is refused; by the time it lets go, you have moved on, and a window
+appearing then interrupts rather than helps. Windows highlights the taskbar
+button instead, which is its own way of saying an application wants you.
 
-Beyond that, raising the window is a real thing Quil does, and if it is not
-happening the log says why:
+So a click switches Quil to the right project, tab and pane and focuses that
+pane. Switch to the terminal when you are ready and you are already where the
+toast was sending you.
+
+If a click seems to do nothing at all, the handler records every one:
 
 ```bash
 tail -3 ~/.quil/notify-activate.log
 ```
 
-`raised … via hotkey` is the normal, working line. `raise failed …` means Windows
-declined, and it names the foreground lock timeout in force at that moment.
+- `routed pane … to pid …` — the click was delivered
+- `no listener for pane … (pid …)` — the toast outlived the Quil that showed it
+- `refused malformed activation URI` — something invoked `quil://` with a
+  payload Quil will not act on
 
-Windows only lets an application take the foreground under conditions that are
-not up to the application: no menus may be active, the current foreground
-process must not have locked the foreground, and the asking process must qualify
-somehow — by already being in front, by having been started by whoever is, or by
-having received the last input event. While a notification is being clicked the
-shell holds that lock, which is why merely asking is always refused. Quil
-satisfies the conditions instead of asking repeatedly: it registers and injects
-a keystroke for **F22** — a key no keyboard has and nothing binds — which
-releases the lock and makes Quil the recipient of the last input event. This is
-the same technique Chromium uses.
-
-`ForegroundLockTimeout` (default **200000 ms**, 3m20s), reported by
-`quil notify status`, is a *different* setting and is deliberately left alone.
-It covers only the "qualify somehow" half, so changing it does not make a raise
-work on its own — measured, not assumed. It is system-wide, every application
-depends on it, and `quil notify setup` writes nothing you did not ask for.
-
-Known limitation: Windows Terminal hosts many tabs in one window and exposes no
-way to select one, so this raises the *window*. If Quil shares a Windows
-Terminal window with other tabs, you may still land on a different tab.
+**If you upgraded from a build before `quil-activate.exe` existed, re-run
+`quil notify setup`.** The handler is registered by path, so an existing
+registration keeps pointing at the old console-based one until setup rewrites
+it — and that one flashes a console window on every click.
 
 To undo everything Quil wrote:
 

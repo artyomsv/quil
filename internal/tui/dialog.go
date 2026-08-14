@@ -1496,14 +1496,17 @@ func (m Model) renderConfirmDialog() string {
 func (m Model) renderGitRepoPickDialog() string {
 	var b strings.Builder
 
-	// Names the tool the picker will actually spawn: Alt+G and Alt+H share this
-	// dialog, and a title that always said "lazygit" would be a lie half the
-	// time — on the one screen where the user commits to a repository.
-	tool := m.repoPickPlugin
-	if tool == "" {
-		tool = overlayPluginLazygit
-	}
-	b.WriteString(dialogTitle.Render("Open " + tool + " for which repo?"))
+	// Names the tool the picker will actually spawn: both overlay toggles share
+	// this dialog, and a title that always said "lazygit" would be a lie half
+	// the time — on the one screen where the user commits to a repository.
+	//
+	// Deliberately NO fallback for an empty repoPickPlugin. Substituting a tool
+	// name here would have the title disagree with Enter, which passes the raw
+	// value to createOverlay and refuses it — a dialog that named a tool and
+	// then did nothing. The field is set immediately before this dialog opens
+	// and cleared on both exits, so an empty value is a wiring bug, and a
+	// visibly broken title is how it should surface.
+	b.WriteString(dialogTitle.Render("Open " + m.repoPickPlugin + " for which repo?"))
 	b.WriteString("\n\n")
 
 	// gitRepoPickWidth - 4: 2 for cursor marker, 2 for dialog border padding.

@@ -215,21 +215,56 @@ func TestResolveOverlay_NoCandidatesOtherTool_Flashes(t *testing.T) {
 	}
 }
 
-// TestResolveOverlay_HunkUnavailable_NamesHunk: the availability gate must
-// report the tool the user actually pressed a key for.
-func TestResolveOverlay_HunkUnavailable_NamesHunk(t *testing.T) {
+// TestResolveOverlay_HunkUnavailable_NamesHunkAndSkipsThePicker: the
+// availability gate must report the tool the user actually pressed a key for,
+// AND must sit above the picker.
+//
+// The fixture deliberately has TWO candidate repos. With one candidate the test
+// cannot fail for the reason it names: step 5's gate and createOverlay's
+// defense-in-depth re-check produce an identical flash and identical zero
+// sends, so a regression that read the wrong plugin's availability would stay
+// green while doing the exact thing the gate exists to prevent — opening the
+// repo picker on an uninstalled binary, where Enter spawns a doomed pane.
+func TestResolveOverlay_HunkUnavailable_NamesHunkAndSkipsThePicker(t *testing.T) {
 	t.Parallel()
-	repo := gitRepoDir(t)
-	m, fake, tab := overlayTestModel(t, repo)
-	m.pluginRegistry.Get("hunk").Available = false
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"repo-a", "repo-b"} {
+		if err := os.MkdirAll(filepath.Join(base, name, ".git"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m, fake, tab := overlayTestModel(t, base)
+	m.pluginRegistry.Get(overlayPluginHunk).Available = false
 
-	runCmd(toggleOverlayWithDiscovery(m, tab, repo, "hunk"))
+	runCmd(toggleOverlayWithDiscovery(m, tab, base, overlayPluginHunk))
 
-	if !strings.Contains(m.flashText, "hunk") {
+	if !strings.Contains(m.flashText, overlayPluginHunk) {
 		t.Errorf("flash = %q, want it to name hunk", m.flashText)
+	}
+	if m.dialog == dialogGitRepoPick {
+		t.Error("the picker must not open for an uninstalled tool — Enter would spawn a doomed pane")
 	}
 	if len(fake.sent) != 0 {
 		t.Errorf("expected no IPC sends, got %v", debugSentTypes(fake))
+	}
+}
+
+// TestResolveOverlay_LazygitUnavailableDoesNotGateHunk: the two tools share a
+// slot, not an installation. A machine with hunk but no lazygit must still open
+// hunk — the gate has to read the requested plugin's own availability.
+func TestResolveOverlay_LazygitUnavailableDoesNotGateHunk(t *testing.T) {
+	t.Parallel()
+	repo := gitRepoDir(t)
+	m, fake, tab := overlayTestModel(t, repo)
+	m.pluginRegistry.Get(overlayPluginLazygit).Available = false
+
+	runCmd(toggleOverlayWithDiscovery(m, tab, repo, overlayPluginHunk))
+
+	if p := createdPane(t, fake); p.Type != overlayPluginHunk {
+		t.Errorf("Type = %q, want hunk", p.Type)
 	}
 }
 
@@ -288,7 +323,7 @@ func TestHandleOverlayKey_HunkKey_HidesHunkOverlay(t *testing.T) {
 // onto alt+h, this fails instead of silently swallowing the key in every pane.
 func TestHandleOverlayKey_AltH_ReachesThePTY(t *testing.T) {
 	t.Parallel()
-	m, _, tab := overlayTestModel(t, "")
+	m, fake, tab := overlayTestModel(t, "")
 	overlay := NewPaneModel("pane-o", 1024)
 	overlay.Type = "hunk"
 	tab.overlayPane = overlay
@@ -297,7 +332,14 @@ func TestHandleOverlayKey_AltH_ReachesThePTY(t *testing.T) {
 	runCmd(m.handleOverlayKey(tea.KeyPressMsg{Mod: tea.ModAlt, Code: 'h'}, tab))
 
 	if !tab.overlayVisible {
-		t.Error("alt+h must fall through to the PTY, not toggle the overlay")
+		t.Error("alt+h must not toggle the overlay")
+	}
+	// "Did not toggle" alone would also hold if the key were silently dropped,
+	// which is the failure this test exists to catch — so assert the bytes
+	// actually left for the pane. enqueueInput falls back to a synchronous send
+	// when inputCh is nil, which is the case for a Model built by a test.
+	if got := sentTypesFiltered(fake, ipc.MsgPaneInput); len(got) != 1 {
+		t.Errorf("want alt+h forwarded as one MsgPaneInput, got %v", debugSentTypes(fake))
 	}
 }
 
@@ -548,5 +590,88 @@ func TestResolveOverlay_ReplacingAHiddenOverlay_DoesNotRepaint(t *testing.T) {
 
 	if hasClearScreen(cmd) {
 		t.Error("replacing a hidden overlay changes nothing on screen; no repaint should be emitted")
+	}
+}
+
+// ipcLeaves runs a cmd tree leaf-by-leaf in order and returns, per leaf, the
+// IPC message types that leaf sent. A tea.Batch node sends nothing itself, so
+// it contributes no entry — only its children do.
+//
+// This is a STRUCTURAL probe, not a behavioural one, and it has to be: running
+// a batch in a test walks its children sequentially, so a test that only reads
+// fake.sent sees the right order whether or not the order is guaranteed. In
+// production tea.Batch runs each child on its own goroutine with no ordering
+// between them, which is the property under test.
+func ipcLeaves(cmd tea.Cmd, fake *fakeSender) [][]string {
+	var out [][]string
+	var walk func(tea.Cmd)
+	walk = func(c tea.Cmd) {
+		if c == nil {
+			return
+		}
+		before := len(fake.sent)
+		msg := c()
+		if batch, ok := msg.(tea.BatchMsg); ok {
+			for _, child := range batch {
+				walk(child)
+			}
+			return
+		}
+		var types []string
+		for _, m := range fake.sent[before:] {
+			types = append(types, m.Type)
+		}
+		out = append(out, types)
+	}
+	walk(cmd)
+	return out
+}
+
+// TestCreateOverlay_DestroyAndCreateShareOneCmd: replacing an overlay must
+// send MsgDestroyPane and MsgCreatePane from a SINGLE tea.Cmd, destroy first.
+//
+// tea.Batch runs its children on separate goroutines and guarantees nothing
+// about their order — the same property that made keystrokes transpose when
+// pane input was forwarded through per-key Cmds. Here the cost is worse than
+// cosmetic: the daemon runs enforceOverlayCap at CREATE time, so if the create
+// wins the race the outgoing overlay is still counted live, the cap is one
+// over, and the least-recently-SHOWN overlay is evicted to make room. The
+// outgoing one was just on screen, so it sorts newest — the victim is a
+// DIFFERENT tab's overlay, typically a lazygit the user left running (which
+// mutates .git, so killing it mid-rebase is real damage).
+//
+// The tab's single overlay slot is what makes this routine rather than rare:
+// before, this path ran only when the resolved repo differed; now every
+// Alt+G <-> hunk-key tool swap goes through it.
+func TestCreateOverlay_DestroyAndCreateShareOneCmd(t *testing.T) {
+	t.Parallel()
+	repo := gitRepoDir(t)
+	m, fake, tab := overlayTestModel(t, repo)
+	old := NewPaneModel("pane-old", 1024)
+	old.Type = overlayPluginLazygit
+	old.CWD = "/some/other/repo"
+	tab.overlayPane = old
+	tab.overlayVisible = false
+
+	leaves := ipcLeaves(toggleOverlayWithDiscovery(m, tab, repo, overlayPluginHunk), fake)
+
+	var found bool
+	for _, sent := range leaves {
+		hasCreate := false
+		for _, typ := range sent {
+			if typ == ipc.MsgCreatePane {
+				hasCreate = true
+			}
+		}
+		if !hasCreate {
+			continue
+		}
+		found = true
+		if len(sent) < 2 || sent[0] != ipc.MsgDestroyPane || sent[1] != ipc.MsgCreatePane {
+			t.Errorf("the create leaf sent %v; want the destroy and the create from one cmd, destroy first", sent)
+		}
+	}
+	if !found {
+		t.Fatalf("no leaf sent MsgCreatePane; leaves = %v", leaves)
 	}
 }

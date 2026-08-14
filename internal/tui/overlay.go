@@ -12,6 +12,12 @@ import (
 // Plugins that can own a tab's overlay slot. Both are full-tab git tools
 // resolved from the active pane's repository; they differ only in which binary
 // runs and how the repo reaches it.
+//
+// Adding a third? overlayInstanceArgs below switches on the NAME, so a new tool
+// silently inherits the nil-args branch — correct only if it, like hunk, is
+// scoped by its working directory rather than by a repo flag. Check there, and
+// give it a keybinding that is not a documented PTY passthrough (see the
+// PaneLeft comment in internal/config/config.go).
 const (
 	overlayPluginLazygit = "lazygit"
 	overlayPluginHunk    = "hunk"
@@ -389,9 +395,11 @@ func (m *Model) createOverlay(tab *TabModel, repo, pluginName string) tea.Cmd {
 	tabDest := tab.Dest
 
 	// Destroy the old overlay if one exists (different repo, or a different
-	// tool now that the slot is shared).
+	// tool now that the slot is shared). oldID stays empty when there is
+	// nothing to replace; the send below reads it to decide.
+	var oldID string
 	if tab.overlayPane != nil {
-		oldID := tab.overlayPane.ID
+		oldID = tab.overlayPane.ID
 		// Captured before the slot is cleared: overlayVisibilityCmd reads
 		// tab.overlayPane, which is nil by the time this batches below.
 		visCmd := m.overlayVisibilityCmd(tab, false)
@@ -410,15 +418,7 @@ func (m *Model) createOverlay(tab *TabModel, repo, pluginName string) tea.Cmd {
 		tab.overlayPane.Dispose()
 		tab.overlayPane = nil
 		tab.overlayVisible = false
-		cmds = append(cmds, visCmd, func() tea.Msg {
-			msg, err := ipc.NewMessage(ipc.MsgDestroyPane, ipc.DestroyPanePayload{PaneID: oldID})
-			if err != nil {
-				log.Printf("overlay: destroy pane encode: %v", err)
-				return nil
-			}
-			m.sendForDest(tabDest, msg)
-			return nil
-		})
+		cmds = append(cmds, visCmd)
 	}
 
 	// Record that we expect the overlay to appear and auto-show on arrival.
@@ -433,7 +433,34 @@ func (m *Model) createOverlay(tab *TabModel, repo, pluginName string) tea.Cmd {
 	m.pendingOverlayShow[tab.ID] = true
 
 	tabID := tab.ID
+	// The destroy and the create leave in ONE Cmd, destroy first — never as two
+	// siblings of a tea.Batch, which runs its children on separate goroutines
+	// and orders nothing (the same property that transposed keystrokes when
+	// pane input was forwarded per-key through Cmds). The daemon dispatches one
+	// connection's messages in arrival order, so sending them here in sequence
+	// is what makes the replace atomic from its point of view.
+	//
+	// Losing that race is not cosmetic: enforceOverlayCap runs at CREATE time
+	// and counts every live overlay, so a create that arrives first sees the
+	// outgoing overlay still alive, finds itself one past [overlay] max_live,
+	// and evicts the least recently SHOWN overlay to make room. The outgoing one
+	// was just on screen, so it sorts newest and survives — the overlay that
+	// dies is a DIFFERENT tab's, typically a lazygit left running elsewhere,
+	// which mutates .git and may be mid-rebase. The shared slot is what makes
+	// this routine rather than rare: this path used to run only when the
+	// resolved repo differed, and now every tool swap goes through it.
 	cmds = append(cmds, func() tea.Msg {
+		if oldID != "" {
+			msg, err := ipc.NewMessage(ipc.MsgDestroyPane, ipc.DestroyPanePayload{PaneID: oldID})
+			if err != nil {
+				// Fall through to the create: an overlay we failed to destroy is
+				// a leak the idle sweep still reclaims, whereas skipping the
+				// create would leave the user's keypress with nothing to show.
+				log.Printf("overlay: destroy pane encode: %v", err)
+			} else {
+				m.sendForDest(tabDest, msg)
+			}
+		}
 		payload := ipc.CreatePanePayload{
 			TabID:        tabID,
 			CWD:          repo,

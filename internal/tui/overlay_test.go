@@ -606,6 +606,7 @@ func TestGitRepoPick_EscCloses(t *testing.T) {
 	m, fake, _ := overlayTestModel(t, "")
 	m.dialog = dialogGitRepoPick
 	m.repoPickCandidates = []string{"/a", "/b"}
+	m.repoPickPlugin = overlayPluginHunk
 
 	out, _ := m.handleGitRepoPickKey(tea.KeyPressMsg{Code: tea.KeyEscape})
 	got := out.(Model)
@@ -615,6 +616,12 @@ func TestGitRepoPick_EscCloses(t *testing.T) {
 	}
 	if got.repoPickCandidates != nil {
 		t.Errorf("repoPickCandidates = %v, want nil (cleared)", got.repoPickCandidates)
+	}
+	// Cleared alongside the candidates: the two are written together when the
+	// picker opens, and a survivor would have the next picker render a title
+	// naming a tool the current request never asked for.
+	if got.repoPickPlugin != "" {
+		t.Errorf("repoPickPlugin = %q, want cleared", got.repoPickPlugin)
 	}
 	if len(fake.sent) != 0 {
 		t.Errorf("Esc must not send any IPC; got %v", debugSentTypes(fake))

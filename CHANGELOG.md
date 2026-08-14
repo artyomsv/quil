@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Releases publish again.** Since v1.56.0 the release pipeline tagged a new
+  version and then failed before publishing anything, so `quil update` and the
+  install script — which read published releases, not tags — kept offering
+  v1.55.2 while the repository claimed two newer versions. The cause was the
+  Windows-only click-handler added alongside desktop notifications: it shares
+  one archive definition with `quil` and `quild`, so that archive holds three
+  binaries on Windows and two elsewhere, and the packaging step rejects an
+  uneven count unless it is told the difference is deliberate. v1.56.0 and
+  v1.57.0 remain tagged without a published release; this version carries
+  their contents.
+
 ## [1.57.0] - 2026-08-14
 
 ### Added

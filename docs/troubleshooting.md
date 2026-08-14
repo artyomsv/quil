@@ -236,25 +236,36 @@ that appears in front of you, takes the foreground, and then disappears when the
 handler exits, leaving focus nowhere. `quil-activate.exe` is linked as a GUI
 binary purely so no console is ever created for it.
 
-Beyond that, the foreground itself is Windows' decision, and on a default
-install it is what you should expect.
+Beyond that, raising the window is a real thing Quil does, and if it is not
+happening the log says why:
 
-Windows refuses to let an application take focus for a period after you interact
-with a *different* one — the foreground lock, `ForegroundLockTimeout`, which
-defaults to **200000 ms (3m20s)**. A toast fires exactly when you are working
-somewhere else, so that window is always open, and every documented way of
-asking is refused. `quil notify status` prints the value in force on your
-machine.
+```bash
+tail -3 ~/.quil/notify-activate.log
+```
 
-The routing half is unaffected: clicking the toast still moves Quil to the right
-project, tab and pane, and focuses that pane. You alt-tab to the terminal and
-you are already where you needed to be.
+`raised … via hotkey` is the normal, working line. `raise failed …` means Windows
+declined, and it names the foreground lock timeout in force at that moment.
 
-If you would rather Windows allowed it, set
-`HKCU\Control Panel\Desktop\ForegroundLockTimeout` to `0` and sign out and back
-in. That is a **system-wide** change affecting every application, which is why
-Quil reports the setting and never writes it — `quil notify setup` deliberately
-writes nothing you did not ask for.
+Windows only lets an application take the foreground under conditions that are
+not up to the application: no menus may be active, the current foreground
+process must not have locked the foreground, and the asking process must qualify
+somehow — by already being in front, by having been started by whoever is, or by
+having received the last input event. While a notification is being clicked the
+shell holds that lock, which is why merely asking is always refused. Quil
+satisfies the conditions instead of asking repeatedly: it registers and injects
+a keystroke for **F22** — a key no keyboard has and nothing binds — which
+releases the lock and makes Quil the recipient of the last input event. This is
+the same technique Chromium uses.
+
+`ForegroundLockTimeout` (default **200000 ms**, 3m20s), reported by
+`quil notify status`, is a *different* setting and is deliberately left alone.
+It covers only the "qualify somehow" half, so changing it does not make a raise
+work on its own — measured, not assumed. It is system-wide, every application
+depends on it, and `quil notify setup` writes nothing you did not ask for.
+
+Known limitation: Windows Terminal hosts many tabs in one window and exposes no
+way to select one, so this raises the *window*. If Quil shares a Windows
+Terminal window with other tabs, you may still land on a different tab.
 
 To undo everything Quil wrote:
 

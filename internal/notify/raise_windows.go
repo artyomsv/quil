@@ -140,27 +140,42 @@ type raiseAttempt struct {
 
 const (
 	// shellHandoverWait is how long to wait for the notification UI to give the
-	// foreground back before trying to take it. Generous, because the cost of
-	// waiting is invisible (this process has no window) while the cost of
-	// giving up early is the whole feature.
-	shellHandoverWait = 2500 * time.Millisecond
-	shellHandoverPoll = 60 * time.Millisecond
+	// foreground back before trying to take it.
+	//
+	// MEASURED, not guessed. Tracing the foreground window every 60 ms across a
+	// real banner click: the user's window at 10:55:45.274, ShellExperienceHost
+	// taking the foreground at 10:55:51.901 when the banner was clicked, and
+	// giving it back at 10:55:57.358 — it holds it for about 5.5 seconds. An
+	// earlier version of this waited 2.5 s, gave up at 10:55:56, and missed the
+	// handover by 1.4 seconds. The whole feature failed on a constant that was
+	// picked rather than observed.
+	//
+	// Ten seconds leaves room for a slower machine. Waiting costs nothing
+	// visible — this process has no window and the pane routing was delivered
+	// before the wait starts — while giving up early costs the raise entirely.
+	shellHandoverWait = 10 * time.Second
+	shellHandoverPoll = 80 * time.Millisecond
 )
 
 // isModernShellSurface reports whether hwnd is one of the UWP surfaces the
-// shell uses for notifications.
+// shell uses for notifications — i.e. whether the foreground currently belongs
+// to the notification UI rather than to an application.
 //
-// This is the thing that was refusing us, and it took six rounds to see because
-// it is not a permission at all. SetForegroundWindow cannot take the foreground
-// FROM a modern application, full stop — no lock to clear, no right to acquire,
-// no input to generate. Measured at the moment of a real toast click: the
-// foreground was hwnd=5505836 class="Windows.UI.Core.CoreWindow", and it stayed
-// that way through every rung, including one where the injected hotkey was
-// confirmed delivered.
+// It is a "who is holding it" test and nothing more. An earlier version of this
+// comment claimed the foreground cannot be taken from a modern application at
+// all; that is FALSE and was disproved on this machine within the hour — with
+// Calculator foreground (ApplicationFrameWindow), SetForegroundWindow from an
+// ordinary background process succeeded immediately. The class of the incumbent
+// window is not what decides the refusal.
 //
-// So the question was never "how do we win the foreground", it was "when is it
-// ours to take". ApplicationFrameWindow is included because it hosts UWP content
-// in a Win32 frame and behaves the same way.
+// What actually decides it is timing: while the shell is handling a banner
+// click it holds the foreground, and holds it for about five and a half
+// seconds. Every attempt inside that window is refused however well it is
+// implemented, and every attempt after it succeeds. Hence this predicate exists
+// to answer "is the shell still holding it", not "may we take it".
+//
+// ApplicationFrameWindow is included because it hosts UWP content in a Win32
+// frame; a notification surface can appear as either.
 func isModernShellSurface(hwnd uintptr) bool {
 	if hwnd == 0 {
 		return false
@@ -183,10 +198,22 @@ func isModernShellSurface(hwnd uintptr) bool {
 // foreground never becomes takeable and the attempt below simply fails as it
 // did before. Waiting costs nothing visible either way — this process has no
 // window and the pane routing has already been delivered.
-func waitForForegroundHandover() time.Duration {
+func waitForForegroundHandover(entry uintptr) time.Duration {
+	// Nothing to wait for unless the notification UI is the thing holding the
+	// foreground. If the banner never took it — or the user was already in the
+	// terminal — this returns immediately.
+	if !isModernShellSurface(entry) {
+		return 0
+	}
 	start := time.Now()
 	for time.Since(start) < shellHandoverWait {
-		if !isModernShellSurface(currentForeground()) {
+		// Waits for the foreground to LEAVE the specific window the shell held,
+		// rather than for it to become some class we approve of. The user may
+		// legitimately have been working in a modern application when the toast
+		// arrived, and after the handover the foreground returns THERE — a rule
+		// phrased as "wait until the foreground is not a modern app" would sit
+		// out the entire budget in exactly that case and then act too late.
+		if currentForeground() != entry {
 			break
 		}
 		time.Sleep(shellHandoverPoll)
@@ -424,7 +451,7 @@ func RaiseWindowFor(pid int) (string, error) {
 	// identically no matter how well it is implemented — which is exactly what
 	// the logs showed for six rounds, including a rung whose injected keystroke
 	// was confirmed delivered.
-	handover := waitForForegroundHandover()
+	handover := waitForForegroundHandover(entryForeground)
 
 	var firstErr error
 	for _, cand := range ancestorPIDs(uint32(pid)) {

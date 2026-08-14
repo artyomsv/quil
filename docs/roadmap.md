@@ -547,9 +547,10 @@ review the diff.
 13. **Sound notifications** — audible cue when an agent needs you (both rivals).
     Extends [notification-center](roadmap/notification-center.md).
 14. ~~**OS / desktop notifications**~~ — **shipped for Windows.** Toasts fire on
-    the sidebar's own attention states (parked ▲ / finished ✓) while the
-    terminal is unfocused, and clicking one routes to that exact project, tab
-    and pane through a registered `quil://` handler. Opt-in via
+    the sidebar's own attention states (parked ▲ / finished ✓) for any pane you
+    are not looking at — another tab, another project or another application —
+    and clicking one routes to that exact project, tab and pane through a
+    registered `quil://` handler. Opt-in via
     `quil notify setup`; see
     [Features → Desktop notifications](features.md#desktop-notifications).
     **Still open:** macOS and Linux. The original sketch here named OSC /

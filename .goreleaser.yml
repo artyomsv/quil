@@ -52,8 +52,9 @@ builds:
   # The windowless handler for desktop-toast clicks. Windows only, and
   # -H windowsgui is the entire point: it is what makes the process have no
   # console window. A console binary launched for a click shows a real window
-  # that takes the foreground, so the handler ends up competing with itself for
-  # the focus it is trying to hand to the terminal.
+  # that takes the foreground and then vanishes when the handler exits, leaving
+  # focus on a window that no longer exists — after which the user types into
+  # nothing.
   #
   # amd64 only, matching the other two — the windows/arm64 ignore below is the
   # same exclusion expressed by omission, since this build lists no arm64.

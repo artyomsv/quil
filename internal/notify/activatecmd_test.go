@@ -57,6 +57,26 @@ func TestActivateCommand_FallsBackWhenHelperIsAbsent(t *testing.T) {
 	}
 }
 
+// A trailing separator in QUIL_HOME must not reach the registry. Inside double
+// quotes, CommandLineToArgvW reads a trailing \" as an escaped quote, so the
+// home value swallows the URI that follows and the click silently does nothing.
+func TestActivateCommand_StripsATrailingSeparatorFromHome(t *testing.T) {
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "quil.exe")
+	if err := os.WriteFile(filepath.Join(dir, ActivateHelperName), []byte("stub"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got := activateCommand(Options{Scheme: "quil"}, exe, `D:\quil\`)
+
+	if strings.Contains(got, `\" "%1"`) {
+		t.Errorf("command = %q, want no escaped quote before the URI placeholder", got)
+	}
+	if !strings.HasSuffix(got, `"%1"`) {
+		t.Errorf("command = %q, want it to end with the URI placeholder", got)
+	}
+}
+
 // A DIRECTORY named quil-activate.exe is not a program. Stat alone would accept
 // it and register a command Windows cannot run.
 func TestActivateCommand_IgnoresADirectoryNamedLikeTheHelper(t *testing.T) {

@@ -45,11 +45,21 @@ func parseArgs(args []string) (scheme, home, raw string) {
 			if strings.HasPrefix(args[i], "-") {
 				continue
 			}
-			// The first bare argument is the URI. Later ones are ignored: a
-			// click delivers exactly one.
-			if raw == "" {
-				raw = args[i]
-			}
+			// The first bare argument is the URI, and parsing STOPS there.
+			//
+			// That is a security boundary, not tidiness. Windows substitutes
+			// the clicked URI for %1, which setup writes as the LAST token, so
+			// everything after it was injected by whatever produced the URI. A
+			// quote surviving into the URI closes the one around %1 and the
+			// remainder becomes fresh argv — and continuing to parse would let
+			// it supply its own --home, which activatelog.go turns into an
+			// os.OpenFile path. A UNC path there is an outbound SMB connection
+			// with implicit authentication, from a click.
+			//
+			// Every legitimate flag precedes %1 by construction, so stopping
+			// costs nothing and the degrade-don't-die intent above is intact.
+			raw = args[i]
+			return scheme, home, raw
 		}
 	}
 	return scheme, home, raw

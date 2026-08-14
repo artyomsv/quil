@@ -329,6 +329,11 @@ func (w *winNotifier) tagToast(toast uintptr, tag string) error {
 	if err := hrErr("get_Tag", call(toast2, idxToastGetTag, uintptr(unsafe.Pointer(&got)))); err != nil {
 		return err
 	}
+	// get_Tag hands back a new HSTRING and we own it, exactly like every other
+	// HSTRING in this file. Missed once because this one is read for a
+	// comparison rather than used — one small leak per toast, in a process that
+	// runs for weeks.
+	defer freeHString(got)
 	if v := hstringValue(got); v != tag {
 		return fmt.Errorf("notify: toast tag did not stick (got %q, want %q) — check the IToastNotification2 vtable indices", v, tag)
 	}

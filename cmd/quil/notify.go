@@ -82,7 +82,15 @@ func runNotifySetup(opts notify.Options) {
 	fmt.Printf("\nEnabled by default in config.toml:\n\n")
 	fmt.Printf("  [notification.desktop]\n  enabled = true\n\n")
 	if verified {
-		fmt.Printf("Verified: a test toast was displayed and withdrawn.\n\n")
+		// Deliberately NOT "verified: displayed". Show returns S_OK for an
+		// AUMID Windows has not indexed yet and simply displays nothing — see
+		// notify_windows.go — and the shortcut this command just wrote is
+		// seconds old, which is exactly when that happens. Claiming a display
+		// we cannot observe is how a user ends up trusting a toast path that
+		// never worked. The canary is withdrawn immediately, so they could not
+		// check it either way.
+		fmt.Printf("Sent a verification toast. Windows may not have indexed the new\n")
+		fmt.Printf("shortcut yet — if nothing appeared, retry with:  quil notify test\n\n")
 	} else {
 		fmt.Printf("WARNING: the verification toast could not be displayed. Check\n")
 		fmt.Printf("Settings > System > Notifications, then:  quil notify test\n\n")
@@ -255,9 +263,10 @@ func runNotifyTest(opts notify.Options) {
 func handleActivate() {
 	// FIRST, before argument checking and before anything can take time: this
 	// process was launched by a click, and Windows gave it a console WINDOW
-	// that appears in front of the user and takes the foreground. Every moment
-	// it exists is a moment the handler is competing with itself for the focus
-	// it is trying to hand to the terminal.
+	// that appears in front of the user and takes the foreground — then vanishes
+	// when the handler exits, leaving focus on a window that no longer exists.
+	// Typing straight after a click reached neither the routed pane nor the
+	// application the user came from.
 	//
 	// Ahead of the usage check deliberately — a malformed URI must not leave a
 	// window on screen either, and os.Exit(1) below would strand it.

@@ -3579,8 +3579,9 @@ func (m Model) View() tea.View {
 
 	v := tea.NewView(content)
 	v.AltScreen = true
-	// Desktop toasts are gated on the terminal being unfocused, and this is the
-	// only thing that makes focus knowable. Harmless where unsupported: the
+	// Desktop toasts suppress only for the pane the user is DEMONSTRABLY watching
+	// — which needs window focus as well as on-screen position — and this is the
+	// only thing that makes window focus knowable. Harmless where unsupported: the
 	// terminal ignores the sequence and simply never reports.
 	v.ReportFocus = true
 	v.MouseMode = tea.MouseModeCellMotion

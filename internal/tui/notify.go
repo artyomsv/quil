@@ -148,13 +148,20 @@ func (m *Model) raiseAttentionToast(pane *PaneModel, proj *ProjectModel, wasBloc
 	if m.notifier == nil || !cfg.Enabled || pane == nil || proj == nil {
 		return
 	}
-	// A muted pane is muted everywhere. The sidebar already honours this and a
-	// toast is louder than a sidebar row, so honouring it here is the minimum.
-	if pane.Muted {
-		return
-	}
+	// Muting is checked in emitToast, which BOTH callers go through — it was
+	// checked here as well, silently, so the "suppressed: muted" line emitToast
+	// promises for every suppression path only ever appeared for the deferred
+	// sweep. A rising edge on a muted pane logged nothing at all.
 	if m.userIsWatching(pane.ID) {
-		logger.Debug("notify: suppressed for pane %s: it is the pane on screen", pane.ID)
+		// focusEverReported is named here because this is the one suppression
+		// whose premise can be silently WRONG. termFocused starts true so a
+		// terminal that does not implement DEC 1004 fails quiet rather than
+		// toasting at someone staring at the screen — but that same default
+		// makes "the user is watching" unfalsifiable on such a terminal, and
+		// the symptom is no toasts at all with nothing to point at. Recording
+		// it is what the field is for; it had been written and never read.
+		logger.Debug("notify: suppressed for pane %s: it is the pane on screen (focus ever reported: %v)",
+			pane.ID, m.focusEverReported)
 		return
 	}
 
@@ -303,6 +310,25 @@ func (m *Model) emitToast(pane *PaneModel, proj *ProjectModel, kind toastKind) {
 		return
 	}
 
+	// The pane id is validated on the way OUT as well as the way in.
+	//
+	// It becomes the toast's Tag, which WinRT bounds at 64 characters and
+	// rejects outright when malformed — and pane ids arrive off the wire in
+	// workspace_state, so under --remote they are chosen by a daemon the user
+	// may not control. A rejected Tag fails the whole Show, and the failure is
+	// logged at debug and swallowed, so one hostile or simply buggy id turns
+	// off every desktop notification for the session. For a feature whose
+	// purpose is telling you an agent is blocked, that is the worst possible
+	// silent failure.
+	//
+	// The asymmetry is what makes this easy to miss: ValidPaneID is applied
+	// three times on the inbound click path, each with a comment explaining
+	// why the previous one is not enough, and was applied zero times here.
+	if !notify.ValidPaneID(pane.ID) {
+		logger.Debug("notify: suppressed for pane %q: not a well-formed pane id", pane.ID)
+		return
+	}
+
 	headline := glyphDone + " Turn finished"
 	if kind == toastBlocked {
 		headline = glyphBlocked + " Waiting for your input"
@@ -315,8 +341,6 @@ func (m *Model) emitToast(pane *PaneModel, proj *ProjectModel, kind toastKind) {
 			pane.ID, since.Truncate(time.Millisecond), cfg.CooldownDuration())
 		return
 	}
-	pane.lastToastAt = now
-
 	title := m.toastTitle(pane, proj)
 	body := headline
 	if kind == toastBlocked && pane.blockedReason != "" {
@@ -340,6 +364,12 @@ func (m *Model) emitToast(pane *PaneModel, proj *ProjectModel, kind toastKind) {
 		logger.Debug("notify: toast failed for pane %s: %v", pane.ID, err)
 		return
 	}
+
+	// The cooldown starts when a toast is actually QUEUED, not when one is
+	// attempted. Stamping before the send meant a dropped queue entry — the one
+	// case where the user was told nothing — also silenced that pane for a full
+	// cooldown, turning one lost toast into several.
+	pane.lastToastAt = now
 
 	// Recorded WITH its kind, not as a bare presence marker. The sweep has to
 	// know which condition raised this toast — see sweepOutstandingToasts.
@@ -458,7 +488,17 @@ func (m *Model) sweepOutstandingToasts() {
 		// attention state" — see toastKind.
 		//
 		// A vanished pane cannot clear its own flags, so "gone" withdraws too.
-		if pane := live[paneID]; pane != nil && kind.live(pane) {
+		//
+		// Looking at the pane also withdraws, and that closes a case the
+		// raising-condition test alone cannot: blockedSince deliberately
+		// SURVIVES focus (ackFocusedPane clears unseen only), while the sidebar
+		// suppresses the ▲ for the pane on screen. So clicking a "Waiting for
+		// your input" toast put the pane in front of the user, took the glyph
+		// off the sidebar row, and left the Action Center entry standing until
+		// they typed — the toast outliving its own click, and the two surfaces
+		// disagreeing about one pane. That is precisely the accumulating lie
+		// Withdraw exists to prevent.
+		if pane := live[paneID]; pane != nil && kind.live(pane) && !m.userIsWatching(paneID) {
 			continue
 		}
 		if err := m.notifier.Withdraw(paneID); err != nil {

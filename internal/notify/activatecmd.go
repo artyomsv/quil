@@ -3,6 +3,7 @@ package notify
 import (
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // ActivateHelperName is the windowless binary that handles a toast click.
@@ -35,7 +36,27 @@ const ActivateHelperName = "quil-activate.exe"
 func activateCommand(opts Options, exePath, home string) string {
 	helper := filepath.Join(filepath.Dir(exePath), ActivateHelperName)
 	if fi, err := os.Stat(helper); err == nil && !fi.IsDir() {
-		return `"` + helper + `" --scheme "` + opts.Scheme + `" --home "` + home + `" "%1"`
+		return `"` + helper + `" --scheme "` + opts.Scheme + `" --home "` + quotableDir(home) + `" "%1"`
 	}
 	return `"` + exePath + `" activate "%1"`
+}
+
+// quotableDir makes a directory safe to sit inside double quotes on a Windows
+// command line.
+//
+// A TRAILING BACKSLASH is the trap. config.QuilDir returns QUIL_HOME verbatim,
+// so `QUIL_HOME=D:\quil\` produces --home "D:\quil\" — and CommandLineToArgvW
+// reads \" as an escaped quote, not as a backslash followed by a terminator. The
+// value then swallows the rest of the line including the URI, the handler gets
+// no URI at all and exits silently, and the log directory it would have
+// complained into is garbage too. A click that does nothing and writes nothing,
+// from a stray character in an environment variable.
+//
+// filepath.Clean also normalises the separators and drops any `..`, so the
+// registry never carries a path the user cannot read back.
+func quotableDir(home string) string {
+	if home == "" {
+		return ""
+	}
+	return strings.TrimRight(filepath.Clean(home), `\/`)
 }

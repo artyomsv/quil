@@ -19,7 +19,7 @@
 // process that must never show a window cannot be a console binary.
 //
 // Everything it may do is in notify.RunActivation: parse the URI, validate the
-// pane id, send that id to the TUI over a per-PID pipe, raise the window. There
+// pane id, and send that id to the TUI over a per-PID pipe. There
 // is deliberately no path from a registered URI — which any local process can
 // invoke — to spawning a pane, sending input, or running a command.
 package main

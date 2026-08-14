@@ -258,7 +258,27 @@ func dialActivatePipe(pid int) (windows.Handle, error) {
 	}
 	deadline := time.Now().Add(sendActivateTimeout)
 	for {
-		h, err := windows.CreateFile(namePtr, windows.GENERIC_WRITE, 0, nil, windows.OPEN_EXISTING, 0, 0)
+		// SECURITY_SQOS_PRESENT|SECURITY_ANONYMOUS is load-bearing, not
+		// boilerplate. Without it a named-pipe client's quality of service
+		// defaults to SecurityImpersonation — the most permissive level,
+		// chosen by omission — so whoever is on the other end may call
+		// ImpersonateNamedPipeClient and act as this user.
+		//
+		// Every control in this file protects the SERVER: the DACL, and
+		// FILE_FLAG_FIRST_PIPE_INSTANCE so a squatter cannot take the name
+		// from us. Nothing protected the CLIENT, and the two interact
+		// backwards — pipe names are predictable (PipeName is the pid), so a
+		// second principal on the machine can pre-create the name across a pid
+		// range; our own Listen then fails with ERROR_ACCESS_DENIED, which the
+		// TUI logs at debug and continues past with toasts still firing, and
+		// the next click dials straight into the squatter and hands over an
+		// impersonation token. The pane id is worthless; the token is the prize.
+		//
+		// Anonymous is the right level rather than merely the safest: the
+		// server never needs the client's identity — the DACL already decided
+		// who may connect.
+		h, err := windows.CreateFile(namePtr, windows.GENERIC_WRITE, 0, nil, windows.OPEN_EXISTING,
+			windows.SECURITY_SQOS_PRESENT|windows.SECURITY_ANONYMOUS, 0)
 		if err == nil {
 			return h, nil
 		}

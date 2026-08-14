@@ -20,8 +20,20 @@ func TestParseArgs(t *testing.T) {
 			raw:    "quil-dev://activate?pid=1&pane=pane-0a1b2c3d",
 		},
 		{
-			name:   "order is not fixed",
-			args:   []string{"quil://activate?pid=2&pane=pane-11111111", "--home", "/h", "--scheme", "quil"},
+			// Parsing STOPS at the URI. This case previously asserted the
+			// opposite — that flags after the URI are honoured — which
+			// encoded an injection as intended behaviour: %1 is the last
+			// token setup writes, so anything following it came from the
+			// clicked URI, and an injected --home steers a file path.
+			name:   "flags after the URI are NOT honoured",
+			args:   []string{"quil://activate?pid=2&pane=pane-11111111", "--home", `\\attacker\share`, "--scheme", "evil"},
+			scheme: "",
+			home:   "",
+			raw:    "quil://activate?pid=2&pane=pane-11111111",
+		},
+		{
+			name:   "flags before the URI are honoured, in any order",
+			args:   []string{"--home", "/h", "--scheme", "quil", "quil://activate?pid=2&pane=pane-11111111"},
 			scheme: "quil",
 			home:   "/h",
 			raw:    "quil://activate?pid=2&pane=pane-11111111",
@@ -47,6 +59,16 @@ func TestParseArgs(t *testing.T) {
 			name: "a trailing flag with no value is survivable",
 			args: []string{"quil://activate?pid=6&pane=pane-55555555", "--scheme"},
 			raw:  "quil://activate?pid=6&pane=pane-55555555",
+		},
+		{
+			// The whole injection shape in one case: a quote surviving into
+			// the URI closes the one setup wrote around %1, and everything
+			// after it arrives as argv.
+			name:   "an injected --home cannot redirect the log path",
+			args:   []string{"--scheme", "quil", "--home", `C:\real\.quil`, "quil://activate?pid=7&pane=pane-66666666", "--home", `\\attacker\share`},
+			scheme: "quil",
+			home:   `C:\real\.quil`,
+			raw:    "quil://activate?pid=7&pane=pane-66666666",
 		},
 		{
 			name: "nothing at all",

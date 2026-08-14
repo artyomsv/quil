@@ -603,14 +603,25 @@ func launchTUI() {
 	var notifier notify.Notifier
 	if cfg.Notification.Desktop.Enabled {
 		n, err := notify.New(notifyOpts)
-		if err != nil {
+		switch {
+		case err != nil:
 			// Not fatal, and deliberately not a dialog: a dialog about
 			// notifications is the wrong medicine, and the sidebar keeps
 			// working. With `enabled` defaulting true this is the ordinary
 			// state of a machine that never ran setup, so it is logged at
 			// debug rather than warned.
 			logger.Debug("desktop notifications unavailable: %v", err)
-		} else {
+		case n == nil:
+			// THE THIRD OUTCOME, and it is the normal one off Windows.
+			// notify.New's contract is (nil, nil) where there is no toast
+			// mechanism at all — nil rather than an error precisely so no
+			// caller needs a platform branch. Treating err == nil as "we have
+			// a notifier" installed a deferred Close on a nil interface and
+			// panicked EVERY Linux and macOS session at exit, after the TUI
+			// had otherwise run perfectly. Nothing in CI runs launchTUI, and
+			// the feature is Windows-facing, so nobody exercised the one path
+			// every non-Windows user takes.
+		default:
 			notifier = n
 			// The success case is logged too, and not as symmetry for its own
 			// sake: diagnosing a missing toast starts by asking whether this
@@ -770,7 +781,15 @@ func launchTUI() {
 			// Logged, not fatal: the primary value of a toast is "an agent
 			// needs you", and routing is the bonus. Disabling toasts entirely
 			// over a pipe failure would be the larger silent loss.
-			logger.Debug("toast activation listener unavailable: %v", err)
+			//
+			// WARN rather than debug, because one cause of this is another
+			// principal having taken our pipe name before we could — the name
+			// is derived from our pid and is therefore predictable. Toasts keep
+			// firing with a live launch URI either way, so at debug level a
+			// squatted name is indistinguishable from an ordinary machine that
+			// never registered. The client-side SQOS in dialActivatePipe is
+			// what makes that harmless; this line is what makes it visible.
+			logger.Warn("toast activation listener unavailable, clicks will not route: %v", err)
 		} else if lis != nil {
 			defer lis.Close()
 		}

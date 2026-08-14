@@ -196,7 +196,7 @@ case "${1:-help}" in
     echo "Usage: ./dev.sh <command>"
     echo ""
     echo "Commands:"
-    echo "  build          Build all variants: prod, dev, debug (6 binaries)"
+    echo "  build          Build all variants: prod, dev, debug (6 binaries) + quil-activate.exe"
     echo "  test [pkg]     Run tests (all, or just ./<pkg>/...)"
     echo "  test-race [pkg]  Run tests with race detector"
     echo "  vet [pkg]      Run go vet"

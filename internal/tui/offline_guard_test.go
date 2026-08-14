@@ -117,7 +117,7 @@ func TestPalette_OfflineProjectDisablesRenameAndNewTab(t *testing.T) {
 		mcpHighlights: make(map[string]bool),
 		// A live sibling project keeps onlyOfflineProjects() false, which is
 		// the load-bearing distinction from the pre-first-broadcast launch
-		// window (see TestHandleKey_NewTab_NoProjectsYetStillCreatesTab):
+		// window (see TestHandleKey_NewTab_NoProjectsYetOpensThePicker):
 		// New tab must stay disabled while the ACTIVE project is offline and
 		// some other, reachable project exists — only the seeded-but-nothing-
 		// heard-from-yet state gets the carve-out.
@@ -174,7 +174,7 @@ func TestHandleKey_NewTab_OfflineProjectRefusesWithFlash(t *testing.T) {
 		// matching comment in TestPalette_OfflineProjectDisablesRenameAndNewTab.
 		// Without it this fixture is indistinguishable from the seeded-at-
 		// launch, nothing-broadcast-yet window, which is deliberately NOT
-		// refused (TestHandleKey_NewTab_NoProjectsYetStillCreatesTab's sibling
+		// refused (TestHandleKey_NewTab_NoProjectsYetOpensThePicker's sibling
 		// carve-out).
 		projects: []*ProjectModel{
 			{ID: "proj-a", Name: "cluster", Dest: "gpu01", Offline: &OfflineState{}},
@@ -279,7 +279,7 @@ func TestHandleKey_NewTab_OnlyOfflineProjectsOpensThePicker(t *testing.T) {
 }
 
 // TestPalette_OnlyOfflineProjectsKeepsNewTabEnabled is the palette's half of
-// TestHandleKey_NewTab_OnlyOfflineProjectsStillCreatesTab.
+// TestHandleKey_NewTab_OnlyOfflineProjectsOpensThePicker.
 func TestPalette_OnlyOfflineProjectsKeepsNewTabEnabled(t *testing.T) {
 	t.Parallel()
 	m := Model{

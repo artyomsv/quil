@@ -422,7 +422,12 @@ type Model struct {
 	// git-discovery listings were answered by it), so submitting against a
 	// different one hands, at worst, a WorktreeSpec.RepoRoot describing machine
 	// A to machine B's `git worktree add`.
-	createPaneDest       string
+	createPaneDest string
+	// newTabWorktrees tracks branches asked for by a NEW-TAB create, keyed by
+	// BRANCH because such a create owns no tab id yet — the daemon mints it. It
+	// is the staleness key that lets applyCreatePaneResp report a failed add on
+	// that path without also reporting one belonging to another client.
+	newTabWorktrees      map[string]bool
 	selectedCategory     int           // selected category index in create pane dialog
 	selectedPlugin       string        // selected plugin name in create pane dialog
 	pluginErrorTitle     string        // title for plugin error dialog
@@ -3196,8 +3201,33 @@ func (m Model) openCreatePaneDialogFor(target paneTarget) (tea.Model, tea.Cmd) {
 	m.createPaneStep = 0
 	m.selectedCategory = 0
 	m.createPaneTarget = target
-	m.createPaneDest = m.activeDest()
+	m.createPaneDest = m.pinnableDest()
 	return m, tea.ClearScreen
+}
+
+// pinnableDest is the destination a dialog opened NOW should submit to, or ""
+// meaning "not known yet — let the router resolve it at send time".
+//
+// The empty answer is not a fallback, it is the two documented startup windows,
+// and it must not be confused with `activeDest() == ""`:
+//
+//   - m.cur() == nil is the pre-first-broadcast window every session passes
+//     through. Under --remote the router is keyed by the REMOTE host and holds
+//     no "" conn at all, so pinning "" would aim the send at a destination that
+//     does not exist.
+//   - onlyOfflineProjects() is that same window once offline stand-ins have been
+//     seeded: every known project is a placeholder for some OTHER host that
+//     failed to dial, so m.cur() names an unreachable machine while the daemon
+//     the send actually resolves to is fine.
+//
+// In both, Router.Send's sole-conn fallback is the thing that delivers — and
+// that fallback is gated on the message being UNSTAMPED, so the send must skip
+// the stamp entirely rather than stamp a best guess. See sendCreateTab.
+func (m Model) pinnableDest() string {
+	if m.cur() == nil || m.onlyOfflineProjects() {
+		return ""
+	}
+	return m.activeDest()
 }
 
 // handleNewTab opens the create-pane dialog to choose the new tab's first pane.
@@ -3233,12 +3263,20 @@ func (m Model) createTerminalTab() tea.Cmd {
 
 // sendCreateTab is the ONE create_tab producer.
 //
-// Aimed at createPaneDest via sendForDestStrict rather than the unstamped
-// m.client.Send the old createTab used. That send was safe only because the
-// keypress and the send were the same instant; with a dialog in between, the
-// destination can move under it — see createPaneDest. Strict because
+// A KNOWN destination is aimed with sendForDestStrict rather than the unstamped
+// m.client.Send the old createTab used: that send was safe only because the
+// keypress and the send were the same instant, and a dialog can stay open while
+// the active project moves under it (see createPaneDest). Strict because
 // Router.Send drops an unroutable message and returns nil, so the loose form
 // cannot tell the user their tab was never created.
+//
+// An EMPTY destination is deliberately sent UNSTAMPED, and that asymmetry is
+// load-bearing rather than a shortcut. Empty means one of the two startup
+// windows pinnableDest documents, where the router must pick the destination
+// itself — and its sole-conn fallback is gated on `!stamped`, so stamping ""
+// (which stampDest maps to destLocal) makes that fallback unreachable and the
+// send is dropped against a "" conn that, under --remote, never existed. Both
+// windows regressed exactly that way when this function stamped unconditionally.
 func (m Model) sendCreateTab(spec *ipc.FirstPaneSpec) tea.Cmd {
 	dest := m.createPaneDest
 	return func() tea.Msg {
@@ -3248,6 +3286,15 @@ func (m Model) sendCreateTab(spec *ipc.FirstPaneSpec) tea.Cmd {
 		})
 		if err != nil {
 			log.Printf("create tab: build message: %v", err)
+			return nil
+		}
+		if dest == "" {
+			// No pre-flight check to make: the router resolves this one, and a
+			// drop there is already logged. Reporting "cannot reach" about a
+			// destination nobody named is the bug this branch exists to avoid.
+			if err := m.client.Send(msg); err != nil {
+				log.Printf("create tab: send: %v", err)
+			}
 			return nil
 		}
 		if err := m.sendForDestStrict(dest, msg); err != nil {

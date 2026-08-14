@@ -1809,6 +1809,21 @@ func (m Model) handleCreatePaneSelect() (tea.Model, tea.Cmd) {
 	return m.handleCreatePaneSplit()
 }
 
+// recentCWDsDest is the destination a committed directory is filed under.
+//
+// createPaneDest when the dialog pinned one, because that is the machine whose
+// disk was browsed and the machine the pane is going to. It is deliberately NOT
+// used when empty: "" there means one of the startup windows (see
+// pinnableDest), where the router picks the destination and the client cannot
+// know which — filing under "" would put the entry in the unscoped list, which
+// is the LOCAL daemon's, and that is the same guess Router.Send makes.
+func (m Model) recentCWDsDest() string {
+	if m.createPaneDest != "" {
+		return m.createPaneDest
+	}
+	return m.activeDest()
+}
+
 // setupDiscoveryBase is the directory the setup dialog starts looking from.
 //
 // For a SPLIT it is the active pane's OSC 7 CWD: the pane being split is the
@@ -1895,10 +1910,13 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 	if cwd != "" {
 		m.lastSelectedCWD = cwd
 		m.recentCWDs = pushRecentCWD(m.recentCWDs, cwd, recentCWDMax)
-		// Scoped to the ACTIVE project's daemon: the directory was picked on
-		// that machine's disk, so filing it under another host's recent list
-		// would offer a path that does not exist there.
-		if err := SaveRecentCWDs(config.RecentCWDsPath(m.activeDest()), m.recentCWDs); err != nil {
+		// Scoped to the daemon the DIALOG was opened against, not the active
+		// project's: the directory was browsed on that machine's disk, so filing
+		// it anywhere else offers a path that does not exist there. The two
+		// differ exactly when createPaneDest exists to matter — the active
+		// project moved while the dialog was open — and the pane itself goes to
+		// createPaneDest, so the recent list has to follow it.
+		if err := SaveRecentCWDs(config.RecentCWDsPath(m.recentCWDsDest()), m.recentCWDs); err != nil {
 			log.Printf("create pane: save recent cwds: %v", err)
 		}
 	}
@@ -1952,6 +1970,14 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 				return m, m.flashCmd()
 			}
 			spec = &ipc.WorktreeSpec{RepoRoot: newBranchRepo, Branch: newBranch}
+			// Armed so the daemon's answer can be reported. Keyed by BRANCH, not
+			// by tab: this create has no tab id until the daemon mints one, which
+			// is also why it arms none of the tab-keyed bookkeeping the split
+			// path uses. applyCreatePaneResp consumes it.
+			if m.newTabWorktrees == nil {
+				m.newTabWorktrees = make(map[string]bool)
+			}
+			m.newTabWorktrees[newBranch] = true
 		}
 		logger.Debug("create tab: submitting cwd=%q type=%s instance=%s branch=%q repo=%q",
 			cwd, pluginName, instanceName, newBranch, newBranchRepo)
@@ -2973,9 +2999,11 @@ func (m Model) renderPluginErrorDialog() string {
 // already used for handleInstanceFormKey + openInstanceForm in this file.
 
 // enterSetupOrSplit routes after a plugin or instance is picked: either show
-// the setup dialog (if plugin needs CWD prompt or has toggles) or jump to
-// split-direction selection. Returns nil when no setup is needed, in which
-// case the caller is responsible for advancing to step 3.
+// the setup dialog (if the plugin prompts for a CWD or has toggles) or finish
+// choosing via advanceFromPluginChoice — which means the placement step for a
+// split, and the submit itself for a new tab. Callers must NOT advance the step
+// themselves; four of them used to, and keeping them in agreement is exactly
+// what that helper exists to remove.
 //
 // Receiver is *Model because this method always mutates state — even on the
 // "no setup" branch it must clear stale CWD/toggle state from a prior plugin

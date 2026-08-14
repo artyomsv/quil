@@ -1580,13 +1580,24 @@ func (d *Daemon) handleCreateTab(conn *ipc.Conn, msg *ipc.Message) {
 		spec = &ipc.FirstPaneSpec{}
 	}
 	paneType := firstPaneType(*spec)
-	create := ipc.CreatePanePayload{
-		TabID:           tab.ID,
-		CWD:             spec.CWD,
-		Type:            paneType,
-		InstanceName:    spec.InstanceName,
-		InstanceArgs:    spec.InstanceArgs,
-		ResumeSessionID: spec.ResumeSessionID,
+	create := ipc.CreatePanePayload{TabID: tab.ID, Type: paneType}
+	// The plugin fields ride along ONLY when the pane really is the requested
+	// one. When firstPaneType downgraded it — a worktree placeholder, or a spec
+	// naming no type at all — they belong to a DIFFERENT program, and
+	// resolveSpawnArgs REPLACES a plugin's own args with InstanceArgs whenever
+	// the pane has any: the placeholder would be spawned as
+	// `<shell> --dangerously-skip-permissions`. shellinit.Configure masks that
+	// on bash/zsh/pwsh by overwriting args and returns nil for sh/dash/fish and
+	// anything unrecognised, where the shell dies on its first instruction —
+	// so the "a failed add leaves a harmless terminal" guarantee would hold
+	// only on some hosts. ResumeSessionID goes with them: it would write a
+	// resume claim onto a terminal, which a snapshot inside the checkout window
+	// persists and a failed add leaves forever. createFirstPaneWorktree carries
+	// the full set on its own payload, so nothing is lost.
+	if paneType == spec.Type {
+		create.InstanceName = spec.InstanceName
+		create.InstanceArgs = spec.InstanceArgs
+		create.ResumeSessionID = spec.ResumeSessionID
 	}
 	cwd := d.resolveRequestedCWD(spec.CWD, d.projectCWD(tab.ProjectID))
 
@@ -1879,7 +1890,9 @@ func (d *Daemon) handleCreatePane(conn *ipc.Conn, msg *ipc.Message) {
 // Symlinks are re-resolved here too: the TUI calls EvalSymlinks before sending,
 // but a symlink swap between the TUI's Stat and the daemon's spawn would
 // otherwise redirect the child process to a different directory. Doing the
-// resolve once more daemon-side closes that TOCTOU window for every IPC client.
+// resolve once more daemon-side NARROWS that window from client-to-daemon down
+// to daemon-internal — it does not close it. The gap between this resolve and
+// the child's own chdir remains, and closing it would need an fd-based spawn.
 //
 // The FALLBACK is a parameter rather than d.defaultCWD() baked in, because the
 // two call sites disagree about it and the disagreement is load-bearing: a pane
@@ -1888,18 +1901,23 @@ func (d *Daemon) handleCreatePane(conn *ipc.Conn, msg *ipc.Message) {
 // here would silently stop new tabs opening in the project root — a regression
 // in the projects feature, caused from inside the pane feature.
 func (d *Daemon) resolveRequestedCWD(cwd, fallback string) string {
-	if cwd != "" {
-		if info, err := os.Stat(cwd); err != nil || !info.IsDir() {
-			log.Printf("create pane: rejecting cwd %q (err=%v); using %q", cwd, err, fallback)
-			cwd = ""
-		} else if resolved, evalErr := filepath.EvalSymlinks(cwd); evalErr == nil {
-			cwd = resolved
-		}
-	}
 	if cwd == "" {
 		return fallback
 	}
-	return cwd
+	// Through resolveSpawnDirWithin, never an inline os.Stat: this runs on the
+	// requesting connection's dispatch goroutine, and the value comes off the
+	// WIRE. A path on a dead NFS/SMB mount parks that goroutine in an
+	// uninterruptible syscall and with it every later message from that client,
+	// input included — the wedge class that primitive's own doc comment says it
+	// was written to remove from the other two spawn-CWD resolvers. It claims a
+	// permit, shares one deadline across the stat and the symlink resolution,
+	// and answers "" for "could not use this", which is exactly this function's
+	// fallback condition.
+	if dir := resolveSpawnDirWithin(cwd, spawnDirProbeTimeout); dir != "" {
+		return dir
+	}
+	log.Printf("spawn cwd: rejecting %q (missing, not a directory, or did not answer in time); using %q", cwd, fallback)
+	return fallback
 }
 
 // createPaneAt is the pane construction every create path shares: allocate,

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -262,6 +263,61 @@ func TestHandleCreateTab_WorktreeFirstPaneOpensAsATerminal(t *testing.T) {
 	}
 }
 
+// The placeholder must carry NONE of the requested plugin's fields, not just a
+// different Type.
+//
+// resolveSpawnArgs REPLACES a plugin's own args whenever the pane has any
+// InstanceArgs, so a placeholder that inherits them is spawned as
+// `<shell> <args meant for a different program>`. shellinit.Configure hides it
+// on bash/zsh/pwsh by overwriting args — and returns nil for sh, dash, fish and
+// anything unrecognised, where the shell dies on its first instruction and the
+// "a failure leaves a harmless terminal" guarantee stops being true. Reachable
+// without an adversary: Ctrl+T → claude-code → permission toggle → new branch.
+//
+// ResumeSessionID rides along for the same reason and must go too: it writes a
+// resume claim onto a TERMINAL pane, which any snapshot inside the checkout
+// window persists, and which outlives a failed add.
+func TestHandleCreateTab_WorktreePlaceholderCarriesNoPluginFields(t *testing.T) {
+	d, sock := overlayServerDaemonWithConfig(t, config.Default())
+	release := make(chan struct{})
+	done := joinableAdd(t, func(context.Context, string, string, string) error {
+		<-release
+		return errors.New("released")
+	})
+	defer func() {
+		close(release)
+		joinAdd(t, done)
+	}()
+
+	client := attachTestClient(t, sock)
+	defer client.Close()
+	sendCreateTab(t, client, &ipc.FirstPaneSpec{
+		Type:            "terminal-wide",
+		InstanceName:    "inst",
+		InstanceArgs:    []string{"--dangerously-skip-permissions"},
+		ResumeSessionID: "3f2504e0-4f89-41d3-9a0c-0305e82c3301",
+		Worktree:        &ipc.WorktreeSpec{RepoRoot: t.TempDir(), Branch: "feat/x"},
+	})
+
+	settled(t, d, 2)
+
+	pane := newTabPane(t, d)
+	pane.PluginMu.Lock()
+	args, name := pane.InstanceArgs, pane.InstanceName
+	resume := pane.PluginState["resume_session_id"]
+	pane.PluginMu.Unlock()
+
+	if len(args) != 0 {
+		t.Errorf("placeholder InstanceArgs = %v, want none — these replace the shell's own args", args)
+	}
+	if name != "" {
+		t.Errorf("placeholder InstanceName = %q, want empty", name)
+	}
+	if resume != "" {
+		t.Errorf("placeholder holds resume_session_id %q, want none on a terminal", resume)
+	}
+}
+
 // And the requested pane really does arrive, in the worktree, replacing that
 // placeholder — driven through the real handler over a real conn, because the
 // leg runs on a worker goroutine and answers the requester.
@@ -382,6 +438,53 @@ func TestHandleCreateTab_WorktreeFailureKeepsTheTerminal(t *testing.T) {
 	}
 	if got := paneType(panes[0]); got != "terminal" {
 		t.Errorf("pane type = %q, want the terminal left in place", got)
+	}
+}
+
+// A client-supplied directory that never answers must not park the dispatch
+// goroutine.
+//
+// Before this feature a new tab's directory came ONLY from projectCWD, which
+// routes through resolveSpawnDirWithin — permit-claimed and bounded. Accepting
+// spec.CWD off the wire and stat-ing it inline gave create_tab back the
+// unbounded syscall that primitive's own doc comment says it was written to
+// remove: a path on a dead NFS/SMB mount parks the requesting connection's
+// goroutine, and with it every later message from that client, input included.
+//
+// Driven through the statPath seam because no real filesystem provides a path
+// that never answers on demand.
+// The call count is the load-bearing assertion, not the elapsed time: an inline
+// os.Stat on a path that does not exist returns instantly, so a timing-only test
+// stays green against exactly the code this is meant to refuse. statPath being
+// reached is what proves the resolution went through the BOUNDED primitive.
+func TestResolveRequestedCWD_HungPathFallsBackWithinTheBudget(t *testing.T) {
+	block := make(chan struct{})
+	var calls atomic.Int64
+	orig := statPath
+	statPath = func(string) (os.FileInfo, error) {
+		calls.Add(1)
+		<-block
+		return nil, os.ErrNotExist
+	}
+	t.Cleanup(func() { restoreSeam(t, block, func() { statPath = orig }) })
+
+	d := overlayTestDaemon(t, config.Default())
+	fallback := t.TempDir()
+
+	done := make(chan string, 1)
+	go func() { done <- d.resolveRequestedCWD("/mnt/dead", fallback) }()
+
+	select {
+	case got := <-done:
+		if got != fallback {
+			t.Errorf("resolveRequestedCWD = %q, want the fallback %q", got, fallback)
+		}
+	case <-time.After(spawnDirProbeTimeout + 3*time.Second):
+		t.Fatal("resolveRequestedCWD never returned — a dead mount parks the dispatch goroutine")
+	}
+	if calls.Load() == 0 {
+		t.Error("statPath was never reached — the client-supplied directory is being stat-ed " +
+			"inline on the dispatch goroutine, with no budget and no permit")
 	}
 }
 

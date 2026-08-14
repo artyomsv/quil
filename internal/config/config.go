@@ -332,6 +332,15 @@ type KeybindingsConfig struct {
 	// ToggleLazygit opens/hides the per-tab lazygit overlay for the git
 	// repo resolved from the active pane's CWD.
 	ToggleLazygit string `toml:"toggle_lazygit"`
+	// ToggleHunk opens/hides the per-tab hunk overlay for the git repo
+	// resolved from the active pane's CWD. A tab has ONE overlay slot, so
+	// this and ToggleLazygit replace each other rather than stacking.
+	//
+	// Defaults to alt+d ("diff"), NOT the more obvious alt+h: Alt+H is left
+	// unbound at the global level on purpose so it reaches the PTY (see the
+	// PaneLeft comment above), and it is also what vim-style setups rebind to
+	// pane-left. Users who want it anyway can set toggle_hunk = "alt+h".
+	ToggleHunk string `toml:"toggle_hunk"`
 	// ToggleWrap switches the active wide-canvas pane's preview between
 	// left-edge crop (default) and soft-wrap. Only meaningful for panes
 	// whose plugin sets [display] wide_canvas; no-op elsewhere.
@@ -470,6 +479,7 @@ func Default() Config {
 			ToggleEager:    "alt+shift+e",
 			CommandHistory: "alt+shift+i",
 			ToggleLazygit:  "alt+g",
+			ToggleHunk:     "alt+d",
 			// Mnemonic: W for wrap; the Alt+Shift layer dodges AI-tool
 			// Alt-letter bindings (same reasoning as the split keys).
 			ToggleWrap: "alt+shift+w",

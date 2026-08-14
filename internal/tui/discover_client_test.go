@@ -331,13 +331,13 @@ func TestApplyGitRepos_CrossingRequests_FirstResponseNotRoutedToSecond(t *testin
 	m, fake, tab := overlayTestModel(t, "/a")
 
 	// RPC1: Alt+G overlay scan for /a.
-	runCmd(m.requestGitRepos("/a", tab.ID, repoScanOverlay))
+	runCmd(m.requestGitRepos("/a", tab.ID, repoScanOverlay, overlayPluginLazygit))
 	gen1 := m.repoScan.gen
 
 	// RPC2: the setup dialog's pick list, same directory, asked before RPC1's
 	// answer lands — overwrites the shared slot.
 	m.dialog = dialogCreatePaneSetup
-	runCmd(m.requestGitRepos("/a", "", repoScanPickList))
+	runCmd(m.requestGitRepos("/a", "", repoScanPickList, ""))
 	gen2 := m.repoScan.gen
 	if gen1 == gen2 {
 		t.Fatalf("setup: the two requests must get distinct generations, got %q twice", gen1)

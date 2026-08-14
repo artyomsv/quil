@@ -112,6 +112,7 @@ toggle_eager = "alt+shift+e"    # toggle eager restore; eager panes respawn on r
 go_back = "alt+backspace"       # pane history back (after jumping via sidebar Enter)
 notes_toggle = "alt+e"          # toggle pane notes editor
 toggle_lazygit = "alt+g"        # toggle lazygit overlay for the repo at the active pane's CWD
+toggle_hunk = "alt+d"           # toggle hunk diff-review overlay for the same repo
 toggle_wrap = "alt+shift+w"     # AI-pane preview: switch left-edge crop (default) <-> soft-wrap
 redraw = "alt+shift+l"          # force full screen repaint (clears rendering artifacts)
 new_project = "alt+shift+n"
@@ -222,11 +223,11 @@ Dev builds use a separate namespace throughout (`quil-dev://`, AUMID `artyomsv.q
 
 ## `[overlay]`
 
-Bounds the Alt+G lazygit overlay pane. `Alt+G` again (or switching away and back) only *hides* it — the process keeps running; only quitting lazygit itself (`q`) or one of these two limits reclaims it.
+Bounds the overlay pane — the Alt+G lazygit and Alt+D hunk views share one slot per tab. Pressing the same key again (or switching away and back) only *hides* it — the process keeps running; only quitting the tool itself (`q`) or one of these two limits reclaims it.
 
 | Key | Type | Default | What it does |
 |---|---|---|---|
-| `idle_timeout_minutes` | int | `5` | Destroy an overlay that has been hidden for at least this long. `0` disables idle eviction — a hidden overlay then runs until lazygit quits on its own or its tab is destroyed. Clamped to at most `525600` (one year); a negative value reads as `0`. |
+| `idle_timeout_minutes` | int | `5` | Destroy an overlay that has been hidden for at least this long. `0` disables idle eviction — a hidden overlay then runs until the tool quits on its own or its tab is destroyed. Clamped to at most `525600` (one year); a negative value reads as `0`. |
 | `max_live` | int | `5` | Cap on overlays live across all tabs at once. Opening one past the cap evicts the least recently **shown** overlay (not the oldest one created) to make room. `0` disables the cap. |
 
 Both keys are also editable at **F1 → Settings**, which pushes the change to the running daemon immediately — no restart needed.
@@ -330,6 +331,7 @@ Multiple modifiers stack with `+` (no spaces). Mouse buttons are not bindable he
 | `go_back` | `alt+backspace` | Pane history back — return to the pane you were on before the sidebar's `Enter` jump |
 | `notes_toggle` | `alt+e` | Open / close the per-pane notes editor |
 | `toggle_lazygit` | `alt+g` | Toggle lazygit overlay for the git repo resolved from the active pane's current directory. Only shown when the `lazygit` binary is installed. |
+| `toggle_hunk` | `alt+d` | Toggle hunk (diff review) overlay for the same repo. Shares the tab's single overlay slot with lazygit — pressing this while lazygit is up swaps the tools rather than stacking them. Only shown when the `hunk` binary is installed. `alt+d` rather than the more obvious `alt+h` because plain `Alt+H` is deliberately left unbound so it reaches the running program, and because vim-style setups rebind it to pane-left; set `toggle_hunk = "alt+h"` if you want it anyway. |
 | `toggle_wrap` | `alt+shift+w` | Switch the active AI pane's preview between left-edge crop (default) and soft-wrap. Only meaningful for `wide_canvas` panes rendered smaller than the window; per-pane, not persisted. |
 | `redraw` | `alt+shift+l` | Force a full screen repaint — clears rendering artifacts (scrambled or misplaced characters) without restarting the TUI |
 | `new_project` | `alt+shift+n` | Open the create-project dialog |

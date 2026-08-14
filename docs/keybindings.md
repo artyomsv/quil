@@ -108,6 +108,7 @@ The active tab is prefixed with `* ` in the tab bar so it's visible even when [t
 | `Ctrl+E` | Toggle focus mode (active pane full-screen) |
 | `Alt+Shift+W` | Toggle the active AI pane's preview between left-edge crop (default) and soft-wrap. Only affects `wide_canvas` panes rendered smaller than the window. |
 | `Alt+G` | Toggle lazygit overlay (git repo from active pane's directory) |
+| `Alt+D` | Toggle hunk overlay — diff review for the same repo. Shares the tab's single overlay slot with lazygit, so pressing it while lazygit is on screen swaps tools. Mnemonic: **d**iff. Not `Alt+H`, because plain `Alt+H` is deliberately left unbound so it reaches the running program (see the passthrough note below) and because vim-style layouts rebind it to pane-left — set `toggle_hunk = "alt+h"` if you prefer it there. |
 | `Alt+Shift+L` | Force a full screen redraw — clears rendering artifacts (scrambled/misplaced characters) without restarting. Mnemonic: `Ctrl+L` redraws a shell. |
 | `Alt+Shift+I` | Open the active pane's input history — one row per prompt you submitted, newest first. `↑/↓` navigate, `PgUp/PgDn/Home/End` jump, `Enter` opens the full text in a soft-wrapped read-only viewer (drag or `Ctrl+A` to select, right-click or `Enter` to copy), `Esc` closes. Only AI panes whose plugin sets `record_history` (Claude Code) capture history; other pane types show an empty state. |
 | `Alt+A` | Open the pane context menu for the active pane (`quick_actions`). Same menu as right-click — see [Mouse: pane context menu](#mouse-pane-context-menu) below. |

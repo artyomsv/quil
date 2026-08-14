@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **hunk, a review-first diff viewer, is now a built-in tool.** Reading what an
+  agent just wrote is most of what a Quil workspace produces, and
+  [hunk](https://github.com/modem-dev/hunk) is built for exactly that. Two entry
+  points, mirroring lazygit: **Ctrl+N → Tools → Hunk** opens it as an ordinary
+  pane, with the same git-repo directory step (the enclosing repository plus any
+  one level down, with a Browse… fallback); **Alt+D** toggles a full-tab review
+  of the working tree for the repository resolved from the active pane's
+  directory. Hiding keeps the process running, so re-opening is instant with its
+  UI state intact, and quitting hunk destroys the overlay pane automatically.
+  Offered only when the `hunk` binary is installed — `npm i -g hunkdiff`,
+  `brew install hunk`, or `mise use -g hunk` — and shown greyed with a link to
+  the project when it is not.
+
+  **Alt+G and Alt+D share one overlay slot per tab**: pressing the other tool's
+  key while an overlay is on screen swaps the tools rather than opening a second
+  one, so the outgoing tool's process ends. Each key still hides its own
+  overlay, each is gated on its own binary, and the repository picker now names
+  the tool it is about to open. New keybinding `toggle_hunk`, default `alt+d`
+  (mnemonic: **d**iff) rather than the more obvious `alt+h` — plain `Alt+H` is
+  deliberately left unbound so it reaches the running program, and it is what
+  vim-style setups rebind to pane-left. Set `toggle_hunk = "alt+h"` in
+  `config.toml` if you want it there anyway.
+
 ## [1.56.0] - 2026-08-14
 
 ### Added

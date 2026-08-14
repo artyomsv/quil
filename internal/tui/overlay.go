@@ -9,40 +9,71 @@ import (
 	"github.com/artyomsv/quil/internal/logger"
 )
 
-// handleToggleLazygit implements the Alt+G state machine (spec §4).
+// Plugins that can own a tab's overlay slot. Both are full-tab git tools
+// resolved from the active pane's repository; they differ only in which binary
+// runs and how the repo reaches it.
+//
+// Adding a third? overlayInstanceArgs below switches on the NAME, so a new tool
+// silently inherits the nil-args branch — correct only if it, like hunk, is
+// scoped by its working directory rather than by a repo flag. Check there, and
+// give it a keybinding that is not a documented PTY passthrough (see the
+// PaneLeft comment in internal/config/config.go).
+const (
+	overlayPluginLazygit = "lazygit"
+	overlayPluginHunk    = "hunk"
+)
+
+// handleToggleLazygit (Alt+G) and handleToggleHunk (Alt+H) are the two keys
+// bound to the shared overlay state machine.
+func (m *Model) handleToggleLazygit() tea.Cmd { return m.handleToggleOverlay(overlayPluginLazygit) }
+func (m *Model) handleToggleHunk() tea.Cmd    { return m.handleToggleOverlay(overlayPluginHunk) }
+
+// handleToggleOverlay implements the overlay state machine (spec §4) for one
+// overlay plugin.
 //
 // Precedence:
-//  1. Overlay visible → hide it. Never replaces from the overlay itself.
-//  2. Overlay hidden/absent → ask the daemon which repos are near
-//     activeNormalPane.CWD (requestGitRepos); resumes at step 3 in
-//     resolveLazygitOverlay once the answer lands.
-//  3. No candidates: if an overlay exists → show it anyway;
+//  1. THIS plugin's overlay is visible → hide it. Never replaces from the
+//     overlay itself. Another tool's visible overlay falls through to the
+//     resolve half, which replaces it — a tab has ONE overlay slot, so Alt+H
+//     over a visible lazygit is a request to swap tools, not to hide one.
+//  2. Overlay hidden/absent/another tool's → ask the daemon which repos are
+//     near activeNormalPane.CWD (requestGitRepos); resumes at step 3 in
+//     resolveOverlay once the answer lands.
+//  3. No candidates: if an overlay for THIS plugin exists → show it anyway;
 //     else flash "no git repo here".
-//  4. Any candidate == existing overlay's repo (compare to overlayPane.CWD) →
-//     show existing (no binary check; process already running).
-//  5. Lazygit availability gate — hoisted above the picker so a missing binary
+//  4. Any candidate == existing overlay's repo AND that overlay runs this
+//     plugin → show existing (no binary check; process already running).
+//  5. Availability gate — hoisted above the picker so a missing binary
 //     never opens the picker (which would spawn a doomed pane on Enter).
 //     Steps 1-4 stay unguarded: showing a running overlay never needs the binary.
 //  6. Multiple candidates, none matching → open picker dialog
-//     (dialogGitRepoPick; Task 12 fills render/handler).
+//     (dialogGitRepoPick), which remembers the requesting plugin.
 //  7. Create (or destroy old + create) for the resolved repo.
 //     createOverlay keeps its own gate as defense-in-depth for callers that
 //     bypass this function (e.g. handleGitRepoPickKey).
-func (m *Model) handleToggleLazygit() tea.Cmd {
+//
+// Every step keys on pluginName rather than on the mere existence of an
+// overlay: with one slot shared between tools, "an overlay is up" and "the
+// overlay the user just asked for is up" are different questions, and
+// answering the first gives the user the other tool.
+func (m *Model) handleToggleOverlay(pluginName string) tea.Cmd {
 	tab := m.activeTabModel()
 	if tab == nil {
 		return nil
 	}
 
-	// Step 1: visible overlay → hide.
-	if tab.overlayVisible {
+	// Step 1: this plugin's overlay is visible → hide.
+	if tab.overlayVisible && tab.overlayRuns(pluginName) {
 		tab.overlayVisible = false
 		return tea.Batch(tea.ClearScreen, m.overlayVisibilityCmd(tab, false))
 	}
 
 	// Step 2: resolve candidates from the active NORMAL pane's CWD.
-	// ActivePaneModel returns the overlay when visible, but we already
-	// handled that case above. Use treeActivePaneModel for the normal pane.
+	// ActivePaneModel returns the overlay when one is visible — which is
+	// reachable here, since another tool's overlay does not take the hide
+	// branch above — so the normal pane has to be asked for by name. Taking
+	// the overlay's own CWD instead would resolve the swap against the repo
+	// the outgoing tool happened to be opened on.
 	normalPane := tab.treeActivePaneModel()
 	var cwd string
 	if normalPane != nil {
@@ -54,7 +85,7 @@ func (m *Model) handleToggleLazygit() tea.Cmd {
 	// could open on an unrelated repository. Fall through to the same
 	// no-candidates handling the discovery would have produced.
 	if cwd == "" {
-		return m.resolveLazygitOverlay(tab, nil)
+		return m.resolveOverlay(tab, nil, pluginName)
 	}
 	// Asked of the DAEMON, never resolved here. Running gitdiscover in this
 	// process stats the machine drawing the UI, so against a remote host Alt+G
@@ -62,24 +93,26 @@ func (m *Model) handleToggleLazygit() tea.Cmd {
 	// machine that actually holds it — and nothing in that message hinted the
 	// wrong disk had been consulted. The rest of the state machine resumes in
 	// applyGitRepos when the answer lands.
-	return m.requestGitRepos(cwd, tab.ID, repoScanOverlay)
+	return m.requestGitRepos(cwd, tab.ID, repoScanOverlay, pluginName)
 }
 
-// resolveLazygitOverlay runs steps 3-7 of the Alt+G state machine against an
-// already-resolved candidate list.
+// resolveOverlay runs steps 3-7 of the overlay state machine against an
+// already-resolved candidate list, for the plugin whose key was pressed.
 //
 // Split from the discovery above so the decision half can be driven directly:
-// handleToggleLazygit calls it for the no-CWD case (candidates known to be
+// handleToggleOverlay calls it for the no-CWD case (candidates known to be
 // nil without a round trip), and applyGitRepos calls it once the daemon's
 // answer lands (RD-021 — discovery itself runs on the daemon, never stats
 // this process's disk). Everything below here is unaffected by where the
-// list came from. overlay_test.go's toggleWithDiscovery also drives this half
-// directly, resolving candidates the same way the daemon does, so tests don't
+// list came from. The tests' toggleWithDiscovery helpers also drive this half
+// directly, resolving candidates the same way the daemon does, so they don't
 // need a live RPC round trip to exercise steps 3-7.
-func (m *Model) resolveLazygitOverlay(tab *TabModel, candidates []string) tea.Cmd {
-	// Step 3: no candidates.
+func (m *Model) resolveOverlay(tab *TabModel, candidates []string, pluginName string) tea.Cmd {
+	// Step 3: no candidates. Only THIS plugin's overlay is worth showing —
+	// popping the other tool up in response to a key that asks for this one
+	// answers a question nobody asked.
 	if len(candidates) == 0 {
-		if tab.overlayPane != nil {
+		if tab.overlayRuns(pluginName) {
 			return m.showOverlay(tab)
 		}
 		m.setFlash("no git repo here")
@@ -87,7 +120,9 @@ func (m *Model) resolveLazygitOverlay(tab *TabModel, candidates []string) tea.Cm
 	}
 
 	// Step 4: check whether any candidate matches the existing overlay's repo.
-	if tab.overlayPane != nil {
+	// The repo alone is not enough: with one slot per tab, an overlay on the
+	// right repo running the WRONG tool has to be replaced, not shown.
+	if tab.overlayRuns(pluginName) {
 		for _, c := range candidates {
 			if c == tab.overlayPane.CWD {
 				return m.showOverlay(tab)
@@ -97,9 +132,9 @@ func (m *Model) resolveLazygitOverlay(tab *TabModel, candidates []string) tea.Cm
 
 	// Step 5: availability gate — must come before the picker so a missing
 	// binary never opens the picker dialog (Enter would spawn a doomed pane).
-	p := m.pluginRegistry.Get("lazygit")
+	p := m.pluginRegistry.Get(pluginName)
 	if p == nil || !p.Available {
-		m.setFlash("lazygit not installed")
+		m.setFlash(pluginName + " not installed")
 		return m.flashCmd()
 	}
 
@@ -110,13 +145,16 @@ func (m *Model) resolveLazygitOverlay(tab *TabModel, candidates []string) tea.Cm
 			candidates = candidates[:maxRepoCandidates]
 		}
 		m.repoPickCandidates = candidates
+		// Which key opened the picker is not recoverable at Enter time — the
+		// dialog outlives the keypress — so it is remembered here.
+		m.repoPickPlugin = pluginName
 		m.dialog = dialogGitRepoPick
 		m.dialogCursor = 0
 		return nil
 	}
 
 	// Step 7: single candidate — create/replace.
-	return m.createOverlay(tab, candidates[0])
+	return m.createOverlay(tab, candidates[0], pluginName)
 }
 
 // showOverlay makes the overlay visible and syncs its dimensions to the full
@@ -320,17 +358,33 @@ func (m *Model) overlayPolicyCmd() tea.Cmd {
 	}
 }
 
+// overlayInstanceArgs returns the per-spawn args an overlay pane needs to be
+// scoped to repo.
+//
+// Lazygit takes the repository as an explicit flag. Hunk has no equivalent —
+// it reads whatever repository its working directory sits in — and the empty
+// return is load-bearing rather than merely unnecessary: the daemon's
+// resolveSpawnArgs REPLACES a plugin's base args with InstanceArgs whenever a
+// pane has any, and hunk's `diff` subcommand lives in those base args. Any
+// non-nil value here would spawn a help screen.
+func overlayInstanceArgs(pluginName, repo string) []string {
+	if pluginName == overlayPluginLazygit {
+		return []string{"--path", repo}
+	}
+	return nil
+}
+
 // createOverlay destroys any existing overlay pane, initialises
 // pendingOverlayShow, and sends MsgCreatePane to the daemon.
 //
-// Defense-in-depth availability check: handleToggleLazygit already gates on
+// Defense-in-depth availability check: handleToggleOverlay already gates on
 // this before reaching the picker or this function, but handleGitRepoPickKey
 // calls createOverlay directly, so we re-check here to cover any future caller.
-func (m *Model) createOverlay(tab *TabModel, repo string) tea.Cmd {
+func (m *Model) createOverlay(tab *TabModel, repo, pluginName string) tea.Cmd {
 	// Defense-in-depth: re-check availability so any direct caller is safe.
-	p := m.pluginRegistry.Get("lazygit")
+	p := m.pluginRegistry.Get(pluginName)
 	if p == nil || !p.Available {
-		m.setFlash("lazygit not installed")
+		m.setFlash(pluginName + " not installed")
 		return m.flashCmd()
 	}
 
@@ -340,24 +394,31 @@ func (m *Model) createOverlay(tab *TabModel, repo string) tea.Cmd {
 	// daemon — Alt+G is reachable from a background project's tab.
 	tabDest := tab.Dest
 
-	// Destroy the old overlay if one exists (different repo).
+	// Destroy the old overlay if one exists (different repo, or a different
+	// tool now that the slot is shared). oldID stays empty when there is
+	// nothing to replace; the send below reads it to decide.
+	var oldID string
 	if tab.overlayPane != nil {
-		oldID := tab.overlayPane.ID
+		oldID = tab.overlayPane.ID
 		// Captured before the slot is cleared: overlayVisibilityCmd reads
 		// tab.overlayPane, which is nil by the time this batches below.
 		visCmd := m.overlayVisibilityCmd(tab, false)
+		// Repaint only when the outgoing overlay was ON SCREEN. That case was
+		// unreachable until the slot became shared — step 1 hid a visible
+		// overlay before this function could be called — and it takes the frame
+		// from a full-tab overlay back to the tab's normal split layout with the
+		// replacement still a daemon round trip away. Both other visibility
+		// transitions (the hide branch and showOverlay) pair with ClearScreen
+		// for the same reason. Replacing a HIDDEN overlay changes nothing on
+		// screen, so it stays repaint-free — that is the ordinary Alt+G
+		// swap-repos path and does not deserve a full redraw.
+		if tab.overlayVisible {
+			cmds = append(cmds, tea.ClearScreen)
+		}
 		tab.overlayPane.Dispose()
 		tab.overlayPane = nil
 		tab.overlayVisible = false
-		cmds = append(cmds, visCmd, func() tea.Msg {
-			msg, err := ipc.NewMessage(ipc.MsgDestroyPane, ipc.DestroyPanePayload{PaneID: oldID})
-			if err != nil {
-				log.Printf("overlay: destroy pane encode: %v", err)
-				return nil
-			}
-			m.sendForDest(tabDest, msg)
-			return nil
-		})
+		cmds = append(cmds, visCmd)
 	}
 
 	// Record that we expect the overlay to appear and auto-show on arrival.
@@ -372,12 +433,39 @@ func (m *Model) createOverlay(tab *TabModel, repo string) tea.Cmd {
 	m.pendingOverlayShow[tab.ID] = true
 
 	tabID := tab.ID
+	// The destroy and the create leave in ONE Cmd, destroy first — never as two
+	// siblings of a tea.Batch, which runs its children on separate goroutines
+	// and orders nothing (the same property that transposed keystrokes when
+	// pane input was forwarded per-key through Cmds). The daemon dispatches one
+	// connection's messages in arrival order, so sending them here in sequence
+	// is what makes the replace atomic from its point of view.
+	//
+	// Losing that race is not cosmetic: enforceOverlayCap runs at CREATE time
+	// and counts every live overlay, so a create that arrives first sees the
+	// outgoing overlay still alive, finds itself one past [overlay] max_live,
+	// and evicts the least recently SHOWN overlay to make room. The outgoing one
+	// was just on screen, so it sorts newest and survives — the overlay that
+	// dies is a DIFFERENT tab's, typically a lazygit left running elsewhere,
+	// which mutates .git and may be mid-rebase. The shared slot is what makes
+	// this routine rather than rare: this path used to run only when the
+	// resolved repo differed, and now every tool swap goes through it.
 	cmds = append(cmds, func() tea.Msg {
+		if oldID != "" {
+			msg, err := ipc.NewMessage(ipc.MsgDestroyPane, ipc.DestroyPanePayload{PaneID: oldID})
+			if err != nil {
+				// Fall through to the create: an overlay we failed to destroy is
+				// a leak the idle sweep still reclaims, whereas skipping the
+				// create would leave the user's keypress with nothing to show.
+				log.Printf("overlay: destroy pane encode: %v", err)
+			} else {
+				m.sendForDest(tabDest, msg)
+			}
+		}
 		payload := ipc.CreatePanePayload{
 			TabID:        tabID,
 			CWD:          repo,
-			Type:         "lazygit",
-			InstanceArgs: []string{"--path", repo},
+			Type:         pluginName,
+			InstanceArgs: overlayInstanceArgs(pluginName, repo),
 			Overlay:      true,
 		}
 		msg, err := ipc.NewMessage(ipc.MsgCreatePane, payload)
@@ -428,25 +516,33 @@ func (m *Model) overlayResizeCmd(tab *TabModel) tea.Cmd {
 // handleOverlayKey routes keys while the overlay is visible.
 //
 // Allow-list:
-//   - ToggleLazygit (alt+g)  → hide overlay (delegates to handleToggleLazygit)
+//   - ToggleLazygit (alt+g)  → hide, or swap to lazygit if hunk is showing
+//   - ToggleHunk (alt+h)     → hide, or swap to hunk if lazygit is showing
 //   - Quit (ctrl+q / ctrl+c) → pass through to normal quit handler
 //   - Redraw (alt+shift+l)   → mirror the existing Redraw case exactly
 //   - alt+1..9               → switchTab (overlay survives, per-tab state)
 //   - everything else         → keyToBytes → forwardInputBytes
 //     (ActivePaneModel returns the overlay pane when visible, so the bytes
-//     reach the lazygit PTY).
+//     reach the overlay tool's PTY).
 //
-// Esc MUST reach lazygit (not intercepted here), so it falls through to the
-// default forwarding branch.
+// BOTH toggles are on the list, not just the one that owns the visible
+// overlay: with a single slot, the other tool's key is how you swap, and a key
+// left off this list is delivered to the running tool as input instead.
+//
+// Esc MUST reach the overlay tool (not intercepted here), so it falls through
+// to the default forwarding branch.
 func (m *Model) handleOverlayKey(msg tea.KeyPressMsg, tab *TabModel) tea.Cmd {
 	key := msg.String()
 	kb := m.cfg.Keybindings
 
 	logger.Debug("handleOverlayKey: key=%q", key)
 
-	// Toggle → hide.
+	// Toggles → hide (own tool) or swap (other tool).
 	if kbMatches(key, kb.ToggleLazygit) {
 		return m.handleToggleLazygit()
+	}
+	if kbMatches(key, kb.ToggleHunk) {
+		return m.handleToggleHunk()
 	}
 
 	// Quit.

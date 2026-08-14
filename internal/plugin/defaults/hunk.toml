@@ -1,0 +1,35 @@
+# hunk — review-first terminal diff viewer
+# Edit this file to customize the plugin. Delete it to restore defaults.
+
+[plugin]
+name = "hunk"
+display_name = "Hunk"
+category = "tools"
+description = "Review-first diff viewer for the current workspace"
+homepage = "https://github.com/modem-dev/hunk"
+schema_version = 1
+
+[command]
+cmd = "hunk"
+# path = "/path/to/hunk"  # uncomment to override PATH lookup
+detect = "hunk --version"
+# `hunk` on its own prints help — `diff` is what opens the review UI for the
+# working tree. It lives here rather than in a toggle because InstanceArgs
+# REPLACE these base args at spawn (resolveSpawnArgs), so any enabled toggle
+# would drop the subcommand and leave the pane on a help screen. Keep this
+# plugin toggle-free; hunk's own ~/.config/hunk/config.toml is where per-user
+# options (watch mode, layout, tab width) belong.
+args = ["diff"]
+# hunk has no --path/-C flag: the repository it reviews comes from the working
+# directory alone, so the CWD step is what scopes it.
+prompts_cwd = true
+# The CWD step lists git repos found near the active pane's directory
+# (enclosing repo + one-level sub-repos) instead of the plain browser.
+discover = "git"
+
+[persistence]
+# Re-run `hunk diff` in the saved CWD on daemon restart. It rereads the working
+# tree from scratch, exactly like git does.
+strategy = "rerun"
+# Full-screen TUI — replaying stale frames on reconnect is useless.
+ghost_buffer = false

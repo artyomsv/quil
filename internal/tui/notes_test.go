@@ -778,6 +778,13 @@ func TestModel_NotesKeyExempt_AllowsGlobalShortcuts(t *testing.T) {
 		"shift+tab", // same
 		kb.PaneLeft, // focus toggle — handled before notesKeyExempt is reached
 		kb.PaneRight,
+		// Both overlay toggles are deliberately NOT exempt: notes mode binds the
+		// editor to a pane, and popping a full-screen overlay over it mid-edit
+		// conflicts with the layout, so they fall through as plain input. That
+		// decision is documented on notesKeyExempt and was previously pinned by
+		// nothing — for the old binding either.
+		kb.ToggleLazygit,
+		kb.ToggleHunk,
 	}
 	for _, key := range consumed {
 		if m.notesKeyExempt(key) {

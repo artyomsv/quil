@@ -59,6 +59,13 @@ type repoScanState struct {
 	cwd     string // echoed back by the daemon; identifies WHAT was asked
 	tabID   string // the tab that asked (repoScanOverlay only), resolved again on arrival
 	purpose repoScanPurpose
+	// plugin is the overlay tool whose key started this scan (repoScanOverlay
+	// only). Discovery is a round trip to the daemon, so the keypress is long
+	// gone by the time the answer lands, and a tab's single overlay slot
+	// cannot stand in for the answer: it holds whatever tool was there BEFORE
+	// — frequently the other one, since swapping tools is what Alt+G/Alt+H do
+	// to each other.
+	plugin string
 	// gen identifies WHICH request this is, on top of cwd identifying what it
 	// asked about. cwd alone is not enough: the overlay and the pick list can
 	// both be asked about the SAME directory (e.g. Alt+G on a pane, then
@@ -85,9 +92,11 @@ type repoScanState struct {
 //
 // Used in local mode too, deliberately. The answer is identical when the daemon
 // is local, and a path exercised only by remote sessions is one that rots.
-func (m *Model) requestGitRepos(cwd, tabID string, purpose repoScanPurpose) tea.Cmd {
+// plugin names the overlay tool that asked; it is meaningful for
+// repoScanOverlay only and ignored for the pick list.
+func (m *Model) requestGitRepos(cwd, tabID string, purpose repoScanPurpose, plugin string) tea.Cmd {
 	gen := m.nextReqGen()
-	m.repoScan = repoScanState{cwd: cwd, tabID: tabID, purpose: purpose, gen: gen}
+	m.repoScan = repoScanState{cwd: cwd, tabID: tabID, purpose: purpose, plugin: plugin, gen: gen}
 	return tea.Batch(
 		func() tea.Msg {
 			msg, err := ipc.NewMessage(ipc.MsgGitReposReq, ipc.GitReposReqPayload{CWD: cwd})
@@ -129,6 +138,7 @@ func (m *Model) applyGitRepos(resp ipc.GitReposRespPayload, gen string) tea.Cmd 
 	}
 	purpose := m.repoScan.purpose
 	tabID := m.repoScan.tabID
+	overlayPlugin := m.repoScan.plugin
 	m.repoScan = repoScanState{}
 
 	// A failure is NOT "no repository here". Reporting a timed-out or rejected
@@ -156,7 +166,7 @@ func (m *Model) applyGitRepos(resp ipc.GitReposRespPayload, gen string) tea.Cmd 
 	if tab == nil {
 		return nil
 	}
-	return m.resolveLazygitOverlay(tab, resp.Repos)
+	return m.resolveOverlay(tab, resp.Repos, overlayPlugin)
 }
 
 // tabByID finds a tab by id, or nil. Alt+G resolves its target twice — once to

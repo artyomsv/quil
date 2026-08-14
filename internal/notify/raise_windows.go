@@ -138,6 +138,62 @@ type raiseAttempt struct {
 	try  func(hwnd uintptr) (bool, string)
 }
 
+const (
+	// shellHandoverWait is how long to wait for the notification UI to give the
+	// foreground back before trying to take it. Generous, because the cost of
+	// waiting is invisible (this process has no window) while the cost of
+	// giving up early is the whole feature.
+	shellHandoverWait = 2500 * time.Millisecond
+	shellHandoverPoll = 60 * time.Millisecond
+)
+
+// isModernShellSurface reports whether hwnd is one of the UWP surfaces the
+// shell uses for notifications.
+//
+// This is the thing that was refusing us, and it took six rounds to see because
+// it is not a permission at all. SetForegroundWindow cannot take the foreground
+// FROM a modern application, full stop — no lock to clear, no right to acquire,
+// no input to generate. Measured at the moment of a real toast click: the
+// foreground was hwnd=5505836 class="Windows.UI.Core.CoreWindow", and it stayed
+// that way through every rung, including one where the injected hotkey was
+// confirmed delivered.
+//
+// So the question was never "how do we win the foreground", it was "when is it
+// ours to take". ApplicationFrameWindow is included because it hosts UWP content
+// in a Win32 frame and behaves the same way.
+func isModernShellSurface(hwnd uintptr) bool {
+	if hwnd == 0 {
+		return false
+	}
+	var buf [64]uint16
+	procGetClassNameW.Call(hwnd, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
+	switch windows.UTF16ToString(buf[:]) {
+	case "Windows.UI.Core.CoreWindow", "ApplicationFrameWindow":
+		return true
+	}
+	return false
+}
+
+// waitForForegroundHandover blocks until the notification UI stops holding the
+// foreground, and reports how long that took.
+//
+// Polling rather than an event, because there is no notification for "the shell
+// finished dismissing"; and bounded, because the user may genuinely have been
+// working IN a UWP application when the toast arrived, in which case the
+// foreground never becomes takeable and the attempt below simply fails as it
+// did before. Waiting costs nothing visible either way — this process has no
+// window and the pane routing has already been delivered.
+func waitForForegroundHandover() time.Duration {
+	start := time.Now()
+	for time.Since(start) < shellHandoverWait {
+		if !isModernShellSurface(currentForeground()) {
+			break
+		}
+		time.Sleep(shellHandoverPoll)
+	}
+	return time.Since(start).Truncate(time.Millisecond)
+}
+
 // describeWindow names a window well enough to identify who is holding the
 // foreground when a click is delivered — the one fact that is invisible from
 // inside a process being refused, and the one that says whether the refusal is
@@ -361,6 +417,15 @@ func RaiseWindowFor(pid int) (string, error) {
 	defer runtime.UnlockOSThread()
 
 	entryForeground := currentForeground()
+
+	// BEFORE anything is attempted: a click is delivered while the notification
+	// UI still owns the foreground, and the foreground cannot be taken from a
+	// modern application at all. Every rung run inside that window is refused
+	// identically no matter how well it is implemented — which is exactly what
+	// the logs showed for six rounds, including a rung whose injected keystroke
+	// was confirmed delivered.
+	handover := waitForForegroundHandover()
+
 	var firstErr error
 	for _, cand := range ancestorPIDs(uint32(pid)) {
 		hwnd := visibleTopLevelWindow(cand)
@@ -377,7 +442,10 @@ func RaiseWindowFor(pid int) (string, error) {
 		}
 		how, why := raiseWithSettle(hwnd)
 		if how != "" {
-			return how, nil
+			// The wait is reported on SUCCESS too. It is the difference between
+			// "the shell had already let go" and "we waited 400 ms for it",
+			// and only the second confirms why this works at all.
+			return fmt.Sprintf("%s after %s handover", how, handover), nil
 		}
 		// Keep walking rather than giving up here. In practice the first
 		// ancestor owning a titled window IS the terminal, but the walk is what
@@ -387,8 +455,8 @@ func RaiseWindowFor(pid int) (string, error) {
 			// The foreground at ENTRY is recorded because it names who is
 			// refusing. Every previous round of this diagnosis was spent
 			// guessing at that from the outside.
-			firstErr = fmt.Errorf("owner pid %d, foreground on entry was %s — %s",
-				cand, describeWindow(entryForeground), why)
+			firstErr = fmt.Errorf("owner pid %d, foreground on entry was %s, waited %s for handover, foreground then was %s — %s",
+				cand, describeWindow(entryForeground), handover, describeWindow(currentForeground()), why)
 		}
 	}
 	if firstErr != nil {

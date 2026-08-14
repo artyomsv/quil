@@ -192,7 +192,16 @@ func TestBeginWorktreeStatus_RefusesASecondConcurrentRequest(t *testing.T) {
 func TestWorktreeStatusReq_IsDispatchedAndAnswered(t *testing.T) {
 	d, sock := overlayServerDaemon(t)
 	stubWorktreeStatus(t, func(string) (int, error) { return 4, nil })
-	_ = d
+	// The daemon answers only about worktrees it owns, so the round trip needs
+	// a pane that owns this one — otherwise this would pass through the refusal
+	// path and prove nothing about dispatch.
+	tab := d.session.CreateTab("t")
+	pane, err := d.session.CreatePane(tab.ID, "/w/feat-a")
+	if err != nil {
+		t.Fatalf("CreatePane: %v", err)
+	}
+	pane.WorktreeOwned = true
+	pane.WorktreePath = "/w/feat-a"
 
 	c, err := ipc.NewClient(sock)
 	if err != nil {
@@ -243,5 +252,51 @@ func TestWorktreeStatusReq_IsDispatchedAndAnswered(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("no worktree_status_resp arrived — is the type dispatched?")
+	}
+}
+
+// The status RPC takes PATHS off the wire, which is the one asymmetry with the
+// destroy payload's carefully-argued "a bool, never a path" boundary. It is
+// read-only and capped, but it still runs `git status` in a directory a client
+// named — and `git status` honours that repository's core.fsmonitor, i.e. it can
+// start a process the client chose the configuration of.
+//
+// The daemon answers only about worktrees it OWNS, which costs nothing: the
+// dialog asks about exactly those, so no legitimate request is refused.
+func TestWorktreeStatusResponse_AnswersOnlyAboutOwnedWorktrees(t *testing.T) {
+	d := newTestDaemon(t)
+	tab := d.session.CreateTab("t")
+	pane, err := d.session.CreatePane(tab.ID, "/w/feat-a")
+	if err != nil {
+		t.Fatalf("CreatePane: %v", err)
+	}
+	pane.WorktreeOwned = true
+	pane.WorktreePath = "/w/feat-a"
+
+	var asked []string
+	stubWorktreeStatus(t, func(path string) (int, error) {
+		asked = append(asked, path)
+		return 1, nil
+	})
+
+	got := d.worktreeStatusResponse(ipc.WorktreeStatusReqPayload{
+		Paths: []string{"/w/feat-a", "/etc", "/somebody/elses/repo"},
+	})
+
+	if len(asked) != 1 || asked[0] != "/w/feat-a" {
+		t.Errorf("git status ran against %v, want only the owned worktree", asked)
+	}
+	// The echo contract still holds for every path, and the unowned ones carry
+	// a reason rather than a count — never a 0, which would read as clean.
+	if len(got.Paths) != 3 {
+		t.Errorf("Paths = %v, want all three echoed verbatim", got.Paths)
+	}
+	if len(got.Statuses) != 3 {
+		t.Fatalf("Statuses = %+v, want one per path", got.Statuses)
+	}
+	for _, st := range got.Statuses[1:] {
+		if st.Error == "" {
+			t.Errorf("status %+v reports no reason for a path the daemon does not own", st)
+		}
 	}
 }

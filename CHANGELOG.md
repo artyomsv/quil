@@ -23,12 +23,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is still what the row describes. A pane you opened in a worktree you made by
   hand is not Quil's to delete. While the dialog is open it
   asks what each worktree holds and shows `clean` or
-  `⚠ 3 uncommitted changes will be lost`, so the toggle is armed against a
-  number rather than a guess; if it cannot check, it says so instead of
-  reporting `clean`. The removal is a forced one, so uncommitted and untracked
-  files go with the directory — but **the branch is kept**, along with every
-  commit on it, so nothing you committed is lost and `git branch` still lists
-  it. A worktree that still holds a pane in another tab is left where it is.
+  `⚠ 3 uncommitted or ignored files will be lost`, so the toggle is armed
+  against a number rather than a guess; if it cannot check, it says so instead
+  of reporting `clean`. **Ignored files are counted** — a `.env` or a `build/`
+  is exactly what a forced removal destroys with nothing to recover it from, so
+  a worktree holding one never reads as clean. All of that goes with the
+  directory — but **the branch is kept**, along with every commit on it, so
+  nothing you committed is lost and `git branch` still lists it. A worktree
+  that still holds a pane in another tab is left where it is.
 
 ## [1.58.0] - 2026-08-14
 

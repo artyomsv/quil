@@ -515,3 +515,35 @@ func TestRemoveWorktree_TerminatesOptionsBeforeThePath(t *testing.T) {
 		t.Errorf("argv = %v; want %q immediately before the path", args, "--")
 	}
 }
+
+// The status call must not take the index lock: it runs against a worktree the
+// user may be working in at that moment, and a plain `git status` refreshes and
+// REWRITES the index, contending with their own git. Quil is asking a question
+// here, not doing work on their behalf.
+func TestStatus_DoesNotTakeOptionalLocks(t *testing.T) {
+	calls := stubGit(t, "", nil)
+
+	if _, err := Status(context.Background(), "/w/feat-a"); err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+
+	if len(*calls) != 1 {
+		t.Fatalf("git calls = %v, want one", *calls)
+	}
+	args := (*calls)[0]
+	var sawNoOptionalLocks, sawIgnored bool
+	for _, a := range args {
+		switch a {
+		case "--no-optional-locks":
+			sawNoOptionalLocks = true
+		case "--ignored":
+			sawIgnored = true
+		}
+	}
+	if !sawNoOptionalLocks {
+		t.Errorf("argv = %v, want --no-optional-locks", args)
+	}
+	if !sawIgnored {
+		t.Errorf("argv = %v, want --ignored — an ignored .env is destroyed by the removal and must be counted", args)
+	}
+}

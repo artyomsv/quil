@@ -679,6 +679,7 @@ func (m Model) handleAboutKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			// MsgShutdown (see handleConfirmKey).
 			m.dialog = dialogConfirm
 			m.confirmKind = confirmKindShutdown
+			m.resetConfirmWorktrees()
 			m.confirmID = ""
 			m.confirmName = ""
 			m.dialogCursor = 0
@@ -1526,15 +1527,27 @@ func (m Model) renderConfirmDialog() string {
 		if rows := m.renderConfirmWorktrees(); rows != "" {
 			b.WriteString("\n\n")
 			b.WriteString(rows)
-			footer = "space also delete worktree    Enter confirm    Esc cancel"
+			// "space also delete worktree …" is 57 cells, 59 with the indent,
+			// against a 54-cell budget — lipgloss wraps rather than clips, so it
+			// stranded `Esc cancel` on a row the box never budgeted, stacked on
+			// top of the worktree list. dialogBoxChrome documents this exact
+			// hazard; this footer is the one that walked into it.
+			footer = "space worktree    Enter confirm    Esc cancel"
 		}
 	}
 	b.WriteString("\n\n")
 
-	b.WriteString("  " + dialogSubtle.Render(footer))
+	// Truncated like every other value-bearing row in this package's dialogs:
+	// the box pads but never clips, so a footer that outgrows the budget wraps
+	// and adds a row nothing accounted for.
+	b.WriteString("  " + dialogSubtle.Render(truncateToWidth(footer, dialogWidth-dialogBoxChrome-confirmRowIndent)))
 
 	return b.String()
 }
+
+// confirmRowIndent is the two-space gutter every confirm row is written with.
+// Counted against the width budget because it is part of the rendered line.
+const confirmRowIndent = 2
 
 // renderConfirmWorktrees draws the "also delete the worktree" checkbox and one
 // line per worktree, or "" when the close would delete none.
@@ -1568,13 +1581,18 @@ func (m Model) renderConfirmWorktrees() string {
 	}
 	for _, w := range shown {
 		b.WriteString("\n")
-		// The label is a BRANCH NAME, which a remote daemon chooses and a user
-		// can type an escape into: sanitized and bounded at render, like every
-		// other value from a machine the user may not control. Bounding is a
-		// separate job from sanitizing — sanitizeRemoteText removes escapes
-		// without shortening anything.
+		// The label is daemon-chosen text — a branch name, or a path when the
+		// pane's shell has drifted — so it is sanitized AND bounded at render,
+		// like every other value from a machine the user may not control.
+		// Bounding is a separate job from sanitizing: sanitizeRemoteText
+		// removes escapes without shortening anything.
+		//
+		// Elided in the MIDDLE, because the identifying half of a path is its
+		// TAIL: truncateCells cuts the end, so every worktree under one parent
+		// would render as the same `E:\Projects\…\quil-worktrees\…` prefix. The
+		// pane's own spawn-error line elides for exactly this reason.
 		b.WriteString("      " + dialogSubtle.Render(
-			truncateCells(sanitizeRemoteText(w.label), confirmWorktreeLabelCap)))
+			elideMiddle(sanitizeRemoteText(w.label), confirmWorktreeLabelCap)))
 		b.WriteString("\n")
 		b.WriteString("      " + m.renderWorktreeChanges(w))
 	}
@@ -1584,9 +1602,11 @@ func (m Model) renderConfirmWorktrees() string {
 	}
 	// Said once, under the list, because it is a property of the operation
 	// rather than of any one worktree — and said whether or not the check
-	// answered, since it is true either way.
+	// answered, since it is true either way. "everything else here" is deliberate
+	// and covers the case a count alone hides: ignored files, a .env among them,
+	// which exist in no branch and cannot be recovered from one.
 	b.WriteString("\n")
-	b.WriteString("  " + dialogSubtle.Render("The branch is kept. Uncommitted work is not."))
+	b.WriteString("  " + dialogSubtle.Render("The branch is kept; everything else here goes."))
 	return b.String()
 }
 
@@ -1609,9 +1629,13 @@ func (m Model) renderWorktreeChanges(w confirmWorktree) string {
 	case w.changes == 0:
 		return dialogSubtle.Render("clean")
 	case w.changes == 1:
-		return dialogWarn.Render("⚠ 1 uncommitted change will be lost")
+		return dialogWarn.Render("⚠ 1 uncommitted or ignored file will be lost")
 	default:
-		return dialogWarn.Render(fmt.Sprintf("⚠ %d uncommitted changes will be lost", w.changes))
+		// "or ignored" is not padding: the count includes ignored entries
+		// (gitworktree.Status), and those are the ones with no branch to
+		// recover them from. Saying only "uncommitted" would have the number
+		// describe something narrower than what the removal takes.
+		return dialogWarn.Render(fmt.Sprintf("⚠ %d uncommitted or ignored files will be lost", w.changes))
 	}
 }
 
@@ -1818,6 +1842,7 @@ func (m Model) handleCreatePaneKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			idx := m.dialogCursor - 1
 			if idx < len(instances) {
 				m.confirmKind = "instance"
+				m.resetConfirmWorktrees()
 				m.confirmID = instances[idx].ID
 				m.confirmName = instances[idx].Name
 				m.dialog = dialogConfirm

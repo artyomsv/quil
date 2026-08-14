@@ -1181,3 +1181,37 @@ trip produces two wire-indistinguishable requests about the same worktree.
 toggle inherited by the next close is a deletion nobody was offered — the same
 shape as the project form's armed merge plan, and the reason that one re-derives
 its plan on open rather than trusting a flag.
+
+**The change count includes IGNORED files, and leaving them out was a hole in
+the one thing the count exists for.** `git status --porcelain` says nothing
+about ignored entries, so a worktree holding a `.env` and a `build/` reported
+ZERO — the dialog rendered "clean", the single answer that invites the toggle,
+and `--force` deleted both. An ignored file is in no branch, so unlike a
+committed change there is nothing to recover it from. `Status` passes
+`--ignored` in its TRADITIONAL mode, which respects `-unormal` and collapses an
+ignored directory to one entry (a `node_modules` costs one line);
+`--ignored=matching` would expand it and walk every file. It also passes
+`--no-optional-locks`, because a plain `git status` refreshes and rewrites the
+index of a checkout the user may be working in at that moment.
+
+**`MsgWorktreeStatusReq` carries PATHS, and the ownership filter is where the
+destroy payload's "a bool, never a path" boundary is enforced for it.** The
+request has to name paths — it is asked before the close, about several
+worktrees at once — so `Daemon.worktreeStatusResponse` answers only about
+worktrees this daemon created and hands every other path back with a reason
+rather than a zero count (a zero renders as "clean"). It refuses nothing
+legitimate, since the dialog only ever asks about worktrees it was offered. It
+matters because `git status` is less read-only than it looks: it runs in a
+directory the client named and honours that repository's `core.fsmonitor`.
+
+**A failed `git worktree remove` may already have deregistered the worktree.**
+Measured on Windows: git deletes the tree and the admin entry, then fails on the
+now-empty directory because the pane's shell still holds it — so it exits
+non-zero having done most of the job, and every later attempt answers "is not a
+working tree" while an orphaned directory `git worktree list` no longer mentions
+is left behind. `removeOneWorktree` therefore asks the LISTING (not the error
+text, which is git's to reword) whether the path is still registered, and when
+it is not, finishes with `os.Remove` — never `RemoveAll`, so only an empty
+directory, because Quil is completing git's operation rather than performing a
+recursive delete of its own. That cleanup retries on the same budget the git
+call does, since the child that blocked git is still exiting.

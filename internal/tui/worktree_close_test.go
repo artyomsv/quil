@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/artyomsv/quil/internal/ipc"
 )
@@ -462,5 +463,58 @@ func TestOpenClosePaneConfirm_AsksTheDaemonAboutTheRecordedWorktree(t *testing.T
 	}
 	if stamped == "" || stamped != got.confirmWorktreeGen {
 		t.Errorf("request ID = %q, want the dialog's generation %q", stamped, got.confirmWorktreeGen)
+	}
+}
+
+// Every line the confirm dialog draws must fit its content width. lipgloss pads
+// but never clips, so an over-wide line WRAPS — stranding half the footer on a
+// row the box never budgeted, on top of the worktree list it now carries. The
+// footer this feature added was 59 cells against a 54-cell budget.
+func TestRenderConfirmDialog_EveryLineFitsTheBox(t *testing.T) {
+	p := worktreePane("pane-a", "/w/feat-a", "feat/a")
+	m := modelWithPanes(p)
+	m = applyModel(m.openClosePaneConfirm())
+	m.confirmWorktrees[0].loaded = true
+	m.confirmWorktrees[0].changes = 3
+
+	budget := dialogWidth - dialogBoxChrome
+	for _, line := range strings.Split(stripANSI(m.renderConfirmDialog()), "\n") {
+		if w := lipgloss.Width(line); w > budget {
+			t.Errorf("line is %d cells, over the %d-cell budget — lipgloss will wrap it:\n%q", w, budget, line)
+		}
+	}
+}
+
+// A drifted pane labels its row with the PATH, and a path is identified by its
+// TAIL — truncateCells cuts the tail, so a plain truncation leaves every
+// worktree under one parent looking identical (`E:\Projects\…\quil-worktrees\…`).
+func TestRenderConfirmDialog_KeepsTheIdentifyingEndOfALongPath(t *testing.T) {
+	p := worktreePane("pane-a", "/elsewhere", "feat/b")
+	p.WorktreePath = `E:\Projects\Stukans\quil-worktrees\feat-the-actual-branch`
+	m := modelWithPanes(p)
+	m = applyModel(m.openClosePaneConfirm())
+
+	out := stripANSI(m.renderConfirmDialog())
+
+	if !strings.Contains(out, "feat-the-actual-branch") {
+		t.Errorf("the row does not show the part of the path that identifies the worktree:\n%s", out)
+	}
+}
+
+// Every confirm opener clears the worktree state, not just the close ones.
+// Today the terminal branches of handleConfirmKey reset it and the invariant
+// holds globally — but "instance" renders through the same default arm, so an
+// exit path added later that skips the reset would paint worktree rows on an
+// unrelated confirm. Clearing at each opener makes it local instead.
+func TestOpenRestartPaneConfirm_ClearsAnyWorktreeStateFromABeforeDialog(t *testing.T) {
+	m := modelWithWorktreePane()
+	m = applyModel(m.openClosePaneConfirm())
+	m = applyModel(m.handleConfirmKey(keyPressFor(" ")))
+
+	got := applyModel(m.openRestartPaneConfirm())
+
+	if len(got.confirmWorktrees) != 0 || got.confirmRemoveWorktree {
+		t.Errorf("the restart confirm inherited worktree state: rows=%+v armed=%v",
+			got.confirmWorktrees, got.confirmRemoveWorktree)
 	}
 }

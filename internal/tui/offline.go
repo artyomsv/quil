@@ -107,6 +107,7 @@ func (m *Model) promptNextUpgrade() {
 	}
 	m.dialog = dialogConfirm
 	m.confirmKind = confirmKindUpgradeDest
+	m.resetConfirmWorktrees()
 	m.confirmID = next.dest
 	m.confirmName = next.dest
 	m.confirmDetail = next.detail

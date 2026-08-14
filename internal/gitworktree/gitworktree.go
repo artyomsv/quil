@@ -350,17 +350,29 @@ func RemoveWorktree(ctx context.Context, repo, path string) error {
 	return nil
 }
 
-// Status counts the entries `git status --porcelain` reports for the worktree
-// at path — modified tracked files and untracked ones alike, because --force
-// destroys both and a count covering only the tracked half would report a
-// worktree holding a whole unversioned build as clean.
+// Status counts everything the forced removal would destroy in the worktree at
+// path: modified tracked files, untracked ones, AND IGNORED ones.
 //
-// An untracked DIRECTORY is one entry rather than one per file (git's default
-// -unormal). That is why the caller says "uncommitted changes" rather than
-// naming a file count: the cheap answer is honest about there being work, and
-// -uall walks every untracked file in the tree, which on a checkout carrying a
-// node_modules or a build directory is the slow call this package otherwise
-// avoids.
+// The ignored half is the one that was missing and it is the most dangerous to
+// omit. `git status --porcelain` says nothing about ignored entries, so a
+// worktree holding a `.env` and a `build/` reported ZERO — the dialog rendered
+// "clean", which is the single answer that invites the toggle, and `--force`
+// then deleted both. An ignored file is not in git at all, so unlike a
+// committed change there is no branch to recover it from; it is simply gone.
+// The earlier version of this comment claimed to cover exactly that case ("a
+// whole unversioned build") and did not, because a build directory is normally
+// ignored rather than merely untracked.
+//
+// --ignored is the TRADITIONAL mode (the default when the flag carries no
+// value), which respects -unormal and collapses an ignored DIRECTORY to one
+// entry — so a node_modules costs one line. --ignored=matching would expand it
+// and walk every file, which is the slow call this package otherwise avoids.
+// The same collapsing applies to untracked directories, which is why the caller
+// counts "files" loosely rather than promising an exact number.
+//
+// --no-optional-locks because a plain `git status` refreshes and REWRITES the
+// index: this runs against a checkout the user may be working in at that
+// moment, and Quil is asking a question here, not doing work on their behalf.
 //
 // A non-repository is an ERROR, unlike List, which folds that case into an
 // empty answer. There it means "nothing to attach to" and is a real answer; here
@@ -372,7 +384,7 @@ func RemoveWorktree(ctx context.Context, repo, path string) error {
 // It is affordable here because it runs ONCE, when the user opens a confirm
 // dialog, against one worktree.
 func Status(ctx context.Context, path string) (int, error) {
-	out, err := runGit(ctx, path, "status", "--porcelain")
+	out, err := runGit(ctx, path, "--no-optional-locks", "status", "--porcelain", "--ignored")
 	if err != nil {
 		return 0, fmt.Errorf("git status %s: %w", path, err)
 	}

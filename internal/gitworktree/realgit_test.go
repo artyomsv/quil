@@ -562,3 +562,53 @@ func TestStatus_RealGit_ReportsANonRepositoryAsAnError(t *testing.T) {
 		t.Error("Status reported no error for a directory outside any repository")
 	}
 }
+
+// IGNORED files are counted, and leaving them out was a hole in the one thing
+// this count exists for.
+//
+// `git status --porcelain` says nothing about ignored entries, so a worktree
+// holding a `.env` and a `build/` reported ZERO — the dialog rendered "clean",
+// which is the single answer that invites the toggle, and `--force` then
+// deleted both. A `.env` is not in git at all, so there is no branch to recover
+// it from: the file is simply gone. Verified against real git before the fix.
+//
+// --ignored (traditional, with the default -unormal) collapses an ignored
+// DIRECTORY to one entry, so a node_modules costs one line rather than a walk.
+func TestStatus_RealGit_CountsIgnoredFilesToo(t *testing.T) {
+	repo := realGitRepo(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	if err := os.WriteFile(filepath.Join(repo, ".gitignore"), []byte(".env\nbuild/\n"), 0o644); err != nil {
+		t.Fatalf("write .gitignore: %v", err)
+	}
+	runGitIn(t, repo, "add", ".gitignore")
+	runGitIn(t, repo, "commit", "-qm", "ignore rules")
+
+	path := DerivePath(repo, "feat/ignored")
+	if _, err := Add(ctx, repo, path, "feat/ignored"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	// Exactly the shape that reported clean: nothing tracked is modified and
+	// nothing is untracked — everything that would be destroyed is ignored.
+	if err := os.WriteFile(filepath.Join(path, ".env"), []byte("SECRET=1\n"), 0o600); err != nil {
+		t.Fatalf("write .env: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(path, "build"), 0o755); err != nil {
+		t.Fatalf("mkdir build: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "build", "out"), []byte("x\n"), 0o644); err != nil {
+		t.Fatalf("write build/out: %v", err)
+	}
+
+	got, err := Status(ctx, path)
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if got == 0 {
+		t.Fatal("Status = 0 for a worktree holding an ignored .env and build/ — the dialog would call this clean and then delete both")
+	}
+	if got != 2 {
+		t.Errorf("Status = %d, want 2 (.env plus the collapsed build/ directory)", got)
+	}
+}

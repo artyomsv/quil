@@ -3093,6 +3093,14 @@ func (m Model) openRestartPaneConfirm() (tea.Model, tea.Cmd) {
 			m.confirmKind = confirmKindRestartPane
 			m.confirmID = pane.ID
 			m.confirmName = paneDisplayName(pane)
+			// Cleared HERE as well as on every exit. The exits do cover it
+			// today — both terminal branches of handleConfirmKey reset — but
+			// that makes the invariant global, and "instance" already renders
+			// through renderConfirmDialog's default arm, so one future exit
+			// that skips the reset would paint worktree rows on a confirm that
+			// has nothing to do with worktrees. Clearing at each opener makes
+			// it local.
+			m.resetConfirmWorktrees()
 		}
 	}
 	return m, tea.ClearScreen

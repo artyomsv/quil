@@ -135,9 +135,17 @@ func (d *Daemon) removeOneWorktree(path string) {
 	// remove the directory it is sitting in — and the daemon has no record of
 	// the repository a pane's worktree came from: it stores the worktree path
 	// and nothing else, deliberately, so this is where the repo is recovered.
+	// The two failures are logged APART because List folds "not a repository"
+	// into (nil, nil) deliberately — so a shared branch printed "cannot find
+	// its repository: <nil>", which reads as a bug in the logging rather than
+	// as the answer it is.
 	list, err := worktreeListFn(ctx, path)
-	if err != nil || len(list) == 0 {
-		log.Printf("worktree remove: %s kept, cannot find its repository: %v", path, err)
+	if err != nil {
+		log.Printf("worktree remove: %s kept, its repository could not be read: %v", path, err)
+		return
+	}
+	if len(list) == 0 {
+		log.Printf("worktree remove: %s kept, it is not inside a git repository", path)
 		return
 	}
 	repo := list[0].Path
@@ -248,11 +256,18 @@ var removeDirFn = os.Remove
 // platform — appropriate for comparing what git printed against a built path in
 // a test, and wrong for a decision that authorises a delete.
 func sameWorktreePath(a, b string) bool {
-	x, y := filepath.Clean(a), filepath.Clean(b)
+	return normalizeWorktreePath(a) == normalizeWorktreePath(b)
+}
+
+// normalizeWorktreePath is the one normalisation every worktree-path comparison
+// in this package uses — pathWithin, sameWorktreePath and the ownership set —
+// so a path cannot be considered equal by one of them and not by another.
+func normalizeWorktreePath(p string) string {
+	c := filepath.Clean(p)
 	if runtime.GOOS == "windows" {
-		x, y = strings.ToLower(x), strings.ToLower(y)
+		c = strings.ToLower(c)
 	}
-	return x == y
+	return c
 }
 
 // paneInWorktree reports the id of a live pane that lives in the worktree, or
@@ -288,10 +303,6 @@ func (d *Daemon) paneInWorktree(path string) string {
 // is rewritten from OSC 7 — whatever case the shell reports — while the
 // worktree path is the one git created.
 func pathWithin(parent, child string) bool {
-	p := filepath.Clean(parent)
-	c := filepath.Clean(child)
-	if runtime.GOOS == "windows" {
-		p, c = strings.ToLower(p), strings.ToLower(c)
-	}
+	p, c := normalizeWorktreePath(parent), normalizeWorktreePath(child)
 	return p == c || strings.HasPrefix(c, p+string(filepath.Separator))
 }

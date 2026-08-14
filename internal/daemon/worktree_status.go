@@ -48,7 +48,7 @@ func (d *Daemon) handleWorktreeStatusReq(conn *ipc.Conn, msg *ipc.Message) {
 	}
 	go func() {
 		defer d.worktreeStatusing.Store(false)
-		respondTo(conn, msg.ID, ipc.MsgWorktreeStatusResp, worktreeStatusResponse(req))
+		respondTo(conn, msg.ID, ipc.MsgWorktreeStatusResp, d.worktreeStatusResponse(req))
 	}()
 }
 
@@ -79,6 +79,77 @@ func worktreeStatusReq(msg *ipc.Message) ipc.WorktreeStatusReqPayload {
 		log.Printf("handleWorktreeStatusReq: decode: %v", err)
 	}
 	return req
+}
+
+// worktreeStatusResponse (method) answers only about worktrees this daemon
+// OWNS, and hands the rest back with a reason.
+//
+// This closes the one asymmetry with the destroy payload, which carries a bool
+// precisely so no client can name a directory. The status request has to carry
+// paths — it is asked before the close, about several worktrees at once — so the
+// filter is where the same boundary is enforced. It costs nothing legitimate:
+// the dialog only ever asks about worktrees it was offered, which are exactly
+// the owned ones.
+//
+// It matters because `git status` is not as read-only as it looks: it runs in a
+// directory the client named and honours that repository's core.fsmonitor,
+// which can start a process configured by whoever owns that repository.
+//
+// An unowned path is refused with a REASON rather than a zero count, for the
+// reason every other branch here is: a zero renders as "clean", the one answer
+// that invites the removal toggle.
+func (d *Daemon) worktreeStatusResponse(req ipc.WorktreeStatusReqPayload) ipc.WorktreeStatusRespPayload {
+	// Capped against the REQUEST, before the filter: the response echoes every
+	// path the client sent, so the frame bound has to be measured on that
+	// rather than on the subset that survives.
+	if len(req.Paths) > maxWorktreeStatusPaths {
+		return ipc.WorktreeStatusRespPayload{
+			Paths: req.Paths,
+			Error: "too many worktrees in one status check",
+		}
+	}
+	owned := d.ownedWorktreeSet()
+	var ask ipc.WorktreeStatusReqPayload
+	for _, p := range req.Paths {
+		if owned[normalizeWorktreePath(p)] {
+			ask.Paths = append(ask.Paths, p)
+		}
+	}
+	inner := worktreeStatusResponse(ask)
+	byPath := make(map[string]ipc.WorktreeStatus, len(inner.Statuses))
+	for _, st := range inner.Statuses {
+		byPath[st.Path] = st
+	}
+	// Paths echoes the REQUEST verbatim, unfiltered — it is the client's
+	// staleness key, and a response listing fewer paths than were asked about
+	// is one the client drops entirely.
+	out := ipc.WorktreeStatusRespPayload{Paths: req.Paths, Error: inner.Error}
+	for _, p := range req.Paths {
+		if st, ok := byPath[p]; ok {
+			out.Statuses = append(out.Statuses, st)
+			continue
+		}
+		out.Statuses = append(out.Statuses, ipc.WorktreeStatus{
+			Path:  p,
+			Error: "not a worktree this daemon created",
+		})
+	}
+	return out
+}
+
+// ownedWorktreeSet is every worktree directory this daemon created, normalised
+// for comparison.
+func (d *Daemon) ownedWorktreeSet() map[string]bool {
+	out := map[string]bool{}
+	for _, p := range d.session.AllPanes() {
+		p.PluginMu.Lock()
+		owned, path := p.WorktreeOwned, p.WorktreePath
+		p.PluginMu.Unlock()
+		if owned && path != "" {
+			out[normalizeWorktreePath(path)] = true
+		}
+	}
+	return out
 }
 
 // worktreeStatusResponse is the pure half.

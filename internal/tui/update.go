@@ -93,6 +93,7 @@ func (m Model) handleUpdateAction() (tea.Model, tea.Cmd) {
 	if info.StagedVersion == info.LatestVersion {
 		m.dialog = dialogConfirm
 		m.confirmKind = confirmKindApplyUpdate
+		m.resetConfirmWorktrees()
 		m.confirmID = ""
 		m.confirmName = info.LatestVersion
 		m.dialogCursor = 0

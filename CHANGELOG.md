@@ -51,6 +51,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a notification in the sidebar, pane-history back-navigation, and clicking a
   desktop toast.
 
+## [1.55.2] - 2026-08-14
+
+### Changed
+- **The sidebar's working indicator now spins.** A pane mid-turn showed a still
+  `◐` in the sidebar while the tab bar and the pane's own border animated a
+  spinner for the same fact — so the one place that lists every pane at once
+  was the one that looked stopped. Both sidebar levels now cycle that same
+  spinner, in step with the tab and the border: the pane's own row, and the
+  count rolled up onto its project row.
+
 ## [1.55.1] - 2026-08-13
 
 ### Fixed

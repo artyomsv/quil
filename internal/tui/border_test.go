@@ -29,6 +29,34 @@ func TestBuildTopBorder_WorkingShowsLeftSpinner(t *testing.T) {
 	}
 }
 
+// TestBuildTopBorder_WorkingFrameMatchesTheSidebar closes the one gap the other
+// spinner tests leave open: every existing case passes frame 0, which is the
+// single value where a hand-rolled `spinnerFrames[f%len(f)]` and workingGlyph
+// agree by construction — so they would all stay green if the border kept its
+// own copy of the mapping and that copy drifted.
+//
+// Asserted against workingGlyph rather than a literal frame, because the
+// property is "the border shows what every other renderer shows", not "the
+// border shows ⠹". The sidebar rows and the tab label are pinned to the same
+// function by TestSidebar_WorkingIndicatorAnimatesWithTheTabSpinner, so this
+// completes the set: one glyph definition, four renderers, no site free to
+// disagree.
+func TestBuildTopBorder_WorkingFrameMatchesTheSidebar(t *testing.T) {
+	t.Parallel()
+	c := lipgloss.Color("238")
+	// Every frame, not one: a subset or an offset applied to the shared
+	// definition would still line up at whichever single frame was sampled.
+	for frame := range spinnerFrames {
+		border := buildTopBorder(40, "/home/user/proj", "claude", c,
+			false, false, false, false, 0 /*spinnerFrame*/, true /*working*/, frame)
+		want := workingGlyph(frame)
+		if !strings.Contains(border, want) {
+			t.Errorf("workFrame=%d: border %q does not show %q — the pane border "+
+				"no longer draws the frame workingGlyph defines", frame, border, want)
+		}
+	}
+}
+
 func TestBuildTopBorder_WorkingNoCWD(t *testing.T) {
 	t.Parallel()
 	c := lipgloss.Color("238")

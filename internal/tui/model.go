@@ -5035,7 +5035,7 @@ func (m Model) tabLabel(idx int) string {
 		name = glyphPinned + name
 	}
 	if m.tabHasWorkingPane(idx) {
-		name = spinnerFrames[m.workSpinnerFrame%len(spinnerFrames)] + " " + name
+		name = workingGlyph(m.workSpinnerFrame) + " " + name
 	}
 	if idx == m.activeTabIdx() {
 		return "* " + name

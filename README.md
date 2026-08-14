@@ -38,7 +38,7 @@ Type `quil` after a reboot — every tab, pane, working directory, layout split,
 | Start typing and the palette also searches every loaded pane's scrollback — match counts + a preview under **Found in panes**. | `Enter` on a pane match jumps straight to it. Searches loaded panes; lazily-restored panes appear once you open them. |
 | **Every project in one sidebar** | **…including ones on other machines** |
 | <img src="https://cdn.stukans.com/quil/screenshots/projects_1_main-800.webp" alt="Quil sidebar listing a dozen projects with per-pane agent state and git branch under the active one" width="420"> | <img src="https://cdn.stukans.com/quil/screenshots/projects_2_with_remote-800.webp" alt="A remote project in the sidebar labelled with its ssh host, its terminal, lazygit and Claude Code panes all running on that machine" width="420"> |
-| Projects group tabs and roll up their agents — `⚠` needs you, `◐` working, `✓` finished while you were elsewhere. Per-pane git branch underneath. | A remote host is a sibling row with its host under the name. Its panes run over there; the sidebar reports them exactly like local ones. |
+| Projects group tabs and roll up their agents — `▲` needs you, `⠹` working (spinning), `✓` finished while you were elsewhere. Per-pane git branch underneath. | A remote host is a sibling row with its host under the name. Its panes run over there; the sidebar reports them exactly like local ones. |
 
 ## Install
 
@@ -86,7 +86,7 @@ A **project** groups tabs, owns a root directory, and belongs to one daemon.
 an agent that finished — or got stuck asking you something — in a project you are
 *not* looking at is visible from the one you are.
 
-Each project row rolls up its panes: `⚠` blocked on you, `◐` working, `✓` finished
+Each project row rolls up its panes: `▲` blocked on you, `⠹` working (spinning), `✓` finished
 while you were elsewhere. **Blocked and finished are different states**, because
 they need different things from you. `Alt+Shift+A` jumps to whichever agent has
 been waiting longest anywhere in the workspace — oldest first rather than sidebar

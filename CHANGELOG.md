@@ -40,6 +40,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   something and switching away, the commonest sequence there is, was exactly the
   case that produced nothing. Being seen now requires the window to have focus
   as well, and returning to it still acknowledges the pane you land on.
+- **Clicking a toast no longer leaves the keyboard in limbo.** The window came
+  forward with the right pane selected, but nothing held keyboard focus —
+  typing reached neither the raised pane nor the app you had been in, so you had
+  to click the pane before you could type. Raising a window uses per-thread
+  Windows calls, and they were being made from a goroutine that can move
+  between OS threads mid-sequence, so the activation was never completed. The
+  raise now runs pinned to one thread, completes the activation in the target
+  window's own input queue, and verifies the window really ended up in the
+  foreground instead of trusting the call that asked. A raise that fails is
+  recorded in `notify-activate.log` beside the other logs.
 - **A pane raised from outside the pane area now takes focus properly.** Jumping
   to a pane set it as active for keyboard input but never set its focus flag, so
   it arrived with no cursor drawn and the pane you came from still wearing the

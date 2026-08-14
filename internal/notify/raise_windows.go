@@ -3,6 +3,9 @@
 package notify
 
 import (
+	"fmt"
+	"runtime"
+	"sync"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -21,6 +24,8 @@ var (
 	procGetWindowTextLengthW   = user32.NewProc("GetWindowTextLengthW")
 	procAttachThreadInput      = user32.NewProc("AttachThreadInput")
 	procGetForegroundWindow    = user32.NewProc("GetForegroundWindow")
+	procSetActiveWindow        = user32.NewProc("SetActiveWindow")
+	procBringWindowToTop       = user32.NewProc("BringWindowToTop")
 	procGetCurrentThreadIdUser = windows.NewLazySystemDLL("kernel32.dll").NewProc("GetCurrentThreadId")
 )
 
@@ -30,8 +35,10 @@ const (
 
 // RaiseWindowFor brings the terminal window hosting pid to the foreground.
 //
-// Best-effort by design: a failure means the user alt-tabs, which is exactly
-// where they were before. It never reports an error upward for that reason.
+// Best-effort in EFFECT — a failure means the user alt-tabs, which is where
+// they were before — but it reports what happened, because a raise that half
+// worked is not the same as one that did nothing and the difference is exactly
+// what the user feels. See the limbo case in forceForeground.
 //
 // The window does not belong to the quil process. Quil runs inside a terminal —
 // under Windows Terminal, GetConsoleWindow returns a hidden ConPTY
@@ -44,30 +51,70 @@ const (
 // Known ceiling: Windows Terminal hosts many tabs in one window and exposes no
 // way to select one, so this raises the WINDOW. If quil shares a WT window with
 // other tabs, the user may still land on a different tab.
-func RaiseWindowFor(pid int) {
-	// Windows only grants SetForegroundWindow to a process that currently has
-	// foreground rights. A process launched by the user clicking a toast does —
-	// but it must hand that right to the target, which is what
-	// AllowSetForegroundWindow is for.
+func RaiseWindowFor(pid int) error {
+	// EVERY call below is per-OS-THREAD: AttachThreadInput binds a specific
+	// thread's input queue, GetCurrentThreadId reports the thread it runs on,
+	// and the detach must name the same pair the attach did. A goroutine may be
+	// rescheduled onto a different OS thread at any call boundary, so without
+	// this lock the attach binds one thread, the activation runs on another and
+	// the detach unbinds a pair that was never attached — see forceForeground,
+	// where that produced a window in the foreground with the keyboard in
+	// limbo. internal/notify already pins a thread for COM apartment state, and
+	// this is the same class of requirement.
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	var firstErr error
 	for _, cand := range ancestorPIDs(uint32(pid)) {
 		hwnd := visibleTopLevelWindow(cand)
 		if hwnd == 0 {
 			continue
 		}
+		// Windows only grants SetForegroundWindow to a process that currently
+		// has foreground rights. A process launched by the user clicking a
+		// toast usually does — but it must hand that right to the target,
+		// which is what AllowSetForegroundWindow is for.
 		procAllowSetForegroundWin.Call(uintptr(cand))
 		if iconic, _, _ := procIsIconic.Call(hwnd); iconic != 0 {
 			procShowWindow.Call(hwnd, swRestore)
 		}
-		if ok, _, _ := procSetForegroundWindow.Call(hwnd); ok != 0 {
-			return
+		// The plain call FIRST and unattached, because it is the ordinary
+		// activation: the window manager runs its normal path and the owning
+		// application gets to place keyboard focus inside itself, which is the
+		// part that was going missing.
+		procSetForegroundWindow.Call(hwnd)
+		if isForeground(hwnd) {
+			return nil
 		}
-		// SetForegroundWindow is refused when the caller has lost foreground
-		// rights (a slow click, a stolen focus). Attaching to the foreground
-		// thread's input queue is the documented way to borrow them.
+		// Refused — the caller has lost foreground rights (a slow click, a
+		// stolen focus). Borrowing the input queues is the documented way back.
 		if forceForeground(hwnd) {
-			return
+			return nil
+		}
+		// Keep walking rather than giving up here. In practice the first
+		// ancestor owning a titled window IS the terminal, but the walk is what
+		// makes that a finding rather than an assumption, and the failure is
+		// reported against the whole chain.
+		if firstErr == nil {
+			firstErr = fmt.Errorf("could not foreground window of owner pid %d", cand)
 		}
 	}
+	if firstErr != nil {
+		return fmt.Errorf("notify: raising for pid %d: %w", pid, firstErr)
+	}
+	return fmt.Errorf("notify: no visible window found for pid %d or its ancestors", pid)
+}
+
+// isForeground asks the SYSTEM whether the raise landed, rather than trusting
+// the return value of the call that attempted it.
+//
+// SetForegroundWindow reports whether the request was ACCEPTED, which is not
+// the same as the window ending up foreground with the keyboard behind it —
+// the difference is invisible from inside the call and is the whole reason
+// this feature was debugged three times from the outside.
+func isForeground(hwnd uintptr) bool {
+	fg, _, _ := procGetForegroundWindow.Call()
+	return fg == hwnd
 }
 
 // ancestorPIDs returns pid followed by its parents, nearest first.
@@ -138,23 +185,63 @@ func visibleTopLevelWindow(pid uint32) uintptr {
 	return found
 }
 
-// forceForeground borrows the foreground thread's input queue so
-// SetForegroundWindow is permitted. Falls back cleanly when it is not.
+// forceForeground borrows the input queues so SetForegroundWindow is permitted.
+//
+// MUST be called on a locked OS thread — RaiseWindowFor holds the lock for
+// exactly this. Every call here is per-thread, and a goroutine that migrates
+// mid-sequence leaves the attach and the detach naming different threads.
+//
+// BOTH queues are attached, and the target's is the one that was missing. The
+// earlier version attached only the foreground thread, which is enough to be
+// PERMITTED to call SetForegroundWindow but not enough for the activation to
+// land in the target's own queue — so Windows Terminal came forward while the
+// keyboard belonged to nobody: text typed after a toast click appeared neither
+// in the raised pane nor in the app the user had been in. SetActiveWindow is
+// what completes it, and it can only reach a window in an attached queue.
+//
+// The result is VERIFIED against the system rather than read from a return
+// value, and the attachments are undone before asking, so the answer describes
+// the state the user is left in.
 func forceForeground(hwnd uintptr) bool {
-	fg, _, _ := procGetForegroundWindow.Call()
-	if fg == 0 {
-		return false
-	}
-	var fgPID uint32
-	fgThread, _, _ := procGetWindowThreadProcID.Call(fg, uintptr(unsafe.Pointer(&fgPID)))
 	self, _, _ := procGetCurrentThreadIdUser.Call()
-	if fgThread == 0 || fgThread == self {
-		return false
+
+	fg, _, _ := procGetForegroundWindow.Call()
+	var fgThread uintptr
+	if fg != 0 {
+		fgThread, _, _ = procGetWindowThreadProcID.Call(fg, 0)
 	}
-	if ok, _, _ := procAttachThreadInput.Call(self, fgThread, 1); ok == 0 {
-		return false
+	// The window's own thread. NULL for the pid is legal and documented — it is
+	// the thread id this needs, not the process.
+	targetThread, _, _ := procGetWindowThreadProcID.Call(hwnd, 0)
+
+	detachFg := attachInput(self, fgThread)
+	defer detachFg()
+	detachTarget := attachInput(self, targetThread)
+	defer detachTarget()
+
+	procBringWindowToTop.Call(hwnd)
+	procSetForegroundWindow.Call(hwnd)
+	procSetActiveWindow.Call(hwnd)
+
+	// Detached BEFORE the check: while queues are attached the answer describes
+	// a borrowed state that ends a microsecond later, not the one the user gets.
+	detachTarget()
+	detachFg()
+	return isForeground(hwnd)
+}
+
+// attachInput joins self to other's input queue and returns the undo, which is
+// safe to call more than once. A no-op undo is returned when there is nothing
+// to attach, so callers never branch on whether the attach happened.
+func attachInput(self, other uintptr) func() {
+	if other == 0 || other == self {
+		return func() {}
 	}
-	defer procAttachThreadInput.Call(self, fgThread, 0)
-	res, _, _ := procSetForegroundWindow.Call(hwnd)
-	return res != 0
+	if ok, _, _ := procAttachThreadInput.Call(self, other, 1); ok == 0 {
+		return func() {}
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() { procAttachThreadInput.Call(self, other, 0) })
+	}
 }

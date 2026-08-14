@@ -4,7 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
+	"time"
 
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/notify"
@@ -269,5 +271,43 @@ func handleActivate() {
 	// time the window appears, so the user sees the right pane rather than
 	// watching it switch. Best-effort — a failure leaves them exactly where
 	// they were.
-	notify.RaiseWindowFor(pid)
+	if err := notify.RaiseWindowFor(pid); err != nil {
+		logActivate("raise failed for pane %s: %v", paneID, err)
+		return
+	}
+	logActivate("raised pid %d for pane %s", pid, paneID)
+}
+
+// maxActivateLogBytes caps the activation log. It is a diagnostic buffer, not a
+// history: one line per toast click, and the interesting one is always the last.
+const maxActivateLogBytes = 64 << 10
+
+// logActivate records what a toast click did.
+//
+// This process is spawned by Windows, lives for milliseconds, and has no
+// terminal, no logger and no daemon connection — so until now it was the one
+// component in the feature that could fail with no trace anywhere. Three
+// separate bugs in this path were diagnosed by correlating timestamps in other
+// processes' logs by hand, which is how long a silent path stays silent.
+//
+// Deliberately best-effort and completely silent on failure: a diagnostic that
+// can break an activation is worse than no diagnostic.
+func logActivate(format string, args ...any) {
+	dir := config.QuilDir()
+	if dir == "" {
+		return
+	}
+	path := filepath.Join(dir, "notify-activate.log")
+	// Truncate rather than rotate. Rotation implies someone will read the old
+	// file, and nobody will — the failure being diagnosed is always the click
+	// that just happened.
+	if fi, err := os.Stat(path); err == nil && fi.Size() > maxActivateLogBytes {
+		_ = os.Truncate(path, 0)
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	fmt.Fprintf(f, "%s %s\n", time.Now().Format(time.RFC3339), fmt.Sprintf(format, args...))
 }

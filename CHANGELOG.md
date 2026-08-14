@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.55.2] - 2026-08-14
+
 ### Changed
 - **The sidebar's working indicator now spins.** A pane mid-turn showed a still
   `◐` in the sidebar while the tab bar and the pane's own border animated a

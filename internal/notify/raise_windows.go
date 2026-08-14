@@ -28,6 +28,10 @@ var (
 	procSetActiveWindow        = user32.NewProc("SetActiveWindow")
 	procSwitchToThisWindow     = user32.NewProc("SwitchToThisWindow")
 	procSystemParametersInfo   = user32.NewProc("SystemParametersInfoW")
+	procRegisterHotKey         = user32.NewProc("RegisterHotKey")
+	procUnregisterHotKey       = user32.NewProc("UnregisterHotKey")
+	procSendInput              = user32.NewProc("SendInput")
+	procPeekMessageW           = user32.NewProc("PeekMessageW")
 
 	kernel32                   = windows.NewLazySystemDLL("kernel32.dll")
 	procGetCurrentThreadIdUser = kernel32.NewProc("GetCurrentThreadId")
@@ -41,17 +45,85 @@ const (
 
 	// SPI_GETFOREGROUNDLOCKTIMEOUT. See ForegroundLockTimeout.
 	spiGetForegroundLockTimeout = 0x2000
+
+	// F22 exists on no keyboard anyone owns and no application binds it, which
+	// is precisely why it is the key to synthesise. See foregroundViaHotkey.
+	vkF22 = 0x85
+
+	inputKeyboard = 1
+	keyEventKeyUp = 0x0002
+
+	wmHotkey = 0x0312
+	pmRemove = 0x0001
+
+	// hotkeyID is scoped to this thread — RegisterHotKey with a NULL window
+	// registers against the calling thread's queue, so it cannot collide with
+	// another process's id.
+	hotkeyID = 0x4051
+
+	// hotkeyWait bounds the wait for our own injected key to come back. It
+	// returns in microseconds when it works; this exists so a swallowed
+	// injection cannot hang a click.
+	hotkeyWait = 400 * time.Millisecond
+	hotkeyPoll = 5 * time.Millisecond
 )
+
+// keyboardInput is Win32 INPUT holding a KEYBDINPUT.
+//
+// Laid out by hand because the C type is a union sized to its LARGEST member
+// (MOUSEINPUT), not to the member being used. On amd64 that makes INPUT 40
+// bytes, where the fields this needs occupy 32 — and SendInput validates the
+// cb argument against its own idea of the size, sending NOTHING and reporting
+// success-with-zero-events when they disagree. A silently unsent keystroke here
+// would look exactly like the refusal this whole mechanism exists to defeat.
+type keyboardInput struct {
+	typ     uint32
+	_       uint32 // union alignment
+	wVk     uint16
+	wScan   uint16
+	dwFlags uint32
+	time    uint32
+	_       uint32 // alignment before the pointer-sized field
+	dwExtra uintptr
+	_       [8]byte // pad out to the size of the MOUSEINPUT arm
+}
+
+// Compile-time size assertion. A wrong layout is otherwise invisible: the call
+// succeeds, no key is sent, and the raise simply never works. This is checked by
+// the GOOS=windows build in CI, which is the only place these files compile.
+var _ = [1]struct{}{}[unsafe.Sizeof(keyboardInput{})-40]
+
+// msgW is Win32 MSG (48 bytes on amd64).
+type msgW struct {
+	hwnd    uintptr
+	message uint32
+	_       uint32
+	wParam  uintptr
+	lParam  uintptr
+	time    uint32
+	ptX     int32
+	ptY     int32
+	_       uint32
+}
+
+var _ = [1]struct{}{}[unsafe.Sizeof(msgW{})-48]
 
 // raiseAttempt is one way of asking Windows to foreground a window, paired with
 // the name that goes in the log when it is the one that worked.
 //
-// A LADDER rather than a single call, because "may this process set the
-// foreground window" is a policy decision Windows makes from state we cannot
-// see — whether the click's foreground rights reached us, what the foreground
-// lock timeout is, which process owns the desktop right now. Measured on the
-// reporting machine: a toast launched through protocol activation arrives with
-// NO foreground rights, so the two documented approaches were both refused.
+// A LADDER rather than a single call, because whether a process MAY set the
+// foreground window depends on state it cannot read. SetForegroundWindow's
+// documented rules are two groups that must BOTH hold: a set of hard gates
+// (no menus active, and the foreground process has not called
+// LockSetForegroundWindow) and a set of ways to qualify (be the foreground
+// process, be started by it, have received the last input event, or have the
+// foreground lock timeout expired).
+//
+// Getting that structure wrong cost this feature several rounds. The timeout is
+// only ever about the SECOND group, so setting it to zero — measured, on the
+// reporting machine — changes nothing while the shell holds the lock, which it
+// does at exactly the moment a toast is clicked. Retrying cannot help either:
+// the lock is released by user INPUT, not by elapsed time.
 //
 // Every rung is VERIFIED against GetForegroundWindow, which is what makes
 // adding rungs safe: a technique that does nothing costs a call and reports
@@ -59,6 +131,65 @@ const (
 type raiseAttempt struct {
 	name string
 	try  func(hwnd uintptr) bool
+}
+
+// foregroundViaHotkey satisfies both groups at once by generating real input.
+//
+// It registers a hotkey for a key nobody has, injects that key with SendInput,
+// waits for the WM_HOTKEY it just caused, and only then calls
+// SetForegroundWindow. The injected keystroke is genuine user input as far as
+// the window manager is concerned, so it RELEASES the foreground lock (first
+// group) and makes this thread the one that received the last input event
+// (second group). Chromium does the same thing in
+// ui/base/win/foreground_helper.cc, and this is the technique behind most
+// desktop applications that manage to raise themselves from a notification.
+//
+// F22 is the key because no keyboard has one and nothing binds it. An earlier
+// version of this file injected ALT instead, which failed for two independent
+// reasons: it opens the MENU BAR of whatever window has focus — swallowing the
+// user's next keystrokes — and an active menu violates the first group outright,
+// so the rung guaranteed its own refusal. That failure was recorded here as
+// "synthetic input does not work", which was wrong and pointed the next four
+// attempts in the wrong direction. Only ALT did not work.
+//
+// Waiting for the hotkey to come BACK is what makes this ordered rather than
+// hopeful: SendInput is asynchronous, so calling SetForegroundWindow straight
+// after it races the input it depends on.
+//
+// Must run on the locked OS thread RaiseWindowFor pins — RegisterHotKey and the
+// message queue both belong to the calling thread.
+func foregroundViaHotkey(hwnd uintptr) bool {
+	if ok, _, _ := procRegisterHotKey.Call(0, hotkeyID, 0, vkF22); ok == 0 {
+		// Already taken by another process. Not an error worth reporting: the
+		// remaining rungs still run.
+		return false
+	}
+	defer procUnregisterHotKey.Call(0, hotkeyID)
+
+	inputs := [2]keyboardInput{
+		{typ: inputKeyboard, wVk: vkF22},
+		{typ: inputKeyboard, wVk: vkF22, dwFlags: keyEventKeyUp},
+	}
+	if sent, _, _ := procSendInput.Call(2, uintptr(unsafe.Pointer(&inputs[0])), unsafe.Sizeof(inputs[0])); sent != 2 {
+		return false
+	}
+
+	// PeekMessage on a deadline rather than a blocking GetMessage: this runs in
+	// a process spawned by a click, where a wait that cannot end is
+	// indistinguishable from the click doing nothing.
+	deadline := time.Now().Add(hotkeyWait)
+	for time.Now().Before(deadline) {
+		var m msgW
+		if got, _, _ := procPeekMessageW.Call(uintptr(unsafe.Pointer(&m)), 0, 0, 0, pmRemove); got != 0 {
+			if m.message == wmHotkey {
+				procSetForegroundWindow.Call(hwnd)
+				return isForeground(hwnd)
+			}
+			continue
+		}
+		time.Sleep(hotkeyPoll)
+	}
+	return false
 }
 
 // raiseLadder is ordered least- to most-intrusive. Nothing below the first rung
@@ -72,6 +203,10 @@ func raiseLadder() []raiseAttempt {
 			procSetForegroundWindow.Call(hwnd)
 			return isForeground(hwnd)
 		}},
+		// Generate real input so the foreground lock is released and this thread
+		// owns the last input event. The rung that actually works at toast-click
+		// time; everything below it is a fallback for when RegisterHotKey fails.
+		{"hotkey", foregroundViaHotkey},
 		// Borrow the input queues. Enough to be PERMITTED where the refusal is
 		// about queue ownership rather than rights.
 		{"attached", forceForeground},
@@ -97,66 +232,55 @@ func raiseLadder() []raiseAttempt {
 }
 
 const (
-	// raiseSettleWindow is how long the plain activation keeps being retried
-	// before the escalating rungs are tried. Sized to outlast a toast
-	// dismissal, not to be patient in general: this process exists only to
-	// deliver one click and exits immediately afterwards.
-	raiseSettleWindow = 1200 * time.Millisecond
+	// raiseRounds is how many times the WHOLE ladder is re-run if it fails.
+	//
+	// Small on purpose. An earlier version retried the plain call alone for
+	// 1.2 s, which was built on a wrong model of the barrier: the foreground
+	// lock is cleared by user INPUT, not by elapsed time, so retrying an
+	// identical call generated nothing that could change the answer — and,
+	// worse, it delayed the one rung that does work behind more than a second
+	// of calls that cannot. What the rounds cover now is narrow and real: the
+	// shell may take the foreground back as the notification dismisses, after
+	// we have already won it.
+	raiseRounds = 3
 
-	// raiseRetryInterval spaces the retries. Short enough that a user who
-	// clicked cannot perceive the delay, long enough that a full window of
-	// them is a handful of calls rather than a spin.
-	raiseRetryInterval = 120 * time.Millisecond
+	// raiseRetryInterval spaces the rounds. Long enough for a dismissal to
+	// finish, short enough that a user who clicked cannot perceive it.
+	raiseRetryInterval = 150 * time.Millisecond
 )
 
-// raiseWithSettle activates hwnd, RETRYING the plain call across the moment the
-// toast is going away, and escalating only if that whole window fails. It
-// returns the rung that worked, or "".
+// raiseWithSettle runs the whole ladder, re-running it a few times if the
+// window does not stay in front. It returns the rung that worked, or "".
 //
-// The retry is the fix for a race, and the race was found by elimination rather
-// than by guessing. Every static explanation was tested and ruled out on the
-// reporting machine: the ladder targets the right window (one candidate, class
-// ConsoleWindowClass), the foreground lock was set to 0, the target and the
-// caller run at the same integrity level — and with all of that true, the very
-// same SetForegroundWindow call on the very same handle SUCCEEDS from an
-// ordinary background process at a calm moment, while ours was refused at click
-// time.
+// The WHOLE ladder each round, not the first rung repeatedly. The rungs are
+// ordered cheapest-and-most-normal first, and the plain call costs nothing and
+// has no side effects when refused — but the rung that actually works at
+// toast-click time is the hotkey one, and an earlier version could not reach it
+// until it had spent 1.2 s repeating a call that was structurally incapable of
+// succeeding.
 //
-// What differs is only WHEN. Clicking a toast dismisses the notification UI,
-// and the shell restores the foreground to the application the user was in.
-// Our activation lands inside that transition and is immediately overridden,
-// and the verification a microsecond later measures the transition rather than
-// the outcome. Retrying past it lets the last word be ours.
+// The rounds exist for one narrow reason: the shell may take the foreground
+// back while the notification finishes dismissing, after we have already won
+// it. Re-running the hotkey rung is safe — F22 is inert, and the injection is
+// what makes the next attempt permitted at all.
 //
-// The plain rung is the one that repeats, because it is inert when refused. The
-// escalating rungs run once each at the end: attaching input queues and
-// SwitchToThisWindow are cheap but not free of side effects, and a technique
-// worth doing once is not automatically worth doing ten times.
+// The round count is reported when more than one was needed, because "worked
+// immediately" and "worked on the third round" are different findings about
+// what the shell is doing after a click.
 func raiseWithSettle(hwnd uintptr) string {
-	ladder := raiseLadder()
-	plain := ladder[0]
-
-	// The attempt count is reported, not just the rung. "worked on the first
-	// try" and "worked on the fifth" are different findings about the machine —
-	// the second confirms the transition this loop exists to outlast, and the
-	// first would mean the race theory is wrong and something else changed.
 	start := time.Now()
-	deadline := start.Add(raiseSettleWindow)
-	for n := 1; ; n++ {
-		if plain.try(hwnd) {
-			if n == 1 {
-				return plain.name
+	for round := 1; round <= raiseRounds; round++ {
+		for _, attempt := range raiseLadder() {
+			if !attempt.try(hwnd) {
+				continue
 			}
-			return fmt.Sprintf("%s (attempt %d, %s)", plain.name, n, time.Since(start).Truncate(time.Millisecond))
+			if round == 1 {
+				return attempt.name
+			}
+			return fmt.Sprintf("%s (round %d, %s)", attempt.name, round, time.Since(start).Truncate(time.Millisecond))
 		}
-		if time.Now().After(deadline) {
-			break
-		}
-		time.Sleep(raiseRetryInterval)
-	}
-	for _, attempt := range ladder[1:] {
-		if attempt.try(hwnd) {
-			return attempt.name
+		if round < raiseRounds {
+			time.Sleep(raiseRetryInterval)
 		}
 	}
 	return ""

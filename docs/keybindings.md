@@ -28,7 +28,7 @@ The five keys you'll use most:
 | `Alt+Shift+P` | Command palette — fuzzy-find any action or jump to any pane/tab |
 | `F1` | About menu → Settings, Plugins, Memory, log viewers |
 | `Ctrl+N` | New typed pane (Claude Code, OpenCode, terminal, …) |
-| `Ctrl+T` | New tab |
+| `Ctrl+T` | New tab — asks which pane it opens with (`Esc` for a plain terminal) |
 | `Ctrl+W` | Close active pane |
 | `Ctrl+Q` | Quit |
 
@@ -36,7 +36,8 @@ The five keys you'll use most:
 
 A project owns a set of tabs. Switching project switches the whole tab bar, and
 each project remembers the tab you left it on. Every tab belongs to exactly one
-project, so `Ctrl+T` files the new tab into whichever project you are on.
+project, so `Ctrl+T` files the new tab into whichever project you are on, and
+the pane it opens with starts in that project's root directory.
 
 | Key | Action |
 |---|---|
@@ -85,7 +86,7 @@ actions, command palette).
 
 | Key | Action |
 |---|---|
-| `Ctrl+T` | New tab |
+| `Ctrl+T` | New tab — asks which pane it opens with (`Esc` for a plain terminal) |
 | `Alt+W` | Close active tab |
 | `F2` | Rename active tab |
 | `Alt+C` | Cycle tab colour (8 colours) |

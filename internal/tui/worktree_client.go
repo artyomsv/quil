@@ -172,6 +172,24 @@ func (m *Model) applyCreatePaneResp(p ipc.CreatePaneRespPayload, dest string) {
 	}
 	tabID := p.TabID
 	if m.worktreeCreates[tabID] == "" {
+		// A NEW-TAB create arms no tab-keyed bookkeeping — it detaches nothing
+		// and reserves no leaf, so there is nothing here to unwind (see
+		// handleCreatePaneSplit's new-tab branch). It cannot: the tab id does not
+		// exist when the request leaves. But the daemon still answers, and a
+		// failed add on that path is the user's ONLY notice — otherwise they ask
+		// for an agent on a fresh branch, silently get a shell in the project
+		// root, and the reason lives in quild.log alone.
+		//
+		// Matched on the echoed BRANCH, which is the key such a create does own,
+		// and consumed on use. A blanket flash here would break the neighbouring
+		// guarantee that a duplicate, late or foreign answer is inert
+		// (TestCreatePaneResp_UnknownTabIsInert) — an MCP bridge's own worktree
+		// create would raise an error the user never caused.
+		if p.Error != "" && p.Worktree != nil && m.newTabWorktrees[p.Worktree.Branch] {
+			delete(m.newTabWorktrees, p.Worktree.Branch)
+			m.setFlash("worktree not created: " +
+				truncateCells(sanitizeRemoteText(p.Error), createErrFlashCap))
+		}
 		return // not ours, or already settled
 	}
 	// The response must describe a tab on the daemon it came FROM. tabByID

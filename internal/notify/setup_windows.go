@@ -66,7 +66,7 @@ func Registered(opts Options) (bool, error) {
 
 // Setup writes both artifacts and returns what it wrote, so the command can
 // print it. Nothing here needs admin rights.
-func Setup(opts Options, exePath string) ([]string, error) {
+func Setup(opts Options, exePath, home string) ([]string, error) {
 	path, err := ShortcutPath(opts)
 	if err != nil {
 		return nil, err
@@ -82,7 +82,7 @@ func Setup(opts Options, exePath string) ([]string, error) {
 	}); err != nil {
 		return nil, err
 	}
-	if err := writeProtocolKey(opts, exePath); err != nil {
+	if err := writeProtocolKey(opts, exePath, home); err != nil {
 		// Leave no half-registration behind: a shortcut without the protocol
 		// key produces toasts that silently do nothing when clicked, which is
 		// worse than no toasts at all.
@@ -123,11 +123,12 @@ func Remove(opts Options) ([]string, error) {
 	return removed, nil
 }
 
+
 // writeProtocolKey registers the quil:// (or quil-dev://) handler.
 //
-// The command is the ONLY thing a click can reach, and it is `quil activate
-// "%1"` and nothing else — see handleActivate for why that ceiling matters.
-func writeProtocolKey(opts Options, exePath string) error {
+// The command is the ONLY thing a click can reach — see RunActivation for why
+// that ceiling matters.
+func writeProtocolKey(opts Options, exePath, home string) error {
 	root, _, err := registry.CreateKey(registry.CURRENT_USER, classesKey(opts), registry.SET_VALUE)
 	if err != nil {
 		return fmt.Errorf("notify: creating protocol key: %w", err)
@@ -146,7 +147,7 @@ func writeProtocolKey(opts Options, exePath string) error {
 		return fmt.Errorf("notify: creating command key: %w", err)
 	}
 	defer cmd.Close()
-	if err := cmd.SetStringValue("", `"`+exePath+`" activate "%1"`); err != nil {
+	if err := cmd.SetStringValue("", activateCommand(opts, exePath, home)); err != nil {
 		return fmt.Errorf("notify: setting command: %w", err)
 	}
 	return nil

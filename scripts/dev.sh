@@ -42,7 +42,7 @@ pkg_target() {
 
 # BUILT_BINARIES are every file `build` writes and `clean` removes, in this
 # project directory. Production installs live elsewhere and are never touched.
-BUILT_BINARIES="quil-dev.exe quild-dev.exe quil-debug.exe quild-debug.exe quil.exe quild.exe quil quild"
+BUILT_BINARIES="quil-dev.exe quild-dev.exe quil-debug.exe quild-debug.exe quil.exe quild.exe quil-activate.exe quil quild"
 
 # refuse_if_binaries_held stops a build that would silently half-finish.
 #
@@ -120,7 +120,8 @@ case "${1:-help}" in
       GOOS=windows GOARCH=amd64 go build -ldflags \"\$F_DBG\" -o quil-debug.exe  ./cmd/quil  && \
       GOOS=windows GOARCH=amd64 go build -ldflags \"\$F_DBG\" -o quild-debug.exe ./cmd/quild && \
       GOOS=windows GOARCH=amd64 go build -ldflags \"\$F\"     -o quil.exe        ./cmd/quil  && \
-      GOOS=windows GOARCH=amd64 go build -ldflags \"\$F\"     -o quild.exe       ./cmd/quild"
+      GOOS=windows GOARCH=amd64 go build -ldflags \"\$F\"     -o quild.exe       ./cmd/quild && \
+      GOOS=windows GOARCH=amd64 go build -ldflags \"\$F -H windowsgui\" -o quil-activate.exe ./cmd/quil-activate"
     ;;
 
   test)
@@ -165,7 +166,8 @@ case "${1:-help}" in
       GOOS=darwin  GOARCH=arm64 go build -ldflags \"\$LDFLAGS\" -o dist/quil-darwin-arm64       ./cmd/quil && \
       GOOS=darwin  GOARCH=arm64 go build -ldflags \"\$LDFLAGS\" -o dist/quild-darwin-arm64      ./cmd/quild && \
       GOOS=windows GOARCH=amd64 go build -ldflags \"\$LDFLAGS\" -o dist/quil-windows-amd64.exe  ./cmd/quil && \
-      GOOS=windows GOARCH=amd64 go build -ldflags \"\$LDFLAGS\" -o dist/quild-windows-amd64.exe ./cmd/quild"
+      GOOS=windows GOARCH=amd64 go build -ldflags \"\$LDFLAGS\" -o dist/quild-windows-amd64.exe ./cmd/quild && \
+      GOOS=windows GOARCH=amd64 go build -ldflags \"\$LDFLAGS -H windowsgui\" -o dist/quil-activate-windows-amd64.exe ./cmd/quil-activate"
     ;;
 
   image)
@@ -179,7 +181,8 @@ case "${1:-help}" in
     rm -f "$PROJECT_DIR/quil" "$PROJECT_DIR/quild" \
           "$PROJECT_DIR/quil.exe" "$PROJECT_DIR/quild.exe" \
           "$PROJECT_DIR/quil-dev.exe" "$PROJECT_DIR/quild-dev.exe" \
-          "$PROJECT_DIR/quil-debug.exe" "$PROJECT_DIR/quild-debug.exe"
+          "$PROJECT_DIR/quil-debug.exe" "$PROJECT_DIR/quild-debug.exe" \
+          "$PROJECT_DIR/quil-activate.exe"
     rm -f "$PROJECT_DIR"/cmd/quil/rsrc*.syso "$PROJECT_DIR"/cmd/quild/rsrc*.syso
     rm -rf "$PROJECT_DIR/dist/"
     ;;

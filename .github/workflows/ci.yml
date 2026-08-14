@@ -74,6 +74,13 @@ jobs:
         run: |
           GOOS=windows go build ./internal/notify/...
           GOOS=windows go vet -unsafeptr=false ./internal/notify/...
+          # cmd/quil-activate is Windows-only in the same way, and it is the
+          # binary a toast click actually runs — a break here is a click that
+          # does nothing, discovered by a user rather than by CI. The -H
+          # windowsgui link flag is included because it is the reason the
+          # command exists; building without it would prove the wrong thing.
+          GOOS=windows go build -ldflags "-H windowsgui" ./cmd/quil-activate/...
+          GOOS=windows go vet ./cmd/quil-activate/...
 
       - name: shellcheck
         run: shellcheck -S warning scripts/*.sh

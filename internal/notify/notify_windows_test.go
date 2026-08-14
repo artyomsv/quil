@@ -35,7 +35,7 @@ func TestNotify_ShowsAndWithdraws(t *testing.T) {
 	if err != nil {
 		t.Fatalf("os.Executable() = %v", err)
 	}
-	if _, err := Setup(opts, exe); err != nil {
+	if _, err := Setup(opts, exe, t.TempDir()); err != nil {
 		t.Fatalf("Setup() = %v", err)
 	}
 	t.Cleanup(func() { _, _ = Remove(opts) })
@@ -113,7 +113,7 @@ func TestWithdraw_UnknownTagIsTolerated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("os.Executable() = %v", err)
 	}
-	if _, err := Setup(opts, exe); err != nil {
+	if _, err := Setup(opts, exe, t.TempDir()); err != nil {
 		t.Fatalf("Setup() = %v", err)
 	}
 	t.Cleanup(func() { _, _ = Remove(opts) })

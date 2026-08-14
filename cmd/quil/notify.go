@@ -4,9 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"runtime"
-	"time"
 
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/notify"
@@ -59,7 +57,10 @@ func runNotifySetup(opts notify.Options) {
 		fmt.Fprintf(os.Stderr, "cannot resolve this executable: %v\n", err)
 		os.Exit(1)
 	}
-	written, err := notify.Setup(opts, exe)
+	// QuilDir() resolved HERE, by the binary that knows it: the helper is
+	// launched by Windows with the shell's environment, so a dev registration
+	// that did not carry this would log into the real ~/.quil.
+	written, err := notify.Setup(opts, exe, config.QuilDir())
 	if err != nil {
 		refuseUnsupported(err)
 		fmt.Fprintf(os.Stderr, "notify setup failed: %v\n", err)
@@ -280,85 +281,6 @@ func handleActivate() {
 	if len(os.Args) < 3 {
 		os.Exit(1)
 	}
-	opts := notifyVariant()
-	pid, paneID, err := notify.ParseActivateURI(opts.Scheme, os.Args[2])
-	if err != nil {
-		os.Exit(1)
-	}
-	// A TUI that exited between the toast and the click leaves no listener.
-	// Exit 0 silently: a stale toast must never pop an error window.
-	if err := notify.SendActivate(pid, paneID); err != nil {
-		return
-	}
-
-	// Then bring the terminal forward. Routing without raising means the user
-	// clicks a toast, nothing appears to happen, and they alt-tab to discover
-	// Quil moved — which reads as the click not working.
-	//
-	// AFTER SendActivate, not before: the jump should already be applied by the
-	// time the window appears, so the user sees the right pane rather than
-	// watching it switch. Best-effort — a failure leaves them exactly where
-	// they were.
-	how, err := notify.RaiseWindowFor(pid)
-	if err != nil {
-		// The lock timeout is named IN the failure line rather than left for
-		// someone to look up, because it is the usual explanation and it is
-		// per-user state no log elsewhere records. A refusal with a non-zero
-		// timeout is Windows working as configured; a refusal with zero is a
-		// genuinely different problem, and the line has to be able to say so.
-		logActivate("raise failed for pane %s: %v (%s)", paneID, err, foregroundLockNote())
-		return
-	}
-	// WHICH rung won is the useful half. The ladder exists because Windows
-	// decides this from state we cannot see, so the only way to learn what
-	// actually works on a given machine is to record it.
-	logActivate("raised pid %d for pane %s via %s", pid, paneID, how)
+	notify.RunActivation(notifyVariant().Scheme, os.Args[2], notify.ActivationLogger(config.QuilDir()))
 }
 
-// foregroundLockNote renders the foreground lock timeout for a log line or a
-// status row, in the three states it really has: a value, zero, or unknown.
-func foregroundLockNote() string {
-	d, err := notify.ForegroundLockTimeout()
-	switch {
-	case err != nil:
-		return fmt.Sprintf("foreground lock timeout unknown: %v", err)
-	case d == 0:
-		return "foreground lock timeout is 0, so this refusal is NOT the lock"
-	default:
-		return fmt.Sprintf("foreground lock timeout is %s — Windows is refusing focus by policy", d)
-	}
-}
-
-// maxActivateLogBytes caps the activation log. It is a diagnostic buffer, not a
-// history: one line per toast click, and the interesting one is always the last.
-const maxActivateLogBytes = 64 << 10
-
-// logActivate records what a toast click did.
-//
-// This process is spawned by Windows, lives for milliseconds, and has no
-// terminal, no logger and no daemon connection — so until now it was the one
-// component in the feature that could fail with no trace anywhere. Three
-// separate bugs in this path were diagnosed by correlating timestamps in other
-// processes' logs by hand, which is how long a silent path stays silent.
-//
-// Deliberately best-effort and completely silent on failure: a diagnostic that
-// can break an activation is worse than no diagnostic.
-func logActivate(format string, args ...any) {
-	dir := config.QuilDir()
-	if dir == "" {
-		return
-	}
-	path := filepath.Join(dir, "notify-activate.log")
-	// Truncate rather than rotate. Rotation implies someone will read the old
-	// file, and nobody will — the failure being diagnosed is always the click
-	// that just happened.
-	if fi, err := os.Stat(path); err == nil && fi.Size() > maxActivateLogBytes {
-		_ = os.Truncate(path, 0)
-	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-	fmt.Fprintf(f, "%s %s\n", time.Now().Format(time.RFC3339), fmt.Sprintf(format, args...))
-}

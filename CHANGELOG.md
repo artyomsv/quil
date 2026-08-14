@@ -36,6 +36,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Linux can carry a click back to a specific pane.
 
 ### Fixed
+- **Clicking a toast no longer flashes a window and drops your keyboard.** The
+  click handler was a console program, so Windows gave it a console *window*
+  that appeared in front of you, took the foreground, and vanished when the
+  handler exited — leaving focus on a window that no longer existed, which is
+  why typing straight after a click reached neither the raised pane nor the app
+  you came from. Clicks are now handled by `quil-activate.exe`, linked as a GUI
+  binary so no console is ever created for it. **Upgrading from an earlier
+  build: re-run `quil notify setup`** — the handler is registered by path, so an
+  existing registration keeps pointing at the old one.
 - **A turn that finished while Quil was behind another window no longer counts
   as seen.** Whether you saw a completed turn was decided from the pane's
   position on screen alone, so a pane you left on screen when you switched to

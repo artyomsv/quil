@@ -226,8 +226,18 @@ quil notify setup
 
 ## Clicking a toast switches panes but does not bring the window forward
 
-This is Windows working as designed, and on a default install it is what you
-should expect.
+**First, if you upgraded from a build before `quil-activate.exe` existed:
+re-run `quil notify setup`.** The click handler is registered in the registry
+by path, so an existing registration keeps pointing at the old console-based
+handler until setup rewrites it. `quil notify status` shows what is registered.
+
+That handler is a console program, so Windows gave it a console *window* — one
+that appears in front of you, takes the foreground, and then disappears when the
+handler exits, leaving focus nowhere. `quil-activate.exe` is linked as a GUI
+binary purely so no console is ever created for it.
+
+Beyond that, the foreground itself is Windows' decision, and on a default
+install it is what you should expect.
 
 Windows refuses to let an application take focus for a period after you interact
 with a *different* one — the foreground lock, `ForegroundLockTimeout`, which

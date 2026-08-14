@@ -31,7 +31,7 @@ func TestSetupRemove_RoundTrip(t *testing.T) {
 	}
 	t.Cleanup(func() { _, _ = Remove(opts) })
 
-	written, err := Setup(opts, exe)
+	written, err := Setup(opts, exe, t.TempDir())
 	if err != nil {
 		t.Fatalf("Setup() = %v", err)
 	}
@@ -96,7 +96,7 @@ func TestRegistered_FalseWithoutProtocolKey(t *testing.T) {
 	}
 	t.Cleanup(func() { _, _ = Remove(opts) })
 
-	if _, err := Setup(opts, exe); err != nil {
+	if _, err := Setup(opts, exe, t.TempDir()); err != nil {
 		t.Fatalf("Setup() = %v", err)
 	}
 	for _, sub := range []string{`\shell\open\command`, `\shell\open`, `\shell`, ``} {

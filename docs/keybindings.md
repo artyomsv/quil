@@ -52,14 +52,17 @@ project, so `Ctrl+T` files the new tab into whichever project you are on.
 | Click + drag the sidebar's right edge | Resize the sidebar (12-column minimum; a rule previews the new edge, panes resize on release, width persists to `[ui] sidebar_width`) |
 
 The sidebar is the reserved left column listing projects and the active
-project's panes. Each project row carries a badge counting its agents: `◐N`
-while N panes are working, `⚠N` when N are blocked waiting on you. Those counts
+project's panes. Each project row carries a badge counting its agents: `⠹N`
+while N panes are working — the same spinner the tab bar and the pane border
+run, so one glance says "still going" — and `▲N` when N are blocked waiting on
+you. Those counts
 keep updating for projects in the **background**, which is what makes
 `Alt+Shift+A` useful — it crosses the project boundary to reach whichever pane
 has been waiting longest.
 
-Each pane row carries the same vocabulary for one pane: `◐` working (with `⋯N`
-when N subagents are still running), `⚠` blocked on you (with the tool it is
+Each pane row carries the same vocabulary for one pane: `⠹` working, spinning
+(with `⋯N`
+when N subagents are still running), `▲` blocked on you (with the tool it is
 waiting on, when the hook reported one), `✓` finished and not yet looked at,
 `○` idle.
 

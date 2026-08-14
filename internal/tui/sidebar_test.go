@@ -1094,8 +1094,8 @@ func TestProjectBadgeCountsFinishedPanes(t *testing.T) {
 	// to carry a COUNT per state, and pinning the codepoints here would make a
 	// deliberate glyph change (see TestSidebarGlyphs_OneCellAndNotEmojiCapable
 	// for why one was needed) look like a counting regression.
-	row := projectRow("alpha", c, "", false, 30, nil)
-	for _, want := range []string{glyphBlocked + "1", glyphWorking + "1", glyphDone + "1"} {
+	row := projectRow("alpha", c, 0, "", false, 30, nil)
+	for _, want := range []string{glyphBlocked + "1", workingGlyph(0) + "1", glyphDone + "1"} {
 		if !strings.Contains(row, want) {
 			t.Errorf("project row %q is missing the %s badge", row, want)
 		}
@@ -1146,7 +1146,7 @@ func TestProjectCounts_PinnedIsIndependentOfTheStateRanking(t *testing.T) {
 // mark", which is the whole job of a mark that never auto-clears.
 func TestProjectRow_ShowsThePinnedCount(t *testing.T) {
 	t.Parallel()
-	row := projectRow("alpha", paneStateCounts{pinned: 2}, "", false, 30, nil)
+	row := projectRow("alpha", paneStateCounts{pinned: 2}, 0, "", false, 30, nil)
 	if want := glyphPinned + "2"; !strings.Contains(row, want) {
 		t.Errorf("project row %q is missing the %s badge", row, want)
 	}
@@ -1155,7 +1155,7 @@ func TestProjectRow_ShowsThePinnedCount(t *testing.T) {
 	}
 	// Absent when there is nothing to report — the badge is a list of what is
 	// true, not a fixed set of columns with zeroes in them.
-	if plain := projectRow("alpha", paneStateCounts{}, "", false, 30, nil); strings.Contains(plain, glyphPinned) {
+	if plain := projectRow("alpha", paneStateCounts{}, 0, "", false, 30, nil); strings.Contains(plain, glyphPinned) {
 		t.Errorf("project row %q shows a pin badge with no pinned panes", plain)
 	}
 }
@@ -1383,7 +1383,9 @@ func TestProjectRow_BadgesCarryTheirStateColour(t *testing.T) {
 		badge string
 	}{
 		{"blocked", sidebarBlockedStyle, glyphBlocked + "1"},
-		{"working", sidebarWorkingStyle, glyphWorking + "2"},
+		// Frame 4 — the badge draws whichever frame the caller passes, and
+		// pinning frame 0 would let a call site that ignores the parameter pass.
+		{"working", sidebarWorkingStyle, workingGlyph(4) + "2"},
 		{"done", sidebarUnseenStyle, glyphDone + "3"},
 	}
 	// The three styles must be mutually distinct, or the assertions below keep
@@ -1402,7 +1404,7 @@ func TestProjectRow_BadgesCarryTheirStateColour(t *testing.T) {
 	// badge that inherits it is exactly the bug — being the active project does
 	// not change what its panes are doing.
 	for _, active := range []bool{false, true} {
-		row := projectRow("alpha", paneStateCounts{working: 2, blocked: 1, done: 3}, "", active, 30, nil)
+		row := projectRow("alpha", paneStateCounts{working: 2, blocked: 1, done: 3}, 4 /*workFrame*/, "", active, 30, nil)
 		for _, tt := range tests {
 			want := styleSGR(t, tt.style) + " " + tt.badge
 			if !strings.Contains(row, want) {
@@ -1438,7 +1440,7 @@ func TestProjectRow_LinkGlyphCarriesItsOwnColour(t *testing.T) {
 		{glyphLinkParked, sidebarLinkParkedStyle},
 		{glyphLinkRetry, sidebarLinkRetryStyle},
 	} {
-		row := projectRow("alpha", paneStateCounts{}, tt.glyph, false, 30, nil)
+		row := projectRow("alpha", paneStateCounts{}, 0, tt.glyph, false, 30, nil)
 		want := styleSGR(t, tt.style) + " " + tt.glyph
 		if !strings.Contains(row, want) {
 			t.Errorf("projectRow(link=%q) = %q, want the glyph painted with its own style (%q)",
@@ -1465,7 +1467,7 @@ func TestProjectRow_NameKeepsTheRowStyle(t *testing.T) {
 		{"inactive", sidebarProjectStyle, false},
 		{"active", sidebarActiveStyle, true},
 	} {
-		row := projectRow("alpha", paneStateCounts{working: 1, blocked: 1, done: 1}, glyphLinkParked, tt.activ, 30, nil)
+		row := projectRow("alpha", paneStateCounts{working: 1, blocked: 1, done: 1}, 0, glyphLinkParked, tt.activ, 30, nil)
 		if want := styleSGR(t, tt.style); !strings.Contains(row, want) {
 			t.Errorf("%s: projectRow = %q, want the name painted with the row style (%q)",
 				tt.name, row, want)
@@ -1475,6 +1477,63 @@ func TestProjectRow_NameKeepsTheRowStyle(t *testing.T) {
 		if !strings.HasSuffix(row, "\x1b[0m") && !strings.HasSuffix(row, "\x1b[m") {
 			t.Errorf("%s: projectRow = %q, want it to end with an SGR reset", tt.name, row)
 		}
+	}
+}
+
+// TestSidebar_WorkingIndicatorAnimatesWithTheTabSpinner pins the whole point of
+// the animated working glyph: the sidebar used to draw a STATIC ◐ for the state
+// the tab bar and the pane border were spinning a braille frame for, so one
+// fact wore two notations on three levels of the same screen — and the level
+// that lists every pane at once was the one telling the quieter story.
+//
+// Driven through Update rather than by handing the row builders a frame,
+// because the WIRING is what can break. paneRow reads the pane's mirrored
+// workFrame and projectRow the shared counter it is mirrored from; only the
+// tick keeps those equal, and a unit call that passes a frame in by hand agrees
+// with itself whichever counter the real call site reads.
+func TestSidebar_WorkingIndicatorAnimatesWithTheTabSpinner(t *testing.T) {
+	t.Parallel()
+	m := modelForWorkTest()
+	m.sidebarOpen, m.sidebarWidth = true, defaultSidebarWidth
+	m.width, m.height = 120, 40
+	m.curTabs()[0].Root.Leaves()[0].working = true
+	m.workTickRunning = true
+
+	seen := map[string]bool{}
+	for i := 0; i < len(spinnerFrames); i++ {
+		next, _ := m.Update(workSpinnerTickMsg{})
+		m = next.(Model)
+		frame := workingGlyph(m.workSpinnerFrame)
+		seen[frame] = true
+
+		rows, _ := m.sidebarRows(defaultSidebarWidth)
+		var paneText, projText string
+		for _, r := range rows {
+			switch r.kind {
+			case sidebarRowPane:
+				paneText = r.text
+			case sidebarRowProject:
+				projText = r.text
+			}
+		}
+		if !strings.Contains(paneText, frame) {
+			t.Fatalf("tick %d: pane row %q does not show the current frame %q", i, paneText, frame)
+		}
+		// The badge is the roll-up, so it must spin with the rows it rolls up
+		// rather than beside them out of phase.
+		if want := frame + "1"; !strings.Contains(projText, want) {
+			t.Fatalf("tick %d: project badge %q does not show %q", i, projText, want)
+		}
+		// The tab label is the indicator the sidebar is being matched TO — if
+		// the two ever disagree the change has bought a third notation rather
+		// than removed a second one.
+		if label := m.tabLabel(0); !strings.Contains(label, frame) {
+			t.Fatalf("tick %d: tab label %q shows a different frame than the sidebar (%q)", i, label, frame)
+		}
+	}
+	if len(seen) != len(spinnerFrames) {
+		t.Errorf("the sidebar showed %d distinct glyphs over %d ticks, want %d — it is not animating",
+			len(seen), len(spinnerFrames), len(spinnerFrames))
 	}
 }
 
@@ -1561,7 +1620,7 @@ func TestPaneRow_BlockedFocusedSuppressesTheGlyph(t *testing.T) {
 		{"blocked alone falls through to idle",
 			func(p *PaneModel) {}, glyphIdle, glyphBlocked},
 		{"blocked and working falls through to working",
-			func(p *PaneModel) { p.working = true }, glyphWorking, glyphBlocked},
+			func(p *PaneModel) { p.working = true }, workingGlyph(0), glyphBlocked},
 		{"blocked and pinned falls through to the pin",
 			func(p *PaneModel) { p.pinnedAttention = true }, glyphPinned, glyphBlocked},
 		{"blocked and unseen falls through to done",

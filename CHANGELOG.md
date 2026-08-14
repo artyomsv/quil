@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.57.1] - 2026-08-14
+
 ### Fixed
 - **Releases publish again.** Since v1.56.0 the release pipeline tagged a new
   version and then failed before publishing anything, so `quil update` and the

@@ -26,38 +26,13 @@ var (
 	procGetForegroundWindow    = user32.NewProc("GetForegroundWindow")
 	procSetActiveWindow        = user32.NewProc("SetActiveWindow")
 	procSwitchToThisWindow     = user32.NewProc("SwitchToThisWindow")
-	procKeybdEvent             = user32.NewProc("keybd_event")
 	procGetCurrentThreadIdUser = windows.NewLazySystemDLL("kernel32.dll").NewProc("GetCurrentThreadId")
 )
 
 const (
 	swRestore = 9
-
-	// VK_MENU is ALT. See the "inputtap" rung for why it is the only safe key
-	// to synthesise into whatever the user is looking at.
-	vkMenu           = 0x12
-	keyEventExtended = 0x0001
-	keyEventKeyUp    = 0x0002
 )
 
-// RaiseWindowFor brings the terminal window hosting pid to the foreground.
-//
-// Best-effort in EFFECT — a failure means the user alt-tabs, which is where
-// they were before — but it reports what happened, because a raise that half
-// worked is not the same as one that did nothing and the difference is exactly
-// what the user feels. See the limbo case in forceForeground.
-//
-// The window does not belong to the quil process. Quil runs inside a terminal —
-// under Windows Terminal, GetConsoleWindow returns a hidden ConPTY
-// "PseudoConsoleWindow" rather than anything the user can see (the same trap
-// window_windows.go documents for size restore). So this walks UP the process
-// tree from the TUI and looks for a visible top-level window owned by any
-// ancestor: quil-dev.exe -> pwsh.exe -> WindowsTerminal.exe, and it is the last
-// of those that owns the window.
-//
-// Known ceiling: Windows Terminal hosts many tabs in one window and exposes no
-// way to select one, so this raises the WINDOW. If quil shares a WT window with
-// other tabs, the user may still land on a different tab.
 // raiseAttempt is one way of asking Windows to foreground a window, paired with
 // the name that goes in the log when it is the one that worked.
 //
@@ -97,22 +72,39 @@ func raiseLadder() []raiseAttempt {
 			procSwitchToThisWindow.Call(hwnd, 1)
 			return isForeground(hwnd)
 		}},
-		// Last resort. One of the documented conditions for setting the
-		// foreground window is having received the last input event, so a
-		// synthetic key tap satisfies it where nothing else did.
+		// A synthetic ALT tap was tried here and REMOVED. The theory was sound —
+		// one documented condition for setting the foreground window is having
+		// received the last input event — but measured on the reporting machine
+		// it was refused like every other rung, and it is not side-effect free:
+		// ALT alone activates the MENU BAR of whatever window has focus, which
+		// then swallows the keystrokes that follow. So a user who clicked the
+		// toast and started typing got nothing, from a rung that was supposed
+		// to be the one that finally worked.
 		//
-		// ALT is deliberate: it is the only key that is a no-op on its own in
-		// essentially every application — a bare press-and-release focuses a
-		// menu bar at most, and the window it lands on is the one about to lose
-		// focus anyway. A printable key would be TYPED into the user's document.
-		{"inputtap", func(hwnd uintptr) bool {
-			procKeybdEvent.Call(vkMenu, 0, keyEventExtended, 0)
-			procKeybdEvent.Call(vkMenu, 0, keyEventExtended|keyEventKeyUp, 0)
-			return forceForeground(hwnd)
-		}},
+		// "Harmless if it fails" is a property to verify, not assume, and it is
+		// the property that decides whether a speculative rung may exist at all.
 	}
 }
 
+// RaiseWindowFor brings the terminal window hosting pid to the foreground and
+// reports which rung of the ladder managed it.
+//
+// Best-effort in EFFECT — a failure means the user alt-tabs, which is where
+// they were before — but it reports what happened, because a raise that half
+// worked is not the same as one that did nothing and the difference is exactly
+// what the user feels. See the limbo case in forceForeground.
+//
+// The window does not belong to the quil process. Quil runs inside a terminal —
+// under Windows Terminal, GetConsoleWindow returns a hidden ConPTY
+// "PseudoConsoleWindow" rather than anything the user can see (the same trap
+// window_windows.go documents for size restore). So this walks UP the process
+// tree from the TUI and looks for a visible top-level window owned by any
+// ancestor: quil-dev.exe -> pwsh.exe -> WindowsTerminal.exe, and it is the last
+// of those that owns the window.
+//
+// Known ceiling: Windows Terminal hosts many tabs in one window and exposes no
+// way to select one, so this raises the WINDOW. If quil shares a WT window with
+// other tabs, the user may still land on a different tab.
 func RaiseWindowFor(pid int) (string, error) {
 	// EVERY call below is per-OS-THREAD: AttachThreadInput binds a specific
 	// thread's input queue, GetCurrentThreadId reports the thread it runs on,

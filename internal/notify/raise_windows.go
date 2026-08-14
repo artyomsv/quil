@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"runtime"
 	"sync"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -26,11 +27,15 @@ var (
 	procGetForegroundWindow    = user32.NewProc("GetForegroundWindow")
 	procSetActiveWindow        = user32.NewProc("SetActiveWindow")
 	procSwitchToThisWindow     = user32.NewProc("SwitchToThisWindow")
+	procSystemParametersInfo   = user32.NewProc("SystemParametersInfoW")
 	procGetCurrentThreadIdUser = windows.NewLazySystemDLL("kernel32.dll").NewProc("GetCurrentThreadId")
 )
 
 const (
 	swRestore = 9
+
+	// SPI_GETFOREGROUNDLOCKTIMEOUT. See ForegroundLockTimeout.
+	spiGetForegroundLockTimeout = 0x2000
 )
 
 // raiseAttempt is one way of asking Windows to foreground a window, paired with
@@ -149,6 +154,38 @@ func RaiseWindowFor(pid int) (string, error) {
 		return "", fmt.Errorf("notify: raising for pid %d: %w", pid, firstErr)
 	}
 	return "", fmt.Errorf("notify: no visible window found for pid %d or its ancestors", pid)
+}
+
+// ForegroundLockTimeout reports how long after user input Windows refuses to
+// let an application force itself into the foreground.
+//
+// This is the policy behind every refusal the raise ladder can hit, and it is
+// per-USER rather than anything Quil can see from its own state — which is why
+// a raise can be impossible on one machine and instant on another with the same
+// build. Non-zero means an application that does not already own the user's
+// most recent interaction cannot take focus, full stop, and a toast click
+// handled by the shell's notification host leaves Quil in exactly that position.
+//
+// Read through SystemParametersInfo rather than the registry key that backs it:
+// the key may be absent while the system still applies a default, so the
+// registry answers "unset" where this answers what is actually enforced.
+//
+// Reported, never changed. It is a system-wide behaviour the user chose (or
+// their default), other applications depend on it, and silently rewriting it to
+// make one feature work is exactly the kind of side effect `quil notify setup`
+// exists to avoid.
+func ForegroundLockTimeout() (time.Duration, error) {
+	var ms uint32
+	r, _, err := procSystemParametersInfo.Call(
+		spiGetForegroundLockTimeout,
+		0,
+		uintptr(unsafe.Pointer(&ms)),
+		0,
+	)
+	if r == 0 {
+		return 0, fmt.Errorf("notify: reading foreground lock timeout: %w", err)
+	}
+	return time.Duration(ms) * time.Millisecond, nil
 }
 
 // isForeground asks the SYSTEM whether the raise landed, rather than trusting

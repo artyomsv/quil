@@ -168,6 +168,24 @@ func runNotifyStatus(opts notify.Options) {
 	fmt.Printf("  done:       %v\n", d.Done)
 	fmt.Printf("  cooldown:   %s\n", d.CooldownDuration())
 
+	// Reported here because it decides whether clicking a toast can bring the
+	// terminal forward, and nothing else the user can run will tell them.
+	if lock, err := notify.ForegroundLockTimeout(); err == nil {
+		fmt.Printf("\nForeground lock: %s\n", lock)
+		if lock > 0 {
+			fmt.Printf(`
+  Windows will not let an application take focus for this long after you
+  interact with a different one, so clicking a toast can switch Quil to the
+  right pane without bringing its window forward. Quil does not change this
+  setting: it is system-wide, other applications rely on it, and rewriting it
+  to suit one feature is not Quil's call.
+
+  To allow it, set HKCU\Control Panel\Desktop\ForegroundLockTimeout to 0 and
+  sign out and back in. The toast will still route correctly either way.
+`)
+		}
+	}
+
 	fmt.Printf("\nToasts fire for any pane you are not looking at — another tab, another\n")
 	fmt.Printf("project, or another application. The pane on screen never toasts.\n")
 }
@@ -273,13 +291,32 @@ func handleActivate() {
 	// they were.
 	how, err := notify.RaiseWindowFor(pid)
 	if err != nil {
-		logActivate("raise failed for pane %s: %v", paneID, err)
+		// The lock timeout is named IN the failure line rather than left for
+		// someone to look up, because it is the usual explanation and it is
+		// per-user state no log elsewhere records. A refusal with a non-zero
+		// timeout is Windows working as configured; a refusal with zero is a
+		// genuinely different problem, and the line has to be able to say so.
+		logActivate("raise failed for pane %s: %v (%s)", paneID, err, foregroundLockNote())
 		return
 	}
 	// WHICH rung won is the useful half. The ladder exists because Windows
 	// decides this from state we cannot see, so the only way to learn what
 	// actually works on a given machine is to record it.
 	logActivate("raised pid %d for pane %s via %s", pid, paneID, how)
+}
+
+// foregroundLockNote renders the foreground lock timeout for a log line or a
+// status row, in the three states it really has: a value, zero, or unknown.
+func foregroundLockNote() string {
+	d, err := notify.ForegroundLockTimeout()
+	switch {
+	case err != nil:
+		return fmt.Sprintf("foreground lock timeout unknown: %v", err)
+	case d == 0:
+		return "foreground lock timeout is 0, so this refusal is NOT the lock"
+	default:
+		return fmt.Sprintf("foreground lock timeout is %s — Windows is refusing focus by policy", d)
+	}
 }
 
 // maxActivateLogBytes caps the activation log. It is a diagnostic buffer, not a

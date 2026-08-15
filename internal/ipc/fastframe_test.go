@@ -504,3 +504,66 @@ func TestFastPaths_KnownValidityLimits(t *testing.T) {
 		}
 	})
 }
+
+// TestPaneOutputPayload_FastPathStaysEngaged guards the coupling between
+// PaneOutputPayload's wire shape and the two places that hard-code it:
+// paneOutputSpan's `{"pane_id":"` prefix, and decodePaneOutput's `,"data":"`
+// key and exact trailing-key set.
+//
+// This failure mode is SILENT without a test. Add a field, reorder two, or
+// change a tag, and both fast paths simply stop matching — they decline, the
+// encoding/json fallback runs, everything stays correct, and the ~40x encode
+// and ~9x receive improvement evaporates with nothing going red. That is worse
+// than a break, because nobody goes looking.
+//
+// The reflection half names what to update; the round-trip half is the one that
+// actually proves the fast path is still being taken.
+func TestPaneOutputPayload_FastPathStaysEngaged(t *testing.T) {
+	t.Run("wire shape is pinned", func(t *testing.T) {
+		want := []struct{ name, tag string }{
+			{"PaneID", `json:"pane_id"`},
+			{"Data", `json:"data"`},
+			{"Ghost", `json:"ghost,omitempty"`},
+		}
+		typ := reflect.TypeOf(PaneOutputPayload{})
+		if typ.NumField() != len(want) {
+			t.Fatalf("PaneOutputPayload has %d fields, expected %d — paneOutputSpan and decodePaneOutput hard-code this shape and must be updated with it",
+				typ.NumField(), len(want))
+		}
+		for i, w := range want {
+			f := typ.Field(i)
+			if f.Name != w.name {
+				t.Errorf("field %d: name %q, want %q", i, f.Name, w.name)
+			}
+			if got := string(f.Tag); got != w.tag {
+				t.Errorf("field %s: tag %q, want %q", f.Name, got, w.tag)
+			}
+		}
+	})
+
+	t.Run("fast paths still engage on a real message", func(t *testing.T) {
+		for _, ghost := range []bool{false, true} {
+			msg, err := NewMessage(MsgPaneOutput, PaneOutputPayload{
+				PaneID: "pane-1a2b3c4d", Data: []byte("hello"), Ghost: ghost,
+			})
+			if err != nil {
+				t.Fatalf("NewMessage: %v", err)
+			}
+			frame, ok := appendEnvelope(msg)
+			if !ok {
+				t.Fatalf("ghost=%v: appendEnvelope declined a NewMessage-produced pane_output frame", ghost)
+			}
+			var got Message
+			if !parseEnvelope(frame[4:], &got) {
+				t.Fatalf("ghost=%v: parseEnvelope declined a frame this package just produced", ghost)
+			}
+			var p PaneOutputPayload
+			if !decodePaneOutput(got.Payload, &p) {
+				t.Fatalf("ghost=%v: decodePaneOutput declined a payload NewMessage just marshalled", ghost)
+			}
+			if p.PaneID != "pane-1a2b3c4d" || string(p.Data) != "hello" || p.Ghost != ghost {
+				t.Errorf("ghost=%v: round trip changed the value: %+v", ghost, p)
+			}
+		}
+	})
+}

@@ -23,3 +23,16 @@
 # go:embed sees is what git stores.
 *.sh text eol=lf
 internal/shellinit/scripts/** text eol=lf
+
+# Changelog fragments are concatenated verbatim into CHANGELOG.md by
+# scripts/promote-changelog.sh. A fragment authored on Windows would otherwise
+# carry CRLF into a file that is LF everywhere else — the goreleaser job strips
+# \r from the release NOTES (release.yml), so the damage would be invisible on
+# the release page and permanent in the committed changelog. The promoter also
+# strips CR defensively; this keeps it from ever being needed.
+changelog.d/*.md text eol=lf
+# CHANGELOG.md is what the promoter WRITES, splicing fragment bytes into the
+# existing file. Its blob is already LF, but without this the working tree is
+# CRLF under core.autocrlf, so a local promote produces a file that is LF on
+# the lines it just wrote and CRLF on the history it copied through.
+CHANGELOG.md text eol=lf

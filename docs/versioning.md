@@ -30,16 +30,21 @@ If no bumpable commits are found since the last tag, no release is created.
 
 - **`VERSION`** file at repo root — single source of truth (`0.2.0`)
 - **`cmd/quil/main.go`** — build-time injection via `-ldflags "-X main.version=..."`
-- **`CHANGELOG.md`** — version header added automatically on release
+- **`CHANGELOG.md`** — written by the release workflow, never by hand
+- **`changelog.d/`** — one fragment per PR, collected into `CHANGELOG.md` on release
 - **Git tags** — `v0.2.0` format, created by the release workflow
 
 ## Release Process
 
 1. Develop on a feature branch
-2. Create a PR to `master` — CI runs tests + build
-3. Merge PR — release workflow automatically:
+2. Add a changelog fragment — `changelog.d/<type>-<slug>.md` (see
+   [changelog.d/README.md](../changelog.d/README.md)). One file per PR, so two
+   PRs open at once never touch the same path and never conflict.
+3. Create a PR to `master` — CI runs tests + build, and requires the fragment
+4. Merge PR — release workflow automatically:
    - Reads `VERSION`, analyzes commits, determines bump
-   - Updates `VERSION` and `CHANGELOG.md`
+   - Updates `VERSION`, promotes `changelog.d/*.md` into `CHANGELOG.md`, and
+     deletes the consumed fragments
    - Commits `chore(release): vX.Y.Z`
    - Creates git tag `vX.Y.Z`
    - Cross-compiles binaries (Linux + macOS, amd64 + arm64)

@@ -88,12 +88,25 @@ jobs:
       - name: installer regression test
         run: sh scripts/test-install.sh
 
-  # The release workflow only inserts a version header above whatever is under
-  # `## [Unreleased]` — it never writes prose. So an entry that is not written
-  # HERE, while the author still has the context, is never written at all: the
-  # version section ships empty and stays empty. Catching it at release time
-  # (release.yml has that gate too, as a backstop) means blocking a release on
-  # a changelog nobody remembers the details for.
+      # promote-changelog.sh is the one release step that REWRITES CHANGELOG.md,
+      # so a splicing bug there silently eats unreleased prose or released
+      # history. It lives in scripts/ rather than inline in release.yml
+      # precisely so it can be tested here, on every PR, before it ever runs
+      # against the real file.
+      - name: changelog promoter regression test
+        run: sh scripts/test-promote-changelog.sh
+
+  # The release workflow does not write changelog prose — it only collects the
+  # fragments under `changelog.d/` into a version section. So an entry that is
+  # not written HERE, while the author still has the context, is never written
+  # at all: the version section ships empty and stays empty. Catching it at
+  # release time (release.yml has that gate too, as a backstop) means blocking
+  # a release on a changelog nobody remembers the details for.
+  #
+  # One file per PR, rather than a shared `## [Unreleased]` block, because every
+  # PR editing the same anchor line made the second of two parallel PRs conflict
+  # with the first as soon as it merged. Git has no conflict concept for two
+  # distinct ADDED paths.
   changelog:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
@@ -103,15 +116,38 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Require a CHANGELOG entry for user-facing changes
+      - name: Require a changelog fragment for user-facing changes
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
-          CHANGED=$(git diff --name-only "$(git merge-base "$BASE" "$HEAD")" "$HEAD")
+          MERGE_BASE=$(git merge-base "$BASE" "$HEAD")
+          CHANGED=$(git diff --name-only "$MERGE_BASE" "$HEAD")
           echo "--- changed files ---"
           echo "$CHANGED"
           echo "---"
+
+          # Directory hygiene, checked on EVERY pull request — including the
+          # docs-only ones exempted from needing a fragment below. This is the
+          # same code the release runs, so a fragment that would break the
+          # release fails HERE instead, while the author is still looking at
+          # it. It refuses a symlink (the promoter reads it through, so
+          # `fixed-x.md -> ../.git/config` would publish the checkout's
+          # credential header), a non-regular file, an empty fragment, and one
+          # carrying a `## [` heading that would truncate the release notes.
+          # --validate rather than --check: an exempt PR legitimately has
+          # nothing to promote.
+          #
+          # Wrapped so the reason reaches the Files-changed tab as an
+          # annotation. The script writes plain stderr, which lands only in
+          # the raw log — every other failure in this job annotates, and a
+          # gate whose reason you have to go digging for gets guessed at.
+          if ! VALIDATION=$(sh scripts/promote-changelog.sh --validate 2>&1); then
+            echo "$VALIDATION"
+            echo "::error file=changelog.d/::Invalid changelog fragment — see the log for which file and why. A fragment must be a regular file (not a symlink) named changelog.d/<type>-<slug>.md, must not be empty, and must not contain a '## [' heading. See changelog.d/README.md."
+            exit 1
+          fi
+          echo "$VALIDATION"
 
           # Anything that reaches the binary. Test-only, docs-only, site-only
           # and workflow-only PRs are exempt — they can't change what a user
@@ -135,20 +171,35 @@ jobs:
           # Non-obvious members: internal/plugin/defaults/*.toml and
           # internal/shellinit/*.sh are go:embed'ed, so a TOML-only change
           # really does change the binary — v1.28.0 shipped exactly that.
+          # changelog.d/ is denied for the same reason as docs/: a typo fix in
+          # a pending fragment would otherwise read as payload and cut a
+          # release whose five platform binaries are identical to the last tag.
           CODE=$(echo "$CHANGED" \
-            | grep -vE '^(site|docs|tools|techdebt|marketing|\.github|\.claude)/' \
+            | grep -vE '^(site|docs|tools|techdebt|marketing|\.github|\.claude|changelog\.d)/' \
             | grep -vE '^[^/]+\.md$' \
             | grep -vE '^(VERSION|LICENSE|Makefile|package-lock\.json|\.gitignore|\.gitattributes|\.editorconfig|\.dockerignore)$' \
             | grep -v '_test\.go$' || true)
           if [ -z "$CODE" ]; then
-            echo "::notice::No changes reach the binary — changelog entry not required"
+            echo "::notice::No changes reach the binary — changelog fragment not required"
             exit 0
           fi
 
-          if echo "$CHANGED" | grep -qx 'CHANGELOG.md'; then
-            echo "::notice::CHANGELOG.md updated"
+          # --diff-filter=A: the fragment must be NEW. The previous gate asked
+          # only whether CHANGELOG.md was touched, which an edit to an
+          # already-released section satisfied.
+          #
+          # The name grammar is NOT written out here. promote-changelog.sh owns
+          # it, and this gate pipes candidates through the same script the
+          # release runs, because a gate that can disagree with the action it
+          # guards is exactly how #130 (v1.49.0 -> v1.49.1) turned master red:
+          # a PR passes review, then the release dies on a rule the PR was
+          # never checked against.
+          FRAGMENTS=$(git diff --name-status --diff-filter=A "$MERGE_BASE" "$HEAD" \
+            | cut -f2 | sh scripts/promote-changelog.sh --filter-names)
+          if [ -n "$FRAGMENTS" ]; then
+            echo "::notice::changelog fragment(s) added: $(echo "$FRAGMENTS" | tr '\n' ' ')"
             exit 0
           fi
 
-          echo "::error file=CHANGELOG.md::This PR changes production code but does not touch CHANGELOG.md. Add an entry under '## [Unreleased]' describing the change from a user's point of view — the release workflow copies that section verbatim and cannot write it for you. If the change is genuinely invisible to users (pure refactor, internal cleanup), add the literal line '_No user-facing changes._' under '## [Unreleased]' to say so explicitly."
+          echo "::error file=changelog.d/::This PR changes production code but adds no changelog fragment. Create changelog.d/<type>-<slug>.md describing the change from a user's point of view, where <type> is one of added, changed, deprecated, removed, fixed, security, internal. The file holds the bullet text only — the release workflow adds the version header and section heading, and cannot write the prose for you. If the change is genuinely invisible to users (pure refactor, internal cleanup), add changelog.d/none-<slug>.md to say so explicitly. See changelog.d/README.md; validate locally with 'sh scripts/promote-changelog.sh --check'."
           exit 1

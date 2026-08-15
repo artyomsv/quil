@@ -198,7 +198,7 @@ jobs:
           # Keep this list in sync with ci.yml's `changelog` job.
           if git rev-parse "$LAST_TAG" >/dev/null 2>&1; then
             PAYLOAD=$(git diff --name-only "${LAST_TAG}..HEAD" \
-              | grep -vE '^(site|docs|tools|techdebt|marketing|\.github|\.claude)/' \
+              | grep -vE '^(site|docs|tools|techdebt|marketing|\.github|\.claude|changelog\.d)/' \
               | grep -vE '^[^/]+\.md$' \
               | grep -vE '^(VERSION|LICENSE|Makefile|package-lock\.json|\.gitignore|\.gitattributes|\.editorconfig|\.dockerignore)$' \
               | grep -v '_test\.go$' || true)
@@ -243,12 +243,12 @@ jobs:
           echo "skip=false" >> $GITHUB_OUTPUT
           echo "::notice::Version bump: ${CURRENT} → ${NEW_VERSION} (${BUMP})"
 
-      - name: Require a non-empty [Unreleased] section
+      - name: Validate changelog fragments
         # The release "generator" does NOT write changelog prose — it only
-        # inserts a `## [X.Y.Z] - DATE` header above whatever is already under
-        # `## [Unreleased]`. So a PR that ships without an Unreleased entry
-        # produces a version section that is permanently empty in CHANGELOG.md.
-        # That silently happened 42 times (v0.10.2 through v1.40.0), including
+        # collects the fragments under `changelog.d/` into a
+        # `## [X.Y.Z] - DATE` section. So a release with no fragment produces a
+        # version section that is permanently empty in CHANGELOG.md. That
+        # silently happened 42 times (v0.10.2 through v1.40.0), including
         # feature releases: quil status, split-border drag, auto-update, the
         # pane context menu, and the command palette's content search all
         # shipped with no changelog entry at all.
@@ -260,27 +260,27 @@ jobs:
         # one-line commit rather than a released-with-no-notes version.
         #
         # Escape hatch for a release with genuinely nothing to tell users
-        # (CI-only, refactor-only): put the sentinel line below in
-        # `## [Unreleased]`. It is deliberately an explicit, greppable
-        # statement — "nothing to say" and "forgot to write it" must not look
-        # identical to this check.
+        # (CI-only, refactor-only): a `changelog.d/none-<slug>.md` fragment,
+        # which renders the `_No user-facing changes._` sentinel. It is
+        # deliberately an explicit, greppable statement — "nothing to say" and
+        # "forgot to write it" must not look identical to this check.
+        #
+        # This runs the SAME script the promotion step runs, so the gate and
+        # the action cannot disagree about what a valid fragment is; ci.yml's
+        # PR gate calls it too. See the header of scripts/promote-changelog.sh
+        # for why that matters (#130).
         #
         # One failure here is NOT the author's fault: when two PRs merge
-        # back-to-back, this job checks out master at trigger time, so run #1
-        # can sweep BOTH entries into version #1 and leave run #2 with an empty
-        # section. That is how v1.32.1's macOS fixes ended up filed under
-        # v1.32.0, and v1.40.0's palette content search under v1.39.0. If this
-        # gate fires immediately after another release, check whether the
-        # previous version's section is holding this one's entry, and move it
-        # down rather than writing a new one.
+        # back-to-back, run #1 can consume BOTH PRs' fragments into version #1
+        # and leave run #2 with nothing to promote. That is how v1.32.1's macOS
+        # fixes ended up filed under v1.32.0, and v1.40.0's palette content
+        # search under v1.39.0. If this gate reports "nothing to promote"
+        # immediately after another release, check the PREVIOUS version's
+        # section in CHANGELOG.md before writing anything new — this release's
+        # entry is probably already in it, and the fix is to move it down
+        # rather than to author a second copy.
         if: steps.bump.outputs.skip != 'true' && inputs.publish_tag == ''
-        run: |
-          UNRELEASED=$(sed -n '/^## \[Unreleased\]/,/^## \[/{ /^## \[Unreleased\]/d; /^## \[/d; p; }' CHANGELOG.md)
-          if [ -z "$(printf '%s' "$UNRELEASED" | tr -d '[:space:]')" ]; then
-            echo "::error file=CHANGELOG.md::The [Unreleased] section is empty — refusing to cut a release with no changelog entry. Add one under '## [Unreleased]' describing the change from a user's point of view, or, if this release genuinely has nothing user-facing, add the literal line '_No user-facing changes._' there."
-            exit 1
-          fi
-          echo "::notice::[Unreleased] section present ($(printf '%s\n' "$UNRELEASED" | wc -l) lines)"
+        run: sh scripts/promote-changelog.sh --check
 
       - name: Update version files
         if: steps.bump.outputs.skip != 'true' && inputs.publish_tag == ''
@@ -289,9 +289,12 @@ jobs:
         run: |
           echo "$VERSION" > VERSION
 
-          # Update CHANGELOG: insert versioned header after [Unreleased]
+          # Collect changelog.d/*.md into a new version section below the
+          # [Unreleased] anchor, then delete the consumed fragments. The
+          # anchor itself is kept, so the goreleaser job's release-note
+          # extraction sed is unaffected by this change.
           DATE=$(date +%Y-%m-%d)
-          sed -i "s/## \[Unreleased\]/## [Unreleased]\n\n## [${VERSION}] - ${DATE}/" CHANGELOG.md
+          sh scripts/promote-changelog.sh "$VERSION" "$DATE"
 
           # Bump the marketing site's version pill so quil.cc reflects the
           # release. seo.ts is the single source of truth for the home page
@@ -347,6 +350,17 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add VERSION CHANGELOG.md site/src/data/seo.ts
+          # -A stages the DELETIONS of the fragments the promote step consumed.
+          # A plain `git add changelog.d` records nothing for a removed file,
+          # so the fragments would survive on master and be re-promoted into
+          # every subsequent release — the monorepo's process-changelog action
+          # carries a comment recording exactly that bug.
+          #
+          # No `[ -d changelog.d ]` guard: `git add -A -- <path>` already
+          # handles a path that no longer exists on disk, and the guard made
+          # the one case you would most want staged — the directory itself
+          # disappearing — the case that silently staged nothing.
+          git add -A -- changelog.d
           git commit -m "chore(release): v${VERSION}"
           git tag "v${VERSION}"
           # --atomic: land the release commit and its tag together or not at

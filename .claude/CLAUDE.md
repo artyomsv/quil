@@ -85,10 +85,12 @@ Go module cache is persisted in a Docker volume (`quil-gomod`) for fast repeated
 
 Single workflow (`release.yml`) with two jobs:
 
-1. **`release` job** — triggers on push to master. Analyzes conventional commits since last tag, computes version bump (major/minor/patch), updates `VERSION` + `CHANGELOG.md`, commits `chore(release): vX.Y.Z`, creates git tag, pushes. Outputs version to the next job.
+1. **`release` job** — triggers on push to master. Analyzes conventional commits since last tag, computes version bump (major/minor/patch), updates `VERSION`, promotes the `changelog.d/` fragments into `CHANGELOG.md`, commits `chore(release): vX.Y.Z`, creates git tag, pushes. Outputs version to the next job.
 2. **`goreleaser` job** — runs after `release` job. Checks out the tagged commit, extracts release notes from `CHANGELOG.md` via sed, runs GoReleaser to cross-compile 5 platforms (linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64), creates `.tar.gz` (Unix) / `.zip` (Windows) archives with both `quil` + `quild`, publishes GitHub Release with SHA256 checksums. Release notes applied via `gh release edit` (decoupled from GoReleaser's changelog system — `--release-notes` flag broke with `changelog.disable: true` in newer GoReleaser v2).
 
 GoReleaser config: `.goreleaser.yml` (version 2). Version injected via `-ldflags "-s -w -X main.version={{.Version}}"` on both binaries. Note: both jobs are in one workflow because tags pushed with `GITHUB_TOKEN` don't trigger other workflows.
+
+**Changelog entries are per-PR fragments, never direct edits to `CHANGELOG.md`.** Each PR adds one `changelog.d/<type>-<slug>.md` holding the bullet text; `scripts/promote-changelog.sh` collects them into a version section at release and deletes them. Every PR used to edit the same `## [Unreleased]` anchor line, so two open PRs conflicted the moment the first merged — git has no conflict concept for two distinct ADDED paths, which is the whole point. The grammar of a valid fragment name lives ONLY in that script: `ci.yml`'s PR gate pipes candidates through `--filter-names` and `release.yml` gates with `--check`, because a gate that can disagree with the action it guards is how #130 turned master red. `## [Unreleased]` is retained as a static anchor so the goreleaser job's release-note extraction sed is untouched. `changelog.d/` is in BOTH denylists — a typo fix in a pending fragment must not cut a release of byte-identical binaries. `release.yml` stages consumed fragments with `git add -A`; a plain add records no deletion and re-promotes them forever. Regression tests: `scripts/test-promote-changelog.sh` (run by `ci.yml`).
 
 Install script: `scripts/install.sh` — POSIX shell, detects OS/arch, downloads from GitHub Releases, verifies checksum, installs to `~/.local/bin/`.
 
@@ -193,7 +195,8 @@ QUIL_HOME=/custom/path ./quil     # Arbitrary data directory
 Project docs are now organized as a navigable tree under `docs/` (with the index at `docs/README.md`). Only `README.md`, `CHANGELOG.md`, `CONTRIBUTING.md`, and `LICENSE` stay at the repo root.
 
 - `README.md` — Landing page (install + 5-command quick start + Documentation table)
-- `CHANGELOG.md` — Keep a Changelog format
+- `CHANGELOG.md` — Keep a Changelog format; written by the release workflow, never by hand
+- `changelog.d/` — pending per-PR changelog fragments (`README.md` documents the convention)
 - `CONTRIBUTING.md` — Branch / commit / PR conventions
 - `docs/README.md` — Documentation index
 - `docs/quick-start.md` — First-launch walkthrough

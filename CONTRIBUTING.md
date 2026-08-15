@@ -78,13 +78,15 @@ PRs get squash-merged to `master` for a clean history. GitHub uses the **PR titl
 
 > **A non-conventional PR title silently skips the release.** The bump regex requires the type followed by `:`, `(`, or `/` (e.g. `fix:`, `fix(tui):`, `fix/…`). A title like `Fix the pane bug` matches nothing, so the release job logs `No version-bumping commits found` and exits without tagging — the merge lands on `master` but never ships. If a merged change didn't produce a release, check the PR title first.
 
-> **A PR that touches `cmd/` or `internal/` must also touch `CHANGELOG.md`.** CI enforces this. The release pipeline only inserts a `## [X.Y.Z]` header above whatever is already under `## [Unreleased]` — it never writes prose — so an entry you don't write in the PR is never written at all, and the released version ships with a permanently empty section. If the change genuinely has nothing to tell users (pure refactor, internal cleanup), say so explicitly with the literal line `_No user-facing changes._` under `## [Unreleased]`. Test-only, docs-only, and site-only PRs are exempt.
+> **A PR that touches `cmd/` or `internal/` must also add a changelog fragment.** CI enforces this. Create `changelog.d/<type>-<slug>.md` holding the bullet text — the release pipeline adds the version header and section heading but never writes prose, so an entry you don't write in the PR is never written at all, and the released version ships with a permanently empty section. If the change genuinely has nothing to tell users (pure refactor, internal cleanup), say so explicitly with a `changelog.d/none-<slug>.md` fragment. Test-only, docs-only, and site-only PRs are exempt. See [changelog.d/README.md](changelog.d/README.md), and validate before pushing with `sh scripts/promote-changelog.sh --check`.
+>
+> One file per PR is what keeps parallel PRs from conflicting: entries used to go under a shared `## [Unreleased]` heading in `CHANGELOG.md`, so two open PRs edited the same anchor line and the second to merge always conflicted. **Do not edit `CHANGELOG.md` directly** — the release workflow owns it.
 
 ## Documentation maintenance
 
 When your change adds a new feature, configuration knob, or significant architectural decision:
 
-- Update [CHANGELOG.md](CHANGELOG.md) — add an entry under `[Unreleased]`, written for a user rather than a reviewer: what changed for them, and what was wrong before if it's a fix. The release pipeline rotates it into a dated section on the next bump and copies it verbatim to the GitHub release page.
+- Add a changelog fragment — `changelog.d/<type>-<slug>.md`, written for a user rather than a reviewer: what changed for them, and what was wrong before if it's a fix. The release pipeline collects it into a dated section in [CHANGELOG.md](CHANGELOG.md) on the next bump and copies that verbatim to the GitHub release page.
 - Update the matching doc in [docs/](docs/):
   - New feature → [features.md](docs/features.md)
   - New config key → [configuration.md](docs/configuration.md)

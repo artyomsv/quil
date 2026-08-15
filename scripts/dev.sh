@@ -143,6 +143,47 @@ case "${1:-help}" in
       "CGO_ENABLED=1 go test -race $(pkg_target "${2:-}")"
     ;;
 
+  # Benchmarks are excluded from `test` (go test runs no benchmarks without
+  # -bench), so they cost nothing on the normal loop and are only paid here.
+  #
+  # -count 6 gives benchstat enough samples to report a delta with a useful
+  # confidence interval (its Mann-Whitney U test can reach p<0.05 at n=4, so
+  # this is headroom, not a floor). -cpu 1 keeps runs comparable, since the
+  # benchmarked code is single-threaded and GOMAXPROCS otherwise varies with
+  # whatever else the machine is doing. -run '^$' skips tests so a slow suite
+  # does not pad the timing run.
+  #
+  # Results land in bench/<label>.txt (gitignored). The workflow this exists for:
+  #   ./scripts/dev.sh bench before     # on the unchanged code
+  #   ...implement...
+  #   ./scripts/dev.sh bench after      # prints the comparison automatically
+  #
+  # QUIL_BENCH_BASE names the baseline to compare against (default "before"), so
+  # a baseline captured under another label is not silently skipped.
+  bench)
+    label="${2:-bench}"
+    pkg="$(pkg_target "${3:-internal/ipc}")"
+    base="${QUIL_BENCH_BASE:-before}"
+    mkdir -p "$PROJECT_DIR/bench"
+    out="bench/${label}.txt"
+    echo "benchmarking $pkg -> $out" >&2
+    $DOCKER_RUN sh -c \
+      "go test -run '^\$' -bench . -benchmem -count 6 -cpu 1 $pkg | tee $out"
+    # benchstat is best-effort: comparison is a convenience, the .txt files are
+    # the artifact, and a machine without network must still get its numbers.
+    # The version is PINNED — @latest re-resolves against the proxy on every
+    # run, which both needs network and can change the tool under a comparison.
+    if [ "$label" != "$base" ] && [ -f "$PROJECT_DIR/bench/${base}.txt" ]; then
+      echo "" >&2
+      echo "=== benchstat ${base}.txt -> ${label}.txt ===" >&2
+      $DOCKER_RUN sh -c \
+        "go run golang.org/x/perf/cmd/benchstat@v0.0.0-20250515181355-8f5f3abf5b0e bench/${base}.txt $out" \
+        || echo "(benchstat unavailable — compare bench/${base}.txt and $out by hand)" >&2
+    elif [ "$label" != "$base" ]; then
+      echo "(no bench/${base}.txt — capture a baseline first, or set QUIL_BENCH_BASE)" >&2
+    fi
+    ;;
+
   vet)
     $DOCKER_RUN go vet "$(pkg_target "${2:-}")"
     ;;
@@ -199,6 +240,7 @@ case "${1:-help}" in
     echo "  build          Build all variants: prod, dev, debug (6 binaries) + quil-activate.exe"
     echo "  test [pkg]     Run tests (all, or just ./<pkg>/...)"
     echo "  test-race [pkg]  Run tests with race detector"
+    echo "  bench [label] [pkg]  Run benchmarks -> bench/<label>.txt (default pkg: internal/ipc)"
     echo "  vet [pkg]      Run go vet"
     echo "  cross          Cross-compile for all platforms"
     echo "  image          Build Docker image (scratch-based)"

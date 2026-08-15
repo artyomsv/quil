@@ -51,3 +51,6 @@ Thumbs.db
 # is a full checkout nested inside the repo, so without this every file in it
 # shows up as untracked in the parent.
 /.claude/worktrees/
+
+# Benchmark result files (./scripts/dev.sh bench)
+/bench/

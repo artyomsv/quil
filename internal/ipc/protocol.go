@@ -137,6 +137,18 @@ const (
 	MsgWorktreeListReq  = "worktree_list_req"
 	MsgWorktreeListResp = "worktree_list_resp"
 
+	// Worktree change count (close confirm dialog). Asks the daemon how much
+	// uncommitted work a worktree holds, so the dialog can say what the force
+	// removal it is offering would destroy.
+	//
+	// On demand rather than on the git ticker, and that is a cost decision:
+	// `git status` is the one plumbing call gitinfo deliberately never makes,
+	// because it can take seconds on a large repository without fsmonitor.
+	// Once per dialog against one worktree is affordable; every five seconds
+	// against every pane's checkout is not.
+	MsgWorktreeStatusReq  = "worktree_status_req"
+	MsgWorktreeStatusResp = "worktree_status_resp"
+
 	// Recent-directory existence check (pane setup dialog's quick pick). The
 	// list was filtered with a local os.Stat, so against a remote host every
 	// server path failed the test and the pick list rendered silently empty —
@@ -148,6 +160,11 @@ const (
 	// Auto-update (TUI ⇄ daemon)
 	MsgStageUpdateReq  = "stage_update_req"  // TUI → daemon (empty payload)
 	MsgStageUpdateResp = "stage_update_resp" // daemon → TUI (unicast)
+	// Check-only refresh, fired when the About dialog opens. Deliberately has
+	// NO response type: the answer is the refreshed "update" key on the next
+	// workspace_state broadcast, and a check that fails (offline laptop) is a
+	// routine non-event the row must not report. Rate-limited daemon-side.
+	MsgUpdateCheckReq = "update_check_req" // TUI → daemon (empty payload)
 
 	// Kube-context discovery (pane setup dialog, discover = "kube"). Same
 	// reason as the browser and git discovery: it used to parse the
@@ -259,6 +276,19 @@ type WorktreeSpec struct {
 
 type DestroyPanePayload struct {
 	PaneID string `json:"pane_id"`
+	// RemoveWorktree asks the daemon to delete the linked worktree this pane
+	// was created into, once the pane itself is gone.
+	//
+	// A BOOL, never a path, and that is the security boundary rather than a
+	// convenience: the daemon re-derives which directory may go from its own
+	// Pane.WorktreeOwned record, so the only directories reachable through this
+	// field are ones this daemon created itself. A path on the wire would be a
+	// recursive-delete primitive any IPC client could aim anywhere.
+	//
+	// Absent means false means today's behaviour, which is what keeps every
+	// existing producer — the MCP destroy_pane tool, the overlay teardown, an
+	// older client — non-destructive without knowing this field exists.
+	RemoveWorktree bool `json:"remove_worktree,omitempty"`
 }
 
 type ResizePanePayload struct {
@@ -280,10 +310,46 @@ type PaneOutputPayload struct {
 
 type CreateTabPayload struct {
 	Name string `json:"name"`
+	// FirstPane names the pane the new tab opens with. Nil (the default) keeps
+	// the historical behavior — a `terminal` pane rooted at the owning project's
+	// directory — which is what every non-interactive producer of this message
+	// needs: an older client, the attach bootstrap's shape, and any future
+	// caller with no opinion. The TUI sets it from the create-pane dialog so a
+	// tab and its first pane are ONE atomic step, with no create-then-replace
+	// and no window where the wrong pane type is on screen.
+	FirstPane *FirstPaneSpec `json:"first_pane,omitempty"`
+}
+
+// FirstPaneSpec is the subset of a pane request that makes sense for a tab that
+// does not exist yet.
+//
+// Deliberately NOT a *CreatePanePayload, though it carries a subset of the same
+// fields. That type also has TabID (meaningless — the daemon owns the id it is
+// about to mint), ReplacePaneID (there is nothing to replace, and honoring one
+// would destroy an arbitrary pane as a side effect of "create tab") and Overlay
+// (a tab whose only pane is a muted overlay is a state ensureTabNotEmpty reads
+// as empty and no create path repairs). Any IPC client can set these fields, so
+// the guarantee is structural rather than a sanitizing branch someone can drop
+// later — the same reason MergeProjectsPayload has no RootDir.
+type FirstPaneSpec struct {
+	Type         string   `json:"type,omitempty"`
+	CWD          string   `json:"cwd,omitempty"`
+	InstanceName string   `json:"instance_name,omitempty"`
+	InstanceArgs []string `json:"instance_args,omitempty"`
+	// ResumeSessionID and Worktree carry the same meaning, and the same trust
+	// model, as their CreatePanePayload counterparts — the daemon validates both
+	// before either reaches argv.
+	ResumeSessionID string        `json:"resume_session_id,omitempty"`
+	Worktree        *WorktreeSpec `json:"worktree,omitempty"`
 }
 
 type DestroyTabPayload struct {
 	TabID string `json:"tab_id"`
+	// RemoveWorktree deletes the linked worktrees of every pane in the tab that
+	// owns one. A tab is closed as a unit, so its worktrees are too — see
+	// DestroyPanePayload.RemoveWorktree for why this is a bool rather than a
+	// list of paths.
+	RemoveWorktree bool `json:"remove_worktree,omitempty"`
 }
 
 type SwitchTabPayload struct {
@@ -904,6 +970,45 @@ type WorktreeListRespPayload struct {
 	Error        string         `json:"error,omitempty"`
 }
 
+// WorktreeStatusReqPayload asks how much uncommitted work each of these
+// worktrees holds. The close confirm dialog sends one request covering every
+// worktree the close would delete, so a tab with several is one round trip.
+type WorktreeStatusReqPayload struct {
+	Paths []string `json:"paths"`
+}
+
+// WorktreeStatus is one worktree's answer.
+//
+// Changes counts what `git status --porcelain` reports — modified tracked files
+// and untracked entries alike, because a force removal destroys both. An
+// untracked DIRECTORY counts once rather than once per file, which is why the
+// dialog says "uncommitted changes" rather than naming a file count.
+//
+// Changes == 0 with an empty Error is the only thing that means CLEAN. A path
+// that could not be read carries Error and must never be rendered as clean: a
+// zero there would invite the toggle on the strength of a number nobody
+// obtained.
+type WorktreeStatus struct {
+	Path    string `json:"path"`
+	Changes int    `json:"changes,omitempty"`
+	Error   string `json:"error,omitempty"`
+}
+
+// WorktreeStatusRespPayload answers a status request.
+//
+// CONTRACT: Paths echoes the request VERBATIM on every path, including the
+// error and single-flight-rejection ones — the client's staleness key, matching
+// WorktreeListRespPayload.Path and every other pair in this protocol.
+//
+// Error is the whole-request failure (an oversized request); a per-worktree
+// failure rides its own WorktreeStatus, because one unreadable checkout must
+// not take the other rows' answers with it.
+type WorktreeStatusRespPayload struct {
+	Paths    []string         `json:"paths"`
+	Statuses []WorktreeStatus `json:"statuses,omitempty"`
+	Error    string           `json:"error,omitempty"`
+}
+
 // ClaudeSessionDetailReqPayload asks for the deep read of ONE session — the
 // listing head-reads every transcript in a directory, so this is issued per
 // user request (the picker's info key), never per listing.
@@ -944,12 +1049,32 @@ type UpdateInfo struct {
 	InstallWritable bool   `json:"install_writable"`
 }
 
-// StageUpdateRespPayload answers MsgStageUpdateReq (About → Update now with
-// nothing staged yet).
+// StageUpdateRespPayload answers MsgStageUpdateReq (About → Update now).
+//
+// AlreadyStaged distinguishes "the latest release is on disk, nothing was
+// downloaded" from "it was downloaded just now". The request re-checks GitHub
+// on EVERY press — including when the client believes a version is already
+// staged, because that belief comes from a broadcast the daemon refreshes
+// daily — so without this flag the answer to "is my stage still the latest?"
+// would cost a redundant ~15 MB download every time it was yes.
+//
+// Success is true in both cases (the latest IS staged when the call returns),
+// so a client that predates the flag still reads the outcome correctly.
+//
+// CheckFailed narrows what a failure licenses. A client holding an apply intent
+// may fall back to installing what is already staged ONLY when the release
+// check could not be MADE — GitHub unreachable — because then "is this still
+// the newest?" is unanswered rather than answered no. Every other error
+// (staging failed, install dir not writable, a check already running) leaves
+// the question answered or the request unperformed, and must not be read as
+// permission to install an older stage: doing so re-creates the very
+// apply-the-intermediate-version loop this pair exists to end.
 type StageUpdateRespPayload struct {
-	Success bool   `json:"success"`
-	Version string `json:"version,omitempty"`
-	Error   string `json:"error,omitempty"`
+	Success       bool   `json:"success"`
+	AlreadyStaged bool   `json:"already_staged,omitempty"`
+	CheckFailed   bool   `json:"check_failed,omitempty"`
+	Version       string `json:"version,omitempty"`
+	Error         string `json:"error,omitempty"`
 }
 
 // KubeCtxReqPayload is deliberately empty: kube-context discovery is
@@ -1022,7 +1147,21 @@ const maxFrameSize = 10 * 1024 * 1024
 // allocation. Shared by WriteMessage and the per-conn send queues — replaces
 // the marshal → bytes.Buffer → clone chain that copied every broadcast frame
 // up to four times.
+// Tries appendEnvelope first, which builds the same bytes by concatenation and
+// skips encoding/json's redundant pass over the already-encoded payload. Any
+// shape it declines falls through to EncodeFrameSlow, which remains the sole
+// definition of correct output — the fast path is measured against it in tests.
 func EncodeFrame(msg *Message) ([]byte, error) {
+	if frame, ok := appendEnvelope(msg); ok {
+		return frame, nil
+	}
+	return EncodeFrameSlow(msg)
+}
+
+// EncodeFrameSlow is the reference encoder: plain json.Marshal plus the length
+// prefix. Exported so the fast path can be differentially tested against it,
+// and kept as the fallback for every shape appendEnvelope declines.
+func EncodeFrameSlow(msg *Message) ([]byte, error) {
 	data, err := json.Marshal(msg)
 	if err != nil {
 		return nil, fmt.Errorf("marshal message: %w", err)
@@ -1066,7 +1205,14 @@ func ReadMessage(r io.Reader) (*Message, error) {
 		return nil, fmt.Errorf("read payload: %w", err)
 	}
 
+	// data is freshly allocated above and never reused. That is load-bearing:
+	// parseEnvelope's Payload ALIASES it rather than copying, so a pooled or
+	// reused read buffer here would become a use-after-reuse bug surfacing as
+	// intermittently corrupted payloads.
 	var msg Message
+	if parseEnvelope(data, &msg) {
+		return &msg, nil
+	}
 	if err := json.Unmarshal(data, &msg); err != nil {
 		return nil, fmt.Errorf("unmarshal message: %w", err)
 	}
@@ -1074,6 +1220,17 @@ func ReadMessage(r io.Reader) (*Message, error) {
 }
 
 // DecodePayload unmarshals the message payload into the given target.
+//
+// pane_output is special-cased because it is the only high-frequency type: at
+// up to 500 frames/s/pane, running the JSON scanner over ~11 KB of base64 to
+// reach one []byte field cost ~90 us a frame. The fast path lives inside this
+// method rather than in a new exported one so that no call site changes, and it
+// declines to the same json.Unmarshal below for every shape it does not
+// recognise — including the error cases, so callers keep seeing exactly the
+// errors encoding/json produces.
 func (m *Message) DecodePayload(target any) error {
+	if out, ok := target.(*PaneOutputPayload); ok && decodePaneOutput(m.Payload, out) {
+		return nil
+	}
 	return json.Unmarshal(m.Payload, target)
 }

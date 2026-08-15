@@ -1,0 +1,511 @@
+package tui
+
+import (
+	"runtime"
+	"time"
+
+	"github.com/artyomsv/quil/internal/logger"
+	"github.com/artyomsv/quil/internal/notify"
+)
+
+// desktopNotifier is defined HERE, at the consumer, per the project's Go
+// conventions — internal/notify returns a concrete implementation and this
+// package names only the two methods it uses, which is also what makes the
+// whole trigger path testable with a recording fake on Linux.
+type desktopNotifier interface {
+	Notify(notify.Notification) error
+	Withdraw(tag string) error
+}
+
+// ActivatePaneMsg asks the TUI to focus a pane by id.
+//
+// Exported because cmd/quil constructs it from the activation listener and
+// delivers it with Program.Send. It carries a pane id and nothing else: the
+// path from a registry-reachable URI to this message must not be able to name
+// a command, an argument or a filesystem path.
+type ActivatePaneMsg struct{ PaneID string }
+
+// toastKind records WHICH attention state raised a live toast.
+//
+// Tracking the kind rather than mere presence is a correctness requirement, not
+// bookkeeping. The two states are independent: a pane can be `unseen` from a
+// finished turn AND later `blocked` by a background subagent's permission
+// prompt. Answering that prompt clears blockedSince ONLY — answerBlockedByInput
+// deliberately does not touch unseen — so a sweep that kept the toast while
+// EITHER state held would leave "▲ Waiting for your input" standing in Action
+// Center until the user happened to focus that pane. That is precisely the
+// surface-that-accumulates-lies this feature's Withdraw exists to prevent.
+type toastKind int
+
+const (
+	toastBlocked toastKind = iota
+	toastDone
+)
+
+// live reports whether the state that raised a toast of this kind still holds.
+func (k toastKind) live(p *PaneModel) bool {
+	switch k {
+	case toastBlocked:
+		return !p.blockedSince.IsZero()
+	case toastDone:
+		return p.unseen
+	}
+	return false
+}
+
+// SetDesktopNotifier installs the notifier and the identity the activation URI
+// must carry.
+//
+// An explicit setter rather than a NewModel parameter, matching SetRecentCWDs:
+// roughly 46 tests build a Model directly, and threading a platform-dependent
+// value through the constructor would make every one of them care about it.
+//
+// opts is passed in rather than derived from m.devMode — that field is
+// QUIL_HOME != "", which is true for a prod binary under a custom QUIL_HOME
+// too, and would then name the dev AUMID that `quil notify setup` never wrote.
+// Called even when n is nil, so opts is always populated: the Settings row
+// reports registration state, which it cannot look up without the variant.
+func (m *Model) SetDesktopNotifier(n desktopNotifier, opts notify.Options, pid int) {
+	m.notifier = n
+	m.notifyOpts = opts
+	m.notifyPID = pid
+}
+
+// desktopNotifyState describes what the Settings row should say.
+//
+// A separate type rather than a bool because with `enabled` defaulting true,
+// "on but not registered" is the DEFAULT state on a fresh Windows install
+// rather than an edge case — and rendering that as a plain "on" would claim
+// toasts are working when no toast can be displayed at all. Same rule the
+// Sidebar width setter states: never show a value the system is not using.
+type desktopNotifyState int
+
+const (
+	desktopOff desktopNotifyState = iota
+	desktopOn
+	desktopNeedsSetup
+	desktopUnsupported
+)
+
+func (s desktopNotifyState) label() string {
+	switch s {
+	case desktopOn:
+		return "on"
+	case desktopNeedsSetup:
+		return "on (run notify setup)"
+	case desktopUnsupported:
+		return "unsupported"
+	default:
+		return "off"
+	}
+}
+
+// desktopState resolves what the row shows.
+//
+// Order matters: disabled outranks everything, because a user who turned it off
+// does not need to be told about registration. Unsupported outranks
+// needs-setup for the same reason — there is nothing to set up.
+//
+// Registration is read from whether a notifier was INSTALLED, never by probing
+// the filesystem and registry here. This function is reached from
+// settingsFields()[].get, which renderSettingsDialog calls for every row on
+// every frame — so a probe would run os.Stat + two registry reads per frame,
+// hundreds per second while a pane streams output. Worse, on a domain-joined
+// machine with folder redirection %APPDATA% is a UNC path, so an unreachable
+// share would freeze the whole TUI behind an SMB timeout on the Update
+// goroutine — the exact class remote-dialogs.md builds maxBlockingFSCalls for.
+//
+// notify.New returns ErrNotRegistered when the artifacts are absent, so a
+// non-nil notifier IS the registration answer, already resolved once at launch.
+// The cost is that running `quil notify setup` from another window does not
+// update this row until relaunch — which is honest rather than merely
+// convenient: this process genuinely has no notifier until then.
+func (m *Model) desktopState() desktopNotifyState {
+	if !m.cfg.Notification.Desktop.Enabled {
+		return desktopOff
+	}
+	if runtime.GOOS != "windows" {
+		return desktopUnsupported
+	}
+	if m.notifier == nil {
+		return desktopNeedsSetup
+	}
+	return desktopOn
+}
+
+// raiseAttentionToast fires a desktop toast on a RISING attention edge.
+//
+// Called from the single derivation point in applyWorkTransition, deriving the
+// edge from the before/after pair rather than hooking each write of
+// blockedSince and unseen. There are three such writes today (workstate.go
+// lines 350, 384 and 421); a fourth added later would silently emit nothing if
+// this were wired per write site. The spinner beside it already works this way
+// for the same reason.
+func (m *Model) raiseAttentionToast(pane *PaneModel, proj *ProjectModel, wasBlocked, wasUnseen bool) {
+	// Read from m.cfg, never from a cached copy — see the Model field comment.
+	// This is also what makes the F1 -> Settings toggle take effect immediately.
+	cfg := m.cfg.Notification.Desktop
+	if m.notifier == nil || !cfg.Enabled || pane == nil || proj == nil {
+		return
+	}
+	// Muting is checked in emitToast, which BOTH callers go through — it was
+	// checked here as well, silently, so the "suppressed: muted" line emitToast
+	// promises for every suppression path only ever appeared for the deferred
+	// sweep. A rising edge on a muted pane logged nothing at all.
+	if m.userIsWatching(pane.ID) {
+		// focusEverReported is named here because this is the one suppression
+		// whose premise can be silently WRONG. termFocused starts true so a
+		// terminal that does not implement DEC 1004 fails quiet rather than
+		// toasting at someone staring at the screen — but that same default
+		// makes "the user is watching" unfalsifiable on such a terminal, and
+		// the symptom is no toasts at all with nothing to point at. Recording
+		// it is what the field is for; it had been written and never read.
+		logger.Debug("notify: suppressed for pane %s: it is the pane on screen (focus ever reported: %v)",
+			pane.ID, m.focusEverReported)
+		return
+	}
+
+	nowBlocked := !pane.blockedSince.IsZero()
+	var kind toastKind
+	switch {
+	case cfg.Blocked && nowBlocked && !wasBlocked:
+		kind = toastBlocked
+	case cfg.Done && pane.unseen && !wasUnseen:
+		kind = toastDone
+	default:
+		return
+	}
+	m.emitToast(pane, proj, kind)
+}
+
+// userIsWatching reports whether the user is demonstrably looking at this pane
+// right now. It is the single definition of "you saw it" for the whole client:
+// the toast suppression, the `unseen` mark set on a completed turn
+// (applyWorkTransition) and the acknowledgement that clears it (ackFocusedPane)
+// all read it, so they cannot disagree about what the user witnessed.
+//
+// Watching means BOTH halves: the terminal window has focus AND the pane is the
+// active pane of the active tab of the active project. Anything else — another
+// tab, another project, another application — is a pane the user cannot see,
+// and those are exactly the ones worth a toast. Quil's whole premise is agents
+// running in projects you are not currently looking at.
+//
+// The two halves were separated once and it broke the feature in the case that
+// matters most. `unseen` was computed from the on-screen test ALONE, so a turn
+// finishing while the terminal sat behind a browser counted as seen — and since
+// the Done toast fires on the RISING edge of `unseen`, the commonest sequence
+// there is (ask the agent something, alt-tab away, wait) produced no toast at
+// all. It only ever worked if the user also happened to switch pane first.
+// Reported twice from real use before the cause was found; the tests missed it
+// because every one of them moved ActivePane away, which is the case that
+// already worked. Anything deciding whether the user saw something must call
+// THIS, never one half of it.
+//
+// An earlier version of the toast gate went the other way and keyed on the
+// terminal being unfocused alone, which made an agent parking in project B
+// while you work in project A produce nothing. Both failures are the same
+// mistake: one signal standing in for a two-part question.
+//
+// There is no config knob to widen this back to "the whole terminal must be
+// unfocused" — see the note where require_blur used to live in
+// config.DesktopConfig for why that key was removed rather than re-defaulted.
+func (m *Model) userIsWatching(paneID string) bool {
+	if !m.termFocused {
+		return false // the whole app is in the background
+	}
+	return m.paneOnScreenFocused(paneID)
+}
+
+// paneOnScreenFocused reports whether this pane is the one the user is
+// actually looking at right now.
+//
+// Same three-part test applyWorkTransition uses to decide whether a completed
+// turn counts as `unseen`, so the toast and the sidebar cannot disagree about
+// what "you saw it" means.
+func (m *Model) paneOnScreenFocused(paneID string) bool {
+	pane, proj, tabIdx := m.findPaneAndTab(paneID)
+	if pane == nil || proj == nil || proj != m.cur() {
+		return false
+	}
+	if tabIdx != proj.activeTab || tabIdx >= len(proj.tabs) {
+		return false
+	}
+	return proj.tabs[tabIdx].ActivePane == paneID
+}
+
+// focusedPaneID is the pane the user is looking at, or "" when the terminal is
+// in the background. Used only to notice that it changed.
+func (m *Model) focusedPaneID() string {
+	if !m.termFocused {
+		return ""
+	}
+	tab := m.activeTabModel()
+	if tab == nil {
+		return ""
+	}
+	return tab.ActivePane
+}
+
+// raiseDeferredToasts fires for panes that ALREADY need attention, at the
+// moment the user stops looking at them.
+//
+// Without this the feature only works when the user happens to be away at the
+// exact instant an agent parks. The common real sequence is the opposite: you
+// watch the agent finish, then leave — and because the rising edge fired while
+// you were focused, it was suppressed and never comes back. Observed directly:
+// Stop at 21:32:54 while the pane was focused, user leaves, agent idle-waiting
+// at 21:33:54, no toast ever. "Notify me when I'm away" has to mean when I
+// LEAVE, not only if I was already gone.
+//
+// Deliberately state-based rather than edge-based: it asks what needs attention
+// NOW. outstandingToasts skips anything already showing, and the per-pane
+// cooldown stops alt-tabbing from producing a burst per switch.
+func (m *Model) raiseDeferredToasts() {
+	cfg := m.cfg.Notification.Desktop
+	if m.notifier == nil || !cfg.Enabled {
+		return
+	}
+	for _, proj := range m.projects {
+		for _, tab := range proj.tabs {
+			if tab.Root == nil {
+				continue
+			}
+			for _, pane := range tab.Leaves() {
+				if _, showing := m.outstandingToasts[pane.ID]; showing {
+					continue
+				}
+				if m.userIsWatching(pane.ID) {
+					continue
+				}
+				switch {
+				case cfg.Blocked && !pane.blockedSince.IsZero():
+					m.emitToast(pane, proj, toastBlocked)
+				case cfg.Done && pane.unseen:
+					m.emitToast(pane, proj, toastDone)
+				}
+			}
+		}
+	}
+}
+
+// emitToast is the single place a toast is built, rate-limited and sent.
+//
+// Shared by the rising-edge path and the on-blur sweep so the two cannot
+// disagree about muting, the cooldown, sanitising, or what gets recorded for
+// withdrawal. It does NOT check termFocused: the edge path checks it before
+// deciding, and the blur path is by definition unfocused.
+// Every suppression path logs its reason at debug. That is not noise: a
+// suppressed toast produces no error, no event and no visible effect, so
+// "nothing happened" was previously indistinguishable from a bug — diagnosing
+// it meant correlating daemon hook timestamps by hand. One line per decision
+// turns the next report into a log grep.
+func (m *Model) emitToast(pane *PaneModel, proj *ProjectModel, kind toastKind) {
+	if m.notifier == nil || pane == nil || proj == nil {
+		return
+	}
+	// A muted pane is muted everywhere. The sidebar already honours this and a
+	// toast is louder than a sidebar row.
+	if pane.Muted {
+		logger.Debug("notify: suppressed for pane %s: muted", pane.ID)
+		return
+	}
+
+	// The pane id is validated on the way OUT as well as the way in.
+	//
+	// It becomes the toast's Tag, which WinRT bounds at 64 characters and
+	// rejects outright when malformed — and pane ids arrive off the wire in
+	// workspace_state, so under --remote they are chosen by a daemon the user
+	// may not control. A rejected Tag fails the whole Show, and the failure is
+	// logged at debug and swallowed, so one hostile or simply buggy id turns
+	// off every desktop notification for the session. For a feature whose
+	// purpose is telling you an agent is blocked, that is the worst possible
+	// silent failure.
+	//
+	// The asymmetry is what makes this easy to miss: ValidPaneID is applied
+	// three times on the inbound click path, each with a comment explaining
+	// why the previous one is not enough, and was applied zero times here.
+	if !notify.ValidPaneID(pane.ID) {
+		logger.Debug("notify: suppressed for pane %q: not a well-formed pane id", pane.ID)
+		return
+	}
+
+	headline := glyphDone + " Turn finished"
+	if kind == toastBlocked {
+		headline = glyphBlocked + " Waiting for your input"
+	}
+
+	now := time.Now()
+	cfg := m.cfg.Notification.Desktop
+	if since := now.Sub(pane.lastToastAt); !pane.lastToastAt.IsZero() && since < cfg.CooldownDuration() {
+		logger.Debug("notify: suppressed for pane %s: cooldown (%v since last, need %v)",
+			pane.ID, since.Truncate(time.Millisecond), cfg.CooldownDuration())
+		return
+	}
+	title := m.toastTitle(pane, proj)
+	body := headline
+	if kind == toastBlocked && pane.blockedReason != "" {
+		body = headline + " (" + sanitizeRemoteText(pane.blockedReason) + ")"
+	}
+
+	n := notify.Notification{
+		Title:  title,
+		Body:   body,
+		Tag:    pane.ID,
+		Launch: notify.BuildActivateURI(m.notifyOpts.Scheme, m.notifyPID, pane.ID),
+	}
+	if err := m.notifier.Notify(n); err != nil {
+		// Logged, never retried and never surfaced. The sidebar event has
+		// already landed, so the user is not missing the information — and a
+		// retried toast is worse than a missing one.
+		//
+		// Returning BEFORE recording it: a toast that was never queued has
+		// nothing to withdraw, and recording it anyway would have the sweep
+		// later issue a pointless Withdraw for a tag Action Center never saw.
+		logger.Debug("notify: toast failed for pane %s: %v", pane.ID, err)
+		return
+	}
+
+	// The cooldown starts when a toast is actually QUEUED, not when one is
+	// attempted. Stamping before the send meant a dropped queue entry — the one
+	// case where the user was told nothing — also silenced that pane for a full
+	// cooldown, turning one lost toast into several.
+	pane.lastToastAt = now
+
+	// Recorded WITH its kind, not as a bare presence marker. The sweep has to
+	// know which condition raised this toast — see sweepOutstandingToasts.
+	if m.outstandingToasts == nil {
+		m.outstandingToasts = make(map[string]toastKind, 1)
+	}
+	m.outstandingToasts[pane.ID] = kind
+	logger.Debug("notify: raised for pane %s (%s): %q", pane.ID, headline, title)
+}
+
+// toastTitle names WHERE the pane is, in the order the user navigates: project,
+// then tab, then pane.
+//
+// The tab was missing at first and asked for immediately, which makes sense
+// once you look at what the title is FOR — the toast's job is to tell you where
+// to go, and with several tabs per project "quil · claude-code" names a
+// destination the user still has to hunt for. It is also the segment most
+// likely to be the distinguishing one: panes in different tabs routinely share
+// a name, because the name comes from the plugin.
+//
+// Adjacent duplicates collapse rather than repeat. A tab holding one pane very
+// often takes that pane's name, and "quil · ai-pane · ai-pane" reads as a bug.
+// Empty segments drop out for the same reason — an unnamed pane must not leave
+// a trailing separator.
+//
+// Sanitised HERE rather than inside internal/notify, because this package's
+// standing rule is that remote text is cleaned at RENDER and never in state — a
+// project name round-trips back to the daemon on rename, so stripping it in
+// state would rewrite a name the user never edited. The toast is one more
+// render surface. internal/notify still escapes and bounds what it is handed;
+// the two passes cover different threats.
+func (m *Model) toastTitle(pane *PaneModel, proj *ProjectModel) string {
+	// The owning project is re-resolved rather than trusting the caller's, so
+	// the tab index and the tabs it indexes come from the same walk. Indexing
+	// the passed project with an index found in another would be a silent
+	// mismatch rather than an error.
+	var tabName string
+	if owner, idx := m.ownerTabOfPane(pane.ID); owner != nil {
+		tabName = owner.tabs[idx].Name
+	}
+
+	var out string
+	var last string
+	for _, seg := range []string{proj.Name, tabName, pane.Name} {
+		seg = sanitizeRemoteText(seg)
+		if seg == "" || seg == last {
+			continue
+		}
+		if out != "" {
+			out += " · "
+		}
+		out += seg
+		last = seg
+	}
+	return out
+}
+
+// ownerTabOfPane returns the project owning a pane and the index of the tab
+// holding it, or (nil, -1). A thin wrapper over findPaneAndTab that drops the
+// pane, so a caller wanting only the location cannot accidentally index one
+// project's tabs with another's index.
+func (m *Model) ownerTabOfPane(paneID string) (*ProjectModel, int) {
+	_, proj, idx := m.findPaneAndTab(paneID)
+	if proj == nil || idx < 0 || idx >= len(proj.tabs) {
+		return nil, -1
+	}
+	return proj, idx
+}
+
+// sweepOutstandingToasts withdraws toasts whose pane no longer needs attention.
+//
+// A sweep rather than a hook on each clear site, because the falling edge has
+// no choke point the way the rising one does. blockedSince and unseen are
+// cleared in at least four places outside applyWorkTransition:
+//
+//   - PaneModel.answerBlockedByInput — the user typed an answer
+//   - Model.ackFocusedPane          — the user focused the pane
+//   - ctxmenu.go's "Clear attention" row
+//   - pane destruction, which has no transition at all
+//
+// The first is both the commonest and the worst for an edge-based design:
+// approving a Bash/Edit/Write prompt fires NO hook (promptToolMatcher covers
+// only AskUserQuestion and ExitPlanMode), so applyWorkTransition is never
+// reached and the toast would stand until the turn's Stop, minutes away.
+//
+// The sweep also covers a fifth clear path added later without anyone
+// remembering this file, which a set of hooks cannot.
+func (m *Model) sweepOutstandingToasts() {
+	// The overwhelmingly common state, and this runs on every Update including
+	// the 100 ms spinner tick — so the empty case must cost nothing.
+	if len(m.outstandingToasts) == 0 || m.notifier == nil {
+		return
+	}
+
+	// ONE pass over the workspace, not one findPaneAndTab per outstanding tag.
+	// That helper walks every project × tab × layout tree, and this runs on
+	// every Update including every paneOutputMsg — so the per-tag form was
+	// O(outstanding × panes) precisely when panes are blocked, i.e. exactly
+	// when other panes are streaming output.
+	live := make(map[string]*PaneModel, len(m.outstandingToasts))
+	for _, proj := range m.projects {
+		for _, tab := range proj.tabs {
+			if tab.Root == nil {
+				continue
+			}
+			for _, pane := range tab.Leaves() {
+				if _, watched := m.outstandingToasts[pane.ID]; watched {
+					live[pane.ID] = pane
+				}
+			}
+		}
+	}
+
+	for paneID, kind := range m.outstandingToasts {
+		// Checked against the condition that RAISED it, never against "any
+		// attention state" — see toastKind.
+		//
+		// A vanished pane cannot clear its own flags, so "gone" withdraws too.
+		//
+		// Looking at the pane also withdraws, and that closes a case the
+		// raising-condition test alone cannot: blockedSince deliberately
+		// SURVIVES focus (ackFocusedPane clears unseen only), while the sidebar
+		// suppresses the ▲ for the pane on screen. So clicking a "Waiting for
+		// your input" toast put the pane in front of the user, took the glyph
+		// off the sidebar row, and left the Action Center entry standing until
+		// they typed — the toast outliving its own click, and the two surfaces
+		// disagreeing about one pane. That is precisely the accumulating lie
+		// Withdraw exists to prevent.
+		if pane := live[paneID]; pane != nil && kind.live(pane) && !m.userIsWatching(paneID) {
+			continue
+		}
+		if err := m.notifier.Withdraw(paneID); err != nil {
+			logger.Debug("notify: withdraw failed for pane %s: %v", paneID, err)
+		}
+		// Deleting during range is spec-legal in Go and is what keeps this a
+		// single pass.
+		delete(m.outstandingToasts, paneID)
+	}
+}

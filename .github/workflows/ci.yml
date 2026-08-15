@@ -58,6 +58,30 @@ jobs:
       - run: go test -tags=integration -race -timeout 300s ./...
       - run: go build ./cmd/quil && go build ./cmd/quild
 
+      # Every step above runs on linux/amd64, so nothing behind
+      # `//go:build windows` is compiled, vetted or analysed — not by go vet,
+      # not by go test, not by CodeQL. internal/notify is mostly Windows COM
+      # interop, registry writes and a named-pipe DACL, i.e. the highest-risk
+      # code in the package sits in exactly the files CI cannot see. This
+      # cross-compiles them so a break is caught here rather than on a user's
+      # machine; no Windows runner needed.
+      #
+      # -unsafeptr=false is a targeted opt-out, not a blanket one: COM hands
+      # back raw addresses that must be converted to pointers, and vet's
+      # unsafeptr check has no way to express "this address is OS-owned and
+      # outside the Go heap". Every other analyser still runs on these files.
+      - name: cross-compile and vet Windows-only sources
+        run: |
+          GOOS=windows go build ./internal/notify/...
+          GOOS=windows go vet -unsafeptr=false ./internal/notify/...
+          # cmd/quil-activate is Windows-only in the same way, and it is the
+          # binary a toast click actually runs — a break here is a click that
+          # does nothing, discovered by a user rather than by CI. The -H
+          # windowsgui link flag is included because it is the reason the
+          # command exists; building without it would prove the wrong thing.
+          GOOS=windows go build -ldflags "-H windowsgui" ./cmd/quil-activate/...
+          GOOS=windows go vet ./cmd/quil-activate/...
+
       - name: shellcheck
         run: shellcheck -S warning scripts/*.sh
 

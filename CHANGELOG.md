@@ -48,6 +48,202 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Shortcuts. Keyboard text selection claims those eight chords midway through
   dispatch, so which side wins depends on the action: the warning names it.
 
+## [1.59.2] - 2026-08-15
+
+### Changed
+- **Panes that produce a lot of output cost the daemon far less CPU.** Every
+  message between the TUI and the daemon was being encoded twice over: the
+  payload was turned into JSON, and then the envelope wrapping it re-scanned
+  that payload from start to finish before putting it on the wire. For terminal
+  output — the one message type that arrives hundreds of times a second per
+  busy pane — that second pass was doing almost all of the work and producing
+  nothing.
+
+  Encoding a frame of pane output is now about 35× faster, and receiving one
+  about 10× faster, with roughly half the memory allocations. In practical
+  terms, a pane streaming output as fast as Quil will batch it used to occupy
+  about half a CPU core just formatting messages; it now takes closer to one
+  percent of one. A build or test run that floods a pane should feel less
+  likely to make the rest of the session stutter, and the effect grows with the
+  number of busy panes.
+
+  Nothing changes on the wire — the bytes are identical to what previous
+  versions sent — so mixed versions of the TUI, the daemon and the MCP bridge
+  keep talking to each other exactly as before.
+
+## [1.59.1] - 2026-08-15
+
+### Fixed
+- **A staged update no longer traps you on the version it staged.** Once a
+  release was downloaded, `F1` → Update offered only to install *that* version,
+  even if a newer one had been published since — so catching up meant applying
+  the intermediate release, restarting, and updating a second time. The row was
+  answering from the daemon's last release check, and that check runs once a
+  day; anything published inside that window was invisible to it.
+
+  Pressing the update row now asks the daemon what is actually the newest
+  release before it does anything. If the staged version is still the newest,
+  it installs straight away and downloads nothing. If a newer one exists, that
+  one is fetched and offered instead, so a single press lands you on the
+  current release. A check that cannot reach GitHub still offers the staged
+  version — it just says on the confirm that it could not be verified as the
+  newest.
+
+  Opening `F1` also asks for a fresh check on the way in (rate-limited, and it
+  never downloads), so the update row's label is current rather than up to a
+  day old.
+
+  The apply confirm now takes `y` rather than `Enter`, matching *Stop daemon*
+  and the remote-upgrade prompt: it can appear on its own once a download
+  finishes, and by then your hands are usually back in a pane. Pressing the row
+  again while a download is still running does nothing but say so, rather than
+  offering to install the older copy and abandoning the download.
+
+  The update row is local-only: with a remote project active it says so instead
+  of acting, because applying swaps this machine's binaries out of this
+  machine's staging directory. The status-bar `↑ ready` marker follows the same
+  rule.
+
+## [1.59.0] - 2026-08-14
+
+### Added
+- **Closing a pane or tab can now delete the worktree Quil made for it.**
+  Worktrees are never removed automatically — that remains the right default —
+  but once a branch is merged the checkout sits on disk with no route to remove
+  it from inside Quil. The close confirm (`Ctrl+W` for a pane, `Alt+W` for a
+  tab) now carries an unticked `Also delete its worktree` row: `space` arms it,
+  and it is off every time the dialog opens, so the destructive half is always
+  something you reached for. Closing a tab lists every worktree it holds under
+  one toggle, since a tab closes as a unit.
+
+  Only a worktree **Quil created** is ever offered, and the offer names the
+  directory Quil created rather than wherever the pane's shell has since
+  wandered — `cd` a worktree pane into a sibling checkout and its own worktree
+  is still what the row describes. A pane you opened in a worktree you made by
+  hand is not Quil's to delete. While the dialog is open it
+  asks what each worktree holds and shows `clean` or
+  `⚠ 3 uncommitted or ignored files will be lost`, so the toggle is armed
+  against a number rather than a guess; if it cannot check, it says so instead
+  of reporting `clean`. **Ignored files are counted** — a `.env` or a `build/`
+  is exactly what a forced removal destroys with nothing to recover it from, so
+  a worktree holding one never reads as clean. All of that goes with the
+  directory — but **the branch is kept**, along with every commit on it, so
+  nothing you committed is lost and `git branch` still lists it. A worktree
+  that still holds a pane in another tab is left where it is.
+
+## [1.58.0] - 2026-08-14
+
+### Added
+- **`Ctrl+T` asks what the new tab should open with.** A new tab always came up
+  holding a shell, so opening one for an agent meant creating the tab, then
+  replacing its pane — every time. It now opens the same picker as `Ctrl+N`,
+  including the setup step, so a new tab can start as Claude Code in a chosen
+  directory, on a chosen kube context, resuming a chosen session, or on a fresh
+  worktree branch. `Esc` on the first screen still gives you a plain terminal
+  tab, so `Ctrl+T` `Esc` is the old behaviour in two keystrokes.
+
+  The tab and its pane are created in one step, so no tab flickers through a
+  shell nobody asked for. A new branch is the exception and deliberately so: the
+  tab opens with a terminal while `git worktree add` runs and the chosen pane
+  replaces it on success, because an agent must not spend those seconds in the
+  main checkout.
+
+## [1.57.1] - 2026-08-14
+
+### Fixed
+- **Releases publish again.** Since v1.56.0 the release pipeline tagged a new
+  version and then failed before publishing anything, so `quil update` and the
+  install script — which read published releases, not tags — kept offering
+  v1.55.2 while the repository claimed two newer versions. The cause was the
+  Windows-only click-handler added alongside desktop notifications: it shares
+  one archive definition with `quil` and `quild`, so that archive holds three
+  binaries on Windows and two elsewhere, and the packaging step rejects an
+  uneven count unless it is told the difference is deliberate. v1.56.0 and
+  v1.57.0 remain tagged without a published release; this version carries
+  their contents.
+
+## [1.57.0] - 2026-08-14
+
+### Added
+- **hunk, a review-first diff viewer, is now a built-in tool.** Reading what an
+  agent just wrote is most of what a Quil workspace produces, and
+  [hunk](https://github.com/modem-dev/hunk) is built for exactly that. Two entry
+  points, mirroring lazygit: **Ctrl+N → Tools → Hunk** opens it as an ordinary
+  pane, with the same git-repo directory step (the enclosing repository plus any
+  one level down, with a Browse… fallback); **Alt+D** toggles a full-tab review
+  of the working tree for the repository resolved from the active pane's
+  directory. Hiding keeps the process running, so re-opening is instant with its
+  UI state intact, and quitting hunk destroys the overlay pane automatically.
+  Offered only when the `hunk` binary is installed — `npm i -g hunkdiff`,
+  `brew install hunk`, or `mise use -g hunk` — and shown greyed with a link to
+  the project when it is not.
+
+  **Alt+G and Alt+D share one overlay slot per tab**: pressing the other tool's
+  key while an overlay is on screen swaps the tools rather than opening a second
+  one, so the outgoing tool's process ends. Each key still hides its own
+  overlay, each is gated on its own binary, and the repository picker now names
+  the tool it is about to open. New keybinding `toggle_hunk`, default `alt+d`
+  (mnemonic: **d**iff) rather than the more obvious `alt+h` — plain `Alt+H` is
+  deliberately left unbound so it reaches the running program, and it is what
+  vim-style setups rebind to pane-left. Set `toggle_hunk = "alt+h"` in
+  `config.toml` if you want it there anyway.
+
+## [1.56.0] - 2026-08-14
+
+### Added
+- **Desktop notifications on Windows.** When an agent parks waiting on you, or
+  finishes a turn while you were away, Windows raises a toast naming the
+  project, tab and pane — and clicking it switches Quil to that exact pane and
+  focuses it, so switching to the terminal lands you where the toast was sending
+  you. (The terminal window is not raised for you: Windows does not let an
+  application take the foreground from a notification click, and highlights the
+  taskbar button instead.) It fires on the same two
+  states the project sidebar already marks (▲ and ✓) and no others, only while
+  you are not looking at that pane — another tab, another project or another
+  application all count. Six agents finishing together give six separately
+  clickable toasts rather than a storm. Answering a prompt withdraws its toast,
+  so Action Center never goes on claiming attention you have already given.
+
+  Registration is explicit and reversible: `quil notify setup` writes a Start
+  Menu shortcut and a `quil://` handler, prints exactly what it wrote, and
+  `quil notify setup --remove` undoes both. Nothing is written as a side effect
+  of a config flag. `quil notify status` reports where you stand and
+  `quil notify test` sends one labelled canary. Toggle it live at F1 → Settings
+  or under `[notification.desktop]`; the Settings row reports whether
+  registration is actually in place rather than echoing the flag.
+
+  Clicking a toast can only move your cursor — the handler validates a pane id
+  and forwards it over a per-PID named pipe, with no path to spawning a pane,
+  sending input or running a command. Windows only: no transport on macOS or
+  Linux can carry a click back to a specific pane.
+
+### Fixed
+- **A turn that finished while Quil was behind another window no longer counts
+  as seen.** Whether you saw a completed turn was decided from the pane's
+  position on screen alone, so a pane you left on screen when you switched to
+  your browser was treated as watched — it kept no unseen mark, and the desktop
+  toast that fires when that mark is set never fired either. Asking an agent
+  something and switching away, the commonest sequence there is, was exactly the
+  case that produced nothing. Being seen now requires the window to have focus
+  as well, and returning to it still acknowledges the pane you land on.
+- **A pane raised from outside the pane area now takes focus properly.** Jumping
+  to a pane set it as active for keyboard input but never set its focus flag, so
+  it arrived with no cursor drawn and the pane you came from still wearing the
+  focused border — it looked like you had to click the pane to "really" get
+  there. Affected every jump that crosses tabs: MCP `set_active_pane`, clicking
+  a notification in the sidebar, pane-history back-navigation, and clicking a
+  desktop toast.
+
+## [1.55.2] - 2026-08-14
+
+### Changed
+- **The sidebar's working indicator now spins.** A pane mid-turn showed a still
+  `◐` in the sidebar while the tab bar and the pane's own border animated a
+  spinner for the same fact — so the one place that lists every pane at once
+  was the one that looked stopped. Both sidebar levels now cycle that same
+  spinner, in step with the tab and the border: the pane's own row, and the
+  count rolled up onto its project row.
+
 ## [1.55.1] - 2026-08-13
 
 ### Fixed

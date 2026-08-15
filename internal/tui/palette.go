@@ -57,6 +57,7 @@ const (
 	palActEager
 	palActHistory
 	palActLazygit
+	palActHunk
 	palActRestartPane
 	palActClosePane
 	palActNewTab
@@ -288,7 +289,7 @@ func (m *Model) buildPaletteCommands() []paletteCommand {
 	header := func(label string) { cmds = append(cmds, paletteCommand{header: true, label: label}) }
 
 	// Per-active-pane gates + toggle labels.
-	historyOK, lazygitOK := false, false
+	historyOK, lazygitOK, hunkOK := false, false, false
 	muteLabel, eagerLabel := "Mute notifications", "Enable eager restore"
 	if tab := m.activeTabModel(); tab != nil {
 		if p := tab.ActivePaneModel(); p != nil {
@@ -305,9 +306,14 @@ func (m *Model) buildPaletteCommands() []paletteCommand {
 			}
 		}
 	}
+	// Each overlay tool is gated on its OWN binary: they share a tab's overlay
+	// slot, not an installation.
 	if m.pluginRegistry != nil {
-		if pl := m.pluginRegistry.Get("lazygit"); pl != nil {
+		if pl := m.pluginRegistry.Get(overlayPluginLazygit); pl != nil {
 			lazygitOK = pl.Available
+		}
+		if pl := m.pluginRegistry.Get(overlayPluginHunk); pl != nil {
+			hunkOK = pl.Available
 		}
 	}
 
@@ -369,18 +375,18 @@ func (m *Model) buildPaletteCommands() []paletteCommand {
 			keywords: []string{"tab", "go to", "goto", "switch"},
 		})
 	}
-	// Greyed while there IS an active project and it is unreachable: CreateTab
-	// would be accepted here and dropped by Router.Send on its way to a
-	// daemon with no connection, which reads as a broken keybinding. A NIL
-	// active project (before the first workspace_state broadcast) is NOT the
-	// same thing — createTab's unstamped send still resolves through
-	// Router.Send's sole-conn startup fallback, so it must stay enabled. See
-	// the matching comment on the "tab.new" case in model.go.
+	// Greyed while there IS an active project and it is unreachable: the create
+	// would be accepted here and dropped by Router.Send on its way to a daemon
+	// with no connection, which reads as a broken keybinding. A NIL active
+	// project (before the first workspace_state broadcast) is NOT the same
+	// thing — the send still resolves through Router.Send's sole-conn startup
+	// fallback, so it must stay enabled. Mirrors handleNewTab's own refusal in
+	// model.go; this row is the greyed-out form of the same rule.
 	newTabEnabled := true
 	if p := m.cur(); p != nil {
-		// onlyOfflineProjects mirrors the "tab.new" guard in model.go: every
+		// onlyOfflineProjects mirrors handleNewTab's guard in model.go: every
 		// row seeded before the first broadcast stands in for a destination
-		// that is not the one createTab's unstamped send actually resolves to.
+		// that is not the one the send actually resolves to.
 		newTabEnabled = m.projectActionable(p) || m.onlyOfflineProjects()
 	}
 	cmds = append(cmds,
@@ -492,6 +498,7 @@ func (m *Model) buildPaletteCommands() []paletteCommand {
 		paletteCommand{action: palActEager, enabled: true, label: eagerLabel, detail: m.keymap.Display("pane.toggle_eager"), keywords: []string{"eager", "restore", "restart"}},
 		paletteCommand{action: palActHistory, enabled: historyOK, label: "Input history", detail: m.keymap.Display("pane.command_history"), keywords: []string{"history", "prompts"}},
 		paletteCommand{action: palActLazygit, enabled: lazygitOK, label: "Open lazygit", detail: m.keymap.Display("pane.toggle_lazygit"), keywords: []string{"git", "lazygit"}},
+		paletteCommand{action: palActHunk, enabled: hunkOK, label: "Open hunk", detail: m.keymap.Display("pane.toggle_hunk"), keywords: []string{"git", "hunk", "diff", "review"}},
 		paletteCommand{action: palActNewPane, enabled: true, label: "New pane…", detail: "ctrl+n", keywords: []string{"create", "plugin", "claude", "terminal"}},
 		paletteCommand{action: palActRestartPane, enabled: true, label: "Restart pane…", detail: m.keymap.Display("pane.restart"), keywords: []string{"restart", "respawn"}},
 		paletteCommand{action: palActClosePane, enabled: true, label: "Close pane…", detail: m.keymap.Display("pane.close"), keywords: []string{"close", "kill"}},
@@ -1060,6 +1067,8 @@ func (m Model) executePaletteCommand(c paletteCommand) (tea.Model, tea.Cmd) {
 		return m.openHistoryForActivePane()
 	case palActLazygit:
 		return m, m.handleToggleLazygit()
+	case palActHunk:
+		return m, m.handleToggleHunk()
 	case palActRestartPane:
 		return m.openRestartPaneConfirm()
 	case palActClosePane:
@@ -1067,7 +1076,7 @@ func (m Model) executePaletteCommand(c paletteCommand) (tea.Model, tea.Cmd) {
 
 	// --- Tab ---------------------------------------------------------------
 	case palActNewTab:
-		return m, m.createTab()
+		return m.handleNewTab()
 	case palActCloseTab:
 		return m.openCloseTabConfirm()
 	case palActRenameTab:
@@ -1096,9 +1105,7 @@ func (m Model) executePaletteCommand(c paletteCommand) (tea.Model, tea.Cmd) {
 		m = m.openMemoryDialog()
 		return m, m.refreshMemory()
 	case palActAbout:
-		m.dialog = dialogAbout
-		m.dialogCursor = 0
-		return m, tea.ClearScreen
+		return m.openAboutDialog()
 	case palActClientLog:
 		return m.openLogViewer("Client log", filepath.Join(config.QuilDir(), "quil.log"))
 	case palActDaemonLog:

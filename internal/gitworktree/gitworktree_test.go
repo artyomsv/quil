@@ -487,3 +487,63 @@ func TestAdd_PropagatesFailure(t *testing.T) {
 		t.Fatal("Add should return an error when git fails")
 	}
 }
+
+// The path reaches git in OPTION position, and it is a value this daemon does
+// not fully control: a pane's recorded worktree path comes from Quil, but the
+// same helper is reachable with any path a caller holds. `--` terminates option
+// parsing so a value that begins with a dash can never be read as a flag.
+//
+// Current git happens to reject `--force --x` on its own, so this is hardening
+// rather than a live hole — the same reasoning that keeps usableStartPoint's
+// dash guard around a value that cannot begin with one today.
+func TestRemoveWorktree_TerminatesOptionsBeforeThePath(t *testing.T) {
+	calls := stubGit(t, "", nil)
+
+	if err := RemoveWorktree(context.Background(), "/repo", "/w/feat-a"); err != nil {
+		t.Fatalf("RemoveWorktree: %v", err)
+	}
+
+	if len(*calls) != 1 {
+		t.Fatalf("git calls = %v, want one", *calls)
+	}
+	args := (*calls)[0]
+	last := args[len(args)-1]
+	if last != "/w/feat-a" {
+		t.Fatalf("last arg = %q, want the path", last)
+	}
+	if before := args[len(args)-2]; before != "--" {
+		t.Errorf("argv = %v; want %q immediately before the path", args, "--")
+	}
+}
+
+// The status call must not take the index lock: it runs against a worktree the
+// user may be working in at that moment, and a plain `git status` refreshes and
+// REWRITES the index, contending with their own git. Quil is asking a question
+// here, not doing work on their behalf.
+func TestStatus_DoesNotTakeOptionalLocks(t *testing.T) {
+	calls := stubGit(t, "", nil)
+
+	if _, err := Status(context.Background(), "/w/feat-a"); err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+
+	if len(*calls) != 1 {
+		t.Fatalf("git calls = %v, want one", *calls)
+	}
+	args := (*calls)[0]
+	var sawNoOptionalLocks, sawIgnored bool
+	for _, a := range args {
+		switch a {
+		case "--no-optional-locks":
+			sawNoOptionalLocks = true
+		case "--ignored":
+			sawIgnored = true
+		}
+	}
+	if !sawNoOptionalLocks {
+		t.Errorf("argv = %v, want --no-optional-locks", args)
+	}
+	if !sawIgnored {
+		t.Errorf("argv = %v, want --ignored — an ignored .env is destroyed by the removal and must be counted", args)
+	}
+}

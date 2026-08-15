@@ -46,6 +46,21 @@ type Manifest struct {
 	StagedAt string            `json:"staged_at"` // RFC3339
 }
 
+// SafeVersion rejects a release version that cannot be used as a single path
+// component under staged/.
+//
+// A hostile tag ("v1.0.0-../../evil") survives semver parsing — version.Parsed
+// strips the suffix after "-" — yet would escape the staging root once joined.
+// Exported because Stage is no longer the only consumer of a version string
+// that came off the wire: the daemon also persists it into state.json and
+// broadcasts it as display text on a path that never reaches Stage at all.
+func SafeVersion(v string) error {
+	if v == "" || v != filepath.Base(v) || strings.ContainsAny(v, `/\`) || strings.Contains(v, "..") {
+		return fmt.Errorf("release version %q is not a safe version string", v)
+	}
+	return nil
+}
+
 // Stager downloads, verifies, and extracts a release into
 // <Root>/staged/<version>/.
 type Stager struct {
@@ -68,14 +83,8 @@ func (s *Stager) httpClient() *http.Client {
 // writes manifest.json last. Any earlier failure leaves no manifest — the
 // next check re-stages from scratch.
 func (s *Stager) Stage(ctx context.Context, rel *Release) error {
-	// The version becomes a directory name under staged/ via filepath.Join.
-	// A hostile tag ("v1.0.0-../../evil") survives semver parsing (the
-	// suffix after "-" is stripped by version.Parsed) yet would escape the
-	// staging root once joined. Reject anything that isn't a plain single
-	// path component before any network I/O happens.
-	if v := rel.Version(); v == "" || v != filepath.Base(v) ||
-		strings.ContainsAny(v, `/\`) || strings.Contains(v, "..") {
-		return fmt.Errorf("release tag %q is not a safe version string", rel.TagName)
+	if err := SafeVersion(rel.Version()); err != nil {
+		return err
 	}
 
 	archive, sums, err := FindAssets(rel, s.GOOS, s.GOARCH)

@@ -27,9 +27,10 @@ Client-daemon model:
 - `internal/persist/` — Atomic workspace/buffer persistence (JSON snapshots, binary ghost buffers)
 - `internal/shellinit/` — Automatic OSC 7 + OSC 133 shell integration (embedded init scripts, `//go:embed`)
 - `internal/plugin/` — Pane plugin system (registry, built-ins, TOML loading, scraper)
-- `internal/gitworktree/` — git worktree listing + creation (the repository WRITES; kept apart from the read-only `gitinfo`, which a ticker runs)
+- `internal/gitworktree/` — git worktree listing, creation + removal, and the on-demand `git status` count the close dialog warns with (the repository WRITES; kept apart from the read-only `gitinfo`, which a ticker runs)
 - `internal/clipboard/` — Platform-native clipboard read/write (Win32 API, pbpaste/pbcopy, xclip/xsel)
 - `internal/keymap/` — Keybinding action registry: canonical chords, the action table with its dispatch `Tier`, and `Build` (config specs → lookup + conflict list). Stdlib only
+- `internal/notify/` — Windows desktop toasts + `quil://` click-to-route activation. Split so every file with logic is platform-neutral (URI codec, toast XML, variant selection) and the `//go:build windows` files hold syscalls only — CI is Linux, so anything behind that tag is never compiled by `dev.sh test`. Raw COM/WinRT interop (no CGo, no new dependency), following `internal/clipboard`'s `NewProc` idiom
 - `internal/tui/` — Bubble Tea model, tabs, panes, layout tree, styles, text selection, notification sidebar
 
 Deep package notes — `internal/transport/`, `internal/pty/`, `internal/ipc/`, `internal/claudehook/`,
@@ -42,7 +43,7 @@ packages, so they cost nothing on unrelated work.
 Go and make are NOT installed locally. Use `scripts/dev.sh` (Docker-based):
 
 ```bash
-./scripts/dev.sh build          # Build all variants: prod, dev, debug (6 binaries)
+./scripts/dev.sh build          # Build all variants: prod, dev, debug (6 binaries) + quil-activate.exe
 ./scripts/dev.sh test           # Run tests
 ./scripts/dev.sh test-race      # Tests with race detector (CGo — handled automatically)
 ./scripts/dev.sh vet            # Lint
@@ -69,6 +70,8 @@ There is deliberately no override flag, for the same reason `refuse_if_binaries_
 | **debug** | `quil-debug.exe` | `quild-debug.exe` | Debug logging, connects to production `~/.quil/`, finds `quild-debug` |
 
 Ldflags: `buildDevMode` (auto-sets `QUIL_HOME`), `buildLogLevel` (overrides config log level), `daemonBinary` (daemon binary name for `findDaemonBinary`). Dev variant is self-contained — just run `./quil-dev.exe`, no flags needed.
+
+**`quil-activate.exe` is a seventh binary and deliberately variant-agnostic** — one copy serves prod, dev and debug, because the two things it cannot derive (the URI scheme and `QUIL_HOME`) are written INTO the registry command by `quil notify setup`. It is linked `-H windowsgui`: Windows gives a console binary a console WINDOW for every toast click, which appears in front of the user, takes the foreground, and is destroyed when the handler exits — leaving focus on a window that no longer exists. `FreeConsole` is not sufficient, because the console is created during process startup before any Go code runs. `quil notify setup` registers this binary when it is present beside the quil binary and falls back to `quil activate` when it is absent, so an in-place upgrade cannot leave the registry naming a file that does not exist.
 
 Go module cache is persisted in a Docker volume (`quil-gomod`) for fast repeated builds.
 
@@ -127,9 +130,9 @@ package-specific moved to `.claude/rules/*.md`, each gated by a `paths:` glob so
 | `daemon-lifecycle.md` | `internal/daemon/`, `internal/ipc/`, `internal/persist/`, `internal/ringbuf/`, `cmd/quild/` | IPC queues, startup guards, readiness wait, restart/shutdown, restore, snapshots, ghost buffers, logging |
 | `hooks-and-sessions.md` | `internal/claudehook/`, `opencodehook/`, `hookevents/`, `claudesessions/`, `tui/workstate.go`, `modelinfo.go` | hook producers, session-id rotation, hook-events pipeline, work-in-progress indicators |
 | `windows-pty.md` | `internal/pty/`, any `*_windows.go`, `tui/consolefix*.go` | ConPTY + bundled OpenConsole, console-mode restore, window geometry, spawn-size healing |
-| `plugins.md` | `internal/plugin/`, `gitdiscover/`, `kubediscover/`, `defaults/*.toml`, `tui/instances.go`, `overlay.go` | plugin schema + registry, instances, `discover`/`sessions` opt-ins, lazygit/k9s/lazysql |
+| `plugins.md` | `internal/plugin/`, `gitdiscover/`, `kubediscover/`, `defaults/*.toml`, `tui/instances.go`, `overlay.go` | plugin schema + registry, instances, `discover`/`sessions` opt-ins, the shared overlay slot, lazygit/hunk/k9s/lazysql |
 | `auto-update.md` | `internal/update/`, `cmd/quil/update_apply.go`, `daemon/update.go`, `tui/update.go` | update check, staging, rename-aside swap + rollback |
-| `projects.md` | `daemon/project.go`, `daemon/gitcache.go`, `daemon/worktree*.go`, `internal/gitinfo/`, `internal/gitworktree/`, `tui/project*.go`, `tui/worktree_client.go`, `sidebar.go`, `router.go`, `dialdest.go`, `attention.go` | projects above tabs, multi-daemon routing, runtime connect/disconnect, the project form, sidebar layout, git subsystem, worktree creation |
+| `projects.md` | `daemon/project.go`, `daemon/gitcache.go`, `daemon/worktree*.go`, `internal/gitinfo/`, `internal/gitworktree/`, `tui/project*.go`, `tui/worktree_*.go`, `sidebar.go`, `router.go`, `dialdest.go`, `attention.go` | projects above tabs, multi-daemon routing, runtime connect/disconnect, the project form, sidebar layout, git subsystem, worktree creation + close-time removal |
 | `dev-environment.md` | *(always on)* | production-isolation rule — never touch the running production daemon |
 
 **Adding to this file?** Ask: *does this apply when I open a file in a different package?*
@@ -157,6 +160,7 @@ These hold regardless of which file you open. Violating one breaks something.
 - Persistence: `internal/persist/` handles atomic file I/O — `snapshot.go` for workspace JSON (write `.tmp` → rotate to `.bak` → rename), `ghostbuf.go` for per-pane binary buffers. Both use temp+rename for crash safety. Ring buffers (`internal/ringbuf`) are fixed-allocation circular buffers; `Tail(n)` copies only the trailing window (excerpts) and `Gen()` exposes a mutation counter (snapshot change-detection).
 - Output coalescing: `streamPTYOutput()` uses goroutine + 2ms timer to batch rapid PTY output before IPC broadcast, preventing visual tearing with interactive TUI tools
 - Auto-recovery: deleting the last tab auto-creates a new "Shell" tab; deleting the last pane in a tab auto-creates a fresh pane
+- New-tab first pane: `CreateTabPayload.FirstPane *FirstPaneSpec` (omitempty) names the pane a new tab opens with. NIL keeps the historical hardcoded `terminal`, which every non-interactive producer needs — an older client, and the three OTHER daemon sites that mint a tab-plus-pane (`daemon.go` attach bootstrap, `recoverEmptyProject`, `ensureTabNotEmpty`), all recovery invariants that must never block on a prompt. It is a NARROW type, not a `*CreatePanePayload`: that one also carries `TabID` (the daemon owns the id it is minting), `ReplacePaneID` (would destroy an arbitrary pane as a side effect of "create tab") and `Overlay` (a tab whose only pane is a muted overlay is a state `ensureTabNotEmpty` reads as empty and no create path repairs) — any IPC client can set those, so the guarantee is structural, per the `MergeProjectsPayload` precedent. `handleCreateTab` calls `constructPaneAt` (the non-broadcasting split of `createPaneAt`) so the tab and its pane reach clients as ONE frame — `createPaneAt` broadcasts and snapshots itself, so reusing it puts two full workspace-state frames back to back on the 64-slot must-deliver queue per new tab. The CWD fallback is `projectCWD`, NOT `handleCreatePane`'s `defaultCWD` (`resolveRequestedCWD` takes it as a parameter for exactly that reason): a submit that picks no directory would otherwise silently stop opening in the project root, a regression in the projects feature caused from inside the pane feature. A `Worktree` spec opens the tab with a plain TERMINAL and swaps in the requested pane via the ordinary worktree REPLACE path (`createFirstPaneWorktree` → `worktreeAddAndCreate` with `ReplacePaneID`) — creating the tab and adding the worktree first would leave it pane-less for up to `worktreeAddTimeout`, broadcast blank and persisted that way by any snapshot in the window, with nothing to recover it; and spawning the REQUESTED type as the placeholder would start an agent in the main checkout, the isolation failure the worktree exists to prevent
 - Resume strategies: `cwd_only` (terminal), `rerun` (stripe, ssh), `preassign_id` (claude-code), `session_scrape`, `none`. Dispatched in `spawnPane()` with `restoring` flag
 
 ## Dev Mode
@@ -223,7 +227,7 @@ Cached reference repos:
 | M1 | Done | Foundation — daemon, TUI, IPC, PTY, tabs, splits, shell integration, mouse, scrollback, lifecycle |
 | M2 | Done | Persistence — workspace snapshots, ghost buffers, shell respawn, reboot-proof sessions |
 | M3 | Done | Resume engine — `preassign_id`, `session_scrape`, `rerun` strategies |
-| M4 | Done | Plugin system — typed panes, TOML plugins, registry, error handlers, Ctrl+N dialog, 8 built-ins |
+| M4 | Done | Plugin system — typed panes, TOML plugins, registry, error handlers, Ctrl+N dialog, 9 built-ins |
 | M5 | **In progress** | Polish — setup dialog, spatial nav, clipboard image paste, leveled logger, log rotation, lazy restore, IPC backpressure, lazygit, split drag-resize, resume picker. Remaining: JSON transformer, encrypted tokens, OS service install |
 | M6 | Done | Pane focus — Ctrl+E full-screen active pane |
 | M7 | Done | Pane notes — Alt+E editor bound per pane, three save safety nets |
@@ -233,5 +237,6 @@ Cached reference repos:
 | M12 | Done | Notification center — daemon event queue, per-pane mute, sidebar, 3 MCP tools |
 | M13 | Done | Memory reporting — 5s collector, per-pane Go-heap + PTY RSS, dialog + 2 MCP tools |
 | M14 | Done (v1.47.0) | Projects — grouping above tabs, sidebar with agent+git state, multi-daemon router, runtime host connect/disconnect. Deferred to their own plans: MCP project scoping, listening ports |
+| M17 | Partial | Desktop notifications — Windows toasts on the sidebar's attention states, `quil://` click-to-route via the windowless `quil-activate.exe`, `quil notify setup/status/test/--remove`, F1 → Settings toggle. Still open in M17: sound, macOS/Linux (no transport there carries a click back to a pane). **Raising the terminal window on click was built and REMOVED** — clicking a notification hands the foreground to the shell's notification host, which holds it (measured: 5.5 s for one click, >10 s for the next, released on user input rather than on a timer) and refuses every documented way of taking it back. Windows highlights the taskbar button instead. Do not rebuild this without new evidence: `SetForegroundWindow`, `AttachThreadInput` queue borrowing, `SwitchToThisWindow` and Chromium's F22 hotkey injection were each implemented and each verified refused |
 
 Full detail: `docs/roadmap.md` and `docs/roadmap/*.md`.

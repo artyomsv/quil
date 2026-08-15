@@ -1,6 +1,9 @@
 package ipc_test
 
 import (
+	"encoding/binary"
+	"io"
+	"net"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -41,7 +44,7 @@ func TestBroadcast_SlowConnDoesNotBlockFastConn(t *testing.T) {
 	}
 	defer srv.Stop()
 
-	fast, err := ipc.NewClient(sockPath)
+	fast, err := net.Dial("unix", sockPath)
 	if err != nil {
 		t.Fatalf("fast client connect: %v", err)
 	}
@@ -60,13 +63,31 @@ func TestBroadcast_SlowConnDoesNotBlockFastConn(t *testing.T) {
 	// closes the slow conn. Meanwhile the fast client must keep receiving.
 
 	const broadcasts = 200
-	const fastReceives = 50
 
+	// The fast client drains RAW frames — framing only, no JSON decode.
+	//
+	// It used to call ipc.Client.Receive, whose envelope unmarshal cost ~320 us
+	// on this test's escape-heavy 24 KiB frames. That was never "fast"; it was
+	// merely faster than the encoder, which used to spend ~372 us per frame
+	// re-scanning an already-encoded payload. When EncodeFrame stopped doing
+	// that (2026-08) the producer outran this reader ~13x, so the "fast" client
+	// filled its own 64-slot critical queue and was closed by the very overflow
+	// policy this test exercises on the slow conn — a deterministic failure
+	// asserting the opposite of what the test is named for.
+	//
+	// The encoder no longer supplies incidental backpressure, and this test must
+	// not depend on either side's incidental speed. "Fast" means "drains its
+	// socket", which is the layer the broadcast fan-out actually couples to.
 	gotFast := make(chan int, broadcasts)
 	go func() {
 		count := 0
+		var hdr [4]byte
 		for {
-			if _, err := fast.Receive(); err != nil {
+			if _, err := io.ReadFull(fast, hdr[:]); err != nil {
+				close(gotFast)
+				return
+			}
+			if _, err := io.CopyN(io.Discard, fast, int64(binary.BigEndian.Uint32(hdr[:]))); err != nil {
 				close(gotFast)
 				return
 			}
@@ -79,27 +100,45 @@ func TestBroadcast_SlowConnDoesNotBlockFastConn(t *testing.T) {
 	// per-conn send queue. Pure echo of an arbitrary string.
 	payload := map[string]string{"data": string(make([]byte, 4000))}
 
-	broadcastStart := time.Now()
+	// Paced, and the pacing is load-bearing rather than cosmetic. The critical
+	// queue has NO drop path, so its only slack is 64 slots plus one ~200 KiB
+	// socket buffer — about 72 of these frames. Unpaced, the encoder empties
+	// 200 of them in ~5 ms and the remaining ~3 MB must be drained
+	// concurrently or the FAST conn overflows its own queue and the server
+	// closes it, which is this test's failure message verbatim. That was a
+	// real low-rate flake on the non-race run (race instrumentation slows the
+	// producer enough to hide it). The sibling test below has always paced for
+	// the same reason, which is why it never flaked.
+	//
+	// Only the Broadcast calls are timed, so the "> 5 s means the fan-out is
+	// wedged" assertion still measures what it always did.
+	var broadcastDur time.Duration
 	for i := 0; i < broadcasts; i++ {
+		if i > 0 && i%10 == 0 {
+			time.Sleep(200 * time.Microsecond)
+		}
 		msg, _ := ipc.NewMessage(ipc.MsgStateUpdate, payload)
+		start := time.Now()
 		srv.Broadcast(msg)
+		broadcastDur += time.Since(start)
 	}
-	broadcastDur := time.Since(broadcastStart)
 
 	// All Broadcast calls must return promptly even though one peer is
 	// stalled. The real failure mode this guards against is a *wedged* fan-out:
 	// a blocked Broadcast would hang on the slow conn until the 30s write
 	// deadline (or forever). The actual healthy cost is microseconds; the
 	// generous 5s ceiling tolerates `-race` instrumentation + loaded-CI jitter
-	// (each broadcast marshals+clones a 4 KiB frame and does atomic-guarded
-	// dual-queue enqueues, all heavily instrumented under the race detector)
+	// (each broadcast encodes one frame — shared read-only across conns, never
+	// cloned — and does atomic-guarded dual-queue enqueues, all heavily
+	// instrumented under the race detector)
 	// while still being far below the seconds-to-30s signature of a real wedge.
 	if broadcastDur > 5*time.Second {
 		t.Errorf("Broadcast loop blocked: %d broadcasts took %v (want < 5s) — slow client wedged the fan-out", broadcasts, broadcastDur)
 	}
 
-	// Fast client must drain enough messages to demonstrate it's still being
-	// served. Healthy peers never stall.
+	// A genuinely draining peer must receive EVERY critical frame — the
+	// must-deliver queue has no drop path for a conn that keeps up. The old
+	// bar was 50 of 200, which tolerated 150 lost frames.
 	timeout := time.After(3 * time.Second)
 	for {
 		select {
@@ -107,7 +146,7 @@ func TestBroadcast_SlowConnDoesNotBlockFastConn(t *testing.T) {
 			if !ok {
 				t.Fatal("fast client got an error before reaching the expected message count")
 			}
-			if n >= fastReceives {
+			if n >= broadcasts {
 				return // success
 			}
 		case <-timeout:
@@ -130,7 +169,13 @@ func TestBroadcast_ContinuesAfterSlowConnDisconnects(t *testing.T) {
 	}
 	defer srv.Stop()
 
-	fast, err := ipc.NewClient(sockPath)
+	// Raw frame drain, for the same reason as
+	// TestBroadcast_SlowConnDoesNotBlockFastConn: a JSON-decoding reader is not
+	// a fast reader, and this test's 1 ms pacing was only ever ahead of it
+	// because the encoder was slow too. Under -race the margin was ~30%, so
+	// once EncodeFrame stopped re-scanning payloads BOTH conns overflowed and
+	// waitForConnCount below saw 0 instead of 1.
+	fast, err := net.Dial("unix", sockPath)
 	if err != nil {
 		t.Fatalf("fast client: %v", err)
 	}
@@ -146,8 +191,12 @@ func TestBroadcast_ContinuesAfterSlowConnDisconnects(t *testing.T) {
 	var fastCount int
 	var fastMu sync.Mutex
 	go func() {
+		var hdr [4]byte
 		for {
-			if _, err := fast.Receive(); err != nil {
+			if _, err := io.ReadFull(fast, hdr[:]); err != nil {
+				return
+			}
+			if _, err := io.CopyN(io.Discard, fast, int64(binary.BigEndian.Uint32(hdr[:]))); err != nil {
 				return
 			}
 			fastMu.Lock()

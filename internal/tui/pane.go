@@ -21,7 +21,11 @@ import (
 	"github.com/artyomsv/quil/internal/ringbuf"
 )
 
-// spinnerFrames are braille characters cycled for the resuming indicator.
+// spinnerFrames are braille characters cycled for every animated indicator: the
+// per-pane resuming/preparing spinner, the tab label's work spinner, the pane's
+// top-border one, and the sidebar's working glyph (workingGlyph, sidebar.go).
+// ONE sequence deliberately — a second set of frames would make the same fact
+// look different depending on which part of the screen reported it.
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 // restoreAccentStyle / restoreDimStyle / restoreDoneStyle color the centered
@@ -33,8 +37,8 @@ var (
 	// spawnErrorStyle marks a pane that has no process and is not getting one.
 	// Red rather than the restore palette's dim grey: this is a terminal state
 	// the user has to act on, not a step in progress.
-	spawnErrorStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Bold(true)
-	restoreDoneStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("28"))
+	spawnErrorStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Bold(true)
+	restoreDoneStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("28"))
 )
 
 // Restore-indicator timing: the spinner shows for at least restoreMinDisplay
@@ -82,11 +86,17 @@ type PaneModel struct {
 	// values actually observed rather than current ones.
 	// SpawnError explains why this pane has no process; empty when it has one.
 	// Rendered in the pane's own rectangle in place of VT content.
-	SpawnError         string
-	GitBranch          string
-	GitDetached        bool
-	GitWorktree        bool
-	GitWorktreeName    string
+	SpawnError      string
+	GitBranch       string
+	GitDetached     bool
+	GitWorktree     bool
+	GitWorktreeName string
+	// WorktreeOwned is daemon-authoritative: this pane's worktree was created
+	// by Quil, so the close dialog may offer to delete it. WorktreePath is the
+	// directory that was created — the close dialog prices THAT, never CWD,
+	// which drifts with every `cd` the shell makes. See PaneInfo.
+	WorktreeOwned      bool
+	WorktreePath       string
 	GitUpstream        bool
 	GitAhead           int
 	GitBehind          int
@@ -110,6 +120,11 @@ type PaneModel struct {
 	workFrame          int            // shared spinner frame index, mirrored here for top-border render
 	blockedSince       time.Time      // set when the agent parks waiting on the user — workPark always, workNotify unless the producer marked the event as Claude's idle nudge AND the turn is already over; zero when not blocked. Cleared on workStart/workAbort/workStop/workStopFinal (a completed turn is by definition not blocked) — focus does NOT clear it (see ackFocusedPane); paneRow suppresses the glyph for the focused pane instead
 	blockedReason      string         // optional tool name from the hook's Data["tool"]; genuinely absent for Notification/permission.ask, so left empty rather than invented
+	// lastToastAt rate-limits desktop notifications for this pane. Per pane and
+	// SHARED by both event kinds, matching the daemon's own per-pane bell
+	// cooldown (Pane.LastBellEventAt): a pane that blocks and then completes
+	// five seconds later is one event to a human, not two.
+	lastToastAt time.Time
 
 	// Mouse-tracking state, updated by the VT EnableMode/DisableMode callbacks
 	// during AppendOutput (same goroutine as Update/View, like cursorVisible —
@@ -1005,7 +1020,7 @@ func buildTopBorder(width int, cwd, name string, color color.Color, ghost, resum
 	spin := ""
 	spinLen := 0
 	if working {
-		spin = " " + spinnerFrames[workFrame%len(spinnerFrames)]
+		spin = " " + workingGlyph(workFrame)
 		spinLen = 2 // leading space + single-width braille glyph
 	}
 

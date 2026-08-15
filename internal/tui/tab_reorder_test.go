@@ -17,11 +17,20 @@ func newModelForTest(names []string, activeIdx int) Model {
 	m := Model{
 		cfg:            config.Default(),
 		tabDragFromIdx: -1,
+		// See modelForWorkTest: NewModel starts focused, and the zero value
+		// would claim the terminal is in the background.
+		termFocused: true,
 	}
 	for _, n := range names {
 		m.appendTab(NewTabModel(n, n))
 	}
 	m.setActiveTabIdx(activeIdx)
+	// Keys resolve through the action registry, so a Model built here rather
+	// than by NewModel needs the keymap NewModel would have given it —
+	// otherwise MatchTier answers "" for every press and Display() renders
+	// nothing, and any test that drives a keybinding or reads the shortcuts
+	// dialog fails on wiring that works. Set after cfg, since Build reads it.
+	m.initKeymap()
 	return m
 }
 

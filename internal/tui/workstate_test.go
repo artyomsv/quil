@@ -75,8 +75,14 @@ func modelForWorkTest() Model {
 	tab.Root = NewLeaf(pane)
 	tab.ActivePane = "p1"
 	return Model{
-		client:        &fakeSender{},
-		projects:      oneProject(tab),
+		client:   &fakeSender{},
+		projects: oneProject(tab),
+		// Matches NewModel: a TUI starts focused, and a terminal that never
+		// reports focus keeps that value forever. Without it the zero value
+		// says the window is in the BACKGROUND, which now means "the user is
+		// not looking at anything" — so every focused-pane assertion built on
+		// this fixture would be describing a state the user is not in.
+		termFocused:   true,
 		notifications: NewNotificationCenter(cfg.Notification.SidebarWidth, cfg.Notification.MaxEvents),
 	}
 }

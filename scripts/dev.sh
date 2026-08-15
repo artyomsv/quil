@@ -42,7 +42,7 @@ pkg_target() {
 
 # BUILT_BINARIES are every file `build` writes and `clean` removes, in this
 # project directory. Production installs live elsewhere and are never touched.
-BUILT_BINARIES="quil-dev.exe quild-dev.exe quil-debug.exe quild-debug.exe quil.exe quild.exe quil quild"
+BUILT_BINARIES="quil-dev.exe quild-dev.exe quil-debug.exe quild-debug.exe quil.exe quild.exe quil-activate.exe quil quild"
 
 # refuse_if_binaries_held stops a build that would silently half-finish.
 #
@@ -120,7 +120,8 @@ case "${1:-help}" in
       GOOS=windows GOARCH=amd64 go build -ldflags \"\$F_DBG\" -o quil-debug.exe  ./cmd/quil  && \
       GOOS=windows GOARCH=amd64 go build -ldflags \"\$F_DBG\" -o quild-debug.exe ./cmd/quild && \
       GOOS=windows GOARCH=amd64 go build -ldflags \"\$F\"     -o quil.exe        ./cmd/quil  && \
-      GOOS=windows GOARCH=amd64 go build -ldflags \"\$F\"     -o quild.exe       ./cmd/quild"
+      GOOS=windows GOARCH=amd64 go build -ldflags \"\$F\"     -o quild.exe       ./cmd/quild && \
+      GOOS=windows GOARCH=amd64 go build -ldflags \"\$F -H windowsgui\" -o quil-activate.exe ./cmd/quil-activate"
     ;;
 
   test)
@@ -140,6 +141,66 @@ case "${1:-help}" in
     ensure_race_image
     $DOCKER_RUN_RACE sh -c \
       "CGO_ENABLED=1 go test -race $(pkg_target "${2:-}")"
+    ;;
+
+  # Benchmarks are excluded from `test` (go test runs no benchmarks without
+  # -bench), so they cost nothing on the normal loop and are only paid here.
+  #
+  # -count 6 gives benchstat enough samples to report a delta with a useful
+  # confidence interval (its Mann-Whitney U test can reach p<0.05 at n=4, so
+  # this is headroom, not a floor). -cpu 1 keeps runs comparable, since the
+  # benchmarked code is single-threaded and GOMAXPROCS otherwise varies with
+  # whatever else the machine is doing. -run '^$' skips tests so a slow suite
+  # does not pad the timing run.
+  #
+  # Results land in bench/<label>.txt (gitignored). The workflow this exists for:
+  #   ./scripts/dev.sh bench before     # on the unchanged code
+  #   ...implement...
+  #   ./scripts/dev.sh bench after      # prints the comparison automatically
+  #
+  # QUIL_BENCH_BASE names the baseline to compare against (default "before"), so
+  # a baseline captured under another label is not silently skipped.
+  bench)
+    label="${2:-bench}"
+    base="${QUIL_BENCH_BASE:-before}"
+    # Both values are interpolated into a `sh -c` string that runs inside the
+    # container with the project bind-mounted read-write, and the label is also
+    # used as a path. Unvalidated, `bench 'x;id>/src/pwn'` executes in the
+    # container and `bench ../../foo` writes outside bench/. Whoever runs this
+    # already has the shell, so it is robustness rather than a privilege
+    # boundary — but a label is a label, and rejecting is one line.
+    for v in "$label" "$base"; do
+      case "$v" in
+        "" | *[!A-Za-z0-9._-]* | .* )
+          echo "dev.sh bench: invalid label '$v' (allowed: A-Za-z0-9._- , not starting with '.')" >&2
+          exit 1
+          ;;
+      esac
+    done
+    pkg="$(pkg_target "${3:-internal/ipc}")"
+    mkdir -p "$PROJECT_DIR/bench"
+    out="bench/${label}.txt"
+    echo "benchmarking $pkg -> $out" >&2
+    $DOCKER_RUN sh -c \
+      "go test -run '^\$' -bench . -benchmem -count 6 -cpu 1 $pkg | tee $out"
+    # benchstat is best-effort: comparison is a convenience, the .txt files are
+    # the artifact, and a machine without network must still get its numbers.
+    # The version is PINNED — @latest re-resolves against the proxy on every
+    # run, which both needs network and can change the tool under a comparison.
+    if [ "$label" != "$base" ] && [ -f "$PROJECT_DIR/bench/${base}.txt" ]; then
+      echo "" >&2
+      echo "=== benchstat ${base}.txt -> ${label}.txt ===" >&2
+      # git is required to FETCH benchstat (the module proxy path goes through
+      # a VCS checkout) and the golang:alpine image does not ship it. Installed
+      # here rather than in a derived image because it is needed once per cold
+      # module cache, and the cache is a persisted volume.
+      $DOCKER_RUN sh -c \
+        "command -v git >/dev/null 2>&1 || apk add --no-cache git >/dev/null 2>&1; \
+         go run golang.org/x/perf/cmd/benchstat@v0.0.0-20260813145340-fd4a688df892 bench/${base}.txt $out" \
+        || echo "(benchstat unavailable — compare bench/${base}.txt and $out by hand)" >&2
+    elif [ "$label" != "$base" ]; then
+      echo "(no bench/${base}.txt — capture a baseline first, or set QUIL_BENCH_BASE)" >&2
+    fi
     ;;
 
   vet)
@@ -165,7 +226,8 @@ case "${1:-help}" in
       GOOS=darwin  GOARCH=arm64 go build -ldflags \"\$LDFLAGS\" -o dist/quil-darwin-arm64       ./cmd/quil && \
       GOOS=darwin  GOARCH=arm64 go build -ldflags \"\$LDFLAGS\" -o dist/quild-darwin-arm64      ./cmd/quild && \
       GOOS=windows GOARCH=amd64 go build -ldflags \"\$LDFLAGS\" -o dist/quil-windows-amd64.exe  ./cmd/quil && \
-      GOOS=windows GOARCH=amd64 go build -ldflags \"\$LDFLAGS\" -o dist/quild-windows-amd64.exe ./cmd/quild"
+      GOOS=windows GOARCH=amd64 go build -ldflags \"\$LDFLAGS\" -o dist/quild-windows-amd64.exe ./cmd/quild && \
+      GOOS=windows GOARCH=amd64 go build -ldflags \"\$LDFLAGS -H windowsgui\" -o dist/quil-activate-windows-amd64.exe ./cmd/quil-activate"
     ;;
 
   image)
@@ -179,7 +241,8 @@ case "${1:-help}" in
     rm -f "$PROJECT_DIR/quil" "$PROJECT_DIR/quild" \
           "$PROJECT_DIR/quil.exe" "$PROJECT_DIR/quild.exe" \
           "$PROJECT_DIR/quil-dev.exe" "$PROJECT_DIR/quild-dev.exe" \
-          "$PROJECT_DIR/quil-debug.exe" "$PROJECT_DIR/quild-debug.exe"
+          "$PROJECT_DIR/quil-debug.exe" "$PROJECT_DIR/quild-debug.exe" \
+          "$PROJECT_DIR/quil-activate.exe"
     rm -f "$PROJECT_DIR"/cmd/quil/rsrc*.syso "$PROJECT_DIR"/cmd/quild/rsrc*.syso
     rm -rf "$PROJECT_DIR/dist/"
     ;;
@@ -193,9 +256,10 @@ case "${1:-help}" in
     echo "Usage: ./dev.sh <command>"
     echo ""
     echo "Commands:"
-    echo "  build          Build all variants: prod, dev, debug (6 binaries)"
+    echo "  build          Build all variants: prod, dev, debug (6 binaries) + quil-activate.exe"
     echo "  test [pkg]     Run tests (all, or just ./<pkg>/...)"
     echo "  test-race [pkg]  Run tests with race detector"
+    echo "  bench [label] [pkg]  Run benchmarks -> bench/<label>.txt (default pkg: internal/ipc)"
     echo "  vet [pkg]      Run go vet"
     echo "  cross          Cross-compile for all platforms"
     echo "  image          Build Docker image (scratch-based)"

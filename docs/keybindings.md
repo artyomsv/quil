@@ -28,7 +28,7 @@ The five keys you'll use most:
 | `Alt+Shift+P` | Command palette — fuzzy-find any action or jump to any pane/tab |
 | `F1` | About menu → Settings, Plugins, Memory, log viewers |
 | `Ctrl+N` | New typed pane (Claude Code, OpenCode, terminal, …) |
-| `Ctrl+T` | New tab |
+| `Ctrl+T` | New tab — asks which pane it opens with (`Esc` for a plain terminal) |
 | `Ctrl+W` | Close active pane |
 | `Ctrl+Q` | Quit |
 
@@ -36,7 +36,8 @@ The five keys you'll use most:
 
 A project owns a set of tabs. Switching project switches the whole tab bar, and
 each project remembers the tab you left it on. Every tab belongs to exactly one
-project, so `Ctrl+T` files the new tab into whichever project you are on.
+project, so `Ctrl+T` files the new tab into whichever project you are on, and
+the pane it opens with starts in that project's root directory.
 
 | Key | Action |
 |---|---|
@@ -52,14 +53,17 @@ project, so `Ctrl+T` files the new tab into whichever project you are on.
 | Click + drag the sidebar's right edge | Resize the sidebar (12-column minimum; a rule previews the new edge, panes resize on release, width persists to `[ui] sidebar_width`) |
 
 The sidebar is the reserved left column listing projects and the active
-project's panes. Each project row carries a badge counting its agents: `◐N`
-while N panes are working, `⚠N` when N are blocked waiting on you. Those counts
+project's panes. Each project row carries a badge counting its agents: `⠹N`
+while N panes are working — the same spinner the tab bar and the pane border
+run, so one glance says "still going" — and `▲N` when N are blocked waiting on
+you. Those counts
 keep updating for projects in the **background**, which is what makes
 `Alt+Shift+A` useful — it crosses the project boundary to reach whichever pane
 has been waiting longest.
 
-Each pane row carries the same vocabulary for one pane: `◐` working (with `⋯N`
-when N subagents are still running), `⚠` blocked on you (with the tool it is
+Each pane row carries the same vocabulary for one pane: `⠹` working, spinning
+(with `⋯N`
+when N subagents are still running), `▲` blocked on you (with the tool it is
 waiting on, when the hook reported one), `✓` finished and not yet looked at,
 `○` idle.
 
@@ -82,7 +86,7 @@ actions, command palette).
 
 | Key | Action |
 |---|---|
-| `Ctrl+T` | New tab |
+| `Ctrl+T` | New tab — asks which pane it opens with (`Esc` for a plain terminal) |
 | `Alt+W` | Close active tab |
 | `F2` | Rename active tab |
 | `Alt+C` | Cycle tab colour (8 colours) |
@@ -97,7 +101,7 @@ The active tab is prefixed with `* ` in the tab bar so it's visible even when [t
 | Key | Action |
 |---|---|
 | `Ctrl+N` | New typed pane (plugin picker dialog) |
-| `Ctrl+W` | Close active pane (with confirm) |
+| `Ctrl+W` | Close active pane (with confirm). If Quil created a worktree for the pane, the confirm offers to delete it too — `space` arms the row, and it is off every time the dialog opens. The branch is kept; uncommitted work in the worktree is not. |
 | `Alt+R` | Restart active pane's process in place (with confirm). The process is killed and respawned with the plugin's resume strategy, so AI panes (Claude Code, OpenCode) resume their recorded session. Use this when a pane shows the "Pane not accepting input" warning. |
 | `Alt+Shift+H` | Split side-by-side |
 | `Alt+Shift+V` | Split top/bottom |
@@ -105,6 +109,7 @@ The active tab is prefixed with `* ` in the tab bar so it's visible even when [t
 | `Ctrl+E` | Toggle focus mode (active pane full-screen) |
 | `Alt+Shift+W` | Toggle the active AI pane's preview between left-edge crop (default) and soft-wrap. Only affects `wide_canvas` panes rendered smaller than the window. |
 | `Alt+G` | Toggle lazygit overlay (git repo from active pane's directory) |
+| `Alt+D` | Toggle hunk overlay — diff review for the same repo. Shares the tab's single overlay slot with lazygit, so pressing it while lazygit is on screen swaps tools. Mnemonic: **d**iff. Not `Alt+H`, because plain `Alt+H` is deliberately left unbound so it reaches the running program (see the passthrough note below) and because vim-style layouts rebind it to pane-left — set `toggle_hunk = "alt+h"` if you prefer it there. |
 | `Alt+Shift+L` | Force a full screen redraw — clears rendering artifacts (scrambled/misplaced characters) without restarting. Mnemonic: `Ctrl+L` redraws a shell. |
 | `Alt+Shift+I` | Open the active pane's input history — one row per prompt you submitted, newest first. `↑/↓` navigate, `PgUp/PgDn/Home/End` jump, `Enter` opens the full text in a soft-wrapped read-only viewer (drag or `Ctrl+A` to select, right-click or `Enter` to copy), `Esc` closes. Only AI panes whose plugin sets `record_history` (Claude Code) capture history; other pane types show an empty state. |
 | `Alt+A` | Open the pane context menu for the active pane (`quick_actions`). Same menu as right-click — see [Mouse: pane context menu](#mouse-pane-context-menu) below. |

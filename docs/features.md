@@ -29,10 +29,12 @@ A capability-by-capability tour of what Quil does. For configuration knobs, see 
   - [Resume a past session at pane creation](#resume-a-past-session-at-pane-creation)
   - [Custom plugins via TOML](#custom-plugins-via-toml)
   - [Lazygit integration](#lazygit-integration)
+  - [Hunk integration](#hunk-integration)
   - [k9s integration](#k9s-integration)
   - [lazysql integration](#lazysql-integration)
 - [Observability](#observability)
   - [Notification center](#notification-center)
+  - [Desktop notifications](#desktop-notifications)
   - [Memory reporting](#memory-reporting)
   - [Leveled logger + log viewer](#leveled-logger--log-viewer)
 - [Pane notes](#pane-notes)
@@ -110,12 +112,29 @@ The CWD also feeds the new-pane setup dialog (pre-filled from the active pane's 
 
 | Action | Binding |
 |---|---|
-| New tab | `Ctrl+T` |
+| New tab | `Ctrl+T` — see below |
 | Rename tab | `F2` |
 | Rename pane | `Alt+F2` |
 | Close tab | `Alt+W` |
 | Cycle tab color | `Alt+C` (8 colours) |
 | Switch to tab N | `Alt+1` .. `Alt+9` |
+
+### New tab, with the pane you actually want
+
+`Ctrl+T` opens the same picker as `Ctrl+N` and creates the tab around whatever
+you choose — Claude Code, OpenCode, lazysql, a terminal — including its setup
+step, so a new tab can start in a chosen directory, on a chosen kube context, or
+resuming a Claude session. If the plugin offers worktrees, a new tab can open
+straight onto a fresh branch.
+
+`Esc` on the first screen closes the picker and gives you a plain terminal tab,
+so `Ctrl+T` `Esc` is the two-keystroke path to the old behaviour.
+
+The tab and its pane are created together, so a tab never flickers through a
+shell you did not ask for. The one exception is a new branch: the tab opens with
+a terminal while `git worktree add` runs, and the pane you asked for replaces it
+when the checkout finishes — an agent must never spend those seconds in the main
+checkout.
 
 ---
 
@@ -148,9 +167,9 @@ The default is `Alt+Shift+P` because `Ctrl+Shift+P` (the VS Code key) is interce
 
 ### Pane context menu
 
-Right-click a pane (with no text selection active — a selection still copies, unchanged) or press `Alt+A` (`quick_actions`, active pane) to open a popup with 10 actions: Input history, Enter/Exit focus mode, Open notes, Open lazygit, Rename pane, Mute/Unmute notifications, Mark/Unmark attention, Clear attention, Restart pane… (confirm), Close pane… (confirm). The menu shows the target pane's name as a header, and the target pane gets a blue highlight border while the menu is open. Hovering the mouse highlights the row under the cursor; `↑`/`↓`/`k`/`j` also navigate (disabled rows are skipped), `Enter` or a click executes, `Esc` or a click outside closes, and right-clicking another pane re-targets the menu. Action groups (view actions / pane settings / destructive) are separated by a blank line, keeping Restart/Close visually isolated (the menu falls back to a compact layout on short terminals).
+Right-click a pane (with no text selection active — a selection still copies, unchanged) or press `Alt+A` (`quick_actions`, active pane) to open a popup with 11 actions: Input history, Enter/Exit focus mode, Open notes, Open lazygit, Open hunk, Rename pane, Mute/Unmute notifications, Mark/Unmark attention, Clear attention, Restart pane… (confirm), Close pane… (confirm). The menu shows the target pane's name as a header, and the target pane gets a blue highlight border while the menu is open. Hovering the mouse highlights the row under the cursor; `↑`/`↓`/`k`/`j` also navigate (disabled rows are skipped), `Enter` or a click executes, `Esc` or a click outside closes, and right-clicking another pane re-targets the menu. Action groups (view actions / pane settings / destructive) are separated by a blank line, keeping Restart/Close visually isolated (the menu falls back to a compact layout on short terminals).
 
-Three rows grey out when unavailable: **Input history** unless the pane's plugin sets `record_history` (Claude Code), **Open lazygit** when the `lazygit` binary isn't installed, and **Clear attention** when the pane carries no mark to clear.
+Four rows grey out when unavailable: **Input history** unless the pane's plugin sets `record_history` (Claude Code), **Open lazygit** and **Open hunk** when their binaries aren't installed (each gated on its own), and **Clear attention** when the pane carries no mark to clear.
 
 **Mark attention** pins a purple `◆` on the pane — deliberately not the green of the automatic "work finished, unseen" mark, because only one of the two clears itself. The pin survives focusing the pane and goes away only via **Unmark attention** or **Clear attention**.
 
@@ -240,7 +259,11 @@ Only new branches are offered. Checking out a branch that's already live in anot
 
 If the add fails — the branch exists, the path is occupied, the repo has no commits — **no pane is created**, and git's own message is shown. Quil never falls back to the repository root: a pane on `master` that you believe is isolated is worse than no pane. For the same reason the field is refused when you choose **Replace** rather than a split, since that path closes the old pane before the new one is known to be possible.
 
-Worktrees are never removed automatically. Closing a pane leaves its worktree — and any uncommitted work in it — exactly where it was.
+**Removing one when you close the pane.** Worktrees are never removed automatically — closing a pane leaves its worktree, and any uncommitted work in it, exactly where it was. The close confirm (`Ctrl+W` for a pane, `Alt+W` for a tab) *offers* to delete it: an unticked `[ ] Also delete its worktree` row, armed with `space`, off every time the dialog opens. Closing a tab lists every worktree in it under one toggle, since a tab closes as a unit.
+
+The row appears only for a worktree **Quil created**, and it names the directory Quil created — not wherever the pane's shell happens to be now. `cd` a worktree pane into a sibling checkout and the offer still refers to its own worktree, because a pane you opened in a worktree you made by hand never gets the offer at all: Quil deletes what Quil created. (A pane restored from a workspace saved before Quil started recording that directory does not get the offer either — there is no way to be sure which checkout it made.)
+
+While the dialog is open it asks the daemon what the worktree holds and shows `clean` or `⚠ 3 uncommitted or ignored files will be lost` under each row. The count includes **ignored** files, not just modified and untracked ones — a `.env` or a `build/` is exactly what a forced removal destroys with no branch to recover it from, so a worktree holding one is never reported as clean. The removal is forced, so all of that goes with the directory; **the branch stays**, along with any commits on it, so nothing you committed is lost and `git branch` still lists it. A worktree that still hosts a pane in another tab is kept and the reason logged — closing one pane never pulls the directory out from under another. If the check can't answer, the row says so rather than reporting `clean`.
 
 **If a worktree goes missing** (you ran `git worktree remove`, or its drive is unmounted), the pane restores *unspawned*, showing which worktree is gone, with `Alt+R` to retry. It does not quietly reopen in the main checkout — for an AI pane that would resume the recorded conversation against the wrong tree.
 
@@ -287,6 +310,29 @@ See the full [plugin reference](plugin-reference.md) for every field.
   Overlays are ephemeral: they don't survive a daemon restart (one keypress
   recreates them). Quit lazygit (`q`) and the overlay pane is destroyed
   automatically; the next Alt+G starts fresh.
+
+### Hunk integration
+
+[hunk](https://github.com/modem-dev/hunk) is a review-first diff viewer — built
+for reading changes an agent just wrote, which is most of what a Quil workspace
+produces.
+
+- **Hunk plugin** (Ctrl+N → Tools → Hunk): opens `hunk diff` as a regular pane,
+  with the same git-repo directory step lazygit uses. Only offered when the
+  `hunk` binary is installed (`npm i -g hunkdiff`, `brew install hunk`, or
+  `mise use -g hunk`).
+- **Overlay (Alt+D)**: toggles a full-tab review of the working tree for the
+  repo resolved from the active pane's directory — same lifecycle as the
+  lazygit overlay above.
+
+**Alt+G and Alt+D share one overlay slot per tab.** Pressing the other tool's
+key while an overlay is on screen *swaps* tools rather than opening a second
+one, so the outgoing tool's process ends and its UI state is lost. Each key
+still hides its own overlay, and each is offered only when its own binary is
+installed.
+
+Hunk takes no repository flag — it reviews whatever repository its working
+directory sits in — so the directory the pane spawns in is what scopes it.
 
 ### k9s integration
 
@@ -362,6 +408,42 @@ Tier values (per source — Claude and OpenCode are configured independently):
 
 External AI agents can subscribe via MCP — `get_notifications` (non-blocking), `watch_notifications` (blocking, up to 5 min) and `dismiss_notifications` (ack from agent side) replace polling. See [MCP](mcp.md#event-observation).
 
+### Desktop notifications
+
+**Windows only.** The sidebar above is a log; this is the alert. When an agent needs you and you are in another window, Windows raises a toast — and clicking it puts Quil on that exact pane.
+
+It fires on the same two states the project sidebar already marks, and no others:
+
+| State | Sidebar | Toast |
+|---|---|---|
+| Parked waiting on you | `▲` | "▲ Waiting for your input", with the tool name when the hook reported one |
+| Turn finished while you were away | `✓` | "✓ Turn finished" |
+| Turn in progress | `◐` | — (noise) |
+| Attention pinned by hand | `◆` | — (you set it while looking at the screen) |
+
+Behaviour worth knowing:
+
+- **Only for a pane you are not looking at.** Another tab, another project, or another application all count. The single pane that never toasts is the one on screen — the active pane of the active tab of the active project while the terminal has focus. That is the same test the sidebar uses to decide whether a finished turn counts as unseen, so the two never disagree.
+- **One toast per pane**, with a short per-pane floor (5 s) against a runaway agent. Six agents finishing at once give six independently clickable toasts, not a storm of duplicates; Windows collapses the overflow into Action Center on its own.
+- **Clicking routes precisely** — project, tab and pane, the same jump `Alt+Shift+A` performs.
+- **Answering withdraws the toast.** Typing your answer clears it from Action Center, so the surface never keeps claiming attention you already gave. That covers approving a Bash/Edit/Write prompt, which fires no hook at all.
+- **Muted panes stay muted.** `Alt+M` suppresses toasts as well as sidebar rows.
+
+Setup is explicit and reversible — nothing is written as a side effect of enabling the config flag:
+
+```bash
+quil notify setup           # writes a Start Menu shortcut + a quil:// handler, and prints both
+quil notify status          # what is registered, and what the config says
+quil notify test            # send one self-labelled canary toast
+quil notify setup --remove  # a true inverse
+```
+
+Toggle it live at **F1 → Settings → Desktop notifications**, or via [`[notification.desktop]`](configuration.md#notificationdesktop). The Settings row reports registration *state* rather than the flag — it reads `on (run notify setup)` when the flag is on but nothing is registered, which is the default on a fresh install.
+
+`quil notify setup` shows a verification toast and reports whether it actually appeared, so you find out immediately rather than the next time an agent blocks.
+
+Clicking a toast can only move your cursor. The `quil://` handler validates a pane id and forwards it to the running TUI over a per-PID named pipe — there is deliberately no path from a registered URI to spawning a pane, sending input, or running a command, since a registered scheme is invokable by any local process. Inline toast buttons ("Approve" / "Deny") are refused on that basis rather than merely deferred.
+
 ### Memory reporting
 
 `F1 → Memory` opens a collapsible tab / pane tree showing:
@@ -390,7 +472,7 @@ The viewer is a read-only `TextEditor` (typing / save / paste / cut all gated). 
 
 ## Projects
 
-A project groups tabs, owns a root directory, and belongs to exactly one daemon. The left sidebar (`Alt+Shift+S`) lists every project with a roll-up of its panes — `▲` needs you, `◐` running, `✓` finished while you were away, `◆` pinned by hand — so an agent that finished or got stuck in a project you are not looking at is visible from the one place you are. Each count is painted in the same colour its pane rows use, so the roll-up reads as a summary of them rather than as a second notation. The first three rank against each other (a pane parked for input has also finished its turn, and "needs you" outranks "is ready", so it counts once); `◆` is independent, because a pinned pane is usually also doing something. A tab holding a pane parked on you turns amber in the tab bar, including the tab you are on: the pane waiting may be the one you are not looking at in a split.
+A project groups tabs, owns a root directory, and belongs to exactly one daemon. The left sidebar (`Alt+Shift+S`) lists every project with a roll-up of its panes — `▲` needs you, `⠹` running (a spinner, the same one the tab bar and the pane border cycle), `✓` finished while you were away, `◆` pinned by hand — so an agent that finished or got stuck in a project you are not looking at is visible from the one place you are. Each count is painted in the same colour its pane rows use, so the roll-up reads as a summary of them rather than as a second notation. The first three rank against each other (a pane parked for input has also finished its turn, and "needs you" outranks "is ready", so it counts once); `◆` is independent, because a pinned pane is usually also doing something. A tab holding a pane parked on you turns amber in the tab bar, including the tab you are on: the pane waiting may be the one you are not looking at in a split.
 
 Under the active project, each tab gets a numbered heading (`1:name`, matching `Alt+1..9`) and its panes carry the same glyphs plus the checkout they sit in: branch, the linked worktree's name, and `↑N`/`↓N` against upstream. A pane you have pinned with **Mark attention** shows `◆` in purple, which stays until you unmark it and survives a restart — if a more urgent state is showing, the pin moves to the end of the row rather than disappearing, and keeps its own colour there so it never reads as part of the state that outranked it. Git state is refreshed on a background ticker, cached per checkout so N panes in one repository cost one invocation, and marked stale rather than guessed when a probe does not answer.
 
@@ -463,6 +545,13 @@ under `~/.quil/update/`. The next `quil` launch applies the update with
 one confirmation and restarts the daemon; tabs, layouts, CWDs, notes,
 and Claude sessions are preserved via the workspace snapshot. Configure
 via `[update]` in `config.toml`; About (F1) has a manual "Update now".
+
+The manual row always confirms with GitHub before it acts, so it installs
+the release that is newest *now* rather than the one the last daily check
+found — if something newer than the staged version has shipped, that is
+what gets fetched and offered. Opening F1 also refreshes the row's label.
+The update row is local-only: with a remote project active it says so
+instead of acting, because applying swaps this machine's binaries.
 
 ### Remote daemon over SSH
 

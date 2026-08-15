@@ -517,6 +517,7 @@ func (m *Model) confirmDestroyProject(id string) tea.Cmd {
 	}
 	m.dialog = dialogConfirm
 	m.confirmKind = confirmKindDestroyProject
+	m.resetConfirmWorktrees()
 	m.confirmID = id
 	m.confirmName = p.Name
 	return nil
@@ -1286,6 +1287,7 @@ func (m *Model) confirmDisconnectHost(projectID string) tea.Cmd {
 	}
 	m.dialog = dialogConfirm
 	m.confirmKind = confirmKindDisconnectHost
+	m.resetConfirmWorktrees()
 	m.confirmID = p.Dest
 	m.confirmName = p.Dest
 	return nil

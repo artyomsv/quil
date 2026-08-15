@@ -37,6 +37,12 @@ var registry = []Action{
 	{ID: "pane.toggle_eager", Label: "Toggle eager restore (active pane)", Group: "Panes", Tier: TierEarly, Order: 600, Default: "alt+shift+e"},
 	{ID: "pane.toggle_wrap", Label: "Toggle preview soft-wrap (AI pane)", Group: "Panes", Tier: TierEarly, Order: 700, Default: "alt+shift+w"},
 	{ID: "pane.toggle_lazygit", Label: "Toggle lazygit overlay for current repo", Group: "Panes", Tier: TierEarly, Order: 800, Default: "alt+g"},
+	// Order 850 rather than a round number: it sits between lazygit and input
+	// history because that is where handleOverlayKey and the early switch check
+	// it, and Order is what reproduces that arm order. The default is alt+d, not
+	// the more obvious alt+h — plain Alt+H is deliberately left unbound so it
+	// reaches the running program, and vim-style layouts rebind it to pane-left.
+	{ID: "pane.toggle_hunk", Label: "Toggle hunk (diff review) overlay for current repo", Group: "Panes", Tier: TierEarly, Order: 850, Default: "alt+d"},
 	{ID: "pane.command_history", Label: "Open pane input history", Group: "Panes", Tier: TierEarly, Order: 900, Default: "alt+shift+i"},
 	{ID: "pane.quick_actions", Label: "Pane context menu (also mouse right-click)", Group: "Panes", Tier: TierEarly, Order: 1000, Default: "alt+a"},
 	{ID: "project.new", Label: "New project", Group: "Projects", Tier: TierEarly, Order: 1100, Default: "alt+shift+n"},

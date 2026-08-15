@@ -9,11 +9,11 @@ import (
 // the blocked badge's colour, and a project can be offline AND holding a blocked
 // agent at once.
 func TestProjectRow_OfflineRendersOrange(t *testing.T) {
-	row := projectRow("cluster-management", paneStateCounts{}, glyphLinkParked, false, 22, &OfflineState{Kind: offlineNeedsUpgrade})
+	row := projectRow("cluster-management", paneStateCounts{}, 0, glyphLinkParked, false, 22, &OfflineState{Kind: offlineNeedsUpgrade})
 	if !strings.Contains(row, "208") {
 		t.Errorf("offline row carries no 208 foreground: %q", row)
 	}
-	live := projectRow("cluster-management", paneStateCounts{}, "", false, 22, nil)
+	live := projectRow("cluster-management", paneStateCounts{}, 0, "", false, 22, nil)
 	if strings.Contains(live, "208") {
 		t.Errorf("a live row was painted orange: %q", live)
 	}

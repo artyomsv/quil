@@ -31,6 +31,9 @@ func newTestModelWithTabs(t *testing.T, n, panesPerTab int) Model {
 	return Model{
 		projects:      []*ProjectModel{{ID: "proj-a", tabs: tabs}},
 		activeProject: 0,
+		// See modelForWorkTest: NewModel starts focused, and the zero value
+		// would claim the terminal is in the background.
+		termFocused: true,
 	}
 }
 

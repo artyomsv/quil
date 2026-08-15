@@ -1,0 +1,27 @@
+# Code Review State: global / new-tab-cretion
+
+Last reviewed: 2026-08-14
+Rounds completed: 1
+
+## Resolved (fixed in code; do not re-raise)
+- [code-quality/CRITICAL] sendForDestStrict + a pinned createPaneDest broke both startup carve-outs — stampDest sets Origin, so Router.Send's `!stamped` sole-conn fallback became unreachable and the create was dropped under `--remote` (no "" conn) and when only offline stand-ins are seeded. Fixed with pinnableDest() returning "" for those two windows and sendCreateTab sending UNSTAMPED there. Pinned by TestNewTab_BeforeTheFirstBroadcastReachesTheSoleDaemon and TestNewTab_OnlyOfflineProjectsStillReachesTheLocalDaemon, both driving a real Router (fakeSender could never reach the strict branch) — round 1
+- [security/M-2 + code-quality/A] The worktree placeholder inherited the requested plugin's InstanceName/InstanceArgs/ResumeSessionID while its Type was downgraded to terminal; resolveSpawnArgs REPLACES a plugin's args, so the placeholder spawned as `<shell> --dangerously-skip-permissions` (masked on bash/zsh/pwsh by shellinit.Configure, fatal on sh/dash/fish). Plugin fields now ride only when paneType == spec.Type. Pinned by TestHandleCreateTab_WorktreePlaceholderCarriesNoPluginFields — round 1
+- [security/M-1] resolveRequestedCWD stat-ed a wire-supplied path inline on the conn dispatch goroutine, removing the bound create_tab previously had via projectCWD → resolveSpawnDirWithin. Now routed through that same permit-claimed, deadline-shared primitive. Pinned by TestResolveRequestedCWD_HungPathFallsBackWithinTheBudget, which asserts the statPath seam is REACHED (a timing-only assertion stays green against the inline stat) — round 1
+- [security/L-3 + code-quality/B] A failed `git worktree add` on the new-tab path was swallowed: applyCreatePaneResp bails on `worktreeCreates[tabID] == ""`, which that path never arms. Now reported via a branch-keyed Model.newTabWorktrees, sanitized and bounded like the split path. Keyed by branch rather than flashing unconditionally, which preserves TestCreatePaneResp_UnknownTabIsInert. Pinned by TestNewTab_WorktreeFailureIsReported — round 1
+- [rules/MEDIUM] new_tab_pane_test.go reached SaveRecentCWDs → config.RecentCWDsPath and wrote to the developer's real ~/.quil; Docker's throwaway /root hid it in CI. Fixed with t.Setenv("QUIL_HOME", t.TempDir()) — which is also the answer to the t.Parallel() suggestion: t.Setenv forbids it — round 1
+- [qa/gap-1] palActNewTab's palette dispatch was only covered by a "the palette closed" bucket assertion; a wrong opener would pass silently. Pinned by TestPalette_NewTabOpensThePickerInNewTabMode — round 1
+- [qa/gap-2] createPaneDest pinning had no test. Pinned by TestNewTab_SubmitTargetsTheDialogsOwnDestination (active project moves under the open dialog; submit must still target the open-time dest) — round 1
+- [code-quality/C] TestNewTab_SkipsThePlacementStep's first assertion was vacuous — the fixture leaves createPaneStep at 0, so `if step == 3 && ...` never ran. Now sets step 3 explicitly — round 1
+- [code-quality/D] Untested branches added: the newBranchRepo == "" refusal (TestNewTab_BranchWithoutARepositoryRootIsRefused) and the createTabFailedMsg Update arm (TestCreateTabFailed_FlashesAndDoesNotRelisten) — round 1
+- [code-quality/suggestion] Recent-CWD entries were filed under activeDest() while the pane goes to createPaneDest — they diverge exactly when createPaneDest matters. Now filed via recentCWDsDest() — round 1
+- [code-quality/suggestion] enterSetupOrSplit's doc still claimed the caller must advance to step 3; that responsibility moved to advanceFromPluginChoice — round 1
+- [code-quality/suggestion] Dead create.CWD assignment removed (constructPaneAt uses the separately-resolved cwd parameter) — round 1
+- [code-quality/suggestion] resolveRequestedCWD's rejection log said "create pane:" from both call sites, naming the wrong operation for create_tab; now "spawn cwd:" — round 1
+- [security/L-4] The daemon-side re-resolve comment claimed it "closes" the TOCTOU window; it narrows it to daemon-internal. Comment corrected — round 1
+- [qa/cosmetic] Stale references to the pre-rename test names in offline_guard_test.go — round 1
+
+## Dismissed (acknowledged, will not fix; agents may escalate with explicit justification)
+- [rules/LOW] dto-naming.md permits only *Dto / *View / *Payload, and this adds FirstPaneSpec — dismissed: it mirrors the pre-existing WorktreeSpec in the same file, filling the same role (a nested value object inside a *Payload). The rule's own "Renames" section requires an alignment rename to be its own commit, so renaming FirstPaneSpec alone here would violate that section while leaving WorktreeSpec non-compliant. A follow-up renaming both together is the correct route if literal compliance is wanted (round 1)
+- [rules/LOW] Commit body had lines at 74-75 chars against a 72-char wrap — addressed in the follow-up commit rather than tracked; cosmetic and not mechanically enforced (round 1)
+- [rules/LOW] Branch is `feat/new-tab-cretion` where CONTRIBUTING.md documents `feature/` — dismissed: renaming a branch mid-review has its own costs and the branch is not part of the diff (round 1)
+- [code-quality/suggestion] Two adjacent PluginMu critical sections in constructPaneAt could be merged — dismissed: they are semantically distinct (one unconditional, one Overlay-gated) and merging couples them for no gain (round 1)

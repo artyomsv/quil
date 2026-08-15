@@ -115,8 +115,13 @@ func TestHandleOverlayKey_ToggleLazygit_HonoursMultiBinding(t *testing.T) {
 	t.Parallel()
 	m, _, tab := overlayTestModel(t, "")
 	m.cfg.Keybindings.ToggleLazygit = "alt+g,ctrl+alt+g"
-	m.initKeymap()
+	m.initKeymap() // rebuild: overlayTestModel built the keymap from the default cfg
 	overlay := NewPaneModel("pane-o", 1024)
+	// Type is load-bearing since the overlay slot became shared: step 1 of
+	// handleToggleOverlay hides only when tab.overlayRuns(plugin) — an
+	// untyped overlay falls through to the resolve half and SWAPS instead,
+	// which is the correct answer for a different tool and the wrong one here.
+	overlay.Type = overlayPluginLazygit
 	tab.overlayPane = overlay
 	tab.overlayVisible = true
 

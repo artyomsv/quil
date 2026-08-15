@@ -161,6 +161,14 @@ var (
 	dialogNormal = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("250"))
 
+	// dialogWarn marks the one thing in a dialog that destroys data — today,
+	// the close confirm's worktree row and the uncommitted-change count under
+	// it. 214 is the amber this codebase already reserves for "this needs your
+	// attention" (blockedTabStyle, sidebarBlockedStyle) rather than the red it
+	// uses for a failure, because an armed toggle is a choice, not an error.
+	dialogWarn = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("214"))
+
 	dialogKeyStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("63")).
 			Width(dialogKeyColWidth)
@@ -328,6 +336,30 @@ func settingsFields() []settingsField {
 				m.cfg.Overlay.IdleTimeoutMinutes = n
 				m.configChanged = true
 			},
+		},
+		{
+			// Reports STATE, not the flag. With Enabled defaulting true,
+			// enabled-but-unregistered is the default on a fresh Windows
+			// install — a bare "on" there would claim toasts are working when
+			// no toast can be displayed at all. Same rule the Sidebar width
+			// setter states: never show a value the system is not using.
+			//
+			// The row deliberately does NOT perform registration. Writing a
+			// Start Menu shortcut and an HKCU key as a side effect of a config
+			// toggle is exactly the auto-register behaviour this design
+			// rejected; it names the command instead.
+			//
+			// Applies LIVE, unlike most rows here: raiseAttentionToast reads
+			// m.cfg.Notification.Desktop on every edge, so there is no apply
+			// step. An on/off switch that did nothing until relaunch would read
+			// as a broken dialog — the same reason Sidebar width is live.
+			label: "Desktop notifications",
+			get:   func(m *Model) string { return m.desktopState().label() },
+			set: func(m *Model, _ string) {
+				m.cfg.Notification.Desktop.Enabled = !m.cfg.Notification.Desktop.Enabled
+				m.configChanged = true
+			},
+			isBool: true,
 		},
 		{
 			label: "Max live overlays",
@@ -677,6 +709,7 @@ func (m Model) handleAboutKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			// MsgShutdown (see handleConfirmKey).
 			m.dialog = dialogConfirm
 			m.confirmKind = confirmKindShutdown
+			m.resetConfirmWorktrees()
 			m.confirmID = ""
 			m.confirmName = ""
 			m.dialogCursor = 0
@@ -828,7 +861,28 @@ func (m Model) handleShortcutsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
+	case " ", "space", "w":
+		// Both spellings, because Bubble Tea v2 reports the space key as
+		// "space" while a pasted or synthesised one can arrive as " " — the
+		// same pair the settings dialog matches.
+		//
+		// Toggles the "also delete the worktree" row. A no-op when the dialog
+		// offers none, so the other confirm kinds are unaffected — and space
+		// rather than a letter because it is what a checkbox answers to, with
+		// `w` as the discoverable alias the footer names.
+		//
+		// Deliberately NOT a second key that also confirms: arming and
+		// confirming must stay two separate keystrokes, or the toggle is no
+		// safer than a plain destructive default.
+		if len(m.confirmWorktrees) > 0 {
+			m.confirmRemoveWorktree = !m.confirmRemoveWorktree
+		}
+		return m, nil
 	case "esc", "n":
+		// Cleared on EVERY route out, including the branches below that return
+		// early to another dialog. These fields outlive the dialog, and an
+		// inherited arm is a deletion the next close never offered.
+		m.resetConfirmWorktrees()
 		// Return to appropriate dialog based on confirm kind
 		if m.confirmKind == "instance" {
 			m.dialog = dialogCreatePane
@@ -844,10 +898,18 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.confirmKind == confirmKindApplyUpdate {
-			// Back to the About menu, cursor on the update row.
-			m.dialog = dialogAbout
-			m.dialogCursor = aboutUpdateIndex
-			return m, nil
+			// Back to where the press came from — the About menu with the
+			// cursor on the update row when the user is still there, otherwise
+			// the panes, because this confirm can open by itself. The detail
+			// line describes ONE answer from the daemon, so it must not
+			// outlive this dialog and reappear on an unrelated later confirm.
+			m.dialog = m.applyConfirmReturn
+			m.dialogCursor = 0
+			if m.dialog == dialogAbout {
+				m.dialogCursor = aboutUpdateIndex
+			}
+			m.confirmDetail = ""
+			return m, tea.ClearScreen
 		}
 		m.dialog = dialogNone
 		if m.confirmKind == confirmKindUpgradeDest {
@@ -863,6 +925,10 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "enter", "y":
 		kind := m.confirmKind
 		id := m.confirmID
+		// Read BEFORE the reset below, like every other value this branch
+		// carries into its command.
+		removeWorktree := m.confirmRemoveWorktree
+		m.resetConfirmWorktrees()
 
 		// Stop-daemon requires explicit `y` — Enter is the universal
 		// select/commit key across every menu and toggle, so accepting it
@@ -945,8 +1011,17 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// Apply-update: quit the TUI with the apply intent set; main.go
 		// performs verify → swap → respawn after the program exits (the
 		// terminal must be released before the wrapper respawn).
+		//
+		// Requires explicit `y` for the reason shutdown does, and for one more:
+		// this confirm is opened by the daemon's answer to a stage request, so
+		// it can arrive a whole download after the keypress that asked for it,
+		// onto a user who has gone back to typing in a pane.
 		if kind == confirmKindApplyUpdate {
+			if msg.String() != "y" {
+				return m, nil
+			}
 			m.dialog = dialogNone
+			m.confirmDetail = ""
 			m.applyUpdateOnExit = true
 			return m, tea.Quit
 		}
@@ -1030,11 +1105,16 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			case "pane":
 				req, _ := ipc.NewMessage(ipc.MsgDestroyPane, ipc.DestroyPanePayload{
 					PaneID: id,
+					// The only field on this wire that deletes a directory. It
+					// is a bool: the daemon re-derives WHICH worktree from its
+					// own ownership record, so nothing here names a path.
+					RemoveWorktree: removeWorktree,
 				})
 				m.sendForDest(dest, req)
 			case "tab":
 				req, _ := ipc.NewMessage(ipc.MsgDestroyTab, ipc.DestroyTabPayload{
-					TabID: id,
+					TabID:          id,
+					RemoveWorktree: removeWorktree,
 				})
 				m.sendForDest(dest, req)
 			}
@@ -1044,15 +1124,17 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleGitRepoPickKey drives the Alt+G multi-repo picker: a plain list of
-// git repos found near the active pane's CWD. Enter opens the lazygit
-// overlay for the highlighted repo; Esc cancels.
+// handleGitRepoPickKey drives the Alt+G / Alt+H multi-repo picker: a plain
+// list of git repos found near the active pane's CWD. Enter opens the overlay
+// for the highlighted repo, running whichever tool opened the picker
+// (m.repoPickPlugin); Esc cancels.
 func (m Model) handleGitRepoPickKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 	switch key {
 	case "esc":
 		m.dialog = dialogNone
 		m.repoPickCandidates = nil
+		m.repoPickPlugin = ""
 		return m, tea.ClearScreen
 	case "up", "k":
 		if m.dialogCursor > 0 {
@@ -1069,8 +1151,10 @@ func (m Model) handleGitRepoPickKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		repo := m.repoPickCandidates[m.dialogCursor]
+		pick := m.repoPickPlugin
 		m.dialog = dialogNone
 		m.repoPickCandidates = nil
+		m.repoPickPlugin = ""
 		tab := m.activeTabModel()
 		if tab == nil {
 			return m, tea.ClearScreen
@@ -1078,7 +1162,7 @@ func (m Model) handleGitRepoPickKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// createOverlay uses a pointer receiver so it mutates m directly
 		// (Go takes &m on a value-receiver local variable). The returned m
 		// reflects all mutations including pendingOverlayShow.
-		return m, tea.Batch(tea.ClearScreen, m.createOverlay(tab, repo))
+		return m, tea.Batch(tea.ClearScreen, m.createOverlay(tab, repo, pick))
 	}
 	return m, nil
 }
@@ -1193,7 +1277,7 @@ func (m Model) renderAboutDialog() string {
 		"View client log",
 		"View daemon log",
 		"View MCP logs",
-		aboutUpdateLabel(m.activeUpdateInfo(), m.version),
+		aboutUpdateLabel(m.activeUpdateInfo(), m.version, m.remoteModeFor(m.activeDest())),
 		"Stop daemon",
 	}
 	for i, item := range items {
@@ -1487,11 +1571,31 @@ func (m Model) renderConfirmDialog() string {
 		b.WriteString("\n")
 		b.WriteString("  " + dialogSubtle.Render("AI panes resume their recorded session."))
 	case confirmKindApplyUpdate:
-		b.WriteString("  " + dialogNormal.Render(fmt.Sprintf("Apply update v%s now?", m.confirmName)))
+		// Sanitized and bounded like confirmKindDestroyProject's and
+		// confirmKindUpgradeDest's names: this one now comes from a stage
+		// RESPONSE, and under --remote that is a host the user may not control.
+		// It is also the consent text for swapping the binaries on this machine.
+		b.WriteString("  " + dialogNormal.Render(fmt.Sprintf("Apply update v%s now?",
+			truncateToWidth(sanitizeRemoteText(m.confirmName), confirmDetailCap))))
 		b.WriteString("\n\n")
+		// Present only when the newest-release check did not settle — the
+		// version above is then what is on disk rather than a confirmed
+		// latest, and that is the one thing the user needs to know before
+		// spending a restart on it. Same sanitize+bound treatment as the
+		// upgrade confirm: under --remote this text came off another host.
+		if d := m.confirmDetail; d != "" {
+			b.WriteString("  " + dialogSubtle.Render(truncateToWidth(sanitizeRemoteText(d), confirmDetailCap)))
+			b.WriteString("\n\n")
+		}
 		b.WriteString("  " + dialogSubtle.Render("The TUI restarts and the daemon respawns all panes."))
 		b.WriteString("\n")
 		b.WriteString("  " + dialogSubtle.Render("Claude sessions resume; running shell commands are killed."))
+		// `y`, not Enter — this confirm can now appear on its own, seconds or
+		// minutes after the press that started the download, by which time the
+		// user's hands are back on a pane. Enter is the universal commit key,
+		// so accepting it would let one reflex quit the TUI and swap binaries.
+		// Same rule, and the same reason, as the shutdown and upgrade confirms.
+		footer = "y confirm    Esc cancel"
 	case confirmKindDestroyProject:
 		b.WriteString("  " + dialogNormal.Render(fmt.Sprintf("Destroy project %q?", sanitizeRemoteText(m.confirmName))))
 		b.WriteString("\n\n")
@@ -1530,18 +1634,153 @@ func (m Model) renderConfirmDialog() string {
 	default:
 		label := fmt.Sprintf("Close %s %q?", m.confirmKind, m.confirmName)
 		b.WriteString("  " + dialogNormal.Render(label))
+		if rows := m.renderConfirmWorktrees(); rows != "" {
+			b.WriteString("\n\n")
+			b.WriteString(rows)
+			// "space also delete worktree …" is 57 cells, 59 with the indent,
+			// against a 54-cell budget — lipgloss wraps rather than clips, so it
+			// stranded `Esc cancel` on a row the box never budgeted, stacked on
+			// top of the worktree list. dialogBoxChrome documents this exact
+			// hazard; this footer is the one that walked into it.
+			// "toggle" rather than "worktree": a footer lists key → ACTION, and
+			// there is exactly one checkbox on screen for it to refer to.
+			footer = "space toggle    Enter confirm    Esc cancel"
+		}
 	}
 	b.WriteString("\n\n")
 
-	b.WriteString("  " + dialogSubtle.Render(footer))
+	// Truncated like every other value-bearing row in this package's dialogs:
+	// the box pads but never clips, so a footer that outgrows the budget wraps
+	// and adds a row nothing accounted for.
+	b.WriteString("  " + dialogSubtle.Render(truncateToWidth(footer, dialogWidth-dialogBoxChrome-confirmRowIndent)))
 
 	return b.String()
 }
 
+// confirmRowIndent is the two-space gutter every confirm row is written with.
+// Counted against the width budget because it is part of the rendered line.
+const confirmRowIndent = 2
+
+// renderConfirmWorktrees draws the "also delete the worktree" checkbox and one
+// line per worktree, or "" when the close would delete none.
+//
+// Returning "" for the ordinary case is the point: every close that touches no
+// worktree renders exactly the dialog it always has, down to the footer.
+func (m Model) renderConfirmWorktrees() string {
+	if len(m.confirmWorktrees) == 0 {
+		return ""
+	}
+	box := "[ ]"
+	if m.confirmRemoveWorktree {
+		box = "[x]"
+	}
+	head := fmt.Sprintf("%s Also delete %s", box, pluralWorktrees(len(m.confirmWorktrees)))
+	style := dialogNormal
+	if m.confirmRemoveWorktree {
+		style = dialogWarn
+	}
+
+	var b strings.Builder
+	b.WriteString("  " + style.Render(head))
+	// CAPPED, because lipgloss pads but never clips and renderDialog's
+	// lipgloss.Place does not either: two lines per worktree grows the box past
+	// the terminal and pushes the footer — and the Enter it documents — off
+	// screen. The cap is a DISPLAY bound only; the header counts every worktree
+	// and the toggle still covers all of them.
+	shown := m.confirmWorktrees
+	if len(shown) > confirmWorktreeMaxRows {
+		shown = shown[:confirmWorktreeMaxRows]
+	}
+	for _, w := range shown {
+		b.WriteString("\n")
+		// The label is daemon-chosen text — a branch name, or a path when the
+		// pane's shell has drifted — so it is sanitized AND bounded at render,
+		// like every other value from a machine the user may not control.
+		// Bounding is a separate job from sanitizing: sanitizeRemoteText
+		// removes escapes without shortening anything.
+		//
+		// Elided in the MIDDLE, because the identifying half of a path is its
+		// TAIL: truncateCells cuts the end, so every worktree under one parent
+		// would render as the same `E:\Projects\…\quil-worktrees\…` prefix. The
+		// pane's own spawn-error line elides for exactly this reason.
+		b.WriteString("      " + dialogSubtle.Render(
+			elideMiddle(sanitizeRemoteText(w.label), confirmWorktreeLabelCap)))
+		b.WriteString("\n")
+		b.WriteString("      " + m.renderWorktreeChanges(w))
+	}
+	if rest := len(m.confirmWorktrees) - len(shown); rest > 0 {
+		b.WriteString("\n")
+		b.WriteString("      " + dialogSubtle.Render(fmt.Sprintf("…and %d more", rest)))
+	}
+	// Said once, under the list, because it is a property of the operation
+	// rather than of any one worktree — and said whether or not the check
+	// answered, since it is true either way. "everything else here" is deliberate
+	// and covers the case a count alone hides: ignored files, a .env among them,
+	// which exist in no branch and cannot be recovered from one.
+	//
+	// Separated by a BLANK line: butted against the last row it reads as that
+	// worktree's own status line rather than as a statement about the operation.
+	b.WriteString("\n\n")
+	b.WriteString("  " + dialogSubtle.Render("The branch is kept; everything else here goes."))
+	return b.String()
+}
+
+// confirmWorktreeMaxRows bounds the rendered list. A tab can legitimately hold
+// more worktree panes than a dialog has room for, and the box does not clip.
+const confirmWorktreeMaxRows = 6
+
+// renderWorktreeChanges is the one line that says what the removal would cost.
+//
+// Four states, all rendered apart, because collapsing any two of them tells the
+// user something that is not true: still checking, could not check, clean, and
+// a count. "Could not check" must never look like "clean" — clean is the one
+// answer that invites the toggle.
+func (m Model) renderWorktreeChanges(w confirmWorktree) string {
+	switch {
+	case !w.loaded:
+		return dialogSubtle.Render("checking for uncommitted work…")
+	case w.err != "":
+		return dialogWarn.Render("⚠ " + truncateCells(sanitizeRemoteText(w.err), confirmWorktreeLabelCap))
+	case w.changes == 0:
+		return dialogSubtle.Render("clean")
+	case w.changes == 1:
+		return dialogWarn.Render("⚠ 1 uncommitted or ignored file will be lost")
+	default:
+		// "or ignored" is not padding: the count includes ignored entries
+		// (gitworktree.Status), and those are the ones with no branch to
+		// recover them from. Saying only "uncommitted" would have the number
+		// describe something narrower than what the removal takes.
+		return dialogWarn.Render(fmt.Sprintf("⚠ %d uncommitted or ignored files will be lost", w.changes))
+	}
+}
+
+func pluralWorktrees(n int) string {
+	if n == 1 {
+		return "its worktree"
+	}
+	return fmt.Sprintf("%d worktrees", n)
+}
+
+// confirmWorktreeLabelCap bounds a branch name and a daemon-supplied error in
+// the dialog. The confirm box does not truncate on its own and lipgloss WRAPS,
+// so an unbounded value becomes many rendered lines — the same reason the
+// project form caps its message line.
+const confirmWorktreeLabelCap = 46
+
 func (m Model) renderGitRepoPickDialog() string {
 	var b strings.Builder
 
-	b.WriteString(dialogTitle.Render("Open lazygit for which repo?"))
+	// Names the tool the picker will actually spawn: both overlay toggles share
+	// this dialog, and a title that always said "lazygit" would be a lie half
+	// the time — on the one screen where the user commits to a repository.
+	//
+	// Deliberately NO fallback for an empty repoPickPlugin. Substituting a tool
+	// name here would have the title disagree with Enter, which passes the raw
+	// value to createOverlay and refuses it — a dialog that named a tool and
+	// then did nothing. The field is set immediately before this dialog opens
+	// and cleared on both exits, so an empty value is a wiring bug, and a
+	// visibly broken title is how it should surface.
+	b.WriteString(dialogTitle.Render("Open " + m.repoPickPlugin + " for which repo?"))
 	b.WriteString("\n\n")
 
 	// gitRepoPickWidth - 4: 2 for cursor marker, 2 for dialog border padding.
@@ -1686,6 +1925,13 @@ func (m Model) handleCreatePaneKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		m.dialog = dialogNone
 		m.createPaneStep = 0
+		if m.createPaneTarget == paneTargetNewTab {
+			// Cancelling the PICKER is not cancelling the tab: Ctrl+T Esc stays
+			// the two-keystroke path to the shell tab this key produced before
+			// the picker existed. The bare create carries no spec, so the daemon
+			// takes exactly the path every other producer takes.
+			return m, m.createTerminalTab()
+		}
 		return m, nil
 
 	case "up", "k":
@@ -1711,6 +1957,7 @@ func (m Model) handleCreatePaneKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			idx := m.dialogCursor - 1
 			if idx < len(instances) {
 				m.confirmKind = "instance"
+				m.resetConfirmWorktrees()
 				m.confirmID = instances[idx].ID
 				m.confirmName = instances[idx].Name
 				m.dialog = dialogConfirm
@@ -1734,6 +1981,12 @@ func (m *Model) createPaneItemCount() int {
 	case 2: // instance list
 		return 1 + len(m.instanceStore[m.selectedPlugin]) // "+ New" + saved
 	case 3: // split direction
+		if m.createPaneTarget == paneTargetNewTab {
+			// Unreachable through advanceFromPluginChoice, which submits rather
+			// than landing here — answered anyway so a future path that does
+			// reach it renders no rows instead of three that cannot act.
+			return 0
+		}
 		return 3 // Horizontal, Vertical, Replace
 	}
 	return 0
@@ -1822,15 +2075,75 @@ func (m Model) handleCreatePaneSelect() (tea.Model, tea.Cmd) {
 		// Mirror the same routing as the no-form-fields branch above and the
 		// instance form submit path; otherwise saved instances would silently
 		// skip the setup dialog while "+ New" wouldn't.
-		if cmd := m.enterSetupOrSplit(p); cmd != nil {
-			return m, cmd
-		}
-		m.createPaneStep = 3
-		return m, nil
+		// enterSetupOrSplit routes to the setup dialog, the placement step or a
+		// new-tab submit — no step assignment belongs here.
+		return m, m.enterSetupOrSplit(p)
 	}
 
 	// Step 3: selected placement (split direction)
 	return m.handleCreatePaneSplit()
+}
+
+// recentCWDsDest is the destination a committed directory is filed under.
+//
+// createPaneDest when the dialog pinned one, because that is the machine whose
+// disk was browsed and the machine the pane is going to. It is deliberately NOT
+// used when empty: "" there means one of the startup windows (see
+// pinnableDest), where the router picks the destination and the client cannot
+// know which — filing under "" would put the entry in the unscoped list, which
+// is the LOCAL daemon's, and that is the same guess Router.Send makes.
+func (m Model) recentCWDsDest() string {
+	if m.createPaneDest != "" {
+		return m.createPaneDest
+	}
+	return m.activeDest()
+}
+
+// setupDiscoveryBase is the directory the setup dialog starts looking from.
+//
+// For a SPLIT it is the active pane's OSC 7 CWD: the pane being split is the
+// context, and that is where the user already is. Deliberately not
+// lastSelectedCWD — that memory belongs to the generic browser, and a stale
+// last-choice from another project seeds candidates for the wrong repository.
+//
+// For a NEW TAB the context is the PROJECT. A new tab is not "beside this
+// pane", and the daemon roots one at projectCWD for exactly the same reason, so
+// discovering from wherever the last shell happened to cd to would put the two
+// halves of one create on different directories. The active pane is still the
+// fallback, for a project with no root recorded.
+func (m Model) setupDiscoveryBase() string {
+	if m.createPaneTarget == paneTargetNewTab {
+		if p := m.cur(); p != nil && p.RootDir != "" {
+			return p.RootDir
+		}
+	}
+	if tab := m.activeTabModel(); tab != nil {
+		if pane := tab.ActivePaneModel(); pane != nil {
+			return pane.CWD
+		}
+	}
+	return ""
+}
+
+// advanceFromPluginChoice runs once the plugin, its instance and its setup
+// answers have all been collected — the one place that decides what "done
+// choosing" means for each target.
+//
+// For a split there is a step left: WHERE the pane goes relative to the active
+// one. A new tab has no pane to be relative to, so those three rows cannot mean
+// anything and the choice is complete — it submits instead. Routing both
+// through one function is what stops the four call sites that used to assign
+// createPaneStep = 3 from having to agree about it.
+func (m *Model) advanceFromPluginChoice() tea.Cmd {
+	if m.createPaneTarget == paneTargetNewTab {
+		out, cmd := m.handleCreatePaneSplit()
+		*m = out.(Model)
+		return cmd
+	}
+	m.dialog = dialogCreatePane
+	m.createPaneStep = 3
+	m.dialogCursor = 0
+	return nil
 }
 
 // openInstanceForm initializes the instance form dialog with default values.
@@ -1847,6 +2160,7 @@ func (m *Model) openInstanceForm(p *plugin.PanePlugin) {
 
 // handleCreatePaneSplit handles the final split direction selection (step 3).
 func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
+	target := m.createPaneTarget
 	pluginName := m.selectedPlugin
 	instanceName := m.selectedInstanceName
 	instanceArgs := m.selectedInstanceArgs
@@ -1871,10 +2185,13 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 	if cwd != "" {
 		m.lastSelectedCWD = cwd
 		m.recentCWDs = pushRecentCWD(m.recentCWDs, cwd, recentCWDMax)
-		// Scoped to the ACTIVE project's daemon: the directory was picked on
-		// that machine's disk, so filing it under another host's recent list
-		// would offer a path that does not exist there.
-		if err := SaveRecentCWDs(config.RecentCWDsPath(m.activeDest()), m.recentCWDs); err != nil {
+		// Scoped to the daemon the DIALOG was opened against, not the active
+		// project's: the directory was browsed on that machine's disk, so filing
+		// it anywhere else offers a path that does not exist there. The two
+		// differ exactly when createPaneDest exists to matter — the active
+		// project moved while the dialog was open — and the pane itself goes to
+		// createPaneDest, so the recent list has to follow it.
+		if err := SaveRecentCWDs(config.RecentCWDsPath(m.recentCWDsDest()), m.recentCWDs); err != nil {
 			log.Printf("create pane: save recent cwds: %v", err)
 		}
 	}
@@ -1901,6 +2218,53 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 	m.worktreeScroll = 0
 	m.worktrees = worktreeState{}
 	m.resetSessionSelection()
+
+	// The new-tab branch returns HERE — after the teardown, before everything
+	// below it — and both halves of that position are load-bearing.
+	//
+	// After the teardown, so a new-tab create leaves exactly as little behind as
+	// a split does. Before the rest, because none of it applies: m.dialogCursor
+	// is read below to pick horizontal/vertical/replace and holds whatever the
+	// last list left there (the placement step never ran), the active-tab and
+	// active-pane requirements describe a pane to split FROM — which is also
+	// what keeps this working during the startup window, when there is no tab
+	// yet — and every piece of bookkeeping past this point (pendingSplit,
+	// worktreeCreates, worktreeReplaced, the give-up tick) is keyed by a tab id
+	// that will not exist until the daemon answers. Nothing is detached and no
+	// leaf is reserved, so there is nothing to unwind and nothing to time out:
+	// the tab arrives whole on the next broadcast.
+	if target == paneTargetNewTab {
+		var spec *ipc.WorktreeSpec
+		if newBranch != "" {
+			if newBranchRepo == "" {
+				// Same refusal the split path makes just below, for the same
+				// reason: falling back to the browsed directory is the nested-
+				// worktree bug.
+				logger.Debug("create tab: REFUSED, branch %q has no known repository root", newBranch)
+				m.setFlash("worktree not created: the repository root is not known yet")
+				return m, m.flashCmd()
+			}
+			spec = &ipc.WorktreeSpec{RepoRoot: newBranchRepo, Branch: newBranch}
+			// Armed so the daemon's answer can be reported. Keyed by BRANCH, not
+			// by tab: this create has no tab id until the daemon mints one, which
+			// is also why it arms none of the tab-keyed bookkeeping the split
+			// path uses. applyCreatePaneResp consumes it.
+			if m.newTabWorktrees == nil {
+				m.newTabWorktrees = make(map[string]bool)
+			}
+			m.newTabWorktrees[newBranch] = true
+		}
+		logger.Debug("create tab: submitting cwd=%q type=%s instance=%s branch=%q repo=%q",
+			cwd, pluginName, instanceName, newBranch, newBranchRepo)
+		return m, m.sendCreateTab(&ipc.FirstPaneSpec{
+			Type:            pluginName,
+			CWD:             cwd,
+			InstanceName:    instanceName,
+			InstanceArgs:    instanceArgs,
+			ResumeSessionID: resumeSessionID,
+			Worktree:        spec,
+		})
+	}
 
 	tab := m.activeTabModel()
 	if tab == nil {
@@ -2381,14 +2745,8 @@ func (m Model) submitInstanceForm(p *plugin.PanePlugin) (tea.Model, tea.Cmd) {
 	m.selectedInstanceArgs = BuildArgs(p.Command.ArgTemplate, fieldMap)
 	m.selectedInstanceName = name
 
-	// Either show setup dialog (CWD/toggles) or proceed to split direction.
-	if cmd := m.enterSetupOrSplit(p); cmd != nil {
-		return m, cmd
-	}
-	m.dialog = dialogCreatePane
-	m.createPaneStep = 3
-	m.dialogCursor = 0
-	return m, nil
+	// Either show setup dialog (CWD/toggles) or finish choosing.
+	return m, m.enterSetupOrSplit(p)
 }
 
 func (m Model) renderInstanceFormDialog() string {
@@ -2916,9 +3274,11 @@ func (m Model) renderPluginErrorDialog() string {
 // already used for handleInstanceFormKey + openInstanceForm in this file.
 
 // enterSetupOrSplit routes after a plugin or instance is picked: either show
-// the setup dialog (if plugin needs CWD prompt or has toggles) or jump to
-// split-direction selection. Returns nil when no setup is needed, in which
-// case the caller is responsible for advancing to step 3.
+// the setup dialog (if the plugin prompts for a CWD or has toggles) or finish
+// choosing via advanceFromPluginChoice — which means the placement step for a
+// split, and the submit itself for a new tab. Callers must NOT advance the step
+// themselves; four of them used to, and keeping them in agreement is exactly
+// what that helper exists to remove.
 //
 // Receiver is *Model because this method always mutates state — even on the
 // "no setup" branch it must clear stale CWD/toggle state from a prior plugin
@@ -2973,8 +3333,7 @@ func (m *Model) enterSetupOrSplit(p *plugin.PanePlugin) tea.Cmd {
 	needsSetup := p != nil && (p.Command.PromptsCWD || len(p.Command.Toggles) > 0 ||
 		p.Command.Discover == "kube" || p.Command.Sessions == "claude")
 	if !needsSetup {
-		m.createPaneStep = 3
-		return nil
+		return m.advanceFromPluginChoice()
 	}
 
 	// The browser's pre-fill now costs a round trip, so the dialog opens first
@@ -2983,23 +3342,14 @@ func (m *Model) enterSetupOrSplit(p *plugin.PanePlugin) tea.Cmd {
 
 	if p.Command.PromptsCWD {
 		if p.Command.Discover == "git" {
-			// Discovery base is the active pane's OSC7 CWD directly — not
-			// lastSelectedCWD (that memory belongs to the generic browser; a
-			// stale last-choice from another project would seed wrong
-			// candidates).
-			var base string
-			if tab := m.activeTabModel(); tab != nil {
-				if pane := tab.ActivePaneModel(); pane != nil {
-					base = pane.CWD
-				}
-			}
+			base := m.setupDiscoveryBase()
 			// Asked of the DAEMON, never resolved here — gitdiscover run in this
 			// process stats the machine drawing the UI, which is the wrong disk
 			// whenever the daemon is remote (RD-021). Whether there turn out to
 			// be any candidates isn't known until the answer lands, so the
 			// recent-locations/browser fallback that used to run right below
 			// this branch now runs in applyGitReposPickList instead.
-			browseCmd = m.requestGitRepos(base, "", repoScanPickList)
+			browseCmd = m.requestGitRepos(base, "", repoScanPickList, "")
 		} else {
 			browseCmd = m.fallbackToRecentOrBrowser()
 		}
@@ -4115,11 +4465,9 @@ func (m Model) submitSetupDialog(p *plugin.PanePlugin) (tea.Model, tea.Cmd) {
 		m.selectedInstanceArgs = merged
 	}
 
-	m.dialog = dialogCreatePane
-	m.createPaneStep = 3
-	m.dialogCursor = 0
 	m.dialogEdit = false
-	return m, tea.ClearScreen
+	cmd := m.advanceFromPluginChoice()
+	return m, tea.Batch(tea.ClearScreen, cmd)
 }
 
 // renderSetupSessionField draws the resume-session picker.

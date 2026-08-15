@@ -249,8 +249,8 @@ func (m *Model) sidebarRows(w int) ([]sidebarRow, int) {
 		// either half, and the badges that say whether the project needs you
 		// are what gets truncated away first.
 		rows = append(rows, sidebarRow{
-			text: projectRow(sanitizeRemoteText(p.Name),
-				p.counts(), m.linkGlyph(p.Dest, p.Offline), i == m.activeProject, w, p.Offline),
+			text: projectRow(sanitizeRemoteText(p.Name), p.counts(), m.workSpinnerFrame,
+				m.linkGlyph(p.Dest, p.Offline), i == m.activeProject, w, p.Offline),
 			kind:  sidebarRowProject,
 			index: i,
 		})
@@ -746,9 +746,12 @@ func (m Model) hitTestSidebarEdge(x, y int) bool {
 // emoji-presentation alternative (U+FE0F, which lipgloss does measure as two)
 // walks straight into the per-rune truncation overflow documented on
 // truncateCells. A codepoint that was never emoji needs neither.
+//
+// The WORKING state is the one member of this vocabulary that is NOT a
+// constant — it animates, and lives in workingGlyph below. Every frame it can
+// return is bound by the same rule as the constants here.
 const (
 	glyphBlocked = "▲" // parked waiting on the user — needs you
-	glyphWorking = "◐" // turn in flight
 	glyphDone    = "✓" // finished while you were away
 	glyphIdle    = "○" // nothing happening
 	glyphPinned  = "◆" // attention pinned by hand — never auto-cleared
@@ -759,6 +762,57 @@ const (
 	// the state-vocabulary confusion the rest of this file exists to remove.
 	glyphMore = "⋯" // more rows in this direction (U+22EF)
 )
+
+// workingGlyph is the WORKING state's glyph: an ANIMATED braille frame, taken
+// from the same spinnerFrames the tab label and the pane's top border already
+// cycle, rather than a static rune of the sidebar's own.
+//
+// One fact, one indicator. The sidebar spent a still ◐ on the state the tab bar
+// two rows above was spinning ⠹ for, and the sidebar is the level that lists
+// every pane at once — so it is exactly where a second notation for "this agent
+// is running" reads as a second STATE. Motion is also what separates working
+// from the four states that are not: ▲/✓/◆/○ all describe something that has
+// stopped, and a static ◐ among them says "in progress" only if you already
+// know the vocabulary.
+//
+// Every frame satisfies the const block's rule above — one rune, one cell,
+// Emoji=No — and TestSidebarGlyphs_OneCellAndNotEmojiCapable sweeps them all
+// rather than the single value a constant would have had.
+//
+// The frame is a PARAMETER rather than a read of the Model, because the callers
+// hold different copies of the same counter: paneRow passes the pane's own
+// mirrored workFrame (what buildTopBorder renders, so a pane's row and its
+// border cannot disagree), and projectRow passes the shared workSpinnerFrame it
+// is derived from. The tick writes both in one pass, so every level animates in
+// lockstep.
+//
+// It is the ONE definition of the index→glyph mapping for the work spinner —
+// all four renderers of it go through here (tabLabel in model.go, buildTopBorder
+// in pane.go, and this file's two rows). Sidebar-only centralisation was the
+// first version and it is not enough to keep the promise the paragraph above
+// makes: with the other two hand-rolling `spinnerFrames[f%len(f)]`, any change
+// here — a guard, an offset, a different subset of frames — moves the sidebar
+// and leaves the border behind, which is the "one fact, two notations" state
+// this function exists to remove, reappearing one level down. The tab label is
+// cross-checked against the sidebar by
+// TestSidebar_WorkingIndicatorAnimatesWithTheTabSpinner; the border is checked
+// by nothing, since border_test.go passes frame 0 — the single value where every
+// implementation agrees by construction.
+//
+// NOT shared with the RESTORE spinner (pane.go's p.spinnerFrame), deliberately:
+// that is a different counter with a different lifecycle, describing a pane
+// coming back rather than an agent working, and the two are free to diverge.
+//
+// The double modulo is defence for a RENDER path. Both work counters are
+// client-local and monotonic from zero, so a negative frame is unreachable
+// today — but Go's % keeps the sign of the dividend, so if one ever arrives the
+// index panics, and a panic in View() takes down the whole multiplexer rather
+// than one glyph. One line, and it is free for every value that actually
+// occurs; it is only worth having because this is now the single site.
+func workingGlyph(frame int) string {
+	n := len(spinnerFrames)
+	return spinnerFrames[((frame%n)+n)%n]
+}
 
 // sidebarHeadingStyle / sidebarDimStyle / the state-glyph styles mirror the
 // palette already used for tab/pane state elsewhere (styles.go): amber for
@@ -1060,7 +1114,7 @@ func sidebarTabHeading(name string, idx int, active bool, color string, w int) s
 // The active project keeps sidebarActiveStyle even when offline: "where am I"
 // outranks "what is wrong with it", and the link glyph beside the name says
 // the rest.
-func projectRow(name string, c paneStateCounts, link string, active bool, w int, offline *OfflineState) string {
+func projectRow(name string, c paneStateCounts, workFrame int, link string, active bool, w int, offline *OfflineState) string {
 	marker := "  "
 	if active {
 		marker = "▸ "
@@ -1085,8 +1139,25 @@ func projectRow(name string, c paneStateCounts, link string, active bool, w int,
 	if c.blocked > 0 {
 		segs = append(segs, styledSegment{fmt.Sprintf(" %s%d", glyphBlocked, c.blocked), sidebarBlockedStyle})
 	}
+	// The badge's working glyph is the SAME frame the pane rows below are
+	// drawing (workFrame is the counter theirs is mirrored from), so the roll-up
+	// spins with the rows it rolls up rather than beside them out of phase.
+	//
+	// It keeps spinning for an OFFLINE destination, and that is a decision
+	// rather than an oversight. resetWorkStateForReattach runs on reattach, so
+	// a host that drops mid-turn leaves its panes `working` and the badge
+	// asserts motion about a machine we cannot reach. Freezing it HERE is
+	// cheap — `offline` is in hand — and that is exactly why it is wrong: the
+	// pane rows, the tab label and the pane border have no offline state
+	// threaded to them, so a lone frozen badge would put two answers about one
+	// pane on one screen, which is the defect this whole change removes. The
+	// honest signal for "unreachable" is the link glyph on this very row
+	// (⚡/⟳) plus the reconnect banner; the spinner's job is to report the last
+	// state the daemon gave us, and a still ◐ was equally stale before — just
+	// stale-and-neutral rather than stale-and-confident. Revisit as ONE change
+	// across all four renderers, or not at all.
 	if c.working > 0 {
-		segs = append(segs, styledSegment{fmt.Sprintf(" %s%d", glyphWorking, c.working), sidebarWorkingStyle})
+		segs = append(segs, styledSegment{fmt.Sprintf(" %s%d", workingGlyph(workFrame), c.working), sidebarWorkingStyle})
 	}
 	if c.done > 0 {
 		segs = append(segs, styledSegment{fmt.Sprintf(" %s%d", glyphDone, c.done), sidebarUnseenStyle})
@@ -1128,8 +1199,9 @@ func projectRow(name string, c paneStateCounts, link string, active bool, w int,
 	return renderStyledSegments(segs, w)
 }
 
-// paneRow renders one pane's agent state: ◐ working (with ⋯N outstanding
-// subagents when any are running), ▲ blocked-on-user (with the hook-reported
+// paneRow renders one pane's agent state: a spinning braille frame for working
+// (workingGlyph, with ⋯N outstanding subagents when any are running),
+// ▲ blocked-on-user (with the hook-reported
 // tool name when present — never invented when blockedReason is empty), ◆
 // pinned attention (outranked only by blocked/working, which then keep it as a
 // trailing ◆ suffix so a pin never goes dark under a transient state), ✓ done
@@ -1164,7 +1236,10 @@ func paneRow(pane *PaneModel, focused bool, w int) string {
 			suffix = " " + sanitizeRemoteText(pane.blockedReason)
 		}
 	case pane.working:
-		glyph, style = glyphWorking, sidebarWorkingStyle
+		// pane.workFrame, not the Model's counter: it is the value the tick
+		// mirrors onto this pane and the one buildTopBorder renders, so the row
+		// and the pane's own border always show the same frame.
+		glyph, style = workingGlyph(pane.workFrame), sidebarWorkingStyle
 		// "+" when the ledger overflowed: a refused start may still be live
 		// with no entry to count, so the number is a floor. Marking it beats
 		// printing a confidently low count — and the badge still appears when

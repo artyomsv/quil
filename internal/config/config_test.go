@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/artyomsv/quil/internal/config"
 )
@@ -179,6 +180,23 @@ func TestDefault_ToggleLazygitBinding(t *testing.T) {
 	cfg := config.Default()
 	if cfg.Keybindings.ToggleLazygit != "alt+g" {
 		t.Errorf("ToggleLazygit = %q, want alt+g", cfg.Keybindings.ToggleLazygit)
+	}
+}
+
+// TestDefault_ToggleHunkBinding pins alt+d rather than the more obvious alt+h.
+//
+// Alt+H is a documented deliberate PTY passthrough (see the PaneLeft comment in
+// config.go and .claude/rules/tui-rendering.md): it is left unbound at the
+// global level so it reaches the child process, alongside Alt+V, which
+// claude-code uses for image paste. Binding it here would take that away
+// silently from every pane.
+func TestDefault_ToggleHunkBinding(t *testing.T) {
+	cfg := config.Default()
+	if cfg.Keybindings.ToggleHunk != "alt+d" {
+		t.Errorf("ToggleHunk = %q, want alt+d", cfg.Keybindings.ToggleHunk)
+	}
+	if cfg.Keybindings.ToggleHunk == "alt+h" {
+		t.Error("alt+h is reserved for the PTY passthrough — see tui-rendering.md")
 	}
 }
 
@@ -363,5 +381,63 @@ func TestOverlayConfig_TOMLRoundTrip(t *testing.T) {
 	}
 	if out.Overlay != in.Overlay {
 		t.Errorf("round trip = %+v, want %+v", out.Overlay, in.Overlay)
+	}
+}
+
+func TestDesktopNotificationDefaults(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	cfg := config.Default()
+	d := cfg.Notification.Desktop
+
+	if !d.Enabled {
+		t.Error("desktop notifications must default to ON — the flag expresses intent; registration is the gate")
+	}
+	if !d.Blocked || !d.Done {
+		t.Errorf("both kinds default on: blocked=%v done=%v", d.Blocked, d.Done)
+	}
+	if got := d.CooldownDuration(); got != 5*time.Second {
+		t.Errorf("CooldownDuration() = %v, want 5s", got)
+	}
+}
+
+// A garbage value must not disable the rate limit — that would turn a typo
+// into a toast storm.
+func TestDesktopCooldownDuration_FallsBackOnGarbage(t *testing.T) {
+	tests := []struct {
+		in   string
+		want time.Duration
+	}{
+		{"30s", 30 * time.Second},
+		{"2m", 2 * time.Minute},
+		{"", 5 * time.Second},
+		{"nonsense", 5 * time.Second},
+		{"-5s", 5 * time.Second},
+		{"0s", 5 * time.Second},
+	}
+	for _, tt := range tests {
+		d := config.DesktopConfig{Cooldown: tt.in}
+		if got := d.CooldownDuration(); got != tt.want {
+			t.Errorf("Cooldown %q → %v, want %v", tt.in, got, tt.want)
+		}
+	}
+}
+
+// The desktop block must survive a save/load round trip, or a Settings toggle
+// silently reverts on the next launch.
+func TestDesktopConfig_RoundTrips(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	in := config.Default()
+	in.Notification.Desktop.Enabled = false
+	in.Notification.Desktop.Done = false
+	in.Notification.Desktop.Cooldown = "90s"
+	if err := config.Save(path, in); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	out, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if out.Notification.Desktop != in.Notification.Desktop {
+		t.Errorf("round trip = %+v, want %+v", out.Notification.Desktop, in.Notification.Desktop)
 	}
 }

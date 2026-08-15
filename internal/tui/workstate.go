@@ -127,6 +127,28 @@ func (m *Model) jumpToPane(paneID string) (bool, tea.Cmd) {
 	proj.activeTab = tabIdx
 	target := proj.tabs[tabIdx]
 	target.ActivePane = paneID
+	// The Active FLAG is set here, not left to the caller. ActivePane alone
+	// routes keystrokes, but Active is what draws the pane's cursor
+	// (renderPane) and its focused border — so a pane raised without it looks
+	// dead: no cursor anywhere, the pane the user left still wearing the active
+	// border. Reported against the desktop toast ("that pane is shown, but
+	// focus is not on that pane so I cannot start input"), and every other
+	// caller of this choke point had it too — MCP set_active_pane, the
+	// notification sidebar and pane-history back. Only the palette's goToPane
+	// escaped, by doing the flag dance itself around the call.
+	//
+	// ActivePaneModel() cannot cover this: it heals a stale ID, never a stale
+	// flag, which is the same note ctxmenu.go carries. The outgoing tab is
+	// cleared through treeActivePaneModel (no side effects — it must not adopt
+	// a leaf in a tab being left), and finalizeTabPanes then sets the flag on
+	// the arriving pane and clears every sibling, which also covers a jump
+	// WITHIN one tab where `from` and `target` are the same.
+	if from != nil && from != target {
+		if old := from.treeActivePaneModel(); old != nil {
+			old.Active = false
+		}
+	}
+	m.finalizeTabPanes(target)
 	// The jump may have crossed a project — and therefore a daemon — boundary,
 	// so every later unstamped send has a new right answer.
 	m.syncActiveDest()
@@ -235,11 +257,20 @@ func (m *Model) applyWorkTransition(paneID, eventType string, data map[string]st
 	if kind == workNone {
 		return
 	}
-	pane, proj, tabIdx := m.findPaneAndTab(paneID)
+	// The tab index is deliberately dropped: deciding whether the user saw this
+	// completion is userIsWatching's job alone, and re-deriving half of it here
+	// from a local is how the two definitions drifted apart in the first place.
+	pane, proj, _ := m.findPaneAndTab(paneID)
 	if pane == nil {
 		return
 	}
 	wasWorking := pane.working
+	// Captured beside wasWorking for the same reason: the edge actions below
+	// key off a before/after pair so they fire exactly once per transition.
+	// blockedSince is written at two points in the switch and unseen at one, so
+	// hooking each write would silently miss a fourth added later.
+	wasBlocked := !pane.blockedSince.IsZero()
+	wasUnseen := pane.unseen
 	abort := false
 	switch kind {
 	case workStart:
@@ -416,11 +447,27 @@ func (m *Model) applyWorkTransition(paneID, eventType string, data map[string]st
 		// IS marked — its green border is the cue. An abort (process exit)
 		// clears the spinner without marking: a crash is not a completed
 		// turn.
-		focused := proj == m.cur() && tabIdx == proj.activeTab && proj.tabs[tabIdx].ActivePane == paneID
-		if !focused {
+		//
+		// userIsWatching, not the three-part on-screen test this line used to
+		// inline: a pane on screen in a terminal that is BEHIND ANOTHER WINDOW
+		// was being counted as seen, which is the state a user is in every time
+		// they ask an agent something and alt-tab away. See the comment there —
+		// it also cost the desktop toast, which fires on this mark's rising
+		// edge. Nothing changes visually for a pane marked this way: tabUnseen
+		// excludes the active tab and the active pane border outranks the green
+		// one, so the mark is invisible until it matters and is cleared by
+		// ackFocusedPane the moment the user comes back.
+		if !m.userIsWatching(paneID) {
 			pane.unseen = true
 		}
 	}
+
+	// Desktop toast on the RISING edge of either attention state. One call
+	// site, deriving both from the pair captured at the top — see
+	// raiseAttentionToast. Withdrawal is NOT here: the falling edge has no
+	// choke point (the user typing an answer clears blockedSince without any
+	// hook firing at all), so it is a sweep in Update instead.
+	m.raiseAttentionToast(pane, proj, wasBlocked, wasUnseen)
 }
 
 // coalescedCount extracts the ingester's burst count from an event's Data
@@ -463,6 +510,17 @@ func coalescedCount(data map[string]string) int {
 // context menu's two attention rows send MsgUpdatePane; focus is not a route to
 // a clear at all.
 func (m *Model) ackFocusedPane() {
+	// A window the user is not looking at cannot acknowledge anything, and this
+	// half was missing: with it absent the mark set by a turn that finished
+	// while the terminal was in the background was cleared again on the very
+	// next message — the 1 s size poll guarantees one — so the desktop toast
+	// raised on that mark's rising edge was withdrawn by the sweep before the
+	// user could act on it. Same shape as the blockedSince clear this function
+	// used to do and no longer does: a signal removed ~one tick after it was
+	// set is indistinguishable from one that was never set at all.
+	if !m.termFocused {
+		return
+	}
 	tab := m.activeTabModel()
 	if tab == nil || tab.Root == nil || tab.ActivePane == "" {
 		return
@@ -662,6 +720,11 @@ func syncPaneMeta(pane *PaneModel, info *PaneInfo, wideCanvas bool, minNativeCol
 	pane.GitDetached = info.GitDetached
 	pane.GitWorktree = info.GitWorktree
 	pane.GitWorktreeName = info.GitWorktreeName
+	// Unconditional like the rest: a pane whose worktree Quil no longer owns —
+	// a restore that could not confirm it, a daemon that dropped the record —
+	// must stop being offered for deletion, and the absent key is what says so.
+	pane.WorktreeOwned = info.WorktreeOwned
+	pane.WorktreePath = info.WorktreePath
 	pane.GitUpstream = info.GitUpstream
 	pane.GitAhead = info.GitAhead
 	pane.GitBehind = info.GitBehind

@@ -4,8 +4,8 @@ import "testing"
 
 func TestActions_RegistryIntegrity(t *testing.T) {
 	acts := Actions()
-	if len(acts) != 41 {
-		t.Fatalf("registry has %d actions, want 41 (one per KeybindingsConfig field)", len(acts))
+	if len(acts) != 42 {
+		t.Fatalf("registry has %d actions, want 42 (one per KeybindingsConfig field)", len(acts))
 	}
 	seen := make(map[ActionID]bool, len(acts))
 	orders := make(map[int]ActionID, len(acts))
@@ -33,18 +33,26 @@ func TestActions_TierSplitMatchesLegacySwitches(t *testing.T) {
 	// was on. Moving one between tiers changes whether a plugin's raw_keys
 	// entry beats it. Cited by symbol, never by line: the two switches have
 	// moved twice already, and a stale line number reads as a fact.
+	//
+	// pane.toggle_hunk has no pre-rewrite position — it arrived on master
+	// after this branch was cut. It is pinned against where MASTER put its
+	// kbMatches arm instead: ahead of tryPluginRawKey, between toggle_lazygit
+	// and command_history, which is the early switch. The two overlay toggles
+	// share one slot per tab, so splitting them across the seam would let a
+	// plugin's raw_keys claim one of the pair and not the other.
 	early := map[ActionID]bool{
 		"notification.toggle": true, "notification.focus": true,
 		"sidebar.toggle": true, "pane.go_back": true, "pane.mute": true,
 		"pane.toggle_eager": true, "pane.toggle_wrap": true,
-		"pane.toggle_lazygit": true, "pane.command_history": true,
-		"pane.quick_actions": true, "project.new": true,
+		"pane.toggle_lazygit": true, "pane.toggle_hunk": true,
+		"pane.command_history": true,
+		"pane.quick_actions":   true, "project.new": true,
 		"project.destroy": true, "project.picker": true,
 		"project.next": true, "project.prev": true,
 		"project.toggle": true, "project.attention_queue": true,
 	}
-	if len(early) != 17 {
-		t.Fatalf("expected-early table has %d entries, want 17", len(early))
+	if len(early) != 18 {
+		t.Fatalf("expected-early table has %d entries, want 18", len(early))
 	}
 	for _, a := range Actions() {
 		want := TierLate

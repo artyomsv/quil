@@ -15,6 +15,8 @@ When things go sideways, this is the first place to look.
 - [Extra space / garbled text when typing on Windows 10](#extra-space--garbled-text-when-typing-on-windows-10)
 - [Pane shows ghost (dimmed border) and never goes live](#pane-shows-ghost-dimmed-border-and-never-goes-live)
 - [Claude Code session doesn't resume](#claude-code-session-doesnt-resume)
+- [No desktop notifications (Windows)](#no-desktop-notifications-windows)
+- [Clicking a toast switches panes but does not bring the window forward](#clicking-a-toast-switches-panes-but-does-not-bring-the-window-forward)
 - [Log files — where to look](#log-files--where-to-look)
 - [Enable debug logging](#enable-debug-logging)
 - [Force-stop the daemon](#force-stop-the-daemon)
@@ -197,6 +199,72 @@ Quil tracks Claude session-id rotation via a `SessionStart` hook. If the hook di
 
 For OpenCode the equivalent files are under `~/.quil/opencodehook/` and `~/.quil/sessions/opencode-<pane-id>.id` — see [Features → OpenCode session-id tracking](features.md#opencode-session-id-tracking).
 
+## No desktop notifications (Windows)
+
+Check in this order — the first item is the usual cause, because the config flag is already on by default and registration is the remaining gate.
+
+**1. Register.** Desktop toasts need a Start Menu shortcut and a `quil://` handler, and nothing writes them as a side effect of the config flag:
+
+```bash
+quil notify status     # says "Registered: NO" until you do this
+quil notify setup
+```
+
+**2. Send a canary.** `quil notify test` shows one self-labelled toast from the real binary. This is the only way to exercise the whole path — a `go test` binary cannot, because Windows resolves an unpackaged app's identity by matching the running process to a Start Menu shortcut that points at it.
+
+**3. `quil notify test` reports notifications are turned off.** Open Settings → System → Notifications and check that notifications are enabled for your account and not blocked by group policy. This is the one case Quil refuses to toast, because Windows would silently discard it anyway.
+
+**4. A stale `require_blur = true` in your config.** An earlier build wrote this key, and because `config.Save` persists the whole struct it survives on disk. It gated toasts on the *whole terminal* being unfocused, so nothing fired while you were anywhere inside Quil. The key no longer exists and is ignored, but if you are on an older build, delete the line — this was the single most common cause of "no toasts at all".
+
+**5. You are looking at that pane.** The active pane of the active tab of the active project never toasts while the terminal has focus — you can already see it. Switch to another tab and it fires; that switch is itself a trigger.
+
+**6. The pane is muted.** `Alt+M` suppresses toasts as well as sidebar rows.
+
+**7. The cooldown.** One toast per pane per 5 s, shared across both kinds. This is a floor against a runaway agent, not a batching window — if you are testing with rapid turns you can still outrun it. Tune with `cooldown` in `[notification.desktop]`.
+
+**8. Check the Settings row.** `F1 → Settings → Desktop notifications` reports state, not the flag: `on` means registered and working, `on (run notify setup)` means the flag is on but nothing is registered, `unsupported` means you are not on Windows.
+
+## Clicking a toast switches panes but does not bring the window forward
+
+That is the intended behaviour, and it is a limit of Windows rather than a
+setting you are missing.
+
+Clicking a notification hands the foreground to the shell's notification host,
+and it keeps it — measured on one machine at 5.5 seconds for one click and more
+than 10 for the next, released when the user next does something rather than on
+any timer. For as long as it holds the foreground, every documented way of
+taking it is refused; by the time it lets go, you have moved on, and a window
+appearing then interrupts rather than helps. Windows highlights the taskbar
+button instead, which is its own way of saying an application wants you.
+
+So a click switches Quil to the right project, tab and pane and focuses that
+pane. Switch to the terminal when you are ready and you are already where the
+toast was sending you.
+
+If a click seems to do nothing at all, the handler records every one:
+
+```bash
+tail -3 ~/.quil/notify-activate.log
+```
+
+- `routed pane … to pid …` — the click was delivered
+- `no listener for pane … (pid …)` — the toast outlived the Quil that showed it
+- `refused malformed activation URI` — something invoked `quil://` with a
+  payload Quil will not act on
+
+**If you upgraded from a build before `quil-activate.exe` existed, re-run
+`quil notify setup`.** The handler is registered by path, so an existing
+registration keeps pointing at the old console-based one until setup rewrites
+it — and that one flashes a console window on every click.
+
+To undo everything Quil wrote:
+
+```bash
+quil notify setup --remove
+```
+
+Dev builds register separately (`quil-dev://`, `Quil (dev).lnk`), so `quil-dev.exe notify setup --remove` will not touch a production registration.
+
 ## Log files — where to look
 
 | File | What's in it |
@@ -207,6 +275,7 @@ For OpenCode the equivalent files are under `~/.quil/opencodehook/` and `~/.quil
 | `~/.quil/claudehook/hook.log` | Errors from the Claude Code SessionStart hook |
 | `~/.quil/opencodehook/hook.log` | Errors / breadcrumbs from the OpenCode JS plugin |
 | `~/.quil/quild.stderr.log` | Daemon panics and SIGQUIT goroutine dumps (anything the Go runtime writes to stderr) |
+| `~/.quil/notify-activate.log` | One line per desktop-toast click: which pane it routed to and whether the window could be raised. Written by the short-lived process Windows spawns for the click, which has no other way to report — truncated at 64 KiB |
 
 From inside the TUI: `F1 → View client log` / `View daemon log` / `View MCP logs` opens a read-only viewer with `Alt+Up` / `Alt+Down` for paged navigation.
 

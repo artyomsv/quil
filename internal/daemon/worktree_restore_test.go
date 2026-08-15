@@ -197,3 +197,35 @@ func TestSpawnPane_ClearsAStaleSpawnError(t *testing.T) {
 		t.Errorf("SpawnError = %q after a successful spawn, want it cleared", got)
 	}
 }
+
+// The PATH has to survive alongside the ownership bit, and for the same reason
+// the bit does: after a restart the pane's CWD is whatever the shell last
+// reported, so a daemon that kept only the bit can no longer say which
+// directory it created. Driven through disk, like its sibling above — a key the
+// writer emits and the reader ignores is the same bug one step later.
+func TestSnapshot_WorktreePathSurvivesTheRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	d := newTestDaemonInDir(t, dir)
+	tab := d.session.CreateTab("t")
+	pane, err := d.session.CreatePane(tab.ID, t.TempDir())
+	if err != nil {
+		t.Fatalf("CreatePane: %v", err)
+	}
+	pane.WorktreeOwned = true
+	pane.WorktreePath = filepath.Join(t.TempDir(), "feat-a")
+	want := pane.WorktreePath
+	d.snapshot()
+
+	d2 := newTestDaemonInDir(t, dir)
+	if err := d2.restoreWorkspace(); err != nil {
+		t.Fatalf("restoreWorkspace: %v", err)
+	}
+
+	got := d2.session.Pane(pane.ID)
+	if got == nil {
+		t.Fatal("pane did not survive restore")
+	}
+	if got.WorktreePath != want {
+		t.Errorf("WorktreePath = %q, want %q", got.WorktreePath, want)
+	}
+}

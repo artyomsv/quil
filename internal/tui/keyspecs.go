@@ -49,6 +49,7 @@ func keySpecsFromConfig(kb config.KeybindingsConfig) map[keymap.ActionID]string 
 		"pane.toggle_eager":       kb.ToggleEager,
 		"pane.toggle_wrap":        kb.ToggleWrap,
 		"pane.toggle_lazygit":     kb.ToggleLazygit,
+		"pane.toggle_hunk":        kb.ToggleHunk,
 		"pane.command_history":    kb.CommandHistory,
 		"pane.quick_actions":      kb.QuickActions,
 		"notification.toggle":     kb.NotificationToggle,

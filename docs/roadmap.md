@@ -44,6 +44,7 @@ run (user copies override them):
 | **SSH** | POC | `rerun` — reconnect with same args | M4 |
 | **Stripe** | POC | `rerun` — re-listen with same webhook URL | M4 |
 | **lazygit** | Tool | `rerun` — plus per-tab `Alt+G` overlay | v1.22.0 |
+| **hunk** | Tool | `rerun` — plus per-tab `Alt+D` overlay, sharing lazygit's slot | Unreleased |
 | **k9s** | Tool | `rerun` — kube-context pick via `discover = "kube"` | v1.27.0 |
 | **lazysql** | Tool | `rerun` — connections stay in lazysql's manager | v1.28.0 |
 
@@ -308,7 +309,7 @@ A modal, centered, keyboard-first launcher. Entries are grouped under section he
 Tabs were a flat list, so six tabs across three repositories were visually indistinguishable, and an agent parked on a permission prompt in a background tab stayed invisible until you happened to look. Separately, `quil --remote <host>` bound a whole TUI process to one daemon. Both were the same missing piece: nowhere to hang "which work is this" or "which machine is this".
 
 - **Projects** — named, rooted at a directory, owning their own tabs and remembering which one you left them on. Daemon-owned and persisted, so a second client sees the same grouping. An existing `workspace.json` migrates into a single `Default` project with tab order preserved; no prompt, no data loss
-- **Reserved left sidebar** (`Alt+Shift+S`) — projects with a roll-up of their agents, then the active project's panes with live state: `◐` working (`⋯N` subagents), `⚠` blocked on you and the tool it is asking about, `○` idle, `✓` finished-unseen. The roll-ups keep updating for **background** projects, which is the point
+- **Reserved left sidebar** (`Alt+Shift+S`) — projects with a roll-up of their agents, then the active project's panes with live state: `⠹` working — a spinner, the tab bar's own (`⋯N` subagents), `▲` blocked on you and the tool it is asking about, `○` idle, `✓` finished-unseen. The roll-ups keep updating for **background** projects, which is the point
 - **Blocked is distinct from done** — the hook events always carried the difference (`Notification`, `PermissionRequest`, `permission.ask`); the old classifier collapsed them because the UI only needed "mark unseen"
 - **Attention queue** (`Alt+Shift+A`) — jumps to whichever agent has been blocked longest, anywhere in the workspace, cycling on repeated presses. Oldest-first, deliberately not sidebar order
 - **Per-pane git state** — branch, `wt` for a linked worktree, `↑N`/`↓N` against upstream, on a background ticker and cached per checkout so N panes in one repository cost one invocation. Keyed by the **per-checkout** git dir, not the repository's common dir: linked worktrees share a common dir while sitting on different branches, which is the entire reason anyone creates one. `git status --porcelain` is deliberately excluded — the one call that can take seconds on a large repo without fsmonitor. A probe that does not answer keeps its last value and is marked **stale**
@@ -546,9 +547,20 @@ review the diff.
 
 13. **Sound notifications** — audible cue when an agent needs you (both rivals).
     Extends [notification-center](roadmap/notification-center.md).
-14. **OS / desktop notifications** — OSC / `notify-send` / `terminal-notifier` so
-    alerts leave the TUI and work over SSH. Extends
-    [notification-center](roadmap/notification-center.md).
+14. ~~**OS / desktop notifications**~~ — **shipped for Windows.** Toasts fire on
+    the sidebar's own attention states (parked ▲ / finished ✓) for any pane you
+    are not looking at — another tab, another project or another application —
+    and clicking one routes to that exact project, tab and pane through a
+    registered `quil://` handler. Opt-in via
+    `quil notify setup`; see
+    [Features → Desktop notifications](features.md#desktop-notifications).
+    **Still open:** macOS and Linux. The original sketch here named OSC /
+    `notify-send` / `terminal-notifier` — none of those can carry a click back
+    to a specific pane, so they would be a different, lesser feature rather
+    than the same one ported, and shipping them under the same name would
+    overstate what they do. Raising the terminal window on click is also still
+    open: `GetConsoleWindow` returns a ConPTY ghost under Windows Terminal, and
+    WT exposes no way to select a tab within a window.
 15. **Themes + light/dark auto-switch** — multiple presets that follow the host's
     OSC 10/11 colors (herdr ships 18, AoE 8). Quil's theming is minimal today.
 16. **Session lifecycle management** — auto-stop idle sessions plus
@@ -574,13 +586,30 @@ is a major surface and cuts against Quil's TUI/Windows-native focus.
     (AoE). The single largest surface Quil is missing. **Gated on Phase 4
     (mTLS)** — a browser cannot speak `ssh -T host "quil --stdio"`, so
     something has to terminate a network connection carrying real client
-    identity before this can start.
+    identity before this can start. Feasibility was investigated on
+    2026-08-15 and the answer is yes — see
+    [Browser UI](roadmap/browser-ui.md) for why the architecture already
+    suits it (the daemon streams raw PTY bytes; VT emulation is client-side,
+    so xterm.js is a drop-in consumer), the three blockers, and a staged
+    path whose first stage is read-only and needs no protocol change.
 19. **Remote phone access** — expose the dashboard over a Tailscale/Cloudflare
     tunnel with QR + passphrase pairing and Web Push (AoE). Builds on #18.
 20. **Container sandboxing** — isolate agents in Docker/Podman with shared auth
     volumes so they authenticate in-container without re-login (AoE).
 
 ---
+
+## Investigated and Rejected
+
+Directions that were explored, measured, and deliberately not taken. Recorded so the
+question is not re-opened from intuition.
+
+- **Rewriting the daemon in Rust or Zig** (2026-08-15) —
+  [investigation](roadmap/daemon-language-rewrite.md). Rejected: the hot path is
+  bottlenecked by a wire-protocol decision, not by the language. `encoding/json`
+  re-scanning an already-encoded payload was 99% of encode time, and removing it in Go
+  is a 42× encode / 11.5× decode improvement on a byte-identical wire. The document
+  lists the four conditions that would re-open the question.
 
 ## Priority Matrix
 
@@ -598,7 +627,7 @@ section above.
 | 4 | **[gap]** Git worktree-per-session + diff viewer (M15) | Medium | Very High | Core |
 | 5 | Project workspace files (`.quil.toml`) + repo hooks **[gap #19]** | Medium | Very High | Core |
 | ~~6~~ | ~~Command palette (`Alt+Shift+P`)~~ | ~~Medium~~ | ~~High~~ | ~~Done (v1)~~ |
-| 7 | **[gap]** Sound + OS/desktop notifications (M17) | Small | High | Polish |
+| 7 | **[gap]** Sound notifications (M17) — desktop toasts shipped for Windows; sound, macOS and Linux remain | Small | Medium | Polish |
 | 8 | **[gap]** General shell CLI to script panes | Medium | High | Core |
 | 9 | Community plugin registry + executable plugins **[gap]** | Medium | High | Growth |
 | 10 | Smart health monitoring + auto-restart (feeds M14 detection) | Medium | High | Advanced |

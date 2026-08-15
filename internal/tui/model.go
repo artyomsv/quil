@@ -28,6 +28,7 @@ import (
 	"github.com/artyomsv/quil/internal/kubediscover"
 	"github.com/artyomsv/quil/internal/logger"
 	"github.com/artyomsv/quil/internal/memreport"
+	"github.com/artyomsv/quil/internal/notify"
 	"github.com/artyomsv/quil/internal/plugin"
 )
 
@@ -141,6 +142,19 @@ type PaneInfo struct {
 	GitAhead        int
 	GitBehind       int
 	GitStale        bool
+	// WorktreeOwned marks a pane this daemon created a linked worktree for.
+	// GitWorktree beside it says only that the CWD is IN one, which a pane the
+	// user made by hand also satisfies — the close dialog offers deletion on
+	// this field alone, because the offer is a claim that the checkout is
+	// Quil's to remove.
+	WorktreeOwned bool
+	// WorktreePath is the directory git created for this pane, as the daemon
+	// recorded it at creation. The close dialog prices and names THIS, never
+	// CWD: CWD is rewritten by OSC 7 on every `cd`, so pricing it would show
+	// the user one worktree's dirty count while the daemon deleted another.
+	// Empty for a pane restored from a snapshot older than the field, which is
+	// what makes such a pane un-offerable on both sides.
+	WorktreePath string
 	// Model/ContextTokens are daemon-authoritative (extracted from hook event
 	// data at turn boundaries): the model id and context-window token count of
 	// the pane's last completed AI turn. Empty/zero for non-AI panes.
@@ -389,49 +403,79 @@ type Model struct {
 	// daemon's pane consume another's kick and let armReattachReset for one
 	// dest clear the other's flag. Two daemons minting the same UUID is not a
 	// realistic accident, but the invariant should not rest on that.
-	sizedOnce            map[string]bool
-	renaming             bool
-	renameInput          string
-	renamingPane         bool
-	paneRenameInput      string
-	pendingWidth         int
-	pendingHeight        int
-	resizeSeq            int
-	pendingSplit         map[string]*LayoutNode // tabID → placeholder node awaiting pane from daemon
-	pendingOverlayShow   map[string]bool        // tabID → show overlay on its first arrival; set by the Alt+G overlay sender (wired in a follow-up commit); reads/deletes are nil-map-safe
-	dialog               dialogScreen           // active dialog screen
-	dialogCursor         int                    // highlighted item in dialog
-	shortcutsCursor      int                    // scroll position in the Shortcuts list
-	shortcutsScroll      int                    // window origin for the Shortcuts list
-	logViewerReturn      dialogScreen           // dialog to return to when the read-only log/text viewer closes (default About)
-	dialogEdit           bool                   // editing a settings value
-	dialogInput          string                 // text input buffer for editing
-	confirmKind          string                 // "pane" or "tab"
-	confirmID            string                 // ID of pane/tab to delete
-	confirmName          string                 // display name for confirmation
-	confirmDetail        string                 // extra remote-sourced line (upgrade confirm); sanitized+bounded at render
-	upgradeQueue         []upgradePrompt        // hosts waiting to be ASKED about provisioning; see enqueueUpgradePrompt
-	devMode              bool                   // true when QUIL_HOME is set
-	pluginRegistry       *plugin.Registry       // plugin registry (shared with daemon)
-	lastWidth            int                    // last known window width (for persistence)
-	lastHeight           int                    // last known window height (for persistence)
-	createPaneStep       int                    // 0=category, 1=plugin, 2=instance form, 3=split direction
-	selectedCategory     int                    // selected category index in create pane dialog
-	selectedPlugin       string                 // selected plugin name in create pane dialog
-	pluginErrorTitle     string                 // title for plugin error dialog
-	pluginErrorMessage   string                 // message for plugin error dialog
-	instanceStore        InstanceStore          // saved plugin instances (loaded from instances.json)
-	instanceFormValues   []string               // form field values (indexed by FormField position)
-	instanceFormCursor   int                    // active field in instance form
-	selectedInstanceArgs []string               // args from selected instance (for IPC); toggles are appended here
-	selectedInstanceName string                 // name from selected instance (for IPC)
+	sizedOnce          map[string]bool
+	renaming           bool
+	renameInput        string
+	renamingPane       bool
+	paneRenameInput    string
+	pendingWidth       int
+	pendingHeight      int
+	resizeSeq          int
+	pendingSplit       map[string]*LayoutNode // tabID → placeholder node awaiting pane from daemon
+	pendingOverlayShow map[string]bool        // tabID → show overlay on its first arrival; set by the Alt+G overlay sender (wired in a follow-up commit); reads/deletes are nil-map-safe
+	dialog             dialogScreen           // active dialog screen
+	dialogCursor       int                    // highlighted item in dialog
+	shortcutsCursor    int                    // scroll position in the Shortcuts list
+	shortcutsScroll    int                    // window origin for the Shortcuts list
+	logViewerReturn    dialogScreen           // dialog to return to when the read-only log/text viewer closes (default About)
+	dialogEdit         bool                   // editing a settings value
+	dialogInput        string                 // text input buffer for editing
+	confirmKind        string                 // "pane" or "tab"
+	confirmID          string                 // ID of pane/tab to delete
+	confirmName        string                 // display name for confirmation
+	confirmDetail      string                 // extra remote-sourced line (upgrade/apply-update confirm); sanitized+bounded at render
+	pendingApplyVer    string                 // version to apply when the in-flight MsgStageUpdateReq answers; set only by a press meaning APPLY (see applyStageUpdateResp)
+	updateReqInFlight  bool                   // a MsgStageUpdateReq is unanswered; a second press must not queue a second one (see sendStageUpdateReq)
+	applyConfirmReturn dialogScreen           // where Esc on the apply confirm goes: About when the press came from there, else back to the panes
+	// confirmWorktrees holds the worktrees this close would delete, empty for
+	// every close that would delete none — which is what keeps an ordinary
+	// close dialog byte-identical to what it has always been.
+	//
+	// confirmRemoveWorktree is the toggle and is ALWAYS false on open: the
+	// destructive half must be something the user reached for. All three are
+	// cleared by resetConfirmWorktrees on every route out of the dialog.
+	confirmWorktrees      []confirmWorktree
+	confirmRemoveWorktree bool
+	confirmWorktreeGen    string           // in-flight status request; "" = none
+	upgradeQueue          []upgradePrompt  // hosts waiting to be ASKED about provisioning; see enqueueUpgradePrompt
+	devMode               bool             // true when QUIL_HOME is set
+	pluginRegistry        *plugin.Registry // plugin registry (shared with daemon)
+	lastWidth             int              // last known window width (for persistence)
+	lastHeight            int              // last known window height (for persistence)
+	createPaneStep        int              // 0=category, 1=plugin, 2=instance form, 3=split direction
+	createPaneTarget      paneTarget       // where the pane goes: into this tab (Ctrl+N) or a new one (Ctrl+T)
+	// createPaneDest pins the destination the dialog was OPENED against.
+	//
+	// Resolving it at submit instead would read whichever project is active by
+	// then, and this dialog stays open for as long as the user takes — MCP
+	// set_active_pane moves the active project with no keyboard involved. Every
+	// value in the form describes the open-time daemon's disk (the browse and
+	// git-discovery listings were answered by it), so submitting against a
+	// different one hands, at worst, a WorktreeSpec.RepoRoot describing machine
+	// A to machine B's `git worktree add`.
+	createPaneDest string
+	// newTabWorktrees tracks branches asked for by a NEW-TAB create, keyed by
+	// BRANCH because such a create owns no tab id yet — the daemon mints it. It
+	// is the staleness key that lets applyCreatePaneResp report a failed add on
+	// that path without also reporting one belonging to another client.
+	newTabWorktrees      map[string]bool
+	selectedCategory     int           // selected category index in create pane dialog
+	selectedPlugin       string        // selected plugin name in create pane dialog
+	pluginErrorTitle     string        // title for plugin error dialog
+	pluginErrorMessage   string        // message for plugin error dialog
+	instanceStore        InstanceStore // saved plugin instances (loaded from instances.json)
+	instanceFormValues   []string      // form field values (indexed by FormField position)
+	instanceFormCursor   int           // active field in instance form
+	selectedInstanceArgs []string      // args from selected instance (for IPC); toggles are appended here
+	selectedInstanceName string        // name from selected instance (for IPC)
 	// Setup-dialog state. selectedCWD is the value committed at submit time
 	// (a snapshot of cwdBrowseDir) and is what handleCreatePaneSplit reads
 	// for CreatePanePayload.CWD. The two fields exist separately so that the
 	// browser can navigate freely without dirtying the "to be sent" value
 	// until the user actually presses Continue.
 	repoCandidates     []string               // git repos offered by the setup dialog (discover="git"); nil = plain browser
-	repoPickCandidates []string               // candidates for dialogGitRepoPick (Alt+G, multiple repos)
+	repoPickCandidates []string               // candidates for dialogGitRepoPick (Alt+G / Alt+H, multiple repos)
+	repoPickPlugin     string                 // overlay tool the picker will spawn on Enter (lazygit / hunk)
 	kubeContexts       []kubediscover.Context // contexts offered by the setup dialog (discover="kube"); nil = none
 	kubeCursor         int                    // row cursor in the kube field: 0 = Default context, 1.. = kubeContexts
 	kubeScan           kubeScanState          // in-flight kube-context request (zero value = none); see kubeScanState.gen
@@ -570,18 +614,64 @@ type Model struct {
 	// m.dialog is the sole open/closed authority). See projectpicker.go.
 	projectPick projectPickState
 
-	tomlEditor       *TextEditor         // active TOML editor (nil when not editing)
-	selection        *Selection          // active text selection (nil when none)
-	mouseDown        bool                // true while left mouse button is held
-	mouseStartX      int                 // screen X of mouse press
-	mouseStartY      int                 // screen Y of mouse press
-	configChanged    bool                // true when config needs saving on exit
-	disclaimerTipIdx int                 // random tip index for disclaimer dialog
-	mcpHighlights    map[string]bool     // pane IDs with active MCP highlight
-	mcpHighlightSeq  map[string]int      // sequence number for highlight timer reset
-	notifications    *NotificationCenter // notification sidebar
-	paneHistory      []PaneRef           // navigation history (bounded, 20 max)
-	sidebarFocused   bool                // true when notification sidebar has keyboard focus
+	tomlEditor       *TextEditor // active TOML editor (nil when not editing)
+	selection        *Selection  // active text selection (nil when none)
+	mouseDown        bool        // true while left mouse button is held
+	mouseStartX      int         // screen X of mouse press
+	mouseStartY      int         // screen Y of mouse press
+	configChanged    bool        // true when config needs saving on exit
+	disclaimerTipIdx int         // random tip index for disclaimer dialog
+
+	// termFocused tracks whether the terminal window has focus, from
+	// tea.FocusMsg/BlurMsg (DEC 1004).
+	//
+	// Initialised TRUE. A terminal that does not implement focus reporting
+	// sends neither message, so this keeps its initial value for the life of
+	// the process — and the two possible defaults fail in opposite directions.
+	// True means desktop toasts silently never fire there; false means they
+	// fire constantly while the user is looking straight at the screen.
+	// Quiet-and-diagnosable beats loud-and-wrong, so this starts true and
+	// focusEverReported exists to explain the silence.
+	termFocused bool
+
+	// focusEverReported records that at least one focus event arrived, i.e.
+	// that the terminal really does implement DEC 1004. Without it, "no toasts
+	// ever appear" has no distinguishable cause.
+	focusEverReported bool
+
+	// notifier raises desktop toasts. Nil on every platform but Windows, and
+	// nil on Windows until the user has run `quil notify setup` — so every
+	// call site is a single nil check rather than a platform branch.
+	//
+	// notifyOpts is stored rather than re-derived from m.devMode: that field is
+	// QUIL_HOME != "", which is also true for a PROD binary run against a
+	// custom QUIL_HOME, and would then read the dev AUMID that `quil notify
+	// setup` never wrote. The variant is a property of the BUILD, resolved by
+	// cmd/quil and passed in.
+	//
+	// There is deliberately NO cached DesktopConfig here. raiseAttentionToast
+	// reads m.cfg.Notification.Desktop directly — the same field the Settings
+	// row's setter writes — so the toggle applies live by construction rather
+	// than by remembering to sync two copies. Two copies of one value with
+	// independent writers is the shape behind both the applyBrowseDir
+	// staleness bug and the PinnedAttention local-write bug.
+	notifier   desktopNotifier
+	notifyOpts notify.Options
+	notifyPID  int
+
+	// outstandingToasts maps a pane id to the KIND of live toast it has.
+	// The kind is load-bearing, not bookkeeping — see toastKind.
+	outstandingToasts map[string]toastKind
+
+	// lastFocusedPaneID is the previous value of focusedPaneID(), so Update can
+	// notice the user moved away from a pane without walking the workspace.
+	lastFocusedPaneID string
+
+	mcpHighlights   map[string]bool     // pane IDs with active MCP highlight
+	mcpHighlightSeq map[string]int      // sequence number for highlight timer reset
+	notifications   *NotificationCenter // notification sidebar
+	paneHistory     []PaneRef           // navigation history (bounded, 20 max)
+	sidebarFocused  bool                // true when notification sidebar has keyboard focus
 	// sidebarOpen/sidebarWidth control the PROJECT sidebar (internal/tui/sidebar.go)
 	// — not to be confused with the notification sidebar above. Unlike that one
 	// (a compositor overlay, zero layout width), the project sidebar is a real
@@ -792,10 +882,13 @@ func (m *Model) SetRecentCWDs(list []string) { m.recentCWDs = list }
 // frozen at startup.
 func NewModel(client Client, cfg config.Config, version string, registry *plugin.Registry, stalePlugins []plugin.StalePlugin) Model {
 	m := Model{
-		client:           client,
-		cfg:              cfg,
-		version:          version,
-		devMode:          os.Getenv("QUIL_HOME") != "",
+		client:  client,
+		cfg:     cfg,
+		version: version,
+		devMode: os.Getenv("QUIL_HOME") != "",
+		// See the field comment: a terminal with no focus reporting never
+		// corrects this, and assuming focused is the quiet failure.
+		termFocused:      true,
 		pluginRegistry:   registry,
 		instanceStore:    LoadInstances(config.InstancesPath()),
 		recentCWDs:       LoadRecentCWDs(config.RecentCWDsPath("")),
@@ -917,6 +1010,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Acknowledge the focused pane of the active tab before processing the
 	// message — focusing is the acknowledgement; see ackFocusedPane.
 	m.ackFocusedPane()
+	// Beside ackFocusedPane deliberately: this is the one point every message
+	// passes through, and the sweep's own emptiness check makes it free in the
+	// common case. It must not be an edge hook — see sweepOutstandingToasts.
+	m.sweepOutstandingToasts()
+	// Moving away from a pane is a trigger, exactly like leaving the app: a
+	// pane that parked while you were looking at it was correctly suppressed,
+	// and switching tab or project is the moment it becomes something you
+	// cannot see. Keyed on the focused pane CHANGING so this costs one string
+	// compare per message rather than a workspace walk.
+	if cur := m.focusedPaneID(); cur != m.lastFocusedPaneID {
+		m.lastFocusedPaneID = cur
+		m.raiseDeferredToasts()
+	}
 	// A context menu whose target vanished (daemon reconciliation, pane
 	// destroy, MsgDestroyProject from another client) closes itself. Single
 	// choke point — no need to audit every pruning path.
@@ -963,6 +1069,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 	switch msg := msg.(type) {
+	case ActivatePaneMsg:
+		// Validated a third time. The value has already passed
+		// ParseActivateURI and the pipe listener, but this is the boundary that
+		// actually moves the user's focus, and jumpToPane is reached from five
+		// other callers that owe it nothing.
+		if !notify.ValidPaneID(msg.PaneID) {
+			return m, nil
+		}
+		_, cmd := m.jumpToPane(msg.PaneID)
+		return m, cmd
+
+	case tea.FocusMsg:
+		// DEC 1004. Arriving at all is the proof that this terminal reports
+		// focus — see the focusEverReported field comment.
+		m.termFocused = true
+		m.focusEverReported = true
+		return m, nil
+
+	case tea.BlurMsg:
+		m.termFocused = false
+		m.focusEverReported = true
+		// Leaving is itself the trigger. An agent that parked or finished while
+		// you were watching produced a rising edge that was correctly
+		// suppressed — without this, walking away never surfaces it.
+		m.raiseDeferredToasts()
+		return m, nil
+
 	case tea.WindowSizeMsg:
 		// Poll echo: size matches both the applied and any pending value —
 		// nothing to do. Keeps the 1s size poll free when idle.
@@ -2143,6 +2276,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.applyWorktreeList(msg)
 		return m, m.listenForMessages()
 
+	case worktreeStatusMsg:
+		// Same rule: an IPC response arm that does not re-arm ends the loop.
+		m.applyWorktreeStatus(msg)
+		return m, m.listenForMessages()
+
+	case worktreeStatusTimeoutMsg:
+		// Local timer, so deliberately NO re-arm — the distinction
+		// worktreeTimeoutMsg below makes.
+		m.applyWorktreeStatusTimeout(msg)
+		return m, nil
+
 	case createPaneRespMsg:
 		// Same rule: an IPC response arm that returns a bare nil ends the
 		// listen loop for the session.
@@ -2154,6 +2298,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// worktreeTimeoutMsg below makes.
 		m.applyCreatePaneTimeout(msg.tabID)
 		return m, nil
+
+	case createTabFailedMsg:
+		// Not an IPC response — it is the send reporting that it never left, so
+		// no re-arm (the listen loop was never involved). Router.Send would have
+		// dropped this silently and returned nil, which is why the send is
+		// strict: a tab the user asked for and did not get has to say so.
+		m.setFlash("cannot reach " + hostLabel(msg.dest) + " — new tab not created")
+		return m, m.flashCmd()
 
 	case worktreeTimeoutMsg:
 		// Local timer, so deliberately no re-arm.
@@ -2215,18 +2367,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case stageUpdateRespMsg:
-		switch {
-		case msg.Resp.Success:
-			m.setFlash("update v" + msg.Resp.Version + " staged — applies on next launch")
-		case msg.Resp.Error == "already up to date":
-			// handleUpdateAction's "up to date" branch sends this request to
-			// force a fresh check rather than trusting stale broadcast info;
-			// a re-confirmed "up to date" is a normal outcome, not a failure.
-			m.setFlash("quil is up to date (v" + m.version + ")")
-		default:
-			m.setFlash("update failed: " + msg.Resp.Error)
-		}
-		return m, tea.Batch(m.listenForMessages(), m.flashCmd())
+		next, cmd := m.applyStageUpdateResp(msg.Resp)
+		// Always re-arm the listen loop: this is an IPC response, so dropping
+		// the re-arm kills every later message on the connection.
+		return next, tea.Batch(m.listenForMessages(), cmd)
 
 	case historyListMsg:
 		m = m.applyHistoryList(msg.Resp)
@@ -2934,6 +3078,14 @@ func (m Model) openClosePaneConfirm() (tea.Model, tea.Cmd) {
 			m.confirmKind = "pane"
 			m.confirmID = pane.ID
 			m.confirmName = paneDisplayName(pane)
+			// Re-collected on every open rather than carried, and the toggle is
+			// re-cleared: the previous dialog's answer describes a different
+			// pane, and an inherited arm is a deletion nobody was offered.
+			m.resetConfirmWorktrees()
+			m.confirmWorktrees = collectConfirmWorktrees([]*PaneModel{pane})
+			if cmd := m.requestWorktreeStatus(m.destOfPane(pane.ID)); cmd != nil {
+				return m, tea.Batch(tea.ClearScreen, cmd)
+			}
 		}
 	}
 	return m, tea.ClearScreen
@@ -2948,6 +3100,14 @@ func (m Model) openRestartPaneConfirm() (tea.Model, tea.Cmd) {
 			m.confirmKind = confirmKindRestartPane
 			m.confirmID = pane.ID
 			m.confirmName = paneDisplayName(pane)
+			// Cleared HERE as well as on every exit. The exits do cover it
+			// today — both terminal branches of handleConfirmKey reset — but
+			// that makes the invariant global, and "instance" already renders
+			// through renderConfirmDialog's default arm, so one future exit
+			// that skips the reset would paint worktree rows on a confirm that
+			// has nothing to do with worktrees. Clearing at each opener makes
+			// it local.
+			m.resetConfirmWorktrees()
 		}
 	}
 	return m, tea.ClearScreen
@@ -3048,6 +3208,13 @@ func (m Model) openCloseTabConfirm() (tea.Model, tea.Cmd) {
 		m.confirmKind = "tab"
 		m.confirmID = tab.ID
 		m.confirmName = tab.Name
+		// EVERY owned worktree in the tab, not the active pane's: a tab closes
+		// as a unit, and one toggle covers the set it takes with it.
+		m.resetConfirmWorktrees()
+		m.confirmWorktrees = collectConfirmWorktrees(tab.Leaves())
+		if cmd := m.requestWorktreeStatus(m.destOfTab(tab.ID)); cmd != nil {
+			return m, tea.Batch(tea.ClearScreen, cmd)
+		}
 	}
 	return m, tea.ClearScreen
 }
@@ -3062,15 +3229,148 @@ func (m Model) beginTabRename() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// paneTarget says where the pane the create-pane dialog is building will go.
+//
+// The dialog's first three steps (category → plugin → instance → setup) are
+// identical either way; only the last step and the message sent differ. The
+// zero value is the Ctrl+N behaviour that predates the new-tab flow, so any
+// path that forgets to set this splits the current tab rather than creating a
+// tab nobody asked for.
+type paneTarget int
+
+const (
+	paneTargetSplit  paneTarget = iota // Ctrl+N: into the active tab
+	paneTargetNewTab                   // Ctrl+T: as the first pane of a new tab
+)
+
 // openCreatePaneDialog opens the create-pane dialog at step 0 (the Ctrl+N flow).
 // Extracted from the `key == "ctrl+n"` case; shared with the command palette.
 func (m Model) openCreatePaneDialog() (tea.Model, tea.Cmd) {
+	return m.openCreatePaneDialogFor(paneTargetSplit)
+}
+
+// openCreatePaneDialogFor is the shared opener for both targets.
+//
+// createPaneTarget is reset HERE rather than on each close path, and that is
+// load-bearing: the step-0 escape, the instance-delete detour into the confirm
+// dialog, and handleCreatePaneSplit's three early refusals all leave the dialog
+// without reaching its teardown block. A target that outlived any one of those
+// would make the next plain Ctrl+N create a TAB instead of a split — the fourth
+// recurrence of the stale-dialog-state class this file already documents three
+// of, and the reason this is a parameter rather than a field somebody sets
+// afterwards.
+func (m Model) openCreatePaneDialogFor(target paneTarget) (tea.Model, tea.Cmd) {
 	m.dialog = dialogCreatePane
 	m.dialogCursor = 0
 	m.createPaneStep = 0
 	m.selectedCategory = 0
+	m.createPaneTarget = target
+	m.createPaneDest = m.pinnableDest()
 	return m, tea.ClearScreen
 }
+
+// pinnableDest is the destination a dialog opened NOW should submit to, or ""
+// meaning "not known yet — let the router resolve it at send time".
+//
+// The empty answer is not a fallback, it is the two documented startup windows,
+// and it must not be confused with `activeDest() == ""`:
+//
+//   - m.cur() == nil is the pre-first-broadcast window every session passes
+//     through. Under --remote the router is keyed by the REMOTE host and holds
+//     no "" conn at all, so pinning "" would aim the send at a destination that
+//     does not exist.
+//   - onlyOfflineProjects() is that same window once offline stand-ins have been
+//     seeded: every known project is a placeholder for some OTHER host that
+//     failed to dial, so m.cur() names an unreachable machine while the daemon
+//     the send actually resolves to is fine.
+//
+// In both, Router.Send's sole-conn fallback is the thing that delivers — and
+// that fallback is gated on the message being UNSTAMPED, so the send must skip
+// the stamp entirely rather than stamp a best guess. See sendCreateTab.
+func (m Model) pinnableDest() string {
+	if m.cur() == nil || m.onlyOfflineProjects() {
+		return ""
+	}
+	return m.activeDest()
+}
+
+// handleNewTab opens the create-pane dialog to choose the new tab's first pane.
+//
+// Ctrl+T used to send create_tab immediately, which always produced a shell.
+// The daemon still does exactly that for a create carrying no spec, so the
+// escape path and every other client keep the old behaviour.
+//
+// The reachability refusal moved here from the keypress: the send is what
+// Router.Send drops silently, and letting the user fill in a directory, a
+// branch and a session first — then dropping it — is worse than refusing the
+// keystroke. Both carve-outs come with it, and both encode shipped bugs: a NIL
+// m.cur() is the pre-first-broadcast window every session passes through (the
+// unstamped send resolves through Router.Send's sole-conn fallback there), and
+// onlyOfflineProjects is the same window once offline rows have been seeded for
+// some OTHER destination while the local daemon is fine.
+func (m Model) handleNewTab() (tea.Model, tea.Cmd) {
+	if p := m.cur(); p != nil && !m.projectActionable(p) && !m.onlyOfflineProjects() {
+		m.setFlash("cannot reach " + hostLabel(p.Dest) + " — new tab not created")
+		return m, m.flashCmd()
+	}
+	return m.openCreatePaneDialogFor(paneTargetNewTab)
+}
+
+// createTerminalTab sends the bare create_tab every producer sent before the
+// first-pane spec existed: no FirstPane, so the daemon spawns its terminal.
+//
+// This is the Esc fallback, and it is why cancelling the picker still leaves a
+// usable tab rather than nothing at all.
+func (m Model) createTerminalTab() tea.Cmd {
+	return m.sendCreateTab(nil)
+}
+
+// sendCreateTab is the ONE create_tab producer.
+//
+// A KNOWN destination is aimed with sendForDestStrict rather than the unstamped
+// m.client.Send the old createTab used: that send was safe only because the
+// keypress and the send were the same instant, and a dialog can stay open while
+// the active project moves under it (see createPaneDest). Strict because
+// Router.Send drops an unroutable message and returns nil, so the loose form
+// cannot tell the user their tab was never created.
+//
+// An EMPTY destination is deliberately sent UNSTAMPED, and that asymmetry is
+// load-bearing rather than a shortcut. Empty means one of the two startup
+// windows pinnableDest documents, where the router must pick the destination
+// itself — and its sole-conn fallback is gated on `!stamped`, so stamping ""
+// (which stampDest maps to destLocal) makes that fallback unreachable and the
+// send is dropped against a "" conn that, under --remote, never existed. Both
+// windows regressed exactly that way when this function stamped unconditionally.
+func (m Model) sendCreateTab(spec *ipc.FirstPaneSpec) tea.Cmd {
+	dest := m.createPaneDest
+	return func() tea.Msg {
+		msg, err := ipc.NewMessage(ipc.MsgCreateTab, ipc.CreateTabPayload{
+			Name:      "New Tab",
+			FirstPane: spec,
+		})
+		if err != nil {
+			log.Printf("create tab: build message: %v", err)
+			return nil
+		}
+		if dest == "" {
+			// No pre-flight check to make: the router resolves this one, and a
+			// drop there is already logged. Reporting "cannot reach" about a
+			// destination nobody named is the bug this branch exists to avoid.
+			if err := m.client.Send(msg); err != nil {
+				log.Printf("create tab: send: %v", err)
+			}
+			return nil
+		}
+		if err := m.sendForDestStrict(dest, msg); err != nil {
+			return createTabFailedMsg{dest: dest}
+		}
+		return nil
+	}
+}
+
+// createTabFailedMsg reports a create_tab that never reached its daemon. The
+// send happens off the Update goroutine, so the flash cannot be set there.
+type createTabFailedMsg struct{ dest string }
 
 // forceRedraw is the full-repaint recovery hatch: drop every pane's render
 // cache and every tab's leaves cache, then ClearScreen + re-probe the terminal
@@ -3264,9 +3564,9 @@ func (m Model) logViewerPosAt(screenX, screenY int) (row, col int, ok bool) {
 // as a hard-coded case in the caller (not driven by kb.NextPane, which is
 // now unbound by default since spatial navigation moved to Alt+Arrow).
 //
-// Note: ToggleLazygit (Alt+G) is deliberately NOT in this list — notes mode
-// binds the editor to a pane, and popping a full-screen overlay over it
-// mid-edit conflicts with the notes layout. Alt+G in notes mode falls through
+// Note: ToggleLazygit (Alt+G) and ToggleHunk (Alt+H) are deliberately NOT in
+// this list — notes mode binds the editor to a pane, and popping a full-screen
+// overlay over it mid-edit conflicts with the notes layout. Both fall through
 // to the editor harmlessly as plain text input.
 func (m Model) notesKeyExempt(key string) bool {
 	if key == "" {
@@ -3501,6 +3801,11 @@ func (m Model) View() tea.View {
 
 	v := tea.NewView(content)
 	v.AltScreen = true
+	// Desktop toasts suppress only for the pane the user is DEMONSTRABLY watching
+	// — which needs window focus as well as on-screen position — and this is the
+	// only thing that makes window focus knowable. Harmless where unsupported: the
+	// terminal ignores the sequence and simply never reports.
+	v.ReportFocus = true
 	v.MouseMode = tea.MouseModeCellMotion
 	if m.ctxMenu.open() {
 		// Cell-motion only reports motion while a button is held, so the
@@ -3608,9 +3913,10 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	// Overlay visible: intercept keys before global shortcuts reach pane-level
 	// handlers (ClosePane, RenamePane, notes toggle, split, etc.). The sidebar-
-	// focused branch below must NOT steal keys while lazygit is on screen.
-	// The kb.ToggleLazygit case in the main switch is still reachable when the
-	// overlay is hidden (this block only fires when overlayVisible is true).
+	// focused branch below must NOT steal keys while an overlay tool is on
+	// screen. The kb.ToggleLazygit / kb.ToggleHunk cases in the main switch are
+	// still reachable when the overlay is hidden (this block only fires when
+	// overlayVisible is true).
 	if tab := m.activeTabModel(); tab != nil && tab.overlayVisible && tab.overlayPane != nil && m.dialog == dialogNone && !m.renaming && !m.renamingPane {
 		return m, m.handleOverlayKey(msg, tab)
 	}
@@ -3657,6 +3963,8 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "pane.toggle_lazygit":
 		return m, m.handleToggleLazygit()
+	case "pane.toggle_hunk":
+		return m, m.handleToggleHunk()
 	case "pane.command_history":
 		return m.openHistoryForActivePane()
 	case "pane.quick_actions":
@@ -3809,36 +4117,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 
 	case "tab.new":
-		// Flashes rather than no-opping silently, for the same reason the
-		// single-project/no-bounce-target/empty-queue refusals above do: a
-		// key that appears to do nothing is indistinguishable from a broken
-		// one. It fires only when there IS an active project and it is
-		// unreachable — createTab's send is unstamped and Router.Send would
-		// drop it silently, so the user would believe a tab was created that
-		// never was.
-		//
-		// A NIL m.cur() is deliberately NOT refused: m.projects is nil from
-		// NewModel until the first workspace_state broadcast, which is a real
-		// window every session passes through, not an unreachable one — during
-		// it createTab's unstamped send resolves through Router.Send's
-		// sole-conn startup fallback (routeDest's currentDest() is "" before any
-		// project is known, which is exactly the key the local daemon's own
-		// connection is registered under). Refusing here would make Ctrl+T do
-		// nothing for the first moment of every session, on a machine that is
-		// reachable.
-		// onlyOfflineProjects is the same carve-out as the nil case just above:
-		// every row seeded before the first broadcast is an offline stand-in for
-		// SOME OTHER destination, so m.cur() names a host that is unreachable
-		// while the LOCAL daemon — where createTab's unstamped send actually
-		// resolves via Router.Send's sole-conn fallback — is fine. Without it,
-		// seeding turned the never-reached-daemon window this comment already
-		// describes into "flashes cannot reach <host>" about a machine that was
-		// never the problem.
-		if p := m.cur(); p != nil && !m.projectActionable(p) && !m.onlyOfflineProjects() {
-			m.setFlash("cannot reach " + hostLabel(p.Dest) + " — new tab not created")
-			return m, m.flashCmd()
-		}
-		return m, m.createTab()
+		return m.handleNewTab()
 
 	case "pane.close":
 		return m.openClosePaneConfirm()
@@ -3979,9 +4258,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.openCreatePaneDialog()
 
 	case key == "f1":
-		m.dialog = dialogAbout
-		m.dialogCursor = 0
-		return m, tea.ClearScreen
+		return m.openAboutDialog()
 
 	case key == "alt+1" || key == "alt+2" || key == "alt+3" ||
 		key == "alt+4" || key == "alt+5" || key == "alt+6" ||
@@ -4984,7 +5261,7 @@ func (m Model) tabLabel(idx int) string {
 		name = glyphPinned + name
 	}
 	if m.tabHasWorkingPane(idx) {
-		name = spinnerFrames[m.workSpinnerFrame%len(spinnerFrames)] + " " + name
+		name = workingGlyph(m.workSpinnerFrame) + " " + name
 	}
 	if idx == m.activeTabIdx() {
 		return "* " + name
@@ -5408,7 +5685,12 @@ func (m Model) renderStatusBar() string {
 	// single last-broadcast field) is the other half: a mixed session would
 	// otherwise pass this gate with a LOCAL project active and then render the
 	// REMOTE daemon's version.
-	if !m.RemoteMode() {
+	// remoteModeFor(activeDest()) as well as RemoteMode(): the session-wide flag
+	// misses a MIXED session, where the TUI is local but the project on screen
+	// belongs to another host — and there this rendered "↑ v1.2.3 ready" for a
+	// release staged on that host, beside an About row that (correctly) says
+	// updates apply locally. Neither is the machine the segment implies.
+	if !m.RemoteMode() && !m.remoteModeFor(m.activeDest()) {
 		if seg := updateStatusSegment(m.activeUpdateInfo(), m.version); seg != "" {
 			right = seg + " | " + right
 		}
@@ -5827,6 +6109,14 @@ func (m Model) listenForMessages() tea.Cmd {
 			}
 			return worktreeListMsg{Resp: resp, Gen: msg.ID}
 
+		case ipc.MsgWorktreeStatusResp:
+			var resp ipc.WorktreeStatusRespPayload
+			if err := msg.DecodePayload(&resp); err != nil {
+				log.Printf("worktree status: decode: %v", err)
+				return listenContinueMsg{}
+			}
+			return worktreeStatusMsg{Resp: resp, Gen: msg.ID}
+
 		case ipc.MsgCreatePaneResp:
 			var resp ipc.CreatePaneRespPayload
 			if err := msg.DecodePayload(&resp); err != nil {
@@ -5881,6 +6171,16 @@ func (m Model) listenForMessages() tea.Cmd {
 			return listenContinueMsg{}
 
 		case ipc.MsgStageUpdateResp:
+			// Honoured ONLY from the LOCAL daemon, the MsgLinkLost gate's
+			// reasoning applied to a reply rather than a synthetic message:
+			// applying swaps THIS machine's binaries out of THIS machine's
+			// staging dir, and sendStageUpdateReq never asks anyone else. An
+			// unsolicited one from a remote daemon would otherwise consume the
+			// pending apply intent and name its own version on the confirm.
+			if msg.Origin != "" {
+				log.Printf("ipc recv: ignoring stage_update_resp from %q", msg.Origin)
+				return listenContinueMsg{}
+			}
 			var payload ipc.StageUpdateRespPayload
 			if err := msg.DecodePayload(&payload); err != nil {
 				log.Printf("decode stage_update_resp: %v", err)
@@ -6060,6 +6360,12 @@ func parseWorkspaceState(raw map[string]any) WorkspaceStateMsg {
 				if s, ok := pm["git_worktree_name"].(string); ok {
 					pi.GitWorktreeName = s
 				}
+				if b, ok := pm["worktree_owned"].(bool); ok {
+					pi.WorktreeOwned = b
+				}
+				if s, ok := pm["worktree_path"].(string); ok {
+					pi.WorktreePath = s
+				}
 				if b, ok := pm["git_upstream"].(bool); ok {
 					pi.GitUpstream = b
 				}
@@ -6090,16 +6396,6 @@ func parseWorkspaceState(raw map[string]any) WorkspaceStateMsg {
 		}
 	}
 	return state
-}
-
-func (m Model) createTab() tea.Cmd {
-	return func() tea.Msg {
-		msg, _ := ipc.NewMessage(ipc.MsgCreateTab, ipc.CreateTabPayload{
-			Name: "New Tab",
-		})
-		m.client.Send(msg)
-		return nil
-	}
 }
 
 func (m *Model) splitPane(dir SplitDir) tea.Cmd {

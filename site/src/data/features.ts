@@ -188,8 +188,8 @@ export const features: Feature[] = [
     category: "interaction",
     detail: [
       "A project owns its tabs and remembers which one you left it on. Ctrl+T files a new tab into the project you're on, and switching project switches the whole tab bar. Alt+Shift+N creates one, Alt+P fuzzy-finds, Alt+O bounces between the last two, Alt+Shift+←/→ cycles.",
-      "The sidebar (Alt+Shift+S) is a reserved left column, not an overlay. Each project row carries a roll-up of its agents — `◐N` working, `⚠N` blocked waiting on you — and those counts keep updating for projects in the background, which is the entire point.",
-      "Under the active project, each pane gets its own glyph: `◐` working (with `⋯N` outstanding subagents), `⚠` blocked on you and the tool it's asking about, `○` idle, `✓` finished while you weren't looking. Click any row to jump there.",
+      "The sidebar (Alt+Shift+S) is a reserved left column, not an overlay. Each project row carries a roll-up of its agents — `⠹N` working, `▲N` blocked waiting on you — and those counts keep updating for projects in the background, which is the entire point.",
+      "Under the active project, each pane gets its own glyph: `⠹` working — the same spinner the tab bar and the pane border run, so \"still going\" reads the same wherever you look (with `⋯N` outstanding subagents), `▲` blocked on you and the tool it's asking about, `○` idle, `✓` finished while you weren't looking. Click any row to jump there.",
       "Blocked is a separate state from finished. The agents' hook events always carried the distinction — Notification, PermissionRequest, permission.ask — but the old UI only needed \"mark unseen\", so they were collapsed into one. A permission prompt and a completed turn now look different, because they need different things from you.",
       "Alt+Shift+A jumps to whichever agent has been blocked longest, anywhere in the workspace, and cycles on repeated presses. Oldest-first rather than sidebar order: with several agents running, the one waiting longest is the one costing you time.",
       "Each pane row also shows the checkout it sits in — branch, `wt` for a linked worktree, `↑N`/`↓N` against upstream. Refreshed on a background ticker and cached per checkout, so ten panes in one repository cost one git invocation. `git status --porcelain` is deliberately not among them: it's the one call that can take seconds on a large repo without fsmonitor. A probe that doesn't answer keeps its last value and marks it stale rather than guessing.",
@@ -396,6 +396,27 @@ export const features: Feature[] = [
       "Daemon-side event queue with pattern-matching idle analysis.",
       "Process exit detection with exit-code extraction.",
       "Optional sidebar surfaces notifications without interrupting focused work.",
+    ],
+  },
+  {
+    slug: "desktop-notifications",
+    icon: "bell",
+    title: "Desktop notifications",
+    blurb:
+      "When an agent parks for input while you are in another window, Windows raises a toast. Click it and Quil is already on that project, tab and pane.",
+    category: "observability",
+    // Windows-only today — a real limit worth reading before relying on this,
+    // which is what the badge is for.
+    badge: "beta",
+    detail: [
+      "Fires on the same two states the project sidebar already marks: a pane parked waiting on you (▲) and a turn that finished while you were away (✓). Not on every event — the notification sidebar remains the full log.",
+      "For any pane you are not looking at — another tab, another project, or another application. Only the pane on screen in a focused terminal stays silent, so an agent parking in a project you are not watching still reaches you.",
+      "Clicking the toast routes to the exact pane via a registered `quil://` handler — the same jump the attention queue (Alt+Shift+A) performs, including switching project and tab.",
+      "One toast per pane, so six agents finishing at once give you six independently clickable toasts rather than a storm of duplicates — a toast only fires on a state change, and a pane already showing one cannot get a second.",
+      "Answering a prompt withdraws its toast from Action Center, so the notification surface never keeps claiming attention you have already given.",
+      "Opt-in registration: `quil notify setup` writes a Start Menu shortcut and a `quil://` handler, prints exactly what it wrote, and `quil notify setup --remove` is a true inverse. Nothing is written as a side effect of a config flag.",
+      "Toggle live from F1 → Settings or `[notification.desktop]` in config.toml. The Settings row reports whether registration is actually in place rather than just echoing the flag.",
+      "Windows only. macOS and Linux have no transport that supports click-to-route, so they are deliberately not faked.",
     ],
   },
   {

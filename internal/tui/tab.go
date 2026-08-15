@@ -34,9 +34,10 @@ type TabModel struct {
 	// request.
 	CreatingBranch string
 
-	// overlayPane is the tab's lazygit overlay (never part of the layout
-	// tree). overlayVisible controls rendering; the pane's PTY keeps
-	// running while hidden so re-show is instant with UI state intact.
+	// overlayPane is the tab's overlay tool — lazygit or hunk, one at a time
+	// (never part of the layout tree). overlayVisible controls rendering; the
+	// pane's PTY keeps running while hidden so re-show is instant with UI
+	// state intact.
 	overlayPane    *PaneModel
 	overlayVisible bool
 
@@ -66,6 +67,17 @@ func (t *TabModel) Leaves() []*PaneModel {
 }
 
 func (t *TabModel) invalidateLeaves() { t.leavesCache = nil }
+
+// overlayRuns reports whether this tab's overlay slot holds a pane running
+// pluginName. The slot is shared by every overlay tool, so "there is an
+// overlay" is not the same question as "the tool the user just asked for is
+// the one in the slot" — the state machine keys on the latter.
+//
+// Type is daemon-authoritative (syncPaneMeta copies it from every broadcast),
+// so this matches whatever is actually running, not what the client asked for.
+func (t *TabModel) overlayRuns(pluginName string) bool {
+	return t.overlayPane != nil && t.overlayPane.Type == pluginName
+}
 
 // ActivePaneModel returns the currently active pane, or nil.
 // When the overlay is visible it acts as the single active pane —

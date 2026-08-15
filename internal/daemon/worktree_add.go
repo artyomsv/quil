@@ -259,6 +259,13 @@ func (d *Daemon) createPaneInWorktree(p ipc.CreatePanePayload, path string) (*Pa
 	// reading it.
 	pane.PluginMu.Lock()
 	pane.WorktreeOwned = true
+	// The one place the created directory can be captured, and it is taken from
+	// the pane's OWN CWD rather than the payload's: the spawn resolves the path
+	// (EvalSymlinks canonicalises /var → /private/var on macOS), so the pane's
+	// value is the one every later comparison sees. It is correct only at this
+	// instant — the shell will move it with the first `cd` — which is exactly
+	// why it is copied somewhere that does not move. See Pane.WorktreePath.
+	pane.WorktreePath = pane.CWD
 	pane.PluginMu.Unlock()
 	return pane, swapped, nil
 }

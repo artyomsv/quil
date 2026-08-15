@@ -94,6 +94,32 @@ type Daemon struct {
 	updateInfo    *ipc.UpdateInfo
 	updateStaging atomic.Bool
 
+	// updateChecking is the single-flight guard for the check-only refresh
+	// (MsgUpdateCheckReq, fired when a client opens its About dialog). It is
+	// deliberately NOT updateStaging: a client opens About and then presses
+	// the update row, so the two fire back to back by design — one shared slot
+	// would reject the stage exactly when it followed the check that motivated
+	// it (the browseScanning/dirsChecking precedent).
+	updateChecking atomic.Bool
+
+	// updateOnDemand is the single-flight guard for MsgStageUpdateReq. Its own
+	// slot, because the handler answers from disk (AlreadyStaged) BEFORE
+	// reaching updateStaging's CAS, so that guard no longer bounds it — and
+	// each unguarded request costs a GitHub call plus a full re-hash of both
+	// staged binaries.
+	updateOnDemand atomic.Bool
+
+	// lastUpdateCheckAt paces client-driven release checks, in memory and
+	// stamped on the ATTEMPT. The persisted LastCheckMs cannot serve: it is
+	// only written after a SUCCESSFUL check, so a 403 from an exhausted quota
+	// would leave it frozen and lift the limit exactly when it is needed.
+	lastUpdateCheckAt atomic.Int64
+
+	// updateStateMu serialises the read-modify-write of state.json now that
+	// three paths write it (daily tick, check-only refresh, on-demand stage).
+	// See mutateUpdateState.
+	updateStateMu sync.Mutex
+
 	// sessionScanning is the single-flight guard for the Claude session
 	// listing (MsgClaudeSessionsReq). One scan reads up to 200 transcript
 	// heads off disk — far more work than parsing the frame that requested
@@ -141,6 +167,10 @@ type Daemon struct {
 	// worktreeScanning single-flights MsgWorktreeListReq. Its own slot — see
 	// handleWorktreeListReq for why it is not browseScanning's.
 	worktreeScanning atomic.Bool
+
+	// worktreeStatusing single-flights MsgWorktreeStatusReq. Its own slot — see
+	// beginWorktreeStatus for why it is not worktreeScanning's.
+	worktreeStatusing atomic.Bool
 
 	// worktreeAdding serialises worktree CREATION. Its own slot — see
 	// beginWorktreeAdd for why it is not worktreeScanning — and it doubles as
@@ -771,6 +801,7 @@ func (d *Daemon) restoreWorkspace() error {
 				eager, _ := paneData["eager"].(bool)
 				pinnedAttention, _ := paneData["pinned_attention"].(bool)
 				worktreeOwned, _ := paneData["worktree_owned"].(bool)
+				worktreePath, _ := paneData["worktree_path"].(string)
 
 				pane := &Pane{
 					ID:           paneID,
@@ -796,6 +827,13 @@ func (d *Daemon) restoreWorkspace() error {
 					// right default: a pane nobody recorded as owning a
 					// worktree keeps the ordinary CWD fallback.
 					WorktreeOwned: worktreeOwned,
+					// Absent on any snapshot written before the path was
+					// recorded → empty, and an owned pane with no path is never
+					// offered for close-time removal. That degradation is
+					// deliberate: the only directory such a pane can name is its
+					// CWD, which is the value that cannot be trusted for a
+					// force-delete.
+					WorktreePath: worktreePath,
 				}
 
 				// Load ghost buffer from disk
@@ -1261,6 +1299,9 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 		d.handleGitReposReq(conn, msg)
 	case ipc.MsgWorktreeListReq:
 		d.handleWorktreeListReq(conn, msg)
+
+	case ipc.MsgWorktreeStatusReq:
+		d.handleWorktreeStatusReq(conn, msg)
 	case ipc.MsgKubeCtxReq:
 		d.handleKubeCtxReq(conn, msg)
 	case ipc.MsgPluginListReq:
@@ -1299,6 +1340,8 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 	// Auto-update
 	case ipc.MsgStageUpdateReq:
 		d.handleStageUpdateReq(conn, msg)
+	case ipc.MsgUpdateCheckReq:
+		d.handleUpdateCheckReq()
 
 	// Pane input history
 	case ipc.MsgPaneHistoryReq:
@@ -1568,18 +1611,107 @@ func (d *Daemon) handleCreateTab(conn *ipc.Conn, msg *ipc.Message) {
 	d.session.SwitchTab(tab.ID)
 	log.Printf("tab created: %s %q", tab.ID, tab.Name)
 
-	// Every tab needs a default pane with a shell, rooted at the OWNING
-	// project's directory (see projectCWD).
-	pane, _ := d.session.CreatePane(tab.ID, d.projectCWD(tab.ProjectID))
-	pane.Type = "terminal"
+	// Every tab needs a pane, rooted at the OWNING project's directory (see
+	// projectCWD) unless the client named one.
+	//
+	// The spec is a REQUEST, never the pane construction itself: TabID is the id
+	// this daemon just minted, and the fields a first pane must not carry
+	// (ReplacePaneID, Overlay) are absent from FirstPaneSpec by construction
+	// rather than dropped here.
+	spec := payload.FirstPane
+	if spec == nil {
+		spec = &ipc.FirstPaneSpec{}
+	}
+	paneType := firstPaneType(*spec)
+	create := ipc.CreatePanePayload{TabID: tab.ID, Type: paneType}
+	// The plugin fields ride along ONLY when the pane really is the requested
+	// one. When firstPaneType downgraded it — a worktree placeholder, or a spec
+	// naming no type at all — they belong to a DIFFERENT program, and
+	// resolveSpawnArgs REPLACES a plugin's own args with InstanceArgs whenever
+	// the pane has any: the placeholder would be spawned as
+	// `<shell> --dangerously-skip-permissions`. shellinit.Configure masks that
+	// on bash/zsh/pwsh by overwriting args and returns nil for sh/dash/fish and
+	// anything unrecognised, where the shell dies on its first instruction —
+	// so the "a failed add leaves a harmless terminal" guarantee would hold
+	// only on some hosts. ResumeSessionID goes with them: it would write a
+	// resume claim onto a terminal, which a snapshot inside the checkout window
+	// persists and a failed add leaves forever. createFirstPaneWorktree carries
+	// the full set on its own payload, so nothing is lost.
+	if paneType == spec.Type {
+		create.InstanceName = spec.InstanceName
+		create.InstanceArgs = spec.InstanceArgs
+		create.ResumeSessionID = spec.ResumeSessionID
+	}
+	cwd := d.resolveRequestedCWD(spec.CWD, d.projectCWD(tab.ProjectID))
 
-	ptySession := apty.New()
-	if err := d.spawnPane(pane, ptySession, false); err != nil {
-		log.Printf("failed to start PTY for new tab: %v", err)
+	// constructPaneAt, not createPaneAt: the tab and its pane are one change and
+	// must reach clients as ONE frame. See the note on that split.
+	pane, err := d.constructPaneAt(create, cwd, paneType)
+	if err != nil {
+		log.Printf("new tab %s: %v", tab.ID, err)
 	}
 
 	d.broadcastState()
 	d.requestSnapshot()
+
+	// LAST, and only once the placeholder is on screen and broadcast.
+	if pane != nil && spec.Worktree != nil {
+		d.createFirstPaneWorktree(conn, msg.ID, tab.ID, pane.ID, *spec)
+	}
+}
+
+// firstPaneType is the type a new tab's first pane OPENS as, which is not
+// always the type that was asked for.
+//
+// A worktree request opens as a terminal whatever it named. git has not made
+// the directory yet — an add checks out a tree, seconds on a large repository —
+// so the requested pane would spend that window in the project root. For an
+// agent that IS the isolation failure the worktree exists to prevent: isolated
+// in its directory and not in its history, invisible until somebody reads the
+// diff days later. A shell sitting there for a few seconds costs nothing.
+func firstPaneType(spec ipc.FirstPaneSpec) string {
+	if spec.Worktree != nil || spec.Type == "" {
+		return "terminal"
+	}
+	return spec.Type
+}
+
+// createFirstPaneWorktree swaps a new tab's placeholder terminal for the pane
+// that was actually requested, inside a worktree it creates first.
+//
+// It REPLAYS the ordinary worktree replace rather than adding a second
+// create-in-a-worktree path: worktreeAddAndCreate already owns branch
+// validation, the daemon-wide single-flight slot, the blocking-FS permit, the
+// re-checks that cover a tab or target closed mid-checkout, and the cleanup
+// that removes a checkout no pane ended up using.
+//
+// Creating the tab and then adding the worktree BEFORE any pane is the shape
+// that looks simpler and is not: the tab would sit pane-less for the whole
+// checkout — up to worktreeAddTimeout — broadcast to every client as a blank
+// active tab with no placeholder to render, and PERSISTED that way by any
+// snapshot landing inside the window. Nothing recovers it: ensureTabNotEmpty
+// runs on destroy paths only, so a daemon crash mid-checkout restores a
+// permanently empty tab. Replacing a pane that is already on screen has none of
+// those properties — the placeholder is live throughout, a failure leaves it
+// exactly where it is, and the swap arrives through ordinary broadcast
+// reconciliation with no client-side placeholder bookkeeping.
+//
+// On a worker goroutine for the reason handleCreatePane's worktree branch is:
+// this runs on the requesting conn's dispatch goroutine, where a checkout would
+// block every message from that client, input included.
+func (d *Daemon) createFirstPaneWorktree(conn *ipc.Conn, reqID, tabID, placeholderID string, spec ipc.FirstPaneSpec) {
+	p := ipc.CreatePanePayload{
+		TabID:           tabID,
+		Type:            spec.Type,
+		InstanceName:    spec.InstanceName,
+		InstanceArgs:    spec.InstanceArgs,
+		ResumeSessionID: spec.ResumeSessionID,
+		ReplacePaneID:   placeholderID,
+		Worktree:        spec.Worktree,
+	}
+	go func() {
+		respondTo(conn, reqID, ipc.MsgCreatePaneResp, d.worktreeAddAndCreate(p))
+	}()
 }
 
 func (d *Daemon) handleDestroyTab(msg *ipc.Message) {
@@ -1598,6 +1730,12 @@ func (d *Daemon) handleDestroyTab(msg *ipc.Message) {
 	// Capture the pane list before DestroyTab removes them from the session
 	// maps, so we can clean up their artifacts after the tab is gone.
 	panes := d.session.Panes(payload.TabID)
+	// Read from the SAME pre-destroy capture, for the same reason: after
+	// DestroyTab there is nothing left to ask which worktrees the tab owned.
+	var worktrees []string
+	if payload.RemoveWorktree {
+		worktrees = ownedWorktreePaths(panes)
+	}
 	d.session.DestroyTab(payload.TabID)
 	for _, p := range panes {
 		d.cleanupPaneArtifacts(p.ID)
@@ -1607,6 +1745,14 @@ func (d *Daemon) handleDestroyTab(msg *ipc.Message) {
 
 	d.broadcastState()
 	d.requestSnapshot()
+
+	// LAST, and on a worker: a removal shells out to git against a directory
+	// that may be on a network mount, and this is the requesting client's
+	// dispatch goroutine. Running it before the broadcast would also leave the
+	// tab on screen for the length of the checkout deletion.
+	if len(worktrees) > 0 {
+		go d.removeOwnedWorktrees(worktrees)
+	}
 }
 
 // recoverEmptyProject re-creates a shell tab for a project that has no tabs
@@ -1769,30 +1915,8 @@ func (d *Daemon) handleCreatePane(conn *ipc.Conn, msg *ipc.Message) {
 		return
 	}
 
-	cwd := payload.CWD
-	logger.Debug("create pane: received payload cwd=%q type=%s", cwd, payload.Type)
-	// Validate the CWD before trusting it. The TUI dialog already validates
-	// what it sends, but the IPC socket is reachable by other clients (the
-	// MCP bridge, future tooling), and the daemon should be authoritative.
-	// On any failure (gone / not a directory / stat error) we fall back to
-	// the daemon's own working directory rather than aborting the spawn.
-	//
-	// Re-resolve symlinks here too: the TUI calls EvalSymlinks before sending
-	// but a symlink swap between the TUI's Stat and the daemon's spawn would
-	// otherwise redirect the child process to a different directory. Doing
-	// the resolve once more on the daemon side closes that TOCTOU window for
-	// every IPC client (TUI, MCP, future tooling).
-	if cwd != "" {
-		if info, err := os.Stat(cwd); err != nil || !info.IsDir() {
-			log.Printf("create pane: rejecting cwd %q (err=%v); using daemon default", cwd, err)
-			cwd = ""
-		} else if resolved, evalErr := filepath.EvalSymlinks(cwd); evalErr == nil {
-			cwd = resolved
-		}
-	}
-	if cwd == "" {
-		cwd = d.defaultCWD()
-	}
+	logger.Debug("create pane: received payload cwd=%q type=%s", payload.CWD, payload.Type)
+	cwd := d.resolveRequestedCWD(payload.CWD, d.defaultCWD())
 
 	// Determine pane type
 	paneType := payload.Type
@@ -1812,6 +1936,47 @@ func (d *Daemon) handleCreatePane(conn *ipc.Conn, msg *ipc.Message) {
 	}
 }
 
+// resolveRequestedCWD validates a client-supplied directory and answers the
+// fallback when it cannot be used.
+//
+// The TUI dialog already validates what it sends, but the IPC socket is
+// reachable by other clients (the MCP bridge, future tooling), and the daemon
+// should be authoritative. On any failure (gone / not a directory / stat error)
+// the fallback is used rather than aborting the spawn.
+//
+// Symlinks are re-resolved here too: the TUI calls EvalSymlinks before sending,
+// but a symlink swap between the TUI's Stat and the daemon's spawn would
+// otherwise redirect the child process to a different directory. Doing the
+// resolve once more daemon-side NARROWS that window from client-to-daemon down
+// to daemon-internal — it does not close it. The gap between this resolve and
+// the child's own chdir remains, and closing it would need an fd-based spawn.
+//
+// The FALLBACK is a parameter rather than d.defaultCWD() baked in, because the
+// two call sites disagree about it and the disagreement is load-bearing: a pane
+// created into an existing tab belongs to the client's directory, while a new
+// TAB is rooted at its project (see projectCWD). Hardcoding the pane answer
+// here would silently stop new tabs opening in the project root — a regression
+// in the projects feature, caused from inside the pane feature.
+func (d *Daemon) resolveRequestedCWD(cwd, fallback string) string {
+	if cwd == "" {
+		return fallback
+	}
+	// Through resolveSpawnDirWithin, never an inline os.Stat: this runs on the
+	// requesting connection's dispatch goroutine, and the value comes off the
+	// WIRE. A path on a dead NFS/SMB mount parks that goroutine in an
+	// uninterruptible syscall and with it every later message from that client,
+	// input included — the wedge class that primitive's own doc comment says it
+	// was written to remove from the other two spawn-CWD resolvers. It claims a
+	// permit, shares one deadline across the stat and the symlink resolution,
+	// and answers "" for "could not use this", which is exactly this function's
+	// fallback condition.
+	if dir := resolveSpawnDirWithin(cwd, spawnDirProbeTimeout); dir != "" {
+		return dir
+	}
+	log.Printf("spawn cwd: rejecting %q (missing, not a directory, or did not answer in time); using %q", cwd, fallback)
+	return fallback
+}
+
 // createPaneAt is the pane construction every create path shares: allocate,
 // apply the payload's plugin fields, claim a resume session, spawn, publish.
 //
@@ -1825,14 +1990,44 @@ func (d *Daemon) handleCreatePane(conn *ipc.Conn, msg *ipc.Message) {
 // its historical behaviour is to leave the PTY-less pane in place and log,
 // and the next workspace broadcast shows it as exited.
 func (d *Daemon) createPaneAt(payload ipc.CreatePanePayload, cwd, paneType string) (*Pane, error) {
+	pane, err := d.constructPaneAt(payload, cwd, paneType)
+	if err != nil {
+		return pane, err
+	}
+	d.broadcastState()
+	d.requestSnapshot()
+	return pane, nil
+}
+
+// constructPaneAt is createPaneAt without the publish — allocate, apply the
+// payload's plugin fields, claim a resume session, spawn.
+//
+// Split out for handleCreateTab, which creates a tab AND its first pane and
+// must emit ONE workspace-state frame for the pair. Calling createPaneAt there
+// would put two full frames back to back on the 64-slot must-deliver queue for
+// every new tab — the 2026-08-09 force-disconnect shape — and each frame also
+// drives a full applyWorkspaceState reconciliation on every attached client.
+//
+// A spawn failure returns the pane alongside the error, so a caller that must
+// leave nothing behind can destroy it.
+func (d *Daemon) constructPaneAt(payload ipc.CreatePanePayload, cwd, paneType string) (*Pane, error) {
 	pane, err := d.session.CreatePane(payload.TabID, cwd)
 	if err != nil {
 		return nil, fmt.Errorf("create pane error: %w", err)
 	}
 
+	// Under PluginMu for the same reason the Overlay block below states:
+	// CreatePane has already PUBLISHED the pane into the session maps, so a
+	// snapshot or broadcast goroutine can be reading these fields already, and
+	// Type/CWD are on the documented PluginMu-protected set. These three writes
+	// were unlocked — pre-existing, and reachable: the race detector reports
+	// them against any concurrent reader of Type the moment a create runs on a
+	// conn goroutine rather than the test's own.
+	pane.PluginMu.Lock()
 	pane.Type = paneType
 	pane.InstanceName = payload.InstanceName
 	pane.InstanceArgs = payload.InstanceArgs
+	pane.PluginMu.Unlock()
 	if payload.Overlay {
 		// CreatePane already PUBLISHED the pane into the session maps, so a
 		// concurrent snapshot/broadcast goroutine may be reading it — both
@@ -1858,8 +2053,6 @@ func (d *Daemon) createPaneAt(payload ipc.CreatePanePayload, cwd, paneType strin
 	if err := d.spawnPane(pane, ptySession, false); err != nil {
 		return pane, fmt.Errorf("start PTY error: %w", err)
 	}
-	d.broadcastState()
-	d.requestSnapshot()
 	return pane, nil
 }
 
@@ -1974,8 +2167,15 @@ func (d *Daemon) handleDestroyPane(msg *ipc.Message) {
 
 	// Capture tab ID before destroying the pane
 	var tabID string
+	var worktrees []string
 	if pane := d.session.Pane(payload.PaneID); pane != nil {
 		tabID = pane.TabID
+		// Captured here for the reason the tab id is: DestroyPane removes the
+		// pane from the session maps, and its CWD is the only record of which
+		// worktree it owned.
+		if payload.RemoveWorktree {
+			worktrees = ownedWorktreePaths([]*Pane{pane})
+		}
 	}
 	log.Printf("pane destroy: %s (tab=%s)", payload.PaneID, tabID)
 
@@ -1995,6 +2195,15 @@ func (d *Daemon) handleDestroyPane(msg *ipc.Message) {
 
 	d.broadcastState()
 	d.requestSnapshot()
+
+	// LAST, and after ensureTabNotEmpty: its replacement shell spawns in
+	// d.defaultCWD(), never in the closing pane's directory, so the two cannot
+	// race for the worktree — but a hidden overlay pane in the same tab CAN be
+	// sitting in it, and ensureTabNotEmpty is what destroys those. Removing
+	// before it ran would find the overlay still live and keep the worktree.
+	if len(worktrees) > 0 {
+		go d.removeOwnedWorktrees(worktrees)
+	}
 }
 
 // ensureTabNotEmpty destroys orphaned overlay panes and spawns a fresh
@@ -2783,6 +2992,12 @@ func (d *Daemon) workspaceStateFromSnapshot(activeTab string, tabs []*Tab, panes
 			// the snapshot carries only CWD, which cannot distinguish them.
 			if pane.WorktreeOwned {
 				paneData["worktree_owned"] = true
+			}
+			// Persisted for the same reason, and it is the half that says WHICH
+			// directory. Without it a restored pane can only name its CWD, which
+			// the shell has been rewriting all along — see Pane.WorktreePath.
+			if pane.WorktreePath != "" {
+				paneData["worktree_path"] = pane.WorktreePath
 			}
 			// SpawnError is captured for the BROADCAST only — see
 			// includeOverlays below. It is never written to paneData.

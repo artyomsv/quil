@@ -1,0 +1,24 @@
+# Code Review State: global / app-update
+
+Last reviewed: 2026-08-15
+Rounds completed: 1
+
+## Resolved (fixed in code; do not re-raise)
+- [code-quality/1] Second press while a stage is in flight re-created the bug the PR fixes — the daemon's fast "staging already in progress" answer was read as a failed check and offered the OLDER staged version. `Model.updateReqInFlight` refuses the press, placed BEFORE the `pendingApplyVer` reset so a refused press cannot discard the first press's intent — round 1
+- [code-quality/4+5, security/1-partial] Failure fallback conflated "the check failed" with "the stage failed" / "already up to date". New `StageUpdateRespPayload.CheckFailed` — only an unreachable GitHub licenses installing what is on disk — round 1
+- [security/2, code-quality/2, rules/1] Rate limit read the persisted `LastCheckMs`, which only advances on a SUCCESSFUL check, so a 403 from a spent quota lifted the limit entirely (measured 10 opens → 10 requests). Now stamped on the attempt via `Daemon.lastUpdateCheckAt`, which also removed the `os.ReadFile` from the conn dispatch goroutine — round 1
+- [code-quality/9] Clock skew (future `LastCheckMs`) disabled the check-only path; `updateCheckedRecently` treats a negative age as not-recent — round 1
+- [security/3] `MsgStageUpdateReq` had no single-flight once `AlreadyStaged` began answering before `stageRelease`'s CAS. Added `Daemon.updateOnDemand`; the rejection is answered rather than dropped, and deliberately not phrased as a check failure — round 1
+- [security/4, code-quality/3] `recordStagedVersion` asserted `InstallWritable: true` on the already-staged path, which never probes. Now a parameter, probed on that branch — round 1
+- [code-quality/6] Three concurrent read-modify-writers of `state.json`. All routed through `Daemon.mutateUpdateState` under `updateStateMu`, never held across a download — round 1
+- [security/5] `rel.Version()` skipped `Stage`'s path-shape validation on the already-staged path while still reaching persisted state and broadcast text. Hoisted to the exported `update.SafeVersion` and called in `stageOnDemand` — round 1
+- [security/1] `confirmName` on the apply confirm was rendered unsanitized and unbounded while its neighbours on the same dialog were not, and it now carries a version from a stage RESPONSE. Sanitized + bounded; flashes too; `MsgStageUpdateResp` origin-gated to the local daemon (the `MsgLinkLost` precedent) — round 1
+- [code-quality/8] `updateStatusSegment` was gated on session-wide `RemoteMode()` only, so a MIXED session still rendered a remote host's staged version. Now also gated on `remoteModeFor(activeDest())`, matching the About row — round 1
+- [code-quality/7] Esc on a self-opened apply confirm always painted the About menu over whatever the user had gone back to. `Model.applyConfirmReturn` records where the press came from — round 1
+- [qa/1+2, code-quality/10] The daemon test stub served no release assets, so every assertion downstream of a download was unfalsifiable — two were provably vacuous (one confirmed by mutation). Replaced with `stubDownloadableRelease`, serving a real checksummed archive built for `runtime.GOOS`, and added `TestStageOnDemand_NewerReleaseSupersedesTheStagedOne` (the missing end-to-end test for the bug itself, mutation-verified), `TestStageOnDemand_CorruptStageIsRepaired`, and `TestHandleUpdateCheckReq_FailedCheckStillPaces` — round 1
+- [rebase] Master (v1.59.0) added `m.resetConfirmWorktrees()` inside the block this change replaced; moved into `openApplyConfirm` rather than dropped — round 1
+
+## Dismissed (acknowledged, will not fix; agents may escalate with explicit justification)
+- [security/5-secondary] Post-change, a locally planted `staged/<latest>/` is adopted rather than incidentally overwritten by a re-download. Crosses no privilege boundary — `$QUIL_HOME` and the install dir are user-owned in every supported layout, and `cmd/quil/main.go` already offers the same directory at every launch. The stronger anchor (recording the archive's sha256 in the manifest and re-comparing) is not justified at this cost (round 1)
+- [security/3-residual] `update.saveJSON` writes through a fixed `<path>.tmp`, so concurrent savers can produce invalid JSON that `LoadState` silently reads as the zero `State`. The in-process half is closed by `mutateUpdateState` + the new single-flight; the generic helper is tracked instead as `techdebt/4-1-update-state-json-fixed-temp-path.md` (round 1)
+- [qa/4] `internal/daemon` cannot be cross-compiled for Windows in this environment (`internal/pty/winconpty` has a `go:embed` on binaries fetched only by `dev.sh build`), so the `runtime.GOOS` plumbing inside `stageOnDemand` is untested on real Windows. Structural — CI is Linux-only too; the underlying `BinaryNames`/`VerifyStaged` logic is `GOOS`-parameterized and covered in `internal/update/stage_test.go` (round 1)

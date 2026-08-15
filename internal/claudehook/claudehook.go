@@ -138,6 +138,14 @@ var forwardedHookEvents = []string{
 	"SubagentStop",
 	"TaskCreated",
 	"TaskCompleted",
+	// Match-all deliberately, unlike the PostToolUse entry below: this is the
+	// start edge for a turn no user prompt began (a teammate reported back and
+	// the agent resumed on its own), and a resumed turn's first action is
+	// whatever tool the agent picks. Narrowing it by tool name would restore
+	// the blind spot it closes. The per-tool-call volume is handled in the
+	// producer instead — RunHook drops the line unless the pane has been quiet
+	// (spoolIsFresh) — because a line dropped there cannot cost the signal.
+	"PreToolUse",
 }
 
 // matchedHookEvents are registered with a tool-name matcher so Claude only

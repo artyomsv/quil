@@ -46,6 +46,24 @@ func workEventKind(eventType string) workTransition {
 	return hookevents.ClassifyWorkEvent(eventType)
 }
 
+// workStateOnlyEvent reports whether an event exists purely to drive the
+// spinner and must never become a notification card. Read by the paneEventMsg
+// arm in model.go.
+//
+// Being a work-state edge is NOT the test — most of them (Stop,
+// PermissionRequest, a named SubagentStop) are exactly what the sidebar is
+// for. The test is whether the event says anything a user could act on, and
+// these two say only "still running": PostToolUse fires when the user answers
+// a prompt they are already looking at, and PreToolUse is a heartbeat that
+// repeats every workHeartbeatInterval for as long as an agent works.
+func workStateOnlyEvent(eventType string) bool {
+	switch eventType {
+	case "hook.claude.PostToolUse", "hook.claude.PreToolUse":
+		return true
+	}
+	return false
+}
+
 // findPaneAndTab locates a pane by ID across EVERY project and reports the
 // owning project and the tab's index within it.
 //

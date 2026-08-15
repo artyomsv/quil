@@ -15,6 +15,10 @@ func TestClassifyWorkEvent(t *testing.T) {
 		{"hook.claude.UserPromptSubmit", WorkEventStart},
 		{"hook.opencode.chat.message", WorkEventStart},
 		{"hook.claude.PostToolUse", WorkEventStart},
+		// A tool call is proof the agent is working, whatever started the
+		// turn. It is the ONLY start edge that does not assume a human began
+		// it — see the PreToolUse case in ClassifyWorkEvent.
+		{"hook.claude.PreToolUse", WorkEventStart},
 		{"hook.claude.Stop", WorkEventStop},
 		{"hook.claude.SessionEnd", WorkEventStopFinal},
 		{"hook.opencode.session.idle", WorkEventStop},

@@ -88,6 +88,21 @@ func ClassifyWorkEvent(eventType string) WorkEventKind {
 	// without tracking ordinary tool completions.
 	case "hook.claude.PostToolUse":
 		return WorkEventStart
+	// The only start edge that does not assume a HUMAN began the turn, and the
+	// reason it had to exist: UserPromptSubmit is a typed prompt and the
+	// PostToolUse above is matched to the prompt tools a user has just
+	// answered, so a turn Claude starts by itself has neither. When a teammate
+	// reports back, its result arrives as a user-ROLE transcript entry and the
+	// agent resumes — measured on one orchestrator pane as 3 Stops against 1
+	// UserPromptSubmit, with a 14m41s stretch of ~60 tool calls showing no
+	// indicator at all. A tool call is proof of work whatever started it.
+	//
+	// The producer throttles these to roughly one per quiet interval
+	// (claudehook.spoolIsFresh), so the ledger sees a heartbeat rather than a
+	// per-tool-call stream. Dropping one is free — it is a level, not an edge:
+	// any later tool call in the same turn re-arms the identical state.
+	case "hook.claude.PreToolUse":
+		return WorkEventStart
 	case "hook.claude.Stop",
 		"hook.opencode.session.idle", "hook.opencode.session.error":
 		return WorkEventStop

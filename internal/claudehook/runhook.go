@@ -42,7 +42,12 @@ type claudeStdin struct {
 	ToolName       string `json:"tool_name"`
 	Reason         string `json:"reason"`
 	AgentType      string `json:"agent_type"`
-	Content        string `json:"content"`
+	// AgentID is present only when the hook fires INSIDE a subagent, which
+	// makes its absence the test for "this came from the main agent".
+	// agent_type cannot serve: a session started with --agent carries one on
+	// every event, main-agent events included.
+	AgentID string `json:"agent_id"`
+	Content string `json:"content"`
 }
 
 // sessionIDRe matches the Claude session-id shape (uuid-ish hex). Mirrors the
@@ -154,6 +159,35 @@ func dispatchHookEvent(env HookEnv, in claudeStdin, nowMs int64) error {
 		hookLog(env.QuilDir, env.PaneID, "PostToolUse resume tool="+in.ToolName)
 		return spoolEvent(env, nowMs, "PostToolUse", in.SessionID,
 			truncate("Resumed after "+in.ToolName, hookevents.MaxTitleBytes), hookevents.SeverityInfo,
+			map[string]string{"tool": truncate(in.ToolName, hookevents.MaxDataValueBytes)})
+	case "PreToolUse":
+		// Work-spinner START edge for a turn no user prompt began. See the
+		// PreToolUse case in hookevents.ClassifyWorkEvent for the trace.
+		// Work-state only; the TUI suppresses it from the notification sidebar.
+		//
+		// Registered for EVERY tool, so this branch runs once per tool call —
+		// the only hook Quil registers that does. It is throttled to a
+		// heartbeat because the signal is a LEVEL ("this pane is working"),
+		// not an edge: a pane Quil heard from moments ago needs no further
+		// proof, and any later tool call in the same turn re-arms the
+		// identical state. Dropping the line here also keeps it off the
+		// ingester's rate limiter, which would otherwise spend a pane's whole
+		// 100-events-per-2s budget on heartbeats and take a real permission
+		// prompt down with it.
+		// Hooks fire inside subagents too, and turnActive is a statement about
+		// the MAIN turn alone. A background subagent outlives that turn's Stop
+		// by design, so letting its tool calls through would reopen a turn that
+		// has ended — and nothing would close it again, since the subagent's
+		// own completion is a SubagentStop. The pane would hold a lit spinner
+		// until SessionEnd. The subagent ledger already keeps such a pane
+		// `working` via SubagentStart/Stop, so this costs no signal.
+		if in.AgentID != "" {
+			return nil
+		}
+		if spoolIsFresh(env, nowMs) {
+			return nil
+		}
+		return spoolEvent(env, nowMs, "PreToolUse", in.SessionID, "Working", hookevents.SeverityInfo,
 			map[string]string{"tool": truncate(in.ToolName, hookevents.MaxDataValueBytes)})
 	case "PreCompact":
 		title := "Compacting context"
@@ -272,6 +306,36 @@ func notifyKindData(message string) map[string]string {
 		return nil
 	}
 	return map[string]string{hookevents.DataNotifyKind: hookevents.NotifyKindIdle}
+}
+
+// workHeartbeatInterval is how long a pane may stay silent before a tool call
+// is worth spooling as proof of work. It bounds how late the indicator can
+// appear on a turn Quil never saw start; every tool call in between costs a
+// single stat and no line.
+const workHeartbeatInterval = 15 * time.Second
+
+// spoolIsFresh reports whether Quil has heard from this pane within
+// workHeartbeatInterval of nowMs, judged by the spool file's mtime.
+//
+// The spool carries EVERY event for the pane, which is what makes it the right
+// clock to read: the question is not "when did the last heartbeat fire" but
+// "does Quil already know this pane is alive". A turn opened by a normal
+// UserPromptSubmit therefore suppresses the heartbeats behind it for free.
+//
+// Both failure directions resolve toward speaking rather than staying silent.
+// A missing or unreadable spool means Quil has heard NOTHING from this pane —
+// the loudest possible reason to emit — and a future mtime (clock skew, a
+// restored file) yields a negative age that must not read as "recently
+// audible", or a skewed clock would mute the pane's indicator indefinitely. A
+// surplus line costs one sidebar-suppressed event; a missing one costs the
+// user the only cue that work is happening.
+func spoolIsFresh(env HookEnv, nowMs int64) bool {
+	fi, err := os.Stat(filepath.Join(env.QuilDir, "events", env.PaneID+".jsonl"))
+	if err != nil {
+		return false
+	}
+	age := time.UnixMilli(nowMs).Sub(fi.ModTime())
+	return age >= 0 && age < workHeartbeatInterval
 }
 
 // isPromptTool reports whether tool is an interactive-prompt tool whose

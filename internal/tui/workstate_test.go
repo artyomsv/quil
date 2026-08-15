@@ -28,6 +28,7 @@ func TestWorkEventKind(t *testing.T) {
 		{"hook.claude.UserPromptSubmit", workStart},
 		{"hook.opencode.chat.message", workStart},
 		{"hook.claude.PostToolUse", workStart}, // resume after a prompt is answered
+		{"hook.claude.PreToolUse", workStart},  // a tool call proves the agent is working
 		{"hook.claude.Stop", workStop},
 		// SessionEnd is terminal: no subagent can outlive the session, so it
 		// also clears any outstanding-subagent count (WorkEventStopFinal).
@@ -113,6 +114,41 @@ func modelWithSplitActiveTab() Model {
 	}
 	m.curTabs()[0].invalidateLeaves()
 	return m
+}
+
+// TestWorkStateOnlyEvent covers which hook events drive the spinner WITHOUT
+// earning a notification card. Both entries are events the user never asked
+// about: PostToolUse fires when they answer a prompt, PreToolUse once per
+// quiet interval for as long as an agent keeps working. Carding the latter
+// would post a card every workHeartbeatInterval on every working pane —
+// turning the sidebar into a progress log and burying the events that do need
+// an answer.
+func TestWorkStateOnlyEvent(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		eventType string
+		want      bool
+	}{
+		{"hook.claude.PostToolUse", true},
+		{"hook.claude.PreToolUse", true},
+		// Everything else is a real notification — including the other
+		// work-state edges, which say something a user acts on.
+		{"hook.claude.UserPromptSubmit", false},
+		{"hook.claude.Stop", false},
+		{"hook.claude.PermissionRequest", false},
+		{"hook.claude.SubagentStop", false},
+		{"output_idle", false},
+		{"process_exit", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.eventType, func(t *testing.T) {
+			t.Parallel()
+			if got := workStateOnlyEvent(tt.eventType); got != tt.want {
+				t.Errorf("workStateOnlyEvent(%q) = %v, want %v", tt.eventType, got, tt.want)
+			}
+		})
+	}
 }
 
 func TestApplyWorkTransition_StartSetsWorking(t *testing.T) {
@@ -643,6 +679,59 @@ func TestApplyWorkTransition_StopWithOutstandingSubagents_KeepsSpinner(t *testin
 	}
 	if !pane.unseen {
 		t.Error("draining the last subagent after the turn ended must mark the background pane unseen")
+	}
+}
+
+// TestApplyWorkTransition_AutonomousResumeAfterTeammate_LightsSpinner replays
+// the production trace that motivated the PreToolUse start edge, verbatim from
+// one orchestrator pane's spool (2026-08-15, 18:06–18:35 local).
+//
+// Both pre-existing start edges assume a HUMAN began the turn: UserPromptSubmit
+// is a typed prompt, and PostToolUse is matched to the interactive-prompt tools
+// the user has just answered. Claude Code breaks that assumption — when a
+// teammate reports back, its result is injected as a user-ROLE transcript entry
+// and the orchestrator resumes on its own. No prompt is submitted, so neither
+// edge fires and `working` stays false for the whole resumed turn.
+//
+// Measured cost of the gap in that trace: the last subagent drained at 18:19:57
+// and the turn's Stop landed at 18:34:38, with ~60 tool calls in between. The
+// pane showed no indicator for 14m41s while visibly working.
+func TestApplyWorkTransition_AutonomousResumeAfterTeammate_LightsSpinner(t *testing.T) {
+	t.Parallel()
+	reviewer := map[string]string{"agent_type": "spec-reviewer"}
+	m := modelWithBackgroundTab()
+	pane := m.curTabs()[1].Root.Leaves()[0]
+
+	m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit", nil) // 18:06:20
+	m.applyWorkTransition("p2", "hook.claude.SubagentStart", reviewer)
+	m.applyWorkTransition("p2", "hook.claude.SubagentStop", reviewer)
+	m.applyWorkTransition("p2", "hook.claude.SubagentStart", reviewer)
+	m.applyWorkTransition("p2", "hook.claude.Stop", nil)              // 18:19:31
+	m.applyWorkTransition("p2", "hook.claude.SubagentStop", reviewer) // 18:19:57
+
+	// Guard, not the assertion under test: the turn is over and the ledger is
+	// drained, so this is genuinely the state the hole starts from. If this
+	// ever fails the trace no longer reproduces and the test below proves
+	// nothing.
+	if pane.working {
+		t.Fatal("setup: the pane must be idle here — that is what makes the next edge the only signal")
+	}
+
+	// The teammate's result lands and the orchestrator resumes. The FIRST
+	// observable thing it does is call a tool (Bash, at 18:20:53).
+	m.applyWorkTransition("p2", "hook.claude.PreToolUse", map[string]string{"tool": "Bash"})
+	if !pane.working {
+		t.Error("a tool call is proof the agent is working — the spinner must light without a user prompt")
+	}
+	if !m.tabHasWorkingPane(1) {
+		t.Error("the tab label must carry the resumed turn too")
+	}
+
+	// And the ordinary falling edge still ends it: a start edge that no Stop
+	// can clear would trade a dark spinner for a stuck one.
+	m.applyWorkTransition("p2", "hook.claude.Stop", nil) // 18:34:38
+	if pane.working {
+		t.Error("the turn's Stop must clear a spinner lit by PreToolUse")
 	}
 }
 

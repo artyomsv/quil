@@ -522,6 +522,125 @@ func TestRunHook_RejectsTraversalPaneID(t *testing.T) {
 // even though Claude's matcher should only fire PostToolUse for prompt tools, a
 // PostToolUse for an ordinary tool (Bash/Read/Edit) must never spool — that was
 // the noise the matcher exists to avoid.
+// backdateSpool sets a pane's spool mtime so the PreToolUse throttle sees a
+// known age. The throttle compares the file's mtime against the INJECTED
+// nowMs, never the wall clock, so these tests are deterministic.
+func backdateSpool(t *testing.T, quilDir, paneID string, when time.Time) {
+	t.Helper()
+	p := filepath.Join(quilDir, "events", paneID+".jsonl")
+	if err := os.Chtimes(p, when, when); err != nil {
+		t.Fatalf("chtimes spool: %v", err)
+	}
+}
+
+const preToolStdin = `{"hook_event_name":"PreToolUse","session_id":"11111111-2222-3333-4444-555555555555","tool_name":"Bash"}`
+
+// TestRunHook_PreToolUse_SpoolsWhenQuilHasNotHeardFromThePane covers the edge
+// this event exists for: a turn that began without a user prompt (a teammate
+// reported back and the agent resumed on its own). Quil's last word from the
+// pane was a Stop, so it believes the pane is idle — the tool call is the only
+// evidence otherwise.
+func TestRunHook_PreToolUse_SpoolsWhenQuilHasNotHeardFromThePane(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	env := HookEnv{PaneID: "pane-pre", QuilDir: dir, Mode: "default"}
+	const nowMs int64 = 1700000000000
+
+	stop := `{"hook_event_name":"Stop","session_id":"11111111-2222-3333-4444-555555555555"}`
+	if err := RunHook(strings.NewReader(stop), env, nowMs-60_000); err != nil {
+		t.Fatalf("RunHook(Stop): %v", err)
+	}
+	backdateSpool(t, dir, "pane-pre", time.UnixMilli(nowMs-60_000))
+
+	if err := RunHook(strings.NewReader(preToolStdin), env, nowMs); err != nil {
+		t.Fatalf("RunHook(PreToolUse): %v", err)
+	}
+	got := readSpool(t, dir, "pane-pre")
+	if len(got) != 2 {
+		t.Fatalf("spool lines = %d, want 2 (Stop + PreToolUse)", len(got))
+	}
+	p := got[1]
+	if p.HookEvent != "PreToolUse" {
+		t.Errorf("hook_event = %q, want PreToolUse", p.HookEvent)
+	}
+	if p.Data["tool"] != "Bash" {
+		t.Errorf("data[tool] = %q, want Bash", p.Data["tool"])
+	}
+}
+
+// TestRunHook_PreToolUse_ThrottledWhileThePaneIsAlreadyAudible is the half that
+// keeps the cost down. PreToolUse is registered for EVERY tool — one hook
+// invocation per tool call — but a pane quil heard from moments ago needs no
+// further proof it is working, so the line is dropped before it reaches the
+// spool, the ingester's rate limiter, or the notification queue.
+func TestRunHook_PreToolUse_ThrottledWhileThePaneIsAlreadyAudible(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	env := HookEnv{PaneID: "pane-thr", QuilDir: dir, Mode: "default"}
+	const nowMs int64 = 1700000000000
+
+	prompt := `{"hook_event_name":"UserPromptSubmit","session_id":"11111111-2222-3333-4444-555555555555","prompt":"go"}`
+	if err := RunHook(strings.NewReader(prompt), env, nowMs-1_000); err != nil {
+		t.Fatalf("RunHook(UserPromptSubmit): %v", err)
+	}
+	backdateSpool(t, dir, "pane-thr", time.UnixMilli(nowMs-1_000))
+
+	if err := RunHook(strings.NewReader(preToolStdin), env, nowMs); err != nil {
+		t.Fatalf("RunHook(PreToolUse): %v", err)
+	}
+	if got := readSpool(t, dir, "pane-thr"); len(got) != 1 {
+		t.Fatalf("spool lines = %d, want 1 — the tool call added nothing quil did not already know", len(got))
+	}
+}
+
+// TestRunHook_PreToolUse_FirstEventOnAPaneIsNeverThrottled pins the direction
+// the throttle fails in. No spool file means quil has heard NOTHING from this
+// pane, which is the loudest possible reason to speak — a stat error must
+// never be read as "recently audible".
+func TestRunHook_PreToolUse_FirstEventOnAPaneIsNeverThrottled(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	env := HookEnv{PaneID: "pane-first", QuilDir: dir, Mode: "default"}
+
+	if err := RunHook(strings.NewReader(preToolStdin), env, 1700000000000); err != nil {
+		t.Fatalf("RunHook(PreToolUse): %v", err)
+	}
+	got := readSpool(t, dir, "pane-first")
+	if len(got) != 1 {
+		t.Fatalf("spool lines = %d, want 1", len(got))
+	}
+	if got[0].HookEvent != "PreToolUse" {
+		t.Errorf("hook_event = %q, want PreToolUse", got[0].HookEvent)
+	}
+}
+
+// TestRunHook_PreToolUse_FromASubagentIsDropped keeps the heartbeat a
+// statement about the MAIN turn, which is the only thing turnActive means.
+// Hooks fire inside subagents too, and a subagent's tool call carries an
+// agent_id (verified against Claude Code 2.1.233: main-agent tool events have
+// none, a subagent's carry both agent_id and agent_type).
+//
+// Spooling those would let a background subagent — which by design outlives
+// the main turn's Stop — reopen the turn that just ended. Nothing would close
+// it again: the subagent's own completion is a SubagentStop, so the pane would
+// hold a lit spinner until SessionEnd. The subagent ledger already covers this
+// pane correctly via SubagentStart/Stop, so dropping the line costs no signal.
+func TestRunHook_PreToolUse_FromASubagentIsDropped(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	env := HookEnv{PaneID: "pane-sub", QuilDir: dir, Mode: "default"}
+
+	// No spool at all: the throttle would emit this one, so a dropped line can
+	// only be the agent_id gate.
+	stdin := `{"hook_event_name":"PreToolUse","session_id":"11111111-2222-3333-4444-555555555555","tool_name":"Bash","agent_id":"afdeee7427beccf6d","agent_type":"general-purpose"}`
+	if err := RunHook(strings.NewReader(stdin), env, 1700000000000); err != nil {
+		t.Fatalf("RunHook: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "events", "pane-sub.jsonl")); !os.IsNotExist(err) {
+		t.Fatalf("a subagent's tool call must not spool a main-turn start edge (stat err = %v)", err)
+	}
+}
+
 func TestRunHook_PostToolUse_NonPromptToolDropped(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

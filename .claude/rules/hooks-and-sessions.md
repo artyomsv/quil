@@ -53,7 +53,64 @@ opencode mints a new session id on `/new`, fork, or compaction. Quil registers a
 
 ### Work-in-progress indicators
 
-`internal/tui/workstate.go` derives a per-pane `working` bool entirely TUI-side from the existing `paneEventMsg` stream (`Type == "hook.<src>.<event>"`) — no new IPC, no daemon state. `working` is derived from two inputs tracked per pane: `turnActive` (main turn) OR `len(subagents) > 0` (outstanding background subagents). Start edges (→ `turnActive`): `hook.claude.UserPromptSubmit`, `hook.opencode.chat.message`.
+`internal/tui/workstate.go` derives a per-pane `working` bool entirely TUI-side from the existing `paneEventMsg` stream (`Type == "hook.<src>.<event>"`) — no new IPC, no daemon state. `working` is derived from two inputs tracked per pane: `turnActive` (main turn) OR `len(subagents) > 0` (outstanding background subagents). Start edges (→ `turnActive`): `hook.claude.UserPromptSubmit`, `hook.opencode.chat.message`, `hook.claude.PreToolUse`.
+
+**`PreToolUse` is the only start edge that does not assume a HUMAN began the
+turn, and it exists because the other two do.** `UserPromptSubmit` is a typed
+prompt and `PostToolUse` is matched to the interactive-prompt tools the user
+has just answered, so a turn Claude Code starts BY ITSELF has neither. When a
+teammate/subagent reports back, its result is injected as a user-ROLE
+transcript entry and the orchestrator resumes with no prompt submitted.
+Measured on one orchestrator pane (2026-08-15): **3 `Stop`s against 1
+`UserPromptSubmit`**, and between the last `SubagentStop` (18:19:57) and the
+next `Stop` (18:34:38) the pane ran ~60 tool calls with `working` false the
+whole time — 14m41s of visible work with no indicator. A `Stop` for a turn
+Quil never saw start is machine-checkable proof of a missed start edge, but it
+arrives at the END of the work, so it can only diagnose the hole, never fill
+it. There is no turn-start hook to register instead: the upstream event list
+has none, and the only signals emitted during autonomous work are tool-level.
+
+**It is registered MATCH-ALL and throttled at the PRODUCER, and that split is
+load-bearing.** A resumed turn's first action is whatever tool the agent picks,
+so any tool-name matcher would restore the blind spot — which is why the volume
+is handled by `claudehook.spoolIsFresh` instead: the branch runs once per tool
+call (the only Quil hook that does) but drops the line unless the pane's SPOOL
+has been quiet for `workHeartbeatInterval` (15 s). The spool is the right clock
+because the question is "does Quil already know this pane is alive", not "when
+did the last heartbeat fire" — so an ordinary `UserPromptSubmit` turn suppresses
+every heartbeat behind it for free, and a live 4-tool-call run spooled exactly
+ONE `PreToolUse` line (verified against Claude Code 2.1.233). Dropping a line is
+free because the signal is a LEVEL, not an edge: any later tool call in the same
+turn re-arms the identical state. Both failure directions fall toward speaking —
+a missing/unreadable spool means Quil has heard nothing at all (loudest reason to
+emit), and a FUTURE mtime yields a negative age that must not read as "recently
+audible", or clock skew would mute a pane's indicator indefinitely. Uncapped, the
+per-tool-call stream would also spend a pane's whole 100-events-per-2 s ingester
+budget on heartbeats and take a real permission prompt down with it.
+
+It is work-state-only, like `PostToolUse` — `tui.workStateOnlyEvent`
+(workstate.go) keeps both off the notification sidebar. Being a work-state edge
+is NOT the test for that: `Stop`, `PermissionRequest` and a named `SubagentStop`
+are exactly what the sidebar is for. The test is whether the event says anything
+a user can act on, and a heartbeat that repeats every 15 s for as long as an
+agent works says only "still running" — carded, it would bury the events that
+need an answer under a progress log.
+
+**It is gated on `agent_id` being ABSENT, which is what keeps it a statement
+about the MAIN turn** — the only thing `turnActive` means. Hooks fire inside
+subagents too, and a background subagent outlives the main turn's `Stop` by
+design, so admitting its tool calls would reopen a turn that has already ended
+with nothing left to close it again: the subagent's own completion is a
+`SubagentStop`, not a `Stop`, so the pane would hold a lit spinner until
+`SessionEnd`. Nothing is lost by dropping them, because the subagent ledger
+already keeps exactly those panes `working` via `SubagentStart`/`SubagentStop`.
+Verified against Claude Code 2.1.233 by dumping raw hook stdin: a main-agent
+`PreToolUse` carries neither `agent_id` nor `agent_type` (including the one for
+the `Agent` tool that SPAWNS a subagent), while the subagent's own `PreToolUse`
+carries both, matching the `SubagentStart`/`SubagentStop` pair that brackets it.
+**`agent_type` cannot serve as the gate** — a session started with `--agent`
+carries one on every event, main-agent events included — so `agent_id`, which is
+documented as present only inside a subagent, is the discriminator.
 
 Subagent edges: `hook.claude.SubagentStart` adds to the ledger (spinner on), `hook.claude.SubagentStop` drains it; both honor the ingester's `data["coalesced"]` burst count (N events sharing the debounce key in the 50 ms window arrive as ONE PaneEvent) via `coalescedCount`, or a parallel 3-subagent spawn would undercount as 1.
 

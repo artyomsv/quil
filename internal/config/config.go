@@ -210,9 +210,11 @@ type UpdateConfig struct {
 // HookNotificationsConfig controls which hook-driven events get spool-emitted
 // per source. Tier values are "default" / "verbose" / "off". Daemon passes
 // the resolved value to the hook scripts via the QUIL_HOOK_MODE env var at
-// pane spawn so the script can branch on it (default → forward the v1 tier;
-// verbose → also forward tool-use + pre/post events; off → no spool writes
-// at all). Unset = "default" downstream.
+// pane spawn so the script can branch on it (default → forward the v1 tier
+// plus the throttled PreToolUse heartbeat the work indicator needs for turns
+// no user prompt began; verbose → reserved for the full per-tool-call
+// PreToolUse/PostToolUse stream; off → no spool writes at all). Unset =
+// "default" downstream.
 type HookNotificationsConfig struct {
 	Claude   string `toml:"claude"`
 	OpenCode string `toml:"opencode"`

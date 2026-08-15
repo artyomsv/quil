@@ -3854,6 +3854,30 @@ func (d *Daemon) emitEvent(e PaneEvent) {
 			}
 		}
 	}
+	// Work-state-only events (hookevents.IsWorkStateOnly) take the same
+	// broadcast-but-don't-queue path the mute branch above uses, for a
+	// different reason: they are not notifications at all. PreToolUse is a
+	// heartbeat that repeats for as long as an agent keeps working, and the
+	// queue is bounded and aggregates by (PaneID, Title) before re-prepending
+	// the entry — so a constant "Working" title holds a slot per working pane
+	// and jumps ahead of every older event each time it fires, displacing
+	// genuine notifications (a permission prompt among them) out of the
+	// attach-replay window. It also woke every watch_notifications watcher on
+	// the pane, turning the tool that documents itself as replacing polling
+	// back into a poll.
+	//
+	// The broadcast is NOT optional: with the event out of the queue this is
+	// the only route by which a client learns the pane is working. The cost is
+	// that a reattaching client cannot rebuild `working` from the replay — it
+	// waits for the next live heartbeat instead, which is bounded and matches
+	// the documented contract that work state is not persisted.
+	if hookevents.IsWorkStateOnly(e.Type) {
+		payload := toPaneEventPayload(e)
+		msg, _ := ipc.NewMessage(ipc.MsgPaneEvent, payload)
+		d.broadcast(msg)
+		return
+	}
+
 	d.events.Push(e)
 	payload := toPaneEventPayload(e)
 	msg, _ := ipc.NewMessage(ipc.MsgPaneEvent, payload)

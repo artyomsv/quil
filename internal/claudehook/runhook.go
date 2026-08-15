@@ -42,7 +42,12 @@ type claudeStdin struct {
 	ToolName       string `json:"tool_name"`
 	Reason         string `json:"reason"`
 	AgentType      string `json:"agent_type"`
-	Content        string `json:"content"`
+	// AgentID is present only when the hook fires INSIDE a subagent, which
+	// makes its absence the test for "this came from the main agent".
+	// agent_type cannot serve: a session started with --agent carries one on
+	// every event, main-agent events included.
+	AgentID string `json:"agent_id"`
+	Content string `json:"content"`
 }
 
 // sessionIDRe matches the Claude session-id shape (uuid-ish hex). Mirrors the
@@ -154,6 +159,54 @@ func dispatchHookEvent(env HookEnv, in claudeStdin, nowMs int64) error {
 		hookLog(env.QuilDir, env.PaneID, "PostToolUse resume tool="+in.ToolName)
 		return spoolEvent(env, nowMs, "PostToolUse", in.SessionID,
 			truncate("Resumed after "+in.ToolName, hookevents.MaxTitleBytes), hookevents.SeverityInfo,
+			map[string]string{"tool": truncate(in.ToolName, hookevents.MaxDataValueBytes)})
+	case "StopFailure":
+		// The turn ending Claude reports instead of Stop when the API call
+		// fails. Carries the reason where Stop carries model usage: there is no
+		// completed assistant turn to read usage from, and the reason is what
+		// separates a network blip from a pane worth restarting.
+		title := "Turn failed"
+		if in.Reason != "" {
+			title = truncate("Turn failed: "+in.Reason, hookevents.MaxTitleBytes)
+		}
+		return spoolEvent(env, nowMs, "StopFailure", in.SessionID, title, hookevents.SeverityWarning,
+			map[string]string{"reason": truncate(in.Reason, hookevents.MaxDataValueBytes)})
+	case "PreToolUse":
+		// Work-spinner START edge for a turn no user prompt began. See the
+		// PreToolUse case in hookevents.ClassifyWorkEvent for the trace.
+		// Work-state only; the TUI suppresses it from the notification sidebar.
+		//
+		// Registered for EVERY tool, so this branch runs once per tool call —
+		// the only hook Quil registers that does. It is throttled to a
+		// heartbeat because the signal is a LEVEL ("this pane is working"),
+		// not an edge: a pane Quil heard from moments ago needs no further
+		// proof, and any later tool call in the same turn re-arms the
+		// identical state. Dropping the line here also keeps it off the
+		// ingester's rate limiter, which would otherwise spend a pane's whole
+		// 100-events-per-2s budget on heartbeats and take a real permission
+		// prompt down with it.
+		// Hooks fire inside subagents too, and turnActive is a statement about
+		// the MAIN turn alone. A background subagent outlives that turn's Stop
+		// by design, so letting its tool calls through would reopen a turn that
+		// has ended — and nothing would close it again, since the subagent's
+		// own completion is a SubagentStop. The pane would hold a lit spinner
+		// until SessionEnd. The subagent ledger already keeps such a pane
+		// `working` via SubagentStart/Stop, so this costs no signal.
+		if in.AgentID != "" {
+			return nil
+		}
+		// Off-mode is checked HERE as well as inside spoolEvent, which is not
+		// redundant on this path: spoolEvent returns before writing, so the
+		// spool never exists, so the throttle below would stat a missing file
+		// once per tool call forever. It also keeps the off-mode contract local
+		// to the branch that runs most often.
+		if env.Mode == "off" {
+			return nil
+		}
+		if spoolIsFresh(env, nowMs) {
+			return nil
+		}
+		return spoolEvent(env, nowMs, "PreToolUse", in.SessionID, "Working", hookevents.SeverityInfo,
 			map[string]string{"tool": truncate(in.ToolName, hookevents.MaxDataValueBytes)})
 	case "PreCompact":
 		title := "Compacting context"
@@ -274,6 +327,65 @@ func notifyKindData(message string) map[string]string {
 	return map[string]string{hookevents.DataNotifyKind: hookevents.NotifyKindIdle}
 }
 
+// spoolDir and spoolPath are the ONE definition of where a pane's spool lives.
+// They exist because the reader (spoolIsFresh) and the writer (spoolEvent) built
+// the path independently, and a drift between them fails silently in the worst
+// direction: the throttle would stat a file nobody writes, find it missing, read
+// "never audible", and stop throttling — with no test and no log line to say so.
+func spoolDir(env HookEnv) string {
+	return filepath.Join(env.QuilDir, "events")
+}
+
+func spoolPath(env HookEnv) string {
+	return filepath.Join(spoolDir(env), env.PaneID+".jsonl")
+}
+
+// workHeartbeatInterval is how long a pane may stay silent before a tool call
+// is worth spooling as proof of work.
+//
+// It bounds the indicator's error in BOTH directions, and the second one is
+// easy to miss. Late ON: a turn Quil never saw start goes unindicated until the
+// first tool call past a quiet window. Late OFF: while background subagents are
+// draining more often than this interval, the main agent's own heartbeats are
+// all throttled, so when the LAST subagent drains the falling edge fires and the
+// pane briefly reports a completed turn while the main agent is demonstrably
+// working. Both are bounded by this value, and the second is strictly better
+// than the pre-existing behaviour, where that false completion stood forever.
+//
+// The cost this interval bounds is the SPOOL LINE, not the hook invocation.
+// PreToolUse is registered match-all and Claude blocks on the hook before every
+// tool call, so the process spawn is paid per tool call regardless of the
+// throttle — measured on a Windows host at ~81 ms end to end (~25 ms over a bare
+// process spawn), i.e. roughly 5 s per turn at the ~60 tool calls this feature's
+// own trace recorded. That is the real price of closing the blind spot, and
+// there is no cheaper instrument: upstream has no turn-start hook, and narrowing
+// the matcher restores the gap.
+const workHeartbeatInterval = 15 * time.Second
+
+// spoolIsFresh reports whether Quil has heard from this pane within
+// workHeartbeatInterval of nowMs, judged by the spool file's mtime.
+//
+// The spool carries EVERY event for the pane, which is what makes it the right
+// clock to read: the question is not "when did the last heartbeat fire" but
+// "does Quil already know this pane is alive". A turn opened by a normal
+// UserPromptSubmit therefore suppresses the heartbeats behind it for free.
+//
+// Both failure directions resolve toward speaking rather than staying silent.
+// A missing or unreadable spool means Quil has heard NOTHING from this pane —
+// the loudest possible reason to emit — and a future mtime (clock skew, a
+// restored file) yields a negative age that must not read as "recently
+// audible", or a skewed clock would mute the pane's indicator indefinitely. A
+// surplus line costs one sidebar-suppressed event; a missing one costs the
+// user the only cue that work is happening.
+func spoolIsFresh(env HookEnv, nowMs int64) bool {
+	fi, err := os.Stat(spoolPath(env))
+	if err != nil {
+		return false
+	}
+	age := time.UnixMilli(nowMs).Sub(fi.ModTime())
+	return age >= 0 && age < workHeartbeatInterval
+}
+
 // isPromptTool reports whether tool is an interactive-prompt tool whose
 // completion (PostToolUse) should re-arm the work spinner. Keep this set in
 // sync with claudehook.promptToolMatcher (the registration-side regex).
@@ -292,7 +404,7 @@ func spoolEvent(env HookEnv, nowMs int64, hookEvent, sessionID, title, sev strin
 	if env.Mode == "off" {
 		return nil
 	}
-	eventsDir := filepath.Join(env.QuilDir, "events")
+	eventsDir := spoolDir(env)
 	if err := os.MkdirAll(eventsDir, 0o700); err != nil {
 		hookLog(env.QuilDir, env.PaneID, "mkdir events dir failed: "+err.Error())
 		return err
@@ -314,8 +426,7 @@ func spoolEvent(env HookEnv, nowMs int64, hookEvent, sessionID, title, sev strin
 		hookLog(env.QuilDir, env.PaneID, "marshal payload failed: "+err.Error())
 		return err
 	}
-	spoolFile := filepath.Join(eventsDir, env.PaneID+".jsonl")
-	f, err := os.OpenFile(spoolFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	f, err := os.OpenFile(spoolPath(env), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		hookLog(env.QuilDir, env.PaneID, "open spool failed: "+err.Error())
 		return err

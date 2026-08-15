@@ -2156,8 +2156,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// command_complete) stay even on the active pane: they're transient
 		// state changes that benefit from a sidebar audit trail.
 		//
-		// hook.claude.PostToolUse is a work-state-only signal (re-arms the
-		// spinner after a prompt is answered) — never a user-facing card.
+		// Work-state-only signals (see workStateOnlyEvent) drive the spinner
+		// and nothing else — never a user-facing card.
 		//
 		// A muted pane's daemon still forwards work-state hook events live
 		// (see emitEvent) so `working` tracks reality across mute/unmute —
@@ -2165,7 +2165,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// the sidebar card for any event sourced from a muted pane.
 		eventPane, _, _ := m.findPaneAndTab(msg.PaneID)
 		muted := eventPane != nil && eventPane.Muted
-		workStateOnly := msg.Type == "hook.claude.PostToolUse"
+		workStateOnly := workStateOnlyEvent(msg.Type)
 		if !muted && !workStateOnly && !(msg.Type == "output_idle" && m.isActivePane(msg.PaneID)) {
 			m.notifications.AddEvent(ipc.PaneEventPayload(msg))
 		}
@@ -4238,6 +4238,13 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				// this pane — and the answer a parked pane never otherwise
 				// hears, since approving a prompt emits no hook.
 				pane.answerBlockedByInput()
+				// ESC is Claude's interrupt, and the one turn ending it
+				// reports NO hook for — measured, not assumed. Without this
+				// the pane goes on claiming work until SessionEnd. See
+				// interruptWorkingPane for why a keystroke is sound here.
+				if key == "esc" {
+					m.interruptWorkingPane(pane.ID)
+				}
 			}
 		}
 		return m, m.forwardInputBytes(data)

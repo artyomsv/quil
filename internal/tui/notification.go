@@ -231,7 +231,20 @@ func (nc *NotificationCenter) View(height int) string {
 			// Line 2: title (indented), with optional ×N badge for
 			// daemon-side aggregation. count > 1 means this card already
 			// absorbed N repeats of the same (PaneID, Title).
-			titleBody := "  " + e.Title
+			// Sanitised for the same reason every pane-sourced string in
+			// sidebar.go is: a card title comes from a pane's own child via the
+			// hook spool, and this card is composited straight into the frame
+			// with no VT emulator in between — so an unfiltered title is one of
+			// the few strings in Quil that reaches the terminal with nothing
+			// parsing it first. Escapes could clear the screen or write the
+			// clipboard; U+202E is printable, so it survives a C0-only filter
+			// and reverses the rendered line.
+			//
+			// It runs BEFORE the truncation below, and that order is
+			// load-bearing: truncateRunes slices runes with no idea what an
+			// escape is, so sanitising afterwards would still leave a cut
+			// sequence swallowing the styling bytes that follow it.
+			titleBody := "  " + sanitizeRemoteText(e.Title)
 			countBadge := ""
 			if e.Data != nil {
 				if n, err := strconv.Atoi(e.Data["count"]); err == nil && n > 1 {

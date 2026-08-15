@@ -28,7 +28,9 @@ func TestWorkEventKind(t *testing.T) {
 		{"hook.claude.UserPromptSubmit", workStart},
 		{"hook.opencode.chat.message", workStart},
 		{"hook.claude.PostToolUse", workStart}, // resume after a prompt is answered
+		{"hook.claude.PreToolUse", workStart},  // a tool call proves the agent is working
 		{"hook.claude.Stop", workStop},
+		{"hook.claude.StopFailure", workStop}, // turn died on an API error
 		// SessionEnd is terminal: no subagent can outlive the session, so it
 		// also clears any outstanding-subagent count (WorkEventStopFinal).
 		{"hook.claude.SessionEnd", workStopFinal},
@@ -113,6 +115,41 @@ func modelWithSplitActiveTab() Model {
 	}
 	m.curTabs()[0].invalidateLeaves()
 	return m
+}
+
+// TestWorkStateOnlyEvent covers which hook events drive the spinner WITHOUT
+// earning a notification card. Both entries are events the user never asked
+// about: PostToolUse fires when they answer a prompt, PreToolUse once per
+// quiet interval for as long as an agent keeps working. Carding the latter
+// would post a card every workHeartbeatInterval on every working pane —
+// turning the sidebar into a progress log and burying the events that do need
+// an answer.
+func TestWorkStateOnlyEvent(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		eventType string
+		want      bool
+	}{
+		{"hook.claude.PostToolUse", true},
+		{"hook.claude.PreToolUse", true},
+		// Everything else is a real notification — including the other
+		// work-state edges, which say something a user acts on.
+		{"hook.claude.UserPromptSubmit", false},
+		{"hook.claude.Stop", false},
+		{"hook.claude.PermissionRequest", false},
+		{"hook.claude.SubagentStop", false},
+		{"output_idle", false},
+		{"process_exit", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.eventType, func(t *testing.T) {
+			t.Parallel()
+			if got := workStateOnlyEvent(tt.eventType); got != tt.want {
+				t.Errorf("workStateOnlyEvent(%q) = %v, want %v", tt.eventType, got, tt.want)
+			}
+		})
+	}
 }
 
 func TestApplyWorkTransition_StartSetsWorking(t *testing.T) {
@@ -643,6 +680,184 @@ func TestApplyWorkTransition_StopWithOutstandingSubagents_KeepsSpinner(t *testin
 	}
 	if !pane.unseen {
 		t.Error("draining the last subagent after the turn ended must mark the background pane unseen")
+	}
+}
+
+// TestApplyWorkTransition_StopFailureEndsTheTurn covers the opposite failure
+// direction to the PreToolUse gap: a turn that dies on an API error emits
+// StopFailure and never a Stop, so with the event unmapped turnActive stayed
+// true and the spinner claimed work that had already stopped. Nothing short of
+// SessionEnd or process_exit could clear it — neither of which a user reaches
+// without restarting the pane or the session.
+func TestApplyWorkTransition_StopFailureEndsTheTurn(t *testing.T) {
+	t.Parallel()
+	m := modelWithBackgroundTab()
+	pane := m.curTabs()[1].Root.Leaves()[0]
+
+	m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit", nil)
+	if !pane.working {
+		t.Fatal("setup: the turn must be running before it can fail")
+	}
+
+	m.applyWorkTransition("p2", "hook.claude.StopFailure", nil)
+	if pane.working {
+		t.Error("a turn that died on an API error must not keep the spinner running")
+	}
+	// Marked like any other completion the user was not watching: the turn is
+	// over and its outcome is something they need to come back to.
+	if !pane.unseen {
+		t.Error("a failed turn on a background tab must still leave a mark")
+	}
+}
+
+// TestApplyWorkTransition_StopFailureLeavesLiveSubagentsRunning pins the REASON
+// StopFailure is classified as a plain WorkEventStop rather than StopFinal.
+//
+// The classification tables catch a straight swap, but they run on an empty
+// ledger, so they cannot express the argument the code actually makes: an API
+// error ends the TURN and says nothing about background subagents, which are
+// separate processes carrying their own edges. StopFinal would clear the ledger
+// and take the spinner down while those agents were still running — the exact
+// wrong-off failure the ledger exists to prevent.
+func TestApplyWorkTransition_StopFailureLeavesLiveSubagentsRunning(t *testing.T) {
+	t.Parallel()
+	m := modelWithBackgroundTab()
+	pane := m.curTabs()[1].Root.Leaves()[0]
+
+	m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit", nil)
+	m.applyWorkTransition("p2", "hook.claude.SubagentStart", map[string]string{"agent_type": "spec-reviewer"})
+	m.applyWorkTransition("p2", "hook.claude.StopFailure", nil)
+
+	if !pane.working {
+		t.Error("a turn dying on an API error must not stop a subagent that is still running")
+	}
+	if pane.unseen {
+		t.Error("the completion mark must wait for the outstanding subagent to drain")
+	}
+
+	// The drain is still the completion edge, exactly as after a normal Stop.
+	m.applyWorkTransition("p2", "hook.claude.SubagentStop", map[string]string{"agent_type": "spec-reviewer"})
+	if pane.working {
+		t.Error("draining the last subagent after a failed turn must stop the spinner")
+	}
+	if !pane.unseen {
+		t.Error("draining the last subagent must mark the background pane")
+	}
+}
+
+// TestApplyWorkTransition_HeartbeatKeepsAMarkTheUserHasNotSeen protects the
+// completion mark from the agent that resumed after it.
+//
+// Every start edge used to imply a HUMAN had acted — UserPromptSubmit is a
+// typed prompt, PostToolUse is matched to a prompt the user just answered — so
+// clearing `unseen` on the rising edge WAS an acknowledgement. PreToolUse
+// breaks that: nobody acknowledged anything, the agent simply carried on.
+//
+// From the branch's own production trace: the turn's completion marked the pane
+// at 18:19:57 and raised a desktop toast, the resumed turn's first tool call
+// landed at 18:20:53, and clearing the mark there also had
+// sweepOutstandingToasts withdraw the toast — a notification created and
+// destroyed inside 56 seconds without a human seeing either. That is the same
+// shape as the bug that put the termFocused guard into ackFocusedPane ("a
+// signal removed ~one tick after it was set is indistinguishable from one that
+// was never set at all"), except here the remover is the agent.
+func TestApplyWorkTransition_HeartbeatKeepsAMarkTheUserHasNotSeen(t *testing.T) {
+	t.Parallel()
+	m := modelWithBackgroundTab()
+	pane := m.curTabs()[1].Root.Leaves()[0]
+
+	m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit", nil)
+	m.applyWorkTransition("p2", "hook.claude.Stop", nil)
+	if !pane.unseen {
+		t.Fatal("setup: a turn finishing on a background tab must mark the pane")
+	}
+
+	// The agent resumes on its own. It has not answered anything for the user.
+	m.applyWorkTransition("p2", "hook.claude.PreToolUse", map[string]string{"tool": "Bash"})
+	if !pane.working {
+		t.Error("the heartbeat must still light the spinner")
+	}
+	if !pane.unseen {
+		t.Error("an agent resuming must not clear the mark left by the turn the user has not seen")
+	}
+}
+
+// TestApplyWorkTransition_HumanStartStillClearsTheMark is the other half: the
+// exemption above must stay narrow. A start the user caused IS an
+// acknowledgement, and clearing there is what keeps a stale green cue off a
+// pane the user is actively driving.
+func TestApplyWorkTransition_HumanStartStillClearsTheMark(t *testing.T) {
+	t.Parallel()
+	for _, evt := range []string{"hook.claude.UserPromptSubmit", "hook.claude.PostToolUse"} {
+		t.Run(evt, func(t *testing.T) {
+			t.Parallel()
+			m := modelWithBackgroundTab()
+			pane := m.curTabs()[1].Root.Leaves()[0]
+
+			m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit", nil)
+			m.applyWorkTransition("p2", "hook.claude.Stop", nil)
+			if !pane.unseen {
+				t.Fatal("setup: the completed turn must have marked the pane")
+			}
+
+			m.applyWorkTransition("p2", evt, nil)
+			if pane.unseen {
+				t.Errorf("%s is a human acting on the pane and must clear the mark", evt)
+			}
+		})
+	}
+}
+
+// TestApplyWorkTransition_AutonomousResumeAfterTeammate_LightsSpinner replays
+// the production trace that motivated the PreToolUse start edge, verbatim from
+// one orchestrator pane's spool (2026-08-15, 18:06–18:35 local).
+//
+// Both pre-existing start edges assume a HUMAN began the turn: UserPromptSubmit
+// is a typed prompt, and PostToolUse is matched to the interactive-prompt tools
+// the user has just answered. Claude Code breaks that assumption — when a
+// teammate reports back, its result is injected as a user-ROLE transcript entry
+// and the orchestrator resumes on its own. No prompt is submitted, so neither
+// edge fires and `working` stays false for the whole resumed turn.
+//
+// Measured cost of the gap in that trace: the last subagent drained at 18:19:57
+// and the turn's Stop landed at 18:34:38, with ~60 tool calls in between. The
+// pane showed no indicator for 14m41s while visibly working.
+func TestApplyWorkTransition_AutonomousResumeAfterTeammate_LightsSpinner(t *testing.T) {
+	t.Parallel()
+	reviewer := map[string]string{"agent_type": "spec-reviewer"}
+	m := modelWithBackgroundTab()
+	pane := m.curTabs()[1].Root.Leaves()[0]
+
+	m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit", nil) // 18:06:20
+	m.applyWorkTransition("p2", "hook.claude.SubagentStart", reviewer)
+	m.applyWorkTransition("p2", "hook.claude.SubagentStop", reviewer)
+	m.applyWorkTransition("p2", "hook.claude.SubagentStart", reviewer)
+	m.applyWorkTransition("p2", "hook.claude.Stop", nil)              // 18:19:31
+	m.applyWorkTransition("p2", "hook.claude.SubagentStop", reviewer) // 18:19:57
+
+	// Guard, not the assertion under test: the turn is over and the ledger is
+	// drained, so this is genuinely the state the hole starts from. If this
+	// ever fails the trace no longer reproduces and the test below proves
+	// nothing.
+	if pane.working {
+		t.Fatal("setup: the pane must be idle here — that is what makes the next edge the only signal")
+	}
+
+	// The teammate's result lands and the orchestrator resumes. The FIRST
+	// observable thing it does is call a tool (Bash, at 18:20:53).
+	m.applyWorkTransition("p2", "hook.claude.PreToolUse", map[string]string{"tool": "Bash"})
+	if !pane.working {
+		t.Error("a tool call is proof the agent is working — the spinner must light without a user prompt")
+	}
+	if !m.tabHasWorkingPane(1) {
+		t.Error("the tab label must carry the resumed turn too")
+	}
+
+	// And the ordinary falling edge still ends it: a start edge that no Stop
+	// can clear would trade a dark spinner for a stuck one.
+	m.applyWorkTransition("p2", "hook.claude.Stop", nil) // 18:34:38
+	if pane.working {
+		t.Error("the turn's Stop must clear a spinner lit by PreToolUse")
 	}
 }
 

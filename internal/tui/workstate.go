@@ -46,6 +46,56 @@ func workEventKind(eventType string) workTransition {
 	return hookevents.ClassifyWorkEvent(eventType)
 }
 
+// workStateOnlyEvent reports whether an event exists purely to drive the
+// spinner and must never become a notification card. Read by the paneEventMsg
+// arm in model.go.
+//
+// Being a work-state edge is NOT the test — most of them (Stop,
+// PermissionRequest, a named SubagentStop) are exactly what the sidebar is
+// for. The test is whether the event says anything a user could act on, and
+// these two say only "still running": PostToolUse fires when the user answers
+// a prompt they are already looking at, and PreToolUse is a heartbeat that
+// repeats every workHeartbeatInterval for as long as an agent works.
+// Delegates to hookevents, which is the single source of truth: the daemon
+// reads the same predicate to keep these events out of its notification queue,
+// and a private copy here is what let the two disagree.
+func workStateOnlyEvent(eventType string) bool {
+	return hookevents.IsWorkStateOnly(eventType)
+}
+
+// userInterruptEvent is the synthetic pane-event type the TUI feeds through
+// applyWorkTransition when the user presses ESC on a working pane. It is not a
+// hook event and never crosses IPC — hookevents.ClassifyWorkEvent recognises it
+// so the interrupt reuses the ordinary turn-ending edge rather than hand-rolling
+// a second way to clear the same fields.
+const userInterruptEvent = "internal.user_interrupt"
+
+// interruptWorkingPane ends the main turn of the pane the user just interrupted.
+//
+// ESC is the ONLY turn ending Claude reports nothing for. Verified by driving a
+// real pane: a prompt spools UserPromptSubmit, an ESC mid-response spools
+// nothing at all, and no later event corrects it — so a stopped pane went on
+// claiming work until SessionEnd (observed live at 43 minutes and counting).
+//
+// Wired to the KEY paths only, not to paste and not to enqueueInput. A paste
+// that happens to contain 0x1b is not a decision to interrupt, and enqueueInput
+// also carries forwarded wheel notches and the selection handler's arrow keys —
+// the same reasoning that keeps answerBlockedByInput off those paths.
+//
+// Deliberately unconditional rather than gated on pane.working: ESC on an idle
+// pane recomputes the identical state and fires no edge, so a gate would only
+// duplicate what the single derivation point already guarantees.
+//
+// The cost of being wrong is now bounded in the safe direction, which is what
+// makes a keystroke heuristic acceptable here at all. ESC has other uses inside
+// Claude (dismissing a menu, leaving a mode), so this can clear a turn that is
+// still running — but the PreToolUse heartbeat re-lights it at the next tool
+// call, within workHeartbeatInterval. Before that heartbeat existed there was
+// no such recovery and this would have been a spinner that went dark for good.
+func (m *Model) interruptWorkingPane(paneID string) {
+	m.applyWorkTransition(paneID, userInterruptEvent, nil)
+}
+
 // findPaneAndTab locates a pane by ID across EVERY project and reports the
 // owning project and the tab's index within it.
 //
@@ -434,11 +484,25 @@ func (m *Model) applyWorkTransition(paneID, eventType string, data map[string]st
 		// Rising edge: seed the pane spinner with the shared frame so the
 		// tab and pane glyphs are in sync from the first render, and clear
 		// any stale mark — the spinner supersedes the green unseen cue.
-		// (working ⇒ !unseen is an invariant: the mark is set only on the
-		// falling edge below, so a start on an already-working pane has
-		// nothing to clear.)
+		//
+		// The clear is an ACKNOWLEDGEMENT, and only a human can give one. It
+		// was unconditional while every start edge implied one: UserPromptSubmit
+		// is a typed prompt and PostToolUse is matched to a prompt the user has
+		// just answered, so in both cases they had demonstrably just looked at
+		// the pane. A PreToolUse heartbeat carries no such implication — the
+		// agent simply resumed on its own — and clearing there let the AGENT
+		// delete the previous turn's completion mark and, via
+		// sweepOutstandingToasts, withdraw the desktop toast raised with it.
+		// Measured on the trace this branch exists for: mark set at 18:19:57,
+		// erased at 18:20:53, with no human having seen either.
+		//
+		// So a heartbeat lights the spinner and leaves the mark alone. The two
+		// then coexist, which is not a broken invariant but an accurate report:
+		// this pane is working AND it finished something you have not seen.
 		pane.workFrame = m.workSpinnerFrame
-		pane.unseen = false
+		if !hookevents.IsWorkHeartbeat(eventType) {
+			pane.unseen = false
+		}
 	case !pane.working && wasWorking && !abort:
 		// Falling edge on a genuine completion — turn over AND subagents
 		// drained, whichever edge landed last. Mark unless the user is

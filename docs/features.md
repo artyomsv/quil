@@ -395,8 +395,10 @@ hook fires (claude .sh / opencode .js)
 
 Tier values (per source — Claude and OpenCode are configured independently):
 
-- `default` (the v1 set): Claude `SessionEnd`, `UserPromptSubmit`, `Notification`, `PermissionRequest`, `Stop`, `PreCompact`/`PostCompact`, `SubagentStart/Stop`, `TaskCreated/Completed`; OpenCode `permission.ask`, `experimental.session.compacting`, plus filtered bus events (`session.idle/error/compacted`, `session.status` retry-only, `file.edited` batched 1 s).
-- `verbose` (currently identical to `default` — placeholder for future tier-2 events like Claude `PreToolUse`/`PostToolUse`).
+- `default` (the v1 set): Claude `SessionEnd`, `UserPromptSubmit`, `Notification`, `PermissionRequest`, `Stop`, `StopFailure`, `PreCompact`/`PostCompact`, `SubagentStart/Stop`, `TaskCreated/Completed`, plus a throttled `PreToolUse` heartbeat (see below); OpenCode `permission.ask`, `experimental.session.compacting`, plus filtered bus events (`session.idle/error/compacted`, `session.status` retry-only, `file.edited` batched 1 s).
+- `verbose` (currently identical to `default` — placeholder for future tier-2 events such as the full per-tool-call `PreToolUse`/`PostToolUse` stream).
+
+The `default` tier's `PreToolUse` registration is **not** the per-tool-call stream `verbose` is reserved for. It is the work-indicator's only evidence that a turn is running when no user prompt started it — an agent resuming after a teammate reports back — so it must fire for every tool, but it is throttled to at most one spooled event per pane per 15 seconds of silence and never becomes a notification card. `verbose` remains the switch for seeing every tool call.
 - `off` disables forwarding entirely; the legacy PTY-byte idle heuristic kicks back in as the fallback notification surface.
 
 | Action | Binding |

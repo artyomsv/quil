@@ -17,7 +17,7 @@ Extracted verbatim from `.claude/CLAUDE.md`. Loaded only when the files above ar
 
 ### `internal/claudehook/`
 
-Claude Code multi-event hook (native subcommand, no scripts). `BuildSettingsJSON` registers Quil's hook command under 12 Claude events (SessionStart for session-id tracking + 11 forwarded to the JSONL spool: SessionEnd, UserPromptSubmit, Notification, PermissionRequest, Stop, PreCompact, PostCompact, SubagentStart/Stop, TaskCreated/TaskCompleted). The hook command is `HookCommand(exePath)` → `"<quild>" claude-hook` — the daemon passes `os.Executable()`. `RunHook` (runhook.go) is the handler: reads the hook JSON on stdin, branches on `hook_event_name`, and either writes the session id file (SessionStart) or appends a `hookevents.Payload` JSONL line via `encoding/json` (no hand-rolled escaping; eliminates the BOM/codepage bug class the old `.ps1`/`.sh` had). Wired in `cmd/quild/main.go` as a fast-path subcommand that never starts the daemon — replaces the per-event PowerShell/sh spawn (~1-4 s cold start) with a native Go process (~tens of ms). `claudeHookSpawnPrep` (daemon.go) builds the `--settings` JSON from `claudeHookExeFn` (≈`os.Executable`, injectable for tests) and sets PTY env `QUIL_PANE_ID` + `QUIL_HOOK_MODE` (`"default"|"verbose"|"off"`) + `QUIL_HOOK_HOME` (renamed from `QUIL_HOME`; consumers fall back to `QUIL_HOME` for one release). `ReadPersistedSessionID` consults `config.SessionsDir()/<paneID>.id` on restore. (OpenCode still uses an embedded JS plugin — see `internal/opencodehook/`.)
+Claude Code multi-event hook (native subcommand, no scripts). `BuildSettingsJSON` registers Quil's hook command under 14 Claude events (SessionStart for session-id tracking + 13 forwarded to the JSONL spool: SessionEnd, UserPromptSubmit, Notification, PermissionRequest, Stop, StopFailure, PreToolUse, PreCompact, PostCompact, SubagentStart/Stop, TaskCreated/TaskCompleted). The hook command is `HookCommand(exePath)` → `"<quild>" claude-hook` — the daemon passes `os.Executable()`. `RunHook` (runhook.go) is the handler: reads the hook JSON on stdin, branches on `hook_event_name`, and either writes the session id file (SessionStart) or appends a `hookevents.Payload` JSONL line via `encoding/json` (no hand-rolled escaping; eliminates the BOM/codepage bug class the old `.ps1`/`.sh` had). Wired in `cmd/quild/main.go` as a fast-path subcommand that never starts the daemon — replaces the per-event PowerShell/sh spawn (~1-4 s cold start) with a native Go process (~tens of ms). `claudeHookSpawnPrep` (daemon.go) builds the `--settings` JSON from `claudeHookExeFn` (≈`os.Executable`, injectable for tests) and sets PTY env `QUIL_PANE_ID` + `QUIL_HOOK_MODE` (`"default"|"verbose"|"off"`) + `QUIL_HOOK_HOME` (renamed from `QUIL_HOME`; consumers fall back to `QUIL_HOME` for one release). `ReadPersistedSessionID` consults `config.SessionsDir()/<paneID>.id` on restore. (OpenCode still uses an embedded JS plugin — see `internal/opencodehook/`.)
 
 ### `internal/claudesessions/`
 
@@ -53,7 +53,88 @@ opencode mints a new session id on `/new`, fork, or compaction. Quil registers a
 
 ### Work-in-progress indicators
 
-`internal/tui/workstate.go` derives a per-pane `working` bool entirely TUI-side from the existing `paneEventMsg` stream (`Type == "hook.<src>.<event>"`) — no new IPC, no daemon state. `working` is derived from two inputs tracked per pane: `turnActive` (main turn) OR `len(subagents) > 0` (outstanding background subagents). Start edges (→ `turnActive`): `hook.claude.UserPromptSubmit`, `hook.opencode.chat.message`.
+`internal/tui/workstate.go` derives a per-pane `working` bool entirely TUI-side from the existing `paneEventMsg` stream (`Type == "hook.<src>.<event>"`) — no new IPC, no daemon state. `working` is derived from two inputs tracked per pane: `turnActive` (main turn) OR `len(subagents) > 0` (outstanding background subagents). Start edges (→ `turnActive`): `hook.claude.UserPromptSubmit`, `hook.opencode.chat.message`, `hook.claude.PreToolUse`.
+
+**`PreToolUse` is the only start edge that does not assume a HUMAN began the
+turn, and it exists because the other two do.** `UserPromptSubmit` is a typed
+prompt and `PostToolUse` is matched to the interactive-prompt tools the user
+has just answered, so a turn Claude Code starts BY ITSELF has neither. When a
+teammate/subagent reports back, its result is injected as a user-ROLE
+transcript entry and the orchestrator resumes with no prompt submitted.
+Measured on one orchestrator pane (2026-08-15): **3 `Stop`s against 1
+`UserPromptSubmit`**, and between the last `SubagentStop` (18:19:57) and the
+next `Stop` (18:34:38) the pane ran ~60 tool calls with `working` false the
+whole time — 14m41s of visible work with no indicator. A `Stop` for a turn
+Quil never saw start is machine-checkable proof of a missed start edge, but it
+arrives at the END of the work, so it can only diagnose the hole, never fill
+it. There is no turn-start hook to register instead: the upstream event list
+has none, and the only signals emitted during autonomous work are tool-level.
+
+**It is registered MATCH-ALL and throttled at the PRODUCER, and that split is
+load-bearing.** A resumed turn's first action is whatever tool the agent picks,
+so any tool-name matcher would restore the blind spot — which is why the volume
+is handled by `claudehook.spoolIsFresh` instead: the branch runs once per tool
+call (the only Quil hook that does) but drops the line unless the pane's SPOOL
+has been quiet for `workHeartbeatInterval` (15 s). The spool is the right clock
+because the question is "does Quil already know this pane is alive", not "when
+did the last heartbeat fire" — so an ordinary `UserPromptSubmit` turn suppresses
+every heartbeat behind it for free, and a live 4-tool-call run spooled exactly
+ONE `PreToolUse` line (verified against Claude Code 2.1.233). Dropping a line is
+free because the signal is a LEVEL, not an edge: any later tool call in the same
+turn re-arms the identical state. Both failure directions fall toward speaking —
+a missing/unreadable spool means Quil has heard nothing at all (loudest reason to
+emit), and a FUTURE mtime yields a negative age that must not read as "recently
+audible", or clock skew would mute a pane's indicator indefinitely. Uncapped, the
+per-tool-call stream would also spend a pane's whole 100-events-per-2 s ingester
+budget on heartbeats and take a real permission prompt down with it.
+
+**It is work-state-only, like `PostToolUse`, and that predicate must live in
+`hookevents.IsWorkStateOnly` because BOTH ends need it.** Being a work-state
+edge is NOT the test: `Stop`, `StopFailure`, `PermissionRequest` and a named
+`SubagentStop` are exactly what the sidebar and the attach replay are for. The
+test is whether the event says anything a user can act on, and a heartbeat that
+repeats every 15 s for as long as an agent works says only "still running".
+
+The TUI half (`tui.workStateOnlyEvent`, which now delegates) keeps the card off
+the sidebar. **The DAEMON half is the one that was missed, and a render-side
+suppression could not cover it**: `emitEvent` pushed every heartbeat into the
+bounded (50-slot) notification queue, where `eventQueue.Push` aggregates by
+`(PaneID, Title)` and then RE-PREPENDS the aggregated entry. A constant
+`"Working"` title therefore holds one slot per working pane AND jumps ahead of
+every older event each time it fires, displacing genuine notifications out of
+the attach-replay window — and this project's own position is that a missed park
+is silent and terminal. It also woke every `watch_notifications` watcher on the
+pane (that handler filters by pane, not by type), turning the tool documented as
+replacing polling back into a ~15 s poll, and re-pushing a dismissed card under
+its existing ID. `emitEvent` now takes the same broadcast-but-don't-queue path
+the mute branch uses.
+
+**The broadcast is not optional on that path.** With the event out of the queue,
+the live broadcast is the ONLY route by which a client learns the pane is
+working, so an "optimisation" that returns early there silences the spinner
+outright — the exact bug the heartbeat exists to fix. The cost is that a
+reattaching client cannot rebuild `working` from the replay and waits for the
+next live heartbeat instead; that is bounded by `workHeartbeatInterval` and
+matches the standing contract that work state is not persisted.
+`TestEmitEvent_WorkStateOnlyEventBroadcastsWithoutQueueing` drives a real IPC
+server and a real client for exactly this reason — a queue-count assertion
+passes just as happily with the broadcast deleted.
+
+**It is gated on `agent_id` being ABSENT, which is what keeps it a statement
+about the MAIN turn** — the only thing `turnActive` means. Hooks fire inside
+subagents too, and a background subagent outlives the main turn's `Stop` by
+design, so admitting its tool calls would reopen a turn that has already ended
+with nothing left to close it again: the subagent's own completion is a
+`SubagentStop`, not a `Stop`, so the pane would hold a lit spinner until
+`SessionEnd`. Nothing is lost by dropping them, because the subagent ledger
+already keeps exactly those panes `working` via `SubagentStart`/`SubagentStop`.
+Verified against Claude Code 2.1.233 by dumping raw hook stdin: a main-agent
+`PreToolUse` carries neither `agent_id` nor `agent_type` (including the one for
+the `Agent` tool that SPAWNS a subagent), while the subagent's own `PreToolUse`
+carries both, matching the `SubagentStart`/`SubagentStop` pair that brackets it.
+**`agent_type` cannot serve as the gate** — a session started with `--agent`
+carries one on every event, main-agent events included — so `agent_id`, which is
+documented as present only inside a subagent, is the discriminator.
 
 Subagent edges: `hook.claude.SubagentStart` adds to the ledger (spinner on), `hook.claude.SubagentStop` drains it; both honor the ingester's `data["coalesced"]` burst count (N events sharing the debounce key in the 50 ms window arrive as ONE PaneEvent) via `coalescedCount`, or a parallel 3-subagent spawn would undercount as 1.
 
@@ -65,7 +146,51 @@ Subagent edges: `hook.claude.SubagentStart` adds to the ledger (spinner on), `ho
 
 **The phantom is also dropped at the PRODUCER** (`internal/claudehook/runhook.go`, `SubagentStop` with empty `agent_type` → no spool line). It names no agent and reports nothing actionable, but spooled it became a sidebar card titled literally `" done"` once per turn on every AI pane, which the queue's `(PaneID, Title)` aggregation collapsed to `" done" ×N` and re-promoted to the top on each occurrence. The TUI-side match-by-name guard stays as defence in depth — the producer drop removes the noise, the ledger rule is what keeps the indicator correct.
 
-**`agent_type` is part of the ingester's coalesce key for exactly this reason** (`internal/hookevents/ingest.go` — `coalesceKey(paneID, hook_event, agent_type)`, appended only when non-empty so every other event keys as before). Coalescing is last-wins, so merging two DIFFERENT agents' starts would erase the loser's identity: its own stop would then match nothing while the winner's count never drained, wedging the spinner until `SessionEnd` — the ledger's identity guarantee only holds because the wire preserves it. A burst of the SAME agent still collapses to one emit with the burst count, which is what the count exists for. **The key's two free-form components are escaped** (`keyFieldEscaper`): `paneID` is NUL-free by `safePaneID` and stays first (so `Cancel`'s prefix match is unaffected), but `hook_event` and `agent_type` are arbitrary payload strings and JSON admits U+0000 in either — two variable fields joined by a separator either may contain is not injective, and `("SubagentStart", "\x00X")` would otherwise key identically to `("SubagentStart\x00", "X")`, coalescing them last-wins and erasing an identity. The escape is identity for every value a real producer emits. Claude Code runs subagents detached by default, so the main turn's `Stop` routinely fires while they still run: stop edges only end the spinner once the counter is drained, and the unseen mark is deferred to the drain edge (the LAST `SubagentStop` becomes the completion edge). Stop edges (→ persistent green unseen mark on the pane): `hook.claude.Stop`, `hook.opencode.session.idle`/`session.error`. `hook.claude.SessionEnd` is a *terminal* stop (`WorkEventStopFinal`): it also clears the subagent ledger (no subagent outlives its session — a lost SubagentStop must not wedge the spinner). `TaskCreated`/`TaskCompleted` are deliberately unmapped (task-list bookkeeping, not execution). Resume edge: `hook.claude.PostToolUse` (registered with a tool-name matcher `AskUserQuestion|ExitPlanMode` in `internal/claudehook` so it fires only for interactive-prompt tools — the user just answered → re-arm spinner; `workStart` clears the pane's unseen mark; suppressed from the notification sidebar as work-state-only). `process_exit` clears `working` AND the subagent ledger WITHOUT marking unseen (a crash is not a completed turn). A single shared 100 ms `workSpinnerTickMsg` animates the braille `spinnerFrames` on both the tab label (`tabLabel` prefix when `tabHasWorkingPane`) and each working pane's top-left border (left segment of `buildTopBorder`, reserved so the CWD truncation never eats the glyph); the loop self-stops via `workTickRunning` when no pane is working. `unseen` lives on `PaneModel` (set on workStop unless the pane is the focused pane of the active tab; cleared by `ackFocusedPane` at the single `Update` entry choke point — focusing the pane is the acknowledgement, no timer). Marked panes render a green border (precedence below active/ghost/MCP-highlight); background tabs derive a green label via `tabUnseen` + `unseenTabStyle` — `tabStyle(idx)` precedence is `blockedTabStyle` (amber, includes the active tab: the parked pane may be in an unfocused split) > `pinnedTabStyle` (purple 141, a pane pinned by hand — it had shared `unseenTabStyle`'s green, which made the mark the user set indistinguishable from the one the agent caused, and only the latter clears itself on focus) > `unseenTabStyle` (green, `tabUnseen` alone now) > custom tab color > active/inactive default, and is shared by `renderTabBar` + `hitTestTab` so rendered widths and click hit-testing never diverge. The active tab label never shows green (you're already looking at it); an unfocused split sibling still shows its green border. OpenCode's start edge is produced by the `chat.message` handler in `internal/opencodehook/scripts/quil-session-tracker.js`; Claude needs no producer change (both edges already arrive). State is not persisted — panes start idle on restart and the next hook event corrects them.
+**`agent_type` is part of the ingester's coalesce key for exactly this reason** (`internal/hookevents/ingest.go` — `coalesceKey(paneID, hook_event, agent_type)`, appended only when non-empty so every other event keys as before). Coalescing is last-wins, so merging two DIFFERENT agents' starts would erase the loser's identity: its own stop would then match nothing while the winner's count never drained, wedging the spinner until `SessionEnd` — the ledger's identity guarantee only holds because the wire preserves it. A burst of the SAME agent still collapses to one emit with the burst count, which is what the count exists for. **The key's two free-form components are escaped** (`keyFieldEscaper`): `paneID` is NUL-free by `safePaneID` and stays first (so `Cancel`'s prefix match is unaffected), but `hook_event` and `agent_type` are arbitrary payload strings and JSON admits U+0000 in either — two variable fields joined by a separator either may contain is not injective, and `("SubagentStart", "\x00X")` would otherwise key identically to `("SubagentStart\x00", "X")`, coalescing them last-wins and erasing an identity. The escape is identity for every value a real producer emits. Claude Code runs subagents detached by default, so the main turn's `Stop` routinely fires while they still run: stop edges only end the spinner once the counter is drained, and the unseen mark is deferred to the drain edge (the LAST `SubagentStop` becomes the completion edge). Stop edges (→ persistent green unseen mark on the pane): `hook.claude.Stop`, `hook.claude.StopFailure`, `hook.opencode.session.idle`/`session.error`.
+
+**ESC is the third turn ending, and the only one with NO upstream event behind
+it — so the TUI synthesises one.** Measured against Claude Code 2.1.233 by
+driving a real pane over IPC: submitting a prompt spools `UserPromptSubmit`,
+interrupting the streaming response with ESC spools **nothing at all** — not
+`Stop`, not `StopFailure`, not `Notification`, still nothing 80 s later. So
+`turnActive` stayed true until `SessionEnd` and a stopped pane went on claiming
+work indefinitely (reported from a live workspace at 43 minutes and counting).
+`tui.interruptWorkingPane` feeds the synthetic type `internal.user_interrupt`
+(`tui.userInterruptEvent`) through `applyWorkTransition`, which
+`ClassifyWorkEvent` maps to a plain `WorkEventStop` — reusing the ordinary
+turn-ending edge instead of hand-rolling a second way to clear the same fields.
+It is TUI-only and never crosses IPC.
+
+Three constraints make a keystroke acceptable where one normally would not be.
+It is wired to the two **key** paths only — not paste (a pasted `0x1b` is not a
+decision to interrupt) and not `enqueueInput` (which also carries wheel notches
+and the selection handler's arrow keys), the same boundary
+`answerBlockedByInput` draws. It ends the **main turn only** and leaves the
+subagent ledger alone, because a subagent's own tool calls are dropped by the
+`agent_id` gate, so nothing could ever re-light a spinner cleared here for a
+teammate that is still running — whereas the opposite error is the wrong-on
+direction `subagentsOverflow` already accepts and `SessionEnd`/`process_exit`
+both clear. And being wrong is now **recoverable**: ESC has other uses inside
+Claude (dismissing a menu, leaving a mode), so this can close a turn that is
+still running, but the `PreToolUse` heartbeat re-lights it at the next tool
+call. Before that heartbeat existed the same heuristic would have gone dark for
+good, which is why this fix belongs after it rather than before.
+
+**`StopFailure` is the turn ending Claude reports INSTEAD of `Stop` when the API
+call fails, and leaving it unregistered stranded the spinner.** A turn killed by
+an API error emits no `Stop` at all, so `turnActive` stayed true with only
+`SessionEnd` or `process_exit` able to clear it — neither of which a user reaches
+without restarting the pane or the session, so the pane claimed to be working for
+as long as it stayed open. Same missing-edge class as the `PreToolUse` gap below,
+opposite direction: that one loses the indicator, this one strands it. Mapped to
+plain `WorkEventStop`, NOT `StopFinal`: an API error ends the TURN and says
+nothing about background subagents, which are separate processes carrying their
+own edges, so clearing the ledger here would drop agents that are still running.
+It spools the `reason` where `Stop` spools model usage — there is no completed
+assistant turn to read usage from, and the reason is what separates a network
+blip from a pane worth restarting. Verified only that Claude Code 2.1.233 ACCEPTS
+the registration and spawns normally; the failing-turn payload itself has not
+been observed live, so `reason` is treated as optional. `hook.claude.SessionEnd` is a *terminal* stop (`WorkEventStopFinal`): it also clears the subagent ledger (no subagent outlives its session — a lost SubagentStop must not wedge the spinner). `TaskCreated`/`TaskCompleted` are deliberately unmapped (task-list bookkeeping, not execution). Resume edge: `hook.claude.PostToolUse` (registered with a tool-name matcher `AskUserQuestion|ExitPlanMode` in `internal/claudehook` so it fires only for interactive-prompt tools — the user just answered → re-arm spinner; `workStart` clears the pane's unseen mark; suppressed from the notification sidebar as work-state-only). `process_exit` clears `working` AND the subagent ledger WITHOUT marking unseen (a crash is not a completed turn). A single shared 100 ms `workSpinnerTickMsg` animates the braille `spinnerFrames` on both the tab label (`tabLabel` prefix when `tabHasWorkingPane`) and each working pane's top-left border (left segment of `buildTopBorder`, reserved so the CWD truncation never eats the glyph); the loop self-stops via `workTickRunning` when no pane is working. `unseen` lives on `PaneModel` (set on workStop unless the pane is the focused pane of the active tab; cleared by `ackFocusedPane` at the single `Update` entry choke point — focusing the pane is the acknowledgement, no timer). Marked panes render a green border (precedence below active/ghost/MCP-highlight); background tabs derive a green label via `tabUnseen` + `unseenTabStyle` — `tabStyle(idx)` precedence is `blockedTabStyle` (amber, includes the active tab: the parked pane may be in an unfocused split) > `pinnedTabStyle` (purple 141, a pane pinned by hand — it had shared `unseenTabStyle`'s green, which made the mark the user set indistinguishable from the one the agent caused, and only the latter clears itself on focus) > `unseenTabStyle` (green, `tabUnseen` alone now) > custom tab color > active/inactive default, and is shared by `renderTabBar` + `hitTestTab` so rendered widths and click hit-testing never diverge. The active tab label never shows green (you're already looking at it); an unfocused split sibling still shows its green border. OpenCode's start edge is produced by the `chat.message` handler in `internal/opencodehook/scripts/quil-session-tracker.js`; Claude needs no producer change (both edges already arrive). State is not persisted — panes start idle on restart and the next hook event corrects them.
 
 Park-for-input edges (`hook.claude.PermissionRequest`,
 `hook.opencode.permission.ask`) set `blockedSince` and do **NOT** clear

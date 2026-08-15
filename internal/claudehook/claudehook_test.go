@@ -1,6 +1,7 @@
 package claudehook
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -85,6 +86,32 @@ func TestBuildSettingsJSON_PostToolUseHasMatcher(t *testing.T) {
 	// The match-all events must NOT carry a matcher key.
 	if strings.Contains(js, `"SessionStart","matcher"`) {
 		t.Error("match-all events should not emit a matcher field")
+	}
+}
+
+// TestBuildSettingsJSON_PreToolUseHasNoMatcher pins the one property that
+// makes PreToolUse work as a start edge: it must fire for EVERY tool. A
+// resumed turn's first action is whatever the agent decides to run, so any
+// tool-name matcher here would reintroduce exactly the blind spot the event
+// was added to close. The volume that motivates a matcher elsewhere is
+// handled at the producer instead (spoolIsFresh), where dropping a line
+// cannot cost the signal.
+func TestBuildSettingsJSON_PreToolUseHasNoMatcher(t *testing.T) {
+	t.Parallel()
+	js, err := BuildSettingsJSON("sh /tmp/hook.sh")
+	if err != nil {
+		t.Fatalf("BuildSettingsJSON: %v", err)
+	}
+	var decoded settingsSchema
+	if err := json.Unmarshal([]byte(js), &decoded); err != nil {
+		t.Fatalf("decode settings JSON: %v", err)
+	}
+	entries, ok := decoded.Hooks["PreToolUse"]
+	if !ok || len(entries) == 0 {
+		t.Fatalf("PreToolUse not registered: %s", js)
+	}
+	if entries[0].Matcher != "" {
+		t.Errorf("PreToolUse matcher = %q, want empty (match every tool)", entries[0].Matcher)
 	}
 }
 

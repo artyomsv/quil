@@ -132,12 +132,23 @@ var forwardedHookEvents = []string{
 	"Notification",
 	"PermissionRequest",
 	"Stop",
+	// The turn ending Claude reports INSTEAD of Stop when the API call fails.
+	// Without it a failed turn produced no turn-ending edge at all.
+	"StopFailure",
 	"PreCompact",
 	"PostCompact",
 	"SubagentStart",
 	"SubagentStop",
 	"TaskCreated",
 	"TaskCompleted",
+	// Match-all deliberately, unlike the PostToolUse entry below: this is the
+	// start edge for a turn no user prompt began (a teammate reported back and
+	// the agent resumed on its own), and a resumed turn's first action is
+	// whatever tool the agent picks. Narrowing it by tool name would restore
+	// the blind spot it closes. The per-tool-call volume is handled in the
+	// producer instead — RunHook drops the line unless the pane has been quiet
+	// (spoolIsFresh) — because a line dropped there cannot cost the signal.
+	"PreToolUse",
 }
 
 // matchedHookEvents are registered with a tool-name matcher so Claude only
@@ -149,7 +160,9 @@ var forwardedHookEvents = []string{
 // the TUI uses to re-arm the work spinner after a park (the park itself comes
 // from the match-all PermissionRequest/Notification events above). Diagnostic
 // hook logging confirmed PreToolUse fires *before* the prompt, so only
-// PostToolUse is registered here.
+// PostToolUse can serve as the ANSWER edge — that is what this entry is about,
+// and it is unaffected by PreToolUse also being registered match-all above for
+// an unrelated purpose (proof that an autonomously resumed turn is running).
 var matchedHookEvents = []struct{ Name, Matcher string }{
 	{Name: "PostToolUse", Matcher: promptToolMatcher},
 }

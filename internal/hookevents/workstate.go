@@ -77,6 +77,56 @@ const (
 	NotifyKindIdle = "idle"
 )
 
+// IsWorkStateOnly reports whether an event exists PURELY to drive the work
+// indicator and must never be treated as a notification — neither queued by the
+// daemon nor carded by the TUI sidebar. It lives here, beside
+// ClassifyWorkEvent, so the two consumers share one list: the TUI held a
+// private copy first, and the daemon could not see it, which is precisely how
+// the heartbeat ended up in the notification queue.
+//
+// Being a work-state edge is NOT the test. Most of them — Stop, StopFailure,
+// PermissionRequest, a named SubagentStop — are exactly what the sidebar and
+// the attach replay exist for. The test is whether the event says anything a
+// user can act on, and these two say only "still running": PostToolUse fires
+// when the user answers a prompt they are already looking at, and PreToolUse is
+// a heartbeat that repeats for as long as an agent keeps working.
+//
+// The consequence for the DAEMON is why this matters beyond tidiness. The event
+// queue is bounded and aggregates by (PaneID, Title) before re-prepending the
+// entry, so a heartbeat carrying a constant title holds one slot per working
+// pane and jumps ahead of every older event each time it fires — displacing
+// genuine notifications out of the attach-replay window, and waking every
+// watch_notifications watcher on that pane. Callers must still BROADCAST these
+// events: suppressing the queue leaves the live broadcast as the only route by
+// which a client learns the pane is working.
+func IsWorkStateOnly(eventType string) bool {
+	switch eventType {
+	case "hook.claude.PostToolUse", "hook.claude.PreToolUse":
+		return true
+	}
+	return false
+}
+
+// IsWorkHeartbeat reports whether a start edge came from the agent carrying on
+// by itself rather than from a human acting on the pane.
+//
+// The distinction exists because the consumer's rising edge clears the pane's
+// unseen mark, and that was only ever sound while every start implied a human:
+// UserPromptSubmit is a typed prompt and PostToolUse is matched to a prompt the
+// user has just answered, so in both cases the person had demonstrably just
+// looked at the pane. PreToolUse carries no such implication — nobody
+// acknowledged anything, the agent simply resumed — so clearing there lets an
+// agent delete the completion mark, and withdraw the desktop toast raised with
+// it, for a turn the user never saw.
+//
+// It is deliberately NOT the same predicate as IsWorkStateOnly, which also
+// holds for PostToolUse: that one asks "should this become a card", this one
+// asks "did a human cause this". Collapsing them would re-introduce the bug for
+// the answered-prompt case, where clearing the mark is exactly right.
+func IsWorkHeartbeat(eventType string) bool {
+	return eventType == "hook.claude.PreToolUse"
+}
+
 // ClassifyWorkEvent maps a composed PaneEvent Type to a work-state transition.
 func ClassifyWorkEvent(eventType string) WorkEventKind {
 	switch eventType {
@@ -88,8 +138,36 @@ func ClassifyWorkEvent(eventType string) WorkEventKind {
 	// without tracking ordinary tool completions.
 	case "hook.claude.PostToolUse":
 		return WorkEventStart
+	// The only start edge that does not assume a HUMAN began the turn, and the
+	// reason it had to exist: UserPromptSubmit is a typed prompt and the
+	// PostToolUse above is matched to the prompt tools a user has just
+	// answered, so a turn Claude starts by itself has neither. When a teammate
+	// reports back, its result arrives as a user-ROLE transcript entry and the
+	// agent resumes — measured on one orchestrator pane as 3 Stops against 1
+	// UserPromptSubmit, with a 14m41s stretch of ~60 tool calls showing no
+	// indicator at all. A tool call is proof of work whatever started it.
+	//
+	// The producer throttles these to roughly one per quiet interval
+	// (claudehook.spoolIsFresh), so the ledger sees a heartbeat rather than a
+	// per-tool-call stream. Dropping one is free — it is a level, not an edge:
+	// any later tool call in the same turn re-arms the identical state.
+	case "hook.claude.PreToolUse":
+		return WorkEventStart
 	case "hook.claude.Stop",
 		"hook.opencode.session.idle", "hook.opencode.session.error":
+		return WorkEventStop
+	// A turn killed by an API error ends with StopFailure and NEVER a Stop, so
+	// leaving it unmapped left turnActive true with only SessionEnd or
+	// process_exit able to clear it — a spinner claiming work that had already
+	// stopped, for as long as the pane stayed open. Same missing-edge class as
+	// the PreToolUse case below, opposite direction: that one loses the
+	// indicator, this one strands it.
+	//
+	// Plain WorkEventStop, not StopFinal: an API error ends the TURN, and says
+	// nothing about background subagents, which are separate processes the
+	// ledger tracks on their own edges. Clearing the ledger here would drop
+	// agents that are still running.
+	case "hook.claude.StopFailure":
 		return WorkEventStop
 	// SessionEnd is terminal for the whole Claude session (/clear, /logout,
 	// exit): no subagent of it can still be running, so the TUI also drops
@@ -130,6 +208,18 @@ func ClassifyWorkEvent(eventType string) WorkEventKind {
 		return WorkEventPark
 	case "hook.claude.Notification":
 		return WorkEventNotify
+	// The user pressed ESC, which is Claude's interrupt. This is the ONLY
+	// turn-ending edge with no upstream event behind it: measured against
+	// Claude Code 2.1.233 by interrupting a streaming response on a real pane,
+	// an ESC spools nothing at all — not Stop, not StopFailure, not
+	// Notification — so `turnActive` stayed true until SessionEnd and a
+	// stopped pane went on reporting work indefinitely (observed: 43 minutes).
+	// The TUI synthesises it from the keystroke instead (see
+	// tui.userInterruptEvent); it is not a hook type and never crosses IPC.
+	//
+	// A plain Stop, so it ends the TURN and leaves the subagent ledger alone.
+	case "internal.user_interrupt":
+		return WorkEventStop
 	case "process_exit":
 		return WorkEventAbort
 	}

@@ -48,6 +48,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Shortcuts. Keyboard text selection claims those eight chords midway through
   dispatch, so which side wins depends on the action: the warning names it.
 
+## [1.59.3] - 2026-08-15
+
+### Fixed
+- **The work indicator no longer goes dark while an agent is still working.**
+  A pane whose agent picked its work back up on its own — most visibly an
+  orchestrator resuming after a teammate reported back — showed nothing at all,
+  often for many minutes, while it read files, edited and ran commands.
+
+  Quil learns that a turn started from Claude, and Claude only announced one
+  when a human began it: you typed a prompt, or you answered a prompt it had
+  shown you. A turn the agent starts by itself has neither. The teammate's
+  result arrives as a plain conversation entry, so the pane simply went quiet
+  while the work continued. One measured pane reported three finished turns
+  against a single started one, with a fourteen-minute stretch of roughly sixty
+  tool calls showing no indicator.
+
+  A tool call now counts as proof the pane is working, whoever started the
+  turn. To keep that cheap it is recorded at most once every fifteen seconds
+  per pane, and only while the pane has otherwise been silent — an ordinary
+  turn you began yourself is already accounted for and adds nothing. Tool calls
+  made by background teammates are deliberately not counted: those panes are
+  already tracked separately, and counting them would leave the indicator stuck
+  on after the main turn ended.
+
+- **A turn killed by an API error no longer leaves the indicator running
+  forever.** Claude reports that ending differently from a normal one, and Quil
+  was not listening for it, so the pane never learned the turn was over. The
+  indicator kept claiming work that had already stopped, and nothing cleared it
+  short of restarting the pane or the session. Such a turn now ends the
+  indicator like any other, and reports the reason it failed to the
+  notification sidebar.
+
+- **Stopping an agent with `esc` now clears the in-progress marker.** A pane you
+  interrupted kept showing as working — in one reported case for 43 minutes
+  after it had been stopped — and nothing short of restarting the pane or the
+  session cleared it. Claude announces the end of a turn in several ways, but an
+  interrupt is not one of them: pressing `esc` produces no announcement at all,
+  so Quil never learned the turn was over. `esc` on a working pane is now
+  treated as the end of that turn. Background teammates are left alone, since
+  they keep running and report their own completion.
+
+- **Work-indicator activity no longer crowds real notifications out of the
+  sidebar.** The signals that drive the indicator were being filed as
+  notifications by the daemon even though the sidebar never showed them. The
+  notification list holds a limited number of entries and moves an entry back to
+  the top each time it repeats, so on a workspace of busy agents these invisible
+  entries steadily pushed genuine ones — a permission prompt among them — out of
+  the list you see when you come back to a pane. They also woke anything waiting
+  on notifications through the MCP tools roughly every fifteen seconds, which
+  made a call that is supposed to wait quietly behave like a poll. Those signals
+  now reach the panes that need them without being filed at all.
+
+- **A notification card can no longer smuggle terminal escape sequences onto
+  your screen.** Card titles come from a pane's own agent, and unlike every
+  other pane-sourced string in the sidebar they were drawn without being
+  filtered first — so a title containing terminal control sequences could clear
+  the screen, write to the clipboard, or reverse the text of the line it was
+  drawn on. Titles are now filtered the same way the rest of the sidebar
+  already was.
+
 ## [1.59.2] - 2026-08-15
 
 ### Changed

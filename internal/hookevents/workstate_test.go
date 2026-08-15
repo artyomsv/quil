@@ -15,7 +15,14 @@ func TestClassifyWorkEvent(t *testing.T) {
 		{"hook.claude.UserPromptSubmit", WorkEventStart},
 		{"hook.opencode.chat.message", WorkEventStart},
 		{"hook.claude.PostToolUse", WorkEventStart},
+		// A tool call is proof the agent is working, whatever started the
+		// turn. It is the ONLY start edge that does not assume a human began
+		// it — see the PreToolUse case in ClassifyWorkEvent.
+		{"hook.claude.PreToolUse", WorkEventStart},
 		{"hook.claude.Stop", WorkEventStop},
+		// A turn killed by an API error ends without a Stop. Unmapped, it left
+		// turnActive true with nothing but SessionEnd/process_exit to clear it.
+		{"hook.claude.StopFailure", WorkEventStop},
 		{"hook.claude.SessionEnd", WorkEventStopFinal},
 		{"hook.opencode.session.idle", WorkEventStop},
 		{"hook.opencode.session.error", WorkEventStop},
@@ -25,6 +32,9 @@ func TestClassifyWorkEvent(t *testing.T) {
 		{"hook.claude.SubagentStart", WorkEventSubagentStart},
 		{"hook.claude.SubagentStop", WorkEventSubagentStop},
 		{"process_exit", WorkEventAbort},
+		// Synthesised by the TUI from an ESC keypress: the one turn ending
+		// upstream emits no event for at all.
+		{"internal.user_interrupt", WorkEventStop},
 		// Deliberately unmapped: task-list bookkeeping, not execution.
 		{"hook.claude.TaskCreated", WorkEventNone},
 		{"hook.claude.TaskCompleted", WorkEventNone},

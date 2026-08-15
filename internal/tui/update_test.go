@@ -220,6 +220,43 @@ func TestApplyUpdateConfirm_RequiresExplicitY(t *testing.T) {
 	}
 }
 
+// TestApplyUpdateConfirm_EscClearsTheDetailAndReturnsWhereThePressCameFrom
+// covers both halves of the Esc route out. The detail line describes ONE answer
+// from the daemon, so leaving it set would reappear on an unrelated later
+// confirm; and this dialog can now open by itself minutes after the press, so
+// Esc must not paint the About menu over a pane the user went back to working
+// in.
+func TestApplyUpdateConfirm_EscClearsTheDetailAndReturnsWhereThePressCameFrom(t *testing.T) {
+	esc := tea.KeyPressMsg{Code: tea.KeyEscape}
+
+	fromAbout := Model{
+		dialog: dialogConfirm, confirmKind: confirmKindApplyUpdate, confirmName: "0.0.2",
+		confirmDetail: "newest-release check: dial tcp: no route to host",
+		// The press came from the About menu, so that is where Esc belongs.
+		applyConfirmReturn: dialogAbout,
+	}
+	out, _ := fromAbout.handleConfirmKey(esc)
+	got := out.(Model)
+	if got.dialog != dialogAbout {
+		t.Errorf("dialog = %v, want dialogAbout (the press came from there)", got.dialog)
+	}
+	if got.dialogCursor != aboutUpdateIndex {
+		t.Errorf("dialogCursor = %d, want the update row (%d)", got.dialogCursor, aboutUpdateIndex)
+	}
+	if got.confirmDetail != "" {
+		t.Errorf("confirmDetail = %q, want cleared on the way out", got.confirmDetail)
+	}
+
+	selfOpened := Model{
+		dialog: dialogConfirm, confirmKind: confirmKindApplyUpdate, confirmName: "0.0.2",
+		applyConfirmReturn: dialogNone, // arrived on its own, after a download
+	}
+	out, _ = selfOpened.handleConfirmKey(esc)
+	if got := out.(Model).dialog; got != dialogNone {
+		t.Errorf("dialog = %v, want dialogNone — Esc must return to the panes, not a menu never opened", got)
+	}
+}
+
 // TestUpdate_StageUpdateRespOpensTheApplyConfirm drives the decision through
 // Update rather than calling applyStageUpdateResp directly. Everything above
 // tests what the handler decides; this tests that the message arm still

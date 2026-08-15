@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -395,6 +396,86 @@ func TestStageOnDemand_CorruptStageIsRepaired(t *testing.T) {
 	}
 	if vErr := update.VerifyStaged(dir, man, update.BinaryNames(runtime.GOOS)); vErr != nil {
 		t.Errorf("VerifyStaged after repair: %v — the tampered bytes were not replaced", vErr)
+	}
+}
+
+// TestRunUpdateCheck_AutoStagesANewerRelease covers the allowStage=true side of
+// the parameter this change introduced — the DAILY tick with [update] auto on,
+// which is how most installs actually receive an update.
+//
+// The on-demand path has the equivalent test above; this one exists because
+// splitting a boolean out of a function creates two paths where there was one,
+// and only the false side was reachable from the new code. A staged 1.1.0 must
+// be superseded on disk by 1.2.0 here exactly as it is on demand.
+func TestRunUpdateCheck_AutoStagesANewerRelease(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	withVersionState(t, "1.0.0", true)
+	writeStagedManifest(t, "1.1.0")
+	stub := stubDownloadableRelease(t, "1.2.0")
+
+	cfg := config.Default()
+	cfg.Update.Check = true
+	cfg.Update.Auto = true
+	d := New(cfg)
+
+	d.runUpdateCheck(true)
+
+	if got := stub.archiveHits.Load(); got != 1 {
+		t.Errorf("archive downloaded %d times, want 1 (the auto-stage)", got)
+	}
+	man, dir, err := update.FindStaged(config.UpdateDir())
+	if err != nil || man == nil {
+		t.Fatalf("FindStaged = (%+v, %v), want the auto-staged release", man, err)
+	}
+	if man.Version != "1.2.0" {
+		t.Errorf("staged version = %q, want 1.2.0", man.Version)
+	}
+	if vErr := update.VerifyStaged(dir, man, update.BinaryNames(runtime.GOOS)); vErr != nil {
+		t.Errorf("VerifyStaged on the auto-staged release: %v", vErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(config.UpdateDir(), "staged", "1.1.0")); !os.IsNotExist(statErr) {
+		t.Errorf("staged/1.1.0 still present (stat err = %v), want pruned", statErr)
+	}
+	if st := update.LoadState(config.UpdateStatePath()); st.StagedVersion != "1.2.0" || st.LatestVersion != "1.2.0" {
+		t.Errorf("state = %+v, want 1.2.0 as both latest and staged", st)
+	}
+	if info := d.currentUpdateInfo(); info == nil || info.StagedVersion != "1.2.0" {
+		t.Errorf("currentUpdateInfo() = %+v, want 1.2.0 announced as staged", info)
+	}
+}
+
+// TestHandleUpdateCheckReq_ConcurrentRequestsCheckOnce drives the single-flight
+// CAS with real concurrency. The rate-limit test calls the handler
+// sequentially, which proves the slot is RELEASED on both paths but never that
+// it EXCLUDES — every caller there passes the CAS uncontended. A burst is the
+// shape that matters: several attached clients open About at once, and all of
+// them pass the rate check (nothing has been stamped yet) before contending.
+func TestHandleUpdateCheckReq_ConcurrentRequestsCheckOnce(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	withVersionState(t, "1.0.0", true)
+	stub := stubDownloadableRelease(t, "1.1.0")
+
+	cfg := config.Default()
+	cfg.Update.Check = true
+	d := New(cfg)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			d.handleUpdateCheckReq()
+		}()
+	}
+	wg.Wait()
+	waitForCheck(t, d)
+
+	if got := stub.releaseHits.Load(); got != 1 {
+		t.Errorf("release endpoint hit %d times from 8 concurrent requests, want 1", got)
+	}
+	// And the slot is free afterwards, or every later check is refused forever.
+	if d.updateChecking.Load() {
+		t.Error("updateChecking still held after the burst settled")
 	}
 }
 

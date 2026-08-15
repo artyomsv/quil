@@ -77,6 +77,36 @@ const (
 	NotifyKindIdle = "idle"
 )
 
+// IsWorkStateOnly reports whether an event exists PURELY to drive the work
+// indicator and must never be treated as a notification — neither queued by the
+// daemon nor carded by the TUI sidebar. It lives here, beside
+// ClassifyWorkEvent, so the two consumers share one list: the TUI held a
+// private copy first, and the daemon could not see it, which is precisely how
+// the heartbeat ended up in the notification queue.
+//
+// Being a work-state edge is NOT the test. Most of them — Stop, StopFailure,
+// PermissionRequest, a named SubagentStop — are exactly what the sidebar and
+// the attach replay exist for. The test is whether the event says anything a
+// user can act on, and these two say only "still running": PostToolUse fires
+// when the user answers a prompt they are already looking at, and PreToolUse is
+// a heartbeat that repeats for as long as an agent keeps working.
+//
+// The consequence for the DAEMON is why this matters beyond tidiness. The event
+// queue is bounded and aggregates by (PaneID, Title) before re-prepending the
+// entry, so a heartbeat carrying a constant title holds one slot per working
+// pane and jumps ahead of every older event each time it fires — displacing
+// genuine notifications out of the attach-replay window, and waking every
+// watch_notifications watcher on that pane. Callers must still BROADCAST these
+// events: suppressing the queue leaves the live broadcast as the only route by
+// which a client learns the pane is working.
+func IsWorkStateOnly(eventType string) bool {
+	switch eventType {
+	case "hook.claude.PostToolUse", "hook.claude.PreToolUse":
+		return true
+	}
+	return false
+}
+
 // ClassifyWorkEvent maps a composed PaneEvent Type to a work-state transition.
 func ClassifyWorkEvent(eventType string) WorkEventKind {
 	switch eventType {

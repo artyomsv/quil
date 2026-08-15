@@ -593,6 +593,40 @@ func TestRunHook_PreToolUse_ThrottledWhileThePaneIsAlreadyAudible(t *testing.T) 
 	}
 }
 
+// TestRunHook_PreToolUse_FutureSpoolMtimeIsNotFresh pins the other half of the
+// throttle's fail-toward-speaking rule, and it is the half a refactor is most
+// likely to drop: `age >= 0 && age < workHeartbeatInterval` looks redundant
+// until you ask what a mtime AHEAD of nowMs means. Without the lower bound a
+// future stamp reads as "heard from moments ago" for as long as it stays in
+// the future, muting the pane's indicator for exactly that long. Reachable
+// without an attacker: a spool restored from a backup, a clock stepped
+// backwards by NTP, or a network share whose clock leads the client's.
+func TestRunHook_PreToolUse_FutureSpoolMtimeIsNotFresh(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	env := HookEnv{PaneID: "pane-future", QuilDir: dir, Mode: "default"}
+	const nowMs int64 = 1700000000000
+
+	prompt := `{"hook_event_name":"UserPromptSubmit","session_id":"11111111-2222-3333-4444-555555555555","prompt":"go"}`
+	if err := RunHook(strings.NewReader(prompt), env, nowMs); err != nil {
+		t.Fatalf("RunHook(UserPromptSubmit): %v", err)
+	}
+	// Half a minute into the future — well inside the throttle window if the
+	// sign were ignored.
+	backdateSpool(t, dir, "pane-future", time.UnixMilli(nowMs+30_000))
+
+	if err := RunHook(strings.NewReader(preToolStdin), env, nowMs); err != nil {
+		t.Fatalf("RunHook(PreToolUse): %v", err)
+	}
+	got := readSpool(t, dir, "pane-future")
+	if len(got) != 2 {
+		t.Fatalf("spool lines = %d, want 2 — a future mtime must not read as recently audible", len(got))
+	}
+	if got[1].HookEvent != "PreToolUse" {
+		t.Errorf("hook_event = %q, want PreToolUse", got[1].HookEvent)
+	}
+}
+
 // TestRunHook_PreToolUse_FirstEventOnAPaneIsNeverThrottled pins the direction
 // the throttle fails in. No spool file means quil has heard NOTHING from this
 // pane, which is the loudest possible reason to speak — a stat error must
@@ -640,6 +674,32 @@ func TestRunHook_StopFailure_SpoolsATurnEndingEdge(t *testing.T) {
 	}
 	if got[0].Severity != hookevents.SeverityWarning {
 		t.Errorf("severity = %q, want warning", got[0].Severity)
+	}
+}
+
+// TestRunHook_StopFailure_WithoutAReasonStillEndsTheTurn covers the fallback
+// title. The reason is Claude's to supply and an empty one must not produce a
+// card titled "Turn failed: " — nor, worse, tempt a future edit into dropping
+// the event when it carries no reason, since the turn ending is the part the
+// spinner depends on and the reason is only the explanation.
+func TestRunHook_StopFailure_WithoutAReasonStillEndsTheTurn(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	env := HookEnv{PaneID: "pane-sfe", QuilDir: dir, Mode: "default"}
+	stdin := `{"hook_event_name":"StopFailure","session_id":"11111111-2222-3333-4444-555555555555"}`
+
+	if err := RunHook(strings.NewReader(stdin), env, 1700000000000); err != nil {
+		t.Fatalf("RunHook: %v", err)
+	}
+	got := readSpool(t, dir, "pane-sfe")
+	if len(got) != 1 {
+		t.Fatalf("spool lines = %d, want 1", len(got))
+	}
+	if got[0].Title != "Turn failed" {
+		t.Errorf("title = %q, want exactly %q", got[0].Title, "Turn failed")
+	}
+	if got[0].HookEvent != "StopFailure" {
+		t.Errorf("hook_event = %q, want StopFailure", got[0].HookEvent)
 	}
 }
 

@@ -88,13 +88,37 @@ audible", or clock skew would mute a pane's indicator indefinitely. Uncapped, th
 per-tool-call stream would also spend a pane's whole 100-events-per-2 s ingester
 budget on heartbeats and take a real permission prompt down with it.
 
-It is work-state-only, like `PostToolUse` — `tui.workStateOnlyEvent`
-(workstate.go) keeps both off the notification sidebar. Being a work-state edge
-is NOT the test for that: `Stop`, `PermissionRequest` and a named `SubagentStop`
-are exactly what the sidebar is for. The test is whether the event says anything
-a user can act on, and a heartbeat that repeats every 15 s for as long as an
-agent works says only "still running" — carded, it would bury the events that
-need an answer under a progress log.
+**It is work-state-only, like `PostToolUse`, and that predicate must live in
+`hookevents.IsWorkStateOnly` because BOTH ends need it.** Being a work-state
+edge is NOT the test: `Stop`, `StopFailure`, `PermissionRequest` and a named
+`SubagentStop` are exactly what the sidebar and the attach replay are for. The
+test is whether the event says anything a user can act on, and a heartbeat that
+repeats every 15 s for as long as an agent works says only "still running".
+
+The TUI half (`tui.workStateOnlyEvent`, which now delegates) keeps the card off
+the sidebar. **The DAEMON half is the one that was missed, and a render-side
+suppression could not cover it**: `emitEvent` pushed every heartbeat into the
+bounded (50-slot) notification queue, where `eventQueue.Push` aggregates by
+`(PaneID, Title)` and then RE-PREPENDS the aggregated entry. A constant
+`"Working"` title therefore holds one slot per working pane AND jumps ahead of
+every older event each time it fires, displacing genuine notifications out of
+the attach-replay window — and this project's own position is that a missed park
+is silent and terminal. It also woke every `watch_notifications` watcher on the
+pane (that handler filters by pane, not by type), turning the tool documented as
+replacing polling back into a ~15 s poll, and re-pushing a dismissed card under
+its existing ID. `emitEvent` now takes the same broadcast-but-don't-queue path
+the mute branch uses.
+
+**The broadcast is not optional on that path.** With the event out of the queue,
+the live broadcast is the ONLY route by which a client learns the pane is
+working, so an "optimisation" that returns early there silences the spinner
+outright — the exact bug the heartbeat exists to fix. The cost is that a
+reattaching client cannot rebuild `working` from the replay and waits for the
+next live heartbeat instead; that is bounded by `workHeartbeatInterval` and
+matches the standing contract that work state is not persisted.
+`TestEmitEvent_WorkStateOnlyEventBroadcastsWithoutQueueing` drives a real IPC
+server and a real client for exactly this reason — a queue-count assertion
+passes just as happily with the broadcast deleted.
 
 **It is gated on `agent_id` being ABSENT, which is what keeps it a statement
 about the MAIN turn** — the only thing `turnActive` means. Hooks fire inside

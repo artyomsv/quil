@@ -37,6 +37,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   indicator like any other, and reports the reason it failed to the
   notification sidebar.
 
+- **Work-indicator activity no longer crowds real notifications out of the
+  sidebar.** The signals that drive the indicator were being filed as
+  notifications by the daemon even though the sidebar never showed them. The
+  notification list holds a limited number of entries and moves an entry back to
+  the top each time it repeats, so on a workspace of busy agents these invisible
+  entries steadily pushed genuine ones — a permission prompt among them — out of
+  the list you see when you come back to a pane. They also woke anything waiting
+  on notifications through the MCP tools roughly every fifteen seconds, which
+  made a call that is supposed to wait quietly behave like a poll. Those signals
+  now reach the panes that need them without being filed at all.
+
+- **A notification card can no longer smuggle terminal escape sequences onto
+  your screen.** Card titles come from a pane's own agent, and unlike every
+  other pane-sourced string in the sidebar they were drawn without being
+  filtered first — so a title containing terminal control sequences could clear
+  the screen, write to the clipboard, or reverse the text of the line it was
+  drawn on. Titles are now filtered the same way the rest of the sidebar
+  already was.
+
 ## [1.59.2] - 2026-08-15
 
 ### Changed

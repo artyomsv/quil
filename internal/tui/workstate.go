@@ -56,12 +56,11 @@ func workEventKind(eventType string) workTransition {
 // these two say only "still running": PostToolUse fires when the user answers
 // a prompt they are already looking at, and PreToolUse is a heartbeat that
 // repeats every workHeartbeatInterval for as long as an agent works.
+// Delegates to hookevents, which is the single source of truth: the daemon
+// reads the same predicate to keep these events out of its notification queue,
+// and a private copy here is what let the two disagree.
 func workStateOnlyEvent(eventType string) bool {
-	switch eventType {
-	case "hook.claude.PostToolUse", "hook.claude.PreToolUse":
-		return true
-	}
-	return false
+	return hookevents.IsWorkStateOnly(eventType)
 }
 
 // findPaneAndTab locates a pane by ID across EVERY project and reports the

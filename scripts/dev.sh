@@ -162,8 +162,22 @@ case "${1:-help}" in
   # a baseline captured under another label is not silently skipped.
   bench)
     label="${2:-bench}"
-    pkg="$(pkg_target "${3:-internal/ipc}")"
     base="${QUIL_BENCH_BASE:-before}"
+    # Both values are interpolated into a `sh -c` string that runs inside the
+    # container with the project bind-mounted read-write, and the label is also
+    # used as a path. Unvalidated, `bench 'x;id>/src/pwn'` executes in the
+    # container and `bench ../../foo` writes outside bench/. Whoever runs this
+    # already has the shell, so it is robustness rather than a privilege
+    # boundary — but a label is a label, and rejecting is one line.
+    for v in "$label" "$base"; do
+      case "$v" in
+        "" | *[!A-Za-z0-9._-]* | .* )
+          echo "dev.sh bench: invalid label '$v' (allowed: A-Za-z0-9._- , not starting with '.')" >&2
+          exit 1
+          ;;
+      esac
+    done
+    pkg="$(pkg_target "${3:-internal/ipc}")"
     mkdir -p "$PROJECT_DIR/bench"
     out="bench/${label}.txt"
     echo "benchmarking $pkg -> $out" >&2

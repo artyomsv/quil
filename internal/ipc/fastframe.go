@@ -207,13 +207,27 @@ func paneOutputSpan(p []byte) bool {
 // the payload, returning false to decline. m is written only on success, so a
 // declined call leaves the caller's Message untouched for the fallback.
 //
-// Restricted to pane_output deliberately, and it is a correctness requirement
-// rather than a scope choice: "slice the payload without scanning it" and "fall
-// back on anything non-conforming" are contradictory in general, because
-// non-conformance can live inside the unscanned span. flatBracedObject resolves
-// that for this one flat shape. It also costs nothing to restrict — the scan is
-// expensive only in proportion to the payload, and no other message type has a
-// large one.
+// The general problem this solves: "slice the payload without scanning it" and
+// "fall back on anything non-conforming" are contradictory, because
+// non-conformance can live inside the unscanned span. paneOutputSpan is what
+// resolves it, by checking a shape flat enough to validate with a prefix
+// compare and two IndexByte calls.
+//
+// The `typ != MsgPaneOutput` gate is NOT what makes that sound, and an earlier
+// version of this comment claimed it was. A mutation test removing the gate
+// survived the whole suite plus 4.4M fuzz executions — correctly, because
+// parseEnvelope only ever hands back an opaque byte span, so for ANY type a
+// span paneOutputSpan accepts slices to exactly what json.Unmarshal produces.
+//
+// The gate earns its place for two other reasons. It keeps paneOutputSpan's
+// justification honest: "contains no brace" is an argument about base64 and hex
+// pane ids, true only for this payload type, so without the gate those checks
+// would be right by accident rather than by reasoning. And it bounds the blast
+// radius of any future loosening of them to the one message type whose shape
+// was actually analysed. Restricting costs nothing either way — the scan is
+// expensive only in proportion to the payload, and no other type has a large
+// one. TestParseEnvelope_DeclinesNonPaneOutput pins the gate so it cannot be
+// silently dropped as dead code.
 //
 // LIFETIME: the returned Payload ALIASES body rather than copying it, unlike
 // the json.Unmarshal fallback, where RawMessage.UnmarshalJSON copies. Safe
@@ -244,6 +258,24 @@ func parseEnvelope(body []byte, m *Message) bool {
 
 	const payloadKey = `,"payload":`
 	if !bytes.HasPrefix(rest, []byte(payloadKey)) {
+		return false
+	}
+	// The explicit length guard is defence in depth, and it is cheap insurance
+	// against a whole-daemon crash rather than a wasted branch.
+	//
+	// The slice below is already provably in range, but only through an
+	// invariant nothing states: `rest` is always a SUFFIX of `body` (both
+	// body[len(prefix):] and fastString's b[i+1:] return suffixes), and the
+	// trailing-'}' check above already returned for anything else — so a
+	// non-empty rest ends in '}', HasPrefix forces rest[10] == ':', and
+	// len(rest) == 11 is a contradiction, giving len(rest) >= 12.
+	//
+	// That is three separate facts holding a slice expression in range. Reorder
+	// the '}' check, or make fastString return something that is not a suffix,
+	// and this becomes a one-byte out-of-range panic — on a conn dispatch
+	// goroutine that has no recover (internal/ipc/server.go handleConn), from a
+	// single frame, on a socket whose only authentication is its file mode.
+	if len(rest) < len(payloadKey)+1 {
 		return false
 	}
 	span := rest[len(payloadKey) : len(rest)-1]

@@ -36,6 +36,11 @@ func TestAppendEnvelope_MatchesJSONMarshal(t *testing.T) {
 		{"nil payload", Message{Type: "x", Payload: nil}},
 		{"empty payload slice", Message{Type: "x", Payload: json.RawMessage{}}},
 		{"literal null payload", Message{Type: "x", Payload: json.RawMessage(`null`)}},
+		{"literal true payload", Message{Type: "x", Payload: json.RawMessage(`true`)}},
+		{"literal false payload", Message{Type: "x", Payload: json.RawMessage(`false`)}},
+		{"number payload", Message{Type: "x", Payload: json.RawMessage(`42`)}},
+		{"negative float payload", Message{Type: "x", Payload: json.RawMessage(`-1.5e10`)}},
+		{"string payload", Message{Type: "x", Payload: json.RawMessage(`"hi"`)}},
 		{"array payload", Message{Type: "x", Payload: json.RawMessage(`[1,2]`)}},
 		{"8k pane output", Message{Type: MsgPaneOutput, Payload: bigPayload}},
 	}
@@ -563,6 +568,199 @@ func TestPaneOutputPayload_FastPathStaysEngaged(t *testing.T) {
 			}
 			if p.PaneID != "pane-1a2b3c4d" || string(p.Data) != "hello" || p.Ghost != ghost {
 				t.Errorf("ghost=%v: round trip changed the value: %+v", ghost, p)
+			}
+		}
+	})
+}
+
+// TestParseEnvelope_GatesAreIndependentlyPinned exercises parseEnvelope's two
+// structural gates SEPARATELY, so neither can be deleted without a test going
+// red.
+//
+// Both survived mutation testing before this existed, for the same reason:
+// downstream checks made the end-to-end behaviour correct anyway. That is
+// exactly the shape of a safety net that quietly stops being one — the
+// redundancy is only load-bearing until somebody changes the other check.
+func TestParseEnvelope_GatesAreIndependentlyPinned(t *testing.T) {
+	// The type gate. A payload that WOULD satisfy paneOutputSpan, so the only
+	// thing that can decline it is the type check itself.
+	t.Run("type gate", func(t *testing.T) {
+		body := []byte(`{"type":"other","payload":{"pane_id":"p","data":"aGk="}}`)
+		// Precondition: encoding/json accepts this frame, so declining is a
+		// choice rather than a forced error.
+		if err := json.Unmarshal(body, new(Message)); err != nil {
+			t.Fatalf("precondition: encoding/json should accept this frame: %v", err)
+		}
+		var m Message
+		if parseEnvelope(body, &m) {
+			t.Error("parseEnvelope accepted a non-pane_output type; the typ gate is not doing anything")
+		}
+	})
+
+	// paneOutputSpan's prefix check. Correct type, brace-flat span, so the only
+	// thing that can decline it is the pane_id prefix.
+	t.Run("payload prefix check", func(t *testing.T) {
+		body := []byte(`{"type":"pane_output","payload":{"other":"aGk="}}`)
+		if err := json.Unmarshal(body, new(Message)); err != nil {
+			t.Fatalf("precondition: encoding/json should accept this frame: %v", err)
+		}
+		var m Message
+		if parseEnvelope(body, &m) {
+			t.Error("parseEnvelope accepted a brace-flat span that does not open with pane_id")
+		}
+	})
+
+	// The span-length guard. A payload key with an empty value cannot underflow
+	// the slice — a panic here runs on a conn dispatch goroutine with no
+	// recover, so one frame would take the whole daemon down.
+	t.Run("empty payload span does not panic", func(t *testing.T) {
+		for _, body := range []string{
+			`{"type":"pane_output","payload":}`,
+			`{"type":"pane_output","payload":}}`,
+			`{"type":"pane_output"}`,
+			`{"type":"pane_output","id":"x","payload":}`,
+		} {
+			var m Message
+			if parseEnvelope([]byte(body), &m) {
+				t.Errorf("parseEnvelope accepted %q", body)
+			}
+		}
+	})
+}
+
+// TestDecodePaneOutput_DeclinesLineBreaksInData pins the one divergence between
+// encoding/json and base64.Decode.
+//
+// base64.Decode SKIPS \r and \n silently; encoding/json rejects any byte below
+// 0x20 inside a string. Every other illegal byte is outside the base64 alphabet
+// and errors out on its own, so these two are the entire class. Found by
+// FuzzDecodePaneOutput, which produced {"pane_id":"0","data":"\r"} — decoded by
+// the fast path to an empty payload, rejected outright by encoding/json.
+//
+// Pinned as a unit test because a fuzzer finding is only reproducible while its
+// corpus survives, and this one costs two IndexByte calls to keep correct.
+func TestDecodePaneOutput_DeclinesLineBreaksInData(t *testing.T) {
+	for _, tt := range []struct{ name, payload string }{
+		{"carriage return", "{\"pane_id\":\"p\",\"data\":\"aG\rk=\"}"},
+		{"line feed", "{\"pane_id\":\"p\",\"data\":\"aG\nk=\"}"},
+		{"leading crlf", "{\"pane_id\":\"p\",\"data\":\"\r\naGk=\"}"},
+		{"only a cr", "{\"pane_id\":\"p\",\"data\":\"\r\"}"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			// encoding/json must reject it — that is what makes accepting a divergence.
+			var viaJSON PaneOutputPayload
+			if err := json.Unmarshal([]byte(tt.payload), &viaJSON); err == nil {
+				t.Fatalf("precondition: encoding/json should reject %q", tt.payload)
+			}
+			var p PaneOutputPayload
+			if decodePaneOutput([]byte(tt.payload), &p) {
+				t.Errorf("decodePaneOutput accepted %q; base64.Decode skips line breaks but encoding/json does not", tt.payload)
+			}
+			// And the public path must still surface an error.
+			msg := &Message{Type: MsgPaneOutput, Payload: json.RawMessage(tt.payload)}
+			if err := msg.DecodePayload(&p); err == nil {
+				t.Errorf("DecodePayload accepted %q", tt.payload)
+			}
+		})
+	}
+}
+
+// Two successive ReadMessage calls must return payloads backed by DIFFERENT
+// arrays. The decoded Payload aliases the read buffer, so pooling that buffer —
+// the natural next optimisation, and one the encode side already carries an
+// explicit ban against — would turn into cross-frame payload corruption that no
+// other test would notice.
+func TestReadMessage_PayloadsDoNotShareBackingArrays(t *testing.T) {
+	first := mustMessage(t, MsgPaneOutput, PaneOutputPayload{PaneID: "pane-1", Data: []byte("first")})
+	second := mustMessage(t, MsgPaneOutput, PaneOutputPayload{PaneID: "pane-2", Data: []byte("second")})
+
+	f1, err := EncodeFrame(first)
+	if err != nil {
+		t.Fatalf("EncodeFrame: %v", err)
+	}
+	f2, err := EncodeFrame(second)
+	if err != nil {
+		t.Fatalf("EncodeFrame: %v", err)
+	}
+
+	r := bytes.NewReader(append(append([]byte{}, f1...), f2...))
+	got1, err := ReadMessage(r)
+	if err != nil {
+		t.Fatalf("ReadMessage 1: %v", err)
+	}
+	got2, err := ReadMessage(r)
+	if err != nil {
+		t.Fatalf("ReadMessage 2: %v", err)
+	}
+
+	// Reading the second frame must not have disturbed the first payload.
+	var p1 PaneOutputPayload
+	if err := got1.DecodePayload(&p1); err != nil {
+		t.Fatalf("decode first payload after reading the second: %v", err)
+	}
+	if p1.PaneID != "pane-1" || string(p1.Data) != "first" {
+		t.Errorf("first payload was corrupted by the second read: %+v", p1)
+	}
+	if len(got1.Payload) > 0 && len(got2.Payload) > 0 && &got1.Payload[0] == &got2.Payload[0] {
+		t.Error("two payloads share a backing array — ReadMessage's buffer is being reused, which the aliasing contract forbids")
+	}
+}
+
+// The decline branches that no higher-level test reaches, because an earlier
+// guard always fires first on realistic input. They are cheap to reach directly
+// and expensive to leave unpinned: each one is a `return false` whose deletion
+// would silently widen what the fast path accepts.
+func TestFastPaths_DeclineBranchesAreReachable(t *testing.T) {
+	t.Run("fastString exhausts input without a closing quote", func(t *testing.T) {
+		// Ends in '}' so the trailing-brace guard passes, and the type string
+		// is never terminated — the one shape that reaches fastString's final
+		// return rather than being rejected earlier.
+		var m Message
+		if parseEnvelope([]byte(`{"type":"aaaa}`), &m) {
+			t.Error("parseEnvelope accepted a frame whose type string is unterminated")
+		}
+	})
+
+	t.Run("body does not open with the type key", func(t *testing.T) {
+		for _, body := range []string{
+			`{"id":"x","type":"pane_output","payload":{}}`,
+			`{"typ":"pane_output"}`,
+			`[{"type":"pane_output"}]`,
+		} {
+			var m Message
+			if parseEnvelope([]byte(body), &m) {
+				t.Errorf("parseEnvelope accepted %q", body)
+			}
+		}
+	})
+
+	t.Run("envelope has no payload key", func(t *testing.T) {
+		var m Message
+		if parseEnvelope([]byte(`{"type":"pane_output","other":1}`), &m) {
+			t.Error("parseEnvelope accepted an envelope with no payload key")
+		}
+	})
+
+	t.Run("decodePaneOutput declines a malformed pane id", func(t *testing.T) {
+		// Unterminated pane_id string: fastString fails inside the payload.
+		var p PaneOutputPayload
+		if decodePaneOutput([]byte(`{"pane_id":"aaaa`), &p) {
+			t.Error("decodePaneOutput accepted an unterminated pane_id")
+		}
+	})
+
+	t.Run("decodePaneOutput declines an unterminated data field", func(t *testing.T) {
+		var p PaneOutputPayload
+		if decodePaneOutput([]byte(`{"pane_id":"p","data":"aGk=`), &p) {
+			t.Error("decodePaneOutput accepted an unterminated data field")
+		}
+	})
+
+	t.Run("decodePaneOutput declines a payload that is not an object", func(t *testing.T) {
+		for _, payload := range []string{`"str"`, `[1]`, `{"data":"aGk="}`} {
+			var p PaneOutputPayload
+			if decodePaneOutput([]byte(payload), &p) {
+				t.Errorf("decodePaneOutput accepted %q", payload)
 			}
 		}
 	})

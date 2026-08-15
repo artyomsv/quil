@@ -1147,7 +1147,21 @@ const maxFrameSize = 10 * 1024 * 1024
 // allocation. Shared by WriteMessage and the per-conn send queues — replaces
 // the marshal → bytes.Buffer → clone chain that copied every broadcast frame
 // up to four times.
+// Tries appendEnvelope first, which builds the same bytes by concatenation and
+// skips encoding/json's redundant pass over the already-encoded payload. Any
+// shape it declines falls through to EncodeFrameSlow, which remains the sole
+// definition of correct output — the fast path is measured against it in tests.
 func EncodeFrame(msg *Message) ([]byte, error) {
+	if frame, ok := appendEnvelope(msg); ok {
+		return frame, nil
+	}
+	return EncodeFrameSlow(msg)
+}
+
+// EncodeFrameSlow is the reference encoder: plain json.Marshal plus the length
+// prefix. Exported so the fast path can be differentially tested against it,
+// and kept as the fallback for every shape appendEnvelope declines.
+func EncodeFrameSlow(msg *Message) ([]byte, error) {
 	data, err := json.Marshal(msg)
 	if err != nil {
 		return nil, fmt.Errorf("marshal message: %w", err)
@@ -1191,7 +1205,14 @@ func ReadMessage(r io.Reader) (*Message, error) {
 		return nil, fmt.Errorf("read payload: %w", err)
 	}
 
+	// data is freshly allocated above and never reused. That is load-bearing:
+	// parseEnvelope's Payload ALIASES it rather than copying, so a pooled or
+	// reused read buffer here would become a use-after-reuse bug surfacing as
+	// intermittently corrupted payloads.
 	var msg Message
+	if parseEnvelope(data, &msg) {
+		return &msg, nil
+	}
 	if err := json.Unmarshal(data, &msg); err != nil {
 		return nil, fmt.Errorf("unmarshal message: %w", err)
 	}
@@ -1199,6 +1220,17 @@ func ReadMessage(r io.Reader) (*Message, error) {
 }
 
 // DecodePayload unmarshals the message payload into the given target.
+//
+// pane_output is special-cased because it is the only high-frequency type: at
+// up to 500 frames/s/pane, running the JSON scanner over ~11 KB of base64 to
+// reach one []byte field cost ~90 us a frame. The fast path lives inside this
+// method rather than in a new exported one so that no call site changes, and it
+// declines to the same json.Unmarshal below for every shape it does not
+// recognise — including the error cases, so callers keep seeing exactly the
+// errors encoding/json produces.
 func (m *Message) DecodePayload(target any) error {
+	if out, ok := target.(*PaneOutputPayload); ok && decodePaneOutput(m.Payload, out) {
+		return nil
+	}
 	return json.Unmarshal(m.Payload, target)
 }

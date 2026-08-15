@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Panes that produce a lot of output cost the daemon far less CPU.** Every
+  message between the TUI and the daemon was being encoded twice over: the
+  payload was turned into JSON, and then the envelope wrapping it re-scanned
+  that payload from start to finish before putting it on the wire. For terminal
+  output — the one message type that arrives hundreds of times a second per
+  busy pane — that second pass was doing almost all of the work and producing
+  nothing.
+
+  Encoding a frame of pane output is now about 35× faster, and receiving one
+  about 10× faster, with roughly half the memory allocations. In practical
+  terms, a pane streaming output as fast as Quil will batch it used to occupy
+  about half a CPU core just formatting messages; it now takes closer to one
+  percent of one. A build or test run that floods a pane should feel less
+  likely to make the rest of the session stutter, and the effect grows with the
+  number of busy panes.
+
+  Nothing changes on the wire — the bytes are identical to what previous
+  versions sent — so mixed versions of the TUI, the daemon and the MCP bridge
+  keep talking to each other exactly as before.
+
 ## [1.59.1] - 2026-08-15
 
 ### Fixed

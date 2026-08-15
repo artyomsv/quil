@@ -418,7 +418,10 @@ type Model struct {
 	confirmKind        string                 // "pane" or "tab"
 	confirmID          string                 // ID of pane/tab to delete
 	confirmName        string                 // display name for confirmation
-	confirmDetail      string                 // extra remote-sourced line (upgrade confirm); sanitized+bounded at render
+	confirmDetail      string                 // extra remote-sourced line (upgrade/apply-update confirm); sanitized+bounded at render
+	pendingApplyVer    string                 // version to apply when the in-flight MsgStageUpdateReq answers; set only by a press meaning APPLY (see applyStageUpdateResp)
+	updateReqInFlight  bool                   // a MsgStageUpdateReq is unanswered; a second press must not queue a second one (see sendStageUpdateReq)
+	applyConfirmReturn dialogScreen           // where Esc on the apply confirm goes: About when the press came from there, else back to the panes
 	// confirmWorktrees holds the worktrees this close would delete, empty for
 	// every close that would delete none — which is what keeps an ordinary
 	// close dialog byte-identical to what it has always been.
@@ -2352,18 +2355,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case stageUpdateRespMsg:
-		switch {
-		case msg.Resp.Success:
-			m.setFlash("update v" + msg.Resp.Version + " staged — applies on next launch")
-		case msg.Resp.Error == "already up to date":
-			// handleUpdateAction's "up to date" branch sends this request to
-			// force a fresh check rather than trusting stale broadcast info;
-			// a re-confirmed "up to date" is a normal outcome, not a failure.
-			m.setFlash("quil is up to date (v" + m.version + ")")
-		default:
-			m.setFlash("update failed: " + msg.Resp.Error)
-		}
-		return m, tea.Batch(m.listenForMessages(), m.flashCmd())
+		next, cmd := m.applyStageUpdateResp(msg.Resp)
+		// Always re-arm the listen loop: this is an IPC response, so dropping
+		// the re-arm kills every later message on the connection.
+		return next, tea.Batch(m.listenForMessages(), cmd)
 
 	case historyListMsg:
 		m = m.applyHistoryList(msg.Resp)
@@ -4216,9 +4211,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.openCreatePaneDialog()
 
 	case key == "f1":
-		m.dialog = dialogAbout
-		m.dialogCursor = 0
-		return m, tea.ClearScreen
+		return m.openAboutDialog()
 
 	case kbMatches(key, kb.CommandPalette):
 		return m.openCommandPalette()
@@ -5648,7 +5641,12 @@ func (m Model) renderStatusBar() string {
 	// single last-broadcast field) is the other half: a mixed session would
 	// otherwise pass this gate with a LOCAL project active and then render the
 	// REMOTE daemon's version.
-	if !m.RemoteMode() {
+	// remoteModeFor(activeDest()) as well as RemoteMode(): the session-wide flag
+	// misses a MIXED session, where the TUI is local but the project on screen
+	// belongs to another host — and there this rendered "↑ v1.2.3 ready" for a
+	// release staged on that host, beside an About row that (correctly) says
+	// updates apply locally. Neither is the machine the segment implies.
+	if !m.RemoteMode() && !m.remoteModeFor(m.activeDest()) {
 		if seg := updateStatusSegment(m.activeUpdateInfo(), m.version); seg != "" {
 			right = seg + " | " + right
 		}
@@ -6129,6 +6127,16 @@ func (m Model) listenForMessages() tea.Cmd {
 			return listenContinueMsg{}
 
 		case ipc.MsgStageUpdateResp:
+			// Honoured ONLY from the LOCAL daemon, the MsgLinkLost gate's
+			// reasoning applied to a reply rather than a synthetic message:
+			// applying swaps THIS machine's binaries out of THIS machine's
+			// staging dir, and sendStageUpdateReq never asks anyone else. An
+			// unsolicited one from a remote daemon would otherwise consume the
+			// pending apply intent and name its own version on the confirm.
+			if msg.Origin != "" {
+				log.Printf("ipc recv: ignoring stage_update_resp from %q", msg.Origin)
+				return listenContinueMsg{}
+			}
 			var payload ipc.StageUpdateRespPayload
 			if err := msg.DecodePayload(&payload); err != nil {
 				log.Printf("decode stage_update_resp: %v", err)

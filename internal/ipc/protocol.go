@@ -160,6 +160,11 @@ const (
 	// Auto-update (TUI ⇄ daemon)
 	MsgStageUpdateReq  = "stage_update_req"  // TUI → daemon (empty payload)
 	MsgStageUpdateResp = "stage_update_resp" // daemon → TUI (unicast)
+	// Check-only refresh, fired when the About dialog opens. Deliberately has
+	// NO response type: the answer is the refreshed "update" key on the next
+	// workspace_state broadcast, and a check that fails (offline laptop) is a
+	// routine non-event the row must not report. Rate-limited daemon-side.
+	MsgUpdateCheckReq = "update_check_req" // TUI → daemon (empty payload)
 
 	// Kube-context discovery (pane setup dialog, discover = "kube"). Same
 	// reason as the browser and git discovery: it used to parse the
@@ -1044,12 +1049,32 @@ type UpdateInfo struct {
 	InstallWritable bool   `json:"install_writable"`
 }
 
-// StageUpdateRespPayload answers MsgStageUpdateReq (About → Update now with
-// nothing staged yet).
+// StageUpdateRespPayload answers MsgStageUpdateReq (About → Update now).
+//
+// AlreadyStaged distinguishes "the latest release is on disk, nothing was
+// downloaded" from "it was downloaded just now". The request re-checks GitHub
+// on EVERY press — including when the client believes a version is already
+// staged, because that belief comes from a broadcast the daemon refreshes
+// daily — so without this flag the answer to "is my stage still the latest?"
+// would cost a redundant ~15 MB download every time it was yes.
+//
+// Success is true in both cases (the latest IS staged when the call returns),
+// so a client that predates the flag still reads the outcome correctly.
+//
+// CheckFailed narrows what a failure licenses. A client holding an apply intent
+// may fall back to installing what is already staged ONLY when the release
+// check could not be MADE — GitHub unreachable — because then "is this still
+// the newest?" is unanswered rather than answered no. Every other error
+// (staging failed, install dir not writable, a check already running) leaves
+// the question answered or the request unperformed, and must not be read as
+// permission to install an older stage: doing so re-creates the very
+// apply-the-intermediate-version loop this pair exists to end.
 type StageUpdateRespPayload struct {
-	Success bool   `json:"success"`
-	Version string `json:"version,omitempty"`
-	Error   string `json:"error,omitempty"`
+	Success       bool   `json:"success"`
+	AlreadyStaged bool   `json:"already_staged,omitempty"`
+	CheckFailed   bool   `json:"check_failed,omitempty"`
+	Version       string `json:"version,omitempty"`
+	Error         string `json:"error,omitempty"`
 }
 
 // KubeCtxReqPayload is deliberately empty: kube-context discovery is

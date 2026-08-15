@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **A staged update no longer traps you on the version it staged.** Once a
+  release was downloaded, `F1` → Update offered only to install *that* version,
+  even if a newer one had been published since — so catching up meant applying
+  the intermediate release, restarting, and updating a second time. The row was
+  answering from the daemon's last release check, and that check runs once a
+  day; anything published inside that window was invisible to it.
+
+  Pressing the update row now asks the daemon what is actually the newest
+  release before it does anything. If the staged version is still the newest,
+  it installs straight away and downloads nothing. If a newer one exists, that
+  one is fetched and offered instead, so a single press lands you on the
+  current release. A check that cannot reach GitHub still offers the staged
+  version — it just says on the confirm that it could not be verified as the
+  newest.
+
+  Opening `F1` also asks for a fresh check on the way in (rate-limited, and it
+  never downloads), so the update row's label is current rather than up to a
+  day old.
+
+  The apply confirm now takes `y` rather than `Enter`, matching *Stop daemon*
+  and the remote-upgrade prompt: it can appear on its own once a download
+  finishes, and by then your hands are usually back in a pane. Pressing the row
+  again while a download is still running does nothing but say so, rather than
+  offering to install the older copy and abandoning the download.
+
+  The update row is local-only: with a remote project active it says so instead
+  of acting, because applying swaps this machine's binaries out of this
+  machine's staging directory. The status-bar `↑ ready` marker follows the same
+  rule.
+
 ## [1.59.0] - 2026-08-14
 
 ### Added

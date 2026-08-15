@@ -94,6 +94,32 @@ type Daemon struct {
 	updateInfo    *ipc.UpdateInfo
 	updateStaging atomic.Bool
 
+	// updateChecking is the single-flight guard for the check-only refresh
+	// (MsgUpdateCheckReq, fired when a client opens its About dialog). It is
+	// deliberately NOT updateStaging: a client opens About and then presses
+	// the update row, so the two fire back to back by design — one shared slot
+	// would reject the stage exactly when it followed the check that motivated
+	// it (the browseScanning/dirsChecking precedent).
+	updateChecking atomic.Bool
+
+	// updateOnDemand is the single-flight guard for MsgStageUpdateReq. Its own
+	// slot, because the handler answers from disk (AlreadyStaged) BEFORE
+	// reaching updateStaging's CAS, so that guard no longer bounds it — and
+	// each unguarded request costs a GitHub call plus a full re-hash of both
+	// staged binaries.
+	updateOnDemand atomic.Bool
+
+	// lastUpdateCheckAt paces client-driven release checks, in memory and
+	// stamped on the ATTEMPT. The persisted LastCheckMs cannot serve: it is
+	// only written after a SUCCESSFUL check, so a 403 from an exhausted quota
+	// would leave it frozen and lift the limit exactly when it is needed.
+	lastUpdateCheckAt atomic.Int64
+
+	// updateStateMu serialises the read-modify-write of state.json now that
+	// three paths write it (daily tick, check-only refresh, on-demand stage).
+	// See mutateUpdateState.
+	updateStateMu sync.Mutex
+
 	// sessionScanning is the single-flight guard for the Claude session
 	// listing (MsgClaudeSessionsReq). One scan reads up to 200 transcript
 	// heads off disk — far more work than parsing the frame that requested
@@ -1314,6 +1340,8 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 	// Auto-update
 	case ipc.MsgStageUpdateReq:
 		d.handleStageUpdateReq(conn, msg)
+	case ipc.MsgUpdateCheckReq:
+		d.handleUpdateCheckReq()
 
 	// Pane input history
 	case ipc.MsgPaneHistoryReq:

@@ -868,10 +868,18 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.confirmKind == confirmKindApplyUpdate {
-			// Back to the About menu, cursor on the update row.
-			m.dialog = dialogAbout
-			m.dialogCursor = aboutUpdateIndex
-			return m, nil
+			// Back to where the press came from — the About menu with the
+			// cursor on the update row when the user is still there, otherwise
+			// the panes, because this confirm can open by itself. The detail
+			// line describes ONE answer from the daemon, so it must not
+			// outlive this dialog and reappear on an unrelated later confirm.
+			m.dialog = m.applyConfirmReturn
+			m.dialogCursor = 0
+			if m.dialog == dialogAbout {
+				m.dialogCursor = aboutUpdateIndex
+			}
+			m.confirmDetail = ""
+			return m, tea.ClearScreen
 		}
 		m.dialog = dialogNone
 		if m.confirmKind == confirmKindUpgradeDest {
@@ -973,8 +981,17 @@ func (m Model) handleConfirmKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// Apply-update: quit the TUI with the apply intent set; main.go
 		// performs verify → swap → respawn after the program exits (the
 		// terminal must be released before the wrapper respawn).
+		//
+		// Requires explicit `y` for the reason shutdown does, and for one more:
+		// this confirm is opened by the daemon's answer to a stage request, so
+		// it can arrive a whole download after the keypress that asked for it,
+		// onto a user who has gone back to typing in a pane.
 		if kind == confirmKindApplyUpdate {
+			if msg.String() != "y" {
+				return m, nil
+			}
 			m.dialog = dialogNone
+			m.confirmDetail = ""
 			m.applyUpdateOnExit = true
 			return m, tea.Quit
 		}
@@ -1230,7 +1247,7 @@ func (m Model) renderAboutDialog() string {
 		"View client log",
 		"View daemon log",
 		"View MCP logs",
-		aboutUpdateLabel(m.activeUpdateInfo(), m.version),
+		aboutUpdateLabel(m.activeUpdateInfo(), m.version, m.remoteModeFor(m.activeDest())),
 		"Stop daemon",
 	}
 	for i, item := range items {
@@ -1481,11 +1498,31 @@ func (m Model) renderConfirmDialog() string {
 		b.WriteString("\n")
 		b.WriteString("  " + dialogSubtle.Render("AI panes resume their recorded session."))
 	case confirmKindApplyUpdate:
-		b.WriteString("  " + dialogNormal.Render(fmt.Sprintf("Apply update v%s now?", m.confirmName)))
+		// Sanitized and bounded like confirmKindDestroyProject's and
+		// confirmKindUpgradeDest's names: this one now comes from a stage
+		// RESPONSE, and under --remote that is a host the user may not control.
+		// It is also the consent text for swapping the binaries on this machine.
+		b.WriteString("  " + dialogNormal.Render(fmt.Sprintf("Apply update v%s now?",
+			truncateToWidth(sanitizeRemoteText(m.confirmName), confirmDetailCap))))
 		b.WriteString("\n\n")
+		// Present only when the newest-release check did not settle — the
+		// version above is then what is on disk rather than a confirmed
+		// latest, and that is the one thing the user needs to know before
+		// spending a restart on it. Same sanitize+bound treatment as the
+		// upgrade confirm: under --remote this text came off another host.
+		if d := m.confirmDetail; d != "" {
+			b.WriteString("  " + dialogSubtle.Render(truncateToWidth(sanitizeRemoteText(d), confirmDetailCap)))
+			b.WriteString("\n\n")
+		}
 		b.WriteString("  " + dialogSubtle.Render("The TUI restarts and the daemon respawns all panes."))
 		b.WriteString("\n")
 		b.WriteString("  " + dialogSubtle.Render("Claude sessions resume; running shell commands are killed."))
+		// `y`, not Enter — this confirm can now appear on its own, seconds or
+		// minutes after the press that started the download, by which time the
+		// user's hands are back on a pane. Enter is the universal commit key,
+		// so accepting it would let one reflex quit the TUI and swap binaries.
+		// Same rule, and the same reason, as the shutdown and upgrade confirms.
+		footer = "y confirm    Esc cancel"
 	case confirmKindDestroyProject:
 		b.WriteString("  " + dialogNormal.Render(fmt.Sprintf("Destroy project %q?", sanitizeRemoteText(m.confirmName))))
 		b.WriteString("\n\n")

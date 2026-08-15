@@ -34,6 +34,19 @@ ok() {
   printf '  ok  %s\n' "$1"
 }
 
+# Assert a REFUSAL specifically — exit 1 from `die`, not merely "non-zero".
+# A shell parse error exits 2 and would otherwise read as a clean refusal,
+# which is how a broken script passes a suite of negative cases.
+expect_die() {
+  label=$1
+  shift
+  set +e
+  "$@" > /dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -eq 1 ] || fail "$label: expected exit 1 (refusal), got $rc"
+}
+
 BASELINE='# Changelog
 
 All notable changes to Quil will be documented in this file.
@@ -220,9 +233,7 @@ ok '6  hand-written [Unreleased] prose is promoted above the fragments'
 
 # --- 7. nothing to promote -------------------------------------------------
 setup empty
-if sh "$PROMOTE" --check > /dev/null 2>&1; then
-  fail 'case 7: --check passed with no fragments and an empty [Unreleased]'
-fi
+expect_die 'case 7' sh "$PROMOTE" --check
 ok '7  --check refuses an empty release'
 
 # --- 8. invalid filenames --------------------------------------------------
@@ -295,9 +306,7 @@ for NAME in $INVALID; do
   if [ "$NAME" != 'README.md' ]; then
     setup "parity-$(printf '%s' "$NAME" | tr -d '.')"
     : > "$CASE/changelog.d/$NAME"
-    if sh "$PROMOTE" --check > /dev/null 2>&1; then
-      fail "case 13: --filter-names rejects '$NAME' but --check accepts it (divergence)"
-    fi
+    expect_die "case 13 (divergence on '$NAME')" sh "$PROMOTE" --check
   fi
 done
 # Paths outside changelog.d/, and nested ones, are not fragments.
@@ -389,9 +398,8 @@ ok '18 an empty none-* fragment is accepted and renders the sentinel'
 setup injection
 printf -- '- **Real.**\n\n## [9.9.9] - 2020-01-01\n\n- **Injected.**\n' \
   > "$CASE/changelog.d/fixed-inject.md"
-if sh "$PROMOTE" --check > /dev/null 2>&1; then
-  fail 'case 19: --check accepted a fragment containing a "## [" heading'
-fi
+expect_die 'case 19' sh "$PROMOTE" --check
+expect_die 'case 19 (promote)' sh "$PROMOTE" 1.1.0 2026-02-03
 assert_changelog 'case 19' "$BASELINE"
 ok '19 a fragment containing a "## [" heading is refused'
 
@@ -401,13 +409,9 @@ ok '19 a fragment containing a "## [" heading is refused'
 setup validateonly
 sh "$PROMOTE" --validate > /dev/null \
   || fail 'case 20: --validate failed on a clean, empty changelog.d'
-if sh "$PROMOTE" --check > /dev/null 2>&1; then
-  fail 'case 20: --check passed with nothing to promote'
-fi
+expect_die 'case 20 (--check with nothing to promote)' sh "$PROMOTE" --check
 frag banana-x.md '- **Bad name.**'
-if sh "$PROMOTE" --validate > /dev/null 2>&1; then
-  fail 'case 20: --validate accepted an invalid name'
-fi
+expect_die 'case 20 (--validate, invalid name)' sh "$PROMOTE" --validate
 ok '20 --validate checks hygiene without requiring something to promote'
 
 # --- 21. argument handling ---------------------------------------------------
@@ -415,7 +419,10 @@ setup args
 sh "$PROMOTE" --help > /dev/null 2>&1 && fail 'case 21: --help exited 0'
 sh "$PROMOTE" > /dev/null 2>&1 && fail 'case 21: no-arg invocation exited 0'
 frag fixed-x.md '- **X.**'
-for BAD_V in 1.2 v1.2.3 1.2.3.4 ''; do
+# NOT '' — an empty first argument makes ${1:---help} substitute --help, so
+# that iteration would exit 2 from the usage branch without ever reaching the
+# version regex it claims to test. The no-argument case is covered above.
+for BAD_V in 1.2 v1.2.3 1.2.3.4 1.2.3-rc1; do
   if sh "$PROMOTE" "$BAD_V" 2026-02-03 > /dev/null 2>&1; then
     fail "case 21: accepted invalid version '$BAD_V'"
   fi
@@ -460,6 +467,33 @@ assert_changelog 'case 23' '# Changelog
 - **First entry.**
 '
 ok '23 promotes correctly when [Unreleased] is the last line'
+
+# --- 23b. no trailing newline, following heading IS the last line ------------
+# The splice mixes two line counts: `rest` comes from awk, which counts an
+# unterminated final line, and `total` must therefore come from awk too.
+# Taking `total` from `wc -l` (which counts NEWLINES) made the two disagree by
+# one on an unterminated file, the `rest <= total` guard read false, and the
+# tail was never appended — silently deleting every released section.
+setup notrailingnl
+printf '# Changelog\n\n## [Unreleased]\n\n## [1.0.0] - 2026-01-01' > "$CHANGELOG_FILE"
+frag fixed-b.md '- **B frag.**'
+sh "$PROMOTE" 1.1.0 2026-02-03 > /dev/null
+grep -q '^## \[1\.0\.0\] - 2026-01-01' "$CHANGELOG_FILE" \
+  || fail 'case 23b: released history was deleted from an unterminated file'
+# Asserted WITHOUT a trailing newline: the input had none, and the promoter
+# copies the tail through verbatim rather than reformatting history it did
+# not write.
+assert_changelog 'case 23b' '# Changelog
+
+## [Unreleased]
+
+## [1.1.0] - 2026-02-03
+
+### Fixed
+- **B frag.**
+
+## [1.0.0] - 2026-01-01'
+ok '23b unterminated final line does not eat released history'
 
 # --- 24. the remaining types render through promote() ------------------------
 # Cases 2 and 13 between them cover added/fixed/security/internal and the NAME

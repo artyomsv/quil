@@ -31,3 +31,8 @@ internal/shellinit/scripts/** text eol=lf
 # the release page and permanent in the committed changelog. The promoter also
 # strips CR defensively; this keeps it from ever being needed.
 changelog.d/*.md text eol=lf
+# CHANGELOG.md is what the promoter WRITES, splicing fragment bytes into the
+# existing file. Its blob is already LF, but without this the working tree is
+# CRLF under core.autocrlf, so a local promote produces a file that is LF on
+# the lines it just wrote and CRLF on the history it copied through.
+CHANGELOG.md text eol=lf

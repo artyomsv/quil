@@ -89,7 +89,11 @@ trim_blank_lines() {
 # them) and prints the ones that are fragments. README.md is deliberately NOT
 # a fragment: adding only the README must not satisfy the CI gate.
 filter_names() {
-  while IFS= read -r path; do
+  # `|| [ -n "$path" ]` so an unterminated final line is still processed.
+  # ci.yml feeds this from `git diff | cut`, which always terminates, but the
+  # failure mode if it ever did not is the worst-signal one available: the
+  # gate rejects a PR for not adding a fragment that it did add.
+  while IFS= read -r path || [ -n "$path" ]; do
     path=$(printf '%s' "$path" | tr -d '\r')
     case "$path" in
       "$FRAGMENT_DIR_REL"/*/*) continue ;;
@@ -114,7 +118,11 @@ filter_names() {
 validate_fragment_dir() {
   [ -d "$FRAGMENT_DIR" ] || return 0
   invalid=''
-  for f in "$FRAGMENT_DIR"/* "$FRAGMENT_DIR"/.[!.]*; do
+  # `..?*` as well as `.[!.]*`: without it a name beginning with two dots
+  # (`..weird`) matches neither glob, so it would be neither refused nor
+  # consumed — it would just sit there, which is the silent skip this
+  # function exists to prevent.
+  for f in "$FRAGMENT_DIR"/* "$FRAGMENT_DIR"/.[!.]* "$FRAGMENT_DIR"/..?*; do
     # -L as well as -e, so a DANGLING symlink is caught by the checks below
     # instead of falling through this unmatched-glob guard as if absent.
     if [ ! -e "$f" ] && [ ! -L "$f" ]; then
@@ -281,14 +289,23 @@ promote() {
     files=$(fragments_of_type "$t")
     [ -n "$files" ] || continue
     [ ! -s "$body" ] || printf '\n' >> "$body"
-    printf '### %s\n' "$(section_heading "$t")" >> "$body"
+    # Assigned first, not inlined into printf: `die` inside a command
+    # substitution exits only the subshell, and printf would then return 0
+    # and emit a bare `### ` into a released changelog. The assignment's exit
+    # status is the substitution's, so this catches it.
+    heading=$(section_heading "$t") || die "no section heading for type: $t"
+    printf '### %s\n' "$heading" >> "$body"
     # No blank line after the heading, exactly one before the next heading —
     # matches how every existing block in CHANGELOG.md is written.
     # A read failure inside this loop runs in a subshell, so `set -e` cannot
     # see it — and the failure would otherwise be discovered only after
     # CHANGELOG.md had already been replaced. Make it fatal explicitly.
+    #
+    # The braces matter: `tr < "$f" | trim_blank_lines || exit 1` tests the
+    # PIPELINE's status, which is trim_blank_lines', so a failed `tr` exits 0
+    # and the guard never fires. Grouping puts the test on `tr` itself.
     printf '%s\n' "$files" | while IFS= read -r f; do
-      tr -d '\r' < "$f" | trim_blank_lines || exit 1
+      { tr -d '\r' < "$f" || exit 1; } | trim_blank_lines
     done >> "$body" || die "could not read a $t fragment"
   done
 
@@ -299,7 +316,13 @@ promote() {
   fi
 
   anchor=$(grep -n '^## \[Unreleased\]' "$CHANGELOG" | head -1 | cut -d: -f1)
-  total=$(wc -l < "$CHANGELOG" | tr -d ' ')
+  # awk, NOT `wc -l`. wc counts NEWLINES; awk counts LINES, and the two
+  # disagree by one on a file whose last line is unterminated. `rest` below
+  # comes from awk, so mixing the two made the guard read `rest <= total` as
+  # false when the following section WAS the last line of an unterminated
+  # file — and the tail was then never appended, silently deleting released
+  # history.
+  total=$(awk 'END { print NR }' "$CHANGELOG")
   rest=$(awk -v a="$anchor" 'NR > a && /^## \[/ { print NR; exit }' "$CHANGELOG")
   [ -n "$rest" ] || rest=$((total + 1))
 
@@ -325,19 +348,19 @@ promote() {
   # leaves the deletion unstaged and the fragment is re-promoted on every
   # subsequent release (the monorepo's process-changelog action carries a
   # comment recording exactly that bug).
-  consumed=0
+  had_fragments=0
   for t in $FRAGMENT_TYPES none; do
     files=$(fragments_of_type "$t")
     [ -n "$files" ] || continue
     printf '%s\n' "$files" | while IFS= read -r f; do
       rm -f "$f"
     done
-    consumed=$((consumed + 1))
+    had_fragments=1
   done
 
   printf 'promote-changelog: %s promoted into %s\n' \
     "$version" "${CHANGELOG#"$PROJECT_DIR"/}"
-  [ "$consumed" -gt 0 ] || printf 'promote-changelog: no fragments (promoted [Unreleased] prose)\n'
+  [ "$had_fragments" -eq 1 ] || printf 'promote-changelog: no fragments (promoted [Unreleased] prose)\n'
 }
 
 USAGE='usage: %s [--filter-names | --validate | --check | <version> <date>]\n'

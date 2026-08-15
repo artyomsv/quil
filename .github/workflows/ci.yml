@@ -137,7 +137,17 @@ jobs:
           # carrying a `## [` heading that would truncate the release notes.
           # --validate rather than --check: an exempt PR legitimately has
           # nothing to promote.
-          sh scripts/promote-changelog.sh --validate
+          #
+          # Wrapped so the reason reaches the Files-changed tab as an
+          # annotation. The script writes plain stderr, which lands only in
+          # the raw log — every other failure in this job annotates, and a
+          # gate whose reason you have to go digging for gets guessed at.
+          if ! VALIDATION=$(sh scripts/promote-changelog.sh --validate 2>&1); then
+            echo "$VALIDATION"
+            echo "::error file=changelog.d/::Invalid changelog fragment — see the log for which file and why. A fragment must be a regular file (not a symlink) named changelog.d/<type>-<slug>.md, must not be empty, and must not contain a '## [' heading. See changelog.d/README.md."
+            exit 1
+          fi
+          echo "$VALIDATION"
 
           # Anything that reaches the binary. Test-only, docs-only, site-only
           # and workflow-only PRs are exempt — they can't change what a user

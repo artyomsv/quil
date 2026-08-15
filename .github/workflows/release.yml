@@ -355,9 +355,12 @@ jobs:
           # so the fragments would survive on master and be re-promoted into
           # every subsequent release — the monorepo's process-changelog action
           # carries a comment recording exactly that bug.
-          if [ -d changelog.d ]; then
-            git add -A changelog.d
-          fi
+          #
+          # No `[ -d changelog.d ]` guard: `git add -A -- <path>` already
+          # handles a path that no longer exists on disk, and the guard made
+          # the one case you would most want staged — the directory itself
+          # disappearing — the case that silently staged nothing.
+          git add -A -- changelog.d
           git commit -m "chore(release): v${VERSION}"
           git tag "v${VERSION}"
           # --atomic: land the release commit and its tag together or not at

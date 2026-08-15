@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.59.1] - 2026-08-15
+
 ### Fixed
 - **A staged update no longer traps you on the version it staged.** Once a
   release was downloaded, `F1` → Update offered only to install *that* version,

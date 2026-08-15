@@ -311,4 +311,191 @@ GOT=$(printf '%s\n' 'internal/tui/model.go' 'changelog.d/fixed-e.md' 'CHANGELOG.
 [ "$GOT" = 'changelog.d/fixed-e.md' ] || fail 'case 13: mixed diff filtered wrongly'
 ok '13 --filter-names and --check accept exactly the same names'
 
+# --- 15. a symlink fragment is refused --------------------------------------
+# The promoter reads a fragment and splices the bytes verbatim into
+# CHANGELOG.md, which the release pushes to master and publishes as the
+# GitHub Release body. A symlink is read THROUGH, so `fixed-x.md` pointing at
+# `../.git/config` would publish the AUTHORIZATION header actions/checkout
+# persists there — and that credential is RELEASE_PAT, a ruleset bypass actor.
+# The name is perfectly legal, so only a file-type check catches it.
+setup symlink
+printf 'SECRET-CANARY-NOT-A-REAL-VALUE\n' > "$CASE/target.txt"
+if ln -s "$CASE/target.txt" "$CASE/changelog.d/fixed-link.md" 2>/dev/null && [ -L "$CASE/changelog.d/fixed-link.md" ]; then
+  if sh "$PROMOTE" --validate > /dev/null 2>&1; then
+    fail 'case 15: --validate accepted a symlink fragment'
+  fi
+  if sh "$PROMOTE" --check > /dev/null 2>&1; then
+    fail 'case 15: --check accepted a symlink fragment'
+  fi
+  if sh "$PROMOTE" 1.1.0 2026-02-03 > /dev/null 2>&1; then
+    fail 'case 15: promote ran with a symlink fragment'
+  fi
+  assert_changelog 'case 15' "$BASELINE"
+  if grep -q 'SECRET-CANARY' "$CHANGELOG_FILE"; then
+    fail 'case 15: symlink target content reached CHANGELOG.md'
+  fi
+  [ -f "$CASE/target.txt" ] || fail 'case 15: symlink target was deleted'
+  ok '15 symlink fragment refused; target neither read nor deleted'
+else
+  printf '  SKIP 15 (this filesystem does not support symlinks)\n'
+fi
+
+# --- 16. a directory named like a fragment is refused ------------------------
+# It used to pass --check, then fail mid-promote AFTER CHANGELOG.md had
+# already been replaced — leaving a half-written file behind.
+setup dirfrag
+mkdir -p "$CASE/changelog.d/fixed-adir.md"
+if sh "$PROMOTE" --check > /dev/null 2>&1; then
+  fail 'case 16: --check accepted a directory named like a fragment'
+fi
+if sh "$PROMOTE" 1.1.0 2026-02-03 > /dev/null 2>&1; then
+  fail 'case 16: promote ran with a directory named like a fragment'
+fi
+assert_changelog 'case 16' "$BASELINE"
+ok '16 directory named like a fragment refused; CHANGELOG.md untouched'
+
+# --- 17. empty and blank-only fragments are refused --------------------------
+# Otherwise they render a section heading with nothing under it, shipped to
+# the changelog and the release page.
+for BODY in '' '   ' '
+
+'; do
+  setup "empty$(printf '%s' "$BODY" | wc -c | tr -d ' ')"
+  printf '%s' "$BODY" > "$CASE/changelog.d/fixed-blank.md"
+  if sh "$PROMOTE" --check > /dev/null 2>&1; then
+    fail 'case 17: --check accepted a blank fragment'
+  fi
+  if sh "$PROMOTE" 1.1.0 2026-02-03 > /dev/null 2>&1; then
+    fail 'case 17: promote ran with a blank fragment'
+  fi
+  assert_changelog 'case 17' "$BASELINE"
+done
+ok '17 empty and blank-only fragments refused; nothing written'
+
+# --- 18. an empty none-* fragment is still fine ------------------------------
+# Its content is ignored by design, so the content rules must not apply to it.
+setup emptynone
+: > "$CASE/changelog.d/none-refactor.md"
+sh "$PROMOTE" --check > /dev/null || fail 'case 18: --check rejected an empty none-*'
+sh "$PROMOTE" 1.1.0 2026-02-03 > /dev/null
+grep -qx '_No user-facing changes\._' "$CHANGELOG_FILE" \
+  || fail 'case 18: sentinel not emitted for an empty none-*'
+ok '18 an empty none-* fragment is accepted and renders the sentinel'
+
+# --- 19. a fragment carrying a version heading is refused --------------------
+# goreleaser extracts the release body with a sed range ending at the next
+# `^## [`, so such a line truncates the published notes there and leaves a
+# bogus heading that every later extraction also mis-parses.
+setup injection
+printf -- '- **Real.**\n\n## [9.9.9] - 2020-01-01\n\n- **Injected.**\n' \
+  > "$CASE/changelog.d/fixed-inject.md"
+if sh "$PROMOTE" --check > /dev/null 2>&1; then
+  fail 'case 19: --check accepted a fragment containing a "## [" heading'
+fi
+assert_changelog 'case 19' "$BASELINE"
+ok '19 a fragment containing a "## [" heading is refused'
+
+# --- 20. --validate vs --check -----------------------------------------------
+# ci.yml runs --validate on every PR, including docs-only ones that are exempt
+# from needing a fragment; those legitimately have nothing to promote.
+setup validateonly
+sh "$PROMOTE" --validate > /dev/null \
+  || fail 'case 20: --validate failed on a clean, empty changelog.d'
+if sh "$PROMOTE" --check > /dev/null 2>&1; then
+  fail 'case 20: --check passed with nothing to promote'
+fi
+frag banana-x.md '- **Bad name.**'
+if sh "$PROMOTE" --validate > /dev/null 2>&1; then
+  fail 'case 20: --validate accepted an invalid name'
+fi
+ok '20 --validate checks hygiene without requiring something to promote'
+
+# --- 21. argument handling ---------------------------------------------------
+setup args
+sh "$PROMOTE" --help > /dev/null 2>&1 && fail 'case 21: --help exited 0'
+sh "$PROMOTE" > /dev/null 2>&1 && fail 'case 21: no-arg invocation exited 0'
+frag fixed-x.md '- **X.**'
+for BAD_V in 1.2 v1.2.3 1.2.3.4 ''; do
+  if sh "$PROMOTE" "$BAD_V" 2026-02-03 > /dev/null 2>&1; then
+    fail "case 21: accepted invalid version '$BAD_V'"
+  fi
+done
+for BAD_D in 02-03-2026 2026-2-3 tomorrow; do
+  if sh "$PROMOTE" 1.1.0 "$BAD_D" > /dev/null 2>&1; then
+    fail "case 21: accepted invalid date '$BAD_D'"
+  fi
+done
+assert_changelog 'case 21' "$BASELINE"
+ok '21 bad arguments are refused and nothing is written'
+
+# --- 22. malformed or missing CHANGELOG.md -----------------------------------
+setup noanchor
+printf '# Changelog\n\n## [1.0.0] - 2026-01-01\n\n### Added\n- **First.**\n' > "$CHANGELOG_FILE"
+frag fixed-x.md '- **X.**'
+if sh "$PROMOTE" --check > /dev/null 2>&1; then
+  fail 'case 22: --check passed with no [Unreleased] anchor'
+fi
+setup nochangelog
+rm -f "$CHANGELOG_FILE"
+frag fixed-x.md '- **X.**'
+if sh "$PROMOTE" --check > /dev/null 2>&1; then
+  fail 'case 22: --check passed with no CHANGELOG.md'
+fi
+ok '22 a missing anchor or missing CHANGELOG.md is refused'
+
+# --- 23. [Unreleased] as the last line ---------------------------------------
+# The `rest=$((total + 1))` fallback: there is no following section to splice
+# back in.
+setup lastline
+printf '# Changelog\n\n## [Unreleased]\n' > "$CHANGELOG_FILE"
+frag added-first.md '- **First entry.**'
+sh "$PROMOTE" 1.0.0 2026-02-03 > /dev/null
+assert_changelog 'case 23' '# Changelog
+
+## [Unreleased]
+
+## [1.0.0] - 2026-02-03
+
+### Added
+- **First entry.**
+'
+ok '23 promotes correctly when [Unreleased] is the last line'
+
+# --- 24. the remaining types render through promote() ------------------------
+# Cases 2 and 13 between them cover added/fixed/security/internal and the NAME
+# grammar; these three types had never been through the real render path.
+setup remainingtypes
+frag changed-a.md '- **Chg.**'
+frag deprecated-b.md '- **Dep.**'
+frag removed-c.md '- **Rem.**'
+sh "$PROMOTE" 1.1.0 2026-02-03 > /dev/null
+assert_changelog 'case 24' '# Changelog
+
+All notable changes to Quil will be documented in this file.
+
+## [Unreleased]
+
+## [1.1.0] - 2026-02-03
+
+### Changed
+- **Chg.**
+
+### Deprecated
+- **Dep.**
+
+### Removed
+- **Rem.**
+
+## [1.0.1] - 2026-01-02
+
+### Fixed
+- **Older fix.** Body text.
+
+## [1.0.0] - 2026-01-01
+
+### Added
+- **First release.**
+'
+ok '24 changed/deprecated/removed render in the right order'
+
 printf '\nPASS: %s promote-changelog checks\n' "$PASSED"

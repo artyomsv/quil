@@ -39,9 +39,20 @@ branch name is the easy way to keep it unique. Two PRs picking the same `<type>-
 is an add/add conflict — rare, loud, and fixed by renaming one of them. Uniqueness is a
 convention, not a guarantee.
 
-Anything in this directory that is neither `README.md` nor a valid fragment name is
-**rejected** by the release gate, rather than skipped. A silently-ignored file is lost
-prose that surfaces weeks later as a wrong release page.
+Anything in this directory that is neither `README.md` nor a valid fragment is
+**rejected**, rather than skipped. A silently-ignored file is lost prose that surfaces
+weeks later as a wrong release page. Beyond the name, a fragment must be:
+
+- **A regular file.** Not a symlink, not a directory. The promoter splices a fragment's
+  bytes verbatim into `CHANGELOG.md`, which is pushed to master and published as the
+  release body — and a symlink is read *through*, so `fixed-x.md` pointing at a file
+  elsewhere in the checkout would publish that file's contents.
+- **Non-empty.** An empty fragment renders a section heading with nothing under it. If
+  the change genuinely has nothing to tell users, that is what `none-<slug>.md` is for —
+  "forgot to write it" and "nothing to say" must not produce the same output.
+- **Free of `## [` headings.** The release notes are extracted with a range that ends at
+  the next `## [`, so such a line truncates the published notes there. The promoter
+  writes every heading; a fragment never needs one.
 
 ## Content
 
@@ -71,9 +82,11 @@ which is why the empty case needs a file rather than the absence of one.
 ## Checking your work
 
 ```sh
-sh scripts/promote-changelog.sh --check
+sh scripts/promote-changelog.sh --validate   # is this directory well-formed?
+sh scripts/promote-changelog.sh --check      # ...and is there anything to release?
 ```
 
-Validates the directory and confirms there is something to promote. The PR gate in
-`.github/workflows/ci.yml` calls the same script, so a fragment that passes locally
-passes CI.
+`.github/workflows/ci.yml` runs `--validate` on every PR and `.github/workflows/release.yml`
+runs `--check` before it cuts a version, so a fragment that passes locally passes both.
+The grammar lives in that one script for exactly that reason — a gate that can disagree
+with the action it guards is how a green PR turns master red.

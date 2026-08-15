@@ -127,6 +127,18 @@ jobs:
           echo "$CHANGED"
           echo "---"
 
+          # Directory hygiene, checked on EVERY pull request — including the
+          # docs-only ones exempted from needing a fragment below. This is the
+          # same code the release runs, so a fragment that would break the
+          # release fails HERE instead, while the author is still looking at
+          # it. It refuses a symlink (the promoter reads it through, so
+          # `fixed-x.md -> ../.git/config` would publish the checkout's
+          # credential header), a non-regular file, an empty fragment, and one
+          # carrying a `## [` heading that would truncate the release notes.
+          # --validate rather than --check: an exempt PR legitimately has
+          # nothing to promote.
+          sh scripts/promote-changelog.sh --validate
+
           # Anything that reaches the binary. Test-only, docs-only, site-only
           # and workflow-only PRs are exempt — they can't change what a user
           # sees in the binary.

@@ -115,7 +115,11 @@ validate_fragment_dir() {
   [ -d "$FRAGMENT_DIR" ] || return 0
   invalid=''
   for f in "$FRAGMENT_DIR"/* "$FRAGMENT_DIR"/.[!.]*; do
-    [ -e "$f" ] || continue
+    # -L as well as -e, so a DANGLING symlink is caught by the checks below
+    # instead of falling through this unmatched-glob guard as if absent.
+    if [ ! -e "$f" ] && [ ! -L "$f" ]; then
+      continue
+    fi
     name=${f##*/}
     # `[ x = y ] && continue` would be a set -e landmine: when the test fails
     # it is the last command of the AND-OR list, so the shell exits.
@@ -123,22 +127,83 @@ validate_fragment_dir() {
       continue
     fi
     if ! is_fragment_name "$name"; then
-      invalid="$invalid  $FRAGMENT_DIR_REL/$name"
+      invalid="$invalid
+  $FRAGMENT_DIR_REL/$name — not a <type>-<slug>.md name"
+      continue
+    fi
+
+    # A fragment must be a REGULAR file, and not a symlink.
+    #
+    # The promoter reads it and splices the bytes verbatim into CHANGELOG.md,
+    # which release.yml then pushes to master and publishes as the GitHub
+    # Release body. A symlink is read THROUGH, so a fragment named
+    # `fixed-notes.md` pointing at `../.git/config` would publish the
+    # AUTHORIZATION header that actions/checkout persists there — and that
+    # credential is RELEASE_PAT, a ruleset bypass actor. Name validation
+    # alone cannot see this: the name is perfectly legal.
+    #
+    # A directory is refused for the same reason it must not be skipped: it
+    # passed the old check, then `tr` failed mid-promote AFTER CHANGELOG.md
+    # had already been rewritten.
+    #
+    # Refused, never skipped — a skipped file is silently-dropped prose,
+    # which is the failure this function exists to prevent.
+    if [ -L "$f" ]; then
+      invalid="$invalid
+  $FRAGMENT_DIR_REL/$name — is a symlink; fragments must be regular files"
+      continue
+    fi
+    if [ ! -f "$f" ]; then
+      invalid="$invalid
+  $FRAGMENT_DIR_REL/$name — is not a regular file"
+      continue
+    fi
+
+    # `none-*` carries no prose by design, so the content rules below do not
+    # apply to it.
+    case "$name" in
+      none-*) continue ;;
+    esac
+
+    # An empty or blank-only fragment renders a section heading with nothing
+    # under it — `### Fixed` alone, shipped to the changelog and the release
+    # page. Refused rather than skipped, because "forgot to write the prose"
+    # and "deliberately nothing to say" must not resolve to the same output;
+    # the second one is what `none-<slug>.md` is for.
+    if [ -z "$(tr -d '\r' < "$f" | trim_blank_lines)" ]; then
+      invalid="$invalid
+  $FRAGMENT_DIR_REL/$name — is empty; write the entry, or use none-<slug>.md"
+      continue
+    fi
+
+    # goreleaser extracts the release body with a sed range that ENDS at the
+    # next `^## [` (release.yml). A fragment carrying such a line therefore
+    # truncates the published notes at that point and leaves a bogus version
+    # heading in CHANGELOG.md that every later extraction also mis-parses.
+    # The promoter owns every heading, so a fragment never needs one.
+    if grep -q '^## \[' "$f"; then
+      invalid="$invalid
+  $FRAGMENT_DIR_REL/$name — contains a '## [' heading; the promoter writes those"
     fi
   done
-  [ -z "$invalid" ] || die "unrecognised file(s) in $FRAGMENT_DIR_REL/:
+  [ -z "$invalid" ] || die "invalid changelog fragment(s):
 $invalid
 
-A fragment must be named <type>-<slug>.md, where <type> is one of:
+A fragment is a regular file named <type>-<slug>.md, where <type> is one of:
   added changed deprecated removed fixed security internal none
-and <slug> starts with a letter or digit. Only README.md is exempt."
+and <slug> starts with a letter or digit. It holds the bullet text only.
+Only README.md is exempt."
 }
 
 # Paths of every fragment of one type, C-sorted so output is reproducible.
 fragments_of_type() {
   [ -d "$FRAGMENT_DIR" ] || return 0
+  # -f, not -e: validate_fragment_dir has already refused anything that is
+  # not a regular file, so this only ever fires on the unmatched glob — but
+  # it means no caller can be handed a directory or a dangling link even if
+  # it forgot to validate first.
   for f in "$FRAGMENT_DIR"/"$1"-*.md; do
-    [ -e "$f" ] || continue
+    [ -f "$f" ] || continue
     printf '%s\n' "$f"
   done | LC_ALL=C sort
 }
@@ -219,9 +284,12 @@ promote() {
     printf '### %s\n' "$(section_heading "$t")" >> "$body"
     # No blank line after the heading, exactly one before the next heading —
     # matches how every existing block in CHANGELOG.md is written.
+    # A read failure inside this loop runs in a subshell, so `set -e` cannot
+    # see it — and the failure would otherwise be discovered only after
+    # CHANGELOG.md had already been replaced. Make it fatal explicitly.
     printf '%s\n' "$files" | while IFS= read -r f; do
-      tr -d '\r' < "$f" | trim_blank_lines
-    done >> "$body"
+      tr -d '\r' < "$f" | trim_blank_lines || exit 1
+    done >> "$body" || die "could not read a $t fragment"
   done
 
   # Only `none-*` fragments were present: emit the sentinel release.yml's
@@ -240,8 +308,14 @@ promote() {
     head -n "$anchor" "$CHANGELOG"
     printf '\n## [%s] - %s\n\n' "$version" "$date"
     cat "$body"
-    printf '\n'
-    tail -n +"$rest" "$CHANGELOG"
+    # The blank line separates this section from the NEXT one, so it is only
+    # correct when there is a next one. On the first release of a fresh
+    # changelog `## [Unreleased]` is the last line, and emitting it
+    # unconditionally leaves a trailing blank line at EOF forever.
+    if [ "$rest" -le "$total" ]; then
+      printf '\n'
+      tail -n +"$rest" "$CHANGELOG"
+    fi
   } > "$out"
   mv "$out" "$CHANGELOG"
 
@@ -266,20 +340,35 @@ promote() {
   [ "$consumed" -gt 0 ] || printf 'promote-changelog: no fragments (promoted [Unreleased] prose)\n'
 }
 
+USAGE='usage: %s [--filter-names | --validate | --check | <version> <date>]\n'
+
 case "${1:---help}" in
   --filter-names)
     filter_names
     ;;
+  --validate)
+    # Directory hygiene only, with no "is there anything to release?"
+    # requirement — so ci.yml can run it on EVERY pull request, including the
+    # docs-only ones that are exempt from needing a fragment. Without this
+    # split, an invalid file could land via a docs-only PR and first surface
+    # as a failed release.
+    validate_fragment_dir
+    printf 'promote-changelog: %s/ is valid\n' "$FRAGMENT_DIR_REL"
+    ;;
   --check)
     check
-    printf 'promote-changelog: changelog.d/ is valid and has something to promote\n'
+    printf 'promote-changelog: %s/ is valid and has something to promote\n' "$FRAGMENT_DIR_REL"
     ;;
   --help|-h)
-    printf 'usage: %s [--filter-names | --check | <version> <date>]\n' "$0" >&2
+    # shellcheck disable=SC2059  # USAGE is a literal format string
+    printf "$USAGE" "$0" >&2
     exit 2
     ;;
   *)
-    [ $# -eq 2 ] || die "usage: $0 [--filter-names | --check | <version> <date>]"
+    if [ $# -ne 2 ]; then
+      # shellcheck disable=SC2059  # USAGE is a literal format string
+      die "$(printf "$USAGE" "$0")"
+    fi
     promote "$1" "$2"
     ;;
 esac

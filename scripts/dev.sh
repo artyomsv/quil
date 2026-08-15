@@ -176,8 +176,13 @@ case "${1:-help}" in
     if [ "$label" != "$base" ] && [ -f "$PROJECT_DIR/bench/${base}.txt" ]; then
       echo "" >&2
       echo "=== benchstat ${base}.txt -> ${label}.txt ===" >&2
+      # git is required to FETCH benchstat (the module proxy path goes through
+      # a VCS checkout) and the golang:alpine image does not ship it. Installed
+      # here rather than in a derived image because it is needed once per cold
+      # module cache, and the cache is a persisted volume.
       $DOCKER_RUN sh -c \
-        "go run golang.org/x/perf/cmd/benchstat@v0.0.0-20250515181355-8f5f3abf5b0e bench/${base}.txt $out" \
+        "command -v git >/dev/null 2>&1 || apk add --no-cache git >/dev/null 2>&1; \
+         go run golang.org/x/perf/cmd/benchstat@v0.0.0-20260813145340-fd4a688df892 bench/${base}.txt $out" \
         || echo "(benchstat unavailable — compare bench/${base}.txt and $out by hand)" >&2
     elif [ "$label" != "$base" ]; then
       echo "(no bench/${base}.txt — capture a baseline first, or set QUIL_BENCH_BASE)" >&2

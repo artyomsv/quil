@@ -586,13 +586,30 @@ is a major surface and cuts against Quil's TUI/Windows-native focus.
     (AoE). The single largest surface Quil is missing. **Gated on Phase 4
     (mTLS)** — a browser cannot speak `ssh -T host "quil --stdio"`, so
     something has to terminate a network connection carrying real client
-    identity before this can start.
+    identity before this can start. Feasibility was investigated on
+    2026-08-15 and the answer is yes — see
+    [Browser UI](roadmap/browser-ui.md) for why the architecture already
+    suits it (the daemon streams raw PTY bytes; VT emulation is client-side,
+    so xterm.js is a drop-in consumer), the three blockers, and a staged
+    path whose first stage is read-only and needs no protocol change.
 19. **Remote phone access** — expose the dashboard over a Tailscale/Cloudflare
     tunnel with QR + passphrase pairing and Web Push (AoE). Builds on #18.
 20. **Container sandboxing** — isolate agents in Docker/Podman with shared auth
     volumes so they authenticate in-container without re-login (AoE).
 
 ---
+
+## Investigated and Rejected
+
+Directions that were explored, measured, and deliberately not taken. Recorded so the
+question is not re-opened from intuition.
+
+- **Rewriting the daemon in Rust or Zig** (2026-08-15) —
+  [investigation](roadmap/daemon-language-rewrite.md). Rejected: the hot path is
+  bottlenecked by a wire-protocol decision, not by the language. `encoding/json`
+  re-scanning an already-encoded payload was 99% of encode time, and removing it in Go
+  is a 42× encode / 11.5× decode improvement on a byte-identical wire. The document
+  lists the four conditions that would re-open the question.
 
 ## Priority Matrix
 

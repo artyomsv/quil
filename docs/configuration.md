@@ -303,6 +303,22 @@ Every binding accepts a Bubble Tea key string. Common forms:
 
 Multiple modifiers stack with `+` (no spaces). Mouse buttons are not bindable here — mouse events route through Bubble Tea's mouse subsystem.
 
+### Spelling rules
+
+Quil normalizes what you write before matching it, so several spellings of the same chord are equivalent:
+
+- **Modifier names fold and reorder.** `Ctrl+Shift+A`, `shift+ctrl+a` and `ctrl+shift+a` are one chord. Quil echoes it back as `ctrl+shift+a` in F1 → Shortcuts.
+- **Named keys fold and alias.** `escape`/`esc`, `pageup`/`pgup`, `pagedown`/`pgdown`/`pgdn`, `return`/`enter` are interchangeable, in any case. `meta` and `hyper` are accepted as spellings of `super` (Cmd on macOS, Win on Windows).
+- **A single-character key keeps its case.** `alt+m` and `alt+M` are *different* chords, because on macOS with Option-as-Meta they are different key presses (`Option+M` vs `Option+Shift+M`). Write the case you mean.
+- **Control characters are rejected.** A binding containing an escape sequence fails to parse; that one action falls back to its default and F1 shows an `unreadable binding` warning. Your other bindings are unaffected.
+- **Space separates a multi-step sequence** (`"ctrl+b c"`). The syntax parses today but nothing dispatches it yet — F1 reports it as `not yet dispatched`. See [Keybindings → Coming for tmux users](keybindings.md#coming-for-tmux-users).
+
+### When two bindings collide
+
+Quil resolves every binding at startup and reports anything it could not honour as a warning row at the top of **F1 → Shortcuts**, and in the client log. A duplicate key, a key that another action resolves first, a collision with a built-in key (`F1`, `Ctrl+N`, `Alt+1`…`Alt+9`, the paste aliases, the text-selection chords), an unparseable spec, or an unknown action name each produce one, naming the key, the winner, and what will not fire.
+
+A bad line never costs you the rest of your keymap: only the affected action falls back to its default.
+
 ### Bindable actions
 
 | Key | Default | Purpose |

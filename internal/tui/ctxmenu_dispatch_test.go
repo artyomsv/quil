@@ -105,6 +105,7 @@ func TestCtxMenu_KeyNavigationAndEsc(t *testing.T) {
 func TestCtxMenu_QuitPassesThrough(t *testing.T) {
 	t.Parallel()
 	m := newSplitDragTestModel(t)
+	m.initKeymap() // handleCtxMenuKey dispatches through the keymap; NewModel builds it
 	updated, _ := m.Update(tea.MouseClickMsg{X: 20, Y: 10, Button: tea.MouseRight})
 	got := updated.(Model)
 	_, cmd := got.handleCtxMenuKey("ctrl+q")

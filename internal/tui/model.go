@@ -24,6 +24,7 @@ import (
 	"github.com/artyomsv/quil/internal/clipboard"
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
+	"github.com/artyomsv/quil/internal/keymap"
 	"github.com/artyomsv/quil/internal/kubediscover"
 	"github.com/artyomsv/quil/internal/logger"
 	"github.com/artyomsv/quil/internal/memreport"
@@ -374,9 +375,13 @@ type Model struct {
 	clientGen     int          // bumped on every client swap; see linkLostMsg for why
 	closeClientFn func(Client) // releases a connection; see SetClientCloser
 	cfg           config.Config
-	version       string
-	sized         bool            // the terminal has reported its geometry at least once
-	attached      map[string]bool // destinations already attached — see attachAllDests
+	// keymap resolves key presses to registry actions; keyConflicts is
+	// surfaced in F1 -> Shortcuts.
+	keymap       *keymap.Keymap
+	keyConflicts []keymap.Conflict
+	version      string
+	sized        bool            // the terminal has reported its geometry at least once
+	attached     map[string]bool // destinations already attached — see attachAllDests
 	// offlineWoken records which offline destinations have had their ladder
 	// started, so the wake-up fires once rather than on every resize.
 	offlineWoken map[string]bool
@@ -906,7 +911,14 @@ func NewModel(client Client, cfg config.Config, version string, registry *plugin
 		m.dialog = dialogDisclaimer
 		m.disclaimerTipIdx = rand.Intn(len(disclaimerTips))
 	}
+	m.initKeymap()
 	return m
+}
+
+// initKeymap resolves the configured bindings into the dispatch keymap. Safe
+// to call repeatedly; the last call wins.
+func (m *Model) initKeymap() {
+	m.keymap, m.keyConflicts = buildKeymap(m.cfg.Keybindings)
 }
 
 // WindowSize returns the last known window dimensions for persistence.
@@ -3909,9 +3921,13 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, m.handleOverlayKey(msg, tab)
 	}
 
-	// Notification sidebar keybindings (always available)
-	switch {
-	case kbMatches(key, kb.NotificationToggle):
+	// Early-tier actions (always available). This lookup sits BEFORE
+	// tryPluginRawKey, so an action resolved here beats a plugin's raw_keys
+	// claim on the same chord. Moving one of these into the late switch below
+	// silently hands the chord to the plugin — see keymap.Tier.
+	earlyID, _ := m.keymap.MatchTier(keymap.TierEarly, key)
+	switch earlyID {
+	case "notification.toggle":
 		// Alt+N: toggle visibility only, never focus. The sidebar is an
 		// overlay — no pane resize needed, only a full repaint.
 		m.notifications.visible = !m.notifications.visible
@@ -3920,22 +3936,22 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(tea.ClearScreen, m.startSidebarTick())
 		}
 		return m, tea.ClearScreen
-	case kbMatches(key, kb.SidebarToggle):
+	case "sidebar.toggle":
 		return m.toggleProjectSidebar()
-	case kbMatches(key, kb.NotificationFocus):
+	case "notification.focus":
 		// Ctrl+Alt+N: open (if hidden) and focus sidebar
 		if !m.notifications.visible {
 			m.notifications.visible = true
 		}
 		m.sidebarFocused = true
 		return m, tea.Batch(tea.ClearScreen, m.startSidebarTick())
-	case kbMatches(key, kb.GoBack):
+	case "pane.go_back":
 		return m.popPaneHistory()
-	case kbMatches(key, kb.MutePane):
+	case "pane.mute":
 		return m, m.toggleActivePaneMute()
-	case kbMatches(key, kb.ToggleEager):
+	case "pane.toggle_eager":
 		return m, m.toggleActivePaneEager()
-	case kbMatches(key, kb.ToggleWrap):
+	case "pane.toggle_wrap":
 		// Flip the active wide-canvas pane's preview between left-edge
 		// crop (default) and soft-wrap. View-only state — no IPC, no PTY
 		// touch; the preview layout cache re-keys on the flag.
@@ -3945,17 +3961,17 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
-	case kbMatches(key, kb.ToggleLazygit):
+	case "pane.toggle_lazygit":
 		return m, m.handleToggleLazygit()
-	case kbMatches(key, kb.ToggleHunk):
+	case "pane.toggle_hunk":
 		return m, m.handleToggleHunk()
-	case kbMatches(key, kb.CommandHistory):
+	case "pane.command_history":
 		return m.openHistoryForActivePane()
-	case kbMatches(key, kb.QuickActions):
+	case "pane.quick_actions":
 		return m.openQuickActionsMenu()
-	case kbMatches(key, kb.NewProject):
+	case "project.new":
 		return m.openNewProjectDialog()
-	case kbMatches(key, kb.DestroyProject):
+	case "project.destroy":
 		// The ACTIVE project, because that is the only one a keystroke can
 		// name — the sidebar's right-click menu is how another one is reached.
 		// Opens the same confirm the menu does rather than destroying: this
@@ -3971,9 +3987,9 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, m.confirmDestroyProject(p.ID)
 		}
 		return m, nil
-	case kbMatches(key, kb.ProjectPicker):
+	case "project.picker":
 		return m.openProjectPicker()
-	case kbMatches(key, kb.ProjectNext), kbMatches(key, kb.ProjectPrev):
+	case "project.next", "project.prev":
 		// A single project flashes rather than no-opping silently, for the
 		// same reason the empty attention queue and the narrow-terminal
 		// sidebar refusal do — and this is the ordinary state until the user
@@ -3984,14 +4000,20 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, m.flashCmd()
 		}
 		delta := 1
-		if kbMatches(key, kb.ProjectPrev) {
+		// The resolved action IS the direction now. Re-matching the key against
+		// kb.ProjectPrev here would answer a different question than the lookup
+		// that got us into this arm: with both fields bound to one chord the
+		// registry awards it to project.next (lower Order, reported as a
+		// duplicate conflict), and a kbMatches re-check would then run it
+		// backwards.
+		if earlyID == "project.prev" {
 			delta = -1
 		}
 		// Sequenced for the same reason as ProjectToggle below: cycleProject
 		// mutates m through a pointer receiver via switchProject.
 		cmd := m.cycleProject(delta)
 		return m, cmd
-	case kbMatches(key, kb.ProjectToggle):
+	case "project.toggle":
 		// No bounce target flashes rather than doing nothing, for the same
 		// reason the AttentionQueue empty case below does. This is the
 		// ORDINARY state on a fresh launch: prevProject is only written by
@@ -4012,7 +4034,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// statement (see activateSidebarRow's identical note in project.go).
 		cmd := m.toggleLastProject()
 		return m, cmd
-	case kbMatches(key, kb.AttentionQueue):
+	case "project.attention_queue":
 		// An empty queue flashes rather than doing nothing, for the same
 		// reason the SidebarToggle refusal above does: a key that no-ops
 		// silently is indistinguishable from a broken one, and "nothing is
@@ -4086,50 +4108,54 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.handleSelectionKey(key)
 	}
 
-	switch {
-	case kbMatches(key, kb.Quit):
+	// Late-tier actions. Everything here is reachable only once tryPluginRawKey
+	// above has declined the key, so a plugin's raw_keys claim beats these —
+	// that is the whole reason the registry carries a Tier.
+	lateID, _ := m.keymap.MatchTier(keymap.TierLate, key)
+	switch lateID {
+	case "app.quit":
 		return m, tea.Quit
 
-	case kbMatches(key, kb.NewTab):
+	case "tab.new":
 		return m.handleNewTab()
 
-	case kbMatches(key, kb.ClosePane):
+	case "pane.close":
 		return m.openClosePaneConfirm()
 
-	case kbMatches(key, kb.RestartPane):
+	case "pane.restart":
 		return m.openRestartPaneConfirm()
 
-	case kbMatches(key, kb.CloseTab):
+	case "tab.close":
 		return m.openCloseTabConfirm()
 
-	case kbMatches(key, kb.SplitHorizontal):
+	case "pane.split_h":
 		if tab := m.activeTabModel(); tab != nil && tab.FocusMode() {
 			tab.ExitFocus()
 		}
 		return m, m.splitPane(SplitHorizontal)
 
-	case kbMatches(key, kb.SplitVertical):
+	case "pane.split_v":
 		if tab := m.activeTabModel(); tab != nil && tab.FocusMode() {
 			tab.ExitFocus()
 		}
 		return m, m.splitPane(SplitVertical)
 
-	case kbMatches(key, kb.RenameTab):
+	case "tab.rename":
 		return m.beginTabRename()
 
-	case kbMatches(key, kb.RenamePane):
+	case "pane.rename":
 		return m.beginPaneRename()
 
-	case kbMatches(key, kb.CycleTabColor):
+	case "tab.cycle_color":
 		return m, m.cycleTabColor()
 
-	case kbMatches(key, kb.Redraw):
+	case "app.redraw":
 		// Recovery hatch for rendering artifacts: cell-diff drift (width
 		// disagreements with the host terminal) accumulates until a full
 		// repaint. See forceRedraw — shared with the command palette.
 		return m.forceRedraw()
 
-	case kbMatches(key, kb.ScrollPageUp):
+	case "pane.scroll_page_up":
 		if tab := m.activeTabModel(); tab != nil {
 			if pane := tab.ActivePaneModel(); pane != nil {
 				lines := m.cfg.UI.PageScrollLines
@@ -4141,7 +4167,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case kbMatches(key, kb.ScrollPageDown):
+	case "pane.scroll_page_down":
 		if tab := m.activeTabModel(); tab != nil {
 			if pane := tab.ActivePaneModel(); pane != nil {
 				lines := m.cfg.UI.PageScrollLines
@@ -4153,68 +4179,86 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case kbMatches(key, kb.NextPane):
+	case "pane.next":
 		if tab := m.activeTabModel(); tab != nil && !tab.FocusMode() {
 			tab.NextPane()
 		}
 		return m, nil
 
-	case kbMatches(key, kb.PrevPane):
+	case "pane.prev":
 		if tab := m.activeTabModel(); tab != nil && !tab.FocusMode() {
 			tab.PrevPane()
 		}
 		return m, nil
 
-	case kbMatches(key, kb.PaneLeft):
+	case "pane.left":
 		if tab := m.activeTabModel(); tab != nil {
 			tab.NavigateDirection(DirLeft)
 		}
 		return m, nil
 
-	case kbMatches(key, kb.PaneRight):
+	case "pane.right":
 		if tab := m.activeTabModel(); tab != nil {
 			tab.NavigateDirection(DirRight)
 		}
 		return m, nil
 
-	case kbMatches(key, kb.PaneUp):
+	case "pane.up":
 		if tab := m.activeTabModel(); tab != nil {
 			tab.NavigateDirection(DirUp)
 		}
 		return m, nil
 
-	case kbMatches(key, kb.PaneDown):
+	case "pane.down":
 		if tab := m.activeTabModel(); tab != nil {
 			tab.NavigateDirection(DirDown)
 		}
 		return m, nil
 
-	case kbMatches(key, kb.Paste), key == "ctrl+alt+v", key == "f8":
-		// Multiple aliases for paste because Windows Terminal captures the
-		// default Ctrl+V binding for its own paste action and never delivers
-		// the key event to the TUI:
-		//   - kb.Paste (ctrl+v): works on Linux/macOS native ttys; eaten by
-		//                        Windows Terminal
-		//   - ctrl+alt+v:        works on most Windows configs but is ambiguous
-		//                        with AltGr on European keyboard layouts
-		//   - f8:                guaranteed pass-through on every terminal,
-		//                        no AltGr ambiguity (recommended on Windows)
+	case "pane.paste":
+		// Two more chords also paste; they are NOT registry actions and are
+		// checked below, after this switch. See that block for why.
 		return m, m.pasteClipboard()
 
-	case kbMatches(key, kb.FocusPane):
+	case "pane.focus_toggle":
 		return m.toggleFocusForActiveTab()
 
-	case kbMatches(key, kb.NotesToggle):
+	case "pane.notes_toggle":
 		return m.toggleNotesMode()
 
+	case "app.command_palette":
+		return m.openCommandPalette()
+	}
+
+	// Multiple aliases for paste because Windows Terminal captures the
+	// default Ctrl+V binding for its own paste action and never delivers
+	// the key event to the TUI:
+	//   - kb.Paste (ctrl+v): works on Linux/macOS native ttys; eaten by
+	//                        Windows Terminal
+	//   - ctrl+alt+v:        works on most Windows configs but is ambiguous
+	//                        with AltGr on European keyboard layouts
+	//   - f8:                guaranteed pass-through on every terminal,
+	//                        no AltGr ambiguity (recommended on Windows)
+	//
+	// These are checked AFTER the tier lookup, not inside it, so every late
+	// action keeps beating them — notably pane.restart, which preceded the
+	// paste case in the pre-registry switch, so `restart_pane = "f8"` still
+	// restarts. The cost is that a late action bound to f8 or ctrl+alt+v now
+	// shadows the alias where the actions AFTER paste used not to; the build
+	// reports that as a ConflictHardcoded, which is why both chords are in
+	// keymap's hardcodedKeys table.
+	if key == "ctrl+alt+v" || key == "f8" {
+		return m, m.pasteClipboard()
+	}
+
+	// Keys Quil reserves outright: they are never registry actions, so a
+	// binding on one of them can never win. Also in keymap's hardcodedKeys.
+	switch {
 	case key == "ctrl+n":
 		return m.openCreatePaneDialog()
 
 	case key == "f1":
 		return m.openAboutDialog()
-
-	case kbMatches(key, kb.CommandPalette):
-		return m.openCommandPalette()
 
 	case key == "alt+1" || key == "alt+2" || key == "alt+3" ||
 		key == "alt+4" || key == "alt+5" || key == "alt+6" ||

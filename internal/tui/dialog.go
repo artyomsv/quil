@@ -20,6 +20,7 @@ import (
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/gitworktree"
 	"github.com/artyomsv/quil/internal/ipc"
+	"github.com/artyomsv/quil/internal/keymap"
 	"github.com/artyomsv/quil/internal/logger"
 	"github.com/artyomsv/quil/internal/plugin"
 )
@@ -94,7 +95,22 @@ const dialogBoxChrome = 6
 // the shortcuts list sizes its descriptions against what is LEFT of the row
 // after it — two numbers that have to move together, and a description budget
 // computed against a stale one wraps the row it was meant to fit.
-const dialogKeyColWidth = 16
+//
+// 22, not 16: "pane.rename" is the one action with two default bindings
+// (the macOS-friendly Alt+Shift+R fallback beside Alt+F2), and
+// Keymap.Display joins them as "alt+f2 / alt+shift+r" — 20 cells. At 16 that
+// wrapped onto a second line, which is the same row-count-vs-line-count
+// mismatch shortcutsDescWidth's own doc warns about, just in the other
+// column. 22 leaves 2 cells of headroom on the key side.
+//
+// The description side is where this comment used to claim 2 cells of headroom
+// that were not there: the row also pays shortcutsRowIndent, so at the old
+// 74-cell box the budget was 74 - dialogBoxChrome - 2 - 22 = 44, against a
+// longest description ("Remove active project (destroy / disconnect)") of
+// exactly 44 — zero margin, and the next label one cell longer would have
+// wrapped. The headroom comes from shortcutsDialogWidth, which the conflict
+// rows widened anyway; see its own comment.
+const dialogKeyColWidth = 22
 
 // dialogInnerWidth is the usable content width for a dialog whose box is boxW
 // columns wide in a termW-column terminal. It applies renderDialog's own clamp
@@ -437,85 +453,99 @@ const confirmKindDestroyProject = "destroy-project"
 // one the user got a parked row and no way to act on it inside the tool.
 const confirmKindUpgradeDest = "upgrade-dest"
 
-func shortcutsList(m *Model) []struct{ key, desc string } {
-	kb := m.cfg.Keybindings
-	// kbDisplay renders comma-separated multi-bindings as "a / b" so the
-	// help text stays readable when an action has multiple bindings (e.g.
-	// the macOS-friendly fallback on Rename pane).
-	list := []struct{ key, desc string }{
-		{kbDisplay(kb.Quit), "Quit"},
-		{kbDisplay(kb.CommandPalette), "Command palette (fuzzy-find any action)"},
-		{kbDisplay(kb.NewTab), "New tab"},
-		{kbDisplay(kb.ClosePane), "Close pane"},
-		{kbDisplay(kb.QuickActions), "Pane context menu (also mouse right-click)"},
-		{kbDisplay(kb.CloseTab), "Close tab"},
-		{kbDisplay(kb.SplitHorizontal), "Split side-by-side"},
-		{kbDisplay(kb.SplitVertical), "Split top/bottom"},
-		{kbDisplay(kb.PaneLeft), "Focus pane left"},
-		{kbDisplay(kb.PaneRight), "Focus pane right"},
-		{kbDisplay(kb.PaneUp), "Focus pane up"},
-		{kbDisplay(kb.PaneDown), "Focus pane down"},
+// shortcutRow is one line of the F1 -> Shortcuts list: a chord and what it
+// does, or — when full is set — one sentence that takes the whole inner width
+// because it has no key half worth a fixed column.
+type shortcutRow struct {
+	key  string
+	desc string
+	full bool
+}
+
+// srow is an ordinary two-column row. Only conflicts set full, and they build
+// their row explicitly, so every other call site says so by using this.
+func srow(key, desc string) shortcutRow { return shortcutRow{key: key, desc: desc} }
+
+// shortcutsList derives the F1 -> Shortcuts rows from the action registry, so
+// the dialog cannot drift from what the keys actually do (it used to be a
+// hand-maintained line per action — TestShortcutsList_CoversEveryProjectBinding
+// existed because seven of eight project bindings were added to the config
+// but never copied into this function).
+func shortcutsList(m *Model) []shortcutRow {
+	var list []shortcutRow
+
+	// Conflicts first: a dropped binding is the one thing a user cannot
+	// discover any other way, so it has to be the first thing they see, not
+	// buried under 40-odd rows of bindings that DO work. full: the message is
+	// a sentence and needs the cells the key column would take.
+	for _, c := range m.keyConflicts {
+		list = append(list, shortcutRow{key: "!", desc: c.String(), full: true})
 	}
-	// Legacy linear pane cycling (unbound by default — hide when empty).
-	if kb.NextPane != "" {
-		list = append(list, struct{ key, desc string }{kbDisplay(kb.NextPane), "Next pane"})
+
+	// m.keymap.Display renders every binding on an action joined with " / "
+	// so the help text stays readable when an action has multiple bindings
+	// (e.g. the macOS-friendly fallback on Rename pane), and canonically
+	// ("ctrl+v", not "Ctrl+V") because that is the chord form Display parses
+	// to and reports.
+	//
+	// Display returns the binding an action REQUESTED, not whether it WON
+	// dispatch — an action that lost a duplicate-binding conflict still
+	// shows the chord it asked for, one that will never fire because the
+	// conflict winner owns it at runtime. That is deliberate: the conflict
+	// row above already carries the truth for that chord, and showing the
+	// requested binding next to a "! duplicate binding" warning is more
+	// useful than blanking the row, which would read as "unbound" rather
+	// than "misconfigured" — the two are different problems with different
+	// fixes.
+	groups, byGroup := keymap.ActionsByGroup()
+	for _, g := range groups {
+		var bucket []shortcutRow
+		for _, a := range byGroup[g] {
+			if a.Hidden {
+				continue // e.g. json.transform: registered, no dispatch site
+			}
+			if keys := m.keymap.Display(a.ID); keys != "" {
+				bucket = append(bucket, srow(keys, a.Label))
+			}
+		}
+		if len(bucket) == 0 {
+			continue // never render an empty heading
+		}
+		list = append(list, srow("", g))
+		list = append(list, bucket...)
 	}
-	if kb.PrevPane != "" {
-		list = append(list, struct{ key, desc string }{kbDisplay(kb.PrevPane), "Previous pane"})
-	}
-	list = append(list, []struct{ key, desc string }{
-		{kbDisplay(kb.RenameTab), "Rename tab"},
-		{kbDisplay(kb.RenamePane), "Rename pane"},
-		{kbDisplay(kb.CycleTabColor), "Cycle tab color"},
-		{kbDisplay(kb.ScrollPageUp), "Scroll page up"},
-		{kbDisplay(kb.ScrollPageDown), "Scroll page down"},
-		{kbDisplay(kb.Paste), "Paste clipboard"},
-		{kbDisplay(kb.FocusPane), "Toggle focus mode"},
-		{kbDisplay(kb.NotesToggle), "Toggle pane notes"},
-		{kbDisplay(kb.Redraw), "Force screen redraw"},
-		{kbDisplay(kb.MutePane), "Mute / unmute pane notifications"},
-		{kbDisplay(kb.RestartPane), "Restart pane process (sessions resume)"},
-		{kbDisplay(kb.ToggleEager), "Toggle eager restore (active pane)"},
-		{kbDisplay(kb.ToggleWrap), "Toggle preview soft-wrap (AI pane)"},
-		{kbDisplay(kb.ToggleLazygit), "Toggle lazygit overlay for current repo"},
-		{kbDisplay(kb.ToggleHunk), "Toggle hunk diff overlay for current repo"},
-		{"", ""},
-		{"", "── Projects ──"},
-		{kbDisplay(kb.SidebarToggle), "Toggle project sidebar"},
-		{kbDisplay(kb.NewProject), "New project"},
-		{kbDisplay(kb.DestroyProject), "Remove active project (destroy / disconnect)"},
-		{kbDisplay(kb.ProjectPicker), "Project picker (fuzzy-find by name)"},
-		{kbDisplay(kb.ProjectToggle), "Bounce to the previous project"},
-		{kbDisplay(kb.ProjectNext), "Next project"},
-		{kbDisplay(kb.ProjectPrev), "Previous project"},
-		{kbDisplay(kb.AttentionQueue), "Jump to the agent blocked longest"},
-		{"", ""},
-		{kbDisplay(kb.NotificationToggle), "Toggle notification sidebar"},
-		{kbDisplay(kb.NotificationFocus), "Focus notification sidebar"},
-		{kbDisplay(kb.GoBack), "Pane history back"},
-		{"Ctrl+N", "New typed pane"},
-		{"Alt+1..9", "Switch to tab N"},
-		{"F1", "Help / About"},
-		{"Tab / Shift+Tab", "→ PTY (shell completion, Claude Code modes)"},
-		{"Shift+Arrows", "Select text"},
-		{"Ctrl+Shift+←→", "Select word"},
-		{"Ctrl+Alt+Shift+←→", "Select 3 words"},
-		{"Ctrl+←→", "Jump word"},
-		{"Ctrl+Alt+←→", "Jump 3 words"},
-		{"Enter", "Copy selection"},
-		{"Right-click", "Copy selection"},
-		{"Esc", "Clear selection"},
-		{"", ""},
-		{"", "── Editor ──"},
-		{"Shift+Arrows", "Select text (editor)"},
-		{"Ctrl+Shift+←→", "Select word (editor)"},
-		{"Ctrl+Alt+Shift+←→", "Select 3 words (editor)"},
-		{"Enter", "Copy selection (editor)"},
-		{"Ctrl+X", "Cut selection (editor)"},
-		{"Ctrl+V", "Paste (editor)"},
-		{"Ctrl+A", "Select all (editor)"},
-		{"Ctrl+S", "Save (editor)"},
-	}...)
+
+	// Non-action rows: behaviour with no registry action behind it —
+	// handleKey intercepts these outside the two dispatch tiers (Ctrl+N,
+	// Alt+1..9, F1 itself), or they belong to terminal/editor selection,
+	// which the registry does not model. Carried verbatim from the
+	// pre-registry list.
+	list = append(list,
+		srow("", ""),
+		srow("", "── Built-in keys ──"),
+		srow("Ctrl+N", "New typed pane"),
+		srow("Alt+1..9", "Switch to tab N"),
+		srow("F1", "Help / About"),
+		srow("Tab / Shift+Tab", "→ PTY (shell completion, Claude Code modes)"),
+		srow("Shift+Arrows", "Select text"),
+		srow("Ctrl+Shift+←→", "Select word"),
+		srow("Ctrl+Alt+Shift+←→", "Select 3 words"),
+		srow("Ctrl+←→", "Jump word"),
+		srow("Ctrl+Alt+←→", "Jump 3 words"),
+		srow("Enter", "Copy selection"),
+		srow("Right-click", "Copy selection"),
+		srow("Esc", "Clear selection"),
+		srow("", ""),
+		srow("", "── Editor ──"),
+		srow("Shift+Arrows", "Select text (editor)"),
+		srow("Ctrl+Shift+←→", "Select word (editor)"),
+		srow("Ctrl+Alt+Shift+←→", "Select 3 words (editor)"),
+		srow("Enter", "Copy selection (editor)"),
+		srow("Ctrl+X", "Cut selection (editor)"),
+		srow("Ctrl+V", "Paste (editor)"),
+		srow("Ctrl+A", "Select all (editor)"),
+		srow("Ctrl+S", "Save (editor)"),
+	)
 	return list
 }
 
@@ -753,7 +783,7 @@ func (m Model) handleSettingsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			if len(m.dialogInput) > 0 {
 				m.dialogInput = m.dialogInput[:len(m.dialogInput)-1]
 			}
-		case key == m.cfg.Keybindings.Paste:
+		case m.isAction(key, "pane.paste"):
 			return m, m.pasteToDialog()
 		default:
 			if len(key) == 1 {
@@ -1366,13 +1396,23 @@ func (m Model) renderSettingsDialog() string {
 const shortcutsChromeRows = 8
 
 // shortcutsDialogWidth runs wider than the standard 60. dialogKeyStyle is a
-// fixed 16 cells, so at 60 a description gets 36 — and eight entries already
-// exceeded that, including "Command palette (fuzzy-find any action)" and the
-// Tab → PTY note. Each wrapped onto a second line, which is why counting
-// ENTRIES against the height budget under-counted the box and let it overflow
-// even after a window was added. One entry must be one line for the row
-// arithmetic to mean anything.
-const shortcutsDialogWidth = 74
+// fixed dialogKeyColWidth cells, so at 60 a description gets 32 — and eight
+// entries already exceeded that, including "Command palette (fuzzy-find any
+// action)" and the Tab → PTY note. Each wrapped onto a second line, which is
+// why counting ENTRIES against the height budget under-counted the box and let
+// it overflow even after a window was added. One entry must be one line for
+// the row arithmetic to mean anything.
+//
+// 100, not the 74 that was enough for the bindings alone: the conflict rows
+// carry a sentence, not a label — kind, chord, winner, loser and consequence —
+// and 74 cut every one of them mid-clause ("duplicate binding: \"ctrl+w\"
+// resolves to pan…"), which is the half of the message that says what to do.
+// The longest one the registry can produce runs ~88 cells; a conflict row
+// spends nothing on the key column (shortcutsFullRowWidth), so at 100 it gets
+// 90 and that sentence lands whole. It also takes the ordinary description
+// budget from 44 — exactly the longest label, i.e. no headroom at all — to 70.
+// 100 is the width historyDialogWidth already uses for the same reason.
+const shortcutsDialogWidth = 100
 
 // shortcutsRowIndent is the two spaces every shortcut row starts with.
 const shortcutsRowIndent = 2
@@ -1389,6 +1429,19 @@ const shortcutsRowIndent = 2
 // rows past the bottom edge.
 func (m Model) shortcutsDescWidth() int {
 	if w := dialogInnerWidth(m.width, shortcutsDialogWidth) - shortcutsRowIndent - dialogKeyColWidth; w > 1 {
+		return w
+	}
+	return 1
+}
+
+// shortcutsFullRowWidth is the budget for a row that has no key half — the
+// conflict warnings, whose "key" is a bare "!". Spending dialogKeyColWidth on
+// one exclamation mark cost those rows 22 of the cells their message needed,
+// and they are the only rows in this dialog whose text a user cannot get any
+// other way: a binding row that truncates still shows its chord and its label,
+// a truncated conflict shows neither the winner nor the consequence.
+func (m Model) shortcutsFullRowWidth() int {
+	if w := dialogInnerWidth(m.width, shortcutsDialogWidth) - shortcutsRowIndent; w > 1 {
 		return w
 	}
 	return 1
@@ -1439,15 +1492,35 @@ func (m Model) renderShortcutsDialog() string {
 	b.WriteString("\n\n")
 
 	desc := m.shortcutsDescWidth()
+	full := m.shortcutsFullRowWidth()
+	indent := strings.Repeat(" ", shortcutsRowIndent)
 	for _, s := range list[start:end] {
+		// A conflict row is one sentence, not a key/label pair — it takes the
+		// whole inner width, marker included, and is red because it reports
+		// something the user has to go and fix.
+		if s.full {
+			b.WriteString(indent)
+			b.WriteString(dialogErrorStyle.Render(truncateToWidth(s.key+" "+s.desc, full)))
+			b.WriteByte('\n')
+			continue
+		}
 		// At the preferred width this truncation is a guard — every current
 		// description fits — but on a narrower terminal it is the mechanism, and
 		// that is why the budget has to be the box's real one. Either way a row
 		// that wraps breaks the height arithmetic, which counts one line per
 		// entry; that is the failure this dialog already had.
+		// The key half is truncated too, and lipgloss.Width is why: dialogKeyStyle
+		// is Width(dialogKeyColWidth), which PADS a short value and does nothing
+		// at all to a long one. A legal chord list overflows it by honest typo —
+		// `rename_pane = "alt+f2,alt+shift+r,alt+shift+q,ctrl+alt+shift+f4"`
+		// renders 42 lines against a height of 40 at 100x40, wrapping one entry
+		// across three and breaking the one-row-one-line arithmetic this whole
+		// dialog is built on. (Escapes are handled at the parser — see
+		// keymap.ParseChord — because truncateToWidth is ANSI-aware and would
+		// carry one through intact.)
 		b.WriteString(fmt.Sprintf("%s%s%s\n",
-			strings.Repeat(" ", shortcutsRowIndent),
-			dialogKeyStyle.Render(s.key),
+			indent,
+			dialogKeyStyle.Render(truncateToWidth(s.key, dialogKeyColWidth)),
 			dialogValStyle.Render(truncateToWidth(s.desc, desc))))
 	}
 
@@ -2576,7 +2649,7 @@ func (m Model) handleInstanceFormKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			if m.instanceFormCursor < totalItems-1 {
 				m.instanceFormCursor++
 			}
-		case key == m.cfg.Keybindings.Paste:
+		case m.isAction(key, "pane.paste"):
 			return m, m.pasteToDialog()
 		default:
 			if len(key) == 1 {

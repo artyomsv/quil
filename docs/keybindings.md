@@ -271,3 +271,49 @@ prev_pane = "shift+tab"
 ## Customizing keybindings
 
 Every binding listed above corresponds to a key in `~/.quil/config.toml` under `[keybindings]`. See [Configuration](configuration.md#keybindings) for the full list of overridable bindings.
+
+### How a binding is read
+
+Quil resolves keys to **actions**, not to raw config strings. That has a few consequences worth knowing:
+
+- **Modifier names are case-insensitive and order-insensitive.** `Ctrl+Shift+A`, `shift+ctrl+a`, and `ctrl+shift+a` are the same chord. Quil renders it back to you as `ctrl+shift+a`.
+- **A single-character key keeps its case.** `alt+m` and `alt+M` are *different* chords. This matters on macOS — see [Word-jump inside a pane](#word-jump-inside-a-pane-macos) below.
+- **Named keys are case-insensitive and have aliases.** `escape` = `esc`, `pageup` = `pgup`, `pagedown` = `pgdown` = `pgdn`, `return` = `enter`. `meta` and `hyper` both mean `super` (Cmd on macOS, Win on Windows).
+- **Control characters are rejected.** A binding containing an escape sequence or other control character fails to parse, and the action falls back to its shipped default. Only that one binding is affected.
+- **F1 shows what Quil actually parsed**, in canonical form. If you wrote `Ctrl+V` and F1 shows `ctrl+v`, that is the same key — Quil is echoing its normalized spelling, not changing your binding.
+
+### When a binding doesn't work
+
+Open **F1 → Shortcuts**. If Quil could not honour a binding, a warning row appears at the top of the list marked with `!`, naming the key, which action won, and what will not fire. Five cases produce one:
+
+| Warning | Meaning |
+|---|---|
+| `duplicate binding` | Two actions claim the same key. The one listed first in F1 wins. |
+| `cross-tier shadowing` | Two actions claim the same key, and one of them is resolved earlier in the dispatch order, so the other can never fire. |
+| `collides with a built-in key` | The key is also handled by Quil outside the binding system — `F1`, `Ctrl+N`, `Alt+1`…`Alt+9`, the `F8` / `Ctrl+Alt+V` paste aliases, or the text-selection chords (`Shift+Arrow`, `Ctrl+Shift+Left/Right`, `Ctrl+Alt+Shift+Left/Right`). The message names which one wins. |
+| `unreadable binding` | The spec did not parse. That action fell back to its default; every other binding is unaffected. |
+| `not yet dispatched` | A multi-step sequence (see below). The syntax parses, but nothing acts on it yet. |
+
+These also go to the client log, so a binding that breaks the F1 dialog itself is still diagnosable.
+
+### Multi-step sequences are parsed but not yet active
+
+The config parser already accepts a space-separated sequence:
+
+```toml
+[keybindings]
+new_tab = "ctrl+b c"
+```
+
+This is groundwork for the tmux-style prefix keymap described below. **It does not work yet.** Quil parses it, stores it, and reports it in F1 as `not yet dispatched` — pressing `Ctrl+B` then `c` does nothing, and `Ctrl+B` still reaches your shell. Use single chords until the prefix engine ships.
+
+## Coming for tmux users
+
+Quil's splits, spatial pane navigation, and detach-on-quit behaviour already mirror tmux, but the **keymap does not**. There is no `Ctrl+B` prefix today: every Quil binding is a single chord, so tmux muscle memory (`Ctrl+B` `%`, `Ctrl+B` `c`, `Ctrl+B` `z`) does not carry over.
+
+Closing that gap is planned in two further stages:
+
+- **Prefix sequences** — a real `prefix + key` state machine, so `Ctrl+B` `c` opens a tab. Includes the escape hatch tmux users expect: pressing the prefix twice sends one literal prefix to the pane, so a tmux running *inside* a Quil pane stays reachable.
+- **Keymap presets and `bindings.toml`** — select a named keymap (`default`, `tmux`) in one line, rebind the prefix in one more, and keep your own overrides in a dedicated file instead of 41 individual config fields.
+
+Until those land, the closest thing to a tmux keymap is rebinding the individual actions in `[keybindings]` — see [Configuration](configuration.md#keybindings) for the full list. Quil's defaults deliberately avoid the Alt-letter keys AI tools claim, so there is room to move things around.

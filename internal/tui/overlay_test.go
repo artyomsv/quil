@@ -31,6 +31,11 @@ func overlayTestModel(t *testing.T, paneCWD string) (*Model, *fakeSender, *TabMo
 		client:         fake,
 		pluginRegistry: registryWithOverlayTools(t),
 	}
+	// handleOverlayKey resolves both overlay toggles through the action
+	// registry, so the allow-list is empty without this and every key falls
+	// through to the overlay's PTY. Callers that rebind a toggle must call
+	// initKeymap again after changing cfg.
+	m.initKeymap()
 	return m, fake, tab
 }
 
@@ -379,6 +384,7 @@ func TestHandleToggleLazygit_TwoCandidates_OpensPicker(t *testing.T) {
 func TestHandleOverlayKey_ToggleKey_Hides(t *testing.T) {
 	t.Parallel()
 	m, _, tab := overlayTestModel(t, "")
+	m.initKeymap() // handleOverlayKey dispatches through the keymap; NewModel builds it
 	overlay := NewPaneModel("pane-o", 1024)
 	overlay.Type = overlayPluginLazygit
 	tab.overlayPane = overlay
@@ -672,6 +678,7 @@ func TestGitRepoPick_UpDownClamp(t *testing.T) {
 func TestHandleOverlayKey_Quit_ReturnsQuit(t *testing.T) {
 	t.Parallel()
 	m, _, tab := overlayTestModel(t, "")
+	m.initKeymap() // handleOverlayKey dispatches through the keymap; NewModel builds it
 	overlay := NewPaneModel("pane-o", 1024)
 	overlay.Type = overlayPluginLazygit
 	tab.overlayPane = overlay
@@ -698,6 +705,7 @@ func TestHandleOverlayKey_Quit_ReturnsQuit(t *testing.T) {
 func TestHandleOverlayKey_Redraw_InvalidatesCaches(t *testing.T) {
 	t.Parallel()
 	m, fake, tab := overlayTestModel(t, "")
+	m.initKeymap() // handleOverlayKey dispatches through the keymap; NewModel builds it
 
 	// Give the tab a two-pane split so the cache-invalidation loop has real
 	// panes to walk.

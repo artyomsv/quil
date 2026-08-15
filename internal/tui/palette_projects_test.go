@@ -102,6 +102,7 @@ func TestPalette_SidebarRowNamesTheAction(t *testing.T) {
 // an empty detail column teaches nothing.
 func TestPalette_ProjectRowsCarryTheirShortcuts(t *testing.T) {
 	m := paletteModelWithProjects(t)
+	m.initKeymap() // buildPaletteCommands dispatches through the keymap; NewModel builds it
 	kb := m.cfg.Keybindings
 
 	want := map[string]string{

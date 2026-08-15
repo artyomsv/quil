@@ -182,6 +182,11 @@ func TestHandleKey_NewTab_OfflineProjectRefusesWithFlash(t *testing.T) {
 		},
 		activeProject: 0,
 	}
+	// handleKey resolves keys through the action registry, so a directly-built
+	// Model needs the keymap NewModel would have given it. Without this,
+	// MatchTier answers "" for every press, the "tab.new" case never runs, and
+	// this test fails on a guard that is working.
+	m.initKeymap()
 
 	updated, cmd := m.handleKey(tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
 	got := updated.(Model)
@@ -221,6 +226,7 @@ func TestHandleKey_NewTab_NoProjectsYetOpensThePicker(t *testing.T) {
 		mcpHighlights: make(map[string]bool),
 		// projects is deliberately nil — the pre-first-broadcast state.
 	}
+	m.initKeymap() // see TestHandleKey_NewTab_OfflineProjectRefusesWithFlash
 
 	updated, _ := m.handleKey(tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
 	got := updated.(Model)
@@ -263,6 +269,7 @@ func TestHandleKey_NewTab_OnlyOfflineProjectsOpensThePicker(t *testing.T) {
 		},
 		activeProject: 0,
 	}
+	m.initKeymap() // see TestHandleKey_NewTab_OfflineProjectRefusesWithFlash
 
 	updated, _ := m.handleKey(tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
 	got := updated.(Model)

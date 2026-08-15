@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **F1 → Shortcuts is now derived from the keybinding table itself.** The list
+  used to be maintained by hand beside the bindings, and had drifted: seven of
+  the eight project shortcuts were missing from it. Rows are regrouped under
+  new headings, and each shortcut is spelled the way the key is actually
+  matched (`ctrl+v`, not `Ctrl+V`). The pane input-history shortcut appears for
+  the first time; `json_transform` no longer does, because nothing has ever
+  handled it.
+- **A keybinding that cannot work now says so, at the top of that dialog.**
+  Two actions on one chord, a chord Quil reserves for itself, a spec that does
+  not parse, or a name that is not an action: each is listed with which side
+  wins and which binding will never fire, rather than being dropped in silence.
+
+### Fixed
+
+- **`Option+Shift+<letter>` reaches the shell again on macOS.** Chord parsing
+  lowercased the key, and the same parser reads the incoming key press — so on
+  Terminal.app with "Use Option as Meta key", where the shifted form arrives as
+  `alt+M` rather than `alt+shift+m`, ten letters were swallowed by the binding
+  on their lowercase twin (mute, restart pane, close tab, lazygit, the project
+  picker and others). `alt+M` and `alt+m` are now distinct chords; modifier
+  names and named keys such as `Escape` or `PgUp` still ignore case.
+- A binding whose key is not a key name — anything carrying a control or
+  text-direction character — is now refused and reported in F1 → Shortcuts
+  instead of being drawn into the dialog as written.
+- A long list of keys on one action no longer wraps its row in F1 → Shortcuts.
+  Four bindings on `rename_pane` pushed the dialog past the bottom of a 40-row
+  terminal.
+- A multi-step binding such as `new_tab = "ctrl+b c"` is now listed in F1 →
+  Shortcuts as not yet supported. It parsed and appeared in the list like any
+  working shortcut, while nothing dispatched it.
+- Paste now works in the Settings field editor and the instance form when
+  `paste` is configured with multiple keys (e.g. `paste = "ctrl+v,f8"`). Those
+  two dialogs compared the whole configured string against a single key, so any
+  multi-key paste binding was silently dead there.
+- Binding an action to `shift+left`/`right`/`up`/`down`, `ctrl+shift+left`/
+  `right`, or `ctrl+alt+shift+left`/`right` now reports a warning in F1 →
+  Shortcuts. Keyboard text selection claims those eight chords midway through
+  dispatch, so which side wins depends on the action: the warning names it.
+
 ## [1.59.3] - 2026-08-15
 
 ### Fixed

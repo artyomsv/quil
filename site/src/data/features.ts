@@ -233,6 +233,22 @@ export const features: Feature[] = [
     ],
   },
   {
+    slug: "keybinding-registry",
+    icon: "key-round",
+    title: "Keybindings that tell you when they're broken",
+    blurb:
+      "Every key resolves to a named action, and anything Quil can't honour — a duplicate, a collision with a built-in, an unparseable spec — shows up as a warning in the shortcuts dialog instead of failing silently.",
+    category: "interaction",
+    detail: [
+      "Rebind any of 41 actions in `~/.quil/config.toml`. Comma-separate alternatives in one field (`rename_pane = \"alt+f2,alt+shift+r\"`) when a key is unreliable on one platform — macOS eats most F-keys unless you enable standard function keys.",
+      "A binding that can't fire now says so. F1 → Shortcuts puts a warning row at the top naming the key, which action won, and what will never run: duplicates, a key another action resolves first, collisions with built-ins (F1, Ctrl+N, Alt+1-9, the paste aliases, the text-selection chords), unparseable specs, and unknown action names.",
+      "One bad line costs you one binding, not your keymap — a spec that fails to parse falls back to that action's default and leaves the other 40 alone.",
+      "Spelling is normalized: modifier names fold and reorder (`Ctrl+Shift+A` = `shift+ctrl+a`), named keys alias (`escape`/`esc`, `pgdn`/`pagedown`, `meta`/`super`). Single-character keys keep their case, because on macOS with Option-as-Meta `alt+m` and `alt+M` are genuinely different presses.",
+      "The shortcuts dialog is generated from the action table rather than hand-written, so it can't drift from what the keys actually do — the hand-maintained version had quietly lost seven of eight project bindings.",
+      "Groundwork for a tmux-style prefix keymap: the parser already reads `\"ctrl+b c\"` sequences and reports them as not-yet-dispatched. The prefix engine and named presets (`default`, `tmux`) are the next two stages.",
+    ],
+  },
+  {
     slug: "mouse-pane-resize",
     image: "https://cdn.stukans.com/quil/screenshots/pane-resize-800.webp",
     icon: "layout-panel-left",

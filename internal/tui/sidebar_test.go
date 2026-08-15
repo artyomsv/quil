@@ -617,6 +617,7 @@ func TestTabBarNeverWrapsWhenOneLabelOverflowsThePaneColumn(t *testing.T) {
 func TestSidebarToggleKeyFlipsResizesAndPersists(t *testing.T) {
 	m := newSplitDragTestModel(t)
 	m.cfg = config.Default()
+	m.initKeymap() // handleKey dispatches through the keymap; NewModel builds it
 	if m.cfg.Keybindings.SidebarToggle != "alt+shift+s" {
 		t.Fatalf("default sidebar_toggle = %q, want alt+shift+s", m.cfg.Keybindings.SidebarToggle)
 	}
@@ -713,6 +714,7 @@ func TestViewKeepsTheSidebarWhenTheActiveProjectHasNoTabs(t *testing.T) {
 func TestSidebarToggleKeyRefusedOnANarrowTerminal(t *testing.T) {
 	m := newSplitDragTestModel(t)
 	m.cfg = config.Default()
+	m.initKeymap() // handleKey dispatches through the keymap; NewModel builds it
 	m.width = minWidthForSidebar - 1
 	if m.projectSidebarWidth() != 0 {
 		t.Fatalf("setup invariant broken: projectSidebarWidth = %d at width %d, want 0",

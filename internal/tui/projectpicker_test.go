@@ -380,7 +380,7 @@ func keyModel(t *testing.T, m Model, msg tea.KeyPressMsg) (Model, tea.Cmd) {
 // shown.
 func TestProjectToggleKeyWithNoPreviousFlashes(t *testing.T) {
 	newModel := func(prev string) Model {
-		return Model{
+		m := Model{
 			client:        newFakeConn(),
 			cfg:           config.Default(),
 			width:         100,
@@ -394,6 +394,8 @@ func TestProjectToggleKeyWithNoPreviousFlashes(t *testing.T) {
 			activeProject: 1,
 			prevProject:   prev,
 		}
+		m.initKeymap() // handleKey dispatches through the keymap; NewModel builds it
+		return m
 	}
 	press := tea.KeyPressMsg{Mod: tea.ModAlt, Code: 'o'}
 
@@ -444,7 +446,7 @@ func TestProjectCycleKeysWrapBothWays(t *testing.T) {
 				tabs: []*TabModel{tabWith(&PaneModel{ID: "pane-" + id})},
 			})
 		}
-		return Model{
+		m := Model{
 			client:        newFakeConn(),
 			cfg:           config.Default(),
 			width:         100,
@@ -454,6 +456,8 @@ func TestProjectCycleKeysWrapBothWays(t *testing.T) {
 			projects:      projects,
 			activeProject: active,
 		}
+		m.initKeymap() // handleKey dispatches through the keymap; NewModel builds it
+		return m
 	}
 	next := tea.KeyPressMsg{Mod: tea.ModAlt | tea.ModShift, Code: tea.KeyRight}
 	prev := tea.KeyPressMsg{Mod: tea.ModAlt | tea.ModShift, Code: tea.KeyLeft}

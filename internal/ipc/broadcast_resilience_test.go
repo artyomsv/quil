@@ -1,6 +1,9 @@
 package ipc_test
 
 import (
+	"encoding/binary"
+	"io"
+	"net"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -41,7 +44,7 @@ func TestBroadcast_SlowConnDoesNotBlockFastConn(t *testing.T) {
 	}
 	defer srv.Stop()
 
-	fast, err := ipc.NewClient(sockPath)
+	fast, err := net.Dial("unix", sockPath)
 	if err != nil {
 		t.Fatalf("fast client connect: %v", err)
 	}
@@ -60,13 +63,31 @@ func TestBroadcast_SlowConnDoesNotBlockFastConn(t *testing.T) {
 	// closes the slow conn. Meanwhile the fast client must keep receiving.
 
 	const broadcasts = 200
-	const fastReceives = 50
 
+	// The fast client drains RAW frames — framing only, no JSON decode.
+	//
+	// It used to call ipc.Client.Receive, whose envelope unmarshal cost ~320 us
+	// on this test's escape-heavy 24 KiB frames. That was never "fast"; it was
+	// merely faster than the encoder, which used to spend ~372 us per frame
+	// re-scanning an already-encoded payload. When EncodeFrame stopped doing
+	// that (2026-08) the producer outran this reader ~13x, so the "fast" client
+	// filled its own 64-slot critical queue and was closed by the very overflow
+	// policy this test exercises on the slow conn — a deterministic failure
+	// asserting the opposite of what the test is named for.
+	//
+	// The encoder no longer supplies incidental backpressure, and this test must
+	// not depend on either side's incidental speed. "Fast" means "drains its
+	// socket", which is the layer the broadcast fan-out actually couples to.
 	gotFast := make(chan int, broadcasts)
 	go func() {
 		count := 0
+		var hdr [4]byte
 		for {
-			if _, err := fast.Receive(); err != nil {
+			if _, err := io.ReadFull(fast, hdr[:]); err != nil {
+				close(gotFast)
+				return
+			}
+			if _, err := io.CopyN(io.Discard, fast, int64(binary.BigEndian.Uint32(hdr[:]))); err != nil {
 				close(gotFast)
 				return
 			}
@@ -91,15 +112,17 @@ func TestBroadcast_SlowConnDoesNotBlockFastConn(t *testing.T) {
 	// a blocked Broadcast would hang on the slow conn until the 30s write
 	// deadline (or forever). The actual healthy cost is microseconds; the
 	// generous 5s ceiling tolerates `-race` instrumentation + loaded-CI jitter
-	// (each broadcast marshals+clones a 4 KiB frame and does atomic-guarded
-	// dual-queue enqueues, all heavily instrumented under the race detector)
+	// (each broadcast encodes one frame — shared read-only across conns, never
+	// cloned — and does atomic-guarded dual-queue enqueues, all heavily
+	// instrumented under the race detector)
 	// while still being far below the seconds-to-30s signature of a real wedge.
 	if broadcastDur > 5*time.Second {
 		t.Errorf("Broadcast loop blocked: %d broadcasts took %v (want < 5s) — slow client wedged the fan-out", broadcasts, broadcastDur)
 	}
 
-	// Fast client must drain enough messages to demonstrate it's still being
-	// served. Healthy peers never stall.
+	// A genuinely draining peer must receive EVERY critical frame — the
+	// must-deliver queue has no drop path for a conn that keeps up. The old
+	// bar was 50 of 200, which tolerated 150 lost frames.
 	timeout := time.After(3 * time.Second)
 	for {
 		select {
@@ -107,7 +130,7 @@ func TestBroadcast_SlowConnDoesNotBlockFastConn(t *testing.T) {
 			if !ok {
 				t.Fatal("fast client got an error before reaching the expected message count")
 			}
-			if n >= fastReceives {
+			if n >= broadcasts {
 				return // success
 			}
 		case <-timeout:
@@ -130,7 +153,13 @@ func TestBroadcast_ContinuesAfterSlowConnDisconnects(t *testing.T) {
 	}
 	defer srv.Stop()
 
-	fast, err := ipc.NewClient(sockPath)
+	// Raw frame drain, for the same reason as
+	// TestBroadcast_SlowConnDoesNotBlockFastConn: a JSON-decoding reader is not
+	// a fast reader, and this test's 1 ms pacing was only ever ahead of it
+	// because the encoder was slow too. Under -race the margin was ~30%, so
+	// once EncodeFrame stopped re-scanning payloads BOTH conns overflowed and
+	// waitForConnCount below saw 0 instead of 1.
+	fast, err := net.Dial("unix", sockPath)
 	if err != nil {
 		t.Fatalf("fast client: %v", err)
 	}
@@ -146,8 +175,12 @@ func TestBroadcast_ContinuesAfterSlowConnDisconnects(t *testing.T) {
 	var fastCount int
 	var fastMu sync.Mutex
 	go func() {
+		var hdr [4]byte
 		for {
-			if _, err := fast.Receive(); err != nil {
+			if _, err := io.ReadFull(fast, hdr[:]); err != nil {
+				return
+			}
+			if _, err := io.CopyN(io.Discard, fast, int64(binary.BigEndian.Uint32(hdr[:]))); err != nil {
 				return
 			}
 			fastMu.Lock()

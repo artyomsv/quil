@@ -1106,9 +1106,7 @@ func (m Model) executePaletteCommand(c paletteCommand) (tea.Model, tea.Cmd) {
 		m = m.openMemoryDialog()
 		return m, m.refreshMemory()
 	case palActAbout:
-		m.dialog = dialogAbout
-		m.dialogCursor = 0
-		return m, tea.ClearScreen
+		return m.openAboutDialog()
 	case palActClientLog:
 		return m.openLogViewer("Client log", filepath.Join(config.QuilDir(), "quil.log"))
 	case palActDaemonLog:

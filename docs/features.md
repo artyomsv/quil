@@ -546,6 +546,13 @@ one confirmation and restarts the daemon; tabs, layouts, CWDs, notes,
 and Claude sessions are preserved via the workspace snapshot. Configure
 via `[update]` in `config.toml`; About (F1) has a manual "Update now".
 
+The manual row always confirms with GitHub before it acts, so it installs
+the release that is newest *now* rather than the one the last daily check
+found — if something newer than the staged version has shipped, that is
+what gets fetched and offered. Opening F1 also refreshes the row's label.
+The update row is local-only: with a remote project active it says so
+instead of acting, because applying swaps this machine's binaries.
+
 ### Remote daemon over SSH
 
 > **BETA.** Phases 1, 2, and most of 3 of [Remote Daemon Attach](roadmap/remote-daemon.md). Usable for real work, with the limits at the end of this section — chiefly that plugin *definitions* still come from your local machine, and that `quil status` and the update controls are blocked in remote mode rather than targeting the wrong host.

@@ -47,9 +47,19 @@ func updateStatusSegment(info *ipc.UpdateInfo, current string) string {
 }
 
 // aboutUpdateLabel is the dynamic F1 → About row for updates.
-func aboutUpdateLabel(info *ipc.UpdateInfo, current string) string {
+//
+// remote says the daemon behind the ACTIVE project is on another host. Its
+// announcement describes that host's releases and its staging dir, while
+// applying an update swaps the binaries on THIS machine — so the row says so
+// rather than offering an action that would cross machines, matching the
+// refusal in handleUpdateAction and the one maybeShowUpdateNotice already made
+// for the startup notice.
+func aboutUpdateLabel(info *ipc.UpdateInfo, current string, remote bool) string {
 	if !version.UpdatesEnabled() {
 		return "Updates disabled (dev build)"
+	}
+	if remote {
+		return "Updates apply locally (remote project active)"
 	}
 	if !updateAvailable(info, current) {
 		return "Check for updates (up to date)"
@@ -64,15 +74,60 @@ func aboutUpdateLabel(info *ipc.UpdateInfo, current string) string {
 }
 
 // handleUpdateAction is the Enter action for the About update row and the
-// startup notice's "Update now" button. Branches: up to date → ask the
-// daemon to re-check now (the row no longer just repeats stale broadcast
-// state); unwritable → flash pointing at the release page; staged → apply
-// confirm; otherwise → on-demand stage request to the daemon.
+// startup notice's "Update now" button. Every branch that acts on a version
+// re-checks with the daemon first, because the only version this Model knows
+// came from a broadcast the daemon refreshes once a day: up to date → re-check
+// (a report of "nothing newer" does not mean a check ran this session); staged
+// → re-check, then apply whatever is newest; not staged → stage. Only the
+// unwritable branch answers from the broadcast, and it offers no action.
 func (m Model) handleUpdateAction() (tea.Model, tea.Cmd) {
 	info := m.activeUpdateInfo()
+	// Captured BEFORE the dialog is closed below. The apply confirm now opens
+	// from the daemon's answer, which can land long after this press, so Esc on
+	// it must return where the user actually came from: the About menu when
+	// they are still standing in it, and the panes when the confirm arrived on
+	// its own. Painting About over a pane the user went back to working in is
+	// the same "dialog they never opened" complaint from the other direction.
+	m.applyConfirmReturn = dialogNone
+	if m.dialog == dialogAbout {
+		m.applyConfirmReturn = dialogAbout
+	}
 	m.dialog = dialogNone
 	if !version.UpdatesEnabled() {
 		m.setFlash("updates are disabled in dev builds")
+		return m, tea.Batch(tea.ClearScreen, m.flashCmd())
+	}
+	// BEFORE the pendingApplyVer reset below, and that ordering is the whole
+	// point: this press is refused, so it must leave no trace. Clearing the
+	// intent here would silently discard the FIRST press's "apply when this
+	// answers" — the user asked to apply, waited out the download, and got a
+	// flash.
+	if m.updateReqInFlight {
+		// A request is unanswered. Sending a second one is not merely wasteful:
+		// while the first is DOWNLOADING a newer release, the daemon answers the
+		// second from stageRelease's CAS ("staging already in progress") within
+		// milliseconds — and that fast failure used to be read as "the check
+		// failed", opening the apply confirm for the OLD staged version. Pressing
+		// y there installs the intermediate release and abandons the download
+		// that was fetching the newest: the exact loop this whole change exists
+		// to end, re-created by an impatient second press.
+		m.setFlash("already checking — hold on…")
+		return m, tea.Batch(tea.ClearScreen, m.flashCmd())
+	}
+	// Cleared here and set only by the staged branch below: a leftover from an
+	// earlier press would make an ordinary download open the apply confirm the
+	// user did not ask for.
+	m.pendingApplyVer = ""
+	if m.remoteModeFor(m.activeDest()) {
+		// Every value on this row came from the active project's daemon, and
+		// the request below would go back to it — but applying swaps the
+		// binaries on THIS machine, out of THIS machine's staging dir. Staging
+		// on the far host and then installing locally is a wrong-machine
+		// action in both directions, so it is refused rather than performed
+		// (the startup notice refuses on the same grounds). It matters more
+		// now that a successful stage continues straight into the apply
+		// confirm: the confirm would name a version this machine never staged.
+		m.setFlash("updates apply to this machine — switch to a local project first")
 		return m, tea.Batch(tea.ClearScreen, m.flashCmd())
 	}
 	if !updateAvailable(info, m.version) {
@@ -91,13 +146,23 @@ func (m Model) handleUpdateAction() (tea.Model, tea.Cmd) {
 		return m, tea.Batch(tea.ClearScreen, m.flashCmd())
 	}
 	if info.StagedVersion == info.LatestVersion {
-		m.dialog = dialogConfirm
-		m.confirmKind = confirmKindApplyUpdate
-		m.resetConfirmWorktrees()
-		m.confirmID = ""
-		m.confirmName = info.LatestVersion
-		m.dialogCursor = 0
-		return m, nil
+		// Something is staged — but "staged" here means "staged as of the
+		// daemon's last check", and that check runs 1 min after daemon start
+		// and every 24 h after. A release published inside that window is
+		// invisible to this Model, so applying straight from it installs a
+		// version that is no longer the newest and leaves the user to repeat
+		// the whole cycle after the restart. Ask the daemon what is actually
+		// latest; it answers AlreadyStaged when this stage is still it, and
+		// stages the newer one when it is not.
+		//
+		// pendingApplyVer records that this press meant APPLY (the "Update
+		// to vX (download)" row sends the same request and must keep its
+		// flash-only outcome) and carries the fallback: a check that cannot
+		// reach GitHub must still be able to install what is already on disk.
+		m.pendingApplyVer = info.LatestVersion
+		m.setFlash("checking for a newer version…")
+		m.sendStageUpdateReq()
+		return m, tea.Batch(tea.ClearScreen, m.flashCmd())
 	}
 	// Nothing staged yet ([update] auto = false, or the daily tick hasn't
 	// run): ask the daemon to stage now. Response lands as
@@ -108,9 +173,12 @@ func (m Model) handleUpdateAction() (tea.Model, tea.Cmd) {
 }
 
 // sendStageUpdateReq fires MsgStageUpdateReq at the daemon (no-op without a
-// live client, e.g. in tests). Shared by the up-to-date recheck and the
-// not-staged-yet download branches of handleUpdateAction.
-func (m Model) sendStageUpdateReq() {
+// live client, e.g. in tests). Shared by the up-to-date recheck, the
+// staged-apply recheck, and the not-staged-yet download branch.
+//
+// Pointer receiver: it sets updateReqInFlight, which handleUpdateAction's
+// caller must see.
+func (m *Model) sendStageUpdateReq() {
 	if m.client == nil {
 		return
 	}
@@ -121,7 +189,133 @@ func (m Model) sendStageUpdateReq() {
 	}
 	if err := m.client.Send(req); err != nil {
 		log.Printf("stage update: send: %v", err)
+		return
 	}
+	m.updateReqInFlight = true
+}
+
+// openAboutDialog opens F1 → About and asks the daemon for a fresh release
+// check on the way in, so the update row is describing GitHub rather than
+// whatever the daily tick last found. Used by the F1 key and the palette's
+// About command — NOT by the Esc paths that return here from a sub-dialog,
+// which are back-navigation inside one visit and would otherwise re-request on
+// every step out of Settings.
+func (m Model) openAboutDialog() (tea.Model, tea.Cmd) {
+	m.dialog = dialogAbout
+	m.dialogCursor = 0
+	m.sendUpdateCheckReq()
+	return m, tea.ClearScreen
+}
+
+// sendUpdateCheckReq asks the daemon to re-check GitHub without downloading
+// anything, so the About row describes the current release rather than
+// whatever the daily tick last found. Fire-and-forget: the answer arrives as
+// the refreshed "update" key on the next workspace_state broadcast, and the
+// daemon rate-limits the path (opening a dialog must not be able to spend the
+// unauthenticated GitHub quota).
+func (m Model) sendUpdateCheckReq() {
+	// Skipped for a remote active project for the reason handleUpdateAction
+	// refuses there: the answer would describe the far host's releases, and it
+	// would spend that host's GitHub quota to tell this machine nothing.
+	if m.client == nil || !version.UpdatesEnabled() || m.remoteModeFor(m.activeDest()) {
+		return
+	}
+	req, err := ipc.NewMessage(ipc.MsgUpdateCheckReq, nil)
+	if err != nil {
+		log.Printf("update check: marshal: %v", err)
+		return
+	}
+	if err := m.client.Send(req); err != nil {
+		log.Printf("update check: send: %v", err)
+	}
+}
+
+// applyStageUpdateResp turns the daemon's answer into the next step. The
+// branch that matters is pendingApplyVer: the press it records asked to
+// APPLY, so a success — whether the stage was already current or a newer
+// release was downloaded just now — continues into the apply confirm for the
+// version the daemon actually has, and a failure falls back to confirming the
+// staged version rather than stranding the user on a flash.
+func (m Model) applyStageUpdateResp(resp ipc.StageUpdateRespPayload) (Model, tea.Cmd) {
+	pending := m.pendingApplyVer
+	m.pendingApplyVer = ""
+	m.updateReqInFlight = false
+
+	// The version is remote-sourced under --remote and lands in a flash and a
+	// dialog title, neither of which passes through a VT emulator.
+	ver := sanitizeRemoteText(resp.Version)
+
+	switch {
+	case resp.Success && pending != "":
+		return m.openApplyConfirm(ver, "")
+	case resp.Success && resp.AlreadyStaged:
+		m.setFlash("v" + ver + " is already staged — applies on next launch")
+	case resp.Success:
+		m.setFlash("update v" + ver + " staged — applies on next launch")
+	case pending != "" && resp.CheckFailed:
+		// ONLY a failed CHECK licenses this. The staged bytes are still on disk
+		// and still newer than what is running, so the apply the user asked for
+		// remains possible — it just cannot be confirmed as the newest, and the
+		// reason rides the confirm itself because a flash is invisible behind a
+		// dialog. Every other failure means the question was answered, or the
+		// request never ran: falling back there would install an older stage
+		// over a newer one that is mid-download.
+		return m.openApplyConfirm(sanitizeRemoteText(pending), stageRespReason(resp))
+	case resp.Error == "already up to date":
+		// handleUpdateAction's "up to date" branch sends this request to force
+		// a fresh check rather than trusting stale broadcast info; a
+		// re-confirmed "up to date" is a normal outcome, not a failure. It also
+		// reaches here WITH an apply intent when a staged release was yanked —
+		// GitHub answered, and it said nothing is newer, so the honest reply is
+		// this rather than a confirm contradicting its own detail line.
+		m.setFlash("quil is up to date (v" + m.version + ")")
+	default:
+		m.setFlash("update failed: " + sanitizeRemoteText(resp.Error))
+	}
+	return m, m.flashCmd()
+}
+
+// stageRespReason renders why the newest-release check did not settle, for the
+// apply confirm's detail line. Bounded and sanitized at render like every
+// other confirmDetail — under --remote the text originates on a host the user
+// may not control.
+func stageRespReason(resp ipc.StageUpdateRespPayload) string {
+	if resp.Error == "" {
+		return "could not confirm this is the newest release"
+	}
+	return "newest-release check: " + resp.Error
+}
+
+// openApplyConfirm arms the apply-update confirm for ver, with an optional
+// detail line explaining a check that did not settle.
+//
+// It REFUSES to replace an open dialog. Unlike the old immediate path this can
+// fire long after the keypress that started it (a stage takes as long as the
+// download takes), and by then the user may be part-way through something
+// else — which replacing the dialog would discard. The flash plus the
+// unchanged About row are enough to finish the job by hand.
+func (m Model) openApplyConfirm(ver, detail string) (Model, tea.Cmd) {
+	if ver == "" {
+		// A success with no version is not something to act on blindly.
+		m.setFlash("update staged — F1 → Update to apply")
+		return m, m.flashCmd()
+	}
+	if m.dialog != dialogNone {
+		m.setFlash("v" + ver + " staged — F1 → Update to apply")
+		return m, m.flashCmd()
+	}
+	m.dialog = dialogConfirm
+	m.confirmKind = confirmKindApplyUpdate
+	// The worktree-delete fields outlive the dialog, so every confirm re-clears
+	// them ON OPEN as well as on the way out — an armed toggle inherited here
+	// is a deletion nobody was offered. This open is the one that used to sit
+	// inline in handleUpdateAction; the reset moved with it.
+	m.resetConfirmWorktrees()
+	m.confirmID = ""
+	m.confirmName = ver
+	m.confirmDetail = detail
+	m.dialogCursor = 0
+	return m, nil
 }
 
 // updateInfoFor returns the release dest's daemon announced, or nil.

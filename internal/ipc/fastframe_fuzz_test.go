@@ -82,6 +82,11 @@ func FuzzAppendEnvelope(f *testing.F) {
 func FuzzAppendEnvelopeRawPayload(f *testing.F) {
 	f.Add("pane_output", "", `{"a":1}`)
 	f.Add("x", "", `[ ]`)
+	// The envelope-injection shapes. Seeded permanently so the corpus carries
+	// them even on a machine that has never fuzzed this target.
+	f.Add("pane_output", "", `{},"type":"shutdown","x":{}`)
+	f.Add("pane_output", "req-1", `{},"id":"stolen","x":{}`)
+	f.Add("pane_output", "", `{"pane_id":"p"},"type":"shutdown","x":{}`)
 	f.Add("x", "", `{ "a" : 1 }`)
 	f.Add("x", "", `null`)
 	f.Add("x", "", `[1,2]`)
@@ -98,9 +103,23 @@ func FuzzAppendEnvelopeRawPayload(f *testing.F) {
 		}
 		want, err := EncodeFrameSlow(msg)
 		if err != nil {
-			// Outside the contract: the reference rejects this payload as
-			// invalid JSON and payloadInlinable is not a parser. See the
-			// package comment above and TestFastPaths_KnownValidityLimits.
+			// The reference rejects this payload. Byte-identity is out of
+			// scope here, but ONE property must still hold: the fast path may
+			// never turn an invalid payload into a valid frame that says
+			// something DIFFERENT.
+			//
+			// This branch used to be a bare return, and that is precisely why
+			// ~18M executions across four targets never found the envelope
+			// injection — every payload that forged a `"type"` or `"id"` key
+			// landed here and was silently skipped.
+			//
+			// The obvious assertion (the frame must not decode) is wrong: a
+			// forged frame decodes perfectly. The envelope is what to compare.
+			var got Message
+			if json.Unmarshal(frame[4:], &got) == nil && (got.Type != typ || got.ID != id) {
+				t.Fatalf("payload rewrote the envelope: type %q->%q id %q->%q (payload=%q)",
+					typ, got.Type, id, got.ID, payload)
+			}
 			return
 		}
 		var gotMsg, wantMsg Message

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/json"
 )
 
 // Fast paths for the IPC hot path.
@@ -44,53 +45,56 @@ func fastStringSafe(s string) bool {
 
 // payloadInlinable reports whether p may be written into the envelope verbatim.
 //
-// It checks that p LOOKS like a complete, compact JSON value: matching outer
-// delimiters, or one of the three exact literals, or a number made only of the
-// bytes json.Marshal emits for one. Composite values are O(1) — only the two
-// ends are examined.
+// It must establish that p is ONE COMPLETE JSON VALUE with nothing after it.
+// That is a security property, not tidiness: the payload is concatenated
+// between `,"payload":` and the envelope's closing brace, so trailing content
+// becomes SIBLING ENVELOPE KEYS, and encoding/json resolves duplicates
+// last-wins. A payload of
 //
-// This is deliberately NOT full validation, and the boundary matters. Full
-// validation via json.Valid costs 47 us on an 8 KB pane_output payload, which
-// would give back most of the 112 us -> 2.7 us this change buys. So the
-// soundness argument rests on the producer instead: NewMessage
-// (internal/ipc/protocol.go:1130) is the only production site that sets
-// Message.Payload and it always uses json.Marshal, so payloads arrive compact,
-// HTML-escaped and valid.
+//	{},"type":"shutdown","x":{}
 //
-// What this check adds on top is a cheap backstop against a payload built by
-// hand, which is what TestBroadcast_MarshalErrorLogsAndReturns injects and what
-// EncodeFrame's error path exists for. It catches unterminated and truncated
-// values — the realistic shapes — but a hand-built payload that is
-// delimiter-balanced and still internally invalid (`{not valid}`) would be
-// inlined and reach the peer as a malformed frame. No production path can
-// produce one; a future producer that bypasses NewMessage must not assume it is
-// checked here.
+// produces {"type":"pane_output","payload":{},"type":"shutdown","x":{}}, which
+// is not malformed — it decodes cleanly as Type "shutdown". A pane_output frame
+// becomes a shutdown frame.
+//
+// An earlier version checked only the first and last byte and documented the
+// residual risk as "reaches the peer as a malformed frame". That was measurably
+// wrong, and the review that caught it is why this is now two checks:
+//
+//   - paneOutputSpan is the hot path and is already injection-proof: exactly one
+//     '{' and one '}', at the two ends, so no sibling key can exist. Free.
+//   - json.Valid for everything else. It costs ~5.8 ns/byte, which is why it is
+//     NOT applied to pane_output (47 us on an 8 KB payload would give back most
+//     of what this change buys) — but every other message type has a small
+//     payload, measured at 1.4 us for a two-pane list_panes_resp, and that is
+//     the right price for a property the first-byte check never actually had.
+//
+// json.Valid also subsumes the old hand-rolled number branch, which accepted
+// eleven shapes json.Marshal never emits ("-", "+", ".", "1e", "1.2.3", "+5",
+// ".5", "0123" among them) — several of which cannot begin a JSON value at all.
+//
+// Note this establishes VALIDITY, not compactness: json.Valid accepts `[ ]`,
+// which json.Marshal would compact to `[]`, so byte-identity still holds only
+// for marshal-produced payloads. Semantic equivalence holds for all of them,
+// and that is what "no version negotiation needed" rests on. See the contract
+// note in fastframe_fuzz_test.go.
 func payloadInlinable(p []byte) bool {
-	switch p[0] {
-	case '{':
-		return p[len(p)-1] == '}'
-	case '[':
-		return p[len(p)-1] == ']'
-	case '"':
-		return len(p) >= 2 && p[len(p)-1] == '"'
-	case 't':
-		return string(p) == "true"
-	case 'f':
-		return string(p) == "false"
-	case 'n':
-		return string(p) == "null"
+	if paneOutputSpan(p) {
+		return true
 	}
-	// A number. json.Marshal emits only these bytes for one, and they are
-	// short enough that a full scan is free.
-	for i := 0; i < len(p); i++ {
-		switch c := p[i]; {
-		case c >= '0' && c <= '9':
-		case c == '-', c == '+', c == '.', c == 'e', c == 'E':
-		default:
-			return false
-		}
+	// Leading or trailing whitespace is VALID JSON that json.Marshal would
+	// compact away, so inlining it would break byte-identity for no gain. Two
+	// comparisons keep the property for the common case; interior whitespace
+	// (`{ "a" : 1 }`) still passes and is the documented semantic-equivalence
+	// case, covered by FuzzAppendEnvelopeRawPayload.
+	if isJSONSpace(p[0]) || isJSONSpace(p[len(p)-1]) {
+		return false
 	}
-	return true
+	return json.Valid(p)
+}
+
+func isJSONSpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r'
 }
 
 // appendEnvelope builds a complete length-prefixed frame by concatenation,
@@ -102,6 +106,12 @@ func payloadInlinable(p []byte) bool {
 // (internal/ipc/server.go:610), and ReadMessage's decoded Payload aliases its
 // own read buffer. Pooling either would break both at once.
 func appendEnvelope(msg *Message) ([]byte, bool) {
+	// A nil Message reached json.Marshal as `null` before this fast path
+	// existed. Declining restores that exactly, and costs one comparison to
+	// avoid a nil dereference on a conn dispatch goroutine that has no recover.
+	if msg == nil {
+		return nil, false
+	}
 	if !fastStringSafe(msg.Type) || !fastStringSafe(msg.ID) {
 		return nil, false
 	}

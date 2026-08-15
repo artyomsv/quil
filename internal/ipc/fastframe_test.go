@@ -477,18 +477,60 @@ func TestDecodePayload_OtherTypesUnaffected(t *testing.T) {
 // If one of these ever starts failing because the fast path got stricter, that
 // is an improvement: delete the row.
 func TestFastPaths_KnownValidityLimits(t *testing.T) {
-	t.Run("encoder inlines a balanced but invalid payload", func(t *testing.T) {
-		msg := &Message{Type: "x", Payload: json.RawMessage(`[A]`)}
-		if _, err := EncodeFrameSlow(msg); err == nil {
-			t.Fatal("precondition: the reference encoder should reject this payload")
+	t.Run("encoder never inlines an invalid payload", func(t *testing.T) {
+		// This subtest previously asserted the OPPOSITE — that an invalid
+		// payload is inlined and the resulting frame is "detectably bad". That
+		// was wrong in the way that matters: payloadInlinable checked only the
+		// first and last byte, so `{},"type":"shutdown","x":{}` was inlined and
+		// the frame decoded CLEANLY as Type "shutdown". Not a moved error; a
+		// forged envelope. json.Valid closes it.
+		for _, payload := range []string{
+			`{},"type":"shutdown","x":{}`, // envelope injection: rewrites Type
+			`{},"id":"stolen","x":{}`,     // rewrites ID
+			`{},"z":{}`,                   // injects an unrelated key
+			`[A]`, `{not valid}`, `{"a":1` , // plain invalid
+			"-", "+", ".", "1e", "1.2.3", "+5", ".5", // numbers json.Marshal never emits
+		} {
+			msg := &Message{Type: MsgPaneOutput, Payload: json.RawMessage(payload)}
+			if _, err := EncodeFrameSlow(msg); err == nil {
+				t.Fatalf("precondition: the reference encoder should reject %q", payload)
+			}
+			if _, ok := appendEnvelope(msg); ok {
+				t.Errorf("appendEnvelope inlined invalid payload %q", payload)
+			}
+			if _, err := EncodeFrame(msg); err == nil {
+				t.Errorf("EncodeFrame accepted invalid payload %q instead of erroring", payload)
+			}
 		}
-		frame, err := EncodeFrame(msg)
-		if err != nil {
-			t.Skip("fast path now rejects this — delete this row")
+	})
+
+	// The property that actually matters, stated directly: a payload can never
+	// rewrite the envelope around it.
+	t.Run("a payload cannot forge envelope keys", func(t *testing.T) {
+		for _, payload := range []string{
+			`{},"type":"shutdown","x":{}`,
+			`{},"id":"stolen","x":{}`,
+			`{"pane_id":"p"},"type":"shutdown","x":{}`,
+		} {
+			msg := &Message{Type: MsgPaneOutput, ID: "req-1", Payload: json.RawMessage(payload)}
+			frame, err := EncodeFrame(msg)
+			if err != nil {
+				continue // rejected outright, which is the desired outcome
+			}
+			var got Message
+			if json.Unmarshal(frame[4:], &got) != nil {
+				continue // malformed is also acceptable; forged is not
+			}
+			if got.Type != msg.Type || got.ID != msg.ID {
+				t.Errorf("payload %q rewrote the envelope: type %q->%q id %q->%q",
+					payload, msg.Type, got.Type, msg.ID, got.ID)
+			}
 		}
-		// The error is MOVED, not removed: the frame is detectably bad.
-		if _, err := ReadMessage(bytes.NewReader(frame)); err == nil {
-			t.Error("a frame built from an invalid payload decoded cleanly — the badness was swallowed")
+	})
+
+	t.Run("nil message declines instead of panicking", func(t *testing.T) {
+		if _, ok := appendEnvelope(nil); ok {
+			t.Error("appendEnvelope accepted a nil message")
 		}
 	})
 

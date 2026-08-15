@@ -100,12 +100,28 @@ func TestBroadcast_SlowConnDoesNotBlockFastConn(t *testing.T) {
 	// per-conn send queue. Pure echo of an arbitrary string.
 	payload := map[string]string{"data": string(make([]byte, 4000))}
 
-	broadcastStart := time.Now()
+	// Paced, and the pacing is load-bearing rather than cosmetic. The critical
+	// queue has NO drop path, so its only slack is 64 slots plus one ~200 KiB
+	// socket buffer — about 72 of these frames. Unpaced, the encoder empties
+	// 200 of them in ~5 ms and the remaining ~3 MB must be drained
+	// concurrently or the FAST conn overflows its own queue and the server
+	// closes it, which is this test's failure message verbatim. That was a
+	// real low-rate flake on the non-race run (race instrumentation slows the
+	// producer enough to hide it). The sibling test below has always paced for
+	// the same reason, which is why it never flaked.
+	//
+	// Only the Broadcast calls are timed, so the "> 5 s means the fan-out is
+	// wedged" assertion still measures what it always did.
+	var broadcastDur time.Duration
 	for i := 0; i < broadcasts; i++ {
+		if i > 0 && i%10 == 0 {
+			time.Sleep(200 * time.Microsecond)
+		}
 		msg, _ := ipc.NewMessage(ipc.MsgStateUpdate, payload)
+		start := time.Now()
 		srv.Broadcast(msg)
+		broadcastDur += time.Since(start)
 	}
-	broadcastDur := time.Since(broadcastStart)
 
 	// All Broadcast calls must return promptly even though one peer is
 	// stalled. The real failure mode this guards against is a *wedged* fan-out:

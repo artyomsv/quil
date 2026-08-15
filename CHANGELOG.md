@@ -16,10 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   busy pane — that second pass was doing almost all of the work and producing
   nothing.
 
-  Encoding a frame of pane output is now about 40× faster, and receiving one
-  about 9× faster, with roughly half the memory allocations. In practical
+  Encoding a frame of pane output is now about 35× faster, and receiving one
+  about 10× faster, with roughly half the memory allocations. In practical
   terms, a pane streaming output as fast as Quil will batch it used to occupy
-  about half a CPU core just formatting messages; it now takes about one
+  about half a CPU core just formatting messages; it now takes closer to one
   percent of one. A build or test run that floods a pane should feel less
   likely to make the rest of the session stutter, and the effect grows with the
   number of busy panes.

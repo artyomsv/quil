@@ -257,18 +257,31 @@ Shipped numbers, `benchstat bench/before.txt bench/after.txt`, n=6, `-cpu 1`:
 
 | Benchmark | Before | After | Change |
 |---|---|---|---|
-| `EncodeFrame_PaneOutput8K` | 112.97 µs | **2.72 µs** | −97.6% (41×) |
-| `EncodeFrame_PaneOutput64K` | 858.53 µs | **23.81 µs** | −97.2% (36×) |
-| `EncodeFrame_ListPanesResp` | 3.49 µs | **0.20 µs** | −94.3% (17×) |
-| `ReadMessage_PaneOutput8K` | 117.38 µs | **3.70 µs** | −96.9% (32×) |
-| `DecodePayload_PaneOutput8K` | 103.83 µs | **18.78 µs** | −81.9% (5.5×) |
-| `ClientReceive_PaneOutput8K` | 226.72 µs | **24.34 µs** | −89.3% (9.3×) |
-| `ClientReceive_ListPanesResp` | 13.77 µs | 13.48 µs | ~ (control, no regression) |
+| `EncodeFrame_PaneOutput8K` | 112.97 µs | **3.20 µs** | −97.2% (35×) |
+| `EncodeFrame_PaneOutput64K` | 858.53 µs | **27.20 µs** | −96.8% (32×) |
+| `EncodeFrame_ListPanesResp` | 3.49 µs | **1.95 µs** | −44% (1.8×) |
+| `ReadMessage_PaneOutput8K` | 117.38 µs | **3.62 µs** | −96.9% (32×) |
+| `DecodePayload_PaneOutput8K` | 103.83 µs | **18.73 µs** | −82.0% (5.5×) |
+| `ClientReceive_PaneOutput8K` | 226.72 µs | **22.73 µs** | −90.0% (10×) |
+| `ClientReceive_ListPanesResp` | 13.77 µs | 13.04 µs | ~ (control, no regression) |
 
 Allocations: encode 2 → 1 on every type; a full client receive 17 → 7.
 
-Both acceptance thresholds are met with margin (≥30× encode, ≥8× client receive), and
-the small structured control improved rather than regressing.
+Both acceptance thresholds are met with margin (≥30× encode, ≥8× client receive).
+
+**`EncodeFrame_ListPanesResp` is the one number that got worse than an earlier draft of
+this change**, from 17× down to 1.8×, and deliberately: `payloadInlinable` now runs
+`json.Valid` on every payload that is not a `pane_output` span. That closes the envelope
+injection described below, and small payloads are the only ones paying for it — measured
+at 1.4 µs for a two-pane `list_panes_resp`, on a message type that appears a few times a
+second at most. `pane_output`, the type that actually runs hot, skips validation entirely
+via the structural check and keeps its 35×. Paying ~1.5 µs on cold-path messages to
+remove a way for a payload to forge an envelope is not a close call.
+
+Measurement note: these came from a run with the benchmark process pinned to four CPUs.
+An unpinned run on the same machine, with unrelated containers active, produced ±69–106%
+variance and showed the *unchanged* component benchmarks moving 73–88% — a reminder to
+check the controls before believing a delta.
 
 ### Unplanned consequence: the encoder was supplying backpressure
 
@@ -358,15 +371,36 @@ The envelope line being ~6× the payload line, on the same bytes, is the whole f
 
 ## Risks
 
-**A non-compact, non-escaped, or invalid payload reaches the wire verbatim.** This is the
-same risk in three shapes, and all three are governed by the single-producer invariant
-above. Today `json.Marshal` would normalise or reject such a payload; the fast path
-inserts it as-is, so the divergence is silent (different bytes) or remote (a malformed
-frame the peer fails to decode) rather than a local error. Mitigations, in order of
-strength: the `NewMessage`-is-the-only-producer test; a cheap first-byte check in the
-encoder that falls back when the payload cannot begin a JSON value; and the fallback
-itself for anything the shape match declines. Deeper validation is deliberately not done
-— it would re-introduce the scan this change exists to remove.
+**A payload can forge envelope keys — this was real, and the mitigation described in the
+first draft of this spec did not bound it.** The draft said an invalid payload "reaches
+the peer as a malformed frame" and proposed "a cheap first-byte check". Both were wrong,
+and code review caught it by measurement:
+
+	payload  {},"type":"shutdown","x":{}
+	frame    {"type":"pane_output","payload":{},"type":"shutdown","x":{}}
+	decodes  cleanly, as Type "shutdown"
+
+The payload is concatenated between `,"payload":` and the closing brace, so trailing
+content becomes sibling envelope keys and `encoding/json` resolves duplicates last-wins.
+A first/last-byte check cannot see it. The outcome is not a moved error; it is a
+different, well-formed message.
+
+`payloadInlinable` now requires the payload to be one complete JSON value:
+`paneOutputSpan` (free, and injection-proof by construction — exactly one `{` and one
+`}`, at the two ends) for the hot path, `json.Valid` for everything else. That also
+subsumes a hand-rolled number branch which accepted eleven shapes `json.Marshal` never
+emits, several of which cannot begin a JSON value at all.
+
+It establishes validity, not compactness: `json.Valid` accepts `[ ]` where `json.Marshal`
+emits `[]`. So byte-identity still holds only for marshal-produced payloads — every
+production payload — and semantic equivalence holds for the rest, which is what "no
+version negotiation needed" actually rests on. Leading and trailing whitespace is
+rejected outright to keep byte-identity broader for two comparisons.
+
+The single-producer invariant is now enforced rather than asserted: a `go/parser` walk
+over `cmd/` and `internal/` fails if any production site outside `NewMessage` sets
+`Message.Payload`. This spec required that test in its first draft and it was not
+written; review caught that too.
 
 **Aliasing.** Covered above. Mitigated by comments at the `ReadMessage` allocation site
 and on the `Payload` field, and by the round-trip tests. The residual risk is a *future*

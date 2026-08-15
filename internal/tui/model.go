@@ -4238,6 +4238,13 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				// this pane — and the answer a parked pane never otherwise
 				// hears, since approving a prompt emits no hook.
 				pane.answerBlockedByInput()
+				// ESC is Claude's interrupt, and the one turn ending it
+				// reports NO hook for — measured, not assumed. Without this
+				// the pane goes on claiming work until SessionEnd. See
+				// interruptWorkingPane for why a keystroke is sound here.
+				if key == "esc" {
+					m.interruptWorkingPane(pane.ID)
+				}
 			}
 		}
 		return m, m.forwardInputBytes(data)

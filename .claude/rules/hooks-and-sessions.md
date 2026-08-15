@@ -148,6 +148,34 @@ Subagent edges: `hook.claude.SubagentStart` adds to the ledger (spinner on), `ho
 
 **`agent_type` is part of the ingester's coalesce key for exactly this reason** (`internal/hookevents/ingest.go` — `coalesceKey(paneID, hook_event, agent_type)`, appended only when non-empty so every other event keys as before). Coalescing is last-wins, so merging two DIFFERENT agents' starts would erase the loser's identity: its own stop would then match nothing while the winner's count never drained, wedging the spinner until `SessionEnd` — the ledger's identity guarantee only holds because the wire preserves it. A burst of the SAME agent still collapses to one emit with the burst count, which is what the count exists for. **The key's two free-form components are escaped** (`keyFieldEscaper`): `paneID` is NUL-free by `safePaneID` and stays first (so `Cancel`'s prefix match is unaffected), but `hook_event` and `agent_type` are arbitrary payload strings and JSON admits U+0000 in either — two variable fields joined by a separator either may contain is not injective, and `("SubagentStart", "\x00X")` would otherwise key identically to `("SubagentStart\x00", "X")`, coalescing them last-wins and erasing an identity. The escape is identity for every value a real producer emits. Claude Code runs subagents detached by default, so the main turn's `Stop` routinely fires while they still run: stop edges only end the spinner once the counter is drained, and the unseen mark is deferred to the drain edge (the LAST `SubagentStop` becomes the completion edge). Stop edges (→ persistent green unseen mark on the pane): `hook.claude.Stop`, `hook.claude.StopFailure`, `hook.opencode.session.idle`/`session.error`.
 
+**ESC is the third turn ending, and the only one with NO upstream event behind
+it — so the TUI synthesises one.** Measured against Claude Code 2.1.233 by
+driving a real pane over IPC: submitting a prompt spools `UserPromptSubmit`,
+interrupting the streaming response with ESC spools **nothing at all** — not
+`Stop`, not `StopFailure`, not `Notification`, still nothing 80 s later. So
+`turnActive` stayed true until `SessionEnd` and a stopped pane went on claiming
+work indefinitely (reported from a live workspace at 43 minutes and counting).
+`tui.interruptWorkingPane` feeds the synthetic type `internal.user_interrupt`
+(`tui.userInterruptEvent`) through `applyWorkTransition`, which
+`ClassifyWorkEvent` maps to a plain `WorkEventStop` — reusing the ordinary
+turn-ending edge instead of hand-rolling a second way to clear the same fields.
+It is TUI-only and never crosses IPC.
+
+Three constraints make a keystroke acceptable where one normally would not be.
+It is wired to the two **key** paths only — not paste (a pasted `0x1b` is not a
+decision to interrupt) and not `enqueueInput` (which also carries wheel notches
+and the selection handler's arrow keys), the same boundary
+`answerBlockedByInput` draws. It ends the **main turn only** and leaves the
+subagent ledger alone, because a subagent's own tool calls are dropped by the
+`agent_id` gate, so nothing could ever re-light a spinner cleared here for a
+teammate that is still running — whereas the opposite error is the wrong-on
+direction `subagentsOverflow` already accepts and `SessionEnd`/`process_exit`
+both clear. And being wrong is now **recoverable**: ESC has other uses inside
+Claude (dismissing a menu, leaving a mode), so this can close a turn that is
+still running, but the `PreToolUse` heartbeat re-lights it at the next tool
+call. Before that heartbeat existed the same heuristic would have gone dark for
+good, which is why this fix belongs after it rather than before.
+
 **`StopFailure` is the turn ending Claude reports INSTEAD of `Stop` when the API
 call fails, and leaving it unregistered stranded the spinner.** A turn killed by
 an API error emits no `Stop` at all, so `turnActive` stayed true with only

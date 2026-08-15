@@ -32,6 +32,9 @@ func TestClassifyWorkEvent(t *testing.T) {
 		{"hook.claude.SubagentStart", WorkEventSubagentStart},
 		{"hook.claude.SubagentStop", WorkEventSubagentStop},
 		{"process_exit", WorkEventAbort},
+		// Synthesised by the TUI from an ESC keypress: the one turn ending
+		// upstream emits no event for at all.
+		{"internal.user_interrupt", WorkEventStop},
 		// Deliberately unmapped: task-list bookkeeping, not execution.
 		{"hook.claude.TaskCreated", WorkEventNone},
 		{"hook.claude.TaskCompleted", WorkEventNone},

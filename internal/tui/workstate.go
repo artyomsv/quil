@@ -63,6 +63,39 @@ func workStateOnlyEvent(eventType string) bool {
 	return hookevents.IsWorkStateOnly(eventType)
 }
 
+// userInterruptEvent is the synthetic pane-event type the TUI feeds through
+// applyWorkTransition when the user presses ESC on a working pane. It is not a
+// hook event and never crosses IPC — hookevents.ClassifyWorkEvent recognises it
+// so the interrupt reuses the ordinary turn-ending edge rather than hand-rolling
+// a second way to clear the same fields.
+const userInterruptEvent = "internal.user_interrupt"
+
+// interruptWorkingPane ends the main turn of the pane the user just interrupted.
+//
+// ESC is the ONLY turn ending Claude reports nothing for. Verified by driving a
+// real pane: a prompt spools UserPromptSubmit, an ESC mid-response spools
+// nothing at all, and no later event corrects it — so a stopped pane went on
+// claiming work until SessionEnd (observed live at 43 minutes and counting).
+//
+// Wired to the KEY paths only, not to paste and not to enqueueInput. A paste
+// that happens to contain 0x1b is not a decision to interrupt, and enqueueInput
+// also carries forwarded wheel notches and the selection handler's arrow keys —
+// the same reasoning that keeps answerBlockedByInput off those paths.
+//
+// Deliberately unconditional rather than gated on pane.working: ESC on an idle
+// pane recomputes the identical state and fires no edge, so a gate would only
+// duplicate what the single derivation point already guarantees.
+//
+// The cost of being wrong is now bounded in the safe direction, which is what
+// makes a keystroke heuristic acceptable here at all. ESC has other uses inside
+// Claude (dismissing a menu, leaving a mode), so this can clear a turn that is
+// still running — but the PreToolUse heartbeat re-lights it at the next tool
+// call, within workHeartbeatInterval. Before that heartbeat existed there was
+// no such recovery and this would have been a spinner that went dark for good.
+func (m *Model) interruptWorkingPane(paneID string) {
+	m.applyWorkTransition(paneID, userInterruptEvent, nil)
+}
+
 // findPaneAndTab locates a pane by ID across EVERY project and reports the
 // owning project and the tab's index within it.
 //

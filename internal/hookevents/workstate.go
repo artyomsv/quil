@@ -208,6 +208,18 @@ func ClassifyWorkEvent(eventType string) WorkEventKind {
 		return WorkEventPark
 	case "hook.claude.Notification":
 		return WorkEventNotify
+	// The user pressed ESC, which is Claude's interrupt. This is the ONLY
+	// turn-ending edge with no upstream event behind it: measured against
+	// Claude Code 2.1.233 by interrupting a streaming response on a real pane,
+	// an ESC spools nothing at all — not Stop, not StopFailure, not
+	// Notification — so `turnActive` stayed true until SessionEnd and a
+	// stopped pane went on reporting work indefinitely (observed: 43 minutes).
+	// The TUI synthesises it from the keystroke instead (see
+	// tui.userInterruptEvent); it is not a hook type and never crosses IPC.
+	//
+	// A plain Stop, so it ends the TURN and leaves the subagent ledger alone.
+	case "internal.user_interrupt":
+		return WorkEventStop
 	case "process_exit":
 		return WorkEventAbort
 	}

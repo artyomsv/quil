@@ -37,6 +37,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   indicator like any other, and reports the reason it failed to the
   notification sidebar.
 
+- **Stopping an agent with `esc` now clears the in-progress marker.** A pane you
+  interrupted kept showing as working — in one reported case for 43 minutes
+  after it had been stopped — and nothing short of restarting the pane or the
+  session cleared it. Claude announces the end of a turn in several ways, but an
+  interrupt is not one of them: pressing `esc` produces no announcement at all,
+  so Quil never learned the turn was over. `esc` on a working pane is now
+  treated as the end of that turn. Background teammates are left alone, since
+  they keep running and report their own completion.
+
 - **Work-indicator activity no longer crowds real notifications out of the
   sidebar.** The signals that drive the indicator were being filed as
   notifications by the daemon even though the sidebar never showed them. The

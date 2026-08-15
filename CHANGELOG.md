@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **The work indicator no longer goes dark while an agent is still working.**
+  A pane whose agent picked its work back up on its own — most visibly an
+  orchestrator resuming after a teammate reported back — showed nothing at all,
+  often for many minutes, while it read files, edited and ran commands.
+
+  Quil learns that a turn started from Claude, and Claude only announced one
+  when a human began it: you typed a prompt, or you answered a prompt it had
+  shown you. A turn the agent starts by itself has neither. The teammate's
+  result arrives as a plain conversation entry, so the pane simply went quiet
+  while the work continued. One measured pane reported three finished turns
+  against a single started one, with a fourteen-minute stretch of roughly sixty
+  tool calls showing no indicator.
+
+  A tool call now counts as proof the pane is working, whoever started the
+  turn. To keep that cheap it is recorded at most once every fifteen seconds
+  per pane, and only while the pane has otherwise been silent — an ordinary
+  turn you began yourself is already accounted for and adds nothing. Tool calls
+  made by background teammates are deliberately not counted: those panes are
+  already tracked separately, and counting them would leave the indicator stuck
+  on after the main turn ended.
+
+- **A turn killed by an API error no longer leaves the indicator running
+  forever.** Claude reports that ending differently from a normal one, and Quil
+  was not listening for it, so the pane never learned the turn was over. The
+  indicator kept claiming work that had already stopped, and nothing cleared it
+  short of restarting the pane or the session. Such a turn now ends the
+  indicator like any other, and reports the reason it failed to the
+  notification sidebar.
+
 ## [1.59.2] - 2026-08-15
 
 ### Changed

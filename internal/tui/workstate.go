@@ -451,11 +451,25 @@ func (m *Model) applyWorkTransition(paneID, eventType string, data map[string]st
 		// Rising edge: seed the pane spinner with the shared frame so the
 		// tab and pane glyphs are in sync from the first render, and clear
 		// any stale mark — the spinner supersedes the green unseen cue.
-		// (working ⇒ !unseen is an invariant: the mark is set only on the
-		// falling edge below, so a start on an already-working pane has
-		// nothing to clear.)
+		//
+		// The clear is an ACKNOWLEDGEMENT, and only a human can give one. It
+		// was unconditional while every start edge implied one: UserPromptSubmit
+		// is a typed prompt and PostToolUse is matched to a prompt the user has
+		// just answered, so in both cases they had demonstrably just looked at
+		// the pane. A PreToolUse heartbeat carries no such implication — the
+		// agent simply resumed on its own — and clearing there let the AGENT
+		// delete the previous turn's completion mark and, via
+		// sweepOutstandingToasts, withdraw the desktop toast raised with it.
+		// Measured on the trace this branch exists for: mark set at 18:19:57,
+		// erased at 18:20:53, with no human having seen either.
+		//
+		// So a heartbeat lights the spinner and leaves the mark alone. The two
+		// then coexist, which is not a broken invariant but an accurate report:
+		// this pane is working AND it finished something you have not seen.
 		pane.workFrame = m.workSpinnerFrame
-		pane.unseen = false
+		if !hookevents.IsWorkHeartbeat(eventType) {
+			pane.unseen = false
+		}
 	case !pane.working && wasWorking && !abort:
 		// Falling edge on a genuine completion — turn over AND subagents
 		// drained, whichever edge landed last. Mark unless the user is

@@ -195,6 +195,14 @@ func dispatchHookEvent(env HookEnv, in claudeStdin, nowMs int64) error {
 		if in.AgentID != "" {
 			return nil
 		}
+		// Off-mode is checked HERE as well as inside spoolEvent, which is not
+		// redundant on this path: spoolEvent returns before writing, so the
+		// spool never exists, so the throttle below would stat a missing file
+		// once per tool call forever. It also keeps the off-mode contract local
+		// to the branch that runs most often.
+		if env.Mode == "off" {
+			return nil
+		}
 		if spoolIsFresh(env, nowMs) {
 			return nil
 		}
@@ -319,10 +327,39 @@ func notifyKindData(message string) map[string]string {
 	return map[string]string{hookevents.DataNotifyKind: hookevents.NotifyKindIdle}
 }
 
+// spoolDir and spoolPath are the ONE definition of where a pane's spool lives.
+// They exist because the reader (spoolIsFresh) and the writer (spoolEvent) built
+// the path independently, and a drift between them fails silently in the worst
+// direction: the throttle would stat a file nobody writes, find it missing, read
+// "never audible", and stop throttling — with no test and no log line to say so.
+func spoolDir(env HookEnv) string {
+	return filepath.Join(env.QuilDir, "events")
+}
+
+func spoolPath(env HookEnv) string {
+	return filepath.Join(spoolDir(env), env.PaneID+".jsonl")
+}
+
 // workHeartbeatInterval is how long a pane may stay silent before a tool call
-// is worth spooling as proof of work. It bounds how late the indicator can
-// appear on a turn Quil never saw start; every tool call in between costs a
-// single stat and no line.
+// is worth spooling as proof of work.
+//
+// It bounds the indicator's error in BOTH directions, and the second one is
+// easy to miss. Late ON: a turn Quil never saw start goes unindicated until the
+// first tool call past a quiet window. Late OFF: while background subagents are
+// draining more often than this interval, the main agent's own heartbeats are
+// all throttled, so when the LAST subagent drains the falling edge fires and the
+// pane briefly reports a completed turn while the main agent is demonstrably
+// working. Both are bounded by this value, and the second is strictly better
+// than the pre-existing behaviour, where that false completion stood forever.
+//
+// The cost this interval bounds is the SPOOL LINE, not the hook invocation.
+// PreToolUse is registered match-all and Claude blocks on the hook before every
+// tool call, so the process spawn is paid per tool call regardless of the
+// throttle — measured on a Windows host at ~81 ms end to end (~25 ms over a bare
+// process spawn), i.e. roughly 5 s per turn at the ~60 tool calls this feature's
+// own trace recorded. That is the real price of closing the blind spot, and
+// there is no cheaper instrument: upstream has no turn-start hook, and narrowing
+// the matcher restores the gap.
 const workHeartbeatInterval = 15 * time.Second
 
 // spoolIsFresh reports whether Quil has heard from this pane within
@@ -341,7 +378,7 @@ const workHeartbeatInterval = 15 * time.Second
 // surplus line costs one sidebar-suppressed event; a missing one costs the
 // user the only cue that work is happening.
 func spoolIsFresh(env HookEnv, nowMs int64) bool {
-	fi, err := os.Stat(filepath.Join(env.QuilDir, "events", env.PaneID+".jsonl"))
+	fi, err := os.Stat(spoolPath(env))
 	if err != nil {
 		return false
 	}
@@ -367,7 +404,7 @@ func spoolEvent(env HookEnv, nowMs int64, hookEvent, sessionID, title, sev strin
 	if env.Mode == "off" {
 		return nil
 	}
-	eventsDir := filepath.Join(env.QuilDir, "events")
+	eventsDir := spoolDir(env)
 	if err := os.MkdirAll(eventsDir, 0o700); err != nil {
 		hookLog(env.QuilDir, env.PaneID, "mkdir events dir failed: "+err.Error())
 		return err
@@ -389,8 +426,7 @@ func spoolEvent(env HookEnv, nowMs int64, hookEvent, sessionID, title, sev strin
 		hookLog(env.QuilDir, env.PaneID, "marshal payload failed: "+err.Error())
 		return err
 	}
-	spoolFile := filepath.Join(eventsDir, env.PaneID+".jsonl")
-	f, err := os.OpenFile(spoolFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	f, err := os.OpenFile(spoolPath(env), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		hookLog(env.QuilDir, env.PaneID, "open spool failed: "+err.Error())
 		return err

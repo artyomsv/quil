@@ -107,6 +107,26 @@ func IsWorkStateOnly(eventType string) bool {
 	return false
 }
 
+// IsWorkHeartbeat reports whether a start edge came from the agent carrying on
+// by itself rather than from a human acting on the pane.
+//
+// The distinction exists because the consumer's rising edge clears the pane's
+// unseen mark, and that was only ever sound while every start implied a human:
+// UserPromptSubmit is a typed prompt and PostToolUse is matched to a prompt the
+// user has just answered, so in both cases the person had demonstrably just
+// looked at the pane. PreToolUse carries no such implication — nobody
+// acknowledged anything, the agent simply resumed — so clearing there lets an
+// agent delete the completion mark, and withdraw the desktop toast raised with
+// it, for a turn the user never saw.
+//
+// It is deliberately NOT the same predicate as IsWorkStateOnly, which also
+// holds for PostToolUse: that one asks "should this become a card", this one
+// asks "did a human cause this". Collapsing them would re-introduce the bug for
+// the answered-prompt case, where clearing the mark is exactly right.
+func IsWorkHeartbeat(eventType string) bool {
+	return eventType == "hook.claude.PreToolUse"
+}
+
 // ClassifyWorkEvent maps a composed PaneEvent Type to a work-state transition.
 func ClassifyWorkEvent(eventType string) WorkEventKind {
 	switch eventType {

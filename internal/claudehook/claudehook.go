@@ -160,7 +160,9 @@ var forwardedHookEvents = []string{
 // the TUI uses to re-arm the work spinner after a park (the park itself comes
 // from the match-all PermissionRequest/Notification events above). Diagnostic
 // hook logging confirmed PreToolUse fires *before* the prompt, so only
-// PostToolUse is registered here.
+// PostToolUse can serve as the ANSWER edge — that is what this entry is about,
+// and it is unaffected by PreToolUse also being registered match-all above for
+// an unrelated purpose (proof that an autonomously resumed turn is running).
 var matchedHookEvents = []struct{ Name, Matcher string }{
 	{Name: "PostToolUse", Matcher: promptToolMatcher},
 }

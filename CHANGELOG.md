@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.59.2] - 2026-08-15
+
 ### Changed
 - **Panes that produce a lot of output cost the daemon far less CPU.** Every
   message between the TUI and the daemon was being encoded twice over: the

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.59.3] - 2026-08-15
+
 ### Fixed
 - **The work indicator no longer goes dark while an agent is still working.**
   A pane whose agent picked its work back up on its own — most visibly an

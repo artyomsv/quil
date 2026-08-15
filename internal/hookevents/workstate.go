@@ -106,6 +106,19 @@ func ClassifyWorkEvent(eventType string) WorkEventKind {
 	case "hook.claude.Stop",
 		"hook.opencode.session.idle", "hook.opencode.session.error":
 		return WorkEventStop
+	// A turn killed by an API error ends with StopFailure and NEVER a Stop, so
+	// leaving it unmapped left turnActive true with only SessionEnd or
+	// process_exit able to clear it — a spinner claiming work that had already
+	// stopped, for as long as the pane stayed open. Same missing-edge class as
+	// the PreToolUse case below, opposite direction: that one loses the
+	// indicator, this one strands it.
+	//
+	// Plain WorkEventStop, not StopFinal: an API error ends the TURN, and says
+	// nothing about background subagents, which are separate processes the
+	// ledger tracks on their own edges. Clearing the ledger here would drop
+	// agents that are still running.
+	case "hook.claude.StopFailure":
+		return WorkEventStop
 	// SessionEnd is terminal for the whole Claude session (/clear, /logout,
 	// exit): no subagent of it can still be running, so the TUI also drops
 	// any outstanding-subagent count instead of letting a lost SubagentStop

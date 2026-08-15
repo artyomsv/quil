@@ -20,6 +20,9 @@ func TestClassifyWorkEvent(t *testing.T) {
 		// it — see the PreToolUse case in ClassifyWorkEvent.
 		{"hook.claude.PreToolUse", WorkEventStart},
 		{"hook.claude.Stop", WorkEventStop},
+		// A turn killed by an API error ends without a Stop. Unmapped, it left
+		// turnActive true with nothing but SessionEnd/process_exit to clear it.
+		{"hook.claude.StopFailure", WorkEventStop},
 		{"hook.claude.SessionEnd", WorkEventStopFinal},
 		{"hook.opencode.session.idle", WorkEventStop},
 		{"hook.opencode.session.error", WorkEventStop},

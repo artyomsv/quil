@@ -614,6 +614,35 @@ func TestRunHook_PreToolUse_FirstEventOnAPaneIsNeverThrottled(t *testing.T) {
 	}
 }
 
+// TestRunHook_StopFailure_SpoolsATurnEndingEdge covers the turn ending that
+// Claude reports instead of Stop when the API call fails. Unspooled, the TUI
+// never learned the turn was over.
+func TestRunHook_StopFailure_SpoolsATurnEndingEdge(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	env := HookEnv{PaneID: "pane-sf", QuilDir: dir, Mode: "default"}
+	stdin := `{"hook_event_name":"StopFailure","session_id":"11111111-2222-3333-4444-555555555555","reason":"API Error: 500"}`
+
+	if err := RunHook(strings.NewReader(stdin), env, 1700000000000); err != nil {
+		t.Fatalf("RunHook: %v", err)
+	}
+	got := readSpool(t, dir, "pane-sf")
+	if len(got) != 1 {
+		t.Fatalf("spool lines = %d, want 1", len(got))
+	}
+	if got[0].HookEvent != "StopFailure" {
+		t.Errorf("hook_event = %q, want StopFailure", got[0].HookEvent)
+	}
+	// The reason is what makes the card actionable — a bare "turn failed"
+	// leaves the user to guess between a network blip and a wedged pane.
+	if !strings.Contains(got[0].Title, "API Error: 500") {
+		t.Errorf("title = %q, want it to carry the reason", got[0].Title)
+	}
+	if got[0].Severity != hookevents.SeverityWarning {
+		t.Errorf("severity = %q, want warning", got[0].Severity)
+	}
+}
+
 // TestRunHook_PreToolUse_FromASubagentIsDropped keeps the heartbeat a
 // statement about the MAIN turn, which is the only thing turnActive means.
 // Hooks fire inside subagents too, and a subagent's tool call carries an

@@ -132,6 +132,9 @@ var forwardedHookEvents = []string{
 	"Notification",
 	"PermissionRequest",
 	"Stop",
+	// The turn ending Claude reports INSTEAD of Stop when the API call fails.
+	// Without it a failed turn produced no turn-ending edge at all.
+	"StopFailure",
 	"PreCompact",
 	"PostCompact",
 	"SubagentStart",

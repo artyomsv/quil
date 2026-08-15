@@ -160,6 +160,17 @@ func dispatchHookEvent(env HookEnv, in claudeStdin, nowMs int64) error {
 		return spoolEvent(env, nowMs, "PostToolUse", in.SessionID,
 			truncate("Resumed after "+in.ToolName, hookevents.MaxTitleBytes), hookevents.SeverityInfo,
 			map[string]string{"tool": truncate(in.ToolName, hookevents.MaxDataValueBytes)})
+	case "StopFailure":
+		// The turn ending Claude reports instead of Stop when the API call
+		// fails. Carries the reason where Stop carries model usage: there is no
+		// completed assistant turn to read usage from, and the reason is what
+		// separates a network blip from a pane worth restarting.
+		title := "Turn failed"
+		if in.Reason != "" {
+			title = truncate("Turn failed: "+in.Reason, hookevents.MaxTitleBytes)
+		}
+		return spoolEvent(env, nowMs, "StopFailure", in.SessionID, title, hookevents.SeverityWarning,
+			map[string]string{"reason": truncate(in.Reason, hookevents.MaxDataValueBytes)})
 	case "PreToolUse":
 		// Work-spinner START edge for a turn no user prompt began. See the
 		// PreToolUse case in hookevents.ClassifyWorkEvent for the trace.

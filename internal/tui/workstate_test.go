@@ -30,6 +30,7 @@ func TestWorkEventKind(t *testing.T) {
 		{"hook.claude.PostToolUse", workStart}, // resume after a prompt is answered
 		{"hook.claude.PreToolUse", workStart},  // a tool call proves the agent is working
 		{"hook.claude.Stop", workStop},
+		{"hook.claude.StopFailure", workStop}, // turn died on an API error
 		// SessionEnd is terminal: no subagent can outlive the session, so it
 		// also clears any outstanding-subagent count (WorkEventStopFinal).
 		{"hook.claude.SessionEnd", workStopFinal},
@@ -679,6 +680,33 @@ func TestApplyWorkTransition_StopWithOutstandingSubagents_KeepsSpinner(t *testin
 	}
 	if !pane.unseen {
 		t.Error("draining the last subagent after the turn ended must mark the background pane unseen")
+	}
+}
+
+// TestApplyWorkTransition_StopFailureEndsTheTurn covers the opposite failure
+// direction to the PreToolUse gap: a turn that dies on an API error emits
+// StopFailure and never a Stop, so with the event unmapped turnActive stayed
+// true and the spinner claimed work that had already stopped. Nothing short of
+// SessionEnd or process_exit could clear it — neither of which a user reaches
+// without restarting the pane or the session.
+func TestApplyWorkTransition_StopFailureEndsTheTurn(t *testing.T) {
+	t.Parallel()
+	m := modelWithBackgroundTab()
+	pane := m.curTabs()[1].Root.Leaves()[0]
+
+	m.applyWorkTransition("p2", "hook.claude.UserPromptSubmit", nil)
+	if !pane.working {
+		t.Fatal("setup: the turn must be running before it can fail")
+	}
+
+	m.applyWorkTransition("p2", "hook.claude.StopFailure", nil)
+	if pane.working {
+		t.Error("a turn that died on an API error must not keep the spinner running")
+	}
+	// Marked like any other completion the user was not watching: the turn is
+	// over and its outcome is something they need to come back to.
+	if !pane.unseen {
+		t.Error("a failed turn on a background tab must still leave a mark")
 	}
 }
 

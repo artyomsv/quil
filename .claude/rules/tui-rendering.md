@@ -8,8 +8,11 @@ paths:
   - "**/internal/tui/compose.go"
   - "**/internal/tui/selection.go"
   - "**/internal/tui/keymatch.go"
-  - "**/internal/tui/keyspecs.go"
+  - "**/internal/tui/keyspecs*.go"
+  - "**/internal/tui/keydispatch*.go"
+  - "**/internal/tui/sequence*.go"
   - "**/internal/keymap/**"
+  - "**/internal/config/bindings*.go"
   - "**/internal/tui/oscfilter.go"
   - "**/internal/tui/splitdrag*.go"
   - "**/internal/clipboard/**"
@@ -27,9 +30,9 @@ tabs show 1-based index prefix (`1:Shell`, `2:Build`) matching Alt+1-9 shortcuts
 
 ### The action registry (`internal/keymap`)
 
-keys resolve to ACTIONS, not to config strings. `internal/keymap` (stdlib-only, so it is testable without a `Model` or a `QUIL_HOME`) owns: `ParseChord`/`ParseSpec` (canonical chords, `,`-separated alternatives, space-separated multi-step sequences), the `registry` of `Action{ID, Label, Group, Tier, Order, Default, Hidden}` in `action.go`, and `Build(specs)` → `(*Keymap, []Conflict)`. `internal/tui/keyspecs.go` is the ONE place legacy `[keybindings]` field names map onto action IDs (`keySpecsFromConfig`); Stage 3 replaces its body with a `bindings.toml` read and nothing else in the TUI changes.
+keys resolve to ACTIONS, not to config strings. `internal/keymap` owns: `ParseChord`/`ParseSpec` (canonical chords, `,`-separated alternatives, space-separated multi-step sequences), the `registry` of `Action{ID, Label, Group, Tier, Order, Default, Hidden}` in `action.go`, and `Build(specs)` → `(*Keymap, []Conflict)`. It imports **stdlib plus `BurntSushi/toml`** (for `preset.go`'s embedded presets) and nothing else — no `config`, no `tui`, and no knowledge of where files live, which is what keeps it testable without a `Model` and without a `QUIL_HOME`. `config.KeySpecsFromConfig` maps the legacy `[keybindings]` field names onto action IDs; `internal/config/bindings.go` owns every `QuilDir()`-derived path.
 
-**`Tier` is not cosmetic.** `handleKey` (`internal/tui/model.go`) does an early-tier lookup, then `tryPluginRawKey`, then `isSelectionExtendKey`, then a late-tier lookup, then the `ctrl+alt+v`/`f8` paste aliases, then the reserved `ctrl+n`/`f1`/`alt+1..9` switch. So an early action beats a plugin's `raw_keys` claim and a late one loses to it; moving an action between tiers silently changes that. `TestActions_TierSplitMatchesLegacySwitches` pins the split against the pre-registry switch order.
+**`Tier` is not cosmetic.** `handleKey` (`internal/tui/model.go`) does an early-tier lookup, then `tryPluginRawKey`, then `isSelectionExtendKey`, then a late-tier lookup, then the `ctrl+alt+v`/`f8` paste aliases, then the reserved `ctrl+n`/`f1` switch (`alt+1..9` left that switch when they became `tab.switch_1..9` actions). So an early action beats a plugin's `raw_keys` claim and a late one loses to it; moving an action between tiers silently changes that. `TestActions_TierSplitMatchesLegacySwitches` pins the split against the pre-registry switch order.
 
 **Sequences are two flat maps, not a trie.** `Keymap.seqs` maps a full canonical sequence (`"ctrl+b c"`) to its action; `Keymap.partial` maps every PROPER prefix to one owning action. `MatchSeq(pending)` is two map hits — and `partial` is consulted on EVERY keypress, bound or not, so O(1) is what keeps the machine free in the input path. A trie earns nothing at ~54 actions.
 

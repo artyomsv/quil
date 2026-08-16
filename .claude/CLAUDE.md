@@ -29,7 +29,7 @@ Client-daemon model:
 - `internal/plugin/` — Pane plugin system (registry, built-ins, TOML loading, scraper)
 - `internal/gitworktree/` — git worktree listing, creation + removal, and the on-demand `git status` count the close dialog warns with (the repository WRITES; kept apart from the read-only `gitinfo`, which a ticker runs)
 - `internal/clipboard/` — Platform-native clipboard read/write (Win32 API, pbpaste/pbcopy, xclip/xsel)
-- `internal/keymap/` — Keybinding action registry: canonical chords, the action table with its dispatch `Tier`, and `Build` (config specs → lookup + conflict list). Stdlib only
+- `internal/keymap/` — Keybinding action registry: canonical chords, the action table with its dispatch `Tier`, multi-chord sequence matching, layered resolution (defaults → preset → user overrides), and the embedded presets. Stdlib + `BurntSushi/toml` only — no `config`, no `tui`, and no `QuilDir()`, so the whole package tests without a `Model` or a `QUIL_HOME`. Path-derived reads live in `internal/config/bindings.go` (`bindings.toml`, migration off the legacy `[keybindings]` table)
 - `internal/notify/` — Windows desktop toasts + `quil://` click-to-route activation. Split so every file with logic is platform-neutral (URI codec, toast XML, variant selection) and the `//go:build windows` files hold syscalls only — CI is Linux, so anything behind that tag is never compiled by `dev.sh test`. Raw COM/WinRT interop (no CGo, no new dependency), following `internal/clipboard`'s `NewProc` idiom
 - `internal/tui/` — Bubble Tea model, tabs, panes, layout tree, styles, text selection, notification sidebar
 

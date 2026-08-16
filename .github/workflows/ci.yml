@@ -144,7 +144,7 @@ jobs:
           # gate whose reason you have to go digging for gets guessed at.
           if ! VALIDATION=$(sh scripts/promote-changelog.sh --validate 2>&1); then
             echo "$VALIDATION"
-            echo "::error file=changelog.d/::Invalid changelog fragment — see the log for which file and why. A fragment must be a regular file (not a symlink) named changelog.d/<type>-<slug>.md, must not be empty, and must not contain a '## [' heading. See changelog.d/README.md."
+            echo "::error file=changelog.d/::Invalid changelog fragment — see the log for which file and why. A fragment must be a regular file (not a symlink) named changelog.d/<type>-<slug>.md, must not be empty, must carry a one-line 'headline:' front-matter block (except none-* and internal-*), and must not contain a '## [' heading. See changelog.d/README.md."
             exit 1
           fi
           echo "$VALIDATION"

@@ -20,6 +20,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/artyomsv/quil/internal/changelog"
 	"github.com/artyomsv/quil/internal/claudesessions"
 	"github.com/artyomsv/quil/internal/clipboard"
 	"github.com/artyomsv/quil/internal/config"
@@ -323,6 +324,7 @@ const (
 	dialogProjectNew    // Alt+Shift+N: create a project (Task 13)
 	dialogProjectRename // sidebar context menu: rename a project (Task 13)
 	dialogProjectPick   // Alt+P: fuzzy project picker (Task 14)
+	dialogWhatsNew      // post-upgrade highlights; also F1 → What's New
 )
 
 // tuiClient is the subset of *ipc.Client the TUI uses on the Model. Defined
@@ -634,6 +636,13 @@ type Model struct {
 	configChanged    bool        // true when config needs saving on exit
 	disclaimerTipIdx int         // random tip index for disclaimer dialog
 
+	// whatsNew holds the release window the What's New dialog renders. Nil
+	// when the dialog has never been opened this session.
+	whatsNew         *changelog.Window
+	whatsNewExpanded bool         // fixes list expanded rather than collapsed to a count
+	whatsNewScroll   int          // first rendered row, when the body overflows
+	whatsNewReturn   dialogScreen // dialog to restore on dismissal (About, or none)
+
 	// termFocused tracks whether the terminal window has focus, from
 	// tea.FocusMsg/BlurMsg (DEC 1004).
 	//
@@ -892,7 +901,14 @@ func (m *Model) SetRecentCWDs(list []string) { m.recentCWDs = list }
 // Model rather than installed afterwards: tea.NewProgram takes the Model BY
 // VALUE, so anything that reads back through a closure over main's copy would be
 // frozen at startup.
-func NewModel(client Client, cfg config.Config, version string, registry *plugin.Registry, stalePlugins []plugin.StalePlugin) Model {
+// whatsNew is the post-upgrade window, resolved by the caller via
+// ResolveWhatsNew and passed in rather than computed here — that resolution
+// WRITES the last-run marker, and no constructor may write to $QUIL_HOME: a
+// test building a Model without setting it would clobber the developer's real
+// ~/.quil, invisibly, because dev.sh test runs with a throwaway /root. (This
+// function still READS there via LoadInstances and LoadRecentCWDs; the write is
+// what had to move.) Nil when there is nothing to show.
+func NewModel(client Client, cfg config.Config, version string, registry *plugin.Registry, stalePlugins []plugin.StalePlugin, whatsNew *changelog.Window) Model {
 	m := Model{
 		client:  client,
 		cfg:     cfg,
@@ -916,12 +932,20 @@ func NewModel(client Client, cfg config.Config, version string, registry *plugin
 		inputDone:        make(chan struct{}),
 		inputIdle:        make(chan struct{}),
 	}
-	// Migration dialog takes priority over the disclaimer — it blocks
-	// startup until all stale plugins are resolved. Show disclaimer only
-	// when no migration is pending.
-	if len(stalePlugins) == 0 && cfg.UI.ShowDisclaimer && len(disclaimerTips) > 0 {
-		m.dialog = dialogDisclaimer
-		m.disclaimerTipIdx = rand.Intn(len(disclaimerTips))
+	// Startup dialog priority: migration > what's-new > update-notice >
+	// disclaimer. Migration blocks startup until every stale plugin is
+	// resolved. What's-new outranks the disclaimer because it is specific to
+	// this launch; the disclaimer reappears next time, as it always has. The
+	// update notice is decided later, on the first broadcast, and its own guard
+	// already yields to any dialog that is already open — returning BEFORE it
+	// saves its marker, so the offer is not lost.
+	if len(stalePlugins) == 0 {
+		if whatsNew != nil {
+			m.openWhatsNew(*whatsNew, dialogNone)
+		} else if cfg.UI.ShowDisclaimer && len(disclaimerTips) > 0 {
+			m.dialog = dialogDisclaimer
+			m.disclaimerTipIdx = rand.Intn(len(disclaimerTips))
+		}
 	}
 	m.initKeymap()
 	return m
@@ -1128,6 +1152,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.lastWidth = msg.Width
 		m.lastHeight = msg.Height
 		m.resizeSeq++
+
+		// A taller terminal shows more rows, which lowers the What's New
+		// dialog's scroll ceiling. The renderer clamps its own copy, so
+		// nothing draws wrong — but the STORED offset would sit above the new
+		// limit and cost one dead key press before the view moved.
+		if m.dialog == dialogWhatsNew {
+			m.clampWhatsNewScroll()
+		}
 
 		// First resize: apply immediately for initial attach
 		if !m.sized {

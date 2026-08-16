@@ -349,7 +349,15 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add VERSION CHANGELOG.md site/src/data/seo.ts
+          # internal/changelog/highlights.txt is written by the promote step and
+          # go:embed'ed into the binary. It is NOT covered by the path-scoped
+          # `git add -A -- changelog.d` below, so without naming it here every
+          # release would write its records into the workspace and discard them:
+          # the tagged commit the goreleaser job checks out would embed a file
+          # that never grows, and the shipped binary would carry no highlights
+          # at all. No test can catch that — this job's own `go test` runs
+          # against the workspace copy, which IS updated.
+          git add VERSION CHANGELOG.md site/src/data/seo.ts internal/changelog/highlights.txt
           # -A stages the DELETIONS of the fragments the promote step consumed.
           # A plain `git add changelog.d` records nothing for a removed file,
           # so the fragments would survive on master and be re-promoted into

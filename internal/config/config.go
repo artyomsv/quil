@@ -776,3 +776,12 @@ func UpdateStatePath() string {
 func UpdateNotifiedPath() string {
 	return filepath.Join(UpdateDir(), "notified.json")
 }
+
+// LastRunPath is the TUI-owned marker recording the version that last ran on
+// this machine, which is what the post-upgrade What's New dialog compares
+// against. Distinct from UpdateNotifiedPath, which records a version the user
+// was TOLD ABOUT: conflating them would let dismissing an update offer suppress
+// the what's-new for a version that was never installed.
+func LastRunPath() string {
+	return filepath.Join(UpdateDir(), "lastrun.json")
+}

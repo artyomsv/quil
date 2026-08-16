@@ -14,6 +14,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/artyomsv/quil/internal/changelog"
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/ipc"
 	"github.com/artyomsv/quil/internal/logger"
@@ -559,7 +560,21 @@ func launchTUI() {
 	// back through main's copy would be frozen at startup and would route every
 	// unstamped send to whichever daemon happened to be active at launch.
 	router := tui.NewRouter(conns)
-	model := tui.NewModel(router, cfg, version, reg, stalePlugins)
+	// Resolved HERE rather than inside NewModel, because it WRITES the last-run
+	// marker and the constructor must stay free of disk I/O — ~46 tests build a
+	// Model without setting QUIL_HOME, and dev.sh test runs with a throwaway
+	// /root, so such a write would stay green in Docker and clobber the real
+	// ~/.quil on the host.
+	//
+	// Guarded on the migration for the same reason the marker exists: resolving
+	// records this version as seen, so doing it while the blocking migration
+	// dialog is going to suppress the notice would consume the upgrade's
+	// highlights and never show them to anyone.
+	var whatsNew *changelog.Window
+	if len(stalePlugins) == 0 {
+		whatsNew = tui.ResolveWhatsNew(version)
+	}
+	model := tui.NewModel(router, cfg, version, reg, stalePlugins, whatsNew)
 	// Seed a row for every configured destination that did not connect. Without
 	// this the host simply vanishes from the sidebar, which reads as Quil having
 	// deleted the user's projects — and after a client auto-update it happens on

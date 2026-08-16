@@ -21,12 +21,13 @@ const (
 	ConflictMalformed
 	// ConflictUnknownAction: a spec named an ID that is not registered.
 	ConflictUnknownAction
-	// ConflictUnsupportedSequence: a multi-step sequence ("ctrl+b c"). It
-	// parses, and Build keeps it in bindings so Stage 2's prefix machine can
-	// pick it up, but nothing dispatches it today. Reported because Display
-	// renders it in F1 exactly like a working binding — accepting the syntax
-	// ahead of the state machine is fine, advertising it as working is not.
-	ConflictUnsupportedSequence
+	// ConflictShadowed: a chord or sequence is a strict prefix of a longer
+	// sequence, so pressing it always arms the prefix machine and it can never
+	// fire on its own. Within one layer the SHORTER binding is refused —
+	// length is a safe tie-break there only because both sides tie on layer.
+	// The cross-layer rule is by layer instead, and deliberately so: a user
+	// override must be able to reclaim the prefix key as a plain chord.
+	ConflictShadowed
 )
 
 func (k ConflictKind) String() string {
@@ -41,8 +42,8 @@ func (k ConflictKind) String() string {
 		return "unreadable binding"
 	case ConflictUnknownAction:
 		return "unknown action"
-	case ConflictUnsupportedSequence:
-		return "sequence not supported yet"
+	case ConflictShadowed:
+		return "shadowed by a longer sequence"
 	}
 	return "unknown conflict"
 }
@@ -84,8 +85,6 @@ func (c Conflict) String() string {
 		// common failure there is — and "made.up is not a known action" does
 		// not say which line of the file to go and look at.
 		return fmt.Sprintf("%s: %q → %q is not a known action; ignored", c.Kind, c.Key, c.Loser)
-	case ConflictUnsupportedSequence:
-		return fmt.Sprintf("%s: %q → %s never fires", c.Kind, c.Key, c.Loser)
 	}
 	return fmt.Sprintf("%s: %q → %s wins, %s never fires", c.Kind, c.Key, c.Winner, c.Loser)
 }

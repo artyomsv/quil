@@ -38,10 +38,19 @@ FRAGMENT_DIR_REL="${CHANGELOG_FRAGMENT_DIR_REL:-changelog.d}"
 FRAGMENT_DIR="${CHANGELOG_FRAGMENT_DIR:-$PROJECT_DIR/$FRAGMENT_DIR_REL}"
 CHANGELOG="${CHANGELOG_FILE:-$PROJECT_DIR/CHANGELOG.md}"
 
+# The line-oriented data file internal/changelog embeds. Overridable so
+# scripts/test-promote-changelog.sh can drive this against a throwaway tree —
+# without that override a test run would rewrite the real checkout's copy.
+HIGHLIGHTS="${CHANGELOG_HIGHLIGHTS_FILE:-$PROJECT_DIR/internal/changelog/highlights.txt}"
+
 # Keep a Changelog's section order, plus `internal` (already used in
 # CHANGELOG.md) and `none` (the no-user-facing-changes sentinel, which renders
 # no section at all). Render order is this order, NOT filename order.
 FRAGMENT_TYPES='added changed deprecated removed fixed security internal'
+
+# Types that reach the post-upgrade dialog. `internal` and `none` are absent
+# deliberately: neither is addressed to users.
+HIGHLIGHT_TYPES='added changed deprecated removed fixed security'
 
 # The slug must start alphanumeric so `fixed--x.md` and `fixed-.md` are refused
 # rather than silently producing an odd-looking but valid-ish name.
@@ -69,6 +78,28 @@ section_heading() {
 
 is_fragment_name() {
   printf '%s\n' "$1" | grep -Eq "$NAME_RE"
+}
+
+# The one-letter record type used in highlights.txt. One letter per fragment
+# type, so the data file is lossless and the TUI decides its own grouping.
+type_letter() {
+  case "$1" in
+    added)      printf 'A' ;;
+    changed)    printf 'C' ;;
+    deprecated) printf 'D' ;;
+    removed)    printf 'R' ;;
+    fixed)      printf 'F' ;;
+    security)   printf 'S' ;;
+    *)          die "no highlight letter for type: $1" ;;
+  esac
+}
+
+# True when highlights.txt already records $1. Checked from check(), i.e.
+# BEFORE CHANGELOG.md is rewritten: a refusal that fired mid-promote would
+# leave a duplicated `## [x.y.z]` section behind in the file it was protecting.
+highlights_have_version() {
+  [ -f "$HIGHLIGHTS" ] || return 1
+  grep -q "^V $1 " "$HIGHLIGHTS"
 }
 
 # Strip leading and trailing blank lines. Fragment authors should not have to
@@ -304,6 +335,44 @@ fragments_of_type() {
   done | LC_ALL=C sort
 }
 
+# Prepend this release's records to highlights.txt, the file internal/changelog
+# embeds. Must run BEFORE the fragments are deleted — it reads them.
+#
+# A `V` record is written for EVERY release, including one whose only fragment
+# was `none-*`: the dialog header counts releases crossed, and the F1 path walks
+# the record list, so a release that told users nothing still happened.
+write_highlights() {
+  hl_version=$1
+  hl_date=$2
+
+  [ -f "$HIGHLIGHTS" ] || die "$HIGHLIGHTS does not exist"
+
+  hl_new="$work/highlights.new"
+  printf 'V %s %s\n' "$hl_version" "$hl_date" > "$hl_new"
+
+  for t in $HIGHLIGHT_TYPES; do
+    hl_files=$(fragments_of_type "$t")
+    [ -n "$hl_files" ] || continue
+    hl_letter=$(type_letter "$t") || die "no highlight letter for type: $t"
+    printf '%s\n' "$hl_files" | while IFS= read -r hl_f; do
+      hl_text=$(fragment_headline "$hl_f")
+      [ -n "$hl_text" ] || continue
+      printf '%s %s\n' "$hl_letter" "$hl_text"
+    done >> "$hl_new" || die "could not read a $t headline"
+  done
+
+  hl_out="$work/highlights.out"
+  {
+    # Leading comment block, verbatim.
+    awk '/^#/ { print; next } { exit }' "$HIGHLIGHTS"
+    cat "$hl_new"
+    # `|| true`: grep exits 1 on an as-yet-empty file, which set -e would take
+    # as fatal.
+    grep -v '^#' "$HIGHLIGHTS" || true
+  } > "$hl_out"
+  mv "$hl_out" "$HIGHLIGHTS"
+}
+
 any_fragments() {
   for t in $FRAGMENT_TYPES none; do
     if [ -n "$(fragments_of_type "$t")" ]; then
@@ -328,6 +397,14 @@ check() {
     || die "$CHANGELOG has no '## [Unreleased]' anchor — the promoter inserts below it"
 
   validate_fragment_dir
+
+  # $1 is the version being promoted, empty for --check and --validate.
+  # Refusing a duplicate HERE rather than mid-promote is the difference between
+  # a clean refusal and a CHANGELOG.md left holding two sections for one
+  # version — the file this check exists to protect.
+  if [ -n "${1:-}" ] && highlights_have_version "$1"; then
+    die "highlights already record version $1 — refusing to write it twice"
+  fi
 
   # A lone `none-*` fragment counts: it is the explicit "this release has
   # nothing to tell users" statement, and refusing it here would red-master
@@ -357,7 +434,7 @@ promote() {
   printf '%s' "$date" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' \
     || die "invalid date: '$date' (expected YYYY-MM-DD)"
 
-  check
+  check "$version"
 
   work=$(mktemp -d)
   # shellcheck disable=SC2064  # expand $work now, not at trap time
@@ -429,6 +506,9 @@ promote() {
     fi
   } > "$out"
   mv "$out" "$CHANGELOG"
+
+  # Before the deletion loop below: this reads the fragments.
+  write_highlights "$version" "$date"
 
   # Deleting the fragments is what keeps the NEXT branch conflict-free: a
   # rebased branch sees an empty changelog.d/ and its own new file collides

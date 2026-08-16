@@ -6,65 +6,16 @@ import (
 	"github.com/artyomsv/quil/internal/logger"
 )
 
-// keySpecsFromConfig is the ONE place legacy KeybindingsConfig field names
-// correspond to registry action IDs. Stage 3 replaces this body with a
-// bindings.toml read.
+// keySpecsFromConfig forwards to config.KeySpecsFromConfig, which owns the
+// legacy field-name-to-action-ID map now: MigrateBindings needs the same map to
+// diff a user's config against the shipped defaults, and two copies would drift.
 //
-// STAGE 2 IS A HARD PREREQUISITE FOR THAT, and this comment used to say the
-// opposite ("no other TUI code changes"). The notes-mode key split still reads
-// m.cfg.Keybindings directly through kbMatches — see handleKey's notesMode
-// block and notesKeyExempt — so a Stage 3 that empties the legacy table while
-// those readers remain leaves them comparing against empty strings: Alt+E
-// stops exiting notes mode, and every structural key stops flushing the editor
-// before it fires. Stage 2's job is retiring those three kbMatches call sites;
-// only then is this function the last thing standing between config and
-// dispatch.
+// Kept as a local alias because this package's tests and buildKeymap read it
+// often enough that the qualifier is noise at every call site.
 func keySpecsFromConfig(kb config.KeybindingsConfig) map[keymap.ActionID]string {
-	return map[keymap.ActionID]string{
-		"app.quit":                kb.Quit,
-		"app.redraw":              kb.Redraw,
-		"app.command_palette":     kb.CommandPalette,
-		"tab.new":                 kb.NewTab,
-		"tab.close":               kb.CloseTab,
-		"tab.rename":              kb.RenameTab,
-		"tab.cycle_color":         kb.CycleTabColor,
-		"pane.close":              kb.ClosePane,
-		"pane.restart":            kb.RestartPane,
-		"pane.rename":             kb.RenamePane,
-		"pane.split_h":            kb.SplitHorizontal,
-		"pane.split_v":            kb.SplitVertical,
-		"pane.focus_toggle":       kb.FocusPane,
-		"pane.notes_toggle":       kb.NotesToggle,
-		"pane.paste":              kb.Paste,
-		"pane.scroll_page_up":     kb.ScrollPageUp,
-		"pane.scroll_page_down":   kb.ScrollPageDown,
-		"pane.left":               kb.PaneLeft,
-		"pane.right":              kb.PaneRight,
-		"pane.up":                 kb.PaneUp,
-		"pane.down":               kb.PaneDown,
-		"pane.next":               kb.NextPane,
-		"pane.prev":               kb.PrevPane,
-		"pane.go_back":            kb.GoBack,
-		"pane.mute":               kb.MutePane,
-		"pane.toggle_eager":       kb.ToggleEager,
-		"pane.toggle_wrap":        kb.ToggleWrap,
-		"pane.toggle_lazygit":     kb.ToggleLazygit,
-		"pane.toggle_hunk":        kb.ToggleHunk,
-		"pane.command_history":    kb.CommandHistory,
-		"pane.quick_actions":      kb.QuickActions,
-		"notification.toggle":     kb.NotificationToggle,
-		"notification.focus":      kb.NotificationFocus,
-		"sidebar.toggle":          kb.SidebarToggle,
-		"project.new":             kb.NewProject,
-		"project.destroy":         kb.DestroyProject,
-		"project.picker":          kb.ProjectPicker,
-		"project.next":            kb.ProjectNext,
-		"project.prev":            kb.ProjectPrev,
-		"project.toggle":          kb.ProjectToggle,
-		"project.attention_queue": kb.AttentionQueue,
-		"json.transform":          kb.JSONTransform,
-	}
+	return config.KeySpecsFromConfig(kb)
 }
+
 
 // buildKeymap resolves a config into the dispatch keymap.
 //
@@ -83,6 +34,62 @@ func buildKeymap(kb config.KeybindingsConfig) (*keymap.Keymap, []keymap.Conflict
 		logger.Warn("keybindings: %s", c)
 	}
 	return km, conflicts
+}
+
+// SetBindings applies a loaded bindings.toml, replacing whatever initKeymap
+// built from the legacy config table.
+//
+// PURE — no disk access. ~46 tests build a Model directly without setting
+// QUIL_HOME, and a read here would point every one of them at the real
+// ~/.quil. cmd/quil/main.go does the load, following the SetRecentCWDs
+// precedent.
+func (m *Model) SetBindings(b config.Bindings) {
+	base := keymap.DefaultLayer()
+
+	var presetLayer map[keymap.ActionID]string
+	prefix := b.Prefix
+	if b.Preset != "" && b.Preset != keymap.DefaultPresetName {
+		p, err := keymap.LoadPreset(b.Preset)
+		if err != nil {
+			// An unknown preset name keeps the defaults rather than leaving the
+			// user with no keymap at all.
+			logger.Warn("keybindings: %v; keeping the default preset", err)
+		} else {
+			presetLayer = p.Bindings
+			// The preset's own prefix is the DEFAULT, not an override: a user
+			// who writes only `preset = "tmux"` must get ctrl+b, or every one
+			// of that preset's ${prefix} bindings expands against an empty
+			// prefix and is dropped. Setting prefix in bindings.toml still wins,
+			// which is how `set -g prefix C-a` is expressed.
+			if prefix == "" {
+				prefix = p.Prefix
+			}
+		}
+	}
+	if warning := keymap.PrefixWarning(prefix); warning != "" {
+		logger.Warn("keybindings: %s", warning)
+	}
+
+	// Expand ${prefix} in each layer SEPARATELY and before any collision
+	// analysis. BuildLayered decides who wins by comparing head chords, and a
+	// literal "${prefix}" is not a chord — expanding after the merge would have
+	// it compare templates and find no collisions at all.
+	var conflicts []keymap.Conflict
+	expand := func(layer map[keymap.ActionID]string) map[keymap.ActionID]string {
+		out, cs := keymap.ExpandPrefix(layer, prefix)
+		conflicts = append(conflicts, cs...)
+		return out
+	}
+
+	km, buildConflicts := keymap.BuildLayered(expand(base), expand(presetLayer), expand(b.Overrides))
+	conflicts = append(conflicts, buildConflicts...)
+
+	m.keymap = km
+	m.keyConflicts = conflicts
+	m.seqTimeout = b.SequenceTimeout
+	for _, c := range conflicts {
+		logger.Warn("keybindings: %s", c)
+	}
 }
 
 // isAction reports whether key is bound to the given action, searching both

@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"time"
+
 	"testing"
 
 	"github.com/artyomsv/quil/internal/config"
@@ -140,5 +142,80 @@ func TestIsAction_SearchesBothTiersAndIsNilSafe(t *testing.T) {
 	var nilM Model
 	if nilM.isAction("ctrl+w", "pane.close") {
 		t.Error("isAction on a keymap-less Model reported a match")
+	}
+}
+
+func TestSetBindings_AppliesPresetAndOverrides(t *testing.T) {
+	m := newModelForTest([]string{"A"}, 0)
+	m.SetBindings(config.Bindings{
+		Preset:    keymap.DefaultPresetName,
+		Overrides: map[keymap.ActionID]string{"tab.new": "ctrl+shift+t"},
+	})
+	if got := m.keymap.Display("tab.new"); got != "ctrl+shift+t" {
+		t.Errorf("Display(tab.new) = %q, want the override", got)
+	}
+	if got := m.keymap.Display("pane.close"); got != "ctrl+w" {
+		t.Errorf("Display(pane.close) = %q, want the default layer's value", got)
+	}
+}
+
+// Selecting tmux with no prefix of one's own must WORK. Every tmux binding is
+// written "${prefix} x", so a loader that drops the preset's own prefix expands
+// them all against "" and drops every one — the preset would appear to do
+// nothing at all.
+func TestSetBindings_PresetSuppliesItsOwnPrefix(t *testing.T) {
+	m := newModelForTest([]string{"A"}, 0)
+	m.SetBindings(config.Bindings{Preset: "tmux"})
+
+	for _, c := range m.keyConflicts {
+		if c.Kind == keymap.ConflictPrefixInvalid {
+			t.Fatalf("tmux preset dropped a binding for want of a prefix: %s", c)
+		}
+	}
+	if got := m.keymap.Display("tab.new"); got != "ctrl+b c" {
+		t.Errorf("Display(tab.new) = %q, want %q", got, "ctrl+b c")
+	}
+	if got := m.keymap.Display("tab.rename"); got != "ctrl+b ," {
+		t.Errorf("Display(tab.rename) = %q, want the comma binding", got)
+	}
+}
+
+// A prefix in bindings.toml overrides the preset's, which is how the common
+// `set -g prefix C-a` habit is expressed.
+func TestSetBindings_UserPrefixOverridesThePreset(t *testing.T) {
+	m := newModelForTest([]string{"A"}, 0)
+	m.SetBindings(config.Bindings{Preset: "tmux", Prefix: "ctrl+a"})
+	if got := m.keymap.Display("tab.new"); got != "ctrl+a c" {
+		t.Errorf("Display(tab.new) = %q, want ctrl+a c", got)
+	}
+}
+
+// Presets REPLACE. Selecting tmux must take Ctrl+T away from tab.new, or the
+// user has two keymaps at once and twice the conflict surface.
+func TestSetBindings_PresetReplacesRatherThanAdds(t *testing.T) {
+	m := newModelForTest([]string{"A"}, 0)
+	m.SetBindings(config.Bindings{Preset: "tmux"})
+	if id, ok := m.keymap.MatchTier(keymap.TierLate, "ctrl+t"); ok {
+		t.Errorf("ctrl+t still resolves to %q under the tmux preset; presets replace", id)
+	}
+	// An action the preset does not name keeps its default.
+	if got := m.keymap.Display("app.command_palette"); got != "alt+shift+p" {
+		t.Errorf("an unnamed action must inherit, got %q", got)
+	}
+}
+
+func TestSetBindings_UnknownPresetKeepsDefaults(t *testing.T) {
+	m := newModelForTest([]string{"A"}, 0)
+	m.SetBindings(config.Bindings{Preset: "no-such-preset"})
+	if got := m.keymap.Display("tab.new"); got != "ctrl+t" {
+		t.Errorf("an unknown preset must fall back to the defaults, got %q", got)
+	}
+}
+
+func TestSetBindings_CarriesTheSequenceTimeout(t *testing.T) {
+	m := newModelForTest([]string{"A"}, 0)
+	m.SetBindings(config.Bindings{Preset: keymap.DefaultPresetName, SequenceTimeout: 750 * time.Millisecond})
+	if m.seqTimeout != 750*time.Millisecond {
+		t.Errorf("seqTimeout = %v, want 750ms", m.seqTimeout)
 	}
 }

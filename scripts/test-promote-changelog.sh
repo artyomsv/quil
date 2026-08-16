@@ -76,8 +76,23 @@ setup() {
   export CHANGELOG_FILE CHANGELOG_FRAGMENT_DIR
 }
 
+# frag <name> <body>
+#
+# Auto-prepends a headline block for user-facing types, which validation now
+# requires. The block is stripped before promotion, so every existing
+# exact-output assertion still holds unchanged. Cases that need a specific,
+# absent or malformed headline write the file directly with printf instead.
 frag() {
-  printf '%s\n' "$2" > "$CASE/changelog.d/$1"
+  case "$1" in
+    none-*|internal-*)
+      printf '%s\n' "$2" > "$CASE/changelog.d/$1"
+      ;;
+    *)
+      { printf -- '---\nheadline: Headline for %s\n---\n' "${1%.md}"
+        printf '%s\n' "$2"
+      } > "$CASE/changelog.d/$1"
+      ;;
+  esac
 }
 
 # Assert the whole file, not a substring — a splice that drops history still
@@ -279,7 +294,10 @@ ok '10 [Unreleased] anchor survives; 11 released history byte-identical'
 
 # --- 12. CRLF --------------------------------------------------------------
 setup crlf
-printf -- '- **CRLF entry.**\r\n' > "$CASE/changelog.d/fixed-crlf.md"
+# The headline block is CRLF too, so this also proves fragment_headline strips
+# CR before matching the fixed three-line shape.
+printf -- '---\r\nheadline: A CRLF headline\r\n---\r\n- **CRLF entry.**\r\n' \
+  > "$CASE/changelog.d/fixed-crlf.md"
 sh "$PROMOTE" 1.1.0 2026-02-03 > /dev/null
 if grep -q "$(printf '\r')" "$CHANGELOG_FILE"; then
   fail 'case 12: carriage return leaked into CHANGELOG.md'
@@ -396,7 +414,9 @@ ok '18 an empty none-* fragment is accepted and renders the sentinel'
 # `^## [`, so such a line truncates the published notes there and leaves a
 # bogus heading that every later extraction also mis-parses.
 setup injection
-printf -- '- **Real.**\n\n## [9.9.9] - 2020-01-01\n\n- **Injected.**\n' \
+# Carries a valid headline so the refusal below is attributable to the '## ['
+# heading this case is named for, and not to a missing headline block.
+printf -- '---\nheadline: A real headline\n---\n- **Real.**\n\n## [9.9.9] - 2020-01-01\n\n- **Injected.**\n' \
   > "$CASE/changelog.d/fixed-inject.md"
 expect_die 'case 19' sh "$PROMOTE" --check
 expect_die 'case 19 (promote)' sh "$PROMOTE" 1.1.0 2026-02-03
@@ -531,5 +551,106 @@ All notable changes to Quil will be documented in this file.
 - **First release.**
 '
 ok '24 changed/deprecated/removed render in the right order'
+
+# --- 25. headline block is stripped from promoted prose --------------------
+setup headline_strip
+printf -- '---\nheadline: A short one-liner\n---\n- **New fix.** Body.\n' \
+  > "$CASE/changelog.d/fixed-thing.md"
+sh "$PROMOTE" 1.1.0 2026-02-03 > /dev/null
+assert_changelog 'case 25' '# Changelog
+
+All notable changes to Quil will be documented in this file.
+
+## [Unreleased]
+
+## [1.1.0] - 2026-02-03
+
+### Fixed
+- **New fix.** Body.
+
+## [1.0.1] - 2026-01-02
+
+### Fixed
+- **Older fix.** Body text.
+
+## [1.0.0] - 2026-01-01
+
+### Added
+- **First release.**
+'
+ok '25 headline block stripped from CHANGELOG.md'
+
+# --- 26. headline required on every user-facing type -----------------------
+for T in added changed deprecated removed fixed security; do
+  setup "headline_missing_$T"
+  printf -- '- **Body with no headline.**\n' > "$CASE/changelog.d/$T-thing.md"
+  expect_die "case 26 ($T)" sh "$PROMOTE" --validate
+done
+ok '26 headline required on every user-facing fragment type'
+
+# --- 27. headline forbidden on internal, unnecessary on none ---------------
+setup headline_internal
+printf -- '---\nheadline: Not user facing\n---\n- **Refactor.**\n' \
+  > "$CASE/changelog.d/internal-thing.md"
+expect_die 'case 27' sh "$PROMOTE" --validate
+
+setup headline_none
+frag none-thing.md 'nothing user facing here'
+sh "$PROMOTE" --validate > /dev/null || fail 'case 27: none-* rejected for having no headline'
+ok '27 headline refused on internal-*, not required on none-*'
+
+# --- 28. malformed headlines are refused -----------------------------------
+setup hl_unclosed
+printf -- '---\nheadline: Never closed\n- **Body.**\n' > "$CASE/changelog.d/fixed-a.md"
+expect_die 'case 28a (unclosed)' sh "$PROMOTE" --validate
+
+setup hl_wrongkey
+printf -- '---\ntitle: Wrong key\n---\n- **Body.**\n' > "$CASE/changelog.d/fixed-a.md"
+expect_die 'case 28b (wrong key)' sh "$PROMOTE" --validate
+
+setup hl_toolong
+printf -- '---\nheadline: %s\n---\n- **Body.**\n' \
+  'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
+  > "$CASE/changelog.d/fixed-a.md"
+expect_die 'case 28c (65 bytes)' sh "$PROMOTE" --validate
+
+setup hl_quote
+printf -- '---\nheadline: Paste "just works" now\n---\n- **Body.**\n' \
+  > "$CASE/changelog.d/fixed-a.md"
+expect_die 'case 28d (quote)' sh "$PROMOTE" --validate
+
+setup hl_backslash
+printf -- '---\nheadline: Fixed C:\\path handling\n---\n- **Body.**\n' \
+  > "$CASE/changelog.d/fixed-a.md"
+expect_die 'case 28e (backslash)' sh "$PROMOTE" --validate
+
+setup hl_tab
+printf -- '---\nheadline: Has\ta tab\n---\n- **Body.**\n' \
+  > "$CASE/changelog.d/fixed-a.md"
+expect_die 'case 28f (control char)' sh "$PROMOTE" --validate
+ok '28 malformed headlines refused: unclosed, wrong key, too long, quote, backslash, control char'
+
+# --- 29. exactly 64 bytes is accepted, printable non-ASCII is accepted -----
+setup hl_boundary
+printf -- '---\nheadline: %s\n---\n- **Body.**\n' \
+  'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
+  > "$CASE/changelog.d/fixed-a.md"
+sh "$PROMOTE" --validate > /dev/null || fail 'case 29: a 64-byte headline was refused'
+
+setup hl_utf8
+printf -- '---\nheadline: F1 → Shortcuts is derived from your keymap\n---\n- **Body.**\n' \
+  > "$CASE/changelog.d/changed-a.md"
+sh "$PROMOTE" --validate > /dev/null || fail 'case 29: printable non-ASCII was refused'
+ok '29 a 64-byte headline and printable non-ASCII are accepted'
+
+# --- 30. a fragment that is ONLY a headline block is refused ---------------
+# The pre-existing emptiness check reads the raw bytes, so the block itself
+# satisfies it — and the fragment then promotes a section heading with nothing
+# under it, which is exactly what that check exists to prevent.
+setup hl_onlyblock
+printf -- '---\nheadline: All headline, no body\n---\n' > "$CASE/changelog.d/fixed-a.md"
+expect_die 'case 30' sh "$PROMOTE" --validate
+assert_changelog 'case 30' "$BASELINE"
+ok '30 a headline-only fragment is refused as empty'
 
 printf '\nPASS: %s promote-changelog checks\n' "$PASSED"

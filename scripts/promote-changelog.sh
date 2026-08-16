@@ -84,6 +84,64 @@ trim_blank_lines() {
   '
 }
 
+# --- headline front matter -------------------------------------------------
+#
+# A fragment carries a one-line headline for the post-upgrade "What's new"
+# dialog, in a fixed three-line block at the very top of the file:
+#
+#   ---
+#   headline: Option+Shift shortcuts work again on macOS
+#   ---
+#
+# The shape is fixed rather than YAML on purpose: this script has to read it,
+# and a three-line shape needs no parser. The block is stripped before the
+# prose is spliced into CHANGELOG.md, so the published entry is unchanged.
+
+HEADLINE_MAX_BYTES=64
+
+# True when $1 begins a front-matter block.
+has_front_matter() {
+  [ "$(head -n 1 "$1" | tr -d '\r')" = '---' ]
+}
+
+# Print the headline of fragment $1, or nothing if it has no well-formed block.
+fragment_headline() {
+  tr -d '\r' < "$1" | awk '
+    NR == 1 { if ($0 != "---") exit; next }
+    NR == 2 { if (substr($0, 1, 10) != "headline: ") exit; hl = substr($0, 11); next }
+    NR == 3 { if ($0 == "---" && hl != "") print hl; exit }
+  '
+}
+
+# Drop a leading front-matter block. A file without one passes through
+# unchanged. Reads stdin, writes stdout.
+strip_front_matter() {
+  awk '
+    NR == 1 && $0 == "---" { infm = 1; next }
+    infm && $0 == "---"    { infm = 0; next }
+    infm                   { next }
+    { print }
+  '
+}
+
+# A headline is emitted into highlights.txt with printf and no escaping, and is
+# rendered on one dialog row. Reject anything that would break either: control
+# characters, a double quote, or a backslash. Printable non-ASCII (arrows,
+# bullets) is fine — the TUI already renders those.
+headline_charset_ok() {
+  case "$1" in
+    *'"'*|*'\'*) return 1 ;;
+  esac
+  # tr ranges are byte-wise: this deletes printable ASCII and every high byte,
+  # leaving only C0 controls and DEL behind.
+  [ -z "$(printf '%s' "$1" | LC_ALL=C tr -d '\040-\176\200-\377')" ]
+}
+
+# Byte length under LC_ALL=C, so the limit does not shift with the locale.
+headline_length() {
+  printf '%s' "$1" | LC_ALL=C wc -c | tr -d ' '
+}
+
 # --- mode: --filter-names -------------------------------------------------
 # Reads paths (as `git diff --name-status --diff-filter=A | cut -f2` emits
 # them) and prints the ones that are fragments. README.md is deliberately NOT
@@ -173,12 +231,42 @@ validate_fragment_dir() {
       none-*) continue ;;
     esac
 
+    # Headline block. Required on every user-facing type, because a fragment
+    # without one vanishes silently from the post-upgrade dialog — the same
+    # lost-prose failure this function exists to prevent. Refused on
+    # `internal-*`, which by definition is not addressed to users.
+    case "$name" in
+      internal-*)
+        if has_front_matter "$f"; then
+          invalid="$invalid
+  $FRAGMENT_DIR_REL/$name — carries a headline; internal changes are not user-facing"
+        fi
+        ;;
+      *)
+        headline=$(fragment_headline "$f")
+        if [ -z "$headline" ]; then
+          invalid="$invalid
+  $FRAGMENT_DIR_REL/$name — has no headline block (see $FRAGMENT_DIR_REL/README.md)"
+        elif [ "$(headline_length "$headline")" -gt "$HEADLINE_MAX_BYTES" ]; then
+          invalid="$invalid
+  $FRAGMENT_DIR_REL/$name — headline is $(headline_length "$headline") bytes; the limit is $HEADLINE_MAX_BYTES"
+        elif ! headline_charset_ok "$headline"; then
+          invalid="$invalid
+  $FRAGMENT_DIR_REL/$name — headline must not contain control characters, a double quote, or a backslash"
+        fi
+        ;;
+    esac
+
     # An empty or blank-only fragment renders a section heading with nothing
     # under it — `### Fixed` alone, shipped to the changelog and the release
     # page. Refused rather than skipped, because "forgot to write the prose"
     # and "deliberately nothing to say" must not resolve to the same output;
     # the second one is what `none-<slug>.md` is for.
-    if [ -z "$(tr -d '\r' < "$f" | trim_blank_lines)" ]; then
+    #
+    # Measured POST-STRIP, not on the raw bytes: a file that is ONLY a headline
+    # block is non-empty on disk but contributes nothing to CHANGELOG.md, and
+    # would render exactly the empty section this check exists to prevent.
+    if [ -z "$(tr -d '\r' < "$f" | strip_front_matter | trim_blank_lines)" ]; then
       invalid="$invalid
   $FRAGMENT_DIR_REL/$name — is empty; write the entry, or use none-<slug>.md"
       continue
@@ -305,7 +393,7 @@ promote() {
     # PIPELINE's status, which is trim_blank_lines', so a failed `tr` exits 0
     # and the guard never fires. Grouping puts the test on `tr` itself.
     printf '%s\n' "$files" | while IFS= read -r f; do
-      { tr -d '\r' < "$f" || exit 1; } | trim_blank_lines
+      { tr -d '\r' < "$f" || exit 1; } | strip_front_matter | trim_blank_lines
     done >> "$body" || die "could not read a $t fragment"
   done
 

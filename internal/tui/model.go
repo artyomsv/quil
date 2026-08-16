@@ -4153,16 +4153,37 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, m.armSequenceTimeout()
 		}
 		// A completed sequence reaches its action WITHOUT passing through the
-		// notes block above, so the structural teardown that block performs has
-		// to be repeated here. Without it, `pane.split_h = "${prefix} %"` — what
-		// the tmux preset ships — restructures the layout while notesMode is
-		// still true and the editor is still bound to a pane that just moved.
+		// notes block above, so that block's handling has to be repeated for
+		// the actions it treats specially. This mirrors it arm for arm — see
+		// the notesMode branch earlier in this function.
 		//
-		// Only structural actions, matching the notes block's own split: an
-		// ordinary action completing while the pane has focus leaves notes open
-		// there too.
-		if seqAction != "" && m.notesMode && m.notesEditor != nil && isStructuralAction(seqAction) {
-			m.exitNotesModeInPlace()
+		// The two that bite hardest are pane.left / pane.right. In notes mode
+		// they switch focus between the editor and the bound pane; run through
+		// the ordinary late-tier arm instead, they navigate to another pane
+		// entirely, and the next workspace broadcast re-syncs the active pane
+		// back to the bound one — so the move silently undoes itself. Under a
+		// vim-style prefix keymap (`pane.right = "${prefix} l"`) that is the
+		// normal way to press them.
+		if seqAction != "" && m.notesMode && m.notesEditor != nil {
+			switch {
+			case seqAction == "pane.notes_toggle":
+				return m.exitNotesMode()
+			case seqAction == "app.quit":
+				if err := m.notesEditor.Close(); err != nil {
+					log.Printf("save notes on quit: %v", err)
+				}
+				return m, tea.Quit
+			case seqAction == "pane.left":
+				m.notesPaneFocused = true
+				return m, nil
+			case seqAction == "pane.right":
+				m.notesPaneFocused = false
+				return m, nil
+			case isStructuralAction(seqAction):
+				// Destroys or restructures the bound pane: flush and tear down
+				// before it runs, then fall through so the action still fires.
+				m.exitNotesModeInPlace()
+			}
 		}
 	}
 

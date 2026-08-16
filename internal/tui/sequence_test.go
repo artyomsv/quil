@@ -432,3 +432,115 @@ func TestSequence_ThreeStepCompletesThroughUpdate(t *testing.T) {
 		t.Error("the three-step sequence did not fire pane.focus_toggle")
 	}
 }
+
+// notesSeqModel is seqModel with notes mode open over the active pane.
+func notesSeqModel(t *testing.T, mutate func(*Model)) Model {
+	t.Helper()
+	m := seqModel(t, mutate)
+	ne, err := NewNotesEditor(t.TempDir(), "p1", "Shell", 40, 20)
+	if err != nil {
+		t.Fatalf("NewNotesEditor: %v", err)
+	}
+	m.notesMode = true
+	m.notesEditor = ne
+	m.notesPaneFocused = true // the pane side, where a sequence can reach the machine
+	return m
+}
+
+// A completed sequence bypasses the notes block, so the four actions that block
+// treats specially have to be handled on the sequence path too.
+//
+// pane.right is the sharp one: run through the ordinary late-tier arm it
+// NAVIGATES to another pane, and the next workspace broadcast re-syncs the
+// active pane back to the notes-bound one — so the move silently undoes itself.
+// Under a vim-style prefix keymap that is the normal way to press it.
+func TestSequence_NotesFocusSwitchIsNotPaneNavigation(t *testing.T) {
+	m := notesSeqModel(t, func(m *Model) { m.cfg.Keybindings.PaneRight = "ctrl+b l" })
+
+	before := m.curTabs()[0].ActivePane
+	m = press(t, m, ctrlB())
+	m = press(t, m, tea.KeyPressMsg{Code: 'l', Text: "l"})
+
+	if m.curTabs()[0].ActivePane != before {
+		t.Errorf("the sequence navigated panes (%s -> %s); in notes mode it must switch FOCUS",
+			before, m.curTabs()[0].ActivePane)
+	}
+	if m.notesPaneFocused {
+		t.Error("pane.right must move focus to the editor")
+	}
+	if !m.notesMode {
+		t.Error("a focus switch must not tear down notes mode")
+	}
+}
+
+// Structural actions destroy or restructure the bound pane, so notes must be
+// flushed and torn down before one runs — the teardown the notes block does and
+// the sequence path would otherwise skip.
+func TestSequence_StructuralActionTearsDownNotes(t *testing.T) {
+	m := notesSeqModel(t, func(m *Model) { m.cfg.Keybindings.SplitHorizontal = "ctrl+b %" })
+
+	m = press(t, m, ctrlB())
+	m = press(t, m, tea.KeyPressMsg{Code: '%', Text: "%"})
+
+	if m.notesMode {
+		t.Error("a structural action reached the layout with notes still bound to a pane that moved")
+	}
+}
+
+// The control: a NON-structural action completing while the pane has focus
+// leaves notes open, matching the notes block's own fall-through. Without this
+// the test above would pass against a teardown that fires on everything.
+func TestSequence_OrdinaryActionLeavesNotesOpen(t *testing.T) {
+	m := notesSeqModel(t, func(m *Model) { m.cfg.Keybindings.MutePane = "ctrl+b m" })
+
+	m = press(t, m, ctrlB())
+	m = press(t, m, tea.KeyPressMsg{Code: 'm', Text: "m"})
+
+	if !m.notesMode {
+		t.Error("an ordinary action must not tear down notes mode")
+	}
+}
+
+// A daemon broadcast can move the active pane with no keypress at all, and a
+// sequence completed afterwards would act on a pane the user never armed it in
+// — the hazard the mouse-click cancel covers, by a route no input event sees.
+func TestSequence_PaneChangeUnderAnArmedPrefixCancels(t *testing.T) {
+	m := seqModel(t, func(m *Model) { m.cfg.Keybindings.FocusPane = "ctrl+b z" })
+
+	before := m.activeTabModel().FocusMode()
+	m = press(t, m, ctrlB())
+	if len(m.pendingSeq) != 1 {
+		t.Fatalf("setup: ctrl+b did not arm, got %v", m.pendingSeq)
+	}
+
+	// What a broadcast does: the active pane moves, with no key involved.
+	m.curTabs()[0].ActivePane = "p2"
+
+	m = press(t, m, tea.KeyPressMsg{Code: 'z', Text: "z"})
+	if m.activeTabModel().FocusMode() != before {
+		t.Error("the sequence completed against a pane it was never armed in")
+	}
+	if len(m.pendingSeq) != 0 {
+		t.Errorf("pendingSeq = %v, want cleared", m.pendingSeq)
+	}
+}
+
+// A dialog can open with no keypress (a plugin error matched against pane
+// output, an upgrade prompt from a resize), and while one is up the view draws
+// only the dialog — so the pending indicator is not on screen either.
+func TestSequence_DialogCancelsAPendingPrefix(t *testing.T) {
+	m := seqModel(t, func(m *Model) { m.cfg.Keybindings.FocusPane = "ctrl+b z" })
+
+	m = press(t, m, ctrlB())
+	if len(m.pendingSeq) != 1 {
+		t.Fatalf("setup: ctrl+b did not arm, got %v", m.pendingSeq)
+	}
+
+	m.dialog = dialogPluginError // as a daemon message would set it
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEscape})
+
+	if len(m.pendingSeq) != 0 {
+		t.Errorf("pendingSeq = %v — dismissing the dialog left a prefix armed the user "+
+			"cannot see, and the next character would complete it", m.pendingSeq)
+	}
+}

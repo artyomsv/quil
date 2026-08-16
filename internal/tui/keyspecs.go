@@ -124,15 +124,22 @@ func (m *Model) SetBindings(b config.Bindings) {
 // it by matching a sequence's head chord here — that would make the context
 // menu quit on a bare prefix press.
 //
-// The cost, under a preset that binds these actions to sequences (tmux does):
-// the "never swallow quit" passthrough in the context menu and the overlay
-// stops applying, and notes mode loses its Alt+Left / Alt+Right focus switch,
-// since both are ${prefix}-based there. Esc still closes the menu and the
-// overlay. The notes-mode STRUCTURAL teardown is handled instead on handleKey's
-// completed-sequence path, which is the only place a sequence can arrive.
+// The cost, under a preset that binds these actions to sequences (tmux does),
+// differs per caller and is worth stating exactly rather than in aggregate:
 //
-// This list is the known set, not a proof of completeness: any caller added
-// here inherits the same blind spot.
+//   - Context menu: the "never swallow quit" passthrough stops applying. Esc
+//     still closes the menu (ctxmenu.go), so nothing is stuck.
+//   - Overlay: the same, AND Esc does NOT help — handleOverlayKey deliberately
+//     forwards Esc to the running tool. A sequence-bound pane.toggle_lazygit
+//     therefore cannot close the overlay it opened; the tool's own quit key
+//     ("q" in lazygit) is the way out. Do not bind an overlay toggle to a
+//     sequence without knowing that.
+//   - Notes mode: handled rather than lost. handleKey's completed-sequence
+//     block mirrors the notes block arm for arm, because that is the only
+//     place a sequence can arrive.
+//
+// This is the known set, not a proof of completeness: any caller added here
+// inherits the same blind spot.
 func (m *Model) isAction(key string, id keymap.ActionID) bool {
 	for _, tier := range []keymap.Tier{keymap.TierEarly, keymap.TierLate} {
 		if got, ok := m.keymap.MatchTier(tier, key); ok && got == id {

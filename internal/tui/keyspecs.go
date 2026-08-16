@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"time"
+
 	"github.com/artyomsv/quil/internal/config"
 	"github.com/artyomsv/quil/internal/keymap"
 	"github.com/artyomsv/quil/internal/logger"
@@ -56,6 +58,16 @@ func (m *Model) SetBindings(b config.Bindings) {
 			logger.Warn("keybindings: %v; keeping the default preset", err)
 		} else {
 			presetLayer = p.Bindings
+			// Same default-not-override rule for the timeout. bindings.toml
+			// carries no way to say "0 means I chose off" apart from omitting
+			// it, so a preset's value applies only when the user left it unset.
+			if b.SequenceTimeout == 0 && p.Timeout != "" && p.Timeout != "0" {
+				if d, err := time.ParseDuration(p.Timeout); err == nil {
+					b.SequenceTimeout = d
+				} else {
+					logger.Warn("keybindings: preset %q has an unreadable sequence_timeout %q", p.Name, p.Timeout)
+				}
+			}
 			// The preset's own prefix is the DEFAULT, not an override: a user
 			// who writes only `preset = "tmux"` must get ctrl+b, or every one
 			// of that preset's ${prefix} bindings expands against an empty
@@ -106,6 +118,16 @@ func (m *Model) SetBindings(b config.Bindings) {
 // reach — harmless for the six call sites, since each asks about one action it
 // then handles itself, but a caller using this to decide what handleKey WILL do
 // would get the wrong answer for a chord claimed in the other tier.
+//
+// It answers FALSE for an action bound only to a multi-chord sequence, and that
+// is correct rather than a gap: every caller is a mode that owns the keyboard,
+// and the sequence machine is deliberately inert in all of them. Under a
+// sequence-heavy preset this does mean the "never swallow quit" passthrough in
+// the context menu and the overlay stops applying — Esc still closes both — and
+// the notes-mode structural teardown moves to handleKey's completed-sequence
+// path, which is where a sequence can actually arrive. Do not "fix" this by
+// matching a sequence's head chord here: that would make the context menu quit
+// on a bare prefix press.
 func (m *Model) isAction(key string, id keymap.ActionID) bool {
 	for _, tier := range []keymap.Tier{keymap.TierEarly, keymap.TierLate} {
 		if got, ok := m.keymap.MatchTier(tier, key); ok && got == id {

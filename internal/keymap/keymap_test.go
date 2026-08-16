@@ -122,7 +122,7 @@ func TestBuild_ShorterBindingIsRefusedWhenItShadows(t *testing.T) {
 
 func TestConflictShadowed_Message(t *testing.T) {
 	c := Conflict{Kind: ConflictShadowed, Key: "ctrl+b", Winner: "tab.new", Loser: "pane.rename"}
-	want := `shadowed by a longer sequence: "ctrl+b" → tab.new wins, pane.rename never fires`
+	want := `unreachable binding: "ctrl+b" → tab.new wins, pane.rename never fires`
 	if got := c.String(); got != want {
 		t.Errorf("String() = %q, want %q", got, want)
 	}

@@ -22,6 +22,7 @@ var presetFS embed.FS
 type Preset struct {
 	Name     string
 	Prefix   string
+	Timeout  string
 	Bindings map[ActionID]string
 }
 
@@ -68,6 +69,7 @@ func LoadPreset(name string) (Preset, error) {
 	out := Preset{
 		Name:     name,
 		Prefix:   pf.Prefix,
+		Timeout:  pf.SequenceTimeout,
 		Bindings: make(map[ActionID]string, len(pf.Bindings)),
 	}
 	for id, spec := range pf.Bindings {

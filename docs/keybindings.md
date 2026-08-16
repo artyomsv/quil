@@ -1,6 +1,6 @@
 # Keybindings
 
-Quil's full keymap. Every binding is configurable via `~/.quil/config.toml` under `[keybindings]` — see [Configuration](configuration.md#keybindings) for the override syntax.
+Quil's full keymap. Every binding is configurable in `~/.quil/bindings.toml`, either by selecting a preset or by overriding individual actions — see [Customizing keybindings](#customizing-keybindings) below and [Configuration](configuration.md#bindingstoml) for the file reference.
 
 ## Table of contents
 
@@ -306,9 +306,9 @@ Open **F1 → Shortcuts**. If Quil could not honour a binding, a warning row app
 |---|---|
 | `duplicate binding` | Two actions claim the same key. The one listed first in F1 wins. |
 | `cross-tier shadowing` | Two actions claim the same key, and one of them is resolved earlier in the dispatch order, so the other can never fire. |
-| `collides with a built-in key` | The key is also handled by Quil outside the binding system — `F1`, `Ctrl+N`, `Alt+1`…`Alt+9`, the `F8` / `Ctrl+Alt+V` paste aliases, or the text-selection chords (`Shift+Arrow`, `Ctrl+Shift+Left/Right`, `Ctrl+Alt+Shift+Left/Right`). The message names which one wins. |
+| `collides with a built-in key` | The key is also handled by Quil outside the binding system — `F1`, `Ctrl+N`, the `F8` / `Ctrl+Alt+V` paste aliases, or the text-selection chords (`Shift+Arrow`, `Ctrl+Shift+Left/Right`, `Ctrl+Alt+Shift+Left/Right`). The message names which one wins. |
 | `unreadable binding` | The spec did not parse. That action fell back to its default; every other binding is unaffected. |
-| `shadowed by a longer sequence` | One binding is the opening of another — binding both `ctrl+b` and `ctrl+b c` means the first can never fire, because pressing it always waits for a second key. The message names which one survives. |
+| `unreachable binding` | One binding is the opening of another — binding both `ctrl+b` and `ctrl+b c` means the first can never fire, because pressing it always waits for a second key. The message names which one survives. |
 | `unusable prefix` | A binding uses `${prefix}` but `prefix` is unset, or is not exactly one chord. Those bindings are dropped rather than half-expanded. |
 
 These also go to the client log, so a binding that breaks the F1 dialog itself is still diagnosable.
@@ -329,7 +329,7 @@ Three things worth knowing:
 
 - **Pressing the opening key twice sends it through to the pane.** With `Ctrl+B` as a sequence opener, `Ctrl+B` `Ctrl+B` delivers one literal `Ctrl+B` to whatever is running. This is what keeps a tmux *inside* a Quil pane reachable — the same escape tmux itself uses.
 - **A sequence takes priority over a plugin's `raw_keys`.** If a pane's tool claims `x` and you bind `ctrl+b x`, the sequence wins. Single-chord bindings are unaffected.
-- **Sequences are inert wherever something else owns the keyboard** — dialogs, the command palette, an inline rename, the context menu, a full-screen overlay, the notification sidebar, and while text is selected.
+- **Sequences are inert wherever something else owns the keyboard** — dialogs, the command palette, an inline rename, the context menu, a full-screen overlay, the notification sidebar, while text is selected, and while the notes editor has focus.
 
 To bind the comma key, write `comma` — a literal `,` separates alternatives:
 

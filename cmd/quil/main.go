@@ -589,16 +589,28 @@ func launchTUI() {
 	// reason as SetRecentCWDs: ~46 tests build a Model directly without setting
 	// QUIL_HOME, and a disk read in the constructor points every one of them at
 	// the real ~/.quil.
+	migrateErr := error(nil)
 	if migrated, err := config.MigrateBindings(cfg, cfgErr); err != nil {
+		migrateErr = err
 		log.Printf("bindings migration: %v", err)
 	} else if migrated {
 		log.Printf("bindings: migrated [keybindings] into %s", config.BindingsPath())
 	}
-	if bindings, err := config.LoadBindings(); err != nil {
+	switch bindings, err := config.LoadBindings(); {
+	case err != nil:
 		// Keep whatever initKeymap built from the config table rather than
 		// leaving the user with no keymap at all.
 		log.Printf("bindings: %v; keeping the bindings from config.toml", err)
-	} else {
+	case migrateErr != nil && !fileExists(config.BindingsPath()):
+		// The migration failed to WRITE — read-only QUIL_HOME, full disk — and
+		// no bindings.toml exists. LoadBindings still succeeds here, because a
+		// missing file is the legitimate first-launch state, and it answers
+		// with pure defaults. Applying that would silently discard the user's
+		// [keybindings] customizations for the session, with nothing on screen
+		// saying why. Keep the config-derived keymap instead.
+		log.Printf("bindings: migration failed and %s is absent; keeping the bindings from config.toml",
+			config.BindingsPath())
+	default:
 		model.SetBindings(bindings)
 	}
 

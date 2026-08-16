@@ -34,6 +34,16 @@ func ExpandPrefix(specs map[ActionID]string, prefix string) (map[ActionID]string
 			continue
 		}
 		if err != nil {
+			// An unregistered ID is Build's to report, as ConflictUnknownAction
+			// — it is a typo'd action name, not a prefix problem, and saying so
+			// twice in two different vocabularies helps nobody. Passing the
+			// spec through unchanged also keeps every Conflict raised here
+			// carrying one of our own ActionID constants rather than an
+			// arbitrary table key from the user's file.
+			if _, known := Lookup(id); !known {
+				out[id] = spec
+				continue
+			}
 			conflicts = append(conflicts, Conflict{
 				Kind: ConflictPrefixInvalid, Key: spec, Loser: id, Detail: err.Error(),
 			})

@@ -384,8 +384,9 @@ type Model struct {
 	// a cancelled sequence's in-flight timeout tick cannot clear a sequence
 	// started after it. seqFlash reports a dropped sequence in the status bar
 	// and is cleared by the next keypress rather than by a timer.
-	pendingSeq []keymap.Chord
-	pendingGen int
+	pendingSeq  []keymap.Chord
+	pendingGen  int
+	pendingPane string
 	seqFlash   string
 	// seqTimeout drops a pending sequence after this long. Zero = off, which
 	// is the shipped default and matches tmux.
@@ -3594,6 +3595,27 @@ func (m Model) rawKeyFor(seqAction keymap.ActionID, key string, msg tea.KeyPress
 	return m.tryPluginRawKey(key, msg)
 }
 
+// structuralActions destroy or restructure the pane a notes editor is bound
+// to, so notes must be flushed and torn down before one runs. Named once here
+// because two call sites need the same list: the notes block in handleKey, and
+// the completed-sequence path that bypasses it.
+var structuralActions = map[keymap.ActionID]bool{
+	"pane.close": true, "tab.close": true,
+	"pane.split_h": true, "pane.split_v": true,
+}
+
+func isStructuralAction(id keymap.ActionID) bool { return structuralActions[id] }
+
+// armedPaneID is the pane a pending sequence was started in. A completed
+// sequence must act on that pane, not on whichever one happens to be active
+// two keystrokes later.
+func (m Model) armedPaneID() string {
+	if tab := m.activeTabModel(); tab != nil {
+		return tab.ActivePane
+	}
+	return ""
+}
+
 // cancelSequence clears any pending prefix sequence. Bumping the generation is
 // what stops a cancelled sequence's in-flight timeout tick from clearing a
 // sequence started after it.
@@ -3613,7 +3635,10 @@ type sequenceTimeoutMsg struct{ gen int }
 // armSequenceTimeout returns a tick for the current sequence generation, or nil
 // when the timeout is off (the shipped default).
 func (m Model) armSequenceTimeout() tea.Cmd {
-	if m.seqTimeout <= 0 {
+	// Nothing pending means nothing to expire. Without this the esc-cancel and
+	// dropped-sequence paths each schedule a tick that can only no-op, one per
+	// rejected keystroke once a timeout is configured.
+	if m.seqTimeout <= 0 || len(m.pendingSeq) == 0 {
 		return nil
 	}
 	gen := m.pendingGen
@@ -3637,8 +3662,26 @@ func (m Model) armSequenceTimeout() tea.Cmd {
 func (m Model) stepSequence(msg tea.KeyPressMsg, key string) (Model, keymap.ActionID, bool) {
 	m.seqFlash = ""
 
+	// The world can change under an armed prefix with no keypress at all: a
+	// daemon broadcast moves the active pane (MCP set_active_pane, switch_tab),
+	// or a message-driven dialog opens and closes. Completing the sequence then
+	// would act on a pane the user never armed it in — the same hazard the
+	// mouse-click cancel exists for, arriving by a route no input event covers.
+	// The timeout would eventually catch it, but it ships off.
+	if len(m.pendingSeq) > 0 && m.armedPaneID() != m.pendingPane {
+		m.cancelSequence()
+	}
+
 	c, err := keymap.ParseChord(key)
 	if err != nil {
+		// An unparseable key is not a sequence step. Drop any pending prefix
+		// rather than leaving it armed: every other "not part of this sequence"
+		// path clears it, and leaving it would read the NEXT keystroke as step
+		// two of a sequence the user has every reason to think was abandoned.
+		if len(m.pendingSeq) > 0 {
+			m.cancelSequence()
+			return m, "", true
+		}
 		return m, "", false
 	}
 
@@ -3666,6 +3709,7 @@ func (m Model) stepSequence(msg tea.KeyPressMsg, key string) (Model, keymap.Acti
 	switch id, kind := m.keymap.MatchSeq(cand); kind {
 	case keymap.MatchPartial:
 		m.pendingSeq = cand
+		m.pendingPane = m.armedPaneID()
 		m.pendingGen++
 		return m, "", true
 	case keymap.MatchExact:
@@ -3683,7 +3727,13 @@ func (m Model) stepSequence(msg tea.KeyPressMsg, key string) (Model, keymap.Acti
 	// chord falls through untouched, which is what keeps every single-chord
 	// binding byte-identical to its pre-sequence behaviour.
 	if len(m.pendingSeq) > 0 {
-		m.seqFlash = keymap.Sequence(cand).String() + " is not bound"
+		// Names the PENDING prefix, never the unmatched chord that ended it.
+		// Ctrl+B is readline's backward-char, so under the tmux preset the
+		// machine arms on an ordinary shell keystroke — and the next character
+		// typed might be a character of a password at an ssh or sudo prompt.
+		// It is swallowed either way; painting it on the status bar until the
+		// following keypress is what this avoids.
+		m.seqFlash = keymap.Sequence(m.pendingSeq).String() + " — no such binding"
 		m.cancelSequence()
 		return m, "", true
 	}
@@ -4079,12 +4129,31 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// lookups below resolve to that action and disables the between-tier
 	// guards, because a completed sequence must run from its own tier and must
 	// outrank a plugin's raw_keys claim on its final chord.
+	// The dropped-sequence flash lives until the next keypress. Cleared here
+	// rather than inside stepSequence, which is skipped entirely while the
+	// sidebar has focus or a selection is active — press F3 after a dropped
+	// sequence and the message would otherwise stay on the status bar for the
+	// rest of the session.
+	m.seqFlash = ""
+
 	var seqAction keymap.ActionID
 	if !(m.sidebarFocused && m.notifications.visible) && m.selection == nil {
 		var consumed bool
 		m, seqAction, consumed = m.stepSequence(msg, key)
 		if consumed {
 			return m, m.armSequenceTimeout()
+		}
+		// A completed sequence reaches its action WITHOUT passing through the
+		// notes block above, so the structural teardown that block performs has
+		// to be repeated here. Without it, `pane.split_h = "${prefix} %"` — what
+		// the tmux preset ships — restructures the layout while notesMode is
+		// still true and the editor is still bound to a pane that just moved.
+		//
+		// Only structural actions, matching the notes block's own split: an
+		// ordinary action completing while the pane has focus leaves notes open
+		// there too.
+		if seqAction != "" && m.notesMode && m.notesEditor != nil && isStructuralAction(seqAction) {
+			m.exitNotesModeInPlace()
 		}
 	}
 

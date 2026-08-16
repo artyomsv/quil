@@ -2,7 +2,9 @@ package config
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
@@ -85,9 +87,24 @@ func WriteBindings(b Bindings) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return fmt.Errorf("create quil dir: %w", err)
 	}
+	// O_EXCL on the temp file, not os.WriteFile. O_CREATE|O_TRUNC follows a
+	// symlink, so a pre-planted bindings.toml.tmp would redirect this write to
+	// any path the user can reach. Removing first keeps a crashed earlier write
+	// from wedging every later one.
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
+	os.Remove(tmp)
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return fmt.Errorf("create bindings temp: %w", err)
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		os.Remove(tmp)
 		return fmt.Errorf("write bindings: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("close bindings temp: %w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		os.Remove(tmp)
@@ -159,7 +176,7 @@ func encodeBindings(b Bindings) ([]byte, error) {
 // ordinary first launch, and refusing it would leave the user with no
 // bindings.toml on every subsequent launch, forever.
 func MigrateBindings(cfg Config, loadErr error) (bool, error) {
-	if loadErr != nil && !os.IsNotExist(loadErr) {
+	if loadErr != nil && !errors.Is(loadErr, fs.ErrNotExist) {
 		return false, fmt.Errorf("refusing to migrate bindings from an unreadable config: %w", loadErr)
 	}
 	if _, err := os.Stat(BindingsPath()); err == nil {

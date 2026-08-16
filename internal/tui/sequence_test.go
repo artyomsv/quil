@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/artyomsv/quil/internal/config"
+
 	tea "charm.land/bubbletea/v2"
 )
 
@@ -219,15 +221,25 @@ func TestSequence_LiteralEscape(t *testing.T) {
 		t.Fatalf("setup: ctrl+b did not arm the machine, got %v", m.pendingSeq)
 	}
 
-	next, _, consumed := m.stepSequence(ctrlB(), ctrlB().String())
-	if consumed {
-		t.Fatal("the second prefix press must fall through to the pane, not be consumed")
+	// Driven through Update, not stepSequence: the payoff is one \x02 reaching
+	// the PANE, and asserting "unhandled" plus "keyToBytes encodes \x02"
+	// separately is two halves that never meet. seqModel wires an inputCh, so
+	// the bytes are observable where they actually land.
+	m.inputCh = make(chan paneInput, inputForwardBuffer)
+	m = press(t, m, ctrlB())
+	if len(m.pendingSeq) != 0 {
+		t.Errorf("the machine must disarm on the literal escape, got %v", m.pendingSeq)
 	}
-	if len(next.pendingSeq) != 0 {
-		t.Errorf("the machine must disarm on the literal escape, got %v", next.pendingSeq)
+
+	var forwarded []byte
+	select {
+	case in := <-m.inputCh:
+		forwarded = in.data
+	default:
 	}
-	if got := string(keyToBytes(ctrlB())); got != "\x02" {
-		t.Errorf("keyToBytes(ctrl+b) = %q, want \\x02 — the literal escape relies on this", got)
+	if string(forwarded) != "\x02" {
+		t.Errorf("the pane received %q, want one literal \\x02 — a tmux inside a "+
+			"Quil pane has no reachable prefix without this", string(forwarded))
 	}
 }
 
@@ -246,12 +258,21 @@ func TestSequence_DroppedSequenceFlashes(t *testing.T) {
 	m.lastWidth, m.lastHeight = 120, 40
 
 	m = press(t, m, ctrlB())
-	m = press(t, m, tea.KeyPressMsg{Code: 'z'}) // no ctrl+b z binding
+	m = press(t, m, tea.KeyPressMsg{Code: 'z', Text: "z"}) // no ctrl+b z binding
 	if m.seqFlash == "" {
 		t.Fatal("a dropped sequence must set a flash message, not silently no-op")
 	}
-	if got := m.renderStatusBar(); !strings.Contains(got, "ctrl+b z") {
-		t.Errorf("the flash must name the sequence that was dropped, got %q", got)
+	got := m.renderStatusBar()
+	if !strings.Contains(got, "ctrl+b") {
+		t.Errorf("the flash must name the pending prefix, got %q", got)
+	}
+	// The unmatched chord must NOT be echoed. Ctrl+B is readline's
+	// backward-char, so under the tmux preset the machine arms on an ordinary
+	// shell keystroke — and the character that ends the sequence could be a
+	// character of a password at an ssh or sudo prompt. It is swallowed either
+	// way; painting it on the status bar is what this guards against.
+	if strings.Contains(got, "ctrl+b z") {
+		t.Errorf("the flash echoed the swallowed keystroke: %q", got)
 	}
 }
 
@@ -325,5 +346,89 @@ func TestSequence_TimeoutOffArmsNoTimer(t *testing.T) {
 	}
 	if cmd := m.armSequenceTimeout(); cmd != nil {
 		t.Error("a zero timeout must arm no timer")
+	}
+}
+
+// TestSequence_BeatsPluginRawKeysOnFinalChord pins the ONE deliberate
+// precedence change in the sequence machine.
+//
+// tryPluginRawKey normally lets a pane's tool claim a key outright — that is
+// what the late tier loses to. A completed sequence must beat that claim on its
+// final chord, or `pane.close = "ctrl+b x"` is dead on any pane whose plugin
+// claims x. The shipped tmux preset binds exactly that, so this is the
+// configuration users get, not a hypothetical.
+//
+// The control row is what makes the test meaningful: pressing the same final
+// chord ALONE must still be claimed by the plugin. Without it, a keymap that
+// simply stopped resolving anything would pass the first row.
+func TestSequence_BeatsPluginRawKeysOnFinalChord(t *testing.T) {
+	tests := []struct {
+		name          string
+		withPrefix    bool
+		wantForwarded bool
+	}{
+		{"completed sequence beats the raw_keys claim", true, false},
+		{"the same chord alone is still claimed", false, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m, _ := inputOrderTestModel(t, "pane-1", true)
+			m.cfg = config.Default()
+			m.cfg.Keybindings.ClosePane = "ctrl+b x"
+			m.initKeymap()
+			givePaneRawKeys(t, m, "pane-1", []string{"x"})
+
+			// Guard the fixture: the plugin must really be claiming x, or the
+			// first row passes for the wrong reason.
+			if data := m.tryPluginRawKey("x", tea.KeyPressMsg{Code: 'x', Text: "x"}); data == nil {
+				t.Fatal("fixture: the plugin does not claim x")
+			}
+
+			if tt.withPrefix {
+				updated, _ := m.Update(ctrlB())
+				got := updated.(Model)
+				if len(got.pendingSeq) != 1 {
+					t.Fatalf("ctrl+b did not arm the machine: %v", got.pendingSeq)
+				}
+				*m = got
+			}
+			_, _ = m.Update(tea.KeyPressMsg{Code: 'x', Text: "x"})
+
+			var forwarded bool
+			select {
+			case <-m.inputCh:
+				forwarded = true
+			default:
+			}
+			if forwarded != tt.wantForwarded {
+				if tt.wantForwarded {
+					t.Error("the plugin's raw_keys claim must still win for a bare chord")
+				} else {
+					t.Error("the final chord reached the pane — the plugin's raw_keys claim " +
+						"beat a completed sequence, so pane.close = \"ctrl+b x\" is dead on this pane")
+				}
+			}
+		})
+	}
+}
+
+// A three-step sequence completes through Update. MatchSeq is chord-count
+// agnostic and unit-tested at three steps, but nothing drove one through the
+// real dispatch path.
+func TestSequence_ThreeStepCompletesThroughUpdate(t *testing.T) {
+	m := seqModel(t, func(m *Model) { m.cfg.Keybindings.FocusPane = "ctrl+b w z" })
+
+	before := m.activeTabModel().FocusMode()
+	m = press(t, m, ctrlB())
+	m = press(t, m, tea.KeyPressMsg{Code: 'w'})
+	if len(m.pendingSeq) != 2 {
+		t.Fatalf("after ctrl+b w, pendingSeq = %v, want two chords armed", m.pendingSeq)
+	}
+	m = press(t, m, tea.KeyPressMsg{Code: 'z'})
+	if len(m.pendingSeq) != 0 {
+		t.Errorf("pendingSeq not cleared: %v", m.pendingSeq)
+	}
+	if m.activeTabModel().FocusMode() == before {
+		t.Error("the three-step sequence did not fire pane.focus_toggle")
 	}
 }

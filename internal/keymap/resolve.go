@@ -139,6 +139,23 @@ func resolveShadowing(parsed []parsedBinding, origin map[ActionID]int) []Conflic
 	if len(dropped) == 0 {
 		return nil
 	}
+	// A winner named earlier in the loop can itself lose later: with
+	// A="ctrl+b c", B="ctrl+b" one layer up, and C="ctrl+b c d", the row for A
+	// credits C, and C is then dropped against B. Blank a winner that kept no
+	// alternative, so F1 never credits a binding that is not in the tables.
+	survives := map[ActionID]bool{}
+	for bi := range parsed {
+		for si := range parsed[bi].seqs {
+			if !dropped[altRef{bi, si}] {
+				survives[parsed[bi].action.ID] = true
+			}
+		}
+	}
+	for i := range out {
+		if out[i].Winner != "" && !survives[out[i].Winner] {
+			out[i].Winner = ""
+		}
+	}
 	for bi := range parsed {
 		kept := parsed[bi].seqs[:0]
 		for si, seq := range parsed[bi].seqs {

@@ -48,7 +48,11 @@ func (k ConflictKind) String() string {
 	case ConflictUnknownAction:
 		return "unknown action"
 	case ConflictShadowed:
-		return "shadowed by a longer sequence"
+		// Not "by a LONGER sequence": cross-layer, the loser is the longer one
+		// — a higher-layer chord reclaiming a key a lower-layer preset uses as
+		// a sequence head. Saying "longer" there described the winner and read
+		// as backwards to the only person who would ever see the row.
+		return "unreachable binding"
 	case ConflictPrefixInvalid:
 		return "unusable prefix"
 	}
@@ -92,10 +96,28 @@ func (c Conflict) String() string {
 		// common failure there is — and "made.up is not a known action" does
 		// not say which line of the file to go and look at.
 		return fmt.Sprintf("%s: %q → %q is not a known action; ignored", c.Kind, c.Key, c.Loser)
+	case ConflictShadowed:
+		if c.Winner == "" {
+			// The binding that displaced this one was itself displaced. Say
+			// what is certain and claim no winner — a wrong direction is what
+			// this message exists to avoid.
+			return fmt.Sprintf("%s: %q → %s can never fire", c.Kind, c.Key, c.Loser)
+		}
+		return fmt.Sprintf("%s: %q → %s wins, %s never fires", c.Kind, c.Key, c.Winner, c.Loser)
 	case ConflictPrefixInvalid:
 		// The binding is dropped whole, so there is no winner to name — the
 		// Detail says which of the three malformed shapes it was.
-		return fmt.Sprintf("%s: %q → %s dropped; %s", c.Kind, c.Key, c.Loser, c.Detail)
+		//
+		// %q on the Loser, not %s. Every other branch here names an ActionID
+		// that Build already resolved through Lookup, so it is one of our own
+		// constants. This one is reached from ExpandPrefix, which runs BEFORE
+		// that filter and so can be handed a raw [bindings] table key from the
+		// user's file. That string is rendered into F1 -> Shortcuts and the
+		// log, and lipgloss measures ANSI as zero cells, so an escape sequence
+		// would survive every width budget and reach the terminal intact —
+		// exactly the attack validateBaseKey exists to stop, arriving through a
+		// field the chord parser never sees. %q escapes C0, C1 and bidi.
+		return fmt.Sprintf("%s: %q → %q dropped; %s", c.Kind, c.Key, c.Loser, c.Detail)
 	}
 	return fmt.Sprintf("%s: %q → %s wins, %s never fires", c.Kind, c.Key, c.Winner, c.Loser)
 }

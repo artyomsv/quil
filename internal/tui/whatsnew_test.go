@@ -10,6 +10,9 @@ import (
 
 	"github.com/artyomsv/quil/internal/changelog"
 	"github.com/artyomsv/quil/internal/config"
+	"github.com/artyomsv/quil/internal/ipc"
+	"github.com/artyomsv/quil/internal/plugin"
+	"github.com/artyomsv/quil/internal/update"
 )
 
 // No test in this file may call t.Parallel: several mutate QUIL_HOME-derived
@@ -158,5 +161,105 @@ func TestWhatsNewWidth_ClampsToTheTerminal(t *testing.T) {
 	// NewModel builds the dialog before any WindowSizeMsg arrives.
 	if got := whatsNewWidth(0); got != whatsNewMaxWidth {
 		t.Errorf("whatsNewWidth(0) = %d, want %d (unknown size falls back)", got, whatsNewMaxWidth)
+	}
+}
+
+func TestResolveWhatsNew_FirstRunShowsNothingButRecordsTheVersion(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	if w := resolveWhatsNew("1.60.0"); w != nil {
+		t.Errorf("first run returned a window: %+v", w)
+	}
+	if got := update.LoadLastRunVersion(config.LastRunPath()); got != "1.60.0" {
+		t.Errorf("marker = %q, want 1.60.0 — a first run must still record", got)
+	}
+}
+
+func TestResolveWhatsNew_SameVersionShowsNothing(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	if err := update.SaveLastRunVersion(config.LastRunPath(), "1.60.0"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if w := resolveWhatsNew("1.60.0"); w != nil {
+		t.Errorf("unchanged version returned a window: %+v", w)
+	}
+}
+
+func TestResolveWhatsNew_DowngradeShowsNothingAndRecords(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	if err := update.SaveLastRunVersion(config.LastRunPath(), "1.60.0"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if w := resolveWhatsNew("1.59.0"); w != nil {
+		t.Errorf("downgrade returned a window: %+v", w)
+	}
+	if got := update.LoadLastRunVersion(config.LastRunPath()); got != "1.59.0" {
+		t.Errorf("marker = %q, want 1.59.0", got)
+	}
+}
+
+// Recording "dev" would make the next real launch look like a downgrade.
+func TestResolveWhatsNew_DevBuildIsSkippedAndWritesNothing(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	if w := resolveWhatsNew("dev"); w != nil {
+		t.Errorf("dev build returned a window: %+v", w)
+	}
+	if got := update.LoadLastRunVersion(config.LastRunPath()); got != "" {
+		t.Errorf("dev build wrote the marker (%q); it must not", got)
+	}
+}
+
+func TestNewModel_MigrationOutranksWhatsNew(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	stale := []plugin.StalePlugin{{Name: "old"}}
+	m := NewModel(nil, config.Default(), "1.60.0", plugin.NewRegistry(), stale)
+	if m.dialog == dialogWhatsNew {
+		t.Error("what's-new opened while a plugin migration was pending")
+	}
+}
+
+// The update notice must not consume its once-per-version marker while
+// suppressed, or the offer is lost for good.
+func TestMaybeShowUpdateNotice_YieldsToWhatsNewWithoutBurningItsMarker(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	m := Model{cfg: config.Default(), version: "1.60.0", dialog: dialogWhatsNew}
+	m.updateInfos = map[string]*ipc.UpdateInfo{
+		"": {LatestVersion: "1.61.0", InstallWritable: true},
+	}
+	m.maybeShowUpdateNotice("")
+	if m.dialog != dialogWhatsNew {
+		t.Errorf("dialog = %v, want dialogWhatsNew — the notice must yield", m.dialog)
+	}
+	if got := update.LoadNotifiedVersion(config.UpdateNotifiedPath()); got != "" {
+		t.Errorf("the suppressed notice wrote its marker (%q); the offer is now lost", got)
+	}
+}
+
+// The F1 path must work on the very release that ships this feature, when the
+// embedded file holds exactly one record and there is no earlier version to
+// derive a range from.
+func TestLatestWindow_WorksWithASingleRecordedRelease(t *testing.T) {
+	if changelog.Latest() == nil {
+		t.Skip("the embedded highlights file records no releases yet")
+	}
+	w, ok := latestWindow()
+	if !ok {
+		t.Skip("the newest recorded release carries no entries")
+	}
+	if w.From != "" || w.Total != 1 || len(w.Releases) != 1 {
+		t.Errorf("want a one-release window with no From, got %+v", w)
+	}
+}
+
+func TestAboutMenu_WhatsNewRowIsLabelledCorrectly(t *testing.T) {
+	m := Model{cfg: config.Default(), version: "1.60.0", dialogCursor: aboutWhatsNewIndex}
+	var selected string
+	for _, line := range strings.Split(m.renderAboutDialog(), "\n") {
+		if strings.HasPrefix(line, "> ") {
+			selected = line
+		}
+	}
+	if !strings.Contains(selected, "What's New") {
+		t.Errorf("cursor at aboutWhatsNewIndex=%d highlights %q, want the What's New row",
+			aboutWhatsNewIndex, selected)
 	}
 }

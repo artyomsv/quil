@@ -2,12 +2,16 @@ package tui
 
 import (
 	"fmt"
+	"log"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
 	"github.com/artyomsv/quil/internal/changelog"
+	"github.com/artyomsv/quil/internal/config"
+	"github.com/artyomsv/quil/internal/update"
+	"github.com/artyomsv/quil/internal/version"
 )
 
 // whatsNewMaxWidth is wider than dialogWidth (60) on purpose. This dialog is a
@@ -66,6 +70,59 @@ func splitEntries(w changelog.Window) (added, changed, security, fixed []string)
 		}
 	}
 	return added, changed, security, fixed
+}
+
+// resolveWhatsNew decides whether the post-upgrade dialog should open, and
+// records the running version.
+//
+// The comparison is a persisted string against this binary's version, which
+// makes it indifferent to HOW the upgrade happened. Returns nil when there is
+// nothing to show.
+//
+// A user upgrading from a version that predates this feature has no marker, and
+// an absent marker is indistinguishable from a fresh install — the binary that
+// would have written it did not contain this feature. That one launch therefore
+// shows nothing. The marker is written then, so every later upgrade works. This
+// is inherent to any marker-based scheme and is not closed by backfilling data.
+func resolveWhatsNew(v string) *changelog.Window {
+	// A dev or unstamped build has no meaningful version, and recording "dev"
+	// would make the next real launch look like a downgrade.
+	if _, _, _, err := version.Parsed(v); err != nil {
+		return nil
+	}
+	path := config.LastRunPath()
+	last := update.LoadLastRunVersion(path)
+	if err := update.SaveLastRunVersion(path, v); err != nil {
+		log.Printf("save last-run version: %v", err)
+	}
+	if last == "" {
+		return nil // fresh install, or a first launch after a pre-feature version
+	}
+	cmp, err := version.Compare(last, v)
+	if err != nil || cmp >= 0 {
+		return nil // unparseable marker, same version, or a downgrade
+	}
+	w, ok := changelog.Between(last, v)
+	if !ok || len(w.Releases) == 0 {
+		return nil
+	}
+	return &w
+}
+
+// latestWindow is the F1 path: a one-release window built straight from the
+// newest record. Deriving it as a range from the previous record would come
+// back empty on the release that ships this feature, making the menu row a
+// silent no-op on exactly the version that introduces it.
+func latestWindow() (changelog.Window, bool) {
+	r := changelog.Latest()
+	if r == nil || len(r.Entries) == 0 {
+		return changelog.Window{}, false
+	}
+	return changelog.Window{
+		To:       r.Version,
+		Total:    1,
+		Releases: []changelog.Release{*r},
+	}, true
 }
 
 // openWhatsNew installs a window and opens the dialog.

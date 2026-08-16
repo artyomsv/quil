@@ -912,12 +912,20 @@ func NewModel(client Client, cfg config.Config, version string, registry *plugin
 		inputDone:        make(chan struct{}),
 		inputIdle:        make(chan struct{}),
 	}
-	// Migration dialog takes priority over the disclaimer — it blocks
-	// startup until all stale plugins are resolved. Show disclaimer only
-	// when no migration is pending.
-	if len(stalePlugins) == 0 && cfg.UI.ShowDisclaimer && len(disclaimerTips) > 0 {
-		m.dialog = dialogDisclaimer
-		m.disclaimerTipIdx = rand.Intn(len(disclaimerTips))
+	// Startup dialog priority: migration > what's-new > update-notice >
+	// disclaimer. Migration blocks startup until every stale plugin is
+	// resolved. What's-new outranks the disclaimer because it is specific to
+	// this launch; the disclaimer reappears next time, as it always has. The
+	// update notice is decided later, on the first broadcast, and its own guard
+	// already yields to any dialog that is already open — returning BEFORE it
+	// saves its marker, so the offer is not lost.
+	if len(stalePlugins) == 0 {
+		if w := resolveWhatsNew(version); w != nil {
+			m.openWhatsNew(*w)
+		} else if cfg.UI.ShowDisclaimer && len(disclaimerTips) > 0 {
+			m.dialog = dialogDisclaimer
+			m.disclaimerTipIdx = rand.Intn(len(disclaimerTips))
+		}
 	}
 	m.initKeymap()
 	return m

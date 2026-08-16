@@ -593,6 +593,8 @@ func (m Model) handleDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.handleProjectDialogKey(msg)
 	case dialogProjectPick:
 		return m.handleProjectPickKey(msg)
+	case dialogWhatsNew:
+		return m.handleWhatsNewKey(msg)
 	}
 	return m, nil
 }
@@ -661,15 +663,20 @@ func (m Model) handleCommandHistoryKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd)
 // cannot drift on the indices.
 const aboutUpdateIndex = 7
 
+// aboutWhatsNewIndex is the row index of "What's New" in the F1 → About (root)
+// menu. It sits directly below the dynamic update row because the two are the
+// same subject seen from either side of an upgrade.
+const aboutWhatsNewIndex = 8
+
 // aboutStopDaemonIndex is the row index of "Stop daemon" in the F1 → About
 // (root) menu. Stop daemon was promoted from the nested Settings list to the
 // root menu so it sits alongside Settings/Shortcuts/Plugins. Kept as a named
 // constant so handleAboutKey, lastAboutItem, and the confirm-dialog Esc
 // handler cannot drift on the index.
-const aboutStopDaemonIndex = 8
+const aboutStopDaemonIndex = 9
 
 func (m Model) handleAboutKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	const lastAboutItem = aboutStopDaemonIndex // 0:Settings 1:Shortcuts 2:Plugins 3:Memory 4:Client 5:Daemon 6:MCP 7:Update 8:Stop daemon
+	const lastAboutItem = aboutStopDaemonIndex // 0:Settings 1:Shortcuts 2:Plugins 3:Memory 4:Client 5:Daemon 6:MCP 7:Update 8:What's New 9:Stop daemon
 	switch msg.String() {
 	case "esc":
 		m.dialog = dialogNone
@@ -703,6 +710,13 @@ func (m Model) handleAboutKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m.openMCPLogsViewer()
 		case aboutUpdateIndex:
 			return m.handleUpdateAction()
+		case aboutWhatsNewIndex:
+			// Opened by hand rather than by an upgrade, so the window is the
+			// single most recent release.
+			if w, ok := latestWindow(); ok {
+				m.openWhatsNew(w)
+			}
+			return m, nil
 		case aboutStopDaemonIndex:
 			// Stop daemon: route to the shutdown confirm. Enter here only
 			// opens the confirm; the confirm itself requires `y` to fire
@@ -1227,6 +1241,9 @@ func (m Model) renderDialog() string {
 	case dialogUpdateNotice:
 		width = dialogWidth
 		content = m.renderUpdateNoticeDialog()
+	case dialogWhatsNew:
+		width = whatsNewWidth(m.lastWidth)
+		content = m.renderWhatsNewDialog()
 	case dialogCommandPalette:
 		width = paletteWidth
 		content = renderCommandPalette(m)
@@ -1278,6 +1295,7 @@ func (m Model) renderAboutDialog() string {
 		"View daemon log",
 		"View MCP logs",
 		aboutUpdateLabel(m.activeUpdateInfo(), m.version, m.remoteModeFor(m.activeDest())),
+		"What's New",
 		"Stop daemon",
 	}
 	for i, item := range items {

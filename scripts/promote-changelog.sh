@@ -372,13 +372,25 @@ fragments_of_type() {
   done | LC_ALL=C sort
 }
 
-# Prepend this release's records to highlights.txt, the file internal/changelog
-# embeds. Must run BEFORE the fragments are deleted — it reads them.
+# Build this release's highlights.txt into "$work/highlights.out". Does NOT
+# install it — promote() renames it into place beside CHANGELOG.md.
+#
+# Every way this function can fail must happen BEFORE CHANGELOG.md is rewritten.
+# highlights.txt is written second, so the duplicate-version guard (which reads
+# it) is blind to a half-finished promote: a die between the two writes leaves
+# `## [x.y.z]` in CHANGELOG.md with no matching `V` record, and the re-run then
+# appends a SECOND section for the same version — the exact duplicate check()
+# exists to prevent, plus a broken sed range for every later release-note
+# extraction. Not reachable from a CI re-run, which discards the half-state on a
+# fresh checkout, but changelog.d/README.md tells contributors to run this
+# locally.
+#
+# Must also run BEFORE the fragments are deleted — it reads them.
 #
 # A `V` record is written for EVERY release, including one whose only fragment
 # was `none-*`: the dialog header counts releases crossed, and the F1 path walks
 # the record list, so a release that told users nothing still happened.
-write_highlights() {
+build_highlights() {
   hl_version=$1
   hl_date=$2
 
@@ -430,7 +442,6 @@ write_highlights() {
     # as fatal.
     grep -v '^#' "$HIGHLIGHTS" || true
   } > "$hl_out"
-  mv "$hl_out" "$HIGHLIGHTS"
 }
 
 any_fragments() {
@@ -572,10 +583,15 @@ promote() {
       tail -n +"$rest" "$CHANGELOG"
     fi
   } > "$out"
-  mv "$out" "$CHANGELOG"
 
-  # Before the deletion loop below: this reads the fragments.
-  write_highlights "$version" "$date"
+  # Built BEFORE either destructive write, and before the deletion loop, so that
+  # every way it can fail happens while the tree is still untouched. What is
+  # left afterwards is two renames — which can fail on a full disk, but not on
+  # anything about the content this release is made of.
+  build_highlights "$version" "$date"
+
+  mv "$out" "$CHANGELOG"
+  mv "$work/highlights.out" "$HIGHLIGHTS"
 
   # Deleting the fragments is what keeps the NEXT branch conflict-free: a
   # rebased branch sees an empty changelog.d/ and its own new file collides

@@ -891,9 +891,11 @@ func (m *Model) SetRecentCWDs(list []string) { m.recentCWDs = list }
 // frozen at startup.
 // whatsNew is the post-upgrade window, resolved by the caller via
 // ResolveWhatsNew and passed in rather than computed here — that resolution
-// WRITES the last-run marker, and this constructor must stay free of disk I/O
-// so a test building a Model without QUIL_HOME set cannot touch the real
-// ~/.quil. Nil when there is nothing to show.
+// WRITES the last-run marker, and no constructor may write to $QUIL_HOME: a
+// test building a Model without setting it would clobber the developer's real
+// ~/.quil, invisibly, because dev.sh test runs with a throwaway /root. (This
+// function still READS there via LoadInstances and LoadRecentCWDs; the write is
+// what had to move.) Nil when there is nothing to show.
 func NewModel(client Client, cfg config.Config, version string, registry *plugin.Registry, stalePlugins []plugin.StalePlugin, whatsNew *changelog.Window) Model {
 	m := Model{
 		client:  client,
@@ -1138,6 +1140,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.lastWidth = msg.Width
 		m.lastHeight = msg.Height
 		m.resizeSeq++
+
+		// A taller terminal shows more rows, which lowers the What's New
+		// dialog's scroll ceiling. The renderer clamps its own copy, so
+		// nothing draws wrong — but the STORED offset would sit above the new
+		// limit and cost one dead key press before the view moved.
+		if m.dialog == dialogWhatsNew {
+			m.clampWhatsNewScroll()
+		}
 
 		// First resize: apply immediately for initial attach
 		if !m.sized {

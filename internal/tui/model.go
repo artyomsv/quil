@@ -387,13 +387,13 @@ type Model struct {
 	pendingSeq  []keymap.Chord
 	pendingGen  int
 	pendingPane string
-	seqFlash   string
+	seqFlash    string
 	// seqTimeout drops a pending sequence after this long. Zero = off, which
 	// is the shipped default and matches tmux.
 	seqTimeout time.Duration
 	version    string
-	sized        bool            // the terminal has reported its geometry at least once
-	attached     map[string]bool // destinations already attached — see attachAllDests
+	sized      bool            // the terminal has reported its geometry at least once
+	attached   map[string]bool // destinations already attached — see attachAllDests
 	// offlineWoken records which offline destinations have had their ladder
 	// started, so the wake-up fires once rather than on every resize.
 	offlineWoken map[string]bool
@@ -4029,8 +4029,17 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		logger.Debug("handleKey: key=%q Mod=%v Code=%d Text=%q", key, msg.Mod, msg.Code, msg.Text)
 	}
 
-	// Dialog mode: route input to dialog handler
+	// Dialog mode: route input to dialog handler.
+	//
+	// Cancel any pending sequence on the way in. A dialog can open with no
+	// keypress at all — MsgPluginError matches a pattern against a pane's PTY
+	// output, and the upgrade prompt is driven from WindowSizeMsg — and while
+	// one is up View draws only the dialog, so the pending indicator is not on
+	// screen either. Without this, dismissing that dialog leaves a prefix armed
+	// that the user has no way to know about, and the next character they type
+	// completes a sequence they never started.
 	if m.dialog != dialogNone {
+		m.cancelSequence()
 		return m.handleDialogKey(msg)
 	}
 

@@ -18,7 +18,6 @@ func keySpecsFromConfig(kb config.KeybindingsConfig) map[keymap.ActionID]string 
 	return config.KeySpecsFromConfig(kb)
 }
 
-
 // buildKeymap resolves a config into the dispatch keymap.
 //
 // Two layers, not one. The registry's own defaults go underneath because the
@@ -121,13 +120,19 @@ func (m *Model) SetBindings(b config.Bindings) {
 //
 // It answers FALSE for an action bound only to a multi-chord sequence, and that
 // is correct rather than a gap: every caller is a mode that owns the keyboard,
-// and the sequence machine is deliberately inert in all of them. Under a
-// sequence-heavy preset this does mean the "never swallow quit" passthrough in
-// the context menu and the overlay stops applying — Esc still closes both — and
-// the notes-mode structural teardown moves to handleKey's completed-sequence
-// path, which is where a sequence can actually arrive. Do not "fix" this by
-// matching a sequence's head chord here: that would make the context menu quit
-// on a bare prefix press.
+// and the sequence machine is deliberately inert in all of them. Do not "fix"
+// it by matching a sequence's head chord here — that would make the context
+// menu quit on a bare prefix press.
+//
+// The cost, under a preset that binds these actions to sequences (tmux does):
+// the "never swallow quit" passthrough in the context menu and the overlay
+// stops applying, and notes mode loses its Alt+Left / Alt+Right focus switch,
+// since both are ${prefix}-based there. Esc still closes the menu and the
+// overlay. The notes-mode STRUCTURAL teardown is handled instead on handleKey's
+// completed-sequence path, which is the only place a sequence can arrive.
+//
+// This list is the known set, not a proof of completeness: any caller added
+// here inherits the same blind spot.
 func (m *Model) isAction(key string, id keymap.ActionID) bool {
 	for _, tier := range []keymap.Tier{keymap.TierEarly, keymap.TierLate} {
 		if got, ok := m.keymap.MatchTier(tier, key); ok && got == id {

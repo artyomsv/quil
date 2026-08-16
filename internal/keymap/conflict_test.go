@@ -232,3 +232,46 @@ func TestBuild_ShadowingOrderIsDeterministic(t *testing.T) {
 		}
 	}
 }
+
+// TestConflict_StringNeverEmitsControlBytes is a regression guard for the whole
+// class, not for one branch.
+//
+// Conflict.String() is rendered into F1 -> Shortcuts, where lipgloss measures
+// ANSI as zero cells — so an escape sequence survives every width budget and
+// reaches the terminal intact. An OSC 52 payload sets the system clipboard on
+// one keypress. validateBaseKey stops that for chords; this pins the other two
+// routes into the same sink.
+//
+// Detail is the reason this is a test rather than a code change: it is built
+// from err.Error() on input that FAILED to parse, so it bypasses
+// validateBaseKey by construction. Every constructor that reaches it quotes its
+// input today, and nothing else pins that — one future fmt.Errorf("chord %s")
+// would silently re-open the path.
+func TestConflict_StringNeverEmitsControlBytes(t *testing.T) {
+	const payload = "\x1b]52;c;QUFB\x07"
+
+	// Both routes a user-supplied string can take into a Conflict: a spec that
+	// fails to parse, and a prefix that fails to validate.
+	_, malformed := Build(map[ActionID]string{"tab.new": payload})
+	prefixed := func() []Conflict {
+		_, cs := ExpandPrefix(map[ActionID]string{"tab.new": "${prefix} c"}, payload)
+		return cs
+	}()
+
+	groups := map[string][]Conflict{"malformed spec": malformed, "invalid prefix": prefixed}
+	for name, cs := range groups {
+		if len(cs) == 0 {
+			t.Errorf("%s: produced no conflict, so this test asserts nothing", name)
+		}
+		for _, c := range cs {
+			got := c.String()
+			for i, r := range got {
+				if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+					t.Errorf("%s: Conflict.String() emits U+%04X at byte %d — it reaches the "+
+						"terminal through F1 unmeasured: %q", name, r, i, got)
+					break
+				}
+			}
+		}
+	}
+}

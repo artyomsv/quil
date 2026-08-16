@@ -3708,44 +3708,43 @@ func (m Model) notesKeyExempt(key string) bool {
 	if key == "" {
 		return false
 	}
-	kb := m.cfg.Keybindings
-	// Vertical spatial nav — there's no up/down axis in the notes 2-panel
-	// layout (pane|editor), so Alt+Up/Alt+Down flush and exit notes, then
-	// the global handler runs NavigateDirection to the closest neighbor.
-	// Alt+Left and Alt+Right are handled by the notes-mode focus toggle
-	// earlier in handleKey and never reach this function.
-	exempt := []string{
+	// Exempt ACTIONS, not raw config strings. Resolving through the registry is
+	// what lets the binding source move: comparing against cfg.Keybindings here
+	// would silently start matching against empty strings the moment bindings
+	// live anywhere else, and every structural key would stop flushing the
+	// editor before it fires.
+	exempt := []keymap.ActionID{
 		// Vertical spatial nav — there's no up/down axis in the notes 2-panel
 		// layout (pane|editor), so Alt+Up/Alt+Down flush and exit notes, then
 		// the global handler runs NavigateDirection to the closest neighbor.
 		// Alt+Left and Alt+Right are handled by the notes-mode focus toggle
 		// earlier in handleKey and never reach this function.
-		kb.PaneUp, kb.PaneDown,
+		"pane.up", "pane.down",
 		// Structural — close/split implicitly destroys the bound pane and must
 		// flush + exit notes before running.
-		kb.ClosePane, kb.CloseTab, kb.SplitHorizontal, kb.SplitVertical,
+		"pane.close", "tab.close", "pane.split_h", "pane.split_v",
 		// Tab management.
-		kb.NewTab, kb.RenameTab, kb.RenamePane, kb.CycleTabColor,
+		"tab.new", "tab.rename", "pane.rename", "tab.cycle_color",
 		// Other modes.
-		kb.FocusPane,
+		"pane.focus_toggle",
 		// Force repaint — view-level, harmless while the editor is open.
-		kb.Redraw,
+		"app.redraw",
 		// Notification center.
-		kb.NotificationToggle, kb.NotificationFocus, kb.GoBack, kb.MutePane, kb.ToggleEager,
+		"notification.toggle", "notification.focus", "pane.go_back", "pane.mute", "pane.toggle_eager",
 		// Project sidebar — view-level, and resizeAllPanes covers the notes
 		// layout's own dependency on paneAreaWidth().
-		kb.SidebarToggle,
+		"sidebar.toggle",
 		// Preview wrap toggle — pane-level view state, harmless in notes mode.
-		kb.ToggleWrap,
+		"pane.toggle_wrap",
 		// Pane process restart — opens a confirm dialog, never types into
 		// the notes editor.
-		kb.RestartPane,
+		"pane.restart",
 		// Tools and dialogs.
-		kb.JSONTransform, kb.QuickActions, kb.CommandHistory, kb.NewProject,
+		"json.transform", "pane.quick_actions", "pane.command_history", "project.new",
 		// Project navigation — switchProject (reached by both) already calls
 		// exitNotesModeInPlace itself, so exempting these just lets the key
 		// reach it instead of being swallowed as editor text.
-		kb.ProjectPicker, kb.ProjectToggle, kb.ProjectNext, kb.ProjectPrev,
+		"project.picker", "project.toggle", "project.next", "project.prev",
 		// Attention queue — notes are exactly the sort of thing left open
 		// while an agent grinds in another pane, so "notes are focused" is a
 		// likely state at the moment the queue is needed, arguably more so
@@ -3754,10 +3753,10 @@ func (m Model) notesKeyExempt(key string) bool {
 		// jumpToNextBlocked, so the teardown always lands on the OLD tab
 		// whether the jump crosses a project boundary or only moves the
 		// active tab within the current one.
-		kb.AttentionQueue,
+		"project.attention_queue",
 	}
-	for _, b := range exempt {
-		if kbMatches(key, b) {
+	for _, id := range exempt {
+		if m.isAction(key, id) {
 			return true
 		}
 	}
@@ -3962,7 +3961,6 @@ func (m Model) View() tea.View {
 
 func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
-	kb := m.cfg.Keybindings
 
 	// Per-key trace for modified keys. Flip [logging] level = "debug" in
 	// config.toml to see every modified key reaching Quil. Useful for
@@ -4001,19 +3999,19 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// Universal keys — handled the same way regardless of which side
 		// currently has focus.
 		switch {
-		case kbMatches(key, kb.NotesToggle):
+		case m.isAction(key, "pane.notes_toggle"):
 			return m.exitNotesMode()
-		case kbMatches(key, kb.Quit):
+		case m.isAction(key, "app.quit"):
 			if err := m.notesEditor.Close(); err != nil {
 				log.Printf("save notes on quit: %v", err)
 			}
 			return m, tea.Quit
-		case kbMatches(key, kb.PaneLeft):
+		case m.isAction(key, "pane.left"):
 			// Alt+Left — focus the bound pane (on the left in notes layout).
 			// Idempotent: no-op if the pane is already focused.
 			m.notesPaneFocused = true
 			return m, nil
-		case kbMatches(key, kb.PaneRight):
+		case m.isAction(key, "pane.right"):
 			// Alt+Right — focus the editor (on the right in notes layout).
 			// Idempotent: no-op if the editor is already focused.
 			m.notesPaneFocused = false
@@ -4024,8 +4022,8 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// the bound pane. Flush + exit notes first, regardless of which
 		// side currently has focus, then fall through to the normal
 		// handler so the structural action still fires.
-		structural := kbMatches(key, kb.ClosePane) || kbMatches(key, kb.CloseTab) ||
-			kbMatches(key, kb.SplitHorizontal) || kbMatches(key, kb.SplitVertical)
+		structural := m.isAction(key, "pane.close") || m.isAction(key, "tab.close") ||
+			m.isAction(key, "pane.split_h") || m.isAction(key, "pane.split_v")
 		if structural {
 			m.exitNotesModeInPlace()
 		} else if m.notesPaneFocused {

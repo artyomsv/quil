@@ -728,6 +728,11 @@ func newNotesTestModel(t *testing.T, ne *NotesEditor) *Model {
 func TestModel_NotesKeyExempt_AllowsGlobalShortcuts(t *testing.T) {
 	t.Parallel()
 	m := Model{cfg: config.Default()}
+	// notesKeyExempt resolves through the action registry now, so a
+	// directly-built Model needs the keymap NewModel would have given it.
+	// Without this, isAction answers false for every key and the test fails on
+	// wiring rather than on the exemption list it is checking.
+	m.initKeymap()
 	kb := m.cfg.Keybindings
 
 	// Keys that MUST bypass the notes editor. Alt+Up/Alt+Down are exempt

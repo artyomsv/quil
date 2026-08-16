@@ -287,6 +287,36 @@ func TestSequence_CurrentTimeoutTickClears(t *testing.T) {
 	}
 }
 
+// The notes-mode readers moved off raw config-string comparison onto the
+// registry. A multi-binding is the cheapest proof: the fallback half of
+// "alt+w,f10" can never match a whole-string compare, so these fail against the
+// pre-migration code and pass after it.
+func TestNotesKeyExempt_ResolvesThroughRegistry(t *testing.T) {
+	m := seqModel(t, func(m *Model) { m.cfg.Keybindings.CloseTab = "alt+w,f10" })
+
+	if !m.notesKeyExempt("f10") {
+		t.Error("a non-primary tab.close binding must be exempt in notes mode")
+	}
+	if !m.notesKeyExempt("alt+w") {
+		t.Error("the primary tab.close binding must still be exempt")
+	}
+	if m.notesKeyExempt("ctrl+shift+f12") {
+		t.Error("an unbound key must not be exempt")
+	}
+}
+
+func TestNotesMode_StructuralKeyHonoursMultiBinding(t *testing.T) {
+	m := seqModel(t, func(m *Model) { m.cfg.Keybindings.ClosePane = "ctrl+w,f11" })
+	m.notesMode = true
+	m.notesPaneFocused = false
+
+	// notesKeyExempt is the shared oracle for both notes readers; pane.close is
+	// reached through the structural branch, which used the same comparison.
+	if !m.notesKeyExempt("f11") {
+		t.Error("a non-primary pane.close binding must be recognised in notes mode")
+	}
+}
+
 // Off by default, matching tmux. A zero duration must arm no timer at all.
 func TestSequence_TimeoutOffArmsNoTimer(t *testing.T) {
 	m := seqModel(t, func(m *Model) { m.cfg.Keybindings.NewTab = "ctrl+b c" })

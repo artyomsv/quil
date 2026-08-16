@@ -10,13 +10,17 @@ import "strings"
 // shortcut with Keymap.Display, and the reconnect screen asks Keymap.Keys for
 // the quit bindings and hands them to isFreezeEscape.
 //
-// Three kbMatches call sites remain, and only the first two are Stage 2's to
-// remove: notesKeyExempt and the notes-mode key split inside handleKey (both
-// still fed by the raw config keybindings the notes block reads directly —
-// Stage 2 replaces this with the prefix state machine). The third, Update's
-// reconnect resume-key check, matches against the hardcoded
-// reconnectResumeKey constant rather than a config value and stays even
-// after Stage 2. Do not add new call sites.
+// ONE kbMatches call site remains: Update's reconnect resume-key check, which
+// matches against the hardcoded reconnectResumeKey constant rather than a
+// config value and so has nothing to resolve through the registry. The notes
+// readers that used to be here — notesKeyExempt and the notes-mode key split
+// inside handleKey — now go through Model.isAction, which is what lets the
+// binding source move off cfg.Keybindings without those two silently starting
+// to compare against empty strings.
+//
+// handleKey itself no longer reads cfg.Keybindings at all.
+//
+// Do not add new call sites.
 //
 // kbMatches reports whether key matches configured, where configured is
 // either a single binding ("alt+f2") or a comma-separated list of

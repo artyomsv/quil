@@ -270,7 +270,23 @@ prev_pane = "shift+tab"
 
 ## Customizing keybindings
 
-Every binding listed above corresponds to a key in `~/.quil/config.toml` under `[keybindings]`. See [Configuration](configuration.md#keybindings) for the full list of overridable bindings.
+Bindings live in `~/.quil/bindings.toml`, keyed by **action ID** rather than by config field name:
+
+```toml
+preset = "default"
+
+[bindings]
+"pane.rename" = "alt+shift+r"
+"project.picker" = ""            # explicitly unbound
+```
+
+F1 → Shortcuts lists every action ID alongside its current key.
+
+If you are upgrading, your existing `[keybindings]` table in `config.toml` is migrated to this file on first launch. Only settings that differ from the shipped defaults are carried across — a binding you never changed stays free to follow future default changes instead of being frozen at today's value. The old table is left in `config.toml` for one release as a fallback, but it is no longer read.
+
+### Windows paste
+
+`pane.paste` ships as three alternatives — `ctrl+v, ctrl+alt+v, f8`. Windows Terminal captures `Ctrl+V` for its own paste and never delivers it to Quil, and `Ctrl+Alt+V` is ambiguous with AltGr on European layouts. **If you rebind `pane.paste`, keep an `f8` alternative** or Windows users lose the only reliable trigger.
 
 ### How a binding is read
 
@@ -292,28 +308,93 @@ Open **F1 → Shortcuts**. If Quil could not honour a binding, a warning row app
 | `cross-tier shadowing` | Two actions claim the same key, and one of them is resolved earlier in the dispatch order, so the other can never fire. |
 | `collides with a built-in key` | The key is also handled by Quil outside the binding system — `F1`, `Ctrl+N`, `Alt+1`…`Alt+9`, the `F8` / `Ctrl+Alt+V` paste aliases, or the text-selection chords (`Shift+Arrow`, `Ctrl+Shift+Left/Right`, `Ctrl+Alt+Shift+Left/Right`). The message names which one wins. |
 | `unreadable binding` | The spec did not parse. That action fell back to its default; every other binding is unaffected. |
-| `not yet dispatched` | A multi-step sequence (see below). The syntax parses, but nothing acts on it yet. |
+| `shadowed by a longer sequence` | One binding is the opening of another — binding both `ctrl+b` and `ctrl+b c` means the first can never fire, because pressing it always waits for a second key. The message names which one survives. |
+| `unusable prefix` | A binding uses `${prefix}` but `prefix` is unset, or is not exactly one chord. Those bindings are dropped rather than half-expanded. |
 
 These also go to the client log, so a binding that breaks the F1 dialog itself is still diagnosable.
 
-### Multi-step sequences are parsed but not yet active
+## Key sequences
 
-The config parser already accepts a space-separated sequence:
+A binding can be several keys pressed in order, separated by spaces:
 
 ```toml
-[keybindings]
-new_tab = "ctrl+b c"
+# ~/.quil/bindings.toml
+[bindings]
+"tab.new" = "ctrl+b c"
 ```
 
-This is groundwork for the tmux-style prefix keymap described below. **It does not work yet.** Quil parses it, stores it, and reports it in F1 as `not yet dispatched` — pressing `Ctrl+B` then `c` does nothing, and `Ctrl+B` still reaches your shell. Use single chords until the prefix engine ships.
+Press `Ctrl+B`, then `c`. While Quil is waiting for the second key the status bar shows `ctrl+b…`; `Esc` cancels, and a combination bound to nothing says so rather than doing nothing quietly.
 
-## Coming for tmux users
+Three things worth knowing:
 
-Quil's splits, spatial pane navigation, and detach-on-quit behaviour already mirror tmux, but the **keymap does not**. There is no `Ctrl+B` prefix today: every Quil binding is a single chord, so tmux muscle memory (`Ctrl+B` `%`, `Ctrl+B` `c`, `Ctrl+B` `z`) does not carry over.
+- **Pressing the opening key twice sends it through to the pane.** With `Ctrl+B` as a sequence opener, `Ctrl+B` `Ctrl+B` delivers one literal `Ctrl+B` to whatever is running. This is what keeps a tmux *inside* a Quil pane reachable — the same escape tmux itself uses.
+- **A sequence takes priority over a plugin's `raw_keys`.** If a pane's tool claims `x` and you bind `ctrl+b x`, the sequence wins. Single-chord bindings are unaffected.
+- **Sequences are inert wherever something else owns the keyboard** — dialogs, the command palette, an inline rename, the context menu, a full-screen overlay, the notification sidebar, and while text is selected.
 
-Closing that gap is planned in two further stages:
+To bind the comma key, write `comma` — a literal `,` separates alternatives:
 
-- **Prefix sequences** — a real `prefix + key` state machine, so `Ctrl+B` `c` opens a tab. Includes the escape hatch tmux users expect: pressing the prefix twice sends one literal prefix to the pane, so a tmux running *inside* a Quil pane stays reachable.
-- **Keymap presets and `bindings.toml`** — select a named keymap (`default`, `tmux`) in one line, rebind the prefix in one more, and keep your own overrides in a dedicated file instead of 41 individual config fields.
+```toml
+"tab.rename" = "ctrl+b comma"
+```
 
-Until those land, the closest thing to a tmux keymap is rebinding the individual actions in `[keybindings]` — see [Configuration](configuration.md#keybindings) for the full list. Quil's defaults deliberately avoid the Alt-letter keys AI tools claim, so there is room to move things around.
+## Keymap presets
+
+Set a whole keymap in one line:
+
+```toml
+# ~/.quil/bindings.toml
+preset = "tmux"
+```
+
+**Presets replace, they do not add.** Selecting `tmux` means `Ctrl+T` no longer opens a tab and `Ctrl+W` no longer closes a pane — those keys belong to the tmux layout now. Any action the preset does not mention keeps its usual key: `Alt+Shift+P` still opens the command palette, `Alt+G` still toggles lazygit.
+
+Want one of them back? Override it:
+
+```toml
+preset = "tmux"
+
+[bindings]
+"tab.new" = "ctrl+b c, ctrl+t"   # both
+```
+
+### The tmux preset
+
+| tmux | Quil action |
+|---|---|
+| `prefix c` | New tab |
+| `prefix ,` | Rename tab |
+| `prefix &` | Close tab |
+| `prefix n` / `prefix p` | Next / previous tab |
+| `prefix 1`–`9` | Switch to tab 1–9 |
+| `prefix %` | Split side by side |
+| `prefix "` | Split top/bottom |
+| `prefix x` | Close pane |
+| `prefix z` | Toggle focus mode (tmux zoom) |
+| `prefix o` | Next pane |
+| `prefix ←↑↓→` | Focus pane in that direction |
+| `prefix [` | Scroll page up |
+| `prefix d` | Quit — the daemon keeps running, so this is tmux's detach |
+| `prefix ?` | Show this shortcut list |
+
+`prefix 0` is deliberately unbound: tmux windows count from 0 and Quil tabs count from 1, so mapping it to tab 1 would double-bind that tab and hide tab 9.
+
+### Changing the prefix
+
+```toml
+preset = "tmux"
+prefix = "ctrl+a"
+```
+
+One line rebinds every `${prefix}` binding in the preset.
+
+**Check F1 after changing it.** A prefix that collides with an inherited default degrades quietly: `prefix = "ctrl+w"` makes every preset sequence shadow the default `Ctrl+W` binding for closing a pane. That is coherent — the longer sequence wins — but the only place it is visible is F1's warning rows.
+
+An unmodified letter as the prefix (`prefix = "a"`) is allowed but warns: it is swallowed globally, before any pane sees it.
+
+### Sequence timeout
+
+Off by default, matching tmux — a pending prefix waits indefinitely. To make it expire:
+
+```toml
+sequence_timeout = "500ms"
+```

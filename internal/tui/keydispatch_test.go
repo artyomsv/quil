@@ -538,3 +538,54 @@ func handleKeySource(t *testing.T, src string) string {
 	}
 	return rest[:end]
 }
+
+// TestPresetChords_MatchRealKeyPresses extends the shipped-defaults check to
+// every preset, which is where it is most needed: the tmux keymap is the only
+// thing in the tree binding "%", "\"", "&", "[" and "?", and a chord bubbletea
+// spells differently is a silently dead key with the conflict checker green.
+//
+// keymap cannot do this itself — it imports stdlib only and so can never build
+// a tea.KeyPressMsg.
+func TestPresetChords_MatchRealKeyPresses(t *testing.T) {
+	for _, name := range keymap.PresetNames() {
+		p, err := keymap.LoadPreset(name)
+		if err != nil {
+			t.Fatalf("LoadPreset(%s): %v", name, err)
+		}
+		prefix := p.Prefix
+		if prefix == "" {
+			prefix = "ctrl+b"
+		}
+		expanded, conflicts := keymap.ExpandPrefix(p.Bindings, prefix)
+		for _, c := range conflicts {
+			t.Fatalf("preset %s: %s", name, c)
+		}
+
+		for id, spec := range expanded {
+			// Parse first: dispatch matches CANONICAL chords, so those are what
+			// have to equal a real press. It is also the only way an aliased
+			// spelling can be checked at all — the tmux preset writes the comma
+			// key as "comma", and the canonical form is ",".
+			seqs, err := keymap.ParseSpec(spec)
+			if err != nil {
+				t.Errorf("preset %s, %s = %q: %v", name, id, spec, err)
+				continue
+			}
+			for _, seq := range seqs {
+				for _, c := range seq {
+					chord := c.String()
+					t.Run(name+"/"+string(id)+"/"+chord, func(t *testing.T) {
+						msg, ok := keyPressForChord(chord)
+						if !ok {
+							t.Fatalf("no tea.KeyPressMsg encoding for %q — extend keyPressForChord", chord)
+						}
+						if got := msg.String(); got != chord {
+							t.Fatalf("bubbletea renders this key as %q but preset %s canonicalizes it to %q — "+
+								"either the fixture's Code is wrong or the binding is dead", got, name, chord)
+						}
+					})
+				}
+			}
+		}
+	}
+}

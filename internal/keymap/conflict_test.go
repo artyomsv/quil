@@ -32,7 +32,7 @@ func TestBuild_HardcodedCollision(t *testing.T) {
 	// isSelectionExtendKey (internal/tui/model.go), unguarded ahead of the
 	// late-tier lookup.
 	for _, key := range []string{
-		"f1", "ctrl+n", "alt+1", "alt+9", "f8", "ctrl+alt+v",
+		"f1", "ctrl+n", "f8", "ctrl+alt+v",
 		"shift+left", "shift+right", "shift+up", "shift+down",
 		"ctrl+shift+left", "ctrl+shift+right",
 		"ctrl+alt+shift+left", "ctrl+alt+shift+right",
@@ -52,8 +52,37 @@ func TestBuild_HardcodedCollision(t *testing.T) {
 	}
 }
 
+// alt+1..9 were promoted to tab.switch_1..9 registry actions, so they are no
+// longer intercepted outside the registry. Binding another action to one is an
+// ordinary duplicate now, not a collision with built-in behaviour — and the
+// message matters, because "collides with a built-in key" would send a user
+// looking for a hardcoded key that no longer exists.
+func TestBuild_AltDigitsAreActionsNotHardcoded(t *testing.T) {
+	_, conflicts := Build(map[ActionID]string{"tab.switch_1": "alt+1"})
+	for _, c := range conflicts {
+		if c.Kind == ConflictHardcoded && c.Key == "alt+1" {
+			t.Errorf("alt+1 is a registry action now and must not report a built-in collision: %s", c)
+		}
+	}
+
+	// Two actions on the same digit is a plain duplicate, tie-broken by Order.
+	_, conflicts = Build(map[ActionID]string{"tab.switch_1": "alt+1", "pane.close": "alt+1"})
+	var dup bool
+	for _, c := range conflicts {
+		if c.Kind == ConflictDuplicate && c.Key == "alt+1" {
+			dup = true
+			if c.Winner != "pane.close" {
+				t.Errorf("duplicate winner = %q, want pane.close (Order 2200 beats tab.switch_1's 4600)", c.Winner)
+			}
+		}
+	}
+	if !dup {
+		t.Errorf("want a ConflictDuplicate for alt+1, got %+v", conflicts)
+	}
+}
+
 func TestBuild_NoFalsePositives(t *testing.T) {
-	// alt+0 is NOT intercepted — only alt+1..alt+9 are.
+	// alt+0 is bound to nothing and intercepted by nothing.
 	_, conflicts := Build(map[ActionID]string{"pane.close": "alt+0"})
 	if len(conflicts) != 0 {
 		t.Errorf("alt+0 reported a conflict: %+v", conflicts)
@@ -131,7 +160,7 @@ func TestConflict_HardcodedNamesTheRealWinner(t *testing.T) {
 		// After both tier switches: the action wins whichever tier it is on.
 		{"late action on a paste alias", "pane.restart", "f8", "pane.restart", "paste"},
 		{"early action on f1", "pane.mute", "f1", "pane.mute", "help"},
-		{"late action on alt+1", "pane.close", "alt+1", "pane.close", "tab 1"},
+
 		{"early action on ctrl+n", "pane.mute", "ctrl+n", "pane.mute", "new pane"},
 		// Between the tiers: isSelectionExtendKey runs after the early switch
 		// and before the late one, so the tier decides.

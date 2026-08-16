@@ -66,10 +66,19 @@ func keySpecsFromConfig(kb config.KeybindingsConfig) map[keymap.ActionID]string 
 	}
 }
 
-// buildKeymap resolves a config into the dispatch keymap. Build handles a
-// malformed spec per-action, so there is no whole-config fallback to do here.
+// buildKeymap resolves a config into the dispatch keymap.
+//
+// Two layers, not one. The registry's own defaults go underneath because the
+// legacy [keybindings] table has no field for the twelve actions promoted out
+// of handleKey's reserved-key switch (tab.switch_1..9, tab.next, tab.prev,
+// system.shortcuts) — building from the config alone would leave Alt+1..9
+// bound to nothing at all. The config layer on top still wins for every one of
+// the 42 fields it does carry.
+//
+// Build handles a malformed spec per-action, so there is no whole-config
+// fallback to do here.
 func buildKeymap(kb config.KeybindingsConfig) (*keymap.Keymap, []keymap.Conflict) {
-	km, conflicts := keymap.Build(keySpecsFromConfig(kb))
+	km, conflicts := keymap.BuildLayered(keymap.DefaultLayer(), keySpecsFromConfig(kb))
 	for _, c := range conflicts {
 		logger.Warn("keybindings: %s", c)
 	}

@@ -474,6 +474,11 @@ func TestShortcutsDialog_ListsTheHunkBinding(t *testing.T) {
 	t.Parallel()
 	m := newSplitDragTestModel(t)
 	m.cfg = config.Default()
+	// Tall enough for the whole list. renderShortcutsDialog windows its rows
+	// around the cursor, and promoting tab.switch_1..9 pushed the Panes group
+	// below a 40-row fold — the row is still reachable by scrolling, which
+	// shortcuts_scroll_test.go covers, but this test is about the CONTENT.
+	m.height = 100
 
 	out := stripANSI(m.renderShortcutsDialog())
 	if !strings.Contains(out, m.cfg.Keybindings.ToggleHunk) {

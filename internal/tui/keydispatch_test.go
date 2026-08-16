@@ -389,11 +389,15 @@ func TestHandleKey_EveryDispatchedActionHasACaseArm(t *testing.T) {
 
 	var checked int
 	for _, a := range keymap.Actions() {
-		// The two forms an arm can take: its own case, or a label shared with
-		// the arm above it (project.next / project.prev).
+		// The three forms an arm can take: its own case, the LAST label of a
+		// shared arm (project.next / project.prev), or a label in the middle
+		// of one (tab.switch_1..9 share a single arm across two source lines).
 		at := strings.Index(body, "case \""+string(a.ID)+"\"")
 		if at < 0 {
 			at = strings.Index(body, ", \""+string(a.ID)+"\":")
+		}
+		if at < 0 {
+			at = strings.Index(body, "\""+string(a.ID)+"\",")
 		}
 		if a.ID == "json.transform" {
 			if at >= 0 {
@@ -438,7 +442,11 @@ func TestHandleKey_EveryDispatchedActionHasACaseArm(t *testing.T) {
 // Code fails loudly here instead of quietly asserting about the wrong key.
 func TestKeymap_EveryShippedDefaultMatchesARealKeyPress(t *testing.T) {
 	km, _ := buildKeymap(config.Default().Keybindings)
-	specs := keySpecsFromConfig(config.Default().Keybindings)
+	// DefaultLayer, not keySpecsFromConfig: the promoted actions have no config
+	// field, so walking the config map would silently skip alt+1..9 — the very
+	// bindings that just moved from a hardcoded switch into the registry and
+	// therefore the ones most in need of a real-keypress check.
+	specs := keymap.DefaultLayer()
 
 	var checked int
 	for _, a := range keymap.Actions() {
@@ -464,9 +472,18 @@ func TestKeymap_EveryShippedDefaultMatchesARealKeyPress(t *testing.T) {
 			checked++
 		}
 	}
-	if checked < len(keymap.Actions())-2 { // next_pane and prev_pane ship unbound
-		t.Errorf("only %d chords checked across %d actions — the walk is skipping bindings",
-			checked, len(keymap.Actions()))
+	// Counted, not a magic offset: several actions ship deliberately unbound
+	// (pane.next, pane.prev, tab.next, tab.prev, system.shortcuts), and a
+	// hardcoded allowance silently absorbs the next skipped binding.
+	var bound int
+	for _, a := range keymap.Actions() {
+		if a.Default != "" {
+			bound++
+		}
+	}
+	if checked < bound {
+		t.Errorf("only %d chords checked across %d bound actions — the walk is skipping bindings",
+			checked, bound)
 	}
 }
 

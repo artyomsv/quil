@@ -30,6 +30,25 @@ type Keymap struct {
 // and reports a ConflictMalformed; an unknown ID is ignored with a conflict.
 // One bad line in config.toml must not cost the user their other 40 bindings.
 func Build(specs map[ActionID]string) (*Keymap, []Conflict) {
+	return buildWithOrigin(specs, nil)
+}
+
+// parsedBinding is one action's alternatives after parsing and before
+// insertion. Shadow resolution runs on these rather than on spec STRINGS, and
+// that is not a style choice: rebuilding a spec by joining surviving
+// alternatives with "," is unreadable back through ParseSpec the moment a
+// binding uses the comma key itself, and it also hides a malformed spec from
+// Build's own per-action fallback.
+type parsedBinding struct {
+	action Action
+	seqs   []Sequence
+}
+
+// buildWithOrigin is Build plus the layer each action's spec came from.
+//
+// origin may be nil, which makes every action layer 0 — all ties, which is
+// exactly what a single flat spec map means.
+func buildWithOrigin(specs map[ActionID]string, origin map[ActionID]int) (*Keymap, []Conflict) {
 	km := &Keymap{
 		chords:   map[Tier]map[string]ActionID{TierEarly: {}, TierLate: {}},
 		bindings: make(map[ActionID][]Sequence, len(specs)),
@@ -62,6 +81,8 @@ func Build(specs map[ActionID]string) (*Keymap, []Conflict) {
 		conflicts = append(conflicts, Conflict{Kind: ConflictUnknownAction, Key: specs[id], Loser: id})
 	}
 
+	// Phase 1 — parse every spec, with the per-action fallback.
+	parsed := make([]parsedBinding, 0, len(resolved))
 	for _, a := range resolved {
 		seqs, err := ParseSpec(specs[a.ID])
 		if err != nil {
@@ -73,8 +94,21 @@ func Build(specs map[ActionID]string) (*Keymap, []Conflict) {
 		if len(seqs) == 0 {
 			continue
 		}
-		km.bindings[a.ID] = seqs
-		for _, seq := range seqs {
+		parsed = append(parsed, parsedBinding{action: a, seqs: seqs})
+	}
+
+	// Phase 2 — resolve prefix shadowing across every alternative, dropping
+	// the losers before anything reaches the lookup tables.
+	conflicts = append(conflicts, resolveShadowing(parsed, origin)...)
+
+	// Phase 3 — insert what survived.
+	for _, pb := range parsed {
+		a := pb.action
+		if len(pb.seqs) == 0 {
+			continue
+		}
+		km.bindings[a.ID] = pb.seqs
+		for _, seq := range pb.seqs {
 			if len(seq) > 1 {
 				// Multi-step: the prefix machine owns these. They never enter
 				// the tier chord maps, so a sequence head cannot be dispatched
@@ -135,27 +169,10 @@ func (k *Keymap) detectShadowing() []Conflict {
 			}
 		}
 	}
-	// Sequence shadowing. A chord or sequence that is a proper prefix of a
-	// longer sequence can never fire: the probe reports Partial and swallows
-	// the key every time. REFUSE the shorter one — leaving it in the tables
-	// would advertise a binding dispatch can never reach, which is the failure
-	// mode every other conflict in this file exists to prevent.
-	//
-	// Deleting the current key while ranging a map is defined behaviour in Go.
-	for _, tier := range []Tier{TierEarly, TierLate} {
-		for key, id := range k.chords[tier] {
-			if winner, ok := k.partial[key]; ok {
-				out = append(out, Conflict{Kind: ConflictShadowed, Key: key, Winner: winner, Loser: id})
-				delete(k.chords[tier], key)
-			}
-		}
-	}
-	for full, id := range k.seqs {
-		if winner, ok := k.partial[full]; ok {
-			out = append(out, Conflict{Kind: ConflictShadowed, Key: full, Winner: winner, Loser: id})
-			delete(k.seqs, full)
-		}
-	}
+	// Prefix shadowing is NOT detected here. It is resolved by resolveShadowing
+	// before insertion, because the loser must never enter the tables at all —
+	// removing it afterwards would leave its prefixes recorded in km.partial,
+	// so a dropped binding would still swallow its own first chord.
 	// Deterministic order: these render in F1, and a list that reshuffles
 	// between launches is unreadable.
 	sort.Slice(out, func(i, j int) bool {

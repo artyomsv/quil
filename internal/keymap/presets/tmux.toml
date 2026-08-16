@@ -1,0 +1,60 @@
+# tmux-compatible keymap.
+#
+# Presets REPLACE, they do not add: every action named here loses its default
+# chord. tab.new = "${prefix} c" means Ctrl+T no longer opens a tab. That is
+# deliberate — a preset that keeps both key sets is neither keymap, and it
+# doubles the conflict surface. A user who wants both writes the alternative in
+# their own [bindings] table.
+#
+# Actions NOT named here inherit the default layer: Alt+Shift+P still opens the
+# command palette, Alt+F2 still renames a pane, Alt+G still toggles lazygit.
+
+preset = "tmux"
+
+# The preset's own prefix. A user who writes only `preset = "tmux"` in their
+# bindings.toml gets this; setting `prefix` there overrides it, which is how
+# the common `set -g prefix C-a` habit is expressed.
+prefix = "ctrl+b"
+
+sequence_timeout = "0"
+
+[bindings]
+# Windows -> tabs.
+"tab.new" = "${prefix} c"
+# "comma", not ",": a literal comma is the alternatives separator and splits
+# the spec before any chord is parsed. See keyAliases.
+"tab.rename" = "${prefix} comma"
+"tab.close" = "${prefix} &"
+"tab.next" = "${prefix} n"
+"tab.prev" = "${prefix} p"
+
+# tmux windows are 0-indexed and Quil tabs are 1-indexed. ${prefix} 0 stays
+# UNBOUND rather than aliasing tab 1 — that would double-bind tab 1 and hide
+# tab 9 from anyone counting from zero.
+"tab.switch_1" = "${prefix} 1"
+"tab.switch_2" = "${prefix} 2"
+"tab.switch_3" = "${prefix} 3"
+"tab.switch_4" = "${prefix} 4"
+"tab.switch_5" = "${prefix} 5"
+"tab.switch_6" = "${prefix} 6"
+"tab.switch_7" = "${prefix} 7"
+"tab.switch_8" = "${prefix} 8"
+"tab.switch_9" = "${prefix} 9"
+
+# Panes.
+"pane.split_h" = "${prefix} %"
+"pane.split_v" = "${prefix} \""
+"pane.close" = "${prefix} x"
+# tmux calls it zoom; Quil's focus mode is an exact match.
+"pane.focus_toggle" = "${prefix} z"
+"pane.next" = "${prefix} o"
+"pane.left" = "${prefix} left"
+"pane.right" = "${prefix} right"
+"pane.up" = "${prefix} up"
+"pane.down" = "${prefix} down"
+# Approximates copy-mode entry.
+"pane.scroll_page_up" = "${prefix} ["
+
+# Quitting Quil leaves the daemon running, so detach semantics match exactly.
+"app.quit" = "${prefix} d"
+"system.shortcuts" = "${prefix} ?"

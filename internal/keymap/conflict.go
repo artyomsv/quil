@@ -28,6 +28,11 @@ const (
 	// The cross-layer rule is by layer instead, and deliberately so: a user
 	// override must be able to reclaim the prefix key as a plain chord.
 	ConflictShadowed
+	// ConflictPrefixInvalid: ${prefix} was referenced while prefix is unset, or
+	// prefix is not exactly one chord. Every binding referencing it is dropped
+	// rather than half-expanded — see validatePrefix for what each malformed
+	// shape would silently turn into.
+	ConflictPrefixInvalid
 )
 
 func (k ConflictKind) String() string {
@@ -44,6 +49,8 @@ func (k ConflictKind) String() string {
 		return "unknown action"
 	case ConflictShadowed:
 		return "shadowed by a longer sequence"
+	case ConflictPrefixInvalid:
+		return "unusable prefix"
 	}
 	return "unknown conflict"
 }
@@ -85,6 +92,10 @@ func (c Conflict) String() string {
 		// common failure there is — and "made.up is not a known action" does
 		// not say which line of the file to go and look at.
 		return fmt.Sprintf("%s: %q → %q is not a known action; ignored", c.Kind, c.Key, c.Loser)
+	case ConflictPrefixInvalid:
+		// The binding is dropped whole, so there is no winner to name — the
+		// Detail says which of the three malformed shapes it was.
+		return fmt.Sprintf("%s: %q → %s dropped; %s", c.Kind, c.Key, c.Loser, c.Detail)
 	}
 	return fmt.Sprintf("%s: %q → %s wins, %s never fires", c.Kind, c.Key, c.Winner, c.Loser)
 }
@@ -162,9 +173,9 @@ var hardcodedKeys = func() map[string]hardcodedKey {
 		"ctrl+alt+v": {afterBothTiers, "paste"},
 		"f8":         {afterBothTiers, "paste"},
 	}
-	for _, d := range []string{"1", "2", "3", "4", "5", "6", "7", "8", "9"} {
-		m["alt+"+d] = hardcodedKey{afterBothTiers, "tab " + d}
-	}
+	// alt+1..9 were promoted to tab.switch_1..9 registry actions and are no
+	// longer intercepted outside the registry, so a binding on one is an
+	// ordinary duplicate rather than a collision with built-in behaviour.
 	for _, dir := range []string{"left", "right", "up", "down"} {
 		m["shift+"+dir] = hardcodedKey{betweenTiers, "text selection"}
 	}

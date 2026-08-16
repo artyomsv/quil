@@ -3760,12 +3760,22 @@ func (m Model) notesKeyExempt(key string) bool {
 			return true
 		}
 	}
+	// Tab switching is exempt for the same reason as the structural keys: it
+	// moves off the tab the editor is bound to. It reads from the registry now
+	// that alt+1..9 are actions — a literal alt+digit list would exempt the
+	// stale keys and not the rebound ones.
+	for _, id := range []keymap.ActionID{
+		"tab.switch_1", "tab.switch_2", "tab.switch_3", "tab.switch_4", "tab.switch_5",
+		"tab.switch_6", "tab.switch_7", "tab.switch_8", "tab.switch_9",
+		"tab.next", "tab.prev", "system.shortcuts",
+	} {
+		if m.isAction(key, id) {
+			return true
+		}
+	}
+	// Still hardcoded in handleKey, so still listed literally here.
 	switch key {
 	case "f1", "ctrl+n":
-		return true
-	// Alt+1..9 tab switching.
-	case "alt+1", "alt+2", "alt+3", "alt+4",
-		"alt+5", "alt+6", "alt+7", "alt+8", "alt+9":
 		return true
 	}
 	return false
@@ -4405,6 +4415,28 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case "app.command_palette":
 		return m.openCommandPalette()
+
+	case "tab.next":
+		// Sequenced, not inlined into the return: switchTabBy mutates m
+		// through a pointer receiver, and Go does not order a plain operand
+		// against a call in the same return statement — `return m, m.switchTabBy(1)`
+		// may copy m before the mutation lands. Same reason the alt+digit case
+		// below has always split it.
+		cmd := m.switchTabBy(1)
+		return m, cmd
+
+	case "tab.prev":
+		cmd := m.switchTabBy(-1)
+		return m, cmd
+
+	case "tab.switch_1", "tab.switch_2", "tab.switch_3", "tab.switch_4", "tab.switch_5",
+		"tab.switch_6", "tab.switch_7", "tab.switch_8", "tab.switch_9":
+		// The ID's last rune is the 1-based tab number; switchTab is 0-based.
+		cmd := m.switchTab(int(lateID[len(lateID)-1] - '1'))
+		return m, cmd
+
+	case "system.shortcuts":
+		return m.openShortcutsDialog()
 	}
 
 	// Multiple aliases for paste because Windows Terminal captures the
@@ -4444,13 +4476,6 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case key == "f1":
 		return m.openAboutDialog()
-
-	case key == "alt+1" || key == "alt+2" || key == "alt+3" ||
-		key == "alt+4" || key == "alt+5" || key == "alt+6" ||
-		key == "alt+7" || key == "alt+8" || key == "alt+9":
-		idx := int(key[len(key)-1] - '1')
-		cmd := m.switchTab(idx)
-		return m, cmd
 
 	default:
 		// Only process keys that produce PTY bytes.
@@ -5377,6 +5402,32 @@ func (m Model) isActivePane(paneID string) bool {
 // transition flips a flag, so without these two reports the daemon's copy is
 // wrong for as long as the user stays away — and a "visible" overlay is exempt
 // from the idle sweep forever.
+// switchTabBy moves the active tab by delta, wrapping at both ends.
+//
+// Pointer receiver, matching switchTab: a value receiver would apply the
+// index change to a local copy and discard it, which looks identical to
+// "nothing happened" at the call site.
+//
+// Wrapping matches tmux's next-window/previous-window. A non-wrapping version
+// makes the last tab a dead end for anyone driving purely from the keyboard.
+func (m *Model) switchTabBy(delta int) tea.Cmd {
+	tabs := len(m.curTabs())
+	if tabs == 0 {
+		return nil
+	}
+	idx := ((m.activeTabIdx()+delta)%tabs + tabs) % tabs
+	return m.switchTab(idx)
+}
+
+// openShortcutsDialog jumps straight to F1 -> Shortcuts, which is otherwise
+// reachable only by opening About and selecting a row. tmux binds prefix-? to
+// the equivalent list, so the preset needs a direct entry point.
+func (m Model) openShortcutsDialog() (tea.Model, tea.Cmd) {
+	m.dialog = dialogShortcuts
+	m.dialogCursor = 0
+	return m, tea.ClearScreen
+}
+
 func (m *Model) switchTab(idx int) tea.Cmd {
 	if idx < 0 || idx >= len(m.curTabs()) {
 		return nil

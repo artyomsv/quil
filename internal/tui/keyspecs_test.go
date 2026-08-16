@@ -7,15 +7,37 @@ import (
 	"github.com/artyomsv/quil/internal/keymap"
 )
 
-func TestKeySpecsFromConfig_MapsEveryAction(t *testing.T) {
+// promotedActions have no [keybindings] field by design: they were promoted out
+// of handleKey's reserved-key switch, which never had config fields, and adding
+// twelve to a table the whole feature is migrating away from would be work
+// aimed backwards. They get their bindings from keymap.DefaultLayer instead.
+//
+// Listed explicitly so promoting another action is a deliberate edit here
+// rather than a silently shrinking assertion.
+var promotedActions = map[keymap.ActionID]bool{
+	"tab.next": true, "tab.prev": true, "system.shortcuts": true,
+	"tab.switch_1": true, "tab.switch_2": true, "tab.switch_3": true,
+	"tab.switch_4": true, "tab.switch_5": true, "tab.switch_6": true,
+	"tab.switch_7": true, "tab.switch_8": true, "tab.switch_9": true,
+}
+
+func TestKeySpecsFromConfig_MapsEveryConfigBackedAction(t *testing.T) {
 	specs := keySpecsFromConfig(config.Default().Keybindings)
-	if len(specs) != len(keymap.Actions()) {
-		t.Fatalf("mapped %d specs, want %d", len(specs), len(keymap.Actions()))
-	}
+	var want int
 	for _, a := range keymap.Actions() {
+		if promotedActions[a.ID] {
+			if _, ok := specs[a.ID]; ok {
+				t.Errorf("action %q is promoted and must not be mapped from config", a.ID)
+			}
+			continue
+		}
+		want++
 		if _, ok := specs[a.ID]; !ok {
 			t.Errorf("action %q has no config field mapping", a.ID)
 		}
+	}
+	if len(specs) != want {
+		t.Fatalf("mapped %d specs, want %d config-backed actions", len(specs), want)
 	}
 }
 
@@ -24,9 +46,28 @@ func TestKeySpecsFromConfig_MatchesRegistryDefaults(t *testing.T) {
 	// per-action fallback restores a binding the user never had.
 	specs := keySpecsFromConfig(config.Default().Keybindings)
 	for _, a := range keymap.Actions() {
+		if promotedActions[a.ID] {
+			continue
+		}
 		if specs[a.ID] != a.Default {
 			t.Errorf("action %q: config default %q != registry Default %q",
 				a.ID, specs[a.ID], a.Default)
+		}
+	}
+}
+
+// The promoted actions have no config field, so the ONLY thing binding them is
+// the default layer underneath the config layer. Without it Alt+1..9 dispatch
+// nothing — which is exactly what deleting their reserved-key case would cause.
+func TestBuildKeymap_PromotedActionsKeepTheirDefaults(t *testing.T) {
+	km, _ := buildKeymap(config.Default().Keybindings)
+	for _, tc := range []struct{ key, id string }{
+		{"alt+1", "tab.switch_1"},
+		{"alt+9", "tab.switch_9"},
+	} {
+		got, ok := km.MatchTier(keymap.TierLate, tc.key)
+		if !ok || string(got) != tc.id {
+			t.Errorf("MatchTier(late, %q) = (%q, %v), want %q", tc.key, got, ok, tc.id)
 		}
 	}
 }

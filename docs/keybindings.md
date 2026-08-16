@@ -359,6 +359,8 @@ preset = "tmux"
 
 ### The tmux preset
 
+For how this lines up against tmux's own default prefix table — including what has no Quil equivalent and why — see [tmux comparison](tmux-comparison.md).
+
 | tmux | Quil action |
 |---|---|
 | `prefix c` | New tab |

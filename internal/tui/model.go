@@ -20,6 +20,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/artyomsv/quil/internal/changelog"
 	"github.com/artyomsv/quil/internal/claudesessions"
 	"github.com/artyomsv/quil/internal/clipboard"
 	"github.com/artyomsv/quil/internal/config"
@@ -323,6 +324,7 @@ const (
 	dialogProjectNew    // Alt+Shift+N: create a project (Task 13)
 	dialogProjectRename // sidebar context menu: rename a project (Task 13)
 	dialogProjectPick   // Alt+P: fuzzy project picker (Task 14)
+	dialogWhatsNew      // post-upgrade highlights; also F1 → What's New
 )
 
 // tuiClient is the subset of *ipc.Client the TUI uses on the Model. Defined
@@ -621,6 +623,12 @@ type Model struct {
 	mouseStartY      int         // screen Y of mouse press
 	configChanged    bool        // true when config needs saving on exit
 	disclaimerTipIdx int         // random tip index for disclaimer dialog
+
+	// whatsNew holds the release window the What's New dialog renders. Nil
+	// when the dialog has never been opened this session.
+	whatsNew         *changelog.Window
+	whatsNewExpanded bool // fixes list expanded rather than collapsed to a count
+	whatsNewScroll   int  // first rendered row, when the body overflows
 
 	// termFocused tracks whether the terminal window has focus, from
 	// tea.FocusMsg/BlurMsg (DEC 1004).

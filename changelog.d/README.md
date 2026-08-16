@@ -54,6 +54,38 @@ weeks later as a wrong release page. Beyond the name, a fragment must be:
   the next `## [`, so such a line truncates the published notes there. The promoter
   writes every heading; a fragment never needs one.
 
+## Headline
+
+Every fragment of a user-facing type carries a one-line headline in a front-matter
+block at the very top of the file:
+
+    ---
+    headline: Option+Shift shortcuts work again on macOS
+    ---
+    - **`Option+Shift+<letter>` reaches the shell again on macOS.** Chord parsing
+      lowercased the key, and the same parser reads the incoming key press…
+
+The headline is what a user sees in the **What's New** dialog after upgrading — the
+one-line register, not the explanatory one. `scripts/promote-changelog.sh` strips the
+block before splicing your prose into `CHANGELOG.md`, so the published entry is
+unchanged, and appends the headline to `internal/changelog/highlights.txt`, which the
+binary embeds.
+
+| Rule | |
+|---|---|
+| Required on | `added` `changed` `deprecated` `removed` `fixed` `security` |
+| Forbidden on | `internal` `none` — neither is addressed to users |
+| Shape | Exactly three lines: `---`, `headline: <text>`, `---`. Nothing else, no blank line inside |
+| Length | At most 64 bytes. It renders on one dialog row |
+| Characters | No control characters, no `"`, no `\`. Printable non-ASCII (`→`, `•`) is fine |
+| Body | The fragment must still hold prose once the block is removed — a headline-only file is refused as empty |
+
+Write it as a complete sentence about the outcome, not the mechanism. "Option+Shift
+shortcuts work again on macOS", not "fix chord parsing case handling".
+
+A fragment that gets any of this wrong is refused by `--validate`, which runs on every
+pull request.
+
 ## Content
 
 The file holds the bullet body only — no `###` heading, no version header. The promoter

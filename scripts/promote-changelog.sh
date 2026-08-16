@@ -38,10 +38,19 @@ FRAGMENT_DIR_REL="${CHANGELOG_FRAGMENT_DIR_REL:-changelog.d}"
 FRAGMENT_DIR="${CHANGELOG_FRAGMENT_DIR:-$PROJECT_DIR/$FRAGMENT_DIR_REL}"
 CHANGELOG="${CHANGELOG_FILE:-$PROJECT_DIR/CHANGELOG.md}"
 
+# The line-oriented data file internal/changelog embeds. Overridable so
+# scripts/test-promote-changelog.sh can drive this against a throwaway tree —
+# without that override a test run would rewrite the real checkout's copy.
+HIGHLIGHTS="${CHANGELOG_HIGHLIGHTS_FILE:-$PROJECT_DIR/internal/changelog/highlights.txt}"
+
 # Keep a Changelog's section order, plus `internal` (already used in
 # CHANGELOG.md) and `none` (the no-user-facing-changes sentinel, which renders
 # no section at all). Render order is this order, NOT filename order.
 FRAGMENT_TYPES='added changed deprecated removed fixed security internal'
+
+# Types that reach the post-upgrade dialog. `internal` and `none` are absent
+# deliberately: neither is addressed to users.
+HIGHLIGHT_TYPES='added changed deprecated removed fixed security'
 
 # The slug must start alphanumeric so `fixed--x.md` and `fixed-.md` are refused
 # rather than silently producing an odd-looking but valid-ish name.
@@ -68,7 +77,50 @@ section_heading() {
 }
 
 is_fragment_name() {
+  # A name containing a NEWLINE must be refused before the regex sees it.
+  # `grep -Eq` matches per LINE, so it answers "some line matched" — and a
+  # basename of `added-a.md\nVERSION` would pass. Both consumers of
+  # `fragments_of_type` re-split its output on newline (the render loop in
+  # promote(), and write_highlights), so the tail would become a bare
+  # repo-root-relative path whose contents get spliced into CHANGELOG.md and
+  # published as the release body — the outcome the symlink check below
+  # exists to prevent, reached by a different route. The likelier outcome is
+  # a mid-promote `die` AFTER CHANGELOG.md has been rewritten, which is the
+  # failure class #130 was.
+  # Counted with wc rather than a `case` glob: command substitution strips
+  # trailing newlines, so the natural-looking `*"$(printf '\n')"*` is the
+  # pattern `*""*`, which matches EVERY name and refuses the whole directory.
+  if [ "$(printf '%s' "$1" | wc -l | tr -d ' ')" -ne 0 ]; then
+    return 1
+  fi
   printf '%s\n' "$1" | grep -Eq "$NAME_RE"
+}
+
+# The one-letter record type used in highlights.txt. One letter per fragment
+# type, so the data file is lossless and the TUI decides its own grouping.
+type_letter() {
+  case "$1" in
+    added)      printf 'A' ;;
+    changed)    printf 'C' ;;
+    deprecated) printf 'D' ;;
+    removed)    printf 'R' ;;
+    fixed)      printf 'F' ;;
+    security)   printf 'S' ;;
+    *)          die "no highlight letter for type: $1" ;;
+  esac
+}
+
+# True when highlights.txt already records $1. Checked from check(), i.e.
+# BEFORE CHANGELOG.md is rewritten: a refusal that fired mid-promote would
+# leave a duplicated `## [x.y.z]` section behind in the file it was protecting.
+highlights_have_version() {
+  [ -f "$HIGHLIGHTS" ] || return 1
+  # Field comparison, not a regex: in `grep "^V $1 "` the dots of a version are
+  # wildcards, so 1.2.3 would also match a record `V 1x2x3`. Unreachable today
+  # (promote() validates ^[0-9]+\.[0-9]+\.[0-9]+$ before calling check), but a
+  # guard that is only correct because of a caller elsewhere is one refactor
+  # from being wrong.
+  awk -v v="$1" '$1 == "V" && $2 == v { found = 1 } END { exit !found }' "$HIGHLIGHTS"
 }
 
 # Strip leading and trailing blank lines. Fragment authors should not have to
@@ -82,6 +134,72 @@ trim_blank_lines() {
       for (i = s; i <= e; i++) print line[i]
     }
   '
+}
+
+# --- headline front matter -------------------------------------------------
+#
+# A fragment carries a one-line headline for the post-upgrade "What's new"
+# dialog, in a fixed three-line block at the very top of the file:
+#
+#   ---
+#   headline: Option+Shift shortcuts work again on macOS
+#   ---
+#
+# The shape is fixed rather than YAML on purpose: this script has to read it,
+# and a three-line shape needs no parser. The block is stripped before the
+# prose is spliced into CHANGELOG.md, so the published entry is unchanged.
+
+HEADLINE_MAX_BYTES=64
+
+# True when $1 begins a front-matter block.
+has_front_matter() {
+  [ "$(head -n 1 "$1" | tr -d '\r')" = '---' ]
+}
+
+# Print the headline of fragment $1, or nothing if it has no well-formed block.
+fragment_headline() {
+  tr -d '\r' < "$1" | awk '
+    NR == 1 { if ($0 != "---") exit; next }
+    NR == 2 {
+      if (substr($0, 1, 10) != "headline: ") exit
+      hl = substr($0, 11)
+      # Trim padding rather than carrying it into the data file and onto the
+      # rendered dialog row, where a trailing space is invisible and a leading
+      # one shifts the bullet.
+      sub(/^[ \t]+/, "", hl); sub(/[ \t]+$/, "", hl)
+      next
+    }
+    NR == 3 { if ($0 == "---" && hl != "") print hl; exit }
+  '
+}
+
+# Drop a leading front-matter block. A file without one passes through
+# unchanged. Reads stdin, writes stdout.
+strip_front_matter() {
+  awk '
+    NR == 1 && $0 == "---" { infm = 1; next }
+    infm && $0 == "---"    { infm = 0; next }
+    infm                   { next }
+    { print }
+  '
+}
+
+# A headline is emitted into highlights.txt with printf and no escaping, and is
+# rendered on one dialog row. Reject anything that would break either: control
+# characters, a double quote, or a backslash. Printable non-ASCII (arrows,
+# bullets) is fine — the TUI already renders those.
+headline_charset_ok() {
+  case "$1" in
+    *'"'*|*'\'*) return 1 ;;
+  esac
+  # tr ranges are byte-wise: this deletes printable ASCII and every high byte,
+  # leaving only C0 controls and DEL behind.
+  [ -z "$(printf '%s' "$1" | LC_ALL=C tr -d '\040-\176\200-\377')" ]
+}
+
+# Byte length under LC_ALL=C, so the limit does not shift with the locale.
+headline_length() {
+  printf '%s' "$1" | LC_ALL=C wc -c | tr -d ' '
 }
 
 # --- mode: --filter-names -------------------------------------------------
@@ -168,9 +286,43 @@ validate_fragment_dir() {
     fi
 
     # `none-*` carries no prose by design, so the content rules below do not
-    # apply to it.
+    # apply to it — except that a headline on one is a mistake worth naming.
+    # Its contents are ignored, so a headline written there would silently
+    # never reach the What's New dialog, and README.md states the rule.
     case "$name" in
-      none-*) continue ;;
+      none-*)
+        if has_front_matter "$f"; then
+          invalid="$invalid
+  $FRAGMENT_DIR_REL/$name — carries a headline; a none-* fragment says there is nothing to tell users"
+        fi
+        continue
+        ;;
+    esac
+
+    # Headline block. Required on every user-facing type, because a fragment
+    # without one vanishes silently from the post-upgrade dialog — the same
+    # lost-prose failure this function exists to prevent. Refused on
+    # `internal-*`, which by definition is not addressed to users.
+    case "$name" in
+      internal-*)
+        if has_front_matter "$f"; then
+          invalid="$invalid
+  $FRAGMENT_DIR_REL/$name — carries a headline; internal changes are not user-facing"
+        fi
+        ;;
+      *)
+        headline=$(fragment_headline "$f")
+        if [ -z "$headline" ]; then
+          invalid="$invalid
+  $FRAGMENT_DIR_REL/$name — has no headline block (see $FRAGMENT_DIR_REL/README.md)"
+        elif [ "$(headline_length "$headline")" -gt "$HEADLINE_MAX_BYTES" ]; then
+          invalid="$invalid
+  $FRAGMENT_DIR_REL/$name — headline is $(headline_length "$headline") bytes; the limit is $HEADLINE_MAX_BYTES"
+        elif ! headline_charset_ok "$headline"; then
+          invalid="$invalid
+  $FRAGMENT_DIR_REL/$name — headline must not contain control characters, a double quote, or a backslash"
+        fi
+        ;;
     esac
 
     # An empty or blank-only fragment renders a section heading with nothing
@@ -178,7 +330,11 @@ validate_fragment_dir() {
     # page. Refused rather than skipped, because "forgot to write the prose"
     # and "deliberately nothing to say" must not resolve to the same output;
     # the second one is what `none-<slug>.md` is for.
-    if [ -z "$(tr -d '\r' < "$f" | trim_blank_lines)" ]; then
+    #
+    # Measured POST-STRIP, not on the raw bytes: a file that is ONLY a headline
+    # block is non-empty on disk but contributes nothing to CHANGELOG.md, and
+    # would render exactly the empty section this check exists to prevent.
+    if [ -z "$(tr -d '\r' < "$f" | strip_front_matter | trim_blank_lines)" ]; then
       invalid="$invalid
   $FRAGMENT_DIR_REL/$name — is empty; write the entry, or use none-<slug>.md"
       continue
@@ -216,6 +372,78 @@ fragments_of_type() {
   done | LC_ALL=C sort
 }
 
+# Build this release's highlights.txt into "$work/highlights.out". Does NOT
+# install it — promote() renames it into place beside CHANGELOG.md.
+#
+# Every way this function can fail must happen BEFORE CHANGELOG.md is rewritten.
+# highlights.txt is written second, so the duplicate-version guard (which reads
+# it) is blind to a half-finished promote: a die between the two writes leaves
+# `## [x.y.z]` in CHANGELOG.md with no matching `V` record, and the re-run then
+# appends a SECOND section for the same version — the exact duplicate check()
+# exists to prevent, plus a broken sed range for every later release-note
+# extraction. Not reachable from a CI re-run, which discards the half-state on a
+# fresh checkout, but changelog.d/README.md tells contributors to run this
+# locally.
+#
+# Must also run BEFORE the fragments are deleted — it reads them.
+#
+# A `V` record is written for EVERY release, including one whose only fragment
+# was `none-*`: the dialog header counts releases crossed, and the F1 path walks
+# the record list, so a release that told users nothing still happened.
+build_highlights() {
+  hl_version=$1
+  hl_date=$2
+
+  [ -f "$HIGHLIGHTS" ] || die "$HIGHLIGHTS does not exist"
+
+  hl_new="$work/highlights.new"
+  printf 'V %s %s\n' "$hl_version" "$hl_date" > "$hl_new"
+
+  for hl_t in $HIGHLIGHT_TYPES; do
+    hl_files=$(fragments_of_type "$hl_t")
+    [ -n "$hl_files" ] || continue
+    hl_letter=$(type_letter "$hl_t") || die "no highlight letter for type: $hl_t"
+    printf '%s\n' "$hl_files" | while IFS= read -r hl_f; do
+      hl_text=$(fragment_headline "$hl_f")
+      [ -n "$hl_text" ] || continue
+      printf '%s %s\n' "$hl_letter" "$hl_text"
+    done >> "$hl_new" || die "could not read a $hl_t headline"
+  done
+
+  # Every user-facing fragment must have produced exactly one record.
+  #
+  # The loop above cannot fail loudly on its own: `fragment_headline` is
+  # `tr … | awk …`, so a failing `tr` (unreadable file) still exits with awk's
+  # status of 0, leaving `hl_text` empty and hitting the `continue` — a
+  # SILENTLY DROPPED headline, which is the one outcome this script's whole
+  # design refuses. Wrapping the loop in `|| die` does not help either: a
+  # tested pipeline disables `set -e` inside it, and the status reported is the
+  # last command's. Counting the result is what actually detects it.
+  #
+  # validate_fragment_dir has already refused any fragment that is unreadable
+  # or missing a headline, so a mismatch here means the tree changed underneath
+  # the release or one of those checks regressed. Either way it must not ship.
+  hl_expected=0
+  for hl_t in $HIGHLIGHT_TYPES; do
+    hl_files=$(fragments_of_type "$hl_t")
+    [ -n "$hl_files" ] || continue
+    hl_expected=$((hl_expected + $(printf '%s\n' "$hl_files" | wc -l)))
+  done
+  hl_got=$(awk '!/^V /' "$hl_new" | wc -l | tr -d ' ')
+  [ "$hl_expected" -eq "$hl_got" ] || die \
+    "expected $hl_expected headline record(s), wrote $hl_got — a fragment was dropped"
+
+  hl_out="$work/highlights.out"
+  {
+    # Leading comment block, verbatim.
+    awk '/^#/ { print; next } { exit }' "$HIGHLIGHTS"
+    cat "$hl_new"
+    # `|| true`: grep exits 1 on an as-yet-empty file, which set -e would take
+    # as fatal.
+    grep -v '^#' "$HIGHLIGHTS" || true
+  } > "$hl_out"
+}
+
 any_fragments() {
   for t in $FRAGMENT_TYPES none; do
     if [ -n "$(fragments_of_type "$t")" ]; then
@@ -236,10 +464,25 @@ unreleased_prose() {
 
 check() {
   [ -f "$CHANGELOG" ] || die "$CHANGELOG does not exist"
+  # Checked HERE, not only in write_highlights. That runs after
+  # `mv "$out" "$CHANGELOG"`, so dying on a missing file there leaves
+  # CHANGELOG.md rewritten with the fragments unconsumed — and the retry then
+  # appends a SECOND `## [x.y.z]` section, which is both the outcome the
+  # duplicate-version guard below exists to prevent and a broken sed range for
+  # every later release-note extraction.
+  [ -f "$HIGHLIGHTS" ] || die "$HIGHLIGHTS does not exist"
   grep -q '^## \[Unreleased\]' "$CHANGELOG" \
     || die "$CHANGELOG has no '## [Unreleased]' anchor — the promoter inserts below it"
 
   validate_fragment_dir
+
+  # $1 is the version being promoted, empty for --check and --validate.
+  # Refusing a duplicate HERE rather than mid-promote is the difference between
+  # a clean refusal and a CHANGELOG.md left holding two sections for one
+  # version — the file this check exists to protect.
+  if [ -n "${1:-}" ] && highlights_have_version "$1"; then
+    die "highlights already record version $1 — refusing to write it twice"
+  fi
 
   # A lone `none-*` fragment counts: it is the explicit "this release has
   # nothing to tell users" statement, and refusing it here would red-master
@@ -269,7 +512,7 @@ promote() {
   printf '%s' "$date" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' \
     || die "invalid date: '$date' (expected YYYY-MM-DD)"
 
-  check
+  check "$version"
 
   work=$(mktemp -d)
   # shellcheck disable=SC2064  # expand $work now, not at trap time
@@ -305,7 +548,7 @@ promote() {
     # PIPELINE's status, which is trim_blank_lines', so a failed `tr` exits 0
     # and the guard never fires. Grouping puts the test on `tr` itself.
     printf '%s\n' "$files" | while IFS= read -r f; do
-      { tr -d '\r' < "$f" || exit 1; } | trim_blank_lines
+      { tr -d '\r' < "$f" || exit 1; } | strip_front_matter | trim_blank_lines
     done >> "$body" || die "could not read a $t fragment"
   done
 
@@ -340,7 +583,15 @@ promote() {
       tail -n +"$rest" "$CHANGELOG"
     fi
   } > "$out"
+
+  # Built BEFORE either destructive write, and before the deletion loop, so that
+  # every way it can fail happens while the tree is still untouched. What is
+  # left afterwards is two renames — which can fail on a full disk, but not on
+  # anything about the content this release is made of.
+  build_highlights "$version" "$date"
+
   mv "$out" "$CHANGELOG"
+  mv "$work/highlights.out" "$HIGHLIGHTS"
 
   # Deleting the fragments is what keeps the NEXT branch conflict-free: a
   # rebased branch sees an empty changelog.d/ and its own new file collides

@@ -63,6 +63,37 @@ func SaveNotifiedVersion(path, version string) error {
 	return saveJSON(path, notifiedFile{Version: version})
 }
 
+// lastRunFile is the TUI-owned "which version last ran here" marker. It is what
+// makes the post-upgrade What's New dialog indifferent to HOW the upgrade
+// happened: self-update, `go install`, a package manager and a manual unzip all
+// change the binary, and none of them are otherwise observable.
+//
+// Deliberately NOT notifiedFile. That one means "a version I told you about";
+// conflating the two would let dismissing an update offer suppress the
+// what's-new for a version that was never installed.
+type lastRunFile struct {
+	Version string `json:"version"`
+}
+
+// LoadLastRunVersion returns the version recorded by the previous launch, or ""
+// (never run / unreadable), which the caller treats as a fresh install.
+func LoadLastRunVersion(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	var f lastRunFile
+	if err := json.Unmarshal(data, &f); err != nil {
+		return ""
+	}
+	return f.Version
+}
+
+// SaveLastRunVersion records the version now running.
+func SaveLastRunVersion(path, version string) error {
+	return saveJSON(path, lastRunFile{Version: version})
+}
+
 func saveJSON(path string, v any) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return fmt.Errorf("create dir for %s: %w", path, err)

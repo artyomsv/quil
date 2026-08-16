@@ -1,3 +1,6 @@
+---
+headline: Keybindings can be multi-key sequences, with a tmux preset
+---
 - **A keybinding can now be several keys pressed in sequence.** `Ctrl+B` then `c`, in
   the tmux style, rather than one chord per action. The status bar shows the keys typed
   so far while a sequence is pending, `Esc` cancels one, and a sequence that matches

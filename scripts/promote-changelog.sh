@@ -160,7 +160,15 @@ has_front_matter() {
 fragment_headline() {
   tr -d '\r' < "$1" | awk '
     NR == 1 { if ($0 != "---") exit; next }
-    NR == 2 { if (substr($0, 1, 10) != "headline: ") exit; hl = substr($0, 11); next }
+    NR == 2 {
+      if (substr($0, 1, 10) != "headline: ") exit
+      hl = substr($0, 11)
+      # Trim padding rather than carrying it into the data file and onto the
+      # rendered dialog row, where a trailing space is invisible and a leading
+      # one shifts the bullet.
+      sub(/^[ \t]+/, "", hl); sub(/[ \t]+$/, "", hl)
+      next
+    }
     NR == 3 { if ($0 == "---" && hl != "") print hl; exit }
   '
 }
@@ -278,9 +286,17 @@ validate_fragment_dir() {
     fi
 
     # `none-*` carries no prose by design, so the content rules below do not
-    # apply to it.
+    # apply to it — except that a headline on one is a mistake worth naming.
+    # Its contents are ignored, so a headline written there would silently
+    # never reach the What's New dialog, and README.md states the rule.
     case "$name" in
-      none-*) continue ;;
+      none-*)
+        if has_front_matter "$f"; then
+          invalid="$invalid
+  $FRAGMENT_DIR_REL/$name — carries a headline; a none-* fragment says there is nothing to tell users"
+        fi
+        continue
+        ;;
     esac
 
     # Headline block. Required on every user-facing type, because a fragment
@@ -371,15 +387,15 @@ write_highlights() {
   hl_new="$work/highlights.new"
   printf 'V %s %s\n' "$hl_version" "$hl_date" > "$hl_new"
 
-  for t in $HIGHLIGHT_TYPES; do
-    hl_files=$(fragments_of_type "$t")
+  for hl_t in $HIGHLIGHT_TYPES; do
+    hl_files=$(fragments_of_type "$hl_t")
     [ -n "$hl_files" ] || continue
-    hl_letter=$(type_letter "$t") || die "no highlight letter for type: $t"
+    hl_letter=$(type_letter "$hl_t") || die "no highlight letter for type: $hl_t"
     printf '%s\n' "$hl_files" | while IFS= read -r hl_f; do
       hl_text=$(fragment_headline "$hl_f")
       [ -n "$hl_text" ] || continue
       printf '%s %s\n' "$hl_letter" "$hl_text"
-    done >> "$hl_new" || die "could not read a $t headline"
+    done >> "$hl_new" || die "could not read a $hl_t headline"
   done
 
   # Every user-facing fragment must have produced exactly one record.
@@ -396,8 +412,8 @@ write_highlights() {
   # or missing a headline, so a mismatch here means the tree changed underneath
   # the release or one of those checks regressed. Either way it must not ship.
   hl_expected=0
-  for t in $HIGHLIGHT_TYPES; do
-    hl_files=$(fragments_of_type "$t")
+  for hl_t in $HIGHLIGHT_TYPES; do
+    hl_files=$(fragments_of_type "$hl_t")
     [ -n "$hl_files" ] || continue
     hl_expected=$((hl_expected + $(printf '%s\n' "$hl_files" | wc -l)))
   done
@@ -437,6 +453,13 @@ unreleased_prose() {
 
 check() {
   [ -f "$CHANGELOG" ] || die "$CHANGELOG does not exist"
+  # Checked HERE, not only in write_highlights. That runs after
+  # `mv "$out" "$CHANGELOG"`, so dying on a missing file there leaves
+  # CHANGELOG.md rewritten with the fragments unconsumed — and the retry then
+  # appends a SECOND `## [x.y.z]` section, which is both the outcome the
+  # duplicate-version guard below exists to prevent and a broken sed range for
+  # every later release-note extraction.
+  [ -f "$HIGHLIGHTS" ] || die "$HIGHLIGHTS does not exist"
   grep -q '^## \[Unreleased\]' "$CHANGELOG" \
     || die "$CHANGELOG has no '## [Unreleased]' anchor — the promoter inserts below it"
 

@@ -29,6 +29,13 @@ const whatsNewMinWidth = 20
 // expanded. Collapsing three items is friction with no benefit.
 const fixesAutoExpandLimit = 5
 
+// whatsNewChromeRows is the vertical space the dialog border, padding and
+// surrounding frame take, i.e. what the body may not use.
+const whatsNewChromeRows = 6
+
+// whatsNewPageRows is one PgUp/PgDn step.
+const whatsNewPageRows = 10
+
 // releasesURL is the footer link — the full, unabridged changelog.
 const releasesURL = "github.com/artyomsv/quil/releases"
 
@@ -84,6 +91,14 @@ func splitEntries(w changelog.Window) (added, changed, security, fixed []string)
 // would have written it did not contain this feature. That one launch therefore
 // shows nothing. The marker is written then, so every later upgrade works. This
 // is inherent to any marker-based scheme and is not closed by backfilling data.
+// ResolveWhatsNew is called by cmd/quil/main.go BEFORE NewModel, and its result
+// passed in. It must not move into the constructor: ~46 tests build a Model
+// directly and never set QUIL_HOME, so a disk WRITE there would clobber the
+// developer's real ~/.quil/update/lastrun.json — and `dev.sh test` runs with a
+// throwaway /root, so it would stay green in Docker and misbehave only on the
+// host. Same reasoning that keeps SetRemoteDest pure (.claude/rules/remote-dialogs.md).
+func ResolveWhatsNew(v string) *changelog.Window { return resolveWhatsNew(v) }
+
 func resolveWhatsNew(v string) *changelog.Window {
 	// A dev or unstamped build has no meaningful version, and recording "dev"
 	// would make the next real launch look like a downgrade.
@@ -131,13 +146,43 @@ var latestWindow = func() (changelog.Window, bool) {
 	}, true
 }
 
-// openWhatsNew installs a window and opens the dialog.
-func (m *Model) openWhatsNew(w changelog.Window) {
+// openWhatsNew installs a window and opens the dialog. ret is the dialog to
+// return to on dismissal — dialogAbout for the F1 path, dialogNone for the
+// startup one.
+func (m *Model) openWhatsNew(w changelog.Window, ret dialogScreen) {
 	_, _, _, fixed := splitEntries(w)
 	m.dialog = dialogWhatsNew
 	m.whatsNew = &w
 	m.whatsNewExpanded = len(fixed) <= fixesAutoExpandLimit
 	m.whatsNewScroll = 0
+	m.whatsNewReturn = ret
+}
+
+// whatsNewMaxScroll is the largest first-row index that still fills the view.
+// Beyond it there is nothing further to reveal, so the handler must not keep
+// counting: applyWhatsNewScroll clamps a LOCAL copy, which leaves the stored
+// value free to run away. Holding `j` for forty presses against fourteen real
+// positions then costs twenty-six dead `k` presses before the view moves.
+func (m Model) whatsNewMaxScroll() int {
+	maxRows := m.lastHeight - whatsNewChromeRows
+	if maxRows <= 0 {
+		return 0
+	}
+	n := len(strings.Split(m.whatsNewBody(whatsNewWidth(m.lastWidth)), "\n"))
+	if n <= maxRows {
+		return 0
+	}
+	return n - maxRows
+}
+
+// clampWhatsNewScroll keeps the stored offset inside the scrollable range.
+func (m *Model) clampWhatsNewScroll() {
+	if limit := m.whatsNewMaxScroll(); m.whatsNewScroll > limit {
+		m.whatsNewScroll = limit
+	}
+	if m.whatsNewScroll < 0 {
+		m.whatsNewScroll = 0
+	}
 }
 
 func (m Model) handleWhatsNewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -145,7 +190,12 @@ func (m Model) handleWhatsNewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "esc", "q", "enter":
 		// Enter dismisses rather than expanding, matching the disclaimer and
 		// update-notice dialogs where Enter activates the focused button.
-		m.dialog = dialogNone
+		//
+		// Returns to whatever opened it: reached from F1 → What's New, closing
+		// it must land back on the About menu the user was navigating, as every
+		// other About sub-dialog does. On the startup path the return is
+		// dialogNone.
+		m.dialog = m.whatsNewReturn
 		m.whatsNewScroll = 0
 		return m, tea.ClearScreen
 	case "right", "l":
@@ -156,17 +206,16 @@ func (m Model) handleWhatsNewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.whatsNewScroll = 0
 	case "down", "j":
 		m.whatsNewScroll++
+		m.clampWhatsNewScroll()
 	case "up", "k":
-		if m.whatsNewScroll > 0 {
-			m.whatsNewScroll--
-		}
+		m.whatsNewScroll--
+		m.clampWhatsNewScroll()
 	case "pgdown":
-		m.whatsNewScroll += 10
+		m.whatsNewScroll += whatsNewPageRows
+		m.clampWhatsNewScroll()
 	case "pgup":
-		m.whatsNewScroll -= 10
-		if m.whatsNewScroll < 0 {
-			m.whatsNewScroll = 0
-		}
+		m.whatsNewScroll -= whatsNewPageRows
+		m.clampWhatsNewScroll()
 	}
 	return m, nil
 }
@@ -175,8 +224,18 @@ func (m Model) renderWhatsNewDialog() string {
 	if m.whatsNew == nil {
 		return ""
 	}
-	w := *m.whatsNew
 	width := whatsNewWidth(m.lastWidth)
+	return m.applyWhatsNewScroll(m.whatsNewBody(width), width)
+}
+
+// whatsNewBody renders the unscrolled dialog. Split from renderWhatsNewDialog
+// so whatsNewMaxScroll can measure it without recursing through the scroll it
+// is computing the bound for.
+func (m Model) whatsNewBody(width int) string {
+	if m.whatsNew == nil {
+		return ""
+	}
+	w := *m.whatsNew
 
 	var b strings.Builder
 	b.WriteString(lipgloss.PlaceHorizontal(width, lipgloss.Center,
@@ -231,7 +290,7 @@ func (m Model) renderWhatsNewDialog() string {
 	b.WriteString(lipgloss.PlaceHorizontal(width, lipgloss.Center,
 		dialogSelected.Render("  OK  ")))
 
-	return m.applyWhatsNewScroll(b.String(), width)
+	return b.String()
 }
 
 // sanitizeHeadline makes one release headline safe to write to a terminal.
@@ -270,8 +329,7 @@ func padPair(left, right string, width int) string {
 // expanding the fixes list is the usual way to reach that state.
 func (m Model) applyWhatsNewScroll(content string, width int) string {
 	lines := strings.Split(content, "\n")
-	// 6 cells for the dialog border, padding and surrounding chrome.
-	maxRows := m.lastHeight - 6
+	maxRows := m.lastHeight - whatsNewChromeRows
 	if maxRows <= 0 || len(lines) <= maxRows {
 		return content
 	}

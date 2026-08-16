@@ -627,8 +627,9 @@ type Model struct {
 	// whatsNew holds the release window the What's New dialog renders. Nil
 	// when the dialog has never been opened this session.
 	whatsNew         *changelog.Window
-	whatsNewExpanded bool // fixes list expanded rather than collapsed to a count
-	whatsNewScroll   int  // first rendered row, when the body overflows
+	whatsNewExpanded bool         // fixes list expanded rather than collapsed to a count
+	whatsNewScroll   int          // first rendered row, when the body overflows
+	whatsNewReturn   dialogScreen // dialog to restore on dismissal (About, or none)
 
 	// termFocused tracks whether the terminal window has focus, from
 	// tea.FocusMsg/BlurMsg (DEC 1004).
@@ -888,7 +889,12 @@ func (m *Model) SetRecentCWDs(list []string) { m.recentCWDs = list }
 // Model rather than installed afterwards: tea.NewProgram takes the Model BY
 // VALUE, so anything that reads back through a closure over main's copy would be
 // frozen at startup.
-func NewModel(client Client, cfg config.Config, version string, registry *plugin.Registry, stalePlugins []plugin.StalePlugin) Model {
+// whatsNew is the post-upgrade window, resolved by the caller via
+// ResolveWhatsNew and passed in rather than computed here — that resolution
+// WRITES the last-run marker, and this constructor must stay free of disk I/O
+// so a test building a Model without QUIL_HOME set cannot touch the real
+// ~/.quil. Nil when there is nothing to show.
+func NewModel(client Client, cfg config.Config, version string, registry *plugin.Registry, stalePlugins []plugin.StalePlugin, whatsNew *changelog.Window) Model {
 	m := Model{
 		client:  client,
 		cfg:     cfg,
@@ -920,8 +926,8 @@ func NewModel(client Client, cfg config.Config, version string, registry *plugin
 	// already yields to any dialog that is already open — returning BEFORE it
 	// saves its marker, so the offer is not lost.
 	if len(stalePlugins) == 0 {
-		if w := resolveWhatsNew(version); w != nil {
-			m.openWhatsNew(*w)
+		if whatsNew != nil {
+			m.openWhatsNew(*whatsNew, dialogNone)
 		} else if cfg.UI.ShowDisclaimer && len(disclaimerTips) > 0 {
 			m.dialog = dialogDisclaimer
 			m.disclaimerTipIdx = rand.Intn(len(disclaimerTips))

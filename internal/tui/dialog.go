@@ -712,9 +712,10 @@ func (m Model) handleAboutKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m.handleUpdateAction()
 		case aboutWhatsNewIndex:
 			// Opened by hand rather than by an upgrade, so the window is the
-			// single most recent release.
+			// single most recent release. Dismissal returns to this menu, as
+			// every other About sub-dialog does.
 			if w, ok := latestWindow(); ok {
-				m.openWhatsNew(w)
+				m.openWhatsNew(w, dialogAbout)
 			}
 			return m, nil
 		case aboutStopDaemonIndex:

@@ -17,6 +17,7 @@ import (
 	"bufio"
 	"bytes"
 	_ "embed"
+	"slices"
 	"strings"
 	"sync"
 
@@ -148,7 +149,11 @@ func Latest() *Release {
 	if len(rels) == 0 {
 		return nil
 	}
+	// The struct copy alone still shares the Entries backing array with the
+	// process-wide cache, and the caller puts that slice onto a Model — an
+	// append with spare capacity would then write into the embedded corpus.
 	r := rels[0]
+	r.Entries = slices.Clone(r.Entries)
 	return &r
 }
 

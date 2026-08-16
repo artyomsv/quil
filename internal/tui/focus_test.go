@@ -39,7 +39,7 @@ func TestFocusMsg_TracksTerminalFocus(t *testing.T) {
 // nothing about what a launched TUI actually starts with.
 func TestNewModel_AssumesFocusedUntilProvenOtherwise(t *testing.T) {
 	t.Setenv("QUIL_HOME", t.TempDir())
-	m := NewModel(newFakeConn(), config.Default(), "test", plugin.NewRegistry(), nil)
+	m := NewModel(newFakeConn(), config.Default(), "test", plugin.NewRegistry(), nil, nil)
 	if !m.termFocused {
 		t.Error("termFocused must start true so an unsupporting terminal fails quiet, not loud")
 	}

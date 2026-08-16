@@ -41,7 +41,7 @@ func testWindow(fixes int) changelog.Window {
 
 func whatsNewModel(w changelog.Window) Model {
 	m := Model{cfg: config.Default(), version: "1.60.0", lastWidth: 100, lastHeight: 40}
-	m.openWhatsNew(w)
+	m.openWhatsNew(w, dialogNone)
 	return m
 }
 
@@ -208,12 +208,47 @@ func TestResolveWhatsNew_DevBuildIsSkippedAndWritesNothing(t *testing.T) {
 	}
 }
 
+// Even handed a window, a pending migration wins — it blocks startup until
+// every stale plugin is resolved.
+//
+// The other half of this invariant lives in cmd/quil/main.go, which only calls
+// ResolveWhatsNew when no migration is pending: resolving WRITES the last-run
+// marker, so resolving here and suppressing the dialog would consume the
+// upgrade's highlights and never show them.
 func TestNewModel_MigrationOutranksWhatsNew(t *testing.T) {
 	t.Setenv("QUIL_HOME", t.TempDir())
+	w := testWindow(2)
 	stale := []plugin.StalePlugin{{Name: "old"}}
-	m := NewModel(nil, config.Default(), "1.60.0", plugin.NewRegistry(), stale)
+	m := NewModel(nil, config.Default(), "1.60.0", plugin.NewRegistry(), stale, &w)
 	if m.dialog == dialogWhatsNew {
 		t.Error("what's-new opened while a plugin migration was pending")
+	}
+}
+
+// The constructor must not touch disk: a Model built without QUIL_HOME set
+// would otherwise write the developer's real ~/.quil/update/lastrun.json, and
+// dev.sh test's throwaway /root hides that in Docker.
+func TestNewModel_WritesNoMarker(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	w := testWindow(2)
+	_ = NewModel(nil, config.Default(), "1.60.0", plugin.NewRegistry(), nil, &w)
+	if got := update.LoadLastRunVersion(config.LastRunPath()); got != "" {
+		t.Errorf("NewModel wrote the last-run marker (%q); resolution belongs to the caller", got)
+	}
+}
+
+// A window handed to the constructor opens the dialog — the feature's primary
+// path, which no test reached while resolution happened inside NewModel against
+// an embedded corpus that is empty until the first release carrying headlines.
+func TestNewModel_OpensTheDialogForAGivenWindow(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	w := testWindow(2)
+	m := NewModel(nil, config.Default(), "1.60.0", plugin.NewRegistry(), nil, &w)
+	if m.dialog != dialogWhatsNew {
+		t.Fatalf("dialog = %v, want dialogWhatsNew", m.dialog)
+	}
+	if m.whatsNewReturn != dialogNone {
+		t.Errorf("startup path must dismiss to nothing, got %v", m.whatsNewReturn)
 	}
 }
 
@@ -293,7 +328,7 @@ func TestNewModel_DisclaimerStillOpensWhenNothingElseApplies(t *testing.T) {
 	t.Setenv("QUIL_HOME", t.TempDir())
 	cfg := config.Default()
 	cfg.UI.ShowDisclaimer = true
-	m := NewModel(nil, cfg, "dev", plugin.NewRegistry(), nil)
+	m := NewModel(nil, cfg, "dev", plugin.NewRegistry(), nil, nil)
 	if m.dialog != dialogDisclaimer {
 		t.Errorf("dialog = %v, want dialogDisclaimer", m.dialog)
 	}
@@ -388,6 +423,11 @@ func TestWhatsNew_ScrollKeysMoveAndClampThroughUpdate(t *testing.T) {
 	m.whatsNewExpanded = true
 	m.lastHeight = 16
 
+	limit := m.whatsNewMaxScroll()
+	if limit <= 0 {
+		t.Fatalf("setup: content does not overflow, maxScroll = %d", limit)
+	}
+
 	got, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	if got.(Model).whatsNewScroll != 1 {
 		t.Errorf("down: scroll = %d, want 1", got.(Model).whatsNewScroll)
@@ -402,19 +442,81 @@ func TestWhatsNew_ScrollKeysMoveAndClampThroughUpdate(t *testing.T) {
 	if got.(Model).whatsNewScroll != 0 {
 		t.Errorf("up at top: scroll = %d, want 0", got.(Model).whatsNewScroll)
 	}
-	got, _ = got.(Model).Update(tea.KeyPressMsg{Code: tea.KeyPgDown})
-	if got.(Model).whatsNewScroll != 10 {
-		t.Errorf("pgdown: scroll = %d, want 10", got.(Model).whatsNewScroll)
+
+	// The STORED offset must stop at the last real position, not keep counting.
+	// applyWhatsNewScroll clamps only a local copy, so an unbounded handler
+	// leaves the view pinned while the value runs away — every press in the
+	// opposite direction is then dead until it unwinds.
+	cur := got.(Model)
+	for i := 0; i < 40; i++ {
+		next, _ := cur.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+		cur = next.(Model)
+	}
+	if cur.whatsNewScroll != limit {
+		t.Errorf("40 x down: scroll = %d, want it clamped to %d", cur.whatsNewScroll, limit)
+	}
+	// One press back must move the view immediately.
+	back, _ := cur.Update(tea.KeyPressMsg{Code: tea.KeyUp})
+	if back.(Model).whatsNewScroll != limit-1 {
+		t.Errorf("up after clamping: scroll = %d, want %d", back.(Model).whatsNewScroll, limit-1)
+	}
+
+	got, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyPgDown})
+	if want := min(whatsNewPageRows, limit); got.(Model).whatsNewScroll != want {
+		t.Errorf("pgdown: scroll = %d, want %d", got.(Model).whatsNewScroll, want)
 	}
 	got, _ = got.(Model).Update(tea.KeyPressMsg{Code: tea.KeyPgUp})
 	if got.(Model).whatsNewScroll != 0 {
 		t.Errorf("pgup: scroll = %d, want 0", got.(Model).whatsNewScroll)
 	}
-	// A scroll far past the end must still render, clamped to the last page.
+	// A stored scroll past the end must still render, clamped to the last page.
 	far := got.(Model)
 	far.whatsNewScroll = 9999
 	if out := far.renderWhatsNewDialog(); !strings.Contains(out, "↑↓ scroll") {
 		t.Errorf("a scroll past the end must clamp and still render:\n%s", out)
+	}
+}
+
+// The F1 path returns to the About menu it was opened from; the startup path
+// dismisses to the panes.
+func TestWhatsNew_EscReturnsToWhicheverOpenedIt(t *testing.T) {
+	withLatestWindow(t, testWindow(2), true)
+	m := Model{cfg: config.Default(), version: "1.60.0", dialog: dialogAbout,
+		dialogCursor: aboutWhatsNewIndex, lastWidth: 100, lastHeight: 40}
+	opened, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if opened.(Model).dialog != dialogWhatsNew {
+		t.Fatalf("setup: dialog = %v", opened.(Model).dialog)
+	}
+	closed, _ := opened.(Model).Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	if closed.(Model).dialog != dialogAbout {
+		t.Errorf("esc from the F1 path = %v, want dialogAbout", closed.(Model).dialog)
+	}
+
+	startup := whatsNewModel(testWindow(2))
+	closed, _ = startup.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	if closed.(Model).dialog != dialogNone {
+		t.Errorf("esc from the startup path = %v, want dialogNone", closed.(Model).dialog)
+	}
+}
+
+func TestWhatsNewWidth_FloorsOnAVeryNarrowTerminal(t *testing.T) {
+	for _, tw := range []int{1, 10, 22, 23} {
+		if got := whatsNewWidth(tw); got < whatsNewMinWidth {
+			t.Errorf("whatsNewWidth(%d) = %d, below the floor %d", tw, got, whatsNewMinWidth)
+		}
+	}
+	if got := whatsNewWidth(10); got != whatsNewMinWidth {
+		t.Errorf("whatsNewWidth(10) = %d, want the floor %d", got, whatsNewMinWidth)
+	}
+}
+
+func TestPadPair_HandlesAnEmptyRightHalf(t *testing.T) {
+	got := padPair("left only", "", 20)
+	if lipgloss.Width(got) != 20 {
+		t.Errorf("width = %d, want 20 (%q)", lipgloss.Width(got), got)
+	}
+	if !strings.HasPrefix(got, "left only") {
+		t.Errorf("got %q, want it to start with the left half", got)
 	}
 }
 

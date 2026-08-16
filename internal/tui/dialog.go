@@ -2389,6 +2389,10 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 				m.pendingSplit = make(map[string]*LayoutNode)
 			}
 			m.pendingSplit[tab.ID] = leaf
+			// What the reserved leaf is waiting for, recorded on the node so it
+			// dies with it. A replace disposes the pane it stands in for at send
+			// time, so on a single-pane tab this placeholder IS the tab.
+			leaf.phType = pluginName
 		}
 
 		if spec != nil {
@@ -2399,6 +2403,14 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 				m.worktreeCreates = make(map[string]string)
 			}
 			m.worktreeCreates[tab.ID] = newBranch
+			// Pushed HERE as well as in rebuildTabs, and the rebuildTabs copy
+			// alone was not enough: it runs only on a broadcast, and a worktree
+			// create is the one request that guarantees none. handleCreatePane
+			// hands it to a worker without broadcasting, and gitWatcher stays
+			// silent unless a fingerprint moved — so the next broadcast is
+			// typically the one the finished add produces, and the placeholder
+			// was blank for the entire wait it exists to explain.
+			tab.CreatingBranch = newBranch
 		}
 
 		send := func() tea.Msg {
@@ -2447,6 +2459,8 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 		m.pendingSplit = make(map[string]*LayoutNode)
 	}
 	m.pendingSplit[tab.ID] = placeholder
+	// See the replace arm: recorded on the node, so it needs no unwinding.
+	placeholder.phType = pluginName
 
 	// The spec, when the user asked for a new branch. RepoRoot is the main
 	// checkout the DAEMON reported, so no path built on this machine reaches
@@ -2466,6 +2480,9 @@ func (m Model) handleCreatePaneSplit() (tea.Model, tea.Cmd) {
 			m.worktreeCreates = make(map[string]string)
 		}
 		m.worktreeCreates[tab.ID] = newBranch
+		// See the replace arm: the first broadcast is typically the one that
+		// arrives when the checkout is already over.
+		tab.CreatingBranch = newBranch
 	}
 
 	send := func() tea.Msg {

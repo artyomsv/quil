@@ -27,11 +27,19 @@ type TabModel struct {
 	focusMode bool // true = active pane fills entire tab
 
 	// CreatingBranch names the branch of a worktree create in flight for this
-	// tab, and is what the placeholder leaf renders while it waits. Pushed by
-	// the Model each frame from worktreeCreates rather than stored here as the
-	// source of truth: the map is what the response handlers settle, and two
-	// copies of "is a create in flight" is how a placeholder outlives its
-	// request.
+	// tab, and is what the placeholder leaf renders while it waits.
+	// worktreeCreates remains the SOURCE OF TRUTH — it is what the response
+	// handlers settle, and two copies of "is a create in flight" is how a
+	// placeholder outlives its request — so this field is only ever a mirror of
+	// it, written at the three moments the map is: the submit, the settle, and
+	// every broadcast (rebuildTabs).
+	//
+	// The submit write is the one that cannot be dropped. Broadcasts are not
+	// guaranteed during the wait this field exists to explain: the daemon hands
+	// a worktree create to a worker without broadcasting, and gitWatcher stays
+	// silent unless a git fingerprint moved — so for a while the mirror was
+	// filled in only by the broadcast that arrived once the checkout was already
+	// over, and the box the user stared at throughout said nothing at all.
 	CreatingBranch string
 
 	// overlayPane is the tab's overlay tool — lazygit or hunk, one at a time

@@ -115,6 +115,13 @@ func TestReplace_FailedAddPutsTheOldPaneBack(t *testing.T) {
 	if got.flashText == "" {
 		t.Error("the failure was not reported")
 	}
+	// The rendered mirror is retired with the map entry it mirrors. Left
+	// behind, an ordinary split armed in this tab before the next broadcast
+	// renders "Creating worktree feat/x" over a placeholder that has no
+	// worktree — the branch that just FAILED, named as if it were in progress.
+	if tab.CreatingBranch != "" {
+		t.Errorf("CreatingBranch = %q after a failed add, want empty", tab.CreatingBranch)
+	}
 }
 
 // A timeout is the same situation: nothing proved the swap happened, and the
@@ -134,6 +141,10 @@ func TestReplace_TimeoutPutsTheOldPaneBack(t *testing.T) {
 	}
 	if got.worktreeReplaced[tabID] != nil {
 		t.Error("the held pane survived the timeout")
+	}
+	// Retired with the map entry, for the reason the failure test gives.
+	if tab.CreatingBranch != "" {
+		t.Errorf("CreatingBranch = %q after a timeout, want empty", tab.CreatingBranch)
 	}
 }
 
@@ -203,7 +214,7 @@ func TestReplace_WithoutAWorktreeStillDisposesImmediately(t *testing.T) {
 // replace path with the old pane already gone, so the whole tab was blank with
 // nothing to say why.
 func TestRenderPendingPane_NamesTheBranchItIsWaitingOn(t *testing.T) {
-	out := renderPendingPane("feat/login", 60, 10)
+	out := renderPendingPane("feat/login", "claude-code", 60, 10)
 	if out == "" {
 		t.Fatal("a pending create rendered nothing at all")
 	}
@@ -225,7 +236,7 @@ func TestRenderPendingPane_NamesTheBranchItIsWaitingOn(t *testing.T) {
 // listing, so it is sanitized like any other rendered remote value — and
 // bounded, because sanitizing does not shorten and this box has a fixed width.
 func TestRenderPendingPane_SanitizesAndBoundsTheBranch(t *testing.T) {
-	out := renderPendingPane("boom\x1b]52;c;cGF5bG9hZA==\x07"+strings.Repeat("x", 400), 40, 8)
+	out := renderPendingPane("boom\x1b]52;c;cGF5bG9hZA==\x07"+strings.Repeat("x", 400), "", 40, 8)
 	if strings.Contains(out, "\x1b]52") {
 		t.Error("an OSC 52 in the branch survived into the pending box")
 	}
@@ -237,7 +248,7 @@ func TestRenderPendingPane_SanitizesAndBoundsTheBranch(t *testing.T) {
 // A zero rect means no resize has run yet. Rendering nothing there is the
 // pre-existing behaviour and strictly better than a zero-width box.
 func TestRenderPendingPane_ZeroRectRendersNothing(t *testing.T) {
-	if out := renderPendingPane("feat/x", 0, 0); out != "" {
+	if out := renderPendingPane("feat/x", "", 0, 0); out != "" {
 		t.Errorf("a zero rect rendered %q", out)
 	}
 }

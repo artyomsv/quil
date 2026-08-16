@@ -39,11 +39,37 @@ type LayoutNode struct {
 	// Runtime-only, and safe to add here because persistence goes through
 	// SerializedNode rather than this struct.
 	phW, phH int
+
+	// phType is the pane type this placeholder is waiting for, so a create
+	// carrying no worktree can still say what it is doing. It lives on the NODE
+	// rather than in a tab-keyed map for one reason: it needs no lifecycle at
+	// all. The placeholder is the only thing that reads it and the only thing
+	// that outlives the arming, so it cannot be left behind for a later create
+	// to render — the failure mode every other piece of this feature's
+	// bookkeeping (worktreeCreates, worktreeReplaced, pendingSplit) has to be
+	// unwound by hand to avoid.
+	//
+	// Empty renders nothing, which is what an unlabelled placeholder (a
+	// reconciliation-built one, say) should do.
+	phType string
 }
 
 // NewLeaf creates a leaf node wrapping a pane.
 func NewLeaf(pane *PaneModel) *LayoutNode {
 	return &LayoutNode{Pane: pane, Ratio: 0.5}
+}
+
+// fill installs a pane in a placeholder node and retires the placeholder's own
+// metadata with it. Every site that ends a placeholder's wait by giving it a
+// pane must go through this rather than assigning Pane directly.
+//
+// The clear is not tidiness. A node that stops being a placeholder is not
+// destroyed — a REPLACE writes the label onto an EXISTING leaf, and RemoveLeaf
+// later promotes a sibling into a node IN PLACE — so a label left behind is one
+// a LATER placeholder inherits, and it renders.
+func (n *LayoutNode) fill(pane *PaneModel) {
+	n.Pane = pane
+	n.phType = ""
 }
 
 // IsLeaf returns true if this node holds a pane (no children).
@@ -162,6 +188,11 @@ func (n *LayoutNode) RemoveLeaf(paneID string) bool {
 	parent.Ratio = sibling.Ratio
 	parent.Left = sibling.Left
 	parent.Right = sibling.Right
+	// The placeholder label travels with the rest of the sibling, or the
+	// promoted node keeps the PARENT's — which is a label from whatever create
+	// last passed through that slot, and reaches the screen whenever the
+	// promoted sibling is itself a placeholder.
+	parent.phType = sibling.phType
 
 	return true
 }
@@ -220,11 +251,11 @@ func (n *LayoutNode) FillPlaceholder(pane *PaneModel) bool {
 	}
 	// Check if this node's children are placeholders.
 	if n.Left != nil && n.Left.Pane == nil && n.Left.Left == nil {
-		n.Left.Pane = pane
+		n.Left.fill(pane)
 		return true
 	}
 	if n.Right != nil && n.Right.Pane == nil && n.Right.Left == nil {
-		n.Right.Pane = pane
+		n.Right.fill(pane)
 		return true
 	}
 	if n.Left != nil && n.Left.FillPlaceholder(pane) {
@@ -759,7 +790,7 @@ func renderNode(n *LayoutNode, creating string) string {
 		return n.Pane.View()
 	}
 	if n.Left == nil && n.Right == nil {
-		return renderPendingPane(creating, n.phW, n.phH)
+		return renderPendingPane(creating, n.phType, n.phW, n.phH)
 	}
 
 	leftView := renderNode(n.Left, creating)
@@ -779,21 +810,19 @@ func renderNode(n *LayoutNode, creating string) string {
 // placeholder may be one half of a split, and a full-tab box would paint over
 // its sibling. A zero rect (no resize has run yet) renders nothing, which is
 // the pre-existing behaviour and strictly better than a 0-width box.
-func renderPendingPane(branch string, w, h int) string {
+func renderPendingPane(branch, paneType string, w, h int) string {
 	if w <= 0 || h <= 0 {
 		return ""
 	}
-	// An ORDINARY split arms a placeholder too, and it has no branch. Saying
-	// "Creating worktree…" there is a confidently wrong answer about what the
-	// pane is waiting for — transient locally, but a create over ssh is not
-	// microseconds. A blank rect is what that placeholder rendered before this
-	// function existed, and it stays that way.
-	if branch == "" {
+	// Nothing known about what this placeholder is waiting for — a node built
+	// by reconciliation rather than by a submit. A blank rect is what every
+	// placeholder rendered before this function existed, and it stays the
+	// answer when there is nothing true to say.
+	if branch == "" && paneType == "" {
 		return lipgloss.NewStyle().Width(w).Height(h).Render("")
 	}
-	// The branch is the user's own text, but it is rendered, so it takes the
-	// same treatment as any other rendered value: sanitized, then bounded.
-	// Sanitizing does not shorten.
+	// Both values are rendered, so both take the same treatment as any other
+	// rendered value: sanitized, then bounded. Sanitizing does not shorten.
 	//
 	// The WHOLE line is budgeted, not just the branch. Granting the branch w-4
 	// while prepending an 18-cell literal produces a line up to w+14 wide, and
@@ -801,14 +830,26 @@ func renderPendingPane(branch string, w, h int) string {
 	// wrapped line and, being taller than the rect resizeNode recorded, pushed
 	// every sibling below it down. Measured before the fix: a 10x4 leaf (the
 	// documented minimum) rendered 10x5, and 1x4 rendered 1x18.
-	lines := []string{truncateCells("Creating worktree "+sanitizeRemoteText(branch), w)}
-	// The second line explains the wait rather than leaving the user to guess
-	// whether it has hung: a checkout of a large repository legitimately takes
-	// tens of seconds, which is exactly when it reads as broken. It needs three
-	// rows of its own (message, blank, hint), so it is gated on the height that
-	// actually fits it.
+	//
+	// The branch outranks the type when both are known: a create in a worktree
+	// waits on the checkout, not on the pane.
+	var lines []string
+	var hint string
+	if branch != "" {
+		lines = append(lines, truncateCells("Creating worktree "+sanitizeRemoteText(branch), w))
+		// The second line explains the wait rather than leaving the user to
+		// guess whether it has hung: a checkout of a large repository
+		// legitimately takes tens of seconds, which is exactly when it reads as
+		// broken.
+		hint = "checking out — this can take a while on a large repository"
+	} else {
+		lines = append(lines, truncateCells("Starting "+sanitizeRemoteText(paneType)+"…", w))
+		hint = "waiting for the daemon to create the pane"
+	}
+	// The hint needs three rows of its own (message, blank, hint), so it is
+	// gated on the height that actually fits it.
 	if h >= 4 {
-		lines = append(lines, "", restoreDimStyle.Render(truncateCells("checking out — this can take a while on a large repository", w)))
+		lines = append(lines, "", restoreDimStyle.Render(truncateCells(hint, w)))
 	}
 	// MaxWidth/MaxHeight CLAMP where Width/Height only pad: the pair is what
 	// makes the box fit its rect exactly rather than at least. Without them a

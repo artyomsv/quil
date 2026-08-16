@@ -222,6 +222,14 @@ func (m *Model) applyCreatePaneResp(p ipc.CreatePaneRespPayload, dest string) {
 		return
 	}
 	delete(m.worktreeCreates, tabID)
+	// Retired in the same step as the map entry it mirrors. rebuildTabs
+	// recomputes it from that map on every broadcast, so this only covers the
+	// window before the next one — but an ordinary split started inside that
+	// window would otherwise render "Creating worktree <the branch that just
+	// failed>" over a placeholder that has no worktree at all.
+	if tab != nil {
+		tab.CreatingBranch = ""
+	}
 	// A failed REPLACE normally puts the pane back rather than pruning its
 	// leaf: the worktree is created BEFORE the swap, so an add git refused
 	// leaves the pane alive on both sides, and pruning would cost the user a
@@ -272,7 +280,7 @@ func (m *Model) settleReplacedPane(tabID string, tab *TabModel, restore bool) {
 	// nowhere to put it — and a model with no home is a leaked emulator.
 	if restore && tab != nil && tab.Root != nil {
 		if leaf := m.pendingSplit[tabID]; leaf != nil && leaf.Pane == nil {
-			leaf.Pane = old
+			leaf.fill(old)
 			tab.invalidateLeaves()
 			return
 		}
@@ -288,6 +296,10 @@ func (m *Model) applyCreatePaneTimeout(tabID string) {
 	}
 	delete(m.worktreeCreates, tabID)
 	tab := m.tabByID(tabID)
+	// Retired with the map entry, for the reason applyCreatePaneResp gives.
+	if tab != nil {
+		tab.CreatingBranch = ""
+	}
 	// Restored, like the failure path: nothing proved the swap happened, the
 	// pane we detached is still ours, and putting it back is recoverable where
 	// losing it is not. A create the daemon CONFIRMED already disposed and

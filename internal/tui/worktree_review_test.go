@@ -249,7 +249,7 @@ func TestRenderPendingPane_FitsItsRectAtEverySize(t *testing.T) {
 		{8, 4}, {6, 4}, {3, 4}, {1, 4},
 		{12, 2}, {12, 1}, {20, 3}, {80, 24},
 	} {
-		out := renderPendingPane("feat/some-quite-long-branch-name", tc.w, tc.h)
+		out := renderPendingPane("feat/some-quite-long-branch-name", "claude-code", tc.w, tc.h)
 		if w := lipgloss.Width(out); w > tc.w {
 			t.Errorf("%dx%d: rendered %d cells wide, want <= %d", tc.w, tc.h, w, tc.w)
 		}
@@ -264,9 +264,57 @@ func TestRenderPendingPane_FitsItsRectAtEverySize(t *testing.T) {
 // confidently wrong answer about what the pane is waiting for — and an ordinary
 // create over ssh is not microseconds.
 func TestRenderPendingPane_OrdinarySplitSaysNothingAboutWorktrees(t *testing.T) {
-	out := renderPendingPane("", 60, 10)
+	out := renderPendingPane("", "ssh", 60, 10)
 	if strings.Contains(out, "Creating worktree") {
 		t.Errorf("an ordinary split placeholder claims a worktree is being created:\n%q", out)
+	}
+	if lipgloss.Width(out) != 60 || lipgloss.Height(out) != 10 {
+		t.Errorf("the placeholder is %dx%d, want 60x10", lipgloss.Width(out), lipgloss.Height(out))
+	}
+}
+
+// The "Starting <type>…" line gets the same rect sweep the branch line does.
+// The branch outranks the type, so the sweep above renders only the branch line
+// at these sizes and a budget mistake specific to this one would ship — which
+// is exactly the bug class this function's comments record having shipped
+// before ("a 10x4 leaf rendered 10x5, and 1x4 rendered 1x18").
+func TestRenderPendingPane_TypeLineFitsItsRectAtEverySize(t *testing.T) {
+	for _, tc := range []struct{ w, h int }{
+		{10, 4}, // the documented minimum leaf size
+		{8, 4}, {6, 4}, {3, 4}, {1, 4},
+		{12, 2}, {12, 1}, {20, 3}, {80, 24},
+	} {
+		out := renderPendingPane("", "some-quite-long-plugin-name", tc.w, tc.h)
+		if w := lipgloss.Width(out); w > tc.w {
+			t.Errorf("%dx%d: rendered %d cells wide, want <= %d", tc.w, tc.h, w, tc.w)
+		}
+		if h := lipgloss.Height(out); h > tc.h {
+			t.Errorf("%dx%d: rendered %d rows, want <= %d", tc.w, tc.h, h, tc.h)
+		}
+	}
+}
+
+// The type line is interpolated into rendered text, so it takes the same
+// sanitize-then-bound pair the branch line takes. Both existing controls tests
+// pass a branch, and the branch outranks the type — so removing either control
+// from this line left the whole suite green.
+func TestRenderPendingPane_SanitizesAndBoundsTheType(t *testing.T) {
+	out := renderPendingPane("", "boom\x1b]52;c;cGF5bG9hZA==\x07"+strings.Repeat("x", 400), 40, 8)
+	if strings.Contains(out, "\x1b]52") {
+		t.Error("an OSC 52 in the pane type survived into the pending box")
+	}
+	if w := lipgloss.Width(out); w != 40 {
+		t.Errorf("pending box is %d cells wide, want exactly 40 — an unbounded type overflowed its rect", w)
+	}
+}
+
+// With NEITHER value known — a placeholder built by reconciliation rather than
+// by a submit — the box stays blank. Inventing a subject for a wait nobody can
+// describe is the same class of confidently wrong answer as claiming a worktree.
+func TestRenderPendingPane_NothingKnownRendersBlank(t *testing.T) {
+	out := renderPendingPane("", "", 60, 10)
+	if strings.TrimSpace(stripANSI(out)) != "" {
+		t.Errorf("an unlabelled placeholder rendered text:\n%q", out)
 	}
 	if lipgloss.Width(out) != 60 || lipgloss.Height(out) != 10 {
 		t.Errorf("the blank placeholder is %dx%d, want 60x10", lipgloss.Width(out), lipgloss.Height(out))

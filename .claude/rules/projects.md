@@ -992,6 +992,48 @@ is pushed from the SAME read that decides the prune exemption, so the
 placeholder and the message standing in it cannot disagree about whether a
 create is in flight.
 
+**That push is a MIRROR of `worktreeCreates`, and the `rebuildTabs` write alone
+left the box blank for the whole wait it exists to explain.** `rebuildTabs` runs
+on a broadcast, and a worktree create is the one request that guarantees none:
+`handleCreatePane` hands it to a worker and returns without broadcasting, and
+`gitWatcher` broadcasts only when a git fingerprint actually MOVED — so on an
+idle tab the next broadcast is the one the finished checkout produces, and
+`CreatingBranch` was still `""` until then. The mirror is therefore written at
+all three moments the map is: the submit (`handleCreatePaneSplit`, both arms),
+the settle (`applyCreatePaneResp`'s failure branch and `applyCreatePaneTimeout`,
+so a branch that just FAILED cannot label the next placeholder), and every
+broadcast. `worktreeCreates` remains the single source of truth — it is what the
+response handlers settle, and two independent copies of "is a create in flight"
+is how a placeholder outlives its request.
+
+**A placeholder with NO worktree says what it is starting**, via
+`LayoutNode.phType` — runtime-only beside `phW`/`phH`, so persistence is
+untouched. It lives on the NODE rather than in a tab-keyed map because that is
+what gives it no lifecycle: it dies with the placeholder, where
+`worktreeCreates` / `worktreeReplaced` / `pendingSplit` each have to be unwound
+by hand on four paths. Blank stays the answer when neither value is known (a
+node built by reconciliation) — inventing a subject for a wait nobody can
+describe is the same confidently-wrong answer as claiming a worktree.
+
+**"It dies with the placeholder" is only true because two sites make it true.**
+A node that stops being a placeholder is not destroyed: a REPLACE writes the
+label onto an EXISTING leaf, and `RemoveLeaf` promotes a sibling into a parent
+IN PLACE. So `fill` (the single choke point every "give this placeholder its
+pane" site goes through — `FillPlaceholder`, `rebuildTabs`, `settleReplacedPane`)
+clears the label with the arrival, and `RemoveLeaf` carries `phType` alongside
+the other five promoted fields. Without the pair, a placeholder promoted into a
+slot an earlier create passed through renders that create's label.
+
+**`splitPane` owes the same in-flight refusal `handleCreatePaneSplit` makes**,
+and for one more reason than that one has. It is the split the KEYBINDINGS and
+the command palette call, so it is the split people actually use; `pendingSplit`
+is keyed by tab, so a second placeholder overwrites the leaf a worktree create
+reserved and the pane still on its way lands nowhere. And because `renderNode`
+hands the TAB's `CreatingBranch` to EVERY placeholder leaf, a second placeholder
+in that tab renders "Creating worktree …" while having no worktree at all. The
+tab-level branch is correct exactly while a tab holds at most one placeholder,
+and that refusal is what keeps it so.
+
 **The WHOLE line is budgeted, not just the branch, and the box is CLAMPED.**
 lipgloss `Width`/`Height` pad but never truncate, so granting the branch `w-4`
 while prepending an 18-cell literal produced a line up to `w+14` wide that

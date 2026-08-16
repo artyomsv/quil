@@ -1949,30 +1949,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// tick chain per pane: spinnerTickRunning (set at the start site) is
 		// cleared here when the chain stops, so a re-arm can start a fresh one
 		// without ever stacking two chains (which would double the frame rate).
-		for _, tab := range m.allTabs() {
-			if tab.Root == nil {
-				continue
-			}
-			leaf := tab.Root.FindLeaf(msg.paneID)
-			if leaf == nil {
-				continue
-			}
-			// Keep the indicator alive until the pane's first live output
-			// (min display met) or the safety cap — not a fixed 2s timer.
-			if (leaf.Pane.resuming || leaf.Pane.preparing) && !leaf.Pane.restoreSettled() {
-				leaf.Pane.spinnerFrame = msg.frame
-				nextFrame := msg.frame + 1
-				paneID := msg.paneID
-				return m, tea.Tick(100*time.Millisecond, func(t time.Time) tea.Msg {
-					return spinnerTickMsg{paneID: paneID, frame: nextFrame}
-				})
-			}
-			// Chain stopped: settled, or no longer resuming/preparing.
-			leaf.Pane.resuming = false
-			leaf.Pane.preparing = false
-			leaf.Pane.spinnerTickRunning = false
+		pane := m.spinnerTargetPane(msg.paneID)
+		if pane == nil {
 			return m, nil
 		}
+		// Keep the indicator alive until the pane's first live output
+		// (min display met) or the safety cap — not a fixed 2s timer.
+		if (pane.resuming || pane.preparing) && !pane.restoreSettled() {
+			pane.spinnerFrame = msg.frame
+			nextFrame := msg.frame + 1
+			paneID := msg.paneID
+			return m, tea.Tick(100*time.Millisecond, func(t time.Time) tea.Msg {
+				return spinnerTickMsg{paneID: paneID, frame: nextFrame}
+			})
+		}
+		// Chain stopped: settled, or no longer resuming/preparing.
+		pane.resuming = false
+		pane.preparing = false
+		pane.spinnerTickRunning = false
 		return m, nil
 
 	case workSpinnerTickMsg:
@@ -2134,14 +2128,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// spinnerTickRunning so a pane that already has a live tick chain (e.g.
 		// armed in a previous broadcast) never gets a second one — two chains
 		// would advance spinnerFrame independently and double the visible rate.
-		// Overlay panes (not in the tree) keep their prior ungated behavior.
+		// Overlay panes are guarded too: their ticks used to find no pane and
+		// die, so a stacked chain was invisible — and it stopped being so the
+		// moment the handler learned to resolve them.
 		for _, paneID := range newPaneIDs {
 			id := paneID
-			if leaf := m.leafByID(id); leaf != nil {
-				if leaf.Pane.spinnerTickRunning {
+			if pane := m.spinnerTargetPane(id); pane != nil {
+				if pane.spinnerTickRunning {
 					continue
 				}
-				leaf.Pane.spinnerTickRunning = true
+				pane.spinnerTickRunning = true
 			}
 			cmds = append(cmds, tea.Tick(100*time.Millisecond, func(t time.Time) tea.Msg {
 				return spinnerTickMsg{paneID: id, frame: 1}
@@ -3008,16 +3004,25 @@ func (m *Model) activePaneByID(id string) *PaneModel {
 	return nil
 }
 
-// leafByID returns the layout leaf for a pane id across all tabs (tree panes
-// only — overlay panes live outside the tree). Used to guard spinner-tick
-// chains against stacking.
-func (m *Model) leafByID(id string) *LayoutNode {
+// spinnerTargetPane resolves the pane a restore-spinner tick names, across
+// every tab and INCLUDING each tab's overlay pane.
+//
+// The overlay half is the whole reason this exists. Overlay panes are
+// deliberately outside the layout tree, so the tick handler's old walk of
+// tab.Root found nothing for lazygit or hunk: the chain stopped on its first
+// message, and a boot indicator on one of those panes would have rendered a
+// single frozen frame. The start site (see the newPaneIDs loop) has always
+// armed a tick for them.
+func (m *Model) spinnerTargetPane(id string) *PaneModel {
 	for _, tab := range m.allTabs() {
+		if tab.overlayPane != nil && tab.overlayPane.ID == id {
+			return tab.overlayPane
+		}
 		if tab.Root == nil {
 			continue
 		}
 		if leaf := tab.Root.FindLeaf(id); leaf != nil {
-			return leaf
+			return leaf.Pane
 		}
 	}
 	return nil
@@ -4418,7 +4423,6 @@ func (m *Model) handlePaneOutput(msg PaneOutputMsg) tea.Cmd {
 	// Overlay panes live outside the layout tree — check them first.
 	for _, tab := range m.allTabs() {
 		if tab.overlayPane != nil && tab.overlayPane.ID == msg.PaneID {
-			tab.overlayPane.preparing = false
 			// Same armed-reset consume as the layout-tree branch below. This
 			// branch returns early, so without it an overlay pane's replay would
 			// append onto content it was supposed to replace. Today's only
@@ -4430,6 +4434,16 @@ func (m *Model) handlePaneOutput(msg PaneOutputMsg) tea.Cmd {
 				tab.overlayPane.resetForReattach()
 			}
 			tab.overlayPane.AppendOutput(msg.Data)
+			// Settled the way the layout-tree branch below settles: AFTER the
+			// append, and only once the pane really shows something. This used
+			// to clear unconditionally on the FIRST byte — but lazygit's opening
+			// frames set up the terminal and clear the screen well before they
+			// paint, so the flag went down while the rectangle was still empty,
+			// which is the state the indicator exists to cover.
+			if (tab.overlayPane.preparing || tab.overlayPane.resuming) && tab.overlayPane.restoreSettled() {
+				tab.overlayPane.preparing = false
+				tab.overlayPane.resuming = false
+			}
 			return nil
 		}
 	}
@@ -4910,7 +4924,7 @@ func (m *Model) rebuildTabs(info ProjectInfo, state WorkspaceStateMsg, existingT
 			// Try to fill a pending split placeholder first.
 			if m.pendingSplit != nil {
 				if placeholder, ok := m.pendingSplit[tab.ID]; ok {
-					placeholder.Pane = pane
+					placeholder.fill(pane)
 					tab.invalidateLeaves()
 					delete(m.pendingSplit, tab.ID)
 					// The pane LANDING is what retires a worktree create's
@@ -5132,6 +5146,21 @@ func (m *Model) reconcileOverlayPane(
 		pane, ok := existingPanes[overlayInfo.ID]
 		if !ok {
 			pane = NewPaneModel(overlayInfo.ID, m.replayBufSize())
+			// The boot indicator, for the same reason a tree pane gets one at
+			// the `len(existingTabs) > 0` arm above: a full-tab overlay whose
+			// tool has not painted yet is an empty rectangle, and lazygit
+			// scanning a large repository or hunk computing a diff is seconds
+			// of it with nothing on screen to say so.
+			//
+			// Gated on pendingOverlayShow, which is precisely "this client's
+			// Alt+G/Alt+D just created this". An overlay adopted on a plain
+			// REATTACH is a tool that has been running for hours — claiming it
+			// is starting up would be a confidently wrong answer, and it is
+			// hidden by default there anyway, so it renders nothing at all.
+			if m.pendingOverlayShow[tab.ID] {
+				pane.preparing = true
+				pane.resumeStart = time.Now()
+			}
 			newPaneIDs = append(newPaneIDs, overlayInfo.ID)
 		}
 		syncPaneMeta(pane, overlayInfo, m.pluginWideCanvas(overlayInfo.Type), m.pluginMinNativeCols(overlayInfo.Type))
@@ -6447,6 +6476,18 @@ func (m *Model) splitPane(dir SplitDir) tea.Cmd {
 		return nil
 	}
 
+	// The same in-flight refusal handleCreatePaneSplit makes, and it belongs
+	// here for one MORE reason than it does there. pendingSplit is keyed by
+	// tab, so a second placeholder overwrites the leaf the create reserved and
+	// the pane still on its way lands nowhere. On top of that, renderNode hands
+	// the TAB's CreatingBranch to every placeholder leaf — correct only while a
+	// tab holds at most one — so the split's own placeholder would render
+	// "Creating worktree <branch>" while having no worktree at all.
+	if inflight := m.worktreeCreates[tab.ID]; inflight != "" {
+		m.setFlash("still creating the worktree for " + truncateCells(sanitizeRemoteText(inflight), createErrFlashCap) + " — wait for it to finish")
+		return m.flashCmd()
+	}
+
 	// Split the active pane's leaf, creating a placeholder for the new pane.
 	placeholder := tab.SplitAtPane(pane.ID, dir)
 	if placeholder == nil {
@@ -6458,6 +6499,10 @@ func (m *Model) splitPane(dir SplitDir) tea.Cmd {
 		m.pendingSplit = make(map[string]*LayoutNode)
 	}
 	m.pendingSplit[tab.ID] = placeholder
+	// The same node-local label the dialog path records. The payload below
+	// carries no Type and the daemon normalises an empty one to terminal, so
+	// this is what the pane will be rather than a guess about it.
+	placeholder.phType = "terminal"
 
 	tabID, dest := tab.ID, tab.Dest
 	return func() tea.Msg {

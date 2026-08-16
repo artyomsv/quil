@@ -346,6 +346,10 @@ Set a whole keymap in one line:
 preset = "tmux"
 ```
 
+**Restart Quil for it to take effect.** `bindings.toml` is read once at startup — there is no in-app preset switcher and no hot reload, so editing the file while Quil is running does nothing until the next launch. `F1` → Shortcuts always lists the keymap that is *currently* live, which is how to confirm a switch actually took.
+
+Switching back is the same line: `preset = "default"`.
+
 **Presets replace, they do not add.** Selecting `tmux` means `Ctrl+T` no longer opens a tab and `Ctrl+W` no longer closes a pane — those keys belong to the tmux layout now. Any action the preset does not mention keeps its usual key: `Alt+Shift+P` still opens the command palette, `Alt+G` still toggles lazygit.
 
 Want one of them back? Override it:

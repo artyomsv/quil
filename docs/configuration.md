@@ -386,6 +386,8 @@ Quil records the last project list seen on each remote destination in `~/.quil/r
 
 Keybindings live in their own file, `~/.quil/bindings.toml` (or `$QUIL_HOME/bindings.toml`), rather than in `config.toml`.
 
+**Every value here applies on next launch only.** The file is read once at startup; there is no in-app editor for it and no hot reload, so a change made while Quil is running has no effect until you restart. `F1` → Shortcuts renders the keymap that is currently live, so it is the quickest check that an edit took.
+
 The reason is mechanical: `config.toml` is rewritten in full whenever any setting changes, so a keymap resolved into it would be frozen as literal strings the first time you edited an unrelated option — and no future preset or default change could ever reach you again.
 
 ```toml

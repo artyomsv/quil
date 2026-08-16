@@ -83,6 +83,30 @@ var registry = []Action{
 	// and conflict detection sees the key; Hidden so F1 does not advertise a
 	// shortcut that does nothing.
 	{ID: "json.transform", Label: "Transform selection as JSON", Group: "System", Tier: TierLate, Order: 4300, Default: "ctrl+j", Hidden: true},
+
+	// --- Promoted out of handleKey's reserved-key switch ---
+	//
+	// Order sits above every pre-existing action because alt+1..9 was checked
+	// LAST in handleKey, once both tier switches had declined. Order is what
+	// reproduces that rank for the duplicate tie-break.
+	//
+	// tab.next/tab.prev ship UNBOUND: Quil never had them, and inventing a
+	// default chord here would claim two keys from every existing user to
+	// serve a preset they have not selected.
+	{ID: "tab.next", Label: "Next tab", Group: "Tabs", Tier: TierLate, Order: 4400, Default: ""},
+	{ID: "tab.prev", Label: "Previous tab", Group: "Tabs", Tier: TierLate, Order: 4500, Default: ""},
+	{ID: "tab.switch_1", Label: "Switch to tab 1", Group: "Tabs", Tier: TierLate, Order: 4600, Default: "alt+1"},
+	{ID: "tab.switch_2", Label: "Switch to tab 2", Group: "Tabs", Tier: TierLate, Order: 4700, Default: "alt+2"},
+	{ID: "tab.switch_3", Label: "Switch to tab 3", Group: "Tabs", Tier: TierLate, Order: 4800, Default: "alt+3"},
+	{ID: "tab.switch_4", Label: "Switch to tab 4", Group: "Tabs", Tier: TierLate, Order: 4900, Default: "alt+4"},
+	{ID: "tab.switch_5", Label: "Switch to tab 5", Group: "Tabs", Tier: TierLate, Order: 5000, Default: "alt+5"},
+	{ID: "tab.switch_6", Label: "Switch to tab 6", Group: "Tabs", Tier: TierLate, Order: 5100, Default: "alt+6"},
+	{ID: "tab.switch_7", Label: "Switch to tab 7", Group: "Tabs", Tier: TierLate, Order: 5200, Default: "alt+7"},
+	{ID: "tab.switch_8", Label: "Switch to tab 8", Group: "Tabs", Tier: TierLate, Order: 5300, Default: "alt+8"},
+	{ID: "tab.switch_9", Label: "Switch to tab 9", Group: "Tabs", Tier: TierLate, Order: 5400, Default: "alt+9"},
+	// Reachable today only through F1 -> About. Ships unbound for the same
+	// reason as tab.next: the tmux preset is what wants a key for it.
+	{ID: "system.shortcuts", Label: "Show keyboard shortcuts", Group: "System", Tier: TierLate, Order: 5500, Default: ""},
 }
 
 // Actions returns every registered action. The slice is a copy.

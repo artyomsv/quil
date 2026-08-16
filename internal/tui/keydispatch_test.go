@@ -389,11 +389,15 @@ func TestHandleKey_EveryDispatchedActionHasACaseArm(t *testing.T) {
 
 	var checked int
 	for _, a := range keymap.Actions() {
-		// The two forms an arm can take: its own case, or a label shared with
-		// the arm above it (project.next / project.prev).
+		// The three forms an arm can take: its own case, the LAST label of a
+		// shared arm (project.next / project.prev), or a label in the middle
+		// of one (tab.switch_1..9 share a single arm across two source lines).
 		at := strings.Index(body, "case \""+string(a.ID)+"\"")
 		if at < 0 {
 			at = strings.Index(body, ", \""+string(a.ID)+"\":")
+		}
+		if at < 0 {
+			at = strings.Index(body, "\""+string(a.ID)+"\",")
 		}
 		if a.ID == "json.transform" {
 			if at >= 0 {
@@ -438,7 +442,11 @@ func TestHandleKey_EveryDispatchedActionHasACaseArm(t *testing.T) {
 // Code fails loudly here instead of quietly asserting about the wrong key.
 func TestKeymap_EveryShippedDefaultMatchesARealKeyPress(t *testing.T) {
 	km, _ := buildKeymap(config.Default().Keybindings)
-	specs := keySpecsFromConfig(config.Default().Keybindings)
+	// DefaultLayer, not keySpecsFromConfig: the promoted actions have no config
+	// field, so walking the config map would silently skip alt+1..9 — the very
+	// bindings that just moved from a hardcoded switch into the registry and
+	// therefore the ones most in need of a real-keypress check.
+	specs := keymap.DefaultLayer()
 
 	var checked int
 	for _, a := range keymap.Actions() {
@@ -464,9 +472,18 @@ func TestKeymap_EveryShippedDefaultMatchesARealKeyPress(t *testing.T) {
 			checked++
 		}
 	}
-	if checked < len(keymap.Actions())-2 { // next_pane and prev_pane ship unbound
-		t.Errorf("only %d chords checked across %d actions — the walk is skipping bindings",
-			checked, len(keymap.Actions()))
+	// Counted, not a magic offset: several actions ship deliberately unbound
+	// (pane.next, pane.prev, tab.next, tab.prev, system.shortcuts), and a
+	// hardcoded allowance silently absorbs the next skipped binding.
+	var bound int
+	for _, a := range keymap.Actions() {
+		if a.Default != "" {
+			bound++
+		}
+	}
+	if checked < bound {
+		t.Errorf("only %d chords checked across %d bound actions — the walk is skipping bindings",
+			checked, bound)
 	}
 }
 
@@ -520,4 +537,55 @@ func handleKeySource(t *testing.T, src string) string {
 		t.Fatal("could not find the end of handleKey")
 	}
 	return rest[:end]
+}
+
+// TestPresetChords_MatchRealKeyPresses extends the shipped-defaults check to
+// every preset, which is where it is most needed: the tmux keymap is the only
+// thing in the tree binding "%", "\"", "&", "[" and "?", and a chord bubbletea
+// spells differently is a silently dead key with the conflict checker green.
+//
+// keymap cannot do this itself — it imports stdlib only and so can never build
+// a tea.KeyPressMsg.
+func TestPresetChords_MatchRealKeyPresses(t *testing.T) {
+	for _, name := range keymap.PresetNames() {
+		p, err := keymap.LoadPreset(name)
+		if err != nil {
+			t.Fatalf("LoadPreset(%s): %v", name, err)
+		}
+		prefix := p.Prefix
+		if prefix == "" {
+			prefix = "ctrl+b"
+		}
+		expanded, conflicts := keymap.ExpandPrefix(p.Bindings, prefix)
+		for _, c := range conflicts {
+			t.Fatalf("preset %s: %s", name, c)
+		}
+
+		for id, spec := range expanded {
+			// Parse first: dispatch matches CANONICAL chords, so those are what
+			// have to equal a real press. It is also the only way an aliased
+			// spelling can be checked at all — the tmux preset writes the comma
+			// key as "comma", and the canonical form is ",".
+			seqs, err := keymap.ParseSpec(spec)
+			if err != nil {
+				t.Errorf("preset %s, %s = %q: %v", name, id, spec, err)
+				continue
+			}
+			for _, seq := range seqs {
+				for _, c := range seq {
+					chord := c.String()
+					t.Run(name+"/"+string(id)+"/"+chord, func(t *testing.T) {
+						msg, ok := keyPressForChord(chord)
+						if !ok {
+							t.Fatalf("no tea.KeyPressMsg encoding for %q — extend keyPressForChord", chord)
+						}
+						if got := msg.String(); got != chord {
+							t.Fatalf("bubbletea renders this key as %q but preset %s canonicalizes it to %q — "+
+								"either the fixture's Code is wrong or the binding is dead", got, name, chord)
+						}
+					})
+				}
+			}
+		}
+	}
 }

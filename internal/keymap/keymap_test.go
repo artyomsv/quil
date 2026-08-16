@@ -50,48 +50,81 @@ func TestBuild_MultiStepSequenceNeverMatchesItsFirstChord(t *testing.T) {
 	}
 }
 
-// TestBuild_MultiStepSequenceIsReportedAsUnsupported is the other half of the
-// test above, and the reason it exists is that the two together are the whole
-// contract: the sequence must not dispatch AND must not be advertised as
-// working. It stays in bindings, so Display renders "ctrl+b c" in F1 exactly
-// like a binding that fires — the conflict row is the only thing that says
-// otherwise, and this file's governing principle is that a silently dropped
-// binding is worse than a loud one.
-func TestBuild_MultiStepSequenceIsReportedAsUnsupported(t *testing.T) {
+// TestBuild_MultiStepSequenceDispatchesCleanly replaces the Stage 1 test that
+// asserted the opposite. A sequence now resolves, and it must do so with NO
+// conflict — the unsupported-sequence report existed only to keep Build honest
+// while the syntax parsed but nothing dispatched it. Leaving it would make F1
+// warn about a binding that works.
+func TestBuild_MultiStepSequenceDispatchesCleanly(t *testing.T) {
 	km, conflicts := Build(map[ActionID]string{"tab.new": "ctrl+b c"})
-	if len(conflicts) != 1 || conflicts[0].Kind != ConflictUnsupportedSequence {
-		t.Fatalf("conflicts = %+v, want one ConflictUnsupportedSequence", conflicts)
+	if len(conflicts) != 0 {
+		t.Fatalf("conflicts = %+v, want none — the sequence is dispatchable now", conflicts)
 	}
-	if got := conflicts[0].Key; got != "ctrl+b c" {
-		t.Errorf("conflict Key = %q, want the whole sequence", got)
+	if id, kind := km.MatchSeq(mustChords(t, "ctrl+b c")); kind != MatchExact || id != "tab.new" {
+		t.Errorf("MatchSeq = (%q, %v), want (tab.new, MatchExact)", id, kind)
 	}
-	if got := conflicts[0].Loser; got != "tab.new" {
-		t.Errorf("conflict Loser = %q, want tab.new", got)
-	}
-	// The user sees the message, not the struct: it has to name the sequence
-	// and the action, or the F1 row says a key is broken without saying which.
-	msg := conflicts[0].String()
-	for _, want := range []string{"sequence not supported yet", `"ctrl+b c"`, "tab.new", "never fires"} {
-		if !strings.Contains(msg, want) {
-			t.Errorf("Conflict.String() = %q, missing %q", msg, want)
+	// The sequence must NOT be reachable as a bare chord in either tier, or it
+	// would fire on the first keypress and the second chord would be stray
+	// input in the pane.
+	for _, tier := range []Tier{TierEarly, TierLate} {
+		if id, ok := km.MatchTier(tier, "ctrl+b"); ok {
+			t.Errorf("tier %v resolves the sequence head as a chord (%q); only the machine may", tier, id)
 		}
 	}
-	// And Display still offers it — which is exactly why the conflict is
-	// needed. If this ever stops being true the conflict can go with it.
 	if got := km.Display("tab.new"); got != "ctrl+b c" {
-		t.Errorf("Display = %q, want the sequence still advertised", got)
+		t.Errorf("Display = %q, want the sequence", got)
 	}
 }
 
-// TestBuild_SingleChordSpecsProduceNoSequenceConflict is the control: the
-// unsupported-sequence report must fire on multi-step specs only. Without it a
-// `continue` that reported every binding would still pass the test above.
-func TestBuild_SingleChordSpecsProduceNoSequenceConflict(t *testing.T) {
-	_, conflicts := Build(map[ActionID]string{"pane.rename": "alt+f2,alt+shift+r"})
-	for _, c := range conflicts {
-		if c.Kind == ConflictUnsupportedSequence {
-			t.Errorf("a comma-separated alternative was reported as a sequence: %+v", c)
+// The control: a comma-separated alternative is two single chords, not a
+// sequence. Without this, a `continue` that treated every binding as multi-step
+// would still pass the test above.
+func TestBuild_CommaAlternativesAreNotSequences(t *testing.T) {
+	km, conflicts := Build(map[ActionID]string{"pane.rename": "alt+f2,alt+shift+r"})
+	if len(conflicts) != 0 {
+		t.Fatalf("conflicts = %+v, want none", conflicts)
+	}
+	for _, key := range []string{"alt+f2", "alt+shift+r"} {
+		if id, ok := km.MatchTier(TierLate, key); !ok || id != "pane.rename" {
+			t.Errorf("MatchTier(late, %q) = (%q, %v), want pane.rename", key, id, ok)
 		}
+	}
+}
+
+// A chord that opens a longer sequence can never fire — pressing it always
+// arms the machine instead. The shorter binding is refused, and refused means
+// gone from the tables, not merely warned about.
+func TestBuild_ShorterBindingIsRefusedWhenItShadows(t *testing.T) {
+	km, conflicts := Build(map[ActionID]string{
+		"pane.rename": "ctrl+b",
+		"tab.new":     "ctrl+b c",
+	})
+
+	var got *Conflict
+	for i := range conflicts {
+		if conflicts[i].Kind == ConflictShadowed {
+			got = &conflicts[i]
+		}
+	}
+	if got == nil {
+		t.Fatalf("want a ConflictShadowed, got %+v", conflicts)
+	}
+	if got.Loser != "pane.rename" || got.Winner != "tab.new" {
+		t.Errorf("Conflict = winner %q loser %q, want winner tab.new loser pane.rename", got.Winner, got.Loser)
+	}
+	if id, ok := km.MatchTier(TierLate, "ctrl+b"); ok {
+		t.Errorf("the shadowed chord must be removed from the tier map, still resolves to %q", id)
+	}
+	if _, kind := km.MatchSeq(mustChords(t, "ctrl+b")); kind != MatchPartial {
+		t.Errorf("ctrl+b must now be MatchPartial, got %v", kind)
+	}
+}
+
+func TestConflictShadowed_Message(t *testing.T) {
+	c := Conflict{Kind: ConflictShadowed, Key: "ctrl+b", Winner: "tab.new", Loser: "pane.rename"}
+	want := `unreachable binding: "ctrl+b" → tab.new wins, pane.rename never fires`
+	if got := c.String(); got != want {
+		t.Errorf("String() = %q, want %q", got, want)
 	}
 }
 

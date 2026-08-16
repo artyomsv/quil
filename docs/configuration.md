@@ -14,7 +14,8 @@ Quil reads `~/.quil/config.toml` (or `$QUIL_HOME/config.toml` when `QUIL_HOME` i
 - [`[overlay]`](#overlay)
 - [`[update]`](#update)
 - [`[[destinations]]`](#destinations)
-- [`[keybindings]`](#keybindings)
+- [`[keybindings]`](#keybindings) — legacy, migrated to `bindings.toml`
+- [`bindings.toml`](#bindingstoml)
 - [Per-plugin instances](#per-plugin-instances)
 - [How edits get persisted](#how-edits-get-persisted)
 
@@ -294,6 +295,13 @@ Notes:
 
 ## `[keybindings]`
 
+> **This table is legacy.** Keybindings now live in `~/.quil/bindings.toml`, keyed by
+> action ID. On first launch after upgrading, this table is migrated there — only
+> settings that differ from the shipped defaults are carried across — and it is no
+> longer read afterwards. It is still written to `config.toml` for one release so that
+> rolling back to an older Quil finds your keys. See [`bindings.toml`](#bindingstoml)
+> below and [Keybindings](keybindings.md#customizing-keybindings).
+
 Every binding accepts a Bubble Tea key string. Common forms:
 
 - Single key — `enter`, `tab`, `escape`, `space`, `f1` … `f12`
@@ -373,3 +381,40 @@ Quil records the last project list seen on each remote destination in `~/.quil/r
 - **Edits via the F1 → Settings dialog** auto-save on TUI exit. The setter for each row flips `m.configChanged = true`; `main.go` writes the file atomically via temp + rename.
 - **Edits to `~/.quil/config.toml` while the TUI is open** are picked up on next launch — there is intentionally no live reload (would require re-plumbing the file handle owned by `main.go`).
 - **Atomic write** — Quil writes to `~/.quil/config.toml.tmp` then renames over the target. A crash mid-write leaves the previous config intact.
+
+## `bindings.toml`
+
+Keybindings live in their own file, `~/.quil/bindings.toml` (or `$QUIL_HOME/bindings.toml`), rather than in `config.toml`.
+
+**Every value here applies on next launch only.** The file is read once at startup; there is no in-app editor for it and no hot reload, so a change made while Quil is running has no effect until you restart. `F1` → Shortcuts renders the keymap that is currently live, so it is the quickest check that an edit took.
+
+The reason is mechanical: `config.toml` is rewritten in full whenever any setting changes, so a keymap resolved into it would be frozen as literal strings the first time you edited an unrelated option — and no future preset or default change could ever reach you again.
+
+```toml
+# Which shipped keymap to start from: "default" or "tmux".
+preset = "default"
+
+# The chord that ${prefix} expands to in a preset's bindings.
+# Only meaningful for presets that use it; "tmux" supplies "ctrl+b" itself.
+prefix = ""
+
+# How long a partially-typed key sequence waits for its next key.
+# "0" means wait indefinitely, which is what tmux does and the default here.
+sequence_timeout = "0"
+
+# Per-action overrides, keyed by action ID. These beat the preset.
+[bindings]
+"pane.rename" = "alt+shift+r"
+"project.picker" = ""            # explicitly unbound
+```
+
+| Field | Default | Meaning |
+|---|---|---|
+| `preset` | `"default"` | Name of the shipped keymap to start from. `default` is Quil's own; `tmux` is a tmux-compatible layout. |
+| `prefix` | `""` | The chord `${prefix}` expands to. A preset may supply its own, which this overrides. Must be exactly one chord — no comma, no space. |
+| `sequence_timeout` | `"0"` | How long a pending key sequence waits. `"0"` = no timeout. Any Go duration otherwise, e.g. `"500ms"`. |
+| `[bindings]` | — | Action ID → key spec. Highest-priority layer. |
+
+**Layering.** Bindings resolve in three layers, lowest first: Quil's shipped defaults, then the selected preset, then your `[bindings]` table. Each layer *replaces* the one below per action — it does not merge alternatives. An action nobody mentions keeps the default; `""` explicitly unbinds.
+
+Action IDs are listed in **F1 → Shortcuts** alongside their current keys. Key spec syntax — sequences, alternatives, `${prefix}` — is documented in [Keybindings](keybindings.md#key-sequences).

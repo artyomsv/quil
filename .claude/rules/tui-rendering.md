@@ -8,8 +8,11 @@ paths:
   - "**/internal/tui/compose.go"
   - "**/internal/tui/selection.go"
   - "**/internal/tui/keymatch.go"
-  - "**/internal/tui/keyspecs.go"
+  - "**/internal/tui/keyspecs*.go"
+  - "**/internal/tui/keydispatch*.go"
+  - "**/internal/tui/sequence*.go"
   - "**/internal/keymap/**"
+  - "**/internal/config/bindings*.go"
   - "**/internal/tui/oscfilter.go"
   - "**/internal/tui/splitdrag*.go"
   - "**/internal/clipboard/**"
@@ -27,9 +30,23 @@ tabs show 1-based index prefix (`1:Shell`, `2:Build`) matching Alt+1-9 shortcuts
 
 ### The action registry (`internal/keymap`)
 
-keys resolve to ACTIONS, not to config strings. `internal/keymap` (stdlib-only, so it is testable without a `Model` or a `QUIL_HOME`) owns: `ParseChord`/`ParseSpec` (canonical chords, `,`-separated alternatives, space-separated multi-step sequences), the `registry` of `Action{ID, Label, Group, Tier, Order, Default, Hidden}` in `action.go`, and `Build(specs)` → `(*Keymap, []Conflict)`. `internal/tui/keyspecs.go` is the ONE place legacy `[keybindings]` field names map onto action IDs (`keySpecsFromConfig`); Stage 3 replaces its body with a `bindings.toml` read and nothing else in the TUI changes.
+keys resolve to ACTIONS, not to config strings. `internal/keymap` owns: `ParseChord`/`ParseSpec` (canonical chords, `,`-separated alternatives, space-separated multi-step sequences), the `registry` of `Action{ID, Label, Group, Tier, Order, Default, Hidden}` in `action.go`, and `Build(specs)` → `(*Keymap, []Conflict)`. It imports **stdlib plus `BurntSushi/toml`** (for `preset.go`'s embedded presets) and nothing else — no `config`, no `tui`, and no knowledge of where files live, which is what keeps it testable without a `Model` and without a `QUIL_HOME`. `config.KeySpecsFromConfig` maps the legacy `[keybindings]` field names onto action IDs; `internal/config/bindings.go` owns every `QuilDir()`-derived path.
 
-**`Tier` is not cosmetic.** `handleKey` (`internal/tui/model.go`) does an early-tier lookup, then `tryPluginRawKey`, then `isSelectionExtendKey`, then a late-tier lookup, then the `ctrl+alt+v`/`f8` paste aliases, then the reserved `ctrl+n`/`f1`/`alt+1..9` switch. So an early action beats a plugin's `raw_keys` claim and a late one loses to it; moving an action between tiers silently changes that. `TestActions_TierSplitMatchesLegacySwitches` pins the split against the pre-registry switch order.
+**`Tier` is not cosmetic.** `handleKey` (`internal/tui/model.go`) does an early-tier lookup, then `tryPluginRawKey`, then `isSelectionExtendKey`, then a late-tier lookup, then the `ctrl+alt+v`/`f8` paste aliases, then the reserved `ctrl+n`/`f1` switch (`alt+1..9` left that switch when they became `tab.switch_1..9` actions). So an early action beats a plugin's `raw_keys` claim and a late one loses to it; moving an action between tiers silently changes that. `TestActions_TierSplitMatchesLegacySwitches` pins the split against the pre-registry switch order.
+
+**Sequences are two flat maps, not a trie.** `Keymap.seqs` maps a full canonical sequence (`"ctrl+b c"`) to its action; `Keymap.partial` maps every PROPER prefix to one owning action. `MatchSeq(pending)` is two map hits — and `partial` is consulted on EVERY keypress, bound or not, so O(1) is what keeps the machine free in the input path. A trie earns nothing at ~54 actions.
+
+**The probe is TIER-AGNOSTIC and that is the whole subtlety.** `pane.close` is late-tier, so `"ctrl+b x"` leaves its opening chord in neither tier's chord map: a tier-scoped probe answers `MatchNone`, the key falls to `tryPluginRawKey` or the PTY, and the sequence can never complete however many times `x` is pressed. The tier split governs `Exact` resolution of SINGLE CHORDS only. `TestMatchSeq_IsTierAgnostic` + `TestSequence_LateTierSequenceArmsAndCompletes` pin it; a mutation making the probe early-only fails ten tests.
+
+**One probe site, in `handleKey` between the overlay guard and the early-tier lookup.** Dialog, rename, pane-rename, ctxmenu and overlay all `return` above it, so they are inert by ordering — no predicate. The reconnect/parked screen never reaches `handleKey` at all (`freezeInput` is called unconditionally in `Update` and returns frozen). Only `sidebarFocused` and an active selection sit DOWNSTREAM and are named explicitly; anything new that consumes keys after that line must be added there.
+
+**A completed sequence sets a local `seqAction`, it does not run through a extracted dispatcher.** The two `switch` blocks stay byte-identical where they are — `TestHandleKey_EveryDispatchedActionHasACaseArm` scrapes `handleKey`'s SOURCE TEXT for `case "<id>"` arms and the early/late boundary, so moving them into methods breaks it, and the tier tests can no longer see which switch a case landed in. `seqAction` blanks the other tier's lookup (the final chord may ALSO be bound as a plain chord) and disables the between-tier guards, because a completed sequence must outrank a plugin's `raw_keys` claim on that chord — the one deliberate precedence change, scoped to multi-step bindings only.
+
+**Prefix shadowing is resolved BEFORE insertion (`resolveShadowing`), never after.** Removing a loser from the tables afterwards leaves its prefixes in `km.partial`, so the dropped binding still swallows its own first chord. Resolution runs on PARSED sequences rather than spec strings: re-serialising and re-splitting on `,` is unreadable the moment a binding uses the comma key, and it hides a malformed spec from `Build`'s per-action fallback. Cross-layer the HIGHER layer wins whichever is shorter (a user override must be able to reclaim the prefix key as a chord); within one layer the SHORTER is refused (both tie on layer, so length is the only unambiguous tie-break). Equal-length collisions are `ConflictDuplicate`, resolved by `Order` — never `ConflictShadowed`.
+
+**There is no `presets/default.toml`.** `DefaultLayer()` reads each action's registered `Default`; a file would be a second copy free to drift from the one dispatch uses. `presets/` holds only genuinely different keymaps (`tmux.toml`). A preset carries its own `Prefix`, and `SetBindings` uses it when `bindings.toml` sets none — without that, `preset = "tmux"` expands all 24 `${prefix}` bindings against `""` and drops every one, so the preset silently does nothing.
+
+**The comma key is bindable only as `"comma"`** (a `keyAliases` entry). A literal `,` is the alternatives separator and splits the spec before any chord parsing; the canonical form stays `,` because that is what a real press reports. `TestPresetChords_MatchRealKeyPresses` (in `internal/tui`, because `keymap` cannot build a `tea.KeyPressMsg`) validates every preset chord against bubbletea — parse FIRST, then compare `Chord.String()`, or an aliased spelling can never match.
 
 **`Build` never fails.** A malformed spec falls back to that action's shipped `Default` and reports a `ConflictMalformed`; an unknown ID is ignored with a `ConflictUnknownAction`; one bad config line must not cost the user their other 40 bindings. `Conflict.String()` is both the log line (`buildKeymap` warns each one) and the F1 → Shortcuts row, so it front-loads key → winner → loser and puts the consequence clause last, where truncation eats it first. `ConflictHardcoded` DERIVES its direction rather than storing one: `hardcodedKeys` records where `handleKey` checks each built-in key, and the 13 checked after BOTH tier lookups (`f1`, `ctrl+n`, `alt+1..9`, `f8`, `ctrl+alt+v`) are ones the bound ACTION wins — the shipped message claimed the opposite for all 21.
 

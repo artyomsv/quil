@@ -4,8 +4,8 @@ import "testing"
 
 func TestActions_RegistryIntegrity(t *testing.T) {
 	acts := Actions()
-	if len(acts) != 42 {
-		t.Fatalf("registry has %d actions, want 42 (one per KeybindingsConfig field)", len(acts))
+	if len(acts) != 54 {
+		t.Fatalf("registry has %d actions, want 54 (42 config-backed + 12 promoted from the reserved-key switch)", len(acts))
 	}
 	seen := make(map[ActionID]bool, len(acts))
 	orders := make(map[int]ActionID, len(acts))

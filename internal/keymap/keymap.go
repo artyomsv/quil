@@ -8,10 +8,20 @@ import (
 // Keymap is a resolved, immutable key-to-action mapping.
 type Keymap struct {
 	// chords maps tier -> canonical chord -> action. Only single-chord
-	// bindings land here; multi-step sequences live in bindings and are
-	// matched by the prefix machine (Stage 2), never as a bare chord.
+	// bindings land here; multi-step sequences live in seqs and are matched by
+	// the prefix machine before either tier lookup runs, never as a bare chord.
 	chords   map[Tier]map[string]ActionID
 	bindings map[ActionID][]Sequence
+	// seqs maps a full canonical sequence ("ctrl+b c") to its action.
+	//
+	// Two flat maps rather than a trie: with ~50 actions a tree earns nothing,
+	// and the partial set below is consulted on EVERY keypress, bound or not,
+	// so an O(1) map hit is the difference between the machine costing nothing
+	// and costing something in the input path.
+	seqs map[string]ActionID
+	// partial maps every PROPER prefix of every sequence to one owning action.
+	// A map rather than a set so a shadowing conflict can name the winner.
+	partial map[string]ActionID
 }
 
 // Build resolves a spec map into a Keymap.
@@ -20,9 +30,30 @@ type Keymap struct {
 // and reports a ConflictMalformed; an unknown ID is ignored with a conflict.
 // One bad line in config.toml must not cost the user their other 40 bindings.
 func Build(specs map[ActionID]string) (*Keymap, []Conflict) {
+	return buildWithOrigin(specs, nil)
+}
+
+// parsedBinding is one action's alternatives after parsing and before
+// insertion. Shadow resolution runs on these rather than on spec STRINGS, and
+// that is not a style choice: rebuilding a spec by joining surviving
+// alternatives with "," is unreadable back through ParseSpec the moment a
+// binding uses the comma key itself, and it also hides a malformed spec from
+// Build's own per-action fallback.
+type parsedBinding struct {
+	action Action
+	seqs   []Sequence
+}
+
+// buildWithOrigin is Build plus the layer each action's spec came from.
+//
+// origin may be nil, which makes every action layer 0 — all ties, which is
+// exactly what a single flat spec map means.
+func buildWithOrigin(specs map[ActionID]string, origin map[ActionID]int) (*Keymap, []Conflict) {
 	km := &Keymap{
 		chords:   map[Tier]map[string]ActionID{TierEarly: {}, TierLate: {}},
 		bindings: make(map[ActionID][]Sequence, len(specs)),
+		seqs:     map[string]ActionID{},
+		partial:  map[string]ActionID{},
 	}
 	var conflicts []Conflict
 
@@ -50,6 +81,8 @@ func Build(specs map[ActionID]string) (*Keymap, []Conflict) {
 		conflicts = append(conflicts, Conflict{Kind: ConflictUnknownAction, Key: specs[id], Loser: id})
 	}
 
+	// Phase 1 — parse every spec, with the per-action fallback.
+	parsed := make([]parsedBinding, 0, len(resolved))
 	for _, a := range resolved {
 		seqs, err := ParseSpec(specs[a.ID])
 		if err != nil {
@@ -61,17 +94,42 @@ func Build(specs map[ActionID]string) (*Keymap, []Conflict) {
 		if len(seqs) == 0 {
 			continue
 		}
-		km.bindings[a.ID] = seqs
-		for _, seq := range seqs {
-			if len(seq) != 1 {
-				// Multi-step: Stage 2's prefix machine owns these. The
-				// sequence stays in bindings — Display renders it in F1 like
-				// any other binding — so it has to be REPORTED, or the dialog
-				// advertises a chord that does nothing. Stage 2 deletes this
-				// branch along with the conflict.
-				conflicts = append(conflicts, Conflict{
-					Kind: ConflictUnsupportedSequence, Key: seq.String(), Loser: a.ID,
-				})
+		parsed = append(parsed, parsedBinding{action: a, seqs: seqs})
+	}
+
+	// Phase 2 — resolve prefix shadowing across every alternative, dropping
+	// the losers before anything reaches the lookup tables.
+	conflicts = append(conflicts, resolveShadowing(parsed, origin)...)
+
+	// Phase 3 — insert what survived.
+	for _, pb := range parsed {
+		a := pb.action
+		if len(pb.seqs) == 0 {
+			continue
+		}
+		km.bindings[a.ID] = pb.seqs
+		for _, seq := range pb.seqs {
+			if len(seq) > 1 {
+				// Multi-step: the prefix machine owns these. They never enter
+				// the tier chord maps, so a sequence head cannot be dispatched
+				// as a bare chord.
+				full := seq.String()
+				if prev, taken := km.seqs[full]; taken {
+					conflicts = append(conflicts, Conflict{
+						Kind: ConflictDuplicate, Key: full, Winner: prev, Loser: a.ID,
+					})
+					continue // lower Order already claimed it: legacy case order
+				}
+				km.seqs[full] = a.ID
+				// Record every PROPER prefix. First writer wins, so the owner
+				// recorded here follows registry Order like every other
+				// tie-break in this function.
+				for i := 1; i < len(seq); i++ {
+					head := seq[:i].String()
+					if _, seen := km.partial[head]; !seen {
+						km.partial[head] = a.ID
+					}
+				}
 				continue
 			}
 			key := seq[0].String()
@@ -111,6 +169,10 @@ func (k *Keymap) detectShadowing() []Conflict {
 			}
 		}
 	}
+	// Prefix shadowing is NOT detected here. It is resolved by resolveShadowing
+	// before insertion, because the loser must never enter the tables at all —
+	// removing it afterwards would leave its prefixes recorded in km.partial,
+	// so a dropped binding would still swallow its own first chord.
 	// Deterministic order: these render in F1, and a list that reshuffles
 	// between launches is unreadable.
 	sort.Slice(out, func(i, j int) bool {
@@ -143,12 +205,10 @@ func (k *Keymap) MatchTier(t Tier, key string) (ActionID, bool) {
 
 // Bindings returns the sequences bound to an action, or nil.
 //
-// Stage 2's prefix state machine is the caller this exists for: it needs the
-// unflattened Sequence — how many chords, and which — where every Stage 1
-// reader wants a display string (Display) or the canonical chords (Keys).
-// Deliberately kept rather than deleted: the multi-step specs it will consume
-// already parse and are already stored, and ConflictUnsupportedSequence is what
-// tells the user they are not dispatched yet.
+// Returns the unflattened Sequence — how many chords, and which — where the
+// display readers want a string (Display) or the canonical chords (Keys).
+// Dispatch itself goes through MatchTier for chords and MatchSeq for
+// sequences; this is for callers that need to inspect a binding's shape.
 func (k *Keymap) Bindings(id ActionID) []Sequence {
 	if k == nil {
 		return nil

@@ -21,12 +21,18 @@ const (
 	ConflictMalformed
 	// ConflictUnknownAction: a spec named an ID that is not registered.
 	ConflictUnknownAction
-	// ConflictUnsupportedSequence: a multi-step sequence ("ctrl+b c"). It
-	// parses, and Build keeps it in bindings so Stage 2's prefix machine can
-	// pick it up, but nothing dispatches it today. Reported because Display
-	// renders it in F1 exactly like a working binding — accepting the syntax
-	// ahead of the state machine is fine, advertising it as working is not.
-	ConflictUnsupportedSequence
+	// ConflictShadowed: a chord or sequence is a strict prefix of a longer
+	// sequence, so pressing it always arms the prefix machine and it can never
+	// fire on its own. Within one layer the SHORTER binding is refused —
+	// length is a safe tie-break there only because both sides tie on layer.
+	// The cross-layer rule is by layer instead, and deliberately so: a user
+	// override must be able to reclaim the prefix key as a plain chord.
+	ConflictShadowed
+	// ConflictPrefixInvalid: ${prefix} was referenced while prefix is unset, or
+	// prefix is not exactly one chord. Every binding referencing it is dropped
+	// rather than half-expanded — see validatePrefix for what each malformed
+	// shape would silently turn into.
+	ConflictPrefixInvalid
 )
 
 func (k ConflictKind) String() string {
@@ -41,8 +47,14 @@ func (k ConflictKind) String() string {
 		return "unreadable binding"
 	case ConflictUnknownAction:
 		return "unknown action"
-	case ConflictUnsupportedSequence:
-		return "sequence not supported yet"
+	case ConflictShadowed:
+		// Not "by a LONGER sequence": cross-layer, the loser is the longer one
+		// — a higher-layer chord reclaiming a key a lower-layer preset uses as
+		// a sequence head. Saying "longer" there described the winner and read
+		// as backwards to the only person who would ever see the row.
+		return "unreachable binding"
+	case ConflictPrefixInvalid:
+		return "unusable prefix"
 	}
 	return "unknown conflict"
 }
@@ -84,8 +96,28 @@ func (c Conflict) String() string {
 		// common failure there is — and "made.up is not a known action" does
 		// not say which line of the file to go and look at.
 		return fmt.Sprintf("%s: %q → %q is not a known action; ignored", c.Kind, c.Key, c.Loser)
-	case ConflictUnsupportedSequence:
-		return fmt.Sprintf("%s: %q → %s never fires", c.Kind, c.Key, c.Loser)
+	case ConflictShadowed:
+		if c.Winner == "" {
+			// The binding that displaced this one was itself displaced. Say
+			// what is certain and claim no winner — a wrong direction is what
+			// this message exists to avoid.
+			return fmt.Sprintf("%s: %q → %s can never fire", c.Kind, c.Key, c.Loser)
+		}
+		return fmt.Sprintf("%s: %q → %s wins, %s never fires", c.Kind, c.Key, c.Winner, c.Loser)
+	case ConflictPrefixInvalid:
+		// The binding is dropped whole, so there is no winner to name — the
+		// Detail says which of the three malformed shapes it was.
+		//
+		// %q on the Loser, not %s. Every other branch here names an ActionID
+		// that Build already resolved through Lookup, so it is one of our own
+		// constants. This one is reached from ExpandPrefix, which runs BEFORE
+		// that filter and so can be handed a raw [bindings] table key from the
+		// user's file. That string is rendered into F1 -> Shortcuts and the
+		// log, and lipgloss measures ANSI as zero cells, so an escape sequence
+		// would survive every width budget and reach the terminal intact —
+		// exactly the attack validateBaseKey exists to stop, arriving through a
+		// field the chord parser never sees. %q escapes C0, C1 and bidi.
+		return fmt.Sprintf("%s: %q → %q dropped; %s", c.Kind, c.Key, c.Loser, c.Detail)
 	}
 	return fmt.Sprintf("%s: %q → %s wins, %s never fires", c.Kind, c.Key, c.Winner, c.Loser)
 }
@@ -163,9 +195,9 @@ var hardcodedKeys = func() map[string]hardcodedKey {
 		"ctrl+alt+v": {afterBothTiers, "paste"},
 		"f8":         {afterBothTiers, "paste"},
 	}
-	for _, d := range []string{"1", "2", "3", "4", "5", "6", "7", "8", "9"} {
-		m["alt+"+d] = hardcodedKey{afterBothTiers, "tab " + d}
-	}
+	// alt+1..9 were promoted to tab.switch_1..9 registry actions and are no
+	// longer intercepted outside the registry, so a binding on one is an
+	// ordinary duplicate rather than a collision with built-in behaviour.
 	for _, dir := range []string{"left", "right", "up", "down"} {
 		m["shift+"+dir] = hardcodedKey{betweenTiers, "text selection"}
 	}

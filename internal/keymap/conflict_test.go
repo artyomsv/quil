@@ -32,7 +32,7 @@ func TestBuild_HardcodedCollision(t *testing.T) {
 	// isSelectionExtendKey (internal/tui/model.go), unguarded ahead of the
 	// late-tier lookup.
 	for _, key := range []string{
-		"f1", "ctrl+n", "alt+1", "alt+9", "f8", "ctrl+alt+v",
+		"f1", "ctrl+n", "f8", "ctrl+alt+v",
 		"shift+left", "shift+right", "shift+up", "shift+down",
 		"ctrl+shift+left", "ctrl+shift+right",
 		"ctrl+alt+shift+left", "ctrl+alt+shift+right",
@@ -52,8 +52,37 @@ func TestBuild_HardcodedCollision(t *testing.T) {
 	}
 }
 
+// alt+1..9 were promoted to tab.switch_1..9 registry actions, so they are no
+// longer intercepted outside the registry. Binding another action to one is an
+// ordinary duplicate now, not a collision with built-in behaviour — and the
+// message matters, because "collides with a built-in key" would send a user
+// looking for a hardcoded key that no longer exists.
+func TestBuild_AltDigitsAreActionsNotHardcoded(t *testing.T) {
+	_, conflicts := Build(map[ActionID]string{"tab.switch_1": "alt+1"})
+	for _, c := range conflicts {
+		if c.Kind == ConflictHardcoded && c.Key == "alt+1" {
+			t.Errorf("alt+1 is a registry action now and must not report a built-in collision: %s", c)
+		}
+	}
+
+	// Two actions on the same digit is a plain duplicate, tie-broken by Order.
+	_, conflicts = Build(map[ActionID]string{"tab.switch_1": "alt+1", "pane.close": "alt+1"})
+	var dup bool
+	for _, c := range conflicts {
+		if c.Kind == ConflictDuplicate && c.Key == "alt+1" {
+			dup = true
+			if c.Winner != "pane.close" {
+				t.Errorf("duplicate winner = %q, want pane.close (Order 2200 beats tab.switch_1's 4600)", c.Winner)
+			}
+		}
+	}
+	if !dup {
+		t.Errorf("want a ConflictDuplicate for alt+1, got %+v", conflicts)
+	}
+}
+
 func TestBuild_NoFalsePositives(t *testing.T) {
-	// alt+0 is NOT intercepted — only alt+1..alt+9 are.
+	// alt+0 is bound to nothing and intercepted by nothing.
 	_, conflicts := Build(map[ActionID]string{"pane.close": "alt+0"})
 	if len(conflicts) != 0 {
 		t.Errorf("alt+0 reported a conflict: %+v", conflicts)
@@ -97,7 +126,7 @@ func TestConflict_StringIncludesKindLabel(t *testing.T) {
 		{"hardcoded", Conflict{Kind: ConflictHardcoded, Key: "f1", Loser: "pane.close"}, "collides with a built-in key"},
 		{"malformed", Conflict{Kind: ConflictMalformed, Key: "ctrl+w", Loser: "pane.close", Detail: "bad spec"}, "unreadable binding"},
 		{"unknown-action", Conflict{Kind: ConflictUnknownAction, Key: "ctrl+z", Loser: "made.up"}, "unknown action"},
-		{"unsupported-sequence", Conflict{Kind: ConflictUnsupportedSequence, Key: "ctrl+b c", Loser: "tab.new"}, "sequence not supported yet"},
+		{"shadowed", Conflict{Kind: ConflictShadowed, Key: "ctrl+b", Winner: "tab.new", Loser: "pane.rename"}, "unreachable binding"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -131,7 +160,7 @@ func TestConflict_HardcodedNamesTheRealWinner(t *testing.T) {
 		// After both tier switches: the action wins whichever tier it is on.
 		{"late action on a paste alias", "pane.restart", "f8", "pane.restart", "paste"},
 		{"early action on f1", "pane.mute", "f1", "pane.mute", "help"},
-		{"late action on alt+1", "pane.close", "alt+1", "pane.close", "tab 1"},
+
 		{"early action on ctrl+n", "pane.mute", "ctrl+n", "pane.mute", "new pane"},
 		// Between the tiers: isSelectionExtendKey runs after the early switch
 		// and before the late one, so the tier decides.
@@ -200,6 +229,49 @@ func TestBuild_ShadowingOrderIsDeterministic(t *testing.T) {
 	for i, w := range want {
 		if conflicts[i] != w {
 			t.Errorf("conflicts[%d] = %+v, want %+v", i, conflicts[i], w)
+		}
+	}
+}
+
+// TestConflict_StringNeverEmitsControlBytes is a regression guard for the whole
+// class, not for one branch.
+//
+// Conflict.String() is rendered into F1 -> Shortcuts, where lipgloss measures
+// ANSI as zero cells — so an escape sequence survives every width budget and
+// reaches the terminal intact. An OSC 52 payload sets the system clipboard on
+// one keypress. validateBaseKey stops that for chords; this pins the other two
+// routes into the same sink.
+//
+// Detail is the reason this is a test rather than a code change: it is built
+// from err.Error() on input that FAILED to parse, so it bypasses
+// validateBaseKey by construction. Every constructor that reaches it quotes its
+// input today, and nothing else pins that — one future fmt.Errorf("chord %s")
+// would silently re-open the path.
+func TestConflict_StringNeverEmitsControlBytes(t *testing.T) {
+	const payload = "\x1b]52;c;QUFB\x07"
+
+	// Both routes a user-supplied string can take into a Conflict: a spec that
+	// fails to parse, and a prefix that fails to validate.
+	_, malformed := Build(map[ActionID]string{"tab.new": payload})
+	prefixed := func() []Conflict {
+		_, cs := ExpandPrefix(map[ActionID]string{"tab.new": "${prefix} c"}, payload)
+		return cs
+	}()
+
+	groups := map[string][]Conflict{"malformed spec": malformed, "invalid prefix": prefixed}
+	for name, cs := range groups {
+		if len(cs) == 0 {
+			t.Errorf("%s: produced no conflict, so this test asserts nothing", name)
+		}
+		for _, c := range cs {
+			got := c.String()
+			for i, r := range got {
+				if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+					t.Errorf("%s: Conflict.String() emits U+%04X at byte %d — it reaches the "+
+						"terminal through F1 unmeasured: %q", name, r, i, got)
+					break
+				}
+			}
 		}
 	}
 }

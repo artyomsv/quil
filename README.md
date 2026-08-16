@@ -221,6 +221,7 @@ Define your own pane types in TOML — see the [plugin reference](docs/plugin-re
 | **First launch** | [quick-start.md](docs/quick-start.md) |
 | **All features** | [features.md](docs/features.md) |
 | **Keybindings** | [keybindings.md](docs/keybindings.md) |
+| **tmux comparison** | [tmux-comparison.md](docs/tmux-comparison.md) |
 | **Configuration** | [configuration.md](docs/configuration.md) |
 | **MCP (AI integration)** | [mcp.md](docs/mcp.md) |
 | **Custom plugins** | [plugin-reference.md](docs/plugin-reference.md) |

@@ -42,6 +42,15 @@ var modNames = map[string]Mod{
 var keyAliases = map[string]string{
 	"escape": "esc", "pageup": "pgup", "pagedown": "pgdown",
 	"pgdn": "pgdown", "return": "enter",
+	// "comma" is the only way to BIND the comma key, because "," separates
+	// alternatives in a spec and there is no escape: "ctrl+b ," splits into
+	// "ctrl+b " and "", which ParseSpec rejects as an empty alternative. tmux
+	// binds rename-window to the prefix followed by a comma, so without this
+	// the tmux preset cannot express one of its core bindings.
+	//
+	// The canonical form is still "," — String must match what bubbletea
+	// reports for a real press, and it reports the bare symbol.
+	"comma": ",",
 }
 
 // ParseChord parses a chord in any accepted spelling and returns its canonical

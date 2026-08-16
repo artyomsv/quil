@@ -381,9 +381,21 @@ type Model struct {
 	// surfaced in F1 -> Shortcuts.
 	keymap       *keymap.Keymap
 	keyConflicts []keymap.Conflict
-	version      string
-	sized        bool            // the terminal has reported its geometry at least once
-	attached     map[string]bool // destinations already attached — see attachAllDests
+	// pendingSeq holds the chords typed so far in a multi-step binding; empty
+	// means the machine is idle. pendingGen is bumped on every state change so
+	// a cancelled sequence's in-flight timeout tick cannot clear a sequence
+	// started after it. seqFlash reports a dropped sequence in the status bar
+	// and is cleared by the next keypress rather than by a timer.
+	pendingSeq  []keymap.Chord
+	pendingGen  int
+	pendingPane string
+	seqFlash    string
+	// seqTimeout drops a pending sequence after this long. Zero = off, which
+	// is the shipped default and matches tmux.
+	seqTimeout time.Duration
+	version    string
+	sized      bool            // the terminal has reported its geometry at least once
+	attached   map[string]bool // destinations already attached — see attachAllDests
 	// offlineWoken records which offline destinations have had their ladder
 	// started, so the wake-up fires once rather than on every resize.
 	offlineWoken map[string]bool
@@ -1378,6 +1390,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleKey(msg)
 
 	case tea.MouseClickMsg:
+		// A click can change the active pane, so a sequence completed after one
+		// would target a different pane than the one the prefix was pressed in.
+		m.cancelSequence()
 		if msg.Mod.Contains(tea.ModCtrl) {
 			return m, nil
 		}
@@ -1854,7 +1869,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case sequenceTimeoutMsg:
+		// Local timer: this arm must NOT re-arm listenForMessages. The
+		// generation compare is what stops a cancelled sequence's in-flight
+		// tick from clearing the one started after it.
+		if msg.gen == m.pendingGen {
+			m.cancelSequence()
+		}
+		return m, nil
+
 	case tea.PasteMsg:
+		// Paste bypasses handleKey and lands in the PTY, so an armed prefix
+		// would read the next keystroke as a sequence step.
+		m.cancelSequence()
 		if m.dialog == dialogPluginMigration && m.migrationLeft != nil && !m.migrationRightFocus {
 			text := strings.ReplaceAll(msg.Content, "\r", "")
 			m.migrationLeft.InsertMultiLine(text)
@@ -3591,6 +3618,165 @@ func (m Model) logViewerPosAt(screenX, screenY int) (row, col int, ok bool) {
 	return row, col, true
 }
 
+// rawKeyFor is tryPluginRawKey, suppressed when a sequence just completed.
+//
+// A pending sequence outranks a plugin's raw_keys claim. This is the one place
+// the design deliberately changes the precedence the Tier split encodes, and it
+// is scoped to multi-step bindings: a single chord never sets seqAction, so no
+// existing binding's relationship with raw_keys moves. Without it,
+// `pane.close = "ctrl+b x"` is dead on any pane whose plugin claims x.
+func (m Model) rawKeyFor(seqAction keymap.ActionID, key string, msg tea.KeyPressMsg) []byte {
+	if seqAction != "" {
+		return nil
+	}
+	return m.tryPluginRawKey(key, msg)
+}
+
+// structuralActions destroy or restructure the pane a notes editor is bound
+// to, so notes must be flushed and torn down before one runs. Named once here
+// because two call sites need the same list: the notes block in handleKey, and
+// the completed-sequence path that bypasses it.
+var structuralActions = map[keymap.ActionID]bool{
+	"pane.close": true, "tab.close": true,
+	"pane.split_h": true, "pane.split_v": true,
+}
+
+func isStructuralAction(id keymap.ActionID) bool { return structuralActions[id] }
+
+// armedPaneID is the pane a pending sequence was started in. A completed
+// sequence must act on that pane, not on whichever one happens to be active
+// two keystrokes later.
+func (m Model) armedPaneID() string {
+	if tab := m.activeTabModel(); tab != nil {
+		return tab.ActivePane
+	}
+	return ""
+}
+
+// cancelSequence clears any pending prefix sequence. Bumping the generation is
+// what stops a cancelled sequence's in-flight timeout tick from clearing a
+// sequence started after it.
+func (m *Model) cancelSequence() {
+	if len(m.pendingSeq) == 0 {
+		return
+	}
+	m.pendingSeq = nil
+	m.pendingGen++
+}
+
+// sequenceTimeoutMsg drops a pending sequence. gen pins it to the sequence that
+// armed it: without that, a cancelled sequence's in-flight tick clears the one
+// the user started after it.
+type sequenceTimeoutMsg struct{ gen int }
+
+// armSequenceTimeout returns a tick for the current sequence generation, or nil
+// when the timeout is off (the shipped default).
+func (m Model) armSequenceTimeout() tea.Cmd {
+	// Nothing pending means nothing to expire. Without this the esc-cancel and
+	// dropped-sequence paths each schedule a tick that can only no-op, one per
+	// rejected keystroke once a timeout is configured.
+	if m.seqTimeout <= 0 || len(m.pendingSeq) == 0 {
+		return nil
+	}
+	gen := m.pendingGen
+	return tea.Tick(m.seqTimeout, func(time.Time) tea.Msg {
+		return sequenceTimeoutMsg{gen: gen}
+	})
+}
+
+// stepSequence advances the prefix machine by one chord.
+//
+// Returns:
+//   - (m, "", true)   the key was consumed — a sequence is now pending, or one
+//     was cancelled or dropped. handleKey returns immediately.
+//   - (m, id, false)  a multi-step sequence completed. handleKey continues with
+//     its between-tier guards disabled so the action runs from its own tier.
+//   - (m, "", false)  nothing happened; handleKey dispatches as it always did.
+//
+// The probe is TIER-AGNOSTIC. pane.close is late-tier, so binding it to
+// "ctrl+b x" leaves the opening chord in neither tier's chord map; a
+// tier-scoped probe would answer none and the sequence could never complete.
+func (m Model) stepSequence(msg tea.KeyPressMsg, key string) (Model, keymap.ActionID, bool) {
+	m.seqFlash = ""
+
+	// The world can change under an armed prefix with no keypress at all: a
+	// daemon broadcast moves the active pane (MCP set_active_pane, switch_tab),
+	// or a message-driven dialog opens and closes. Completing the sequence then
+	// would act on a pane the user never armed it in — the same hazard the
+	// mouse-click cancel exists for, arriving by a route no input event covers.
+	// The timeout would eventually catch it, but it ships off.
+	if len(m.pendingSeq) > 0 && m.armedPaneID() != m.pendingPane {
+		m.cancelSequence()
+	}
+
+	c, err := keymap.ParseChord(key)
+	if err != nil {
+		// An unparseable key is not a sequence step. Drop any pending prefix
+		// rather than leaving it armed: every other "not part of this sequence"
+		// path clears it, and leaving it would read the NEXT keystroke as step
+		// two of a sequence the user has every reason to think was abandoned.
+		if len(m.pendingSeq) > 0 {
+			m.cancelSequence()
+			return m, "", true
+		}
+		return m, "", false
+	}
+
+	// Esc always cancels, ahead of the probe: a binding could legitimately use
+	// esc as a sequence step, and the escape hatch outranks it.
+	if key == "esc" && len(m.pendingSeq) > 0 {
+		m.cancelSequence()
+		return m, "", true
+	}
+
+	// Literal escape: prefix prefix sends ONE raw chord to the pane. Returning
+	// unhandled hands the original KeyPressMsg to handleKey's default branch,
+	// so keyToBytes does the encoding and there is no second byte table to keep
+	// in sync. Quil panes routinely ssh into hosts running tmux, and without
+	// this the remote tmux has no reachable prefix at all.
+	if len(m.pendingSeq) == 1 && m.pendingSeq[0] == c {
+		m.cancelSequence()
+		return m, "", false
+	}
+
+	cand := make([]keymap.Chord, 0, len(m.pendingSeq)+1)
+	cand = append(cand, m.pendingSeq...)
+	cand = append(cand, c)
+
+	switch id, kind := m.keymap.MatchSeq(cand); kind {
+	case keymap.MatchPartial:
+		m.pendingSeq = cand
+		m.pendingPane = m.armedPaneID()
+		m.pendingGen++
+		return m, "", true
+	case keymap.MatchExact:
+		// A length-1 exact is a plain chord. Leave it to the tier lookups, or
+		// it would run on the wrong side of tryPluginRawKey and quietly beat a
+		// plugin's raw_keys claim it is supposed to lose to.
+		if len(cand) == 1 {
+			return m, "", false
+		}
+		m.cancelSequence()
+		return m, id, false
+	}
+
+	// No match. A pending sequence is dropped with a visible flash; a bare
+	// chord falls through untouched, which is what keeps every single-chord
+	// binding byte-identical to its pre-sequence behaviour.
+	if len(m.pendingSeq) > 0 {
+		// Names the PENDING prefix, never the unmatched chord that ended it.
+		// Ctrl+B is readline's backward-char, so under the tmux preset the
+		// machine arms on an ordinary shell keystroke — and the next character
+		// typed might be a character of a password at an ssh or sudo prompt.
+		// It is swallowed either way; painting it on the status bar until the
+		// following keypress is what this avoids.
+		m.seqFlash = keymap.Sequence(m.pendingSeq).String() + " — no such binding"
+		m.cancelSequence()
+		return m, "", true
+	}
+	return m, "", false
+}
+
 // notesKeyExempt reports whether a key should bypass the notes editor and
 // reach the normal global handlers (structural changes, tab/pane management,
 // dialogs). Anything not on this list is consumed by the editor as text
@@ -3609,44 +3795,43 @@ func (m Model) notesKeyExempt(key string) bool {
 	if key == "" {
 		return false
 	}
-	kb := m.cfg.Keybindings
-	// Vertical spatial nav — there's no up/down axis in the notes 2-panel
-	// layout (pane|editor), so Alt+Up/Alt+Down flush and exit notes, then
-	// the global handler runs NavigateDirection to the closest neighbor.
-	// Alt+Left and Alt+Right are handled by the notes-mode focus toggle
-	// earlier in handleKey and never reach this function.
-	exempt := []string{
+	// Exempt ACTIONS, not raw config strings. Resolving through the registry is
+	// what lets the binding source move: comparing against cfg.Keybindings here
+	// would silently start matching against empty strings the moment bindings
+	// live anywhere else, and every structural key would stop flushing the
+	// editor before it fires.
+	exempt := []keymap.ActionID{
 		// Vertical spatial nav — there's no up/down axis in the notes 2-panel
 		// layout (pane|editor), so Alt+Up/Alt+Down flush and exit notes, then
 		// the global handler runs NavigateDirection to the closest neighbor.
 		// Alt+Left and Alt+Right are handled by the notes-mode focus toggle
 		// earlier in handleKey and never reach this function.
-		kb.PaneUp, kb.PaneDown,
+		"pane.up", "pane.down",
 		// Structural — close/split implicitly destroys the bound pane and must
 		// flush + exit notes before running.
-		kb.ClosePane, kb.CloseTab, kb.SplitHorizontal, kb.SplitVertical,
+		"pane.close", "tab.close", "pane.split_h", "pane.split_v",
 		// Tab management.
-		kb.NewTab, kb.RenameTab, kb.RenamePane, kb.CycleTabColor,
+		"tab.new", "tab.rename", "pane.rename", "tab.cycle_color",
 		// Other modes.
-		kb.FocusPane,
+		"pane.focus_toggle",
 		// Force repaint — view-level, harmless while the editor is open.
-		kb.Redraw,
+		"app.redraw",
 		// Notification center.
-		kb.NotificationToggle, kb.NotificationFocus, kb.GoBack, kb.MutePane, kb.ToggleEager,
+		"notification.toggle", "notification.focus", "pane.go_back", "pane.mute", "pane.toggle_eager",
 		// Project sidebar — view-level, and resizeAllPanes covers the notes
 		// layout's own dependency on paneAreaWidth().
-		kb.SidebarToggle,
+		"sidebar.toggle",
 		// Preview wrap toggle — pane-level view state, harmless in notes mode.
-		kb.ToggleWrap,
+		"pane.toggle_wrap",
 		// Pane process restart — opens a confirm dialog, never types into
 		// the notes editor.
-		kb.RestartPane,
+		"pane.restart",
 		// Tools and dialogs.
-		kb.JSONTransform, kb.QuickActions, kb.CommandHistory, kb.NewProject,
+		"json.transform", "pane.quick_actions", "pane.command_history", "project.new",
 		// Project navigation — switchProject (reached by both) already calls
 		// exitNotesModeInPlace itself, so exempting these just lets the key
 		// reach it instead of being swallowed as editor text.
-		kb.ProjectPicker, kb.ProjectToggle, kb.ProjectNext, kb.ProjectPrev,
+		"project.picker", "project.toggle", "project.next", "project.prev",
 		// Attention queue — notes are exactly the sort of thing left open
 		// while an agent grinds in another pane, so "notes are focused" is a
 		// likely state at the moment the queue is needed, arguably more so
@@ -3655,19 +3840,29 @@ func (m Model) notesKeyExempt(key string) bool {
 		// jumpToNextBlocked, so the teardown always lands on the OLD tab
 		// whether the jump crosses a project boundary or only moves the
 		// active tab within the current one.
-		kb.AttentionQueue,
+		"project.attention_queue",
 	}
-	for _, b := range exempt {
-		if kbMatches(key, b) {
+	for _, id := range exempt {
+		if m.isAction(key, id) {
 			return true
 		}
 	}
+	// Tab switching is exempt for the same reason as the structural keys: it
+	// moves off the tab the editor is bound to. It reads from the registry now
+	// that alt+1..9 are actions — a literal alt+digit list would exempt the
+	// stale keys and not the rebound ones.
+	for _, id := range []keymap.ActionID{
+		"tab.switch_1", "tab.switch_2", "tab.switch_3", "tab.switch_4", "tab.switch_5",
+		"tab.switch_6", "tab.switch_7", "tab.switch_8", "tab.switch_9",
+		"tab.next", "tab.prev", "system.shortcuts",
+	} {
+		if m.isAction(key, id) {
+			return true
+		}
+	}
+	// Still hardcoded in handleKey, so still listed literally here.
 	switch key {
 	case "f1", "ctrl+n":
-		return true
-	// Alt+1..9 tab switching.
-	case "alt+1", "alt+2", "alt+3", "alt+4",
-		"alt+5", "alt+6", "alt+7", "alt+8", "alt+9":
 		return true
 	}
 	return false
@@ -3863,7 +4058,6 @@ func (m Model) View() tea.View {
 
 func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
-	kb := m.cfg.Keybindings
 
 	// Per-key trace for modified keys. Flip [logging] level = "debug" in
 	// config.toml to see every modified key reaching Quil. Useful for
@@ -3872,8 +4066,17 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		logger.Debug("handleKey: key=%q Mod=%v Code=%d Text=%q", key, msg.Mod, msg.Code, msg.Text)
 	}
 
-	// Dialog mode: route input to dialog handler
+	// Dialog mode: route input to dialog handler.
+	//
+	// Cancel any pending sequence on the way in. A dialog can open with no
+	// keypress at all — MsgPluginError matches a pattern against a pane's PTY
+	// output, and the upgrade prompt is driven from WindowSizeMsg — and while
+	// one is up View draws only the dialog, so the pending indicator is not on
+	// screen either. Without this, dismissing that dialog leaves a prefix armed
+	// that the user has no way to know about, and the next character they type
+	// completes a sequence they never started.
 	if m.dialog != dialogNone {
+		m.cancelSequence()
 		return m.handleDialogKey(msg)
 	}
 
@@ -3902,19 +4105,19 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// Universal keys — handled the same way regardless of which side
 		// currently has focus.
 		switch {
-		case kbMatches(key, kb.NotesToggle):
+		case m.isAction(key, "pane.notes_toggle"):
 			return m.exitNotesMode()
-		case kbMatches(key, kb.Quit):
+		case m.isAction(key, "app.quit"):
 			if err := m.notesEditor.Close(); err != nil {
 				log.Printf("save notes on quit: %v", err)
 			}
 			return m, tea.Quit
-		case kbMatches(key, kb.PaneLeft):
+		case m.isAction(key, "pane.left"):
 			// Alt+Left — focus the bound pane (on the left in notes layout).
 			// Idempotent: no-op if the pane is already focused.
 			m.notesPaneFocused = true
 			return m, nil
-		case kbMatches(key, kb.PaneRight):
+		case m.isAction(key, "pane.right"):
 			// Alt+Right — focus the editor (on the right in notes layout).
 			// Idempotent: no-op if the editor is already focused.
 			m.notesPaneFocused = false
@@ -3925,8 +4128,8 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// the bound pane. Flush + exit notes first, regardless of which
 		// side currently has focus, then fall through to the normal
 		// handler so the structural action still fires.
-		structural := kbMatches(key, kb.ClosePane) || kbMatches(key, kb.CloseTab) ||
-			kbMatches(key, kb.SplitHorizontal) || kbMatches(key, kb.SplitVertical)
+		structural := m.isAction(key, "pane.close") || m.isAction(key, "tab.close") ||
+			m.isAction(key, "pane.split_h") || m.isAction(key, "pane.split_v")
 		if structural {
 			m.exitNotesModeInPlace()
 		} else if m.notesPaneFocused {
@@ -3958,11 +4161,84 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, m.handleOverlayKey(msg, tab)
 	}
 
+	// Prefix sequence machine. Placed here so every mode that fully owns the
+	// keyboard is already inert by construction: dialog, rename, pane-rename,
+	// context menu and overlay all return above. The reconnect/parked screen
+	// never reaches handleKey at all — freezeInput is called unconditionally in
+	// Update and returns frozen.
+	//
+	// The two modes named below sit DOWNSTREAM of this point, so ordering does
+	// not cover them. Add a mode here if you add one that consumes keys after
+	// this line.
+	//
+	// seqAction is set only when a MULTI-STEP sequence completed. It makes the
+	// lookups below resolve to that action and disables the between-tier
+	// guards, because a completed sequence must run from its own tier and must
+	// outrank a plugin's raw_keys claim on its final chord.
+	// The dropped-sequence flash lives until the next keypress. Cleared here
+	// rather than inside stepSequence, which is skipped entirely while the
+	// sidebar has focus or a selection is active — press F3 after a dropped
+	// sequence and the message would otherwise stay on the status bar for the
+	// rest of the session.
+	m.seqFlash = ""
+
+	var seqAction keymap.ActionID
+	if !(m.sidebarFocused && m.notifications.visible) && m.selection == nil {
+		var consumed bool
+		m, seqAction, consumed = m.stepSequence(msg, key)
+		if consumed {
+			return m, m.armSequenceTimeout()
+		}
+		// A completed sequence reaches its action WITHOUT passing through the
+		// notes block above, so that block's handling has to be repeated for
+		// the actions it treats specially. This mirrors it arm for arm — see
+		// the notesMode branch earlier in this function.
+		//
+		// The two that bite hardest are pane.left / pane.right. In notes mode
+		// they switch focus between the editor and the bound pane; run through
+		// the ordinary late-tier arm instead, they navigate to another pane
+		// entirely, and the next workspace broadcast re-syncs the active pane
+		// back to the bound one — so the move silently undoes itself. Under a
+		// vim-style prefix keymap (`pane.right = "${prefix} l"`) that is the
+		// normal way to press them.
+		if seqAction != "" && m.notesMode && m.notesEditor != nil {
+			switch {
+			case seqAction == "pane.notes_toggle":
+				return m.exitNotesMode()
+			case seqAction == "app.quit":
+				if err := m.notesEditor.Close(); err != nil {
+					log.Printf("save notes on quit: %v", err)
+				}
+				return m, tea.Quit
+			case seqAction == "pane.left":
+				m.notesPaneFocused = true
+				return m, nil
+			case seqAction == "pane.right":
+				m.notesPaneFocused = false
+				return m, nil
+			case isStructuralAction(seqAction):
+				// Destroys or restructures the bound pane: flush and tear down
+				// before it runs, then fall through so the action still fires.
+				m.exitNotesModeInPlace()
+			}
+		}
+	}
+
 	// Early-tier actions (always available). This lookup sits BEFORE
 	// tryPluginRawKey, so an action resolved here beats a plugin's raw_keys
 	// claim on the same chord. Moving one of these into the late switch below
 	// silently hands the chord to the plugin — see keymap.Tier.
 	earlyID, _ := m.keymap.MatchTier(keymap.TierEarly, key)
+	if seqAction != "" {
+		// A completed sequence replaces the chord lookup entirely. Blanking the
+		// other tier matters: the sequence's final chord may ALSO be bound as a
+		// plain chord here, and running that instead would fire an action the
+		// user did not ask for.
+		earlyID = ""
+		if a, ok := keymap.Lookup(seqAction); ok && a.Tier == keymap.TierEarly {
+			earlyID = seqAction
+		}
+	}
 	switch earlyID {
 	case "notification.toggle":
 		// Alt+N: toggle visibility only, never focus. The sidebar is an
@@ -4088,17 +4364,22 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 
+	// Everything from here to the late-tier lookup is skipped for a completed
+	// sequence: these guards protect the plain-chord path, and a sequence has
+	// already been resolved against the whole keymap. In particular the raw-key
+	// seam below must not claim a sequence's final chord.
+
 	// Sidebar focused: route keys to notification center
-	if m.sidebarFocused && m.notifications.visible {
+	if seqAction == "" && m.sidebarFocused && m.notifications.visible {
 		return m.handleNotificationKey(key)
 	}
 
 	// Selection: Enter copies (tmux convention), Esc clears, Cmd+C for macOS
-	if m.selection != nil && key == "esc" {
+	if seqAction == "" && m.selection != nil && key == "esc" {
 		m.selection = nil
 		return m, nil
 	}
-	if m.selection != nil && (key == "enter" || key == "super+c") {
+	if seqAction == "" && m.selection != nil && (key == "enter" || key == "super+c") {
 		tab := m.activeTabModel()
 		if tab != nil {
 			if pane := tab.ActivePaneModel(); pane != nil {
@@ -4123,7 +4404,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// for mode toggling). When the active pane's plugin lists the current key
 	// in its RawKeys, send it straight to the PTY and skip every global
 	// shortcut, selection guard, and pane-navigation binding below.
-	if data := m.tryPluginRawKey(key, msg); data != nil {
+	if data := m.rawKeyFor(seqAction, key, msg); data != nil {
 		m.selection = nil
 		if tab := m.activeTabModel(); tab != nil {
 			if pane := tab.ActivePaneModel(); pane != nil {
@@ -4141,7 +4422,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// actually supports — a broader prefix match would swallow shift+tab
 	// (Claude Code mode toggle), shift+enter, and similar app-specific
 	// keys that must reach the PTY.
-	if isSelectionExtendKey(key) {
+	if seqAction == "" && isSelectionExtendKey(key) {
 		return m.handleSelectionKey(key)
 	}
 
@@ -4149,6 +4430,11 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// above has declined the key, so a plugin's raw_keys claim beats these —
 	// that is the whole reason the registry carries a Tier.
 	lateID, _ := m.keymap.MatchTier(keymap.TierLate, key)
+	if seqAction != "" {
+		// Early-tier sequences already ran and returned above, so anything
+		// still carrying a seqAction here is late-tier by elimination.
+		lateID = seqAction
+	}
 	switch lateID {
 	case "app.quit":
 		return m, tea.Quit
@@ -4265,6 +4551,28 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case "app.command_palette":
 		return m.openCommandPalette()
+
+	case "tab.next":
+		// Sequenced, not inlined into the return: switchTabBy mutates m
+		// through a pointer receiver, and Go does not order a plain operand
+		// against a call in the same return statement — `return m, m.switchTabBy(1)`
+		// may copy m before the mutation lands. Same reason the alt+digit case
+		// below has always split it.
+		cmd := m.switchTabBy(1)
+		return m, cmd
+
+	case "tab.prev":
+		cmd := m.switchTabBy(-1)
+		return m, cmd
+
+	case "tab.switch_1", "tab.switch_2", "tab.switch_3", "tab.switch_4", "tab.switch_5",
+		"tab.switch_6", "tab.switch_7", "tab.switch_8", "tab.switch_9":
+		// The ID's last rune is the 1-based tab number; switchTab is 0-based.
+		cmd := m.switchTab(int(lateID[len(lateID)-1] - '1'))
+		return m, cmd
+
+	case "system.shortcuts":
+		return m.openShortcutsDialog()
 	}
 
 	// Multiple aliases for paste because Windows Terminal captures the
@@ -4284,8 +4592,16 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// shadows the alias where the actions AFTER paste used not to; the build
 	// reports that as a ConflictHardcoded, which is why both chords are in
 	// keymap's hardcodedKeys table.
-	if key == "ctrl+alt+v" || key == "f8" {
+	if seqAction == "" && (key == "ctrl+alt+v" || key == "f8") {
 		return m, m.pasteClipboard()
+	}
+
+	// A completed sequence that reached here resolved to an action with no
+	// dispatch case (json.transform is the only one). Swallow it rather than
+	// letting the final chord fall through to the reserved-key switch or the
+	// pane — the user pressed a binding, not a key.
+	if seqAction != "" {
+		return m, nil
 	}
 
 	// Keys Quil reserves outright: they are never registry actions, so a
@@ -4296,13 +4612,6 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case key == "f1":
 		return m.openAboutDialog()
-
-	case key == "alt+1" || key == "alt+2" || key == "alt+3" ||
-		key == "alt+4" || key == "alt+5" || key == "alt+6" ||
-		key == "alt+7" || key == "alt+8" || key == "alt+9":
-		idx := int(key[len(key)-1] - '1')
-		cmd := m.switchTab(idx)
-		return m, cmd
 
 	default:
 		// Only process keys that produce PTY bytes.
@@ -5253,6 +5562,32 @@ func (m Model) isActivePane(paneID string) bool {
 // transition flips a flag, so without these two reports the daemon's copy is
 // wrong for as long as the user stays away — and a "visible" overlay is exempt
 // from the idle sweep forever.
+// switchTabBy moves the active tab by delta, wrapping at both ends.
+//
+// Pointer receiver, matching switchTab: a value receiver would apply the
+// index change to a local copy and discard it, which looks identical to
+// "nothing happened" at the call site.
+//
+// Wrapping matches tmux's next-window/previous-window. A non-wrapping version
+// makes the last tab a dead end for anyone driving purely from the keyboard.
+func (m *Model) switchTabBy(delta int) tea.Cmd {
+	tabs := len(m.curTabs())
+	if tabs == 0 {
+		return nil
+	}
+	idx := ((m.activeTabIdx()+delta)%tabs + tabs) % tabs
+	return m.switchTab(idx)
+}
+
+// openShortcutsDialog jumps straight to F1 -> Shortcuts, which is otherwise
+// reachable only by opening About and selecting a row. tmux binds prefix-? to
+// the equivalent list, so the preset needs a direct entry point.
+func (m Model) openShortcutsDialog() (tea.Model, tea.Cmd) {
+	m.dialog = dialogShortcuts
+	m.dialogCursor = 0
+	return m, tea.ClearScreen
+}
+
 func (m *Model) switchTab(idx int) tea.Cmd {
 	if idx < 0 || idx >= len(m.curTabs()) {
 		return nil
@@ -5736,6 +6071,16 @@ func (m Model) renderStatusBar() string {
 		} else {
 			left = paneInfo
 		}
+	}
+
+	// Pending prefix, or the message from the last dropped sequence. Leftmost
+	// because it is transient and outranks everything beside it: an armed
+	// machine that shows nothing is indistinguishable from a frozen TUI, and a
+	// sequence that silently did nothing is the support ticket this prevents.
+	if len(m.pendingSeq) > 0 {
+		left = keymap.Sequence(m.pendingSeq).String() + "… " + left
+	} else if m.seqFlash != "" {
+		left = m.seqFlash + " " + left
 	}
 
 	// Right side: keybinding hints + version

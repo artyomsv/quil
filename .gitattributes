@@ -36,3 +36,10 @@ changelog.d/*.md text eol=lf
 # CRLF under core.autocrlf, so a local promote produces a file that is LF on
 # the lines it just wrote and CRLF on the history it copied through.
 CHANGELOG.md text eol=lf
+
+# internal/changelog/highlights.txt is go:embed'ed and parsed line by line, so a
+# CRLF checkout puts a trailing \r at the end of every record — which lands
+# inside the headline text and is rendered into the TUI. Same failure class as
+# internal/shellinit/scripts/** above; internal/remoteinstall/embed_test.go is
+# the precedent for pairing the attribute with a no-CR assertion.
+internal/changelog/highlights.txt text eol=lf

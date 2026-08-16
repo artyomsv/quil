@@ -8,6 +8,7 @@ paths:
   - "**/internal/tui/ctxmenu.go"
   - "**/internal/tui/editor*.go"
   - "**/internal/tui/notes.go"
+  - "**/internal/tui/whatsnew*.go"
   - "**/internal/tui/migration.go"
   - "**/internal/tui/viewer_mouse.go"
   - "**/internal/panehistory/**"

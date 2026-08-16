@@ -113,7 +113,13 @@ func resolveWhatsNew(v string) *changelog.Window {
 // newest record. Deriving it as a range from the previous record would come
 // back empty on the release that ships this feature, making the menu row a
 // silent no-op on exactly the version that introduces it.
-func latestWindow() (changelog.Window, bool) {
+//
+// A package-var seam, following listFilesystemRoots: until the first release
+// cut after this lands, the embedded file holds no records, so the "opens the
+// dialog" branch is statically unreachable from a test and only the no-op
+// branch would ever be exercised. That is the shape where a wiring bug — the
+// wrong index, an inverted ok check — passes every test in the repo.
+var latestWindow = func() (changelog.Window, bool) {
 	r := changelog.Latest()
 	if r == nil || len(r.Entries) == 0 {
 		return changelog.Window{}, false
@@ -198,7 +204,8 @@ func (m Model) renderWhatsNewDialog() string {
 		b.WriteString(dialogSelected.Render("  " + title))
 		b.WriteByte('\n')
 		for _, it := range items {
-			b.WriteString(dialogNormal.Render(truncateToWidth("   • "+it, width)))
+			b.WriteString(dialogNormal.Render(
+				truncateToWidth("   • "+sanitizeHeadline(it), width)))
 			b.WriteByte('\n')
 		}
 	}
@@ -225,6 +232,27 @@ func (m Model) renderWhatsNewDialog() string {
 		dialogSelected.Render("  OK  ")))
 
 	return m.applyWhatsNewScroll(b.String(), width)
+}
+
+// sanitizeHeadline makes one release headline safe to write to a terminal.
+//
+// The text is authored in a pull request and travels fragment → shell printf →
+// highlights.txt → go:embed → this row. promote-changelog.sh's charset check is
+// BYTE-wise (`tr -d '\040-\176\200-\377'`), so it rejects only C0 and DEL:
+// every high byte passes. That admits U+009B — the single-rune C1 CSI
+// introducer internal/tui/oscfilter.go already exists because of — and the bidi
+// overrides U+202A–U+202E, which are *printable* and so pass any
+// control-character filter while reversing the rendered row.
+//
+// ToValidUTF8 first, because sanitizeRemoteText documents a valid-UTF-8
+// precondition and names this exact caller as the one that would not get it for
+// free: every other caller's value arrived over IPC as JSON, which coerces
+// invalid bytes to U+FFFD before this process sees them. An embedded file has
+// no such stage, and a bare 0x9B does survive the shell validator. Without the
+// conversion, sanitizeRemoteText's ContainsFunc fast path decodes that byte to
+// U+FFFD, matches nothing, and returns the string with the raw byte intact.
+func sanitizeHeadline(s string) string {
+	return sanitizeRemoteText(strings.ToValidUTF8(s, ""))
 }
 
 // padPair renders left and right on one row of exactly width cells, dropping

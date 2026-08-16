@@ -234,19 +234,203 @@ func TestMaybeShowUpdateNotice_YieldsToWhatsNewWithoutBurningItsMarker(t *testin
 	}
 }
 
+// withLatestWindow swaps the F1 path's window source for one test. Until the
+// first release cut after this feature lands, the embedded file holds no
+// records, so without this seam only the no-op branch is reachable.
+func withLatestWindow(t *testing.T, w changelog.Window, ok bool) {
+	t.Helper()
+	prev := latestWindow
+	latestWindow = func() (changelog.Window, bool) { return w, ok }
+	t.Cleanup(func() { latestWindow = prev })
+}
+
 // The F1 path must work on the very release that ships this feature, when the
 // embedded file holds exactly one record and there is no earlier version to
 // derive a range from.
-func TestLatestWindow_WorksWithASingleRecordedRelease(t *testing.T) {
-	if changelog.Latest() == nil {
-		t.Skip("the embedded highlights file records no releases yet")
-	}
+func TestLatestWindow_BuildsAOneReleaseWindowWithNoFrom(t *testing.T) {
 	w, ok := latestWindow()
+	if changelog.Latest() == nil {
+		if ok {
+			t.Error("an empty corpus must not produce a window")
+		}
+		return
+	}
 	if !ok {
-		t.Skip("the newest recorded release carries no entries")
+		return // newest release carried no entries; the no-op branch is correct
 	}
 	if w.From != "" || w.Total != 1 || len(w.Releases) != 1 {
 		t.Errorf("want a one-release window with no From, got %+v", w)
+	}
+}
+
+func TestAboutMenu_WhatsNewRowOpensTheDialogThroughUpdate(t *testing.T) {
+	withLatestWindow(t, testWindow(2), true)
+	m := Model{cfg: config.Default(), version: "1.60.0", dialog: dialogAbout,
+		dialogCursor: aboutWhatsNewIndex, lastWidth: 100, lastHeight: 40}
+	got, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if got.(Model).dialog != dialogWhatsNew {
+		t.Errorf("dialog = %v, want dialogWhatsNew", got.(Model).dialog)
+	}
+}
+
+// Before the first release carrying headlines there is nothing to show, and
+// the row must leave the About menu exactly as it was rather than opening an
+// empty dialog.
+func TestAboutMenu_WhatsNewRowIsANoOpWhenThereIsNothingToShow(t *testing.T) {
+	withLatestWindow(t, changelog.Window{}, false)
+	m := Model{cfg: config.Default(), version: "1.60.0", dialog: dialogAbout,
+		dialogCursor: aboutWhatsNewIndex, lastWidth: 100, lastHeight: 40}
+	got, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if got.(Model).dialog != dialogAbout {
+		t.Errorf("dialog = %v, want dialogAbout — the row must not open an empty dialog",
+			got.(Model).dialog)
+	}
+}
+
+// The disclaimer must still open when neither a migration nor a what's-new
+// applies. "dev" is not parseable semver, so resolveWhatsNew declines it.
+func TestNewModel_DisclaimerStillOpensWhenNothingElseApplies(t *testing.T) {
+	t.Setenv("QUIL_HOME", t.TempDir())
+	cfg := config.Default()
+	cfg.UI.ShowDisclaimer = true
+	m := NewModel(nil, cfg, "dev", plugin.NewRegistry(), nil)
+	if m.dialog != dialogDisclaimer {
+		t.Errorf("dialog = %v, want dialogDisclaimer", m.dialog)
+	}
+}
+
+// The headline is authored in a PR and rendered here. The promoter's charset
+// check is byte-wise, so a bidi override or a C1 introducer passes it as
+// ordinary high bytes — the render must strip them, as every other
+// externally-authored string in this package does.
+func TestRenderWhatsNew_StripsBidiAndC1FromHeadlines(t *testing.T) {
+	w := changelog.Window{
+		From: "1.59.0", To: "1.60.0", Total: 1,
+		Releases: []changelog.Release{{
+			Version: "1.60.0",
+			Entries: []changelog.Entry{
+				{Kind: changelog.KindAdded, Text: "safe‮reversed"},
+				{Kind: changelog.KindChanged, Text: "csi31mred"},
+			},
+		}},
+	}
+	out := whatsNewModel(w).renderWhatsNewDialog()
+	for _, bad := range []string{"‮", ""} {
+		if strings.Contains(out, bad) {
+			t.Errorf("render leaked %q into the dialog:\n%q", bad, out)
+		}
+	}
+	// The surrounding printable text must survive.
+	if !strings.Contains(out, "safe") || !strings.Contains(out, "reversed") {
+		t.Errorf("sanitizing dropped legitimate text:\n%s", out)
+	}
+}
+
+// A BARE 0x9B — the 8-bit CSI introducer — is not valid UTF-8 and survives the
+// promoter's byte-wise charset check. sanitizeRemoteText alone would return it
+// untouched, because its ContainsFunc fast path decodes the invalid byte to
+// U+FFFD and matches nothing. Only the ToValidUTF8 pass in sanitizeHeadline
+// removes it; today the renderer happens to neutralise it via a []rune round
+// trip, which is a dependency's behaviour rather than ours.
+func TestSanitizeHeadline_DropsABareCSIByteThatIsNotValidUTF8(t *testing.T) {
+	got := sanitizeHeadline("before\x9bafter")
+	if strings.ContainsRune(got, 0x9b) || strings.ContainsRune(got, '�') {
+		t.Errorf("sanitizeHeadline kept the bare 0x9b: %q", got)
+	}
+	if got != "beforeafter" {
+		t.Errorf("sanitizeHeadline = %q, want %q", got, "beforeafter")
+	}
+}
+
+func TestSanitizeHeadline_LeavesOrdinaryTextAlone(t *testing.T) {
+	const in = "F1 → Shortcuts is derived from your keymap"
+	if got := sanitizeHeadline(in); got != in {
+		t.Errorf("sanitizeHeadline = %q, want it unchanged", got)
+	}
+}
+
+func TestPadPair_DropsTheRightHalfWhenTheRowWouldOverflow(t *testing.T) {
+	if got := padPair("left", "right", 20); lipgloss.Width(got) != 20 {
+		t.Errorf("padPair width = %d, want 20 (%q)", lipgloss.Width(got), got)
+	}
+	// No room for both: the right half is dropped and the left is truncated to
+	// the budget rather than overflowing the dialog border.
+	got := padPair("a very long left half indeed", "right", 12)
+	if w := lipgloss.Width(got); w > 12 {
+		t.Errorf("padPair overflowed: width %d > 12 (%q)", w, got)
+	}
+	if strings.Contains(got, "right") {
+		t.Errorf("the right half must be dropped when it does not fit: %q", got)
+	}
+}
+
+// The scroll machinery only engages when the body overflows the terminal, so a
+// short test model never reaches it.
+func TestRenderWhatsNew_ScrollsAndShowsAPositionIndicatorWhenContentOverflows(t *testing.T) {
+	m := whatsNewModel(testWindow(30))
+	m.whatsNewExpanded = true
+	m.lastHeight = 16
+	out := m.renderWhatsNewDialog()
+	if !strings.Contains(out, "↑↓ scroll") {
+		t.Fatalf("overflowing content must show a position indicator:\n%s", out)
+	}
+	rows := len(strings.Split(out, "\n"))
+	if rows > m.lastHeight-6+1 {
+		t.Errorf("rendered %d rows, want at most %d (maxRows + indicator)", rows, m.lastHeight-6+1)
+	}
+	if !strings.Contains(out, "1/") {
+		t.Errorf("indicator must start at position 1 before scrolling:\n%s", out)
+	}
+}
+
+func TestWhatsNew_ScrollKeysMoveAndClampThroughUpdate(t *testing.T) {
+	m := whatsNewModel(testWindow(30))
+	m.whatsNewExpanded = true
+	m.lastHeight = 16
+
+	got, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	if got.(Model).whatsNewScroll != 1 {
+		t.Errorf("down: scroll = %d, want 1", got.(Model).whatsNewScroll)
+	}
+	got, _ = got.(Model).Update(tea.KeyPressMsg{Code: tea.KeyUp})
+	if got.(Model).whatsNewScroll != 0 {
+		t.Errorf("up: scroll = %d, want 0", got.(Model).whatsNewScroll)
+	}
+	// Already at the top: up must clamp rather than go negative, which would
+	// panic the slice in applyWhatsNewScroll.
+	got, _ = got.(Model).Update(tea.KeyPressMsg{Code: tea.KeyUp})
+	if got.(Model).whatsNewScroll != 0 {
+		t.Errorf("up at top: scroll = %d, want 0", got.(Model).whatsNewScroll)
+	}
+	got, _ = got.(Model).Update(tea.KeyPressMsg{Code: tea.KeyPgDown})
+	if got.(Model).whatsNewScroll != 10 {
+		t.Errorf("pgdown: scroll = %d, want 10", got.(Model).whatsNewScroll)
+	}
+	got, _ = got.(Model).Update(tea.KeyPressMsg{Code: tea.KeyPgUp})
+	if got.(Model).whatsNewScroll != 0 {
+		t.Errorf("pgup: scroll = %d, want 0", got.(Model).whatsNewScroll)
+	}
+	// A scroll far past the end must still render, clamped to the last page.
+	far := got.(Model)
+	far.whatsNewScroll = 9999
+	if out := far.renderWhatsNewDialog(); !strings.Contains(out, "↑↓ scroll") {
+		t.Errorf("a scroll past the end must clamp and still render:\n%s", out)
+	}
+}
+
+// Expanding and collapsing reset the scroll, or a collapsed short list renders
+// from a row that no longer exists.
+func TestWhatsNew_ExpandAndCollapseResetTheScroll(t *testing.T) {
+	m := whatsNewModel(testWindow(30))
+	m.whatsNewExpanded = true
+	m.lastHeight = 16
+	got, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyPgDown})
+	if got.(Model).whatsNewScroll == 0 {
+		t.Fatal("setup: pgdown did not move the scroll")
+	}
+	got, _ = got.(Model).Update(tea.KeyPressMsg{Code: tea.KeyLeft})
+	if got.(Model).whatsNewScroll != 0 {
+		t.Errorf("collapse: scroll = %d, want 0", got.(Model).whatsNewScroll)
 	}
 }
 

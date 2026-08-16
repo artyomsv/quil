@@ -77,6 +77,22 @@ section_heading() {
 }
 
 is_fragment_name() {
+  # A name containing a NEWLINE must be refused before the regex sees it.
+  # `grep -Eq` matches per LINE, so it answers "some line matched" — and a
+  # basename of `added-a.md\nVERSION` would pass. Both consumers of
+  # `fragments_of_type` re-split its output on newline (the render loop in
+  # promote(), and write_highlights), so the tail would become a bare
+  # repo-root-relative path whose contents get spliced into CHANGELOG.md and
+  # published as the release body — the outcome the symlink check below
+  # exists to prevent, reached by a different route. The likelier outcome is
+  # a mid-promote `die` AFTER CHANGELOG.md has been rewritten, which is the
+  # failure class #130 was.
+  # Counted with wc rather than a `case` glob: command substitution strips
+  # trailing newlines, so the natural-looking `*"$(printf '\n')"*` is the
+  # pattern `*""*`, which matches EVERY name and refuses the whole directory.
+  if [ "$(printf '%s' "$1" | wc -l | tr -d ' ')" -ne 0 ]; then
+    return 1
+  fi
   printf '%s\n' "$1" | grep -Eq "$NAME_RE"
 }
 
@@ -99,7 +115,12 @@ type_letter() {
 # leave a duplicated `## [x.y.z]` section behind in the file it was protecting.
 highlights_have_version() {
   [ -f "$HIGHLIGHTS" ] || return 1
-  grep -q "^V $1 " "$HIGHLIGHTS"
+  # Field comparison, not a regex: in `grep "^V $1 "` the dots of a version are
+  # wildcards, so 1.2.3 would also match a record `V 1x2x3`. Unreachable today
+  # (promote() validates ^[0-9]+\.[0-9]+\.[0-9]+$ before calling check), but a
+  # guard that is only correct because of a caller elsewhere is one refactor
+  # from being wrong.
+  awk -v v="$1" '$1 == "V" && $2 == v { found = 1 } END { exit !found }' "$HIGHLIGHTS"
 }
 
 # Strip leading and trailing blank lines. Fragment authors should not have to
@@ -360,6 +381,29 @@ write_highlights() {
       printf '%s %s\n' "$hl_letter" "$hl_text"
     done >> "$hl_new" || die "could not read a $t headline"
   done
+
+  # Every user-facing fragment must have produced exactly one record.
+  #
+  # The loop above cannot fail loudly on its own: `fragment_headline` is
+  # `tr … | awk …`, so a failing `tr` (unreadable file) still exits with awk's
+  # status of 0, leaving `hl_text` empty and hitting the `continue` — a
+  # SILENTLY DROPPED headline, which is the one outcome this script's whole
+  # design refuses. Wrapping the loop in `|| die` does not help either: a
+  # tested pipeline disables `set -e` inside it, and the status reported is the
+  # last command's. Counting the result is what actually detects it.
+  #
+  # validate_fragment_dir has already refused any fragment that is unreadable
+  # or missing a headline, so a mismatch here means the tree changed underneath
+  # the release or one of those checks regressed. Either way it must not ship.
+  hl_expected=0
+  for t in $HIGHLIGHT_TYPES; do
+    hl_files=$(fragments_of_type "$t")
+    [ -n "$hl_files" ] || continue
+    hl_expected=$((hl_expected + $(printf '%s\n' "$hl_files" | wc -l)))
+  done
+  hl_got=$(awk '!/^V /' "$hl_new" | wc -l | tr -d ' ')
+  [ "$hl_expected" -eq "$hl_got" ] || die \
+    "expected $hl_expected headline record(s), wrote $hl_got — a fragment was dropped"
 
   hl_out="$work/highlights.out"
   {

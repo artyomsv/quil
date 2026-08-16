@@ -30,6 +30,16 @@ The same helper backs the TUI-owned `notified.json`, which is written by a
 different process than the daemon-owned `state.json` — a cross-process race no
 in-process mutex can cover.
 
+**Widened 2026-08-16 (What's New, PR #165).** `saveJSON` now has a third
+caller: `lastrun.json`, written by `SaveLastRunVersion` from `resolveWhatsNew`
+during `NewModel` — i.e. on every TUI startup, unconditionally, before anything
+else happens. Two TUIs launched together therefore race on `lastrun.json.tmp`.
+The consequence stays Low and is self-healing in the same way: a corrupt marker
+makes `LoadLastRunVersion` return `""`, which `resolveWhatsNew` reads as a fresh
+install, so one launch shows no What's New dialog and the marker is rewritten
+correctly on the spot. Noted because the new writer fires far more often than
+the two existing ones.
+
 ## Risks
 
 Silent loss of the update announcement (the row goes back to "up to date" when

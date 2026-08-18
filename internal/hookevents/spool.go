@@ -21,6 +21,12 @@ import (
 // not skip a leading BOM, so the reader strips it (see parseAndValidate).
 var utf8BOM = []byte{0xEF, 0xBB, 0xBF}
 
+// removeFn is the unlink implementation used by Init. Overridable in tests to
+// exercise the truncate fallback, which is otherwise only reachable on Windows
+// when another process holds the file open without FILE_SHARE_DELETE — a state
+// the Linux CI image cannot produce.
+var removeFn = os.Remove
+
 // rotationThreshold is the per-pane spool size at which we truncate after a
 // fully-drained read. The watcher only ever advances; without rotation a
 // long-running pane's spool file grows linearly with hook-event count and
@@ -47,8 +53,14 @@ const parseWarnSampleRate = 50
 // between O_APPEND hook writes and the daemon's stat-then-read.
 //
 // On daemon shutdown, the spool files persist on disk; on next daemon
-// start, Init truncates them so we do not replay stale events from a
+// start, Init REMOVES them so we do not replay stale events from a
 // previous session (notifications are inherently ephemeral).
+//
+// Removing rather than truncating is load-bearing for cost, not tidiness.
+// Tick walks every .jsonl in the directory and pays open+stat+close on each,
+// so a zero-byte husk left for a pane that no longer exists costs syscalls on
+// every 200 ms tick for the life of the daemon — and truncating meant the set
+// only ever grew, across every restart, for as long as the install existed.
 type Spool struct {
 	dir string
 
@@ -89,8 +101,14 @@ func (s *Spool) Init() error {
 			continue
 		}
 		path := filepath.Join(s.dir, name)
-		if err := os.Truncate(path, 0); err != nil && !errors.Is(err, os.ErrNotExist) {
-			logger.Warn("hookevents: truncate spool %q: %v", path, err)
+		if err := removeFn(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			// Unlinking is the optimisation; zeroing is the guarantee. A file
+			// we cannot delete must still not replay a previous session's
+			// events, so fall back to what Init did before.
+			logger.Warn("hookevents: remove stale spool %q: %v — truncating instead", path, err)
+			if err := os.Truncate(path, 0); err != nil && !errors.Is(err, os.ErrNotExist) {
+				logger.Warn("hookevents: truncate spool %q: %v", path, err)
+			}
 		}
 	}
 	s.mu.Lock()

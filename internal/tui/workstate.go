@@ -13,7 +13,19 @@ import (
 
 // workSpinnerInterval is the animation cadence for the work-in-progress
 // spinner (shared by tab and pane indicators).
-const workSpinnerInterval = 100 * time.Millisecond
+//
+// This is a COST knob, not just a visual one. Bubble Tea calls View() once per
+// message, so each tick renders a whole frame — ~2.8 ms at 37 tabs, 73% of it
+// lipgloss measuring grapheme widths across the composed screen. Measured in
+// production 2026-08-18, this ticker alone was ~65% of every render the TUI
+// did, and it never idles while any agent is mid-turn.
+//
+// Unlike the other timer-driven messages, these frames cannot be coalesced
+// away: a spinner tick really does change the screen. 200 ms keeps the ten
+// braille frames cycling in 2 s — still plainly motion, which is what separates
+// "working" from the finished states — at half the frames of the original
+// 100 ms. See TestWorkSpinner_RateBalancesMotionAgainstRenderCost for the bound.
+const workSpinnerInterval = 200 * time.Millisecond
 
 // maxTrackedSubagents caps the DISTINCT agent_type keys one pane's ledger may
 // hold. The ledger is keyed by a producer-controlled string in a TUI process
@@ -573,7 +585,9 @@ func coalescedCount(data map[string]string) int {
 // syncPaneMeta (this file) is the only thing in the client that writes it. The
 // context menu's two attention rows send MsgUpdatePane; focus is not a route to
 // a clear at all.
-func (m *Model) ackFocusedPane() {
+// Reports whether it actually cleared a flag, which render coalescing needs —
+// see the comment at the assignment below.
+func (m *Model) ackFocusedPane() bool {
 	// A window the user is not looking at cannot acknowledge anything, and this
 	// half was missing: with it absent the mark set by a turn that finished
 	// while the terminal was in the background was cleared again on the very
@@ -583,20 +597,27 @@ func (m *Model) ackFocusedPane() {
 	// used to do and no longer does: a signal removed ~one tick after it was
 	// set is indistinguishable from one that was never set at all.
 	if !m.termFocused {
-		return
+		return false
 	}
 	tab := m.activeTabModel()
 	if tab == nil || tab.Root == nil || tab.ActivePane == "" {
-		return
+		return false
 	}
 	// Deliberately not ActivePaneModel(): that helper heals a stale
 	// ActivePane and sets Active — side effects we must not run per message.
 	for _, p := range tab.Leaves() {
 		if p != nil && p.ID == tab.ActivePane {
+			// The return value is what keeps render coalescing honest. `unseen`
+			// is drawn by the tab bar and the sidebar, and this runs before
+			// Update's switch on EVERY message — so an otherwise-inert message
+			// can move the screen through this line alone. Reporting the
+			// mutation lets the skip sites defer to it; see Model.skipRender.
+			changed := p.unseen
 			p.unseen = false
-			return
+			return changed
 		}
 	}
+	return false
 }
 
 // answerBlockedByInput clears a pane's parked-on-the-user mark because real

@@ -896,18 +896,22 @@ func launchTUI() {
 		applyUpdate = m.ApplyUpdateRequested() && !remoteMode()
 	}
 
-	// Deliberately OUTSIDE the block above, and this placement is the fix
-	// rather than tidying.
+	// Applied OUTSIDE the block above so the finished session is unmistakably
+	// unreachable before this process parks for the life of the replacement
+	// TUI (respawnSelf blocks that whole time while holding the console).
 	//
-	// maybeApplyStagedUpdate ends in respawnSelf, which blocks for the entire
-	// life of the replacement TUI while this process holds the console. Running
-	// it while `m` and `finalModel` are still in scope keeps the whole finished
-	// session reachable — every VT emulator, every scrollback buffer — so
-	// releaseHeapBeforePark has nothing it is allowed to collect and the wrapper
-	// parks at full size. Measured: 326 MB and 436 MB for two such wrappers.
+	// Honest about how much this buys: Go's liveness is precise per
+	// instruction, so `m` and `finalModel` are already dead after their last
+	// use and the collector was free to take them regardless. The real work is
+	// releaseHeapBeforePark returning the pages; this placement and the
+	// explicit nil are belt-and-braces plus documentation of the intent. Do NOT
+	// generalise "scope placement frees memory" from this.
 	//
-	// Dropping finalModel explicitly because it is the other reference to the
-	// same Model, and it stays live to the end of the function otherwise.
+	// One reference genuinely does outlive it: `p` is captured by the toast
+	// activation listener installed above and pinned by its deferred Close, so
+	// p.initialModel — the LAUNCH-time Model — survives the respawn. That is
+	// nil-projects in the ordinary local case and small; if a measured wrapper
+	// RSS ever fails to drop as far as expected, start there.
 	finalModel = nil
 	if applyUpdate {
 		if maybeApplyStagedUpdate(true) {

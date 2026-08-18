@@ -61,6 +61,11 @@ type eventLoopStats struct {
 	viewCount   int64
 	viewTotalNs int64
 	viewMaxNs   int64
+	// viewSkipped counts frames served from the render cache instead of being
+	// rebuilt. viewCount covers rebuilds only, so the two together are the
+	// messages Bubble Tea asked for a frame on — which is what view(n=...)
+	// meant before render coalescing existed.
+	viewSkipped int64
 
 	// Non-key messages processed since the last KeyPressMsg — proxy for
 	// queue backlog. Large values while typing mean keystroke messages are
@@ -158,6 +163,15 @@ func (s *eventLoopStats) recordView(d time.Duration) {
 	}
 }
 
+// recordSkippedView records a frame served from the render cache.
+// Caller must be on the Bubble Tea program goroutine.
+func (s *eventLoopStats) recordSkippedView() {
+	if s == nil {
+		return
+	}
+	s.viewSkipped++
+}
+
 // flush emits one aggregate summary line and resets all counters.
 // Caller must be on the Bubble Tea program goroutine.
 func (s *eventLoopStats) flush() {
@@ -172,9 +186,9 @@ func (s *eventLoopStats) flush() {
 		viewAvg = time.Duration(s.viewTotalNs / s.viewCount)
 	}
 
-	logger.Info("perf window=%s | view(n=%d avg=%s max=%s) | pane-out(bytes=%d max-vt=%s) | key-backlog-max=%d | %s",
+	logger.Info("perf window=%s | view(n=%d skipped=%d avg=%s max=%s) | pane-out(bytes=%d max-vt=%s) | key-backlog-max=%d | %s",
 		window.Round(time.Millisecond),
-		s.viewCount, viewAvg, time.Duration(s.viewMaxNs),
+		s.viewCount, s.viewSkipped, viewAvg, time.Duration(s.viewMaxNs),
 		s.paneOutBytes, time.Duration(s.paneOutMaxNs),
 		s.maxSinceKey,
 		breakdown,
@@ -220,6 +234,7 @@ func (s *eventLoopStats) resetCounters() {
 	s.viewCount = 0
 	s.viewTotalNs = 0
 	s.viewMaxNs = 0
+	s.viewSkipped = 0
 	s.maxSinceKey = 0
 	s.lastFlush = time.Now()
 }

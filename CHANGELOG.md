@@ -11,6 +11,82 @@ version section here and deletes them.
 
 ## [Unreleased]
 
+## [1.62.1] - 2026-08-18
+
+### Added
+- **`[ui] scrollback_lines` sets how much scrollback each pane keeps.** The depth was fixed
+  at 10 000 lines, and every pane holds its own terminal emulator whether or not you are
+  looking at it — so the figure multiplies by pane count. A 37-pane workspace measured
+  1.13 GB of client memory.
+
+  The default is unchanged, so no existing install loses history. Lower it if you run many
+  panes on a memory-tight machine. Both ends are guarded: an unset or nonsensical value falls
+  back to the default rather than leaving panes with no history, and an implausibly large one
+  is clamped — the setting that exists to reduce memory should not be able to exhaust it
+  through a stray zero.
+
+### Changed
+- **The TUI stops rebuilding the screen for messages that change nothing.** Bubble Tea asks
+  the model for a frame once per message it receives, and a frame on a 37-tab workspace costs
+  around 2.8 ms — nearly three quarters of it spent measuring the width of text that had not
+  changed since the last one. Timers drove most of those frames: a one-second terminal-size
+  poll, a five-second memory refresh, and messages the TUI does not handle at all.
+
+  Those now reuse the previous frame. Anything that genuinely changes the screen still
+  repaints immediately; rendering remains the default and only cases audited as inert are
+  skipped.
+
+- **The work-in-progress spinner animates at 200 ms instead of 100 ms.** It was the single
+  largest source of repaints — around 65% of them — and it never stops while any agent is
+  mid-turn. The ten braille frames now cycle in two seconds rather than one, which still
+  reads as motion at half the cost.
+
+### Fixed
+- **The daemon stops re-polling hook spools for panes that no longer exist.** It reads
+  `$QUIL_HOME/events/<paneID>.jsonl` every 200 ms, opening and stat-ing every file it
+  finds. On daemon start these were *truncated* rather than deleted, so a zero-byte file
+  survived for every pane that ever existed — across every restart, for the life of the
+  install.
+
+  The cost is the file count, not their size. One measured workspace had 349 spool files
+  for 37 live panes, 332 of them empty husks, driving roughly 7,000 file-handle
+  operations a second and holding a full CPU core at 21% in kernel time with the session
+  otherwise idle. Typing echo, tab switching and scrolling all lagged behind it.
+
+  Startup now unlinks stale spools instead of emptying them, falling back to the old
+  truncation if the file cannot be deleted so a previous session's notifications still
+  never replay.
+- **The daemon no longer races itself when two clients attach at the same moment.**
+  `SnapshotState` promises callers a consistent view of the session taken under one lock,
+  and delivered that for projects but not for tabs — those came back as live pointers, so
+  anything reading a tab's pane list after the lock was released raced a concurrent pane
+  creation.
+
+  Each connection is dispatched on its own goroutine, so two clients attaching together was
+  enough to hit it: one builds the default workspace while the other builds the workspace
+  state it is about to be sent. Tabs are now copied on the way out, exactly as projects
+  already were.
+- **A quil left running after an in-session update no longer holds the whole finished
+  session in memory.** Applying an update relaunches quil and keeps the old process alive
+  behind it, holding the terminal so your shell does not print a prompt over the new one.
+  That process had just run a full session, so it parked still holding every pane's
+  terminal emulator and scrollback — measured at 326 MB and 436 MB on a machine that had
+  updated twice without quitting.
+
+  It now releases that memory back to the operating system before parking. The processes
+  themselves are unchanged and still exit when you quit quil.
+
+### Internal
+- Clients can now decline the live pane-output broadcast (`subscribe` message), and the MCP
+  bridge does. The daemon broadcast every pane's PTY bytes to every connection, and the
+  bridge decoded each frame only to discard it — so a workspace with many AI sessions
+  attached multiplied one verbose pane's output by the connection count, in both socket
+  writes and frame decoding.
+
+  Nothing is opted out by default: a client that never sends the message, including any
+  older build, receives exactly what it did before. Only the live output stream can be
+  declined — workspace state, request responses and lifecycle frames are unaffected.
+
 ## [1.62.0] - 2026-08-16
 
 ### Added

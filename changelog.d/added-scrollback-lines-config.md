@@ -7,5 +7,7 @@ headline: Per-pane scrollback depth is now configurable
   1.13 GB of client memory.
 
   The default is unchanged, so no existing install loses history. Lower it if you run many
-  panes on a memory-tight machine; an unset or nonsensical value falls back to the default
-  rather than leaving panes with no history.
+  panes on a memory-tight machine. Both ends are guarded: an unset or nonsensical value falls
+  back to the default rather than leaving panes with no history, and an implausibly large one
+  is clamped — the setting that exists to reduce memory should not be able to exhaust it
+  through a stray zero.

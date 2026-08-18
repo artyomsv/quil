@@ -34,12 +34,22 @@ func TestSetScrollbackLines_AppliesToNewPanes(t *testing.T) {
 
 	// The setting is only real if it reaches the emulator a pane is built with.
 	p := NewPaneModel("pane-scrollback", 1024)
+	t.Cleanup(p.Dispose)
 	for i := 0; i < 700; i++ {
 		p.AppendOutput([]byte("line of scrollback content\r\n"))
 	}
-	if sb := p.vt.ScrollbackLen(); sb > 500 {
+	// A BAND, not just an upper bound. `sb > 500` alone is satisfied by zero,
+	// which is precisely the "pane with no history at all" outcome the clamp
+	// below exists to prevent — so the obvious assertion passes hardest on the
+	// worst failure.
+	sb := p.vt.ScrollbackLen()
+	if sb > 500 {
 		t.Errorf("pane retained %d scrollback lines with a 500 cap — the "+
 			"configured depth never reached the emulator", sb)
+	}
+	if sb == 0 {
+		t.Error("pane retained NO scrollback after 700 lines — the configured depth " +
+			"reached the emulator as zero, which is worse than ignoring it")
 	}
 }
 

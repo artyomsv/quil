@@ -106,6 +106,16 @@ type Conn struct {
 	dropped   atomic.Uint64
 	// deadlineRefused gates reportDeadlineRefused to one line per conn.
 	deadlineRefused atomic.Bool
+	// noPaneOutput opts this conn out of the live MsgPaneOutput stream.
+	//
+	// Inverted so the ZERO VALUE means subscribed: a client that never says
+	// anything — every TUI, and any build older than this field — keeps
+	// receiving exactly what it did before. Only a client that explicitly asks
+	// to be excused loses frames.
+	//
+	// Atomic because the opt-out arrives on the conn's read goroutine while
+	// Broadcast reads it from whichever goroutine is emitting.
+	noPaneOutput atomic.Bool
 	// pending counts must-deliver frames accepted by Send but not yet written
 	// to the socket. Send is non-blocking — it hands the frame to sendLoop —
 	// so an empty critCh does NOT mean the peer has it. Flush needs to know
@@ -601,6 +611,25 @@ func (s *Server) ConnCount() int {
 // types are critical: a slow or wedged conn that overflows its critical queue
 // is dropped from the fan-out (logged once, per CAS-guarded enqueue) without
 // affecting the others.
+// SetPaneOutputWanted records whether this conn wants the live pane-output
+// stream. Exported for the daemon's subscribe handler.
+func (c *Conn) SetPaneOutputWanted(want bool) { c.setPaneOutputWanted(want) }
+
+func (c *Conn) setPaneOutputWanted(want bool) { c.noPaneOutput.Store(!want) }
+
+func (c *Conn) wantsPaneOutput() bool { return !c.noPaneOutput.Load() }
+
+// wantsFrame reports whether a frame of this type should be delivered to this
+// conn. Only the live pane-output stream is ever filtered: everything else is
+// must-deliver, and a client excusing itself from PTY bytes still needs
+// workspace state, its own responses, and lifecycle frames.
+func (c *Conn) wantsFrame(msgType string) bool {
+	if msgType != MsgPaneOutput {
+		return true
+	}
+	return c.wantsPaneOutput()
+}
+
 func (s *Server) Broadcast(msg *Message) {
 	frame, err := EncodeFrame(msg)
 	if err != nil {
@@ -624,6 +653,12 @@ func (s *Server) Broadcast(msg *Message) {
 	// must-deliver and routes to the critical queue (overflow → close).
 	droppable := msg.Type == MsgPaneOutput
 	for _, c := range conns {
+		// A subscriber that excused itself from the live PTY stream (the MCP
+		// bridge, which decodes every frame only to discard it) is skipped
+		// before the frame reaches its queue.
+		if !c.wantsFrame(msg.Type) {
+			continue
+		}
 		if err := c.enqueue(frame, droppable); err != nil && !errors.Is(err, ErrSendOverflow) {
 			// ErrSendOverflow is already logged at the overflow site (CAS
 			// guarantees exactly one log per conn). Any other error is

@@ -160,6 +160,21 @@ func runMCP() {
 	defer cancel()
 
 	bridge := newMCPBridge(client)
+	// Decline the live pane-output stream. readLoop discards every broadcast
+	// (`if msg.ID == "" { continue }`), so each frame cost a socket write on the
+	// daemon and a frame decode here purely to be thrown away — multiplied by
+	// however many bridges are attached. The MCP tools that read pane content
+	// (read_pane_output, screenshot_pane) do so by request/response, which is
+	// unaffected; so are workspace state and notifications.
+	//
+	// Best-effort: an older daemon ignores the unknown message type and simply
+	// keeps sending everything, which is exactly the previous behaviour.
+	declinePaneOutput := false
+	if subMsg, err := ipc.NewMessage(ipc.MsgSubscribe, ipc.SubscribePayload{PaneOutput: &declinePaneOutput}); err != nil {
+		log.Printf("mcp: build subscribe: %v", err)
+	} else if err := bridge.sendRaw(subMsg); err != nil {
+		log.Printf("mcp: send subscribe: %v", err)
+	}
 	go bridge.readLoop(ctx)
 
 	server := mcp.NewServer(

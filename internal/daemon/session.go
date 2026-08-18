@@ -711,7 +711,27 @@ func (sm *SessionManager) SnapshotState() (activeTab string, tabs []*Tab, panesB
 
 	for _, id := range sm.tabOrder {
 		tab := sm.tabs[id]
-		tabs = append(tabs, tab)
+		// COPY, for the same reason the projects loop below copies — and this
+		// one was missing it, which made the doc comment above a promise this
+		// function did not keep.
+		//
+		// Returning the live *Tab lets every caller read tab.Panes AFTER the
+		// unlock (workspaceStateFromSnapshot, snapshot, search, the memory
+		// report, list_tabs all do), racing any concurrent CreatePane doing
+		// `tab.Panes = append(...)`. Two clients attaching at once is enough:
+		// each conn dispatches on its own goroutine, so one attach builds the
+		// default workspace while the other builds workspace state. Caught by
+		// CI's race detector, reproduced by
+		// TestSnapshotState_TabPanesDoNotRaceConcurrentCreatePane.
+		//
+		// Panes and Layout are the reference fields; Layout is an opaque
+		// json.RawMessage that handleUpdateLayout REPLACES rather than edits in
+		// place, so aliasing it is safe, but it is copied anyway so the
+		// returned Tab shares nothing at all.
+		cp := *tab
+		cp.Panes = append([]string(nil), tab.Panes...)
+		cp.Layout = append(json.RawMessage(nil), tab.Layout...)
+		tabs = append(tabs, &cp)
 
 		tabPanes := make([]*Pane, 0, len(tab.Panes))
 		for _, pid := range tab.Panes {

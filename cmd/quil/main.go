@@ -574,6 +574,10 @@ func launchTUI() {
 	if len(stalePlugins) == 0 {
 		whatsNew = tui.ResolveWhatsNew(version)
 	}
+	// Must precede NewModel and any pane construction: the depth is baked into
+	// each pane's emulator when it is created, so a pane built before this call
+	// would keep the default for its whole life.
+	tui.SetScrollbackLines(cfg.UI.ScrollbackLines)
 	model := tui.NewModel(router, cfg, version, reg, stalePlugins, whatsNew)
 	// Seed a row for every configured destination that did not connect. Without
 	// this the host simply vanishes from the sidebar, which reads as Quil having
@@ -850,6 +854,10 @@ func launchTUI() {
 		os.Exit(1)
 	}
 
+	// Whether the session asked for a staged update to be applied on exit. Read
+	// inside the block below, acted on outside it — see the comment there.
+	applyUpdate := false
+
 	// Save window size and config changes for next launch
 	if m, ok := finalModel.(tui.Model); ok {
 		m.FlushNotes()
@@ -885,17 +893,32 @@ func launchTUI() {
 		// while the apply reads the LOCAL one. Re-checked here rather than
 		// trusted: this is the branch that swaps binaries on disk, and a
 		// belt-and-braces guard on it costs one comparison.
-		if m.ApplyUpdateRequested() && !remoteMode() {
-			if maybeApplyStagedUpdate(true) {
-				return
-			}
-			// The user explicitly confirmed "Update now" — silently falling
-			// through to a normal exit would look like the confirm did
-			// nothing. maybeApplyStagedUpdate already logged the specific
-			// failure (verification, swap, or missing staged files); this is
-			// the user-facing summary line.
-			fmt.Fprintln(os.Stderr, "update was confirmed but could not be applied (staged files missing or failed verification) — run quil again or use About → Update now to re-download.")
+		applyUpdate = m.ApplyUpdateRequested() && !remoteMode()
+	}
+
+	// Deliberately OUTSIDE the block above, and this placement is the fix
+	// rather than tidying.
+	//
+	// maybeApplyStagedUpdate ends in respawnSelf, which blocks for the entire
+	// life of the replacement TUI while this process holds the console. Running
+	// it while `m` and `finalModel` are still in scope keeps the whole finished
+	// session reachable — every VT emulator, every scrollback buffer — so
+	// releaseHeapBeforePark has nothing it is allowed to collect and the wrapper
+	// parks at full size. Measured: 326 MB and 436 MB for two such wrappers.
+	//
+	// Dropping finalModel explicitly because it is the other reference to the
+	// same Model, and it stays live to the end of the function otherwise.
+	finalModel = nil
+	if applyUpdate {
+		if maybeApplyStagedUpdate(true) {
+			return
 		}
+		// The user explicitly confirmed "Update now" — silently falling
+		// through to a normal exit would look like the confirm did
+		// nothing. maybeApplyStagedUpdate already logged the specific
+		// failure (verification, swap, or missing staged files); this is
+		// the user-facing summary line.
+		fmt.Fprintln(os.Stderr, "update was confirmed but could not be applied (staged files missing or failed verification) — run quil again or use About → Update now to re-download.")
 	}
 	log.Print("TUI exited normally")
 }

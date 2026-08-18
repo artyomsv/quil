@@ -36,6 +36,31 @@ func newMCPBridge(client *ipc.Client) *mcpBridge {
 	}
 }
 
+// declinePaneOutput asks the daemon to stop broadcasting the live PTY stream to
+// this bridge.
+//
+// readLoop discards every broadcast it receives (`if msg.ID == "" { continue }`),
+// so each pane-output frame cost a socket write on the daemon and a full frame
+// decode here purely to be thrown away — multiplied by however many bridges are
+// attached, 17 in one measured session. The MCP tools that read pane content
+// (read_pane_output, screenshot_pane) use request/response and are unaffected,
+// as are workspace state and notifications.
+//
+// Best-effort by design: an older daemon has no case for this message type,
+// ignores it, and keeps sending everything — exactly the previous behaviour. So
+// the error is logged, never fatal.
+func (b *mcpBridge) declinePaneOutput() error {
+	no := false
+	msg, err := ipc.NewMessage(ipc.MsgSubscribe, ipc.SubscribePayload{PaneOutput: &no})
+	if err != nil {
+		return fmt.Errorf("build subscribe: %w", err)
+	}
+	if err := b.sendRaw(msg); err != nil {
+		return fmt.Errorf("send subscribe: %w", err)
+	}
+	return nil
+}
+
 // readLoop reads messages from the daemon, routing responses to waiting
 // callers and discarding broadcast messages. On connection loss, all
 // pending requests are woken with a closed channel.
@@ -160,20 +185,8 @@ func runMCP() {
 	defer cancel()
 
 	bridge := newMCPBridge(client)
-	// Decline the live pane-output stream. readLoop discards every broadcast
-	// (`if msg.ID == "" { continue }`), so each frame cost a socket write on the
-	// daemon and a frame decode here purely to be thrown away — multiplied by
-	// however many bridges are attached. The MCP tools that read pane content
-	// (read_pane_output, screenshot_pane) do so by request/response, which is
-	// unaffected; so are workspace state and notifications.
-	//
-	// Best-effort: an older daemon ignores the unknown message type and simply
-	// keeps sending everything, which is exactly the previous behaviour.
-	declinePaneOutput := false
-	if subMsg, err := ipc.NewMessage(ipc.MsgSubscribe, ipc.SubscribePayload{PaneOutput: &declinePaneOutput}); err != nil {
-		log.Printf("mcp: build subscribe: %v", err)
-	} else if err := bridge.sendRaw(subMsg); err != nil {
-		log.Printf("mcp: send subscribe: %v", err)
+	if err := bridge.declinePaneOutput(); err != nil {
+		log.Printf("mcp: decline pane output: %v", err)
 	}
 	go bridge.readLoop(ctx)
 

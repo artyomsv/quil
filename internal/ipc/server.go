@@ -611,25 +611,6 @@ func (s *Server) ConnCount() int {
 // types are critical: a slow or wedged conn that overflows its critical queue
 // is dropped from the fan-out (logged once, per CAS-guarded enqueue) without
 // affecting the others.
-// SetPaneOutputWanted records whether this conn wants the live pane-output
-// stream. Exported for the daemon's subscribe handler.
-func (c *Conn) SetPaneOutputWanted(want bool) { c.setPaneOutputWanted(want) }
-
-func (c *Conn) setPaneOutputWanted(want bool) { c.noPaneOutput.Store(!want) }
-
-func (c *Conn) wantsPaneOutput() bool { return !c.noPaneOutput.Load() }
-
-// wantsFrame reports whether a frame of this type should be delivered to this
-// conn. Only the live pane-output stream is ever filtered: everything else is
-// must-deliver, and a client excusing itself from PTY bytes still needs
-// workspace state, its own responses, and lifecycle frames.
-func (c *Conn) wantsFrame(msgType string) bool {
-	if msgType != MsgPaneOutput {
-		return true
-	}
-	return c.wantsPaneOutput()
-}
-
 func (s *Server) Broadcast(msg *Message) {
 	frame, err := EncodeFrame(msg)
 	if err != nil {
@@ -666,6 +647,29 @@ func (s *Server) Broadcast(msg *Message) {
 			logger.Error("ipc: broadcast send: %v", err)
 		}
 	}
+}
+
+// SetPaneOutputWanted records whether this conn wants the live pane-output
+// stream. Exported for the daemon's subscribe handler.
+func (c *Conn) SetPaneOutputWanted(want bool) { c.setPaneOutputWanted(want) }
+
+// PaneOutputWanted reports the current setting. Exported so the handler can log
+// only on a real change rather than on every message it receives.
+func (c *Conn) PaneOutputWanted() bool { return c.wantsPaneOutput() }
+
+func (c *Conn) setPaneOutputWanted(want bool) { c.noPaneOutput.Store(!want) }
+
+func (c *Conn) wantsPaneOutput() bool { return !c.noPaneOutput.Load() }
+
+// wantsFrame reports whether a frame of this type should be delivered to this
+// conn. Only the live pane-output stream is ever filtered: everything else is
+// must-deliver, and a client excusing itself from PTY bytes still needs
+// workspace state, its own responses, and lifecycle frames.
+func (c *Conn) wantsFrame(msgType string) bool {
+	if msgType != MsgPaneOutput {
+		return true
+	}
+	return c.wantsPaneOutput()
 }
 
 func (s *Server) acceptLoop() {

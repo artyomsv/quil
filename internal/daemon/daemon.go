@@ -1333,10 +1333,11 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 	case ipc.MsgWatchNotificationsReq:
 		d.handleWatchNotificationsReq(conn, msg)
 
-	// Memory reporting
+	// Broadcast subscription
 	case ipc.MsgSubscribe:
 		d.handleSubscribe(conn, msg)
 
+	// Memory reporting
 	case ipc.MsgMemoryReportReq:
 		d.handleMemoryReportReq(conn, msg)
 
@@ -5012,12 +5013,23 @@ func (d *Daemon) handleWatchNotificationsReq(conn *ipc.Conn, msg *ipc.Message) {
 func (d *Daemon) handleSubscribe(conn *ipc.Conn, msg *ipc.Message) {
 	var p ipc.SubscribePayload
 	if err := msg.DecodePayload(&p); err != nil {
-		logger.Warn("ipc: bad subscribe payload: %v", err)
+		// Debug, not Warn: the sender controls how often this fires, so a
+		// hostile client could otherwise drive log rotation from a malformed
+		// payload alone.
+		logger.Debug("ipc: bad subscribe payload: %v", err)
 		return
 	}
 	if p.PaneOutput != nil {
-		conn.SetPaneOutputWanted(*p.PaneOutput)
-		logger.Info("ipc: client set pane_output subscription = %v", *p.PaneOutput)
+		// Log only on an actual change. Any process that can open the socket
+		// can loop this message, and an unconditional line here would be the
+		// one per-message Info in the daemon — enough to churn quild.log
+		// through its rotation and evict diagnostic history, which is the
+		// forensic half of a DoS even though the disk is bounded. internal/ipc
+		// gates its own repeat-warnings with a CAS for the same reason.
+		if conn.PaneOutputWanted() != *p.PaneOutput {
+			conn.SetPaneOutputWanted(*p.PaneOutput)
+			logger.Info("ipc: client set pane_output subscription = %v", *p.PaneOutput)
+		}
 	}
 }
 

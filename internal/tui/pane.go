@@ -302,7 +302,7 @@ type vtDrain struct {
 // safe to call.
 func (p *PaneModel) newVTEmulator(w, h int) (*vt.SafeEmulator, *vtDrain) {
 	em := vt.NewSafeEmulator(w, h)
-	em.SetScrollbackSize(10000)
+	em.SetScrollbackSize(scrollbackLines())
 	em.SetCallbacks(vt.Callbacks{
 		CursorVisibility: func(visible bool) {
 			p.cursorVisible = visible
@@ -382,6 +382,40 @@ func (p *PaneModel) Dispose() {
 func (p *PaneModel) installVT(em *vt.SafeEmulator, d *vtDrain) {
 	p.closeVT()
 	p.vt, p.vtDrain = em, d
+}
+
+// defaultScrollbackLines is the per-pane VT scrollback depth, and was the
+// hardcoded value before it became configurable. It stays the default so no
+// install loses history on upgrade.
+const defaultScrollbackLines = 10000
+
+// scrollbackDepth is process-wide because every pane wants the same answer and
+// panes are constructed from a dozen call sites that have no config in hand —
+// the same reason SetRemoteDest and SetRecentCWDs are package-level setters.
+// Read through scrollbackLines(), never directly.
+var scrollbackDepth = defaultScrollbackLines
+
+// SetScrollbackLines sets the per-pane scrollback depth for panes created from
+// here on. Called once at startup from the loaded config.
+//
+// Depth is per-pane and every pane holds its own emulator whether or not it is
+// visible, so this multiplies by pane count: 37 panes at the default measured
+// 1.13 GB resident in production. A value <= 0 means unset (TOML's zero) or
+// nonsense and falls back to the default — a pane with no scrollback at all is
+// never what a config typo meant.
+func SetScrollbackLines(n int) {
+	if n <= 0 {
+		scrollbackDepth = defaultScrollbackLines
+		return
+	}
+	scrollbackDepth = n
+}
+
+func scrollbackLines() int {
+	if scrollbackDepth <= 0 {
+		return defaultScrollbackLines
+	}
+	return scrollbackDepth
 }
 
 func NewPaneModel(id string, bufSize int) *PaneModel {

@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -385,13 +386,39 @@ func respawnSelf(exe string) bool {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Env = append(os.Environ(), "QUIL_UPDATE_RESTART=1")
-	if err := cmd.Run(); err != nil {
+	if err := cmd.Start(); err != nil {
+		fmt.Fprintf(os.Stderr, "update applied but relaunch failed: %v — run quil again\n", err)
+		return true
+	}
+	// AFTER Start, not before: the child is already launching, so the STW
+	// collection and page release overlap the new TUI's startup instead of
+	// delaying the user's relaunch by the cost of scavenging a ~1 GB heap.
+	// Parked RSS ends up identical either way.
+	releaseHeapBeforePark()
+	if err := cmd.Wait(); err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			os.Exit(exitErr.ExitCode())
 		}
 		fmt.Fprintf(os.Stderr, "update applied but relaunch failed: %v — run quil again\n", err)
 	}
 	return true
+}
+
+// releaseHeapBeforePark hands the finished session's memory back to the OS
+// before this process parks waiting on the replacement TUI.
+//
+// respawnSelf blocks for the entire life of that child, and this process has
+// just run a full session — so without this it sits there holding every VT
+// emulator and scrollback buffer it accumulated, for hours, doing nothing.
+// Measured in production 2026-08-18: wrappers parked at 326 MB and 436 MB, one
+// added per in-session update.
+//
+// debug.FreeOSMemory rather than runtime.GC: collecting the objects is not the
+// point, returning the pages is. Go's scavenger would get there eventually, but
+// "eventually" is unbounded for a process that makes no further allocations —
+// which is exactly what a parked wrapper is.
+func releaseHeapBeforePark() {
+	debug.FreeOSMemory()
 }
 
 // cleanupAppliedUpdate removes backups and the staged dir once the running

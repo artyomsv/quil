@@ -302,7 +302,7 @@ type vtDrain struct {
 // safe to call.
 func (p *PaneModel) newVTEmulator(w, h int) (*vt.SafeEmulator, *vtDrain) {
 	em := vt.NewSafeEmulator(w, h)
-	em.SetScrollbackSize(10000)
+	em.SetScrollbackSize(scrollbackLines())
 	em.SetCallbacks(vt.Callbacks{
 		CursorVisibility: func(visible bool) {
 			p.cursorVisible = visible
@@ -382,6 +382,52 @@ func (p *PaneModel) Dispose() {
 func (p *PaneModel) installVT(em *vt.SafeEmulator, d *vtDrain) {
 	p.closeVT()
 	p.vt, p.vtDrain = em, d
+}
+
+// defaultScrollbackLines is the per-pane VT scrollback depth, and was the
+// hardcoded value before it became configurable. It stays the default so no
+// install loses history on upgrade.
+const defaultScrollbackLines = 10000
+
+// maxScrollbackLines caps what the config may ask for. Depth multiplies by pane
+// count, so a stray zero turns a tuning knob into an out-of-memory on startup —
+// on the one setting whose entire purpose is memory pressure. The ceiling sits
+// far above any plausible use (100x the default) so it can only catch a typo.
+const maxScrollbackLines = 1000000
+
+// scrollbackDepth is process-wide because every pane wants the same answer and
+// panes are constructed from a dozen call sites that have no config in hand.
+// The established precedent for this shape in the codebase is
+// version.SetUpdatesEnabled/UpdatesEnabled. Read through scrollbackLines(),
+// never directly.
+var scrollbackDepth = defaultScrollbackLines
+
+// SetScrollbackLines sets the per-pane scrollback depth for panes created from
+// here on. Called once at startup from the loaded config.
+//
+// Depth is per-pane and every pane holds its own emulator whether or not it is
+// visible, so this multiplies by pane count: 37 panes at the default measured
+// 1.13 GB resident in production. Both ends are clamped — <= 0 means unset
+// (TOML's zero) or nonsense, and anything past maxScrollbackLines is a typo the
+// user would otherwise discover as an OOM.
+func SetScrollbackLines(n int) {
+	switch {
+	case n <= 0:
+		scrollbackDepth = defaultScrollbackLines
+	case n > maxScrollbackLines:
+		log.Printf("ui.scrollback_lines = %d exceeds the %d cap — clamping; depth is per pane and multiplies by pane count",
+			n, maxScrollbackLines)
+		scrollbackDepth = maxScrollbackLines
+	default:
+		scrollbackDepth = n
+	}
+}
+
+func scrollbackLines() int {
+	if scrollbackDepth <= 0 {
+		return defaultScrollbackLines
+	}
+	return scrollbackDepth
 }
 
 func NewPaneModel(id string, bufSize int) *PaneModel {

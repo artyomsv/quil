@@ -1333,6 +1333,10 @@ func (d *Daemon) handleMessage(conn *ipc.Conn, msg *ipc.Message) {
 	case ipc.MsgWatchNotificationsReq:
 		d.handleWatchNotificationsReq(conn, msg)
 
+	// Broadcast subscription
+	case ipc.MsgSubscribe:
+		d.handleSubscribe(conn, msg)
+
 	// Memory reporting
 	case ipc.MsgMemoryReportReq:
 		d.handleMemoryReportReq(conn, msg)
@@ -2126,9 +2130,15 @@ func (d *Daemon) replacePaneAt(payload ipc.CreatePanePayload, cwd, paneType stri
 // Ordering relative to the PTY close does not matter for correctness: a
 // dying hook process can recreate the spool/session-id file after cleanup,
 // but emitHookEvent drops events for panes absent from the session, so the
-// residue is a small bounded file until the next daemon restart (Init
-// truncates stale spools). Call it before or after the session delete,
-// whichever reads better at the call site.
+// residue is a small bounded file until the next daemon restart (Init removes
+// stale spools). Call it before or after the session delete, whichever reads
+// better at the call site.
+//
+// "Small bounded file" is about BYTES; the cost that bit was the COUNT. Init
+// used to truncate rather than unlink, so every spool file ever created
+// survived every restart as a zero-byte husk and Tick kept paying
+// open+stat+close on it 5x/s. Production 2026-08-18: 349 files for 37 live
+// panes, ~7,000 handle ops/sec, 21% of a core in kernel time.
 func (d *Daemon) cleanupPaneArtifacts(paneID string) {
 	// Overlay visibility claims are keyed by pane id, so a destroyed overlay
 	// would otherwise leave its id in every live client's claim set — in a
@@ -4991,6 +5001,36 @@ func (d *Daemon) handleWatchNotificationsReq(conn *ipc.Conn, msg *ipc.Message) {
 			d.events.RemoveWatcher(watcher)
 		}
 	}()
+}
+
+// handleSubscribe narrows what this connection is broadcast. Today the only
+// stream that can be declined is live pane output — the MCP bridge decodes
+// every frame of it only to discard it, and a workspace with many bridges
+// attached multiplies one verbose pane's output by the connection count.
+//
+// An omitted field leaves that stream as it is, so the message stays
+// extensible; a client that never sends it at all is fully subscribed.
+func (d *Daemon) handleSubscribe(conn *ipc.Conn, msg *ipc.Message) {
+	var p ipc.SubscribePayload
+	if err := msg.DecodePayload(&p); err != nil {
+		// Debug, not Warn: the sender controls how often this fires, so a
+		// hostile client could otherwise drive log rotation from a malformed
+		// payload alone.
+		logger.Debug("ipc: bad subscribe payload: %v", err)
+		return
+	}
+	if p.PaneOutput != nil {
+		// Log only on an actual change. Any process that can open the socket
+		// can loop this message, and an unconditional line here would be the
+		// one per-message Info in the daemon — enough to churn quild.log
+		// through its rotation and evict diagnostic history, which is the
+		// forensic half of a DoS even though the disk is bounded. internal/ipc
+		// gates its own repeat-warnings with a CAS for the same reason.
+		if conn.PaneOutputWanted() != *p.PaneOutput {
+			conn.SetPaneOutputWanted(*p.PaneOutput)
+			logger.Info("ipc: client set pane_output subscription = %v", *p.PaneOutput)
+		}
+	}
 }
 
 func (d *Daemon) handleMemoryReportReq(conn *ipc.Conn, msg *ipc.Message) {

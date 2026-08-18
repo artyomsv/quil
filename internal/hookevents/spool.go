@@ -21,6 +21,19 @@ import (
 // not skip a leading BOM, so the reader strips it (see parseAndValidate).
 var utf8BOM = []byte{0xEF, 0xBB, 0xBF}
 
+// removeFn is the unlink implementation used by Init. Overridable in tests to
+// exercise the truncate fallback, which is otherwise only reachable on Windows
+// when another process holds the file open without FILE_SHARE_DELETE — a state
+// the Linux CI image cannot produce.
+//
+// Any test that stubs this MUST NOT call t.Parallel(). Its Init siblings do, and
+// they are safe only because Go pauses parallel tests until the sequential phase
+// finishes — so a stub installed by a serial test is never live while they run.
+// Adding t.Parallel() to the stubbing test would race the package var, and the
+// detector will not report it, because the two sets never overlap in a passing
+// run. See TestSpool_Init_TruncatesWhenRemoveFails.
+var removeFn = os.Remove
+
 // rotationThreshold is the per-pane spool size at which we truncate after a
 // fully-drained read. The watcher only ever advances; without rotation a
 // long-running pane's spool file grows linearly with hook-event count and
@@ -47,8 +60,14 @@ const parseWarnSampleRate = 50
 // between O_APPEND hook writes and the daemon's stat-then-read.
 //
 // On daemon shutdown, the spool files persist on disk; on next daemon
-// start, Init truncates them so we do not replay stale events from a
+// start, Init REMOVES them so we do not replay stale events from a
 // previous session (notifications are inherently ephemeral).
+//
+// Removing rather than truncating is load-bearing for cost, not tidiness.
+// Tick walks every .jsonl in the directory and pays open+stat+close on each,
+// so a zero-byte husk left for a pane that no longer exists costs syscalls on
+// every 200 ms tick for the life of the daemon — and truncating meant the set
+// only ever grew, across every restart, for as long as the install existed.
 type Spool struct {
 	dir string
 
@@ -57,8 +76,8 @@ type Spool struct {
 	parseErrCounts map[string]uint64 // paneID → malformed-line counter for log sampling
 }
 
-// NewSpool returns a Spool reading from dir. Use Init to truncate stale
-// files on daemon startup; Tick on each poll; Cleanup on pane destroy.
+// NewSpool returns a Spool reading from dir. Use Init to discard stale files
+// on daemon startup; Tick on each poll; Cleanup on pane destroy.
 func NewSpool(dir string) *Spool {
 	return &Spool{
 		dir:            dir,
@@ -67,14 +86,22 @@ func NewSpool(dir string) *Spool {
 	}
 }
 
-// Init prepares the spool directory: creates it if absent, truncates every
-// existing *.jsonl file to size 0 so a fresh daemon never replays events
-// from a previous run. Safe to call multiple times.
+// Init prepares the spool directory: creates it if absent, then REMOVES every
+// existing *.jsonl file so a fresh daemon never replays events from a previous
+// run. Safe to call multiple times.
 //
-// Truncate-on-start trades off durability for predictability: a hook that
-// fired between daemon-stop and daemon-start would be lost, but the
-// alternative — replaying potentially-stale events that no longer
-// represent live state — is worse for a notification surface.
+// Discard-on-start trades off durability for predictability: a hook that fired
+// between daemon-stop and daemon-start is lost, but the alternative — replaying
+// potentially-stale events that no longer represent live state — is worse for a
+// notification surface.
+//
+// Unlinking rather than truncating is what bounds the directory. Tick walks
+// every entry here five times a second and pays open+stat+close on each, so a
+// zero-byte husk left for a pane that no longer exists costs syscalls for the
+// life of the daemon — and truncating meant the set only ever grew, across
+// every restart. Where the unlink fails (Windows refuses it while another
+// process holds the file open without FILE_SHARE_DELETE) it falls back to the
+// old truncate: unlinking is the optimisation, zeroing is the guarantee.
 func (s *Spool) Init() error {
 	if err := os.MkdirAll(s.dir, 0o700); err != nil {
 		return fmt.Errorf("hookevents: create spool dir %q: %w", s.dir, err)
@@ -89,8 +116,26 @@ func (s *Spool) Init() error {
 			continue
 		}
 		path := filepath.Join(s.dir, name)
-		if err := os.Truncate(path, 0); err != nil && !errors.Is(err, os.ErrNotExist) {
-			logger.Warn("hookevents: truncate spool %q: %v", path, err)
+		// Containment check, mirroring Cleanup's. os.ReadDir yields base names
+		// only and never "." or "..", so no escape is constructible here today
+		// — this is symmetry, not a patched hole. It earns its place because
+		// the OPERATION changed: this loop used to truncate and now unlinks,
+		// and the guard set around it did not move with the blast radius.
+		// readPaneFile and Cleanup both carry a check; the path that deletes
+		// should not be the one without one.
+		cleaned := filepath.Clean(path)
+		if !strings.HasPrefix(cleaned, filepath.Clean(s.dir)+string(filepath.Separator)) {
+			logger.Warn("hookevents: refusing to remove spool outside the dir: %q", cleaned)
+			continue
+		}
+		if err := removeFn(cleaned); err != nil && !errors.Is(err, os.ErrNotExist) {
+			// Unlinking is the optimisation; zeroing is the guarantee. A file
+			// we cannot delete must still not replay a previous session's
+			// events, so fall back to what Init did before.
+			logger.Warn("hookevents: remove stale spool %q: %v — truncating instead", cleaned, err)
+			if err := os.Truncate(cleaned, 0); err != nil && !errors.Is(err, os.ErrNotExist) {
+				logger.Warn("hookevents: truncate spool %q: %v", cleaned, err)
+			}
 		}
 	}
 	s.mu.Lock()

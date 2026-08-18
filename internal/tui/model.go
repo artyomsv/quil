@@ -772,6 +772,24 @@ type Model struct {
 	// Bubble Tea's value-receiver copies.
 	perfStats *eventLoopStats
 
+	// viewCache holds the last built frame so a message that provably changed
+	// nothing visible can reuse it. Pointer for the same reason perfStats is
+	// one: View has a value receiver, so it cannot write back to the Model
+	// Bubble Tea will hand to the next Update.
+	//
+	// Nil is a supported state and simply disables reuse — the many tests that
+	// build Model{} directly keep rendering every time.
+	viewCache *viewCacheBox
+
+	// skipRender marks the message just handled as inert: the frame cannot
+	// have moved, so View may return the cached one.
+	//
+	// The default is FALSE — render — and Update resets it on every message.
+	// Only branches audited as inert set it, so an unexamined branch (or a new
+	// one) behaves exactly as it did before coalescing existed. Getting this
+	// backwards would trade a performance win for stale pixels.
+	skipRender bool
+
 	// Plugin migration dialog state
 	migrationPlugins    []plugin.StalePlugin // stale plugins needing migration
 	migrationIdx        int                  // active plugin tab index
@@ -921,6 +939,7 @@ func NewModel(client Client, cfg config.Config, version string, registry *plugin
 		instanceStore:    LoadInstances(config.InstancesPath()),
 		recentCWDs:       LoadRecentCWDs(config.RecentCWDsPath("")),
 		mcpHighlights:    make(map[string]bool),
+		viewCache:        &viewCacheBox{},
 		mcpHighlightSeq:  make(map[string]int),
 		notifications:    NewNotificationCenter(cfg.Notification.SidebarWidth, cfg.Notification.MaxEvents),
 		migrationPlugins: stalePlugins,
@@ -1043,9 +1062,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		markUpdateEnd()
 		m.perfStats.recordMsg(msgTypeName(msg), time.Since(start))
 	}()
+	// Render coalescing starts from "this frame must be rebuilt" and is lowered
+	// only by branches audited as inert (see Model.skipRender). Resetting here
+	// means the flag describes THIS message and can never leak into the next.
+	m.skipRender = false
 	// Acknowledge the focused pane of the active tab before processing the
 	// message — focusing is the acknowledgement; see ackFocusedPane.
-	m.ackFocusedPane()
+	//
+	// This clears a flag the tab bar and sidebar draw, so it can move the
+	// screen even when the message itself is inert.
+	//
+	// prologueChangedView is named for the REGION, not for this call: every
+	// mutation between here and the type switch runs on every message and can
+	// therefore move the screen under an otherwise-inert one. Anything added to
+	// that region must fold into this flag. It was called ackChangedView first
+	// and covered only the ack — which is precisely how the context-menu prune
+	// below was missed, shipping a cached frame that still drew a closed menu.
+	prologueChangedView := m.ackFocusedPane()
 	// Beside ackFocusedPane deliberately: this is the one point every message
 	// passes through, and the sweep's own emptiness check makes it free in the
 	// common case. It must not be an edge hook — see sweepOutstandingToasts.
@@ -1070,13 +1103,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// and paneID are mutually exclusive discriminators (see ctxMenuState), so
 	// the else arm is exactly the original pane case. Both lookups are
 	// nil-safe.
+	// Folded into prologueChangedView: View both DRAWS this menu and derives
+	// v.MouseMode from it, so closing it here moves the screen — on a message
+	// that may otherwise be inert.
 	if m.ctxMenu.open() {
 		if projectID := m.ctxMenu.projectID; projectID != "" {
 			if m.projectByID(projectID) == nil {
 				m.closeCtxMenu()
+				prologueChangedView = true
 			}
 		} else if pane, _, _ := m.findPaneAndTab(m.ctxMenu.paneID); pane == nil {
 			m.closeCtxMenu()
+			prologueChangedView = true
 		}
 	}
 	// The resume key is checked BEFORE the freeze, or it would be swallowed with
@@ -1144,6 +1182,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// it; making the 1 s size poll a second retry path would only race that.
 		if m.sized && msg.Width == m.width && msg.Height == m.height &&
 			msg.Width == m.pendingWidth && msg.Height == m.pendingHeight {
+			// Inert: the branch reports a size we already hold and touches
+			// nothing. The 1 s poll makes this one of the most frequent
+			// messages the TUI sees.
+			m.skipRender = !prologueChangedView
 			return m, nil
 		}
 		log.Printf("WindowSizeMsg: %dx%d", msg.Width, msg.Height)
@@ -1366,6 +1408,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.finishReconnect(msg.dest, msg.client)
 
 	case sizePollMsg:
+		// Inert: re-arms the tick and issues the console-grid probe as Cmds.
+		// The model is untouched.
+		m.skipRender = !prologueChangedView
 		return m, tea.Batch(sizePollProbe, sizePollTick())
 
 	case resizeTickMsg:
@@ -2282,6 +2327,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case memoryTickMsg:
+		// Inert: refreshMemory only builds a Cmd that sends an IPC request.
+		// The reply (memoryReportMsg) is what updates the status-bar total, and
+		// that branch renders.
+		m.skipRender = !prologueChangedView
 		return m, tea.Batch(m.refreshMemory(), memoryTickCmd())
 
 	case memoryReportMsg:
@@ -2465,7 +2514,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return mdl, tea.Batch(cmd, m.listenForMessages())
 
 	case listenContinueMsg:
+		// Inert: re-arms the IPC listen loop only.
+		m.skipRender = !prologueChangedView
 		return m, m.listenForMessages()
+
+	default:
+		// No case matched, so nothing in this switch touched the model and the
+		// frame cannot have moved. This is reached by message types the TUI
+		// does not handle — Bubble Tea's own internal windowSizeMsg among them,
+		// which the 1 s size poll produces on every tick.
+		//
+		// Safe against the cases above that fall out of the switch instead of
+		// returning: a type switch runs `default` only when NOTHING matched, so
+		// those still reach the tail with skipRender false and render.
+		m.skipRender = !prologueChangedView
 	}
 
 	return m, nil
@@ -3911,7 +3973,27 @@ func (m *Model) exitNotesMode() (tea.Model, tea.Cmd) {
 	return *m, tea.Batch(tea.ClearScreen, m.resizeAllPanes())
 }
 
+// viewCacheBox holds the frame View last built. See Model.viewCache for why
+// this is reached through a pointer.
+type viewCacheBox struct {
+	valid bool
+	view  tea.View
+	// builds counts real rebuilds. It is what the coalescing tests assert on:
+	// comparing rendered content proves a skip was HONEST, this proves the skip
+	// actually happened.
+	builds int
+}
+
 func (m Model) View() tea.View {
+	if m.skipRender && m.viewCache != nil && m.viewCache.valid {
+		// Counted, because the perf log's view(n=...) is the number this
+		// project's render-cost analysis is built on and coalescing silently
+		// changed what it means. Without this the stat would report REBUILDS
+		// while reading like frames delivered, and a future measurement would
+		// compare it against pre-coalescing numbers that counted every frame.
+		m.perfStats.recordSkippedView()
+		return m.viewCache.view
+	}
 	viewStart := time.Now()
 	defer func() { m.perfStats.recordView(time.Since(viewStart)) }()
 	var content string
@@ -4053,6 +4135,11 @@ func (m Model) View() tea.View {
 	// tea.View.Cursor was tried and reverted: the per-frame repositioning
 	// desynced Bubble Tea's diff writer on Windows and the first typed
 	// character landed one cell off ("Test" → "T est").
+	if m.viewCache != nil {
+		m.viewCache.view = v
+		m.viewCache.valid = true
+		m.viewCache.builds++
+	}
 	return v
 }
 

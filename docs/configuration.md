@@ -50,6 +50,7 @@ theme = "default"
 mouse_scroll_lines = 3
 page_scroll_lines = 0           # 0 = half-page (dynamic) — terminal pane scrollback
 log_viewer_page_lines = 40      # Alt+Up/Alt+Down jump in F1 → log viewer
+scrollback_lines = 10000        # per-pane scrollback depth — multiplies by pane count
 show_disclaimer = true          # beta disclaimer on startup
 sidebar_open = false            # project sidebar starts collapsed
 sidebar_width = 22              # project sidebar width — reserves layout width; NOT [notification]'s
@@ -158,6 +159,7 @@ The "ghost buffer" is the rendered preview Quil shows immediately on reconnect, 
 | `mouse_scroll_lines` | int | `3` | Lines per mouse-wheel notch in pane scrollback. |
 | `page_scroll_lines` | int | `0` | Lines per `Alt+PgUp` / `Alt+PgDown`. `0` = half the pane height (dynamic). |
 | `log_viewer_page_lines` | int | `40` | `Alt+Up` / `Alt+Down` jump distance in the F1 log viewer. |
+| `scrollback_lines` | int | `10000` | Lines of scrollback each pane keeps. **Multiplies by pane count** — every pane holds its own terminal emulator whether or not you are looking at it, so a 37-pane workspace at the default measured ~1.1 GB of client memory. Lower it if you run many panes on a memory-tight machine. `0` (unset) keeps the default; values above `1000000` are clamped, since the setting that exists to *reduce* memory should not be able to exhaust it through a typo. Applies to panes created **after** launch — existing panes keep the depth they were built with, so a change takes effect on the next restart. |
 | `show_disclaimer` | bool | `true` | Display the beta disclaimer on startup. The `Don't show again` button flips this to `false`. |
 | `sidebar_open` | bool | `false` | Whether the **project** sidebar starts expanded. Closed by default so existing installs keep their pane geometry unchanged. `Alt+Shift+S` flips it, and the setting persists. |
 | `sidebar_width` | int | `22` | Width of the **project** sidebar. Unlike the notification sidebar this reserves real layout width — panes are narrower by exactly this many columns while it is open, and toggling it resizes every pane's PTY. Clamped against the terminal width, so an oversized value cannot push the pane area off screen. Editable without touching this file: **F1 → Settings → Sidebar width** (the one Settings row that applies immediately rather than on next launch), or **drag the sidebar's right edge** with the mouse. Both persist here. A drag will not take the strip below 12 columns — collapsing it entirely is what `Alt+Shift+S` is for, and a strip dragged to nothing would leave no edge to grab it back by. |

@@ -574,6 +574,10 @@ func launchTUI() {
 	if len(stalePlugins) == 0 {
 		whatsNew = tui.ResolveWhatsNew(version)
 	}
+	// Must precede NewModel and any pane construction: the depth is baked into
+	// each pane's emulator when it is created, so a pane built before this call
+	// would keep the default for its whole life.
+	tui.SetScrollbackLines(cfg.UI.ScrollbackLines)
 	model := tui.NewModel(router, cfg, version, reg, stalePlugins, whatsNew)
 	// Seed a row for every configured destination that did not connect. Without
 	// this the host simply vanishes from the sidebar, which reads as Quil having
@@ -850,6 +854,10 @@ func launchTUI() {
 		os.Exit(1)
 	}
 
+	// Whether the session asked for a staged update to be applied on exit. Read
+	// inside the block below, acted on outside it — see the comment there.
+	applyUpdate := false
+
 	// Save window size and config changes for next launch
 	if m, ok := finalModel.(tui.Model); ok {
 		m.FlushNotes()
@@ -885,17 +893,36 @@ func launchTUI() {
 		// while the apply reads the LOCAL one. Re-checked here rather than
 		// trusted: this is the branch that swaps binaries on disk, and a
 		// belt-and-braces guard on it costs one comparison.
-		if m.ApplyUpdateRequested() && !remoteMode() {
-			if maybeApplyStagedUpdate(true) {
-				return
-			}
-			// The user explicitly confirmed "Update now" — silently falling
-			// through to a normal exit would look like the confirm did
-			// nothing. maybeApplyStagedUpdate already logged the specific
-			// failure (verification, swap, or missing staged files); this is
-			// the user-facing summary line.
-			fmt.Fprintln(os.Stderr, "update was confirmed but could not be applied (staged files missing or failed verification) — run quil again or use About → Update now to re-download.")
+		applyUpdate = m.ApplyUpdateRequested() && !remoteMode()
+	}
+
+	// Applied OUTSIDE the block above so the finished session is unmistakably
+	// unreachable before this process parks for the life of the replacement
+	// TUI (respawnSelf blocks that whole time while holding the console).
+	//
+	// Honest about how much this buys: Go's liveness is precise per
+	// instruction, so `m` and `finalModel` are already dead after their last
+	// use and the collector was free to take them regardless. The real work is
+	// releaseHeapBeforePark returning the pages; this placement and the
+	// explicit nil are belt-and-braces plus documentation of the intent. Do NOT
+	// generalise "scope placement frees memory" from this.
+	//
+	// One reference genuinely does outlive it: `p` is captured by the toast
+	// activation listener installed above and pinned by its deferred Close, so
+	// p.initialModel — the LAUNCH-time Model — survives the respawn. That is
+	// nil-projects in the ordinary local case and small; if a measured wrapper
+	// RSS ever fails to drop as far as expected, start there.
+	finalModel = nil
+	if applyUpdate {
+		if maybeApplyStagedUpdate(true) {
+			return
 		}
+		// The user explicitly confirmed "Update now" — silently falling
+		// through to a normal exit would look like the confirm did
+		// nothing. maybeApplyStagedUpdate already logged the specific
+		// failure (verification, swap, or missing staged files); this is
+		// the user-facing summary line.
+		fmt.Fprintln(os.Stderr, "update was confirmed but could not be applied (staged files missing or failed verification) — run quil again or use About → Update now to re-download.")
 	}
 	log.Print("TUI exited normally")
 }

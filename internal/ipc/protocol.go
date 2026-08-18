@@ -14,6 +14,10 @@ const (
 	MsgDetach    = "detach"
 	MsgShutdown  = "shutdown"
 	MsgHeartbeat = "heartbeat"
+	// MsgSubscribe lets a client narrow what the daemon broadcasts to it.
+	// Optional in both directions: a client that never sends it receives
+	// everything, exactly as before this message existed.
+	MsgSubscribe = "subscribe"
 
 	// Session control (Client -> Daemon)
 	MsgCreatePane   = "create_pane"
@@ -306,6 +310,16 @@ type PaneOutputPayload struct {
 	PaneID string `json:"pane_id"`
 	Data   []byte `json:"data"`
 	Ghost  bool   `json:"ghost,omitempty"`
+}
+
+// SubscribePayload narrows what a client is sent.
+//
+// PaneOutput is a POINTER so "field absent" and "explicitly false" are
+// distinguishable: an omitted field leaves the current setting alone, which
+// keeps the message extensible without every future sender having to restate
+// every flag. Nothing is opted out by default.
+type SubscribePayload struct {
+	PaneOutput *bool `json:"pane_output,omitempty"`
 }
 
 type CreateTabPayload struct {

@@ -1131,7 +1131,7 @@ func projectRow(name string, c paneStateCounts, workFrame int, link string, acti
 	// a styledSegment is 664 — growing a nil slice through four appends and then
 	// copying it into a fifth to prepend the head is some 8 KB of churn per
 	// project per frame, on a strip repainted on every message including the
-	// 100 ms spinner tick.
+	// work-spinner tick (workSpinnerInterval).
 	segs := make([]styledSegment, 1, 6)
 	// Badge order is urgency order, and it is the same glyph vocabulary the
 	// pane rows use so the summary reads as a roll-up rather than a second
@@ -1309,7 +1309,7 @@ func paneRow(pane *PaneModel, focused bool, w int) string {
 
 	// TWO segments, not three: prefix+label and suffix carry the SAME style, so
 	// splitting them emitted a second identical SGR pair on every pane row of
-	// every frame — on a strip that repaints on the 100 ms spinner tick. Only
+	// every frame — on a strip that repaints on every work-spinner tick (workSpinnerInterval). Only
 	// the pin genuinely differs, and merging also drops one of the caller
 	// obligations renderStyledSegments states.
 	//

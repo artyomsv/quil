@@ -459,7 +459,7 @@ func (m *Model) ownerTabOfPane(paneID string) (*ProjectModel, int) {
 // remembering this file, which a set of hooks cannot.
 func (m *Model) sweepOutstandingToasts() {
 	// The overwhelmingly common state, and this runs on every Update including
-	// the 100 ms spinner tick — so the empty case must cost nothing.
+	// the work-spinner tick (workSpinnerInterval) — so the empty case must cost nothing.
 	if len(m.outstandingToasts) == 0 || m.notifier == nil {
 		return
 	}

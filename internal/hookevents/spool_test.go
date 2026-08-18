@@ -2,6 +2,7 @@ package hookevents
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -171,15 +172,89 @@ func TestSpool_Tick_DropsMalformed(t *testing.T) {
 	}
 }
 
-func TestSpool_Init_TruncatesExistingFiles(t *testing.T) {
+// Init must UNLINK stale spools, not truncate them. Tick walks every .jsonl in
+// the directory and pays open+stat+close on each one, so a file left behind for
+// a pane that no longer exists costs syscalls on every 200 ms tick for as long
+// as the daemon runs — and Init preserving them means the set only ever grows,
+// across every restart. Observed in production 2026-08-18: 349 spool files for
+// 37 live panes, 332 of them the zero-byte husks this truncate produced,
+// driving ~7,000 handle operations/sec and 21% of one core in kernel time.
+func TestSpool_Init_RemovesStaleFiles(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 
-	// Pre-seed a stale file as though a previous daemon left it.
-	path := filepath.Join(dir, "pane-old.jsonl")
-	if err := os.WriteFile(path, []byte("stale content from previous run\n"), 0o600); err != nil {
-		t.Fatalf("seed spool: %v", err)
+	// Both shapes a previous daemon leaves behind: one still holding events,
+	// one already truncated to zero by an earlier Init.
+	seed := map[string]string{
+		"pane-old.jsonl":   "stale content from previous run\n",
+		"pane-older.jsonl": "",
 	}
+	for name, body := range seed {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+			t.Fatalf("seed %s: %v", name, err)
+		}
+	}
+
+	s := NewSpool(dir)
+	if err := s.Init(); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	var left []string
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read spool dir: %v", err)
+	}
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".jsonl") {
+			left = append(left, e.Name())
+		}
+	}
+	if len(left) != 0 {
+		t.Errorf("Init should unlink stale spools, not truncate them; %d left behind: %v", len(left), left)
+	}
+}
+
+// The reason Init touches stale files at all: notifications are ephemeral, so a
+// previous session's events must never replay into this one. Removal has to keep
+// that guarantee that truncation provided.
+func TestSpool_Init_DoesNotReplayPreviousSessionEvents(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	path := filepath.Join(dir, "pane-1.jsonl")
+	writeSpoolLine(t, path, Payload{
+		V: SchemaVersion, PaneID: "pane-1", Source: SourceClaude,
+		HookEvent: "Stop", Title: "Reply ready", Severity: SeverityInfo, TsMs: 1, Seq: 1,
+	})
+
+	s := NewSpool(dir)
+	if err := s.Init(); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	if got := s.Tick(); len(got) != 0 {
+		t.Errorf("Init must not let a previous session's events replay; Tick returned %+v", got)
+	}
+}
+
+// Removal can fail where truncation would have succeeded: on Windows an open
+// handle without FILE_SHARE_DELETE fails the unlink, and this project's primary
+// platform is Windows. A failed remove must not leave a file still holding a
+// previous session's events — the no-replay guarantee is the floor, and
+// unlinking is only the optimisation on top of it.
+func TestSpool_Init_TruncatesWhenRemoveFails(t *testing.T) {
+	dir := t.TempDir()
+
+	path := filepath.Join(dir, "pane-1.jsonl")
+	writeSpoolLine(t, path, Payload{
+		V: SchemaVersion, PaneID: "pane-1", Source: SourceClaude,
+		HookEvent: "Stop", Title: "Reply ready", Severity: SeverityInfo, TsMs: 1, Seq: 1,
+	})
+
+	orig := removeFn
+	removeFn = func(string) error { return errors.New("sharing violation") }
+	t.Cleanup(func() { removeFn = orig })
 
 	s := NewSpool(dir)
 	if err := s.Init(); err != nil {
@@ -188,10 +263,41 @@ func TestSpool_Init_TruncatesExistingFiles(t *testing.T) {
 
 	info, err := os.Stat(path)
 	if err != nil {
-		t.Fatalf("stat after init: %v", err)
+		t.Fatalf("file should still exist when remove fails: %v", err)
 	}
 	if info.Size() != 0 {
-		t.Errorf("Init should truncate stale spool; got size %d", info.Size())
+		t.Errorf("Init must fall back to truncation when remove fails; size = %d", info.Size())
+	}
+	if got := s.Tick(); len(got) != 0 {
+		t.Errorf("undeletable spool must not replay previous events; Tick returned %+v", got)
+	}
+}
+
+// Init now DELETES rather than truncates, so the .jsonl filter stops being a
+// tidiness detail and becomes the blast radius. The spool directory is
+// $QUIL_HOME/events, and nothing else there is Init's to remove.
+func TestSpool_Init_LeavesNonSpoolFilesAlone(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	keep := filepath.Join(dir, "notes.txt")
+	if err := os.WriteFile(keep, []byte("not a spool\n"), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "subdir.jsonl"), 0o700); err != nil {
+		t.Fatalf("seed dir: %v", err)
+	}
+
+	s := NewSpool(dir)
+	if err := s.Init(); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	if _, err := os.Stat(keep); err != nil {
+		t.Errorf("Init removed a non-spool file: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "subdir.jsonl")); err != nil {
+		t.Errorf("Init removed a directory whose name ends in .jsonl: %v", err)
 	}
 }
 

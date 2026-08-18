@@ -269,6 +269,15 @@ type UIConfig struct {
 	// fight a narrower terminal on restore.
 	SidebarOpen  bool `toml:"sidebar_open"`
 	SidebarWidth int  `toml:"sidebar_width"`
+	// ScrollbackLines is the per-pane VT scrollback depth. 0 (unset) keeps the
+	// shipped default, so existing installs are unchanged.
+	//
+	// This multiplies by pane count — every pane holds its own emulator whether
+	// visible or not — so it is the knob for a workspace with dozens of panes on
+	// a memory-tight machine. Measured: 37 panes at the default 10 000 lines put
+	// the TUI at 1.13 GB resident. internal/tui.defaultScrollbackLines holds the
+	// default; config cannot import tui.
+	ScrollbackLines int `toml:"scrollback_lines"`
 }
 
 type KeybindingsConfig struct {

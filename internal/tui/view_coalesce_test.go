@@ -22,56 +22,98 @@ import (
 // examined renders, exactly as before.
 //
 // These tests are the audit. For each skipping branch they assert BOTH halves:
-// the frame is byte-identical across the message (so skipping is honest), and
-// the rebuild really was skipped (so the optimisation exists at all).
+// that the rebuild really was skipped (so the optimisation exists at all), and
+// that the delivered frame matches a FORCED REBUILD of the model Update
+// returned (so the skip was honest).
+//
+// The second half is why the comparison is against a forced rebuild rather than
+// against the previous frame. See TestView_InertMessagesReuseTheCachedFrame.
 
 // coalesceModel builds a rendering-capable Model with the frame cache
 // installed, mirroring what NewModel wires up in production.
-func coalesceModel() Model {
+//
+// Takes *testing.T so every pane it mints is disposed: each one owns a VT
+// emulator with a parked drain goroutine and a scrollback allocation, and this
+// helper is called once per subtest.
+func coalesceModel(t *testing.T) Model {
+	t.Helper()
 	m := benchModel(6, 2)
 	m.viewCache = &viewCacheBox{}
+	t.Cleanup(func() {
+		for _, proj := range m.projects {
+			for _, tab := range proj.tabs {
+				for _, p := range tab.Leaves() {
+					if p != nil {
+						p.Dispose()
+					}
+				}
+			}
+		}
+	})
 	return m
 }
 
+// The honesty check compares the delivered frame against a FORCED REBUILD of
+// the very model that was returned — never against the frame from before the
+// message.
+//
+// Comparing before/after cannot fail by construction: when the skip works,
+// View returns the cached struct, so `after` and `before` are the same value
+// and the assertion is a tautology. That tautology is exactly why the
+// context-menu case below escaped the first audit of this feature. Rebuilding
+// the returned model is the only way to ask "would an honest render have
+// produced something different?".
 func TestView_InertMessagesReuseTheCachedFrame(t *testing.T) {
 	cases := []struct {
 		name string
 		msg  tea.Msg
 	}{
-		{"sizePoll", sizePollMsg{}},
-		{"memoryTick", memoryTickMsg{}},
-		{"listenContinue", listenContinueMsg{}},
+		{name: "sizePoll", msg: sizePollMsg{}},
+		{name: "memoryTick", msg: memoryTickMsg{}},
+		{name: "listenContinue", msg: listenContinueMsg{}},
 		// The 1 s poll's echo: Bubble Tea re-reports a size that already
 		// matches. Update's own early return does nothing with it.
-		{"windowSizeEcho", tea.WindowSizeMsg{Width: 200, Height: 50}},
+		{name: "windowSizeEcho", msg: tea.WindowSizeMsg{Width: 200, Height: 50}},
 		// A message type Update has no case for cannot have changed the model.
-		{"unhandledType", struct{ unknownToUpdate bool }{}},
+		{name: "unhandledType", msg: struct{ unknownToUpdate bool }{}},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			m := coalesceModel()
+			m := coalesceModel(t)
 			// Prime: the size-echo case needs the model to already agree with
 			// the size it will be told about.
 			m.sized = true
 			m.pendingWidth, m.pendingHeight = m.width, m.height
 
-			before := m.View()
-			builds := m.viewCache.builds
-			if builds == 0 {
+			if m.View(); m.viewCache.builds == 0 {
 				t.Fatal("first View() must build a frame")
 			}
+			builds := m.viewCache.builds
 
 			next, _ := m.Update(tc.msg)
-			after := next.(Model).View()
+			nextModel := next.(Model)
+			delivered := nextModel.View()
+			skipped := m.viewCache.builds == builds
 
-			if got := m.viewCache.builds; got != builds {
-				t.Errorf("View rebuilt after an inert %s (builds %d -> %d); "+
-					"the whole point is to reuse the cached frame", tc.name, builds, got)
+			// What an honest render of the SAME returned model produces.
+			forced := nextModel
+			forced.skipRender = false
+			honest := forced.View()
+
+			if delivered.Content != honest.Content {
+				t.Errorf("%s: the delivered frame is STALE — an honest rebuild of the "+
+					"same model differs, so something in Update moved the screen while "+
+					"this message was treated as inert", tc.name)
 			}
-			if after.Content != before.Content {
-				t.Errorf("%s was treated as inert but the frame CHANGED — "+
-					"skipping it would have left a stale screen", tc.name)
+			if delivered.MouseMode != honest.MouseMode {
+				t.Errorf("%s: delivered MouseMode %v != honest %v — a cached frame "+
+					"carries the mouse mode, so a stale one leaves the terminal in the "+
+					"wrong reporting mode", tc.name, delivered.MouseMode, honest.MouseMode)
+			}
+			if !skipped {
+				t.Errorf("%s: View rebuilt instead of reusing the cached frame; "+
+					"the optimisation did not happen", tc.name)
 			}
 		})
 	}
@@ -81,7 +123,7 @@ func TestView_InertMessagesReuseTheCachedFrame(t *testing.T) {
 // design, so it must never be coalesced away. If this passes while the test
 // above also passes, the predicate is discriminating rather than constant.
 func TestView_VisibleChangeStillRebuilds(t *testing.T) {
-	m := coalesceModel()
+	m := coalesceModel(t)
 	// A pane mid-turn is what keeps the spinner ticking at all.
 	m.activeTabModel().Leaves()[0].working = true
 
@@ -110,7 +152,7 @@ func TestView_VisibleChangeStillRebuilds(t *testing.T) {
 //
 // Skipping therefore defers to whether the ack actually mutated anything.
 func TestView_InertMessageStillRebuildsWhenAckClearsUnseen(t *testing.T) {
-	m := coalesceModel()
+	m := coalesceModel(t)
 	tab := m.activeTabModel()
 	focused := tab.Leaves()[0]
 	tab.ActivePane = focused.ID
@@ -133,6 +175,52 @@ func TestView_InertMessageStillRebuildsWhenAckClearsUnseen(t *testing.T) {
 	}
 	_ = after
 	_ = before
+}
+
+// The second prologue hazard, and the one the first audit of this feature
+// missed — which is why the gate is now named for the whole region.
+//
+// Update prunes a context menu whose target pane has vanished, before the type
+// switch, on EVERY message. View both DRAWS that menu and derives v.MouseMode
+// from it. So an inert message can close the menu and, without the fold into
+// prologueChangedView, hand back a cached frame that still shows it: a menu the
+// model believes is closed, painted on screen, with clicks routing to the pane
+// underneath — and the terminal left in all-motion mouse reporting.
+//
+// Reachable in ordinary use: another client destroys the pane (MCP
+// destroy_pane, a second TUI, daemon reconciliation) while the menu is open,
+// and the 1 s size poll prunes it a moment later.
+func TestView_InertMessageStillRebuildsWhenProloguePrunesCtxMenu(t *testing.T) {
+	m := coalesceModel(t)
+	m.sized = true
+	m.pendingWidth, m.pendingHeight = m.width, m.height
+	m.ctxMenu = ctxMenuState{
+		paneID: "pane-destroyed-elsewhere",
+		title:  "gone",
+		items:  []ctxMenuItem{{label: "Close", enabled: true}},
+	}
+
+	m.View()
+	builds := m.viewCache.builds
+
+	next, _ := m.Update(sizePollMsg{})
+	nextModel := next.(Model)
+	delivered := nextModel.View()
+
+	if m.viewCache.builds == builds {
+		t.Error("the prologue closed the context menu during an inert message, so the " +
+			"frame moved and MUST be rebuilt — reusing the cache paints a menu the " +
+			"model considers closed")
+	}
+	if nextModel.ctxMenu.open() {
+		t.Fatal("fixture wrong: the prologue did not prune the menu, so the hazard was never exercised")
+	}
+
+	forced := nextModel
+	forced.skipRender = false
+	if honest := forced.View(); delivered.Content != honest.Content {
+		t.Error("delivered frame still differs from an honest rebuild")
+	}
 }
 
 // A Model built without the cache (every test in this package that constructs

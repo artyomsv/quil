@@ -1070,9 +1070,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// message — focusing is the acknowledgement; see ackFocusedPane.
 	//
 	// This clears a flag the tab bar and sidebar draw, so it can move the
-	// screen even when the message itself is inert. Every skip site below is
-	// gated on it.
-	ackChangedView := m.ackFocusedPane()
+	// screen even when the message itself is inert.
+	//
+	// prologueChangedView is named for the REGION, not for this call: every
+	// mutation between here and the type switch runs on every message and can
+	// therefore move the screen under an otherwise-inert one. Anything added to
+	// that region must fold into this flag. It was called ackChangedView first
+	// and covered only the ack — which is precisely how the context-menu prune
+	// below was missed, shipping a cached frame that still drew a closed menu.
+	prologueChangedView := m.ackFocusedPane()
 	// Beside ackFocusedPane deliberately: this is the one point every message
 	// passes through, and the sweep's own emptiness check makes it free in the
 	// common case. It must not be an edge hook — see sweepOutstandingToasts.
@@ -1097,13 +1103,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// and paneID are mutually exclusive discriminators (see ctxMenuState), so
 	// the else arm is exactly the original pane case. Both lookups are
 	// nil-safe.
+	// Folded into prologueChangedView: View both DRAWS this menu and derives
+	// v.MouseMode from it, so closing it here moves the screen — on a message
+	// that may otherwise be inert.
 	if m.ctxMenu.open() {
 		if projectID := m.ctxMenu.projectID; projectID != "" {
 			if m.projectByID(projectID) == nil {
 				m.closeCtxMenu()
+				prologueChangedView = true
 			}
 		} else if pane, _, _ := m.findPaneAndTab(m.ctxMenu.paneID); pane == nil {
 			m.closeCtxMenu()
+			prologueChangedView = true
 		}
 	}
 	// The resume key is checked BEFORE the freeze, or it would be swallowed with
@@ -1174,7 +1185,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Inert: the branch reports a size we already hold and touches
 			// nothing. The 1 s poll makes this one of the most frequent
 			// messages the TUI sees.
-			m.skipRender = !ackChangedView
+			m.skipRender = !prologueChangedView
 			return m, nil
 		}
 		log.Printf("WindowSizeMsg: %dx%d", msg.Width, msg.Height)
@@ -1399,7 +1410,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case sizePollMsg:
 		// Inert: re-arms the tick and issues the console-grid probe as Cmds.
 		// The model is untouched.
-		m.skipRender = !ackChangedView
+		m.skipRender = !prologueChangedView
 		return m, tea.Batch(sizePollProbe, sizePollTick())
 
 	case resizeTickMsg:
@@ -2319,7 +2330,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Inert: refreshMemory only builds a Cmd that sends an IPC request.
 		// The reply (memoryReportMsg) is what updates the status-bar total, and
 		// that branch renders.
-		m.skipRender = !ackChangedView
+		m.skipRender = !prologueChangedView
 		return m, tea.Batch(m.refreshMemory(), memoryTickCmd())
 
 	case memoryReportMsg:
@@ -2504,7 +2515,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case listenContinueMsg:
 		// Inert: re-arms the IPC listen loop only.
-		m.skipRender = !ackChangedView
+		m.skipRender = !prologueChangedView
 		return m, m.listenForMessages()
 
 	default:
@@ -2516,7 +2527,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Safe against the cases above that fall out of the switch instead of
 		// returning: a type switch runs `default` only when NOTHING matched, so
 		// those still reach the tail with skipRender false and render.
-		m.skipRender = !ackChangedView
+		m.skipRender = !prologueChangedView
 	}
 
 	return m, nil
@@ -3975,6 +3986,12 @@ type viewCacheBox struct {
 
 func (m Model) View() tea.View {
 	if m.skipRender && m.viewCache != nil && m.viewCache.valid {
+		// Counted, because the perf log's view(n=...) is the number this
+		// project's render-cost analysis is built on and coalescing silently
+		// changed what it means. Without this the stat would report REBUILDS
+		// while reading like frames delivered, and a future measurement would
+		// compare it against pre-coalescing numbers that counted every frame.
+		m.perfStats.recordSkippedView()
 		return m.viewCache.view
 	}
 	viewStart := time.Now()

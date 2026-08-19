@@ -3,8 +3,7 @@
 // Quil tracks Claude session-id rotation (/clear, compaction, /resume) and
 // forwards Claude's lifecycle/notification hooks by registering a hook command
 // via --settings (a per-pane settings file) when it spawns a claude-code pane.
-// The hook
-// command invokes the quil daemon binary's `claude-hook` subcommand (see
+// The hook command invokes the quil daemon binary's `claude-hook` subcommand (see
 // runhook.go + cmd/quild), which reads the hook JSON on stdin and writes the
 // per-pane session id to $QUIL_HOME/sessions/<paneID>.id and/or appends a
 // hookevents JSONL line to $QUIL_HOME/events/<paneID>.jsonl.
@@ -119,7 +118,7 @@ type hookEntry struct {
 }
 
 // forwardedHookEvents lists the Claude Code hook events Quil registers in
-// the inline --settings JSON. The native claude-hook subcommand branches on
+// the --settings JSON. The native claude-hook subcommand branches on
 // hook_event_name from stdin so the same command handles every entry.
 //
 // SessionStart is the original — it writes the session id file used by the
@@ -219,12 +218,38 @@ func settingsFile(quilDir, paneID string) string {
 //
 // Returns ("", nil) when there is nothing to write, letting the caller skip the
 // --settings argument entirely rather than passing an empty path.
+// cmdMetaChars are the characters that would defeat the whole point of passing
+// a path instead of inline JSON.
+//
+// The premise of the file indirection is that a path carries nothing cmd.exe
+// re-interprets. That is very nearly true and not quite: Go quotes an argv
+// token only when it contains a space, a tab or a quote, so a path with none of
+// those but with a `&` in it — `C:\R&D\.quil\sessions\x.settings.json`, and R&D
+// is a real directory name — reaches cmd.exe unquoted and splits the command
+// line exactly as the inline JSON did.
+//
+// Of these, only & ^ % can actually occur: " | < > are illegal in Windows
+// filenames. Checked on every platform rather than behind a Windows build tag,
+// so a client and daemon on different operating systems cannot disagree about
+// whether a pane gets rotation tracking — and so the rule is testable where CI
+// actually runs.
+const cmdMetaChars = "&|^<>\"%"
+
+// pathIsArgvSafe reports whether p can be passed as a bare argv token without a
+// second parser re-interpreting part of it.
+func pathIsArgvSafe(p string) bool {
+	return !strings.ContainsAny(p, cmdMetaChars)
+}
+
 func WriteSettingsFile(quilDir, paneID, settingsJSON string) (string, error) {
 	if err := validatePaneID(paneID); err != nil {
 		return "", err
 	}
 	if settingsJSON == "" {
 		return "", nil
+	}
+	if !pathIsArgvSafe(quilDir) {
+		return "", fmt.Errorf("claudehook: quil dir %q contains a character (%s) that a shell would re-interpret in the --settings argument", quilDir, cmdMetaChars)
 	}
 	dir := filepath.Join(quilDir, "sessions")
 	if err := os.MkdirAll(dir, 0o700); err != nil {

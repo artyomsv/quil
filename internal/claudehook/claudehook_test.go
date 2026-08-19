@@ -304,3 +304,31 @@ func TestWriteSettingsFile_RejectsTraversalPaneID(t *testing.T) {
 		}
 	}
 }
+
+// The file indirection exists so the --settings argument carries nothing a
+// second parser re-interprets. Go quotes an argv token only for space/tab/quote,
+// so a metacharacter in a space-free path reaches cmd.exe unquoted and splits
+// the command line exactly as the inline JSON used to.
+func TestWriteSettingsFile_RejectsShellMetacharsInQuilDir(t *testing.T) {
+	t.Parallel()
+
+	for _, bad := range []string{`C:\R&D\.quil`, `/home/u/a^b/.quil`, `/home/u/a%b/.quil`} {
+		if _, err := WriteSettingsFile(bad, "pane-abc123", `{"hooks":{}}`); err == nil {
+			t.Errorf("quilDir %q accepted, want rejected", bad)
+		}
+	}
+}
+
+// The common Windows path has a space, which Go quotes, so parentheses inside
+// it are inert. Rejecting them would break a default install.
+func TestWriteSettingsFile_AcceptsOrdinaryPaths(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	if _, err := WriteSettingsFile(dir, "pane-abc123", `{"hooks":{}}`); err != nil {
+		t.Errorf("ordinary temp dir rejected: %v", err)
+	}
+	if !pathIsArgvSafe(`C:\Program Files (x86)\quil\.quil`) {
+		t.Error("a path with parens and a space must stay acceptable")
+	}
+}

@@ -882,3 +882,26 @@ func TestReadDetail_CurrentSchemaWithNoTypedEntriesStaysEmpty(t *testing.T) {
 		t.Error("Started is zero — the timestamp scan is independent of prompt classification")
 	}
 }
+
+// Sidechain entries belong to subagents, so a subagent's ai-title is not this
+// session's title. The ai-title pass had no sidechain guard while the pass below
+// it did, which made the two asymmetric for no reason.
+func TestReadTitle_SidechainAiTitleIsNotPromoted(t *testing.T) {
+	path := writeSchemaTranscript(t,
+		`{"type":"ai-title","isSidechain":true,"aiTitle":"Subagent task","leafUuid":"u1"}`,
+	)
+	if got := readTitle(path); got != "" {
+		t.Errorf("readTitle = %q, want empty — a sidechain ai-title is a subagent's, not the session's", got)
+	}
+}
+
+// The ai-title pre-filter is a SUBSTRING match, so an entry merely containing
+// that text reaches the unmarshal. Only a real ai-title entry may title the row.
+func TestReadTitle_NonAiTitleEntryContainingTheMarkerIsIgnored(t *testing.T) {
+	path := writeSchemaTranscript(t,
+		`{"type":"assistant","aiTitle":"not mine","message":{"content":[{"type":"text","text":"mentions \"type\":\"ai-title\" in passing"}]}}`,
+	)
+	if got := readTitle(path); got != "" {
+		t.Errorf("readTitle = %q, want empty — only a real ai-title entry may title the session", got)
+	}
+}

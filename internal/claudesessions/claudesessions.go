@@ -558,6 +558,15 @@ func readTitle(path string) string {
 		if err := json.Unmarshal(bytes.TrimSpace(line), &tl); err != nil {
 			continue
 		}
+		// The pre-filter is a SUBSTRING match, so a line merely containing that
+		// text — an entry with a nested content block, say — also lands here.
+		// Confirm the entry really is an ai-title, and exclude sidechains for
+		// the same reason every other pass does: they belong to subagents, not
+		// to the user's conversation, so a subagent's title is not this
+		// session's title.
+		if tl.Type != "ai-title" || tl.IsSidechain {
+			continue
+		}
 		if text := sanitizeTitle(tl.AiTitle); text != "" {
 			return text
 		}

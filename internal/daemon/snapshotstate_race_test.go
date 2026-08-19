@@ -60,3 +60,73 @@ func TestSnapshotState_TabPanesDoNotRaceConcurrentCreatePane(t *testing.T) {
 
 	wg.Wait()
 }
+
+// The second race of this class, caught by CI on PR #175 rather than locally —
+// a reminder that a green local `test-race` is evidence about one run, not a
+// proof.
+//
+// handleAttach creates the default workspace when no tabs exist, and wrote
+// `pane.Type = "terminal"` WITHOUT PluginMu. workspaceStateFromSnapshot reads
+// Type under PluginMu, and says so in its own comment ("Type and CWD are
+// PluginMu-protected"). CreatePane publishes the pane into sm.panes before
+// returning, so the write lands on an object another connection's goroutine can
+// already see.
+//
+// Two clients attaching at the same moment is enough, because each conn is
+// dispatched on its own goroutine: one builds the default workspace while the
+// other builds the workspace state it is about to be sent — the same shape as
+// TestSnapshotState_TabPanesDoNotRaceConcurrentCreatePane above.
+//
+// Pre-existing on master; the render-coalescing branch only shifted timing
+// enough to surface it. Run under -race, this fails without the PluginMu guard.
+func TestPaneType_WriteDoesNotRaceSnapshotRead(t *testing.T) {
+	sm := NewSessionManager(1024)
+	tab := sm.CreateTab("race")
+
+	// ONE published pane, raced on, so both goroutines are guaranteed to be on
+	// the same field rather than relying on a fresh pane per iteration being
+	// observed before the writer moves on.
+	//
+	// Verified to discriminate: deleting the writer's PluginMu pair reproduces
+	// the CI failure (1 DATA RACE, test fails). Keep it that way — a race test
+	// that passes with and without the guard is worse than no test.
+	pane, err := sm.CreatePane(tab.ID, "")
+	if err != nil {
+		t.Fatalf("CreatePane: %v", err)
+	}
+
+	const rounds = 500
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Writer: what handleAttach / recoverEmptyProject / ensureTabNotEmpty /
+	// handleCreatePaneReq do after CreatePane has already published the pane.
+	go func() {
+		defer wg.Done()
+		for i := 0; i < rounds; i++ {
+			pane.PluginMu.Lock()
+			pane.Type = "terminal"
+			pane.PluginMu.Unlock()
+		}
+	}()
+
+	// Reader: workspaceStateFromSnapshot's capture of the PluginMu-guarded set.
+	go func() {
+		defer wg.Done()
+		for i := 0; i < rounds; i++ {
+			_, tabs, panesByTab, _, _ := sm.SnapshotState()
+			for _, panes := range panesByTab {
+				for _, p := range panes {
+					p.PluginMu.Lock()
+					_ = p.Type
+					p.PluginMu.Unlock()
+				}
+			}
+			for _, tb := range tabs {
+				_ = tb.Panes
+			}
+		}
+	}()
+
+	wg.Wait()
+}

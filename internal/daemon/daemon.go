@@ -1397,7 +1397,14 @@ func (d *Daemon) handleAttach(conn *ipc.Conn, msg *ipc.Message) {
 		log.Print("attach: creating default workspace (no tabs)")
 		tab := d.session.CreateTab("Shell")
 		pane, _ := d.session.CreatePane(tab.ID, d.defaultCWD())
+		// PluginMu-protected: CreatePane PUBLISHES the pane into sm.panes before
+		// returning, so this writes an object another conn's goroutine can
+		// already be reading. workspaceStateFromSnapshot captures Type under
+		// this lock, and two clients attaching at once is enough — one builds
+		// the default workspace while the other builds workspace state.
+		pane.PluginMu.Lock()
 		pane.Type = "terminal"
+		pane.PluginMu.Unlock()
 
 		ptySession := apty.NewWithSize(cols, rows)
 		if err := d.spawnPane(pane, ptySession, false); err != nil {
@@ -1783,7 +1790,11 @@ func (d *Daemon) recoverEmptyProject(projectID string) {
 		log.Printf("recover empty project %q: create pane: %v", projectID, err)
 		return
 	}
+	// PluginMu-protected for the same reason as the attach path: CreatePane has
+	// already published this pane, so a concurrent snapshot can read Type.
+	pane.PluginMu.Lock()
 	pane.Type = "terminal"
+	pane.PluginMu.Unlock()
 	// Through newSessionFn rather than apty.NewWithSize directly: same 80×24
 	// default in production, and the seam is what lets a test assert the
 	// replacement shell's CWD without launching a child.
@@ -2241,7 +2252,11 @@ func (d *Daemon) ensureTabNotEmpty(tabID string) {
 		d.session.DestroyPane(op.ID)
 	}
 	if newPane, err := d.session.CreatePane(tabID, d.defaultCWD()); err == nil {
+		// PluginMu-protected: published by CreatePane, so a concurrent snapshot
+		// can read Type. Same shape as the attach and recover paths.
+		newPane.PluginMu.Lock()
 		newPane.Type = "terminal"
+		newPane.PluginMu.Unlock()
 		ptySession := apty.New()
 		if err := d.spawnPane(newPane, ptySession, false); err != nil {
 			log.Printf("failed to start replacement shell: %v", err)
@@ -4598,12 +4613,17 @@ func (d *Daemon) handleCreatePaneReq(conn *ipc.Conn, msg *ipc.Message) {
 	}
 	d.highlightPane(pane.ID)
 
+	// PluginMu-protected: CreatePane published this pane above, so a snapshot on
+	// another conn's goroutine can already read Type. Matches handleCreatePane's
+	// own guarded write of the same fields.
+	pane.PluginMu.Lock()
 	pane.Type = req.Type
 	if pane.Type == "" {
 		pane.Type = "terminal"
 	}
 	pane.InstanceName = req.InstanceName
 	pane.InstanceArgs = req.InstanceArgs
+	pane.PluginMu.Unlock()
 
 	ptySession := apty.NewWithSize(80, 24)
 	if err := d.spawnPane(pane, ptySession, false); err != nil {
